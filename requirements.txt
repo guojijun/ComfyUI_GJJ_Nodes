@@ -1,0 +1,57 @@
+# GJJ 基础依赖 / Basic requirements
+#
+# 安装方式：
+#   pip install -r requirements.txt
+#
+# 说明：
+# - 这里放“常用、相对通用、安装风险较低”的依赖。
+# - 不写 torch / torchvision / numpy / Pillow / aiohttp，因为 ComfyUI 通常已自带或由 ComfyUI 环境管理。
+# - 每个依赖下方标注主要支持的节点：中文显示名 / English or class name。
+
+# 支持：
+# - GJJ · 📢 CosyVoice3语音克隆TTS / GJJ_CosyVoice3Generator：自动下载 CosyVoice3 模型
+# - GJJ · 📢 FishAudioS2语音克隆TTS / GJJ_FishAudioS2Generator：自动下载 Fish Audio S2 模型
+# - GJJ · 📢 LongCat语音克隆TTS / GJJ_LongCatAudioDiTTTS：自动下载 tokenizer / 模型
+# - GJJ · 🔍 FlashVSR视频超分放大器 / GJJ_FlashVSRVideoUpscaler：自动下载 FlashVSR 模型
+# - GJJ · 📢 Qwen3语音识别四文本 / GJJ_Qwen3ASRTextFormats：自动下载 Qwen3-ASR 模型
+huggingface_hub
+
+# 支持：
+# - GJJ · 🎞️ 视频合成器 / GJJ_VideoCombine：视频编码辅助
+imageio-ffmpeg
+
+# 支持：
+# - GJJ · 😃 人脸细化器 / GJJ_FaceDetailer：遮罩膨胀、腐蚀、模糊等图像处理
+# - GJJ · 📍 SEM2点选分割器 / GJJ_SEM2PointSegmenter：点位绘制、遮罩处理
+# - GJJ · 🎬 批量视频加载预览器 / GJJ_MultiVideoLoader：视频元数据读取、帧解码
+# - GJJ · 🧩 图片拼版 / GJJ_ImageCollage、GJJ · 🎚️ 图片调色 / GJJ_ImageAdjuster：部分图像处理路径
+opencv-python
+
+# 支持：
+# - GJJ · ✂️ 综合抠图 / GJJ_ComprehensiveMatting：加载 RMBG2、BiRefNet 等 safetensors 权重
+# - GJJ · 🔍 FlashVSR视频超分放大器 / GJJ_FlashVSRVideoUpscaler：加载 safetensors 权重
+# - GJJ · 📢 LongCat语音克隆TTS / GJJ_LongCatAudioDiTTTS：兼容 safetensors 权重
+safetensors
+
+# 支持：
+# - GJJ · 📢 CosyVoice3语音克隆TTS / GJJ_CosyVoice3Generator：读取/写入音频
+# - GJJ · 📢 FishAudioS2语音克隆TTS / GJJ_FishAudioS2Generator：读取/写入音频
+# - GJJ · 📢 LongCat语音克隆TTS / GJJ_LongCatAudioDiTTTS：读取/写入音频
+soundfile
+
+# 支持：
+# - GJJ · 🔍 载入模型图片放大器 / GJJ_ModelUpscaler：加载 ESRGAN、RealESRGAN 等放大模型
+spandrel
+
+# 支持：
+# - GJJ · 🔍 载入模型图片放大器 / GJJ_ModelUpscaler：补充更多放大模型架构
+spandrel-extra-arches
+
+# 支持：
+# - GJJ · ✂️ 综合抠图 / GJJ_ComprehensiveMatting：BiRefNet/RMBG2/BEN2 网络结构依赖
+# - GJJ · ✂️ SAM3点选分割器 / GJJ_SAM3PointSegmenter、GJJ · 📝 SAM3文本分割器 / GJJ_SAM3TextSegmenter：vendored SAM3 模型结构依赖
+timm
+
+# 支持：
+# - GJJ · ✂️ 综合抠图 / GJJ_ComprehensiveMatting：BiRefNet 边缘/拉普拉斯相关滤波
+kornia

@@ -1,0 +1,61 @@
+data:
+  num_frames: 16
+  sample_rate: 16000
+  video_fps: 25
+unet_config:
+  _class_name: UNet3DConditionModel
+  act_fn: silu
+  attention_head_dim: 8
+  block_out_channels:
+  - 320
+  - 640
+  - 1280
+  - 1280
+  center_input_sample: false
+  class_embed_type: null
+  cross_attention_dim: 384
+  down_block_types:
+  - CrossAttnDownBlock3D
+  - CrossAttnDownBlock3D
+  - CrossAttnDownBlock3D
+  - DownBlock3D
+  downsample_padding: 1
+  dual_cross_attention: false
+  flip_sin_to_cos: true
+  freq_shift: 0
+  in_channels: 13
+  layers_per_block: 2
+  mid_block_scale_factor: 1
+  mid_block_type: UNetMidBlock3DCrossAttn
+  motion_module_decoder_only: false
+  motion_module_kwargs:
+    attention_block_types:
+    - Temporal_Self
+    - Temporal_Self
+    num_attention_heads: 8
+    num_transformer_block: 1
+    temporal_attention_dim_div: 1
+    temporal_position_encoding: true
+    temporal_position_encoding_max_len: 24
+    zero_initialize: true
+  motion_module_mid_block: false
+  motion_module_resolutions:
+  - 1
+  - 2
+  - 4
+  - 8
+  motion_module_type: Vanilla
+  norm_eps: 1.0e-05
+  norm_num_groups: 32
+  num_class_embeds: null
+  only_cross_attention: false
+  out_channels: 4
+  resnet_time_scale_shift: default
+  sample_size: 64
+  up_block_types:
+  - UpBlock3D
+  - CrossAttnUpBlock3D
+  - CrossAttnUpBlock3D
+  - CrossAttnUpBlock3D
+  use_linear_projection: false
+  use_motion_module: true

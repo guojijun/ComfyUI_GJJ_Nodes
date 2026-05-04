@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <!-- Base path for ComfyUI integration -->
+    <base href="/gjj/mesh2motion/" />
+    <title style="display: none">Mesh2Motion - 浏览</title>
+    <link rel="icon" type="image/png" href="images/favicon.png"/>
+        <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script type="module" crossorigin src="/gjj/mesh2motion/assets/dialog-DLSP7MTB.js"></script>
+  <script type="module" crossorigin src="/gjj/mesh2motion/assets/export-overlay-ABM4UpqP.js"></script>
+  <script type="module" crossorigin src="/gjj/mesh2motion/assets/marketing-BLIa0xjn.js"></script>
+  <link rel="stylesheet" crossorigin href="/gjj/mesh2motion/assets/dialog-C4NDzct4.css">
+  <link rel="stylesheet" crossorigin href="/gjj/mesh2motion/assets/export-overlay-BsAGLCSz.css">
+  <link rel="stylesheet" crossorigin href="/gjj/mesh2motion/assets/marketing-BWWBWUA4.css">
+  <script type="module" src="/gjj/mesh2motion/assets/gjj-localize-cn.js"></script>
+</head>
+<body style="margin: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden;">
+    <!-- Script files-->
+
+    <!-- Stylesheets-->
+
+    <nav>
+        <div style="display: inline-flex; align-items: center;">
+            <a href="https://mesh2motion.org"><img src="images/mesh2motion.svg" width="200" /></a>
+            <span class="active-nav-item">浏览</span>
+            <a href="retarget-comfyui.html">重定向</a>
+        </div>
+
+        <div style="display: inline-flex; align-items: center;">
+             <button id="save-to-comfyui-button" class="comfyui-export-button" ><span>保存图片到 ComfyUI</span></button>
+             <a href="https://support.mesh2motion.org" target="_blank"> 💗 支持</a>
+            <a href="https://github.com/scottpetrovic/mesh2motion-app" target="_blank">源码</a>
+            <a href="#" id="attribution-link">贡献者</a>            
+
+            <!-- Theme Toggle -->
+            <button id="theme-toggle">
+                <!-- icon will fill in here-->
+                <span class="theme-icon"></span>
+            </button>
+        </div>
+    </nav>
+
+    <!-- Top toolbar with mouse controls -->
+    <div id="header-ui">
+        <div>
+            <img src="images/mouse-left.svg" height="30" width="30" style="vertical-align: middle;"/> Rotate
+        </div>
+
+        <div>
+            <img src="images/mouse-right.svg" height="30" width="30" style="vertical-align: middle;"/> Pan
+        </div>
+        <div>
+            <img src="images/mouse-middle.svg" height="30" width="30" style="vertical-align: middle;"/> Zoom
+        </div>
+    </div>
+
+    <!-- Left-side skeleton picker panel (sibling of #tool-panel; toggled
+         by the left-edge activity bar). MarketingBootstrap populates
+         .model-selection-section at boot. -->
+    <div id="skeleton-panel">
+        <div class="skeleton-panel-header">骨骼</div>
+        <div class="model-selection-section"></div>
+    </div>
+
+    <div id="tool-panel">
+        <!-- create a radio button group. There are two options. Move Skeleton, Rotate Mesh -->
+        <div id="tool-selection-group">
+           
+                <!-- <div style="margin-bottom: 1rem; padding: 0;">
+
+                    <span id="current-step-label"></span>
+                </div> -->
+
+                <div id="load-skeleton-tools">
+
+                    <span>
+                        <span style="max-width: 220px">将模型旋转到正面 <br/> （蓝色原点线）</span>
+                        <div style="display: flex; flex-direction: row">
+                            <button class="secondary-button" id="rotate-model-x-button">X</button>
+                            <button class="secondary-button" id="rotate-model-y-button">Y</button>
+                            <button class="secondary-button" id="rotate-model-z-button">Z</button>
+                        </div>
+                    </span>
+
+
+                        <div style="display: flex; flex-direction: column; gap: 1rem;">
+                            <span>骨骼模板：</span>
+                            <select id="skeleton-selection">
+                                <option value="select-skeleton">选择骨骼</option>
+                                <option value="human">人形</option>
+                                <option value="quadraped">四足生物</option>
+                                <option value="bird">鸟类</option>
+                                <option value="dragon">龙</option>
+                            </select>
+                        </div>
+
+                </div>
+
+
+            <span id="skeleton-step-actions">
+
+
+
+                <!-- option to change out skinning algorithm -->
+                <label style="display: none" for="skinning-algorithm-options">蒙皮算法：</label>
+                <select style="display: none" id="skinning-algorithm-options">
+                    <option value="closest-distance-targeting">最近距离目标</option>
+                    <option value="closest-bone">最近骨骼</option>
+                    <option value="closest-bone-child">最近距离子骨骼</option>
+                </select>
+
+
+                <!-- back to load skeleton -->
+                 <div class="display: flex; gap: 0.5rem;">
+                     <button class="secondary-button" id="action_back_to_load_skeleton" >&#x2039; 返回</button>
+                     <button id="action_bind_pose" >绑定姿势</button>
+                 </div>
+
+            </span>
+
+            <span id="skinned-step-animation-export-options">
+
+                <div id="animations-listing">
+    
+                    <!-- Filter textbox for animations -->     
+                    <div id="animation-listing-count">0</div>
+                    <input type="text" id="animation-filter" placeholder="筛选动画...">
+
+                    <!-- loading progress when animations start getting larger. -->
+                    <div id="animation-progress-loader-container" style="display: none">
+                        <div id="loading-status-text">正在加载动画数据</div>
+                        <div id="loading-progress-bar"></div>
+                        <div id="current-file-progress-bar"></div>
+                    </div>
+       
+        
+                    <!-- javascript will populate this item with animations
+                         that we get from the animations file(s)  -->
+                    <div id="animations-items"> </div> 
+
+       
+       
+
+                    <div style="display: flex; gap: 0.5rem;">
+                        <!-- checkbox option to show skeleton -->
+                        <div class="styled-checkbox icon-toggle">
+                            <input type="checkbox" id="show-skeleton-checkbox" name="show-skeleton" value="show" style="display:none;">
+                            <label for="show-skeleton-checkbox" data-tippy-content="显示骨骼"  tabindex="0">
+                                <img src="images/icons/bone-display.svg" width="30" height="30" alt="显示骨骼" />
+                            </label>
+                        </div>
+                        
+
+                        
+                        <!-- testing the mirroring options -->
+                        <div class="styled-checkbox icon-toggle">
+                            <input type="checkbox" id="mirror-animations-checkbox" name="mirror-animations" value="true" style="display:none;">
+                            <label for="mirror-animations-checkbox" data-tippy-content="镜像动画"  tabindex="0">
+                                <img src="images/icons/mirror.svg" alt="镜像动画" width="30" height="30" />
+                            </label>
+                        </div>
+
+                        <button id="export-button" title="导出动画。请先选择要导出的动画。">
+                            <span class="button-icon-group">
+                                <span class="material-symbols-outlined">save_alt</span>
+                                <span>下载 <span id="animation-selection-count">0</span></span>
+                            </span>
+                        </button>
+                        <a id="download-hidden-link" href="#" style="display:none"></a>
+                    </div>
+
+
+       
+                </div>
+        
+               
+            </span>
+
+
+        </div>
+
+    </div> <!-- end tool-panel-->
+
+    <!-- Legacy animation player (kept hidden for AnimationPlayer.ts DOM refs) -->
+    <div id="animation-player" style="display:none">
+        <div id="current-animation-container"><span id="current-animation-name"></span></div>
+        <div id="play-controls">
+            <button id="play-pause-button" class="animation-control-button" disabled><span class="material-symbols-outlined">play_arrow</span></button>
+            <span><span id="current-time">0</span>/<span id="total-time">0</span></span>
+            <input type="range" id="animation-scrubber" min="0" max="100" value="0" disabled>
+        </div>
+    </div>
+
+    <!-- Camera preset panel (sibling of #tool-panel; they're mutually
+         exclusive, driven by the activity bar on the right edge). -->
+    <div id="camera-preset-panel" class="collapsed">
+        <!-- populated by CameraPresetPanel.ts in Step 2 -->
+        <div class="camera-preset-panel-header">相机预设</div>
+        <div id="camera-preset-items" class="camera-preset-items"></div>
+    </div>
+
+    <!-- Per-preset tuning panel (sibling of the preset list). -->
+    <div id="camera-tune-panel" class="collapsed">
+        <div class="camera-tune-panel-header">相机调节</div>
+        <div id="camera-tune-content"></div>
+    </div>
+
+    <!-- Right-edge activity bar: one button per panel (animations / cameras / tuning). -->
+    <div id="activity-bar">
+        <button id="activity-animations" class="activity-btn" data-panel="animations" title="动画">
+            <span class="material-symbols-outlined">animation</span>
+        </button>
+        <button id="activity-camera" class="activity-btn" data-panel="camera" title="相机预设">
+            <span class="material-symbols-outlined">videocam</span>
+        </button>
+        <button id="activity-camera-tune" class="activity-btn" data-panel="tune" title="相机调节">
+            <span class="material-symbols-outlined">tune</span>
+        </button>
+    </div>
+
+    <!-- Left-edge activity bar. One button for now (skeleton); more to come
+         (e.g. per-preset camera tuning). -->
+    <div id="activity-bar-left">
+        <button id="activity-skeleton" class="activity-btn" data-panel="skeleton" title="骨骼">
+            <span class="material-symbols-outlined">accessibility_new</span>
+        </button>
+    </div>
+
+    <!-- 3D viewport (Three.js canvas goes here) -->
+    <div id="viewport-container"></div>
+
+    <!-- Timeline sits below 3D canvas -->
+    <div id="timeline-container"></div>
+
+    <!-- 3d view control hit box -->
+    <div id="view-control-hitbox"></div>
+
+
+    <!-- build version information-->
+    <span id="build-version"></span>
+
+</body>
+</html>

@@ -1,0 +1,1 @@
+import{m as e,t}from"./dialog-DLSP7MTB.js";import{n,t as r}from"./export-overlay-ABM4UpqP.js";var i=class{constructor(){this.mesh2motion_engine=new t,e().setEngine(this.mesh2motion_engine);let r=n();r.isInWindowMode()&&r.setEngine(this.mesh2motion_engine)}};document.addEventListener(`DOMContentLoaded`,()=>{r()}),new i;

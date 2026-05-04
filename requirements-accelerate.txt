@@ -1,0 +1,38 @@
+# GJJ 可选硬件加速依赖 / Optional hardware acceleration requirements
+#
+# 说明：
+# - 这些包与 CUDA、Python 版本、显卡驱动、Windows/Linux 平台强相关。
+# - 默认全部注释，避免全新 ComfyUI 环境安装失败。
+# - 确认本机 CUDA/PyTorch 匹配后，再按需要取消注释并单独安装。
+
+# 支持：
+# - GJJ · 📢 FishAudioS2语音克隆TTS / GJJ_FishAudioS2Generator：部分量化/低显存路径可能用到
+# - GJJ · 📢 LongCat语音克隆TTS / GJJ_LongCatAudioDiTTTS：部分量化模型路径可能用到
+# bitsandbytes
+
+# 支持：
+# - GJJ · 📢 LongCat语音克隆TTS / GJJ_LongCatAudioDiTTTS：可选 FlashAttention 加速
+# - GJJ · 🔍 FlashVSR视频超分放大器 / GJJ_FlashVSRVideoUpscaler：vendored FlashVSR attention 可选加速
+# flash-attn
+
+# 支持：
+# - GJJ · 📢 FishAudioS2语音克隆TTS / GJJ_FishAudioS2Generator：可选 SageAttention 加速
+# - GJJ · 📢 LongCat语音克隆TTS / GJJ_LongCatAudioDiTTTS：可选 SageAttention 加速
+# - GJJ · 🔍 FlashVSR视频超分放大器 / GJJ_FlashVSRVideoUpscaler：可选 SageAttention 加速
+# sageattention
+
+# 支持：
+# - GJJ · 🔍 FlashVSR视频超分放大器 / GJJ_FlashVSRVideoUpscaler：部分稀疏/自定义 attention kernel
+# triton
+
+# 支持：
+# - GJJ · 📢 CosyVoice3语音克隆TTS / GJJ_CosyVoice3Generator：CosyVoice LLM 推理可选 vLLM 路径
+# vllm
+
+# 支持：
+# - GJJ · 📢 CosyVoice3语音克隆TTS / GJJ_CosyVoice3Generator：CosyVoice TensorRT 导出/推理可选路径
+# tensorrt
+
+# 支持：
+# - GJJ · 📢 CosyVoice3语音克隆TTS / GJJ_CosyVoice3Generator：CosyVoice 训练/分布式相关可选路径
+# deepspeed

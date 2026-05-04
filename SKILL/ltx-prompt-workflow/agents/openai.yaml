@@ -1,0 +1,7 @@
+interface:
+  display_name: "LTX Prompt Workflow"
+  short_description: "把剧本、四宫格或视频提示词转换为 LTX 工作流素材"
+  default_prompt: "Use $ltx-prompt-workflow to convert my script, storyboard, or video prompt into Chinese LTX-ready prompts or shot JSON."
+
+policy:
+  allow_implicit_invocation: true

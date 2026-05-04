@@ -1,0 +1,895 @@
+from __future__ import annotations
+
+import math
+from typing import Any
+
+import comfy.lora
+import comfy.lora_convert
+import comfy.model_management
+import comfy.model_sampling
+import comfy.samplers
+import comfy.sd
+import comfy.utils
+import folder_paths
+import node_helpers
+import torch
+import torch.nn.functional as F
+from comfy_extras.nodes_custom_sampler import CFGGuider, KSamplerSelect, RandomNoise, SamplerCustomAdvanced
+from comfy_extras.nodes_flux import EmptyFlux2LatentImage, Flux2Scheduler
+from nodes import (
+	EmptyLatentImage,
+	VAEDecode,
+	VAEEncode,
+	VAEEncodeForInpaint,
+	common_ksampler,
+)
+
+try:
+	from nodes import EmptySD3LatentImage
+except ImportError:
+	from comfy_extras.nodes_sd3 import EmptySD3LatentImage
+from .model_bundle_loader import (
+	UNET_DTYPE_OPTIONS,
+	_build_unet_model_options,
+	_dedupe_keep_order,
+	_normalize_text,
+	_resolve_full_path,
+	list_clip_models,
+	list_unet_models,
+	list_vae_models,
+)
+from .model_family_preset_table import load_model_family_presets
+from .batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
+from .multi_image_loader import load_image_tensor, parse_selected_images, resolve_input_image_path
+
+NODE_NAME = "GJJ_LazyImageStudio"
+MAX_MAIN_IMAGE_INDEX = 9999
+DEFAULT_UNET_NAME = "flux-2-klein-9b-nvfp4.safetensors"
+DEFAULT_UNET_DTYPE = "default"
+DEFAULT_CLIP_NAME = "qwen_3_8b.safetensors"
+DEFAULT_VAE_NAME = "flux2-vae.safetensors"
+DEFAULT_LIGHTNING_LORA = ""
+DEFAULT_NSFW_LORA = ""
+REFERENCE_IMAGE_MEGAPIXELS = 1.0
+REFERENCE_IMAGE_RESOLUTION_STEPS = 1
+CLIP_TYPE_OPTIONS = [
+	"stable_diffusion",
+	"qwen_image",
+	"flux",
+	"flux2",
+	"wan",
+	"hidream",
+	"ace",
+	"hunyuan_image",
+	"lumina2",
+	"omnigen2",
+	"ovis",
+	"newbie",
+]
+
+CLIP_TYPE_KEYWORDS = [
+	(("hidream",), "hidream"),
+	(("wan", "wan2.2"), "wan"),
+	(("ace",), "ace"),
+	(("hunyuan_image", "hunyuan-image"), "hunyuan_image"),
+	(("qwen_image", "qwen-image", "lotus-depth"), "qwen_image"),
+	(("flux2", "klein"), "flux2"),
+	(("flux1", "flux-1", "kontext", "schnell"), "flux"),
+	(("omnigen2",), "omnigen2"),
+	(("ovis",), "ovis"),
+	(("z_image", "z-image", "zimage"), "lumina2"),
+	(("newbie",), "newbie"),
+]
+MODEL_FAMILY_PRESETS = load_model_family_presets()
+IMAGE_RATIO_EPSILON = 0.015
+
+
+def _send_status(unique_id: Any, text: str) -> None:
+	if not unique_id:
+		return
+	try:
+		from server import PromptServer
+		PromptServer.instance.send_sync(
+			"gjj_node_progress",
+			{"node": str(unique_id), "text": str(text or "")},
+		)
+	except Exception:
+		pass
+
+
+def _format_model_missing_error(label: str, filename: str, categories: tuple[str, ...], exc: Exception | None = None) -> RuntimeError:
+	model_dirs = " / ".join(f"models\\{category}" for category in categories)
+	detail = f"\n详细错误：{exc}" if exc else ""
+	return RuntimeError(
+		f"缺少{label}模型。\n"
+		f"当前选择：{filename or '[未填写]'}\n"
+		f"查找目录：{model_dirs}{detail}"
+	)
+
+
+def _format_runtime_error(stage: str, exc: Exception) -> RuntimeError:
+	return RuntimeError(f"{stage}失败。\n详细错误：{exc}")
+
+class FlexibleImageStudioInputType(dict):
+	def __init__(self,data: dict[str,Any] | None=None):
+		super().__init__()
+		self.data=data or {}
+		for key,value in self.data.items():
+			self[key]=value
+	def __getitem__(self,key):
+		if key in self.data:
+			return self.data[key]
+		text=str(key or "")
+		if text.startswith("image_"):
+			return ("IMAGE",)
+		raise KeyError(key)
+	def __contains__(self,key):
+		text=str(key or "")
+		return key in self.data or text.startswith("image_")
+def _safe_filename_list(category: str) -> list[str]:
+	try:
+		return _dedupe_keep_order(list(folder_paths.get_filename_list(category)))
+	except Exception:
+		return []
+def _preferred_default(values: list[str],preferred: str) -> str:
+	preferred=str(preferred or "").strip()
+	if preferred and preferred in values:
+		return preferred
+	return values[0] if values else preferred
+def _clip_type_enum(name: str):
+	return getattr(comfy.sd.CLIPType,str(name or "").upper(),comfy.sd.CLIPType.STABLE_DIFFUSION)
+def _canonical_model_text(value: str | None) -> str:
+	text=_normalize_text(value)
+	for char in ("\\", "/", "_", "-", ".", " "):
+		text=text.replace(char, "")
+	return text
+def input_index(name: str,prefix: str) -> int:
+	text=str(name or "")
+	if not text.startswith(prefix):
+		return 999999
+	try:
+		return int(text[len(prefix):])
+	except Exception:
+		return 999999
+def sorted_dynamic_items(kwargs: dict[str,Any],prefix: str) -> list[tuple[str,Any]]:
+	return sorted([(key,value) for key,value in kwargs.items() if str(key).startswith(prefix)],
+		key=lambda item: input_index(item[0],prefix),)
+def _split_image_batch(value: Any) -> list[Any]:
+	if value is None:
+		return []
+	if not isinstance(value,torch.Tensor):
+		return [value]
+	if value.ndim == 3:
+		return [value.unsqueeze(0).contiguous()]
+	if value.ndim != 4:
+		return [value]
+	batch_size=max(0,int(value.shape[0]))
+	if batch_size <=1:
+		return [value.contiguous()]
+	return [value[index:index + 1].contiguous() for index in range(batch_size)]
+def _resolve_prompt_node(prompt_graph: Any,node_id: Any) -> dict[str,Any] | None:
+	if not isinstance(prompt_graph,dict):
+		return None
+	text_id=str(node_id or "").strip()
+	if text_id and isinstance(prompt_graph.get(text_id),dict):
+		return prompt_graph[text_id]
+	if node_id in prompt_graph and isinstance(prompt_graph[node_id],dict):
+		return prompt_graph[node_id]
+	return None
+def _recover_serialized_image_entries(raw_value: Any) -> list[torch.Tensor]:
+	selected_images=parse_selected_images(raw_value)
+	if not selected_images:
+		return []
+	recovered: list[torch.Tensor]=[]
+	for entry in selected_images:
+		try:
+			recovered.append(load_image_tensor(resolve_input_image_path(entry)))
+		except Exception:
+			return []
+	return recovered
+def _recover_multi_image_loader_primary_batch(prompt_graph: Any,unique_id: Any) -> list[torch.Tensor]:
+	current_node=_resolve_prompt_node(prompt_graph,unique_id)
+	if not isinstance(current_node,dict):
+		return []
+	current_inputs=current_node.get("inputs",{})
+	image_ref=current_inputs.get("image_01")
+	if not isinstance(image_ref,(list,tuple)) or len(image_ref) <2:
+		return []
+	try:
+		output_index=int(image_ref[1])
+	except Exception:
+		return []
+	if output_index !=0:
+		return []
+	upstream_node=_resolve_prompt_node(prompt_graph,image_ref[0])
+	if not isinstance(upstream_node,dict):
+		return []
+	if str(upstream_node.get("class_type") or "") != "GJJ_MultiImageLoader":
+		return []
+	upstream_inputs=upstream_node.get("inputs",{})
+	if isinstance(upstream_inputs.get("input_images"),(list,tuple)):
+		return []
+	return _recover_serialized_image_entries(upstream_inputs.get("selected_images"))
+def collect_image_pairs(kwargs: dict[str,Any],prompt_graph: Any=None,unique_id: Any=None,batch_source_images: Any=None) -> list[dict[str,Any]]:
+	primary_value=kwargs.get("image_01")
+	recovered_primary_images=_recover_serialized_image_entries(batch_source_images) or _recover_multi_image_loader_primary_batch(prompt_graph,unique_id)
+	has_secondary_images=any(
+		input_index(name,"image_") >1 and value is not None
+		for name,value in sorted_dynamic_items(kwargs,"image_")
+	)
+	skip_primary_batch=(
+		has_secondary_images
+		and (
+			bool(recovered_primary_images)
+			or (
+				isinstance(primary_value,torch.Tensor)
+				and getattr(primary_value,"ndim",0) ==4
+				and int(primary_value.shape[0]) >1
+			)
+		)
+	)
+	pairs: list[dict[str,Any]]=[]
+	for name,value in sorted_dynamic_items(kwargs,"image_"):
+		input_slot=input_index(name,"image_")
+		if input_slot >=999999 or value is None:
+			continue
+		if skip_primary_batch and input_slot ==1:
+			continue
+		if input_slot ==1 and recovered_primary_images:
+			source_images=recovered_primary_images
+		else:
+			source_images=_split_image_batch(value)
+		for batch_index,image in enumerate(source_images):
+			pairs.append({
+				"slot_index": len(pairs),
+				"source_input_index": input_slot - 1,
+				"source_batch_index": batch_index,
+				"image": image,
+			})
+	return pairs
+def zero_out_conditioning(conditioning):
+	result=[]
+	for item in conditioning:
+		payload=item[1].copy()
+		pooled_output=payload.get("pooled_output")
+		if pooled_output is not None:
+			payload["pooled_output"]=torch.zeros_like(pooled_output)
+		conditioning_lyrics=payload.get("conditioning_lyrics")
+		if conditioning_lyrics is not None:
+			payload["conditioning_lyrics"]=torch.zeros_like(conditioning_lyrics)
+		result.append([torch.zeros_like(item[0]),payload])
+	return result
+def load_standard_lora_patches(model: Any,lora_state: dict[str,Any]) -> dict[str,Any]:
+	key_map=comfy.lora.model_lora_keys_unet(model.model,{})
+	converted_lora=comfy.lora_convert.convert_lora(lora_state)
+	return comfy.lora.load_lora(converted_lora,key_map)
+def apply_lora_to_model_and_clip(model: Any,clip: Any,lora_state: dict[str,Any],strength_model: float,strength_clip: float):
+    patched_model,patched_clip=comfy.sd.load_lora_for_models(model,clip,lora_state,strength_model,strength_clip)
+    if patched_model is None:
+        raise RuntimeError("LoRA 已读取，但没有任何权重成功应用到模型。")
+    return patched_model,patched_clip or clip
+def match_model_family(unet_name: str) -> dict[str,Any]:
+	normalized_name=_normalize_text(unet_name)
+	canonical_name=_canonical_model_text(unet_name)
+	best: dict[str,Any] | None=None
+	best_length=-1
+	for preset in MODEL_FAMILY_PRESETS:
+		for keyword in preset.get("keywords",[]):
+			normalized_keyword=_normalize_text(keyword)
+			canonical_keyword=_canonical_model_text(keyword)
+			if not normalized_keyword:
+				continue
+			if (normalized_keyword in normalized_name
+				or (canonical_keyword and canonical_keyword in canonical_name)) and len(canonical_keyword or normalized_keyword) > best_length:
+				best=preset
+				best_length=len(canonical_keyword or normalized_keyword)
+	return best or {"id": "generic","clip_type": "stable_diffusion","clip_names": [DEFAULT_CLIP_NAME],"vae_name": DEFAULT_VAE_NAME,"lora_1_name": "","lora_1_strength": 0.0,"lora_2_name": "","lora_2_strength": 0.0, "steps": 20,"cfg": 1.0,"sampler_name": "euler","scheduler": "beta57","denoise": 1.0,"model_sampling": "","model_shift": 0.0,"cfg_norm_strength": 0.0, "supports_multi_image_edit": False,"main_long_edge": 1024, "vl_long_edge": 512,"width": 1024, "height": 1024,}
+def resolve_clip_type(unet_name: str,clip_names: list[str],preferred_type: str= "") -> str:
+	preferred_text=str(preferred_type or "").strip()
+	if preferred_text and _normalize_text(preferred_text) not in ("", "stable_diffusion", "auto"):
+		return preferred_text
+	normalized_unet=_normalize_text(unet_name)
+	canonical_unet=_canonical_model_text(unet_name)
+	normalized_clips= " ".join(_normalize_text(name) for name in clip_names if str(name or "").strip())
+	canonical_clips= " ".join(_canonical_model_text(name) for name in clip_names if str(name or "").strip())
+	for keywords,clip_type in CLIP_TYPE_KEYWORDS:
+		if any(_normalize_text(keyword) in normalized_unet
+			or _canonical_model_text(keyword) in canonical_unet
+			for keyword in keywords):
+			return clip_type
+	if "clip_l_hidream" in normalized_clips or "clipghidream" in canonical_clips:
+		return "hidream"
+	if "qwen_2.5_vl" in normalized_clips or "qwen25vl" in canonical_clips:
+		return "qwen_image"
+	if "qwen_3_8b" in normalized_clips or "qwen_3_4b" in normalized_clips or "qwen38b" in canonical_clips or "qwen34b" in canonical_clips:
+		if "flux2" in normalized_unet or "klein" in normalized_unet:
+			return "flux2"
+		if "wan" in normalized_unet:
+			return "wan"
+		if "ace" in normalized_unet:
+			return "ace"
+		if "hunyuan" in normalized_unet:
+			return "hunyuan_image"
+	if "clip_l" in normalized_clips and "t5xxl" in normalized_clips:
+		return "flux"
+	return str(preferred_type or "stable_diffusion")
+def _pick_available_name(requested: str,available: list[str],fallback: str= "") -> str:
+	requested=str(requested or "").strip()
+	if requested and requested in available:
+		return requested
+	requested_basename= requested.replace("/","\\").split("\\")[-1] if requested else ""
+	requested_canonical=_canonical_model_text(requested_basename or requested)
+	if requested_canonical:
+		for candidate in available:
+			candidate_text=str(candidate or "").strip()
+			candidate_basename=candidate_text.replace("/","\\").split("\\")[-1]
+			if _canonical_model_text(candidate_basename)== requested_canonical:
+				return candidate_text
+	fallback=str(fallback or "").strip()
+	if fallback and fallback in available:
+		return fallback
+	fallback_basename= fallback.replace("/","\\").split("\\")[-1] if fallback else ""
+	fallback_canonical=_canonical_model_text(fallback_basename or fallback)
+	if fallback_canonical:
+		for candidate in available:
+			candidate_text=str(candidate or "").strip()
+			candidate_basename=candidate_text.replace("/","\\").split("\\")[-1]
+			if _canonical_model_text(candidate_basename)== fallback_canonical:
+				return candidate_text
+	return available[0] if available else requested or fallback
+def _pick_available_lora_name(requested: str,available: list[str],fallback: str= "") -> str:
+	requested=str(requested or "").strip()
+	if requested and requested in available:
+		return requested
+	requested_basename=requested.replace("/","\\").split("\\")[-1] if requested else ""
+	requested_canonical=_canonical_model_text(requested_basename or requested)
+	if requested_canonical:
+		for candidate in available:
+			candidate_text=str(candidate or "").strip()
+			candidate_basename=candidate_text.replace("/","\\").split("\\")[-1]
+			candidate_canonical=_canonical_model_text(candidate_basename)
+			full_canonical=_canonical_model_text(candidate_text)
+			if candidate_canonical== requested_canonical or requested_canonical in candidate_canonical or requested_canonical in full_canonical:
+				return candidate_text
+	fallback=str(fallback or "").strip()
+	if fallback and fallback in available:
+		return fallback
+	fallback_basename=fallback.replace("/","\\").split("\\")[-1] if fallback else ""
+	fallback_canonical=_canonical_model_text(fallback_basename or fallback)
+	if fallback_canonical:
+		for candidate in available:
+			candidate_text=str(candidate or "").strip()
+			candidate_basename=candidate_text.replace("/","\\").split("\\")[-1]
+			candidate_canonical=_canonical_model_text(candidate_basename)
+			full_canonical=_canonical_model_text(candidate_text)
+			if candidate_canonical== fallback_canonical or fallback_canonical in candidate_canonical or fallback_canonical in full_canonical:
+				return candidate_text
+	return ""
+def _flux_optional_clip_candidates(clip_models: list[str],default_name: str= "") -> list[str]:
+	preferred=_dedupe_keep_order([default_name,"t5xxl_fp16.safetensors", "t5xxl_fp8_e4m3fn_scaled.safetensors","t5xxl_fp8_e4m3fn.safetensors",])
+	return [name for name in preferred if str(name or "").strip() and name in clip_models]
+def resolve_clip_names_for_preset(preset: dict[str,Any],clip_models: list[str],exposed_clip_name: str= "",legacy_clip_names: list[str] | None=None,) -> list[str]:
+	recommended_clip_names=[name for name in list(preset.get("clip_names",[])) if str(name or "").strip()]
+	if not recommended_clip_names:
+		resolved: list[str]=[]
+		for manual_name in legacy_clip_names or []:
+			chosen=_pick_available_name(manual_name,clip_models, "")
+			if chosen:
+				resolved.append(chosen)
+		return resolved
+	if (_normalize_text(preset.get("clip_type", ""))== "flux"
+		and _normalize_text(recommended_clip_names[0])== "clipl.safetensors"):
+		clip_l_name=_pick_available_name("clip_l.safetensors",clip_models,recommended_clip_names[0])
+		optional_candidates=_flux_optional_clip_candidates(clip_models,recommended_clip_names[1] if len(recommended_clip_names) > 1 else "",)
+		optional_name=_pick_available_name(exposed_clip_name,optional_candidates,recommended_clip_names[1] if len(recommended_clip_names) > 1 else "",)
+		resolved=[name for name in [clip_l_name,optional_name] if str(name or "").strip()]
+		if resolved:
+			return resolved
+	resolved=[]
+	for recommended_name in recommended_clip_names:
+		chosen=_pick_available_name(recommended_name,clip_models,recommended_name)
+		if chosen:
+			resolved.append(chosen)
+	return resolved
+def _load_vae(vae_name: str):
+	try:
+		vae_path=_resolve_full_path(("vae",),vae_name)
+	except Exception as exc:
+		raise _format_model_missing_error("VAE",vae_name,("vae",),exc) from exc
+	sd,metadata=comfy.utils.load_torch_file(vae_path,return_metadata=True)
+	try:
+		vae=comfy.sd.VAE(sd=sd,metadata=metadata,dtype=None)
+		vae.throw_exception_if_invalid()
+		return vae
+	except Exception as exc:
+		requested_canonical=_canonical_model_text(vae_name)
+		if requested_canonical== _canonical_model_text("full_encoder_small_decoder.safetensors"):
+			for fallback_name in ("flux2-vae.safetensors","Flux2-DEV-ae.safetensors"):
+				try:
+					fallback_path=_resolve_full_path(("vae",),fallback_name)
+					fallback_sd,fallback_metadata=comfy.utils.load_torch_file(fallback_path,return_metadata=True)
+					vae=comfy.sd.VAE(sd=fallback_sd,metadata=fallback_metadata,dtype=None)
+					vae.throw_exception_if_invalid()
+					return vae
+				except Exception:
+					pass
+			raise RuntimeError(
+				"当前 ComfyUI 核心无法加载 full_encoder_small_decoder.safetensors，且可回退的 Flux2 VAE 也不可用。"
+				"请升级 ComfyUI，或改用 flux2-vae.safetensors / Flux2-DEV-ae.safetensors。"
+			) from exc
+		raise _format_runtime_error("VAE 加载",exc) from exc
+def _load_model(unet_name: str,unet_dtype: str):
+	try:
+		unet_path=_resolve_full_path(("diffusion_models", "checkpoints"),unet_name)
+	except Exception as exc:
+		raise _format_model_missing_error("UNET",unet_name,("diffusion_models", "checkpoints"),exc) from exc
+	try:
+		return comfy.sd.load_diffusion_model(unet_path,model_options=_build_unet_model_options(unet_dtype))
+	except Exception as exc:
+		raise _format_runtime_error("UNET 加载",exc) from exc
+def _load_clip_from_names(clip_names: list[str],clip_type: str):
+	clean_names=[str(name or "").strip() for name in clip_names if str(name or "").strip()]
+	if not clean_names:
+		raise RuntimeError("至少需要一个文本编码器模型。")
+	try:
+		clip_paths=[_resolve_full_path(("text_encoders", "clip"),name) for name in clean_names]
+	except Exception as exc:
+		raise _format_model_missing_error("CLIP"," + ".join(clean_names),("text_encoders", "clip"),exc) from exc
+	try:
+		embedding_directory=folder_paths.get_folder_paths("embeddings")
+	except Exception:
+		embedding_directory=[]
+	normalized_type=_normalize_text(clip_type)
+	try:
+		if normalized_type== "hidream":
+			return comfy.sd.load_clip(ckpt_paths=clip_paths,embedding_directory=embedding_directory,model_options={},)
+		return comfy.sd.load_clip(ckpt_paths=clip_paths,embedding_directory=embedding_directory,clip_type=_clip_type_enum(clip_type),model_options={},)
+	except Exception as exc:
+		raise _format_runtime_error("CLIP 加载",exc) from exc
+def _resize_to_long_edge(samples: torch.Tensor,longest_edge: int,upscale: str,crop: str) -> torch.Tensor:
+	height=int(samples.shape[2])
+	width=int(samples.shape[3])
+	current_long_edge=max(height,width)
+	if current_long_edge <=0:
+		return samples
+	scale=float(longest_edge) / float(current_long_edge)
+	target_width=max(8,int(round(width * scale)))
+	target_height=max(8,int(round(height * scale)))
+	return comfy.utils.common_upscale(samples,target_width,target_height,upscale,crop)
+def _scale_image_to_total_pixels(image: torch.Tensor,megapixels: float= REFERENCE_IMAGE_MEGAPIXELS,resolution_steps: int= REFERENCE_IMAGE_RESOLUTION_STEPS,upscale: str= "lanczos") -> torch.Tensor:
+	samples=image.movedim(-1,1)
+	total=max(0.01,float(megapixels)) * 1024.0 * 1024.0
+	current_total=max(1,int(samples.shape[2]) * int(samples.shape[3]))
+	scale_by=math.sqrt(total / float(current_total))
+	step=max(1,int(resolution_steps))
+	target_width=max(step,int(round((samples.shape[3] * scale_by) / step)) * step)
+	target_height=max(step,int(round((samples.shape[2] * scale_by) / step)) * step)
+	return comfy.utils.common_upscale(samples,target_width,target_height,upscale,"disabled").movedim(1,-1)
+def _reorder_pairs_by_main_index(pairs: list[dict[str,Any]],main_image_index: int) -> list[dict[str,Any]]:
+	if not pairs:
+		return []
+	main_slot=max(0,min(len(pairs) - 1,int(main_image_index) - 1))
+	if main_slot <=0:
+		return list(pairs)
+	return [pairs[main_slot],*pairs[:main_slot],*pairs[main_slot + 1:]]
+def _ensure_mask_bhw(mask: torch.Tensor | None) -> torch.Tensor | None:
+	if mask is None:
+		return None
+	if mask.ndim == 2:
+		return mask.unsqueeze(0)
+	if mask.ndim == 3:
+		return mask
+	if mask.ndim == 4:
+		return mask[:,0,:,:]
+	raise RuntimeError(f"不支持的遮罩维度：{tuple(mask.shape)}")
+def _resize_image_exact(image: torch.Tensor,target_width: int,target_height: int,upscale: str= "lanczos") -> torch.Tensor:
+	samples=image.movedim(-1,1)
+	resized=comfy.utils.common_upscale(samples,int(target_width),int(target_height),upscale,"disabled")
+	return resized.movedim(1,-1)
+def _resize_mask_exact(mask: torch.Tensor | None,target_width: int,target_height: int,upscale: str= "bilinear") -> torch.Tensor | None:
+	mask_bhw=_ensure_mask_bhw(mask)
+	if mask_bhw is None:
+		return None
+	mask_image=mask_bhw.unsqueeze(1)
+	resized=comfy.utils.common_upscale(mask_image,int(target_width),int(target_height),upscale,"disabled")
+	return resized[:,0,:,:].clamp(0.0,1.0)
+def _same_aspect_ratio(width_a: int,height_a: int,width_b: int,height_b: int,epsilon: float= IMAGE_RATIO_EPSILON) -> bool:
+	if min(width_a,height_a,width_b,height_b) <=0:
+		return False
+	ratio_a=float(width_a) / float(height_a)
+	ratio_b=float(width_b) / float(height_b)
+	return abs((ratio_a / ratio_b) - 1.0) <= float(epsilon)
+def _fit_image_with_replicate_padding(image: torch.Tensor,target_width: int,target_height: int,upscale: str= "lanczos"):
+	source_height=int(image.shape[1])
+	source_width=int(image.shape[2])
+	scale=min(float(target_width) / float(max(1,source_width)),float(target_height) / float(max(1,source_height)))
+	resized_width=max(8,int(round(source_width * scale)))
+	resized_height=max(8,int(round(source_height * scale)))
+	resized_width=min(int(target_width),resized_width)
+	resized_height=min(int(target_height),resized_height)
+	resized=_resize_image_exact(image,resized_width,resized_height,upscale)
+	left=max(0,(int(target_width) - resized_width) // 2)
+	top=max(0,(int(target_height) - resized_height) // 2)
+	right=max(0,int(target_width) - resized_width - left)
+	bottom=max(0,int(target_height) - resized_height - top)
+	padded=F.pad(resized.movedim(-1,1),(left,right,top,bottom),mode="replicate").movedim(1,-1)
+	mask=torch.ones((image.shape[0],int(target_height),int(target_width)),dtype=image.dtype,device=image.device)
+	mask[:,top:top + resized_height,left:left + resized_width]=0.0
+	return padded,mask,left,top,resized_width,resized_height
+def _ceil_to_multiple(value: int,multiple: int=8) -> int:
+	multiple=max(1,int(multiple))
+	return max(multiple,int(math.ceil(max(1,int(value)) / float(multiple))) * multiple)
+def _largest_pair_canvas_size(pairs: list[dict[str,Any]],fallback_width: int=1024,fallback_height: int=1024) -> tuple[int,int]:
+	width=max(8,int(fallback_width))
+	height=max(8,int(fallback_height))
+	for pair in pairs or []:
+		image=pair.get("image") if isinstance(pair,dict) else None
+		if not isinstance(image,torch.Tensor) or image.ndim <3:
+			continue
+		width=max(width,int(image.shape[2]))
+		height=max(height,int(image.shape[1]))
+	return _ceil_to_multiple(width,8),_ceil_to_multiple(height,8)
+def _uses_equal_reference_canvas(preset: dict[str,Any],unet_name: str= "") -> bool:
+	text=_canonical_model_text("|".join([
+		str(preset.get("id","")),
+		str(preset.get("keywords","")),
+		str(unet_name or ""),
+	]))
+	return (
+		"qwenimageedit2511" in text
+		or "fireredimageedit11" in text
+		or "fireredimageedit1.1" in _normalize_text(str(unet_name or ""))
+	)
+def _prepare_primary_image_for_target(image: torch.Tensor,target_width: int,target_height: int,mask: torch.Tensor | None= None):
+	source_height=int(image.shape[1])
+	source_width=int(image.shape[2])
+	target_width=max(8,int(target_width))
+	target_height=max(8,int(target_height))
+	if source_width == target_width and source_height == target_height:
+		return image,_ensure_mask_bhw(mask),False
+	if _same_aspect_ratio(source_width,source_height,target_width,target_height):
+		return _resize_image_exact(image,target_width,target_height,"lanczos"),_resize_mask_exact(mask,target_width,target_height),False
+	padded_image,layout_mask,left,top,resized_width,resized_height=_fit_image_with_replicate_padding(image,target_width,target_height,"lanczos")
+	composed_mask=layout_mask
+	source_mask=_ensure_mask_bhw(mask)
+	if source_mask is not None:
+		resized_source_mask=_resize_mask_exact(source_mask,resized_width,resized_height)
+		mask_canvas=torch.zeros_like(layout_mask)
+		mask_canvas[:,top:top + resized_height,left:left + resized_width]=resized_source_mask
+		composed_mask=torch.maximum(composed_mask,mask_canvas)
+	return padded_image,composed_mask.clamp(0.0,1.0),True
+def _apply_cfg_norm(model,strength: float):
+	if abs(float(strength)) <=1e-6:
+		return model
+	patched=model.clone()
+	def cfg_norm(args):
+		cond_p=args["cond_denoised"]
+		pred_text=args["denoised"]
+		norm_full_cond=torch.norm(cond_p,dim=1,keepdim=True)
+		norm_pred_text=torch.norm(pred_text,dim=1,keepdim=True)
+		scale=(norm_full_cond / (norm_pred_text + 1e-8)).clamp(min=0.0,max=1.0)
+		return pred_text * scale * float(strength)
+	patched.set_model_sampler_post_cfg_function(cfg_norm)
+	return patched
+def _patch_model_sampling(model,sampling_mode: str,shift: float):
+	mode=_normalize_text(sampling_mode)
+	if not mode or abs(float(shift)) <=1e-6:
+		return model
+	patched=model.clone()
+	if mode== "aura":
+		sampling_base=comfy.model_sampling.ModelSamplingDiscreteFlow
+		sampling_type=comfy.model_sampling.CONST
+		multiplier=1.0
+	elif mode== "sd3":
+		sampling_base=comfy.model_sampling.ModelSamplingDiscreteFlow
+		sampling_type=comfy.model_sampling.CONST
+		multiplier=1000.0
+	else:
+		return model
+	class ModelSamplingAdvanced(sampling_base,sampling_type):
+		pass
+	model_sampling=ModelSamplingAdvanced(patched.model.model_config)
+	model_sampling.set_parameters(shift=float(shift),multiplier=multiplier)
+	patched.add_object_patch("model_sampling",model_sampling)
+	return patched
+def _is_lora_enabled(name: str,strength: float) -> bool:
+	return bool(str(name or "").strip()) and abs(float(strength)) >1e-6
+def _resolve_lora_suggested_steps(name: str) -> int | None:
+	text=_normalize_text(name)
+	canonical=_canonical_model_text(name)
+	if "flux2turbocomfyv2" in canonical:
+		return 8
+	if "8step" in text or "8step" in canonical:
+		return 8
+	if "4step" in text or "4step" in canonical:
+		return 4
+	return None
+def _resolve_effective_steps(requested_steps: int,preset: dict[str,Any],lora_1_name: str,lora_1_strength: float,lora_2_name: str,lora_2_strength: float,) -> int:
+	for name,strength in ((lora_1_name,lora_1_strength),(lora_2_name,lora_2_strength)):
+		if _is_lora_enabled(name,strength):
+			suggested=_resolve_lora_suggested_steps(name)
+			if suggested is not None:
+				return int(suggested)
+	base_steps=preset.get("base_steps")
+	if base_steps is not None and not _is_lora_enabled(lora_1_name,lora_1_strength) and not _is_lora_enabled(lora_2_name,lora_2_strength):
+		return int(base_steps)
+	return int(requested_steps)
+class GJJ_LazyImageStudio:
+	CATEGORY= "GJJ"
+	FUNCTION= "create_image"
+	DESCRIPTION= "懒人图文集成一键生图：支持文生图、图生图，以及多图参考编辑。节点会根据所选 UNET 主关键词自动推荐匹配的文本编码器、VAE、加速 LoRA、NSFW LoRA 与常用采样参数。"
+	SEARCH_ALIASES=["懒人","一键生图","图文集成","图文生成","图生图","文生图","flux","hidream", "omnigen2","采样器",]
+	RETURN_TYPES=("IMAGE",)
+	RETURN_NAMES=("最终生成图像",)
+	OUTPUT_TOOLTIPS=("节点内部完成条件编码、采样和解码后的最终图片。",)
+	def __init__(self):
+		self._lora_cache: dict[str,Any]={}
+	@classmethod
+	def INPUT_TYPES(cls):
+		diffusion_models=list_unet_models() or [DEFAULT_UNET_NAME]
+		clip_models=list_clip_models() or [DEFAULT_CLIP_NAME]
+		vae_models=list_vae_models() or [DEFAULT_VAE_NAME]
+		lora_models=[""] + (_safe_filename_list("loras") or [])
+		return {"required": {"prompt": ("STRING",
+					{"default": "","multiline": False,"dynamicPrompts": True,"display_name": "正向提示词","tooltip": "正向提示词；无图片输入时走文生图，有图片输入时走图生图或多图编辑。",},),"negative_prompt": ("STRING",
+					{"default": "","multiline": False,"dynamicPrompts": True,"display_name": "反向提示词","tooltip": "反向提示词；为空时会自动生成零反向条件。",},),"main_image_index": ("INT",
+					{"default": 1,"min": 1,"max": MAX_MAIN_IMAGE_INDEX,"display_name": "主图序号","tooltip": "有多张参考图时，哪一张作为主参考排在最前；Qwen Image Edit 2511 / FireRed Image Edit 1.1 分支会忽略该项，改为所有图片平等参考。",},),"width": ("INT",
+					{"default": 1024,"min": 64,"max": 8192,"step": 8,"display_name": "宽度","tooltip": "默认会在接入批量图片时，从所有图片里不分先后取最大图自动同步宽度；如果你手动修改，节点会按目标尺寸自动缩放或外扩填充。",},),"height": ("INT",
+					{"default": 1024,"min": 64,"max": 8192,"step": 8,"display_name": "高度","tooltip": "默认会在接入批量图片时，从所有图片里不分先后取最大图自动同步高度；如果你手动修改，节点会按目标尺寸自动缩放或外扩填充。",},),"batch_size": ("INT",
+					{"default": 1,"min": 1,"max": 64,"display_name": "批次数","tooltip": "文生图时生成的 latent 批次数。",},),"unet_name": (diffusion_models,
+					{"default": _preferred_default(diffusion_models,DEFAULT_UNET_NAME),"display_name": "🟣 UNET 主模型","tooltip": "主扩散模型；前端会根据模型关键词自动推荐匹配的编码器、VAE、LoRA 与采样参数。",},),"unet_dtype": (UNET_DTYPE_OPTIONS,
+					{"default": DEFAULT_UNET_DTYPE,"display_name": "UNET 精度","tooltip": "UNET 加载精度；Flux2 工作流默认使用模型原生精度。",},),"clip_name1": (clip_models,
+					{"default": _preferred_default(clip_models,DEFAULT_CLIP_NAME),"display_name": "🟡 CLIP 编码器","tooltip": "仅在需要手动选择可变文本编码器的模型族中显示，例如 Flux1 的 T5 编码器；固定配套模型会在节点内部自动匹配。",},),"vae_name": (vae_models,
+					{"default": _preferred_default(vae_models,DEFAULT_VAE_NAME),"display_name": "🔴 VAE 解码器","tooltip": "自动推荐与当前底模同体系的 VAE，可按需手动覆盖。",},),"lora_1_name": (lora_models,
+					{"default": _preferred_default(lora_models,DEFAULT_LIGHTNING_LORA),"display_name": "🟢 第1组 LoRA","tooltip": "推荐的官方加速 LoRA；常见 4 步或 8 步加速会自动回填步数。",},),"lora_1_strength": ("FLOAT",
+					{"default": 1.0,"min": 0.0,"max": 4.0,"step": 0.01,"display_name": "LoRA 1 强度","tooltip": "加速 LoRA 的模型强度。",},),"lora_2_name": (lora_models,
+					{"default": _preferred_default(lora_models,DEFAULT_NSFW_LORA),"display_name": "🟢 第2组 LoRA","tooltip": "推荐的第二组 LoRA，例如 NSFW / 功能扩展 LoRA。",},),"lora_2_strength": ("FLOAT",
+					{"default": 0.7,"min": 0.0,"max": 2.0,"step": 0.01,"display_name": "LoRA 2 强度","tooltip": "第二组 LoRA 的模型强度。",},),"seed": ("INT",
+					{"default": 0,"min": 0,"max": 0xffffffffffffffff,"control_after_generate": True,"display_name": "种子","tooltip": "随机种子。",},),"steps": ("INT",
+					{"default": 4,"min": 1,"max": 10000,"display_name": "步数","tooltip": "采样步数；前端会按所选加速 LoRA 自动推荐。",},),"cfg": ("FLOAT",
+					{"default": 1.0,"min": 0.0,"max": 100.0,"step": 0.1,"round": 0.01,"display_name": "CFG 引导强度","tooltip": "提示词引导强度；大多数新模型建议较低值。",},),"sampler_name": (comfy.samplers.KSampler.SAMPLERS,
+					{"default": "euler","display_name": "采样器","tooltip": "采样算法。",},),"scheduler": (comfy.samplers.KSampler.SCHEDULERS,
+					{"default": "beta57","display_name": "调度器","tooltip": "噪声调度器。",},),"denoise": ("FLOAT",
+					{"default": 1.0,"min": 0.0,"max": 1.0,"step": 0.01,"display_name": "降噪","tooltip": "文生图通常为 1.0；图生图可适当降低保留原图结构。",},),"grow_mask_by": ("INT",
+					{"default": 6,"min": 0,"max": 64,"display_name": "遮罩扩张","tooltip": "图生图有遮罩时用于 latent 无缝过渡的遮罩扩张像素。",},),},
+			"optional": FlexibleImageStudioInputType({"batch_source_images": ("STRING",
+						{"default": "[]","multiline": True,"display_name": "批量图片来源","tooltip": "前端自动同步的批量图片来源清单；正常使用时会自动隐藏。",},),"image_01": (GJJ_BATCH_IMAGE_TYPE,
+						{"display_name": "批量图片","tooltip": "可直接接入 GJJ · 多图片加载预览器 的批量图片输出；会按顺序拆成多张参考图参与工作流，并在所有图片里不分先后取最大图自动同步尺寸。",},),"mask": ("MASK",
+						{"display_name": "主图遮罩", "tooltip": "可选主图遮罩；存在时会走带 noise_mask 的局部编辑逻辑。",},),"lora_chain_config": ("LORA_CHAIN_CONFIG",
+						{"display_name": "LoRA串联配置","tooltip": "可选接入 LoRA串联配置 节点的输出；接入后会在面板 LoRA 1/LoRA 2 之后继续按顺序串联应用多组 LoRA。",},),}),
+			"hidden": {"prompt_graph": "PROMPT","unique_id": "UNIQUE_ID"},
+		}
+	def _load_lora_state(self,lora_name: str):
+		lora_path=folder_paths.get_full_path("loras",lora_name)
+		if not lora_path:
+			raise _format_model_missing_error("LoRA",lora_name,("loras",))
+		if lora_path not in self._lora_cache:
+			self._lora_cache[lora_path]=comfy.utils.load_torch_file(lora_path,safe_load=True)
+		return self._lora_cache[lora_path]
+	def _apply_loras(self,model,clip,lora_1_name: str,lora_1_strength: float,lora_2_name: str,lora_2_strength: float,lora_chain_config: str= ""):
+		current_model=model
+		current_clip=clip
+		if str(lora_1_name or "").strip() and abs(float(lora_1_strength)) > 1e-6:
+			current_model,current_clip=apply_lora_to_model_and_clip(
+				current_model,
+				current_clip,
+				self._load_lora_state(lora_1_name),
+				float(lora_1_strength),
+				float(lora_1_strength),
+			)
+		if str(lora_2_name or "").strip() and abs(float(lora_2_strength)) > 1e-6:
+			current_model,current_clip=apply_lora_to_model_and_clip(
+				current_model,
+				current_clip,
+				self._load_lora_state(lora_2_name),
+				float(lora_2_strength),
+				float(lora_2_strength),
+			)
+		if str(lora_chain_config or "").strip():
+			current_model,current_clip,_=apply_lora_chain_config(
+				current_model,
+				current_clip,
+				lora_data=normalize_lora_chain_data(lora_chain_config),
+				loaded_lora_cache=None,
+			)
+		return current_model,current_clip
+	def _encode_text_conditioning(self,clip,text: str):
+		tokens=clip.tokenize(str(text or ""))
+		return clip.encode_from_tokens_scheduled(tokens)
+	def _encode_negative_conditioning(self,clip,positive,negative_prompt: str):
+		if str(negative_prompt or "").strip():
+			return self._encode_text_conditioning(clip,negative_prompt)
+		return zero_out_conditioning(positive)
+	def _sample_flux2_reference_workflow(self,model,positive,negative,latent_out,width: int,height: int,steps: int,seed: int,cfg: float,sampler_name: str):
+		selected_sampler=str(sampler_name or "").strip() or "lcm"
+		noise=RandomNoise.execute(int(seed))[0]
+		sampler=KSamplerSelect.execute(selected_sampler)[0]
+		sigmas=Flux2Scheduler.execute(int(steps),int(width),int(height))[0]
+		guider=CFGGuider.execute(model,positive,negative,float(cfg))[0]
+		return SamplerCustomAdvanced.execute(noise,guider,sampler,sigmas,latent_out)[0]
+	def _encode_equal_reference_image_edit(self,clip,vae,prompt: str,negative_prompt: str,pairs: list[dict[str,Any]],vl_long_edge: int=512,target_width: int=1024,target_height: int=1024,):
+		canvas_width,canvas_height=_largest_pair_canvas_size(pairs,target_width,target_height)
+		image_prompt= ""
+		ref_latents: list[torch.Tensor]=[]
+		vl_images: list[torch.Tensor]=[]
+		for slot,pair in enumerate(pairs):
+			image=pair["image"]
+			prepared_image,_ignore_mask,_ignore_outpaint=_prepare_primary_image_for_target(image,canvas_width,canvas_height,None)
+			ref_latents.append(vae.encode(prepared_image[:,:,:,:3]))
+			vl_image,_ignore_mask,_ignore_outpaint=_prepare_primary_image_for_target(prepared_image,int(vl_long_edge),int(vl_long_edge),None)
+			vl_images.append(vl_image[:,:,:,:3])
+			image_prompt +=f"Picture {slot + 1}: <|vision_start|><|image_pad|><|vision_end|>"
+		if not ref_latents:
+			raise RuntimeError("平等参考模式至少需要一张有效参考图。")
+		full_prompt=image_prompt + str(prompt or "")
+		tokens=clip.tokenize(full_prompt,images=vl_images)
+		conditioning=clip.encode_from_tokens_scheduled(tokens)
+		positive=node_helpers.conditioning_set_values(conditioning,{"reference_latents": ref_latents},append=True)
+		negative=self._encode_negative_conditioning(clip,positive,negative_prompt)
+		latent_out={"samples": torch.zeros_like(ref_latents[0])}
+		return positive,negative,latent_out,canvas_width,canvas_height
+	def _encode_multi_image_edit(self,clip,vae,prompt: str,negative_prompt: str,main_image_index: int,pairs: list[dict[str,Any]],main_mask=None,main_long_edge: int=1024,vl_long_edge: int=512,target_width: int=1024,target_height: int=1024,):
+		valid_length=len(pairs)
+		main_slot=max(0,min(valid_length - 1,int(main_image_index) - 1))
+		image_prompt= ""
+		main_ref_latent=None
+		noise_mask=None
+		vl_images: list[torch.Tensor]=[]
+		for slot,pair in enumerate(pairs):
+			image=pair["image"]
+			is_main=slot==main_slot
+			if is_main:
+				processed_image,prepared_mask,_=_prepare_primary_image_for_target(image,int(target_width),int(target_height),main_mask)
+				main_ref_latent=vae.encode(processed_image[:,:,:,:3])
+				noise_mask=prepared_mask
+				vl_image,_ignore_mask,_ignore_outpaint=_prepare_primary_image_for_target(processed_image,int(vl_long_edge),int(vl_long_edge),None)
+			else:
+				vl_image,_ignore_mask,_ignore_outpaint=_prepare_primary_image_for_target(image,int(vl_long_edge),int(vl_long_edge),None)
+			vl_images.append(vl_image[:,:,:,:3])
+			image_prompt +=f"Picture {slot + 1}: <|vision_start|><|image_pad|><|vision_end|>"
+		if main_ref_latent is None:
+			raise RuntimeError("主图参考 latent 生成失败，请检查主图输入是否有效。")
+		full_prompt=image_prompt + str(prompt or "")
+		tokens=clip.tokenize(full_prompt,images=vl_images)
+		conditioning=clip.encode_from_tokens_scheduled(tokens)
+		positive=node_helpers.conditioning_set_values(conditioning,{"reference_latents": [main_ref_latent]},append=True)
+		negative=self._encode_negative_conditioning(clip,positive,negative_prompt)
+		latent_out={"samples": main_ref_latent}
+		if noise_mask is not None:
+			latent_out["noise_mask"]=noise_mask
+		return positive,negative,latent_out
+	def _encode_flux2_multi_reference(self,clip,vae,prompt: str,negative_prompt: str,main_image_index: int,pairs: list[dict[str,Any]],width: int,height: int,batch_size: int,preset: dict[str,Any]):
+		ordered_pairs=_reorder_pairs_by_main_index(pairs,main_image_index)
+		if not ordered_pairs:
+			raise RuntimeError("Flux2 多图参考模式至少需要一张有效参考图。")
+		positive=self._encode_text_conditioning(clip,prompt)
+		negative=self._encode_negative_conditioning(clip,positive,negative_prompt)
+		resolved_width=max(16,int(width))
+		resolved_height=max(16,int(height))
+		for ordered_index,pair in enumerate(ordered_pairs):
+			scaled_image=_scale_image_to_total_pixels(pair["image"])
+			if ordered_index ==0:
+				resolved_width=max(16,int(scaled_image.shape[2]))
+				resolved_height=max(16,int(scaled_image.shape[1]))
+			reference_latent=VAEEncode().encode(vae,scaled_image)[0]["samples"]
+			positive=node_helpers.conditioning_set_values(positive,{"reference_latents": [reference_latent]},append=True)
+			negative=node_helpers.conditioning_set_values(negative,{"reference_latents": [reference_latent]},append=True)
+		latent_out=EmptyFlux2LatentImage.execute(int(resolved_width),int(resolved_height),int(batch_size))[0]
+		return positive,negative,latent_out,resolved_width,resolved_height
+	def _build_latent(self,vae,width,height,batch_size,image_pairs,mask,grow_mask_by,preset):
+		if not image_pairs:
+			if _normalize_text(preset.get("clip_type","")) == "lumina2":
+				return EmptySD3LatentImage().generate(int(width),int(height),int(batch_size))[0]
+			if _normalize_text(preset.get("clip_type","")) == "flux2":
+				return EmptyFlux2LatentImage.execute(int(width),int(height),int(batch_size))[0]
+			return EmptyLatentImage().generate(int(width),int(height),int(batch_size))[0]
+		main_slot=max(0,min(len(image_pairs) - 1,0))
+		image=image_pairs[main_slot]["image"]
+		prepared_image,prepared_mask,use_outpaint=_prepare_primary_image_for_target(image,int(width),int(height),mask)
+		if prepared_mask is not None and (use_outpaint or mask is not None):
+			return VAEEncodeForInpaint().encode(vae,prepared_image,prepared_mask,int(grow_mask_by))[0]
+		return VAEEncode().encode(vae,prepared_image)[0]
+	def _load_runtime_pipeline(self,unet_name: str,unet_dtype: str,clip_names: list[str],clip_type: str,vae_name: str):
+		model=_load_model(unet_name,unet_dtype)
+		clip=_load_clip_from_names(clip_names,clip_type)
+		vae=_load_vae(vae_name)
+		return model,clip,vae
+	def create_image(self,prompt,negative_prompt,main_image_index,width,height,batch_size,unet_name,unet_dtype,clip_name1,vae_name,lora_1_name,lora_1_strength,lora_2_name,lora_2_strength,seed,steps,cfg,sampler_name,scheduler,denoise,grow_mask_by,lora_chain_config="",batch_source_images="[]",mask=None,prompt_graph=None,unique_id=None,**kwargs,):
+		try:
+			_send_status(unique_id,"1/6 解析模型配套...")
+			preset=match_model_family(unet_name)
+			clip_models=list_clip_models() or [DEFAULT_CLIP_NAME]
+			vae_models=list_vae_models() or [DEFAULT_VAE_NAME]
+			lora_models=_safe_filename_list("loras")
+			resolved_clip_names=resolve_clip_names_for_preset(preset,clip_models,exposed_clip_name=clip_name1,legacy_clip_names=[clip_name1],)
+			if not resolved_clip_names:
+				resolved_clip_names.append(_pick_available_name("",clip_models,DEFAULT_CLIP_NAME))
+			resolved_vae_name=_pick_available_name(preset.get("vae_name",DEFAULT_VAE_NAME),vae_models,vae_name)
+			resolved_lora_1_name=_pick_available_lora_name(lora_1_name,lora_models,preset.get("lora_1_name",""))
+			resolved_lora_2_name=_pick_available_lora_name(lora_2_name,lora_models,preset.get("lora_2_name",""))
+			resolved_clip_type=resolve_clip_type(unet_name,resolved_clip_names,str(preset.get("clip_type", "stable_diffusion")),)
+			pairs=[pair for pair in collect_image_pairs(kwargs,prompt_graph=prompt_graph,unique_id=unique_id,batch_source_images=batch_source_images) if pair["image"] is not None]
+
+			_send_status(unique_id,"2/6 加载主模型、CLIP 和 VAE...")
+			model,clip,vae=self._load_runtime_pipeline(unet_name,unet_dtype,resolved_clip_names,resolved_clip_type,resolved_vae_name,)
+
+			_send_status(unique_id,"3/6 应用 LoRA 与模型补丁...")
+			model,clip=self._apply_loras(model,clip,resolved_lora_1_name,lora_1_strength,resolved_lora_2_name,lora_2_strength,lora_chain_config)
+			model=_patch_model_sampling(model,str(preset.get("model_sampling", "")),float(preset.get("model_shift",0.0)))
+			model=_apply_cfg_norm(model,float(preset.get("cfg_norm_strength",0.0)))
+
+			_send_status(unique_id,"4/6 编码条件与 latent...")
+			flux2_sample_size=None
+			if len(pairs) >1 and resolved_clip_type== "flux2" and mask is None:
+				_send_status(unique_id,f"4/6 编码 Flux2 多参考条件（{len(pairs)} 张）...")
+				positive,negative,latent_out,flux2_width,flux2_height=self._encode_flux2_multi_reference(
+					clip=clip,
+					vae=vae,
+					prompt=prompt,
+					negative_prompt=negative_prompt,
+					main_image_index=main_image_index,
+					pairs=pairs,
+					width=int(width),
+					height=int(height),
+					batch_size=int(batch_size),
+					preset=preset,
+				)
+				flux2_sample_size=(int(flux2_width),int(flux2_height))
+			elif pairs and mask is None and bool(preset.get("supports_multi_image_edit")) and _uses_equal_reference_canvas(preset,unet_name):
+				_send_status(unique_id,f"4/6 编码平等参考条件（{len(pairs)} 张，按最大图尺寸）...")
+				positive,negative,latent_out,equal_width,equal_height=self._encode_equal_reference_image_edit(
+					clip=clip,
+					vae=vae,
+					prompt=prompt,
+					negative_prompt=negative_prompt,
+					pairs=pairs,
+					vl_long_edge=int(preset.get("vl_long_edge",512)),
+					target_width=int(width),
+					target_height=int(height),
+				)
+				width=int(equal_width)
+				height=int(equal_height)
+			elif pairs and bool(preset.get("supports_multi_image_edit")):
+				positive,negative,latent_out=self._encode_multi_image_edit(clip=clip,vae=vae,prompt=prompt,negative_prompt=negative_prompt,main_image_index=main_image_index,pairs=pairs,main_mask=mask,main_long_edge=int(preset.get("main_long_edge",1024)),vl_long_edge=int(preset.get("vl_long_edge",512)),target_width=int(width),target_height=int(height),)
+			else:
+				positive=self._encode_text_conditioning(clip,prompt)
+				negative=self._encode_negative_conditioning(clip,positive,negative_prompt)
+				latent_out=self._build_latent(vae=vae,width=width,height=height,batch_size=batch_size,image_pairs=pairs,mask=mask,grow_mask_by=grow_mask_by,preset=preset,)
+
+			_send_status(unique_id,"5/6 采样生成图像...")
+			effective_steps=_resolve_effective_steps(int(steps),preset,resolved_lora_1_name,lora_1_strength,resolved_lora_2_name,lora_2_strength,)
+			if flux2_sample_size is not None:
+				flux2_width,flux2_height=flux2_sample_size
+				_send_status(unique_id,f"5/6 按 Flux2 工作流采样（{flux2_width} x {flux2_height}）...")
+				sampled_latent=self._sample_flux2_reference_workflow(
+					model=model,
+					positive=positive,
+					negative=negative,
+					latent_out=latent_out,
+					width=flux2_width,
+					height=flux2_height,
+					steps=effective_steps,
+					seed=int(seed),
+					cfg=float(cfg),
+					sampler_name=str(preset.get("sampler_name","lcm") or "lcm"),
+				)
+			else:
+				sampled_latent=common_ksampler(model,int(seed),effective_steps,float(cfg),sampler_name,scheduler,positive,negative,latent_out,denoise=float(denoise),)[0]
+
+			_send_status(unique_id,"6/6 解码输出图像...")
+			image=VAEDecode().decode(vae,sampled_latent)[0]
+			_send_status(unique_id,f"完成：{image.shape[2]} x {image.shape[1]}")
+			return (image,)
+		except RuntimeError as exc:
+			_send_status(unique_id,f"执行失败：{str(exc).splitlines()[0]}")
+			raise
+		except Exception as exc:
+			_send_status(unique_id,"执行失败")
+			raise RuntimeError(
+				f"懒人图文集成一键生图执行失败。\n"
+				f"UNET：{unet_name}\n"
+				f"详细错误：{exc}"
+			) from exc
+NODE_CLASS_MAPPINGS={NODE_NAME: GJJ_LazyImageStudio}
+NODE_DISPLAY_NAME_MAPPINGS={NODE_NAME: "GJJ · 🖼️ 懒人图文集成一键生图"}

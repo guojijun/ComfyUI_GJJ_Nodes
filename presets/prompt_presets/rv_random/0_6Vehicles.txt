@@ -1,0 +1,105 @@
+2 wheeled vehicle
+3 wheeled vehicle
+4 wheeled vehicle
+6 wheeled vehicle
+Aircraft carrier
+Airship
+Ambulance
+Armored vehicle
+Aston Martin
+Audi
+Battlestar Galactica
+Bicycle
+BMW
+Boat
+Bodyboard
+Bullet Train
+Bus
+Camper
+Canoe
+Car
+Chair lift
+Chevrolet
+Container ship
+Cruise ship
+Ducati
+Electric Car
+Electric Vehicle
+Ferrari
+Ferrari 275 GTS 1966
+Fire truck
+Ford
+Ford Mustang 1967 Shelby GT
+Formula 1 car
+Funicular
+Garbage truck
+Gondola
+Hang glider
+Harley-Davidson
+Helicopter
+High-speed Train
+Honda
+Horse-drawn carriage
+Hot air balloon
+Hovercraft
+hypercar
+Icebreaker
+Jeep
+Jet ski
+Kawasaki
+Kayak
+Kiteboard
+Lamborghini
+Mega yacht
+Mercedes-Benz
+Motorcycle
+Muscle car
+Nissan
+Nuclear submarine
+Oil tanker
+Paddle boat
+Parachute
+Plane
+Police car
+Porsche
+Postal delivery truck
+Raft
+Rocketship
+Roller skates
+Rollerblades
+Rope Bridge
+Ropeway
+Scooter
+Seaplane carrier
+Ship
+Skateboard
+Skis
+Sled
+Snow plow
+Snowboard
+Snowmobile
+Space shuttle
+Spacecraft
+Spaceship
+Sports car
+Submarine
+Surfboard
+Tesla
+Thunderbird
+Tow truck
+Toyota
+Tractor trailer
+Train
+Tram
+Trike
+Trolley
+Unicycle
+Utility van
+Volkswagen
+Wakeboard
+Water scooter
+Water skis
+Whaling ship
+Wind surfboard
+Yacht
+Yamaha

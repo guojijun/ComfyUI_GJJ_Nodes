@@ -1,0 +1,175 @@
+Camel
+Cardinal
+Cat
+Cavalier King Charles Spaniel
+Chameleon
+Cheetah
+Chickadee
+Chicken
+Chihuahua
+Chimera
+Chimpanzee
+Chupacabra
+Condor
+Cornish Rex Cat
+Cow
+Coyote
+Crocodile
+Crow
+Cuckoo
+Dachshund
+Deer
+Devon Rex Cat
+Diplodocus
+Doberman Pinscher
+Dolphin
+Donkey
+Duck
+Egyptian Mau Cat
+Elephant
+Elk
+English Mastiff
+Exotic Shorthair Cat
+Falcon
+Ferret
+Finch
+Fish
+Flamingo
+Fox
+French Bulldog
+Frog
+Gazelle
+Gecko
+German Shepherd
+Giraffe
+Goat
+Golden Eagle
+Golden Retriever
+Goose
+Gorilla
+Great Dane
+Griffin
+Gyarados
+Hare
+Hawk
+Hedgehog
+Himalayan Cat
+Horse
+Hummingbird
+Hyena
+Jack Russell Terrier
+Jaguar
+Japanese Bobtail Cat
+Jellyfish
+Jigglypuff
+Kangaroo
+Kestrel
+Koala
+Korat Cat
+Kraken
+Labrador Retriever
+Ladybird
+Lark
+Lemur
+Leopard
+Leviathan
+Lion
+Lizard
+Llama
+Lobster
+Magpie
+Maine Coon Cat
+Mallard
+Mammoth
+Manx Cat
+Mastodon
+Megalodon
+Mink
+Moth
+Mouse
+Mule
+Newt
+Nightingale
+Norwegian Forest Cat
+Octopus
+Opossum
+Orangutan
+Oriental Shorthair Cat
+Osprey
+Ostrich
+Otter
+Owl
+Owlbear
+Oyster
+Panda
+Panther
+Parrot
+Peacock
+Pegasus
+Pelican
+Persian Cat
+Phoenix
+Pig
+Pigeon
+Platypus
+Poodle
+Porpoise
+Puffin
+Puppy Dog
+Python
+Rabbit
+Raccoon
+Ragdoll Cat
+Rat
+Raven
+Red Panda
+Rhinoceros
+Robin
+Rottweiler
+Russian Blue Cat
+Sabertooth tiger
+Saint Bernard
+Salamander
+Scorpion
+Scottish Fold Cat
+Sea serpent
+Seagull
+Shar Pei
+Shark
+Sheep
+Shih Tzu
+Shrimp
+Siamese Cat
+Siberian Husky
+Skunk
+Sloth
+Snail
+Snake
+Sparrow
+Sphynx Cat
+Spice worm
+Spider
+Squid
+Squirrel
+Starfish
+Stork
+Swan
+Swordfish
+Tapir
+Tiger
+Toad
+Tortoise
+Toucan
+Turtle
+Vulture
+Wasp
+Water buffalo
+Weasel
+Whale
+Wolf
+Wombat
+Woodpecker
+Woolly rhinoceros
+Yak
+Yorkshire Terrier
+Zebra

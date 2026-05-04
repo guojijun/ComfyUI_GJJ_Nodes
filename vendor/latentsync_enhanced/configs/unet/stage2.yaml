@@ -1,0 +1,99 @@
+data:
+  syncnet_config_path: configs/syncnet/syncnet_16_pixel_attn.yaml
+  train_output_dir: debug/unet
+  train_fileslist: /mnt/bn/maliva-gen-ai-v2/chunyu.li/fileslist/data_v10_core.txt
+  train_data_dir: ""
+  audio_embeds_cache_dir: /mnt/bn/maliva-gen-ai-v2/chunyu.li/audio_cache/embeds
+  audio_mel_cache_dir: /mnt/bn/maliva-gen-ai-v2/chunyu.li/audio_cache/mel
+
+  val_video_path: assets/demo1_video.mp4
+  val_audio_path: assets/demo1_audio.wav
+  batch_size: 1 # 4
+  num_workers: 12 # 12
+  num_frames: 16
+  resolution: 256
+  mask_image_path: latentsync/utils/mask.png
+  audio_sample_rate: 16000
+  video_fps: 25
+  audio_feat_length: [2, 2]
+
+ckpt:
+  resume_ckpt_path: checkpoints/latentsync_unet.pt
+  save_ckpt_steps: 10000
+
+run:
+  pixel_space_supervise: true
+  use_syncnet: true
+  sync_loss_weight: 0.05
+  perceptual_loss_weight: 0.1 # 0.1
+  recon_loss_weight: 1 # 1
+  guidance_scale: 2.0 # [1.0 - 3.0]
+  trepa_loss_weight: 10
+  inference_steps: 20
+  trainable_modules:
+    - motion_modules.
+    - attentions.
+  seed: 1247
+  use_mixed_noise: true
+  mixed_noise_alpha: 1 # 1
+  mixed_precision_training: true
+  enable_gradient_checkpointing: true
+  max_train_steps: 10000000
+  max_train_epochs: -1
+
+optimizer:
+  lr: 1e-5
+  scale_lr: false
+  max_grad_norm: 1.0
+  lr_scheduler: constant
+  lr_warmup_steps: 0
+
+model:
+  act_fn: silu
+  add_audio_layer: true
+  attention_head_dim: 8
+  block_out_channels: [320, 640, 1280, 1280]
+  center_input_sample: false
+  cross_attention_dim: 384
+  down_block_types:
+    [
+      "CrossAttnDownBlock3D",
+      "CrossAttnDownBlock3D",
+      "CrossAttnDownBlock3D",
+      "DownBlock3D",
+    ]
+  mid_block_type: UNetMidBlock3DCrossAttn
+  up_block_types:
+    [
+      "UpBlock3D",
+      "CrossAttnUpBlock3D",
+      "CrossAttnUpBlock3D",
+      "CrossAttnUpBlock3D",
+    ]
+  downsample_padding: 1
+  flip_sin_to_cos: true
+  freq_shift: 0
+  in_channels: 13 # 49
+  layers_per_block: 2
+  mid_block_scale_factor: 1
+  norm_eps: 1e-5
+  norm_num_groups: 32
+  out_channels: 4 # 16
+  sample_size: 64
+  resnet_time_scale_shift: default # Choose between [default, scale_shift]
+
+  use_motion_module: true
+  motion_module_resolutions: [1, 2, 4, 8]
+  motion_module_mid_block: false
+  motion_module_decoder_only: false
+  motion_module_type: Vanilla
+  motion_module_kwargs:
+    num_attention_heads: 8
+    num_transformer_block: 1
+    attention_block_types:
+      - Temporal_Self
+      - Temporal_Self
+    temporal_position_encoding: true
+    temporal_position_encoding_max_len: 24
+    temporal_attention_dim_div: 1
+    zero_initialize: true

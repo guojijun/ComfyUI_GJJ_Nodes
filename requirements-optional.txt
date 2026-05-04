@@ -1,0 +1,97 @@
+# GJJ 可选重节点依赖 / Optional heavy-node requirements
+#
+# 安装方式：
+#   pip install -r requirements-optional.txt
+#
+# 说明：
+# - 这里放 SAM/SAM2/SAM3、语音、ASR、视频、高级模型节点才需要的依赖。
+# - 如果只使用文本、图片拼版、基础模型包装、常规工作流节点，可以先不装本文件。
+# - 每个依赖下方标注主要支持的节点：中文显示名 / English or class name。
+
+# 支持：
+# - GJJ · 📢 CosyVoice3语音克隆TTS / GJJ_CosyVoice3Generator：非 wav/flac 音频解码兜底
+# - GJJ · 📢 FishAudioS2语音克隆TTS / GJJ_FishAudioS2Generator：音频解码兜底
+# - GJJ · 📢 LongCat语音克隆TTS / GJJ_LongCatAudioDiTTTS：音频解码兜底
+# - GJJ · 🦴 Mesh2Motion 骨骼动画 / GJJ_Mesh2MotionExplore：视频读取/预览
+av
+
+# 支持：
+# - GJJ · 📢 CosyVoice3语音克隆TTS / GJJ_CosyVoice3Generator：vendored CosyVoice/Matcha 组件
+# - GJJ · 🔍 FlashVSR视频超分放大器 / GJJ_FlashVSRVideoUpscaler：部分模型管理/权重转换路径
+diffusers
+
+# 支持：
+# - GJJ · 📝 SAM3文本分割器 / GJJ_SAM3TextSegmenter：SAM3 文本 tokenizer 清理
+ftfy
+
+# 支持：
+# - GJJ · 📍 SEM2点选分割器 / GJJ_SEM2PointSegmenter：加载 SAM2 配置
+# - GJJ · 📢 FishAudioS2语音克隆TTS / GJJ_FishAudioS2Generator：vendored Fish Speech 配置/模型实例化
+hydra-core
+
+# 支持：
+# - GJJ · 📢 CosyVoice3语音克隆TTS / GJJ_CosyVoice3Generator：读取 CosyVoice YAML 配置
+hyperpyyaml
+
+# 支持：
+# - GJJ · 📢 CosyVoice3语音克隆TTS / GJJ_CosyVoice3Generator：英文数字读法处理
+inflect
+
+# 支持：
+# - GJJ · 📍 SEM2点选分割器 / GJJ_SEM2PointSegmenter：vendored SAM2/SAM3 文件访问工具
+# - GJJ · ✂️ SAM3点选分割器 / GJJ_SAM3PointSegmenter、GJJ · 📝 SAM3文本分割器 / GJJ_SAM3TextSegmenter：SAM3 tokenizer/模型文件访问
+iopath
+
+# 支持：
+# - GJJ · 📢 CosyVoice3语音克隆TTS / GJJ_CosyVoice3Generator：mel 特征/音频工具
+# - GJJ · 📢 FishAudioS2语音克隆TTS / GJJ_FishAudioS2Generator：vendored Fish Speech 音频处理
+# - GJJ · 📢 LongCat语音克隆TTS / GJJ_LongCatAudioDiTTTS：音频处理
+librosa
+
+# 支持：
+# - GJJ · 📢 FishAudioS2语音克隆TTS / GJJ_FishAudioS2Generator：vendored Fish Speech 日志模块
+loguru
+
+# 支持：
+# - GJJ · 📢 CosyVoice3语音克隆TTS / GJJ_CosyVoice3Generator：CosyVoice 官方模型下载兼容路径
+modelscope
+
+# 支持：
+# - GJJ · 📢 FishAudioS2语音克隆TTS / GJJ_FishAudioS2Generator：vendored Fish Speech 配置
+# - GJJ · 📢 CosyVoice3语音克隆TTS / GJJ_CosyVoice3Generator：部分 YAML/模型配置路径
+omegaconf
+
+# 支持：
+# - GJJ · 📢 CosyVoice3语音克隆TTS / GJJ_CosyVoice3Generator：参考音频自动识别文本
+openai-whisper
+
+# 支持：
+# - GJJ · 📍 SEM2点选分割器 / GJJ_SEM2PointSegmenter：SAM2 mask RLE/COCO 工具
+# - GJJ · ✂️ SAM3点选分割器 / GJJ_SAM3PointSegmenter、GJJ · 📝 SAM3文本分割器 / GJJ_SAM3TextSegmenter：SAM3 mask 工具
+pycocotools
+
+# 支持：
+# - GJJ · 📢 FishAudioS2语音克隆TTS / GJJ_FishAudioS2Generator：vendored Fish Speech 数据结构
+pydantic
+
+# 支持：
+# - GJJ · 📝 SAM3文本分割器 / GJJ_SAM3TextSegmenter：SAM3 tokenizer
+# - GJJ · 📢 CosyVoice3语音克隆TTS / GJJ_CosyVoice3Generator：文本正则处理
+regex
+
+# 支持：
+# - GJJ · 😃 人脸细化器 / GJJ_FaceDetailer：SAM1 分割模型
+segment-anything
+
+# 支持：
+# - GJJ · 📢 FishAudioS2语音克隆TTS / GJJ_FishAudioS2Generator：Fish Speech tokenizer
+# - GJJ · 📢 CosyVoice3语音克隆TTS / GJJ_CosyVoice3Generator：CosyVoice tokenizer
+tiktoken
+
+# 支持：
+# - GJJ · 😃 人脸细化器 / GJJ_FaceDetailer：人脸/目标检测模型加载
+ultralytics
+
+# 支持：
+# - GJJ · 📢 CosyVoice3语音克隆TTS / GJJ_CosyVoice3Generator：CosyVoice DiT/rotary attention 组件
+x-transformers
