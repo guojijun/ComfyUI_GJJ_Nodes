@@ -3,7 +3,7 @@ import re,gc,torch
 from dataclasses import dataclass, field
 from typing import Any
 import torch.nn.functional as F
-from .batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
 from .gjj_sam3_runtime import (comfy_image_to_pil,get_or_build_model,list_sam3_models,masks_to_comfy_mask,pick_available_name,)
 
 try:from ..utils.tsv_translation import translate_text_to_english, translate_to_english

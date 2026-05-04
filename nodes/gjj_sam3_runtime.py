@@ -28,7 +28,7 @@ from sam3.predictor import Sam3VideoPredictor  # type: ignore  # noqa: E402
 from sam3.utils import Sam3Processor  # type: ignore  # noqa: E402
 from sam3.attention import set_sam3_dtype  # type: ignore  # noqa: E402
 
-from .model_name_resolver import pick_available_model_name  # noqa: E402
+from .gjj_model_name_resolver import pick_available_model_name  # noqa: E402
 
 
 _SAM3_CACHE: dict[str, Any] = {"config_hash": None, "model": None}

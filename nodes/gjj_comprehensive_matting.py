@@ -18,7 +18,7 @@ from torchvision.transforms.functional import to_pil_image
 
 import folder_paths
 
-from .batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
 
 
 NODE_NAME = "GJJ_ComprehensiveMatting"

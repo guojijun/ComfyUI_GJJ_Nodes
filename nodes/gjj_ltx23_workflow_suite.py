@@ -19,8 +19,8 @@ from comfy_extras.nodes_lt_upsampler import LTXVLatentUpsampler
 from comfy_extras.nodes_video import CreateVideo, GetVideoComponents
 from nodes import CheckpointLoaderSimple, CLIPTextEncode, LoraLoaderModelOnly, VAEDecodeTiled
 
-from .model_name_resolver import model_basename, pick_available_model_name
-from .multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
+from .gjj_model_name_resolver import model_basename, pick_available_model_name
+from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
 
 
 DEFAULT_CKPT_CANDIDATES = (

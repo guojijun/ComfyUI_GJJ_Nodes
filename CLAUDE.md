@@ -16,7 +16,7 @@
 
 开发任何 GJJ 节点时必须满足：
 
-1. **命名规范**：显示名 `GJJ · <emoji> <中文名称>`，模块文件 `gjj_` 前缀 + snake_case
+1. **命名规范**：显示名 `GJJ · <emoji> <中文名称>`，模块文件统一使用 `gjj_` 前缀 + snake_case，前后端文件名完全一致（如 `gjj_region_layer_tools.py` ↔ `gjj_region_layer_tools.js`）
 2. **全中文**：所有 `display_name`、`tooltip`、`RETURN_NAMES`、`OUTPUT_TOOLTIPS` 用中文
 3. **零外部依赖**：不依赖第三方自定义节点包，小辅助函数内联
 4. **前端 JS**：放在 `<GJJ>/js` 下，标签/按钮/提示均为中文
@@ -25,3 +25,4 @@
 7. **1-based 编号**：用户面编号从 1 开始，内部索引用 0-based
 8. **面板宽/高**：外部连接优先、面板值次之、图片尺寸初始化
 9. **自定义预览**：只发出一种预览路径，不要同时返回 `ui.images`
+10. **序列化往返**：`widgets_values` 按位置索引，`reorderWidgets` 会破坏保存/加载一致性。核心数据改用 `node.properties`（key-value）存储；不删除承载数据的 Widget 输入槽；Python `RETURN_TYPES` 与 `return` 元组长度必须一致；`onSerialize` 中修剪动态输出口

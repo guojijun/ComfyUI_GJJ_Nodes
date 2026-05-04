@@ -16,7 +16,7 @@ except Exception:
 import folder_paths
 from nodes import PreviewImage
 
-from .batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
 
 
 NODE_NAME = "GJJ_MultiVideoLoader"

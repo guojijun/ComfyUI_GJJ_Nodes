@@ -1,0 +1,21 @@
+{
+  "GJJ_HelpButton": {
+    "name": "· 默认显示帮助按钮",
+    "tooltip": "关闭后，新建 GJJ 节点时不再自动显示顶部帮助按钮（🔍 帮助 / 📖 使用说明）。已存在的节点不受影响。"
+  },
+  "GJJ_ExternalLinks": {
+    "name": "────────── GJJ 相关链接 ──────────"
+  },
+  "GJJ_BilibiliLink": {
+    "name": "📺 哔哩哔哩 · 视频教程",
+    "tooltip": "https://space.bilibili.com/454791153"
+  },
+  "GJJ_ModelFiles": {
+    "name": "📦 夸克网盘 · 模型文件下载",
+    "tooltip": "https://pan.quark.cn/s/6ec846f1f58d"
+  },
+  "GJJ_GitHubRepo": {
+    "name": "🔄 GitHub · 插件更新与反馈",
+    "tooltip": "https://github.com/guojijun/ComfyUI_GJJ_Nodes"
+  }
+}

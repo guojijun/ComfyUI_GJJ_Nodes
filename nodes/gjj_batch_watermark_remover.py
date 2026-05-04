@@ -14,8 +14,8 @@ from comfy_extras.nodes_flux import EmptyFlux2LatentImage, Flux2Scheduler
 from PIL import Image, PngImagePlugin
 from nodes import ConditioningZeroOut, VAEDecode, VAEEncode
 
-from .batch_image_type import GJJ_BATCH_IMAGE_TYPE
-from .lazy_Image_studio import (
+from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .gjj_lazy_image_studio import (
     DEFAULT_UNET_DTYPE,
     _load_clip_from_names,
     _load_model,
@@ -25,7 +25,7 @@ from .lazy_Image_studio import (
     list_clip_models,
     list_unet_models,
 )
-from .multi_image_loader import build_uniform_batch
+from .gjj_multi_image_loader import build_uniform_batch
 
 
 NODE_NAME = "GJJ_BatchWatermarkRemover"

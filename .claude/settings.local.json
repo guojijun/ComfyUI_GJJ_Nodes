@@ -4,7 +4,15 @@
       "Bash(node --check js/gjj_utils.js)",
       "Bash(grep -v \":0$\")",
       "Bash(python3 -c ' *)",
-      "Bash(node -e ' *)"
+      "Bash(node -e ' *)",
+      "Bash(git mv *)",
+      "Bash(mv js/GJJ_LTX23ImageToVideoMultiRef.js js/GJJ_LTX23MultirefImageToVideo.js)",
+      "Bash(sed -i '/\\\\/\\\\/ ── Initial load/,/setTimeout.*{/{ *)",
+      "Bash(sed -i '/syncOutputs\\(node, state.rows, state.cols\\);/{ *)",
+      "Read(//d/AI/CUI/ComfyUI/**)",
+      "Read(//d/AI/CUI/ComfyUI/custom_nodes/**)",
+      "Read(//d/AI/MOD/custom_nodes/**)",
+      "Bash(python -c \"import importlib.resources; import comfyui_frontend_package; print\\(str\\(importlib.resources.files\\(comfyui_frontend_package\\) / 'static'\\)\\)\")"
     ],
     "bash": "alwaysAllow",
     "edit": "alwaysAllow"

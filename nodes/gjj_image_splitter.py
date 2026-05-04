@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from .batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
 
 MAX_ROWS = 4
 MAX_COLS = 4
@@ -236,9 +236,16 @@ class GJJ_ImageSplitter:
             },),
         }
 
+        # 对齐 RETURN_TYPES：补齐空张量到 1 + MAX_BLOCKS
+        empty = torch.zeros((0, 1, 1, C), device=image.device, dtype=image.dtype)
+        result = (batch_img,) + tuple(active_blocks)
+        padding_needed = (1 + MAX_BLOCKS) - len(result)
+        if padding_needed > 0:
+            result = result + (empty,) * padding_needed
+
         return {
             "ui": ui,
-            "result": (batch_img,) + tuple(active_blocks),
+            "result": result,
         }
 
     def _load_internal(self, filename: str) -> torch.Tensor | None:

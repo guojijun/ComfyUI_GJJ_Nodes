@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "TodoWrite",
+      "TaskOutput",
+      "Agent",
+      "Skill",
+      "Bash(git *)",
+      "Bash(mkdir *)",
+      "Bash(sed -n *)",
+      "Bash(node --check *)"
+    ]
+  }
+}

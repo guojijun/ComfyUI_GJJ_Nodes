@@ -550,7 +550,7 @@ class GJJ_LocalLipSync:
         frame_count = max(1, int(round(duration * float(fps))) + 1)
         _send_status(unique_id, f"GJJ 内部 LTX2.3：{frame_count} 帧 / {fps} fps", 0.08)
         try:
-            from .ltx23_template_workflows import GJJ_LTX23WorkflowPromptRelayTalkingHead
+            from .gjj_ltx23_template_workflows import GJJ_LTX23WorkflowPromptRelayTalkingHead
 
             # LTX workflow 需要 torch 音频
             audio_torch = _audio_to_torch(input_audio)
