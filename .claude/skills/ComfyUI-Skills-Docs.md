@@ -338,3 +338,223 @@ def _get_files(cls, dir_type, extensions):
 - **模型查找：** 子目录感知 + 最长公共片段匹配 + 扩展名剥离 + 信任度阈值。
 - **DOMWidget 高度：** 内容驱动，用 `scrollHeight` 计算，保留用户宽度。
 - **长文本编辑：** 隐藏原生 STRING 控件，使用 GJJ 自有 textarea，通过 `properties` 持久化。
+
+---
+
+## 8. ComfyUI 自定义节点前端 UI 状态管理
+
+> ⚠️ 以下经验来自实际调试中踩过的深坑，每条规则背后都是一次通宵排查。务必遵守。
+
+### 8.1 核心原则：严格区分"状态更新"与"结构重建"
+
+这是 ComfyUI 前端开发中最容易出错的点。**状态切换 ≠ 重建 UI**，混用会导致 DOM 引用失效、事件丢失、按钮消失。
+
+| 交互类型 | 操作 | 何时使用 |
+|---------|------|---------|
+| 切换开关/模式 | **只同步状态**，更新已保存的 DOM 引用样式 | 按钮组切换、单选/多选、筛选模式 |
+| 参数变化导致结构变化 | **rebuildUI**，安全清理后全量重建 | 分组数量变化、动态行增删、插槽布局改变 |
+| 外部连线变化 | **stabilize 防抖**，增量调整插槽 | 动态输入/输出扩展/收缩 |
+
+**铁律：** 按钮点击切换激活状态时，绝不调用 rebuildUI。rebuildUI 会删除触发事件的 DOM 元素，导致按钮"点完就消失"。
+
+### 8.2 DOM 引用稳定性
+
+**❌ 错误做法：** 通过 `querySelector` 反查 DOM
+```javascript
+// 极其不稳定！ComfyUI 可能重绘、重排、覆盖 classList
+const btn = node.element.querySelector(".my-mode-btn");
+if (btn) btn.classList.add("active");
+```
+
+**✅ 正确做法：** 创建时保存引用到 `node.__gjjXXX`，后续直接使用
+```javascript
+// 创建时保存
+function createModeButtons(node) {
+    node.__gjjModeButtons = [];  // 持久引用数组
+    for (const mode of modes) {
+        const btn = document.createElement("button");
+        btn.addEventListener("click", () => onModeClick(node, mode));
+        container.appendChild(btn);
+        node.__gjjModeButtons.push({ mode, element: btn });
+    }
+}
+
+// 同步状态时直接使用引用 —— 绝不 querySelector
+function syncModeButtonStates(node, activeMode) {
+    for (const ref of node.__gjjModeButtons) {
+        const isActive = ref.mode === activeMode;
+        ref.element.style.setProperty("background", isActive ? "#4ecdc4" : "#333", "important");
+        ref.element.style.setProperty("color", isActive ? "#000" : "#aaa", "important");
+        ref.element.textContent = isActive ? `${ref.mode} ✓` : ref.mode;
+    }
+}
+```
+
+**为什么 `querySelector` 会失败：**
+- ComfyUI 框架可能在任意时刻重绘节点，替换 DOM 结构
+- 动态创建的按钮不在 ComfyUI 的 widget 体系中，框架不感知它们
+- `classList` 可能被框架的样式系统覆盖
+
+### 8.3 安全的 DOM 清理
+
+**❌ 禁止：** 直接替换数组
+```javascript
+node.widgets = [];  // 元素未从 DOM 移除 → 内存泄漏 + 残留
+```
+
+**✅ 推荐：** 显式移除每个元素后再清空
+```javascript
+function clearNodeWidgets(node) {
+    if (!Array.isArray(node.widgets)) return;
+    for (const w of node.widgets) {
+        if (w.element?.remove) w.element.remove();        // DOMWidget
+        if (w.inputEl?.remove) w.inputEl.remove();        // 原生控件
+    }
+    node.widgets.length = 0;
+}
+```
+
+### 8.4 精细化清理策略
+
+清理 DOM 时必须区分控件类型，不能一刀切：
+
+- **跳过 ComfyUI 原生控件：** 如 `STRING`、`INT`、`BOOLEAN` 类型的控件，它们由框架管理生命周期
+- **只清理 `gjj_` 前缀的 DOMWidget：** 这些是自定义创建的，需要手动管理
+- **严禁手动删除内部子元素：** 如 ComfyUI 控件内部的 `input`、`label` 等，应由框架自行回收
+
+```javascript
+function clearCustomWidgets(node) {
+    for (let i = node.widgets.length - 1; i >= 0; i--) {
+        const w = node.widgets[i];
+        if (w.name?.startsWith("gjj_")) {
+            w.element?.remove();
+            node.widgets.splice(i, 1);
+        }
+    }
+}
+```
+
+### 8.5 样式强制覆盖
+
+ComfyUI 框架会动态重绘节点并覆盖 `classList`。直接操作 `classList.add/remove` 的样式随时可能被框架重置。
+
+**✅ 使用 `!important` 内联样式直接锁定：**
+```javascript
+element.style.setProperty("background", activeColor, "important");
+element.style.setProperty("color", textColor, "important");
+element.style.setProperty("border", "2px solid #4ecdc4", "important");
+```
+
+**全局样式注入**（用于无法内联的场景，如 `:hover`）：
+```javascript
+if (!document.getElementById("gjj-custom-styles")) {
+    const style = document.createElement("style");
+    style.id = "gjj-custom-styles";
+    style.textContent = `
+        .gjj-mode-btn { transition: all 0.15s; cursor: pointer; }
+        .gjj-mode-btn:hover { filter: brightness(1.2); }
+    `;
+    document.head.appendChild(style);
+}
+```
+
+### 8.6 状态读取优先级
+
+遵循缓存优先原则，widget.value 仅作降级：
+
+```
+读取优先级：
+1. node.__gjjXXX（内存缓存，最快最准）
+2. widget.value（控件当前值，可能滞后）
+3. properties（序列化存储，加载时用）
+```
+
+```javascript
+function getActiveGroups(node) {
+    // 优先读缓存
+    if (node.__gjjActiveGroupRefs) {
+        return node.__gjjActiveGroupRefs;
+    }
+    // 降级读 widget
+    const w = GJJ_Utils.getWidget(node, "active_groups");
+    return w?.value || [];
+}
+```
+
+### 8.7 交互时序规范
+
+每次用户交互遵循 5 步标准流程：
+
+```
+1. 更新状态 → 修改 node.__gjjXXX 缓存
+2. 处理业务逻辑 → 计算新的输出/筛选结果
+3. 同步 UI → 用保存的 DOM 引用更新样式（不重建！）
+4. 应用业务状态 → 写回 widget.value + properties
+5. 触发工作流变化 → setDirty + queueNode（如需要）
+```
+
+**关键：** 步骤 3 永远在步骤 1-2 之后，且不创建/删除任何 DOM 元素。
+
+### 8.8 常见问题排查表
+
+| 问题 | 根本原因 | 解决方案 |
+|------|---------|---------|
+| 点击【单选】按钮消失 | `rebuildUI` → `clearNodeWidgets` 删除了触发事件的 DOM | 状态切换不调用 `rebuildUI`，只同步状态 |
+| 点击【单选】无响应 | `syncModeButtonStates` 通过 `querySelector` 反查 DOM，找不到元素 | 创建时保存引用到 `node.__gjjModeButtons`，直接使用 |
+| 样式不生效 | ComfyUI 框架重绘覆盖 `classList` | 使用 `element.style.setProperty(prop, value, 'important')` |
+| 状态不一致 | widget.value 与 DOM 显示不同步 | 建立 `node.__gjjXXX` 缓存作为唯一真相源 |
+| DOM 残留 | 直接替换 `node.widgets` 数组 | 显式调用 `widget.element.remove()` 后再清空数组 |
+| 模式按钮消失 | `rebuildUI` 清除了全部 widget 再重建，但事件监听器未重新绑定 | 不要在按钮点击回调中调用 `rebuildUI` |
+
+### 8.9 实战案例：分组筛选路由节点
+
+完整交互矩阵 — 一个包含按钮组 + 下拉筛选 + 动态输出的节点：
+
+```
+用户操作          → 状态变化           → UI 操作
+─────────────────────────────────────────────────────
+点击模式按钮      → 更新 activeMode    → syncModeButtonStates (只用引用)
+切换筛选下拉      → 更新 filter        → 可能需要 rebuildUI (参数驱动结构)
+外部连线变化      → 输出槽增减         → stabilize 防抖增量调整
+工作流加载        → 从 properties 恢复  → onConfigure 全量重建
+```
+
+核心代码结构：
+```javascript
+// 1. 创建时保存引用
+function createUI(node) {
+    node.__gjjModeButtons = [];
+    for (const mode of MODES) {
+        const btn = document.createElement("button");
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            onModeClick(node, mode);  // 绝不在此调用 rebuildUI
+        });
+        node.__gjjModeButtons.push({ mode, element: btn });
+    }
+}
+
+// 2. 状态切换只同步样式
+function onModeClick(node, mode) {
+    node.__gjjActiveMode = mode;                 // 1. 更新缓存
+    const w = GJJ_Utils.getWidget(node, "mode"); // 2. 写回 widget
+    if (w) { w.value = mode; w.callback?.(mode); }
+    syncModeButtonStates(node);                  // 3. 只同步 UI
+    node.setDirtyCanvas?.(true, true);           // 4. 触发重绘
+}
+
+// 3. 结构变化才重建
+function rebuildUI(node) {
+    clearCustomWidgets(node);     // 安全清理
+    createUI(node);               // 全量重建
+}
+
+// 4. 加载时全量恢复
+nodeType.prototype.onConfigure = function (...args) {
+    originalOnConfigure?.apply(this, args);
+    const mode = this.properties?.mode || "默认";
+    node.__gjjActiveMode = mode;
+    rebuildUI(this);
+    syncModeButtonStates(this);
+};
+```

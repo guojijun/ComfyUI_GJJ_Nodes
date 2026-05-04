@@ -1,4 +1,5 @@
 import { app } from "/scripts/app.js";
+import { GJJ_Utils } from "./gjj_utils.js";
 
 const NODE_TYPE = "GJJ_ComprehensiveMatting";
 const METHOD_WIDGET = "matting_method";
@@ -8,6 +9,7 @@ const PANEL_WIDGET = "gjj_matting_method_buttons";
 const BATCH_INPUT = "batch_image";
 const IMAGE_INPUT = "image";
 const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE";
+const HIDDEN_NAMES = new Set([METHOD_WIDGET, STATUS_WIDGET, SELECTED_METHODS_WIDGET]);
 
 const METHODS = [
 	{ value: "RMBG2", label: "RMBG2", suffix: "RMBG2", title: "RMBG2 通用背景移除" },
@@ -17,17 +19,11 @@ const METHODS = [
 	{ value: "Inspyrenet", label: "Inspyrenet", suffix: "Inspyrenet", title: "Inspyrenet 抠图" },
 ];
 
-function findWidget(node, name) {
-	return node?.widgets?.find((widget) => widget?.name === name);
-}
-
 function refreshNodeSize(node) {
 	const width = Math.max(300, Number(node?.size?.[0] || 300));
-	const computed = node.computeSize?.() || node.size || [width, 80];
+	const computed = node.computeSize?.();
 	node.setSize?.([width, Math.max(120, Number(computed?.[1] || 120))]);
-	node.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
-	app.graph?.change?.();
 }
 
 function findInput(node, name) {
@@ -35,25 +31,18 @@ function findInput(node, name) {
 }
 
 function removeInternalInputs(node) {
+	// 只删除 DOM 面板的输入槽，保留核心数据 Widget 的输入槽（序列化需要）
 	if (!Array.isArray(node?.inputs)) {
 		return;
 	}
-	const internalNames = new Set([METHOD_WIDGET, STATUS_WIDGET, SELECTED_METHODS_WIDGET, PANEL_WIDGET]);
 	for (let index = node.inputs.length - 1; index >= 0; index -= 1) {
 		const input = node.inputs[index];
-		const name = String(input?.name || "");
-		const label = String(input?.label || input?.localized_name || "");
-		const type = String(input?.type || "");
-		const isInternal = internalNames.has(name)
-			|| internalNames.has(label)
-			|| type.startsWith("converted-widget:");
-		if (!isInternal) {
-			continue;
+		const type = String(input?.type || '');
+		const name = String(input?.name || '');
+		if (name === PANEL_WIDGET || type.startsWith('converted-widget:' + PANEL_WIDGET)) {
+			try { node.disconnectInput?.(index); } catch (_) {}
+			node.removeInput?.(index);
 		}
-		if (input?.link != null) {
-			node.disconnectInput?.(index);
-		}
-		node.removeInput?.(index);
 	}
 }
 
@@ -115,50 +104,20 @@ function normalizeSlots(node) {
 	globalThis.GJJApplyTypeColorsToNode?.(node);
 }
 
-function hideWidget(widget) {
-	if (!widget) {
-		return;
-	}
-	if (!widget.__gjjMattingHidden) {
-		widget.__gjjMattingHidden = {
-			type: widget.type,
-			draw: widget.draw,
-			computeSize: widget.computeSize,
-			getHeight: widget.getHeight,
-			y: widget.y,
-			last_y: widget.last_y,
-		};
-	}
-	widget.serialize = false;
-	widget.type = `converted-widget:${widget.type || "combo"}`;
-	widget.hidden = true;
-	widget.draw = () => {};
-	widget.computeSize = () => [0, 0];
-	widget.getHeight = () => 0;
-	widget.y = -10000;
-	widget.last_y = -10000;
-	if (widget.inputEl) {
-		widget.inputEl.style.display = "none";
-		widget.inputEl.style.pointerEvents = "none";
-	}
-	if (widget.element) {
-		widget.element.style.display = "none";
-		widget.element.style.pointerEvents = "none";
-	}
-	if (widget.widget) {
-		widget.widget.style.display = "none";
-		widget.widget.style.pointerEvents = "none";
-	}
-}
-
-function hideInternalWidgets(node) {
-	hideWidget(findWidget(node, METHOD_WIDGET));
-	hideWidget(findWidget(node, STATUS_WIDGET));
-	hideWidget(findWidget(node, SELECTED_METHODS_WIDGET));
+function compactNode(node) {
+	// 标准 GJJ compact 模式：隐藏 → 删除输入槽 → 重排控件 → 刷新尺寸
+	GJJ_Utils.hideWidget(GJJ_Utils.getWidget(node, METHOD_WIDGET));
+	GJJ_Utils.hideWidget(GJJ_Utils.getWidget(node, STATUS_WIDGET));
+	GJJ_Utils.hideWidget(GJJ_Utils.getWidget(node, SELECTED_METHODS_WIDGET));
+	// 核心数据通过 onSerialize → properties → onConfigure 保证序列化往返
+	GJJ_Utils.removeHiddenInputSockets(node, HIDDEN_NAMES);
+	// 重排控件：gjj_ 前缀排前，隐藏控件排后
+	GJJ_Utils.reorderWidgets(node, HIDDEN_NAMES);
+	GJJ_Utils.refreshNode(node);
 }
 
 function parseStatus(node) {
-	const widget = findWidget(node, STATUS_WIDGET);
+	const widget = GJJ_Utils.getWidget(node, STATUS_WIDGET);
 	if (!widget?.value) {
 		return {};
 	}
@@ -170,8 +129,8 @@ function parseStatus(node) {
 }
 
 function parseSelectedMethods(node) {
-	const widget = findWidget(node, SELECTED_METHODS_WIDGET);
-	const fallback = findWidget(node, METHOD_WIDGET)?.value || METHODS[0].value;
+	const widget = GJJ_Utils.getWidget(node, SELECTED_METHODS_WIDGET);
+	const fallback = GJJ_Utils.getWidget(node, METHOD_WIDGET)?.value || METHODS[0].value;
 	let selected = [];
 	try {
 		const raw = String(widget?.value || node?.properties?.[SELECTED_METHODS_WIDGET] || "");
@@ -194,12 +153,12 @@ function writeSelectedMethods(node, selected) {
 	const serialized = JSON.stringify(finalSelection);
 	node.properties = node.properties || {};
 	node.properties[SELECTED_METHODS_WIDGET] = serialized;
-	const widget = findWidget(node, SELECTED_METHODS_WIDGET);
+	const widget = GJJ_Utils.getWidget(node, SELECTED_METHODS_WIDGET);
 	if (widget) {
 		widget.value = serialized;
 		widget.callback?.(widget.value, app.canvas, node, undefined, widget);
 	}
-	const methodWidget = findWidget(node, METHOD_WIDGET);
+	const methodWidget = GJJ_Utils.getWidget(node, METHOD_WIDGET);
 	if (methodWidget) {
 		methodWidget.value = finalSelection[0];
 		methodWidget.callback?.(methodWidget.value, app.canvas, node, undefined, methodWidget);
@@ -287,14 +246,14 @@ function setMethod(node, value, append = false) {
 
 function mountButtons(node) {
 	if (node.__gjjMattingButtons || typeof node.addDOMWidget !== "function") {
-		hideInternalWidgets(node);
+		compactNode(node);
 		normalizeSlots(node);
 		syncButtons(node);
 		refreshNodeSize(node);
 		return;
 	}
 
-	hideInternalWidgets(node);
+	compactNode(node);
 	normalizeSlots(node);
 
 	const wrap = document.createElement("div");
@@ -312,7 +271,8 @@ function mountButtons(node) {
 		const button = document.createElement("button");
 		button.type = "button";
 		button.textContent = item.label;
-		button.title = `${item.title}\n普通点击单选；按 Shift 点击可多选/取消该路线。`;
+		button.title = `${item.title}
+普通点击单选；按 Shift 点击可多选/取消该路线。`;
 		button.dataset.value = item.value;
 		button.style.cssText = buttonStyle(false, false);
 		button.addEventListener("mousedown", (event) => event.stopPropagation());
@@ -334,7 +294,7 @@ function mountButtons(node) {
 }
 
 function stabilizeNode(node) {
-	hideInternalWidgets(node);
+	compactNode(node);
 	normalizeSlots(node);
 	mountButtons(node);
 	syncButtons(node);
@@ -359,9 +319,19 @@ app.registerExtension({
 		const originalConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (...args) {
 			originalConfigure?.apply(this, args);
-			const widget = findWidget(this, SELECTED_METHODS_WIDGET);
-			if (widget && this.properties?.[SELECTED_METHODS_WIDGET]) {
-				widget.value = this.properties[SELECTED_METHODS_WIDGET];
+			// 从 properties 恢复核心数据（不受 widget 重排影响）
+			const props = this.properties || {};
+			const selectedWidget = GJJ_Utils.getWidget(this, SELECTED_METHODS_WIDGET);
+			if (selectedWidget && props[SELECTED_METHODS_WIDGET]) {
+				selectedWidget.value = props[SELECTED_METHODS_WIDGET];
+			}
+			const methodWidget = GJJ_Utils.getWidget(this, METHOD_WIDGET);
+			if (methodWidget && props[METHOD_WIDGET]) {
+				methodWidget.value = props[METHOD_WIDGET];
+			}
+			const statusWidget = GJJ_Utils.getWidget(this, STATUS_WIDGET);
+			if (statusWidget && props[STATUS_WIDGET]) {
+				statusWidget.value = props[STATUS_WIDGET];
 			}
 			stabilizeNode(this);
 			setTimeout(() => stabilizeNode(this), 0);
@@ -371,12 +341,19 @@ app.registerExtension({
 		const originalSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode) {
 			const result = originalSerialize?.apply(this, [serializedNode]);
+			// 核心数据全部写入 properties（不受 widget 重排和 serialize:false 影响）
 			const selected = JSON.stringify(parseSelectedMethods(this));
+			const method = GJJ_Utils.getWidget(this, METHOD_WIDGET)?.value || '';
+			const status = GJJ_Utils.getWidget(this, STATUS_WIDGET)?.value || '';
 			this.properties = this.properties || {};
 			this.properties[SELECTED_METHODS_WIDGET] = selected;
+			this.properties[METHOD_WIDGET] = method;
+			this.properties[STATUS_WIDGET] = status;
 			if (serializedNode) {
 				serializedNode.properties = serializedNode.properties || {};
 				serializedNode.properties[SELECTED_METHODS_WIDGET] = selected;
+				serializedNode.properties[METHOD_WIDGET] = method;
+				serializedNode.properties[STATUS_WIDGET] = status;
 			}
 			return result;
 		};

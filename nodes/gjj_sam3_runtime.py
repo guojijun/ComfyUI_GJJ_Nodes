@@ -23,7 +23,22 @@ VENDOR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ven
 if VENDOR_ROOT not in sys.path:
 	sys.path.insert(0, VENDOR_ROOT)
 
-from sam3 import build_sam3_video_model, _load_checkpoint_file, remap_video_checkpoint  # type: ignore  # noqa: E402
+# 清除其他自定义节点可能已缓存的同名 sam3 模块
+sys.modules.pop("sam3", None)
+for key in list(sys.modules):
+	if key == "sam3" or key.startswith("sam3."):
+		del sys.modules[key]
+
+# 强制从 GJJ vendor 导入，不受其他包的 sam3 遮蔽
+import importlib.util
+_vendor_sam3 = os.path.abspath(os.path.join(VENDOR_ROOT, "sam3", "__init__.py"))
+_spec = importlib.util.spec_from_file_location("sam3", _vendor_sam3)
+_sam3 = importlib.util.module_from_spec(_spec)
+sys.modules["sam3"] = _sam3
+_spec.loader.exec_module(_sam3)
+build_sam3_video_model = _sam3.build_sam3_video_model
+_load_checkpoint_file = _sam3._load_checkpoint_file
+remap_video_checkpoint = _sam3.remap_video_checkpoint  # type: ignore  # noqa: E402
 from sam3.predictor import Sam3VideoPredictor  # type: ignore  # noqa: E402
 from sam3.utils import Sam3Processor  # type: ignore  # noqa: E402
 from sam3.attention import set_sam3_dtype  # type: ignore  # noqa: E402

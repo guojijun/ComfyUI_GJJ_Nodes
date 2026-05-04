@@ -338,3 +338,5 @@ def _get_files(cls, dir_type, extensions):
 - **模型查找：** 子目录感知 + 最长公共片段匹配 + 扩展名剥离 + 信任度阈值。
 - **DOMWidget 高度：** 内容驱动，用 `scrollHeight` 计算，保留用户宽度。
 - **长文本编辑：** 隐藏原生 STRING 控件，使用 GJJ 自有 textarea，通过 `properties` 持久化。
+
+---

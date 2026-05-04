@@ -10,10 +10,8 @@
       "TaskOutput",
       "Agent",
       "Skill",
-      "Bash(git *)",
-      "Bash(mkdir *)",
-      "Bash(sed -n *)",
-      "Bash(node --check *)"
+      "Bash(*)",
+      "PowerShell(*)"
     ]
   }
 }

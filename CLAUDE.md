@@ -25,4 +25,4 @@
 7. **1-based 编号**：用户面编号从 1 开始，内部索引用 0-based
 8. **面板宽/高**：外部连接优先、面板值次之、图片尺寸初始化
 9. **自定义预览**：只发出一种预览路径，不要同时返回 `ui.images`
-10. **序列化往返**：`widgets_values` 按位置索引，`reorderWidgets` 会破坏保存/加载一致性。核心数据改用 `node.properties`（key-value）存储；不删除承载数据的 Widget 输入槽；Python `RETURN_TYPES` 与 `return` 元组长度必须一致；`onSerialize` 中修剪动态输出口
+10. **序列化往返**：⚠️ 隐藏控件无空白 + 保存加载不丢数据，必须一起做。用 `GJJ_Utils.hideWidget`（`[0,-4]` 零占位）+ `GJJ_Utils.compactNode` + `onSerialize` 存 `properties` + `onConfigure` 从 `properties` 恢复 + 全文件统一 `GJJ_Utils.getWidget`。6 步缺一不可，详见 skill 规则 10
