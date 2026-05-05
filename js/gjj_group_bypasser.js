@@ -3,8 +3,8 @@ import { app } from "/scripts/app.js";
 const TARGET_NODES = new Set([
 	"GJJ_GroupBypasser",
 ]);
-const FILTER_NAME = "filter_keyword";
-const MODE_NAME = "selection_mode";
+const FILTER_NAME = "过滤关键词";
+const MODE_NAME = "选择模式";
 const MODE_LABEL = "选择模式";
 const MODE_SINGLE = "单选";
 const MODE_MULTI = "多选";
@@ -142,6 +142,50 @@ function updateFilterText(node, value) {
 	ensureNodeState(node)[FILTER_NAME] = String(value || "");
 }
 
+function syncFilterToOriginalWidget(node) {
+	const currentValue = getFilterText(node);
+	const widgets = (node.widgets || []).filter((w) => w?.name === FILTER_NAME);
+	
+	// 如果有多个同名 widget（DOM widget + Python widget），确保它们值一致
+	if (widgets.length > 1) {
+		for (const widget of widgets) {
+			if (widget.value !== currentValue) {
+				widget.value = currentValue;
+				if (widget.inputEl) {
+					widget.inputEl.value = currentValue;
+				}
+			}
+		}
+	}
+}
+
+function enforceWidgetZIndex(node) {
+	// 遍历所有 DOM widget，确保它们的容器有正确的 z-index
+	const widgets = Array.isArray(node.widgets) ? node.widgets : [];
+	let zIndexCounter = 10000;
+	
+	for (const widget of widgets) {
+		if (widget?.element instanceof HTMLElement) {
+			const element = widget.element;
+			
+			// 提升容器本身的 z-index
+			element.style.setProperty("z-index", String(zIndexCounter), "important");
+			element.style.setProperty("position", "relative", "important");
+			element.style.setProperty("pointer-events", "auto", "important");
+			
+			// 提升容器内所有子元素的 z-index
+			const buttons = element.querySelectorAll("button");
+			buttons.forEach((btn, index) => {
+				btn.style.setProperty("z-index", String(zIndexCounter + 1), "important");
+				btn.style.setProperty("position", "relative", "important");
+				btn.style.setProperty("pointer-events", "auto", "important");
+			});
+			
+			zIndexCounter += 10; // 每个 widget 递增，避免冲突
+		}
+	}
+}
+
 function updateSelectionMode(node, value) {
 	const mode = MODE_VALUES.includes(String(value || "")) ? String(value) : MODE_SINGLE;
 	ensureNodeState(node)[MODE_NAME] = mode;
@@ -177,31 +221,58 @@ function makeDomWidgetSize(widget, height) {
 }
 
 function createModeButtonRow(node) {
-	if (typeof node.addDOMWidget !== "function") {
-		for (const value of MODE_VALUES) {
-			const active = value === getSelectionMode(node);
-			const button = node.addWidget("button", `${active ? "●" : "○"} ${value}`, "", () => {
-				updateSelectionMode(node, value);
-				rebuildUI(node);
-			});
-			button.serialize = false;
-		}
-		return null;
-	}
-
-	const wrap = document.createElement("div");
-	wrap.className = "gjj-mode-button-row";
-	wrap.style.cssText = "box-sizing:border-box;width:100%;display:flex;gap:8px;padding:2px 0 6px";
-
-	// 注入模式按钮样式
+	// 新方案：直接将按钮注入到节点的 header 区域，避开 DOM widget 的问题
 	ensureModeButtonStyles();
-
-	// 保存当前激活的模式值，用于样式设置
-	const currentMode = getSelectionMode(node);
-
+	
+	// 查找或创建 header 容器
+	let headerContainer = node.__gjjModeHeaderContainer;
+	if (!headerContainer || !headerContainer.parentNode) {
+		// 创建新的 header 容器
+		headerContainer = document.createElement("div");
+		headerContainer.id = `gjj-mode-header-${node.id}`;
+		headerContainer.className = "gjj-mode-header-container";
+		headerContainer.style.cssText = [
+			"display:flex",
+			"gap:8px",
+			"padding:8px 12px",
+			"margin:0",
+			"background:#1a2b35",
+			"border-bottom:1px solid #2a3f4d",
+			"position:relative",
+			"z-index:100",
+		].join(";");
+		
+		// 保存到节点引用，避免重复创建
+		node.__gjjModeHeaderContainer = headerContainer;
+		
+		// 将容器插入到节点的 DOM 结构中
+		// 尝试插入到 node.badges 或 node.title 之后
+		setTimeout(() => {
+			const nodeElement = document.querySelector(`[data-node-id="${node.id}"]`);
+			if (nodeElement) {
+				// 找到 title 区域
+				const titleElement = nodeElement.querySelector(".node-title") || nodeElement.querySelector("header");
+				if (titleElement && titleElement.parentNode) {
+					// 插入到 title 之后
+					titleElement.parentNode.insertBefore(headerContainer, titleElement.nextSibling);
+				} else if (nodeElement.firstChild) {
+					// 如果没有 title，插入到最前面
+					nodeElement.insertBefore(headerContainer, nodeElement.firstChild);
+				} else {
+					nodeElement.appendChild(headerContainer);
+				}
+			}
+		}, 10);
+	}
+	
+	// 清空旧按钮
+	headerContainer.innerHTML = "";
+	
 	// 初始化模式按钮引用数组
 	node.__gjjModeButtons = [];
-
+	
+	const currentMode = getSelectionMode(node);
+	
 	for (const value of MODE_VALUES) {
 		const active = value === currentMode;
 		const button = document.createElement("button");
@@ -209,49 +280,43 @@ function createModeButtonRow(node) {
 		button.className = "gjj-mode-button";
 		button.textContent = value;
 		button.title = value === MODE_SINGLE ? "单选：启用一个分组时会自动旁路其它匹配分组。" : "多选：可以同时启用多个匹配分组。";
-
-		// 保存模式值引用
+		button.dataset.mode = value;
 		button.__gjjModeValue = value;
+		
 		updateModeButtonClass(button, active);
-
-		// 保存按钮引用
 		node.__gjjModeButtons.push(button);
-
-		button.addEventListener("pointerdown", (event) => event.stopPropagation());
+		
+		// 只绑定 click 事件，不绑定 pointerdown
 		button.addEventListener("click", (event) => {
 			event.preventDefault();
 			event.stopPropagation();
-
+			
 			// 更新模式
 			updateSelectionMode(node, value);
-
+			
 			// 处理单选模式下的分组状态
 			let activeGroups = getActiveGroupRefs(node);
-
 			if (value === MODE_SINGLE && activeGroups.size > 1) {
 				const firstGroup = [...activeGroups][0];
 				activeGroups = new Set(firstGroup ? [firstGroup] : []);
 			}
-
 			setActiveGroupRefs(node, activeGroups);
-
-			// 同步模式按钮和分组按钮状态，不调用 rebuildUI
+			
+			// 同步状态
 			syncModeButtonStates(node);
 			syncGroupButtonStates(node, activeGroups);
-
-			// 应用分组启用/旁路状态
 			applyMatchedGroupModes(node);
-
+			
 			node.graph?.change?.();
 			node.setDirtyCanvas?.(true, true);
 			app.graph?.setDirtyCanvas?.(true, true);
 		});
-		wrap.appendChild(button);
+		
+		headerContainer.appendChild(button);
 	}
-	return makeDomWidgetSize(node.addDOMWidget("选择模式", "HTML", wrap, {
-		serialize: false,
-		hideOnZoom: false,
-	}), 38);
+	
+	// 返回 null，因为我们不再使用 DOM widget
+	return null;
 }
 
 function ensureModeButtonStyles() {
@@ -263,6 +328,11 @@ function ensureModeButtonStyles() {
 	const style = document.createElement("style");
 	style.id = styleId;
 	style.textContent = `
+		.gjj-mode-header-container {
+			position: relative !important;
+			z-index: 100 !important;
+			pointer-events: auto !important;
+		}
 		.gjj-mode-button {
 			flex: 1 1 0;
 			height: 30px;
@@ -276,6 +346,13 @@ function ensureModeButtonStyles() {
 			cursor: pointer;
 			outline: none;
 			transition: all 0.2s ease;
+			position: relative;
+			z-index: 101;
+			pointer-events: auto;
+		}
+		.gjj-mode-button:hover {
+			background: #2a4a55 !important;
+			border-color: #4a6b78 !important;
 		}
 		.gjj-mode-button.on {
 			background: #1f6b43 !important;
@@ -288,27 +365,40 @@ function ensureModeButtonStyles() {
 
 function buildModeControls(node) {
 	ensureNodeState(node);
+	// createModeButtonRow 现在直接操作 DOM，不再返回 widget
 	createModeButtonRow(node);
 }
 
 function createGroupButtonWidget(node, group, isActive) {
 	const title = String(group?.title || "未命名分组");
 
-	const wrap = document.createElement("div");
-	wrap.className = "gjj-group-bypasser-row";
-	wrap.style.cssText = "box-sizing:border-box;width:100%;display:flex;padding:2px 0 4px";
+	// 创建独立的专用容器，避免与其他元素冲突
+	const container = document.createElement("div");
+	container.id = `gjj-group-${node.id}-${group.id}`;
+	container.className = "gjj-group-bypasser-row";
+	container.style.cssText = [
+		"box-sizing:border-box",
+		"width:100%",
+		"display:flex",
+		"padding:3px 0 5px",
+		"margin:0",
+		"position:relative",
+		"z-index:9998",
+		"pointer-events:auto",
+	].join(";");
 
 	const button = document.createElement("button");
 	button.type = "button";
 	button.className = "gjj-group-button";
 	button.textContent = `${isActive ? "✅ " : "❌ "}${title}`;
 	button.title = `切换分组"${title}"的启用状态；单选模式下互斥，多选模式下可同时启用多个分组。`;
+	button.dataset.groupId = group.id; // 使用 data 属性存储分组 ID
 
 	updateButtonClass(button, isActive);
 
-	wrap.appendChild(button);
+	container.appendChild(button);
 
-	const domWidget = makeDomWidgetSize(node.addDOMWidget(title, "HTML", wrap, {
+	const domWidget = makeDomWidgetSize(node.addDOMWidget(title, "HTML", container, {
 		serialize: false,
 		hideOnZoom: false,
 	}), 36);
@@ -342,12 +432,28 @@ function createGroupButtonWidget(node, group, isActive) {
 		app.graph?.setDirtyCanvas?.(true, true);
 	};
 
-	button.addEventListener("pointerdown", (event) => event.stopPropagation());
+	// 使用事件委托，避免重复绑定
+	// 只阻止事件冒泡，不阻止默认行为（避免阻止 click 事件）
+	button.addEventListener("pointerdown", (event) => {
+		event.stopPropagation();
+		// 注意：不要调用 preventDefault()，否则会阻止后续的 click 事件
+	});
+	
 	button.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
 		toggle();
 	});
+
+	// 保护 DOM widget 不被 Canvas 事件捕获
+	if (container && typeof container.addEventListener === "function") {
+		const stopCanvasCapture = (event) => {
+			event.stopPropagation();
+		};
+		for (const eventName of ["pointerdown", "mousedown", "dblclick", "contextmenu", "wheel"]) {
+			container.addEventListener(eventName, stopCanvasCapture);
+		}
+	}
 
 	return domWidget;
 }
@@ -360,7 +466,22 @@ function buildFilterWidget(node) {
 		value,
 		(newValue) => {
 			updateFilterText(node, newValue);
-			rebuildUI(node);
+			
+			// 同步到原始的 Python widget（如果存在）
+			const originalWidget = (node.widgets || []).find((w) => w?.name === FILTER_NAME && w !== widget);
+			if (originalWidget) {
+				originalWidget.value = String(newValue || "");
+				if (originalWidget.inputEl) {
+					originalWidget.inputEl.value = String(newValue || "");
+				}
+				originalWidget.callback?.(newValue);
+			}
+			
+			// 使用setTimeout确保DOM更新完成后再重建UI
+			setTimeout(() => {
+				rebuildUI(node);
+				refreshNodeSize(node);
+			}, 10);
 		},
 		{ placeholder: FILTER_PLACEHOLDER },
 	);
@@ -406,6 +527,12 @@ function rebuildUI(node) {
 
 	buildModeControls(node);
 	buildFilterWidget(node);
+	
+	// 确保关键词值同步到原始 Python widget
+	syncFilterToOriginalWidget(node);
+	
+	// 强制提升所有 DOM widget 容器的层级
+	enforceWidgetZIndex(node);
 
 	const matchedGroups = getMatchedGroups(node);
 	releaseManagedGroups(node, matchedGroups);
@@ -451,6 +578,10 @@ app.registerExtension({
 
 		requestAnimationFrame(() => {
 			rebuildUI(node);
+			// 添加帮助按钮
+			if (typeof window.__gjjEnsureHelpWidget === "function") {
+				window.__gjjEnsureHelpWidget(node);
+			}
 		});
 	},
 
@@ -485,6 +616,24 @@ app.registerExtension({
 			}
 			applyMatchedGroupModes(this);
 		};
+
+		// Hook addDOMWidget to protect DOM widgets
+		const originalAddDOMWidget = nodeType.prototype.addDOMWidget;
+		if (originalAddDOMWidget) {
+			nodeType.prototype.addDOMWidget = function(...args) {
+				const widget = originalAddDOMWidget.apply(this, args);
+				// 保护DOM widget不被Canvas事件捕获
+				if (widget?.element && typeof widget.element.addEventListener === "function") {
+					const stopCanvasCapture = (event) => {
+						event.stopPropagation();
+					};
+					for (const eventName of ["pointerdown", "mousedown", "dblclick", "contextmenu", "wheel"]) {
+						widget.element.addEventListener(eventName, stopCanvasCapture);
+					}
+				}
+				return widget;
+			};
+		}
 	},
 
 	async setup() {
@@ -543,11 +692,38 @@ function clearNodeWidgets(node) {
 		}
 
 		if (widget?.element instanceof HTMLElement) {
-			widget.element.remove();
+			// 清理事件监听器，避免内存泄漏
+			const element = widget.element;
+			
+			// 如果元素有 cloneNode 方法，可以用它来清除所有事件监听器
+			if (typeof element.cloneNode === "function") {
+				const cleanElement = element.cloneNode(true);
+				if (element.parentNode) {
+					element.parentNode.replaceChild(cleanElement, element);
+				}
+			} else {
+				element.remove();
+			}
+		}
+		
+		// 清理自定义属性引用
+		if (widget.__buttonEl) {
+			widget.__buttonEl = null;
+		}
+		if (widget.__groupRef) {
+			widget.__groupRef = null;
 		}
 	}
 
 	node.widgets = [];
+	
+	// 清理节点上的自定义引用
+	if (node.__gjjModeButtons) {
+		node.__gjjModeButtons = null;
+	}
+
+	// 注意：不要清理 __gjjModeHeaderContainer，因为 rebuildUI 时会复用
+	// 我们只需要清空它的 innerHTML，而不是移除 DOM 元素
 }
 
 function syncGroupButtonStates(node, activeGroups = getActiveGroupRefs(node)) {
@@ -600,6 +776,11 @@ function ensureGroupButtonStyles(container) {
 	style.id = styleId;
 
 	style.textContent = `
+		.gjj-group-bypasser-row {
+			position: relative !important;
+			z-index: 9998 !important;
+			pointer-events: auto !important;
+		}
 		.gjj-group-button {
 			flex: 1 1 0 !important;
 			height: 30px !important;
@@ -616,6 +797,13 @@ function ensureGroupButtonStyles(container) {
 			-moz-appearance: none !important;
 			appearance: none !important;
 			box-shadow: none !important;
+			position: relative !important;
+			z-index: 9999 !important;
+			pointer-events: auto !important;
+		}
+		.gjj-group-button:hover {
+			background: #2a4a55 !important;
+			border-color: #4a6b78 !important;
 		}
 		.gjj-group-button.gjj-active {
 			background: #1f6b43 !important;
@@ -623,7 +811,6 @@ function ensureGroupButtonStyles(container) {
 			color: #fff !important;
 		}
 	`;
-
 	document.head.appendChild(style);
 }
 

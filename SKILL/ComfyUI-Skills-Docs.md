@@ -219,7 +219,7 @@ ComfyUI 模型文件夹：`checkpoints/`、`clip/`、`clip_vision/`、`controlne
 | 音频列表 | `(list,)` 元组包裹 | `[list]` 直接列表 |
 | 视频列表 | `(list,)` 元组包裹 | `[list]` 直接列表 |
 
-```python
+```
 # ✅ 正确
 ui["preview_text"] = ("some text",)
 ui["preview_images"] = [{"filename": "img.png"}]
@@ -227,7 +227,7 @@ ui["preview_audio"] = ([{"filename": "audio.wav"}],)
 ui["preview_video"] = ([{"filename": "video.mp4"}],)
 ```
 
-```python
+```
 # ❌ 错误
 ui["preview_text"] = "some text"
 ui["preview_audio"] = [{"filename": "audio.wav"}]
@@ -235,7 +235,7 @@ ui["preview_audio"] = [{"filename": "audio.wav"}]
 
 ### 前端解包
 
-```javascript
+```
 // 元组字段：取 [0]
 this.__previewKind = message?.preview_kind?.[0] || "";
 this.__previewText = message?.preview_text?.[0] || "";
@@ -338,3 +338,80 @@ def _get_files(cls, dir_type, extensions):
 - **模型查找：** 子目录感知 + 最长公共片段匹配 + 扩展名剥离 + 信任度阈值。
 - **DOMWidget 高度：** 内容驱动，用 `scrollHeight` 计算，保留用户宽度。
 - **长文本编辑：** 隐藏原生 STRING 控件，使用 GJJ 自有 textarea，通过 `properties` 持久化。
+
+---
+
+## 8. 节点注册与模块结构规范
+
+### Python 节点文件末尾必须保留注册代码
+
+**绝对禁止删除以下两行注册代码：**
+
+```
+NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_GroupBypasser}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🔀 分组筛选路由"}
+```
+
+**原因：**
+- `NODE_CLASS_MAPPINGS` 将 Python 类映射到 ComfyUI 节点系统，是节点能被加载和使用的**唯一标识**。
+- `NODE_DISPLAY_NAME_MAPPINGS` 定义节点在 ComfyUI 界面上的显示名称。
+- 如果删除这两行，节点将**完全无法注册**到 ComfyUI，前端和后端都无法识别该节点。
+
+**标准结构示例：**
+
+```
+# 文件开头：常量定义
+NODE_NAME = "GJJ_GroupBypasser"
+
+# 节点类定义
+class GJJ_GroupBypasser:
+    NAME = "GJJ_GroupBypasser"
+    DISPLAY_NAME = "分组筛选路由"
+    CATEGORY = "GJJ"
+    FUNCTION = "noop"
+    # ... 其他类属性和方法 ...
+
+# 文件末尾：注册代码（必须保留！）
+NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_GroupBypasser}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🔀 分组筛选路由"}
+```
+
+### 编辑文件时的注意事项
+
+使用 `edit_file` 工具时：
+- ✅ **只修改** `INPUT_TYPES`、方法实现、类内部逻辑
+- ✅ **保留** 文件末尾的 `NODE_CLASS_MAPPINGS` 和 `NODE_DISPLAY_NAME_MAPPINGS`
+- ❌ **绝对不要**在 `code_edit` 参数中省略或替换这两行
+
+**错误示例（会导致注册代码丢失）：**
+
+```
+    def noop(self, **kwargs):
+        return ()
+# 错误：缺少了 NODE_CLASS_MAPPINGS 和 NODE_DISPLAY_NAME_MAPPINGS！
+```
+
+**正确示例：**
+
+```
+    def noop(self, **kwargs):
+        return ()
+
+
+NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_GroupBypasser}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🔀 分组筛选路由"}
+```
+
+### 前端注册同样重要
+
+JavaScript 文件末尾也必须保留 `app.registerExtension`：
+
+```
+app.registerExtension({
+    name: "GJJ.GroupBypasser",
+    nodeCreated(node, app) { ... },
+    async beforeRegisterNodeDef(nodeType, nodeData, app) { ... },
+    async setup() { ... }
+});
+```
+

@@ -822,4 +822,4 @@ class GJJ_ComprehensiveMatting:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_ComprehensiveMatting}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · ✂️ 综合抠图"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · ✂️ 批量多功能综合抠图"}

@@ -103,13 +103,13 @@ function measureHeight(node) {
 }
 
 function refreshLayout(node) {
-	// 只更新高度，保留用户设置的宽度
+	const width = Math.max(MIN_WIDTH, Number(node.size?.[0] || MIN_WIDTH));
 	const height = Math.max(
 		MIN_NODE_HEIGHT,
 		Number(node.size?.[1] || MIN_NODE_HEIGHT),
 	);
-	if ((node.size?.[1] || 0) !== height) {
-		node.setSize?.([node.size?.[0], height]);
+	if ((node.size?.[0] || 0) !== width || (node.size?.[1] || 0) !== height) {
+		node.setSize?.([width, height]);
 	}
 	setDirty(node);
 }
@@ -122,7 +122,6 @@ function estimateImagePreviewHeight(node) {
 	if (count === 1) {
 		return SINGLE_IMAGE_PREVIEW_HEIGHT;
 	}
-	// 使用用户设置的宽度，而不是强制最小宽度
 	const nodeWidth = Math.max(MIN_WIDTH, Number(node?.size?.[0] || MIN_WIDTH));
 	const contentWidth = Math.max(220, nodeWidth - 36);
 	const columns = Math.min(
@@ -543,12 +542,12 @@ function applyPreviewContent(node) {
 		for (const [index, item] of images.entries()) {
 			const card = document.createElement("div");
 			card.style.cssText = [
+				"position:relative",
 				"display:flex",
 				"flex-direction:column",
-				"gap:6px",
-				"padding:6px",
-				"border:1px solid #33434a",
-				"border-radius:8px",
+				"padding:0",
+				"border:none",
+				"border-radius:0",
 				"background:#12191d",
 				"min-width:0",
 				"box-sizing:border-box",
@@ -556,17 +555,25 @@ function applyPreviewContent(node) {
 				"overflow:hidden",
 			].join(";");
 
+			const imageWrapper = document.createElement("div");
+			imageWrapper.style.cssText = [
+				"position:relative",
+				"width:100%",
+				"height:100%",
+				"display:flex",
+				"align-items:center",
+				"justify-content:center",
+			].join(";");
+
 			const image = document.createElement("img");
 			image.src = imageDataToUrl(item);
 			image.draggable = false;
 			image.style.cssText = [
 				"width:100%",
-				`height:${imageHeight}px`,
+				"height:100%",
 				"object-fit:contain",
 				"background:#0c1114",
-				"border-radius:6px",
 				"display:block",
-				"flex:0 0 auto",
 			].join(";");
 			image.onload = () => {
 				scheduleLayout(node);
@@ -631,12 +638,27 @@ function applyPreviewContent(node) {
 				document.body.appendChild(overlay);
 			});
 
+			// 创建序号标签，以50%透明度覆盖在图片上
 			const caption = document.createElement("div");
-			caption.textContent = `图片 ${index + 1}`;
-			caption.style.cssText = "font-size:11px;color:#dce7e2;";
+			caption.textContent = `${index + 1}`;
+			caption.style.cssText = [
+				"position:absolute",
+				"top:4px",
+				"left:4px",
+				"font-size:12px",
+				"font-weight:bold",
+				"color:#ffffff",
+				"opacity:0.5",
+				"background:rgba(0,0,0,0.3)",
+				"padding:2px 6px",
+				"border-radius:3px",
+				"pointer-events:none",
+				"z-index:1",
+			].join(";");
 
-			card.appendChild(image);
-			card.appendChild(caption);
+			imageWrapper.appendChild(image);
+			imageWrapper.appendChild(caption);
+			card.appendChild(imageWrapper);
 			grid.appendChild(card);
 		}
 		// 图片预览分支结束，body 已在前置逻辑中隐藏
@@ -1052,7 +1074,7 @@ function ensurePreviewWidget(node) {
 	grid.style.cssText = [
 		"display:none",
 		"grid-template-columns:repeat(auto-fit, minmax(140px, 1fr))",
-		"gap:8px",
+		"gap:1px",
 		"width:100%",
 		"order:1", // 播放器显示在前面
 	].join(";");

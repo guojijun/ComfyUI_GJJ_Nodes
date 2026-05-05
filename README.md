@@ -108,6 +108,7 @@ pip install -r requirements-accelerate.txt # 推理加速
 | 节点名称 | 功能描述 |
 | -------- | -------- |
 | GJJ · Video Combine | 零依赖视频合成节点，支持 IMAGE/LATENT 序列输出 GIF、WEBP、PNG 和多种视频格式 |
+| GJJ · Video Segment Editor | 可视化视频分段编辑器，自动生成分段并拖拽调整起止时间，批量裁剪输出多个视频片段 |
 | GJJ · Video Reverse Frame | 从输入视频帧序列中提取倒数第 N 帧，输出同尺寸单张静态图片 |
 | GJJ · Video Outpaint Pad | 把 VIDEO 拆成帧后做零依赖外扩画布预处理，支持边距和目标比例扩充 |
 | GJJ · Video Frames Loader | 用 FFmpeg 抽取视频帧为 IMAGE 批次 |
