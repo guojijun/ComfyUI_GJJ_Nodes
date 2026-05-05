@@ -558,3 +558,72 @@ nodeType.prototype.onConfigure = function (...args) {
     syncModeButtonStates(this);
 };
 ```
+
+### 8.10 顶部隐藏控件空行问题：消除而非隐藏
+
+> ⚠️ `GJJ_Utils.hideWidget` 的 `-4` 零占位只对**尾部**隐藏控件有效。如果隐藏控件在节点**顶部**（按钮行之前），即使 `-4` 也会残留空行。
+
+**根因：** Node 2.0 布局引擎对首个 widget 之前的位置有最小间距保护，`-4` 无法抵消这个间距。
+
+**✅ 正确做法：不创建 widget，状态纯存 `properties`，通过 `onSerialize`/`onConfigure` 持久化。**
+
+完整三步：
+
+**① Python：将不展示的字段移到 `hidden`**
+
+```python
+@classmethod
+def INPUT_TYPES(cls):
+    return {
+        "required": {
+            "filter_keyword": ("STRING", {...}),  # 需要可见控件
+        },
+        "hidden": {
+            "selection_mode": (["单选", "多选"], {...}),  # 不创建 widget，只声明类型
+        },
+    }
+```
+
+**② JS：用自定义 DOM 按钮替代，不再创建隐藏 widget**
+
+```javascript
+function buildModeControls(node) {
+    ensureNodeState(node);                        // 初始化 properties
+    createModeButtonRow(node);                    // 只创建 DOM 按钮
+    // 不再 addWidget("combo", ...) + hideWidget(...)
+}
+```
+
+**③ JS：onSerialize 写 properties，onConfigure 读 properties**
+
+```javascript
+// 保存
+nodeType.prototype.onSerialize = function(serializedNode) {
+    const result = originalOnSerialize?.apply(this, [serializedNode]);
+    serializedNode.properties = serializedNode.properties || {};
+    serializedNode.properties["selection_mode"] = ensureNodeState(this)["selection_mode"];
+    return result;
+};
+
+// 加载
+nodeType.prototype.onConfigure = function(serialized) {
+    originalOnConfigure?.apply(this, [serialized]);
+    hydrateStateFromSerialized(this, serialized);  // 从 properties 恢复
+};
+```
+
+**对比：**
+
+| | hideWidget 方案 | properties 方案 |
+|---|---|---|
+| 适用位置 | 尾部隐藏控件 | **顶部**隐藏控件 |
+| 空白行 | 尾部无空白，顶部仍有 | **完全无空白** |
+| Python 声明 | 需要 `required` | 移到 `hidden` |
+| 序列化 | widgets_values | properties + onSerialize |
+| 复杂度 | 低 | 中（需 onSerialize） |
+
+**判断流程：**
+```
+隐藏控件在节点顶部？
+  ├─ 是 → 不创建 widget，用 properties + onSerialize
+  └─ 否（尾部）→ GJJ_Utils.hideWidget（-4 零占位）

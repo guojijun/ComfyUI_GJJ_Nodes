@@ -144,10 +144,8 @@ function updateFilterText(node, value) {
 
 function updateSelectionMode(node, value) {
 	const mode = MODE_VALUES.includes(String(value || "")) ? String(value) : MODE_SINGLE;
-	console.log("[GJJ GroupBypasser] updateSelectionMode - new mode:", mode);
 	ensureNodeState(node)[MODE_NAME] = mode;
-	console.log("[GJJ GroupBypasser] updateSelectionMode - node.properties[MODE_NAME]:", ensureNodeState(node)[MODE_NAME]);
-	
+
 	const widget = (node.widgets || []).find((item) => item?.name === MODE_NAME);
 	if (widget) {
 		widget.value = mode;
@@ -155,7 +153,7 @@ function updateSelectionMode(node, value) {
 			widget.inputEl.value = mode;
 		}
 	}
-	
+
 	node.graph?.change?.();
 }
 
@@ -167,27 +165,6 @@ function hydrateStateFromSerialized(node, serialized) {
 	}
 	if (!Object.prototype.hasOwnProperty.call(serialized?.properties || {}, MODE_NAME) && MODE_VALUES.includes(String(values[1] || ""))) {
 		props[MODE_NAME] = String(values[1]);
-	}
-}
-
-function hideWidget(widget) {
-	if (!widget || widget.__gjjGroupBypasserHidden) {
-		return;
-	}
-	widget.__gjjGroupBypasserHidden = true;
-	widget.__gjjOriginalType = widget.type;
-	widget.type = `converted-widget:${widget.name || "hidden"}`;
-	widget.hidden = true;
-	widget.computeSize = () => [0, 0];
-	widget.getHeight = () => 0;
-	widget.draw = () => {};
-	widget.y = -10000;
-	widget.last_y = -10000;
-	if (widget.inputEl) {
-		widget.inputEl.style.display = "none";
-	}
-	if (widget.element) {
-		widget.element.style.display = "none";
 	}
 }
 
@@ -215,32 +192,31 @@ function createModeButtonRow(node) {
 	const wrap = document.createElement("div");
 	wrap.className = "gjj-mode-button-row";
 	wrap.style.cssText = "box-sizing:border-box;width:100%;display:flex;gap:8px;padding:2px 0 6px";
-	
+
 	// 注入模式按钮样式
 	ensureModeButtonStyles();
-	
+
 	// 保存当前激活的模式值，用于样式设置
 	const currentMode = getSelectionMode(node);
-	
+
 	// 初始化模式按钮引用数组
 	node.__gjjModeButtons = [];
-	
+
 	for (const value of MODE_VALUES) {
 		const active = value === currentMode;
-		console.log("[GJJ GroupBypasser] createModeButton - value:", value, "currentMode:", currentMode, "active:", active);
 		const button = document.createElement("button");
 		button.type = "button";
 		button.className = "gjj-mode-button";
 		button.textContent = value;
 		button.title = value === MODE_SINGLE ? "单选：启用一个分组时会自动旁路其它匹配分组。" : "多选：可以同时启用多个匹配分组。";
-		
+
 		// 保存模式值引用
 		button.__gjjModeValue = value;
 		updateModeButtonClass(button, active);
-		
+
 		// 保存按钮引用
 		node.__gjjModeButtons.push(button);
-		
+
 		button.addEventListener("pointerdown", (event) => event.stopPropagation());
 		button.addEventListener("click", (event) => {
 			event.preventDefault();
@@ -262,7 +238,7 @@ function createModeButtonRow(node) {
 			// 同步模式按钮和分组按钮状态，不调用 rebuildUI
 			syncModeButtonStates(node);
 			syncGroupButtonStates(node, activeGroups);
-			
+
 			// 应用分组启用/旁路状态
 			applyMatchedGroupModes(node);
 
@@ -278,13 +254,12 @@ function createModeButtonRow(node) {
 	}), 38);
 }
 
-// 新增：确保模式按钮样式已注入
 function ensureModeButtonStyles() {
 	const styleId = "gjj-mode-button-styles";
 	if (document.getElementById(styleId)) {
 		return;
 	}
-	
+
 	const style = document.createElement("style");
 	style.id = styleId;
 	style.textContent = `
@@ -309,60 +284,40 @@ function ensureModeButtonStyles() {
 		}
 	`;
 	document.head.appendChild(style);
-	console.log("[GJJ GroupBypasser] Mode button CSS styles injected to document.head");
 }
 
 function buildModeControls(node) {
-	const mode = getSelectionMode(node);
-	const hidden = node.addWidget(
-		"combo",
-		MODE_LABEL,
-		mode,
-		(newValue) => {
-			updateSelectionMode(node, newValue);
-			rebuildUI(node);
-		},
-		{ values: MODE_VALUES },
-	);
-	hidden.name = MODE_NAME;
-	hidden.label = MODE_LABEL;
-	hidden.tooltip = "单选互斥；多选允许同时启用多个匹配分组。";
-	hideWidget(hidden);
-
+	ensureNodeState(node);
 	createModeButtonRow(node);
 }
 
 function createGroupButtonWidget(node, group, isActive) {
 	const title = String(group?.title || "未命名分组");
-	
-	// 创建包裹容器
+
 	const wrap = document.createElement("div");
 	wrap.className = "gjj-group-bypasser-row";
 	wrap.style.cssText = "box-sizing:border-box;width:100%;display:flex;padding:2px 0 4px";
-	
-	// 创建按钮
+
 	const button = document.createElement("button");
 	button.type = "button";
 	button.className = "gjj-group-button";
-	// 使用文字图标显示状态
-	button.textContent = `${isActive ? "\u2705 " : "\u274c "}${title}`;
+	button.textContent = `${isActive ? "✅ " : "❌ "}${title}`;
 	button.title = `切换分组"${title}"的启用状态；单选模式下互斥，多选模式下可同时启用多个分组。`;
-	
-	// 直接应用样式
+
 	updateButtonClass(button, isActive);
-	
+
 	wrap.appendChild(button);
-	
+
 	const domWidget = makeDomWidgetSize(node.addDOMWidget(title, "HTML", wrap, {
 		serialize: false,
 		hideOnZoom: false,
 	}), 36);
-	
+
 	domWidget.value = Boolean(isActive);
 	domWidget.__gjjGroupToggle = true;
 	domWidget.__groupRef = group;
 	domWidget.__buttonEl = button;
-	
+
 	const toggle = () => {
 		const activeGroups = getActiveGroupRefs(node);
 		const isCurrentlyActive = activeGroups.has(group);
@@ -378,28 +333,22 @@ function createGroupButtonWidget(node, group, isActive) {
 		}
 
 		setActiveGroupRefs(node, activeGroups);
-
-		// 关键：同步当前 DOMWidget 的 value
 		domWidget.value = newState;
-
-		// 关键：不要在这里 rebuildUI，直接更新按钮状态
 		syncGroupButtonStates(node, activeGroups);
-
-		// 应用分组启用/旁路状态
 		applyMatchedGroupModes(node);
 
 		node.graph?.change?.();
 		node.setDirtyCanvas?.(true, true);
 		app.graph?.setDirtyCanvas?.(true, true);
 	};
-	
+
 	button.addEventListener("pointerdown", (event) => event.stopPropagation());
 	button.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
 		toggle();
 	});
-	
+
 	return domWidget;
 }
 
@@ -451,9 +400,7 @@ function refreshNodeSize(node) {
 }
 
 function rebuildUI(node) {
-	console.log("[GJJ GroupBypasser] rebuildUI - START");
 	const previousActiveGroups = getActiveGroupRefs(node);
-	console.log("[GJJ GroupBypasser] rebuildUI - previousActiveGroups:", [...previousActiveGroups].map(g => g?.title));
 
 	clearNodeWidgets(node);
 
@@ -461,19 +408,16 @@ function rebuildUI(node) {
 	buildFilterWidget(node);
 
 	const matchedGroups = getMatchedGroups(node);
-	console.log("[GJJ GroupBypasser] rebuildUI - matchedGroups count:", matchedGroups.length);
 	releaseManagedGroups(node, matchedGroups);
 	if (matchedGroups.length === 0) {
 		setActiveGroupRefs(node, []);
 		addEmptyState(node);
 		node.__gjjGroupSignature = getGroupSignature();
 		refreshNodeSize(node);
-		console.log("[GJJ GroupBypasser] rebuildUI - END (no groups)");
 		return;
 	}
 
 	let restoredActiveGroups = matchedGroups.filter((group) => previousActiveGroups.has(group));
-	console.log("[GJJ GroupBypasser] rebuildUI - restoredActiveGroups:", [...restoredActiveGroups].map(g => g?.title));
 	if (getSelectionMode(node) === MODE_SINGLE) {
 		restoredActiveGroups = restoredActiveGroups.slice(0, 1);
 	}
@@ -481,14 +425,12 @@ function rebuildUI(node) {
 
 	matchedGroups.forEach((group) => {
 		const isActive = restoredActiveGroups.includes(group);
-		console.log("[GJJ GroupBypasser] rebuildUI - creating button for group:", group?.title, "isActive:", isActive);
 		addGroupToggle(node, group, isActive);
 	});
 
 	node.__gjjGroupSignature = getGroupSignature();
 	applyMatchedGroupModes(node, matchedGroups);
 	refreshNodeSize(node);
-	console.log("[GJJ GroupBypasser] rebuildUI - END");
 }
 
 function refreshAllGroupBypassers() {
@@ -499,45 +441,44 @@ function refreshAllGroupBypassers() {
 	});
 }
 
-// 注册扩展
 app.registerExtension({
 	name: "GJJ.GroupBypasser",
-	
-	// 节点创建时调用
+
 	nodeCreated(node, app) {
 		if (!TARGET_NODES.has(node.comfyClass)) {
 			return;
 		}
-		
-		console.log("[GJJ GroupBypasser] Node created:", node.comfyClass);
-		
-		// 延迟执行以确保节点完全初始化
+
 		requestAnimationFrame(() => {
 			rebuildUI(node);
 		});
 	},
-	
-	// 工作流加载时调用
+
 	async beforeRegisterNodeDef(nodeType, nodeData, app) {
 		if (!TARGET_NODES.has(nodeData.name)) {
 			return;
 		}
-		
-		// 保存原始的 onConfigure 方法
+
 		const originalOnConfigure = nodeType.prototype.onConfigure;
-		
-		// 重写 onConfigure 以从序列化数据恢复状态
+
+		// onSerialize：选择模式存到 properties（不再依赖隐藏 combo widget）
+		const originalOnSerialize = nodeType.prototype.onSerialize;
+		nodeType.prototype.onSerialize = function(serializedNode) {
+			const result = originalOnSerialize?.apply(this, [serializedNode]);
+			serializedNode.properties = serializedNode.properties || {};
+			serializedNode.properties[MODE_NAME] = ensureNodeState(this)[MODE_NAME];
+			return result;
+		};
+
 		nodeType.prototype.onConfigure = function(serialized) {
 			if (originalOnConfigure) {
 				originalOnConfigure.call(this, serialized);
 			}
 			hydrateStateFromSerialized(this, serialized);
 		};
-		
-		// 保存原始的 onExecutionStart 方法
+
 		const originalOnExecutionStart = nodeType.prototype.onExecutionStart;
-		
-		// 在每次执行前更新分组状态
+
 		nodeType.prototype.onExecutionStart = function() {
 			if (originalOnExecutionStart) {
 				originalOnExecutionStart.call(this);
@@ -545,10 +486,8 @@ app.registerExtension({
 			applyMatchedGroupModes(this);
 		};
 	},
-	
-	// 工作流加载完成后刷新所有节点
+
 	async setup() {
-		// 监听分组变化
 		const originalAddGroup = app.graph?.addGroup;
 		if (originalAddGroup) {
 			app.graph.addGroup = function(...args) {
@@ -557,8 +496,7 @@ app.registerExtension({
 				return result;
 			};
 		}
-		
-		// 监听图变化
+
 		let rebuildTimer = null;
 		const scheduleRebuild = () => {
 			if (rebuildTimer) {
@@ -569,8 +507,7 @@ app.registerExtension({
 				rebuildTimer = null;
 			}, 100);
 		};
-		
-		// 监听节点移动和分组变化
+
 		const originalOnNodeMoved = app.graph?.onNodeMoved;
 		app.graph.onNodeMoved = function(node) {
 			if (originalOnNodeMoved) {
@@ -578,7 +515,7 @@ app.registerExtension({
 			}
 			scheduleRebuild();
 		};
-		
+
 		const originalOnGroupAdd = app.graph?.onGroupAdd;
 		app.graph.onGroupAdd = function(group) {
 			if (originalOnGroupAdd) {
@@ -586,7 +523,7 @@ app.registerExtension({
 			}
 			scheduleRebuild();
 		};
-		
+
 		const originalOnGroupRemove = app.graph?.onGroupRemove;
 		app.graph.onGroupRemove = function(group) {
 			if (originalOnGroupRemove) {
@@ -594,8 +531,6 @@ app.registerExtension({
 			}
 			scheduleRebuild();
 		};
-		
-		console.log("[GJJ GroupBypasser] Extension registered successfully");
 	}
 });
 
@@ -625,7 +560,7 @@ function syncGroupButtonStates(node, activeGroups = getActiveGroupRefs(node)) {
 		const title = String(widget.__groupRef?.title || "未命名分组");
 
 		widget.value = isActive;
-		widget.__buttonEl.textContent = `${isActive ? "\u2705 " : "\u274c "}${title}`;
+		widget.__buttonEl.textContent = `${isActive ? "✅ " : "❌ "}${title}`;
 		updateButtonClass(widget.__buttonEl, isActive);
 	});
 }
@@ -655,18 +590,15 @@ function syncModeButtonStates(node) {
 }
 
 function ensureGroupButtonStyles(container) {
-	// 检查样式是否已经注入
 	const styleId = "gjj-group-bypasser-styles";
 	const existingStyle = document.getElementById(styleId);
 	if (existingStyle) {
-		console.log("[GJJ GroupBypasser] CSS styles already exist, checking...");
 		return;
 	}
-	
+
 	const style = document.createElement("style");
 	style.id = styleId;
-	
-	// 使用更高优先级的 CSS 规则，包含所有可能的浏览器前缀
+
 	style.textContent = `
 		.gjj-group-button {
 			flex: 1 1 0 !important;
@@ -691,38 +623,13 @@ function ensureGroupButtonStyles(container) {
 			color: #fff !important;
 		}
 	`;
-	
+
 	document.head.appendChild(style);
-	console.log("[GJJ GroupBypasser] Global CSS styles injected to document.head");
-	console.log("[GJJ GroupBypasser] Style element:", style);
-	console.log("[GJJ GroupBypasser] Style textContent length:", style.textContent.length);
-	
-	// 验证样式是否真的被添加
-	setTimeout(() => {
-		const styleSheet = document.styleSheets;
-		console.log("[GJJ GroupBypasser] Total stylesheets:", styleSheet.length);
-		for (let i = 0; i < styleSheet.length; i++) {
-			if (styleSheet[i].ownerNode && styleSheet[i].ownerNode.id === styleId) {
-				console.log("[GJJ GroupBypasser] Found our stylesheet at index:", i);
-				try {
-					const rules = styleSheet[i].cssRules || styleSheet[i].rules;
-					console.log("[GJJ GroupBypasser] Number of CSS rules:", rules.length);
-					for (let j = 0; j < rules.length; j++) {
-						console.log("[GJJ GroupBypasser] Rule", j, ":", rules[j].selectorText);
-					}
-				} catch (e) {
-					console.log("[GJJ GroupBypasser] Cannot read CSS rules (CORS restriction):", e);
-				}
-			}
-		}
-	}, 100);
 }
 
-// 初始化时注入样式
 if (document.head) {
 	ensureGroupButtonStyles(document.body);
 } else {
-	// 如果 document.head 还不存在，等待 DOM 加载完成
 	document.addEventListener("DOMContentLoaded", () => {
 		ensureGroupButtonStyles(document.body);
 	});
@@ -730,20 +637,12 @@ if (document.head) {
 
 function updateButtonClass(button, isActive) {
 	if (!button) {
-		console.error("[GJJ GroupBypasser] updateButtonClass - button is null");
 		return;
 	}
-	
-	// 使用 setProperty 设置类名，确保生效
+
 	if (isActive) {
 		button.classList.add("gjj-active");
 	} else {
 		button.classList.remove("gjj-active");
 	}
-	
-	console.log("[GJJ GroupBypasser] updateButtonClass - button:", button.textContent.substring(0, 20), "isActive:", isActive, "classList:", button.className);
-	
-	// 额外调试：检查计算后的样式
-	const computedStyle = window.getComputedStyle(button);
-	console.log("[GJJ GroupBypasser] Computed style - background:", computedStyle.backgroundColor, "color:", computedStyle.color);
 }

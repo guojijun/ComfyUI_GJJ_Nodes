@@ -103,13 +103,13 @@ function measureHeight(node) {
 }
 
 function refreshLayout(node) {
-	const width = Math.max(MIN_WIDTH, Number(node.size?.[0] || MIN_WIDTH));
+	// 只更新高度，保留用户设置的宽度
 	const height = Math.max(
 		MIN_NODE_HEIGHT,
 		Number(node.size?.[1] || MIN_NODE_HEIGHT),
 	);
-	if ((node.size?.[0] || 0) !== width || (node.size?.[1] || 0) !== height) {
-		node.setSize?.([width, height]);
+	if ((node.size?.[1] || 0) !== height) {
+		node.setSize?.([node.size?.[0], height]);
 	}
 	setDirty(node);
 }
@@ -122,6 +122,7 @@ function estimateImagePreviewHeight(node) {
 	if (count === 1) {
 		return SINGLE_IMAGE_PREVIEW_HEIGHT;
 	}
+	// 使用用户设置的宽度，而不是强制最小宽度
 	const nodeWidth = Math.max(MIN_WIDTH, Number(node?.size?.[0] || MIN_WIDTH));
 	const contentWidth = Math.max(220, nodeWidth - 36);
 	const columns = Math.min(
@@ -157,12 +158,12 @@ function updateLayout(node) {
 	if (!node) {
 		return;
 	}
-	const width = Math.max(MIN_WIDTH, Number(node.size?.[0] || MIN_WIDTH));
+	// 只更新高度，保留用户设置的宽度
 	const height =
 		String(node.__gjjAnyPreviewKind || "") === "image"
 			? Math.max(MIN_NODE_HEIGHT, estimateImagePreviewHeight(node) + 72)
 			: measureHeight(node);
-	node.setSize?.([width, height]);
+	node.setSize?.([node.size?.[0], height]);
 	setDirty(node);
 }
 

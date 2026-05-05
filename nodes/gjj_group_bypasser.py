@@ -24,6 +24,8 @@ class GJJ_GroupBypasser:
                         "tooltip": "输入分组名称中的关键词进行筛选；留空时显示当前工作流中的全部分组。",
                     },
                 ),
+            },
+            "hidden": {
                 "selection_mode": (
                     ["单选", "多选"],
                     {
@@ -32,7 +34,7 @@ class GJJ_GroupBypasser:
                         "tooltip": "单选时分组按钮互斥，只能启用一个分组；多选时可以同时启用多个匹配分组。",
                     },
                 ),
-            }
+            },
         }
 
     def noop(self, filter_keyword, selection_mode="单选"):

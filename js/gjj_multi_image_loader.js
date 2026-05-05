@@ -453,9 +453,9 @@ function measureHeight(node) {
 
 function updateLayout(node) {
 	updateSummary(node);
-	const width = Math.max(MIN_WIDTH, Number(node.size?.[0] || MIN_WIDTH));
+	// 只更新高度，保留用户设置的宽度
 	const height = measureHeight(node);
-	node.setSize?.([width, height]);
+	node.setSize?.([node.size?.[0], height]);
 	if (node.__gjjMultiImageWidget) {
 		node.__gjjMultiImageWidget.last_y = 0;
 	}
