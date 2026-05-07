@@ -49,7 +49,7 @@ def resolve_axis_position(value, size):
     解析位置值，兼容两种模式：
     - 0到1之间（含0和1）：按百分比位置处理（浮点数）
     - 大于1：按像素位置处理（整数）
-    
+
     示例：
     - 0.5 → size * 0.5 (50%位置)
     - 1.0 → size * 1.0 (100%位置)
@@ -72,34 +72,34 @@ def apply_opacity(image: Image.Image, opacity: float) -> Image.Image:
     """应用透明度到图像"""
     if opacity >= 1.0:
         return image
-    
+
     # 分离通道
     r, g, b, a = image.split()
-    
+
     # 调整alpha通道
     a = a.point(lambda x: int(x * opacity))
-    
+
     # 合并通道
     return Image.merge('RGBA', (r, g, b, a))
 
 def tensor_to_pil(tensor):
     """Convert torch tensor to PIL Image
-    
+
     Args:
         tensor: [H, W, C] 或 [H, W] 格式的 tensor
-    
+
     Returns:
         PIL Image: 保留原始通道（RGB 或 RGBA）
     """
     # Ensure tensor is on CPU and numpy
     np_img = tensor.cpu().numpy()
-    
+
     # Scale from 0-1 to 0-255 if necessary
     if np_img.max() <= 1.0:
         np_img = (np_img * 255).astype(np.uint8)
     else:
         np_img = np_img.astype(np.uint8)
-    
+
     # 根据通道数创建对应的 PIL Image
     if np_img.ndim == 2:
         # 灰度图
@@ -119,23 +119,23 @@ def tensor_to_pil(tensor):
 
 def pil_to_tensor(image):
     """Convert PIL Image to torch tensor
-    
+
     Args:
         image: PIL Image (RGB or RGBA)
-    
+
     Returns:
         torch.Tensor: [H, W, C] format, range [0, 1]
     """
     # 确保是RGB格式
     if image.mode != 'RGB':
         image = image.convert('RGB')
-    
+
     # 转换为numpy数组
     np_img = np.array(image)
-    
+
     # 调试：打印 numpy 数组信息
     print(f"[DEBUG pil_to_tensor] np_img.shape: {np_img.shape}, np_img.ndim: {np_img.ndim}, dtype: {np_img.dtype}")
-    
+
     # 确保是3维数组 [H, W, C]
     if np_img.ndim == 2:
         # 如果是灰度图，扩展为3通道
@@ -147,13 +147,13 @@ def pil_to_tensor(image):
         np_img = np_img[:, :, :3]
     elif np_img.ndim == 3 and np_img.shape[2] != 3:
         print(f"[WARNING] 通道数异常: {np_img.shape[2]}")
-    
+
     # 转换为 float32 并归一化
     np_img = np_img.astype(np.float32) / 255.0
-    
+
     tensor = torch.from_numpy(np_img)
     print(f"[DEBUG pil_to_tensor] 返回 Tensor shape: {tensor.shape}")
-    
+
     return tensor
 
 # 工具函数
@@ -177,12 +177,12 @@ class GJJ_TextOverlay:
     CATEGORY = "GJJ"
     DESCRIPTION = "将文本或 RGBA 水印叠加到背景图上，支持批量处理。覆盖文本可设置透明度。"
     SEARCH_ALIASES = ["text overlay", "text image overlay", "水印", "叠加", "图片", "批量", "batch"]
-    
+
     FUNCTION = "run"
     RETURN_TYPES = (MIXED_BATCH_IMAGE_TYPE,)
     RETURN_NAMES = ("叠加后图像",)
     OUTPUT_TOOLTIPS = ("文本或水印叠加后的合成图像（自动匹配输入类型）。",)
-    
+
     INPUT_IS_LIST = False
     OUTPUT_IS_LIST = (True,)
 
@@ -200,7 +200,7 @@ class GJJ_TextOverlay:
                     "default": "",
                     "multiline": True,
                     "display_name": "文本列表",
-                    "tooltip": "一行一个，按种子随机选取（可选，不填则只使用 RGBA 水印）",
+                    "tooltip": "支持多行文本，每行独立显示。可用分隔符和索引抽取第一行的部分内容。",
                 }),
                 "watermark_image": (MIXED_BATCH_IMAGE_TYPE, {
                     "display_name": "水印图",
@@ -261,7 +261,7 @@ class GJJ_TextOverlay:
                     "default": 0,
                     "min": 0,
                     "display_name": "种子值",
-                    "tooltip": "控制随机选行",
+                    "tooltip": "已废弃：多行文本模式下不再随机选行，所有行都会显示。",
                 }),
                 "strip_empty": ("BOOLEAN", {
                     "default": True,
@@ -359,35 +359,46 @@ class GJJ_TextOverlay:
         # 确保是4D张量 [B, H, W, C]
         if background_image.ndim == 3:
             background_image = background_image.unsqueeze(0)
-        
+
         batch_size = background_image.shape[0]
         background_images = [background_image[i] for i in range(batch_size)]
-        
+
         # 自动检测背景图尺寸，用于动态UI
         # 如果是批量，使用最小尺寸以确保安全区域或统一参考
         min_height = int(background_images[0].shape[0])
         min_width = int(background_images[0].shape[1])
-        
+
         for bg_tensor in background_images:
             h = int(bg_tensor.shape[0])
             w = int(bg_tensor.shape[1])
             min_height = min(min_height, h)
             min_width = min(min_width, w)
 
-        # 解析文本
-        items = parse_text_blob(texts, strip_empty=strip_empty) or [""]
-        line = items[seed % len(items)].strip()
-        final_text = line
+        # 解析文本 - 保留所有行，支持多行显示
+        items = parse_text_blob(texts, strip_empty=strip_empty)
 
-        # 分段 + 索引抽取
-        if split_char and split_char in line:
-            parts = line.split(split_char)
-            try:
-                idx_list = [int(i.strip()) for i in indexes.split(",") if i.strip().isdigit()]
-                selected = [parts[i].strip() for i in idx_list if 0 <= i < len(parts)]
-                final_text = " ".join(selected)
-            except:
-                final_text = parts[1].strip() if len(parts) > 1 else line
+        # 如果有文本内容，使用完整的多行文本
+        if items and items != [""]:
+            # 分段 + 索引抽取（仅在第一行应用）
+            first_line = items[0]
+            if split_char and split_char in first_line:
+                parts = first_line.split(split_char)
+                try:
+                    idx_list = [int(i.strip()) for i in indexes.split(",") if i.strip().isdigit()]
+                    selected = [parts[i].strip() for i in idx_list if 0 <= i < len(parts)]
+                    final_text = " ".join(selected)
+                    # 保留其他行
+                    if len(items) > 1:
+                        final_text = final_text + "\n" + "\n".join(items[1:])
+                except:
+                    final_text = parts[1].strip() if len(parts) > 1 else first_line
+                    if len(items) > 1:
+                        final_text = final_text + "\n" + "\n".join(items[1:])
+            else:
+                # 没有分隔符，直接使用所有行
+                final_text = "\n".join(items)
+        else:
+            final_text = ""
 
         # 文件名
         filename = re.sub(r'[^a-zA-Z0-9\u4e00-\u9fff]', '_', final_text)[:150] or "text"
@@ -396,7 +407,7 @@ class GJJ_TextOverlay:
         # 确保是4D张量 [B, H, W, C]
         if background_image.ndim == 3:
             background_image = background_image.unsqueeze(0)
-        
+
         batch_size = background_image.shape[0]
         background_images = [background_image[i] for i in range(batch_size)]
 
@@ -414,10 +425,10 @@ class GJJ_TextOverlay:
                     # 这里假设如果数量不一致，就只用第一张重复使用，或者如果只有一张
                     wm_single = watermark_image[0]
                     watermark_images = [wm_single] * batch_size
-        
+
         # 批量处理
         composite_outputs = []
-        
+
         # 预加载字体以避免在循环中重复加载
         try:
             font = ImageFont.truetype(resolve_font_path(font_path), font_size)
@@ -427,12 +438,12 @@ class GJJ_TextOverlay:
         # 颜色转换
         text_col_rgb = hex2rgb(color_hex, (255, 215, 0))
         stroke_col_rgb = hex2rgb(stroke_color_hex, (0, 0, 0))
-        
+
         # 应用文本透明度到颜色
         text_alpha = int(255 * text_opacity)
         text_fill = (*text_col_rgb, text_alpha)
         stroke_fill = (*stroke_col_rgb, text_alpha) if use_stroke else None
-        
+
         sw = stroke_width if use_stroke else 0
 
         for i, bg_tensor in enumerate(background_images):
@@ -450,28 +461,41 @@ class GJJ_TextOverlay:
             current_text = final_text if final_text else ""
 
             if current_text:
+                # 支持多行文本：按换行符分割
+                lines = current_text.split('\n')
+
                 # 计算字符尺寸用于间距计算
-                # 使用第一个字符估算，或者遍历获取更精确的布局（简单起见使用平均或首个）
-                sample_char = current_text[0]
+                sample_char = current_text[0] if current_text else 'A'
                 bbox = draw.textbbox((0, 0), sample_char, font=font)
                 cw = bbox[2] - bbox[0]
                 ch = bbox[3] - bbox[1]
-                
+
+                # 计算行高（字体大小 + 额外间距）
+                line_height = ch + spacing + 10  # 10px 额外行间距
+
                 # 解析起始位置
-                cx = resolve_axis_position(x, canvas_width)
-                cy = resolve_axis_position(y, canvas_height)
-                
+                start_x = resolve_axis_position(x, canvas_width)
+                start_y = resolve_axis_position(y, canvas_height)
+
                 # 横竖排版绘制
                 if is_vertical_direction(direction):
-                    for c in current_text:
-                        draw.text((cx, cy), c, font=font, fill=text_fill,
-                                  stroke_width=sw, stroke_fill=stroke_fill)
-                        cy += ch + spacing
+                    # 纵向：每行从上到下，多行从左到右排列
+                    for line_idx, line in enumerate(lines):
+                        cx = start_x + line_idx * (cw + spacing + 5)  # 行间距
+                        cy = start_y
+                        for c in line:
+                            draw.text((cx, cy), c, font=font, fill=text_fill,
+                                      stroke_width=sw, stroke_fill=stroke_fill)
+                            cy += ch + spacing
                 else:
-                    for c in current_text:
-                        draw.text((cx, cy), c, font=font, fill=text_fill,
-                                  stroke_width=sw, stroke_fill=stroke_fill)
-                        cx += cw + spacing
+                    # 横向：每行从左到右，多行从上到下排列
+                    for line_idx, line in enumerate(lines):
+                        cx = start_x
+                        cy = start_y + line_idx * line_height
+                        for c in line:
+                            draw.text((cx, cy), c, font=font, fill=text_fill,
+                                      stroke_width=sw, stroke_fill=stroke_fill)
+                            cx += cw + spacing
 
             # 合成文本到背景
             composite = Image.alpha_composite(bg_pil, text_layer)
@@ -480,68 +504,68 @@ class GJJ_TextOverlay:
             if i < len(watermark_images):
                 wm_tensor = watermark_images[i]
                 wm_pil = tensor_to_pil(wm_tensor).convert("RGBA")
-                
+
                 # 关键修复：如果有 watermark_mask，将其合成到水印的 Alpha 通道
                 if watermark_mask is not None:
                     # 获取当前图片对应的 mask
                     mask_tensor = watermark_mask
-                    
+
                     # 处理 mask 的批次维度
                     if mask_tensor.ndim == 4:
                         # 批量 mask，取对应的索引
                         mask_idx = i if mask_tensor.shape[0] > 1 else 0
                         mask_tensor = mask_tensor[mask_idx]
-                    
+
                     # mask 可能是 [H, W] 或 [H, W, 1]
                     if mask_tensor.ndim == 3:
                         mask_tensor = mask_tensor.squeeze(-1)
-                    
+
                     # 转换为 numpy 数组
                     mask_np = mask_tensor.cpu().numpy()
-                    
+
                     # 归一化到 0-255
                     if mask_np.max() <= 1.0:
                         mask_np = (mask_np * 255).astype(np.uint8)
                     else:
                         mask_np = mask_np.astype(np.uint8)
-                    
+
                     # 调整 mask 尺寸到水印大小
                     mask_pil = Image.fromarray(mask_np, mode="L")
                     mask_pil = mask_pil.resize(wm_pil.size, Image.LANCZOS)
-                    
+
                     # 将 mask 设置为水印的 Alpha 通道
                     wm_pil.putalpha(mask_pil)
-                
+
                 # 应用水印宽度缩放
                 if watermark_width != 1.0:
                     orig_width, orig_height = wm_pil.size
                     new_width = max(1, int(orig_width * watermark_width))
                     new_height = max(1, int(orig_height * watermark_width))
                     wm_pil = wm_pil.resize((new_width, new_height), Image.LANCZOS)
-                
+
                 # 应用水印透明度
                 if watermark_opacity < 1.0:
                     wm_pil = apply_opacity(wm_pil, watermark_opacity)
-                
+
                 # 确定水印位置
                 wx = int(resolve_axis_position(x, canvas_width))
                 wy = int(resolve_axis_position(y, canvas_height))
-                
+
                 # 创建水印图层以支持位置偏移
                 watermark_layer = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
                 watermark_layer.paste(wm_pil, (wx, wy), mask=wm_pil)
-                
+
                 composite = Image.alpha_composite(composite, watermark_layer)
 
             # 转换为tensor
             # 调试：打印图像信息
             print(f"[DEBUG] 合成后图像 {i}: PIL mode={composite.mode}, size={composite.size}")
-            
+
             comp_out = pil_to_tensor(composite.convert("RGB"))
-            
+
             # 调试：打印 Tensor 形状
             print(f"[DEBUG] 输出 Tensor {i} shape: {comp_out.shape}, ndim: {comp_out.ndim}")
-            
+
             composite_outputs.append(comp_out)
 
         # 批量输出：直接返回批量图片队列，不拼接
