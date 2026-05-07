@@ -20,10 +20,11 @@ from .gjj_lazy_image_studio import (
     _load_clip_from_names,
     _load_model,
     _load_vae,
-    _pick_available_name,
-    _safe_filename_list,
+)
+from .gjj_model_bundle_loader import (
     list_clip_models,
     list_unet_models,
+    list_vae_models,
 )
 # 移除外部依赖，在节点内部实现统一的缩放和补齐逻辑
 from .gjj_multi_image_loader import build_uniform_batch_by_longest_edge
@@ -110,21 +111,21 @@ def _pad_image_height(image: torch.Tensor, target_height: int, padding_mode: str
     current_height = int(image.shape[1])
     if current_height >= target_height:
         return image
-    
+
     # 计算需要补齐的像素数
     pad_height = target_height - current_height
     pad_top = pad_height // 2 if padding_mode == "center" else 0
     pad_bottom = pad_height - pad_top
-    
+
     # 创建黑色填充（RGB全0）
     batch_size = int(image.shape[0])
     width = int(image.shape[2])
     channels = int(image.shape[3])
-    
+
     # 创建填充张量
     top_pad = torch.zeros(batch_size, pad_top, width, channels, device=image.device, dtype=image.dtype) if pad_top > 0 else None
     bottom_pad = torch.zeros(batch_size, pad_bottom, width, channels, device=image.device, dtype=image.dtype) if pad_bottom > 0 else None
-    
+
     # 拼接
     parts = []
     if top_pad is not None:
@@ -132,7 +133,7 @@ def _pad_image_height(image: torch.Tensor, target_height: int, padding_mode: str
     parts.append(image)
     if bottom_pad is not None:
         parts.append(bottom_pad)
-    
+
     return torch.cat(parts, dim=1)
 
 
@@ -140,14 +141,14 @@ def _merge_output_images(images: list[torch.Tensor]) -> tuple[torch.Tensor, bool
     """合并输出图片，先按最大长边缩放，再居中补齐高度"""
     if not images:
         raise RuntimeError("没有可输出的去水印结果。")
-    
+
     normalized = [_ensure_image_batch(image) for image in images]
-    
+
     # 检查尺寸是否一致
     size_set = {(int(image.shape[2]), int(image.shape[1])) for image in normalized}
     if len(size_set) == 1:
         return torch.cat(normalized, dim=0).contiguous(), False
-    
+
     # 尺寸不一致，需要统一处理
     # 第一遍：找到所有图片的最大长边
     max_longest_edge = 0
@@ -155,28 +156,28 @@ def _merge_output_images(images: list[torch.Tensor]) -> tuple[torch.Tensor, bool
         height = int(image.shape[1])
         width = int(image.shape[2])
         max_longest_edge = max(max_longest_edge, max(height, width))
-    
+
     # 第二遍：按最大长边缩放，然后居中补齐高度
     scaled = []
     for image in normalized:
         height = int(image.shape[1])
         width = int(image.shape[2])
         longest_edge = max(height, width)
-        
+
         # 按长边缩放到统一尺寸
         if longest_edge != max_longest_edge:
             scale_factor = max_longest_edge / longest_edge
             new_width = int(round(width * scale_factor / 8.0) * 8)
             new_height = int(round(height * scale_factor / 8.0) * 8)
             image = _resize_image_exact(image, new_width, new_height, "lanczos")
-        
+
         # 如果高度不一致，居中补齐
         current_height = int(image.shape[1])
         if current_height < max_longest_edge:
             image = _pad_image_height(image, max_longest_edge, "center")
-        
+
         scaled.append(image)
-    
+
     return torch.cat(scaled, dim=0).contiguous(), True
 
 
@@ -359,9 +360,32 @@ def _save_result_images(
     return previews, saved_paths
 
 
+from .common_utils.flux2_tools import (
+    gjjutils_append_reference_latent,
+    gjjutils_encode_text,
+    gjjutils_zero_out_conditioning,
+)
+from .common_utils.text_tools import gjjutils_pick_available_name
+
+
 def _resolve_from_category(category: str, requested: str, label: str) -> str:
-    available = _safe_filename_list(category)
-    resolved = _pick_available_name(requested, available, requested)
+    """从指定类别中解析模型名称"""
+    if category == "vae":
+        available = list_vae_models() or [DEFAULT_VAE]
+    elif category == "diffusion_models":
+        available = list_unet_models() or [DEFAULT_UNET]
+    elif category == "text_encoders":
+        available = list_clip_models() or [DEFAULT_CLIP]
+    else:
+        # 回退到通用方法
+        try:
+            import folder_paths
+            available = folder_paths.get_filename_list(category)
+        except Exception:
+            available = []
+
+    from .common_utils.text_tools import gjjutils_pick_available_name
+    resolved = gjjutils_pick_available_name(requested, available, requested)
     if not resolved:
         raise RuntimeError(f"未找到{label}模型：{requested}")
     return resolved
@@ -369,8 +393,9 @@ def _resolve_from_category(category: str, requested: str, label: str) -> str:
 
 def _resolve_unet_name(requested: str) -> str:
     """解析 UNET 模型名称"""
-    available = list_unet_models() or _safe_filename_list("diffusion_models") or [DEFAULT_UNET]
-    resolved = _pick_available_name(requested, available, DEFAULT_UNET)
+    from .common_utils.text_tools import gjjutils_pick_available_name
+    available = list_unet_models() or [DEFAULT_UNET]
+    resolved = gjjutils_pick_available_name(requested, available, DEFAULT_UNET)
     if not resolved:
         raise RuntimeError(f"未找到 UNET 模型：{requested}")
     return resolved
@@ -378,8 +403,9 @@ def _resolve_unet_name(requested: str) -> str:
 
 def _resolve_clip_name(requested: str) -> str:
     """解析 CLIP 模型名称"""
-    available = list_clip_models() or _safe_filename_list("text_encoders") or [DEFAULT_CLIP]
-    resolved = _pick_available_name(requested, available, DEFAULT_CLIP)
+    from .common_utils.text_tools import gjjutils_pick_available_name
+    available = list_clip_models() or [DEFAULT_CLIP]
+    resolved = gjjutils_pick_available_name(requested, available, DEFAULT_CLIP)
     if not resolved:
         raise RuntimeError(f"未找到 CLIP 模型：{requested}")
     return resolved
@@ -411,9 +437,9 @@ def _process_single_image(
 
     _send_status(unique_id, f"编码参考图{suffix}...")
     reference_latent = VAEEncode().encode(vae, working)[0]["samples"]
-    positive = _append_reference_latent(_encode_text(clip, prompt), reference_latent)
-    negative_base = _encode_text(clip, negative_prompt) if str(negative_prompt or "").strip() else _zero_out(_encode_text(clip, prompt))
-    negative = _append_reference_latent(negative_base, reference_latent)
+    positive = gjjutils_append_reference_latent(gjjutils_encode_text(clip, prompt), reference_latent)
+    negative_base = gjjutils_encode_text(clip, negative_prompt) if str(negative_prompt or "").strip() else gjjutils_zero_out_conditioning(gjjutils_encode_text(clip, prompt))
+    negative = gjjutils_append_reference_latent(negative_base, reference_latent)
 
     _send_status(unique_id, f"采样去水印{suffix}...")
     latent = EmptyFlux2LatentImage.execute(width, height, 1)[0]
@@ -425,20 +451,20 @@ def _process_single_image(
 
     _send_status(unique_id, f"解码结果{suffix}...")
     result = VAEDecode().decode(vae, sampled)[0]
-    
+
     # 如果指定了目标长边，则缩放到该尺寸
     if target_longest_edge is not None and output_size_mode == "保持输入尺寸":
         result_height = int(result.shape[1])
         result_width = int(result.shape[2])
         result_longest_edge = max(result_height, result_width)
-        
+
         if result_longest_edge != target_longest_edge:
             # 计算缩放比例
             scale_factor = target_longest_edge / result_longest_edge
             new_width = max(16, int(round(result_width * scale_factor / 8.0) * 8))
             new_height = max(16, int(round(result_height * scale_factor / 8.0) * 8))
             result = _resize_image_exact(result, new_width, new_height, scale_method)
-    
+
     return result.clamp(0.0, 1.0).contiguous()
 
 
@@ -456,9 +482,9 @@ class GJJ_BatchWatermarkRemover:
 
     @classmethod
     def INPUT_TYPES(cls):
-        unet_models = list_unet_models() or _safe_filename_list("diffusion_models") or [DEFAULT_UNET]
-        clip_models = list_clip_models() or _safe_filename_list("text_encoders") or [DEFAULT_CLIP]
-        vae_models = _safe_filename_list("vae") or [DEFAULT_VAE]
+        unet_models = list_unet_models() or [DEFAULT_UNET]
+        clip_models = list_clip_models() or [DEFAULT_CLIP]
+        vae_models = list_vae_models() or [DEFAULT_VAE]
         return {
             "required": {
                 "image": (
@@ -489,7 +515,7 @@ class GJJ_BatchWatermarkRemover:
                 "unet_name": (
                     unet_models,
                     {
-                        "default": _pick_available_name(DEFAULT_UNET, unet_models, DEFAULT_UNET),
+                        "default": gjjutils_pick_available_name(DEFAULT_UNET, unet_models, DEFAULT_UNET),
                         "display_name": "🟣 UNET 主模型",
                         "tooltip": "默认对齐参考工作流的 flux-2-klein-4b-fp8.safetensors；会从本地 diffusion_models/checkpoints 列表中解析。",
                     },
@@ -497,7 +523,7 @@ class GJJ_BatchWatermarkRemover:
                 "clip_name": (
                     clip_models,
                     {
-                        "default": _pick_available_name(DEFAULT_CLIP, clip_models, DEFAULT_CLIP),
+                        "default": gjjutils_pick_available_name(DEFAULT_CLIP, clip_models, DEFAULT_CLIP),
                         "display_name": "🔤 CLIP 文本编码器",
                         "tooltip": "默认对齐参考工作流的 qwen_3_4b.safetensors；类型固定按 flux2 加载。",
                     },
@@ -505,7 +531,7 @@ class GJJ_BatchWatermarkRemover:
                 "vae_name": (
                     vae_models,
                     {
-                        "default": _pick_available_name(DEFAULT_VAE, vae_models, DEFAULT_VAE),
+                        "default": gjjutils_pick_available_name(DEFAULT_VAE, vae_models, DEFAULT_VAE),
                         "display_name": "🧩 VAE",
                         "tooltip": "默认对齐参考工作流的 flux2-vae.safetensors。",
                     },
@@ -640,7 +666,7 @@ class GJJ_BatchWatermarkRemover:
 
             total = len(input_images)
             results: list[torch.Tensor] = []
-            
+
             # 计算所有输入图片在工作尺寸下的最大长边（用于统一输出尺寸）
             max_longest_edge = 0
             if output_size_mode == "保持输入尺寸":
@@ -651,7 +677,7 @@ class GJJ_BatchWatermarkRemover:
                     work_height = int(working.shape[1])
                     work_width = int(working.shape[2])
                     max_longest_edge = max(max_longest_edge, max(work_height, work_width))
-            
+
             for index, single_image in enumerate(input_images, start=1):
                 suffix = f"（第 {index}/{total} 张）" if total > 1 else ""
                 _send_status(unique_id, f"2/4 准备图片{suffix}...")

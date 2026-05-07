@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "scan_time": "2026-05-07T19:47:58.139419",
+  "scan_time": "2026-05-07T21:29:37.154332",
   "file_hashes": {
     "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\analyze_official_workflows.py": "a6f13fa0d282d05f92641bedf7f0073d",
     "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\analyze_video_workflows.py": "e8b4ffe5e7b31775061a539bccd4ae21",
@@ -15,7 +15,7 @@
     "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_batch_image_bridge.py": "bda62514bb68ed055df6e62f3e54714a",
     "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_batch_image_type.py": "d31dd972391993b753c818958cd8f0af",
     "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_batch_text_segmenter.py": "8d5480dbd27dfab0d9340fd2960ba735",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_batch_watermark_remover.py": "ddd6681aa111d3453bf07264804c359c",
+    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_batch_watermark_remover.py": "3d75d745f6d582e4de9ad6e0be8ffb66",
     "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_brushnet_inpaint.py": "e488010cfa1838319af46b2f64c19d1b",
     "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_character_multiview_studio.py": "785fee6d57ee45ead57a849a05c96e9e",
     "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_checkpoint_direct_generator.py": "59b9af9adf54579afbf2480d6f0be929",
@@ -153,9 +153,9 @@
         "gjj_audio_ace_music_generator.py"
       ],
       "sam3": [
+        "gjj_batch_text_segmenter.py",
         "gjj_sam3_runtime.py",
-        "gjj_sam3_segmenter.py",
-        "gjj_batch_text_segmenter.py"
+        "gjj_sam3_segmenter.py"
       ],
       "flux-2-klein-4b-fp8": [
         "gjj_batch_watermark_remover.py"
@@ -164,9 +164,9 @@
         "gjj_batch_watermark_remover.py"
       ],
       "flux2-vae": [
-        "utils.py",
         "gjj_batch_watermark_remover.py",
-        "gjj_lazy_image_studio.py"
+        "gjj_lazy_image_studio.py",
+        "utils.py"
       ],
       "qwen-image-edit-2511-multiple-angles-lora": [
         "gjj_character_multiview_studio.py"
@@ -227,8 +227,8 @@
         "gjj_flux_fill_dev_outpaint.py"
       ],
       "flux-2-klein-9b-nvfp4": [
-        "utils.py",
-        "gjj_lazy_image_studio.py"
+        "gjj_lazy_image_studio.py",
+        "utils.py"
       ],
       "full-encoder-small-decoder": [
         "gjj_lazy_image_studio.py"
@@ -237,38 +237,38 @@
         "gjj_lazy_image_studio.py"
       ],
       "model": [
-        "gjj_longcat_audiodit_loader.py",
-        "gjj_sam3d_body.py"
+        "gjj_sam3d_body.py",
+        "gjj_longcat_audiodit_loader.py"
       ],
       "ltx-2.3-22b-dev-fp8": [
+        "gjj_ltx23_first_last_outfit.py",
         "gjj_ltx23_multiref_runtime.py",
-        "gjj_ltx23_workflow_suite.py",
-        "gjj_ltx23_first_last_outfit.py"
+        "gjj_ltx23_workflow_suite.py"
       ],
       "ltx-2.3-22b-dev": [
-        "gjj_ltx23_multiref_runtime.py",
-        "gjj_ltx23_first_last_outfit.py"
+        "gjj_ltx23_first_last_outfit.py",
+        "gjj_ltx23_multiref_runtime.py"
       ],
       "ltx23-video-vae": [
+        "gjj_ltx23_first_last_outfit.py",
         "gjj_ltx23_multiref_runtime.py",
-        "gjj_ltx23_workflow_suite.py",
-        "gjj_ltx23_first_last_outfit.py"
+        "gjj_ltx23_workflow_suite.py"
       ],
       "gemma-3-12b-it": [
-        "gjj_ltx23_multiref_runtime.py",
-        "gjj_ltx23_workflow_suite.py",
         "gjj_ltx23_first_last_outfit.py",
-        "gjj_ltx23_image_to_video.py"
+        "gjj_ltx23_image_to_video.py",
+        "gjj_ltx23_multiref_runtime.py",
+        "gjj_ltx23_workflow_suite.py"
       ],
       "ltx-2.3-spatial-upscaler-x2-1.1": [
-        "gjj_ltx23_multiref_runtime.py",
-        "gjj_ltx23_workflow_suite.py",
         "gjj_ltx23_first_last_outfit.py",
-        "gjj_ltx23_image_to_video.py"
+        "gjj_ltx23_image_to_video.py",
+        "gjj_ltx23_multiref_runtime.py",
+        "gjj_ltx23_workflow_suite.py"
       ],
       "ltx-2.3-spatial-upscaler-x2-1.0": [
-        "gjj_ltx23_multiref_runtime.py",
-        "gjj_ltx23_first_last_outfit.py"
+        "gjj_ltx23_first_last_outfit.py",
+        "gjj_ltx23_multiref_runtime.py"
       ],
       "ltx2.3-transition": [
         "gjj_ltx23_first_last_outfit.py"
@@ -388,19 +388,19 @@
         "gjj_flux1_dual_clip_loader.py"
       ],
       "flux-2-klein-9b-nvfp4": [
-        "utils.py",
-        "gjj_lazy_image_studio.py"
+        "gjj_lazy_image_studio.py",
+        "utils.py"
       ],
       "full-encoder-small-decoder": [
         "gjj_lazy_image_studio.py"
       ],
       "model": [
-        "gjj_longcat_audiodit_loader.py",
-        "gjj_sam3d_body.py"
+        "gjj_sam3d_body.py",
+        "gjj_longcat_audiodit_loader.py"
       ],
       "ltx-2.3-22b-dev-fp8": [
-        "gjj_ltx23_workflow_suite.py",
-        "gjj_ltx23_first_last_outfit.py"
+        "gjj_ltx23_first_last_outfit.py",
+        "gjj_ltx23_workflow_suite.py"
       ],
       "默认自动匹配 ltx2.3-transition.safetensors；找不到时会跳过并在状态栏提示。": [
         "gjj_ltx23_first_last_outfit.py"
@@ -453,17 +453,17 @@
         "gjj_flux_fill_dev_outpaint.py"
       ],
       "flux-2-klein-9b-nvfp4": [
-        "utils.py",
-        "gjj_lazy_image_studio.py"
+        "gjj_lazy_image_studio.py",
+        "utils.py"
       ],
       "full-encoder-small-decoder": [
         "gjj_lazy_image_studio.py"
       ],
       "gemma-3-12b-it": [
-        "gjj_ltx23_multiref_runtime.py",
-        "gjj_ltx23_workflow_suite.py",
         "gjj_ltx23_first_last_outfit.py",
-        "gjj_ltx23_image_to_video.py"
+        "gjj_ltx23_image_to_video.py",
+        "gjj_ltx23_multiref_runtime.py",
+        "gjj_ltx23_workflow_suite.py"
       ],
       "ltx-2.3-text-projection": [
         "gjj_ltx23_workflow_suite.py"
@@ -513,16 +513,16 @@
         "gjj_flux_fill_dev_outpaint.py"
       ],
       "flux-2-klein-9b-nvfp4": [
-        "utils.py",
-        "gjj_lazy_image_studio.py"
+        "gjj_lazy_image_studio.py",
+        "utils.py"
       ],
       "full-encoder-small-decoder": [
         "gjj_lazy_image_studio.py"
       ],
       "ltx23-video-vae": [
+        "gjj_ltx23_first_last_outfit.py",
         "gjj_ltx23_multiref_runtime.py",
-        "gjj_ltx23_workflow_suite.py",
-        "gjj_ltx23_first_last_outfit.py"
+        "gjj_ltx23_workflow_suite.py"
       ],
       "qwen-image-edit-2511": [
         "gjj_old_photo_restorer.py"
@@ -577,9 +577,9 @@
     },
     "upscaler": {
       "ltx-2.3-spatial-upscaler-x2-1.1": [
-        "gjj_ltx23_multiref_runtime.py",
         "gjj_ltx23_first_last_outfit.py",
-        "gjj_ltx23_image_to_video.py"
+        "gjj_ltx23_image_to_video.py",
+        "gjj_ltx23_multiref_runtime.py"
       ],
       "ltx-2.3-spatial-upscaler-x2-1.0": [
         "gjj_ltx23_first_last_outfit.py"
