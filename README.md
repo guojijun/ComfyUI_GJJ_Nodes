@@ -49,6 +49,41 @@ pip install -r requirements.txt
 2. 解压到 `ComfyUI/custom_nodes/ComfyUI_GJJ_Nodes`
 3. 在该目录下运行 `pip install -r requirements.txt`
 
+### 国内镜像加速安装（推荐）
+
+如果下载速度慢，可使用国内 pip 镜像源：
+
+```bash
+# 清华镜像（推荐）
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 阿里云镜像
+pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
+
+# 腾讯云镜像
+pip install -r requirements.txt -i https://mirrors.cloud.tencent.com/pypi/simple
+
+# 可选依赖（同样使用镜像）
+pip install -r requirements-optional.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install -r requirements-accelerate.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+部分节点还需要额外手动安装的包（部分已集成在 requirements 中）：
+
+```bash
+# 人脸分析 / 换脸
+pip install insightface onnxruntime-gpu -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# Ollama 相关（提示词生成、图片分析等）
+pip install ollama -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 翻译
+pip install transformers sentencepiece -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# RIFE 视频插帧
+pip install pillow -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
 ### 可选依赖
 
 ```bash
@@ -56,13 +91,49 @@ pip install -r requirements-optional.txt   # 可选功能
 pip install -r requirements-accelerate.txt # 推理加速
 ```
 
-### 模型下载
+### 📥 模型下载
 
-部分节点需要配套模型才能运行，模型文件请从以下地址下载：
+部分节点需要配套模型才能运行。所有模型文件请从以下地址统一下载：
 
 🔗 **模型下载地址：** [https://pan.quark.cn/s/6ec846f1f58d](https://pan.quark.cn/s/6ec846f1f58d)
 
-下载后将对应模型放入 `ComfyUI/models/` 下的相应子目录即可，具体路径参考各节点参数中的中文提示。
+#### 各节点所需模型及放置路径一览
+
+下载后将对应模型放入 `ComfyUI/models/` 下的相应子目录：
+
+| 模型目录 | 模型文件 | 使用节点 |
+| -------- | -------- | -------- |
+| `models/cosyvoice/` | CosyVoice3 全套模型文件 | CosyVoice3 语音克隆 TTS |
+| `models/fishaudioS2/` | Fish Audio S2 全套模型 | Fish Audio S2 语音克隆 TTS |
+| `models/audiodit/` | LongCat-AudioDiT 模型 | LongCat 语音克隆 TTS |
+| `models/Qwen3-ASR/` | Qwen3-ASR 模型 | Qwen3 语音识别与强制对齐 |
+| `models/FlashVSR/` | FlashVSR / Ultra-Fast 模型 | FlashVSR 视频超分放大器 |
+| `models/sam3/` | sam3.safetensors | SAM3 点选/文本/批量分割器 |
+| `models/sam2/` | sam2_hiera_base_plus.safetensors 等 | SEM2 点选分割器 |
+| `models/sams/` | SAM 模型（sam_vit_b 等） | Face Detailer 细分/SAM Mask |
+| `models/sam3dbody/` | model.safetensors + assets/mhr_model.pt | SAM3D Body 人体网格恢复 |
+| `models/insightface/` | buffalo_l 模型 + inswapper_128.onnx | 人脸分析/换脸 |
+| `models/ultralytics/bbox/` | 人脸/目标检测 bbox 模型 | Face Detailer / BBox 检测 |
+| `models/latentsync/` | latentsync_unet.pt + whisper/tiny.pt | LatentSync 口型同步 |
+| `models/checkpoints/LatentSync-1.6/` | UNet / VAE / Whisper | Local LipSync 视频分支 |
+| `models/ckpts/` | big-lama.pt | LaMa 图像修复（去物补边） |
+| `models/translation/` | opus-mt-zh-en 模型 | 中英翻译节点 |
+| `models/upscale_models/` | ESRGAN / RealESRGAN 等超分模型 | 模型图片放大器 |
+| `models/upscale_models/` | ltx-2.3-spatial-upscaler-x2 | LTX2.3 潜空间放大 |
+| `models/checkpoints/` | LTX / Flux / Wan / SD 等底模 | 各生成/视频节点 |
+| `models/checkpoints/` | interiordesignsuperm_v2 等 | ControlNet Preset |
+| `models/checkpoints/` | ltx-2.3-22b 系列 | LTX2.3 视频生成 |
+| `models/checkpoints/` | wan2.2 系列 | Wan2.2 视频生成 |
+| `models/diffusion_models/` | flux-2-klein-4b-fp8.safetensors | 批量水印去除 |
+| `models/diffusion_models/` | wan2.2_s2v_14B_fp8_scaled | Wan S2V 检测分支 |
+| `models/text_encoders/` | gemma_3_12B_it_fp4_mixed.safetensors | LTX2.3 图片说话 |
+| `models/audio_encoders/` | wav2vec2_large_english_fp16.safetensors | Wan S2V 音频条件编码 |
+| `models/loras/LTX/` | ltx-2.3-22b-distilled-lora-384 + AV-LoRA | LTX2.3 口型同步 |
+| `models/vae/` | LTX23_video_vae_bf16 / LTX23_audio_vae_bf16 | LTX2.3 音视频链路 |
+| `models/mp3/` | 参考音频文件（.mp3 / .wav） | 语音克隆各节点（参考音色） |
+| `models/fonts/` | 字体文件（.ttf / .otf） | Text Overlay 文字叠加 |
+
+> **提示：** 大部分节点在运行时会自动在 `ComfyUI/models/` 下递归搜索模型，面板中也会显示对应的中文 tooltip 提示所需路径。
 
 ---
 
@@ -246,34 +317,41 @@ pip install -r requirements-accelerate.txt # 推理加速
 
 ```
 ComfyUI_GJJ_Nodes/
-├── __init__.py               # 入口：注册节点、帮助 API
-├── requirements.txt          # 核心依赖
-├── requirements-optional.txt # 可选依赖
-├── requirements-accelerate.txt # 加速依赖
-├── js/                       # 前端 JS（每个节点独立文件）
-├── nodes/                    # 后端 Python（每个节点独立文件）
-│   └── common_utils/         # 共享工具模块
-├── locales/                  # 国际化
-├── examples/                 # 工作流示例
-├── presets/                  # 预设文件
-├── utils/                    # 通用工具
-├── SKILL/                    # 开发文档和知识库
-│   ├── SKILL_INDEX.md        # 文档索引
-│   ├── 10-node-architecture/ # 每个节点的架构文档
-│   └── 11-dev-tools/         # 开发/测试工具
-├── memory/                   # 开发记忆/命名规范
-└── web/                      # Web 资源
+├── __init__.py                    # 入口：注册节点、帮助 API
+├── .editorconfig                  # 编辑器配置
+├── .gitignore                     # Git 忽略规则
+├── README.md                      # 项目说明
+├── requirements.txt               # 核心依赖
+├── requirements-optional.txt      # 可选依赖
+├── requirements-accelerate.txt    # 推理加速依赖
+├── js/                            # 前端 JS（每个节点独立文件）
+├── nodes/                         # 后端 Python（每个节点独立文件）
+│   └── common_utils/              # 共享工具模块
+├── locales/                       # 国际化
+│   └── zh/                        # 中文语言包
+├── examples/                      # 工作流 JSON 示例
+├── presets/                       # 预设文件
+├── utils/                         # 通用工具脚本
+└── web/                           # Web 资源
 ```
+
+> **注意：** 仓库中包含 `SKILL/`（开发文档）、`docs/`（使用指南）、`memory/`（开发记忆）等目录，这些目录已通过 `.gitignore` 排除，不会提交到远程仓库。如需查阅，请联系作者获取。
 
 ---
 
 ## 📖 文档
 
-- **[SKILL_INDEX.md](./SKILL/SKILL_INDEX.md)** — 完整文档索引，包含所有节点的架构说明和开发指南
-- **[GJJ_CODING_CONVENTIONS.md](./SKILL/GJJ_CODING_CONVENTIONS.md)** — 编码规范
-- **[SKILL/10-node-architecture/](./SKILL/10-node-architecture/)** — 每个节点的前后端架构文档
-- **[docs/](./docs/)** — 使用指南
-- **[examples/](./examples/)** — 工作流 JSON 示例
+开发和架构文档存放于 `SKILL/` 目录（本地知识库，已 gitignore）：
+
+- **SKILL_INDEX.md** — 完整文档索引，包含所有节点的架构说明和开发指南
+- **GJJ_CODING_CONVENTIONS.md** — 编码规范
+- **SKILL/10-node-architecture/** — 每个节点的前后端架构文档
+- **SKILL/11-dev-tools/** — 开发/测试工具
+
+使用指南：
+
+- **docs/** — 功能使用说明（通过 `.gitignore` 排除，按需获取）
+- **examples/** — 工作流 JSON 示例文件
 
 ---
 
