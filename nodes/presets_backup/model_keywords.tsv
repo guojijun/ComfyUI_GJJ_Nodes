@@ -1,0 +1,556 @@
+# GJJ 模型关键词索引表 (Model Keywords Index)
+# 
+# 用途说明：
+# 1. 统一管理所有模型的关键词（去扩展名、去量化参数）
+# 2. 支持模糊搜索和子目录匹配
+# 3. 方便维护和扩展
+#
+# 字段说明：
+# - id: 唯一标识符（小写，使用连字符分隔）
+# - category: 模型类别 (unet/clip/vae/lora/controlnet/upscaler/audio/embedding)
+# - keywords: 搜索关键词（多个用 | 分隔，已去除扩展名和量化参数）
+# - display_name: 显示名称（人类可读）
+# - description: 描述信息
+# - tags: 标签（多个用 | 分隔）
+# - priority: 优先级（0-100，数字越大越优先匹配）
+#
+# 规范化规则：
+# 1. 去除扩展名：.safetensors, .ckpt, .pth, .pt, .bin, .gguf, .onnx
+# 2. 去除量化参数：_fp8, _fp16, _bf16, _fp4, _nvfp4, _e4m3fn, _scaled, _turbo 等
+# 3. 统一使用小写字母和连字符
+#
+# 示例：
+# 原始文件名: "ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3.safetensors"
+# 规范化后: "ltx-2.3-22b-distilled-transformer-only"
+# 关键词: "ltx|2.3|22b|distilled|transformer|only"
+
+apple-dfn5b-clip-vit-h-14-384	audio	apple|dfn5b|clip|vit|h	Apple Dfn5B Clip Vit H 14 384	Apple Dfn5B Clip Vit H 14 384 (audio)	audio|mmaudio	60
+bigvgan-discriminator-optimizer	audio	bigvgan|discriminator|optimizer	Bigvgan Discriminator Optimizer	Bigvgan Discriminator Optimizer (audio)	audio|mmaudio	60
+bigvgan-generator	audio	bigvgan|generator	Bigvgan Generator	Bigvgan Generator (audio)	audio|mmaudio	60
+campplus	audio	campplus	Campplus	Campplus (audio)	audio|cosyvoice	60
+codec	audio	codec	Codec	Codec (audio)	audio|fishaudioS2	60
+diffusion-pytorch-model	audio	diffusion|pytorch|model	Diffusion Pytorch Model	Diffusion Pytorch Model (audio)	audio|latentsync	60
+flow	audio	flow	Flow	Flow (audio)	audio|cosyvoice	60
+flow.decoder.estimator.fp32	audio	flow.decoder.estimator.fp32	Flow.Decoder.Estimator.Fp32	Flow.Decoder.Estimator.Fp32 (audio)	audio|cosyvoice	60
+hift	audio	hift	Hift	Hift (audio)	audio|cosyvoice	60
+latentsync-syncnet	audio	latentsync|syncnet	Latentsync Syncnet	Latentsync Syncnet (audio)	audio|latentsync	60
+latentsync-unet	audio	latentsync|unet	Latentsync Unet	Latentsync Unet (audio)	audio|latentsync	60
+llm	audio	llm	Llm	Llm (audio)	audio|cosyvoice	60
+llm.rl	audio	llm.rl	Llm.Rl	Llm.Rl (audio)	audio|cosyvoice	60
+lq-proj-in	audio	lq-proj-in|lq proj in	LQ Projector Input	低质量投影输入模块	audio|projection	60
+mmaudio-large-44k	audio	mmaudio|large|44k	Mmaudio Large 44K	Mmaudio Large 44K (audio)	audio|mmaudio	60
+mmaudio-large-44k-nsfw-gold-8.5k-final	audio	mmaudio|large|44k|nsfw|gold	Mmaudio Large 44K Nsfw Gold 8.5K Final	Mmaudio Large 44K Nsfw Gold 8.5K Final (audio)	audio|mmaudio	60
+mmaudio-synchformer	audio	mmaudio|synchformer	Mmaudio Synchformer	Mmaudio Synchformer (audio)	audio|mmaudio	60
+mmaudio-vae-44k	audio	mmaudio|vae|44k	Mmaudio Vae 44K	Mmaudio Vae 44K (audio)	audio|mmaudio	60
+model	audio	model	Model	Model (audio)	audio|audiodit	60
+s3fd-619a316812	audio	s3fd|619a316812	S3Fd 619A316812	S3Fd 619A316812 (audio)	audio|latentsync	60
+speech-tokenizer	audio	speech|tokenizer	Speech Tokenizer	Speech Tokenizer (audio)	audio|cosyvoice	60
+speech-tokenizerbatch	audio	speech|tokenizerbatch	Speech Tokenizerbatch	Speech Tokenizerbatch (audio)	audio|cosyvoice	60
+tcdecoder	audio	tcdecoder	TCDecoder	音频时间码解码器	audio|codec	75
+tiny	audio	tiny	Tiny	Tiny (audio)	audio|latentsync	60
+wan2-1-flashvsr-lq-proj-model	audio	wan2-1-flashvsr-lq-proj|lq-proj|flashvsr	Wan FlashVSR LQ Projector	Wan FlashVSR 低质量投影器	audio|projection	70
+wan2-1-flashvsr-tcdecoder-fp32	audio	wan2-1-flashvsr-tcdecoder|tcdecoder-fp32	Wan FlashVSR TCDecoder FP32	Wan FlashVSR 时间码解码器 FP32	audio|codec|fp32	70
+wan2-1-t2v-1-3b-flashvsr-fp32	audio	wan2-1-t2v-1-3b-flashvsr|t2v-3b|flashvsr-fp32	Wan T2V 1.3B FlashVSR FP32	Wan 文生视频 1.3B FlashVSR FP32	audio|video|fp32	65
+wan2-1-t2v-1.1-3b-flashvsr-fp32	audio	wan2-1-t2v-1.1-3b-flashvsr|t2v-1.1-3b	Wan T2V 1.1 3B FlashVSR FP32	Wan 文生视频 1.1 3B FlashVSR FP32	audio|video|fp32	65
+id	category	keywords	display_name	description	tags	priority
+byt5-small-glyphxl	clip	byt5|small|glyphxl	Byt5 Small Glyphxl	Byt5 Small Glyphxl (clip)	clip|clip	85
+clip-g	clip	clip_g|clip g|g	CLIP G	CLIP G 文本编码器	clip|text-encoder|sd3	90
+clip-g-hidream	clip	clip|g|hidream	Clip G Hidream	Clip G Hidream (clip)	clip|text-encoders	60
+clip-l	clip	clip_l|clip l|l	CLIP L	CLIP L 文本编码器	clip|text-encoder|sd3	90
+clip-l-hidream	clip	clip|l|hidream	Clip L Hidream	Clip L Hidream (clip)	clip|text-encoders	60
+clip-vision-h	clip	clip|vision|h	Clip Vision H	Clip Vision H (clip)	clip|clip-vision	60
+clip-vit-h-14-laion2b-s32b-b79k	clip	clip|vit|h|14|laion2b	Clip Vit H 14 Laion2B S32B B79K	Clip Vit H 14 Laion2B S32B B79K (clip)	clip|clip-vision	60
+clip-vit-large-patch14-model	clip	clip|vit|large|patch14|model	Clip Vit Large Patch14 Model	Clip Vit Large Patch14 Model (clip)	clip|clip	85
+eva02-clip-l-336-psz14-s6b	clip	eva02|clip|l|336|psz14	Eva02 Clip L 336 Psz14 S6B	Eva02 Clip L 336 Psz14 S6B (clip)	clip|clip	85
+full-encoder-small-decoder	clip	full-encoder-small-decoder|full encoder small decoder	Full Encoder Small Decoder	完整编码器小型解码器架构	clip|custom	75
+gemma-3-12b-it	clip	gemma-3-12b|gemma 3 12b|it	Gemma 3 12B IT	Gemma 3 12B 指令微调文本编码器	gemma|text-encoder|12b	100
+gemma-3-4b-it	clip	gemma|3|4b|it	Gemma 3 4B It	Gemma 3 4B It (clip)	clip|text-encoders	60
+jina-clip	clip	jina|clip	Jina Clip	Jina Clip (clip)	clip|text-encoders	60
+llama-3.1-8b-instruct	clip	llama|3.1|8b|instruct	Llama 3.1 8B Instruct	Llama 3.1 8B Instruct (clip)	clip|text-encoders	60
+ltx-2.3-text-projection	clip	ltx-2.3-text|ltx 2.3 text|projection	LTX 2.3 Text Projection	LTX 2.3 文本投影编码器	ltx|text-encoder	90
+mistral-3-small-flux2	clip	mistral|3|small|flux2	Mistral 3 Small Flux2	Mistral 3 Small Flux2 (clip)	clip|text-encoders	60
+model	clip	model	Model	Model (clip)	clip|clip	85
+model-00001-of-00002	clip	model|00001|of|00002	Model 00001 Of 00002	Model 00001 Of 00002 (clip)	clip|Qwen3-ASR	60
+model-00002-of-00002	clip	model|00002|of|00002	Model 00002 Of 00002	Model 00002 Of 00002 (clip)	clip|Qwen3-ASR	60
+model.fp16	clip	model.fp16	Model.Fp16	Model.Fp16 (clip)	clip|clip	85
+open-clip-model	clip	open|clip|model	Open Clip Model	Open Clip Model (clip)	clip|clip	85
+pytorch-model	clip	pytorch|model	Pytorch Model	Pytorch Model (clip)	clip|florence2	60
+qwen-0.6b-ace15	clip	qwen-0.6b|qwen 0.6b|ace15	Qwen 0.6B ACE15	Qwen 0.6B ACE 专用模型	qwen|llm|0.6b	80
+qwen-1.7b-ace15	clip	qwen-1.7b|qwen 1.7b|ace15	Qwen 1.7B ACE15	Qwen 1.7B ACE 专用模型	qwen|llm|1.7b	85
+qwen-2.5-vl-7b	clip	qwen-2.5-vl|qwen25vl|7b	Qwen 2.5 VL 7B	Qwen 2.5 视觉语言 7B 模型	qwen|vl|7b	95
+qwen-3-4b	clip	qwen-3-4b|qwen3 4b	Qwen 3 4B	Qwen 3 4B 语言模型	qwen|llm|4b	90
+qwen-3-8b	clip	qwen-3-8b|qwen3 8b	Qwen 3 8B	Qwen 3 8B 语言模型	qwen|llm|8b	95
+qwen-4b-ace15	clip	qwen|4b|ace15	Qwen 4B Ace15	Qwen 4B Ace15 (clip)	clip|clip	85
+qwen2.5-3b-instruct	clip	qwen2.5|3b|instruct	Qwen2.5 3B Instruct	Qwen2.5 3B Instruct (clip)	clip|text-encoders	60
+qwen2.5vl-7b-bf16	clip	qwen2.5vl|7b|bf16	Qwen2.5Vl 7B Bf16	Qwen2.5Vl 7B Bf16 (clip)	clip|clip	85
+qwen3.5-4b	clip	qwen3.5|4b	Qwen3.5 4B	Qwen3.5 4B (clip)	clip|text-encoders	60
+sdxl-zavychromaxl 	clip	sdxl|zavychromaxl 	Sdxl Zavychromaxl 	Sdxl Zavychromaxl  (clip)	clip|clip	85
+sigclip-vision-patch14-384	clip	sigclip-vision|sigclip vision|patch14|384	SigCLIP Vision Patch14 384	SigCLIP 视觉编码器 384 分辨率	clip|vision	80
+t5-v1-1-xxl-encoder-f16	clip	t5|v1|1|xxl|encoder	T5 V1 1 Xxl Encoder F16	T5 V1 1 Xxl Encoder F16 (clip)	clip|clip	85
+t5xxl	clip	t5xxl|t5 xxl	T5 XXL	T5 XXL 文本编码器（多版本）	t5|text-encoder|sd3	90
+umt5-xxl	clip	umt5-xxl|umt5 xxl	uMT5 XXL	Universal MT5 XXL 编码器	umt5|text-encoder	85
+umt5-xxl-enc-bf16	clip	umt5|xxl|enc|bf16	Umt5 Xxl Enc Bf16	Umt5 Xxl Enc Bf16 (clip)	clip|text-encoders	60
+umt5-xxl-enc-fp8	clip	umt5|xxl|enc|fp8	Umt5 Xxl Enc Fp8	Umt5 Xxl Enc Fp8 (clip)	clip|text-encoders	60
+wav2vec2-large-english	clip	wav2vec2|large|english	Wav2Vec2 Large English	Wav2Vec2 Large English (clip)	clip|audio-encoders	60
+control-v11f1p-sd15-depth	controlnet	control-v11f1p-sd15-depth|sd15-depth|depth-control	ControlNet SD15 Depth	SD1.5 深度控制网	controlnet|depth|sd15	85
+controle-sd15-ip2p	controlnet	controle|sd15|ip2p	Controle Sd15 Ip2P	Controle Sd15 Ip2P (controlnet)	controlnet|controlnet	80
+controle-sd15-shuffle	controlnet	controle|sd15|shuffle	Controle Sd15 Shuffle	Controle Sd15 Shuffle (controlnet)	controlnet|controlnet	80
+controlf1e-sd15-tile	controlnet	controlf1e|sd15|tile	Controlf1E Sd15 Tile	Controlf1E Sd15 Tile (controlnet)	controlnet|controlnet	80
+controlf1p-sd15-depth	controlnet	controlf1p|sd15|depth	Controlf1P Sd15 Depth	Controlf1P Sd15 Depth (controlnet)	controlnet|controlnet	80
+controlp-sd15-canny	controlnet	controlp|sd15|canny	Controlp Sd15 Canny	Controlp Sd15 Canny (controlnet)	controlnet|controlnet	80
+controlp-sd15-inpaint	controlnet	controlp|sd15|inpaint	Controlp Sd15 Inpaint	Controlp Sd15 Inpaint (controlnet)	controlnet|controlnet	80
+controlp-sd15-lineart	controlnet	controlp|sd15|lineart	Controlp Sd15 Lineart	Controlp Sd15 Lineart (controlnet)	controlnet|controlnet	80
+controlp-sd15-mlsd	controlnet	controlp|sd15|mlsd	Controlp Sd15 Mlsd	Controlp Sd15 Mlsd (controlnet)	controlnet|controlnet	80
+controlp-sd15-normalbae	controlnet	controlp|sd15|normalbae	Controlp Sd15 Normalbae	Controlp Sd15 Normalbae (controlnet)	controlnet|controlnet	80
+controlp-sd15-openpose	controlnet	controlp|sd15|openpose	Controlp Sd15 Openpose	Controlp Sd15 Openpose (controlnet)	controlnet|controlnet	80
+controlp-sd15-scribble	controlnet	controlp|sd15|scribble	Controlp Sd15 Scribble	Controlp Sd15 Scribble (controlnet)	controlnet|controlnet	80
+controlp-sd15-seg	controlnet	controlp|sd15|seg	Controlp Sd15 Seg	Controlp Sd15 Seg (controlnet)	controlnet|controlnet	80
+controlp-sd15-softedge	controlnet	controlp|sd15|softedge	Controlp Sd15 Softedge	Controlp Sd15 Softedge (controlnet)	controlnet|controlnet	80
+controlp-sd15s2-lineart-anime	controlnet	controlp|sd15s2|lineart|anime	Controlp Sd15S2 Lineart Anime	Controlp Sd15S2 Lineart Anime (controlnet)	controlnet|controlnet	80
+controlu-sd15-tile	controlnet	controlu|sd15|tile	Controlu Sd15 Tile	Controlu Sd15 Tile (controlnet)	controlnet|controlnet	80
+diffusion-pytorch-model	controlnet	diffusion|pytorch|model	Diffusion Pytorch Model	Diffusion Pytorch Model (controlnet)	controlnet|controlnet	80
+ip-adapter	controlnet	ip|adapter	Ip Adapter	Ip Adapter (controlnet)	controlnet|instantid	60
+ip-adapter-faceid-plus-sd15-lora	controlnet	ip|adapter|faceid|plus|sd15	Ip Adapter Faceid Plus Sd15 Lora	Ip Adapter Faceid Plus Sd15 Lora (controlnet)	controlnet|ipadapter	60
+ip-adapter-faceid-plusv2-sd15-lora	controlnet	ip|adapter|faceid|plusv2|sd15	Ip Adapter Faceid Plusv2 Sd15 Lora	Ip Adapter Faceid Plusv2 Sd15 Lora (controlnet)	controlnet|ipadapter	60
+ip-adapter-faceid-plusv2-sdxl-lora	controlnet	ip|adapter|faceid|plusv2|sdxl	Ip Adapter Faceid Plusv2 Sdxl Lora	Ip Adapter Faceid Plusv2 Sdxl Lora (controlnet)	controlnet|ipadapter	60
+ip-adapter-faceid-sd15-lora	controlnet	ip|adapter|faceid|sd15|lora	Ip Adapter Faceid Sd15 Lora	Ip Adapter Faceid Sd15 Lora (controlnet)	controlnet|ipadapter	60
+ip-adapter-faceid-sdxl-lora	controlnet	ip|adapter|faceid|sdxl|lora	Ip Adapter Faceid Sdxl Lora	Ip Adapter Faceid Sdxl Lora (controlnet)	controlnet|ipadapter	60
+ip-adapter-full-face-sd15	controlnet	ip|adapter|full|face|sd15	Ip Adapter Full Face Sd15	Ip Adapter Full Face Sd15 (controlnet)	controlnet|ipadapter	60
+ip-adapter-plus-face-sd15	controlnet	ip|adapter|plus|face|sd15	Ip Adapter Plus Face Sd15	Ip Adapter Plus Face Sd15 (controlnet)	controlnet|ipadapter	60
+ip-adapter-plus-face-sdxl-vit-h	controlnet	ip|adapter|plus|face|sdxl	Ip Adapter Plus Face Sdxl Vit H	Ip Adapter Plus Face Sdxl Vit H (controlnet)	controlnet|ipadapter	60
+ip-adapter-plus-sd15	controlnet	ip|adapter|plus|sd15	Ip Adapter Plus Sd15	Ip Adapter Plus Sd15 (controlnet)	controlnet|ipadapter	60
+ip-adapter-plus-sdxl-vit-h	controlnet	ip|adapter|plus|sdxl|vit	Ip Adapter Plus Sdxl Vit H	Ip Adapter Plus Sdxl Vit H (controlnet)	controlnet|ipadapter	60
+ip-adapter-pulid-sdxl	controlnet	ip|adapter|pulid|sdxl	Ip Adapter Pulid Sdxl	Ip Adapter Pulid Sdxl (controlnet)	controlnet|ipadapter	60
+ip-adapter-sd15	controlnet	ip|adapter|sd15	Ip Adapter Sd15	Ip Adapter Sd15 (controlnet)	controlnet|ipadapter	60
+ip-adapter-sd15-light	controlnet	ip|adapter|sd15|light	Ip Adapter Sd15 Light	Ip Adapter Sd15 Light (controlnet)	controlnet|ipadapter	60
+ip-adapter-sd15-vit-g	controlnet	ip|adapter|sd15|vit|g	Ip Adapter Sd15 Vit G	Ip Adapter Sd15 Vit G (controlnet)	controlnet|ipadapter	60
+ip-adapter-sdxl	controlnet	ip|adapter|sdxl	Ip Adapter Sdxl	Ip Adapter Sdxl (controlnet)	controlnet|ipadapter	60
+ip-adapter-sdxl-vit-h	controlnet	ip|adapter|sdxl|vit|h	Ip Adapter Sdxl Vit H	Ip Adapter Sdxl Vit H (controlnet)	controlnet|ipadapter	60
+qwen-image-instantx-controlnet-inpainting	controlnet	qwen-image-instantx-controlnet-inpainting|instantx|inpainting-control	Qwen InstantX Inpainting ControlNet	Qwen 即时修复控制网	qwen|controlnet|inpainting	90
+qwen-image-instantx-controlnet-union	controlnet	qwen|image|instantx|controlnet|union	Qwen Image Instantx Controlnet Union	Qwen Image Instantx Controlnet Union (controlnet)	controlnet|controlnet	80
+t2iadapter-depth-sd15v2	controlnet	t2iadapter|depth|sd15v2	T2Iadapter Depth Sd15V2	T2Iadapter Depth Sd15V2 (controlnet)	controlnet|controlnet	80
+512-inpainting-ema	embedding	512-inpainting-ema|inpainting-ema|512	512 Inpainting EMA	512 分辨率修复嵌入	embedding|inpainting	70
+prompt	embedding	prompt	Prompt Embedding	提示词嵌入模板	embedding|prompt	60
+1girl-qwen	lora	1girl|qwen	1Girl Qwen	1Girl Qwen (lora)	lora|loras	80
+644	lora	644	644	644 (lora)	lora|loras	80
+77-foundfootage	lora	77|foundfootage	77 Foundfootage	77 Foundfootage (lora)	lora|loras	80
+amateur%20photos%2090s	lora	amateur%20photos%2090s	Amateur%20Photos%2090S	Amateur%20Photos%2090S (lora)	lora|loras	80
+anything2real-2601-a-final-patched	lora	anything2real|2601|a|final|patched	Anything2Real 2601 A Final Patched	Anything2Real 2601 A Final Patched (lora)	lora|loras	80
+anythingtorealcharacters2511-20	lora	anythingtorealcharacters2511|20	Anythingtorealcharacters2511 20	Anythingtorealcharacters2511 20 (lora)	lora|loras	80
+b3tternud3s-1-nsfw-lora	lora	b3tternud3s|1|nsfw|lora	B3Tternud3S 1 Nsfw Lora	B3Tternud3S 1 Nsfw Lora (lora)	lora|loras	80
+blindboxmix	lora	blindboxmix	Blindboxmix	Blindboxmix (lora)	lora|loras	80
+blue-hair-q2512	lora	blue|hair|q2512	Blue Hair Q2512	Blue Hair Q2512 (lora)	lora|loras	80
+breast-size2-flux-lora	lora	breast|size2|flux|lora	Breast Size2 Flux Lora	Breast Size2 Flux Lora (lora)	lora|loras	80
+ccppropagandaposter1-f16e6	lora	ccppropagandaposter1|f16e6	Ccppropagandaposter1 F16E6	Ccppropagandaposter1 F16E6 (lora)	lora|loras	80
+cg-girlv1-p-鍐欏疄灏戝コ	lora	cg|girlv1|p|鍐欏疄灏戝コ	Cg Girlv1 P 鍐欏疄灏戝コ	Cg Girlv1 P 鍐欏疄灏戝コ (lora)	lora|loras	80
+character design sheet	lora	character design sheet	Character Design Sheet	Character Design Sheet (lora)	lora|loras	80
+consistent-char-min-park-z-image	lora	consistent|char|min|park|z	Consistent Char Min Park Z Image	Consistent Char Min Park Z Image (lora)	lora|loras	80
+detail-lora	lora	detail|enhance	Detail LoRA	细节增强 LoRA	lora|quality	75
+detailed-nipples-z	lora	detailed|nipples|z	Detailed Nipples Z	Detailed Nipples Z (lora)	lora|loras	80
+edit-2511浜烘櫙鑹蹭氦浜?0-lora+	lora	edit|2511浜烘櫙鑹蹭氦浜?0|lora+	Edit 2511浜烘櫙鑹蹭氦浜?0 Lora+	Edit 2511浜烘櫙鑹蹭氦浜?0 Lora+ (lora)	lora|loras	80
+edit-2511浜烘櫙铻嶅悎20	lora	edit|2511浜烘櫙铻嶅悎20	Edit 2511浜烘櫙铻嶅悎20	Edit 2511浜烘櫙铻嶅悎20 (lora)	lora|loras	80
+elf	lora	elf	Elf	Elf (lora)	lora|loras	80
+excellentfullnude-f2k4b-1-qwen-flux-nsfw	lora	excellentfullnude|f2k4b|1|qwen|flux	Excellentfullnude F2K4B 1 Qwen Flux Nsfw	Excellentfullnude F2K4B 1 Qwen Flux Nsfw (lora)	lora|loras	80
+f2k-anything2real-a-patched	lora	f2k|anything2real|a|patched	F2K Anything2Real A Patched	F2K Anything2Real A Patched (lora)	lora|loras	80
+face-lora	lora	face|portrait	Face LoRA	人脸专用 LoRA	lora|face	85
+fantasypuppetstyle-濂囧够鏈ㄥ伓椋庢牸	lora	fantasypuppetstyle|濂囧够鏈ㄥ伓椋庢牸	Fantasypuppetstyle 濂囧够鏈ㄥ伓椋庢牸	Fantasypuppetstyle 濂囧够鏈ㄥ伓椋庢牸 (lora)	lora|loras	80
+fastwan-t2v-14b-480p-lora-rank-128	lora	fastwan|t2v|14b|480p|lora	Fastwan T2V 14B 480P Lora Rank 128	Fastwan T2V 14B 480P Lora Rank 128 (lora)	lora|loras	80
+femnude-qwen-image-2512-epoch30	lora	femnude|qwen|image|2512|epoch30	Femnude Qwen Image 2512 Epoch30	Femnude Qwen Image 2512 Epoch30 (lora)	lora|loras	80
+firered-image-edit-1.0-lightning-8steps-v1.1	lora	firered|image|edit|1.0|lightning	Firered Image Edit 1.0 Lightning 8Steps V1.1	Firered Image Edit 1.0 Lightning 8Steps V1.1 (lora)	lora|loras	80
+firered-image-edit-covercraft	lora	firered|image|edit|covercraft	Firered Image Edit Covercraft	Firered Image Edit Covercraft (lora)	lora|loras	80
+firered-image-edit-makeup	lora	firered|image|edit|makeup	Firered Image Edit Makeup	Firered Image Edit Makeup (lora)	lora|loras	80
+fk-missionary	lora	fk|missionary	Fk Missionary	Fk Missionary (lora)	lora|loras	80
+flux-2-turbo-lora-comfyui-8steps	lora	flux|2|turbo|lora|comfyui	Flux 2 Turbo Lora Comfyui 8Steps	Flux 2 Turbo Lora Comfyui 8Steps (lora)	lora|loras	80
+flux-fd-amatuermix-v2	lora	flux|fd|amatuermix|v2	Flux Fd Amatuermix V2	Flux Fd Amatuermix V2 (lora)	lora|loras	80
+flux1-depth-dev-lora	lora	flux1|depth|dev|lora	Flux1 Depth Dev Lora	Flux1 Depth Dev Lora (lora)	lora|loras	80
+flux2-4b-gydboy	lora	flux2|4b|gydboy	Flux2 4B Gydboy	Flux2 4B Gydboy (lora)	lora|loras	80
+flux2-9b-gydboy	lora	flux2|9b|gydboy	Flux2 9B Gydboy	Flux2 9B Gydboy (lora)	lora|loras	80
+flux2-9b-gydboy-000003500	lora	flux2|9b|gydboy|000003500	Flux2 9B Gydboy 000003500	Flux2 9B Gydboy 000003500 (lora)	lora|loras	80
+flux2-9b-gydboy-000003750	lora	flux2|9b|gydboy|000003750	Flux2 9B Gydboy 000003750	Flux2 9B Gydboy 000003750 (lora)	lora|loras	80
+flux2klein-anus-female	lora	flux2klein|anus|female	Flux2Klein Anus Female	Flux2Klein Anus Female (lora)	lora|loras	80
+flux2klein-body-pawg	lora	flux2klein|body|pawg	Flux2Klein Body Pawg	Flux2Klein Body Pawg (lora)	lora|loras	80
+flux2klein-body-version-a	lora	flux2klein|body|version|a	Flux2Klein Body Version A	Flux2Klein Body Version A (lora)	lora|loras	80
+flux2klein-extract-tattoo	lora	flux2klein|extract|tattoo	Flux2Klein Extract Tattoo	Flux2Klein Extract Tattoo (lora)	lora|loras	80
+flux2klein-nipple	lora	flux2klein|nipple	Flux2Klein Nipple	Flux2Klein Nipple (lora)	lora|loras	80
+flux2klein-nsfw	lora	flux2klein|nsfw	Flux2Klein Nsfw	Flux2Klein Nsfw (lora)	lora|loras	80
+flux2klein-place-tattoo	lora	flux2klein|place|tattoo	Flux2Klein Place Tattoo	Flux2Klein Place Tattoo (lora)	lora|loras	80
+flux2klein-pussy	lora	flux2klein|pussy	Flux2Klein Pussy	Flux2Klein Pussy (lora)	lora|loras	80
+flux2klein-slider-bust	lora	flux2klein|slider|bust	Flux2Klein Slider Bust	Flux2Klein Slider Bust (lora)	lora|loras	80
+flux2klein-slider-detail	lora	flux2klein|slider|detail	Flux2Klein Slider Detail	Flux2Klein Slider Detail (lora)	lora|loras	80
+frxxzhl	lora	frxxzhl	Frxxzhl	Frxxzhl (lora)	lora|loras	80
+gemma-3-12b-it-abliterated-lora-rank64	lora	gemma|3|12b|it|abliterated	Gemma 3 12B It Abliterated Lora Rank64	Gemma 3 12B It Abliterated Lora Rank64 (lora)	lora|loras	80
+genitals-helpere219	lora	genitals|helpere219	Genitals Helpere219	Genitals Helpere219 (lora)	lora|loras	80
+goth%20girl%20influencer%2077	lora	goth%20girl%20influencer%2077	Goth%20Girl%20Influencer%2077	Goth%20Girl%20Influencer%2077 (lora)	lora|loras	80
+guozi-fushiruyaowan-000020-comfy	lora	guozi|fushiruyaowan|000020|comfy	Guozi Fushiruyaowan 000020 Comfy	Guozi Fushiruyaowan 000020 Comfy (lora)	lora|loras	80
+head-swap-flux-klein-9b-000003500	lora	head|swap|flux|klein|9b	Head Swap Flux Klein 9B 000003500	Head Swap Flux Klein 9B 000003500 (lora)	lora|loras	80
+instagirlv2.5-high	lora	instagirlv2.5|high	Instagirlv2.5 High	Instagirlv2.5 High (lora)	lora|loras	80
+instagirlv2.5-low	lora	instagirlv2.5|low	Instagirlv2.5 Low	Instagirlv2.5 Low (lora)	lora|loras	80
+klein-slider-glow	lora	klein|slider|glow	Klein Slider Glow	Klein Slider Glow (lora)	lora|loras	80
+kleinpp-uncutflaccidpenis	lora	kleinpp|uncutflaccidpenis	Kleinpp Uncutflaccidpenis	Kleinpp Uncutflaccidpenis (lora)	lora|loras	80
+kook-qwen-2512-鐪熷疄骞绘兂lora	lora	kook|qwen|2512|鐪熷疄骞绘兂lora	Kook Qwen 2512 鐪熷疄骞绘兂Lora	Kook Qwen 2512 鐪熷疄骞绘兂Lora (lora)	lora|loras	80
+kook-qwen鏋佽嚧鐪熷疄	lora	kook|qwen鏋佽嚧鐪熷疄	Kook Qwen鏋佽嚧鐪熷疄	Kook Qwen鏋佽嚧鐪熷疄 (lora)	lora|loras	80
+lightning-lora	lora	lightning|turbo	Lightning LoRA	加速采样 LoRA	lora|fast|turbo	80
+lightx2v-i2v-14b-480p-cfg-step-distill-rank64	lora	lightx2v|i2v|14b|480p|cfg	Lightx2V I2V 14B 480P Cfg Step Distill Rank64	Lightx2V I2V 14B 480P Cfg Step Distill Rank64 (lora)	lora|loras	80
+ltx-2-19b-ic-lora-detailer-ba1e0b4544bd	lora	ltx-2-19b-ic-lora-detailer|detailer|ba1e0b4544bd	LTX 2 19B Detailer LoRA	LTX 2 19B 细节增强 LoRA	ltx|lora|detail	85
+ltx-2-19b-ic-lora-detailer-缁嗚妭	lora	ltx|2|19b|ic|lora	Ltx 2 19B Ic Lora Detailer 缁嗚妭	Ltx 2 19B Ic Lora Detailer 缁嗚妭 (lora)	lora|loras	80
+ltx-2.3-22b-av-lora-talking-head-v1	lora	ltx-2.3-22b-av-lora-talking-head|talking-head|av-lora	LTX 2.3 Talking Head LoRA	LTX 2.3 说话头像 LoRA	ltx|lora|talking-head	90
+ltx-2.3-22b-distilled-lora-384-1.1	lora	ltx-2.3-22b-distilled-lora-384|distilled-lora|384	LTX 2.3 Distilled LoRA 384	LTX 2.3 蒸馏版 384 分辨率 LoRA	ltx|lora|distilled	80
+ltx-2.3-22b-distilled-lora-384-1.1-钂搁鍔犻€?寮哄害0.6	lora	ltx|2.3|22b|distilled|lora	Ltx 2.3 22B Distilled Lora 384 1.1 钂搁鍔犻€?寮哄害0.6	Ltx 2.3 22B Distilled Lora 384 1.1 钂搁鍔犻€?寮哄害0.6 (lora)	lora|loras	80
+ltx-2.3-22b-ic-lora-outpaint-澶栨墿	lora	ltx|2.3|22b|ic|lora	Ltx 2.3 22B Ic Lora Outpaint 澶栨墿	Ltx 2.3 22B Ic Lora Outpaint 澶栨墿 (lora)	lora|loras	80
+ltx-2.3-22b-ic-lora-refocus	lora	ltx-2.3-22b-ic-lora-refocus|refocus|ic-lora	LTX 2.3 Refocus LoRA	LTX 2.3 重新聚焦 LoRA	ltx|lora|refocus	90
+ltx-2.3-22b-ic-lora-refocus-鑱氱劍	lora	ltx|2.3|22b|ic|lora	Ltx 2.3 22B Ic Lora Refocus 鑱氱劍	Ltx 2.3 22B Ic Lora Refocus 鑱氱劍 (lora)	lora|loras	80
+ltx-2.3-22b-ic-lora-union-control-ref0.5-澶氬悎涓€鎺у埗	lora	ltx|2.3|22b|ic|lora	Ltx 2.3 22B Ic Lora Union Control Ref0.5 澶氬悎涓€鎺у埗	Ltx 2.3 22B Ic Lora Union Control Ref0.5 澶氬悎涓€鎺у埗 (lora)	lora|loras	80
+ltx-2.3-guofeng-v01-鍥介	lora	ltx|2.3|guofeng|v01|鍥介	Ltx 2.3 Guofeng V01 鍥介	Ltx 2.3 Guofeng V01 鍥介 (lora)	lora|loras	80
+ltx-2.3-id-lora-talkvid-3k-浜よ皥	lora	ltx|2.3|id|lora|talkvid	Ltx 2.3 Id Lora Talkvid 3K 浜よ皥	Ltx 2.3 Id Lora Talkvid 3K 浜よ皥 (lora)	lora|loras	80
+ltx2.3-22b-ic-lora-cameraman-杩愰暅澶嶅埢	lora	ltx2.3|22b|ic|lora|cameraman	Ltx2.3 22B Ic Lora Cameraman 杩愰暅澶嶅埢	Ltx2.3 22B Ic Lora Cameraman 杩愰暅澶嶅埢 (lora)	lora|loras	80
+ltx2.3-transition	lora	ltx2.3-transition|transition	LTX2.3 Transition LoRA	LTX 2.3 转场效果 LoRA	ltx|lora|transition	85
+ltx2.3姊呭嚌瑙﹀彂璇峬eining	lora	ltx2.3姊呭嚌瑙﹀彂璇峬eining	Ltx2.3姊呭嚌瑙﹀彂璇峂eining	Ltx2.3姊呭嚌瑙﹀彂璇峂eining (lora)	lora|loras	80
+ltx2.3瀹嬬帀瑙﹀彂璇峴ongyu	lora	ltx2.3瀹嬬帀瑙﹀彂璇峴ongyu	Ltx2.3瀹嬬帀瑙﹀彂璇峉ongyu	Ltx2.3瀹嬬帀瑙﹀彂璇峉ongyu (lora)	lora|loras	80
+ltx2.3绱伒瑙﹀彂璇峼iling	lora	ltx2.3绱伒瑙﹀彂璇峼iling	Ltx2.3绱伒瑙﹀彂璇峑iling	Ltx2.3绱伒瑙﹀彂璇峑iling (lora)	lora|loras	80
+ltx2.3鎱曟矝鐏佃Е鍙戣瘝peiling	lora	ltx2.3鎱曟矝鐏佃Е鍙戣瘝peiling	Ltx2.3鎱曟矝鐏佃Е鍙戣瘝Peiling	Ltx2.3鎱曟矝鐏佃Е鍙戣瘝Peiling (lora)	lora|loras	80
+ltx2.3鐕曞瀚ｈЕ鍙戣瘝ruyan	lora	ltx2.3鐕曞瀚ｈЕ鍙戣瘝ruyan	Ltx2.3鐕曞瀚ｈЕ鍙戣瘝Ruyan	Ltx2.3鐕曞瀚ｈЕ鍙戣瘝Ruyan (lora)	lora|loras	80
+ltx2.3闊╃珛瑙﹀彂璇峢anli	lora	ltx2.3闊╃珛瑙﹀彂璇峢anli	Ltx2.3闊╃珛瑙﹀彂璇岺anli	Ltx2.3闊╃珛瑙﹀彂璇岺anli (lora)	lora|loras	80
+ltx2.3闊╃珛鍗楀濠夊弻浜簂ora	lora	ltx2.3闊╃珛鍗楀濠夊弻浜簂ora	Ltx2.3闊╃珛鍗楀濠夊弻浜篖ora	Ltx2.3闊╃珛鍗楀濠夊弻浜篖ora (lora)	lora|loras	80
+ltx23-edit-anything-global-rank128steps-prodigy-閫氱敤缂栬緫	lora	ltx23|edit|anything|global|rank128steps	Ltx23 Edit Anything Global Rank128Steps Prodigy 閫氱敤缂栬緫	Ltx23 Edit Anything Global Rank128Steps Prodigy 閫氱敤缂栬緫 (lora)	lora|loras	80
+ltx23-gydboy	lora	ltx23-gydboy|gydboy	LTX23 GYDBoy LoRA	LTX23 GYDBoy 风格 LoRA	ltx|lora|style	75
+ltx2浜氭床浜哄儚缇庡v2	lora	ltx2浜氭床浜哄儚缇庡v2	Ltx2浜氭床浜哄儚缇庡V2	Ltx2浜氭床浜哄儚缇庡V2 (lora)	lora|loras	80
+menace-qwen-image-2512	lora	menace|qwen|image|2512	Menace Qwen Image 2512	Menace Qwen Image 2512 (lora)	lora|loras	80
+moxinv1	lora	moxinv1	Moxinv1	Moxinv1 (lora)	lora|loras	80
+naturalbeautyflux2klein9bnudity	lora	naturalbeautyflux2klein9bnudity	Naturalbeautyflux2Klein9Bnudity	Naturalbeautyflux2Klein9Bnudity (lora)	lora|loras	80
+next-scene-lora-v2-3000	lora	next|scene|lora|v2|3000	Next Scene Lora V2 3000	Next Scene Lora V2 3000 (lora)	lora|loras	80
+nipplediffusion-f2-klein-9b	lora	nipplediffusion|f2|klein|9b	Nipplediffusion F2 Klein 9B	Nipplediffusion F2 Klein 9B (lora)	lora|loras	80
+nipplediffusion-f2-klein-9bqwen-flux-nsfw	lora	nipplediffusion|f2|klein|9bqwen|flux	Nipplediffusion F2 Klein 9Bqwen Flux Nsfw	Nipplediffusion F2 Klein 9Bqwen Flux Nsfw (lora)	lora|loras	80
+nsfw-female-genitals-helper-for-wan-t2v-i2v	lora	nsfw|female|genitals|helper|for	Nsfw Female Genitals Helper For Wan T2V I2V	Nsfw Female Genitals Helper For Wan T2V I2V (lora)	lora|loras	80
+nsfw-klein	lora	nsfw|klein	Nsfw Klein	Nsfw Klein (lora)	lora|loras	80
+p0ssy-loransfw	lora	p0ssy|loransfw	P0Ssy Loransfw	P0Ssy Loransfw (lora)	lora|loras	80
+papercutoutstyle-椋庢牸-鍓焊	lora	papercutoutstyle|椋庢牸|鍓焊	Papercutoutstyle 椋庢牸 鍓焊	Papercutoutstyle 椋庢牸 鍓焊 (lora)	lora|loras	80
+pubichair-wan22-high-e40	lora	pubichair|wan22|high|e40	Pubichair Wan22 High E40	Pubichair Wan22 High E40 (lora)	lora|loras	80
+pubichair-wan22-low-e50	lora	pubichair|wan22|low|e50	Pubichair Wan22 Low E50	Pubichair Wan22 Low E50 (lora)	lora|loras	80
+pussy-zimage-v1-000026000	lora	pussy|zimage|v1|000026000	Pussy Zimage V1 000026000	Pussy Zimage V1 000026000 (lora)	lora|loras	80
+pytorch-lora-weights	lora	pytorch|lora|weights	Pytorch Lora Weights	Pytorch Lora Weights (lora)	lora|loras	80
+qwen-2512-pussy-anusnsfw	lora	qwen|2512|pussy|anusnsfw	Qwen 2512 Pussy Anusnsfw	Qwen 2512 Pussy Anusnsfw (lora)	lora|loras	80
+qwen-edit-2509-multiple-angles	lora	qwen|edit|2509|multiple|angles	Qwen Edit 2509 Multiple Angles	Qwen Edit 2509 Multiple Angles (lora)	lora|loras	80
+qwen-edit-2511-澶ф潅鐑?20	lora	qwen|edit|2511|澶ф潅鐑﹟20	Qwen Edit 2511 澶ф潅鐑?20	Qwen Edit 2511 澶ф潅鐑?20 (lora)	lora|loras	80
+qwen-edit-remove-clothes-nsfw	lora	qwen|edit|remove|clothes|nsfw	Qwen Edit Remove Clothes Nsfw	Qwen Edit Remove Clothes Nsfw (lora)	lora|loras	80
+qwen-image-2512-lightning-4steps-v1.0-bf16	lora	qwen|image|2512|lightning|4steps	Qwen Image 2512 Lightning 4Steps V1.0 Bf16	Qwen Image 2512 Lightning 4Steps V1.0 Bf16 (lora)	lora|loras	80
+qwen-image-2512-lightning-8steps-v1.0-bf16	lora	qwen|image|2512|lightning|8steps	Qwen Image 2512 Lightning 8Steps V1.0 Bf16	Qwen Image 2512 Lightning 8Steps V1.0 Bf16 (lora)	lora|loras	80
+qwen-image-2512-lora-by-ai-characters-style-smartphonesnapshotphotorealitytrigger$amtr snapshot photo$	lora	qwen|image|2512|lora|by	Qwen Image 2512 Lora By Ai Characters Style Smartphonesnapshotphotorealitytrigger$Amtr Snapshot Photo$	Qwen Image 2512 Lora By Ai Characters Style Smartphonesnapshotphotorealitytrigger$Amtr Snapshot Photo$ (lora)	lora|loras	80
+qwen-image-edit-2509-lightning-4steps-v1.0-bf16	lora	qwen|image|edit|2509|lightning	Qwen Image Edit 2509 Lightning 4Steps V1.0 Bf16	Qwen Image Edit 2509 Lightning 4Steps V1.0 Bf16 (lora)	lora|loras	80
+qwen-image-edit-2509-lightning-8steps-v1.0-bf16	lora	qwen|image|edit|2509|lightning	Qwen Image Edit 2509 Lightning 8Steps V1.0 Bf16	Qwen Image Edit 2509 Lightning 8Steps V1.0 Bf16 (lora)	lora|loras	80
+qwen-image-edit-2511-lightning-4steps-v1.0-bf16	lora	qwen|image|edit|2511|lightning	Qwen Image Edit 2511 Lightning 4Steps V1.0 Bf16	Qwen Image Edit 2511 Lightning 4Steps V1.0 Bf16 (lora)	lora|loras	80
+qwen-image-edit-2511-multiple-angles-lora	lora	qwen-image-edit-2511-multiple-angles|multiple-angles|edit-lora	Qwen Image Edit Multiple Angles LoRA	Qwen 多角度编辑 LoRA	qwen|lora|edit|multi-angle	85
+qwen-image-edit-2511-upscale	lora	qwen|image|edit|2511|upscale	Qwen Image Edit 2511 Upscale	Qwen Image Edit 2511 Upscale (lora)	lora|loras	80
+qwen-image-edit-lightning-4steps-v1.0	lora	qwen|image|edit|lightning|4steps	Qwen Image Edit Lightning 4Steps V1.0	Qwen Image Edit Lightning 4Steps V1.0 (lora)	lora|loras	80
+qwen-image-edit-lightning-8steps-v1.0	lora	qwen|image|edit|lightning|8steps	Qwen Image Edit Lightning 8Steps V1.0	Qwen Image Edit Lightning 8Steps V1.0 (lora)	lora|loras	80
+qwen-image-edit-unblur-upscale-10	lora	qwen|image|edit|unblur|upscale	Qwen Image Edit Unblur Upscale 10	Qwen Image Edit Unblur Upscale 10 (lora)	lora|loras	80
+qwen-image-lightning-4steps-v2.0	lora	qwen|image|lightning|4steps|v2.0	Qwen Image Lightning 4Steps V2.0	Qwen Image Lightning 4Steps V2.0 (lora)	lora|loras	80
+qwen-image-lightning-4steps-v2.0-bf16	lora	qwen|image|lightning|4steps|v2.0	Qwen Image Lightning 4Steps V2.0 Bf16	Qwen Image Lightning 4Steps V2.0 Bf16 (lora)	lora|loras	80
+qwen-image-lightning-8steps-v1.1-bf16	lora	qwen|image|lightning|8steps|v1.1	Qwen Image Lightning 8Steps V1.1 Bf16	Qwen Image Lightning 8Steps V1.1 Bf16 (lora)	lora|loras	80
+qwen-image-lightning-8steps-v2.0	lora	qwen|image|lightning|8steps|v2.0	Qwen Image Lightning 8Steps V2.0	Qwen Image Lightning 8Steps V2.0 (lora)	lora|loras	80
+qwen-image-nsfw-adv	lora	qwen|image|nsfw|adv	Qwen Image Nsfw Adv	Qwen Image Nsfw Adv (lora)	lora|loras	80
+qwen-image-union-diffsynth-lora	lora	qwen|image|union|diffsynth|lora	Qwen Image Union Diffsynth Lora	Qwen Image Union Diffsynth Lora (lora)	lora|loras	80
+qwen-mysticxxx-v1-nsfw	lora	qwen|mysticxxx|v1|nsfw	Qwen Mysticxxx V1 Nsfw	Qwen Mysticxxx V1 Nsfw (lora)	lora|loras	80
+qwen-nsfw-bodyc-12k	lora	qwen|nsfw|bodyc|12k	Qwen Nsfw Bodyc 12K	Qwen Nsfw Bodyc 12K (lora)	lora|loras	80
+qwen2511-anypose-base-000006250	lora	qwen2511|anypose|base|000006250	Qwen2511 Anypose Base 000006250	Qwen2511 Anypose Base 000006250 (lora)	lora|loras	80
+qwen2511-consis-alpha-patched(浜虹墿涓€鑷存€?	lora	qwen2511|consis|alpha|patched(浜虹墿涓€鑷存€?	Qwen2511 Consis Alpha Patched(浜虹墿涓€鑷存€?	Qwen2511 Consis Alpha Patched(浜虹墿涓€鑷存€? (lora)	lora|loras	80
+qwen2512-gydboy-000000250	lora	qwen2512|gydboy|000000250	Qwen2512 Gydboy 000000250	Qwen2512 Gydboy 000000250 (lora)	lora|loras	80
+qwen2512-gydboy-000000300	lora	qwen2512|gydboy|000000300	Qwen2512 Gydboy 000000300	Qwen2512 Gydboy 000000300 (lora)	lora|loras	80
+qwen2512-gydboy-000000350	lora	qwen2512|gydboy|000000350	Qwen2512 Gydboy 000000350	Qwen2512 Gydboy 000000350 (lora)	lora|loras	80
+qwen2512-vagina3-1328-onetrainer-masked-nsfw	lora	qwen2512|vagina3|1328|onetrainer|masked	Qwen2512 Vagina3 1328 Onetrainer Masked Nsfw	Qwen2512 Vagina3 1328 Onetrainer Masked Nsfw (lora)	lora|loras	80
+sdxl-lightning-8step-lora	lora	sdxl|lightning|8step|lora	Sdxl Lightning 8Step Lora	Sdxl Lightning 8Step Lora (lora)	lora|loras	80
+sexgod-femalenudity-qwenedit-2511nsfw	lora	sexgod|femalenudity|qwenedit|2511nsfw	Sexgod Femalenudity Qwenedit 2511Nsfw	Sexgod Femalenudity Qwenedit 2511Nsfw (lora)	lora|loras	80
+shorty-hair-q2512	lora	shorty|hair|q2512	Shorty Hair Q2512	Shorty Hair Q2512 (lora)	lora|loras	80
+style-lora	lora	style|artistic	Style LoRA	风格化 LoRA	lora|style	70
+super-skin-detailer-by-stable-yogi-pd0	lora	super|skin|detailer|by|stable	Super Skin Detailer By Stable Yogi Pd0	Super Skin Detailer By Stable Yogi Pd0 (lora)	lora|loras	80
+super-skin-detailer-by-stable-yogi-sd0	lora	super|skin|detailer|by|stable	Super Skin Detailer By Stable Yogi Sd0	Super Skin Detailer By Stable Yogi Sd0 (lora)	lora|loras	80
+t2v-seoullina-high	lora	t2v|seoullina|high	T2V Seoullina High	T2V Seoullina High (lora)	lora|loras	80
+t2v-seoullina-low	lora	t2v|seoullina|low	T2V Seoullina Low	T2V Seoullina Low (lora)	lora|loras	80
+turbopussyznsfw	lora	turbopussyznsfw	Turbopussyznsfw	Turbopussyznsfw (lora)	lora|loras	80
+ultraface%20female%2077%c2%ae	lora	ultraface%20female%2077%c2%ae	Ultraface%20Female%2077%C2%Ae	Ultraface%20Female%2077%C2%Ae (lora)	lora|loras	80
+ulzzangg1	lora	ulzzangg1	Ulzzangg1	Ulzzangg1 (lora)	lora|loras	80
+uncrop-f2k9b	lora	uncrop|f2k9b	Uncrop F2K9B	Uncrop F2K9B (lora)	lora|loras	80
+uso-flux1-dit-lora-v1	lora	uso|flux1|dit|lora|v1	Uso Flux1 Dit Lora V1	Uso Flux1 Dit Lora V1 (lora)	lora|loras	80
+virtual-babes-1-by-stable-yogi-sdxl8	lora	virtual|babes|1|by|stable	Virtual Babes 1 By Stable Yogi Sdxl8	Virtual Babes 1 By Stable Yogi Sdxl8 (lora)	lora|loras	80
+wan-m4crom4sti4-i2v-106epo-k3nk	lora	wan|m4crom4sti4|i2v|106epo|k3nk	Wan M4Crom4Sti4 I2V 106Epo K3Nk	Wan M4Crom4Sti4 I2V 106Epo K3Nk (lora)	lora|loras	80
+wan2.2-face-complete-distilled	lora	wan2.2|face|complete|distilled	Wan2.2 Face Complete Distilled	Wan2.2 Face Complete Distilled (lora)	lora|loras	80
+wan2.2-fun-a14b-inp-low-noise-hps2.1	lora	wan2.2|fun|a14b|inp|low	Wan2.2 Fun A14B Inp Low Noise Hps2.1	Wan2.2 Fun A14B Inp Low Noise Hps2.1 (lora)	lora|loras	80
+wan2.2-highnoise-smartphonesnapshotphotorealityby-ai-characters	lora	wan2.2|highnoise|smartphonesnapshotphotorealityby|ai|characters	Wan2.2 Highnoise Smartphonesnapshotphotorealityby Ai Characters	Wan2.2 Highnoise Smartphonesnapshotphotorealityby Ai Characters (lora)	lora|loras	80
+wan2.2-i2v-lightx2v-4steps-lorahigh-noise	lora	wan2.2|i2v|lightx2v|4steps|lorahigh	Wan2.2 I2V Lightx2V 4Steps Lorahigh Noise	Wan2.2 I2V Lightx2V 4Steps Lorahigh Noise (lora)	lora|loras	80
+wan2.2-i2v-lightx2v-4steps-loralow-noise	lora	wan2.2|i2v|lightx2v|4steps|loralow	Wan2.2 I2V Lightx2V 4Steps Loralow Noise	Wan2.2 I2V Lightx2V 4Steps Loralow Noise (lora)	lora|loras	80
+wan2.2-lightning-i2v-a14b-4steps-lora-low	lora	wan2.2|lightning|i2v|a14b|4steps	Wan2.2 Lightning I2V A14B 4Steps Lora Low	Wan2.2 Lightning I2V A14B 4Steps Lora Low (lora)	lora|loras	80
+wan2.2-loraset-nsfw	lora	wan2.2|loraset|nsfw	Wan2.2 Loraset Nsfw	Wan2.2 Loraset Nsfw (lora)	lora|loras	80
+wan2.2-lownoise-smartphonesnapshotphotorealityby-ai-characters	lora	wan2.2|lownoise|smartphonesnapshotphotorealityby|ai|characters	Wan2.2 Lownoise Smartphonesnapshotphotorealityby Ai Characters	Wan2.2 Lownoise Smartphonesnapshotphotorealityby Ai Characters (lora)	lora|loras	80
+wan2.2-mocap-fullbodycopy-ed	lora	wan2.2|mocap|fullbodycopy|ed	Wan2.2 Mocap Fullbodycopy Ed	Wan2.2 Mocap Fullbodycopy Ed (lora)	lora|loras	80
+wan2.2-t2v-lightx2v-4steps-lorahigh-noise	lora	wan2.2|t2v|lightx2v|4steps|lorahigh	Wan2.2 T2V Lightx2V 4Steps Lorahigh Noise	Wan2.2 T2V Lightx2V 4Steps Lorahigh Noise (lora)	lora|loras	80
+wan2.2-t2v-lightx2v-4steps-loralow-noise	lora	wan2.2|t2v|lightx2v|4steps|loralow	Wan2.2 T2V Lightx2V 4Steps Loralow Noise	Wan2.2 T2V Lightx2V 4Steps Loralow Noise (lora)	lora|loras	80
+wan2.2-ti2v-5b-gydboy	lora	wan2.2|ti2v|5b|gydboy	Wan2.2 Ti2V 5B Gydboy	Wan2.2 Ti2V 5B Gydboy (lora)	lora|loras	80
+wan22-combo-qo-ipref-noprefix-ed	lora	wan22|combo|qo|ipref|noprefix	Wan22 Combo Qo Ipref Noprefix Ed	Wan22 Combo Qo Ipref Noprefix Ed (lora)	lora|loras	80
+wananimate-relight-lora	lora	wananimate|relight|lora	Wananimate Relight Lora	Wananimate Relight Lora (lora)	lora|loras	80
+white high-neck tight dress with oversized bell sleeves and platform sandals-nsfw	lora	white high|neck tight dress with oversized bell sleeves and platform sandals|nsfw	White High Neck Tight Dress With Oversized Bell Sleeves And Platform Sandals Nsfw	White High Neck Tight Dress With Oversized Bell Sleeves And Platform Sandals Nsfw (lora)	lora|loras	80
+z-image	lora	z|image	Z Image	Z Image (lora)	lora|loras	80
+zimage-gydboy	lora	zimage|gydboy	Zimage Gydboy	Zimage Gydboy (lora)	lora|loras	80
+zitnsfwlora	lora	zitnsfwlora	Zitnsfwlora	Zitnsfwlora (lora)	lora|loras	80
+娓呮柊瀹跺眳瑁呴グ椋庢牸妯″瀷 fresh decor style	lora	娓呮柊瀹跺眳瑁呴グ椋庢牸妯″瀷 fresh decor style	娓呮柊瀹跺眳瑁呴グ椋庢牸妯″瀷 Fresh Decor Style	娓呮柊瀹跺眳瑁呴グ椋庢牸妯″瀷 Fresh Decor Style (lora)	lora|loras	80
+绮剧編寤虹瓚璁捐妯″瀷 wd-architectural design	lora	绮剧編寤虹瓚璁捐妯″瀷 wd|architectural design	绮剧編寤虹瓚璁捐妯″瀷 Wd Architectural Design	绮剧編寤虹瓚璁捐妯″瀷 Wd Architectural Design (lora)	lora|loras	80
+鍖楁椋庢牸瀹ゅ唴璁捐	lora	鍖楁椋庢牸瀹ゅ唴璁捐	鍖楁椋庢牸瀹ゅ唴璁捐	鍖楁椋庢牸瀹ゅ唴璁捐 (lora)	lora|loras	80
+鐜颁唬鎽╃櫥鍒澶栬璁捐 detached villa 1.0	lora	鐜颁唬鎽╃櫥鍒澶栬璁捐 detached villa 1.0	鐜颁唬鎽╃櫥鍒澶栬璁捐 Detached Villa 1.0	鐜颁唬鎽╃櫥鍒澶栬璁捐 Detached Villa 1.0 (lora)	lora|loras	80
+鐢靛晢瀹ゅ唴鍦烘櫙瑙嗚杞崲 reconstructing furniture perspective	lora	鐢靛晢瀹ゅ唴鍦烘櫙瑙嗚杞崲 reconstructing furniture perspective	鐢靛晢瀹ゅ唴鍦烘櫙瑙嗚杞崲 Reconstructing Furniture Perspective	鐢靛晢瀹ゅ唴鍦烘櫙瑙嗚杞崲 Reconstructing Furniture Perspective (lora)	lora|loras	80
+1k3d68	model	1k3d68	1K3D68	1K3D68 (model)	model|insightface	60
+2d106det	model	2d106det	2D106Det	2D106Det (model)	model|insightface	60
+det-10g	model	det|10g	Det 10G	Det 10G (model)	model|insightface	60
+genderage	model	genderage	Genderage	Genderage (model)	model|insightface	60
+glintr100	model	glintr100	Glintr100	Glintr100 (model)	model|insightface	60
+inswapper-128	model	inswapper|128	Inswapper 128	Inswapper 128 (model)	model|insightface	60
+model	model	model	Model Placeholder	模型占位符（通用）	model|generic	50
+sam3dbody	model	sam3dbody	SAM 3D Body	SAM 3D 人体分割模型	sam|3d|body	80
+scrfd-10g-bnkps	model	scrfd|10g|bnkps	Scrfd 10G Bnkps	Scrfd 10G Bnkps (model)	model|insightface	60
+sdpose-wholebody	model	sdpose|wholebody	Sdpose Wholebody	Sdpose Wholebody (model)	model|pose-estimation	60
+w600k-r50	model	w600k|r50	W600K R50	W600K R50 (model)	model|insightface	60
+512-inpainting-ema	unet	512|inpainting|ema	512 Inpainting Ema	512 Inpainting Ema (unet)	unet|checkpoints	90
+ace-step-1.5	unet	ace-step|ace step|1.5	ACE Step 1.5	ACE 步骤音乐生成模型	ace|music|audio	85
+acestep	unet	acestep	Acestep	Acestep (unet)	unet|diffusion-models	60
+aisha-nsfw-beta	unet	aisha|nsfw|beta	Aisha Nsfw Beta	Aisha Nsfw Beta (unet)	unet|checkpoints	90
+architecturerealmix	unet	architecturerealmix	Architecturerealmix	Architecturerealmix (unet)	unet|checkpoints	90
+awpainting	unet	awpainting	Awpainting	Awpainting (unet)	unet|checkpoints	90
+ben-base	unet	ben|base	Ben Base	Ben Base (unet)	unet|BEN	60
+ben2-base	unet	ben2|base	Ben2 Base	Ben2 Base (unet)	unet|BEN	60
+big-lama	unet	big|lama	Big Lama	Big Lama (unet)	unet|ckpts	60
+birefnet-general	unet	birefnet|general	Birefnet General	Birefnet General (unet)	unet|RMBG	60
+codeformer-v0.1.0	unet	codeformer|v0.1.0	Codeformer V0.1.0	Codeformer V0.1.0 (unet)	unet|facerestore-models	60
+counterfeit-v2.5	unet	counterfeit|v2.5	Counterfeit V2.5	Counterfeit V2.5 (unet)	unet|checkpoints	90
+diffusion-pytorch-model	unet	diffusion|pytorch|model	Diffusion Pytorch Model	Diffusion Pytorch Model (unet)	unet|hidream-i1-fast-local	60
+diffusion-pytorch-model-00001-of-00003	unet	diffusion|pytorch|model|00001|of	Diffusion Pytorch Model 00001 Of 00003	Diffusion Pytorch Model 00001 Of 00003 (unet)	unet|diffusers	60
+diffusion-pytorch-model-00001-of-00005	unet	diffusion|pytorch|model|00001|of	Diffusion Pytorch Model 00001 Of 00005	Diffusion Pytorch Model 00001 Of 00005 (unet)	unet|diffusers	60
+diffusion-pytorch-model-00002-of-00003	unet	diffusion|pytorch|model|00002|of	Diffusion Pytorch Model 00002 Of 00003	Diffusion Pytorch Model 00002 Of 00003 (unet)	unet|diffusers	60
+diffusion-pytorch-model-00002-of-00005	unet	diffusion|pytorch|model|00002|of	Diffusion Pytorch Model 00002 Of 00005	Diffusion Pytorch Model 00002 Of 00005 (unet)	unet|diffusers	60
+diffusion-pytorch-model-00003-of-00003	unet	diffusion|pytorch|model|00003|of	Diffusion Pytorch Model 00003 Of 00003	Diffusion Pytorch Model 00003 Of 00003 (unet)	unet|diffusers	60
+diffusion-pytorch-model-00005-of-00005	unet	diffusion|pytorch|model|00005|of	Diffusion Pytorch Model 00005 Of 00005	Diffusion Pytorch Model 00005 Of 00005 (unet)	unet|diffusers	60
+dreamcreationvirtual3decommerce	unet	dreamcreationvirtual3decommerce	Dreamcreationvirtual3Decommerce	Dreamcreationvirtual3Decommerce (unet)	unet|checkpoints	90
+dreamshaper-8	unet	dreamshaper|8	Dreamshaper 8	Dreamshaper 8 (unet)	unet|checkpoints	90
+face-yolov8m	unet	face|yolov8m	Face Yolov8M	Face Yolov8M (unet)	unet|ultralytics	60
+face-yolov8n	unet	face|yolov8n	Face Yolov8N	Face Yolov8N (unet)	unet|ultralytics	60
+face-yolov8s	unet	face|yolov8s	Face Yolov8S	Face Yolov8S (unet)	unet|ultralytics	60
+face-yolov9c	unet	face|yolov9c	Face Yolov9C	Face Yolov9C (unet)	unet|ultralytics	60
+firered-image-edit-1.1	unet	firered|image|edit|1.1	Firered Image Edit 1.1	Firered Image Edit 1.1 (unet)	unet|diffusion-models	60
+flux-2-klein-4b-fp8	unet	flux|2|klein|4b|fp8	Flux 2 Klein 4B Fp8	Flux 2 Klein 4B Fp8 (unet)	unet|diffusion-models	60
+flux-2-klein-9b-kv	unet	flux|2|klein|9b|kv	Flux 2 Klein 9B Kv	Flux 2 Klein 9B Kv (unet)	unet|diffusion-models	60
+flux-2-klein-9b-nvfp4	unet	flux|2|klein|9b|nvfp4	Flux 2 Klein 9B Nvfp4	Flux 2 Klein 9B Nvfp4 (unet)	unet|diffusion-models	60
+flux-2-klein-base-4b	unet	flux|2|klein|base|4b	Flux 2 Klein Base 4B	Flux 2 Klein Base 4B (unet)	unet|diffusion-models	60
+flux-2-klein-base-4b-fp8	unet	flux|2|klein|base|4b	Flux 2 Klein Base 4B Fp8	Flux 2 Klein Base 4B Fp8 (unet)	unet|diffusion-models	60
+flux-2-klein-base-9b	unet	flux|2|klein|base|9b	Flux 2 Klein Base 9B	Flux 2 Klein Base 9B (unet)	unet|diffusion-models	60
+flux-dev	unet	flux1|flux-dev|flux dev	Flux Dev	Flux 开发版主扩散模型	flux|text-to-image	100
+flux-fill	unet	flux-fill|flux fill	Flux Fill	Flux 填充/重绘模型	flux|inpaint	90
+flux-krea	unet	flux1-krea|flux krea	Flux Krea	Flux Krea 优化版模型	flux|optimized	85
+flux-redux	unet	flux1-redux|flux redux	Flux Redux	Flux Redux 风格迁移模型	flux|style	80
+flux-schnell	unet	flux1-schnell|flux schnell	Flux Schnell	Flux 快速版主扩散模型	flux|fast	95
+flux1-canny-dev	unet	flux1|canny|dev	Flux1 Canny Dev	Flux1 Canny Dev (unet)	unet|diffusion-models	60
+flux1-dev-fp8	unet	flux1|dev|fp8	Flux1 Dev Fp8	Flux1 Dev Fp8 (unet)	unet|checkpoints	90
+flux1-fill-dev	unet	flux1|fill|dev	Flux1 Fill Dev	Flux1 Fill Dev (unet)	unet|diffusion-models	60
+flux1-krea-dev	unet	flux1|krea|dev	Flux1 Krea Dev	Flux1 Krea Dev (unet)	unet|diffusion-models	60
+flux1-redux-dev	unet	flux1|redux|dev	Flux1 Redux Dev	Flux1 Redux Dev (unet)	unet|style-models	60
+flux1-schnell-fp8-e4m3fn	unet	flux1|schnell|fp8|e4m3fn	Flux1 Schnell Fp8 E4M3Fn	Flux1 Schnell Fp8 E4M3Fn (unet)	unet|diffusion-models	60
+flux2-dev-nvfp4-mixed	unet	flux2|dev|nvfp4|mixed	Flux2 Dev Nvfp4 Mixed	Flux2 Dev Nvfp4 Mixed (unet)	unet|diffusion-models	60
+flux2klein-4b-distill-aio-fp8	unet	flux2klein|4b|distill|aio|fp8	Flux2Klein 4B Distill Aio Fp8	Flux2Klein 4B Distill Aio Fp8 (unet)	unet|checkpoints	90
+fluxtoolsredux-reduxdev	unet	fluxtoolsredux|reduxdev	Fluxtoolsredux Reduxdev	Fluxtoolsredux Reduxdev (unet)	unet|style-models	60
+general	unet	general	General	General (unet)	unet|BiRefNet	60
+gfpganv1.3	unet	gfpganv1.3	Gfpganv1.3	Gfpganv1.3 (unet)	unet|facerestore-models	60
+gfpganv1.4	unet	gfpganv1.4	Gfpganv1.4	Gfpganv1.4 (unet)	unet|facerestore-models	60
+gpen-bfr-512	unet	gpen|bfr|512	Gpen Bfr 512	Gpen Bfr 512 (unet)	unet|facerestore-models	60
+hand-yolov8n	unet	hand|yolov8n	Hand Yolov8N	Hand Yolov8N (unet)	unet|ultralytics	60
+hand-yolov8s	unet	hand|yolov8s	Hand Yolov8S	Hand Yolov8S (unet)	unet|ultralytics	60
+hand-yolov9c	unet	hand|yolov9c	Hand Yolov9C	Hand Yolov9C (unet)	unet|ultralytics	60
+hidream-e1-1-fp8	unet	hidream|e1|1|fp8	Hidream E1 1 Fp8	Hidream E1 1 Fp8 (unet)	unet|diffusion-models	60
+hidream-i1-fast	unet	hidream|i1|fast	Hidream I1 Fast	Hidream I1 Fast (unet)	unet|diffusion-models	60
+hidream-i1-full	unet	hidream-i1-full|hidream i1 full	HiDream I1 Full	HiDream I1 完整版图像模型	hidream|image	95
+hunyuan-3d	unet	hunyuan|3d	Hunyuan 3D	Hunyuan 3D (unet)	unet|checkpoints	90
+hunyuan-image	unet	hunyuan-image|hunyuan image	Hunyuan Image	混元图像生成模型	hunyuan|image	90
+hunyuan-video	unet	hunyuan-video|hunyuan video	Hunyuan Video	混元视频生成模型	hunyuan|video	95
+hunyuan3d-dit-v2-0-fp16	unet	hunyuan3d|dit|v2|0|fp16	Hunyuan3D Dit V2 0 Fp16	Hunyuan3D Dit V2 0 Fp16 (unet)	unet|unet	60
+hunyuan3d-dit-v2-1	unet	hunyuan3d|dit|v2|1	Hunyuan3D Dit V2 1	Hunyuan3D Dit V2 1 (unet)	unet|diffusion-models	60
+hunyuanvideo1.5-1080p-sr-distilled	unet	hunyuanvideo1.5|1080p|sr|distilled	Hunyuanvideo1.5 1080P Sr Distilled	Hunyuanvideo1.5 1080P Sr Distilled (unet)	unet|diffusion-models	60
+hunyuanvideo1.5-480p-i2v-cfg-distilled	unet	hunyuanvideo1.5|480p|i2v|cfg|distilled	Hunyuanvideo1.5 480P I2V Cfg Distilled	Hunyuanvideo1.5 480P I2V Cfg Distilled (unet)	unet|diffusion-models	60
+hunyuanvideo1.5-480p-t2v-cfg-distilled	unet	hunyuanvideo1.5|480p|t2v|cfg|distilled	Hunyuanvideo1.5 480P T2V Cfg Distilled	Hunyuanvideo1.5 480P T2V Cfg Distilled (unet)	unet|diffusion-models	60
+hunyuanvideo1.5-720p-i2v	unet	hunyuanvideo1.5|720p|i2v	Hunyuanvideo1.5 720P I2V	Hunyuanvideo1.5 720P I2V (unet)	unet|diffusion-models	60
+hunyuanvideo1.5-720p-sr-distilled	unet	hunyuanvideo1.5|720p|sr|distilled	Hunyuanvideo1.5 720P Sr Distilled	Hunyuanvideo1.5 720P Sr Distilled (unet)	unet|checkpoints	90
+hunyuanvideo1.5-720p-t2v	unet	hunyuanvideo1.5|720p|t2v	Hunyuanvideo1.5 720P T2V	Hunyuanvideo1.5 720P T2V (unet)	unet|diffusion-models	60
+inspyrenet	unet	inspyrenet	Inspyrenet	Inspyrenet (unet)	unet|RMBG	60
+inspyrenet-swinb	unet	inspyrenet|swinb	Inspyrenet Swinb	Inspyrenet Swinb (unet)	unet|RMBG	60
+interiordesignsuperm	unet	interiordesignsuperm	Interiordesignsuperm	Interiordesignsuperm (unet)	unet|checkpoints	90
+japanesestylerealistic	unet	japanesestylerealistic	Japanesestylerealistic	Japanesestylerealistic (unet)	unet|checkpoints	90
+juggernautxlrdphoto2lightning	unet	juggernautxlrdphoto2lightning	Juggernautxlrdphoto2Lightning	Juggernautxlrdphoto2Lightning (unet)	unet|checkpoints	90
+lotus-depth-d-v1-1	unet	lotus|depth|d|v1|1	Lotus Depth D V1 1	Lotus Depth D V1 1 (unet)	unet|diffusion-models	60
+ltx-2-3-22b-dev-transformer-only	unet	ltx-2-3-22b-dev|transformer-only	LTX 2.3 22B Transformer Only	LTX 2.3 仅 Transformer 版本	ltx|video|transformer	90
+ltx-2.3-22b-dev	unet	ltx-2.3-22b|ltx 2.3 22b|dev	LTX 2.3 22B Dev	LTX 2.3 22B 开发版视频模型	ltx|video|22b	100
+ltx-2.3-22b-dev-fp8	unet	ltx|2.3|22b|dev|fp8	Ltx 2.3 22B Dev Fp8	Ltx 2.3 22B Dev Fp8 (unet)	unet|checkpoints	90
+ltx-2.3-22b-distilled	unet	ltx-2.3-22b-distilled|distilled-transformer	LTX 2.3 22B Distilled	LTX 2.3 22B 蒸馏版视频模型	ltx|video|distilled	95
+ltx-2.3-22b-distilled-1.1-transformer-only	unet	ltx|2.3|22b|distilled|1.1	Ltx 2.3 22B Distilled 1.1 Transformer Only	Ltx 2.3 22B Distilled 1.1 Transformer Only (unet)	unet|diffusion-models	60
+ltx-2.3-22b-distilled-transformer-only	unet	ltx|2.3|22b|distilled|transformer	Ltx 2.3 22B Distilled Transformer Only	Ltx 2.3 22B Distilled Transformer Only (unet)	unet|checkpoints	90
+majicmixrealistic	unet	majicmixrealistic	Majicmixrealistic	Majicmixrealistic (unet)	unet|checkpoints	90
+matting	unet	matting	Matting	Matting (unet)	unet|BiRefNet	60
+melbandroformer	unet	melbandroformer	Melbandroformer	Melbandroformer (unet)	unet|diffusion-models	60
+model	unet	model	Model	Model (unet)	unet|hidream-i1-fast-local	60
+newbie-image-exp0.1-bf16	unet	newbie|image|exp0.1|bf16	Newbie Image Exp0.1 Bf16	Newbie Image Exp0.1 Bf16 (unet)	unet|diffusion-models	60
+person-yolov8m-seg	unet	person|yolov8m|seg	Person Yolov8M Seg	Person Yolov8M Seg (unet)	unet|ultralytics	60
+pytorch-model	unet	pytorch|model	Pytorch Model	Pytorch Model (unet)	unet|vitmatte	60
+qwen-image	unet	qwen-image|qwen image	Qwen Image	Qwen 图像生成模型	qwen|image	90
+qwen-image-2512	unet	qwen|image|2512	Qwen Image 2512	Qwen Image 2512 (unet)	unet|checkpoints	90
+qwen-image-2512-fp8	unet	qwen|image|2512|fp8	Qwen Image 2512 Fp8	Qwen Image 2512 Fp8 (unet)	unet|checkpoints	90
+qwen-image-edit	unet	qwen|image|edit	Qwen Image Edit	Qwen Image Edit (unet)	unet|diffusion-models	60
+qwen-image-edit-2511	unet	qwen-image-edit|qwen image edit|2511	Qwen Image Edit 2511	Qwen 图像编辑 2511 模型	qwen|image|edit	90
+qwen-image-layered	unet	qwen|image|layered	Qwen Image Layered	Qwen Image Layered (unet)	unet|diffusion-models	60
+qwen-rapid-aio-nsfw-v23	unet	qwen|rapid|aio|nsfw|v23	Qwen Rapid Aio Nsfw V23	Qwen Rapid Aio Nsfw V23 (unet)	unet|checkpoints	90
+realvisxl	unet	realvisxl	Realvisxl	Realvisxl (unet)	unet|checkpoints	90
+rmbg1.4	unet	rmbg1.4	Rmbg1.4	Rmbg1.4 (unet)	unet|RMBG	60
+rmbg2	unet	rmbg2	Rmbg2	Rmbg2 (unet)	unet|RMBG	60
+sam-vit-b-01ec64	unet	sam|vit|b|01ec64	Sam Vit B 01Ec64	Sam Vit B 01Ec64 (unet)	unet|sams	60
+sam2-hiera-base-plus	unet	sam2-hiera|sam2 hiera|base-plus	SAM 2 Hiera Base Plus	SAM 2 Hiera 基础增强版	sam|segmentation	80
+sam3	unet	sam3	SAM 3	Segment Anything Model 3	sam|segmentation	85
+sam3-fp16	unet	sam3|fp16	Sam3 Fp16	Sam3 Fp16 (unet)	unet|sam3	60
+sam3.1	unet	sam3.1	Sam3.1	Sam3.1 (unet)	unet|sam3	60
+sd-xl-base-1.0	unet	sd|xl|base|1.0	Sd Xl Base 1.0	Sd Xl Base 1.0 (unet)	unet|checkpoints	90
+sd15	unet	sd1.5|stable-diffusion-1.5	SD 1.5	Stable Diffusion 1.5 经典模型	sd|legacy	75
+sd3.5-large	unet	sd3.5|large|stable-diffusion	SD 3.5 Large	Stable Diffusion 3.5 大型模型	sd|latest|text-to-image	95
+sd3.5-medium	unet	sd3.5|medium|stable-diffusion	SD 3.5 Medium	Stable Diffusion 3.5 中型模型	sd|latest|text-to-image	90
+sdmatte	unet	sdmatte	Sdmatte	Sdmatte (unet)	unet|RMBG	60
+sdmatte-plus	unet	sdmatte|plus	Sdmatte Plus	Sdmatte Plus (unet)	unet|RMBG	60
+sdxl	unet	sdxl|stable-diffusion-xl	SDXL	Stable Diffusion XL 模型	sd|modern	85
+supir-v0f	unet	supir|v0f	Supir V0F	Supir V0F (unet)	unet|checkpoints	90
+supir-v0q	unet	supir|v0q	Supir V0Q	Supir V0Q (unet)	unet|checkpoints	90
+ultra	unet	ultra	Ultra	Ultra (unet)	unet|checkpoints	90
+v1-5-pruned-emaonly	unet	v1|5|pruned|emaonly	V1 5 Pruned Emaonly	V1 5 Pruned Emaonly (unet)	unet|checkpoints	90
+vitpose-l-wholebody	unet	vitpose|l|wholebody	Vitpose L Wholebody	Vitpose L Wholebody (unet)	unet|detection	60
+wan2.2-animate-14b	unet	wan2.2|animate|14b	Wan2.2 Animate 14B	Wan2.2 Animate 14B (unet)	unet|diffusion-models	60
+wan2.2-fun-camera-high-noise-14b	unet	wan2.2|fun|camera|high|noise	Wan2.2 Fun Camera High Noise 14B	Wan2.2 Fun Camera High Noise 14B (unet)	unet|diffusion-models	60
+wan2.2-fun-camera-low-noise-14b	unet	wan2.2|fun|camera|low|noise	Wan2.2 Fun Camera Low Noise 14B	Wan2.2 Fun Camera Low Noise 14B (unet)	unet|diffusion-models	60
+wan2.2-fun-control-high-noise-14b	unet	wan2.2|fun|control|high|noise	Wan2.2 Fun Control High Noise 14B	Wan2.2 Fun Control High Noise 14B (unet)	unet|diffusion-models	60
+wan2.2-fun-control-low-noise-14b	unet	wan2.2|fun|control|low|noise	Wan2.2 Fun Control Low Noise 14B	Wan2.2 Fun Control Low Noise 14B (unet)	unet|diffusion-models	60
+wan2.2-fun-inpaint-high-noise-14b	unet	wan2.2|fun|inpaint|high|noise	Wan2.2 Fun Inpaint High Noise 14B	Wan2.2 Fun Inpaint High Noise 14B (unet)	unet|diffusion-models	60
+wan2.2-fun-inpaint-low-noise-14b	unet	wan2.2|fun|inpaint|low|noise	Wan2.2 Fun Inpaint Low Noise 14B	Wan2.2 Fun Inpaint Low Noise 14B (unet)	unet|diffusion-models	60
+wan2.2-i2v-high-noise-14b	unet	wan2.2|i2v|high|noise|14b	Wan2.2 I2V High Noise 14B	Wan2.2 I2V High Noise 14B (unet)	unet|diffusion-models	60
+wan2.2-i2v-low-noise-14b	unet	wan2.2|i2v|low|noise|14b	Wan2.2 I2V Low Noise 14B	Wan2.2 I2V Low Noise 14B (unet)	unet|diffusion-models	60
+wan2.2-rapid-mega-aio-nsfw-v12.2	unet	wan2.2|rapid|mega|aio|nsfw	Wan2.2 Rapid Mega Aio Nsfw V12.2	Wan2.2 Rapid Mega Aio Nsfw V12.2 (unet)	unet|checkpoints	90
+wan2.2-remix-nsfw-i2v-14b-low-lighting.1	unet	wan2.2|remix|nsfw|i2v|14b	Wan2.2 Remix Nsfw I2V 14B Low Lighting.1	Wan2.2 Remix Nsfw I2V 14B Low Lighting.1 (unet)	unet|diffusion-models	60
+wan2.2-s2v-14b	unet	wan2.2|s2v|14b	Wan2.2 S2V 14B	Wan2.2 S2V 14B (unet)	unet|diffusion-models	60
+wan2.2-t2v-high-noise-14b	unet	wan2.2|t2v|high|noise|14b	Wan2.2 T2V High Noise 14B	Wan2.2 T2V High Noise 14B (unet)	unet|diffusion-models	60
+wan2.2-t2v-low-noise-14b	unet	wan2.2|t2v|low|noise|14b	Wan2.2 T2V Low Noise 14B	Wan2.2 T2V Low Noise 14B (unet)	unet|diffusion-models	60
+wan2.2-ti2v-5b	unet	wan2.2|ti2v|5b	Wan2.2 Ti2V 5B	Wan2.2 Ti2V 5B (unet)	unet|diffusion-models	60
+wan21-i2v-14b	unet	wan2.1-i2v|wan21-i2v|image-to-video	Wan 2.1 I2V 14B	Wan 2.1 图生视频 14B 模型	wan|video|image-to-video	100
+wan21-t2v-14b	unet	wan2.1|wan21|wan-2.1|t2v	Wan 2.1 T2V 14B	Wan 2.1 文生视频 14B 模型	wan|video|text-to-video	100
+wan22-rapid-mega	unet	wan2.2|rapid|mega|aio	Wan 2.2 Rapid Mega	Wan 2.2 快速全能模型	wan|video|all-in-one	95
+xsarchitectural	unet	xsarchitectural	Xsarchitectural	Xsarchitectural (unet)	unet|checkpoints	90
+yolo11x-train28-best	unet	yolo11x|train28|best	Yolo11X Train28 Best	Yolo11X Train28 Best (unet)	unet|yolo	60
+yolov10m	unet	yolov10m	Yolov10M	Yolov10M (unet)	unet|detection	60
+z-image	unet	z|image	Z Image	Z Image (unet)	unet|diffusion-models	60
+zimage	unet	zimage	Zimage	Zimage (unet)	unet|diffusion-models	60
+diffusion-pytorch-model	unknown	diffusion|pytorch|model	Diffusion Pytorch Model	Diffusion Pytorch Model (unknown)	unknown|z-image-turbo-nvfp4-local	60
+model	unknown	model	Model	Model (unknown)	unknown|LLM	60
+pytorch-model	unknown	pytorch|model	Pytorch Model	Pytorch Model (unknown)	unknown|LLM	60
+qwen3.5-9b	unknown	qwen3.5|9b	Qwen3.5 9B	Qwen3.5 9B (unknown)	unknown|LLM	60
+rife47	unknown	rife47	Rife47	Rife47 (unknown)	unknown|frame-interpolatiom	60
+rifeheavy	unknown	rifeheavy	Rifeheavy	Rifeheavy (unknown)	unknown|frame-interpolatiom	60
+1xskincontrast-superultracompact	upscaler	1xskincontrast|superultracompact	1Xskincontrast Superultracompact	1Xskincontrast Superultracompact (upscaler)	upscaler|upscale-models	75
+2xnomosuni-span-multijpg-ldl	upscaler	2xnomosuni|span|multijpg|ldl	2Xnomosuni Span Multijpg Ldl	2Xnomosuni Span Multijpg Ldl (upscaler)	upscaler|upscale-models	75
+4x-animesharp	upscaler	4x|animesharp	4X Animesharp	4X Animesharp (upscaler)	upscaler|upscale-models	75
+4xfaceupdat	upscaler	4xfaceupdat	4Xfaceupdat	4Xfaceupdat (upscaler)	upscaler|upscale-models	75
+4xfaceupsharpdat	upscaler	4xfaceupsharpdat	4Xfaceupsharpdat	4Xfaceupsharpdat (upscaler)	upscaler|upscale-models	75
+4xnomos8k-atd-jpg	upscaler	4xnomos8k|atd|jpg	4Xnomos8K Atd Jpg	4Xnomos8K Atd Jpg (upscaler)	upscaler|upscale-models	75
+4xnomos8kschat-l	upscaler	4xnomos8kschat|l	4Xnomos8Kschat L	4Xnomos8Kschat L (upscaler)	upscaler|upscale-models	75
+8xnmkdsuperscale-150000g	upscaler	8xnmkdsuperscale|150000g	8Xnmkdsuperscale 150000G	8Xnmkdsuperscale 150000G (upscaler)	upscaler|upscale-models	75
+architecturerealmix-v11	upscaler	architecturerealmix-v11|architecture-realmix|v11	Architecture RealMix v11	架构真实混合 v11 超分	upscaler|architecture	75
+bsrgan	upscaler	bsrgan	Bsrgan	Bsrgan (upscaler)	upscaler|upscale-models	75
+dat-x4	upscaler	dat|x4	Dat X4	Dat X4 (upscaler)	upscaler|upscale-models	75
+diffusion-pytorch-model-streaming-dmd	upscaler	diffusion|pytorch|model|streaming|dmd	Diffusion Pytorch Model Streaming Dmd	Diffusion Pytorch Model Streaming Dmd (upscaler)	upscaler|FlashVSR-v1.1	60
+ema-vae	upscaler	ema|vae	Ema Vae	Ema Vae (upscaler)	upscaler|SEEDVR2	60
+esrgan-4x	upscaler	esrgan|4x	Esrgan 4X	Esrgan 4X (upscaler)	upscaler|upscale-models	75
+flashvsr1-1	upscaler	flashvsr1-1|flashvsr 1.1	FlashVSR 1.1	FlashVSR 1.1 快速视频超分	upscaler|video|fast	85
+hunyuanvideo15-latent-upsampler-1080p	upscaler	hunyuanvideo15|latent|upsampler|1080p	Hunyuanvideo15 Latent Upsampler 1080P	Hunyuanvideo15 Latent Upsampler 1080P (upscaler)	upscaler|latent-upscale-models	60
+interiordesignsuperm-v2	upscaler	interiordesignsuperm-v2|interior-design-superm|v2	Interior Design SuperM v2	室内设计超级模型 v2	upscaler|interior	70
+lq-proj-in	upscaler	lq|proj|in	Lq Proj In	Lq Proj In (upscaler)	upscaler|FlashVSR	60
+ltx-2.3-spatial-upscaler-x2-1.0	upscaler	ltx-2.3-spatial-upscaler-x2-1.0|x2-1.0	LTX 2.3 Spatial Upscaler x2 1.0	LTX 2.3 空间超分 x2 v1.0	ltx|upscaler|2x	95
+ltx-2.3-spatial-upscaler-x2-1.1	upscaler	ltx-2.3-spatial-upscaler-x2-1.1|spatial-upscaler|x2-1.1	LTX 2.3 Spatial Upscaler x2 1.1	LTX 2.3 空间超分 x2 v1.1	ltx|upscaler|2x	100
+prompt	upscaler	prompt	Prompt	Prompt (upscaler)	upscaler|FlashVSR	60
+real-esrgan-x4	upscaler	real-esrgan-x4|realesrgan x4|4x	Real-ESRGAN x4	Real-ESRGAN 4倍超分模型	upscaler|4x|general	90
+realesrgan-x2plus	upscaler	realesrgan|x2plus	Realesrgan X2Plus	Realesrgan X2Plus (upscaler)	upscaler|upscale-models	75
+realesrgan-x4plus	upscaler	realesrgan|x4plus	Realesrgan X4Plus	Realesrgan X4Plus (upscaler)	upscaler|upscale-models	75
+realesrgan-x4plus-anime-6b	upscaler	realesrgan|x4plus|anime|6b	Realesrgan X4Plus Anime 6B	Realesrgan X4Plus Anime 6B (upscaler)	upscaler|upscale-models	75
+seedvr2-ema-3b	upscaler	seedvr2-ema-3b|seedvr2|3b	SeedVR2 EMA 3B	SeedVR2 指数移动平均 3B 超分	upscaler|ema|3b	80
+seedvr2-ema-7b	upscaler	seedvr2|ema|7b	Seedvr2 Ema 7B	Seedvr2 Ema 7B (upscaler)	upscaler|SEEDVR2	60
+seedvr2-ema-7b-sharp	upscaler	seedvr2|ema|7b|sharp	Seedvr2 Ema 7B Sharp	Seedvr2 Ema 7B Sharp (upscaler)	upscaler|SEEDVR2	60
+swinir-4x	upscaler	swinir|4x	Swinir 4X	Swinir 4X (upscaler)	upscaler|upscale-models	75
+swinir-x4	upscaler	swinir-x4|swin ir x4|4x	SwinIR x4	SwinIR 4倍超分模型	upscaler|4x|general	85
+tcdecoder	upscaler	tcdecoder	Tcdecoder	Tcdecoder (upscaler)	upscaler|FlashVSR	60
+wan2-1-flashvsr-lq-proj-model	upscaler	wan2|1|flashvsr|lq|proj	Wan2 1 Flashvsr Lq Proj Model	Wan2 1 Flashvsr Lq Proj Model (upscaler)	upscaler|FlashVSR	60
+wan2.1-vae	upscaler	wan2.1|vae	Wan2.1 Vae	Wan2.1 Vae (upscaler)	upscaler|FlashVSR	60
+ace-1.5-vae	vae	ace-1.5-vae|ace 1.5 vae	ACE 1.5 VAE	ACE 1.5 音频 VAE	ace|vae|audio	85
+diffusion-pytorch-model	vae	diffusion-pytorch-model|pytorch	Diffusion PyTorch Model	扩散模型 PyTorch 格式 VAE	vae|pytorch	75
+diffusion-pytorch-model-streaming-dmd	vae	diffusion-pytorch-model-streaming-dmd|streaming-dmd	Diffusion Streaming DMD	流式蒸馏匹配扩散模型	vae|distillation	70
+diffusion-pytorch-model.fp16	vae	diffusion|pytorch|model.fp16	Diffusion Pytorch Model.Fp16	Diffusion Pytorch Model.Fp16 (vae)	vae|vae	85
+ema-vae	vae	ema-vae|ema vae	EMA VAE	指数移动平均 VAE	vae|ema	80
+flux1-krea-dev-vae	vae	flux1-krea-dev-vae|flux1 krea dev vae	Flux1 Krea Dev VAE	Flux1 Krea 开发版 VAE	flux|vae	80
+flux2-dev-ae	vae	flux2-dev-ae|flux2 dev ae	Flux2 Dev AE	Flux 2 开发版自动编码器	flux|vae|autoencoder	85
+flux2-vae	vae	flux2-vae|flux2 vae	Flux2 VAE	Flux 2 VAE 编解码器	flux|vae	90
+full-encoder-small-decoder	vae	full|encoder|small|decoder	Full Encoder Small Decoder	Full Encoder Small Decoder (vae)	vae|vae	85
+hunyuan3d-vae-v2-1	vae	hunyuan3d|vae|v2|1	Hunyuan3D Vae V2 1	Hunyuan3D Vae V2 1 (vae)	vae|vae	85
+hunyuanvideo-1.5-vae	vae	hunyuanvideo|1.5|vae	Hunyuanvideo 1.5 Vae	Hunyuanvideo 1.5 Vae (vae)	vae|vae	85
+hunyuanvideo15-vae	vae	hunyuanvideo15|vae	Hunyuanvideo15 Vae	Hunyuanvideo15 Vae (vae)	vae|vae	85
+llava-llama3	vae	llava|llama3	Llava Llama3	Llava Llama3 (vae)	vae|vae	85
+ltx23-audio-vae	vae	ltx23-audio-vae|ltx23 audio vae|audio-vae	LTX23 Audio VAE	LTX 2.3 音频 VAE 编解码器	ltx|vae|audio	95
+ltx23-video-vae	vae	ltx23-video-vae|ltx23 video vae|video-vae	LTX23 Video VAE	LTX 2.3 视频 VAE 编解码器	ltx|vae|video	100
+qwen-2512-vae	vae	qwen|2512|vae	Qwen 2512 Vae	Qwen 2512 Vae (vae)	vae|vae	85
+qwen-image-layered-vae	vae	qwen|image|layered|vae	Qwen Image Layered Vae	Qwen Image Layered Vae (vae)	vae|vae	85
+qwen-image-vae	vae	qwen-image-vae|qwen image vae	Qwen Image VAE	Qwen 图像 VAE 编解码器	qwen|vae	85
+sdxl-vae	vae	sdxl|vae	Sdxl Vae	Sdxl Vae (vae)	vae|vae	85
+taef1-decoder	vae	taef1|decoder	Taef1 Decoder	Taef1 Decoder (vae)	vae|vae-approx	60
+taef1-encoder	vae	taef1|encoder	Taef1 Encoder	Taef1 Encoder (vae)	vae|vae-approx	60
+taeltx2-3	vae	taeltx2|3	Taeltx2 3	Taeltx2 3 (vae)	vae|vae	85
+taesd-decoder	vae	taesd|decoder	Taesd Decoder	Taesd Decoder (vae)	vae|vae-approx	60
+taesd-encoder	vae	taesd|encoder	Taesd Encoder	Taesd Encoder (vae)	vae|vae-approx	60
+taesd3-decoder	vae	taesd3|decoder	Taesd3 Decoder	Taesd3 Decoder (vae)	vae|vae-approx	60
+taesd3-encoder	vae	taesd3|encoder	Taesd3 Encoder	Taesd3 Encoder (vae)	vae|vae-approx	60
+taesdxl-decoder	vae	taesdxl|decoder	Taesdxl Decoder	Taesdxl Decoder (vae)	vae|vae-approx	60
+taesdxl-encoder	vae	taesdxl|encoder	Taesdxl Encoder	Taesdxl Encoder (vae)	vae|vae-approx	60
+vae-ft-mse-840000-ema-pruned	vae	vae-ft-mse|vae ft mse|840000|ema-pruned	VAE FT MSE 840K EMA Pruned	微调 MSE VAE 84万步剪枝版	vae|finetuned	75
+wan-2.1-vae	vae	wan|2.1|vae	Wan 2.1 Vae	Wan 2.1 Vae (vae)	vae|vae	85
+wan2.1-vae	vae	wan2.1-vae|wan2.1 vae	Wan 2.1 VAE	Wan 2.1 视频 VAE 编解码器	wan|vae|video	90
+wan2.2-vae	vae	wan2.2|vae	Wan2.2 Vae	Wan2.2 Vae (vae)	vae|vae	85
+video\wan2.2-remix-nsfw-i2v-14b-low-lighting-fp8-e4m3fn-v2.1	unet	video\wan2.2|remix|nsfw|i2v|14b|low	Video\Wan2.2 Remix Nsfw I2V 14B Low Lighting Fp8 E4M3Fn V2.1	Video\Wan2.2 Remix Nsfw I2V 14B Low Lighting Fp8 E4M3Fn V2.1 (video model from official workflows)	unet|video|official-workflow|wan	96
+wan\wan2.2-i2v-lightx2v-4steps-lora-v1-high-noise	lora	wan\wan2.2|i2v|lightx2v|4steps|lora|v1	Wan\Wan2.2 I2V Lightx2V 4Steps Lora V1 High Noise	Wan\Wan2.2 I2V Lightx2V 4Steps Lora V1 High Noise (video model from official workflows)	lora|video|official-workflow|wan	100
+wan\wan2.2-i2v-lightx2v-4steps-lora-v1-low-noise	lora	wan\wan2.2|i2v|lightx2v|4steps|lora|v1	Wan\Wan2.2 I2V Lightx2V 4Steps Lora V1 Low Noise	Wan\Wan2.2 I2V Lightx2V 4Steps Lora V1 Low Noise (video model from official workflows)	lora|video|official-workflow|wan	100
+wan2.2-remix-nsfw-i2v-14b-low-lighting-fp8-e4m3fn-v2.1	unet	wan2.2|remix|nsfw|i2v|14b|low	Wan2.2 Remix Nsfw I2V 14B Low Lighting Fp8 E4M3Fn V2.1	Wan2.2 Remix Nsfw I2V 14B Low Lighting Fp8 E4M3Fn V2.1 (video model from official workflows)	unet|video|official-workflow|wan	99
+wan2-2-animate-14b-fp8-e4m3fn-scaled-kj	unet	wan2|2|animate|14b|fp8|e4m3fn	Wan2 2 Animate 14B Fp8 E4M3Fn Scaled Kj	Wan2 2 Animate 14B Fp8 E4M3Fn Scaled Kj (video model from official workflows)	unet|video|official-workflow|wan	93
+wananimate-relight-lora-fp16	lora	wananimate|relight|lora|fp16	Wananimate Relight Lora Fp16	Wananimate Relight Lora Fp16 (video model from official workflows)	lora|video|official-workflow|wan	93
+lightx2v-i2v-14b-480p-cfg-step-distill-rank64-bf16	lora	lightx2v|i2v|14b|480p|cfg|step	Lightx2V I2V 14B 480P Cfg Step Distill Rank64 Bf16	Lightx2V I2V 14B 480P Cfg Step Distill Rank64 Bf16 (video model from official workflows)	lora|video|official-workflow	73
+ltx-2.3-22b-distilled-lora-384	lora	ltx|2.3|22b|distilled|lora|384	Ltx 2.3 22B Distilled Lora 384	Ltx 2.3 22B Distilled Lora 384 (video model from official workflows)	lora|video|official-workflow|ltx	93
+umt5-xxl-fp8-e4m3fn-scaled	clip	umt5|xxl|fp8|e4m3fn|scaled	Umt5 Xxl Fp8 E4M3Fn Scaled	Umt5 Xxl Fp8 E4M3Fn Scaled (video model from official workflows)	clip|video|official-workflow	100
+wan2.1-t2v-1.3b-bf16	unet	wan2.1|t2v|1.3b|bf16	Wan2.1 T2V 1.3B Bf16	Wan2.1 T2V 1.3B Bf16 (video model from official workflows)	unet|video|official-workflow|wan	93
+wan2.2-animate-14b-fp8-scaled-e4m3fn-kj-v2	unet	wan2.2|animate|14b|fp8|scaled|e4m3fn	Wan2.2 Animate 14B Fp8 Scaled E4M3Fn Kj V2	Wan2.2 Animate 14B Fp8 Scaled E4M3Fn Kj V2 (video model from official workflows)	unet|video|official-workflow|wan	93
+wan2.2-fun-camera-high-noise-14b-fp8-scaled	unet	wan2.2|fun|camera|high|noise|14b	Wan2.2 Fun Camera High Noise 14B Fp8 Scaled	Wan2.2 Fun Camera High Noise 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	100
+wan2.2-fun-camera-low-noise-14b-fp8-scaled	unet	wan2.2|fun|camera|low|noise|14b	Wan2.2 Fun Camera Low Noise 14B Fp8 Scaled	Wan2.2 Fun Camera Low Noise 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	100
+wan2.2-fun-control-high-noise-14b-fp8-scaled	unet	wan2.2|fun|control|high|noise|14b	Wan2.2 Fun Control High Noise 14B Fp8 Scaled	Wan2.2 Fun Control High Noise 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	100
+wan2.2-fun-control-low-noise-14b-fp8-scaled	unet	wan2.2|fun|control|low|noise|14b	Wan2.2 Fun Control Low Noise 14B Fp8 Scaled	Wan2.2 Fun Control Low Noise 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	100
+wan2.2-fun-inpaint-high-noise-14b-fp8-scaled	unet	wan2.2|fun|inpaint|high|noise|14b	Wan2.2 Fun Inpaint High Noise 14B Fp8 Scaled	Wan2.2 Fun Inpaint High Noise 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	100
+wan2.2-fun-inpaint-low-noise-14b-fp8-scaled	unet	wan2.2|fun|inpaint|low|noise|14b	Wan2.2 Fun Inpaint Low Noise 14B Fp8 Scaled	Wan2.2 Fun Inpaint Low Noise 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	100
+wan2.2-i2v-high-noise-14b-fp8-scaled	unet	wan2.2|i2v|high|noise|14b|fp8	Wan2.2 I2V High Noise 14B Fp8 Scaled	Wan2.2 I2V High Noise 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	100
+wan2.2-i2v-lightx2v-4steps-lora-v1-high-noise	lora	wan2.2|i2v|lightx2v|4steps|lora|v1	Wan2.2 I2V Lightx2V 4Steps Lora V1 High Noise	Wan2.2 I2V Lightx2V 4Steps Lora V1 High Noise (video model from official workflows)	lora|video|official-workflow|wan	100
+wan2.2-i2v-lightx2v-4steps-lora-v1-low-noise	lora	wan2.2|i2v|lightx2v|4steps|lora|v1	Wan2.2 I2V Lightx2V 4Steps Lora V1 Low Noise	Wan2.2 I2V Lightx2V 4Steps Lora V1 Low Noise (video model from official workflows)	lora|video|official-workflow|wan	100
+wan2.2-i2v-low-noise-14b-fp8-scaled	unet	wan2.2|i2v|low|noise|14b|fp8	Wan2.2 I2V Low Noise 14B Fp8 Scaled	Wan2.2 I2V Low Noise 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	99
+wan2.2-s2v-14b-fp8-scaled	unet	wan2.2|s2v|14b|fp8|scaled	Wan2.2 S2V 14B Fp8 Scaled	Wan2.2 S2V 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	100
+wan2.2-t2v-lightx2v-4steps-lora-v1.1-high-noise	lora	wan2.2|t2v|lightx2v|4steps|lora|v1.1	Wan2.2 T2V Lightx2V 4Steps Lora V1.1 High Noise	Wan2.2 T2V Lightx2V 4Steps Lora V1.1 High Noise (video model from official workflows)	lora|video|official-workflow|wan	96
+wan2.2-ti2v-5b-fp16	unet	wan2.2|ti2v|5b|fp16	Wan2.2 Ti2V 5B Fp16	Wan2.2 Ti2V 5B Fp16 (video model from official workflows)	unet|video|official-workflow|wan	96
+firered-image-edit-1.1-transformer	unet	firered|image|edit|1.1|transformer	Firered Image Edit 1.1 Transformer	Firered Image Edit 1.1 Transformer (from official workflows)	unet|official-workflow	75
+flux1\uso-flux1-dit-lora-v1	lora	flux1\uso|flux1|dit|lora|v1	Flux1\Uso Flux1 Dit Lora V1	Flux1\Uso Flux1 Dit Lora V1 (from official workflows)	lora|official-workflow	80
+qwen\lighting\qwen-image-lightning-4steps-v2.0	lora	qwen\lighting\qwen|image|lightning|4steps|v2.0	Qwen\Lighting\Qwen Image Lightning 4Steps V2.0	Qwen\Lighting\Qwen Image Lightning 4Steps V2.0 (from official workflows)	lora|official-workflow	95
+qwen\lighting\qwen-image-lightning-8steps-v2.0	lora	qwen\lighting\qwen|image|lightning|8steps|v2.0	Qwen\Lighting\Qwen Image Lightning 8Steps V2.0	Qwen\Lighting\Qwen Image Lightning 8Steps V2.0 (from official workflows)	lora|official-workflow	75
+sd1.5\dreamcreationvirtual3decommerce-v10	unet	sd1.5\dreamcreationvirtual3decommerce|v10	Sd1.5\Dreamcreationvirtual3Decommerce V10	Sd1.5\Dreamcreationvirtual3Decommerce V10 (from official workflows)	unet|official-workflow	75
+sd1.5\v1-5-pruned-emaonly	unet	sd1.5\v1|5|pruned|emaonly	Sd1.5\V1 5 Pruned Emaonly	Sd1.5\V1 5 Pruned Emaonly (from official workflows)	unet|official-workflow	80
+ae	vae	ae	Ae	Ae (from official workflows)	vae|official-workflow	100
+awpainting-v14	unet	awpainting|v14	Awpainting V14	Awpainting V14 (from official workflows)	unet|official-workflow	75
+blindbox-v1-mix	lora	blindbox|v1|mix	Blindbox V1 Mix	Blindbox V1 Mix (from official workflows)	lora|official-workflow	75
+flux1-fill-dev-fp8	unet	flux1|fill|dev|fp8	Flux1 Fill Dev Fp8	Flux1 Fill Dev Fp8 (from official workflows)	unet|official-workflow	80
+flux1-krea-dev-fp8-scaled	unet	flux1|krea|dev|fp8|scaled	Flux1 Krea Dev Fp8 Scaled	Flux1 Krea Dev Fp8 Scaled (from official workflows)	unet|official-workflow	75
+hidream-i1-full-fp8	unet	hidream|i1|full|fp8	Hidream I1 Full Fp8	Hidream I1 Full Fp8 (from official workflows)	unet|official-workflow	75
+majicmixrealistic-v7	unet	majicmixrealistic|v7	Majicmixrealistic V7	Majicmixrealistic V7 (from official workflows)	unet|official-workflow	75
+qwen-2.5-vl-7b-fp8-scaled	clip	qwen|2.5|vl|7b|fp8	Qwen 2.5 Vl 7B Fp8 Scaled	Qwen 2.5 Vl 7B Fp8 Scaled (from official workflows)	clip|official-workflow	100
+qwen-image-edit-fp8-e4m3fn	unet	qwen|image|edit|fp8|e4m3fn	Qwen Image Edit Fp8 E4M3Fn	Qwen Image Edit Fp8 E4M3Fn (from official workflows)	unet|official-workflow	75
+qwen-image-fp8-e4m3fn	unet	qwen|image|fp8|e4m3fn	Qwen Image Fp8 E4M3Fn	Qwen Image Fp8 E4M3Fn (from official workflows)	unet|official-workflow	95
+xsarchitectural-v11	unet	xsarchitectural|v11	Xsarchitectural V11	Xsarchitectural V11 (from official workflows)	unet|official-workflow	75

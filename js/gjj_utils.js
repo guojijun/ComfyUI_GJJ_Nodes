@@ -442,3 +442,26 @@ export class GJJ_Utils {
         });
     }
 }
+
+export function queueNode(node, reason = "manual") {
+	if (!node || !node.graph) return;
+
+	const graph = node.graph;
+	const queueNodeFn = graph.queueNode;
+
+	// 检查 queueNode 是否存在且为函数
+	if (typeof queueNodeFn === 'function') {
+		try {
+			queueNodeFn(node);
+			console.log(`[GJJ] 成功触发节点重新执行: ${node.name || 'unknown'} (${reason})`);
+		} catch (err) {
+			console.warn(`[GJJ] 触发节点重新执行失败: ${node.name || 'unknown'}, 错误:`, err);
+			// 备用方案：设置脏标志
+			graph.setDirtyCanvas?.(true, true);
+		}
+	} else {
+		console.warn(`[GJJ] queueNode 函数不可用，尝试使用备用方法: ${node.name || 'unknown'}`);
+		// 备用方案：直接设置脏标志
+		graph.setDirtyCanvas?.(true, true);
+	}
+}

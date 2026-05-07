@@ -14,6 +14,89 @@ const MIN_VISIBLE_OUTPUTS = 2; // 1个分段列表 + 1个视频片段
 const SEGMENT_LIST_NAME = "分段列表";
 const HIDDEN_WIDGET_NAMES = ["segments_json", "preview_text", "preview_kind", "preview_video", "preview_frame_rate", "preview_total_frames", "segment_count"];
 
+function refreshNodeCanvas(node) {
+	if (!node) return;
+
+	try {
+		node.setDirtyCanvas?.(true, true);
+	} catch (_) {}
+
+	try {
+		node.graph?.setDirtyCanvas?.(true, true);
+	} catch (_) {}
+
+	try {
+		app.graph?.setDirtyCanvas?.(true, true);
+	} catch (_) {}
+
+	try {
+		app.canvas?.setDirty?.(true, true);
+	} catch (_) {}
+}
+
+function isExecutionOutputNode(node) {
+	if (!node) return false;
+
+	if (node === undefined || node === null) return false;
+
+	if (node.comfyClass === NODE_NAME) return true;
+
+	if (node.constructor?.nodeData?.output_node === true) return true;
+	if (node.nodeData?.output_node === true) return true;
+	if (node.flags?.output === true) return true;
+
+	return false;
+}
+
+async function queueOnlyCurrentNode(node) {
+	if (!node || !node.graph) return false;
+
+	const graph = node.graph || app.graph;
+	const allNodes = graph?._nodes || app.graph?._nodes || [];
+
+	const savedModes = [];
+	const oldSelectedNodes = app.canvas?.selected_nodes;
+	const oldSelectedNode = app.canvas?.selected_node;
+
+	try {
+		for (const n of allNodes) {
+			if (!n || n === node) continue;
+
+			if (isExecutionOutputNode(n)) {
+				savedModes.push([n, n.mode]);
+				n.mode = 2;
+			}
+		}
+
+		if (app.canvas) {
+			app.canvas.selected_nodes = {};
+			app.canvas.selected_nodes[node.id] = node;
+			app.canvas.selected_node = node;
+		}
+
+		refreshNodeCanvas(node);
+
+		if (typeof app.queuePrompt === "function") {
+			await app.queuePrompt(0, 1);
+			return true;
+		}
+
+		console.warn("[GJJ] app.queuePrompt 不存在，无法只刷新当前节点");
+		return false;
+	} finally {
+		for (const [n, mode] of savedModes) {
+			n.mode = mode;
+		}
+
+		if (app.canvas) {
+			app.canvas.selected_nodes = oldSelectedNodes;
+			app.canvas.selected_node = oldSelectedNode;
+		}
+
+		refreshNodeCanvas(node);
+	}
+}
+
 const SEGMENT_COLORS = [
 	"#4f8edc", "#e07b3a", "#5cb85c", "#d9534f", "#9b6cd6",
 	"#a07060", "#e377c2", "#7f7f7f", "#c4c447", "#3fbac4",
@@ -58,12 +141,12 @@ function videoDataToUrl(previewVideo) {
 	if (!previewVideo || !Array.isArray(previewVideo) || previewVideo.length === 0) return null;
 	const data = previewVideo[0];
 	if (!data?.filename) return null;
-	
+
 	// 构建URL，移除localhost，使用相对路径
 	const subfolder = data.subfolder || "";
 	const type = data.type || "temp";
 	const filename = data.filename;
-	
+
 	// 使用相对路径，避免跨域问题
 	return `/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(type)}&subfolder=${encodeURIComponent(subfolder)}`;
 }
@@ -147,6 +230,22 @@ function stabilizeNode(node, segmentCount) {
 	removeUnusedOutputsFromEnd(node, targetOutputs);
 	renameOutputsSequentially(node, actualCount);
 	setDirty(node);
+
+	// 异步更新节点高度，避免 DOM 重排时序问题
+	requestAnimationFrame(() => {
+		if (!node) return;
+
+		// 保留用户手动调整的宽度
+		const currentWidth = Math.max(420, Number(node.size?.[0] || 420));
+
+		// 使用 computeSize 计算新高度
+		const computed = node.computeSize?.() || node.size;
+		const newHeight = Math.max(320, Number(computed?.[1] || 320));
+
+		// 仅更新高度，保留宽度
+		node.setSize?.([currentWidth, newHeight]);
+		refreshNodeCanvas(node);
+	});
 }
 
 function setDirty(node) {
@@ -209,14 +308,14 @@ class VideoSegmentEditorWidget {
 			font-family: sans-serif; font-size: 11px; color: #ddd;
 			width: 100%;
 		`;
-		
+
 		// 视频预览区域（带播放器）
 		const videoPreview = document.createElement('div');
 		videoPreview.className = 'gjj-video-preview';
 		videoPreview.style.cssText = 'width: 100%; height: 160px; border-radius: 4px; overflow: hidden; background: #111; position: relative; flex-shrink: 0;';
 		videoPreview.innerHTML = '<div style="height: 160px; display: flex; align-items: center; justify-content: center; color: #888; font-size: 12px;">加载中...</div>';
 		this.container.appendChild(videoPreview);
-		
+
 		// 保存视频播放器引用
 		this.videoPreviewEl = videoPreview;
 		this.videoPlayer = null;
@@ -249,11 +348,12 @@ class VideoSegmentEditorWidget {
 		// 控制按钮
 		const controls = document.createElement('div');
 		controls.style.cssText = 'display: flex; gap: 6px; align-items: center;';
-		
+
 		this.addBtn = this.makeButton("+ 添加", "在末尾添加一个新分段");
 		this.distributeBtn = this.makeButton("均分", "将所有分段均匀分布到整个时长");
 		this.deleteBtn = this.makeButton("删除", "删除当前选中的分段（至少保留1个）");
-		
+		this.refreshBtn = this.makeButton("🔄 刷新", "只刷新当前视频分段节点");
+
 		this.totalLabel = document.createElement('span');
 		this.totalLabel.style.cssText = 'color: #888; margin-left: 4px; flex: 1; text-align: right;';
 		this.totalLabel.textContent = '合计: --';
@@ -261,6 +361,7 @@ class VideoSegmentEditorWidget {
 		controls.appendChild(this.addBtn);
 		controls.appendChild(this.distributeBtn);
 		controls.appendChild(this.deleteBtn);
+		controls.appendChild(this.refreshBtn);
 		controls.appendChild(this.totalLabel);
 		this.container.appendChild(controls);
 	}
@@ -318,6 +419,9 @@ class VideoSegmentEditorWidget {
 			}
 		});
 
+		this.refreshBtn.addEventListener("pointerdown", e => e.stopPropagation());
+		this.refreshBtn.addEventListener("click", () => this.refreshVideo());
+
 		this.resizeObserver = new ResizeObserver(() => this.resizeCanvas());
 		this.resizeObserver.observe(this.container);
 	}
@@ -341,13 +445,13 @@ class VideoSegmentEditorWidget {
 	segmentRects() {
 		const rects = [];
 		const pps = this.pxPerSecond();
-		
+
 		for (let i = 0; i < this.segments.length; i++) {
 			const seg = this.segments[i];
 			const startSec = seg.start || 0;
 			const endSec = seg.end || startSec + MIN_DURATION;
 			const len = Math.max(MIN_DURATION, endSec - startSec);
-			
+
 			rects.push({
 				index: i,
 				x: startSec * pps,
@@ -445,6 +549,7 @@ class VideoSegmentEditorWidget {
 			this.dragStart = null;
 			this.dragBaseline = null;
 			try { this.canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+			// 不再自动刷新，由用户手动点击刷新按钮更新缩略图
 		}
 	}
 
@@ -509,27 +614,81 @@ class VideoSegmentEditorWidget {
 	// ─── Commit & Sync ───
 	// 提交分段数据到widget
 	commit() {
-		const data = {
-			segments: this.segments.map(s => ({
-				start: parseFloat(s.start.toFixed(3)),
-				end: parseFloat(s.end.toFixed(3)),
-				label: s.label,
-			})),
-		};
+		this._syncSegmentsJSON();
+		this._syncProperties();
+		this.node.graph?.setDirtyCanvas?.(true, true);
+		this.syncOutputs();
+	}
 
-		const json = JSON.stringify(data.segments, null, 2);
-		const segWidget = this.node.widgets?.find(w => w.name === "segments_json");
-		if (segWidget) {
-			segWidget.value = json;
+	_syncSegmentsJSON() {
+		const widget = this.node.widgets?.find(w => w.name === "segments_json");
+
+		if (widget) {
+			widget.value = JSON.stringify(this.segments);
+
+			if (widget.callback) {
+				try {
+					widget.callback(widget.value);
+				} catch (_) {}
+			}
+		}
+	}
+
+	_syncProperties() {
+		if (!this.node.properties) {
+			this.node.properties = {};
 		}
 
-		// 动态同步输出接口数量
-		scheduleStabilize(this.node, this.segments.length);
+		this.node.properties.segments = JSON.stringify(this.segments);
+
+		refreshNodeCanvas(this.node);
+	}
+
+	syncOutputs() {
+		const targetCount = Math.max(1, this.segments.length);
+		stabilizeNode(this, targetCount);
 	}
 
 	updateTotalLabel() {
 		const total = this.segments.reduce((sum, s) => sum + Math.max(0, (s.end || 0) - (s.start || 0)), 0);
 		this.totalLabel.textContent = `合计: ${this.formatTime(total)}秒`;
+	}
+
+	async refreshVideo() {
+		if (!this.node || !this.node.graph) return;
+
+		console.log("[GJJ] 刷新视频预览: 只执行当前节点");
+
+		const btn = this.refreshBtn;
+		const originalText = btn.textContent;
+
+		try {
+			btn.textContent = "🔄 刷新中...";
+			btn.disabled = true;
+			btn.style.cursor = "not-allowed";
+			btn.style.opacity = "0.65";
+
+			// 直接同步数据，不调用 commit()（与音频编辑器一致）
+			this._syncSegmentsJSON();
+			this._syncProperties();
+
+			// 使用专用函数只刷新当前节点
+			const ok = await queueOnlyCurrentNode(this.node);
+
+			if (!ok) {
+				console.warn("[GJJ] 当前节点刷新失败：queueOnlyCurrentNode 返回 false");
+			}
+		} catch (err) {
+			console.error("[GJJ] 刷新视频失败:", err);
+			alert("刷新失败，请检查控制台错误信息");
+		} finally {
+			setTimeout(() => {
+				btn.textContent = originalText;
+				btn.disabled = false;
+				btn.style.cursor = "pointer";
+				btn.style.opacity = "1";
+			}, 500);
+		}
 	}
 
 	// ─── Rendering ───
@@ -657,11 +816,11 @@ class VideoSegmentEditorWidget {
 			ctx.beginPath();
 			ctx.rect(x, y, w, h);
 			ctx.clip();
-			
+
 			// 计算缩略图绘制区域（保持宽高比，填充整个区域）
 			const imgAspect = seg._thumbnailImage.naturalWidth / seg._thumbnailImage.naturalHeight;
 			const boxAspect = w / h;
-			
+
 			let drawW, drawH, drawX, drawY;
 			if (imgAspect > boxAspect) {
 				// 图片更宽，以宽度为准
@@ -676,7 +835,7 @@ class VideoSegmentEditorWidget {
 				drawX = x + (w - drawW) / 2;
 				drawY = y;
 			}
-			
+
 			// 绘制缩略图
 			ctx.globalAlpha = 0.7;
 			ctx.drawImage(seg._thumbnailImage, drawX, drawY, drawW, drawH);
@@ -692,24 +851,24 @@ class VideoSegmentEditorWidget {
 		// Label - 绘制在底部，透明度50%
 		const labelText = seg.label || `(${rect.index + 1})`;
 		const timeText = `${this.formatTime(rect.startSec)} - ${this.formatTime(rect.endSec)}`;
-		
+
 		// 底部背景条
 		const labelHeight = 28;
 		const labelY = y + h - labelHeight;
 		ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
 		ctx.fillRect(x, labelY, w, labelHeight);
-		
+
 		// 文字 - 白色，50%透明度
 		ctx.globalAlpha = 0.8;
 		ctx.fillStyle = "#fff";
 		ctx.font = "10px sans-serif";
 		ctx.textAlign = "center";
 		ctx.textBaseline = "middle";
-		
+
 		// 绘制文字（单行显示：标签 + 时间）
 		const displayText = `${labelText}  ${timeText}`;
 		ctx.fillText(displayText, x + w / 2, labelY + labelHeight / 2);
-		
+
 		// 重置透明度
 		ctx.globalAlpha = 1;
 	}
@@ -756,16 +915,35 @@ class VideoSegmentEditorWidget {
 		if (data.preview_segments) {
 			// 解析新的分段数据
 			const newSegments = parseSegments(data.preview_segments);
-			
+
 			// 清除旧的缩略图引用，强制重新加载
 			this.segments.forEach(seg => {
 				if (seg._thumbnailImage) {
 					seg._thumbnailImage = null;
 				}
 			});
-			
+
 			this.segments = newSegments;
 		}
+
+		// 更新分段缩略图
+		if (data.segment_thumbnails !== undefined) {
+			try {
+				const thumbnails = JSON.parse(data.segment_thumbnails);
+				if (Array.isArray(thumbnails)) {
+					for (let i = 0; i < thumbnails.length && i < this.segments.length; i++) {
+						this.segments[i].thumbnail = thumbnails[i];
+						// 清除旧的图片引用，触发重新加载
+						if (this.segments[i]._thumbnailImage) {
+							this.segments[i]._thumbnailImage = null;
+						}
+					}
+				}
+			} catch (e) {
+				console.error('[GJJ] 解析分段缩略图失败:', e);
+			}
+		}
+
 		if (data.preview_duration !== undefined) {
 			this.duration = parseFloat(data.preview_duration);
 		}
@@ -795,10 +973,10 @@ class VideoSegmentEditorWidget {
 
 		// 更新视频预览显示
 		this.updateVideoPreview(data.preview_video);
-		
+
 		// 渲染Canvas（会自动加载缩略图）
 		this.render();
-		
+
 		// 通知节点尺寸可能发生变化
 		if (this.node) {
 			this.node.onResize?.(this.node.size);
@@ -824,7 +1002,7 @@ class VideoSegmentEditorWidget {
 			previewVideoData,
 			imageUrl,
 		});
-		
+
 		if (imageUrl) {
 			// 恢复视频播放器，但添加错误回退
 			videoPreviewEl.innerHTML = `
@@ -832,13 +1010,13 @@ class VideoSegmentEditorWidget {
 					您的浏览器不支持视频播放
 				</video>
 			`;
-			
+
 			// 保存视频播放器引用
 			this.videoPlayer = videoPreviewEl.querySelector('video');
-			
+
 			// 设置视频源
 			this.videoPlayer.src = imageUrl;
-			
+
 			// 添加错误监听 - 如果视频加载失败，显示图片预览
 			this.videoPlayer.addEventListener('error', (e) => {
 				console.warn('[GJJ] 视频加载失败，回退到图片预览:', {
@@ -855,7 +1033,7 @@ class VideoSegmentEditorWidget {
 				});
 				this.videoPlayer = null;
 			});
-			
+
 			// 添加成功加载监听
 			this.videoPlayer.addEventListener('loadeddata', () => {
 				console.log('[GJJ] 视频加载成功:', this.videoPlayer.src);
@@ -871,7 +1049,7 @@ class VideoSegmentEditorWidget {
 // ─── Node Registration ───
 app.registerExtension({
 	name: `GJJ.${NODE_NAME}`,
-	
+
 	beforeRegisterNodeDef(nodeType, nodeData, appInstance) {
 		if (nodeData.name !== NODE_NAME) return;
 
@@ -892,13 +1070,14 @@ app.registerExtension({
 					preview_frame_rate: message.preview_frame_rate?.[0],
 					preview_total_frames: message.preview_total_frames?.[0],
 					preview_video: message.preview_video?.[0],  // 解包元组
+					segment_thumbnails: message.segment_thumbnails?.[0],  // 分段缩略图
 				});
 			}
-			
+
 			// 根据后端返回的分段数量更新输出接口
 			const segmentCount = message.preview_segment_count?.[0] || 1;
 			scheduleStabilize(this, segmentCount);
-			
+
 			// 强制刷新节点显示（包括DOM widget）
 			setTimeout(() => {
 				this.setDirtyCanvas(true, true);
@@ -930,7 +1109,7 @@ app.registerExtension({
 
 			// Build editor inside a DOM widget
 			const container = document.createElement("div");
-			
+
 			const self = this;
 
 			this._videoSegmentEditorWidget = this.addDOMWidget("video_segment_editor_canvas", "GJJVideoSegmentEditor", container, {
@@ -979,6 +1158,12 @@ app.registerExtension({
 						callback: () => {
 							this.__gjjVideoSegmentEditor.deleteSelected();
 							scheduleStabilize(this, this.__gjjVideoSegmentEditor.segments.length);
+						},
+					},
+					{
+						content: "只刷新当前节点",
+						callback: () => {
+							this.__gjjVideoSegmentEditor.refreshVideo();
 						},
 					},
 				);

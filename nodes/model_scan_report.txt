@@ -1,0 +1,371 @@
+Scanning project for model usage...
+
+================================================================================
+Model Usage Statistics Report
+================================================================================
+
+[CLIP] - 10 models
+--------------------------------------------------------------------------------
+  - .safetensors[^
+    Used by 1 files: scan_models.py
+  - checkpoints 鍒楄〃涓В鏋愩€?
+    Used by 1 files: gjj_batch_watermark_remover.py
+  - flux 1 涓绘墿鏁ｆā鍨嬶紱榛樿浣跨敤 flux1-krea-dev.safetensors銆?
+    Used by 1 files: gjj_flux1_dual_clip_loader.py
+  - flux-2-klein-9b-nvfp4
+    Used by 1 files: gjj_lazy_image_studio.py
+  - full-encoder-small-decoder
+    Used by 1 files: gjj_lazy_image_studio.py
+  - gemma-3-12b-it
+    Used by 4 files: gjj_ltx23_first_last_outfit.py, gjj_ltx23_image_to_video.py, gjj_ltx23_multiref_runtime.py, gjj_ltx23_workflow_suite.py
+  - ltx-2.3-text-projection
+    Used by 1 files: gjj_ltx23_workflow_suite.py
+  - qwen-image
+    Used by 1 files: gjj_qwen2511_edit_outpaint.py
+  - qwen-image-edit-2511-multiple-angles-lora
+    Used by 1 files: gjj_character_multiview_studio.py
+  - 涓绘墿鏁ｆā鍨嬨€傞粯璁や娇鐢ㄥ畼鏂瑰伐浣滄祦涓殑 flux1-fill-dev.safetensors銆?
+    Used by 1 files: gjj_flux_fill_dev_outpaint.py
+
+[LORA] - 10 models
+--------------------------------------------------------------------------------
+  - flux-2-klein-9b-nvfp4
+    Used by 1 files: gjj_lazy_image_studio.py
+  - full-encoder-small-decoder
+    Used by 1 files: gjj_lazy_image_studio.py
+  - ltx-2-19b-ic-lora-detailer-ba1e0b4544bd
+    Used by 1 files: gjj_ltx23_first_last_outfit.py
+  - ltx-2.3-22b-av-lora-talking-head-v1-闊宠棰戝悓姝?
+    Used by 1 files: gjj_local_lipsync.py
+  - ltx-2.3-22b-distilled-lora-384-1.1
+    Used by 1 files: gjj_local_lipsync.py
+  - ltx-2.3-22b-ic-lora-refocus
+    Used by 1 files: gjj_ltx23_first_last_outfit.py
+  - ltx2.3-transition
+    Used by 1 files: gjj_ltx23_first_last_outfit.py
+  - qwen-image
+    Used by 1 files: gjj_qwen2511_edit_outpaint.py
+  - 绗?2 鏉′覆鑱?lora銆傞粯璁よˉ鍏?ltx23-gydboy.safetensors銆?
+    Used by 1 files: gjj_ltx23_image_to_video.py
+  - 榛樿鑷姩鍖归厤 ltx2.3-transition.safetensors锛涙壘涓嶅埌鏃朵細璺宠繃骞跺湪鐘舵€佹爮鎻愮ず銆?
+    Used by 1 files: gjj_ltx23_first_last_outfit.py
+
+[UNET] - 17 models
+--------------------------------------------------------------------------------
+  - .safetensors[^
+    Used by 1 files: scan_models.py
+  - checkpoints 鍒楄〃涓В鏋愩€?
+    Used by 1 files: gjj_batch_watermark_remover.py
+  - flux 1 涓绘墿鏁ｆā鍨嬶紱榛樿浣跨敤 flux1-krea-dev.safetensors銆?
+    Used by 1 files: gjj_flux1_dual_clip_loader.py
+  - flux-2-klein-9b-nvfp4
+    Used by 1 files: gjj_lazy_image_studio.py
+  - full-encoder-small-decoder
+    Used by 1 files: gjj_lazy_image_studio.py
+  - lq-proj-in
+    Used by 1 files: gjj_flashvsr_runtime.py
+  - ltx-2.3-22b-dev-fp8
+    Used by 2 files: gjj_ltx23_first_last_outfit.py, gjj_ltx23_workflow_suite.py
+  - ltx-2.3-22b-distilled-lora-384-1.1
+    Used by 1 files: gjj_ltx23_image_to_video.py
+  - ltx-2.3-22b-distilled-transformer-only
+    Used by 1 files: gjj_ltx23_multiref_runtime.py
+  - model
+    Used by 2 files: gjj_longcat_audiodit_loader.py, gjj_sam3d_body.py
+  - qwen-image-edit-2511
+    Used by 1 files: gjj_old_photo_restorer.py
+  - qwen-image-edit-2511-multiple-angles-lora
+    Used by 1 files: gjj_character_multiview_studio.py
+  - sam2-hiera-base-plus
+    Used by 1 files: gjj_sem2_point_segmenter.py
+  - sam3
+    Used by 1 files: gjj_sam3_runtime.py
+  - sam3dbody銆?
+    Used by 1 files: gjj_sam3d_body.py
+  - 绗?2 鏉′覆鑱?lora銆傞粯璁よˉ鍏?ltx23-gydboy.safetensors銆?
+    Used by 1 files: gjj_ltx23_image_to_video.py
+  - 榛樿鑷姩鍖归厤 ltx2.3-transition.safetensors锛涙壘涓嶅埌鏃朵細璺宠繃骞跺湪鐘舵€佹爮鎻愮ず銆?
+    Used by 1 files: gjj_ltx23_first_last_outfit.py
+
+[UNKNOWN] - 63 models
+--------------------------------------------------------------------------------
+  - 512-inpainting-ema
+    Used by 1 files: gjj_sd15_inpaint_workflow.py
+  - ace-1.5-vae
+    Used by 1 files: gjj_audio_ace_music_generator.py
+  - ace-step-1.5
+    Used by 1 files: gjj_audio_ace_music_generator.py
+  - acestep-v1.5
+    Used by 1 files: gjj_audio_ace_music_generator.py
+  - architecturerealmix-v11
+    Used by 1 files: gjj_depth_controlnet_generator.py
+  - clip-l
+    Used by 2 files: gjj_flux1_dual_clip_loader.py, gjj_flux_fill_dev_outpaint.py
+  - control-v11f1p-sd15-depth
+    Used by 1 files: gjj_depth_controlnet_generator.py
+  - diffusion-pytorch-model-streaming-dmd
+    Used by 1 files: gjj_flashvsr_runtime.py
+  - ema-vae
+    Used by 1 files: gjj_seedvr2_image_upscaler.py
+  - flashvsr1-1
+    Used by 1 files: gjj_flashvsr_runtime.py
+  - flux-2-klein-4b-fp8
+    Used by 1 files: gjj_batch_watermark_remover.py
+  - flux-2-klein-9b-nvfp4
+    Used by 1 files: gjj_lazy_image_studio.py
+  - flux1-fill-dev
+    Used by 1 files: gjj_flux_fill_dev_outpaint.py
+  - flux1-krea-dev
+    Used by 1 files: gjj_flux1_dual_clip_loader.py
+  - flux1-redux-dev
+    Used by 1 files: gjj_redux_advanced.py
+  - flux2-dev-ae
+    Used by 1 files: gjj_lazy_image_studio.py
+  - flux2-vae
+    Used by 2 files: gjj_batch_watermark_remover.py, gjj_lazy_image_studio.py
+  - full-encoder-small-decoder
+    Used by 1 files: gjj_lazy_image_studio.py
+  - gemma-3-12b-it
+    Used by 4 files: gjj_ltx23_first_last_outfit.py, gjj_ltx23_image_to_video.py, gjj_ltx23_multiref_runtime.py, gjj_ltx23_workflow_suite.py
+  - interiordesignsuperm-v2
+    Used by 1 files: gjj_controlnet_preset.py
+  - lq-proj-in
+    Used by 1 files: gjj_flashvsr_runtime.py
+  - ltx-2-19b-ic-lora-detailer-ba1e0b4544bd
+    Used by 1 files: gjj_ltx23_first_last_outfit.py
+  - ltx-2-3-22b-dev-transformer-only
+    Used by 1 files: gjj_ltx23_workflow_suite.py
+  - ltx-2.3-22b-dev
+    Used by 2 files: gjj_ltx23_first_last_outfit.py, gjj_ltx23_multiref_runtime.py
+  - ltx-2.3-22b-dev-fp8
+    Used by 3 files: gjj_ltx23_first_last_outfit.py, gjj_ltx23_multiref_runtime.py, gjj_ltx23_workflow_suite.py
+  - ltx-2.3-22b-distilled-transformer-only
+    Used by 2 files: gjj_ltx23_multiref_runtime.py, gjj_ltx23_workflow_suite.py
+  - ltx-2.3-22b-ic-lora-refocus
+    Used by 1 files: gjj_ltx23_first_last_outfit.py
+  - ltx-2.3-spatial-upscaler-x2-1.0
+    Used by 2 files: gjj_ltx23_first_last_outfit.py, gjj_ltx23_multiref_runtime.py
+  - ltx-2.3-spatial-upscaler-x2-1.1
+    Used by 4 files: gjj_ltx23_first_last_outfit.py, gjj_ltx23_image_to_video.py, gjj_ltx23_multiref_runtime.py, gjj_ltx23_workflow_suite.py
+  - ltx-2.3-text-projection
+    Used by 1 files: gjj_ltx23_workflow_suite.py
+  - ltx2.3-transition
+    Used by 1 files: gjj_ltx23_first_last_outfit.py
+  - ltx23-audio-vae
+    Used by 1 files: gjj_ltx23_workflow_suite.py
+  - ltx23-gydboy
+    Used by 1 files: gjj_ltx23_image_to_video.py
+  - ltx23-video-vae
+    Used by 3 files: gjj_ltx23_first_last_outfit.py, gjj_ltx23_multiref_runtime.py, gjj_ltx23_workflow_suite.py
+  - model
+    Used by 2 files: gjj_longcat_audiodit_loader.py, gjj_sam3d_body.py
+  - prompt
+    Used by 1 files: gjj_flashvsr_runtime.py
+  - qwen-0.6b-ace15
+    Used by 1 files: gjj_audio_ace_music_generator.py
+  - qwen-1.7b-ace15
+    Used by 1 files: gjj_audio_ace_music_generator.py
+  - qwen-2.5-vl-7b
+    Used by 2 files: gjj_old_photo_restorer.py, gjj_qwen2511_edit_outpaint.py
+  - qwen-3-4b
+    Used by 1 files: gjj_batch_watermark_remover.py
+  - qwen-image
+    Used by 1 files: gjj_qwen2511_edit_outpaint.py
+  - qwen-image-edit-2511
+    Used by 1 files: gjj_old_photo_restorer.py
+  - qwen-image-edit-2511-multiple-angles-lora
+    Used by 1 files: gjj_character_multiview_studio.py
+  - qwen-image-instantx-controlnet-inpainting
+    Used by 1 files: gjj_qwen2511_edit_outpaint.py
+  - qwen-image-vae
+    Used by 2 files: gjj_old_photo_restorer.py, gjj_qwen2511_edit_outpaint.py
+  - sam2-hiera-base-plus
+    Used by 1 files: gjj_sem2_point_segmenter.py
+  - sam3
+    Used by 3 files: gjj_batch_text_segmenter.py, gjj_sam3_runtime.py, gjj_sam3_segmenter.py
+  - sdmatte
+    Used by 1 files: gjj_sdmatte_matting.py
+  - sdmatte-plus
+    Used by 1 files: gjj_sdmatte_matting.py
+  - seedvr2-ema-3b
+    Used by 1 files: gjj_seedvr2_image_upscaler.py
+  - sigclip-vision-patch14-384
+    Used by 1 files: gjj_redux_advanced.py
+  - t5xxl
+    Used by 2 files: gjj_flux1_dual_clip_loader.py, gjj_flux_fill_dev_outpaint.py
+  - tcdecoder
+    Used by 1 files: gjj_flashvsr_runtime.py
+  - umt5-xxl
+    Used by 1 files: gjj_wan22_first_last_video.py
+  - vae-ft-mse-840000-ema-pruned
+    Used by 1 files: gjj_scribble_controlnet_generator.py
+  - wan-2.1-vae
+    Used by 1 files: gjj_wan22_first_last_video.py
+  - wan2-1-flashvsr-lq-proj-model
+    Used by 1 files: gjj_flashvsr_runtime.py
+  - wan2-1-flashvsr-tcdecoder-fp32
+    Used by 1 files: gjj_flashvsr_runtime.py
+  - wan2-1-t2v-1-3b-flashvsr-fp32
+    Used by 1 files: gjj_flashvsr_runtime.py
+  - wan2-1-t2v-1.1-3b-flashvsr-fp32
+    Used by 1 files: gjj_flashvsr_runtime.py
+  - wan2.1-vae
+    Used by 1 files: gjj_flashvsr_runtime.py
+  - wan2.2-rapid-mega-aio-nsfw-v12.2
+    Used by 1 files: gjj_wan22_rapid_aio_mega.py
+  - wan2.2-remix-nsfw-i2v-14b-low-lighting.1
+    Used by 1 files: gjj_wan22_first_last_video.py
+
+[UPSCALER] - 3 models
+--------------------------------------------------------------------------------
+  - .safetensors[^
+    Used by 1 files: scan_models.py
+  - ltx-2.3-spatial-upscaler-x2-1.0
+    Used by 1 files: gjj_ltx23_first_last_outfit.py
+  - ltx-2.3-spatial-upscaler-x2-1.1
+    Used by 3 files: gjj_ltx23_first_last_outfit.py, gjj_ltx23_image_to_video.py, gjj_ltx23_multiref_runtime.py
+
+[VAE] - 10 models
+--------------------------------------------------------------------------------
+  - .safetensors[^
+    Used by 1 files: scan_models.py
+  - diffusion-pytorch-model-streaming-dmd
+    Used by 1 files: gjj_flashvsr_runtime.py
+  - flux 1 涓绘墿鏁ｆā鍨嬶紱榛樿浣跨敤 flux1-krea-dev.safetensors銆?
+    Used by 1 files: gjj_flux1_dual_clip_loader.py
+  - flux-2-klein-9b-nvfp4
+    Used by 1 files: gjj_lazy_image_studio.py
+  - full-encoder-small-decoder
+    Used by 1 files: gjj_lazy_image_studio.py
+  - ltx23-video-vae
+    Used by 3 files: gjj_ltx23_first_last_outfit.py, gjj_ltx23_multiref_runtime.py, gjj_ltx23_workflow_suite.py
+  - qwen-image-edit-2511
+    Used by 1 files: gjj_old_photo_restorer.py
+  - qwen-image-edit-2511-multiple-angles-lora
+    Used by 1 files: gjj_character_multiview_studio.py
+  - wan2.1-vae
+    Used by 1 files: gjj_flashvsr_runtime.py
+  - 涓绘墿鏁ｆā鍨嬨€傞粯璁や娇鐢ㄥ畼鏂瑰伐浣滄祦涓殑 flux1-fill-dev.safetensors銆?
+    Used by 1 files: gjj_flux_fill_dev_outpaint.py
+
+================================================================================
+Total: 113 unique models (normalized)
+================================================================================
+
+
+TSV Output (copy to model_keywords.tsv):
+================================================================================
+id	category	keywords	display_name	description	tags	priority
+.safetensors[^	clip	.safetensors[^	.Safetensors[^	.Safetensors[^ (clip)	clip	60
+checkpoints 鍒楄〃涓В鏋愩€?clip	checkpoints 鍒楄〃涓В鏋愩€?Checkpoints 鍒楄〃涓В鏋愩€?Checkpoints 鍒楄〃涓В鏋愩€?(clip)	clip	60
+flux 1 涓绘墿鏁ｆā鍨嬶紱榛樿浣跨敤 flux1-krea-dev.safetensors銆?clip	flux 1 涓绘墿鏁ｆā鍨嬶紱榛樿浣跨敤 flux1|krea|dev.safetensors銆?Flux 1 涓绘墿鏁ｆā鍨嬶紱榛樿浣跨敤 Flux1 Krea Dev.Safetensors銆?Flux 1 涓绘墿鏁ｆā鍨嬶紱榛樿浣跨敤 Flux1 Krea Dev.Safetensors銆?(clip)	clip	60
+flux-2-klein-9b-nvfp4	clip	flux|2|klein|9b|nvfp4	Flux 2 Klein 9B Nvfp4	Flux 2 Klein 9B Nvfp4 (clip)	clip	60
+full-encoder-small-decoder	clip	full|encoder|small|decoder	Full Encoder Small Decoder	Full Encoder Small Decoder (clip)	clip	60
+gemma-3-12b-it	clip	gemma|3|12b|it	Gemma 3 12B It	Gemma 3 12B It (clip)	clip|popular	90
+ltx-2.3-text-projection	clip	ltx|2.3|text|projection	Ltx 2.3 Text Projection	Ltx 2.3 Text Projection (clip)	clip	60
+qwen-image	clip	qwen|image	Qwen Image	Qwen Image (clip)	clip	60
+qwen-image-edit-2511-multiple-angles-lora	clip	qwen|image|edit|2511|multiple|angles|lora	Qwen Image Edit 2511 Multiple Angles Lora	Qwen Image Edit 2511 Multiple Angles Lora (clip)	clip	60
+涓绘墿鏁ｆā鍨嬨€傞粯璁や娇鐢ㄥ畼鏂瑰伐浣滄祦涓殑 flux1-fill-dev.safetensors銆?clip	涓绘墿鏁ｆā鍨嬨€傞粯璁や娇鐢ㄥ畼鏂瑰伐浣滄祦涓殑 flux1|fill|dev.safetensors銆?涓绘墿鏁ｆā鍨嬨€傞粯璁や娇鐢ㄥ畼鏂瑰伐浣滄祦涓殑 Flux1 Fill Dev.Safetensors銆?涓绘墿鏁ｆā鍨嬨€傞粯璁や娇鐢ㄥ畼鏂瑰伐浣滄祦涓殑 Flux1 Fill Dev.Safetensors銆?(clip)	clip	60
+flux-2-klein-9b-nvfp4	lora	flux|2|klein|9b|nvfp4	Flux 2 Klein 9B Nvfp4	Flux 2 Klein 9B Nvfp4 (lora)	lora	60
+full-encoder-small-decoder	lora	full|encoder|small|decoder	Full Encoder Small Decoder	Full Encoder Small Decoder (lora)	lora	60
+ltx-2-19b-ic-lora-detailer-ba1e0b4544bd	lora	ltx|2|19b|ic|lora|detailer|ba1e0b4544bd	Ltx 2 19B Ic Lora Detailer Ba1E0B4544Bd	Ltx 2 19B Ic Lora Detailer Ba1E0B4544Bd (lora)	lora	60
+ltx-2.3-22b-av-lora-talking-head-v1-闊宠棰戝悓姝?lora	ltx|2.3|22b|av|lora|talking|head|v1|闊宠棰戝悓姝?Ltx 2.3 22B Av Lora Talking Head V1 闊宠棰戝悓姝?Ltx 2.3 22B Av Lora Talking Head V1 闊宠棰戝悓姝?(lora)	lora	60
+ltx-2.3-22b-distilled-lora-384-1.1	lora	ltx|2.3|22b|distilled|lora|384|1.1	Ltx 2.3 22B Distilled Lora 384 1.1	Ltx 2.3 22B Distilled Lora 384 1.1 (lora)	lora	60
+ltx-2.3-22b-ic-lora-refocus	lora	ltx|2.3|22b|ic|lora|refocus	Ltx 2.3 22B Ic Lora Refocus	Ltx 2.3 22B Ic Lora Refocus (lora)	lora	60
+ltx2.3-transition	lora	ltx2.3|transition	Ltx2.3 Transition	Ltx2.3 Transition (lora)	lora	60
+qwen-image	lora	qwen|image	Qwen Image	Qwen Image (lora)	lora	60
+绗?2 鏉′覆鑱?lora銆傞粯璁よˉ鍏?ltx23-gydboy.safetensors銆?lora	绗?2 鏉′覆鑱?lora銆傞粯璁よˉ鍏?ltx23|gydboy.safetensors銆?绗?2 鏉′覆鑱?Lora銆傞粯璁よˉ鍏?Ltx23 Gydboy.Safetensors銆?绗?2 鏉′覆鑱?Lora銆傞粯璁よˉ鍏?Ltx23 Gydboy.Safetensors銆?(lora)	lora	60
+榛樿鑷姩鍖归厤 ltx2.3-transition.safetensors锛涙壘涓嶅埌鏃朵細璺宠繃骞跺湪鐘舵€佹爮鎻愮ず銆?lora	榛樿鑷姩鍖归厤 ltx2.3|transition.safetensors锛涙壘涓嶅埌鏃朵細璺宠繃骞跺湪鐘舵€佹爮鎻愮ず銆?榛樿鑷姩鍖归厤 Ltx2.3 Transition.Safetensors锛涙壘涓嶅埌鏃朵細璺宠繃骞跺湪鐘舵€佹爮鎻愮ず銆?榛樿鑷姩鍖归厤 Ltx2.3 Transition.Safetensors锛涙壘涓嶅埌鏃朵細璺宠繃骞跺湪鐘舵€佹爮鎻愮ず銆?(lora)	lora	60
+.safetensors[^	unet	.safetensors[^	.Safetensors[^	.Safetensors[^ (unet)	unet	60
+checkpoints 鍒楄〃涓В鏋愩€?unet	checkpoints 鍒楄〃涓В鏋愩€?Checkpoints 鍒楄〃涓В鏋愩€?Checkpoints 鍒楄〃涓В鏋愩€?(unet)	unet	60
+flux 1 涓绘墿鏁ｆā鍨嬶紱榛樿浣跨敤 flux1-krea-dev.safetensors銆?unet	flux 1 涓绘墿鏁ｆā鍨嬶紱榛樿浣跨敤 flux1|krea|dev.safetensors銆?Flux 1 涓绘墿鏁ｆā鍨嬶紱榛樿浣跨敤 Flux1 Krea Dev.Safetensors銆?Flux 1 涓绘墿鏁ｆā鍨嬶紱榛樿浣跨敤 Flux1 Krea Dev.Safetensors銆?(unet)	unet	60
+flux-2-klein-9b-nvfp4	unet	flux|2|klein|9b|nvfp4	Flux 2 Klein 9B Nvfp4	Flux 2 Klein 9B Nvfp4 (unet)	unet	60
+full-encoder-small-decoder	unet	full|encoder|small|decoder	Full Encoder Small Decoder	Full Encoder Small Decoder (unet)	unet	60
+lq-proj-in	unet	lq|proj|in	Lq Proj In	Lq Proj In (unet)	unet	60
+ltx-2.3-22b-dev-fp8	unet	ltx|2.3|22b|dev|fp8	Ltx 2.3 22B Dev Fp8	Ltx 2.3 22B Dev Fp8 (unet)	unet	70
+ltx-2.3-22b-distilled-lora-384-1.1	unet	ltx|2.3|22b|distilled|lora|384|1.1	Ltx 2.3 22B Distilled Lora 384 1.1	Ltx 2.3 22B Distilled Lora 384 1.1 (unet)	unet	60
+ltx-2.3-22b-distilled-transformer-only	unet	ltx|2.3|22b|distilled|transformer|only	Ltx 2.3 22B Distilled Transformer Only	Ltx 2.3 22B Distilled Transformer Only (unet)	unet	60
+model	unet	model	Model	Model (unet)	unet	70
+qwen-image-edit-2511	unet	qwen|image|edit|2511	Qwen Image Edit 2511	Qwen Image Edit 2511 (unet)	unet	60
+qwen-image-edit-2511-multiple-angles-lora	unet	qwen|image|edit|2511|multiple|angles|lora	Qwen Image Edit 2511 Multiple Angles Lora	Qwen Image Edit 2511 Multiple Angles Lora (unet)	unet	60
+sam2-hiera-base-plus	unet	sam2|hiera|base|plus	Sam2 Hiera Base Plus	Sam2 Hiera Base Plus (unet)	unet	60
+sam3	unet	sam3	Sam3	Sam3 (unet)	unet	60
+sam3dbody銆?unet	sam3dbody銆?Sam3Dbody銆?Sam3Dbody銆?(unet)	unet	60
+绗?2 鏉′覆鑱?lora銆傞粯璁よˉ鍏?ltx23-gydboy.safetensors銆?unet	绗?2 鏉′覆鑱?lora銆傞粯璁よˉ鍏?ltx23|gydboy.safetensors銆?绗?2 鏉′覆鑱?Lora銆傞粯璁よˉ鍏?Ltx23 Gydboy.Safetensors銆?绗?2 鏉′覆鑱?Lora銆傞粯璁よˉ鍏?Ltx23 Gydboy.Safetensors銆?(unet)	unet	60
+榛樿鑷姩鍖归厤 ltx2.3-transition.safetensors锛涙壘涓嶅埌鏃朵細璺宠繃骞跺湪鐘舵€佹爮鎻愮ず銆?unet	榛樿鑷姩鍖归厤 ltx2.3|transition.safetensors锛涙壘涓嶅埌鏃朵細璺宠繃骞跺湪鐘舵€佹爮鎻愮ず銆?榛樿鑷姩鍖归厤 Ltx2.3 Transition.Safetensors锛涙壘涓嶅埌鏃朵細璺宠繃骞跺湪鐘舵€佹爮鎻愮ず銆?榛樿鑷姩鍖归厤 Ltx2.3 Transition.Safetensors锛涙壘涓嶅埌鏃朵細璺宠繃骞跺湪鐘舵€佹爮鎻愮ず銆?(unet)	unet	60
+512-inpainting-ema	unknown	512|inpainting|ema	512 Inpainting Ema	512 Inpainting Ema (unknown)	unknown	60
+ace-1.5-vae	unknown	ace|1.5|vae	Ace 1.5 Vae	Ace 1.5 Vae (unknown)	unknown	60
+ace-step-1.5	unknown	ace|step|1.5	Ace Step 1.5	Ace Step 1.5 (unknown)	unknown	60
+acestep-v1.5	unknown	acestep|v1.5	Acestep V1.5	Acestep V1.5 (unknown)	unknown	60
+architecturerealmix-v11	unknown	architecturerealmix|v11	Architecturerealmix V11	Architecturerealmix V11 (unknown)	unknown	60
+clip-l	unknown	clip|l	Clip L	Clip L (unknown)	unknown	70
+control-v11f1p-sd15-depth	unknown	control|v11f1p|sd15|depth	Control V11F1P Sd15 Depth	Control V11F1P Sd15 Depth (unknown)	unknown	60
+diffusion-pytorch-model-streaming-dmd	unknown	diffusion|pytorch|model|streaming|dmd	Diffusion Pytorch Model Streaming Dmd	Diffusion Pytorch Model Streaming Dmd (unknown)	unknown	60
+ema-vae	unknown	ema|vae	Ema Vae	Ema Vae (unknown)	unknown	60
+flashvsr1-1	unknown	flashvsr1|1	Flashvsr1 1	Flashvsr1 1 (unknown)	unknown	60
+flux-2-klein-4b-fp8	unknown	flux|2|klein|4b|fp8	Flux 2 Klein 4B Fp8	Flux 2 Klein 4B Fp8 (unknown)	unknown	60
+flux-2-klein-9b-nvfp4	unknown	flux|2|klein|9b|nvfp4	Flux 2 Klein 9B Nvfp4	Flux 2 Klein 9B Nvfp4 (unknown)	unknown	60
+flux1-fill-dev	unknown	flux1|fill|dev	Flux1 Fill Dev	Flux1 Fill Dev (unknown)	unknown	60
+flux1-krea-dev	unknown	flux1|krea|dev	Flux1 Krea Dev	Flux1 Krea Dev (unknown)	unknown	60
+flux1-redux-dev	unknown	flux1|redux|dev	Flux1 Redux Dev	Flux1 Redux Dev (unknown)	unknown	60
+flux2-dev-ae	unknown	flux2|dev|ae	Flux2 Dev Ae	Flux2 Dev Ae (unknown)	unknown	60
+flux2-vae	unknown	flux2|vae	Flux2 Vae	Flux2 Vae (unknown)	unknown	70
+full-encoder-small-decoder	unknown	full|encoder|small|decoder	Full Encoder Small Decoder	Full Encoder Small Decoder (unknown)	unknown	60
+gemma-3-12b-it	unknown	gemma|3|12b|it	Gemma 3 12B It	Gemma 3 12B It (unknown)	unknown|popular	90
+interiordesignsuperm-v2	unknown	interiordesignsuperm|v2	Interiordesignsuperm V2	Interiordesignsuperm V2 (unknown)	unknown	60
+lq-proj-in	unknown	lq|proj|in	Lq Proj In	Lq Proj In (unknown)	unknown	60
+ltx-2-19b-ic-lora-detailer-ba1e0b4544bd	unknown	ltx|2|19b|ic|lora|detailer|ba1e0b4544bd	Ltx 2 19B Ic Lora Detailer Ba1E0B4544Bd	Ltx 2 19B Ic Lora Detailer Ba1E0B4544Bd (unknown)	unknown	60
+ltx-2-3-22b-dev-transformer-only	unknown	ltx|2|3|22b|dev|transformer|only	Ltx 2 3 22B Dev Transformer Only	Ltx 2 3 22B Dev Transformer Only (unknown)	unknown	60
+ltx-2.3-22b-dev	unknown	ltx|2.3|22b|dev	Ltx 2.3 22B Dev	Ltx 2.3 22B Dev (unknown)	unknown	70
+ltx-2.3-22b-dev-fp8	unknown	ltx|2.3|22b|dev|fp8	Ltx 2.3 22B Dev Fp8	Ltx 2.3 22B Dev Fp8 (unknown)	unknown	80
+ltx-2.3-22b-distilled-transformer-only	unknown	ltx|2.3|22b|distilled|transformer|only	Ltx 2.3 22B Distilled Transformer Only	Ltx 2.3 22B Distilled Transformer Only (unknown)	unknown	70
+ltx-2.3-22b-ic-lora-refocus	unknown	ltx|2.3|22b|ic|lora|refocus	Ltx 2.3 22B Ic Lora Refocus	Ltx 2.3 22B Ic Lora Refocus (unknown)	unknown	60
+ltx-2.3-spatial-upscaler-x2-1.0	unknown	ltx|2.3|spatial|upscaler|x2|1.0	Ltx 2.3 Spatial Upscaler X2 1.0	Ltx 2.3 Spatial Upscaler X2 1.0 (unknown)	unknown	70
+ltx-2.3-spatial-upscaler-x2-1.1	unknown	ltx|2.3|spatial|upscaler|x2|1.1	Ltx 2.3 Spatial Upscaler X2 1.1	Ltx 2.3 Spatial Upscaler X2 1.1 (unknown)	unknown|popular	90
+ltx-2.3-text-projection	unknown	ltx|2.3|text|projection	Ltx 2.3 Text Projection	Ltx 2.3 Text Projection (unknown)	unknown	60
+ltx2.3-transition	unknown	ltx2.3|transition	Ltx2.3 Transition	Ltx2.3 Transition (unknown)	unknown	60
+ltx23-audio-vae	unknown	ltx23|audio|vae	Ltx23 Audio Vae	Ltx23 Audio Vae (unknown)	unknown	60
+ltx23-gydboy	unknown	ltx23|gydboy	Ltx23 Gydboy	Ltx23 Gydboy (unknown)	unknown	60
+ltx23-video-vae	unknown	ltx23|video|vae	Ltx23 Video Vae	Ltx23 Video Vae (unknown)	unknown	80
+model	unknown	model	Model	Model (unknown)	unknown	70
+prompt	unknown	prompt	Prompt	Prompt (unknown)	unknown	60
+qwen-0.6b-ace15	unknown	qwen|0.6b|ace15	Qwen 0.6B Ace15	Qwen 0.6B Ace15 (unknown)	unknown	60
+qwen-1.7b-ace15	unknown	qwen|1.7b|ace15	Qwen 1.7B Ace15	Qwen 1.7B Ace15 (unknown)	unknown	60
+qwen-2.5-vl-7b	unknown	qwen|2.5|vl|7b	Qwen 2.5 Vl 7B	Qwen 2.5 Vl 7B (unknown)	unknown	70
+qwen-3-4b	unknown	qwen|3|4b	Qwen 3 4B	Qwen 3 4B (unknown)	unknown	60
+qwen-image	unknown	qwen|image	Qwen Image	Qwen Image (unknown)	unknown	60
+qwen-image-edit-2511	unknown	qwen|image|edit|2511	Qwen Image Edit 2511	Qwen Image Edit 2511 (unknown)	unknown	60
+qwen-image-edit-2511-multiple-angles-lora	unknown	qwen|image|edit|2511|multiple|angles|lora	Qwen Image Edit 2511 Multiple Angles Lora	Qwen Image Edit 2511 Multiple Angles Lora (unknown)	unknown	60
+qwen-image-instantx-controlnet-inpainting	unknown	qwen|image|instantx|controlnet|inpainting	Qwen Image Instantx Controlnet Inpainting	Qwen Image Instantx Controlnet Inpainting (unknown)	unknown	60
+qwen-image-vae	unknown	qwen|image|vae	Qwen Image Vae	Qwen Image Vae (unknown)	unknown	70
+sam2-hiera-base-plus	unknown	sam2|hiera|base|plus	Sam2 Hiera Base Plus	Sam2 Hiera Base Plus (unknown)	unknown	60
+sam3	unknown	sam3	Sam3	Sam3 (unknown)	unknown	80
+sdmatte	unknown	sdmatte	Sdmatte	Sdmatte (unknown)	unknown	60
+sdmatte-plus	unknown	sdmatte|plus	Sdmatte Plus	Sdmatte Plus (unknown)	unknown	60
+seedvr2-ema-3b	unknown	seedvr2|ema|3b	Seedvr2 Ema 3B	Seedvr2 Ema 3B (unknown)	unknown	60
+sigclip-vision-patch14-384	unknown	sigclip|vision|patch14|384	Sigclip Vision Patch14 384	Sigclip Vision Patch14 384 (unknown)	unknown	60
+t5xxl	unknown	t5xxl	T5Xxl	T5Xxl (unknown)	unknown	70
+tcdecoder	unknown	tcdecoder	Tcdecoder	Tcdecoder (unknown)	unknown	60
+umt5-xxl	unknown	umt5|xxl	Umt5 Xxl	Umt5 Xxl (unknown)	unknown	60
+vae-ft-mse-840000-ema-pruned	unknown	vae|ft|mse|840000|ema|pruned	Vae Ft Mse 840000 Ema Pruned	Vae Ft Mse 840000 Ema Pruned (unknown)	unknown	60
+wan-2.1-vae	unknown	wan|2.1|vae	Wan 2.1 Vae	Wan 2.1 Vae (unknown)	unknown	60
+wan2-1-flashvsr-lq-proj-model	unknown	wan2|1|flashvsr|lq|proj|model	Wan2 1 Flashvsr Lq Proj Model	Wan2 1 Flashvsr Lq Proj Model (unknown)	unknown	60
+wan2-1-flashvsr-tcdecoder-fp32	unknown	wan2|1|flashvsr|tcdecoder|fp32	Wan2 1 Flashvsr Tcdecoder Fp32	Wan2 1 Flashvsr Tcdecoder Fp32 (unknown)	unknown	60
+wan2-1-t2v-1-3b-flashvsr-fp32	unknown	wan2|1|t2v|1|3b|flashvsr|fp32	Wan2 1 T2V 1 3B Flashvsr Fp32	Wan2 1 T2V 1 3B Flashvsr Fp32 (unknown)	unknown	60
+wan2-1-t2v-1.1-3b-flashvsr-fp32	unknown	wan2|1|t2v|1.1|3b|flashvsr|fp32	Wan2 1 T2V 1.1 3B Flashvsr Fp32	Wan2 1 T2V 1.1 3B Flashvsr Fp32 (unknown)	unknown	60
+wan2.1-vae	unknown	wan2.1|vae	Wan2.1 Vae	Wan2.1 Vae (unknown)	unknown	60
+wan2.2-rapid-mega-aio-nsfw-v12.2	unknown	wan2.2|rapid|mega|aio|nsfw|v12.2	Wan2.2 Rapid Mega Aio Nsfw V12.2	Wan2.2 Rapid Mega Aio Nsfw V12.2 (unknown)	unknown	60
+wan2.2-remix-nsfw-i2v-14b-low-lighting.1	unknown	wan2.2|remix|nsfw|i2v|14b|low|lighting.1	Wan2.2 Remix Nsfw I2V 14B Low Lighting.1	Wan2.2 Remix Nsfw I2V 14B Low Lighting.1 (unknown)	unknown	60
+.safetensors[^	upscaler	.safetensors[^	.Safetensors[^	.Safetensors[^ (upscaler)	upscaler	60
+ltx-2.3-spatial-upscaler-x2-1.0	upscaler	ltx|2.3|spatial|upscaler|x2|1.0	Ltx 2.3 Spatial Upscaler X2 1.0	Ltx 2.3 Spatial Upscaler X2 1.0 (upscaler)	upscaler	60
+ltx-2.3-spatial-upscaler-x2-1.1	upscaler	ltx|2.3|spatial|upscaler|x2|1.1	Ltx 2.3 Spatial Upscaler X2 1.1	Ltx 2.3 Spatial Upscaler X2 1.1 (upscaler)	upscaler	80
+.safetensors[^	vae	.safetensors[^	.Safetensors[^	.Safetensors[^ (vae)	vae	60
+diffusion-pytorch-model-streaming-dmd	vae	diffusion|pytorch|model|streaming|dmd	Diffusion Pytorch Model Streaming Dmd	Diffusion Pytorch Model Streaming Dmd (vae)	vae	60
+flux 1 涓绘墿鏁ｆā鍨嬶紱榛樿浣跨敤 flux1-krea-dev.safetensors銆?vae	flux 1 涓绘墿鏁ｆā鍨嬶紱榛樿浣跨敤 flux1|krea|dev.safetensors銆?Flux 1 涓绘墿鏁ｆā鍨嬶紱榛樿浣跨敤 Flux1 Krea Dev.Safetensors銆?Flux 1 涓绘墿鏁ｆā鍨嬶紱榛樿浣跨敤 Flux1 Krea Dev.Safetensors銆?(vae)	vae	60
+flux-2-klein-9b-nvfp4	vae	flux|2|klein|9b|nvfp4	Flux 2 Klein 9B Nvfp4	Flux 2 Klein 9B Nvfp4 (vae)	vae	60
+full-encoder-small-decoder	vae	full|encoder|small|decoder	Full Encoder Small Decoder	Full Encoder Small Decoder (vae)	vae	60
+ltx23-video-vae	vae	ltx23|video|vae	Ltx23 Video Vae	Ltx23 Video Vae (vae)	vae	80
+qwen-image-edit-2511	vae	qwen|image|edit|2511	Qwen Image Edit 2511	Qwen Image Edit 2511 (vae)	vae	60
+qwen-image-edit-2511-multiple-angles-lora	vae	qwen|image|edit|2511|multiple|angles|lora	Qwen Image Edit 2511 Multiple Angles Lora	Qwen Image Edit 2511 Multiple Angles Lora (vae)	vae	60
+wan2.1-vae	vae	wan2.1|vae	Wan2.1 Vae	Wan2.1 Vae (vae)	vae	60
+涓绘墿鏁ｆā鍨嬨€傞粯璁や娇鐢ㄥ畼鏂瑰伐浣滄祦涓殑 flux1-fill-dev.safetensors銆?vae	涓绘墿鏁ｆā鍨嬨€傞粯璁や娇鐢ㄥ畼鏂瑰伐浣滄祦涓殑 flux1|fill|dev.safetensors銆?涓绘墿鏁ｆā鍨嬨€傞粯璁や娇鐢ㄥ畼鏂瑰伐浣滄祦涓殑 Flux1 Fill Dev.Safetensors銆?涓绘墿鏁ｆā鍨嬨€傞粯璁や娇鐢ㄥ畼鏂瑰伐浣滄祦涓殑 Flux1 Fill Dev.Safetensors銆?(vae)	vae	60

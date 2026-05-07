@@ -5,7 +5,13 @@ from typing import Any, Iterable
 
 import comfy.utils
 import torch
-from comfy_extras.nodes_custom_sampler import CFGGuider, KSamplerSelect, ManualSigmas, RandomNoise, SamplerCustomAdvanced
+from comfy_extras.nodes_custom_sampler import (
+    CFGGuider,
+    KSamplerSelect,
+    ManualSigmas,
+    RandomNoise,
+    SamplerCustomAdvanced,
+)
 from comfy_extras.nodes_hunyuan import LatentUpscaleModelLoader
 from comfy_extras.nodes_lt import (
     EmptyLTXVLatentVideo,
@@ -17,9 +23,19 @@ from comfy_extras.nodes_lt import (
     LTXVPreprocess,
     LTXVSeparateAVLatent,
 )
-from comfy_extras.nodes_lt_audio import LTXAVTextEncoderLoader, LTXVAudioVAEDecode, LTXVAudioVAELoader, LTXVEmptyLatentAudio
+from comfy_extras.nodes_lt_audio import (
+    LTXAVTextEncoderLoader,
+    LTXVAudioVAEDecode,
+    LTXVAudioVAELoader,
+    LTXVEmptyLatentAudio,
+)
 from comfy_extras.nodes_lt_upsampler import LTXVLatentUpsampler
-from nodes import CheckpointLoaderSimple, CLIPTextEncode, LoraLoaderModelOnly, VAEDecodeTiled
+from nodes import (
+    CheckpointLoaderSimple,
+    CLIPTextEncode,
+    LoraLoaderModelOnly,
+    VAEDecodeTiled,
+)
 
 from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
 from .gjj_ltx23_multiref_runtime import (
@@ -35,7 +51,6 @@ from .gjj_ltx23_multiref_runtime import (
     _safe_filename_list,
     _slice_output_frames,
 )
-
 
 NODE_NAME = "GJJ_LTX23FirstLastOutfit"
 
@@ -101,7 +116,9 @@ DEFAULT_PREPROCESS_LONG_EDGE = 1536
 DEFAULT_PREPROCESS_COMPRESSION = 18
 DEFAULT_STAGE1_SAMPLER = "euler_ancestral_cfg_pp"
 DEFAULT_STAGE2_SAMPLER = "euler_cfg_pp"
-DEFAULT_STAGE1_SIGMAS = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
+DEFAULT_STAGE1_SIGMAS = (
+    "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
+)
 DEFAULT_STAGE2_SIGMAS = "0.85, 0.7250, 0.4219, 0.0"
 DEFAULT_CFG = 1.0
 DEFAULT_NAG_SCALE = 11.0
@@ -179,7 +196,9 @@ def _apply_loras(model, loras: Iterable[tuple[str, float]]):
     for lora_name, strength in loras:
         if not lora_name or abs(float(strength)) <= 1e-6:
             continue
-        current = LoraLoaderModelOnly().load_lora_model_only(current, lora_name, float(strength))[0]
+        current = LoraLoaderModelOnly().load_lora_model_only(
+            current, lora_name, float(strength)
+        )[0]
     return current
 
 
@@ -201,7 +220,9 @@ def _ensure_image(image: torch.Tensor, label: str) -> torch.Tensor:
     if image.ndim != 4 or int(image.shape[0]) <= 0:
         raise RuntimeError(f"{label}不是有效的 IMAGE 张量。")
     if _is_empty_loader_placeholder(image):
-        raise RuntimeError(f"{label}接到了 64x64 空占位图。请优先连接多图片加载器的“批量图片队列”，或连接已经选中的单图输出。")
+        raise RuntimeError(
+            f"{label}接到了 64x64 空占位图。请优先连接多图片加载器的“批量图片队列”，或连接已经选中的单图输出。"
+        )
     return image[:1].contiguous()
 
 
@@ -212,7 +233,9 @@ def _split_image_batch(value: Any) -> list[torch.Tensor]:
         return [value.unsqueeze(0).contiguous()]
     if value.ndim != 4:
         return []
-    return [value[index:index + 1].contiguous() for index in range(int(value.shape[0]))]
+    return [
+        value[index : index + 1].contiguous() for index in range(int(value.shape[0]))
+    ]
 
 
 def _filter_valid_images(images: Iterable[Any]) -> tuple[list[torch.Tensor], int]:
@@ -232,12 +255,19 @@ def _filter_valid_images(images: Iterable[Any]) -> tuple[list[torch.Tensor], int
     return valid, skipped
 
 
-def _resolve_first_last_images(image_queue: Any, first_image: Any, last_image: Any) -> tuple[torch.Tensor, torch.Tensor, int, int]:
+def _resolve_first_last_images(
+    image_queue: Any, first_image: Any, last_image: Any
+) -> tuple[torch.Tensor, torch.Tensor, int, int]:
     queue_images, skipped_queue = _filter_valid_images(_split_image_batch(image_queue))
     direct_images, skipped_direct = _filter_valid_images([first_image, last_image])
 
     if len(queue_images) >= 2:
-        return queue_images[0], queue_images[1], len(queue_images), skipped_queue + skipped_direct
+        return (
+            queue_images[0],
+            queue_images[1],
+            len(queue_images),
+            skipped_queue + skipped_direct,
+        )
 
     first = queue_images[0] if len(queue_images) >= 1 else None
     last = None
@@ -249,7 +279,11 @@ def _resolve_first_last_images(image_queue: Any, first_image: Any, last_image: A
     if last is None:
         if len(direct_images) >= 2:
             last = direct_images[1]
-        elif len(queue_images) >= 1 and len(direct_images) >= 1 and direct_images[0] is not first:
+        elif (
+            len(queue_images) >= 1
+            and len(direct_images) >= 1
+            and direct_images[0] is not first
+        ):
             last = direct_images[0]
 
     if first is None or last is None:
@@ -257,7 +291,12 @@ def _resolve_first_last_images(image_queue: Any, first_image: Any, last_image: A
             "未收到有效的首帧和尾帧图片。推荐把 GJJ · 批量多图片加载预览器 的“批量图片队列”输出接到本节点“首尾帧队列”，"
             "并至少选择 2 张图片；也可以分别连接“首帧图片”和“尾帧图片”。"
         )
-    return _ensure_image(first, "首帧图片"), _ensure_image(last, "尾帧图片"), len(queue_images), skipped_queue + skipped_direct
+    return (
+        _ensure_image(first, "首帧图片"),
+        _ensure_image(last, "尾帧图片"),
+        len(queue_images),
+        skipped_queue + skipped_direct,
+    )
 
 
 def _is_empty_loader_placeholder(image: Any) -> bool:
@@ -265,7 +304,11 @@ def _is_empty_loader_placeholder(image: Any) -> bool:
         return False
     if image.ndim != 4:
         return False
-    if int(image.shape[0]) != 1 or int(image.shape[1]) != 64 or int(image.shape[2]) != 64:
+    if (
+        int(image.shape[0]) != 1
+        or int(image.shape[1]) != 64
+        or int(image.shape[2]) != 64
+    ):
         return False
     try:
         return float(image.detach().abs().amax().item()) <= 1e-7
@@ -274,13 +317,17 @@ def _is_empty_loader_placeholder(image: Any) -> bool:
 
 
 def _resize_center_crop(image: torch.Tensor, width: int, height: int) -> torch.Tensor:
-    return comfy.utils.common_upscale(
-        image.movedim(-1, 1),
-        int(width),
-        int(height),
-        "lanczos",
-        "center",
-    ).movedim(1, -1).contiguous()
+    return (
+        comfy.utils.common_upscale(
+            image.movedim(-1, 1),
+            int(width),
+            int(height),
+            "lanczos",
+            "center",
+        )
+        .movedim(1, -1)
+        .contiguous()
+    )
 
 
 def _resize_to_long_edge(image: torch.Tensor, long_edge: int) -> torch.Tensor:
@@ -298,16 +345,22 @@ def _resize_to_long_edge(image: torch.Tensor, long_edge: int) -> torch.Tensor:
         target_width = max(64, int(round(width * (target_height / float(height)))))
     target_width = _round_to_multiple(target_width, 32, 64)
     target_height = _round_to_multiple(target_height, 32, 64)
-    return comfy.utils.common_upscale(
-        image.movedim(-1, 1),
-        target_width,
-        target_height,
-        "lanczos",
-        "center",
-    ).movedim(1, -1).contiguous()
+    return (
+        comfy.utils.common_upscale(
+            image.movedim(-1, 1),
+            target_width,
+            target_height,
+            "lanczos",
+            "center",
+        )
+        .movedim(1, -1)
+        .contiguous()
+    )
 
 
-def _prepare_reference_image(image: torch.Tensor, width: int, height: int, long_edge: int, compression: int) -> torch.Tensor:
+def _prepare_reference_image(
+    image: torch.Tensor, width: int, height: int, long_edge: int, compression: int
+) -> torch.Tensor:
     resized = _resize_center_crop(image, width, height)
     resized = _resize_to_long_edge(resized, int(long_edge))
     return LTXVPreprocess.execute(resized, int(compression))[0]
@@ -327,7 +380,9 @@ class GJJ_LTX23FirstLastOutfit:
     ]
     RETURN_TYPES = ("VIDEO",)
     RETURN_NAMES = ("视频生成结果",)
-    OUTPUT_TOOLTIPS = ("由首帧到尾帧连续变装过渡的视频结果，内部使用 ComfyUI 自带 VIDEO 输出。",)
+    OUTPUT_TOOLTIPS = (
+        "由首帧到尾帧连续变装过渡的视频结果，内部使用 ComfyUI 自带 VIDEO 输出。",
+    )
 
     def __init__(self):
         self.loaded_lora: tuple[str, Any] | None = None
@@ -335,7 +390,9 @@ class GJJ_LTX23FirstLastOutfit:
     @classmethod
     def INPUT_TYPES(cls):
         ckpts = _filtered_ltx_names("checkpoints") or list(DEFAULT_CKPT_CANDIDATES)
-        default_ckpt = _pick_available_name(DEFAULT_CKPT_CANDIDATES[0], ckpts) or ckpts[0]
+        default_ckpt = (
+            _pick_available_name(DEFAULT_CKPT_CANDIDATES[0], ckpts) or ckpts[0]
+        )
         lora_choices = _choices_with_auto("loras")
         return {
             "required": {
@@ -424,10 +481,50 @@ class GJJ_LTX23FirstLastOutfit:
                         "tooltip": "辅助细节 LoRA 的强度；只有选择了 LoRA 且强度大于 0 时才生效。",
                     },
                 ),
-                "base_width": ("INT", {"default": DEFAULT_BASE_WIDTH, "min": 64, "max": 4096, "step": 32, "display_name": "工作宽度", "tooltip": "首尾参考图先适配到此宽度；开启二次放大后最终视频宽度约为它的 2 倍。"}),
-                "base_height": ("INT", {"default": DEFAULT_BASE_HEIGHT, "min": 64, "max": 4096, "step": 32, "display_name": "工作高度", "tooltip": "首尾参考图先适配到此高度；开启二次放大后最终视频高度约为它的 2 倍。"}),
-                "frame_count": ("INT", {"default": DEFAULT_FRAME_COUNT, "min": 9, "max": 1000, "step": 1, "display_name": "帧数", "tooltip": "视频 latent 的总帧数，参考工作流默认 197。"}),
-                "fps": ("INT", {"default": DEFAULT_FPS, "min": 1, "max": 120, "step": 1, "display_name": "帧率", "tooltip": "LTX 条件帧率和输出视频帧率。"}),
+                "base_width": (
+                    "INT",
+                    {
+                        "default": DEFAULT_BASE_WIDTH,
+                        "min": 64,
+                        "max": 4096,
+                        "step": 32,
+                        "display_name": "工作宽度",
+                        "tooltip": "首尾参考图先适配到此宽度；开启二次放大后最终视频宽度约为它的 2 倍。",
+                    },
+                ),
+                "base_height": (
+                    "INT",
+                    {
+                        "default": DEFAULT_BASE_HEIGHT,
+                        "min": 64,
+                        "max": 4096,
+                        "step": 32,
+                        "display_name": "工作高度",
+                        "tooltip": "首尾参考图先适配到此高度；开启二次放大后最终视频高度约为它的 2 倍。",
+                    },
+                ),
+                "frame_count": (
+                    "INT",
+                    {
+                        "default": DEFAULT_FRAME_COUNT,
+                        "min": 9,
+                        "max": 1000,
+                        "step": 1,
+                        "display_name": "帧数",
+                        "tooltip": "视频 latent 的总帧数，参考工作流默认 197。",
+                    },
+                ),
+                "fps": (
+                    "INT",
+                    {
+                        "default": DEFAULT_FPS,
+                        "min": 1,
+                        "max": 120,
+                        "step": 1,
+                        "display_name": "帧率",
+                        "tooltip": "LTX 条件帧率和输出视频帧率。",
+                    },
+                ),
                 "stage1_seed": (
                     "INT",
                     {
@@ -497,8 +594,20 @@ class GJJ_LTX23FirstLastOutfit:
                         "tooltip": "推荐直接连接 GJJ · 批量多图片加载预览器 的“批量图片队列”；节点会自动取第 1 张为首帧、第 2 张为尾帧，并忽略未选中的 64x64 空占位图。",
                     },
                 ),
-                "first_image": ("IMAGE", {"display_name": "首帧图片", "tooltip": "备用单图输入。接首帧图片；如果已连接首尾帧队列，队列优先。"}),
-                "last_image": ("IMAGE", {"display_name": "尾帧图片", "tooltip": "备用单图输入。接尾帧图片；如果已连接首尾帧队列，队列优先。"}),
+                "first_image": (
+                    "IMAGE",
+                    {
+                        "display_name": "首帧图片",
+                        "tooltip": "备用单图输入。接首帧图片；如果已连接首尾帧队列，队列优先。",
+                    },
+                ),
+                "last_image": (
+                    "IMAGE",
+                    {
+                        "display_name": "尾帧图片",
+                        "tooltip": "备用单图输入。接尾帧图片；如果已连接首尾帧队列，队列优先。",
+                    },
+                ),
                 "lora_chain_config": (
                     "LORA_CHAIN_CONFIG",
                     {
@@ -612,30 +721,64 @@ class GJJ_LTX23FirstLastOutfit:
         final_width = base_width * (2 if bool(double_latent_upscale) else 1)
         final_height = base_height * (2 if bool(double_latent_upscale) else 1)
 
-        first_image, last_image, queue_count, skipped_placeholders = _resolve_first_last_images(image_queue, first_image, last_image)
+        first_image, last_image, queue_count, skipped_placeholders = (
+            _resolve_first_last_images(image_queue, first_image, last_image)
+        )
         if skipped_placeholders:
-            _send_status(unique_id, f"提示：已忽略 {skipped_placeholders} 张 64x64 空占位图。建议连接“批量图片队列”输出。", 0.01)
+            _send_status(
+                unique_id,
+                f"提示：已忽略 {skipped_placeholders} 张 64x64 空占位图。建议连接“批量图片队列”输出。",
+                0.01,
+            )
         if queue_count >= 2:
-            _send_status(unique_id, f"提示：已从首尾帧队列读取 {queue_count} 张图片，使用第 1 张作为首帧、第 2 张作为尾帧。", 0.01)
+            _send_status(
+                unique_id,
+                f"提示：已从首尾帧队列读取 {queue_count} 张图片，使用第 1 张作为首帧、第 2 张作为尾帧。",
+                0.01,
+            )
 
-        _send_status(unique_id, "1/9 加载 LTX 模型、VAE、文本编码器和 latent 放大模型...", 0.02)
+        _send_status(
+            unique_id, "1/9 加载 LTX 模型、VAE、文本编码器和 latent 放大模型...", 0.02
+        )
         try:
-            resolved_ckpt = _pick_available_name(str(ckpt_name or ""), _safe_filename_list("checkpoints"))
+            resolved_ckpt = _pick_available_name(
+                str(ckpt_name or ""), _safe_filename_list("checkpoints")
+            )
             if not resolved_ckpt:
-                resolved_ckpt = _pick_first_candidate("checkpoints", DEFAULT_CKPT_CANDIDATES, "LTX 主模型")
-            resolved_video_vae = _pick_first_candidate("vae", DEFAULT_VIDEO_VAE_CANDIDATES, "LTX 视频 VAE")
-            resolved_text_encoder = _pick_first_candidate("text_encoders", DEFAULT_TEXT_ENCODER_CANDIDATES, "LTX 文本编码器")
-            resolved_upscaler_1 = _pick_first_candidate("latent_upscale_models", DEFAULT_LATENT_UPSCALER_1_CANDIDATES, "LTX latent 放大模型 1")
+                resolved_ckpt = _pick_first_candidate(
+                    "checkpoints", DEFAULT_CKPT_CANDIDATES, "LTX 主模型"
+                )
+            resolved_video_vae = _pick_first_candidate(
+                "vae", DEFAULT_VIDEO_VAE_CANDIDATES, "LTX 视频 VAE"
+            )
+            resolved_text_encoder = _pick_first_candidate(
+                "text_encoders", DEFAULT_TEXT_ENCODER_CANDIDATES, "LTX 文本编码器"
+            )
+            resolved_upscaler_1 = _pick_first_candidate(
+                "latent_upscale_models",
+                DEFAULT_LATENT_UPSCALER_1_CANDIDATES,
+                "LTX latent 放大模型 1",
+            )
             resolved_upscaler_2 = ""
             if bool(double_latent_upscale):
-                resolved_upscaler_2 = _pick_first_candidate("latent_upscale_models", DEFAULT_LATENT_UPSCALER_2_CANDIDATES, "LTX latent 放大模型 2")
+                resolved_upscaler_2 = _pick_first_candidate(
+                    "latent_upscale_models",
+                    DEFAULT_LATENT_UPSCALER_2_CANDIDATES,
+                    "LTX latent 放大模型 2",
+                )
 
             model, _, _ = CheckpointLoaderSimple().load_checkpoint(resolved_ckpt)
             video_vae = _load_vae(resolved_video_vae)
             audio_vae = LTXVAudioVAELoader.execute(resolved_ckpt)[0]
-            clip = LTXAVTextEncoderLoader.execute(resolved_text_encoder, resolved_ckpt, "default")[0]
+            clip = LTXAVTextEncoderLoader.execute(
+                resolved_text_encoder, resolved_ckpt, "default"
+            )[0]
             latent_upscaler_1 = LatentUpscaleModelLoader.execute(resolved_upscaler_1)[0]
-            latent_upscaler_2 = LatentUpscaleModelLoader.execute(resolved_upscaler_2)[0] if resolved_upscaler_2 else None
+            latent_upscaler_2 = (
+                LatentUpscaleModelLoader.execute(resolved_upscaler_2)[0]
+                if resolved_upscaler_2
+                else None
+            )
         except Exception as exc:
             raise RuntimeError(f"LTX 首尾帧变装节点加载模型失败：{exc}") from exc
 
@@ -644,11 +787,28 @@ class GJJ_LTX23FirstLastOutfit:
             lora_items = []
             notices = []
             for selection, strength, candidates, label in (
-                (transition_lora, transition_lora_strength, DEFAULT_TRANSITION_LORA_CANDIDATES, "过渡LoRA"),
-                (refocus_lora, refocus_lora_strength, DEFAULT_REFOCUS_LORA_CANDIDATES, "辅助聚焦LoRA"),
-                (detailer_lora, detailer_lora_strength, DEFAULT_DETAILER_LORA_CANDIDATES, "辅助细节LoRA"),
+                (
+                    transition_lora,
+                    transition_lora_strength,
+                    DEFAULT_TRANSITION_LORA_CANDIDATES,
+                    "过渡LoRA",
+                ),
+                (
+                    refocus_lora,
+                    refocus_lora_strength,
+                    DEFAULT_REFOCUS_LORA_CANDIDATES,
+                    "辅助聚焦LoRA",
+                ),
+                (
+                    detailer_lora,
+                    detailer_lora_strength,
+                    DEFAULT_DETAILER_LORA_CANDIDATES,
+                    "辅助细节LoRA",
+                ),
             ):
-                name, resolved_strength, notice = _resolve_selected_lora(selection, strength, candidates, label)
+                name, resolved_strength, notice = _resolve_selected_lora(
+                    selection, strength, candidates, label
+                )
                 if name:
                     lora_items.append((name, resolved_strength))
                 if notice:
@@ -685,9 +845,20 @@ class GJJ_LTX23FirstLastOutfit:
         try:
             positive_base = CLIPTextEncode().encode(clip, prompt_text)[0]
             negative_base = CLIPTextEncode().encode(clip, negative_text)[0]
-            model_nag = _apply_ltx_nag(model, negative_base, DEFAULT_NAG_SCALE, DEFAULT_NAG_ALPHA, DEFAULT_NAG_TAU, inplace=True)
-            positive, negative = LTXVConditioning.execute(positive_base, negative_base, float(fps))[0:2]
-            video_latent = EmptyLTXVLatentVideo.execute(lowres_width, lowres_height, frame_count, 1)[0]
+            model_nag = _apply_ltx_nag(
+                model,
+                negative_base,
+                DEFAULT_NAG_SCALE,
+                DEFAULT_NAG_ALPHA,
+                DEFAULT_NAG_TAU,
+                inplace=True,
+            )
+            positive, negative = LTXVConditioning.execute(
+                positive_base, negative_base, float(fps)
+            )[0:2]
+            video_latent = EmptyLTXVLatentVideo.execute(
+                lowres_width, lowres_height, frame_count, 1
+            )[0]
             if float(first_strength) > 0:
                 positive, negative, video_latent = LTXVAddGuide.execute(
                     positive,
@@ -708,14 +879,20 @@ class GJJ_LTX23FirstLastOutfit:
                     -1,
                     float(last_strength),
                 )[0:3]
-            audio_latent = LTXVEmptyLatentAudio.execute(frame_count, fps, 1, audio_vae)[0]
+            audio_latent = LTXVEmptyLatentAudio.execute(frame_count, fps, 1, audio_vae)[
+                0
+            ]
             av_latent_stage1 = LTXVConcatAVLatent.execute(video_latent, audio_latent)[0]
         except Exception as exc:
-            raise RuntimeError(f"LTX 首尾帧变装节点构建初始 latent 失败：{exc}") from exc
+            raise RuntimeError(
+                f"LTX 首尾帧变装节点构建初始 latent 失败：{exc}"
+            ) from exc
 
         _send_status(unique_id, "5/9 第一阶段低清采样...", 0.42)
         try:
-            guider_stage1 = CFGGuider.execute(model_nag, positive, negative, DEFAULT_CFG)[0]
+            guider_stage1 = CFGGuider.execute(
+                model_nag, positive, negative, DEFAULT_CFG
+            )[0]
             sampler_stage1 = KSamplerSelect.execute(DEFAULT_STAGE1_SAMPLER)[0]
             sigmas_stage1 = ManualSigmas.execute(DEFAULT_STAGE1_SIGMAS)[0]
             noise_stage1 = RandomNoise.execute(int(stage1_seed))[0]
@@ -726,28 +903,46 @@ class GJJ_LTX23FirstLastOutfit:
                 sigmas_stage1,
                 av_latent_stage1,
             )[0]
-            video_latent_stage1, audio_latent_stage1 = LTXVSeparateAVLatent.execute(stage1_result)[0:2]
+            video_latent_stage1, audio_latent_stage1 = LTXVSeparateAVLatent.execute(
+                stage1_result
+            )[0:2]
         except Exception as exc:
             raise RuntimeError(f"LTX 首尾帧变装节点第一阶段采样失败：{exc}") from exc
 
-        _send_status(unique_id, f"6/9 latent 放大 {upscale_count} 次并准备高清阶段...", 0.58)
+        _send_status(
+            unique_id, f"6/9 latent 放大 {upscale_count} 次并准备高清阶段...", 0.58
+        )
         try:
-            positive_stage2, negative_stage2, video_latent_stage1_cropped = LTXVCropGuides.execute(
-                positive,
-                negative,
-                video_latent_stage1,
-            )[0:3]
-            video_latent_high = LTXVLatentUpsampler().upsample_latent(video_latent_stage1_cropped, latent_upscaler_1, video_vae)[0]
+            positive_stage2, negative_stage2, video_latent_stage1_cropped = (
+                LTXVCropGuides.execute(
+                    positive,
+                    negative,
+                    video_latent_stage1,
+                )[0:3]
+            )
+            video_latent_high = LTXVLatentUpsampler().upsample_latent(
+                video_latent_stage1_cropped, latent_upscaler_1, video_vae
+            )[0]
             if latent_upscaler_2 is not None:
-                video_latent_high = LTXVLatentUpsampler().upsample_latent(video_latent_high, latent_upscaler_2, video_vae)[0]
-            video_latent_high = LTXVImgToVideoInplace.execute(video_vae, first_ref, video_latent_high, 1.0, False)[0]
-            av_latent_stage2 = LTXVConcatAVLatent.execute(video_latent_high, audio_latent_stage1)[0]
+                video_latent_high = LTXVLatentUpsampler().upsample_latent(
+                    video_latent_high, latent_upscaler_2, video_vae
+                )[0]
+            video_latent_high = LTXVImgToVideoInplace.execute(
+                video_vae, first_ref, video_latent_high, 1.0, False
+            )[0]
+            av_latent_stage2 = LTXVConcatAVLatent.execute(
+                video_latent_high, audio_latent_stage1
+            )[0]
         except Exception as exc:
-            raise RuntimeError(f"LTX 首尾帧变装节点高清 latent 准备失败：{exc}") from exc
+            raise RuntimeError(
+                f"LTX 首尾帧变装节点高清 latent 准备失败：{exc}"
+            ) from exc
 
         _send_status(unique_id, "7/9 第二阶段高清采样...", 0.70)
         try:
-            guider_stage2 = CFGGuider.execute(model_nag, positive_stage2, negative_stage2, DEFAULT_CFG)[0]
+            guider_stage2 = CFGGuider.execute(
+                model_nag, positive_stage2, negative_stage2, DEFAULT_CFG
+            )[0]
             sampler_stage2 = KSamplerSelect.execute(DEFAULT_STAGE2_SAMPLER)[0]
             sigmas_stage2 = ManualSigmas.execute(DEFAULT_STAGE2_SIGMAS)[0]
             noise_stage2 = RandomNoise.execute(int(stage2_seed))[0]
@@ -758,7 +953,9 @@ class GJJ_LTX23FirstLastOutfit:
                 sigmas_stage2,
                 av_latent_stage2,
             )[0]
-            video_latent_stage2, audio_latent_stage2 = LTXVSeparateAVLatent.execute(stage2_result)[0:2]
+            video_latent_stage2, audio_latent_stage2 = LTXVSeparateAVLatent.execute(
+                stage2_result
+            )[0:2]
         except Exception as exc:
             raise RuntimeError(f"LTX 首尾帧变装节点第二阶段采样失败：{exc}") from exc
 
@@ -774,7 +971,11 @@ class GJJ_LTX23FirstLastOutfit:
             )[0]
             frames = _slice_output_frames(frames, 0, frame_count)
             frames = _crop_frames_to_size(frames, final_width, final_height)
-            output_audio = LTXVAudioVAEDecode.execute(audio_latent_stage2, audio_vae)[0] if bool(decode_generated_audio) else None
+            output_audio = (
+                LTXVAudioVAEDecode.execute(audio_latent_stage2, audio_vae)[0]
+                if bool(decode_generated_audio)
+                else None
+            )
         except Exception as exc:
             raise RuntimeError(f"LTX 首尾帧变装节点解码失败：{exc}") from exc
 
@@ -782,7 +983,11 @@ class GJJ_LTX23FirstLastOutfit:
         video = _create_video(frames, float(fps), output_audio)
         elapsed = time.perf_counter() - started_at
         audio_text = "模型音频" if output_audio is not None else "无音频"
-        _send_status(unique_id, f"完成：{final_width}x{final_height} / {frame_count} 帧 / {fps}fps / {audio_text} / 耗时 {elapsed:.1f} 秒", 1.0)
+        _send_status(
+            unique_id,
+            f"完成：{final_width}x{final_height} / {frame_count} 帧 / {fps}fps / {audio_text} / 耗时 {elapsed:.1f} 秒",
+            1.0,
+        )
         return {
             "ui": {
                 "resolved_width": [int(final_width)],

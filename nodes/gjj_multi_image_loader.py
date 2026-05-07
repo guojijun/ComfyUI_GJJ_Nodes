@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import comfy.utils
 import json
 import os
 from pathlib import Path
@@ -17,7 +18,7 @@ except Exception:
 import folder_paths
 from nodes import PreviewImage
 
-from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
 
 NODE_NAME = "GJJ_MultiImageLoader"
@@ -185,13 +186,20 @@ def resolve_input_image_path(entry: dict[str, str]) -> Path:
 def load_image_tensor(path: Path) -> torch.Tensor:
     image = Image.open(path)
     image = ImageOps.exif_transpose(image)
-    image = image.convert("RGB")
-    array = np.asarray(image).astype(np.float32) / 255.0
+    
+    # 保留原始通道：如果是 RGBA 则输出 RGBA，否则输出 RGB
+    if image.mode == "RGBA":
+        array = np.asarray(image).astype(np.float32) / 255.0
+    else:
+        image = image.convert("RGB")
+        array = np.asarray(image).astype(np.float32) / 255.0
+    
     return torch.from_numpy(array)[None, ...]
 
 
-def empty_image_tensor() -> torch.Tensor:
-    return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+def empty_image_tensor(num_channels: int = 3) -> torch.Tensor:
+    """创建空的占位图片 Tensor"""
+    return torch.zeros((1, 64, 64, num_channels), dtype=torch.float32)
 
 
 def build_uniform_batch(images: list[torch.Tensor]) -> torch.Tensor:
@@ -200,6 +208,9 @@ def build_uniform_batch(images: list[torch.Tensor]) -> torch.Tensor:
 
     max_height = max(int(image.shape[1]) for image in images)
     max_width = max(int(image.shape[2]) for image in images)
+    # 获取通道数（可能是 3 或 4）
+    num_channels = int(images[0].shape[3])
+    
     padded: list[torch.Tensor] = []
 
     for image in images:
@@ -209,13 +220,55 @@ def build_uniform_batch(images: list[torch.Tensor]) -> torch.Tensor:
             padded.append(image.contiguous())
             continue
 
-        canvas = torch.zeros((1, max_height, max_width, 3), dtype=image.dtype, device=image.device)
+        # 根据实际通道数创建 canvas
+        canvas = torch.zeros((1, max_height, max_width, num_channels), dtype=image.dtype, device=image.device)
         top = max(0, (max_height - height) // 2)
         left = max(0, (max_width - width) // 2)
         canvas[:, top:top + height, left:left + width, :] = image
         padded.append(canvas)
 
     return torch.cat(padded, dim=0)
+
+
+def build_uniform_batch_by_longest_edge(images: list[torch.Tensor], method: str = "lanczos") -> torch.Tensor:
+    """通过长边缩放统一图片尺寸，而不是加黑边"""
+    if not images:
+        return empty_image_tensor()
+    
+    # 找到所有图片中的最大长边
+    max_longest_edge = 0
+    for image in images:
+        height = int(image.shape[1])
+        width = int(image.shape[2])
+        longest_edge = max(height, width)
+        max_longest_edge = max(max_longest_edge, longest_edge)
+    
+    if max_longest_edge == 0:
+        return empty_image_tensor()
+    
+    # 将所有图片按长边缩放到统一尺寸
+    scaled: list[torch.Tensor] = []
+    for image in images:
+        height = int(image.shape[1])
+        width = int(image.shape[2])
+        longest_edge = max(height, width)
+        
+        if longest_edge == max_longest_edge:
+            # 已经是最大长边，无需缩放
+            scaled.append(image.contiguous())
+        else:
+            # 计算缩放比例
+            scale_factor = max_longest_edge / longest_edge
+            new_width = max(16, int(round(width * scale_factor / 8.0) * 8))
+            new_height = max(16, int(round(height * scale_factor / 8.0) * 8))
+            
+            # 缩放图片（保持原始通道数）
+            samples = image.movedim(-1, 1)
+            scaled_image = comfy.utils.common_upscale(samples, new_width, new_height, str(method or "lanczos"), "disabled")
+            scaled_image = scaled_image.movedim(1, -1).clamp(0.0, 1.0).contiguous()
+            scaled.append(scaled_image)
+    
+    return torch.cat(scaled, dim=0)
 
 
 def parse_sequence_range(raw_value: Any, total: int) -> list[int] | None:
@@ -269,7 +322,7 @@ class GJJ_MultiImageLoader:
     OUTPUT_NODE = False
     DESCRIPTION = "一次选择多张 input 目录里的图片，在节点中网格预览并按选择数量同步扩展图片输出接口。可作为主图图片、输入图像、原图来源的默认加载节点。"
     SEARCH_ALIASES = ["multi image loader", "image loader", "多图加载", "图片预览", "批量图片", "主图图片", "输入图像", "原图输入", "主图加载", "多图片加载预览器"]
-    RETURN_TYPES = (GJJ_BATCH_IMAGE_TYPE,) + tuple("IMAGE" for _ in range(MAX_OUTPUT_IMAGES))
+    RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE",) + tuple("IMAGE" for _ in range(MAX_OUTPUT_IMAGES))
     RETURN_NAMES = ("批量图片队列",) + tuple(f"导出图片{index:02d}" for index in range(1, MAX_OUTPUT_IMAGES + 1))
     OUTPUT_TOOLTIPS = ("将所有已选图片按顺序打包成一个 GJJ 专用批量图片队列输出。",) + tuple(
         f"第 {index} 张已选图片的单独输出；未使用的尾部输出会在前端自动收起。"
@@ -375,24 +428,44 @@ class GJJ_MultiImageLoader:
         indices = parse_sequence_range(sequence_range, len(collected))
         if indices is not None:
             collected = [collected[index] for index in indices]
-
-        collected = collected[:MAX_OUTPUT_IMAGES]
+        
+        # 如果超过20张，只保留批量图片队列输出（不创建单图输出）
+        # 如果20张以内，保留原有的批量队列+单图输出
+        exceeds_limit = len(collected) > MAX_OUTPUT_IMAGES
+        
         outputs = [item["image"] for item in collected]
         preview_entries: list[dict[str, Any]] = []
         for item in collected:
             preview_entries.extend(item["preview"])
-        preview_entries = preview_entries[:MAX_OUTPUT_IMAGES]
+        
         batch_output = build_uniform_batch(outputs)
-        while len(outputs) < MAX_OUTPUT_IMAGES:
-            outputs.append(empty_image_tensor())
-        return {
-            "ui": {
-                "preview_images": preview_entries,
-                "external_image_count": [sum(1 for item in collected if item.get("source") == "external")],
-                "merged_image_count": [len(preview_entries)],
-            },
-            "result": (batch_output, *tuple(outputs[:MAX_OUTPUT_IMAGES])),
-        }
+        
+        # 获取批量图片的通道数（3 或 4）
+        num_channels = int(batch_output.shape[3]) if len(outputs) > 0 else 3
+        
+        if exceeds_limit:
+            # 超过20张：只返回批量图片队列
+            return {
+                "ui": {
+                    "preview_images": preview_entries,
+                    "external_image_count": [sum(1 for item in collected if item.get("source") == "external")],
+                    "merged_image_count": [len(preview_entries)],
+                },
+                "result": (batch_output,),
+            }
+        else:
+            # 20张以内：批量队列 + 单图输出
+            preview_entries = preview_entries[:MAX_OUTPUT_IMAGES]
+            while len(outputs) < MAX_OUTPUT_IMAGES:
+                outputs.append(empty_image_tensor(num_channels))
+            return {
+                "ui": {
+                    "preview_images": preview_entries,
+                    "external_image_count": [sum(1 for item in collected if item.get("source") == "external")],
+                    "merged_image_count": [len(preview_entries)],
+                },
+                "result": (batch_output, *tuple(outputs[:MAX_OUTPUT_IMAGES])),
+            }
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_MultiImageLoader}

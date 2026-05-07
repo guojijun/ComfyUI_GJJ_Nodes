@@ -16,7 +16,6 @@ import sys
 vendor_path = os.path.join(os.path.dirname(__file__), '..', 'vendor')
 if vendor_path not in sys.path:
     sys.path.insert(0, vendor_path)
-    print(f"[GJJ FaceAnalysis] 🔧 已添加 vendor 路径: {vendor_path}")
 
 # ============================================================================
 # 强制清除 insightface 模块缓存（解决其他节点先加载的问题）
@@ -25,11 +24,8 @@ if vendor_path not in sys.path:
 # 我们需要清除缓存并强制从 vendor 重新加载
 insightface_modules = [key for key in sys.modules.keys() if key.startswith('insightface')]
 if insightface_modules:
-    print(f"[GJJ FaceAnalysis] ⚠️  检测到已加载的 insightface 模块: {insightface_modules}")
-    print(f"[GJJ FaceAnalysis] 🔄 正在清除缓存并重新从 vendor 加载...")
     for mod in insightface_modules:
         del sys.modules[mod]
-    print(f"[GJJ FaceAnalysis] ✅ 已清除 insightface 模块缓存")
 
 # 现在导入其他模块（会使用 vendor 中的 insightface）
 import cv2
@@ -92,9 +88,6 @@ try:
     import insightface
     from insightface.app.common import Face
     
-    print(f"[GJJ FaceAnalysis] ✅ 成功加载 vendor 中的 insightface")
-    print(f"[GJJ FaceAnalysis] 📂 insightface 路径: {insightface.__file__}")
-    
     # 设置执行提供者
     try:
         import torch.cuda as cuda
@@ -107,7 +100,6 @@ try:
     
     REACTOR_AVAILABLE = True
 except ImportError as e:
-    print(f"[GJJ FaceAnalysis] ❌ 无法加载 insightface: {e}")
     REACTOR_AVAILABLE = False
     PROVIDERS = ["CPUExecutionProvider"]
 
@@ -127,15 +119,9 @@ def scan_available_models():
     models_path = folder_paths.models_dir
     insightface_path = os.path.join(models_path, "insightface")
     
-    print(f"[GJJ FaceAnalysis] 🔍 开始扫描模型目录...")
-    print(f"[GJJ FaceAnalysis] 📂 models_path: {models_path}")
-    print(f"[GJJ FaceAnalysis]  insightface_path: {insightface_path}")
-    print(f"[GJJ FaceAnalysis]  insightface_path 存在: {os.path.exists(insightface_path)}")
-    
     available_models = []
     
     if not os.path.exists(insightface_path):
-        print(f"[GJJ FaceAnalysis] ️  目录不存在: {insightface_path}")
         return ["无可用模型"]
     
     # 递归查找所有包含 buffalo 的目录
@@ -154,23 +140,12 @@ def scan_available_models():
             if has_required:
                 model_info = f"{dir_name} ({rel_path})"
                 available_models.append(model_info)
-                print(f"[GJJ FaceAnalysis] ✅ 发现模型: {model_info}")
-                print(f"[GJJ FaceAnalysis]    完整路径: {root}")
-                print(f"[GJJ FaceAnalysis]    包含文件: {', '.join([f for f in files if f.endswith('.onnx')])}")
-    
     if not available_models:
-        print(f"[GJJ FaceAnalysis] ⚠️  未在 {insightface_path} 中找到有效的 buffalo 模型")
-        # 列出目录内容帮助调试
-        if os.path.exists(insightface_path):
-            print(f"[GJJ FaceAnalysis]  insightface 目录内容:")
-            for item in os.listdir(insightface_path):
-                print(f"[GJJ FaceAnalysis]    - {item}")
         return ["无可用模型"]
     
     # 按名称排序
     available_models.sort()
     
-    print(f"[GJJ FaceAnalysis]  共找到 {len(available_models)} 个可用模型")
     
     return available_models
 
@@ -197,26 +172,17 @@ def get_analysis_model(det_size=(640, 640), model_path=None):
     
     # 如果指定了模型路径，直接使用
     if model_path and os.path.exists(model_path):
-        print(f"[GJJ FaceAnalysis] 🔧 使用指定模型: {model_path}")
-        print(f"[GJJ FaceAnalysis] 父目录: {os.path.dirname(model_path)}")
-        print(f"[GJJ FaceAnalysis] 模型名称: {os.path.basename(model_path)}")
         
         try:
             # insightface 需要的是父目录，不是 buffalo_l 本身
             parent_dir = os.path.dirname(model_path)
             model_name = os.path.basename(model_path)
             
-            print(f"[GJJ FaceAnalysis] 开始初始化 FaceAnalysis...")
-            print(f"[GJJ FaceAnalysis] 参数: name='{model_name}', root='{parent_dir}'")
-            
             # 直接初始化，不传递额外参数（遵循 ReActor 原版）
             ANALYSIS_MODELS[key] = insightface.app.FaceAnalysis(
                 name=model_name,
                 root=parent_dir
             )
-            
-            print(f"[GJJ FaceAnalysis] FaceAnalysis 初始化完成，检查模型...")
-            print(f"[GJJ FaceAnalysis] 已加载的模型: {list(ANALYSIS_MODELS[key].models.keys())}")
             
             if 'detection' in ANALYSIS_MODELS[key].models:
                 print(f"[GJJ FaceAnalysis] ✅ 成功加载模型: {model_path}")
@@ -267,13 +233,10 @@ def get_analysis_model(det_size=(640, 640), model_path=None):
         rel_path = first_model_info.split('(')[1].rstrip(')')
         full_path = os.path.join(models_path, rel_path)
         
-        print(f"[GJJ FaceAnalysis] 🔄 自动选择模型: {first_model_info}")
-        
         try:
             parent_dir = os.path.dirname(full_path)
             model_name = os.path.basename(full_path)
             
-            print(f"[GJJ FaceAnalysis] 参数: name='{model_name}', root='{parent_dir}'")
             
             ANALYSIS_MODELS[key] = insightface.app.FaceAnalysis(
                 name=model_name,
@@ -679,7 +642,6 @@ class GJJ_FaceAnalysis:
         else:
             actual_model_path = None
         
-        print(f"[GJJ FaceAnalysis] 📦 使用模型: {face_model}")
         if actual_model_path:
             print(f"[GJJ FaceAnalysis] 📂 模型路径: {actual_model_path}")
         
@@ -727,7 +689,6 @@ class GJJ_FaceAnalysis:
                     pair_num += 1
                     target_pil = tensor_to_pil(target_img)
                     
-                    print(f"[GJJ FaceAnalysis]  处理配对 {pair_num}/{total_pairs}: 源图 {source_idx+1}/{len(source_images)} → 目标图 {target_idx+1}/{len(target_images)}")
                     
                     result_pil = swap_face_core(
                         source_pil, target_pil,

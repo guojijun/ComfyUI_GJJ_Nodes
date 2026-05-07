@@ -243,7 +243,8 @@ async function uploadFiles(node, files) {
 	await refreshOptions(node);
 	for (const item of uploaded) {
 		const alreadySelected = state.selection.some((selected) => selected.filename === item.filename && selected.subfolder === item.subfolder);
-		if (!alreadySelected && state.selection.length < MAX_OUTPUT_IMAGES) {
+		// 移除20张限制，允许上传并选择任意数量的图片
+		if (!alreadySelected) {
 			state.selection.push(item);
 		}
 	}
@@ -274,8 +275,13 @@ function hasExternalImageLink(node) {
 }
 
 function ensureOutputs(node, count) {
-	const imageCount = Math.max(0, Math.min(MAX_OUTPUT_IMAGES, Number(count || 0)));
-	const visibleCount = imageCount + 1;
+	const imageCount = Math.max(0, Number(count || 0));
+	
+	// 当超过20张时，只显示批量图片队列接口
+	// 当20张以内时，显示批量队列 + 单图输出接口
+	const showIndividualOutputs = imageCount <= MAX_OUTPUT_IMAGES;
+	const visibleCount = showIndividualOutputs ? (imageCount + 1) : 1;
+	
 	while ((node.outputs?.length || 0) < visibleCount) {
 		const outputIndex = node.outputs?.length || 0;
 		if (outputIndex === 0) {
@@ -301,7 +307,11 @@ function ensureOutputs(node, count) {
 			output.label = output.name;
 			output.localized_name = output.name;
 			output.type = BATCH_IMAGE_TYPE;
-			output.tooltip = "将所有已选图片按顺序打包成一个 GJJ 专用批量图片队列输出。";
+			if (imageCount > MAX_OUTPUT_IMAGES) {
+				output.tooltip = `已选择 ${imageCount} 张图片（超过20张限制），仅支持批量图片队列输出。`;
+			} else {
+				output.tooltip = "将所有已选图片按顺序打包成一个 GJJ 专用批量图片队列输出。";
+			}
 			return;
 		}
 		output.name = `图片 ${index}`;
@@ -322,7 +332,8 @@ function toggleSelection(node, item) {
 	const existingIndex = state.selection.findIndex((selected) => selected.filename === item.filename && selected.subfolder === item.subfolder);
 	if (existingIndex >= 0) {
 		state.selection.splice(existingIndex, 1);
-	} else if (state.selection.length < MAX_OUTPUT_IMAGES) {
+	} else {
+		// 移除20张限制，允许选择任意数量的图片
 		state.selection.push(item);
 	}
 	syncDataWidget(node);
@@ -349,73 +360,237 @@ function renderPreview(node) {
 	const hasExternalPreview = Number(state.externalCount || 0) > 0 && executedItems.length > 0;
 	const items = hasExternalPreview ? executedItems : (state.selection || []);
 	empty.style.display = items.length > 0 ? "none" : "flex";
+	
+	// 存储节点引用以便后续调用
+	const nodeRef = node;
+	
 	for (const [index, item] of items.entries()) {
 		const card = document.createElement("div");
+		card.className = "gjj-image-card";
 		card.style.cssText = [
-			"display:flex",
-			"flex-direction:column",
-			"gap:6px",
-			"padding:6px",
-			"border:1px solid #33434a",
-			"border-radius:8px",
-			"background:#12191d",
-			"min-width:0",
 			"position:relative",
+			"width:100%",
+			"aspect-ratio:1/1",
+			"overflow:hidden",
+			"border-radius:6px",
 			"cursor:pointer",
+			"transition:transform 0.2s ease",
 		].join(";");
+		
+		// 鼠标悬停效果
+		card.addEventListener("mouseenter", () => {
+			card.style.transform = "scale(1.05)";
+		});
+		card.addEventListener("mouseleave", () => {
+			card.style.transform = "scale(1)";
+		});
 
+		// 图片元素
 		const image = document.createElement("img");
 		image.src = imageDataToUrl(item);
 		image.draggable = false;
+		image.className = "gjj-image-preview";
 		image.style.cssText = [
 			"width:100%",
-			"height:108px",
-			"object-fit:contain",
-			"background:#0c1114",
-			"border-radius:6px",
+			"height:100%",
+			"object-fit:cover",
+			"display:block",
 		].join(";");
 
-		const caption = document.createElement("div");
-		caption.textContent = hasExternalPreview && index < Number(state.externalCount || 0)
-			? `导入图片 ${index + 1}`
-			: `图片 ${index + 1}`;
-		caption.style.cssText = "font-size:11px;color:#dce7e2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+		// 左上角：图片序号
+		const indexBadge = document.createElement("div");
+		indexBadge.className = "gjj-image-index-badge";
+		indexBadge.textContent = index + 1;
+		indexBadge.style.cssText = [
+			"position:absolute",
+			"top:6px",
+			"left:6px",
+			"min-width:24px",
+			"height:24px",
+			"padding:0 6px",
+			"border-radius:12px",
+			"background:rgba(0, 0, 0, 0.5)",
+			"backdrop-filter:blur(4px)",
+			"color:#fff",
+			"font-size:11px",
+			"font-weight:bold",
+			"display:flex",
+			"align-items:center",
+			"justify-content:center",
+			"pointer-events:none",
+			"z-index:2",
+		].join(";");
 
-		const meta = document.createElement("div");
-		meta.textContent = "读取尺寸中...";
-		meta.style.cssText = "font-size:10px;color:#8ea0a8;";
+		// 右上角：图片尺寸
+		const sizeBadge = document.createElement("div");
+		sizeBadge.className = "gjj-image-size-badge";
+		sizeBadge.style.cssText = [
+			"position:absolute",
+			"top:6px",
+			"right:6px",
+			"padding:2px 8px",
+			"border-radius:4px",
+			"background:rgba(0, 0, 0, 0.5)",
+			"backdrop-filter:blur(4px)",
+			"color:#fff",
+			"font-size:10px",
+			"pointer-events:none",
+			"z-index:2",
+			"white-space:nowrap",
+		].join(";");
 
+		// 设置尺寸文字
 		if (item.width && item.height) {
-			meta.textContent = `${item.width} × ${item.height}`;
+			sizeBadge.textContent = `${item.width}×${item.height}`;
 		} else if (item.image) {
-			meta.textContent = "外部输入";
+			sizeBadge.textContent = "外部输入";
 		} else {
+			sizeBadge.textContent = "加载中...";
+			// 图片加载完成后更新尺寸
 			image.onload = () => {
-				meta.textContent = `${image.naturalWidth} × ${image.naturalHeight}`;
-				scheduleLayout(node);
+				sizeBadge.textContent = `${image.naturalWidth}×${image.naturalHeight}`;
+				scheduleLayout(nodeRef);
 			};
 		}
+		// 图片加载失败标记
 		image.onerror = () => {
-			meta.textContent = "尺寸读取失败";
-			scheduleLayout(node);
+			sizeBadge.textContent = "加载失败";
+			// 标记为错误图片
+			item._error = true;
+			card.style.opacity = "0.5";
+			card.style.filter = "grayscale(0.8)";
+			scheduleLayout(nodeRef);
 		};
 
-		const removeHint = document.createElement("div");
-		removeHint.textContent = hasExternalPreview && index < Number(state.externalCount || 0) ? "外部导入" : "点击移除";
-		removeHint.style.cssText = "position:absolute;top:8px;right:8px;padding:1px 6px;border-radius:999px;background:#243039;color:#dce7e2;font-size:10px;pointer-events:none;";
+		// 右下角：删除按钮
+		const deleteBtn = document.createElement("button");
+		deleteBtn.className = "gjj-image-delete-btn";
+		deleteBtn.innerHTML = "×";
+		deleteBtn.style.cssText = [
+			"position:absolute",
+			"bottom:6px",
+			"right:6px",
+			"width:28px",
+			"height:28px",
+			"border-radius:50%",
+			"border:none",
+			"background:rgba(220, 53, 69, 0.8)",
+			"backdrop-filter:blur(4px)",
+			"color:#fff",
+			"font-size:18px",
+			"font-weight:bold",
+			"line-height:1",
+			"cursor:pointer",
+			"transition:all 0.2s ease",
+			"pointer-events:auto",
+			"z-index:3",
+			"display:flex",
+			"align-items:center",
+			"justify-content:center",
+		].join(";");
+		
+		// 删除按钮悬停效果
+		deleteBtn.addEventListener("mouseenter", () => {
+			deleteBtn.style.background = "rgba(220, 53, 69, 1)";
+			deleteBtn.style.transform = "scale(1.1)";
+		});
+		deleteBtn.addEventListener("mouseleave", () => {
+			deleteBtn.style.background = "rgba(220, 53, 69, 0.8)";
+			deleteBtn.style.transform = "scale(1)";
+		});
+		
+		// 删除按钮点击事件
+		deleteBtn.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			toggleSelection(nodeRef, item);
+		});
 
-		if (!hasExternalPreview || index >= Number(state.externalCount || 0)) {
-			card.addEventListener("click", (event) => {
-				event.preventDefault();
-				event.stopPropagation();
-				toggleSelection(node, item);
+		// 点击图片放大查看
+		card.addEventListener("click", (event) => {
+			// 如果点击的是删除按钮，不触发放大
+			if (event.target === deleteBtn || deleteBtn.contains(event.target)) {
+				return;
+			}
+			event.preventDefault();
+			event.stopPropagation();
+			
+			// 创建全屏预览
+			const overlay = document.createElement("div");
+			overlay.style.cssText = [
+				"position:fixed",
+				"inset:0",
+				"background:rgba(0, 0, 0, 0.9)",
+				"backdrop-filter:blur(10px)",
+				"z-index:10000",
+				"display:flex",
+				"align-items:center",
+				"justify-content:center",
+				"cursor:zoom-out",
+			].join(";");
+			
+			const previewImg = document.createElement("img");
+			previewImg.src = imageDataToUrl(item);
+			previewImg.style.cssText = [
+				"max-width:90%",
+				"max-height:90%",
+				"object-fit:contain",
+				"border-radius:8px",
+				"box-shadow:0 0 40px rgba(0, 0, 0, 0.5)",
+				"transition:transform 0.1s ease",
+				"cursor:grab",
+			].join(";");
+			
+			// 滚轮缩放功能
+			let currentScale = 1;
+			const minScale = 0.1;
+			const maxScale = 10;
+			
+			overlay.addEventListener("wheel", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				
+				const delta = e.deltaY > 0 ? -0.1 : 0.1;
+				currentScale = Math.max(minScale, Math.min(maxScale, currentScale + delta));
+				previewImg.style.transform = `scale(${currentScale})`;
 			});
-		}
+			
+			// 双击重置缩放
+			previewImg.addEventListener("dblclick", (e) => {
+				e.stopPropagation();
+				currentScale = 1;
+				previewImg.style.transform = `scale(${currentScale})`;
+			});
+			
+			const closeHint = document.createElement("div");
+			closeHint.textContent = "滚轮缩放 · 双击重置 · 点击关闭";
+			closeHint.style.cssText = [
+				"position:absolute",
+				"bottom:20px",
+				"left:50%",
+				"transform:translateX(-50%)",
+				"color:#fff",
+				"font-size:13px",
+				"opacity:0.6",
+				"pointer-events:none",
+				"white-space:nowrap",
+			].join(";");
+			
+			overlay.appendChild(previewImg);
+			overlay.appendChild(closeHint);
+			document.body.appendChild(overlay);
+			
+			// 点击关闭
+			overlay.addEventListener("click", () => {
+				overlay.remove();
+			});
+		});
 
+		// 组装卡片
 		card.appendChild(image);
-		card.appendChild(caption);
-		card.appendChild(meta);
-		card.appendChild(removeHint);
+		card.appendChild(indexBadge);
+		card.appendChild(sizeBadge);
+		card.appendChild(deleteBtn);
 		grid.appendChild(card);
 	}
 }
@@ -434,11 +609,16 @@ function updateSummary(node) {
 			if (selectedCount > 0) {
 				parts.push(`已选 ${selectedCount} 张`);
 			}
-			const total = mergedCount > 0 ? mergedCount : Math.min(MAX_OUTPUT_IMAGES, externalCount + selectedCount);
-			node.__gjjMultiImageSummary.textContent = `${parts.join(" + ")}，共 ${total} / ${MAX_OUTPUT_IMAGES} 张`;
+			// 当超过20张时，显示实际总数，不再限制为MAX_OUTPUT_IMAGES
+			const total = mergedCount > 0 ? mergedCount : (externalCount + selectedCount);
+			if (total > MAX_OUTPUT_IMAGES) {
+				node.__gjjMultiImageSummary.textContent = `${parts.join(" + ")}，共 ${total} 张（仅批量队列输出）`;
+			} else {
+				node.__gjjMultiImageSummary.textContent = `${parts.join(" + ")}，共 ${total} / ${MAX_OUTPUT_IMAGES} 张`;
+			}
 			return;
 		}
-		node.__gjjMultiImageSummary.textContent = "点击“浏览图片”导入，或外部连接 GJJ 批量图片队列";
+		node.__gjjMultiImageSummary.textContent = '点击"浏览图片"导入，或外部连接 GJJ 批量图片队列';
 	}
 }
 
@@ -448,7 +628,7 @@ function measureHeight(node) {
 		return MIN_HEIGHT;
 	}
 	const contentHeight = Math.ceil(container.scrollHeight || container.offsetHeight || MIN_HEIGHT);
-	return Math.max(MIN_HEIGHT, contentHeight + 12);
+	return Math.max(MIN_HEIGHT, contentHeight + 8);
 }
 
 function updateLayout(node) {
@@ -487,23 +667,23 @@ function buildDom(node) {
 	container.style.cssText = [
 		"display:flex",
 		"flex-direction:column",
-		"gap:8px",
+		"gap:6px",
 		"width:100%",
 		"height:auto",
 		"min-height:unset",
 		"box-sizing:border-box",
-		"padding:6px 0 0 0",
+		"padding:4px 0 0 0",
 	].join(";");
 
 	const toolbar = document.createElement("div");
-	toolbar.style.cssText = "display:flex;gap:6px;align-items:center;flex-wrap:wrap;";
+	toolbar.style.cssText = "display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:0 2px;";
 
 	const browseButton = document.createElement("button");
 	browseButton.type = "button";
-	browseButton.textContent = "浏览图片";
+	browseButton.textContent = " 浏览图片";
 	browseButton.title = "打开系统图片选择器；可用 Shift 或 Ctrl 一次选择多张图片。";
 	browseButton.style.cssText = [
-		"height:24px",
+		"height:26px",
 		"padding:0 10px",
 		"border:1px solid #465761",
 		"border-radius:6px",
@@ -511,16 +691,54 @@ function buildDom(node) {
 		"color:#dce7e2",
 		"font-size:11px",
 		"cursor:pointer",
+		"transition:all 0.2s ease",
 	].join(";");
 
 	const refreshButton = document.createElement("button");
 	refreshButton.type = "button";
-	refreshButton.textContent = "刷新列表";
+	refreshButton.textContent = "🔄 刷新";
+	refreshButton.title = "刷新图片列表";
 	refreshButton.style.cssText = browseButton.style.cssText;
 	refreshButton.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
 		refreshOptions(node);
+	});
+	
+	// 清理错误图片按钮
+	const clearErrorButton = document.createElement("button");
+	clearErrorButton.type = "button";
+	clearErrorButton.textContent = "🗑️ 清理错误";
+	clearErrorButton.title = "清理加载失败的图片";
+	clearErrorButton.style.cssText = browseButton.style.cssText;
+	clearErrorButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		clearErrorImages(node);
+	});
+	
+	// 清空所有图片按钮
+	const clearAllButton = document.createElement("button");
+	clearAllButton.type = "button";
+	clearAllButton.textContent = "🧹 清空";
+	clearAllButton.title = "清空所有已选图片";
+	clearAllButton.style.cssText = browseButton.style.cssText;
+	clearAllButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		clearAllImages(node);
+	});
+	
+	// 按钮悬停效果
+	[browseButton, refreshButton, clearErrorButton, clearAllButton].forEach(btn => {
+		btn.addEventListener("mouseenter", () => {
+			btn.style.background = "#243039";
+			btn.style.borderColor = "#567080";
+		});
+		btn.addEventListener("mouseleave", () => {
+			btn.style.background = "#1a2328";
+			btn.style.borderColor = "#465761";
+		});
 	});
 
 	const fileInput = document.createElement("input");
@@ -554,26 +772,38 @@ function buildDom(node) {
 	});
 
 	const summary = document.createElement("div");
-	summary.style.cssText = "font-size:11px;color:#dce7e2;";
+	summary.style.cssText = [
+		"font-size:11px",
+		"color:#dce7e2",
+		"padding:2px 8px",
+		"background:rgba(0, 0, 0, 0.3)",
+		"border-radius:4px",
+		"flex:1",
+		"min-width:120px",
+	].join(";");
 
 	toolbar.appendChild(browseButton);
 	toolbar.appendChild(refreshButton);
+	toolbar.appendChild(clearErrorButton);
+	toolbar.appendChild(clearAllButton);
 	toolbar.appendChild(summary);
 
 	const previewWrap = document.createElement("div");
 	previewWrap.style.cssText = [
 		"position:relative",
 		"border:1px solid #33434a",
-		"border-radius:10px",
+		"border-radius:8px",
 		"background:#0f1418",
-		"padding:8px",
+		"padding:6px",
 		"box-sizing:border-box",
-		"overflow:auto",
-		"min-height:124px",
+		"overflow-y:auto",
+		"overflow-x:hidden",
+		"min-height:160px",
+		"max-height:480px",
 	].join(";");
 
 	const empty = document.createElement("div");
-	empty.textContent = "先点击“浏览图片”导入；可按 Shift/Ctrl 多选，点图片可移除";
+	empty.textContent = '点击"浏览图片"导入，或外部连接 GJJ 批量图片队列';
 	empty.style.cssText = [
 		"position:absolute",
 		"inset:0",
@@ -590,8 +820,9 @@ function buildDom(node) {
 	const grid = document.createElement("div");
 	grid.style.cssText = [
 		"display:grid",
-		"grid-template-columns:repeat(auto-fill, minmax(120px, 1fr))",
+		"grid-template-columns:repeat(auto-fill, minmax(140px, 1fr))",
 		"gap:8px",
+		"padding:4px",
 	].join(";");
 
 	previewWrap.appendChild(grid);

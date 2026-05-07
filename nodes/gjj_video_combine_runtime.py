@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from comfy_api.latest import InputImpl, Types
-from comfy_extras.nodes_video import CreateVideo
+from .common_utils.video_tools import CreateVideo
 import folder_paths
 
 

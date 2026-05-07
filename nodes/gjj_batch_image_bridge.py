@@ -5,7 +5,7 @@ from typing import Any
 import torch
 from nodes import PreviewImage
 
-from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
 
 IMAGE_TO_BATCH_NODE = "GJJ_ImageToBatchImage"
@@ -104,7 +104,7 @@ class GJJ_ImageToBatchImage:
     FUNCTION = "wrap"
     DESCRIPTION = "把一张或多张普通 IMAGE 打包成 GJJ 专用批量图片类型，便于连接到批量图片专用接口。"
     SEARCH_ALIASES = ["批量图片适配", "GJJ_BATCH_IMAGE", "图片包装", "批量图片桥"]
-    RETURN_TYPES = (GJJ_BATCH_IMAGE_TYPE,)
+    RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE",)
     RETURN_NAMES = ("批量图片",)
     OUTPUT_TOOLTIPS = ("把多路图片按输入顺序打包为 GJJ_BATCH_IMAGE；若尺寸不一致，会自动补齐到统一尺寸。",)
 

@@ -1,0 +1,26 @@
+# Python 缓存文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# VS Code 配置
+.vscode/
+.idea/
+
+# 临时目录和文件
+_archive/
+memory/
+*.tmp
+*.log
+*.bak
+
+# 其他不想提交的目录
+.claude/
+.lingma/
+docs/
+memory/
+SKILL/

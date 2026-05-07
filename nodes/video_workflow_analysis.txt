@@ -1,0 +1,265 @@
+================================================================================
+Video Workflow Model Analysis (Wan & LTX)
+================================================================================
+
+馃搧 Scanning: Video
+   Found 5 workflow files
+
+馃搧 Scanning: wan2.2
+   Found 9 workflow files
+
+馃搧 Scanning: wan2.2workflows
+   Found 9 workflow files
+
+================================================================================
+Model Usage Summary
+================================================================================
+
+馃摝 Video\Wan2.2_Remix_NSFW_i2v_14b_low_lighting_fp8_e4m3fn_v2.1.safetensors
+   Used in 2 workflow(s):
+   - Video/image_to_video_wan_480p_example.json (UNETLoader)
+   - Video/image_to_video_wan_720p_example.json (UNETLoader)
+
+馃摝 WAN\wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors
+   Used in 5 workflow(s):
+   - wan2.2/video_wan2_2_14B_flf2v.json (LoraLoaderModelOnly)
+   - wan2.2/video_wan2_2_14B_fun_camera.json (LoraLoaderModelOnly)
+   - wan2.2/video_wan2_2_14B_fun_control.json (LoraLoaderModelOnly)
+   - wan2.2/video_wan2_2_14B_fun_inpaint.json (LoraLoaderModelOnly)
+   - wan2.2/video_wan2_2_14B_i2v.json (LoraLoaderModelOnly)
+
+馃摝 WAN\wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors
+   Used in 5 workflow(s):
+   - wan2.2/video_wan2_2_14B_flf2v.json (LoraLoaderModelOnly)
+   - wan2.2/video_wan2_2_14B_fun_camera.json (LoraLoaderModelOnly)
+   - wan2.2/video_wan2_2_14B_fun_control.json (LoraLoaderModelOnly)
+   - wan2.2/video_wan2_2_14B_fun_inpaint.json (LoraLoaderModelOnly)
+   - wan2.2/video_wan2_2_14B_i2v.json (LoraLoaderModelOnly)
+
+馃摝 Wan2.2_Remix_NSFW_i2v_14b_low_lighting_fp8_e4m3fn_v2.1.safetensors
+   Used in 3 workflow(s):
+   - wan2.2/video_wan2_2_14B_flf2v.json (UNETLoader)
+   - wan2.2/video_wan2_2_14B_flf2v.json (UNETLoader)
+   - wan2.2/video_wan2_2_14B_flf2v.json (UNETLoader)
+
+馃摝 Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors
+   Used in 1 workflow(s):
+   - wan2.2workflows/video_wan2_2_14B_animate.json (UNETLoader)
+
+馃摝 WanAnimate_relight_lora_fp16.safetensors
+   Used in 1 workflow(s):
+   - wan2.2workflows/video_wan2_2_14B_animate.json (LoraLoaderModelOnly)
+
+馃摝 lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors
+   Used in 1 workflow(s):
+   - wan2.2workflows/video_wan2_2_14B_animate.json (LoraLoaderModelOnly)
+
+馃摝 ltx-2.3-22b-distilled-lora-384.safetensors
+   Used in 1 workflow(s):
+   - Video/video_ltx2_3_t2v.json (LoraLoaderModelOnly)
+
+馃摝 ltx23_gydboy.safetensors
+   Used in 1 workflow(s):
+   - Video/video_ltx2_3_t2v.json (LoraLoaderModelOnly)
+
+馃摝 umt5_xxl_fp8_e4m3fn_scaled.safetensors
+   Used in 28 workflow(s):
+   - Video/image_to_video_wan_480p_example.json (CLIPLoader)
+   - Video/image_to_video_wan_720p_example.json (CLIPLoader)
+   - Video/text_to_video_wan.json (CLIPLoader)
+   - wan2.2/video_wan2_2_14B_animate.json (CLIPLoader)
+   - wan2.2/video_wan2_2_14B_flf2v.json (CLIPLoader)
+   - wan2.2/video_wan2_2_14B_flf2v.json (CLIPLoader)
+   - wan2.2/video_wan2_2_14B_fun_camera.json (CLIPLoader)
+   - wan2.2/video_wan2_2_14B_fun_camera.json (CLIPLoader)
+   - wan2.2/video_wan2_2_14B_fun_control.json (CLIPLoader)
+   - wan2.2/video_wan2_2_14B_fun_control.json (CLIPLoader)
+   - wan2.2/video_wan2_2_14B_fun_inpaint.json (CLIPLoader)
+   - wan2.2/video_wan2_2_14B_fun_inpaint.json (CLIPLoader)
+   - wan2.2/video_wan2_2_14B_i2v.json (CLIPLoader)
+   - wan2.2/video_wan2_2_14B_s2v.json (CLIPLoader)
+   - wan2.2/video_wan2_2_14B_s2v.json (CLIPLoader)
+   - wan2.2/video_wan2_2_5B_ti2v.json (CLIPLoader)
+   - wan2.2workflows/video_wan2_2_14B_animate.json (CLIPLoader)
+   - wan2.2workflows/video_wan2_2_14B_flf2v.json (CLIPLoader)
+   - wan2.2workflows/video_wan2_2_14B_flf2v.json (CLIPLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_camera.json (CLIPLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_camera.json (CLIPLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_control.json (CLIPLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_control.json (CLIPLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_inpaint.json (CLIPLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_inpaint.json (CLIPLoader)
+   - wan2.2workflows/video_wan2_2_14B_s2v.json (CLIPLoader)
+   - wan2.2workflows/video_wan2_2_14B_s2v.json (CLIPLoader)
+   - wan2.2workflows/video_wan2_2_5B_ti2v.json (CLIPLoader)
+
+馃摝 wan2.1_t2v_1.3B_bf16.safetensors
+   Used in 1 workflow(s):
+   - Video/text_to_video_wan.json (UNETLoader)
+
+馃摝 wan2.2_TI2V_5B_GYDBOY.safetensors
+   Used in 1 workflow(s):
+   - wan2.2/video_wan2_2_5B_ti2v.json (LoraLoader)
+
+馃摝 wan2.2_animate_14B_fp8_scaled_e4m3fn_KJ_v2.safetensors
+   Used in 1 workflow(s):
+   - wan2.2/video_wan2_2_14B_animate.json (UNETLoader)
+
+馃摝 wan2.2_fun_camera_high_noise_14B_fp8_scaled.safetensors
+   Used in 4 workflow(s):
+   - wan2.2/video_wan2_2_14B_fun_camera.json (UNETLoader)
+   - wan2.2/video_wan2_2_14B_fun_camera.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_camera.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_camera.json (UNETLoader)
+
+馃摝 wan2.2_fun_camera_low_noise_14B_fp8_scaled.safetensors
+   Used in 4 workflow(s):
+   - wan2.2/video_wan2_2_14B_fun_camera.json (UNETLoader)
+   - wan2.2/video_wan2_2_14B_fun_camera.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_camera.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_camera.json (UNETLoader)
+
+馃摝 wan2.2_fun_control_high_noise_14B_fp8_scaled.safetensors
+   Used in 4 workflow(s):
+   - wan2.2/video_wan2_2_14B_fun_control.json (UNETLoader)
+   - wan2.2/video_wan2_2_14B_fun_control.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_control.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_control.json (UNETLoader)
+
+馃摝 wan2.2_fun_control_low_noise_14B_fp8_scaled.safetensors
+   Used in 4 workflow(s):
+   - wan2.2/video_wan2_2_14B_fun_control.json (UNETLoader)
+   - wan2.2/video_wan2_2_14B_fun_control.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_control.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_control.json (UNETLoader)
+
+馃摝 wan2.2_fun_inpaint_high_noise_14B_fp8_scaled.safetensors
+   Used in 4 workflow(s):
+   - wan2.2/video_wan2_2_14B_fun_inpaint.json (UNETLoader)
+   - wan2.2/video_wan2_2_14B_fun_inpaint.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_inpaint.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_inpaint.json (UNETLoader)
+
+馃摝 wan2.2_fun_inpaint_low_noise_14B_fp8_scaled.safetensors
+   Used in 4 workflow(s):
+   - wan2.2/video_wan2_2_14B_fun_inpaint.json (UNETLoader)
+   - wan2.2/video_wan2_2_14B_fun_inpaint.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_inpaint.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_inpaint.json (UNETLoader)
+
+馃摝 wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors
+   Used in 4 workflow(s):
+   - wan2.2/video_wan2_2_14B_flf2v.json (UNETLoader)
+   - wan2.2/video_wan2_2_14B_i2v.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_flf2v.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_flf2v.json (UNETLoader)
+
+馃摝 wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors
+   Used in 4 workflow(s):
+   - wan2.2workflows/video_wan2_2_14B_flf2v.json (LoraLoaderModelOnly)
+   - wan2.2workflows/video_wan2_2_14B_fun_camera.json (LoraLoaderModelOnly)
+   - wan2.2workflows/video_wan2_2_14B_fun_control.json (LoraLoaderModelOnly)
+   - wan2.2workflows/video_wan2_2_14B_fun_inpaint.json (LoraLoaderModelOnly)
+
+馃摝 wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors
+   Used in 4 workflow(s):
+   - wan2.2workflows/video_wan2_2_14B_flf2v.json (LoraLoaderModelOnly)
+   - wan2.2workflows/video_wan2_2_14B_fun_camera.json (LoraLoaderModelOnly)
+   - wan2.2workflows/video_wan2_2_14B_fun_control.json (LoraLoaderModelOnly)
+   - wan2.2workflows/video_wan2_2_14B_fun_inpaint.json (LoraLoaderModelOnly)
+
+馃摝 wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors
+   Used in 3 workflow(s):
+   - wan2.2/video_wan2_2_14B_i2v.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_flf2v.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_flf2v.json (UNETLoader)
+
+馃摝 wan2.2_s2v_14B_fp8_scaled.safetensors
+   Used in 4 workflow(s):
+   - wan2.2/video_wan2_2_14B_s2v.json (UNETLoader)
+   - wan2.2/video_wan2_2_14B_s2v.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_s2v.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_14B_s2v.json (UNETLoader)
+
+馃摝 wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors
+   Used in 2 workflow(s):
+   - wan2.2/video_wan2_2_14B_s2v.json (LoraLoaderModelOnly)
+   - wan2.2workflows/video_wan2_2_14B_s2v.json (LoraLoaderModelOnly)
+
+馃摝 wan2.2_ti2v_5B_fp16.safetensors
+   Used in 2 workflow(s):
+   - wan2.2/video_wan2_2_5B_ti2v.json (UNETLoader)
+   - wan2.2workflows/video_wan2_2_5B_ti2v.json (UNETLoader)
+
+馃摝 wan2.2_vae.safetensors
+   Used in 2 workflow(s):
+   - wan2.2/video_wan2_2_5B_ti2v.json (VAELoader)
+   - wan2.2workflows/video_wan2_2_5B_ti2v.json (VAELoader)
+
+馃摝 wan_2.1_vae.safetensors
+   Used in 26 workflow(s):
+   - Video/image_to_video_wan_480p_example.json (VAELoader)
+   - Video/image_to_video_wan_720p_example.json (VAELoader)
+   - Video/text_to_video_wan.json (VAELoader)
+   - wan2.2/video_wan2_2_14B_animate.json (VAELoader)
+   - wan2.2/video_wan2_2_14B_flf2v.json (VAELoader)
+   - wan2.2/video_wan2_2_14B_flf2v.json (VAELoader)
+   - wan2.2/video_wan2_2_14B_fun_camera.json (VAELoader)
+   - wan2.2/video_wan2_2_14B_fun_camera.json (VAELoader)
+   - wan2.2/video_wan2_2_14B_fun_control.json (VAELoader)
+   - wan2.2/video_wan2_2_14B_fun_control.json (VAELoader)
+   - wan2.2/video_wan2_2_14B_fun_inpaint.json (VAELoader)
+   - wan2.2/video_wan2_2_14B_fun_inpaint.json (VAELoader)
+   - wan2.2/video_wan2_2_14B_i2v.json (VAELoader)
+   - wan2.2/video_wan2_2_14B_s2v.json (VAELoader)
+   - wan2.2/video_wan2_2_14B_s2v.json (VAELoader)
+   - wan2.2workflows/video_wan2_2_14B_animate.json (VAELoader)
+   - wan2.2workflows/video_wan2_2_14B_flf2v.json (VAELoader)
+   - wan2.2workflows/video_wan2_2_14B_flf2v.json (VAELoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_camera.json (VAELoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_camera.json (VAELoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_control.json (VAELoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_control.json (VAELoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_inpaint.json (VAELoader)
+   - wan2.2workflows/video_wan2_2_14B_fun_inpaint.json (VAELoader)
+   - wan2.2workflows/video_wan2_2_14B_s2v.json (VAELoader)
+   - wan2.2workflows/video_wan2_2_14B_s2v.json (VAELoader)
+
+================================================================================
+Total unique models: 28
+Workflows with models: 19
+================================================================================
+
+
+TSV Update Suggestions for Video Models:
+================================================================================
+# Add these video models to presets/model_keywords.tsv
+id	category	keywords	display_name	description	tags	priority
+video\wan2.2-remix-nsfw-i2v-14b-low-lighting-fp8-e4m3fn-v2.1	unet	video\wan2.2|remix|nsfw|i2v|14b|low	Video\Wan2.2 Remix Nsfw I2V 14B Low Lighting Fp8 E4M3Fn V2.1	Video\Wan2.2 Remix Nsfw I2V 14B Low Lighting Fp8 E4M3Fn V2.1 (video model from official workflows)	unet|video|official-workflow|wan	96
+wan\wan2.2-i2v-lightx2v-4steps-lora-v1-high-noise	lora	wan\wan2.2|i2v|lightx2v|4steps|lora|v1	Wan\Wan2.2 I2V Lightx2V 4Steps Lora V1 High Noise	Wan\Wan2.2 I2V Lightx2V 4Steps Lora V1 High Noise (video model from official workflows)	lora|video|official-workflow|wan	100
+wan\wan2.2-i2v-lightx2v-4steps-lora-v1-low-noise	lora	wan\wan2.2|i2v|lightx2v|4steps|lora|v1	Wan\Wan2.2 I2V Lightx2V 4Steps Lora V1 Low Noise	Wan\Wan2.2 I2V Lightx2V 4Steps Lora V1 Low Noise (video model from official workflows)	lora|video|official-workflow|wan	100
+wan2.2-remix-nsfw-i2v-14b-low-lighting-fp8-e4m3fn-v2.1	unet	wan2.2|remix|nsfw|i2v|14b|low	Wan2.2 Remix Nsfw I2V 14B Low Lighting Fp8 E4M3Fn V2.1	Wan2.2 Remix Nsfw I2V 14B Low Lighting Fp8 E4M3Fn V2.1 (video model from official workflows)	unet|video|official-workflow|wan	99
+wan2-2-animate-14b-fp8-e4m3fn-scaled-kj	unet	wan2|2|animate|14b|fp8|e4m3fn	Wan2 2 Animate 14B Fp8 E4M3Fn Scaled Kj	Wan2 2 Animate 14B Fp8 E4M3Fn Scaled Kj (video model from official workflows)	unet|video|official-workflow|wan	93
+wananimate-relight-lora-fp16	lora	wananimate|relight|lora|fp16	Wananimate Relight Lora Fp16	Wananimate Relight Lora Fp16 (video model from official workflows)	lora|video|official-workflow|wan	93
+lightx2v-i2v-14b-480p-cfg-step-distill-rank64-bf16	lora	lightx2v|i2v|14b|480p|cfg|step	Lightx2V I2V 14B 480P Cfg Step Distill Rank64 Bf16	Lightx2V I2V 14B 480P Cfg Step Distill Rank64 Bf16 (video model from official workflows)	lora|video|official-workflow	73
+ltx-2.3-22b-distilled-lora-384	lora	ltx|2.3|22b|distilled|lora|384	Ltx 2.3 22B Distilled Lora 384	Ltx 2.3 22B Distilled Lora 384 (video model from official workflows)	lora|video|official-workflow|ltx	93
+ltx23-gydboy	lora	ltx23|gydboy	Ltx23 Gydboy	Ltx23 Gydboy (video model from official workflows)	lora|video|official-workflow|ltx	93
+umt5-xxl-fp8-e4m3fn-scaled	clip	umt5|xxl|fp8|e4m3fn|scaled	Umt5 Xxl Fp8 E4M3Fn Scaled	Umt5 Xxl Fp8 E4M3Fn Scaled (video model from official workflows)	clip|video|official-workflow	100
+wan2.1-t2v-1.3b-bf16	unet	wan2.1|t2v|1.3b|bf16	Wan2.1 T2V 1.3B Bf16	Wan2.1 T2V 1.3B Bf16 (video model from official workflows)	unet|video|official-workflow|wan	93
+wan2.2-ti2v-5b-gydboy	lora	wan2.2|ti2v|5b|gydboy	Wan2.2 Ti2V 5B Gydboy	Wan2.2 Ti2V 5B Gydboy (video model from official workflows)	lora|video|official-workflow|wan	93
+wan2.2-animate-14b-fp8-scaled-e4m3fn-kj-v2	unet	wan2.2|animate|14b|fp8|scaled|e4m3fn	Wan2.2 Animate 14B Fp8 Scaled E4M3Fn Kj V2	Wan2.2 Animate 14B Fp8 Scaled E4M3Fn Kj V2 (video model from official workflows)	unet|video|official-workflow|wan	93
+wan2.2-fun-camera-high-noise-14b-fp8-scaled	unet	wan2.2|fun|camera|high|noise|14b	Wan2.2 Fun Camera High Noise 14B Fp8 Scaled	Wan2.2 Fun Camera High Noise 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	100
+wan2.2-fun-camera-low-noise-14b-fp8-scaled	unet	wan2.2|fun|camera|low|noise|14b	Wan2.2 Fun Camera Low Noise 14B Fp8 Scaled	Wan2.2 Fun Camera Low Noise 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	100
+wan2.2-fun-control-high-noise-14b-fp8-scaled	unet	wan2.2|fun|control|high|noise|14b	Wan2.2 Fun Control High Noise 14B Fp8 Scaled	Wan2.2 Fun Control High Noise 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	100
+wan2.2-fun-control-low-noise-14b-fp8-scaled	unet	wan2.2|fun|control|low|noise|14b	Wan2.2 Fun Control Low Noise 14B Fp8 Scaled	Wan2.2 Fun Control Low Noise 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	100
+wan2.2-fun-inpaint-high-noise-14b-fp8-scaled	unet	wan2.2|fun|inpaint|high|noise|14b	Wan2.2 Fun Inpaint High Noise 14B Fp8 Scaled	Wan2.2 Fun Inpaint High Noise 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	100
+wan2.2-fun-inpaint-low-noise-14b-fp8-scaled	unet	wan2.2|fun|inpaint|low|noise|14b	Wan2.2 Fun Inpaint Low Noise 14B Fp8 Scaled	Wan2.2 Fun Inpaint Low Noise 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	100
+wan2.2-i2v-high-noise-14b-fp8-scaled	unet	wan2.2|i2v|high|noise|14b|fp8	Wan2.2 I2V High Noise 14B Fp8 Scaled	Wan2.2 I2V High Noise 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	100
+wan2.2-i2v-lightx2v-4steps-lora-v1-high-noise	lora	wan2.2|i2v|lightx2v|4steps|lora|v1	Wan2.2 I2V Lightx2V 4Steps Lora V1 High Noise	Wan2.2 I2V Lightx2V 4Steps Lora V1 High Noise (video model from official workflows)	lora|video|official-workflow|wan	100
+wan2.2-i2v-lightx2v-4steps-lora-v1-low-noise	lora	wan2.2|i2v|lightx2v|4steps|lora|v1	Wan2.2 I2V Lightx2V 4Steps Lora V1 Low Noise	Wan2.2 I2V Lightx2V 4Steps Lora V1 Low Noise (video model from official workflows)	lora|video|official-workflow|wan	100
+wan2.2-i2v-low-noise-14b-fp8-scaled	unet	wan2.2|i2v|low|noise|14b|fp8	Wan2.2 I2V Low Noise 14B Fp8 Scaled	Wan2.2 I2V Low Noise 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	99
+wan2.2-s2v-14b-fp8-scaled	unet	wan2.2|s2v|14b|fp8|scaled	Wan2.2 S2V 14B Fp8 Scaled	Wan2.2 S2V 14B Fp8 Scaled (video model from official workflows)	unet|video|official-workflow|wan	100
+wan2.2-t2v-lightx2v-4steps-lora-v1.1-high-noise	lora	wan2.2|t2v|lightx2v|4steps|lora|v1.1	Wan2.2 T2V Lightx2V 4Steps Lora V1.1 High Noise	Wan2.2 T2V Lightx2V 4Steps Lora V1.1 High Noise (video model from official workflows)	lora|video|official-workflow|wan	96
+wan2.2-ti2v-5b-fp16	unet	wan2.2|ti2v|5b|fp16	Wan2.2 Ti2V 5B Fp16	Wan2.2 Ti2V 5B Fp16 (video model from official workflows)	unet|video|official-workflow|wan	96
+wan2.2-vae	vae	wan2.2|vae	Wan2.2 Vae	Wan2.2 Vae (video model from official workflows)	vae|video|official-workflow|wan	96
+wan-2.1-vae	vae	wan|2.1|vae	Wan 2.1 Vae	Wan 2.1 Vae (video model from official workflows)	vae|video|official-workflow|wan	100

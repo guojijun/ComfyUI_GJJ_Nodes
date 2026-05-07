@@ -28,3 +28,17 @@ hidream_i1_dev	hidream_i1_dev	hidream	clip_l_hidream.safetensors|clip_g_hidream.
 hidream_i1_fast	hidream_i1_fast	hidream	clip_l_hidream.safetensors|clip_g_hidream.safetensors|t5xxl_fp8_e4m3fn_scaled.safetensors|llama_3.1_8b_instruct_fp8_scaled.safetensors	ae.safetensors		0.0		0.0	16		1.0	lcm	normal	1.0	sd3	3.0	0.0	false			1024	1024
 hidream_e1	hidream_e1	hidream	clip_l_hidream.safetensors|clip_g_hidream.safetensors|t5xxl_fp8_e4m3fn_scaled.safetensors|llama_3.1_8b_instruct_fp8_scaled.safetensors	ae.safetensors		0.0		0.0	28		1.0	lcm	normal	1.0	sd3	6.0	0.0	false			1024	1024
 omnigen2	omnigen2	omnigen2	qwen_2.5_vl_fp16.safetensors	ae.safetensors		0.0		0.0	20		1.0	euler	beta57	1.0			0.0	false			1024	1024
+wan22_i2v_high_noise	wan2.2-i2v-high-noise|wan22_i2v_high_noise	wan	umt5_xxl_fp8_e4m3fn_scaled.safetensors	wan_2.1_vae.safetensors	WAN\wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors	1.0		0.0	4	20	1.0	euler	simple	1.0			0.0	false			832	480
+wan22_i2v_low_noise	wan2.2-i2v-low-noise|wan22_i2v_low_noise	wan	umt5_xxl_fp8_e4m3fn_scaled.safetensors	wan_2.1_vae.safetensors	WAN\wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors	1.0		0.0	4	20	1.0	euler	simple	1.0			0.0	false			832	480
+wan22_fun_camera	wan2.2-fun-camera|wan22_fun_camera	wan	umt5_xxl_fp8_e4m3fn_scaled.safetensors	wan_2.1_vae.safetensors		0.0		0.0	20		1.0	euler	simple	1.0			0.0	false			832	480
+wan22_fun_control	wan2.2-fun-control|wan22_fun_control	wan	umt5_xxl_fp8_e4m3fn_scaled.safetensors	wan_2.1_vae.safetensors		0.0		0.0	20		1.0	euler	simple	1.0			0.0	false			832	480
+wan22_fun_inpaint	wan2.2-fun-inpaint|wan22_fun_inpaint	wan	umt5_xxl_fp8_e4m3fn_scaled.safetensors	wan_2.1_vae.safetensors		0.0		0.0	20		1.0	euler	simple	1.0			0.0	false			832	480
+wan22_t2v	wan2.2-t2v|wan22_t2v	wan	umt5_xxl_fp8_e4m3fn_scaled.safetensors	wan_2.1_vae.safetensors		0.0		0.0	20		1.0	euler	simple	1.0			0.0	false			832	480
+wan22_s2v	wan2.2-s2v|wan22_s2v	wan	umt5_xxl_fp8_e4m3fn_scaled.safetensors	wan_2.1_vae.safetensors		0.0		0.0	20		1.0	euler	simple	1.0			0.0	false			832	480
+wan22_ti2v	wan2.2-ti2v|wan22_ti2v	wan	umt5_xxl_fp8_e4m3fn_scaled.safetensors	wan_2.1_vae.safetensors		0.0		0.0	20		1.0	euler	simple	1.0			0.0	false			832	480
+wan22_animate	wan2.2-animate|wan22_animate	wan	umt5_xxl_fp8_e4m3fn_scaled.safetensors	wan_2.1_vae.safetensors		0.0		0.0	20		1.0	euler	simple	1.0			0.0	false			832	480
+wan22_remix	wan2.2-remix|wan22_remix|Wan2.2_Remix	wan	umt5_xxl_fp8_e4m3fn_scaled.safetensors	wan_2.1_vae.safetensors		0.0		0.0	20		1.0	euler	simple	1.0			0.0	false			832	480
+wan21_t2v	wan2.1-t2v|wan21_t2v	wan	umt5_xxl_fp8_e4m3fn_scaled.safetensors	wan_2.1_vae.safetensors		0.0		0.0	20		1.0	euler	simple	1.0			0.0	false			832	480
+wan21_i2v	wan2.1-i2v|wan21_i2v	wan	umt5_xxl_fp8_e4m3fn_scaled.safetensors	wan_2.1_vae.safetensors		0.0		0.0	20		1.0	euler	simple	1.0			0.0	false			832	480
+ltx23_dev	ltx-2.3-22b-dev|ltx23_dev	ltx	gemma_3_12B_it_fp4_mixed.safetensors	ltx-2.3-22b-dev-fp8.safetensors	LTX\ltx-2.3-22b-distilled-lora-384-1.1.safetensors	0.5	ltx23_gydboy.safetensors	1.0	25		1.0	euler_cfg_pp	simple	1.0			0.0	false			1280	720
+ltx23	ltx-2.3-22b|ltx23	ltx	gemma_3_12B_it_fp4_mixed.safetensors	ltx-2.3-22b-dev-fp8.safetensors	LTX\ltx-2.3-22b-distilled-lora-384-1.1.safetensors	0.5	ltx23_gydboy.safetensors	1.0	25		1.0	euler_cfg_pp	simple	1.0			0.0	false			1280	720

@@ -1,9 +1,7 @@
 # 中文	English
-一个女孩	1girl
-一个女孩，一个男孩	1girl, 1boy
-一个女孩，两个男孩	1girl, 2boys
+女孩	girl
+男孩	boy
 一个男孩	1boy
-一个男孩，两个女孩	1boy, 2girls
 两个男孩	2boys
 两个女孩	2girls
 青少年	adolescent
@@ -25,6 +23,8 @@
 跨性别者	crossdressing
 舞者	dancer
 暗精灵	dark elf
+手	hand
+头发	hair
 魔女	demon girl
 恶魔	devil
 医生	doctor
@@ -51,9 +51,6 @@
 马娘	horse girl
 夫妻	husband and wife
 偶像	idol
-小妖精	imp
-克/达（英雄联盟）	k/da (league of legends)
-雾雨魔理沙角色扮演	kirisame marisa (cosplay)
 九尾狐	kitsune
 科加女孩	kogal
 九尾妖狐	kyuubi
@@ -79,7 +76,6 @@
 办公室女性	office lady
 老妇人	old woman
 胸部萝莉	oppai loli
-兽人	orc
 警察	police
 女警	policewoman
 牧师	priest
@@ -88,12 +84,9 @@
 赛跑女王	race queen
 水手服战士	sailor senshi
 少男	shota
-兄妹	siblings
 姐妹	sisters
 独奏	solo
 蜘蛛女孩	spider girl
-青少年	teenage
-女性	woman
 双胞胎	twins
 独特冰元素人形	unique ice-inspired humanoid
 瓦尔基里	valkyrie
@@ -163,14 +156,12 @@
 畏缩	cowering
 爬行	crawling
 脚踝交叉	crossed ankles
-双臂交叉	crossed arms
 双手交握	crossed fingers
 十字架姿势	crucifixion
 依偎	cuddling
 合掌	cupping hands
 屈膝礼	curtsey
 双V手势	double v
-衣服提起	dress lift
 脱衣	dress removed
 拉扯衣服	dress tug
 擦干头发	drying hair
@@ -227,9 +218,6 @@
 手按别人脸	hands on another's face
 手按屁股	hands on ass
 手按脚	hands on feet
-手按臀部	hands on hips
-摸自己脸	hands on own face
-摸自己膝盖	hands on own knees
 倒立	handstand
 帽礼	hat tip
 头后仰	head back
@@ -301,7 +289,6 @@ W形手势	middle w
 掌拳礼	palm-fist greeting
 掌拳轻击	palm-fist tap
 手掌	palm
-爪子姿势	paw pose
 鸽子姿势	pigeon pose
 小指伸出	pinky out
 食指中指竖起	pinky swear
@@ -317,7 +304,6 @@ W形手势	middle w
 跪拜	prostration
 举拳	raised fist
 伸手	reaching
-躺卧	reclining
 揉眼睛	rubbing eyes
 奔跑	running
 敬礼	salute
@@ -342,7 +328,6 @@ W形手势	middle w
 劈叉	split
 张开双臂	spread arms
 张开手指	spread fingers
-分开双腿	spread legs
 蹲下	squatting
 单腿站立	standing on one leg
 站劈叉	standing split
@@ -362,15 +347,12 @@ W形手势	middle w
 月光沐浴	tsuki ni kawatte oshioki yo
 扭曲身躯	twisted torso
 两指礼	two-finger salute
-束发	tying hair
 绑扎	tying
-脱衣	undressing
 直立叉腿	upright straddle
 眼前V手势	v over eye
 嘴前V手势	v over mouth
 胜利姿势	victory pose
 瓦肯举手礼	vulcan salute
-W形手势	w
 行走	walking
 贴墙走	wallwalking
 瓦里扎	wariza
@@ -398,7 +380,6 @@ W形手势	w
 看着观众	looking at viewer
 移开视线	looking away
 回头望	looking back
-低头	looking down
 侧视	looking to the side
 抬头	looking up
 下半身	lower body
@@ -448,11 +429,9 @@ W形手势	w
 梳背头	comb over
 锥形丸子头	cone hair bun
 玉米辫	cornrows
-平头	crew cut
 交叉刘海	crossed bangs
 王冠辫	crown braid
 水晶发	crystal hair
-卷发	curly hair
 窗帘式发型	curtained hair
 深蓝色发	dark blue hair
 斜刘海	diagonal bangs
@@ -511,13 +490,11 @@ W形手势	w
 凌乱的头发	messy hair
 米祖拉发型	mizura
 莫霍克发型	mohawk
-莫霍克发型	mullet
 多束扎发	multi-tied hair
 多彩头发	multicolored hair
 多辫子	multiple braids
 日红发型	nihongami
 奥卡帕发型	okappa
-一侧头发竖起	one side up
 分叉刘海	parted bangs
 粉红色头发	pink hair
 精灵头	pixie cut
@@ -532,7 +509,6 @@ W形手势	w
 五马尾	quin tails
 彩虹色头发	rainbow hair
 红色头发	red hair
-卷发	ringlets
 光泽的头发	shiny hair
 短发	short hair
 短马尾	short ponytail
@@ -554,7 +530,6 @@ W形手势	w
 挑染头发	streaked hair
 挑起刘海	swept bangs
 触手发	tentacle hair
-束发	tied hair
 顶髻	topknot
 三股辫	tri braids
 三叉尾	tri tails
@@ -566,14 +541,12 @@ W形手势	w
 后剃头	undercut
 不对称双马尾	uneven twintails
 超长刘海	very long bangs
-超长发	very long hair
 超短发	very short hair
 波浪卷发	wavy hair
 湿发	wet hair
 白发	white hair
 美人尖	widow's peak
 海滩波浪发型	beach waves hair
-编发	braided hairstyle
 鬏髻发型	bun hair
 烫卷头发	crimped hair
 荷兰辫	dutch braid
@@ -581,10 +554,8 @@ W形手势	w
 额前刘海	fringe hair
 半扎发	half-up half-down hairstyle
 层次感发型	layered hair
-波比头	lob hair
 派对发型	prom hairstyle
 剃刀剪	razor cut hair
-卷发	ringlets hair
 蓬松发型	shaggy hair
 光滑发型	sleek hair
 直发	straight hair
@@ -610,16 +581,10 @@ W形手势	w
 中渐变发型	mid-fade
 胡须	mustache
 羊角胡	mutton chops
-剃刀剪	razor cut
 剪刀剪	scissor cut
-光头	shaved head
 短后短侧	short back and sides
 短胡须	short mustache
 侧分	side part
-斜刘海	side-swept fringe
-鬓角	sideburns
-油头	slick back
-刺猬头	spiky hair
 渐层渐变发型	taper fade
 临时渐变发型	temp fade
 纹理短发	textured crop
@@ -654,12 +619,10 @@ W形手势	w
 头戴耳机	behind-the-head headphones
 铃铛	bell
 贝雷帽	beret
-戴眼镜的	bespectacled
 黑色发带	black hairband
 眼罩	blindfold
 蓝色发带	blue hairband
 骨饰发饰	bone hair ornament
-发带	bow hairband
 兔耳朵饰品	bunny hair ornament
 蝴蝶发饰	butterfly hair ornament
 胡萝卜发饰	carrot hair ornament
@@ -672,11 +635,9 @@ W形手势	w
 恶魔角	demon horns
 龙角	dragon horns
 护肘	elbow pads
-眼罩	eyepatch
 头戴眼镜	eyewear on head
 面部彩绘	facepaint
 羽毛发饰	feather hair ornament
-贝雷帽	fedora
 鱼形发饰	fish hair ornament
 头花	flower on head
 食物主题发饰	food-themed hair ornament
@@ -697,7 +658,6 @@ W形手势	w
 发饰	hair ornament
 束发带	hair scrunchie
 橡皮筋	hair tie
-发圈	hairband
 夹子	hairclip
 别针	hairpin
 发圈耳机	hairpods
@@ -749,7 +709,6 @@ W形手势	w
 太阳镜	sunglasses
 外科口罩	surgical mask
 天狗面具	tengu mask
-王冠	tiara
 托金帽	tokin hat
 脖子上的哨子	whistle around neck
 白色发带	white hairband
@@ -769,8 +728,6 @@ W形手势	w
 可爱	:q
 哭鼻子	(-3-)
 闭眼	@ @
-微笑眨眼	\(^o^)/
-双手合十	+ +
 眼镜	=^=
 抿嘴卖萌	=v=
 指向某人	> @
@@ -807,7 +764,6 @@ W形手势	w
 脸贴脸	cheek-to-cheek
 抓下巴	chin grab
 紧咬牙关	clenched teeth
-闭眼	closed eyes
 闭嘴	closed mouth
 失色	color drain
 复眼	compound eyes
@@ -819,7 +775,6 @@ W形手势	w
 疯狂眼神	crazy eyes
 疯狂微笑	crazy smile
 疯狂	crazy
-斜视	cross-eyed
 睁着眼哭泣	crying with eyes open
 哭泣	crying
 断线眼	dashed eyes
@@ -845,7 +800,6 @@ W形手势	w
 邪恶	evil
 兴奋	excited
 无表情的眼睛	expressionless eyes
-无表情	expressionless
 表情	expressions
 夸张的睫毛	extravagant eyelashes
 眼睛反射	eye reflection
@@ -861,7 +815,6 @@ W形手势	w
 面对着另一个人	facing another
 露出獠牙	fang out
 獠牙	fang
-獠牙	fangs
 比心	fingersmile
 燃烧的眼睛	flaming eyes
 嘴里含花	flower in mouth
@@ -876,21 +829,17 @@ W形手势	w
 满脸通红	full blush
 怒火中烧	fume
 紧锁的眉头	furrowed brow
-怒视	glaring
 格拉斯哥微笑	glasgow smile
 闪烁	glint
 忧郁的表情	gloom (expression)
 发光的眼睛	glowing eye
-发光的眼睛	glowing eyes
 渐变色眼睛	gradient eyes
 绿色眼睛	green eyes
 绿色巩膜	green sclera
 灰色眼睛	grey eyes
 龇牙咧嘴	grimace
-微笑	grin
 内疚	guilt
 半闭的眼睛	half-closed eye
-半闭的眼睛	half-closed eyes
 幸福的眼泪	happy tears
 开心	happy
 眼里有心	heart in eye
@@ -902,14 +851,12 @@ W形手势	w
 凹眼	hollow eyes
 水平瞳孔	horizontal pupils
 惊恐	horrified
-嫉妒	jealous
 吉多梅	jitome
 库布里克凝视	kubrick stare
 大紫色发光眼	large purple glowing eyes
 笑	laughing
 舔唇	licking lips
 轻红润	light blush
-微笑	light smile
 嘴唇	lips
 口红	lipstick
 孤独	lonely
@@ -919,7 +866,6 @@ W形手势	w
 异瞳	mismatched pupils
 异白眼	mismatched sclera
 呻吟	moaning
-流口水	mouth drool
 咬唇	mouth hold
 多色眼	multicolored eyes
 淘气	naughty
@@ -960,30 +906,25 @@ W形手势	w
 唾液	saliva
 三白眼	sanpaku
 害怕	scared
-皱眉	scowl
 尖叫	screaming
 挑逗微笑	seductive smile
 严肃	serious
 阴影	shaded
-害羞	shy
 斜嘴	sideways mouth
 叹气	sigh
 皮肤獠牙	skin fang
 困倦	sleepy
 狭缝状瞳孔	slit pupils
 闻东西	smelling
-微笑	smile
 笑脸	smiley
 得意笑	smirk
 抽泣	sobbing
 实心圆眼	solid circle eyes
 闪亮眼睛	sparkling eyes
-吐舌	spit take
 咧嘴	split mouth
 星形瞳孔	star-shaped pupils
 憋笑	stifled laugh
 流眼泪	streaming tears
-生气	sulking
 惊讶	surprised
 符号状瞳孔	symbol-shaped pupils
 塔雷梅	tareme
@@ -1008,8 +949,6 @@ W形手势	w
 波浪嘴	wavy mouth
 白眼	white eyes
 瞪大眼睛	wide eyed
-瞪大眼睛	wide-eyed
-皱眉	wince
 担忧	worried
 叉形瞳孔	x-shaped pupils
 阎德雷	yandere
@@ -1081,7 +1020,6 @@ W形手势	w
 高领	high collar
 领结	jabot
 胸牌链	lanyard
-花环	lei
 吊坠	locket
 玛格塔马珠	magatama
 金属项圈	metal collar
@@ -1097,7 +1035,6 @@ W形手势	w
 敞口领	open collar
 橙色领饰	orange neckwear
 珍珠项链	pearl necklace
-吊坠	pendant
 五角星	pentacle
 宠物锥形项圈	pet cone
 粉红色领饰	pink neckwear
@@ -1165,7 +1102,6 @@ V领	v-neck
 礼服翻转	dress flip
 礼服抓取	dress grab
 连衣裙	dress
-晚礼服	evening gown
 眼罩比基尼	eyepatch bikini
 国旗裙	flag dress
 正式	formal
@@ -1224,12 +1160,10 @@ V领	v-neck
 橙色连衣裙	orange dress
 欧根纱蕾丝	organza lace
 铅笔裙	pencil dress
-铅笔裙	pencil skirt
 衬裙	pettiskirt
 围裙连衣裙	pinafore dress
 粉红色连衣裙	pink dress
 细条纹连衣裙	pinstripe dress
-格子连衣裙	plaid dress
 格子裙	plaid skirt
 花兔体操服	playboy bunny leotard
 褶皱连衣裙	pleated dress
@@ -1244,8 +1178,6 @@ V领	v-neck
 饰带连衣裙	ribbon-trimmed dress
 水手比基尼	sailor bikini
 水手服	sailor dress
-水手服	sailor senshi uniform
-水手服	sailor
 圣诞装	santa costume
 圣诞连衣裙	santa dress
 圣诞老人	santa
@@ -1266,9 +1198,7 @@ V领	v-neck
 弹弓泳装	slingshot swimsuit
 运动比基尼	sports bikini
 直列制服	stile uniform
-紧身衣	straitjacket
 无带比基尼	strapless bikini
-无袖连衣裙	strapless dress
 条纹连衣裙	striped dress
 条纹的	striped
 套装	suit
@@ -1279,7 +1209,6 @@ V领	v-neck
 格子图案	tartan
 紧身连衣裙	taut dress
 网球服	tennis dress
-比基尼内裤	thong bikini
 破烂衣服	torn clothes
 破烂连衣裙	torn dress
 秋千裙	trapeze dress
@@ -1287,7 +1216,6 @@ V领	v-neck
 塔图裙	tutu
 双色连衣裙	two-tone dress
 乌奇卡伊	uchikake
-内衣	underwear
 制服	uniform
 未系带比基尼	untied bikini
 变异套装	varia suit
@@ -1308,7 +1236,6 @@ V领	v-neck
 徽章	badge
 包扎的手臂	bandaged arm
 包扎的手	bandaged hands
-绷带	bandages
 手镯	bangle
 条形码	barcode
 露肩	bare shoulders
@@ -1321,7 +1248,6 @@ V领	v-neck
 夹克	blazer
 衬衫	blouse
 蝴蝶结	bow
-护腕	bracer
 蝴蝶翅膀	butterfly wings
 背心	camisole
 斗篷	cape
@@ -1333,7 +1259,6 @@ V领	v-neck
 中心花边	center frills
 中开门襟	center opening
 格子衬衫	checkered shirt
-斗篷	cloak
 胸间衣物	clothes between breasts
 外套	coat
 衣摆	coattails
@@ -1371,7 +1296,6 @@ V领	v-neck
 心跳	heartbeat
 高腰裙	high-waist skirt
 连帽斗篷	hooded cape
-连帽斗篷	hooded cloak
 连帽外套	hooded coat
 连帽夹克	hooded jacket
 连帽毛衣	hooded sweater
@@ -1389,7 +1313,6 @@ V领	v-neck
 鼹鼠	mole
 肌肉	muscle
 数字纹身	number tattoo
-露肩	off shoulder
 敞开的衣服	open clothes
 敞开的长袍	open robe
 开胸前的毛衣	open-chest sweater
@@ -1404,7 +1327,6 @@ V领	v-neck
 西装外套	suit jacket
 T恤	t-shirt
 燕尾服	tailcoat
-背心	tank top
 无上衣	topless
 未扣纽扣的衬衫	unbuttoned shirt
 马甲	vest
@@ -1428,7 +1350,6 @@ T恤	t-shirt
 骑行短裤	bike shorts
 比基尼底裤	bikini bottom
 黑色绑腿带	black garter straps
-衬裙	bloomers
 无底裤	bottomless
 束缚的双腿	bound legs
 蝴蝶结内裤	bow panties
@@ -1437,8 +1358,6 @@ T恤	t-shirt
 七分裤	capri pants
 猫耳内裤	cat ear panties
 马鞍护腿	chaps
-格子裙	checkered skirt
-短裤	cutoffs
 恶魔尾巴	demon tail
 牛仔短裤	denim shorts
 牛仔裙	denim skirt
@@ -1477,7 +1396,6 @@ T恤	t-shirt
 泳衣下丝袜	pantyhose under swimsuit
 粉红色内裤	pink panties
 褶裙	pleated skirt
-短裤	shorts
 侧系内裤	side-tie panties
 裙套装	skirt suit
 裙子	skirt
@@ -1491,7 +1409,6 @@ T恤	t-shirt
 大腿	thighs
 丁字裤	thong
 脚趾	toes
-三叶草	trefoil
 白色腿带	white garter straps
 白色内裤	white panties
 二千酱	2k-tan
@@ -1540,7 +1457,6 @@ PC-98版爱丽丝·玛格特洛依德	alice margatroid (pc-98)
 手杖	cane
 链子	chains
 袖口	cuffs
-手铐	handcuffs
 沙朗格	sarong
 镣铐	shackles
 纹身	tattoo
@@ -1610,7 +1526,6 @@ PC-98版爱丽丝·玛格特洛依德	alice margatroid (pc-98)
 条纹长筒袜	striped thighhighs
 塔巴伊鞋	tabi
 大腿靴	thigh boots
-长筒袜	thighhighs
 无趾靴	toeless boots
 无趾腿部配件	toeless legwear
 破洞腿部配件	torn legwear
@@ -1628,7 +1543,6 @@ PC-98版爱丽丝·玛格特洛依德	alice margatroid (pc-98)
 椅子	chair
 筷子	chopsticks
 香烟	cigarette
-褶皱	crease
 匕首	dagger
 御守	gohei
 吉他	guitar
@@ -1739,7 +1653,6 @@ aqueduct	aqueduct
 高速公路	highway
 小山	hill
 岛屿	island
-码头	jetty
 丛林	jungle
 湖泊	lake
 市场摊位	market stall
@@ -1767,7 +1680,6 @@ aqueduct	aqueduct
 过山车	roller coaster
 绳索桥	rope bridge
 跑道	running track
-跑道	runway
 乡村	rural
 草原	savannah
 船坞	shipyard
@@ -1791,7 +1703,6 @@ aqueduct	aqueduct
 麦田	wheat field
 木桥	wooden bridge
 动物园	zoo
-机场	airport
 露天剧场	amphitheater
 公寓	apartment
 水族馆	aquarium
@@ -1824,7 +1735,6 @@ aqueduct	aqueduct
 车库	garage
 加油站	gas station
 凉亭	gazebo
-温室	greenhouse
 瞭望塔	guard tower
 机库	hangar
 医院	hospital
@@ -1905,7 +1815,6 @@ aqueduct	aqueduct
 菊花	chrysanthemum
 铁线莲	clematis
 姬竹	clivia
-三叶草	clover
 鸡冠花	cockscomb (flower)
 郁金香	columbine
 蓝蓟	cornflower
@@ -1929,15 +1838,11 @@ aqueduct	aqueduct
 花卉图案	floral print
 花朵符号	flower (symbol)
 花坛	flower bed
-花环	flower bracelet
 液体上的花	flower on liquid
-花边	flower trim
 花	flower
-花田	flowers meadows
 勿忘我	forget-me-not
 连翘	forsythia
 四点钟花	four o'clock (flower)
-铃兰	foxglove
 小苍兰	freesia
 紫荆花	fuchsia
 园艺	gardening
@@ -1961,7 +1866,6 @@ aqueduct	aqueduct
 冬青	hellebore
 木槿	hibiscus
 蜀葵	hollyhock
-风信子	hyacinth
 绣球花	hydrangea
 冰花	ice flower
 鸢尾	iris
@@ -1972,7 +1876,6 @@ aqueduct	aqueduct
 鸟嘴花	larkspur
 薰衣草	lavender
 紫丁香	lilac
-水仙	lily of the valley
 睡莲叶	lily pad
 百合	lily
 恋思花	lisianthus (flower)
@@ -1981,7 +1884,6 @@ aqueduct	aqueduct
 木兰	magnolia
 向日葵	marigold
 沼泽金盏花	marsh marigold
-紫荆花	mimosa (flower)
 月光花	moonflower
 牵牛花	morning glory
 多色玫瑰	multicolored rose
@@ -1989,7 +1891,6 @@ aqueduct	aqueduct
 黑籽茴香	nigella
 夹竹桃	oleander
 开花	on flower
-文心兰	oncidium
 橙花	orange blossoms
 橙色玫瑰	orange rose
 兰花	orchid
@@ -2005,7 +1906,6 @@ aqueduct	aqueduct
 花瓣在液体中	petals on liquid
 花瓣	petals
 矮牵牛	petunia (flower)
-日本杜鹃	pieris japonica
 粉玫瑰	pink rose
 植物	plant
 梅花	plum blossoms
@@ -2026,32 +1926,25 @@ aqueduct	aqueduct
 红姜花	red ginger
 红玫瑰	red rose
 再爱我一次	reimu
-杜鹃花	rhododendron
 玫瑰花瓣	rose petals
 玫瑰	rose
 黑心菊	rudbeckia
 静谧公主	silent princess
 绢花	silk flower
-龙胆	snapdragon
 雪滴花	snowdrop
 白鹤芋	spathiphyllum
 蜘蛛兰	spider lily
 草莓花	strawberry blossoms
-向日葵	sunflower
 甜花	sweet flower
 刺蓟	thistle
 虎尾兰	tiger lily
-牵牛花	trumpet creeper
-郁金香	tulip
 紫罗兰	violet
 睡莲	water lily flower
 蜡梅花	wax flower
 白玫瑰	white rose
 紫藤	wisteria
 狼毒花	wolfsbane
-花环	wreath
 黄玫瑰	yellow rose
-金盏花	zinnia
 七喜	7up
 油豆腐	aburaage
 爱玉果	akebia fruit
@@ -2205,7 +2098,6 @@ Bavarois	bavarois
 多力多滋	doritos
 双球冰淇淋	double scoop
 面团	dough
-七喜	dr pepper
 龙舌兰果	dragon fruit
 伯爵茶	earl grey tea
 长条泡芙	eclair (food)
@@ -2263,7 +2155,6 @@ Bavarois	bavarois
 海藻	hijiki
 手持披萨	holding pizza
 蜂蜜	honey
-哈密瓜	honeydew
 复活节甜面包	hot cross bun
 热狗	hot dog
 辣酱	hot sauce
@@ -2274,7 +2165,6 @@ Bavarois	bavarois
 冰茶	iced tea
 草莓大福	ichigo daifuku
 糖霜	icing
-鱼子酱	ikura
 伊麻伽连糕	imagawayaki
 海苔寿司	inarizushi
 意大利（新潟）	italian (niigata)
@@ -2327,7 +2217,6 @@ M&M豆	m&m's
 麻婆豆腐	mapo tofu
 大理石巧克力	marble chocolate
 玛格丽塔	margarita
-果酱	marmalade
 棉花糖	marshmallow
 马天尼	martini
 蛋黄酱	mayonnaise
@@ -2336,14 +2225,12 @@ M&M豆	m&m's
 巨无霸	megamac
 哈密瓜面包	melon bread
 哈密瓜汽水	melon soda
-哈密瓜	melon
 牛奶瓶	milk bottle
 牛奶盒	milk carton
 牛奶搅拌器	milk churn
 奶须	milk mustache
 奶茶	milk tea
 牛奶	milk
-奶昔	milkshake
 千层酥	mille-feuille
 薄荷	mint
 味噌汤	miso soup
@@ -2354,7 +2241,6 @@ M&M豆	m&m's
 月饼	mooncake
 山地汽水	mountain dew
 蘑菇	mushroom
-哈密瓜	muskmelon
 锅物	nabe
 生焦糖布丁	namagashi
 七草祭	nanakusa-no-sekku
@@ -2374,7 +2260,6 @@ M&M豆	m&m's
 橄榄	olive
 煎蛋卷	omelet
 饭团炒蛋	omurice
-香蕉	on banana
 便当饭团	onigiri
 洋葱圈	onion rings
 洋葱	onion
@@ -2400,7 +2285,6 @@ M&M豆	m&m's
 百事冰黄瓜	pepsi ice cucumber
 百事可乐	pepsi
 柿子	persimmon
-泡菜	pickle
 派	pie
 彩蛋	pinata
 菠萝	pineapple
@@ -2415,30 +2299,24 @@ M&M豆	m&m's
 冰棍棒	popsicle stick
 冰棍	popsicle
 猪肉	pork
-薯片	potato chips
 土豆	potato
 磅蛋糕	pound cake
 椒盐卷饼	pretzel
 品客	pringles
-布丁	pudding a la mode
-布丁	pudding
 南瓜	pumpkin
 四球冰淇淋	quadruple scoop
-山竹	rambutan
 拉面	ramen
 雷明顿汽水	ramune
 轻乳酪蛋糕	rare cheesecake
 覆盆子	raspberry
 红苹果	red apple
 红豆沙	red bean paste
-辣椒	red pepper
 红丝绒蛋糕	red velvet cake
 猪肋排	ribs (food)
 饭包脸	rice on face
 粥	rice porridge
 米饭	rice
 烩饭	risotto
-鱼子酱	roe
 根汁汽水	root beer
 玫瑰果茶	rose hip tea
 清酒	sake
@@ -2449,13 +2327,10 @@ M&M豆	m&m's
 盐	salt
 饼干夹心糖	sandwich cookie
 三明治	sandwich
-生鱼片	sashimi
 酱料	sauce
 香肠	sausage
 松饼	scone
 炒蛋	scrambled egg
-海苔	seaweed
-煎饼	senbei
 造型棒糖	shaped lollipop
 刨冰	shaved ice
 虾天妇罗	shrimp tempura
@@ -2468,7 +2343,6 @@ M&M豆	m&m's
 汽水罐	soda can
 汽水	soda
 软服务冰淇淋	soft serve
-松饼	songpyeon
 手擀面	soumen
 汤	soup
 酱油	soy sauce
@@ -2476,8 +2350,6 @@ M&M豆	m&m's
 意大利面	spaghetti
 薄荷茶	spear mint tea
 葱	spring onion
-糖霜	sprinkles
-南瓜	squash
 星巴克	starbucks
 星果	starfruit
 牛排	steak
@@ -2500,9 +2372,7 @@ M&M豆	m&m's
 甜薯	sweet potato
 旋涡棒棒糖	swirl lollipop
 瑞士奶酪	swiss cheese
-瑞士卷	swiss roll
 塔可	taco
-鱼饼	taiyaki
 竹子之国	takenoko no sato
 章鱼香肠	tako-san wiener
 章鱼烧	takoyaki
@@ -2537,7 +2407,6 @@ M&M豆	m&m's
 未达旦	unadon (food)
 伏特加	vodka
 饼干棒	wafer stick
-饼干	wafer
 华夫筒	waffle cone
 华夫饼	waffle
 和果子	wagashi
@@ -2560,7 +2429,6 @@ M&M豆	m&m's
 酸奶	yogurt
 羊羹	youkan
 耶诞树蛋糕	yule log
-柚子	yuzu (fruit)
 粽子	zongzi
 冬至汤	zouni soup
 美丽细腻的水	beautiful detailed water
@@ -2572,7 +2440,6 @@ M&M豆	m&m's
 风景	landscape
 魔法圈	magic circle
 室外	outdoors
-五角星	pentagram
 科幻	science fiction
 简单背景	simple background
 透明背景	transparent background
@@ -2587,13 +2454,11 @@ M&M豆	m&m's
 虚幻引擎5	UE5
 虚幻引擎	Unreal engine
 维雷	V-Ray
-女刺客	a assassin woman
 女运动员	a athletic woman
 美女	a beautiful woman
 女骑手	a biker woman
 魅力女性	a charismatic woman
 梦幻女性	a dreamy woman
-老妇人	a elder woman
 优雅女士	a elegant woman
 有表现力的女性	a expressive woman
 时尚女性	a fashion woman
@@ -2606,10 +2471,7 @@ M&M豆	m&m's
 摇滚女性	a rocker woman
 性感女性	a sexy woman
 女歌手	a singer woman
-时尚女性	a stylish woman
 丰满女性	a voluptuous woman
-女战士	a warrior woman
-女性	a woman
 女工	a worker woman
 男刺客	a assassin man
 运动员	a athletic man
@@ -2623,17 +2485,13 @@ M&M豆	m&m's
 时尚男性	a fashion man
 健身男性	a fitness man
 光彩照人的男性	a glamorous man
-美男子	a gorgeous man
 肌肉男	a muscular man
 神秘男性	a mysterious man
 职员	a office man
 摇滚男性	a rocker man
 性感男性	a sexy man
 歌手	a singer man
-时尚男性	a stylish man
 丰满男性	a voluptuous man
-战士	a warrior man
-男性	a man
 工人	a worker man
 尼尔的2B	2B from Nier
 尼尔的9S	9S from Nier
@@ -2657,7 +2515,6 @@ M&M豆	m&m's
 安纳金·天行者	Anakin Skywalker
 安纳西	Anansi
 安卓	Android
-天使	Angel
 来自头脑特工队的愤怒	Anger from Inside Out
 冰雪奇缘中的安娜	Anna from Frozen
 拟人化动物	Anthropomorphic -animal-
@@ -2706,7 +2563,6 @@ M&M豆	m&m's
 佛陀	Buddha
 巴菲·斯马特斯	Buffy Summers
 兔八哥	Bugs Bunny
-兔女郎	Bunny Girl
 来自《玩具总动员》的巴斯光年	Buzz Lightyear from Toy Story
 机器人C-3PO	C-3PO
 来自街头霸王的卡蜜	Cammy from street fighter
@@ -2771,7 +2627,6 @@ M&M豆	m&m's
 瓦力中的伊芙	EVE from WALL-E
 恶毒女王	Evil Queen
 邪恶巫师	Evil Witch
-仙子	Fairy
 史瑞克中的菲奥娜	Fiona from Shrek
 福尔图娜	Fortuna
 弗兰肯斯坦的怪物	Frankenstein's Monster
@@ -2888,11 +2743,9 @@ M&M豆	m&m's
 里默斯·卢平	Remus Lupin
 来自料理鼠王的雷米	Remy from Ratatouille
 星球大战中的瑞伊	Rey from star wars
-兔八哥	Road Runner
 罗宾汉	Robin Hood
 月亮女神	Sailor Moon
 一拳超人	Saitama
-圣诞老人	Santa
 塞勒涅	Selene
 夏洛克·福尔摩斯	Sherlock Holmes
 湿婆	Shiva
@@ -2904,7 +2757,6 @@ M&M豆	m&m's
 斯派迪·古兹曼	Speedy Gonzales
 蜘蛛-盖文	Spider-Gwen
 蜘蛛侠	Spider-Man
-蜘蛛侠	Spiderman
 蜘蛛女	Spider-Girl
 海绵宝宝	SpongeBob SquarePants
 斯派罗	Spyro the Dragon
@@ -2940,7 +2792,6 @@ M&M豆	m&m's
 白巫师	White Witch
 威利·欧·科伊奥特	Wile E. Coyote
 小熊维尼	Winnie the Pooh
-巫师	Witch
 神奇女侠	Wonder Woman
 林地仙女	Woodland Nymph
 来自巫师的叶奈法	Yennefer of Vengerberg from the witcher
@@ -2964,39 +2815,29 @@ M&M豆	m&m's
 博斯梅尔	Bosmer
 小矮人	Brownie
 卡达西亚人	Cardassian
-半人马	Centaur
 基路伯	Cherubim
 奇美拉	Chimera
 赛博人	Cyberman
 独眼巨人	Cyclops
-独眼巨人	Cyclopskin
 赛隆	Cylon
 达瑞亚	Daedra
 戴立克	Dalek
-精灵	Djinn
 德拉克希尔	Dracthyr
 德拉诺伊	Draenei
 龙裔	Dragonborn
 龙族	Dragonkin
 德拉乌格	Draugr
-暗精灵	Drow
 树精	Dryad
 邓默尔	Dunmer
 矮人	Dwarf
 杜梅尔	Dwemer
 元素	Elemental
-精灵	Elf
-仙子	Faerie
 法尔默	Falmer
-丘比特	Faun
 弗雷曼人	Fremen
 冰巨人	Frost giant
 园丁小矮人	Garden gnome
-鬼魂	Ghost
-巨人	Giant
 侏儒	Gnome
 哥布林	Goblin
-女神	Godess
 石像怪	Golem
 戈耳工	Gorgon
 冈人	Gorn
@@ -3007,7 +2848,6 @@ M&M豆	m&m's
 人偶师	Homunculus
 伊菲尔特	Ifrit
 绝地武士	Jedi
-精灵	Jinn
 卡贾特	Khajit
 克林贡	Klingon
 巫妖	Lich
@@ -3015,7 +2855,6 @@ M&M豆	m&m's
 人体模型	Mannequin
 火星人	Martian
 门塔特	Mentat
-美人鱼	Mermaid
 心灵吸食者	Mind Flayer
 迷宫牛	Minotaur
 木乃伊	Mummy
@@ -3027,19 +2866,16 @@ M&M豆	m&m's
 夜精灵	Nightelf
 宁芙	Nymph
 食人魔	Ogre
-兽人	Orc
 奥瑞姆	Orsimer
 熊猫人	Pandaren
 小精灵	Pixie
 闹鬼	Poltergeist
-掠食者	Predator
 红卫兵	Redguard
 复制人	Replicant
 机器人	Robot
 罗曼人	Romulan
 萨特	Satyr
 圣天使	Seraphim
-阴影	Shade
 影子	Shadow
 塞壬	Siren
 骷髅	Skeleton
@@ -3050,16 +2886,11 @@ M&M豆	m&m's
 时间领主	Time Lord
 滴魔	Troll
 不死生物	Undead
-瓦尔基里	Valkyrie
-吸血鬼	Vampire
 虚空精灵	Voidelf
 瓦肯人	Vulcan
-狼人	Werewolf
 幽灵火	Will-o'-the-wisp
 伍可希	Wookiee
-狼人	Worgen
 游魂	Wraith
-外星生物	Xenomorph
 赞达拉人	Zandalari
 僵尸	Zombie
 骆驼	Camel
@@ -3096,7 +2927,6 @@ M&M豆	m&m's
 猎鹰	Falcon
 水貂	Ferret
 金丝雀	Finch
-鱼	Fish
 火烈鸟	Flamingo
 狐狸	Fox
 法国斗牛犬	French Bulldog
@@ -3139,7 +2969,6 @@ M&M豆	m&m's
 狮子	Lion
 蜥蜴	Lizard
 羊驼	Llama
-龙虾	Lobster
 喜鹊	Magpie
 缅因库恩猫	Maine Coon Cat
 绿头鸭	Mallard
@@ -3147,7 +2976,6 @@ M&M豆	m&m's
 曼克斯猫	Manx Cat
 乳齿象	Mastodon
 巨齿鲨	Megalodon
-水貂	Mink
 蛾	Moth
 老鼠	Mouse
 骡子	Mule
@@ -3176,15 +3004,11 @@ M&M豆	m&m's
 鸽子	Pigeon
 鸭嘴兽	Platypus
 贵宾犬	Poodle
-海豚	Porpoise
 信天翁	Puffin
 小狗	Puppy Dog
 蟒蛇	Python
-兔子	Rabbit
 浣熊	Raccoon
 拉戈尔德猫	Ragdoll Cat
-老鼠	Rat
-乌鸦	Raven
 红熊猫	Red Panda
 犀牛	Rhinoceros
 知更鸟	Robin
@@ -3192,7 +3016,6 @@ M&M豆	m&m's
 俄罗斯蓝猫	Russian Blue Cat
 剑齿虎	Sabertooth tiger
 圣伯纳犬	Saint Bernard
-蝾螈	Salamander
 蝎子	Scorpion
 斯科特兰折耳猫	Scottish Fold Cat
 海怪	Sea serpent
@@ -3201,7 +3024,6 @@ M&M豆	m&m's
 鲨鱼	Shark
 绵羊	Sheep
 吉娃娃犬	Shih Tzu
-虾	Shrimp
 暹罗猫	Siamese Cat
 西伯利亚雪橇犬	Siberian Husky
 臭鼬	Skunk
@@ -3224,7 +3046,6 @@ M&M豆	m&m's
 乌龟	Tortoise
 巨嘴鸟	Toucan
 海龟	Turtle
-秃鹰	Vulture
 黄蜂	Wasp
 水牛	Water buffalo
 貂	Weasel
@@ -3309,7 +3130,6 @@ M&M豆	m&m's
 索道	Ropeway
 滑板车	Scooter
 水上飞机母舰	Seaplane carrier
-船	Ship
 滑板	Skateboard
 滑雪板	Skis
 雪橇	Sled
@@ -3329,7 +3149,6 @@ M&M豆	m&m's
 半挂牵引车	Tractor trailer
 火车	Train
 有轨电车	Tram
-三轮车	Trike
 电车	Trolley
 独轮车	Unicycle
 厢式货车	Utility van
@@ -3378,7 +3197,6 @@ M&M豆	m&m's
 侧拍	shot from side
 肩位拍摄	shoulder-level shot
 侧面拍摄	side view shot
-侧面	side-profile
 街景拍摄	street level shot
 棚拍	studio shot
 长焦拍摄	telephoto shot
@@ -3389,22 +3207,10 @@ M&M豆	m&m's
 宽幅	wide shot
 拉远	zoomed out
 背面	back view
-特写	close-up
 超特写	extreme close-up
-正面	front view
 仰视	high angle view
-俯视	low angle view
-中近景	medium close-up
 中全景	medium full shot
-顶视角度	overhead shot view
-俯视	seen from above view
-背拍	seen from behind
-仰视	seen from below view
 自拍视角	selfie view
-侧面	side view
-正面	straight on view
-俯视	top down view
-广角	wide angle view
 长城	great wall of china
 海滨木板路	a beachfront boardwalk
 盛开的植物园	a botanical garden in bloom
@@ -3546,7 +3352,6 @@ M&M豆	m&m's
 乌托邦之地	arcadia
 希腊神话中的乌托邦之地	arcadia utopian paradise in greek mythology
 拱坝	arch dam
-建筑	architecture
 北欧神族的阿斯加德领域	asgard realm of the norse gods
 天文观测站	astronomical observatory
 在狂欢节上	at a carnival
@@ -3650,7 +3455,6 @@ M&M豆	m&m's
 天界国王的宝座	at the throne of the celestial king
 巨山中的巨人之巅	at the titan's summit amid the colossal mountains
 摩天大楼顶端	at the top of a sky scraper
-摩天大楼顶端	at the top of a skyscraper
 天界阶梯的顶点	at the zenith of the celestial staircase
 沉没于海底的神话亚特兰蒂斯岛	atlantis mythical island submerged beneath the ocean
 沉没岛屿，亚特兰蒂斯	atlantis submerged island
@@ -3689,7 +3493,6 @@ Bed & Breakfast	bed and breakfast
 挪威峡湾的惊世美景是摄影师的梦想	breathtaking beauty of the norwegian fjords is a photographer's dream
 挪威令人惊叹的峡湾是摄影师的梦想	breathtaking fjords of norway are a photographer's dream
 平房小屋	bungalow
-公交站	bus station
 曼谷繁华市场的视觉、听觉和嗅觉盛宴	bustling markets of bangkok are a sensory overload of sights, sounds, and smells
 海滨	by the seaside
 小木屋	cabin
@@ -3703,7 +3506,6 @@ Bed & Breakfast	bed and breakfast
 法国巴黎墓穴	catacombs of paris france
 大教堂	cathedral
 赛莱西娅	celestia
-小木屋	chalet
 化工厂	chemical plant
 奇琴伊察	chichen itza
 希波拉	cibola
@@ -3716,7 +3518,6 @@ Bed & Breakfast	bed and breakfast
 哈瓦那色彩斑斓的街道是摄影师的梦想，有经典汽车、活力四射的建筑和生动的街头场景	colorful streets of havana are a photographer's dream, with classic cars, vibrant architecture, and lively street scenes
 罗马斗兽场	colosseum
 音乐厅	concert hall
-小屋	cottage
 舞吧	danceclub
 洞穴系统深处	deep within a cave system
 冰川深处	deep within a glacier
@@ -3752,7 +3553,6 @@ Bed & Breakfast	bed and breakfast
 永恒的梦幻岛	eternal neverland
 虚幻天城	ethereal celestial city
 虚幻夏安杜	ethereal xanadu
-亚瑟王传说中的阿瓦隆岛	fabled isle of avalon
 提尔纳诺格传说之地	fabled tir na nog
 农舍	farmhouse
 水上酒店	floating hotel
@@ -3760,23 +3560,18 @@ Bed & Breakfast	bed and breakfast
 人行桥	footbridge
 紫禁城	forbidden city
 奥兹国遗忘之地	forgotten land of oz
-幽影之地	forgotten land of shadows
 堡垒	fort
-要塞	fortress
 化石燃料发电站	fossil fuel power station
-高速公路	freeway
 富士山	fuji mountain
 门	gate
 巨杉树	giant sequoia tree
 黄金埃尔多拉多	golden el dorado
-谷仓	grain elevator
 粮仓	grain silo
 大峡谷	grand canyon
 大堡礁是一个充满生机的水下乐园	great barrier reef is a vibrant underwater paradise teeming with life
 吉萨大金字塔	great pyramid of giza
 杂货店	grocery store
 小旅馆	guesthouse
-健身房	gymnasium
 希腊神话中的地狱	hades underworld in greek mythology
 圣索菲亚大教堂	hagia sophia
 夏威夷	hawaiki
@@ -3916,7 +3711,6 @@ Bed & Breakfast	bed and breakfast
 在幻影沙地中隐藏的蜃景绿洲	in the mirage oasis concealed within the mirage sands
 在有幻象棕榈林的蜃景绿洲	in the mirage oasis with illusory palm groves
 在发光菌类庇护所	in the myconid haven with luminescent fungal canopies
-在发光菌类庇护所	in the myconid haven with luminous fungal canopies
 在连接多元宇宙领域的枢纽门户	in the nexus gateway connecting multiversal realms
 在幻影沙地中隐藏的绿洲蜃景	in the oasis mirage hidden in the mirage sands
 在无尽可能的世界	in the realm of endless possibilities
@@ -3939,7 +3733,6 @@ Bed & Breakfast	bed and breakfast
 意大利波韦利亚岛	island of poveglia italy
 墨西哥玩偶岛	island of the dolls mexico
 亚瑟王的阿瓦隆岛	isle of avalon arthurian resting place
-亚瑟王的阿瓦隆岛	isle of avalon resting place of king arthur
 巨人之境	jotunheim
 湖畔别墅	lake house
 漂浮灯笼	lantern floating
@@ -3994,12 +3787,10 @@ Bed & Breakfast	bed and breakfast
 尼福海姆，北欧神话中的冰冻领域	niflheim icy realm in norse mythology
 巴黎圣母院	notre-dame cathedral
 核导弹发射井	nuclear missile silo
-核电站	nuclear power plant
 办公楼	office building
 海上钻油平台	offshore oil platform
 海上风电场	offshore wind farm
 钻油平台	oil platform
-炼油厂	oil refinery
 钻井平台	oil rig
 奥林匹斯	olympus
 希腊的奥林匹斯	olympus greek home
@@ -4021,17 +3812,11 @@ Bed & Breakfast	bed and breakfast
 太空站	on a space station
 热带岛屿	on a tropical island
 穿越宇宙的航行	on a voyage through the cosmos
-时空之旅	on a voyage through time and space
 宫殿	palace
 混乱	pandemonium
-停车场	parking garage
-人行桥	pedestrian bridge
 人行隧道	pedestrian tunnel
 戏院	playhouse
-港口	port
 门户	portal
-意大利波韦利亚岛	poveglia island italy
-发电厂	power plant
 乌克兰普里皮亚特	pripyat ukraine
 斐济的原始海滩是放松的最佳去处	pristine beaches of fiji are the perfect place to unwind and relax
 马尔代夫的原始海滩让人逃离日常生活的喧嚣	pristine beaches of the maldives are the perfect place to escape the hustle and bustle of everyday life
@@ -4067,9 +3852,7 @@ Bed & Breakfast	bed and breakfast
 西藏密宗隐秘王国夏玛哈拉	shambhala hidden kingdom of tibetan buddhism
 和平与觉悟的隐秘香格里拉乌托邦	shangri-la hidden utopia of peace and enlightenment
 购物中心	shopping mall
-谷仓	silo
 滑板公园	skate park
-摩天大楼	skyscraper
 太阳能电站	solar power station
 水疗中心	spa
 空间站	space station
@@ -4092,7 +3875,6 @@ Bed & Breakfast	bed and breakfast
 北极天空中舞动的极光令人叹为观止	surreal beauty of the northern lights dancing across the arctic sky is a sight to behold
 悬索桥	suspension bridge
 暗精灵之域	svartalfheim
-游泳池	swimming pool
 犹太会堂	synagogue
 泰姬陵	taj mahal
 塔内隆	tanelorn
@@ -4111,7 +3893,6 @@ Bed & Breakfast	bed and breakfast
 意大利罗马的地下墓穴	the catacombs of rome italy
 土库曼斯坦地狱之门	the door to hell turkmenistan
 梦之时代	the dreamtime
-埃菲尔铁塔	the eiffel tower
 元素位面	the elemental planes
 虚无界	the ethereal plane
 精灵界	the feywild
@@ -4170,8 +3951,6 @@ Bed & Breakfast	bed and breakfast
 北美洲的神话维京定居地	vinland mythical norse settlement in north america
 维京定居地	vinland norse settlement
 水塔	water tower
-污水处理厂	water treatment plant
-美国瓦维尔山疗养院	waverly hills sanatorium usa
 威斯敏斯特大教堂	westminster abbey
 奇想仙境	whimsical wonderland
 美国温彻斯特神秘宅邸	winchester mystery house usa
@@ -4805,12 +4584,10 @@ CFA·沃西风格	style by cfa voysey
 来自菲利蓬的风格	style by charles philipon
 来自雷菲尔的风格	style by charles reiffel
 来自麦金托什的风格	style by charles rennie mackintosh
-来自罗宾逊的风格	style by charles robinson
 来自舒尔茨的风格	style by charles schulz
 来自谢勒的风格	style by charles sheeler
 来自斯潘塞莱的风格	style by charles spencelayh
 来自图尼克利夫的风格	style by charles tunnicliffe
-来自韦斯的风格	style by charles vess
 来自蒂里翁的风格	style by charles victor thirion
 来自怀特的风格	style by charles white
 来自佩尔的风格	style by charles willson peale
@@ -4988,7 +4765,6 @@ CLAMP风格	style by clamp
 戴维·邓顿风格	style by david downton
 大卫·德拉斯基尔风格	style by david driskell
 大卫·芬奇风格	style by david finch
-大卫·芬奇风格	style by david fincher
 大卫·戈德布拉特风格	style by david goldblatt
 大卫·哈蒙斯风格	style by david hammons
 大卫·赫廷格风格	style by david hettinger
@@ -5544,7 +5320,6 @@ G·威尔洛·威尔逊风格	style by g. willow wilson
 文扎尼风格	style by giovanni battista venanzi
 卡斯蒂廖内风格	style by giovanni benedetto castiglione
 博尔丁尼风格	style by giovanni boldini
-提埃波罗风格	style by giovanni domenico tiepolo
 坎托内风格	style by giovanni gabriele cantone
 塞甘蒂尼风格	style by giovanni segantini
 阿奇博尔多风格	style by giuseppe arcimboldo
@@ -5810,7 +5585,6 @@ H.N.韦尔坎风格	style by h.n. werkman
 艾琳·舍里风格	style by irene sheri
 伊丽丝·范·赫芬风格	style by iris van herpen
 伊尔玛·斯坦特风格	style by irma stern
-爱德华·韦斯顿风格	style by irving penn
 伊里娜·叶尔莫洛娃风格	style by iryna yermolova
 伊萨克·科达风格	style by isaac cordal
 伊萨克·格吕内瓦德风格	style by isaac grünewald
@@ -5979,19 +5753,16 @@ H.N.韦尔坎风格	style by h.n. werkman
 李智英风格	style by jeeyoung lee
 丹齐格风格	style by jeff danziger
 易塞尔风格	style by jeff easley
-基恩风格	style by jeff keane
 金尼风格	style by jeff kinney
 考恩风格	style by jeff koons
 莱格风格	style by jeff legg
 雷米风格	style by jeff lemire
 罗兰德风格	style by jeff rowland
 辛普森风格	style by jeff simpson
-史密斯风格	style by jeff smith
 索托风格	style by jeff soto
 沃尓夫风格	style by jeff wall
 杰弗里·凯瑟琳·琼斯风格	style by jeffrey catherine jones
 史马特风格	style by jeffrey smart
-史密斯风格	style by jeffrey smith
 拉森风格	style by jeffrey t. larson
 鲁贝尔风格	style by jennifer rubell
 萨维尔风格	style by jenny saville
@@ -6063,62 +5834,13 @@ H.N.韦尔坎风格	style by h.n. werkman
 来自爱尔兰的风格	style by john anster fitzgerald
 来自英国的风格	style by john atkinson grimshaw
 来自美国的风格	style by john avon
-来自美国的风格	style by john baizley
 来自南非的风格	style by john batho
 来自瑞典的风格	style by john bauer
-来自美国的风格	style by john berkey
-来自英国的风格	style by john blanche
 来自澳大利亚的风格	style by john bolton
-来自澳大利亚的风格	style by john brack
-来自英国的风格	style by john bratby
-来自美国的风格	style by john buscema
-来自爱尔兰的风格	style by john butler yeats
-来自美国的风格	style by john cassaday
-来自美国的风格	style by john cassavetes
-来自美国的风格	style by john chamberlain
-来自美国的风格	style by john closterman
-来自英国的风格	style by john collier
-来自英国的风格	style by john constable
-来自英国的风格	style by john crome
-来自美国的风格	style by john currin
 来自苏格兰的风格	style by john duncan
-来自英国的风格	style by john everett millais
-来自美国的风格	style by john ford
-来自美国的风格	style by john frederick kensett
-来自美国的风格	style by john french sloan
-来自英国的风格	style by john harris
-来自美国的风格	style by john hejduk
-来自美国的风格	style by john henry twachtman
-来自英国的风格	style by john higgins
-来自美国的风格	style by john holcroft
-来自美国的风格	style by john howe
-来自英国的风格	style by john hoyland
-来自美国的风格	style by john james audubon
-来自美国的风格	style by john jude palencar
 来自丹麦的风格	style by john kenn mortensen
-来自美国的风格	style by john la farge
 来自西班牙的风格	style by john larriva
 来自英国和爱尔兰的风格	style by john lavery
-来自美国的风格	style by john le
-来自美国的风格	style by john liberto
-来自澳大利亚的风格	style by john lowrie morrison
-来自美国的风格	style by john lurie
-来自英国的风格	style by john martin
-来自美国的风格	style by john mckinstry
-来自英国的风格	style by john melhuish strudwick
-来自美国的风格	style by john moonan
-来自澳大利亚的风格	style by john nash
-来自英国的风格	style by john pawson
-来自英国的风格	style by john perceval
-来自美国的风格	style by john philip falter
-来自英国的风格	style by john piper
-来自美国的风格	style by john pitre
-来自美国的风格	style by john reuss
-来自澳大利亚的风格	style by john riley
-来自英国的风格	style by john roddam spencer stanhope
-来自英国的风格	style by john ruskin
-来自美国的风格	style by john salminen
-来自英国的风格	style by john sell cotman
 约翰·辛格·萨金特风格	style by john singer sargent
 约翰·斯洛恩风格	style by john sloane
 约翰·斯图尔特·英格勒风格	style by john stuart ingle
@@ -6246,7 +5968,6 @@ H.N.韦尔坎风格	style by h.n. werkman
 歌川广重风格	style by katsushika hokusai
 小林一之风格	style by katsushika ōi
 卡瓦西风格	style by kawacy
-喜多川歌麿风格	style by kawanabe kyōsai
 凯·尼尔森风格	style by kay nielsen
 凯·赛格风格	style by kay sage
 卡齐米日·达布罗夫斯基风格	style by kazimierz dąbrowski
@@ -6477,7 +6198,6 @@ L.S. Lowry风格	style by l. s. lowry
 弗洛雷风格	style by maia flore
 安达风格	style by makoto aida
 新垣风格	style by makoto shinkai
-新垣风格	style by makoto shinkhai
 高山风格	style by makuzu kōzan
 马尔科姆·霍伊风格	style by malcolm howie
 马尔科姆·莱普克风格	style by malcolm liepke
@@ -6836,7 +6556,6 @@ ND史蒂文森风格	style by nd stevenson
 奥托·迪克斯风格	style by otto dix
 奥托·马塞乌斯·范·施里克风格	style by otto marseus van schrieck
 奥托·穆勒风格	style by otto mueller
-奥托·穆勒风格	style by otto müller
 奥托·皮恩风格	style by otto piene
 帕布洛·阿马里尼哥风格	style by pablo amaringo
 来自穆诺兹的风格	style by pablo munoz gomez
@@ -7497,7 +7216,6 @@ Stephanie Pui-Mun Law风格	style by stephanie pui-mun law
 托马斯·哈特·班顿风格	style by thomas hart benton
 托马斯·霍尔克风格	style by thomas hawker
 托马斯·赫德威格风格	style by thomas heatherwick
-托马斯·金凯德风格	style by thomas kinkade
 托马斯·劳伦斯风格	style by thomas lawrence
 来自托马斯·勒乌特尔的风格	style by thomas leuthard
 来自托马斯·莫兰的风格	style by thomas moran
@@ -7524,7 +7242,6 @@ Stephanie Pui-Mun Law风格	style by stephanie pui-mun law
 来自蒂姆·怀特的风格	style by tim white
 来自蒂莫西·伊斯坦顿的风格	style by timothy easton
 提香风格	style by tintoretto
-提香风格	style by titian
 来自提图斯·卡法尔的风格	style by titus kaphar
 来自蒂瓦达·科恩特瓦里·科斯特卡的风格	style by tivadar csontváry kosztka
 TJ德雷尔风格	style by tj drysdale
@@ -7688,7 +7405,6 @@ W·希思·罗宾逊风格	style by w. heath robinson
 沃伦·巴菲特风格	style by warren buffet
 沃伦·艾利斯风格	style by warren ellis
 华莱士·戈布尔风格	style by warwick goble
-瓦西里·康定斯基风格	style by wassily kandinsky
 韦恩·巴罗尔风格	style by wayne barlowe
 韦恩·席博德风格	style by wayne thiebaud
 温迪·弗劳德风格	style by wendy froud
@@ -7863,7 +7579,6 @@ iPhone X	iphone x
 强调照明	accent lighting
 环境光	ambient lighting
 背光	back lit
-背光	backlight
 美光	beautifully Lit
 黑光	black lighting
 光晕	bloom light
@@ -7887,7 +7602,6 @@ iPhone X	iphone x
 环形照明	loop lighting
 情绪化灯光	moody lighting
 自然光	natural lighting
-霓虹灯	neon Lights
 怀旧光	nostalgic lighting
 反射光	reflected light
 伦勃朗照明	rembrandt lighting
@@ -7921,11 +7635,7 @@ iPhone X	iphone x
 奉俊昊风格	style by Bong Joon-Ho
 邦德安·沃尔夫风格	style by Brandon Woelfel
 克里斯·弗里尔风格	style by Chris Friel
-丹·维茨风格	style by Dan Witz
 达伦·阿罗诺夫斯基风格	style by Darren Aronofsky
-大卫·芬奇风格	style by David Fincher
-大卫·拉查佩勒风格	style by David LaChapelle
-大卫·林奇风格	style by David Lynch
 丹尼斯·维伦纽瓦风格	style by Denis Villeneuve
 黛安·阿勃斯风格	style by Diane Arbus
 迪米特里·约夫·雷因斯坦风格	style by Dmitriy Yoav Reinshtein
@@ -7937,14 +7647,8 @@ iPhone X	iphone x
 乔治·梅里爱风格	style by Georges Méliès
 杰曼因·克鲁风格	style by Germaine Krull
 格雷戈里·克莱森风格	style by Gregory Crewdson
-吉尔莫·德尔·托罗风格	style by Guillermo Del Toro
-汉斯·贝尔默风格	style by Hans Bellmer
-宫崎骏风格	style by Hayao Miyazaki
-赫尔穆特·纽顿风格	style by Helmut Newton
-亨利·卡蒂埃-布列松风格	style by Henri Cartier-Bresson
 伊夫林·潘风格	style by Irving Penn
 詹姆斯·比德古德风格	style by James Bidgood
-让-皮埃尔·热内风格	style by Jean-Pierre Jeunet
 杰夫·华风格	style by Jeff Wall
 乔尔·梅耶罗维茨风格	style by Joel Meyerowitz
 金·基弗风格	style by Kim Keever
@@ -7956,11 +7660,6 @@ iPhone X	iphone x
 马丁·帕尔风格	style by Martin Parr
 马汀·肖勒风格	style by Martin Schoeller
 马西莫·维塔利风格	style by Massimo Vitali
-迈克尔·肯纳风格	style by Michael Kenna
-米卡琳妮·托马斯风格	style by Mickalene Thomas
-米科·拉格斯特德风格	style by Miko Lagerstedt
-迈尔斯·阿尔德里奇风格	style by Miles Aldridge
-米沙·戈尔丁风格	style by Misha Gordin
 南·戈林风格	style by Nan Goldin
 内森·韦斯特风格	style by Nathan Wirth
 尼科·奈特风格	style by Nick Knight
@@ -7978,19 +7677,12 @@ iPhone X	iphone x
 理查德·阿维顿风格	style by Richard Avedon
 罗伯特·卡帕风格	style by Robert Capa
 罗杰·巴伦风格	style by Roger Ballen
-莎莉·曼风格	style by Sally Mann
 索菲亚·科波拉风格	style by Sofia Coppola
 斯派克·琼兹风格	style by Spike Jonze
-北野武风格	style by Takeshi Kitano
-特瑞·吉列姆风格	style by Terry Gilliam
 柯恩兄弟风格	style by The Coen Brothers
 蒂姆·波顿风格	style by Tim Burton
 提姆·沃克风格	style by Tim walker
-泰勒·谢尔兹风格	style by Tyler Shields
-韦斯·安德森风格	style by Wes Anderson
-维姆·文德斯风格	style by Wim Wenders
 尤瑟夫·卡尔斯风格	style by Yousuf Karsh
-张艺谋风格	style by Zhang Yimou
 抽象摄影	Abstract Photography
 动作摄影	Action Photography
 胶片摄影	Analogue Photography
@@ -8038,7 +7730,6 @@ glitch 风格	glitch style
 高速液滴摄影	high speed liquid
 全息效果	hologram effect
 红外滤镜	infrared filter
-镜头光晕	lens flare
 洛莫效果	lomo effect
 长时间曝光	long exposure
 中等景深	medium depth of field
@@ -8081,7 +7772,6 @@ sepia 色调	sepia tone
 夜景摄影灯光	night photography lighting
 阴天光线	overcast lighting
 怀旧电影照明	reminiscent film lighting
-轮廓光	rim lighting
 剪影光	silhouette lighting
 鼻锥灯	snoot lighting
 柔和散射光	soft and diffused lighting

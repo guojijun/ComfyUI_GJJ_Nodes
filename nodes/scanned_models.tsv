@@ -1,0 +1,109 @@
+Found models directory: C:\ComfyUI\models
+
+Scanning 65 directories...
+
+鈼?animatediff_models: empty or not found
+鈼?animatediff_motion_lora: empty or not found
+鈼?audio_encoders: empty or not found
+鈼?audiodit: empty or not found
+鈼?BEN: empty or not found
+鈼?BiRefNet: empty or not found
+鈼?blip: empty or not found
+鉁?checkpoints: 16 models
+鈼?ckpts: empty or not found
+鉁?clip: 15 models
+鈼?clip_vision: empty or not found
+鈼?clip_visions: empty or not found
+鈼?CogVideo: empty or not found
+鈼?controlnet: empty or not found
+鈼?cosyvoice: empty or not found
+鈼?detection: empty or not found
+鈼?diffusers: empty or not found
+鈼?diffusion_models: empty or not found
+鈼?dlib: empty or not found
+鈼?embeddings: empty or not found
+鈼?facerestore_models: empty or not found
+鈼?fishaudioS2: empty or not found
+鈼?FlashVSR: empty or not found
+鈼?FlashVSR-v1.1: empty or not found
+鈼?florence2: empty or not found
+鈼?frame_interpolatiom: empty or not found
+鈼?gligen: empty or not found
+鈼?hidream_i1_fast_local: empty or not found
+鈼?hypernetworks: empty or not found
+鈼?insightface: empty or not found
+鈼?instantid: empty or not found
+鈼?ipadapter: empty or not found
+鈼?Joy_caption: empty or not found
+鈼?latent_upscale_models: empty or not found
+鈼?latentsync: empty or not found
+鈼?liveportrait: empty or not found
+鈼?LLM: empty or not found
+鈼?loras: empty or not found
+鈼?mediapipe: empty or not found
+鈼?mmaudio: empty or not found
+鈼?modelscope: empty or not found
+鈼?nsfw_detector: empty or not found
+鈼?onnx: empty or not found
+鈼?photomaker: empty or not found
+鈼?pose_estimation: empty or not found
+鈼?Qwen3-ASR: empty or not found
+鈼?reactor: empty or not found
+鈼?RMBG: empty or not found
+鈼?sam2: empty or not found
+鈼?sam3: empty or not found
+鈼?sams: empty or not found
+鈼?SEEDVR2: empty or not found
+鈼?style_models: empty or not found
+鈼?text_encoders: empty or not found
+鈼?ultralytics: empty or not found
+鈼?unet: empty or not found
+鈼?upscale_models: empty or not found
+鉁?vae: 1 models
+鈼?vae_approx: empty or not found
+鈼?vitmatte: empty or not found
+鈼?woosh: empty or not found
+鈼?xlabs: empty or not found
+鈼?yolo: empty or not found
+鈼?z_image_de_turbo_cached_local: empty or not found
+鈼?z_image_turbo_nvfp4_local: empty or not found
+
+================================================================================
+Total: 32 models found
+================================================================================
+
+# Additional models scanned from ComfyUI models directory
+# Add these to presets/model_keywords.tsv
+id	category	keywords	display_name	description	tags	priority
+clip-g	clip	clip|g	Clip G	Clip G (clip)	clip|clip	85
+clip-l	clip	clip|l	Clip L	Clip L (clip)	clip|clip	85
+diffusion-pytorch-model	clip	diffusion|pytorch|model	Diffusion Pytorch Model	Diffusion Pytorch Model (clip)	clip|clip	85
+diffusion-pytorch-model-00001-of-00002	clip	diffusion|pytorch|model|00001|of	Diffusion Pytorch Model 00001 Of 00002	Diffusion Pytorch Model 00001 Of 00002 (clip)	clip|clip	85
+diffusion-pytorch-model-00002-of-00002	clip	diffusion|pytorch|model|00002|of	Diffusion Pytorch Model 00002 Of 00002	Diffusion Pytorch Model 00002 Of 00002 (clip)	clip|clip	85
+model	clip	model	Model	Model (clip)	clip|clip	85
+model	clip	model	Model	Model (clip)	clip|clip	85
+model-00001-of-00002	clip	model|00001|of|00002	Model 00001 Of 00002	Model 00001 Of 00002 (clip)	clip|clip	85
+model-00002-of-00002	clip	model|00002|of|00002	Model 00002 Of 00002	Model 00002 Of 00002 (clip)	clip|clip	85
+model.fp16	clip	model.fp16	Model.Fp16	Model.Fp16 (clip)	clip|clip	85
+model.fp16	clip	model.fp16	Model.Fp16	Model.Fp16 (clip)	clip|clip	85
+model.fp16-00001-of-00002	clip	model.fp16|00001|of|00002	Model.Fp16 00001 Of 00002	Model.Fp16 00001 Of 00002 (clip)	clip|clip	85
+model.fp16-00002-of-00002	clip	model.fp16|00002|of|00002	Model.Fp16 00002 Of 00002	Model.Fp16 00002 Of 00002 (clip)	clip|clip	85
+t5xxl	clip	t5xxl	T5Xxl	T5Xxl (clip)	clip|clip	85
+t5xxl	clip	t5xxl	T5Xxl	T5Xxl (clip)	clip|clip	85
+clip-g	unet	clip|g	Clip G	Clip G (unet)	unet|checkpoints	90
+clip-l	unet	clip|l	Clip L	Clip L (unet)	unet|checkpoints	90
+diffusion-pytorch-model	unet	diffusion|pytorch|model	Diffusion Pytorch Model	Diffusion Pytorch Model (unet)	unet|checkpoints	90
+diffusion-pytorch-model-00001-of-00002	unet	diffusion|pytorch|model|00001|of	Diffusion Pytorch Model 00001 Of 00002	Diffusion Pytorch Model 00001 Of 00002 (unet)	unet|checkpoints	90
+diffusion-pytorch-model-00002-of-00002	unet	diffusion|pytorch|model|00002|of	Diffusion Pytorch Model 00002 Of 00002	Diffusion Pytorch Model 00002 Of 00002 (unet)	unet|checkpoints	90
+model	unet	model	Model	Model (unet)	unet|checkpoints	90
+model	unet	model	Model	Model (unet)	unet|checkpoints	90
+model-00001-of-00002	unet	model|00001|of|00002	Model 00001 Of 00002	Model 00001 Of 00002 (unet)	unet|checkpoints	90
+model-00002-of-00002	unet	model|00002|of|00002	Model 00002 Of 00002	Model 00002 Of 00002 (unet)	unet|checkpoints	90
+model.fp16	unet	model.fp16	Model.Fp16	Model.Fp16 (unet)	unet|checkpoints	90
+model.fp16	unet	model.fp16	Model.Fp16	Model.Fp16 (unet)	unet|checkpoints	90
+model.fp16-00001-of-00002	unet	model.fp16|00001|of|00002	Model.Fp16 00001 Of 00002	Model.Fp16 00001 Of 00002 (unet)	unet|checkpoints	90
+model.fp16-00002-of-00002	unet	model.fp16|00002|of|00002	Model.Fp16 00002 Of 00002	Model.Fp16 00002 Of 00002 (unet)	unet|checkpoints	90
+sd3.5-large	unet	sd3.5|large	Sd3.5 Large	Sd3.5 Large (unet)	unet|checkpoints	90
+t5xxl	unet	t5xxl	T5Xxl	T5Xxl (unet)	unet|checkpoints	90
+t5xxl	unet	t5xxl	T5Xxl	T5Xxl (unet)	unet|checkpoints	90
+diffusion-pytorch-model	vae	diffusion|pytorch|model	Diffusion Pytorch Model	Diffusion Pytorch Model (vae)	vae|vae	85

@@ -1,31 +1,38 @@
 import { app } from "/scripts/app.js";
 
-const TARGET_NODES = new Set([
-	"GJJ_GroupBypasser",
-]);
-const FILTER_NAME = "过滤关键词";
-const MODE_NAME = "选择模式";
-const MODE_LABEL = "选择模式";
+// 目标节点
+const TARGET_NODES = new Set(["GJJ_GroupBypasser"]);
+
+// 模式常量
 const MODE_SINGLE = "单选";
 const MODE_MULTI = "多选";
 const MODE_VALUES = [MODE_SINGLE, MODE_MULTI];
+const MODE_NAME = "选择模式";
+
+// 过滤关键词常量
+const FILTER_NAME = "过滤关键词";
 const FILTER_LABEL = "过滤关键词";
 const FILTER_PLACEHOLDER = "留空显示全部分组";
 const FILTER_TOOLTIP = "输入分组名称中的关键词进行筛选；留空时显示当前工作流中的全部分组。";
+
+// 空状态常量
 const EMPTY_STATE_NAME = "分组状态提示";
 const EMPTY_STATE_LABEL = "分组状态提示";
 const EMPTY_STATE_TEXT = "当前没有分组，或没有匹配到包含该关键词的分组。";
 const EMPTY_STATE_TOOLTIP = "没有可切换的分组时，会在这里显示中文状态提示。";
 
+// 存储每个节点的状态
+const nodeStates = new Map();
+
 function ensureNodeState(node) {
-	node.properties = node.properties || {};
-	if (!Object.prototype.hasOwnProperty.call(node.properties, FILTER_NAME)) {
-		node.properties[FILTER_NAME] = "";
+	if (!nodeStates.has(node.id)) {
+		nodeStates.set(node.id, {
+			[MODE_NAME]: MODE_SINGLE,
+			[FILTER_NAME]: "",
+			__activeGroupRefs: new Set(),
+		});
 	}
-	if (!MODE_VALUES.includes(String(node.properties[MODE_NAME] || ""))) {
-		node.properties[MODE_NAME] = MODE_SINGLE;
-	}
-	return node.properties;
+	return nodeStates.get(node.id);
 }
 
 function getGroups() {
@@ -70,33 +77,29 @@ function getToggleWidgets(node) {
 }
 
 function getSelectionMode(node) {
-	const value = String(ensureNodeState(node)[MODE_NAME] || MODE_SINGLE);
+	const state = ensureNodeState(node);
+	const value = String(state[MODE_NAME] || MODE_SINGLE);
 	return MODE_VALUES.includes(value) ? value : MODE_SINGLE;
 }
 
+function updateSelectionMode(node, mode) {
+	const state = ensureNodeState(node);
+	state[MODE_NAME] = MODE_VALUES.includes(mode) ? mode : MODE_SINGLE;
+}
+
+function updateFilterText(node, text) {
+	ensureNodeState(node)[FILTER_NAME] = String(text || "");
+}
+
 function getActiveGroupRefs(node) {
-	// 优先读缓存状态，避免 widget.value 延迟导致的状态不一致
-	if (node.__gjjActiveGroupRefs instanceof Set) {
-		return new Set([...node.__gjjActiveGroupRefs]);
-	}
-
-	if (node.__gjjActiveGroupRef) {
-		return new Set([node.__gjjActiveGroupRef]);
-	}
-
-	// 降级：从 widget.value 读取
-	const widgets = getToggleWidgets(node);
-	const activeGroups = widgets
-		.filter((widget) => widget?.value && widget?.__groupRef)
-		.map((widget) => widget.__groupRef);
-
-	return new Set(activeGroups);
+	const state = ensureNodeState(node);
+	return state.__activeGroupRefs || new Set();
 }
 
 function setActiveGroupRefs(node, groups) {
+	const state = ensureNodeState(node);
 	const groupList = Array.isArray(groups) ? groups.filter(Boolean) : [...(groups || [])].filter(Boolean);
-	node.__gjjActiveGroupRefs = new Set(groupList);
-	node.__gjjActiveGroupRef = groupList[0] || null;
+	state.__activeGroupRefs = new Set(groupList);
 }
 
 function trimActiveGroupsForMode(node) {
@@ -138,77 +141,37 @@ function applyMatchedGroupModes(node, groups = getMatchedGroups(node)) {
 	});
 }
 
-function updateFilterText(node, value) {
-	ensureNodeState(node)[FILTER_NAME] = String(value || "");
-}
-
 function syncFilterToOriginalWidget(node) {
-	const currentValue = getFilterText(node);
-	const widgets = (node.widgets || []).filter((w) => w?.name === FILTER_NAME);
-	
-	// 如果有多个同名 widget（DOM widget + Python widget），确保它们值一致
-	if (widgets.length > 1) {
-		for (const widget of widgets) {
-			if (widget.value !== currentValue) {
-				widget.value = currentValue;
-				if (widget.inputEl) {
-					widget.inputEl.value = currentValue;
-				}
-			}
+	const filterWidget = (node.widgets || []).find((w) => w?.name === FILTER_NAME && w.type !== "HTML");
+	const currentFilter = getFilterText(node);
+	if (filterWidget && filterWidget.value !== currentFilter) {
+		filterWidget.value = String(currentFilter || "");
+		if (filterWidget.inputEl) {
+			filterWidget.inputEl.value = String(currentFilter || "");
 		}
+		filterWidget.callback?.(currentFilter);
 	}
 }
 
-function enforceWidgetZIndex(node) {
-	// 遍历所有 DOM widget，确保它们的容器有正确的 z-index
-	const widgets = Array.isArray(node.widgets) ? node.widgets : [];
-	let zIndexCounter = 10000;
-	
-	for (const widget of widgets) {
-		if (widget?.element instanceof HTMLElement) {
-			const element = widget.element;
-			
-			// 提升容器本身的 z-index
-			element.style.setProperty("z-index", String(zIndexCounter), "important");
-			element.style.setProperty("position", "relative", "important");
-			element.style.setProperty("pointer-events", "auto", "important");
-			
-			// 提升容器内所有子元素的 z-index
-			const buttons = element.querySelectorAll("button");
-			buttons.forEach((btn, index) => {
-				btn.style.setProperty("z-index", String(zIndexCounter + 1), "important");
-				btn.style.setProperty("position", "relative", "important");
-				btn.style.setProperty("pointer-events", "auto", "important");
-			});
-			
-			zIndexCounter += 10; // 每个 widget 递增，避免冲突
-		}
-	}
-}
 
-function updateSelectionMode(node, value) {
-	const mode = MODE_VALUES.includes(String(value || "")) ? String(value) : MODE_SINGLE;
-	ensureNodeState(node)[MODE_NAME] = mode;
-
-	const widget = (node.widgets || []).find((item) => item?.name === MODE_NAME);
-	if (widget) {
-		widget.value = mode;
-		if (widget.inputEl) {
-			widget.inputEl.value = mode;
-		}
-	}
-
-	node.graph?.change?.();
-}
 
 function hydrateStateFromSerialized(node, serialized) {
-	const props = ensureNodeState(node);
+	const state = ensureNodeState(node);
 	const values = Array.isArray(serialized?.widgets_values) ? serialized.widgets_values : [];
-	if (!Object.prototype.hasOwnProperty.call(serialized?.properties || {}, FILTER_NAME) && values.length > 0) {
-		props[FILTER_NAME] = String(values[0] || "");
+	
+	// 尝试从 properties 恢复，如果没有则从 widgets_values 恢复
+	const savedMode = serialized?.properties?.[MODE_NAME];
+	if (savedMode && MODE_VALUES.includes(savedMode)) {
+		state[MODE_NAME] = savedMode;
+	} else if (values.length > 1 && MODE_VALUES.includes(String(values[1]))) {
+		state[MODE_NAME] = String(values[1]);
 	}
-	if (!Object.prototype.hasOwnProperty.call(serialized?.properties || {}, MODE_NAME) && MODE_VALUES.includes(String(values[1] || ""))) {
-		props[MODE_NAME] = String(values[1]);
+
+	const savedFilter = serialized?.properties?.[FILTER_NAME];
+	if (savedFilter !== undefined) {
+		state[FILTER_NAME] = String(savedFilter);
+	} else if (values.length > 0) {
+		state[FILTER_NAME] = String(values[0] || "");
 	}
 }
 
@@ -220,153 +183,91 @@ function makeDomWidgetSize(widget, height) {
 	return widget;
 }
 
-function createModeButtonRow(node) {
-	// 新方案：直接将按钮注入到节点的 header 区域，避开 DOM widget 的问题
-	ensureModeButtonStyles();
+// 使用并排切换按钮替代下拉框（类似ReActor的OFF/ON）
+function buildModeControls(node) {
+	const state = ensureNodeState(node);
+	const currentMode = state[MODE_NAME];
 	
-	// 查找或创建 header 容器
-	let headerContainer = node.__gjjModeHeaderContainer;
-	if (!headerContainer || !headerContainer.parentNode) {
-		// 创建新的 header 容器
-		headerContainer = document.createElement("div");
-		headerContainer.id = `gjj-mode-header-${node.id}`;
-		headerContainer.className = "gjj-mode-header-container";
-		headerContainer.style.cssText = [
-			"display:flex",
-			"gap:8px",
-			"padding:8px 12px",
-			"margin:0",
-			"background:#1a2b35",
-			"border-bottom:1px solid #2a3f4d",
-			"position:relative",
-			"z-index:100",
-		].join(";");
-		
-		// 保存到节点引用，避免重复创建
-		node.__gjjModeHeaderContainer = headerContainer;
-		
-		// 将容器插入到节点的 DOM 结构中
-		// 尝试插入到 node.badges 或 node.title 之后
-		setTimeout(() => {
-			const nodeElement = document.querySelector(`[data-node-id="${node.id}"]`);
-			if (nodeElement) {
-				// 找到 title 区域
-				const titleElement = nodeElement.querySelector(".node-title") || nodeElement.querySelector("header");
-				if (titleElement && titleElement.parentNode) {
-					// 插入到 title 之后
-					titleElement.parentNode.insertBefore(headerContainer, titleElement.nextSibling);
-				} else if (nodeElement.firstChild) {
-					// 如果没有 title，插入到最前面
-					nodeElement.insertBefore(headerContainer, nodeElement.firstChild);
-				} else {
-					nodeElement.appendChild(headerContainer);
-				}
-			}
-		}, 10);
-	}
+	// 创建模式切换按钮容器
+	const container = document.createElement("div");
+	container.className = "gjj-mode-toggle-container";
+	container.style.cssText = [
+		"box-sizing:border-box",
+		"width:100%",
+		"display:flex",
+		"gap:0",
+		"padding:4px 0",
+		"margin:0",
+	].join(";");
 	
-	// 清空旧按钮
-	headerContainer.innerHTML = "";
-	
-	// 初始化模式按钮引用数组
-	node.__gjjModeButtons = [];
-	
-	const currentMode = getSelectionMode(node);
-	
-	for (const value of MODE_VALUES) {
-		const active = value === currentMode;
+	// 创建两个按钮：单选和多选
+	MODE_VALUES.forEach((modeValue) => {
+		const isActive = modeValue === currentMode;
 		const button = document.createElement("button");
 		button.type = "button";
-		button.className = "gjj-mode-button";
-		button.textContent = value;
-		button.title = value === MODE_SINGLE ? "单选：启用一个分组时会自动旁路其它匹配分组。" : "多选：可以同时启用多个匹配分组。";
-		button.dataset.mode = value;
-		button.__gjjModeValue = value;
+		button.textContent = modeValue;
+		button.className = isActive ? "gjj-mode-btn gjj-mode-btn-active" : "gjj-mode-btn";
+		button.style.cssText = [
+			"flex:1",
+			"height:32px",
+			"padding:6px 12px",
+			"border:1px solid #3b5560",
+			"border-radius:6px",
+			"background:#20323a",
+			"color:#edf6fa",
+			"font:700 13px sans-serif",
+			"cursor:pointer",
+			"transition:all 0.2s ease",
+			isActive ? "background:#1f6b43;border-color:#48ad73;color:#fff" : "",
+		].join(";");
 		
-		updateModeButtonClass(button, active);
-		node.__gjjModeButtons.push(button);
-		
-		// 只绑定 click 事件，不绑定 pointerdown
 		button.addEventListener("click", (event) => {
 			event.preventDefault();
 			event.stopPropagation();
 			
 			// 更新模式
-			updateSelectionMode(node, value);
+			updateSelectionMode(node, modeValue);
 			
 			// 处理单选模式下的分组状态
 			let activeGroups = getActiveGroupRefs(node);
-			if (value === MODE_SINGLE && activeGroups.size > 1) {
+			if (modeValue === MODE_SINGLE && activeGroups.size > 1) {
 				const firstGroup = [...activeGroups][0];
 				activeGroups = new Set(firstGroup ? [firstGroup] : []);
 			}
 			setActiveGroupRefs(node, activeGroups);
 			
-			// 同步状态
-			syncModeButtonStates(node);
+			// 同步所有分组按钮状态
 			syncGroupButtonStates(node, activeGroups);
 			applyMatchedGroupModes(node);
+			
+			// 更新按钮样式
+			container.querySelectorAll(".gjj-mode-btn").forEach(btn => {
+				const btnMode = btn.textContent;
+				const isBtnActive = btnMode === modeValue;
+				btn.className = isBtnActive ? "gjj-mode-btn gjj-mode-btn-active" : "gjj-mode-btn";
+				btn.style.background = isBtnActive ? "#1f6b43" : "#20323a";
+				btn.style.borderColor = isBtnActive ? "#48ad73" : "#3b5560";
+				btn.style.color = isBtnActive ? "#fff" : "#edf6fa";
+			});
 			
 			node.graph?.change?.();
 			node.setDirtyCanvas?.(true, true);
 			app.graph?.setDirtyCanvas?.(true, true);
 		});
 		
-		headerContainer.appendChild(button);
-	}
+		container.appendChild(button);
+	});
 	
-	// 返回 null，因为我们不再使用 DOM widget
-	return null;
-}
-
-function ensureModeButtonStyles() {
-	const styleId = "gjj-mode-button-styles";
-	if (document.getElementById(styleId)) {
-		return;
-	}
-
-	const style = document.createElement("style");
-	style.id = styleId;
-	style.textContent = `
-		.gjj-mode-header-container {
-			position: relative !important;
-			z-index: 100 !important;
-			pointer-events: auto !important;
-		}
-		.gjj-mode-button {
-			flex: 1 1 0;
-			height: 30px;
-			min-width: 0;
-			padding: 5px 8px;
-			border-radius: 5px;
-			border: 1px solid #3b5560;
-			background: #20323a;
-			color: #edf6fa;
-			font: 700 12px sans-serif;
-			cursor: pointer;
-			outline: none;
-			transition: all 0.2s ease;
-			position: relative;
-			z-index: 101;
-			pointer-events: auto;
-		}
-		.gjj-mode-button:hover {
-			background: #2a4a55 !important;
-			border-color: #4a6b78 !important;
-		}
-		.gjj-mode-button.on {
-			background: #1f6b43 !important;
-			border-color: #48ad73 !important;
-			color: #fff !important;
-		}
-	`;
-	document.head.appendChild(style);
-}
-
-function buildModeControls(node) {
-	ensureNodeState(node);
-	// createModeButtonRow 现在直接操作 DOM，不再返回 widget
-	createModeButtonRow(node);
+	// 添加DOM Widget
+	const modeWidget = node.addDOMWidget(MODE_NAME, "HTML", container, {
+		serialize: false,
+		hideOnZoom: false,
+	});
+	
+	modeWidget.value = currentMode;
+	modeWidget.__gjjModeToggle = true;
+	
+	return modeWidget;
 }
 
 function createGroupButtonWidget(node, group, isActive) {
@@ -432,13 +333,7 @@ function createGroupButtonWidget(node, group, isActive) {
 		app.graph?.setDirtyCanvas?.(true, true);
 	};
 
-	// 使用事件委托，避免重复绑定
-	// 只阻止事件冒泡，不阻止默认行为（避免阻止 click 事件）
-	button.addEventListener("pointerdown", (event) => {
-		event.stopPropagation();
-		// 注意：不要调用 preventDefault()，否则会阻止后续的 click 事件
-	});
-	
+	// 使用事件委托，只绑定一次click事件
 	button.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
@@ -530,9 +425,6 @@ function rebuildUI(node) {
 	
 	// 确保关键词值同步到原始 Python widget
 	syncFilterToOriginalWidget(node);
-	
-	// 强制提升所有 DOM widget 容器的层级
-	enforceWidgetZIndex(node);
 
 	const matchedGroups = getMatchedGroups(node);
 	releaseManagedGroups(node, matchedGroups);
@@ -716,14 +608,6 @@ function clearNodeWidgets(node) {
 	}
 
 	node.widgets = [];
-	
-	// 清理节点上的自定义引用
-	if (node.__gjjModeButtons) {
-		node.__gjjModeButtons = null;
-	}
-
-	// 注意：不要清理 __gjjModeHeaderContainer，因为 rebuildUI 时会复用
-	// 我们只需要清空它的 innerHTML，而不是移除 DOM 元素
 }
 
 function syncGroupButtonStates(node, activeGroups = getActiveGroupRefs(node)) {
@@ -738,30 +622,6 @@ function syncGroupButtonStates(node, activeGroups = getActiveGroupRefs(node)) {
 		widget.value = isActive;
 		widget.__buttonEl.textContent = `${isActive ? "✅ " : "❌ "}${title}`;
 		updateButtonClass(widget.__buttonEl, isActive);
-	});
-}
-
-function updateModeButtonClass(button, isActive) {
-	button.classList.toggle("on", isActive);
-
-	if (isActive) {
-		button.style.setProperty("background", "#1f6b43", "important");
-		button.style.setProperty("border-color", "#48ad73", "important");
-		button.style.setProperty("color", "#fff", "important");
-	} else {
-		button.style.setProperty("background", "#20323a", "important");
-		button.style.setProperty("border-color", "#3b5560", "important");
-		button.style.setProperty("color", "#edf6fa", "important");
-	}
-}
-
-function syncModeButtonStates(node) {
-	const mode = getSelectionMode(node);
-	const buttons = Array.isArray(node.__gjjModeButtons) ? node.__gjjModeButtons : [];
-
-	buttons.forEach((button) => {
-		const value = button.__gjjModeValue;
-		updateModeButtonClass(button, value === mode);
 	});
 }
 

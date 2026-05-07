@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
 MAX_ROWS = 4
 MAX_COLS = 4
@@ -91,7 +91,7 @@ class GJJ_ImageSplitter:
             "image": {"type": "IMAGE", "required": False, "description": "输入待分割的图片"},
         },
         "outputs": {
-            "批量图片": {"type": "GJJ_BATCH_IMAGE", "description": "所有裁剪区块合并为一张批量图片，便于后续批量处理"},
+            "批量图片": {"type": "GJJ_BATCH_IMAGE,IMAGE", "description": "所有裁剪区块合并为一张批量图片，便于后续批量处理"},
             "区块_1_1 ~ 区块_N_N": {"type": "IMAGE", "description": "按 4×4 网格位置输出的裁剪区块，仅激活的区块有数据"},
         },
     }
@@ -123,7 +123,7 @@ class GJJ_ImageSplitter:
             },
         }
 
-    RETURN_TYPES = (GJJ_BATCH_IMAGE_TYPE,) + ("IMAGE",) * MAX_BLOCKS
+    RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE",) + ("IMAGE",) * MAX_BLOCKS
     RETURN_NAMES = ("批量图片",) + tuple(
         f"区块_{i + 1}"
         for i in range(MAX_BLOCKS)

@@ -9,7 +9,7 @@ import comfy.sd
 import comfy.utils
 import folder_paths
 import torch
-from comfy_extras.nodes_audio import vae_decode_audio
+from .common_utils.audio_tools import vae_decode_audio
 from nodes import (
     CheckpointLoaderSimple,
     ConditioningZeroOut,

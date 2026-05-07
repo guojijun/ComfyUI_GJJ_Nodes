@@ -9,7 +9,8 @@ import folder_paths
 import torch
 from nodes import PreviewImage
 
-from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
+from .gjj_multi_image_loader import build_uniform_batch_by_longest_edge
 
 NODE_NAME = "GJJ_AnyPreview"
 
@@ -87,14 +88,9 @@ def resize_image_batch(images: torch.Tensor, width: int, height: int) -> torch.T
 
 def merge_images(values: list[torch.Tensor]) -> torch.Tensor:
 	batches = [normalize_image_tensor(value) for value in values]
-	max_width = max(int(batch.shape[2]) for batch in batches)
-	max_height = max(int(batch.shape[1]) for batch in batches)
-	merged = []
-	for batch in batches:
-		if int(batch.shape[2]) != max_width or int(batch.shape[1]) != max_height:
-			batch = resize_image_batch(batch, max_width, max_height)
-		merged.append(batch)
-	return torch.cat(merged, dim=0)
+	# 使用长边缩放统一尺寸，而不是最大尺寸缩放
+	# 这样可以避免小图被放大产生黑边
+	return build_uniform_batch_by_longest_edge(batches, method="lanczos")
 
 
 def serialize_preview(value: Any) -> str:
@@ -272,9 +268,9 @@ class GJJ_AnyPreview:
 		
 		"inputs": {
 			"batch_image": {
-				"type": "GJJ_BATCH_IMAGE",
+				"type": "GJJ_BATCH_IMAGE,IMAGE",
 				"required": False,
-				"description": "GJJ 专用批量图片接口，优先作为图片批次预览",
+				"description": "GJJ 专用批量图片接口，优先作为图片批次预览（兼容标准 IMAGE）",
 			},
 			"any_XX": {
 				"type": "*",
@@ -536,9 +532,14 @@ class GJJ_AnyPreview:
 		# 添加最终调试日志
 		print(f"[GJJ] 最终返回的ui数据: {ui}")
 		print(f"[GJJ] ui.keys: {list(ui.keys())}")
+		
+		# 确保返回的是原始输入值，而不是内部处理后的 merged 对象
+		# 如果 values 只有一个元素，返回该元素；否则返回合并后的结果
+		result_output = values[0] if len(values) == 1 else merged
+		
 		return {
 			"ui": ui,
-			"result": (merged,),
+			"result": (result_output,),
 		}
 
 

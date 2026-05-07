@@ -13,9 +13,6 @@ const PREVIEW_WIDGET_NAME = "gjj_any_preview_text";
 const EMPTY_PREVIEW = "执行后在这里预览文本、对象或调试信息";
 const MIN_PREVIEW_HEIGHT = 96;
 const IMAGE_PREVIEW_MIN_HEIGHT = 124;
-const IMAGE_CARD_HEIGHT = 145;
-const IMAGE_CARD_IMAGE_HEIGHT = 108;
-const IMAGE_CARD_TARGET_WIDTH = 120;
 const SINGLE_IMAGE_PREVIEW_HEIGHT = 360;
 const MIN_NODE_HEIGHT = 180;
 const MIN_WIDTH = 300;
@@ -122,17 +119,30 @@ function estimateImagePreviewHeight(node) {
 	if (count === 1) {
 		return SINGLE_IMAGE_PREVIEW_HEIGHT;
 	}
+
 	const nodeWidth = Math.max(MIN_WIDTH, Number(node?.size?.[0] || MIN_WIDTH));
+	// 减去 padding 和 border
 	const contentWidth = Math.max(220, nodeWidth - 36);
+	
+	// 动态计算列数：正方形卡片，最小宽度 140px，间距 8px
+	const minCardWidth = 140;
+	const gap = 8;
 	const columns = Math.min(
 		count,
-		Math.max(1, Math.floor(contentWidth / IMAGE_CARD_TARGET_WIDTH)),
+		Math.max(1, Math.floor((contentWidth + gap) / (minCardWidth + gap))),
 	);
+	
 	const rows = Math.max(1, Math.ceil(count / columns));
-	const totalGap = Math.max(0, rows - 1) * 8;
+	
+	// 正方形卡片，高度等于宽度
+	const actualCardWidth = (contentWidth - (columns - 1) * gap) / columns;
+	const cardHeight = actualCardWidth; // 正方形，高度=宽度
+	
+	// 计算总高度：行数 * 卡片高度 + 间距
+	const totalGap = (rows - 1) * gap;
 	return Math.max(
-		IMAGE_PREVIEW_MIN_HEIGHT,
-		rows * IMAGE_CARD_HEIGHT + totalGap + 18,
+		MIN_PREVIEW_HEIGHT,
+		rows * cardHeight + totalGap + 18,
 	);
 }
 
@@ -160,7 +170,7 @@ function updateLayout(node) {
 	// 只更新高度，保留用户设置的宽度
 	const height =
 		String(node.__gjjAnyPreviewKind || "") === "image"
-			? Math.max(MIN_NODE_HEIGHT, estimateImagePreviewHeight(node) + 72)
+			? Math.max(MIN_NODE_HEIGHT, estimateImagePreviewHeight(node) + 36)
 			: measureHeight(node);
 	node.setSize?.([node.size?.[0], height]);
 	setDirty(node);
@@ -527,138 +537,186 @@ function applyPreviewContent(node) {
 
 	if (showImage) {
 		const isSingleImage = images.length === 1;
-		const cardHeight = isSingleImage
-			? Math.max(160, availableHeight - 18)
-			: IMAGE_CARD_HEIGHT;
-		const imageHeight = isSingleImage
-			? Math.max(120, cardHeight - 28)
-			: IMAGE_CARD_IMAGE_HEIGHT;
+		
+		// 单图和多图使用不同的样式
 		grid.style.gridTemplateColumns = isSingleImage
 			? "repeat(1, minmax(0, 1fr))"
-			: "repeat(auto-fill, minmax(120px, 1fr))";
+			: "repeat(auto-fill, minmax(140px, 1fr))";
+		grid.style.gap = "8px";
 		grid.style.height = "auto";
 		grid.style.alignItems = "start";
 		grid.replaceChildren();
+		
 		for (const [index, item] of images.entries()) {
 			const card = document.createElement("div");
 			card.style.cssText = [
 				"position:relative",
-				"display:flex",
-				"flex-direction:column",
-				"padding:0",
-				"border:none",
-				"border-radius:0",
-				"background:#12191d",
-				"min-width:0",
-				"box-sizing:border-box",
-				`height:${cardHeight}px`,
-				"overflow:hidden",
-			].join(";");
-
-			const imageWrapper = document.createElement("div");
-			imageWrapper.style.cssText = [
-				"position:relative",
 				"width:100%",
-				"height:100%",
-				"display:flex",
-				"align-items:center",
-				"justify-content:center",
+				"aspect-ratio:1/1",
+				"overflow:hidden",
+				"border-radius:6px",
+				"cursor:pointer",
+				"transition:transform 0.2s ease",
+				"background:#12191d",
 			].join(";");
+			
+			// 鼠标悬停效果
+			card.addEventListener("mouseenter", () => {
+				card.style.transform = "scale(1.05)";
+			});
+			card.addEventListener("mouseleave", () => {
+				card.style.transform = "scale(1)";
+			});
 
+			// 图片元素 - 使用object-fit:cover撑满画布
 			const image = document.createElement("img");
 			image.src = imageDataToUrl(item);
 			image.draggable = false;
 			image.style.cssText = [
 				"width:100%",
 				"height:100%",
-				"object-fit:contain",
-				"background:#0c1114",
+				"object-fit:cover",
 				"display:block",
 			].join(";");
+			
+			// 图片加载完成后更新尺寸
 			image.onload = () => {
+				if (sizeBadge) {
+					sizeBadge.textContent = `${image.naturalWidth}×${image.naturalHeight}`;
+				}
 				scheduleLayout(node);
 			};
 			image.onerror = () => {
+				if (sizeBadge) {
+					sizeBadge.textContent = "加载失败";
+				}
 				scheduleLayout(node);
 			};
 
-			// 添加点击放大功能
-			image.style.cursor = "pointer";
-			image.addEventListener("click", (e) => {
-				e.stopPropagation(); // 防止事件冒泡影响canvas
-
-				// 创建覆盖层
-				const overlay = document.createElement("div");
-				overlay.style.position = "fixed";
-				overlay.style.top = "0";
-				overlay.style.left = "0";
-				overlay.style.width = "100%";
-				overlay.style.height = "100%";
-				overlay.style.backgroundColor = "rgba(0, 0, 0, 0.8)";
-				overlay.style.display = "flex";
-				overlay.style.justifyContent = "center";
-				overlay.style.alignItems = "center";
-				overlay.style.zIndex = "10000";
-				overlay.style.cursor = "pointer";
-
-				// 创建放大的图片
-				const zoomedImage = document.createElement("img");
-				zoomedImage.src = image.src;
-				zoomedImage.style.maxWidth = "90%";
-				zoomedImage.style.maxHeight = "90%";
-				zoomedImage.style.objectFit = "contain";
-				zoomedImage.style.cursor = "pointer";
-
-				// 点击放大图片或覆盖层关闭
-				const closeOverlay = (event) => {
-					if (overlay.parentNode) {
-						document.body.removeChild(overlay);
-						document.removeEventListener("keydown", handleKeyDown);
-					}
-				};
-
-				// 点击覆盖层背景关闭（但不包括点击放大图片的情况）
-				overlay.addEventListener("click", (e) => {
-					// 如果点击的是overlay本身而不是图片，则关闭
-					if (e.target === overlay) {
-						closeOverlay(e);
-					}
-				});
-
-				// ESC键关闭功能
-				const handleKeyDown = (e) => {
-					if (e.key === "Escape") {
-						closeOverlay(e);
-					}
-				};
-
-				document.addEventListener("keydown", handleKeyDown);
-
-				overlay.appendChild(zoomedImage);
-				document.body.appendChild(overlay);
-			});
-
-			// 创建序号标签，以50%透明度覆盖在图片上
-			const caption = document.createElement("div");
-			caption.textContent = `${index + 1}`;
-			caption.style.cssText = [
+			// 左上角：图片序号
+			const indexBadge = document.createElement("div");
+			indexBadge.textContent = `${index + 1}`;
+			indexBadge.style.cssText = [
 				"position:absolute",
-				"top:4px",
-				"left:4px",
-				"font-size:12px",
+				"top:6px",
+				"left:6px",
+				"min-width:24px",
+				"height:24px",
+				"padding:0 6px",
+				"border-radius:12px",
+				"background:rgba(0, 0, 0, 0.5)",
+				"backdrop-filter:blur(4px)",
+				"color:#fff",
+				"font-size:11px",
 				"font-weight:bold",
-				"color:#ffffff",
-				"opacity:0.5",
-				"background:rgba(0,0,0,0.3)",
-				"padding:2px 6px",
-				"border-radius:3px",
+				"display:flex",
+				"align-items:center",
+				"justify-content:center",
 				"pointer-events:none",
-				"z-index:1",
+				"z-index:2",
 			].join(";");
 
-			imageWrapper.appendChild(image);
-			imageWrapper.appendChild(caption);
-			card.appendChild(imageWrapper);
+			// 右上角：图片尺寸
+			const sizeBadge = document.createElement("div");
+			sizeBadge.style.cssText = [
+				"position:absolute",
+				"top:6px",
+				"right:6px",
+				"padding:2px 8px",
+				"border-radius:4px",
+				"background:rgba(0, 0, 0, 0.5)",
+				"backdrop-filter:blur(4px)",
+				"color:#fff",
+				"font-size:10px",
+				"pointer-events:none",
+				"z-index:2",
+				"white-space:nowrap",
+			].join(";");
+			
+			// 初始显示加载中
+			sizeBadge.textContent = "加载中...";
+
+			// 点击图片放大查看（带滚轮缩放）
+			card.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				
+				// 创建全屏预览
+				const overlay = document.createElement("div");
+				overlay.style.cssText = [
+					"position:fixed",
+					"inset:0",
+					"background:rgba(0, 0, 0, 0.9)",
+					"backdrop-filter:blur(10px)",
+					"z-index:10000",
+					"display:flex",
+					"align-items:center",
+					"justify-content:center",
+					"cursor:zoom-out",
+				].join(";");
+				
+				const previewImg = document.createElement("img");
+				previewImg.src = imageDataToUrl(item);
+				previewImg.style.cssText = [
+					"max-width:90%",
+					"max-height:90%",
+					"object-fit:contain",
+					"border-radius:8px",
+					"box-shadow:0 0 40px rgba(0, 0, 0, 0.5)",
+					"transition:transform 0.1s ease",
+					"cursor:grab",
+				].join(";");
+				
+				// 滚轮缩放功能
+				let currentScale = 1;
+				const minScale = 0.1;
+				const maxScale = 10;
+				
+				overlay.addEventListener("wheel", (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					
+					const delta = e.deltaY > 0 ? -0.1 : 0.1;
+					currentScale = Math.max(minScale, Math.min(maxScale, currentScale + delta));
+					previewImg.style.transform = `scale(${currentScale})`;
+				});
+				
+				// 双击重置缩放
+				previewImg.addEventListener("dblclick", (e) => {
+					e.stopPropagation();
+					currentScale = 1;
+					previewImg.style.transform = `scale(${currentScale})`;
+				});
+				
+				// 提示文字
+				const hint = document.createElement("div");
+				hint.style.cssText = [
+					"position:absolute",
+					"bottom:20px",
+					"left:50%",
+					"transform:translateX(-50%)",
+					"color:#fff",
+					"font-size:13px",
+					"opacity:0.6",
+					"pointer-events:none",
+					"white-space:nowrap",
+				].join(";");
+				hint.textContent = "滚轮缩放 · 双击重置 · 点击关闭";
+				
+				overlay.appendChild(previewImg);
+				overlay.appendChild(hint);
+				document.body.appendChild(overlay);
+				
+				// 点击关闭
+				overlay.addEventListener("click", () => {
+					overlay.remove();
+				});
+			});
+
+			// 组装卡片
+			card.appendChild(image);
+			card.appendChild(indexBadge);
+			card.appendChild(sizeBadge);
 			grid.appendChild(card);
 		}
 		// 图片预览分支结束，body 已在前置逻辑中隐藏
@@ -1222,7 +1280,7 @@ app.registerExtension({
 				const sizeSignature = `${Math.round(this.size?.[0] || 0)}x${Math.round(this.size?.[1] || 0)}`;
 				if (this.__gjjAnyPreviewSizeSignature !== sizeSignature) {
 					this.__gjjAnyPreviewSizeSignature = sizeSignature;
-					applyPreviewContent(this);
+					// 只更新高度，不重新渲染内容，避免无限循环
 					updateLayout(this);
 				}
 			}

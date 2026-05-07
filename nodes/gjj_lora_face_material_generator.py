@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .gjj_character_multiview_studio import DEFAULT_NEGATIVE_PROMPT, DEFAULT_SEED, _make_squareish_collage, _send_status
 from .gjj_lazy_image_studio import (
     DEFAULT_CLIP_NAME,

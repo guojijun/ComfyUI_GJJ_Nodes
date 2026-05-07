@@ -25,7 +25,8 @@ from .gjj_lazy_image_studio import (
     list_clip_models,
     list_unet_models,
 )
-from .gjj_multi_image_loader import build_uniform_batch
+# 移除外部依赖，在节点内部实现统一的缩放和补齐逻辑
+from .gjj_multi_image_loader import build_uniform_batch_by_longest_edge
 
 
 NODE_NAME = "GJJ_BatchWatermarkRemover"
@@ -89,6 +90,7 @@ def _resize_image_exact(image: torch.Tensor, width: int, height: int, method: st
 
 
 def _scale_to_total_pixels(image: torch.Tensor, megapixels: float, method: str) -> torch.Tensor:
+    """按总像素数缩放图像"""
     target_pixels = max(0.05, float(megapixels)) * 1_000_000.0
     width = max(1, int(image.shape[2]))
     height = max(1, int(image.shape[1]))
@@ -103,50 +105,79 @@ def _scale_to_total_pixels(image: torch.Tensor, megapixels: float, method: str) 
     return _resize_image_exact(image, new_width, new_height, method)
 
 
-def _encode_text(clip, text: str):
-    return clip.encode_from_tokens_scheduled(clip.tokenize(str(text or "")))
-
-
-def _zero_out(conditioning):
-    return ConditioningZeroOut().zero_out(conditioning)[0]
-
-
-def _append_reference_latent(conditioning, latent_samples: torch.Tensor):
-    return node_helpers.conditioning_set_values(conditioning, {"reference_latents": [latent_samples]}, append=True)
-
-
-def _resolve_from_category(category: str, requested: str, label: str) -> str:
-    available = _safe_filename_list(category)
-    resolved = _pick_available_name(requested, available, requested)
-    if not resolved:
-        raise RuntimeError(f"未找到{label}模型：{requested}")
-    return resolved
-
-
-def _resolve_unet_name(requested: str) -> str:
-    available = list_unet_models() or _safe_filename_list("diffusion_models") or [DEFAULT_UNET]
-    resolved = _pick_available_name(requested, available, DEFAULT_UNET)
-    if not resolved:
-        raise RuntimeError(f"未找到 UNET 模型：{requested}")
-    return resolved
-
-
-def _resolve_clip_name(requested: str) -> str:
-    available = list_clip_models() or _safe_filename_list("text_encoders") or [DEFAULT_CLIP]
-    resolved = _pick_available_name(requested, available, DEFAULT_CLIP)
-    if not resolved:
-        raise RuntimeError(f"未找到 CLIP 模型：{requested}")
-    return resolved
+def _pad_image_height(image: torch.Tensor, target_height: int, padding_mode: str = "center") -> torch.Tensor:
+    """居中补齐图像高度"""
+    current_height = int(image.shape[1])
+    if current_height >= target_height:
+        return image
+    
+    # 计算需要补齐的像素数
+    pad_height = target_height - current_height
+    pad_top = pad_height // 2 if padding_mode == "center" else 0
+    pad_bottom = pad_height - pad_top
+    
+    # 创建黑色填充（RGB全0）
+    batch_size = int(image.shape[0])
+    width = int(image.shape[2])
+    channels = int(image.shape[3])
+    
+    # 创建填充张量
+    top_pad = torch.zeros(batch_size, pad_top, width, channels, device=image.device, dtype=image.dtype) if pad_top > 0 else None
+    bottom_pad = torch.zeros(batch_size, pad_bottom, width, channels, device=image.device, dtype=image.dtype) if pad_bottom > 0 else None
+    
+    # 拼接
+    parts = []
+    if top_pad is not None:
+        parts.append(top_pad)
+    parts.append(image)
+    if bottom_pad is not None:
+        parts.append(bottom_pad)
+    
+    return torch.cat(parts, dim=1)
 
 
 def _merge_output_images(images: list[torch.Tensor]) -> tuple[torch.Tensor, bool]:
+    """合并输出图片，先按最大长边缩放，再居中补齐高度"""
     if not images:
         raise RuntimeError("没有可输出的去水印结果。")
+    
     normalized = [_ensure_image_batch(image) for image in images]
+    
+    # 检查尺寸是否一致
     size_set = {(int(image.shape[2]), int(image.shape[1])) for image in normalized}
     if len(size_set) == 1:
         return torch.cat(normalized, dim=0).contiguous(), False
-    return build_uniform_batch(normalized), True
+    
+    # 尺寸不一致，需要统一处理
+    # 第一遍：找到所有图片的最大长边
+    max_longest_edge = 0
+    for image in normalized:
+        height = int(image.shape[1])
+        width = int(image.shape[2])
+        max_longest_edge = max(max_longest_edge, max(height, width))
+    
+    # 第二遍：按最大长边缩放，然后居中补齐高度
+    scaled = []
+    for image in normalized:
+        height = int(image.shape[1])
+        width = int(image.shape[2])
+        longest_edge = max(height, width)
+        
+        # 按长边缩放到统一尺寸
+        if longest_edge != max_longest_edge:
+            scale_factor = max_longest_edge / longest_edge
+            new_width = int(round(width * scale_factor / 8.0) * 8)
+            new_height = int(round(height * scale_factor / 8.0) * 8)
+            image = _resize_image_exact(image, new_width, new_height, "lanczos")
+        
+        # 如果高度不一致，居中补齐
+        current_height = int(image.shape[1])
+        if current_height < max_longest_edge:
+            image = _pad_image_height(image, max_longest_edge, "center")
+        
+        scaled.append(image)
+    
+    return torch.cat(scaled, dim=0).contiguous(), True
 
 
 def _output_root() -> Path:
@@ -328,6 +359,32 @@ def _save_result_images(
     return previews, saved_paths
 
 
+def _resolve_from_category(category: str, requested: str, label: str) -> str:
+    available = _safe_filename_list(category)
+    resolved = _pick_available_name(requested, available, requested)
+    if not resolved:
+        raise RuntimeError(f"未找到{label}模型：{requested}")
+    return resolved
+
+
+def _resolve_unet_name(requested: str) -> str:
+    """解析 UNET 模型名称"""
+    available = list_unet_models() or _safe_filename_list("diffusion_models") or [DEFAULT_UNET]
+    resolved = _pick_available_name(requested, available, DEFAULT_UNET)
+    if not resolved:
+        raise RuntimeError(f"未找到 UNET 模型：{requested}")
+    return resolved
+
+
+def _resolve_clip_name(requested: str) -> str:
+    """解析 CLIP 模型名称"""
+    available = list_clip_models() or _safe_filename_list("text_encoders") or [DEFAULT_CLIP]
+    resolved = _pick_available_name(requested, available, DEFAULT_CLIP)
+    if not resolved:
+        raise RuntimeError(f"未找到 CLIP 模型：{requested}")
+    return resolved
+
+
 def _process_single_image(
     image: torch.Tensor,
     model,
@@ -338,6 +395,7 @@ def _process_single_image(
     working_megapixels: float,
     scale_method: str,
     output_size_mode: str,
+    target_longest_edge: int | None,
     steps: int,
     cfg: float,
     seed: int,
@@ -367,8 +425,20 @@ def _process_single_image(
 
     _send_status(unique_id, f"解码结果{suffix}...")
     result = VAEDecode().decode(vae, sampled)[0]
-    if output_size_mode == "保持输入尺寸" and (int(result.shape[2]) != source_width or int(result.shape[1]) != source_height):
-        result = _resize_image_exact(result, source_width, source_height, scale_method)
+    
+    # 如果指定了目标长边，则缩放到该尺寸
+    if target_longest_edge is not None and output_size_mode == "保持输入尺寸":
+        result_height = int(result.shape[1])
+        result_width = int(result.shape[2])
+        result_longest_edge = max(result_height, result_width)
+        
+        if result_longest_edge != target_longest_edge:
+            # 计算缩放比例
+            scale_factor = target_longest_edge / result_longest_edge
+            new_width = max(16, int(round(result_width * scale_factor / 8.0) * 8))
+            new_height = max(16, int(round(result_height * scale_factor / 8.0) * 8))
+            result = _resize_image_exact(result, new_width, new_height, scale_method)
+    
     return result.clamp(0.0, 1.0).contiguous()
 
 
@@ -378,7 +448,7 @@ class GJJ_BatchWatermarkRemover:
     RETURN_TYPES = (GJJ_BATCH_IMAGE_TYPE,)
     RETURN_NAMES = ("批量图片",)
     OUTPUT_TOOLTIPS = (
-        "全部去水印结果打包成 GJJ 专用批量图片；尺寸不一致时会自动补齐为统一批次。需要单图时请接 GJJ 批量图片解包/预览类节点。",
+        "全部去水印结果打包成 GJJ 专用批量图片；尺寸不一致时会自动通过长边缩放统一为相同尺寸。需要单图时请接 GJJ 批量图片解包/预览类节点。",
     )
     FUNCTION = "remove"
     OUTPUT_NODE = True
@@ -570,6 +640,18 @@ class GJJ_BatchWatermarkRemover:
 
             total = len(input_images)
             results: list[torch.Tensor] = []
+            
+            # 计算所有输入图片在工作尺寸下的最大长边（用于统一输出尺寸）
+            max_longest_edge = 0
+            if output_size_mode == "保持输入尺寸":
+                for single_image in input_images:
+                    source = _ensure_image_batch(single_image)
+                    # 先缩放到工作尺寸
+                    working = _scale_to_total_pixels(source, working_megapixels, scale_method)
+                    work_height = int(working.shape[1])
+                    work_width = int(working.shape[2])
+                    max_longest_edge = max(max_longest_edge, max(work_height, work_width))
+            
             for index, single_image in enumerate(input_images, start=1):
                 suffix = f"（第 {index}/{total} 张）" if total > 1 else ""
                 _send_status(unique_id, f"2/4 准备图片{suffix}...")
@@ -584,6 +666,7 @@ class GJJ_BatchWatermarkRemover:
                         working_megapixels,
                         scale_method,
                         output_size_mode,
+                        max_longest_edge if output_size_mode == "保持输入尺寸" else None,
                         steps,
                         cfg,
                         int(seed) + index - 1,
@@ -596,7 +679,7 @@ class GJJ_BatchWatermarkRemover:
             width = int(result.shape[2])
             height = int(result.shape[1])
             if used_padding:
-                _send_status(unique_id, f"4/4 完成：{len(results)} 张，已补齐到统一尺寸 {width} x {height}")
+                _send_status(unique_id, f"4/4 完成：{len(results)} 张，已缩放统一尺寸到 {width} x {height}")
             else:
                 _send_status(unique_id, f"4/4 完成：{len(results)} 张，尺寸 {width} x {height}")
             if bool(auto_save):

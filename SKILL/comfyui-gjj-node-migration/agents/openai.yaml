@@ -1,4 +1,0 @@
-interface:
-  display_name: "ComfyUI GJJ Node Migration"
-  short_description: "Port and refine ComfyUI custom nodes for the GJJ package."
-  default_prompt: "Use this skill to migrate, rewrite, or polish ComfyUI custom nodes for D:\\AI\\MOD\\custom_nodes\\GJJ with Chinese labels, portable dependencies, and GJJ-compatible frontend behavior."

@@ -146,14 +146,18 @@ function refreshLayout(node) {
 }
 
 function getWidgetHeight(node, widget) {
+	// 让DOM Widget靠顶部，充分利用可用高度
 	const nodeHeight = Math.max(MIN_HEIGHT, Number(node?.size?.[1] || MIN_HEIGHT));
-	const topOffset = Math.max(
-		0,
-		Number(widget?.y || 0),
-		Number(widget?.last_y || 0),
-	);
-	const availableHeight = nodeHeight - topOffset - NODE_BOTTOM_PADDING;
-	return Math.max(180, availableHeight);
+	
+	// 减去底部padding
+	const availableHeight = nodeHeight - NODE_BOTTOM_PADDING;
+	
+	// 如果有选择按钮栏，减去其高度
+	const state = getCurrentState(node);
+	const hasSelectorBar = state.images.length > 2;
+	const selectorBarHeight = hasSelectorBar ? 32 : 0;
+	
+	return Math.max(180, availableHeight - selectorBarHeight);
 }
 
 function createButton(label) {
@@ -161,16 +165,32 @@ function createButton(label) {
 	button.type = "button";
 	button.textContent = label;
 	button.style.cssText = [
-		"height:22px",
-		"padding:0 8px",
+		"height:24px",
+		"padding:0 10px",
 		"border:1px solid #465761",
-		"border-radius:6px",
+		"border-radius:4px",
 		"background:#1a2328",
 		"color:#dce7e2",
 		"font-size:11px",
+		"font-weight:500",
 		"line-height:1",
 		"cursor:pointer",
+		"transition:all 0.15s ease",
+		"box-sizing:border-box",
 	].join(";");
+	
+	// 添加悬停效果
+	button.addEventListener("mouseenter", () => {
+		button.style.background = "#26343d";
+		button.style.borderColor = "#7d96a2";
+	});
+	button.addEventListener("mouseleave", () => {
+		if (!button.style.background.includes("#26343d")) {
+			button.style.background = "#1a2328";
+			button.style.borderColor = "#465761";
+		}
+	});
+	
 	return button;
 }
 
@@ -266,34 +286,41 @@ function buildCompareDom(node) {
 	container.style.cssText = [
 		"display:flex",
 		"flex-direction:column",
-		"gap:8px",
+		"gap:0",
 		"width:100%",
 		"height:100%",
 		"min-height:0",
 		"box-sizing:border-box",
-		"padding:4px 0 0 0",
+		"padding:0",
+		"margin:0",
 		"cursor:default",
+		"position:relative",
 	].join(";");
 
 	const selectorBar = document.createElement("div");
 	selectorBar.style.cssText = [
 		"display:none",
 		"flex-wrap:wrap",
-		"gap:6px",
+		"gap:4px",
 		"align-items:center",
+		"padding:2px 4px",
+		"min-height:28px",
+		"background:#0f1418",
+		"border:1px solid #2a3a42",
+		"border-bottom:none",
+		"border-radius:6px 6px 0 0",
 	].join(";");
 
 	const compareArea = document.createElement("div");
 	compareArea.style.cssText = [
 		"position:relative",
 		"width:100%",
-		"height:100%",
 		"flex:1 1 auto",
 		"min-height:0",
 		"overflow:hidden",
-		"border:1px solid #3c4c54",
-		"border-radius:10px",
-		"background:#0f1418",
+		"border:1px solid #2a3a42",
+		"border-radius:0 0 6px 6px",
+		"background:#0a0f12",
 		"user-select:none",
 		"touch-action:none",
 		"cursor:default",
@@ -557,15 +584,43 @@ function updateSelectorBar(node) {
 	}
 
 	selectorBar.style.display = "flex";
+	
+	// 添加分组标签
+	let lastGroup = "";
 	for (const item of state.images) {
+		const currentGroup = String(item?.name || "").startsWith("A") ? "A" : "B";
+		
+		// 如果是新组的开始，添加分隔符
+		if (currentGroup !== lastGroup && lastGroup !== "") {
+			const separator = document.createElement("div");
+			separator.style.cssText = [
+				"width:1px",
+				"height:16px",
+				"background:#2a3a42",
+				"margin:0 4px",
+			].join(";");
+			selectorBar.appendChild(separator);
+		}
+		lastGroup = currentGroup;
+		
 		const button = createButton(item.name);
-		button.style.background = item.selected ? "#26343d" : "#1a2328";
-		button.style.borderColor = item.selected ? "#7d96a2" : "#465761";
+		// 选中状态样式
+		if (item.selected) {
+			button.style.background = "#1f6b43";
+			button.style.borderColor = "#48ad73";
+			button.style.color = "#ffffff";
+		} else {
+			button.style.background = "#1a2328";
+			button.style.borderColor = "#465761";
+			button.style.color = "#dce7e2";
+		}
+		
 		button.addEventListener("click", (event) => {
 			event.preventDefault();
 			event.stopPropagation();
 			onSelectionDown(node, item);
 		});
+		
 		selectorBar.appendChild(button);
 	}
 }

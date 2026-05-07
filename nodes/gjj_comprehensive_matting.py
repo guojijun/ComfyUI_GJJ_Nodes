@@ -18,7 +18,7 @@ from torchvision.transforms.functional import to_pil_image
 
 import folder_paths
 
-from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
 
 NODE_NAME = "GJJ_ComprehensiveMatting"
@@ -605,7 +605,7 @@ class GJJ_ComprehensiveMatting:
     FUNCTION = "remove_background"
     DESCRIPTION = "综合抠图节点：RMBG2、BiRefNet 通用/精细、BEN2、Inspyrenet。模型会在 models 下相关目录模糊搜索。"
     SEARCH_ALIASES = ["rmbg", "remove background", "抠图", "去背景", "背景移除", "前景提取", "birefnet", "ben2", "inspyrenet"]
-    RETURN_TYPES = (GJJ_BATCH_IMAGE_TYPE,)
+    RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE",)
     RETURN_NAMES = ("综合批量图",)
     OUTPUT_TOOLTIPS = ("把所有已选路线的结果按路线顺序合并成一个 GJJ 专用批量图片输出。",)
 

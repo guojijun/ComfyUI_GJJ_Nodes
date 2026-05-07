@@ -45,7 +45,6 @@ def get_analysis_model(det_size=(640, 640)):
                     # 验证是否成功加载 detection 模型
                     if 'detection' in ANALYSIS_MODELS[key].models:
                         model_loaded = True
-                        print(f"[GJJ FaceAnalysis] ✅ 成功从 {root_path} 加载 buffalo_l 模型")
                         break
                     else:
                         print(f"[GJJ FaceAnalysis] ⚠️  {root_path} 中缺少 detection 模型")

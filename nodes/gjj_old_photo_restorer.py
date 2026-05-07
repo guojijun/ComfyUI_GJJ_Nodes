@@ -11,6 +11,10 @@ import torch
 from nodes import VAEDecode, common_ksampler
 from server import PromptServer
 
+from .common_utils.text_tools import (
+	gjjutils_normalize_text as _normalize_text,
+	gjjutils_pick_available_name as _pick_available_name,
+)
 from .gjj_lazy_image_studio import (
 	DEFAULT_UNET_DTYPE,
 	DEFAULT_UNET_NAME,
@@ -19,14 +23,19 @@ from .gjj_lazy_image_studio import (
 	_load_clip_from_names,
 	_load_model,
 	_load_vae,
-	_normalize_text,
 	_patch_model_sampling,
-	_pick_available_name,
 	_resize_to_long_edge,
 	_safe_filename_list,
 	list_clip_models,
 	list_unet_models,
 	list_vae_models,
+)
+from .common_utils.model_family import (
+	gjjutils_model_family_match_preset as match_model_family,
+	gjjutils_model_family_resolve_clip_type as resolve_clip_type,
+	gjjutils_model_family_resolve_clip_names as resolve_clip_names_for_preset,
+	MODEL_FAMILY_PRESETS,
+	DEFAULT_VAE_NAME as MODEL_DEFAULT_VAE,
 )
 from .gjj_model_upscaler import _load_upscale_model, _list_upscale_models
 
@@ -189,7 +198,7 @@ def _encode_qwen_edit_single_image(clip, vae, image: torch.Tensor, prompt: str, 
 	main_ref_image = canvas.movedim(1, -1)
 	main_ref_latent = vae.encode(main_ref_image[:, :, :, :3])
 	vl_tensor = _resize_to_long_edge(samples, 512, "bicubic", "center").movedim(1, -1)
-	full_prompt = f"Picture 1: <|vision_start|><|image_pad|><|vision_end|>{str(prompt or '')}"
+	full_prompt = f"Picture 1: {str(prompt or '')}"
 	tokens = clip.tokenize(full_prompt, images=[vl_tensor])
 	conditioning = clip.encode_from_tokens_scheduled(tokens)
 	positive = _conditioning_set_values(conditioning, {"reference_latents": [main_ref_latent]}, append=True)
@@ -310,13 +319,31 @@ class GJJ_OldPhotoRestorer:
 			if not resolved_unet:
 				raise RuntimeError(f"未找到 UNET 模型：{unet_name}")
 
-			resolved_clip = _resolve_basename_match(DEFAULT_CLIP, clip_models, DEFAULT_CLIP)
-			if not resolved_clip:
-				raise RuntimeError(f"未找到 CLIP 模型：{DEFAULT_CLIP}")
-
-			resolved_vae = _resolve_basename_match(DEFAULT_VAE, vae_models, DEFAULT_VAE)
-			if not resolved_vae:
-				raise RuntimeError(f"未找到 VAE 模型：{DEFAULT_VAE}")
+			# 根据 UNET 名称匹配模型预设
+			preset = match_model_family(resolved_unet)
+			
+			# 根据预设自动匹配 CLIP 和 VAE
+			resolved_clip_names = resolve_clip_names_for_preset(
+				preset, 
+				clip_models, 
+				exposed_clip_name="",
+				legacy_clip_names=[]
+			)
+			if not resolved_clip_names:
+				# 如果预设匹配失败，回退到默认配置
+				resolved_clip_names = [_pick_available_name(DEFAULT_CLIP, clip_models, DEFAULT_CLIP)]
+			
+			resolved_vae_name = _pick_available_name(
+				preset.get("vae_name", DEFAULT_VAE),
+				vae_models,
+				DEFAULT_VAE
+			)
+			
+			resolved_clip_type = resolve_clip_type(
+				resolved_unet,
+				resolved_clip_names,
+				str(preset.get("clip_type", "qwen_image"))
+			)
 
 			resolved_lora_1 = _require_lora_name(DEFAULT_LORA_1, lora_models, "加速")
 			resolved_lora_2 = _require_lora_name(DEFAULT_LORA_2, lora_models, "增强")
@@ -326,8 +353,8 @@ class GJJ_OldPhotoRestorer:
 
 			_send_status(unique_id, "加载 UNET / CLIP / VAE...")
 			model = _load_model(resolved_unet, DEFAULT_UNET_DTYPE)
-			clip = _load_clip_from_names([resolved_clip], "qwen_image")
-			vae = _load_vae(resolved_vae)
+			clip = _load_clip_from_names(resolved_clip_names, resolved_clip_type)
+			vae = _load_vae(resolved_vae_name)
 
 			_send_status(unique_id, "应用 LoRA...")
 			model, clip = _apply_model_only_lora(model, clip, resolved_lora_1, 1.0)

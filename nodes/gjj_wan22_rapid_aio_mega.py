@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 from nodes import CheckpointLoaderSimple, CLIPTextEncode, VAEDecode, common_ksampler
 
-from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
 
 
@@ -387,7 +387,7 @@ class GJJ_Wan22RapidAIOMega:
         "首尾帧",
         "多图串接",
     ]
-    RETURN_TYPES = (GJJ_BATCH_IMAGE_TYPE,)
+    RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE",)
     RETURN_NAMES = ("视频帧序列",)
     OUTPUT_TOOLTIPS = ("解码后的视频帧序列；这里复用 GJJ_BATCH_IMAGE 类型，可直接连接 GJJ · 视频合成器 的 图像/Latent 输入。",)
 

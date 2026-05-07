@@ -16,6 +16,11 @@ from PIL import Image, ImageDraw, ImageFont
 from PIL.PngImagePlugin import PngInfo
 from nodes import VAEDecode, common_ksampler
 
+from .common_utils.text_tools import (
+	gjjutils_canonical_model_text as _canonical_model_text,
+	gjjutils_normalize_text as _normalize_text,
+	gjjutils_pick_available_name as _pick_available_name,
+)
 from .gjj_lazy_image_studio import (
 	DEFAULT_CLIP_NAME,
 	DEFAULT_LIGHTNING_LORA,
@@ -28,9 +33,6 @@ from .gjj_lazy_image_studio import (
 	_patch_model_sampling,
 	_resize_to_long_edge,
 	_safe_filename_list,
-	_canonical_model_text,
-	_normalize_text,
-	_pick_available_name,
 	_resolve_effective_steps,
 	collect_image_pairs,
 	list_clip_models,
@@ -1214,8 +1216,8 @@ class GJJ_CharacterMultiViewStudio(GJJ_LazyImageStudio):
 					_prepare_qwen_vl_image(action_ref_image, int(preset.get("vl_long_edge", 384)), "bicubic", "center"),
 				]
 				prompt = (
-					"Picture 1: <|vision_start|><|image_pad|><|vision_end|>"
-					"Picture 2: <|vision_start|><|image_pad|><|vision_end|>"
+					"Picture 1: "
+					"Picture 2: "
 					f"{view_prompt}"
 				)
 				tokens = clip.tokenize(prompt, images=vl_images)

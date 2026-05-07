@@ -1,0 +1,201 @@
+================================================================================
+Official Workflow Model Analysis
+================================================================================
+
+Found 35 workflow files
+
+================================================================================
+Model Usage Summary
+================================================================================
+
+馃摝 512-inpainting-ema.safetensors
+   Used in 2 workflow(s):
+   - outpaint.json (CheckpointLoader)
+   - sd1.5_inpaint.json (CheckpointLoader)
+
+馃摝 FireRed-Image-Edit-1.0-Lightning-8steps-v1.1.safetensors
+   Used in 1 workflow(s):
+   - FireRed_Edit_1.1.json (LoraLoaderModelOnly)
+
+馃摝 FireRed-Image-Edit-1.1-transformer.safetensors
+   Used in 1 workflow(s):
+   - FireRed_Edit_1.1.json (UNETLoader)
+
+馃摝 Flux1\uso-flux1-dit-lora-v1.safetensors
+   Used in 2 workflow(s):
+   - bytedance-uso.json (LoraLoaderModelOnly)
+   - bytedance-uso.json (LoraLoaderModelOnly)
+
+馃摝 MoXinV1.safetensors
+   Used in 1 workflow(s):
+   - multiple_loras.json (LoraLoader)
+
+馃摝 QWEN\lighting\Qwen-Image-Lightning-4steps-V2.0.safetensors
+   Used in 5 workflow(s):
+   - image_qwen_image_controlnet_patch.json (LoraLoaderModelOnly)
+   - image_qwen_image_controlnet_patch杈圭紭妫€娴?json (LoraLoaderModelOnly)
+   - image_qwen_image_instantx_controlnet.json (LoraLoaderModelOnly)
+   - image_qwen_image_union_control_lora.json (LoraLoaderModelOnly)
+   - qwen_image_edit.json (LoraLoaderModelOnly)
+
+馃摝 QWEN\lighting\Qwen-Image-Lightning-8steps-V2.0.safetensors
+   Used in 1 workflow(s):
+   - qwen-image.json (LoraLoaderModelOnly)
+
+馃摝 SD1.5\dreamCreationVirtual3DECommerce_v10.safetensors
+   Used in 1 workflow(s):
+   - pose_controlnet_2_pass.json (CheckpointLoader)
+
+馃摝 SD1.5\v1-5-pruned-emaonly.safetensors
+   Used in 2 workflow(s):
+   - text-to-image-workflow.json (CheckpointLoader)
+   - workflow.json (CheckpointLoader)
+
+馃摝 ae.safetensors
+   Used in 6 workflow(s):
+   - flux-1-canny-dev.json (VAELoader)
+   - flux_dev_t5fp16.json (VAELoader)
+   - flux_fill_dev_outpaint.json (VAELoader)
+   - flux_fill_inpaint.json (VAELoader)
+   - flux_schnell_t5fp8.json (VAELoader)
+   - hidream_i1_full.json (VAELoader)
+
+馃摝 architecturerealmix_v11.safetensors
+   Used in 1 workflow(s):
+   - depth_controlnet.json (CheckpointLoader)
+
+馃摝 awpainting_v14.safetensors
+   Used in 1 workflow(s):
+   - mixing_controlnets.json (CheckpointLoader)
+
+馃摝 blindbox_v1_mix.safetensors
+   Used in 1 workflow(s):
+   - multiple_loras.json (LoraLoader)
+
+馃摝 dreamshaper_8.safetensors
+   Used in 1 workflow(s):
+   - multiple_loras.json (CheckpointLoader)
+
+馃摝 flux1-canny-dev.safetensors
+   Used in 1 workflow(s):
+   - flux-1-canny-dev.json (UNETLoader)
+
+馃摝 flux1-dev-fp8.safetensors
+   Used in 2 workflow(s):
+   - bytedance-uso.json (CheckpointLoader)
+   - bytedance-uso.json (CheckpointLoader)
+
+馃摝 flux1-fill-dev_fp8.safetensors
+   Used in 2 workflow(s):
+   - flux_fill_dev_outpaint.json (UNETLoader)
+   - flux_fill_inpaint.json (UNETLoader)
+
+馃摝 flux1-krea-dev_fp8_scaled.safetensors
+   Used in 1 workflow(s):
+   - flux_dev_t5fp16.json (UNETLoader)
+
+馃摝 flux1-schnell-fp8-e4m3fn.safetensors
+   Used in 1 workflow(s):
+   - flux_schnell_t5fp8.json (UNETLoader)
+
+馃摝 hidream_i1_full_fp8.safetensors
+   Used in 1 workflow(s):
+   - hidream_i1_full.json (UNETLoader)
+
+馃摝 interiordesignsuperm_v2.safetensors
+   Used in 1 workflow(s):
+   - depth-t2i-adapter.json (CheckpointLoader)
+
+馃摝 majicmixRealistic_v7.safetensors
+   Used in 1 workflow(s):
+   - pose_controlnet_2_pass.json (CheckpointLoader)
+
+馃摝 qwen2.5vl-7b-bf16.safetensors
+   Used in 1 workflow(s):
+   - FireRed_Edit_1.1.json (CLIPLoader)
+
+馃摝 qwen_2.5_vl_7b_fp8_scaled.safetensors
+   Used in 6 workflow(s):
+   - image_qwen_image_controlnet_patch.json (CLIPLoader)
+   - image_qwen_image_controlnet_patch杈圭紭妫€娴?json (CLIPLoader)
+   - image_qwen_image_instantx_controlnet.json (CLIPLoader)
+   - image_qwen_image_union_control_lora.json (CLIPLoader)
+   - qwen-image.json (CLIPLoader)
+   - qwen_image_edit.json (CLIPLoader)
+
+馃摝 qwen_image_edit_fp8_e4m3fn.safetensors
+   Used in 1 workflow(s):
+   - qwen_image_edit.json (UNETLoader)
+
+馃摝 qwen_image_fp8_e4m3fn.safetensors
+   Used in 5 workflow(s):
+   - image_qwen_image_controlnet_patch.json (UNETLoader)
+   - image_qwen_image_controlnet_patch杈圭紭妫€娴?json (UNETLoader)
+   - image_qwen_image_instantx_controlnet.json (UNETLoader)
+   - image_qwen_image_union_control_lora.json (UNETLoader)
+   - qwen-image.json (UNETLoader)
+
+馃摝 qwen_image_union_diffsynth_lora.safetensors
+   Used in 1 workflow(s):
+   - image_qwen_image_union_control_lora.json (LoraLoaderModelOnly)
+
+馃摝 qwen_image_vae.safetensors
+   Used in 7 workflow(s):
+   - FireRed_Edit_1.1.json (VAELoader)
+   - image_qwen_image_controlnet_patch.json (VAELoader)
+   - image_qwen_image_controlnet_patch杈圭紭妫€娴?json (VAELoader)
+   - image_qwen_image_instantx_controlnet.json (VAELoader)
+   - image_qwen_image_union_control_lora.json (VAELoader)
+   - qwen-image.json (VAELoader)
+   - qwen_image_edit.json (VAELoader)
+
+馃摝 vae-ft-mse-840000-ema-pruned.safetensors
+   Used in 3 workflow(s):
+   - mixing_controlnets.json (VAELoader)
+   - pose_controlnet_2_pass.json (VAELoader)
+   - scribble_controlnet.json (VAELoader)
+
+馃摝 xsarchitectural_v11.ckpt
+   Used in 1 workflow(s):
+   - scribble_controlnet.json (CheckpointLoader)
+
+================================================================================
+Total unique models: 30
+Workflows with models: 24
+================================================================================
+
+
+TSV Update Suggestions:
+================================================================================
+# Add these models to presets/model_keywords.tsv
+id	category	keywords	display_name	description	tags	priority
+512-inpainting-ema	unet	512|inpainting|ema	512 Inpainting Ema	512 Inpainting Ema (from official workflows)	unet|official-workflow	80
+firered-image-edit-1.0-lightning-8steps-v1.1	lora	firered|image|edit|1.0|lightning	Firered Image Edit 1.0 Lightning 8Steps V1.1	Firered Image Edit 1.0 Lightning 8Steps V1.1 (from official workflows)	lora|official-workflow	75
+firered-image-edit-1.1-transformer	unet	firered|image|edit|1.1|transformer	Firered Image Edit 1.1 Transformer	Firered Image Edit 1.1 Transformer (from official workflows)	unet|official-workflow	75
+flux1\uso-flux1-dit-lora-v1	lora	flux1\uso|flux1|dit|lora|v1	Flux1\Uso Flux1 Dit Lora V1	Flux1\Uso Flux1 Dit Lora V1 (from official workflows)	lora|official-workflow	80
+moxinv1	lora	moxinv1	Moxinv1	Moxinv1 (from official workflows)	lora|official-workflow	75
+qwen\lighting\qwen-image-lightning-4steps-v2.0	lora	qwen\lighting\qwen|image|lightning|4steps|v2.0	Qwen\Lighting\Qwen Image Lightning 4Steps V2.0	Qwen\Lighting\Qwen Image Lightning 4Steps V2.0 (from official workflows)	lora|official-workflow	95
+qwen\lighting\qwen-image-lightning-8steps-v2.0	lora	qwen\lighting\qwen|image|lightning|8steps|v2.0	Qwen\Lighting\Qwen Image Lightning 8Steps V2.0	Qwen\Lighting\Qwen Image Lightning 8Steps V2.0 (from official workflows)	lora|official-workflow	75
+sd1.5\dreamcreationvirtual3decommerce-v10	unet	sd1.5\dreamcreationvirtual3decommerce|v10	Sd1.5\Dreamcreationvirtual3Decommerce V10	Sd1.5\Dreamcreationvirtual3Decommerce V10 (from official workflows)	unet|official-workflow	75
+sd1.5\v1-5-pruned-emaonly	unet	sd1.5\v1|5|pruned|emaonly	Sd1.5\V1 5 Pruned Emaonly	Sd1.5\V1 5 Pruned Emaonly (from official workflows)	unet|official-workflow	80
+ae	vae	ae	Ae	Ae (from official workflows)	vae|official-workflow	100
+architecturerealmix-v11	unet	architecturerealmix|v11	Architecturerealmix V11	Architecturerealmix V11 (from official workflows)	unet|official-workflow	75
+awpainting-v14	unet	awpainting|v14	Awpainting V14	Awpainting V14 (from official workflows)	unet|official-workflow	75
+blindbox-v1-mix	lora	blindbox|v1|mix	Blindbox V1 Mix	Blindbox V1 Mix (from official workflows)	lora|official-workflow	75
+dreamshaper-8	unet	dreamshaper|8	Dreamshaper 8	Dreamshaper 8 (from official workflows)	unet|official-workflow	75
+flux1-canny-dev	unet	flux1|canny|dev	Flux1 Canny Dev	Flux1 Canny Dev (from official workflows)	unet|official-workflow	75
+flux1-dev-fp8	unet	flux1|dev|fp8	Flux1 Dev Fp8	Flux1 Dev Fp8 (from official workflows)	unet|official-workflow	80
+flux1-fill-dev-fp8	unet	flux1|fill|dev|fp8	Flux1 Fill Dev Fp8	Flux1 Fill Dev Fp8 (from official workflows)	unet|official-workflow	80
+flux1-krea-dev-fp8-scaled	unet	flux1|krea|dev|fp8|scaled	Flux1 Krea Dev Fp8 Scaled	Flux1 Krea Dev Fp8 Scaled (from official workflows)	unet|official-workflow	75
+flux1-schnell-fp8-e4m3fn	unet	flux1|schnell|fp8|e4m3fn	Flux1 Schnell Fp8 E4M3Fn	Flux1 Schnell Fp8 E4M3Fn (from official workflows)	unet|official-workflow	75
+hidream-i1-full-fp8	unet	hidream|i1|full|fp8	Hidream I1 Full Fp8	Hidream I1 Full Fp8 (from official workflows)	unet|official-workflow	75
+interiordesignsuperm-v2	unet	interiordesignsuperm|v2	Interiordesignsuperm V2	Interiordesignsuperm V2 (from official workflows)	unet|official-workflow	75
+majicmixrealistic-v7	unet	majicmixrealistic|v7	Majicmixrealistic V7	Majicmixrealistic V7 (from official workflows)	unet|official-workflow	75
+qwen2.5vl-7b-bf16	clip	qwen2.5vl|7b|bf16	Qwen2.5Vl 7B Bf16	Qwen2.5Vl 7B Bf16 (from official workflows)	clip|official-workflow	75
+qwen-2.5-vl-7b-fp8-scaled	clip	qwen|2.5|vl|7b|fp8	Qwen 2.5 Vl 7B Fp8 Scaled	Qwen 2.5 Vl 7B Fp8 Scaled (from official workflows)	clip|official-workflow	100
+qwen-image-edit-fp8-e4m3fn	unet	qwen|image|edit|fp8|e4m3fn	Qwen Image Edit Fp8 E4M3Fn	Qwen Image Edit Fp8 E4M3Fn (from official workflows)	unet|official-workflow	75
+qwen-image-fp8-e4m3fn	unet	qwen|image|fp8|e4m3fn	Qwen Image Fp8 E4M3Fn	Qwen Image Fp8 E4M3Fn (from official workflows)	unet|official-workflow	95
+qwen-image-union-diffsynth-lora	lora	qwen|image|union|diffsynth|lora	Qwen Image Union Diffsynth Lora	Qwen Image Union Diffsynth Lora (from official workflows)	lora|official-workflow	75
+qwen-image-vae	vae	qwen|image|vae	Qwen Image Vae	Qwen Image Vae (from official workflows)	vae|official-workflow	100
+vae-ft-mse-840000-ema-pruned	vae	vae|ft|mse|840000|ema	Vae Ft Mse 840000 Ema Pruned	Vae Ft Mse 840000 Ema Pruned (from official workflows)	vae|official-workflow	85
+xsarchitectural-v11	unet	xsarchitectural|v11	Xsarchitectural V11	Xsarchitectural V11 (from official workflows)	unet|official-workflow	75

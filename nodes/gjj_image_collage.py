@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageColor, ImageDraw, ImageFont
 
-from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
 NODE_NAME = "GJJ_ImageCollage"
 

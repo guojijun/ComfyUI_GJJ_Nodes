@@ -9,27 +9,34 @@ import folder_paths
 import nodes
 import torch
 import torch.nn.functional as F
-from comfy_extras.nodes_mask import GrowMask
+from .common_utils.mask_tools import GrowMask
 from nodes import ImagePadForOutpaint, common_ksampler
 from server import PromptServer
 
+from .common_utils.text_tools import (
+	gjjutils_normalize_text as _normalize_text,
+	gjjutils_pick_available_name as _pick_available_name,
+)
 from .gjj_lazy_image_studio import (
 	DEFAULT_UNET_DTYPE,
 	_apply_cfg_norm,
 	_load_clip_from_names,
 	_load_model,
 	_load_vae,
-	_normalize_text,
 	_patch_model_sampling,
 	_pick_available_lora_name,
-	_pick_available_name,
 	_safe_filename_list,
 	list_clip_models,
 	list_unet_models,
-	resolve_clip_names_for_preset,
-	resolve_clip_type,
 )
-from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .common_utils.model_family import (
+	gjjutils_model_family_match_preset as match_model_family,
+	gjjutils_model_family_resolve_clip_type as resolve_clip_type,
+	gjjutils_model_family_resolve_clip_names as resolve_clip_names_for_preset,
+	MODEL_FAMILY_PRESETS,
+	DEFAULT_VAE_NAME as MODEL_DEFAULT_VAE,
+)
+from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .gjj_model_family_preset_table import load_model_family_presets, match_model_family_preset
 from .gjj_multi_image_loader import (
 	MAX_OUTPUT_IMAGES,
@@ -80,7 +87,6 @@ DEFAULT_FLUX_FILL_SAMPLER = "euler"
 DEFAULT_FLUX_FILL_SCHEDULER = "normal"
 DEFAULT_FLUX_FILL_DENOISE = 1.0
 DEFAULT_FLUX_FILL_DIFF_STRENGTH = 1.0
-MODEL_FAMILY_PRESETS = load_model_family_presets()
 ALLOWED_UNET_KEYWORDS = ("flux1-fill-dev", "qwen_image_fp")
 LAYOUT_MODE_OPTIONS = ("按目标尺寸扩图", "按四边像素扩图")
 EXPAND_METHOD_OPTIONS = ("按宽度占比", "按高度占比", "按最长边占比")
@@ -160,7 +166,7 @@ def _allowed_unets() -> list[str]:
 
 
 def _resolve_model_bundle(unet_name: str) -> dict[str, Any]:
-	preset = match_model_family_preset(unet_name, MODEL_FAMILY_PRESETS) or {}
+	preset = match_model_family(unet_name)
 	clip_models = list_clip_models() or [DEFAULT_CLIP]
 	clip_names = resolve_clip_names_for_preset(preset, clip_models, "", [])
 	clip_type = resolve_clip_type(unet_name, clip_names, str(preset.get("clip_type") or "stable_diffusion"))
@@ -765,7 +771,7 @@ class GJJ_Qwen2511EditOutpaint:
 			},
 		}
 
-	RETURN_TYPES = (GJJ_BATCH_IMAGE_TYPE,) + tuple("IMAGE" for _ in range(MAX_OUTPUT_IMAGES))
+	RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE",) + tuple("IMAGE" for _ in range(MAX_OUTPUT_IMAGES))
 	RETURN_NAMES = ("批量图片",) + tuple(f"输入 {index}" for index in range(1, MAX_OUTPUT_IMAGES + 1))
 	OUTPUT_TOOLTIPS = (
 		"将全部外扩结果按顺序打包成一个 GJJ 专用批量图片输出；如果单图尺寸不一致，会自动补齐到统一尺寸。",

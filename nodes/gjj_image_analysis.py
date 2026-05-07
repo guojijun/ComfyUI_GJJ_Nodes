@@ -5,7 +5,7 @@ import math
 
 import torch
 
-from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .gjj_ollama_common import (
     DEFAULT_OLLAMA_HOST,
     extract_final_answer,

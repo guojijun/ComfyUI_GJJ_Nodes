@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .gjj_video_combine_runtime import (
     DEFAULT_FILENAME_PREFIX,
     DEFAULT_FORMAT,

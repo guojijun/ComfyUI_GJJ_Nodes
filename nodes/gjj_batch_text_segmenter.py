@@ -3,7 +3,7 @@ import re,gc,torch
 from dataclasses import dataclass, field
 from typing import Any
 import torch.nn.functional as F
-from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
+from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .gjj_sam3_runtime import (comfy_image_to_pil,get_or_build_model,list_sam3_models,masks_to_comfy_mask,pick_available_name,)
 
 try:from ..utils.tsv_translation import translate_text_to_english, translate_to_english
@@ -438,7 +438,7 @@ class GJJ_BatchTextSegmenter:
 	FUNCTION = "segment"
 	DESCRIPTION = "GJJ 零依赖批量 SAM3 文本分割器：输入 GJJ_BATCH_IMAGE 和分号分段文本，按图文序号或顺序匹配图片，调用本地 models/sam3 模型输出 RGBA 透明裁剪批量图。无联网、无第三方自定义节点依赖；无法识别时只在面板显示警告并跳过。"
 	SEARCH_ALIASES = ["批量文本分割", "SAM3批量文本分割", "文本分割器", "零依赖分割", "RGBA裁剪", "semantic crop", "text segmenter"]
-	RETURN_TYPES = (GJJ_BATCH_IMAGE_TYPE,)
+	RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE",)
 	RETURN_NAMES = ("RGBA批量裁剪图",)
 	OUTPUT_TOOLTIPS = ("按文本规则裁剪出的透明 RGBA 批量图片；需要查看单张结果时接 GJJ 批量图片预览/解包节点。",)
 
