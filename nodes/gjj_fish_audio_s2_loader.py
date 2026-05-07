@@ -87,10 +87,19 @@ def _ensure_vendor_fish_speech() -> None:
         import fish_speech.models  # noqa: F401
     except ImportError as exc:
         raise RuntimeError(
-            "GJJ 内置 Fish Speech 运行时无法导入，通常是 Python 依赖缺失。\n"
-            "请确认当前 ComfyUI 环境已安装 Fish S2 推理依赖，例如：transformers、"
-            "loguru、pydantic、tiktoken、hydra-core、descript-audio-codec、"
-            "descript-audiotools 等。\n"
+            "Fish Audio S2 运行时导入失败，请先补齐 Fish S2 的 Python 推理依赖。\n"
+            "\n"
+            "不要 pip install fish-speech；GJJ 已内置 fish_speech 源码，只需要环境依赖。\n"
+            "\n"
+            "🔧 快速安装命令（使用国内镜像）：\n"
+            "pip install transformers loguru pydantic tiktoken hydra-core descript-audio-codec descript-audiotools soundfile -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+            "\n"
+            "或者逐个安装：\n"
+            "pip install transformers -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+            "pip install hydra-core -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+            "pip install descript-audio-codec descript-audiotools -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+            "pip install soundfile -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+            "\n"
             f"原始导入错误：{exc}"
         ) from exc
 
@@ -302,7 +311,7 @@ def resolve_model_path(name: str) -> Path:
         raise FileNotFoundError(
             f"未找到本地 Fish S2 模型。请把模型放到：{_get_models_base()}"
         )
-    
+
     path = _get_models_base() / name
 
     if not _has_complete_model_files(path):
@@ -339,7 +348,7 @@ def resolve_device(device_choice: str) -> tuple[str, torch.dtype]:
 def resolve_precision(precision_choice: str, model_name: str, device: str) -> torch.dtype:
     """
     Resolve precision to torch.dtype based on choice, model type, and device.
-    
+
     - 'auto': bfloat16 for full model on CUDA, float16 for quantized model on CUDA
     - Otherwise use the specified precision
     """
@@ -361,7 +370,7 @@ def resolve_precision(precision_choice: str, model_name: str, device: str) -> to
             return torch.float16
         else:
             return torch.float32
-    
+
     # Explicit precision choices
     if precision_choice == "bfloat16":
         return torch.bfloat16

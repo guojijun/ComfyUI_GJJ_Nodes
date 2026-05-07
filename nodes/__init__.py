@@ -62,15 +62,66 @@ def _safe_import_node_module(module_name):
 
     这里会捕获异常并跳过该模块，避免整个 GJJ 包加载失败。
     """
+    # 获取当前 Python 解释器的实际路径
+    import sys
+    python_executable = sys.executable
+
+    # 常见缺失依赖的安装命令映射（使用实际 Python 路径）
+    DEPENDENCY_SOLUTIONS = {
+        "soundfile": f"{python_executable} -m pip install soundfile -i https://pypi.tuna.tsinghua.edu.cn/simple",
+        "cv2": f"{python_executable} -m pip install opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple",
+        "timm": f"{python_executable} -m pip install timm -i https://pypi.tuna.tsinghua.edu.cn/simple",
+        "insightface": f"{python_executable} -m pip install insightface onnxruntime-gpu -i https://pypi.tuna.tsinghua.edu.cn/simple",
+        "torchcodec": f"{python_executable} -m pip install torchcodec -i https://pypi.tuna.tsinghua.edu.cn/simple",
+        "mediapipe": f"{python_executable} -m pip install mediapipe -i https://pypi.tuna.tsinghua.edu.cn/simple",
+        "hydra": f"{python_executable} -m pip install hydra-core -i https://pypi.tuna.tsinghua.edu.cn/simple",
+        "descript-audio-codec": f"{python_executable} -m pip install descript-audio-codec descript-audiotools -i https://pypi.tuna.tsinghua.edu.cn/simple",
+        "transformers": f"{python_executable} -m pip install transformers -i https://pypi.tuna.tsinghua.edu.cn/simple",
+    }
+
     try:
         return importlib.import_module("." + module_name, __name__)
     except Exception as exc:
-        print("=" * 80)
-        print(f"[GJJ] 跳过节点模块: {module_name}")
-        print(f"[GJJ] 原因: {type(exc).__name__}: {exc}")
-        print("[GJJ] 该模块中的节点不会注册，但其它 GJJ 节点会继续加载。")
-        print("=" * 80)
-        traceback.print_exc()
+        # ANSI 颜色代码
+        RED = '\033[91m'
+        YELLOW = '\033[93m'
+        CYAN = '\033[96m'
+        GREEN = '\033[92m'
+        RESET = '\033[0m'
+        BOLD = '\033[1m'
+
+        # 尝试从错误信息中提取缺失的模块名
+        error_msg = str(exc)
+        missing_module = None
+
+        # 匹配 "No module named 'xxx'" 格式
+        import re
+        match = re.search(r"No module named ['\"]([^'\"]+)['\"]", error_msg)
+        if match:
+            missing_module = match.group(1)
+            # 如果是嵌套模块，取第一级（如 'cv2.xxx' -> 'cv2'）
+            if '.' in missing_module:
+                missing_module = missing_module.split('.')[0]
+
+        # 构建解决方案提示
+        solution_lines = []
+        if missing_module and missing_module in DEPENDENCY_SOLUTIONS:
+            solution_lines.append(f"{YELLOW}[GJJ] {BOLD}快速安装命令:{RESET}")
+            solution_lines.append(f"  {GREEN}{DEPENDENCY_SOLUTIONS[missing_module]}{RESET}")
+        else:
+            solution_lines.append(f"{YELLOW}[GJJ] {BOLD}请根据错误信息安装缺失的依赖:{RESET}")
+            solution_lines.append(f"  {GREEN}{python_executable} -m pip install <缺失的包名> -i https://pypi.tuna.tsinghua.edu.cn/simple{RESET}")
+
+        print(f"\n{RED}{'=' * 80}{RESET}")
+        print(f"{YELLOW}[GJJ] {BOLD}跳过节点模块:{RESET} {CYAN}{module_name}{RESET}")
+        print(f"{YELLOW}[GJJ] {BOLD}原因:{RESET} {RED}{type(exc).__name__}:{RESET} {exc}")
+        print(f"{YELLOW}[GJJ]{RESET} 该模块中的节点不会注册，但其它 GJJ 节点会继续加载。")
+        for line in solution_lines:
+            print(line)
+        print(f"{YELLOW}[GJJ] {BOLD}提示:{RESET} 安装完成后请重启 ComfyUI 服务器")
+        print(f"{RED}{'=' * 80}{RESET}\n")
+        # 只打印简化的错误信息，不显示完整堆栈
+        # traceback.print_exc()
         return None
 
 

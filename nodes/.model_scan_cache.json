@@ -1,139 +1,139 @@
 {
   "version": 1,
-  "scan_time": "2026-05-07T22:12:52.115787",
+  "scan_time": "2026-05-08T03:55:36.794514",
   "file_hashes": {
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\analyze_official_workflows.py": "a6f13fa0d282d05f92641bedf7f0073d",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\analyze_video_workflows.py": "e8b4ffe5e7b31775061a539bccd4ae21",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\fix_insightface_bug.py": "d7a4c211282058d35eff1d3377bcd887",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_alpha_tools.py": "a421e7db486ffb2e45c0d4eb3728df53",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_any_list_tools.py": "e2f01d37bb667114799cbba4d5a15f49",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_any_preview.py": "aa2fa26f36509b123e1fef4da67851e1",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_any_switch.py": "e23cf1043499c0d0c8cfc1846f57123f",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_audio_ace_music_generator.py": "c14c9d470ba25fe5bff147b32c1dd148",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_audio_timestamp_editor.py": "c6ad0c00d4b8ff9ab6e09ee9c5547f2e",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_audio_tools.py": "dad5e02020f0e43b3b3b786a5b12ccd5",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_batch_image_bridge.py": "bda62514bb68ed055df6e62f3e54714a",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_batch_image_type.py": "d31dd972391993b753c818958cd8f0af",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_batch_text_segmenter.py": "8d5480dbd27dfab0d9340fd2960ba735",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_batch_watermark_remover.py": "3d75d745f6d582e4de9ad6e0be8ffb66",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_brushnet_inpaint.py": "e488010cfa1838319af46b2f64c19d1b",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_character_multiview_studio.py": "785fee6d57ee45ead57a849a05c96e9e",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_checkpoint_direct_generator.py": "59b9af9adf54579afbf2480d6f0be929",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_color_balance.py": "27a4ce9218c6d418cd83e8b5523fb7cc",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_comprehensive_matting.py": "220028f384a3ad205cc47f3be9b06dba",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_controlnet_preset.py": "0ced62178acda480cff25541b30a557d",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_cosyvoice3_generator.py": "a2224804d87f1bb731b2191f0af98733",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_cosyvoice3_runtime.py": "dd5e510780cff049570a3e2d4e82b347",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_csv_tsv_row_iterator.py": "107849663c1600e3d7d84ed422acfa78",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_depth_controlnet_generator.py": "3a6abe19f8f49f0236c6e2bdaad0170e",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_face_analysis.py": "41b62280da666ec6ea252abc52b8bfa6",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_face_detailer.py": "ecf56190929d2f411524a152c00e3e0a",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_face_detailer_modules.py": "c9a24c734d30746055f2df2a2180c8b7",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_face_detailer_runtime.py": "726ba74e7588d79089a40d18cfb5dd39",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ffmpeg_tools.py": "7d0e5426a1e1a2f0f2ae7d9b328bc119",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_fish_audio_s2_generator.py": "34f44fbbd986e214d4cd5ea60aab0b24",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_fish_audio_s2_loader.py": "b73bdd2c0fc9a77b2ace64453d361e8f",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_fish_audio_s2_model_cache.py": "460eb4e758c28f1014f5029163b63f3c",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_flashvsr_runtime.py": "16191c4e869801dd704812e5ceb8f29b",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_flashvsr_video_upscaler.py": "0475a7293e846f8fd9ec46df80e9ac88",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_flux1_dual_clip_loader.py": "7fe0a4146970d0c53fffeea92468526f",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_flux_fill_dev_outpaint.py": "7d3830848d336babe9145da46ac0c144",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_group_bypasser.py": "dc7fafff7f8b1a1f1af297313327f067",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_image_adjuster.py": "a80745f082bdde97a68f3af8739beba6",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_image_analysis.py": "534ca03c6c2b85b73f2bba49aaa0d05a",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_image_collage.py": "60e1cad6be3d003603cd65f7eff00167",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_image_compare.py": "76c11121964cc14969ffc0150b674151",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_image_grid_tools.py": "82fcb7363e258a12a44b06b84d1d9454",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_image_splitter.py": "fc8429b94b3a2d8ca92eae7ccdc42882",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_impact_face_detailer_bridge.py": "7f8f06d689bd7f0373ce4156e365d9a0",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_incrementing_integer.py": "db47fa6645aaeb074fbf70ca0779aa2a",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_inpaint_crop.py": "ccd17d9f36cb65def159c146edba0eca",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_lama_inpaint.py": "ac8650e146ea8c9259504ec0462321ad",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_latentsync_node.py": "5a1aa1e37a2dd97a0ace4dd9cd7d1d55",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_lazy_image_studio.py": "4b5f030a7302ef1bd3df98a05ed2efaa",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_local_image_tools.py": "51c56f24902aaf4d7fe8c134997ead92",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_local_lipsync.py": "49971a48e3214880b3561bb5aa2ff814",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_longcat_audiodit_loader.py": "d5466062cba9ce5e1a438e37207c79b7",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_longcat_audiodit_model_cache.py": "0383b082c67f098834218f8bb3866ef7",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_longcat_audiodit_tts.py": "62a41565a4b357af7b262b6bd4e64017",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_lora_effect_tester.py": "8ad13da4594670907c6386307dfd2b16",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_lora_face_material_generator.py": "127c5dd9f5112344cb759ccc5e812da0",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ltx23_first_last_outfit.py": "a6dfc04a8ca69fa98a23c0589c29fbda",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ltx23_image_to_video.py": "e510712dac75199bc85c46d01c0aec5d",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ltx23_multiref_image_to_video.py": "4508ef99ecb7a40525b8dc1192538d90",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ltx23_multiref_runtime.py": "47d22f57851e8e3c0ba1a682b5a1fb23",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ltx23_template_workflows.py": "77a58de041f568ccbc90752639a1cc82",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ltx23_workflow_suite.py": "9175e36eacf2096826c2f54d9cb8a92d",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ltx_first_last_frame.py": "62dbb8a00a01d5ded18e78a1cfa2339a",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_mask_toolkit.py": "9f29b299131882f927c19fed67988c39",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_mesh2motion_explore.py": "d4672a0d2f13377c286040255a3bb5f1",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_metadata_viewer.py": "a1c5c5494b64c0ce76a61d8fd266ed36",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_model_bundle_loader.py": "70498af4cff6f403ff7db38ae8a48d05",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_model_family_preset_table.py": "ce570158d564176407e8865c87f9b161",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_model_name_resolver.py": "73a46e30a5afdd9e630d9781ea78fe3f",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_model_upscaler.py": "e78a2208866d480264ba58f223f43ab6",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_multifunction_calculator.py": "b7cfce8477edeb6c481e89705ea55024",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_multi_image_loader.py": "6a652dcbce136d3c4e52290739dafbd9",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_multi_lora_chain.py": "727feddeaca903e86464395e2acca2c3",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_multi_video_loader.py": "f665fbd8b86dac60c926fd35e820a816",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_old_photo_restorer.py": "37dd7cc2b7ac736bf3e11369872b6b2b",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ollama_common.py": "5bc47fce0522e2d02c0ccea5ba65e9c6",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ollama_directory_captioner.py": "5bb15ed517430710c6da357286bd39d0",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_opus_mt_zh_en_translation.py": "45b5d867eb70b862509f93cf63f8654f",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_pdf_tools.py": "dc03e6a578da27f649ea540ce6a7952c",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_points_editor.py": "cc4494208c8411f1d722f455901a3ab2",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_prompt_combo_tools.py": "624b01503c1285e8cc21a6cb6d6c6951",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_prompt_generation.py": "38415c751cb5484a1cc5e7d715ce163a",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_prompt_group_switch.py": "51ac9b3bc9603bc58ea710c7a3cdaba3",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_prompt_preset_studio.py": "a2831d85404d216b63b36a5c96b44408",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_prompt_relay.py": "de447cadc1b93560f7d2a6378e5549ee",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_prompt_relay_encoder.py": "1c743d00094451b450034f3d99559a7c",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_prompt_size_preset.py": "06a00980404ac95b1368f26b2a30f1fc",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_qwen2511_edit_outpaint.py": "45f488b38cbdba90625c207042db0c48",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_qwen3_asr_text_formats.py": "4d88c9a0c58e6056748ed93a0a04802e",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_qwen_timestamp_to_prompt_relay.py": "7fa64b27165525c895ebb284b115e423",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_redux_advanced.py": "d07ad2c3d4fac27c53e52fcd09d12392",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_region_layer_tools.py": "e634301acd682af3c0f3abc6664934cb",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_rife_runtime.py": "7c40986f8af1cd915e65bb4687b8f98f",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_rife_video_interpolator.py": "432ea2e6ee03e9f281f4876f96ddcda0",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_sam3d_body.py": "14bbf742f86840a051ba68ed13d27081",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_sam3_runtime.py": "a27e505d8b7d6dbd9e6a90307d55766d",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_sam3_segmenter.py": "74dafec03690420b45694fa0c3b0d101",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_save_any_object.py": "01c60fde6d498dec0710251a28273cce",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_scribble_controlnet_generator.py": "05507f11d9f7f9d8d41cab9a86aeb2b7",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_sd15_inpaint_workflow.py": "c0b28b04cfb652d817340d1514c686b3",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_sdmatte_matting.py": "6356dbb2ae0926a1a1f648c2237639d9",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_seedvr2_image_upscaler.py": "1db82674078826c6b939a85c5ade19d0",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_sem2_point_segmenter.py": "cb97e9071b42f0821f56864dfb62259a",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_sequence_auto_executor.py": "00415830505904b3fe401149d3f9e3d7",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_size_math.py": "850897791850b3f3a48b570bc9726d9d",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_text_file_io.py": "d8b83856c28349d3845801ec4230f512",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_text_input.py": "276a1f7c61653cb56890ee7f8df61161",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_text_merge.py": "645a4e3a2c97a52046c7ca6851968a0e",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_text_overlay.py": "0e8502ae1f0c1427225eef3ad49d5fe2",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_text_random_line.py": "2324e069902109a52dfdd17b6c0e8333",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_translation.py": "d990992a6d90cffed85c8f26aa8b105a",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ultimate_architecture_upscaler.py": "1c034620434a70cbdd6e81825070ff31",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ultimate_crop_patch.py": "f3e1a8b035d2177356b2ed82df7d666a",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ultimate_runtime.py": "b17cd17e826b3b46b24b13895d9b5672",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ultimate_utils.py": "7a996f547686908a77234ac57f61ce88",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ultralytics_runtime.py": "c05a59f178b0f5e22ebf378c40a82c86",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_vfx_tools.py": "6d0f0b510f74fa3a7c8643c67fee19ce",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_video_combine.py": "50703f14ab9c9ae23a3a7d9f9fde0ef1",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_video_combine_runtime.py": "37f043772ecabd9c3332214cbbb7c64a",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_video_outpaint_pad.py": "c425b9894b22eb551ea685be89714974",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_video_reverse_frame.py": "8f636756f82a654e7d4db3642db763a0",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_video_segment_editor.py": "365c6e27053c85c4d9b8011521fcc4cd",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_wan22_first_last_video.py": "f95de64e9962c51a7a6620b83264b165",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_wan22_rapid_aio_mega.py": "a5f73b5f293bd26ca3ba2fb9944d6962",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\merge_scanned_models.py": "4a81a9b7b11a7bfc2aaa3293104f0a90",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\merge_workflow_models.py": "6c1c30cb8472298471a8c4483b2fdff7",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\scan_all_models.py": "fdd251ef29a0bbdb9b6ec59f58d686bf",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\scan_models.py": "c24a613d90a592571577d1e774085c93",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\update_type_compatibility.py": "fbcc6f3dd84de02c8af3718d52ab5c16",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\__init__.py": "515fdeff66a8570924562794d3f53be7",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\model_family\\utils.py": "ddf7efe182b9dbb936e5b8229b1a71ae",
-    "D:\\AI\\CUI\\ComfyUI\\custom_nodes\\GJJ\\nodes\\model_family\\__init__.py": "fb72c1da3d88069797a8f3f35267da64"
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\analyze_official_workflows.py": "a6f13fa0d282d05f92641bedf7f0073d",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\analyze_video_workflows.py": "e8b4ffe5e7b31775061a539bccd4ae21",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\fix_insightface_bug.py": "d7a4c211282058d35eff1d3377bcd887",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_alpha_tools.py": "a421e7db486ffb2e45c0d4eb3728df53",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_any_list_tools.py": "e2f01d37bb667114799cbba4d5a15f49",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_any_preview.py": "aa2fa26f36509b123e1fef4da67851e1",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_any_switch.py": "e23cf1043499c0d0c8cfc1846f57123f",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_audio_ace_music_generator.py": "c14c9d470ba25fe5bff147b32c1dd148",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_audio_timestamp_editor.py": "c6ad0c00d4b8ff9ab6e09ee9c5547f2e",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_audio_tools.py": "dad5e02020f0e43b3b3b786a5b12ccd5",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_batch_image_bridge.py": "bda62514bb68ed055df6e62f3e54714a",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_batch_image_type.py": "d31dd972391993b753c818958cd8f0af",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_batch_text_segmenter.py": "8d5480dbd27dfab0d9340fd2960ba735",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_batch_watermark_remover.py": "3d75d745f6d582e4de9ad6e0be8ffb66",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_brushnet_inpaint.py": "e488010cfa1838319af46b2f64c19d1b",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_character_multiview_studio.py": "785fee6d57ee45ead57a849a05c96e9e",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_checkpoint_direct_generator.py": "59b9af9adf54579afbf2480d6f0be929",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_color_balance.py": "27a4ce9218c6d418cd83e8b5523fb7cc",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_comprehensive_matting.py": "220028f384a3ad205cc47f3be9b06dba",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_controlnet_preset.py": "0ced62178acda480cff25541b30a557d",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_cosyvoice3_generator.py": "47ccc9bd6096edab24bec867c79b833d",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_cosyvoice3_runtime.py": "753fb49d035403e82bb725cc5c5228ad",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_csv_tsv_row_iterator.py": "107849663c1600e3d7d84ed422acfa78",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_depth_controlnet_generator.py": "3a6abe19f8f49f0236c6e2bdaad0170e",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_face_analysis.py": "b153fba10a11cbc6bf35de910041a940",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_face_detailer.py": "ecf56190929d2f411524a152c00e3e0a",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_face_detailer_modules.py": "c9a24c734d30746055f2df2a2180c8b7",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_face_detailer_runtime.py": "726ba74e7588d79089a40d18cfb5dd39",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ffmpeg_tools.py": "7d0e5426a1e1a2f0f2ae7d9b328bc119",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_fish_audio_s2_generator.py": "e979b28d8c48d3bbea6cb31cc0ddceb6",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_fish_audio_s2_loader.py": "4292d37b3b5854f48dbc73de84a861b2",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_fish_audio_s2_model_cache.py": "460eb4e758c28f1014f5029163b63f3c",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_flashvsr_runtime.py": "16191c4e869801dd704812e5ceb8f29b",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_flashvsr_video_upscaler.py": "0475a7293e846f8fd9ec46df80e9ac88",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_flux1_dual_clip_loader.py": "7fe0a4146970d0c53fffeea92468526f",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_flux_fill_dev_outpaint.py": "7d3830848d336babe9145da46ac0c144",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_group_bypasser.py": "dc7fafff7f8b1a1f1af297313327f067",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_image_adjuster.py": "a80745f082bdde97a68f3af8739beba6",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_image_analysis.py": "534ca03c6c2b85b73f2bba49aaa0d05a",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_image_collage.py": "60e1cad6be3d003603cd65f7eff00167",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_image_compare.py": "76c11121964cc14969ffc0150b674151",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_image_grid_tools.py": "82fcb7363e258a12a44b06b84d1d9454",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_image_splitter.py": "fc8429b94b3a2d8ca92eae7ccdc42882",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_impact_face_detailer_bridge.py": "7f8f06d689bd7f0373ce4156e365d9a0",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_incrementing_integer.py": "db47fa6645aaeb074fbf70ca0779aa2a",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_inpaint_crop.py": "ccd17d9f36cb65def159c146edba0eca",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_lama_inpaint.py": "ac8650e146ea8c9259504ec0462321ad",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_latentsync_node.py": "d3c3e8cd6ae4f34d309df03dcf5e5b7f",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_lazy_image_studio.py": "4b5f030a7302ef1bd3df98a05ed2efaa",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_local_image_tools.py": "51c56f24902aaf4d7fe8c134997ead92",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_local_lipsync.py": "2ca2acce68db944e1627214e6762f363",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_longcat_audiodit_loader.py": "d5466062cba9ce5e1a438e37207c79b7",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_longcat_audiodit_model_cache.py": "0383b082c67f098834218f8bb3866ef7",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_longcat_audiodit_tts.py": "700ef7cbff6668cd75804b87e21dda18",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_lora_effect_tester.py": "8ad13da4594670907c6386307dfd2b16",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_lora_face_material_generator.py": "127c5dd9f5112344cb759ccc5e812da0",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ltx23_first_last_outfit.py": "a6dfc04a8ca69fa98a23c0589c29fbda",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ltx23_image_to_video.py": "e510712dac75199bc85c46d01c0aec5d",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ltx23_multiref_image_to_video.py": "4508ef99ecb7a40525b8dc1192538d90",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ltx23_multiref_runtime.py": "47d22f57851e8e3c0ba1a682b5a1fb23",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ltx23_template_workflows.py": "77a58de041f568ccbc90752639a1cc82",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ltx23_workflow_suite.py": "9175e36eacf2096826c2f54d9cb8a92d",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ltx_first_last_frame.py": "62dbb8a00a01d5ded18e78a1cfa2339a",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_mask_toolkit.py": "9f29b299131882f927c19fed67988c39",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_mesh2motion_explore.py": "d4672a0d2f13377c286040255a3bb5f1",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_metadata_viewer.py": "a1c5c5494b64c0ce76a61d8fd266ed36",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_model_bundle_loader.py": "70498af4cff6f403ff7db38ae8a48d05",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_model_family_preset_table.py": "ce570158d564176407e8865c87f9b161",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_model_name_resolver.py": "73a46e30a5afdd9e630d9781ea78fe3f",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_model_upscaler.py": "e78a2208866d480264ba58f223f43ab6",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_multifunction_calculator.py": "b7cfce8477edeb6c481e89705ea55024",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_multi_image_loader.py": "6a652dcbce136d3c4e52290739dafbd9",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_multi_lora_chain.py": "727feddeaca903e86464395e2acca2c3",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_multi_video_loader.py": "f665fbd8b86dac60c926fd35e820a816",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_old_photo_restorer.py": "37dd7cc2b7ac736bf3e11369872b6b2b",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ollama_common.py": "5bc47fce0522e2d02c0ccea5ba65e9c6",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ollama_directory_captioner.py": "5bb15ed517430710c6da357286bd39d0",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_opus_mt_zh_en_translation.py": "45b5d867eb70b862509f93cf63f8654f",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_pdf_tools.py": "dc03e6a578da27f649ea540ce6a7952c",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_points_editor.py": "cc4494208c8411f1d722f455901a3ab2",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_prompt_combo_tools.py": "624b01503c1285e8cc21a6cb6d6c6951",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_prompt_generation.py": "38415c751cb5484a1cc5e7d715ce163a",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_prompt_group_switch.py": "51ac9b3bc9603bc58ea710c7a3cdaba3",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_prompt_preset_studio.py": "a2831d85404d216b63b36a5c96b44408",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_prompt_relay.py": "de447cadc1b93560f7d2a6378e5549ee",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_prompt_relay_encoder.py": "1c743d00094451b450034f3d99559a7c",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_prompt_size_preset.py": "06a00980404ac95b1368f26b2a30f1fc",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_qwen2511_edit_outpaint.py": "45f488b38cbdba90625c207042db0c48",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_qwen3_asr_text_formats.py": "c857efb54b584dac88ccac8c0aa01d78",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_qwen_timestamp_to_prompt_relay.py": "7fa64b27165525c895ebb284b115e423",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_redux_advanced.py": "d07ad2c3d4fac27c53e52fcd09d12392",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_region_layer_tools.py": "e634301acd682af3c0f3abc6664934cb",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_rife_runtime.py": "7c40986f8af1cd915e65bb4687b8f98f",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_rife_video_interpolator.py": "432ea2e6ee03e9f281f4876f96ddcda0",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_sam3d_body.py": "14bbf742f86840a051ba68ed13d27081",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_sam3_runtime.py": "a27e505d8b7d6dbd9e6a90307d55766d",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_sam3_segmenter.py": "74dafec03690420b45694fa0c3b0d101",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_save_any_object.py": "01c60fde6d498dec0710251a28273cce",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_scribble_controlnet_generator.py": "05507f11d9f7f9d8d41cab9a86aeb2b7",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_sd15_inpaint_workflow.py": "c0b28b04cfb652d817340d1514c686b3",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_sdmatte_matting.py": "6356dbb2ae0926a1a1f648c2237639d9",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_seedvr2_image_upscaler.py": "1db82674078826c6b939a85c5ade19d0",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_sem2_point_segmenter.py": "cb97e9071b42f0821f56864dfb62259a",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_sequence_auto_executor.py": "00415830505904b3fe401149d3f9e3d7",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_size_math.py": "850897791850b3f3a48b570bc9726d9d",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_text_file_io.py": "d8b83856c28349d3845801ec4230f512",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_text_input.py": "276a1f7c61653cb56890ee7f8df61161",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_text_merge.py": "645a4e3a2c97a52046c7ca6851968a0e",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_text_overlay.py": "0e8502ae1f0c1427225eef3ad49d5fe2",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_text_random_line.py": "2324e069902109a52dfdd17b6c0e8333",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_translation.py": "d990992a6d90cffed85c8f26aa8b105a",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ultimate_architecture_upscaler.py": "1c034620434a70cbdd6e81825070ff31",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ultimate_crop_patch.py": "f3e1a8b035d2177356b2ed82df7d666a",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ultimate_runtime.py": "b17cd17e826b3b46b24b13895d9b5672",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ultimate_utils.py": "7a996f547686908a77234ac57f61ce88",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_ultralytics_runtime.py": "c05a59f178b0f5e22ebf378c40a82c86",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_vfx_tools.py": "6d0f0b510f74fa3a7c8643c67fee19ce",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_video_combine.py": "50703f14ab9c9ae23a3a7d9f9fde0ef1",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_video_combine_runtime.py": "37f043772ecabd9c3332214cbbb7c64a",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_video_outpaint_pad.py": "c425b9894b22eb551ea685be89714974",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_video_reverse_frame.py": "8f636756f82a654e7d4db3642db763a0",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_video_segment_editor.py": "365c6e27053c85c4d9b8011521fcc4cd",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_wan22_first_last_video.py": "f95de64e9962c51a7a6620b83264b165",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\gjj_wan22_rapid_aio_mega.py": "a5f73b5f293bd26ca3ba2fb9944d6962",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\merge_scanned_models.py": "4a81a9b7b11a7bfc2aaa3293104f0a90",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\merge_workflow_models.py": "6c1c30cb8472298471a8c4483b2fdff7",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\scan_all_models.py": "fdd251ef29a0bbdb9b6ec59f58d686bf",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\scan_models.py": "c24a613d90a592571577d1e774085c93",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\update_type_compatibility.py": "fbcc6f3dd84de02c8af3718d52ab5c16",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\__init__.py": "1e99ebad8e31417708a0f136467deded",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\model_family\\utils.py": "ddf7efe182b9dbb936e5b8229b1a71ae",
+    "D:\\AI\\ComfyUINEW\\ComfyUI\\custom_nodes\\GJJ\\nodes\\model_family\\__init__.py": "fb72c1da3d88069797a8f3f35267da64"
   },
   "results": {
     "unknown": {
@@ -153,9 +153,9 @@
         "gjj_audio_ace_music_generator.py"
       ],
       "sam3": [
-        "gjj_sam3_runtime.py",
+        "gjj_batch_text_segmenter.py",
         "gjj_sam3_segmenter.py",
-        "gjj_batch_text_segmenter.py"
+        "gjj_sam3_runtime.py"
       ],
       "flux-2-klein-4b-fp8": [
         "gjj_batch_watermark_remover.py"
@@ -164,9 +164,9 @@
         "gjj_batch_watermark_remover.py"
       ],
       "flux2-vae": [
-        "utils.py",
+        "gjj_lazy_image_studio.py",
         "gjj_batch_watermark_remover.py",
-        "gjj_lazy_image_studio.py"
+        "utils.py"
       ],
       "qwen-image-edit-2511-multiple-angles-lora": [
         "gjj_character_multiview_studio.py"
@@ -214,21 +214,21 @@
         "gjj_flux1_dual_clip_loader.py"
       ],
       "clip-l": [
+        "gjj_flux1_dual_clip_loader.py",
         "gjj_flux_fill_dev_outpaint.py",
-        "utils.py",
-        "gjj_flux1_dual_clip_loader.py"
+        "utils.py"
       ],
       "t5xxl": [
+        "gjj_flux1_dual_clip_loader.py",
         "gjj_flux_fill_dev_outpaint.py",
-        "utils.py",
-        "gjj_flux1_dual_clip_loader.py"
+        "utils.py"
       ],
       "flux1-fill-dev": [
         "gjj_flux_fill_dev_outpaint.py"
       ],
       "flux-2-klein-9b-nvfp4": [
-        "utils.py",
-        "gjj_lazy_image_studio.py"
+        "gjj_lazy_image_studio.py",
+        "utils.py"
       ],
       "full-encoder-small-decoder": [
         "gjj_lazy_image_studio.py"
@@ -237,38 +237,38 @@
         "gjj_lazy_image_studio.py"
       ],
       "model": [
-        "gjj_sam3d_body.py",
-        "gjj_longcat_audiodit_loader.py"
+        "gjj_longcat_audiodit_loader.py",
+        "gjj_sam3d_body.py"
       ],
       "ltx-2.3-22b-dev-fp8": [
-        "gjj_ltx23_multiref_runtime.py",
         "gjj_ltx23_first_last_outfit.py",
-        "gjj_ltx23_workflow_suite.py"
+        "gjj_ltx23_workflow_suite.py",
+        "gjj_ltx23_multiref_runtime.py"
       ],
       "ltx-2.3-22b-dev": [
-        "gjj_ltx23_multiref_runtime.py",
-        "gjj_ltx23_first_last_outfit.py"
+        "gjj_ltx23_first_last_outfit.py",
+        "gjj_ltx23_multiref_runtime.py"
       ],
       "ltx23-video-vae": [
-        "gjj_ltx23_multiref_runtime.py",
         "gjj_ltx23_first_last_outfit.py",
-        "gjj_ltx23_workflow_suite.py"
+        "gjj_ltx23_workflow_suite.py",
+        "gjj_ltx23_multiref_runtime.py"
       ],
       "gemma-3-12b-it": [
-        "gjj_ltx23_multiref_runtime.py",
-        "gjj_ltx23_first_last_outfit.py",
         "gjj_ltx23_image_to_video.py",
-        "gjj_ltx23_workflow_suite.py"
+        "gjj_ltx23_first_last_outfit.py",
+        "gjj_ltx23_workflow_suite.py",
+        "gjj_ltx23_multiref_runtime.py"
       ],
       "ltx-2.3-spatial-upscaler-x2-1.1": [
-        "gjj_ltx23_multiref_runtime.py",
-        "gjj_ltx23_first_last_outfit.py",
         "gjj_ltx23_image_to_video.py",
-        "gjj_ltx23_workflow_suite.py"
+        "gjj_ltx23_first_last_outfit.py",
+        "gjj_ltx23_workflow_suite.py",
+        "gjj_ltx23_multiref_runtime.py"
       ],
       "ltx-2.3-spatial-upscaler-x2-1.0": [
-        "gjj_ltx23_multiref_runtime.py",
-        "gjj_ltx23_first_last_outfit.py"
+        "gjj_ltx23_first_last_outfit.py",
+        "gjj_ltx23_multiref_runtime.py"
       ],
       "ltx2.3-transition": [
         "gjj_ltx23_first_last_outfit.py"
@@ -300,12 +300,12 @@
         "gjj_old_photo_restorer.py"
       ],
       "qwen-2.5-vl-7b": [
-        "gjj_old_photo_restorer.py",
-        "gjj_qwen2511_edit_outpaint.py"
+        "gjj_qwen2511_edit_outpaint.py",
+        "gjj_old_photo_restorer.py"
       ],
       "qwen-image-vae": [
-        "gjj_old_photo_restorer.py",
-        "gjj_qwen2511_edit_outpaint.py"
+        "gjj_qwen2511_edit_outpaint.py",
+        "gjj_old_photo_restorer.py"
       ],
       "qwen-image": [
         "gjj_qwen2511_edit_outpaint.py"
@@ -388,15 +388,15 @@
         "gjj_flux1_dual_clip_loader.py"
       ],
       "flux-2-klein-9b-nvfp4": [
-        "utils.py",
-        "gjj_lazy_image_studio.py"
+        "gjj_lazy_image_studio.py",
+        "utils.py"
       ],
       "full-encoder-small-decoder": [
         "gjj_lazy_image_studio.py"
       ],
       "model": [
-        "gjj_sam3d_body.py",
-        "gjj_longcat_audiodit_loader.py"
+        "gjj_longcat_audiodit_loader.py",
+        "gjj_sam3d_body.py"
       ],
       "ltx-2.3-22b-dev-fp8": [
         "gjj_ltx23_first_last_outfit.py",
@@ -453,17 +453,17 @@
         "gjj_flux_fill_dev_outpaint.py"
       ],
       "flux-2-klein-9b-nvfp4": [
-        "utils.py",
-        "gjj_lazy_image_studio.py"
+        "gjj_lazy_image_studio.py",
+        "utils.py"
       ],
       "full-encoder-small-decoder": [
         "gjj_lazy_image_studio.py"
       ],
       "gemma-3-12b-it": [
-        "gjj_ltx23_multiref_runtime.py",
-        "gjj_ltx23_first_last_outfit.py",
         "gjj_ltx23_image_to_video.py",
-        "gjj_ltx23_workflow_suite.py"
+        "gjj_ltx23_first_last_outfit.py",
+        "gjj_ltx23_workflow_suite.py",
+        "gjj_ltx23_multiref_runtime.py"
       ],
       "ltx-2.3-text-projection": [
         "gjj_ltx23_workflow_suite.py"
@@ -513,16 +513,16 @@
         "gjj_flux_fill_dev_outpaint.py"
       ],
       "flux-2-klein-9b-nvfp4": [
-        "utils.py",
-        "gjj_lazy_image_studio.py"
+        "gjj_lazy_image_studio.py",
+        "utils.py"
       ],
       "full-encoder-small-decoder": [
         "gjj_lazy_image_studio.py"
       ],
       "ltx23-video-vae": [
-        "gjj_ltx23_multiref_runtime.py",
         "gjj_ltx23_first_last_outfit.py",
-        "gjj_ltx23_workflow_suite.py"
+        "gjj_ltx23_workflow_suite.py",
+        "gjj_ltx23_multiref_runtime.py"
       ],
       "qwen-image-edit-2511": [
         "gjj_old_photo_restorer.py"
@@ -577,9 +577,9 @@
     },
     "upscaler": {
       "ltx-2.3-spatial-upscaler-x2-1.1": [
-        "gjj_ltx23_multiref_runtime.py",
+        "gjj_ltx23_image_to_video.py",
         "gjj_ltx23_first_last_outfit.py",
-        "gjj_ltx23_image_to_video.py"
+        "gjj_ltx23_multiref_runtime.py"
       ],
       "ltx-2.3-spatial-upscaler-x2-1.0": [
         "gjj_ltx23_first_last_outfit.py"

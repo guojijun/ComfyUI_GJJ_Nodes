@@ -12,15 +12,17 @@ from typing import Any
 import folder_paths
 import huggingface_hub
 import numpy as np
-import soundfile as sf
 import torch
 
+# 延迟导入 soundfile，在函数内部使用
+# import soundfile as sf
 
 VENDOR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "vendor", "cosyvoice3"))
 if VENDOR_ROOT not in sys.path:
 	sys.path.insert(0, VENDOR_ROOT)
 
-from cosyvoice.cli.cosyvoice import AutoModel  # type: ignore  # noqa: E402
+# 延迟导入 cosyvoice，在函数内部使用
+# from cosyvoice.cli.cosyvoice import AutoModel
 
 
 COSYVOICE_ROOT = os.path.join(folder_paths.models_dir, "cosyvoice")
@@ -191,6 +193,23 @@ def ensure_model_dir(model_name: str, unique_id: Any = None) -> str:
 
 
 def load_cosyvoice_model(model_name: str, unique_id: Any = None) -> dict[str, Any]:
+	# 运行时检查依赖
+	try:
+		from cosyvoice.cli.cosyvoice import AutoModel  # type: ignore  # noqa: F811
+	except ImportError as exc:
+		raise RuntimeError(
+			"CosyVoice3 运行时导入失败，请先补齐 CosyVoice3 的 Python 依赖。\n"
+			"\n"
+			"🔧 快速安装命令（使用国内镜像）：\n"
+			"pip install cosyvoice soundfile -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+			"\n"
+			"或者逐个安装：\n"
+			"pip install cosyvoice -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+			"pip install soundfile -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+			"\n"
+			f"原始导入错误：{exc}"
+		) from exc
+
 	model_dir = ensure_model_dir(model_name, unique_id)
 	cache_key = model_dir
 	if cache_key in _MODEL_CACHE:
@@ -205,6 +224,22 @@ def load_cosyvoice_model(model_name: str, unique_id: Any = None) -> dict[str, An
 	}
 	_MODEL_CACHE[cache_key] = info
 	return info
+
+
+def _ensure_soundfile():
+	"""确保 soundfile 已安装"""
+	try:
+		import soundfile as sf  # noqa: F811
+		return sf
+	except ImportError as exc:
+		raise RuntimeError(
+			"CosyVoice3 需要 soundfile 库来处理音频文件。\n"
+			"\n"
+			"🔧 快速安装命令（使用国内镜像）：\n"
+			"pip install soundfile -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+			"\n"
+			f"原始错误：{exc}"
+		) from exc
 
 
 def get_speaker_dir() -> str:
@@ -289,6 +324,7 @@ def ensure_demo_reference(name: str, unique_id: Any = None) -> dict[str, Any]:
 		send_status(unique_id, f"正在下载官方示例音色：{name}")
 		with urllib.request.urlopen(meta["url"]) as response, open(local_path, "wb") as output:
 			output.write(response.read())
+	sf = _ensure_soundfile()
 	info = sf.info(local_path)
 	return {
 		"name": name,
@@ -322,6 +358,7 @@ def audio_file_to_tempfile(source_path: str) -> tuple[str, float]:
 	if not source_path or not os.path.isfile(source_path):
 		raise RuntimeError(f"未找到音频文件：{source_path}")
 	try:
+		sf = _ensure_soundfile()
 		audio_np, sample_rate = sf.read(source_path, always_2d=True)
 	except Exception as sf_exc:
 		try:
@@ -336,6 +373,7 @@ def audio_file_to_tempfile(source_path: str) -> tuple[str, float]:
 	temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
 	temp_path = temp_file.name
 	temp_file.close()
+	sf = _ensure_soundfile()
 	sf.write(temp_path, audio_np, int(sample_rate))
 	duration = float(audio_np.shape[0]) / float(sample_rate)
 	return temp_path, duration
@@ -440,6 +478,7 @@ def comfy_audio_to_tempfile(audio: dict[str, Any], suffix: str = ".wav") -> tupl
 	temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
 	temp_path = temp_file.name
 	temp_file.close()
+	sf = _ensure_soundfile()
 	sf.write(temp_path, audio_np, sample_rate)
 	duration = float(waveform.shape[-1]) / float(sample_rate)
 	return temp_path, duration

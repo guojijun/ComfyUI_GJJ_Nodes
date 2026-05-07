@@ -28,7 +28,7 @@ if insightface_modules:
         del sys.modules[mod]
 
 # 现在导入其他模块（会使用 vendor 中的 insightface）
-import cv2
+# import cv2  # 在函数内部延迟导入
 import numpy as np
 from PIL import Image
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -46,7 +46,59 @@ if vendor_path not in sys.path:
 
 NODE_NAME = "GJJ_FaceAnalysis"
 CATEGORY = "GJJ/图像"
-DESCRIPTION = """内联 ReActor 核心的换脸节点：将源图的脸部特征迁移到目标图上。
+
+# 如果缺少关键依赖，显示错误信息
+if not REACTOR_AVAILABLE:
+    DESCRIPTION = """❌ 节点 GJJ · 🎭 换脸分析器 缺少必需的 Python 依赖：
+
+📦 必需依赖（请安装）：
+  • insightface (人脸识别和换脸核心库)
+  • onnxruntime-gpu (GPU 加速) 或 onnxruntime (CPU)
+  • opencv-python (cv2, 图像处理)
+
+🔧 快速安装命令（使用国内镜像）：
+  pip install insightface onnxruntime-gpu opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+或者逐个安装：
+  pip install insightface -i https://pypi.tuna.tsinghua.edu.cn/simple
+  pip install onnxruntime-gpu -i https://pypi.tuna.tsinghua.edu.cn/simple
+  pip install opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+💡 提示：安装后请重启 ComfyUI 服务器。
+
+---
+内联 ReActor 核心的换脸节点：将源图的脸部特征迁移到目标图上。
+
+【核心功能】
+• 双批量输入 - 源图和目标图均支持单图或多图
+• 智能配对 - 自动处理一对一、一对多、多对一场景
+• 内联 ReActor - 直接使用 reactor 原版代码，无需安装额外包
+• 批量输出 - 保持与输入对应的批量结构
+
+【工作原理】
+节点内置了 ReActor 的核心换脸逻辑：
+1. 使用 insightface 进行人脸检测和关键点提取
+2. 通过 inswapper_128 模型执行脸部特征交换
+3. 可选的面部修复增强（GFPGAN/CodeFormer）
+4. 自动处理批量图片和尺寸适配
+
+【输入说明】
+• 目标图 - 需要被换脸的图片(可批量)
+• 源图 - 提供脸部特征的图片(可批量)
+
+【配对规则】
+• 单图 + 单图 → 单张结果
+• 单图 + 批量 → 源图应用到所有目标图
+• 批量 + 单图 → 同一源脸应用到所有目标图
+• 批量 + 批量 → 按最小数量一一配对
+
+【技术细节】
+• 使用 YOLOv5n 进行人脸检测
+• inswapper_128 模型执行换脸
+• 自动处理不同尺寸的图片
+• 保持原始分辨率和色彩空间"""
+else:
+    DESCRIPTION = """内联 ReActor 核心的换脸节点：将源图的脸部特征迁移到目标图上。
 
 【核心功能】
 • 双批量输入 - 源图和目标图均支持单图或多图
@@ -87,7 +139,7 @@ try:
     # 使用 vendor 中的 insightface
     import insightface
     from insightface.app.common import Face
-    
+
     # 设置执行提供者
     try:
         import torch.cuda as cuda
@@ -97,11 +149,12 @@ try:
             PROVIDERS = ["CPUExecutionProvider"]
     except:
         PROVIDERS = ["CPUExecutionProvider"]
-    
+
     REACTOR_AVAILABLE = True
 except ImportError as e:
     REACTOR_AVAILABLE = False
     PROVIDERS = ["CPUExecutionProvider"]
+    _IMPORT_ERROR = str(e)
 
 
 # 全局变量缓存
@@ -118,12 +171,12 @@ def scan_available_models():
     """扫描 models/insightface 目录下所有可用的 buffalo 模型"""
     models_path = folder_paths.models_dir
     insightface_path = os.path.join(models_path, "insightface")
-    
+
     available_models = []
-    
+
     if not os.path.exists(insightface_path):
         return ["无可用模型"]
-    
+
     # 递归查找所有包含 buffalo 的目录
     for root, dirs, files in os.walk(insightface_path):
         # 检查是否是 buffalo 模型目录（包含 det_10g.onnx）
@@ -132,58 +185,77 @@ def scan_available_models():
             rel_path = os.path.relpath(root, models_path)
             # 提取目录名作为显示名称
             dir_name = os.path.basename(root)
-            
+
             # 验证是否包含必要的模型文件
             required_files = ['det_10g.onnx', 'w600k_r50.onnx']
             has_required = all(f in files for f in required_files)
-            
+
             if has_required:
                 model_info = f"{dir_name} ({rel_path})"
                 available_models.append(model_info)
     if not available_models:
         return ["无可用模型"]
-    
+
     # 按名称排序
     available_models.sort()
-    
-    
+
+
     return available_models
+
+
+def _ensure_cv2():
+    """确保 cv2 已安装"""
+    try:
+        import cv2
+        return cv2
+    except ImportError as exc:
+        raise RuntimeError(
+            "🎭 GJJ · 换脸分析器 需要 opencv-python (cv2) 来处理图像。\n"
+            "\n"
+            "🔧 快速安装命令（使用国内镜像）：\n"
+            "pip install opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+            "\n"
+            f"原始导入错误：{exc}\n"
+            "\n"
+            "💡 提示：安装后请重启 ComfyUI 服务器。"
+        ) from exc
 
 
 def get_image_md5hash(img_data: np.ndarray) -> str:
     """计算图片的 MD5 哈希值"""
     import hashlib
+    cv2 = _ensure_cv2()
     img_bytes = cv2.imencode('.png', img_data)[1].tobytes()
     return hashlib.md5(img_bytes).hexdigest()
 
 
 def get_analysis_model(det_size=(640, 640), model_path=None):
     """获取人脸分析模型
-    
+
     Args:
         det_size: 检测尺寸
         model_path: 模型目录的完整路径（如果为 None 则自动扫描）
     """
     global ANALYSIS_MODELS
-    
+
     models_path = folder_paths.models_dir
-    
+
     key = str(det_size[0])
-    
+
     # 如果指定了模型路径，直接使用
     if model_path and os.path.exists(model_path):
-        
+
         try:
             # insightface 需要的是父目录，不是 buffalo_l 本身
             parent_dir = os.path.dirname(model_path)
             model_name = os.path.basename(model_path)
-            
+
             # 直接初始化，不传递额外参数（遵循 ReActor 原版）
             ANALYSIS_MODELS[key] = insightface.app.FaceAnalysis(
                 name=model_name,
                 root=parent_dir
             )
-            
+
             if 'detection' in ANALYSIS_MODELS[key].models:
                 print(f"[GJJ FaceAnalysis] ✅ 成功加载模型: {model_path}")
             else:
@@ -191,7 +263,7 @@ def get_analysis_model(det_size=(640, 640), model_path=None):
                 error_msg += f"已加载的模型: {list(ANALYSIS_MODELS[key].models.keys())}\n"
                 error_msg += f"请检查模型文件是否完整且未损坏"
                 raise RuntimeError(error_msg)
-                
+
         except RuntimeError:
             # 重新抛出 RuntimeError
             raise
@@ -204,7 +276,7 @@ def get_analysis_model(det_size=(640, 640), model_path=None):
             import traceback
             error_msg += f"详细堆栈:\n{traceback.format_exc()}"
             raise RuntimeError(error_msg)
-        
+
         model = ANALYSIS_MODELS[key]
         try:
             import torch.cuda as cuda
@@ -215,29 +287,29 @@ def get_analysis_model(det_size=(640, 640), model_path=None):
         except:
             model.prepare(ctx_id=-1, det_size=det_size)
         return model
-    
+
     # 自动检测模式：扫描所有可用模型并使用第一个
     if key not in ANALYSIS_MODELS or ANALYSIS_MODELS[key] is None:
         available_models = scan_available_models()
-        
+
         if not available_models or available_models[0] == "无可用模型":
             raise RuntimeError(
                 f"无法找到可用的 buffalo 人脸检测模型。\n"
                 f"请确保模型文件存在于 ComfyUI/models/insightface/ 目录及其子目录中。\n"
                 f"可以从 https://github.com/deepinsight/insightface/releases 下载 buffalo_l 模型"
             )
-        
+
         # 使用第一个可用的模型
         first_model_info = available_models[0]
         # 提取相对路径部分
         rel_path = first_model_info.split('(')[1].rstrip(')')
         full_path = os.path.join(models_path, rel_path)
-        
+
         try:
             parent_dir = os.path.dirname(full_path)
             model_name = os.path.basename(full_path)
-            
-            
+
+
             ANALYSIS_MODELS[key] = insightface.app.FaceAnalysis(
                 name=model_name,
                 root=parent_dir
@@ -249,7 +321,7 @@ def get_analysis_model(det_size=(640, 640), model_path=None):
         except Exception as e:
             import traceback
             raise RuntimeError(f"自动加载模型失败: {e}\n{traceback.format_exc()}")
-    
+
     model = ANALYSIS_MODELS[key]
     # 在 prepare 时设置设备上下文
     try:
@@ -260,14 +332,14 @@ def get_analysis_model(det_size=(640, 640), model_path=None):
             model.prepare(ctx_id=-1, det_size=det_size)  # CPU
     except:
         model.prepare(ctx_id=-1, det_size=det_size)  # 降级到 CPU
-    
+
     return model
 
 
 def get_face_swap_model(model_path: str):
     """获取换脸模型"""
     global FS_MODEL, CURRENT_FS_MODEL_PATH
-    
+
     if CURRENT_FS_MODEL_PATH is None or CURRENT_FS_MODEL_PATH != model_path:
         CURRENT_FS_MODEL_PATH = model_path
         # ReActor 原版做法：不传递 providers 参数
@@ -288,7 +360,7 @@ def get_face_swap_model(model_path: str):
         except:
             # 降级处理：尝试不带 provider_name 参数
             FS_MODEL = insightface.model_zoo.get_model(model_path)
-    
+
     return FS_MODEL
 
 
@@ -310,7 +382,7 @@ def sort_faces_by_order(faces, order: str = "large-small"):
 
 def analyze_faces(img_data: np.ndarray, det_size=(640, 640), model_path=None):
     """分析图片中的人脸
-    
+
     Args:
         img_data: 图像数据
         det_size: 检测尺寸
@@ -318,28 +390,28 @@ def analyze_faces(img_data: np.ndarray, det_size=(640, 640), model_path=None):
     """
     face_analyser = get_analysis_model(det_size, model_path=model_path)
     faces = face_analyser.get(img_data)
-    
+
     # 如果没找到人脸，尝试减小检测尺寸
     if len(faces) == 0 and det_size[0] > 320 and det_size[1] > 320:
         det_size_half = (det_size[0] // 2, det_size[1] // 2)
         return analyze_faces(img_data, det_size_half, model_path=model_path)
-    
+
     return faces
 
 
-def get_face_single(img_data: np.ndarray, faces, face_index=0, det_size=(640, 640), 
+def get_face_single(img_data: np.ndarray, faces, face_index=0, det_size=(640, 640),
                     order="large-small", model_path=None):
     """获取单个人脸"""
     buffalo_path = os.path.join(folder_paths.models_dir, "insightface", "models", "buffalo_l.zip")
     if os.path.exists(buffalo_path):
         os.remove(buffalo_path)
-    
+
     # 无性别过滤
     if len(faces) == 0 and det_size[0] > 320 and det_size[1] > 320:
         det_size_half = (det_size[0] // 2, det_size[1] // 2)
-        return get_face_single(img_data, analyze_faces(img_data, det_size_half, model_path=model_path), 
+        return get_face_single(img_data, analyze_faces(img_data, det_size_half, model_path=model_path),
                              face_index, det_size_half, order, model_path=model_path)
-    
+
     try:
         faces_sorted = sort_faces_by_order(faces, order)
         return faces_sorted[face_index], 0
@@ -357,99 +429,101 @@ def swap_face_core(
 ) -> Image.Image:
     """
     核心换脸函数 - 从 ReActor 复制并简化
-    
+
     Args:
         model_path: buffalo 模型目录的完整路径（如果为 None 则自动扫描）
     """
     global SOURCE_FACES, SOURCE_IMAGE_HASH, TARGET_FACES, TARGET_IMAGE_HASH
-    
+
+    cv2 = _ensure_cv2()
+
     result_image = target_img if isinstance(target_img, Image.Image) else Image.fromarray(cv2.cvtColor(target_img, cv2.COLOR_RGB2BGR))
-    
+
     if model is None:
         return result_image
-    
+
     # 转换为目标格式
     if isinstance(target_img, Image.Image):
         target_cv = cv2.cvtColor(np.array(target_img), cv2.COLOR_RGB2BGR)
     else:
         target_cv = target_img
-    
+
     source_cv = None
     if source_img is not None:
         if isinstance(source_img, Image.Image):
             source_cv = cv2.cvtColor(np.array(source_img), cv2.COLOR_RGB2BGR)
         else:
             source_cv = source_img
-    
+
     # 分析源图人脸
     if source_cv is not None:
         source_hash = get_image_md5hash(source_cv)
-        
+
         if SOURCE_IMAGE_HASH != source_hash:
             SOURCE_IMAGE_HASH = source_hash
             SOURCE_FACES = None
-        
+
         if SOURCE_FACES is None:
             SOURCE_FACES = analyze_faces(source_cv, model_path=model_path)
-        
+
         source_faces = SOURCE_FACES
     else:
         return result_image
-    
+
     # 分析目标图人脸
     target_hash = get_image_md5hash(target_cv)
-    
+
     if TARGET_IMAGE_HASH != target_hash:
         TARGET_IMAGE_HASH = target_hash
         TARGET_FACES = None
-    
+
     if TARGET_FACES is None:
         TARGET_FACES = analyze_faces(target_cv, model_path=model_path)
-    
+
     target_faces = TARGET_FACES
-    
+
     if len(target_faces) == 0:
         return result_image
-    
+
     # 获取源人脸
     if len(source_faces_index) > 0:
         source_face, _ = get_face_single(
-            source_cv, source_faces, 
-            face_index=source_faces_index[0], 
+            source_cv, source_faces,
+            face_index=source_faces_index[0],
             order="large-small",
             model_path=model_path
         )
     else:
         source_face = sort_faces_by_order(source_faces, "large-small")[0]
-    
+
     if source_face is None:
         return result_image
-    
+
     # 执行换脸
     models_path = folder_paths.models_dir
     insightface_path = os.path.join(models_path, "insightface")
     model_path = os.path.join(insightface_path, model)
-    
+
     if not os.path.exists(model_path):
         raise RuntimeError(f"找不到换脸模型文件: {model}\n请将模型放置于 ComfyUI/models/insightface/ 目录")
-    
+
     face_swapper = get_face_swap_model(model_path)
     result = target_cv
-    
+
     for face_num in faces_index:
         if face_num >= len(target_faces):
             break
-        
+
         target_face, _ = get_face_single(
             target_cv, target_faces,
             face_index=face_num,
             order="large-small",
             model_path=model_path
         )
-        
+
         if target_face is not None:
             result = face_swapper.get(result, target_face, source_face)
-    
+
     result_image = Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
     return result_image
 
@@ -462,13 +536,13 @@ def normalize_image_batch(value: Any) -> List[torch.Tensor]:
     """将输入标准化为图片列表"""
     if value is None:
         return []
-    
+
     if isinstance(value, torch.Tensor):
         if value.ndim == 3:
             return [value.unsqueeze(0)]
         elif value.ndim == 4:
             return [value[i:i+1] for i in range(value.shape[0])]
-    
+
     return []
 
 
@@ -476,7 +550,7 @@ def ensure_rgb(image: torch.Tensor) -> torch.Tensor:
     """确保图片为 RGB 格式(3通道)"""
     if image.ndim != 4:
         raise RuntimeError(f"期望4维张量,收到 {image.ndim} 维")
-    
+
     channels = int(image.shape[-1])
     if channels == 3:
         return image.contiguous()
@@ -508,7 +582,7 @@ class GJJ_FaceAnalysis:
     FUNCTION = "swap_faces"
     OUTPUT_NODE = False
     DESCRIPTION = DESCRIPTION
-    
+
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("换脸结果",)
     OUTPUT_TOOLTIPS = ("换脸后的图片,保持与目标图相同的批量结构",)
@@ -517,7 +591,7 @@ class GJJ_FaceAnalysis:
     def INPUT_TYPES(cls):
         # 扫描可用的模型
         available_models = scan_available_models()
-        
+
         return {
             "required": {
                 "target_image": (
@@ -592,34 +666,49 @@ class GJJ_FaceAnalysis:
         source_faces_index: str = "0",
     ):
         """执行换脸操作"""
-        
+
         if not REACTOR_AVAILABLE:
             raise RuntimeError(
-                "缺少 insightface 依赖。请安装:\n"
-                "pip install insightface onnxruntime-gpu\n\n"
-                "并将 inswapper_128.onnx 模型放置于 ComfyUI/models/insightface/ 目录"
+                "🎭 GJJ · 换脸分析器 运行时依赖缺失\n"
+                "\n"
+                "📦 必需依赖（请安装）：\n"
+                "  • insightface (人脸识别和换脸核心库)\n"
+                "  • onnxruntime-gpu (GPU 加速) 或 onnxruntime (CPU)\n"
+                "  • opencv-python (cv2, 图像处理)\n"
+                "\n"
+                "🔧 快速安装命令（使用国内镜像）：\n"
+                "pip install insightface onnxruntime-gpu opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+                "\n"
+                "或者逐个安装：\n"
+                "pip install insightface -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+                "pip install onnxruntime-gpu -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+                "pip install opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+                "\n"
+                f"原始导入错误：{_IMPORT_ERROR}\n"
+                "\n"
+                "💡 提示：安装后请重启 ComfyUI 服务器。"
             )
-        
+
         # 标准化输入
         target_images = normalize_image_batch(target_image)
         source_images = normalize_image_batch(source_image)
-        
+
         if not target_images:
             raise RuntimeError("目标图不能为空")
         if not source_images:
             raise RuntimeError("源图不能为空")
-        
+
         # 确保 RGB 格式
         target_images = [ensure_rgb(img) for img in target_images]
         source_images = [ensure_rgb(img) for img in source_images]
-        
+
         try:
             target_indices = [int(x.strip()) for x in target_faces_index.split(",") if x.strip()]
             if not target_indices:
                 target_indices = [0]
         except ValueError:
             target_indices = [0]
-        
+
         try:
             source_indices = [int(x.strip()) for x in source_faces_index.split(",") if x.strip()]
             if not source_indices:
@@ -633,7 +722,7 @@ class GJJ_FaceAnalysis:
                 f"请确保模型文件存在于 ComfyUI/models/insightface/ 目录及其子目录中。\n"
                 f"可以从 https://github.com/deepinsight/insightface/releases 下载 buffalo_l 模型"
             )
-        
+
         # 从显示名称中提取相对路径
         # 格式: "buffalo_l (insightface\models\buffalo_l)"
         if '(' in face_model and ')' in face_model:
@@ -641,13 +730,13 @@ class GJJ_FaceAnalysis:
             actual_model_path = os.path.join(folder_paths.models_dir, rel_path)
         else:
             actual_model_path = None
-        
+
         if actual_model_path:
             print(f"[GJJ FaceAnalysis] 📂 模型路径: {actual_model_path}")
-        
+
         # 确定配对策略并执行换脸
         results = []
-        
+
         if len(source_images) == 1 and len(target_images) > 1:
             # 单源多目标：同一张源图应用到所有目标图
             source_pil = tensor_to_pil(source_images[0])
@@ -661,7 +750,7 @@ class GJJ_FaceAnalysis:
                     model_path=actual_model_path,
                 )
                 results.append(pil_to_tensor(result_pil))
-        
+
         elif len(target_images) == 1 and len(source_images) > 1:
             # 单目标多源：所有源图应用到同一张目标图
             target_pil = tensor_to_pil(target_images[0])
@@ -675,21 +764,21 @@ class GJJ_FaceAnalysis:
                     model_path=actual_model_path,
                 )
                 results.append(pil_to_tensor(result_pil))
-        
+
         else:
             # 批量+批量：所有源图和目标图两两配对（笛卡尔积）
             # 例如：4个目标 + 2个源 → 8个结果（2×4=8）
             total_pairs = len(source_images) * len(target_images)
             pair_num = 0
-            
+
             for source_idx, source_img in enumerate(source_images):
                 source_pil = tensor_to_pil(source_img)
-                
+
                 for target_idx, target_img in enumerate(target_images):
                     pair_num += 1
                     target_pil = tensor_to_pil(target_img)
-                    
-                    
+
+
                     result_pil = swap_face_core(
                         source_pil, target_pil,
                         model=swap_model,
@@ -698,7 +787,7 @@ class GJJ_FaceAnalysis:
                         model_path=actual_model_path,
                     )
                     results.append(pil_to_tensor(result_pil))
-        
+
         # 合并结果
         if len(results) == 1:
             return (results[0],)

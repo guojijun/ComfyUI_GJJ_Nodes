@@ -7,9 +7,9 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-import cv2
+# import cv2  # 在函数内部延迟导入
 import numpy as np
-import soundfile as sf
+# import soundfile as sf  # 在函数内部延迟导入
 from scipy import signal as sp_signal
 
 
@@ -339,11 +339,79 @@ def _check_wan22_s2v_environment() -> str:
 
 # ─── 主节点 ────────────────────────────────────────────────────
 
+# 检查关键依赖
+try:
+    import cv2
+    import soundfile as sf
+    _DEPENDENCIES_AVAILABLE = True
+except ImportError as exc:
+    _DEPENDENCIES_AVAILABLE = False
+    _IMPORT_ERROR = str(exc)
+
+
+def _ensure_cv2():
+    """确保 cv2 已安装"""
+    try:
+        import cv2
+        return cv2
+    except ImportError as exc:
+        raise RuntimeError(
+            "💄 GJJ · 本地口型同步 需要 opencv-python (cv2) 来处理图像。\n"
+            "\n"
+            "🔧 快速安装命令（使用国内镜像）：\n"
+            "pip install opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+            "\n"
+            f"原始导入错误：{exc}\n"
+            "\n"
+            "💡 提示：安装后请重启 ComfyUI 服务器。"
+        ) from exc
+
+
+def _ensure_soundfile():
+    """确保 soundfile 已安装"""
+    try:
+        import soundfile as sf
+        return sf
+    except ImportError as exc:
+        raise RuntimeError(
+            "💄 GJJ · 本地口型同步 需要 soundfile 来处理音频文件。\n"
+            "\n"
+            "🔧 快速安装命令（使用国内镜像）：\n"
+            "pip install soundfile -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+            "\n"
+            f"原始导入错误：{exc}\n"
+            "\n"
+            "💡 提示：安装后请重启 ComfyUI 服务器。"
+        ) from exc
+
 
 class GJJ_LocalLipSync:
     CATEGORY = "GJJ"
     FUNCTION = "generate"
-    DESCRIPTION = "GJJ 内部本地零 API 口型同步：图片+音频使用 GJJ 已有 LTX2.3 功能，视频+音频使用 GJJ 内部 LatentSync 或 LatentSync 功能；只引用 ComfyUI 官方能力和 GJJ 包内功能，不依赖其它自定义节点。"
+
+    # 如果缺少关键依赖，显示错误信息
+    if not _DEPENDENCIES_AVAILABLE:
+        DESCRIPTION = """❌ 节点 GJJ · 💄 本地口型同步 缺少必需的 Python 依赖：
+
+📦 必需依赖（请安装）：
+  • opencv-python (cv2, 图像处理)
+  • soundfile (音频文件处理)
+  • scipy (信号处理)
+
+🔧 快速安装命令（使用国内镜像）：
+  pip install opencv-python soundfile scipy -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+或者逐个安装：
+  pip install opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple
+  pip install soundfile -i https://pypi.tuna.tsinghua.edu.cn/simple
+  pip install scipy -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+💡 提示：安装后请重启 ComfyUI 服务器。
+
+---
+GJJ 内部本地零 API 口型同步：图片+音频使用 GJJ 已有 LTX2.3 功能，视频+音频使用 GJJ 内部 LatentSync 或 LatentSync 功能；只引用 ComfyUI 官方能力和 GJJ 包内功能，不依赖其它自定义节点。"""
+    else:
+        DESCRIPTION = "GJJ 内部本地零 API 口型同步：图片+音频使用 GJJ 已有 LTX2.3 功能，视频+音频使用 GJJ 内部 LatentSync 或 LatentSync 功能；只引用 ComfyUI 官方能力和 GJJ 包内功能，不依赖其它自定义节点。"
     SEARCH_ALIASES = ["口型同步", "唇形同步", "数字人", "lipsync", "LatentSync", "LTX2.3", "Wan2.2"]
     GJJ_HELP = {
         "models": [

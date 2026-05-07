@@ -8,8 +8,10 @@ from typing import Any
 
 import folder_paths
 import numpy as np
-import soundfile as sf
 import torch
+
+# 延迟导入 soundfile，避免缺失时导致整个模块无法加载
+# import soundfile as sf  # 在函数内部导入
 
 from .gjj_fish_audio_s2_loader import (
     _register_folder,
@@ -30,6 +32,13 @@ from .gjj_fish_audio_s2_model_cache import (
     set_cached_engine,
     unload_engine,
 )
+
+# 检查关键依赖
+try:
+    import soundfile as sf
+    _SOUNDFILE_AVAILABLE = True
+except ImportError:
+    _SOUNDFILE_AVAILABLE = False
 
 
 NODE_NAME = "GJJ_FishAudioS2Generator"
@@ -318,7 +327,83 @@ class GJJ_FishAudioS2Generator:
     CATEGORY = "GJJ/Audio"
     FUNCTION = "generate"
     OUTPUT_NODE = True
-    DESCRIPTION = "Fish Audio S2 一体式 TTS、单人语音克隆和多说话人语音克隆节点。内置 Fish Speech 运行时源码，不依赖原 ComfyUI-fish-audio-s2 节点包。"
+
+    # 如果缺少关键依赖，显示错误信息
+    if not _SOUNDFILE_AVAILABLE:
+        DESCRIPTION = """❌ 节点 Fish Audio S2 缺少必需的 Python 依赖：
+
+📦 必需依赖（请安装）：
+  • soundfile
+
+🔧 安装命令：
+  pip install soundfile
+
+💡 提示：安装后请重启 ComfyUI 服务器。
+
+---
+Fish Audio S2 一体式 TTS、单人语音克隆和多说话人语音克隆节点。内置 Fish Speech 运行时源码，不依赖原 ComfyUI-fish-audio-s2 节点包。
+
+📦 所需模型：
+  • 模型目录: models/fishaudioS2/
+    - s2-pro (推荐，音质最佳)
+    - s2-base (轻量，速度快)
+    - 或其他 Fish Speech S2 模型变体
+  • 自动下载: 开启后首次执行时从 HuggingFace 下载（需 huggingface_hub）
+
+🔧 Python 依赖：
+  • transformers (文本编码)
+  • loguru, pydantic, tiktoken (工具库)
+  • hydra-core (配置管理)
+  • descript-audio-codec, descript-audiotools (音频编解码)
+  • soundfile (音频读写)
+  • 安装命令: pip install transformers loguru pydantic tiktoken hydra-core descript-audio-codec descript-audiotools soundfile
+
+✅ 优点：
+  • 音质出色，接近真人发音
+  • 支持多说话人同时克隆（最多 10 人）
+  • 内置 vendor 版 Fish Speech 运行时，无需额外安装
+  • 支持 50+ 种语言
+  • 提供普通 TTS、单人克隆、多说话人克隆三种模式
+  • 自动保存 MP3 预览，方便快速试听
+
+⚠️ 缺点：
+  • 模型较大（s2-pro 约 2-3GB）
+  • 需要较多显存（建议 ≥6GB）
+  • 推理速度中等（取决于文本长度）
+  • 依赖较多 Python 包，环境配置复杂
+  • 跨语言克隆效果可能不如母语自然"""
+    else:
+        DESCRIPTION = """Fish Audio S2 一体式 TTS、单人语音克隆和多说话人语音克隆节点。内置 Fish Speech 运行时源码，不依赖原 ComfyUI-fish-audio-s2 节点包。
+
+    📦 所需模型：
+      • 模型目录: models/fishaudioS2/
+        - s2-pro (推荐，音质最佳)
+        - s2-base (轻量，速度快)
+        - 或其他 Fish Speech S2 模型变体
+      • 自动下载: 开启后首次执行时从 HuggingFace 下载（需 huggingface_hub）
+
+    🔧 Python 依赖：
+      • transformers (文本编码)
+      • loguru, pydantic, tiktoken (工具库)
+      • hydra-core (配置管理)
+      • descript-audio-codec, descript-audiotools (音频编解码)
+      • soundfile (音频读写)
+      • 安装命令: pip install transformers loguru pydantic tiktoken hydra-core descript-audio-codec descript-audiotools soundfile
+
+    ✅ 优点：
+      • 音质出色，接近真人发音
+      • 支持多说话人同时克隆（最多 10 人）
+      • 内置 vendor 版 Fish Speech 运行时，无需额外安装
+      • 支持 50+ 种语言
+      • 提供普通 TTS、单人克隆、多说话人克隆三种模式
+      • 自动保存 MP3 预览，方便快速试听
+
+    ⚠️ 缺点：
+      • 模型较大（s2-pro 约 2-3GB）
+      • 需要较多显存（建议 ≥6GB）
+      • 推理速度中等（取决于文本长度）
+      • 依赖较多 Python 包，环境配置复杂
+      • 跨语言克隆效果可能不如母语自然"""
     SEARCH_ALIASES = ["Fish Audio", "Fish S2", "TTS", "语音克隆", "多说话人", "文字转语音"]
     RETURN_TYPES = ("AUDIO",)
     RETURN_NAMES = ("合成音频",)
@@ -347,16 +432,16 @@ class GJJ_FishAudioS2Generator:
                     "display_name": "合成文本",
                     "tooltip": "要合成的文本。多说话人模式请使用 [speaker_1]:、[speaker_2]: 这样的行首标签。",
                 }),
-                "default_reference_text": ("STRING", {
-                    "multiline": True,
-                    "default": DEFAULT_REFERENCE_TEXT,
-                    "display_name": "默认参考文本",
-                    "tooltip": "参考音频对应的文字。未连接每路参考文本时，会使用这里作为克隆提示。",
-                }),
                 "local_audio_name": (audio_choices, {
                     "default": default_audio,
                     "display_name": "本地参考音频",
                     "tooltip": "没有连接第 1 路参考音频时，从 models/mp3 选择一段音频作为单人克隆或 speaker_1 的参考。",
+                }),
+                "default_reference_text": ("STRING", {
+                    "multiline": False,
+                    "default": DEFAULT_REFERENCE_TEXT,
+                    "display_name": "默认参考文本",
+                    "tooltip": "参考音频对应的文字。未连接每路参考文本时，会使用这里作为克隆提示。",
                 }),
                 "language": (LANGUAGES, {
                     "default": "auto",
@@ -433,21 +518,6 @@ class GJJ_FishAudioS2Generator:
                     "display_name": "说话间隔秒数",
                     "tooltip": "多说话人模式下，相邻说话片段之间插入的静音秒数。",
                 }),
-                "keep_model_loaded": ("BOOLEAN", {
-                    "default": True,
-                    "display_name": "保留模型",
-                    "tooltip": "任务结束后保留模型缓存，下一次运行更快；关闭则任务后卸载。",
-                }),
-                "offload_to_cpu": ("BOOLEAN", {
-                    "default": False,
-                    "display_name": "结束后转CPU",
-                    "tooltip": "保留模型时可把模型转到 CPU 以释放显存，下次运行再恢复。",
-                }),
-                "compile_model": ("BOOLEAN", {
-                    "default": False,
-                    "display_name": "编译模型",
-                    "tooltip": "启用 torch.compile。Windows 环境通常不建议开启；首次运行会明显变慢。",
-                }),
                 "mp3_filename_prefix": ("STRING", {
                     "default": "audio/GJJ_FishAudioS2",
                     "display_name": "MP3文件名前缀",
@@ -459,9 +529,12 @@ class GJJ_FishAudioS2Generator:
                     "tooltip": "内置 MP3 保存质量。320k 体积较大但质量更高；128k 体积更小；V0 是可变码率。",
                 }),
             },
-            "optional": _build_optional_inputs(),
+            "optional": {
+                **_build_optional_inputs(),
+            },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
+                "extra_pnginfo": "EXTRA_PNGINFO",
             },
         }
 
@@ -539,12 +612,42 @@ class GJJ_FishAudioS2Generator:
             raise RuntimeError("Fish S2 没有生成有效音频。")
         return np.asarray(audio_out, dtype=np.float32), int(sample_rate)
 
+    def _read_bool_properties(self, extra_pnginfo, unique_id):
+        """从 workflow 的 properties 中读取 Boolean 值"""
+        if not isinstance(extra_pnginfo, dict):
+            return None
+        workflow = extra_pnginfo.get("workflow")
+        if not isinstance(workflow, dict):
+            return None
+        nodes = workflow.get("nodes")
+        if not isinstance(nodes, list):
+            return None
+
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            # 查找当前节点
+            if unique_id is not None and str(node.get("id")) != str(unique_id):
+                continue
+            if node.get("type") != NODE_NAME:
+                continue
+
+            # 读取 properties
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                return {
+                    "keep_model_loaded": properties.get("keep_model_loaded"),
+                    "offload_to_cpu": properties.get("offload_to_cpu"),
+                    "compile_model": properties.get("compile_model"),
+                }
+        return None
+
     def generate(
         self,
         mode,
         model_path,
-        text,
         default_reference_text,
+        text,
         local_audio_name,
         language,
         device,
@@ -557,14 +660,32 @@ class GJJ_FishAudioS2Generator:
         repetition_penalty,
         seed,
         pause_after_speaker,
-        keep_model_loaded,
-        offload_to_cpu,
-        compile_model,
         mp3_filename_prefix="audio/GJJ_FishAudioS2",
         mp3_quality="320k",
         unique_id=None,
+        extra_pnginfo=None,
         **kwargs,
     ):
+        # 从 properties 读取 Boolean 值（通过 extra_pnginfo + unique_id）
+        props = {}
+        try:
+            if extra_pnginfo and isinstance(extra_pnginfo, dict):
+                workflow = extra_pnginfo.get("workflow", {})
+                if isinstance(workflow, dict):
+                    nodes = workflow.get("nodes", [])
+                    if isinstance(nodes, list):
+                        uid = str(unique_id)
+                        for n in nodes:
+                            if isinstance(n, dict) and str(n.get("id")) == uid:
+                                props = n.get("properties", {}) or {}
+                                break
+        except Exception:
+            props = {}
+
+        keep_model_loaded = bool(props.get("keep_model_loaded", True))
+        offload_to_cpu = bool(props.get("offload_to_cpu", False))
+        compile_model = bool(props.get("compile_model", False))
+
         started_at = time.perf_counter()
         cancel_event.clear()
         pbar = None

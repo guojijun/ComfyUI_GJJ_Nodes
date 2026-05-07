@@ -98,6 +98,89 @@ def _new_progress_bar(total: int):
         return None
 
 
+def _decode_audio_with_av(source_path: str) -> tuple[np.ndarray, int]:
+    """使用 PyAV 解码音频文件（支持 WMA 等格式）"""
+    import av
+
+    with av.open(source_path) as container:
+        if not container.streams.audio:
+            raise RuntimeError("文件中没有可解码的音频流。")
+        stream = container.streams.audio[0]
+        sample_rate = int(stream.codec_context.sample_rate or 0)
+        chunks: list[np.ndarray] = []
+        for frame in container.decode(stream):
+            if not sample_rate:
+                sample_rate = int(frame.sample_rate or 0)
+            chunk = frame.to_ndarray()
+            if chunk.ndim == 1:
+                chunk = chunk[:, None]
+            elif chunk.shape[0] <= 8:
+                chunk = chunk.T
+            if chunk.dtype.kind in {"i", "u"}:
+                chunk = chunk.astype(np.float32) / float(np.iinfo(chunk.dtype).max)
+            else:
+                chunk = chunk.astype(np.float32, copy=False)
+            chunks.append(chunk)
+        if not chunks:
+            raise RuntimeError("音频文件没有有效采样。")
+        audio_np = np.concatenate(chunks, axis=0)
+        return audio_np.astype(np.float32, copy=False), sample_rate
+
+
+def _read_audio_file(path: str) -> tuple[np.ndarray, int]:
+    """读取音频文件，支持多种加载方式，逐级回退"""
+    errors = []
+
+    # 方式1: 尝试 soundfile（支持 WAV、FLAC、OGG 等）
+    try:
+        import soundfile as sf
+        audio_np, sample_rate = sf.read(path, always_2d=True)
+        if audio_np.size > 0:
+            return audio_np.astype(np.float32, copy=False), int(sample_rate)
+    except Exception as e:
+        errors.append(f"soundfile: {e}")
+
+    # 方式2: 尝试 torchaudio（支持 MP3、WAV 等）
+    try:
+        import torchaudio
+        waveform, sr = torchaudio.load(path)
+        audio_np = waveform.numpy()
+        # torchaudio 返回 (channels, samples)，需要转为 (samples, channels)
+        if audio_np.ndim == 2:
+            audio_np = audio_np.T
+        else:
+            audio_np = audio_np.reshape(-1, 1)
+        return audio_np.astype(np.float32, copy=False), int(sr)
+    except Exception as e:
+        errors.append(f"torchaudio: {e}")
+
+    # 方式3: 尝试 PyAV（通过 FFmpeg 支持几乎所有格式，包括 WMA）
+    try:
+        audio_np, sample_rate = _decode_audio_with_av(path)
+        if audio_np.size > 0:
+            return audio_np, sample_rate
+    except Exception as e:
+        errors.append(f"PyAV: {e}")
+
+    # 方式4: 尝试 librosa（支持多种格式，但速度较慢）
+    try:
+        import librosa
+        audio_np, sr = librosa.load(path, sr=None, mono=False)
+        if audio_np.ndim == 1:
+            audio_np = audio_np.reshape(-1, 1)
+        else:
+            audio_np = audio_np.T
+        return audio_np.astype(np.float32, copy=False), int(sr)
+    except Exception as e:
+        errors.append(f"librosa: {e}")
+
+    # 所有方式都失败
+    raise RuntimeError(
+        f"无法解码音频文件：{path}\n"
+        f"尝试的所有方法均失败：\n" + "\n".join(f"  - {err}" for err in errors)
+    )
+
+
 def _update_progress(pbar: Any, current: int, total: int) -> None:
     if pbar is None:
         return
@@ -441,7 +524,34 @@ class GJJ_Qwen3ASRTextFormats:
     CATEGORY = "GJJ/Audio"
     FUNCTION = "transcribe_and_align"
     OUTPUT_NODE = True
-    DESCRIPTION = "Qwen3-ASR 一体式语音识别与强制对齐节点。输入 ComfyUI 音频，输出时间戳表、分段文本、开始时间和结束时间四种文本。"
+    DESCRIPTION = """Qwen3-ASR 一体式语音识别与强制对齐节点。输入 ComfyUI 音频，输出时间戳表、分段文本、开始时间和结束时间四种文本。
+
+📦 所需模型：
+  • ASR 模型目录: models/Qwen3-ASR/
+    - Qwen3-ASR-1.7B (推荐，精度高)
+    - Qwen3-ASR-0.6B (轻量，速度快)
+  • 对齐模型目录: models/Qwen3-ASR/
+    - Qwen3-ForcedAligner-0.6B
+  • 自动下载: 开启后首次执行时从 HuggingFace 下载（需 huggingface_hub）
+
+🔧 Python 依赖：
+  • qwen-asr (必需，Qwen3-ASR 运行时库)
+  • huggingface_hub (可选，用于自动下载模型)
+  • soundfile, torchaudio, librosa, av (音频加载，至少安装其一)
+  • 安装命令: pip install qwen-asr huggingface_hub soundfile av
+
+✅ 优点：
+  • 支持 28+ 种语言自动识别
+  • 内置强制对齐，生成精确时间戳
+  • 支持上下文提示，提升专有名词识别准确率
+  • 多种文本输出格式，适配 Wan/LTX 等视频生成节点
+  • 支持 WMA/MP3/WAV/FLAC 等多种音频格式
+
+⚠️ 缺点：
+  • 模型较大（1.7B 约 3.4GB，0.6B 约 1.2GB）
+  • 需要较多显存（建议 ≥8GB）
+  • 推理速度较慢（长音频可能需要数分钟）
+  • 依赖 qwen-asr 包，安装可能遇到兼容性问题"""
     SEARCH_ALIASES = ["qwen3 asr", "qwen asr", "语音识别", "音频转文字", "强制对齐", "字幕时间戳"]
     RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("时间戳表", "分段文本", "开始时间列表", "结束时间列表")
@@ -456,13 +566,36 @@ class GJJ_Qwen3ASRTextFormats:
     def INPUT_TYPES(cls):
         asr_models = _list_asr_models()
         aligner_models = _list_aligner_models()
+        # 读取 models/mp3 列表（用于提示）
+        mp3_dir = os.path.join(folder_paths.models_dir, "mp3")
+        available_audios = []
+        if os.path.isdir(mp3_dir):
+            for f in sorted(os.listdir(mp3_dir)):
+                if f.lower().endswith((".mp3", ".wav", ".flac", ".m4a")):
+                    available_audios.append(f)
+
+        # 构建提示文本
+        audio_hint = "从 models/mp3 目录选择示例音频进行识别。"
+        if available_audios:
+            audio_hint += f"\n\n可用音频（{len(available_audios)}个）：\n" + "\n".join(available_audios[:10])
+            if len(available_audios) > 10:
+                audio_hint += f"\n... 还有 {len(available_audios) - 10} 个"
+
         return {
-            "required": {
+            "required": {},
+            "optional": {
                 "audio": ("AUDIO", {
                     "display_name": "输入音频",
                     "tooltip": "连接 ComfyUI 的音频对象，例如 Load Audio 节点输出。",
                 }),
-                "asr_model_name": (asr_models, {
+                "example_audio": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "display_name": "示例音频",
+                    "tooltip": audio_hint,
+                }),
+                "asr_model_name": (asr_models,
+ {
                     "default": "Qwen3-ASR-1.7B" if "Qwen3-ASR-1.7B" in asr_models else asr_models[0],
                     "display_name": "ASR模型",
                     "tooltip": "自动搜索 models/Qwen3-ASR 下的本地 Qwen3-ASR 模型；找不到时可按设置自动下载。",
@@ -482,23 +615,11 @@ class GJJ_Qwen3ASRTextFormats:
                     "display_name": "对齐语言",
                     "tooltip": "默认使用 ASR 检测到的语言；如果检测语言不稳定，可手动指定强制对齐语言。",
                 }),
-                "segment_by_sentence": ("BOOLEAN", {
-                    "default": True,
-                    "display_name": "按句分段",
-                    "tooltip": "开启后按标点和空白把识别文本合并成片段；关闭后按底层字/词级时间戳逐项输出。",
-                }),
-            },
-            "optional": {
                 "context": ("STRING", {
                     "default": "",
                     "multiline": True,
                     "display_name": "上下文提示",
                     "tooltip": "可填写专有名词、人物名或场景提示，帮助 ASR 识别更准确；不需要时留空。",
-                }),
-                "auto_download": ("BOOLEAN", {
-                    "default": True,
-                    "display_name": "自动下载模型",
-                    "tooltip": "本地没有模型时自动下载到 models/Qwen3-ASR。关闭后只使用本地已有模型。",
                 }),
                 "precision": (PRECISION_OPTIONS, {
                     "default": "自动",
@@ -522,24 +643,66 @@ class GJJ_Qwen3ASRTextFormats:
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
+                "extra_pnginfo": "EXTRA_PNGINFO",
             },
         }
 
     def transcribe_and_align(
         self,
-        audio,
-        asr_model_name,
-        aligner_model_name,
-        asr_language,
-        align_language,
-        segment_by_sentence,
+        audio=None,
+        example_audio="",
+        asr_model_name=None,
+        aligner_model_name=None,
+        asr_language="Auto",
+        align_language=ALIGN_AUTO,
         context="",
+        segment_by_sentence=True,
         auto_download=True,
         precision="自动",
         max_inference_batch_size=32,
         max_new_tokens=512,
         unique_id=None,
+        extra_pnginfo=None,
     ):
+        # 从 properties 读取 Boolean 值（通过 extra_pnginfo + unique_id）
+        props = {}
+        try:
+            if extra_pnginfo and isinstance(extra_pnginfo, dict):
+                workflow = extra_pnginfo.get("workflow", {})
+                if isinstance(workflow, dict):
+                    nodes = workflow.get("nodes", [])
+                    if isinstance(nodes, list):
+                        uid = str(unique_id)
+                        for n in nodes:
+                            if isinstance(n, dict) and str(n.get("id")) == uid:
+                                props = n.get("properties", {}) or {}
+                                break
+        except Exception:
+            props = {}
+
+        segment_by_sentence = bool(props.get("segment_by_sentence", True))
+        auto_download = bool(props.get("auto_download", True))
+
+        # 如果提供了 example_audio，加载它作为 audio
+        # 支持空字符串、'[无示例音频]' 或实际文件名
+        if audio is None and example_audio and example_audio != "[无示例音频]":
+            mp3_dir = os.path.join(folder_paths.models_dir, "mp3")
+            audio_path = os.path.join(mp3_dir, example_audio)
+            if os.path.exists(audio_path):
+                try:
+                    # 使用 soundfile + PyAV 加载音频（支持 WMA 等多种格式）
+                    audio_np, sample_rate = _read_audio_file(audio_path)
+                    # 转换为 torch tensor
+                    if audio_np.ndim == 1:
+                        audio_np = audio_np.reshape(1, -1)
+                    else:
+                        audio_np = audio_np.T  # soundfile 返回 (samples, channels)，需要转为 (channels, samples)
+                    waveform = torch.from_numpy(audio_np).float()
+                    audio = {"waveform": waveform.unsqueeze(0), "sample_rate": sample_rate}
+                except Exception as e:
+                    raise RuntimeError(f"加载示例音频失败: {e}")
+            else:
+                raise RuntimeError(f"示例音频文件不存在: {audio_path}\n请检查文件名是否正确，或确保文件位于 models/mp3 目录。")
         started_at = time.perf_counter()
         pbar = _new_progress_bar(5)
         try:
@@ -606,6 +769,18 @@ class GJJ_Qwen3ASRTextFormats:
                 1.0,
             )
             _update_progress(pbar, 5, 5)
+
+            # 发送生成的文本到前端显示（通过 custom event）
+            try:
+                from server import PromptServer
+                PromptServer.instance.send_sync("gjj_qwen3_text_generated", {
+                    "node": str(unique_id),
+                    "text_list": text_list,
+                    "timestamps": timestamps,
+                })
+            except Exception:
+                pass
+
             return {
                 "ui": {"text": (timestamps, text_list, start_times, end_times)},
                 "result": (timestamps, text_list, start_times, end_times),

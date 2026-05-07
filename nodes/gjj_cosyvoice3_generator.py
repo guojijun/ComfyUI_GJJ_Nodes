@@ -6,6 +6,9 @@ from typing import Any
 import comfy.utils
 import torch
 
+# 延迟导入 cosyvoice，避免缺失时导致整个模块无法加载
+# from cosyvoice.cli.cosyvoice import AutoModel  # 在 runtime 中导入
+
 from .gjj_cosyvoice3_runtime import (
 	DEFAULT_MODEL_NAME,
 	audio_file_to_tempfile,
@@ -25,6 +28,13 @@ from .gjj_cosyvoice3_runtime import (
 	tensor_to_comfy_audio,
 	transcribe_audio,
 )
+
+# 检查关键依赖
+try:
+	from cosyvoice.cli.cosyvoice import AutoModel  # noqa: F401
+	_COSYVOICE_AVAILABLE = True
+except ImportError:
+	_COSYVOICE_AVAILABLE = False
 
 
 MODE_OPTIONS = ["零样本复刻", "跨语言复刻", "指令风格"]
@@ -46,7 +56,78 @@ def _has_valid_audio_input(audio: Any) -> bool:
 
 
 class GJJ_CosyVoice3Generator:
-	DESCRIPTION = "CosyVoice3 一体式语音克隆器。内部自动加载本地 models/cosyvoice 模型，支持零样本复刻、跨语言复刻与指令风格控制。"
+	# 如果缺少关键依赖，显示错误信息
+	if not _COSYVOICE_AVAILABLE:
+		DESCRIPTION = """❌ 节点 CosyVoice3 语音克隆器 缺少必需的 Python 依赖：
+
+📦 必需依赖（请安装）：
+  • cosyvoice
+
+🔧 安装命令：
+  pip install cosyvoice
+
+💡 提示：安装后请重启 ComfyUI 服务器。
+
+---
+CosyVoice3 一体式语音克隆器。内部自动加载本地 models/cosyvoice 模型，支持零样本复刻、跨语言复刻与指令风格控制。
+
+📦 所需模型：
+  • 模型目录: models/cosyvoice/
+    - Fun-CosyVoice3-0.5B-2512 (默认，约 1GB)
+  • 示例音频目录: models/mp3/ (存放参考音频)
+  • 官方示例: 首次执行时自动下载到 models/cosyvoice/demo/
+  • 自动下载: 开启后首次执行时从 HuggingFace 国内镜像下载（需 huggingface_hub）
+
+🔧 Python 依赖：
+  • cosyvoice (必需，CosyVoice3 运行时库)
+  • huggingface_hub (可选，用于自动下载模型)
+  • soundfile (音频读写)
+  • 安装命令: pip install cosyvoice huggingface_hub soundfile
+
+✅ 优点：
+  • 支持三种合成模式：零样本复刻、跨语言复刻、指令风格
+  • 音质自然，情感表达丰富
+  • 支持自动转录参考音频文本（零样本模式下）
+  • 内置官方示例音色，方便快速测试
+  • 模型较小（0.5B 约 1GB），显存占用低
+  • 支持语速调节和风格指令控制
+
+⚠️ 缺点：
+  • 仅支持单一说话人克隆（不支持多说话人）
+  • 跨语言复刻效果可能不如母语自然
+  • 指令风格模式需要手动编写风格描述
+  • 依赖 cosyvoice 包，安装可能遇到兼容性问题
+  • 不支持动态扩展输入口"""
+	else:
+		DESCRIPTION = """CosyVoice3 一体式语音克隆器。内部自动加载本地 models/cosyvoice 模型，支持零样本复刻、跨语言复刻与指令风格控制。
+
+📦 所需模型：
+  • 模型目录: models/cosyvoice/
+    - Fun-CosyVoice3-0.5B-2512 (默认，约 1GB)
+  • 示例音频目录: models/mp3/ (存放参考音频)
+  • 官方示例: 首次执行时自动下载到 models/cosyvoice/demo/
+  • 自动下载: 开启后首次执行时从 HuggingFace 国内镜像下载（需 huggingface_hub）
+
+🔧 Python 依赖：
+  • cosyvoice (必需，CosyVoice3 运行时库)
+  • huggingface_hub (可选，用于自动下载模型)
+  • soundfile (音频读写)
+  • 安装命令: pip install cosyvoice huggingface_hub soundfile
+
+✅ 优点：
+  • 支持三种合成模式：零样本复刻、跨语言复刻、指令风格
+  • 音质自然，情感表达丰富
+  • 支持自动转录参考音频文本（零样本模式下）
+  • 内置官方示例音色，方便快速测试
+  • 模型较小（0.5B 约 1GB），显存占用低
+  • 支持语速调节和风格指令控制
+
+⚠️ 缺点：
+  • 仅支持单一说话人克隆（不支持多说话人）
+  • 跨语言复刻效果可能不如母语自然
+  • 指令风格模式需要手动编写风格描述
+  • 依赖 cosyvoice 包，安装可能遇到兼容性问题
+  • 不支持动态扩展输入口"""
 
 	@classmethod
 	def INPUT_TYPES(cls):
@@ -86,25 +167,15 @@ class GJJ_CosyVoice3Generator:
 				}),
 				"reference_text": ("STRING", {
 					"default": DEFAULT_REFERENCE_TEXT,
-					"multiline": True,
+					"multiline": False,
 					"display_name": "参考文本",
 					"tooltip": "参考音频对应的文字。零样本复刻模式下为空时可自动转录；本地示例音色同样支持自动转录。",
 				}),
 				"instruct_text": ("STRING", {
 					"default": "请以自然、清晰、富有感情的语气朗读。",
-					"multiline": True,
+					"multiline": False,
 					"display_name": "风格指令",
-					"tooltip": "在“指令风格”模式下用来描述语气、情绪和风格；其它模式可留空。",
-				}),
-				"auto_transcribe": ("BOOLEAN", {
-					"default": True,
-					"display_name": "自动转录参考音频",
-					"tooltip": "零样本复刻模式下，如果参考文本为空，会尝试用 Whisper 自动转录。",
-				}),
-				"text_frontend": ("BOOLEAN", {
-					"default": True,
-					"display_name": "启用文本前端",
-					"tooltip": "启用 CosyVoice 的文本规范化。特殊标签或自定义音素时可关闭。",
+					"tooltip": "在\"指令风格\"模式下用来描述语气、情绪和风格；其它模式可留空。",
 				}),
 				"seed": ("INT", {
 					"default": 42,
@@ -132,6 +203,7 @@ class GJJ_CosyVoice3Generator:
 			},
 			"hidden": {
 				"unique_id": "UNIQUE_ID",
+				"extra_pnginfo": "EXTRA_PNGINFO",
 			},
 		}
 
@@ -156,14 +228,31 @@ class GJJ_CosyVoice3Generator:
 		reference_text: str = DEFAULT_REFERENCE_TEXT,
 		example_audio_name: str = "[未找到示例音色]",
 		instruct_text: str = "",
-		auto_transcribe: bool = True,
-		text_frontend: bool = True,
 		seed: int = 42,
 		mp3_filename_prefix: str = "audio/GJJ_CosyVoice3",
 		mp3_quality: str = "320k",
 		reference_audio: dict[str, Any] | None = None,
 		unique_id: Any = None,
+		extra_pnginfo: dict[str, Any] | None = None,
 	):
+		# 从 properties 读取 Boolean 值（通过 extra_pnginfo + unique_id）
+		props = {}
+		try:
+			if extra_pnginfo and isinstance(extra_pnginfo, dict):
+				workflow = extra_pnginfo.get("workflow", {})
+				if isinstance(workflow, dict):
+					nodes = workflow.get("nodes", [])
+					if isinstance(nodes, list):
+						uid = str(unique_id)
+						for n in nodes:
+							if isinstance(n, dict) and str(n.get("id")) == uid:
+								props = n.get("properties", {}) or {}
+								break
+		except Exception:
+			props = {}
+
+		auto_transcribe = bool(props.get("auto_transcribe", True))
+		text_frontend = bool(props.get("text_frontend", True))
 		temp_file = None
 		use_uploaded_audio = _has_valid_audio_input(reference_audio)
 		reference_source = "输入音频" if use_uploaded_audio else "示例音频"

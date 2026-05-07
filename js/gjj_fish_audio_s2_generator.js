@@ -9,6 +9,73 @@ const MIN_VISIBLE_PAIRS = 1;
 const LOCAL_AUDIO_WIDGET = "local_audio_name";
 const STATUS_WIDGET_NAME = "gjj_fish_audio_s2_status";
 const AUDIO_WIDGET_NAME = "gjj_fish_audio_s2_audio";
+const GENERATE_BUTTON_NAME = "gjj_generate_speech_btn";
+
+// Boolean 控件名称
+const BOOL_WIDGETS = ["keep_model_loaded", "offload_to_cpu", "compile_model"];
+
+// ─── 只刷新当前节点 ──
+function isExecutionOutputNode(node) {
+	if (!node) return false;
+	if (node === undefined || node === null) return false;
+	if (node.comfyClass === "GJJ_FishAudioS2Generator") return true;
+	if (node.constructor?.nodeData?.output_node === true) return true;
+	if (node.nodeData?.output_node === true) return true;
+	if (node.flags?.output === true) return true;
+	return false;
+}
+
+async function queueOnlyCurrentNode(node) {
+	if (!node || !node.graph) return false;
+
+	const graph = node.graph || app.graph;
+	const allNodes = graph?._nodes || app.graph?._nodes || [];
+
+	const savedModes = [];
+	const oldSelectedNodes = app.canvas?.selected_nodes;
+	const oldSelectedNode = app.canvas?.selected_node;
+
+	try {
+		for (const n of allNodes) {
+			if (!n || n === node) continue;
+			if (isExecutionOutputNode(n)) {
+				savedModes.push([n, n.mode]);
+				n.mode = 2;
+			}
+		}
+
+		if (app.canvas) {
+			app.canvas.selected_nodes = {};
+			app.canvas.selected_nodes[node.id] = node;
+			app.canvas.selected_node = node;
+		}
+
+		node.setDirtyCanvas?.(true, true);
+		node.graph?.setDirtyCanvas?.(true, true);
+		app.graph?.setDirtyCanvas?.(true, true);
+
+		if (typeof app.queuePrompt === "function") {
+			await app.queuePrompt(0, 1);
+			return true;
+		}
+
+		console.warn("[GJJ] app.queuePrompt 不存在，无法只刷新当前节点");
+		return false;
+	} finally {
+		for (const [n, mode] of savedModes) {
+			n.mode = mode;
+		}
+
+		if (app.canvas) {
+			app.canvas.selected_nodes = oldSelectedNodes;
+			app.canvas.selected_node = oldSelectedNode;
+		}
+
+		node.setDirtyCanvas?.(true, true);
+		node.graph?.setDirtyCanvas?.(true, true);
+		app.graph?.setDirtyCanvas?.(true, true);
+	}
+}
 
 function formatAudioName(index) {
 	return `${AUDIO_PREFIX}${String(index).padStart(2, "0")}_audio`;
@@ -41,7 +108,6 @@ function ensureStatusWidget(node) {
 	}
 	const box = document.createElement("div");
 	box.style.cssText = [
-		"min-height:34px",
 		"padding:6px 10px",
 		"border:1px solid #41535b",
 		"border-radius:8px",
@@ -52,9 +118,86 @@ function ensureStatusWidget(node) {
 		"white-space:pre-wrap",
 		"word-break:break-word",
 	].join(";");
+
+	// 第一行：三个 Boolean 按钮
+	const boolBtnRow = document.createElement("div");
+	boolBtnRow.style.cssText = "display:flex;gap:6px;margin-bottom:8px";
+
+	// 创建三个 Boolean 按钮
+	const boolButtons = {};
+	const boolConfigs = [
+		{ name: "keep_model_loaded", label: " 保留模型", default: true },
+		{ name: "offload_to_cpu", label: " 转CPU", default: false },
+		{ name: "compile_model", label: "⚡ 编译模型", default: false },
+	];
+
+	boolConfigs.forEach(config => {
+		const btn = document.createElement("button");
+		btn.textContent = config.label;
+		btn.title = config.name;
+		btn.style.cssText = [
+			"flex: 1",
+			"background: #5aa8ff",
+			"color: #fff",
+			"border: none",
+			"border-radius:4px",
+			"padding: 4px 8px",
+			"cursor: pointer",
+			"font-size: 11px",
+			"font-weight: bold",
+			"transition: all 0.2s",
+		].join(";");
+
+		// 存储按钮状态
+		btn.__boolValue = config.default;
+
+		// 点击切换状态
+		btn.addEventListener("click", () => {
+			btn.__boolValue = !btn.__boolValue;
+			// 统一颜色：开启=蓝色，关闭=灰色
+			if (btn.__boolValue) {
+				btn.style.background = "#5aa8ff";
+				btn.style.color = "#fff";
+			} else {
+				btn.style.background = "#3a3a3a";
+				btn.style.color = "#aaa";
+			}
+
+			// 保存到 node.properties（用于持久化和后端读取）
+			if (!node.properties) node.properties = {};
+			node.properties[config.name] = btn.__boolValue;
+
+			// 通知 ComfyUI 节点已更改
+			node.setDirtyCanvas?.(true, true);
+			node.graph?.setDirtyCanvas?.(true, true);
+			node.graph?.change?.();
+		});
+
+		btn.addEventListener("mouseenter", () => {
+			btn.style.opacity = "0.85";
+		});
+		btn.addEventListener("mouseleave", () => {
+			btn.style.opacity = "1";
+		});
+
+		boolBtnRow.appendChild(btn);
+		boolButtons[config.name] = btn;
+	});
+
+	box.appendChild(boolBtnRow);
+
+	// 第二行：状态栏 + 生成语音按钮
+	const statusRow = document.createElement("div");
+	statusRow.style.cssText = "display:flex;gap:8px;align-items:center";
+
+	// 状态栏（文本 + 进度条）
+	const statusContent = document.createElement("div");
+	statusContent.style.cssText = "flex:1;min-width:0";
+
 	const label = document.createElement("div");
 	label.textContent = "等待执行";
-	label.style.cssText = "margin-bottom:6px";
+	label.style.cssText = "margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+
 	const track = document.createElement("div");
 	track.style.cssText = [
 		"height:5px",
@@ -71,13 +214,39 @@ function ensureStatusWidget(node) {
 		"transition:width 160ms ease",
 	].join(";");
 	track.appendChild(bar);
-	box.append(label, track);
+	statusContent.append(label, track);
+
+	// 生成语音按钮
+	const generateBtn = document.createElement("button");
+	generateBtn.textContent = "🎤 生成语音";
+	generateBtn.title = "只执行当前节点，生成语音";
+	generateBtn.style.cssText = [
+		"background: #2d5a9e",
+		"color: #fff",
+		"border: none",
+		"border-radius:4px",
+		"padding: 4px 12px",
+		"cursor: pointer",
+		"font-size: 11px",
+		"font-weight: bold",
+		"white-space: nowrap",
+	].join(";");
+	generateBtn.addEventListener("mouseenter", () => generateBtn.style.background = "#3d6aae");
+	generateBtn.addEventListener("mouseleave", () => generateBtn.style.background = "#2d5a9e");
+
+	statusRow.append(statusContent, generateBtn);
+	box.appendChild(statusRow);
+
 	const widget = node.addDOMWidget?.(STATUS_WIDGET_NAME, STATUS_WIDGET_NAME, box, {
 		serialize: false,
 		hideOnZoom: false,
-		getHeight: () => 54,
+		getHeight: () => 80,
 	});
-	node.__gjjFishAudioS2Status = { widget, box, label, bar };
+
+	node.__gjjFishAudioS2Status = {
+		widget, box, label, bar, generateBtn,
+		boolButtons, boolBtnRow, statusRow
+	};
 	return node.__gjjFishAudioS2Status;
 }
 
@@ -201,6 +370,86 @@ function patchNode(node) {
 	ensureStatusWidget(node);
 	ensureAudioWidget(node);
 	setStatus(node, "等待执行");
+
+	// 彻底删除旧的 Boolean widgets（从工作流加载的旧数据）
+	BOOL_WIDGETS.forEach(widgetName => {
+		const widgetIndex = (node.widgets || []).findIndex(w => w.name === widgetName);
+		if (widgetIndex !== -1) {
+			// 从 widgets 数组中完全移除
+			node.widgets.splice(widgetIndex, 1);
+		}
+	});
+
+	// 初始化 Boolean 状态（使用 node.properties）
+	BOOL_WIDGETS.forEach(widgetName => {
+		if (!node.properties) node.properties = {};
+		if (node.properties[widgetName] === undefined) {
+			node.properties[widgetName] = widgetName === "keep_model_loaded" ? true : false;
+		}
+	});
+
+	// 强制重新计算节点大小并刷新
+	node.setSize?.([node.size?.[0] || 400, node.computeSize?.()[1] || 400]);
+	node.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+
+	// 同步 Boolean 按钮状态（从 properties 初始化）
+	const status = node.__gjjFishAudioS2Status;
+	if (status?.boolButtons) {
+		Object.entries(status.boolButtons).forEach(([name, btn]) => {
+			// 从 properties 读取值
+			const value = node.properties?.[name] ?? btn.__boolValue;
+			btn.__boolValue = value;
+			if (btn.__boolValue) {
+				btn.style.background = "#5aa8ff";
+				btn.style.color = "#fff";
+			} else {
+				btn.style.background = "#3a3a3a";
+				btn.style.color = "#aaa";
+			}
+		});
+	}
+
+	// 关键：强制重新计算节点大小并刷新
+	node.setSize?.([node.size?.[0] || 400, node.computeSize?.()[1] || 400]);
+	node.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+
+	// 绑定生成语音按钮事件
+	if (status?.generateBtn) {
+		status.generateBtn.addEventListener("click", async () => {
+			console.log("[GJJ] 生成语音: 只执行当前节点");
+			const btn = status.generateBtn;
+			const originalText = btn.textContent;
+
+			try {
+				btn.textContent = "⏳ 生成中...";
+				btn.disabled = true;
+				btn.style.cursor = "not-allowed";
+				btn.style.opacity = "0.65";
+
+				setStatus(node, "正在生成语音...");
+
+				// 使用专用函数只刷新当前节点
+				const ok = await queueOnlyCurrentNode(node);
+
+				if (!ok) {
+					console.warn("[GJJ] 生成语音失败：queueOnlyCurrentNode 返回 false");
+					setStatus(node, "生成失败");
+				}
+			} catch (err) {
+				console.error("[GJJ] 生成语音失败:", err);
+				setStatus(node, "生成失败");
+			} finally {
+				setTimeout(() => {
+					btn.textContent = originalText;
+					btn.disabled = false;
+					btn.style.cursor = "pointer";
+					btn.style.opacity = "1";
+				}, 500);
+			}
+		});
+	}
 }
 
 function getPairs(node) {

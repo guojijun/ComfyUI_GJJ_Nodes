@@ -8,9 +8,11 @@ from typing import Any
 
 import folder_paths
 import numpy as np
-import soundfile as sf
 import torch
 import torch.nn.functional as F
+
+# 延迟导入 soundfile，避免缺失时导致整个模块无法加载
+# import soundfile as sf  # 在函数内部导入
 
 from .gjj_longcat_audiodit_loader import (
     _strip_auto_download_suffix,
@@ -33,6 +35,13 @@ from .gjj_longcat_audiodit_model_cache import (
     unload_model,
 )
 
+# 检查关键依赖
+try:
+    import soundfile as sf
+    _SOUNDFILE_AVAILABLE = True
+except ImportError:
+    _SOUNDFILE_AVAILABLE = False
+
 
 NODE_NAME = "GJJ_LongCatAudioDiTTTS"
 MAX_SPEAKERS = 10
@@ -41,6 +50,7 @@ AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac"}
 MISSING_AUDIO_CHOICE = "[未找到models/mp3音频]"
 MP3_QUALITY_OPTIONS = ["320k", "128k", "V0"]
 DEFAULT_REFERENCE_TEXT = "人生不如意十有八九。要么看得开，要么就认栽!"
+MIN_VISIBLE_PAIRS = 1  # 默认只显示 1 对输入口
 
 
 def _send_status(unique_id: Any, text: str, progress: float | None = None) -> None:
@@ -126,12 +136,18 @@ def _models_mp3_root() -> Path:
 
 def _list_models_mp3() -> list[str]:
     root = _models_mp3_root()
-    items: list[str] = []
-    for path in sorted(root.rglob("*")):
+    items: list[tuple[str, float]] = []
+    for path in root.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in AUDIO_EXTENSIONS:
             continue
-        items.append(str(path.relative_to(root)).replace("/", "\\"))
-    return items
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        items.append((str(path.relative_to(root)).replace("/", "\\"), mtime))
+    # 按修改时间降序排列（最新的在前面）
+    items.sort(key=lambda x: x[1], reverse=True)
+    return [item[0] for item in items]
 
 
 def _audio_choices() -> list[str]:
@@ -280,6 +296,7 @@ def _speaker_ref_text_name(index: int) -> str:
 
 def _build_optional_inputs() -> dict[str, tuple[str, dict[str, Any]]]:
     optional: dict[str, tuple[str, dict[str, Any]]] = {}
+
     for index in range(1, MAX_SPEAKERS + 1):
         optional[_speaker_audio_name(index)] = ("AUDIO", {
             "forceInput": True,
@@ -343,7 +360,83 @@ class GJJ_LongCatAudioDiTTTS:
     CATEGORY = "GJJ/Audio"
     FUNCTION = "generate"
     OUTPUT_NODE = True
-    DESCRIPTION = "LongCat AudioDiT 一体式语音克隆与多说话人 TTS。默认从 models/mp3 选择参考音频；连接音频后按实际音频输入数量自动计算说话人数，并自动保存 MP3 供节点内预览。"
+
+    # 如果缺少关键依赖，显示错误信息
+    if not _SOUNDFILE_AVAILABLE:
+        DESCRIPTION = """❌ 节点 LongCat AudioDiT TTS 缺少必需的 Python 依赖：
+
+📦 必需依赖（请安装）：
+  • soundfile
+
+🔧 安装命令：
+  pip install soundfile
+
+💡 提示：安装后请重启 ComfyUI 服务器。
+
+---
+LongCat AudioDiT 一体式语音克隆与多说话人 TTS。默认从 models/mp3 选择参考音频；连接音频后按实际音频输入数量自动计算说话人数，并自动保存 MP3 供节点内预览。
+
+📦 所需模型：
+  • 模型目录: models/audiodit/
+    - LongCat-AudioDiT-1B (轻量，~6GB FP32)
+    - LongCat-AudioDiT-3.5B (标准，~14GB FP32)
+    - LongCat-AudioDiT-3.5B-bf16 (推荐，~7GB VRAM, bf16 量化)
+    - LongCat-AudioDiT-3.5B-fp8 (极速，~4GB VRAM, fp8 量化)
+  • Tokenizer: google/umt5-base (首次执行时自动下载)
+  • 自动下载: 开启后首次执行时从 HuggingFace 下载（需 huggingface_hub）
+
+🔧 Python 依赖：
+  • transformers (文本编码和 tokenizer)
+  • soundfile (音频读写)
+  • huggingface_hub (可选，用于自动下载模型)
+  • 安装命令: pip install transformers soundfile huggingface_hub
+
+✅ 优点：
+  • 支持动态扩展输入口（最多 10 个说话人）
+  • 自动检测连接的音频数量，智能调整说话人数
+  • 提供多种模型尺寸，适配不同显存配置
+  • fp8 量化版本显存占用低，适合消费级显卡
+  • 自动保存 MP3 预览，方便快速试听
+  • 默认参考文本可自定义
+
+⚠️ 缺点：
+  • 大模型需要较多显存（3.5B FP32 约 14GB）
+  • 推理速度较慢（尤其是大模型）
+  • 跨语言克隆效果可能不如母语自然
+  • 需要手动提供参考音频对应的文本（或留空使用默认文本）
+  • 音质略逊于 Fish Audio S2"""
+    else:
+        DESCRIPTION = """LongCat AudioDiT 一体式语音克隆与多说话人 TTS。默认从 models/mp3 选择参考音频；连接音频后按实际音频输入数量自动计算说话人数，并自动保存 MP3 供节点内预览。
+
+    📦 所需模型：
+      • 模型目录: models/audiodit/
+        - LongCat-AudioDiT-1B (轻量，~6GB FP32)
+        - LongCat-AudioDiT-3.5B (标准，~14GB FP32)
+        - LongCat-AudioDiT-3.5B-bf16 (推荐，~7GB VRAM, bf16 量化)
+        - LongCat-AudioDiT-3.5B-fp8 (极速，~4GB VRAM, fp8 量化)
+      • Tokenizer: google/umt5-base (首次执行时自动下载)
+      • 自动下载: 开启后首次执行时从 HuggingFace 下载（需 huggingface_hub）
+
+    🔧 Python 依赖：
+      • transformers (文本编码和 tokenizer)
+      • soundfile (音频读写)
+      • huggingface_hub (可选，用于自动下载模型)
+      • 安装命令: pip install transformers soundfile huggingface_hub
+
+    ✅ 优点：
+      • 支持动态扩展输入口（最多 10 个说话人）
+      • 自动检测连接的音频数量，智能调整说话人数
+      • 提供多种模型尺寸，适配不同显存配置
+      • fp8 量化版本显存占用低，适合消费级显卡
+      • 自动保存 MP3 预览，方便快速试听
+      • 默认参考文本可自定义
+
+    ⚠️ 缺点：
+      • 大模型需要较多显存（3.5B FP32 约 14GB）
+      • 推理速度较慢（尤其是大模型）
+      • 跨语言克隆效果可能不如母语自然
+      • 需要手动提供参考音频对应的文本（或留空使用默认文本）
+      • 音质略逊于 Fish Audio S2"""
     SEARCH_ALIASES = ["LongCat", "AudioDiT", "TTS", "语音克隆", "多说话人", "文字转语音"]
     RETURN_TYPES = ("AUDIO",)
     RETURN_NAMES = ("合成音频",)
@@ -424,11 +517,6 @@ class GJJ_LongCatAudioDiTTTS:
                     "display_name": "说话间隔秒数",
                     "tooltip": "多句合成后，在相邻说话片段之间插入的静音秒数。",
                 }),
-                "normalize_reference": ("BOOLEAN", {
-                    "default": True,
-                    "display_name": "归一化参考音频",
-                    "tooltip": "近似复刻工作流中的响度归一化，帮助不同来源参考音频保持稳定。",
-                }),
                 "reference_dbfs": ("FLOAT", {
                     "default": -23.0,
                     "min": -40.0,
@@ -436,11 +524,6 @@ class GJJ_LongCatAudioDiTTTS:
                     "step": 0.5,
                     "display_name": "参考目标响度",
                     "tooltip": "参考音频 RMS 归一化目标，默认约等于工作流里的 -23。",
-                }),
-                "keep_model_loaded": ("BOOLEAN", {
-                    "default": True,
-                    "display_name": "保留模型",
-                    "tooltip": "任务结束后保留模型缓存并自动转移到 CPU，下次运行会尝试恢复到 GPU；关闭则任务后卸载。",
                 }),
                 "mp3_filename_prefix": ("STRING", {
                     "default": "audio/GJJ_LongCat",
@@ -453,9 +536,17 @@ class GJJ_LongCatAudioDiTTTS:
                     "tooltip": "内置 MP3 保存质量。320k 体积较大但质量更高；128k 体积更小；V0 是可变码率。",
                 }),
             },
-            "optional": _build_optional_inputs(),
+            "optional": {
+                "keep_model_loaded": ("BOOLEAN", {
+                    "default": True,
+                    "display_name": "保留模型",
+                    "tooltip": "任务结束后保留模型缓存并自动转移到 CPU，下次运行会尝试恢复到 GPU；关闭则任务后卸载。",
+                }),
+                **_build_optional_inputs(),
+            },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
+                "extra_pnginfo": "EXTRA_PNGINFO",
             },
         }
 
@@ -471,13 +562,38 @@ class GJJ_LongCatAudioDiTTTS:
     ) -> list[dict[str, Any]]:
         sr = int(model.config.sampling_rate)
         refs = connected_refs
+
+        # 如果没有连接任何参考音频，使用本地参考音频列表中的文件
         if not refs:
-            local_path = _resolve_local_audio(local_audio_name)
-            refs = [{
-                "source": f"models/mp3：{local_path.name}",
-                "local_path": local_path,
-                "ref_text": str(kwargs.get(_speaker_ref_text_name(1)) or DEFAULT_REFERENCE_TEXT).strip(),
-            }]
+            audio_choices = _list_models_mp3()
+
+            # 默认使用本地参考音频列表中的 [1] 和 [2]（如果存在）
+            if len(audio_choices) >= 2:
+                # 有两个或更多文件，使用 [0] 和 [1] 作为 speaker_1 和 speaker_2
+                refs = []
+                for idx in range(min(2, len(audio_choices))):
+                    local_path = _models_mp3_root() / audio_choices[idx].replace("/", os.sep).replace("\\", os.sep)
+                    refs.append({
+                        "source": f"models/mp3：{local_path.name}",
+                        "local_path": local_path,
+                        "ref_text": str(kwargs.get(_speaker_ref_text_name(idx + 1)) or DEFAULT_REFERENCE_TEXT).strip(),
+                    })
+            elif len(audio_choices) == 1:
+                # 只有一个文件，使用它作为 speaker_1
+                local_path = _models_mp3_root() / audio_choices[0].replace("/", os.sep).replace("\\", os.sep)
+                refs = [{
+                    "source": f"models/mp3：{local_path.name}",
+                    "local_path": local_path,
+                    "ref_text": str(kwargs.get(_speaker_ref_text_name(1)) or DEFAULT_REFERENCE_TEXT).strip(),
+                }]
+            else:
+                # 没有本地音频文件，回退到 local_audio_name
+                local_path = _resolve_local_audio(local_audio_name)
+                refs = [{
+                    "source": f"models/mp3：{local_path.name}",
+                    "local_path": local_path,
+                    "ref_text": str(kwargs.get(_speaker_ref_text_name(1)) or DEFAULT_REFERENCE_TEXT).strip(),
+                }]
 
         prepared: list[dict[str, Any]] = []
         for index, ref in enumerate(refs, start=1):
@@ -526,14 +642,31 @@ class GJJ_LongCatAudioDiTTTS:
         attention,
         seed,
         pause_after_speaker,
-        normalize_reference,
         reference_dbfs,
-        keep_model_loaded,
         mp3_filename_prefix="audio/GJJ_LongCat",
         mp3_quality="320k",
         unique_id=None,
+        extra_pnginfo=None,
         **kwargs,
     ):
+        # 从 properties 读取 Boolean 值（通过 extra_pnginfo + unique_id）
+        props = {}
+        try:
+            if extra_pnginfo and isinstance(extra_pnginfo, dict):
+                workflow = extra_pnginfo.get("workflow", {})
+                if isinstance(workflow, dict):
+                    nodes = workflow.get("nodes", [])
+                    if isinstance(nodes, list):
+                        uid = str(unique_id)
+                        for n in nodes:
+                            if isinstance(n, dict) and str(n.get("id")) == uid:
+                                props = n.get("properties", {}) or {}
+                                break
+        except Exception:
+            props = {}
+
+        normalize_reference = bool(props.get("normalize_reference", True))
+        keep_model_loaded = bool(props.get("keep_model_loaded", True))
         started_at = time.perf_counter()
         cancel_event.clear()
         pbar = None

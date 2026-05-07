@@ -1,11 +1,38 @@
 import os
 import random
-import cv2
+# import cv2  # 在函数内部延迟导入
 import numpy as np
 import subprocess
 import folder_paths
 import torch
 import comfy.utils
+
+# 检查关键依赖
+try:
+    import cv2
+    _CV2_AVAILABLE = True
+except ImportError as exc:
+    _CV2_AVAILABLE = False
+    _IMPORT_ERROR = str(exc)
+
+
+def _ensure_cv2():
+    """确保 cv2 已安装"""
+    try:
+        import cv2
+        return cv2
+    except ImportError as exc:
+        raise RuntimeError(
+            "🎬 GJJ · LatentSync 节点 需要 opencv-python (cv2) 来处理视频。\n"
+            "\n"
+            "🔧 快速安装命令（使用国内镜像）：\n"
+            "pip install opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+            "\n"
+            f"原始导入错误：{exc}\n"
+            "\n"
+            "💡 提示：安装后请重启 ComfyUI 服务器。"
+        ) from exc
+
 
 class LatentSyncNode:
     """
@@ -13,8 +40,23 @@ class LatentSyncNode:
     此节点用于将音频与视频同步，需要预下载模型到 models/latentsync 目录
     音频处理使用 soundfile / pydub / librosa / wave（零 torchcodec 冲突）
     """
-    
-    DESCRIPTION = "通过音频同步视频唇形的节点。需要预下载模型到 ComfyUI/models/latentsync 目录"
+
+    # 如果缺少关键依赖，显示错误信息
+    if not _CV2_AVAILABLE:
+        DESCRIPTION = """❌ 节点 GJJ · 🎬 LatentSync 缺少必需的 Python 依赖：
+
+📦 必需依赖（请安装）：
+  • opencv-python (cv2, 视频处理)
+
+🔧 快速安装命令（使用国内镜像）：
+  pip install opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+💡 提示：安装后请重启 ComfyUI 服务器。
+
+---
+通过音频同步视频唇形的节点。需要预下载模型到 ComfyUI/models/latentsync 目录"""
+    else:
+        DESCRIPTION = "通过音频同步视频唇形的节点。需要预下载模型到 ComfyUI/models/latentsync 目录"
     REQUIRED_MODELS = [
         {
             "filename": "latentsync_unet.pt",
@@ -50,10 +92,10 @@ class LatentSyncNode:
     def _resolve_video_path(self, video):
         """从各种可能的VIDEO对象格式中解析出实际的视频文件路径"""
         actual_video_path = None
-        
+
         if isinstance(video, str):
             return video
-            
+
         if isinstance(video, dict):
             if "video" in video:
                 actual_video_path = video["video"]
@@ -70,7 +112,7 @@ class LatentSyncNode:
                     actual_video_path = values[0]
                 else:
                     raise ValueError(f"无法从VIDEO字典对象获取视频路径: {video}")
-            
+
             if actual_video_path and os.path.exists(actual_video_path):
                 return actual_video_path
             elif actual_video_path:
@@ -118,7 +160,7 @@ class LatentSyncNode:
                 elif isinstance(inputs, str) and os.path.exists(inputs):
                     return inputs
             raise ValueError(f"无法从VIDEO对象 ({class_name}) 获取视频路径。")
-        
+
         raise ValueError(f"无法从VIDEO对象获取视频路径，未知格式: {type(video)}")
 
     def _load_audio(self, audio_path):
@@ -275,14 +317,17 @@ class LatentSyncNode:
             raise RuntimeError(f"MoviePy 合并失败: {str(e)}")
 
     def inference(self, seed, video=None, audio=None, video_path="", audio_path=""):
+        # 运行时检查依赖
+        cv2 = _ensure_cv2()
+
         # 检查模型
         models_dir = folder_paths.models_dir
         latentsync_model_dir = os.path.join(models_dir, "latentsync")
         unet_model_path = os.path.join(latentsync_model_dir, "latentsync_unet.pt")
-        
+
         if not os.path.exists(unet_model_path):
             raise FileNotFoundError(f"未找到模型文件: {unet_model_path}\n请下载 latentsync_unet.pt 到 models/latentsync 目录")
-        
+
         # 解析视频路径
         if video is not None:
             actual_video_path = self._resolve_video_path(video)
@@ -307,7 +352,7 @@ class LatentSyncNode:
 
         if not os.path.exists(actual_video_path):
             raise FileNotFoundError(f"视频路径不存在: {actual_video_path}")
-        
+
         output_dir = folder_paths.get_output_directory()
         os.makedirs(output_dir, exist_ok=True)
         output_name = ''.join(random.choice("abcdefghijklmnopqrstupvxyz") for _ in range(5))
