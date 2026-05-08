@@ -1353,5 +1353,70 @@ app.registerExtension({
 				stabilizeNode(node, 1);
 			}
 		}
+
+		// 监听后端发送的运行时错误事件（包含安装命令）
+		api.addEventListener("gjj_audio_timestamp_error", (event) => {
+			try {
+				const data = event.detail || {};
+				const nodeId = data.node;
+				const errorMessage = data.error || "";
+				const installCommand = data.install_command || "";
+
+				if (!nodeId || !errorMessage) return;
+
+				// 查找对应的节点
+				const nodes = app.graph?._nodes || [];
+				for (const node of nodes) {
+					if (String(node.id) === String(nodeId)) {
+						// 显示错误信息在节点面板中
+						if (node._editor?.statusDisplay) {
+							let displayText = `❌ 执行失败：\n\n${errorMessage}`;
+
+							// 如果有安装命令，添加提示
+							if (installCommand) {
+								displayText += `\n\n🔧 快速安装命令（点击按钮复制）：`;
+							}
+
+							node._editor.statusDisplay.textContent = displayText;
+							node._editor.statusDisplay.style.color = "#ff6b6b";
+
+							// 显示复制按钮
+							if (node._editor.copyBtn) {
+								node._editor.copyBtn.style.display = "block";
+								node._editor.copyBtn.textContent = "📋 复制安装命令";
+								node._editor.copyBtn.title = "复制安装命令到剪贴板";
+								node._editor.copyBtn.style.background = "#ff4757";
+								node._editor.copyBtn.style.color = "#fff";
+
+								// 更新复制按钮事件，复制安装命令
+								const newCopyBtn = node._editor.copyBtn.cloneNode(true);
+								node._editor.copyBtn.parentNode.replaceChild(newCopyBtn, node._editor.copyBtn);
+								node._editor.copyBtn = newCopyBtn;
+
+								node._editor.copyBtn.addEventListener("click", () => {
+									if (installCommand) {
+										navigator.clipboard.writeText(installCommand).then(() => {
+											const originalText = node._editor.copyBtn.textContent;
+											node._editor.copyBtn.textContent = "✅ 已复制";
+											node._editor.copyBtn.style.background = "#2ed573";
+											setTimeout(() => {
+												node._editor.copyBtn.textContent = originalText;
+												node._editor.copyBtn.style.background = "#ff4757";
+											}, 1500);
+										}).catch(err => {
+											console.error("[GJJ] 复制失败:", err);
+											alert("复制失败，请手动选择安装命令复制");
+										});
+									}
+								});
+							}
+						}
+						break;
+					}
+				}
+			} catch (err) {
+				console.error("[GJJ] 处理错误事件失败:", err);
+			}
+		});
 	},
 });

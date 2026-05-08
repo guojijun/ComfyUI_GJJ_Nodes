@@ -1,35 +1,289 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+import comfy.utils
+import folder_paths
+import node_helpers
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
-from .gjj_character_multiview_studio import DEFAULT_NEGATIVE_PROMPT, DEFAULT_SEED, _make_squareish_collage, _send_status
-from .gjj_lazy_image_studio import (
-    DEFAULT_CLIP_NAME,
-    DEFAULT_UNET_DTYPE,
-    DEFAULT_UNET_NAME,
-    DEFAULT_VAE_NAME,
-    GJJ_LazyImageStudio,
-    _apply_cfg_norm,
-    _patch_model_sampling,
-    _pick_available_name,
-    _resolve_effective_steps,
-    _safe_filename_list,
-    list_clip_models,
-    list_unet_models,
-    list_vae_models,
-    match_model_family,
-    resolve_clip_names_for_preset,
-    resolve_clip_type,
+from .common_utils.text_tools import (
+	gjjutils_canonical_model_text as _canonical_model_text,
+	gjjutils_normalize_text as _normalize_text,
+	gjjutils_pick_available_name as _pick_available_name,
 )
+from .common_utils.model_loader import (
+	DEFAULT_UNET_DTYPE,
+	DEFAULT_UNET_NAME,
+	gjjutils_apply_cfg_norm as _apply_cfg_norm,
+	gjjutils_patch_model_sampling as _patch_model_sampling,
+)
+from .common_utils.model_family import (
+	DEFAULT_CLIP_NAME,
+	DEFAULT_VAE_NAME,
+	gjjutils_match_model_family_preset as match_model_family,
+	gjjutils_model_family_resolve_clip_names as resolve_clip_names_for_preset,
+	gjjutils_model_family_resolve_clip_type as resolve_clip_type,
+)
+from .gjj_model_bundle_loader import (
+	list_clip_models,
+	list_unet_models,
+	list_vae_models,
+)
+
+
+# ============================================================================
+# 本地常量和辅助函数（从 gjj_character_multiview_studio 迁移）
+# ============================================================================
+
+DEFAULT_NEGATIVE_PROMPT = ""
+DEFAULT_SEED = 0
+CAPTION_HEIGHT = 48
+CAPTION_PADDING_X = 8
+CAPTION_PADDING_Y = 6
+
+
+def _send_status(unique_id, text: str) -> None:
+	"""发送进度状态消息。"""
+	if not unique_id:
+		return
+	message = str(text or "")
+	try:
+		from server import PromptServer
+	except Exception:
+		PromptServer = None
+	try:
+		if PromptServer is not None:
+			PromptServer.instance.send_progress_text(message, unique_id)
+	except Exception:
+		pass
+
+
+def _safe_filename_list(category: str) -> list[str]:
+	"""安全获取文件名列表。"""
+	import folder_paths
+	try:
+		return list(folder_paths.get_filename_list(category))
+	except Exception:
+		return []
+
+
+def _is_lora_enabled(name: str, strength: float) -> bool:
+	"""判断 LoRA 是否启用。"""
+	return bool(str(name or "").strip()) and abs(float(strength)) > 1e-6
+
+
+def _resolve_lora_suggested_steps(name: str):
+	"""解析 LoRA 推荐步数。"""
+	text = _normalize_text(name)
+	canonical = _canonical_model_text(name)
+	if "flux2turbocomfyv2" in canonical:
+		return 8
+	if "8step" in text or "8step" in canonical:
+		return 8
+	if "4step" in text or "4step" in canonical:
+		return 4
+	return None
+
+
+def _resolve_effective_steps(
+	requested_steps: int,
+	preset: dict,
+	lora_1_name: str,
+	lora_1_strength: float,
+	lora_2_name: str,
+	lora_2_strength: float,
+):
+	"""解析有效步数。"""
+	for name, strength in (
+		(lora_1_name, lora_1_strength),
+		(lora_2_name, lora_2_strength),
+	):
+		if _is_lora_enabled(name, strength):
+			suggested = _resolve_lora_suggested_steps(name)
+			if suggested is not None:
+				return int(suggested)
+	base_steps = preset.get("base_steps")
+	if (
+		base_steps is not None
+		and not _is_lora_enabled(lora_1_name, lora_1_strength)
+		and not _is_lora_enabled(lora_2_name, lora_2_strength)
+	):
+		return int(base_steps)
+	return int(requested_steps)
+
+
+EMPTY_GRID_SLOT_PENALTY = 2.0
+
+
+def _best_grid(count: int, cell_width: int, cell_height: int, target_aspect: float = 1.0):
+	"""计算最佳网格布局。"""
+	best_cols = 1
+	best_rows = count
+	best_score = None
+	target_ratio = max(0.1, float(target_aspect or 1.0))
+	for cols in range(1, count + 1):
+		rows = math.ceil(count / cols)
+		total_width = cols * cell_width
+		total_height = rows * (cell_height + CAPTION_HEIGHT)
+		current_ratio = float(total_width) / float(max(1, total_height))
+		empty_slots = max(0, rows * cols - count)
+		score = (abs(current_ratio - target_ratio) + float(empty_slots) * EMPTY_GRID_SLOT_PENALTY, rows * cols)
+		if best_score is None or score < best_score:
+			best_score = score
+			best_cols = cols
+			best_rows = rows
+	return best_cols, best_rows
+
+
+def _fit_bchw_to_height(samples: torch.Tensor, target_height: int) -> torch.Tensor:
+	"""调整 BCHW 图像到指定高度。"""
+	import comfy.utils
+	current_height = int(samples.shape[2])
+	current_width = int(samples.shape[3])
+	if current_height <= 0 or current_width <= 0:
+		return samples
+	scale = float(target_height) / float(current_height)
+	target_width = max(1, int(round(current_width * scale)))
+	return comfy.utils.common_upscale(samples, target_width, int(target_height), "lanczos", "disabled")
+
+
+def _find_font_path():
+	"""查找系统字体路径。"""
+	candidates = []
+	try:
+		import os as os_module
+		win_fonts = Path(os_module.environ.get("WINDIR", "C:\\Windows")) / "Fonts"
+		candidates.extend([
+			win_fonts / "msyh.ttc",
+			win_fonts / "msyh.ttf",
+			win_fonts / "simhei.ttf",
+		])
+	except Exception:
+		pass
+	for candidate in candidates:
+		if candidate.exists():
+			return str(candidate)
+	return None
+
+
+def _load_caption_font(size: int):
+	"""加载标题字体。"""
+	font_path = _find_font_path()
+	if font_path:
+		try:
+			return ImageFont.truetype(font_path, size)
+		except Exception:
+			pass
+	return ImageFont.load_default()
+
+
+def _measure_caption_text(draw, text: str, font):
+	"""测量文本尺寸。"""
+	try:
+		text_bbox = draw.textbbox((0, 0), str(text or ""), font=font)
+		return (
+			max(0, int(text_bbox[2] - text_bbox[0])),
+			max(0, int(text_bbox[3] - text_bbox[1])),
+		)
+	except Exception:
+		return (len(str(text or "")) * 10, 18)
+
+
+def _trim_caption_to_width(draw, text: str, font, max_width: int) -> str:
+	"""截断文本以适应宽度。"""
+	content = str(text or "").rstrip()
+	if not content:
+		return ""
+	width, _ = _measure_caption_text(draw, content, font)
+	if width <= max_width:
+		return content
+
+	suffix = "..."
+	while content:
+		candidate = f"{content.rstrip()}{suffix}"
+		candidate_width, _ = _measure_caption_text(draw, candidate, font)
+		if candidate_width <= max_width:
+			return candidate
+		content = content[:-1]
+	return suffix
+
+
+def _normalize_caption_line(text: str) -> str:
+	"""规范化标题行。"""
+	return re.sub(r"\s+", " ", str(text or "").replace("\r\n", " ").replace("\r", " ").replace("\n", " ")).strip()
+
+
+def _draw_caption_on_canvas(canvas: np.ndarray, top: int, left: int, cell_width: int, caption_text: str, font) -> None:
+	"""在画布上绘制标题。"""
+	band = Image.fromarray(np.clip(canvas[top:top + CAPTION_HEIGHT, left:left + cell_width, :] * 255, 0, 255).astype(np.uint8))
+	draw = ImageDraw.Draw(band)
+	max_text_width = max(24, int(cell_width) - CAPTION_PADDING_X * 2)
+	caption_text = _trim_caption_to_width(draw, _normalize_caption_line(caption_text), font, max_text_width)
+	text_width, text_height = _measure_caption_text(draw, caption_text, font)
+	text_x = max(CAPTION_PADDING_X, (cell_width - text_width) // 2)
+	text_y = max(CAPTION_PADDING_Y, (CAPTION_HEIGHT - text_height) // 2)
+	draw.text((text_x, text_y), caption_text, fill=(28, 38, 46), font=font)
+	canvas[top:top + CAPTION_HEIGHT, left:left + cell_width, :] = np.asarray(band).astype(np.float32) / 255.0
+
+
+def _paste_bchw_in_cell(canvas: np.ndarray, sample: torch.Tensor, top: int, left: int, cell_width: int, cell_height: int) -> None:
+	"""将 BCHW 图像粘贴到单元格中。"""
+	image_np = sample[0].movedim(0, -1).detach().cpu().numpy().clip(0, 1).astype(np.float32)
+	image_height = int(sample.shape[2])
+	image_width = int(sample.shape[3])
+	paste_y = top + max(0, (cell_height - image_height) // 2)
+	paste_x = left + max(0, (cell_width - image_width) // 2)
+	canvas[paste_y:paste_y + image_height, paste_x:paste_x + image_width, :] = image_np[:image_height, :image_width, :]
+
+
+def _make_squareish_collage(images: list[torch.Tensor], captions: list[str], target_aspect: float = 1.0) -> torch.Tensor:
+	"""创建方形拼贴图（简化版）。"""
+	if not images:
+		raise RuntimeError("未生成任何图像，无法拼接图板。")
+
+	# 转换为 BCHW 格式
+	bchw_images: list[torch.Tensor] = []
+	cell_height = 0
+	for image in images:
+		sample = image[:1].movedim(-1, 1)
+		bchw_images.append(sample)
+		cell_height = max(cell_height, int(sample.shape[2]))
+
+	# 调整到统一高度
+	fitted_images: list[torch.Tensor] = []
+	cell_width = 0
+	for sample in bchw_images:
+		fitted = _fit_bchw_to_height(sample, cell_height)
+		fitted_images.append(fitted)
+		cell_width = max(cell_width, int(fitted.shape[3]))
+
+	# 计算网格布局
+	font = _load_caption_font(18)
+	cols, rows = _best_grid(len(bchw_images), cell_width, cell_height, target_aspect=target_aspect)
+	total_height = rows * (cell_height + CAPTION_HEIGHT)
+	canvas = np.ones((total_height, cols * cell_width, 3), dtype=np.float32)
+
+	# 粘贴图像和标题
+	for index, sample in enumerate(fitted_images):
+		row = index // cols
+		col = index % cols
+		top = row * (cell_height + CAPTION_HEIGHT)
+		left = col * cell_width
+		_paste_bchw_in_cell(canvas, sample, top, left, cell_width, cell_height)
+
+		caption_text = str(captions[index] if index < len(captions) else f"视图 {index + 1}")
+		_draw_caption_on_canvas(canvas, top + cell_height, left, cell_width, caption_text, font)
+
+	return torch.from_numpy(canvas).unsqueeze(0)
 
 
 NODE_NAME = "GJJ_LoraFaceMaterialGenerator"
@@ -109,7 +363,7 @@ def _safe_unet_models() -> List[str]:
     filtered = []
     for model_name in models:
         preset = match_model_family(model_name)
-        if preset.get("supports_multi_image_edit"):
+        if preset is not None and preset.get("supports_multi_image_edit"):
             filtered.append(model_name)
     return filtered or models
 
@@ -326,7 +580,7 @@ def _save_dataset(
     return saved_count
 
 
-class GJJLoraFaceMaterialGenerator(GJJ_LazyImageStudio):
+class GJJLoraFaceMaterialGenerator:
     CATEGORY = "GJJ"
     FUNCTION = "generate_materials"
     DESCRIPTION = (
@@ -464,6 +718,9 @@ class GJJLoraFaceMaterialGenerator(GJJ_LazyImageStudio):
 
     def _resolve_generation_bundle(self, unet_name: str):
         preset = match_model_family(unet_name)
+        if preset is None:
+            # 如果找不到预设，使用默认值
+            preset = {"id": "generic", "clip_type": "stable_diffusion", "vae_name": DEFAULT_VAE_NAME}
         clip_models = list_clip_models() or [DEFAULT_CLIP_NAME]
         vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
         resolved_clip_names = resolve_clip_names_for_preset(
@@ -481,6 +738,104 @@ class GJJLoraFaceMaterialGenerator(GJJ_LazyImageStudio):
             str(preset.get("clip_type", "stable_diffusion")),
         )
         return preset, resolved_clip_names, resolved_clip_type, resolved_vae_name
+
+    def _encode_negative_conditioning(self, clip, positive, negative_prompt: str):
+        """编码负向条件。"""
+        if str(negative_prompt or "").strip():
+            tokens = clip.tokenize(str(negative_prompt))
+            return clip.encode_from_tokens_scheduled(tokens)
+        # 如果没有负向提示，使用零化条件
+        return [[torch.zeros_like(positive[0][0]), positive[0][1]]]
+
+    def _encode_multi_image_edit(
+        self,
+        clip,
+        vae,
+        prompt: str,
+        negative_prompt: str,
+        main_image_index: int,
+        pairs: list,
+        main_mask=None,
+        main_long_edge: int = 1024,
+        vl_long_edge: int = 512,
+        target_width: int = 1024,
+        target_height: int = 1024,
+    ):
+        """编码多图编辑条件（简化版）。"""
+        valid_length = len(pairs)
+        main_slot = max(0, min(valid_length - 1, int(main_image_index) - 1))
+        image_prompt = ""
+        main_ref_latent = None
+        vl_images: list[torch.Tensor] = []
+
+        for slot, pair in enumerate(pairs):
+            image = pair["image"]
+            is_main = slot == main_slot
+            if is_main:
+                # 调整主图到目标尺寸
+                processed_image = comfy.utils.common_upscale(
+                    image[:1].movedim(-1, 1),
+                    int(target_width),
+                    int(target_height),
+                    "lanczos",
+                    "center",
+                ).movedim(1, -1)
+                main_ref_latent = vae.encode(processed_image[:, :, :, :3])
+                # VL 图像调整到较小尺寸
+                vl_image = comfy.utils.common_upscale(
+                    processed_image[:1].movedim(-1, 1),
+                    int(vl_long_edge),
+                    int(vl_long_edge),
+                    "bicubic",
+                    "center",
+                ).movedim(1, -1)
+            else:
+                vl_image = comfy.utils.common_upscale(
+                    image[:1].movedim(-1, 1),
+                    int(vl_long_edge),
+                    int(vl_long_edge),
+                    "bicubic",
+                    "center",
+                ).movedim(1, -1)
+            vl_images.append(vl_image[:, :, :, :3])
+            image_prompt += f"Picture {slot + 1}: "
+
+        if main_ref_latent is None:
+            raise RuntimeError("主图参考 latent 生成失败，请检查主图输入是否有效。")
+
+        full_prompt = image_prompt + str(prompt or "")
+        tokens = clip.tokenize(full_prompt, images=vl_images)
+        conditioning = clip.encode_from_tokens_scheduled(tokens)
+        positive = node_helpers.conditioning_set_values(
+            conditioning, {"reference_latents": [main_ref_latent]}, append=True
+        )
+        negative = self._encode_negative_conditioning(clip, positive, negative_prompt)
+        latent_out = {"samples": main_ref_latent}
+        return positive, negative, latent_out
+
+    def _build_latent(
+        self, vae, width, height, batch_size, image_pairs, mask, grow_mask_by, preset
+    ):
+        """构建 latent（简化版）。"""
+        from nodes import EmptyLatentImage, VAEEncode
+
+        if not image_pairs:
+            return EmptyLatentImage().generate(
+                int(width), int(height), int(batch_size)
+            )[0]
+
+        # 如果有图像对，使用第一张图像编码
+        main_slot = max(0, min(len(image_pairs) - 1, 0))
+        image = image_pairs[main_slot]["image"]
+        # 调整图像到目标尺寸
+        prepared_image = comfy.utils.common_upscale(
+            image[:1].movedim(-1, 1),
+            int(width),
+            int(height),
+            "lanczos",
+            "center",
+        ).movedim(1, -1)
+        return VAEEncode().encode(vae, prepared_image)[0]
 
     def _generate_single_material(
         self,

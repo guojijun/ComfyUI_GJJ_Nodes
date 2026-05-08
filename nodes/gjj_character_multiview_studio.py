@@ -11,6 +11,7 @@ import comfy.utils
 import folder_paths
 import numpy as np
 import torch
+import torch.nn.functional as F
 from comfy.cli_args import args
 from PIL import Image, ImageDraw, ImageFont
 from PIL.PngImagePlugin import PngInfo
@@ -21,29 +22,249 @@ from .common_utils.text_tools import (
 	gjjutils_normalize_text as _normalize_text,
 	gjjutils_pick_available_name as _pick_available_name,
 )
-from .gjj_lazy_image_studio import (
-	DEFAULT_CLIP_NAME,
-	DEFAULT_LIGHTNING_LORA,
+from .common_utils.model_loader import (
 	DEFAULT_UNET_DTYPE,
 	DEFAULT_UNET_NAME,
+	DEFAULT_LIGHTNING_LORA,
+	gjjutils_apply_cfg_norm as _apply_cfg_norm,
+	gjjutils_patch_model_sampling as _patch_model_sampling,
+)
+from .common_utils.model_family import (
+	DEFAULT_CLIP_NAME,
 	DEFAULT_VAE_NAME,
-	GJJ_LazyImageStudio,
-	_prepare_primary_image_for_target,
-	_apply_cfg_norm,
-	_patch_model_sampling,
-	_resize_to_long_edge,
-	_safe_filename_list,
-	_resolve_effective_steps,
-	collect_image_pairs,
+	gjjutils_match_model_family_preset as match_model_family,
+	gjjutils_model_family_resolve_clip_names as resolve_clip_names_for_preset,
+	gjjutils_model_family_resolve_clip_type as resolve_clip_type,
+)
+from .gjj_model_bundle_loader import (
 	list_clip_models,
 	list_unet_models,
 	list_vae_models,
-	match_model_family,
-	resolve_clip_names_for_preset,
-	resolve_clip_type,
 )
 from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
 from .gjj_multi_lora_chain import normalize_lora_chain_data
+
+
+# ============================================================================
+# 本地辅助函数（从 gjj_lazy_Image_studio 迁移）
+# ============================================================================
+
+def _safe_filename_list(category: str) -> list[str]:
+	"""安全获取文件名列表。"""
+	try:
+		return list(folder_paths.get_filename_list(category))
+	except Exception:
+		return []
+
+
+def _should_skip_clip_lora_for_multiview_family() -> bool:
+	"""判断多视图节点是否应该跳过 CLIP LoRA（Qwen Image 系列不需要）。"""
+	return True  # 多视图节点主要针对 Qwen Image，默认跳过 CLIP LoRA
+
+
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+	"""去重并保持顺序。"""
+	result: list[str] = []
+	seen: set[str] = set()
+	for item in values:
+		value = str(item or "").strip()
+		if not value or value in seen:
+			continue
+		seen.add(value)
+		result.append(value)
+	return result
+
+
+def input_index(name: str, prefix: str) -> int:
+	"""获取输入索引。"""
+	text = str(name or "")
+	if not text.startswith(prefix):
+		return 999999
+	try:
+		return int(text[len(prefix):])
+	except Exception:
+		return 999999
+
+
+def sorted_dynamic_items(kwargs: dict[str, Any], prefix: str) -> list[tuple[str, Any]]:
+	"""排序动态项。"""
+	return sorted(
+		[(key, value) for key, value in kwargs.items() if str(key).startswith(prefix)],
+		key=lambda item: input_index(item[0], prefix),
+	)
+
+
+def _split_image_batch(value: Any) -> list[Any]:
+	"""分割图像批次。"""
+	if value is None:
+		return []
+	if not isinstance(value, torch.Tensor):
+		return [value]
+	if value.ndim == 3:
+		return [value.unsqueeze(0).contiguous()]
+	if value.ndim != 4:
+		return [value]
+	batch_size = max(0, int(value.shape[0]))
+	if batch_size <= 1:
+		return [value.contiguous()]
+	return [value[index: index + 1].contiguous() for index in range(batch_size)]
+
+
+def collect_image_pairs(
+	kwargs: dict[str, Any],
+	prompt_graph: Any = None,
+	unique_id: Any = None,
+	batch_source_images: Any = None,
+) -> list[dict[str, Any]]:
+	"""收集图像对。简化版本，仅处理基本逻辑。"""
+	from .gjj_multi_image_loader import (
+		load_image_tensor,
+		parse_selected_images,
+		resolve_input_image_path,
+	)
+
+	primary_value = kwargs.get("image_01")
+	# 简化：不处理恢复逻辑，直接分割批次
+	pairs: list[dict[str, Any]] = []
+	for name, value in sorted_dynamic_items(kwargs, "image_"):
+		input_slot = input_index(name, "image_")
+		if input_slot >= 999999 or value is None:
+			continue
+		source_images = _split_image_batch(value)
+		for batch_index, image in enumerate(source_images):
+			pairs.append({
+				"slot_index": len(pairs),
+				"source_input_index": input_slot - 1,
+				"source_batch_index": batch_index,
+				"image": image,
+			})
+	return pairs
+
+
+IMAGE_RATIO_EPSILON = 0.015
+
+
+def _ensure_mask_bhw(mask: torch.Tensor | None) -> torch.Tensor | None:
+	"""确保遮罩为 BHW 格式。"""
+	if mask is None:
+		return None
+	if mask.ndim == 2:
+		return mask.unsqueeze(0)
+	if mask.ndim == 3:
+		return mask
+	if mask.ndim == 4:
+		return mask[:, 0, :, :]
+	raise RuntimeError(f"不支持的遮罩维度：{tuple(mask.shape)}")
+
+
+def _resize_image_exact(
+	image: torch.Tensor, target_width: int, target_height: int, upscale: str = "lanczos"
+) -> torch.Tensor:
+	"""精确调整图像尺寸。"""
+	samples = image.movedim(-1, 1)
+	resized = comfy.utils.common_upscale(
+		samples, int(target_width), int(target_height), upscale, "disabled"
+	)
+	return resized.movedim(1, -1)
+
+
+def _resize_mask_exact(
+	mask: torch.Tensor | None,
+	target_width: int,
+	target_height: int,
+	upscale: str = "bilinear",
+) -> torch.Tensor | None:
+	"""精确调整遮罩尺寸。"""
+	mask_bhw = _ensure_mask_bhw(mask)
+	if mask_bhw is None:
+		return None
+	mask_image = mask_bhw.unsqueeze(1)
+	resized = comfy.utils.common_upscale(
+		mask_image, int(target_width), int(target_height), upscale, "disabled"
+	)
+	return resized[:, 0, :, :].clamp(0.0, 1.0)
+
+
+def _same_aspect_ratio(
+	width_a: int,
+	height_a: int,
+	width_b: int,
+	height_b: int,
+	epsilon: float = IMAGE_RATIO_EPSILON,
+) -> bool:
+	"""检查宽高比是否相同。"""
+	if min(width_a, height_a, width_b, height_b) <= 0:
+		return False
+	ratio_a = float(width_a) / float(height_a)
+	ratio_b = float(width_b) / float(height_b)
+	return abs((ratio_a / ratio_b) - 1.0) <= float(epsilon)
+
+
+def _fit_image_with_replicate_padding(
+	image: torch.Tensor, target_width: int, target_height: int, upscale: str = "lanczos"
+):
+	"""使用复制填充适配图像。"""
+	source_height = int(image.shape[1])
+	source_width = int(image.shape[2])
+	scale = min(
+		float(target_width) / float(max(1, source_width)),
+		float(target_height) / float(max(1, source_height)),
+	)
+	resized_width = max(8, int(round(source_width * scale)))
+	resized_height = max(8, int(round(source_height * scale)))
+	resized_width = min(int(target_width), resized_width)
+	resized_height = min(int(target_height), resized_height)
+	resized = _resize_image_exact(image, resized_width, resized_height, upscale)
+	left = max(0, (int(target_width) - resized_width) // 2)
+	top = max(0, (int(target_height) - resized_height) // 2)
+	right = max(0, int(target_width) - resized_width - left)
+	bottom = max(0, int(target_height) - resized_height - top)
+	padded = F.pad(
+		resized.movedim(-1, 1), (left, right, top, bottom), mode="replicate"
+	).movedim(1, -1)
+	mask = torch.ones(
+		(image.shape[0], int(target_height), int(target_width)),
+		dtype=image.dtype,
+		device=image.device,
+	)
+	mask[:, top: top + resized_height, left: left + resized_width] = 0.0
+	return padded, mask, left, top, resized_width, resized_height
+
+
+def _prepare_primary_image_for_target(
+	image: torch.Tensor,
+	target_width: int,
+	target_height: int,
+	mask: torch.Tensor | None = None,
+):
+	"""准备主图以适应目标尺寸。"""
+	source_height = int(image.shape[1])
+	source_width = int(image.shape[2])
+	target_width = max(8, int(target_width))
+	target_height = max(8, int(target_height))
+	if source_width == target_width and source_height == target_height:
+		return image, _ensure_mask_bhw(mask), False
+	if _same_aspect_ratio(source_width, source_height, target_width, target_height):
+		return (
+			_resize_image_exact(image, target_width, target_height, "lanczos"),
+			_resize_mask_exact(mask, target_width, target_height),
+			False,
+		)
+	padded_image, layout_mask, left, top, resized_width, resized_height = (
+		_fit_image_with_replicate_padding(image, target_width, target_height, "lanczos")
+	)
+	composed_mask = layout_mask
+	source_mask = _ensure_mask_bhw(mask)
+	if source_mask is not None:
+		resized_source_mask = _resize_mask_exact(
+			source_mask, resized_width, resized_height
+		)
+		mask_canvas = torch.zeros_like(layout_mask)
+		mask_canvas[:, top: top + resized_height, left: left + resized_width] = (
+			resized_source_mask
+		)
+		composed_mask = torch.maximum(composed_mask, mask_canvas)
+	return padded_image, composed_mask.clamp(0.0, 1.0), True
 
 
 NODE_NAME = "GJJ_CharacterMultiViewStudio"
@@ -142,14 +363,19 @@ def _multiview_allowed_unets() -> list[str]:
 
 def _match_multiview_family(unet_name: str) -> dict[str, Any]:
 	preset = match_model_family(unet_name)
+	if preset is None:
+		# 如果找不到预设，返回一个默认的 generic 预设
+		return {"id": "generic", "clip_type": "stable_diffusion"}
 	if preset.get("id") != "generic":
 		return preset
 
 	canonical = _canonical_model_text(unet_name)
 	if any(keyword in canonical for keyword in SPECIAL_EDIT_KEYWORDS):
-		override = dict(match_model_family("qwen_image_edit_2511"))
-		override["id"] = "realfire_like_edit"
-		return override
+		fallback_preset = match_model_family("qwen_image_edit_2511")
+		if fallback_preset is not None:
+			override = dict(fallback_preset)
+			override["id"] = "realfire_like_edit"
+			return override
 	return preset
 
 
@@ -932,7 +1158,7 @@ class FlexibleMultiViewInputType(dict):
 		return key in self.data or text.startswith("action_image_")
 
 
-class GJJ_CharacterMultiViewStudio(GJJ_LazyImageStudio):
+class GJJ_CharacterMultiViewStudio:
 	CATEGORY = "GJJ"
 	FUNCTION = "generate"
 	DESCRIPTION = (
@@ -1139,6 +1365,85 @@ class GJJ_CharacterMultiViewStudio(GJJ_LazyImageStudio):
 				str(bool(save_each_image)),
 			]
 		)
+
+	def _load_runtime_pipeline(
+		self,
+		unet_name: str,
+		unet_dtype: str,
+		clip_names: list[str],
+		clip_type: str,
+		vae_name: str,
+	):
+		"""加载运行时管道（模型、CLIP、VAE）。"""
+		model = gjjutils_load_model(unet_name, unet_dtype)
+		clip = gjjutils_load_clip_from_names(clip_names, clip_type)
+		vae = gjjutils_load_vae(vae_name)
+		return model, clip, vae
+
+	def _apply_loras(
+		self,
+		model,
+		clip,
+		lora_1_name: str,
+		lora_1_strength: float,
+		lora_2_name: str,
+		lora_2_strength: float,
+		lora_chain_config: str = "",
+	):
+		"""应用 LoRA 到模型和 CLIP。"""
+		from .gjj_multi_lora_chain import apply_lora_to_model_and_clip, apply_lora_chain_config
+
+		current_model = model
+		current_clip = clip
+
+		# Qwen Image 系列不需要 CLIP LoRA
+		clip_strength = 0.0 if _should_skip_clip_lora_for_multiview_family() else None
+
+		if str(lora_1_name or "").strip() and abs(float(lora_1_strength)) > 1e-6:
+			current_model, current_clip = apply_lora_to_model_and_clip(
+				current_model,
+				current_clip,
+				self._load_lora_state(lora_1_name),
+				float(lora_1_strength),
+				float(lora_1_strength) if clip_strength is None else float(clip_strength),
+			)
+		if str(lora_2_name or "").strip() and abs(float(lora_2_strength)) > 1e-6:
+			current_model, current_clip = apply_lora_to_model_and_clip(
+				current_model,
+				current_clip,
+				self._load_lora_state(lora_2_name),
+				float(lora_2_strength),
+				float(lora_2_strength) if clip_strength is None else float(clip_strength),
+			)
+		if str(lora_chain_config or "").strip():
+			current_model, current_clip, _ = apply_lora_chain_config(
+				current_model,
+				current_clip,
+				lora_data=normalize_lora_chain_data(lora_chain_config),
+				loaded_lora_cache=None,
+			)
+		return current_model, current_clip
+
+	def _load_lora_state(self, lora_name: str):
+		"""加载 LoRA 状态字典。"""
+		import comfy.utils
+		lora_path = folder_paths.get_full_path("loras", lora_name)
+		if not lora_path:
+			raise FileNotFoundError(f"LoRA 文件未找到: {lora_name}")
+		return comfy.utils.load_torch_file(lora_path, safe_load=True)
+
+	def _encode_text_conditioning(self, clip, text: str):
+		"""编码文本条件。"""
+		tokens = clip.tokenize(str(text or ""))
+		return clip.encode_from_tokens_scheduled(tokens)
+
+	def _encode_negative_conditioning(self, clip, positive, negative_prompt: str):
+		"""编码负向条件。"""
+		if str(negative_prompt or "").strip():
+			return self._encode_text_conditioning(clip, negative_prompt)
+		# 如果没有负向提示，使用零化条件
+		import torch
+		return [[torch.zeros_like(positive[0][0]), positive[0][1]]]
 
 	def _collect_action_pairs(self, kwargs: dict[str, Any]) -> list[dict[str, Any]]:
 		return [

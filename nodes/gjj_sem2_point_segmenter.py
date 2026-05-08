@@ -7,14 +7,10 @@ import os
 import sys
 from typing import Any
 
-import cv2
 import folder_paths
 import numpy as np
 import torch
 import comfy.utils
-from hydra import compose, initialize_config_dir
-from hydra.core.global_hydra import GlobalHydra
-from hydra.utils import instantiate
 
 
 NODE_NAME = "GJJ_SEM2PointSegmenter"
@@ -22,7 +18,49 @@ VENDOR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ven
 if VENDOR_ROOT not in sys.path:
 	sys.path.insert(0, VENDOR_ROOT)
 
-from sam2.sam2_image_predictor import SAM2ImagePredictor  # type: ignore  # noqa: E402
+# 延迟导入：运行时依赖检查
+def _load_dependencies():
+	"""运行时加载 cv2、hydra 和 sam2，失败时提供友好提示"""
+	from .common_utils.dependency_checker import load_dependency_at_runtime
+
+	cv2 = load_dependency_at_runtime(
+		module_name="cv2",
+		node_name="GJJ · SEM2点分割器",
+		package_name="opencv-python",
+		description="该节点需要 OpenCV 进行图像处理"
+	)
+
+	hydra = load_dependency_at_runtime(
+		module_name="hydra",
+		node_name="GJJ · SEM2点分割器",
+		package_name="hydra-core",
+		description="该节点需要 Hydra 进行配置管理"
+	)
+
+	compose = hydra.compose
+	initialize_config_dir = hydra.initialize_config_dir
+	GlobalHydra = hydra.core.global_hydra.GlobalHydra
+	instantiate = hydra.utils.instantiate
+
+	# SAM2 从 vendor 目录导入
+	try:
+		from sam2.sam2_image_predictor import SAM2ImagePredictor  # type: ignore
+	except ImportError as exc:
+		raise RuntimeError(
+			f"\n 未找到 SAM2 运行库。\n"
+			f"\n"
+			f"这个 GJJ 节点需要 SAM2 Python 包才能运行。\n"
+			f"\n"
+			f"🔧 解决方案：\n"
+			f"  1. 确保 vendor/sam2 目录存在且包含完整的 SAM2 代码\n"
+			f"  2. 如果缺失，请从 https://github.com/facebookresearch/segment-anything-2 下载\n"
+			f"\n"
+			f"原始导入错误：{exc}\n"
+			f"\n"
+			f"💡 提示：安装后请重启 ComfyUI 服务器。"
+		) from exc
+
+	return cv2, compose, initialize_config_dir, GlobalHydra, instantiate, SAM2ImagePredictor
 
 
 SAM2_CONFIG_MAP = {
@@ -306,6 +344,9 @@ class GJJ_SEM2PointSegmenter:
 		unique_id: Any = None,
 	):
 		try:
+			# 运行时加载依赖
+			cv2, compose, initialize_config_dir, GlobalHydra, instantiate, SAM2ImagePredictor = _load_dependencies()
+
 			_send_status(unique_id, "加载 SEM2 模型...")
 			pos_points = _parse_points(positive_points)
 			neg_points = _parse_points(negative_points)

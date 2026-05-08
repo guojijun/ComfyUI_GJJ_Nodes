@@ -621,6 +621,32 @@ class GJJ_BatchTextSegmenter:
 			_warning(warnings, f"内部异常已拦截：{exc}")
 			status = "\n".join(warnings[-20:])
 			_send_status(unique_id, status)
+
+			# 如果原始错误包含详细安装命令（来自 _load_sam3_runtime），则保留它
+			if isinstance(exc, RuntimeError) and "未找到 SAM3 运行库" in str(exc):
+				# 提取安装命令
+				error_str = str(exc)
+				install_command = ""
+				# 尝试从错误信息中提取安装命令（包含 pip install 的行）
+				import re
+				match = re.search(r'(.+?python\.exe.*?pip install torchvision.*?)\n', error_str)
+				if match:
+					install_command = match.group(1).strip()
+
+				# 发送错误事件到前端
+				try:
+					from server import PromptServer
+					PromptServer.instance.send_sync("gjj_batch_text_error", {
+						"node": str(unique_id),
+						"error": error_str,
+						"install_command": install_command,
+					})
+				except Exception:
+					pass
+
+				# 抛出简洁的错误信息（在默认错误区域显示）
+				raise RuntimeError("运行时依赖缺失：SAM3。详细信息请查看节点前端面板。") from exc
+
 			return {"ui": {"warning_text": [status]}, "result": (_build_rgba_batch(outputs, canvas_mode),)}
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_BatchTextSegmenter}

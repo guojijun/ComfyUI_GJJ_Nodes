@@ -68,6 +68,8 @@ def video_to_frames_data(video: dict[str, Any]) -> tuple[np.ndarray, float, int,
 		if images is not None and isinstance(images, torch.Tensor):
 			frames_np = images.detach().cpu().numpy()
 			if frames_np.ndim == 4:
+				if frames_np.shape[0] == 0:
+					raise RuntimeError("视频对象包含0帧数据")
 				height, width = frames_np.shape[1], frames_np.shape[2]
 				return frames_np, frame_rate, width, height
 
@@ -79,6 +81,8 @@ def video_to_frames_data(video: dict[str, Any]) -> tuple[np.ndarray, float, int,
 		if isinstance(images, torch.Tensor):
 			frames_np = images.detach().cpu().numpy()
 			if frames_np.ndim == 4:
+				if frames_np.shape[0] == 0:
+					raise RuntimeError("视频对象包含0帧数据")
 				height, width = frames_np.shape[1], frames_np.shape[2]
 				return frames_np, frame_rate, width, height
 
@@ -177,9 +181,10 @@ def load_video_from_file(filename: str):
 
 def _decode_video_with_ffmpeg(video_path: str) -> dict[str, Any]:
 	"""使用FFmpeg解码视频为帧序列"""
-	import imageio.v3 as iio
 
 	try:
+		import imageio.v3 as iio
+		
 		# 读取视频帧
 		frames = iio.imread(video_path, plugin="pyav")
 
@@ -215,6 +220,10 @@ def _decode_video_with_ffmpeg(video_path: str) -> dict[str, Any]:
 	except Exception as e:
 		# 回退到ffmpeg命令行
 		print(f"[GJJ] imageio读取失败，尝试FFmpeg... ({e})")
+		if "imageio" in str(e) or "imageio" in str(type(e).__name__).lower():
+			from .common_utils.dependency_checker import get_pip_install_command_text
+			cmd = get_pip_install_command_text("imageio imageio-ffmpeg")
+			print(f"[GJJ] 提示：缺少 imageio 依赖，安装命令: {cmd}")
 		return _decode_video_with_ffmpeg_cli(video_path)
 
 
@@ -364,6 +373,9 @@ def extract_first_frame(video_path: str) -> np.ndarray | None:
 					frame_np = np.stack([frame_np] * 3, axis=-1).astype(np.float32) / 255.0
 					return frame_np
 	except ImportError:
+		from .common_utils.dependency_checker import get_pip_install_command_text
+		cmd = get_pip_install_command_text("imageio imageio-ffmpeg")
+		print(f"[GJJ] imageio 未安装，跳过使用该库提取首帧。安装命令: {cmd}")
 		# 如果没有 imageio，使用 ffmpeg 命令行
 		try:
 			import tempfile
@@ -378,7 +390,7 @@ def extract_first_frame(video_path: str) -> np.ndarray | None:
 				cmd = [
 					"ffmpeg", "-y", "-v", "error",
 					"-i", video_path,
-					"-vf", "select=eq(n\,0)",
+					"-vf", r"select=eq(n\,0)",
 					"-frames:v", "1",
 					str(frame_file),
 				]
@@ -873,32 +885,42 @@ class GJJ_VideoSegmentEditor:
 
 		# 7. 按时间段裁剪视频
 		video_segments = []
-		for i, segment in enumerate(segments):
-			if not isinstance(segment, dict):
-				print(f"[GJJ] 警告：分段{i+1}不是dict类型 ({type(segment).__name__})，跳过")
-				continue
-			start = float(segment.get("start", 0))
-			end = float(segment.get("end", duration))
+		has_valid_source = video_path is not None or (frames is not None and len(frames) > 0)
 
-			# 确保时间范围有效
-			if start >= end:
-				print(f"[GJJ] 警告：分段{i+1}的时间范围无效 ({start}s - {end}s)，跳过")
-				continue
-
-			try:
-				if video_path:
-					# 如果有原始文件路径，使用FFmpeg裁剪
-					segment_video = self._crop_video_with_ffmpeg(video_path, start, end, frame_rate)
-				else:
-					# 否则从帧数组中裁剪
-					segment_video = self._crop_video_from_frames(frames, start, end, frame_rate)
-
-				video_segments.append(segment_video)
-			except Exception as e:
-				print(f"[GJJ] 裁剪分段{i+1}失败: {e}")
-				# 填充空视频
-				empty_frames = torch.zeros((1, height, width, 3), dtype=torch.float32)
+		if not has_valid_source:
+			print(f"[GJJ] 错误：没有有效的视频源 (video_path={video_path}, frames={frames is not None})")
+			# 填充空视频
+			empty_frames = torch.zeros((1, max(height, 1), max(width, 1), 3), dtype=torch.float32)
+			for _ in segments:
 				video_segments.append(create_video_object(empty_frames, frame_rate))
+		else:
+			for i, segment in enumerate(segments):
+				if not isinstance(segment, dict):
+					print(f"[GJJ] 警告：分段{i+1}不是dict类型 ({type(segment).__name__})，跳过")
+					continue
+				start = float(segment.get("start", 0))
+				end = float(segment.get("end", duration))
+
+				# 确保时间范围有效
+				if start >= end:
+					print(f"[GJJ] 警告：分段{i+1}的时间范围无效 ({start}s - {end}s)，跳过")
+					continue
+
+				try:
+					if video_path:
+						# 如果有原始文件路径，使用FFmpeg裁剪
+						segment_video = self._crop_video_with_ffmpeg(video_path, start, end, frame_rate)
+					else:
+						# 否则从帧数组中裁剪
+						segment_video = self._crop_video_from_frames(frames, start, end, frame_rate)
+
+					video_segments.append(segment_video)
+					print(f"[GJJ] 成功裁剪分段{i+1}: {start}s - {end}s")
+				except Exception as e:
+					print(f"[GJJ] 裁剪分段{i+1}失败: {e}")
+					# 填充空视频
+					empty_frames = torch.zeros((1, max(height, 1), max(width, 1), 3), dtype=torch.float32)
+					video_segments.append(create_video_object(empty_frames, frame_rate))
 
 		# 8. 构建返回结果：
 		# 第一个输出 = 分段列表JSON（STRING）
@@ -916,18 +938,28 @@ class GJJ_VideoSegmentEditor:
 
 	def _crop_video_with_ffmpeg(self, video_path: str, start: float, end: float, fps: float) -> dict[str, Any]:
 		"""使用FFmpeg裁剪视频并重新加载为VIDEO对象"""
-		with tempfile.TemporaryDirectory() as tmpdir:
-			output_path = os.path.join(tmpdir, "segment.mp4")
+		tmpdir = tempfile.TemporaryDirectory()
+		try:
+			output_path = os.path.join(tmpdir.name, "segment.mp4")
 
 			if not crop_video_segment_ffmpeg(video_path, start, end, output_path):
 				raise RuntimeError("FFmpeg裁剪失败")
 
+			# 检查输出文件是否存在且有内容
+			if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+				raise RuntimeError("FFmpeg裁剪后文件为空")
+
 			# 使用load_video_from_path加载临时文件
 			return load_video_from_path(output_path)
+		finally:
+			tmpdir.cleanup()
 
 	def _crop_video_from_frames(self, frames: np.ndarray, start: float, end: float, fps: float) -> dict[str, Any]:
 		"""从帧数组中裁剪视频片段"""
 		total_frames = len(frames)
+		if total_frames == 0:
+			raise RuntimeError("无法从空帧数组裁剪视频片段")
+
 		start_frame = int(start * fps)
 		end_frame = int(end * fps)
 
@@ -937,6 +969,9 @@ class GJJ_VideoSegmentEditor:
 
 		# 裁剪帧
 		cropped_frames = frames[start_frame:end_frame]
+
+		if len(cropped_frames) == 0:
+			raise RuntimeError(f"裁剪后帧数为0 (start_frame={start_frame}, end_frame={end_frame}, total={total_frames})")
 
 		# 转换为tensor
 		frames_tensor = torch.from_numpy(cropped_frames).float()

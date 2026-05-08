@@ -355,15 +355,45 @@ def _ensure_cv2():
         import cv2
         return cv2
     except ImportError as exc:
+        # 获取当前 Python 解释器的实际路径
+        python_executable = sys.executable
+
+        # ANSI 颜色代码（用于控制台彩色输出）
+        RED = '\033[91m'
+        YELLOW = '\033[93m'
+        CYAN = '\033[96m'
+        GREEN = '\033[92m'
+        RESET = '\033[0m'
+        BOLD = '\033[1m'
+
+        # 构建安装命令
+        from .common_utils.dependency_checker import get_pip_install_command_text
+        install_cmd = get_pip_install_command_text("opencv-python")
+
+        # 在控制台打印美观的错误提示（更加突出）
+        print(f"\n{RED}{'=' * 80}{RESET}")
+        print(f"{RED}{BOLD}  GJJ 节点运行时依赖缺失！{RESET}")
+        print(f"{RED}{'=' * 80}{RESET}")
+        print(f"{YELLOW}[GJJ] {BOLD}节点:{RESET} {CYAN}本地口型同步{RESET}")
+        print(f"{YELLOW}[GJJ] {BOLD}缺失依赖:{RESET} {RED}{BOLD}opencv-python{RESET}")
+        print(f"{YELLOW}[GJJ]{RESET} 该节点需要 opencv-python (cv2) 来处理图像。\n")
+        print(f"{YELLOW}{BOLD} 快速安装命令:{RESET}")
+        print(f"{GREEN}{BOLD}  {install_cmd}{RESET}\n")
+        print(f"{YELLOW}{BOLD} 提示:{RESET} 安装后请重启 ComfyUI 服务器")
+        print(f"{RED}{'=' * 80}{RESET}\n")
+
         raise RuntimeError(
-            "💄 GJJ · 本地口型同步 需要 opencv-python (cv2) 来处理图像。\n"
+            "\n💄 GJJ · 本地口型同步 需要 opencv-python (cv2) 来处理图像。\n"
             "\n"
-            "🔧 快速安装命令（使用国内镜像）：\n"
-            "pip install opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+            " 必需依赖（请安装）：\n"
+            "  • opencv-python (cv2, 图像处理)\n"
+            "\n"
+            " 快速安装命令（使用实际 Python 路径）：\n"
+            f"{install_cmd}\n"
             "\n"
             f"原始导入错误：{exc}\n"
             "\n"
-            "💡 提示：安装后请重启 ComfyUI 服务器。"
+            " 提示：安装后请重启 ComfyUI 服务器。"
         ) from exc
 
 
@@ -373,15 +403,45 @@ def _ensure_soundfile():
         import soundfile as sf
         return sf
     except ImportError as exc:
+        # 获取当前 Python 解释器的实际路径
+        python_executable = sys.executable
+
+        # ANSI 颜色代码（用于控制台彩色输出）
+        RED = '\033[91m'
+        YELLOW = '\033[93m'
+        CYAN = '\033[96m'
+        GREEN = '\033[92m'
+        RESET = '\033[0m'
+        BOLD = '\033[1m'
+
+        # 构建安装命令
+        from .common_utils.dependency_checker import get_pip_install_command_text
+        install_cmd = get_pip_install_command_text("soundfile")
+
+        # 在控制台打印美观的错误提示（更加突出）
+        print(f"\n{RED}{'=' * 80}{RESET}")
+        print(f"{RED}{BOLD}  GJJ 节点运行时依赖缺失！{RESET}")
+        print(f"{RED}{'=' * 80}{RESET}")
+        print(f"{YELLOW}[GJJ] {BOLD}节点:{RESET} {CYAN}本地口型同步{RESET}")
+        print(f"{YELLOW}[GJJ] {BOLD}缺失依赖:{RESET} {RED}{BOLD}soundfile{RESET}")
+        print(f"{YELLOW}[GJJ]{RESET} 该节点需要 soundfile 来处理音频文件。\n")
+        print(f"{YELLOW}{BOLD} 快速安装命令:{RESET}")
+        print(f"{GREEN}{BOLD}  {install_cmd}{RESET}\n")
+        print(f"{YELLOW}{BOLD} 提示:{RESET} 安装后请重启 ComfyUI 服务器")
+        print(f"{RED}{'=' * 80}{RESET}\n")
+
         raise RuntimeError(
-            "💄 GJJ · 本地口型同步 需要 soundfile 来处理音频文件。\n"
+            "\n💄 GJJ · 本地口型同步 需要 soundfile 来处理音频文件。\n"
             "\n"
-            "🔧 快速安装命令（使用国内镜像）：\n"
-            "pip install soundfile -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+            " 必需依赖（请安装）：\n"
+            "  • soundfile (音频文件处理)\n"
+            "\n"
+            " 快速安装命令（使用实际 Python 路径）：\n"
+            f"{install_cmd}\n"
             "\n"
             f"原始导入错误：{exc}\n"
             "\n"
-            "💡 提示：安装后请重启 ComfyUI 服务器。"
+            " 提示：安装后请重启 ComfyUI 服务器。"
         ) from exc
 
 

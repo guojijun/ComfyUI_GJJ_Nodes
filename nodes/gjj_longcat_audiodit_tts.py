@@ -35,14 +35,6 @@ from .gjj_longcat_audiodit_model_cache import (
     unload_model,
 )
 
-# 检查关键依赖
-try:
-    import soundfile as sf
-    _SOUNDFILE_AVAILABLE = True
-except ImportError:
-    _SOUNDFILE_AVAILABLE = False
-
-
 NODE_NAME = "GJJ_LongCatAudioDiTTTS"
 MAX_SPEAKERS = 10
 AUDIO_PREFIX = "speaker_"
@@ -204,7 +196,24 @@ def _decode_audio_with_av(source_path: Path) -> tuple[np.ndarray, int]:
 
 def _read_audio_file(path: Path) -> tuple[np.ndarray, int]:
     try:
+        import soundfile as sf
         audio_np, sample_rate = sf.read(str(path), always_2d=True)
+    except ImportError as exc:
+        from .common_utils.dependency_checker import print_runtime_dependency_error, get_pip_install_command_text
+
+        install_cmd = get_pip_install_command_text("soundfile")
+
+        # 打印美观的控制台错误提示
+        print_runtime_dependency_error(
+            node_name="LongCat AudioDiT TTS",
+            dependency_name="soundfile",
+            install_command=install_cmd,
+            description="该节点需要 soundfile 来读取音频文件",
+            extra_info=f"原始导入错误：{exc}"
+        )
+
+        # 抛出简洁的错误信息（在前端显示）
+        raise RuntimeError("运行时依赖缺失：soundfile。详细信息请查看控制台。") from exc
     except Exception as sf_exc:
         try:
             audio_np, sample_rate = _decode_audio_with_av(path)
@@ -360,21 +369,7 @@ class GJJ_LongCatAudioDiTTTS:
     CATEGORY = "GJJ/Audio"
     FUNCTION = "generate"
     OUTPUT_NODE = True
-
-    # 如果缺少关键依赖，显示错误信息
-    if not _SOUNDFILE_AVAILABLE:
-        DESCRIPTION = """❌ 节点 LongCat AudioDiT TTS 缺少必需的 Python 依赖：
-
-📦 必需依赖（请安装）：
-  • soundfile
-
-🔧 安装命令：
-  pip install soundfile
-
-💡 提示：安装后请重启 ComfyUI 服务器。
-
----
-LongCat AudioDiT 一体式语音克隆与多说话人 TTS。默认从 models/mp3 选择参考音频；连接音频后按实际音频输入数量自动计算说话人数，并自动保存 MP3 供节点内预览。
+    DESCRIPTION = """LongCat AudioDiT 一体式语音克隆与多说话人 TTS。默认从 models/mp3 选择参考音频；连接音频后按实际音频输入数量自动计算说话人数，并自动保存 MP3 供节点内预览。
 
 📦 所需模型：
   • 模型目录: models/audiodit/
@@ -405,38 +400,6 @@ LongCat AudioDiT 一体式语音克隆与多说话人 TTS。默认从 models/mp3
   • 跨语言克隆效果可能不如母语自然
   • 需要手动提供参考音频对应的文本（或留空使用默认文本）
   • 音质略逊于 Fish Audio S2"""
-    else:
-        DESCRIPTION = """LongCat AudioDiT 一体式语音克隆与多说话人 TTS。默认从 models/mp3 选择参考音频；连接音频后按实际音频输入数量自动计算说话人数，并自动保存 MP3 供节点内预览。
-
-    📦 所需模型：
-      • 模型目录: models/audiodit/
-        - LongCat-AudioDiT-1B (轻量，~6GB FP32)
-        - LongCat-AudioDiT-3.5B (标准，~14GB FP32)
-        - LongCat-AudioDiT-3.5B-bf16 (推荐，~7GB VRAM, bf16 量化)
-        - LongCat-AudioDiT-3.5B-fp8 (极速，~4GB VRAM, fp8 量化)
-      • Tokenizer: google/umt5-base (首次执行时自动下载)
-      • 自动下载: 开启后首次执行时从 HuggingFace 下载（需 huggingface_hub）
-
-    🔧 Python 依赖：
-      • transformers (文本编码和 tokenizer)
-      • soundfile (音频读写)
-      • huggingface_hub (可选，用于自动下载模型)
-      • 安装命令: pip install transformers soundfile huggingface_hub
-
-    ✅ 优点：
-      • 支持动态扩展输入口（最多 10 个说话人）
-      • 自动检测连接的音频数量，智能调整说话人数
-      • 提供多种模型尺寸，适配不同显存配置
-      • fp8 量化版本显存占用低，适合消费级显卡
-      • 自动保存 MP3 预览，方便快速试听
-      • 默认参考文本可自定义
-
-    ⚠️ 缺点：
-      • 大模型需要较多显存（3.5B FP32 约 14GB）
-      • 推理速度较慢（尤其是大模型）
-      • 跨语言克隆效果可能不如母语自然
-      • 需要手动提供参考音频对应的文本（或留空使用默认文本）
-      • 音质略逊于 Fish Audio S2"""
     SEARCH_ALIASES = ["LongCat", "AudioDiT", "TTS", "语音克隆", "多说话人", "文字转语音"]
     RETURN_TYPES = ("AUDIO",)
     RETURN_NAMES = ("合成音频",)

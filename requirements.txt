@@ -13,7 +13,7 @@
 # - GJJ · 📢 FishAudioS2语音克隆TTS / GJJ_FishAudioS2Generator：自动下载 Fish Audio S2 模型
 # - GJJ · 📢 LongCat语音克隆TTS / GJJ_LongCatAudioDiTTTS：自动下载 tokenizer / 模型
 # - GJJ · 🔍 FlashVSR视频超分放大器 / GJJ_FlashVSRVideoUpscaler：自动下载 FlashVSR 模型
-# - GJJ · 📢 Qwen3语音识别四文本 / GJJ_Qwen3ASRTextFormats：自动下载 Qwen3-ASR 模型
+# - GJJ · 🎤 Qwen3语音识别四文本 / GJJ_Qwen3ASRTextFormats：自动下载 Qwen3-ASR 模型
 huggingface_hub
 
 # 支持：

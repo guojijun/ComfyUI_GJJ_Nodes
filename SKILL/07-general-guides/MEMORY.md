@@ -1,0 +1,1 @@
+- [GJJ Node Naming Convention](gjj_naming_convention.md) — NODE_DISPLAY_NAME_MAPPINGS must be "emoji 中文名称"

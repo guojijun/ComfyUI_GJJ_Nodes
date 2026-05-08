@@ -12,8 +12,66 @@ from typing import Any, Dict, List, Tuple
 
 import folder_paths
 import numpy as np
-import soundfile as sf
 import torch
+
+
+# 延迟导入：运行时依赖检查
+_soundfile = None
+
+def _load_soundfile():
+	"""运行时加载 soundfile，失败时提供友好提示"""
+	global _soundfile
+	if _soundfile is not None:
+		return _soundfile
+
+	try:
+		import soundfile as sf
+		_soundfile = sf
+		return sf
+	except Exception as exc:
+		import sys
+		python_executable = sys.executable
+
+		# ANSI 颜色代码（用于控制台彩色输出）
+		RED = '\033[91m'
+		YELLOW = '\033[93m'
+		CYAN = '\033[96m'
+		GREEN = '\033[92m'
+		RESET = '\033[0m'
+		BOLD = '\033[1m'
+
+		# 构建安装命令
+		from .common_utils.dependency_checker import get_pip_install_command_text
+		install_cmd = get_pip_install_command_text("soundfile numpy")
+
+		# 在控制台打印美观的错误提示
+		print(f"\n{RED}{'=' * 80}{RESET}")
+		print(f"{RED}{BOLD}  GJJ 节点运行时依赖缺失！{RESET}")
+		print(f"{RED}{'=' * 80}{RESET}")
+		print(f"{YELLOW}[GJJ] {BOLD}节点:{RESET} {CYAN}音频分段编辑器{RESET}")
+		print(f"{YELLOW}[GJJ] {BOLD}缺失依赖:{RESET} {RED}{BOLD}soundfile{RESET}")
+		print(f"{YELLOW}[GJJ]{RESET} 该节点需要 soundfile 和 numpy Python 包才能运行。\n")
+		print(f"{YELLOW}{BOLD} 快速安装命令:{RESET}")
+		print(f"{GREEN}{BOLD}  {install_cmd}{RESET}\n")
+		print(f"{YELLOW}{BOLD} 提示:{RESET} 安装后请重启 ComfyUI 服务器")
+		print(f"{RED}{'=' * 80}{RESET}\n")
+
+		raise RuntimeError(
+			"\n 未找到 soundfile 运行库。\n"
+			"\n"
+			"这个 GJJ 节点需要 soundfile 和 numpy Python 包才能运行。\n"
+			"\n"
+			" 必需依赖（请安装）：\n"
+			"  • soundfile (音频文件读写库)\n"
+			"  • numpy (数值计算库)\n"
+			"\n"
+			"🔧 快速安装命令（使用实际 Python 路径）：\n"
+			f"{install_cmd}\n"
+			"\n"
+			f"原始导入错误：{exc}\n"
+			"\n"
+			" 提示：安装后请重启 ComfyUI 服务器。"
+		) from exc
 
 
 NODE_NAME = "GJJ_AudioTimestampEditor"
@@ -32,7 +90,7 @@ def parse_segments_list(text: str) -> list[dict[str, Any]]:
 	"""解析分段列表，支持多种格式，过滤非dict元素"""
 	if not text or not text.strip():
 		return []
-	
+
 	try:
 		data = json.loads(text)
 		if isinstance(data, list):
@@ -45,7 +103,7 @@ def parse_segments_list(text: str) -> list[dict[str, Any]]:
 			return [data]
 	except json.JSONDecodeError:
 		pass
-	
+
 	return []
 
 
@@ -60,7 +118,7 @@ def audio_to_waveform_data(audio: dict[str, Any]) -> tuple[np.ndarray, int]:
 	"""将ComfyUI音频对象转换为numpy波形数据和采样率"""
 	waveform = audio.get("waveform")
 	sample_rate = int(audio.get("sample_rate", 44100))
-	
+
 	if isinstance(waveform, torch.Tensor):
 		audio_np = waveform.squeeze(0).cpu().numpy()
 		if audio_np.ndim == 2:
@@ -69,41 +127,57 @@ def audio_to_waveform_data(audio: dict[str, Any]) -> tuple[np.ndarray, int]:
 			audio_np = audio_np.reshape(-1, 1)
 	else:
 		audio_np = np.array(waveform)
-	
+
 	return audio_np, sample_rate
 
 
 def save_audio_for_preview(audio_np: np.ndarray, sample_rate: int, prompt: Any = None) -> tuple[str, str]:
 	"""保存音频到临时文件用于预览"""
+	sf = _load_soundfile()
+
 	output_dir = folder_paths.get_temp_directory()
 	filename = f"GJJ_AudioSegmentEditor_{hash(str(prompt))}.wav"
 	filepath = os.path.join(output_dir, filename)
-	
+
 	os.makedirs(output_dir, exist_ok=True)
 	sf.write(filepath, audio_np, sample_rate)
-	
+
 	return filepath, filename
+
+
+def _send_status(unique_id: Any, text: str, progress: float = None) -> None:
+	"""发送状态更新到前端"""
+	if not unique_id:
+		return
+	try:
+		from server import PromptServer
+		data = {"node": str(unique_id), "text": str(text or "")}
+		if progress is not None:
+			data["progress"] = float(progress)
+		PromptServer.instance.send_sync("gjj_node_progress", data)
+	except Exception:
+		pass
 
 
 def crop_audio_segment(audio: dict[str, Any], start_time: float, end_time: float) -> dict[str, Any]:
 	"""根据起止时间裁剪音频片段"""
 	waveform = audio.get("waveform")
 	sample_rate = int(audio.get("sample_rate", 44100))
-	
+
 	if not isinstance(waveform, torch.Tensor):
 		raise RuntimeError("音频对象缺少有效的waveform数据")
-	
+
 	total_samples = waveform.shape[-1]
 	start_sample = int(start_time * sample_rate)
 	end_sample = int(end_time * sample_rate)
-	
+
 	# 边界检查
 	start_sample = max(0, min(start_sample, total_samples - 1))
 	end_sample = max(start_sample + 1, min(end_sample, total_samples))
-	
+
 	# 裁剪音频
 	cropped_waveform = waveform[..., start_sample:end_sample].contiguous()
-	
+
 	return {
 		"waveform": cropped_waveform,
 		"sample_rate": sample_rate,
@@ -114,10 +188,10 @@ def generate_auto_segments(duration: float, segment_count: int = 4) -> list[dict
 	"""根据音频时长自动生成等分的时间段"""
 	if duration <= 0:
 		return []
-	
+
 	segment_duration = duration / segment_count
 	segments = []
-	
+
 	for i in range(segment_count):
 		start = i * segment_duration
 		end = (i + 1) * segment_duration
@@ -126,7 +200,7 @@ def generate_auto_segments(duration: float, segment_count: int = 4) -> list[dict
 			"end": round(end, 3),
 			"label": f"片段 {i + 1}",
 		})
-	
+
 	return segments
 
 
@@ -159,21 +233,21 @@ class GJJ_AudioSegmentEditor:
 【输出说明】
 • 音频片段1...N - 按时间段裁剪的音频
 • 分段列表JSON - 编辑后的时间段配置"""
-	
+
 	# 依赖声明
 	REQUIRED_PACKAGES = [
 		"soundfile>=0.12.0",
 		"numpy>=1.20.0",
 	]
-	
+
 	REQUIRED_MODELS = []
-	
+
 	GJJ_HELP = {
 		"title": "GJJ · ✂️ 音频分段编辑器",
 		"version": "2.0.0",
 		"author": "GJJ Custom Nodes Team",
 		"description": "可视化音频分段裁剪工具，支持动态输出多个音频片段",
-		
+
 		"features": [
 			{
 				"name": "节点内音频加载",
@@ -202,7 +276,7 @@ class GJJ_AudioSegmentEditor:
 				"format": "AUDIO",
 			},
 		],
-		
+
 		"inputs": {
 			"audio": {
 				"type": "AUDIO",
@@ -228,7 +302,7 @@ class GJJ_AudioSegmentEditor:
 				"description": "自动分段数量（当segments_json为空时生效）",
 			},
 		},
-		
+
 		"outputs": {
 			"音频片段1...N": {
 				"type": "AUDIO",
@@ -239,7 +313,7 @@ class GJJ_AudioSegmentEditor:
 				"description": "编辑后的时间段JSON配置",
 			},
 		},
-		
+
 		"usage_examples": [
 			{
 				"title": "语音分段提取",
@@ -257,14 +331,14 @@ class GJJ_AudioSegmentEditor:
 				"workflow": "[Podcast] → [GJJ Audio Segment Editor]",
 			},
 		],
-		
+
 		"technical_notes": [
 			"音频裁剪使用 torch.Tensor 切片，保持原始采样率",
 			"动态输出接口通过IS_CHANGED机制实现，前端根据分段数量动态调整",
 			"时间段精度为毫秒级（小数点后3位）",
 			"输出顺序与分段列表顺序一致",
 		],
-		
+
 		"troubleshooting": [
 			{
 				"problem": "输出接口数量不对",
@@ -275,7 +349,7 @@ class GJJ_AudioSegmentEditor:
 				"solution": "检查起止时间是否重叠或超出音频总时长",
 			},
 		],
-		
+
 		"changelog": [
 			{
 				"version": "2.0.0",
@@ -291,7 +365,7 @@ class GJJ_AudioSegmentEditor:
 			},
 		],
 	}
-	
+
 	SEARCH_ALIASES = [
 		"audio segment editor",
 		"audio splitter",
@@ -302,7 +376,7 @@ class GJJ_AudioSegmentEditor:
 		"audio cutter",
 		"segment extractor",
 	]
-	
+
 	# 输出定义：第一个是分段列表JSON（STRING），第二个及之后是音频片段（AUDIO）
 	# 由前端动态添加更多AUDIO输出
 	RETURN_TYPES = ("STRING",) + ("AUDIO",) * MAX_SEGMENTS
@@ -313,7 +387,7 @@ class GJJ_AudioSegmentEditor:
 	def INPUT_TYPES(cls):
 		# 获取音频文件列表
 		audio_files = cls._get_audio_files()
-		
+
 		return {
 			"required": {
 				"audio_file": (audio_files, {
@@ -335,29 +409,29 @@ class GJJ_AudioSegmentEditor:
 			},
 			"hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO", "unique_id": "UNIQUE_ID"},
 		}
-	
+
 	@classmethod
 	def _get_audio_files(cls) -> list[str]:
 		"""获取可用的音频文件列表"""
 		files = ["[不加载]"]
-		
+
 		# 从多个目录查找音频文件
 		search_dirs = [
 			folder_paths.get_input_directory(),
 			folder_paths.get_output_directory(),
 		]
-		
+
 		audio_extensions = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
-		
+
 		for search_dir in search_dirs:
 			if not search_dir or not os.path.exists(search_dir):
 				continue
-			
+
 			for root, dirs, filenames in os.walk(search_dir):
 				for filename in filenames:
 					if Path(filename).suffix.lower() in audio_extensions:
 						files.append(filename)
-		
+
 		return files
 
 	def __init__(self):
@@ -372,123 +446,160 @@ class GJJ_AudioSegmentEditor:
 		extra_pnginfo=None,
 		unique_id=None,
 	):
-		# 1. 加载音频（优先使用外部连接，其次使用内部加载）
-		if audio is not None and is_audio_object(audio):
-			current_audio = audio
-		elif audio_file != "[不加载]":
-			# 从文件加载音频
-			current_audio = self._load_audio_from_file(audio_file)
-		else:
-			raise RuntimeError("请连接外部音频或在节点内选择音频文件")
-		
-		# 2. 转换音频数据
-		audio_np, sample_rate = audio_to_waveform_data(current_audio)
-		duration = len(audio_np) / sample_rate if sample_rate > 0 else 0
-		
-		# 3. 解析或生成分段列表（默认4段）
-		segments = parse_segments_list(segments_json)
-		if not segments:
-			# 自动生成分段
-			segments = generate_auto_segments(duration, 4)
-		
-		# 4. 保存音频用于预览
 		try:
-			filepath, filename = save_audio_for_preview(audio_np, sample_rate, prompt)
-			self.preview_audio_path = filepath
-		except Exception as e:
-			print(f"[GJJ] 音频分段编辑器 - 保存预览文件失败: {e}")
-			filename = ""
-		
-		# 5. 构建预览数据
-		preview_audio_data = []
-		if filename:
-			preview_audio_data = [{
-				"filename": filename,
-				"subfolder": "",
-				"type": "temp",
-			}]
-		
-		# 6. 构建UI数据（遵循ComfyUI规范：所有值必须用元组包裹）
-		ui: dict[str, Any] = {
-			"preview_text": (f"音频时长: {duration:.2f}秒 | 采样率: {sample_rate}Hz | 分段数量: {len(segments)}",),
-			"preview_kind": ("audio_segment_editor",),
-			"preview_audio": (preview_audio_data,) if preview_audio_data else (),
-			"preview_segments": (format_segments_list(segments),),  # 字符串必须用元组包裹
-			"preview_duration": (duration,),  # 数值必须用元组包裹
-			"preview_sample_rate": (sample_rate,),  # 数值必须用元组包裹
-			"preview_segment_count": (len(segments),),  # 数值必须用元组包裹
-		}
-		
-		print(f"[GJJ] 音频分段编辑器 - 音频时长: {duration:.2f}秒, 分段数量: {len(segments)}")
-		
-		# 7. 按时间段裁剪音频
-		audio_segments = []
-		for i, segment in enumerate(segments):
-			if not isinstance(segment, dict):
-				print(f"[GJJ] 警告：分段{i+1}不是dict类型 ({type(segment).__name__})，跳过")
-				continue
-			start = float(segment.get("start", 0))
-			end = float(segment.get("end", duration))
-			
-			# 确保时间范围有效
-			if start >= end:
-				print(f"[GJJ] 警告：分段{i+1}的时间范围无效 ({start}s - {end}s)，跳过")
-				continue
-			
+			# 1. 加载音频（优先使用外部连接，其次使用内部加载）
+			if audio is not None and is_audio_object(audio):
+				current_audio = audio
+			elif audio_file != "[不加载]":
+				# 从文件加载音频
+				current_audio = self._load_audio_from_file(audio_file)
+			else:
+				raise RuntimeError("请连接外部音频或在节点内选择音频文件")
+
+			# 2. 转换音频数据
+			audio_np, sample_rate = audio_to_waveform_data(current_audio)
+			duration = len(audio_np) / sample_rate if sample_rate > 0 else 0
+
+			# 3. 解析或生成分段列表（默认4段）
+			segments = parse_segments_list(segments_json)
+			if not segments:
+				# 自动生成分段
+				segments = generate_auto_segments(duration, 4)
+
+			# 4. 保存音频用于预览
 			try:
-				segment_audio = crop_audio_segment(current_audio, start, end)
-				audio_segments.append(segment_audio)
+				filepath, filename = save_audio_for_preview(audio_np, sample_rate, prompt)
+				self.preview_audio_path = filepath
 			except Exception as e:
-				print(f"[GJJ] 裁剪分段{i+1}失败: {e}")
-				# 填充空音频
-				audio_segments.append({
-					"waveform": torch.zeros((1, 1, 1), dtype=torch.float32),
-					"sample_rate": sample_rate,
-				})
-		
-		# 8. 构建返回结果：
-		# 第一个输出 = 分段列表JSON（STRING）
-		# 后续输出 = 各音频片段（AUDIO）
-		result_list = [format_segments_list(segments)]
-		result_list.extend(audio_segments)
-		
-		# 调试日志
-		print(f"[GJJ] 音频分段编辑器 - 输出: 1个JSON + {len(audio_segments)}个音频片段")
-		
-		return {
-			"ui": ui,
-			"result": tuple(result_list),
-		}
-	
+				print(f"[GJJ] 音频分段编辑器 - 保存预览文件失败: {e}")
+				filename = ""
+
+			# 5. 构建预览数据
+			preview_audio_data = []
+			if filename:
+				preview_audio_data = [{
+					"filename": filename,
+					"subfolder": "",
+					"type": "temp",
+				}]
+
+			# 6. 构建 UI数据（遵循ComfyUI规范：所有值必须用元组包裹）
+			ui: dict[str, Any] = {
+				"preview_text": (f"音频时长: {duration:.2f}秒 | 采样率: {sample_rate}Hz | 分段数量: {len(segments)}",),
+				"preview_kind": ("audio_segment_editor",),
+				"preview_audio": (preview_audio_data,) if preview_audio_data else (),
+				"preview_segments": (format_segments_list(segments),),  # 字符串必须用元组包裹
+				"preview_duration": (duration,),  # 数值必须用元组包裹
+				"preview_sample_rate": (sample_rate,),  # 数值必须用元组包裹
+				"preview_segment_count": (len(segments),),  # 数值必须用元组包裹
+			}
+
+			print(f"[GJJ] 音频分段编辑器 - 音频时长: {duration:.2f}秒, 分段数量: {len(segments)}")
+
+			# 7. 按时间段裁剪音频
+			audio_segments = []
+			for i, segment in enumerate(segments):
+				if not isinstance(segment, dict):
+					print(f"[GJJ] 警告：分段{i+1}不是dict类型 ({type(segment).__name__})，跳过")
+					continue
+				start = float(segment.get("start", 0))
+				end = float(segment.get("end", duration))
+
+				# 确保时间范围有效
+				if start >= end:
+					print(f"[GJJ] 警告：分段{i+1}的时间范围无效 ({start}s - {end}s)，跳过")
+					continue
+
+				try:
+					segment_audio = crop_audio_segment(current_audio, start, end)
+					audio_segments.append(segment_audio)
+				except Exception as e:
+					print(f"[GJJ] 裁剪分段{i+1}失败: {e}")
+					# 填充空音频
+					audio_segments.append({
+						"waveform": torch.zeros((1, 1, 1), dtype=torch.float32),
+						"sample_rate": sample_rate,
+					})
+
+			# 8. 构建返回结果：
+			# 第一个输出 = 分段列表JSON（STRING）
+			# 后续输出 = 各音频片段（AUDIO）
+			result_list = [format_segments_list(segments)]
+			result_list.extend(audio_segments)
+
+			# 调试日志
+			print(f"[GJJ] 音频分段编辑器 - 输出: 1个JSON + {len(audio_segments)}个音频片段")
+
+			return {
+				"ui": ui,
+				"result": tuple(result_list),
+			}
+		except Exception as exc:
+			_send_status(unique_id, f"执行失败：{exc}", 1.0)
+
+			# 如果原始错误包含详细安装命令（来自 _load_soundfile），则保留它
+			if isinstance(exc, RuntimeError) and "未找到 soundfile 运行库" in str(exc):
+				# 提取安装命令
+				error_str = str(exc)
+				install_command = ""
+				# 尝试从错误信息中提取安装命令（包含 pip install 的行）
+				import re
+				match = re.search(r'(.+?python\.exe.*?pip install soundfile.*?)\n', error_str)
+				if match:
+					install_command = match.group(1).strip()
+
+				# 发送错误事件到前端
+				try:
+					from server import PromptServer
+					PromptServer.instance.send_sync("gjj_audio_timestamp_error", {
+						"node": str(unique_id),
+						"error": error_str,
+						"install_command": install_command,
+					})
+				except Exception:
+					pass
+
+				# 抛出简洁的错误信息（在默认错误区域显示）
+				raise RuntimeError("运行时依赖缺失：soundfile。详细信息请查看节点前端面板。") from exc
+			else:
+				# 其他错误使用标准格式
+				raise RuntimeError(
+					f"🎤 音频分段编辑器执行失败\n"
+					f"参数：audio_file={audio_file}\n\n"
+					f"详细错误：{exc}"
+				) from exc
+
 	def _load_audio_from_file(self, filename: str) -> dict[str, Any]:
 		"""从文件加载音频，自动回退到 ffmpeg 解码不支持的格式"""
 		import subprocess
 		import tempfile
-		
+
+		sf = _load_soundfile()
+
 		# 在多个目录中查找文件
 		search_dirs = [
 			folder_paths.get_input_directory(),
 			folder_paths.get_output_directory(),
 		]
-		
+
 		for search_dir in search_dirs:
 			if not search_dir or not os.path.exists(search_dir):
 				continue
-			
+
 			filepath = os.path.join(search_dir, filename)
 			if os.path.exists(filepath):
 				# 尝试直接加载
 				try:
 					audio_data, sample_rate = sf.read(filepath)
-					
+
 					# 转换为torch tensor
 					if audio_data.ndim == 1:
 						audio_data = audio_data.reshape(1, -1)
 					elif audio_data.ndim == 2:
 						audio_data = audio_data.T
-					
+
 					waveform = torch.from_numpy(audio_data).float().unsqueeze(0)
-					
+
 					return {
 						"waveform": waveform,
 						"sample_rate": sample_rate,
@@ -496,12 +607,12 @@ class GJJ_AudioSegmentEditor:
 				except Exception as e:
 					# soundfile 不支持时尝试 ffmpeg 解码
 					print(f"[GJJ] soundfile 无法加载 {filename}，尝试 ffmpeg 解码... ({e})")
-					
+
 				# ffmpeg 回退：转换成临时 WAV
 				try:
 					with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
 						tmp_path = tmp.name
-					
+
 					cmd = [
 						"ffmpeg", "-y", "-v", "error",
 						"-i", filepath,
@@ -511,23 +622,23 @@ class GJJ_AudioSegmentEditor:
 						tmp_path,
 					]
 					subprocess.run(cmd, capture_output=True, text=True, check=True)
-					
+
 					audio_data, sample_rate = sf.read(tmp_path)
-					
+
 					# 清理临时文件
 					try:
 						os.unlink(tmp_path)
 					except OSError:
 						pass
-					
+
 					# 转换为torch tensor
 					if audio_data.ndim == 1:
 						audio_data = audio_data.reshape(1, -1)
 					elif audio_data.ndim == 2:
 						audio_data = audio_data.T
-					
+
 					waveform = torch.from_numpy(audio_data).float().unsqueeze(0)
-					
+
 					print(f"[GJJ] ffmpeg 解码成功: {filename}")
 					return {
 						"waveform": waveform,
@@ -540,7 +651,7 @@ class GJJ_AudioSegmentEditor:
 					except (OSError, NameError):
 						pass
 					raise RuntimeError(f"加载音频文件失败 {filename}: soundfile={e}, ffmpeg={e2}")
-		
+
 		raise RuntimeError(f"找不到音频文件: {filename}")
 
 

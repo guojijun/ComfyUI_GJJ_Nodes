@@ -5,11 +5,21 @@ import os
 from collections import namedtuple
 from typing import Any
 
-import cv2
 import folder_paths
 import numpy as np
 import torch
 from PIL import Image
+
+# 延迟导入：运行时依赖检查
+def _load_cv2():
+	"""运行时加载 cv2，失败时提供友好提示"""
+	from .common_utils.dependency_checker import load_dependency_at_runtime
+	return load_dependency_at_runtime(
+		module_name="cv2",
+		node_name="GJJ · Ultralytics 运行库",
+		package_name="opencv-python",
+		description="该模块需要 OpenCV 进行图像处理"
+	)
 
 
 SEG = namedtuple(
@@ -109,30 +119,32 @@ def create_segmasks(results):
 
 
 def dilate_masks(segmasks, dilation_factor: int, iterations: int = 1):
-    if dilation_factor == 0:
-        return segmasks
+	if dilation_factor == 0:
+		return segmasks
 
-    kernel = np.ones((abs(dilation_factor), abs(dilation_factor)), np.uint8)
-    result = []
-    for item_bbox, item_mask, confidence in segmasks:
-        if dilation_factor > 0:
-            new_mask = cv2.dilate(item_mask, kernel, iterations)
-        else:
-            new_mask = cv2.erode(item_mask, kernel, iterations)
-        result.append((item_bbox, new_mask, confidence))
-    return result
+	cv2 = _load_cv2()
+	kernel = np.ones((abs(dilation_factor), abs(dilation_factor)), np.uint8)
+	result = []
+	for item_bbox, item_mask, confidence in segmasks:
+		if dilation_factor > 0:
+			new_mask = cv2.dilate(item_mask, kernel, iterations)
+		else:
+			new_mask = cv2.erode(item_mask, kernel, iterations)
+		result.append((item_bbox, new_mask, confidence))
+	return result
 
 
 def combine_masks(masks):
-    if len(masks) == 0:
-        return None
+	if len(masks) == 0:
+		return None
 
-    combined_cv2_mask = np.array(masks[0][1])
-    for index in range(1, len(masks)):
-        cv2_mask = np.array(masks[index][1])
-        if combined_cv2_mask.shape == cv2_mask.shape:
-            combined_cv2_mask = cv2.bitwise_or(combined_cv2_mask, cv2_mask)
-    return torch.from_numpy(combined_cv2_mask)
+	cv2 = _load_cv2()
+	combined_cv2_mask = np.array(masks[0][1])
+	for index in range(1, len(masks)):
+		cv2_mask = np.array(masks[index][1])
+		if combined_cv2_mask.shape == cv2_mask.shape:
+			combined_cv2_mask = cv2.bitwise_or(combined_cv2_mask, cv2_mask)
+	return torch.from_numpy(combined_cv2_mask)
 
 
 def _load_ultralytics_yolo():
@@ -163,32 +175,33 @@ def load_ultralytics_bbox_detector(model_name: str):
 
 
 def inference_bbox(model, image: Image.Image, confidence: float = 0.3, device: str = ""):
-    pred = model(image, conf=confidence, device=device)
-    bboxes = pred[0].boxes.xyxy.cpu().numpy()
+	cv2 = _load_cv2()
+	pred = model(image, conf=confidence, device=device)
+	bboxes = pred[0].boxes.xyxy.cpu().numpy()
 
-    cv2_image = np.array(image)
-    if len(cv2_image.shape) == 3:
-        cv2_image = cv2_image[:, :, ::-1].copy()
-    else:
-        cv2_image = cv2.cvtColor(cv2_image, cv2.COLOR_GRAY2BGR)
-    cv2_gray = cv2.cvtColor(cv2_image, cv2.COLOR_BGR2GRAY)
+	cv2_image = np.array(image)
+	if len(cv2_image.shape) == 3:
+		cv2_image = cv2_image[:, :, ::-1].copy()
+	else:
+		cv2_image = cv2.cvtColor(cv2_image, cv2.COLOR_GRAY2BGR)
+	cv2_gray = cv2.cvtColor(cv2_image, cv2.COLOR_BGR2GRAY)
 
-    segms = []
-    for x0, y0, x1, y1 in bboxes:
-        cv2_mask = np.zeros(cv2_gray.shape, np.uint8)
-        cv2.rectangle(cv2_mask, (int(x0), int(y0)), (int(x1), int(y1)), 255, -1)
-        segms.append(cv2_mask.astype(bool))
+	segms = []
+	for x0, y0, x1, y1 in bboxes:
+		cv2_mask = np.zeros(cv2_gray.shape, np.uint8)
+		cv2.rectangle(cv2_mask, (int(x0), int(y0)), (int(x1), int(y1)), 255, -1)
+		segms.append(cv2_mask.astype(bool))
 
-    if len(bboxes) == 0:
-        return [[], [], [], []]
+	if len(bboxes) == 0:
+		return [[], [], [], []]
 
-    results = [[], [], [], []]
-    for index in range(len(bboxes)):
-        results[0].append(pred[0].names[int(pred[0].boxes[index].cls.item())])
-        results[1].append(bboxes[index])
-        results[2].append(segms[index])
-        results[3].append(pred[0].boxes[index].conf.cpu().numpy())
-    return results
+	results = [[], [], [], []]
+	for index in range(len(bboxes)):
+		results[0].append(pred[0].names[int(pred[0].boxes[index].cls.item())])
+		results[1].append(bboxes[index])
+		results[2].append(segms[index])
+		results[3].append(pred[0].boxes[index].conf.cpu().numpy())
+	return results
 
 
 class UltraBBoxDetector:

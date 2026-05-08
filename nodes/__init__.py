@@ -19,6 +19,17 @@ OPTIONAL_NODE_MODULES = {
     "gjj_latentsync_node",
 }
 
+# 这些是工具脚本（非节点模块），不应被自动导入
+TOOL_SCRIPTS = {
+    "scan_models",
+    "scan_all_models",
+    "merge_scanned_models",
+    "analyze_official_workflows",
+    "analyze_video_workflows",
+    "fix_insightface_bug",
+    "generate_node_docs",
+}
+
 
 def _humanize_name(name):
     text = str(name or "").strip()
@@ -64,19 +75,24 @@ def _safe_import_node_module(module_name):
     """
     # 获取当前 Python 解释器的实际路径
     import sys
+    import os
     python_executable = sys.executable
+    site_packages = os.path.join(os.path.dirname(python_executable), "Lib", "site-packages")
 
-    # 常见缺失依赖的安装命令映射（使用实际 Python 路径）
+    def _get_pip_cmd(pkg):
+        return f'& "{python_executable}" -m pip install {pkg} -i https://pypi.tuna.tsinghua.edu.cn/simple --ignore-installed --target "{site_packages}"'
+
+    # 常见缺失依赖的安装命令映射（使用实际 Python 路径和 --target 参数）
     DEPENDENCY_SOLUTIONS = {
-        "soundfile": f"{python_executable} -m pip install soundfile -i https://pypi.tuna.tsinghua.edu.cn/simple",
-        "cv2": f"{python_executable} -m pip install opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple",
-        "timm": f"{python_executable} -m pip install timm -i https://pypi.tuna.tsinghua.edu.cn/simple",
-        "insightface": f"{python_executable} -m pip install insightface onnxruntime-gpu -i https://pypi.tuna.tsinghua.edu.cn/simple",
-        "torchcodec": f"{python_executable} -m pip install torchcodec -i https://pypi.tuna.tsinghua.edu.cn/simple",
-        "mediapipe": f"{python_executable} -m pip install mediapipe -i https://pypi.tuna.tsinghua.edu.cn/simple",
-        "hydra": f"{python_executable} -m pip install hydra-core -i https://pypi.tuna.tsinghua.edu.cn/simple",
-        "descript-audio-codec": f"{python_executable} -m pip install descript-audio-codec descript-audiotools -i https://pypi.tuna.tsinghua.edu.cn/simple",
-        "transformers": f"{python_executable} -m pip install transformers -i https://pypi.tuna.tsinghua.edu.cn/simple",
+        "soundfile": _get_pip_cmd("soundfile"),
+        "cv2": _get_pip_cmd("opencv-python"),
+        "timm": _get_pip_cmd("timm"),
+        "insightface": _get_pip_cmd("insightface onnxruntime-gpu"),
+        "torchcodec": _get_pip_cmd("torchcodec"),
+        "mediapipe": _get_pip_cmd("mediapipe"),
+        "hydra": _get_pip_cmd("hydra-core"),
+        "descript-audio-codec": _get_pip_cmd("descript-audio-codec descript-audiotools"),
+        "transformers": _get_pip_cmd("transformers"),
     }
 
     try:
@@ -110,7 +126,7 @@ def _safe_import_node_module(module_name):
             solution_lines.append(f"  {GREEN}{DEPENDENCY_SOLUTIONS[missing_module]}{RESET}")
         else:
             solution_lines.append(f"{YELLOW}[GJJ] {BOLD}请根据错误信息安装缺失的依赖:{RESET}")
-            solution_lines.append(f"  {GREEN}{python_executable} -m pip install <缺失的包名> -i https://pypi.tuna.tsinghua.edu.cn/simple{RESET}")
+            solution_lines.append(f"  {GREEN}{_get_pip_cmd('<缺失的包名>')}{RESET}")
 
         print(f"\n{RED}{'=' * 80}{RESET}")
         print(f"{YELLOW}[GJJ] {BOLD}跳过节点模块:{RESET} {CYAN}{module_name}{RESET}")
@@ -144,6 +160,10 @@ for f in glob.glob(os.path.join(os.path.dirname(__file__), "*.py")):
     module_name = os.path.basename(f)[:-3]
 
     if module_name == "__init__":
+        continue
+
+    # 跳过工具脚本（非节点模块）
+    if module_name in TOOL_SCRIPTS:
         continue
 
     # 避免可选节点被这里导入一次，后面又导入一次

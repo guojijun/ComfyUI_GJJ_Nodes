@@ -22,7 +22,22 @@ except Exception:
 
 
 NODE_NAME = "GJJ_PromptPresetStudio"
-PRESET_ROOT = Path(__file__).resolve().parent.parent / "presets" / "prompt_presets"
+# 查找预设文件路径：从当前文件向上查找，直到找到包含 presets/prompt_presets 目录的位置
+def _find_preset_root() -> Path:
+	"""动态查找预设文件根目录（必须包含 prompt_presets 子目录）。"""
+	current = Path(__file__).resolve().parent
+	# 向上最多查找5级目录
+	for _ in range(5):
+		presets_dir = current / "presets"
+		if presets_dir.exists() and presets_dir.is_dir():
+			# 检查是否包含 prompt_presets 子目录，确保找到的是正确的 presets 目录
+			if (presets_dir / "prompt_presets").exists():
+				return presets_dir
+		current = current.parent
+	# 如果找不到，回退到默认位置（相对于当前文件的三级父目录）
+	return Path(__file__).resolve().parent.parent.parent / "presets"
+
+PRESET_ROOT = _find_preset_root() / "prompt_presets"
 PROMPT_PRESET_STYLES_API_PATH = "/gjj/prompt_preset_styles"
 PROMPT_PRESET_SCHEMA_API_PATH = "/gjj/prompt_preset_schema"
 LABEL_TRANSLATIONS_PATH = DEFAULT_TRANSLATION_TSV

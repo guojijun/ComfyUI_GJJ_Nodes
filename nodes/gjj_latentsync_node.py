@@ -6,6 +6,7 @@ import subprocess
 import folder_paths
 import torch
 import comfy.utils
+import sys
 
 # 检查关键依赖
 try:
@@ -22,16 +23,21 @@ def _ensure_cv2():
         import cv2
         return cv2
     except ImportError as exc:
-        raise RuntimeError(
-            "🎬 GJJ · LatentSync 节点 需要 opencv-python (cv2) 来处理视频。\n"
-            "\n"
-            "🔧 快速安装命令（使用国内镜像）：\n"
-            "pip install opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
-            "\n"
-            f"原始导入错误：{exc}\n"
-            "\n"
-            "💡 提示：安装后请重启 ComfyUI 服务器。"
-        ) from exc
+        from .common_utils.dependency_checker import print_runtime_dependency_error, get_pip_install_command_text
+
+        install_cmd = get_pip_install_command_text("opencv-python")
+
+        # 打印美观的控制台错误提示
+        print_runtime_dependency_error(
+            node_name="LatentSync",
+            dependency_name="opencv-python",
+            install_command=install_cmd,
+            description="该节点需要 opencv-python (cv2) 来处理视频",
+            extra_info=f"原始导入错误：{exc}"
+        )
+
+        # 抛出简洁的错误信息（在前端显示）
+        raise RuntimeError("运行时依赖缺失：opencv-python。详细信息请查看控制台。") from exc
 
 
 class LatentSyncNode:
@@ -240,8 +246,22 @@ class LatentSyncNode:
                 channels.append(sp_signal.resample(wave_np[ch], num_samples).astype(np.float32))
             result = np.stack(channels, axis=0)
             return torch.from_numpy(result)
-        except ImportError:
-            raise RuntimeError("缺少 scipy，无法进行音频重采样。请安装 scipy。")
+        except ImportError as exc:
+            from .common_utils.dependency_checker import print_runtime_dependency_error, get_pip_install_command_text
+
+            install_cmd = get_pip_install_command_text("scipy")
+
+            # 打印美观的控制台错误提示
+            print_runtime_dependency_error(
+                node_name="LatentSync",
+                dependency_name="scipy",
+                install_command=install_cmd,
+                description="该节点需要 scipy 来进行音频重采样",
+                extra_info=f"原始导入错误：{exc}"
+            )
+
+            # 抛出简洁的错误信息（在前端显示）
+            raise RuntimeError("运行时依赖缺失：scipy。详细信息请查看控制台。") from exc
 
     def _save_audio(self, waveform, sample_rate, output_path):
         """保存音频到 wav 文件（替代 torchaudio.save）"""

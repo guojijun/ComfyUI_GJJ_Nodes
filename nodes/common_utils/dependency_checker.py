@@ -4,9 +4,9 @@ GJJ 节点依赖检查工具
 提供统一的依赖检查和错误提示机制，确保即使缺少依赖也不会导致整个节点包无法注册。
 
 使用方法：
-    from .common_utils.dependency_checker import check_dependencies, create_fallback_node
+    from .common_utils.dependency_checker import check_dependencies, create_fallback_node, print_runtime_dependency_error
 
-    # 在模块顶部检查依赖
+    # 在模块顶部检查依赖（启动时）
     DEPS_OK, DEPS_ERROR = check_dependencies(
         required_packages=["soundfile", "transformers"],
         node_name="GJJ_FishAudioS2Generator"
@@ -30,6 +30,26 @@ GJJ 节点依赖检查工具
         # 正常的节点实现
         class GJJ_FishAudioS2Generator:
             ...
+
+    # 运行时依赖检查（执行节点时）
+    def some_function():
+        try:
+            import some_module
+        except ImportError as exc:
+            from .common_utils.dependency_checker import get_pip_install_command_text
+            install_cmd = get_pip_install_command_text("some_module")
+
+            # 打印美观的控制台错误提示
+            print_runtime_dependency_error(
+                node_name="我的节点",
+                dependency_name="some_module",
+                install_command=install_cmd,
+                description="该节点需要 some_module 才能运行",
+                extra_info=f"原始导入错误：{exc}"
+            )
+
+            # 抛出简洁的错误信息（在前端显示）
+            raise RuntimeError("运行时依赖缺失：some_module。详细信息请查看控制台。") from exc
 """
 
 import sys
@@ -270,3 +290,202 @@ def safe_import_with_fallback(
         error_msg = f"❌ 节点 {node_name} 导入失败：\n\n{str(e)}\n\n详细错误：\n{traceback.format_exc()}"
         fallback_class = create_fallback_node_class(node_name, error_msg, category)
         return fallback_class, False
+
+
+def print_runtime_dependency_error(
+    node_name: str,
+    dependency_name: str,
+    install_command: str,
+    description: str = "",
+    extra_info: str = ""
+):
+    """
+    在控制台打印美观的运行时依赖缺失错误提示（带彩色输出）。
+
+    这是一个公用函数，所有节点在运行时遇到依赖缺失时都可以调用此函数，
+    以提供统一、美观的错误提示体验。
+
+    Args:
+        node_name: 节点名称（如 "语音识别四文本TTS(Qwen3)"）
+        dependency_name: 缺失的依赖名称（如 "qwen-asr"）
+        install_command: 完整的安装命令（如 "python.exe -m pip install qwen-asr ..."）
+        description: 依赖说明（如 "该节点需要 qwen-asr Python 包才能运行"）
+        extra_info: 额外信息（可选，如原始错误信息）
+
+    Example:
+        >>> print_runtime_dependency_error(
+        ...     node_name="语音识别四文本TTS(Qwen3)",
+        ...     dependency_name="qwen-asr",
+        ...     install_command=f"{sys.executable} -m pip install qwen-asr -i https://pypi.tuna.tsinghua.edu.cn/simple",
+        ...     description="该节点需要 qwen-asr Python 包才能运行",
+        ...     extra_info=f"原始导入错误：{exc}"
+        ... )
+    """
+    import sys
+
+    # ANSI 颜色代码（用于控制台彩色输出）
+    RED = '\033[91m'
+    YELLOW = '\033[93m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+
+    # 在控制台打印美观的错误提示
+    print(f"\n{RED}{'=' * 80}{RESET}")
+    print(f"{RED}{BOLD}  GJJ 节点运行时依赖缺失！{RESET}")
+    print(f"{RED}{'=' * 80}{RESET}")
+    print(f"{YELLOW}[GJJ] {BOLD}节点:{RESET} {CYAN}{node_name}{RESET}")
+
+    if description:
+        print(f"{YELLOW}[GJJ]{RESET} {description}")
+
+    print(f"\n{YELLOW}[GJJ] {BOLD}快速安装命令:{RESET}")
+    print(f"  {GREEN}{install_command}{RESET}")
+
+    if extra_info:
+        print(f"\n{YELLOW}[GJJ] {BOLD}详细信息:{RESET}")
+        print(f"  {extra_info}")
+
+    print(f"\n{YELLOW}[GJJ] {BOLD}提示:{RESET} 安装完成后请重启 ComfyUI 服务器")
+    print(f"{RED}{'=' * 80}{RESET}\n")
+
+
+def load_dependency_at_runtime(
+    module_name: str,
+    node_name: str,
+    package_name: str = None,
+    description: str = "",
+    extra_packages: list = None
+):
+    """
+    在运行时加载依赖模块，失败时提供友好的错误提示。
+
+    这是一个通用的运行时依赖加载函数，所有节点都可以使用。
+    如果模块已加载，直接返回缓存；否则尝试导入，失败时提供详细的安装命令。
+
+    Args:
+        module_name: 要导入的模块名（如 "cv2", "soundfile", "insightface"）
+        node_name: 节点显示名称（如 "GJJ · 人脸分析"）
+        package_name: pip 包名（可选，如果与 module_name 不同，如 module_name="cv2", package_name="opencv-python"）
+        description: 依赖说明（可选）
+        extra_packages: 额外需要安装的包列表（可选）
+
+    Returns:
+        导入的模块对象
+
+    Raises:
+        RuntimeError: 如果依赖缺失，抛出包含详细安装命令的错误
+
+    Example:
+        >>> import sys
+        >>> cv2 = load_dependency_at_runtime(
+        ...     module_name="cv2",
+        ...     node_name="GJJ · 人脸分析",
+        ...     package_name="opencv-python",
+        ...     description="该节点需要 OpenCV 进行图像处理"
+        ... )
+    """
+    import sys
+    import importlib
+
+    # 检查缓存
+    cache_key = f"_gjj_runtime_{module_name}"
+    if hasattr(sys, cache_key):
+        return getattr(sys, cache_key)
+
+    try:
+        # 尝试导入模块
+        module = importlib.import_module(module_name)
+        # 缓存成功导入的模块
+        setattr(sys, cache_key, module)
+        return module
+
+    except Exception as exc:
+        python_executable = sys.executable
+
+        # 确定 pip 包名
+        pip_package = package_name or module_name
+
+        # 构建安装命令 - 使用统一的命令生成函数
+        packages = [pip_package] + (extra_packages or [])
+        install_cmd = get_pip_install_command_text(" ".join(packages))
+
+        # ANSI 颜色代码
+        RED = '\033[91m'
+        YELLOW = '\033[93m'
+        CYAN = '\033[96m'
+        GREEN = '\033[92m'
+        RESET = '\033[0m'
+        BOLD = '\033[1m'
+
+        # 打印美观的错误提示
+        print(f"\n{RED}{'=' * 80}{RESET}")
+        print(f"{RED}{BOLD}  GJJ 节点运行时依赖缺失！{RESET}")
+        print(f"{RED}{'=' * 80}{RESET}")
+        print(f"{YELLOW}[GJJ] {BOLD}节点:{RESET} {CYAN}{node_name}{RESET}")
+        print(f"{YELLOW}[GJJ] {BOLD}缺失依赖:{RESET} {RED}{BOLD}{module_name}{RESET}")
+
+        if description:
+            print(f"{YELLOW}[GJJ]{RESET} {description}")
+
+        print(f"\n{YELLOW}[GJJ] {BOLD}快速安装命令:{RESET}")
+        print(f"{GREEN}{BOLD}  {install_cmd}{RESET}\n")
+        print(f"{YELLOW}[GJJ] {BOLD}提示:{RESET} 安装后请重启 ComfyUI 服务器")
+        print(f"{RED}{'=' * 80}{RESET}\n")
+
+        # 构建详细的错误信息
+        error_detail = (
+            f"\n 未找到 {module_name} 运行库。\n"
+            f"\n"
+            f"这个 GJJ 节点需要 {module_name} Python 包才能运行。\n"
+            f"\n"
+            f" 必需依赖（请安装）：\n"
+            f"  • {pip_package} ({description or 'Python 包'})\n"
+        )
+
+        if extra_packages:
+            error_detail += "\n 其他依赖：\n"
+            for pkg in extra_packages:
+                error_detail += f"  • {pkg}\n"
+
+        error_detail += (
+            f"\n"
+            f"🔧 快速安装命令（使用实际 Python 路径）：\n"
+            f"{install_cmd}\n"
+            f"\n"
+            f"原始导入错误：{exc}\n"
+            f"\n"
+            f" 提示：安装后请重启 ComfyUI 服务器。"
+        )
+
+        raise RuntimeError(error_detail) from exc
+
+
+def get_pip_install_command_text(pkg: str) -> str:
+    """生成依赖安装命令文本（使用用户指定的完整Python路径和清华源）。
+
+    这是一个公用函数，所有节点在报告依赖缺失时都可以调用此函数，
+    以提供统一、完整的安装命令。
+
+    Args:
+        pkg: 依赖包名（可以是单个包名，也可以是多个包名用空格分隔）
+
+    Returns:
+        完整的 pip 安装命令文本，使用 sys.executable 的实际 Python 路径
+        并添加 --target 参数安装到 Lib/site-packages 目录
+
+    Example:
+        >>> get_pip_install_command_text("imageio")
+        '& "C:\\AI\\CUI77\\python.exe" -m pip install imageio -i https://pypi.tuna.tsinghua.edu.cn/simple --ignore-installed --target "C:\\AI\\CUI77\\Lib\\site-packages"'
+
+        >>> get_pip_install_command_text("imageio imageio-ffmpeg")
+        '& "C:\\AI\\CUI77\\python.exe" -m pip install imageio imageio-ffmpeg -i https://pypi.tuna.tsinghua.edu.cn/simple --ignore-installed --target "C:\\AI\\CUI77\\Lib\\site-packages"'
+    """
+    import os
+    import sys
+
+    python_path = sys.executable
+    site_packages = os.path.join(os.path.dirname(python_path), "Lib", "site-packages")
+
+    return f'& "{python_path}" -m pip install {pkg} -i https://pypi.tuna.tsinghua.edu.cn/simple --ignore-installed --target "{site_packages}"'

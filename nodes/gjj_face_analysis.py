@@ -47,58 +47,60 @@ if vendor_path not in sys.path:
 NODE_NAME = "GJJ_FaceAnalysis"
 CATEGORY = "GJJ/图像"
 
-# 如果缺少关键依赖，显示错误信息
-if not REACTOR_AVAILABLE:
-    DESCRIPTION = """❌ 节点 GJJ · 🎭 换脸分析器 缺少必需的 Python 依赖：
+# 延迟导入：运行时依赖检查
+def _load_dependencies():
+	"""运行时加载 insightface、cv2 等依赖，失败时提供友好提示"""
+	from .common_utils.dependency_checker import load_dependency_at_runtime
+	import sys
 
-📦 必需依赖（请安装）：
-  • insightface (人脸识别和换脸核心库)
-  • onnxruntime-gpu (GPU 加速) 或 onnxruntime (CPU)
-  • opencv-python (cv2, 图像处理)
+	# 加载 cv2
+	cv2 = load_dependency_at_runtime(
+		module_name="cv2",
+		node_name="GJJ · 🎭 换脸分析器",
+		package_name="opencv-python",
+		description="该节点需要 OpenCV 进行图像处理"
+	)
 
-🔧 快速安装命令（使用国内镜像）：
-  pip install insightface onnxruntime-gpu opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple
+	# 加载 insightface
+	insightface = load_dependency_at_runtime(
+		module_name="insightface",
+		node_name="GJJ · 🎭 换脸分析器",
+		package_name="insightface",
+		extra_packages=["onnxruntime-gpu"],
+		description="该节点需要 InsightFace 进行人脸识别和换脸"
+	)
 
-或者逐个安装：
-  pip install insightface -i https://pypi.tuna.tsinghua.edu.cn/simple
-  pip install onnxruntime-gpu -i https://pypi.tuna.tsinghua.edu.cn/simple
-  pip install opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple
+	# 从 insightface 导入 Face 类
+	try:
+		from insightface.app.common import Face
+	except ImportError as exc:
+		raise RuntimeError(
+			f"\n 未找到 insightface.app.common.Face。\n"
+			f"\n"
+			f"这个 GJJ 节点需要 insightface Python 包才能运行。\n"
+			f"\n"
+			f"🔧 快速安装命令：\n"
+			f"  {get_pip_install_command_text('insightface onnxruntime-gpu')}\n"
+			f"\n"
+			f"原始导入错误：{exc}\n"
+			f"\n"
+			f"💡 提示：安装后请重启 ComfyUI 服务器。"
+		) from exc
 
-💡 提示：安装后请重启 ComfyUI 服务器。
+	# 设置执行提供者
+	try:
+		import torch.cuda as cuda
+		if cuda is not None and cuda.is_available():
+			PROVIDERS = ["CUDAExecutionProvider"]
+		else:
+			PROVIDERS = ["CPUExecutionProvider"]
+	except:
+		PROVIDERS = ["CPUExecutionProvider"]
 
----
-内联 ReActor 核心的换脸节点：将源图的脸部特征迁移到目标图上。
+	return cv2, insightface, Face, PROVIDERS
 
-【核心功能】
-• 双批量输入 - 源图和目标图均支持单图或多图
-• 智能配对 - 自动处理一对一、一对多、多对一场景
-• 内联 ReActor - 直接使用 reactor 原版代码，无需安装额外包
-• 批量输出 - 保持与输入对应的批量结构
 
-【工作原理】
-节点内置了 ReActor 的核心换脸逻辑：
-1. 使用 insightface 进行人脸检测和关键点提取
-2. 通过 inswapper_128 模型执行脸部特征交换
-3. 可选的面部修复增强（GFPGAN/CodeFormer）
-4. 自动处理批量图片和尺寸适配
-
-【输入说明】
-• 目标图 - 需要被换脸的图片(可批量)
-• 源图 - 提供脸部特征的图片(可批量)
-
-【配对规则】
-• 单图 + 单图 → 单张结果
-• 单图 + 批量 → 源图应用到所有目标图
-• 批量 + 单图 → 同一源脸应用到所有目标图
-• 批量 + 批量 → 按最小数量一一配对
-
-【技术细节】
-• 使用 YOLOv5n 进行人脸检测
-• inswapper_128 模型执行换脸
-• 自动处理不同尺寸的图片
-• 保持原始分辨率和色彩空间"""
-else:
-    DESCRIPTION = """内联 ReActor 核心的换脸节点：将源图的脸部特征迁移到目标图上。
+DESCRIPTION = """内联 ReActor 核心的换脸节点：将源图的脸部特征迁移到目标图上。
 
 【核心功能】
 • 双批量输入 - 源图和目标图均支持单图或多图
@@ -134,27 +136,7 @@ else:
 # 内联 ReActor 核心代码 - 从 comfyui-reactor-node 复制
 # 使用 vendor 目录中的 insightface（零依赖）
 # ============================================================================
-
-try:
-    # 使用 vendor 中的 insightface
-    import insightface
-    from insightface.app.common import Face
-
-    # 设置执行提供者
-    try:
-        import torch.cuda as cuda
-        if cuda is not None and cuda.is_available():
-            PROVIDERS = ["CUDAExecutionProvider"]
-        else:
-            PROVIDERS = ["CPUExecutionProvider"]
-    except:
-        PROVIDERS = ["CPUExecutionProvider"]
-
-    REACTOR_AVAILABLE = True
-except ImportError as e:
-    REACTOR_AVAILABLE = False
-    PROVIDERS = ["CPUExecutionProvider"]
-    _IMPORT_ERROR = str(e)
+# 注意：所有依赖已改为运行时加载，见 _load_dependencies() 函数
 
 
 # 全局变量缓存
@@ -209,16 +191,21 @@ def _ensure_cv2():
         import cv2
         return cv2
     except ImportError as exc:
-        raise RuntimeError(
-            "🎭 GJJ · 换脸分析器 需要 opencv-python (cv2) 来处理图像。\n"
-            "\n"
-            "🔧 快速安装命令（使用国内镜像）：\n"
-            "pip install opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
-            "\n"
-            f"原始导入错误：{exc}\n"
-            "\n"
-            "💡 提示：安装后请重启 ComfyUI 服务器。"
-        ) from exc
+        from .common_utils.dependency_checker import print_runtime_dependency_error, get_pip_install_command_text
+
+        install_cmd = get_pip_install_command_text("opencv-python")
+
+        # 打印美观的控制台错误提示
+        print_runtime_dependency_error(
+            node_name="换脸分析器",
+            dependency_name="opencv-python",
+            install_command=install_cmd,
+            description="该节点需要 opencv-python (cv2) 来处理图像",
+            extra_info=f"原始导入错误：{exc}"
+        )
+
+        # 抛出简洁的错误信息（在前端显示）
+        raise RuntimeError("运行时依赖缺失：opencv-python。详细信息请查看控制台。") from exc
 
 
 def get_image_md5hash(img_data: np.ndarray) -> str:
@@ -666,28 +653,8 @@ class GJJ_FaceAnalysis:
         source_faces_index: str = "0",
     ):
         """执行换脸操作"""
-
-        if not REACTOR_AVAILABLE:
-            raise RuntimeError(
-                "🎭 GJJ · 换脸分析器 运行时依赖缺失\n"
-                "\n"
-                "📦 必需依赖（请安装）：\n"
-                "  • insightface (人脸识别和换脸核心库)\n"
-                "  • onnxruntime-gpu (GPU 加速) 或 onnxruntime (CPU)\n"
-                "  • opencv-python (cv2, 图像处理)\n"
-                "\n"
-                "🔧 快速安装命令（使用国内镜像）：\n"
-                "pip install insightface onnxruntime-gpu opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
-                "\n"
-                "或者逐个安装：\n"
-                "pip install insightface -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
-                "pip install onnxruntime-gpu -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
-                "pip install opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
-                "\n"
-                f"原始导入错误：{_IMPORT_ERROR}\n"
-                "\n"
-                "💡 提示：安装后请重启 ComfyUI 服务器。"
-            )
+        # 运行时加载依赖
+        cv2, insightface, Face, PROVIDERS = _load_dependencies()
 
         # 标准化输入
         target_images = normalize_image_batch(target_image)

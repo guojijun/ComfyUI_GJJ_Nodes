@@ -29,13 +29,6 @@ from .gjj_cosyvoice3_runtime import (
 	transcribe_audio,
 )
 
-# 检查关键依赖
-try:
-	from cosyvoice.cli.cosyvoice import AutoModel  # noqa: F401
-	_COSYVOICE_AVAILABLE = True
-except ImportError:
-	_COSYVOICE_AVAILABLE = False
-
 
 MODE_OPTIONS = ["零样本复刻", "跨语言复刻", "指令风格"]
 MP3_QUALITY_OPTIONS = ["320k", "128k", "V0"]
@@ -56,50 +49,7 @@ def _has_valid_audio_input(audio: Any) -> bool:
 
 
 class GJJ_CosyVoice3Generator:
-	# 如果缺少关键依赖，显示错误信息
-	if not _COSYVOICE_AVAILABLE:
-		DESCRIPTION = """❌ 节点 CosyVoice3 语音克隆器 缺少必需的 Python 依赖：
-
-📦 必需依赖（请安装）：
-  • cosyvoice
-
-🔧 安装命令：
-  pip install cosyvoice
-
-💡 提示：安装后请重启 ComfyUI 服务器。
-
----
-CosyVoice3 一体式语音克隆器。内部自动加载本地 models/cosyvoice 模型，支持零样本复刻、跨语言复刻与指令风格控制。
-
-📦 所需模型：
-  • 模型目录: models/cosyvoice/
-    - Fun-CosyVoice3-0.5B-2512 (默认，约 1GB)
-  • 示例音频目录: models/mp3/ (存放参考音频)
-  • 官方示例: 首次执行时自动下载到 models/cosyvoice/demo/
-  • 自动下载: 开启后首次执行时从 HuggingFace 国内镜像下载（需 huggingface_hub）
-
-🔧 Python 依赖：
-  • cosyvoice (必需，CosyVoice3 运行时库)
-  • huggingface_hub (可选，用于自动下载模型)
-  • soundfile (音频读写)
-  • 安装命令: pip install cosyvoice huggingface_hub soundfile
-
-✅ 优点：
-  • 支持三种合成模式：零样本复刻、跨语言复刻、指令风格
-  • 音质自然，情感表达丰富
-  • 支持自动转录参考音频文本（零样本模式下）
-  • 内置官方示例音色，方便快速测试
-  • 模型较小（0.5B 约 1GB），显存占用低
-  • 支持语速调节和风格指令控制
-
-⚠️ 缺点：
-  • 仅支持单一说话人克隆（不支持多说话人）
-  • 跨语言复刻效果可能不如母语自然
-  • 指令风格模式需要手动编写风格描述
-  • 依赖 cosyvoice 包，安装可能遇到兼容性问题
-  • 不支持动态扩展输入口"""
-	else:
-		DESCRIPTION = """CosyVoice3 一体式语音克隆器。内部自动加载本地 models/cosyvoice 模型，支持零样本复刻、跨语言复刻与指令风格控制。
+	DESCRIPTION = """CosyVoice3 一体式语音克隆器。内部自动加载本地 models/cosyvoice 模型，支持零样本复刻、跨语言复刻与指令风格控制。
 
 📦 所需模型：
   • 模型目录: models/cosyvoice/

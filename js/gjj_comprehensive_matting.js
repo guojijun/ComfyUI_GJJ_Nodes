@@ -366,7 +366,50 @@ app.registerExtension({
 		};
 	},
 
-	setup() {
+	async setup() {
+		// 监听后端发送的错误事件
+		const { api } = await import("/scripts/api.js");
+		api.addEventListener("gjj_comprehensive_matting_error", (event) => {
+			try {
+				const data = event.detail || {};
+				const nodeId = data.node;
+				const errorMessage = data.error || "";
+				const installCommand = data.install_command || "";
+
+				if (!nodeId || !errorMessage) return;
+
+				// 查找对应的节点
+				for (const node of app.graph?._nodes || []) {
+					if (String(node.id) === String(nodeId)) {
+						// 显示错误提示（使用 alert，因为该节点没有文本显示区）
+						let message = `❌ 执行失败：\n\n${errorMessage}`;
+
+						if (installCommand) {
+							message += `\n\n🔧 快速安装命令：\n${installCommand}\n\n点击确定复制到剪贴板`;
+						}
+
+						// 显示错误对话框
+						const confirmed = confirm(message);
+
+						// 如果用户点击确定，复制安装命令
+						if (confirmed && installCommand) {
+							navigator.clipboard.writeText(installCommand).then(() => {
+								alert("✅ 安装命令已复制到剪贴板！\n\n请打开终端粘贴执行，完成后重启 ComfyUI。");
+							}).catch(err => {
+								console.error("[GJJ] 复制失败:", err);
+								alert("复制失败，请手动选择并复制上面的安装命令。");
+							});
+						}
+
+						break;
+					}
+				}
+			} catch (err) {
+				console.error("[GJJ] 处理错误事件失败:", err);
+			}
+		});
+
+		// 初始化现有节点
 		for (const node of app.graph?._nodes || []) {
 			if (node?.comfyClass === NODE_TYPE) {
 				stabilizeNode(node);

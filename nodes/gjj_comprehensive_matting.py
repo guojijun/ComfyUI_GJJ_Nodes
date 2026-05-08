@@ -17,6 +17,7 @@ from torchvision import transforms
 from torchvision.transforms.functional import to_pil_image
 
 import folder_paths
+from server import PromptServer
 
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
@@ -45,6 +46,67 @@ _RMBG2_COMPONENTS: tuple[type, type] | None = None
 _BIREFNET_CLASS: type | None = None
 _BEN2_CLASS: type | None = None
 _INSPYRENET_REMOVER_CACHE: dict[tuple[str, str, bool], object] = {}
+
+# ═══════════════════════════════════════════════
+# 运行时依赖加载（懒加载模式）
+# ═══════════════════════════════════════════════
+_DEPS = {}
+
+def _send_error_to_frontend(unique_id, error_message, install_command=""):
+    """将错误信息和安装命令发送给前端"""
+    if not unique_id:
+        return
+    try:
+        PromptServer.instance.send_sync("gjj_comprehensive_matting_error", {
+            "node": str(unique_id),
+            "error": error_message,
+            "install_command": install_command,
+        })
+    except Exception:
+        pass
+
+def _load_comprehensive_matting_runtime(unique_id=None):
+    """运行时懒加载依赖库"""
+    if _DEPS.get("_loaded"):
+        return _DEPS
+
+    python_exe = sys.executable
+
+    try:
+        # RMBG2/BiRefNet 需要的核心依赖
+        import timm  # noqa: F401
+        import kornia  # noqa: F401
+    except ImportError as exc:
+        # 提取缺失的包名
+        error_str = str(exc)
+        missing_module = "未知模块"
+        if "'" in error_str:
+            missing_module = error_str.split("'")[1]
+        elif '"' in error_str:
+            missing_module = error_str.split('"')[1]
+
+        # 使用规范的公共函数打印彩色控制台错误
+        from .common_utils.dependency_checker import print_runtime_dependency_error, get_pip_install_command_text
+        install_cmd = get_pip_install_command_text(missing_module)
+        print_runtime_dependency_error(
+            node_name="综合抠图 (RMBG2/BiRefNet)",
+            dependency_name=missing_module,
+            install_command=install_cmd,
+            description=f"该节点需要 {missing_module} Python 包才能运行",
+            extra_info=f"原始导入错误：{exc}",
+        )
+
+        # 发送错误到前端显示
+        _send_error_to_frontend(
+            unique_id=unique_id,
+            error_message=f"缺少 Python 依赖：{missing_module}",
+            install_command=install_cmd,
+        )
+
+        raise RuntimeError(f"运行时依赖缺失：{missing_module}。详细信息请查看控制台。") from exc
+
+    _DEPS["_loaded"] = True
+    return _DEPS
 
 
 @contextmanager
@@ -760,6 +822,9 @@ class GJJ_ComprehensiveMatting:
         extra_pnginfo=None,
         unique_id=None,
     ):
+        # ⬅ 运行时依赖检查（懒加载）
+        _load_comprehensive_matting_runtime(unique_id=unique_id)
+
         selected_methods = _recover_selected_methods(selected_methods_json, matting_method, extra_pnginfo, unique_id)
         method = selected_methods[0]
         if method not in METHODS:

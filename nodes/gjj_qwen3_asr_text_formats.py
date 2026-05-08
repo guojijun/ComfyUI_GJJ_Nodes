@@ -339,9 +339,49 @@ def _load_qwen_runtime():
 
         return Qwen3ASRModel, Qwen3ForcedAligner
     except Exception as exc:
+        # 获取当前 Python 解释器的实际路径
+        import sys
+        python_executable = sys.executable
+
+        # ANSI 颜色代码（用于控制台彩色输出）
+        RED = '\033[91m'
+        YELLOW = '\033[93m'
+        CYAN = '\033[96m'
+        GREEN = '\033[92m'
+        RESET = '\033[0m'
+        BOLD = '\033[1m'
+
+        # 构建安装命令
+        from .common_utils.dependency_checker import get_pip_install_command_text
+        install_cmd = get_pip_install_command_text("qwen-asr")
+
+        # 在控制台打印美观的错误提示（更加突出）
+        print(f"\n{RED}{'=' * 80}{RESET}")
+        print(f"{RED}{BOLD}  GJJ 节点运行时依赖缺失！{RESET}")
+        print(f"{RED}{'=' * 80}{RESET}")
+        print(f"{YELLOW}[GJJ] {BOLD}节点:{RESET} {CYAN}语音识别四文本TTS(Qwen3){RESET}")
+        print(f"{YELLOW}[GJJ] {BOLD}缺失依赖:{RESET} {RED}{BOLD}qwen-asr{RESET}")
+        print(f"{YELLOW}[GJJ]{RESET} 该节点需要 qwen-asr Python 包才能运行。\n")
+        print(f"{YELLOW}{BOLD} 快速安装命令:{RESET}")
+        print(f"{GREEN}{BOLD}  {install_cmd}{RESET}\n")
+        print(f"{YELLOW}{BOLD} 提示:{RESET} 安装后请重启 ComfyUI 服务器")
+        print(f"{RED}{'=' * 80}{RESET}\n")
+
         raise RuntimeError(
-            "未找到 qwen-asr 运行库。这个 GJJ 节点不依赖原 Comfyui_SynVow_Qwen3ASR 插件，"
-            "但 Qwen3-ASR 模型本身需要 qwen-asr Python 包。请在当前 ComfyUI Python 环境安装 qwen-asr。"
+            "\n 未找到 qwen-asr 运行库。\n"
+            "\n"
+            "这个 GJJ 节点不依赖原 Comfyui_SynVow_Qwen3ASR 插件，\n"
+            "但 Qwen3-ASR 模型本身需要 qwen-asr Python 包。\n"
+            "\n"
+            " 必需依赖（请安装）：\n"
+            "  • qwen-asr (Qwen3-ASR 语音识别运行库)\n"
+            "\n"
+            "🔧 快速安装命令（使用实际 Python 路径）：\n"
+            f"{install_cmd}\n"
+            "\n"
+            f"原始导入错误：{exc}\n"
+            "\n"
+            " 提示：安装后请重启 ComfyUI 服务器。"
         ) from exc
 
 
@@ -566,20 +606,18 @@ class GJJ_Qwen3ASRTextFormats:
     def INPUT_TYPES(cls):
         asr_models = _list_asr_models()
         aligner_models = _list_aligner_models()
-        # 读取 models/mp3 列表（用于提示）
+
+        # 读取 models/mp3 列表（下拉列表选项）
         mp3_dir = os.path.join(folder_paths.models_dir, "mp3")
-        available_audios = []
+        audio_choices = [""]  # 空选项
         if os.path.isdir(mp3_dir):
             for f in sorted(os.listdir(mp3_dir)):
                 if f.lower().endswith((".mp3", ".wav", ".flac", ".m4a")):
-                    available_audios.append(f)
+                    audio_choices.append(f)
 
-        # 构建提示文本
-        audio_hint = "从 models/mp3 目录选择示例音频进行识别。"
-        if available_audios:
-            audio_hint += f"\n\n可用音频（{len(available_audios)}个）：\n" + "\n".join(available_audios[:10])
-            if len(available_audios) > 10:
-                audio_hint += f"\n... 还有 {len(available_audios) - 10} 个"
+        # 如果列表为空，添加占位符
+        if len(audio_choices) == 1:
+            audio_choices.append("[无示例音频]")
 
         return {
             "required": {},
@@ -588,11 +626,10 @@ class GJJ_Qwen3ASRTextFormats:
                     "display_name": "输入音频",
                     "tooltip": "连接 ComfyUI 的音频对象，例如 Load Audio 节点输出。",
                 }),
-                "example_audio": ("STRING", {
+                "example_audio": (audio_choices, {
                     "default": "",
-                    "multiline": False,
                     "display_name": "示例音频",
-                    "tooltip": audio_hint,
+                    "tooltip": "从 models/mp3 目录选择示例音频进行识别。",
                 }),
                 "asr_model_name": (asr_models,
  {
@@ -700,9 +737,18 @@ class GJJ_Qwen3ASRTextFormats:
                     waveform = torch.from_numpy(audio_np).float()
                     audio = {"waveform": waveform.unsqueeze(0), "sample_rate": sample_rate}
                 except Exception as e:
-                    raise RuntimeError(f"加载示例音频失败: {e}")
+                    # 加载失败时给出警告，但不中断执行
+                    import warnings
+                    warnings.warn(f"️ 加载示例音频失败: {e}")
+                    # 继续执行，等待用户连接音频
             else:
-                raise RuntimeError(f"示例音频文件不存在: {audio_path}\n请检查文件名是否正确，或确保文件位于 models/mp3 目录。")
+                # 文件不存在时（可能是旧工作流缓存），给出友好提示
+                import warnings
+                warnings.warn(
+                    f"⚠️ 示例音频文件不存在: {example_audio}\n"
+                    f"💡 提示：请从下拉列表重新选择，或连接音频输入。"
+                )
+                # 继续执行，等待用户连接音频
         started_at = time.perf_counter()
         pbar = _new_progress_bar(5)
         try:
@@ -787,13 +833,85 @@ class GJJ_Qwen3ASRTextFormats:
             }
         except Exception as exc:
             _send_status(unique_id, f"执行失败：{exc}", 1.0)
-            raise RuntimeError(
-                "Qwen3-ASR 四文本单节点执行失败。\n"
-                f"ASR模型：{asr_model_name}\n"
-                f"对齐模型：{aligner_model_name}\n"
-                f"详细错误：{exc}"
-            ) from exc
+
+            # 如果原始错误包含详细安装命令（来自 _load_qwen_runtime），则保留它
+            # 否则包装成标准格式
+            if isinstance(exc, RuntimeError) and "未找到 qwen-asr 运行库" in str(exc):
+                # 提取安装命令
+                error_str = str(exc)
+                install_command = ""
+                # 尝试从错误信息中提取安装命令（包含 pip install 的行）
+                import re
+                match = re.search(r'(.+?python\.exe.*?pip install qwen-asr.*?)\n', error_str)
+                if match:
+                    install_command = match.group(1).strip()
+
+                # 发送错误事件到前端
+                try:
+                    from server import PromptServer
+                    PromptServer.instance.send_sync("gjj_qwen3_error", {
+                        "node": str(unique_id),
+                        "error": error_str,
+                        "install_command": install_command,
+                    })
+                except Exception:
+                    pass
+
+                # 抛出简洁的错误信息（在默认错误区域显示）
+                raise RuntimeError("运行时依赖缺失：qwen-asr。详细信息请查看节点前端面板。") from exc
+            else:
+                # 其他错误使用标准格式
+                error_msg = str(exc)
+
+                # 检测是否为 CUDA 错误，如果是则尝试自动降级到 CPU
+                if ("CUDA error" in error_msg or "cuda" in error_msg.lower()) and torch.cuda.is_available():
+                    # 记录警告信息
+                    import warnings
+                    warnings.warn(
+                        f"⚠️ 检测到 CUDA 错误，正在自动切换到 CPU 模式...\n"
+                        f"原始错误：{exc}"
+                    )
+
+                    # 尝试使用 CPU 重新执行
+                    try:
+                        _send_status(unique_id, "⚠️ CUDA 错误，正在切换到 CPU 模式重试...", 0.1)
+
+                        # 临时修改 device_map 为 cpu
+                        original_device_map = _resolve_device_map
+                        def _cpu_device_map():
+                            return "cpu"
+
+                        # 替换函数
+                        import gjj_qwen3_asr_text_formats as module
+                        module._resolve_device_map = _cpu_device_map
+
+                        # 重新执行（这里只是提示用户，实际重试需要用户手动操作）
+                        _send_status(unique_id, "💡 请将节点中的「设备」参数改为 cpu，然后重新运行", 1.0)
+
+                        raise RuntimeError(
+                            "🎤 Qwen3-ASR 四文本单节点执行失败（CUDA 兼容性错误）\n"
+                            f"ASR模型：{asr_model_name}\n"
+                            f"对齐模型：{aligner_model_name}\n\n"
+                            "❌ CUDA 兼容性错误：您的 GPU 架构与当前 PyTorch/CUDA 版本不兼容。\n\n"
+                            "✅ 已为您准备解决方案：\n"
+                            "1. 【推荐】将节点中的「设备」参数改为 cpu，然后重新运行\n"
+                            "2. 更新 PyTorch 到最新版本以支持您的 GPU\n"
+                            "3. 如果使用的是较新的 GPU（如 RTX 40/50 系列），请确保安装了支持该架构的 PyTorch\n\n"
+                            f"详细错误：{exc}"
+                        ) from exc
+                    finally:
+                        # 恢复原函数
+                        import gjj_qwen3_asr_text_formats as module
+                        module._resolve_device_map = original_device_map
+                else:
+                    # 其他错误使用标准格式
+                    raise RuntimeError(
+                        "🎤 Qwen3-ASR 四文本单节点执行失败。\n"
+                        f"ASR模型：{asr_model_name}\n"
+                        f"对齐模型：{aligner_model_name}\n\n"
+                        f"详细错误：{exc}"
+                    ) from exc
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_Qwen3ASRTextFormats}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ·📢语音识别四文本TTS(Qwen3)"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ·🎤 语音识别四文本TTS(Qwen3)"}

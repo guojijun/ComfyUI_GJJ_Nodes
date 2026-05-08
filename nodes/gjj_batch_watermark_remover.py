@@ -15,11 +15,11 @@ from PIL import Image, PngImagePlugin
 from nodes import ConditioningZeroOut, VAEDecode, VAEEncode
 
 from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
-from .gjj_lazy_image_studio import (
+from .common_utils.model_loader import (
     DEFAULT_UNET_DTYPE,
-    _load_clip_from_names,
-    _load_model,
-    _load_vae,
+    gjjutils_load_clip_from_names as _load_clip_from_names,
+    gjjutils_load_model as _load_model,
+    gjjutils_load_vae as _load_vae,
 )
 from .gjj_model_bundle_loader import (
     list_clip_models,

@@ -6,7 +6,6 @@ import os
 import time
 from typing import Any
 
-import cv2
 import folder_paths
 import numpy as np
 import torch
@@ -14,9 +13,38 @@ import torch.nn.functional as F
 import comfy
 from comfy import model_management
 from nodes import InpaintModelConditioning, MAX_RESOLUTION, VAEEncode, VAEEncodeTiled, VAEDecodeTiled, common_ksampler
-from segment_anything import SamPredictor, sam_model_registry
 
 from .gjj_ultralytics_runtime import SEG, available_ultralytics_bbox_models, ensure_ultralytics_model_paths, load_ultralytics_bbox_detector
+
+# 延迟导入：运行时依赖检查
+def _load_dependencies():
+	"""运行时加载 cv2 和 segment_anything，失败时提供友好提示"""
+	from .common_utils.dependency_checker import load_dependency_at_runtime
+
+	cv2 = load_dependency_at_runtime(
+		module_name="cv2",
+		node_name="GJJ · 人脸细节增强器",
+		package_name="opencv-python",
+		description="该节点需要 OpenCV 进行图像处理"
+	)
+
+	try:
+		from segment_anything import SamPredictor, sam_model_registry
+	except ImportError as exc:
+		raise RuntimeError(
+			f"\n 未找到 segment_anything 运行库。\n"
+			f"\n"
+			f"这个 GJJ 节点需要 segment-anything Python 包才能运行。\n"
+			f"\n"
+			f"🔧 安装命令：\n"
+			f"  pip install git+https://github.com/facebookresearch/segment-anything.git\n"
+			f"\n"
+			f"原始导入错误：{exc}\n"
+			f"\n"
+			f"💡 提示：安装后请重启 ComfyUI 服务器。"
+		) from exc
+
+	return cv2, SamPredictor, sam_model_registry
 
 
 SAM2_CONFIG_TABLE = {

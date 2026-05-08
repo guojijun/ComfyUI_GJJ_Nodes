@@ -2,11 +2,11 @@ import os
 
 os.environ["USE_LIBUV"] = "0"
 import sys
+from pathlib import Path
 from typing import Optional
 
 import hydra
 import lightning as L
-import pyrootutils
 import torch
 from lightning import Callback, LightningDataModule, LightningModule, Trainer
 from lightning.pytorch.loggers import Logger
@@ -17,8 +17,30 @@ os.environ.pop("SLURM_NTASKS", None)
 os.environ.pop("SLURM_JOB_NAME", None)
 os.environ.pop("SLURM_NTASKS_PER_NODE", None)
 
-# register eval resolver and root
-pyrootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
+
+def setup_root(file_path, indicator=".project-root", pythonpath=True):
+    """Find the project root directory containing the indicator file/folder and optionally add it to PYTHONPATH."""
+    current_path = Path(file_path).resolve()
+
+    # Search upwards for the indicator
+    for parent in [current_path, *current_path.parents]:
+        if (parent / indicator).exists():
+            root_dir = parent
+            break
+    else:
+        raise FileNotFoundError(
+            f"Could not find {indicator} in any parent directory of {file_path}"
+        )
+
+    if pythonpath:
+        root_str = str(root_dir)
+        if root_str not in sys.path:
+            sys.path.insert(0, root_str)
+
+    return root_dir
+
+
+setup_root(__file__, indicator=".project-root", pythonpath=True)
 
 # Allow TF32 on Ampere GPUs
 torch.set_float32_matmul_precision("high")

@@ -15,20 +15,14 @@ from .common_utils.text_tools import (
 	gjjutils_normalize_text as _normalize_text,
 	gjjutils_pick_available_name as _pick_available_name,
 )
-from .gjj_lazy_image_studio import (
+from .common_utils.model_loader import (
 	DEFAULT_UNET_DTYPE,
 	DEFAULT_UNET_NAME,
-	DEFAULT_VAE_NAME,
-	_apply_cfg_norm,
-	_load_clip_from_names,
-	_load_model,
-	_load_vae,
-	_patch_model_sampling,
-	_resize_to_long_edge,
-	_safe_filename_list,
-	list_clip_models,
-	list_unet_models,
-	list_vae_models,
+	gjjutils_apply_cfg_norm as _apply_cfg_norm,
+	gjjutils_load_clip_from_names as _load_clip_from_names,
+	gjjutils_load_model as _load_model,
+	gjjutils_load_vae as _load_vae,
+	gjjutils_patch_model_sampling as _patch_model_sampling,
 )
 from .common_utils.model_family import (
 	gjjutils_model_family_match_preset as match_model_family,
@@ -36,6 +30,11 @@ from .common_utils.model_family import (
 	gjjutils_model_family_resolve_clip_names as resolve_clip_names_for_preset,
 	MODEL_FAMILY_PRESETS,
 	DEFAULT_VAE_NAME as MODEL_DEFAULT_VAE,
+)
+from .gjj_model_bundle_loader import (
+	list_clip_models,
+	list_unet_models,
+	list_vae_models,
 )
 from .gjj_model_upscaler import _load_upscale_model, _list_upscale_models
 
@@ -56,6 +55,35 @@ DEFAULT_SHIFT = 3.1
 DEFAULT_CFG_NORM = 1.0
 DEFAULT_MEGAPIXELS = 1.0
 DEFAULT_UPSCALE_MODEL = "1xSkinContrast-SuperUltraCompact.pth"
+
+
+# ============================================================================
+# 本地辅助函数（从 gjj_lazy_Image_studio 迁移）
+# ============================================================================
+
+def _safe_filename_list(category: str) -> list[str]:
+	"""安全获取文件名列表。"""
+	try:
+		return list(folder_paths.get_filename_list(category))
+	except Exception:
+		return []
+
+
+def _resize_to_long_edge(
+	samples: torch.Tensor, longest_edge: int, upscale: str, crop: str
+) -> torch.Tensor:
+	"""调整图像到指定长边。"""
+	height = int(samples.shape[2])
+	width = int(samples.shape[3])
+	current_long_edge = max(height, width)
+	if current_long_edge <= 0:
+		return samples
+	scale = float(longest_edge) / float(current_long_edge)
+	target_width = max(8, int(round(width * scale)))
+	target_height = max(8, int(round(height * scale)))
+	return comfy.utils.common_upscale(
+		samples, target_width, target_height, upscale, crop
+	)
 
 
 def _send_status(unique_id: Any, text: str) -> None:
@@ -321,24 +349,27 @@ class GJJ_OldPhotoRestorer:
 
 			# 根据 UNET 名称匹配模型预设
 			preset = match_model_family(resolved_unet)
-			
+			if preset is None:
+				# 如果找不到预设，使用默认值
+				preset = {"id": "generic", "clip_type": "stable_diffusion", "vae_name": DEFAULT_VAE}
+
 			# 根据预设自动匹配 CLIP 和 VAE
 			resolved_clip_names = resolve_clip_names_for_preset(
-				preset, 
-				clip_models, 
+				preset,
+				clip_models,
 				exposed_clip_name="",
 				legacy_clip_names=[]
 			)
 			if not resolved_clip_names:
 				# 如果预设匹配失败，回退到默认配置
 				resolved_clip_names = [_pick_available_name(DEFAULT_CLIP, clip_models, DEFAULT_CLIP)]
-			
+
 			resolved_vae_name = _pick_available_name(
 				preset.get("vae_name", DEFAULT_VAE),
 				vae_models,
 				DEFAULT_VAE
 			)
-			
+
 			resolved_clip_type = resolve_clip_type(
 				resolved_unet,
 				resolved_clip_names,

@@ -463,10 +463,29 @@ def load_engine(
         from fish_speech.models.text2semantic import inference as text2semantic_inference
         from fish_speech.inference_engine import TTSInferenceEngine
     except ImportError as e:
+        from .common_utils.dependency_checker import print_runtime_dependency_error, get_pip_install_command_text
+
+        install_cmd = get_pip_install_command_text("transformers loguru pydantic tiktoken hydra-core descript-audio-codec descript-audiotools soundfile pyrootutils omegaconf huggingface_hub torchvision librosa pyarrow protobuf natsort loralib datasets imageio-ffmpeg")
+
+        description = (
+            "FishAudioS2 节点缺少 Python 依赖。\n"
+            "❌ 不要执行 pip install fish-speech；GJJ 已内置源码，只需要环境依赖。\n"
+            "运行节点时会显示完整的安装命令，复制后执行即可。"
+        )
+
+        print_runtime_dependency_error(
+            node_name="[语气]语音克隆TTS(FishAudioS2)",
+            dependency_name="fish_speech 环境依赖",
+            install_command=install_cmd,
+            description=description,
+            extra_info=f"原始导入错误：{e}"
+        )
+
         raise RuntimeError(
-            "Fish Audio S2 运行时导入失败，请先补齐 Fish S2 的 Python 推理依赖。\n"
-            "不要 pip install fish-speech；GJJ 已内置 fish_speech 源码，只需要环境依赖。\n"
-            f"原始导入错误：{e}"
+            f"🎵 Fish Audio S2 运行时导入失败，请先补齐依赖。\n\n"
+            f"快速安装命令：\n{install_cmd}\n\n"
+            f"原始导入错误：{e}\n\n"
+            "💡 提示：安装后请重启 ComfyUI 服务器。"
         ) from e
 
     launch_thread_safe_queue = text2semantic_inference.launch_thread_safe_queue

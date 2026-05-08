@@ -16,10 +16,22 @@ import folder_paths
 
 from .text_tools import gjjutils_normalize_text, gjjutils_extract_stem
 
+# 查找预设文件路径：从当前文件向上查找，直到找到包含 presets 目录的位置
+def _find_preset_root() -> Path:
+	"""动态查找预设文件根目录。"""
+	current = Path(__file__).resolve().parent
+	# 向上最多查找5级目录
+	for _ in range(5):
+		presets_dir = current / "presets"
+		if presets_dir.exists() and presets_dir.is_dir():
+			return presets_dir
+		current = current.parent
+	# 如果找不到，回退到默认位置（相对于当前文件的三级父目录）
+	return Path(__file__).resolve().parent.parent.parent / "presets"
+
+PRESET_ROOT = _find_preset_root()
 # TSV 文件路径
-MODEL_KEYWORDS_PATH = (
-    Path(__file__).resolve().parent.parent / "presets" / "model_keywords.tsv"
-)
+MODEL_KEYWORDS_PATH = PRESET_ROOT / "model_keywords.tsv"
 
 
 def _parse_tsv_row(row: dict[str, str]) -> dict[str, Any]:

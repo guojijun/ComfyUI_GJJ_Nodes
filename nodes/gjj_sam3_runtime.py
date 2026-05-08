@@ -19,29 +19,96 @@ import comfy.utils
 from comfy.model_patcher import ModelPatcher
 
 
-VENDOR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "vendor"))
-if VENDOR_ROOT not in sys.path:
-	sys.path.insert(0, VENDOR_ROOT)
+# 延迟导入：运行时依赖检查
+_sam3_loaded = False
+_sam3_module = None
 
-# 清除其他自定义节点可能已缓存的同名 sam3 模块
-sys.modules.pop("sam3", None)
-for key in list(sys.modules):
-	if key == "sam3" or key.startswith("sam3."):
-		del sys.modules[key]
+def _load_sam3_runtime():
+	"""运行时加载 sam3，失败时提供友好提示"""
+	global _sam3_loaded, _sam3_module
 
-# 强制从 GJJ vendor 导入，不受其他包的 sam3 遮蔽
-import importlib.util
-_vendor_sam3 = os.path.abspath(os.path.join(VENDOR_ROOT, "sam3", "__init__.py"))
-_spec = importlib.util.spec_from_file_location("sam3", _vendor_sam3)
-_sam3 = importlib.util.module_from_spec(_spec)
-sys.modules["sam3"] = _sam3
-_spec.loader.exec_module(_sam3)
-build_sam3_video_model = _sam3.build_sam3_video_model
-_load_checkpoint_file = _sam3._load_checkpoint_file
-remap_video_checkpoint = _sam3.remap_video_checkpoint  # type: ignore  # noqa: E402
-from sam3.predictor import Sam3VideoPredictor  # type: ignore  # noqa: E402
-from sam3.utils import Sam3Processor  # type: ignore  # noqa: E402
-from sam3.attention import set_sam3_dtype  # type: ignore  # noqa: E402
+	if _sam3_loaded:
+		return _sam3_module
+
+	try:
+		VENDOR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "vendor"))
+		if VENDOR_ROOT not in sys.path:
+			sys.path.insert(0, VENDOR_ROOT)
+
+		# 清除其他自定义节点可能已缓存的同名 sam3 模块
+		sys.modules.pop("sam3", None)
+		for key in list(sys.modules):
+			if key == "sam3" or key.startswith("sam3."):
+				del sys.modules[key]
+
+		# 强制从 GJJ vendor 导入，不受其他包的 sam3 遮蔽
+		import importlib.util
+		_vendor_sam3 = os.path.abspath(os.path.join(VENDOR_ROOT, "sam3", "__init__.py"))
+		_spec = importlib.util.spec_from_file_location("sam3", _vendor_sam3)
+		_sam3 = importlib.util.module_from_spec(_spec)
+		sys.modules["sam3"] = _sam3
+		_spec.loader.exec_module(_sam3)
+
+		_sam3_module = {
+			"build_sam3_video_model": _sam3.build_sam3_video_model,
+			"_load_checkpoint_file": _sam3._load_checkpoint_file,
+			"remap_video_checkpoint": _sam3.remap_video_checkpoint,
+			"Sam3VideoPredictor": _sam3.predictor.Sam3VideoPredictor,
+			"Sam3Processor": _sam3.utils.Sam3Processor,
+			"set_sam3_dtype": _sam3.attention.set_sam3_dtype,
+		}
+
+		_sam3_loaded = True
+		return _sam3_module
+
+	except Exception as exc:
+		python_executable = sys.executable
+
+		# ANSI 颜色代码（用于控制台彩色输出）
+		RED = '\033[91m'
+		YELLOW = '\033[93m'
+		CYAN = '\033[96m'
+		GREEN = '\033[92m'
+		RESET = '\033[0m'
+		BOLD = '\033[1m'
+
+		# 构建安装命令
+		from .common_utils.dependency_checker import get_pip_install_command_text
+		install_cmd = get_pip_install_command_text("torchvision opencv-python")
+
+		# 在控制台打印美观的错误提示
+		print(f"\n{RED}{'=' * 80}{RESET}")
+		print(f"{RED}{BOLD}  GJJ 节点运行时依赖缺失！{RESET}")
+		print(f"{RED}{'=' * 80}{RESET}")
+		print(f"{YELLOW}[GJJ] {BOLD}节点:{RESET} {CYAN}批量文本分割器(SAM3){RESET}")
+		print(f"{YELLOW}[GJJ] {BOLD}缺失依赖:{RESET} {RED}{BOLD}SAM3 vendor 模块{RESET}")
+		print(f"{YELLOW}[GJJ]{RESET} 该节点需要 GJJ/vendor/sam3 目录下的 SAM3 模型和依赖。\n")
+		print(f"{YELLOW}{BOLD} 快速检查:{RESET}")
+		print(f"{CYAN}  • 确认 {VENDOR_ROOT}/sam3 目录存在{RESET}")
+		print(f"{CYAN}  • 确认包含 __init__.py 和必要的 Python 文件{RESET}")
+		print(f"{CYAN}  • 如果依赖缺失，请运行：{RESET}")
+		print(f"{GREEN}{BOLD}  {install_cmd}{RESET}\n")
+		print(f"{YELLOW}{BOLD} 提示:{RESET} 修复后请重启 ComfyUI 服务器")
+		print(f"{RED}{'=' * 80}{RESET}\n")
+
+		raise RuntimeError(
+			"\n 未找到 SAM3 运行库。\n"
+			"\n"
+			"这个 GJJ 节点需要 GJJ/vendor/sam3 模块才能运行。\n"
+			"\n"
+			" 必需检查：\n"
+			"  • 确认 vendor/sam3 目录存在且包含完整代码\n"
+			"  • 确认包含 __init__.py、predictor.py、utils.py 等文件\n"
+			"  • 如果需要额外依赖，请安装：\n"
+			"    torchvision, opencv-python\n"
+			"\n"
+			"🔧 快速安装命令（使用实际 Python 路径）：\n"
+			f"{install_cmd}\n"
+			"\n"
+			f"原始导入错误：{exc}\n"
+			"\n"
+			" 提示：修复后请重启 ComfyUI 服务器。"
+		) from exc
 
 from .gjj_model_name_resolver import pick_available_model_name  # noqa: E402
 
@@ -221,6 +288,15 @@ def get_or_build_model(model_name: str, precision: str = "auto", compile_model: 
 
 	load_device = comfy.model_management.get_torch_device()
 	offload_device = comfy.model_management.unet_offload_device()
+
+	# 运行时加载 sam3 模块
+	sam3 = _load_sam3_runtime()
+	build_sam3_video_model = sam3["build_sam3_video_model"]
+	_load_checkpoint_file = sam3["_load_checkpoint_file"]
+	remap_video_checkpoint = sam3["remap_video_checkpoint"]
+	Sam3VideoPredictor = sam3["Sam3VideoPredictor"]
+	set_sam3_dtype = sam3["set_sam3_dtype"]
+	Sam3Processor = sam3["Sam3Processor"]
 
 	with torch.device("meta"):
 		model = build_sam3_video_model(

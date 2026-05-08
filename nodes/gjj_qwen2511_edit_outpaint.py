@@ -17,24 +17,25 @@ from .common_utils.text_tools import (
 	gjjutils_normalize_text as _normalize_text,
 	gjjutils_pick_available_name as _pick_available_name,
 )
-from .gjj_lazy_image_studio import (
+from .common_utils.model_loader import (
 	DEFAULT_UNET_DTYPE,
-	_apply_cfg_norm,
-	_load_clip_from_names,
-	_load_model,
-	_load_vae,
-	_patch_model_sampling,
-	_pick_available_lora_name,
-	_safe_filename_list,
-	list_clip_models,
-	list_unet_models,
+	gjjutils_apply_cfg_norm as _apply_cfg_norm,
+	gjjutils_load_clip_from_names as _load_clip_from_names,
+	gjjutils_load_model as _load_model,
+	gjjutils_load_vae as _load_vae,
+	gjjutils_patch_model_sampling as _patch_model_sampling,
 )
 from .common_utils.model_family import (
 	gjjutils_model_family_match_preset as match_model_family,
 	gjjutils_model_family_resolve_clip_type as resolve_clip_type,
 	gjjutils_model_family_resolve_clip_names as resolve_clip_names_for_preset,
+	gjjutils_model_family_pick_lora_name as _pick_available_lora_name,
 	MODEL_FAMILY_PRESETS,
 	DEFAULT_VAE_NAME as MODEL_DEFAULT_VAE,
+)
+from .gjj_model_bundle_loader import (
+	list_clip_models,
+	list_unet_models,
 )
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .gjj_model_family_preset_table import load_model_family_presets, match_model_family_preset
@@ -77,6 +78,18 @@ DEFAULT_MASK_SIGMA = 1.0
 DEFAULT_STEPS = 4
 DEFAULT_CFG = 1.0
 DEFAULT_SAMPLER = "euler"
+
+
+# ============================================================================
+# 本地辅助函数（从 gjj_lazy_Image_studio 迁移）
+# ============================================================================
+
+def _safe_filename_list(category: str) -> list[str]:
+	"""安全获取文件名列表。"""
+	try:
+		return list(folder_paths.get_filename_list(category))
+	except Exception:
+		return []
 DEFAULT_SCHEDULER = "simple"
 DEFAULT_DENOISE = 1.0
 DEFAULT_SHIFT = 3.1
@@ -167,6 +180,9 @@ def _allowed_unets() -> list[str]:
 
 def _resolve_model_bundle(unet_name: str) -> dict[str, Any]:
 	preset = match_model_family(unet_name)
+	if preset is None:
+		# 如果找不到预设，使用默认值
+		preset = {"id": "generic", "clip_type": "stable_diffusion", "vae_name": DEFAULT_VAE}
 	clip_models = list_clip_models() or [DEFAULT_CLIP]
 	clip_names = resolve_clip_names_for_preset(preset, clip_models, "", [])
 	clip_type = resolve_clip_type(unet_name, clip_names, str(preset.get("clip_type") or "stable_diffusion"))

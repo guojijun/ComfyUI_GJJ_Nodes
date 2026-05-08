@@ -1,5 +1,4 @@
 from __future__ import annotations
-from __future__ import annotations
 
 import math
 from typing import Any
@@ -31,6 +30,7 @@ except ImportError:
 
 from .common_utils.text_tools import (
     gjjutils_normalize_text as _normalize_text,
+    gjjutils_canonical_model_text as _canonical_model_text,
 )
 
 from .common_utils.sampler_tools import (
@@ -334,6 +334,11 @@ def apply_lora_to_model_and_clip(
     if patched_model is None:
         raise RuntimeError("LoRA 已读取，但没有任何权重成功应用到模型。")
     return patched_model, patched_clip or clip
+
+
+def _should_skip_clip_lora_for_family(clip_type: str) -> bool:
+    normalized = _normalize_text(clip_type)
+    return normalized in {"qwen_image"}
 
 
 # 以下函数已迁移到 common_utils.model_family，使用导入的别名
@@ -714,7 +719,7 @@ def _resolve_effective_steps(
 
 
 class GJJ_LazyImageStudio:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/Image"
     FUNCTION = "create_image"
     DESCRIPTION = "懒人图文集成一键生图：支持文生图、图生图，以及多图参考编辑。节点会根据所选 UNET 主关键词自动推荐匹配的文本编码器、VAE、加速 LoRA、NSFW LoRA 与常用采样参数。"
     SEARCH_ALIASES = [
@@ -748,7 +753,12 @@ class GJJ_LazyImageStudio:
         diffusion_models = _filtered if _filtered else _raw_diffusion_models
         clip_models = list_clip_models() or [DEFAULT_CLIP_NAME]
         vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
-        lora_models = [""] + (_safe_filename_list("loras") or [])
+        # 确保 loras 目录存在并获取文件列表
+        try:
+            lora_files = folder_paths.get_filename_list("loras")
+            lora_models = [""] + [str(f) for f in lora_files if str(f or "").strip()]
+        except Exception:
+            lora_models = [""]
         return {
             "required": {
                 "prompt": (
@@ -992,7 +1002,11 @@ class GJJ_LazyImageStudio:
                     ),
                 }
             ),
-            "hidden": {"prompt_graph": "PROMPT", "unique_id": "UNIQUE_ID"},
+            "hidden": {
+                "prompt_graph": "PROMPT",
+                "unique_id": "UNIQUE_ID",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+            },
         }
 
     def _load_lora_state(self, lora_name: str):
@@ -1009,6 +1023,7 @@ class GJJ_LazyImageStudio:
         self,
         model,
         clip,
+        clip_type: str,
         lora_1_name: str,
         lora_1_strength: float,
         lora_2_name: str,
@@ -1017,13 +1032,18 @@ class GJJ_LazyImageStudio:
     ):
         current_model = model
         current_clip = clip
+        clip_strength = (
+            0.0 if _should_skip_clip_lora_for_family(clip_type) else None
+        )
         if str(lora_1_name or "").strip() and abs(float(lora_1_strength)) > 1e-6:
             current_model, current_clip = apply_lora_to_model_and_clip(
                 current_model,
                 current_clip,
                 self._load_lora_state(lora_1_name),
                 float(lora_1_strength),
-                float(lora_1_strength),
+                float(lora_1_strength)
+                if clip_strength is None
+                else float(clip_strength),
             )
         if str(lora_2_name or "").strip() and abs(float(lora_2_strength)) > 1e-6:
             current_model, current_clip = apply_lora_to_model_and_clip(
@@ -1031,7 +1051,9 @@ class GJJ_LazyImageStudio:
                 current_clip,
                 self._load_lora_state(lora_2_name),
                 float(lora_2_strength),
-                float(lora_2_strength),
+                float(lora_2_strength)
+                if clip_strength is None
+                else float(clip_strength),
             )
         if str(lora_chain_config or "").strip():
             current_model, current_clip, _ = apply_lora_chain_config(
@@ -1283,7 +1305,12 @@ class GJJ_LazyImageStudio:
             preset = match_model_family(unet_name)
             clip_models = list_clip_models() or [DEFAULT_CLIP_NAME]
             vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
-            lora_models = _safe_filename_list("loras")
+            # 确保 loras 目录存在并获取文件列表
+            try:
+                lora_files = folder_paths.get_filename_list("loras")
+                lora_models = [str(f) for f in lora_files if str(f or "").strip()]
+            except Exception:
+                lora_models = []
             resolved_clip_names = resolve_clip_names_for_preset(
                 preset,
                 clip_models,
@@ -1294,6 +1321,19 @@ class GJJ_LazyImageStudio:
                 resolved_clip_names.append(
                     _pick_available_name("", clip_models, DEFAULT_CLIP_NAME)
                 )
+
+            # 验证 CLIP 模型是否正确匹配 UNET 模型
+            preset_clip_names = preset.get("clip_names", [])
+            if preset_clip_names and resolved_clip_names:
+                # 检查解析后的 CLIP 名称是否与预设中的推荐名称匹配
+                for i, (resolved, recommended) in enumerate(zip(resolved_clip_names, preset_clip_names)):
+                    if resolved != recommended and recommended:
+                        # 如果解析的名称与推荐的不一致，发出警告
+                        print(f"[GJJ_LazyImageStudio] 警告: CLIP 模型不匹配！")
+                        print(f"  UNET: {unet_name}")
+                        print(f"  推荐的 CLIP: {recommended}")
+                        print(f"  实际加载的 CLIP: {resolved}")
+                        print(f"  这可能导致维度不匹配错误。请确保 '{recommended}' 存在于 models/text_encoders 或 models/clip 目录中。")
             resolved_vae_name = _pick_available_name(
                 preset.get("vae_name", DEFAULT_VAE_NAME), vae_models, vae_name
             )
@@ -1332,6 +1372,7 @@ class GJJ_LazyImageStudio:
             model, clip = self._apply_loras(
                 model,
                 clip,
+                resolved_clip_type,
                 resolved_lora_1_name,
                 lora_1_strength,
                 resolved_lora_2_name,
@@ -1478,4 +1519,20 @@ class GJJ_LazyImageStudio:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_LazyImageStudio}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🖼️ 懒人图文集成一键生图"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "🖼️ 懒人图文集成一键生图"}
+
+# 注册 API 端点用于动态获取 LoRA 列表
+try:
+    from aiohttp import web
+    from server import PromptServer
+
+    @PromptServer.instance.routes.get("/gjj/lora_list")
+    async def get_lora_list_api(request):
+        try:
+            lora_files = folder_paths.get_filename_list("loras")
+            lora_list = [str(f) for f in lora_files if str(f or "").strip()]
+            return web.json_response({"loras": lora_list})
+        except Exception as e:
+            return web.json_response({"loras": [], "error": str(e)}, status=500)
+except Exception:
+    pass

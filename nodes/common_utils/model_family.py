@@ -28,26 +28,26 @@ def gjjutils_model_family_match_preset(
 	default_preset: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
 	"""根据 UNET 名称匹配对应的模型族预设。
-	
+
 	通过关键词模糊匹配找到最合适的预设配置，支持多关键词优先级排序。
-	
+
 	Args:
 		unet_name: UNET 模型名称
 		presets: 可选的预设列表，默认为全局 MODEL_FAMILY_PRESETS
 		default_preset: 自定义默认预设，未匹配时使用。如果为 None，使用内置默认配置
-		
+
 	Returns:
 		匹配的预设字典，包含 clip_type、clip_names、vae_name、采样参数等配置。
-		
+
 	Example:
 		>>> # 基本用法
 		>>> preset = gjjutils_model_family_match_preset("flux-2-klein-9b-nvfp4.safetensors")
 		>>> print(preset["clip_type"])  # "flux2"
-		
+
 		>>> # 使用自定义预设列表
 		>>> custom_presets = [{"keywords": ["my-model"], "clip_type": "custom"}]
 		>>> preset = gjjutils_model_family_match_preset("my-model-v1", presets=custom_presets)
-		
+
 		>>> # 使用自定义默认配置
 		>>> default = {"clip_type": "fallback", "steps": 30}
 		>>> preset = gjjutils_model_family_match_preset("unknown-model", default_preset=default)
@@ -56,9 +56,9 @@ def gjjutils_model_family_match_preset(
 	canonical_name = _canonical_model_text(unet_name)
 	best: dict[str, Any] | None = None
 	best_length = -1
-	
+
 	target_presets = presets if presets is not None else MODEL_FAMILY_PRESETS
-	
+
 	for preset in target_presets:
 		for keyword in preset.get("keywords", []):
 			normalized_keyword = _normalize_text(keyword)
@@ -69,14 +69,14 @@ def gjjutils_model_family_match_preset(
 				or (canonical_keyword and canonical_keyword in canonical_name)) and len(canonical_keyword or normalized_keyword) > best_length:
 				best = preset
 				best_length = len(canonical_keyword or normalized_keyword)
-	
+
 	if best:
 		return best
-	
+
 	# 使用自定义默认配置或内置默认配置
 	if default_preset is not None:
 		return default_preset
-	
+
 	return {
 		"id": "generic",
 		"clip_type": "stable_diffusion",
@@ -109,18 +109,18 @@ def gjjutils_model_family_resolve_clip_type(
 	custom_keywords: list[tuple[tuple[str, ...], str]] | None = None,
 ) -> str:
 	"""根据 UNET 和 CLIP 名称智能推断 CLIP 类型。
-	
+
 	支持多种模型的自动识别，包括 Flux、Wan、HiDream、Qwen 等。
-	
+
 	Args:
 		unet_name: UNET 模型名称
 		clip_names: CLIP 模型名称列表
 		preferred_type: 用户手动指定的 CLIP 类型（优先级最高）
 		custom_keywords: 自定义关键词映射列表，格式为 ((keyword1, keyword2), clip_type)
-		
+
 	Returns:
 		推断出的 CLIP 类型字符串，如 "flux2"、"wan"、"hidream" 等
-		
+
 	Example:
 		>>> # 基本用法
 		>>> clip_type = gjjutils_model_family_resolve_clip_type(
@@ -128,7 +128,7 @@ def gjjutils_model_family_resolve_clip_type(
 		...     ["qwen_3_8b.safetensors"]
 		... )
 		>>> print(clip_type)  # "flux2"
-		
+
 		>>> # 使用自定义关键词
 		>>> custom_kw = [(("my-custom-model",), "my_type")]
 		>>> clip_type = gjjutils_model_family_resolve_clip_type(
@@ -141,12 +141,12 @@ def gjjutils_model_family_resolve_clip_type(
 	preferred_text = str(preferred_type or "").strip()
 	if preferred_text and _normalize_text(preferred_text) not in ("", "stable_diffusion", "auto"):
 		return preferred_text
-	
+
 	normalized_unet = _normalize_text(unet_name)
 	canonical_unet = _canonical_model_text(unet_name)
 	normalized_clips = " ".join(_normalize_text(name) for name in clip_names if str(name or "").strip())
 	canonical_clips = " ".join(_canonical_model_text(name) for name in clip_names if str(name or "").strip())
-	
+
 	# 优先使用自定义关键词
 	if custom_keywords:
 		for keywords, clip_type in custom_keywords:
@@ -154,14 +154,14 @@ def gjjutils_model_family_resolve_clip_type(
 				or _canonical_model_text(keyword) in canonical_unet
 				for keyword in keywords):
 				return clip_type
-	
+
 	# 基于 UNET 名称匹配（内置关键词）
 	for keywords, clip_type in CLIP_TYPE_KEYWORDS:
 		if any(_normalize_text(keyword) in normalized_unet
 			or _canonical_model_text(keyword) in canonical_unet
 			for keyword in keywords):
 			return clip_type
-	
+
 	# 基于 CLIP 名称的特殊规则
 	if "clip_l_hidream" in normalized_clips or "clipghidream" in canonical_clips:
 		return "hidream"
@@ -178,7 +178,7 @@ def gjjutils_model_family_resolve_clip_type(
 			return "hunyuan_image"
 	if "clip_l" in normalized_clips and "t5xxl" in normalized_clips:
 		return "flux"
-	
+
 	return str(preferred_type or "stable_diffusion")
 
 
@@ -188,21 +188,21 @@ def gjjutils_model_family_get_flux_clip_candidates(
 	priority_list: list[str] | None = None,
 ) -> list[str]:
 	"""获取 Flux 模型的可选 CLIP 候选列表。
-	
+
 	按优先级排序，返回实际存在的模型。
-	
+
 	Args:
 		clip_models: 可用的 CLIP 模型列表
 		default_name: 首选的 CLIP 名称
 		priority_list: 自定义优先级列表，默认为标准 T5 系列
-		
+
 	Returns:
 		过滤后的候选 CLIP 名称列表（仅包含实际存在的模型）
-		
+
 	Example:
 		>>> # 基本用法
 		>>> candidates = gjjutils_model_family_get_flux_clip_candidates(available_clips)
-		
+
 		>>> # 使用自定义优先级
 		>>> priority = ["custom-t5.safetensors", "backup-t5.safetensors"]
 		>>> candidates = gjjutils_model_family_get_flux_clip_candidates(
@@ -221,7 +221,7 @@ def gjjutils_model_family_get_flux_clip_candidates(
 		# 将 default_name 插入到优先级列表开头
 		if default_name and default_name not in priority_list:
 			priority_list = [default_name] + priority_list
-	
+
 	preferred = _dedupe_keep_order(priority_list)
 	return [name for name in preferred if str(name or "").strip() and name in clip_models]
 
@@ -234,19 +234,19 @@ def gjjutils_model_family_resolve_clip_names(
 	name_matcher: callable | None = None,
 ) -> list[str]:
 	"""从预设中解析并匹配可用的 CLIP 模型名称列表。
-	
+
 	支持 Flux 双 CLIP 的特殊处理逻辑，以及通用模型的名称匹配。
-	
+
 	Args:
 		preset: 模型族预设字典
 		clip_models: 系统中可用的 CLIP 模型列表
 		exposed_clip_name: 前端暴露的 CLIP 名称（用户手动选择）
 		legacy_clip_names: 旧版 CLIP 名称列表（向后兼容）
 		name_matcher: 自定义名称匹配函数，签名为 (requested, available, fallback) -> str
-		
+
 	Returns:
 		解析后的 CLIP 名称列表，可用于加载 CLIP 模型
-		
+
 	Example:
 		>>> # 基本用法
 		>>> clip_names = gjjutils_model_family_resolve_clip_names(
@@ -254,7 +254,7 @@ def gjjutils_model_family_resolve_clip_names(
 		...     available_clip_models,
 		...     exposed_clip_name="custom_clip.safetensors"
 		... )
-		
+
 		>>> # 使用自定义匹配器
 		>>> def custom_matcher(requested, available, fallback):
 		...     # 自定义匹配逻辑
@@ -266,9 +266,9 @@ def gjjutils_model_family_resolve_clip_names(
 		... )
 	"""
 	matcher = name_matcher if name_matcher is not None else _pick_available_name
-	
+
 	recommended_clip_names = [name for name in list(preset.get("clip_names", [])) if str(name or "").strip()]
-	
+
 	# 无推荐名称时使用 legacy 名称
 	if not recommended_clip_names:
 		resolved: list[str] = []
@@ -277,7 +277,7 @@ def gjjutils_model_family_resolve_clip_names(
 			if chosen:
 				resolved.append(chosen)
 		return resolved
-	
+
 	# Flux 特殊处理：clip_l + 可选 T5
 	if (_normalize_text(preset.get("clip_type", "")) == "flux"
 		and _normalize_text(recommended_clip_names[0]) == "clipl.safetensors"):
@@ -294,7 +294,7 @@ def gjjutils_model_family_resolve_clip_names(
 		resolved = [name for name in [clip_l_name, optional_name] if str(name or "").strip()]
 		if resolved:
 			return resolved
-	
+
 	# 通用处理：逐个匹配推荐名称
 	resolved = []
 	for recommended_name in recommended_clip_names:
@@ -311,7 +311,7 @@ def gjjutils_model_family_pick_lora_name(
 	match_mode: str = "flexible",
 ) -> str:
 	"""从可用 LoRA 列表中选择最匹配的名称（支持多种匹配模式）。
-	
+
 	Args:
 		requested: 请求的 LoRA 名称
 		available: 可用的 LoRA 名称列表
@@ -320,17 +320,17 @@ def gjjutils_model_family_pick_lora_name(
 			- "exact": 仅精确匹配
 			- "basename": 仅 basename 匹配
 			- "flexible": 灵活匹配（默认，支持部分包含）
-		
+
 	Returns:
 		最佳匹配的 LoRA 名称，未找到则返回空字符串
-		
+
 	Example:
 		>>> # 基本用法（灵活匹配）
 		>>> lora_name = gjjutils_model_family_pick_lora_name(
 		...     "lightning-lora.safetensors",
 		...     available_loras
 		... )
-		
+
 		>>> # 严格精确匹配
 		>>> lora_name = gjjutils_model_family_pick_lora_name(
 		...     "exact-name.safetensors",
@@ -341,29 +341,29 @@ def gjjutils_model_family_pick_lora_name(
 	requested = str(requested or "").strip()
 	if not requested:
 		return ""
-	
+
 	if match_mode == "exact":
 		# 仅精确匹配
 		if requested in available:
 			return requested
 		fallback = str(fallback or "").strip()
 		return fallback if fallback in available else ""
-	
+
 	# 灵活匹配模式（默认）
 	if requested in available:
 		return requested
-	
+
 	# 尝试 basename 精确匹配和部分包含匹配
 	requested_basename = requested.replace("/", "\\").split("\\")[-1] if requested else ""
 	requested_canonical = _canonical_model_text(requested_basename or requested)
-	
+
 	if requested_canonical:
 		for candidate in available:
 			candidate_text = str(candidate or "").strip()
 			candidate_basename = candidate_text.replace("/", "\\").split("\\")[-1]
 			candidate_canonical = _canonical_model_text(candidate_basename)
 			full_canonical = _canonical_model_text(candidate_text)
-			
+
 			if match_mode == "basename":
 				# 仅 basename 匹配
 				if candidate_canonical == requested_canonical:
@@ -374,22 +374,22 @@ def gjjutils_model_family_pick_lora_name(
 					or requested_canonical in candidate_canonical
 					or requested_canonical in full_canonical):
 					return candidate_text
-	
+
 	# 尝试 fallback
 	fallback = str(fallback or "").strip()
 	if fallback and fallback in available:
 		return fallback
-	
+
 	fallback_basename = fallback.replace("/", "\\").split("\\")[-1] if fallback else ""
 	fallback_canonical = _canonical_model_text(fallback_basename or fallback)
-	
+
 	if fallback_canonical:
 		for candidate in available:
 			candidate_text = str(candidate or "").strip()
 			candidate_basename = candidate_text.replace("/", "\\").split("\\")[-1]
 			candidate_canonical = _canonical_model_text(candidate_basename)
 			full_canonical = _canonical_model_text(candidate_text)
-			
+
 			if match_mode == "basename":
 				if candidate_canonical == fallback_canonical:
 					return candidate_text
@@ -398,7 +398,7 @@ def gjjutils_model_family_pick_lora_name(
 					or fallback_canonical in candidate_canonical
 					or fallback_canonical in full_canonical):
 					return candidate_text
-	
+
 	return ""
 
 
@@ -409,7 +409,7 @@ def gjjutils_model_family_pick_model_name(
 	match_strategy: str = "basename",
 ) -> str:
 	"""从可用模型列表中选择最匹配的名称（支持多种匹配策略）。
-	
+
 	Args:
 		requested: 请求的模型名称
 		available: 可用的模型名称列表
@@ -418,17 +418,17 @@ def gjjutils_model_family_pick_model_name(
 			- "exact": 仅精确匹配
 			- "basename": basename 匹配（默认）
 			- "canonical": 规范化匹配（去除所有特殊字符）
-		
+
 	Returns:
 		最佳匹配的模型名称
-		
+
 	Example:
 		>>> # 基本用法（basename 匹配）
 		>>> vae_name = gjjutils_model_family_pick_model_name(
 		...     "flux2-vae.safetensors",
 		...     available_vaes
 		... )
-		
+
 		>>> # 使用规范化匹配
 		>>> model_name = gjjutils_model_family_pick_model_name(
 		...     "my-model_v1",
@@ -439,13 +439,13 @@ def gjjutils_model_family_pick_model_name(
 	requested = str(requested or "").strip()
 	if not requested:
 		return str(fallback or "").strip()
-	
+
 	if match_strategy == "exact":
 		if requested in available:
 			return requested
 		fallback = str(fallback or "").strip()
 		return fallback if fallback in available else ""
-	
+
 	# 使用内部实现（支持 basename 和 canonical 匹配）
 	return _pick_available_name(requested, available, fallback)
 
@@ -554,25 +554,25 @@ def gjjutils_pick_available_model_name(
     allow_first: bool = False,
 ) -> str:
     """从可用模型列表中选择最匹配的名称。
-    
+
     支持多种匹配策略：精确匹配、basename 匹配、模糊匹配。
-    
+
     Args:
         preferred: 首选模型名称
         available: 可用的模型名称列表
         fallback: 备选模型名称
         allow_first: 如果为 True，无匹配时返回第一个可用模型
-        
+
     Returns:
         最佳匹配的模型名称，未找到则返回空字符串或 fallback
-        
+
     Example:
         >>> # 基本用法
         >>> model_name = gjjutils_pick_available_model_name(
         ...     "flux-dev.safetensors",
         ...     available_models
         ... )
-        
+
         >>> # 允许返回第一个可用模型
         >>> model_name = gjjutils_pick_available_model_name(
         ...     "unknown-model.safetensors",
@@ -638,7 +638,21 @@ FLOAT_FIELDS = {
 }
 BOOL_FIELDS = {"supports_multi_image_edit"}
 
-PRESET_TABLE_PATH = Path(__file__).resolve().parent.parent / "presets" / "model_family_presets.tsv"
+# 查找预设文件路径：从当前文件向上查找，直到找到包含 presets 目录的位置
+def _find_preset_root() -> Path:
+	"""动态查找预设文件根目录。"""
+	current = Path(__file__).resolve().parent
+	# 向上最多查找5级目录
+	for _ in range(5):
+		presets_dir = current / "presets"
+		if presets_dir.exists() and presets_dir.is_dir():
+			return presets_dir
+		current = current.parent
+	# 如果找不到，回退到默认位置（相对于当前文件的三级父目录）
+	return Path(__file__).resolve().parent.parent.parent / "presets"
+
+PRESET_ROOT = _find_preset_root()
+PRESET_TABLE_PATH = PRESET_ROOT / "model_family_presets.tsv"
 
 
 def _parse_bool(value: str) -> bool:
@@ -712,10 +726,10 @@ def _find_preset_header_index(lines: list[str]) -> int:
 @lru_cache(maxsize=1)
 def gjjutils_load_model_family_presets() -> list[dict[str, Any]]:
 	"""加载模型族预设表（带缓存）。
-	
+
 	Returns:
 		预设列表，每个元素是一个包含配置项的字典
-		
+
 	Example:
 		>>> presets = gjjutils_load_model_family_presets()
 		>>> print(len(presets))  # 预设数量
@@ -731,14 +745,14 @@ def gjjutils_match_model_family_preset(
 	presets: list[dict[str, Any]] | None = None
 ) -> dict[str, Any] | None:
 	"""根据 UNET 名称匹配模型族预设（简化版）。
-	
+
 	Args:
 		unet_name: UNET 模型名称
 		presets: 可选的预设列表，默认为加载的预设表
-		
+
 	Returns:
 		匹配的预设字典，未匹配则返回 None
-		
+
 	Example:
 		>>> preset = gjjutils_match_model_family_preset("flux-dev.safetensors")
 		>>> if preset:

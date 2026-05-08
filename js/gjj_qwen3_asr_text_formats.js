@@ -422,9 +422,13 @@ import { api } from "/scripts/api.js";
                             const status = node.__gjjQwen3Status;
                             if (status?.textDisplay) {
                                 status.textDisplay.textContent = textList;
+                                status.textDisplay.style.color = "#c8d6e5";
                                 // 显示复制按钮
                                 if (status.copyBtn) {
                                     status.copyBtn.style.display = "block";
+                                    status.copyBtn.textContent = "📋";
+                                    status.copyBtn.title = "复制生成的文本到剪贴板";
+                                    status.copyBtn.style.background = "#4a5a6a";
                                 }
                                 setStatus(node, "文本已生成");
                             }
@@ -433,6 +437,74 @@ import { api } from "/scripts/api.js";
                     }
                 } catch (err) {
                     console.error("[GJJ] 处理文本生成事件失败:", err);
+                }
+            });
+
+            // 监听后端发送的运行时错误事件（包含安装命令）
+            api.addEventListener("gjj_qwen3_error", (event) => {
+                try {
+                    const data = event.detail || {};
+                    const nodeId = data.node;
+                    const errorMessage = data.error || "";
+                    const installCommand = data.install_command || "";
+
+                    if (!nodeId || !errorMessage) return;
+
+                    // 查找对应的节点
+                    const nodes = app.graph?._nodes || [];
+                    for (const node of nodes) {
+                        if (String(node.id) === String(nodeId)) {
+                            const status = node.__gjjQwen3Status;
+                            if (status?.textDisplay) {
+                                // 显示错误信息
+                                let displayText = `❌ 执行失败：\n\n${errorMessage}`;
+
+                                // 如果有安装命令，添加提示
+                                if (installCommand) {
+                                    displayText += `\n\n🔧 快速安装命令（点击按钮复制）：`;
+                                }
+
+                                status.textDisplay.textContent = displayText;
+                                status.textDisplay.style.color = "#ff6b6b";
+
+                                // 显示复制按钮
+                                if (status.copyBtn) {
+                                    status.copyBtn.style.display = "block";
+                                    status.copyBtn.textContent = "📋 复制安装命令";
+                                    status.copyBtn.title = "复制安装命令到剪贴板";
+                                    status.copyBtn.style.background = "#ff4757";
+                                    status.copyBtn.style.color = "#fff";
+
+                                    // 更新复制按钮事件，复制安装命令
+                                    const newCopyBtn = status.copyBtn.cloneNode(true);
+                                    status.copyBtn.parentNode.replaceChild(newCopyBtn, status.copyBtn);
+                                    status.copyBtn = newCopyBtn;
+
+                                    status.copyBtn.addEventListener("click", () => {
+                                        if (installCommand) {
+                                            navigator.clipboard.writeText(installCommand).then(() => {
+                                                const originalText = status.copyBtn.textContent;
+                                                status.copyBtn.textContent = "✅ 已复制";
+                                                status.copyBtn.style.background = "#2ed573";
+                                                setTimeout(() => {
+                                                    status.copyBtn.textContent = originalText;
+                                                    status.copyBtn.style.background = "#ff4757";
+                                                }, 1500);
+                                            }).catch(err => {
+                                                console.error("[GJJ] 复制失败:", err);
+                                                alert("复制失败，请手动选择安装命令复制");
+                                            });
+                                        }
+                                    });
+                                }
+
+                                setStatus(node, "执行失败");
+                            }
+                            break;
+                        }
+                    }
+                } catch (err) {
+                    console.error("[GJJ] 处理错误事件失败:", err);
                 }
             });
         },

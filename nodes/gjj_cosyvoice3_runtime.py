@@ -98,6 +98,20 @@ def send_audio_preview(unique_id: Any, audio_ui: dict[str, Any]) -> None:
 		pass
 
 
+def send_error_to_frontend(unique_id: Any, error_message: str, install_command: str = ""):
+	"""将错误信息和安装命令发送给前端"""
+	try:
+		from server import PromptServer
+
+		PromptServer.instance.send_sync("gjj_cosyvoice3_error", {
+			"node": str(unique_id),
+			"error": error_message,
+			"install_command": install_command,
+		})
+	except Exception:
+		pass
+
+
 def _normalize_key(value: str) -> str:
 	return (
 		str(value or "")
@@ -197,18 +211,41 @@ def load_cosyvoice_model(model_name: str, unique_id: Any = None) -> dict[str, An
 	try:
 		from cosyvoice.cli.cosyvoice import AutoModel  # type: ignore  # noqa: F811
 	except ImportError as exc:
-		raise RuntimeError(
-			"CosyVoice3 运行时导入失败，请先补齐 CosyVoice3 的 Python 依赖。\n"
-			"\n"
-			"🔧 快速安装命令（使用国内镜像）：\n"
-			"pip install cosyvoice soundfile -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
-			"\n"
-			"或者逐个安装：\n"
-			"pip install cosyvoice -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
-			"pip install soundfile -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
-			"\n"
-			f"原始导入错误：{exc}"
-		) from exc
+		from .common_utils.dependency_checker import print_runtime_dependency_error, get_pip_install_command_text
+		
+		install_cmd = get_pip_install_command_text("cosyvoice==0.0.7 soundfile")
+		
+		description = (
+			"CosyVoice3 节点需要以下依赖：\n"
+			"• cosyvoice (语音合成模型)\n"
+			"• soundfile (音频处理)\n\n"
+			"📌 安装建议：\n"
+			"1. 先升级 pip：\n"
+			"   pip install --upgrade pip\n"
+			"2. 安装构建工具（如果需要）：\n"
+			"   pip install setuptools wheel\n"
+			"3. 尝试安装指定版本：\n"
+			"   pip install cosyvoice==0.0.7 soundfile\n"
+			"4. 如果仍失败，从源码安装：\n"
+			"   git clone https://github.com/modelscope/CosyVoice.git\n"
+			"   cd CosyVoice && pip install -e .\n"
+			"5. 确保已安装 PyTorch 和 CUDA"
+		)
+
+		# 打印美观的控制台错误提示
+		print_runtime_dependency_error(
+			node_name="CosyVoice3",
+			dependency_name="cosyvoice",
+			install_command=install_cmd,
+			description=description,
+			extra_info=f"原始导入错误：{exc}"
+		)
+
+		# 发送错误事件到前端
+		send_error_to_frontend(unique_id, "运行时依赖缺失：cosyvoice", install_cmd)
+
+		# 抛出简洁的错误信息（在前端显示）
+		raise RuntimeError("运行时依赖缺失：cosyvoice。详细信息请查看控制台。") from exc
 
 	model_dir = ensure_model_dir(model_name, unique_id)
 	cache_key = model_dir
@@ -232,14 +269,21 @@ def _ensure_soundfile():
 		import soundfile as sf  # noqa: F811
 		return sf
 	except ImportError as exc:
-		raise RuntimeError(
-			"CosyVoice3 需要 soundfile 库来处理音频文件。\n"
-			"\n"
-			"🔧 快速安装命令（使用国内镜像）：\n"
-			"pip install soundfile -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
-			"\n"
-			f"原始错误：{exc}"
-		) from exc
+		from .common_utils.dependency_checker import print_runtime_dependency_error, get_pip_install_command_text
+
+		install_cmd = get_pip_install_command_text("soundfile")
+
+		# 打印美观的控制台错误提示
+		print_runtime_dependency_error(
+			node_name="CosyVoice3",
+			dependency_name="soundfile",
+			install_command=install_cmd,
+			description="该节点需要 soundfile 库来处理音频文件",
+			extra_info=f"原始导入错误：{exc}"
+		)
+
+		# 抛出简洁的错误信息（在前端显示）
+		raise RuntimeError("运行时依赖缺失：soundfile。详细信息请查看控制台。") from exc
 
 
 def get_speaker_dir() -> str:

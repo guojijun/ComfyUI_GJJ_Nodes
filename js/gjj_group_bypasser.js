@@ -158,7 +158,7 @@ function syncFilterToOriginalWidget(node) {
 function hydrateStateFromSerialized(node, serialized) {
 	const state = ensureNodeState(node);
 	const values = Array.isArray(serialized?.widgets_values) ? serialized.widgets_values : [];
-	
+
 	// 尝试从 properties 恢复，如果没有则从 widgets_values 恢复
 	const savedMode = serialized?.properties?.[MODE_NAME];
 	if (savedMode && MODE_VALUES.includes(savedMode)) {
@@ -183,11 +183,56 @@ function makeDomWidgetSize(widget, height) {
 	return widget;
 }
 
+function selectAllGroups(node) {
+	const matchedGroups = getMatchedGroups(node);
+	setActiveGroupRefs(node, matchedGroups);
+	syncGroupButtonStates(node, new Set(matchedGroups));
+	applyMatchedGroupModes(node);
+	updateMasterToggleButton(node);
+	node.graph?.change?.();
+	node.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function deselectAllGroups(node) {
+	setActiveGroupRefs(node, []);
+	syncGroupButtonStates(node, new Set());
+	applyMatchedGroupModes(node);
+	updateMasterToggleButton(node);
+	node.graph?.change?.();
+	node.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function isAllGroupsSelected(node) {
+	const matchedGroups = getMatchedGroups(node);
+	if (matchedGroups.length === 0) return false;
+	const activeGroups = getActiveGroupRefs(node);
+	return matchedGroups.every(group => activeGroups.has(group));
+}
+
+function updateMasterToggleButton(node) {
+	const toggleBtn = node.__gjjMasterToggleBtn;
+	if (!toggleBtn) return;
+
+	const allSelected = isAllGroupsSelected(node);
+	toggleBtn.textContent = allSelected ? "🟢" : "🔴";
+	toggleBtn.title = allSelected ? "点击全部旁路" : "点击全部打开";
+	toggleBtn.style.background = allSelected ? "#3d7c47" : "#8b2a2a";
+}
+
+function updateMasterToggleVisibility(node) {
+	const toggleBtn = node.__gjjMasterToggleBtn;
+	if (!toggleBtn) return;
+
+	toggleBtn.style.display = getSelectionMode(node) === MODE_MULTI ? "block" : "none";
+}
+
 // 使用并排切换按钮替代下拉框（类似ReActor的OFF/ON）
 function buildModeControls(node) {
 	const state = ensureNodeState(node);
 	const currentMode = state[MODE_NAME];
-	
+
 	// 创建模式切换按钮容器
 	const container = document.createElement("div");
 	container.className = "gjj-mode-toggle-container";
@@ -195,11 +240,11 @@ function buildModeControls(node) {
 		"box-sizing:border-box",
 		"width:100%",
 		"display:flex",
-		"gap:0",
+		"gap:4px",
 		"padding:4px 0",
 		"margin:0",
 	].join(";");
-	
+
 	// 创建两个按钮：单选和多选
 	MODE_VALUES.forEach((modeValue) => {
 		const isActive = modeValue === currentMode;
@@ -213,21 +258,21 @@ function buildModeControls(node) {
 			"padding:6px 12px",
 			"border:1px solid #3b5560",
 			"border-radius:6px",
-			"background:#20323a",
+			"background:#2a3f4a",
 			"color:#edf6fa",
 			"font:700 13px sans-serif",
 			"cursor:pointer",
 			"transition:all 0.2s ease",
-			isActive ? "background:#1f6b43;border-color:#48ad73;color:#fff" : "",
+			isActive ? "background:#2d5a9e;border-color:#5aa8ff;color:#fff" : "",
 		].join(";");
-		
+
 		button.addEventListener("click", (event) => {
 			event.preventDefault();
 			event.stopPropagation();
-			
+
 			// 更新模式
 			updateSelectionMode(node, modeValue);
-			
+
 			// 处理单选模式下的分组状态
 			let activeGroups = getActiveGroupRefs(node);
 			if (modeValue === MODE_SINGLE && activeGroups.size > 1) {
@@ -235,38 +280,76 @@ function buildModeControls(node) {
 				activeGroups = new Set(firstGroup ? [firstGroup] : []);
 			}
 			setActiveGroupRefs(node, activeGroups);
-			
+
 			// 同步所有分组按钮状态
 			syncGroupButtonStates(node, activeGroups);
 			applyMatchedGroupModes(node);
-			
+
 			// 更新按钮样式
 			container.querySelectorAll(".gjj-mode-btn").forEach(btn => {
 				const btnMode = btn.textContent;
 				const isBtnActive = btnMode === modeValue;
 				btn.className = isBtnActive ? "gjj-mode-btn gjj-mode-btn-active" : "gjj-mode-btn";
-				btn.style.background = isBtnActive ? "#1f6b43" : "#20323a";
-				btn.style.borderColor = isBtnActive ? "#48ad73" : "#3b5560";
+				btn.style.background = isBtnActive ? "#2d5a9e" : "#2a3f4a";
+				btn.style.borderColor = isBtnActive ? "#5aa8ff" : "#3b5560";
 				btn.style.color = isBtnActive ? "#fff" : "#edf6fa";
 			});
-			
+
+			// 更新主切换按钮的可见性
+			updateMasterToggleVisibility(node);
+
 			node.graph?.change?.();
 			node.setDirtyCanvas?.(true, true);
 			app.graph?.setDirtyCanvas?.(true, true);
 		});
-		
+
 		container.appendChild(button);
 	});
-	
+
+	// 创建主切换按钮（与模式按钮同一行）
+	const masterToggleBtn = document.createElement("button");
+	masterToggleBtn.type = "button";
+	masterToggleBtn.className = "gjj-master-toggle-btn";
+	const allSelected = isAllGroupsSelected(node);
+	masterToggleBtn.textContent = allSelected ? "🟢" : "🔴";
+	masterToggleBtn.title = allSelected ? "点击全部旁路" : "点击全部打开";
+	masterToggleBtn.style.cssText = [
+		"height:32px",
+		"width:40px",
+		"padding:0",
+		"border:1px solid #3b5560",
+		"border-radius:6px",
+		"background:" + (allSelected ? "#3d7c47" : "#8b2a2a"),
+		"color:#fff",
+		"font:700 16px sans-serif",
+		"cursor:pointer",
+		"transition:all 0.2s ease",
+		"display:" + (currentMode === MODE_MULTI ? "block" : "none"),
+	].join(";");
+
+	masterToggleBtn.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+
+		if (isAllGroupsSelected(node)) {
+			deselectAllGroups(node);
+		} else {
+			selectAllGroups(node);
+		}
+	});
+
+	node.__gjjMasterToggleBtn = masterToggleBtn;
+	container.appendChild(masterToggleBtn);
+
 	// 添加DOM Widget
 	const modeWidget = node.addDOMWidget(MODE_NAME, "HTML", container, {
 		serialize: false,
 		hideOnZoom: false,
 	});
-	
+
 	modeWidget.value = currentMode;
 	modeWidget.__gjjModeToggle = true;
-	
+
 	return modeWidget;
 }
 
@@ -327,6 +410,7 @@ function createGroupButtonWidget(node, group, isActive) {
 		domWidget.value = newState;
 		syncGroupButtonStates(node, activeGroups);
 		applyMatchedGroupModes(node);
+		updateMasterToggleButton(node);
 
 		node.graph?.change?.();
 		node.setDirtyCanvas?.(true, true);
@@ -361,7 +445,7 @@ function buildFilterWidget(node) {
 		value,
 		(newValue) => {
 			updateFilterText(node, newValue);
-			
+
 			// 同步到原始的 Python widget（如果存在）
 			const originalWidget = (node.widgets || []).find((w) => w?.name === FILTER_NAME && w !== widget);
 			if (originalWidget) {
@@ -371,7 +455,7 @@ function buildFilterWidget(node) {
 				}
 				originalWidget.callback?.(newValue);
 			}
-			
+
 			// 使用setTimeout确保DOM更新完成后再重建UI
 			setTimeout(() => {
 				rebuildUI(node);
@@ -422,7 +506,7 @@ function rebuildUI(node) {
 
 	buildModeControls(node);
 	buildFilterWidget(node);
-	
+
 	// 确保关键词值同步到原始 Python widget
 	syncFilterToOriginalWidget(node);
 
@@ -586,7 +670,7 @@ function clearNodeWidgets(node) {
 		if (widget?.element instanceof HTMLElement) {
 			// 清理事件监听器，避免内存泄漏
 			const element = widget.element;
-			
+
 			// 如果元素有 cloneNode 方法，可以用它来清除所有事件监听器
 			if (typeof element.cloneNode === "function") {
 				const cleanElement = element.cloneNode(true);
@@ -597,7 +681,7 @@ function clearNodeWidgets(node) {
 				element.remove();
 			}
 		}
-		
+
 		// 清理自定义属性引用
 		if (widget.__buttonEl) {
 			widget.__buttonEl = null;
