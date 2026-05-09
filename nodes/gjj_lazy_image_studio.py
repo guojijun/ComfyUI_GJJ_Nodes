@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 from typing import Any
 
 import comfy.lora
@@ -20,6 +21,7 @@ from nodes import (
     VAEEncode,
     VAEEncodeForInpaint,
     common_ksampler,
+    PreviewImage,
 )
 
 try:
@@ -88,12 +90,29 @@ def _send_status(unique_id: Any, text: str) -> None:
     try:
         from server import PromptServer
 
+        # 确保text是字符串且不为空
+        status_text = str(text or "").strip()
+        if not status_text:
+            status_text = "处理中..."
+
         PromptServer.instance.send_sync(
             "gjj_node_progress",
-            {"node": str(unique_id), "text": str(text or "")},
+            {"node": str(unique_id), "text": status_text},
         )
-    except Exception:
-        pass
+    except Exception as e:
+        # 添加调试信息，但不要中断主流程
+        print(f"[DEBUG] _send_status failed for node {unique_id}: {str(e)}")
+        try:
+            # 尝试备用方案：直接设置节点状态（如果可用）
+            if hasattr(_send_status, "current_node") and hasattr(
+                _send_status.current_node, "status"
+            ):
+                _send_status.current_node.status = {
+                    "status": "processing",
+                    "message": text,
+                }
+        except Exception:
+            pass
 
 
 def _format_model_missing_error(
@@ -124,7 +143,7 @@ class FlexibleImageStudioInputType(dict):
             return self.data[key]
         text = str(key or "")
         if text.startswith("image_"):
-            return ("IMAGE",)
+            return ("GJJ_BATCH_IMAGE,IMAGE",)
         raise KeyError(key)
 
     def __contains__(self, key):
@@ -713,25 +732,9 @@ def _resolve_lora_suggested_steps(name: str) -> int | None:
 def _resolve_effective_steps(
     requested_steps: int,
     preset: dict[str, Any],
-    lora_1_name: str,
-    lora_1_strength: float,
-    lora_2_name: str,
-    lora_2_strength: float,
 ) -> int:
-    for name, strength in (
-        (lora_1_name, lora_1_strength),
-        (lora_2_name, lora_2_strength),
-    ):
-        if _is_lora_enabled(name, strength):
-            suggested = _resolve_lora_suggested_steps(name)
-            if suggested is not None:
-                return int(suggested)
     base_steps = preset.get("base_steps")
-    if (
-        base_steps is not None
-        and not _is_lora_enabled(lora_1_name, lora_1_strength)
-        and not _is_lora_enabled(lora_2_name, lora_2_strength)
-    ):
+    if base_steps is not None:
         return int(base_steps)
     return int(requested_steps)
 
@@ -754,10 +757,12 @@ class GJJ_LazyImageStudio:
     ]
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("最终生成图像",)
+    OUTPUT_NODE = True  # 设为True以确保节点可以作为有效输出节点
     OUTPUT_TOOLTIPS = ("节点内部完成条件编码、采样和解码后的最终图片。",)
 
     def __init__(self):
         self._lora_cache: dict[str, Any] = {}
+        self.preview_image = PreviewImage()
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -875,46 +880,6 @@ class GJJ_LazyImageStudio:
                         "tooltip": "自动推荐与当前底模同体系的 VAE，可按需手动覆盖。",
                     },
                 ),
-                "lora_1_name": (
-                    lora_models,
-                    {
-                        "default": _preferred_default(
-                            lora_models, DEFAULT_LIGHTNING_LORA
-                        ),
-                        "display_name": "🟢 第1组 LoRA",
-                        "tooltip": "推荐的官方加速 LoRA；常见 4 步或 8 步加速会自动回填步数。",
-                    },
-                ),
-                "lora_1_strength": (
-                    "FLOAT",
-                    {
-                        "default": 1.0,
-                        "min": 0.0,
-                        "max": 4.0,
-                        "step": 0.01,
-                        "display_name": "LoRA 1 强度",
-                        "tooltip": "加速 LoRA 的模型强度。",
-                    },
-                ),
-                "lora_2_name": (
-                    lora_models,
-                    {
-                        "default": _preferred_default(lora_models, DEFAULT_NSFW_LORA),
-                        "display_name": "🟢 第2组 LoRA",
-                        "tooltip": "推荐的第二组 LoRA，例如 NSFW / 功能扩展 LoRA。",
-                    },
-                ),
-                "lora_2_strength": (
-                    "FLOAT",
-                    {
-                        "default": 0.7,
-                        "min": 0.0,
-                        "max": 2.0,
-                        "step": 0.01,
-                        "display_name": "LoRA 2 强度",
-                        "tooltip": "第二组 LoRA 的模型强度。",
-                    },
-                ),
                 "seed": (
                     "INT",
                     {
@@ -959,7 +924,7 @@ class GJJ_LazyImageStudio:
                 "scheduler": (
                     comfy.samplers.KSampler.SCHEDULERS,
                     {
-                        "default": "beta57",
+                        "default": "simple",
                         "display_name": "调度器",
                         "tooltip": "噪声调度器。",
                     },
@@ -998,7 +963,7 @@ class GJJ_LazyImageStudio:
                         },
                     ),
                     "image_01": (
-                        GJJ_BATCH_IMAGE_TYPE,
+                        "GJJ_BATCH_IMAGE,IMAGE",
                         {
                             "display_name": "批量图片",
                             "tooltip": "可直接接入 GJJ · 多图片加载预览器 的批量图片输出；会按顺序拆成多张参考图参与工作流，并在所有图片里不分先后取最大图自动同步尺寸。",
@@ -1047,44 +1012,20 @@ class GJJ_LazyImageStudio:
         model,
         clip,
         clip_type: str,
-        lora_1_name: str,
-        lora_1_strength: float,
-        lora_2_name: str,
-        lora_2_strength: float,
         lora_chain_config: str = "",
+        lora_data: str = "",
     ):
         current_model = model
         current_clip = clip
-        clip_strength = 0.0 if _should_skip_clip_lora_for_family(clip_type) else None
-        if str(lora_1_name or "").strip() and abs(float(lora_1_strength)) > 1e-6:
-            current_model, current_clip = apply_lora_to_model_and_clip(
-                current_model,
-                current_clip,
-                self._load_lora_state(lora_1_name),
-                float(lora_1_strength),
-                (
-                    float(lora_1_strength)
-                    if clip_strength is None
-                    else float(clip_strength)
-                ),
-            )
-        if str(lora_2_name or "").strip() and abs(float(lora_2_strength)) > 1e-6:
-            current_model, current_clip = apply_lora_to_model_and_clip(
-                current_model,
-                current_clip,
-                self._load_lora_state(lora_2_name),
-                float(lora_2_strength),
-                (
-                    float(lora_2_strength)
-                    if clip_strength is None
-                    else float(clip_strength)
-                ),
-            )
-        if str(lora_chain_config or "").strip():
+        # 优先使用 lora_data，如果没有则使用 lora_chain_config
+        final_lora_data = (
+            lora_data if str(lora_data or "").strip() else lora_chain_config
+        )
+        if str(final_lora_data or "").strip():
             current_model, current_clip, _ = apply_lora_chain_config(
                 current_model,
                 current_clip,
-                lora_data=normalize_lora_chain_data(lora_chain_config),
+                lora_data=normalize_lora_chain_data(final_lora_data),
                 loaded_lora_cache=None,
             )
         return current_model, current_clip
@@ -1133,9 +1074,11 @@ class GJJ_LazyImageStudio:
         # 限制最大参考图数量以避免OOM，特别是对于FireRed和qwen-image-edit模型
         MAX_REFERENCE_IMAGES = 3
         if len(pairs) > MAX_REFERENCE_IMAGES:
-            print(f"[WARNING] 参考图数量 ({len(pairs)}) 超过最大限制 ({MAX_REFERENCE_IMAGES})，仅使用前 {MAX_REFERENCE_IMAGES} 张")
+            print(
+                f"[WARNING] 参考图数量 ({len(pairs)}) 超过最大限制 ({MAX_REFERENCE_IMAGES})，仅使用前 {MAX_REFERENCE_IMAGES} 张"
+            )
             pairs = pairs[:MAX_REFERENCE_IMAGES]
-        
+
         # 对于FireRed和qwen-image-edit模型，降低视觉语言编码分辨率以节省显存
         canvas_width, canvas_height = _largest_pair_canvas_size(
             pairs, target_width, target_height
@@ -1143,10 +1086,10 @@ class GJJ_LazyImageStudio:
         image_prompt = ""
         ref_latents: list[torch.Tensor] = []
         vl_images: list[torch.Tensor] = []
-        
+
         # 降低VL处理分辨率以节省显存
         effective_vl_long_edge = min(vl_long_edge, 384)  # 限制最大为384
-        
+
         for slot, pair in enumerate(pairs):
             image = pair["image"]
             prepared_image, _ignore_mask, _ignore_outpaint = (
@@ -1157,15 +1100,18 @@ class GJJ_LazyImageStudio:
             ref_latents.append(vae.encode(prepared_image[:, :, :, :3]))
             vl_image, _ignore_mask, _ignore_outpaint = (
                 _prepare_primary_image_for_target(
-                    prepared_image, int(effective_vl_long_edge), int(effective_vl_long_edge), None
+                    prepared_image,
+                    int(effective_vl_long_edge),
+                    int(effective_vl_long_edge),
+                    None,
                 )
             )
             vl_images.append(vl_image[:, :, :, :3])
             image_prompt += f"Picture {slot + 1}: "
-            
+
             # 及时清理不需要的中间变量以释放显存
             del prepared_image, vl_image
-        
+
         if not ref_latents:
             raise RuntimeError("平等参考模式至少需要一张有效参考图。")
         full_prompt = image_prompt + str(prompt or "")
@@ -1176,10 +1122,10 @@ class GJJ_LazyImageStudio:
         )
         negative = self._encode_negative_conditioning(clip, positive, negative_prompt)
         latent_out = {"samples": torch.zeros_like(ref_latents[0])}
-        
+
         # 清理VL图像列表以释放显存
         del vl_images
-        
+
         return positive, negative, latent_out, canvas_width, canvas_height
 
     def _encode_multi_image_edit(
@@ -1199,26 +1145,28 @@ class GJJ_LazyImageStudio:
         # 限制最大参考图数量以避免OOM
         MAX_REFERENCE_IMAGES = 5
         if len(pairs) > MAX_REFERENCE_IMAGES:
-            print(f"[WARNING] 多图编辑参考图数量 ({len(pairs)}) 超过最大限制 ({MAX_REFERENCE_IMAGES})，仅使用前 {MAX_REFERENCE_IMAGES} 张")
+            print(
+                f"[WARNING] 多图编辑参考图数量 ({len(pairs)}) 超过最大限制 ({MAX_REFERENCE_IMAGES})，仅使用前 {MAX_REFERENCE_IMAGES} 张"
+            )
             # 确保主图在限制范围内
             main_slot = max(0, min(len(pairs) - 1, int(main_image_index) - 1))
             if main_slot >= MAX_REFERENCE_IMAGES:
                 # 如果主图超出限制，将其包含在前MAX_REFERENCE_IMAGES张中
-                selected_pairs = [pairs[main_slot]] + pairs[:MAX_REFERENCE_IMAGES-1]
+                selected_pairs = [pairs[main_slot]] + pairs[: MAX_REFERENCE_IMAGES - 1]
             else:
                 selected_pairs = pairs[:MAX_REFERENCE_IMAGES]
             pairs = selected_pairs
-        
+
         valid_length = len(pairs)
         main_slot = max(0, min(valid_length - 1, int(main_image_index) - 1))
         image_prompt = ""
         main_ref_latent = None
         noise_mask = None
         vl_images: list[torch.Tensor] = []
-        
+
         # 降低VL处理分辨率以节省显存
         effective_vl_long_edge = min(vl_long_edge, 384)
-        
+
         for slot, pair in enumerate(pairs):
             image = pair["image"]
             is_main = slot == main_slot
@@ -1230,21 +1178,27 @@ class GJJ_LazyImageStudio:
                 noise_mask = prepared_mask
                 vl_image, _ignore_mask, _ignore_outpaint = (
                     _prepare_primary_image_for_target(
-                        processed_image, int(effective_vl_long_edge), int(effective_vl_long_edge), None
+                        processed_image,
+                        int(effective_vl_long_edge),
+                        int(effective_vl_long_edge),
+                        None,
                     )
                 )
             else:
                 vl_image, _ignore_mask, _ignore_outpaint = (
                     _prepare_primary_image_for_target(
-                        image, int(effective_vl_long_edge), int(effective_vl_long_edge), None
+                        image,
+                        int(effective_vl_long_edge),
+                        int(effective_vl_long_edge),
+                        None,
                     )
                 )
             vl_images.append(vl_image[:, :, :, :3])
             image_prompt += f"Picture {slot + 1}: "
-            
+
             # 及时清理不需要的中间变量
             del vl_image
-            
+
         if main_ref_latent is None:
             raise RuntimeError("主图参考 latent 生成失败，请检查主图输入是否有效。")
         full_prompt = image_prompt + str(prompt or "")
@@ -1257,11 +1211,58 @@ class GJJ_LazyImageStudio:
         latent_out = {"samples": main_ref_latent}
         if noise_mask is not None:
             latent_out["noise_mask"] = noise_mask
-            
+
         # 清理VL图像列表以释放显存
         del vl_images
-        
+
         return positive, negative, latent_out
+
+    def _build_latent(
+        self, vae, width, height, batch_size, image_pairs, mask, grow_mask_by, preset
+    ):
+        # 检查是否为Flux2模型（32通道）
+        is_flux2_model = False
+        clip_type = preset.get("clip_type", "stable_diffusion")
+        unet_name = preset.get("unet_name", "")
+
+        # 通过UNET名称判断是否为Flux2模型
+        normalized_unet = _normalize_text(unet_name)
+        if "flux2" in normalized_unet:
+            is_flux2_model = True
+
+        # 或者通过clip_type判断
+        if _normalize_text(clip_type) == "flux2":
+            is_flux2_model = True
+
+        if not image_pairs:
+            if _normalize_text(preset.get("clip_type", "")) == "lumina2":
+                if EmptySD3LatentImage is not None:
+                    return EmptySD3LatentImage().generate(
+                        int(width), int(height), int(batch_size)
+                    )[0]
+                else:
+                    # EmptySD3LatentImage 不可用时，使用标准 EmptyLatentImage
+                    return EmptyLatentImage().generate(
+                        int(width), int(height), int(batch_size)
+                    )[0]
+            if is_flux2_model:
+                latent_dict = EmptyFlux2LatentImage(
+                    int(width), int(height), int(batch_size)
+                )
+                return latent_dict
+            return EmptyLatentImage().generate(
+                int(width), int(height), int(batch_size)
+            )[0]
+        main_slot = max(0, min(len(image_pairs) - 1, 0))
+        image = image_pairs[main_slot]["image"]
+        prepared_image, prepared_mask, use_outpaint = _prepare_primary_image_for_target(
+            image, int(width), int(height), mask
+        )
+        if prepared_mask is not None and (use_outpaint or mask is not None):
+            return VAEEncodeForInpaint().encode(
+                vae, prepared_image, prepared_mask, int(grow_mask_by)
+            )[0]
+        return VAEEncode().encode(vae, prepared_image)[0]
 
     def _encode_flux2_multi_reference(
         self,
@@ -1300,53 +1301,6 @@ class GJJ_LazyImageStudio:
         )
         return positive, negative, latent_out, resolved_width, resolved_height
 
-    def _build_latent(
-        self, vae, width, height, batch_size, image_pairs, mask, grow_mask_by, preset
-    ):
-        # 检查是否为Flux2模型（32通道）
-        is_flux2_model = False
-        clip_type = preset.get("clip_type", "stable_diffusion")
-        unet_name = preset.get("unet_name", "")
-        
-        # 通过UNET名称判断是否为Flux2模型
-        normalized_unet = _normalize_text(unet_name)
-        if "flux2" in normalized_unet:
-            is_flux2_model = True
-        
-        # 或者通过clip_type判断
-        if _normalize_text(clip_type) == "flux2":
-            is_flux2_model = True
-            
-        if not image_pairs:
-            if _normalize_text(preset.get("clip_type", "")) == "lumina2":
-                if EmptySD3LatentImage is not None:
-                    return EmptySD3LatentImage().generate(
-                        int(width), int(height), int(batch_size)
-                    )[0]
-                else:
-                    # EmptySD3LatentImage 不可用时，使用标准 EmptyLatentImage
-                    return EmptyLatentImage().generate(
-                        int(width), int(height), int(batch_size)
-                    )[0]
-            if is_flux2_model:
-                latent_dict = EmptyFlux2LatentImage(
-                    int(width), int(height), int(batch_size)
-                )
-                return latent_dict
-            return EmptyLatentImage().generate(
-                int(width), int(height), int(batch_size)
-            )[0]
-        main_slot = max(0, min(len(image_pairs) - 1, 0))
-        image = image_pairs[main_slot]["image"]
-        prepared_image, prepared_mask, use_outpaint = _prepare_primary_image_for_target(
-            image, int(width), int(height), mask
-        )
-        if prepared_mask is not None and (use_outpaint or mask is not None):
-            return VAEEncodeForInpaint().encode(
-                vae, prepared_image, prepared_mask, int(grow_mask_by)
-            )[0]
-        return VAEEncode().encode(vae, prepared_image)[0]
-
     def _load_runtime_pipeline(
         self,
         unet_name: str,
@@ -1372,10 +1326,6 @@ class GJJ_LazyImageStudio:
         unet_dtype,
         clip_name1,
         vae_name,
-        lora_1_name,
-        lora_1_strength,
-        lora_2_name,
-        lora_2_strength,
         seed,
         steps,
         cfg,
@@ -1388,8 +1338,32 @@ class GJJ_LazyImageStudio:
         mask=None,
         prompt_graph=None,
         unique_id=None,
+        extra_pnginfo=None,
         **kwargs,
     ):
+        # 从 properties 读取 lora_data（通过 extra_pnginfo + unique_id）
+        lora_data = ""
+        try:
+            if extra_pnginfo and isinstance(extra_pnginfo, dict):
+                workflow = extra_pnginfo.get("workflow", {})
+                if isinstance(workflow, dict):
+                    nodes = workflow.get("nodes", [])
+                    if isinstance(nodes, list):
+                        uid = str(unique_id)
+                        for n in nodes:
+                            if isinstance(n, dict) and str(n.get("id")) == uid:
+                                props = n.get("properties", {}) or {}
+                                lora_data = str(props.get("lora_data", ""))
+                                break
+        except Exception:
+            lora_data = ""
+
+        # 设置当前节点引用用于状态更新
+        _send_status.current_node = self
+
+        # 记录开始时间
+        start_time = time.time()
+
         try:
             _send_status(unique_id, "1/6 解析模型配套...")
             preset = match_model_family(unet_name)
@@ -1431,12 +1405,6 @@ class GJJ_LazyImageStudio:
             resolved_vae_name = _pick_available_name(
                 preset.get("vae_name", DEFAULT_VAE_NAME), vae_models, vae_name
             )
-            resolved_lora_1_name = _pick_available_lora_name(
-                lora_1_name, lora_models, preset.get("lora_1_name", "")
-            )
-            resolved_lora_2_name = _pick_available_lora_name(
-                lora_2_name, lora_models, preset.get("lora_2_name", "")
-            )
             resolved_clip_type = resolve_clip_type(
                 unet_name,
                 resolved_clip_names,
@@ -1467,11 +1435,8 @@ class GJJ_LazyImageStudio:
                 model,
                 clip,
                 resolved_clip_type,
-                resolved_lora_1_name,
-                lora_1_strength,
-                resolved_lora_2_name,
-                lora_2_strength,
                 lora_chain_config,
+                lora_data,
             )
             model = _patch_model_sampling(
                 model,
@@ -1559,10 +1524,6 @@ class GJJ_LazyImageStudio:
             effective_steps = _resolve_effective_steps(
                 int(steps),
                 preset,
-                resolved_lora_1_name,
-                lora_1_strength,
-                resolved_lora_2_name,
-                lora_2_strength,
             )
             if flux2_sample_size is not None:
                 flux2_width, flux2_height = flux2_sample_size
@@ -1598,8 +1559,26 @@ class GJJ_LazyImageStudio:
 
             _send_status(unique_id, "6/6 解码输出图像...")
             image = VAEDecode().decode(vae, sampled_latent)[0]
-            _send_status(unique_id, f"完成：{image.shape[2]} x {image.shape[1]}")
-            return (image,)
+
+            # 计算耗时
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            elapsed_str = f"{elapsed_time:.1f}s"
+
+            # 更新状态，显示尺寸和耗时
+            _send_status(unique_id, f"完成：{image.shape[2]} x {image.shape[1]} ⏰ 耗时：{elapsed_str}")
+
+            # 保存预览图片并返回 UI 数据
+            preview_ui = self.preview_image.save_images(
+                image,
+                filename_prefix="GJJ_LazyImageStudio",
+                prompt=prompt,
+                extra_pnginfo=extra_pnginfo,
+            )
+            preview_images = preview_ui.get("ui", {}).get("images", [])
+
+            # 返回 UI 数据，包含图片和耗时
+            return {"ui": {"images": preview_images, "elapsed_time": [elapsed_time]}, "result": (image,)}
         except RuntimeError as exc:
             _send_status(unique_id, f"执行失败：{str(exc).splitlines()[0]}")
             raise

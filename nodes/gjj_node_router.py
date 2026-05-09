@@ -14,23 +14,6 @@ class GJJ_NodeRouter:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "optional": {
-                "过滤关键词": (
-                    "STRING",
-                    {
-                        "default": "",
-                        "multiline": False,
-                        "tooltip": "输入节点名称中的关键词进行筛选；留空时显示当前工作流中的全部节点。",
-                    },
-                ),
-                "选择模式": (
-                    ["单选", "多选"],
-                    {
-                        "default": "单选",
-                        "tooltip": "单选时节点按钮互斥，只能启用一个节点；多选时可以同时启用多个匹配节点。",
-                    },
-                ),
-            },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
             },

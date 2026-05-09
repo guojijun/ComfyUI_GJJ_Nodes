@@ -40,20 +40,6 @@ class GJJ_LTX_FirstLastFrame:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "positive": (
-                    "CONDITIONING",
-                    {
-                        "display_name": "正向条件",
-                        "tooltip": "接 LTXVConditioning 的正向输出；节点会在其中追加首帧/尾帧 guide 信息。",
-                    },
-                ),
-                "negative": (
-                    "CONDITIONING",
-                    {
-                        "display_name": "反向条件",
-                        "tooltip": "接 LTXVConditioning 的反向输出；会与正向条件同步追加 guide 信息。",
-                    },
-                ),
                 "vae": (
                     "VAE",
                     {
@@ -92,6 +78,20 @@ class GJJ_LTX_FirstLastFrame:
                 ),
             },
             "optional": {
+                "positive": (
+                    "CONDITIONING",
+                    {
+                        "display_name": "正向条件",
+                        "tooltip": "接 LTXVConditioning 的正向输出；节点会在其中追加首帧/尾帧 guide 信息。",
+                    },
+                ),
+                "negative": (
+                    "CONDITIONING",
+                    {
+                        "display_name": "反向条件",
+                        "tooltip": "接 LTXVConditioning 的反向输出；会与正向条件同步追加 guide 信息。",
+                    },
+                ),
                 "first_image": (
                     "IMAGE",
                     {
@@ -157,12 +157,12 @@ class GJJ_LTX_FirstLastFrame:
 
     def execute(
         self,
-        positive,
-        negative,
         vae,
         latent: dict[str, Any],
         first_strength: float,
         last_strength: float,
+        positive=None,
+        negative=None,
         first_image: torch.Tensor | None = None,
         last_image: torch.Tensor | None = None,
     ):
@@ -180,6 +180,10 @@ class GJJ_LTX_FirstLastFrame:
         if not has_first and not has_last:
             self._log("未连接首帧或尾帧，直接透传。")
             return (positive_out, negative_out, latent_out)
+
+        if positive_out is None:
+            self._log("未连接正向条件，跳过引导。")
+            return (None, negative_out if negative_out is not None else None, latent_out)
 
         LTXVAddGuide = _get_ltxv_add_guide()
 

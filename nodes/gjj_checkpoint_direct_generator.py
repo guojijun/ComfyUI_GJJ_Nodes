@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import time
 
 import comfy.samplers
 import folder_paths
@@ -11,14 +12,15 @@ from nodes import (
     EmptyLatentImage,
     KSampler,
     VAEDecode,
+    PreviewImage,
 )
 from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
 
 
 NODE_NAME = "GJJ_CheckpointDirectGenerator"
 DEFAULT_CHECKPOINT = ""
-DEFAULT_POSITIVE = ""
-DEFAULT_NEGATIVE = ""
+DEFAULT_POSITIVE = "masterpiece, best quality, highly detailed"
+DEFAULT_NEGATIVE = "lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry"
 DEFAULT_WIDTH = 512
 DEFAULT_HEIGHT = 512
 DEFAULT_BATCH_SIZE = 1
@@ -60,16 +62,23 @@ def _list_supported_checkpoints() -> list[str]:
 
 def _send_status(unique_id: Any, text: str) -> None:
     if not unique_id:
+        print(f"[GJJ Checkpoint] ️ _send_status 跳过：unique_id 为空，文本={text}")
         return
     try:
         from server import PromptServer
 
+        status_text = str(text or "").strip()
+        if not status_text:
+            status_text = "处理中..."
+
+        print(f"[GJJ Checkpoint]  发送状态：node_id={unique_id}, text={status_text}")
+
         PromptServer.instance.send_sync(
             "gjj_node_progress",
-            {"node": str(unique_id), "text": str(text or "")},
+            {"node": str(unique_id), "text": status_text},
         )
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[GJJ Checkpoint] ❌ _send_status 失败：{str(e)}")
 
 
 def _send_lora_applied(unique_id: Any, payload: dict[str, Any]) -> None:
@@ -118,6 +127,7 @@ def _unsupported_checkpoint_error(ckpt_name: str) -> RuntimeError:
 class GJJ_CheckpointDirectGenerator:
     CATEGORY = "GJJ"
     FUNCTION = "generate"
+    OUTPUT_NODE = True  # ✅ 标记为输出节点，允许单节点执行
     DESCRIPTION = "单节点加载底模 checkpoint 直接出图，内部自动完成提示词编码、latent 创建、采样和 VAE 解码。"
     SEARCH_ALIASES = [
         "checkpoint",
@@ -133,6 +143,7 @@ class GJJ_CheckpointDirectGenerator:
 
     def __init__(self):
         self.loaded_lora: tuple[str, Any] | None = None
+        self.preview_image = PreviewImage()
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -145,7 +156,7 @@ class GJJ_CheckpointDirectGenerator:
                     checkpoints,
                     {
                         "default": _preferred_default(checkpoints, DEFAULT_CHECKPOINT),
-                        "display_name": "底模模型",
+                        "display_name": "🎨 底模模型",
                         "tooltip": "直接从 ComfyUI 的 checkpoints 列表中选择要加载的主模型，支持子目录条目。",
                     },
                 ),
@@ -153,9 +164,9 @@ class GJJ_CheckpointDirectGenerator:
                     "STRING",
                     {
                         "default": DEFAULT_POSITIVE,
-                        "multiline": True,
+                        "multiline": False,
                         "dynamicPrompts": True,
-                        "display_name": "正向提示词",
+                        "display_name": "✨ 正向提示词",
                         "tooltip": "描述想要生成内容的正向提示词。",
                     },
                 ),
@@ -163,9 +174,9 @@ class GJJ_CheckpointDirectGenerator:
                     "STRING",
                     {
                         "default": DEFAULT_NEGATIVE,
-                        "multiline": True,
+                        "multiline": False,
                         "dynamicPrompts": True,
-                        "display_name": "反向提示词",
+                        "display_name": "🚫 反向提示词",
                         "tooltip": "描述不希望出现内容的反向提示词；留空时会按空白提示词编码。",
                     },
                 ),
@@ -176,7 +187,7 @@ class GJJ_CheckpointDirectGenerator:
                         "min": 64,
                         "max": 8192,
                         "step": 8,
-                        "display_name": "宽度",
+                        "display_name": "📐 宽度",
                         "tooltip": "输出图片宽度，建议按当前 checkpoint 的推荐分辨率设置。",
                     },
                 ),
@@ -187,7 +198,7 @@ class GJJ_CheckpointDirectGenerator:
                         "min": 64,
                         "max": 8192,
                         "step": 8,
-                        "display_name": "高度",
+                        "display_name": "📏 高度",
                         "tooltip": "输出图片高度，建议按当前 checkpoint 的推荐分辨率设置。",
                     },
                 ),
@@ -197,7 +208,7 @@ class GJJ_CheckpointDirectGenerator:
                         "default": DEFAULT_BATCH_SIZE,
                         "min": 1,
                         "max": 64,
-                        "display_name": "批次数",
+                        "display_name": "🔢 批次数",
                         "tooltip": "一次采样输出的图片批次数，返回值仍是标准 IMAGE 批量张量。",
                     },
                 ),
@@ -208,7 +219,7 @@ class GJJ_CheckpointDirectGenerator:
                         "min": 0,
                         "max": 0xFFFFFFFFFFFFFFFF,
                         "control_after_generate": True,
-                        "display_name": "种子",
+                        "display_name": "🎲 种子",
                         "tooltip": "随机种子；开启生成后自动变化时可快速连刷不同结果。",
                     },
                 ),
@@ -218,7 +229,7 @@ class GJJ_CheckpointDirectGenerator:
                         "default": DEFAULT_STEPS,
                         "min": 1,
                         "max": 10000,
-                        "display_name": "步数",
+                        "display_name": "👣 步数",
                         "tooltip": "扩散采样步数，通常步数越高越稳定，但耗时也越长。",
                     },
                 ),
@@ -230,7 +241,7 @@ class GJJ_CheckpointDirectGenerator:
                         "max": 100.0,
                         "step": 0.1,
                         "round": 0.01,
-                        "display_name": "CFG 引导强度",
+                        "display_name": "⚖️ CFG 引导强度",
                         "tooltip": "提示词引导强度；数值越高，结果越贴近提示词，但也更容易过拟合。",
                     },
                 ),
@@ -238,7 +249,7 @@ class GJJ_CheckpointDirectGenerator:
                     samplers,
                     {
                         "default": _preferred_default(samplers, DEFAULT_SAMPLER),
-                        "display_name": "采样器",
+                        "display_name": "🌀 采样器",
                         "tooltip": "选择本次采样使用的采样算法。",
                     },
                 ),
@@ -246,7 +257,7 @@ class GJJ_CheckpointDirectGenerator:
                     schedulers,
                     {
                         "default": _preferred_default(schedulers, DEFAULT_SCHEDULER),
-                        "display_name": "调度器",
+                        "display_name": "📊 调度器",
                         "tooltip": "选择噪声调度策略；不同 checkpoint 的最佳搭配可能不同。",
                     },
                 ),
@@ -255,7 +266,7 @@ class GJJ_CheckpointDirectGenerator:
                 "lora_chain_config": (
                     "LORA_CHAIN_CONFIG",
                     {
-                        "display_name": "LoRA串联配置",
+                        "display_name": "🔗 LoRA串联配置",
                         "tooltip": "可选。接入 GJJ · LoRA串联配置 的输出后，会按顺序串联应用多组 LoRA，并同时作用到底模与 CLIP。",
                     },
                 ),
@@ -315,6 +326,7 @@ class GJJ_CheckpointDirectGenerator:
         lora_chain_config="",
         unique_id=None,
     ):
+        start_time = time.time()
         checkpoint_name = str(ckpt_name or "").strip()
         if not checkpoint_name:
             raise RuntimeError("未找到可用 checkpoint 模型，请先把模型放到 models\\checkpoints 目录。")
@@ -322,14 +334,14 @@ class GJJ_CheckpointDirectGenerator:
             raise _unsupported_checkpoint_error(checkpoint_name)
 
         try:
-            _send_status(unique_id, "1/5 加载 checkpoint...")
+            _send_status(unique_id, "⏳ 1/5 加载 checkpoint...")
             try:
                 model, clip, vae = CheckpointLoaderSimple().load_checkpoint(checkpoint_name)
             except Exception as exc:
                 raise _stage_error("加载 checkpoint", checkpoint_name, exc) from exc
 
             if str(lora_chain_config or "").strip():
-                _send_status(unique_id, "2/6 应用 LoRA 串联配置...")
+                _send_status(unique_id, "⏳ 2/6 应用 LoRA 串联配置...")
                 try:
                     model, clip, self.loaded_lora = apply_lora_chain_config(
                         model,
@@ -342,15 +354,15 @@ class GJJ_CheckpointDirectGenerator:
                 except Exception as exc:
                     raise _stage_error("LoRA 串联应用", checkpoint_name, exc) from exc
 
-                encode_step_text = "3/6 编码提示词..."
-                latent_step_text = "4/6 创建 latent..."
-                sample_step_text = "5/6 采样生成..."
-                decode_step_text = "6/6 VAE 解码..."
+                encode_step_text = "⏳ 3/6 编码提示词..."
+                latent_step_text = "⏳ 4/6 创建 latent..."
+                sample_step_text = "⏳ 5/6 采样生成..."
+                decode_step_text = "⏳ 6/6 VAE 解码..."
             else:
-                encode_step_text = "2/5 编码提示词..."
-                latent_step_text = "3/5 创建 latent..."
-                sample_step_text = "4/5 采样生成..."
-                decode_step_text = "5/5 VAE 解码..."
+                encode_step_text = "⏳ 2/5 编码提示词..."
+                latent_step_text = "⏳ 3/5 创建 latent..."
+                sample_step_text = "⏳ 4/5 采样生成..."
+                decode_step_text = "⏳ 5/5 VAE 解码..."
 
             _send_status(unique_id, encode_step_text)
             try:
@@ -388,10 +400,20 @@ class GJJ_CheckpointDirectGenerator:
             except Exception as exc:
                 raise _stage_error("VAE 解码", checkpoint_name, exc) from exc
 
-            _send_status(unique_id, f"完成：{image.shape[2]} x {image.shape[1]}")
-            return (image,)
+            elapsed_time = time.time() - start_time
+            _send_status(unique_id, f"✅ 完成：{image.shape[2]} x {image.shape[1]} | 耗时: {elapsed_time:.2f}s")
+
+            # 保存预览图片并返回 UI 数据
+            preview_ui = self.preview_image.save_images(
+                image,
+                filename_prefix="GJJ_CheckpointDirectGenerator",
+            )
+            preview_images = preview_ui.get("ui", {}).get("images", [])
+
+            return {"ui": {"images": preview_images}, "result": (image,)}
         except RuntimeError as exc:
-            _send_status(unique_id, f"执行失败：{str(exc).splitlines()[0]}")
+            elapsed_time = time.time() - start_time
+            _send_status(unique_id, f"❌ 执行失败：{str(exc).splitlines()[0]} | 耗时: {elapsed_time:.2f}s")
             raise
 
 
