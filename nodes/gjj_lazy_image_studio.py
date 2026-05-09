@@ -1130,12 +1130,23 @@ class GJJ_LazyImageStudio:
         target_width: int = 1024,
         target_height: int = 1024,
     ):
+        # 限制最大参考图数量以避免OOM，特别是对于FireRed和qwen-image-edit模型
+        MAX_REFERENCE_IMAGES = 3
+        if len(pairs) > MAX_REFERENCE_IMAGES:
+            print(f"[WARNING] 参考图数量 ({len(pairs)}) 超过最大限制 ({MAX_REFERENCE_IMAGES})，仅使用前 {MAX_REFERENCE_IMAGES} 张")
+            pairs = pairs[:MAX_REFERENCE_IMAGES]
+        
+        # 对于FireRed和qwen-image-edit模型，降低视觉语言编码分辨率以节省显存
         canvas_width, canvas_height = _largest_pair_canvas_size(
             pairs, target_width, target_height
         )
         image_prompt = ""
         ref_latents: list[torch.Tensor] = []
         vl_images: list[torch.Tensor] = []
+        
+        # 降低VL处理分辨率以节省显存
+        effective_vl_long_edge = min(vl_long_edge, 384)  # 限制最大为384
+        
         for slot, pair in enumerate(pairs):
             image = pair["image"]
             prepared_image, _ignore_mask, _ignore_outpaint = (
@@ -1146,11 +1157,15 @@ class GJJ_LazyImageStudio:
             ref_latents.append(vae.encode(prepared_image[:, :, :, :3]))
             vl_image, _ignore_mask, _ignore_outpaint = (
                 _prepare_primary_image_for_target(
-                    prepared_image, int(vl_long_edge), int(vl_long_edge), None
+                    prepared_image, int(effective_vl_long_edge), int(effective_vl_long_edge), None
                 )
             )
             vl_images.append(vl_image[:, :, :, :3])
             image_prompt += f"Picture {slot + 1}: "
+            
+            # 及时清理不需要的中间变量以释放显存
+            del prepared_image, vl_image
+        
         if not ref_latents:
             raise RuntimeError("平等参考模式至少需要一张有效参考图。")
         full_prompt = image_prompt + str(prompt or "")
@@ -1161,6 +1176,10 @@ class GJJ_LazyImageStudio:
         )
         negative = self._encode_negative_conditioning(clip, positive, negative_prompt)
         latent_out = {"samples": torch.zeros_like(ref_latents[0])}
+        
+        # 清理VL图像列表以释放显存
+        del vl_images
+        
         return positive, negative, latent_out, canvas_width, canvas_height
 
     def _encode_multi_image_edit(
@@ -1177,12 +1196,29 @@ class GJJ_LazyImageStudio:
         target_width: int = 1024,
         target_height: int = 1024,
     ):
+        # 限制最大参考图数量以避免OOM
+        MAX_REFERENCE_IMAGES = 5
+        if len(pairs) > MAX_REFERENCE_IMAGES:
+            print(f"[WARNING] 多图编辑参考图数量 ({len(pairs)}) 超过最大限制 ({MAX_REFERENCE_IMAGES})，仅使用前 {MAX_REFERENCE_IMAGES} 张")
+            # 确保主图在限制范围内
+            main_slot = max(0, min(len(pairs) - 1, int(main_image_index) - 1))
+            if main_slot >= MAX_REFERENCE_IMAGES:
+                # 如果主图超出限制，将其包含在前MAX_REFERENCE_IMAGES张中
+                selected_pairs = [pairs[main_slot]] + pairs[:MAX_REFERENCE_IMAGES-1]
+            else:
+                selected_pairs = pairs[:MAX_REFERENCE_IMAGES]
+            pairs = selected_pairs
+        
         valid_length = len(pairs)
         main_slot = max(0, min(valid_length - 1, int(main_image_index) - 1))
         image_prompt = ""
         main_ref_latent = None
         noise_mask = None
         vl_images: list[torch.Tensor] = []
+        
+        # 降低VL处理分辨率以节省显存
+        effective_vl_long_edge = min(vl_long_edge, 384)
+        
         for slot, pair in enumerate(pairs):
             image = pair["image"]
             is_main = slot == main_slot
@@ -1194,17 +1230,21 @@ class GJJ_LazyImageStudio:
                 noise_mask = prepared_mask
                 vl_image, _ignore_mask, _ignore_outpaint = (
                     _prepare_primary_image_for_target(
-                        processed_image, int(vl_long_edge), int(vl_long_edge), None
+                        processed_image, int(effective_vl_long_edge), int(effective_vl_long_edge), None
                     )
                 )
             else:
                 vl_image, _ignore_mask, _ignore_outpaint = (
                     _prepare_primary_image_for_target(
-                        image, int(vl_long_edge), int(vl_long_edge), None
+                        image, int(effective_vl_long_edge), int(effective_vl_long_edge), None
                     )
                 )
             vl_images.append(vl_image[:, :, :, :3])
             image_prompt += f"Picture {slot + 1}: "
+            
+            # 及时清理不需要的中间变量
+            del vl_image
+            
         if main_ref_latent is None:
             raise RuntimeError("主图参考 latent 生成失败，请检查主图输入是否有效。")
         full_prompt = image_prompt + str(prompt or "")
@@ -1217,6 +1257,10 @@ class GJJ_LazyImageStudio:
         latent_out = {"samples": main_ref_latent}
         if noise_mask is not None:
             latent_out["noise_mask"] = noise_mask
+            
+        # 清理VL图像列表以释放显存
+        del vl_images
+        
         return positive, negative, latent_out
 
     def _encode_flux2_multi_reference(
@@ -1259,35 +1303,39 @@ class GJJ_LazyImageStudio:
     def _build_latent(
         self, vae, width, height, batch_size, image_pairs, mask, grow_mask_by, preset
     ):
-        # 检查是否为Flux系列模型（包括Flux1和Flux2）
-        is_flux_model = False
+        # 检查是否为Flux2模型（32通道）
+        is_flux2_model = False
         clip_type = preset.get("clip_type", "stable_diffusion")
         unet_name = preset.get("unet_name", "")
         
-        # 通过UNET名称判断是否为Flux模型
+        # 通过UNET名称判断是否为Flux2模型
         normalized_unet = _normalize_text(unet_name)
-        if "flux" in normalized_unet:
-            is_flux_model = True
+        if "flux2" in normalized_unet:
+            is_flux2_model = True
         
         # 或者通过clip_type判断
         if _normalize_text(clip_type) == "flux2":
-            is_flux_model = True
+            is_flux2_model = True
             
         if not image_pairs:
             if _normalize_text(preset.get("clip_type", "")) == "lumina2":
-                latent_tensor = EmptySD3LatentImage().generate(
-                    int(width), int(height), int(batch_size)
-                )[0]
-                return {"samples": latent_tensor}
-            if is_flux_model:
+                if EmptySD3LatentImage is not None:
+                    return EmptySD3LatentImage().generate(
+                        int(width), int(height), int(batch_size)
+                    )[0]
+                else:
+                    # EmptySD3LatentImage 不可用时，使用标准 EmptyLatentImage
+                    return EmptyLatentImage().generate(
+                        int(width), int(height), int(batch_size)
+                    )[0]
+            if is_flux2_model:
                 latent_dict = EmptyFlux2LatentImage(
                     int(width), int(height), int(batch_size)
                 )
                 return latent_dict
-            latent_tensor = EmptyLatentImage().generate(
+            return EmptyLatentImage().generate(
                 int(width), int(height), int(batch_size)
             )[0]
-            return {"samples": latent_tensor}
         main_slot = max(0, min(len(image_pairs) - 1, 0))
         image = image_pairs[main_slot]["image"]
         prepared_image, prepared_mask, use_outpaint = _prepare_primary_image_for_target(

@@ -2,8 +2,6 @@ import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
 const TARGET_NODES = new Set(["GJJ_AnyPreview"]);
-const BATCH_INPUT_NAME = "batch_image";
-const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE";
 const INPUT_PREFIX = "any_";
 const MIN_VISIBLE_INPUTS = 1;
 const ANY_INPUT_TYPE = "*";
@@ -55,14 +53,6 @@ function getInputs(node) {
 				.filter((input) => String(input?.name || "").startsWith(INPUT_PREFIX))
 				.sort((a, b) => getInputIndex(a?.name) - getInputIndex(b?.name))
 		: [];
-}
-
-function getBatchInput(node) {
-	return Array.isArray(node?.inputs)
-		? node.inputs.find(
-				(input) => String(input?.name || "") === BATCH_INPUT_NAME,
-			)
-		: null;
 }
 
 function getLinkedOutputInfo(input) {
@@ -234,11 +224,8 @@ function renameInputsSequentially(node) {
 }
 
 function resolveOutputMode(node) {
-	const batchInput = getBatchInput(node);
-	const infos = [
-		...(batchInput?.link ? [batchInput] : []),
-		...getInputs(node).filter((input) => input?.link),
-	]
+	const infos = getInputs(node)
+		.filter((input) => input?.link)
 		.map((input) => getLinkedOutputInfo(input))
 		.filter(Boolean);
 
@@ -264,7 +251,7 @@ function resolveOutputMode(node) {
 	const types = [...new Set(infos.map((info) => String(info.type || "*")))];
 	if (types.length === 1) {
 		const type = types[0];
-		if (type === "IMAGE" || type === BATCH_IMAGE_TYPE) {
+		if (type === "IMAGE") {
 			return {
 				type: "IMAGE",
 				name: "图片输出",
@@ -962,7 +949,7 @@ function getLoraEffectLiveText(node) {
 		delete node.__gjjLoraEffectLiveSourceId;
 		delete node.__gjjLoraEffectLiveOutputIndex;
 	}
-	for (const input of [getBatchInput(node), ...getInputs(node)]) {
+	for (const input of getInputs(node)) {
 		const link = input?.link ? app.graph?.links?.[input.link] : null;
 		const origin =
 			link?.origin_id != null ? app.graph?.getNodeById?.(link.origin_id) : null;
@@ -1203,20 +1190,6 @@ function stabilizeNode(node) {
 	}
 
 	ensureOutput(node);
-	const batchInput = getBatchInput(node);
-	if (batchInput) {
-		batchInput.name = BATCH_INPUT_NAME;
-		batchInput.type = BATCH_IMAGE_TYPE;
-		batchInput.label = "GJJ 批量图片";
-		batchInput.localized_name = batchInput.label;
-		batchInput.tooltip =
-			"第一行固定接口。接入 GJJ 专用批量图片后会优先作为图片批次预览和输出。";
-		const batchIndex = node.inputs.indexOf(batchInput);
-		if (batchIndex > 0) {
-			node.inputs.splice(batchIndex, 1);
-			node.inputs.unshift(batchInput);
-		}
-	}
 	removeUnusedInputsFromEnd(node, MIN_VISIBLE_INPUTS);
 	ensureTrailingEmptyInput(node);
 	renameInputsSequentially(node);

@@ -390,18 +390,7 @@ class GJJ_AnyPreview:
 	def INPUT_TYPES(cls):
 		return {
 			"required": {},
-			"optional": FlexibleOptionalInputType(
-				any_type,
-				{
-					"batch_image": (
-						GJJ_BATCH_IMAGE_TYPE,
-						{
-							"display_name": "GJJ 批量图片",
-							"tooltip": "第一行固定接口。接入 GJJ 专用批量图片后会优先作为图片批次预览和输出。",
-						},
-					),
-				},
-			),
+			"optional": FlexibleOptionalInputType(any_type),
 			"hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
 		}
 
@@ -410,9 +399,6 @@ class GJJ_AnyPreview:
 
 	def preview(self, prompt=None, extra_pnginfo=None, **kwargs):
 		values = []
-		batch_image = kwargs.get("batch_image")
-		if not is_none(batch_image):
-			values.append(batch_image)
 		for key in sorted(kwargs.keys(), key=extract_input_index):
 			if not key.startswith("any_"):
 				continue

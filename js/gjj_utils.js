@@ -465,3 +465,74 @@ export function queueNode(node, reason = "manual") {
 		graph.setDirtyCanvas?.(true, true);
 	}
 }
+
+function isExecutionOutputNode(node) {
+	if (!node) return false;
+	if (node === undefined || node === null) return false;
+	if (node.constructor?.nodeData?.output_node === true) return true;
+	if (node.nodeData?.output_node === true) return true;
+	if (node.flags?.output === true) return true;
+	return false;
+}
+
+/**
+ * 仅执行当前节点（不触发整个工作流队列）。
+ * 核心功能：临时禁用其他输出节点，只执行当前节点，执行完成后恢复状态。
+ * 
+ * @param {object} node - 当前节点对象
+ * @returns {Promise<boolean>} - 是否成功执行
+ */
+export async function queueOnlyCurrentNode(node) {
+	if (!node || !node.graph) return false;
+
+	const graph = node.graph || app.graph;
+	const allNodes = graph?._nodes || app.graph?._nodes || [];
+	const savedModes = [];
+	const oldSelectedNodes = app.canvas?.selected_nodes;
+	const oldSelectedNode = app.canvas?.selected_node;
+
+	try {
+		// 临时禁用其他输出节点
+		for (const n of allNodes) {
+			if (!n || n === node) continue;
+			if (isExecutionOutputNode(n)) {
+				savedModes.push([n, n.mode]);
+				n.mode = 2;  // 临时禁用以阻止执行
+			}
+		}
+
+		// 只选中当前节点
+		if (app.canvas) {
+			app.canvas.selected_nodes = {};
+			app.canvas.selected_nodes[node.id] = node;
+			app.canvas.selected_node = node;
+		}
+
+		node.setDirtyCanvas?.(true, true);
+		node.graph?.setDirtyCanvas?.(true, true);
+		app.graph?.setDirtyCanvas?.(true, true);
+
+		// 执行节点
+		if (typeof app.queuePrompt === "function") {
+			await app.queuePrompt(0, 1);
+			return true;
+		}
+		
+		console.warn("[GJJ] app.queuePrompt 不存在，无法只刷新当前节点");
+		return false;
+	} finally {
+		// 恢复所有被禁用的节点
+		for (const [n, mode] of savedModes) {
+			n.mode = mode;
+		}
+
+		if (app.canvas) {
+			app.canvas.selected_nodes = oldSelectedNodes;
+			app.canvas.selected_node = oldSelectedNode;
+		}
+
+		node.setDirtyCanvas?.(true, true);
+		node.graph?.setDirtyCanvas?.(true, true);
+		app.graph?.setDirtyCanvas?.(true, true);
+	}
+}

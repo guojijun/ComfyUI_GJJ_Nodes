@@ -17,10 +17,10 @@ flux1_fill_dev	flux1-fill-dev	stable_diffusion	clip_l.safetensors|t5xxl_fp16.saf
 flux1_canny_dev	flux1-canny-dev	stable_diffusion	clip_l.safetensors|t5xxl_fp16.safetensors	ae.safetensors		0.0		0.0	20		1.0	euler	normal	0.75			0.0	false			1024	1024
 flux1_dev	flux1-dev	stable_diffusion	clip_l.safetensors|t5xxl_fp16.safetensors	ae.safetensors	flux1-depth-dev-lora	1.0		0.0	20		1.0	euler	normal	0.75			0.0	false			1024	1024
 flux1_schnell	flux1-schnell	stable_diffusion	clip_l.safetensors|t5xxl_fp8_e4m3fn.safetensors	ae.safetensors		0.0		0.0	8		1.0	euler	normal	0.75			0.0	false			1024	1024
-z_image_turbo	z_image_turbo	lumina2	qwen_3_4b.safetensors	ae.safetensors	zimage_gydboy	1.0		0.0	8		1.0	res_multistep	simple	1.0	aura	3.0	0.0	false			1024	1024
-z_image	z_image	lumina2	qwen_3_4b.safetensors	ae.safetensors		0.0		0.0	25		4.0	res_multistep	simple	1.0	aura	3.0	0.0	false			1024	1024
-zimage_turbo_nsfw	zimage_turbo_nsfw	lumina2	qwen_3_4b.safetensors	ae.safetensors		0.0		0.0	25		4.0	res_multistep	simple	1.0	aura	3.0	0.0	false			1024	1024
-zimage_nsfw	zimage_nsfw	lumina2	qwen_3_4b.safetensors	ae.safetensors		0.0		0.0	25		4.0	res_multistep	simple	1.0	aura	3.0	0.0	false			1024	1024
+z_image_turbo	z_image_turbo	lumina2	qwen_3_4b.safetensors	ae.safetensors		1.0		0.0	8		1.0	res_multistep	simple	1.0	aura	3.0	0.0	false			1024	1024
+z_image	z_image	lumina2	qwen_3_4b.safetensors	ae.safetensors		1.0		0.0	25		4.0	res_multistep	simple	1.0	aura	3.0	0.0	false			1024	1024
+zimage_turbo_nsfw	zimage_turbo_nsfw	lumina2	qwen_3_4b.safetensors	ae.safetensors		1.0		0.0	25		4.0	res_multistep	simple	1.0	aura	3.0	0.0	false			1024	1024
+zimage_nsfw	zimage_nsfw	lumina2	qwen_3_4b.safetensors	ae.safetensors		1.0		0.0	25		4.0	res_multistep	simple	1.0	aura	3.0	0.0	false			1024	1024
 newbie	newbie-image-exp0.1	newbie	gemma_3_4b_it_bf16.safetensors|jina_clip_v2_bf16.safetensors	ae.safetensors		0.0		0.0	20		1.0	euler	beta57	1.0			0.0	false			1024	1024
 ovis	ovis_image	ovis	ovis_2.5.safetensors	ae.safetensors		0.0		0.0	20		1.0	euler	beta57	1.0			0.0	false			1024	1024
 hidream_i1_full	hidream_i1_full	hidream	clip_l_hidream.safetensors|clip_g_hidream.safetensors|t5xxl_fp8_e4m3fn_scaled.safetensors|llama_3.1_8b_instruct_fp8_scaled.safetensors	ae.safetensors		0.0		0.0	50		5.0	uni_pc	simple	1.0	sd3	3.0	0.0	false			1024	1024

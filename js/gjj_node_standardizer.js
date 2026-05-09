@@ -31,6 +31,7 @@ const FULLY_BYPASS_CLASSES = new Set([
 ]);
 const STATUS_DISABLED_CLASSES = new Set([
 	"GJJ_AnyPreview",
+	"GJJ_MemoryManager",
 	"GJJ_AnimeLineartRealConverter",
 	"GJJ_AnimeLineartRealEditor",
 	"GJJ_AudioAceMusicGenerator",
