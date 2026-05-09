@@ -574,24 +574,6 @@ function rebuildUI(node, options = {}) {
 
 	if (!node.properties) node.properties = {};
 
-	// 清理旧的 router panel widget，避免重复添加
-	if (node.__gjjRouterPanelWidget) {
-		const oldWidget = node.__gjjRouterPanelWidget;
-		// 从 widgets 数组中移除
-		if (node.widgets) {
-			const index = node.widgets.indexOf(oldWidget);
-			if (index !== -1) {
-				node.widgets.splice(index, 1);
-			}
-		}
-		// 清除 DOM 元素
-		if (oldWidget.element && oldWidget.element.parentNode) {
-			oldWidget.element.parentNode.removeChild(oldWidget.element);
-		}
-		// 清除引用
-		node.__gjjRouterPanelWidget = null;
-	}
-
 	// 隐藏原始的 Python widgets（每次重建时都确保隐藏）
 	hideOriginalPythonWidgets(node);
 
@@ -610,6 +592,8 @@ function rebuildUI(node, options = {}) {
 
 	releaseManagedNodes(node, getMatchedNodes(node));
 
+	// 确保 widget 存在，然后直接渲染内容（不会删除和重建 widget）
+	ensureRouterPanelWidget(node);
 	renderRouterPanel(node);
 
 	node.__gjjNodeSignature = fullSignature;
