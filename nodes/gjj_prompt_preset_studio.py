@@ -11,9 +11,9 @@ from typing import Any
 from aiohttp import web
 
 try:
-	from ..utils.tsv_translation import DEFAULT_TRANSLATION_TSV, load_translation_table, normalize_translation_text
+	from .common_utils.tsv_translation import DEFAULT_TRANSLATION_TSV, load_translation_table, normalize_translation_text
 except Exception:
-	from utils.tsv_translation import DEFAULT_TRANSLATION_TSV, load_translation_table, normalize_translation_text
+	from nodes.common_utils.tsv_translation import DEFAULT_TRANSLATION_TSV, load_translation_table, normalize_translation_text
 
 try:
 	from server import PromptServer

@@ -6,8 +6,8 @@ import torch.nn.functional as F
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .gjj_sam3_runtime import (comfy_image_to_pil,get_or_build_model,list_sam3_models,masks_to_comfy_mask,pick_available_name,)
 
-try:from ..utils.tsv_translation import translate_text_to_english, translate_to_english
-except Exception:from utils.tsv_translation import translate_text_to_english, translate_to_english
+try:from .common_utils.tsv_translation import translate_text_to_english, translate_to_english
+except Exception:from nodes.common_utils.tsv_translation import translate_text_to_english, translate_to_english
 
 
 NODE_NAME = "GJJ_BatchTextSegmenter"

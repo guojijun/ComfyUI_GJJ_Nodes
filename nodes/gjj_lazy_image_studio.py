@@ -31,6 +31,7 @@ except ImportError:
 from .common_utils.text_tools import (
     gjjutils_normalize_text as _normalize_text,
     gjjutils_canonical_model_text as _canonical_model_text,
+    gjjutils_dedupe_keep_order as _dedupe_keep_order,
 )
 
 from .common_utils.sampler_tools import (
@@ -351,12 +352,15 @@ def _should_skip_clip_lora_for_family(clip_type: str) -> bool:
 def _load_vae(vae_name: str):
     try:
         vae_path = _resolve_full_path(("vae",), vae_name)
+        print(f"[DEBUG] Loading VAE model: {vae_name}")
+        print(f"[DEBUG] VAE model path: {vae_path}")
     except Exception as exc:
         raise _format_model_missing_error("VAE", vae_name, ("vae",), exc) from exc
     sd, metadata = comfy.utils.load_torch_file(vae_path, return_metadata=True)
     try:
         vae = comfy.sd.VAE(sd=sd, metadata=metadata, dtype=None)
         vae.throw_exception_if_invalid()
+        print(f"[DEBUG] Successfully loaded VAE model: {vae_name}")
         return vae
     except Exception as exc:
         requested_canonical = _canonical_model_text(vae_name)
@@ -366,6 +370,8 @@ def _load_vae(vae_name: str):
             for fallback_name in ("flux2-vae.safetensors", "Flux2-DEV-ae.safetensors"):
                 try:
                     fallback_path = _resolve_full_path(("vae",), fallback_name)
+                    print(f"[DEBUG] Trying fallback VAE: {fallback_name}")
+                    print(f"[DEBUG] Fallback VAE path: {fallback_path}")
                     fallback_sd, fallback_metadata = comfy.utils.load_torch_file(
                         fallback_path, return_metadata=True
                     )
@@ -373,6 +379,7 @@ def _load_vae(vae_name: str):
                         sd=fallback_sd, metadata=fallback_metadata, dtype=None
                     )
                     vae.throw_exception_if_invalid()
+                    print(f"[DEBUG] Successfully loaded fallback VAE: {fallback_name}")
                     return vae
                 except Exception:
                     pass
@@ -386,14 +393,19 @@ def _load_vae(vae_name: str):
 def _load_model(unet_name: str, unet_dtype: str):
     try:
         unet_path = _resolve_full_path(("diffusion_models", "checkpoints"), unet_name)
+        print(f"[DEBUG] Loading UNET model: {unet_name}")
+        print(f"[DEBUG] UNET model path: {unet_path}")
+        print(f"[DEBUG] UNET dtype: {unet_dtype}")
     except Exception as exc:
         raise _format_model_missing_error(
             "UNET", unet_name, ("diffusion_models", "checkpoints"), exc
         ) from exc
     try:
-        return comfy.sd.load_diffusion_model(
+        model = comfy.sd.load_diffusion_model(
             unet_path, model_options=_build_unet_model_options(unet_dtype)
         )
+        print(f"[DEBUG] Successfully loaded UNET model: {unet_name}")
+        return model
     except Exception as exc:
         raise _format_runtime_error("UNET 加载", exc) from exc
 
@@ -408,6 +420,9 @@ def _load_clip_from_names(clip_names: list[str], clip_type: str):
         clip_paths = [
             _resolve_full_path(("text_encoders", "clip"), name) for name in clean_names
         ]
+        print(f"[DEBUG] Loading CLIP models: {clean_names}")
+        print(f"[DEBUG] CLIP model paths: {clip_paths}")
+        print(f"[DEBUG] CLIP type: {clip_type}")
     except Exception as exc:
         raise _format_model_missing_error(
             "CLIP", " + ".join(clean_names), ("text_encoders", "clip"), exc
@@ -419,17 +434,20 @@ def _load_clip_from_names(clip_names: list[str], clip_type: str):
     normalized_type = _normalize_text(clip_type)
     try:
         if normalized_type == "hidream":
-            return comfy.sd.load_clip(
+            clip = comfy.sd.load_clip(
                 ckpt_paths=clip_paths,
                 embedding_directory=embedding_directory,
                 model_options={},
             )
-        return comfy.sd.load_clip(
-            ckpt_paths=clip_paths,
-            embedding_directory=embedding_directory,
-            clip_type=_clip_type_enum(clip_type),
-            model_options={},
-        )
+        else:
+            clip = comfy.sd.load_clip(
+                ckpt_paths=clip_paths,
+                embedding_directory=embedding_directory,
+                clip_type=_clip_type_enum(clip_type),
+                model_options={},
+            )
+        print(f"[DEBUG] Successfully loaded CLIP models: {clean_names}")
+        return clip
     except Exception as exc:
         raise _format_runtime_error("CLIP 加载", exc) from exc
 
@@ -1013,10 +1031,15 @@ class GJJ_LazyImageStudio:
         lora_path = folder_paths.get_full_path("loras", lora_name)
         if not lora_path:
             raise _format_model_missing_error("LoRA", lora_name, ("loras",))
+        print(f"[DEBUG] Loading LoRA model: {lora_name}")
+        print(f"[DEBUG] LoRA model path: {lora_path}")
         if lora_path not in self._lora_cache:
             self._lora_cache[lora_path] = comfy.utils.load_torch_file(
                 lora_path, safe_load=True
             )
+            print(f"[DEBUG] Successfully loaded and cached LoRA model: {lora_name}")
+        else:
+            print(f"[DEBUG] Using cached LoRA model: {lora_name}")
         return self._lora_cache[lora_path]
 
     def _apply_loras(
@@ -1032,18 +1055,18 @@ class GJJ_LazyImageStudio:
     ):
         current_model = model
         current_clip = clip
-        clip_strength = (
-            0.0 if _should_skip_clip_lora_for_family(clip_type) else None
-        )
+        clip_strength = 0.0 if _should_skip_clip_lora_for_family(clip_type) else None
         if str(lora_1_name or "").strip() and abs(float(lora_1_strength)) > 1e-6:
             current_model, current_clip = apply_lora_to_model_and_clip(
                 current_model,
                 current_clip,
                 self._load_lora_state(lora_1_name),
                 float(lora_1_strength),
-                float(lora_1_strength)
-                if clip_strength is None
-                else float(clip_strength),
+                (
+                    float(lora_1_strength)
+                    if clip_strength is None
+                    else float(clip_strength)
+                ),
             )
         if str(lora_2_name or "").strip() and abs(float(lora_2_strength)) > 1e-6:
             current_model, current_clip = apply_lora_to_model_and_clip(
@@ -1051,9 +1074,11 @@ class GJJ_LazyImageStudio:
                 current_clip,
                 self._load_lora_state(lora_2_name),
                 float(lora_2_strength),
-                float(lora_2_strength)
-                if clip_strength is None
-                else float(clip_strength),
+                (
+                    float(lora_2_strength)
+                    if clip_strength is None
+                    else float(clip_strength)
+                ),
             )
         if str(lora_chain_config or "").strip():
             current_model, current_clip, _ = apply_lora_chain_config(
@@ -1226,26 +1251,43 @@ class GJJ_LazyImageStudio:
             negative = node_helpers.conditioning_set_values(
                 negative, {"reference_latents": [reference_latent]}, append=True
             )
-        latent_out = EmptyFlux2LatentImage.execute(
+        latent_out = EmptyFlux2LatentImage(
             int(resolved_width), int(resolved_height), int(batch_size)
-        )[0]
+        )
         return positive, negative, latent_out, resolved_width, resolved_height
 
     def _build_latent(
         self, vae, width, height, batch_size, image_pairs, mask, grow_mask_by, preset
     ):
+        # 检查是否为Flux系列模型（包括Flux1和Flux2）
+        is_flux_model = False
+        clip_type = preset.get("clip_type", "stable_diffusion")
+        unet_name = preset.get("unet_name", "")
+        
+        # 通过UNET名称判断是否为Flux模型
+        normalized_unet = _normalize_text(unet_name)
+        if "flux" in normalized_unet:
+            is_flux_model = True
+        
+        # 或者通过clip_type判断
+        if _normalize_text(clip_type) == "flux2":
+            is_flux_model = True
+            
         if not image_pairs:
             if _normalize_text(preset.get("clip_type", "")) == "lumina2":
-                return EmptySD3LatentImage().generate(
+                latent_tensor = EmptySD3LatentImage().generate(
                     int(width), int(height), int(batch_size)
                 )[0]
-            if _normalize_text(preset.get("clip_type", "")) == "flux2":
-                return EmptyFlux2LatentImage.execute(
+                return {"samples": latent_tensor}
+            if is_flux_model:
+                latent_dict = EmptyFlux2LatentImage(
                     int(width), int(height), int(batch_size)
-                )[0]
-            return EmptyLatentImage().generate(
+                )
+                return latent_dict
+            latent_tensor = EmptyLatentImage().generate(
                 int(width), int(height), int(batch_size)
             )[0]
+            return {"samples": latent_tensor}
         main_slot = max(0, min(len(image_pairs) - 1, 0))
         image = image_pairs[main_slot]["image"]
         prepared_image, prepared_mask, use_outpaint = _prepare_primary_image_for_target(
@@ -1326,14 +1368,18 @@ class GJJ_LazyImageStudio:
             preset_clip_names = preset.get("clip_names", [])
             if preset_clip_names and resolved_clip_names:
                 # 检查解析后的 CLIP 名称是否与预设中的推荐名称匹配
-                for i, (resolved, recommended) in enumerate(zip(resolved_clip_names, preset_clip_names)):
+                for i, (resolved, recommended) in enumerate(
+                    zip(resolved_clip_names, preset_clip_names)
+                ):
                     if resolved != recommended and recommended:
                         # 如果解析的名称与推荐的不一致，发出警告
                         print(f"[GJJ_LazyImageStudio] 警告: CLIP 模型不匹配！")
                         print(f"  UNET: {unet_name}")
                         print(f"  推荐的 CLIP: {recommended}")
                         print(f"  实际加载的 CLIP: {resolved}")
-                        print(f"  这可能导致维度不匹配错误。请确保 '{recommended}' 存在于 models/text_encoders 或 models/clip 目录中。")
+                        print(
+                            f"  这可能导致维度不匹配错误。请确保 '{recommended}' 存在于 models/text_encoders 或 models/clip 目录中。"
+                        )
             resolved_vae_name = _pick_available_name(
                 preset.get("vae_name", DEFAULT_VAE_NAME), vae_models, vae_name
             )
@@ -1534,5 +1580,6 @@ try:
             return web.json_response({"loras": lora_list})
         except Exception as e:
             return web.json_response({"loras": [], "error": str(e)}, status=500)
+
 except Exception:
     pass

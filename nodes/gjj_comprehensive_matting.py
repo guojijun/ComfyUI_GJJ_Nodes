@@ -345,7 +345,7 @@ def _load_rmbg2_components() -> tuple[type, type]:
     if _RMBG2_COMPONENTS is not None:
         return _RMBG2_COMPONENTS
 
-    model_root = Path(__file__).resolve().parents[1] / "utils" / "rmbg2_model"
+    model_root = Path(__file__).resolve().parent / "common_utils" / "rmbg2_model"
     config_path = model_root / "BiRefNet_config.py"
     network_path = model_root / "birefnet.py"
     if not config_path.exists() or not network_path.exists():

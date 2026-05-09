@@ -8,6 +8,7 @@ __pycache__/
 *.so
 .Python
 build/
+SKILL/
 develop-eggs/
 dist/
 downloads/

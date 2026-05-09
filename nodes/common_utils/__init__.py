@@ -159,6 +159,24 @@ from .cfg_tools import (
 	CFGNorm_execute,
 )
 
+from .tsv_translation import (
+	# 翻译工具
+	DEFAULT_TRANSLATION_TSV,
+	TRANSLATION_ROOT,
+	TranslationTable,
+	load_translation_table,
+	normalize_translation_key,
+	normalize_translation_text,
+	translate_term,
+	translate_text_by_terms,
+	translate_text_to_chinese,
+	translate_text_to_english,
+	translate_to_chinese,
+	translate_to_english,
+)
+
+from . import rmbg2_model
+
 __all__ = [
 	# types
 	"GJJ_BATCH_IMAGE_TYPE",
@@ -249,4 +267,17 @@ __all__ = [
 	# cfg_tools
 	"gjjutils_CFGNorm",
 	"CFGNorm_execute",
+	# tsv_translation
+	"DEFAULT_TRANSLATION_TSV",
+	"TRANSLATION_ROOT",
+	"TranslationTable",
+	"load_translation_table",
+	"normalize_translation_key",
+	"normalize_translation_text",
+	"translate_term",
+	"translate_text_by_terms",
+	"translate_text_to_chinese",
+	"translate_text_to_english",
+	"translate_to_chinese",
+	"translate_to_english",
 ]
