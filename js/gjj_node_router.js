@@ -1,8 +1,8 @@
-// GJJ GroupBypasser - v2.0.0 (修复 cloneNode 导致的事件丢失问题)
+// GJJ NodeRouter v2.1 - DOM Widget 清理修复（保留container，清空子元素）
 import { app } from "/scripts/app.js";
 
 // 目标节点
-const TARGET_NODES = new Set(["GJJ_GroupBypasser"]);
+const TARGET_NODES = new Set(["GJJ_NodeRouter"]);
 
 // 模式常量
 const MODE_SINGLE = "单选";
@@ -13,14 +13,14 @@ const MODE_NAME = "选择模式";
 // 过滤关键词常量
 const FILTER_NAME = "过滤关键词";
 const FILTER_LABEL = "过滤关键词";
-const FILTER_PLACEHOLDER = "留空显示全部分组";
-const FILTER_TOOLTIP = "输入分组名称中的关键词进行筛选；留空时显示当前工作流中的全部分组。";
+const FILTER_PLACEHOLDER = "留空显示全部节点";
+const FILTER_TOOLTIP = "输入节点名称中的关键词进行筛选；留空时显示当前工作流中的全部节点。";
 
 // 空状态常量
-const EMPTY_STATE_NAME = "分组状态提示";
-const EMPTY_STATE_LABEL = "分组状态提示";
-const EMPTY_STATE_TEXT = "当前没有分组，或没有匹配到包含该关键词的分组。";
-const EMPTY_STATE_TOOLTIP = "没有可切换的分组时，会在这里显示中文状态提示。";
+const EMPTY_STATE_NAME = "节点状态提示";
+const EMPTY_STATE_LABEL = "节点状态提示";
+const EMPTY_STATE_TEXT = "当前没有节点，或没有匹配到包含该关键词的节点。";
+const EMPTY_STATE_TOOLTIP = "没有可切换的节点时，会在这里显示中文状态提示。";
 
 // 存储每个节点的状态
 const nodeStates = new Map();
@@ -30,51 +30,58 @@ function ensureNodeState(node) {
 		nodeStates.set(node.id, {
 			[MODE_NAME]: MODE_SINGLE,
 			[FILTER_NAME]: "",
-			__activeGroupRefs: new Set(),
+			__activeNodeRefs: new Set(),
 		});
 	}
 	return nodeStates.get(node.id);
 }
 
-function getGroups() {
-	return Array.isArray(app.graph?._groups) ? [...app.graph._groups] : [];
+function getNodes() {
+	return Array.isArray(app.graph?._nodes) ? [...app.graph._nodes] : [];
 }
 
-function getGroupSignature(groups = getGroups()) {
-	return groups
-		.map((group) => {
-			const title = String(group?.title || "");
-			const left = Number(group?.pos?.[0] || 0);
-			const top = Number(group?.pos?.[1] || 0);
-			const width = Number(group?.size?.[0] || 0);
-			const height = Number(group?.size?.[1] || 0);
-			const nodeCount = Array.isArray(group?._nodes) ? group._nodes.length : 0;
-			return `${title}|${left},${top}|${width},${height}|${nodeCount}`;
+function getNodeSignature(nodes = getNodes()) {
+	return nodes
+		.map((node) => {
+			const title = String(node?.title || node?.comfyClass || "");
+			const left = Number(node?.pos?.[0] || 0);
+			const top = Number(node?.pos?.[1] || 0);
+			const width = Number(node?.size?.[0] || 0);
+			const height = Number(node?.size?.[1] || 0);
+			return `${title}|${left},${top}|${width},${height}`;
 		})
 		.sort()
 		.join("||");
 }
 
-function sortGroups(groups) {
-	return [...groups].sort((a, b) => String(a?.title || "").localeCompare(String(b?.title || ""), "zh-Hans-CN"));
+function sortNodes(nodes) {
+	return [...nodes].sort((a, b) => String(a?.title || a?.comfyClass || "").localeCompare(String(b?.title || b?.comfyClass || ""), "zh-Hans-CN"));
 }
 
 function getFilterText(node) {
 	return String(ensureNodeState(node)[FILTER_NAME] || "").trim().toLowerCase();
 }
 
-function getMatchedGroups(node) {
+function getMatchedNodes(node) {
 	const filterText = getFilterText(node);
-	const groups = sortGroups(getGroups());
+	const nodes = sortNodes(getNodes().filter(n => n !== node));
 	if (!filterText) {
-		return groups;
+		return nodes;
 	}
 
-	return groups.filter((group) => String(group?.title || "").toLowerCase().includes(filterText));
+	return nodes.filter((n) => {
+		const title = String(n?.title || n?.comfyClass || "").toLowerCase();
+		const category = String(n?.constructor?.nodeData?.category || n?.nodeData?.category || "").toLowerCase();
+		const comfyClass = String(n?.comfyClass || "").toLowerCase();
+
+		return title.includes(filterText) ||
+			   category.includes(filterText) ||
+			   comfyClass.includes(filterText);
+	});
 }
 
 function getToggleWidgets(node) {
-	return (node.widgets || []).filter((widget) => widget?.__gjjGroupToggle);
+	return (node.widgets || []).filter((widget) => widget?.__gjjNodeToggle);
 }
 
 function getSelectionMode(node) {
@@ -92,53 +99,49 @@ function updateFilterText(node, text) {
 	ensureNodeState(node)[FILTER_NAME] = String(text || "");
 }
 
-function getActiveGroupRefs(node) {
+function getActiveNodeRefs(node) {
 	const state = ensureNodeState(node);
-	return state.__activeGroupRefs || new Set();
+	return state.__activeNodeRefs || new Set();
 }
 
-function setActiveGroupRefs(node, groups) {
+function setActiveNodeRefs(node, nodes) {
 	const state = ensureNodeState(node);
-	const groupList = Array.isArray(groups) ? groups.filter(Boolean) : [...(groups || [])].filter(Boolean);
-	state.__activeGroupRefs = new Set(groupList);
+	const nodeList = Array.isArray(nodes) ? nodes.filter(Boolean) : [...(nodes || [])].filter(Boolean);
+	state.__activeNodeRefs = new Set(nodeList);
 }
 
-function trimActiveGroupsForMode(node) {
-	const activeGroups = [...getActiveGroupRefs(node)];
-	if (getSelectionMode(node) === MODE_SINGLE && activeGroups.length > 1) {
-		setActiveGroupRefs(node, [activeGroups[0]]);
+function trimActiveNodesForMode(node) {
+	const activeNodes = [...getActiveNodeRefs(node)];
+	if (getSelectionMode(node) === MODE_SINGLE && activeNodes.length > 1) {
+		setActiveNodeRefs(node, [activeNodes[0]]);
 	}
 }
 
-function setGroupState(group, isActive, controllerNode) {
-	group?.recomputeInsideNodes?.();
-	const nodes = Array.isArray(group?._nodes) ? group._nodes : [];
-	nodes.forEach((item) => {
-		if (item === controllerNode) return;
-		item.mode = isActive ? 0 : 4;
-	});
+function setNodeState(targetNode, isActive, controllerNode) {
+	if (targetNode === controllerNode) return;
+	targetNode.mode = isActive ? 0 : 2;
 }
 
-function releaseManagedGroups(node, nextGroups = []) {
-	const nextGroupSet = new Set(nextGroups);
-	const previousGroups = Array.isArray(node.__gjjManagedGroups) ? node.__gjjManagedGroups : [];
-	previousGroups.forEach((group) => {
-		if (!nextGroupSet.has(group)) {
-			setGroupState(group, false);
+function releaseManagedNodes(node, nextNodes = []) {
+	const nextNodeSet = new Set(nextNodes);
+	const previousNodes = Array.isArray(node.__gjjManagedNodes) ? node.__gjjManagedNodes : [];
+	previousNodes.forEach((n) => {
+		if (!nextNodeSet.has(n)) {
+			setNodeState(n, false, node);
 		}
 	});
-	node.__gjjManagedGroups = [...nextGroups];
+	node.__gjjManagedNodes = [...nextNodes];
 }
 
-function applyMatchedGroupModes(node, groups = getMatchedGroups(node)) {
-	if (!Array.isArray(groups) || groups.length === 0) {
+function applyMatchedNodeModes(node, nodes = getMatchedNodes(node)) {
+	if (!Array.isArray(nodes) || nodes.length === 0) {
 		return;
 	}
 
-	trimActiveGroupsForMode(node);
-	const activeGroups = getActiveGroupRefs(node);
-	groups.forEach((group) => {
-		setGroupState(group, activeGroups.has(group), node);
+	trimActiveNodesForMode(node);
+	const activeNodes = getActiveNodeRefs(node);
+	nodes.forEach((n) => {
+		setNodeState(n, activeNodes.has(n), node);
 	});
 }
 
@@ -184,41 +187,41 @@ function makeDomWidgetSize(widget, height) {
 	return widget;
 }
 
-function selectAllGroups(node) {
-	const matchedGroups = getMatchedGroups(node);
-	setActiveGroupRefs(node, matchedGroups);
-	syncGroupButtonStates(node, new Set(matchedGroups));
-	applyMatchedGroupModes(node);
+function selectAllNodes(node) {
+	const matchedNodes = getMatchedNodes(node);
+	setActiveNodeRefs(node, matchedNodes);
+	syncNodeButtonStates(node, new Set(matchedNodes));
+	applyMatchedNodeModes(node);
 	updateMasterToggleButton(node);
 	node.graph?.change?.();
 	node.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
 }
 
-function deselectAllGroups(node) {
-	setActiveGroupRefs(node, []);
-	syncGroupButtonStates(node, new Set());
-	applyMatchedGroupModes(node);
+function deselectAllNodes(node) {
+	setActiveNodeRefs(node, []);
+	syncNodeButtonStates(node, new Set());
+	applyMatchedNodeModes(node);
 	updateMasterToggleButton(node);
 	node.graph?.change?.();
 	node.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
 }
 
-function isAllGroupsSelected(node) {
-	const matchedGroups = getMatchedGroups(node);
-	if (matchedGroups.length === 0) return false;
-	const activeGroups = getActiveGroupRefs(node);
-	return matchedGroups.every(group => activeGroups.has(group));
+function isAllNodesSelected(node) {
+	const matchedNodes = getMatchedNodes(node);
+	if (matchedNodes.length === 0) return false;
+	const activeNodes = getActiveNodeRefs(node);
+	return matchedNodes.every(n => activeNodes.has(n));
 }
 
 function updateMasterToggleButton(node) {
 	const toggleBtn = node.__gjjMasterToggleBtn;
 	if (!toggleBtn) return;
 
-	const allSelected = isAllGroupsSelected(node);
+	const allSelected = isAllNodesSelected(node);
 	toggleBtn.textContent = allSelected ? "🟢" : "🔴";
-	toggleBtn.title = allSelected ? "点击全部旁路" : "点击全部打开";
+	toggleBtn.title = allSelected ? "点击全部启用" : "点击全部禁用";
 	toggleBtn.style.background = allSelected ? "#3d7c47" : "#8b2a2a";
 }
 
@@ -274,17 +277,17 @@ function buildModeControls(node) {
 			// 更新模式
 			updateSelectionMode(node, modeValue);
 
-			// 处理单选模式下的分组状态
-			let activeGroups = getActiveGroupRefs(node);
-			if (modeValue === MODE_SINGLE && activeGroups.size > 1) {
-				const firstGroup = [...activeGroups][0];
-				activeGroups = new Set(firstGroup ? [firstGroup] : []);
+			// 处理单选模式下的节点状态
+			let activeNodes = getActiveNodeRefs(node);
+			if (modeValue === MODE_SINGLE && activeNodes.size > 1) {
+				const firstNode = [...activeNodes][0];
+				activeNodes = new Set(firstNode ? [firstNode] : []);
 			}
-			setActiveGroupRefs(node, activeGroups);
+			setActiveNodeRefs(node, activeNodes);
 
-			// 同步所有分组按钮状态
-			syncGroupButtonStates(node, activeGroups);
-			applyMatchedGroupModes(node);
+			// 同步所有节点按钮状态
+			syncNodeButtonStates(node, activeNodes);
+			applyMatchedNodeModes(node);
 
 			// 更新按钮样式
 			container.querySelectorAll(".gjj-mode-btn").forEach(btn => {
@@ -311,9 +314,9 @@ function buildModeControls(node) {
 	const masterToggleBtn = document.createElement("button");
 	masterToggleBtn.type = "button";
 	masterToggleBtn.className = "gjj-master-toggle-btn";
-	const allSelected = isAllGroupsSelected(node);
+	const allSelected = isAllNodesSelected(node);
 	masterToggleBtn.textContent = allSelected ? "🟢" : "🔴";
-	masterToggleBtn.title = allSelected ? "点击全部旁路" : "点击全部打开";
+	masterToggleBtn.title = allSelected ? "点击全部启用" : "点击全部禁用";
 	masterToggleBtn.style.cssText = [
 		"height:32px",
 		"width:40px",
@@ -332,10 +335,10 @@ function buildModeControls(node) {
 		event.preventDefault();
 		event.stopPropagation();
 
-		if (isAllGroupsSelected(node)) {
-			deselectAllGroups(node);
+		if (isAllNodesSelected(node)) {
+			deselectAllNodes(node);
 		} else {
-			selectAllGroups(node);
+			selectAllNodes(node);
 		}
 	});
 
@@ -354,13 +357,13 @@ function buildModeControls(node) {
 	return modeWidget;
 }
 
-function createGroupButtonWidget(node, group, isActive) {
-	const title = String(group?.title || "未命名分组");
+function createNodeButtonWidget(node, targetNode, isActive) {
+	const title = String(targetNode?.title || targetNode?.comfyClass || "未命名节点");
 
 	// 创建独立的专用容器，避免与其他元素冲突
 	const container = document.createElement("div");
-	container.id = `gjj-group-${node.id}-${group.id}`;
-	container.className = "gjj-group-bypasser-row";
+	container.id = `gjj-node-${node.id}-${targetNode.id}`;
+	container.className = "gjj-node-router-row";
 	container.style.cssText = [
 		"box-sizing:border-box",
 		"width:100%",
@@ -374,10 +377,10 @@ function createGroupButtonWidget(node, group, isActive) {
 
 	const button = document.createElement("button");
 	button.type = "button";
-	button.className = "gjj-group-button";
+	button.className = "gjj-node-button";
 	button.textContent = `${isActive ? "✅ " : "❌ "}${title}`;
-	button.title = `切换分组"${title}"的启用状态；单选模式下互斥，多选模式下可同时启用多个分组。`;
-	button.dataset.groupId = group.id; // 使用 data 属性存储分组 ID
+	button.title = `切换节点"${title}"的启用状态；单选模式下互斥，多选模式下可同时启用多个节点。`;
+	button.dataset.nodeId = targetNode.id; // 使用 data 属性存储节点 ID
 
 	updateButtonClass(button, isActive);
 
@@ -389,28 +392,28 @@ function createGroupButtonWidget(node, group, isActive) {
 	}), 36);
 
 	domWidget.value = Boolean(isActive);
-	domWidget.__gjjGroupToggle = true;
-	domWidget.__groupRef = group;
+	domWidget.__gjjNodeToggle = true;
+	domWidget.__nodeRef = targetNode;
 	domWidget.__buttonEl = button;
 
 	const toggle = () => {
-		const activeGroups = getActiveGroupRefs(node);
-		const isCurrentlyActive = activeGroups.has(group);
+		const activeNodes = getActiveNodeRefs(node);
+		const isCurrentlyActive = activeNodes.has(targetNode);
 		const newState = !isCurrentlyActive;
 
 		if (newState) {
 			if (getSelectionMode(node) === MODE_SINGLE) {
-				activeGroups.clear();
+				activeNodes.clear();
 			}
-			activeGroups.add(group);
+			activeNodes.add(targetNode);
 		} else {
-			activeGroups.delete(group);
+			activeNodes.delete(targetNode);
 		}
 
-		setActiveGroupRefs(node, activeGroups);
+		setActiveNodeRefs(node, activeNodes);
 		domWidget.value = newState;
-		syncGroupButtonStates(node, activeGroups);
-		applyMatchedGroupModes(node);
+		syncNodeButtonStates(node, activeNodes);
+		applyMatchedNodeModes(node);
 		updateMasterToggleButton(node);
 
 		node.graph?.change?.();
@@ -490,8 +493,8 @@ function addEmptyState(node) {
 	return widget;
 }
 
-function addGroupToggle(node, group, isActive) {
-	return createGroupButtonWidget(node, group, isActive);
+function addNodeToggle(node, targetNode, isActive) {
+	return createNodeButtonWidget(node, targetNode, isActive);
 }
 
 function refreshNodeSize(node) {
@@ -501,7 +504,7 @@ function refreshNodeSize(node) {
 }
 
 function rebuildUI(node) {
-	const previousActiveGroups = getActiveGroupRefs(node);
+	const previousActiveNodes = getActiveNodeRefs(node);
 
 	clearNodeWidgets(node);
 
@@ -511,33 +514,33 @@ function rebuildUI(node) {
 	// 确保关键词值同步到原始 Python widget
 	syncFilterToOriginalWidget(node);
 
-	const matchedGroups = getMatchedGroups(node);
-	releaseManagedGroups(node, matchedGroups);
-	if (matchedGroups.length === 0) {
-		setActiveGroupRefs(node, []);
+	const matchedNodes = getMatchedNodes(node);
+	releaseManagedNodes(node, matchedNodes);
+	if (matchedNodes.length === 0) {
+		setActiveNodeRefs(node, []);
 		addEmptyState(node);
-		node.__gjjGroupSignature = getGroupSignature();
+		node.__gjjNodeSignature = getNodeSignature();
 		refreshNodeSize(node);
 		return;
 	}
 
-	let restoredActiveGroups = matchedGroups.filter((group) => previousActiveGroups.has(group));
+	let restoredActiveNodes = matchedNodes.filter((n) => previousActiveNodes.has(n));
 	if (getSelectionMode(node) === MODE_SINGLE) {
-		restoredActiveGroups = restoredActiveGroups.slice(0, 1);
+		restoredActiveNodes = restoredActiveNodes.slice(0, 1);
 	}
-	setActiveGroupRefs(node, restoredActiveGroups);
+	setActiveNodeRefs(node, restoredActiveNodes);
 
-	matchedGroups.forEach((group) => {
-		const isActive = restoredActiveGroups.includes(group);
-		addGroupToggle(node, group, isActive);
+	matchedNodes.forEach((n) => {
+		const isActive = restoredActiveNodes.includes(n);
+		addNodeToggle(node, n, isActive);
 	});
 
-	node.__gjjGroupSignature = getGroupSignature();
-	applyMatchedGroupModes(node, matchedGroups);
+	node.__gjjNodeSignature = getNodeSignature();
+	applyMatchedNodeModes(node, matchedNodes);
 	refreshNodeSize(node);
 }
 
-function refreshAllGroupBypassers() {
+function refreshAllNodeRouters() {
 	(app.graph?._nodes || []).forEach((node) => {
 		if (TARGET_NODES.has(node?.comfyClass)) {
 			rebuildUI(node);
@@ -546,7 +549,7 @@ function refreshAllGroupBypassers() {
 }
 
 app.registerExtension({
-	name: "GJJ.GroupBypasser",
+	name: "GJJ.NodeRouter",
 
 	nodeCreated(node, app) {
 		if (!TARGET_NODES.has(node.comfyClass)) {
@@ -584,7 +587,7 @@ app.registerExtension({
 				originalOnConfigure.call(this, serialized);
 			}
 			hydrateStateFromSerialized(this, serialized);
-			// 使用 requestAnimationFrame 确保 app.graph._groups 已初始化后再重建 UI
+			// 使用 requestAnimationFrame 确保 app.graph._nodes 已初始化后再重建 UI
 			requestAnimationFrame(() => {
 				rebuildUI(this);
 			});
@@ -596,7 +599,7 @@ app.registerExtension({
 			if (originalOnExecutionStart) {
 				originalOnExecutionStart.call(this);
 			}
-			applyMatchedGroupModes(this);
+			applyMatchedNodeModes(this);
 		};
 
 		// Hook addDOMWidget to protect DOM widgets
@@ -619,11 +622,11 @@ app.registerExtension({
 	},
 
 	async setup() {
-		const originalAddGroup = app.graph?.addGroup;
-		if (originalAddGroup) {
-			app.graph.addGroup = function(...args) {
-				const result = originalAddGroup.apply(this, args);
-				refreshAllGroupBypassers();
+		const originalAddNode = app.graph?.addNode;
+		if (originalAddNode) {
+			app.graph.addNode = function(...args) {
+				const result = originalAddNode.apply(this, args);
+				refreshAllNodeRouters();
 				return result;
 			};
 		}
@@ -634,7 +637,7 @@ app.registerExtension({
 				clearTimeout(rebuildTimer);
 			}
 			rebuildTimer = setTimeout(() => {
-				refreshAllGroupBypassers();
+				refreshAllNodeRouters();
 				rebuildTimer = null;
 			}, 100);
 		};
@@ -647,18 +650,18 @@ app.registerExtension({
 			scheduleRebuild();
 		};
 
-		const originalOnGroupAdd = app.graph?.onGroupAdd;
-		app.graph.onGroupAdd = function(group) {
-			if (originalOnGroupAdd) {
-				originalOnGroupAdd.call(this, group);
+		const originalOnNodeAdded = app.graph?.onNodeAdded;
+		app.graph.onNodeAdded = function(node) {
+			if (originalOnNodeAdded) {
+				originalOnNodeAdded.call(this, node);
 			}
 			scheduleRebuild();
 		};
 
-		const originalOnGroupRemove = app.graph?.onGroupRemove;
-		app.graph.onGroupRemove = function(group) {
-			if (originalOnGroupRemove) {
-				originalOnGroupRemove.call(this, group);
+		const originalOnNodeRemoved = app.graph?.onNodeRemoved;
+		app.graph.onNodeRemoved = function(node) {
+			if (originalOnNodeRemoved) {
+				originalOnNodeRemoved.call(this, node);
 			}
 			scheduleRebuild();
 		};
@@ -684,22 +687,22 @@ function clearNodeWidgets(node) {
 		if (widget.__buttonEl) {
 			widget.__buttonEl = null;
 		}
-		if (widget.__groupRef) {
-			widget.__groupRef = null;
+		if (widget.__nodeRef) {
+			widget.__nodeRef = null;
 		}
 	}
 
 	node.widgets = [];
 }
 
-function syncGroupButtonStates(node, activeGroups = getActiveGroupRefs(node)) {
+function syncNodeButtonStates(node, activeNodes = getActiveNodeRefs(node)) {
 	getToggleWidgets(node).forEach((widget) => {
-		if (!widget.__buttonEl || !widget.__groupRef) {
+		if (!widget.__buttonEl || !widget.__nodeRef) {
 			return;
 		}
 
-		const isActive = activeGroups.has(widget.__groupRef);
-		const title = String(widget.__groupRef?.title || "未命名分组");
+		const isActive = activeNodes.has(widget.__nodeRef);
+		const title = String(widget.__nodeRef?.title || widget.__nodeRef?.comfyClass || "未命名节点");
 
 		widget.value = isActive;
 		widget.__buttonEl.textContent = `${isActive ? "✅ " : "❌ "}${title}`;
@@ -707,8 +710,8 @@ function syncGroupButtonStates(node, activeGroups = getActiveGroupRefs(node)) {
 	});
 }
 
-function ensureGroupButtonStyles(container) {
-	const styleId = "gjj-group-bypasser-styles";
+function ensureNodeButtonStyles(container) {
+	const styleId = "gjj-node-router-styles";
 	const existingStyle = document.getElementById(styleId);
 	if (existingStyle) {
 		return;
@@ -718,12 +721,12 @@ function ensureGroupButtonStyles(container) {
 	style.id = styleId;
 
 	style.textContent = `
-		.gjj-group-bypasser-row {
+		.gjj-node-router-row {
 			position: relative !important;
 			z-index: 9998 !important;
 			pointer-events: auto !important;
 		}
-		.gjj-group-button {
+		.gjj-node-button {
 			flex: 1 1 0 !important;
 			height: 30px !important;
 			min-width: 0 !important;
@@ -743,11 +746,11 @@ function ensureGroupButtonStyles(container) {
 			z-index: 9999 !important;
 			pointer-events: auto !important;
 		}
-		.gjj-group-button:hover {
+		.gjj-node-button:hover {
 			background: #2a4a55 !important;
 			border-color: #4a6b78 !important;
 		}
-		.gjj-group-button.gjj-active {
+		.gjj-node-button.gjj-active {
 			background: #1f6b43 !important;
 			border-color: #48ad73 !important;
 			color: #fff !important;
@@ -757,10 +760,10 @@ function ensureGroupButtonStyles(container) {
 }
 
 if (document.head) {
-	ensureGroupButtonStyles(document.body);
+	ensureNodeButtonStyles(document.body);
 } else {
 	document.addEventListener("DOMContentLoaded", () => {
-		ensureGroupButtonStyles(document.body);
+		ensureNodeButtonStyles(document.body);
 	});
 }
 
