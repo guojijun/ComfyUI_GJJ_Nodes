@@ -346,10 +346,13 @@ function buildModeControls(node) {
 	container.appendChild(masterToggleBtn);
 
 	// 添加DOM Widget（使用 _UI 后缀避免与 Python 后端的 widget 名称冲突）
-	const modeWidget = node.addDOMWidget(MODE_NAME + "_UI", "HTML", container, {
-		serialize: false,
-		hideOnZoom: false,
-	});
+	const modeWidget = makeDomWidgetSize(
+		node.addDOMWidget(MODE_NAME + "_UI", "HTML", container, {
+			serialize: false,
+			hideOnZoom: false,
+		}),
+		40
+	);
 
 	modeWidget.value = currentMode;
 	modeWidget.__gjjModeToggle = true;
@@ -556,13 +559,14 @@ app.registerExtension({
 			return;
 		}
 
-		requestAnimationFrame(() => {
+		// 延迟 200ms 重建 UI，确保 scheduleRebuild 的 100ms 定时器已执行完毕
+		setTimeout(() => {
 			rebuildUI(node);
 			// 添加帮助按钮
 			if (typeof window.__gjjEnsureHelpWidget === "function") {
 				window.__gjjEnsureHelpWidget(node);
 			}
-		});
+		}, 200);
 	},
 
 	async beforeRegisterNodeDef(nodeType, nodeData, app) {
@@ -587,10 +591,7 @@ app.registerExtension({
 				originalOnConfigure.call(this, serialized);
 			}
 			hydrateStateFromSerialized(this, serialized);
-			// 使用 requestAnimationFrame 确保 app.graph._nodes 已初始化后再重建 UI
-			requestAnimationFrame(() => {
-				rebuildUI(this);
-			});
+			// 不调用 rebuildUI，由 nodeCreated 处理重建
 		};
 
 		const originalOnExecutionStart = nodeType.prototype.onExecutionStart;
@@ -623,14 +624,6 @@ app.registerExtension({
 
 	async setup() {
 		const originalAddNode = app.graph?.addNode;
-		if (originalAddNode) {
-			app.graph.addNode = function(...args) {
-				const result = originalAddNode.apply(this, args);
-				refreshAllNodeRouters();
-				return result;
-			};
-		}
-
 		let rebuildTimer = null;
 		const scheduleRebuild = () => {
 			if (rebuildTimer) {
@@ -641,6 +634,14 @@ app.registerExtension({
 				rebuildTimer = null;
 			}, 100);
 		};
+
+		if (originalAddNode) {
+			app.graph.addNode = function(...args) {
+				const result = originalAddNode.apply(this, args);
+				// 不调用 scheduleRebuild，由 nodeCreated 和 onNodeAdded 处理重建
+				return result;
+			};
+		}
 
 		const originalOnNodeMoved = app.graph?.onNodeMoved;
 		app.graph.onNodeMoved = function(node) {
@@ -655,7 +656,11 @@ app.registerExtension({
 			if (originalOnNodeAdded) {
 				originalOnNodeAdded.call(this, node);
 			}
-			scheduleRebuild();
+			// 不调用 scheduleRebuild，由 nodeCreated 处理重建
+			// 如果是其他节点（非节点路由）添加/删除/移动，才触发 scheduleRebuild
+			if (!TARGET_NODES.has(node?.comfyClass)) {
+				scheduleRebuild();
+			}
 		};
 
 		const originalOnNodeRemoved = app.graph?.onNodeRemoved;

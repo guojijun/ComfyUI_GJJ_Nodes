@@ -584,10 +584,6 @@ app.registerExtension({
 				originalOnConfigure.call(this, serialized);
 			}
 			hydrateStateFromSerialized(this, serialized);
-			// 使用 requestAnimationFrame 确保 app.graph._groups 已初始化后再重建 UI
-			requestAnimationFrame(() => {
-				rebuildUI(this);
-			});
 		};
 
 		const originalOnExecutionStart = nodeType.prototype.onExecutionStart;
