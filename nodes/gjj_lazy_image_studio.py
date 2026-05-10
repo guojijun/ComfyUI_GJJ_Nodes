@@ -1175,6 +1175,14 @@ class GJJ_LazyImageStudio:
 
         # 清理VL图像列表以释放显存
         del vl_images
+        del ref_latents
+        del conditioning
+
+        # 及时释放 GPU/CPU 缓存（Qwen/FireRed 模型会被 ComfyUI 缓存，后续调用速度飞快）
+        import gc
+        gc.collect()
+        if hasattr(torch.cuda, 'empty_cache'):
+            torch.cuda.empty_cache()
 
         return positive, negative, latent_out, canvas_width, canvas_height
 
@@ -1631,7 +1639,7 @@ class GJJ_LazyImageStudio:
             elapsed_str = f"{elapsed_time:.1f}s"
 
             # 更新状态，显示尺寸和耗时
-            _send_status(unique_id, f"完成：{image.shape[2]} x {image.shape[1]} ⏰ 耗时：{elapsed_str}")
+            _send_status(unique_id, f"完成：{image.shape[2]} x {image.shape[1]}  耗时：{elapsed_str}")
 
             # 保存预览图片并返回 UI 数据
             preview_ui = self.preview_image.save_images(
@@ -1641,6 +1649,13 @@ class GJJ_LazyImageStudio:
                 extra_pnginfo=extra_pnginfo,
             )
             preview_images = preview_ui.get("ui", {}).get("images", [])
+
+            # 及时清理 GPU/CPU 缓存，释放显存供下次调用
+            del model, clip, vae, positive, negative, sampled_latent, image
+            import gc
+            gc.collect()
+            if hasattr(torch.cuda, 'empty_cache'):
+                torch.cuda.empty_cache()
 
             # 返回 UI 数据，包含图片和耗时
             return {"ui": {"images": preview_images, "elapsed_time": [elapsed_time]}, "result": (image,)}

@@ -377,44 +377,45 @@ class GJJ_OutpaintStudio:
         effective_orig_h = new_h
 
         if direction == "all":
+            # 四边扩展：从中间向四周均匀扩展
             left = max(0, (target_w - effective_orig_w) // 2)
             right = max(0, target_w - effective_orig_w - left)
             top = max(0, (target_h - effective_orig_h) // 2)
             bottom = max(0, target_h - effective_orig_h - top)
-        elif direction == "left+right":
+        elif direction == "left+right" or direction == "left_right":
+            # 左右扩展：从中间向左右均匀扩展
             left = max(0, (target_w - effective_orig_w) // 2)
             right = max(0, target_w - effective_orig_w - left)
             top = 0
             bottom = 0
-        elif direction == "top+bottom":
+        elif direction == "top+bottom" or direction == "top_bottom":
+            # 上下扩展：从中间向上下均匀扩展
             top = max(0, (target_h - effective_orig_h) // 2)
             bottom = max(0, target_h - effective_orig_h - top)
-            left = 0
-            right = 0
-        elif direction == "left_right":
-            left = max(0, target_w - effective_orig_w)
-            right = 0
-            top = 0
-            bottom = 0
-        elif direction == "top_bottom":
-            top = max(0, target_h - effective_orig_h)
-            bottom = 0
             left = 0
             right = 0
         elif direction == "left":
+            # 仅左侧：全部扩展到左边
             left = max(0, target_w - effective_orig_w)
             right = top = bottom = 0
         elif direction == "right":
+            # 仅右侧：全部扩展到右边
             right = max(0, target_w - effective_orig_w)
             left = top = bottom = 0
         elif direction == "top":
+            # 仅顶部：全部扩展到顶部
             top = max(0, target_h - effective_orig_h)
             bottom = left = right = 0
         elif direction == "bottom":
+            # 仅底部：全部扩展到底部
             bottom = max(0, target_h - effective_orig_h)
             top = left = right = 0
         else:
-            left = right = top = bottom = 0
+            # 默认：四边扩展
+            left = max(0, (target_w - effective_orig_w) // 2)
+            right = max(0, target_w - effective_orig_w - left)
+            top = max(0, (target_h - effective_orig_h) // 2)
+            bottom = max(0, target_h - effective_orig_h - top)
 
         if left > 0 or right > 0 or top > 0 or bottom > 0:
             expanded = self._expand_by_pixels(scaled_img, left, right, top, bottom)
