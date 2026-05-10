@@ -149,7 +149,7 @@ def _generate_error_message(
     # 提供安装命令建议
     lines.append("")
     lines.append("🔧 安装命令：")
-    install_cmd = "pip install " + " ".join(missing_required)
+    install_cmd =f"{sys.executable} -m pip install {missing_required} -i https://pypi.tuna.tsinghua.edu.cn/simple"
     lines.append(f"  {install_cmd}")
 
     # 如果有可选依赖缺失，也列出
@@ -160,7 +160,7 @@ def _generate_error_message(
             lines.append(f"  • {pkg}")
         lines.append("")
         lines.append("  可选依赖安装命令：")
-        install_cmd = "pip install " + " ".join(missing_optional)
+        install_cmd =f"{sys.executable} -m pip install {missing_optional} -i https://pypi.tuna.tsinghua.edu.cn/simple"
         lines.append(f"  {install_cmd}")
 
     lines.append("")
@@ -193,7 +193,7 @@ def _generate_warning_message(
 
     lines.append("")
     lines.append("  如需完整功能，请安装：")
-    install_cmd = "pip install " + " ".join(missing_optional)
+    install_cmd =f"{sys.executable} -m pip install {missing_optional} -i https://pypi.tuna.tsinghua.edu.cn/simple"
     lines.append(f"  {install_cmd}")
     lines.append("")
 
@@ -308,7 +308,7 @@ def print_runtime_dependency_error(
     Args:
         node_name: 节点名称（如 "语音识别四文本TTS(Qwen3)"）
         dependency_name: 缺失的依赖名称（如 "qwen-asr"）
-        install_command: 完整的安装命令（如 "python.exe -m pip install qwen-asr ..."）
+        install_command: 完整的安装命令（如 f"{sys.executable} -m pip install qwen-asr -i https://pypi.tuna.tsinghua.edu.cn/simple" ）
         description: 依赖说明（如 "该节点需要 qwen-asr Python 包才能运行"）
         extra_info: 额外信息（可选，如原始错误信息）
 

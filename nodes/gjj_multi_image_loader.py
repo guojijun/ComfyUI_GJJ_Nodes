@@ -208,20 +208,51 @@ def build_uniform_batch(images: list[torch.Tensor]) -> torch.Tensor:
 
     max_height = max(int(image.shape[1]) for image in images)
     max_width = max(int(image.shape[2]) for image in images)
-    # 获取通道数（可能是 3 或 4）
-    num_channels = int(images[0].shape[3])
+    # 检查是否有任何图像是RGBA（4通道）
+    has_rgba = any(int(image.shape[3]) == 4 for image in images)
+    # 如果有RGBA图像，则统一使用4通道（RGBA），否则使用3通道（RGB）
+    target_channels = 4 if has_rgba else 3
     
     padded: list[torch.Tensor] = []
 
     for image in images:
-        height = int(image.shape[1])
-        width = int(image.shape[2])
+        batch_size = int(image.shape[0])  # 通常是1
+        original_height = int(image.shape[1])
+        original_width = int(image.shape[2])
+        current_channels = int(image.shape[3])
+        
+        # 调整图像通道数以匹配目标通道数
+        if current_channels != target_channels:
+            if current_channels == 3 and target_channels == 4:
+                # RGB to RGBA: 添加全不透明alpha通道（值为1.0）
+                alpha = torch.ones((batch_size, original_height, original_width, 1), dtype=image.dtype, device=image.device)
+                image = torch.cat([image, alpha], dim=3)  # 在通道维度拼接
+            elif current_channels == 4 and target_channels == 3:
+                # RGBA to RGB: 这种情况不应该发生，因为如果有RGBA我们会统一用RGBA
+                # 但为了安全，还是处理一下：丢弃alpha通道
+                image = image[:, :, :, :3]
+            elif current_channels == 1 and target_channels == 3:
+                # Grayscale to RGB: 复制单通道到三个通道
+                image = image.repeat(1, 1, 1, 3)
+            elif current_channels == 1 and target_channels == 4:
+                # Grayscale to RGBA
+                image_rgb = image.repeat(1, 1, 1, 3)
+                alpha = torch.ones((batch_size, original_height, original_width, 1), dtype=image.dtype, device=image.device)
+                image = torch.cat([image_rgb, alpha], dim=3)
+            # 更新高度和宽度（虽然通常不变，但为了安全）
+            height = int(image.shape[1])
+            width = int(image.shape[2])
+        else:
+            height = original_height
+            width = original_width
+        
+        # 检查是否已经是目标尺寸
         if height == max_height and width == max_width:
             padded.append(image.contiguous())
             continue
 
-        # 根据实际通道数创建 canvas
-        canvas = torch.zeros((1, max_height, max_width, num_channels), dtype=image.dtype, device=image.device)
+        # 根据目标通道数创建 canvas
+        canvas = torch.zeros((batch_size, max_height, max_width, target_channels), dtype=image.dtype, device=image.device)
         top = max(0, (max_height - height) // 2)
         left = max(0, (max_width - width) // 2)
         canvas[:, top:top + height, left:left + width, :] = image

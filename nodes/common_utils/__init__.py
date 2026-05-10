@@ -152,6 +152,16 @@ from .mask_tools import (
 	GrowMask_execute,
 )
 
+from .image_tools import (
+	# 图像扩图
+	gjjutils_expand_image_with_padding,
+	gjjutils_create_expand_mask,
+	gjjutils_resize_image_to_size,
+	gjjutils_calculate_expand_size,
+	gjjutils_blend_mask_edge,
+	gjjutils_split_image_batch,
+)
+
 from .cfg_tools import (
 	# CFG 归一化
 	gjjutils_CFGNorm,
@@ -264,6 +274,13 @@ __all__ = [
 	# mask_tools
 	"gjjutils_GrowMask",
 	"GrowMask_execute",
+	# image_tools
+	"gjjutils_expand_image_with_padding",
+	"gjjutils_create_expand_mask",
+	"gjjutils_resize_image_to_size",
+	"gjjutils_calculate_expand_size",
+	"gjjutils_blend_mask_edge",
+	"gjjutils_split_image_batch",
 	# cfg_tools
 	"gjjutils_CFGNorm",
 	"CFGNorm_execute",

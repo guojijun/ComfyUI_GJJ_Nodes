@@ -380,6 +380,8 @@ def _load_vae(vae_name: str):
         vae = comfy.sd.VAE(sd=sd, metadata=metadata, dtype=None)
         vae.throw_exception_if_invalid()
         print(f"[DEBUG] Successfully loaded VAE model: {vae_name}")
+        # 彩色打印 VAE 信息
+        print(f"\033[91m🔴 VAE: {vae_name}\033[0m")
         return vae
     except Exception as exc:
         requested_canonical = _canonical_model_text(vae_name)
@@ -399,6 +401,8 @@ def _load_vae(vae_name: str):
                     )
                     vae.throw_exception_if_invalid()
                     print(f"[DEBUG] Successfully loaded fallback VAE: {fallback_name}")
+                    # 彩色打印 VAE 信息
+                    print(f"\033[91m🔴 VAE: {fallback_name} (fallback)\033[0m")
                     return vae
                 except Exception:
                     pass
@@ -424,6 +428,8 @@ def _load_model(unet_name: str, unet_dtype: str):
             unet_path, model_options=_build_unet_model_options(unet_dtype)
         )
         print(f"[DEBUG] Successfully loaded UNET model: {unet_name}")
+        # 彩色打印 UNET 信息
+        print(f"\033[95m🟣 UNET: {unet_name}\033[0m")
         return model
     except Exception as exc:
         raise _format_runtime_error("UNET 加载", exc) from exc
@@ -466,6 +472,9 @@ def _load_clip_from_names(clip_names: list[str], clip_type: str):
                 model_options={},
             )
         print(f"[DEBUG] Successfully loaded CLIP models: {clean_names}")
+        # 彩色打印 CLIP 信息
+        clip_display = ", ".join(clean_names)
+        print(f"\033[93m🟡 CLIP: {clip_display}\033[0m")
         return clip
     except Exception as exc:
         raise _format_runtime_error("CLIP 加载", exc) from exc
@@ -531,9 +540,21 @@ def _ensure_mask_bhw(mask: torch.Tensor | None) -> torch.Tensor | None:
 def _resize_image_exact(
     image: torch.Tensor, target_width: int, target_height: int, upscale: str = "lanczos"
 ) -> torch.Tensor:
+    """保持宽高比的等比例缩放。"""
     samples = image.movedim(-1, 1)
+    source_height = samples.shape[2]
+    source_width = samples.shape[3]
+
+    # 计算等比例缩放后的尺寸
+    scale = min(
+        float(target_width) / float(max(1, source_width)),
+        float(target_height) / float(max(1, source_height)),
+    )
+    new_width = max(8, int(round(source_width * scale)))
+    new_height = max(8, int(round(source_height * scale)))
+
     resized = comfy.utils.common_upscale(
-        samples, int(target_width), int(target_height), upscale, "disabled"
+        samples, new_width, new_height, upscale, "disabled"
     )
     return resized.movedim(1, -1)
 
@@ -544,12 +565,25 @@ def _resize_mask_exact(
     target_height: int,
     upscale: str = "bilinear",
 ) -> torch.Tensor | None:
+    """保持宽高比的等比例缩放遮罩。"""
     mask_bhw = _ensure_mask_bhw(mask)
     if mask_bhw is None:
         return None
+
+    source_height = int(mask_bhw.shape[1])
+    source_width = int(mask_bhw.shape[2])
+
+    # 计算等比例缩放后的尺寸
+    scale = min(
+        float(target_width) / float(max(1, source_width)),
+        float(target_height) / float(max(1, source_height)),
+    )
+    new_width = max(8, int(round(source_width * scale)))
+    new_height = max(8, int(round(source_height * scale)))
+
     mask_image = mask_bhw.unsqueeze(1)
     resized = comfy.utils.common_upscale(
-        mask_image, int(target_width), int(target_height), upscale, "disabled"
+        mask_image, new_width, new_height, upscale, "disabled"
     )
     return resized[:, 0, :, :].clamp(0.0, 1.0)
 
@@ -573,24 +607,44 @@ def _fit_image_with_replicate_padding(
 ):
     source_height = int(image.shape[1])
     source_width = int(image.shape[2])
-    scale = min(
-        float(target_width) / float(max(1, source_width)),
-        float(target_height) / float(max(1, source_height)),
-    )
+    target_width = int(target_width)
+    target_height = int(target_height)
+
+    # 先等比例缩放，取较小的缩放比例以保证图片完整显示
+    scale_w = float(target_width) / float(max(1, source_width))
+    scale_h = float(target_height) / float(max(1, source_height))
+    scale = min(scale_w, scale_h)
+
+    # 计算等比例缩放后的尺寸
     resized_width = max(8, int(round(source_width * scale)))
     resized_height = max(8, int(round(source_height * scale)))
-    resized_width = min(int(target_width), resized_width)
-    resized_height = min(int(target_height), resized_height)
-    resized = _resize_image_exact(image, resized_width, resized_height, upscale)
-    left = max(0, (int(target_width) - resized_width) // 2)
-    top = max(0, (int(target_height) - resized_height) // 2)
-    right = max(0, int(target_width) - resized_width - left)
-    bottom = max(0, int(target_height) - resized_height - top)
+
+    # 确保不超过目标尺寸
+    resized_width = min(target_width, resized_width)
+    resized_height = min(target_height, resized_height)
+
+    # 等比例缩放图片（使用 PIL 方式确保不变形）
+    samples = image.movedim(-1, 1)
+    # crop="disabled" 确保不裁剪，保持原始比例
+    resized = comfy.utils.common_upscale(
+        samples, resized_width, resized_height, upscale, "disabled"
+    )
+    resized = resized.movedim(1, -1)
+
+    # 计算居中位置
+    left = (target_width - resized_width) // 2
+    top = (target_height - resized_height) // 2
+    right = target_width - resized_width - left
+    bottom = target_height - resized_height - top
+
+    # 使用白边填充（constant mode），值设为 1.0（白色）
     padded = F.pad(
-        resized.movedim(-1, 1), (left, right, top, bottom), mode="replicate"
+        resized.movedim(-1, 1), (left, right, top, bottom), mode="constant", value=1.0
     ).movedim(1, -1)
+
+    # 生成遮罩：1.0 表示填充区域，0.0 表示原始图片区域
     mask = torch.ones(
-        (image.shape[0], int(target_height), int(target_width)),
+        (image.shape[0], target_height, target_width),
         dtype=image.dtype,
         device=image.device,
     )
@@ -648,12 +702,7 @@ def _prepare_primary_image_for_target(
     target_height = max(8, int(target_height))
     if source_width == target_width and source_height == target_height:
         return image, _ensure_mask_bhw(mask), False
-    if _same_aspect_ratio(source_width, source_height, target_width, target_height):
-        return (
-            _resize_image_exact(image, target_width, target_height, "lanczos"),
-            _resize_mask_exact(mask, target_width, target_height),
-            False,
-        )
+    # 统一使用扩图模式（边缘填充），避免非等比例缩放变形
     padded_image, layout_mask, left, top, resized_width, resized_height = (
         _fit_image_with_replicate_padding(image, target_width, target_height, "lanczos")
     )
@@ -756,7 +805,7 @@ class GJJ_LazyImageStudio:
         "采样器",
     ]
     RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("最终生成图像",)
+    RETURN_NAMES = ("🖼️ 最终生成图像",)
     OUTPUT_NODE = True  # 设为True以确保节点可以作为有效输出节点
     OUTPUT_TOOLTIPS = ("节点内部完成条件编码、采样和解码后的最终图片。",)
 
@@ -790,7 +839,7 @@ class GJJ_LazyImageStudio:
                         "default": "",
                         "multiline": False,
                         "dynamicPrompts": True,
-                        "display_name": "正向提示词",
+                        "display_name": "✨ 正向提示词",
                         "tooltip": "正向提示词；无图片输入时走文生图，有图片输入时走图生图或多图编辑。",
                     },
                 ),
@@ -800,7 +849,7 @@ class GJJ_LazyImageStudio:
                         "default": "",
                         "multiline": False,
                         "dynamicPrompts": True,
-                        "display_name": "反向提示词",
+                        "display_name": "🚫 反向提示词",
                         "tooltip": "反向提示词；为空时会自动生成零反向条件。",
                     },
                 ),
@@ -810,7 +859,7 @@ class GJJ_LazyImageStudio:
                         "default": 1,
                         "min": 1,
                         "max": MAX_MAIN_IMAGE_INDEX,
-                        "display_name": "主图序号",
+                        "display_name": "🎯 主图序号",
                         "tooltip": "有多张参考图时，哪一张作为主参考排在最前；Qwen Image Edit 2511 / FireRed Image Edit 1.1 分支会忽略该项，改为所有图片平等参考。",
                     },
                 ),
@@ -821,7 +870,7 @@ class GJJ_LazyImageStudio:
                         "min": 64,
                         "max": 8192,
                         "step": 8,
-                        "display_name": "宽度",
+                        "display_name": "📐 宽度",
                         "tooltip": "默认会在接入批量图片时，从所有图片里不分先后取最大图自动同步宽度；如果你手动修改，节点会按目标尺寸自动缩放或外扩填充。",
                     },
                 ),
@@ -832,7 +881,7 @@ class GJJ_LazyImageStudio:
                         "min": 64,
                         "max": 8192,
                         "step": 8,
-                        "display_name": "高度",
+                        "display_name": "📏 高度",
                         "tooltip": "默认会在接入批量图片时，从所有图片里不分先后取最大图自动同步高度；如果你手动修改，节点会按目标尺寸自动缩放或外扩填充。",
                     },
                 ),
@@ -842,7 +891,7 @@ class GJJ_LazyImageStudio:
                         "default": 1,
                         "min": 1,
                         "max": 64,
-                        "display_name": "批次数",
+                        "display_name": "🔢 批次数",
                         "tooltip": "文生图时生成的 latent 批次数。",
                     },
                 ),
@@ -860,7 +909,7 @@ class GJJ_LazyImageStudio:
                     UNET_DTYPE_OPTIONS,
                     {
                         "default": DEFAULT_UNET_DTYPE,
-                        "display_name": "UNET 精度",
+                        "display_name": "⚙️ UNET 精度",
                         "tooltip": "UNET 加载精度；Flux2 工作流默认使用模型原生精度。",
                     },
                 ),
@@ -887,7 +936,7 @@ class GJJ_LazyImageStudio:
                         "min": 0,
                         "max": 0xFFFFFFFFFFFFFFFF,
                         "control_after_generate": True,
-                        "display_name": "种子",
+                        "display_name": "🎲 种子",
                         "tooltip": "随机种子。",
                     },
                 ),
@@ -897,7 +946,7 @@ class GJJ_LazyImageStudio:
                         "default": 4,
                         "min": 1,
                         "max": 10000,
-                        "display_name": "步数",
+                        "display_name": "👣 步数",
                         "tooltip": "采样步数；前端会按所选加速 LoRA 自动推荐。",
                     },
                 ),
@@ -909,7 +958,7 @@ class GJJ_LazyImageStudio:
                         "max": 100.0,
                         "step": 0.1,
                         "round": 0.01,
-                        "display_name": "CFG 引导强度",
+                        "display_name": "⚖️ CFG 引导强度",
                         "tooltip": "提示词引导强度；大多数新模型建议较低值。",
                     },
                 ),
@@ -917,7 +966,7 @@ class GJJ_LazyImageStudio:
                     comfy.samplers.KSampler.SAMPLERS,
                     {
                         "default": "euler",
-                        "display_name": "采样器",
+                        "display_name": "🌀 采样器",
                         "tooltip": "采样算法。",
                     },
                 ),
@@ -925,7 +974,7 @@ class GJJ_LazyImageStudio:
                     comfy.samplers.KSampler.SCHEDULERS,
                     {
                         "default": "simple",
-                        "display_name": "调度器",
+                        "display_name": "📊 调度器",
                         "tooltip": "噪声调度器。",
                     },
                 ),
@@ -936,7 +985,7 @@ class GJJ_LazyImageStudio:
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.01,
-                        "display_name": "降噪",
+                        "display_name": "🔧 降噪",
                         "tooltip": "文生图通常为 1.0；图生图可适当降低保留原图结构。",
                     },
                 ),
@@ -946,7 +995,7 @@ class GJJ_LazyImageStudio:
                         "default": 6,
                         "min": 0,
                         "max": 64,
-                        "display_name": "遮罩扩张",
+                        "display_name": "🎭 遮罩扩张",
                         "tooltip": "图生图有遮罩时用于 latent 无缝过渡的遮罩扩张像素。",
                     },
                 ),
@@ -958,28 +1007,28 @@ class GJJ_LazyImageStudio:
                         {
                             "default": "[]",
                             "multiline": True,
-                            "display_name": "批量图片来源",
+                            "display_name": "📁 批量图片来源",
                             "tooltip": "前端自动同步的批量图片来源清单；正常使用时会自动隐藏。",
                         },
                     ),
                     "image_01": (
                         "GJJ_BATCH_IMAGE,IMAGE",
                         {
-                            "display_name": "批量图片",
+                            "display_name": "🖼️ 批量图片",
                             "tooltip": "可直接接入 GJJ · 多图片加载预览器 的批量图片输出；会按顺序拆成多张参考图参与工作流，并在所有图片里不分先后取最大图自动同步尺寸。",
                         },
                     ),
                     "mask": (
                         "MASK",
                         {
-                            "display_name": "主图遮罩",
+                            "display_name": "🎭 主图遮罩",
                             "tooltip": "可选主图遮罩；存在时会走带 noise_mask 的局部编辑逻辑。",
                         },
                     ),
                     "lora_chain_config": (
                         "LORA_CHAIN_CONFIG",
                         {
-                            "display_name": "LoRA串联配置",
+                            "display_name": "🔗 LoRA串联配置",
                             "tooltip": "可选接入 LoRA串联配置 节点的输出；接入后会在面板 LoRA 1/LoRA 2 之后继续按顺序串联应用多组 LoRA。",
                         },
                     ),
@@ -1058,7 +1107,8 @@ class GJJ_LazyImageStudio:
         sigmas = Flux2Scheduler(int(steps), int(width), int(height))
         guider = CFGGuider(model, positive, negative, float(cfg))
         result = SamplerCustomAdvanced(noise, guider, sampler, sigmas, latent_out)
-        return result["output"]
+        # 将输出的 tensor 包装成字典格式，以兼容 VAEDecode
+        return {"samples": result["output"]}
 
     def _encode_equal_reference_image_edit(
         self,
@@ -1285,10 +1335,25 @@ class GJJ_LazyImageStudio:
         resolved_width = max(16, int(width))
         resolved_height = max(16, int(height))
         for ordered_index, pair in enumerate(ordered_pairs):
-            scaled_image = _scale_image_to_total_pixels(pair["image"])
+            # 完全仿照 ComfyUI 官方工作流：只用 ImageScaleToTotalPixels 等比例缩放
+            # 不添加白边填充，FLUX2 ReferenceLatent 节点会自动处理不同尺寸
+            image = pair["image"]
+            samples = image.movedim(-1, 1)
+            total_pixels = 1.0 * 1024.0 * 1024.0  # 1 百万像素
+            current_total = max(1, int(samples.shape[2]) * int(samples.shape[3]))
+            scale_by = math.sqrt(total_pixels / float(current_total))
+            target_width = max(1, int(round(samples.shape[3] * scale_by)))
+            target_height = max(1, int(round(samples.shape[2] * scale_by)))
+            scaled_samples = comfy.utils.common_upscale(
+                samples, target_width, target_height, "nearest-exact", "disabled"
+            )
+            scaled_image = scaled_samples.movedim(1, -1)
+
             if ordered_index == 0:
                 resolved_width = max(16, int(scaled_image.shape[2]))
                 resolved_height = max(16, int(scaled_image.shape[1]))
+
+            # FLUX2 多图参考使用标准 VAE 编码（128 通道）
             reference_latent = VAEEncode().encode(vae, scaled_image)[0]["samples"]
             positive = node_helpers.conditioning_set_values(
                 positive, {"reference_latents": [reference_latent]}, append=True

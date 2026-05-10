@@ -17,11 +17,10 @@ from nodes import (
 )
 from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
 
-
 NODE_NAME = "GJJ_CheckpointDirectGenerator"
 DEFAULT_CHECKPOINT = ""
-DEFAULT_POSITIVE = "masterpiece, best quality, highly detailed"
-DEFAULT_NEGATIVE = "lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry"
+DEFAULT_POSITIVE = "masterpiece, best quality, ultra detailed, 1Chinese young girl, east asian facial features, fair skin, delicate face, black long hair, gentle eyes, sitting in modern cafe, holding ceramic coffee cup, sipping coffee, casual chinese style clothing, warm indoor light, cozy cafe interior, soft focus, natural expression, slim figure"
+DEFAULT_NEGATIVE = "lowres, worst quality, low quality, deformed, blurry, ugly, foreigner, western face, big nose, deep eye socket, 3d render, cartoon, anime, illustration, extra limbs, bad hands, missing fingers"
 DEFAULT_WIDTH = 512
 DEFAULT_HEIGHT = 512
 DEFAULT_BATCH_SIZE = 1
@@ -111,9 +110,7 @@ def _send_lora_failed(unique_id: Any, payload: dict[str, Any]) -> None:
 
 def _stage_error(stage: str, ckpt_name: str, exc: Exception) -> RuntimeError:
     return RuntimeError(
-        f"{stage}失败。\n"
-        f"底模：{ckpt_name or '[未选择]'}\n"
-        f"详细错误：{exc}"
+        f"{stage}失败。\n" f"底模：{ckpt_name or '[未选择]'}\n" f"详细错误：{exc}"
     )
 
 
@@ -140,8 +137,10 @@ class GJJ_CheckpointDirectGenerator:
         "txt2img",
     ]
     RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("生成图像",)
-    OUTPUT_TOOLTIPS = ("输出按当前底模和节点内部参数直接生成的图片批次。无输入图片时走文生图，有输入图片时走图生图。",)
+    RETURN_NAMES = ("🖼️ 生成图像",)
+    OUTPUT_TOOLTIPS = (
+        "输出按当前底模和节点内部参数直接生成的图片批次。无输入图片时走文生图，有输入图片时走图生图。",
+    )
 
     def __init__(self):
         self.loaded_lora: tuple[str, Any] | None = None
@@ -355,7 +354,9 @@ class GJJ_CheckpointDirectGenerator:
         start_time = time.time()
         checkpoint_name = str(ckpt_name or "").strip()
         if not checkpoint_name:
-            raise RuntimeError("未找到可用 checkpoint 模型，请先把模型放到 models\\checkpoints 目录。")
+            raise RuntimeError(
+                "未找到可用 checkpoint 模型，请先把模型放到 models\\checkpoints 目录。"
+            )
         if _is_unsupported_checkpoint(checkpoint_name):
             raise _unsupported_checkpoint_error(checkpoint_name)
 
@@ -367,20 +368,28 @@ class GJJ_CheckpointDirectGenerator:
         try:
             _send_status(unique_id, f"⏳ 1/5 加载 checkpoint... ({mode_text}模式)")
             try:
-                model, clip, vae = CheckpointLoaderSimple().load_checkpoint(checkpoint_name)
+                model, clip, vae = CheckpointLoaderSimple().load_checkpoint(
+                    checkpoint_name
+                )
             except Exception as exc:
                 raise _stage_error("加载 checkpoint", checkpoint_name, exc) from exc
 
             if str(lora_chain_config or "").strip():
-                _send_status(unique_id, f"⏳ 2/6 应用 LoRA 串联配置... ({mode_text}模式)")
+                _send_status(
+                    unique_id, f"⏳ 2/6 应用 LoRA 串联配置... ({mode_text}模式)"
+                )
                 try:
                     model, clip, self.loaded_lora = apply_lora_chain_config(
                         model,
                         clip,
                         lora_data=normalize_lora_chain_data(lora_chain_config),
                         loaded_lora_cache=self.loaded_lora,
-                        on_lora_applied=lambda payload: _send_lora_applied(unique_id, payload),
-                        on_lora_failed=lambda payload: _send_lora_failed(unique_id, payload),
+                        on_lora_applied=lambda payload: _send_lora_applied(
+                            unique_id, payload
+                        ),
+                        on_lora_failed=lambda payload: _send_lora_failed(
+                            unique_id, payload
+                        ),
                     )
                 except Exception as exc:
                     raise _stage_error("LoRA 串联应用", checkpoint_name, exc) from exc
@@ -431,10 +440,20 @@ class GJJ_CheckpointDirectGenerator:
             else:
                 # 文生图模式：创建空 latent
                 _send_status(unique_id, latent_step_text)
+                try:
+                    latent = EmptyLatentImage().generate(
+                        int(width), int(height), int(batch_size)
+                    )[0]
+                except Exception as exc:
+                    raise _stage_error("创建 latent", checkpoint_name, exc) from exc
 
             try:
-                positive_conditioning = CLIPTextEncode().encode(clip, str(positive or ""))[0]
-                negative_conditioning = CLIPTextEncode().encode(clip, str(negative or ""))[0]
+                positive_conditioning = CLIPTextEncode().encode(
+                    clip, str(positive or "")
+                )[0]
+                negative_conditioning = CLIPTextEncode().encode(
+                    clip, str(negative or "")
+                )[0]
             except Exception as exc:
                 raise _stage_error("提示词编码", checkpoint_name, exc) from exc
 
@@ -462,7 +481,10 @@ class GJJ_CheckpointDirectGenerator:
                 raise _stage_error("VAE 解码", checkpoint_name, exc) from exc
 
             elapsed_time = time.time() - start_time
-            _send_status(unique_id, f"✅ 完成：{image.shape[2]} x {image.shape[1]} | {mode_text} | 降噪: {denoise:.2f} | 耗时: {elapsed_time:.2f}s")
+            _send_status(
+                unique_id,
+                f"✅ 完成：{image.shape[2]} x {image.shape[1]} | {mode_text} | 降噪: {denoise:.2f} | 耗时: {elapsed_time:.2f}s",
+            )
 
             # 保存预览图片并返回 UI 数据
             preview_ui = self.preview_image.save_images(
@@ -474,7 +496,10 @@ class GJJ_CheckpointDirectGenerator:
             return {"ui": {"images": preview_images}, "result": (image,)}
         except RuntimeError as exc:
             elapsed_time = time.time() - start_time
-            _send_status(unique_id, f"❌ 执行失败：{str(exc).splitlines()[0]} | 耗时: {elapsed_time:.2f}s")
+            _send_status(
+                unique_id,
+                f"❌ 执行失败：{str(exc).splitlines()[0]} | 耗时: {elapsed_time:.2f}s",
+            )
             raise
 
 
