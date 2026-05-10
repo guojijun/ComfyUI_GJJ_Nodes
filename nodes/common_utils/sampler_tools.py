@@ -222,14 +222,16 @@ class gjjutils_SamplerCustomAdvanced:
 		# 准备噪声
 		noise = torch.randn(samples.shape, dtype=samples.dtype, layout=samples.layout, device=device, generator=generator)
 		
-		# 使用 guider 和 sampler 进行采样
-		result = comfy.samplers.sample(
-			guider,
+		# 获取噪声掩码
+		noise_mask = latent_image.get("noise_mask", None)
+		
+		# 使用 guider.sample() 进行采样（官方正确方式）
+		result = guider.sample(
 			noise,
 			samples,
 			sampler_function,
 			sigmas,
-			denoise=1.0,
+			denoise_mask=noise_mask,
 			disable_pbar=True
 		)
 		

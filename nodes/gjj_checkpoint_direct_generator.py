@@ -12,6 +12,7 @@ from nodes import (
     EmptyLatentImage,
     KSampler,
     VAEDecode,
+    VAEEncode,
     PreviewImage,
 )
 from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
@@ -29,6 +30,7 @@ DEFAULT_STEPS = 20
 DEFAULT_CFG = 7.0
 DEFAULT_SAMPLER = "euler"
 DEFAULT_SCHEDULER = "normal"
+DEFAULT_DENOISE = 1.0
 UNSUPPORTED_CHECKPOINT_KEYWORDS = (
     "hunyuan",
     "ltx-",
@@ -139,7 +141,7 @@ class GJJ_CheckpointDirectGenerator:
     ]
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("生成图像",)
-    OUTPUT_TOOLTIPS = ("输出按当前底模和节点内部参数直接生成的图片批次。",)
+    OUTPUT_TOOLTIPS = ("输出按当前底模和节点内部参数直接生成的图片批次。无输入图片时走文生图，有输入图片时走图生图。",)
 
     def __init__(self):
         self.loaded_lora: tuple[str, Any] | None = None
@@ -263,6 +265,25 @@ class GJJ_CheckpointDirectGenerator:
                 ),
             },
             "optional": {
+                "image": (
+                    "GJJ_BATCH_IMAGE,IMAGE",
+                    {
+                        "display_name": "🖼️ 参考图片",
+                        "tooltip": "可选。接入后节点自动切换为图生图模式；不接入则为文生图模式。",
+                    },
+                ),
+                "denoise": (
+                    "FLOAT",
+                    {
+                        "default": DEFAULT_DENOISE,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.01,
+                        "round": 0.01,
+                        "display_name": "🔧 降噪强度",
+                        "tooltip": "图生图模式下的降噪强度；1.0=完全重绘，0.0=保持原图。文生图模式下此参数无效。",
+                    },
+                ),
                 "lora_chain_config": (
                     "LORA_CHAIN_CONFIG",
                     {
@@ -290,6 +311,8 @@ class GJJ_CheckpointDirectGenerator:
         cfg,
         sampler_name,
         scheduler,
+        image=None,
+        denoise=DEFAULT_DENOISE,
         lora_chain_config="",
         unique_id=None,
     ):
@@ -306,6 +329,7 @@ class GJJ_CheckpointDirectGenerator:
                 str(cfg),
                 str(sampler_name),
                 str(scheduler),
+                str(denoise),
                 str(normalize_lora_chain_data(lora_chain_config)),
             ]
         )
@@ -323,6 +347,8 @@ class GJJ_CheckpointDirectGenerator:
         cfg,
         sampler_name,
         scheduler,
+        image=None,
+        denoise=DEFAULT_DENOISE,
         lora_chain_config="",
         unique_id=None,
     ):
@@ -333,15 +359,20 @@ class GJJ_CheckpointDirectGenerator:
         if _is_unsupported_checkpoint(checkpoint_name):
             raise _unsupported_checkpoint_error(checkpoint_name)
 
+        # 判断是否为图生图模式
+        has_input_image = image is not None
+        is_img2img = has_input_image
+        mode_text = "图生图" if is_img2img else "文生图"
+
         try:
-            _send_status(unique_id, "⏳ 1/5 加载 checkpoint...")
+            _send_status(unique_id, f"⏳ 1/5 加载 checkpoint... ({mode_text}模式)")
             try:
                 model, clip, vae = CheckpointLoaderSimple().load_checkpoint(checkpoint_name)
             except Exception as exc:
                 raise _stage_error("加载 checkpoint", checkpoint_name, exc) from exc
 
             if str(lora_chain_config or "").strip():
-                _send_status(unique_id, "⏳ 2/6 应用 LoRA 串联配置...")
+                _send_status(unique_id, f"⏳ 2/6 应用 LoRA 串联配置... ({mode_text}模式)")
                 try:
                     model, clip, self.loaded_lora = apply_lora_chain_config(
                         model,
@@ -354,28 +385,58 @@ class GJJ_CheckpointDirectGenerator:
                 except Exception as exc:
                     raise _stage_error("LoRA 串联应用", checkpoint_name, exc) from exc
 
-                encode_step_text = "⏳ 3/6 编码提示词..."
-                latent_step_text = "⏳ 4/6 创建 latent..."
-                sample_step_text = "⏳ 5/6 采样生成..."
-                decode_step_text = "⏳ 6/6 VAE 解码..."
+                if is_img2img:
+                    encode_step_text = " 3/6 编码参考图片..."
+                    encode_prompt_step_text = "⏳ 4/6 编码提示词..."
+                    sample_step_text = "⏳ 5/6 采样生成..."
+                    decode_step_text = " 6/6 VAE 解码..."
+                else:
+                    encode_step_text = " 3/6 编码提示词..."
+                    latent_step_text = "⏳ 4/6 创建 latent..."
+                    sample_step_text = "⏳ 5/6 采样生成..."
+                    decode_step_text = "⏳ 6/6 VAE 解码..."
             else:
-                encode_step_text = "⏳ 2/5 编码提示词..."
-                latent_step_text = "⏳ 3/5 创建 latent..."
-                sample_step_text = "⏳ 4/5 采样生成..."
-                decode_step_text = "⏳ 5/5 VAE 解码..."
+                if is_img2img:
+                    encode_step_text = "⏳ 2/5 编码参考图片..."
+                    encode_prompt_step_text = "⏳ 3/5 编码提示词..."
+                    sample_step_text = " 4/5 采样生成..."
+                    decode_step_text = "⏳ 5/5 VAE 解码..."
+                else:
+                    encode_step_text = "⏳ 2/5 编码提示词..."
+                    latent_step_text = "⏳ 3/5 创建 latent..."
+                    sample_step_text = "⏳ 4/5 采样生成..."
+                    decode_step_text = "⏳ 5/5 VAE 解码..."
 
             _send_status(unique_id, encode_step_text)
+            if is_img2img:
+                # 图生图模式：编码输入图片为 latent
+                try:
+                    # 确保图片是 4D 张量
+                    input_image = image
+                    if input_image.ndim == 3:
+                        input_image = input_image.unsqueeze(0)
+                    # 取第一张图片（如果是批量图片）
+                    single_image = input_image[:1]
+                    # 缩放到目标尺寸
+                    samples = single_image.movedim(-1, 1)
+                    resized = comfy.utils.common_upscale(
+                        samples, int(width), int(height), "lanczos", "disabled"
+                    )
+                    resized = resized.movedim(1, -1)
+                    latent = VAEEncode().encode(vae, resized)[0]
+                except Exception as exc:
+                    raise _stage_error("参考图片编码", checkpoint_name, exc) from exc
+
+                _send_status(unique_id, encode_prompt_step_text)
+            else:
+                # 文生图模式：创建空 latent
+                _send_status(unique_id, latent_step_text)
+
             try:
                 positive_conditioning = CLIPTextEncode().encode(clip, str(positive or ""))[0]
                 negative_conditioning = CLIPTextEncode().encode(clip, str(negative or ""))[0]
             except Exception as exc:
                 raise _stage_error("提示词编码", checkpoint_name, exc) from exc
-
-            _send_status(unique_id, latent_step_text)
-            try:
-                latent = EmptyLatentImage().generate(int(width), int(height), int(batch_size))[0]
-            except Exception as exc:
-                raise _stage_error("初始 latent 创建", checkpoint_name, exc) from exc
 
             _send_status(unique_id, sample_step_text)
             try:
@@ -389,7 +450,7 @@ class GJJ_CheckpointDirectGenerator:
                     positive_conditioning,
                     negative_conditioning,
                     latent,
-                    1.0,
+                    float(denoise) if is_img2img else 1.0,
                 )[0]
             except Exception as exc:
                 raise _stage_error("采样", checkpoint_name, exc) from exc
@@ -401,7 +462,7 @@ class GJJ_CheckpointDirectGenerator:
                 raise _stage_error("VAE 解码", checkpoint_name, exc) from exc
 
             elapsed_time = time.time() - start_time
-            _send_status(unique_id, f"✅ 完成：{image.shape[2]} x {image.shape[1]} | 耗时: {elapsed_time:.2f}s")
+            _send_status(unique_id, f"✅ 完成：{image.shape[2]} x {image.shape[1]} | {mode_text} | 降噪: {denoise:.2f} | 耗时: {elapsed_time:.2f}s")
 
             # 保存预览图片并返回 UI 数据
             preview_ui = self.preview_image.save_images(
