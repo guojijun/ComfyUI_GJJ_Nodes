@@ -222,23 +222,23 @@ class GJJ_AnyPreview:
 • 音频/视频首次加载可能需要几秒生成预览文件
 • 大尺寸图片会自动缩略显示以保持性能
 • 建议配合 GJJ 批量图片节点使用以获得最佳体验"""
-	
+
 	# 依赖声明
 	REQUIRED_PACKAGES = [
 		"soundfile>=0.12.0",  # 音频文件读写
 		"numpy>=1.20.0",      # 数组处理
 	]
-	
+
 	# 使用的模型（本节点无需外部模型）
 	REQUIRED_MODELS = []
-	
+
 	# 帮助文档
 	GJJ_HELP = {
 		"title": "GJJ · 👀 任意对象预览器",
 		"version": "2.0.0",
 		"author": "GJJ Custom Nodes Team",
 		"description": "万能预览节点，支持图片、文本、音频、视频等多种数据类型的可视化",
-		
+
 		"features": [
 			{
 				"name": "图片预览",
@@ -265,7 +265,7 @@ class GJJ_AnyPreview:
 				"max_resolution": "1920x1080",
 			},
 		],
-		
+
 		"inputs": {
 			"batch_image": {
 				"type": "GJJ_BATCH_IMAGE,IMAGE",
@@ -278,14 +278,14 @@ class GJJ_AnyPreview:
 				"description": "动态插槽，可连接任意类型数据（自动编号 XX）",
 			},
 		},
-		
+
 		"outputs": {
 			"统一预览结果": {
 				"type": "*",
 				"description": "合并后的结果；图片输出 IMAGE 批次，文本输出 STRING，其他输出原对象",
 			},
 		},
-		
+
 		"usage_examples": [
 			{
 				"title": "基础图片预览",
@@ -313,7 +313,7 @@ class GJJ_AnyPreview:
 				"workflow": "[Any Node Output] → [GJJ Any Preview]",
 			},
 		],
-		
+
 		"technical_notes": [
 			"音频/视频预览会在首次执行时生成临时文件（位于 ComfyUI temp 目录）",
 			"图片预览使用 ComfyUI 原生 PreviewImage 节点的能力",
@@ -321,7 +321,7 @@ class GJJ_AnyPreview:
 			"动态插槽数量根据连接情况自动调整，最多支持 99 个输入",
 			"所有预览数据通过 ui 字典返回，遵循 ComfyUI 规范",
 		],
-		
+
 		"troubleshooting": [
 			{
 				"problem": "音频/视频不显示播放器",
@@ -340,7 +340,7 @@ class GJJ_AnyPreview:
 				"solution": "确认已连接有效输入，检查后端日志是否有错误信息",
 			},
 		],
-		
+
 		"changelog": [
 			{
 				"version": "2.0.0",
@@ -363,7 +363,7 @@ class GJJ_AnyPreview:
 			},
 		],
 	}
-	
+
 	SEARCH_ALIASES = [
 		"any preview",
 		"preview any",
@@ -380,25 +380,35 @@ class GJJ_AnyPreview:
 		"video preview",
 		"媒体预览",
 	]
-	RETURN_TYPES = (any_type,)
-	RETURN_NAMES = ("统一预览结果",)
-	OUTPUT_TOOLTIPS = (
-		"合并后的结果；图片输出为 IMAGE 批次，文本输出为 STRING，其它对象输出为任意对象。",
-	)
+	RETURN_TYPES = "GJJ_BATCH_IMAGE,IMAGE",
+	RETURN_NAMES = "批量图片",
+	OUTPUT_TOOLTIPS = "GJJ 批量图片，兼容标准 IMAGE 类型。",
 
 	@classmethod
 	def INPUT_TYPES(cls):
+		# 将 batch_image 定义传给 FlexibleOptionalInputType
+		batch_image_data = {
+			"batch_image": ("GJJ_BATCH_IMAGE,IMAGE", {
+				"display_name": "GJJ 批量图片",
+				"tooltip": "GJJ 专用批量图片接口，优先作为图片批次预览（兼容标准 IMAGE）",
+			}),
+		}
 		return {
 			"required": {},
-			"optional": FlexibleOptionalInputType(any_type),
+			"optional": FlexibleOptionalInputType(any_type, batch_image_data),
 			"hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
 		}
 
 	def __init__(self):
 		self.preview_image = PreviewImage()
 
-	def preview(self, prompt=None, extra_pnginfo=None, **kwargs):
+	def preview(self, batch_image=None, prompt=None, extra_pnginfo=None, **kwargs):
 		values = []
+
+		# 优先处理 batch_image 参数
+		if batch_image is not None and not is_none(batch_image):
+			values.append(batch_image)
+
 		for key in sorted(kwargs.keys(), key=extract_input_index):
 			if not key.startswith("any_"):
 				continue
@@ -413,7 +423,7 @@ class GJJ_AnyPreview:
 			"preview_kind": (preview_kind,),
 			"preview_item_count": (len(values),),
 		}
-		
+
 		# 添加调试日志
 		print(f"[GJJ] 开始构建ui数据 - preview_kind: {preview_kind}")
 
@@ -432,33 +442,33 @@ class GJJ_AnyPreview:
 			try:
 				import numpy as np
 				import soundfile as sf
-				
+
 				# 获取音频数据
 				waveform = merged.get("waveform")
 				sample_rate = merged.get("sample_rate", 44100)
-				
+
 				print(f"[GJJ] 音频预览开始 - waveform类型: {type(waveform)}, sample_rate: {sample_rate}")
-				
+
 				if isinstance(waveform, torch.Tensor):
 					# 转换为numpy数组
 					audio_np = waveform.squeeze(0).cpu().numpy()
 					# 如果是多声道，转置为[样本数, 通道数]
 					if audio_np.ndim == 2:
 						audio_np = audio_np.T
-					
+
 					# 保存到临时文件
 					output_dir = folder_paths.get_temp_directory()
 					filename = f"GJJ_AnyPreview_{hash(str(prompt))}.wav"
 					filepath = os.path.join(output_dir, filename)
-					
+
 					# 确保目录存在
 					os.makedirs(output_dir, exist_ok=True)
-					
+
 					# 保存WAV文件
 					sf.write(filepath, audio_np, sample_rate)
-					
+
 					print(f"[GJJ] 音频文件已保存: {filepath}")
-					
+
 					# 构建预览数据
 					preview_audio_data = [{
 						"filename": filename,
@@ -477,7 +487,7 @@ class GJJ_AnyPreview:
 		elif preview_kind == "video" and is_video_object(merged):
 			try:
 				from .gjj_video_combine_runtime import combine_video
-				
+
 				# 获取视频组件
 				components = merged.get_components()
 				images = getattr(components, "images", None)
@@ -501,7 +511,7 @@ class GJJ_AnyPreview:
 						extra_pnginfo=extra_pnginfo,
 						unique_id=None,
 					)
-					
+
 					# 提取预览媒体数据
 					if isinstance(video_result, dict):
 						video_ui = video_result.get("ui", {})
@@ -518,11 +528,11 @@ class GJJ_AnyPreview:
 		# 添加最终调试日志
 		print(f"[GJJ] 最终返回的ui数据: {ui}")
 		print(f"[GJJ] ui.keys: {list(ui.keys())}")
-		
+
 		# 确保返回的是原始输入值，而不是内部处理后的 merged 对象
 		# 如果 values 只有一个元素，返回该元素；否则返回合并后的结果
 		result_output = values[0] if len(values) == 1 else merged
-		
+
 		return {
 			"ui": ui,
 			"result": (result_output,),

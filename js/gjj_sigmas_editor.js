@@ -17,11 +17,31 @@ const PRESET_OPTIONS = [
     { value: "自定义", label: "自定义" },
 ];
 
+const HIDDEN_WIDGET_NAMES = new Set(["sigmas_data", "curve_mode", "preset"]);
+const DEFAULT_NODE_HEIGHT = CHART_HEIGHT + 120;
+
 function hideWidget(widget) {
-    if (!widget || widget.__gjjSigmasHidden) return;
-    widget.__gjjSigmasHidden = { type: widget.type, computeSize: widget.computeSize };
+    if (!widget || widget.__gjjSigmasHidden) {
+        return;
+    }
+    widget.__gjjSigmasHidden = {
+        type: widget.type,
+        computeSize: widget.computeSize,
+    };
     widget.type = "converted-widget";
     widget.computeSize = () => [0, -4];
+}
+
+function preserveNodeSize(node) {
+    const currentWidth = Math.max(MIN_NODE_WIDTH, Number(node?.size?.[0] || 0));
+    node.size ||= [currentWidth, DEFAULT_NODE_HEIGHT];
+    node.size[0] = currentWidth;
+    node.min_width = currentWidth;
+    node.minWidth = currentWidth;
+    const currentHeight = Math.max(Number(node.size?.[1] || 0), DEFAULT_NODE_HEIGHT);
+    node.setSize?.([currentWidth, currentHeight]);
+    node.setDirtyCanvas?.(true, true);
+    app.graph?.setDirtyCanvas?.(true, true);
 }
 
 function safeParseArray(text, fallback = []) {
@@ -40,6 +60,7 @@ function clamp(value, min, max) {
 function ensureEditor(node) {
     if (node.__gjjSigmasEditor) return node.__gjjSigmasEditor;
 
+    // 获取 widgets 引用
     const sigmasWidget = node.widgets?.find((w) => w.name === "sigmas_data");
     const curveWidget = node.widgets?.find((w) => w.name === "curve_mode");
     const presetWidget = node.widgets?.find((w) => w.name === "preset");
@@ -58,12 +79,20 @@ function ensureEditor(node) {
 
     const addButton = document.createElement("button");
     addButton.textContent = "+ 添加点";
-    addButton.style.cssText = "padding:4px 10px;border-radius:999px;border:1px solid #41535b;background:#182127;color:#dce7e2;cursor:pointer;font-size:12px;";
+    addButton.style.cssText = "padding:4px 10px;border-radius:999px;border:1px solid #41535b;background:#182127;color:#dce7e2;cursor:pointer;font-size:12px;transition:all 0.15s;";
+    addButton.addEventListener("mouseenter", () => { addButton.style.background = "#253038"; addButton.style.borderColor = "#4d636e"; });
+    addButton.addEventListener("mouseleave", () => { addButton.style.background = "#182127"; addButton.style.borderColor = "#41535b"; });
+    addButton.addEventListener("mousedown", () => { addButton.style.background = "#0f1519"; addButton.style.transform = "scale(0.95)"; });
+    addButton.addEventListener("mouseup", () => { addButton.style.background = "#253038"; addButton.style.transform = "scale(1)"; });
     toolbar.appendChild(addButton);
 
     const clearButton = document.createElement("button");
     clearButton.textContent = "清空";
-    clearButton.style.cssText = "padding:4px 10px;border-radius:999px;border:1px solid #41535b;background:#182127;color:#dce7e2;cursor:pointer;font-size:12px;";
+    clearButton.style.cssText = "padding:4px 10px;border-radius:999px;border:1px solid #41535b;background:#182127;color:#dce7e2;cursor:pointer;font-size:12px;transition:all 0.15s;";
+    clearButton.addEventListener("mouseenter", () => { clearButton.style.background = "#253038"; clearButton.style.borderColor = "#4d636e"; });
+    clearButton.addEventListener("mouseleave", () => { clearButton.style.background = "#182127"; clearButton.style.borderColor = "#41535b"; });
+    clearButton.addEventListener("mousedown", () => { clearButton.style.background = "#0f1519"; clearButton.style.transform = "scale(0.95)"; });
+    clearButton.addEventListener("mouseup", () => { clearButton.style.background = "#253038"; clearButton.style.transform = "scale(1)"; });
     toolbar.appendChild(clearButton);
 
     const wrap = document.createElement("div");
@@ -102,19 +131,21 @@ function ensureEditor(node) {
         sigmasWidget,
         curveWidget,
         presetWidget,
-        sigmas: safeParseArray(sigmasWidget?.value, [1.0, 0.5, 0.0]),
+        sigmas: [1.0, 0.0],
         draggingIndex: -1,
         hoveredIndex: -1,
-        currentCurveMode: curveWidget?.value || "smooth",
-        currentPreset: presetWidget?.value || "默认1",
+        currentCurveMode: "smooth",
+        currentPreset: "默认1",
     };
 
     function createModeButtons(container, options, getCurrent, setCurrent, onSelect) {
+        const buttons = [];
+
         options.forEach((opt) => {
             const btn = document.createElement("button");
             btn.textContent = opt.label;
             btn.style.cssText = "padding:4px 10px;border-radius:6px;border:1px solid #41535b;background:#182127;color:#dce7e2;cursor:pointer;font-size:12px;transition:all 0.2s;";
-            
+
             const updateBtnStyle = () => {
                 if (btn.dataset.value === getCurrent()) {
                     btn.style.background = "#2a3a42";
@@ -126,18 +157,19 @@ function ensureEditor(node) {
                     btn.style.color = "#dce7e2";
                 }
             };
-            
+
             btn.dataset.value = opt.value;
+            buttons.push({ btn, updateBtnStyle });
             updateBtnStyle();
-            
+
             btn.onclick = (e) => {
                 e.stopPropagation();
                 setCurrent(opt.value);
-                updateBtnStyle();
+                buttons.forEach((b) => b.updateBtnStyle());
                 onSelect?.(opt.value);
                 draw();
             };
-            
+
             container.appendChild(btn);
         });
     }
@@ -146,7 +178,14 @@ function ensureEditor(node) {
         curveButtonsContainer,
         CURVE_MODES,
         () => editor.currentCurveMode,
-        (v) => { editor.currentCurveMode = v; if (editor.curveWidget) { editor.curveWidget.value = v; editor.curveWidget.callback?.(v); } },
+        (v) => {
+            editor.currentCurveMode = v;
+            if (editor.curveWidget) {
+                editor.curveWidget.value = v;
+                editor.curveWidget.callback?.(v);
+            }
+            draw();
+        },
         null
     );
 
@@ -154,34 +193,45 @@ function ensureEditor(node) {
         presetButtonsContainer,
         PRESET_OPTIONS,
         () => editor.currentPreset,
-        (v) => { editor.currentPreset = v; if (editor.presetWidget) { editor.presetWidget.value = v; editor.presetWidget.callback?.(v); } },
+        (v) => {
+            editor.currentPreset = v;
+            if (editor.presetWidget) {
+                editor.presetWidget.value = v;
+                editor.presetWidget.callback?.(v);
+            }
+        },
         (v) => {
             if (v !== "自定义") {
-                setTimeout(() => {
-                    if (editor.sigmasWidget) {
-                        editor.sigmas = safeParseArray(editor.sigmasWidget.value, [1.0, 0.5, 0.0]);
-                    }
-                    draw();
-                }, 50);
+                node.dirty = true;
+                if (app.graph?.requestExecution) {
+                    app.graph.requestExecution();
+                }
+            } else {
+                editor.sigmas = [1.0, 0.0];
+                writeBack();
             }
         }
     );
 
     function getChartArea() {
         const rect = wrap.getBoundingClientRect();
+        const scaleX = wrap.clientWidth / rect.width;
+        const scaleY = wrap.clientHeight / rect.height;
         return {
-            x: CHART_PADDING.left,
-            y: CHART_PADDING.top,
-            width: Math.max(1, rect.width - CHART_PADDING.left - CHART_PADDING.right),
-            height: Math.max(1, rect.height - CHART_PADDING.top - CHART_PADDING.bottom),
+            x: CHART_PADDING.left * scaleX,
+            y: CHART_PADDING.top * scaleY,
+            width: Math.max(1, wrap.clientWidth - CHART_PADDING.left * scaleX - CHART_PADDING.right * scaleX),
+            height: Math.max(1, wrap.clientHeight - CHART_PADDING.top * scaleY - CHART_PADDING.bottom * scaleY),
         };
     }
 
     function toChartPoint(event) {
         const rect = wrap.getBoundingClientRect();
+        const scaleX = wrap.clientWidth / rect.width;
+        const scaleY = wrap.clientHeight / rect.height;
         const area = getChartArea();
-        const localX = event.clientX - rect.left - area.x;
-        const localY = event.clientY - rect.top - area.y;
+        const localX = (event.clientX - rect.left) * scaleX - area.x;
+        const localY = (event.clientY - rect.top) * scaleY - area.y;
 
         if (localX < 0 || localX > area.width || localY < 0 || localY > area.height) return null;
 
@@ -205,6 +255,19 @@ function ensureEditor(node) {
         }
 
         return nearestIndex;
+    }
+
+    function syncFromWidgets() {
+        if (editor.sigmasWidget) {
+            editor.sigmas = safeParseArray(editor.sigmasWidget.value, [1.0, 0.0]);
+        }
+        if (editor.curveWidget) {
+            editor.currentCurveMode = editor.curveWidget.value || "smooth";
+        }
+        if (editor.presetWidget) {
+            editor.currentPreset = editor.presetWidget.value || "默认1";
+        }
+        draw();
     }
 
     function writeBack() {
@@ -490,8 +553,8 @@ function ensureEditor(node) {
     });
     widget.computeSize = (width) => [Math.max(MIN_NODE_WIDTH, Number(width || 0)), CHART_HEIGHT + 80];
 
-    node.__gjjSigmasEditor = { widget, editor, draw };
-    draw();
+    node.__gjjSigmasEditor = { widget, editor, draw, syncFromWidgets };
+    syncFromWidgets();
     return node.__gjjSigmasEditor;
 }
 
@@ -499,15 +562,34 @@ function patchNode(node) {
     if (!node || node.__gjjSigmasPatched) return;
     node.__gjjSigmasPatched = true;
 
-    const sigmasWidget = node.widgets?.find((w) => w.name === "sigmas_data");
-    const curveWidget = node.widgets?.find((w) => w.name === "curve_mode");
-    const presetWidget = node.widgets?.find((w) => w.name === "preset");
+    // 隐藏 widgets
+    HIDDEN_WIDGET_NAMES.forEach((name) => {
+        const widget = node.widgets?.find((w) => w.name === name);
+        if (widget) hideWidget(widget);
+    });
 
-    if (sigmasWidget) hideWidget(sigmasWidget);
-    if (curveWidget) hideWidget(curveWidget);
-    if (presetWidget) hideWidget(presetWidget);
+    // ⭐ 关键：删除隐藏参数的输入插槽
+    if (node.inputs) {
+        for (let i = node.inputs.length - 1; i >= 0; i--) {
+            const input = node.inputs[i];
+            const inputName = String(input?.name || "");
+            if (HIDDEN_WIDGET_NAMES.has(inputName)) {
+                try { node.disconnectInput?.(i); } catch (_) { /* ignore */ }
+                if (typeof node.removeInput === "function") {
+                    node.removeInput(i);
+                } else {
+                    node.inputs.splice(i, 1);
+                }
+            }
+        }
+    }
+}
 
-    ensureEditor(node);
+function afterNodeReady(node) {
+    patchNode(node);
+    const view = ensureEditor(node);
+    view.syncFromWidgets();
+    preserveNodeSize(node);
 }
 
 app.registerExtension({
@@ -518,31 +600,39 @@ app.registerExtension({
         const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const result = originalOnNodeCreated?.apply(this, arguments);
-            patchNode(this);
+            afterNodeReady(this);
             return result;
         };
 
         const originalOnConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (...args) {
             const result = originalOnConfigure?.apply(this, arguments);
-            patchNode(this);
+            afterNodeReady(this);
             return result;
         };
 
         const originalOnExecuted = nodeType.prototype.onExecuted;
         nodeType.prototype.onExecuted = function (message) {
-            originalOnExecuted?.apply(this, arguments);
+            const result = originalOnExecuted?.apply(this, arguments);
             if (message?.sigmas?.[0]) {
-                const editor = ensureEditor(this);
-                editor.editor.sigmas = message.sigmas[0];
-                editor.draw();
+                const view = ensureEditor(this);
+                view.editor.sigmas = message.sigmas[0];
+                view.draw();
             }
+            return result;
+        };
+
+        const originalOnResize = nodeType.prototype.onResize;
+        nodeType.prototype.onResize = function (...args) {
+            const result = originalOnResize?.apply(this, arguments);
+            ensureEditor(this).draw();
+            return result;
         };
     },
     setup() {
         for (const node of app.graph?._nodes || []) {
             if (TARGET_NODES.has(String(node.comfyClass || node.type || ""))) {
-                patchNode(node);
+                afterNodeReady(node);
             }
         }
     },

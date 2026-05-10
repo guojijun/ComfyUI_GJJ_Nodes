@@ -23,6 +23,14 @@ class GJJ_SigmasEditor:
     @classmethod
     def INPUT_TYPES(cls):
         return {
+            "optional": {
+                "sigmas_in": ("SIGMAS,STRING", {
+                    "default": None,
+                    "display_name": "Sigmas输入",
+                    "tooltip": "外部输入的Sigmas数据，优先级最高",
+                    "forceInput": True,
+                }),
+            },
             "required": {
                 "sigmas_data": ("STRING", {
                     "default": json.dumps(DEFAULT_SIGMAS_1),
@@ -54,8 +62,15 @@ class GJJ_SigmasEditor:
     FUNCTION = "process"
     CATEGORY = "GJJ/工具"
 
-    def process(self, sigmas_data: str, curve_mode: str, preset: str):
-        if preset == "默认1":
+    def process(self, sigmas_in=None, sigmas_data: str = "", curve_mode: str = "smooth", preset: str = "默认1"):
+        if sigmas_in is not None:
+            if isinstance(sigmas_in, str):
+                sigmas = _safe_parse_sigmas(sigmas_in)
+            elif isinstance(sigmas_in, list):
+                sigmas = [float(x) for x in sigmas_in]
+            else:
+                sigmas = None
+        elif preset == "默认1":
             sigmas = DEFAULT_SIGMAS_1.copy()
         elif preset == "默认2":
             sigmas = DEFAULT_SIGMAS_2.copy()
@@ -63,7 +78,7 @@ class GJJ_SigmasEditor:
             sigmas = _safe_parse_sigmas(sigmas_data)
         
         if not sigmas:
-            sigmas = DEFAULT_SIGMAS_1.copy()
+            sigmas = [1.0, 0.0]
         
         return {
             "ui": {"sigmas": [sigmas]},
