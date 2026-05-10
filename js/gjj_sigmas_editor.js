@@ -20,16 +20,60 @@ const PRESET_OPTIONS = [
 const HIDDEN_WIDGET_NAMES = new Set(["sigmas_data", "curve_mode", "preset"]);
 const DEFAULT_NODE_HEIGHT = CHART_HEIGHT + 120;
 
-function hideWidget(widget) {
-    if (!widget || widget.__gjjSigmasHidden) {
-        return;
+function hideOriginalPythonWidgets(node) {
+    const widgetsToHide = ["sigmas_data", "curve_mode", "preset"];
+
+    if (node.widgets) {
+        node.widgets.forEach((widget) => {
+            if (widgetsToHide.includes(widget.name)) {
+                // 按照标准方法隐藏 Widget
+                widget.type = "hidden";
+                widget.hidden = true;
+                widget.serialize = true;
+                widget.computeSize = () => [0, 0];
+                widget.draw = () => {};
+                widget.label = "";
+
+                // 重置关键布局属性
+                widget.last_y = 0;              // ⭐ 最关键
+                widget.computedHeight = 0;
+                widget.margin_top = 0;
+                widget.size = [0, 0];
+
+                // 隐藏 DOM 元素
+                if (widget.inputEl) {
+                    widget.inputEl.style.display = "none";
+                    widget.inputEl.style.height = "0";
+                    widget.inputEl.style.margin = "0";
+                    widget.inputEl.style.padding = "0";
+                }
+                if (widget.element) {
+                    widget.element.style.display = "none";
+                    widget.element.style.height = "0";
+                }
+                if (widget.widget) {
+                    widget.widget.style.display = "none";
+                    widget.widget.style.height = "0";
+                }
+            }
+        });
     }
-    widget.__gjjSigmasHidden = {
-        type: widget.type,
-        computeSize: widget.computeSize,
-    };
-    widget.type = "converted-widget";
-    widget.computeSize = () => [0, -4];
+
+    // ⭐ 删除隐藏参数的输入插槽（左侧小圆点）
+    if (node.inputs) {
+        for (let i = node.inputs.length - 1; i >= 0; i--) {
+            const input = node.inputs[i];
+            const inputName = String(input?.name || "");
+            if (widgetsToHide.includes(inputName)) {
+                try { node.disconnectInput?.(i); } catch (_) { /* ignore */ }
+                if (typeof node.removeInput === "function") {
+                    node.removeInput(i);
+                } else if (node.inputs.splice) {
+                    node.inputs.splice(i, 1);
+                }
+            }
+        }
+    }
 }
 
 function preserveNodeSize(node) {
@@ -131,7 +175,7 @@ function ensureEditor(node) {
         sigmasWidget,
         curveWidget,
         presetWidget,
-        sigmas: [1.0, 0.0],
+        sigmas: [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.881203, 0.863321, 0.841251, 0.820089, 0.655, 0.381875, 0.0],
         draggingIndex: -1,
         hoveredIndex: -1,
         currentCurveMode: "smooth",
@@ -180,11 +224,7 @@ function ensureEditor(node) {
         () => editor.currentCurveMode,
         (v) => {
             editor.currentCurveMode = v;
-            if (editor.curveWidget) {
-                editor.curveWidget.value = v;
-                editor.curveWidget.callback?.(v);
-            }
-            draw();
+            writeBack();
         },
         null
     );
@@ -195,19 +235,25 @@ function ensureEditor(node) {
         () => editor.currentPreset,
         (v) => {
             editor.currentPreset = v;
-            if (editor.presetWidget) {
-                editor.presetWidget.value = v;
-                editor.presetWidget.callback?.(v);
-            }
         },
         (v) => {
             if (v !== "自定义") {
+                if (v === "默认1") {
+                    editor.sigmas = [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.881203, 0.863321, 0.841251, 0.820089, 0.655, 0.381875, 0.0];
+                } else if (v === "默认2") {
+                    editor.sigmas = [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0];
+                }
+                writeBack();
                 node.dirty = true;
-                if (app.graph?.requestExecution) {
+                if (typeof app.queuePrompt === "function") {
+                    app.queuePrompt();
+                } else if (typeof app.graph?.queueNodeExecution === "function") {
+                    app.graph.queueNodeExecution(node);
+                } else if (typeof app.graph?.requestExecution === "function") {
                     app.graph.requestExecution();
                 }
             } else {
-                editor.sigmas = [1.0, 0.0];
+                editor.sigmas = [0.85, 0.7250, 0.4219, 0.0];
                 writeBack();
             }
         }
@@ -274,6 +320,14 @@ function ensureEditor(node) {
         if (editor.sigmasWidget) {
             editor.sigmasWidget.value = JSON.stringify(editor.sigmas);
             editor.sigmasWidget.callback?.(editor.sigmasWidget.value);
+        }
+        if (editor.curveWidget) {
+            editor.curveWidget.value = editor.currentCurveMode;
+            editor.curveWidget.callback?.(editor.currentCurveMode);
+        }
+        if (editor.presetWidget) {
+            editor.presetWidget.value = editor.currentPreset;
+            editor.presetWidget.callback?.(editor.currentPreset);
         }
         draw();
     }
@@ -558,35 +612,26 @@ function ensureEditor(node) {
     return node.__gjjSigmasEditor;
 }
 
-function patchNode(node) {
-    if (!node || node.__gjjSigmasPatched) return;
-    node.__gjjSigmasPatched = true;
+function afterNodeReady(node) {
+    hideOriginalPythonWidgets(node);
 
-    // 隐藏 widgets
-    HIDDEN_WIDGET_NAMES.forEach((name) => {
-        const widget = node.widgets?.find((w) => w.name === name);
-        if (widget) hideWidget(widget);
-    });
-
-    // ⭐ 关键：删除隐藏参数的输入插槽
+    // ⭐ 额外的防护：再次删除输入插槽（确保彻底删除）
+    const widgetsToHide = ["sigmas_data", "curve_mode", "preset"];
     if (node.inputs) {
         for (let i = node.inputs.length - 1; i >= 0; i--) {
             const input = node.inputs[i];
             const inputName = String(input?.name || "");
-            if (HIDDEN_WIDGET_NAMES.has(inputName)) {
+            if (widgetsToHide.includes(inputName)) {
                 try { node.disconnectInput?.(i); } catch (_) { /* ignore */ }
                 if (typeof node.removeInput === "function") {
                     node.removeInput(i);
-                } else {
+                } else if (node.inputs.splice) {
                     node.inputs.splice(i, 1);
                 }
             }
         }
     }
-}
 
-function afterNodeReady(node) {
-    patchNode(node);
     const view = ensureEditor(node);
     view.syncFromWidgets();
     preserveNodeSize(node);
@@ -597,6 +642,25 @@ app.registerExtension({
     beforeRegisterNodeDef(nodeType, nodeData) {
         if (!TARGET_NODES.has(String(nodeData?.name || ""))) return;
 
+        // 防护层1: Hook addWidget
+        const originalAddWidget = nodeType.prototype.addWidget;
+        if (originalAddWidget) {
+            nodeType.prototype.addWidget = function(...args) {
+                const widget = originalAddWidget.apply(this, args);
+                const widgetsToHide = ["sigmas_data", "curve_mode", "preset"];
+                if (widget && widgetsToHide.includes(widget.name)) {
+                    hideOriginalPythonWidgets(this);
+                    setTimeout(() => {
+                        if (widget.inputEl) widget.inputEl.style.display = "none";
+                        if (widget.element) widget.element.style.display = "none";
+                        if (widget.widget) widget.widget.style.display = "none";
+                    }, 0);
+                }
+                return widget;
+            };
+        }
+
+        // 防护层2: onNodeCreated
         const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const result = originalOnNodeCreated?.apply(this, arguments);
@@ -604,6 +668,7 @@ app.registerExtension({
             return result;
         };
 
+        // 防护层3: onConfigure
         const originalOnConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (...args) {
             const result = originalOnConfigure?.apply(this, arguments);
@@ -612,11 +677,13 @@ app.registerExtension({
         };
 
         const originalOnExecuted = nodeType.prototype.onExecuted;
-        nodeType.prototype.onExecuted = function (message) {
+        nodeType.prototype.onExecuted = function (message, outputs) {
             const result = originalOnExecuted?.apply(this, arguments);
-            if (message?.sigmas?.[0]) {
+            const uiData = message?.ui || message;
+            const sigmasData = uiData?.sigmas?.[0] || outputs?.[0];
+            if (sigmasData && Array.isArray(sigmasData)) {
                 const view = ensureEditor(this);
-                view.editor.sigmas = message.sigmas[0];
+                view.editor.sigmas = sigmasData;
                 view.draw();
             }
             return result;

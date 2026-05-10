@@ -76,10 +76,10 @@ class GJJ_SigmasEditor:
             sigmas = DEFAULT_SIGMAS_2.copy()
         else:
             sigmas = _safe_parse_sigmas(sigmas_data)
-        
+
         if not sigmas:
             sigmas = [1.0, 0.0]
-        
+
         return {
             "ui": {"sigmas": [sigmas]},
             "result": (
