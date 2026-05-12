@@ -2,68 +2,68 @@ import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { GJJ_Utils, queueOnlyCurrentNode } from "./gjj_utils.js";
 
-const NODE_TYPE = "GJJ_OutpaintStudio";
-const API_PATH = "/gjj/outpaint_models";
-const DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d";
+const TARGET_NODE_TYPE = "GJJ_OutpaintStudio";
+const CONFIG_WIDGET_NAME = "outpaint_config";
 
-const OUTPAINT_MODES = {
-	sd15_inpaint: { icon: "🎨", name: "SD1.5", color: "#4CAF50" },
-	flux1_fill: { icon: "🌀", name: "Flux1", color: "#2196F3" },
-	flux2_klein: { icon: "✨", name: "Flux2", color: "#9C27B0" },
-	qwen_image: { icon: "🌟", name: "Qwen", color: "#FF9800" },
-};
+const OUTPAINT_MODES = [
+	{ id: "sd15_inpaint", label: "🎨 SD1.5" },
+	{ id: "flux1_fill", label: "🌀 Flux1" },
+	{ id: "flux2_klein", label: "✨ Flux2" },
+	{ id: "qwen_image", label: "🌟 Qwen" },
+];
 
-const EXPAND_METHODS = {
-	pixel_expand: { icon: "📏", name: "像素扩图" },
-	target_size: { icon: "📐", name: "目标尺寸" },
-};
+const EXPAND_METHODS = [
+	{ id: "pixel_expand", label: "像素扩图" },
+	{ id: "target_size", label: "目标尺寸" },
+];
 
 const SAMPLERS = [
-  { value: "euler", label: "Euler" },
-  { value: "euler_ancestral", label: "Euler a" },
-  { value: "heun", label: "Heun" },
-  { value: "heunpp2", label: "HeunPP2" },
-  { value: "dpm_2", label: "DPM2" },
-  { value: "dpm_2_ancestral", label: "DPM2 a" },
-  { value: "lms", label: "LMS" },
-  { value: "dpm_fast", label: "DPM fast" },
-  { value: "dpm_adaptive", label: "DPM adaptive" },
-  { value: "dpmpp_2s_ancestral", label: "DPM++ 2S a" },
-  { value: "dpmpp_sde", label: "DPM++ SDE" },
-  { value: "dpmpp_sde_gpu", label: "DPM++ SDE (GPU)" },
-  { value: "dpmpp_2m", label: "DPM++ 2M" },
-  { value: "dpmpp_3m", label: "DPM++ 3M" },
-  { value: "ddim", label: "DDIM" },
-  { value: "plms", label: "PLMS" },
-  { value: "uni_pc", label: "UniPC" },
-  { value: "uni_pc_bh2", label: "UniPC BH2" }
+	{ value: "euler", label: "euler" },
+	{ value: "euler_ancestral", label: "euler a" },
+	{ value: "heun", label: "heun" },
+	{ value: "heunpp2", label: "heunpp2" },
+	{ value: "dpm_2", label: "dpm_2" },
+	{ value: "dpm_2_ancestral", label: "dpm_2 a" },
+	{ value: "lms", label: "lms" },
+	{ value: "dpm_fast", label: "dpm fast" },
+	{ value: "dpm_adaptive", label: "dpm adaptive" },
+	{ value: "dpmpp_2s_ancestral", label: "dpmpp 2s a" },
+	{ value: "dpmpp_sde", label: "dpmpp sde" },
+	{ value: "dpmpp_sde_gpu", label: "dpmpp sde (gpu)" },
+	{ value: "dpmpp_2m", label: "dpmpp 2m" },
+	{ value: "dpmpp_3m", label: "dpmpp 3m" },
+	{ value: "ddim", label: "ddim" },
+	{ value: "plms", label: "plms" },
+	{ value: "uni_pc", label: "uni_pc" },
+	{ value: "uni_pc_bh2", label: "uni_pc bh2" },
 ];
+
 const SCHEDULERS = [
-  { value: "normal", label: "标准" },
-  { value: "karras", label: "Karras" },
-  { value: "exponential", label: "指数" },
-  { value: "sgm_uniform", label: "SGM 均匀" },
-  { value: "simple", label: "简单" },
-  { value: "ddim_uniform", label: "DDIM 均匀" }
+	{ value: "normal", label: "标准" },
+	{ value: "karras", label: "karras" },
+	{ value: "exponential", label: "指数" },
+	{ value: "sgm_uniform", label: "sgm 均匀" },
+	{ value: "simple", label: "简单" },
+	{ value: "ddim_uniform", label: "ddim 均匀" },
 ];
+
 const UPSCALE_METHODS = [
-  { value: "lanczos", label: "Lanczos" },
-  { value: "bilinear", label: "双线性" },
-  { value: "nearest", label: "最近邻" },
-  { value: "bicubic", label: "双三次" }
+	{ value: "lanczos", label: "lanczos" },
+	{ value: "bilinear", label: "双线性" },
+	{ value: "nearest", label: "最近邻" },
+	{ value: "bicubic", label: "双三次" },
 ];
-const SCALE_MODES = [
-  { value: "by_width", label: "按宽度缩放" },
-  { value: "by_height", label: "按高度缩放" }
-];
-const DIRECTIONS = [
-  { value: "all", label: "四边扩展" },
-  { value: "left+right", label: "左右扩展" },
-  { value: "top+bottom", label: "上下扩展" },
-  { value: "left", label: "仅左侧" },
-  { value: "right", label: "仅右侧" },
-  { value: "top", label: "仅顶部" },
-  { value: "bottom", label: "仅底部" }
+
+const TARGET_DIRECTIONS = [
+	{ value: "center", label: "居中扩展" },
+	{ value: "left", label: "向左扩展" },
+	{ value: "right", label: "向右扩展" },
+	{ value: "top", label: "向上扩展" },
+	{ value: "bottom", label: "向下扩展" },
+	{ value: "top_left", label: "左上扩展" },
+	{ value: "top_right", label: "右上扩展" },
+	{ value: "bottom_left", label: "左下扩展" },
+	{ value: "bottom_right", label: "右下扩展" },
 ];
 
 function getDefaultConfig() {
@@ -76,8 +76,7 @@ function getDefaultConfig() {
 		pixel_bottom: 128,
 		target_width: 1024,
 		target_height: 1024,
-		target_scale_mode: "by_width",
-		target_direction: "left+right",
+		target_direction: "center",
 		seed: 0,
 		steps: 25,
 		cfg: 7.0,
@@ -85,13 +84,13 @@ function getDefaultConfig() {
 		sampler_name: "euler",
 		scheduler: "normal",
 		upscale_method: "lanczos",
+		mask_expand: 10,
 	};
 }
 
 function parseConfig(node) {
-	const configWidget = node.widgets?.find(w => w.name === "outpaint_config");
+	const configWidget = node.widgets?.find((w) => w.name === CONFIG_WIDGET_NAME);
 	if (!configWidget) return getDefaultConfig();
-
 	try {
 		const saved = JSON.parse(configWidget.value || "{}");
 		return { ...getDefaultConfig(), ...saved };
@@ -101,1302 +100,1049 @@ function parseConfig(node) {
 }
 
 function saveConfig(node, config) {
-	const configWidget = node.widgets?.find(w => w.name === "outpaint_config");
+	const configWidget = node.widgets?.find((w) => w.name === CONFIG_WIDGET_NAME);
 	if (!configWidget) return;
-
 	const json = JSON.stringify(config, null, 2);
 	configWidget.value = json;
 	configWidget.callback?.(json);
-
-	const idx = node.widgets?.indexOf(configWidget);
-	if (idx >= 0) {
-		node.widgets_values = node.widgets_values || [];
-		node.widgets_values[idx] = json;
+	if (node.properties) {
+		node.properties[CONFIG_WIDGET_NAME] = json;
 	}
-
-	node.properties = node.properties || {};
-	node.properties.outpaint_config = json;
 }
 
 function hideConfigWidget(node) {
-	const configWidget = node.widgets?.find(w => w.name === "outpaint_config");
-	if (!configWidget) return;
-
-	configWidget.hidden = true;
-	configWidget.type = "hidden";
-	configWidget.computeSize = () => [0, 0];
-	configWidget.draw = () => {};
-	configWidget.label = "";
-
-	if (configWidget.element) {
-		configWidget.element.style.display = "none";
-		configWidget.element.style.visibility = "hidden";
+	const widget = node.widgets?.find((w) => w.name === CONFIG_WIDGET_NAME);
+	if (!widget) return;
+	widget.hidden = true;
+	widget.type = "hidden";
+	widget.computeSize = () => [0, 0];
+	widget.draw = () => {};
+	if (widget.element) {
+		widget.element.style.display = "none";
 	}
-	if (configWidget.inputEl) {
-		configWidget.inputEl.style.display = "none";
+	if (widget.inputEl) {
+		widget.inputEl.style.display = "none";
 	}
 }
 
-function protectEvent(event) {
-	const target = event.target;
-
-	if (target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA") {
-		return;
+function shieldDomEvents(element) {
+	if (!element) return;
+	const stop = (e) => e.stopPropagation();
+	for (const name of ["pointerdown", "mousedown", "dblclick", "contextmenu", "wheel"]) {
+		element.addEventListener(name, stop, { passive: true });
 	}
-
-	if (target.closest("input") || target.closest("select") || target.closest("textarea")) {
-		return;
-	}
-
-	event.preventDefault();
-	event.stopPropagation();
 }
 
-function createModeButtons(node, config, onChange) {
-	const container = document.createElement("div");
-	container.style.cssText = [
-		"display:flex",
-		"flex-direction:column",
-		"gap:6px",
-		"padding:8px",
-		"background:linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)",
-		"border-radius:6px",
-		"margin:6px",
-		"border:1px solid #333",
+function styleControl(control) {
+	control.style.cssText = [
+		"width:100%",
+		"min-height:30px",
+		"padding:4px 10px",
+		"border-radius:10px",
+		"border:1px solid #41535b",
+		"background:#121a1f",
+		"color:#dce7e2",
+		"font-size:12px",
 		"box-sizing:border-box",
-		"position:relative",
-		"z-index:1000",
-		"pointer-events:auto",
 	].join(";");
+}
+
+function createRow(labelText) {
+	const row = document.createElement("div");
+	row.style.cssText = ["display:flex", "align-items:center", "gap:8px"].join(";");
 
 	const label = document.createElement("div");
-	label.textContent = "🔧 扩图模式";
-	label.style.cssText = "font-size:11px;font-weight:bold;color:#e0e0e0;margin-bottom:2px;";
-	container.appendChild(label);
+	label.textContent = labelText;
+	label.style.cssText = [
+		"flex:0 0 72px",
+		"color:#dce7e2",
+		"font-size:12px",
+		"line-height:1.2",
+		"white-space:nowrap",
+	].join(";");
 
-	const buttons = document.createElement("div");
-	buttons.style.cssText = "display:grid;grid-template-columns:repeat(2,1fr);gap:4px;";
+	const wrap = document.createElement("div");
+	wrap.style.cssText = ["flex:1 1 auto", "display:flex"].join(";");
 
-	Object.entries(OUTPAINT_MODES).forEach(([modeId, info]) => {
-		const btn = document.createElement("button");
-		btn.type = "button";
-		btn.textContent = `${info.icon} ${info.name}`;
-		btn.dataset.mode = modeId;
-		btn.style.cssText = [
-			"padding:6px 8px",
-			"font-size:10px",
-			"font-weight:bold",
-			"border:2px solid " + (config.outpaint_mode === modeId ? info.color : "#333"),
-			"background:" + (config.outpaint_mode === modeId ? info.color : "#2a2a4a"),
-			"color:" + (config.outpaint_mode === modeId ? "#fff" : "#aaa"),
-			"border-radius:4px",
-			"cursor:pointer",
-			"transition:all 0.15s ease",
-			"flex:1",
-			"box-sizing:border-box",
-			"position:relative",
-			"z-index:1001",
-			"pointer-events:auto",
-			"user-select:none",
-		].join(";");
-
-		function handleClick(event) {
-			protectEvent(event);
-			onChange({ ...config, outpaint_mode: modeId });
-		}
-
-		for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "wheel"]) {
-			btn.addEventListener(eventName, protectEvent, true);
-			container.addEventListener(eventName, protectEvent, true);
-		}
-		btn.addEventListener("pointerup", handleClick, true);
-		btn.addEventListener("click", handleClick, true);
-
-		buttons.appendChild(btn);
-	});
-
-	container.appendChild(buttons);
-	return container;
+	row.appendChild(label);
+	row.appendChild(wrap);
+	return { row, wrap };
 }
 
-function createMethodButtons(node, config, onChange) {
+function refreshNode(node) {
+	GJJ_Utils.refreshNode(node);
+}
+
+function createModeButtons(node, config) {
 	const container = document.createElement("div");
-	container.style.cssText = [
-		"display:flex",
-		"flex-direction:column",
-		"gap:6px",
-		"padding:8px",
-		"background:linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)",
-		"border-radius:6px",
-		"margin:6px",
-		"border:1px solid #333",
-		"box-sizing:border-box",
-		"position:relative",
-		"z-index:1000",
-		"pointer-events:auto",
-	].join(";");
+	container.style.cssText = ["display:flex", "flex-direction:column", "gap:8px", "padding:8px"].join(";");
 
 	const label = document.createElement("div");
-	label.textContent = "📐 扩图方式";
-	label.style.cssText = "font-size:11px;font-weight:bold;color:#e0e0e0;margin-bottom:2px;";
+	label.textContent = "扩图模式 (Ctrl+点击多选)";
+	label.style.cssText = "font-size:12px;color:#dce7e2;line-height:1.2;";
 	container.appendChild(label);
 
-	const buttons = document.createElement("div");
-	buttons.style.cssText = "display:grid;grid-template-columns:repeat(2,1fr);gap:4px;";
+	const buttonsWrap = document.createElement("div");
+	buttonsWrap.style.cssText = ["display:grid", "grid-template-columns:repeat(2,1fr)", "gap:8px"].join(";");
 
-	Object.entries(EXPAND_METHODS).forEach(([methodId, info]) => {
+	let buttons = [];
+
+	// 初始化多选状态
+	if (!node.__gjjSelectedModes) {
+		node.__gjjSelectedModes = [config.outpaint_mode];
+	}
+
+	for (const mode of OUTPAINT_MODES) {
 		const btn = document.createElement("button");
 		btn.type = "button";
-		btn.textContent = `${info.icon} ${info.name}`;
-		btn.dataset.method = methodId;
-		const color = methodId === "pixel_expand" ? "#E91E63" : "#00BCD4";
-		btn.style.cssText = [
-			"padding:6px 8px",
-			"font-size:10px",
-			"font-weight:bold",
-			"border:2px solid " + (config.expand_method === methodId ? color : "#333"),
-			"background:" + (config.expand_method === methodId ? color : "#2a2a4a"),
-			"color:" + (config.expand_method === methodId ? "#fff" : "#aaa"),
-			"border-radius:4px",
-			"cursor:pointer",
-			"transition:all 0.15s ease",
-			"flex:1",
-			"box-sizing:border-box",
-			"position:relative",
-			"z-index:1001",
-			"pointer-events:auto",
-			"user-select:none",
-		].join(";");
+		btn.textContent = mode.label;
+		const updateButtonStyle = () => {
+			const selected = node.__gjjSelectedModes?.includes(mode.id) || false;
+			btn.style.cssText = [
+				"flex:1 1 0",
+				"height:32px",
+				"padding:0 10px",
+				"border-radius:10px",
+				`border:1px solid ${selected ? "#5d95a6" : "#314047"}`,
+				`background:${selected ? "#27404a" : "#172026"}`,
+				`color:${selected ? "#eff7fb" : "#dce7e2"}`,
+				"font-size:12px",
+				"cursor:pointer",
+				"box-sizing:border-box",
+				"transition:all 0.15s ease",
+			].join(";");
+		};
+		updateButtonStyle();
+		btn.addEventListener("click", (e) => {
+			e.stopPropagation();
 
-		function handleClick(event) {
-			protectEvent(event);
-			onChange({ ...config, expand_method: methodId });
+			if (!node.__gjjSelectedModes) {
+				node.__gjjSelectedModes = [];
+			}
+
+			if (e.ctrlKey || e.metaKey || e.shiftKey) {
+				// Ctrl/Shift+点击：切换多选
+				const idx = node.__gjjSelectedModes.indexOf(mode.id);
+				if (idx > -1) {
+					node.__gjjSelectedModes.splice(idx, 1);
+				} else {
+					node.__gjjSelectedModes.push(mode.id);
+				}
+				// 确保至少选中一个
+				if (node.__gjjSelectedModes.length === 0) {
+					node.__gjjSelectedModes = [mode.id];
+				}
+			} else {
+				// 普通点击：单选
+				node.__gjjSelectedModes = [mode.id];
+			}
+
+			// 更新当前选中的模式
+			node.__gjjConfig = { ...node.__gjjConfig, outpaint_mode: node.__gjjSelectedModes[0] };
+			saveConfig(node, node.__gjjConfig);
+
+			// 更新按钮样式
+			updateAllButtonStyles();
+			if (node.__gjjUpdateParamsVisibility) node.__gjjUpdateParamsVisibility();
+			if (node.__gjjUpdateModelStatus) node.__gjjUpdateModelStatus();
+		});
+		buttons.push({ btn, mode, updateButtonStyle });
+		buttonsWrap.appendChild(btn);
+	}
+
+	const updateAllButtonStyles = () => {
+		for (const { updateButtonStyle } of buttons) {
+			updateButtonStyle();
 		}
+	};
 
-		for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "wheel"]) {
-			btn.addEventListener(eventName, protectEvent, true);
-			container.addEventListener(eventName, protectEvent, true);
-		}
-		btn.addEventListener("pointerup", handleClick, true);
-		btn.addEventListener("click", handleClick, true);
+	container.appendChild(buttonsWrap);
+	shieldDomEvents(container);
 
-		buttons.appendChild(btn);
-	});
-
-	container.appendChild(buttons);
-	return container;
+	return { container, updateAllButtonStyles };
 }
 
-function createPixelExpandPanel(node, config, onChange) {
+function createMethodButtons(node, config) {
 	const container = document.createElement("div");
-	container.style.cssText = [
-		"display:flex",
-		"flex-direction:column",
-		"gap:4px",
-		"box-sizing:border-box",
-		"position:relative",
-		"z-index:1000",
-		"pointer-events:auto",
-	].join(";");
+	container.style.cssText = ["display:flex", "flex-direction:column", "gap:8px", "padding:8px"].join(";");
 
-	const rows = [
-		{ key: "pixel_left", label: "⬅️ 左扩", value: config.pixel_left },
-		{ key: "pixel_right", label: "➡️ 右扩", value: config.pixel_right },
-		{ key: "pixel_top", label: "⬆️ 上扩", value: config.pixel_top },
-		{ key: "pixel_bottom", label: "⬇️ 下扩", value: config.pixel_bottom },
+	const label = document.createElement("div");
+	label.textContent = "扩图方式 (Ctrl+点击多选)";
+	label.style.cssText = "font-size:12px;color:#dce7e2;line-height:1.2;";
+	container.appendChild(label);
+
+	const buttonsWrap = document.createElement("div");
+	buttonsWrap.style.cssText = ["display:flex", "gap:8px", "align-items:center"].join(";");
+
+	let buttons = [];
+
+	// 初始化多选状态
+	if (!node.__gjjSelectedMethods) {
+		node.__gjjSelectedMethods = [config.expand_method];
+	}
+
+	for (const method of EXPAND_METHODS) {
+		const btn = document.createElement("button");
+		btn.type = "button";
+		btn.textContent = method.label;
+		const updateButtonStyle = () => {
+			const selected = node.__gjjSelectedMethods?.includes(method.id) || false;
+			btn.style.cssText = [
+				"flex:1 1 0",
+				"height:32px",
+				"padding:0 10px",
+				"border-radius:10px",
+				`border:1px solid ${selected ? "#5d95a6" : "#314047"}`,
+				`background:${selected ? "#27404a" : "#172026"}`,
+				`color:${selected ? "#eff7fb" : "#dce7e2"}`,
+				"font-size:12px",
+				"cursor:pointer",
+				"box-sizing:border-box",
+				"transition:all 0.15s ease",
+			].join(";");
+		};
+		updateButtonStyle();
+		btn.addEventListener("click", (e) => {
+			e.stopPropagation();
+
+			if (!node.__gjjSelectedMethods) {
+				node.__gjjSelectedMethods = [];
+			}
+
+			if (e.ctrlKey || e.metaKey || e.shiftKey) {
+				// Ctrl/Shift+点击：切换多选
+				const idx = node.__gjjSelectedMethods.indexOf(method.id);
+				if (idx > -1) {
+					node.__gjjSelectedMethods.splice(idx, 1);
+				} else {
+					node.__gjjSelectedMethods.push(method.id);
+				}
+				// 确保至少选中一个
+				if (node.__gjjSelectedMethods.length === 0) {
+					node.__gjjSelectedMethods = [method.id];
+				}
+			} else {
+				// 普通点击：单选
+				node.__gjjSelectedMethods = [method.id];
+			}
+
+			// 更新当前选中的方式
+			node.__gjjConfig = { ...node.__gjjConfig, expand_method: node.__gjjSelectedMethods[0] };
+			saveConfig(node, node.__gjjConfig);
+
+			// 更新按钮样式
+			updateAllButtonStyles();
+			if (node.__gjjUpdateParamsVisibility) node.__gjjUpdateParamsVisibility();
+		});
+		buttons.push({ btn, method, updateButtonStyle });
+		buttonsWrap.appendChild(btn);
+	}
+
+	const updateAllButtonStyles = () => {
+		for (const { updateButtonStyle } of buttons) {
+			updateButtonStyle();
+		}
+	};
+
+	container.appendChild(buttonsWrap);
+	shieldDomEvents(container);
+
+	return { container, updateAllButtonStyles };
+}
+
+function createModelStatus(node, config) {
+	const container = document.createElement("div");
+	container.style.cssText = ["display:flex", "flex-direction:column", "gap:8px", "padding:8px"].join(";");
+
+	const label = document.createElement("div");
+	label.textContent = "模型状态";
+	label.style.cssText = "font-size:12px;color:#dce7e2;line-height:1.2;";
+	container.appendChild(label);
+
+	const status = document.createElement("div");
+	status.textContent = "加载中...";
+	status.style.cssText = [
+		"min-height:24px",
+		"padding:6px 10px",
+		"border-radius:10px",
+		"border:1px solid #41535b",
+		"background:#121a1f",
+		"color:#dce7e2",
+		"font-size:12px",
+		"line-height:1.35",
+		"white-space:pre-wrap",
+		"word-break:break-word",
+		"box-sizing:border-box",
+	].join(";");
+	container.appendChild(status);
+
+	const update = (cfg) => {
+		fetch(`/gjj/outpaint_models?mode=${cfg.outpaint_mode}`)
+			.then((r) => r.json())
+			.then((data) => {
+				const { available, complete } = data;
+				const modeLabel = OUTPAINT_MODES.find((m) => m.id === cfg.outpaint_mode)?.label || "";
+				let text = `${complete ? "✅" : "⚠️"} ${modeLabel}\n`;
+				for (const [type, info] of Object.entries(available)) {
+					const hasModel = info.best !== null;
+					text += `${hasModel ? "✓" : "✗"} ${type}: ${hasModel ? info.best.split(/[/\\]/).pop() : "需要下载"}\n`;
+				}
+				if (!complete) {
+					text += "请到 https://pan.quark.cn/s/6ec846f1f58d 下载";
+				}
+				status.textContent = text.trim();
+			})
+			.catch(() => {
+				status.textContent = "❌ 获取失败";
+			});
+	};
+
+	shieldDomEvents(container);
+	return { container, update };
+}
+
+function createParamsPanel(node, config) {
+	const container = document.createElement("div");
+	container.style.cssText = ["display:flex", "flex-direction:column", "gap:8px", "padding:8px"].join(";");
+
+	// 保存所有元素引用，用于显隐控制
+	const elements = {
+		pixelExpandRows: [],
+		targetSizeRows: [],
+		cfgRow: null,
+		schedRow: null,
+		guideRow: null,
+	};
+
+	// 像素扩图部分
+	const pixelKeys = [
+		{ label: "左扩", key: "pixel_left", step: 8 },
+		{ label: "右扩", key: "pixel_right", step: 8 },
+		{ label: "上扩", key: "pixel_top", step: 8 },
+		{ label: "下扩", key: "pixel_bottom", step: 8 },
 	];
 
-	rows.forEach(row => {
-		const rowEl = document.createElement("div");
-		rowEl.style.cssText = "display:flex;align-items:center;gap:6px;margin:2px 0;";
-
-		const label = document.createElement("span");
-		label.textContent = row.label;
-		label.style.cssText = "font-size:10px;color:#aaa;min-width:45px;";
-
+	for (const { label, key, step } of pixelKeys) {
+		const { row, wrap } = createRow(label);
 		const input = document.createElement("input");
 		input.type = "number";
 		input.min = "0";
-		input.max = "2048";
-		input.step = "8";
-		input.value = row.value;
-		input.style.cssText = [
-			"flex:1",
-			"padding:3px 6px",
-			"font-size:10px",
-			"background:#2a2a4a",
-			"border:1px solid #444",
-			"border-radius:4px",
-			"color:#fff",
-			"text-align:center",
-			"pointer-events:auto",
-			"position:relative",
-			"z-index:1001",
-		].join(";");
-
-		input.oninput = () => {
-			const newConfig = { ...config };
-			newConfig[row.key] = parseInt(input.value) || 0;
-			onChange(newConfig);
+		input.step = String(step);
+		input.value = config[key];
+		styleControl(input);
+		const saveValue = () => {
+			node.__gjjConfig = { ...node.__gjjConfig, [key]: parseInt(input.value) || 0 };
+			saveConfig(node, node.__gjjConfig);
 		};
+		input.addEventListener("change", saveValue);
+		input.addEventListener("blur", saveValue);
+		wrap.appendChild(input);
+		container.appendChild(row);
+		elements.pixelExpandRows.push(row);
+	}
 
-		for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "wheel"]) {
-			input.addEventListener(eventName, protectEvent, true);
-			rowEl.addEventListener(eventName, protectEvent, true);
-			container.addEventListener(eventName, protectEvent, true);
-		}
-
-		rowEl.appendChild(label);
-		rowEl.appendChild(input);
-		container.appendChild(rowEl);
-	});
-
-	return container;
-}
-
-function createTargetSizePanel(node, config, onChange) {
-	const container = document.createElement("div");
-	container.style.cssText = [
-		"display:flex",
-		"flex-direction:column",
-		"gap:4px",
-		"box-sizing:border-box",
-		"position:relative",
-		"z-index:1000",
-		"pointer-events:auto",
-	].join(";");
-
-	const sizeRow = document.createElement("div");
-	sizeRow.style.cssText = "display:flex;gap:6px;margin:2px 0;";
-
+	// 目标尺寸部分
+	const { row: wRow, wrap: wWrap } = createRow("目标宽");
 	const wInput = document.createElement("input");
 	wInput.type = "number";
 	wInput.min = "64";
-	wInput.max = "4096";
 	wInput.step = "8";
 	wInput.value = config.target_width;
-	wInput.style.cssText = [
-		"flex:1",
-		"padding:3px 6px",
-		"font-size:10px",
-		"background:#2a2a4a",
-		"border:1px solid #444",
-		"border-radius:4px",
-		"color:#fff",
-		"text-align:center",
-		"pointer-events:auto",
-		"position:relative",
-		"z-index:1001",
-	].join(";");
-	wInput.oninput = () => onChange({ ...config, target_width: parseInt(wInput.value) || 64 });
+	styleControl(wInput);
+	const saveWidth = () => {
+		node.__gjjConfig = { ...node.__gjjConfig, target_width: parseInt(wInput.value) || 64 };
+		saveConfig(node, node.__gjjConfig);
+	};
+	wInput.addEventListener("change", saveWidth);
+	wInput.addEventListener("blur", saveWidth);
+	wWrap.appendChild(wInput);
+	container.appendChild(wRow);
+	elements.targetSizeRows.push(wRow);
 
+	const { row: hRow, wrap: hWrap } = createRow("目标高");
 	const hInput = document.createElement("input");
 	hInput.type = "number";
 	hInput.min = "64";
-	hInput.max = "4096";
 	hInput.step = "8";
 	hInput.value = config.target_height;
-	hInput.style.cssText = [
-		"flex:1",
-		"padding:3px 6px",
-		"font-size:10px",
-		"background:#2a2a4a",
-		"border:1px solid #444",
-		"border-radius:4px",
-		"color:#fff",
-		"text-align:center",
-		"pointer-events:auto",
-		"position:relative",
-		"z-index:1001",
-	].join(";");
-	hInput.oninput = () => onChange({ ...config, target_height: parseInt(hInput.value) || 64 });
+	styleControl(hInput);
+	const saveHeight = () => {
+		node.__gjjConfig = { ...node.__gjjConfig, target_height: parseInt(hInput.value) || 64 };
+		saveConfig(node, node.__gjjConfig);
+	};
+	hInput.addEventListener("change", saveHeight);
+	hInput.addEventListener("blur", saveHeight);
+	hWrap.appendChild(hInput);
+	container.appendChild(hRow);
+	elements.targetSizeRows.push(hRow);
 
-	for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "wheel"]) {
-		wInput.addEventListener(eventName, protectEvent, true);
-		hInput.addEventListener(eventName, protectEvent, true);
-		sizeRow.addEventListener(eventName, protectEvent, true);
-		container.addEventListener(eventName, protectEvent, true);
+	const { row: dirRow, wrap: dirWrap } = createRow("扩图方向");
+	const dirSelect = document.createElement("select");
+	for (const d of TARGET_DIRECTIONS) {
+		const opt = document.createElement("option");
+		opt.value = d.value;
+		opt.textContent = d.label;
+		dirSelect.appendChild(opt);
 	}
-
-	sizeRow.appendChild(wInput);
-	sizeRow.appendChild(hInput);
-	container.appendChild(sizeRow);
-
-	const scaleSelect = createSelect(node, "🔄 缩放", SCALE_MODES, config.target_scale_mode, (v) => {
-		onChange({ ...config, target_scale_mode: v });
+	dirSelect.value = config.target_direction;
+	styleControl(dirSelect);
+	dirSelect.addEventListener("change", () => {
+		node.__gjjConfig = { ...node.__gjjConfig, target_direction: dirSelect.value };
+		saveConfig(node, node.__gjjConfig);
 	});
-	container.appendChild(scaleSelect);
+	dirWrap.appendChild(dirSelect);
+	container.appendChild(dirRow);
+	elements.targetSizeRows.push(dirRow);
 
-	const dirSelect = createSelect(node, "↔️ 方向", DIRECTIONS, config.target_direction, (v) => {
-		onChange({ ...config, target_direction: v });
-	});
-	container.appendChild(dirSelect);
-
-	return container;
-}
-
-function createSelect(node, label, options, value, onChange) {
-	const container = document.createElement("div");
-	container.style.cssText = "display:flex;align-items:center;gap:6px;margin:2px 0;box-sizing:border-box;position:relative;z-index:1000;pointer-events:auto;";
-
-	const labelEl = document.createElement("span");
-	labelEl.textContent = label;
-	labelEl.style.cssText = "font-size:10px;color:#aaa;min-width:45px;";
-
-	const select = document.createElement("select");
-	options.forEach(opt => {
-		const optEl = document.createElement("option");
-		if (typeof opt === "object" && opt.value !== undefined) {
-			optEl.value = opt.value;
-			optEl.textContent = opt.label;
-		} else {
-			optEl.value = opt;
-			optEl.textContent = opt;
-		}
-		select.appendChild(optEl);
-	});
-	if (typeof value === "object" && value.value !== undefined) {
-		select.value = value.value;
-	} else {
-		select.value = value;
-	}
-	select.style.cssText = [
-		"flex:1",
-		"padding:3px 6px",
-		"font-size:10px",
-		"background:#2a2a4a",
-		"border:1px solid #444",
-		"border-radius:4px",
-		"color:#fff",
-		"pointer-events:auto",
-		"position:relative",
-		"z-index:1001",
-	].join(";");
-	select.onchange = () => onChange(select.value);
-
-	for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "wheel"]) {
-		select.addEventListener(eventName, protectEvent, true);
-		container.addEventListener(eventName, protectEvent, true);
-	}
-
-	container.appendChild(labelEl);
-	container.appendChild(select);
-	return container;
-}
-
-function createModelStatusPanel(node, config) {
-	const container = document.createElement("div");
-	container.style.cssText = [
-		"padding:8px",
-		"background:linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)",
-		"border-radius:6px",
-		"margin:6px",
-		"border:1px solid #333",
-		"font-size:9px",
-		"box-sizing:border-box",
-		"position:relative",
-		"z-index:1000",
-		"pointer-events:auto",
-	].join(";");
-
-	for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "wheel"]) {
-		container.addEventListener(eventName, protectEvent, true);
-	}
-
-	const title = document.createElement("div");
-	title.textContent = "🔲 模型状态";
-	title.style.cssText = "font-size:10px;font-weight:bold;color:#e0e0e0;margin-bottom:2px;";
-	container.appendChild(title);
-
-	const statusText = document.createElement("div");
-	statusText.textContent = "加载中...";
-	statusText.style.color = "#aaa";
-	container.appendChild(statusText);
-
-	fetch(`${API_PATH}?mode=${config.outpaint_mode}`)
-		.then(res => res.json())
-		.then(data => {
-			const { available, complete } = data;
-			const modeLabel = OUTPAINT_MODES[config.outpaint_mode]?.name || "未知";
-
-			let html = `<div style="color: ${complete ? '#4CAF50' : '#ff9800'}">${complete ? '✅' : '⚠️'} ${modeLabel}</div>`;
-
-			const typeLabels = {
-				checkpoints: "主模型", diffusion_models: "UNET", vae: "VAE",
-				text_encoders: "CLIP", clip: "CLIP", controlnet: "ControlNet", loras: "LoRA"
-			};
-
-			Object.entries(available).forEach(([type, info]) => {
-				const hasModel = info.best !== null;
-				html += `
-					<div style="display:flex;gap:4px;margin:2px 0;">
-						<span>${hasModel ? '✓' : '✗'}</span>
-						<span style="color:#aaa;">${typeLabels[type] || type}:</span>
-						<span style="color: ${hasModel ? '#81C784' : '#f44336'};">
-							${hasModel ? info.best.split(/[/\\]/).pop() : `'${info.keyword}'`}
-						</span>
-					</div>
-				`;
-			});
-
-			if (!complete) {
-				html += `
-					<div style="margin-top:4px;padding:3px;background:rgba(255,152,0,0.1);border-radius:3px;">
-						<div style="color:#ff9800;font-size:8px;">📥 下载</div>
-						<a href="${DOWNLOAD_URL}" target="_blank" style="color:#64B5F6;font-size:8px;pointer-events:auto;z-index:1001;position:relative;display:inline-block;">
-							${DOWNLOAD_URL}
-						</a>
-					</div>
-				`;
-			}
-
-			statusText.innerHTML = html;
-		})
-		.catch(() => {
-			statusText.textContent = "❌ 获取模型状态失败";
-			statusText.style.color = "#f44336";
-		});
-
-	return container;
-}
-
-function createSamplerPanel(node, config, onChange, isFlux) {
-	const container = document.createElement("div");
-	container.style.cssText = [
-		"display:flex",
-		"flex-direction:column",
-		"gap:4px",
-		"box-sizing:border-box",
-		"position:relative",
-		"z-index:1000",
-		"pointer-events:auto",
-	].join(";");
-
-	const seedRow = document.createElement("div");
-	seedRow.style.cssText = "display:flex;align-items:center;gap:6px;margin:2px 0;";
-	const seedLabel = document.createElement("span");
-	seedLabel.textContent = "🎲 种子";
-	seedLabel.style.cssText = "font-size:10px;color:#aaa;min-width:45px;";
+	// 公共参数
+	const { row: seedRow, wrap: seedWrap } = createRow("种子");
 	const seedInput = document.createElement("input");
 	seedInput.type = "number";
 	seedInput.value = config.seed;
-	seedInput.style.cssText = [
-		"flex:1",
-		"padding:3px 6px",
-		"font-size:10px",
-		"background:#2a2a4a",
-		"border:1px solid #444",
-		"border-radius:4px",
-		"color:#fff",
-		"pointer-events:auto",
-		"position:relative",
-		"z-index:1001",
-	].join(";");
-	seedInput.oninput = () => onChange({ ...config, seed: parseInt(seedInput.value) || 0 });
-	seedRow.appendChild(seedLabel);
-	seedRow.appendChild(seedInput);
+	styleControl(seedInput);
+	const saveSeed = () => {
+		node.__gjjConfig = { ...node.__gjjConfig, seed: parseInt(seedInput.value) || 0 };
+		saveConfig(node, node.__gjjConfig);
+	};
+	seedInput.addEventListener("change", saveSeed);
+	seedInput.addEventListener("blur", saveSeed);
+	seedWrap.appendChild(seedInput);
 	container.appendChild(seedRow);
 
-	const stepsRow = document.createElement("div");
-	stepsRow.style.cssText = "display:flex;align-items:center;gap:6px;margin:2px 0;";
-	const stepsLabel = document.createElement("span");
-	stepsLabel.textContent = "👣 步数";
-	stepsLabel.style.cssText = "font-size:10px;color:#aaa;min-width:45px;";
+	const { row: stepsRow, wrap: stepsWrap } = createRow("步数");
 	const stepsInput = document.createElement("input");
 	stepsInput.type = "number";
 	stepsInput.min = "1";
-	stepsInput.max = "100";
 	stepsInput.value = config.steps;
-	stepsInput.style.cssText = [
-		"flex:1",
-		"padding:3px 6px",
-		"font-size:10px",
-		"background:#2a2a4a",
-		"border:1px solid #444",
-		"border-radius:4px",
-		"color:#fff",
-		"pointer-events:auto",
-		"position:relative",
-		"z-index:1001",
-	].join(";");
-	stepsInput.oninput = () => onChange({ ...config, steps: parseInt(stepsInput.value) || 1 });
-	stepsRow.appendChild(stepsLabel);
-	stepsRow.appendChild(stepsInput);
+	styleControl(stepsInput);
+	const saveSteps = () => {
+		node.__gjjConfig = { ...node.__gjjConfig, steps: parseInt(stepsInput.value) || 1 };
+		saveConfig(node, node.__gjjConfig);
+	};
+	stepsInput.addEventListener("change", saveSteps);
+	stepsInput.addEventListener("blur", saveSteps);
+	stepsWrap.appendChild(stepsInput);
 	container.appendChild(stepsRow);
 
-	if (isFlux) {
-		const guidanceRow = document.createElement("div");
-		guidanceRow.style.cssText = "display:flex;align-items:center;gap:6px;margin:2px 0;";
-		const guidanceLabel = document.createElement("span");
-		guidanceLabel.textContent = "🎯 Guidance";
-		guidanceLabel.style.cssText = "font-size:10px;color:#aaa;min-width:45px;";
-		const guidanceInput = document.createElement("input");
-		guidanceInput.type = "number";
-		guidanceInput.min = "0";
-		guidanceInput.max = "100";
-		guidanceInput.step = "0.5";
-		guidanceInput.value = config.guidance;
-		guidanceInput.style.cssText = [
-			"flex:1",
-			"padding:3px 6px",
-			"font-size:10px",
-			"background:#2a2a4a",
-			"border:1px solid #444",
-			"border-radius:4px",
-			"color:#fff",
-			"pointer-events:auto",
-			"position:relative",
-			"z-index:1001",
-		].join(";");
-		guidanceInput.oninput = () => onChange({ ...config, guidance: parseFloat(guidanceInput.value) || 0 });
-		guidanceRow.appendChild(guidanceLabel);
-		guidanceRow.appendChild(guidanceInput);
-		container.appendChild(guidanceRow);
-	} else {
-		const cfgRow = document.createElement("div");
-		cfgRow.style.cssText = "display:flex;align-items:center;gap:6px;margin:2px 0;";
-		const cfgLabel = document.createElement("span");
-		cfgLabel.textContent = "⚖️ CFG";
-		cfgLabel.style.cssText = "font-size:10px;color:#aaa;min-width:45px;";
-		const cfgInput = document.createElement("input");
-		cfgInput.type = "number";
-		cfgInput.min = "0";
-		cfgInput.max = "30";
-		cfgInput.step = "0.5";
-		cfgInput.value = config.cfg;
-		cfgInput.style.cssText = [
-			"flex:1",
-			"padding:3px 6px",
-			"font-size:10px",
-			"background:#2a2a4a",
-			"border:1px solid #444",
-			"border-radius:4px",
-			"color:#fff",
-			"pointer-events:auto",
-			"position:relative",
-			"z-index:1001",
-		].join(";");
-		cfgInput.oninput = () => onChange({ ...config, cfg: parseFloat(cfgInput.value) || 0 });
-		cfgRow.appendChild(cfgLabel);
-		cfgRow.appendChild(cfgInput);
-		container.appendChild(cfgRow);
+	// CFG / Guidance
+	const { row: cfgRow, wrap: cfgWrap } = createRow("CFG");
+	const cfgInput = document.createElement("input");
+	cfgInput.type = "number";
+	cfgInput.min = "0";
+	cfgInput.max = "30";
+	cfgInput.step = "0.5";
+	cfgInput.value = config.cfg;
+	styleControl(cfgInput);
+	const saveCfg = () => {
+		node.__gjjConfig = { ...node.__gjjConfig, cfg: parseFloat(cfgInput.value) || 0 };
+		saveConfig(node, node.__gjjConfig);
+	};
+	cfgInput.addEventListener("change", saveCfg);
+	cfgInput.addEventListener("blur", saveCfg);
+	cfgWrap.appendChild(cfgInput);
+	container.appendChild(cfgRow);
+	elements.cfgRow = cfgRow;
 
-		const schedulerSelect = createSelect(node, "📊 调度器", SCHEDULERS, config.scheduler, (v) => {
-			onChange({ ...config, scheduler: v });
-		});
-		container.appendChild(schedulerSelect);
+	const { row: schedRow, wrap: schedWrap } = createRow("调度器");
+	const schedSelect = document.createElement("select");
+	for (const s of SCHEDULERS) {
+		const opt = document.createElement("option");
+		opt.value = s.value;
+		opt.label = s.label;
+		schedSelect.appendChild(opt);
 	}
-
-	const samplerSelect = createSelect(node, "🌀 采样器", SAMPLERS, config.sampler_name, (v) => {
-		onChange({ ...config, sampler_name: v });
+	schedSelect.value = config.scheduler;
+	styleControl(schedSelect);
+	schedSelect.addEventListener("change", () => {
+		node.__gjjConfig = { ...node.__gjjConfig, scheduler: schedSelect.value };
+		saveConfig(node, node.__gjjConfig);
 	});
-	container.appendChild(samplerSelect);
+	schedWrap.appendChild(schedSelect);
+	container.appendChild(schedRow);
+	elements.schedRow = schedRow;
 
-	const upscaleSelect = createSelect(node, "🔍 缩放", UPSCALE_METHODS, config.upscale_method, (v) => {
-		onChange({ ...config, upscale_method: v });
+	const { row: guideRow, wrap: guideWrap } = createRow("Guidance");
+	const guideInput = document.createElement("input");
+	guideInput.type = "number";
+	guideInput.min = "0";
+	guideInput.max = "100";
+	guideInput.step = "0.5";
+	guideInput.value = config.guidance;
+	styleControl(guideInput);
+	const saveGuidance = () => {
+		node.__gjjConfig = { ...node.__gjjConfig, guidance: parseFloat(guideInput.value) || 0 };
+		saveConfig(node, node.__gjjConfig);
+	};
+	guideInput.addEventListener("change", saveGuidance);
+	guideInput.addEventListener("blur", saveGuidance);
+	guideWrap.appendChild(guideInput);
+	container.appendChild(guideRow);
+	elements.guideRow = guideRow;
+
+	// 采样器
+	const { row: samplerRow, wrap: samplerWrap } = createRow("采样器");
+	const samplerSelect = document.createElement("select");
+	for (const s of SAMPLERS) {
+		const opt = document.createElement("option");
+		opt.value = s.value;
+		opt.textContent = s.label;
+		samplerSelect.appendChild(opt);
+	}
+	samplerSelect.value = config.sampler_name;
+	styleControl(samplerSelect);
+	samplerSelect.addEventListener("change", () => {
+		node.__gjjConfig = { ...node.__gjjConfig, sampler_name: samplerSelect.value };
+		saveConfig(node, node.__gjjConfig);
 	});
-	container.appendChild(upscaleSelect);
+	samplerWrap.appendChild(samplerSelect);
+	container.appendChild(samplerRow);
 
-	for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "wheel"]) {
-		container.addEventListener(eventName, protectEvent, true);
+	// 缩放
+	const { row: upscaleRow, wrap: upscaleWrap } = createRow("缩放");
+	const upscaleSelect = document.createElement("select");
+	for (const u of UPSCALE_METHODS) {
+		const opt = document.createElement("option");
+		opt.value = u.value;
+		opt.textContent = u.label;
+		upscaleSelect.appendChild(opt);
 	}
+	upscaleSelect.value = config.upscale_method;
+	styleControl(upscaleSelect);
+	upscaleSelect.addEventListener("change", () => {
+		node.__gjjConfig = { ...node.__gjjConfig, upscale_method: upscaleSelect.value };
+		saveConfig(node, node.__gjjConfig);
+	});
+	upscaleWrap.appendChild(upscaleSelect);
+	container.appendChild(upscaleRow);
 
-	return container;
+	// 扩展遮罩
+	const { row: maskRow, wrap: maskWrap } = createRow("扩展遮罩");
+	const maskInput = document.createElement("input");
+	maskInput.type = "number";
+	maskInput.min = "0";
+	maskInput.max = "100";
+	maskInput.step = "1";
+	maskInput.value = config.mask_expand;
+	styleControl(maskInput);
+	const saveMaskExpand = () => {
+		node.__gjjConfig = { ...node.__gjjConfig, mask_expand: parseInt(maskInput.value) || 0 };
+		saveConfig(node, node.__gjjConfig);
+	};
+	maskInput.addEventListener("change", saveMaskExpand);
+	maskInput.addEventListener("blur", saveMaskExpand);
+	maskWrap.appendChild(maskInput);
+	container.appendChild(maskRow);
+
+	shieldDomEvents(container);
+	return { container, elements };
 }
 
-function createStatusBar() {
+function createStatusBar(node) {
 	const container = document.createElement("div");
-	container.style.cssText = [
-		"display:flex",
-		"flex-direction:column",
-		"gap:4px",
-		"padding:8px",
-		"background:linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)",
-		"border-radius:6px",
-		"margin:6px",
-		"border:1px solid #333",
-		"box-sizing:border-box",
-		"position:relative",
-		"z-index:1000",
-		"pointer-events:auto",
-	].join(";");
+	container.style.cssText = ["display:flex", "flex-direction:column", "gap:8px", "padding:8px"].join(";");
 
-	for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "wheel"]) {
-		container.addEventListener(eventName, protectEvent, true);
-	}
-
-	const statusText = document.createElement("div");
-	statusText.id = "gjj_outpaint_status";
-	statusText.textContent = "就绪";
-	statusText.style.cssText = "font-size:10px;color:#4CAF50;text-align:center;";
-	container.appendChild(statusText);
-
-	const progressBar = document.createElement("div");
-	progressBar.style.cssText = "width:100%;height:3px;background:#333;border-radius:2px;overflow:hidden;";
-
-	const progressFill = document.createElement("div");
-	progressFill.id = "gjj_outpaint_progress";
-	progressFill.style.cssText = "width:0%;height:100%;background:linear-gradient(90deg, #4CAF50, #2196F3);border-radius:2px;transition:width 0.3s ease;";
-	progressBar.appendChild(progressFill);
-	container.appendChild(progressBar);
-
-	return container;
-}
-
-function updateStatus(text, progress) {
-	const statusText = document.getElementById("gjj_outpaint_status");
-	const progressFill = document.getElementById("gjj_outpaint_progress");
-
-	if (statusText) {
-		statusText.textContent = text;
-		statusText.style.color = text.includes("失败") ? "#f44336" :
-			text.includes("完成") ? "#4CAF50" : "#2196F3";
-	}
-
-	if (progressFill) {
-		progressFill.style.width = `${progress}%`;
-	}
-}
-
-function createImagePreview(node) {
-	const container = document.createElement("div");
-	container.style.cssText = [
-		"display:flex",
-		"flex-direction:column",
-		"gap:6px",
+	const bar = document.createElement("div");
+	bar.style.cssText = [
 		"width:100%",
+		"min-height:24px",
+		"padding:6px 10px",
+		"border-radius:10px",
+		"border:1px solid #41535b",
+		"background:#121a1f",
+		"color:#dce7e2",
+		"font-size:12px",
+		"line-height:1.35",
+		"white-space:pre-wrap",
+		"word-break:break-word",
 		"box-sizing:border-box",
-		"position:relative",
-		"z-index:1000",
-		"pointer-events:auto",
+	].join(";");
+	bar.textContent = "就绪";
+
+	container.appendChild(bar);
+	shieldDomEvents(container);
+	return { widget: container, bar };
+}
+
+function createPreviewPanel(node) {
+	const container = document.createElement("div");
+	container.style.cssText = ["display:flex", "flex-direction:column", "gap:8px", "padding:8px"].join(";");
+
+	const label = document.createElement("div");
+	label.textContent = "预览结果";
+	label.style.cssText = "font-size:12px;color:#dce7e2;line-height:1.2;";
+	container.appendChild(label);
+
+	const previewWrap = document.createElement("div");
+	previewWrap.style.cssText = [
+		"width:100%",
+		"min-height:120px",
+		"border-radius:10px",
+		"border:1px solid #314047",
+		"background:#172026",
+		"display:flex",
+		"align-items:center",
+		"justify-content:center",
+		"overflow:hidden",
+		"box-sizing:border-box",
 	].join(";");
 
-	for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "wheel"]) {
-		container.addEventListener(eventName, protectEvent, true);
-	}
-
-	const title = document.createElement("div");
-	title.textContent = "🖼️ 预览结果";
-	title.style.cssText = "font-size:10px;font-weight:bold;color:#e0e0e0;";
-	container.appendChild(title);
-
-	const image = document.createElement("img");
-	image.dataset.gjjCustomPreview = "true";
-	image.style.cssText = [
+	const img = document.createElement("img");
+	img.dataset.gjjCustomPreview = "true";
+	img.style.cssText = [
 		"max-width:100%",
 		"max-height:120px",
 		"object-fit:contain",
 		"display:none",
 		"cursor:pointer",
-		"border-radius:4px",
-		"border:1px solid #3b82f6",
-		"background:#0f1418",
-		"pointer-events:auto",
-		"position:relative",
-		"z-index:1001",
-		"transition:transform 0.15s ease",
 	].join(";");
-
-	image.addEventListener("mouseenter", () => {
-		image.style.transform = "scale(1.02)";
-	});
-	image.addEventListener("mouseleave", () => {
-		image.style.transform = "scale(1)";
-	});
-
-	image.addEventListener("click", (event) => {
-		protectEvent(event);
-
+	img.addEventListener("click", (e) => {
+		e.stopPropagation();
 		const overlay = document.createElement("div");
 		overlay.style.cssText = [
 			"position:fixed",
 			"inset:0",
 			"background:rgba(0,0,0,0.9)",
-			"backdrop-filter:blur(10px)",
 			"z-index:99999",
 			"display:flex",
 			"align-items:center",
 			"justify-content:center",
 			"cursor:zoom-out",
 		].join(";");
-
-		const previewImg = document.createElement("img");
-		previewImg.src = image.src;
-		previewImg.style.cssText = [
-			"max-width:90%",
-			"max-height:90%",
-			"object-fit:contain",
-			"border-radius:8px",
-			"box-shadow:0 0 40px rgba(0,0,0,0.5)",
-			"transition:transform 0.1s ease",
-			"cursor:grab",
-		].join(";");
-
-		let currentScale = 1;
-		const minScale = 0.1;
-		const maxScale = 10;
-
-		overlay.addEventListener("wheel", (e) => {
-			protectEvent(e);
-			const delta = e.deltaY > 0 ? -0.1 : 0.1;
-			currentScale = Math.max(minScale, Math.min(maxScale, currentScale + delta));
-			previewImg.style.transform = `scale(${currentScale})`;
-		});
-
-		let isDragging = false;
-		let startX, startY, translateX = 0, translateY = 0;
-
-		previewImg.addEventListener("mousedown", (e) => {
-			protectEvent(e);
-			isDragging = true;
-			startX = e.clientX - translateX;
-			startY = e.clientY - translateY;
-			previewImg.style.cursor = "grabbing";
-		});
-
-		document.addEventListener("mousemove", (e) => {
-			if (!isDragging) return;
-			translateX = e.clientX - startX;
-			translateY = e.clientY - startY;
-			previewImg.style.transform = `scale(${currentScale}) translate(${translateX}px, ${translateY}px)`;
-		});
-
-		document.addEventListener("mouseup", () => {
-			isDragging = false;
-			previewImg.style.cursor = "grab";
-		});
-
-		overlay.addEventListener("click", () => {
-			overlay.remove();
-		});
-
-		overlay.appendChild(previewImg);
+		const fullImg = document.createElement("img");
+		fullImg.src = img.src;
+		fullImg.style.cssText = ["max-width:90%", "max-height:90%", "object-fit:contain"].join(";");
+		overlay.appendChild(fullImg);
+		overlay.addEventListener("click", () => overlay.remove());
 		document.body.appendChild(overlay);
 	});
 
-	container.appendChild(image);
-	node.__gjjPreviewImage = image;
-	return container;
-}
+	const placeholder = document.createElement("div");
+	placeholder.textContent = "等待生成...";
+	placeholder.style.cssText = ["color:#8a9ba3", "font-size:12px"].join(";");
 
-function imageDataToUrl(imageData) {
-	if (!imageData) return null;
+	previewWrap.appendChild(img);
+	previewWrap.appendChild(placeholder);
+	container.appendChild(previewWrap);
 
-	if (typeof imageData === "object" && !Array.isArray(imageData)) {
-		imageData = [imageData];
-	}
-
-	if (Array.isArray(imageData) && imageData.length > 0) {
-		const img = imageData[0];
-		if (typeof img === "object") {
-			let filename = img.filename || img.name || img.file || img.path || "";
-			let subfolder = img.subfolder || img.sub || "";
-			let type = img.type || img.t || "";
-
-			if (img.full_path || img.fullPath || img.path) {
-				const fullPath = img.full_path || img.fullPath || img.path;
-				if (fullPath) {
-					return api.apiURL(`/view?filename=${encodeURIComponent(fullPath)}`);
-				}
-			}
-
-			if (filename) {
-				let url = api.apiURL(`/view?filename=${encodeURIComponent(filename)}`);
-				if (subfolder) {
-					url += `&subfolder=${encodeURIComponent(subfolder)}`;
-				}
-				if (type) {
-					url += `&type=${encodeURIComponent(type)}`;
-				}
-				if (img.random_id || img.timestamp) {
-					url += `&rand=${Math.random()}`;
-				}
-				return url;
-			}
-		}
-	}
-
-	if (typeof imageData === "string") {
-		if (imageData.startsWith("http://") || imageData.startsWith("https://")) {
-			return imageData;
-		}
-		return api.apiURL(`/view?filename=${encodeURIComponent(imageData)}`);
-	}
-
-	return null;
-}
-
-function updateImagePreview(node, imageData) {
-	if (!imageData) return;
-
-	console.log("[GJJ] updateImagePreview called with:", imageData);
-
-	if (node.__gjjPreviewImage) {
-		const url = imageDataToUrl(imageData);
-		if (url) {
-			console.log("[GJJ] Setting preview image URL:", url);
-			node.__gjjPreviewImage.src = url;
-
-			// 确保我们的自定义预览图的样式完全正常！
-			node.__gjjPreviewImage.style.display = "block";
-			node.__gjjPreviewImage.style.visibility = "visible";
-			node.__gjjPreviewImage.style.height = "";
-			node.__gjjPreviewImage.style.width = "";
-			node.__gjjPreviewImage.style.margin = "";
-			node.__gjjPreviewImage.style.padding = "";
-			node.__gjjPreviewImage.style.opacity = "";
-			node.__gjjPreviewImage.style.position = "";
-			node.__gjjPreviewImage.style.left = "";
-			node.__gjjPreviewImage.style.top = "";
-			node.__gjjPreviewImage.style.minHeight = "";
-			node.__gjjPreviewImage.style.minWidth = "";
-			node.__gjjPreviewImage.style.maxHeight = "";
-			node.__gjjPreviewImage.style.maxWidth = "";
-
-			GJJ_Utils.refreshNode(node);
-		}
-	}
-}
-
-function hideDefaultPreviewElements(node) {
-	// 按照文档中的终极方案：彻底隐藏默认预览
-	// 找到节点的 DOM 元素
-	let nodeElement = null;
-	try {
-		// 尝试多种方式获取节点元素
-		if (node.imgs) {
-			nodeElement = node.imgs;
-		} else if (node.element) {
-			nodeElement = node.element;
-		} else if (node.dummyEl) {
-			nodeElement = node.dummyEl;
-		} else {
-			// 通过 DOM 查找所有可能的节点
-			const allCanvasNodes = document.querySelectorAll('.litegraph');
-			for (const canvasNode of allCanvasNodes) {
-				const potentialNodes = canvasNode.querySelectorAll ?
-					canvasNode.querySelectorAll('[data-node-id]') : [];
-				for (const el of potentialNodes) {
-					if (el.getAttribute('data-node-id') === String(node.id)) {
-						nodeElement = el;
-						break;
-					}
-				}
-			}
-		}
-	} catch (e) {
-		console.log("[GJJ] Error finding node element:", e);
-	}
-
-	// 只要找到了任何节点相关的元素，都尝试查找并隐藏
-	if (nodeElement) {
-		// 查找所有元素
-		const allElements = nodeElement.querySelectorAll ?
-			nodeElement.querySelectorAll("*") : [];
-
-		// 查找所有图片元素
-		const allImgs = nodeElement.querySelectorAll ?
-			nodeElement.querySelectorAll("img") : [];
-
-		// 隐藏所有非自定义的图片
-		for (const img of allImgs) {
-			if (!img.dataset?.gjjCustomPreview) {
-				img.style.display = "none";
-				img.style.visibility = "hidden";
-			}
-		}
-
-		// 隐藏所有看起来是预览的元素
-		for (const el of allElements) {
-			const classStr = String(el.className || "").toLowerCase();
-			const idStr = String(el.id || "").toLowerCase();
-			const tagName = String(el.tagName || "").toLowerCase();
-
-			// 判断是否是预览相关的元素
-			if (
-				classStr.includes("preview") ||
-				idStr.includes("preview") ||
-				(tagName === "div" && el.querySelector && el.querySelector("img"))) {
-				// 检查这个元素是否是我们的自定义预览容器
-				let isOurCustomPreview = false;
-				const customImgs = el.querySelectorAll ?
-					el.querySelectorAll("img[data-gjj-custom-preview='true']") : [];
-				if (customImgs.length > 0) {
-					isOurCustomPreview = true;
-				}
-
-				// 如果不是我们的自定义预览，就隐藏它
-				if (!isOurCustomPreview) {
-					// 只隐藏明显的预览容器，不隐藏整个节点！
-					// 小心地只调整高度！
-					el.style.visibility = "hidden";
-					el.style.height = "0px";
-					el.style.overflow = "hidden";
-					el.style.margin = "0px";
-					el.style.padding = "0px";
-				}
-			}
-		}
-	}
-}
-
-function setupPreviewObserver(node) {
-	// 按照文档：使用 MutationObserver 实时隐藏默认预览
-	// 停止之前的观察器
-	if (node.__gjjPreviewObserver) {
-		try {
-			node.__gjjPreviewObserver.disconnect();
-		} catch (e) {
-			// 忽略错误
-		}
-	}
-
-	// 尝试找到节点的 DOM 元素
-	let targetElement = null;
-	try {
-		if (node.imgs) {
-			targetElement = node.imgs;
-		} else if (node.element) {
-			targetElement = node.element;
-		} else if (node.dummyEl) {
-			targetElement = node.dummyEl;
-		}
-	} catch (e) {
-		// 忽略错误
-	}
-
-	// 如果找到了元素，设置观察器
-	if (targetElement && targetElement.ownerDocument) {
-		node.__gjjPreviewObserver = new MutationObserver((mutations) => {
-			// 只要有任何变化，就尝试隐藏预览
-			let needsHide = false;
-
-			for (const mutation of mutations) {
-				if (mutation.addedNodes && mutation.addedNodes.length > 0) {
-					needsHide = true;
-					break;
-				}
-				if (mutation.type === 'attributes' &&
-					(mutation.attributeName === 'style' ||
-					 mutation.attributeName === 'class' ||
-					 mutation.attributeName === 'src')) {
-					needsHide = true;
-					break;
-				}
-			}
-
-			if (needsHide) {
-				// 延迟隐藏，确保元素完全添加
-				setTimeout(() => hideDefaultPreviewElements(node), 0);
-				setTimeout(() => hideDefaultPreviewElements(node), 20);
-				setTimeout(() => hideDefaultPreviewElements(node), 50);
-			}
-		});
-
-		// 观察元素的变化
-		try {
-			node.__gjjPreviewObserver.observe(targetElement, {
-				childList: true,
-				subtree: true,
-				attributes: true,
-				attributeFilter: ['style', 'class', 'src'],
-			});
-		} catch (e) {
-			console.log("[GJJ] Error setting up MutationObserver:", e);
-		}
-	}
+	shieldDomEvents(container);
+	return { widget: container, img, placeholder };
 }
 
 function createGenerateButton(node) {
 	const container = document.createElement("div");
-	container.style.cssText = [
-		"display:flex",
-		"flex-direction:row",
-		"gap:6px",
-		"width:100%",
-		"box-sizing:border-box",
-		"position:relative",
-		"z-index:1000",
-		"pointer-events:auto",
-	].join(";");
+	container.style.cssText = ["display:flex", "flex-direction:column", "gap:8px", "padding:8px"].join(";");
 
 	const btn = document.createElement("button");
 	btn.type = "button";
 	btn.textContent = "🚀 生成图片";
 	btn.style.cssText = [
 		"width:100%",
-		"margin:6px",
-		"padding:10px",
+		"height:40px",
+		"border-radius:10px",
+		"border:1px solid #5d95a6",
+		"background:#27404a",
+		"color:#eff7fb",
 		"font-size:12px",
 		"font-weight:bold",
-		"color:#fff",
-		"background:linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
-		"border:1px solid #667eea",
-		"border-radius:6px",
 		"cursor:pointer",
 		"transition:all 0.15s ease",
-		"box-shadow:0 4px 15px rgba(102,126,234,0.4)",
 		"box-sizing:border-box",
-		"position:relative",
-		"z-index:1001",
-		"pointer-events:auto",
-		"user-select:none",
-		"display:flex",
-		"align-items:center",
-		"justify-content:center",
-		"gap:4px",
 	].join(";");
-
-	for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "wheel"]) {
-		btn.addEventListener(eventName, protectEvent, true);
-		container.addEventListener(eventName, protectEvent, true);
-	}
-
 	btn.addEventListener("mouseenter", () => {
-		btn.style.transform = "translateY(-1px)";
-		btn.style.boxShadow = "0 6px 20px rgba(102,126,234,0.6)";
+		btn.style.background = "#355a66";
 	});
-
 	btn.addEventListener("mouseleave", () => {
-		btn.style.transform = "";
-		btn.style.boxShadow = "0 4px 15px rgba(102,126,234,0.4)";
+		btn.style.background = "#27404a";
 	});
 
-	async function handleGenerate(event) {
-		protectEvent(event);
-		console.log("[GJJ] 生成图片按钮被点击", node?.id, node?.comfyClass);
+	let batchState = {
+		isRunning: false,
+		currentIndex: 0,
+		total: 0,
+		combinations: [],
+		pollTimer: null,
+	};
 
-		const originalText = btn.textContent;
-		btn.textContent = "⏳ 执行中";
-		btn.disabled = true;
-		btn.style.opacity = "0.7";
+	const log = (color, msg) => {
+		console.log(`%c[GJJ Batch] ${msg}`, `color: ${color}; font-weight: bold;`);
+	};
+
+	const getCombinations = () => {
+		log("#00ff00", "========== 生成组合 ==========");
+
+		const modes = node.__gjjSelectedModes || [node.__gjjConfig?.outpaint_mode || "sd15_inpaint"];
+		const methods = node.__gjjSelectedMethods || [node.__gjjConfig?.expand_method || "pixel_expand"];
+
+		log("#00ffff", `选中的模式: ${JSON.stringify(modes)}`);
+		log("#00ffff", `选中的方法: ${JSON.stringify(methods)}`);
+
+		const combinations = [];
+		for (const mode of modes) {
+			for (const method of methods) {
+				combinations.push({ mode, method });
+				log("#ffff00", `  添加: ${mode} + ${method}`);
+			}
+		}
+
+		log("#00ff00", `组合总数: ${combinations.length}`);
+		return combinations;
+	};
+
+	const updateButtonText = () => {
+		if (!batchState.isRunning || batchState.currentIndex >= batchState.total) {
+			btn.textContent = "🚀 生成图片";
+			return;
+		}
+		const { method, mode } = batchState.combinations[batchState.currentIndex];
+		const methodName = method === "pixel_expand" ? "像素" : "目标";
+		const modeName = OUTPAINT_MODES.find(m => m.id === mode)?.label || mode;
+		btn.textContent = `🚀 ${methodName}-${modeName} (${batchState.currentIndex + 1}/${batchState.total})`;
+	};
+
+	const applyCombination = (combination) => {
+		log("#ff6600", `-------- 应用组合 ${combination.mode} + ${combination.method} --------`);
+
+		node.__gjjConfig = {
+			...node.__gjjConfig,
+			outpaint_mode: combination.mode,
+			expand_method: combination.method,
+		};
+		log("#ff6600", `  设置 outpaint_mode = ${combination.mode}`);
+		log("#ff6600", `  设置 expand_method = ${combination.method}`);
+
+		saveConfig(node, node.__gjjConfig);
+		log("#ff6600", `  配置已保存`);
+
+		if (node.__gjjModeButtons) {
+			node.__gjjModeButtons.updateAllButtonStyles();
+			log("#ff6600", `  模式按钮已更新`);
+		}
+		if (node.__gjjMethodButtons) {
+			node.__gjjMethodButtons.updateAllButtonStyles();
+			log("#ff6600", `  方法按钮已更新`);
+		}
+		if (node.__gjjUpdateParamsVisibility) {
+			node.__gjjUpdateParamsVisibility();
+			log("#ff6600", `  参数可见性已更新`);
+		}
+		if (node.__gjjUpdateModelStatus) {
+			node.__gjjUpdateModelStatus();
+			log("#ff6600", `  模型状态已更新`);
+		}
+	};
+
+	const executeNextCombination = () => {
+		if (!batchState.isRunning) {
+			log("#ff0000", `❌ 批量执行已停止`);
+			return;
+		}
+
+		if (batchState.currentIndex >= batchState.total) {
+			log("#00ff00", `✅ 所有任务执行完成！`);
+			batchState.isRunning = false;
+			batchState.currentIndex = 0;
+			if (batchState.pollTimer) {
+				clearTimeout(batchState.pollTimer);
+				batchState.pollTimer = null;
+			}
+			updateButtonText();
+			return;
+		}
+
+		const combination = batchState.combinations[batchState.currentIndex];
+		log("#00ccff", `========== 执行组合 ${batchState.currentIndex + 1}/${batchState.total}: ${combination.mode} + ${combination.method} ==========`);
+
+		updateButtonText();
+		applyCombination(combination);
+
+		log("#00ccff", `🚀 提交任务到队列...`);
+		app.queuePrompt(0);
+		log("#00ccff", `✅ 任务已提交，等待完成...`);
+
+		// 启动轮询检查队列状态
+		startPolling();
+	};
+
+	const startPolling = () => {
+		if (batchState.pollTimer) {
+			clearTimeout(batchState.pollTimer);
+		}
+
+		batchState.pollTimer = setTimeout(() => {
+			checkQueueStatus();
+		}, 1000);
+	};
+
+	const checkQueueStatus = () => {
+		if (!batchState.isRunning) return;
 
 		try {
-			const ok = await queueOnlyCurrentNode(node);
-			if (!ok) {
-				console.warn("[GJJ] 当前节点执行失败: queueOnlyCurrentNode 返回 false");
-				btn.textContent = "❌ 执行失败";
-				btn.style.background = "linear-gradient(135deg, #7f1d1d, #dc2626)";
-				btn.style.borderColor = "#ef4444";
+			const queueLen = app.queue?.queue?.length || 0;
+			const isRunning = app.queue?.runningTask !== null;
+			log("#9999ff", `队列状态: 运行中=${isRunning}, 待处理=${queueLen}`);
+
+			if (!isRunning && queueLen === 0) {
+				log("#00ff00", `✅ 当前任务完成`);
+				batchState.currentIndex++;
+				setTimeout(() => {
+					executeNextCombination();
+				}, 500);
 			} else {
-				btn.textContent = "✅ 执行中";
-				btn.style.background = "linear-gradient(135deg, #064e3d, #059669)";
-				btn.style.borderColor = "#10b981";
+				// 继续轮询
+				startPolling();
 			}
 		} catch (error) {
-			console.error("[GJJ] 执行当前节点时发生错误:", error);
-			btn.textContent = "❌ 错误";
-			btn.style.background = "linear-gradient(135deg, #7f1d1d, #dc2626)";
-			btn.style.borderColor = "#ef4444";
-		} finally {
+			log("#ff0000", `❌ 检查队列状态失败: ${error.message}`);
+			// 发生错误时也继续尝试下一个
+			batchState.currentIndex++;
 			setTimeout(() => {
-				btn.textContent = originalText;
-				btn.disabled = false;
-				btn.style.opacity = "1";
-				btn.style.background = "linear-gradient(135deg, #667eea 0%, #764ba2 100%)";
-				btn.style.borderColor = "#667eea";
-			}, 1500);
+				executeNextCombination();
+			}, 500);
 		}
-	}
+	};
 
-	btn.addEventListener("pointerup", handleGenerate, true);
-	btn.addEventListener("click", handleGenerate, true);
+	const onExecutionSuccess = (event) => {
+		log("#9999ff", `-------- 执行成功 --------`);
+	};
+
+	const onExecutionError = (event) => {
+		log("#ff0000", `-------- 执行失败 --------`);
+	};
+
+	const onExecutionInterrupted = () => {
+		log("#ff0000", `-------- 执行被中断 --------`);
+		if (batchState.pollTimer) {
+			clearTimeout(batchState.pollTimer);
+			batchState.pollTimer = null;
+		}
+		batchState.isRunning = false;
+		batchState.currentIndex = 0;
+		updateButtonText();
+	};
+
+	api.addEventListener("execution_success", onExecutionSuccess);
+	api.addEventListener("execution_error", onExecutionError);
+	api.addEventListener("execution_interrupted", onExecutionInterrupted);
+
+	btn.addEventListener("click", (e) => {
+		e.stopPropagation();
+		log("#ff00ff", "========== 点击生成按钮 ==========");
+
+		batchState.combinations = getCombinations();
+		log("#ff00ff", `组合列表: ${JSON.stringify(batchState.combinations)}`);
+
+		if (batchState.combinations.length <= 1) {
+			log("#ff00ff", `组合数量 <= 1，直接执行`);
+			applyCombination(batchState.combinations[0]);
+			app.queuePrompt(0);
+			return;
+		}
+
+		if (batchState.isRunning) {
+			log("#ff00ff", `当前正在运行，停止批量执行`);
+			batchState.isRunning = false;
+			batchState.currentIndex = 0;
+			updateButtonText();
+			return;
+		}
+
+		log("#ff00ff", `开始批量执行，共 ${batchState.combinations.length} 个任务`);
+		batchState.isRunning = true;
+		batchState.currentIndex = 0;
+		batchState.total = batchState.combinations.length;
+
+		executeNextCombination();
+	});
 
 	container.appendChild(btn);
+	shieldDomEvents(container);
 	return container;
-}
-
-function createMainContainer(node) {
-	const container = document.createElement("div");
-	container.className = "gjj_outpaint_container";
-	container.style.cssText = [
-		"display:flex",
-		"flex-direction:column",
-		"gap:4px",
-		"width:100%",
-		"box-sizing:border-box",
-		"position:relative",
-		"z-index:1000",
-		"pointer-events:auto",
-	].join(";");
-
-	for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "wheel"]) {
-		container.addEventListener(eventName, protectEvent, true);
-	}
-
-	return container;
-}
-
-function renderUI(node, config) {
-	const mainWidget = node.widgets?.find(w => w.name === "gjj_outpaint_main");
-	if (!mainWidget || !mainWidget.element) return;
-
-	const container = mainWidget.element;
-	container.innerHTML = "";
-
-	const isFlux = ["flux1_fill", "flux2_klein", "qwen_image"].includes(config.outpaint_mode);
-
-	container.appendChild(createModeButtons(node, config, (newConfig) => {
-		saveConfig(node, newConfig);
-		renderUI(node, newConfig);
-	}));
-
-	container.appendChild(createMethodButtons(node, config, (newConfig) => {
-		saveConfig(node, newConfig);
-		renderUI(node, newConfig);
-	}));
-
-	container.appendChild(createModelStatusPanel(node, config));
-
-	const paramsPanel = document.createElement("div");
-	paramsPanel.style.cssText = [
-		"padding:8px",
-		"background:linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)",
-		"border-radius:6px",
-		"margin:6px",
-		"border:1px solid #333",
-		"box-sizing:border-box",
-		"position:relative",
-		"z-index:1000",
-		"pointer-events:auto",
-	].join(";");
-
-	if (config.expand_method === "pixel_expand") {
-		paramsPanel.appendChild(createPixelExpandPanel(node, config, (newConfig) => {
-			saveConfig(node, newConfig);
-		}));
-	} else {
-		paramsPanel.appendChild(createTargetSizePanel(node, config, (newConfig) => {
-			saveConfig(node, newConfig);
-		}));
-	}
-
-	paramsPanel.appendChild(createSamplerPanel(node, config, (newConfig) => {
-		saveConfig(node, newConfig);
-	}, isFlux));
-
-	container.appendChild(paramsPanel);
-	container.appendChild(createStatusBar());
-
-	updateNodeSize(node);
-}
-
-function updateNodeSize(node) {
-	setTimeout(() => {
-		GJJ_Utils.refreshNode(node);
-	}, 50);
 }
 
 function setupNode(node) {
-	if (node.__gjjSetupDone) return;
-	node.__gjjSetupDone = true;
+	if (node.__gjjOutpaintSetup) return;
+	node.__gjjOutpaintSetup = true;
 
 	hideConfigWidget(node);
-
 	const config = parseConfig(node);
+	node.__gjjConfig = config;
 	saveConfig(node, config);
 
-	const mainContainer = createMainContainer(node);
-	node.addDOMWidget("gjj_outpaint_main", "HTML", mainContainer, { serialize: false });
+	const mainWrap = document.createElement("div");
+	mainWrap.style.cssText = [
+		"display:flex",
+		"flex-direction:column",
+		"gap:0",
+		"width:100%",
+		"box-sizing:border-box",
+	].join(";");
 
-	const previewContainer = createImagePreview(node);
-	node.addDOMWidget("gjj_outpaint_preview", "HTML", previewContainer, { serialize: false });
+	const mainWidget = node.addDOMWidget?.("gjj_outpaint_main", "gjj_outpaint_main", mainWrap, {
+		hideOnZoom: false,
+		getHeight: () => 600,
+	});
 
-	const generateContainer = createGenerateButton(node);
-	node.addDOMWidget("gjj_outpaint_generate", "HTML", generateContainer, { serialize: false });
+	node.__gjjOutpaintMainWrap = mainWrap;
 
-	renderUI(node, config);
+	// 创建所有组件
+	const modeData = createModeButtons(node, config);
+	node.__gjjModeButtons = modeData;
+	mainWrap.appendChild(modeData.container);
 
-	// 立即隐藏默认预览
-	setTimeout(() => hideDefaultPreviewElements(node), 0);
-	setTimeout(() => hideDefaultPreviewElements(node), 50);
-	setTimeout(() => hideDefaultPreviewElements(node), 100);
+	const methodData = createMethodButtons(node, config);
+	node.__gjjMethodButtons = methodData;
+	mainWrap.appendChild(methodData.container);
 
-	// 设置观察器实时隐藏
-	setupPreviewObserver(node);
+	const modelStatusData = createModelStatus(node, config);
+	node.__gjjModelStatus = modelStatusData;
+	mainWrap.appendChild(modelStatusData.container);
+
+	const paramsData = createParamsPanel(node, config);
+	node.__gjjParams = paramsData;
+	mainWrap.appendChild(paramsData.container);
+
+	const statusData = createStatusBar(node);
+	node.__gjjOutpaintStatusBar = statusData;
+	const statusWidget = node.addDOMWidget?.("gjj_outpaint_status", "gjj_outpaint_status", statusData.widget, {
+		hideOnZoom: false,
+		getHeight: () => 60,
+	});
+
+	const previewData = createPreviewPanel(node);
+	node.__gjjOutpaintPreview = previewData;
+	const previewWidget = node.addDOMWidget?.("gjj_outpaint_preview", "gjj_outpaint_preview", previewData.widget, {
+		hideOnZoom: false,
+		getHeight: () => 180,
+	});
+
+	const generateBtn = createGenerateButton(node);
+	const generateWidget = node.addDOMWidget?.("gjj_outpaint_generate", "gjj_outpaint_generate", generateBtn, {
+		hideOnZoom: false,
+		getHeight: () => 60,
+	});
+
+	// 更新参数可见性的函数
+	node.__gjjUpdateParamsVisibility = () => {
+		const cfg = node.__gjjConfig;
+		const isFlux = ["flux1_fill", "flux2_klein", "qwen_image"].includes(cfg.outpaint_mode);
+		const isPixel = cfg.expand_method === "pixel_expand";
+
+		// 更新像素/目标部分的显示
+		if (paramsData.elements.pixelExpandRows) {
+			for (const row of paramsData.elements.pixelExpandRows) {
+				row.style.display = isPixel ? "flex" : "none";
+			}
+		}
+		if (paramsData.elements.targetSizeRows) {
+			for (const row of paramsData.elements.targetSizeRows) {
+				row.style.display = isPixel ? "none" : "flex";
+			}
+		}
+
+		// 更新 CFG/调度器/Guidance
+		if (paramsData.elements.cfgRow) {
+			paramsData.elements.cfgRow.style.display = isFlux ? "none" : "flex";
+		}
+		if (paramsData.elements.schedRow) {
+			paramsData.elements.schedRow.style.display = isFlux ? "none" : "flex";
+		}
+		if (paramsData.elements.guideRow) {
+			paramsData.elements.guideRow.style.display = isFlux ? "flex" : "none";
+		}
+	};
+
+	// 更新模型状态的函数
+	node.__gjjUpdateModelStatus = () => {
+		node.__gjjModelStatus.update(node.__gjjConfig);
+	};
+
+	// 更新所有按钮样式的函数
+	node.__gjjUpdateButtons = () => {
+		node.__gjjModeButtons.updateAllButtonStyles();
+		node.__gjjMethodButtons.updateAllButtonStyles();
+	};
+
+	// 初始更新
+	node.__gjjUpdateParamsVisibility();
+	node.__gjjUpdateModelStatus();
+
+	refreshNode(node);
+}
+
+function imageDataToUrl(imageData) {
+	if (!imageData) return null;
+	if (typeof imageData === "object" && !Array.isArray(imageData)) {
+		imageData = [imageData];
+	}
+	if (Array.isArray(imageData) && imageData.length > 0) {
+		const img = imageData[0];
+		if (typeof img === "object") {
+			const filename = img.filename || img.name || img.file || img.path || "";
+			const subfolder = img.subfolder || img.sub || "";
+			if (filename) {
+				let url = api.apiURL(`/view?filename=${encodeURIComponent(filename)}`);
+				if (subfolder) url += `&subfolder=${encodeURIComponent(subfolder)}`;
+				if (img.type) url += `&type=${encodeURIComponent(img.type)}`;
+				url += `&rand=${Math.random()}`;
+				return url;
+			}
+		}
+	}
+	if (typeof imageData === "string") {
+		if (imageData.startsWith("http")) return imageData;
+		return api.apiURL(`/view?filename=${encodeURIComponent(imageData)}`);
+	}
+	return null;
 }
 
 app.registerExtension({
 	name: "GJJ.OutpaintStudio",
 
-	async beforeRegisterNodeDef(nodeType, nodeData) {
-		if (nodeData.name !== NODE_TYPE) return;
+	beforeRegisterNodeDef(nodeType, nodeData) {
+		if (nodeData.name !== TARGET_NODE_TYPE) return;
 
-		// 第一步：在注册节点时就隐藏默认预览（基础防线）
 		nodeData.output_preview = false;
-		if (nodeData.outputs && Array.isArray(nodeData.outputs)) {
-			for (const output of nodeData.outputs) {
-				output.preview = false;
-			}
-		}
 
-		const origOnNodeCreated = nodeType.prototype.onNodeCreated;
-		nodeType.prototype.onNodeCreated = function (...args) {
-			const result = origOnNodeCreated?.apply(this, args);
-			setTimeout(() => {
-				setupNode(this);
-				hideDefaultPreviewElements(this);
-			}, 50);
+		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
+		nodeType.prototype.onNodeCreated = function () {
+			const result = originalOnNodeCreated?.apply(this, arguments);
+			setupNode(this);
 			return result;
 		};
 
-		const origOnConfigure = nodeType.prototype.onConfigure;
-		nodeType.prototype.onConfigure = function (...args) {
-			const result = origOnConfigure?.apply(this, args);
-			setTimeout(() => {
-				const config = parseConfig(this);
-				saveConfig(this, config);
-				renderUI(this, config);
-				hideDefaultPreviewElements(this);
-			}, 50);
+		const originalOnConfigure = nodeType.prototype.onConfigure;
+		nodeType.prototype.onConfigure = function () {
+			const result = originalOnConfigure?.apply(this, arguments);
+			setupNode(this);
 			return result;
 		};
 
 		nodeType.prototype.onExecuted = function (message) {
-			console.log("[GJJ] onExecuted message:", message);
+			const previewData = this.__gjjOutpaintPreview;
+			if (previewData) {
+				let images = null;
+				if (message?.images) images = message.images;
+				else if (message?.ui?.images) images = message.ui.images;
 
-			// 第二步：不要调用 originalExecuted！会创建默认预览！
-			// const result = originalExecuted?.apply(this, [message]); ❌ 不要调用！
-
-			// 只处理自定义预览
-			let images = null;
-			if (message?.images) {
-				images = message.images;
-			} else if (message?.ui?.images) {
-				images = message.ui.images;
-			} else if (message?.output?.images) {
-				images = message.output.images;
-			} else if (Array.isArray(message?.ui)) {
-				for (const uiItem of message.ui) {
-					if (uiItem?.images) {
-						images = uiItem.images;
-						break;
+				if (images) {
+					const url = imageDataToUrl(images);
+					if (url) {
+						previewData.img.src = url;
+						previewData.img.style.display = "block";
+						previewData.placeholder.style.display = "none";
 					}
 				}
 			}
-
-			if (images) {
-				console.log("[GJJ] 更新图片预览:", images);
-				updateImagePreview(this, images);
-			}
-
-			// 多次调用确保彻底隐藏
-			setTimeout(() => hideDefaultPreviewElements(this), 0);
-			setTimeout(() => hideDefaultPreviewElements(this), 50);
-			setTimeout(() => hideDefaultPreviewElements(this), 100);
 		};
 	},
 
 	setup() {
 		setTimeout(() => {
 			for (const node of app.graph?._nodes || []) {
-				if (node.type === NODE_TYPE) {
+				if (node.type === TARGET_NODE_TYPE) {
 					setupNode(node);
-					hideDefaultPreviewElements(node);
 				}
 			}
 		}, 200);
 	},
 });
-
-console.log("[GJJ] 多功能扩图工具节点已加载");

@@ -169,6 +169,13 @@ from .cfg_tools import (
 	CFGNorm_execute,
 )
 
+from .try_handler import (
+	# try-except 通用处理
+	gjj_try_except_handler,
+	gjj_try_import,
+	gjj_safe_execute,
+)
+
 from .tsv_translation import (
 	# 翻译工具
 	DEFAULT_TRANSLATION_TSV,
@@ -284,6 +291,10 @@ __all__ = [
 	# cfg_tools
 	"gjjutils_CFGNorm",
 	"CFGNorm_execute",
+	# try_handler
+	"gjj_try_except_handler",
+	"gjj_try_import",
+	"gjj_safe_execute",
 	# tsv_translation
 	"DEFAULT_TRANSLATION_TSV",
 	"TRANSLATION_ROOT",

@@ -3,6 +3,24 @@ import importlib
 import glob
 import re
 import traceback
+import sys
+
+# 优先导入 common_utils 子包，确保其他模块可以使用
+_common_utils_loaded = False
+for subdir in glob.glob(os.path.join(os.path.dirname(__file__), "*")):
+    if not os.path.isdir(subdir):
+        continue
+    subdir_name = os.path.basename(subdir)
+    if subdir_name == "common_utils":
+        init_file = os.path.join(subdir, "__init__.py")
+        if os.path.exists(init_file):
+            try:
+                common_utils_module = importlib.import_module("." + subdir_name, __name__)
+                sys.modules["nodes.common_utils"] = common_utils_module
+                _common_utils_loaded = True
+                print(f"[GJJ] 优先加载: common_utils")
+            except Exception as exc:
+                print(f"[GJJ] 加载 common_utils 失败: {type(exc).__name__}: {exc}")
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -172,6 +190,26 @@ for f in glob.glob(os.path.join(os.path.dirname(__file__), "*.py")):
 
     module = _safe_import_node_module(module_name)
     _merge_node_module(module)
+
+
+# 自动导入子目录中的包（如果存在 __init__.py）
+for subdir in glob.glob(os.path.join(os.path.dirname(__file__), "*")):
+    if not os.path.isdir(subdir):
+        continue
+
+    init_file = os.path.join(subdir, "__init__.py")
+    if not os.path.exists(init_file):
+        continue
+
+    subdir_name = os.path.basename(subdir)
+
+
+    try:
+        subdir_module = importlib.import_module("." + subdir_name, __name__)
+        _merge_node_module(subdir_module)
+        print(f"[GJJ] 已加载子包: {subdir_name}")
+    except Exception as exc:
+        print(f"[GJJ] 跳过子包 {subdir_name}: {type(exc).__name__}: {exc}")
 
 
 # 单独导入可选节点：LatentSync

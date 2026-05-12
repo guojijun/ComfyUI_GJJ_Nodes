@@ -10,11 +10,11 @@
 - 目标尺寸扩图：指定各边扩图像素
 - 四边像素扩图：指定目标尺寸，智能计算扩图
 
-特点：
-- 按钮式扩图模式选择
-- 动态参数显示
-- 自动模型匹配
-- 批处理支持
+三层循环架构：
+- 第一层：四种模型工作流
+- 第二层：输入图片队列
+- 第三层：两种扩图方式（像素扩图 + 目标尺寸扩图）
+- 中途报错不中断，结果递增累加
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ from .common_utils.sampler_tools import (
     SamplerCustomAdvanced_execute as SamplerCustomAdvanced,
 )
 
-from .common_utils.model_manager import gjjutils_find_model_list
+from .common_utils import model_manager
 
 from .common_utils.image_tools import (
     gjjutils_expand_image_with_padding,
@@ -90,7 +90,12 @@ OUTPAINT_MODES = {
         "description": "经典 SD1.5 局部重绘，适合简单场景",
         "pros": "兼容性好、速度快、资源需求低",
         "cons": "质量相对较低",
-        "default_params": {"steps": 25, "cfg": 7.0, "sampler": "euler", "scheduler": "normal"},
+        "default_params": {
+            "steps": 25,
+            "cfg": 7.0,
+            "sampler": "euler",
+            "scheduler": "normal",
+        },
     },
     "flux1_fill": {
         "name": "Flux1-Fill填充",
@@ -141,33 +146,55 @@ OUTPAINT_MODES = {
 DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
 
 
-def _send_status(unique_id: Any, text: str) -> None:
-    """发送节点状态到前端。"""
-    if not unique_id:
-        return
+def _send_status(unique_id, status_text):
+    """发送节点状态更新。"""
     try:
         from server import PromptServer
-        status_text = str(text or "").strip()
+
+        status_text = str(status_text or "").strip()
         if not status_text:
             status_text = "处理中..."
         PromptServer.instance.send_sync(
             "gjj_node_progress",
             {"node": str(unique_id), "text": status_text},
         )
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[GJJ Outpaint] 发送状态失败: {e}")
 
 
-def _resolve_model_by_priority(
-    folder_type: str, keywords: list[str]
-) -> tuple[str | None, list[str]]:
-    """根据优先级解析模型。"""
-    matched = gjjutils_find_model_list(keywords, folder_type, "OR")
-    if not matched:
-        return None, []
+# 从子目录导入工具函数和核心函数
+from ._gjj_outpaint_studio.utils import (
+    _free_vram,
+    _apply_flux_guidance,
+    _conditioning_zero_out,
+    _apply_differential_diffusion,
+    _apply_reference_latent,
+    _apply_controlnet,
+)
+from ._gjj_outpaint_studio.core import (
+    _parse_config,
+    _scan_mode_models,
+    _validate_mode,
+    _expand_by_pixels,
+    _compute_target_padding_keep_scale,
+    _expand_to_target_size,
+    _load_mode_models,
+)
 
-    sorted_matched = sorted(matched, key=lambda x: len(os.path.basename(x)))
-    return sorted_matched[0], sorted_matched
+EXPAND_METHODS = [
+    {
+        "id": "pixel_expand",
+        "name": "像素扩图",
+        "icon": "📏",
+        "description": "指定四边各扩多少像素",
+    },
+    {
+        "id": "target_size",
+        "name": "目标尺寸扩图",
+        "icon": "🎯",
+        "description": "指定最终目标尺寸，自动计算扩图量",
+    },
+]
 
 
 class GJJ_OutpaintStudio:
@@ -182,8 +209,14 @@ class GJJ_OutpaintStudio:
     OUTPUT_TOOLTIPS = ("扩图后的图像批次。",)
 
     SEARCH_ALIASES = [
-        "扩图", "outpaint", "expand", "inpaint", "填充", "延展",
-        "多功能扩图", "智能扩图",
+        "扩图",
+        "outpaint",
+        "expand",
+        "inpaint",
+        "填充",
+        "延展",
+        "多功能扩图",
+        "智能扩图",
     ]
 
     GJJ_HELP = {
@@ -191,7 +224,6 @@ class GJJ_OutpaintStudio:
         "version": "1.0.0",
         "author": "GJJ Custom Nodes Team",
         "description": "整合四种扩图工作流的智能扩图工具",
-
         "workflows": [
             {
                 "id": mode_id,
@@ -206,7 +238,6 @@ class GJJ_OutpaintStudio:
             }
             for mode_id, cfg in OUTPAINT_MODES.items()
         ],
-
         "download_info": {"url": DOWNLOAD_URL},
     }
 
@@ -216,12 +247,6 @@ class GJJ_OutpaintStudio:
 
     @classmethod
     def INPUT_TYPES(cls):
-        outpaint_modes = list(OUTPAINT_MODES.keys())
-        samplers = list(comfy.samplers.KSampler.SAMPLERS)
-        schedulers = list(comfy.samplers.KSampler.SCHEDULERS)
-        upscale_methods = ["lanczos", "bilinear", "nearest", "bicubic"]
-        scale_modes = ["by_width", "by_height"]
-
         return {
             "required": {},
             "optional": {
@@ -235,25 +260,22 @@ class GJJ_OutpaintStudio:
                 "outpaint_config": (
                     "STRING",
                     {
-                        "default": json.dumps({
-                            "outpaint_mode": "sd15_inpaint",
-                            "expand_method": "pixel_expand",
-                            "pixel_left": 0,
-                            "pixel_right": 128,
-                            "pixel_top": 0,
-                            "pixel_bottom": 128,
-                            "target_width": 1024,
-                            "target_height": 1024,
-                            "target_scale_mode": "by_width",
-                            "target_direction": "left+right",
-                            "seed": 0,
-                            "steps": 25,
-                            "cfg": 7.0,
-                            "guidance": 3.5,
-                            "sampler_name": "euler",
-                            "scheduler": "normal",
-                            "upscale_method": "lanczos",
-                        }, ensure_ascii=False),
+                        "default": json.dumps(
+                            {
+                                "pixel_left": 0,
+                                "pixel_right": 128,
+                                "pixel_top": 0,
+                                "pixel_bottom": 128,
+                                "target_width": 1024,
+                                "target_height": 1024,
+                                "target_scale_mode": "by_width",
+                                "target_direction": "center",
+                                "seed": 0,
+                                "upscale_method": "lanczos",
+                                "mask_expand": 10,
+                            },
+                            ensure_ascii=False,
+                        ),
                         "multiline": True,
                         "display_name": "扩图配置",
                         "tooltip": "由前端自动维护的配置JSON",
@@ -267,372 +289,9 @@ class GJJ_OutpaintStudio:
             },
         }
 
-    def _parse_config(self, config_json):
-        """解析配置JSON"""
-        try:
-            config = json.loads(config_json)
-        except Exception:
-            config = {}
-
-        defaults = {
-            "outpaint_mode": "sd15_inpaint",
-            "expand_method": "pixel_expand",
-            "pixel_left": 0,
-            "pixel_right": 128,
-            "pixel_top": 0,
-            "pixel_bottom": 128,
-            "target_width": 1024,
-            "target_height": 1024,
-            "target_scale_mode": "by_width",
-            "target_direction": "left+right",
-            "seed": 0,
-            "steps": 25,
-            "cfg": 7.0,
-            "guidance": 3.5,
-            "sampler_name": "euler",
-            "scheduler": "normal",
-            "upscale_method": "lanczos",
-        }
-
-        return {**defaults, **config}
-
-    def _scan_mode_models(self, mode: str) -> dict[str, Any]:
-        """扫描模式下可用的模型。"""
-        config = OUTPAINT_MODES.get(mode, OUTPAINT_MODES["sd15_inpaint"])
-        categories = config.get("model_categories", {})
-
-        available = {}
-        for cat, keywords in categories.items():
-            if isinstance(keywords, str):
-                keywords = [keywords]
-            best, all_matches = _resolve_model_by_priority(cat, keywords)
-            available[cat] = {
-                "best": best,
-                "all": all_matches,
-                "keyword": keywords[0] if keywords else "",
-            }
-
-        missing = [cat for cat, data in available.items() if not data["best"]]
-        return {"available": available, "missing": missing, "complete": len(missing) == 0}
-
-    def _validate_mode(self, mode: str) -> tuple[bool, str]:
-        """验证模式所需模型。"""
-        result = self._scan_mode_models(mode)
-        if result["complete"]:
-            return True, "✅ 所有模型已就绪"
-
-        lines = ["⚠️ 部分模型缺失："]
-        for cat in result["missing"]:
-            kw = result["available"].get(cat, {}).get("keyword", "")
-            lines.append(f"  • {cat}: 需要 '{kw}'")
-            lines.append(f"    下载：{DOWNLOAD_URL}")
-        return False, "\n".join(lines)
-
     def _split_batch(self, value):
         """拆分批次图像。"""
         return gjjutils_split_image_batch(value)
-
-    def _expand_by_pixels(
-        self,
-        image: torch.Tensor,
-        left: int,
-        right: int,
-        top: int,
-        bottom: int,
-    ) -> torch.Tensor:
-        """按像素扩展图像。"""
-        return gjjutils_expand_image_with_padding(
-            image, left, right, top, bottom, "replicate"
-        )
-
-    def _expand_to_target_size(
-        self,
-        image: torch.Tensor,
-        target_w: int,
-        target_h: int,
-        scale_mode: str,
-        direction: str,
-    ) -> tuple[torch.Tensor, dict[str, int]]:
-        """扩展到目标尺寸。"""
-        _, orig_h, orig_w, _ = image.shape
-
-        if scale_mode == "by_width":
-            scale = target_w / orig_w
-            new_h = int(orig_h * scale)
-            new_w = target_w
-        else:
-            scale = target_h / orig_h
-            new_w = int(orig_w * scale)
-            new_h = target_h
-
-        # 先缩放图像
-        samples = image.movedim(-1, 1)
-        scaled = comfy.utils.common_upscale(
-            samples, new_w, new_h, "lanczos", "disabled"
-        )
-        scaled_img = scaled.movedim(1, -1)
-
-        # 这里的原始尺寸应该是缩放后的尺寸
-        effective_orig_w = new_w
-        effective_orig_h = new_h
-
-        if direction == "all":
-            # 四边扩展：从中间向四周均匀扩展
-            left = max(0, (target_w - effective_orig_w) // 2)
-            right = max(0, target_w - effective_orig_w - left)
-            top = max(0, (target_h - effective_orig_h) // 2)
-            bottom = max(0, target_h - effective_orig_h - top)
-        elif direction == "left+right" or direction == "left_right":
-            # 左右扩展：从中间向左右均匀扩展
-            left = max(0, (target_w - effective_orig_w) // 2)
-            right = max(0, target_w - effective_orig_w - left)
-            top = 0
-            bottom = 0
-        elif direction == "top+bottom" or direction == "top_bottom":
-            # 上下扩展：从中间向上下均匀扩展
-            top = max(0, (target_h - effective_orig_h) // 2)
-            bottom = max(0, target_h - effective_orig_h - top)
-            left = 0
-            right = 0
-        elif direction == "left":
-            # 仅左侧：全部扩展到左边
-            left = max(0, target_w - effective_orig_w)
-            right = top = bottom = 0
-        elif direction == "right":
-            # 仅右侧：全部扩展到右边
-            right = max(0, target_w - effective_orig_w)
-            left = top = bottom = 0
-        elif direction == "top":
-            # 仅顶部：全部扩展到顶部
-            top = max(0, target_h - effective_orig_h)
-            bottom = left = right = 0
-        elif direction == "bottom":
-            # 仅底部：全部扩展到底部
-            bottom = max(0, target_h - effective_orig_h)
-            top = left = right = 0
-        else:
-            # 默认：四边扩展
-            left = max(0, (target_w - effective_orig_w) // 2)
-            right = max(0, target_w - effective_orig_w - left)
-            top = max(0, (target_h - effective_orig_h) // 2)
-            bottom = max(0, target_h - effective_orig_h - top)
-
-        if left > 0 or right > 0 or top > 0 or bottom > 0:
-            expanded = self._expand_by_pixels(scaled_img, left, right, top, bottom)
-        else:
-            expanded = scaled_img
-
-        # 返回原始尺寸 - 这里是缩放后的尺寸作为有效原始尺寸
-        return expanded, {"left": left, "right": right, "top": top, "bottom": bottom, "orig_w": effective_orig_w, "orig_h": effective_orig_h}
-
-    def _load_mode_models(self, mode: str):
-        """加载模式所需的模型。"""
-        config = OUTPAINT_MODES.get(mode, OUTPAINT_MODES["sd15_inpaint"])
-        categories = config.get("model_categories", {})
-        cache_key = f"mode_{mode}"
-
-        if cache_key in self._model_cache:
-            return self._model_cache[cache_key]
-
-        models = {}
-
-        for cat in ["checkpoints", "diffusion_models"]:
-            if cat in categories:
-                kw = categories[cat]
-                if isinstance(kw, str):
-                    kw = [kw]
-                best, _ = _resolve_model_by_priority(cat, kw)
-                if best:
-                    try:
-                        if cat == "checkpoints":
-                            from nodes import CheckpointLoaderSimple
-                            m, c, v = CheckpointLoaderSimple().load_checkpoint(best)
-                            models["model"] = m
-                            models["clip"] = c
-                            models["vae"] = v
-                        else:
-                            models["model"] = comfy.sd.load_diffusion_model(
-                                folder_paths.get_full_path(cat, best)
-                            )
-                    except Exception as exc:
-                        raise RuntimeError(f"加载 {cat} 失败：{best}\n{exc}") from exc
-
-        for cat in ["vae"]:
-            if cat in categories:
-                kw = categories[cat]
-                if isinstance(kw, str):
-                    kw = [kw]
-                best, _ = _resolve_model_by_priority(cat, kw)
-                if best and "vae" not in models:
-                    try:
-                        vae_path = folder_paths.get_full_path(cat, best)
-                        sd, meta = comfy.utils.load_torch_file(vae_path, return_metadata=True)
-                        models["vae"] = comfy.sd.VAE(sd=sd, metadata=meta)
-                    except Exception:
-                        pass
-
-        for cat in ["text_encoders", "clip"]:
-            if cat in categories:
-                kw = categories[cat]
-                if isinstance(kw, str):
-                    kw = [kw]
-                best, _ = _resolve_model_by_priority(cat, kw)
-                if best and "clip" not in models:
-                    try:
-                        clip_path = folder_paths.get_full_path(cat, best)
-                        models["clip"] = comfy.sd.load_clip(
-                            ckpt_paths=[clip_path],
-                            clip_type=comfy.sd.CLIPType.STABLE_DIFFUSION,
-                        )
-                    except Exception:
-                        pass
-
-        self._model_cache[cache_key] = models
-        return models
-
-    def _execute_sd15_inpainting(
-        self,
-        models: dict,
-        expanded_img: torch.Tensor,
-        orig_size: tuple[int, int],
-        pad_amounts: dict[str, int],
-        seed: int,
-        steps: int,
-        cfg: float,
-        sampler_name: str,
-        scheduler: str,
-    ) -> torch.Tensor:
-        """SD1.5 局部重绘工作流。"""
-        model = models["model"]
-        vae = models.get("vae")
-        clip = models.get("clip")
-
-        if vae is None:
-            raise RuntimeError("VAE 模型不可用")
-
-        batch_size, img_h, img_w, _ = expanded_img.shape
-
-        orig_w, orig_h = orig_size
-
-        left = pad_amounts.get("left", 0)
-        right = pad_amounts.get("right", 0)
-        top = pad_amounts.get("top", 0)
-        bottom = pad_amounts.get("bottom", 0)
-
-        # 创建 mask - [batch_size, height, width]
-        mask_float = torch.zeros((batch_size, img_h, img_w), dtype=torch.float32, device=expanded_img.device)
-
-        # 标记需要重绘的扩展区域
-        if top > 0:
-            mask_float[:, :top, :] = 1.0
-        if bottom > 0:
-            mask_float[:, (img_h - bottom):, :] = 1.0
-        if left > 0:
-            mask_float[:, :, :left] = 1.0
-        if right > 0:
-            mask_float[:, :, (img_w - right):] = 1.0
-
-        # VAE 编码（使用 VAEEncodeForInpaint）
-        encoder = VAEEncodeForInpaint()
-        x_tuple = encoder.encode(vae, expanded_img, mask_float)
-        # 元组返回，取第一个元素 (latent_dict, )
-        x = x_tuple[0] if isinstance(x_tuple, tuple) else x_tuple
-
-        # 提示词编码
-        positive_text = "masterpiece, best quality, highres, highly detailed, extension, seamless"
-        negative_text = "lowres, blurry, low quality, worst quality, bad anatomy, bad hands, text, error"
-
-        if CLIPTextEncode is not None and clip is not None:
-            clip_encoder = CLIPTextEncode()
-            positive = clip_encoder.encode(clip, positive_text)[0]
-            negative = clip_encoder.encode(clip, negative_text)[0]
-        else:
-            positive = [[torch.zeros(1, 77, 768), {}]]
-            negative = positive
-
-        # KSampler
-        sampler = KSampler()
-        sampler_result = sampler.sample(
-            model, seed, steps, cfg, sampler_name, scheduler,
-            positive, negative, x, denoise=1.0
-        )
-        latent = sampler_result[0] if isinstance(sampler_result, tuple) else sampler_result
-
-        # VAE 解码
-        decoder = VAEDecode()
-        decoded_tuple = decoder.decode(vae, latent)
-        decoded = decoded_tuple[0] if isinstance(decoded_tuple, tuple) else decoded_tuple
-
-        return decoded
-
-    def _execute_flux_fill(
-        self,
-        models: dict,
-        expanded_img: torch.Tensor,
-        orig_size: tuple[int, int],
-        pad_amounts: dict[str, int],
-        seed: int,
-        steps: int,
-        guidance: float,
-        sampler_name: str,
-    ) -> torch.Tensor:
-        """Flux1 Fill 工作流。"""
-        model = models["model"]
-        vae = models.get("vae")
-        clip = models.get("clip")
-
-        if vae is None:
-            raise RuntimeError("VAE 模型不可用")
-
-        new_w, new_h = expanded_img.shape[2], expanded_img.shape[1]
-
-        # VAE 编码
-        encoder = VAEEncode()
-        x_tuple = encoder.encode(vae, expanded_img)
-        x = x_tuple[0] if isinstance(x_tuple, tuple) else x_tuple
-
-        # 创建 mask - 只在 latent 空间
-        latent_shape = x["samples"].shape
-        mask = torch.ones((1, 1, latent_shape[2], latent_shape[3]), device=x["samples"].device)
-
-        left_pad = pad_amounts.get("left", 0) // 8
-        top_pad = pad_amounts.get("top", 0) // 8
-        orig_latent_w = max(1, orig_size[0] // 8)
-        orig_latent_h = max(1, orig_size[1] // 8)
-
-        end_x = min(left_pad + orig_latent_w, latent_shape[3])
-        end_y = min(top_pad + orig_latent_h, latent_shape[2])
-
-        if left_pad < end_x and top_pad < end_y:
-            mask[:, :, top_pad:end_y, left_pad:end_x] = 0.0
-
-        x["noise_mask"] = mask
-
-        # Flux 风格编码
-        pos_text = "masterpiece, best quality, high resolution, detailed"
-        neg_text = "low quality, blurry, ugly, distorted"
-
-        if clip is not None and hasattr(clip, "encode_from_tokens_scheduled"):
-            pos_cond = clip.encode_from_tokens_scheduled(clip.tokenize(pos_text))
-            neg_cond = clip.encode_from_tokens_scheduled(clip.tokenize(neg_text))
-        else:
-            pos_cond = [[torch.zeros(1, 77, 2048), {}]]
-            neg_cond = pos_cond
-
-        # Flux 采样
-        noise = RandomNoise(int(seed))
-        sampler = KSamplerSelect(str(sampler_name or "euler").strip())
-        sigmas = Flux2Scheduler(int(steps), new_w, new_h)
-        guider = CFGGuider(model, pos_cond, neg_cond, float(guidance))
-
-        result = SamplerCustomAdvanced(noise, guider, sampler, sigmas, x)
-        sampled = result.get("output", x)
-
-        # VAE 解码
-        decoder = VAEDecode()
-        decoded_tuple = decoder.decode(vae, sampled)
-        decoded = decoded_tuple[0] if isinstance(decoded_tuple, tuple) else decoded_tuple
-        return decoded
 
     def _execute_outpaint(
         self,
@@ -646,30 +305,213 @@ class GJJ_OutpaintStudio:
         guidance: float,
         sampler_name: str,
         scheduler: str,
+        mask_expand: int,
+        unique_id: str = "",
         **kwargs,
     ) -> torch.Tensor:
         """执行扩图采样，按模式分支。"""
-        models = self._load_mode_models(mode)
+        print(f"[GJJ Outpaint] 开始执行: mode={mode}, seed={seed}, steps={steps}")
+
+        try:
+            models = _load_mode_models(
+                mode, OUTPAINT_MODES, self._model_cache, model_manager, _free_vram
+            )
+            print(f"[GJJ Outpaint] 模型加载成功: {list(models.keys())}")
+        except Exception as e:
+            print(
+                f"\033[91m[GJJ Outpaint] ❌ 模型加载失败: {type(e).__name__}: {e}\033[0m"
+            )
+            raise RuntimeError(f"模型加载失败: {type(e).__name__}: {e}")
 
         if not models.get("model"):
-            raise RuntimeError(f"模式 {mode} 缺少主模型")
+            error_msg = f"模式 {mode} 缺少主模型"
+            print(f"\033[91m[GJJ Outpaint] ❌ {error_msg}\033[0m")
+            raise RuntimeError(error_msg)
+
+        # 构建统一的 config 参数包
+        config_params = {
+            "steps": steps,
+            "cfg": cfg,
+            "guidance": guidance,
+            "sampler_name": sampler_name,
+            "scheduler": scheduler,
+            "mask_expand": mask_expand,
+            "unique_id": unique_id,
+        }
 
         if mode == "sd15_inpaint":
-            # SD1.5 局部重绘
-            result = self._execute_sd15_inpainting(
-                models, expanded_img, orig_size, pad_amounts,
-                seed, steps, cfg, sampler_name, scheduler
+            from ._gjj_outpaint_studio.sd15_inpaint import execute_sd15_workflow
+
+            result = execute_sd15_workflow(
+                models["model"],
+                models.get("vae"),
+                models.get("clip"),
+                expanded_img,
+                pad_amounts,
+                seed,
+                config=config_params,
             )
-        elif mode in ["flux1_fill", "flux2_klein", "qwen_image"]:
-            # Flux 系列
-            result = self._execute_flux_fill(
-                models, expanded_img, orig_size, pad_amounts,
-                seed, steps, guidance, sampler_name
+        elif mode == "flux1_fill":
+            from ._gjj_outpaint_studio.flux1_fill import execute_flux1_workflow
+
+            result = execute_flux1_workflow(
+                models["model"],
+                models.get("vae"),
+                models.get("clip"),
+                expanded_img,
+                pad_amounts,
+                seed,
+                config=config_params,
+            )
+        elif mode == "flux2_klein":
+            from ._gjj_outpaint_studio.flux2_klein import execute_flux2_workflow
+
+            result = execute_flux2_workflow(
+                models["model"],
+                models.get("vae"),
+                models.get("clip"),
+                expanded_img,
+                pad_amounts,
+                seed,
+                config=config_params,
+            )
+        elif mode == "qwen_image":
+            from ._gjj_outpaint_studio.qwen_image import execute_qwen_workflow
+
+            result = execute_qwen_workflow(
+                models["model"],
+                models.get("vae"),
+                models.get("clip"),
+                expanded_img,
+                pad_amounts,
+                seed,
+                config=config_params,
             )
         else:
             raise RuntimeError(f"未知模式: {mode}")
 
         return result
+
+    def _expand_for_mode(
+        self,
+        mode: str,
+        img_tensor: torch.Tensor,
+        expand_method: str,
+        pixel_left: int,
+        pixel_right: int,
+        pixel_top: int,
+        pixel_bottom: int,
+        target_width: int,
+        target_height: int,
+        target_scale_mode: str,
+        target_direction: str,
+    ) -> tuple[torch.Tensor, dict[str, int], int, int]:
+        """计算扩图参数，返回 (expanded_img, pad_amounts, effective_orig_w, effective_orig_h)。"""
+        _, orig_h, orig_w, _ = img_tensor.shape
+
+        if mode in ("sd15_inpaint", "flux2_klein", "qwen_image"):
+            # 这些模式内部使用 ImagePadForOutpaint，不提前扩图
+            if expand_method == "pixel_expand":
+                left = pixel_left
+                right = pixel_right
+                top = pixel_top
+                bottom = pixel_bottom
+            else:
+                raw_w = int(target_width)
+                raw_h = int(target_height)
+                target_w = ((raw_w + 7) // 8) * 8
+                target_h = ((raw_h + 7) // 8) * 8
+                total_pad_w = max(0, target_w - orig_w)
+                total_pad_h = max(0, target_h - orig_h)
+                if target_w != raw_w or target_h != raw_h:
+                    print(
+                        f"[GJJ Outpaint] 目标尺寸8倍对齐: {raw_w}x{raw_h} -> {target_w}x{target_h}"
+                    )
+                if target_direction in ("left",):
+                    left = total_pad_w
+                    right = 0
+                elif target_direction in ("right",):
+                    left = 0
+                    right = total_pad_w
+                else:
+                    left = total_pad_w // 2
+                    right = total_pad_w - left
+                if target_direction in ("top",):
+                    top = total_pad_h
+                    bottom = 0
+                elif target_direction in ("bottom",):
+                    top = 0
+                    bottom = total_pad_h
+                else:
+                    top = total_pad_h // 2
+                    bottom = total_pad_h - top
+                print(
+                    f"[GJJ Outpaint] 目标尺寸扩图: orig={orig_w}x{orig_h} -> target={target_w}x{target_h}"
+                )
+
+            expanded = img_tensor
+            pad_amounts = {"left": left, "right": right, "top": top, "bottom": bottom}
+            effective_orig_w = orig_w
+            effective_orig_h = orig_h
+            print(
+                f"[GJJ Outpaint] pad_amounts: left={left}, right={right}, top={top}, bottom={bottom}"
+            )
+        else:
+            # flux1_fill 等：需要提前扩图
+            if expand_method == "pixel_expand":
+                left = pixel_left
+                right = pixel_right
+                top = pixel_top
+                bottom = pixel_bottom
+
+                new_w = orig_w + left + right
+                new_h = orig_h + top + bottom
+                final_w = ((new_w + 7) // 8) * 8
+                final_h = ((new_h + 7) // 8) * 8
+
+                extra_w = final_w - new_w
+                extra_h = final_h - new_h
+                right += extra_w
+                bottom += extra_h
+
+                print(
+                    f"[GJJ Outpaint] 像素扩图: orig={orig_w}x{orig_h}, left={left}, right={right}, top={top}, bottom={bottom}"
+                )
+                print(f"[GJJ Outpaint] 目标尺寸: {final_w}x{final_h}")
+
+                try:
+                    expanded = _expand_by_pixels(img_tensor, left, right, top, bottom)
+                    print(f"[GJJ Outpaint] 扩图后尺寸: {expanded.shape}")
+                except Exception as e:
+                    print(f"[GJJ Outpaint] _expand_by_pixels 失败: {e}")
+                    raise
+
+                pad_amounts = {
+                    "left": left,
+                    "right": right,
+                    "top": top,
+                    "bottom": bottom,
+                }
+                effective_orig_w = orig_w
+                effective_orig_h = orig_h
+            else:
+                print(
+                    f"[GJJ Outpaint] 目标尺寸扩图: orig={orig_w}x{orig_h}, target={target_width}x{target_height}, mode={target_scale_mode}, direction={target_direction}"
+                )
+                expanded, pad_amounts = _expand_to_target_size(
+                    img_tensor,
+                    target_width,
+                    target_height,
+                    target_scale_mode,
+                    target_direction,
+                )
+                print(
+                    f"[GJJ Outpaint] 扩图后尺寸: {expanded.shape}, pad_amounts={pad_amounts}"
+                )
+                effective_orig_w = pad_amounts.get("orig_w", orig_w)
+                effective_orig_h = pad_amounts.get("orig_h", orig_h)
+
+        return expanded, pad_amounts, effective_orig_w, effective_orig_h
 
     def outpaint_image(
         self,
@@ -680,35 +522,26 @@ class GJJ_OutpaintStudio:
         extra_pnginfo=None,
         **kwargs,
     ):
-        """执行扩图操作。"""
+        """执行扩图操作（三层循环：模式 → 图片 → 扩图方式）。"""
         start_time = time.time()
 
-        config = self._parse_config(outpaint_config)
+        config = _parse_config(outpaint_config)
 
-        outpaint_mode = config["outpaint_mode"]
-        expand_method = config["expand_method"]
-        pixel_left = config["pixel_left"]
-        pixel_right = config["pixel_right"]
-        pixel_top = config["pixel_top"]
-        pixel_bottom = config["pixel_bottom"]
-        target_width = config["target_width"]
-        target_height = config["target_height"]
-        target_scale_mode = config["target_scale_mode"]
-        target_direction = config["target_direction"]
-        seed = config["seed"]
-        steps = config["steps"]
-        cfg = config["cfg"]
-        guidance = config["guidance"]
-        sampler_name = config["sampler_name"]
-        scheduler = config["scheduler"]
-        upscale_method = config["upscale_method"]
+        pixel_left = config.get("pixel_left", 0)
+        pixel_right = config.get("pixel_right", 0)
+        pixel_top = config.get("pixel_top", 0)
+        pixel_bottom = config.get("pixel_bottom", 0)
+        target_width = config.get("target_width", 512)
+        target_height = config.get("target_height", 512)
+        target_scale_mode = config.get("target_scale_mode", "cover")
+        target_direction = config.get("target_direction", "center")
+        base_seed = config.get("seed", 0)
+        upscale_method = config.get("upscale_method", "nearest-exact")
+        mask_expand = config.get("mask_expand", 10)
 
-        _send_status(unique_id, "🔍 检查模型...")
-        models_ok, model_msg = self._validate_mode(outpaint_mode)
-        if not models_ok:
-            _send_status(unique_id, f"⚠️ {outpaint_mode}")
-            raise RuntimeError(model_msg)
-
+        # ============================================================
+        # 加载输入图像
+        # ============================================================
         _send_status(unique_id, "📷 加载图像...")
         source_images = []
 
@@ -721,95 +554,235 @@ class GJJ_OutpaintStudio:
                     try:
                         img = load_image_tensor(resolve_input_image_path(entry))
                         source_images.append(img)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[GJJ Outpaint] 加载图片失败: {entry} - {e}")
 
         if not source_images:
             _send_status(unique_id, "❌ 未检测到图像")
             raise RuntimeError("请先加载要扩图的图片")
 
         _send_status(unique_id, f"🖼️ 检测到 {len(source_images)} 张图片")
+        print(
+            f"[GJJ Outpaint] 三层循环开始: 4模式 × {len(source_images)}图 × 2方式 = {4 * len(source_images) * 2} 次推理"
+        )
 
-        results = []
-        batch_idx = 0
+        # ============================================================
+        # 三层循环
+        # ============================================================
+        all_results = []  # 累加所有结果
+        all_errors = []  # 累加所有错误信息
+        mode_labels = {
+            "sd15_inpaint": "SD15",
+            "flux1_fill": "Flux1",
+            "flux2_klein": "Flux2",
+            "qwen_image": "Qwen",
+        }
+        method_labels = {
+            "pixel_expand": "Pixel",
+            "target_size": "Target",
+        }
 
-        for img_tensor in source_images:
-            batch_idx += 1
-            if len(source_images) > 1:
-                _send_status(unique_id, f"🔄 处理 {batch_idx}/{len(source_images)}...")
-
-            _, orig_h, orig_w, _ = img_tensor.shape
-
-            effective_orig_w = orig_w
-            effective_orig_h = orig_h
-
-            if expand_method == "pixel_expand":
-                left = pixel_left
-                right = pixel_right
-                top = pixel_top
-                bottom = pixel_bottom
-
-                new_w = orig_w + left + right
-                new_h = orig_h + top + bottom
-                new_w = max(64, (new_w // 8) * 8)
-                new_h = max(64, (new_h // 8) * 8)
-
-                left = min(left, new_w - orig_w)
-                right = min(right, new_w - orig_w - left)
-                top = min(top, new_h - orig_h)
-                bottom = min(bottom, new_h - orig_h - top)
-
-                expanded = self._expand_by_pixels(img_tensor, left, right, top, bottom)
-                pad_amounts = {"left": left, "right": right, "top": top, "bottom": bottom}
-
-            else:
-                _send_status(unique_id, f"📐 目标尺寸: {target_width}x{target_height}")
-                expanded, pad_amounts = self._expand_to_target_size(
-                    img_tensor, target_width, target_height, target_scale_mode, target_direction
-                )
-                # 从 pad_amounts 中获取有效原始尺寸
-                effective_orig_w = pad_amounts.get("orig_w", orig_w)
-                effective_orig_h = pad_amounts.get("orig_h", orig_h)
-
-            # 确保尺寸是 8 的倍数（避免张量操作错误）
-            final_h = (expanded.shape[1] // 8) * 8
-            final_w = (expanded.shape[2] // 8) * 8
-
-            if final_h != expanded.shape[1] or final_w != expanded.shape[2]:
-                samples = expanded.movedim(-1, 1)
-                resized = comfy.utils.common_upscale(samples, final_w, final_h, upscale_method, "disabled")
-                expanded = resized.movedim(1, -1)
-
-            _send_status(unique_id, f"🎨 模式: {OUTPAINT_MODES[outpaint_mode]['icon']} {OUTPAINT_MODES[outpaint_mode]['name']}")
-
-            result = self._execute_outpaint(
-                outpaint_mode,
-                expanded.contiguous(),
-                (effective_orig_w, effective_orig_h),
-                pad_amounts,
-                seed + batch_idx - 1,
-                steps,
-                cfg,
-                guidance,
-                sampler_name,
-                scheduler,
-                **kwargs,
+        for mode_id, mode_cfg in OUTPAINT_MODES.items():
+            mode_name = mode_cfg["icon"] + " " + mode_cfg["name"]
+            _send_status(unique_id, f"🔍 检查 {mode_name} 模型...")
+            print(
+                f"\n[GJJ Outpaint] ========== 模式: {mode_id} ({mode_name}) =========="
             )
 
-            results.append(result)
+            # 检查模型是否可用
+            models_ok, model_msg = _validate_mode(
+                mode_id, OUTPAINT_MODES, DOWNLOAD_URL, model_manager
+            )
+            if not models_ok:
+                msg = f"[GJJ Outpaint] ⚠️ 模式 {mode_id} 跳过: {model_msg}"
+                print(f"\033[93m{msg}\033[0m")
+                all_errors.append(
+                    {
+                        "mode": mode_id,
+                        "image_index": "N/A",
+                        "method": "N/A",
+                        "error_type": "ModelMissing",
+                        "error_message": model_msg,
+                    }
+                )
+                continue
 
-        final_images = torch.cat(results, dim=0) if len(results) > 1 else results[0]
+            # 清除旧模型缓存，确保跨模式时重新加载
+            self._model_cache.clear()
+            _free_vram()
+
+            # 获取该模式的默认参数
+            default_params = mode_cfg.get("default_params", {})
+            steps = config.get("steps", default_params.get("steps", 20))
+            cfg_val = config.get("cfg", default_params.get("cfg", 7.0))
+            guidance = config.get("guidance", default_params.get("guidance", 3.5))
+            sampler_name = config.get(
+                "sampler_name", default_params.get("sampler", "euler")
+            )
+            scheduler = config.get(
+                "scheduler", default_params.get("scheduler", "normal")
+            )
+
+            # ============================================================
+            # 第二层：遍历输入图片
+            # ============================================================
+            for img_idx, img_tensor in enumerate(source_images):
+                _, orig_h, orig_w, _ = img_tensor.shape
+                print(
+                    f"[GJJ Outpaint] 图片 {img_idx + 1}/{len(source_images)}: size={orig_w}x{orig_h}"
+                )
+
+                # ============================================================
+                # 第三层：遍历两种扩图方式
+                # ============================================================
+                for method in EXPAND_METHODS:
+                    method_id = method["id"]
+                    method_name = method["icon"] + " " + method["name"]
+                    label = f"{mode_labels.get(mode_id, mode_id)}_{method_labels.get(method_id, method_id)}_{img_idx + 1}"
+                    seed = base_seed + img_idx
+
+                    _send_status(
+                        unique_id,
+                        f"🎨 {mode_name} | {method_name} | 图{img_idx + 1}/{len(source_images)}",
+                    )
+                    print(
+                        f"[GJJ Outpaint] --- {label}: mode={mode_id}, method={method_id}, seed={seed} ---"
+                    )
+
+                    try:
+                        # 计算扩图参数
+                        expanded, pad_amounts, eff_w, eff_h = self._expand_for_mode(
+                            mode_id,
+                            img_tensor,
+                            method_id,
+                            pixel_left,
+                            pixel_right,
+                            pixel_top,
+                            pixel_bottom,
+                            target_width,
+                            target_height,
+                            target_scale_mode,
+                            target_direction,
+                        )
+
+                        # 执行推理
+                        result = self._execute_outpaint(
+                            mode_id,
+                            expanded.contiguous(),
+                            (eff_w, eff_h),
+                            pad_amounts,
+                            seed,
+                            steps,
+                            cfg_val,
+                            guidance,
+                            sampler_name,
+                            scheduler,
+                            mask_expand,
+                            unique_id,
+                            **kwargs,
+                        )
+
+                        print(f"[GJJ Outpaint] ✅ {label}: result shape={result.shape}")
+                        all_results.append(result)
+
+                    except Exception as e:
+                        err_info = {
+                            "mode": mode_id,
+                            "image_index": img_idx + 1,
+                            "method": method_id,
+                            "error_type": type(e).__name__,
+                            "error_message": str(e),
+                        }
+                        all_errors.append(err_info)
+                        error_msg = (
+                            f"\033[91m[GJJ Outpaint] ❌ {label} 失败: "
+                            f"{type(e).__name__}: {e}\033[0m"
+                        )
+                        print(f"\n{error_msg}")
+                        _send_status(
+                            unique_id,
+                            f"❌ {label}: {type(e).__name__}",
+                        )
+                        continue
+
+        # ============================================================
+        # 汇总结果
+        # ============================================================
+        print(f"\n[GJJ Outpaint] {'=' * 60}")
+        print(
+            f"[GJJ Outpaint] 三层循环完成: 成功 {len(all_results)}, 失败 {len(all_errors)}"
+        )
+        for err in all_errors:
+            print(
+                f"[GJJ Outpaint] 🔍 失败: mode={err['mode']} img={err['image_index']} "
+                f"method={err['method']} -> {err['error_type']}: {err['error_message']}"
+            )
+        print(f"[GJJ Outpaint] {'=' * 60}")
+
+        if not all_results:
+            error_str = "; ".join(
+                [
+                    f"[{err['mode']}][图{err['image_index']}][{err['method']}] {err['error_type']}"
+                    for err in all_errors
+                ]
+            )
+            _send_status(unique_id, f"❌ 全部失败: {error_str}")
+            return (torch.zeros((1, 256, 256, 3)),)
+
+        final_images = (
+            torch.cat(all_results, dim=0) if len(all_results) > 1 else all_results[0]
+        )
 
         elapsed = time.time() - start_time
-        _send_status(unique_id, f"✅ 完成 {final_images.shape[2]}x{final_images.shape[1]} ⏱️ {elapsed:.1f}s")
-
-        preview_ui = self.preview_image.save_images(
-            final_images,
-            filename_prefix="GJJ_Outpaint",
-            prompt=kwargs.get("prompt", ""),
-            extra_pnginfo=extra_pnginfo,
+        _send_status(
+            unique_id,
+            f"✅ {final_images.shape[0]}张 {final_images.shape[2]}x{final_images.shape[1]} ⏱️ {elapsed:.1f}s",
         )
-        preview_images = preview_ui.get("ui", {}).get("images", [])
+
+        # ============================================================
+        # 保存图片
+        # ============================================================
+        preview_images = []
+        try:
+            import os
+            from PIL import Image
+            import numpy as np
+
+            output_dir = folder_paths.get_output_directory()
+            os.makedirs(output_dir, exist_ok=True)
+
+            full_output_folder, filename, counter, subfolder, filename_prefix = (
+                folder_paths.get_save_image_path(
+                    "GJJ_Outpaint",
+                    output_dir,
+                    final_images.shape[2],
+                    final_images.shape[1],
+                )
+            )
+
+            print(f"[GJJ Outpaint] 保存图片到: {full_output_folder}")
+            print(f"[GJJ Outpaint] 图片数量: {final_images.shape[0]}")
+
+            for i in range(final_images.shape[0]):
+                img_np = (
+                    (255.0 * final_images[i].cpu().numpy()).round().astype(np.uint8)
+                )
+                img = Image.fromarray(img_np)
+                filename_with_counter = f"{filename}_{counter:05}_.png"
+                filepath = os.path.join(full_output_folder, filename_with_counter)
+                img.save(filepath)
+                preview_images.append(
+                    {
+                        "filename": filename_with_counter,
+                        "subfolder": subfolder,
+                        "type": "output",
+                    }
+                )
+                print(f"[GJJ Outpaint] 已保存: {filename_with_counter}")
+                counter += 1
+        except Exception as e:
+            print(f"[GJJ Outpaint] 保存图片失败: {e}")
+            _send_status(unique_id, f"❌ 保存失败: {str(e)}")
 
         return {
             "ui": {"images": preview_images, "elapsed_time": [elapsed]},
@@ -827,9 +800,9 @@ try:
     @PromptServer.instance.routes.get("/gjj/outpaint_models")
     async def get_outpaint_models(request):
         mode = request.query.get("mode", "sd15_inpaint")
-        node = GJJ_OutpaintStudio()
-        result = node._scan_mode_models(mode)
+        result = _scan_mode_models(mode, OUTPAINT_MODES, model_manager)
         return web.json_response(result)
 
-except Exception:
-    pass
+    print(f"[GJJ Outpaint] API 路由注册成功")
+except Exception as e:
+    print(f"[GJJ Outpaint] API 路由注册失败: {e}")
