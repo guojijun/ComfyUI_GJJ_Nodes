@@ -1,6 +1,5 @@
 import { app } from "/scripts/app.js";
-import { api } from "/scripts/api.js";
-import { GJJ_Utils, queueOnlyCurrentNode } from "./gjj_utils.js";
+import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODE_TYPE = "GJJ_OutpaintStudio";
 const CONFIG_WIDGET_NAME = "outpaint_config";
@@ -238,7 +237,7 @@ function createModeButtons(node, config) {
 			}
 
 			// 更新当前选中的模式
-			node.__gjjConfig = { ...node.__gjjConfig, outpaint_mode: node.__gjjSelectedModes[0] };
+			node.__gjjConfig = { ...node.__gjjConfig, outpaint_mode: node.__gjjSelectedModes[0], selected_modes: [...node.__gjjSelectedModes] };
 			saveConfig(node, node.__gjjConfig);
 
 			// 更新按钮样式
@@ -327,7 +326,7 @@ function createMethodButtons(node, config) {
 			}
 
 			// 更新当前选中的方式
-			node.__gjjConfig = { ...node.__gjjConfig, expand_method: node.__gjjSelectedMethods[0] };
+			node.__gjjConfig = { ...node.__gjjConfig, expand_method: node.__gjjSelectedMethods[0], selected_methods: [...node.__gjjSelectedMethods] };
 			saveConfig(node, node.__gjjConfig);
 
 			// 更新按钮样式
@@ -755,203 +754,11 @@ function createGenerateButton(node) {
 		btn.style.background = "#27404a";
 	});
 
-	let batchState = {
-		isRunning: false,
-		currentIndex: 0,
-		total: 0,
-		combinations: [],
-		pollTimer: null,
-	};
-
-	const log = (color, msg) => {
-		console.log(`%c[GJJ Batch] ${msg}`, `color: ${color}; font-weight: bold;`);
-	};
-
-	const getCombinations = () => {
-		log("#00ff00", "========== 生成组合 ==========");
-
-		const modes = node.__gjjSelectedModes || [node.__gjjConfig?.outpaint_mode || "sd15_inpaint"];
-		const methods = node.__gjjSelectedMethods || [node.__gjjConfig?.expand_method || "pixel_expand"];
-
-		log("#00ffff", `选中的模式: ${JSON.stringify(modes)}`);
-		log("#00ffff", `选中的方法: ${JSON.stringify(methods)}`);
-
-		const combinations = [];
-		for (const mode of modes) {
-			for (const method of methods) {
-				combinations.push({ mode, method });
-				log("#ffff00", `  添加: ${mode} + ${method}`);
-			}
-		}
-
-		log("#00ff00", `组合总数: ${combinations.length}`);
-		return combinations;
-	};
-
-	const updateButtonText = () => {
-		if (!batchState.isRunning || batchState.currentIndex >= batchState.total) {
-			btn.textContent = "🚀 生成图片";
-			return;
-		}
-		const { method, mode } = batchState.combinations[batchState.currentIndex];
-		const methodName = method === "pixel_expand" ? "像素" : "目标";
-		const modeName = OUTPAINT_MODES.find(m => m.id === mode)?.label || mode;
-		btn.textContent = `🚀 ${methodName}-${modeName} (${batchState.currentIndex + 1}/${batchState.total})`;
-	};
-
-	const applyCombination = (combination) => {
-		log("#ff6600", `-------- 应用组合 ${combination.mode} + ${combination.method} --------`);
-
-		node.__gjjConfig = {
-			...node.__gjjConfig,
-			outpaint_mode: combination.mode,
-			expand_method: combination.method,
-		};
-		log("#ff6600", `  设置 outpaint_mode = ${combination.mode}`);
-		log("#ff6600", `  设置 expand_method = ${combination.method}`);
-
-		saveConfig(node, node.__gjjConfig);
-		log("#ff6600", `  配置已保存`);
-
-		if (node.__gjjModeButtons) {
-			node.__gjjModeButtons.updateAllButtonStyles();
-			log("#ff6600", `  模式按钮已更新`);
-		}
-		if (node.__gjjMethodButtons) {
-			node.__gjjMethodButtons.updateAllButtonStyles();
-			log("#ff6600", `  方法按钮已更新`);
-		}
-		if (node.__gjjUpdateParamsVisibility) {
-			node.__gjjUpdateParamsVisibility();
-			log("#ff6600", `  参数可见性已更新`);
-		}
-		if (node.__gjjUpdateModelStatus) {
-			node.__gjjUpdateModelStatus();
-			log("#ff6600", `  模型状态已更新`);
-		}
-	};
-
-	const executeNextCombination = () => {
-		if (!batchState.isRunning) {
-			log("#ff0000", `❌ 批量执行已停止`);
-			return;
-		}
-
-		if (batchState.currentIndex >= batchState.total) {
-			log("#00ff00", `✅ 所有任务执行完成！`);
-			batchState.isRunning = false;
-			batchState.currentIndex = 0;
-			if (batchState.pollTimer) {
-				clearTimeout(batchState.pollTimer);
-				batchState.pollTimer = null;
-			}
-			updateButtonText();
-			return;
-		}
-
-		const combination = batchState.combinations[batchState.currentIndex];
-		log("#00ccff", `========== 执行组合 ${batchState.currentIndex + 1}/${batchState.total}: ${combination.mode} + ${combination.method} ==========`);
-
-		updateButtonText();
-		applyCombination(combination);
-
-		log("#00ccff", `🚀 提交任务到队列...`);
-		app.queuePrompt(0);
-		log("#00ccff", `✅ 任务已提交，等待完成...`);
-
-		// 启动轮询检查队列状态
-		startPolling();
-	};
-
-	const startPolling = () => {
-		if (batchState.pollTimer) {
-			clearTimeout(batchState.pollTimer);
-		}
-
-		batchState.pollTimer = setTimeout(() => {
-			checkQueueStatus();
-		}, 1000);
-	};
-
-	const checkQueueStatus = () => {
-		if (!batchState.isRunning) return;
-
-		try {
-			const queueLen = app.queue?.queue?.length || 0;
-			const isRunning = app.queue?.runningTask !== null;
-			log("#9999ff", `队列状态: 运行中=${isRunning}, 待处理=${queueLen}`);
-
-			if (!isRunning && queueLen === 0) {
-				log("#00ff00", `✅ 当前任务完成`);
-				batchState.currentIndex++;
-				setTimeout(() => {
-					executeNextCombination();
-				}, 500);
-			} else {
-				// 继续轮询
-				startPolling();
-			}
-		} catch (error) {
-			log("#ff0000", `❌ 检查队列状态失败: ${error.message}`);
-			// 发生错误时也继续尝试下一个
-			batchState.currentIndex++;
-			setTimeout(() => {
-				executeNextCombination();
-			}, 500);
-		}
-	};
-
-	const onExecutionSuccess = (event) => {
-		log("#9999ff", `-------- 执行成功 --------`);
-	};
-
-	const onExecutionError = (event) => {
-		log("#ff0000", `-------- 执行失败 --------`);
-	};
-
-	const onExecutionInterrupted = () => {
-		log("#ff0000", `-------- 执行被中断 --------`);
-		if (batchState.pollTimer) {
-			clearTimeout(batchState.pollTimer);
-			batchState.pollTimer = null;
-		}
-		batchState.isRunning = false;
-		batchState.currentIndex = 0;
-		updateButtonText();
-	};
-
-	api.addEventListener("execution_success", onExecutionSuccess);
-	api.addEventListener("execution_error", onExecutionError);
-	api.addEventListener("execution_interrupted", onExecutionInterrupted);
-
 	btn.addEventListener("click", (e) => {
 		e.stopPropagation();
-		log("#ff00ff", "========== 点击生成按钮 ==========");
-
-		batchState.combinations = getCombinations();
-		log("#ff00ff", `组合列表: ${JSON.stringify(batchState.combinations)}`);
-
-		if (batchState.combinations.length <= 1) {
-			log("#ff00ff", `组合数量 <= 1，直接执行`);
-			applyCombination(batchState.combinations[0]);
-			app.queuePrompt(0);
-			return;
-		}
-
-		if (batchState.isRunning) {
-			log("#ff00ff", `当前正在运行，停止批量执行`);
-			batchState.isRunning = false;
-			batchState.currentIndex = 0;
-			updateButtonText();
-			return;
-		}
-
-		log("#ff00ff", `开始批量执行，共 ${batchState.combinations.length} 个任务`);
-		batchState.isRunning = true;
-		batchState.currentIndex = 0;
-		batchState.total = batchState.combinations.length;
-
-		executeNextCombination();
+		// 多选列表已在 mode / method 按钮点击时写入 config 的 selected_modes / selected_methods
+		// 后端会一次性按这些列表执行三层循环
+		app.queuePrompt(0);
 	});
 
 	container.appendChild(btn);
