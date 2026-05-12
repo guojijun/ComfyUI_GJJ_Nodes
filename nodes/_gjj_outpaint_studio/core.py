@@ -1,5 +1,6 @@
 """GJJ 扩图工具 - 核心功能模块"""
 
+import json
 import torch
 
 # ================================================
@@ -8,11 +9,21 @@ import torch
 
 
 def _parse_config(config_str: str) -> dict:
-    """解析配置字符串。"""
+    """解析配置字符串（优先 JSON，回退 key=value 格式）。"""
     result = {}
     if not config_str:
         return result
 
+    # 优先 JSON 解析（前端 saveConfig 存 JSON 字符串）
+    try:
+        parsed = json.loads(config_str)
+        if isinstance(parsed, dict):
+            result = parsed
+            return result
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # 回退：key=value 逗号分隔格式（兼容旧工作流或手动配置）
     try:
         for item in config_str.split(","):
             item = item.strip()
