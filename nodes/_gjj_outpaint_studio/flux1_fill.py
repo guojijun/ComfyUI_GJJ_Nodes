@@ -200,11 +200,11 @@ def execute_flux1_workflow(
     try:
         inpaint_cond = InpaintModelConditioning()
         cond_out = inpaint_cond.encode(
-            positive,
-            negative,
-            padded_image,  # pixels
-            vae,
-            raw_mask,
+            positive=positive,
+            negative=negative,
+            vae=vae,
+            pixels=padded_image,
+            mask=raw_mask,
             noise_mask=False,
         )
         # encode 返回 (positive, negative, latent) 三元组

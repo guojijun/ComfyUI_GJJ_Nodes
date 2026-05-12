@@ -522,10 +522,18 @@ class GJJ_OutpaintStudio:
         extra_pnginfo=None,
         **kwargs,
     ):
-        """执行扩图操作（三层循环：模式 → 图片 → 扩图方式）。"""
+        """执行扩图操作（单层循环：遍历输入图片）。
+
+        模式选择和扩图方式由前端 config 中的 outpaint_mode / expand_method 控制。
+        前端通过反复修改 config 重新提交队列来实现多模式/多方式的批量执行。
+        """
         start_time = time.time()
 
         config = _parse_config(outpaint_config)
+
+        # 前端选定要执行的单个模式和方式（由 JS 批量调度逐次提交）
+        outpaint_mode = config.get("outpaint_mode", "sd15_inpaint")
+        expand_method = config.get("expand_method", "pixel_expand")
 
         pixel_left = config.get("pixel_left", 0)
         pixel_right = config.get("pixel_right", 0)
@@ -563,154 +571,134 @@ class GJJ_OutpaintStudio:
 
         _send_status(unique_id, f"🖼️ 检测到 {len(source_images)} 张图片")
         print(
-            f"[GJJ Outpaint] 三层循环开始: 4模式 × {len(source_images)}图 × 2方式 = {4 * len(source_images) * 2} 次推理"
+            f"[GJJ Outpaint] 单次执行: 模式={outpaint_mode}, 方式={expand_method}, {len(source_images)} 张图片"
         )
 
         # ============================================================
-        # 三层循环
+        # 解析当前模式和方法标签
+        # ============================================================
+        mode_cfg = OUTPAINT_MODES.get(outpaint_mode)
+        if mode_cfg is None:
+            raise RuntimeError(f"未知扩图模式: {outpaint_mode}")
+
+        method_label = expand_method
+        method_icon_map = {"pixel_expand": "📏", "target_size": "🎯"}
+        for m in EXPAND_METHODS:
+            if m["id"] == expand_method:
+                method_label = m["icon"] + " " + m["name"]
+                break
+
+        mode_name = mode_cfg["icon"] + " " + mode_cfg["name"]
+
+        # ============================================================
+        # 检查模型是否可用
+        # ============================================================
+        _send_status(unique_id, f"🔍 检查 {mode_name} 模型...")
+        models_ok, model_msg = _validate_mode(
+            outpaint_mode, OUTPAINT_MODES, DOWNLOAD_URL, model_manager
+        )
+        if not models_ok:
+            raise RuntimeError(f"模式 {outpaint_mode} 缺少模型: {model_msg}")
+
+        # 清除旧模型缓存
+        self._model_cache.clear()
+        _free_vram()
+
+        # 获取该模式的默认参数
+        default_params = mode_cfg.get("default_params", {})
+        steps = config.get("steps", default_params.get("steps", 20))
+        cfg_val = config.get("cfg", default_params.get("cfg", 7.0))
+        guidance = config.get("guidance", default_params.get("guidance", 3.5))
+        sampler_name = config.get(
+            "sampler_name", default_params.get("sampler", "euler")
+        )
+        scheduler = config.get("scheduler", default_params.get("scheduler", "normal"))
+
+        # ============================================================
+        # 单层循环：遍历输入图片
         # ============================================================
         all_results = []  # 累加所有结果
         all_errors = []  # 累加所有错误信息
-        mode_labels = {
-            "sd15_inpaint": "SD15",
-            "flux1_fill": "Flux1",
-            "flux2_klein": "Flux2",
-            "qwen_image": "Qwen",
-        }
-        method_labels = {
-            "pixel_expand": "Pixel",
-            "target_size": "Target",
-        }
 
-        for mode_id, mode_cfg in OUTPAINT_MODES.items():
-            mode_name = mode_cfg["icon"] + " " + mode_cfg["name"]
-            _send_status(unique_id, f"🔍 检查 {mode_name} 模型...")
+        for img_idx, img_tensor in enumerate(source_images):
+            _, orig_h, orig_w, _ = img_tensor.shape
             print(
-                f"\n[GJJ Outpaint] ========== 模式: {mode_id} ({mode_name}) =========="
+                f"[GJJ Outpaint] 图片 {img_idx + 1}/{len(source_images)}: size={orig_w}x{orig_h}"
             )
 
-            # 检查模型是否可用
-            models_ok, model_msg = _validate_mode(
-                mode_id, OUTPAINT_MODES, DOWNLOAD_URL, model_manager
+            label = f"{outpaint_mode}_{expand_method}_{img_idx + 1}"
+            seed = base_seed + img_idx
+
+            _send_status(
+                unique_id,
+                f"🎨 {mode_name} | {method_label} | 图{img_idx + 1}/{len(source_images)}",
             )
-            if not models_ok:
-                msg = f"[GJJ Outpaint] ⚠️ 模式 {mode_id} 跳过: {model_msg}"
-                print(f"\033[93m{msg}\033[0m")
-                all_errors.append(
-                    {
-                        "mode": mode_id,
-                        "image_index": "N/A",
-                        "method": "N/A",
-                        "error_type": "ModelMissing",
-                        "error_message": model_msg,
-                    }
+            print(
+                f"[GJJ Outpaint] --- {label}: mode={outpaint_mode}, method={expand_method}, seed={seed} ---"
+            )
+
+            try:
+                # 计算扩图参数
+                expanded, pad_amounts, eff_w, eff_h = self._expand_for_mode(
+                    outpaint_mode,
+                    img_tensor,
+                    expand_method,
+                    pixel_left,
+                    pixel_right,
+                    pixel_top,
+                    pixel_bottom,
+                    target_width,
+                    target_height,
+                    target_scale_mode,
+                    target_direction,
+                )
+
+                # 执行推理
+                result = self._execute_outpaint(
+                    outpaint_mode,
+                    expanded.contiguous(),
+                    (eff_w, eff_h),
+                    pad_amounts,
+                    seed,
+                    steps,
+                    cfg_val,
+                    guidance,
+                    sampler_name,
+                    scheduler,
+                    mask_expand,
+                    unique_id,
+                    **kwargs,
+                )
+
+                print(f"[GJJ Outpaint] ✅ {label}: result shape={result.shape}")
+                all_results.append(result)
+
+            except Exception as e:
+                err_info = {
+                    "mode": outpaint_mode,
+                    "image_index": img_idx + 1,
+                    "method": expand_method,
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                }
+                all_errors.append(err_info)
+                error_msg = (
+                    f"\033[91m[GJJ Outpaint] ❌ {label} 失败: "
+                    f"{type(e).__name__}: {e}\033[0m"
+                )
+                print(f"\n{error_msg}")
+                _send_status(
+                    unique_id,
+                    f"❌ {label}: {type(e).__name__}",
                 )
                 continue
-
-            # 清除旧模型缓存，确保跨模式时重新加载
-            self._model_cache.clear()
-            _free_vram()
-
-            # 获取该模式的默认参数
-            default_params = mode_cfg.get("default_params", {})
-            steps = config.get("steps", default_params.get("steps", 20))
-            cfg_val = config.get("cfg", default_params.get("cfg", 7.0))
-            guidance = config.get("guidance", default_params.get("guidance", 3.5))
-            sampler_name = config.get(
-                "sampler_name", default_params.get("sampler", "euler")
-            )
-            scheduler = config.get(
-                "scheduler", default_params.get("scheduler", "normal")
-            )
-
-            # ============================================================
-            # 第二层：遍历输入图片
-            # ============================================================
-            for img_idx, img_tensor in enumerate(source_images):
-                _, orig_h, orig_w, _ = img_tensor.shape
-                print(
-                    f"[GJJ Outpaint] 图片 {img_idx + 1}/{len(source_images)}: size={orig_w}x{orig_h}"
-                )
-
-                # ============================================================
-                # 第三层：遍历两种扩图方式
-                # ============================================================
-                for method in EXPAND_METHODS:
-                    method_id = method["id"]
-                    method_name = method["icon"] + " " + method["name"]
-                    label = f"{mode_labels.get(mode_id, mode_id)}_{method_labels.get(method_id, method_id)}_{img_idx + 1}"
-                    seed = base_seed + img_idx
-
-                    _send_status(
-                        unique_id,
-                        f"🎨 {mode_name} | {method_name} | 图{img_idx + 1}/{len(source_images)}",
-                    )
-                    print(
-                        f"[GJJ Outpaint] --- {label}: mode={mode_id}, method={method_id}, seed={seed} ---"
-                    )
-
-                    try:
-                        # 计算扩图参数
-                        expanded, pad_amounts, eff_w, eff_h = self._expand_for_mode(
-                            mode_id,
-                            img_tensor,
-                            method_id,
-                            pixel_left,
-                            pixel_right,
-                            pixel_top,
-                            pixel_bottom,
-                            target_width,
-                            target_height,
-                            target_scale_mode,
-                            target_direction,
-                        )
-
-                        # 执行推理
-                        result = self._execute_outpaint(
-                            mode_id,
-                            expanded.contiguous(),
-                            (eff_w, eff_h),
-                            pad_amounts,
-                            seed,
-                            steps,
-                            cfg_val,
-                            guidance,
-                            sampler_name,
-                            scheduler,
-                            mask_expand,
-                            unique_id,
-                            **kwargs,
-                        )
-
-                        print(f"[GJJ Outpaint] ✅ {label}: result shape={result.shape}")
-                        all_results.append(result)
-
-                    except Exception as e:
-                        err_info = {
-                            "mode": mode_id,
-                            "image_index": img_idx + 1,
-                            "method": method_id,
-                            "error_type": type(e).__name__,
-                            "error_message": str(e),
-                        }
-                        all_errors.append(err_info)
-                        error_msg = (
-                            f"\033[91m[GJJ Outpaint] ❌ {label} 失败: "
-                            f"{type(e).__name__}: {e}\033[0m"
-                        )
-                        print(f"\n{error_msg}")
-                        _send_status(
-                            unique_id,
-                            f"❌ {label}: {type(e).__name__}",
-                        )
-                        continue
 
         # ============================================================
         # 汇总结果
         # ============================================================
         print(f"\n[GJJ Outpaint] {'=' * 60}")
         print(
-            f"[GJJ Outpaint] 三层循环完成: 成功 {len(all_results)}, 失败 {len(all_errors)}"
+            f"[GJJ Outpaint] 单次执行完成: 成功 {len(all_results)}, 失败 {len(all_errors)}"
         )
         for err in all_errors:
             print(

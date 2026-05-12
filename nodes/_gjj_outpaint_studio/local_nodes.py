@@ -10,6 +10,7 @@ import comfy.model_management
 
 class ConditioningZeroOut:
     """将 conditioning 值归零"""
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -39,6 +40,7 @@ class ConditioningZeroOut:
 
 class InpaintModelConditioning:
     """图像修复模型条件处理"""
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -57,13 +59,13 @@ class InpaintModelConditioning:
     FUNCTION = "encode"
     CATEGORY = "conditioning/inpaint"
 
-    def encode(self, positive, negative, pixels, vae, mask, noise_mask=True):
+    def encode(self, positive, negative, vae, pixels, mask, noise_mask=True):
         x = (pixels.shape[1] // 8) * 8
         y = (pixels.shape[2] // 8) * 8
         mask = torch.nn.functional.interpolate(
             mask.reshape((-1, 1, mask.shape[-2], mask.shape[-1])),
             size=(pixels.shape[1], pixels.shape[2]),
-            mode="bilinear"
+            mode="bilinear",
         )
 
         orig_pixels = pixels
@@ -71,8 +73,8 @@ class InpaintModelConditioning:
         if pixels.shape[1] != x or pixels.shape[2] != y:
             x_offset = (pixels.shape[1] % 8) // 2
             y_offset = (pixels.shape[2] % 8) // 2
-            pixels = pixels[:, x_offset:x + x_offset, y_offset:y + y_offset, :]
-            mask = mask[:, :, x_offset:x + x_offset, y_offset:y + y_offset]
+            pixels = pixels[:, x_offset : x + x_offset, y_offset : y + y_offset, :]
+            mask = mask[:, :, x_offset : x + x_offset, y_offset : y + y_offset]
 
         m = (1.0 - mask.round()).squeeze(1)
         for i in range(3):
@@ -92,7 +94,7 @@ class InpaintModelConditioning:
         for conditioning in [positive, negative]:
             c = node_helpers.conditioning_set_values(
                 conditioning,
-                {"concat_latent_image": concat_latent, "concat_mask": mask}
+                {"concat_latent_image": concat_latent, "concat_mask": mask},
             )
             out.append(c)
         return (out[0], out[1], out_latent)
@@ -100,12 +102,16 @@ class InpaintModelConditioning:
 
 class FluxGuidance:
     """Flux 引导值设置"""
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "conditioning": ("CONDITIONING",),
-                "guidance": ("FLOAT", {"default": 3.5, "min": 0.0, "max": 100.0, "step": 0.1}),
+                "guidance": (
+                    "FLOAT",
+                    {"default": 3.5, "min": 0.0, "max": 100.0, "step": 0.1},
+                ),
             }
         }
 
@@ -120,6 +126,7 @@ class FluxGuidance:
 
 class FluxDisableGuidance:
     """禁用 Flux 引导"""
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -137,12 +144,16 @@ class FluxDisableGuidance:
 
 class DifferentialDiffusion:
     """差分扩散"""
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "model": ("MODEL",),
-                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "strength": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
             }
         }
 
@@ -164,7 +175,9 @@ class DifferentialDiffusion:
             if step_sigmas is not None and len(step_sigmas) > 0:
                 sigma_from = step_sigmas[0]
                 sigma_to = step_sigmas[-1]
-                current_ts = inner_model.model_sampling.timestep(sigma[0] if isinstance(sigma, (list, torch.Tensor)) else sigma)
+                current_ts = inner_model.model_sampling.timestep(
+                    sigma[0] if isinstance(sigma, (list, torch.Tensor)) else sigma
+                )
                 ts_from = inner_model.model_sampling.timestep(sigma_from)
                 ts_to = inner_model.model_sampling.timestep(sigma_to)
                 threshold = (current_ts - ts_to) / (ts_from - ts_to)

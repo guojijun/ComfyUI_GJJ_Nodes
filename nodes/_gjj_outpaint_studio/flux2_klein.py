@@ -144,6 +144,9 @@ def execute_flux2_workflow(
         joined_image = _unwrap_tensor(
             join_node.join_image_with_alpha(empty_image, raw_mask)
         )
+        # JoinImageWithAlpha 输出 4 通道 (RGBA)，取前 3 通道匹配 RGB
+        if joined_image.shape[-1] == 4:
+            joined_image = joined_image[..., :3]
         print(f"[Flux2] JoinImageWithAlpha 完成")
     except Exception as e:
         tb = traceback.extract_tb(e.__traceback__)

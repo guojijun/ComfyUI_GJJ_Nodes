@@ -61,7 +61,7 @@ class InpaintModelConditioning:
     FUNCTION = "encode"
     CATEGORY = "conditioning/inpaint"
 
-    def encode(self, positive, negative, pixels, vae, mask, noise_mask=True):
+    def encode(self, positive, negative, vae, pixels, mask, noise_mask=True):
         x = (pixels.shape[1] // 8) * 8
         y = (pixels.shape[2] // 8) * 8
         mask = torch.nn.functional.interpolate(
