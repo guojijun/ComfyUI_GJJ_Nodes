@@ -767,7 +767,8 @@ function createGenerateButton(node) {
 	return container;
 }
 
-function setupNode(node) {
+function setupNodeUI(node) {
+	// UI 只创建一次
 	if (node.__gjjOutpaintSetup) return;
 	node.__gjjOutpaintSetup = true;
 
@@ -784,7 +785,7 @@ function setupNode(node) {
 		"box-sizing:border-box",
 	].join(";");
 
-	const mainWidget = node.addDOMWidget?.("gjj_outpaint_main", "gjj_outpaint_main", mainWrap, {
+	node.addDOMWidget?.("gjj_outpaint_main", "gjj_outpaint_main", mainWrap, {
 		hideOnZoom: false,
 		getHeight: () => 600,
 	});
@@ -814,20 +815,20 @@ function setupNode(node) {
 
 	const statusData = createStatusBar(node);
 	node.__gjjOutpaintStatusBar = statusData;
-	const statusWidget = node.addDOMWidget?.("gjj_outpaint_status", "gjj_outpaint_status", statusData.widget, {
+	node.addDOMWidget?.("gjj_outpaint_status", "gjj_outpaint_status", statusData.widget, {
 		hideOnZoom: false,
 		getHeight: () => 60,
 	});
 
 	const previewData = createPreviewPanel(node);
 	node.__gjjOutpaintPreview = previewData;
-	const previewWidget = node.addDOMWidget?.("gjj_outpaint_preview", "gjj_outpaint_preview", previewData.widget, {
+	node.addDOMWidget?.("gjj_outpaint_preview", "gjj_outpaint_preview", previewData.widget, {
 		hideOnZoom: false,
 		getHeight: () => 180,
 	});
 
 	const generateBtn = createGenerateButton(node);
-	const generateWidget = node.addDOMWidget?.("gjj_outpaint_generate", "gjj_outpaint_generate", generateBtn, {
+	node.addDOMWidget?.("gjj_outpaint_generate", "gjj_outpaint_generate", generateBtn, {
 		hideOnZoom: false,
 		getHeight: () => 60,
 	});
@@ -838,7 +839,6 @@ function setupNode(node) {
 		const isFlux = ["flux1_fill", "flux2_klein", "qwen_image"].includes(cfg.outpaint_mode);
 		const isPixel = cfg.expand_method === "pixel_expand";
 
-		// 更新像素/目标部分的显示
 		if (paramsData.elements.pixelExpandRows) {
 			for (const row of paramsData.elements.pixelExpandRows) {
 				row.style.display = isPixel ? "flex" : "none";
@@ -850,7 +850,6 @@ function setupNode(node) {
 			}
 		}
 
-		// 更新 CFG/调度器/Guidance
 		if (paramsData.elements.cfgRow) {
 			paramsData.elements.cfgRow.style.display = isFlux ? "none" : "flex";
 		}
@@ -873,7 +872,36 @@ function setupNode(node) {
 		node.__gjjMethodButtons.updateAllButtonStyles();
 	};
 
-	// 初始更新
+	node.__gjjUpdateParamsVisibility();
+	node.__gjjUpdateModelStatus();
+
+	refreshNode(node);
+}
+
+// onConfigure 时 widget 值已从 workflow JSON 恢复，需要重新读取并更新 UI 状态
+function refreshConfigFromWidget(node) {
+	if (!node.__gjjOutpaintSetup) return; // UI 还没创建，等 onNodeCreated 处理
+
+	const config = parseConfig(node);
+	node.__gjjConfig = config;
+
+	// 重新初始化多选列表
+	node.__gjjSelectedModes =
+		config.selected_modes?.length
+			? [...config.selected_modes]
+			: [config.outpaint_mode];
+
+	node.__gjjSelectedMethods =
+		config.selected_methods?.length
+			? [...config.selected_methods]
+			: [config.expand_method];
+
+	// 写回 config（补齐 selected_modes / selected_methods 以防 config 中没有）
+	node.__gjjConfig = { ...node.__gjjConfig, selected_modes: [...node.__gjjSelectedModes], selected_methods: [...node.__gjjSelectedMethods] };
+	saveConfig(node, node.__gjjConfig);
+
+	// 刷新 UI
+	node.__gjjUpdateButtons();
 	node.__gjjUpdateParamsVisibility();
 	node.__gjjUpdateModelStatus();
 
@@ -917,14 +945,16 @@ app.registerExtension({
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function () {
 			const result = originalOnNodeCreated?.apply(this, arguments);
-			setupNode(this);
+			setupNodeUI(this);
 			return result;
 		};
 
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function () {
 			const result = originalOnConfigure?.apply(this, arguments);
-			setupNode(this);
+			setupNodeUI(this);
+			// onConfigure 时 widget 值已从 workflow JSON 恢复，刷新 UI
+			refreshConfigFromWidget(this);
 			return result;
 		};
 
@@ -951,7 +981,7 @@ app.registerExtension({
 		setTimeout(() => {
 			for (const node of app.graph?._nodes || []) {
 				if (node.type === TARGET_NODE_TYPE) {
-					setupNode(node);
+					setupNodeUI(node);
 				}
 			}
 		}, 200);
