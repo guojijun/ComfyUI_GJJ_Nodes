@@ -113,7 +113,6 @@ function hideConfigWidget(node) {
 	const widget = node.widgets?.find((w) => w.name === CONFIG_WIDGET_NAME);
 	if (!widget) return;
 	widget.hidden = true;
-	widget.type = "hidden";
 	widget.computeSize = () => [0, 0];
 	widget.draw = () => {};
 	if (widget.element) {
