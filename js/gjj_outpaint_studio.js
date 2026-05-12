@@ -186,10 +186,11 @@ function createModeButtons(node, config) {
 
 	let buttons = [];
 
-	// 初始化多选状态
-	if (!node.__gjjSelectedModes) {
-		node.__gjjSelectedModes = [config.outpaint_mode];
-	}
+	// 初始化多选状态（从 config 恢复，避免每次打开工作流丢失）
+	node.__gjjSelectedModes =
+		config.selected_modes?.length
+			? [...config.selected_modes]
+			: [config.outpaint_mode];
 
 	for (const mode of OUTPAINT_MODES) {
 		const btn = document.createElement("button");
@@ -275,10 +276,11 @@ function createMethodButtons(node, config) {
 
 	let buttons = [];
 
-	// 初始化多选状态
-	if (!node.__gjjSelectedMethods) {
-		node.__gjjSelectedMethods = [config.expand_method];
-	}
+	// 初始化多选状态（从 config 恢复，避免每次打开工作流丢失）
+	node.__gjjSelectedMethods =
+		config.selected_methods?.length
+			? [...config.selected_methods]
+			: [config.expand_method];
 
 	for (const method of EXPAND_METHODS) {
 		const btn = document.createElement("button");
@@ -772,8 +774,8 @@ function setupNode(node) {
 
 	hideConfigWidget(node);
 	const config = parseConfig(node);
-	node.__gjjConfig = config;
-	saveConfig(node, config);
+	node.__gjjConfig = { ...config, selected_modes: [...node.__gjjSelectedModes], selected_methods: [...node.__gjjSelectedMethods] };
+	saveConfig(node, node.__gjjConfig);
 
 	const mainWrap = document.createElement("div");
 	mainWrap.style.cssText = [
