@@ -28,6 +28,9 @@ from .common_utils.model_loader import (
 	DEFAULT_LIGHTNING_LORA,
 	gjjutils_apply_cfg_norm as _apply_cfg_norm,
 	gjjutils_patch_model_sampling as _patch_model_sampling,
+	gjjutils_load_model,
+	gjjutils_load_clip_from_names,
+	gjjutils_load_vae,
 )
 from .common_utils.model_family import (
 	DEFAULT_CLIP_NAME,
@@ -45,9 +48,6 @@ from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
 from .gjj_multi_lora_chain import normalize_lora_chain_data
 
 
-# ============================================================================
-# 本地辅助函数（从 gjj_lazy_Image_studio 迁移）
-# ============================================================================
 
 def _safe_filename_list(category: str) -> list[str]:
 	"""安全获取文件名列表。"""
@@ -302,6 +302,164 @@ CAPTION_PADDING_Y = 6
 DEFAULT_SAVE_PREFIX = "主体多视图"
 MAX_SAVE_FILENAME_LENGTH = 96
 EMPTY_GRID_SLOT_PENALTY = 2.0
+
+
+# ============================================================================
+# 本地辅助函数（从 gjj_lazy_Image_studio 迁移）
+# ============================================================================
+
+def _resolve_effective_steps(
+	requested_steps: int,
+	preset: dict[str, Any],
+	lora_1_name: str = "",
+	lora_1_strength: float = 0.0,
+	lora_2_name: str = "",
+	lora_2_strength: float = 0.0,
+) -> int:
+	"""解析有效步数。"""
+	base_steps = preset.get("base_steps")
+	if base_steps is not None:
+		return int(base_steps)
+	return int(requested_steps)
+
+
+def _encode_multi_image_edit(
+	clip,
+	vae,
+	prompt: str,
+	negative_prompt: str,
+	main_image_index: int,
+	pairs: list[dict[str, Any]],
+	main_mask=None,
+	main_long_edge: int = 1024,
+	vl_long_edge: int = 512,
+	target_width: int = 1024,
+	target_height: int = 1024,
+):
+	"""编码多图编辑条件。"""
+	from nodes import node_helpers
+
+	# 限制最大参考图数量以避免OOM
+	MAX_REFERENCE_IMAGES = 5
+	if len(pairs) > MAX_REFERENCE_IMAGES:
+		print(
+			f"[WARNING] 多图编辑参考图数量 ({len(pairs)}) 超过最大限制 ({MAX_REFERENCE_IMAGES})，仅使用前 {MAX_REFERENCE_IMAGES} 张"
+		)
+		# 确保主图在限制范围内
+		main_slot = max(0, min(len(pairs) - 1, int(main_image_index) - 1))
+		if main_slot >= MAX_REFERENCE_IMAGES:
+			# 如果主图超出限制，将其包含在前MAX_REFERENCE_IMAGES张中
+			selected_pairs = [pairs[main_slot]] + pairs[: MAX_REFERENCE_IMAGES - 1]
+		else:
+			selected_pairs = pairs[:MAX_REFERENCE_IMAGES]
+		pairs = selected_pairs
+
+	valid_length = len(pairs)
+	main_slot = max(0, min(valid_length - 1, int(main_image_index) - 1))
+	image_prompt = ""
+	main_ref_latent = None
+	noise_mask = None
+	vl_images: list[torch.Tensor] = []
+
+	# 降低VL处理分辨率以节省显存
+	effective_vl_long_edge = min(vl_long_edge, 384)
+
+	for slot, pair in enumerate(pairs):
+		image = pair["image"]
+		is_main = slot == main_slot
+		if is_main:
+			processed_image, prepared_mask, _ = _prepare_primary_image_for_target(
+				image, int(target_width), int(target_height), main_mask
+			)
+			main_ref_latent = vae.encode(processed_image[:, :, :, :3])
+			noise_mask = prepared_mask
+			vl_image, _ignore_mask, _ignore_outpaint = (
+				_prepare_primary_image_for_target(
+					processed_image,
+					int(effective_vl_long_edge),
+					int(effective_vl_long_edge),
+					None,
+				)
+			)
+		else:
+			vl_image, _ignore_mask, _ignore_outpaint = (
+				_prepare_primary_image_for_target(
+					image,
+					int(effective_vl_long_edge),
+					int(effective_vl_long_edge),
+					None,
+				)
+			)
+		vl_images.append(vl_image[:, :, :, :3])
+		image_prompt += f"Picture {slot + 1}: "
+
+		# 及时清理不需要的中间变量
+		del vl_image
+
+	if main_ref_latent is None:
+		raise RuntimeError("主图参考 latent 生成失败，请检查主图输入是否有效。")
+	full_prompt = image_prompt + str(prompt or "")
+	tokens = clip.tokenize(full_prompt, images=vl_images)
+	conditioning = clip.encode_from_tokens_scheduled(tokens)
+	positive = node_helpers.conditioning_set_values(
+		conditioning, {"reference_latents": [main_ref_latent]}, append=True
+	)
+	negative = [[torch.zeros_like(positive[0][0]), positive[0][1]]] if not str(negative_prompt or "").strip() else clip.encode_from_tokens_scheduled(clip.tokenize(str(negative_prompt)))
+	latent_out = {"samples": main_ref_latent}
+	if noise_mask is not None:
+		latent_out["noise_mask"] = noise_mask
+
+	# 清理VL图像列表以释放显存
+	del vl_images
+
+	return positive, negative, latent_out
+
+
+def _build_latent(
+	vae,
+	width: int,
+	height: int,
+	batch_size: int,
+	image_pairs: list[dict[str, Any]],
+	mask,
+	grow_mask_by: int,
+	preset: dict[str, Any],
+):
+	"""构建 latent。"""
+	from nodes import EmptyLatentImage, VAEEncode, VAEEncodeForInpaint
+
+	# 检查是否为Flux2模型（32通道）
+	is_flux2_model = False
+	clip_type = preset.get("clip_type", "stable_diffusion")
+	unet_name = preset.get("unet_name", "")
+
+	# 通过UNET名称判断是否为Flux2模型
+	normalized_unet = _normalize_text(unet_name)
+	if "flux2" in normalized_unet:
+		is_flux2_model = True
+
+	# 或者通过clip_type判断
+	if _normalize_text(clip_type) == "flux2":
+		is_flux2_model = True
+
+	if not image_pairs:
+		if is_flux2_model:
+			try:
+				from nodes import EmptyFlux2LatentImage
+				latent_dict = EmptyFlux2LatentImage(int(width), int(height), int(batch_size))
+				return latent_dict
+			except Exception:
+				pass
+		return EmptyLatentImage().generate(int(width), int(height), int(batch_size))[0]
+
+	main_slot = max(0, min(len(image_pairs) - 1, 0))
+	image = image_pairs[main_slot]["image"]
+	prepared_image, prepared_mask, use_outpaint = _prepare_primary_image_for_target(
+		image, int(width), int(height), mask
+	)
+	if prepared_mask is not None and (use_outpaint or mask is not None):
+		return VAEEncodeForInpaint().encode(vae, prepared_image, prepared_mask, int(grow_mask_by))[0]
+	return VAEEncode().encode(vae, prepared_image)[0]
 
 
 def _send_status(unique_id: Any, text: str) -> None:
@@ -1045,6 +1203,65 @@ def _best_fixed_grid(
 	)
 
 
+def _make_character_asset_collage(images: list[torch.Tensor], captions: list[str]) -> torch.Tensor:
+	"""创建人物资产 1x4 横向长图拼接。
+	第一张图保持原图比例，后三张裁剪为竖版构图（9:16）。
+	后三张图采用中心裁剪策略，从生成的方形图片中裁出竖版中心区域。
+	"""
+	if len(images) != 4:
+		# 如果不是4张图，使用默认拼接方式
+		return _make_squareish_collage(images, captions)
+
+	bchw_images = [image[:1].movedim(-1, 1) for image in images]
+
+	# 统一所有图片的高度（以第一张图为准）
+	cell_height = int(bchw_images[0].shape[2])
+
+	# 第一张图：保持原始宽高比，不裁剪
+	first_cell_width = int(bchw_images[0].shape[3])
+	fitted_first = bchw_images[0]
+
+	# 后三张图：裁剪为竖版（9:16）
+	# 策略：先缩放到统一高度，然后从中心裁剪出竖版宽度
+	portrait_ratio = 9.0 / 16.0
+	portrait_cell_width = int(cell_height * portrait_ratio)
+
+	fitted_images = [fitted_first]  # 第一张图
+	for i in range(1, 4):
+		# 先缩放到统一高度，保持原始宽高比
+		scaled = _fit_bchw_to_height(bchw_images[i], cell_height)
+		# 从缩放后的图片中心裁剪出竖版宽度
+		original_width = int(scaled.shape[3])
+		if original_width > portrait_cell_width:
+			# 从中心裁剪，保留人物主体
+			crop_start = (original_width - portrait_cell_width) // 2
+			fitted = scaled[:, :, :, crop_start:crop_start + portrait_cell_width]
+		else:
+			# 如果宽度不够，使用原始缩放后的图片（不拉伸）
+			fitted = scaled
+		fitted_images.append(fitted)
+
+	# 计算画布尺寸：1行4列，横向排列
+	total_width = first_cell_width + portrait_cell_width * 3
+	total_height = cell_height + CAPTION_HEIGHT
+	canvas = np.ones((total_height, total_width, 3), dtype=np.float32)
+	font = _load_caption_font(18)
+
+	# 排列第一张图（保持原比例）
+	_paste_bchw_in_cell(canvas, fitted_images[0], 0, 0, first_cell_width, cell_height)
+	caption_text = str(captions[0] if len(captions) > 0 else "视图 1")
+	_draw_caption_on_canvas(canvas, cell_height, 0, first_cell_width, caption_text, font)
+
+	# 横向排列后三张图（竖版构图，居中显示）
+	for index in range(1, 4):
+		left = first_cell_width + (index - 1) * portrait_cell_width
+		_paste_bchw_in_cell(canvas, fitted_images[index], 0, left, portrait_cell_width, cell_height)
+		caption_text = str(captions[index] if len(captions) > index else f"视图 {index + 1}")
+		_draw_caption_on_canvas(canvas, cell_height, left, portrait_cell_width, caption_text, font)
+
+	return torch.from_numpy(canvas).unsqueeze(0)
+
+
 def _make_five_view_collage(images: list[torch.Tensor], captions: list[str]) -> torch.Tensor:
 	bchw_images = [image[:1].movedim(-1, 1) for image in images]
 	right_images = bchw_images[1:]
@@ -1139,6 +1356,8 @@ def _make_squareish_collage(images: list[torch.Tensor], captions: list[str], tar
 
 
 class FlexibleMultiViewInputType(dict):
+	"""允许节点接收动态数量与动态类型的可选输入。"""
+
 	def __init__(self, data: dict[str, Any] | None = None):
 		super().__init__()
 		self.data = data or {}
@@ -1176,7 +1395,7 @@ class GJJ_CharacterMultiViewStudio:
 		"qwen edit 2511",
 	]
 	RETURN_TYPES = ("IMAGE", GJJ_BATCH_IMAGE_TYPE)
-	RETURN_NAMES = ("多视图拼接图", "单图批量图片")
+	RETURN_NAMES = ("👤 多视图拼接图", "单图批量图片")
 	OUTPUT_TOOLTIPS = (
 		"自动拼接后的多视图成品图。",
 		"按视角顺序输出的 GJJ 专用批量图片，可直接接入批量图片输入接口。",
@@ -1191,13 +1410,6 @@ class GJJ_CharacterMultiViewStudio:
 		default_preset = _match_multiview_family(DEFAULT_UNET_NAME)
 		return {
 			"required": {
-				"main_image": (
-					"IMAGE",
-					{
-						"display_name": "主图",
-						"tooltip": "主体主参考图，必选。节点会始终以这张图作为类别、外观与风格一致性的主参考。",
-					},
-				),
 				"base_prompt": (
 					"STRING",
 					{
@@ -1302,6 +1514,13 @@ class GJJ_CharacterMultiViewStudio:
 			},
 			"optional": FlexibleMultiViewInputType(
 				{
+					"main_image": (
+						"GJJ_BATCH_IMAGE,IMAGE",
+						{
+							"display_name": "👤 主图",
+							"tooltip": "主体主参考图，必选。支持 GJJ_BATCH_IMAGE 和 IMAGE 两种类型，节点会始终以这张图作为类别、外观与风格一致性的主参考。",
+						},
+					),
 					"action_image_01": (
 						"IMAGE",
 						{
@@ -1391,7 +1610,7 @@ class GJJ_CharacterMultiViewStudio:
 		lora_chain_config: str = "",
 	):
 		"""应用 LoRA 到模型和 CLIP。"""
-		from .gjj_multi_lora_chain import apply_lora_to_model_and_clip, apply_lora_chain_config
+		from .gjj_multi_lora_chain import apply_standard_lora, apply_lora_chain_config
 
 		current_model = model
 		current_clip = clip
@@ -1400,18 +1619,20 @@ class GJJ_CharacterMultiViewStudio:
 		clip_strength = 0.0 if _should_skip_clip_lora_for_multiview_family() else None
 
 		if str(lora_1_name or "").strip() and abs(float(lora_1_strength)) > 1e-6:
-			current_model, current_clip = apply_lora_to_model_and_clip(
+			lora_state = self._load_lora_state(lora_1_name)
+			current_model, current_clip, _, _, _ = apply_standard_lora(
 				current_model,
 				current_clip,
-				self._load_lora_state(lora_1_name),
+				lora_state,
 				float(lora_1_strength),
 				float(lora_1_strength) if clip_strength is None else float(clip_strength),
 			)
 		if str(lora_2_name or "").strip() and abs(float(lora_2_strength)) > 1e-6:
-			current_model, current_clip = apply_lora_to_model_and_clip(
+			lora_state = self._load_lora_state(lora_2_name)
+			current_model, current_clip, _, _, _ = apply_standard_lora(
 				current_model,
 				current_clip,
-				self._load_lora_state(lora_2_name),
+				lora_state,
 				float(lora_2_strength),
 				float(lora_2_strength) if clip_strength is None else float(clip_strength),
 			)
@@ -1536,7 +1757,7 @@ class GJJ_CharacterMultiViewStudio:
 				latent_out = {"samples": action_ref_latent}
 			else:
 				pairs = [{"slot_index": 0, "image": main_image}]
-				positive, negative, latent_out = self._encode_multi_image_edit(
+				positive, negative, latent_out = _encode_multi_image_edit(
 					clip=clip,
 					vae=vae,
 					prompt=view_prompt,
@@ -1552,7 +1773,7 @@ class GJJ_CharacterMultiViewStudio:
 		else:
 			positive = self._encode_text_conditioning(clip, view_prompt)
 			negative = self._encode_negative_conditioning(clip, positive, negative_prompt)
-			latent_out = self._build_latent(
+			latent_out = _build_latent(
 				vae=vae,
 				width=target_width,
 				height=target_height,
@@ -1603,6 +1824,80 @@ class GJJ_CharacterMultiViewStudio:
 		unique_id=None,
 		**kwargs,
 	):
+		# 检测主图是否为批量输入（多维张量）
+		main_image_batch = _split_image_batch(main_image) if main_image is not None else []
+		is_batch_mode = len(main_image_batch) > 1
+
+		# 如果是批量模式，对每张主图分别处理
+		if is_batch_mode:
+			_send_status(unique_id, f"检测到 {len(main_image_batch)} 张主图，启动批处理模式...")
+			all_collages: list[torch.Tensor] = []
+			all_batch_images: list[torch.Tensor] = []
+
+			for batch_index, single_main_image in enumerate(main_image_batch, start=1):
+				_send_status(unique_id, f"批处理 {batch_index}/{len(main_image_batch)}...")
+				collage, batch_images = self._process_single_main(
+					single_main_image,
+					base_prompt,
+					negative_prompt,
+					action_prompts,
+					unet_name,
+					lora_1_name,
+					lora_1_strength,
+					lora_2_name,
+					lora_2_strength,
+					seed + batch_index - 1,
+					save_each_image,
+					prompt,
+					extra_pnginfo,
+					unique_id,
+					**kwargs,
+				)
+				all_collages.append(collage)
+				all_batch_images.append(batch_images)
+
+			# 合并所有结果
+			final_collage = torch.cat(all_collages, dim=0) if all_collages else all_collages[0]
+			final_batch = torch.cat(all_batch_images, dim=0) if all_batch_images else all_batch_images[0]
+			return (final_collage, final_batch)
+		else:
+			# 单图模式：原有逻辑
+			return self._process_single_main(
+				main_image,
+				base_prompt,
+				negative_prompt,
+				action_prompts,
+				unet_name,
+				lora_1_name,
+				lora_1_strength,
+				lora_2_name,
+				lora_2_strength,
+				seed,
+				save_each_image,
+				prompt,
+				extra_pnginfo,
+				unique_id,
+				**kwargs,
+			)
+	def _process_single_main(
+		self,
+		main_image,
+		base_prompt,
+		negative_prompt,
+		action_prompts,
+		unet_name,
+		lora_1_name,
+		lora_1_strength,
+		lora_2_name,
+		lora_2_strength,
+		seed,
+		save_each_image,
+		prompt=None,
+		extra_pnginfo=None,
+		unique_id=None,
+		**kwargs,
+	):
+		"""处理单张主图的多视图生成。"""
 		total_steps = 6 if bool(save_each_image) else 5
 		_send_status(unique_id, f"1/{total_steps} 检查模型配对并加载主链...")
 		preset, resolved_clip_names, resolved_clip_type, resolved_vae_name = self._resolve_generation_bundle(
@@ -1698,11 +1993,19 @@ class GJJ_CharacterMultiViewStudio:
 
 		captions = _resolve_job_captions(jobs)
 		_send_status(unique_id, f"3/{total_steps} 计算最优拼图布局...")
-		collage = _make_squareish_collage(
-			results,
-			captions,
-			target_aspect=_resolve_image_aspect(main_image, 1.0),
+		# 检测是否为4张图且使用了人物资产预设（通过检测动作文本中的关键词）
+		is_character_asset = (
+			len(results) == 4
+			and any("人物资产" in str(job.get("text", "")) for job in jobs)
 		)
+		if is_character_asset:
+			collage = _make_character_asset_collage(results, captions)
+		else:
+			collage = _make_squareish_collage(
+				results,
+				captions,
+				target_aspect=_resolve_image_aspect(main_image, 1.0),
+			)
 		batch_images = torch.cat(results, dim=0) if results else collage
 		saved_images: list[dict[str, str]] = []
 		if bool(save_each_image) and len(batch_images) > 0:

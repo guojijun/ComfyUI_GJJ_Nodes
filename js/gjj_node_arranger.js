@@ -72,7 +72,7 @@ function getTopoModeConfig(sortMode) {
 			xDirection: "leftToRight",
 			sortStrategy: "barycenter",
 			colWidth: 450,
-			rowGap: 160,
+			rowGap: 40,
 			isolatedSide: "left",
 		},
 		[TOPO_SORT_MODES.TOPO_OUTPUT_ANCHOR]: {
@@ -81,7 +81,7 @@ function getTopoModeConfig(sortMode) {
 			xDirection: "rightOutput",
 			sortStrategy: "barycenter",
 			colWidth: 450,
-			rowGap: 160,
+			rowGap: 40,
 			isolatedSide: "left",
 		},
 		[TOPO_SORT_MODES.TOPO_COMPACT]: {
@@ -90,7 +90,7 @@ function getTopoModeConfig(sortMode) {
 			xDirection: "leftToRight",
 			sortStrategy: "barycenter",
 			colWidth: 360,
-			rowGap: 90,
+			rowGap: 40,
 			isolatedSide: "left",
 		},
 		[TOPO_SORT_MODES.TOPO_BRANCH]: {
@@ -99,7 +99,7 @@ function getTopoModeConfig(sortMode) {
 			xDirection: "leftToRight",
 			sortStrategy: "branch",
 			colWidth: 450,
-			rowGap: 150,
+			rowGap: 40,
 			isolatedSide: "left",
 		},
 		[TOPO_SORT_MODES.TOPO_ORIGINAL_Y]: {
@@ -108,7 +108,7 @@ function getTopoModeConfig(sortMode) {
 			xDirection: "leftToRight",
 			sortStrategy: "originalY",
 			colWidth: 450,
-			rowGap: 150,
+			rowGap: 40,
 			isolatedSide: "left",
 		},
 	};

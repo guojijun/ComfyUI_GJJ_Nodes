@@ -47,6 +47,12 @@ const PRESET_ACTION_GROUPS = {
 		"白色背景。生成产品后视图。",
 		"白色背景。生成产品右侧视图。",
 	],
+	characterAsset: [
+		"白色背景,近距离大头特写，只拍头部和肩膀，构图紧凑，清晰保留完整面部特征，人物资产。",
+		"白色背景,标准正面，全身无裁剪，自然直立站姿。顶部、底部各留白5%，居中人物资产",
+		"白色背景,主体45°斜侧身，全身无裁剪，姿态自然。顶部、底部各留白5%，居中人物资产。",
+		"白色背景,主体后视图，全身无裁剪，轮廓标准。顶部、底部各留白5%，居中人物资产。",
+	],
 	five: [
 		"白色背景。生成主体全身正视图。",
 		"白色背景。生成主体全身正面右45°视图。",
@@ -265,9 +271,9 @@ function stabilizeActions(node) {
 	setInputMeta(
 		findInput(node, MAIN_IMAGE_INPUT),
 		MAIN_IMAGE_INPUT,
-		"主图",
-		"IMAGE",
-		"主体主参考图，必选。节点会始终以这张图作为类别、外观与风格一致性的主参考。",
+		"👤 主图",
+		"GJJ_BATCH_IMAGE,IMAGE",
+		"主体主参考图，必选。支持 GJJ_BATCH_IMAGE 和 IMAGE 两种类型，节点会始终以这张图作为类别、外观与风格一致性的主参考。",
 	);
 	setInputMeta(
 		findInput(node, LORA_CHAIN_INPUT),
@@ -346,7 +352,7 @@ function ensureOutputs(node) {
 	globalThis.GJJApplyTypeColorsToNode?.(node);
 }
 
-function createButton(label, title, onClick) {
+function createButton(label, title, onClick, container) {
 	const button = document.createElement("button");
 	button.type = "button";
 	button.textContent = label;
@@ -361,13 +367,46 @@ function createButton(label, title, onClick) {
 		"line-height:1.2",
 		"cursor:pointer",
 		"white-space:nowrap",
+		"transition:all 0.15s ease",
 	].join(";");
-	button.addEventListener("mousedown", (event) => event.stopPropagation());
+
+	// 点击视觉区分：active 状态
+	button.addEventListener("mousedown", (event) => {
+		event.stopPropagation();
+		button.style.background = "#2a3f4a";
+		button.style.borderColor = "#5a7a8a";
+		button.style.color = "#ffffff";
+	});
+	button.addEventListener("mouseup", (event) => {
+		button.style.background = "#172026";
+		button.style.borderColor = "#41535b";
+		button.style.color = "#dce7e2";
+	});
+	button.addEventListener("mouseleave", (event) => {
+		button.style.background = "#172026";
+		button.style.borderColor = "#41535b";
+		button.style.color = "#dce7e2";
+	});
+
 	button.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
+		// 添加短暂的点击反馈效果
+		button.style.transform = "scale(0.95)";
+		setTimeout(() => {
+			button.style.transform = "scale(1)";
+		}, 100);
 		onClick?.(event);
 	});
+
+	// 鼠标悬停效果
+	button.addEventListener("mouseenter", (event) => {
+		if (button.style.transform !== "scale(0.95)") {
+			button.style.background = "#1e2d36";
+			button.style.borderColor = "#4a636f";
+		}
+	});
+
 	return button;
 }
 
@@ -388,6 +427,7 @@ function ensureToolbar(node) {
 		refreshNode(node);
 	};
 
+	container.appendChild(createButton("人物资产", "填入超写实真人角色人物资产四连图动作文本（大头特写+正面全身+斜侧全身+正侧全身）", () => setActionLines(PRESET_ACTION_GROUPS.characterAsset)));
 	container.appendChild(createButton("产品四视图", "填入产品正左后右四视图动作文本", () => setActionLines(PRESET_ACTION_GROUPS.productFour)));
 	container.appendChild(createButton("标准五视图", "填入 1 张标准照 + 2x2 拼版的五视图动作文本", () => setActionLines(PRESET_ACTION_GROUPS.five)));
 	container.appendChild(createButton("标准六视图", "填入六视图动作文本，拼版自动使用 2x3 或 3x2", () => setActionLines(PRESET_ACTION_GROUPS.six)));
