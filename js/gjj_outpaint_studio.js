@@ -773,8 +773,7 @@ function setupNode(node) {
 
 	hideConfigWidget(node);
 	const config = parseConfig(node);
-	node.__gjjConfig = { ...config, selected_modes: [...node.__gjjSelectedModes], selected_methods: [...node.__gjjSelectedMethods] };
-	saveConfig(node, node.__gjjConfig);
+	node.__gjjConfig = config;
 
 	const mainWrap = document.createElement("div");
 	mainWrap.style.cssText = [
@@ -793,13 +792,17 @@ function setupNode(node) {
 	node.__gjjOutpaintMainWrap = mainWrap;
 
 	// 创建所有组件
-	const modeData = createModeButtons(node, config);
+	const modeData = createModeButtons(node, node.__gjjConfig);
 	node.__gjjModeButtons = modeData;
 	mainWrap.appendChild(modeData.container);
 
-	const methodData = createMethodButtons(node, config);
+	const methodData = createMethodButtons(node, node.__gjjConfig);
 	node.__gjjMethodButtons = methodData;
 	mainWrap.appendChild(methodData.container);
+
+	// 多选状态由 createModeButtons / createMethodButtons 初始化，现在写入 config
+	node.__gjjConfig = { ...node.__gjjConfig, selected_modes: [...node.__gjjSelectedModes], selected_methods: [...node.__gjjSelectedMethods] };
+	saveConfig(node, node.__gjjConfig);
 
 	const modelStatusData = createModelStatus(node, config);
 	node.__gjjModelStatus = modelStatusData;
