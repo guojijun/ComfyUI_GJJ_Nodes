@@ -660,24 +660,83 @@ function arrangeVertical(nodes, spacing = DEFAULT_SPACING) {
 	}
 }
 
+function getWorkflowSortedNodesForGrid(nodes) {
+	const validNodes = filterValidNodes(nodes, false);
+	if (validNodes.length === 0) return [];
+
+	const {
+		normalNodes,
+		rerouteNodes,
+		forward,
+		backward,
+		inDegree,
+		outDegree,
+	} = buildConnectionGraph(validNodes);
+
+	const isolatedNodes = separateIsolatedNodes(normalNodes, inDegree, outDegree);
+	const connectedNodes = normalNodes.filter((node) => !isolatedNodes.includes(node));
+	const ordered = [];
+
+	if (connectedNodes.length > 0) {
+		const levels = calculateSourceLongestLevels(connectedNodes, backward);
+		const layerGroups = groupByLevel(connectedNodes, levels);
+		sortLayerGroups(layerGroups, levels, forward, backward, "barycenter");
+
+		const sortedLevels = Array.from(layerGroups.keys()).sort((a, b) => a - b);
+		for (const level of sortedLevels) {
+			ordered.push(...(layerGroups.get(level) || []));
+		}
+	}
+
+	// 没有连线的节点放在后面，仍按原来的视觉位置排序，避免突然乱跳。
+	isolatedNodes.sort((a, b) => {
+		const dy = getNodeY(a) - getNodeY(b);
+		if (Math.abs(dy) > 8) return dy;
+		return getNodeX(a) - getNodeX(b);
+	});
+	ordered.push(...isolatedNodes);
+
+	// Reroute 节点通常只是连线辅助，网格模式放到最后，避免打乱主工作流顺序。
+	rerouteNodes.sort((a, b) => {
+		const dy = getNodeY(a) - getNodeY(b);
+		if (Math.abs(dy) > 8) return dy;
+		return getNodeX(a) - getNodeX(b);
+	});
+	ordered.push(...rerouteNodes);
+
+	// 兜底：如果图里全是特殊节点，仍然保持原始位置顺序。
+	if (ordered.length === 0) {
+		return [...validNodes].sort((a, b) => {
+			const dy = getNodeY(a) - getNodeY(b);
+			if (Math.abs(dy) > 8) return dy;
+			return getNodeX(a) - getNodeX(b);
+		});
+	}
+
+	return ordered;
+}
+
 function arrangeGrid(nodes, spacing = DEFAULT_SPACING) {
 	if (nodes.length === 0) return;
 
-	const sorted = [...nodes].sort((a, b) => {
-		const dy = getNodeY(a) - getNodeY(b);
-		if (Math.abs(dy) > 50) return dy;
-		return getNodeX(a) - getNodeX(b);
-	});
+	const sorted = getWorkflowSortedNodesForGrid(nodes);
+	if (sorted.length === 0) return;
 
-	const cols = Math.ceil(Math.sqrt(sorted.length));
+	const colGap = getColumnGap(spacing);
+	const rowGap = getRowGap(spacing);
+
+	// 网格仍然保持方正，但排序改为工作流方向：上游在前，下游在后。
+	const cols = Math.max(1, Math.ceil(Math.sqrt(sorted.length)));
 	const maxWidth = Math.max(...sorted.map(getNodeWidth));
 	const maxHeight = Math.max(...sorted.map(getNodeHeight));
+	const colStep = Math.round(maxWidth + colGap);
+	const rowStep = Math.round(maxHeight + rowGap);
 
 	let col = 0;
 	let row = 0;
 
 	for (const node of sorted) {
-		setNodePosition(node, col * (maxWidth + spacing), row * (maxHeight + spacing));
+		setNodePosition(node, col * colStep, row * rowStep);
 
 		col++;
 		if (col >= cols) {
@@ -685,6 +744,8 @@ function arrangeGrid(nodes, spacing = DEFAULT_SPACING) {
 			row++;
 		}
 	}
+
+	resolveNodeOverlaps(sorted, Math.max(colGap, rowGap));
 }
 
 function traceRealSource(nodeId, validSet, visited = new Set()) {
