@@ -16,6 +16,50 @@ const MIN_NODE_HEIGHT = 40;
 const MIN_WIDTH = 300;
 const NODE_BOTTOM_PADDING = 10;
 const LORA_EFFECT_LIVE_TEXT_MAP_KEY = "__gjjLoraEffectTesterLiveTextByNodeId";
+const MODE_EDIT = "edit";
+const MODE_PREVIEW = "preview";
+const DOUBLE_CLICK_MS = 420;
+
+function getMode(node) {
+	const mode = String(node?.properties?.["gjj_any_preview_mode"] || MODE_PREVIEW);
+	return mode === MODE_PREVIEW ? MODE_PREVIEW : MODE_EDIT;
+}
+
+function setMode(node, mode) {
+	node.properties = node.properties || {};
+	node.properties["gjj_any_preview_mode"] = mode === MODE_PREVIEW ? MODE_PREVIEW : MODE_EDIT;
+}
+
+function enterEditMode(node) {
+	setMode(node, MODE_EDIT);
+	applyPreviewContent(node);
+	setTimeout(() => {
+		const editor = node.__gjjAnyPreviewEditor;
+		editor?.focus?.();
+		editor?.select?.();
+	}, 0);
+}
+
+function enterPreviewMode(node) {
+	setMode(node, MODE_PREVIEW);
+	applyPreviewContent(node);
+}
+
+function handlePreviewPointer(node, event) {
+	const now = Date.now();
+	if (event.type === "mousedown" && now - Number(node.__gjjAnyPreviewLastPointerEvent || 0) < 40) {
+		event.stopPropagation();
+		return;
+	}
+	node.__gjjAnyPreviewLastPointerEvent = now;
+	const last = Number(node.__gjjAnyPreviewLastPointer || 0);
+	node.__gjjAnyPreviewLastPointer = now;
+	event.stopPropagation();
+	if (event.detail >= 2 || (last > 0 && now - last <= DOUBLE_CLICK_MS)) {
+		event.preventDefault();
+		enterEditMode(node);
+	}
+}
 
 function imageDataToUrl(data) {
 	if (!data?.filename) {
@@ -497,6 +541,7 @@ function applyPreviewContent(node) {
 	const grid = node.__gjjAnyPreviewGrid;
 	const empty = node.__gjjAnyPreviewEmpty;
 	const previewWrap = node.__gjjAnyPreviewWrap;
+	const editor = node.__gjjAnyPreviewEditor;
 	if (!container || !body || !grid || !empty) {
 		return;
 	}
@@ -516,41 +561,35 @@ function applyPreviewContent(node) {
 	const showAudio = kind === "audio" && audio.length > 0;
 	const showVideo = kind === "video" && video.length > 0;
 	const hasText = Boolean(String(node.__gjjAnyPreviewText || "").trim());
+	const isTextOnly = !showImage && !showAudio && !showVideo && hasText;
+	const mode = isTextOnly ? getMode(node) : MODE_PREVIEW;
 
 	const availableHeight = getWidgetHeight(node, node.__gjjAnyPreviewWidget);
 
-	// 显示逻辑优化：
-	// 1. 图片预览时，通常只显示图片网格，隐藏文本正文（除非没有图片）
-	// 2. 音频/视频预览时，显示播放器(grid) AND 文本正文(body)（如果有文本）
-	// 3. 纯文本预览时，只显示文本正文
-
 	const isMediaPreview = showImage || showAudio || showVideo;
 
-	// Grid 显示条件：有对应的媒体数据
 	grid.style.display = isMediaPreview ? (showImage ? "grid" : "flex") : "none";
 
-	// Body 显示条件：
-	// - 如果是图片预览，通常隐藏 body (除非未来需求改变)
-	// - 如果是音频/视频预览，且有文本，则显示 body
-	// - 如果是纯文本预览，且有文本，则显示 body
 	if (showImage) {
 		body.style.display = "none";
+		if (editor) editor.style.display = "none";
 	} else if ((showAudio || showVideo) && hasText) {
-		body.style.display = "block";
+		body.style.display = mode === MODE_PREVIEW ? "block" : "none";
+		if (editor) editor.style.display = mode === MODE_EDIT ? "block" : "none";
 	} else if (!isMediaPreview && hasText) {
-		body.style.display = "block";
+		body.style.display = mode === MODE_PREVIEW ? "block" : "none";
+		if (editor) editor.style.display = mode === MODE_EDIT ? "block" : "none";
 	} else {
 		body.style.display = "none";
+		if (editor) editor.style.display = "none";
 	}
 
-	// Empty 提示显示条件：没有任何内容时
 	empty.style.display = (!isMediaPreview && !hasText) ? "flex" : "none";
 
 	container.style.height = "auto";
 	container.style.minHeight = `${MIN_PREVIEW_HEIGHT}px`;
 
 	if (previewWrap) {
-		// 图片预览可能需要内部滚动，其他情况让内容自然撑开
 		previewWrap.style.overflow = showImage ? "auto" : "visible";
 		previewWrap.style.height = showImage ? `${availableHeight}px` : "auto";
 		previewWrap.style.minHeight = showImage ? `${availableHeight}px` : "96px";
@@ -870,67 +909,40 @@ function applyPreviewContent(node) {
 		grid.style.height = "";
 		grid.style.alignItems = "";
 
-		// 对于文本内容，设置双击复制功能
 		if (!showImage && !showAudio && !showVideo && hasText) {
-			// 使用 renderMarkdown 渲染文本为 Markdown 格式
 			body.innerHTML = renderMarkdown(text);
 			clampTextPreviewLines(body);
+			body.title = "双击编辑";
 
-			// 修复：使用事件委托，避免重复添加事件监听器
 			const handleDblClick = (e) => {
 				if (e.target.closest("a, img, pre, code")) {
-					return; // 避免在链接、图片、代码块上触发复制
+					return;
 				}
-				navigator.clipboard
-					.writeText(text)
-					.then(() => {
-						// 提供复制成功的视觉反馈
-						const originalBackgroundColor = body.style.backgroundColor;
-						body.style.backgroundColor = "#4a7a4a"; // 临时改变背景色作为反馈
-						setTimeout(() => {
-							body.style.backgroundColor = originalBackgroundColor || "transparent";
-						}, 200);
-					})
-					.catch((err) => {
-						console.error("无法复制到剪贴板:", err);
-						// 降级方案：使用旧式方法
-						try {
-							const textArea = document.createElement("textarea");
-							textArea.value = text;
-							textArea.style.position = "fixed";
-							textArea.style.left = "-999999px";
-							textArea.style.top = "-999999px";
-							document.body.appendChild(textArea);
-							textArea.focus();
-							textArea.select();
-							const successful = document.execCommand("copy");
-							document.body.removeChild(textArea);
-
-							if (successful) {
-								const originalBackgroundColor = body.style.backgroundColor;
-								body.style.backgroundColor = "#4a7a4a";
-								setTimeout(() => {
-									body.style.backgroundColor = originalBackgroundColor || "transparent";
-								}, 200);
-							}
-						} catch (error) {
-							console.error("降级复制方法失败:", error);
-						}
-					});
+				enterEditMode(node);
 			};
 
-			// 移除旧的事件监听器（如果存在）
 			if (body.__gjjDblClickHandler) {
 				body.removeEventListener("dblclick", body.__gjjDblClickHandler);
+				body.removeEventListener("pointerdown", body.__gjjPointerHandler);
+				body.removeEventListener("mousedown", body.__gjjPointerHandler);
 			}
 			body.__gjjDblClickHandler = handleDblClick;
+			const pointerHandler = (e) => handlePreviewPointer(node, e);
+			body.__gjjPointerHandler = pointerHandler;
 			body.addEventListener("dblclick", handleDblClick);
+			body.addEventListener("pointerdown", pointerHandler);
+			body.addEventListener("mousedown", pointerHandler);
 			body.style.cursor = "pointer";
 		} else {
-			// 保留原始行为
 			body.innerHTML = renderMarkdown(text);
 			clampTextPreviewLines(body);
 		}
+	}
+
+	if (editor && mode === MODE_EDIT) {
+		editor.value = String(node.__gjjAnyPreviewText || "");
+		editor.style.height = "auto";
+		editor.style.height = `${Math.max(120, editor.scrollHeight || 120)}px`;
 	}
 
 	requestAnimationFrame(() => {
@@ -1042,6 +1054,31 @@ function ensurePreviewWidget(node) {
 		"pointer-events:auto",
 		"cursor:text",
 	].join(";");
+
+	const editor = document.createElement("textarea");
+	editor.className = "gjj-any-preview-editor";
+	editor.placeholder = "请输入文本";
+	editor.spellcheck = false;
+	editor.style.cssText = [
+		"display:none",
+		"width:100%",
+		"min-height:120px",
+		"height:auto",
+		"resize:vertical",
+		"box-sizing:border-box",
+		"padding:8px 10px",
+		"border:1px solid #44565f",
+		"border-radius:6px",
+		"outline:none",
+		"background:#071012",
+		"color:#dce7e2",
+		"font-size:12px",
+		"line-height:1.55",
+		"font-family:ui-monospace, SFMono-Regular, Consolas, monospace",
+		"white-space:pre-wrap",
+		"overflow:auto",
+	].join(";");
+
 	const previewWrap = document.createElement("div");
 	previewWrap.style.cssText = [
 		"display:flex",
@@ -1148,6 +1185,7 @@ function ensurePreviewWidget(node) {
 	previewWrap.appendChild(style);
 
 	previewWrap.appendChild(body);
+	previewWrap.appendChild(editor);
 
 	const grid = document.createElement("div");
 	grid.style.cssText = [
@@ -1171,9 +1209,32 @@ function ensurePreviewWidget(node) {
 	].join(";");
 	previewWrap.appendChild(empty);
 
-	// 设置body的order，使其显示在grid后面
-	body.style.order = "2"; // 简介文本显示在后面
+	body.style.order = "2";
+	editor.style.order = "3";
 	container.appendChild(previewWrap);
+
+	editor.addEventListener("input", () => {
+		node.__gjjAnyPreviewText = editor.value;
+		editor.style.height = "auto";
+		editor.style.height = `${Math.max(120, editor.scrollHeight || 120)}px`;
+		scheduleLayout(node);
+	});
+
+	editor.addEventListener("keydown", (event) => {
+		if (event.key === "Escape" || ((event.ctrlKey || event.metaKey) && event.key === "Enter")) {
+			event.preventDefault();
+			editor.blur();
+		}
+	});
+
+	editor.addEventListener("blur", () => {
+		node.__gjjAnyPreviewText = editor.value;
+		enterPreviewMode(node);
+	});
+
+	editor.addEventListener("pointerdown", (event) => event.stopPropagation());
+	editor.addEventListener("mousedown", (event) => event.stopPropagation());
+	editor.addEventListener("dblclick", (event) => event.stopPropagation());
 
 	const widget = node.addDOMWidget?.(
 		PREVIEW_WIDGET_NAME,
@@ -1212,6 +1273,7 @@ function ensurePreviewWidget(node) {
 	node.__gjjAnyPreviewContainer = container;
 	node.__gjjAnyPreviewWrap = previewWrap;
 	node.__gjjAnyPreviewBody = body;
+	node.__gjjAnyPreviewEditor = editor;
 	node.__gjjAnyPreviewGrid = grid;
 	node.__gjjAnyPreviewEmpty = empty;
 	applyPreviewContent(node);
