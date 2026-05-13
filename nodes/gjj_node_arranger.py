@@ -56,11 +56,11 @@ class GJJ_NodeArranger:
                     ),
                 }),
                 "间距": ("INT", {
-                    "default": 100,
-                    "min": 20,
-                    "max": 800,
-                    "step": 10,
-                    "tooltip": "节点间距，单位像素",
+                    "default": 26,
+                    "min": 0,
+                    "max": 240,
+                    "step": 8,
+                    "tooltip": "节点基础间距。前端支持 Alt+←/→ 调整列宽，Alt+↑/↓ 调整行高。",
                 }),
                 "迭代次数": ("INT", {
                     "default": 10,
@@ -83,12 +83,6 @@ class GJJ_NodeArranger:
                 "保持连接": ("BOOLEAN", {
                     "default": True,
                     "tooltip": "尽量保持连接关系清晰",
-                }),
-            },
-            "optional": {
-                "仅选中节点": ("BOOLEAN", {
-                    "default": False,
-                    "tooltip": "仅排列当前选中的节点",
                 }),
             },
             "hidden": {
@@ -114,20 +108,21 @@ class GJJ_NodeArranger:
         松弛力度=0.5,
         碰撞检测=True,
         保持连接=True,
-        仅选中节点=False,
         **kwargs,
     ):
         print(
             f"[GJJ_NodeArranger] 节点排列请求: "
             f"排列模式={排列模式}, 间距={间距}, 迭代次数={迭代次数}, "
-            f"松弛力度={松弛力度}, 碰撞检测={碰撞检测}, 保持连接={保持连接}, "
-            f"仅选中节点={仅选中节点}"
+            f"松弛力度={松弛力度}, 碰撞检测={碰撞检测}, 保持连接={保持连接}"
         )
         print("[GJJ_NodeArranger] 实际排列由前端 JS 执行。")
         print("[GJJ_NodeArranger] 可用入口：")
         print("  - 右键画布 -> 📐 GJJ 节点排列")
         print("  - 顶部工具栏 -> 📐 排列节点 / 🔢 拓扑排序 / 拓扑模式下拉框")
+        print("  - 智能范围：无选择或全选时作用全部；部分选择时只作用所选")
         print("  - 快捷键: Ctrl+Shift+A 循环排列模式")
+        print("  - 快捷键: Ctrl+Alt+A 全部折叠 / 全部打开")
+        print("  - 快捷键: Alt+←/→ 调整列宽，Alt+↑/↓ 调整行高")
         print("  - 快捷键: Ctrl+Shift+T 拓扑主链路")
         print("  - 快捷键: Ctrl+Shift+H/V/G 水平/垂直/网格")
         return ()

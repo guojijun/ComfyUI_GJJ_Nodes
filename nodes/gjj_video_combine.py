@@ -28,7 +28,7 @@ class MultiInput(str):
         return other not in self.allowed_types
 
 
-image_or_latent = MultiInput(GJJ_BATCH_IMAGE_TYPE, [GJJ_BATCH_IMAGE_TYPE, "IMAGE", "LATENT", "VIDEO"])
+image_or_latent = MultiInput("IMAGE", ["IMAGE", "LATENT", GJJ_BATCH_IMAGE_TYPE, "VIDEO"])
 float_or_int = MultiInput("FLOAT", ["FLOAT", "INT"])
 
 
@@ -72,8 +72,8 @@ class GJJ_VideoCombine:
                 "images": (
                     image_or_latent,
                     {
-                        "display_name": "图像/视频/Latent",
-                        "tooltip": "支持 GJJ_BATCH_IMAGE、普通 IMAGE batch、LATENT、官方 VIDEO 或 VIDEO 序列；接 VIDEO 时自动走视频合并。",
+                        "display_name": "图像",
+                        "tooltip": "支持 IMAGE batch、LATENT、GJJ_BATCH_IMAGE、官方 VIDEO 或 VIDEO 序列；接 VIDEO 时自动走视频合并。",
                     },
                 ),
                 "frame_rate": (

@@ -45,7 +45,7 @@ from .gjj_ltx23_multiref_runtime import (
     _apply_ltx_nag,
     _create_video,
     _crop_frames_to_size,
-    _load_vae,
+    _load_video_vae,
     _pick_available_name,
     _pick_first_candidate,
     _safe_filename_list,
@@ -768,7 +768,7 @@ class GJJ_LTX23FirstLastOutfit:
                 )
 
             model, _, _ = CheckpointLoaderSimple().load_checkpoint(resolved_ckpt)
-            video_vae = _load_vae(resolved_video_vae)
+            video_vae = _load_video_vae(resolved_video_vae)
             audio_vae = LTXVAudioVAELoader.execute(resolved_ckpt)[0]
             clip = LTXAVTextEncoderLoader.execute(
                 resolved_text_encoder, resolved_ckpt, "default"

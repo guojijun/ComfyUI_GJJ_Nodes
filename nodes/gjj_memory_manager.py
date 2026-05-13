@@ -1,7 +1,35 @@
 import os
 import sys
 import gc
+from typing import Any
 from server import PromptServer
+
+
+class AnyType(str):
+    def __ne__(self, __value: object) -> bool:
+        return False
+
+
+class FlexibleOptionalInputType(dict):
+    """允许节点接收动态数量与动态类型的可选输入。"""
+
+    def __init__(self, input_type, data: dict[str, Any] | None = None):
+        super().__init__()
+        self.input_type = input_type
+        self.data = data or {}
+        for key, value in self.data.items():
+            self[key] = value
+
+    def __getitem__(self, key):
+        if key in self.data:
+            return self.data[key]
+        return (self.input_type,)
+
+    def __contains__(self, key):
+        return True
+
+
+any_type = AnyType("*")
 
 
 def _get_memory_info():
@@ -69,7 +97,7 @@ def _get_memory_info():
 def _get_gpu_info():
     """获取GPU显存信息"""
     gpu_info = []
-    
+
     try:
         import torch
         if torch.cuda.is_available():
@@ -94,7 +122,7 @@ def _get_gpu_info():
             gpu_info.append({"error": "未检测到CUDA设备"})
     except Exception as e:
         gpu_info.append({"error": f"获取GPU信息失败: {str(e)}"})
-    
+
     return gpu_info
 
 
@@ -122,7 +150,7 @@ def _send_stats(node_id):
     try:
         memory = _get_memory_info()
         gpu_info = _get_gpu_info()
-        
+
         PromptServer.instance.send_sync("gjj_memory_manager_stats", {
             "node": node_id,
             "memory": memory,
@@ -137,15 +165,19 @@ class GJJ_MemoryManager:
     CATEGORY = "GJJ/系统工具"
     FUNCTION = "execute"
     OUTPUT_NODE = True
+    DESCRIPTION = "内存显存管理工具，支持接入任意类型数据并通过按钮清理内存/显存"
 
-    RETURN_TYPES = ()
-    RETURN_NAMES = ()
+    RETURN_TYPES = (any_type,)
+    RETURN_NAMES = ("任意输出",)
+    OUTPUT_TOOLTIPS = ("原样输出输入的数据，类型与输入相同",)
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {},
-            "optional": {},
+            "optional": {
+                "任意输入_01": FlexibleOptionalInputType(any_type),
+            },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
                 "extra_pnginfo": "EXTRA_PNGINFO",
@@ -171,7 +203,7 @@ class GJJ_MemoryManager:
         action = props.get("action", "refresh")
 
         result = ""
-        
+
         if action == "clean_memory":
             clean_result = _clean_memory()
             result = f"内存清理: {clean_result['message']}"
@@ -187,7 +219,8 @@ class GJJ_MemoryManager:
 
         _send_stats(str(unique_id))
 
-        return ()
+        output = kwargs.get("任意输入_01", None)
+        return (output,)
 
 NODE_CLASS_MAPPINGS = {"GJJ_MemoryManager": GJJ_MemoryManager}
-NODE_DISPLAY_NAME_MAPPINGS = {"GJJ_MemoryManager": "🖥️ 内存显存管理"}
+NODE_DISPLAY_NAME_MAPPINGS = {"GJJ_MemoryManager": "GJJ · 🖥️ 内存显存管理"}

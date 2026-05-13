@@ -1,10 +1,98 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
-import { queueOnlyCurrentNode } from "./gjj_utils.js";
+import { queueOnlyCurrentNode, GJJ_Utils } from "./gjj_utils.js";
 
 (function () {
     const NODE_CLASS_NAME = "GJJ_MemoryManager";
     const STATUS_WIDGET_NAME = "__gjj_memory_manager_status";
+    const OUTPUT_NAME = "任意输出";
+    const OUTPUT_TOOLTIP = "原样输出输入的数据，类型与输入相同";
+
+    function setDirty(node) {
+        GJJ_Utils.refreshNode(node);
+    }
+
+    function getLinkedOutputInfo(node, input) {
+        const linkId = input?.link;
+        if (!linkId || !app.graph?.links) {
+            return null;
+        }
+        const link = app.graph.links[linkId];
+        const sourceNode = link?.origin_id != null ? app.graph.getNodeById?.(link.origin_id) : null;
+        const sourceSlot = sourceNode?.outputs?.[link.origin_slot];
+        if (!sourceSlot) {
+            return null;
+        }
+        return {
+            type: sourceSlot.type || "*",
+            label: sourceSlot.label || sourceSlot.name || sourceSlot.type || "*",
+        };
+    }
+
+    function getLinkedInputInfo(node, output) {
+        const links = Array.isArray(output?.links) ? output.links : [];
+        for (const linkId of links) {
+            const link = app.graph?.links?.[linkId];
+            const targetNode = link?.target_id != null ? app.graph.getNodeById?.(link.target_id) : null;
+            const targetSlot = targetNode?.inputs?.[link.target_slot];
+            if (targetSlot) {
+                return {
+                    type: targetSlot.type || "*",
+                    label: targetSlot.label || targetSlot.name || targetSlot.type || "*",
+                };
+            }
+        }
+        return null;
+    }
+
+    function detectConnectedType(node) {
+        const input = node?.inputs?.[0];
+        if (input) {
+            const info = getLinkedOutputInfo(node, input);
+            if (info?.type) {
+                return info;
+            }
+        }
+
+        for (const output of node.outputs || []) {
+            const info = getLinkedInputInfo(node, output);
+            if (info?.type) {
+                return info;
+            }
+        }
+
+        return { type: "*", label: OUTPUT_NAME };
+    }
+
+    function stabilizeNode(node) {
+        if (!node) return;
+
+        if (!Array.isArray(node.outputs) || node.outputs.length === 0) {
+            node.addOutput?.(OUTPUT_NAME, "*");
+        }
+
+        const connectedType = detectConnectedType(node);
+        const resolvedType = connectedType?.type || "*";
+        const resolvedLabel = connectedType?.label || OUTPUT_NAME;
+
+        for (const input of node.inputs || []) {
+            input.type = resolvedType;
+        }
+        for (const output of node.outputs || []) {
+            output.type = resolvedType;
+            output.label = String(resolvedLabel || resolvedType || OUTPUT_NAME);
+            output.name = OUTPUT_NAME;
+            output.localized_name = OUTPUT_NAME;
+            output.tooltip = OUTPUT_TOOLTIP;
+        }
+
+        setDirty(node);
+    }
+
+    function scheduleStabilize(node, ms = 32) {
+        clearTimeout(node.__gjjMemoryManagerTimer);
+        node.__gjjMemoryManagerTimer = setTimeout(() => stabilizeNode(node), ms);
+    }
 
     function setStatus(node, text) {
         const s = node.__gjjMemoryStatus;
@@ -82,11 +170,46 @@ import { queueOnlyCurrentNode } from "./gjj_utils.js";
         const box = document.createElement("div");
         box.style.cssText = "padding:10px;border:1px solid #41535b;border-radius:8px;background:#121a1f;color:#dce7e2";
 
+        // 顶部按钮区域（清理内存、清理显存）
+        const topBtnRow = document.createElement("div");
+        topBtnRow.style.cssText = "display:flex;gap:8px;margin-bottom:12px;";
+
+        const topCleanMemBtn = document.createElement("button");
+        topCleanMemBtn.textContent = "🧹清理内存";
+        topCleanMemBtn.style.cssText = "flex:1;height:36px;background:#2d9a5e;color:#fff;border:none;border-radius:4px;padding:4px;cursor:pointer;font-size:12px;font-weight:bold;transition:all 0.2s;";
+
+        topCleanMemBtn.addEventListener("click", async () => {
+            node.properties = node.properties || {};
+            node.properties.action = "clean_memory";
+            node.setDirtyCanvas?.(true, true);
+            node.graph?.change?.();
+
+            await executeNode(node, topCleanMemBtn);
+        });
+
+        topBtnRow.appendChild(topCleanMemBtn);
+
+        const topCleanGpuBtn = document.createElement("button");
+        topCleanGpuBtn.textContent = "🎮清理显存";
+        topCleanGpuBtn.style.cssText = "flex:1;height:36px;background:#8b5cf6;color:#fff;border:none;border-radius:4px;padding:4px;cursor:pointer;font-size:12px;font-weight:bold;transition:all 0.2s;";
+
+        topCleanGpuBtn.addEventListener("click", async () => {
+            node.properties = node.properties || {};
+            node.properties.action = "clean_gpu";
+            node.setDirtyCanvas?.(true, true);
+            node.graph?.change?.();
+
+            await executeNode(node, topCleanGpuBtn);
+        });
+
+        topBtnRow.appendChild(topCleanGpuBtn);
+        box.appendChild(topBtnRow);
+
         const headerRow = document.createElement("div");
         headerRow.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:12px";
 
         const title = document.createElement("div");
-        title.textContent = "🖥️ 资源监控";
+        title.textContent = "️ 资源监控";
         title.style.cssText = "font-weight:bold;font-size:14px";
         headerRow.appendChild(title);
 
@@ -100,11 +223,64 @@ import { queueOnlyCurrentNode } from "./gjj_utils.js";
         statsDisplay.innerHTML = `<div style="color:#aaa;font-size:12px;text-align:center;padding:20px;">点击「刷新状态」获取内存/显存信息</div>`;
         box.appendChild(statsDisplay);
 
+        // 创建开关行（两个开关放一行）
+        const switchRow = document.createElement("div");
+        switchRow.style.cssText = "display:flex;gap:16px;margin-top:12px;padding:8px;background:#1a2329;border-radius:6px;align-items:center;justify-content:space-around;";
+
+        function createToggle(label, defaultState) {
+            const container = document.createElement("div");
+            container.style.cssText = "display:flex;align-items:center;gap:6px;";
+
+            const textSpan = document.createElement("span");
+            textSpan.textContent = label;
+            textSpan.style.cssText = "font-size:12px;color:#dce7e2;white-space:nowrap;";
+            container.appendChild(textSpan);
+
+            const toggleBg = document.createElement("div");
+            toggleBg.style.cssText = "width:36px;height:20px;border-radius:10px;background:#27343b;position:relative;cursor:pointer;transition:background 0.2s;";
+
+            const toggleKnob = document.createElement("div");
+            toggleKnob.style.cssText = "width:16px;height:16px;border-radius:50%;background:#888;position:absolute;top:2px;left:2px;transition:all 0.2s;";
+
+            if (defaultState) {
+                toggleBg.style.background = "#5aa8ff";
+                toggleKnob.style.left = "18px";
+                toggleKnob.style.background = "#fff";
+            }
+
+            toggleBg.appendChild(toggleKnob);
+            container.appendChild(toggleBg);
+
+            let state = defaultState;
+            const toggle = () => {
+                state = !state;
+                if (state) {
+                    toggleBg.style.background = "#5aa8ff";
+                    toggleKnob.style.left = "18px";
+                    toggleKnob.style.background = "#fff";
+                } else {
+                    toggleBg.style.background = "#27343b";
+                    toggleKnob.style.left = "2px";
+                    toggleKnob.style.background = "#888";
+                }
+            };
+            toggleBg.addEventListener("click", toggle);
+
+            return { container, getState: () => state, setState: (val) => { state = val; toggle(); } };
+        }
+
+        const purgeCacheToggle = createToggle("🧹清理内存", false);
+        const purgeModelsToggle = createToggle("🎮清理显存", false);
+
+        switchRow.appendChild(purgeCacheToggle.container);
+        switchRow.appendChild(purgeModelsToggle.container);
+        box.appendChild(switchRow);
+
         const btnRow = document.createElement("div");
         btnRow.style.cssText = "display:flex;flex-direction:row;gap:4px;margin-top:12px;width:100%";
 
         const refreshBtn = document.createElement("button");
-        refreshBtn.textContent = "🔄刷新状态";
+        refreshBtn.textContent = "刷新状态";
         refreshBtn.style.cssText = "flex:1;height:60px;background:#5aa8ff;color:#fff;border:none;border-radius:4px;padding:4px;cursor:pointer;font-size:9px;font-weight:bold;transition:all 0.2s;display:flex;align-items:center;justify-content:center;writing-mode:vertical-rl;text-orientation:mixed;-webkit-writing-mode:vertical-rl;-ms-writing-mode:tb-rl";
 
         refreshBtn.addEventListener("click", async () => {
@@ -119,7 +295,7 @@ import { queueOnlyCurrentNode } from "./gjj_utils.js";
         btnRow.appendChild(refreshBtn);
 
         const cleanMemBtn = document.createElement("button");
-        cleanMemBtn.textContent = "🧹清理内存";
+        cleanMemBtn.textContent = "清理内存";
         cleanMemBtn.style.cssText = "flex:1;height:60px;background:#2d9a5e;color:#fff;border:none;border-radius:4px;padding:4px;cursor:pointer;font-size:9px;font-weight:bold;transition:all 0.2s;display:flex;align-items:center;justify-content:center;writing-mode:vertical-rl;text-orientation:mixed;-webkit-writing-mode:vertical-rl;-ms-writing-mode:tb-rl";
 
         cleanMemBtn.addEventListener("click", async () => {
@@ -134,7 +310,7 @@ import { queueOnlyCurrentNode } from "./gjj_utils.js";
         btnRow.appendChild(cleanMemBtn);
 
         const cleanGpuBtn = document.createElement("button");
-        cleanGpuBtn.textContent = "🎮清理显存";
+        cleanGpuBtn.textContent = "清理显存";
         cleanGpuBtn.style.cssText = "flex:1;height:60px;background:#8b5cf6;color:#fff;border:none;border-radius:4px;padding:4px;cursor:pointer;font-size:9px;font-weight:bold;transition:all 0.2s;display:flex;align-items:center;justify-content:center;writing-mode:vertical-rl;text-orientation:mixed;-webkit-writing-mode:vertical-rl;-ms-writing-mode:tb-rl";
 
         cleanGpuBtn.addEventListener("click", async () => {
@@ -149,7 +325,7 @@ import { queueOnlyCurrentNode } from "./gjj_utils.js";
         btnRow.appendChild(cleanGpuBtn);
 
         const cleanAllBtn = document.createElement("button");
-        cleanAllBtn.textContent = "🔥一键清理";
+        cleanAllBtn.textContent = "一键清理";
         cleanAllBtn.style.cssText = "flex:1;height:60px;background:#ff6b6b;color:#fff;border:none;border-radius:4px;padding:4px;cursor:pointer;font-size:9px;font-weight:bold;transition:all 0.2s;display:flex;align-items:center;justify-content:center;writing-mode:vertical-rl;text-orientation:mixed;-webkit-writing-mode:vertical-rl;-ms-writing-mode:tb-rl";
 
         cleanAllBtn.addEventListener("click", async () => {
@@ -180,13 +356,17 @@ import { queueOnlyCurrentNode } from "./gjj_utils.js";
             refreshBtn,
             cleanMemBtn,
             cleanGpuBtn,
-            cleanAllBtn
+            cleanAllBtn,
+            purgeCacheToggle,
+            purgeModelsToggle,
+            topCleanMemBtn,
+            topCleanGpuBtn
         };
 
         const widget = node.addDOMWidget?.(STATUS_WIDGET_NAME, STATUS_WIDGET_NAME, box, {
             serialize: false,
             hideOnZoom: false,
-            getHeight: () => 280,
+            getHeight: () => 350,
         });
 
         statusObj.widget = widget;
@@ -228,6 +408,7 @@ import { queueOnlyCurrentNode } from "./gjj_utils.js";
 
         ensureStatusWidget(node);
         setStatus(node, "等待操作");
+        setTimeout(() => stabilizeNode(node), 0);
     }
 
     app.registerExtension({
@@ -239,6 +420,20 @@ import { queueOnlyCurrentNode } from "./gjj_utils.js";
                 nodeType.prototype.onNodeCreated = function () {
                     const r = orig?.apply(this, arguments);
                     patchNode(this);
+                    return r;
+                };
+
+                const origConfigure = nodeType.prototype.onConfigure;
+                nodeType.prototype.onConfigure = function () {
+                    const r = origConfigure?.apply(this, arguments);
+                    setTimeout(() => stabilizeNode(this), 0);
+                    return r;
+                };
+
+                const origOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+                nodeType.prototype.onConnectionsChange = function () {
+                    const r = origOnConnectionsChange?.apply(this, arguments);
+                    scheduleStabilize(this);
                     return r;
                 };
             }
@@ -263,6 +458,12 @@ import { queueOnlyCurrentNode } from "./gjj_utils.js";
                     console.error("[GJJ] 处理统计事件失败:", err);
                 }
             });
+
+            for (const node of app.graph?._nodes || []) {
+                if (node?.comfyClass === NODE_CLASS_NAME) {
+                    stabilizeNode(node);
+                }
+            }
         },
     });
 })();

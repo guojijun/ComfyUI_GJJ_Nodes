@@ -7,26 +7,28 @@ NODE_NAME = "GJJ_LTX2NAG"
 CATEGORY = "GJJ/LTX2"
 
 
-def _compute_attention(query, context, attn_precision=None, transformer_options=None):
-    if transformer_options is None:
-        transformer_options = {}
-    k = query.new_zeros(query.shape[0], query.shape[1], context.shape[2])
-    v = context
-    return comfy.ldm.modules.attention.optimized_attention(
-        query, k, v, heads=query.shape[1] // query.shape[2], attn_precision=attn_precision, transformer_options=transformer_options
-    ).flatten(1)
+def _compute_attention(self, query, context, attn_precision=None, transformer_options={}):
+    k = self.k_norm(self.to_k(context)).to(query.dtype)
+    v = self.to_v(context).to(query.dtype)
+    x = comfy.ldm.modules.attention.optimized_attention(
+        query, k, v, heads=self.heads, attn_precision=attn_precision, transformer_options=transformer_options
+    ).flatten(2)
+    del k, v
+    return x
 
 
-def nag_attention(self, query, context_positive, nag_context, attn_precision=None, transformer_options=None):
-    if transformer_options is None:
-        transformer_options = {}
-    x_positive = _compute_attention(query, context_positive, attn_precision, transformer_options)
-    x_negative = _compute_attention(query, nag_context, attn_precision, transformer_options)
+def nag_attention(self, query, context_positive, nag_context, attn_precision=None, transformer_options={}):
+    x_positive = _compute_attention(self, query, context_positive, attn_precision, transformer_options)
+    x_negative = _compute_attention(self, query, nag_context, attn_precision, transformer_options)
     return x_positive, x_negative
 
 
-def normalized_attention_guidance(nag_scale, nag_alpha, nag_tau, x_positive, x_negative):
-    nag_guidance = x_positive * nag_scale - x_negative * (nag_scale - 1)
+def normalized_attention_guidance(self, x_positive, x_negative):
+    if self.inplace:
+        nag_guidance = x_negative.mul_(self.nag_scale - 1).neg_().add_(x_positive, alpha=self.nag_scale)
+    else:
+        nag_guidance = x_positive * self.nag_scale - x_negative * (self.nag_scale - 1)
+
     del x_negative
 
     norm_positive = torch.norm(x_positive, p=1, dim=-1, keepdim=True)
@@ -34,19 +36,69 @@ def normalized_attention_guidance(nag_scale, nag_alpha, nag_tau, x_positive, x_n
 
     scale = norm_guidance / norm_positive
     torch.nan_to_num_(scale, nan=10.0)
-    mask = scale > nag_tau
+    mask = scale > self.nag_tau
     del scale
 
-    adjustment = (norm_positive * nag_tau) / (norm_guidance + 1e-7)
+    adjustment = (norm_positive * self.nag_tau) / (norm_guidance + 1e-7)
     del norm_positive, norm_guidance
 
-    nag_guidance = nag_guidance * torch.where(mask, adjustment, 1.0)
+    nag_guidance.mul_(torch.where(mask, adjustment, 1.0))
     del mask, adjustment
 
-    nag_guidance = nag_guidance * nag_alpha + x_positive * (1 - nag_alpha)
+    if self.inplace:
+        nag_guidance.sub_(x_positive).mul_(self.nag_alpha).add_(x_positive)
+    else:
+        nag_guidance = nag_guidance * self.nag_alpha + x_positive * (1 - self.nag_alpha)
     del x_positive
 
     return nag_guidance
+
+
+def ltxv_crossattn_forward_nag(self, x, context, mask=None, transformer_options={}, **kwargs):
+    # Single or [pos, neg] pair
+    if context.shape[0] == 1:
+        x_pos, context_pos = x, context
+        x_neg, context_neg = None, None
+    else:
+        x_pos, x_neg = torch.chunk(x, 2, dim=0)
+        context_pos, context_neg = torch.chunk(context, 2, dim=0)
+
+    # Positive
+    q_pos = self.q_norm(self.to_q(x_pos))
+    del x_pos
+
+    x_positive, x_negative = nag_attention(self, q_pos, context_pos, self.nag_context,
+                                            attn_precision=self.attn_precision,
+                                            transformer_options=transformer_options)
+    del context_pos, q_pos
+
+    x_pos_out = normalized_attention_guidance(self, x_positive, x_negative)
+    del x_positive, x_negative
+
+    # Negative
+    if x_neg is not None and context_neg is not None:
+        q_neg = self.q_norm(self.to_q(x_neg))
+        k_neg = self.k_norm(self.to_k(context_neg))
+        v_neg = self.to_v(context_neg)
+
+        x_neg_out = comfy.ldm.modules.attention.optimized_attention(
+            q_neg, k_neg, v_neg, heads=self.heads,
+            attn_precision=self.attn_precision,
+            transformer_options=transformer_options
+        )
+        out = torch.cat([x_pos_out, x_neg_out], dim=0)
+    else:
+        out = x_pos_out
+
+    if self.to_gate_logits is not None:
+        gate_logits = self.to_gate_logits(x)  # (B, T, H)
+        b, t, _ = out.shape
+        out = out.view(b, t, self.heads, self.dim_head)
+        gates = 2.0 * torch.sigmoid(gate_logits)  # zero-init -> identity
+        out = out * gates.unsqueeze(-1)
+        out = out.view(b, t, self.heads * self.dim_head)
+
+    return self.to_out(out)
 
 
 class LTXVCrossAttentionPatch:
@@ -58,58 +110,17 @@ class LTXVCrossAttentionPatch:
         self.inplace = inplace
 
     def __get__(self, obj, objtype=None):
-        def ltxv_crossattn_forward_nag(x, context=None, mask=None, transformer_options=None, **kwargs):
-            if transformer_options is None:
-                transformer_options = {}
+        # Create bound method with stored parameters
+        def wrapped_attention(self_module, *args, **kwargs):
+            self_module.nag_context = self.nag_context
+            self_module.nag_scale = self.nag_scale
+            self_module.nag_alpha = self.nag_alpha
+            self_module.nag_tau = self.nag_tau
+            self_module.inplace = self.inplace
 
-            if context is None:
-                context = x
+            return ltxv_crossattn_forward_nag(self_module, *args, **kwargs)
 
-            if context.shape[0] == 1:
-                x_pos, context_pos = x, context
-                x_neg, context_neg = None, None
-            else:
-                x_pos, x_neg = torch.chunk(x, 2, dim=0)
-                context_pos, context_neg = torch.chunk(context, 2, dim=0)
-
-            q_pos = obj.q_norm(obj.to_q(x_pos))
-            del x_pos
-
-            x_positive, x_negative = nag_attention(
-                obj, q_pos, context_pos, self.nag_context,
-                attn_precision=obj.attn_precision, transformer_options=transformer_options
-            )
-            del context_pos, q_pos
-
-            x_pos_out = normalized_attention_guidance(
-                self.nag_scale, self.nag_alpha, self.nag_tau, x_positive, x_negative
-            )
-            del x_positive, x_negative
-
-            if x_neg is not None and context_neg is not None:
-                q_neg = obj.q_norm(obj.to_q(x_neg))
-                k_neg = obj.k_norm(obj.to_k(context_neg))
-                v_neg = obj.to_v(context_neg)
-
-                x_neg_out = comfy.ldm.modules.attention.optimized_attention(
-                    q_neg, k_neg, v_neg, heads=obj.heads,
-                    attn_precision=obj.attn_precision, transformer_options=transformer_options
-                )
-                out = torch.cat([x_pos_out, x_neg_out], dim=0)
-            else:
-                out = x_pos_out
-
-            if obj.to_gate_logits is not None:
-                gate_logits = obj.to_gate_logits(x)
-                b, t, _ = out.shape
-                out = out.view(b, t, obj.heads, obj.dim_head)
-                gates = 2.0 * torch.sigmoid(gate_logits)
-                out = out * gates.unsqueeze(-1)
-                out = out.view(b, t, obj.heads * obj.dim_head)
-
-            return obj.to_out(out)
-
-        return types.MethodType(ltxv_crossattn_forward_nag, obj)
+        return types.MethodType(wrapped_attention, obj)
 
 
 class GJJ_LTX2NAG:

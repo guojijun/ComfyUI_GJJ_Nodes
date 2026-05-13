@@ -17,13 +17,82 @@ const NODE_NAME = "GJJ_NodeArranger";
 
 const MOVE_UNIT = 1;
 
-const DEFAULT_SPACING = 100;
+let DEFAULT_SPACING = 26;
+
+const LAYOUT_GAP_STEP = 8;
+const MIN_LAYOUT_GAP = 0;
+const MAX_LAYOUT_GAP = 240;
+let LAST_ARRANGE_MODE = "auto";
+
+const MIN_NODE_WIDTH = 80;
+const MIN_REROUTE_WIDTH = 24;
+const COLLAPSED_NODE_WIDTH = 80;
+const COLLAPSED_NODE_HEIGHT = 30;
+
+// 节点本身仍然压到最低宽度，但排列时用一个“视觉宽度”防止标题/接口文字互相覆盖。
+const MIN_LAYOUT_NODE_WIDTH = 168;
+const MAX_LAYOUT_NODE_WIDTH = 340;
+let HORIZONTAL_SAFE_GAP = 28;
+let VERTICAL_SAFE_GAP = 18;
+
+// 间距调节：想更松只改上面 3 个值：DEFAULT_SPACING / HORIZONTAL_SAFE_GAP / VERTICAL_SAFE_GAP。
+// 节点真实宽度仍保持最小，布局计算会按 MIN_LAYOUT_NODE_WIDTH 预留视觉空间，避免互相覆盖。
+
+// 智能作用范围：
+// - 没有选择：作用全部
+// - 全部选择：作用全部
+// - 只有部分选择：只作用所选
+function shouldUseSelectedOnly() {
+	const nodes = filterValidNodes(getAllGraphNodes(), false);
+	if (nodes.length === 0) return false;
+
+	const selectedCount = nodes.reduce((count, node) => count + (node.selected ? 1 : 0), 0);
+	return selectedCount > 0 && selectedCount < nodes.length;
+}
+
+function getSmartScopeLabel() {
+	return shouldUseSelectedOnly() ? "部分选择：仅作用所选节点" : "未选择或全选：作用全部节点";
+}
+
+function clampInteger(value, min, max) {
+	return Math.max(min, Math.min(max, Math.round(Number(value) || 0)));
+}
+
+function getColumnGap(spacing = DEFAULT_SPACING) {
+	return clampInteger(Math.max(HORIZONTAL_SAFE_GAP, spacing), MIN_LAYOUT_GAP, MAX_LAYOUT_GAP);
+}
+
+function getRowGap(spacing = DEFAULT_SPACING) {
+	return clampInteger(Math.max(VERTICAL_SAFE_GAP, spacing), MIN_LAYOUT_GAP, MAX_LAYOUT_GAP);
+}
+
+function adjustLayoutGap(axis, delta) {
+	const d = Math.round(Number(delta) || 0);
+	if (axis === "column") {
+		DEFAULT_SPACING = clampInteger(DEFAULT_SPACING + d, MIN_LAYOUT_GAP, MAX_LAYOUT_GAP);
+		HORIZONTAL_SAFE_GAP = clampInteger(HORIZONTAL_SAFE_GAP + d, MIN_LAYOUT_GAP, MAX_LAYOUT_GAP);
+		console.log(`[GJJ_NodeArranger] 列宽/横向间距: ${getColumnGap()}px`);
+		return;
+	}
+
+	VERTICAL_SAFE_GAP = clampInteger(VERTICAL_SAFE_GAP + d, MIN_LAYOUT_GAP, MAX_LAYOUT_GAP);
+	console.log(`[GJJ_NodeArranger] 行高/纵向间距: ${getRowGap()}px`);
+}
+
+function rerunLastArrangement() {
+	const mode = LAST_ARRANGE_MODE || "auto";
+	if (Object.values(TOPO_SORT_MODES).includes(mode)) {
+		arrangeTopologicalFromGraph(mode, shouldUseSelectedOnly(), DEFAULT_SPACING);
+		return;
+	}
+	arrangeNodes(mode, DEFAULT_SPACING, 10, 0.5, true, true, shouldUseSelectedOnly());
+}
 
 const REROUTE_TYPES = new Set([
 	"Reroute",
 	"PrimitiveNode",
-		"Reroute (rgthree)",
-		"ReroutePrimitive",
+	"Reroute (rgthree)",
+	"ReroutePrimitive",
 ]);
 
 const TOPO_SORT_MODES = {
@@ -71,8 +140,8 @@ function getTopoModeConfig(sortMode) {
 			levelStrategy: "sourceLongest",
 			xDirection: "leftToRight",
 			sortStrategy: "barycenter",
-			colWidth: 450,
-			rowGap: 40,
+			colWidth: 16,
+			rowGap: 14,
 			isolatedSide: "left",
 		},
 		[TOPO_SORT_MODES.TOPO_OUTPUT_ANCHOR]: {
@@ -80,8 +149,8 @@ function getTopoModeConfig(sortMode) {
 			levelStrategy: "sinkLongest",
 			xDirection: "rightOutput",
 			sortStrategy: "barycenter",
-			colWidth: 450,
-			rowGap: 40,
+			colWidth: 16,
+			rowGap: 14,
 			isolatedSide: "left",
 		},
 		[TOPO_SORT_MODES.TOPO_COMPACT]: {
@@ -89,8 +158,8 @@ function getTopoModeConfig(sortMode) {
 			levelStrategy: "sourceLongest",
 			xDirection: "leftToRight",
 			sortStrategy: "barycenter",
-			colWidth: 360,
-			rowGap: 40,
+			colWidth: 16,
+			rowGap: 14,
 			isolatedSide: "left",
 		},
 		[TOPO_SORT_MODES.TOPO_BRANCH]: {
@@ -98,8 +167,8 @@ function getTopoModeConfig(sortMode) {
 			levelStrategy: "sourceLongest",
 			xDirection: "leftToRight",
 			sortStrategy: "branch",
-			colWidth: 450,
-			rowGap: 40,
+			colWidth: 16,
+			rowGap: 14,
 			isolatedSide: "left",
 		},
 		[TOPO_SORT_MODES.TOPO_ORIGINAL_Y]: {
@@ -107,8 +176,8 @@ function getTopoModeConfig(sortMode) {
 			levelStrategy: "sourceLongest",
 			xDirection: "leftToRight",
 			sortStrategy: "originalY",
-			colWidth: 450,
-			rowGap: 40,
+			colWidth: 16,
+			rowGap: 14,
 			isolatedSide: "left",
 		},
 	};
@@ -120,8 +189,46 @@ function safeArray(value) {
 	return Array.isArray(value) ? value : [];
 }
 
-function getNodeWidth(node) {
+function getStoredNodeWidth(node) {
 	return Number(node?.size?.[0] || node?.size?.width || 240);
+}
+
+function measureTextWidthForLayout(text) {
+	let width = 0;
+	for (const ch of String(text || "")) {
+		width += /[⺀-鿿]/.test(ch) ? 14 : 8;
+	}
+	return width;
+}
+
+function getNodeTitleForLayout(node) {
+	return String(node?.title || node?.name || node?.comfyClass || node?.type || "");
+}
+
+function getLongestSlotTextWidth(node) {
+	let width = 0;
+	for (const input of safeArray(node?.inputs)) {
+		width = Math.max(width, measureTextWidthForLayout(input?.label || input?.name || input?.type || ""));
+	}
+	for (const output of safeArray(node?.outputs)) {
+		width = Math.max(width, measureTextWidthForLayout(output?.label || output?.name || output?.type || ""));
+	}
+	return width;
+}
+
+function getNodeWidth(node) {
+	if (isRerouteNode(node)) return Math.max(MIN_REROUTE_WIDTH, getStoredNodeWidth(node));
+
+	const titleWidth = measureTextWidthForLayout(getNodeTitleForLayout(node));
+	const slotWidth = getLongestSlotTextWidth(node);
+	const estimated = Math.max(
+		MIN_LAYOUT_NODE_WIDTH,
+		getStoredNodeWidth(node),
+		titleWidth + 44,
+		slotWidth + 72
+	);
+
+	return Math.min(MAX_LAYOUT_NODE_WIDTH, Math.round(estimated));
 }
 
 function getNodeHeight(node) {
@@ -152,6 +259,92 @@ function roundNodePosition(node) {
 
 function setNodePosition(node, x, y) {
 	node.pos = [Math.round(x), Math.round(y)];
+}
+
+function setNodeSize(node, width, height = null) {
+	if (!node) return;
+	const w = Math.max(1, Math.round(Number(width || 1)));
+	const currentH = getNodeHeight(node);
+	const h = Math.max(1, Math.round(Number(height == null ? currentH : height)));
+
+	if (Array.isArray(node.size)) {
+		node.size[0] = w;
+		node.size[1] = h;
+	} else {
+		node.size = [w, h];
+	}
+}
+
+function shrinkNodeWidth(node) {
+	if (!isRealNode(node)) return;
+	const width = isRerouteNode(node) ? MIN_REROUTE_WIDTH : MIN_NODE_WIDTH;
+	setNodeSize(node, width, null);
+}
+
+function shrinkNodeWidths(nodes) {
+	for (const node of filterValidNodes(nodes, false)) {
+		shrinkNodeWidth(node);
+	}
+}
+
+function isNodeCollapsed(node) {
+	return !!node?.flags?.collapsed;
+}
+
+function collapseNode(node) {
+	if (!isRealNode(node)) return;
+	if (!isNodeCollapsed(node)) {
+		node.__gjjNodeArrangerExpandedHeight = Math.max(COLLAPSED_NODE_HEIGHT, Math.round(getNodeHeight(node)));
+	}
+	node.flags = node.flags || {};
+	node.flags.collapsed = true;
+	const width = isRerouteNode(node) ? MIN_REROUTE_WIDTH : COLLAPSED_NODE_WIDTH;
+	setNodeSize(node, width, COLLAPSED_NODE_HEIGHT);
+}
+
+function expandNode(node) {
+	if (!isRealNode(node)) return;
+	node.flags = node.flags || {};
+	node.flags.collapsed = false;
+	const width = isRerouteNode(node) ? MIN_REROUTE_WIDTH : MIN_NODE_WIDTH;
+	const height = Math.max(80, Math.round(Number(node.__gjjNodeArrangerExpandedHeight || 0)));
+	setNodeSize(node, width, height);
+}
+
+function setAllNodesCollapsed(collapsed = true, selectedOnly = false) {
+	const validNodes = getGraphNodesForArrange(selectedOnly);
+	if (validNodes.length === 0) return [];
+
+	for (const node of validNodes) {
+		if (collapsed) {
+			collapseNode(node);
+		} else {
+			expandNode(node);
+		}
+	}
+
+	refreshAfterArrange(validNodes);
+	fitView(validNodes);
+	return validNodes;
+}
+
+function toggleAllNodesCollapsed(selectedOnly = false) {
+	const validNodes = getGraphNodesForArrange(selectedOnly);
+	if (validNodes.length === 0) return [];
+
+	const shouldExpand = validNodes.every((node) => isNodeCollapsed(node));
+	for (const node of validNodes) {
+		if (shouldExpand) {
+			expandNode(node);
+		} else {
+			collapseNode(node);
+		}
+	}
+
+	refreshAfterArrange(validNodes);
+	fitView(validNodes);
+	console.log(`[GJJ_NodeArranger] ${shouldExpand ? "全部打开" : "全部折叠"}`);
+	return validNodes;
 }
 
 function filterValidNodes(nodes, selectedOnly = false) {
@@ -190,13 +383,19 @@ function refreshAfterArrange(nodes = []) {
 	}
 }
 
-function fitView() {
+function fitView(nodes = null) {
 	try {
-		if (app.canvas?.fitViewToSelection) {
-			app.canvas.fitViewToSelection();
+		const targetNodes = filterValidNodes(nodes || getAllGraphNodes(), false);
+		refreshAfterArrange(targetNodes);
+
+		// 不再临时改 selected，避免鼠标悬停/重绘时触发布局或选中状态异常。
+		// 优先尝试 ComfyUI/LiteGraph 自带的全局适配视图能力。
+		if (app.canvas?.fitView && typeof app.canvas.fitView === "function") {
+			app.canvas.fitView();
 			return;
 		}
 
+		// 退回到 ComfyUI 的“适配视图”快捷键。这里不修改任何节点状态。
 		const keyEvent = new KeyboardEvent("keydown", {
 			key: ".",
 			code: "Period",
@@ -236,10 +435,6 @@ function getGraphNodesForArrange(selectedOnly = false) {
 	}
 
 	const validNodes = filterValidNodes(graph._nodes, selectedOnly);
-
-	if (validNodes.length === 0) {
-		showMessage(selectedOnly ? "没有选中的可排列节点" : "没有可排列的节点");
-	}
 
 	return validNodes;
 }
@@ -406,7 +601,7 @@ function calculateRelaxPosition(node, nodes, relaxPower, distance, clampedPull =
 	return false;
 }
 
-function avoidCollisions(nodes, distance = 100, power = 0.5, onlyY = false) {
+function avoidCollisions(nodes, distance = 30, power = 0.5, onlyY = false) {
 	let moved = false;
 
 	for (const node of nodes) {
@@ -901,7 +1096,7 @@ function placeIsolatedNodes(isolatedNodes, layerGroups, config) {
 
 	for (const node of isolatedNodes) {
 		setNodePosition(node, isolatedX, currentY);
-		currentY += getNodeHeight(node) + Math.max(80, config.rowGap * 0.75);
+		currentY += getNodeHeight(node) + Math.max(0, Math.round(config.rowGap * 0.75));
 	}
 }
 
@@ -957,22 +1152,536 @@ function placeRerouteNodes(rerouteNodes, normalNodes) {
 		} else if (sourceNode) {
 			setNodePosition(
 				reroute,
-				getNodeX(sourceNode) + getNodeWidth(sourceNode) + 120,
+				getNodeX(sourceNode) + getNodeWidth(sourceNode),
 				getNodeY(sourceNode)
 			);
 		} else if (targetNode) {
 			setNodePosition(
 				reroute,
-				getNodeX(targetNode) - 160,
+				getNodeX(targetNode) - getNodeWidth(reroute),
 				getNodeY(targetNode)
 			);
 		}
 	}
 }
 
+
+function getNodeTypeName(node) {
+	return String(node?.comfyClass || node?.type || node?.constructor?.name || "").toLowerCase();
+}
+
+function getConnectedInputSlots(node) {
+	return safeArray(node.inputs)
+		.map((input, index) => ({ input, index }))
+		.filter((item) => !!item.input?.link);
+}
+
+function getConnectedOutputSlots(node) {
+	return safeArray(node.outputs)
+		.map((output, index) => ({ output, index }))
+		.filter((item) => Array.isArray(item.output?.links) && item.output.links.length > 0);
+}
+
+function getFirstLinkedSlotIndex(node, backward, forward) {
+	let best = 999999;
+
+	for (const { index } of getConnectedInputSlots(node)) {
+		best = Math.min(best, index);
+	}
+	for (const { index } of getConnectedOutputSlots(node)) {
+		best = Math.min(best, index);
+	}
+
+	if (best !== 999999) return best;
+
+	return (backward.get(node)?.size || 0) * 100 + (forward.get(node)?.size || 0);
+}
+
+function sortLayerByInterfaceOrder(nodes, backward, forward) {
+	nodes.sort((a, b) => {
+		const ai = getFirstLinkedSlotIndex(a, backward, forward);
+		const bi = getFirstLinkedSlotIndex(b, backward, forward);
+		if (ai !== bi) return ai - bi;
+
+		const ay = getNodeY(a);
+		const by = getNodeY(b);
+		if (ay !== by) return ay - by;
+
+		return getNodeX(a) - getNodeX(b);
+	});
+}
+
+function getLayerColumnWidth(nodes) {
+	return Math.max(1, ...safeArray(nodes).map((node) => Math.round(getNodeWidth(node))));
+}
+
+function getMaxLayerHeight(nodes) {
+	return Math.max(1, ...safeArray(nodes).map((node) => Math.round(getNodeHeight(node))));
+}
+
+function calculateCompactXPositions(layerGroups, spacing = 0, reverse = false) {
+	const levels = Array.from(layerGroups.keys()).sort((a, b) => a - b);
+	const orderedLevels = reverse ? [...levels].reverse() : levels;
+	const xByLevel = new Map();
+	let currentX = 0;
+
+	for (const level of orderedLevels) {
+		const layerNodes = layerGroups.get(level) || [];
+		xByLevel.set(level, currentX);
+		currentX += getLayerColumnWidth(layerNodes) + Math.max(0, Math.round(spacing));
+	}
+
+	return xByLevel;
+}
+
+function packLayerY(nodes, preferredY, spacing = 0) {
+	const gap = Math.max(0, Math.round(spacing));
+	const sorted = [...nodes].sort((a, b) => {
+		const ay = Number(preferredY.get(a) ?? getNodeY(a));
+		const by = Number(preferredY.get(b) ?? getNodeY(b));
+		if (ay !== by) return ay - by;
+		return getFirstLinkedSlotIndex(a, new Map(), new Map()) - getFirstLinkedSlotIndex(b, new Map(), new Map());
+	});
+
+	let currentY = 0;
+	for (const node of sorted) {
+		const y = Math.max(Math.round(preferredY.get(node) ?? 0), currentY);
+		setNodePosition(node, getNodeX(node), y);
+		currentY = y + Math.round(getNodeHeight(node)) + gap;
+	}
+}
+
+function getConnectedCenterY(node, connectedNodes) {
+	if (!connectedNodes || connectedNodes.length === 0) return null;
+	let sum = 0;
+	let count = 0;
+	for (const other of connectedNodes) {
+		sum += getNodeY(other) + getNodeHeight(other) / 2;
+		count++;
+	}
+	return count > 0 ? sum / count - getNodeHeight(node) / 2 : null;
+}
+
+function arrangeInterfaceAligned(normalNodes, forward, backward, columnGap = 0, rowGap = columnGap) {
+	const levels = calculateSinkLongestLevels(normalNodes, forward);
+	const layerGroups = groupByLevel(normalNodes, levels);
+
+	for (const layer of layerGroups.values()) {
+		sortLayerByInterfaceOrder(layer, backward, forward);
+	}
+
+	const xByLevel = calculateCompactXPositions(layerGroups, columnGap, true);
+	const sortedLevels = Array.from(layerGroups.keys()).sort((a, b) => b - a);
+
+	for (const level of sortedLevels) {
+		const layer = layerGroups.get(level) || [];
+		let y = 0;
+		for (const node of layer) {
+			setNodePosition(node, xByLevel.get(level) || 0, y);
+			y += Math.round(getNodeHeight(node)) + Math.max(0, Math.round(rowGap));
+		}
+	}
+
+	for (let iter = 0; iter < 4; iter++) {
+		for (const level of sortedLevels) {
+			const layer = layerGroups.get(level) || [];
+			const preferredY = new Map();
+
+			for (const node of layer) {
+				const parents = Array.from(backward.get(node) || []);
+				const children = Array.from(forward.get(node) || []);
+				const connected = [...parents, ...children].filter((other) => other && getNodeX(other) !== getNodeX(node));
+				const centerY = getConnectedCenterY(node, connected);
+				preferredY.set(node, centerY == null ? getNodeY(node) : centerY);
+			}
+
+			packLayerY(layer, preferredY, rowGap);
+		}
+	}
+}
+
+function classifyNodeBlock(node, inDegree, outDegree) {
+	const t = getNodeTypeName(node);
+
+	if ((inDegree.get(node) || 0) === 0 && (outDegree.get(node) || 0) > 0) return "01 输入";
+	if ((outDegree.get(node) || 0) === 0 && (inDegree.get(node) || 0) > 0) return "02 输出";
+	if (/loader|checkpoint|unet|vae|clip|lora|model/.test(t)) return "03 模型";
+	if (/sampler|sample|scheduler|ksampler/.test(t)) return "04 采样";
+	if (/conditioning|encode|prompt|text|cliptext/.test(t)) return "05 条件";
+	if (/image|latent|mask|vae/.test(t)) return "06 图像";
+	if (/video|frame|ltx|wan/.test(t)) return "07 视频";
+	if (/audio|sound|tts|stt|voice/.test(t)) return "08 音频";
+	if (/preview|save|output|viewer/.test(t)) return "09 输出工具";
+	return "10 其它";
+}
+
+function arrangeNodesInSquareBlock(nodes, x, y, columnGap = 0, rowGap = columnGap) {
+	if (!nodes.length) return { width: 0, height: 0 };
+
+	const colGap = Math.max(0, Math.round(columnGap));
+	const rGap = Math.max(0, Math.round(rowGap));
+	const maxW = getLayerColumnWidth(nodes);
+	const maxH = getMaxLayerHeight(nodes);
+	const cols = Math.max(1, Math.ceil(Math.sqrt(nodes.length)));
+
+	let maxRight = x;
+	let maxBottom = y;
+
+	nodes.sort((a, b) => {
+		const dy = getNodeY(a) - getNodeY(b);
+		if (dy !== 0) return dy;
+		return getNodeX(a) - getNodeX(b);
+	});
+
+	for (let i = 0; i < nodes.length; i++) {
+		const col = i % cols;
+		const row = Math.floor(i / cols);
+		const nx = x + col * (maxW + colGap);
+		const ny = y + row * (maxH + rGap);
+		setNodePosition(nodes[i], nx, ny);
+		maxRight = Math.max(maxRight, nx + getNodeWidth(nodes[i]));
+		maxBottom = Math.max(maxBottom, ny + getNodeHeight(nodes[i]));
+	}
+
+	return {
+		width: Math.round(maxRight - x),
+		height: Math.round(maxBottom - y),
+	};
+}
+
+function arrangeTypeBlocksSquare(normalNodes, inDegree, outDegree, columnGap = 0, rowGap = columnGap) {
+	const colGap = Math.max(0, Math.round(columnGap));
+	const rGap = Math.max(0, Math.round(rowGap));
+	const blocks = new Map();
+
+	for (const node of normalNodes) {
+		const key = classifyNodeBlock(node, inDegree, outDegree);
+		if (!blocks.has(key)) blocks.set(key, []);
+		blocks.get(key).push(node);
+	}
+
+	const entries = Array.from(blocks.entries()).sort((a, b) => a[0].localeCompare(b[0], "zh-Hans-CN"));
+	const blockCount = entries.length;
+	const blockCols = Math.max(1, Math.ceil(Math.sqrt(blockCount)));
+
+	const measured = entries.map(([key, list]) => {
+		const cols = Math.max(1, Math.ceil(Math.sqrt(list.length)));
+		const rows = Math.ceil(list.length / cols);
+		const maxW = getLayerColumnWidth(list);
+		const maxH = getMaxLayerHeight(list);
+		return {
+			key,
+			list,
+			width: cols * maxW + Math.max(0, cols - 1) * colGap,
+			height: rows * maxH + Math.max(0, rows - 1) * rGap,
+		};
+	});
+
+	const cellW = Math.max(1, ...measured.map((item) => item.width));
+	const cellH = Math.max(1, ...measured.map((item) => item.height));
+
+	for (let i = 0; i < measured.length; i++) {
+		const item = measured[i];
+		const col = i % blockCols;
+		const row = Math.floor(i / blockCols);
+		const x = col * (cellW + colGap);
+		const y = row * (cellH + rGap);
+		arrangeNodesInSquareBlock(item.list, x, y, colGap, rGap);
+	}
+}
+
+function collectRootsForNode(node, backward, rootSet, visited = new Set()) {
+	if (!node || visited.has(node)) return [];
+	visited.add(node);
+
+	if (rootSet.has(node)) return [node];
+
+	const parents = Array.from(backward.get(node) || []);
+	let roots = [];
+	for (const parent of parents) {
+		roots.push(...collectRootsForNode(parent, backward, rootSet, new Set(visited)));
+	}
+
+	return Array.from(new Set(roots));
+}
+
+function arrangeInputTopBranches(normalNodes, forward, backward, inDegree, outDegree, columnGap = 0, rowGap = columnGap) {
+	const colGap = Math.max(0, Math.round(columnGap));
+	const rGap = Math.max(0, Math.round(rowGap));
+	const roots = normalNodes
+		.filter((node) => (inDegree.get(node) || 0) === 0)
+		.sort((a, b) => getFirstLinkedSlotIndex(a, backward, forward) - getFirstLinkedSlotIndex(b, backward, forward));
+
+	if (roots.length === 0) {
+		arrangeInterfaceAligned(normalNodes, forward, backward, columnGap, rowGap);
+		return;
+	}
+
+	const rootSet = new Set(roots);
+	const levels = calculateSourceLongestLevels(normalNodes, backward);
+	const branchMap = new Map();
+	for (const root of roots) branchMap.set(root, []);
+
+	for (const node of normalNodes) {
+		const rootsForNode = collectRootsForNode(node, backward, rootSet);
+		const owner = rootsForNode[0] || roots[0];
+		branchMap.get(owner).push(node);
+	}
+
+	let currentX = 0;
+	const rootCenters = new Map();
+
+	for (const root of roots) {
+		const branchNodes = branchMap.get(root) || [root];
+		const maxW = getLayerColumnWidth(branchNodes);
+		const rootX = currentX + Math.round((maxW - getNodeWidth(root)) / 2);
+		setNodePosition(root, rootX, 0);
+		rootCenters.set(root, currentX + Math.round(maxW / 2));
+		currentX += maxW + colGap;
+	}
+
+	for (const root of roots) {
+		const branchNodes = (branchMap.get(root) || []).filter((node) => node !== root);
+		const byLevel = new Map();
+
+		for (const node of branchNodes) {
+			const level = Math.max(1, Number(levels.get(node) || 1));
+			if (!byLevel.has(level)) byLevel.set(level, []);
+			byLevel.get(level).push(node);
+		}
+
+		const centerX = rootCenters.get(root) || 0;
+		let currentY = getNodeHeight(root) + rGap;
+		const levelKeys = Array.from(byLevel.keys()).sort((a, b) => a - b);
+
+		for (const level of levelKeys) {
+			const layer = byLevel.get(level) || [];
+			sortLayerByInterfaceOrder(layer, backward, forward);
+			let layerY = currentY;
+			const layerW = getLayerColumnWidth(layer);
+			const cols = Math.max(1, Math.ceil(Math.sqrt(layer.length)));
+			const rows = Math.ceil(layer.length / cols);
+			const startX = centerX - Math.round((cols * layerW + Math.max(0, cols - 1) * colGap) / 2);
+
+			for (let i = 0; i < layer.length; i++) {
+				const col = i % cols;
+				const row = Math.floor(i / cols);
+				const node = layer[i];
+				setNodePosition(node, startX + col * (layerW + colGap), layerY + row * (getMaxLayerHeight(layer) + rGap));
+			}
+
+			currentY += rows * getMaxLayerHeight(layer) + Math.max(0, rows - 1) * rGap + rGap;
+		}
+	}
+}
+
+function rectForNode(node, gap = DEFAULT_SPACING) {
+	const g = Math.max(0, Math.round(gap));
+	return {
+		x: getNodeX(node),
+		y: getNodeY(node),
+		w: getNodeWidth(node),
+		h: getNodeHeight(node),
+		right: getNodeX(node) + getNodeWidth(node) + g,
+		bottom: getNodeY(node) + getNodeHeight(node) + g,
+	};
+}
+
+function resolveNodeOverlaps(nodes, spacing = DEFAULT_SPACING) {
+	const validNodes = filterValidNodes(nodes, false).filter((node) => !isRerouteNode(node));
+	const gap = Math.max(0, Math.round(spacing));
+	let changed = false;
+
+	for (let iter = 0; iter < 12; iter++) {
+		changed = false;
+		validNodes.sort((a, b) => {
+			const dy = getNodeY(a) - getNodeY(b);
+			if (dy !== 0) return dy;
+			return getNodeX(a) - getNodeX(b);
+		});
+
+		for (let i = 0; i < validNodes.length; i++) {
+			const a = validNodes[i];
+			const ar = rectForNode(a, gap);
+
+			for (let j = i + 1; j < validNodes.length; j++) {
+				const b = validNodes[j];
+				const br = rectForNode(b, gap);
+
+				const overlapX = ar.x < br.right && ar.right > br.x;
+				const overlapY = ar.y < br.bottom && ar.bottom > br.y;
+				if (!overlapX || !overlapY) continue;
+
+				// 优先向下错开，保持整体横向紧凑；只有同一行邻列压住时才右移。
+				const sameRow = Math.abs(getNodeY(a) - getNodeY(b)) <= gap;
+				if (sameRow && getNodeX(b) > getNodeX(a)) {
+					setNodePosition(b, ar.right, getNodeY(b));
+				} else {
+					setNodePosition(b, getNodeX(b), ar.bottom);
+				}
+				changed = true;
+			}
+		}
+
+		if (!changed) break;
+	}
+}
+
+function normalizeArrangementOrigin(nodes) {
+	const validNodes = filterValidNodes(nodes, false);
+	if (!validNodes.length) return;
+
+	const minX = Math.min(...validNodes.map(getNodeX));
+	const minY = Math.min(...validNodes.map(getNodeY));
+
+	for (const node of validNodes) {
+		setNodePosition(node, getNodeX(node) - minX, getNodeY(node) - minY);
+	}
+}
+
+
+function getBoundsForNodes(nodes, gap = 0) {
+	const validNodes = filterValidNodes(nodes, false);
+	if (!validNodes.length) return null;
+
+	const g = Math.max(0, Math.round(gap));
+	const minX = Math.min(...validNodes.map(getNodeX));
+	const minY = Math.min(...validNodes.map(getNodeY));
+	const maxX = Math.max(...validNodes.map((node) => getNodeX(node) + getNodeWidth(node) + g));
+	const maxY = Math.max(...validNodes.map((node) => getNodeY(node) + getNodeHeight(node) + g));
+
+	return {
+		x: Math.round(minX),
+		y: Math.round(minY),
+		width: Math.round(maxX - minX),
+		height: Math.round(maxY - minY),
+		right: Math.round(maxX),
+		bottom: Math.round(maxY),
+	};
+}
+
+function isPartialArrangementScope(nodes) {
+	const allNodes = filterValidNodes(getAllGraphNodes(), false);
+	const targetNodes = filterValidNodes(nodes, false);
+	return targetNodes.length > 0 && targetNodes.length < allNodes.length;
+}
+
+function getFixedNodesForPartialScope(nodes) {
+	const targetSet = new Set(filterValidNodes(nodes, false));
+	return filterValidNodes(getAllGraphNodes(), false).filter((node) => !targetSet.has(node));
+}
+
+function moveNodesBy(nodes, dx, dy) {
+	const x = Math.round(Number(dx) || 0);
+	const y = Math.round(Number(dy) || 0);
+	if (x === 0 && y === 0) return;
+	for (const node of filterValidNodes(nodes, false)) {
+		setNodePosition(node, getNodeX(node) + x, getNodeY(node) + y);
+	}
+}
+
+function getPartialScopeBaseline(targetNodes, fixedNodes, fallbackBounds, gap = DEFAULT_SPACING) {
+	const targetSet = new Set(filterValidNodes(targetNodes, false));
+	const fixedSet = new Set(filterValidNodes(fixedNodes, false));
+	const candidatesX = [];
+	const candidatesY = [];
+	const g = Math.max(0, Math.round(gap));
+
+	for (const node of targetSet) {
+		for (const input of safeArray(node.inputs)) {
+			if (!input?.link) continue;
+			const link = getLinkById(input.link);
+			const source = link?.origin_id != null ? getNodeById(link.origin_id) : null;
+			if (!source || !fixedSet.has(source)) continue;
+
+			candidatesX.push(getNodeX(source) + getNodeWidth(source) + g - getNodeX(node));
+			candidatesY.push(getNodeY(source) + getNodeHeight(source) / 2 - getNodeHeight(node) / 2 - getNodeY(node));
+		}
+
+		for (const output of safeArray(node.outputs)) {
+			for (const linkId of safeArray(output?.links)) {
+				const link = getLinkById(linkId);
+				const target = link?.target_id != null ? getNodeById(link.target_id) : null;
+				if (!target || !fixedSet.has(target)) continue;
+
+				candidatesX.push(getNodeX(target) - getNodeWidth(node) - g - getNodeX(node));
+				candidatesY.push(getNodeY(target) + getNodeHeight(target) / 2 - getNodeHeight(node) / 2 - getNodeY(node));
+			}
+		}
+	}
+
+	if (candidatesX.length > 0) {
+		const avgX = candidatesX.reduce((sum, value) => sum + value, 0) / candidatesX.length;
+		const avgY = candidatesY.reduce((sum, value) => sum + value, 0) / Math.max(1, candidatesY.length);
+		return { dx: Math.round(avgX), dy: Math.round(avgY) };
+	}
+
+	const current = getBoundsForNodes(targetNodes, gap);
+	if (!current || !fallbackBounds) return { dx: 0, dy: 0 };
+	return {
+		dx: Math.round(fallbackBounds.x - current.x),
+		dy: Math.round(fallbackBounds.y - current.y),
+	};
+}
+
+function boundsOverlap(a, b) {
+	return !!a && !!b && a.x < b.right && a.right > b.x && a.y < b.bottom && a.bottom > b.y;
+}
+
+function avoidFixedNodeOverlaps(targetNodes, fixedNodes, gap = DEFAULT_SPACING) {
+	const target = filterValidNodes(targetNodes, false);
+	const fixed = filterValidNodes(fixedNodes, false);
+	if (!target.length || !fixed.length) return;
+
+	const g = Math.max(0, Math.round(gap));
+	for (let iter = 0; iter < 24; iter++) {
+		const targetBounds = getBoundsForNodes(target, g);
+		let moved = false;
+
+		for (const fixedNode of fixed) {
+			const fixedBounds = getBoundsForNodes([fixedNode], g);
+			if (!boundsOverlap(targetBounds, fixedBounds)) continue;
+
+			const pushRight = fixedBounds.right - targetBounds.x + g;
+			const pushDown = fixedBounds.bottom - targetBounds.y + g;
+			if (Math.abs(pushRight) <= Math.abs(pushDown)) {
+				moveNodesBy(target, pushRight, 0);
+			} else {
+				moveNodesBy(target, 0, pushDown);
+			}
+			moved = true;
+			break;
+		}
+
+		if (!moved) break;
+	}
+}
+
+function finalizeArrangementPosition(targetNodes, beforeBounds, columnGap = DEFAULT_SPACING, rowGap = columnGap) {
+	const targets = filterValidNodes(targetNodes, false);
+	if (!targets.length) return;
+
+	const partial = isPartialArrangementScope(targets);
+	const fixedNodes = partial ? getFixedNodesForPartialScope(targets) : [];
+	const gap = Math.max(getColumnGap(columnGap), getRowGap(rowGap));
+
+	normalizeArrangementOrigin(targets);
+
+	if (partial) {
+		const baseline = getPartialScopeBaseline(targets, fixedNodes, beforeBounds, gap);
+		moveNodesBy(targets, baseline.dx, baseline.dy);
+		avoidFixedNodeOverlaps(targets, fixedNodes, gap);
+	}
+}
+
 async function arrangeTopological(nodes, spacing = DEFAULT_SPACING, sortMode = TOPO_SORT_MODES.TOPO_MAIN_PATH) {
 	const validNodes = filterValidNodes(nodes, false);
+	const beforeBounds = getBoundsForNodes(validNodes, Math.max(getColumnGap(spacing), getRowGap(spacing)));
+	shrinkNodeWidths(validNodes);
 	const config = getTopoModeConfig(sortMode);
+	const colGap = getColumnGap(spacing);
+	const rowGap = getRowGap(spacing);
+	const gap = Math.max(colGap, rowGap);
 
 	console.log(`[GJJ_NodeArranger] Starting ${config.name}, nodes=${validNodes.length}`);
 
@@ -993,38 +1702,57 @@ async function arrangeTopological(nodes, spacing = DEFAULT_SPACING, sortMode = T
 	if (normalNodes.length === 0) {
 		placeRerouteNodes(rerouteNodes, []);
 		refreshAfterArrange(validNodes);
+		fitView(validNodes);
 		return;
 	}
 
-	const isolatedNodes = separateIsolatedNodes(normalNodes, inDegree, outDegree);
-	const connectedNodes = normalNodes.filter((node) => !isolatedNodes.includes(node));
-
-	let levels;
-
-	if (config.levelStrategy === "sinkLongest") {
-		levels = calculateSinkLongestLevels(connectedNodes, forward);
+	if (sortMode === TOPO_SORT_MODES.TOPO_MAIN_PATH) {
+		// 1. 主链路：以输出锚定为蓝本，按接口顺序计算 Y 轴顺序，
+		//    上游/下游尽量按连接节点中心对齐。
+		arrangeInterfaceAligned(normalNodes, forward, backward, colGap, rowGap);
+	} else if (sortMode === TOPO_SORT_MODES.TOPO_COMPACT) {
+		// 2. 紧凑层级：输入、输出和其它节点按类型分块，整体尽量形成方形区域。
+		arrangeTypeBlocksSquare(normalNodes, inDegree, outDegree, colGap, rowGap);
+	} else if (sortMode === TOPO_SORT_MODES.TOPO_BRANCH) {
+		// 3. 分支优先：输入放第一行，下游放下方并尽量与输入中心对齐。
+		arrangeInputTopBranches(normalNodes, forward, backward, inDegree, outDegree, colGap, rowGap);
 	} else {
-		levels = calculateSourceLongestLevels(connectedNodes, backward);
+		const isolatedNodes = separateIsolatedNodes(normalNodes, inDegree, outDegree);
+		const connectedNodes = normalNodes.filter((node) => !isolatedNodes.includes(node));
+
+		let levels;
+
+		if (config.levelStrategy === "sinkLongest") {
+			levels = calculateSinkLongestLevels(connectedNodes, forward);
+		} else {
+			levels = calculateSourceLongestLevels(connectedNodes, backward);
+		}
+
+		const layerGroups = groupByLevel(connectedNodes, levels);
+		sortLayerGroups(layerGroups, levels, forward, backward, config.sortStrategy);
+
+		const xByLevel = calculateLevelXPositions(layerGroups, {
+			...config,
+			colWidth: Math.max(HORIZONTAL_SAFE_GAP, config.colWidth + colGap),
+		});
+
+		placeLayeredNodes(layerGroups, xByLevel, {
+			...config,
+			rowGap: Math.max(VERTICAL_SAFE_GAP, config.rowGap + rowGap),
+		});
+
+		placeIsolatedNodes(isolatedNodes, layerGroups, {
+			...config,
+			colWidth: Math.max(HORIZONTAL_SAFE_GAP, config.colWidth + colGap),
+			rowGap: Math.max(VERTICAL_SAFE_GAP, config.rowGap + rowGap),
+		});
 	}
 
-	const layerGroups = groupByLevel(connectedNodes, levels);
-	sortLayerGroups(layerGroups, levels, forward, backward, config.sortStrategy);
-
-	const xByLevel = calculateLevelXPositions(layerGroups, {
-		...config,
-		colWidth: Math.max(120, config.colWidth + spacing - DEFAULT_SPACING),
-	});
-
-	placeLayeredNodes(layerGroups, xByLevel, {
-		...config,
-		rowGap: Math.max(40, config.rowGap + spacing - DEFAULT_SPACING),
-	});
-
-	placeIsolatedNodes(isolatedNodes, layerGroups, config);
+	resolveNodeOverlaps(normalNodes, gap);
 	placeRerouteNodes(rerouteNodes, normalNodes);
-
+	finalizeArrangementPosition(validNodes, beforeBounds, colGap, rowGap);
 	refreshAfterArrange(validNodes);
-	fitView();
+	fitView(validNodes);
 
 	await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -1069,7 +1797,7 @@ async function arrangeAuto(nodes, spacing = DEFAULT_SPACING, iterations = 10, re
 	}
 
 	refreshAfterArrange(nodes);
-	fitView();
+	fitView(nodes);
 
 	console.log("[GJJ_NodeArranger] Auto arrangement completed");
 }
@@ -1086,7 +1814,10 @@ async function arrangeNodes(
 	const validNodes = getGraphNodesForArrange(selectedOnly);
 	if (validNodes.length === 0) return;
 
-	console.log(`[GJJ_NodeArranger] arrangeNodes mode=${mode}, nodes=${validNodes.length}`);
+	LAST_ARRANGE_MODE = mode;
+	const beforeBounds = getBoundsForNodes(validNodes, Math.max(getColumnGap(spacing), getRowGap(spacing)));
+	shrinkNodeWidths(validNodes);
+	console.log(`[GJJ_NodeArranger] arrangeNodes mode=${mode}, nodes=${validNodes.length}, scope=${selectedOnly ? "selected" : "all"}`);
 
 	switch (mode) {
 		case "horizontal":
@@ -1119,19 +1850,24 @@ async function arrangeNodes(
 			break;
 	}
 
+	if (["horizontal", "vertical", "grid"].includes(mode)) {
+		finalizeArrangementPosition(validNodes, beforeBounds, getColumnGap(spacing), getRowGap(spacing));
+	}
+
 	refreshAfterArrange(validNodes);
-	fitView();
+	fitView(validNodes);
 }
 
 function arrangeTopologicalFromGraph(sortMode = TOPO_SORT_MODES.TOPO_MAIN_PATH, selectedOnly = false, spacing = DEFAULT_SPACING) {
 	const validNodes = getGraphNodesForArrange(selectedOnly);
 	if (validNodes.length === 0) return;
+	LAST_ARRANGE_MODE = sortMode;
 	return arrangeTopological(validNodes, spacing, sortMode);
 }
 
 function createMenuCallback(mode) {
 	return () => {
-		arrangeNodes(mode, DEFAULT_SPACING, 10, 0.5, true, true, false);
+		arrangeNodes(mode, DEFAULT_SPACING, 10, 0.5, true, true, shouldUseSelectedOnly());
 	};
 }
 
@@ -1159,23 +1895,27 @@ function addContextMenuItems() {
 					null,
 					{
 						content: "🔢 拓扑排序：主链路",
-						callback: () => arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_MAIN_PATH, false, DEFAULT_SPACING),
+						callback: () => arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_MAIN_PATH, shouldUseSelectedOnly(), DEFAULT_SPACING),
 					},
 					{
 						content: "🎯 拓扑排序：输出锚定",
-						callback: () => arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_OUTPUT_ANCHOR, false, DEFAULT_SPACING),
+						callback: () => arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_OUTPUT_ANCHOR, shouldUseSelectedOnly(), DEFAULT_SPACING),
 					},
 					{
 						content: "🧩 拓扑排序：紧凑层级",
-						callback: () => arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_COMPACT, false, DEFAULT_SPACING),
+						callback: () => arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_COMPACT, shouldUseSelectedOnly(), DEFAULT_SPACING),
 					},
 					{
 						content: "🌿 拓扑排序：分支优先",
-						callback: () => arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_BRANCH, false, DEFAULT_SPACING),
+						callback: () => arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_BRANCH, shouldUseSelectedOnly(), DEFAULT_SPACING),
+					},
+					{
+						content: "📦 全部折叠 / 全部打开",
+						callback: () => toggleAllNodesCollapsed(shouldUseSelectedOnly()),
 					},
 					{
 						content: "↕️ 拓扑排序：保持上下",
-						callback: () => arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_ORIGINAL_Y, false, DEFAULT_SPACING),
+						callback: () => arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_ORIGINAL_Y, shouldUseSelectedOnly(), DEFAULT_SPACING),
 					},
 					null,
 					{
@@ -1189,11 +1929,6 @@ function addContextMenuItems() {
 					{
 						content: "⊞ 网格排列",
 						callback: createMenuCallback("grid"),
-					},
-					null,
-					{
-						content: "✅ 仅选中：拓扑主链路",
-						callback: () => arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_MAIN_PATH, true, DEFAULT_SPACING),
 					},
 				],
 			},
@@ -1264,21 +1999,21 @@ function addTopBarButtons() {
 
 		const arrangeBtn = document.createElement("button");
 		arrangeBtn.textContent = "📐 排列节点";
-		arrangeBtn.title = "智能排列工作流中的节点";
+		arrangeBtn.title = "智能排列；部分选择时只排列所选，未选择或全选时排列全部";
 		arrangeBtn.style.cssText = buttonStyle();
 		installHoverStyle(arrangeBtn);
 		arrangeBtn.addEventListener("click", () => {
-			arrangeNodes("auto", DEFAULT_SPACING, 10, 0.5, true, true, false);
+			arrangeNodes("auto", DEFAULT_SPACING, 10, 0.5, true, true, shouldUseSelectedOnly());
 		});
 		group.appendChild(arrangeBtn);
 
 		const topoBtn = document.createElement("button");
 		topoBtn.textContent = "🔢 拓扑排序";
-		topoBtn.title = "默认使用：拓扑主链路";
+		topoBtn.title = "默认使用：拓扑主链路；部分选择时只排列所选";
 		topoBtn.style.cssText = buttonStyle();
 		installHoverStyle(topoBtn);
 		topoBtn.addEventListener("click", () => {
-			arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_MAIN_PATH, false, DEFAULT_SPACING);
+			arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_MAIN_PATH, shouldUseSelectedOnly(), DEFAULT_SPACING);
 		});
 		group.appendChild(topoBtn);
 
@@ -1304,10 +2039,20 @@ function addTopBarButtons() {
 		}
 
 		topoSelect.addEventListener("change", () => {
-			arrangeTopologicalFromGraph(topoSelect.value, false, DEFAULT_SPACING);
+			arrangeTopologicalFromGraph(topoSelect.value, shouldUseSelectedOnly(), DEFAULT_SPACING);
 		});
 
 		group.appendChild(topoSelect);
+
+		const collapseBtn = document.createElement("button");
+		collapseBtn.textContent = "📦 折叠/打开";
+		collapseBtn.title = "折叠/打开；部分选择时只作用所选，未选择或全选时作用全部";
+		collapseBtn.style.cssText = buttonStyle();
+		installHoverStyle(collapseBtn);
+		collapseBtn.addEventListener("click", () => {
+			toggleAllNodesCollapsed(shouldUseSelectedOnly());
+		});
+		group.appendChild(collapseBtn);
 
 		toolbar.appendChild(group);
 
@@ -1348,7 +2093,26 @@ function registerKeyboardShortcuts() {
 	document.addEventListener("keydown", (event) => {
 		const key = String(event.key || "").toLowerCase();
 
-		if (event.ctrlKey && event.shiftKey && key === "a") {
+		if (event.altKey && !event.ctrlKey && !event.shiftKey && ["arrowleft", "arrowright", "arrowup", "arrowdown"].includes(key)) {
+			event.preventDefault();
+			event.stopPropagation();
+
+			if (key === "arrowleft") adjustLayoutGap("column", -LAYOUT_GAP_STEP);
+			if (key === "arrowright") adjustLayoutGap("column", LAYOUT_GAP_STEP);
+			if (key === "arrowup") adjustLayoutGap("row", -LAYOUT_GAP_STEP);
+			if (key === "arrowdown") adjustLayoutGap("row", LAYOUT_GAP_STEP);
+
+			rerunLastArrangement();
+			return;
+		}
+
+		if (event.ctrlKey && event.altKey && key === "a") {
+			event.preventDefault();
+			toggleAllNodesCollapsed(shouldUseSelectedOnly());
+			return;
+		}
+
+		if (event.ctrlKey && event.shiftKey && !event.altKey && key === "a") {
 			event.preventDefault();
 
 			const mode = arrangeModes[arrangeModeIndex];
@@ -1356,7 +2120,7 @@ function registerKeyboardShortcuts() {
 
 			console.log(`[GJJ_NodeArranger] 快捷键循环模式：${name}`);
 
-			arrangeNodes(mode, DEFAULT_SPACING, 10, 0.5, true, true, false);
+			arrangeNodes(mode, DEFAULT_SPACING, 10, 0.5, true, true, shouldUseSelectedOnly());
 
 			arrangeModeIndex = (arrangeModeIndex + 1) % arrangeModes.length;
 			return;
@@ -1364,25 +2128,25 @@ function registerKeyboardShortcuts() {
 
 		if (event.ctrlKey && event.shiftKey && key === "t") {
 			event.preventDefault();
-			arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_MAIN_PATH, false, DEFAULT_SPACING);
+			arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_MAIN_PATH, shouldUseSelectedOnly(), DEFAULT_SPACING);
 			return;
 		}
 
 		if (event.ctrlKey && event.shiftKey && key === "h") {
 			event.preventDefault();
-			arrangeNodes("horizontal", DEFAULT_SPACING);
+			arrangeNodes("horizontal", DEFAULT_SPACING, 10, 0.5, true, true, shouldUseSelectedOnly());
 			return;
 		}
 
 		if (event.ctrlKey && event.shiftKey && key === "v") {
 			event.preventDefault();
-			arrangeNodes("vertical", DEFAULT_SPACING);
+			arrangeNodes("vertical", DEFAULT_SPACING, 10, 0.5, true, true, shouldUseSelectedOnly());
 			return;
 		}
 
 		if (event.ctrlKey && event.shiftKey && key === "g") {
 			event.preventDefault();
-			arrangeNodes("grid", DEFAULT_SPACING);
+			arrangeNodes("grid", DEFAULT_SPACING, 10, 0.5, true, true, shouldUseSelectedOnly());
 		}
 	});
 }
@@ -1449,7 +2213,7 @@ function addButtonToArrangerNode(node) {
 		].join(";");
 
 		btn.addEventListener("click", () => {
-			arrangeNodes("auto", DEFAULT_SPACING, 10, 0.5, true, true, false);
+			arrangeNodes("auto", DEFAULT_SPACING, 10, 0.5, true, true, shouldUseSelectedOnly());
 		});
 
 		btn.addEventListener("mouseenter", () => {
@@ -1477,43 +2241,55 @@ app.registerExtension({
 			arrangeNodes,
 
 			arrangeAuto: (spacing = DEFAULT_SPACING, iterations = 10, relaxPower = 0.5) => {
-				return arrangeNodes("auto", spacing, iterations, relaxPower, true, true, false);
+				return arrangeNodes("auto", spacing, iterations, relaxPower, true, true, shouldUseSelectedOnly());
 			},
 
 			arrangeHorizontal: (spacing = DEFAULT_SPACING) => {
-				return arrangeNodes("horizontal", spacing, 10, 0.5, true, true, false);
+				return arrangeNodes("horizontal", spacing, 10, 0.5, true, true, shouldUseSelectedOnly());
 			},
 
 			arrangeVertical: (spacing = DEFAULT_SPACING) => {
-				return arrangeNodes("vertical", spacing, 10, 0.5, true, true, false);
+				return arrangeNodes("vertical", spacing, 10, 0.5, true, true, shouldUseSelectedOnly());
 			},
 
 			arrangeGrid: (spacing = DEFAULT_SPACING) => {
-				return arrangeNodes("grid", spacing, 10, 0.5, true, true, false);
+				return arrangeNodes("grid", spacing, 10, 0.5, true, true, shouldUseSelectedOnly());
 			},
 
 			arrangeTopological: (spacing = DEFAULT_SPACING, sortMode = TOPO_SORT_MODES.TOPO_MAIN_PATH) => {
-				return arrangeTopologicalFromGraph(sortMode, false, spacing);
+				return arrangeTopologicalFromGraph(sortMode, shouldUseSelectedOnly(), spacing);
 			},
 
 			arrangeTopoMainPath: (spacing = DEFAULT_SPACING) => {
-				return arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_MAIN_PATH, false, spacing);
+				return arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_MAIN_PATH, shouldUseSelectedOnly(), spacing);
 			},
 
 			arrangeTopoOutputAnchor: (spacing = DEFAULT_SPACING) => {
-				return arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_OUTPUT_ANCHOR, false, spacing);
+				return arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_OUTPUT_ANCHOR, shouldUseSelectedOnly(), spacing);
 			},
 
 			arrangeTopoCompact: (spacing = DEFAULT_SPACING) => {
-				return arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_COMPACT, false, spacing);
+				return arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_COMPACT, shouldUseSelectedOnly(), spacing);
 			},
 
 			arrangeTopoBranch: (spacing = DEFAULT_SPACING) => {
-				return arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_BRANCH, false, spacing);
+				return arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_BRANCH, shouldUseSelectedOnly(), spacing);
+			},
+
+			collapseAllNodes: () => {
+				return setAllNodesCollapsed(true, shouldUseSelectedOnly());
+			},
+
+			expandAllNodes: () => {
+				return setAllNodesCollapsed(false, shouldUseSelectedOnly());
+			},
+
+			toggleAllNodesCollapsed: () => {
+				return toggleAllNodesCollapsed(shouldUseSelectedOnly());
 			},
 
 			arrangeTopoOriginalY: (spacing = DEFAULT_SPACING) => {
-				return arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_ORIGINAL_Y, false, spacing);
+				return arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_ORIGINAL_Y, shouldUseSelectedOnly(), spacing);
 			},
 
 			TOPO_SORT_MODES,
@@ -1528,10 +2304,14 @@ app.registerExtension({
 		console.log("[GJJ_NodeArranger] Extension loaded successfully");
 		console.log("[GJJ_NodeArranger] Shortcuts:");
 		console.log("  Ctrl+Shift+A: 循环切换排列模式");
+		console.log("  Ctrl+Alt+A: 全部折叠 / 全部打开（智能范围：部分选择时只折叠/打开所选）");
 		console.log("  Ctrl+Shift+T: 拓扑主链路");
 		console.log("  Ctrl+Shift+H: 水平排列");
 		console.log("  Ctrl+Shift+V: 垂直排列");
 		console.log("  Ctrl+Shift+G: 网格排列");
+		console.log("  Alt+←/→: 减少/增加列宽和横向间距");
+		console.log("  Alt+↑/↓: 减少/增加行高和纵向间距");
+		console.log("  Ctrl+Alt+A: 全部折叠 / 全部打开");
 	},
 
 	async nodeCreated(node) {
