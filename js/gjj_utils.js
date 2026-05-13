@@ -35,6 +35,214 @@ export class GJJ_Utils {
         return node?.inputs?.find((i) => i?.name === name);
     }
 
+    /**
+     * 为指定的 widget 名称列表设置颜色选择器（使用浏览器原生颜色选择器）。
+     * @param {object} node - ComfyUI 节点实例
+     * @param {string[]} colorWidgetNames - 需要设置颜色选择器的 widget 名称数组
+     */
+    static setupColorPickers(node, colorWidgetNames) {
+        if (node.__gjjColorPickersSetup) return;
+        node.__gjjColorPickersSetup = true;
+
+        // 找到颜色相关的 widgets
+        const colorWidgets = [];
+        (node.widgets || []).forEach(widget => {
+            if (colorWidgetNames.includes(widget.name)) {
+                colorWidgets.push(widget);
+            }
+        });
+        
+        // 为每个颜色 widget 添加颜色选择器功能
+        colorWidgets.forEach(widget => {
+            if (!widget) return;
+            
+            // 重写绘制方法，显示颜色预览
+            widget.draw = function(ctx, node, widgetWidth, widgetY, height) {
+                const border = 3;
+                const x = 10;
+                const y = widgetY;
+                const w = widgetWidth - 20;
+                const h = height - 6;
+                
+                // 绘制背景
+                ctx.fillStyle = '#000';
+                ctx.fillRect(x, y, w, h);
+                
+                // 绘制颜色预览
+                const color = this.value || '#000000';
+                ctx.fillStyle = color;
+                ctx.fillRect(x + border, y + border, w - border * 2, h - border * 2);
+                
+                // 绘制边框
+                ctx.strokeStyle = '#555';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x, y, w, h);
+                
+                // 保存位置用于点击检测
+                this.last_y = y;
+            };
+            
+            // 鼠标点击事件 - 使用浏览器原生颜色选择器
+            widget.mouse = function(e, pos, node) {
+                if (e.type === 'pointerdown' || e.type === 'mousedown') {
+                    const rect = [this.last_y, this.last_y + 32];
+                    if (pos[1] > rect[0] && pos[1] < rect[1]) {
+                        // 创建原生颜色选择器
+                        const picker = document.createElement('input');
+                        picker.type = 'color';
+                        picker.value = this.value || '#000000';
+                        
+                        // 定位到屏幕外
+                        picker.style.position = 'absolute';
+                        picker.style.left = '-9999px';
+                        picker.style.top = '-9999px';
+                        
+                        document.body.appendChild(picker);
+                        
+                        // 监听颜色变化
+                        picker.addEventListener('change', () => {
+                            this.value = picker.value;
+                            node.graph._version++;
+                            node.setDirtyCanvas(true, true);
+                            picker.remove();
+                        });
+                        
+                        // 触发点击
+                        picker.click();
+                    }
+                }
+            };
+            
+            // 设置 widget 尺寸
+            widget.computeSize = function(width) {
+                return [width, 32];
+            };
+        });
+    }
+
+    /**
+     * 创建按钮组替换下拉列表控件。
+     * @param {object} node - ComfyUI 节点实例
+     * @param {string} widgetName - 要替换的下拉列表控件名称
+     * @param {string[]} options - 按钮选项数组
+     * @param {string} [label=""] - 显示标签（可选）
+     * @returns {object} DOM Widget 实例
+     */
+    static createButtonGroup(node, widgetName, options, label = "") {
+        const widget = GJJ_Utils.getWidget(node, widgetName);
+        if (!widget) return null;
+
+        // 隐藏原始下拉列表
+        GJJ_Utils.hideWidget(widget);
+
+        // 创建按钮容器
+        const container = document.createElement("div");
+        container.style.cssText = [
+            "box-sizing: border-box",
+            "width: 100%",
+            "display: flex",
+            "flex-direction: column",
+            "gap: 4px",
+            "padding: 4px 0"
+        ].join(";");
+
+        // 添加标签（如果有）
+        if (label) {
+            const labelEl = document.createElement("div");
+            labelEl.textContent = label;
+            labelEl.style.cssText = [
+                "font-size: 12px",
+                "color: #aaa",
+                "padding-left: 4px",
+                "font-weight: bold"
+            ].join(";");
+            container.appendChild(labelEl);
+        }
+
+        // 创建按钮行容器
+        const buttonRow = document.createElement("div");
+        buttonRow.style.cssText = [
+            "display: flex",
+            "gap: 4px",
+            "padding: 0 4px"
+        ].join(";");
+
+        // 创建按钮
+        options.forEach(option => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.textContent = option;
+            button.style.cssText = [
+                "flex: 1",
+                "height: 32px",
+                "padding: 6px 8px",
+                "border: 1px solid #3b5560",
+                "border-radius: 6px",
+                "background: #20323a",
+                "color: #edf6fa",
+                "font: 700 12px sans-serif",
+                "cursor: pointer",
+                "transition: all 0.2s ease",
+                "white-space: nowrap",
+                "overflow: hidden",
+                "text-overflow: ellipsis"
+            ].join(";");
+
+            // 设置初始状态
+            if (option === widget.value) {
+                button.style.background = "#1f6b43";
+                button.style.borderColor = "#48ad73";
+                button.style.color = "#fff";
+            }
+
+            button.addEventListener("click", (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+
+                // 更新所有按钮样式
+                buttonRow.querySelectorAll("button").forEach(btn => {
+                    btn.style.background = "#20323a";
+                    btn.style.borderColor = "#3b5560";
+                    btn.style.color = "#edf6fa";
+                });
+
+                // 设置当前按钮为激活状态
+                button.style.background = "#1f6b43";
+                button.style.borderColor = "#48ad73";
+                button.style.color = "#fff";
+
+                // 更新 widget 值
+                widget.value = option;
+                if (widget.callback) {
+                    widget.callback(option);
+                }
+
+                node.graph?.change?.();
+                node.setDirtyCanvas(true, true);
+                app.graph?.setDirtyCanvas(true, true);
+            });
+
+            buttonRow.appendChild(button);
+        });
+
+        container.appendChild(buttonRow);
+
+        // 添加 DOM Widget
+        const buttonWidget = node.addDOMWidget(
+            `${widgetName}_buttons`,
+            `${widgetName}_buttons`,
+            container,
+            {
+                serialize: false,
+                hideOnZoom: false,
+                getHeight: () => label ? 72 : 40
+            }
+        );
+
+        buttonWidget.value = widget.value;
+        return buttonWidget;
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // UI 数据解包
     // ═══════════════════════════════════════════════════════════════
@@ -93,13 +301,30 @@ export class GJJ_Utils {
         widget.__gjjUtilsHidden = true;
         widget.hidden = true;
         widget.type = `converted-widget:${widget.name || "hidden"}`;
-        widget.computeSize = () => [0, -4];
-        widget.getHeight = () => -4;
+        widget.computeSize = () => [0, 0];
+        widget.getHeight = () => 0;
         widget.draw = () => {};
-        widget.y = -10000;
-        widget.last_y = -10000;
-        if (widget.element) widget.element.style.display = "none";
-        if (widget.inputEl) widget.inputEl.style.display = "none";
+        widget.label = "";
+        
+        // 重置关键布局属性 - 按照《隐藏参数挤出空行问题完全指南.md》的要求
+        widget.last_y = 0;              // ⭐ 最关键，必须设置为 0 而不是负值
+        widget.computedHeight = 0;
+        widget.margin_top = 0;
+        widget.size = [0, 0];
+        
+        // 隐藏 DOM 元素
+        if (widget.element) {
+            widget.element.style.display = "none";
+            widget.element.style.height = "0";
+            widget.element.style.margin = "0";
+            widget.element.style.padding = "0";
+        }
+        if (widget.inputEl) {
+            widget.inputEl.style.display = "none";
+            widget.inputEl.style.height = "0";
+            widget.inputEl.style.margin = "0";
+            widget.inputEl.style.padding = "0";
+        }
     }
 
     /**

@@ -3,7 +3,7 @@ import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set(["GJJ_ImageCollage"]);
 const BATCH_INPUT_NAME = "batch_image";
-const BATCH_INPUT_TYPE = "GJJ_BATCH_IMAGE";
+const BATCH_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const IMAGE_PREFIX = "image_";
 const MIN_VISIBLE_INPUTS = 1;
 const IMAGE_TOOLTIP = "单张图片输入；连接最后一个图片口后会自动新增下一个。支持普通 IMAGE batch。";
@@ -48,15 +48,15 @@ function ensureBatchInput(node) {
 	if (batch) {
 		batch.name = BATCH_INPUT_NAME;
 		batch.type = BATCH_INPUT_TYPE;
-		batch.label = "批量图片";
-		batch.localized_name = "批量图片";
+		batch.label = "📦 批量图片";
+		batch.localized_name = "📦 批量图片";
 		batch.tooltip = BATCH_TOOLTIP;
 	}
 }
 
 function addImageInput(node) {
 	const nextIndex = getImageInputs(node).length + 1;
-	node.addInput?.(formatImageName(nextIndex), "IMAGE");
+	node.addInput?.(formatImageName(nextIndex), "GJJ_BATCH_IMAGE,IMAGE");
 }
 
 function removeUnusedInputsFromEnd(node) {
@@ -88,8 +88,8 @@ function renameInputsSequentially(node) {
 	getImageInputs(node).forEach((input, index) => {
 		const number = index + 1;
 		input.name = formatImageName(number);
-		input.type = "IMAGE";
-		input.label = `图片 ${number}`;
+		input.type = "GJJ_BATCH_IMAGE,IMAGE";
+		input.label = `🖼️ 图片 ${number}`;
 		input.localized_name = input.label;
 		input.tooltip = IMAGE_TOOLTIP;
 	});
@@ -147,6 +147,7 @@ app.registerExtension({
 		nodeType.prototype.onNodeCreated = function (...args) {
 			const result = originalOnNodeCreated?.apply(this, args);
 			setTimeout(() => stabilizeNode(this), 0);
+			this.setupColorPickers();
 			return result;
 		};
 
@@ -154,6 +155,7 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalOnConfigure?.apply(this, args);
 			setTimeout(() => stabilizeNode(this), 0);
+			this.setupColorPickers();
 			return result;
 		};
 
@@ -174,12 +176,64 @@ app.registerExtension({
 			}
 			return result;
 		};
+
+		nodeType.prototype.setupColorPickers = function() {
+			if (this.__colorPickersSetup) return;
+			this.__colorPickersSetup = true;
+
+			const colorWidgetNames = ["🎨 背景颜色", "🌈 标签颜色", "background", "label_color"];
+
+			for (const widgetName of colorWidgetNames) {
+				const widget = this.widgets?.find(w => w.name === widgetName);
+				if (!widget) continue;
+				if (widget.type !== "string" && widget.type !== "text") continue;
+
+				widget.type = "color";
+
+				const originalDraw = widget.draw;
+				widget.draw = function(ctx, node, widgetWidth, widgetY, height) {
+					if (originalDraw) {
+						originalDraw.apply(this, arguments);
+					}
+
+					const color = this.value || '#000000';
+					const padding = 4;
+					const colorBoxSize = height - padding * 2;
+					const colorBoxX = widgetWidth - colorBoxSize - padding;
+					const colorBoxY = widgetY + padding;
+
+					ctx.fillStyle = color;
+					ctx.strokeStyle = '#666';
+					ctx.lineWidth = 1;
+					ctx.fillRect(colorBoxX, colorBoxY, colorBoxSize, colorBoxSize);
+					ctx.strokeRect(colorBoxX, colorBoxY, colorBoxSize, colorBoxSize);
+				};
+
+				widget.mouse = function(e, pos, node) {
+					if (e.type === 'pointerdown' || e.type === 'mousedown') {
+						const widgetY = this.last_y;
+						const widgetHeight = 32;
+						if (pos[1] > widgetY && pos[1] < widgetY + widgetHeight) {
+							if (typeof GJJ_ColorPicker !== 'undefined') {
+								GJJ_ColorPicker.show(node, this, this.value, (newColor) => {
+									this.value = newColor;
+									node.setDirtyCanvas(true, true);
+								});
+							}
+						}
+					}
+				};
+			}
+		};
 	},
 
 	setup() {
 		for (const node of app.graph?._nodes || []) {
 			if (TARGET_NODES.has(node?.comfyClass)) {
 				stabilizeNode(node);
+				if (node.setupColorPickers) {
+					node.setupColorPickers();
+				}
 			}
 		}
 	},

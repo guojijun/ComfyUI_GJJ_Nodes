@@ -14,9 +14,9 @@ NODE_NAME = "GJJ_ImageCollage"
 
 def _image_input(index: int):
     return (
-        "IMAGE",
+        "GJJ_BATCH_IMAGE,IMAGE",
         {
-            "display_name": f"图片 {index}",
+            "display_name": f"🖼️ 图片 {index}",
             "tooltip": f"第 {index} 路图片输入；支持单张图片或 IMAGE 批次。",
         },
     )
@@ -176,7 +176,7 @@ class GJJ_ImageCollage:
                 "batch_image": (
                     GJJ_BATCH_IMAGE_TYPE,
                     {
-                        "display_name": "批量图片",
+                        "display_name": "📦 批量图片",
                         "tooltip": "可直接接入 GJJ 专用批量图片队列；会按批次顺序参与拼版。",
                     },
                 ),
@@ -187,51 +187,51 @@ class GJJ_ImageCollage:
             "required": {
                 "layout": (
                     ["自动网格", "横向排列", "纵向排列"],
-                    {"default": "自动网格", "display_name": "布局方式", "tooltip": "选择图片拼接方向；自动网格会按接近正方形的行列排布。"},
+                    {"default": "自动网格", "display_name": "📐 布局方式", "tooltip": "选择图片拼接方向；自动网格会按接近正方形的行列排布。"},
                 ),
                 "cell_mode": (
                     ["按最长边", "固定宽高"],
-                    {"default": "按最长边", "display_name": "单格尺寸模式", "tooltip": "按最长边会保持每张图比例并统一最长边；固定宽高会先放入统一画格。"},
+                    {"default": "按最长边", "display_name": "📏 单格尺寸模式", "tooltip": "按最长边会保持每张图比例并统一最长边；固定宽高会先放入统一画格。"},
                 ),
                 "cell_size": (
                     "INT",
-                    {"default": 512, "min": 16, "max": 4096, "step": 8, "display_name": "单格最长边", "tooltip": "单格尺寸模式为按最长边时使用。"},
+                    {"default": 512, "min": 16, "max": 4096, "step": 8, "display_name": "📐 单格最长边", "tooltip": "单格尺寸模式为按最长边时使用。"},
                 ),
                 "cell_width": (
                     "INT",
-                    {"default": 512, "min": 16, "max": 4096, "step": 8, "display_name": "单格宽度", "tooltip": "单格尺寸模式为固定宽高时使用。"},
+                    {"default": 512, "min": 16, "max": 4096, "step": 8, "display_name": "↔️ 单格宽度", "tooltip": "单格尺寸模式为固定宽高时使用。"},
                 ),
                 "cell_height": (
                     "INT",
-                    {"default": 512, "min": 16, "max": 4096, "step": 8, "display_name": "单格高度", "tooltip": "单格尺寸模式为固定宽高时使用。"},
+                    {"default": 512, "min": 16, "max": 4096, "step": 8, "display_name": "↕️ 单格高度", "tooltip": "单格尺寸模式为固定宽高时使用。"},
                 ),
                 "fit_mode": (
                     ["等比留边", "裁切填满", "拉伸填满"],
-                    {"default": "等比留边", "display_name": "图片适配", "tooltip": "图片放入单格时的缩放方式。"},
+                    {"default": "等比留边", "display_name": "🖼️ 图片适配", "tooltip": "图片放入单格时的缩放方式。"},
                 ),
                 "gap": (
                     "INT",
-                    {"default": 8, "min": 0, "max": 256, "step": 1, "display_name": "间距", "tooltip": "图片单格之间的像素间距。"},
+                    {"default": 8, "min": 0, "max": 256, "step": 1, "display_name": "↔️ 间距", "tooltip": "图片单格之间的像素间距。"},
                 ),
                 "background": (
-                    "STRING",
-                    {"default": "#111820", "display_name": "背景颜色", "tooltip": "拼版背景色，支持 #RRGGBB、常见颜色名或“透明”。"},
+                    "COLOR",
+                    {"default": "#111820", "display_name": "🎨 背景颜色", "tooltip": "拼版背景色，支持 #RRGGBB、常见颜色名或透明。"},
                 ),
                 "labels": (
                     "STRING",
-                    {"default": "", "multiline": True, "display_name": "标签文本", "tooltip": "每行或逗号分隔一个标签，会按图片顺序绘制在单格底部。"},
+                    {"default": "", "multiline": True, "display_name": "🏷️ 标签文本", "tooltip": "每行或逗号分隔一个标签，会按图片顺序绘制在单格底部。"},
                 ),
                 "font_size": (
                     "INT",
-                    {"default": 28, "min": 8, "max": 160, "step": 1, "display_name": "标签字号", "tooltip": "标签文字字号。"},
+                    {"default": 28, "min": 8, "max": 160, "step": 1, "display_name": "🔤 标签字号", "tooltip": "标签文字字号。"},
                 ),
                 "label_align": (
                     ["左对齐", "居中", "右对齐"],
-                    {"default": "左对齐", "display_name": "标签对齐", "tooltip": "标签在单格底部的水平对齐方式。"},
+                    {"default": "左对齐", "display_name": "↔️ 标签对齐", "tooltip": "标签在单格底部的水平对齐方式。"},
                 ),
                 "label_color": (
-                    "STRING",
-                    {"default": "#FFFFFF", "display_name": "标签颜色", "tooltip": "标签文字颜色。"},
+                    "COLOR",
+                    {"default": "#FFFFFF", "display_name": "🌈 标签颜色", "tooltip": "标签文字颜色。"},
                 ),
             },
             "optional": optional,
