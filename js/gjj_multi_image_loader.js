@@ -662,11 +662,16 @@ function updateLayout(node) {
 	updateSummary(node);
 	// 只更新高度，保留用户设置的宽度
 	const height = measureHeight(node);
-	node.setSize?.([node.size?.[0], height]);
-	if (node.__gjjMultiImageWidget) {
-		node.__gjjMultiImageWidget.last_y = 0;
+
+	// 关键修复：强制更新节点大小，即使高度减少
+	const currentHeight = Number(node.size?.[1] || MIN_HEIGHT);
+	if (height !== currentHeight) {
+		node.setSize?.([node.size?.[0], height]);
+		if (node.__gjjMultiImageWidget) {
+			node.__gjjMultiImageWidget.last_y = 0;
+		}
+		requestRedraw(node);
 	}
-	requestRedraw(node);
 }
 
 function scheduleLayout(node) {
@@ -977,6 +982,14 @@ app.registerExtension({
 				state.mergedCount = state.selection.length;
 			}
 			scheduleStabilize(this);
+			return result;
+		};
+
+		const originalOnResize = nodeType.prototype.onResize;
+		nodeType.prototype.onResize = function (...args) {
+			const result = originalOnResize?.apply(this, args);
+			// 用户手动调整宽度后，立即重新计算高度
+			scheduleLayout(this);
 			return result;
 		};
 	},

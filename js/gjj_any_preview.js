@@ -12,7 +12,7 @@ const EMPTY_PREVIEW = "执行后在这里预览文本、对象或调试信息";
 const MIN_PREVIEW_HEIGHT = 96;
 const IMAGE_PREVIEW_MIN_HEIGHT = 124;
 const SINGLE_IMAGE_PREVIEW_HEIGHT = 360;
-const MIN_NODE_HEIGHT = 180;
+const MIN_NODE_HEIGHT = 40;
 const MIN_WIDTH = 300;
 const NODE_BOTTOM_PADDING = 10;
 const LORA_EFFECT_LIVE_TEXT_MAP_KEY = "__gjjLoraEffectTesterLiveTextByNodeId";
@@ -106,28 +106,33 @@ function estimateImagePreviewHeight(node) {
 		? node.__gjjAnyPreviewImages
 		: [];
 	const count = Math.max(1, images.length || 1);
-	if (count === 1) {
-		return SINGLE_IMAGE_PREVIEW_HEIGHT;
-	}
 
 	const nodeWidth = Math.max(MIN_WIDTH, Number(node?.size?.[0] || MIN_WIDTH));
 	// 减去 padding 和 border
 	const contentWidth = Math.max(220, nodeWidth - 36);
-	
-	// 动态计算列数：正方形卡片，最小宽度 140px，间距 8px
+
+	if (count === 1) {
+		// 单图模式：根据宽度动态计算高度，保持图片比例
+		// 使用默认宽高比 4:3
+		const aspectRatio = 4 / 3;
+		const imageHeight = contentWidth / aspectRatio;
+		return Math.max(MIN_PREVIEW_HEIGHT, imageHeight + 18);
+	}
+
+	// 多图模式：动态计算列数
 	const minCardWidth = 140;
 	const gap = 8;
 	const columns = Math.min(
 		count,
 		Math.max(1, Math.floor((contentWidth + gap) / (minCardWidth + gap))),
 	);
-	
+
 	const rows = Math.max(1, Math.ceil(count / columns));
-	
+
 	// 正方形卡片，高度等于宽度
 	const actualCardWidth = (contentWidth - (columns - 1) * gap) / columns;
 	const cardHeight = actualCardWidth; // 正方形，高度=宽度
-	
+
 	// 计算总高度：行数 * 卡片高度 + 间距
 	const totalGap = (rows - 1) * gap;
 	return Math.max(
@@ -157,13 +162,42 @@ function updateLayout(node) {
 	if (!node) {
 		return;
 	}
-	// 只更新高度，保留用户设置的宽度
-	const height =
-		String(node.__gjjAnyPreviewKind || "") === "image"
-			? Math.max(MIN_NODE_HEIGHT, estimateImagePreviewHeight(node) + 36)
-			: measureHeight(node);
-	node.setSize?.([node.size?.[0], height]);
-	setDirty(node);
+
+	const kind = String(node.__gjjAnyPreviewKind || "");
+
+	// 根据内容类型计算所需高度
+	let height;
+	if (kind === "image") {
+		// 图片预览：根据宽度动态计算高度，不设下限（允许高度减少）
+		const estimated = estimateImagePreviewHeight(node);
+		height = Math.max(MIN_NODE_HEIGHT, estimated + 36);
+	} else {
+		// 非图片预览：测量内容高度
+		height = measureHeight(node);
+	}
+
+	// 关键修复：强制更新节点大小，即使高度减少
+	const currentHeight = Number(node.size?.[1] || MIN_NODE_HEIGHT);
+	if (height !== currentHeight) {
+		node.setSize?.([node.size?.[0], height]);
+
+		// 同步更新 DOM 容器高度
+		const container = node.__gjjAnyPreviewContainer;
+		const previewWrap = node.__gjjAnyPreviewWrap;
+		if (container && previewWrap) {
+			const widget = node.__gjjAnyPreviewWidget;
+			const topOffset = Math.max(
+				0,
+				Number(widget?.y || 0),
+				Number(widget?.last_y || 0),
+			);
+			const availableHeight = height - topOffset - NODE_BOTTOM_PADDING;
+			container.style.height = `${Math.max(MIN_PREVIEW_HEIGHT, availableHeight)}px`;
+			previewWrap.style.height = `${Math.max(MIN_PREVIEW_HEIGHT, availableHeight)}px`;
+		}
+
+		setDirty(node);
+	}
 }
 
 function scheduleLayout(node) {
@@ -489,12 +523,12 @@ function applyPreviewContent(node) {
 	// 1. 图片预览时，通常只显示图片网格，隐藏文本正文（除非没有图片）
 	// 2. 音频/视频预览时，显示播放器(grid) AND 文本正文(body)（如果有文本）
 	// 3. 纯文本预览时，只显示文本正文
-	
+
 	const isMediaPreview = showImage || showAudio || showVideo;
-	
+
 	// Grid 显示条件：有对应的媒体数据
 	grid.style.display = isMediaPreview ? (showImage ? "grid" : "flex") : "none";
-	
+
 	// Body 显示条件：
 	// - 如果是图片预览，通常隐藏 body (除非未来需求改变)
 	// - 如果是音频/视频预览，且有文本，则显示 body
@@ -514,7 +548,7 @@ function applyPreviewContent(node) {
 
 	container.style.height = "auto";
 	container.style.minHeight = `${MIN_PREVIEW_HEIGHT}px`;
-	
+
 	if (previewWrap) {
 		// 图片预览可能需要内部滚动，其他情况让内容自然撑开
 		previewWrap.style.overflow = showImage ? "auto" : "visible";
@@ -524,7 +558,7 @@ function applyPreviewContent(node) {
 
 	if (showImage) {
 		const isSingleImage = images.length === 1;
-		
+
 		// 单图和多图使用不同的样式
 		grid.style.gridTemplateColumns = isSingleImage
 			? "repeat(1, minmax(0, 1fr))"
@@ -533,7 +567,7 @@ function applyPreviewContent(node) {
 		grid.style.height = "auto";
 		grid.style.alignItems = "start";
 		grid.replaceChildren();
-		
+
 		for (const [index, item] of images.entries()) {
 			const card = document.createElement("div");
 			card.style.cssText = [
@@ -546,7 +580,7 @@ function applyPreviewContent(node) {
 				"transition:transform 0.2s ease",
 				"background:#12191d",
 			].join(";");
-			
+
 			// 鼠标悬停效果
 			card.addEventListener("mouseenter", () => {
 				card.style.transform = "scale(1.05)";
@@ -565,7 +599,7 @@ function applyPreviewContent(node) {
 				"object-fit:cover",
 				"display:block",
 			].join(";");
-			
+
 			// 图片加载完成后更新尺寸
 			image.onload = () => {
 				if (sizeBadge) {
@@ -619,7 +653,7 @@ function applyPreviewContent(node) {
 				"z-index:2",
 				"white-space:nowrap",
 			].join(";");
-			
+
 			// 初始显示加载中
 			sizeBadge.textContent = "加载中...";
 
@@ -627,7 +661,7 @@ function applyPreviewContent(node) {
 			card.addEventListener("click", (event) => {
 				event.preventDefault();
 				event.stopPropagation();
-				
+
 				// 创建全屏预览
 				const overlay = document.createElement("div");
 				overlay.style.cssText = [
@@ -641,7 +675,7 @@ function applyPreviewContent(node) {
 					"justify-content:center",
 					"cursor:zoom-out",
 				].join(";");
-				
+
 				const previewImg = document.createElement("img");
 				previewImg.src = imageDataToUrl(item);
 				previewImg.style.cssText = [
@@ -653,28 +687,28 @@ function applyPreviewContent(node) {
 					"transition:transform 0.1s ease",
 					"cursor:grab",
 				].join(";");
-				
+
 				// 滚轮缩放功能
 				let currentScale = 1;
 				const minScale = 0.1;
 				const maxScale = 10;
-				
+
 				overlay.addEventListener("wheel", (e) => {
 					e.preventDefault();
 					e.stopPropagation();
-					
+
 					const delta = e.deltaY > 0 ? -0.1 : 0.1;
 					currentScale = Math.max(minScale, Math.min(maxScale, currentScale + delta));
 					previewImg.style.transform = `scale(${currentScale})`;
 				});
-				
+
 				// 双击重置缩放
 				previewImg.addEventListener("dblclick", (e) => {
 					e.stopPropagation();
 					currentScale = 1;
 					previewImg.style.transform = `scale(${currentScale})`;
 				});
-				
+
 				// 提示文字
 				const hint = document.createElement("div");
 				hint.style.cssText = [
@@ -689,11 +723,11 @@ function applyPreviewContent(node) {
 					"white-space:nowrap",
 				].join(";");
 				hint.textContent = "滚轮缩放 · 双击重置 · 点击关闭";
-				
+
 				overlay.appendChild(previewImg);
 				overlay.appendChild(hint);
 				document.body.appendChild(overlay);
-				
+
 				// 点击关闭
 				overlay.addEventListener("click", () => {
 					overlay.remove();
@@ -716,24 +750,24 @@ function applyPreviewContent(node) {
 		console.log("[GJJ AnyPreview] audio数组:", audio);
 		console.log("[GJJ AnyPreview] audio数组长度:", audio.length);
 		console.log("[GJJ AnyPreview] node.__gjjAnyPreviewAudio:", node.__gjjAnyPreviewAudio);
-		
+
 		if (audio.length === 0) {
 			console.error("[GJJ AnyPreview] 错误：audio数组为空！");
 		}
-		
+
 		grid.style.gridTemplateColumns = "1fr";
 		grid.style.height = "auto";
 		grid.style.alignItems = "center";
 		grid.replaceChildren();
-		
+
 		const audioItem = audio[0];
 		console.log("[GJJ AnyPreview] audioItem:", audioItem);
 		console.log("[GJJ AnyPreview] audioItem.filename:", audioItem?.filename);
 		console.log("[GJJ AnyPreview] audioItem.type:", audioItem?.type);
-		
+
 		const audioUrl = imageDataToUrl(audioItem);
 		console.log("[GJJ AnyPreview] 生成的audioUrl:", audioUrl);
-		
+
 		const audioCard = document.createElement("div");
 		audioCard.style.cssText = [
 			"display:flex",
@@ -770,7 +804,7 @@ function applyPreviewContent(node) {
 		audioCard.appendChild(audioPlayer);
 		audioCard.appendChild(audioLabel);
 		grid.appendChild(audioCard);
-		
+
 		// 显示音频简介文本
 		if (hasText) {
 			body.innerHTML = renderMarkdown(text);
@@ -782,10 +816,10 @@ function applyPreviewContent(node) {
 		grid.style.height = "auto";
 		grid.style.alignItems = "center";
 		grid.replaceChildren();
-		
+
 		const videoItem = video[0];
 		const videoUrl = imageDataToUrl(videoItem);
-		
+
 		const videoCard = document.createElement("div");
 		videoCard.style.cssText = [
 			"display:flex",
@@ -825,7 +859,7 @@ function applyPreviewContent(node) {
 		videoCard.appendChild(videoPlayer);
 		videoCard.appendChild(videoLabel);
 		grid.appendChild(videoCard);
-		
+
 		// 显示视频简介文本
 		if (hasText) {
 			body.innerHTML = renderMarkdown(text);
@@ -1262,6 +1296,16 @@ app.registerExtension({
 				: undefined;
 		};
 
+		const originalOnResize = nodeType.prototype.onResize;
+		nodeType.prototype.onResize = function (...args) {
+			const result = typeof originalOnResize === "function"
+				? originalOnResize.apply(this, args)
+				: undefined;
+			// 用户手动调整宽度后，立即重新计算高度
+			scheduleLayout(this);
+			return result;
+		};
+
 		const originalOnExecuted = nodeType.prototype.onExecuted;
 		nodeType.prototype.onExecuted = function (message) {
 			// 调试：打印onExecuted收到的完整message
@@ -1273,7 +1317,7 @@ app.registerExtension({
 			console.log("[GJJ onExecuted] message.preview_images:", message?.preview_images);
 			console.log("[GJJ onExecuted] message.preview_text:", message?.preview_text);
 			console.log("======================================================");
-			
+
 			const result =
 				typeof originalOnExecuted === "function"
 					? originalOnExecuted.call(this, message)
