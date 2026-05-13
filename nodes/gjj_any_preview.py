@@ -486,15 +486,44 @@ class GJJ_AnyPreview:
 		# 新增：视频预览
 		elif preview_kind == "video" and is_video_object(merged):
 			try:
-				from .gjj_video_combine_runtime import combine_video
-
 				# 获取视频组件
 				components = merged.get_components()
 				images = getattr(components, "images", None)
 				audio = getattr(components, "audio", None)
 				frame_rate = float(getattr(components, "frame_rate", 24.0) or 24.0)
-				if images is not None and isinstance(images, torch.Tensor):
-					# 使用combine_video函数生成视频预览
+				
+				# 优先使用原始视频文件作为预览（快速，毫秒级）
+				video_path = getattr(components, "path", None) or getattr(components, "video_path", None)
+				if video_path and isinstance(video_path, str) and os.path.exists(video_path):
+					# 直接使用原始视频文件作为预览
+					filename = os.path.basename(video_path)
+					subfolder = ""
+					input_dir = folder_paths.get_input_directory()
+					if video_path.startswith(input_dir):
+						subfolder = os.path.relpath(os.path.dirname(video_path), input_dir)
+					ui["preview_video"] = ([{
+						"filename": filename,
+						"subfolder": subfolder,
+						"type": "input",
+						"frame_rate": frame_rate,
+					}],)
+					print(f"[GJJ] 视频预览 - 使用原始视频文件: {filename}")
+				elif images is not None and isinstance(images, torch.Tensor):
+					# 如果没有原始文件路径，才进行重新编码
+					from .gjj_video_combine_runtime import combine_video
+					
+					# 使用更快的编码参数用于预览
+					format_overrides_json = json.dumps({
+						"main_pass": [
+							"-c:v", "libx264",
+							"-preset", "ultrafast",
+							"-crf", "28",
+							"-pix_fmt", "yuv420p",
+							"-vf", "scale=out_color_matrix=bt709",
+							"-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"
+						],
+						"extension": "mp4"
+					})
 					video_result = combine_video(
 						images=images,
 						audio=audio,
@@ -506,7 +535,7 @@ class GJJ_AnyPreview:
 						save_output=False,
 						use_source_fps=False,
 						vae=None,
-						format_overrides_json="",
+						format_overrides_json=format_overrides_json,
 						prompt=prompt,
 						extra_pnginfo=extra_pnginfo,
 						unique_id=None,

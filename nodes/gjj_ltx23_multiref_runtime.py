@@ -30,35 +30,11 @@ from nodes import CheckpointLoaderSimple, CLIPTextEncode, VAEDecodeTiled
 from .gjj_video_combine_runtime import DEFAULT_FORMAT as DEFAULT_SEGMENT_VIDEO_FORMAT, combine_video, list_supported_formats
 from .gjj_model_name_resolver import pick_available_model_name
 from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data, parse_lora_data
-
-
-DEFAULT_CKPT_CANDIDATES = (
-    "ltx-2.3-22b",
-    "ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v3.safetensors",
-    "ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled.safetensors",
-    "ltx-2.3-22b-dev-fp8.safetensors",
-    "ltx-2.3-22b-dev.safetensors",
-)
-DEFAULT_VIDEO_VAE_CANDIDATES = (
-    "LTX23_video_vae_bf16.safetensors",
-    "ltx23_video_vae_bf16.safetensors",
-)
-DEFAULT_TEXT_ENCODER_CANDIDATES = (
-    "gemma_3_12B_it_fp8_scaled.safetensors",
-    "gemma_3_12B_it_fp8_e4m3fn.safetensors",
-    "gemma_3_12B_it.safetensors",
-    "gemma_3_12B_it_fp4_mixed.safetensors",
-)
-DEFAULT_LATENT_UPSCALER_CANDIDATES = (
-    "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
-    "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
-)
-
 DEFAULT_NEGATIVE_PROMPT = (
-    "titles, subtitles, text, watermark, logo, blurry text, distorted text, overexposed, underexposed, "
-    "low contrast, washed out colors, excessive noise, motion blur, camera shake, background clutter, "
-    "unnatural skin tones, deformed facial features, extra limbs, disfigured hands, uncanny valley, "
-    "mismatched lip sync, off-sync audio, jittery movement, awkward pauses, incorrect timing, AI artifacts"
+	"titles, subtitles, text, watermark, logo, blurry text, distorted text, overexposed, underexposed, "
+	"low contrast, washed out colors, excessive noise, motion blur, camera shake, background clutter, "
+	"unnatural skin tones, deformed facial features, extra limbs, disfigured hands, uncanny valley, "
+	"mismatched lip sync, off-sync audio, jittery movement, awkward pauses, incorrect timing, AI artifacts"
 )
 
 DEFAULT_STAGE1_SAMPLER = "euler_ancestral_cfg_pp"
@@ -101,1551 +77,1593 @@ PROGRESS_TEXT_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
 
 
 def _extract_progress_value(text: str) -> float | None:
-    message = str(text or "")
-    match = PROGRESS_TEXT_RE.search(message)
-    if match:
-        current = max(0, int(match.group(1) or 0))
-        total = max(1, int(match.group(2) or 1))
-        return max(0.0, min(1.0, float(current) / float(total)))
-    if "完成" in message or "失败" in message:
-        return 1.0
-    return None
+	message = str(text or "")
+	match = PROGRESS_TEXT_RE.search(message)
+	if match:
+		current = max(0, int(match.group(1) or 0))
+		total = max(1, int(match.group(2) or 1))
+		return max(0.0, min(1.0, float(current) / float(total)))
+	if "完成" in message or "失败" in message:
+		return 1.0
+	return None
 
 
 def _send_status(unique_id: Any, text: str, progress: float | None = None) -> None:
-    if not unique_id:
-        return
-    try:
-        from server import PromptServer
+	if not unique_id:
+		return
+	try:
+		from server import PromptServer
 
-        payload = {"node": str(unique_id), "text": str(text or "")}
-        resolved_progress = _extract_progress_value(text) if progress is None else progress
-        if resolved_progress is not None:
-            payload["progress"] = max(0.0, min(1.0, float(resolved_progress)))
-        PromptServer.instance.send_sync(
-            "gjj_node_progress",
-            payload,
-        )
-    except Exception:
-        pass
+		payload = {"node": str(unique_id), "text": str(text or "")}
+		resolved_progress = _extract_progress_value(text) if progress is None else progress
+		if resolved_progress is not None:
+			payload["progress"] = max(0.0, min(1.0, float(resolved_progress)))
+		PromptServer.instance.send_sync(
+			"gjj_node_progress",
+			payload,
+		)
+	except Exception:
+		pass
 
 
 def _send_segment_preview(unique_id: Any, payload: dict[str, Any]) -> None:
-    if not unique_id:
-        return
-    try:
-        from server import PromptServer
+	if not unique_id:
+		return
+	try:
+		from server import PromptServer
 
-        message = {"node": str(unique_id)}
-        message.update(payload or {})
-        PromptServer.instance.send_sync("gjj_ltx23_multiref_segment", message)
-    except Exception:
-        pass
+		message = {"node": str(unique_id)}
+		message.update(payload or {})
+		PromptServer.instance.send_sync("gjj_ltx23_multiref_segment", message)
+	except Exception:
+		pass
 
 
 def _normalize_text(text: str) -> str:
-    return "".join(ch for ch in str(text or "").lower() if ch.isalnum())
+	return "".join(ch for ch in str(text or "").lower() if ch.isalnum())
 
 
 def _lookup_tokens(text: str) -> list[str]:
-    return [
-        _normalize_text(part)
-        for part in str(text or "").replace("\\", "/").replace("_", " ").replace("-", " ").replace(".", " ").split()
-        if _normalize_text(part)
-    ]
+	return [
+		_normalize_text(part)
+		for part in str(text or "").replace("\\", "/").replace("_", " ").replace("-", " ").replace(".", " ").split()
+		if _normalize_text(part)
+	]
 
 
 def _safe_filename_list(category: str) -> list[str]:
-    try:
-        return list(folder_paths.get_filename_list(category))
-    except Exception:
-        return []
+	try:
+		return list(folder_paths.get_filename_list(category))
+	except Exception:
+		return []
 
 
 def _pick_available_name(preferred: str, available: Iterable[str]) -> str:
-    return pick_available_model_name(preferred, available, allow_first=False)
-
-
+	return pick_available_model_name(preferred, available, allow_first=False)
 def _pick_first_candidate(category: str, candidates: Iterable[str], label: str, required: bool = True) -> str:
     available = _safe_filename_list(category)
+    # 遍历候选模型
     for candidate in candidates:
         resolved = _pick_available_name(candidate, available)
         if resolved:
             full_path = folder_paths.get_full_path(category, resolved)
             if full_path:
+                # ========== 彩色输出：成功找到模型 ==========
+                print(f"\033[93m\033[1m[✓] 成功加载 {label}\033[0m")
+                print(f"\033[0m  └─ 模型分类：{category}\033[0m")
+                print(f"\033[0m  └─ 实际使用：{resolved}\033[0m")
                 return resolved
     if not required:
+        print(f"\033[92m[⚠] {label} 为非必需项，未找到任何可用模型\033[0m")
         return ""
     candidate_text = " / ".join(str(item) for item in candidates)
+    error_msg = f"\033[91m\033[1m[✗] 未找到 {label}，候选项：{candidate_text}\033[0m"
+    print(error_msg)
     raise RuntimeError(f"未找到{label}，候选项：{candidate_text}")
 
-
 def _is_ltx_transition_lora_name(lora_name: Any) -> bool:
-    normalized = _normalize_text(str(lora_name or ""))
-    return ("ltx23transition" in normalized or ("ltx23" in normalized and "transition" in normalized) or ("ltx" in normalized and "zhuanchang" in normalized))
+	normalized = _normalize_text(str(lora_name or ""))
+	return ("ltx23transition" in normalized or ("ltx23" in normalized and "transition" in normalized) or ("ltx" in normalized and "zhuanchang" in normalized))
 
 
 def _prepare_ltx_lora_chain_config(lora_chain_config: Any) -> tuple[str, bool, bool]:
-    items = parse_lora_data(lora_chain_config)
-    if not items:
-        return normalize_lora_chain_data(lora_chain_config), False, False
-    changed_strength = False
-    transition_enabled = False
-    prepared: list[dict[str, Any]] = []
-    for item in items:
-        copied = dict(item)
-        enabled = copied.get("enabled", True) is not False
-        name = str(copied.get("name", "") or "").strip()
-        if enabled and name and _is_ltx_transition_lora_name(name):
-            transition_enabled = True
-            try:
-                current_strength = float(copied.get("strength", 1.0))
-            except Exception:
-                current_strength = 1.0
-            if abs(current_strength - 1.0) > 1e-6:
-                changed_strength = True
-            copied["strength"] = 1.0
-        prepared.append(copied)
-    return normalize_lora_chain_data(json.dumps(prepared, ensure_ascii=False)), transition_enabled, changed_strength
+	items = parse_lora_data(lora_chain_config)
+	if not items:
+		return normalize_lora_chain_data(lora_chain_config), False, False
+	changed_strength = False
+	transition_enabled = False
+	prepared: list[dict[str, Any]] = []
+	for item in items:
+		copied = dict(item)
+		enabled = copied.get("enabled", True) is not False
+		name = str(copied.get("name", "") or "").strip()
+		if enabled and name and _is_ltx_transition_lora_name(name):
+			transition_enabled = True
+			try:
+				current_strength = float(copied.get("strength", 1.0))
+			except Exception:
+				current_strength = 1.0
+			if abs(current_strength - 1.0) > 1e-6:
+				changed_strength = True
+			copied["strength"] = 1.0
+		prepared.append(copied)
+	return normalize_lora_chain_data(json.dumps(prepared, ensure_ascii=False)), transition_enabled, changed_strength
 
 
 def _append_ltx_transition_trigger(prompt_text: str, transition_lora_enabled: bool) -> tuple[str, bool]:
-    text = str(prompt_text or "").strip()
-    if not transition_lora_enabled:
-        return text, False
-    normalized_prompt = _normalize_text(text)
-    normalized_trigger = _normalize_text(LTX_TRANSITION_LORA_TRIGGER)
-    if normalized_trigger in normalized_prompt:
-        return text, False
-    if not text:
-        return LTX_TRANSITION_LORA_TRIGGER, True
-    return f"{LTX_TRANSITION_LORA_TRIGGER}, {text}", True
+	text = str(prompt_text or "").strip()
+	if not transition_lora_enabled:
+		return text, False
+	normalized_prompt = _normalize_text(text)
+	normalized_trigger = _normalize_text(LTX_TRANSITION_LORA_TRIGGER)
+	if normalized_trigger in normalized_prompt:
+		return text, False
+	if not text:
+		return LTX_TRANSITION_LORA_TRIGGER, True
+	return f"{LTX_TRANSITION_LORA_TRIGGER}, {text}", True
 
 
 def _apply_chain_loras(model, clip, lora_chain_config: Any = ""):
-    prepared_config, _, _ = _prepare_ltx_lora_chain_config(lora_chain_config)
-    if not parse_lora_data(prepared_config):
-        return model, clip
-    current_model, current_clip, _ = apply_lora_chain_config(
-        model,
-        clip,
-        lora_data=prepared_config,
-        loaded_lora_cache=None,
-    )
-    return current_model, current_clip
+	prepared_config, _, _ = _prepare_ltx_lora_chain_config(lora_chain_config)
+	if not parse_lora_data(prepared_config):
+		return model, clip
+	current_model, current_clip, _ = apply_lora_chain_config(
+		model,
+		clip,
+		lora_data=prepared_config,
+		loaded_lora_cache=None,
+	)
+	return current_model, current_clip
 
 
-def _load_vae(vae_name: str):
-    vae_path = folder_paths.get_full_path("vae", vae_name)
-    if not vae_path:
-        raise RuntimeError(f"未找到视频 VAE：{vae_name}")
-    sd, metadata = comfy.utils.load_torch_file(vae_path, return_metadata=True)
-    vae = comfy.sd.VAE(sd=sd, metadata=metadata, dtype=None)
-    vae.throw_exception_if_invalid()
-    return vae
+def _load_video_vae(vae_name: str):
+	vae_path = folder_paths.get_full_path("vae", vae_name)
+	if not vae_path:
+		raise RuntimeError(f"未找到视频 VAE：{vae_name}")
+	sd, metadata = comfy.utils.load_torch_file(vae_path, return_metadata=True)
+	vae = comfy.sd.VAE(sd=sd, metadata=metadata, dtype=None)
+	vae.throw_exception_if_invalid()
+	return vae
+def _load_audio_vae(audio_vae_name: str):
+	if not audio_vae_name:
+		raise RuntimeError("未指定音频 VAE。")
 
+	# 先确认文件在 vae 目录
+	audio_vae_path = folder_paths.get_full_path("vae", audio_vae_name)
+	if not audio_vae_path:
+		raise RuntimeError(f"未在 vae 目录找到音频 VAE：{audio_vae_name}")
+
+	# 临时把 vae 目录里的同名文件注册/映射给官方 Audio VAE Loader 使用
+	try:
+		original_get_full_path_or_raise = folder_paths.get_full_path_or_raise
+
+		def patched_get_full_path_or_raise(folder_name, filename):
+			if folder_name == "checkpoints" and filename == audio_vae_name:
+				vae_path = folder_paths.get_full_path("vae", filename)
+				if vae_path:
+					return vae_path
+			return original_get_full_path_or_raise(folder_name, filename)
+
+		folder_paths.get_full_path_or_raise = patched_get_full_path_or_raise
+
+		return LTXVAudioVAELoader.execute(audio_vae_name)[0]
+
+	except AssertionError as exc:
+		raise RuntimeError(
+			f"音频 VAE 文件无效：{audio_vae_name}。"
+			"该文件缺少 audio_vae_config / audio_config 元数据，不能作为 LTX Audio VAE 使用。"
+		) from exc
+	except Exception as exc:
+		raise RuntimeError(f"加载音频 VAE 失败：{audio_vae_name}，原因：{exc}") from exc
+	finally:
+		try:
+			folder_paths.get_full_path_or_raise = original_get_full_path_or_raise
+		except Exception:
+			pass
 
 def _round_to_multiple(value: float, step: int, minimum: int) -> int:
-    rounded = int(round(float(value) / float(step)) * step)
-    return max(int(minimum), rounded)
+	rounded = int(round(float(value) / float(step)) * step)
+	return max(int(minimum), rounded)
 
 
 def _ceil_to_multiple(value: float, step: int, minimum: int) -> int:
-    rounded = int(math.ceil(float(value) / float(step)) * step)
-    return max(int(minimum), rounded)
+	rounded = int(math.ceil(float(value) / float(step)) * step)
+	return max(int(minimum), rounded)
 
 
 def _ensure_image_batch(image: torch.Tensor) -> torch.Tensor:
-    if image is None:
-        raise RuntimeError("未提供输入图像。")
-    if image.ndim == 3:
-        return image.unsqueeze(0)
-    if image.ndim == 4:
-        return image
-    raise RuntimeError(f"无法识别的图像张量维度：{tuple(image.shape)}")
+	if image is None:
+		raise RuntimeError("未提供输入图像。")
+	if image.ndim == 3:
+		return image.unsqueeze(0)
+	if image.ndim == 4:
+		return image
+	raise RuntimeError(f"无法识别的图像张量维度：{tuple(image.shape)}")
 
 
 def _resize_preserve_aspect_to_long_edge(image: torch.Tensor, long_edge: int) -> tuple[torch.Tensor, int, int]:
-    image = _ensure_image_batch(image)[:1]
-    height = int(image.shape[1])
-    width = int(image.shape[2])
-    if height <= 0 or width <= 0:
-        raise RuntimeError("输入图像尺寸无效。")
+	image = _ensure_image_batch(image)[:1]
+	height = int(image.shape[1])
+	width = int(image.shape[2])
+	if height <= 0 or width <= 0:
+		raise RuntimeError("输入图像尺寸无效。")
 
-    if width >= height:
-        target_width = int(long_edge)
-        target_height = max(64, round(height * (target_width / width)))
-    else:
-        target_height = int(long_edge)
-        target_width = max(64, round(width * (target_height / height)))
+	if width >= height:
+		target_width = int(long_edge)
+		target_height = max(64, round(height * (target_width / width)))
+	else:
+		target_height = int(long_edge)
+		target_width = max(64, round(width * (target_height / height)))
 
-    target_width = _round_to_multiple(target_width, 32, 64)
-    target_height = _round_to_multiple(target_height, 32, 64)
+	target_width = _round_to_multiple(target_width, 32, 64)
+	target_height = _round_to_multiple(target_height, 32, 64)
 
-    resized = comfy.utils.common_upscale(
-        image.movedim(-1, 1),
-        target_width,
-        target_height,
-        "lanczos",
-        "center",
-    ).movedim(1, -1)
-    return resized.contiguous(), target_width, target_height
+	resized = comfy.utils.common_upscale(
+		image.movedim(-1, 1),
+		target_width,
+		target_height,
+		"lanczos",
+		"center",
+	).movedim(1, -1)
+	return resized.contiguous(), target_width, target_height
 
 
 def _resize_preserve_native_frame_size(image: torch.Tensor) -> tuple[torch.Tensor, int, int]:
-    image = _ensure_image_batch(image)[:1]
-    height = int(image.shape[1])
-    width = int(image.shape[2])
-    if height <= 0 or width <= 0:
-        raise RuntimeError("输入图像尺寸无效。")
+	image = _ensure_image_batch(image)[:1]
+	height = int(image.shape[1])
+	width = int(image.shape[2])
+	if height <= 0 or width <= 0:
+		raise RuntimeError("输入图像尺寸无效。")
 
-    target_width = _ceil_to_multiple(width, 32, 64)
-    target_height = _ceil_to_multiple(height, 32, 64)
-    if target_width == width and target_height == height:
-        return image.contiguous(), target_width, target_height
+	target_width = _ceil_to_multiple(width, 32, 64)
+	target_height = _ceil_to_multiple(height, 32, 64)
+	if target_width == width and target_height == height:
+		return image.contiguous(), target_width, target_height
 
-    pad_left = max(0, (target_width - width) // 2)
-    pad_right = max(0, target_width - width - pad_left)
-    pad_top = max(0, (target_height - height) // 2)
-    pad_bottom = max(0, target_height - height - pad_top)
-    padded = F.pad(
-        image.movedim(-1, 1),
-        (pad_left, pad_right, pad_top, pad_bottom),
-        mode="replicate",
-    ).movedim(1, -1)
-    return padded.contiguous(), target_width, target_height
+	pad_left = max(0, (target_width - width) // 2)
+	pad_right = max(0, target_width - width - pad_left)
+	pad_top = max(0, (target_height - height) // 2)
+	pad_bottom = max(0, target_height - height - pad_top)
+	padded = F.pad(
+		image.movedim(-1, 1),
+		(pad_left, pad_right, pad_top, pad_bottom),
+		mode="replicate",
+	).movedim(1, -1)
+	return padded.contiguous(), target_width, target_height
 
 
 def _resolve_stage1_sample_size(output_width: int, output_height: int, sample_long_edge: int | None = None) -> tuple[int, int]:
-    output_width = max(64, int(output_width))
-    output_height = max(64, int(output_height))
-    if sample_long_edge is not None and int(sample_long_edge) > 0:
-        scale = min(1.0, float(sample_long_edge) / float(max(output_width, output_height)))
-    else:
-        scale = 1.0 / float(DEFAULT_STAGE2_UPSCALE_FACTOR)
-    sample_width = _ceil_to_multiple(output_width * scale, 32, 64)
-    sample_height = _ceil_to_multiple(output_height * scale, 32, 64)
-    return sample_width, sample_height
+	output_width = max(64, int(output_width))
+	output_height = max(64, int(output_height))
+	if sample_long_edge is not None and int(sample_long_edge) > 0:
+		scale = min(1.0, float(sample_long_edge) / float(max(output_width, output_height)))
+	else:
+		scale = 1.0 / float(DEFAULT_STAGE2_UPSCALE_FACTOR)
+	sample_width = _ceil_to_multiple(output_width * scale, 32, 64)
+	sample_height = _ceil_to_multiple(output_height * scale, 32, 64)
+	return sample_width, sample_height
 
 
 def _resize_guide_to_size(image: torch.Tensor, width: int, height: int) -> torch.Tensor:
-    image = _ensure_image_batch(image)[:1]
-    resized = comfy.utils.common_upscale(
-        image.movedim(-1, 1),
-        int(width),
-        int(height),
-        "lanczos",
-        "disabled",
-    ).movedim(1, -1)
-    return resized.contiguous()
+	image = _ensure_image_batch(image)[:1]
+	resized = comfy.utils.common_upscale(
+		image.movedim(-1, 1),
+		int(width),
+		int(height),
+		"lanczos",
+		"disabled",
+	).movedim(1, -1)
+	return resized.contiguous()
 
 
 def _build_latent_inplace_guides(
-    main_image: torch.Tensor | None,
-    guide_images: Iterable[torch.Tensor | None],
-    guide_times: Iterable[float],
-    guide_strengths: Iterable[float] | None,
+	main_image: torch.Tensor | None,
+	guide_images: Iterable[torch.Tensor | None],
+	guide_times: Iterable[float],
+	guide_strengths: Iterable[float] | None,
 ) -> list[tuple[torch.Tensor, float, float]]:
-    items: list[tuple[torch.Tensor, float, float]] = []
-    if main_image is not None:
-        items.append((main_image, 0.0, 1.0))
-    strength_values = list(guide_strengths or [])
-    for index, (image, seconds) in enumerate(zip(list(guide_images or []), list(guide_times or []))):
-        if image is None:
-            continue
-        strength = _clamp_float(strength_values[index] if index < len(strength_values) else 1.0, 1.0, 0.0, 1.0)
-        items.append((image, float(seconds), strength))
-    items.sort(key=lambda item: float(item[1]))
-    return items
+	items: list[tuple[torch.Tensor, float, float]] = []
+	if main_image is not None:
+		items.append((main_image, 0.0, 1.0))
+	strength_values = list(guide_strengths or [])
+	for index, (image, seconds) in enumerate(zip(list(guide_images or []), list(guide_times or []))):
+		if image is None:
+			continue
+		strength = _clamp_float(strength_values[index] if index < len(strength_values) else 1.0, 1.0, 0.0, 1.0)
+		items.append((image, float(seconds), strength))
+	items.sort(key=lambda item: float(item[1]))
+	return items
 
 
 def _inject_ltxv_images_inplace(
-    *,
-    video_vae: Any,
-    latent: dict[str, Any],
-    reference_guides: Iterable[tuple[torch.Tensor, float, float]],
-    fps: int,
-    output_frame_count: int,
-    trim_start: int,
+	*,
+	video_vae: Any,
+	latent: dict[str, Any],
+	reference_guides: Iterable[tuple[torch.Tensor, float, float]],
+	fps: int,
+	output_frame_count: int,
+	trim_start: int,
 ) -> tuple[dict[str, Any], int]:
-    if not isinstance(latent, dict) or "samples" not in latent:
-        return latent, 0
-    samples = latent["samples"].clone()
-    if samples.ndim != 5:
-        return latent, 0
+	if not isinstance(latent, dict) or "samples" not in latent:
+		return latent, 0
+	samples = latent["samples"].clone()
+	if samples.ndim != 5:
+		return latent, 0
 
-    scale_factors = getattr(video_vae, "downscale_index_formula", None)
-    if not scale_factors or len(scale_factors) < 3:
-        return latent, 0
-    time_scale_factor = max(1, int(scale_factors[0] or 1))
-    height_scale_factor = max(1, int(scale_factors[1] or 1))
-    width_scale_factor = max(1, int(scale_factors[2] or 1))
+	scale_factors = getattr(video_vae, "downscale_index_formula", None)
+	if not scale_factors or len(scale_factors) < 3:
+		return latent, 0
+	time_scale_factor = max(1, int(scale_factors[0] or 1))
+	height_scale_factor = max(1, int(scale_factors[1] or 1))
+	width_scale_factor = max(1, int(scale_factors[2] or 1))
 
-    batch, _, latent_frames, latent_height, latent_width = samples.shape
-    target_width = int(latent_width) * width_scale_factor
-    target_height = int(latent_height) * height_scale_factor
-    if "noise_mask" in latent and isinstance(latent["noise_mask"], torch.Tensor):
-        conditioning_mask = latent["noise_mask"].clone().to(device=samples.device)
-    else:
-        conditioning_mask = None
-    if conditioning_mask is None or conditioning_mask.ndim != 5 or int(conditioning_mask.shape[2]) != int(latent_frames):
-        conditioning_mask = torch.ones(
-            (int(batch), 1, int(latent_frames), 1, 1),
-            dtype=torch.float32,
-            device=samples.device,
-        )
+	batch, _, latent_frames, latent_height, latent_width = samples.shape
+	target_width = int(latent_width) * width_scale_factor
+	target_height = int(latent_height) * height_scale_factor
+	if "noise_mask" in latent and isinstance(latent["noise_mask"], torch.Tensor):
+		conditioning_mask = latent["noise_mask"].clone().to(device=samples.device)
+	else:
+		conditioning_mask = None
+	if conditioning_mask is None or conditioning_mask.ndim != 5 or int(conditioning_mask.shape[2]) != int(latent_frames):
+		conditioning_mask = torch.ones(
+			(int(batch), 1, int(latent_frames), 1, 1),
+			dtype=torch.float32,
+			device=samples.device,
+		)
 
-    injected_count = 0
-    pixel_frame_count = (int(latent_frames) - 1) * time_scale_factor + 1
-    for image, seconds, strength in list(reference_guides or []):
-        if image is None:
-            continue
-        try:
-            source = _ensure_image_batch(image)[:1]
-            if int(source.shape[1]) != target_height or int(source.shape[2]) != target_width:
-                pixels = comfy.utils.common_upscale(
-                    source.movedim(-1, 1),
-                    target_width,
-                    target_height,
-                    "bilinear",
-                    "center",
-                ).movedim(1, -1)
-            else:
-                pixels = source
-            encoded = video_vae.encode(pixels[:, :, :, :3]).to(device=samples.device, dtype=samples.dtype)
-            if encoded.ndim != 5 or int(encoded.shape[2]) <= 0:
-                continue
-            if int(encoded.shape[0]) != int(batch):
-                if int(encoded.shape[0]) == 1 and int(batch) > 1:
-                    encoded = encoded.repeat(int(batch), 1, 1, 1, 1)
-                else:
-                    encoded = encoded[: int(batch)]
+	injected_count = 0
+	pixel_frame_count = (int(latent_frames) - 1) * time_scale_factor + 1
+	for image, seconds, strength in list(reference_guides or []):
+		if image is None:
+			continue
+		try:
+			source = _ensure_image_batch(image)[:1]
+			if int(source.shape[1]) != target_height or int(source.shape[2]) != target_width:
+				pixels = comfy.utils.common_upscale(
+					source.movedim(-1, 1),
+					target_width,
+					target_height,
+					"bilinear",
+					"center",
+				).movedim(1, -1)
+			else:
+				pixels = source
+			encoded = video_vae.encode(pixels[:, :, :, :3]).to(device=samples.device, dtype=samples.dtype)
+			if encoded.ndim != 5 or int(encoded.shape[2]) <= 0:
+				continue
+			if int(encoded.shape[0]) != int(batch):
+				if int(encoded.shape[0]) == 1 and int(batch) > 1:
+					encoded = encoded.repeat(int(batch), 1, 1, 1, 1)
+				else:
+					encoded = encoded[: int(batch)]
 
-            frame_index = _guide_frame_index(seconds, fps, output_frame_count, trim_start)
-            frame_index = max(0, min(int(pixel_frame_count) - 1, int(frame_index)))
-            latent_index = max(0, min(frame_index // time_scale_factor, int(latent_frames) - 1))
-            end_index = min(latent_index + int(encoded.shape[2]), int(latent_frames))
-            if end_index <= latent_index:
-                continue
-            span = end_index - latent_index
-            samples[:, :, latent_index:end_index] = encoded[:, :, :span]
-            conditioning_mask[:, :, latent_index:end_index] = 1.0 - _clamp_float(strength, 1.0, 0.0, 1.0)
-            injected_count += 1
-        except Exception:
-            continue
+			frame_index = _guide_frame_index(seconds, fps, output_frame_count, trim_start)
+			frame_index = max(0, min(int(pixel_frame_count) - 1, int(frame_index)))
+			latent_index = max(0, min(frame_index // time_scale_factor, int(latent_frames) - 1))
+			end_index = min(latent_index + int(encoded.shape[2]), int(latent_frames))
+			if end_index <= latent_index:
+				continue
+			span = end_index - latent_index
+			samples[:, :, latent_index:end_index] = encoded[:, :, :span]
+			conditioning_mask[:, :, latent_index:end_index] = 1.0 - _clamp_float(strength, 1.0, 0.0, 1.0)
+			injected_count += 1
+		except Exception:
+			continue
 
-    if injected_count <= 0:
-        return latent, 0
-    updated = dict(latent)
-    updated["samples"] = samples.contiguous()
-    updated["noise_mask"] = conditioning_mask.contiguous()
-    return updated, injected_count
+	if injected_count <= 0:
+		return latent, 0
+	updated = dict(latent)
+	updated["samples"] = samples.contiguous()
+	updated["noise_mask"] = conditioning_mask.contiguous()
+	return updated, injected_count
 
 
 def _audio_waveform_and_rate(audio: dict[str, Any]) -> tuple[torch.Tensor, int]:
-    if not isinstance(audio, dict):
-        raise RuntimeError("输入音频格式无效。")
-    waveform = audio.get("waveform")
-    sample_rate = int(audio.get("sample_rate", 0) or 0)
-    if waveform is None or sample_rate <= 0:
-        raise RuntimeError("输入音频缺少 waveform 或 sample_rate。")
-    if waveform.ndim == 1:
-        waveform = waveform.unsqueeze(0).unsqueeze(0)
-    elif waveform.ndim == 2:
-        waveform = waveform.unsqueeze(0)
-    elif waveform.ndim != 3:
-        raise RuntimeError(f"无法识别的音频张量维度：{tuple(waveform.shape)}")
-    return waveform, sample_rate
+	if not isinstance(audio, dict):
+		raise RuntimeError("输入音频格式无效。")
+	waveform = audio.get("waveform")
+	sample_rate = int(audio.get("sample_rate", 0) or 0)
+	if waveform is None or sample_rate <= 0:
+		raise RuntimeError("输入音频缺少 waveform 或 sample_rate。")
+	if waveform.ndim == 1:
+		waveform = waveform.unsqueeze(0).unsqueeze(0)
+	elif waveform.ndim == 2:
+		waveform = waveform.unsqueeze(0)
+	elif waveform.ndim != 3:
+		raise RuntimeError(f"无法识别的音频张量维度：{tuple(waveform.shape)}")
+	return waveform, sample_rate
 
 
 def _trim_audio(audio: dict[str, Any], start_seconds: float = DEFAULT_AUDIO_START_SECONDS, max_seconds: float = DEFAULT_AUDIO_MAX_SECONDS) -> dict[str, Any]:
-    waveform, sample_rate = _audio_waveform_and_rate(audio)
-    total_samples = int(waveform.shape[-1])
-    start_sample = max(0, int(round(float(start_seconds) * sample_rate)))
-    if start_sample >= total_samples:
-        raise RuntimeError("音频起始时间超出音频总长度。")
+	waveform, sample_rate = _audio_waveform_and_rate(audio)
+	total_samples = int(waveform.shape[-1])
+	start_sample = max(0, int(round(float(start_seconds) * sample_rate)))
+	if start_sample >= total_samples:
+		raise RuntimeError("音频起始时间超出音频总长度。")
 
-    end_sample = total_samples
-    if max_seconds and max_seconds > 0:
-        end_sample = min(total_samples, start_sample + int(round(float(max_seconds) * sample_rate)))
-    trimmed = waveform[..., start_sample:end_sample].contiguous()
-    if trimmed.shape[-1] <= 0:
-        raise RuntimeError("裁切后的音频为空。")
-    result = dict(audio)
-    result["waveform"] = trimmed
-    result["sample_rate"] = sample_rate
-    return result
+	end_sample = total_samples
+	if max_seconds and max_seconds > 0:
+		end_sample = min(total_samples, start_sample + int(round(float(max_seconds) * sample_rate)))
+	trimmed = waveform[..., start_sample:end_sample].contiguous()
+	if trimmed.shape[-1] <= 0:
+		raise RuntimeError("裁切后的音频为空。")
+	result = dict(audio)
+	result["waveform"] = trimmed
+	result["sample_rate"] = sample_rate
+	return result
 
 
 def _normalize_audio_rms(audio: dict[str, Any], target_db: float = DEFAULT_AUDIO_TARGET_DB) -> dict[str, Any]:
-    waveform, sample_rate = _audio_waveform_and_rate(audio)
-    rms = waveform.pow(2).mean(dim=-1, keepdim=True).sqrt().clamp(min=1e-8)
-    current_db = 20.0 * torch.log10(rms)
-    gain = torch.pow(10.0, (float(target_db) - current_db) / 20.0)
-    normalized = waveform * gain
-    peak = normalized.abs().amax(dim=-1, keepdim=True).clamp(min=1.0)
-    normalized = (normalized / peak).contiguous()
+	waveform, sample_rate = _audio_waveform_and_rate(audio)
+	rms = waveform.pow(2).mean(dim=-1, keepdim=True).sqrt().clamp(min=1e-8)
+	current_db = 20.0 * torch.log10(rms)
+	gain = torch.pow(10.0, (float(target_db) - current_db) / 20.0)
+	normalized = waveform * gain
+	peak = normalized.abs().amax(dim=-1, keepdim=True).clamp(min=1.0)
+	normalized = (normalized / peak).contiguous()
 
-    result = dict(audio)
-    result["waveform"] = normalized
-    result["sample_rate"] = sample_rate
-    return result
+	result = dict(audio)
+	result["waveform"] = normalized
+	result["sample_rate"] = sample_rate
+	return result
 
 
 def _audio_duration_seconds(audio: dict[str, Any]) -> float:
-    waveform, sample_rate = _audio_waveform_and_rate(audio)
-    return float(waveform.shape[-1]) / float(sample_rate)
+	waveform, sample_rate = _audio_waveform_and_rate(audio)
+	return float(waveform.shape[-1]) / float(sample_rate)
 
 
 def _requested_frame_count(seconds: float, fps: int) -> int:
-    return max(1, int(round(max(0.0, float(seconds)) * float(max(1, int(fps))))) + 1)
+	return max(1, int(round(max(0.0, float(seconds)) * float(max(1, int(fps))))) + 1)
 
 
 def _ltx_internal_frame_count(output_frame_count: int, trim_start: int = 0) -> int:
-    needed = max(1, int(output_frame_count) + max(0, int(trim_start)))
-    if needed <= 1:
-        return 1
-    return int(math.ceil(float(needed - 1) / 8.0) * 8 + 1)
+	needed = max(1, int(output_frame_count) + max(0, int(trim_start)))
+	if needed <= 1:
+		return 1
+	return int(math.ceil(float(needed - 1) / 8.0) * 8 + 1)
 
 
 def _guide_frame_index(seconds: float, fps: int, output_frame_count: int, trim_start: int = 0) -> int:
-    last_output_index = max(0, int(output_frame_count) - 1)
-    index = int(round(max(0.0, float(seconds)) * float(max(1, int(fps)))))
-    index = max(0, min(last_output_index, index))
-    return index + max(0, int(trim_start))
+	last_output_index = max(0, int(output_frame_count) - 1)
+	index = int(round(max(0.0, float(seconds)) * float(max(1, int(fps)))))
+	index = max(0, min(last_output_index, index))
+	return index + max(0, int(trim_start))
 
 
 def _set_audio_latent_noise_mask(audio_latent: dict[str, Any], value: float = 0.0) -> dict[str, Any]:
-    samples = audio_latent["samples"]
-    mask = torch.full(
-        (int(samples.shape[0]), 1, int(samples.shape[-2]), int(samples.shape[-1])),
-        float(value),
-        dtype=samples.dtype,
-        device=samples.device,
-    )
-    updated = dict(audio_latent)
-    updated["noise_mask"] = mask
-    return updated
+	samples = audio_latent["samples"]
+	mask = torch.full(
+		(int(samples.shape[0]), 1, int(samples.shape[-2]), int(samples.shape[-1])),
+		float(value),
+		dtype=samples.dtype,
+		device=samples.device,
+	)
+	updated = dict(audio_latent)
+	updated["noise_mask"] = mask
+	return updated
 
 
 def _slice_output_frames(frames: torch.Tensor, start_index: int, frame_count: int) -> torch.Tensor:
-    frames = _ensure_image_batch(frames)
-    total = int(frames.shape[0])
-    if total <= 0:
-        raise RuntimeError("VAE 未解码出任何视频帧。")
-    start_index = max(0, int(start_index))
-    frame_count = max(1, int(frame_count))
-    if start_index >= total:
-        start_index = max(0, total - frame_count)
-    end_index = min(total, start_index + frame_count)
-    sliced = frames[start_index:end_index].contiguous()
-    if int(sliced.shape[0]) <= 0:
-        raise RuntimeError("裁切输出视频帧后为空。")
-    return sliced
+	frames = _ensure_image_batch(frames)
+	total = int(frames.shape[0])
+	if total <= 0:
+		raise RuntimeError("VAE 未解码出任何视频帧。")
+	start_index = max(0, int(start_index))
+	frame_count = max(1, int(frame_count))
+	if start_index >= total:
+		start_index = max(0, total - frame_count)
+	end_index = min(total, start_index + frame_count)
+	sliced = frames[start_index:end_index].contiguous()
+	if int(sliced.shape[0]) <= 0:
+		raise RuntimeError("裁切输出视频帧后为空。")
+	return sliced
 
 
 def _crop_frames_to_size(frames: torch.Tensor, width: int, height: int) -> torch.Tensor:
-    frames = _ensure_image_batch(frames)
-    target_width = max(1, int(width))
-    target_height = max(1, int(height))
-    current_height = int(frames.shape[1])
-    current_width = int(frames.shape[2])
-    if current_width == target_width and current_height == target_height:
-        return frames.contiguous()
-    if target_width > current_width or target_height > current_height:
-        resized = comfy.utils.common_upscale(
-            frames.movedim(-1, 1),
-            target_width,
-            target_height,
-            "lanczos",
-            "center",
-        ).movedim(1, -1)
-        return resized.contiguous()
+	frames = _ensure_image_batch(frames)
+	target_width = max(1, int(width))
+	target_height = max(1, int(height))
+	current_height = int(frames.shape[1])
+	current_width = int(frames.shape[2])
+	if current_width == target_width and current_height == target_height:
+		return frames.contiguous()
+	if target_width > current_width or target_height > current_height:
+		resized = comfy.utils.common_upscale(
+			frames.movedim(-1, 1),
+			target_width,
+			target_height,
+			"lanczos",
+			"center",
+		).movedim(1, -1)
+		return resized.contiguous()
 
-    left = max(0, (current_width - target_width) // 2)
-    top = max(0, (current_height - target_height) // 2)
-    right = left + target_width
-    bottom = top + target_height
-    return frames[:, top:bottom, left:right, :].contiguous()
+	left = max(0, (current_width - target_width) // 2)
+	top = max(0, (current_height - target_height) // 2)
+	right = left + target_width
+	bottom = top + target_height
+	return frames[:, top:bottom, left:right, :].contiguous()
 
 
 def _guide_output_frame_index(seconds: float, fps: int, output_frame_count: int) -> int:
-    last_output_index = max(0, int(output_frame_count) - 1)
-    index = int(round(max(0.0, float(seconds)) * float(max(1, int(fps)))))
-    return max(0, min(last_output_index, index))
+	last_output_index = max(0, int(output_frame_count) - 1)
+	index = int(round(max(0.0, float(seconds)) * float(max(1, int(fps)))))
+	return max(0, min(last_output_index, index))
 
 
 def _stamp_original_guide_frames(
-    frames: torch.Tensor,
-    main_image: torch.Tensor | None,
-    guide_images: Iterable[torch.Tensor | None],
-    guide_times: Iterable[float],
-    fps: int,
-    width: int,
-    height: int,
+	frames: torch.Tensor,
+	main_image: torch.Tensor | None,
+	guide_images: Iterable[torch.Tensor | None],
+	guide_times: Iterable[float],
+	fps: int,
+	width: int,
+	height: int,
 ) -> torch.Tensor:
-    frames = _ensure_image_batch(frames).clone()
-    output_frame_count = int(frames.shape[0])
-    entries: list[tuple[torch.Tensor | None, float]] = []
-    if main_image is not None:
-        entries.append((main_image, 0.0))
-    entries.extend(zip(list(guide_images or []), list(guide_times or [])))
-    for image, seconds in entries:
-        if image is None:
-            continue
-        try:
-            source = _resize_guide_to_size(image, int(width), int(height))[0]
-        except Exception:
-            continue
-        frame_index = _guide_output_frame_index(seconds, fps, output_frame_count)
-        frames[frame_index] = source.to(device=frames.device, dtype=frames.dtype)
-    return frames.contiguous()
+	frames = _ensure_image_batch(frames).clone()
+	output_frame_count = int(frames.shape[0])
+	entries: list[tuple[torch.Tensor | None, float]] = []
+	if main_image is not None:
+		entries.append((main_image, 0.0))
+	entries.extend(zip(list(guide_images or []), list(guide_times or [])))
+	for image, seconds in entries:
+		if image is None:
+			continue
+		try:
+			source = _resize_guide_to_size(image, int(width), int(height))[0]
+		except Exception:
+			continue
+		frame_index = _guide_output_frame_index(seconds, fps, output_frame_count)
+		frames[frame_index] = source.to(device=frames.device, dtype=frames.dtype)
+	return frames.contiguous()
 
 
 def _maybe_purge_vram() -> None:
-    try:
-        comfy.model_management.soft_empty_cache()
-    except Exception:
-        pass
+	try:
+		comfy.model_management.soft_empty_cache()
+	except Exception:
+		pass
 
 
 def _aggressive_purge_runtime() -> None:
-    try:
-        cleanup_models = getattr(comfy.model_management, "cleanup_models", None)
-        if callable(cleanup_models):
-            cleanup_models()
-    except Exception:
-        pass
-    try:
-        unload_all_models = getattr(comfy.model_management, "unload_all_models", None)
-        if callable(unload_all_models):
-            unload_all_models()
-    except Exception:
-        pass
-    try:
-        gc.collect()
-    except Exception:
-        pass
-    try:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-    except Exception:
-        pass
-    _maybe_purge_vram()
+	try:
+		cleanup_models = getattr(comfy.model_management, "cleanup_models", None)
+		if callable(cleanup_models):
+			cleanup_models()
+	except Exception:
+		pass
+	try:
+		unload_all_models = getattr(comfy.model_management, "unload_all_models", None)
+		if callable(unload_all_models):
+			unload_all_models()
+	except Exception:
+		pass
+	try:
+		gc.collect()
+	except Exception:
+		pass
+	try:
+		if torch.cuda.is_available():
+			torch.cuda.empty_cache()
+			torch.cuda.ipc_collect()
+	except Exception:
+		pass
+	_maybe_purge_vram()
 
 
 @contextmanager
 def _fp16_accumulation(enabled: bool = True):
-    backend = getattr(getattr(torch.backends, "cuda", None), "matmul", None)
-    previous = getattr(backend, "allow_fp16_accumulation", None)
-    if not enabled or previous is None:
-        yield
-        return
-    backend.allow_fp16_accumulation = True
-    try:
-        yield
-    finally:
-        backend.allow_fp16_accumulation = previous
+	backend = getattr(getattr(torch.backends, "cuda", None), "matmul", None)
+	previous = getattr(backend, "allow_fp16_accumulation", None)
+	if not enabled or previous is None:
+		yield
+		return
+	backend.allow_fp16_accumulation = True
+	try:
+		yield
+	finally:
+		backend.allow_fp16_accumulation = previous
 
 
 def _compute_attention(self, query, context, attn_precision=None, transformer_options=None):
-    transformer_options = transformer_options or {}
-    key = self.k_norm(self.to_k(context)).to(query.dtype)
-    value = self.to_v(context).to(query.dtype)
-    result = comfy.ldm.modules.attention.optimized_attention(
-        query,
-        key,
-        value,
-        heads=self.heads,
-        attn_precision=attn_precision,
-        transformer_options=transformer_options,
-    ).flatten(2)
-    del key, value
-    return result
+	transformer_options = transformer_options or {}
+	key = self.k_norm(self.to_k(context)).to(query.dtype)
+	value = self.to_v(context).to(query.dtype)
+	result = comfy.ldm.modules.attention.optimized_attention(
+		query,
+		key,
+		value,
+		heads=self.heads,
+		attn_precision=attn_precision,
+		transformer_options=transformer_options,
+	).flatten(2)
+	del key, value
+	return result
 
 
 def _nag_attention(self, query, context_positive, nag_context, attn_precision=None, transformer_options=None):
-    transformer_options = transformer_options or {}
-    positive = _compute_attention(self, query, context_positive, attn_precision, transformer_options)
-    negative = _compute_attention(self, query, nag_context, attn_precision, transformer_options)
-    return positive, negative
+	transformer_options = transformer_options or {}
+	positive = _compute_attention(self, query, context_positive, attn_precision, transformer_options)
+	negative = _compute_attention(self, query, nag_context, attn_precision, transformer_options)
+	return positive, negative
 
 
 def _normalized_attention_guidance(self, x_positive, x_negative):
-    if self.inplace:
-        nag_guidance = x_negative.mul_(self.nag_scale - 1).neg_().add_(x_positive, alpha=self.nag_scale)
-    else:
-        nag_guidance = x_positive * self.nag_scale - x_negative * (self.nag_scale - 1)
+	if self.inplace:
+		nag_guidance = x_negative.mul_(self.nag_scale - 1).neg_().add_(x_positive, alpha=self.nag_scale)
+	else:
+		nag_guidance = x_positive * self.nag_scale - x_negative * (self.nag_scale - 1)
 
-    del x_negative
+	del x_negative
 
-    norm_positive = torch.norm(x_positive, p=1, dim=-1, keepdim=True)
-    norm_guidance = torch.norm(nag_guidance, p=1, dim=-1, keepdim=True)
+	norm_positive = torch.norm(x_positive, p=1, dim=-1, keepdim=True)
+	norm_guidance = torch.norm(nag_guidance, p=1, dim=-1, keepdim=True)
 
-    scale = norm_guidance / norm_positive
-    torch.nan_to_num_(scale, nan=10.0)
-    mask = scale > self.nag_tau
-    del scale
+	scale = norm_guidance / norm_positive
+	torch.nan_to_num_(scale, nan=10.0)
+	mask = scale > self.nag_tau
+	del scale
 
-    adjustment = (norm_positive * self.nag_tau) / (norm_guidance + 1e-7)
-    del norm_positive, norm_guidance
+	adjustment = (norm_positive * self.nag_tau) / (norm_guidance + 1e-7)
+	del norm_positive, norm_guidance
 
-    nag_guidance.mul_(torch.where(mask, adjustment, 1.0))
-    del mask, adjustment
+	nag_guidance.mul_(torch.where(mask, adjustment, 1.0))
+	del mask, adjustment
 
-    if self.inplace:
-        nag_guidance.sub_(x_positive).mul_(self.nag_alpha).add_(x_positive)
-    else:
-        nag_guidance = nag_guidance * self.nag_alpha + x_positive * (1 - self.nag_alpha)
-    del x_positive
+	if self.inplace:
+		nag_guidance.sub_(x_positive).mul_(self.nag_alpha).add_(x_positive)
+	else:
+		nag_guidance = nag_guidance * self.nag_alpha + x_positive * (1 - self.nag_alpha)
+	del x_positive
 
-    return nag_guidance
+	return nag_guidance
 
 
 def _ltxv_crossattn_forward_nag(self, x, context, mask=None, transformer_options=None, **kwargs):
-    transformer_options = transformer_options or {}
+	transformer_options = transformer_options or {}
 
-    if context.shape[0] == 1:
-        x_pos, context_pos = x, context
-        x_neg = context_neg = None
-    else:
-        x_pos, x_neg = torch.chunk(x, 2, dim=0)
-        context_pos, context_neg = torch.chunk(context, 2, dim=0)
+	if context.shape[0] == 1:
+		x_pos, context_pos = x, context
+		x_neg = context_neg = None
+	else:
+		x_pos, x_neg = torch.chunk(x, 2, dim=0)
+		context_pos, context_neg = torch.chunk(context, 2, dim=0)
 
-    query_positive = self.q_norm(self.to_q(x_pos))
-    del x_pos
+	query_positive = self.q_norm(self.to_q(x_pos))
+	del x_pos
 
-    x_positive, x_negative = _nag_attention(
-        self,
-        query_positive,
-        context_pos,
-        self.nag_context,
-        attn_precision=self.attn_precision,
-        transformer_options=transformer_options,
-    )
-    del context_pos, query_positive
+	x_positive, x_negative = _nag_attention(
+		self,
+		query_positive,
+		context_pos,
+		self.nag_context,
+		attn_precision=self.attn_precision,
+		transformer_options=transformer_options,
+	)
+	del context_pos, query_positive
 
-    x_pos_out = _normalized_attention_guidance(self, x_positive, x_negative)
-    del x_positive, x_negative
+	x_pos_out = _normalized_attention_guidance(self, x_positive, x_negative)
+	del x_positive, x_negative
 
-    if x_neg is not None and context_neg is not None:
-        query_negative = self.q_norm(self.to_q(x_neg))
-        key_negative = self.k_norm(self.to_k(context_neg))
-        value_negative = self.to_v(context_neg)
-        x_neg_out = comfy.ldm.modules.attention.optimized_attention(
-            query_negative,
-            key_negative,
-            value_negative,
-            heads=self.heads,
-            attn_precision=self.attn_precision,
-            transformer_options=transformer_options,
-        )
-        out = torch.cat([x_pos_out, x_neg_out], dim=0)
-    else:
-        out = x_pos_out
+	if x_neg is not None and context_neg is not None:
+		query_negative = self.q_norm(self.to_q(x_neg))
+		key_negative = self.k_norm(self.to_k(context_neg))
+		value_negative = self.to_v(context_neg)
+		x_neg_out = comfy.ldm.modules.attention.optimized_attention(
+			query_negative,
+			key_negative,
+			value_negative,
+			heads=self.heads,
+			attn_precision=self.attn_precision,
+			transformer_options=transformer_options,
+		)
+		out = torch.cat([x_pos_out, x_neg_out], dim=0)
+	else:
+		out = x_pos_out
 
-    if self.to_gate_logits is not None:
-        gate_logits = self.to_gate_logits(x)
-        batch, tokens, _ = out.shape
-        out = out.view(batch, tokens, self.heads, self.dim_head)
-        gates = 2.0 * torch.sigmoid(gate_logits)
-        out = out * gates.unsqueeze(-1)
-        out = out.view(batch, tokens, self.heads * self.dim_head)
+	if self.to_gate_logits is not None:
+		gate_logits = self.to_gate_logits(x)
+		batch, tokens, _ = out.shape
+		out = out.view(batch, tokens, self.heads, self.dim_head)
+		gates = 2.0 * torch.sigmoid(gate_logits)
+		out = out * gates.unsqueeze(-1)
+		out = out.view(batch, tokens, self.heads * self.dim_head)
 
-    return self.to_out(out)
+	return self.to_out(out)
 
 
 class _LTXVCrossAttentionPatch:
-    def __init__(self, context, nag_scale: float, nag_alpha: float, nag_tau: float, inplace: bool = True):
-        self.nag_context = context
-        self.nag_scale = float(nag_scale)
-        self.nag_alpha = float(nag_alpha)
-        self.nag_tau = float(nag_tau)
-        self.inplace = bool(inplace)
+	def __init__(self, context, nag_scale: float, nag_alpha: float, nag_tau: float, inplace: bool = True):
+		self.nag_context = context
+		self.nag_scale = float(nag_scale)
+		self.nag_alpha = float(nag_alpha)
+		self.nag_tau = float(nag_tau)
+		self.inplace = bool(inplace)
 
-    def __get__(self, obj, objtype=None):
-        def wrapped_attention(self_module, *args, **kwargs):
-            self_module.nag_context = self.nag_context
-            self_module.nag_scale = self.nag_scale
-            self_module.nag_alpha = self.nag_alpha
-            self_module.nag_tau = self.nag_tau
-            self_module.inplace = self.inplace
-            return _ltxv_crossattn_forward_nag(self_module, *args, **kwargs)
+	def __get__(self, obj, objtype=None):
+		def wrapped_attention(self_module, *args, **kwargs):
+			self_module.nag_context = self.nag_context
+			self_module.nag_scale = self.nag_scale
+			self_module.nag_alpha = self.nag_alpha
+			self_module.nag_tau = self.nag_tau
+			self_module.inplace = self.inplace
+			return _ltxv_crossattn_forward_nag(self_module, *args, **kwargs)
 
-        return types.MethodType(wrapped_attention, obj)
+		return types.MethodType(wrapped_attention, obj)
 
 
 def _apply_ltx_nag(model, nag_conditioning, nag_scale: float, nag_alpha: float, nag_tau: float, inplace: bool = True):
-    if nag_conditioning is None or abs(float(nag_scale)) <= 1e-6:
-        return model
+	if nag_conditioning is None or abs(float(nag_scale)) <= 1e-6:
+		return model
 
-    model_clone = model.clone()
-    diffusion_model = model_clone.get_model_object("diffusion_model")
+	model_clone = model.clone()
+	diffusion_model = model_clone.get_model_object("diffusion_model")
 
-    dtype = model.model.manual_cast_dtype
-    if dtype is None:
-        dtype = model.model.diffusion_model.dtype
+	dtype = model.model.manual_cast_dtype
+	if dtype is None:
+		dtype = model.model.diffusion_model.dtype
 
-    context_video = nag_conditioning[0][0].to(mm.get_torch_device(), dtype)
-    video_dim = diffusion_model.inner_dim
-    cross_attention_dim = getattr(diffusion_model, "cross_attention_dim", None)
-    audio_cross_attention_dim = getattr(diffusion_model, "audio_cross_attention_dim", 0)
-    if cross_attention_dim is not None and context_video.shape[-1] == cross_attention_dim + audio_cross_attention_dim:
-        context_video = context_video[:, :, :cross_attention_dim]
+	context_video = nag_conditioning[0][0].to(mm.get_torch_device(), dtype)
+	video_dim = diffusion_model.inner_dim
+	cross_attention_dim = getattr(diffusion_model, "cross_attention_dim", None)
+	audio_cross_attention_dim = getattr(diffusion_model, "audio_cross_attention_dim", 0)
+	if cross_attention_dim is not None and context_video.shape[-1] == cross_attention_dim + audio_cross_attention_dim:
+		context_video = context_video[:, :, :cross_attention_dim]
 
-    offload_device = mm.unet_offload_device()
-    if getattr(diffusion_model, "caption_proj_before_connector", False) and getattr(diffusion_model, "caption_projection_first_linear", False):
-        diffusion_model.caption_projection.to(mm.get_torch_device())
-        context_video = diffusion_model.caption_projection(context_video)
-        diffusion_model.caption_projection.to(offload_device)
+	offload_device = mm.unet_offload_device()
+	if getattr(diffusion_model, "caption_proj_before_connector", False) and getattr(diffusion_model, "caption_projection_first_linear", False):
+		diffusion_model.caption_projection.to(mm.get_torch_device())
+		context_video = diffusion_model.caption_projection(context_video)
+		diffusion_model.caption_projection.to(offload_device)
 
-    if hasattr(diffusion_model, "video_embeddings_connector"):
-        diffusion_model.video_embeddings_connector.to(mm.get_torch_device())
-        context_video = diffusion_model.video_embeddings_connector(context_video)[0]
-        diffusion_model.video_embeddings_connector.to(offload_device)
+	if hasattr(diffusion_model, "video_embeddings_connector"):
+		diffusion_model.video_embeddings_connector.to(mm.get_torch_device())
+		context_video = diffusion_model.video_embeddings_connector(context_video)[0]
+		diffusion_model.video_embeddings_connector.to(offload_device)
 
-    context_video = context_video.view(1, -1, video_dim)
-    for index, block in enumerate(diffusion_model.transformer_blocks):
-        patched = _LTXVCrossAttentionPatch(context_video, nag_scale, nag_alpha, nag_tau, inplace=inplace).__get__(block.attn2, block.__class__)
-        model_clone.add_object_patch(f"diffusion_model.transformer_blocks.{index}.attn2.forward", patched)
-    return model_clone
+	context_video = context_video.view(1, -1, video_dim)
+	for index, block in enumerate(diffusion_model.transformer_blocks):
+		patched = _LTXVCrossAttentionPatch(context_video, nag_scale, nag_alpha, nag_tau, inplace=inplace).__get__(block.attn2, block.__class__)
+		model_clone.add_object_patch(f"diffusion_model.transformer_blocks.{index}.attn2.forward", patched)
+	return model_clone
 
 
 def _ffn_chunked_forward(self, x):
-    if x.shape[1] > self.dim_threshold:
-        chunk_size = max(1, x.shape[1] // self.num_chunks)
-        for index in range(self.num_chunks):
-            start_idx = index * chunk_size
-            end_idx = (index + 1) * chunk_size if index < self.num_chunks - 1 else x.shape[1]
-            x[:, start_idx:end_idx] = self.net(x[:, start_idx:end_idx])
-        return x
-    return self.net(x)
+	if x.shape[1] > self.dim_threshold:
+		chunk_size = max(1, x.shape[1] // self.num_chunks)
+		for index in range(self.num_chunks):
+			start_idx = index * chunk_size
+			end_idx = (index + 1) * chunk_size if index < self.num_chunks - 1 else x.shape[1]
+			x[:, start_idx:end_idx] = self.net(x[:, start_idx:end_idx])
+		return x
+	return self.net(x)
 
 
 class _LTXVFeedForwardChunkPatch:
-    def __init__(self, num_chunks: int, dim_threshold: int):
-        self.num_chunks = int(num_chunks)
-        self.dim_threshold = int(dim_threshold)
+	def __init__(self, num_chunks: int, dim_threshold: int):
+		self.num_chunks = int(num_chunks)
+		self.dim_threshold = int(dim_threshold)
 
-    def __get__(self, obj, objtype=None):
-        def wrapped_forward(self_module, *args, **kwargs):
-            self_module.num_chunks = self.num_chunks
-            self_module.dim_threshold = self.dim_threshold
-            return _ffn_chunked_forward(self_module, *args, **kwargs)
+	def __get__(self, obj, objtype=None):
+		def wrapped_forward(self_module, *args, **kwargs):
+			self_module.num_chunks = self.num_chunks
+			self_module.dim_threshold = self.dim_threshold
+			return _ffn_chunked_forward(self_module, *args, **kwargs)
 
-        return types.MethodType(wrapped_forward, obj)
+		return types.MethodType(wrapped_forward, obj)
 
 
 def _apply_ff_chunking(model, chunks: int = DEFAULT_FF_CHUNKS, dim_threshold: int = DEFAULT_FF_DIM_THRESHOLD):
-    if int(chunks) <= 1:
-        return model
-    model_clone = model.clone()
-    diffusion_model = model_clone.get_model_object("diffusion_model")
-    for index, block in enumerate(diffusion_model.transformer_blocks):
-        patched = _LTXVFeedForwardChunkPatch(chunks, dim_threshold).__get__(block.ff, block.__class__)
-        model_clone.add_object_patch(f"diffusion_model.transformer_blocks.{index}.ff.forward", patched)
-    return model_clone
+	if int(chunks) <= 1:
+		return model
+	model_clone = model.clone()
+	diffusion_model = model_clone.get_model_object("diffusion_model")
+	for index, block in enumerate(diffusion_model.transformer_blocks):
+		patched = _LTXVFeedForwardChunkPatch(chunks, dim_threshold).__get__(block.ff, block.__class__)
+		model_clone.add_object_patch(f"diffusion_model.transformer_blocks.{index}.ff.forward", patched)
+	return model_clone
 
 
 def _create_video(frames: torch.Tensor, fps: float, audio: dict[str, Any] | None):
-    try:
-        return CreateVideo.execute(frames, float(fps), audio)[0]
-    except Exception:
-        frame_rate = Fraction(float(fps)).limit_denominator(1000)
-        return InputImpl.VideoFromComponents(Types.VideoComponents(images=frames, audio=audio, frame_rate=frame_rate))
+	try:
+		return CreateVideo.execute(frames, float(fps), audio)[0]
+	except Exception:
+		frame_rate = Fraction(float(fps)).limit_denominator(1000)
+		return InputImpl.VideoFromComponents(Types.VideoComponents(images=frames, audio=audio, frame_rate=frame_rate))
 
 
 def _supported_segment_video_format(format_name: Any) -> str:
-    requested = str(format_name or DEFAULT_SEGMENT_VIDEO_FORMAT).strip() or DEFAULT_SEGMENT_VIDEO_FORMAT
-    try:
-        supported = set(list_supported_formats())
-    except Exception:
-        supported = {DEFAULT_SEGMENT_VIDEO_FORMAT}
-    if requested in supported and requested.startswith("video/"):
-        return requested
-    return DEFAULT_SEGMENT_VIDEO_FORMAT
+	requested = str(format_name or DEFAULT_SEGMENT_VIDEO_FORMAT).strip() or DEFAULT_SEGMENT_VIDEO_FORMAT
+	try:
+		supported = set(list_supported_formats())
+	except Exception:
+		supported = {DEFAULT_SEGMENT_VIDEO_FORMAT}
+	if requested in supported and requested.startswith("video/"):
+		return requested
+	return DEFAULT_SEGMENT_VIDEO_FORMAT
 
 
 def _format_segment_save_prefix(preset: Any, unique_id: Any, segment_index: int, start_index: int, end_index: int) -> str:
-    now = datetime.datetime.now()
-    base = str(preset or "").strip() or "video/GJJ_LTX多图分段"
-    replacements = {
-        "{date}": now.strftime("%Y%m%d"),
-        "{time}": now.strftime("%H%M%S"),
-        "{node}": str(unique_id or "node"),
-        "{segment}": f"{int(segment_index):02d}",
-        "{start}": f"{int(start_index):02d}",
-        "{end}": f"{int(end_index):02d}",
-    }
-    for key, value in replacements.items():
-        base = base.replace(key, value)
-    base = base.replace("\\", "/").strip("/")
-    if not base:
-        base = "video/GJJ_LTX多图分段"
-    return f"{base}/段{int(segment_index):02d}_场景{int(start_index):02d}-{int(end_index):02d}"
+	now = datetime.datetime.now()
+	base = str(preset or "").strip() or "video/GJJ_LTX多图分段"
+	replacements = {
+		"{date}": now.strftime("%Y%m%d"),
+		"{time}": now.strftime("%H%M%S"),
+		"{node}": str(unique_id or "node"),
+		"{segment}": f"{int(segment_index):02d}",
+		"{start}": f"{int(start_index):02d}",
+		"{end}": f"{int(end_index):02d}",
+	}
+	for key, value in replacements.items():
+		base = base.replace(key, value)
+	base = base.replace("\\", "/").strip("/")
+	if not base:
+		base = "video/GJJ_LTX多图分段"
+	return f"{base}/段{int(segment_index):02d}_场景{int(start_index):02d}-{int(end_index):02d}"
 
 
 def _concat_audio_segments(audio_segments: list[dict[str, Any] | None]) -> dict[str, Any] | None:
-    valid = [item for item in audio_segments if isinstance(item, dict) and item.get("waveform") is not None]
-    if not valid:
-        return None
-    sample_rate = int(valid[0].get("sample_rate", 0) or 0)
-    if sample_rate <= 0:
-        return None
-    waveforms: list[torch.Tensor] = []
-    for item in valid:
-        if int(item.get("sample_rate", 0) or 0) != sample_rate:
-            return None
-        waveform = item.get("waveform")
-        if not isinstance(waveform, torch.Tensor):
-            waveform = torch.as_tensor(waveform, dtype=torch.float32)
-        if waveform.ndim == 1:
-            waveform = waveform.unsqueeze(0).unsqueeze(0)
-        elif waveform.ndim == 2:
-            waveform = waveform.unsqueeze(0)
-        elif waveform.ndim != 3:
-            return None
-        waveforms.append(waveform.detach().cpu())
-    if not waveforms:
-        return None
-    result = dict(valid[0])
-    result["sample_rate"] = sample_rate
-    result["waveform"] = torch.cat(waveforms, dim=-1).contiguous()
-    return result
+	valid = [item for item in audio_segments if isinstance(item, dict) and item.get("waveform") is not None]
+	if not valid:
+		return None
+	sample_rate = int(valid[0].get("sample_rate", 0) or 0)
+	if sample_rate <= 0:
+		return None
+	waveforms: list[torch.Tensor] = []
+	for item in valid:
+		if int(item.get("sample_rate", 0) or 0) != sample_rate:
+			return None
+		waveform = item.get("waveform")
+		if not isinstance(waveform, torch.Tensor):
+			waveform = torch.as_tensor(waveform, dtype=torch.float32)
+		if waveform.ndim == 1:
+			waveform = waveform.unsqueeze(0).unsqueeze(0)
+		elif waveform.ndim == 2:
+			waveform = waveform.unsqueeze(0)
+		elif waveform.ndim != 3:
+			return None
+		waveforms.append(waveform.detach().cpu())
+	if not waveforms:
+		return None
+	result = dict(valid[0])
+	result["sample_rate"] = sample_rate
+	result["waveform"] = torch.cat(waveforms, dim=-1).contiguous()
+	return result
 
 
 def _save_segment_video_preview(
-    *,
-    frames: torch.Tensor,
-    audio: dict[str, Any] | None,
-    fps: int,
-    save_preset: Any,
-    format_name: Any,
-    unique_id: Any,
-    segment_index: int,
-    segment_count: int,
-    start_index: int,
-    end_index: int,
-    output_width: int,
-    output_height: int,
+	*,
+	frames: torch.Tensor,
+	audio: dict[str, Any] | None,
+	fps: int,
+	save_preset: Any,
+	format_name: Any,
+	unique_id: Any,
+	segment_index: int,
+	segment_count: int,
+	start_index: int,
+	end_index: int,
+	output_width: int,
+	output_height: int,
 ) -> dict[str, Any]:
-    prefix = _format_segment_save_prefix(save_preset, unique_id, segment_index, start_index, end_index)
-    resolved_format = _supported_segment_video_format(format_name)
-    saved = combine_video(
-        images=frames,
-        frame_rate=float(fps),
-        loop_count=0,
-        filename_prefix=prefix,
-        format_name=resolved_format,
-        pingpong=False,
-        save_output=True,
-        audio=audio,
-        unique_id=None,
-    )
-    ui = saved.get("ui", {}) if isinstance(saved, dict) else {}
-    media_items = ui.get("preview_media") or ui.get("images") or []
-    media_item = dict(media_items[0]) if media_items else {}
-    main_path = ""
-    raw_path = ui.get("preview_main_path")
-    if isinstance(raw_path, (list, tuple)) and raw_path:
-        main_path = str(raw_path[0] or "")
-    elif isinstance(raw_path, str):
-        main_path = raw_path
-    payload = {
-        "index": int(segment_index),
-        "total": int(segment_count),
-        "label": f"第 {int(segment_index)}/{int(segment_count)} 段：场景{int(start_index)} → 场景{int(end_index)}",
-        "path": main_path,
-        "media": media_item,
-        "width": int(output_width),
-        "height": int(output_height),
-        "frame_count": int(frames.shape[0]),
-        "format": resolved_format,
-    }
-    _send_segment_preview(unique_id, payload)
-    return payload
+	prefix = _format_segment_save_prefix(save_preset, unique_id, segment_index, start_index, end_index)
+	resolved_format = _supported_segment_video_format(format_name)
+	saved = combine_video(
+		images=frames,
+		frame_rate=float(fps),
+		loop_count=0,
+		filename_prefix=prefix,
+		format_name=resolved_format,
+		pingpong=False,
+		save_output=True,
+		audio=audio,
+		unique_id=None,
+	)
+	ui = saved.get("ui", {}) if isinstance(saved, dict) else {}
+	media_items = ui.get("preview_media") or ui.get("images") or []
+	media_item = dict(media_items[0]) if media_items else {}
+	main_path = ""
+	raw_path = ui.get("preview_main_path")
+	if isinstance(raw_path, (list, tuple)) and raw_path:
+		main_path = str(raw_path[0] or "")
+	elif isinstance(raw_path, str):
+		main_path = raw_path
+	payload = {
+		"index": int(segment_index),
+		"total": int(segment_count),
+		"label": f"第 {int(segment_index)}/{int(segment_count)} 段：场景{int(start_index)} → 场景{int(end_index)}",
+		"path": main_path,
+		"media": media_item,
+		"width": int(output_width),
+		"height": int(output_height),
+		"frame_count": int(frames.shape[0]),
+		"format": resolved_format,
+	}
+	_send_segment_preview(unique_id, payload)
+	return payload
 
 
 def _resolve_output_dimension(value: int | None, fallback: int) -> int:
-    try:
-        numeric = int(value) if value is not None else 0
-    except Exception:
-        numeric = 0
-    if numeric > 0:
-        return max(64, numeric)
-    return max(64, int(fallback))
+	try:
+		numeric = int(value) if value is not None else 0
+	except Exception:
+		numeric = 0
+	if numeric > 0:
+		return max(64, numeric)
+	return max(64, int(fallback))
 
 
 def _clamp_float(value: Any, default: float, minimum: float, maximum: float) -> float:
-    try:
-        numeric = float(value)
-    except Exception:
-        numeric = float(default)
-    return max(float(minimum), min(float(maximum), numeric))
+	try:
+		numeric = float(value)
+	except Exception:
+		numeric = float(default)
+	return max(float(minimum), min(float(maximum), numeric))
 
 
 def _clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
-    try:
-        numeric = int(value)
-    except Exception:
-        numeric = int(default)
-    return max(int(minimum), min(int(maximum), numeric))
+	try:
+		numeric = int(value)
+	except Exception:
+		numeric = int(default)
+	return max(int(minimum), min(int(maximum), numeric))
 
 
 def _apply_denoise_to_sigmas(sigmas: torch.Tensor, denoise: Any) -> torch.Tensor:
-    strength = _clamp_float(denoise, DEFAULT_DENOISE_STRENGTH, 0.0, 1.0)
-    if strength >= 0.999:
-        return sigmas
-    if not isinstance(sigmas, torch.Tensor) or int(sigmas.numel()) <= 1:
-        return sigmas
-    if strength <= 0.0:
-        return sigmas[-2:].contiguous()
-    step_count = max(1, int(sigmas.numel()) - 1)
-    keep_steps = max(1, int(math.ceil(float(step_count) * float(strength))))
-    if keep_steps >= step_count:
-        return sigmas
-    return sigmas[-(keep_steps + 1):].contiguous()
+	strength = _clamp_float(denoise, DEFAULT_DENOISE_STRENGTH, 0.0, 1.0)
+	if strength >= 0.999:
+		return sigmas
+	if not isinstance(sigmas, torch.Tensor) or int(sigmas.numel()) <= 1:
+		return sigmas
+	if strength <= 0.0:
+		return sigmas[-2:].contiguous()
+	step_count = max(1, int(sigmas.numel()) - 1)
+	keep_steps = max(1, int(math.ceil(float(step_count) * float(strength))))
+	if keep_steps >= step_count:
+		return sigmas
+	return sigmas[-(keep_steps + 1):].contiguous()
 
 
 def _transition_curve_alpha(position: float, curve: str) -> float:
-    p = _clamp_float(position, 0.5, 0.0, 1.0)
-    text = str(curve or "").strip()
-    if text == "前置过渡":
-        return 1.0 - (1.0 - p) * (1.0 - p)
-    if text == "后置过渡":
-        return p * p
-    if text == "平滑过渡":
-        return p * p * (3.0 - 2.0 * p)
-    return p
+	p = _clamp_float(position, 0.5, 0.0, 1.0)
+	text = str(curve or "").strip()
+	if text == "前置过渡":
+		return 1.0 - (1.0 - p) * (1.0 - p)
+	if text == "后置过渡":
+		return p * p
+	if text == "平滑过渡":
+		return p * p * (3.0 - 2.0 * p)
+	return p
 
 
 def _blend_reference_images(start_image: torch.Tensor, end_image: torch.Tensor, amount: float) -> torch.Tensor:
-    start = _ensure_image_batch(start_image)[:1]
-    height = int(start.shape[1])
-    width = int(start.shape[2])
-    end = _resize_guide_to_size(end_image, width, height).to(device=start.device, dtype=start.dtype)
-    alpha = _clamp_float(amount, 0.5, 0.0, 1.0)
-    return (start * (1.0 - alpha) + end * alpha).clamp(0.0, 1.0).contiguous()
+	start = _ensure_image_batch(start_image)[:1]
+	height = int(start.shape[1])
+	width = int(start.shape[2])
+	end = _resize_guide_to_size(end_image, width, height).to(device=start.device, dtype=start.dtype)
+	alpha = _clamp_float(amount, 0.5, 0.0, 1.0)
+	return (start * (1.0 - alpha) + end * alpha).clamp(0.0, 1.0).contiguous()
 
 
 def _resolve_transition_options(options: Any) -> dict[str, Any]:
-    data = options if isinstance(options, dict) else {}
-    return {
-        "enabled": bool(data.get("enabled", False)),
-        "curve": str(data.get("curve") or "前置过渡"),
-        "early_tail_ratio": _clamp_float(data.get("early_tail_ratio"), 0.75, 0.10, 0.95),
-        "implicit_guide_count": _clamp_int(data.get("implicit_guide_count"), 2, 0, 4),
-        "implicit_guide_strength": _clamp_float(data.get("implicit_guide_strength"), 0.55, 0.0, 1.0),
-        "early_tail_strength": _clamp_float(data.get("early_tail_strength"), 0.75, 0.0, 1.0),
-        "final_guide_strength": _clamp_float(data.get("final_guide_strength"), 1.0, 0.0, 1.0),
-    }
+	data = options if isinstance(options, dict) else {}
+	return {
+		"enabled": bool(data.get("enabled", False)),
+		"curve": str(data.get("curve") or "前置过渡"),
+		"early_tail_ratio": _clamp_float(data.get("early_tail_ratio"), 0.75, 0.10, 0.95),
+		"implicit_guide_count": _clamp_int(data.get("implicit_guide_count"), 2, 0, 4),
+		"implicit_guide_strength": _clamp_float(data.get("implicit_guide_strength"), 0.55, 0.0, 1.0),
+		"early_tail_strength": _clamp_float(data.get("early_tail_strength"), 0.75, 0.0, 1.0),
+		"final_guide_strength": _clamp_float(data.get("final_guide_strength"), 1.0, 0.0, 1.0),
+	}
 
 
 def _build_transition_conditioning_guides(
-    main_image: torch.Tensor | None,
-    guide_images: Iterable[torch.Tensor | None],
-    guide_times: Iterable[float],
-    transition_options: Any,
+	main_image: torch.Tensor | None,
+	guide_images: Iterable[torch.Tensor | None],
+	guide_times: Iterable[float],
+	transition_options: Any,
 ) -> tuple[list[torch.Tensor], list[float], list[float]]:
-    original_images = list(guide_images or [])
-    original_times = [float(item) for item in list(guide_times or [])]
-    base_strengths = [1.0 for _ in original_images]
-    options = _resolve_transition_options(transition_options)
-    if main_image is None or not options["enabled"] or not original_images:
-        return original_images, original_times, base_strengths
+	original_images = list(guide_images or [])
+	original_times = [float(item) for item in list(guide_times or [])]
+	base_strengths = [1.0 for _ in original_images]
+	options = _resolve_transition_options(transition_options)
+	if main_image is None or not options["enabled"] or not original_images:
+		return original_images, original_times, base_strengths
 
-    scenes: list[tuple[torch.Tensor, float]] = [(main_image, 0.0)]
-    for image, seconds in zip(original_images, original_times):
-        if image is not None:
-            scenes.append((image, float(seconds)))
-    scenes.sort(key=lambda item: float(item[1]))
-    if len(scenes) < 2:
-        return original_images, original_times, base_strengths
+	scenes: list[tuple[torch.Tensor, float]] = [(main_image, 0.0)]
+	for image, seconds in zip(original_images, original_times):
+		if image is not None:
+			scenes.append((image, float(seconds)))
+	scenes.sort(key=lambda item: float(item[1]))
+	if len(scenes) < 2:
+		return original_images, original_times, base_strengths
 
-    guides: list[tuple[torch.Tensor, float, float]] = []
-    implicit_count = int(options["implicit_guide_count"])
-    early_ratio = float(options["early_tail_ratio"])
-    for index in range(len(scenes) - 1):
-        start_image, start_time = scenes[index]
-        end_image, end_time = scenes[index + 1]
-        duration = float(end_time) - float(start_time)
-        if duration <= 0:
-            guides.append((end_image, float(end_time), float(options["final_guide_strength"])))
-            continue
+	guides: list[tuple[torch.Tensor, float, float]] = []
+	implicit_count = int(options["implicit_guide_count"])
+	early_ratio = float(options["early_tail_ratio"])
+	for index in range(len(scenes) - 1):
+		start_image, start_time = scenes[index]
+		end_image, end_time = scenes[index + 1]
+		duration = float(end_time) - float(start_time)
+		if duration <= 0:
+			guides.append((end_image, float(end_time), float(options["final_guide_strength"])))
+			continue
 
-        for guide_index in range(1, implicit_count + 1):
-            position = float(guide_index) / float(implicit_count + 1)
-            time_ratio = early_ratio * position
-            blend_alpha = _transition_curve_alpha(position, str(options["curve"]))
-            try:
-                blended = _blend_reference_images(start_image, end_image, blend_alpha)
-            except Exception:
-                continue
-            guides.append(
-                (
-                    blended,
-                    float(start_time) + duration * time_ratio,
-                    float(options["implicit_guide_strength"]),
-                )
-            )
+		for guide_index in range(1, implicit_count + 1):
+			position = float(guide_index) / float(implicit_count + 1)
+			time_ratio = early_ratio * position
+			blend_alpha = _transition_curve_alpha(position, str(options["curve"]))
+			try:
+				blended = _blend_reference_images(start_image, end_image, blend_alpha)
+			except Exception:
+				continue
+			guides.append(
+				(
+					blended,
+					float(start_time) + duration * time_ratio,
+					float(options["implicit_guide_strength"]),
+				)
+			)
 
-        guides.append(
-            (
-                end_image,
-                float(start_time) + duration * early_ratio,
-                float(options["early_tail_strength"]),
-            )
-        )
-        guides.append((end_image, float(end_time), float(options["final_guide_strength"])))
+		guides.append(
+			(
+				end_image,
+				float(start_time) + duration * early_ratio,
+				float(options["early_tail_strength"]),
+			)
+		)
+		guides.append((end_image, float(end_time), float(options["final_guide_strength"])))
 
-    guides.sort(key=lambda item: float(item[1]))
-    return [item[0] for item in guides], [float(item[1]) for item in guides], [float(item[2]) for item in guides]
+	guides.sort(key=lambda item: float(item[1]))
+	return [item[0] for item in guides], [float(item[1]) for item in guides], [float(item[2]) for item in guides]
 
 
 def _prepare_guides(
-    main_image: torch.Tensor | None,
-    guide_images: Iterable[torch.Tensor | None],
-    guide_times: Iterable[float],
-    guide_strengths: Iterable[float] | None,
-    output_long_edge: int | None,
-    fallback_width: int | None = None,
-    fallback_height: int | None = None,
+	main_image: torch.Tensor | None,
+	guide_images: Iterable[torch.Tensor | None],
+	guide_times: Iterable[float],
+	guide_strengths: Iterable[float] | None,
+	output_long_edge: int | None,
+	fallback_width: int | None = None,
+	fallback_height: int | None = None,
 ):
-    guides: list[tuple[torch.Tensor, float, float]] = []
-    if main_image is None:
-        source_width = 1280
-        source_height = 720
-    else:
-        main_image = _ensure_image_batch(main_image)[:1]
-        source_width = int(main_image.shape[2])
-        source_height = int(main_image.shape[1])
+	guides: list[tuple[torch.Tensor, float, float]] = []
+	if main_image is None:
+		source_width = 1280
+		source_height = 720
+	else:
+		main_image = _ensure_image_batch(main_image)[:1]
+		source_width = int(main_image.shape[2])
+		source_height = int(main_image.shape[1])
 
-    output_width = _resolve_output_dimension(fallback_width, source_width)
-    output_height = _resolve_output_dimension(fallback_height, source_height)
-    width, height = _resolve_stage1_sample_size(output_width, output_height, output_long_edge)
+	output_width = _resolve_output_dimension(fallback_width, source_width)
+	output_height = _resolve_output_dimension(fallback_height, source_height)
+	width, height = _resolve_stage1_sample_size(output_width, output_height, output_long_edge)
 
-    if main_image is not None:
-        anchor_image = _resize_guide_to_size(main_image, width, height)
-        guides.append((anchor_image, 0.0, 1.0))
-    strength_values = list(guide_strengths or [])
-    for index, (image, seconds) in enumerate(zip(list(guide_images or []), list(guide_times or []))):
-        if image is None:
-            continue
-        strength = _clamp_float(strength_values[index] if index < len(strength_values) else 1.0, 1.0, 0.0, 1.0)
-        guides.append((_resize_guide_to_size(image, width, height), float(seconds), strength))
-    guides.sort(key=lambda item: float(item[1]))
-    return guides, width, height, output_width, output_height
+	if main_image is not None:
+		anchor_image = _resize_guide_to_size(main_image, width, height)
+		guides.append((anchor_image, 0.0, 1.0))
+	strength_values = list(guide_strengths or [])
+	for index, (image, seconds) in enumerate(zip(list(guide_images or []), list(guide_times or []))):
+		if image is None:
+			continue
+		strength = _clamp_float(strength_values[index] if index < len(strength_values) else 1.0, 1.0, 0.0, 1.0)
+		guides.append((_resize_guide_to_size(image, width, height), float(seconds), strength))
+	guides.sort(key=lambda item: float(item[1]))
+	return guides, width, height, output_width, output_height
 
 
 def _resolve_visual_route_label(main_image: torch.Tensor | None, guide_images: Iterable[torch.Tensor | None]) -> str:
-    scene_count = 0
-    if main_image is not None:
-        scene_count += 1
-    scene_count += sum(1 for image in list(guide_images or []) if image is not None)
-    if scene_count <= 0:
-        return "文生视频"
-    if scene_count == 1:
-        return "图生视频"
-    return f"多图参考（{scene_count}张）"
+	scene_count = 0
+	if main_image is not None:
+		scene_count += 1
+	scene_count += sum(1 for image in list(guide_images or []) if image is not None)
+	if scene_count <= 0:
+		return "文生视频"
+	if scene_count == 1:
+		return "图生视频"
+	return f"多图参考（{scene_count}张）"
 
 
 def _detect_total_vram_gb(default_gb: float = DEFAULT_AUDIO_SAFE_BASE_VRAM_GB) -> float:
-    try:
-        device = mm.get_torch_device()
-        if not isinstance(device, torch.device):
-            device = torch.device(str(device))
-        if device.type != "cuda":
-            return float(default_gb)
-        total_memory = int(torch.cuda.get_device_properties(device).total_memory)
-        if total_memory <= 0:
-            return float(default_gb)
-        return max(1.0, float(total_memory) / float(1024 ** 3))
-    except Exception:
-        return float(default_gb)
+	try:
+		device = mm.get_torch_device()
+		if not isinstance(device, torch.device):
+			device = torch.device(str(device))
+		if device.type != "cuda":
+			return float(default_gb)
+		total_memory = int(torch.cuda.get_device_properties(device).total_memory)
+		if total_memory <= 0:
+			return float(default_gb)
+		return max(1.0, float(total_memory) / float(1024 ** 3))
+	except Exception:
+		return float(default_gb)
 
 
 def _resolve_audio_conditioned_budget(width: int, height: int, fps: int) -> tuple[int, int, float]:
-    total_vram_gb = _detect_total_vram_gb()
-    budget_scale = max(0.5, float(total_vram_gb) / float(DEFAULT_AUDIO_SAFE_BASE_VRAM_GB))
-    pixel_frame_budget = int(round(float(DEFAULT_AUDIO_SAFE_PIXEL_FRAMES_AT_32GB) * budget_scale))
-    pixel_frame_budget = max(MIN_AUDIO_SAFE_PIXEL_FRAMES, min(MAX_AUDIO_SAFE_PIXEL_FRAMES, pixel_frame_budget))
-    frame_cap = int(round(float(DEFAULT_AUDIO_SAFE_FRAME_CAP_AT_32GB) * budget_scale))
-    frame_cap = max(MIN_AUDIO_SAFE_FRAME_CAP, min(MAX_AUDIO_SAFE_FRAME_CAP, frame_cap))
+	total_vram_gb = _detect_total_vram_gb()
+	budget_scale = max(0.5, float(total_vram_gb) / float(DEFAULT_AUDIO_SAFE_BASE_VRAM_GB))
+	pixel_frame_budget = int(round(float(DEFAULT_AUDIO_SAFE_PIXEL_FRAMES_AT_32GB) * budget_scale))
+	pixel_frame_budget = max(MIN_AUDIO_SAFE_PIXEL_FRAMES, min(MAX_AUDIO_SAFE_PIXEL_FRAMES, pixel_frame_budget))
+	frame_cap = int(round(float(DEFAULT_AUDIO_SAFE_FRAME_CAP_AT_32GB) * budget_scale))
+	frame_cap = max(MIN_AUDIO_SAFE_FRAME_CAP, min(MAX_AUDIO_SAFE_FRAME_CAP, frame_cap))
 
-    area = max(1, int(width) * int(height))
-    frames_from_pixels = max(1, pixel_frame_budget // area)
-    safe_frame_count = max(1, min(frame_cap, frames_from_pixels))
-    safe_seconds = max(0.1, float(max(0, safe_frame_count - 1)) / float(max(1, int(fps))))
-    return safe_frame_count, pixel_frame_budget, safe_seconds
+	area = max(1, int(width) * int(height))
+	frames_from_pixels = max(1, pixel_frame_budget // area)
+	safe_frame_count = max(1, min(frame_cap, frames_from_pixels))
+	safe_seconds = max(0.1, float(max(0, safe_frame_count - 1)) / float(max(1, int(fps))))
+	return safe_frame_count, pixel_frame_budget, safe_seconds
 
 
 def _format_seconds(value: float) -> str:
-    seconds = float(value)
-    if abs(seconds - round(seconds)) <= 0.05:
-        return f"{int(round(seconds))}秒"
-    return f"{seconds:.1f}秒"
+	seconds = float(value)
+	if abs(seconds - round(seconds)) <= 0.05:
+		return f"{int(round(seconds))}秒"
+	return f"{seconds:.1f}秒"
 
 
 def _resolve_audio_speed_sampling_size(
-    width: int,
-    height: int,
-    fps: int,
-    frame_count: int,
-    guide_count: int,
+	width: int,
+	height: int,
+	fps: int,
+	frame_count: int,
+	guide_count: int,
 ) -> tuple[int, int]:
-    current_width = max(64, int(width))
-    current_height = max(64, int(height))
-    current_area = max(1, current_width * current_height)
+	current_width = max(64, int(width))
+	current_height = max(64, int(height))
+	current_area = max(1, current_width * current_height)
 
-    total_vram_gb = _detect_total_vram_gb()
-    vram_scale = max(0.65, float(total_vram_gb) / float(DEFAULT_AUDIO_SAFE_BASE_VRAM_GB))
-    target_pixel_frames = float(DEFAULT_AUDIO_SAFE_PIXEL_FRAMES_AT_32GB) * float(vram_scale) * float(DEFAULT_AUDIO_SPEED_TARGET_RATIO)
-    guide_penalty = max(0.6, 1.0 - max(0, int(guide_count) - 1) * DEFAULT_AUDIO_GUIDE_PENALTY)
-    target_pixel_frames *= guide_penalty
+	total_vram_gb = _detect_total_vram_gb()
+	vram_scale = max(0.65, float(total_vram_gb) / float(DEFAULT_AUDIO_SAFE_BASE_VRAM_GB))
+	target_pixel_frames = float(DEFAULT_AUDIO_SAFE_PIXEL_FRAMES_AT_32GB) * float(vram_scale) * float(DEFAULT_AUDIO_SPEED_TARGET_RATIO)
+	guide_penalty = max(0.6, 1.0 - max(0, int(guide_count) - 1) * DEFAULT_AUDIO_GUIDE_PENALTY)
+	target_pixel_frames *= guide_penalty
 
-    current_pixel_frames = float(current_area) * float(max(1, int(frame_count)))
-    area_scale = 1.0
-    if current_pixel_frames > target_pixel_frames > 0:
-        area_scale = math.sqrt(float(target_pixel_frames) / float(current_pixel_frames))
+	current_pixel_frames = float(current_area) * float(max(1, int(frame_count)))
+	area_scale = 1.0
+	if current_pixel_frames > target_pixel_frames > 0:
+		area_scale = math.sqrt(float(target_pixel_frames) / float(current_pixel_frames))
 
-    base_long_edge = int(round(float(DEFAULT_AUDIO_FAST_LONG_EDGE_AT_32GB) * float(vram_scale)))
-    base_long_edge = max(MIN_AUDIO_FAST_LONG_EDGE, min(MAX_AUDIO_FAST_LONG_EDGE, base_long_edge))
-    current_long_edge = max(current_width, current_height)
-    long_edge_scale = min(1.0, float(base_long_edge) / float(max(1, current_long_edge)))
+	base_long_edge = int(round(float(DEFAULT_AUDIO_FAST_LONG_EDGE_AT_32GB) * float(vram_scale)))
+	base_long_edge = max(MIN_AUDIO_FAST_LONG_EDGE, min(MAX_AUDIO_FAST_LONG_EDGE, base_long_edge))
+	current_long_edge = max(current_width, current_height)
+	long_edge_scale = min(1.0, float(base_long_edge) / float(max(1, current_long_edge)))
 
-    final_scale = min(1.0, area_scale, long_edge_scale)
-    if final_scale >= 0.999:
-        return current_width, current_height
+	final_scale = min(1.0, area_scale, long_edge_scale)
+	if final_scale >= 0.999:
+		return current_width, current_height
 
-    target_width = _round_to_multiple(int(round(float(current_width) * final_scale)), 32, 64)
-    target_height = _round_to_multiple(int(round(float(current_height) * final_scale)), 32, 64)
-    target_width = min(current_width, target_width)
-    target_height = min(current_height, target_height)
-    return target_width, target_height
+	target_width = _round_to_multiple(int(round(float(current_width) * final_scale)), 32, 64)
+	target_height = _round_to_multiple(int(round(float(current_height) * final_scale)), 32, 64)
+	target_width = min(current_width, target_width)
+	target_height = min(current_height, target_height)
+	return target_width, target_height
 
 
 def _check_audio_conditioned_budget(
-    *,
-    width: int,
-    height: int,
-    fps: int,
-    frame_count: int,
-    audio_duration: float,
-    route_label: str,
-    guide_count: int,
+	*,
+	width: int,
+	height: int,
+	fps: int,
+	frame_count: int,
+	audio_duration: float,
+	route_label: str,
+	guide_count: int,
 ):
-    safe_frame_count, pixel_frame_budget, safe_seconds = _resolve_audio_conditioned_budget(width, height, fps)
-    estimated_pixel_frames = int(width) * int(height) * int(frame_count)
+	safe_frame_count, pixel_frame_budget, safe_seconds = _resolve_audio_conditioned_budget(width, height, fps)
+	estimated_pixel_frames = int(width) * int(height) * int(frame_count)
 
-    if int(frame_count) > int(safe_frame_count):
-        raise RuntimeError(
-            f"当前 {route_label} + 音频驱动任务预计显存压力过高：采样尺寸 {int(width)}x{int(height)}，"
-            f"{int(fps)}fps，音频时长 {_format_seconds(audio_duration)}，约 {int(frame_count)} 帧，"
-            f"{int(guide_count)} 张参考图。按当前显卡建议控制在约 {safe_frame_count} 帧 / {_format_seconds(safe_seconds)} 以内，"
-            "否则很容易卡在 “Model Initializing” 并持续占用共享显存。请优先缩短音频，其次降低面板宽高或 fps 后再试。"
-        )
+	if int(frame_count) > int(safe_frame_count):
+		raise RuntimeError(
+			f"当前 {route_label} + 音频驱动任务预计显存压力过高：采样尺寸 {int(width)}x{int(height)}，"
+			f"{int(fps)}fps，音频时长 {_format_seconds(audio_duration)}，约 {int(frame_count)} 帧，"
+			f"{int(guide_count)} 张参考图。按当前显卡建议控制在约 {safe_frame_count} 帧 / {_format_seconds(safe_seconds)} 以内，"
+			"否则很容易卡在 “Model Initializing” 并持续占用共享显存。请优先缩短音频，其次降低面板宽高或 fps 后再试。"
+		)
 
-    usage_ratio = float(frame_count) / float(max(1, safe_frame_count))
-    if usage_ratio >= DEFAULT_AUDIO_SAFE_WARNING_RATIO:
-        return (
-            f"提示：当前任务显存压力较高，采样尺寸 {int(width)}x{int(height)}，"
-            f"{int(fps)}fps，约 {int(frame_count)} 帧，像素帧负载 {estimated_pixel_frames / 1_000_000:.1f}M / "
-            f"{pixel_frame_budget / 1_000_000:.1f}M。"
-        )
+	usage_ratio = float(frame_count) / float(max(1, safe_frame_count))
+	if usage_ratio >= DEFAULT_AUDIO_SAFE_WARNING_RATIO:
+		return (
+			f"提示：当前任务显存压力较高，采样尺寸 {int(width)}x{int(height)}，"
+			f"{int(fps)}fps，约 {int(frame_count)} 帧，像素帧负载 {estimated_pixel_frames / 1_000_000:.1f}M / "
+			f"{pixel_frame_budget / 1_000_000:.1f}M。"
+		)
 
 
 def run_ltx23_multiref_video(
-    *,
-    mode: str,
-    positive_prompt: str,
-    negative_prompt: str,
-    main_image: torch.Tensor | None,
-    guide_images: Iterable[torch.Tensor | None],
-    guide_times: Iterable[float],
-    fps: int,
-    output_long_edge: int | None,
-    target_width: int | None,
-    target_height: int | None,
-    seed: int,
-    duration_seconds: float | None,
-    input_audio: dict[str, Any] | None,
-    lora_chain_config: Any = "",
-    decode_generated_audio: bool = True,
-    frame_trim_start: int,
-    segmented_execution: bool = False,
-    segment_save_preset: Any = "",
-    segment_video_format: Any = DEFAULT_SEGMENT_VIDEO_FORMAT,
-    transition_options: Any = None,
-    denoise_strength: Any = DEFAULT_DENOISE_STRENGTH,
-    unique_id: Any = None,
+	*,
+	mode: str,
+	positive_prompt: str,
+	negative_prompt: str,
+	main_image: torch.Tensor | None,
+	guide_images: Iterable[torch.Tensor | None],
+	guide_times: Iterable[float],
+	fps: int,
+	output_long_edge: int | None,
+	target_width: int | None,
+	target_height: int | None,
+	seed: int,
+	duration_seconds: float | None,
+	input_audio: dict[str, Any] | None,
+	lora_chain_config: Any = "",
+	decode_generated_audio: bool = True,
+	frame_trim_start: int,
+	segmented_execution: bool = False,
+	segment_save_preset: Any = "",
+	segment_video_format: Any = DEFAULT_SEGMENT_VIDEO_FORMAT,
+	transition_options: Any = None,
+	denoise_strength: Any = DEFAULT_DENOISE_STRENGTH,
+	unique_id: Any = None,
 ):
-    prompt_text = str(positive_prompt or "").strip()
-    if not prompt_text:
-        raise RuntimeError("正向提示词不能为空。")
-    prepared_lora_chain_config, transition_lora_enabled, transition_strength_changed = _prepare_ltx_lora_chain_config(lora_chain_config)
-    prompt_text, transition_trigger_added = _append_ltx_transition_trigger(prompt_text, transition_lora_enabled)
-    negative_text = str(negative_prompt or "").strip() or DEFAULT_NEGATIVE_PROMPT
-    fps = max(1, int(fps))
-    base_guide_images = list(guide_images or [])
-    base_guide_times = list(guide_times or [])
-    route_label = _resolve_visual_route_label(main_image, base_guide_images)
-    resolved_denoise_strength = _clamp_float(denoise_strength, DEFAULT_DENOISE_STRENGTH, 0.0, 1.0)
+	prompt_text = str(positive_prompt or "").strip()
+	if not prompt_text:
+		raise RuntimeError("正向提示词不能为空。")
+	prepared_lora_chain_config, transition_lora_enabled, transition_strength_changed = _prepare_ltx_lora_chain_config(lora_chain_config)
+	prompt_text, transition_trigger_added = _append_ltx_transition_trigger(prompt_text, transition_lora_enabled)
+	negative_text = str(negative_prompt or "").strip() or DEFAULT_NEGATIVE_PROMPT
+	fps = max(1, int(fps))
+	base_guide_images = list(guide_images or [])
+	base_guide_times = list(guide_times or [])
+	route_label = _resolve_visual_route_label(main_image, base_guide_images)
+	resolved_denoise_strength = _clamp_float(denoise_strength, DEFAULT_DENOISE_STRENGTH, 0.0, 1.0)
 
-    def _execute():
-        _send_status(unique_id, "1/8 加载 LTX 模型与默认资源...")
-        try:
-            resolved_ckpt = _pick_first_candidate("checkpoints", DEFAULT_CKPT_CANDIDATES, "LTX 主模型")
-            resolved_video_vae = _pick_first_candidate("vae", DEFAULT_VIDEO_VAE_CANDIDATES, "LTX 视频 VAE")
-            resolved_text_encoder = _pick_first_candidate("text_encoders", DEFAULT_TEXT_ENCODER_CANDIDATES, "LTX 文本编码器")
-            resolved_latent_upscaler = _pick_first_candidate("latent_upscale_models", DEFAULT_LATENT_UPSCALER_CANDIDATES, "LTX latent 放大模型")
-            model, _, _ = CheckpointLoaderSimple().load_checkpoint(resolved_ckpt)
-            clip = LTXAVTextEncoderLoader.execute(resolved_text_encoder, resolved_ckpt, "default")[0]
-            video_vae = _load_vae(resolved_video_vae)
-            audio_vae = LTXVAudioVAELoader.execute(resolved_ckpt)[0]
-            latent_upscaler = LatentUpscaleModelLoader.execute(resolved_latent_upscaler)[0]
+	def _execute():
+		_send_status(unique_id, "1/8 加载 LTX 模型与默认资源...")
+		try:
+			resolved_ckpt = _pick_first_candidate("checkpoints",("ltx-2.3-22b",), "LTX 主模型")
+			resolved_video_vae = _pick_first_candidate("vae",("video_vae",), "LTX 视频 VAE")
+			resolved_audio_vae = _pick_first_candidate("vae",("audio_vae",), "LTX 音频 VAE")
+			resolved_text_encoder = _pick_first_candidate("text_encoders",("gemma_3_12B_it",), "LTX 文本编码器")
+			resolved_latent_upscaler = _pick_first_candidate("latent_upscale_models",("ltx-2.3-spatial-upscaler",), "LTX latent 放大模型")
 
-            model, clip = _apply_chain_loras(model, clip, prepared_lora_chain_config)
-            if transition_lora_enabled:
-                details = []
-                if transition_strength_changed:
-                    details.append("强度已按 1.00 应用")
-                if transition_trigger_added:
-                    details.append(f"已自动补触发词 {LTX_TRANSITION_LORA_TRIGGER}")
-                if details:
-                    _send_status(unique_id, f"提示：检测到 LTX 转场 LoRA，{'，'.join(details)}。")
-            model = _apply_ff_chunking(model, DEFAULT_FF_CHUNKS, DEFAULT_FF_DIM_THRESHOLD)
-        except Exception as exc:
-            raise RuntimeError(f"LTX 多图参考节点加载模型失败：{exc}") from exc
+			model, _, _ = CheckpointLoaderSimple().load_checkpoint(resolved_ckpt)
+			clip = LTXAVTextEncoderLoader.execute(resolved_text_encoder, resolved_ckpt, "default")[0]
+			video_vae = _load_video_vae(resolved_video_vae)
+			audio_vae = _load_audio_vae(resolved_audio_vae)
+			latent_upscaler = LatentUpscaleModelLoader.execute(resolved_latent_upscaler)[0]
 
-        def _render_once(
-            *,
-            render_main_image: torch.Tensor | None,
-            render_guide_images: Iterable[torch.Tensor | None],
-            render_guide_times: Iterable[float],
-            render_duration_seconds: float | None,
-            render_mode: str,
-            render_input_audio: dict[str, Any] | None,
-            render_seed: int,
-            render_frame_trim_start: int,
-            render_route_label: str,
-            status_prefix: str = "",
-        ) -> dict[str, Any]:
-            prefix = f"{status_prefix} · " if status_prefix else ""
-            original_guide_images = list(render_guide_images or [])
-            original_guide_times = list(render_guide_times or [])
-            render_guide_images, render_guide_times, render_guide_strengths = _build_transition_conditioning_guides(
-                render_main_image,
-                original_guide_images,
-                original_guide_times,
-                transition_options,
-            )
+			model, clip = _apply_chain_loras(model, clip, prepared_lora_chain_config)
+			if transition_lora_enabled:
+				details = []
+				if transition_strength_changed:
+					details.append("强度已按 1.00 应用")
+				if transition_trigger_added:
+					details.append(f"已自动补触发词 {LTX_TRANSITION_LORA_TRIGGER}")
+				if details:
+					_send_status(unique_id, f"提示：检测到 LTX 转场 LoRA，{'，'.join(details)}。")
+			model = _apply_ff_chunking(model, DEFAULT_FF_CHUNKS, DEFAULT_FF_DIM_THRESHOLD)
+		except Exception as exc:
+			raise RuntimeError(f"LTX 多图参考节点加载模型失败：{exc}") from exc
 
-            _send_status(unique_id, f"{prefix}2/8 处理{render_route_label}输入...")
-            try:
-                guides, sample_width, sample_height, output_width, output_height = _prepare_guides(
-                    render_main_image,
-                    render_guide_images,
-                    render_guide_times,
-                    render_guide_strengths,
-                    output_long_edge,
-                    fallback_width=target_width,
-                    fallback_height=target_height,
-                )
-                latent_reference_guides = _build_latent_inplace_guides(
-                    render_main_image,
-                    render_guide_images,
-                    render_guide_times,
-                    render_guide_strengths,
-                )
-            except Exception as exc:
-                raise RuntimeError(f"LTX 多图参考节点处理参考图失败：{exc}") from exc
+		def _render_once(
+			*,
+			render_main_image: torch.Tensor | None,
+			render_guide_images: Iterable[torch.Tensor | None],
+			render_guide_times: Iterable[float],
+			render_duration_seconds: float | None,
+			render_mode: str,
+			render_input_audio: dict[str, Any] | None,
+			render_seed: int,
+			render_frame_trim_start: int,
+			render_route_label: str,
+			status_prefix: str = "",
+		) -> dict[str, Any]:
+			prefix = f"{status_prefix} · " if status_prefix else ""
+			original_guide_images = list(render_guide_images or [])
+			original_guide_times = list(render_guide_times or [])
+			render_guide_images, render_guide_times, render_guide_strengths = _build_transition_conditioning_guides(
+				render_main_image,
+				original_guide_images,
+				original_guide_times,
+				transition_options,
+			)
 
-            output_audio = None
-            if render_mode == MODE_AUDIO_CONDITIONED:
-                if render_input_audio is None:
-                    raise RuntimeError("数字人多图参考节点需要接入音频。")
-                _send_status(unique_id, f"{prefix}3/8 裁切并编码输入音频...")
-                try:
-                    output_audio = _normalize_audio_rms(_trim_audio(render_input_audio, DEFAULT_AUDIO_START_SECONDS, DEFAULT_AUDIO_MAX_SECONDS), DEFAULT_AUDIO_TARGET_DB)
-                    audio_duration = _audio_duration_seconds(output_audio)
-                    output_frame_count = _requested_frame_count(audio_duration, fps)
-                    frame_count = _ltx_internal_frame_count(output_frame_count, render_frame_trim_start)
-                    tuned_sample_width, tuned_sample_height = _resolve_audio_speed_sampling_size(
-                        sample_width,
-                        sample_height,
-                        fps,
-                        output_frame_count,
-                        len(guides),
-                    )
-                    if tuned_sample_width != sample_width or tuned_sample_height != sample_height:
-                        current_long_edge = max(sample_width, sample_height)
-                        tuned_long_edge = max(tuned_sample_width, tuned_sample_height)
-                        tuned_guides, tuned_width, tuned_height, output_width, output_height = _prepare_guides(
-                            render_main_image,
-                            render_guide_images,
-                            render_guide_times,
-                            render_guide_strengths,
-                            tuned_long_edge if tuned_long_edge < current_long_edge else output_long_edge,
-                            fallback_width=output_width,
-                            fallback_height=output_height,
-                        )
-                        guides = tuned_guides
-                        sample_width = tuned_width
-                        sample_height = tuned_height
-                        _send_status(
-                            unique_id,
-                            f"提示：音频驱动已自动降采样到 {sample_width}x{sample_height} 提速，最终输出仍保持 {output_width}x{output_height}。",
-                        )
-                    pressure_notice = _check_audio_conditioned_budget(
-                        width=sample_width,
-                        height=sample_height,
-                        fps=fps,
-                        frame_count=output_frame_count,
-                        audio_duration=audio_duration,
-                        route_label=render_route_label,
-                        guide_count=len(guides),
-                    )
-                    if pressure_notice:
-                        _send_status(unique_id, pressure_notice)
-                    audio_latent = LTXVAudioVAEEncode.execute(output_audio, audio_vae)[0]
-                    audio_latent = _set_audio_latent_noise_mask(audio_latent, 0.0)
-                except Exception as exc:
-                    raise RuntimeError(f"LTX 数字人节点处理输入音频失败：{exc}") from exc
-            else:
-                _send_status(unique_id, f"{prefix}3/8 构建空白音频 latent...")
-                try:
-                    total_duration = float(render_duration_seconds or 0.0)
-                    if total_duration <= 0:
-                        raise RuntimeError("图生视频时长必须大于 0 秒。")
-                    output_frame_count = _requested_frame_count(total_duration, fps)
-                    frame_count = _ltx_internal_frame_count(output_frame_count, render_frame_trim_start)
-                    audio_latent = LTXVEmptyLatentAudio.execute(frame_count, fps, 1, audio_vae)[0]
-                except Exception as exc:
-                    raise RuntimeError(f"LTX 图生视频节点初始化音频 latent 失败：{exc}") from exc
+			_send_status(unique_id, f"{prefix}2/8 处理{render_route_label}输入...")
+			try:
+				guides, sample_width, sample_height, output_width, output_height = _prepare_guides(
+					render_main_image,
+					render_guide_images,
+					render_guide_times,
+					render_guide_strengths,
+					output_long_edge,
+					fallback_width=target_width,
+					fallback_height=target_height,
+				)
+				latent_reference_guides = _build_latent_inplace_guides(
+					render_main_image,
+					render_guide_images,
+					render_guide_times,
+					render_guide_strengths,
+				)
+			except Exception as exc:
+				raise RuntimeError(f"LTX 多图参考节点处理参考图失败：{exc}") from exc
 
-            original_guide_count = (1 if render_main_image is not None else 0) + sum(1 for image in original_guide_images if image is not None)
-            transition_guide_count = max(0, len(guides) - original_guide_count)
-            guide_text = f"{len(guides)}张guide"
-            if transition_guide_count:
-                guide_text += f"，含{transition_guide_count}张转场guide"
-            if latent_reference_guides:
-                guide_text += f"，latent锚定{len(latent_reference_guides)}帧位"
-            _send_status(unique_id, f"{prefix}4/8 编码提示词并注入时间参考图...（采样 {sample_width}x{sample_height} -> 输出 {output_width}x{output_height} / 输出{output_frame_count}帧 / LTX内部{frame_count}帧 / 降噪{resolved_denoise_strength:.2f} / {guide_text}）")
-            try:
-                positive = CLIPTextEncode().encode(clip, prompt_text)[0]
-                negative = CLIPTextEncode().encode(clip, negative_text)[0]
-                positive, negative = LTXVConditioning.execute(positive, negative, float(fps))[0:2]
+			output_audio = None
+			if render_mode == MODE_AUDIO_CONDITIONED:
+				if render_input_audio is None:
+					raise RuntimeError("数字人多图参考节点需要接入音频。")
+				_send_status(unique_id, f"{prefix}3/8 裁切并编码输入音频...")
+				try:
+					output_audio = _normalize_audio_rms(_trim_audio(render_input_audio, DEFAULT_AUDIO_START_SECONDS, DEFAULT_AUDIO_MAX_SECONDS), DEFAULT_AUDIO_TARGET_DB)
+					audio_duration = _audio_duration_seconds(output_audio)
+					output_frame_count = _requested_frame_count(audio_duration, fps)
+					frame_count = _ltx_internal_frame_count(output_frame_count, render_frame_trim_start)
+					tuned_sample_width, tuned_sample_height = _resolve_audio_speed_sampling_size(
+						sample_width,
+						sample_height,
+						fps,
+						output_frame_count,
+						len(guides),
+					)
+					if tuned_sample_width != sample_width or tuned_sample_height != sample_height:
+						current_long_edge = max(sample_width, sample_height)
+						tuned_long_edge = max(tuned_sample_width, tuned_sample_height)
+						tuned_guides, tuned_width, tuned_height, output_width, output_height = _prepare_guides(
+							render_main_image,
+							render_guide_images,
+							render_guide_times,
+							render_guide_strengths,
+							tuned_long_edge if tuned_long_edge < current_long_edge else output_long_edge,
+							fallback_width=output_width,
+							fallback_height=output_height,
+						)
+						guides = tuned_guides
+						sample_width = tuned_width
+						sample_height = tuned_height
+						_send_status(
+							unique_id,
+							f"提示：音频驱动已自动降采样到 {sample_width}x{sample_height} 提速，最终输出仍保持 {output_width}x{output_height}。",
+						)
+					pressure_notice = _check_audio_conditioned_budget(
+						width=sample_width,
+						height=sample_height,
+						fps=fps,
+						frame_count=output_frame_count,
+						audio_duration=audio_duration,
+						route_label=render_route_label,
+						guide_count=len(guides),
+					)
+					if pressure_notice:
+						_send_status(unique_id, pressure_notice)
+					audio_latent = LTXVAudioVAEEncode.execute(output_audio, audio_vae)[0]
+					audio_latent = _set_audio_latent_noise_mask(audio_latent, 0.0)
+				except Exception as exc:
+					raise RuntimeError(f"LTX 数字人节点处理输入音频失败：{exc}") from exc
+			else:
+				_send_status(unique_id, f"{prefix}3/8 构建空白音频 latent...")
+				try:
+					total_duration = float(render_duration_seconds or 0.0)
+					if total_duration <= 0:
+						raise RuntimeError("图生视频时长必须大于 0 秒。")
+					output_frame_count = _requested_frame_count(total_duration, fps)
+					frame_count = _ltx_internal_frame_count(output_frame_count, render_frame_trim_start)
+					audio_latent = LTXVEmptyLatentAudio.execute(frame_count, fps, 1, audio_vae)[0]
+				except Exception as exc:
+					raise RuntimeError(f"LTX 图生视频节点初始化音频 latent 失败：{exc}") from exc
 
-                video_latent = EmptyLTXVLatentVideo.execute(sample_width, sample_height, frame_count, 1)[0]
-                for guide_image, seconds, strength in guides:
-                    frame_index = _guide_frame_index(seconds, fps, output_frame_count, render_frame_trim_start)
-                    if frame_index >= frame_count:
-                        continue
-                    positive, negative, video_latent = LTXVAddGuide.execute(
-                        positive,
-                        negative,
-                        video_vae,
-                        video_latent,
-                        guide_image,
-                        frame_index,
-                        float(strength),
-                    )[0:3]
-                video_latent, _ = _inject_ltxv_images_inplace(
-                    video_vae=video_vae,
-                    latent=video_latent,
-                    reference_guides=latent_reference_guides,
-                    fps=fps,
-                    output_frame_count=output_frame_count,
-                    trim_start=render_frame_trim_start,
-                )
-                av_latent_stage1 = LTXVConcatAVLatent.execute(video_latent, audio_latent)[0]
-            except Exception as exc:
-                raise RuntimeError(f"LTX 多图参考节点构建初始 latent 失败：{exc}") from exc
+			original_guide_count = (1 if render_main_image is not None else 0) + sum(1 for image in original_guide_images if image is not None)
+			transition_guide_count = max(0, len(guides) - original_guide_count)
+			guide_text = f"{len(guides)}张guide"
+			if transition_guide_count:
+				guide_text += f"，含{transition_guide_count}张转场guide"
+			if latent_reference_guides:
+				guide_text += f"，latent锚定{len(latent_reference_guides)}帧位"
+			_send_status(unique_id, f"{prefix}4/8 编码提示词并注入时间参考图...（采样 {sample_width}x{sample_height} -> 输出 {output_width}x{output_height} / 输出{output_frame_count}帧 / LTX内部{frame_count}帧 / 降噪{resolved_denoise_strength:.2f} / {guide_text}）")
+			try:
+				positive = CLIPTextEncode().encode(clip, prompt_text)[0]
+				negative = CLIPTextEncode().encode(clip, negative_text)[0]
+				positive, negative = LTXVConditioning.execute(positive, negative, float(fps))[0:2]
 
-            _send_status(unique_id, f"{prefix}5/8 第一阶段低清采样...")
-            try:
-                stage1_model = CFGNorm.execute(
-                    _apply_ltx_nag(model, negative, DEFAULT_NAG_SCALE, DEFAULT_NAG_ALPHA, DEFAULT_NAG_TAU, inplace=True),
-                    1.0,
-                )[0]
-                guider_stage1 = CFGGuider.execute(stage1_model, positive, negative, DEFAULT_CFG)[0]
-                sampler_stage1 = KSamplerSelect.execute(DEFAULT_STAGE1_SAMPLER)[0]
-                sigmas_stage1 = _apply_denoise_to_sigmas(ManualSigmas.execute(DEFAULT_STAGE1_SIGMAS)[0], resolved_denoise_strength)
-                noise_stage1 = RandomNoise.execute(int(render_seed))[0]
-                with _fp16_accumulation(True):
-                    stage1_result = SamplerCustomAdvanced.execute(
-                        noise_stage1,
-                        guider_stage1,
-                        sampler_stage1,
-                        sigmas_stage1,
-                        av_latent_stage1,
-                    )[0]
-                _maybe_purge_vram()
-                video_latent_stage1, audio_latent_stage1 = LTXVSeparateAVLatent.execute(stage1_result)[0:2]
-                positive_stage2, negative_stage2, video_latent_stage1 = LTXVCropGuides.execute(
-                    positive,
-                    negative,
-                    video_latent_stage1,
-                )[0:3]
-            except Exception as exc:
-                raise RuntimeError(f"LTX 多图参考节点第一阶段采样失败：{exc}") from exc
+				video_latent = EmptyLTXVLatentVideo.execute(sample_width, sample_height, frame_count, 1)[0]
+				for guide_image, seconds, strength in guides:
+					frame_index = _guide_frame_index(seconds, fps, output_frame_count, render_frame_trim_start)
+					if frame_index >= frame_count:
+						continue
+					positive, negative, video_latent = LTXVAddGuide.execute(
+						positive,
+						negative,
+						video_vae,
+						video_latent,
+						guide_image,
+						frame_index,
+						float(strength),
+					)[0:3]
+				video_latent, _ = _inject_ltxv_images_inplace(
+					video_vae=video_vae,
+					latent=video_latent,
+					reference_guides=latent_reference_guides,
+					fps=fps,
+					output_frame_count=output_frame_count,
+					trim_start=render_frame_trim_start,
+				)
+				av_latent_stage1 = LTXVConcatAVLatent.execute(video_latent, audio_latent)[0]
+			except Exception as exc:
+				raise RuntimeError(f"LTX 多图参考节点构建初始 latent 失败：{exc}") from exc
 
-            _send_status(unique_id, f"{prefix}6/8 latent 放大并进入第二阶段采样...")
-            try:
-                upscaled_video_latent = LTXVLatentUpsampler().upsample_latent(video_latent_stage1, latent_upscaler, video_vae)[0]
-                upscaled_video_latent, _ = _inject_ltxv_images_inplace(
-                    video_vae=video_vae,
-                    latent=upscaled_video_latent,
-                    reference_guides=latent_reference_guides,
-                    fps=fps,
-                    output_frame_count=output_frame_count,
-                    trim_start=render_frame_trim_start,
-                )
-                av_latent_stage2 = LTXVConcatAVLatent.execute(upscaled_video_latent, audio_latent_stage1)[0]
+			_send_status(unique_id, f"{prefix}5/8 第一阶段低清采样...")
+			try:
+				stage1_model = CFGNorm.execute(
+					_apply_ltx_nag(model, negative, DEFAULT_NAG_SCALE, DEFAULT_NAG_ALPHA, DEFAULT_NAG_TAU, inplace=True),
+					1.0,
+				)[0]
+				guider_stage1 = CFGGuider.execute(stage1_model, positive, negative, DEFAULT_CFG)[0]
+				sampler_stage1 = KSamplerSelect.execute(DEFAULT_STAGE1_SAMPLER)[0]
+				sigmas_stage1 = _apply_denoise_to_sigmas(ManualSigmas.execute(DEFAULT_STAGE1_SIGMAS)[0], resolved_denoise_strength)
+				noise_stage1 = RandomNoise.execute(int(render_seed))[0]
+				with _fp16_accumulation(True):
+					stage1_result = SamplerCustomAdvanced.execute(
+						noise_stage1,
+						guider_stage1,
+						sampler_stage1,
+						sigmas_stage1,
+						av_latent_stage1,
+					)[0]
+				_maybe_purge_vram()
+				video_latent_stage1, audio_latent_stage1 = LTXVSeparateAVLatent.execute(stage1_result)[0:2]
+				positive_stage2, negative_stage2, video_latent_stage1 = LTXVCropGuides.execute(
+					positive,
+					negative,
+					video_latent_stage1,
+				)[0:3]
+			except Exception as exc:
+				raise RuntimeError(f"LTX 多图参考节点第一阶段采样失败：{exc}") from exc
 
-                guider_stage2 = CFGGuider.execute(model, positive_stage2, negative_stage2, DEFAULT_CFG)[0]
-                sampler_stage2 = KSamplerSelect.execute(DEFAULT_STAGE2_SAMPLER)[0]
-                sigmas_stage2 = _apply_denoise_to_sigmas(ManualSigmas.execute(DEFAULT_STAGE2_SIGMAS)[0], resolved_denoise_strength)
-                noise_stage2 = RandomNoise.execute(int(render_seed) + 1)[0]
-                with _fp16_accumulation(True):
-                    stage2_result = SamplerCustomAdvanced.execute(
-                        noise_stage2,
-                        guider_stage2,
-                        sampler_stage2,
-                        sigmas_stage2,
-                        av_latent_stage2,
-                    )[0]
-                _maybe_purge_vram()
-                video_latent_stage2, audio_latent_stage2 = LTXVSeparateAVLatent.execute(stage2_result)[0:2]
-            except Exception as exc:
-                raise RuntimeError(f"LTX 多图参考节点第二阶段采样失败：{exc}") from exc
+			_send_status(unique_id, f"{prefix}6/8 latent 放大并进入第二阶段采样...")
+			try:
+				upscaled_video_latent = LTXVLatentUpsampler().upsample_latent(video_latent_stage1, latent_upscaler, video_vae)[0]
+				upscaled_video_latent, _ = _inject_ltxv_images_inplace(
+					video_vae=video_vae,
+					latent=upscaled_video_latent,
+					reference_guides=latent_reference_guides,
+					fps=fps,
+					output_frame_count=output_frame_count,
+					trim_start=render_frame_trim_start,
+				)
+				av_latent_stage2 = LTXVConcatAVLatent.execute(upscaled_video_latent, audio_latent_stage1)[0]
 
-            _send_status(unique_id, f"{prefix}7/8 解码视频帧与音频...")
-            try:
-                frames = VAEDecodeTiled().decode(
-                    video_vae,
-                    video_latent_stage2,
-                    DEFAULT_VAE_TILE_SIZE,
-                    DEFAULT_VAE_OVERLAP,
-                    DEFAULT_VAE_TEMPORAL_SIZE,
-                    DEFAULT_VAE_TEMPORAL_OVERLAP,
-                )[0]
-                frames = _slice_output_frames(frames, render_frame_trim_start, output_frame_count)
-                frames = _crop_frames_to_size(frames, output_width, output_height)
-                frames = _stamp_original_guide_frames(
-                    frames,
-                    render_main_image,
-                    original_guide_images,
-                    original_guide_times,
-                    fps,
-                    output_width,
-                    output_height,
-                )
-                if render_mode == MODE_GENERATED_AUDIO and bool(decode_generated_audio):
-                    output_audio = LTXVAudioVAEDecode.execute(audio_latent_stage2, audio_vae)[0]
-            except Exception as exc:
-                raise RuntimeError(f"LTX 多图参考节点解码失败：{exc}") from exc
+				guider_stage2 = CFGGuider.execute(model, positive_stage2, negative_stage2, DEFAULT_CFG)[0]
+				sampler_stage2 = KSamplerSelect.execute(DEFAULT_STAGE2_SAMPLER)[0]
+				sigmas_stage2 = _apply_denoise_to_sigmas(ManualSigmas.execute(DEFAULT_STAGE2_SIGMAS)[0], resolved_denoise_strength)
+				noise_stage2 = RandomNoise.execute(int(render_seed) + 1)[0]
+				with _fp16_accumulation(True):
+					stage2_result = SamplerCustomAdvanced.execute(
+						noise_stage2,
+						guider_stage2,
+						sampler_stage2,
+						sigmas_stage2,
+						av_latent_stage2,
+					)[0]
+				_maybe_purge_vram()
+				video_latent_stage2, audio_latent_stage2 = LTXVSeparateAVLatent.execute(stage2_result)[0:2]
+			except Exception as exc:
+				raise RuntimeError(f"LTX 多图参考节点第二阶段采样失败：{exc}") from exc
 
-            _send_status(unique_id, f"{prefix}8/8 创建视频...")
-            video = _create_video(frames, float(fps), output_audio)
-            return {
-                "video": video,
-                "frames": frames.detach().float().cpu().clamp(0.0, 1.0).contiguous(),
-                "audio": output_audio,
-                "output_width": int(output_width),
-                "output_height": int(output_height),
-                "output_frame_count": int(output_frame_count),
-            }
+			_send_status(unique_id, f"{prefix}7/8 解码视频帧与音频...")
+			try:
+				frames = VAEDecodeTiled().decode(
+					video_vae,
+					video_latent_stage2,
+					DEFAULT_VAE_TILE_SIZE,
+					DEFAULT_VAE_OVERLAP,
+					DEFAULT_VAE_TEMPORAL_SIZE,
+					DEFAULT_VAE_TEMPORAL_OVERLAP,
+				)[0]
+				frames = _slice_output_frames(frames, render_frame_trim_start, output_frame_count)
+				frames = _crop_frames_to_size(frames, output_width, output_height)
+				frames = _stamp_original_guide_frames(
+					frames,
+					render_main_image,
+					original_guide_images,
+					original_guide_times,
+					fps,
+					output_width,
+					output_height,
+				)
+				if render_mode == MODE_GENERATED_AUDIO and bool(decode_generated_audio):
+					output_audio = LTXVAudioVAEDecode.execute(audio_latent_stage2, audio_vae)[0]
+			except Exception as exc:
+				raise RuntimeError(f"LTX 多图参考节点解码失败：{exc}") from exc
 
-        scene_images = [main_image] + [image for image in base_guide_images if image is not None] if main_image is not None else []
-        use_segmented = bool(segmented_execution) and mode == MODE_GENERATED_AUDIO and len(scene_images) >= 2
-        if bool(segmented_execution) and mode == MODE_AUDIO_CONDITIONED:
-            _send_status(unique_id, "提示：接入驱动音频时已自动关闭分段执行，避免外部音频被错误切段。")
+			_send_status(unique_id, f"{prefix}8/8 创建视频...")
+			video = _create_video(frames, float(fps), output_audio)
+			return {
+				"video": video,
+				"frames": frames.detach().float().cpu().clamp(0.0, 1.0).contiguous(),
+				"audio": output_audio,
+				"output_width": int(output_width),
+				"output_height": int(output_height),
+				"output_frame_count": int(output_frame_count),
+			}
 
-        if use_segmented:
-            segment_count = len(scene_images) - 1
-            _send_status(unique_id, f"准备分段执行：共 {segment_count} 段，将逐段保存并推送预览。")
-            segment_frames: list[torch.Tensor] = []
-            segment_audios: list[dict[str, Any] | None] = []
-            segment_previews: list[dict[str, Any]] = []
-            previous_time = 0.0
-            fallback_segment_duration = max(0.1, float(duration_seconds or 0.0) / float(max(1, segment_count)))
+		scene_images = [main_image] + [image for image in base_guide_images if image is not None] if main_image is not None else []
+		use_segmented = bool(segmented_execution) and mode == MODE_GENERATED_AUDIO and len(scene_images) >= 2
+		if bool(segmented_execution) and mode == MODE_AUDIO_CONDITIONED:
+			_send_status(unique_id, "提示：接入驱动音频时已自动关闭分段执行，避免外部音频被错误切段。")
 
-            for segment_index in range(1, segment_count + 1):
-                end_time = float(base_guide_times[segment_index - 1]) if segment_index - 1 < len(base_guide_times) else previous_time + fallback_segment_duration
-                segment_duration = max(0.1, end_time - previous_time)
-                previous_time = end_time
-                segment_label = f"分段 第{segment_index}段（共{segment_count}段）"
-                segment_route_label = f"首尾帧分段（场景{segment_index}→场景{segment_index + 1}）"
-                result = _render_once(
-                    render_main_image=scene_images[segment_index - 1],
-                    render_guide_images=[scene_images[segment_index]],
-                    render_guide_times=[segment_duration],
-                    render_duration_seconds=segment_duration,
-                    render_mode=mode,
-                    render_input_audio=None,
-                    render_seed=int(seed) + (segment_index - 1) * 2,
-                    render_frame_trim_start=frame_trim_start,
-                    render_route_label=segment_route_label,
-                    status_prefix=segment_label,
-                )
-                segment_frames.append(result["frames"])
-                segment_audios.append(result["audio"])
-                preview = _save_segment_video_preview(
-                    frames=result["frames"],
-                    audio=result["audio"],
-                    fps=fps,
-                    save_preset=segment_save_preset,
-                    format_name=segment_video_format,
-                    unique_id=unique_id,
-                    segment_index=segment_index,
-                    segment_count=segment_count,
-                    start_index=segment_index,
-                    end_index=segment_index + 1,
-                    output_width=result["output_width"],
-                    output_height=result["output_height"],
-                )
-                segment_previews.append(preview)
-                _send_status(unique_id, f"已保存第 {segment_index} 段（共 {segment_count} 段）：{preview.get('path') or '输出文件'}")
-                _maybe_purge_vram()
+		if use_segmented:
+			segment_count = len(scene_images) - 1
+			_send_status(unique_id, f"准备分段执行：共 {segment_count} 段，将逐段保存并推送预览。")
+			segment_frames: list[torch.Tensor] = []
+			segment_audios: list[dict[str, Any] | None] = []
+			segment_previews: list[dict[str, Any]] = []
+			previous_time = 0.0
+			fallback_segment_duration = max(0.1, float(duration_seconds or 0.0) / float(max(1, segment_count)))
 
-            combined_frames = torch.cat(segment_frames, dim=0).contiguous()
-            combined_audio = _concat_audio_segments(segment_audios)
-            final_video = _create_video(combined_frames, float(fps), combined_audio)
-            audio_label = "模型生成音轨" if combined_audio is not None else "静音输出"
-            output_width = int(combined_frames.shape[2])
-            output_height = int(combined_frames.shape[1])
-            _send_status(unique_id, f"完成：分段执行 {segment_count} 段 / 合并输出 {output_width}x{output_height} / {int(combined_frames.shape[0])} 帧 / {audio_label}")
-            return {
-                "ui": {
-                    "segment_videos": segment_previews,
-                    "preview_segments": segment_previews,
-                },
-                "result": (final_video,),
-            }
+			for segment_index in range(1, segment_count + 1):
+				end_time = float(base_guide_times[segment_index - 1]) if segment_index - 1 < len(base_guide_times) else previous_time + fallback_segment_duration
+				segment_duration = max(0.1, end_time - previous_time)
+				previous_time = end_time
+				segment_label = f"分段 第{segment_index}段（共{segment_count}段）"
+				segment_route_label = f"首尾帧分段（场景{segment_index}→场景{segment_index + 1}）"
+				result = _render_once(
+					render_main_image=scene_images[segment_index - 1],
+					render_guide_images=[scene_images[segment_index]],
+					render_guide_times=[segment_duration],
+					render_duration_seconds=segment_duration,
+					render_mode=mode,
+					render_input_audio=None,
+					render_seed=int(seed) + (segment_index - 1) * 2,
+					render_frame_trim_start=frame_trim_start,
+					render_route_label=segment_route_label,
+					status_prefix=segment_label,
+				)
+				segment_frames.append(result["frames"])
+				segment_audios.append(result["audio"])
+				preview = _save_segment_video_preview(
+					frames=result["frames"],
+					audio=result["audio"],
+					fps=fps,
+					save_preset=segment_save_preset,
+					format_name=segment_video_format,
+					unique_id=unique_id,
+					segment_index=segment_index,
+					segment_count=segment_count,
+					start_index=segment_index,
+					end_index=segment_index + 1,
+					output_width=result["output_width"],
+					output_height=result["output_height"],
+				)
+				segment_previews.append(preview)
+				_send_status(unique_id, f"已保存第 {segment_index} 段（共 {segment_count} 段）：{preview.get('path') or '输出文件'}")
+				_maybe_purge_vram()
 
-        result = _render_once(
-            render_main_image=main_image,
-            render_guide_images=base_guide_images,
-            render_guide_times=base_guide_times,
-            render_duration_seconds=duration_seconds,
-            render_mode=mode,
-            render_input_audio=input_audio,
-            render_seed=int(seed),
-            render_frame_trim_start=frame_trim_start,
-            render_route_label=route_label,
-        )
-        if mode == MODE_AUDIO_CONDITIONED:
-            audio_label = "外部音频驱动"
-        elif bool(decode_generated_audio):
-            audio_label = "模型生成音轨"
-        else:
-            audio_label = "静音输出"
-        _send_status(unique_id, f"完成：{route_label} / {result['output_width']}x{result['output_height']} / {result['output_frame_count']} 帧 / {audio_label}")
-        return (result["video"],)
+			combined_frames = torch.cat(segment_frames, dim=0).contiguous()
+			combined_audio = _concat_audio_segments(segment_audios)
+			final_video = _create_video(combined_frames, float(fps), combined_audio)
+			audio_label = "模型生成音轨" if combined_audio is not None else "静音输出"
+			output_width = int(combined_frames.shape[2])
+			output_height = int(combined_frames.shape[1])
+			_send_status(unique_id, f"完成：分段执行 {segment_count} 段 / 合并输出 {output_width}x{output_height} / {int(combined_frames.shape[0])} 帧 / {audio_label}")
+			return {
+				"ui": {
+					"segment_videos": segment_previews,
+					"preview_segments": segment_previews,
+				},
+				"result": (final_video,),
+			}
 
-    try:
-        return _execute()
-    finally:
-        _aggressive_purge_runtime()
+		result = _render_once(
+			render_main_image=main_image,
+			render_guide_images=base_guide_images,
+			render_guide_times=base_guide_times,
+			render_duration_seconds=duration_seconds,
+			render_mode=mode,
+			render_input_audio=input_audio,
+			render_seed=int(seed),
+			render_frame_trim_start=frame_trim_start,
+			render_route_label=route_label,
+		)
+		if mode == MODE_AUDIO_CONDITIONED:
+			audio_label = "外部音频驱动"
+		elif bool(decode_generated_audio):
+			audio_label = "模型生成音轨"
+		else:
+			audio_label = "静音输出"
+		_send_status(unique_id, f"完成：{route_label} / {result['output_width']}x{result['output_height']} / {result['output_frame_count']} 帧 / {audio_label}")
+		return (result["video"],)
+
+	try:
+		return _execute()
+	finally:
+		_aggressive_purge_runtime()

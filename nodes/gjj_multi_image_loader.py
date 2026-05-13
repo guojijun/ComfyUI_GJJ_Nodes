@@ -42,7 +42,7 @@ def list_input_images() -> list[dict[str, Any]]:
                 continue  # 跳过不在目标目录下的文件
         except ValueError:
             continue  # 如果路径无法比较，跳过
-        
+
         if not file_path.is_file():
             continue
         if file_path.suffix.lower() not in IMAGE_EXTENSIONS:
@@ -186,14 +186,14 @@ def resolve_input_image_path(entry: dict[str, str]) -> Path:
 def load_image_tensor(path: Path) -> torch.Tensor:
     image = Image.open(path)
     image = ImageOps.exif_transpose(image)
-    
+
     # 保留原始通道：如果是 RGBA 则输出 RGBA，否则输出 RGB
     if image.mode == "RGBA":
         array = np.asarray(image).astype(np.float32) / 255.0
     else:
         image = image.convert("RGB")
         array = np.asarray(image).astype(np.float32) / 255.0
-    
+
     return torch.from_numpy(array)[None, ...]
 
 
@@ -212,7 +212,7 @@ def build_uniform_batch(images: list[torch.Tensor]) -> torch.Tensor:
     has_rgba = any(int(image.shape[3]) == 4 for image in images)
     # 如果有RGBA图像，则统一使用4通道（RGBA），否则使用3通道（RGB）
     target_channels = 4 if has_rgba else 3
-    
+
     padded: list[torch.Tensor] = []
 
     for image in images:
@@ -220,7 +220,7 @@ def build_uniform_batch(images: list[torch.Tensor]) -> torch.Tensor:
         original_height = int(image.shape[1])
         original_width = int(image.shape[2])
         current_channels = int(image.shape[3])
-        
+
         # 调整图像通道数以匹配目标通道数
         if current_channels != target_channels:
             if current_channels == 3 and target_channels == 4:
@@ -245,7 +245,7 @@ def build_uniform_batch(images: list[torch.Tensor]) -> torch.Tensor:
         else:
             height = original_height
             width = original_width
-        
+
         # 检查是否已经是目标尺寸
         if height == max_height and width == max_width:
             padded.append(image.contiguous())
@@ -265,7 +265,7 @@ def build_uniform_batch_by_longest_edge(images: list[torch.Tensor], method: str 
     """通过长边缩放统一图片尺寸，而不是加黑边"""
     if not images:
         return empty_image_tensor()
-    
+
     # 找到所有图片中的最大长边
     max_longest_edge = 0
     for image in images:
@@ -273,17 +273,17 @@ def build_uniform_batch_by_longest_edge(images: list[torch.Tensor], method: str 
         width = int(image.shape[2])
         longest_edge = max(height, width)
         max_longest_edge = max(max_longest_edge, longest_edge)
-    
+
     if max_longest_edge == 0:
         return empty_image_tensor()
-    
+
     # 将所有图片按长边缩放到统一尺寸
     scaled: list[torch.Tensor] = []
     for image in images:
         height = int(image.shape[1])
         width = int(image.shape[2])
         longest_edge = max(height, width)
-        
+
         if longest_edge == max_longest_edge:
             # 已经是最大长边，无需缩放
             scaled.append(image.contiguous())
@@ -292,13 +292,13 @@ def build_uniform_batch_by_longest_edge(images: list[torch.Tensor], method: str 
             scale_factor = max_longest_edge / longest_edge
             new_width = max(16, int(round(width * scale_factor / 8.0) * 8))
             new_height = max(16, int(round(height * scale_factor / 8.0) * 8))
-            
+
             # 缩放图片（保持原始通道数）
             samples = image.movedim(-1, 1)
             scaled_image = comfy.utils.common_upscale(samples, new_width, new_height, str(method or "lanczos"), "disabled")
             scaled_image = scaled_image.movedim(1, -1).clamp(0.0, 1.0).contiguous()
             scaled.append(scaled_image)
-    
+
     return torch.cat(scaled, dim=0)
 
 
@@ -359,6 +359,68 @@ class GJJ_MultiImageLoader:
         f"第 {index} 张已选图片的单独输出；未使用的尾部输出会在前端自动收起。"
         for index in range(1, MAX_OUTPUT_IMAGES + 1)
     )
+
+    GJJ_HELP = {
+        "title": "GJJ · 🧡·📂 批量多图片加载浏览器",
+        "version": "v3.0",
+        "author": "GJJ Custom Nodes Team",
+        "description": "强大的批量图片加载节点，支持从 ComfyUI input 目录中选择多张图片，提供网格预览、序列范围筛选、外部图片合并等功能。是 GJJ 批量处理工作流的核心输入节点。",
+
+        "features": [
+            {
+                "name": "可视化网格预览",
+                "description": "在节点面板内以网格形式预览所有已选图片，支持缩略图查看",
+            },
+            {
+                "name": "动态输出口",
+                "description": "根据选择的图片数量自动扩展输出接口（最多20个单图输出）",
+            },
+            {
+                "name": "批量图片队列",
+                "description": "将所有图片打包为 GJJ 专用批量格式，便于后续批量处理节点使用",
+            },
+            {
+                "name": "序列范围筛选",
+                "description": "支持 [1,2] 和 [1:2] 语法，精确控制输出哪些图片",
+            },
+            {
+                "name": "外部图片合并",
+                "description": "可接入其他节点的 IMAGE batch，与本地图片合并预览和输出",
+            },
+            {
+                "name": "超大数量支持",
+                "description": "超过20张图片时自动切换为纯批量模式，不限制图片数量",
+            },
+        ],
+
+        "usage": [
+            "1. 准备图片：将需要处理的图片放入 ComfyUI 的 input/ 目录",
+            "2. 打开节点：点击节点面板中的「选择图片」按钮",
+            "3. 多选图片：在文件浏览器中按住 Ctrl/Shift 多选需要的图片",
+            "4. 确认选择：点击确定后，图片会以网格形式在节点内预览",
+            "5. （可选）设置序列范围：如需只输出部分图片，在「序列范围」中输入如 [1:5]",
+            "6. （可选）合并外部图片：接入其他节点的 IMAGE 输出，会与本地图片合并",
+            "7. 连接输出：将「批量图片队列」连接到批量处理节点，或使用单图输出",
+        ],
+
+        "tips": [
+            "💡 图片命名建议：使用数字前缀（如 001_xxx.jpg）便于排序和序列筛选",
+            "💡 支持的格式：PNG、JPG、JPEG、WEBP、BMP 等常见图片格式",
+            "💡 序列范围语法：[1,3,5] 选择第1、3、5张；[1:5] 选择第1到5张",
+            "💡 超过20张图片时，只会输出批量队列，不会创建单图输出口",
+            "💡 外部图片和本地图片会合并预览，但会在 UI 中标记来源",
+            "💡 作为批量工作流的起点，推荐配合 GJJ 批量扩图工具、批量抠图等节点使用",
+        ],
+
+        "performance": {
+            "最大单图输出": "20 张（超过后自动切换为纯批量模式）",
+            "批量队列限制": "无限制，可处理数百张图片",
+            "内存占用": "取决于图片数量和分辨率，建议单次不超过 50 张高分辨率图片",
+            "推荐场景": "批量扩图、批量抠图、批量风格转换等需要多图输入的工作流",
+        },
+
+        "dependencies": [],
+    }
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -459,21 +521,21 @@ class GJJ_MultiImageLoader:
         indices = parse_sequence_range(sequence_range, len(collected))
         if indices is not None:
             collected = [collected[index] for index in indices]
-        
+
         # 如果超过20张，只保留批量图片队列输出（不创建单图输出）
         # 如果20张以内，保留原有的批量队列+单图输出
         exceeds_limit = len(collected) > MAX_OUTPUT_IMAGES
-        
+
         outputs = [item["image"] for item in collected]
         preview_entries: list[dict[str, Any]] = []
         for item in collected:
             preview_entries.extend(item["preview"])
-        
+
         batch_output = build_uniform_batch(outputs)
-        
+
         # 获取批量图片的通道数（3 或 4）
         num_channels = int(batch_output.shape[3]) if len(outputs) > 0 else 3
-        
+
         if exceeds_limit:
             # 超过20张：只返回批量图片队列
             return {

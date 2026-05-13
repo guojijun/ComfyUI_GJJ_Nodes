@@ -1650,6 +1650,9 @@ class GJJ_LazyImageStudio:
             )
             preview_images = preview_ui.get("ui", {}).get("images", [])
 
+            # 准备返回值（在清理资源之前）
+            result_data = {"ui": {"images": preview_images, "elapsed_time": [elapsed_time]}, "result": (image,)}
+
             # 及时清理 GPU/CPU 缓存，释放显存供下次调用
             del model, clip, vae, positive, negative, sampled_latent, image
             import gc
@@ -1658,7 +1661,7 @@ class GJJ_LazyImageStudio:
                 torch.cuda.empty_cache()
 
             # 返回 UI 数据，包含图片和耗时
-            return {"ui": {"images": preview_images, "elapsed_time": [elapsed_time]}, "result": (image,)}
+            return result_data
         except RuntimeError as exc:
             _send_status(unique_id, f"执行失败：{str(exc).splitlines()[0]}")
             raise

@@ -46,8 +46,14 @@ WORKFLOW_FILE_LABELS = {
     "flux_fill_dev扩图": "Flux_Fill",
 }
 
+
 def _workflow_file_label(key: str) -> str:
-    return WORKFLOW_FILE_LABELS.get(str(key or ""), re.sub(r"[^0-9A-Za-z_\-]+", "_", str(key or "workflow")).strip("_") or "workflow")
+    return WORKFLOW_FILE_LABELS.get(
+        str(key or ""),
+        re.sub(r"[^0-9A-Za-z_\-]+", "_", str(key or "workflow")).strip("_")
+        or "workflow",
+    )
+
 
 # 根据你上传的 4 个工作流提取出的默认参数。
 BUILTIN_WORKFLOW_PRESETS: dict[str, dict[str, Any]] = {
@@ -133,11 +139,11 @@ BUILTIN_WORKFLOW_PRESETS: dict[str, dict[str, Any]] = {
 OUTPAINT_MODES = ("像素扩图", "目标尺寸")
 DIRECTIONS = ("居中扩展", "向右扩展", "向左扩展", "向上扩展", "向下扩展")
 
-DEFAULT_LEFT = 0
-DEFAULT_RIGHT = 0
-DEFAULT_TOP = 0
-DEFAULT_BOTTOM = 0
-DEFAULT_TARGET_WIDTH = 1024
+DEFAULT_LEFT = 60
+DEFAULT_RIGHT = 60
+DEFAULT_TOP = 60
+DEFAULT_BOTTOM = 60
+DEFAULT_TARGET_WIDTH = 768
 DEFAULT_TARGET_HEIGHT = 1024
 DEFAULT_DIRECTION = "居中扩展"
 DEFAULT_SEED = 0
@@ -161,6 +167,7 @@ def _send_status(unique_id: Any, text: str, progress: float | None = None) -> No
         return
     try:
         from server import PromptServer
+
         payload: dict[str, Any] = {"node": str(unique_id), "text": str(text or "")}
         if progress is not None:
             payload["progress"] = max(0.0, min(1.0, float(progress)))
@@ -169,11 +176,14 @@ def _send_status(unique_id: Any, text: str, progress: float | None = None) -> No
         pass
 
 
-def _send_error(unique_id: Any, title: str, message: str, install_command: str = "") -> None:
+def _send_error(
+    unique_id: Any, title: str, message: str, install_command: str = ""
+) -> None:
     if not unique_id:
         return
     try:
         from server import PromptServer
+
         PromptServer.instance.send_sync(
             "gjj_batch_outpaint_error",
             {
@@ -201,6 +211,7 @@ def _try_import(class_name: str, modules: tuple[str, ...]) -> Any | None:
     """
     try:
         from nodes import NODE_CLASS_MAPPINGS
+
         obj = NODE_CLASS_MAPPINGS.get(class_name)
         if obj is not None:
             return obj
@@ -224,7 +235,10 @@ def _try_import_conditioning_zero_out() -> Any | None:
 
 
 def _try_import_model_sampling_aura_flow() -> Any | None:
-    return _try_import("ModelSamplingAuraFlow", ("comfy_extras.nodes_model_advanced", "comfy_extras.nodes_flux", "nodes"))
+    return _try_import(
+        "ModelSamplingAuraFlow",
+        ("comfy_extras.nodes_model_advanced", "comfy_extras.nodes_flux", "nodes"),
+    )
 
 
 def _try_import_reference_latent() -> Any | None:
@@ -239,14 +253,18 @@ def _require(obj: Any | None, message: str) -> Any:
 
 def _is_model_like(obj: Any) -> bool:
     """KSampler 需要真实 MODEL 对象，不能是新版节点系统的 NodeOutput 包装。"""
-    return hasattr(obj, "get_model_object") or hasattr(obj, "model") or obj.__class__.__name__ in {"ModelPatcher"}
+    return (
+        hasattr(obj, "get_model_object")
+        or hasattr(obj, "model")
+        or obj.__class__.__name__ in {"ModelPatcher"}
+    )
 
 
 def _looks_like_node_output(obj: Any) -> bool:
     name = obj.__class__.__name__ if obj is not None else ""
-    return name == "NodeOutput" or (hasattr(obj, "node") and hasattr(obj, "output_index"))
-
-
+    return name == "NodeOutput" or (
+        hasattr(obj, "node") and hasattr(obj, "output_index")
+    )
 
 
 def _unpack_node_output(out: Any) -> tuple[Any, ...]:
@@ -271,6 +289,7 @@ def _unpack_node_output(out: Any) -> tuple[Any, ...]:
         return (args,)
     return (out,)
 
+
 def _maybe_use_model_result(original_model: Any, candidate: Any, node_name: str) -> Any:
     """
     某些新版本/自定义节点直接调用会返回 NodeOutput，而不是实际 MODEL。
@@ -279,11 +298,15 @@ def _maybe_use_model_result(original_model: Any, candidate: Any, node_name: str)
     if candidate is None:
         return original_model
     if _looks_like_node_output(candidate):
-        print(f"{YELLOW}[GJJ] {node_name} 返回 NodeOutput 包装对象，直接调用无法展开，已跳过该节点。{RESET}")
+        print(
+            f"{YELLOW}[GJJ] {node_name} 返回 NodeOutput 包装对象，直接调用无法展开，已跳过该节点。{RESET}"
+        )
         return original_model
     if _is_model_like(candidate):
         return candidate
-    print(f"{YELLOW}[GJJ] {node_name} 返回的不是可采样 MODEL：{candidate.__class__.__name__}，已跳过。{RESET}")
+    print(
+        f"{YELLOW}[GJJ] {node_name} 返回的不是可采样 MODEL：{candidate.__class__.__name__}，已跳过。{RESET}"
+    )
     return original_model
 
 
@@ -328,7 +351,25 @@ def _node_call(node: Any, *fallback_args: Any, **kwargs: Any) -> tuple[Any, ...]
     candidates = []
     if fn_name and hasattr(node, fn_name):
         candidates.append(getattr(node, fn_name))
-    for name in ("execute", "generate", "encode", "decode", "sample", "patch", "apply", "scale", "upscale", "composite", "join_image_with_alpha", "expand_image", "load_unet", "load_clip", "load_vae", "load_lora_model_only", "zero_out"):
+    for name in (
+        "execute",
+        "generate",
+        "encode",
+        "decode",
+        "sample",
+        "patch",
+        "apply",
+        "scale",
+        "upscale",
+        "composite",
+        "join_image_with_alpha",
+        "expand_image",
+        "load_unet",
+        "load_clip",
+        "load_vae",
+        "load_lora_model_only",
+        "zero_out",
+    ):
         if hasattr(node, name):
             fn = getattr(node, name)
             if fn not in candidates:
@@ -339,7 +380,9 @@ def _node_call(node: Any, *fallback_args: Any, **kwargs: Any) -> tuple[Any, ...]
         try:
             sig = inspect.signature(fn)
             accepted: dict[str, Any] = {}
-            has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            has_var_kw = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            )
             for key, value in kwargs.items():
                 if has_var_kw or key in sig.parameters:
                     accepted[key] = value
@@ -362,7 +405,9 @@ def _node_call(node: Any, *fallback_args: Any, **kwargs: Any) -> tuple[Any, ...]
     raise RuntimeError(f"无法调用节点：{node.__class__.__name__}")
 
 
-def _call_method(obj: Any, method_names: tuple[str, ...], *args: Any, **kwargs: Any) -> tuple[Any, ...]:
+def _call_method(
+    obj: Any, method_names: tuple[str, ...], *args: Any, **kwargs: Any
+) -> tuple[Any, ...]:
     last_error: Exception | None = None
     for name in method_names:
         fn = getattr(obj, name, None)
@@ -410,16 +455,22 @@ def _split_images(image: torch.Tensor) -> list[torch.Tensor]:
     return [batch[i : i + 1].contiguous() for i in range(int(batch.shape[0]))]
 
 
-def _resize_image_exact(image: torch.Tensor, width: int, height: int, method: str = "lanczos") -> torch.Tensor:
+def _resize_image_exact(
+    image: torch.Tensor, width: int, height: int, method: str = "lanczos"
+) -> torch.Tensor:
     image = _ensure_image_batch(image)
     width = max(8, int(width))
     height = max(8, int(height))
     samples = image.movedim(-1, 1)
-    scaled = comfy.utils.common_upscale(samples, width, height, str(method or "lanczos"), "disabled")
+    scaled = comfy.utils.common_upscale(
+        samples, width, height, str(method or "lanczos"), "disabled"
+    )
     return scaled.movedim(1, -1).clamp(0.0, 1.0).contiguous()
 
 
-def _resize_to_max_dimension(image: torch.Tensor, largest_size: int, method: str = "area") -> torch.Tensor:
+def _resize_to_max_dimension(
+    image: torch.Tensor, largest_size: int, method: str = "area"
+) -> torch.Tensor:
     image = _ensure_image_batch(image)
     largest_size = int(largest_size or 0)
     if largest_size <= 0:
@@ -439,7 +490,9 @@ def _round_to_8(value: int) -> int:
     return max(8, ((int(value) + 7) // 8) * 8)
 
 
-def _calculate_padding_pixel(left: int, right: int, top: int, bottom: int) -> dict[str, int]:
+def _calculate_padding_pixel(
+    left: int, right: int, top: int, bottom: int
+) -> dict[str, int]:
     return {
         "left": max(0, int(left)),
         "right": max(0, int(right)),
@@ -448,7 +501,9 @@ def _calculate_padding_pixel(left: int, right: int, top: int, bottom: int) -> di
     }
 
 
-def _calculate_padding_target_size(image: torch.Tensor, target_width: int, target_height: int, direction: str) -> tuple[torch.Tensor, dict[str, int]]:
+def _calculate_padding_target_size(
+    image: torch.Tensor, target_width: int, target_height: int, direction: str
+) -> tuple[torch.Tensor, dict[str, int]]:
     image = _ensure_image_batch(image)
     h = int(image.shape[1])
     w = int(image.shape[2])
@@ -504,7 +559,9 @@ def _calculate_padding_target_size(image: torch.Tensor, target_width: int, targe
     return resized, {"left": left, "right": right, "top": top, "bottom": bottom}
 
 
-def _apply_padding(image: torch.Tensor, padding: dict[str, int], feathering: int = 24) -> tuple[torch.Tensor, torch.Tensor]:
+def _apply_padding(
+    image: torch.Tensor, padding: dict[str, int], feathering: int = 24
+) -> tuple[torch.Tensor, torch.Tensor]:
     image = _ensure_image_batch(image)
     left = int(padding.get("left", 0))
     right = int(padding.get("right", 0))
@@ -519,7 +576,9 @@ def _apply_padding(image: torch.Tensor, padding: dict[str, int], feathering: int
         return image, mask
 
     try:
-        expanded, mask = ImagePadForOutpaint().expand_image(image, left, top, right, bottom, feathering)
+        expanded, mask = ImagePadForOutpaint().expand_image(
+            image, left, top, right, bottom, feathering
+        )
         return _ensure_image_batch(expanded), mask.float().clamp(0.0, 1.0).contiguous()
     except Exception as exc:
         raise RuntimeError(f"图像扩边失败：{exc}") from exc
@@ -531,11 +590,15 @@ def _empty_image_like(image: torch.Tensor, color: int = 255) -> torch.Tensor:
     return torch.full_like(image, value)
 
 
-def _composite_masked(destination: torch.Tensor, source: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+def _composite_masked(
+    destination: torch.Tensor, source: torch.Tensor, mask: torch.Tensor
+) -> torch.Tensor:
     destination = _ensure_image_batch(destination)
     source = _ensure_image_batch(source)
     if source.shape[1:3] != destination.shape[1:3]:
-        source = _resize_image_exact(source, int(destination.shape[2]), int(destination.shape[1]))
+        source = _resize_image_exact(
+            source, int(destination.shape[2]), int(destination.shape[1])
+        )
     if mask.ndim == 2:
         mask = mask.unsqueeze(0)
     if mask.ndim == 3:
@@ -546,11 +609,15 @@ def _composite_masked(destination: torch.Tensor, source: torch.Tensor, mask: tor
         raise RuntimeError(f"遮罩维度不支持：{tuple(mask.shape)}")
     mask4 = mask4.to(device=destination.device, dtype=destination.dtype).clamp(0.0, 1.0)
     if mask4.shape[1:3] != destination.shape[1:3]:
-        mask4 = torch.nn.functional.interpolate(mask4.movedim(-1, 1), size=destination.shape[1:3], mode="nearest").movedim(1, -1)
+        mask4 = torch.nn.functional.interpolate(
+            mask4.movedim(-1, 1), size=destination.shape[1:3], mode="nearest"
+        ).movedim(1, -1)
     return (destination * (1.0 - mask4) + source * mask4).clamp(0.0, 1.0).contiguous()
 
 
-def _flux2_reference_image_exact(padded: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+def _flux2_reference_image_exact(
+    padded: torch.Tensor, mask: torch.Tensor
+) -> torch.Tensor:
     """
     严格贴近 Flux2-klein扩图.json 的参考图链：
 
@@ -573,8 +640,14 @@ def _flux2_reference_image_exact(padded: torch.Tensor, mask: torch.Tensor) -> to
     ImageCompositeMasked = _try_import("ImageCompositeMasked", ("nodes",))
 
     try:
-        if EmptyImage is None or JoinImageWithAlpha is None or ImageCompositeMasked is None:
-            raise RuntimeError("EmptyImage / JoinImageWithAlpha / ImageCompositeMasked 有节点未找到")
+        if (
+            EmptyImage is None
+            or JoinImageWithAlpha is None
+            or ImageCompositeMasked is None
+        ):
+            raise RuntimeError(
+                "EmptyImage / JoinImageWithAlpha / ImageCompositeMasked 有节点未找到"
+            )
 
         empty = _node_call(
             EmptyImage(),
@@ -602,7 +675,9 @@ def _flux2_reference_image_exact(padded: torch.Tensor, mask: torch.Tensor) -> to
         )[0]
         composed = _ensure_image_batch(composed)
 
-        print(f"{GREEN}[GJJ] Flux2 原生参考图链已生效：EmptyImage -> JoinImageWithAlpha -> ImageCompositeMasked -> FluxKontextImageScale{RESET}")
+        print(
+            f"{GREEN}[GJJ] Flux2 原生参考图链已生效：EmptyImage -> JoinImageWithAlpha -> ImageCompositeMasked -> FluxKontextImageScale{RESET}"
+        )
         return _apply_flux_kontext_scale(composed)
 
     except Exception as exc:
@@ -613,7 +688,9 @@ def _flux2_reference_image_exact(padded: torch.Tensor, mask: torch.Tensor) -> to
 
 
 def _apply_flux_kontext_scale(image: torch.Tensor) -> torch.Tensor:
-    FluxKontextImageScale = _try_import("FluxKontextImageScale", ("comfy_extras.nodes_flux", "nodes"))
+    FluxKontextImageScale = _try_import(
+        "FluxKontextImageScale", ("comfy_extras.nodes_flux", "nodes")
+    )
     if FluxKontextImageScale is None:
         return image
     try:
@@ -621,7 +698,9 @@ def _apply_flux_kontext_scale(image: torch.Tensor) -> torch.Tensor:
         for item in out:
             if isinstance(item, torch.Tensor):
                 return _ensure_image_batch(item)
-        print(f"{YELLOW}[GJJ] FluxKontextImageScale 没有返回 IMAGE 张量，改用原图。{RESET}")
+        print(
+            f"{YELLOW}[GJJ] FluxKontextImageScale 没有返回 IMAGE 张量，改用原图。{RESET}"
+        )
         return image
     except Exception as exc:
         print(f"{YELLOW}[GJJ] FluxKontextImageScale 调用失败，改用原图：{exc}{RESET}")
@@ -642,7 +721,11 @@ def _conditioning_set_values_manual(conditioning: Any, values: dict[str, Any]) -
         return conditioning
     fixed = []
     for item in conditioning:
-        if isinstance(item, (list, tuple)) and len(item) >= 1 and torch.is_tensor(item[0]):
+        if (
+            isinstance(item, (list, tuple))
+            and len(item) >= 1
+            and torch.is_tensor(item[0])
+        ):
             meta = dict(item[1]) if len(item) >= 2 and isinstance(item[1], dict) else {}
             meta.update(values)
             fixed.append([item[0], meta])
@@ -675,7 +758,11 @@ def _append_reference_latent(conditioning: Any, latent: dict[str, torch.Tensor])
 
     fixed = []
     for item in conditioning:
-        if isinstance(item, (list, tuple)) and len(item) >= 1 and torch.is_tensor(item[0]):
+        if (
+            isinstance(item, (list, tuple))
+            and len(item) >= 1
+            and torch.is_tensor(item[0])
+        ):
             meta = dict(item[1]) if len(item) >= 2 and isinstance(item[1], dict) else {}
             refs = meta.get("ref_latents") or []
             if isinstance(refs, dict) and torch.is_tensor(refs.get("samples")):
@@ -686,7 +773,14 @@ def _append_reference_latent(conditioning: Any, latent: dict[str, torch.Tensor])
                 refs = list(refs)
             elif not isinstance(refs, list):
                 refs = []
-            refs = [r["samples"] if isinstance(r, dict) and torch.is_tensor(r.get("samples")) else r for r in refs]
+            refs = [
+                (
+                    r["samples"]
+                    if isinstance(r, dict) and torch.is_tensor(r.get("samples"))
+                    else r
+                )
+                for r in refs
+            ]
             refs.append(samples)
             meta["ref_latents"] = refs
             fixed.append([item[0], meta])
@@ -704,20 +798,28 @@ def _fix_reference_latent_tensors(conditioning: Any) -> Any:
         return conditioning
     fixed = []
     for item in conditioning:
-        if not isinstance(item, (list, tuple)) or len(item) < 1 or not torch.is_tensor(item[0]):
+        if (
+            not isinstance(item, (list, tuple))
+            or len(item) < 1
+            or not torch.is_tensor(item[0])
+        ):
             fixed.append(item)
             continue
         meta = dict(item[1]) if len(item) >= 2 and isinstance(item[1], dict) else {}
         for key in ("ref_latents", "reference_latents"):
             value = meta.get(key)
-            if isinstance(value, dict) and isinstance(value.get("samples"), torch.Tensor):
+            if isinstance(value, dict) and isinstance(
+                value.get("samples"), torch.Tensor
+            ):
                 meta[key] = [value["samples"]]
             elif torch.is_tensor(value):
                 meta[key] = [value]
             elif isinstance(value, (list, tuple)):
                 new_value = []
                 for v in value:
-                    if isinstance(v, dict) and isinstance(v.get("samples"), torch.Tensor):
+                    if isinstance(v, dict) and isinstance(
+                        v.get("samples"), torch.Tensor
+                    ):
                         new_value.append(v["samples"])
                     elif torch.is_tensor(v):
                         new_value.append(v)
@@ -744,7 +846,9 @@ def _reference_latent_native(conditioning: Any, latent: dict[str, torch.Tensor])
             )[0]
             return _fix_reference_latent_tensors(_normalize_conditioning(out))
         except Exception as exc:
-            print(f"{YELLOW}[GJJ] ReferenceLatent 原生节点调用失败，回退手动结构：{exc}{RESET}")
+            print(
+                f"{YELLOW}[GJJ] ReferenceLatent 原生节点调用失败，回退手动结构：{exc}{RESET}"
+            )
     return _fix_reference_latent_tensors(_append_reference_latent(conditioning, latent))
 
 
@@ -762,7 +866,9 @@ def _conditioning_zero_out_native(conditioning: Any) -> Any:
             )[0]
             return _normalize_conditioning(out)
         except Exception as exc:
-            print(f"{YELLOW}[GJJ] ConditioningZeroOut 原生节点调用失败，回退手动清零：{exc}{RESET}")
+            print(
+                f"{YELLOW}[GJJ] ConditioningZeroOut 原生节点调用失败，回退手动清零：{exc}{RESET}"
+            )
     return _zero_out(conditioning)
 
 
@@ -776,7 +882,11 @@ def _zero_out(conditioning: Any) -> Any:
         return conditioning
     fixed = []
     for item in conditioning:
-        if isinstance(item, (list, tuple)) and len(item) >= 1 and torch.is_tensor(item[0]):
+        if (
+            isinstance(item, (list, tuple))
+            and len(item) >= 1
+            and torch.is_tensor(item[0])
+        ):
             meta = dict(item[1]) if len(item) >= 2 and isinstance(item[1], dict) else {}
             pooled = meta.get("pooled_output")
             if torch.is_tensor(pooled):
@@ -796,13 +906,18 @@ def _apply_flux_guidance(conditioning: Any, guidance: float) -> Any:
     """
     return _conditioning_set_values_manual(conditioning, {"guidance": float(guidance)})
 
+
 def _apply_differential_diffusion(model: Any, strength: float = 1.0) -> Any:
-    DifferentialDiffusion = _try_import("DifferentialDiffusion", ("comfy_extras.nodes_differential_diffusion", "nodes"))
+    DifferentialDiffusion = _try_import(
+        "DifferentialDiffusion", ("comfy_extras.nodes_differential_diffusion", "nodes")
+    )
     if DifferentialDiffusion is None:
         print(f"{YELLOW}[GJJ] DifferentialDiffusion 不可用，已跳过。{RESET}")
         return model
     try:
-        candidate = _node_call(DifferentialDiffusion(), model=model, strength=float(strength))[0]
+        candidate = _node_call(
+            DifferentialDiffusion(), model=model, strength=float(strength)
+        )[0]
         return _maybe_use_model_result(model, candidate, "DifferentialDiffusion")
     except Exception as exc:
         print(f"{YELLOW}[GJJ] DifferentialDiffusion 调用失败，已跳过：{exc}{RESET}")
@@ -810,7 +925,10 @@ def _apply_differential_diffusion(model: Any, strength: float = 1.0) -> Any:
 
 
 def _apply_cfg_norm(model: Any, strength: float = 1.0) -> Any:
-    CFGNorm = _try_import("CFGNorm", ("comfy_extras.nodes_cfg", "comfy_extras.nodes_model_advanced", "nodes"))
+    CFGNorm = _try_import(
+        "CFGNorm",
+        ("comfy_extras.nodes_cfg", "comfy_extras.nodes_model_advanced", "nodes"),
+    )
     if CFGNorm is None:
         print(f"{YELLOW}[GJJ] CFGNorm 不可用，已跳过。{RESET}")
         return model
@@ -825,10 +943,14 @@ def _apply_cfg_norm(model: Any, strength: float = 1.0) -> Any:
 def _apply_aura_flow_shift(model: Any, shift: float = 3.1) -> Any:
     ModelSamplingAuraFlow = _try_import_model_sampling_aura_flow()
     if ModelSamplingAuraFlow is None:
-        print(f"{YELLOW}[GJJ] ModelSamplingAuraFlow 不可用，已跳过 shift={shift}。{RESET}")
+        print(
+            f"{YELLOW}[GJJ] ModelSamplingAuraFlow 不可用，已跳过 shift={shift}。{RESET}"
+        )
         return model
     try:
-        candidate = _node_call(ModelSamplingAuraFlow(), model=model, shift=float(shift))[0]
+        candidate = _node_call(
+            ModelSamplingAuraFlow(), model=model, shift=float(shift)
+        )[0]
         return _maybe_use_model_result(model, candidate, "ModelSamplingAuraFlow")
     except Exception as exc:
         print(f"{YELLOW}[GJJ] ModelSamplingAuraFlow 调用失败，已跳过：{exc}{RESET}")
@@ -837,11 +959,17 @@ def _apply_aura_flow_shift(model: Any, shift: float = 3.1) -> Any:
 
 def _load_unet(unet_name: str, dtype: str = "default") -> Any:
     from nodes import UNETLoader
-    return UNETLoader().load_unet(_resolve_model_name("diffusion_models", unet_name), dtype)[0]
+
+    return UNETLoader().load_unet(
+        _resolve_model_name("diffusion_models", unet_name), dtype
+    )[0]
 
 
-def _load_clip(clip_name: str, clip_type: str = "default", device: str = "default") -> Any:
+def _load_clip(
+    clip_name: str, clip_type: str = "default", device: str = "default"
+) -> Any:
     from nodes import CLIPLoader
+
     resolved = _resolve_model_name("text_encoders", clip_name)
     try:
         return CLIPLoader().load_clip(resolved, clip_type, device)[0]
@@ -849,8 +977,11 @@ def _load_clip(clip_name: str, clip_type: str = "default", device: str = "defaul
         return CLIPLoader().load_clip(resolved, clip_type)[0]
 
 
-def _load_dual_clip(clip1: str, clip2: str, clip_type: str = "flux", device: str = "default") -> Any:
+def _load_dual_clip(
+    clip1: str, clip2: str, clip_type: str = "flux", device: str = "default"
+) -> Any:
     from nodes import DualCLIPLoader
+
     resolved1 = _resolve_model_name("text_encoders", clip1)
     resolved2 = _resolve_model_name("text_encoders", clip2)
     try:
@@ -861,6 +992,7 @@ def _load_dual_clip(clip1: str, clip2: str, clip_type: str = "flux", device: str
 
 def _load_vae(vae_name: str) -> Any:
     from nodes import VAELoader
+
     return VAELoader().load_vae(_resolve_model_name("vae", vae_name))[0]
 
 
@@ -868,21 +1000,27 @@ def _apply_lora_model_only(model: Any, lora_name: str, strength: float) -> Any:
     if not lora_name or lora_name == "[未找到模型]":
         return model
     from nodes import LoraLoaderModelOnly
+
     resolved = _resolve_model_name("loras", lora_name)
     loader = LoraLoaderModelOnly()
     try:
         return loader.load_lora_model_only(model, resolved, float(strength))[0]
     except TypeError:
         # 兼容少数自定义版本：可能要求关键字参数。
-        return _node_call(loader, model=model, lora_name=resolved, strength_model=float(strength))[0]
+        return _node_call(
+            loader, model=model, lora_name=resolved, strength_model=float(strength)
+        )[0]
 
 
 def _clip_text_encode(clip: Any, text: str) -> Any:
     from nodes import CLIPTextEncode
+
     return _normalize_conditioning(CLIPTextEncode().encode(clip, str(text or ""))[0])
 
 
-def _qwen_image_edit_encode(clip: Any, vae: Any, image: torch.Tensor, prompt: str) -> Any:
+def _qwen_image_edit_encode(
+    clip: Any, vae: Any, image: torch.Tensor, prompt: str
+) -> Any:
     """
     严格贴近 Qwen_image_edit扩图.json：
 
@@ -890,41 +1028,74 @@ def _qwen_image_edit_encode(clip: Any, vae: Any, image: torch.Tensor, prompt: st
     只有 clip + image1 + prompt 接入。之前代码强行传 vae，会改变该节点内部路径，
     导致 Qwen 输出变成纹理块/非原图。
     """
-    TextEncodeQwenImageEditPlus = _try_import("TextEncodeQwenImageEditPlus", ("nodes", "comfy_extras.nodes_qwen_image"))
+    TextEncodeQwenImageEditPlus = _try_import(
+        "TextEncodeQwenImageEditPlus", ("nodes", "comfy_extras.nodes_qwen_image")
+    )
     if TextEncodeQwenImageEditPlus is not None:
         node = TextEncodeQwenImageEditPlus()
 
         # 第一优先：完全按 JSON，不传 vae / image2 / image3。
         try:
-            return _normalize_conditioning(_node_call(
-                node,
-                clip=clip,
-                image1=image,
-                prompt=str(prompt or ""),
-            )[0])
+            return _normalize_conditioning(
+                _node_call(
+                    node,
+                    clip=clip,
+                    image1=image,
+                    prompt=str(prompt or ""),
+                )[0]
+            )
         except Exception as exc_no_vae:
             # 兼容极少数版本：如果函数签名硬要求 vae，再降级传入。
             try:
-                return _normalize_conditioning(_node_call(
-                    node,
-                    clip=clip,
-                    vae=vae,
-                    image1=image,
-                    prompt=str(prompt or ""),
-                )[0])
+                return _normalize_conditioning(
+                    _node_call(
+                        node,
+                        clip=clip,
+                        vae=vae,
+                        image1=image,
+                        prompt=str(prompt or ""),
+                    )[0]
+                )
             except Exception as exc:
-                print(f"{YELLOW}[GJJ] TextEncodeQwenImageEditPlus 调用失败，回退 CLIPTextEncode：no_vae={exc_no_vae}; with_vae={exc}{RESET}")
+                print(
+                    f"{YELLOW}[GJJ] TextEncodeQwenImageEditPlus 调用失败，回退 CLIPTextEncode：no_vae={exc_no_vae}; with_vae={exc}{RESET}"
+                )
 
     return _clip_text_encode(clip, str(prompt or ""))
 
 
-def _ksampler(model: Any, seed: int, steps: int, cfg: float, sampler: str, scheduler: str, positive: Any, negative: Any, latent: dict[str, torch.Tensor], denoise: float) -> dict[str, torch.Tensor]:
+def _ksampler(
+    model: Any,
+    seed: int,
+    steps: int,
+    cfg: float,
+    sampler: str,
+    scheduler: str,
+    positive: Any,
+    negative: Any,
+    latent: dict[str, torch.Tensor],
+    denoise: float,
+) -> dict[str, torch.Tensor]:
     from nodes import KSampler
+
     if _looks_like_node_output(model) or not _is_model_like(model):
-        raise RuntimeError(f"KSampler 收到的 model 不是可采样 MODEL，而是：{model.__class__.__name__}")
+        raise RuntimeError(
+            f"KSampler 收到的 model 不是可采样 MODEL，而是：{model.__class__.__name__}"
+        )
     positive = _normalize_conditioning(positive)
     negative = _normalize_conditioning(negative)
-    sampled = KSampler().sample(model, int(seed), int(steps), float(cfg), str(sampler), str(scheduler), positive, negative, latent, float(denoise))[0]
+    sampled = KSampler().sample(
+        model,
+        int(seed),
+        int(steps),
+        float(cfg),
+        str(sampler),
+        str(scheduler),
+        positive,
+        negative,
+        latent,
+        float(denoise),
+    )[0]
     if not isinstance(sampled, dict):
         raise RuntimeError("KSampler 输出不是 LATENT 字典。")
     return sampled
@@ -948,7 +1119,9 @@ def _merge_output_images(images: list[torch.Tensor]) -> torch.Tensor:
         for img in normalized:
             h = int(img.shape[1])
             w = int(img.shape[2])
-            canvas = torch.zeros((int(img.shape[0]), max_h, max_w, 3), dtype=img.dtype, device=img.device)
+            canvas = torch.zeros(
+                (int(img.shape[0]), max_h, max_w, 3), dtype=img.dtype, device=img.device
+            )
             y = (max_h - h) // 2
             x = (max_w - w) // 2
             canvas[:, y : y + h, x : x + w, :] = img
@@ -1031,7 +1204,10 @@ def _save_result_images(
     labels = labels or []
     for index, image in enumerate(images, start=1):
         label = labels[index - 1] if index - 1 < len(labels) else "workflow"
-        safe_label = re.sub(r"[^0-9A-Za-z_\-]+", "_", str(label or "workflow")).strip("_") or "workflow"
+        safe_label = (
+            re.sub(r"[^0-9A-Za-z_\-]+", "_", str(label or "workflow")).strip("_")
+            or "workflow"
+        )
         # 文件名形如：批量扩图_SD15_Inpaint_img001_001，方便区分模型分支。
         stem = f"{base_name}_{safe_label}_{index:03d}"
         path = _next_png_path(directory, stem)
@@ -1041,14 +1217,26 @@ def _save_result_images(
             previews.append(
                 {
                     "filename": relative.name,
-                    "subfolder": str(relative.parent).replace("\\", "/") if str(relative.parent) != "." else "",
+                    "subfolder": (
+                        str(relative.parent).replace("\\", "/")
+                        if str(relative.parent) != "."
+                        else ""
+                    ),
                     "type": "output",
                     "path": str(path),
                     "label": safe_label,
                 }
             )
         except Exception:
-            previews.append({"filename": path.name, "subfolder": "", "type": "output", "path": str(path), "label": safe_label})
+            previews.append(
+                {
+                    "filename": path.name,
+                    "subfolder": "",
+                    "type": "output",
+                    "path": str(path),
+                    "label": safe_label,
+                }
+            )
     return previews
 
 
@@ -1077,9 +1265,15 @@ def _resolve_model_name(category: str, preferred: str) -> str:
     return preferred
 
 
-def _extract_workflow_info(filename: str, nodes: list[dict], links: list[list[Any]] | None = None) -> dict[str, Any]:
+def _extract_workflow_info(
+    filename: str, nodes: list[dict], links: list[list[Any]] | None = None
+) -> dict[str, Any]:
     key = Path(filename).stem
-    info: dict[str, Any] = {"key": key, "label": WORKFLOW_LABELS.get(key, key), "file": filename}
+    info: dict[str, Any] = {
+        "key": key,
+        "label": WORKFLOW_LABELS.get(key, key),
+        "file": filename,
+    }
 
     link_to_origin: dict[int, tuple[int, int]] = {}
     if links:
@@ -1180,17 +1374,23 @@ def _extract_workflow_info(filename: str, nodes: list[dict], links: list[list[An
 
 
 def _scan_workflow_presets() -> list[dict[str, Any]]:
-    presets: dict[str, dict[str, Any]] = {k: dict(v) for k, v in BUILTIN_WORKFLOW_PRESETS.items()}
+    presets: dict[str, dict[str, Any]] = {
+        k: dict(v) for k, v in BUILTIN_WORKFLOW_PRESETS.items()
+    }
     if WORKFLOW_DIR.is_dir():
         for f in sorted(WORKFLOW_DIR.glob("*.json")):
             try:
                 with open(f, "r", encoding="utf-8") as fp:
                     wf = json.load(fp)
                 key = f.stem
-                presets[key] = _extract_workflow_info(f.name, wf.get("nodes", []), wf.get("links", []))
+                presets[key] = _extract_workflow_info(
+                    f.name, wf.get("nodes", []), wf.get("links", [])
+                )
             except Exception as exc:
                 print(f"{YELLOW}[GJJ] 工作流解析失败：{f} -> {exc}{RESET}")
-    return [presets[k] for k in WORKFLOW_ORDER if k in presets] + [v for k, v in presets.items() if k not in WORKFLOW_ORDER]
+    return [presets[k] for k in WORKFLOW_ORDER if k in presets] + [
+        v for k, v in presets.items() if k not in WORKFLOW_ORDER
+    ]
 
 
 def _get_node_properties(extra_pnginfo: Any, unique_id: Any) -> dict[str, Any]:
@@ -1224,6 +1424,7 @@ def _suggest_solution(exc: Exception) -> str:
 
 
 # =========================== 4 个工作流执行链路 ===========================
+
 
 def _execute_sd15_inpaint(
     image: torch.Tensor,
@@ -1264,7 +1465,18 @@ def _execute_sd15_inpaint(
     latent = VAEEncodeForInpaint().encode(vae, padded, mask, grow_mask)[0]
 
     _send_status(unique_id, f"采样{suffix}...")
-    sampled = _ksampler(model, seed, steps, cfg, sampler, scheduler, positive, negative_cond, latent, denoise)
+    sampled = _ksampler(
+        model,
+        seed,
+        steps,
+        cfg,
+        sampler,
+        scheduler,
+        positive,
+        negative_cond,
+        latent,
+        denoise,
+    )
 
     _send_status(unique_id, f"解码{suffix}...")
     return _decode_vae(vae, sampled)
@@ -1292,7 +1504,9 @@ def _execute_flux2_klein(
     clip_type = preset.get("clip_type", "flux2")
     vae_name = preset.get("vae", "flux2-vae.safetensors")
 
-    print(f"{CYAN}[GJJ] {suffix} | Flux2-Klein | UNet: {unet_name} | CLIP: {clip_name} | VAE: {vae_name}{RESET}")
+    print(
+        f"{CYAN}[GJJ] {suffix} | Flux2-Klein | UNet: {unet_name} | CLIP: {clip_name} | VAE: {vae_name}{RESET}"
+    )
     _send_status(unique_id, f"加载 Flux2-Klein 模型{suffix}...")
     model = _load_unet(unet_name, unet_dtype)
     clip = _load_clip(clip_name, clip_type)
@@ -1306,7 +1520,11 @@ def _execute_flux2_klein(
     if bool(preset.get("use_alpha_composite", True)):
         ref_image = _flux2_reference_image_exact(padded, mask)
     else:
-        ref_image = _apply_flux_kontext_scale(padded) if bool(preset.get("use_flux_kontext_scale", True)) else padded
+        ref_image = (
+            _apply_flux_kontext_scale(padded)
+            if bool(preset.get("use_flux_kontext_scale", True))
+            else padded
+        )
 
     _send_status(unique_id, f"VAE 编码参考图{suffix}...")
     latent = _encode_vae(vae, ref_image)
@@ -1318,7 +1536,18 @@ def _execute_flux2_klein(
     negative_cond = _conditioning_zero_out_native(positive)
 
     _send_status(unique_id, f"采样{suffix}...")
-    sampled = _ksampler(model, seed, steps, cfg, sampler, scheduler, positive_ref, negative_cond, latent, denoise)
+    sampled = _ksampler(
+        model,
+        seed,
+        steps,
+        cfg,
+        sampler,
+        scheduler,
+        positive_ref,
+        negative_cond,
+        latent,
+        denoise,
+    )
 
     _send_status(unique_id, f"解码{suffix}...")
     return _decode_vae(vae, sampled)
@@ -1346,7 +1575,9 @@ def _execute_qwen_image_edit(
     clip_type = preset.get("clip_type", "qwen_image")
     vae_name = preset.get("vae", "qwen_image_vae.safetensors")
 
-    print(f"{CYAN}[GJJ] {suffix} | Qwen-Image-Edit | UNet: {unet_name} | CLIP: {clip_name} | VAE: {vae_name}{RESET}")
+    print(
+        f"{CYAN}[GJJ] {suffix} | Qwen-Image-Edit | UNet: {unet_name} | CLIP: {clip_name} | VAE: {vae_name}{RESET}"
+    )
     _send_status(unique_id, f"加载 Qwen Image Edit 模型{suffix}...")
     model = _load_unet(unet_name, unet_dtype)
     clip = _load_clip(clip_name, clip_type)
@@ -1356,7 +1587,9 @@ def _execute_qwen_image_edit(
     if lora_name and lora_name != "[未找到模型]":
         _send_status(unique_id, f"加载 Qwen Lightning LoRA{suffix}...")
         try:
-            model = _apply_lora_model_only(model, lora_name, float(preset.get("lora_strength", 1.0)))
+            model = _apply_lora_model_only(
+                model, lora_name, float(preset.get("lora_strength", 1.0))
+            )
         except Exception as exc:
             print(f"{YELLOW}[GJJ] LoRA 加载失败，跳过：{exc}{RESET}")
 
@@ -1367,7 +1600,11 @@ def _execute_qwen_image_edit(
     work_image = image
     if int(preset.get("largest_size", 0) or 0) > 0:
         _send_status(unique_id, f"缩放到最大边{suffix}...")
-        work_image = _resize_to_max_dimension(work_image, int(preset.get("largest_size", 1248)), str(preset.get("upscale_method", "area")))
+        work_image = _resize_to_max_dimension(
+            work_image,
+            int(preset.get("largest_size", 1248)),
+            str(preset.get("upscale_method", "area")),
+        )
 
     _send_status(unique_id, f"扩边{suffix}...")
     padded, _mask = _apply_padding(work_image, padding, feathering)
@@ -1382,7 +1619,18 @@ def _execute_qwen_image_edit(
     negative_cond = _conditioning_zero_out_native(positive_ref)
 
     _send_status(unique_id, f"采样{suffix}...")
-    sampled = _ksampler(model, seed, steps, cfg, sampler, scheduler, positive_ref, negative_cond, latent, denoise)
+    sampled = _ksampler(
+        model,
+        seed,
+        steps,
+        cfg,
+        sampler,
+        scheduler,
+        positive_ref,
+        negative_cond,
+        latent,
+        denoise,
+    )
 
     _send_status(unique_id, f"解码{suffix}...")
     return _decode_vae(vae, sampled)
@@ -1413,14 +1661,18 @@ def _execute_flux_fill_dev(
     clip_type = preset.get("clip_type", "flux")
     vae_name = preset.get("vae", "ae.safetensors")
 
-    print(f"{CYAN}[GJJ] {suffix} | Flux-Fill-Dev | UNet: {unet_name} | VAE: {vae_name}{RESET}")
+    print(
+        f"{CYAN}[GJJ] {suffix} | Flux-Fill-Dev | UNet: {unet_name} | VAE: {vae_name}{RESET}"
+    )
     _send_status(unique_id, f"加载 Flux Fill Dev 模型{suffix}...")
     model = _load_unet(unet_name, unet_dtype)
     clip = _load_dual_clip(clip1, clip2, clip_type)
     vae = _load_vae(vae_name)
 
     _send_status(unique_id, f"应用 DifferentialDiffusion{suffix}...")
-    model = _apply_differential_diffusion(model, float(preset.get("differential_strength", 1.0)))
+    model = _apply_differential_diffusion(
+        model, float(preset.get("differential_strength", 1.0))
+    )
 
     _send_status(unique_id, f"扩边{suffix}...")
     padded, mask = _apply_padding(image, padding, feathering)
@@ -1453,7 +1705,18 @@ def _execute_flux_fill_dev(
     final_positive, final_negative, latent = cond[0], cond[1], cond[2]
 
     _send_status(unique_id, f"采样{suffix}...")
-    sampled = _ksampler(model, seed, steps, cfg, sampler, scheduler, final_positive, final_negative, latent, denoise)
+    sampled = _ksampler(
+        model,
+        seed,
+        steps,
+        cfg,
+        sampler,
+        scheduler,
+        final_positive,
+        final_negative,
+        latent,
+        denoise,
+    )
 
     _send_status(unique_id, f"解码{suffix}...")
     return _decode_vae(vae, sampled)
@@ -1473,10 +1736,139 @@ class GJJ_BatchOutpaint:
     # 输出标准 ComfyUI IMAGE 批量张量，才能被 PreviewImage / SaveImage / 预览器节点直接识别。
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("图片列表",)
-    OUTPUT_TOOLTIPS = ("标准 IMAGE 批量输出，可直接连接 PreviewImage / SaveImage / 预览器节点。",)
+    OUTPUT_TOOLTIPS = (
+        "标准 IMAGE 批量输出，可直接连接 PreviewImage / SaveImage / 预览器节点。",
+    )
     OUTPUT_NODE = True
     FUNCTION = "generate"
     CATEGORY = "GJJ"
+
+    GJJ_HELP = {
+        "title": "GJJ · 🖼️ 批量扩图工具",
+        "version": "v10",
+        "author": "GJJ Custom Nodes Team",
+        "description": "强大的批量扩图节点，支持同时使用多个 AI 模型工作流对图片进行智能扩展。可以一次性处理多张图片，自动应用不同的扩图算法，大幅提升工作效率。",
+
+        "features": [
+            {
+                "name": "多工作流并行",
+                "description": "支持 Ctrl/Shift 多选工作流，一次执行多个扩图算法",
+            },
+            {
+                "name": "两种扩图模式",
+                "description": "像素扩图（指定各方向扩展像素）和目标尺寸（指定最终图片大小）",
+            },
+            {
+                "name": "4 种主流模型",
+                "description": "SD1.5 Inpainting、Flux2 Klein、Qwen Image Edit、Flux Fill Dev",
+            },
+            {
+                "name": "批量自动化",
+                "description": "自动递增种子、进度显示、错误提示",
+            },
+            {
+                "name": "动态参数面板",
+                "description": "根据选择的扩图模式自动显示对应参数",
+            },
+        ],
+
+        "models": [
+            {
+                "label": "📌 模型下载",
+                "value": "夸克网盘: https://pan.quark.cn/s/6ec846f1f58d",
+                "tooltip": "所有模型打包下载，解压后按目录结构放置到 models/ 文件夹",
+            },
+            {
+                "label": "1️⃣ SD1.5 Inpainting EMA - Checkpoint",
+                "value": "models/checkpoints/512-inpainting-ema.safetensors (~2GB)",
+                "tooltip": "SD1.5 专用修复模型，用于基础扩图",
+            },
+            {
+                "label": "2️⃣ Flux2 Klein - UNet",
+                "value": "models/diffusion_models/flux-2-klein-base-9b.safetensors (~18GB)",
+                "tooltip": "Flux2 基础模型，高质量扩图",
+            },
+            {
+                "label": "2️⃣ Flux2 Klein - CLIP",
+                "value": "models/text_encoders/qwen_3_8b.safetensors (~7.5GB)",
+                "tooltip": "Qwen 3 文本编码器",
+            },
+            {
+                "label": "2️⃣ Flux2 Klein - VAE",
+                "value": "models/vae/flux2-vae.safetensors (~335MB)",
+                "tooltip": "Flux2 专用 VAE",
+            },
+            {
+                "label": "3️⃣ Qwen Image Edit - UNet",
+                "value": "models/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors (~14GB)",
+                "tooltip": "Qwen 图像编辑模型（FP8 精度）",
+            },
+            {
+                "label": "3️⃣ Qwen Image Edit - CLIP",
+                "value": "models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors (~14GB)",
+                "tooltip": "Qwen 2.5 VL 视觉语言模型",
+            },
+            {
+                "label": "3️⃣ Qwen Image Edit - VAE",
+                "value": "models/vae/qwen_image_vae.safetensors (~335MB)",
+                "tooltip": "Qwen 专用 VAE",
+            },
+            {
+                "label": "3️⃣ Qwen Image Edit - LoRA (可选)",
+                "value": "models/loras/QWEN/lighting/Qwen-Image-Lightning-4steps-V2.0.safetensors (~1.5GB)",
+                "tooltip": "加速 LoRA，可实现 4 步快速出图",
+            },
+            {
+                "label": "4️⃣ Flux Fill Dev - UNet",
+                "value": "models/diffusion_models/flux1-fill-dev_fp8.safetensors (~11GB)",
+                "tooltip": "Flux1 Fill 开发版（FP8 精度），推荐首选",
+            },
+            {
+                "label": "4️⃣ Flux Fill Dev - CLIP1",
+                "value": "models/text_encoders/clip_l.safetensors (~246MB)",
+                "tooltip": "CLIP-L 文本编码器",
+            },
+            {
+                "label": "4️⃣ Flux Fill Dev - CLIP2",
+                "value": "models/text_encoders/t5xxl_fp16.safetensors (~9.5GB)",
+                "tooltip": "T5-XXL 文本编码器",
+            },
+            {
+                "label": "4️⃣ Flux Fill Dev - VAE",
+                "value": "models/vae/ae.safetensors (~335MB)",
+                "tooltip": "Flux 专用 VAE",
+            },
+        ],
+
+        "usage": [
+            "1. 加载图片：使用 GJJ · 批量多图片加载预览器 或 GJJ · 批量图片包装器 准备图片",
+            "2. 连接节点：将批量图片输出连接到本节点的「批量图片」输入口",
+            "3. 选择工作流：在「选择工作流」下拉框中按 Ctrl/Shift 多选需要的工作流",
+            "4. 设置扩图模式：",
+            "   • 像素扩图：设置左、右、上、下各方向的扩展像素数",
+            "   • 目标尺寸：设置目标宽度、高度和扩展方向",
+            "5. 调整参数：根据需要修改提示词、步数、CFG 等参数",
+            "6. 执行：点击 Queue Prompt 开始批量扩图",
+        ],
+
+        "tips": [
+            "💡 高质量扩图建议使用 Flux Fill Dev 或 Qwen Image Edit",
+            "💡 提示词尽量详细描述需要填充的内容",
+            "💡 Feathering（羽化）值设为 24-100，避免边缘生硬",
+            "💡 先单张测试，确认参数合适后再批量处理",
+            "💡 不同尺寸的图片建议使用「目标尺寸」模式",
+            "💡 显存不足时可减少同时执行的工作流数量或使用 FP8 模型",
+        ],
+
+        "performance": {
+            "SD1.5 Inpainting": "显存 ~4GB | 耗时 5-10秒 (RTX 4090) | 推荐分辨率 512x512",
+            "Flux2 Klein": "显存 ~18GB | 耗时 30-60秒 (RTX 4090) | 推荐分辨率 1024x1024",
+            "Qwen Image Edit": "显存 ~16GB | 耗时 20-40秒 (RTX 4090) | 推荐分辨率 1024x1024",
+            "Flux Fill Dev": "显存 ~14GB | 耗时 25-50秒 (RTX 4090) | 推荐分辨率 1024x1024",
+        },
+
+        "dependencies": [],
+    }
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1526,7 +1918,9 @@ class GJJ_BatchOutpaint:
         props = _get_node_properties(extra_pnginfo, unique_id)
         outpaint_mode = str(props.get("outpaint_mode", "像素扩图") or "像素扩图")
         selected_workflows_str = str(props.get("selected_workflows", "") or "")
-        selected_keys = [k.strip() for k in selected_workflows_str.split(",") if k.strip()]
+        selected_keys = [
+            k.strip() for k in selected_workflows_str.split(",") if k.strip()
+        ]
 
         try:
             if not selected_keys:
@@ -1548,8 +1942,14 @@ class GJJ_BatchOutpaint:
             total_workflows = len(valid_presets)
             total_images = len(input_images)
             total_tasks = total_workflows * total_images
-            print(f"{CYAN}[GJJ] 批量扩图开始：{total_images} 张图片 x {total_workflows} 个工作流 = {total_tasks} 个任务{RESET}")
-            _send_status(unique_id, f"准备处理 {total_images} 张图片 x {total_workflows} 个工作流 = {total_tasks} 个任务", 0.0)
+            print(
+                f"{CYAN}[GJJ] 批量扩图开始：{total_images} 张图片 x {total_workflows} 个工作流 = {total_tasks} 个任务{RESET}"
+            )
+            _send_status(
+                unique_id,
+                f"准备处理 {total_images} 张图片 x {total_workflows} 个工作流 = {total_tasks} 个任务",
+                0.0,
+            )
 
             # 计算扩图参数。目标尺寸模式按每张图片单独计算，避免批量不同尺寸时 padding 错位。
             pixel_padding = None
@@ -1559,12 +1959,24 @@ class GJJ_BatchOutpaint:
                 top = int(props.get("top", DEFAULT_TOP) or 0)
                 bottom = int(props.get("bottom", DEFAULT_BOTTOM) or 0)
                 pixel_padding = _calculate_padding_pixel(left, right, top, bottom)
-                print(f"{GREEN}[GJJ] 像素扩图：左{left} 右{right} 上{top} 下{bottom}{RESET}")
+                print(
+                    f"{GREEN}[GJJ] 像素扩图：左{left} 右{right} 上{top} 下{bottom}{RESET}"
+                )
             else:
-                target_width = int(props.get("target_width", DEFAULT_TARGET_WIDTH) or DEFAULT_TARGET_WIDTH)
-                target_height = int(props.get("target_height", DEFAULT_TARGET_HEIGHT) or DEFAULT_TARGET_HEIGHT)
-                direction = str(props.get("direction", DEFAULT_DIRECTION) or DEFAULT_DIRECTION)
-                print(f"{GREEN}[GJJ] 目标尺寸扩图：{target_width}x{target_height}，方向：{direction}{RESET}")
+                target_width = int(
+                    props.get("target_width", DEFAULT_TARGET_WIDTH)
+                    or DEFAULT_TARGET_WIDTH
+                )
+                target_height = int(
+                    props.get("target_height", DEFAULT_TARGET_HEIGHT)
+                    or DEFAULT_TARGET_HEIGHT
+                )
+                direction = str(
+                    props.get("direction", DEFAULT_DIRECTION) or DEFAULT_DIRECTION
+                )
+                print(
+                    f"{GREEN}[GJJ] 目标尺寸扩图：{target_width}x{target_height}，方向：{direction}{RESET}"
+                )
 
             results: list[torch.Tensor] = []
             result_labels: list[str] = []
@@ -1584,7 +1996,9 @@ class GJJ_BatchOutpaint:
                 wf_scheduler = str(preset.get("scheduler", DEFAULT_SCHEDULER))
                 wf_feathering = int(preset.get("feathering", 24))
 
-                print(f"{CYAN}[GJJ] 工作流 [{wf_idx}/{total_workflows}]：{wf_key}（steps={wf_steps}, cfg={wf_cfg}, sampler={wf_sampler}, scheduler={wf_scheduler}）{RESET}")
+                print(
+                    f"{CYAN}[GJJ] 工作流 [{wf_idx}/{total_workflows}]：{wf_key}（steps={wf_steps}, cfg={wf_cfg}, sampler={wf_sampler}, scheduler={wf_scheduler}）{RESET}"
+                )
 
                 for img_idx, original_image in enumerate(input_images, start=1):
                     task_index += 1
@@ -1595,10 +2009,21 @@ class GJJ_BatchOutpaint:
                     try:
                         single_image = original_image
                         if outpaint_mode == "目标尺寸":
-                            target_width = int(props.get("target_width", DEFAULT_TARGET_WIDTH) or DEFAULT_TARGET_WIDTH)
-                            target_height = int(props.get("target_height", DEFAULT_TARGET_HEIGHT) or DEFAULT_TARGET_HEIGHT)
-                            direction = str(props.get("direction", DEFAULT_DIRECTION) or DEFAULT_DIRECTION)
-                            single_image, padding = _calculate_padding_target_size(single_image, target_width, target_height, direction)
+                            target_width = int(
+                                props.get("target_width", DEFAULT_TARGET_WIDTH)
+                                or DEFAULT_TARGET_WIDTH
+                            )
+                            target_height = int(
+                                props.get("target_height", DEFAULT_TARGET_HEIGHT)
+                                or DEFAULT_TARGET_HEIGHT
+                            )
+                            direction = str(
+                                props.get("direction", DEFAULT_DIRECTION)
+                                or DEFAULT_DIRECTION
+                            )
+                            single_image, padding = _calculate_padding_target_size(
+                                single_image, target_width, target_height, direction
+                            )
                         else:
                             padding = dict(pixel_padding or {})
 
@@ -1619,7 +2044,9 @@ class GJJ_BatchOutpaint:
                             suffix,
                         )
                         results.append(result)
-                        result_labels.append(f"{_workflow_file_label(wf_key)}_img{img_idx:03d}")
+                        result_labels.append(
+                            f"{_workflow_file_label(wf_key)}_img{img_idx:03d}"
+                        )
                         print(f"{GREEN}[GJJ] 完成{suffix}{RESET}")
                     except RuntimeError as exc:
                         error_msg = str(exc)
@@ -1645,7 +2072,9 @@ class GJJ_BatchOutpaint:
             print(f"{GREEN}{BOLD}[GJJ] 批量扩图完成：共生成 {count} 张图片{RESET}")
             _send_status(unique_id, f"完成：{count} 张扩图结果", 1.0)
 
-            previews = _save_result_images(results, "GJJ/批量扩图", workflow_prompt, extra_pnginfo, result_labels)
+            previews = _save_result_images(
+                results, "GJJ/批量扩图", workflow_prompt, extra_pnginfo, result_labels
+            )
 
             # 不再把 images/preview_text 写回本节点面板，避免节点内部出现第二套预览。
             # 图片仍然通过标准 IMAGE 输出端口输出，连接右侧预览器/SaveImage 即可查看。

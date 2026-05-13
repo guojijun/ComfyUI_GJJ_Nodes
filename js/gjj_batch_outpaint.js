@@ -22,7 +22,7 @@ const DEFAULT_WORKFLOW = "flux_fill_dev扩图";
 const DYNAMIC_KEYS = ["left", "right", "top", "bottom", "target_width", "target_height", "direction"];
 const LEGACY_WIDGET_NAMES = ["workflow_0", "workflow_1", "workflow_2", "workflow_3", "outpaint_mode"];
 const HIDDEN_WIDGET_NAMES = ["prompt", "negative", "反向提示词", "提示词"];
-const PREVIEW_WIDGET_NAMES = ["preview", "image", "images", "预览", "预览图像", "preview_image"];
+const PREVIEW_WIDGET_NAMES = ["preview_image", "preview_images", "gjj_preview", "预览图像"];
 
 function props(node) {
     node.properties = node.properties || {};
@@ -61,7 +61,7 @@ function removeInternalPreviewWidgets(node) {
 }
 
 function cleanupNodeWidgets(node) {
-    cleanupNodeWidgets(node);
+    removeLegacyWidgets(node);
     removePromptWidgets(node);
     removeInternalPreviewWidgets(node);
 }

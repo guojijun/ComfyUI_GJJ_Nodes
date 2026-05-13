@@ -181,13 +181,22 @@ function detectDelimiter(text) {
 		.filter((line) => line.trim())
 		.slice(0, 20);
 	const tabs = lines.reduce((sum, line) => sum + (line.match(/\t/g)?.length || 0), 0);
+	const pipes = lines.reduce((sum, line) => sum + (line.match(/\|\|/g)?.length || 0), 0);
 	const commas = lines.reduce((sum, line) => sum + (line.match(/,/g)?.length || 0), 0);
+	if (pipes > 0 && pipes >= tabs && pipes >= commas) {
+		return "||";
+	}
 	return tabs >= commas ? "\t" : ",";
 }
 
 function parseDelimitedText(text, skipEmptyRows) {
 	const delimiter = detectDelimiter(text);
 	const source = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+	if (delimiter === "||") {
+		return source.split("\n").map((line) => line.split("||").map((cell) => cell.trim())).filter((row) => !skipEmptyRows || row.some((cell) => cell.trim()));
+	}
+
 	const rows = [];
 	let row = [];
 	let cell = "";
@@ -364,8 +373,15 @@ function ensureFixedOutputs(node) {
 	const second = node.outputs[1];
 	const needsInsert = first?.name !== "当前行数" || first?.type !== "INT" || second?.name !== "总行数" || second?.type !== "INT";
 	if (needsInsert) {
-		insertFixedOutput(node, "总行数", "当前 CSV/TSV 可输出的数据总行数；开启首行标题时不包含标题行。", 0);
-		insertFixedOutput(node, "当前行数", "当前实际输出的数据行号；开启首行标题时不包含标题行。", 0);
+		const columnOutputsList = node.outputs.slice(2);
+		node.outputs = [];
+		node.addOutput("当前行数", "INT");
+		node.addOutput("总行数", "INT");
+		setFixedOutput(node.outputs[0], "当前行数", "当前实际输出的数据行号；开启首行标题时不包含标题行。");
+		setFixedOutput(node.outputs[1], "总行数", "当前 CSV/TSV 可输出的数据总行数；开启首行标题时不包含标题行。");
+		for (const output of columnOutputsList) {
+			node.outputs.push(output);
+		}
 	} else {
 		setFixedOutput(node.outputs[0], "当前行数", "当前实际输出的数据行号；开启首行标题时不包含标题行。");
 		setFixedOutput(node.outputs[1], "总行数", "当前 CSV/TSV 可输出的数据总行数；开启首行标题时不包含标题行。");
@@ -409,7 +425,15 @@ function removeOutputObject(node, output) {
 	}
 }
 
+function hasTextInput(node) {
+	const textInputWidget = findWidget(node, "text_input");
+	return textInputWidget && String(textInputWidget.value || "").trim();
+}
+
 function maxColumns(node) {
+	if (hasTextInput(node)) {
+		return MIN_VISIBLE_COLUMNS;
+	}
 	const data = state(node);
 	const stats = browserStats(node);
 	return Math.min(MAX_COLUMNS, Math.max(MIN_VISIBLE_COLUMNS, data.column_count || 0, stats.columnCount || 0));
@@ -422,18 +446,35 @@ function stabilizeOutputs(node) {
 		addColumnOutput(node);
 		outputs = columnOutputs(node);
 	}
+
 	const visibleColumns = maxColumns(node);
+
 	while (outputs.length < visibleColumns) {
 		addColumnOutput(node);
 		outputs = columnOutputs(node);
 	}
-	for (let index = outputs.length - 1; index >= Math.max(MIN_VISIBLE_COLUMNS, visibleColumns); index -= 1) {
+
+	for (let i = 0; i < outputs.length; i++) {
+		if (outputHasLinks(outputs[i]) && i + 1 >= outputs.length && outputs.length < MAX_COLUMNS) {
+			addColumnOutput(node);
+			outputs = columnOutputs(node);
+		}
+	}
+
+	for (let index = outputs.length - 1; index >= MIN_VISIBLE_COLUMNS; index -= 1) {
 		if (outputHasLinks(outputs[index])) {
+			break;
+		}
+		if (index < visibleColumns) {
+			break;
+		}
+		if (index === MIN_VISIBLE_COLUMNS - 1) {
 			break;
 		}
 		removeOutputObject(node, outputs[index]);
 		outputs = columnOutputs(node);
 	}
+
 	const names = state(node).column_names || [];
 	columnOutputs(node).forEach((output, index) => {
 		const label = cleanHeaderName(names[index], index + 1);
@@ -961,5 +1002,12 @@ app.registerExtension({
 		for (const node of csvNodes()) {
 			compactNode(node);
 		}
+
+		app.graph.on("change:connections", () => {
+			for (const node of csvNodes()) {
+				stabilizeOutputs(node);
+				dirty(node);
+			}
+		});
 	},
 });

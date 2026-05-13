@@ -19,30 +19,11 @@ const LORA_EFFECT_LIVE_TEXT_MAP_KEY = "__gjjLoraEffectTesterLiveTextByNodeId";
 const MODE_EDIT = "edit";
 const MODE_PREVIEW = "preview";
 const DOUBLE_CLICK_MS = 420;
+const MODE_PROPERTY = "__gjjAnyPreviewMode";
 
 function getMode(node) {
-	const mode = String(node?.properties?.["gjj_any_preview_mode"] || MODE_PREVIEW);
+	const mode = String(node?.properties?.[MODE_PROPERTY] || MODE_PREVIEW);
 	return mode === MODE_PREVIEW ? MODE_PREVIEW : MODE_EDIT;
-}
-
-function setMode(node, mode) {
-	node.properties = node.properties || {};
-	node.properties["gjj_any_preview_mode"] = mode === MODE_PREVIEW ? MODE_PREVIEW : MODE_EDIT;
-}
-
-function enterEditMode(node) {
-	setMode(node, MODE_EDIT);
-	applyPreviewContent(node);
-	setTimeout(() => {
-		const editor = node.__gjjAnyPreviewEditor;
-		editor?.focus?.();
-		editor?.select?.();
-	}, 0);
-}
-
-function enterPreviewMode(node) {
-	setMode(node, MODE_PREVIEW);
-	applyPreviewContent(node);
 }
 
 function handlePreviewPointer(node, event) {
@@ -57,7 +38,6 @@ function handlePreviewPointer(node, event) {
 	event.stopPropagation();
 	if (event.detail >= 2 || (last > 0 && now - last <= DOUBLE_CLICK_MS)) {
 		event.preventDefault();
-		enterEditMode(node);
 	}
 }
 
@@ -368,6 +348,8 @@ function escapeAttribute(text) {
 
 function renderInlineMarkdown(text) {
 	let output = escapeHtml(text);
+	// 转义 || 防止被误解释为表格分隔符或其他特殊语法
+	output = output.replace(/\|\|/g, "&#124;&#124;");
 	// 原有规则
 	output = output.replace(/`([^`]+)`/g, "<code>$1</code>");
 	output = output.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
@@ -912,13 +894,45 @@ function applyPreviewContent(node) {
 		if (!showImage && !showAudio && !showVideo && hasText) {
 			body.innerHTML = renderMarkdown(text);
 			clampTextPreviewLines(body);
-			body.title = "双击编辑";
+			body.title = "双击复制";
 
 			const handleDblClick = (e) => {
 				if (e.target.closest("a, img, pre, code")) {
 					return;
 				}
-				enterEditMode(node);
+				navigator.clipboard
+					.writeText(String(node.__gjjAnyPreviewText || ""))
+					.then(() => {
+						const originalBackgroundColor = body.style.backgroundColor;
+						body.style.backgroundColor = "#4a7a4a";
+						setTimeout(() => {
+							body.style.backgroundColor = originalBackgroundColor || "transparent";
+						}, 200);
+					})
+					.catch((err) => {
+						console.error("无法复制到剪贴板:", err);
+						try {
+							const textArea = document.createElement("textarea");
+							textArea.value = String(node.__gjjAnyPreviewText || "");
+							textArea.style.position = "fixed";
+							textArea.style.left = "-999999px";
+							textArea.style.top = "-999999px";
+							document.body.appendChild(textArea);
+							textArea.focus();
+							textArea.select();
+							const successful = document.execCommand("copy");
+							document.body.removeChild(textArea);
+							if (successful) {
+								const originalBackgroundColor = body.style.backgroundColor;
+								body.style.backgroundColor = "#4a7a4a";
+								setTimeout(() => {
+									body.style.backgroundColor = originalBackgroundColor || "transparent";
+								}, 200);
+							}
+						} catch (error) {
+							console.error("降级复制方法失败:", error);
+						}
+					});
 			};
 
 			if (body.__gjjDblClickHandler) {
@@ -939,12 +953,6 @@ function applyPreviewContent(node) {
 		}
 	}
 
-	if (editor && mode === MODE_EDIT) {
-		editor.value = String(node.__gjjAnyPreviewText || "");
-		editor.style.height = "auto";
-		editor.style.height = `${Math.max(120, editor.scrollHeight || 120)}px`;
-	}
-
 	requestAnimationFrame(() => {
 		const height = showImage
 			? availableHeight
@@ -955,7 +963,7 @@ function applyPreviewContent(node) {
 							container.offsetHeight ||
 							MIN_PREVIEW_HEIGHT,
 					),
-				);
+			  );
 		if (node.__gjjAnyPreviewHeight !== height) {
 			node.__gjjAnyPreviewHeight = height;
 		}
@@ -1053,30 +1061,6 @@ function ensurePreviewWidget(node) {
 		"-webkit-user-select:text",
 		"pointer-events:auto",
 		"cursor:text",
-	].join(";");
-
-	const editor = document.createElement("textarea");
-	editor.className = "gjj-any-preview-editor";
-	editor.placeholder = "请输入文本";
-	editor.spellcheck = false;
-	editor.style.cssText = [
-		"display:none",
-		"width:100%",
-		"min-height:120px",
-		"height:auto",
-		"resize:vertical",
-		"box-sizing:border-box",
-		"padding:8px 10px",
-		"border:1px solid #44565f",
-		"border-radius:6px",
-		"outline:none",
-		"background:#071012",
-		"color:#dce7e2",
-		"font-size:12px",
-		"line-height:1.55",
-		"font-family:ui-monospace, SFMono-Regular, Consolas, monospace",
-		"white-space:pre-wrap",
-		"overflow:auto",
 	].join(";");
 
 	const previewWrap = document.createElement("div");
@@ -1183,9 +1167,7 @@ function ensurePreviewWidget(node) {
 		.gjj-text-input-empty { color: #8ea0a8; }
 	`;
 	previewWrap.appendChild(style);
-
 	previewWrap.appendChild(body);
-	previewWrap.appendChild(editor);
 
 	const grid = document.createElement("div");
 	grid.style.cssText = [
@@ -1193,7 +1175,7 @@ function ensurePreviewWidget(node) {
 		"grid-template-columns:repeat(auto-fit, minmax(140px, 1fr))",
 		"gap:1px",
 		"width:100%",
-		"order:1", // 播放器显示在前面
+		"order:1",
 	].join(";");
 	previewWrap.appendChild(grid);
 
@@ -1210,31 +1192,7 @@ function ensurePreviewWidget(node) {
 	previewWrap.appendChild(empty);
 
 	body.style.order = "2";
-	editor.style.order = "3";
 	container.appendChild(previewWrap);
-
-	editor.addEventListener("input", () => {
-		node.__gjjAnyPreviewText = editor.value;
-		editor.style.height = "auto";
-		editor.style.height = `${Math.max(120, editor.scrollHeight || 120)}px`;
-		scheduleLayout(node);
-	});
-
-	editor.addEventListener("keydown", (event) => {
-		if (event.key === "Escape" || ((event.ctrlKey || event.metaKey) && event.key === "Enter")) {
-			event.preventDefault();
-			editor.blur();
-		}
-	});
-
-	editor.addEventListener("blur", () => {
-		node.__gjjAnyPreviewText = editor.value;
-		enterPreviewMode(node);
-	});
-
-	editor.addEventListener("pointerdown", (event) => event.stopPropagation());
-	editor.addEventListener("mousedown", (event) => event.stopPropagation());
-	editor.addEventListener("dblclick", (event) => event.stopPropagation());
 
 	const widget = node.addDOMWidget?.(
 		PREVIEW_WIDGET_NAME,
@@ -1273,7 +1231,6 @@ function ensurePreviewWidget(node) {
 	node.__gjjAnyPreviewContainer = container;
 	node.__gjjAnyPreviewWrap = previewWrap;
 	node.__gjjAnyPreviewBody = body;
-	node.__gjjAnyPreviewEditor = editor;
 	node.__gjjAnyPreviewGrid = grid;
 	node.__gjjAnyPreviewEmpty = empty;
 	applyPreviewContent(node);

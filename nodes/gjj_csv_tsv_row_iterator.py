@@ -90,7 +90,10 @@ def _source_is_browser_marker(source: str) -> bool:
 def _detect_delimiter(text: str) -> tuple[str, str]:
     sample_lines = [line for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n") if line.strip()][:20]
     tab_count = sum(line.count("\t") for line in sample_lines)
+    pipe_count = sum(line.count("||") for line in sample_lines)
     comma_count = sum(line.count(",") for line in sample_lines)
+    if pipe_count > 0 and pipe_count >= tab_count and pipe_count >= comma_count:
+        return "||", "双竖线"
     if tab_count >= comma_count:
         return "\t", "Tab"
     return ",", "逗号"
@@ -98,14 +101,23 @@ def _detect_delimiter(text: str) -> tuple[str, str]:
 
 def _parse_rows(text: str, skip_empty_rows: bool) -> tuple[list[list[str]], str]:
     delimiter, delimiter_name = _detect_delimiter(text)
-    stream = io.StringIO(text.replace("\r\n", "\n").replace("\r", "\n"))
-    reader = csv.reader(stream, delimiter=delimiter)
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     rows: list[list[str]] = []
-    for row in reader:
-        cells = [str(cell).strip() for cell in row]
-        if skip_empty_rows and not any(cells):
-            continue
-        rows.append(cells)
+
+    if delimiter == "||":
+        for line in lines:
+            cells = [str(cell).strip() for cell in line.split("||")]
+            if skip_empty_rows and not any(cells):
+                continue
+            rows.append(cells)
+    else:
+        stream = io.StringIO(text.replace("\r\n", "\n").replace("\r", "\n"))
+        reader = csv.reader(stream, delimiter=delimiter)
+        for row in reader:
+            cells = [str(cell).strip() for cell in row]
+            if skip_empty_rows and not any(cells):
+                continue
+            rows.append(cells)
     return rows, delimiter_name
 
 
@@ -170,6 +182,16 @@ class GJJ_CsvTsvRowIterator:
                         "tooltip": "1 基行号；前端自动执行会在每次完成后加 1，最大不超过当前 CSV/TSV 数据行数。",
                     },
                 ),
+            },
+            "optional": {
+                "text_input": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "display_name": "外部文本输入",
+                        "tooltip": "从上游节点接收的文本内容；如果有内容，优先使用此输入。",
+                    },
+                ),
                 "source_path": (
                     "STRING",
                     {
@@ -203,10 +225,19 @@ class GJJ_CsvTsvRowIterator:
         timeout_seconds: int,
         browser_file_name: str = "",
         browser_file_text: str = "",
+        text_input: str = "",
     ) -> tuple[str, list[list[str]], list[str], str, str]:
         browser_text = str(browser_file_text or "")
+        text_input_content = str(text_input or "")
         source = str(source_path or "").strip()
-        if browser_text.strip():
+
+        if text_input_content.strip():
+            import hashlib
+            digest = hashlib.sha1(text_input_content.encode("utf-8", errors="replace")).hexdigest()[:12]
+            raw_text = text_input_content
+            signature = f"text_input:{len(text_input_content)}:{digest}"
+            source_key = signature
+        elif browser_text.strip():
             raw_text, signature = _read_browser_text(browser_file_name, browser_text)
             source_key = signature
         elif source:
@@ -215,7 +246,7 @@ class GJJ_CsvTsvRowIterator:
             raw_text, signature = _read_url_text(source, timeout_seconds) if _is_url(source) else _read_local_text(source)
             source_key = source
         else:
-            raise ValueError("请填写 CSV/TSV 文件路径、网络 URL，或点击按钮从浏览器选择 CSV/TSV 文件。")
+            raise ValueError("请填写 CSV/TSV 文件路径、网络 URL，或点击按钮从浏览器选择 CSV/TSV 文件，或连接外部文本输入。")
 
         delimiter, delimiter_name = _detect_delimiter(raw_text)
         key = f"{source_key}|delimiter={delimiter_name}|skip_header={bool(skip_header)}|skip_empty={bool(skip_empty_rows)}"
@@ -244,63 +275,90 @@ class GJJ_CsvTsvRowIterator:
         refresh_file: bool = False,
         browser_file_name: str = "",
         browser_file_text: str = "",
+        text_input: str = "",
     ):
-        state = _parse_state(csv_state)
-        auto_execute = state["auto_execute"]
-        skip_header = state["skip_header"]
-        skip_empty_rows = state["skip_empty_rows"]
-        refresh_file = state["refresh_file"]
-        browser_file_name = state["browser_file_name"] or browser_file_name
-        browser_file_text = state["browser_file_text"] or browser_file_text
-        key, rows, header_names, signature, delimiter_name = self._load_rows(
-            source_path,
-            skip_header,
-            skip_empty_rows,
-            refresh_file,
-            timeout_seconds,
-            browser_file_name,
-            browser_file_text,
-        )
-        if not rows:
-            raise ValueError("CSV/TSV 没有可输出的数据行。")
+        try:
+            state = _parse_state(csv_state)
+            auto_execute = state["auto_execute"]
+            skip_header = state["skip_header"]
+            skip_empty_rows = state["skip_empty_rows"]
+            refresh_file = state["refresh_file"]
+            browser_file_name = state["browser_file_name"] or browser_file_name
+            browser_file_text = state["browser_file_text"] or browser_file_text
+            key, rows, header_names, signature, delimiter_name = self._load_rows(
+                source_path,
+                skip_header,
+                skip_empty_rows,
+                refresh_file,
+                timeout_seconds,
+                browser_file_name,
+                browser_file_text,
+                text_input,
+            )
 
-        requested_row = max(1, int(current_row or 1))
-        effective_row = min(requested_row, len(rows))
-        position = effective_row - 1
-        row = rows[position]
-        max_columns = min(MAX_COLUMNS, max([len(header_names), *[len(item) for item in rows]], default=0))
-        next_row = min(effective_row + 1, len(rows))
-        at_end = effective_row >= len(rows)
+            if not rows:
+                raise ValueError("CSV/TSV 没有可输出的数据行。")
 
-        columns = tuple(str(row[index]) if index < len(row) else "" for index in range(MAX_COLUMNS))
-        overflow = f"\n注意：当前行共 {len(row)} 列，节点后端最多返回前 {MAX_COLUMNS} 列。" if len(row) > MAX_COLUMNS else ""
-        status = (
-            f"已读取 {len(rows)} 行；当前第 {effective_row} 行；下一次第 {next_row} 行；"
-            f"当前行 {len(row)} 列；最大 {max_columns} 列；自动执行={'开' if auto_execute else '关'}；"
-            f"分隔符={delimiter_name}；签名={signature}{overflow}"
-        )
-        return {
-            "ui": {
-                "preview_text": (
-                    f"{status}\n\n当前行：\n{_row_to_text(row)}",
-                ),
-                "gjj_csv_tsv_row_iterator": [
-                    {
-                        "current_row": int(requested_row),
-                        "effective_row": int(effective_row),
-                        "next_row": int(next_row),
-                        "total_rows": int(len(rows)),
-                        "column_count": int(max_columns),
-                        "current_column_count": int(len(row)),
-                        "column_names": header_names[:MAX_COLUMNS],
-                        "auto_execute": bool(auto_execute),
-                        "at_end": bool(at_end),
-                        "status": status,
-                    }
-                ],
-            },
-            "result": (int(effective_row), int(len(rows))) + columns,
-        }
+            requested_row = max(1, int(current_row or 1))
+            effective_row = min(requested_row, len(rows))
+            position = effective_row - 1
+            row = rows[position]
+            max_columns = min(MAX_COLUMNS, max([len(header_names), *[len(item) for item in rows]], default=0))
+            next_row = min(effective_row + 1, len(rows))
+            at_end = effective_row >= len(rows)
+
+            columns = tuple(str(row[index]) if index < len(row) else "" for index in range(MAX_COLUMNS))
+            overflow = f"\n注意：当前行共 {len(row)} 列，节点后端最多返回前 {MAX_COLUMNS} 列。" if len(row) > MAX_COLUMNS else ""
+            status = (
+                f"已读取 {len(rows)} 行；当前第 {effective_row} 行；下一次第 {next_row} 行；"
+                f"当前行 {len(row)} 列；最大 {max_columns} 列；自动执行={'开' if auto_execute else '关'}；"
+                f"分隔符={delimiter_name}；签名={signature}{overflow}"
+            )
+            return {
+                "ui": {
+                    "preview_text": (
+                        f"{status}\n\n当前行：\n{_row_to_text(row)}",
+                    ),
+                    "gjj_csv_tsv_row_iterator": [
+                        {
+                            "current_row": int(requested_row),
+                            "effective_row": int(effective_row),
+                            "next_row": int(next_row),
+                            "total_rows": int(len(rows)),
+                            "column_count": int(max_columns),
+                            "current_column_count": int(len(row)),
+                            "column_names": header_names[:MAX_COLUMNS],
+                            "auto_execute": bool(auto_execute),
+                            "at_end": bool(at_end),
+                            "status": status,
+                        }
+                    ],
+                },
+                "result": (int(effective_row), int(len(rows))) + columns,
+            }
+        except Exception as e:
+            print(f"[GJJ CSV/TSV] 执行错误: {e}")
+            columns = tuple("" for _ in range(MAX_COLUMNS))
+            return {
+                "ui": {
+                    "preview_text": (f"执行错误: {e}",),
+                    "gjj_csv_tsv_row_iterator": [
+                        {
+                            "current_row": int(current_row or 1),
+                            "effective_row": 0,
+                            "next_row": 1,
+                            "total_rows": 0,
+                            "column_count": 1,
+                            "current_column_count": 0,
+                            "column_names": [],
+                            "auto_execute": bool(auto_execute),
+                            "at_end": False,
+                            "status": f"执行错误: {e}",
+                        }
+                    ],
+                },
+                "result": (0, 0) + columns,
+            }
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_CsvTsvRowIterator}
