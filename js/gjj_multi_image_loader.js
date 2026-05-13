@@ -276,12 +276,12 @@ function hasExternalImageLink(node) {
 
 function ensureOutputs(node, count) {
 	const imageCount = Math.max(0, Number(count || 0));
-	
+
 	// 当超过20张时，只显示批量图片队列接口
 	// 当20张以内时，显示批量队列 + 单图输出接口
 	const showIndividualOutputs = imageCount <= MAX_OUTPUT_IMAGES;
 	const visibleCount = showIndividualOutputs ? (imageCount + 1) : 1;
-	
+
 	while ((node.outputs?.length || 0) < visibleCount) {
 		const outputIndex = node.outputs?.length || 0;
 		if (outputIndex === 0) {
@@ -360,10 +360,10 @@ function renderPreview(node) {
 	const hasExternalPreview = Number(state.externalCount || 0) > 0 && executedItems.length > 0;
 	const items = hasExternalPreview ? executedItems : (state.selection || []);
 	empty.style.display = items.length > 0 ? "none" : "flex";
-	
+
 	// 存储节点引用以便后续调用
 	const nodeRef = node;
-	
+
 	for (const [index, item] of items.entries()) {
 		const card = document.createElement("div");
 		card.className = "gjj-image-card";
@@ -376,7 +376,7 @@ function renderPreview(node) {
 			"cursor:pointer",
 			"transition:transform 0.2s ease",
 		].join(";");
-		
+
 		// 鼠标悬停效果
 		card.addEventListener("mouseenter", () => {
 			card.style.transform = "scale(1.05)";
@@ -488,7 +488,7 @@ function renderPreview(node) {
 			"align-items:center",
 			"justify-content:center",
 		].join(";");
-		
+
 		// 删除按钮悬停效果
 		deleteBtn.addEventListener("mouseenter", () => {
 			deleteBtn.style.background = "rgba(220, 53, 69, 1)";
@@ -498,7 +498,7 @@ function renderPreview(node) {
 			deleteBtn.style.background = "rgba(220, 53, 69, 0.8)";
 			deleteBtn.style.transform = "scale(1)";
 		});
-		
+
 		// 删除按钮点击事件
 		deleteBtn.addEventListener("click", (event) => {
 			event.preventDefault();
@@ -514,7 +514,7 @@ function renderPreview(node) {
 			}
 			event.preventDefault();
 			event.stopPropagation();
-			
+
 			// 创建全屏预览
 			const overlay = document.createElement("div");
 			overlay.style.cssText = [
@@ -528,7 +528,7 @@ function renderPreview(node) {
 				"justify-content:center",
 				"cursor:zoom-out",
 			].join(";");
-			
+
 			const previewImg = document.createElement("img");
 			previewImg.src = imageDataToUrl(item);
 			previewImg.style.cssText = [
@@ -540,28 +540,28 @@ function renderPreview(node) {
 				"transition:transform 0.1s ease",
 				"cursor:grab",
 			].join(";");
-			
+
 			// 滚轮缩放功能
 			let currentScale = 1;
 			const minScale = 0.1;
 			const maxScale = 10;
-			
+
 			overlay.addEventListener("wheel", (e) => {
 				e.preventDefault();
 				e.stopPropagation();
-				
+
 				const delta = e.deltaY > 0 ? -0.1 : 0.1;
 				currentScale = Math.max(minScale, Math.min(maxScale, currentScale + delta));
 				previewImg.style.transform = `scale(${currentScale})`;
 			});
-			
+
 			// 双击重置缩放
 			previewImg.addEventListener("dblclick", (e) => {
 				e.stopPropagation();
 				currentScale = 1;
 				previewImg.style.transform = `scale(${currentScale})`;
 			});
-			
+
 			const closeHint = document.createElement("div");
 			closeHint.textContent = "滚轮缩放 · 双击重置 · 点击关闭";
 			closeHint.style.cssText = [
@@ -575,11 +575,11 @@ function renderPreview(node) {
 				"pointer-events:none",
 				"white-space:nowrap",
 			].join(";");
-			
+
 			overlay.appendChild(previewImg);
 			overlay.appendChild(closeHint);
 			document.body.appendChild(overlay);
-			
+
 			// 点击关闭
 			overlay.addEventListener("click", () => {
 				overlay.remove();
@@ -620,6 +620,33 @@ function updateSummary(node) {
 		}
 		node.__gjjMultiImageSummary.textContent = '点击"浏览图片"导入，或外部连接 GJJ 批量图片队列';
 	}
+}
+
+function clearErrorImages(node) {
+	const state = ensureState(node);
+	const beforeCount = state.selection.length;
+	state.selection = state.selection.filter((item) => !item._error);
+	const removedCount = beforeCount - state.selection.length;
+	if (removedCount > 0) {
+		syncDataWidget(node);
+		ensureOutputs(node, state.selection.length);
+		renderPreview(node);
+		updateSummary(node);
+		scheduleLayout(node);
+	}
+}
+
+function clearAllImages(node) {
+	const state = ensureState(node);
+	if (state.selection.length === 0) {
+		return;
+	}
+	state.selection = [];
+	syncDataWidget(node);
+	ensureOutputs(node, 0);
+	renderPreview(node);
+	updateSummary(node);
+	scheduleLayout(node);
 }
 
 function measureHeight(node) {
@@ -704,7 +731,7 @@ function buildDom(node) {
 		event.stopPropagation();
 		refreshOptions(node);
 	});
-	
+
 	// 清理错误图片按钮
 	const clearErrorButton = document.createElement("button");
 	clearErrorButton.type = "button";
@@ -716,7 +743,7 @@ function buildDom(node) {
 		event.stopPropagation();
 		clearErrorImages(node);
 	});
-	
+
 	// 清空所有图片按钮
 	const clearAllButton = document.createElement("button");
 	clearAllButton.type = "button";
@@ -728,7 +755,7 @@ function buildDom(node) {
 		event.stopPropagation();
 		clearAllImages(node);
 	});
-	
+
 	// 按钮悬停效果
 	[browseButton, refreshButton, clearErrorButton, clearAllButton].forEach(btn => {
 		btn.addEventListener("mouseenter", () => {

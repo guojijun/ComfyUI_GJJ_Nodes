@@ -11,6 +11,7 @@ const MAX_ACTIONS = 9;
 const PRESET_WIDGET_NAME = "gjj_multiview_toolbar";
 const STATUS_WIDGET_NAME = "gjj_multiview_status";
 const ACTION_TEXT_WIDGET = "action_prompts";
+const BASE_PROMPT_WIDGET = "base_prompt";
 const UNET_WIDGET = "unet_name";
 const LORA1_WIDGET = "lora_1_name";
 const LORA1_STRENGTH_WIDGET = "lora_1_strength";
@@ -49,9 +50,9 @@ const PRESET_ACTION_GROUPS = {
 	],
 	characterAsset: [
 		"白色背景,近距离大头特写，只拍头部和肩膀，构图紧凑，清晰保留完整面部特征，人物资产。",
-		"白色背景,标准正面，全身无裁剪，自然直立站姿。顶部、底部各留白5%，居中人物资产",
-		"白色背景,主体45°斜侧身，全身无裁剪，姿态自然。顶部、底部各留白5%，居中人物资产。",
-		"白色背景,主体后视图，全身无裁剪，轮廓标准。顶部、底部各留白5%，居中人物资产。",
+		"白色背景,标准正面，全身无裁剪，从头到脚，自然直立站姿。顶部、底部各留白5%，居中人物资产",
+		"白色背景,主体45°斜侧身，全身无裁剪，从头到脚，姿态自然。顶部、底部各留白5%，居中人物资产。",
+		"白色背景,主体后视图，全身无裁剪，从头到脚，轮廓标准。顶部、底部各留白5%，居中人物资产。",
 	],
 	five: [
 		"白色背景。生成主体全身正视图。",
@@ -81,6 +82,11 @@ const PRESET_ACTION_GROUPS = {
 };
 
 const DEFAULT_MULTI_ANGLES_LORA = "qwen-image-edit-2511-multiple-angles-lora.safetensors";
+
+const ACTION_MIGRATION_LORA_1 = "QWEN\\lighting\\FireRed-Image-Edit-1.0-Lightning-8steps-v1.1.safetensors";
+const ACTION_MIGRATION_LORA_1_STRENGTH = 1.0;
+const ACTION_MIGRATION_LORA_2 = "QWEN\\2511\\edit_2511人景融合20.safetensors";
+const ACTION_MIGRATION_LORA_2_STRENGTH = 1.0;
 
 const MODEL_PRESETS = [
 	{
@@ -204,10 +210,11 @@ function reorderInputs(node) {
 	};
 
 	push(findInput(node, MAIN_IMAGE_INPUT));
+	// LoRA 接口放在动态接口前面，避免被挡住
+	push(findInput(node, LORA_CHAIN_INPUT));
 	for (const input of getActionInputs(node)) {
 		push(input);
 	}
-	push(findInput(node, LORA_CHAIN_INPUT));
 	for (const input of node.inputs) {
 		push(input);
 	}
@@ -224,7 +231,7 @@ function addActionInput(node) {
 	if (nextIndex > MAX_ACTIONS) {
 		return;
 	}
-	node.addInput(formatActionName(nextIndex), "IMAGE");
+	node.addInput(formatActionName(nextIndex), "GJJ_BATCH_IMAGE,IMAGE");
 }
 
 function trimTrailingUnusedActions(node) {
@@ -258,8 +265,8 @@ function renameActionsSequentially(node) {
 			input,
 			formatActionName(number),
 			`动作图 ${number}`,
-			"IMAGE",
-			"动作 / 姿势参考图。连上后会自动扩展下一张动作图输入。",
+			"GJJ_BATCH_IMAGE,IMAGE",
+			"动作 / 姿势参考图。支持 GJJ_BATCH_IMAGE 和 IMAGE 两种类型。连上后会自动扩展下一张动作图输入。",
 		);
 	});
 }
@@ -267,11 +274,13 @@ function renameActionsSequentially(node) {
 function stabilizeActions(node) {
 	trimTrailingUnusedActions(node);
 	ensureTrailingEmptyAction(node);
+	// 先重排接口顺序，再设置类型，确保 findInput 找到的接口位置正确
+	reorderInputs(node);
 	renameActionsSequentially(node);
 	setInputMeta(
 		findInput(node, MAIN_IMAGE_INPUT),
 		MAIN_IMAGE_INPUT,
-		"👤 主图",
+		" 主图",
 		"GJJ_BATCH_IMAGE,IMAGE",
 		"主体主参考图，必选。支持 GJJ_BATCH_IMAGE 和 IMAGE 两种类型，节点会始终以这张图作为类别、外观与风格一致性的主参考。",
 	);
@@ -282,8 +291,30 @@ function stabilizeActions(node) {
 		"LORA_CHAIN_CONFIG",
 		"可选接入 GJJ · LoRA串联配置 的输出；会在面板 LoRA 1 / LoRA 2 之后继续按顺序串联应用多组 LoRA。",
 	);
-	reorderInputs(node);
+
+	// 当有动作图输入时，自动清空动作文本列表，并填充主体补充提示词
+	const actionInputs = getActionInputs(node);
+	const hasActionInput = actionInputs.some(input => input?.link);
+	if (hasActionInput) {
+		const textWidget = getWidget(node, ACTION_TEXT_WIDGET);
+		if (textWidget && textWidget.value) {
+			setWidgetValue(textWidget, "");
+		}
+		const basePromptWidget = getWidget(node, BASE_PROMPT_WIDGET);
+		if (basePromptWidget) {
+			setWidgetValue(basePromptWidget, "让图1的人做图2的动作");
+		}
+		setWidgetValue(getWidget(node, LORA1_WIDGET), resolveWidgetOption(getWidget(node, LORA1_WIDGET), ACTION_MIGRATION_LORA_1));
+		setWidgetValue(getWidget(node, LORA1_STRENGTH_WIDGET), ACTION_MIGRATION_LORA_1_STRENGTH);
+		setWidgetValue(getWidget(node, LORA2_WIDGET), resolveWidgetOption(getWidget(node, LORA2_WIDGET), ACTION_MIGRATION_LORA_2));
+		setWidgetValue(getWidget(node, LORA2_STRENGTH_WIDGET), ACTION_MIGRATION_LORA_2_STRENGTH);
+	} else {
+		applyModelPreset(node, true);
+	}
+
+	// 强制刷新类型颜色
 	globalThis.GJJApplyTypeColorsToNode?.(node);
+	node.setDirtyCanvas(true, true);
 }
 
 function scheduleStabilize(node, ms = 24) {
@@ -311,6 +342,11 @@ function matchPreset(unetName) {
 }
 
 function applyModelPreset(node, force = false) {
+	const actionInputs = getActionInputs(node);
+	const hasActionInput = actionInputs.some(input => input?.link);
+	if (hasActionInput) {
+		return;
+	}
 	const unetName = String(getWidget(node, UNET_WIDGET)?.value || "");
 	const preset = matchPreset(unetName);
 	if (!preset) {

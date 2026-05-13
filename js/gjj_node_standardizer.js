@@ -1038,12 +1038,16 @@ function patchNode(node) {
 		return;
 	}
 	patchAddDomWidget(node);
-	if (shouldBypassNode(node)) {
+	const bypass = shouldBypassNode(node);
+	if (bypass) {
 		disableStatusWidget(node);
 	}
 	applyNodeMetadata(node);
-	ensureHelpWidget(node);
-	if (!shouldBypassNode(node) && shouldAttachStatus(node)) {
+	// FULLY_BYPASS_CLASSES 中的节点跳过 DOM widget 帮助按钮，使用 getTitleButtons API
+	if (!bypass) {
+		ensureHelpWidget(node);
+	}
+	if (!bypass && shouldAttachStatus(node)) {
 		ensureStatusWidget(node);
 	} else {
 		disableStatusWidget(node);

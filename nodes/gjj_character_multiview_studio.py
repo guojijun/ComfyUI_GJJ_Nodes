@@ -269,6 +269,10 @@ def _prepare_primary_image_for_target(
 
 NODE_NAME = "GJJ_CharacterMultiViewStudio"
 DEFAULT_MULTI_ANGLES_LORA = "qwen-image-edit-2511-multiple-angles-lora.safetensors"
+ACTION_MIGRATION_LORA_1 = "QWEN\\lighting\\FireRed-Image-Edit-1.0-Lightning-8steps-v1.1.safetensors"
+ACTION_MIGRATION_LORA_1_STRENGTH = 1.0
+ACTION_MIGRATION_LORA_2 = "QWEN\\2511\\edit_2511人景融合20.safetensors"
+ACTION_MIGRATION_LORA_2_STRENGTH = 1.0
 MAX_ACTION_REFERENCES = 9
 DEFAULT_ACTION_LINES = [
 	"白色背景。生成主体全身正视图。",
@@ -321,6 +325,74 @@ def _resolve_effective_steps(
 	if base_steps is not None:
 		return int(base_steps)
 	return int(requested_steps)
+
+
+PREFERED_KONTEXT_RESOLUTIONS = [
+	(672, 1568),
+	(688, 1504),
+	(720, 1456),
+	(752, 1392),
+	(800, 1328),
+	(832, 1248),
+	(880, 1184),
+	(944, 1104),
+	(1024, 1024),
+	(1104, 944),
+	(1184, 880),
+	(1248, 832),
+	(1328, 800),
+	(1392, 752),
+	(1456, 720),
+	(1504, 688),
+	(1568, 672),
+]
+
+
+def _kontext_scale_image(image: torch.Tensor) -> torch.Tensor:
+	"""将图像缩放到 FluxKontextImageScale 的最优尺寸。
+
+	与 ComfyUI 内置 FluxKontextImageScale 行为一致：
+	从 PREFERED_KONTEXT_RESOLUTIONS 中选择宽高比最接近的尺寸，
+	使用 lanczos 缩放。
+	"""
+	if image is None:
+		return image
+	h = int(image.shape[1])
+	w = int(image.shape[2])
+	if w <= 0 or h <= 0:
+		return image
+	aspect_ratio = float(w) / float(h)
+	_, best_w, best_h = min(
+		(abs(aspect_ratio - float(pw) / float(ph)), pw, ph)
+		for pw, ph in PREFERED_KONTEXT_RESOLUTIONS
+	)
+	result = comfy.utils.common_upscale(
+		image.movedim(-1, 1), int(best_w), int(best_h), "lanczos", "center"
+	).movedim(1, -1)
+	return result
+
+
+def _is_skeleton_image(image: torch.Tensor, threshold: float = 0.6):
+	"""判断图像是否为骨架图（OpenPose格式），返回 (是否骨架图, 黑色占比)。
+
+	骨架图特征：
+	- 黑色背景占比很高（>60%的像素亮度<0.1）
+	- 颜色分布非常集中（只有几种关键点颜色）
+	"""
+	if image is None:
+		return False, 0.0
+
+	if image.ndim == 4:
+		img = image[0]
+	else:
+		img = image
+
+	rgb = img[..., :3]
+	brightness = rgb.mean(dim=-1)
+
+	black_ratio = (brightness < 0.1).float().mean().item()
+
+	return black_ratio > threshold, black_ratio
 
 
 def _encode_multi_image_edit(
@@ -818,6 +890,10 @@ def _resolve_image_aspect(image: torch.Tensor, fallback: float = 1.0) -> float:
 
 def _sorted_action_items(kwargs: dict[str, Any]) -> list[tuple[int, torch.Tensor]]:
 	items: list[tuple[int, torch.Tensor]] = []
+	next_index = 1  # 下一个可用的动作图索引
+
+	# 先收集所有动作图并按原始索引排序
+	raw_items: list[tuple[int, Any]] = []
 	for key, value in kwargs.items():
 		text = str(key or "")
 		if not text.startswith("action_image_") or value is None:
@@ -826,8 +902,25 @@ def _sorted_action_items(kwargs: dict[str, Any]) -> list[tuple[int, torch.Tensor
 			index = int(text.split("_")[-1])
 		except Exception:
 			continue
-		items.append((index, value))
-	items.sort(key=lambda item: item[0])
+		raw_items.append((index, value))
+
+	# 按原始索引排序
+	raw_items.sort(key=lambda item: item[0])
+
+	# 展开批量图片并重新分配索引
+	for original_index, value in raw_items:
+		# 如果是 GJJ_BATCH_IMAGE（4D tensor），展开所有图片
+		if isinstance(value, torch.Tensor) and value.ndim == 4:
+			batch_size = int(value.shape[0])
+			for i in range(batch_size):
+				single_image = value[i:i+1].contiguous()
+				items.append((next_index, single_image))
+				next_index += 1
+		else:
+			# 单张图片，直接使用
+			items.append((next_index, value))
+			next_index += 1
+
 	return items
 
 
@@ -1369,7 +1462,8 @@ class FlexibleMultiViewInputType(dict):
 			return self.data[key]
 		text = str(key or "")
 		if text.startswith("action_image_"):
-			return ("IMAGE",)
+			# 与 action_image_01 保持一致的类型
+			return ("GJJ_BATCH_IMAGE,IMAGE",)
 		raise KeyError(key)
 
 	def __contains__(self, key):
@@ -1381,8 +1475,15 @@ class GJJ_CharacterMultiViewStudio:
 	CATEGORY = "GJJ"
 	FUNCTION = "generate"
 	DESCRIPTION = (
-		"主体一键多视图：主图必选，动作可用图片参考、文字描述或按钮预设。"
-		"节点会自动匹配 qwen_image_edit_2511 为主线的图生图模型族，并将结果尽量方正地拼接成多视图图板。"
+		"主体一键多视图：主图必选，动作可用图片参考、文字描述或按钮预设。\n"
+		"节点会自动匹配 qwen_image_edit_2511 为主线的图生图模型族，并将结果尽量方正地拼接成多视图图板。\n\n"
+		"📦 所需模型：\n"
+		"• UNET: models/unet/ 或 models/checkpoints/ (推荐 qwen_image_edit_2511 系列)\n"
+		"• CLIP: models/clip/ (根据 UNET 自动匹配)\n"
+		"• VAE: models/vae/ (根据 UNET 自动匹配)\n"
+		"• LoRA: models/loras/ (推荐 QWEN/lighting/* 和 multiple-angles-lora)\n\n"
+		"🔧 Python 依赖：无需额外安装（所有依赖已包含在 ComfyUI 中）\n\n"
+		"📖 详细帮助文档：SKILL/MD/GJJ_CharacterMultiViewStudio.md"
 	)
 	SEARCH_ALIASES = [
 		"主体一键多视图",
@@ -1521,13 +1622,6 @@ class GJJ_CharacterMultiViewStudio:
 							"tooltip": "主体主参考图，必选。支持 GJJ_BATCH_IMAGE 和 IMAGE 两种类型，节点会始终以这张图作为类别、外观与风格一致性的主参考。",
 						},
 					),
-					"action_image_01": (
-						"IMAGE",
-						{
-							"display_name": "动作图 1",
-							"tooltip": "第一张动作 / 姿势参考图。连上后会自动扩展出下一张动作图输入。",
-						},
-					),
 					"lora_chain_config": (
 						"LORA_CHAIN_CONFIG",
 						{
@@ -1535,6 +1629,14 @@ class GJJ_CharacterMultiViewStudio:
 							"tooltip": "可选接入 GJJ · LoRA串联配置 的输出；会在面板 LoRA 1 / LoRA 2 之后继续按顺序串联应用多组 LoRA。",
 						},
 					),
+					"action_image_01": (
+						"GJJ_BATCH_IMAGE,IMAGE",
+						{
+							"display_name": "动作图 1",
+							"tooltip": "第一张动作 / 姿势参考图。支持 GJJ_BATCH_IMAGE 和 IMAGE 两种类型。连上后会自动扩展出下一张动作图输入。",
+						},
+					),
+
 				}
 			),
 			"hidden": {
@@ -1615,27 +1717,62 @@ class GJJ_CharacterMultiViewStudio:
 		current_model = model
 		current_clip = clip
 
-		# Qwen Image 系列不需要 CLIP LoRA
-		clip_strength = 0.0 if _should_skip_clip_lora_for_multiview_family() else None
+		# Qwen Image 系列使用 LoraLoaderModelOnly（只加载模型 LoRA，不加载 CLIP LoRA）
+		use_model_only = _should_skip_clip_lora_for_multiview_family()
 
-		if str(lora_1_name or "").strip() and abs(float(lora_1_strength)) > 1e-6:
-			lora_state = self._load_lora_state(lora_1_name)
-			current_model, current_clip, _, _, _ = apply_standard_lora(
-				current_model,
-				current_clip,
-				lora_state,
-				float(lora_1_strength),
-				float(lora_1_strength) if clip_strength is None else float(clip_strength),
-			)
-		if str(lora_2_name or "").strip() and abs(float(lora_2_strength)) > 1e-6:
-			lora_state = self._load_lora_state(lora_2_name)
-			current_model, current_clip, _, _, _ = apply_standard_lora(
-				current_model,
-				current_clip,
-				lora_state,
-				float(lora_2_strength),
-				float(lora_2_strength) if clip_strength is None else float(clip_strength),
-			)
+		if use_model_only:
+			# 使用 LoraLoaderModelOnly 只加载模型 LoRA
+			try:
+				from nodes import LoraLoaderModelOnly
+				loader = LoraLoaderModelOnly()
+				if str(lora_1_name or "").strip() and abs(float(lora_1_strength)) > 1e-6:
+					current_model = loader.load_lora_model_only(current_model, lora_1_name, float(lora_1_strength))[0]
+				if str(lora_2_name or "").strip() and abs(float(lora_2_strength)) > 1e-6:
+					current_model = loader.load_lora_model_only(current_model, lora_2_name, float(lora_2_strength))[0]
+			except ImportError:
+				# 降级方案：使用 apply_standard_lora，但 CLIP 强度设为 0
+				clip_strength = 0.0
+				if str(lora_1_name or "").strip() and abs(float(lora_1_strength)) > 1e-6:
+					lora_state = self._load_lora_state(lora_1_name)
+					current_model, current_clip, _, _, _ = apply_standard_lora(
+						current_model,
+						current_clip,
+						lora_state,
+						float(lora_1_strength),
+						float(clip_strength),
+					)
+				if str(lora_2_name or "").strip() and abs(float(lora_2_strength)) > 1e-6:
+					lora_state = self._load_lora_state(lora_2_name)
+					current_model, current_clip, _, _, _ = apply_standard_lora(
+						current_model,
+						current_clip,
+						lora_state,
+						float(lora_2_strength),
+						float(clip_strength),
+					)
+		else:
+			# 非 Qwen Image 系列，使用标准的 LoRA 加载方式
+			clip_strength = None
+			if str(lora_1_name or "").strip() and abs(float(lora_1_strength)) > 1e-6:
+				lora_state = self._load_lora_state(lora_1_name)
+				current_model, current_clip, _, _, _ = apply_standard_lora(
+					current_model,
+					current_clip,
+					lora_state,
+					float(lora_1_strength),
+					float(lora_1_strength) if clip_strength is None else float(clip_strength),
+				)
+			if str(lora_2_name or "").strip() and abs(float(lora_2_strength)) > 1e-6:
+				lora_state = self._load_lora_state(lora_2_name)
+				current_model, current_clip, _, _, _ = apply_standard_lora(
+					current_model,
+					current_clip,
+					lora_state,
+					float(lora_2_strength),
+					float(lora_2_strength) if clip_strength is None else float(clip_strength),
+				)
+
+		# 应用 LoRA 链配置（如果有的话）
 		if str(lora_chain_config or "").strip():
 			current_model, current_clip, _ = apply_lora_chain_config(
 				current_model,
@@ -1716,6 +1853,7 @@ class GJJ_CharacterMultiViewStudio:
 		lora_1_strength: float,
 		lora_2_name: str,
 		lora_2_strength: float,
+		unique_id: str | None = None,
 	):
 		target_width, target_height = _resolve_target_size_from_image(
 			main_image,
@@ -1725,36 +1863,123 @@ class GJJ_CharacterMultiViewStudio:
 		)
 		if bool(preset.get("supports_multi_image_edit")):
 			if action_image is not None:
-				identity_ref_image, identity_ref_latent = _prepare_qwen_ref_image(
-					vae,
-					main_image,
-					target_width,
-					target_height,
+				is_skeleton, black_ratio = _is_skeleton_image(action_image)
+
+				if is_skeleton:
+					_send_status(unique_id, f"✅ 检测到骨架图（黑色占比 {black_ratio:.1%}），直接使用")
+					action_ref_image_processed = action_image
+				else:
+					_send_status(unique_id, f"🔄 检测到RGB图（黑色占比 {black_ratio:.1%}），正在通过 GJJ_OpenPose 转换为骨架图...")
+					try:
+						from .gjj_openpose import GJJ_OpenPose
+						opense_detector = GJJ_OpenPose()
+						# 调用 OpenPose 节点生成骨架图
+						action_ref_image_processed = opense_detector.estimate_pose(
+							images=action_image,
+							detect_hand="启用",
+							detect_body="启用",
+							detect_face="启用",
+							resolution=512,
+							xinsr_stick_scaling="禁用",
+						)[0]
+						_send_status(unique_id, "✅ 骨架图转换完成")
+					except Exception as e:
+						_send_status(unique_id, f"⚠️ OpenPose 转换失败：{e}，使用原始图像")
+						action_ref_image_processed = action_image
+
+				# 使用 TextEncodeQwenImageEditPlus 进行动作迁移编码
+				from comfy_extras.nodes_qwen import TextEncodeQwenImageEditPlus
+				_send_status(unique_id, "✅ 成功导入 TextEncodeQwenImageEditPlus")
+
+				# 调试：查看原始图像形状
+				_send_status(unique_id, f"🔍 主体图: {main_image.shape}, 动作图: {action_ref_image_processed.shape}")
+
+				# 动作迁移使用固定提示词（与工作流一致）
+				action_prompt = (
+					"Preserve 100% of the subject's appearance, clothing, facial features, background, and environment from the first image. "
+					"The only modification is to replicate the precise pose, standing position, arm gestures, and body orientation of the subject in the second image. "
+					"No changes to the original subject, outfit, or background whatsoever. "
+					"High-fidelity, photorealistic, sharp details, consistent lighting."
 				)
-				action_ref_image, action_ref_latent = _prepare_qwen_ref_image(
-					vae,
-					action_image,
-					target_width,
-					target_height,
-				)
-				vl_images = [
-					_prepare_qwen_vl_image(identity_ref_image, int(preset.get("vl_long_edge", 384)), "bicubic", "center"),
-					_prepare_qwen_vl_image(action_ref_image, int(preset.get("vl_long_edge", 384)), "bicubic", "center"),
-				]
-				prompt = (
-					"Picture 1: "
-					"Picture 2: "
-					f"{view_prompt}"
-				)
-				tokens = clip.tokenize(prompt, images=vl_images)
-				conditioning = clip.encode_from_tokens_scheduled(tokens)
-				positive = _conditioning_set_values(
-					conditioning,
-					{"reference_latents": [identity_ref_latent, action_ref_latent]},
-					append=True,
-				)
-				negative = self._encode_negative_conditioning(clip, positive, negative_prompt)
-				latent_out = {"samples": action_ref_latent}
+
+				# 处理批量图像：遍历 batch 维度，逐张处理
+				batch_size = main_image.shape[0] if main_image.ndim == 4 else 1
+				_send_status(unique_id, f"🔍 批次大小: {batch_size}")
+
+				if batch_size > 1:
+					all_positive = []
+					all_negative = []
+					all_latents = []
+
+					for i in range(batch_size):
+						main_img = (main_image[i:i+1] if main_image.ndim == 4 else main_image.unsqueeze(0))[..., :3]
+						action_img = (action_ref_image_processed[i:i+1] if action_ref_image_processed.ndim == 4 else action_ref_image_processed.unsqueeze(0))[..., :3]
+
+						main_img_scaled = _kontext_scale_image(main_img)
+						action_img_scaled = _kontext_scale_image(action_img)
+
+						pos_result = TextEncodeQwenImageEditPlus.execute(
+							clip=clip,
+							prompt=action_prompt,
+							vae=vae,
+							image1=main_img_scaled,
+							image2=action_img_scaled,
+							image3=None
+						)
+						all_positive.append(pos_result[0])
+
+						neg_result = TextEncodeQwenImageEditPlus.execute(
+							clip=clip,
+							prompt="",
+							vae=vae,
+							image1=main_img_scaled,
+							image2=action_img_scaled,
+							image3=None
+						)
+						all_negative.append(neg_result[0])
+
+						latent_samples = vae.encode(action_img_scaled[:, :, :, :3])
+						all_latents.append(latent_samples)
+
+					positive = []
+					for c in all_positive:
+						positive.extend(c)
+					negative = []
+					for c in all_negative:
+						negative.extend(c)
+					latent_out_samples = torch.cat(all_latents, dim=0)
+					latent_out = {"samples": latent_out_samples}
+					_send_status(unique_id, f"✅ 批处理完成，共 {batch_size} 张图像")
+				else:
+					main_img = (main_image[0:1] if main_image.ndim == 4 else main_image.unsqueeze(0))[..., :3]
+					action_img = (action_ref_image_processed[0:1] if action_ref_image_processed.ndim == 4 else action_ref_image_processed.unsqueeze(0))[..., :3]
+
+					main_img_scaled = _kontext_scale_image(main_img)
+					action_img_scaled = _kontext_scale_image(action_img)
+
+					pos_result = TextEncodeQwenImageEditPlus.execute(
+						clip=clip,
+						prompt=action_prompt,
+						vae=vae,
+						image1=main_img_scaled,
+						image2=action_img_scaled,
+						image3=None
+					)
+					positive = pos_result[0]
+
+					neg_result = TextEncodeQwenImageEditPlus.execute(
+						clip=clip,
+						prompt="",
+						vae=vae,
+						image1=main_img_scaled,
+						image2=action_img_scaled,
+						image3=None
+					)
+					negative = neg_result[0]
+
+					latent_out_samples = vae.encode(action_img_scaled[:, :, :, :3])
+					latent_out = {"samples": latent_out_samples}
+					_send_status(unique_id, "✅ 使用 TextEncodeQwenImageEditPlus 编码动作迁移")
 			else:
 				pairs = [{"slot_index": 0, "image": main_image}]
 				positive, negative, latent_out = _encode_multi_image_edit(
@@ -1905,6 +2130,17 @@ class GJJ_CharacterMultiViewStudio:
 			DEFAULT_CLIP_NAME,
 			DEFAULT_VAE_NAME,
 		)
+		action_pairs = self._collect_action_pairs(kwargs)
+		use_action_reference_mode = bool(action_pairs) and bool(preset.get("supports_multi_image_edit"))
+
+		if use_action_reference_mode:
+			lora_models = _safe_filename_list("loras")
+			lora_1_name = _pick_available_lora_name(lora_models, ACTION_MIGRATION_LORA_1, ACTION_MIGRATION_LORA_1)
+			lora_1_strength = ACTION_MIGRATION_LORA_1_STRENGTH
+			lora_2_name = _pick_available_lora_name(lora_models, ACTION_MIGRATION_LORA_2, ACTION_MIGRATION_LORA_2)
+			lora_2_strength = ACTION_MIGRATION_LORA_2_STRENGTH
+			_send_status(unique_id, f"🔄 动作迁移模式：已切换 LoRA → {lora_1_name}（强度 {lora_1_strength}）+ {lora_2_name}（强度 {lora_2_strength}）")
+
 		try:
 			model, clip, vae = self._load_runtime_pipeline(
 				unet_name,
@@ -1937,26 +2173,28 @@ class GJJ_CharacterMultiViewStudio:
 				f"详细错误：{exc}"
 			) from exc
 
-		action_pairs = self._collect_action_pairs(kwargs)
 		action_lines = _parse_action_lines(action_prompts)
+		action_keys = [k for k in kwargs.keys() if str(k).startswith("action_image_")]
+		_send_status(unique_id, f"[DEBUG] 动作图接口: {action_keys} | kwargs 总数: {len(kwargs)}")
+		if action_pairs:
+			_send_status(unique_id, f"[DEBUG] ✅ 收到 {len(action_pairs)} 张动作图，切换到动作迁移！")
+			action_lines = []
+		else:
+			_send_status(unique_id, "[DEBUG]  未收到动作图数据")
 		raw_job_count = max(len(action_lines), len(action_pairs), 1)
 		jobs = _build_action_jobs(action_lines, action_pairs)
-		use_action_reference_mode = any(job["image"] is not None for job in jobs)
 		results: list[torch.Tensor] = []
 		captions: list[str] = []
 
 		if action_pairs and not bool(preset.get("supports_multi_image_edit")):
 			_send_status(unique_id, "提示：当前底模不支持多图视觉参考，动作图将仅作为动作文本的辅助说明。")
 		elif use_action_reference_mode:
-			_send_status(unique_id, "提示：已切换到动作图驱动模式；动作文本不再参与姿态控制，多角度 LoRA 已停用。")
+			_send_status(unique_id, "提示：已切换到动作图驱动模式；动作文本不再参与姿态控制，已自动加载 FireRed 动作迁移 LoRA。")
 		if len(jobs) < raw_job_count:
 			_send_status(unique_id, f"提示：已自动去除 {raw_job_count - len(jobs)} 个重复视角。")
 
 		effective_lora_2_name = lora_2_name
 		effective_lora_2_strength = lora_2_strength
-		if use_action_reference_mode:
-			effective_lora_2_name = ""
-			effective_lora_2_strength = 0.0
 
 		total = len(jobs)
 		for index, job in enumerate(jobs, start=1):
@@ -1966,7 +2204,11 @@ class GJJ_CharacterMultiViewStudio:
 				has_action_image=job["image"] is not None,
 				index=job["index"],
 			)
-			_send_status(unique_id, f"2/{total_steps} 生成第 {index}/{total} 张视图...")
+			# 根据当前模式显示不同的状态栏提示
+			if job["image"] is not None:
+				_send_status(unique_id, f" 动作迁移：生成第 {index}/{total} 张视图...")
+			else:
+				_send_status(unique_id, f"📝 文本描述：生成第 {index}/{total} 张视图...")
 			try:
 				result = self._generate_single_view(
 					model=model,
@@ -1982,6 +2224,7 @@ class GJJ_CharacterMultiViewStudio:
 					lora_1_strength=lora_1_strength,
 					lora_2_name=effective_lora_2_name,
 					lora_2_strength=effective_lora_2_strength,
+					unique_id=unique_id,
 				)
 			except Exception as exc:
 				raise RuntimeError(
