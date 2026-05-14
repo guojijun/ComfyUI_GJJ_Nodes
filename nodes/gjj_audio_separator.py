@@ -1490,5 +1490,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "GJJ_AudioSeparator": "🎵 音频/视频音轨分离器",
+    "GJJ_AudioSeparator": "🎵 音视频人声、背景声分离",
 }
