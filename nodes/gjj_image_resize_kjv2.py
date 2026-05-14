@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import math
 import logging
-from typing import List
+from typing import Any, List, Tuple
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from PIL import ImageColor
 
@@ -14,416 +13,766 @@ from nodes import MAX_RESOLUTION
 from comfy.utils import common_upscale
 from comfy import model_management
 
-try:
-    from server import PromptServer
-except ImportError:
-    PromptServer = None
+NODE_NAME = "GJJ_ImageResizeKJv2"
+
+
+# -----------------------------
+# 通用工具
+# -----------------------------
 
 
 def string_to_color(color_string: str) -> List[int]:
     color_list = [0, 0, 0]
+    color_string = str(color_string or "#000000").strip()
 
-    if ',' in color_string:
+    if "," in color_string:
         try:
-            values = [float(channel.strip()) for channel in color_string.split(',')]
+            values = [float(channel.strip()) for channel in color_string.split(",")]
             if all(0 <= v <= 1 for v in values):
                 color_list = [int(v * 255) for v in values]
             else:
                 color_list = [int(v) for v in values]
         except ValueError:
             logging.warning(f"无效的颜色格式: {color_string}，使用默认黑色。")
-    elif color_string.startswith('#') or (color_string.lstrip('#').isalnum() and not color_string.lstrip('#').replace('.', '', 1).isdigit()):
-        color_string_stripped = color_string.lstrip('#')
-        if len(color_string_stripped) in [6, 8] and all(c in '0123456789ABCDEFabcdef' for c in color_string_stripped):
-            if len(color_string_stripped) == 6:
-                color_list = [int(color_string_stripped[i:i+2], 16) for i in (0, 2, 4)]
-            elif len(color_string_stripped) == 8:
-                color_list = [int(color_string_stripped[i:i+2], 16) for i in (0, 2, 4, 6)]
+    elif color_string.startswith("#") or (
+        color_string.lstrip("#").isalnum()
+        and not color_string.lstrip("#").replace(".", "", 1).isdigit()
+    ):
+        color_string_stripped = color_string.lstrip("#")
+        if len(color_string_stripped) in [6, 8] and all(
+            c in "0123456789ABCDEFabcdef" for c in color_string_stripped
+        ):
+            color_list = [int(color_string_stripped[i : i + 2], 16) for i in (0, 2, 4)]
         else:
             try:
                 rgb = ImageColor.getrgb(color_string)
-                color_list = list(rgb)
+                color_list = list(rgb[:3])
             except ValueError:
-                logging.warning(f"无效的颜色名称或十六进制格式: {color_string}，使用默认黑色。")
+                logging.warning(
+                    f"无效的颜色名称或十六进制格式: {color_string}，使用默认黑色。"
+                )
     else:
         try:
             value = float(color_string.strip())
-            if 0 <= value <= 1:
-                value = int(value * 255)
-            else:
-                value = int(value)
+            value = int(value * 255) if 0 <= value <= 1 else int(value)
             color_list = [value, value, value]
         except ValueError:
             logging.warning(f"无效的颜色格式: {color_string}，使用默认黑色。")
 
-    color_list = np.clip(color_list, 0, 255).tolist()
-
-    return color_list
+    return np.clip(color_list[:3], 0, 255).tolist()
 
 
-def pad(self, image, left, right, top, bottom, extra_padding, color, pad_mode, mask=None, target_width=None, target_height=None):
-    B, H, W, C = image.shape
-    if mask is not None:
-        BM, HM, WM = mask.shape
-        if HM != H or WM != W:
-            mask = F.interpolate(mask.unsqueeze(1), size=(H, W), mode='nearest-exact').squeeze(1)
+def _round_to_multiple(value: float | int, multiple: int) -> int:
+    value = max(1, int(round(float(value))))
+    multiple = int(multiple or 0)
+    if multiple <= 1:
+        return value
+    return max(multiple, int(math.ceil(value / multiple) * multiple))
 
-    color_list = string_to_color(color)
-    bg_color = [x / 255.0 for x in color_list]
-    if len(bg_color) == 1:
-        bg_color = bg_color * 3
-    bg_color = torch.tensor(bg_color, dtype=image.dtype, device=image.device)
 
-    if target_width is not None and target_height is not None:
-        if extra_padding > 0:
-            image = common_upscale(image.movedim(-1, 1), W - extra_padding, H - extra_padding, "lanczos", "disabled").movedim(1, -1)
-            B, H, W, C = image.shape
+def _safe_int(value, default: int = 1) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
 
-        padded_width = target_width
-        padded_height = target_height
-        pad_left = (padded_width - W) // 2
-        pad_right = padded_width - W - pad_left
-        pad_top = (padded_height - H) // 2
-        pad_bottom = padded_height - H - pad_top
-    else:
-        pad_left = left + extra_padding
-        pad_right = right + extra_padding
-        pad_top = top + extra_padding
-        pad_bottom = bottom + extra_padding
 
-        padded_width = W + pad_left + pad_right
-        padded_height = H + pad_top + pad_bottom
+def _get_aspect_ratio(
+    aspect_ratio: str, custom_w: int, custom_h: int, orig_w: int, orig_h: int
+) -> float:
+    if aspect_ratio in ("原始比例", "original"):
+        return orig_w / max(1, orig_h)
+    if aspect_ratio in ("自定义", "custom"):
+        return max(1, custom_w) / max(1, custom_h)
+    if ":" in str(aspect_ratio):
+        try:
+            a, b = str(aspect_ratio).split(":", 1)
+            return max(1.0, float(a)) / max(1.0, float(b))
+        except Exception:
+            pass
+    return orig_w / max(1, orig_h)
 
-    if pad_mode == "pillarbox_blur":
-        def _gaussian_blur_nchw(img_nchw, sigma_px):
-            if sigma_px <= 0:
-                return img_nchw
-            radius = max(1, int(3.0 * float(sigma_px)))
-            k = 2 * radius + 1
-            x = torch.arange(-radius, radius + 1, device=img_nchw.device, dtype=img_nchw.dtype)
-            k1 = torch.exp(-(x * x) / (2.0 * float(sigma_px) * float(sigma_px)))
-            k1 = k1 / k1.sum()
-            kx = k1.view(1, 1, 1, k)
-            ky = k1.view(1, 1, k, 1)
-            c = img_nchw.shape[1]
-            kx = kx.repeat(c, 1, 1, 1)
-            ky = ky.repeat(c, 1, 1, 1)
-            img_nchw = F.conv2d(img_nchw, kx, padding=(0, radius), groups=c)
-            img_nchw = F.conv2d(img_nchw, ky, padding=(radius, 0), groups=c)
-            return img_nchw
 
-        out_image = torch.zeros((B, padded_height, padded_width, C), dtype=image.dtype, device=image.device)
-        for b in range(B):
-            scale_fill = max(padded_width / float(W), padded_height / float(H)) if (W > 0 and H > 0) else 1.0
-            bg_w = max(1, int(round(W * scale_fill)))
-            bg_h = max(1, int(round(H * scale_fill)))
-            src_b = image[b].movedim(-1, 0).unsqueeze(0)
-            bg = common_upscale(src_b, bg_w, bg_h, "bilinear", crop="disabled")
-            y0 = max(0, (bg_h - padded_height) // 2)
-            x0 = max(0, (bg_w - padded_width) // 2)
-            y1 = min(bg_h, y0 + padded_height)
-            x1 = min(bg_w, x0 + padded_width)
-            bg = bg[:, :, y0:y1, x0:x1]
-            if bg.shape[2] != padded_height or bg.shape[3] != padded_width:
-                pad_h = padded_height - bg.shape[2]
-                pad_w = padded_width - bg.shape[3]
-                pad_top_fix = max(0, pad_h // 2)
-                pad_bottom_fix = max(0, pad_h - pad_top_fix)
-                pad_left_fix = max(0, pad_w // 2)
-                pad_right_fix = max(0, pad_w - pad_left_fix)
-                bg = F.pad(bg, (pad_left_fix, pad_right_fix, pad_top_fix, pad_bottom_fix), mode="replicate")
-            sigma = max(1.0, 0.006 * float(min(padded_height, padded_width)))
-            bg = _gaussian_blur_nchw(bg, sigma_px=sigma)
-            if C >= 3:
-                r, g, bch = bg[:, 0:1], bg[:, 1:2], bg[:, 2:3]
-                luma = 0.2126 * r + 0.7152 * g + 0.0722 * bch
-                gray = torch.cat([luma, luma, luma], dim=1)
-                desat = 0.20
-                rgb = torch.cat([r, g, bch], dim=1)
-                rgb = rgb * (1.0 - desat) + gray * desat
-                bg[:, 0:3, :, :] = rgb
-            dim = 0.35
-            bg = torch.clamp(bg * dim, 0.0, 1.0)
-            out_image[b] = bg.squeeze(0).movedim(0, -1)
-        out_image[:, pad_top:pad_top+H, pad_left:pad_left+W, :] = image
-        if mask is not None:
-            fg_mask = mask
-            out_masks = torch.ones((B, padded_height, padded_width), dtype=image.dtype, device=image.device)
-            out_masks[:, pad_top:pad_top+H, pad_left:pad_left+W] = fg_mask
+def _normalize_mask(
+    mask: torch.Tensor | None, batch: int, height: int, width: int, device: torch.device
+) -> torch.Tensor | None:
+    if mask is None:
+        return None
+    if mask.dim() == 2:
+        mask = mask.unsqueeze(0)
+    if mask.dim() == 4:
+        if mask.shape[1] == 1:
+            mask = mask.squeeze(1)
         else:
-            out_masks = torch.ones((B, padded_height, padded_width), dtype=image.dtype, device=image.device)
-            out_masks[:, pad_top:pad_top+H, pad_left:pad_left+W] = 0.0
-        return (out_image, out_masks)
+            mask = mask[..., 0]
+    if mask.shape[0] == 1 and batch > 1:
+        mask = mask.repeat(batch, 1, 1)
+    if mask.shape[0] != batch:
+        mask = mask[:1].repeat(batch, 1, 1)
+    if mask.shape[-2:] == (64, 64) and (height != 64 or width != 64):
+        return None
+    mask = mask.to(device)
+    if mask.shape[-2:] != (height, width):
+        mask = common_upscale(
+            mask.unsqueeze(1), width, height, "bilinear", crop="disabled"
+        ).squeeze(1)
+    return mask
 
-    out_image = torch.zeros((B, padded_height, padded_width, C), dtype=image.dtype, device=image.device)
-    for b in range(B):
-            if pad_mode == "edge":
-                top_edge = image[b, 0, :, :]
-                bottom_edge = image[b, H-1, :, :]
-                left_edge = image[b, :, 0, :]
-                right_edge = image[b, :, W-1, :]
-                out_image[b, :pad_top, :, :] = top_edge.mean(dim=0)
-                out_image[b, pad_top+H:, :, :] = bottom_edge.mean(dim=0)
-                out_image[b, :, :pad_left, :] = left_edge.mean(dim=0)
-                out_image[b, :, pad_left+W:, :] = right_edge.mean(dim=0)
-                out_image[b, pad_top:pad_top+H, pad_left:pad_left+W, :] = image[b]
-            elif pad_mode == "edge_pixel":
-                for y in range(pad_top):
-                    out_image[b, y, pad_left:pad_left+W, :] = image[b, 0, :, :]
-                for y in range(pad_top+H, padded_height):
-                    out_image[b, y, pad_left:pad_left+W, :] = image[b, H-1, :, :]
-                for x in range(pad_left):
-                    out_image[b, pad_top:pad_top+H, x, :] = image[b, :, 0, :]
-                for x in range(pad_left+W, padded_width):
-                    out_image[b, pad_top:pad_top+H, x, :] = image[b, :, W-1, :]
-                out_image[b, :pad_top, :pad_left, :] = image[b, 0, 0, :]
-                out_image[b, :pad_top, pad_left+W:, :] = image[b, 0, W-1, :]
-                out_image[b, pad_top+H:, :pad_left, :] = image[b, H-1, 0, :]
-                out_image[b, pad_top+H:, pad_left+W:, :] = image[b, H-1, W-1, :]
-                out_image[b, pad_top:pad_top+H, pad_left:pad_left+W, :] = image[b]
-            else:
-                out_image[b, :, :, :] = bg_color.unsqueeze(0).unsqueeze(0)
-                out_image[b, pad_top:pad_top+H, pad_left:pad_left+W, :] = image[b]
 
-    if mask is not None:
-        out_masks = torch.nn.functional.pad(
-            mask,
-            (pad_left, pad_right, pad_top, pad_bottom),
-            mode='replicate'
+def _resize_image_tensor(
+    image: torch.Tensor, width: int, height: int, method: str
+) -> torch.Tensor:
+    return common_upscale(
+        image.movedim(-1, 1), width, height, method, crop="disabled"
+    ).movedim(1, -1)
+
+
+def _resize_mask_tensor(
+    mask: torch.Tensor, width: int, height: int, method: str
+) -> torch.Tensor:
+    if method == "lanczos":
+        return common_upscale(
+            mask.unsqueeze(1).repeat(1, 3, 1, 1), width, height, method, crop="disabled"
+        ).movedim(1, -1)[:, :, :, 0]
+    return common_upscale(
+        mask.unsqueeze(1), width, height, method, crop="disabled"
+    ).squeeze(1)
+
+
+def _empty_mask(batch: int, height: int, width: int, dtype, device) -> torch.Tensor:
+    return torch.zeros((batch, height, width), dtype=dtype, device=device)
+
+
+def _pad_to_target(
+    image: torch.Tensor,
+    mask: torch.Tensor | None,
+    target_width: int,
+    target_height: int,
+    color: str,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    b, h, w, c = image.shape
+    color_list = string_to_color(color)
+    bg_color = torch.tensor(
+        [x / 255.0 for x in color_list], dtype=image.dtype, device=image.device
+    )
+    if c > 3:
+        bg_color = torch.cat(
+            [bg_color, torch.ones((c - 3,), dtype=image.dtype, device=image.device)],
+            dim=0,
         )
+    elif c < 3:
+        bg_color = bg_color[:c]
+
+    pad_left = max(0, (target_width - w) // 2)
+    pad_top = max(0, (target_height - h) // 2)
+
+    out_image = torch.zeros(
+        (b, target_height, target_width, c), dtype=image.dtype, device=image.device
+    )
+    out_image[:, :, :, :] = bg_color.view(1, 1, 1, c)
+    out_image[:, pad_top : pad_top + h, pad_left : pad_left + w, :] = image
+
+    if mask is None:
+        out_mask = torch.ones(
+            (b, target_height, target_width), dtype=image.dtype, device=image.device
+        )
+        out_mask[:, pad_top : pad_top + h, pad_left : pad_left + w] = 0.0
     else:
-        out_masks = torch.ones((B, padded_height, padded_width), dtype=image.dtype, device=image.device)
-        for m in range(B):
-            out_masks[m, pad_top:pad_top+H, pad_left:pad_left+W] = 0.0
+        out_mask = torch.ones(
+            (b, target_height, target_width), dtype=mask.dtype, device=mask.device
+        )
+        out_mask[:, pad_top : pad_top + h, pad_left : pad_left + w] = mask
+    return out_image, out_mask
 
-    return (out_image, out_masks)
+
+def _crop_center_to_target(
+    image: torch.Tensor,
+    mask: torch.Tensor | None,
+    target_width: int,
+    target_height: int,
+):
+    _, h, w, _ = image.shape
+    x = max(0, (w - target_width) // 2)
+    y = max(0, (h - target_height) // 2)
+    image = image[:, y : y + target_height, x : x + target_width, :]
+    if mask is not None:
+        mask = mask[:, y : y + target_height, x : x + target_width]
+    return image, mask
 
 
-NODE_NAME = "GJJ_ImageResizeKJv2"
+def _apply_fit(
+    image: torch.Tensor,
+    mask: torch.Tensor | None,
+    target_width: int,
+    target_height: int,
+    fit_mode: str,
+    upscale_method: str,
+    pad_color: str,
+):
+    b, h, w, _ = image.shape
+
+    if fit_mode == "stretch":
+        out_image = _resize_image_tensor(
+            image, target_width, target_height, upscale_method
+        )
+        out_mask = (
+            _resize_mask_tensor(mask, target_width, target_height, upscale_method)
+            if mask is not None
+            else _empty_mask(b, target_height, target_width, image.dtype, image.device)
+        )
+        return out_image, out_mask
+
+    scale = (
+        min(target_width / max(1, w), target_height / max(1, h))
+        if fit_mode == "letterbox"
+        else max(target_width / max(1, w), target_height / max(1, h))
+    )
+    resize_w = max(1, int(round(w * scale)))
+    resize_h = max(1, int(round(h * scale)))
+
+    resized_image = _resize_image_tensor(image, resize_w, resize_h, upscale_method)
+    resized_mask = (
+        _resize_mask_tensor(mask, resize_w, resize_h, upscale_method)
+        if mask is not None
+        else None
+    )
+
+    if fit_mode == "letterbox":
+        return _pad_to_target(
+            resized_image, resized_mask, target_width, target_height, pad_color
+        )
+
+    cropped_image, cropped_mask = _crop_center_to_target(
+        resized_image, resized_mask, target_width, target_height
+    )
+    if cropped_mask is None:
+        cropped_mask = _empty_mask(
+            b, target_height, target_width, image.dtype, image.device
+        )
+    return cropped_image, cropped_mask
+
+
+def _tensor_to_bhwc(image: torch.Tensor) -> torch.Tensor:
+    """把单张 HWC 或批量 BHWC 统一成 BHWC。"""
+    if not isinstance(image, torch.Tensor):
+        raise TypeError(f"图片数据不是 torch.Tensor: {type(image)}")
+    if image.dim() == 3:
+        return image.unsqueeze(0)
+    if image.dim() == 4:
+        return image
+    raise ValueError(f"不支持的图片维度: {tuple(image.shape)}，需要 HWC 或 BHWC。")
+
+
+def _looks_like_image_tensor(value: Any) -> bool:
+    return isinstance(value, torch.Tensor) and value.dim() in (3, 4)
+
+
+def _extract_tensor_from_item(item: Any) -> torch.Tensor | None:
+    """兼容常见 GJJ_BATCH_IMAGE 结构：Tensor、dict[image/images/tensor]、对象.image。"""
+    if _looks_like_image_tensor(item):
+        return item
+    if isinstance(item, dict):
+        for key in ("image", "images", "tensor", "IMAGE"):
+            value = item.get(key)
+            if _looks_like_image_tensor(value):
+                return value
+        # 有些批量结构会把图片放在嵌套 value 中，这里做一层轻量兜底。
+        for value in item.values():
+            if _looks_like_image_tensor(value):
+                return value
+    for attr in ("image", "images", "tensor"):
+        value = getattr(item, attr, None)
+        if _looks_like_image_tensor(value):
+            return value
+    return None
+
+
+def _is_multi_image_container(image: Any) -> bool:
+    if _looks_like_image_tensor(image):
+        return False
+    if isinstance(image, (list, tuple)):
+        return True
+    if isinstance(image, dict):
+        for key in ("images", "image", "items", "batch"):
+            value = image.get(key)
+            if isinstance(value, (list, tuple)):
+                return True
+    return False
+
+
+def _iter_batch_images(image: Any) -> List[Any]:
+    """把 GJJ_BATCH_IMAGE 拆成逐张/逐项处理列表。"""
+    if isinstance(image, dict):
+        for key in ("images", "items", "batch"):
+            value = image.get(key)
+            if isinstance(value, (list, tuple)):
+                return list(value)
+        value = image.get("image")
+        if isinstance(value, (list, tuple)):
+            return list(value)
+    if isinstance(image, (list, tuple)):
+        return list(image)
+    return [image]
+
+
+def _replace_item_image(item: Any, new_image: torch.Tensor) -> Any:
+    """批处理输出时尽量保持原 GJJ_BATCH_IMAGE 的条目结构；无法识别时直接输出图片 Tensor。"""
+    if isinstance(item, dict):
+        out = dict(item)
+        for key in ("image", "images", "tensor", "IMAGE"):
+            if key in out and _looks_like_image_tensor(out[key]):
+                out[key] = new_image
+                return out
+        out["image"] = new_image
+        return out
+    return new_image
+
+
+def _select_mask_for_item(mask: torch.Tensor | None, index: int) -> torch.Tensor | None:
+    if mask is None or not isinstance(mask, torch.Tensor):
+        return None
+    if mask.dim() == 2:
+        return mask.unsqueeze(0)
+    if mask.dim() == 3:
+        if mask.shape[0] == 1:
+            return mask
+        if index < mask.shape[0]:
+            return mask[index : index + 1]
+        return mask[:1]
+    if mask.dim() == 4:
+        if mask.shape[0] == 1:
+            return mask
+        if index < mask.shape[0]:
+            return mask[index : index + 1]
+        return mask[:1]
+    return None
 
 
 class GJJ_ImageResizeKJv2:
-    # 中文显示名称到内部值的映射
+    resize_mode_map = {
+        "宽高": "fixed",
+        "固定宽高": "fixed",
+        "等比": "proportional",
+        "等比缩放": "proportional",
+        "长边": "long_side",
+        "长边适配": "long_side",
+        "像素": "pixel_control",
+        "像素控制": "pixel_control",
+    }
     upscale_method_map = {
         "最近邻": "nearest-exact",
         "双线性": "bilinear",
         "区域": "area",
         "双三次": "bicubic",
-        "兰索斯": "lanczos"
+        "兰索斯": "lanczos",
+        "nearest": "nearest-exact",
+        "bilinear": "bilinear",
+        "box": "area",
+        "bicubic": "bicubic",
+        "hamming": "bicubic",
+        "lanczos": "lanczos",
     }
-    keep_proportion_map = {
+    fit_mode_map = {
         "拉伸": "stretch",
-        "等比缩放": "resize",
-        "颜色填充": "pad",
-        "边缘填充(平均)": "pad_edge",
-        "边缘填充(像素)": "pad_edge_pixel",
-        "裁剪": "crop",
-        "模糊边框": "pillarbox_blur",
-        "总像素数": "total_pixels"
+        "留边填充": "letterbox",
+        "裁剪填满": "crop",
+        "stretch": "stretch",
+        "letterbox": "letterbox",
+        "crop": "crop",
+        "fill": "stretch",
     }
-    crop_position_map = {
-        "居中": "center",
-        "顶部": "top",
-        "底部": "bottom",
-        "左侧": "left",
-        "右侧": "right"
-    }
-    device_map = {
-        "CPU": "cpu",
-        "GPU": "gpu"
-    }
+    aspect_ratio_list = [
+        "原始比例",
+        "自定义",
+        "1:1",
+        "3:2",
+        "4:3",
+        "16:9",
+        "2:3",
+        "3:4",
+        "9:16",
+    ]
+    multiple_list = ["无", "8", "16", "32", "64", "128", "256", "512"]
+    device_map = {"CPU": "cpu", "GPU": "gpu"}
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE", {"display_name": "🖼️ 图片"}),
-                "width": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 8, "display_name": "📐 宽度"}),
-                "height": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 8, "display_name": "📐 高度"}),
-                "upscale_method": (list(cls.upscale_method_map.keys()), {"default": "最近邻", "display_name": "🔄 缩放方法"}),
-                "keep_proportion": (list(cls.keep_proportion_map.keys()), {"default": "拉伸", "display_name": "📏 保持比例"}),
-                "pad_color": ("COLOR", {"default": "#000000", "display_name": "🎨 填充颜色", "tooltip": "填充区域的颜色。"}),
-                "crop_position": (list(cls.crop_position_map.keys()), {"default": "居中", "display_name": "✂️ 裁剪位置"}),
-                "divisible_by": ("INT", {"default": 2, "min": 0, "max": 512, "step": 1, "display_name": "🔢 对齐倍数"}),
+                "image": (
+                    "GJJ_BATCH_IMAGE,IMAGE",
+                    {
+                        "display_name": "🖼️ 图片",
+                        "tooltip": "输入图片。支持普通 IMAGE，也支持 GJJ_BATCH_IMAGE 多图列表；检测到多图会自动逐张批处理，并输出处理后的图片列表。",
+                    },
+                ),
+                "resize_mode": (
+                    ["宽高", "等比", "长边", "像素"],
+                    {
+                        "default": "宽高",
+                        "display_name": "缩放模式",
+                        "tooltip": "选择缩放计算方式。前端会显示为按钮：宽高、等比、长边、像素。",
+                    },
+                ),
+                # 宽高
+                "width": (
+                    "INT",
+                    {
+                        "default": 1024,
+                        "min": 1,
+                        "max": MAX_RESOLUTION,
+                        "step": 8,
+                        "display_name": "📐 目标宽度",
+                        "tooltip": "宽高模式使用。设置最终输出图片的宽度，单位为像素。",
+                    },
+                ),
+                "height": (
+                    "INT",
+                    {
+                        "default": 1024,
+                        "min": 1,
+                        "max": MAX_RESOLUTION,
+                        "step": 8,
+                        "display_name": "📐 目标高度",
+                        "tooltip": "宽高模式使用。设置最终输出图片的高度，单位为像素。",
+                    },
+                ),
+                # 等比
+                "scale_percent": (
+                    "FLOAT",
+                    {
+                        "default": 100.0,
+                        "min": 1.0,
+                        "max": 10000.0,
+                        "step": 1.0,
+                        "display_name": "🔍 缩放百分比",
+                        "tooltip": "等比模式使用。100 表示原尺寸，50 表示缩小一半，200 表示放大两倍。",
+                    },
+                ),
+                # 长边
+                "long_side_length": (
+                    "INT",
+                    {
+                        "default": 1024,
+                        "min": 4,
+                        "max": MAX_RESOLUTION,
+                        "step": 8,
+                        "display_name": "📏 长边长度",
+                        "tooltip": "长边模式使用。把图片较长的一边缩放到此长度，另一边按原比例自动计算。",
+                    },
+                ),
+                # 像素，总像素逻辑：target_width * target_height ≈ total_pixel_k * 1000
+                "total_pixel_k": (
+                    "INT",
+                    {
+                        "default": 1024,
+                        "min": 1,
+                        "max": 1000000,
+                        "step": 1,
+                        "display_name": "🔢 总像素/K",
+                        "tooltip": "像素模式使用。按总像素数量计算输出尺寸，单位为千像素。例如 1024 表示约 102.4 万像素。",
+                    },
+                ),
+                "aspect_ratio": (
+                    cls.aspect_ratio_list,
+                    {
+                        "default": "原始比例",
+                        "display_name": "🧩 输出比例",
+                        "tooltip": "像素模式使用。决定总像素如何分配成宽高。选择原始比例会沿用输入图片比例；选择自定义会显示自定义比例宽和高。",
+                    },
+                ),
+                "proportional_width": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 1,
+                        "max": 100000000,
+                        "step": 1,
+                        "display_name": "↔️ 自定义比例宽",
+                        "tooltip": "像素模式且输出比例为自定义时使用。与自定义比例高共同决定宽高比例。",
+                    },
+                ),
+                "proportional_height": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 1,
+                        "max": 100000000,
+                        "step": 1,
+                        "display_name": "↕️ 自定义比例高",
+                        "tooltip": "像素模式且输出比例为自定义时使用。与自定义比例宽共同决定宽高比例。",
+                    },
+                ),
+                # 公共参数，放在最后，前端按模式重排/隐藏
+                "fit_mode": (
+                    ["拉伸", "留边填充", "裁剪填满"],
+                    {
+                        "default": "拉伸",
+                        "display_name": "🧲 适配方式",
+                        "tooltip": "宽高和像素模式使用。拉伸会直接变成目标宽高；留边填充会保持比例并补边；裁剪填满会保持比例并居中裁剪。",
+                    },
+                ),
+                "upscale_method": (
+                    ["最近邻", "双线性", "区域", "双三次", "兰索斯"],
+                    {
+                        "default": "兰索斯",
+                        "display_name": "🔄 缩放算法",
+                        "tooltip": "图片缩放采样算法。兰索斯质量较高但只支持 CPU；GPU 模式请使用最近邻、双线性、区域或双三次。",
+                    },
+                ),
+                "round_to_multiple": (
+                    cls.multiple_list,
+                    {
+                        "default": "8",
+                        "display_name": "🔢 尺寸对齐",
+                        "tooltip": "把输出宽高向上对齐到指定倍数。常用于确保尺寸能被 8、16、32、64 等整除。选择无则不额外对齐。",
+                    },
+                ),
+                "pad_color": (
+                    "COLOR",
+                    {
+                        "default": "#000000",
+                        "display_name": "🎨 留边颜色",
+                        "tooltip": "留边填充时使用的背景颜色。支持颜色选择器、十六进制颜色和常见颜色名称。",
+                    },
+                ),
+                "device": (
+                    ["CPU", "GPU"],
+                    {
+                        "default": "CPU",
+                        "display_name": "⚙️ 计算设备",
+                        "tooltip": "选择缩放计算设备。兰索斯不支持 GPU，如果选择 GPU 请改用其它缩放算法。",
+                    },
+                ),
             },
             "optional": {
-                "mask": ("MASK", {"display_name": "🎭 遮罩"}),
-                "device": (list(cls.device_map.keys()), {"default": "CPU", "display_name": "⚙️ 计算设备"}),
+                "mask": (
+                    "MASK",
+                    {
+                        "display_name": "🎭 遮罩",
+                        "tooltip": "可选输入。连接后会随图片同步缩放、填充或裁剪。",
+                    },
+                ),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "INT", "INT", "MASK",)
-    RETURN_NAMES = ("图片", "宽度", "高度", "遮罩",)
+    RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE", "MASK", "BOX", "INT", "INT")
+    RETURN_NAMES = ("图片", "遮罩", "原始尺寸", "宽度", "高度")
     FUNCTION = "resize"
     CATEGORY = "GJJ/image"
     DESCRIPTION = """
-将图像缩放到指定的宽度和高度。
+图片缩放 KJv2：合并 ImageScaleByAspectRatio V2 的比例、适配、长边、总像素控制能力。
 
-• 支持多种缩放方法（最近邻、双线性、双三次等）
-• 保持比例模式可以按照最大尺寸等比缩放
-• 填充模式会在空白区域填充指定颜色
-• 裁剪模式会裁剪超出部分
-• 支持遮罩同步处理
-• 对齐倍数确保输出尺寸为指定值的整数倍
+模式：
+• 宽高：直接指定输出宽高，可拉伸、留边、裁剪。
+• 等比：按百分比缩放，保持原图比例。
+• 长边：指定长边长度，短边自动计算。
+• 像素：按总像素/K + 输出比例计算尺寸。
+
+输出：图片、遮罩、原始尺寸、输出宽度、输出高度。
 """
 
-    def resize(self, image, width, height, keep_proportion, upscale_method, divisible_by, pad_color, crop_position, unique_id, device="CPU", mask=None):
-        # 将中文显示值转换为内部值
-        keep_proportion = self.keep_proportion_map.get(keep_proportion, keep_proportion)
+    def _resize_tensor(
+        self,
+        image,
+        resize_mode,
+        width,
+        height,
+        scale_percent,
+        long_side_length,
+        total_pixel_k,
+        aspect_ratio,
+        proportional_width,
+        proportional_height,
+        fit_mode,
+        upscale_method,
+        round_to_multiple,
+        pad_color,
+        device,
+        mask=None,
+    ):
+        resize_mode = self.resize_mode_map.get(resize_mode, resize_mode)
         upscale_method = self.upscale_method_map.get(upscale_method, upscale_method)
-        crop_position = self.crop_position_map.get(crop_position, crop_position)
+        fit_mode = self.fit_mode_map.get(fit_mode, fit_mode)
         device = self.device_map.get(device, device)
 
-        B, H, W, C = image.shape
-
-        if mask is not None and mask.shape[-2:] == (64, 64) and (H != 64 or W != 64):
-            mask = None
-
-        if mask is not None and mask.shape[-2:] != (H, W):
-            mask = common_upscale(mask.unsqueeze(1), W, H, "bilinear", crop="disabled").squeeze(1)
+        image = _tensor_to_bhwc(image)
+        b, orig_h, orig_w, _ = image.shape
+        original_size = [int(orig_w), int(orig_h)]
 
         if device == "gpu":
             if upscale_method == "lanczos":
-                raise Exception("兰索斯不支持GPU")
-            device = model_management.get_torch_device()
+                raise Exception("兰索斯不支持 GPU，请改用 CPU 或换成双三次/双线性。")
+            torch_device = model_management.get_torch_device()
         else:
-            device = torch.device("cpu")
+            torch_device = torch.device("cpu")
 
-        pillarbox_blur = keep_proportion == "pillarbox_blur"
+        image = image.to(torch_device)
+        mask = _normalize_mask(mask, b, orig_h, orig_w, torch_device)
 
-        pad_left = pad_right = pad_top = pad_bottom = 0
+        multiple = (
+            0
+            if round_to_multiple in ("无", "None", None)
+            else _safe_int(round_to_multiple, 0)
+        )
 
-        if keep_proportion in ["resize", "total_pixels"] or keep_proportion.startswith("pad") or pillarbox_blur:
-            if keep_proportion == "total_pixels":
-                total_pixels = width * height
-                aspect_ratio = W / H
-                new_height = int(math.sqrt(total_pixels / aspect_ratio))
-                new_width = int(math.sqrt(total_pixels * aspect_ratio))
-
-            elif width == 0 and height == 0:
-                new_width = W
-                new_height = H
-            elif width == 0 and height != 0:
-                ratio = height / H
-                new_width = round(W * ratio)
-                new_height = height
-            elif height == 0 and width != 0:
-                ratio = width / W
-                new_width = width
-                new_height = round(H * ratio)
-            elif width != 0 and height != 0:
-                ratio = min(width / W, height / H)
-                new_width = round(W * ratio)
-                new_height = round(H * ratio)
-            else:
-                new_width = width
-                new_height = height
-
-            if keep_proportion.startswith("pad") or pillarbox_blur:
-                if crop_position == "center":
-                    pad_left = (width - new_width) // 2
-                    pad_right = width - new_width - pad_left
-                    pad_top = (height - new_height) // 2
-                    pad_bottom = height - new_height - pad_top
-                elif crop_position == "top":
-                    pad_left = (width - new_width) // 2
-                    pad_right = width - new_width - pad_left
-                    pad_top = 0
-                    pad_bottom = height - new_height
-                elif crop_position == "bottom":
-                    pad_left = (width - new_width) // 2
-                    pad_right = width - new_width - pad_left
-                    pad_top = height - new_height
-                    pad_bottom = 0
-                elif crop_position == "left":
-                    pad_left = 0
-                    pad_right = width - new_width
-                    pad_top = (height - new_height) // 2
-                    pad_bottom = height - new_height - pad_top
-                elif crop_position == "right":
-                    pad_left = width - new_width
-                    pad_right = 0
-                    pad_top = (height - new_height) // 2
-                    pad_bottom = height - new_height - pad_top
-
-            width = new_width
-            height = new_height
-        else:
-            if width == 0:
-                width = W
-            if height == 0:
-                height = H
-
-        if divisible_by > 1:
-            width = width - (width % divisible_by)
-            height = height - (height % divisible_by)
-
-        out_image = image if image.device == device else image.to(device)
-        out_mask = None if mask is None else (mask if mask.device == device else mask.to(device))
-
-        if keep_proportion == "crop":
-            old_height = out_image.shape[-3]
-            old_width = out_image.shape[-2]
-            old_aspect = old_width / old_height
-            new_aspect = width / height
-            if old_aspect > new_aspect:
-                crop_w = round(old_height * new_aspect)
-                crop_h = old_height
-            else:
-                crop_w = old_width
-                crop_h = round(old_width / new_aspect)
-            if crop_position == "center":
-                x = (old_width - crop_w) // 2
-                y = (old_height - crop_h) // 2
-            elif crop_position == "top":
-                x = (old_width - crop_w) // 2
-                y = 0
-            elif crop_position == "bottom":
-                x = (old_width - crop_w) // 2
-                y = old_height - crop_h
-            elif crop_position == "left":
-                x = 0
-                y = (old_height - crop_h) // 2
-            elif crop_position == "right":
-                x = old_width - crop_w
-                y = (old_height - crop_h) // 2
-            out_image = out_image.narrow(-2, x, crop_w).narrow(-3, y, crop_h)
-            if out_mask is not None:
-                out_mask = out_mask.narrow(-1, x, crop_w).narrow(-2, y, crop_h)
-
-        out_image = common_upscale(out_image.movedim(-1, 1), width, height, upscale_method, crop="disabled").movedim(1, -1)
-        if out_mask is not None:
-            if upscale_method == "lanczos":
-                out_mask = common_upscale(out_mask.unsqueeze(1).repeat(1, 3, 1, 1), width, height, upscale_method, crop="disabled").movedim(1, -1)[:, :, :, 0]
-            else:
-                out_mask = common_upscale(out_mask.unsqueeze(1), width, height, upscale_method, crop="disabled").squeeze(1)
-
-        if (keep_proportion.startswith("pad") or pillarbox_blur) and (pad_left > 0 or pad_right > 0 or pad_top > 0 or pad_bottom > 0):
-            padded_width = width + pad_left + pad_right
-            padded_height = height + pad_top + pad_bottom
-            if divisible_by > 1:
-                width_remainder = padded_width % divisible_by
-                height_remainder = padded_height % divisible_by
-                if width_remainder > 0:
-                    extra_width = divisible_by - width_remainder
-                    pad_right += extra_width
-                if height_remainder > 0:
-                    extra_height = divisible_by - height_remainder
-                    pad_bottom += extra_height
-
-            pad_mode = (
-                "pillarbox_blur" if pillarbox_blur else
-                "edge" if keep_proportion == "pad_edge" else
-                "edge_pixel" if keep_proportion == "pad_edge_pixel" else
-                "color"
+        if resize_mode == "fixed":
+            target_w = _round_to_multiple(_safe_int(width, orig_w), multiple)
+            target_h = _round_to_multiple(_safe_int(height, orig_h), multiple)
+            out_image, out_mask = _apply_fit(
+                image, mask, target_w, target_h, fit_mode, upscale_method, pad_color
             )
-            out_image, out_mask = pad(self, out_image, pad_left, pad_right, pad_top, pad_bottom, 0, pad_color, pad_mode, mask=out_mask)
 
-        return (out_image.cpu(), out_image.shape[2], out_image.shape[1], out_mask.cpu() if out_mask is not None else torch.zeros(64, 64, device=torch.device("cpu"), dtype=torch.float32))
+        elif resize_mode == "proportional":
+            ratio = max(0.01, float(scale_percent) / 100.0)
+            target_w = _round_to_multiple(orig_w * ratio, multiple)
+            target_h = _round_to_multiple(orig_h * ratio, multiple)
+            out_image = _resize_image_tensor(image, target_w, target_h, upscale_method)
+            out_mask = (
+                _resize_mask_tensor(mask, target_w, target_h, upscale_method)
+                if mask is not None
+                else _empty_mask(b, target_h, target_w, image.dtype, image.device)
+            )
+
+        elif resize_mode == "long_side":
+            long_side = max(4, _safe_int(long_side_length, max(orig_w, orig_h)))
+            if orig_w >= orig_h:
+                target_w = long_side
+                target_h = max(1, int(round(orig_h * (target_w / max(1, orig_w)))))
+            else:
+                target_h = long_side
+                target_w = max(1, int(round(orig_w * (target_h / max(1, orig_h)))))
+            target_w = _round_to_multiple(target_w, multiple)
+            target_h = _round_to_multiple(target_h, multiple)
+            out_image = _resize_image_tensor(image, target_w, target_h, upscale_method)
+            out_mask = (
+                _resize_mask_tensor(mask, target_w, target_h, upscale_method)
+                if mask is not None
+                else _empty_mask(b, target_h, target_w, image.dtype, image.device)
+            )
+
+        elif resize_mode == "pixel_control":
+            ratio = _get_aspect_ratio(
+                aspect_ratio, proportional_width, proportional_height, orig_w, orig_h
+            )
+            total_pixels = max(1, _safe_int(total_pixel_k, 1024)) * 1000
+            target_w = int(round(math.sqrt(total_pixels * ratio)))
+            target_h = int(round(target_w / max(1e-8, ratio)))
+            target_w = _round_to_multiple(target_w, multiple)
+            target_h = _round_to_multiple(target_h, multiple)
+            out_image, out_mask = _apply_fit(
+                image, mask, target_w, target_h, fit_mode, upscale_method, pad_color
+            )
+
+        else:
+            raise ValueError(f"未知缩放模式: {resize_mode}")
+
+        out_h = int(out_image.shape[1])
+        out_w = int(out_image.shape[2])
+        return out_image.cpu(), out_mask.cpu(), original_size, out_w, out_h
+
+    def resize(
+        self,
+        image,
+        resize_mode,
+        width,
+        height,
+        scale_percent,
+        long_side_length,
+        total_pixel_k,
+        aspect_ratio,
+        proportional_width,
+        proportional_height,
+        fit_mode,
+        upscale_method,
+        round_to_multiple,
+        pad_color,
+        device,
+        unique_id=None,
+        mask=None,
+    ):
+        """
+        支持两种输入：
+        1. IMAGE：普通 ComfyUI 图片 Tensor，形状 HWC 或 BHWC，输出仍为 Tensor。
+        2. GJJ_BATCH_IMAGE：多图列表/批量容器，逐张处理，输出处理后的图片列表。
+        """
+        is_multi_container = _is_multi_image_container(image)
+
+        if not is_multi_container:
+            return self._resize_tensor(
+                image,
+                resize_mode,
+                width,
+                height,
+                scale_percent,
+                long_side_length,
+                total_pixel_k,
+                aspect_ratio,
+                proportional_width,
+                proportional_height,
+                fit_mode,
+                upscale_method,
+                round_to_multiple,
+                pad_color,
+                device,
+                mask=mask,
+            )
+
+        items = _iter_batch_images(image)
+        if not items:
+            raise ValueError("GJJ_BATCH_IMAGE 为空，没有可处理的图片。")
+
+        out_items: List[Any] = []
+        out_masks: List[torch.Tensor] = []
+        original_sizes: List[List[int]] = []
+        first_w = 0
+        first_h = 0
+
+        for index, item in enumerate(items):
+            item_image = _extract_tensor_from_item(item)
+            if item_image is None:
+                logging.warning(
+                    f"GJJ_ImageResizeKJv2 跳过第 {index + 1} 张：未找到可识别的图片 Tensor。"
+                )
+                continue
+
+            item_mask = _select_mask_for_item(mask, index)
+            out_image, out_mask, original_size, out_w, out_h = self._resize_tensor(
+                item_image,
+                resize_mode,
+                width,
+                height,
+                scale_percent,
+                long_side_length,
+                total_pixel_k,
+                aspect_ratio,
+                proportional_width,
+                proportional_height,
+                fit_mode,
+                upscale_method,
+                round_to_multiple,
+                pad_color,
+                device,
+                mask=item_mask,
+            )
+
+            # 多图列表输出按“每个元素一张/一批”返回，便于后续 GJJ 批处理节点继续逐项处理。
+            out_items.append(_replace_item_image(item, out_image))
+            out_masks.append(out_mask)
+            original_sizes.append(original_size)
+            if first_w <= 0:
+                first_w = int(out_w)
+                first_h = int(out_h)
+
+        if not out_items:
+            raise ValueError("GJJ_BATCH_IMAGE 中没有可处理的图片。")
+
+        # 对于多图列表，原始尺寸返回每张图的尺寸列表；宽度/高度返回第一张处理结果尺寸。
+        return (out_items, out_masks, original_sizes, first_w, first_h)
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_ImageResizeKJv2}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🔍 图片缩放 KJv2"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🔍 多功能图片缩放"}
