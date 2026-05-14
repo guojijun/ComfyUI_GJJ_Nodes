@@ -1,469 +1,549 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
-import { queueOnlyCurrentNode, GJJ_Utils } from "./gjj_utils.js";
 
-(function () {
-    const NODE_CLASS_NAME = "GJJ_MemoryManager";
-    const STATUS_WIDGET_NAME = "__gjj_memory_manager_status";
-    const OUTPUT_NAME = "任意输出";
-    const OUTPUT_TOOLTIP = "原样输出输入的数据，类型与输入相同";
+const NODE_TYPE = "GJJ_MemoryManager";
 
-    function setDirty(node) {
-        GJJ_Utils.refreshNode(node);
+const ACTION_PROP = "action";
+const AUTO_CLEAN_MEMORY_PROP = "auto_clean_memory";
+const AUTO_CLEAN_GPU_PROP = "auto_clean_gpu";
+
+const ACTION_REFRESH = "refresh";
+const ACTION_CLEAN_MEMORY = "clean_memory";
+const ACTION_CLEAN_GPU = "clean_gpu";
+const ACTION_CLEAN_ALL = "clean_all";
+
+const MIN_NODE_WIDTH = 340;
+const MIN_NODE_HEIGHT = 420;
+const PANEL_HEIGHT = 326;
+const POLL_INTERVAL_MS = 2000;
+
+function ensureStyles() {
+    if (document.getElementById("gjj-memory-manager-styles-v3")) return;
+
+    const style = document.createElement("style");
+    style.id = "gjj-memory-manager-styles-v3";
+    style.textContent = `
+        .gjj-memory-panel {
+            box-sizing: border-box;
+            width: 100%;
+            height: ${PANEL_HEIGHT}px;
+            padding: 10px;
+            border: 1px solid rgba(137, 165, 190, 0.45);
+            border-radius: 10px;
+            background: rgba(13, 26, 31, 0.96);
+            color: #e8f2f4;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            user-select: none;
+            overflow: hidden;
+        }
+        .gjj-memory-top-row,
+        .gjj-memory-action-row {
+            display: grid;
+            gap: 8px;
+        }
+        .gjj-memory-top-row {
+            grid-template-columns: 1fr 1fr;
+            margin-bottom: 12px;
+        }
+        .gjj-memory-action-row {
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            margin-top: 10px;
+        }
+        .gjj-memory-btn {
+            border: 0;
+            border-radius: 6px;
+            color: #ffffff;
+            font-weight: 800;
+            cursor: pointer;
+            transition: transform 0.12s ease, opacity 0.12s ease, filter 0.12s ease, box-shadow 0.12s ease;
+            box-shadow: 0 1px 0 rgba(255,255,255,0.08) inset, 0 6px 12px rgba(0,0,0,0.16);
+            white-space: pre-line;
+            line-height: 1.15;
+            overflow: hidden;
+        }
+        .gjj-memory-btn:hover {
+            filter: brightness(1.08);
+            transform: translateY(-1px);
+        }
+        .gjj-memory-btn:active {
+            transform: translateY(0px) scale(0.98);
+        }
+        .gjj-memory-top-btn {
+            min-height: 52px;
+            padding: 10px 8px;
+            opacity: 0.46;
+            background: #35454e;
+            font-size: 15px;
+        }
+        .gjj-memory-top-btn.active.memory {
+            opacity: 1;
+            background: linear-gradient(135deg, #24b66f, #1f9f62);
+        }
+        .gjj-memory-top-btn.active.gpu {
+            opacity: 1;
+            background: linear-gradient(135deg, #8d5cff, #7444df);
+        }
+        .gjj-memory-action-btn {
+            height: 86px;
+            padding: 7px 4px;
+            font-size: 14px;
+            writing-mode: vertical-rl;
+            text-orientation: upright;
+            white-space: nowrap;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .gjj-memory-action-refresh { background: #4ea5ff; }
+        .gjj-memory-action-ram { background: #25a96b; }
+        .gjj-memory-action-gpu { background: #8358f5; }
+        .gjj-memory-action-all { background: #ff666b; }
+        .gjj-memory-section-title {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin: 4px 4px 8px;
+            font-size: 18px;
+            font-weight: 900;
+        }
+        .gjj-memory-updated {
+            color: #9aaeb7;
+            font-size: 12px;
+            font-weight: 600;
+            flex: 0 0 auto;
+        }
+        .gjj-memory-message {
+            height: 34px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            color: #adbbc3;
+            font-weight: 800;
+            line-height: 1.38;
+            padding: 4px 8px;
+            white-space: pre-line;
+            overflow: hidden;
+        }
+        .gjj-memory-stats {
+            height: 112px;
+            margin-top: 8px;
+            padding: 8px 10px;
+            border-radius: 8px;
+            background: rgba(255,255,255,0.04);
+            color: #c9d6dc;
+            font-size: 12px;
+            line-height: 1.25;
+            overflow: hidden;
+        }
+        .gjj-memory-meter {
+            margin-bottom: 8px;
+        }
+        .gjj-memory-meter:last-child {
+            margin-bottom: 0;
+        }
+        .gjj-memory-meter-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 4px;
+            color: #d7e4e9;
+            font-weight: 800;
+            white-space: nowrap;
+        }
+        .gjj-memory-meter-title {
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .gjj-memory-meter-percent {
+            flex: 0 0 auto;
+            color: #f1f6f8;
+        }
+        .gjj-memory-meter-track {
+            height: 10px;
+            border-radius: 999px;
+            background: rgba(0,0,0,0.32);
+            border: 1px solid rgba(255,255,255,0.06);
+            overflow: hidden;
+        }
+        .gjj-memory-meter-fill {
+            height: 100%;
+            width: 0%;
+            border-radius: inherit;
+            transition: width 0.25s ease;
+        }
+        .gjj-memory-meter.memory .gjj-memory-meter-fill {
+            background: linear-gradient(90deg, #26b56f, #65d68e);
+        }
+        .gjj-memory-meter.gpu .gjj-memory-meter-fill {
+            background: linear-gradient(90deg, #7b55f1, #ad7cff);
+        }
+        .gjj-memory-meter-detail {
+            margin-top: 3px;
+            color: #9fb0b8;
+            font-size: 11px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .gjj-memory-meter-error {
+            padding: 7px 8px;
+            border-radius: 7px;
+            background: rgba(255,255,255,0.04);
+            color: #c8d4da;
+            font-weight: 700;
+        }
+        .gjj-memory-sep {
+            height: 1px;
+            margin: 10px 0 8px;
+            background: rgba(137, 165, 190, 0.22);
+        }
+    `;
+    document.head.appendChild(style);
+}
+
+function isTargetNode(node) {
+    return String(node?.comfyClass || node?.type || "") === NODE_TYPE;
+}
+
+function ensureProps(node) {
+    node.properties = node.properties || {};
+    if (!Object.prototype.hasOwnProperty.call(node.properties, ACTION_PROP)) {
+        node.properties[ACTION_PROP] = ACTION_REFRESH;
+    }
+    if (!Object.prototype.hasOwnProperty.call(node.properties, AUTO_CLEAN_MEMORY_PROP)) {
+        node.properties[AUTO_CLEAN_MEMORY_PROP] = false;
+    }
+    if (!Object.prototype.hasOwnProperty.call(node.properties, AUTO_CLEAN_GPU_PROP)) {
+        node.properties[AUTO_CLEAN_GPU_PROP] = false;
+    }
+    return node.properties;
+}
+
+function markDirty(node) {
+    try {
+        node.setDirtyCanvas?.(true, true);
+        node.graph?.setDirtyCanvas?.(true, true);
+        app.graph?.setDirtyCanvas?.(true, true);
+        node.graph?.change?.();
+    } catch {}
+}
+
+function enforceMinNodeSize(node) {
+    if (!node || !Array.isArray(node.size)) return;
+
+    let changed = false;
+    if (Number(node.size[0] || 0) < MIN_NODE_WIDTH) {
+        node.size[0] = MIN_NODE_WIDTH;
+        changed = true;
+    }
+    if (Number(node.size[1] || 0) < MIN_NODE_HEIGHT) {
+        node.size[1] = MIN_NODE_HEIGHT;
+        changed = true;
     }
 
-    function getLinkedOutputInfo(node, input) {
-        const linkId = input?.link;
-        if (!linkId || !app.graph?.links) {
-            return null;
-        }
-        const link = app.graph.links[linkId];
-        const sourceNode = link?.origin_id != null ? app.graph.getNodeById?.(link.origin_id) : null;
-        const sourceSlot = sourceNode?.outputs?.[link.origin_slot];
-        if (!sourceSlot) {
-            return null;
-        }
-        return {
-            type: sourceSlot.type || "*",
-            label: sourceSlot.label || sourceSlot.name || sourceSlot.type || "*",
-        };
+    if (changed) markDirty(node);
+}
+
+async function fetchJson(url, options = {}) {
+    const fetcher = api?.fetchApi ? api.fetchApi.bind(api) : fetch;
+    const response = await fetcher(url, options);
+    if (!response.ok) {
+        throw new Error(`${response.status} ${response.statusText}`);
     }
-
-    function getLinkedInputInfo(node, output) {
-        const links = Array.isArray(output?.links) ? output.links : [];
-        for (const linkId of links) {
-            const link = app.graph?.links?.[linkId];
-            const targetNode = link?.target_id != null ? app.graph.getNodeById?.(link.target_id) : null;
-            const targetSlot = targetNode?.inputs?.[link.target_slot];
-            if (targetSlot) {
-                return {
-                    type: targetSlot.type || "*",
-                    label: targetSlot.label || targetSlot.name || targetSlot.type || "*",
-                };
-            }
-        }
-        return null;
-    }
-
-    function detectConnectedType(node) {
-        const input = node?.inputs?.[0];
-        if (input) {
-            const info = getLinkedOutputInfo(node, input);
-            if (info?.type) {
-                return info;
-            }
-        }
-
-        for (const output of node.outputs || []) {
-            const info = getLinkedInputInfo(node, output);
-            if (info?.type) {
-                return info;
-            }
-        }
-
-        return { type: "*", label: OUTPUT_NAME };
-    }
-
-    function stabilizeNode(node) {
-        if (!node) return;
-
-        if (!Array.isArray(node.outputs) || node.outputs.length === 0) {
-            node.addOutput?.(OUTPUT_NAME, "*");
-        }
-
-        const connectedType = detectConnectedType(node);
-        const resolvedType = connectedType?.type || "*";
-        const resolvedLabel = connectedType?.label || OUTPUT_NAME;
-
-        for (const input of node.inputs || []) {
-            input.type = resolvedType;
-        }
-        for (const output of node.outputs || []) {
-            output.type = resolvedType;
-            output.label = String(resolvedLabel || resolvedType || OUTPUT_NAME);
-            output.name = OUTPUT_NAME;
-            output.localized_name = OUTPUT_NAME;
-            output.tooltip = OUTPUT_TOOLTIP;
-        }
-
-        setDirty(node);
-    }
-
-    function scheduleStabilize(node, ms = 32) {
-        clearTimeout(node.__gjjMemoryManagerTimer);
-        node.__gjjMemoryManagerTimer = setTimeout(() => stabilizeNode(node), ms);
-    }
-
-    function setStatus(node, text) {
-        const s = node.__gjjMemoryStatus;
-        if (!s) return;
-        s.statusLabel.textContent = text;
-    }
-
-    function updateStatsDisplay(node, data) {
-        const s = node.__gjjMemoryStatus;
-        if (!s) return;
-
-        const memory = data.memory || {};
-        const gpu_list = data.gpu || [];
-
-        let html = `<div style="margin-bottom:12px;">`;
-        html += `<div style="font-weight:bold;color:#5aa8ff;margin-bottom:3px;">💾 系统内存</div>`;
-
-        if (memory.error) {
-            html += `<div style="color:#ff6b6b;font-size:12px;">${memory.error}</div>`;
-        } else {
-            const usedGB = memory.used || 0;
-            const totalGB = memory.total || 1;
-            const percent = memory.percent || 0;
-
-            html += `<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
-                <span>已使用: ${usedGB} GB</span>
-                <span>可用: ${memory.available || 0} GB</span>
-            </div>`;
-            html += `<div style="height:8px;border-radius:4px;background:#27343b;overflow:hidden;">
-                <div style="height:100%;border-radius:4px;background:${percent > 90 ? '#ff6b6b' : percent > 70 ? '#ffa502' : '#5aa8ff'};width:${percent}%;transition:width 0.3s;"></div>
-            </div>`;
-            html += `<div style="text-align:right;font-size:12px;color:#888;margin-top:2px;">${percent}%</div>`;
-        }
-        html += `</div>`;
-
-        html += `<div>`;
-        html += `<div style="font-weight:bold;color:#a855f7;margin-bottom:3px;">🎮 GPU 显存</div>`;
-
-        if (gpu_list.length === 0) {
-            html += `<div style="color:#aaa;font-size:11px;">未检测到GPU信息</div>`;
-        } else {
-            gpu_list.forEach((gpu, idx) => {
-                if (gpu.error) {
-                    html += `<div style="color:#ff6b6b;font-size:12px;margin-bottom:4px;">${gpu.error}</div>`;
-                } else {
-                    const usedGB = gpu.cached || gpu.allocated || 0;
-                    const totalGB = gpu.total || 1;
-                    const percent = gpu.percent || 0;
-
-                    html += `<div style="margin-bottom:8px;padding:6px;background:#1a2329;border-radius:4px;">`;
-                    html += `<div style="font-size:11px;color:#888;margin-bottom:4px;">${gpu.name || `GPU ${idx}`}</div>`;
-                    html += `<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
-                        <span>已分配: ${gpu.allocated || 0} GB</span>
-                        <span>可用: ${gpu.available || 0} GB</span>
-                    </div>`;
-                    html += `<div style="height:6px;border-radius:3px;background:#27343b;overflow:hidden;">
-                        <div style="height:100%;border-radius:3px;background:${percent > 90 ? '#ff6b6b' : percent > 70 ? '#ffa502' : '#a855f7'};width:${percent}%;transition:width 0.3s;"></div>
-                    </div>`;
-                    html += `<div style="text-align:right;font-size:10px;color:#888;margin-top:2px;">缓存: ${gpu.cached || 0} GB (${percent}%)</div>`;
-                    html += `</div>`;
-                }
-            });
-        }
-        html += `</div>`;
-
-        s.statsDisplay.innerHTML = html;
-
-        const timestamp = new Date().toLocaleTimeString();
-        s.lastUpdate.textContent = `最后更新: ${timestamp}`;
-    }
-
-    function ensureStatusWidget(node) {
-        if (node.__gjjMemoryStatus) return node.__gjjMemoryStatus;
-
-        const box = document.createElement("div");
-        box.style.cssText = "padding:10px;border:1px solid #41535b;border-radius:8px;background:#121a1f;color:#dce7e2";
-
-        // 顶部按钮区域（清理内存、清理显存）
-        const topBtnRow = document.createElement("div");
-        topBtnRow.style.cssText = "display:flex;gap:8px;margin-bottom:12px;";
-
-        const topCleanMemBtn = document.createElement("button");
-        topCleanMemBtn.textContent = "🧹清理内存";
-        topCleanMemBtn.style.cssText = "flex:1;height:36px;background:#2d9a5e;color:#fff;border:none;border-radius:4px;padding:4px;cursor:pointer;font-size:12px;font-weight:bold;transition:all 0.2s;";
-
-        topCleanMemBtn.addEventListener("click", async () => {
-            node.properties = node.properties || {};
-            node.properties.action = "clean_memory";
-            node.setDirtyCanvas?.(true, true);
-            node.graph?.change?.();
-
-            await executeNode(node, topCleanMemBtn);
-        });
-
-        topBtnRow.appendChild(topCleanMemBtn);
-
-        const topCleanGpuBtn = document.createElement("button");
-        topCleanGpuBtn.textContent = "🎮清理显存";
-        topCleanGpuBtn.style.cssText = "flex:1;height:36px;background:#8b5cf6;color:#fff;border:none;border-radius:4px;padding:4px;cursor:pointer;font-size:12px;font-weight:bold;transition:all 0.2s;";
-
-        topCleanGpuBtn.addEventListener("click", async () => {
-            node.properties = node.properties || {};
-            node.properties.action = "clean_gpu";
-            node.setDirtyCanvas?.(true, true);
-            node.graph?.change?.();
-
-            await executeNode(node, topCleanGpuBtn);
-        });
-
-        topBtnRow.appendChild(topCleanGpuBtn);
-        box.appendChild(topBtnRow);
-
-        const headerRow = document.createElement("div");
-        headerRow.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:12px";
-
-        const title = document.createElement("div");
-        title.textContent = "️ 资源监控";
-        title.style.cssText = "font-weight:bold;font-size:14px";
-        headerRow.appendChild(title);
-
-        const lastUpdate = document.createElement("div");
-        lastUpdate.textContent = "最后更新: --:--:--";
-        lastUpdate.style.cssText = "font-size:11px;color:#888";
-        headerRow.appendChild(lastUpdate);
-        box.appendChild(headerRow);
-
-        const statsDisplay = document.createElement("div");
-        statsDisplay.innerHTML = `<div style="color:#aaa;font-size:12px;text-align:center;padding:20px;">点击「刷新状态」获取内存/显存信息</div>`;
-        box.appendChild(statsDisplay);
-
-        // 创建开关行（两个开关放一行）
-        const switchRow = document.createElement("div");
-        switchRow.style.cssText = "display:flex;gap:16px;margin-top:12px;padding:8px;background:#1a2329;border-radius:6px;align-items:center;justify-content:space-around;";
-
-        function createToggle(label, defaultState) {
-            const container = document.createElement("div");
-            container.style.cssText = "display:flex;align-items:center;gap:6px;";
-
-            const textSpan = document.createElement("span");
-            textSpan.textContent = label;
-            textSpan.style.cssText = "font-size:12px;color:#dce7e2;white-space:nowrap;";
-            container.appendChild(textSpan);
-
-            const toggleBg = document.createElement("div");
-            toggleBg.style.cssText = "width:36px;height:20px;border-radius:10px;background:#27343b;position:relative;cursor:pointer;transition:background 0.2s;";
-
-            const toggleKnob = document.createElement("div");
-            toggleKnob.style.cssText = "width:16px;height:16px;border-radius:50%;background:#888;position:absolute;top:2px;left:2px;transition:all 0.2s;";
-
-            if (defaultState) {
-                toggleBg.style.background = "#5aa8ff";
-                toggleKnob.style.left = "18px";
-                toggleKnob.style.background = "#fff";
-            }
-
-            toggleBg.appendChild(toggleKnob);
-            container.appendChild(toggleBg);
-
-            let state = defaultState;
-            const toggle = () => {
-                state = !state;
-                if (state) {
-                    toggleBg.style.background = "#5aa8ff";
-                    toggleKnob.style.left = "18px";
-                    toggleKnob.style.background = "#fff";
-                } else {
-                    toggleBg.style.background = "#27343b";
-                    toggleKnob.style.left = "2px";
-                    toggleKnob.style.background = "#888";
-                }
-            };
-            toggleBg.addEventListener("click", toggle);
-
-            return { container, getState: () => state, setState: (val) => { state = val; toggle(); } };
-        }
-
-        const purgeCacheToggle = createToggle("🧹清理内存", false);
-        const purgeModelsToggle = createToggle("🎮清理显存", false);
-
-        switchRow.appendChild(purgeCacheToggle.container);
-        switchRow.appendChild(purgeModelsToggle.container);
-        box.appendChild(switchRow);
-
-        const btnRow = document.createElement("div");
-        btnRow.style.cssText = "display:flex;flex-direction:row;gap:4px;margin-top:12px;width:100%";
-
-        const refreshBtn = document.createElement("button");
-        refreshBtn.textContent = "刷新状态";
-        refreshBtn.style.cssText = "flex:1;height:60px;background:#5aa8ff;color:#fff;border:none;border-radius:4px;padding:4px;cursor:pointer;font-size:9px;font-weight:bold;transition:all 0.2s;display:flex;align-items:center;justify-content:center;writing-mode:vertical-rl;text-orientation:mixed;-webkit-writing-mode:vertical-rl;-ms-writing-mode:tb-rl";
-
-        refreshBtn.addEventListener("click", async () => {
-            node.properties = node.properties || {};
-            node.properties.action = "refresh";
-            node.setDirtyCanvas?.(true, true);
-            node.graph?.change?.();
-
-            await executeNode(node, refreshBtn);
-        });
-
-        btnRow.appendChild(refreshBtn);
-
-        const cleanMemBtn = document.createElement("button");
-        cleanMemBtn.textContent = "清理内存";
-        cleanMemBtn.style.cssText = "flex:1;height:60px;background:#2d9a5e;color:#fff;border:none;border-radius:4px;padding:4px;cursor:pointer;font-size:9px;font-weight:bold;transition:all 0.2s;display:flex;align-items:center;justify-content:center;writing-mode:vertical-rl;text-orientation:mixed;-webkit-writing-mode:vertical-rl;-ms-writing-mode:tb-rl";
-
-        cleanMemBtn.addEventListener("click", async () => {
-            node.properties = node.properties || {};
-            node.properties.action = "clean_memory";
-            node.setDirtyCanvas?.(true, true);
-            node.graph?.change?.();
-
-            await executeNode(node, cleanMemBtn);
-        });
-
-        btnRow.appendChild(cleanMemBtn);
-
-        const cleanGpuBtn = document.createElement("button");
-        cleanGpuBtn.textContent = "清理显存";
-        cleanGpuBtn.style.cssText = "flex:1;height:60px;background:#8b5cf6;color:#fff;border:none;border-radius:4px;padding:4px;cursor:pointer;font-size:9px;font-weight:bold;transition:all 0.2s;display:flex;align-items:center;justify-content:center;writing-mode:vertical-rl;text-orientation:mixed;-webkit-writing-mode:vertical-rl;-ms-writing-mode:tb-rl";
-
-        cleanGpuBtn.addEventListener("click", async () => {
-            node.properties = node.properties || {};
-            node.properties.action = "clean_gpu";
-            node.setDirtyCanvas?.(true, true);
-            node.graph?.change?.();
-
-            await executeNode(node, cleanGpuBtn);
-        });
-
-        btnRow.appendChild(cleanGpuBtn);
-
-        const cleanAllBtn = document.createElement("button");
-        cleanAllBtn.textContent = "一键清理";
-        cleanAllBtn.style.cssText = "flex:1;height:60px;background:#ff6b6b;color:#fff;border:none;border-radius:4px;padding:4px;cursor:pointer;font-size:9px;font-weight:bold;transition:all 0.2s;display:flex;align-items:center;justify-content:center;writing-mode:vertical-rl;text-orientation:mixed;-webkit-writing-mode:vertical-rl;-ms-writing-mode:tb-rl";
-
-        cleanAllBtn.addEventListener("click", async () => {
-            node.properties = node.properties || {};
-            node.properties.action = "clean_all";
-            node.setDirtyCanvas?.(true, true);
-            node.graph?.change?.();
-
-            await executeNode(node, cleanAllBtn);
-        });
-
-        btnRow.appendChild(cleanAllBtn);
-        box.appendChild(btnRow);
-
-        const statusRow = document.createElement("div");
-        statusRow.style.cssText = "margin-top:8px;padding-top:8px;border-top:1px solid #27343b";
-
-        const statusLabel = document.createElement("div");
-        statusLabel.textContent = "状态: 等待操作";
-        statusLabel.style.cssText = "font-size:11px;color:#888";
-        statusRow.appendChild(statusLabel);
-        box.appendChild(statusRow);
-
-        const statusObj = {
-            statusLabel,
-            statsDisplay,
-            lastUpdate,
-            refreshBtn,
-            cleanMemBtn,
-            cleanGpuBtn,
-            cleanAllBtn,
-            purgeCacheToggle,
-            purgeModelsToggle,
-            topCleanMemBtn,
-            topCleanGpuBtn
-        };
-
-        const widget = node.addDOMWidget?.(STATUS_WIDGET_NAME, STATUS_WIDGET_NAME, box, {
-            serialize: false,
-            hideOnZoom: false,
-            getHeight: () => 350,
-        });
-
-        statusObj.widget = widget;
-        node.__gjjMemoryStatus = statusObj;
-
-        return statusObj;
-    }
-
-    async function executeNode(node, btn) {
-        const origText = btn.textContent;
-        const origBg = btn.style.background;
+    return await response.json();
+}
+
+async function requestStats(node) {
+    const id = encodeURIComponent(String(node?.id ?? ""));
+    return await fetchJson(`/gjj_memory_manager/stats?node=${id}`);
+}
+
+async function requestAction(node, action) {
+    return await fetchJson("/gjj_memory_manager/action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ node: String(node?.id ?? ""), action }),
+    });
+}
+
+function makeTopToggleButton(node, label, propName, icon, className) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `gjj-memory-btn gjj-memory-top-btn ${className}`;
+
+    const sync = () => {
+        const props = ensureProps(node);
+        const active = !!props[propName];
+        btn.className = `gjj-memory-btn gjj-memory-top-btn ${className}${active ? " active" : ""}`;
+        btn.textContent = `${icon} ${label}`;
+        btn.title = active
+            ? `已开启：数据流过此节点时自动${label}`
+            : `已关闭：数据流过此节点时不自动${label}`;
+    };
+
+    btn.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        const props = ensureProps(node);
+        props[propName] = !props[propName];
+        props[ACTION_PROP] = ACTION_REFRESH;
+        sync();
+        markDirty(node);
+    });
+
+    sync();
+    return btn;
+}
+
+function makeActionButton(node, label, action, icon, className, statusEl) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `gjj-memory-btn gjj-memory-action-btn ${className}`;
+    btn.textContent = `${icon}${label}`;
+    btn.title = `只执行本节点后端动作：${label}。不会提交整个工作流。`;
+
+    btn.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
 
         try {
-            btn.textContent = "⏳ 处理中...";
-            btn.disabled = true;
-            btn.style.cursor = "not-allowed";
-            btn.style.opacity = "0.65";
+            if (statusEl) statusEl.textContent = "正在处理...";
+            const props = ensureProps(node);
+            props[ACTION_PROP] = ACTION_REFRESH; // 避免手动动作残留到后续正常队列。
+            markDirty(node);
 
-            setStatus(node, "正在处理...");
-
-            await queueOnlyCurrentNode(node);
-        } catch (e) {
-            console.error("[GJJ] 执行失败:", e);
-            setStatus(node, "执行失败");
-        } finally {
-            setTimeout(() => {
-                btn.textContent = origText;
-                btn.disabled = false;
-                btn.style.cursor = "pointer";
-                btn.style.opacity = "1";
-                btn.style.background = origBg;
-            }, 500);
+            const detail = await requestAction(node, action);
+            updateStatsForNode(node, detail);
+        } catch (error) {
+            console.warn("[GJJ_MemoryManager] action failed:", error);
+            if (statusEl) statusEl.textContent = `执行失败：${error.message || error}`;
         }
-    }
-
-    function patchNode(node) {
-        if (!node || node.__gjjMemoryManagerPatched) return;
-        node.__gjjMemoryManagerPatched = true;
-
-        ensureStatusWidget(node);
-        setStatus(node, "等待操作");
-        setTimeout(() => stabilizeNode(node), 0);
-    }
-
-    app.registerExtension({
-        name: `GJJ.${NODE_CLASS_NAME}`,
-
-        async beforeRegisterNodeDef(nodeType, nodeData) {
-            if (nodeData?.name === NODE_CLASS_NAME) {
-                const orig = nodeType.prototype.onNodeCreated;
-                nodeType.prototype.onNodeCreated = function () {
-                    const r = orig?.apply(this, arguments);
-                    patchNode(this);
-                    return r;
-                };
-
-                const origConfigure = nodeType.prototype.onConfigure;
-                nodeType.prototype.onConfigure = function () {
-                    const r = origConfigure?.apply(this, arguments);
-                    setTimeout(() => stabilizeNode(this), 0);
-                    return r;
-                };
-
-                const origOnConnectionsChange = nodeType.prototype.onConnectionsChange;
-                nodeType.prototype.onConnectionsChange = function () {
-                    const r = origOnConnectionsChange?.apply(this, arguments);
-                    scheduleStabilize(this);
-                    return r;
-                };
-            }
-        },
-
-        async setup() {
-            api.addEventListener("gjj_memory_manager_stats", (event) => {
-                try {
-                    const d = event.detail || {};
-                    const nodeId = d.node;
-
-                    if (!nodeId) return;
-
-                    for (const node of app.graph?._nodes || []) {
-                        if (String(node.id) === String(nodeId)) {
-                            updateStatsDisplay(node, d);
-                            setStatus(node, "已更新");
-                            break;
-                        }
-                    }
-                } catch (err) {
-                    console.error("[GJJ] 处理统计事件失败:", err);
-                }
-            });
-
-            for (const node of app.graph?._nodes || []) {
-                if (node?.comfyClass === NODE_CLASS_NAME) {
-                    stabilizeNode(node);
-                }
-            }
-        },
     });
-})();
+
+    return btn;
+}
+
+function clampPercent(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.min(100, n));
+}
+
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+}
+
+function makeMeterHtml(kind, title, percent, detail) {
+    const p = clampPercent(percent);
+    return `
+        <div class="gjj-memory-meter ${kind}">
+            <div class="gjj-memory-meter-head">
+                <span class="gjj-memory-meter-title">${escapeHtml(title)}</span>
+                <span class="gjj-memory-meter-percent">${p.toFixed(1)}%</span>
+            </div>
+            <div class="gjj-memory-meter-track">
+                <div class="gjj-memory-meter-fill" style="width:${p}%"></div>
+            </div>
+            <div class="gjj-memory-meter-detail">${escapeHtml(detail)}</div>
+        </div>
+    `;
+}
+
+function makeErrorHtml(text) {
+    return `<div class="gjj-memory-meter-error">${escapeHtml(text)}</div>`;
+}
+
+function renderStatsHtml(detail) {
+    const parts = [];
+    const memory = detail?.memory;
+
+    if (!memory) {
+        parts.push(makeErrorHtml("内存：暂无数据"));
+    } else if (memory.error) {
+        parts.push(makeErrorHtml(`内存：${memory.error}`));
+    } else {
+        parts.push(makeMeterHtml(
+            "memory",
+            "内存 RAM",
+            memory.percent,
+            `已用 ${memory.used}/${memory.total}${memory.unit} · 可用 ${memory.available}${memory.unit}`
+        ));
+    }
+
+    const gpu = Array.isArray(detail?.gpu) ? detail.gpu : [];
+    const firstGpu = gpu.find((item) => item && !item.error) || gpu[0];
+    if (!firstGpu) {
+        parts.push(makeErrorHtml("显存：暂无数据"));
+    } else if (firstGpu.error) {
+        parts.push(makeErrorHtml(`显存：${firstGpu.error}`));
+    } else {
+        const name = firstGpu.name ? `${firstGpu.device} · ${firstGpu.name}` : firstGpu.device;
+        parts.push(makeMeterHtml(
+            "gpu",
+            "显存 VRAM",
+            firstGpu.percent,
+            `${name} · 已占 ${firstGpu.cached}/${firstGpu.total}${firstGpu.unit} · 可用 ${firstGpu.available}${firstGpu.unit}`
+        ));
+    }
+
+    return parts.join("");
+}
+
+function createPanel(node) {
+    ensureStyles();
+    ensureProps(node);
+
+    const panel = document.createElement("div");
+    panel.className = "gjj-memory-panel";
+
+    const topRow = document.createElement("div");
+    topRow.className = "gjj-memory-top-row";
+    topRow.appendChild(makeTopToggleButton(node, "清理内存", AUTO_CLEAN_MEMORY_PROP, "🧹", "memory"));
+    topRow.appendChild(makeTopToggleButton(node, "清理显存", AUTO_CLEAN_GPU_PROP, "🎮", "gpu"));
+    panel.appendChild(topRow);
+
+    const title = document.createElement("div");
+    title.className = "gjj-memory-section-title";
+    title.innerHTML = `<span>资源监控</span><span class="gjj-memory-updated">最后更新: --:--:--</span>`;
+    panel.appendChild(title);
+
+    const message = document.createElement("div");
+    message.className = "gjj-memory-message";
+    message.textContent = "正在获取资源状态...";
+    panel.appendChild(message);
+
+    const stats = document.createElement("div");
+    stats.className = "gjj-memory-stats";
+    stats.innerHTML = renderStatsHtml({});
+    panel.appendChild(stats);
+
+    const sep = document.createElement("div");
+    sep.className = "gjj-memory-sep";
+    panel.appendChild(sep);
+
+    const actionRow = document.createElement("div");
+    actionRow.className = "gjj-memory-action-row";
+    actionRow.appendChild(makeActionButton(node, "刷新状态", ACTION_REFRESH, "🔄", "gjj-memory-action-refresh", message));
+    actionRow.appendChild(makeActionButton(node, "清理内存", ACTION_CLEAN_MEMORY, "🧹", "gjj-memory-action-ram", message));
+    actionRow.appendChild(makeActionButton(node, "清理显存", ACTION_CLEAN_GPU, "🎮", "gjj-memory-action-gpu", message));
+    actionRow.appendChild(makeActionButton(node, "一键清理", ACTION_CLEAN_ALL, "🧨", "gjj-memory-action-all", message));
+    panel.appendChild(actionRow);
+
+    node.__gjjMemoryPanel = panel;
+    node.__gjjMemoryMessage = message;
+    node.__gjjMemoryStats = stats;
+    node.__gjjMemoryUpdated = title.querySelector(".gjj-memory-updated");
+
+    return panel;
+}
+
+function startPolling(node) {
+    if (node.__gjjMemoryPollTimer) return;
+
+    const tick = async () => {
+        try {
+            const nodes = app.graph?._nodes || [];
+            if (!nodes.includes(node)) {
+                clearInterval(node.__gjjMemoryPollTimer);
+                node.__gjjMemoryPollTimer = null;
+                return;
+            }
+            const detail = await requestStats(node);
+            updateStatsForNode(node, detail, true);
+        } catch (error) {
+            if (node.__gjjMemoryMessage) {
+                node.__gjjMemoryMessage.textContent = `状态更新失败：${error.message || error}`;
+            }
+        }
+    };
+
+    node.__gjjMemoryPollTimer = setInterval(tick, POLL_INTERVAL_MS);
+    setTimeout(tick, 300);
+}
+
+function installPanel(node) {
+    if (!isTargetNode(node)) return;
+    if (node.__gjjMemoryPanelInstalled) return;
+    node.__gjjMemoryPanelInstalled = true;
+
+    const panel = createPanel(node);
+
+    if (typeof node.addDOMWidget === "function") {
+        node.addDOMWidget("gjj_memory_manager_panel", "div", panel, {
+            serialize: false,
+            hideOnZoom: false,
+            getMinHeight: () => PANEL_HEIGHT,
+            getMaxHeight: () => PANEL_HEIGHT,
+        });
+    } else if (typeof node.addWidget === "function") {
+        node.addWidget("text", "GJJ 内存显存管理", "", () => {}, { serialize: false });
+    }
+
+    enforceMinNodeSize(node);
+
+    const oldOnResize = node.onResize;
+    node.onResize = function (...args) {
+        const result = oldOnResize?.apply(this, args);
+        enforceMinNodeSize(this);
+        return result;
+    };
+
+    startPolling(node);
+    markDirty(node);
+}
+
+function updateStatsForNode(node, detail, keepCurrentMessage = false) {
+    if (!node || !node.__gjjMemoryPanel) return;
+
+    const message = detail?.message || "刷新状态";
+    if (node.__gjjMemoryMessage && !keepCurrentMessage) {
+        node.__gjjMemoryMessage.textContent = message;
+    } else if (node.__gjjMemoryMessage && node.__gjjMemoryMessage.textContent === "正在获取资源状态...") {
+        node.__gjjMemoryMessage.textContent = message;
+    }
+
+    if (node.__gjjMemoryStats) {
+        node.__gjjMemoryStats.innerHTML = renderStatsHtml(detail);
+    }
+
+    if (node.__gjjMemoryUpdated) {
+        const d = new Date((detail?.timestamp || Date.now() / 1000) * 1000);
+        node.__gjjMemoryUpdated.textContent = `最后更新: ${d.toLocaleTimeString()}`;
+    }
+}
+
+api.addEventListener("gjj_memory_manager_stats", (event) => {
+    const detail = event.detail || {};
+    const id = String(detail.node ?? "");
+    const node = app.graph?.getNodeById?.(id) || app.graph?._nodes?.find((n) => String(n.id) === id);
+    updateStatsForNode(node, detail, false);
+});
+
+app.registerExtension({
+    name: "GJJ.MemoryManager.Panel.V3",
+    async beforeRegisterNodeDef(nodeType, nodeData) {
+        if (nodeData?.name !== NODE_TYPE) return;
+
+        const onNodeCreated = nodeType.prototype.onNodeCreated;
+        nodeType.prototype.onNodeCreated = function (...args) {
+            const result = onNodeCreated?.apply(this, args);
+            installPanel(this);
+            return result;
+        };
+
+        const onConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function (...args) {
+            const result = onConfigure?.apply(this, args);
+            ensureProps(this);
+            requestAnimationFrame(() => installPanel(this));
+            return result;
+        };
+    },
+});

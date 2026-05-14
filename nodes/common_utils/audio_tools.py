@@ -245,7 +245,7 @@ LTXVAudioVAELoader = gjjutils_LTXVAudioVAELoader
 LTXVAudioVAEEncode = gjjutils_LTXVAudioVAEEncode
 LTXVAudioVAEDecode = gjjutils_LTXVAudioVAEDecode
 LTXAVTextEncoderLoader = gjjutils_LTXAVTextEncoderLoader
-vae_decode_audio = gjjutils_vae_decode_audio
+vae_decode_audio = gjjutils_vae_decode_audio.execute
 
 # 方式2：函数调用（备用）
 def LTXVEmptyLatentAudio_execute(frames_number: int = 1, frame_rate: int = 24, batch_size: int = 1, audio_vae: Any = None) -> tuple[dict[str, Any]]:

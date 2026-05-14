@@ -29,9 +29,10 @@ const MIN_REROUTE_WIDTH = 24;
 const COLLAPSED_NODE_WIDTH = 80;
 const COLLAPSED_NODE_HEIGHT = 30;
 
-// 节点本身仍然压到最低宽度，但排列时用一个“视觉宽度”防止标题/接口文字互相覆盖。
+// 普通排列不再强制修改真实宽度。
+// 这里的布局宽度只用于“计算占位”和“防覆盖”；要尽量包含节点真实宽度，避免宽节点盖住邻居。
 const MIN_LAYOUT_NODE_WIDTH = 168;
-const MAX_LAYOUT_NODE_WIDTH = 340;
+const MAX_LAYOUT_NODE_WIDTH = 1200;
 let HORIZONTAL_SAFE_GAP = 28;
 let VERTICAL_SAFE_GAP = 18;
 
@@ -205,11 +206,41 @@ function getSelectedCountForScope(nodes) {
 	return count;
 }
 
+function getExplicitSelectedNodeSetForScope() {
+	const canvasSelected = getCanvasSelectedNodeSet();
+	const allNodes = filterValidNodes(getAllGraphNodes(), false);
+	const allSet = new Set(allNodes);
+	const result = new Set();
+
+	if (canvasSelected.size > 0) {
+		for (const node of canvasSelected) {
+			if (allSet.has(node)) result.add(node);
+		}
+		return result;
+	}
+
+	for (const node of allNodes) {
+		if (node.selected || node.flags?.selected || node.__selected || node.is_selected) {
+			result.add(node);
+		}
+	}
+
+	return result;
+}
+
 function shouldUseSelectedOnly() {
 	const nodes = filterValidNodes(getAllGraphNodes(), false);
 	if (nodes.length === 0) return false;
 
-	const selectedCount = getSelectedCountForScope(nodes);
+	// 这里必须只看“真实选中”，不能用 current_node / node_over / 最近点击节点。
+	// 否则没有任何选择时，鼠标悬停节点也会被误判成“部分选择”，
+	// 顶部按钮/右键菜单就只作用到一个节点，看起来像“没有反应”。
+	const selectedSet = getExplicitSelectedNodeSetForScope();
+	let selectedCount = 0;
+	for (const node of nodes) {
+		if (selectedSet.has(node)) selectedCount++;
+	}
+
 	return selectedCount > 0 && selectedCount < nodes.length;
 }
 
@@ -382,23 +413,38 @@ function getLongestSlotTextWidth(node) {
 function getNodeWidth(node) {
 	if (isRerouteNode(node)) return Math.max(MIN_REROUTE_WIDTH, getStoredNodeWidth(node));
 
+	const storedWidth = getStoredNodeWidth(node);
 	const titleWidth = measureTextWidthForLayout(getNodeTitleForLayout(node));
 	const slotWidth = getLongestSlotTextWidth(node);
 	const estimated = Math.max(
 		MIN_LAYOUT_NODE_WIDTH,
-		getStoredNodeWidth(node),
-		titleWidth + 44,
-		slotWidth + 72
+		storedWidth,
+		titleWidth + 56,
+		slotWidth + 96
 	);
 
-	return Math.min(MAX_LAYOUT_NODE_WIDTH, Math.round(estimated));
+	// 注意：这里不能再用 340 之类的小上限截断。
+	// 宽节点、长文本节点、手动拉宽的节点都必须按真实宽度参与布局，
+	// 否则排列时会以为节点很窄，最终互相覆盖。
+	return Math.round(Math.min(MAX_LAYOUT_NODE_WIDTH, estimated));
 }
 
 
 function getVisualNodeWidth(node) {
-	// 兼容单节点放射排列里调用的视觉宽度函数。
-	// 普通排列不再修改真实 node.size，布局宽度统一由 getNodeWidth() 估算。
-	return getNodeWidth(node);
+	if (isRerouteNode(node)) return Math.max(MIN_REROUTE_WIDTH, getStoredNodeWidth(node));
+
+	const storedWidth = getStoredNodeWidth(node);
+	const titleWidth = measureTextWidthForLayout(getNodeTitleForLayout(node));
+	const slotWidth = getLongestSlotTextWidth(node);
+	const widgetWidth = Math.max(0, Number(node?.widgets?.length || 0) > 0 ? 24 : 0);
+
+	return Math.round(Math.min(MAX_LAYOUT_NODE_WIDTH, Math.max(
+		MIN_LAYOUT_NODE_WIDTH,
+		storedWidth,
+		titleWidth + 72,
+		slotWidth + 112,
+		storedWidth + widgetWidth
+	)));
 }
 
 function getNodeHeight(node) {
@@ -556,30 +602,176 @@ function refreshAfterArrange(nodes = []) {
 	}
 }
 
+async function executeComfyCommand(commandId) {
+	const candidates = [
+		app?.extensionManager?.command,
+		app?.extensionManager?.commands,
+		app?.commands,
+		app?.commandRegistry,
+		app?.ui?.commands,
+		window?.app?.extensionManager?.command,
+		window?.app?.extensionManager?.commands,
+		window?.app?.commands,
+		window?.app?.commandRegistry,
+	];
+
+	for (const registry of candidates) {
+		if (!registry) continue;
+
+		try {
+			if (typeof registry.execute === "function") {
+				await registry.execute(commandId);
+				return true;
+			}
+
+			if (typeof registry.run === "function") {
+				await registry.run(commandId);
+				return true;
+			}
+
+			if (typeof registry.invoke === "function") {
+				await registry.invoke(commandId);
+				return true;
+			}
+
+			const command = registry[commandId] || registry.commands?.[commandId] || registry.commandMap?.[commandId];
+			if (typeof command === "function") {
+				await command();
+				return true;
+			}
+
+			if (command && typeof command.execute === "function") {
+				await command.execute();
+				return true;
+			}
+		} catch (error) {
+			console.warn(`[GJJ_NodeArranger] command ${commandId} failed:`, error);
+		}
+	}
+
+	return false;
+}
+
+function dispatchFitViewKey(target) {
+	if (!target?.dispatchEvent) return false;
+
+	const base = {
+		key: ".",
+		code: "Period",
+		keyCode: 190,
+		which: 190,
+		bubbles: true,
+		cancelable: true,
+		composed: true,
+	};
+
+	try {
+		target.dispatchEvent(new KeyboardEvent("keydown", base));
+		target.dispatchEvent(new KeyboardEvent("keypress", base));
+		target.dispatchEvent(new KeyboardEvent("keyup", base));
+		return true;
+	} catch (error) {
+		console.warn("[GJJ_NodeArranger] dispatch fit view shortcut failed:", error);
+		return false;
+	}
+}
+
+function pressFitViewShortcut() {
+	const canvasEl = app?.canvas?.canvas || app?.canvas?.canvasEl || app?.canvas?.canvas_element;
+	const targets = [
+		canvasEl,
+		document.activeElement,
+		document.body,
+		document,
+		window,
+	].filter(Boolean);
+
+	let ok = false;
+	for (const target of targets) {
+		ok = dispatchFitViewKey(target) || ok;
+	}
+	return ok;
+}
+
+function runDirectCanvasFit() {
+	try {
+		const canvas = app?.canvas;
+		if (!canvas) return false;
+
+		if (typeof canvas.fitView === "function") {
+			canvas.fitView();
+			return true;
+		}
+
+		if (typeof canvas.fitViewToSelection === "function") {
+			canvas.fitViewToSelection();
+			return true;
+		}
+
+		if (typeof canvas.centerOnNode === "function") {
+			const nodes = getAllGraphNodes();
+			if (nodes.length) {
+				canvas.centerOnNode(nodes[0]);
+				return true;
+			}
+		}
+	} catch (error) {
+		console.warn("[GJJ_NodeArranger] direct canvas fit failed:", error);
+	}
+
+	return false;
+}
+
+let __gjjFitViewTimer = null;
+let __gjjFitViewRunning = false;
+
 function fitView(nodes = null) {
 	try {
 		const targetNodes = filterValidNodes(nodes || getAllGraphNodes(), false);
 		refreshAfterArrange(targetNodes);
 
-		// 不再临时改 selected，避免鼠标悬停/重绘时触发布局或选中状态异常。
-		// 优先尝试 ComfyUI/LiteGraph 自带的全局适配视图能力。
-		if (app.canvas?.fitView && typeof app.canvas.fitView === "function") {
-			app.canvas.fitView();
-			return;
-		}
+		// 以前连续 50/180/360ms 多次执行会造成视图来回抖动。
+		// 这里改成“防抖 + 等画布稳定后只执行一次”。
+		clearTimeout(__gjjFitViewTimer);
 
-		// 退回到 ComfyUI 的“适配视图”快捷键。这里不修改任何节点状态。
-		const keyEvent = new KeyboardEvent("keydown", {
-			key: ".",
-			code: "Period",
-			keyCode: 190,
-			which: 190,
-			bubbles: true,
-			cancelable: true,
-		});
-		document.dispatchEvent(keyEvent);
+		__gjjFitViewTimer = setTimeout(() => {
+			requestAnimationFrame(() => {
+				requestAnimationFrame(async () => {
+					if (__gjjFitViewRunning) return;
+					__gjjFitViewRunning = true;
+
+					try {
+						let ok = false;
+
+						// 优先使用 ComfyUI 自带命令：适应视图到选中节点
+						try {
+							ok = await executeComfyCommand("Comfy_Canvas_FitView");
+						} catch (error) {
+							console.warn("[GJJ_NodeArranger] Comfy_Canvas_FitView failed:", error);
+						}
+
+						// 命令入口不可用时，再走直接 canvas 方法。
+						if (!ok) {
+							ok = runDirectCanvasFit();
+						}
+
+						// 最后兜底只模拟一次系统快捷键「.」，避免多次触发抖动。
+						if (!ok) {
+							pressFitViewShortcut();
+						}
+
+						app?.graph?.setDirtyCanvas?.(true, true);
+						app?.canvas?.setDirty?.(true, true);
+					} finally {
+						__gjjFitViewRunning = false;
+					}
+				});
+			});
+		}, 180);
 	} catch (error) {
 		console.warn("[GJJ_NodeArranger] fit view failed:", error);
+		clearTimeout(__gjjFitViewTimer);
+		__gjjFitViewTimer = setTimeout(() => pressFitViewShortcut(), 180);
 	}
 }
 
@@ -1714,9 +1906,9 @@ function rectForNode(node, gap = DEFAULT_SPACING) {
 	return {
 		x: getNodeX(node),
 		y: getNodeY(node),
-		w: getNodeWidth(node),
+		w: Math.max(getNodeWidth(node), getVisualNodeWidth(node)),
 		h: getNodeHeight(node),
-		right: getNodeX(node) + getNodeWidth(node) + g,
+		right: getNodeX(node) + Math.max(getNodeWidth(node), getVisualNodeWidth(node)) + g,
 		bottom: getNodeY(node) + getNodeHeight(node) + g,
 	};
 }
@@ -2203,7 +2395,7 @@ function buildDirectionalRadialPositions(anchor, normalNodes, forward, backward,
 
 	const maxWidth = Math.max(MIN_LAYOUT_NODE_WIDTH, ...normalNodes.map((node) => Math.max(getNodeWidth(node), getVisualNodeWidth(node))));
 	const maxHeight = Math.max(80, ...normalNodes.map(getNodeHeight));
-	const colStepBase = Math.max(380, maxWidth + getColumnGap(spacing) * 6);
+	const colStepBase = Math.max(380, maxWidth + getColumnGap(spacing) * 8);
 	const branchGapBase = Math.max(190, maxHeight + getRowGap(spacing) * 5);
 	const levelMinGap = Math.max(120, getRowGap(spacing) * 3);
 
@@ -2267,7 +2459,7 @@ function buildDirectionalRadialPositions(anchor, normalNodes, forward, backward,
 				const visualChildHalf = Math.max(getNodeWidth(child), getVisualNodeWidth(child)) / 2;
 				const stepX = Math.max(
 					Math.round(colStepBase * depthScale),
-					Math.round(visualParentHalf + visualChildHalf + getColumnGap(spacing) * 5)
+					Math.round(visualParentHalf + visualChildHalf + getColumnGap(spacing) * 7)
 				);
 
 				const childCenter = {
@@ -2329,7 +2521,7 @@ function buildDirectionalRadialPositions(anchor, normalNodes, forward, backward,
 						const visualChildHalf = Math.max(getNodeWidth(child), getVisualNodeWidth(child)) / 2;
 						const stepX = Math.max(
 							Math.round(colStepBase * depthScale),
-							Math.round(visualParentHalf + visualChildHalf + getColumnGap(spacing) * 6)
+							Math.round(visualParentHalf + visualChildHalf + getColumnGap(spacing) * 8)
 						);
 
 						const x = parentPos.x + direction * stepX;
@@ -2476,7 +2668,8 @@ function arrangeCenteredAroundAnchor(anchor, spacing = DEFAULT_SPACING, mode = "
 	moveNodesBy(targetNodes, originalAnchorCenter.x - newAnchorCenter.x, originalAnchorCenter.y - newAnchorCenter.y);
 
 	refreshAfterArrange(targetNodes);
-	fitView(targetNodes);
+	// 单节点中心放射模式：不要自动适配视图。
+	// 否则视角会被拉走，用户会找不到作为基准的源节点。
 	console.log(`[GJJ_NodeArranger] 单节点连线放射排列完成: ${getNodeTitleForLayout(anchor)}, mode=${mode}, nodes=${targetNodes.length}`);
 	return true;
 }

@@ -124,6 +124,36 @@ class LTXVCrossAttentionPatch:
 
 
 class GJJ_LTX2NAG:
+    DESCRIPTION = """🧡【LTX2 归一化注意力引导】- 增强视频生成质量的专业工具
+
+📦 功能说明：
+本节点为 LTX2 视频生成模型提供归一化注意力引导（Normalized Attention Guidance, NAG）功能，
+通过引入负向引导条件来增强生成视频的质量和细节表现力。
+
+🔧 核心参数：
+• NAG强度：控制负向引导效果的强度，值越大引导效果越强（默认11.0）
+• NAG混合系数：平衡归一化引导表示与原始正向表示的混合比例（默认0.25）
+• NAG阈值：控制引导注意力与正向注意力偏差程度的裁剪阈值（默认2.5）
+
+🎬 使用方法：
+1. 连接基础 LTX2 模型到"模型"输入口
+2. 可选择性连接视频条件或音频条件用于 NAG 引导
+3. 调整 NAG 参数以获得最佳生成效果
+4. 输出经过 NAG 增强的模型，可直接用于后续视频生成
+
+💡 应用场景：
+• 提升视频生成的细节清晰度
+• 增强动作连贯性和稳定性  
+• 改善复杂场景的生成质量
+• 配合 LTX2 视频生成工作流使用
+
+⚠️ 注意事项：
+• NAG强度设为0时将禁用此功能，直接返回原始模型
+• 就地修改选项可节省内存但可能导致数值结果略有不同
+• 需要配合支持 LTX2 架构的模型使用
+
+❓ 点击此处查看详细帮助信息"""
+
     CATEGORY = CATEGORY
     OUTPUT_NODE = False
 
@@ -204,4 +234,4 @@ class GJJ_LTX2NAG:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_LTX2NAG}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · LTX2 NAG"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ·🧡【LTX2】归一化注意力引导(NAG)"}

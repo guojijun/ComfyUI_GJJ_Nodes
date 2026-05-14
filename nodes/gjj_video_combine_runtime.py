@@ -1117,9 +1117,8 @@ def combine_video(
         "preview_is_video": (resolved_format.startswith("video/"),),
     }
     if preview_item is not None:
+        # 只给前端自定义 DOM 预览使用，避免 ComfyUI 原生图片/动图预览再画一次。
         ui_payload["preview_media"] = [preview_item]
-        ui_payload["images"] = [preview_item]
-        ui_payload["animated"] = (True,)
     return {
         "ui": ui_payload,
         "result": (video_output, main_path, output_files_json),

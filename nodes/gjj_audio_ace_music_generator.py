@@ -9,7 +9,7 @@ import comfy.sd
 import comfy.utils
 import folder_paths
 import torch
-from .common_utils.audio_tools import vae_decode_audio
+from comfy_extras.nodes_audio import vae_decode_audio
 from nodes import (
     CheckpointLoaderSimple,
     ConditioningZeroOut,
@@ -58,6 +58,37 @@ def _send_status(unique_id: Any, text: str) -> None:
         )
     except Exception:
         pass
+
+
+def _send_audio_preview(unique_id: Any, audio_ui: dict[str, Any]) -> None:
+    if not unique_id or not audio_ui:
+        return
+    try:
+        from server import PromptServer
+
+        PromptServer.instance.send_sync(
+            "gjj_node_audio",
+            {"node": str(unique_id), "audio": audio_ui.get("audio", [])},
+        )
+    except Exception:
+        pass
+
+
+def _save_audio_mp3_ui(audio: dict[str, Any], filename_prefix: str = "audio/GJJ_ACEMusic", quality: str = "320k") -> dict[str, Any]:
+    prefix = str(filename_prefix or "").strip() or "audio/GJJ_ACEMusic"
+    selected_quality = str(quality or "320k").strip()
+    try:
+        from comfy_api.latest import UI
+
+        return UI.AudioSaveHelper.get_save_audio_ui(
+            audio,
+            filename_prefix=prefix,
+            cls=None,
+            format="mp3",
+            quality=selected_quality,
+        ).as_dict()
+    except Exception as exc:
+        raise RuntimeError(f"保存 MP3 失败：{exc}") from exc
 
 
 def _normalize_text(text: str) -> str:
@@ -311,6 +342,7 @@ def _apply_fade_out(audio: dict[str, Any], fade_seconds: float) -> dict[str, Any
 class GJJ_AudioAceMusicGenerator:
     CATEGORY = "GJJ"
     FUNCTION = "generate"
+    OUTPUT_NODE = True
     DESCRIPTION = "将 Audio ACE 1.5 两套工作流合并成单节点：优先使用整包 checkpoint，缺失时自动回退到 split 模型组，直接生成音乐音频。"
     SEARCH_ALIASES = ["ace 音乐", "music", "audio ace", "作曲", "音乐", "歌曲生成", "音频生成"]
     RETURN_TYPES = ("AUDIO", "STRING")
@@ -653,7 +685,11 @@ class GJJ_AudioAceMusicGenerator:
             f"{int(bpm)} BPM / {str(language)}"
         )
         _send_status(unique_id, f"6/6 完成：{summary}")
-        return (audio, summary)
+
+        audio_ui = _save_audio_mp3_ui(audio, "audio/GJJ_ACEMusic", "320k")
+        _send_audio_preview(unique_id, audio_ui)
+
+        return {"ui": audio_ui, "result": (audio, summary)}
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_AudioAceMusicGenerator}

@@ -12,7 +12,6 @@ from .gjj_video_combine_runtime import (
     list_supported_formats,
 )
 
-
 NODE_NAME = "GJJ_VideoCombine"
 
 
@@ -28,7 +27,9 @@ class MultiInput(str):
         return other not in self.allowed_types
 
 
-image_or_latent = MultiInput("IMAGE", ["IMAGE", "LATENT", GJJ_BATCH_IMAGE_TYPE, "VIDEO"])
+image_or_latent = MultiInput(
+    "IMAGE", ["IMAGE", "LATENT", GJJ_BATCH_IMAGE_TYPE, "VIDEO"]
+)
 float_or_int = MultiInput("FLOAT", ["FLOAT", "INT"])
 
 
@@ -64,8 +65,10 @@ class GJJ_VideoCombine:
     def INPUT_TYPES(cls):
         video_formats, _ = get_video_formats()
         supported_formats = list_supported_formats()
-        default_format = DEFAULT_FORMAT if DEFAULT_FORMAT in supported_formats else (
-            video_formats[0] if video_formats else supported_formats[0]
+        default_format = (
+            DEFAULT_FORMAT
+            if DEFAULT_FORMAT in supported_formats
+            else (video_formats[0] if video_formats else supported_formats[0])
         )
         return {
             "required": {
@@ -153,15 +156,6 @@ class GJJ_VideoCombine:
                         "tooltip": "仅当上方输入 LATENT 时需要连接。",
                     },
                 ),
-                "format_overrides_json": (
-                    "STRING",
-                    {
-                        "default": "",
-                        "multiline": True,
-                        "display_name": "格式高级参数(JSON)",
-                        "tooltip": '可选。用于覆盖本地格式预设参数，例如 {"crf":18,"pix_fmt":"yuv420p10le"}。',
-                    },
-                ),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -213,4 +207,4 @@ class GJJ_VideoCombine:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_VideoCombine}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🎞️ 视频合成器"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🎞️ 视频合成器VHS"}

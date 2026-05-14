@@ -176,7 +176,35 @@ function setStatus(node, detail = {}) {
 	state.progressInner.style.width = `${progress == null ? 0 : progress}%`;
 	refreshNode(node);
 }
+function clearNativePreview(node) {
+	if (!node) {
+		return;
+	}
 
+	// 清理 ComfyUI / LiteGraph 原生图片预览缓存
+	node.imgs = [];
+	node.imageIndex = null;
+	node.overIndex = null;
+
+	// 清理可能存在的动态图 / 视频预览缓存
+	node.animatedImages = [];
+	node.videoContainer = null;
+	node.preview = null;
+	node.previews = null;
+
+	// 部分版本会挂在 properties 里
+	if (node.properties) {
+		delete node.properties.image;
+		delete node.properties.images;
+		delete node.properties.preview;
+		delete node.properties.previews;
+		delete node.properties.gifs;
+		delete node.properties.animated;
+	}
+
+	app.graph?.setDirtyCanvas?.(true, true);
+	refreshNode(node);
+}
 function setPreview(node, detail = {}) {
 	const state = node?.__gjjVideoCombineStatus;
 	if (!state) {
@@ -226,6 +254,7 @@ function patchNode(node) {
 	node.__gjjVideoCombinePatched = true;
 	removeLegacyVideoInputs(node);
 	ensurePanelWidget(node);
+	clearNativePreview(node);
 	setStatus(node, { text: "等待执行", progress: 0 });
 	setPreview(node, {});
 	if (!Array.isArray(node.size) || node.size.length < 2) {
@@ -266,15 +295,23 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalOnConfigure?.apply(this, args);
 			patchNode(this);
+			clearNativePreview(this);
 			return result;
 		};
 
-		const originalOnExecuted = nodeType.prototype.onExecuted;
 		nodeType.prototype.onExecuted = function (message) {
-			const result = originalOnExecuted?.apply(this, arguments);
 			patchNode(this);
+
+			// 只使用本扩展的 DOM 视频预览，不再调用 ComfyUI 原生 onExecuted 预览。
 			setPreview(this, message || {});
-			return result;
+			clearNativePreview(this);
+
+			// 有些版本会在 onExecuted 之后异步回填原生预览，延迟再清一次。
+			requestAnimationFrame(() => clearNativePreview(this));
+			setTimeout(() => clearNativePreview(this), 80);
+			setTimeout(() => clearNativePreview(this), 240);
+
+			return undefined;
 		};
 	},
 
@@ -282,6 +319,7 @@ app.registerExtension({
 		for (const node of app.graph?._nodes || []) {
 			if (TARGET_NODES.has(String(node?.comfyClass || node?.type || ""))) {
 				patchNode(node);
+				clearNativePreview(node);
 			}
 		}
 	},
