@@ -1,778 +1,790 @@
 from __future__ import annotations
 
+import json
 import math
-import logging
-from typing import Any, List, Tuple
+import re
+import time
+import threading
+import traceback
+from copy import deepcopy
+from typing import Any, Dict, Iterable, Iterator, List, Tuple
 
-import numpy as np
 import torch
-
+import torch.nn.functional as F
 from PIL import ImageColor
 
 from nodes import MAX_RESOLUTION
 from comfy.utils import common_upscale
 from comfy import model_management
 
+try:
+    from server import PromptServer
+except Exception:
+    PromptServer = None
+
 NODE_NAME = "GJJ_ImageResizeKJv2"
 
-
-# -----------------------------
-# 通用工具
-# -----------------------------
-
-
-def string_to_color(color_string: str) -> List[int]:
-    color_list = [0, 0, 0]
-    color_string = str(color_string or "#000000").strip()
-
-    if "," in color_string:
-        try:
-            values = [float(channel.strip()) for channel in color_string.split(",")]
-            if all(0 <= v <= 1 for v in values):
-                color_list = [int(v * 255) for v in values]
-            else:
-                color_list = [int(v) for v in values]
-        except ValueError:
-            logging.warning(f"无效的颜色格式: {color_string}，使用默认黑色。")
-    elif color_string.startswith("#") or (
-        color_string.lstrip("#").isalnum()
-        and not color_string.lstrip("#").replace(".", "", 1).isdigit()
-    ):
-        color_string_stripped = color_string.lstrip("#")
-        if len(color_string_stripped) in [6, 8] and all(
-            c in "0123456789ABCDEFabcdef" for c in color_string_stripped
-        ):
-            color_list = [int(color_string_stripped[i : i + 2], 16) for i in (0, 2, 4)]
-        else:
-            try:
-                rgb = ImageColor.getrgb(color_string)
-                color_list = list(rgb[:3])
-            except ValueError:
-                logging.warning(
-                    f"无效的颜色名称或十六进制格式: {color_string}，使用默认黑色。"
-                )
-    else:
-        try:
-            value = float(color_string.strip())
-            value = int(value * 255) if 0 <= value <= 1 else int(value)
-            color_list = [value, value, value]
-        except ValueError:
-            logging.warning(f"无效的颜色格式: {color_string}，使用默认黑色。")
-
-    return np.clip(color_list[:3], 0, 255).tolist()
+# 全局统计：ComfyUI 可能会把批量图片拆成多次单张调用。
+# 因此 total / elapsed 不能只用 resize() 内部局部变量，否则每张都会清零。
+_GJJ_RESIZE_RUN_STATS: Dict[str, Dict[str, Any]] = {}
+_GJJ_RESIZE_RUN_LOCK = threading.RLock()
+_GJJ_RESIZE_FINISH_DELAY = 0.55  # 秒：最后一张处理完后延迟汇总，等待同一轮批量调用结束
 
 
-def _round_to_multiple(value: float | int, multiple: int) -> int:
-    value = max(1, int(round(float(value))))
-    multiple = int(multiple or 0)
+
+def _run_key(unique_id: Any) -> str:
+    try:
+        if isinstance(unique_id, (list, tuple)) and len(unique_id) == 1:
+            unique_id = unique_id[0]
+    except Exception:
+        pass
+    return str(unique_id if unique_id is not None else "global")
+
+
+def _run_elapsed(stat: Dict[str, Any]) -> float:
+    try:
+        return max(0.0, time.time() - float(stat.get("start", time.time())))
+    except Exception:
+        return 0.0
+
+
+def _cancel_finish_timer(stat: Dict[str, Any]) -> None:
+    try:
+        timer = stat.get("timer")
+        if timer is not None:
+            timer.cancel()
+    except Exception:
+        pass
+    stat["timer"] = None
+
+
+def _begin_run_call(unique_id: Any, input_total: int) -> Dict[str, Any]:
+    """记录一次 resize() 调用开始。
+
+    注意：这里的 input_total 可能只是 1，因为 ComfyUI 可能把批量拆成多次调用。
+    所以这里做的是“累计”，不是重置。
+    """
+    key = _run_key(unique_id)
+    now = time.time()
+    with _GJJ_RESIZE_RUN_LOCK:
+        stat = _GJJ_RESIZE_RUN_STATS.get(key)
+        # 如果距离上次调用已经很久，认为是新一轮执行。
+        if not stat or (now - float(stat.get("last_update", 0.0))) > 3.0:
+            stat = {
+                "key": key,
+                "start": now,
+                "last_update": now,
+                "total": 0,
+                "done": 0,
+                "first_orig": None,
+                "first_out": None,
+                "timer": None,
+                "printed_final": False,
+            }
+            _GJJ_RESIZE_RUN_STATS[key] = stat
+
+        _cancel_finish_timer(stat)
+        stat["last_update"] = now
+        stat["total"] = int(stat.get("total", 0)) + max(1, int(input_total or 1))
+        stat["printed_final"] = False
+        return stat
+
+
+def _finish_run_call(unique_id: Any, done_units: int, first_orig_w: int, first_orig_h: int, first_out_w: int, first_out_h: int) -> Dict[str, Any]:
+    """记录一次 resize() 调用完成，并延迟发送最终汇总。"""
+    key = _run_key(unique_id)
+    now = time.time()
+    with _GJJ_RESIZE_RUN_LOCK:
+        stat = _GJJ_RESIZE_RUN_STATS.get(key)
+        if not stat:
+            stat = {
+                "key": key,
+                "start": now,
+                "last_update": now,
+                "total": max(1, int(done_units or 1)),
+                "done": 0,
+                "first_orig": None,
+                "first_out": None,
+                "timer": None,
+                "printed_final": False,
+            }
+            _GJJ_RESIZE_RUN_STATS[key] = stat
+
+        stat["done"] = int(stat.get("done", 0)) + max(1, int(done_units or 1))
+        stat["total"] = max(int(stat.get("total", 0)), int(stat.get("done", 0)))
+        stat["last_update"] = now
+        if stat.get("first_orig") is None and first_orig_w and first_orig_h:
+            stat["first_orig"] = (int(first_orig_w), int(first_orig_h))
+            stat["first_out"] = (int(first_out_w), int(first_out_h))
+
+        _cancel_finish_timer(stat)
+        timer = threading.Timer(_GJJ_RESIZE_FINISH_DELAY, _finalize_run_status, args=(key,))
+        timer.daemon = True
+        stat["timer"] = timer
+        timer.start()
+        return stat
+
+
+def _finalize_run_status(key: str) -> None:
+    """防抖汇总：同一轮批量调用停止一小段时间后，统一输出真实总数和总耗时。"""
+    with _GJJ_RESIZE_RUN_LOCK:
+        stat = _GJJ_RESIZE_RUN_STATS.get(key)
+        if not stat:
+            return
+        now = time.time()
+        # 如果 timer 触发时又有新调用进来，跳过，让新的 timer 负责最终汇总。
+        if (now - float(stat.get("last_update", 0.0))) < (_GJJ_RESIZE_FINISH_DELAY * 0.75):
+            return
+
+        total = int(stat.get("total", 0))
+        done = int(stat.get("done", 0))
+        elapsed = _run_elapsed(stat)
+        first_orig = stat.get("first_orig") or (0, 0)
+        first_out = stat.get("first_out") or (0, 0)
+        stat["printed_final"] = True
+
+    print(
+        f"[GJJ 多功能图片缩放] 汇总完成：共处理 {done}/{total} 张，"
+        f"首图 {first_orig[0]}x{first_orig[1]} -> {first_out[0]}x{first_out[1]}，"
+        f"总耗时 {elapsed:.2f}s"
+    )
+    _send_status(
+        key,
+        "done",
+        f"执行完成：共处理 {done}/{total} 张，耗时 {elapsed:.2f} 秒",
+        progress=1.0 if total <= 0 else min(1.0, done / max(1, total)),
+        total=total,
+        index=done,
+        elapsed=elapsed,
+    )
+
+
+def _send_status(unique_id: Any, state: str, message: str, progress: float | None = None, total: int | None = None, index: int | None = None, elapsed: float | None = None) -> None:
+    """通过 ComfyUI websocket 给前端状态栏发真实后台状态。"""
+    try:
+        if PromptServer is None or not getattr(PromptServer, "instance", None):
+            return
+        data = {
+            "node_id": str(unique_id) if unique_id is not None else "",
+            "state": state,
+            "message": message,
+        }
+        if progress is not None:
+            data["progress"] = float(progress)
+        if total is not None:
+            data["total"] = int(total)
+        if index is not None:
+            data["index"] = int(index)
+        if elapsed is not None:
+            data["elapsed"] = float(elapsed)
+        PromptServer.instance.send_sync("gjj_image_resize_kjv2_status", data)
+    except Exception:
+        pass
+
+
+# ============================================================
+# 基础工具
+# ============================================================
+
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        if isinstance(value, bool):
+            return int(value)
+        return int(float(value))
+    except Exception:
+        return int(default)
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _ceil_to_multiple(value: int, multiple: Any) -> int:
+    value = max(1, _to_int(value, 1))
+    multiple = _to_int(multiple, 1)
     if multiple <= 1:
         return value
-    return max(multiple, int(math.ceil(value / multiple) * multiple))
+    return max(multiple, int(math.ceil(value / multiple)) * multiple)
 
 
-def _safe_int(value, default: int = 1) -> int:
+def _parse_color(value: Any) -> Tuple[float, float, float]:
+    """兼容 COLOR/STRING/list/tuple/dict/rgb()/rgba()，返回 0-1 RGB。"""
     try:
-        return int(value)
+        if isinstance(value, dict):
+            if all(k in value for k in ("r", "g", "b")):
+                vals = [value.get("r", 0), value.get("g", 0), value.get("b", 0)]
+                if all(0 <= _to_float(v, 0) <= 1 for v in vals):
+                    return tuple(float(v) for v in vals)  # type: ignore[return-value]
+                return tuple(max(0, min(255, _to_float(v, 0))) / 255.0 for v in vals)  # type: ignore[return-value]
+            for key in ("hex", "color", "value"):
+                if key in value:
+                    return _parse_color(value[key])
+
+        if isinstance(value, (list, tuple)) and len(value) >= 3:
+            vals = [value[0], value[1], value[2]]
+            if all(0 <= _to_float(v, 0) <= 1 for v in vals):
+                return tuple(float(v) for v in vals)  # type: ignore[return-value]
+            return tuple(max(0, min(255, _to_float(v, 0))) / 255.0 for v in vals)  # type: ignore[return-value]
+
+        text = str(value if value is not None else "#000000").strip()
+        m = re.match(r"rgba?\(([^)]+)\)", text, flags=re.I)
+        if m:
+            vals = [_to_float(p.strip(), 0) for p in m.group(1).split(",")[:3]]
+            return tuple(max(0, min(255, v)) / 255.0 for v in vals)  # type: ignore[return-value]
+
+        if text.startswith("#") and len(text) == 9:
+            text = text[:7]
+
+        rgb = ImageColor.getrgb(text)
+        if isinstance(rgb, int):
+            rgb = (rgb, rgb, rgb)
+        return tuple(max(0, min(255, float(v))) / 255.0 for v in rgb[:3])  # type: ignore[return-value]
     except Exception:
-        return default
+        return (0.0, 0.0, 0.0)
 
 
-def _get_aspect_ratio(
-    aspect_ratio: str, custom_w: int, custom_h: int, orig_w: int, orig_h: int
-) -> float:
-    if aspect_ratio in ("原始比例", "original"):
-        return orig_w / max(1, orig_h)
-    if aspect_ratio in ("自定义", "custom"):
-        return max(1, custom_w) / max(1, custom_h)
-    if ":" in str(aspect_ratio):
+def _method(value: Any) -> str:
+    return {
+        "兰索斯": "lanczos",
+        "双三次": "bicubic",
+        "双线性": "bilinear",
+        "区域": "area",
+        "最近邻": "nearest-exact",
+        "lanczos": "lanczos",
+        "bicubic": "bicubic",
+        "bilinear": "bilinear",
+        "area": "area",
+        "nearest": "nearest-exact",
+        "nearest-exact": "nearest-exact",
+    }.get(str(value), "lanczos")
+
+
+def _mode(value: Any) -> str:
+    text = str(value or "等比")
+    if text in ("宽高", "固定宽高", "width_height"):
+        return "宽高"
+    if text in ("长边", "长边适配", "long_side"):
+        return "长边"
+    if text in ("像素", "像素控制", "total_pixels"):
+        return "像素"
+    return "等比"
+
+
+def _fit(value: Any) -> str:
+    text = str(value or "拉伸")
+    if text in ("留边填充", "letterbox", "pad", "padding"):
+        return "letterbox"
+    if text in ("裁剪填满", "crop"):
+        return "crop"
+    return "stretch"
+
+
+def _aspect_ratio(aspect_ratio: Any, w: int, h: int, proportional_width: Any, proportional_height: Any) -> float:
+    text = str(aspect_ratio or "原始比例")
+    if text in ("原始比例", "original"):
+        return max(1, w) / max(1, h)
+    if text in ("自定义", "custom"):
+        return max(1, _to_float(proportional_width, 1)) / max(1, _to_float(proportional_height, 1))
+    if ":" in text:
+        a, b = text.split(":", 1)
+        return max(1, _to_float(a, 1)) / max(1, _to_float(b, 1))
+    return max(1, w) / max(1, h)
+
+
+def _default_config() -> Dict[str, Any]:
+    return {
+        "mode": "等比",
+        "fit_mode": "拉伸",
+        "upscale_method": "兰索斯",
+        "round_to_multiple": "8",
+        "pad_color": "#000000",
+        "device": "CPU",
+        "width": 1024,
+        "height": 1024,
+        "scale_percent": 100.0,
+        "long_side_length": 1024,
+        "total_pixel_k": 1024,
+        "aspect_ratio": "原始比例",
+        "proportional_width": 1,
+        "proportional_height": 1,
+        "extra_outputs": [],
+    }
+
+
+def _load_config(config_json: Any) -> Dict[str, Any]:
+    cfg = _default_config()
+    if isinstance(config_json, dict):
+        cfg.update(config_json)
+        return cfg
+    try:
+        text = str(config_json or "").strip()
+        if text:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                cfg.update(data)
+    except Exception:
+        pass
+    return cfg
+
+
+
+def _unwrap_list_param(value: Any) -> Any:
+    """ComfyUI 在 INPUT_IS_LIST=True 时，会把普通参数/hidden 参数也包成 list。
+
+    这里只用于 config_json、unique_id 这类标量参数：
+    - ["xxx"] -> "xxx"
+    - [["xxx"]] -> "xxx"
+    图片和遮罩批量数据不要用这个函数解包。
+    """
+    try:
+        while isinstance(value, (list, tuple)) and len(value) == 1:
+            value = value[0]
+    except Exception:
+        pass
+    return value
+
+
+def _is_image_tensor(obj: Any) -> bool:
+    return isinstance(obj, torch.Tensor) and obj.ndim in (3, 4) and obj.shape[-1] in (1, 3, 4)
+
+
+def _is_mask_tensor(obj: Any) -> bool:
+    return isinstance(obj, torch.Tensor) and obj.ndim in (2, 3)
+
+
+def _image_unit_count(t: Any) -> int:
+    """只用于统计真实图片数量。"""
+    try:
+        if isinstance(t, torch.Tensor):
+            if t.ndim == 4 and t.shape[-1] in (1, 3, 4):
+                return int(t.shape[0])
+            if t.ndim == 3 and t.shape[-1] in (1, 3, 4):
+                return 1
+    except Exception:
+        pass
+    return 1
+
+
+def _count_image_units(items: List[Any]) -> int:
+    return max(1, sum(_image_unit_count(x) for x in items))
+
+
+def _split_image_tensor(t: torch.Tensor) -> List[torch.Tensor]:
+    if t.ndim == 3:
+        return [t.unsqueeze(0)]
+    return [t[i:i + 1] for i in range(t.shape[0])]
+
+
+def _split_mask_tensor(t: torch.Tensor) -> List[torch.Tensor]:
+    if t.ndim == 2:
+        return [t.unsqueeze(0)]
+    return [t[i:i + 1] for i in range(t.shape[0])]
+
+
+def _iter_container_values(obj: Any) -> List[Any]:
+    """尽可能安全地展开自定义批量容器。
+
+    GJJ_BATCH_IMAGE 不一定是 dict/list，也可能是带 __dict__ 的自定义对象，
+    或实现了 __iter__ 的容器。V28 只扫 dict/list，所以某些加载器只统计到 1 张。
+    """
+    values: List[Any] = []
+
+    if obj is None or isinstance(obj, (str, bytes, bytearray)) or torch.is_tensor(obj):
+        return values
+
+    if isinstance(obj, dict):
+        return list(obj.values())
+
+    if isinstance(obj, (list, tuple, set)):
+        return list(obj)
+
+    # 优先读取常见批量字段，兼容不同 GJJ 批量容器/图片队列实现。
+    common_names = (
+        "images", "image", "imgs", "batch", "batches", "queue", "items",
+        "data", "samples", "frames", "outputs", "values", "selected",
+        "selected_images", "image_list", "image_queue", "pictures", "pics",
+        "图片", "图片列表", "批量图片", "批量图片队列",
+    )
+    for name in common_names:
         try:
-            a, b = str(aspect_ratio).split(":", 1)
-            return max(1.0, float(a)) / max(1.0, float(b))
+            if hasattr(obj, name):
+                v = getattr(obj, name)
+                if v is not None and v is not obj:
+                    values.append(v)
         except Exception:
             pass
-    return orig_w / max(1, orig_h)
+
+    # 自定义 class / dataclass / SimpleNamespace。
+    try:
+        d = vars(obj)
+        if isinstance(d, dict):
+            values.extend(d.values())
+    except Exception:
+        pass
+
+    # namedtuple。
+    try:
+        if hasattr(obj, "_asdict"):
+            d = obj._asdict()
+            if isinstance(d, dict):
+                values.extend(d.values())
+    except Exception:
+        pass
+
+    # 最后兜底：可迭代容器。注意不要迭代 Tensor/String。
+    try:
+        if hasattr(obj, "__iter__"):
+            values.extend(list(obj))
+    except Exception:
+        pass
+
+    return values
 
 
-def _normalize_mask(
-    mask: torch.Tensor | None, batch: int, height: int, width: int, device: torch.device
-) -> torch.Tensor | None:
-    if mask is None:
-        return None
-    if mask.dim() == 2:
-        mask = mask.unsqueeze(0)
-    if mask.dim() == 4:
-        if mask.shape[1] == 1:
-            mask = mask.squeeze(1)
-        else:
-            mask = mask[..., 0]
-    if mask.shape[0] == 1 and batch > 1:
-        mask = mask.repeat(batch, 1, 1)
-    if mask.shape[0] != batch:
-        mask = mask[:1].repeat(batch, 1, 1)
-    if mask.shape[-2:] == (64, 64) and (height != 64 or width != 64):
-        return None
-    mask = mask.to(device)
-    if mask.shape[-2:] != (height, width):
-        mask = common_upscale(
-            mask.unsqueeze(1), width, height, "bilinear", crop="disabled"
-        ).squeeze(1)
-    return mask
+def _collect_images(obj: Any, _seen: set[int] | None = None) -> List[torch.Tensor]:
+    """递归收集所有图片 Tensor。
+
+    V29 修复点：
+    - 容器本身也加入 seen，避免自引用死循环。
+    - 支持自定义对象容器（__dict__ / attributes / iterable），不只支持 dict/list。
+    - 对 4D IMAGE Tensor 按 batch 维拆成单张，状态栏数量才是真实图片数。
+    """
+    if _seen is None:
+        _seen = set()
+
+    found: List[torch.Tensor] = []
+    if obj is None:
+        return found
+
+    oid = id(obj)
+    if oid in _seen:
+        return found
+    _seen.add(oid)
+
+    if _is_image_tensor(obj):
+        found.extend(_split_image_tensor(obj))
+        return found
+
+    for value in _iter_container_values(obj):
+        found.extend(_collect_images(value, _seen))
+    return found
 
 
-def _resize_image_tensor(
-    image: torch.Tensor, width: int, height: int, method: str
-) -> torch.Tensor:
-    return common_upscale(
-        image.movedim(-1, 1), width, height, method, crop="disabled"
-    ).movedim(1, -1)
+def _collect_masks(obj: Any, _seen: set[int] | None = None) -> List[torch.Tensor]:
+    """递归收集遮罩 Tensor，和图片收集逻辑保持一致。"""
+    if _seen is None:
+        _seen = set()
+
+    found: List[torch.Tensor] = []
+    if obj is None:
+        return found
+
+    oid = id(obj)
+    if oid in _seen:
+        return found
+    _seen.add(oid)
+
+    if _is_mask_tensor(obj) and not _is_image_tensor(obj):
+        found.extend(_split_mask_tensor(obj))
+        return found
+
+    for value in _iter_container_values(obj):
+        found.extend(_collect_masks(value, _seen))
+    return found
 
 
-def _resize_mask_tensor(
-    mask: torch.Tensor, width: int, height: int, method: str
-) -> torch.Tensor:
-    if method == "lanczos":
-        return common_upscale(
-            mask.unsqueeze(1).repeat(1, 3, 1, 1), width, height, method, crop="disabled"
-        ).movedim(1, -1)[:, :, :, 0]
-    return common_upscale(
-        mask.unsqueeze(1), width, height, method, crop="disabled"
-    ).squeeze(1)
+def _replace_images_like(obj: Any, processed: Iterator[torch.Tensor]) -> Any:
+    """尽量保留 GJJ_BATCH_IMAGE 原始容器结构，只替换其中的图片 Tensor。"""
+    if _is_image_tensor(obj):
+        count = 1 if obj.ndim == 3 else obj.shape[0]
+        imgs = []
+        for _ in range(count):
+            try:
+                imgs.append(next(processed))
+            except StopIteration:
+                break
+        if not imgs:
+            return obj
+        return imgs[0].squeeze(0) if obj.ndim == 3 else torch.cat(imgs, dim=0)
 
-
-def _empty_mask(batch: int, height: int, width: int, dtype, device) -> torch.Tensor:
-    return torch.zeros((batch, height, width), dtype=dtype, device=device)
-
-
-def _pad_to_target(
-    image: torch.Tensor,
-    mask: torch.Tensor | None,
-    target_width: int,
-    target_height: int,
-    color: str,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    b, h, w, c = image.shape
-    color_list = string_to_color(color)
-    bg_color = torch.tensor(
-        [x / 255.0 for x in color_list], dtype=image.dtype, device=image.device
-    )
-    if c > 3:
-        bg_color = torch.cat(
-            [bg_color, torch.ones((c - 3,), dtype=image.dtype, device=image.device)],
-            dim=0,
-        )
-    elif c < 3:
-        bg_color = bg_color[:c]
-
-    pad_left = max(0, (target_width - w) // 2)
-    pad_top = max(0, (target_height - h) // 2)
-
-    out_image = torch.zeros(
-        (b, target_height, target_width, c), dtype=image.dtype, device=image.device
-    )
-    out_image[:, :, :, :] = bg_color.view(1, 1, 1, c)
-    out_image[:, pad_top : pad_top + h, pad_left : pad_left + w, :] = image
-
-    if mask is None:
-        out_mask = torch.ones(
-            (b, target_height, target_width), dtype=image.dtype, device=image.device
-        )
-        out_mask[:, pad_top : pad_top + h, pad_left : pad_left + w] = 0.0
-    else:
-        out_mask = torch.ones(
-            (b, target_height, target_width), dtype=mask.dtype, device=mask.device
-        )
-        out_mask[:, pad_top : pad_top + h, pad_left : pad_left + w] = mask
-    return out_image, out_mask
-
-
-def _crop_center_to_target(
-    image: torch.Tensor,
-    mask: torch.Tensor | None,
-    target_width: int,
-    target_height: int,
-):
-    _, h, w, _ = image.shape
-    x = max(0, (w - target_width) // 2)
-    y = max(0, (h - target_height) // 2)
-    image = image[:, y : y + target_height, x : x + target_width, :]
-    if mask is not None:
-        mask = mask[:, y : y + target_height, x : x + target_width]
-    return image, mask
-
-
-def _apply_fit(
-    image: torch.Tensor,
-    mask: torch.Tensor | None,
-    target_width: int,
-    target_height: int,
-    fit_mode: str,
-    upscale_method: str,
-    pad_color: str,
-):
-    b, h, w, _ = image.shape
-
-    if fit_mode == "stretch":
-        out_image = _resize_image_tensor(
-            image, target_width, target_height, upscale_method
-        )
-        out_mask = (
-            _resize_mask_tensor(mask, target_width, target_height, upscale_method)
-            if mask is not None
-            else _empty_mask(b, target_height, target_width, image.dtype, image.device)
-        )
-        return out_image, out_mask
-
-    scale = (
-        min(target_width / max(1, w), target_height / max(1, h))
-        if fit_mode == "letterbox"
-        else max(target_width / max(1, w), target_height / max(1, h))
-    )
-    resize_w = max(1, int(round(w * scale)))
-    resize_h = max(1, int(round(h * scale)))
-
-    resized_image = _resize_image_tensor(image, resize_w, resize_h, upscale_method)
-    resized_mask = (
-        _resize_mask_tensor(mask, resize_w, resize_h, upscale_method)
-        if mask is not None
-        else None
-    )
-
-    if fit_mode == "letterbox":
-        return _pad_to_target(
-            resized_image, resized_mask, target_width, target_height, pad_color
-        )
-
-    cropped_image, cropped_mask = _crop_center_to_target(
-        resized_image, resized_mask, target_width, target_height
-    )
-    if cropped_mask is None:
-        cropped_mask = _empty_mask(
-            b, target_height, target_width, image.dtype, image.device
-        )
-    return cropped_image, cropped_mask
-
-
-def _tensor_to_bhwc(image: torch.Tensor) -> torch.Tensor:
-    """把单张 HWC 或批量 BHWC 统一成 BHWC。"""
-    if not isinstance(image, torch.Tensor):
-        raise TypeError(f"图片数据不是 torch.Tensor: {type(image)}")
-    if image.dim() == 3:
-        return image.unsqueeze(0)
-    if image.dim() == 4:
-        return image
-    raise ValueError(f"不支持的图片维度: {tuple(image.shape)}，需要 HWC 或 BHWC。")
-
-
-def _looks_like_image_tensor(value: Any) -> bool:
-    return isinstance(value, torch.Tensor) and value.dim() in (3, 4)
-
-
-def _extract_tensor_from_item(item: Any) -> torch.Tensor | None:
-    """兼容常见 GJJ_BATCH_IMAGE 结构：Tensor、dict[image/images/tensor]、对象.image。"""
-    if _looks_like_image_tensor(item):
-        return item
-    if isinstance(item, dict):
-        for key in ("image", "images", "tensor", "IMAGE"):
-            value = item.get(key)
-            if _looks_like_image_tensor(value):
-                return value
-        # 有些批量结构会把图片放在嵌套 value 中，这里做一层轻量兜底。
-        for value in item.values():
-            if _looks_like_image_tensor(value):
-                return value
-    for attr in ("image", "images", "tensor"):
-        value = getattr(item, attr, None)
-        if _looks_like_image_tensor(value):
-            return value
-    return None
-
-
-def _is_multi_image_container(image: Any) -> bool:
-    if _looks_like_image_tensor(image):
-        return False
-    if isinstance(image, (list, tuple)):
-        return True
-    if isinstance(image, dict):
-        for key in ("images", "image", "items", "batch"):
-            value = image.get(key)
-            if isinstance(value, (list, tuple)):
-                return True
-    return False
-
-
-def _iter_batch_images(image: Any) -> List[Any]:
-    """把 GJJ_BATCH_IMAGE 拆成逐张/逐项处理列表。"""
-    if isinstance(image, dict):
-        for key in ("images", "items", "batch"):
-            value = image.get(key)
-            if isinstance(value, (list, tuple)):
-                return list(value)
-        value = image.get("image")
-        if isinstance(value, (list, tuple)):
-            return list(value)
-    if isinstance(image, (list, tuple)):
-        return list(image)
-    return [image]
-
-
-def _replace_item_image(item: Any, new_image: torch.Tensor) -> Any:
-    """批处理输出时尽量保持原 GJJ_BATCH_IMAGE 的条目结构；无法识别时直接输出图片 Tensor。"""
-    if isinstance(item, dict):
-        out = dict(item)
-        for key in ("image", "images", "tensor", "IMAGE"):
-            if key in out and _looks_like_image_tensor(out[key]):
-                out[key] = new_image
-                return out
-        out["image"] = new_image
+    if isinstance(obj, dict):
+        out = dict(obj)
+        for key, value in list(out.items()):
+            out[key] = _replace_images_like(value, processed)
         return out
-    return new_image
+
+    if isinstance(obj, list):
+        return [_replace_images_like(v, processed) for v in obj]
+
+    if isinstance(obj, tuple):
+        return tuple(_replace_images_like(v, processed) for v in obj)
+
+    return obj
 
 
-def _select_mask_for_item(mask: torch.Tensor | None, index: int) -> torch.Tensor | None:
-    if mask is None or not isinstance(mask, torch.Tensor):
-        return None
-    if mask.dim() == 2:
-        return mask.unsqueeze(0)
-    if mask.dim() == 3:
-        if mask.shape[0] == 1:
-            return mask
-        if index < mask.shape[0]:
-            return mask[index : index + 1]
-        return mask[:1]
-    if mask.dim() == 4:
-        if mask.shape[0] == 1:
-            return mask
-        if index < mask.shape[0]:
-            return mask[index : index + 1]
-        return mask[:1]
-    return None
+def _pack_output_like(original: Any, processed: List[torch.Tensor]) -> Any:
+    if not processed:
+        return original
+    # 普通 IMAGE Tensor：直接返回 batch tensor。
+    if _is_image_tensor(original):
+        return processed[0].squeeze(0) if original.ndim == 3 and len(processed) == 1 else torch.cat(processed, dim=0)
+    # dict/list/tuple 容器可以尝试保留结构。
+    if isinstance(original, (dict, list, tuple)):
+        try:
+            replaced = _replace_images_like(original, iter(processed))
+            return replaced
+        except Exception:
+            pass
+    # 自定义对象容器不强行原地替换，避免返回未处理的原容器；直接返回 IMAGE batch。
+    return torch.cat(processed, dim=0)
+
+
+# ============================================================
+# 图像缩放核心
+# ============================================================
+
+def _resize_one(image: torch.Tensor, mask: torch.Tensor | None, cfg: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor | None, int, int, int, int]:
+    if image.ndim == 3:
+        image = image.unsqueeze(0)
+    b, h0, w0, c = image.shape
+
+    mode = _mode(cfg.get("mode"))
+    fit = _fit(cfg.get("fit_mode"))
+    method = _method(cfg.get("upscale_method"))
+    multiple = cfg.get("round_to_multiple", "8")
+
+    if cfg.get("device") == "GPU" and method != "lanczos":
+        work_device = model_management.get_torch_device()
+    else:
+        work_device = torch.device("cpu")
+
+    if mode == "宽高":
+        target_w = max(1, _to_int(cfg.get("width"), w0))
+        target_h = max(1, _to_int(cfg.get("height"), h0))
+    elif mode == "长边":
+        side = max(1, _to_int(cfg.get("long_side_length"), max(w0, h0)))
+        ratio = side / max(1, max(w0, h0))
+        target_w = max(1, int(round(w0 * ratio)))
+        target_h = max(1, int(round(h0 * ratio)))
+    elif mode == "像素":
+        total_px = max(1, _to_int(cfg.get("total_pixel_k"), 1024)) * 1000
+        ratio = _aspect_ratio(cfg.get("aspect_ratio"), w0, h0, cfg.get("proportional_width"), cfg.get("proportional_height"))
+        target_w = max(1, int(round(math.sqrt(total_px * ratio))))
+        target_h = max(1, int(round(target_w / ratio)))
+    else:  # 等比
+        scale = max(0.001, _to_float(cfg.get("scale_percent"), 100.0) / 100.0)
+        target_w = max(1, int(round(w0 * scale)))
+        target_h = max(1, int(round(h0 * scale)))
+
+    target_w = _ceil_to_multiple(target_w, multiple)
+    target_h = _ceil_to_multiple(target_h, multiple)
+
+    img = image.to(work_device)
+    msk = None if mask is None else mask
+    if msk is not None:
+        if msk.ndim == 2:
+            msk = msk.unsqueeze(0)
+        if msk.shape[-2:] != (h0, w0):
+            msk = common_upscale(msk.unsqueeze(1), w0, h0, "bilinear", crop="disabled").squeeze(1)
+        msk = msk.to(work_device)
+
+    def upscale_image(x: torch.Tensor, ow: int, oh: int) -> torch.Tensor:
+        return common_upscale(x.movedim(-1, 1), ow, oh, method, crop="disabled").movedim(1, -1)
+
+    def upscale_mask(x: torch.Tensor, ow: int, oh: int) -> torch.Tensor:
+        use_method = "bilinear" if method == "lanczos" else method
+        return common_upscale(x.unsqueeze(1), ow, oh, use_method, crop="disabled").squeeze(1)
+
+    # 等比/长边模式本身已经按比例算目标尺寸；fit_mode 不再额外裁剪/补边。
+    if fit == "stretch" or mode in ("等比", "长边"):
+        out = upscale_image(img, target_w, target_h)
+        out_mask = None if msk is None else upscale_mask(msk, target_w, target_h)
+        return out.cpu(), None if out_mask is None else out_mask.cpu(), w0, h0, target_w, target_h
+
+    scale = min(target_w / max(1, w0), target_h / max(1, h0)) if fit == "letterbox" else max(target_w / max(1, w0), target_h / max(1, h0))
+    inner_w = max(1, int(round(w0 * scale)))
+    inner_h = max(1, int(round(h0 * scale)))
+    resized = upscale_image(img, inner_w, inner_h)
+    resized_mask = None if msk is None else upscale_mask(msk, inner_w, inner_h)
+
+    if fit == "crop":
+        x = max(0, (inner_w - target_w) // 2)
+        y = max(0, (inner_h - target_h) // 2)
+        out = resized[:, y:y + target_h, x:x + target_w, :]
+        out_mask = None if resized_mask is None else resized_mask[:, y:y + target_h, x:x + target_w]
+        return out.cpu(), None if out_mask is None else out_mask.cpu(), w0, h0, target_w, target_h
+
+    # Letterbox / Padding：补边颜色只在这里生效。
+    rgb = torch.tensor(_parse_color(cfg.get("pad_color")), dtype=resized.dtype, device=resized.device)
+    out = torch.zeros((resized.shape[0], target_h, target_w, resized.shape[-1]), dtype=resized.dtype, device=resized.device)
+    if resized.shape[-1] >= 3:
+        out[..., 0:3] = rgb.view(1, 1, 1, 3)
+        if resized.shape[-1] == 4:
+            out[..., 3:4] = 1.0
+    else:
+        out[..., 0:1] = rgb[0].view(1, 1, 1, 1)
+    x = max(0, (target_w - inner_w) // 2)
+    y = max(0, (target_h - inner_h) // 2)
+    out[:, y:y + inner_h, x:x + inner_w, :] = resized
+
+    if resized_mask is not None:
+        out_mask = torch.ones((resized.shape[0], target_h, target_w), dtype=resized_mask.dtype, device=resized_mask.device)
+        out_mask[:, y:y + inner_h, x:x + inner_w] = resized_mask
+    else:
+        out_mask = None
+    return out.cpu(), None if out_mask is None else out_mask.cpu(), w0, h0, target_w, target_h
 
 
 class GJJ_ImageResizeKJv2:
-    resize_mode_map = {
-        "宽高": "fixed",
-        "固定宽高": "fixed",
-        "等比": "proportional",
-        "等比缩放": "proportional",
-        "长边": "long_side",
-        "长边适配": "long_side",
-        "像素": "pixel_control",
-        "像素控制": "pixel_control",
-    }
-    upscale_method_map = {
-        "最近邻": "nearest-exact",
-        "双线性": "bilinear",
-        "区域": "area",
-        "双三次": "bicubic",
-        "兰索斯": "lanczos",
-        "nearest": "nearest-exact",
-        "bilinear": "bilinear",
-        "box": "area",
-        "bicubic": "bicubic",
-        "hamming": "bicubic",
-        "lanczos": "lanczos",
-    }
-    fit_mode_map = {
-        "拉伸": "stretch",
-        "留边填充": "letterbox",
-        "裁剪填满": "crop",
-        "stretch": "stretch",
-        "letterbox": "letterbox",
-        "crop": "crop",
-        "fill": "stretch",
-    }
-    aspect_ratio_list = [
-        "原始比例",
-        "自定义",
-        "1:1",
-        "3:2",
-        "4:3",
-        "16:9",
-        "2:3",
-        "3:4",
-        "9:16",
-    ]
-    multiple_list = ["无", "8", "16", "32", "64", "128", "256", "512"]
-    device_map = {"CPU": "cpu", "GPU": "gpu"}
-
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": (
-                    "GJJ_BATCH_IMAGE,IMAGE",
-                    {
-                        "display_name": "🖼️ 图片",
-                        "tooltip": "输入图片。支持普通 IMAGE，也支持 GJJ_BATCH_IMAGE 多图列表；检测到多图会自动逐张批处理，并输出处理后的图片列表。",
-                    },
-                ),
-                "resize_mode": (
-                    ["宽高", "等比", "长边", "像素"],
-                    {
-                        "default": "宽高",
-                        "display_name": "缩放模式",
-                        "tooltip": "选择缩放计算方式。前端会显示为按钮：宽高、等比、长边、像素。",
-                    },
-                ),
-                # 宽高
-                "width": (
-                    "INT",
-                    {
-                        "default": 1024,
-                        "min": 1,
-                        "max": MAX_RESOLUTION,
-                        "step": 8,
-                        "display_name": "📐 目标宽度",
-                        "tooltip": "宽高模式使用。设置最终输出图片的宽度，单位为像素。",
-                    },
-                ),
-                "height": (
-                    "INT",
-                    {
-                        "default": 1024,
-                        "min": 1,
-                        "max": MAX_RESOLUTION,
-                        "step": 8,
-                        "display_name": "📐 目标高度",
-                        "tooltip": "宽高模式使用。设置最终输出图片的高度，单位为像素。",
-                    },
-                ),
-                # 等比
-                "scale_percent": (
-                    "FLOAT",
-                    {
-                        "default": 100.0,
-                        "min": 1.0,
-                        "max": 10000.0,
-                        "step": 1.0,
-                        "display_name": "🔍 缩放百分比",
-                        "tooltip": "等比模式使用。100 表示原尺寸，50 表示缩小一半，200 表示放大两倍。",
-                    },
-                ),
-                # 长边
-                "long_side_length": (
-                    "INT",
-                    {
-                        "default": 1024,
-                        "min": 4,
-                        "max": MAX_RESOLUTION,
-                        "step": 8,
-                        "display_name": "📏 长边长度",
-                        "tooltip": "长边模式使用。把图片较长的一边缩放到此长度，另一边按原比例自动计算。",
-                    },
-                ),
-                # 像素，总像素逻辑：target_width * target_height ≈ total_pixel_k * 1000
-                "total_pixel_k": (
-                    "INT",
-                    {
-                        "default": 1024,
-                        "min": 1,
-                        "max": 1000000,
-                        "step": 1,
-                        "display_name": "🔢 总像素/K",
-                        "tooltip": "像素模式使用。按总像素数量计算输出尺寸，单位为千像素。例如 1024 表示约 102.4 万像素。",
-                    },
-                ),
-                "aspect_ratio": (
-                    cls.aspect_ratio_list,
-                    {
-                        "default": "原始比例",
-                        "display_name": "🧩 输出比例",
-                        "tooltip": "像素模式使用。决定总像素如何分配成宽高。选择原始比例会沿用输入图片比例；选择自定义会显示自定义比例宽和高。",
-                    },
-                ),
-                "proportional_width": (
-                    "INT",
-                    {
-                        "default": 1,
-                        "min": 1,
-                        "max": 100000000,
-                        "step": 1,
-                        "display_name": "↔️ 自定义比例宽",
-                        "tooltip": "像素模式且输出比例为自定义时使用。与自定义比例高共同决定宽高比例。",
-                    },
-                ),
-                "proportional_height": (
-                    "INT",
-                    {
-                        "default": 1,
-                        "min": 1,
-                        "max": 100000000,
-                        "step": 1,
-                        "display_name": "↕️ 自定义比例高",
-                        "tooltip": "像素模式且输出比例为自定义时使用。与自定义比例宽共同决定宽高比例。",
-                    },
-                ),
-                # 公共参数，放在最后，前端按模式重排/隐藏
-                "fit_mode": (
-                    ["拉伸", "留边填充", "裁剪填满"],
-                    {
-                        "default": "拉伸",
-                        "display_name": "🧲 适配方式",
-                        "tooltip": "宽高和像素模式使用。拉伸会直接变成目标宽高；留边填充会保持比例并补边；裁剪填满会保持比例并居中裁剪。",
-                    },
-                ),
-                "upscale_method": (
-                    ["最近邻", "双线性", "区域", "双三次", "兰索斯"],
-                    {
-                        "default": "兰索斯",
-                        "display_name": "🔄 缩放算法",
-                        "tooltip": "图片缩放采样算法。兰索斯质量较高但只支持 CPU；GPU 模式请使用最近邻、双线性、区域或双三次。",
-                    },
-                ),
-                "round_to_multiple": (
-                    cls.multiple_list,
-                    {
-                        "default": "8",
-                        "display_name": "🔢 尺寸对齐",
-                        "tooltip": "把输出宽高向上对齐到指定倍数。常用于确保尺寸能被 8、16、32、64 等整除。选择无则不额外对齐。",
-                    },
-                ),
-                "pad_color": (
-                    "COLOR",
-                    {
-                        "default": "#000000",
-                        "display_name": "🎨 留边颜色",
-                        "tooltip": "留边填充时使用的背景颜色。支持颜色选择器、十六进制颜色和常见颜色名称。",
-                    },
-                ),
-                "device": (
-                    ["CPU", "GPU"],
-                    {
-                        "default": "CPU",
-                        "display_name": "⚙️ 计算设备",
-                        "tooltip": "选择缩放计算设备。兰索斯不支持 GPU，如果选择 GPU 请改用其它缩放算法。",
-                    },
-                ),
+                "image": ("GJJ_BATCH_IMAGE,IMAGE", {
+                    "display_name": "🖼️ 图片",
+                    "tooltip": "输入图片。支持 IMAGE Tensor、GJJ_BATCH_IMAGE 多图队列、list、dict 批量容器。Input image / batch image container."
+                }),
+                "config_json": ("STRING", {
+                    "default": json.dumps(_default_config(), ensure_ascii=False),
+                    "multiline": False,
+                    "display_name": "隐藏配置",
+                    "tooltip": "前端面板写入的 JSON 配置。Internal JSON config written by the frontend UI.",
+                    # 这些标记前端会识别并彻底隐藏；旧版前端不支持时，也会尽量不生成可见控件。
+                    "hidden": True,
+                    "display": "hidden",
+                    "forceInput": False
+                }),
             },
             "optional": {
-                "mask": (
-                    "MASK",
-                    {
-                        "display_name": "🎭 遮罩",
-                        "tooltip": "可选输入。连接后会随图片同步缩放、填充或裁剪。",
-                    },
-                ),
+                "mask": ("MASK", {"display_name": "🎭 遮罩", "tooltip": "可选遮罩，会与图片同步缩放。Optional mask."}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
             },
         }
 
-    RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE", "MASK", "BOX", "INT", "INT")
-    RETURN_NAMES = ("图片", "遮罩", "原始尺寸", "宽度", "高度")
+    RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE", "MASK", "*", "*", "*")
+    RETURN_NAMES = ("图片", "遮罩", "扩展输出 1", "扩展输出 2", "扩展输出 3")
     FUNCTION = "resize"
     CATEGORY = "GJJ/image"
     DESCRIPTION = """
-图片缩放 KJv2：合并 ImageScaleByAspectRatio V2 的比例、适配、长边、总像素控制能力。
+GJJ · 🔍 多功能图片缩放
 
-模式：
-• 宽高：直接指定输出宽高，可拉伸、留边、裁剪。
-• 等比：按百分比缩放，保持原图比例。
-• 长边：指定长边长度，短边自动计算。
-• 像素：按总像素/K + 输出比例计算尺寸。
+用途：
+- 单图或 GJJ_BATCH_IMAGE 批量图片缩放。
+- 支持【宽高】【等比】【长边】【像素】四种模式。
+- 支持拉伸 Stretch、留边填充 Letterbox/Padding、裁剪填满 Crop Fill。
+- 支持动态扩展输出：原始尺寸、输出高度、输出宽度。
 
-输出：图片、遮罩、原始尺寸、输出宽度、输出高度。
+输入：
+- 图片：GJJ_BATCH_IMAGE,IMAGE。
+- 遮罩：MASK，可选。
+
+输出：
+- 图片：GJJ_BATCH_IMAGE,IMAGE，尽量保持输入批量容器结构。
+- 遮罩：MASK。
+- 扩展输出 1-3：由前端按钮动态决定。
+
+依赖：
+- torch：ComfyUI 标准依赖，用于 Tensor 运算。
+- Pillow/PIL：ComfyUI 标准依赖，用于颜色解析。
+- comfy.utils.common_upscale：ComfyUI 内置缩放函数。
+
+模型：
+- 本节点不需要任何模型。
+- 如果缺失依赖或输入异常，节点会在控制台打印错误原因，并尽量返回原图，避免中断整个流程。
 """
 
-    def _resize_tensor(
-        self,
-        image,
-        resize_mode,
-        width,
-        height,
-        scale_percent,
-        long_side_length,
-        total_pixel_k,
-        aspect_ratio,
-        proportional_width,
-        proportional_height,
-        fit_mode,
-        upscale_method,
-        round_to_multiple,
-        pad_color,
-        device,
-        mask=None,
-    ):
-        resize_mode = self.resize_mode_map.get(resize_mode, resize_mode)
-        upscale_method = self.upscale_method_map.get(upscale_method, upscale_method)
-        fit_mode = self.fit_mode_map.get(fit_mode, fit_mode)
-        device = self.device_map.get(device, device)
+    def resize(self, image, config_json, unique_id=None, mask=None):
+        start = time.time()
+        try:
+            config_json = _unwrap_list_param(config_json)
+            unique_id = _unwrap_list_param(unique_id)
 
-        image = _tensor_to_bhwc(image)
-        b, orig_h, orig_w, _ = image.shape
-        original_size = [int(orig_w), int(orig_h)]
+            cfg = _load_config(config_json)
 
-        if device == "gpu":
-            if upscale_method == "lanczos":
-                raise Exception("兰索斯不支持 GPU，请改用 CPU 或换成双三次/双线性。")
-            torch_device = model_management.get_torch_device()
-        else:
-            torch_device = torch.device("cpu")
+            # INPUT_IS_LIST=True 或某些批量节点会把端口值包一层 list。
+            # 统计只看输入源；输出逻辑保持 v29，不额外复杂化。
+            image_source = image[0] if isinstance(image, (list, tuple)) and len(image) == 1 else image
+            mask_source = mask[0] if isinstance(mask, (list, tuple)) and len(mask) == 1 else mask
 
-        image = image.to(torch_device)
-        mask = _normalize_mask(mask, b, orig_h, orig_w, torch_device)
+            images = _collect_images(image_source)
+            masks = _collect_masks(mask_source)
+            if not images:
+                raise ValueError("没有检测到有效图片。请连接 IMAGE 或 GJJ_BATCH_IMAGE。")
 
-        multiple = (
-            0
-            if round_to_multiple in ("无", "None", None)
-            else _safe_int(round_to_multiple, 0)
-        )
+            input_total = _count_image_units(images)
+            stat = _begin_run_call(unique_id, input_total)
+            total = int(stat.get("total", input_total))
+            done_before = int(stat.get("done", 0))
+            _send_status(unique_id, "running", f"正在处理：累计 {done_before}/{total} 张图片…", progress=done_before / max(1, total), total=total, index=done_before)
 
-        if resize_mode == "fixed":
-            target_w = _round_to_multiple(_safe_int(width, orig_w), multiple)
-            target_h = _round_to_multiple(_safe_int(height, orig_h), multiple)
-            out_image, out_mask = _apply_fit(
-                image, mask, target_w, target_h, fit_mode, upscale_method, pad_color
-            )
+            processed_images: List[torch.Tensor] = []
+            processed_masks: List[torch.Tensor] = []
+            first_orig_w = first_orig_h = first_out_w = first_out_h = 0
+            done_units = 0
 
-        elif resize_mode == "proportional":
-            ratio = max(0.01, float(scale_percent) / 100.0)
-            target_w = _round_to_multiple(orig_w * ratio, multiple)
-            target_h = _round_to_multiple(orig_h * ratio, multiple)
-            out_image = _resize_image_tensor(image, target_w, target_h, upscale_method)
-            out_mask = (
-                _resize_mask_tensor(mask, target_w, target_h, upscale_method)
-                if mask is not None
-                else _empty_mask(b, target_h, target_w, image.dtype, image.device)
-            )
-
-        elif resize_mode == "long_side":
-            long_side = max(4, _safe_int(long_side_length, max(orig_w, orig_h)))
-            if orig_w >= orig_h:
-                target_w = long_side
-                target_h = max(1, int(round(orig_h * (target_w / max(1, orig_w)))))
-            else:
-                target_h = long_side
-                target_w = max(1, int(round(orig_w * (target_h / max(1, orig_h)))))
-            target_w = _round_to_multiple(target_w, multiple)
-            target_h = _round_to_multiple(target_h, multiple)
-            out_image = _resize_image_tensor(image, target_w, target_h, upscale_method)
-            out_mask = (
-                _resize_mask_tensor(mask, target_w, target_h, upscale_method)
-                if mask is not None
-                else _empty_mask(b, target_h, target_w, image.dtype, image.device)
-            )
-
-        elif resize_mode == "pixel_control":
-            ratio = _get_aspect_ratio(
-                aspect_ratio, proportional_width, proportional_height, orig_w, orig_h
-            )
-            total_pixels = max(1, _safe_int(total_pixel_k, 1024)) * 1000
-            target_w = int(round(math.sqrt(total_pixels * ratio)))
-            target_h = int(round(target_w / max(1e-8, ratio)))
-            target_w = _round_to_multiple(target_w, multiple)
-            target_h = _round_to_multiple(target_h, multiple)
-            out_image, out_mask = _apply_fit(
-                image, mask, target_w, target_h, fit_mode, upscale_method, pad_color
-            )
-
-        else:
-            raise ValueError(f"未知缩放模式: {resize_mode}")
-
-        out_h = int(out_image.shape[1])
-        out_w = int(out_image.shape[2])
-        return out_image.cpu(), out_mask.cpu(), original_size, out_w, out_h
-
-    def resize(
-        self,
-        image,
-        resize_mode,
-        width,
-        height,
-        scale_percent,
-        long_side_length,
-        total_pixel_k,
-        aspect_ratio,
-        proportional_width,
-        proportional_height,
-        fit_mode,
-        upscale_method,
-        round_to_multiple,
-        pad_color,
-        device,
-        unique_id=None,
-        mask=None,
-    ):
-        """
-        支持两种输入：
-        1. IMAGE：普通 ComfyUI 图片 Tensor，形状 HWC 或 BHWC，输出仍为 Tensor。
-        2. GJJ_BATCH_IMAGE：多图列表/批量容器，逐张处理，输出处理后的图片列表。
-        """
-        is_multi_container = _is_multi_image_container(image)
-
-        if not is_multi_container:
-            return self._resize_tensor(
-                image,
-                resize_mode,
-                width,
-                height,
-                scale_percent,
-                long_side_length,
-                total_pixel_k,
-                aspect_ratio,
-                proportional_width,
-                proportional_height,
-                fit_mode,
-                upscale_method,
-                round_to_multiple,
-                pad_color,
-                device,
-                mask=mask,
-            )
-
-        items = _iter_batch_images(image)
-        if not items:
-            raise ValueError("GJJ_BATCH_IMAGE 为空，没有可处理的图片。")
-
-        out_items: List[Any] = []
-        out_masks: List[torch.Tensor] = []
-        original_sizes: List[List[int]] = []
-        first_w = 0
-        first_h = 0
-
-        for index, item in enumerate(items):
-            item_image = _extract_tensor_from_item(item)
-            if item_image is None:
-                logging.warning(
-                    f"GJJ_ImageResizeKJv2 跳过第 {index + 1} 张：未找到可识别的图片 Tensor。"
+            for idx, img in enumerate(images):
+                unit_count = _image_unit_count(img)
+                start_index = done_before + done_units + 1
+                end_index = min(total, done_before + done_units + unit_count)
+                _send_status(
+                    unique_id,
+                    "running",
+                    f"正在处理第 {start_index}-{end_index}/{total} 张图片…" if unit_count > 1 else f"正在处理第 {start_index}/{total} 张图片…",
+                    progress=(done_before + done_units) / max(1, total),
+                    total=total,
+                    index=done_before + done_units,
                 )
-                continue
+                m = masks[idx] if idx < len(masks) else None
+                out_img, out_mask, ow, oh, tw, th = _resize_one(img, m, cfg)
+                processed_images.append(out_img)
+                if out_mask is not None:
+                    processed_masks.append(out_mask)
+                done_units += unit_count
+                if idx == 0:
+                    first_orig_w, first_orig_h, first_out_w, first_out_h = ow, oh, tw, th
 
-            item_mask = _select_mask_for_item(mask, index)
-            out_image, out_mask, original_size, out_w, out_h = self._resize_tensor(
-                item_image,
-                resize_mode,
-                width,
-                height,
-                scale_percent,
-                long_side_length,
-                total_pixel_k,
-                aspect_ratio,
-                proportional_width,
-                proportional_height,
-                fit_mode,
-                upscale_method,
-                round_to_multiple,
-                pad_color,
-                device,
-                mask=item_mask,
-            )
+            out_image = _pack_output_like(image, processed_images)
+            out_mask = torch.cat(processed_masks, dim=0) if processed_masks else torch.zeros((1, 64, 64), dtype=torch.float32)
 
-            # 多图列表输出按“每个元素一张/一批”返回，便于后续 GJJ 批处理节点继续逐项处理。
-            out_items.append(_replace_item_image(item, out_image))
-            out_masks.append(out_mask)
-            original_sizes.append(original_size)
-            if first_w <= 0:
-                first_w = int(out_w)
-                first_h = int(out_h)
+            selected = cfg.get("extra_outputs", [])
+            if not isinstance(selected, list):
+                selected = []
+            values: Dict[str, Any] = {
+                "original_size": [int(first_orig_w), int(first_orig_h)],
+                "output_height": int(first_out_h),
+                "output_width": int(first_out_w),
+            }
+            extras = [values.get(k, None) for k in selected[:3]]
+            while len(extras) < 3:
+                extras.append(None)
 
-        if not out_items:
-            raise ValueError("GJJ_BATCH_IMAGE 中没有可处理的图片。")
+            # 不在每次单图调用里打印“完成 1 张”作为最终结果。
+            # 这里只更新全局统计并发送运行中状态；真正的“共处理 N 张/总耗时”
+            # 由 _finalize_run_status 防抖汇总后统一输出。
+            stat = _finish_run_call(unique_id, done_units, first_orig_w, first_orig_h, first_out_w, first_out_h)
+            done_total = int(stat.get("done", done_before + done_units))
+            total = int(stat.get("total", total))
+            elapsed = _run_elapsed(stat)
+            print(f"[GJJ 多功能图片缩放] 进度：{done_total}/{total} 张，当前首图 {first_orig_w}x{first_orig_h} -> {first_out_w}x{first_out_h}，累计耗时 {elapsed:.2f}s")
+            _send_status(unique_id, "running", f"已处理 {done_total}/{total} 张，累计耗时 {elapsed:.2f} 秒", progress=done_total / max(1, total), total=total, index=done_total, elapsed=elapsed)
+            return (out_image, out_mask, extras[0], extras[1], extras[2])
 
-        # 对于多图列表，原始尺寸返回每张图的尺寸列表；宽度/高度返回第一张处理结果尺寸。
-        return (out_items, out_masks, original_sizes, first_w, first_h)
+        except Exception as e:
+            key = _run_key(unique_id)
+            stat = _GJJ_RESIZE_RUN_STATS.get(key)
+            elapsed = _run_elapsed(stat) if stat else (time.time() - start)
+            msg = f"GJJ 多功能图片缩放执行失败：{e}\n{traceback.format_exc()}"
+            print(msg)
+            _send_status(unique_id, "error", f"执行错误：{e}。请检查输入图片、尺寸参数和依赖。", progress=1.0, elapsed=elapsed)
+            empty_mask = torch.zeros((1, 64, 64), dtype=torch.float32)
+            return (image, empty_mask, msg, None, None)
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_ImageResizeKJv2}
+print("[GJJ 多功能图片缩放] 当前版本: V39_GLOBAL_DEBOUNCE_STATS_FIX_UNWRAP", __file__)
 NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🔍 多功能图片缩放"}

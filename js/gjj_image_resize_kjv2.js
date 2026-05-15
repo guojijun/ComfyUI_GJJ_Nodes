@@ -1,170 +1,211 @@
-import { app } from "/scripts/app.js";
+import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
 
 const NODE_CLASS = "GJJ_ImageResizeKJv2";
-const MODES = ["宽高", "等比", "长边", "像素"];
+const CONFIG_WIDGET = "config_json";
 
-const ORDER = [
-  "resize_mode",
-  "width",
-  "height",
-  "scale_percent",
-  "long_side_length",
-  "total_pixel_k",
-  "aspect_ratio",
-  "proportional_width",
-  "proportional_height",
-  "fit_mode",
-  "upscale_method",
-  "round_to_multiple",
-  "pad_color",
-  "device",
+const DEFAULT_CONFIG = {
+  mode: "等比",
+  fit_mode: "拉伸",
+  upscale_method: "兰索斯",
+  round_to_multiple: "8",
+  pad_color: "#000000",
+  device: "CPU",
+  width: 1024,
+  height: 1024,
+  scale_percent: 100,
+  long_side_length: 1024,
+  total_pixel_k: 1024,
+  aspect_ratio: "原始比例",
+  proportional_width: 1,
+  proportional_height: 1,
+  extra_outputs: [],
+};
+
+const MODES = ["宽高", "等比", "长边", "像素"];
+const OUTPUTS = [
+  { key: "original_size", label: "📦 原始尺寸", outName: "原始尺寸", type: "*", title: "输出原始尺寸 [宽度, 高度]。Original size output." },
+  { key: "output_height", label: "↕️ 输出高度", outName: "输出高度", type: "*", title: "输出处理后的高度。Output height." },
+  { key: "output_width", label: "↔️ 输出宽度", outName: "输出宽度", type: "*", title: "输出处理后的宽度。Output width." },
 ];
 
-const CONTROLLED = new Set(ORDER.filter((name) => name !== "resize_mode"));
-const MANAGED = new Set(ORDER);
 
-const GROUPS = {
-  "宽高": ["width", "height", "fit_mode", "upscale_method", "round_to_multiple", "pad_color", "device"],
-  "等比": ["scale_percent", "upscale_method", "round_to_multiple", "device"],
-  "长边": ["long_side_length", "upscale_method", "round_to_multiple", "device"],
-  "像素": ["total_pixel_k", "aspect_ratio", "fit_mode", "upscale_method", "round_to_multiple", "pad_color", "device"],
-};
+const PANEL_WIDGET_NAME = "gjj_multifunction_resize_panel";
 
-const MODE_ALIAS = {
-  "固定宽高": "宽高",
-  "等比缩放": "等比",
-  "长边适配": "长边",
-  "像素控制": "像素",
-};
+const CONFIG_INPUT_RE = /(config_json|隐藏配置|前端面板写入|Internal JSON config)/i;
 
-// 旧节点被旧 JS 污染后用于兜底恢复；新节点通常会走原始类型恢复。
-const WIDGET_TYPE_FALLBACK = {
-  width: "number",
-  height: "number",
-  scale_percent: "number",
-  long_side_length: "number",
-  total_pixel_k: "number",
-  aspect_ratio: "combo",
-  proportional_width: "number",
-  proportional_height: "number",
-  fit_mode: "combo",
-  upscale_method: "combo",
-  round_to_multiple: "combo",
-  pad_color: "text",
-  device: "combo",
-};
-
-const WIDGET_LABEL_FALLBACK = {
-  resize_mode: "缩放模式",
-  width: "📐 目标宽度",
-  height: "📐 目标高度",
-  scale_percent: "🔍 缩放百分比",
-  long_side_length: "📏 长边长度",
-  total_pixel_k: "🔢 总像素/K",
-  aspect_ratio: "🧩 输出比例",
-  proportional_width: "↔️ 自定义比例宽",
-  proportional_height: "↕️ 自定义比例高",
-  fit_mode: "🧲 适配方式",
-  upscale_method: "🔄 缩放算法",
-  round_to_multiple: "🔢 尺寸对齐",
-  pad_color: "🎨 留边颜色",
-  device: "⚙️ 计算设备",
-};
-
-const WIDGET_TOOLTIP_FALLBACK = {
-  resize_mode: "选择缩放计算方式。前端会显示为按钮：宽高、等比、长边、像素。",
-  width: "宽高模式使用。设置最终输出图片的宽度，单位为像素。",
-  height: "宽高模式使用。设置最终输出图片的高度，单位为像素。",
-  scale_percent: "等比模式使用。100 表示原尺寸，50 表示缩小一半，200 表示放大两倍。",
-  long_side_length: "长边模式使用。把图片较长的一边缩放到此长度，另一边按原比例自动计算。",
-  total_pixel_k: "像素模式使用。按总像素数量计算输出尺寸，单位为千像素。例如 1024 表示约 102.4 万像素。",
-  aspect_ratio: "像素模式使用。决定总像素如何分配成宽高。选择原始比例会沿用输入图片比例；选择自定义会显示自定义比例宽和高。",
-  proportional_width: "像素模式且输出比例为自定义时使用。与自定义比例高共同决定宽高比例。",
-  proportional_height: "像素模式且输出比例为自定义时使用。与自定义比例宽共同决定宽高比例。",
-  fit_mode: "宽高和像素模式使用。拉伸会直接变成目标宽高；留边填充会保持比例并补边；裁剪填满会保持比例并居中裁剪。",
-  upscale_method: "图片缩放采样算法。兰索斯质量较高但只支持 CPU；GPU 模式请使用最近邻、双线性、区域或双三次。",
-  round_to_multiple: "把输出宽高向上对齐到指定倍数。常用于确保尺寸能被 8、16、32、64 等整除。选择无则不额外对齐。",
-  pad_color: "留边填充时使用的背景颜色。支持颜色选择器、十六进制颜色和常见颜色名称。",
-  device: "选择缩放计算设备。兰索斯不支持 GPU，如果选择 GPU 请改用其它缩放算法。",
-};
-
-const MODE_TOOLTIP = {
-  "宽高": "宽高：直接指定输出宽度和高度，可选择拉伸、留边填充或裁剪填满。",
-  "等比": "等比：按百分比整体缩放，始终保持原图比例。",
-  "长边": "长边：指定图片较长一边的长度，短边自动按原比例计算。",
-  "像素": "像素：按总像素/K和输出比例自动计算宽高。",
-};
-
-function normalizeMode(value) {
-  return MODE_ALIAS[value] || value || "宽高";
+function isConfigInputSlot(input) {
+  if (!input) return false;
+  const text = [input.name, input.label, input.localized_name, input.type, input.tooltip].filter(Boolean).join(" ");
+  return CONFIG_INPUT_RE.test(text);
 }
 
-function findWidget(node, name) {
-  return node.widgets?.find((w) => w.name === name);
+function removeConfigInputSlots(node) {
+  if (!node?.inputs?.length) return;
+  let removed = false;
+  for (let i = node.inputs.length - 1; i >= 0; i--) {
+    if (!isConfigInputSlot(node.inputs[i])) continue;
+    try { node.disconnectInput?.(i); } catch (_) {}
+    node.inputs.splice(i, 1);
+    removed = true;
+  }
+  if (removed) {
+    try { node.setDirtyCanvas?.(true, true); } catch (_) {}
+    try { node.graph?.setDirtyCanvas?.(true, true); } catch (_) {}
+  }
 }
 
-function widgetValue(node, name, fallback = undefined) {
-  const w = findWidget(node, name);
-  return w?.value ?? fallback;
+function moveConfigWidgetToEnd(node) {
+  if (!node?.widgets?.length) return;
+  const idx = node.widgets.findIndex((w) => w?.name === CONFIG_WIDGET);
+  if (idx >= 0 && idx !== node.widgets.length - 1) {
+    const [w] = node.widgets.splice(idx, 1);
+    node.widgets.push(w);
+  }
 }
 
-function stopCanvasEvent(e) {
-  e.preventDefault?.();
-  e.stopPropagation?.();
+const LEGACY_WIDGET_NAMES = new Set([
+  "gjj_multifunction_resize_panel",
+  "gjj_resize_status",
+  "gjj_status_bar",
+  "gjj_progress_bar",
+  "gjj_multifunction_resize_status",
+  "gjj_multifunction_resize_progress",
+  "状态栏",
+  "进度条",
+]);
+
+function removeWidgetByObject(node, widget) {
+  if (!node?.widgets || !widget) return;
+  const idx = node.widgets.indexOf(widget);
+  if (idx >= 0) node.widgets.splice(idx, 1);
+  try { widget.element?.remove?.(); } catch (_) {}
+  try { widget.inputEl?.remove?.(); } catch (_) {}
+  try { widget.widget?.remove?.(); } catch (_) {}
 }
 
-function stopCanvasEventHard(e) {
-  e.preventDefault?.();
-  e.stopPropagation?.();
-  e.stopImmediatePropagation?.();
+function purgeLegacyStatusAndPanels(node, keepWidget = null) {
+  removeConfigInputSlots(node);
+  if (!node?.widgets) return;
+  const widgets = [...node.widgets];
+  for (const w of widgets) {
+    if (!w || w === keepWidget || w.name === CONFIG_WIDGET) continue;
+    const name = String(w.name || "");
+    const type = String(w.type || "");
+    const isLegacyName = LEGACY_WIDGET_NAMES.has(name) || /gjj.*(status|progress|resize_panel|multifunction_resize_panel)/i.test(name);
+    const isLegacyDom = type.toLowerCase() === "dom" && w.element?.classList?.contains?.("gjj-mf-root");
+    if (isLegacyName || isLegacyDom) removeWidgetByObject(node, w);
+  }
 }
 
-function setWidgetValue(node, name, value) {
-  const w = findWidget(node, name);
-  if (!w) return;
-  w.value = value;
-  node.properties ??= {};
-  node.properties[name] = value;
-  w.callback?.(value, app.canvas, node, app.canvas?.graph_mouse, {});
+const OPTIONS = {
+  fit_mode: ["拉伸", "留边填充", "裁剪填满"],
+  upscale_method: ["兰索斯", "双三次", "双线性", "区域", "最近邻"],
+  round_to_multiple: ["1", "2", "4", "8", "16", "32", "64", "128", "256", "512"],
+  device: ["CPU", "GPU"],
+  aspect_ratio: ["原始比例", "自定义", "1:1", "3:2", "4:3", "16:9", "2:3", "3:4", "9:16"],
+};
+
+function ensureStyles() {
+  if (document.getElementById("gjj-mf-resize-style-v26")) return;
+  const style = document.createElement("style");
+  style.id = "gjj-mf-resize-style-v26";
+  style.textContent = `
+.gjj-mf-root{box-sizing:border-box;width:100%;padding:4px 0 7px 0;font-family:system-ui,"Microsoft YaHei",sans-serif;color:#dbeafe;pointer-events:auto;user-select:none;}
+.gjj-mf-row-title{font-size:11px;color:#93c5fd;margin:2px 0 5px 2px;opacity:.95;}
+.gjj-mf-output-row{display:flex;gap:6px;margin:0 0 9px 0;}
+.gjj-mf-output-btn{flex:1;border:1px solid rgba(148,163,184,.42);background:rgba(15,23,42,.58);color:#e5e7eb;border-radius:8px;padding:5px 3px;font-size:11px;line-height:1.15;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:background .18s,border-color .18s,box-shadow .18s,color .18s;}
+.gjj-mf-output-btn:hover{border-color:#22d3ee;color:#fff;background:rgba(8,145,178,.22);}
+.gjj-mf-output-btn.active{border-color:#22d3ee;color:#fff;background:rgba(14,165,233,.38);box-shadow:0 0 0 1px rgba(34,211,238,.25) inset;}
+.gjj-mf-tabs{position:relative;display:flex;gap:6px;border-bottom:1px solid rgba(34,211,238,.32);margin:0 0 10px 0;padding-bottom:0;}
+.gjj-mf-tab{position:relative;flex:1;text-align:center;border:1px solid rgba(148,163,184,.46);border-bottom:none;border-radius:8px 8px 0 0;background:rgba(15,23,42,.42);color:#d1d5db;font-weight:700;font-size:12px;padding:6px 2px;cursor:pointer;transition:border-color .2s,background .2s,color .2s;z-index:2;}
+.gjj-mf-tab:hover{border-color:rgba(34,211,238,.72);color:#fff;}
+.gjj-mf-tab.active{border-left-color:#22d3ee;border-top-color:#22d3ee;border-right-color:#22d3ee;border-bottom-color:transparent;background:rgba(14,165,233,.28);color:#fff;}
+.gjj-mf-underline{position:absolute;left:0;bottom:-2px;height:3px;width:0;border-radius:999px;background:#22d3ee;box-shadow:0 0 9px rgba(34,211,238,.9);transition:left .3s ease,width .3s ease;z-index:4;}
+.gjj-mf-panel{display:flex;flex-direction:column;gap:7px;}
+.gjj-mf-field{display:flex;align-items:center;gap:7px;min-height:28px;}
+.gjj-mf-label{width:82px;min-width:82px;color:#cbd5e1;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.gjj-mf-control{flex:1;min-width:0;height:28px;border:1px solid rgba(148,163,184,.28);background:rgba(17,24,39,.82);color:#fff;border-radius:8px;padding:0 8px;font-size:12px;outline:none;box-sizing:border-box;}
+.gjj-mf-control:focus{border-color:#22d3ee;box-shadow:0 0 0 1px rgba(34,211,238,.25);}
+.gjj-mf-control[type="color"]{padding:2px 5px;min-width:60px;}
+.gjj-mf-section{margin-top:2px;padding-top:5px;border-top:1px solid rgba(148,163,184,.16);}
+.gjj-mf-status{display:none;margin-top:8px;border:1px solid rgba(34,211,238,.34);border-radius:9px;background:rgba(2,6,23,.45);padding:6px 7px;color:#e0f2fe;font-size:12px;}
+.gjj-mf-status.show{display:block;}
+.gjj-mf-status.done{border-color:rgba(34,197,94,.72);color:#dcfce7;background:rgba(20,83,45,.22);}
+.gjj-mf-status.error{border-color:rgba(248,113,113,.86);color:#fee2e2;background:rgba(127,29,29,.25);}
+.gjj-mf-bar{display:none;height:5px;margin-top:5px;border-radius:999px;background:rgba(148,163,184,.25);overflow:hidden;}
+.gjj-mf-status.running .gjj-mf-bar{display:block;}
+.gjj-mf-fill{height:100%;width:35%;border-radius:999px;background:#22d3ee;animation:gjjMfRun 1.1s ease-in-out infinite alternate;}
+@keyframes gjjMfRun{from{transform:translateX(-90%)}to{transform:translateX(255%)}}
+`;
+  document.head.appendChild(style);
 }
 
-function rememberOriginalWidget(widget) {
-  if (!widget || widget.__gjjResizeOriginalSaved) return;
-  if (widget.type === "hidden" || widget.hidden === true) return;
+function stop(e) {
+  e.stopPropagation();
+}
 
-  widget.__gjjResizeOriginalSaved = true;
-  widget.__gjjResizeOriginal = {
-    type: widget.type,
-    hidden: widget.hidden,
-    disabled: widget.disabled,
-    computeSize: widget.computeSize,
-    draw: widget.draw,
-    label: widget.label,
-    last_y: widget.last_y,
-    computedHeight: widget.computedHeight,
-    margin_top: widget.margin_top,
-    size: Array.isArray(widget.size) ? [...widget.size] : widget.size,
-  };
+function readConfig(node) {
+  let cfg = { ...DEFAULT_CONFIG };
+  const w = node.widgets?.find((x) => x?.name === CONFIG_WIDGET);
+  try {
+    if (w?.value) {
+      const parsed = JSON.parse(String(w.value));
+      if (parsed && typeof parsed === "object") cfg = { ...cfg, ...parsed };
+    }
+  } catch (_) {}
+  node.properties ||= {};
+  if (node.properties.gjj_mf_resize_config && typeof node.properties.gjj_mf_resize_config === "object") {
+    cfg = { ...cfg, ...node.properties.gjj_mf_resize_config };
+  }
+  if (!MODES.includes(cfg.mode)) cfg.mode = "等比";
+  if (!Array.isArray(cfg.extra_outputs)) cfg.extra_outputs = [];
+  return cfg;
+}
+
+function writeConfig(node, patch = {}) {
+  const cfg = { ...readConfig(node), ...patch };
+  if (!MODES.includes(cfg.mode)) cfg.mode = "等比";
+  if (!Array.isArray(cfg.extra_outputs)) cfg.extra_outputs = [];
+  node.properties ||= {};
+  node.properties.gjj_mf_resize_config = cfg;
+  const text = JSON.stringify(cfg);
+  const w = node.widgets?.find((x) => x?.name === CONFIG_WIDGET);
+  if (w) {
+    w.value = text;
+    try { w.callback?.(text, app.canvas, node, app.canvas?.graph_mouse, {}); } catch (_) {}
+  }
+  return cfg;
 }
 
 function hideWidgetCompletely(widget) {
   if (!widget) return;
-  rememberOriginalWidget(widget);
-
+  if (!widget.__gjjMfSaved) {
+    widget.__gjjMfSaved = true;
+    widget.__gjjMfOriginal = {
+      type: widget.type,
+      computeSize: widget.computeSize,
+      draw: widget.draw,
+      mouse: widget.mouse,
+      label: widget.label,
+      size: Array.isArray(widget.size) ? [...widget.size] : widget.size,
+      last_y: widget.last_y,
+      computedHeight: widget.computedHeight,
+      margin_top: widget.margin_top,
+    };
+  }
   widget.type = "hidden";
   widget.hidden = true;
   widget.disabled = true;
   widget.serialize = true;
-  widget.options ??= {};
-  widget.options.hidden = true;
-  widget.computeSize = () => [0, -4];
+  widget.computeSize = () => [0, -8];
   widget.draw = () => {};
+  widget.mouse = () => false;
   widget.label = "";
+  widget.size = [0, 0];
   widget.last_y = 0;
-  widget.computedHeight = -4;
+  widget.computedHeight = 0;
   widget.margin_top = 0;
-  widget.size = [0, -4];
-
   for (const el of [widget.inputEl, widget.element, widget.widget]) {
     if (!el?.style) continue;
     el.style.display = "none";
@@ -177,312 +218,418 @@ function hideWidgetCompletely(widget) {
   }
 }
 
-function showWidgetCompletely(widget) {
-  if (!widget) return;
+function updateOutputs(node) {
+  if (!node.outputs) return;
+  const cfg = writeConfig(node);
+  while (node.outputs.length > 2) node.removeOutput(2);
+  for (const key of cfg.extra_outputs.slice(0, 3)) {
+    const out = OUTPUTS.find((x) => x.key === key);
+    if (out) node.addOutput(out.outName, out.type);
+  }
+}
 
-  const original = widget.__gjjResizeOriginal;
-  const hasValidOriginal = widget.__gjjResizeOriginalSaved && original?.type && original.type !== "hidden";
+function redraw(node) {
+  requestAnimationFrame(() => {
+    try {
+      const minW = 260;
+      if (node.size) node.size[0] = Math.max(node.size[0], minW);
+    } catch (_) {}
+    node.setDirtyCanvas?.(true, true);
+    node.graph?.setDirtyCanvas?.(true, true);
+    app.graph?.setDirtyCanvas?.(true, true);
+  });
+}
 
-  widget.hidden = false;
-  widget.disabled = false;
-  widget.serialize = true;
-  widget.options ??= {};
-  delete widget.options.hidden;
+function numberField(root, node, cfg, key, label, title, opts = {}) {
+  const row = document.createElement("label");
+  row.className = "gjj-mf-field";
+  row.title = title;
+  const span = document.createElement("span");
+  span.className = "gjj-mf-label";
+  span.textContent = label;
+  const input = document.createElement("input");
+  input.className = "gjj-mf-control";
+  input.type = "number";
+  input.value = cfg[key];
+  input.min = opts.min ?? 1;
+  input.max = opts.max ?? 1000000;
+  input.step = opts.step ?? 1;
+  input.addEventListener("input", (e) => {
+    stop(e);
+    writeConfig(node, { [key]: Number(input.value) });
+  });
+  input.addEventListener("change", (e) => { stop(e); redraw(node); });
+  for (const ev of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "keydown", "keyup", "wheel"]) input.addEventListener(ev, stop);
+  row.append(span, input);
+  root.appendChild(row);
+}
 
-  if (hasValidOriginal) {
-    widget.type = original.type;
-    widget.computeSize = original.computeSize;
-    widget.draw = original.draw;
-    widget.label = original.label || WIDGET_LABEL_FALLBACK[widget.name] || widget.name;
-    widget.options.tooltip ??= WIDGET_TOOLTIP_FALLBACK[widget.name];
-    widget.last_y = original.last_y || 0;
-    widget.computedHeight = original.computedHeight;
-    widget.margin_top = original.margin_top || 0;
-    widget.size = Array.isArray(original.size) ? [...original.size] : original.size;
+function selectField(root, node, cfg, key, label, title, values) {
+  const row = document.createElement("label");
+  row.className = "gjj-mf-field";
+  row.title = title;
+  const span = document.createElement("span");
+  span.className = "gjj-mf-label";
+  span.textContent = label;
+  const select = document.createElement("select");
+  select.className = "gjj-mf-control";
+  for (const v of values) {
+    const opt = document.createElement("option");
+    opt.value = v;
+    opt.textContent = v;
+    select.appendChild(opt);
+  }
+  select.value = cfg[key];
+  select.addEventListener("change", (e) => {
+    stop(e);
+    writeConfig(node, { [key]: select.value });
+    buildPanel(node);
+  });
+  for (const ev of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "keydown", "keyup", "wheel"]) select.addEventListener(ev, stop);
+  row.append(span, select);
+  root.appendChild(row);
+}
+
+function colorField(root, node, cfg) {
+  const row = document.createElement("label");
+  row.className = "gjj-mf-field";
+  row.title = "留边填充 Letterbox/Padding 时使用的背景颜色。拉伸和裁剪填满不会使用该颜色。Padding color.";
+  const span = document.createElement("span");
+  span.className = "gjj-mf-label";
+  span.textContent = "🎨 补边颜色";
+  const input = document.createElement("input");
+  input.className = "gjj-mf-control";
+  input.type = "color";
+  input.value = String(cfg.pad_color || "#000000").startsWith("#") ? String(cfg.pad_color).slice(0, 7) : "#000000";
+  input.addEventListener("input", (e) => { stop(e); writeConfig(node, { pad_color: input.value }); });
+  input.addEventListener("change", stop);
+  for (const ev of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "keydown", "keyup", "wheel"]) input.addEventListener(ev, stop);
+  row.append(span, input);
+  root.appendChild(row);
+}
+
+function buildPanel(node) {
+  const dom = node.__gjjMfDom;
+  if (!dom) return;
+  const cfg = readConfig(node);
+  dom.panel.replaceChildren();
+
+  selectField(dom.panel, node, cfg, "fit_mode", "🧲 适配方式", "拉伸 Stretch：直接变成目标尺寸；留边填充 Letterbox/Padding：等比缩放后补边；裁剪填满 Crop Fill：等比缩放后居中裁剪。", OPTIONS.fit_mode);
+  selectField(dom.panel, node, cfg, "upscale_method", "🔄 缩放算法", "缩放采样算法。Lanczos 高质量；Bicubic/Bilinear 更快。Resampling method.", OPTIONS.upscale_method);
+  selectField(dom.panel, node, cfg, "round_to_multiple", "🔢 尺寸对齐", "输出宽高向上对齐到指定倍数。Round output size to multiple.", OPTIONS.round_to_multiple);
+  colorField(dom.panel, node, cfg);
+  selectField(dom.panel, node, cfg, "device", "⚙️ 计算设备", "选择 CPU 或 GPU 执行。Lanczos 在 CPU 更稳定。Compute device.", OPTIONS.device);
+
+  const section = document.createElement("div");
+  section.className = "gjj-mf-section";
+  dom.panel.appendChild(section);
+
+  if (cfg.mode === "宽高") {
+    numberField(section, node, cfg, "width", "📐 目标宽度", "宽高模式使用。Target width.", { min: 1, max: 16384, step: 8 });
+    numberField(section, node, cfg, "height", "📐 目标高度", "宽高模式使用。Target height.", { min: 1, max: 16384, step: 8 });
+  } else if (cfg.mode === "长边") {
+    numberField(section, node, cfg, "long_side_length", "📏 长边长度", "把最长边缩放到该长度，短边自动等比计算。Longest side length.", { min: 1, max: 16384, step: 8 });
+  } else if (cfg.mode === "像素") {
+    numberField(section, node, cfg, "total_pixel_k", "🧮 总像素/K", "单位 K pixels；1024 表示约 102.4 万像素。Total kilo pixels.", { min: 1, max: 1000000, step: 1 });
+    selectField(section, node, cfg, "aspect_ratio", "🖼️ 输出比例", "像素模式使用的输出画幅比例。Aspect ratio.", OPTIONS.aspect_ratio);
+    if (cfg.aspect_ratio === "自定义") {
+      numberField(section, node, cfg, "proportional_width", "↔️ 比例宽", "自定义比例宽。Custom ratio width.", { min: 1, max: 100000, step: 1 });
+      numberField(section, node, cfg, "proportional_height", "↕️ 比例高", "自定义比例高。Custom ratio height.", { min: 1, max: 100000, step: 1 });
+    }
   } else {
-    widget.type = WIDGET_TYPE_FALLBACK[widget.name] || "number";
-    widget.computeSize = undefined;
-    widget.draw = undefined;
-    widget.label = WIDGET_LABEL_FALLBACK[widget.name] || widget.label || widget.name;
-    widget.options.tooltip = WIDGET_TOOLTIP_FALLBACK[widget.name] || widget.options.tooltip;
-    widget.last_y = 0;
-    widget.computedHeight = undefined;
-    widget.margin_top = 0;
-    widget.size = undefined;
+    numberField(section, node, cfg, "scale_percent", "📊 缩放百分比", "100 为原始尺寸，50 为缩小一半，200 为放大两倍。Scale percent.", { min: 0.1, max: 10000, step: 1 });
   }
 
-  for (const el of [widget.inputEl, widget.element, widget.widget]) {
-    if (!el?.style) continue;
-    el.style.display = "";
-    el.style.height = "";
-    el.style.minHeight = "";
-    el.style.margin = "";
-    el.style.padding = "";
-    el.style.border = "";
-    el.style.overflow = "";
+  updateDomState(node);
+  writeConfig(node);
+  redraw(node);
+}
+
+function updateDomState(node) {
+  const dom = node.__gjjMfDom;
+  if (!dom) return;
+  const cfg = readConfig(node);
+  dom.outputs.querySelectorAll("button").forEach((btn) => {
+    btn.classList.toggle("active", cfg.extra_outputs.includes(btn.dataset.key));
+  });
+  const tabs = Array.from(dom.tabs.querySelectorAll("button.gjj-mf-tab"));
+  for (const tab of tabs) tab.classList.toggle("active", tab.dataset.mode === cfg.mode);
+  const active = tabs.find((tab) => tab.dataset.mode === cfg.mode) || tabs[1];
+  if (active) {
+    dom.underline.style.left = `${active.offsetLeft}px`;
+    dom.underline.style.width = `${active.offsetWidth}px`;
   }
 }
 
-function ensureStyles() {
-  if (document.getElementById("gjj-image-resize-kjv2-style")) return;
-  const style = document.createElement("style");
-  style.id = "gjj-image-resize-kjv2-style";
-  style.textContent = `
-    .gjj-resize-kjv2-row {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 5px;
-      width: 100%;
-      box-sizing: border-box;
-      padding: 0;
-      margin: 0;
-      pointer-events: auto;
-      user-select: none;
-    }
-    .gjj-resize-kjv2-btn {
-      border: 1px solid rgba(255,255,255,.18);
-      border-radius: 8px;
-      background: rgba(255,255,255,.075);
-      color: rgba(255,255,255,.9);
-      font-size: 11px;
-      line-height: 1.15;
-      padding: 6px 2px;
-      cursor: pointer;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: clip;
-      pointer-events: auto;
-      transition: background .12s ease, border-color .12s ease, transform .08s ease;
-    }
-    .gjj-resize-kjv2-btn:hover {
-      background: rgba(255,255,255,.14);
-      border-color: rgba(255,255,255,.34);
-    }
-    .gjj-resize-kjv2-btn:active { transform: translateY(1px); }
-    .gjj-resize-kjv2-btn.active {
-      background: rgba(66, 153, 225, .66);
-      border-color: rgba(144, 205, 244, .95);
-      color: #fff;
-      font-weight: 700;
-    }
-  `;
-  document.head.appendChild(style);
-}
-
-function addModeButtons(node) {
-  if (node.__gjjResizeModeButtons) return;
+function createDom(node) {
   ensureStyles();
+  const root = document.createElement("div");
+  root.className = "gjj-mf-root";
+  for (const ev of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "wheel"]) root.addEventListener(ev, stop);
 
-  const row = document.createElement("div");
-  row.className = "gjj-resize-kjv2-row";
-
-  for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "wheel"]) {
-    row.addEventListener(eventName, stopCanvasEvent, { capture: true });
-  }
-
-  const buttons = new Map();
-  for (const mode of MODES) {
+  const outTitle = document.createElement("div");
+  outTitle.className = "gjj-mf-row-title";
+  outTitle.textContent = "🧩 输出扩充口：单选，Ctrl/Shift 复选";
+  const outputs = document.createElement("div");
+  outputs.className = "gjj-mf-output-row";
+  for (const item of OUTPUTS) {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "gjj-resize-kjv2-btn";
-    btn.textContent = mode;
-    btn.title = MODE_TOOLTIP[mode] || `切换到：${mode}`;
-
-    for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu"]) {
-      btn.addEventListener(eventName, stopCanvasEvent, { capture: true });
-    }
-
+    btn.className = "gjj-mf-output-btn";
+    btn.dataset.key = item.key;
+    btn.textContent = item.label;
+    btn.title = item.title;
     btn.addEventListener("click", (e) => {
-      stopCanvasEventHard(e);
-      setWidgetValue(node, "resize_mode", mode);
-      updateNodeUI(node);
-      node.setDirtyCanvas?.(true, true);
-      app.graph?.setDirtyCanvas?.(true, true);
+      stop(e);
+      const cfg = readConfig(node);
+      let selected = [...cfg.extra_outputs];
+      if (e.ctrlKey || e.shiftKey) {
+        selected = selected.includes(item.key) ? selected.filter((x) => x !== item.key) : [...selected, item.key];
+      } else {
+        selected = selected.length === 1 && selected[0] === item.key ? [] : [item.key];
+      }
+      writeConfig(node, { extra_outputs: selected.slice(0, 3) });
+      updateOutputs(node);
+      updateDomState(node);
+      redraw(node);
     });
-
-    buttons.set(mode, btn);
-    row.appendChild(btn);
+    outputs.appendChild(btn);
   }
 
-  const domWidget = node.addDOMWidget("gjj_resize_mode_buttons", "GJJResizeModeButtons", row, {
-    serialize: false,
-    hideOnZoom: false,
-    getValue: () => normalizeMode(widgetValue(node, "resize_mode", "宽高")),
-    setValue: (value) => setWidgetValue(node, "resize_mode", normalizeMode(value)),
-  });
+  const tabs = document.createElement("div");
+  tabs.className = "gjj-mf-tabs";
+  for (const mode of MODES) {
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = "gjj-mf-tab";
+    tab.dataset.mode = mode;
+    tab.textContent = mode;
+    tab.title = `切换到【${mode}】模式。Switch to ${mode} mode.`;
+    tab.addEventListener("click", (e) => {
+      stop(e);
+      writeConfig(node, { mode });
+      buildPanel(node);
+    });
+    tabs.appendChild(tab);
+  }
+  const underline = document.createElement("div");
+  underline.className = "gjj-mf-underline";
+  tabs.appendChild(underline);
 
-  domWidget.computeSize = function(width) {
-    return [width, 30];
-  };
-  domWidget.serialize = false;
-  domWidget.label = "";
-  domWidget.margin_top = 0;
+  const panel = document.createElement("div");
+  panel.className = "gjj-mf-panel";
 
-  node.__gjjResizeModeButtons = { row, buttons, domWidget };
+  const status = document.createElement("div");
+  status.className = "gjj-mf-status";
+  status.innerHTML = `<div class="gjj-mf-status-text">准备就绪</div><div class="gjj-mf-bar"><div class="gjj-mf-fill"></div></div>`;
+
+  root.append(outTitle, outputs, tabs, panel, status);
+  node.__gjjMfDom = { root, outputs, tabs, underline, panel, status };
+  return root;
 }
 
-function removeManagedInputSlots(node) {
-  // 只保留真正数据输入口 image / mask；参数输入口由面板按钮控制，不在左侧出现。
-  if (!Array.isArray(node.inputs)) return;
-  for (const name of MANAGED) {
-    let idx = node.inputs.findIndex((input) => input?.name === name);
-    while (idx !== -1) {
-      node.removeInput?.(idx);
-      idx = node.inputs.findIndex((input) => input?.name === name);
+function ensureDomWidget(node) {
+  removeConfigInputSlots(node);
+  if (node.__gjjMfDomWidget && node.widgets?.includes(node.__gjjMfDomWidget)) {
+    purgeLegacyStatusAndPanels(node, node.__gjjMfDomWidget);
+    return;
+  }
+  purgeLegacyStatusAndPanels(node, null);
+  const root = createDom(node);
+  let widget;
+  if (typeof node.addDOMWidget === "function") {
+    widget = node.addDOMWidget(PANEL_WIDGET_NAME, "DOM", root, {
+      serialize: false,
+      hideOnZoom: false,
+      getValue: () => "",
+      setValue: () => {},
+    });
+  } else {
+    widget = node.addWidget("text", PANEL_WIDGET_NAME, "", () => {}, { serialize: false });
+    widget.element = root;
+  }
+  widget.serialize = false;
+  widget.computeSize = () => [Math.max(235, (node.size?.[0] || 270) - 28), Math.max(230, root.offsetHeight || 260)];
+  node.__gjjMfDomWidget = widget;
+  purgeLegacyStatusAndPanels(node, widget);
+}
+
+function showStatus(node, text, kind = "running", progress = null) {
+  const st = node.__gjjMfDom?.status;
+  if (!st) return;
+  st.classList.remove("running", "error", "done");
+  st.classList.add("show");
+  st.dataset.state = kind;
+  if (kind === "running") st.classList.add("running");
+  else if (kind === "error") st.classList.add("error");
+  else if (kind === "done") st.classList.add("done");
+  const textEl = st.querySelector(".gjj-mf-status-text");
+  if (textEl) textEl.textContent = text;
+  const fill = st.querySelector(".gjj-mf-fill");
+  if (fill) {
+    if (typeof progress === "number" && isFinite(progress)) {
+      fill.style.animation = "none";
+      fill.style.transform = "none";
+      fill.style.width = `${Math.max(0, Math.min(100, progress * 100))}%`;
+    } else {
+      fill.style.width = "35%";
+      fill.style.animation = "gjjMfRun 1.1s ease-in-out infinite alternate";
+      fill.style.transform = "";
     }
   }
+  redraw(node);
 }
 
-function collectManagedWidgets(node) {
-  const map = new Map();
-  for (const name of ORDER) {
-    const widget = findWidget(node, name);
-    if (widget) map.set(name, widget);
-  }
-  return map;
-}
-
-function rebuildWidgetOrder(node, visibleNames) {
-  if (!Array.isArray(node.widgets)) return;
-  const modeButtons = node.__gjjResizeModeButtons?.domWidget;
-  const visibleSet = new Set(visibleNames);
-
-  const managedMap = collectManagedWidgets(node);
-  const visibleWidgets = [];
-  const hiddenWidgets = [];
-
-  for (const name of ORDER) {
-    const widget = managedMap.get(name);
-    if (!widget) continue;
-    if (visibleSet.has(name)) visibleWidgets.push(widget);
-    else hiddenWidgets.push(widget);
-  }
-
-  const otherWidgets = node.widgets.filter((w) => {
-    if (w === modeButtons) return false;
-    if (MANAGED.has(w.name)) return false;
-    return true;
-  });
-
-  // 关键：按“当前模式需要的控件”重排，按钮放在当前控件之后；隐藏控件放最后，避免旧参数在中间挤空行。
-  node.widgets = [...otherWidgets, ...visibleWidgets, ...(modeButtons ? [modeButtons] : []), ...hiddenWidgets];
-}
-
-function applyChineseWidgetText(node) {
-  if (!Array.isArray(node.widgets)) return;
-  for (const widget of node.widgets) {
-    if (!MANAGED.has(widget.name)) continue;
-    widget.options ??= {};
-    widget.label = WIDGET_LABEL_FALLBACK[widget.name] || widget.label || widget.name;
-    widget.options.tooltip = WIDGET_TOOLTIP_FALLBACK[widget.name] || widget.options.tooltip;
-  }
-}
-
-function updateNodeUI(node) {
-  if (!node?.widgets) return;
-
-  applyChineseWidgetText(node);
-  removeManagedInputSlots(node);
-
-  for (const w of node.widgets) {
-    if (MANAGED.has(w.name)) rememberOriginalWidget(w);
-  }
-
-  let mode = normalizeMode(widgetValue(node, "resize_mode", "宽高"));
-  if (!MODES.includes(mode)) mode = "宽高";
-
-  const modeWidget = findWidget(node, "resize_mode");
-  if (modeWidget && modeWidget.value !== mode) modeWidget.value = mode;
-
-  const visibleNames = [...(GROUPS[mode] || GROUPS["宽高"])] ;
-
-  if (mode === "像素" && widgetValue(node, "aspect_ratio", "原始比例") === "自定义") {
-    const idx = visibleNames.indexOf("aspect_ratio");
-    visibleNames.splice(idx + 1, 0, "proportional_width", "proportional_height");
-  }
-
-  const visibleSet = new Set(visibleNames);
-
-  hideWidgetCompletely(modeWidget);
-  for (const name of CONTROLLED) {
-    const w = findWidget(node, name);
-    if (!w) continue;
-    if (visibleSet.has(name)) showWidgetCompletely(w);
-    else hideWidgetCompletely(w);
-  }
-
-  rebuildWidgetOrder(node, visibleNames);
-
-  const buttons = node.__gjjResizeModeButtons?.buttons;
-  if (buttons) {
-    for (const [name, btn] of buttons.entries()) {
-      btn.classList.toggle("active", name === mode);
+function hideStatus(node) {
+  const st = node.__gjjMfDom?.status;
+  if (st) {
+    st.classList.remove("show", "running", "error", "done");
+    st.dataset.state = "hidden";
+    const fill = st.querySelector(".gjj-mf-fill");
+    if (fill) {
+      fill.style.width = "0%";
+      fill.style.animation = "none";
+      fill.style.transform = "none";
     }
   }
-
-  removeManagedInputSlots(node);
-
-  const size = node.computeSize?.();
-  if (size) {
-    node.size[0] = Math.max(node.size?.[0] || 240, size[0]);
-    node.size[1] = size[1];
-  }
-  node.setDirtyCanvas?.(true, true);
-  app.graph?.setDirtyCanvas?.(true, true);
+  redraw(node);
 }
 
-function hookWidgetCallbacks(node) {
-  for (const name of ["resize_mode", "aspect_ratio"]) {
-    const w = findWidget(node, name);
-    if (!w || w.__gjjResizeHooked) continue;
-    const old = w.callback;
-    w.callback = function (...args) {
-      const r = old?.apply(this, args);
-      requestAnimationFrame(() => updateNodeUI(node));
-      return r;
-    };
-    w.__gjjResizeHooked = true;
+function findNodeByBackendId(nodeId) {
+  if (!nodeId || !app?.graph) return null;
+  const idText = String(nodeId);
+  const idNum = Number(idText);
+  try {
+    if (Number.isFinite(idNum)) {
+      const n = app.graph.getNodeById?.(idNum);
+      if (n?.type === NODE_CLASS) return n;
+    }
+  } catch (_) {}
+  for (const n of app.graph._nodes || []) {
+    if (!n || n.type !== NODE_CLASS) continue;
+    if (String(n.id) === idText) return n;
+    if (String(n?.properties?.NodeID || "") === idText) return n;
+  }
+  return null;
+}
+
+function handleBackendStatus(detail) {
+  const data = detail?.detail || detail || {};
+  const node = findNodeByBackendId(data.node_id);
+  if (!node) return;
+  ensureDomWidget(node);
+  const state = data.state || "running";
+  const msg = data.message || (state === "done" ? "执行完成" : state === "error" ? "执行错误" : "正在执行");
+  const progress = typeof data.progress === "number" ? data.progress : null;
+  if (state === "done") {
+    showStatus(node, msg, "done", 1);
+    const st = node.__gjjMfDom?.status;
+    if (st) st.dataset.backendDone = "1";
+  } else if (state === "error") {
+    showStatus(node, msg, "error", 1);
+    const st = node.__gjjMfDom?.status;
+    if (st) st.dataset.backendDone = "1";
+  } else {
+    const st = node.__gjjMfDom?.status;
+    if (st) st.dataset.backendDone = "0";
+    showStatus(node, msg, "running", progress);
   }
 }
 
-function install(node) {
-  requestAnimationFrame(() => {
-    addModeButtons(node);
-    hookWidgetCallbacks(node);
-    updateNodeUI(node);
-    setTimeout(() => updateNodeUI(node), 50);
-    setTimeout(() => updateNodeUI(node), 200);
-  });
+function ensureBackendStatusListener() {
+  if (window.__gjjMfResizeStatusListenerV29) return;
+  window.__gjjMfResizeStatusListenerV29 = true;
+  try {
+    api.addEventListener("gjj_image_resize_kjv2_status", handleBackendStatus);
+  } catch (_) {}
+}
+
+function initNode(node) {
+  node.properties ||= {};
+  removeConfigInputSlots(node);
+  for (const w of node.widgets || []) {
+    if (w?.name === CONFIG_WIDGET) hideWidgetCompletely(w);
+  }
+  ensureDomWidget(node);
+  moveConfigWidgetToEnd(node);
+  removeConfigInputSlots(node);
+  writeConfig(node, readConfig(node));
+  buildPanel(node);
+  updateOutputs(node);
+  hideStatus(node); // 默认隐藏，不占位。
+  setTimeout(() => {
+    for (const w of node.widgets || []) if (w?.name === CONFIG_WIDGET) hideWidgetCompletely(w);
+    moveConfigWidgetToEnd(node);
+    removeConfigInputSlots(node);
+    purgeLegacyStatusAndPanels(node, node.__gjjMfDomWidget);
+    buildPanel(node);
+    updateOutputs(node);
+    hideStatus(node);
+  }, 50);
 }
 
 app.registerExtension({
-  name: "GJJ.ImageResizeKJv2.UI",
-  beforeRegisterNodeDef(nodeType, nodeData) {
+  name: "GJJ.MultiFunctionImageResize.v29.batchCount",
+  async beforeRegisterNodeDef(nodeType, nodeData) {
+    ensureBackendStatusListener();
     if (nodeData.name !== NODE_CLASS) return;
 
     const originalAddWidget = nodeType.prototype.addWidget;
-    if (originalAddWidget && !nodeType.prototype.__gjjResizeAddWidgetHookedV5) {
-      nodeType.prototype.addWidget = function (...args) {
-        const widget = originalAddWidget.apply(this, args);
-        if (widget && MANAGED.has(widget.name)) rememberOriginalWidget(widget);
-        if (widget?.name === "resize_mode") hideWidgetCompletely(widget);
-        return widget;
-      };
-      nodeType.prototype.__gjjResizeAddWidgetHookedV5 = true;
-    }
-
-    const onNodeCreated = nodeType.prototype.onNodeCreated;
-    nodeType.prototype.onNodeCreated = function (...args) {
-      const r = onNodeCreated?.apply(this, args);
-      install(this);
-      return r;
+    nodeType.prototype.addWidget = function (...args) {
+      const widget = originalAddWidget?.apply(this, args);
+      if (widget?.name === CONFIG_WIDGET) {
+        hideWidgetCompletely(widget);
+        setTimeout(() => hideWidgetCompletely(widget), 0);
+      }
+      return widget;
     };
 
-    const onConfigure = nodeType.prototype.onConfigure;
-    nodeType.prototype.onConfigure = function (...args) {
-      const r = onConfigure?.apply(this, args);
-      install(this);
-      return r;
+    const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function () {
+      const ret = originalOnNodeCreated?.apply(this, arguments);
+      initNode(this);
+      return ret;
+    };
+
+    const originalOnConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function () {
+      const ret = originalOnConfigure?.apply(this, arguments);
+      setTimeout(() => initNode(this), 0);
+      return ret;
+    };
+
+    const originalOnSerialize = nodeType.prototype.onSerialize;
+    nodeType.prototype.onSerialize = function (o) {
+      writeConfig(this, readConfig(this));
+      return originalOnSerialize?.apply(this, arguments);
+    };
+
+    const originalOnExecutionStart = nodeType.prototype.onExecutionStart;
+    nodeType.prototype.onExecutionStart = function () {
+      this.__gjjMfStart = performance.now();
+      purgeLegacyStatusAndPanels(this, this.__gjjMfDomWidget);
+      writeConfig(this, readConfig(this));
+      showStatus(this, "开始执行：正在按前台参数处理图片 Batch Resize...", "running", 0);
+      return originalOnExecutionStart?.apply(this, arguments);
+    };
+
+    const originalOnExecuted = nodeType.prototype.onExecuted;
+    nodeType.prototype.onExecuted = function () {
+      const ret = originalOnExecuted?.apply(this, arguments);
+      const st = this.__gjjMfDom?.status;
+      // 后台 websocket 的 done 消息包含真实图片数量，前端 onExecuted 只作为兜底，不能覆盖真实统计。
+      if (!st || st.dataset.backendDone !== "1") {
+        const elapsed = this.__gjjMfStart ? ((performance.now() - this.__gjjMfStart) / 1000).toFixed(2) : "0.00";
+        showStatus(this, `执行完成：耗时 ${elapsed} 秒`, "done", 1);
+      }
+      return ret;
+    };
+
+    const originalOnExecutionError = nodeType.prototype.onExecutionError;
+    nodeType.prototype.onExecutionError = function (error) {
+      const msg = error?.message || String(error || "未知错误");
+      showStatus(this, `执行错误：${msg}。请检查输入图片、torch/Pillow 依赖、尺寸参数。`, "error", 1);
+      return originalOnExecutionError?.apply(this, arguments);
     };
   },
 });
