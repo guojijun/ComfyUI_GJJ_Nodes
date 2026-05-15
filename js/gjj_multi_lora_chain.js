@@ -10,7 +10,23 @@ const GLOBAL_SEARCH_PROPERTY = "gjj_lora_global_search";
 const GROUP_RULES_PROPERTY = "gjj_lora_group_rules";
 const ADVANCED_OPEN_PROPERTY = "gjj_lora_advanced_open";
 const DEFAULT_EMPTY_OPTION = { value: "", label: "未选择" };
-const DEFAULT_ROW = { enabled: true, name: "", strength: 1.0 };
+const DEFAULT_ROW = { enabled: false, name: "", strength: 1.0 };
+const DEFAULT_GROUP_RULES = [
+	"👤 人物角色 = 紫灵,ziling,韩立,hanli,南宫婉,梅凝,meining,慕沛灵,沛灵,peiling,宋玉,songyu,燕如嫣,如嫣,ruyan,gydboy,1girl,blue_hair,shorty_hair,elf,ulzzang,seoullina,instagirl,virtual_babes,character,人物",
+	"🎨 画风风格 = 国风,guofeng,古风,anime2real,real2anime,动画变真实,真实变动画,奇幻木偶,FantasyPuppet,剪纸,PaperCutOut,像素,children,drawings,propaganda,poster,covercraft,makeup,amateur,90s,smartphone,snapshot,photoReality,真实幻想,极致真实,style,风格",
+	"🏠 建筑室内 = 北欧,室内设计,家具,家居,别墅,建筑,architectural,decor,furniture,villa,interior,detached,reconstructing,perspective,场景视角",
+	"⚡ 加速蒸馏 = flux,turbo,lightning,lightx2v,FastWan,distill,distilled,consistency,一致性增强,4steps,8steps,蒸馏加速,加速,sda",
+	"🎬 LTX视频功能 = ltx,transition,转场,zhuanchang,outpaint,外扩,refocus,聚焦,union-control,多合一控制,subtitles-remove,去字幕,watermark-remove,去水印,video-upscale,高清增强,restoration,修复模糊,talking-head,音视频同步,cameraman,运镜复刻,reasoning,逻辑叙事,dual-character,双人分镜头,licon,运动连贯性",
+	"🧩 Qwen图像编辑 = qwen,edit,upscale,unblur,remove-clothes,multiple-angles,AnyPose,人景融合,人景色交互,next-scene,union,diffsynth,consis,人物一致性,大杂烩,FireRed",
+	"🌊 Wan视频功能 = wan,lightx2v,FastWan,MoCap,fullbody,relight,combo,ipref,high_noise,low_noise,Fun-A14B,ST_I2V,无缝转场,丝滑转场,face_complete",
+	"🧍 姿态身体 = pose,AnyPose,mocap,fullbody,body,head_swap,body_version,face_complete,人物一致性,consistent_char,complete",
+	"🔍 细节增强 = detail,details,detailer,skin,Super_Skin,face,eye,eyes,texture,tattoo,glow,slider_detail,extract_tattoo,place_tattoo,细节,脸部,眼睛",
+	"🖼️ 扩图修复 = uncrop,inpaint,masked,restore,restoration,unblur,upscale,outpaint,高清,修复,外扩,局部重绘",
+	"💡 光影镜头 = light,lighting,shadow,cinematic,film,camera,cameraman,lens,closeup,portrait,wide,macro,光影,电影感,运镜,镜头,特写,人像,广角,微距",
+	"👗 服装造型 = outfit,clothes,dress,hanfu,armor,服装,汉服,铠甲,high-neck,tight dress,bell sleeves,platform sandals",
+	"🧱 材质质感 = metal,glass,wood,stone,fabric,材质,金属,玻璃,木纹,石头,texture",
+	"🧪 临时测试 = test,temp,demo,644,pytorch_lora_weights,other,测试,临时,其它"
+].join("\n");
 const DEFAULT_FIRST_SEARCH_TERMS = "";
 
 function normalizeStrength(value, fallback = 1.0) {
@@ -43,11 +59,14 @@ function normalizeRows(value) {
 
 	const rows = parsed
 		.filter((item) => item && typeof item === "object")
-		.map((item) => ({
-			enabled: item.enabled !== false,
-			name: String(item.name || ""),
-			strength: normalizeStrength(item.strength, 1.0),
-		}));
+		.map((item) => {
+			const name = String(item.name || "");
+			return {
+				enabled: Boolean(name) && item.enabled !== false,
+				name,
+				strength: normalizeStrength(item.strength, 1.0),
+			};
+		});
 
 	const nonEmptyRows = rows.filter((item) => item.name);
 	nonEmptyRows.push({ ...DEFAULT_ROW });
@@ -57,11 +76,14 @@ function normalizeRows(value) {
 function serializeRows(rows) {
 	const cleaned = rows
 		.filter((item) => item && typeof item === "object")
-		.map((item) => ({
-			enabled: item.enabled !== false,
-			name: String(item.name || ""),
-			strength: normalizeStrength(item.strength, 1.0),
-		}));
+		.map((item) => {
+			const name = String(item.name || "");
+			return {
+				enabled: Boolean(name) && item.enabled !== false,
+				name,
+				strength: normalizeStrength(item.strength, 1.0),
+			};
+		});
 	return JSON.stringify(cleaned);
 }
 
@@ -100,6 +122,9 @@ function hideDataWidget(node, widget) {
 	widget.__gjjNode = node;
 	widget.type = "hidden";
 	widget.hidden = true;
+	widget.display = "hidden";
+	widget.forceInput = false;
+	widget.options = { ...(widget.options || {}), hidden: true, display: "hidden", forceInput: false };
 	widget.serialize = true;
 	widget.serializeValue = () => {
 		const targetNode = widget.__gjjNode || node;
@@ -116,6 +141,7 @@ function hideDataWidget(node, widget) {
 	widget.computeSize = () => [0, 0];
 	widget.draw = () => {};
 	widget.label = "";
+	widget.name = DATA_WIDGET_NAME;
 	if (widget.inputEl) {
 		widget.inputEl.style.display = "none";
 	}
@@ -159,7 +185,7 @@ function ensureNodeState(node) {
 		options: [{ ...DEFAULT_EMPTY_OPTION }],
 		searchByRow: normalizeSearchByRow(node.properties[SEARCH_BY_ROW_PROPERTY]),
 		globalSearch: String(node.properties[GLOBAL_SEARCH_PROPERTY] || ""),
-		groupRulesText: String(node.properties[GROUP_RULES_PROPERTY] || ""),
+		groupRulesText: String(node.properties[GROUP_RULES_PROPERTY] || DEFAULT_GROUP_RULES),
 		advancedOpen: Boolean(node.properties[ADVANCED_OPEN_PROPERTY]),
 	};
 	return node.__gjjLoraState;
@@ -206,11 +232,14 @@ function ensureTrailingEmptyRow(node) {
 	if (normalized.length === 0 || normalized[normalized.length - 1].name) {
 		normalized.push({ ...DEFAULT_ROW });
 	}
-	state.rows = normalized.map((item) => ({
-		enabled: item.enabled !== false,
-		name: String(item.name || ""),
-		strength: normalizeStrength(item.strength, 1.0),
-	}));
+	state.rows = normalized.map((item) => {
+		const name = String(item.name || "");
+		return {
+			enabled: Boolean(name) && item.enabled !== false,
+			name,
+			strength: normalizeStrength(item.strength, 1.0),
+		};
+	});
 }
 
 function normalizeKeyword(value) {
@@ -250,20 +279,38 @@ function matchesSearchExpression(text, expressionGroups) {
 	return expressionGroups.every((group) => group.some((keyword) => text.includes(keyword)));
 }
 
+function parseRuleHeader(rawHeader, fallbackName) {
+	const header = String(rawHeader || "").trim();
+	const emojiMatch = header.match(/^([\p{Extended_Pictographic}\uFE0F\u200D]+(?:\s+[\p{Extended_Pictographic}\uFE0F\u200D]+)*)\s*/u);
+	const icon = emojiMatch ? emojiMatch[1].trim() : "🧩";
+	const groupName = header.replace(/^([\p{Extended_Pictographic}\uFE0F\u200D]+(?:\s+[\p{Extended_Pictographic}\uFE0F\u200D]+)*)\s*/u, "").trim() || fallbackName;
+	return { icon, groupName };
+}
+
 function parseGroupRules(text) {
 	return String(text || "")
 		.split(/\r?\n/)
 		.map((line) => line.trim())
 		.filter(Boolean)
-		.map((line) => {
+		.map((line, index) => {
 			const [rawGroupName, ...rawKeywords] = line.split("=");
-			if (!rawGroupName || rawKeywords.length === 0) {
-				return null;
+			let groupName = "";
+			let icon = "🧩";
+			let keywordText = "";
+
+			if (rawKeywords.length === 0) {
+				// 兼容简写：紫灵,韩立,国风
+				// 表示这一行内所有关键词属于同一个互斥组。
+				groupName = `互斥组${index + 1}`;
+				keywordText = line;
+			} else {
+				const parsedHeader = parseRuleHeader(rawGroupName, `互斥组${index + 1}`);
+				groupName = parsedHeader.groupName;
+				icon = parsedHeader.icon;
+				keywordText = rawKeywords.join("=");
 			}
 
-			const groupName = String(rawGroupName || "").trim();
-			const keywords = rawKeywords
-				.join("=")
+			const keywords = keywordText
 				.split(/[|,，、；;]/)
 				.map((item) => normalizeKeyword(item))
 				.filter(Boolean);
@@ -272,7 +319,7 @@ function parseGroupRules(text) {
 				return null;
 			}
 
-			return { groupName, keywords };
+			return { groupName, icon, keywords };
 		})
 		.filter(Boolean);
 }
@@ -290,6 +337,45 @@ function getGroupNameForLora(loraName, rules) {
 	}
 
 	return "";
+}
+
+function getRuleForLora(loraName, rules) {
+	const text = normalizeKeyword(loraName);
+	if (!text) {
+		return null;
+	}
+
+	return rules.find((rule) => rule.keywords.some((keyword) => text.includes(keyword))) || null;
+}
+
+function getRuleByGroupName(groupName, rules) {
+	const target = normalizeKeyword(groupName);
+	if (!target) {
+		return null;
+	}
+	return rules.find((rule) => normalizeKeyword(rule.groupName) === target) || null;
+}
+
+function getActiveRuleForRow(row, rules, searchText = "", globalSearch = "") {
+	const bySelected = getRuleForLora(row?.name, rules);
+	if (bySelected) {
+		return bySelected;
+	}
+
+	const searchParts = [String(searchText || ""), String(globalSearch || "")]
+		.join(" ")
+		.split(/[\s,，、；;|&+＋]+/)
+		.map((item) => normalizeKeyword(item))
+		.filter(Boolean);
+
+	for (const part of searchParts) {
+		const byName = getRuleByGroupName(part, rules);
+		if (byName) {
+			return byName;
+		}
+	}
+
+	return null;
 }
 
 function updateGroupRules(node, value) {
@@ -315,6 +401,7 @@ function enforceRowUniqueness(node) {
 		const groupName = getGroupNameForLora(name, rules);
 		if (usedNames.has(loweredName) || (groupName && usedGroups.has(groupName))) {
 			row.name = "";
+			row.enabled = false;
 			return;
 		}
 
@@ -362,6 +449,7 @@ function getRowOptions(node, rowIndex, searchText = "") {
 	const blockedNames = getBlockedNames(node, rowIndex);
 	const blockedGroups = getBlockedGroups(node, rowIndex);
 	const rules = parseGroupRules(state.groupRulesText);
+	const activeRule = getActiveRuleForRow(row, rules, searchText, state.globalSearch);
 	const mergedSearch = [String(state.globalSearch || ""), String(searchText || "")]
 		.filter(Boolean)
 		.join("&");
@@ -376,6 +464,9 @@ function getRowOptions(node, rowIndex, searchText = "") {
 		const loweredValue = normalizeKeyword(value);
 		const groupName = getGroupNameForLora(value, rules);
 		const isCurrent = loweredValue === normalizeKeyword(row.name);
+		if (activeRule && groupName !== activeRule.groupName && !isCurrent) {
+			return false;
+		}
 		if (!isCurrent && blockedNames.has(loweredValue)) {
 			return false;
 		}
@@ -636,10 +727,10 @@ function buildRow(node, row, index, rowsContainer) {
 
 	const groupHint = document.createElement("div");
 	groupHint.className = "gjj-lora-group-hint";
-	const currentGroup = getGroupNameForLora(row.name, parseGroupRules(state.groupRulesText));
-	groupHint.textContent = currentGroup ? "🧩" : "🙂";
-	groupHint.title = currentGroup
-		? `已命中互斥分组：${currentGroup}`
+	const currentRule = getRuleForLora(row.name, parseGroupRules(state.groupRulesText));
+	groupHint.textContent = currentRule ? currentRule.icon : "⭕";
+	groupHint.title = currentRule
+		? `已命中互斥分组：${currentRule.icon} ${currentRule.groupName}`
 		: "当前 LoRA 未命中任何互斥分组规则。";
 
 	const toggleWrap = document.createElement("label");
@@ -693,6 +784,7 @@ function buildRow(node, row, index, rowsContainer) {
 			},
 			onSelect(value) {
 				state.rows[index].name = value;
+				state.rows[index].enabled = Boolean(value);
 				enforceRowUniqueness(node);
 				ensureTrailingEmptyRow(node);
 				updateDataWidget(node);
@@ -857,9 +949,9 @@ function setupUi(node) {
 
 	const rulesInput = document.createElement("textarea");
 	rulesInput.className = "gjj-lora-rules-input";
-	rulesInput.placeholder = "互斥分组规则\n人物 = girl, boy\n细节 = detail, face, eye\n加速 = lcm, lightning";
+	rulesInput.placeholder = "互斥分组规则\n👤 人物角色 = 紫灵,ziling,韩立,hanli\n⚡ 加速蒸馏 = flux,turbo,lightning,distilled\n🎬 LTX视频功能 = ltx,transition,转场";
 	rulesInput.value = ensureNodeState(node).groupRulesText;
-	rulesInput.title = "每行格式为“分组名 = 关键词1,关键词2”；文件名命中同一分组的 LoRA 在当前节点中互斥。";
+	rulesInput.title = "每行格式为“图标 分组名 = 关键词1,关键词2”，例如“👤 人物角色 = 紫灵,ziling,韩立”。图标会在命中后显示到行内；也兼容直接写“紫灵,韩立,国风”。";
 	rulesInput.addEventListener("input", () => {
 		updateGroupRules(node, rulesInput.value);
 		renderUi(node);
@@ -939,7 +1031,7 @@ app.registerExtension({
 				state.rows = normalizeRows(dataWidget?.value || this.properties?.[DATA_WIDGET_NAME] || "[]");
 				updateSearchByRow(this, this.properties?.[SEARCH_BY_ROW_PROPERTY]);
 				state.globalSearch = String(this.properties?.[GLOBAL_SEARCH_PROPERTY] || "");
-				state.groupRulesText = String(this.properties?.[GROUP_RULES_PROPERTY] || "");
+				state.groupRulesText = String(this.properties?.[GROUP_RULES_PROPERTY] || DEFAULT_GROUP_RULES);
 				state.advancedOpen = Boolean(this.properties?.[ADVANCED_OPEN_PROPERTY]);
 				setupUi(this);
 				renderUi(this);

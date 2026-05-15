@@ -67,6 +67,34 @@ SEGMENT_SAVE_PRESETS = (
     "video/GJJ_LTX多图分段/{date}/任务{node}",
 )
 
+# Clean v4：这些主执行参数允许从左侧输入口外联覆盖 DOM 面板/config_json。
+# 仍然不把它们做成普通 Python widget，避免再次出现隐藏占位和 widget 顺序污染。
+CONNECTABLE_PARAM_INPUTS = {
+    "positive_prompt": ("STRING", {"forceInput": True, "display_name": "正向提示词", "tooltip": "可选外联。接入后覆盖面板里的正向提示词。"}),
+    "negative_prompt": ("STRING", {"forceInput": True, "display_name": "反向提示词", "tooltip": "可选外联。接入后覆盖面板里的反向提示词。"}),
+    "segment_seconds": ("FLOAT", {"forceInput": True, "display_name": "场景间隔（秒）", "tooltip": "可选外联。接入后覆盖面板里的场景间隔。"}),
+    "width": ("INT", {"forceInput": True, "display_name": "宽度", "tooltip": "可选外联。接入后覆盖面板里的宽度。"}),
+    "height": ("INT", {"forceInput": True, "display_name": "高度", "tooltip": "可选外联。接入后覆盖面板里的高度。"}),
+    "fps": ("INT", {"forceInput": True, "display_name": "帧率", "tooltip": "可选外联。接入后覆盖面板里的帧率。"}),
+    "seed": ("INT", {"forceInput": True, "display_name": "种子", "tooltip": "可选外联。接入后覆盖面板里的随机种。"}),
+    "denoise_strength": ("FLOAT", {"forceInput": True, "display_name": "降噪", "tooltip": "可选外联。接入后覆盖面板里的降噪强度。"}),
+}
+
+
+def _apply_external_param_overrides(config: dict[str, Any], kwargs: dict[str, Any]) -> dict[str, Any]:
+    """外联主参数覆盖 config_json。
+
+    只处理真正从输入口传入的值；forceInput 口未连接时一般不会进入 kwargs，
+    因而不会污染 DOM 面板默认值。
+    """
+    if not isinstance(config, dict):
+        config = {}
+    updated = dict(config)
+    for key in CONNECTABLE_PARAM_INPUTS.keys():
+        if key in kwargs and kwargs.get(key) is not None:
+            updated[key] = kwargs.get(key)
+    return updated
+
 
 def _segment_video_format_options() -> list[str]:
     # 零依赖导入：INPUT_TYPES 阶段不导入视频合成运行时，避免扫描节点时触发可选依赖。
@@ -138,8 +166,9 @@ def _extract_scene_index(name: str) -> int:
         return 999999
 
 
-def _collect_scene_images(kwargs: dict[str, Any]) -> list[Any]:
-    items: list[tuple[int, Any]] = []
+def _collect_scene_items(kwargs: dict[str, Any]) -> list[tuple[str, int, Any]]:
+    """收集所有场景输入，并保留输入口名称用于调试状态栏。"""
+    items: list[tuple[int, str, Any]] = []
     for key, value in kwargs.items():
         text = str(key or "")
         if text in ("scene_batch", "batch_scenes"):
@@ -153,9 +182,31 @@ def _collect_scene_images(kwargs: dict[str, Any]) -> list[Any]:
             or text.startswith("场景")
         ):
             continue
-        items.append((_extract_scene_index(text), value))
+        items.append((_extract_scene_index(text), text, value))
     items.sort(key=lambda item: item[0])
-    return [value for _, value in items]
+    return [(name, index, value) for index, name, value in items]
+
+
+def _collect_scene_images(kwargs: dict[str, Any]) -> list[Any]:
+    return [value for _, _, value in _collect_scene_items(kwargs)]
+
+
+def _count_split_images(value: Any) -> int:
+    try:
+        return len(_split_scene_batch(value))
+    except Exception:
+        return 0
+
+
+def _summarize_scene_sources(scene_items: list[tuple[str, int, Any]], legacy_batch_count: int) -> str:
+    parts: list[str] = []
+    if legacy_batch_count:
+        parts.append(f"旧批量口={legacy_batch_count}")
+    for name, index, value in scene_items:
+        count = _count_split_images(value)
+        display = f"场景{index}" if index < 999999 else str(name or "场景")
+        parts.append(f"{display}:{count}")
+    return "，".join(parts) if parts else "无场景输入"
 
 
 def _is_empty_loader_placeholder(image: Any) -> bool:
@@ -179,10 +230,17 @@ def _split_scene_batch(value: Any) -> list[Any]:
 
     # 自定义批量图片常见包装：优先读取明确的图片字段，避免误遍历任意 dict。
     if isinstance(value, dict):
-        for key in ("images", "image", "batch_images", "frames", "samples", "items"):
+        for key in ("images", "image", "batch_images", "frames", "samples", "items", "data", "batch", "tensor", "value", "values"):
             if key in value:
                 return _split_scene_batch(value.get(key))
-        return [value]
+        # 有些 GJJ 批量容器会把图片列表藏在嵌套字段里；这里做一层保守递归，
+        # 只收集能继续拆出 Tensor/图片的字段，避免把整个 dict 当成 1 张图造成“批量双图只识别 1 张”。
+        images = []
+        for sub_value in value.values():
+            if sub_value is value:
+                continue
+            images.extend(_split_scene_batch(sub_value))
+        return images or [value]
 
     if isinstance(value, (list, tuple)):
         images: list[Any] = []
@@ -513,10 +571,114 @@ def _prop_value(props: dict[str, Any], name: str, fallback: Any) -> Any:
     return value
 
 
+
+
+CONFIG_PROPERTY_NAME = "gjj_ltx23_config"
+
+
+def _json_response(payload: dict[str, Any]):
+    try:
+        from aiohttp import web  # type: ignore
+        return web.json_response(payload)
+    except Exception:
+        return payload
+
+
+async def _gjj_ltx23_models_endpoint(request):
+    return _json_response({"models": _ltx_checkpoint_options(), "default": _default_ltx_checkpoint()})
+
+
+try:
+    from server import PromptServer  # type: ignore
+    if getattr(PromptServer, "instance", None) is not None:
+        PromptServer.instance.routes.get("/gjj/ltx23/models")(_gjj_ltx23_models_endpoint)
+except Exception:
+    pass
+
+
+def _clean_config_defaults() -> dict[str, Any]:
+    return {
+        "ltx_model_name": _default_ltx_checkpoint(),
+        "positive_prompt": DEFAULT_PROMPT,
+        "negative_prompt": DEFAULT_NEGATIVE_PROMPT,
+        "segment_seconds": DEFAULT_SEGMENT_SECONDS,
+        "width": DEFAULT_WIDTH,
+        "height": DEFAULT_HEIGHT,
+        "fps": DEFAULT_FPS,
+        "seed": DEFAULT_SEED,
+        "denoise_strength": DEFAULT_DENOISE_STRENGTH,
+        "transition_enabled": False,
+        "transition_curve": TRANSITION_CURVES[0],
+        "transition_early_tail_ratio": DEFAULT_TRANSITION_EARLY_TAIL_RATIO,
+        "transition_implicit_guide_count": DEFAULT_TRANSITION_IMPLICIT_GUIDE_COUNT,
+        "transition_implicit_guide_strength": DEFAULT_TRANSITION_IMPLICIT_GUIDE_STRENGTH,
+        "transition_early_tail_strength": DEFAULT_TRANSITION_EARLY_TAIL_STRENGTH,
+        "transition_final_guide_strength": DEFAULT_TRANSITION_FINAL_GUIDE_STRENGTH,
+        "segmented_execution": False,
+        "segment_save_preset": SEGMENT_SAVE_PRESETS[0],
+        "segment_video_format": DEFAULT_SEGMENT_VIDEO_FORMAT,
+    }
+
+
+def _parse_json_config(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    text = str(value or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _config_from_workflow(extra_pnginfo: Any = None, unique_id: Any = None) -> dict[str, Any]:
+    props = _find_node_properties_from_workflow(extra_pnginfo, unique_id)
+    config = props.get(CONFIG_PROPERTY_NAME)
+    if isinstance(config, dict):
+        return dict(config)
+    if isinstance(config, str):
+        return _parse_json_config(config)
+    # 兼容早期直接写 properties 的版本
+    fallback: dict[str, Any] = {}
+    for key in _clean_config_defaults().keys():
+        if key in props:
+            fallback[key] = props.get(key)
+    return fallback
+
+
+def _resolve_clean_config(config_json: Any = None, extra_pnginfo: Any = None, unique_id: Any = None) -> dict[str, Any]:
+    config = _clean_config_defaults()
+    config.update(_config_from_workflow(extra_pnginfo, unique_id))
+    config.update(_parse_json_config(config_json))
+    # 数值安全化
+    config["ltx_model_name"] = str(config.get("ltx_model_name") or _default_ltx_checkpoint())
+    config["positive_prompt"] = str(config.get("positive_prompt") or DEFAULT_PROMPT)
+    config["negative_prompt"] = str(config.get("negative_prompt") or DEFAULT_NEGATIVE_PROMPT)
+    config["segment_seconds"] = _safe_float(config.get("segment_seconds"), DEFAULT_SEGMENT_SECONDS, 0.1, 3600.0)
+    config["width"] = int(_safe_float(config.get("width"), DEFAULT_WIDTH, 64, 8192))
+    config["height"] = int(_safe_float(config.get("height"), DEFAULT_HEIGHT, 64, 8192))
+    config["fps"] = int(_safe_float(config.get("fps"), DEFAULT_FPS, 1, 120))
+    config["seed"] = int(_safe_float(config.get("seed"), DEFAULT_SEED, 0, 0xFFFFFFFFFFFFFFFF))
+    config["denoise_strength"] = _safe_float(config.get("denoise_strength"), DEFAULT_DENOISE_STRENGTH, 0.0, 1.0)
+    config["transition_enabled"] = _safe_bool(config.get("transition_enabled"), False)
+    config["transition_curve"] = str(config.get("transition_curve") or TRANSITION_CURVES[0])
+    config["transition_early_tail_ratio"] = _safe_float(config.get("transition_early_tail_ratio"), DEFAULT_TRANSITION_EARLY_TAIL_RATIO, 0.10, 0.95)
+    config["transition_implicit_guide_count"] = int(_safe_float(config.get("transition_implicit_guide_count"), DEFAULT_TRANSITION_IMPLICIT_GUIDE_COUNT, 0, 4))
+    config["transition_implicit_guide_strength"] = _safe_float(config.get("transition_implicit_guide_strength"), DEFAULT_TRANSITION_IMPLICIT_GUIDE_STRENGTH, 0.0, 1.0)
+    config["transition_early_tail_strength"] = _safe_float(config.get("transition_early_tail_strength"), DEFAULT_TRANSITION_EARLY_TAIL_STRENGTH, 0.0, 1.0)
+    config["transition_final_guide_strength"] = _safe_float(config.get("transition_final_guide_strength"), DEFAULT_TRANSITION_FINAL_GUIDE_STRENGTH, 0.0, 1.0)
+    config["segmented_execution"] = _safe_bool(config.get("segmented_execution"), False)
+    config["segment_save_preset"] = str(config.get("segment_save_preset") or SEGMENT_SAVE_PRESETS[0])
+    config["segment_video_format"] = str(config.get("segment_video_format") or DEFAULT_SEGMENT_VIDEO_FORMAT)
+    return config
+
+
 class GJJ_LTX23ImageToVideoMultiRef:
     CATEGORY = "GJJ"
     FUNCTION = "generate"
-    DESCRIPTION = "LTX-2.3 全自动图文/音频视频节点：无输入=T2V；一张图片=I2V；有音频=S2V；音频+图片=数字人；两张图片=首尾帧；多张图片=多图参考。LoRA 统一通过 LoRA串联配置接入。"
+    DESCRIPTION = "LTX-2.3 清爽版图文/音频视频节点：Python 只保留真实输入口，复杂 UI 全部由前端 DOM 面板写入 config_json / node.properties。无输入=T2V；一张图片=I2V；有音频=S2V；音频+图片=数字人；两张图片=首尾帧；多张图片=多图参考。"
     SEARCH_ALIASES = ["ltx 图生视频", "ltx 文生视频", "ltx 图文生视频", "ltx 多图参考", "ltx i2v multiref", "ltx t2v", "图生视频多图参考", "动态场景视频", "ltx 数字人", "talking head"]
     RETURN_TYPES = ("VIDEO",)
     RETURN_NAMES = ("视频生成结果",)
@@ -525,126 +687,30 @@ class GJJ_LTX23ImageToVideoMultiRef:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {
-                "ltx_model_name": (
-                    _ltx_checkpoint_options(),
-                    {
-                        "default": _default_ltx_checkpoint(),
-                        "display_name": "LTX主模型",
-                        "tooltip": "从 diffusion_models 中筛选文件名包含 ltx（不区分大小写）的模型。会作为本节点实际加载的 LTX 主模型。",
-                    },
-                ),
-                "positive_prompt": (
-                    "STRING",
-                    {
-                        "default": DEFAULT_PROMPT,
-                        "multiline": False,
-                        "dynamicPrompts": True,
-                        "display_name": "正向提示词",
-                        "tooltip": "支持直接输入普通提示词，也支持接入 JSON 字符串提示词。检测到合法 JSON 时，会优先使用其中的 prompt，并同步读取兼容的 parameters 字段。",
-                    },
-                ),
-                "negative_prompt": (
-                    "STRING",
-                    {
-                        "default": DEFAULT_NEGATIVE_PROMPT,
-                        "multiline": False,
-                        "dynamicPrompts": True,
-                        "display_name": "反向提示词",
-                        "tooltip": "用于压制字幕、水印、抖动、结构错乱和常见 LTX 伪影。",
-                    },
-                ),
-                "segment_seconds": (
-                    "FLOAT",
-                    {
-                        "default": DEFAULT_SEGMENT_SECONDS,
-                        "min": 0.1,
-                        "max": 3600.0,
-                        "step": 0.1,
-                        "display_name": "场景间隔（秒）",
-                        "tooltip": "相邻两张场景图之间的默认时长。不接音频时也会决定总时长；0 图或只接 1 张图时，这个值就是整段视频时长。默认 5 秒。",
-                    },
-                ),
-                "width": (
-                    "INT",
-                    {
-                        "default": DEFAULT_WIDTH,
-                        "min": 64,
-                        "max": 8192,
-                        "step": 32,
-                        "display_name": "宽度",
-                        "tooltip": "最终视频帧宽度。无外部宽度直连时，当前面板显示值就是运算值；新连接图片会先同步为图片宽度，之后可手动修改。",
-                    },
-                ),
-                "height": (
-                    "INT",
-                    {
-                        "default": DEFAULT_HEIGHT,
-                        "min": 64,
-                        "max": 8192,
-                        "step": 32,
-                        "display_name": "高度",
-                        "tooltip": "最终视频帧高度。无外部高度直连时，当前面板显示值就是运算值；新连接图片会先同步为图片高度，之后可手动修改。",
-                    },
-                ),
-                "fps": (
-                    "INT",
-                    {
-                        "default": DEFAULT_FPS,
-                        "min": 1,
-                        "max": 120,
-                        "step": 1,
-                        "display_name": "帧率",
-                        "tooltip": "工作流原始默认值为 24。",
-                    },
-                ),
-                "seed": (
-                    "INT",
-                    {
-                        "default": DEFAULT_SEED,
-                        "min": 0,
-                        "max": 0xFFFFFFFFFFFFFFFF,
-                        "control_after_generate": True,
-                        "display_name": "种子",
-                        "tooltip": "第一阶段使用这个种子，第二阶段会自动用 seed + 1。",
-                    },
-                ),
-                "denoise_strength": (
-                    "FLOAT",
-                    {
-                        "default": DEFAULT_DENOISE_STRENGTH,
-                        "min": 0.0,
-                        "max": 1.0,
-                        "step": 0.01,
-                        "display_name": "降噪",
-                        "tooltip": "采样降噪强度。1.00 表示完整采样；降低会从更低噪声段开始，变化更小但可能更弱。会同时作用于第一阶段和第二阶段采样。",
-                    },
-                ),
-            },
+            # Clean v3：模型/高级参数继续由 DOM 面板管理；
+            # 主执行参数额外提供 forceInput 外联口，连接时覆盖 config_json，不创建普通 Python widget。
             "optional": FlexibleSceneInputType(
                 {
-                    # 固定口必须排在动态场景口前面；否则前端追加“场景2”时，旧工作流里的 target_slot 容易错位。
                     "input_audio": (
                         "AUDIO",
                         {
                             "display_name": "驱动音频",
-                            "tooltip": "可选。接入后自动切换为数字人流程，时长直接由音频决定，并把这段音频作为最终视频音轨；音频越长、面板宽高越大，占用显存越高，建议先用短音频测试。",
+                            "tooltip": "可选。接入后自动切换为 S2V/数字人流程。",
                         },
                     ),
                     "lora_chain_config": (
                         "LORA_CHAIN_CONFIG",
                         {
                             "display_name": "LoRA串联配置",
-                            "tooltip": "可选。统一接入所有需要的 LoRA 串联配置；本节点不再提供单独 LoRA 下拉和强度面板。",
+                            "tooltip": "可选。统一接入所有需要的 LoRA 串联配置。",
                         },
                     ),
-                    **{
-                        f"{SCENE_PREFIX}{index:02d}": _scene_input_spec(index)
-                        for index in range(1, INITIAL_SCENE_INPUTS + 1)
-                    },
+                    f"{SCENE_PREFIX}01": _scene_input_spec(1),
+                    **CONNECTABLE_PARAM_INPUTS,
                 }
             ),
             "hidden": {
+                "config_json": ("STRING", {"default": "{}"}),
                 "unique_id": "UNIQUE_ID",
                 "extra_pnginfo": "EXTRA_PNGINFO",
             },
@@ -652,59 +718,31 @@ class GJJ_LTX23ImageToVideoMultiRef:
 
     def generate(
         self,
-        ltx_model_name,
-        positive_prompt,
-        negative_prompt,
-        segment_seconds,
-        width,
-        height,
-        fps,
-        seed,
-        denoise_strength=DEFAULT_DENOISE_STRENGTH,
-        transition_enabled=False,
-        transition_curve=TRANSITION_CURVES[0],
-        transition_early_tail_ratio=DEFAULT_TRANSITION_EARLY_TAIL_RATIO,
-        transition_implicit_guide_count=DEFAULT_TRANSITION_IMPLICIT_GUIDE_COUNT,
-        transition_implicit_guide_strength=DEFAULT_TRANSITION_IMPLICIT_GUIDE_STRENGTH,
-        transition_early_tail_strength=DEFAULT_TRANSITION_EARLY_TAIL_STRENGTH,
-        transition_final_guide_strength=DEFAULT_TRANSITION_FINAL_GUIDE_STRENGTH,
-        segmented_execution=False,
-        segment_save_preset=SEGMENT_SAVE_PRESETS[0],
-        segment_video_format=DEFAULT_SEGMENT_VIDEO_FORMAT,
+        config_json="{}",
         extra_pnginfo=None,
         unique_id=None,
         **kwargs,
     ):
-        # 兼容旧工作流的 batch_scenes/scene_batch；新版第一接口 scene_01 已支持 GJJ_BATCH_IMAGE,IMAGE。
+        config = _resolve_clean_config(config_json=config_json, extra_pnginfo=extra_pnginfo, unique_id=unique_id)
+        config = _resolve_clean_config(config_json=_apply_external_param_overrides(config, kwargs), extra_pnginfo=None, unique_id=None)
+
         legacy_batch_scene_images = _split_scene_batch(kwargs.get("batch_scenes", kwargs.get("scene_batch")))
-        socket_scene_values = _collect_scene_images(kwargs)
+        scene_items = _collect_scene_items(kwargs)
+        socket_scene_values = [value for _, _, value in scene_items]
         socket_scene_images = _flatten_scene_values(socket_scene_values)
+        scene_source_summary = _summarize_scene_sources(scene_items, len(legacy_batch_scene_images))
         scene_images, skipped_placeholders = _filter_valid_scene_images(legacy_batch_scene_images + socket_scene_images)
-        # 不改 GJJ_MultiImageLoader；在 LTX 节点内部把参考图统一到当前宽高，并对齐到 32 倍数，避免多图批次/尺寸不一致影响后续流程。
-        scene_images, width, height = _normalize_ltx_scene_images(scene_images, width, height)
+        scene_images, target_width, target_height = _normalize_ltx_scene_images(scene_images, config["width"], config["height"])
+        _send_status(unique_id, f"Clean v4 输入统计：{scene_source_summary}；有效场景 {len(scene_images)} 张；目标尺寸 {target_width}x{target_height}")
         input_audio = kwargs.get("input_audio")
-
-        # v22：转场/分段高级参数不再由 Python widgets 生成，避免“隐藏控件仍占高度”。
-        # 前端 DOM 选项卡把数值写入 node.properties，这里通过 EXTRA_PNGINFO 读取。
-        section_props = _find_node_properties_from_workflow(extra_pnginfo, unique_id)
-        transition_enabled = _prop_value(section_props, "transition_enabled", transition_enabled)
-        transition_curve = _prop_value(section_props, "transition_curve", transition_curve)
-        transition_early_tail_ratio = _prop_value(section_props, "transition_early_tail_ratio", transition_early_tail_ratio)
-        transition_implicit_guide_count = _prop_value(section_props, "transition_implicit_guide_count", transition_implicit_guide_count)
-        transition_implicit_guide_strength = _prop_value(section_props, "transition_implicit_guide_strength", transition_implicit_guide_strength)
-        transition_early_tail_strength = _prop_value(section_props, "transition_early_tail_strength", transition_early_tail_strength)
-        transition_final_guide_strength = _prop_value(section_props, "transition_final_guide_strength", transition_final_guide_strength)
-        segmented_execution = _prop_value(section_props, "segmented_execution", segmented_execution)
-        segment_save_preset = str(_prop_value(section_props, "segment_save_preset", segment_save_preset) or segment_save_preset)
-        segment_video_format = str(_prop_value(section_props, "segment_video_format", segment_video_format) or segment_video_format)
-
         has_input_audio = input_audio is not None
+
         route_key, route_label, route_tip = _resolve_auto_route(len(scene_images), has_input_audio)
         resolved_payload = _resolve_prompt_payload(
-            positive_prompt=positive_prompt,
-            negative_prompt=negative_prompt,
-            fps=fps,
-            segment_seconds=segment_seconds,
+            positive_prompt=config["positive_prompt"],
+            negative_prompt=config["negative_prompt"],
+            fps=config["fps"],
+            segment_seconds=config["segment_seconds"],
             scene_count=len(scene_images),
             has_input_audio=has_input_audio,
         )
@@ -713,31 +751,30 @@ class GJJ_LTX23ImageToVideoMultiRef:
             float(resolved_payload["segment_seconds"]),
             resolved_payload.get("total_duration_override"),
         )
-        # 运行时内部只需要区分“是否由真实音频驱动”。视觉分支再由图片数量自动决定：
-        # 0图=T2V，1图=I2V，2图=首尾帧，多图=多图参考。
         mode = MODE_AUDIO_CONDITIONED if has_input_audio else MODE_GENERATED_AUDIO
         frame_trim_start = 0 if scene_images else (DEFAULT_FRAME_TRIM_START_AUDIO if has_input_audio else DEFAULT_FRAME_TRIM_START_VIDEO)
         transition_options = {
-            "enabled": _safe_bool(transition_enabled, False) and len(scene_images) >= 2,
-            "curve": str(transition_curve or TRANSITION_CURVES[0]),
-            "early_tail_ratio": _safe_float(transition_early_tail_ratio, DEFAULT_TRANSITION_EARLY_TAIL_RATIO, 0.10, 0.95),
-            "implicit_guide_count": int(_safe_float(transition_implicit_guide_count, DEFAULT_TRANSITION_IMPLICIT_GUIDE_COUNT, 0, 4)),
-            "implicit_guide_strength": _safe_float(transition_implicit_guide_strength, DEFAULT_TRANSITION_IMPLICIT_GUIDE_STRENGTH, 0.0, 1.0),
-            "early_tail_strength": _safe_float(transition_early_tail_strength, DEFAULT_TRANSITION_EARLY_TAIL_STRENGTH, 0.0, 1.0),
-            "final_guide_strength": _safe_float(transition_final_guide_strength, DEFAULT_TRANSITION_FINAL_GUIDE_STRENGTH, 0.0, 1.0),
+            "enabled": bool(config["transition_enabled"]) and len(scene_images) >= 2,
+            "curve": str(config["transition_curve"] or TRANSITION_CURVES[0]),
+            "early_tail_ratio": config["transition_early_tail_ratio"],
+            "implicit_guide_count": int(config["transition_implicit_guide_count"]),
+            "implicit_guide_strength": config["transition_implicit_guide_strength"],
+            "early_tail_strength": config["transition_early_tail_strength"],
+            "final_guide_strength": config["transition_final_guide_strength"],
         }
         if skipped_placeholders and unique_id:
-            _send_status(unique_id, f"提示：已忽略 {skipped_placeholders} 张 64x64 空占位场景图，请优先连接批量场景图或已选图片输出。")
+            _send_status(unique_id, f"提示：已忽略 {skipped_placeholders} 张 64x64 空占位场景图。")
         if unique_id:
             _send_status(
                 unique_id,
-                f"自动模式：{route_label}（{route_key}）。第一接口/追加场景共 {len(socket_scene_images)} 张，兼容旧批量口 {len(legacy_batch_scene_images)} 张；有效 {len(scene_images)} 张。{route_tip}",
+                f"Clean v3 分支：{route_label}（{route_key}）。来源：{scene_source_summary}；有效场景 {len(scene_images)} 张。{route_tip}",
             )
-            if _safe_bool(transition_enabled, False) and len(scene_images) < 2:
+            if bool(config["transition_enabled"]) and len(scene_images) < 2:
                 _send_status(unique_id, "提示：转场控制需要至少两张有效场景图，当前已自动跳过。")
+
         return _run_ltx23_multiref_video(
             mode=mode,
-            checkpoint_name=ltx_model_name,
+            checkpoint_name=config["ltx_model_name"],
             positive_prompt=resolved_payload["positive_prompt"],
             negative_prompt=resolved_payload["negative_prompt"],
             main_image=scene_images[0] if scene_images else None,
@@ -745,19 +782,26 @@ class GJJ_LTX23ImageToVideoMultiRef:
             guide_times=guide_times,
             fps=resolved_payload["fps"],
             output_long_edge=None,
-            target_width=width,
-            target_height=height,
-            seed=seed,
+            target_width=target_width,
+            target_height=target_height,
+            seed=config["seed"],
             duration_seconds=duration_seconds,
             input_audio=input_audio,
             lora_chain_config=kwargs.get("lora_chain_config", ""),
             decode_generated_audio=bool(resolved_payload["decode_generated_audio"]),
             frame_trim_start=frame_trim_start,
-            segmented_execution=bool(segmented_execution),
-            segment_save_preset=segment_save_preset,
-            segment_video_format=segment_video_format,
+            segmented_execution=bool(config["segmented_execution"]),
+            segment_save_preset=config["segment_save_preset"],
+            segment_video_format=config["segment_video_format"],
             transition_options=transition_options,
-            denoise_strength=_safe_float(denoise_strength, DEFAULT_DENOISE_STRENGTH, 0.0, 1.0),
+            denoise_strength=config["denoise_strength"],
+            branch_debug={
+                "route_key": route_key,
+                "route_label": route_label,
+                "scene_count": len(scene_images),
+                "source_summary": f"{scene_source_summary}；目标{target_width}x{target_height}",
+                "has_audio": has_input_audio,
+            },
             unique_id=unique_id,
         )
 

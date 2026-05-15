@@ -2078,6 +2078,7 @@ def run_ltx23_multiref_video(
 	segment_video_format: Any = DEFAULT_SEGMENT_VIDEO_FORMAT,
 	transition_options: Any = None,
 	denoise_strength: Any = DEFAULT_DENOISE_STRENGTH,
+	branch_debug: Any = None,
 	unique_id: Any = None,
 ):
 	_ensure_runtime_dependencies()
@@ -2098,9 +2099,20 @@ def run_ltx23_multiref_video(
 	else:
 		route_label = _resolve_visual_route_label(main_image, base_guide_images)
 	resolved_denoise_strength = _clamp_float(denoise_strength, DEFAULT_DENOISE_STRENGTH, 0.0, 1.0)
+	debug_route_key = ""
+	debug_source_summary = ""
+	if isinstance(branch_debug, dict):
+		debug_route_key = str(branch_debug.get("route_key") or "").strip()
+		debug_source_summary = str(branch_debug.get("source_summary") or "").strip()
+
+	def _branch_status_text() -> str:
+		key_text = f" / {debug_route_key}" if debug_route_key else ""
+		source_text = f" / {debug_source_summary}" if debug_source_summary else ""
+		return f"当前分支：{route_label}{key_text} / 有效场景 {visual_scene_count} 张{source_text}"
 
 	def _execute():
-		_send_status(unique_id, "1/8 加载 LTX 模型与默认资源...")
+		_send_status(unique_id, _branch_status_text())
+		_send_status(unique_id, f"1/8 加载 LTX 模型与默认资源...（{route_label} / {visual_scene_count}张）")
 		try:
 			selected_ckpt = str(checkpoint_name or "").strip()
 			ckpt_candidates = []
@@ -2432,7 +2444,7 @@ def run_ltx23_multiref_video(
 			audio_label = "模型生成音轨" if combined_audio is not None else "静音输出"
 			output_width = int(combined_frames.shape[2])
 			output_height = int(combined_frames.shape[1])
-			_send_status(unique_id, f"完成：分段执行 {segment_count} 段 / 合并输出 {output_width}x{output_height} / {int(combined_frames.shape[0])} 帧 / {audio_label}")
+			_send_status(unique_id, f"完成：{route_label}（分段执行 {segment_count} 段）/ 合并输出 {output_width}x{output_height} / {int(combined_frames.shape[0])} 帧 / {audio_label}")
 			return {
 				"ui": {
 					"segment_videos": segment_previews,
@@ -2458,7 +2470,7 @@ def run_ltx23_multiref_video(
 			audio_label = "模型生成音轨"
 		else:
 			audio_label = "静音输出"
-		_send_status(unique_id, f"完成：{route_label} / {result['output_width']}x{result['output_height']} / {result['output_frame_count']} 帧 / {audio_label}")
+		_send_status(unique_id, f"完成：{route_label} / 有效场景 {visual_scene_count} 张 / {result['output_width']}x{result['output_height']} / {result['output_frame_count']} 帧 / {audio_label}")
 		return (result["video"],)
 
 	try:

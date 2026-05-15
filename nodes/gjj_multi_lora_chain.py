@@ -29,6 +29,26 @@ STRENGTH_PREFIX_RE = re.compile(r"^\s*\([-+]?\d+(?:\.\d+)?\)\s*")
 LORA_NOT_LOADED_PREFIX = "lora key not loaded: "
 
 
+def hidden_lora_data_input() -> tuple[str, dict[str, Any]]:
+    """Return a hidden STRING input used only for frontend JSON persistence.
+
+    ComfyUI frontends/extensions may check different flags, so keep all common
+    hidden markers together here.
+    """
+    return (
+        "STRING",
+        {
+            "default": "[]",
+            "multiline": False,
+            "display_name": "LoRA 配置",
+            "tooltip": "由前端动态界面自动维护的 LoRA 配置 JSON，一般无需手动编辑。",
+            "hidden": True,
+            "display": "hidden",
+            "forceInput": False,
+        },
+    )
+
+
 class _LoraMissingKeyCapture(logging.Handler):
     def __init__(self):
         super().__init__(level=logging.WARNING)
@@ -318,7 +338,37 @@ def apply_lora_chain_config(
 class GJJ_MultiLoraChain:
     CATEGORY = "GJJ"
     FUNCTION = "apply_loras"
-    DESCRIPTION = "按配置顺序串联加载多组 LoRA，并根据是否接入 CLIP 决定只作用于模型还是同时作用于模型与文本编码器。"
+    DESCRIPTION = """GJJ 多 LoRA 串联加载器。
+
+用途：
+- 在一个节点内按列表顺序连续加载多组 LoRA。
+- 接入 CLIP 时，LoRA 同时作用于 MODEL 与 CLIP；不接 CLIP 时，只作用于 MODEL。
+- 前端面板负责选择、启用、强度、搜索、互斥分组；后台只读取隐藏的 LoRA 配置 JSON。
+
+界面说明：
+- “未选择”默认为关闭状态，不参与加载。
+- 选择任意 LoRA 后，该行会自动启用。
+- 改回“未选择”后，该行会自动关闭。
+- 强度为模型/CLIP 共用强度；强度为 0 时会跳过该 LoRA。
+- 列表末尾会自动保留一个空行，方便继续添加。
+
+互斥规则：
+- 在“高级”里编辑互斥预设。
+- 推荐格式：👤 人物角色 = 紫灵,ziling,韩立,hanli
+- 也兼容：人物角色 = 紫灵,韩立
+- 也兼容简写：紫灵,韩立,国风
+- 等号左侧可以带 emoji。LoRA 命中该组后，行内会显示对应图标。
+- 同一互斥组内只能保留一个已选 LoRA；新选择会自动清空同组其它行。
+- 当前行已命中某个互斥组时，下拉框优先只显示该组内 LoRA，避免混入其它组。
+
+预设建议：
+- 适合把人物角色、加速蒸馏、视频功能、图像编辑、画风风格、建筑室内、细节增强等做成互斥组。
+- 如果外部已有模型体系总开关，可把 qwen / ltx / wan / flux 等体系词加入对应组关键词。
+
+兼容说明：
+- 标准 ComfyUI LoRA 会检查未加载 key，避免底模不匹配时静默失败。
+- 检测到 Nunchaku Flux 模型时，会走 Nunchaku Flux LoRA 加载逻辑。
+"""
     SEARCH_ALIASES = ["multi lora", "lora chain", "lora loader", "LoRA", "串联", "加载器"]
     RETURN_TYPES = ("MODEL", "CLIP")
     RETURN_NAMES = ("叠加模型输出", "叠加编码输出")
@@ -338,12 +388,7 @@ class GJJ_MultiLoraChain:
                     "display_name": "模型输入",
                     "tooltip": "接入需要串联加载 LoRA 的基础模型。",
                 }),
-                "lora_data": ("STRING", {
-                    "default": "[]",
-                    "multiline": True,
-                    "display_name": "LoRA 配置",
-                    "tooltip": "由前端动态界面自动维护的 LoRA 配置 JSON，一般无需手动编辑。",
-                }),
+                "lora_data": hidden_lora_data_input(),
             },
             "optional": {
                 "clip": ("CLIP", {
@@ -366,7 +411,26 @@ class GJJ_MultiLoraChain:
 class GJJ_LoraChainConfig:
     CATEGORY = "GJJ"
     FUNCTION = "build_config"
-    DESCRIPTION = "只输出多组 LoRA 的串联配置，可直接连到懒人图文集成一键生图等支持 LoRA 串联配置输入的节点。"
+    DESCRIPTION = """GJJ LoRA 串联配置节点。
+
+用途：
+- 只负责生成 LoRA 串联配置，不直接加载模型。
+- 输出 LORA_CHAIN_CONFIG，可连接到支持“多 LoRA 串联配置”的其它 GJJ 节点。
+- 适合把 LoRA 选择面板独立出来，在多个一键节点或集成节点之间复用。
+
+界面说明：
+- 前端面板用于添加 LoRA、设置启用状态、设置强度、搜索文件名。
+- “未选择”默认关闭，不会写入有效加载项。
+- 选择 LoRA 后自动启用；改回“未选择”后自动关闭。
+- 后台隐藏字段 lora_data 只用于保存 JSON 配置，一般不需要手动编辑。
+
+互斥规则：
+- 在“高级”里编辑互斥预设。
+- 推荐格式：👤 人物角色 = 紫灵,ziling,韩立,hanli
+- 等号左侧可带 emoji；命中后行内显示该图标。
+- 同一互斥组只保留一个 LoRA，避免角色、风格、加速、功能类 LoRA 重复叠加。
+- 当前行命中互斥组后，下拉框会优先只显示该组内 LoRA，便于快速替换同类 LoRA。
+"""
     SEARCH_ALIASES = ["lora config", "串联配置", "lora 串联", "多lora配置"]
     RETURN_TYPES = ("LORA_CHAIN_CONFIG",)
     RETURN_NAMES = ("LoRA串联配置",)
@@ -376,12 +440,7 @@ class GJJ_LoraChainConfig:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "lora_data": ("STRING", {
-                    "default": "[]",
-                    "multiline": True,
-                    "display_name": "LoRA 配置",
-                    "tooltip": "由前端动态界面自动维护的 LoRA 配置 JSON，一般无需手动编辑。",
-                }),
+                "lora_data": hidden_lora_data_input(),
             },
         }
 
