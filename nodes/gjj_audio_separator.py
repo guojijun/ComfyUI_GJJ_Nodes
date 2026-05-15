@@ -4,6 +4,7 @@
 1. 只保留一个输入口，类型限制为 AUDIO,VIDEO。
 2. AUDIO 直接处理；VIDEO / VideoFromFile 自动读取视频音轨。
 3. 不再手写 Mel 频谱 / 反 Mel / 随机相位重建，改用原版 MelBandRoformer 模型直接输出时域人声。
+4. 增加兼容模式：原版 pack/unpack、显式维度修复、自动兼容。
 """
 
 from __future__ import annotations
@@ -26,6 +27,11 @@ from comfy.utils import load_torch_file, ProgressBar
 CATEGORY = "GJJ/音频处理"
 _scanned_models = None
 _cached_models = {}
+
+_COMPAT_AUTO = "自动兼容"
+_COMPAT_ORIGINAL = "原版 pack/unpack"
+_COMPAT_EXPLICIT = "显式维度修复"
+_COMPAT_VALUES = [_COMPAT_AUTO, _COMPAT_ORIGINAL, _COMPAT_EXPLICIT]
 
 NODE_NAME = "GJJ · 音频/视频音轨分离器"
 _RUNTIME_DEP_CACHE = {}
@@ -864,15 +870,16 @@ class MelBandRoformer(Module):
                     self.stereo and channels == 2), 'stereo needs to be set to True if passing in audio signal that is stereo (channel dimension of 2). also need to be False if mono (channel dimension of 1)'
 
         # to stft
-
-        raw_audio, batch_audio_channel_packed_shape = pack_one(raw_audio, '* t')
+        # 不再使用 einops.pack / unpack，避免某些环境下解包后丢失 batch 维度，
+        # 导致后续出现 expected 4 dims but received 3 dims。
+        raw_audio = rearrange(raw_audio, 'b s t -> (b s) t')
 
         stft_window = self.stft_window_fn(device=device)
 
         stft_repr = torch.stft(raw_audio, **self.stft_kwargs, window=stft_window, return_complex=True)
         stft_repr = torch.view_as_real(stft_repr)
 
-        stft_repr = unpack_one(stft_repr, batch_audio_channel_packed_shape, '* f t c')
+        stft_repr = rearrange(stft_repr, '(b s) f t c -> b s f t c', b=batch, s=channels)
         stft_repr = rearrange(stft_repr,
                               'b s f t c -> b (f s) t c')  # merge stereo / mono into the frequency, with frequency leading dimension, for band splitting
 
@@ -892,19 +899,42 @@ class MelBandRoformer(Module):
 
         # axial / hierarchical attention
 
+        compat_mode = getattr(self, "_gjj_compatibility_mode", _COMPAT_ORIGINAL)
+        use_original_pack = compat_mode == _COMPAT_ORIGINAL
+
         for time_transformer, freq_transformer in self.layers:
-            x = rearrange(x, 'b t f d -> b f t d')
-            x, ps = pack([x], '* t d')
+            if use_original_pack:
+                # 原版路径：完全按 mel_band_roformer.py 使用 einops.pack / unpack。
+                x = rearrange(x, 'b t f d -> b f t d')
+                x, ps = pack([x], '* t d')
 
-            x = time_transformer(x)
+                x = time_transformer(x)
 
-            x, = unpack(x, ps, '* t d')
-            x = rearrange(x, 'b f t d -> b t f d')
-            x, ps = pack([x], '* f d')
+                x, = unpack(x, ps, '* t d')
+                x = rearrange(x, 'b f t d -> b t f d')
+                x, ps = pack([x], '* f d')
 
-            x = freq_transformer(x)
+                x = freq_transformer(x)
 
-            x, = unpack(x, ps, '* f d')
+                x, = unpack(x, ps, '* f d')
+            else:
+                # 兼容路径：不用 pack / unpack，显式合并和还原维度。
+                # 适合部分 einops 版本在 unpack 后丢 batch 维的环境。
+                x = rearrange(x, 'b t f d -> b f t d')
+                b_, f_, t_, d_ = x.shape
+                x = rearrange(x, 'b f t d -> (b f) t d')
+
+                x = time_transformer(x)
+
+                x = rearrange(x, '(b f) t d -> b f t d', b=b_, f=f_)
+                x = rearrange(x, 'b f t d -> b t f d')
+
+                b_, t_, f_, d_ = x.shape
+                x = rearrange(x, 'b t f d -> (b t) f d')
+
+                x = freq_transformer(x)
+
+                x = rearrange(x, '(b t) f d -> b t f d', b=b_, t=t_)
 
         num_stems = len(self.mask_estimators)
 
@@ -1207,7 +1237,46 @@ def _extract_audio_from_media(media):
     )
 
 
-def _process_with_real_melroformer(model, audio, device, debug_log=True):
+
+def _run_model_chunk(model, input_tensor, compatibility_mode=_COMPAT_AUTO, debug_log=True):
+    """按兼容模式运行单个模型分块。
+
+    自动兼容：先尝试原版 pack/unpack；若遇到 einops 维度错误，自动切换到显式维度修复。
+    """
+    mode = compatibility_mode if compatibility_mode in _COMPAT_VALUES else _COMPAT_AUTO
+
+    def _call(actual_mode):
+        try:
+            setattr(model, "_gjj_compatibility_mode", actual_mode)
+        except Exception:
+            pass
+        return model(input_tensor)
+
+    if mode == _COMPAT_AUTO:
+        try:
+            return _call(_COMPAT_ORIGINAL)
+        except Exception as exc:
+            text = str(exc)
+            is_dim_compat_error = (
+                "rearrange-reduction pattern" in text
+                or "Wrong shape" in text
+                or "expected 4 dims" in text
+                or "Received 3-dim" in text
+                or "pack" in text.lower()
+                or "unpack" in text.lower()
+            )
+            if not is_dim_compat_error:
+                raise
+            if debug_log:
+                _log_warn(
+                    "自动兼容：原版 pack/unpack 维度不匹配，已切换到“显式维度修复”。"
+                )
+            return _call(_COMPAT_EXPLICIT)
+
+    return _call(mode)
+
+
+def _process_with_real_melroformer(model, audio, device, debug_log=True, compatibility_mode=_COMPAT_AUTO):
     """严格复刻原版 MelBandRoFormerSampler.process 的核心推理逻辑。
 
     注意：这里故意尽量不做额外后处理，避免和原版输出产生听感差异。
@@ -1275,7 +1344,7 @@ def _process_with_real_melroformer(model, audio, device, debug_log=True):
     num_chunks = (total_length + step - 1) // step
     if debug_log:
         _log_model(f"分块参数：总长度={total_length}，块大小={C}，步长={step}，淡入淡出={fade_size}，块数={num_chunks}")
-        _log_model(f"模型类={model.__class__.__name__}")
+        _log_model(f"模型类={model.__class__.__name__}，兼容模式={compatibility_mode}")
 
     model.to(device)
     model.eval()
@@ -1300,7 +1369,7 @@ def _process_with_real_melroformer(model, audio, device, debug_log=True):
                 else:
                     part = F.pad(input=part, pad=(0, C - length, 0, 0), mode='constant', value=0)
 
-            x = model(part.unsqueeze(0))[0]
+            x = _run_model_chunk(model, part.unsqueeze(0), compatibility_mode=compatibility_mode, debug_log=debug_log)[0]
 
             window = windowing_array.clone()
             if i == 0:
@@ -1382,6 +1451,11 @@ class GJJ_AudioSeparator:
                 }),
             },
             "optional": {
+                "compatibility_mode": (_COMPAT_VALUES, {
+                    "default": _COMPAT_AUTO,
+                    "display_name": "兼容模式",
+                    "tooltip": "自动兼容：先尝试原版 pack/unpack，失败时自动切换显式维度修复；原版 pack/unpack：最接近原版；显式维度修复：适合 einops 维度报错环境。",
+                }),
                 "force_rerun": ("BOOLEAN", {
                     "default": True,
                     "display_name": "每次强制重新执行",
@@ -1392,13 +1466,11 @@ class GJJ_AudioSeparator:
                     "display_name": "彩色模型日志",
                     "tooltip": "开启后只在控制台用中文彩色输出具体错误和模型调用情况。",
                 }),
-                "debug_nonce": ("INT", {
-                    "default": 0,
-                    "min": 0,
-                    "max": 999999999,
-                    "step": 1,
+                "debug_nonce": ("STRING", {
+                    "default": "0",
+                    "multiline": False,
                     "display_name": "调试序号",
-                    "tooltip": "排查缓存用。每次手动改一个数字，可以强制 ComfyUI 认为输入变化。",
+                    "tooltip": "排查缓存用。可留空；留空会自动按 0 处理，避免旧工作流空值导致 INT 转换失败。",
                 }),
             },
             "hidden": {
@@ -1419,15 +1491,15 @@ class GJJ_AudioSeparator:
     OUTPUT_NODE = True
 
     @classmethod
-    def IS_CHANGED(cls, model_name, media=None, audio=None, force_rerun=True, debug_log=True, debug_nonce=0, unique_id=None, extra_pnginfo=None, **kwargs):
+    def IS_CHANGED(cls, model_name, media=None, audio=None, compatibility_mode=_COMPAT_AUTO, force_rerun=True, debug_log=True, debug_nonce="0", unique_id=None, extra_pnginfo=None, **kwargs):
         # 排查阶段默认强制执行，避免 ComfyUI 直接复用上一次缓存结果，导致控制台没有推理日志。
         token = f"force={force_rerun}|nonce={debug_nonce}|time={time.time():.9f}|uid={unique_id}"
         if force_rerun:
             # NaN 与自身不相等，能更强地避开部分缓存比较逻辑。
             return float("nan")
-        return f"{model_name}|nonce={debug_nonce}"
+        return f"{model_name}|mode={compatibility_mode}|nonce={debug_nonce}"
 
-    def execute(self, model_name, media=None, audio=None, force_rerun=True, debug_log=True, debug_nonce=0, unique_id=None, extra_pnginfo=None, **kwargs):
+    def execute(self, model_name, media=None, audio=None, compatibility_mode=_COMPAT_AUTO, force_rerun=True, debug_log=True, debug_nonce="0", unique_id=None, extra_pnginfo=None, **kwargs):
         # 在 execute 开头进行运行时依赖检查；启动 ComfyUI 时不会检查这些依赖。
         try:
             _check_runtime_dependencies()
@@ -1446,7 +1518,7 @@ class GJJ_AudioSeparator:
             raise RuntimeError("没有收到输入。请连接 AUDIO 或 VIDEO。")
 
         if debug_log:
-            _log_model(f"调用节点：模型={model_name}，输入类型={type(media_input).__name__}，强制重跑={force_rerun}")
+            _log_model(f"调用节点：模型={model_name}，输入类型={type(media_input).__name__}，兼容模式={compatibility_mode}，强制重跑={force_rerun}")
 
         try:
             audio_input = _extract_audio_from_media(media_input)
@@ -1470,7 +1542,7 @@ class GJJ_AudioSeparator:
             raise
         _log_model(f"模型加载完成：{type(model).__name__}")
         try:
-            vocals, instruments, duration = _process_with_real_melroformer(model, audio_input, device, debug_log=debug_log)
+            vocals, instruments, duration = _process_with_real_melroformer(model, audio_input, device, debug_log=debug_log, compatibility_mode=compatibility_mode)
         except Exception as e:
             _log_error(f"模型推理失败：{e}")
             raise
@@ -1478,6 +1550,7 @@ class GJJ_AudioSeparator:
         debug_text = (
             f"GJJ 音频分离完成\n"
             f"模型：{model_name}\n"
+            f"兼容模式：{compatibility_mode}\n"
             f"时长：{duration:.3f}s\n"
             f"人声：{tuple(vocals['waveform'].shape)}，采样率 {vocals['sample_rate']}Hz\n"
             f"背景声：{tuple(instruments['waveform'].shape)}，采样率 {instruments['sample_rate']}Hz"
@@ -1490,5 +1563,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "GJJ_AudioSeparator": "🎵 音视频人声、背景声分离",
+    "GJJ_AudioSeparator": "🎵 音频/视频音轨分离器",
 }

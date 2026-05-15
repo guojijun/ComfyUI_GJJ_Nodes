@@ -17,6 +17,10 @@ class GJJ_VAELoader:
     def vae_list(cls):
         vaes = folder_paths.get_filename_list("vae")
         approx_vaes = folder_paths.get_filename_list("vae_approx")
+
+        # 用 "ltx" 过滤，不区分大小写，不分子目录
+        vaes = [v for v in vaes if "ltx" in v.lower()]
+        approx_vaes = [v for v in approx_vaes if "ltx" in v.lower()]
         sd1_taesd_dec = False
         sd1_taesd_enc = False
         sdxl_taesd_dec = False
@@ -64,14 +68,22 @@ class GJJ_VAELoader:
         sd = {}
         approx_vaes = folder_paths.get_filename_list("vae_approx")
 
-        encoder = next(filter(lambda a: a.startswith("{}_encoder.".format(name)), approx_vaes))
-        decoder = next(filter(lambda a: a.startswith("{}_decoder.".format(name)), approx_vaes))
+        encoder = next(
+            filter(lambda a: a.startswith("{}_encoder.".format(name)), approx_vaes)
+        )
+        decoder = next(
+            filter(lambda a: a.startswith("{}_decoder.".format(name)), approx_vaes)
+        )
 
-        enc = comfy.utils.load_torch_file(folder_paths.get_full_path_or_raise("vae_approx", encoder))
+        enc = comfy.utils.load_torch_file(
+            folder_paths.get_full_path_or_raise("vae_approx", encoder)
+        )
         for k in enc:
             sd["taesd_encoder.{}".format(k)] = enc[k]
 
-        dec = comfy.utils.load_torch_file(folder_paths.get_full_path_or_raise("vae_approx", decoder))
+        dec = comfy.utils.load_torch_file(
+            folder_paths.get_full_path_or_raise("vae_approx", decoder)
+        )
         for k in dec:
             sd["taesd_decoder.{}".format(k)] = dec[k]
 
@@ -93,9 +105,26 @@ class GJJ_VAELoader:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "vae_name": (cls.vae_list(), {"display_name": "VAE 选择", "tooltip": "选择要加载的 VAE 模型"}),
-                "device": (["main_device", "cpu"], {"display_name": "设备", "default": "main_device", "tooltip": "加载到主设备或 CPU"}),
-                "weight_dtype": (["bf16", "fp16", "fp32"], {"display_name": "权重精度", "default": "bf16", "tooltip": "VAE 权重的精度格式"}),
+                "vae_name": (
+                    cls.vae_list(),
+                    {"display_name": "VAE 选择", "tooltip": "选择要加载的 VAE 模型"},
+                ),
+                "device": (
+                    ["main_device", "cpu"],
+                    {
+                        "display_name": "设备",
+                        "default": "main_device",
+                        "tooltip": "加载到主设备或 CPU",
+                    },
+                ),
+                "weight_dtype": (
+                    ["bf16", "fp16", "fp32"],
+                    {
+                        "display_name": "权重精度",
+                        "default": "bf16",
+                        "tooltip": "VAE 权重的精度格式",
+                    },
+                ),
             },
         }
 
@@ -107,7 +136,9 @@ class GJJ_VAELoader:
 
     def load_vae(self, vae_name, device, weight_dtype):
         metadata = None
-        dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[weight_dtype]
+        dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[
+            weight_dtype
+        ]
         if device == "main_device":
             device = model_management.get_torch_device()
         elif device == "cpu":
@@ -123,11 +154,15 @@ class GJJ_VAELoader:
                 # 检查是否是视频 VAE
                 vae_basename = os.path.splitext(vae_name)[0]
                 if vae_basename in self.video_taes:
-                    vae_path = folder_paths.get_full_path_or_raise("vae_approx", vae_name)
+                    vae_path = folder_paths.get_full_path_or_raise(
+                        "vae_approx", vae_name
+                    )
                 else:
                     vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
                 print(f"[GJJ VAE Loader] 加载 VAE: {vae_path}")
-                sd, metadata = comfy.utils.load_torch_file(vae_path, return_metadata=True)
+                sd, metadata = comfy.utils.load_torch_file(
+                    vae_path, return_metadata=True
+                )
                 print(f"[GJJ VAE Loader] 加载成功，state dict 键数: {len(sd)}")
 
             # 检测是否是音频 VAE
@@ -144,16 +179,20 @@ class GJJ_VAELoader:
                 # 尝试加载音频 VAE（遵循原始代码逻辑）
                 try:
                     # 尝试使用 state_dict_prefix_replace（如果可用）
-                    if hasattr(comfy.utils, 'state_dict_prefix_replace'):
+                    if hasattr(comfy.utils, "state_dict_prefix_replace"):
                         print(f"[GJJ VAE Loader] 使用 state_dict_prefix_replace")
                         sd_audio = comfy.utils.state_dict_prefix_replace(
-                            dict(sd), {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."}, filter_keys=True
+                            dict(sd),
+                            {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."},
+                            filter_keys=True,
                         )
                         vae = VAE(sd=sd_audio, metadata=metadata)
                         vae.throw_exception_if_invalid()
                     else:
                         # 回退到直接使用原始 state dict
-                        print(f"[GJJ VAE Loader] state_dict_prefix_replace 不可用，直接加载")
+                        print(
+                            f"[GJJ VAE Loader] state_dict_prefix_replace 不可用，直接加载"
+                        )
                         vae = VAE(sd=sd, metadata=metadata)
                         vae.throw_exception_if_invalid()
                 except Exception as first_exc:
@@ -162,9 +201,12 @@ class GJJ_VAELoader:
                     try:
                         print(f"[GJJ VAE Loader] 尝试使用 AudioVAE 类")
                         from comfy.ldm.lightricks.vae.audio_vae import AudioVAE
+
                         vae = AudioVAE(sd, metadata)
                     except Exception as fallback_exc:
-                        print(f"[GJJ VAE Loader] AudioVAE 加载失败: {str(fallback_exc)}")
+                        print(
+                            f"[GJJ VAE Loader] AudioVAE 加载失败: {str(fallback_exc)}"
+                        )
                         raise RuntimeError(f"无法加载音频 VAE: {str(fallback_exc)}")
             else:
                 # 普通 VAE
@@ -178,9 +220,10 @@ class GJJ_VAELoader:
         except Exception as e:
             print(f"[GJJ VAE Loader] 加载失败 ({vae_name}): {str(e)}")
             import traceback
+
             traceback.print_exc()
             raise RuntimeError(f"VAE 加载失败: {str(e)}") from e
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_VAELoader}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · VAE 加载器"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ ·⚙ VAE 加载器"}

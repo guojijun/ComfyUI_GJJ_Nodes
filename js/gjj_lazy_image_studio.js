@@ -27,7 +27,7 @@ const LORA_DATA_WIDGET_NAME = "lora_data";
 
 const DEFAULT_EMPTY_OPTION = { value: "", label: "未选择" };
 const DEFAULT_ROW = { enabled: true, name: "", strength: 1.0 };
-const DEFAULT_FIRST_SEARCH_TERMS = "turbo,lightning,hyper,lightx2v,quick,fast,speed,ultra,ultrafast,flash,rapid";
+const DEFAULT_FIRST_SEARCH_TERMS = "";
 
 let MODEL_PRESETS = getCachedModelFamilyPresets();
 

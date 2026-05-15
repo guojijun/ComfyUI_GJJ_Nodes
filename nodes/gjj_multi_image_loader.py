@@ -55,14 +55,17 @@ def list_input_images() -> list[dict[str, Any]]:
         width = 0
         height = 0
         try:
-            # 仅获取图像尺寸而不完全加载图像数据以提高性能
+            # 先完整解码一次，避免损坏/伪 PNG 文件进入前端选择列表。
+            # 只读取尺寸但不解码时，部分坏文件会在执行阶段才触发 PIL.UnidentifiedImageError。
             with Image.open(file_path) as image:
-                # 获取图像尺寸，这是预览需要的关键信息
+                image.load()
                 width, height = image.size
-        except (OSError, IOError):  # 更具体的异常类型
-            # 记录错误但不中断处理其他文件
-            width = 0
-            height = 0
+        except Exception as error:
+            try:
+                print(f"[GJJ_MultiImageLoader] 跳过无法识别的图片：{file_path} ({error})")
+            except Exception:
+                pass
+            continue
 
         items.append(
             {
@@ -183,16 +186,29 @@ def resolve_input_image_path(entry: dict[str, str]) -> Path:
     return candidate
 
 
-def load_image_tensor(path: Path) -> torch.Tensor:
-    image = Image.open(path)
-    image = ImageOps.exif_transpose(image)
+def _display_image_path(path: Path) -> str:
+    try:
+        input_dir = Path(folder_paths.get_input_directory()).resolve()
+        return str(path.resolve().relative_to(input_dir)).replace("\\", "/")
+    except Exception:
+        return str(path)
 
-    # 保留原始通道：如果是 RGBA 则输出 RGBA，否则输出 RGB
-    if image.mode == "RGBA":
-        array = np.asarray(image).astype(np.float32) / 255.0
-    else:
-        image = image.convert("RGB")
-        array = np.asarray(image).astype(np.float32) / 255.0
+
+def load_image_tensor(path: Path) -> torch.Tensor:
+    try:
+        with Image.open(path) as opened:
+            # 强制解码，提前发现损坏文件或扩展名伪装文件。
+            opened.load()
+            image = ImageOps.exif_transpose(opened)
+
+            # 保留原始通道：如果是 RGBA 则输出 RGBA，否则输出 RGB
+            if image.mode == "RGBA":
+                array = np.asarray(image).astype(np.float32) / 255.0
+            else:
+                image = image.convert("RGB")
+                array = np.asarray(image).astype(np.float32) / 255.0
+    except Exception as error:
+        raise RuntimeError(f"图片文件无法识别或已损坏：{_display_image_path(path)}。请删除、重新导出或换一张图片。原始错误：{error}") from error
 
     return torch.from_numpy(array)[None, ...]
 
@@ -355,10 +371,11 @@ class GJJ_MultiImageLoader:
     SEARCH_ALIASES = ["multi image loader", "image loader", "多图加载", "图片预览", "批量图片", "主图图片", "输入图像", "原图输入", "主图加载", "多图片加载预览器"]
     RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE",) + tuple("IMAGE" for _ in range(MAX_OUTPUT_IMAGES))
     RETURN_NAMES = ("批量图片队列",) + tuple(f"导出图片{index:02d}" for index in range(1, MAX_OUTPUT_IMAGES + 1))
-    OUTPUT_TOOLTIPS = ("将所有已选图片按顺序打包成一个 GJJ 专用批量图片队列输出。",) + tuple(
+    OUTPUT_TOOLTIPS = ("将所有已选图片按顺序输出为图片列表，原图尺寸和通道不变，可被浏览器直接读取。",) + tuple(
         f"第 {index} 张已选图片的单独输出；未使用的尾部输出会在前端自动收起。"
         for index in range(1, MAX_OUTPUT_IMAGES + 1)
     )
+    OUTPUT_IS_LIST = (True,) + tuple(False for _ in range(MAX_OUTPUT_IMAGES))
 
     GJJ_HELP = {
         "title": "GJJ · 🧡·📂 批量多图片加载浏览器",
@@ -502,8 +519,18 @@ class GJJ_MultiImageLoader:
                     }
                 )
 
+        skipped_errors: list[str] = []
         for entry in selected:
-            image_tensor = load_image_tensor(resolve_input_image_path(entry))
+            try:
+                image_tensor = load_image_tensor(resolve_input_image_path(entry))
+            except Exception as error:
+                label = f"{str(entry.get('subfolder') or '').strip().replace('\\', '/')}/{str(entry.get('filename') or '').strip()}".strip("/")
+                skipped_errors.append(f"{label}: {error}")
+                try:
+                    print(f"[GJJ_MultiImageLoader] 跳过无法读取的图片：{label} ({error})")
+                except Exception:
+                    pass
+                continue
             preview_ui = self.preview_image.save_images(
                 image_tensor,
                 filename_prefix="GJJ_MultiImageLoader",
@@ -518,46 +545,50 @@ class GJJ_MultiImageLoader:
                 }
             )
 
+        if skipped_errors and not collected:
+            raise RuntimeError("所有已选图片都无法读取：" + "；".join(skipped_errors[:5]))
+
         indices = parse_sequence_range(sequence_range, len(collected))
         if indices is not None:
             collected = [collected[index] for index in indices]
+
+        # 直接输出原图列表，不做任何统一处理（尺寸、通道保持原样）
+        # OUTPUT_IS_LIST = True 表示批量图片队列输出为图片列表
+        batch_outputs = [item["image"] for item in collected]  # 批量队列只包含实际图片
+        preview_entries: list[dict[str, Any]] = []
+        for item in collected:
+            preview_entries.extend(item["preview"])
 
         # 如果超过20张，只保留批量图片队列输出（不创建单图输出）
         # 如果20张以内，保留原有的批量队列+单图输出
         exceeds_limit = len(collected) > MAX_OUTPUT_IMAGES
 
-        outputs = [item["image"] for item in collected]
-        preview_entries: list[dict[str, Any]] = []
-        for item in collected:
-            preview_entries.extend(item["preview"])
-
-        batch_output = build_uniform_batch(outputs)
-
-        # 获取批量图片的通道数（3 或 4）
-        num_channels = int(batch_output.shape[3]) if len(outputs) > 0 else 3
-
         if exceeds_limit:
-            # 超过20张：只返回批量图片队列
+            # 超过20张：只返回批量图片队列（原图列表）
             return {
                 "ui": {
                     "preview_images": preview_entries,
                     "external_image_count": [sum(1 for item in collected if item.get("source") == "external")],
                     "merged_image_count": [len(preview_entries)],
+                    "skipped_image_errors": skipped_errors[:10],
                 },
-                "result": (batch_output,),
+                "result": (batch_outputs,),
             }
         else:
-            # 20张以内：批量队列 + 单图输出
+            # 20张以内：批量队列（原图列表） + 单图输出（空白填充）
             preview_entries = preview_entries[:MAX_OUTPUT_IMAGES]
-            while len(outputs) < MAX_OUTPUT_IMAGES:
-                outputs.append(empty_image_tensor(num_channels))
+            # 单图输出需要填充到20个，但批量队列只包含实际图片
+            single_outputs = batch_outputs.copy()
+            while len(single_outputs) < MAX_OUTPUT_IMAGES:
+                single_outputs.append(empty_image_tensor())
             return {
                 "ui": {
                     "preview_images": preview_entries,
                     "external_image_count": [sum(1 for item in collected if item.get("source") == "external")],
                     "merged_image_count": [len(preview_entries)],
+                    "skipped_image_errors": skipped_errors[:10],
                 },
-                "result": (batch_output, *tuple(outputs[:MAX_OUTPUT_IMAGES])),
+                "result": (batch_outputs, *tuple(single_outputs[:MAX_OUTPUT_IMAGES])),
             }
 
 

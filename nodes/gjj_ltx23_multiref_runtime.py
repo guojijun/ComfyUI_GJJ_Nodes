@@ -5,31 +5,103 @@ import datetime
 from fractions import Fraction
 from typing import Any, Iterable
 import gc
+import importlib
+import inspect
 import json
 import math
 import re
+import sys
 import types
 
-import comfy.ldm.modules.attention
-import comfy.model_management as mm
-import comfy.sd
-import comfy.utils
-import folder_paths
-import torch
-import torch.nn.functional as F
-from comfy_api.latest import InputImpl, Types
-from comfy_extras.nodes_cfg import CFGNorm
-from comfy_extras.nodes_custom_sampler import CFGGuider, KSamplerSelect, ManualSigmas, RandomNoise, SamplerCustomAdvanced
-from comfy_extras.nodes_hunyuan import LatentUpscaleModelLoader
-from comfy_extras.nodes_lt import EmptyLTXVLatentVideo, LTXVAddGuide, LTXVConcatAVLatent, LTXVConditioning, LTXVCropGuides, LTXVSeparateAVLatent
-from comfy_extras.nodes_lt_audio import LTXAVTextEncoderLoader, LTXVAudioVAEDecode, LTXVAudioVAEEncode, LTXVAudioVAELoader, LTXVEmptyLatentAudio
-from comfy_extras.nodes_lt_upsampler import LTXVLatentUpsampler
-from comfy_extras.nodes_video import CreateVideo
-from nodes import CheckpointLoaderSimple, CLIPTextEncode, VAEDecodeTiled
+# 零依赖导入模式：本文件在 ComfyUI 扫描节点时不再顶层导入 torch / comfy / comfy_extras / nodes。
+# 所有第三方与 ComfyUI 运行时依赖都延迟到真正执行节点时由 _ensure_runtime_dependencies() 加载，
+# 避免缺少某个可选节点或库时导致整个 GJJ 节点包导入失败。
+DEFAULT_SEGMENT_VIDEO_FORMAT = "video/h264-mp4"
+_RUNTIME_DEPS_READY = False
 
-from .gjj_video_combine_runtime import DEFAULT_FORMAT as DEFAULT_SEGMENT_VIDEO_FORMAT, combine_video, list_supported_formats
-from .gjj_model_name_resolver import pick_available_model_name
-from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data, parse_lora_data
+
+def _ensure_runtime_dependencies() -> None:
+	global _RUNTIME_DEPS_READY
+	if _RUNTIME_DEPS_READY:
+		return
+	global comfy, mm, folder_paths, torch, F
+	global InputImpl, Types
+	global CFGNorm, CFGGuider, KSamplerSelect, ManualSigmas, RandomNoise, SamplerCustomAdvanced
+	global LatentUpscaleModelLoader
+	global EmptyLTXVLatentVideo, LTXVAddGuide, LTXVConcatAVLatent, LTXVConditioning, LTXVCropGuides, LTXVSeparateAVLatent
+	global LTXAVTextEncoderLoader, LTXVAudioVAEDecode, LTXVAudioVAEEncode, LTXVAudioVAELoader, LTXVEmptyLatentAudio
+	global LTXVLatentUpsampler, CreateVideo
+	global core_nodes, CheckpointLoaderSimple, CLIPTextEncode, VAEDecodeTiled
+	global combine_video, list_supported_formats, pick_available_model_name
+	global apply_lora_chain_config, normalize_lora_chain_data, parse_lora_data
+	global DEFAULT_SEGMENT_VIDEO_FORMAT
+
+	try:
+		comfy = importlib.import_module("comfy")
+		importlib.import_module("comfy.ldm.modules.attention")
+		comfy.model_management = importlib.import_module("comfy.model_management")
+		comfy.sd = importlib.import_module("comfy.sd")
+		comfy.utils = importlib.import_module("comfy.utils")
+		mm = comfy.model_management
+		folder_paths = importlib.import_module("folder_paths")
+		torch = importlib.import_module("torch")
+		F = importlib.import_module("torch.nn.functional")
+
+		latest = importlib.import_module("comfy_api.latest")
+		InputImpl = latest.InputImpl
+		Types = latest.Types
+
+		CFGNorm = importlib.import_module("comfy_extras.nodes_cfg").CFGNorm
+		custom_sampler = importlib.import_module("comfy_extras.nodes_custom_sampler")
+		CFGGuider = custom_sampler.CFGGuider
+		KSamplerSelect = custom_sampler.KSamplerSelect
+		ManualSigmas = custom_sampler.ManualSigmas
+		RandomNoise = custom_sampler.RandomNoise
+		SamplerCustomAdvanced = custom_sampler.SamplerCustomAdvanced
+		LatentUpscaleModelLoader = importlib.import_module("comfy_extras.nodes_hunyuan").LatentUpscaleModelLoader
+
+		nodes_lt = importlib.import_module("comfy_extras.nodes_lt")
+		EmptyLTXVLatentVideo = nodes_lt.EmptyLTXVLatentVideo
+		LTXVAddGuide = nodes_lt.LTXVAddGuide
+		LTXVConcatAVLatent = nodes_lt.LTXVConcatAVLatent
+		LTXVConditioning = nodes_lt.LTXVConditioning
+		LTXVCropGuides = nodes_lt.LTXVCropGuides
+		LTXVSeparateAVLatent = nodes_lt.LTXVSeparateAVLatent
+
+		nodes_lt_audio = importlib.import_module("comfy_extras.nodes_lt_audio")
+		LTXAVTextEncoderLoader = nodes_lt_audio.LTXAVTextEncoderLoader
+		LTXVAudioVAEDecode = nodes_lt_audio.LTXVAudioVAEDecode
+		LTXVAudioVAEEncode = nodes_lt_audio.LTXVAudioVAEEncode
+		LTXVAudioVAELoader = nodes_lt_audio.LTXVAudioVAELoader
+		LTXVEmptyLatentAudio = nodes_lt_audio.LTXVEmptyLatentAudio
+		LTXVLatentUpsampler = importlib.import_module("comfy_extras.nodes_lt_upsampler").LTXVLatentUpsampler
+		CreateVideo = importlib.import_module("comfy_extras.nodes_video").CreateVideo
+
+		core_nodes = importlib.import_module("nodes")
+		CheckpointLoaderSimple = core_nodes.CheckpointLoaderSimple
+		CLIPTextEncode = core_nodes.CLIPTextEncode
+		VAEDecodeTiled = core_nodes.VAEDecodeTiled
+
+		video_runtime = importlib.import_module(".gjj_video_combine_runtime", __package__)
+		DEFAULT_SEGMENT_VIDEO_FORMAT = getattr(video_runtime, "DEFAULT_FORMAT", DEFAULT_SEGMENT_VIDEO_FORMAT)
+		combine_video = video_runtime.combine_video
+		list_supported_formats = video_runtime.list_supported_formats
+		model_resolver = importlib.import_module(".gjj_model_name_resolver", __package__)
+		pick_available_model_name = model_resolver.pick_available_model_name
+		lora_chain = importlib.import_module(".gjj_multi_lora_chain", __package__)
+		apply_lora_chain_config = lora_chain.apply_lora_chain_config
+		normalize_lora_chain_data = lora_chain.normalize_lora_chain_data
+		parse_lora_data = lora_chain.parse_lora_data
+	except Exception as exc:
+		raise RuntimeError(
+			"LTX2.3 节点运行依赖加载失败。节点已启用零依赖导入模式，因此这个错误只会在执行时出现；"
+			"请确认当前 ComfyUI 已安装 LTX/AV 所需的 comfy_extras、torch 与相关自定义节点。"
+			f"原始错误：{exc}"
+		) from exc
+	_RUNTIME_DEPS_READY = True
+
+GJJ_LTX23_RUNTIME_PATCH_VERSION = "workflow_json_reorg_v7_no_dualclip_projection_check"
+
 DEFAULT_NEGATIVE_PROMPT = (
 	"titles, subtitles, text, watermark, logo, blurry text, distorted text, overexposed, underexposed, "
 	"low contrast, washed out colors, excessive noise, motion blur, camera shake, background clutter, "
@@ -132,6 +204,7 @@ def _lookup_tokens(text: str) -> list[str]:
 
 
 def _safe_filename_list(category: str) -> list[str]:
+	_ensure_runtime_dependencies()
 	try:
 		return list(folder_paths.get_filename_list(category))
 	except Exception:
@@ -139,6 +212,7 @@ def _safe_filename_list(category: str) -> list[str]:
 
 
 def _pick_available_name(preferred: str, available: Iterable[str]) -> str:
+	_ensure_runtime_dependencies()
 	return pick_available_model_name(preferred, available, allow_first=False)
 def _pick_first_candidate(category: str, candidates: Iterable[str], label: str, required: bool = True) -> str:
     available = _safe_filename_list(category)
@@ -216,7 +290,81 @@ def _apply_chain_loras(model, clip, lora_chain_config: Any = ""):
 	return current_model, current_clip
 
 
+
+def _load_ltx_main_model(model_name: str):
+	"""Load LTX main model from diffusion_models.
+
+	ComfyUI versions expose different loader class names/methods, so this helper first
+	tries the public node loader and then falls back to comfy.sd.load_diffusion_model_guess_config.
+	"""
+	name = str(model_name or "").strip()
+	if not name:
+		raise RuntimeError("未指定 LTX 主模型。")
+	errors: list[str] = []
+
+	# Preferred: use ComfyUI's diffusion-model loader node when available.
+	for class_name in ("UNETLoader", "DiffusionModelLoader", "LoadDiffusionModel"):
+		loader_cls = getattr(core_nodes, class_name, None)
+		if loader_cls is None:
+			continue
+		try:
+			loader = loader_cls()
+		except Exception as exc:
+			errors.append(f"{class_name} 初始化失败：{exc}")
+			continue
+		for method_name in ("load_unet", "load_model", "load"):
+			method = getattr(loader, method_name, None)
+			if method is None:
+				continue
+			call_attempts = (
+				lambda: method(name, "default"),
+				lambda: method(name, "fp16"),
+				lambda: method(name, weight_dtype="default"),
+				lambda: method(name),
+			)
+			for call in call_attempts:
+				try:
+					out = call()
+					model = out[0] if isinstance(out, (tuple, list)) else out
+					if model is not None:
+						print(f"[GJJ LTX2.3] 已从 diffusion_models 使用 {class_name}.{method_name} 加载主模型：{name}")
+						return model
+				except TypeError:
+					continue
+				except Exception as exc:
+					errors.append(f"{class_name}.{method_name}：{exc}")
+					break
+
+	# Fallback: direct comfy.sd loader.
+	try:
+		path = folder_paths.get_full_path("diffusion_models", name)
+		if not path:
+			raise RuntimeError(f"未在 diffusion_models 中找到：{name}")
+		embedding_directory = None
+		try:
+			embedding_directory = folder_paths.get_folder_paths("embeddings")
+		except Exception:
+			embedding_directory = None
+		kwargs = {
+			"output_vae": False,
+			"output_clip": False,
+			"embedding_directory": embedding_directory,
+		}
+		try:
+			return comfy.sd.load_diffusion_model_guess_config(path, **kwargs)
+		except TypeError:
+			kwargs.pop("embedding_directory", None)
+			try:
+				return comfy.sd.load_diffusion_model_guess_config(path, **kwargs)
+			except TypeError:
+				return comfy.sd.load_diffusion_model_guess_config(path)
+	except Exception as exc:
+		errors.append(f"comfy.sd.load_diffusion_model_guess_config：{exc}")
+
+	raise RuntimeError("LTX 主模型加载失败：" + "；".join(errors[-8:]))
+
 def _load_video_vae(vae_name: str):
+	_ensure_runtime_dependencies()
 	vae_path = folder_paths.get_full_path("vae", vae_name)
 	if not vae_path:
 		raise RuntimeError(f"未找到视频 VAE：{vae_name}")
@@ -225,6 +373,7 @@ def _load_video_vae(vae_name: str):
 	vae.throw_exception_if_invalid()
 	return vae
 def _load_audio_vae(audio_vae_name: str):
+	_ensure_runtime_dependencies()
 	if not audio_vae_name:
 		raise RuntimeError("未指定音频 VAE。")
 
@@ -260,6 +409,621 @@ def _load_audio_vae(audio_vae_name: str):
 			folder_paths.get_full_path_or_raise = original_get_full_path_or_raise
 		except Exception:
 			pass
+
+
+def _is_real_loader_class(candidate: Any) -> bool:
+	"""过滤 torch.ops 这类动态命名空间，避免把它误判成 Comfy 节点类。"""
+	if candidate is None:
+		return False
+	try:
+		import types as _types
+		if isinstance(candidate, _types.ModuleType):
+			return False
+	except Exception:
+		pass
+	module_name = str(getattr(candidate, "__module__", ""))
+	class_name = str(getattr(candidate, "__name__", ""))
+	text = f"{module_name}.{class_name}.{candidate!r}"
+	if "torch.ops" in text or "_OpNamespace" in text:
+		return False
+	if isinstance(candidate, type):
+		return True
+	if callable(candidate):
+		return True
+	for method_name in ("load_model", "execute", "load", "load_clip"):
+		if hasattr(candidate, method_name):
+			return True
+	return False
+
+
+def _get_ltx_gemma_clip_loader_class():
+	"""查找参考工作流使用的 LTXVGemmaCLIPModelLoader。
+
+	兼容三种情况：
+	1. 节点已经注册到 ComfyUI 的 NODE_CLASS_MAPPINGS；
+	2. gemma_encoder.py 模块已经被其它扩展加载，但没有暴露到全局映射；
+	3. 扩展存在于 custom_nodes 里，但模块还没被 import。
+	"""
+	# 1) 先从 ComfyUI 全局节点映射取，兼容已注册的情况。
+	try:
+		import nodes as comfy_nodes
+		mapping = getattr(comfy_nodes, "NODE_CLASS_MAPPINGS", {}) or {}
+		loader_cls = mapping.get("LTXVGemmaCLIPModelLoader")
+		if _is_real_loader_class(loader_cls):
+			return loader_cls
+	except Exception:
+		pass
+
+	# 2) 再从已加载模块里找。部分自定义节点用自己的 registry，不一定写入 nodes.NODE_CLASS_MAPPINGS。
+	try:
+		for module_name, module in list(sys.modules.items()):
+			if str(module_name).startswith("torch"):
+				continue
+			loader_cls = getattr(module, "LTXVGemmaCLIPModelLoader", None)
+			if _is_real_loader_class(loader_cls):
+				return loader_cls
+	except Exception:
+		pass
+
+	# 3) 尝试常见模块名。不同 ComfyUI / fork 版本节点位置可能不同。
+	for module_name in (
+		"comfy_extras.nodes_lt_audio",
+		"comfy_extras.nodes_lt",
+		"comfy_extras.nodes_lt_advanced",
+		"gemma_encoder",
+		"ltx_video.gemma_encoder",
+		"lightricks.gemma_encoder",
+	):
+		try:
+			module = importlib.import_module(module_name)
+		except Exception:
+			continue
+		loader_cls = getattr(module, "LTXVGemmaCLIPModelLoader", None)
+		if _is_real_loader_class(loader_cls):
+			return loader_cls
+
+	# 4) 最后扫描 custom_nodes/**/gemma_encoder.py，并用临时 package 名动态导入。
+	#    这样可以让 gemma_encoder.py 里的相对导入（.nodes_registry / .text_embeddings_connectors）继续生效。
+	try:
+		from pathlib import Path
+		import hashlib
+		import importlib.util
+		import types as _types
+
+		search_roots: list[Path] = []
+		try:
+			this_file = Path(__file__).resolve()
+			for parent in this_file.parents:
+				if parent.name == "custom_nodes":
+					search_roots.append(parent)
+					break
+		except Exception:
+			pass
+		try:
+			cwd_custom_nodes = Path.cwd() / "custom_nodes"
+			if cwd_custom_nodes.exists():
+				search_roots.append(cwd_custom_nodes)
+		except Exception:
+			pass
+
+		seen_roots: set[str] = set()
+		for root in search_roots:
+			root_key = str(root)
+			if root_key in seen_roots or not root.exists():
+				continue
+			seen_roots.add(root_key)
+			for gemma_file in root.rglob("gemma_encoder.py"):
+				try:
+					# 不导入自身目录下的无关文件；只要文件里确实有目标类再执行。
+					text = gemma_file.read_text(encoding="utf-8", errors="ignore")
+					if "LTXVGemmaCLIPModelLoader" not in text:
+						continue
+					package_dir = gemma_file.parent
+					pkg_name = "_gjj_dynamic_ltx_gemma_" + hashlib.md5(str(package_dir).encode("utf-8")).hexdigest()
+					module_name = pkg_name + ".gemma_encoder"
+					if module_name in sys.modules:
+						module = sys.modules[module_name]
+					else:
+						pkg = sys.modules.get(pkg_name)
+						if pkg is None:
+							pkg = _types.ModuleType(pkg_name)
+							pkg.__path__ = [str(package_dir)]
+							pkg.__package__ = pkg_name
+							sys.modules[pkg_name] = pkg
+						spec = importlib.util.spec_from_file_location(module_name, str(gemma_file))
+						if spec is None or spec.loader is None:
+							continue
+						module = importlib.util.module_from_spec(spec)
+						module.__package__ = pkg_name
+						sys.modules[module_name] = module
+						spec.loader.exec_module(module)
+					loader_cls = getattr(module, "LTXVGemmaCLIPModelLoader", None)
+					if _is_real_loader_class(loader_cls):
+						return loader_cls
+				except Exception:
+					continue
+	except Exception:
+		pass
+
+	return None
+
+def _call_comfy_loader(loader_cls: Any, preferred_kwargs: dict[str, Any], fallback_args: tuple[Any, ...]):
+	"""按 Comfy 节点 FUNCTION / execute 等方式调用，尽量兼容不同版本签名。"""
+	instance = loader_cls() if isinstance(loader_cls, type) else loader_cls
+	method_names: list[str] = []
+	function_name = getattr(instance, "FUNCTION", None) or getattr(loader_cls, "FUNCTION", None)
+	if function_name:
+		method_names.append(str(function_name))
+	method_names.extend(["execute", "load", "load_clip", "load_model", "loadmodel"])
+
+	last_error: Exception | None = None
+	for method_name in method_names:
+		method = getattr(instance, method_name, None) or getattr(loader_cls, method_name, None)
+		if method is None:
+			continue
+		try:
+			return method(**preferred_kwargs)
+		except TypeError as exc:
+			last_error = exc
+		except Exception as exc:
+			last_error = exc
+		try:
+			return method(*fallback_args)
+		except Exception as exc:
+			last_error = exc
+	if last_error is not None:
+		raise last_error
+	raise RuntimeError(f"无法调用加载器：{loader_cls}")
+
+
+def _clip_has_missing_projection(clip: Any) -> bool:
+	"""检测当前报错里出现的 text_embedding_projection 权重为空问题。"""
+	try:
+		cond_stage_model = getattr(clip, "cond_stage_model", None)
+		projection = getattr(cond_stage_model, "text_embedding_projection", None)
+		if projection is None:
+			return False
+		return getattr(projection, "weight", None) is None
+	except Exception:
+		return False
+
+
+def _pick_optional_candidate(category: str, candidates: Iterable[str]) -> str:
+	try:
+		available = _safe_filename_list(category)
+		for candidate in candidates:
+			resolved = _pick_available_name(candidate, available)
+			if resolved:
+				return resolved
+	except Exception:
+		pass
+	return ""
+
+
+
+def _import_ltx_text_embeddings_pipeline():
+	"""加载 gemma_encoder.py 旁边的 text_embeddings_connectors.load_text_embeddings_pipeline。
+
+	这里不依赖 LTXVGemmaCLIPModelLoader 节点注册，只借用官方/扩展里的 connector 逻辑。
+	所有导入都发生在执行阶段，继续保持零依赖顶层导入。
+	"""
+	# 已加载模块优先。
+	for module_name, module in list(sys.modules.items()):
+		if str(module_name).startswith("torch"):
+			continue
+		func = getattr(module, "load_text_embeddings_pipeline", None)
+		if callable(func):
+			return func
+	# 常见包名尝试。
+	for module_name in (
+		"text_embeddings_connectors",
+		"ltx_video.text_embeddings_connectors",
+		"lightricks.text_embeddings_connectors",
+	):
+		try:
+			module = importlib.import_module(module_name)
+		except Exception:
+			continue
+		func = getattr(module, "load_text_embeddings_pipeline", None)
+		if callable(func):
+			return func
+	# 最后只扫描 text_embeddings_connectors.py，不再导入 gemma_encoder.py，避免触发其错误 root 扫描。
+	try:
+		from pathlib import Path
+		import hashlib
+		import importlib.util
+		import types as _types
+
+		search_roots: list[Path] = []
+		try:
+			this_file = Path(__file__).resolve()
+			for parent in this_file.parents:
+				if parent.name == "custom_nodes":
+					search_roots.append(parent)
+					break
+		except Exception:
+			pass
+		try:
+			cwd_custom_nodes = Path.cwd() / "custom_nodes"
+			if cwd_custom_nodes.exists():
+				search_roots.append(cwd_custom_nodes)
+		except Exception:
+			pass
+
+		seen_roots: set[str] = set()
+		for root in search_roots:
+			root_key = str(root)
+			if root_key in seen_roots or not root.exists():
+				continue
+			seen_roots.add(root_key)
+			for connector_file in root.rglob("text_embeddings_connectors.py"):
+				try:
+					text = connector_file.read_text(encoding="utf-8", errors="ignore")
+					if "load_text_embeddings_pipeline" not in text:
+						continue
+					package_dir = connector_file.parent
+					pkg_name = "_gjj_dynamic_ltx_connector_" + hashlib.md5(str(package_dir).encode("utf-8")).hexdigest()
+					module_name = pkg_name + ".text_embeddings_connectors"
+					if module_name in sys.modules:
+						module = sys.modules[module_name]
+					else:
+						pkg = sys.modules.get(pkg_name)
+						if pkg is None:
+							pkg = _types.ModuleType(pkg_name)
+							pkg.__path__ = [str(package_dir)]
+							pkg.__package__ = pkg_name
+							sys.modules[pkg_name] = pkg
+						spec = importlib.util.spec_from_file_location(module_name, str(connector_file))
+						if spec is None or spec.loader is None:
+							continue
+						module = importlib.util.module_from_spec(spec)
+						module.__package__ = pkg_name
+						sys.modules[module_name] = module
+						spec.loader.exec_module(module)
+					func = getattr(module, "load_text_embeddings_pipeline", None)
+					if callable(func):
+						return func
+				except Exception:
+					continue
+	except Exception:
+		pass
+	raise RuntimeError("未找到 text_embeddings_connectors.load_text_embeddings_pipeline")
+
+
+def _find_first_matching_dir_limited(root: Any, pattern: str) -> str:
+	from pathlib import Path
+	root_path = Path(root)
+	if not root_path.exists():
+		raise FileNotFoundError(f"目录不存在：{root_path}")
+	for item in root_path.rglob("*"):
+		try:
+			if item.match(pattern):
+				return str(item.parent)
+		except Exception:
+			continue
+	raise FileNotFoundError(f"在 {root_path} 下未找到 {pattern}")
+
+
+def _resolve_gemma_encoder_roots(gemma_path: str) -> tuple[str, str, str]:
+	"""返回 tokenizer_dir, gemma_model_dir, processor_dir。
+
+	只处理真正的 Gemma 目录模型；不会再把裸 `model.safetensors` 解析到
+	models/clip 或 models/text_encoders 根目录。扁平 safetensors 模型交给
+	DualCLIPLoader 处理。
+	"""
+	from pathlib import Path
+	full = folder_paths.get_full_path("text_encoders", gemma_path) or str(gemma_path or "")
+	path = Path(full)
+	if not path.exists():
+		raise RuntimeError(f"未找到 Gemma 文本编码器文件：{gemma_path}")
+
+	def _is_forbidden_root(root: Path) -> bool:
+		name = root.name.lower()
+		# 这些目录太宽，里面可能有 faster-whisper、clip 等无关模型，不能扫描。
+		if name in {"models", "text_encoders", "clip", "checkpoints", "vae"}:
+			return True
+		try:
+			parts = {part.lower() for part in root.parts}
+			# 裸 model.safetensors 常会被 ComfyUI 解析到 models/clip/model.safetensors，必须跳过。
+			if "clip" in parts and root.name.lower() == "clip":
+				return True
+		except Exception:
+			pass
+		return False
+
+	candidate_roots: list[Path] = []
+	if path.is_file():
+		# 标准目录模型：.../gemma_xxx/model/model.safetensors -> root = .../gemma_xxx
+		if path.parent.name.lower() == "model" and path.parent.parent.exists() and not _is_forbidden_root(path.parent.parent):
+			candidate_roots.append(path.parent.parent)
+		# 非标准目录：.../gemma_xxx/model.safetensors -> root = .../gemma_xxx
+		if not _is_forbidden_root(path.parent):
+			candidate_roots.append(path.parent)
+	else:
+		if not _is_forbidden_root(path):
+			candidate_roots.append(path)
+
+	# 如果用户传的是扁平的 gemma_3_12B_it_fp8_e4m3fn.safetensors，通常同目录没有 tokenizer.model，
+	# 这里直接失败，让外层改走 DualCLIPLoader。
+	seen: set[str] = set()
+	roots: list[Path] = []
+	for root in candidate_roots:
+		try:
+			key = str(root.resolve())
+		except Exception:
+			key = str(root)
+		if key not in seen:
+			seen.add(key)
+			roots.append(root)
+
+	last_error = ""
+	for root in roots:
+		try:
+			tokenizer_dir = _find_first_matching_dir_limited(root, "tokenizer.model")
+			model_dir = _find_first_matching_dir_limited(root, "model*.safetensors")
+			try:
+				processor_dir = _find_first_matching_dir_limited(root, "preprocessor_config.json")
+			except Exception:
+				processor_dir = tokenizer_dir
+			return tokenizer_dir, model_dir, processor_dir
+		except Exception as exc:
+			last_error = str(exc)
+			continue
+
+	if not roots:
+		last_error = f"{path} 不是可扫描的 Gemma 目录模型；扁平 safetensors 应使用 DualCLIPLoader"
+	raise RuntimeError(
+		"无法解析 Gemma 目录结构。需要类似："
+		"models/text_encoders/gemma-3-12b.../model/model.safetensors，"
+		"并且同一模型目录下包含 tokenizer.model / config.json / model*.safetensors。"
+		f"最后错误：{last_error}"
+	)
+
+
+def _load_ltx_text_encoder_with_internal_gemma(text_encoder_name: str, ckpt_name: str) -> Any:
+	"""内置迁移版 LTXVGemmaCLIPModelLoader。
+
+	来源逻辑对应用户提供的 gemma_encoder.py：
+	AutoTokenizer + Gemma3ForConditionalGeneration + load_text_embeddings_pipeline + comfy.sd.CLIP。
+	改动：所有依赖延迟导入；目录查找限制在当前 Gemma 模型目录内。
+	"""
+	try:
+		from pathlib import Path
+		AutoImageProcessor = importlib.import_module("transformers").AutoImageProcessor
+		AutoTokenizer = importlib.import_module("transformers").AutoTokenizer
+		Gemma3ForConditionalGeneration = importlib.import_module("transformers").Gemma3ForConditionalGeneration
+		Gemma3Processor = importlib.import_module("transformers").Gemma3Processor
+		load_text_embeddings_pipeline = _import_ltx_text_embeddings_pipeline()
+
+		tokenizer_dir, gemma_model_dir, processor_dir = _resolve_gemma_encoder_roots(text_encoder_name)
+		ltxv_full_path = folder_paths.get_full_path("diffusion_models", ckpt_name)
+		if not ltxv_full_path:
+			ltxv_full_path = folder_paths.get_full_path("checkpoints", ckpt_name)
+		if not ltxv_full_path:
+			raise RuntimeError(f"未找到 LTX 主模型：{ckpt_name}")
+
+		class _GJJLTXVGemmaTokenizer:
+			def __init__(self, embedding_directory=None, tokenizer_data=None, max_length: int = 1024):
+				self.tokenizer = AutoTokenizer.from_pretrained(
+					tokenizer_dir,
+					local_files_only=True,
+					model_max_length=max_length,
+				)
+				self.tokenizer.padding_side = "left"
+				if self.tokenizer.pad_token is None:
+					self.tokenizer.pad_token = self.tokenizer.eos_token
+				self.max_length = max_length
+
+			def tokenize_with_weights(self, text: str, return_word_ids: bool = False):
+				encoded = self.tokenizer(
+					str(text or "").strip(),
+					padding="max_length",
+					max_length=self.max_length,
+					truncation=True,
+					return_tensors="pt",
+				)
+				input_ids = encoded.input_ids
+				attention_mask = encoded.attention_mask
+				tuples = [
+					(token_id, attn, i)
+					for i, (token_id, attn) in enumerate(zip(input_ids[0], attention_mask[0]))
+				]
+				out = {"gemma": tuples}
+				if not return_word_ids:
+					out = {k: [(t, w) for t, w, _ in v] for k, v in out.items()}
+				return out
+
+		class _GJJLTXVGemmaTextEncoderModel(torch.nn.Module):
+			def __init__(self, device="cpu", dtype=None, model_options=None):
+				super().__init__()
+				dtype = torch.bfloat16
+				self.model = Gemma3ForConditionalGeneration.from_pretrained(
+					gemma_model_dir,
+					local_files_only=True,
+					torch_dtype=dtype,
+				)
+				feature_extractor, embeddings_processor = load_text_embeddings_pipeline(
+					ltxv_full_path,
+					dtype=dtype,
+					fallback_proj_path=Path(gemma_model_dir) / "proj_linear.safetensors",
+				)
+				self.feature_extractor = feature_extractor.to(dtype=dtype)
+				self.embeddings_processor = embeddings_processor.to(dtype=dtype)
+				self.processor = None
+				try:
+					image_processor = AutoImageProcessor.from_pretrained(str(processor_dir), local_files_only=True)
+					self.processor = Gemma3Processor(
+						image_processor=image_processor,
+						tokenizer=_GJJLTXVGemmaTokenizer().tokenizer,
+					)
+				except Exception as exc:
+					print(f"[GJJ LTX2.3] Gemma processor 未加载，仅影响提示词增强，不影响 CLIP 编码：{exc}")
+				self.dtypes = {dtype}
+				try:
+					self._model_memory_required = comfy.model_management.module_size(self.model) + 256 * 1024 * 1024
+				except Exception:
+					self._model_memory_required = 0
+
+			def set_clip_options(self, options):
+				pass
+
+			def reset_clip_options(self):
+				pass
+
+			def forward(self, input_ids, attention_mask, padding_side="right"):
+				outputs = self.model(
+					input_ids=input_ids,
+					attention_mask=attention_mask,
+					output_hidden_states=True,
+				)
+				all_layer_hiddens = torch.stack(outputs.hidden_states, dim=-1)
+				return self.feature_extractor(all_layer_hiddens, attention_mask, padding_side)
+
+			def encode_token_weights(self, token_weight_pairs):
+				token_pairs = token_weight_pairs["gemma"]
+				input_ids = torch.tensor([[t[0] for t in token_pairs]], device=self.model.device)
+				attention_mask = torch.tensor([[w[1] for w in token_pairs]], device=self.model.device)
+				self.to(self.model.device)
+				features = self(input_ids, attention_mask, padding_side="left")
+				encoded_input_dtype = next(iter(features.values())).dtype
+				connector_attention_mask = (attention_mask - 1).to(encoded_input_dtype).reshape(
+					(attention_mask.shape[0], 1, -1, attention_mask.shape[-1])
+				) * torch.finfo(encoded_input_dtype).max
+				encoded, mask = self.embeddings_processor.create_embeddings(features, connector_attention_mask)
+				return encoded, None, {"attention_mask": mask}
+
+			def load_sd(self, sd):
+				return self.model.load_state_dict(sd, strict=False)
+
+			def memory_required(self, input_shape):
+				return self._model_memory_required
+
+		clip_target = comfy.supported_models_base.ClipTarget(
+			tokenizer=lambda embedding_directory=None, tokenizer_data=None: _GJJLTXVGemmaTokenizer(max_length=1024),
+			clip=_GJJLTXVGemmaTextEncoderModel,
+		)
+		clip = comfy.sd.CLIP(clip_target)
+		print(f"[GJJ LTX2.3] 已使用内置迁移版 LTXVGemmaCLIPModelLoader：{text_encoder_name}")
+		return clip
+	except Exception as exc:
+		raise RuntimeError(f"内置 LTXVGemmaCLIPModelLoader：{exc}") from exc
+
+def _load_ltx_text_encoder_with_dual_clip(text_encoder_name: str) -> Any:
+	"""按参考工作流优先使用 DualCLIPLoader：Gemma 主体 + LTX 文本投影。"""
+	try:
+		core_nodes = importlib.import_module("nodes")
+		dual_cls = getattr(core_nodes, "DualCLIPLoader", None)
+		if dual_cls is None:
+			raise RuntimeError("当前 ComfyUI 没有 DualCLIPLoader")
+		projection_name = _pick_optional_candidate(
+			"text_encoders",
+			(
+				"ltx-2.3_text_projection_bf16.safetensors",
+				"ltx2.3_text_projection_bf16.safetensors",
+				"text_projection_bf16",
+			),
+		)
+		if not projection_name:
+			raise RuntimeError("未找到 ltx-2.3_text_projection_bf16.safetensors")
+		loader = dual_cls() if isinstance(dual_cls, type) else dual_cls
+		method = getattr(loader, "load_clip", None) or getattr(loader, "load", None) or getattr(loader, "execute", None)
+		if method is None:
+			function_name = getattr(loader, "FUNCTION", None) or getattr(dual_cls, "FUNCTION", None)
+			method = getattr(loader, str(function_name), None) if function_name else None
+		if method is None:
+			raise RuntimeError("无法调用 DualCLIPLoader")
+		try:
+			result = method(text_encoder_name, projection_name, "ltxv", "default")
+		except TypeError:
+			result = method(clip_name1=text_encoder_name, clip_name2=projection_name, type="ltxv", device="default")
+		clip = result[0] if isinstance(result, (tuple, list)) else result
+		if clip is None:
+			raise RuntimeError("DualCLIPLoader 返回空 CLIP")
+		return clip
+	except Exception as exc:
+		raise RuntimeError(f"DualCLIPLoader：{exc}") from exc
+
+
+def _load_ltx_text_encoder(text_encoder_name: str, ckpt_name: str):
+	print(f"[GJJ LTX2.3] runtime patch: {GJJ_LTX23_RUNTIME_PATCH_VERSION}")
+	_ensure_runtime_dependencies()
+	"""加载 LTX-2.3 Gemma 文本编码器。
+
+	规则：
+	- 目录型 Gemma 模型（带 tokenizer.model）优先用内置迁移版 LTXVGemmaCLIPModelLoader。
+	- 扁平 safetensors（参考工作流的 gemma_3_12B_it_fp8...）优先用 DualCLIPLoader。
+	- 不再让裸 model.safetensors 抢先命中 models/clip/model.safetensors。
+	"""
+	attempt_errors: list[str] = []
+
+	def _try_dual(name: str) -> Any | None:
+		try:
+			clip = _load_ltx_text_encoder_with_dual_clip(name)
+			if clip is not None:
+				# 参考工作流的 DualCLIPLoader 返回的 LTXV CLIP 会在真正 encode/load_model 时
+				# 懒加载/绑定投影层。这里不能像旧 LTXAVTextEncoderLoader 一样提前检查
+				# text_embedding_projection.weight，否则会把官方工作流可用的 CLIP 误判为无效。
+				print(f"[GJJ LTX2.3] 已使用 DualCLIPLoader：{name}（已跳过投影层预检查）")
+				return clip
+			attempt_errors.append(f"DualCLIPLoader({name}) 返回空 CLIP")
+		except Exception as exc:
+			attempt_errors.append(str(exc))
+		return None
+
+	def _try_internal(name: str) -> Any | None:
+		try:
+			clip = _load_ltx_text_encoder_with_internal_gemma(name, ckpt_name)
+			if clip is not None and not _clip_has_missing_projection(clip):
+				return clip
+			attempt_errors.append(f"内置 LTXVGemmaCLIPModelLoader({name}) 返回的 CLIP 无效或投影层为空")
+		except Exception as exc:
+			attempt_errors.append(f"{exc}")
+		return None
+
+	# 1) 如果当前选择的是参考工作流的扁平 Gemma safetensors，先走 DualCLIPLoader。
+	lower_name = str(text_encoder_name or "").lower().replace("\\", "/")
+	is_flat_safetensors = lower_name.endswith(".safetensors") and "/" not in lower_name and "model.safetensors" not in lower_name
+	if is_flat_safetensors:
+		clip = _try_dual(text_encoder_name)
+		if clip is not None:
+			return clip
+
+	# 2) 尝试目录型 Gemma。只放明确目录结构候选，不再放裸 model.safetensors。
+	internal_candidates: list[str] = []
+	for candidate in (
+		text_encoder_name,
+		"gemma-3-12b-it-qat-q4_0-unquantized_readout_proj/model/model.safetensors",
+		"gemma-3-12b-it-qat-q4_0-unquantized_readout_proj",
+	):
+		if not candidate or candidate in internal_candidates:
+			continue
+		if candidate == "model.safetensors":
+			continue
+		resolved = _pick_optional_candidate("text_encoders", (candidate,)) if candidate != text_encoder_name else candidate
+		if resolved and resolved not in internal_candidates and resolved != "model.safetensors":
+			internal_candidates.append(resolved)
+
+	for candidate in internal_candidates:
+		clip = _try_internal(candidate)
+		if clip is not None:
+			return clip
+
+	# 3) 如果前面不是扁平模型，或者 Dual 第一次失败，再用当前选择重试 Dual。
+	if not is_flat_safetensors:
+		clip = _try_dual(text_encoder_name)
+		if clip is not None:
+			return clip
+
+	# 4) 最后才走旧加载器。旧加载器在部分 LTX2.3 模型上会 invalid tokenizer 或投影层为空。
+	try:
+		clip = LTXAVTextEncoderLoader.execute(text_encoder_name, ckpt_name, "default")[0]
+		if clip is not None and not _clip_has_missing_projection(clip):
+			return clip
+		attempt_errors.append("LTXAVTextEncoderLoader 返回的 CLIP 投影层为空")
+	except Exception as exc:
+		attempt_errors.append(f"LTXAVTextEncoderLoader：{exc}")
+
+	raise RuntimeError("LTX 文本编码器加载失败：" + "；".join(attempt_errors[-10:]))
 
 def _round_to_multiple(value: float, step: int, minimum: int) -> int:
 	rounded = int(round(float(value) / float(step)) * step)
@@ -346,14 +1110,33 @@ def _resolve_stage1_sample_size(output_width: int, output_height: int, sample_lo
 
 def _resize_guide_to_size(image: torch.Tensor, width: int, height: int) -> torch.Tensor:
 	image = _ensure_image_batch(image)[:1]
+	target_width = max(1, int(width))
+	target_height = max(1, int(height))
+	current_height = int(image.shape[1])
+	current_width = int(image.shape[2])
+	if current_width <= 0 or current_height <= 0:
+		return image.contiguous()
+	if current_width == target_width and current_height == target_height:
+		return image.contiguous()
+
+	# 安全网：保持比例缩放到目标画幅内，再居中补边，避免 guide 图被强行拉伸。
+	scale = min(float(target_width) / float(current_width), float(target_height) / float(current_height))
+	resized_width = max(1, int(round(float(current_width) * scale)))
+	resized_height = max(1, int(round(float(current_height) * scale)))
 	resized = comfy.utils.common_upscale(
 		image.movedim(-1, 1),
-		int(width),
-		int(height),
+		resized_width,
+		resized_height,
 		"lanczos",
 		"disabled",
-	).movedim(1, -1)
-	return resized.contiguous()
+	)
+	pad_left = max(0, (target_width - resized_width) // 2)
+	pad_right = max(0, target_width - resized_width - pad_left)
+	pad_top = max(0, (target_height - resized_height) // 2)
+	pad_bottom = max(0, target_height - resized_height - pad_top)
+	if pad_left or pad_right or pad_top or pad_bottom:
+		resized = F.pad(resized, (pad_left, pad_right, pad_top, pad_bottom), mode="replicate")
+	return resized.movedim(1, -1)[:, :target_height, :target_width, :].contiguous()
 
 
 def _build_latent_inplace_guides(
@@ -1274,7 +2057,8 @@ def _check_audio_conditioned_budget(
 def run_ltx23_multiref_video(
 	*,
 	mode: str,
-	positive_prompt: str,
+	checkpoint_name: Any = "",
+	positive_prompt: str = "",
 	negative_prompt: str,
 	main_image: torch.Tensor | None,
 	guide_images: Iterable[torch.Tensor | None],
@@ -1296,29 +2080,43 @@ def run_ltx23_multiref_video(
 	denoise_strength: Any = DEFAULT_DENOISE_STRENGTH,
 	unique_id: Any = None,
 ):
-	prompt_text = str(positive_prompt or "").strip()
-	if not prompt_text:
-		raise RuntimeError("正向提示词不能为空。")
+	_ensure_runtime_dependencies()
+	prompt_text = str(positive_prompt or "").strip() or "电影感视频，主体自然运动，镜头稳定，细节清晰。"
 	prepared_lora_chain_config, transition_lora_enabled, transition_strength_changed = _prepare_ltx_lora_chain_config(lora_chain_config)
 	prompt_text, transition_trigger_added = _append_ltx_transition_trigger(prompt_text, transition_lora_enabled)
 	negative_text = str(negative_prompt or "").strip() or DEFAULT_NEGATIVE_PROMPT
 	fps = max(1, int(fps))
 	base_guide_images = list(guide_images or [])
 	base_guide_times = list(guide_times or [])
-	route_label = _resolve_visual_route_label(main_image, base_guide_images)
+	visual_scene_count = (1 if main_image is not None else 0) + sum(1 for image in base_guide_images if image is not None)
+	if mode == MODE_AUDIO_CONDITIONED and visual_scene_count <= 0:
+		route_label = "音频生视频"
+	elif mode == MODE_AUDIO_CONDITIONED:
+		route_label = "数字人" if visual_scene_count == 1 else f"数字人多图参考（{visual_scene_count}张）"
+	elif visual_scene_count == 2:
+		route_label = "首尾帧"
+	else:
+		route_label = _resolve_visual_route_label(main_image, base_guide_images)
 	resolved_denoise_strength = _clamp_float(denoise_strength, DEFAULT_DENOISE_STRENGTH, 0.0, 1.0)
 
 	def _execute():
 		_send_status(unique_id, "1/8 加载 LTX 模型与默认资源...")
 		try:
-			resolved_ckpt = _pick_first_candidate("checkpoints",("ltx-2.3-22b",), "LTX 主模型")
+			selected_ckpt = str(checkpoint_name or "").strip()
+			ckpt_candidates = []
+			if selected_ckpt and not selected_ckpt.startswith("未找到"):
+				ckpt_candidates.append(selected_ckpt)
+			for fallback_ckpt in ("ltx-2.3-22b", "ltx23", "ltx"):
+				if fallback_ckpt not in ckpt_candidates:
+					ckpt_candidates.append(fallback_ckpt)
+			resolved_ckpt = _pick_first_candidate("diffusion_models", tuple(ckpt_candidates), "LTX 主模型")
 			resolved_video_vae = _pick_first_candidate("vae",("video_vae",), "LTX 视频 VAE")
 			resolved_audio_vae = _pick_first_candidate("vae",("audio_vae",), "LTX 音频 VAE")
-			resolved_text_encoder = _pick_first_candidate("text_encoders",("gemma_3_12B_it",), "LTX 文本编码器")
+			resolved_text_encoder = _pick_first_candidate("text_encoders",("gemma_3_12B_it_fp8_e4m3fn.safetensors", "gemma_3_12B_it.safetensors", "gemma-3-12b-it-qat-q4_0-unquantized_readout_proj/model/model.safetensors", "gemma-3-12b-it-qat-q4_0-unquantized_readout_proj", "gemma_3_12B_it"), "LTX 文本编码器")
 			resolved_latent_upscaler = _pick_first_candidate("latent_upscale_models",("ltx-2.3-spatial-upscaler",), "LTX latent 放大模型")
 
-			model, _, _ = CheckpointLoaderSimple().load_checkpoint(resolved_ckpt)
-			clip = LTXAVTextEncoderLoader.execute(resolved_text_encoder, resolved_ckpt, "default")[0]
+			model = _load_ltx_main_model(resolved_ckpt)
+			clip = _load_ltx_text_encoder(resolved_text_encoder, resolved_ckpt)
 			video_vae = _load_video_vae(resolved_video_vae)
 			audio_vae = _load_audio_vae(resolved_audio_vae)
 			latent_upscaler = LatentUpscaleModelLoader.execute(resolved_latent_upscaler)[0]
@@ -1429,7 +2227,7 @@ def run_ltx23_multiref_video(
 					audio_latent = LTXVAudioVAEEncode.execute(output_audio, audio_vae)[0]
 					audio_latent = _set_audio_latent_noise_mask(audio_latent, 0.0)
 				except Exception as exc:
-					raise RuntimeError(f"LTX 数字人节点处理输入音频失败：{exc}") from exc
+					raise RuntimeError(f"LTX 音频驱动节点处理输入音频失败：{exc}") from exc
 			else:
 				_send_status(unique_id, f"{prefix}3/8 构建空白音频 latent...")
 				try:

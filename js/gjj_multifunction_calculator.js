@@ -5,6 +5,7 @@ const TARGET_NODES = new Set(["GJJ_MultifunctionCalculator"]);
 const INPUT_PREFIX = "value_";
 const MAX_INPUTS = 24;
 const FORMULA_WIDGET = "formula";
+const ADVANCED_STATE_PROPERTY = "gjj_calculator_advanced_open";
 const MIN_VISIBLE_INPUTS = 1;
 const OPERATORS = [
 	{ label: "➕", insert: " + ", title: "加法" },
@@ -182,6 +183,33 @@ function createButton(label, title, onClick) {
 	return button;
 }
 
+
+function isAdvancedOpen(node) {
+	return Boolean(node?.properties?.[ADVANCED_STATE_PROPERTY] ?? node?.__gjjCalculatorAdvancedOpen);
+}
+
+function setAdvancedOpen(node, open) {
+	node.__gjjCalculatorAdvancedOpen = Boolean(open);
+	node.properties = node.properties || {};
+	node.properties[ADVANCED_STATE_PROPERTY] = Boolean(open);
+	updateAdvancedVisibility(node);
+	measurePanel(node);
+	setDirty(node);
+}
+
+function updateAdvancedVisibility(node) {
+	const open = isAdvancedOpen(node);
+	if (node.__gjjCalculatorAdvancedWrap) {
+		node.__gjjCalculatorAdvancedWrap.style.display = open ? "flex" : "none";
+	}
+	if (node.__gjjCalculatorAdvancedButton) {
+		node.__gjjCalculatorAdvancedButton.textContent = open ? "收起" : "高级";
+		node.__gjjCalculatorAdvancedButton.title = open ? "隐藏高级计算按钮" : "显示高级计算按钮";
+		node.__gjjCalculatorAdvancedButton.style.borderColor = open ? "#7fa7b3" : "#465960";
+		node.__gjjCalculatorAdvancedButton.style.background = open ? "#20333b" : "#172026";
+	}
+}
+
 function getFormula(node) {
 	return String(getWidget(node, FORMULA_WIDGET)?.value || "");
 }
@@ -352,10 +380,14 @@ function invalidateResultPreview(node) {
 
 function rebuildInputButtons(node) {
 	const row = node.__gjjCalculatorInputRow;
+	const advancedInputRow = node.__gjjCalculatorAdvancedInputRow;
 	if (!row) {
 		return;
 	}
 	row.textContent = "";
+	if (advancedInputRow) {
+		advancedInputRow.textContent = "";
+	}
 	const inputs = getValueInputs(node);
 	for (const input of inputs) {
 		const index = getInputIndex(input.name);
@@ -363,8 +395,18 @@ function rebuildInputButtons(node) {
 		const button = createButton(variable, `插入变量 ${variable}`, () => appendFormula(node, variable));
 		button.style.borderColor = inputHasLink(input) ? "#6a8b97" : "#39484e";
 		button.style.opacity = inputHasLink(input) ? "1" : "0.62";
-		row.appendChild(button);
+		if (advancedInputRow) {
+			advancedInputRow.appendChild(button);
+		} else {
+			row.appendChild(button);
+		}
 	}
+	if (!node.__gjjCalculatorAdvancedButton) {
+		const advancedButton = createButton("高级", "显示高级计算按钮", () => setAdvancedOpen(node, !isAdvancedOpen(node)));
+		node.__gjjCalculatorAdvancedButton = advancedButton;
+	}
+	row.appendChild(node.__gjjCalculatorAdvancedButton);
+	updateAdvancedVisibility(node);
 }
 
 function measurePanel(node) {
@@ -386,6 +428,7 @@ function ensureCalculatorPanel(node) {
 		updateResultPreview(node, node.__gjjCalculatorLastResult);
 		rebuildInputButtons(node);
 		updateHint(node);
+		updateAdvancedVisibility(node);
 		measurePanel(node);
 		return;
 	}
@@ -397,11 +440,19 @@ function ensureCalculatorPanel(node) {
 	container.appendChild(inputRow);
 	node.__gjjCalculatorInputRow = inputRow;
 
+	const advancedWrap = document.createElement("div");
+	advancedWrap.style.cssText = "display:none;flex-direction:column;gap:7px;overflow:visible;";
+	node.__gjjCalculatorAdvancedWrap = advancedWrap;
+
+	const advancedInputRow = createRow();
+	advancedWrap.appendChild(advancedInputRow);
+	node.__gjjCalculatorAdvancedInputRow = advancedInputRow;
+
 	const operatorRow = createRow();
 	for (const item of OPERATORS) {
 		operatorRow.appendChild(createButton(item.label, item.title, () => appendFormula(node, item.insert)));
 	}
-	container.appendChild(operatorRow);
+	advancedWrap.appendChild(operatorRow);
 
 	const functionRow = createRow();
 	for (const item of FUNCTIONS) {
@@ -409,7 +460,9 @@ function ensureCalculatorPanel(node) {
 	}
 	functionRow.appendChild(createButton("退格", "删除最后一个字符", () => backspaceFormula(node)));
 	functionRow.appendChild(createButton("清空", "清空当前公式", () => clearFormula(node)));
-	container.appendChild(functionRow);
+	advancedWrap.appendChild(functionRow);
+
+	container.appendChild(advancedWrap);
 
 	const resultBox = document.createElement("div");
 	resultBox.style.cssText = [
@@ -427,12 +480,12 @@ function ensureCalculatorPanel(node) {
 	resultBox.title = "计算结果";
 	node.__gjjCalculatorResultText = resultBox;
 	node.__gjjCalculatorFormulaText = resultBox;
-	container.appendChild(resultBox);
+	advancedWrap.appendChild(resultBox);
 
 	const hint = document.createElement("div");
 	hint.style.cssText = "font-size:11px;line-height:1.35;color:#f0c674;";
 	node.__gjjCalculatorHint = hint;
-	container.appendChild(hint);
+	advancedWrap.appendChild(hint);
 
 	const widget = node.addDOMWidget?.("gjj_calculator_panel", "calculator_panel", container, {
 		serialize: false,
@@ -446,6 +499,7 @@ function ensureCalculatorPanel(node) {
 	updateResultPreview(node, node.__gjjCalculatorLastResult);
 	rebuildInputButtons(node);
 	updateHint(node);
+	updateAdvancedVisibility(node);
 	measurePanel(node);
 }
 

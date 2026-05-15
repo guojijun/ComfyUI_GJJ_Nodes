@@ -1,19 +1,43 @@
 from __future__ import annotations
 
+import importlib
 import json
 from typing import Any
 
-import torch
-
-from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
-from .gjj_video_combine_runtime import DEFAULT_FORMAT as DEFAULT_SEGMENT_VIDEO_FORMAT, list_supported_formats
-from .gjj_ltx23_multiref_runtime import (
-    DEFAULT_NEGATIVE_PROMPT,
-    MODE_AUDIO_CONDITIONED,
-    MODE_GENERATED_AUDIO,
-    _send_status,
-    run_ltx23_multiref_video,
+# 零依赖导入模式：顶层不导入 torch / ComfyUI / 其它本地运行时模块。
+# ComfyUI 扫描节点时只需要 INPUT_TYPES / NODE_CLASS_MAPPINGS，真正执行时再懒加载运行依赖。
+GJJ_BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
+DEFAULT_SEGMENT_VIDEO_FORMAT = "video/h264-mp4"
+MODE_GENERATED_AUDIO = "generated_audio"
+MODE_AUDIO_CONDITIONED = "audio_conditioned"
+DEFAULT_NEGATIVE_PROMPT = (
+    "titles, subtitles, text, watermark, logo, blurry text, distorted text, overexposed, underexposed, "
+    "low contrast, washed out colors, excessive noise, motion blur, camera shake, background clutter, "
+    "unnatural skin tones, deformed facial features, extra limbs, disfigured hands, uncanny valley, "
+    "mismatched lip sync, off-sync audio, jittery movement, awkward pauses, incorrect timing, AI artifacts"
 )
+
+
+def _runtime_module():
+    return importlib.import_module(".gjj_ltx23_multiref_runtime", __package__)
+
+
+def _send_status(unique_id: Any, text: str, progress: float | None = None) -> None:
+    try:
+        return _runtime_module()._send_status(unique_id, text, progress)
+    except Exception:
+        return None
+
+
+def _run_ltx23_multiref_video(**kwargs):
+    return _runtime_module().run_ltx23_multiref_video(**kwargs)
+
+
+def _torch_module():
+    try:
+        return importlib.import_module("torch")
+    except Exception:
+        return None
 
 
 NODE_NAME = "GJJ_LTX23ImageToVideoMultiRef"
@@ -45,21 +69,21 @@ SEGMENT_SAVE_PRESETS = (
 
 
 def _segment_video_format_options() -> list[str]:
-    formats = [item for item in list_supported_formats() if str(item).startswith("video/")]
-    if DEFAULT_SEGMENT_VIDEO_FORMAT not in formats:
-        formats.insert(0, DEFAULT_SEGMENT_VIDEO_FORMAT)
-    return formats or [DEFAULT_SEGMENT_VIDEO_FORMAT]
+    # 零依赖导入：INPUT_TYPES 阶段不导入视频合成运行时，避免扫描节点时触发可选依赖。
+    return [DEFAULT_SEGMENT_VIDEO_FORMAT]
 
 
 def _scene_input_spec(index: int):
+    resolved_index = int(index)
+    input_type = SCENE_BATCH_INPUT_TYPE if resolved_index <= 1 else "IMAGE"
     return (
-        "IMAGE",
+        input_type,
         {
-            "display_name": f"场景{int(index)}",
+            "display_name": f"场景{resolved_index}",
             "tooltip": (
-                "可选起始场景图。新连接图片时会同步面板宽高；留空时走文生视频；连上当前最后一张场景图后，会自动扩展下一张输入。"
-                if int(index) <= 1
-                else "场景参考图。中间图会作为过渡帧，当前最后一张会作为结束帧。连上当前最后一张场景图后，会自动扩展下一张输入。"
+                "第一张场景图输入。支持单张 IMAGE，也支持自定义批量图片 GJJ_BATCH_IMAGE；接入后会自动展开为图片列表，并显示下一张场景输入。留空时走文生视频。"
+                if resolved_index <= 1
+                else "追加场景参考图。中间图会作为过渡帧，当前最后一张会作为结束帧；连上当前最后一张后，会自动扩展下一张输入。"
             ),
         },
     )
@@ -135,7 +159,8 @@ def _collect_scene_images(kwargs: dict[str, Any]) -> list[Any]:
 
 
 def _is_empty_loader_placeholder(image: Any) -> bool:
-    if not isinstance(image, torch.Tensor):
+    torch = _torch_module()
+    if torch is None or not isinstance(image, torch.Tensor):
         return False
     if image.ndim != 4:
         return False
@@ -148,9 +173,25 @@ def _is_empty_loader_placeholder(image: Any) -> bool:
 
 
 def _split_scene_batch(value: Any) -> list[Any]:
+    """把单图 IMAGE、自定义 GJJ_BATCH_IMAGE、普通列表或 4D Tensor 统一拆成图片列表。"""
     if value is None:
         return []
-    if not isinstance(value, torch.Tensor):
+
+    # 自定义批量图片常见包装：优先读取明确的图片字段，避免误遍历任意 dict。
+    if isinstance(value, dict):
+        for key in ("images", "image", "batch_images", "frames", "samples", "items"):
+            if key in value:
+                return _split_scene_batch(value.get(key))
+        return [value]
+
+    if isinstance(value, (list, tuple)):
+        images: list[Any] = []
+        for item in value:
+            images.extend(_split_scene_batch(item))
+        return images
+
+    torch = _torch_module()
+    if torch is None or not isinstance(value, torch.Tensor):
         return [value]
     if value.ndim == 3:
         return [value.unsqueeze(0)]
@@ -159,6 +200,13 @@ def _split_scene_batch(value: Any) -> list[Any]:
     images: list[Any] = []
     for index in range(int(value.shape[0])):
         images.append(value[index:index + 1].contiguous())
+    return images
+
+
+def _flatten_scene_values(values: list[Any]) -> list[Any]:
+    images: list[Any] = []
+    for value in values:
+        images.extend(_split_scene_batch(value))
     return images
 
 
@@ -171,6 +219,90 @@ def _filter_valid_scene_images(scene_images: list[Any]) -> tuple[list[Any], int]
             continue
         valid.append(image)
     return valid, skipped
+
+
+
+def _ceil_to_multiple(value: Any, multiple: int = 32, minimum: int = 64) -> int:
+    try:
+        numeric = int(round(float(value)))
+    except Exception:
+        numeric = int(minimum)
+    numeric = max(int(minimum), numeric)
+    m = max(1, int(multiple))
+    return int(((numeric + m - 1) // m) * m)
+
+
+def _normalize_single_ltx_scene_image(image: Any, target_width: int, target_height: int) -> Any:
+    """执行期内部对齐：不修改 GJJ_MultiImageLoader，只在 LTX 节点内把参考图转成 LTX 友好的 IMAGE。
+
+    重要：这里不能直接拉伸到面板宽高，否则人物/物体会变形。
+    现在采用等比例 contain 缩放，再居中补边到目标画幅，保证最终视频尺寸等于面板宽高，同时保持原图比例。
+    """
+    try:
+        import torch
+        import torch.nn.functional as F
+    except Exception:
+        return image
+
+    if not isinstance(image, torch.Tensor):
+        return image
+    tensor = image
+    if tensor.ndim == 3:
+        tensor = tensor.unsqueeze(0)
+    if tensor.ndim != 4:
+        return image
+    tensor = tensor[:1].contiguous().to(dtype=torch.float32)
+    channels = int(tensor.shape[-1])
+    if channels <= 0:
+        return image
+    if channels == 1:
+        tensor = tensor.repeat(1, 1, 1, 3)
+    elif channels == 2:
+        tensor = tensor[:, :, :, :1].repeat(1, 1, 1, 3)
+    elif channels > 3:
+        # LTX guide/vae 只吃 RGB，Alpha 在这里丢弃，避免后续通道不一致。
+        tensor = tensor[:, :, :, :3]
+
+    target_width = _ceil_to_multiple(target_width, 32, 64)
+    target_height = _ceil_to_multiple(target_height, 32, 64)
+    current_height = int(tensor.shape[1])
+    current_width = int(tensor.shape[2])
+    if current_width <= 0 or current_height <= 0:
+        return image
+
+    if current_width == target_width and current_height == target_height:
+        return tensor.clamp(0.0, 1.0).contiguous()
+
+    # 等比例缩放到目标画幅内，避免直接拉伸变形。
+    scale = min(float(target_width) / float(current_width), float(target_height) / float(current_height))
+    resized_width = max(1, int(round(float(current_width) * scale)))
+    resized_height = max(1, int(round(float(current_height) * scale)))
+
+    samples = tensor.movedim(-1, 1)
+    resized = F.interpolate(samples, size=(resized_height, resized_width), mode="bilinear", align_corners=False)
+
+    # 居中补边到面板宽高。用 replicate 比黑边更不容易影响 LTX guide 边缘。
+    pad_left = max(0, (target_width - resized_width) // 2)
+    pad_right = max(0, target_width - resized_width - pad_left)
+    pad_top = max(0, (target_height - resized_height) // 2)
+    pad_bottom = max(0, target_height - resized_height - pad_top)
+    if pad_left or pad_right or pad_top or pad_bottom:
+        resized = F.pad(resized, (pad_left, pad_right, pad_top, pad_bottom), mode="replicate")
+
+    tensor = resized.movedim(1, -1)
+    return tensor[:, :target_height, :target_width, :].clamp(0.0, 1.0).contiguous()
+
+
+def _normalize_ltx_scene_images(scene_images: list[Any], width: Any, height: Any) -> tuple[list[Any], int, int]:
+    """把单图/批量拆出的图片在 LTX 节点内部等比例缩放到面板画幅，并把宽高对齐到 32 倍数。"""
+    aligned_width = _ceil_to_multiple(width, 32, DEFAULT_WIDTH)
+    aligned_height = _ceil_to_multiple(height, 32, DEFAULT_HEIGHT)
+    if not scene_images:
+        return [], aligned_width, aligned_height
+    return [
+        _normalize_single_ltx_scene_image(image, aligned_width, aligned_height)
+        for image in scene_images
+    ], aligned_width, aligned_height
 
 
 def _build_scene_schedule(
@@ -250,6 +382,21 @@ def _build_prompt_from_scene_list(scene_list: Any) -> str:
     return "，".join(lines).strip()
 
 
+def _resolve_auto_route(scene_count: int, has_input_audio: bool) -> tuple[str, str, str]:
+    scene_count = max(0, int(scene_count or 0))
+    if has_input_audio and scene_count <= 0:
+        return "s2v", "音频生视频", "有音频、无图片，走 S2V / 音频驱动视频流程。"
+    if has_input_audio and scene_count >= 1:
+        return "digital_human", "数字人", "音频 + 图片，走数字人 / 口型驱动流程。"
+    if scene_count <= 0:
+        return "t2v", "文生视频", "无图片、无音频，走 T2V 文生视频流程。"
+    if scene_count == 1:
+        return "i2v", "图生视频", "一张图片，走 I2V 图生视频流程。"
+    if scene_count == 2:
+        return "first_last", "首尾帧", "两张图片，走首尾帧流程：场景1为首帧，场景2为尾帧。"
+    return "multi_ref", "多图参考", f"{scene_count} 张图片，走多图参考流程。"
+
+
 def _resolve_prompt_payload(
     positive_prompt: Any,
     negative_prompt: Any,
@@ -294,19 +441,99 @@ def _resolve_prompt_payload(
     }
 
 
+def _ltx_checkpoint_options() -> list[str]:
+    """Return diffusion model names containing "ltx" case-insensitively.
+
+    LTX 2.3 主模型是 diffusion_models，不是 checkpoints。
+    Kept lazy/defensive so importing this node remains lightweight.
+    """
+    try:
+        import folder_paths  # type: ignore
+        names = list(folder_paths.get_filename_list("diffusion_models"))
+    except Exception:
+        names = []
+    filtered = sorted(
+        [str(name) for name in names if "ltx" in str(name).lower()],
+        key=lambda item: item.lower(),
+    )
+    return filtered or ["ltx-2.3-22b"]
+
+
+def _default_ltx_checkpoint() -> str:
+    options = _ltx_checkpoint_options()
+    preferred_tokens = ("dasiwaltx23", "ltx23", "ltx-2.3", "ltx2.3", "ltx")
+    for token in preferred_tokens:
+        for name in options:
+            if token in str(name).lower().replace("_", "").replace("-", ""):
+                return name
+    return options[0]
+
+
+SECTION_PROPERTY_NAMES = (
+    "transition_enabled",
+    "transition_curve",
+    "transition_early_tail_ratio",
+    "transition_implicit_guide_count",
+    "transition_implicit_guide_strength",
+    "transition_early_tail_strength",
+    "transition_final_guide_strength",
+    "segmented_execution",
+    "segment_save_preset",
+    "segment_video_format",
+)
+
+
+def _find_node_properties_from_workflow(extra_pnginfo: Any = None, unique_id: Any = None) -> dict[str, Any]:
+    """读取前端 DOM 面板写入 node.properties 的高级参数。"""
+    if not isinstance(extra_pnginfo, dict) or unique_id is None:
+        return {}
+    workflow = extra_pnginfo.get("workflow")
+    if not isinstance(workflow, dict):
+        return {}
+    nodes = workflow.get("nodes")
+    if not isinstance(nodes, list):
+        return {}
+    uid = str(unique_id)
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        if str(node.get("id")) != uid:
+            continue
+        props = node.get("properties")
+        return dict(props) if isinstance(props, dict) else {}
+    return {}
+
+
+def _prop_value(props: dict[str, Any], name: str, fallback: Any) -> Any:
+    if name not in props:
+        return fallback
+    value = props.get(name)
+    if value is None:
+        return fallback
+    return value
+
+
 class GJJ_LTX23ImageToVideoMultiRef:
     CATEGORY = "GJJ"
     FUNCTION = "generate"
-    DESCRIPTION = "LTX-2.3 图文生视频多图参考器：0 图走文生视频，1 图走图生视频，多图可整体参考生成，也可按相邻两图分段执行并逐段保存预览；接入驱动音频后自动切到数字人流程，整段音频会直接决定总帧数，建议先用短音频测试；LoRA 统一通过 LoRA串联配置接入。"
+    DESCRIPTION = "LTX-2.3 全自动图文/音频视频节点：无输入=T2V；一张图片=I2V；有音频=S2V；音频+图片=数字人；两张图片=首尾帧；多张图片=多图参考。LoRA 统一通过 LoRA串联配置接入。"
     SEARCH_ALIASES = ["ltx 图生视频", "ltx 文生视频", "ltx 图文生视频", "ltx 多图参考", "ltx i2v multiref", "ltx t2v", "图生视频多图参考", "动态场景视频", "ltx 数字人", "talking head"]
     RETURN_TYPES = ("VIDEO",)
     RETURN_NAMES = ("视频生成结果",)
-    OUTPUT_TOOLTIPS = ("基于输入图片数量自动切换文生 / 图生 / 多图参考的视频结果。无宽高直连时使用面板显示宽高；接入新图片会同步面板宽高，之后可手动修改；接入音频时保留原音轨，不接音频时输出模型生成音轨。",)
+    OUTPUT_TOOLTIPS = ("自动识别：无输入=T2V；一张图片=I2V；有音频=S2V；音频+图片=数字人；两张图片=首尾帧；多张图片=多图参考。",)
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "ltx_model_name": (
+                    _ltx_checkpoint_options(),
+                    {
+                        "default": _default_ltx_checkpoint(),
+                        "display_name": "LTX主模型",
+                        "tooltip": "从 diffusion_models 中筛选文件名包含 ltx（不区分大小写）的模型。会作为本节点实际加载的 LTX 主模型。",
+                    },
+                ),
                 "positive_prompt": (
                     "STRING",
                     {
@@ -393,109 +620,15 @@ class GJJ_LTX23ImageToVideoMultiRef:
                         "tooltip": "采样降噪强度。1.00 表示完整采样；降低会从更低噪声段开始，变化更小但可能更弱。会同时作用于第一阶段和第二阶段采样。",
                     },
                 ),
-                "transition_enabled": (
-                    "BOOLEAN",
-                    {
-                        "default": False,
-                        "display_name": "转场控制",
-                        "tooltip": "至少有两张场景图时可启用。开启后会对相邻首尾帧增加提前尾帧和中间隐式 guide，以缓解前慢后快和尾帧突然跳变。",
-                    },
-                ),
-                "transition_curve": (
-                    TRANSITION_CURVES,
-                    {
-                        "default": TRANSITION_CURVES[0],
-                        "display_name": "过渡曲线",
-                        "tooltip": "控制中间隐式 guide 从首帧混合到尾帧的节奏。前置过渡会更早接近尾帧，后置过渡会更晚接近尾帧。",
-                    },
-                ),
-                "transition_early_tail_ratio": (
-                    "FLOAT",
-                    {
-                        "default": DEFAULT_TRANSITION_EARLY_TAIL_RATIO,
-                        "min": 0.10,
-                        "max": 0.95,
-                        "step": 0.01,
-                        "display_name": "尾帧提前注入",
-                        "tooltip": "尾帧参考提前注入到片段中的位置比例。0.75 表示在片段 75% 处先注入一次尾帧，再在终点注入尾帧。",
-                    },
-                ),
-                "transition_implicit_guide_count": (
-                    "INT",
-                    {
-                        "default": DEFAULT_TRANSITION_IMPLICIT_GUIDE_COUNT,
-                        "min": 0,
-                        "max": 4,
-                        "step": 1,
-                        "display_name": "中间隐式guide",
-                        "tooltip": "在首尾帧之间自动生成的混合参考帧数量。数量越多越稳，但也会增加参考约束和计算压力。",
-                    },
-                ),
-                "transition_implicit_guide_strength": (
-                    "FLOAT",
-                    {
-                        "default": DEFAULT_TRANSITION_IMPLICIT_GUIDE_STRENGTH,
-                        "min": 0.0,
-                        "max": 1.0,
-                        "step": 0.01,
-                        "display_name": "隐式guide强度",
-                        "tooltip": "中间隐式 guide 的约束强度。过高会更贴参考但可能降低运动自由度。",
-                    },
-                ),
-                "transition_early_tail_strength": (
-                    "FLOAT",
-                    {
-                        "default": DEFAULT_TRANSITION_EARLY_TAIL_STRENGTH,
-                        "min": 0.0,
-                        "max": 1.0,
-                        "step": 0.01,
-                        "display_name": "提前尾帧强度",
-                        "tooltip": "提前注入尾帧时的约束强度，用于让模型更早感知终点画面。",
-                    },
-                ),
-                "transition_final_guide_strength": (
-                    "FLOAT",
-                    {
-                        "default": DEFAULT_TRANSITION_FINAL_GUIDE_STRENGTH,
-                        "min": 0.0,
-                        "max": 1.0,
-                        "step": 0.01,
-                        "display_name": "终点guide强度",
-                        "tooltip": "片段末尾尾帧 guide 的约束强度。通常保持 1.00。",
-                    },
-                ),
-                "segmented_execution": (
-                    "BOOLEAN",
-                    {
-                        "default": False,
-                        "display_name": "多图分段执行",
-                        "tooltip": "开启后，2 张以上场景图会按 场景1→场景2、场景2→场景3 逐段生成；每段保存后立即推送到节点面板预览。接入驱动音频时会自动回到整体执行。",
-                    },
-                ),
-                "segment_save_preset": (
-                    SEGMENT_SAVE_PRESETS,
-                    {
-                        "default": SEGMENT_SAVE_PRESETS[0],
-                        "display_name": "分段保存位置预设",
-                        "tooltip": "分段视频保存到 ComfyUI output 下的子目录。支持 {date}、{time}、{node} 占位符，并会自动追加段号和场景号。",
-                    },
-                ),
-                "segment_video_format": (
-                    _segment_video_format_options(),
-                    {
-                        "default": DEFAULT_SEGMENT_VIDEO_FORMAT,
-                        "display_name": "分段视频格式",
-                        "tooltip": "每段预览视频的保存格式；默认使用 H.264 MP4，便于浏览器直接预览。",
-                    },
-                ),
             },
             "optional": FlexibleSceneInputType(
                 {
-                    "batch_scenes": (
-                        SCENE_BATCH_INPUT_TYPE,
+                    # 固定口必须排在动态场景口前面；否则前端追加“场景2”时，旧工作流里的 target_slot 容易错位。
+                    "input_audio": (
+                        "AUDIO",
                         {
-                            "display_name": "批量场景图",
-                            "tooltip": "可直接接入 GJJ · 批量多图片加载预览器 的批量图片队列，节点会按队列顺序作为场景1、场景2继续生成。",
+                            "display_name": "驱动音频",
+                            "tooltip": "可选。接入后自动切换为数字人流程，时长直接由音频决定，并把这段音频作为最终视频音轨；音频越长、面板宽高越大，占用显存越高，建议先用短音频测试。",
                         },
                     ),
                     "lora_chain_config": (
@@ -503,13 +636,6 @@ class GJJ_LTX23ImageToVideoMultiRef:
                         {
                             "display_name": "LoRA串联配置",
                             "tooltip": "可选。统一接入所有需要的 LoRA 串联配置；本节点不再提供单独 LoRA 下拉和强度面板。",
-                        },
-                    ),
-                    "input_audio": (
-                        "AUDIO",
-                        {
-                            "display_name": "驱动音频",
-                            "tooltip": "可选。接入后自动切换为数字人流程，时长直接由音频决定，并把这段音频作为最终视频音轨；音频越长、面板宽高越大，占用显存越高，建议先用短音频测试。",
                         },
                     ),
                     **{
@@ -520,11 +646,13 @@ class GJJ_LTX23ImageToVideoMultiRef:
             ),
             "hidden": {
                 "unique_id": "UNIQUE_ID",
+                "extra_pnginfo": "EXTRA_PNGINFO",
             },
         }
 
     def generate(
         self,
+        ltx_model_name,
         positive_prompt,
         negative_prompt,
         segment_seconds,
@@ -543,28 +671,52 @@ class GJJ_LTX23ImageToVideoMultiRef:
         segmented_execution=False,
         segment_save_preset=SEGMENT_SAVE_PRESETS[0],
         segment_video_format=DEFAULT_SEGMENT_VIDEO_FORMAT,
+        extra_pnginfo=None,
         unique_id=None,
         **kwargs,
     ):
-        batch_scene_images = _split_scene_batch(kwargs.get("batch_scenes", kwargs.get("scene_batch")))
-        socket_scene_images = _collect_scene_images(kwargs)
-        scene_images, skipped_placeholders = _filter_valid_scene_images(batch_scene_images + socket_scene_images)
+        # 兼容旧工作流的 batch_scenes/scene_batch；新版第一接口 scene_01 已支持 GJJ_BATCH_IMAGE,IMAGE。
+        legacy_batch_scene_images = _split_scene_batch(kwargs.get("batch_scenes", kwargs.get("scene_batch")))
+        socket_scene_values = _collect_scene_images(kwargs)
+        socket_scene_images = _flatten_scene_values(socket_scene_values)
+        scene_images, skipped_placeholders = _filter_valid_scene_images(legacy_batch_scene_images + socket_scene_images)
+        # 不改 GJJ_MultiImageLoader；在 LTX 节点内部把参考图统一到当前宽高，并对齐到 32 倍数，避免多图批次/尺寸不一致影响后续流程。
+        scene_images, width, height = _normalize_ltx_scene_images(scene_images, width, height)
         input_audio = kwargs.get("input_audio")
+
+        # v22：转场/分段高级参数不再由 Python widgets 生成，避免“隐藏控件仍占高度”。
+        # 前端 DOM 选项卡把数值写入 node.properties，这里通过 EXTRA_PNGINFO 读取。
+        section_props = _find_node_properties_from_workflow(extra_pnginfo, unique_id)
+        transition_enabled = _prop_value(section_props, "transition_enabled", transition_enabled)
+        transition_curve = _prop_value(section_props, "transition_curve", transition_curve)
+        transition_early_tail_ratio = _prop_value(section_props, "transition_early_tail_ratio", transition_early_tail_ratio)
+        transition_implicit_guide_count = _prop_value(section_props, "transition_implicit_guide_count", transition_implicit_guide_count)
+        transition_implicit_guide_strength = _prop_value(section_props, "transition_implicit_guide_strength", transition_implicit_guide_strength)
+        transition_early_tail_strength = _prop_value(section_props, "transition_early_tail_strength", transition_early_tail_strength)
+        transition_final_guide_strength = _prop_value(section_props, "transition_final_guide_strength", transition_final_guide_strength)
+        segmented_execution = _prop_value(section_props, "segmented_execution", segmented_execution)
+        segment_save_preset = str(_prop_value(section_props, "segment_save_preset", segment_save_preset) or segment_save_preset)
+        segment_video_format = str(_prop_value(section_props, "segment_video_format", segment_video_format) or segment_video_format)
+
+        has_input_audio = input_audio is not None
+        route_key, route_label, route_tip = _resolve_auto_route(len(scene_images), has_input_audio)
         resolved_payload = _resolve_prompt_payload(
             positive_prompt=positive_prompt,
             negative_prompt=negative_prompt,
             fps=fps,
             segment_seconds=segment_seconds,
             scene_count=len(scene_images),
-            has_input_audio=input_audio is not None,
+            has_input_audio=has_input_audio,
         )
         guide_images, guide_times, duration_seconds = _build_scene_schedule(
             scene_images,
             float(resolved_payload["segment_seconds"]),
             resolved_payload.get("total_duration_override"),
         )
-        mode = MODE_AUDIO_CONDITIONED if input_audio is not None else MODE_GENERATED_AUDIO
-        frame_trim_start = 0 if scene_images else (DEFAULT_FRAME_TRIM_START_AUDIO if input_audio is not None else DEFAULT_FRAME_TRIM_START_VIDEO)
+        # 运行时内部只需要区分“是否由真实音频驱动”。视觉分支再由图片数量自动决定：
+        # 0图=T2V，1图=I2V，2图=首尾帧，多图=多图参考。
+        mode = MODE_AUDIO_CONDITIONED if has_input_audio else MODE_GENERATED_AUDIO
+        frame_trim_start = 0 if scene_images else (DEFAULT_FRAME_TRIM_START_AUDIO if has_input_audio else DEFAULT_FRAME_TRIM_START_VIDEO)
         transition_options = {
             "enabled": _safe_bool(transition_enabled, False) and len(scene_images) >= 2,
             "curve": str(transition_curve or TRANSITION_CURVES[0]),
@@ -577,15 +729,15 @@ class GJJ_LTX23ImageToVideoMultiRef:
         if skipped_placeholders and unique_id:
             _send_status(unique_id, f"提示：已忽略 {skipped_placeholders} 张 64x64 空占位场景图，请优先连接批量场景图或已选图片输出。")
         if unique_id:
-            route_tip = "按首帧到尾帧参与 LTX guide" if scene_images else "没有有效场景图，将走文生视频"
             _send_status(
                 unique_id,
-                f"提示：批量场景图收到 {len(batch_scene_images)} 张，单图场景口收到 {len(socket_scene_images)} 张；有效 {len(scene_images)} 张，{route_tip}。",
+                f"自动模式：{route_label}（{route_key}）。第一接口/追加场景共 {len(socket_scene_images)} 张，兼容旧批量口 {len(legacy_batch_scene_images)} 张；有效 {len(scene_images)} 张。{route_tip}",
             )
             if _safe_bool(transition_enabled, False) and len(scene_images) < 2:
                 _send_status(unique_id, "提示：转场控制需要至少两张有效场景图，当前已自动跳过。")
-        return run_ltx23_multiref_video(
+        return _run_ltx23_multiref_video(
             mode=mode,
+            checkpoint_name=ltx_model_name,
             positive_prompt=resolved_payload["positive_prompt"],
             negative_prompt=resolved_payload["negative_prompt"],
             main_image=scene_images[0] if scene_images else None,

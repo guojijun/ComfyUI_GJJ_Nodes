@@ -9,6 +9,27 @@ const TARGET_NODES = new Set([
 	"GJJ_LTX23WorkflowFourPanel",
 	"GJJ_LTX23WorkflowAllReference",
 ]);
+function isLtx23TargetName(value) {
+	const text = String(value || "");
+	return TARGET_NODES.has(text)
+		|| /GJJ.*LTX23/i.test(text)
+		|| /LTX.*多图参考/i.test(text)
+		|| /LTX图文生视频多图参考器/i.test(text);
+}
+
+function isTargetNodeDef(nodeData) {
+	return isLtx23TargetName(nodeData?.name)
+		|| isLtx23TargetName(nodeData?.display_name)
+		|| isLtx23TargetName(nodeData?.title);
+}
+
+function isTargetNodeInstance(node) {
+	return isLtx23TargetName(node?.comfyClass)
+		|| isLtx23TargetName(node?.type)
+		|| isLtx23TargetName(node?.title)
+		|| isLtx23TargetName(node?.constructor?.type);
+}
+
 const SCENE_PREFIX = "scene_";
 const STATUS_WIDGET_NAME = "gjj_ltx23_multiref_status";
 const MIN_VISIBLE_SCENES = 1;
@@ -22,8 +43,34 @@ const LORA_CHAIN_INPUT_NAME = "lora_chain_config";
 const AUDIO_INPUT_NAME = "input_audio";
 const REFERENCE_VIDEO_INPUT_NAME = "reference_video";
 const MULTI_IMAGE_LOADER_CLASS = "GJJ_MultiImageLoader";
-const FIXED_INPUT_ORDER = [BATCH_SCENES_INPUT_NAME, LORA_CHAIN_INPUT_NAME, AUDIO_INPUT_NAME, REFERENCE_VIDEO_INPUT_NAME];
+const FIRST_SCENE_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
+const FIXED_INPUT_ORDER = [AUDIO_INPUT_NAME, LORA_CHAIN_INPUT_NAME, REFERENCE_VIDEO_INPUT_NAME];
+const LEGACY_SCENE_NAME_RE = /^(?:🖼️\s*)?\d+$/;
+const CHINESE_SCENE_NAME_RE = /^场景\s*\d+$/;
 const PROMPT_WIDGETS = new Set(["positive_prompt", "negative_prompt"]);
+// v15：ComfyUI 把 widget 转成输入口时，会生成同名输入口。
+// 这些口不能被动态场景口挤到后面，否则新拉出的“正向提示词”会被 link.target_slot 错修到“场景2”。
+const CONVERTIBLE_WIDGET_INPUT_ORDER = [
+	"ltx_model_name",
+	"positive_prompt",
+	"negative_prompt",
+	"segment_seconds",
+	"width",
+	"height",
+	"fps",
+	"seed",
+	"denoise_strength",
+	"transition_enabled",
+	"transition_curve",
+	"transition_early_tail_ratio",
+	"transition_implicit_guide_count",
+	"transition_implicit_guide_strength",
+	"transition_early_tail_strength",
+	"transition_final_guide_strength",
+	"segmented_execution",
+	"segment_save_preset",
+	"segment_video_format",
+];
 const LEGACY_WIDGET_NAMES = new Set([
   "duration_seconds",
   "guide_2_seconds",
@@ -50,6 +97,16 @@ const TRANSITION_CONTROL_WIDGETS = [
 	["transition_early_tail_strength", "提前尾帧强度"],
 	["transition_final_guide_strength", "终点guide强度"],
 ];
+const SEGMENT_TOGGLE_WIDGET = "segmented_execution";
+const SEGMENT_CONTROL_WIDGETS = [
+	["segment_save_preset", "分段保存位置预设"],
+	["segment_video_format", "分段视频格式"],
+];
+const SECTION_TABS_WIDGET_NAME = "gjj_ltx23_section_tabs";
+const SECTION_STATE_PROPERTY = "gjj_ltx23_active_section";
+const SECTION_NONE = "none";
+const SECTION_TRANSITION = "transition";
+const SECTION_SEGMENT = "segment";
 
 function refreshNode(node) {
 	GJJ_Utils.refreshNode(node);
@@ -481,7 +538,7 @@ async function trySyncPanelSizeFromImageSource(node, force = false) {
 function syncTargetsLinkedFromSource(sourceNode) {
 	setTimeout(() => {
 		for (const node of app.graph?._nodes || []) {
-			if (!TARGET_NODES.has(String(node?.comfyClass || node?.type || ""))) {
+			if (!isTargetNodeInstance(node)) {
 				continue;
 			}
 			const info = primaryImageSourceInfo(node);
@@ -620,8 +677,21 @@ function formatSceneName(index) {
 	return `${SCENE_PREFIX}${String(index).padStart(2, "0")}`;
 }
 
-function getSceneIndex(name) {
-	const text = String(name || "");
+function sceneInputType(index) {
+	return Number(index) <= 1 ? FIRST_SCENE_INPUT_TYPE : "IMAGE";
+}
+
+function sceneTooltip(index) {
+	return Number(index) <= 1
+		? "第一张场景图输入：支持单张 IMAGE，也支持自定义批量图片 GJJ_BATCH_IMAGE；接入后会统一拆成图片列表，并自动显示下一张场景输入。留空时走文生视频。"
+		: "追加场景参考图：用于首尾帧或多图参考；连上当前最后一张后，会自动扩展下一张输入。";
+}
+
+function sceneIndexFromText(value) {
+	const text = String(value || "").trim();
+	if (!text) {
+		return Number.MAX_SAFE_INTEGER;
+	}
 	if (text.startsWith(SCENE_PREFIX)) {
 		return Number.parseInt(text.slice(SCENE_PREFIX.length), 10) || Number.MAX_SAFE_INTEGER;
 	}
@@ -629,22 +699,93 @@ function getSceneIndex(name) {
 		return 1;
 	}
 	if (text.startsWith("guide_image_")) {
-		return Number.parseInt(text.slice("guide_image_".length), 10) || Number.MAX_SAFE_INTEGER;
+		return (Number.parseInt(text.slice("guide_image_".length), 10) || Number.MAX_SAFE_INTEGER) + 1;
+	}
+	const legacy = text.match(/(\d+)$/);
+	if (legacy && (LEGACY_SCENE_NAME_RE.test(text) || CHINESE_SCENE_NAME_RE.test(text))) {
+		return Number.parseInt(legacy[1], 10) || Number.MAX_SAFE_INTEGER;
 	}
 	return Number.MAX_SAFE_INTEGER;
 }
 
+function getSceneIndex(inputOrName) {
+	if (typeof inputOrName === "object" && inputOrName) {
+		return Math.min(
+			sceneIndexFromText(inputOrName.name),
+			sceneIndexFromText(inputOrName.label),
+			sceneIndexFromText(inputOrName.localized_name),
+		);
+	}
+	return sceneIndexFromText(inputOrName);
+}
+
+function isSceneLikeText(value) {
+	const text = String(value || "").trim();
+	return text.startsWith(SCENE_PREFIX)
+		|| text === "main_image"
+		|| text.startsWith("guide_image_")
+		|| LEGACY_SCENE_NAME_RE.test(text)
+		|| CHINESE_SCENE_NAME_RE.test(text);
+}
+
+function isLegacyNumberedSceneInput(input) {
+	const name = String(input?.name || "").trim();
+	const label = String(input?.label || input?.localized_name || "").trim();
+	const type = String(input?.type || "").toUpperCase();
+	return (type.includes("IMAGE") || type.includes("GJJ_BATCH_IMAGE")) && (isSceneLikeText(name) || isSceneLikeText(label));
+}
+
 function isManagedSceneInput(input) {
 	const name = String(input?.name || "");
-	return name.startsWith(SCENE_PREFIX) || name === "main_image" || name.startsWith("guide_image_");
+	return name.startsWith(SCENE_PREFIX) || name === "main_image" || name.startsWith("guide_image_") || isLegacyNumberedSceneInput(input);
 }
 
 function getSceneInputs(node) {
 	return Array.isArray(node?.inputs)
 		? [...node.inputs]
 			.filter((input) => isManagedSceneInput(input))
-			.sort((a, b) => getSceneIndex(a?.name) - getSceneIndex(b?.name))
+			.sort((a, b) => getSceneIndex(a) - getSceneIndex(b))
 		: [];
+}
+
+function dedupeSceneInputs(node) {
+	if (!Array.isArray(node?.inputs)) {
+		return;
+	}
+	const originalOrder = new Map(node.inputs.map((input, index) => [input, index]));
+	const groups = new Map();
+	for (const input of node.inputs) {
+		if (!isManagedSceneInput(input)) {
+			continue;
+		}
+		const index = getSceneIndex(input);
+		if (!Number.isFinite(index) || index === Number.MAX_SAFE_INTEGER) {
+			continue;
+		}
+		if (!groups.has(index)) {
+			groups.set(index, []);
+		}
+		groups.get(index).push(input);
+	}
+	for (const [index, inputs] of groups) {
+		if (inputs.length <= 1) {
+			continue;
+		}
+		inputs.sort((a, b) => {
+			const linkDiff = (b?.link ? 1 : 0) - (a?.link ? 1 : 0);
+			return linkDiff || ((originalOrder.get(a) ?? 0) - (originalOrder.get(b) ?? 0));
+		});
+		const keep = inputs[0];
+		for (const input of inputs.slice(1)) {
+			if (input?.link && !keep.link) {
+				keep.link = input.link;
+			}
+			const slotIndex = node.inputs.indexOf(input);
+			if (slotIndex >= 0) {
+				node.removeInput(slotIndex);
+			}
+		}
+	}
 }
 
 function setInputText(input, name, label, tooltip) {
@@ -657,47 +798,203 @@ function setInputText(input, name, label, tooltip) {
 	input.tooltip = tooltip;
 }
 
+function forceInputType(input, type) {
+	if (!input || !type) {
+		return;
+	}
+	input.type = type;
+	input.widget = null;
+	input.options = input.options || {};
+	input.options.type = type;
+}
+
+function graphLinkById(linkId) {
+	if (linkId == null || !app?.graph?.links) {
+		return null;
+	}
+	const links = app.graph.links;
+	if (links instanceof Map) {
+		return links.get(linkId) || links.get(String(linkId)) || null;
+	}
+	return links[linkId] || links[String(linkId)] || null;
+}
+
+function repairInputLinkSlots(node) {
+	if (!Array.isArray(node?.inputs)) {
+		return;
+	}
+	for (let index = 0; index < node.inputs.length; index += 1) {
+		const input = node.inputs[index];
+		input.slot_index = index;
+		const link = graphLinkById(input?.link);
+		if (!link) {
+			continue;
+		}
+		link.target_id = node.id;
+		link.target_slot = index;
+		if (input.type) {
+			link.type = input.type;
+		}
+	}
+}
+
 function normalizeFixedInputs(node) {
 	for (const widget of node?.widgets || []) {
+		// 如果用户已经把正/反向提示词 widget 转成输入口，不要在稳定化时强制还原 widget。
+		// 否则 ComfyUI 会同时存在“converted widget input”和被恢复的 widget，拖线时容易落到场景口。
+		if (PROMPT_WIDGETS.has(String(widget?.name || "")) && getInput(node, widget.name)) {
+			continue;
+		}
 		restorePromptWidget(widget);
 	}
-	const legacyBatch = getInput(node, "scene_batch");
-	if (legacyBatch && !getInput(node, BATCH_SCENES_INPUT_NAME)) {
-		legacyBatch.name = BATCH_SCENES_INPUT_NAME;
+	// v9：取消单独“批量场景图”接口。旧工作流里的 batch_scenes/scene_batch 会迁移到 scene_01。
+	for (const legacyName of ["scene_batch", BATCH_SCENES_INPUT_NAME]) {
+		const legacyBatch = getInput(node, legacyName);
+		if (!legacyBatch) {
+			continue;
+		}
+		const sceneInputs = getSceneInputs(node).filter((input) => input !== legacyBatch);
+		const firstScene = sceneInputs[0];
+		if (legacyBatch.link && (!firstScene || !firstScene.link)) {
+			if (firstScene && !firstScene.link) {
+				const slotIndex = node.inputs.indexOf(firstScene);
+				if (slotIndex >= 0) {
+					node.removeInput(slotIndex);
+				}
+			}
+			setInputText(legacyBatch, formatSceneName(1), "场景1", sceneTooltip(1));
+			legacyBatch.type = FIRST_SCENE_INPUT_TYPE;
+		} else if (!legacyBatch.link) {
+			const slotIndex = node.inputs.indexOf(legacyBatch);
+			if (slotIndex >= 0) {
+				node.removeInput(slotIndex);
+			}
+		}
 	}
+	// 如果旧节点被前端重排/去重误删固定口，这里重新补回正确类型。
+	if (!getInput(node, AUDIO_INPUT_NAME)) {
+		node.addInput(AUDIO_INPUT_NAME, "AUDIO");
+	}
+	if (!getInput(node, LORA_CHAIN_INPUT_NAME)) {
+		node.addInput(LORA_CHAIN_INPUT_NAME, "LORA_CHAIN_CONFIG");
+	}
+
+	const audioInput = getInput(node, AUDIO_INPUT_NAME);
 	setInputText(
-		getInput(node, BATCH_SCENES_INPUT_NAME),
-		BATCH_SCENES_INPUT_NAME,
-		"批量场景图",
-		"可直接接入 GJJ · 批量多图片加载预览器 的批量图片队列，节点会按队列顺序作为场景1、场景2继续生成。",
-	);
-	setInputText(
-		getInput(node, LORA_CHAIN_INPUT_NAME),
-		LORA_CHAIN_INPUT_NAME,
-		"LoRA串联配置",
-		"可选。统一接入所有需要的 LoRA 串联配置；本节点不再提供单独 LoRA 下拉和强度面板。",
-	);
-	setInputText(
-		getInput(node, AUDIO_INPUT_NAME),
+		audioInput,
 		AUDIO_INPUT_NAME,
 		"驱动音频",
 		"可选。接入后自动切换为数字人流程，时长直接由音频决定，并把这段音频作为最终视频音轨；音频越长、面板宽高越大，占用显存越高，建议先用短音频测试。",
 	);
+	forceInputType(audioInput, "AUDIO");
+
+	const loraInput = getInput(node, LORA_CHAIN_INPUT_NAME);
 	setInputText(
-		getInput(node, REFERENCE_VIDEO_INPUT_NAME),
+		loraInput,
+		LORA_CHAIN_INPUT_NAME,
+		"LoRA串联配置",
+		"可选。统一接入所有需要的 LoRA 串联配置；本节点不再提供单独 LoRA 下拉和强度面板。",
+	);
+	forceInputType(loraInput, "LORA_CHAIN_CONFIG");
+
+	const referenceVideoInput = getInput(node, REFERENCE_VIDEO_INPUT_NAME);
+	setInputText(
+		referenceVideoInput,
 		REFERENCE_VIDEO_INPUT_NAME,
 		"参考视频",
 		"可选。LTX全能参考预设会内部拆出关键帧作为 guide；不需要先手动转成图片帧。",
 	);
+	// 旧版本偶尔会把固定口错继承为 IMAGE；这里只在参考视频口存在时纠正。
+	forceInputType(referenceVideoInput, "VIDEO");
+
+	for (const input of node.inputs || []) {
+		if (isConvertibleWidgetInput(input)) {
+			forceInputType(input, widgetInputType(input.name));
+		}
+	}
 }
 
 function getFixedInputRank(name) {
 	const text = String(name || "");
-	if (text === "scene_batch") {
-		return 0;
-	}
 	const index = FIXED_INPUT_ORDER.indexOf(text);
 	return index >= 0 ? index : -1;
+}
+
+function getConvertibleWidgetInputRank(name) {
+	const text = String(name || "");
+	const index = CONVERTIBLE_WIDGET_INPUT_ORDER.indexOf(text);
+	return index >= 0 ? index : -1;
+}
+
+function isConvertibleWidgetInput(input) {
+	return getConvertibleWidgetInputRank(input?.name) >= 0;
+}
+
+
+function pruneUnlinkedConvertibleWidgetInputs(node, options = {}) {
+	if (!Array.isArray(node?.inputs)) {
+		return;
+	}
+	// v23：只在节点刚创建/刚反序列化后的“初始化清理”阶段删除幽灵 widget socket。
+	// 用户之后从 widget 前面手动拉出的输入口即使暂时未连线，也不能马上删除，
+	// 否则会表现为“参数前面的接口不能外联”。
+	const force = options.force === true;
+	if (!force && node.__gjjLtx23InitialWidgetSocketPruneDone) {
+		return;
+	}
+	for (let index = node.inputs.length - 1; index >= 0; index -= 1) {
+		const input = node.inputs[index];
+		if (!isConvertibleWidgetInput(input)) {
+			continue;
+		}
+		if (input?.link) {
+			continue;
+		}
+		// 保留用户刚从 widget 拉出来、还未来得及接线的 socket。
+		// 只有旧工作流里自动遗留、没有对应 widget 或明确被标记为 ghost 的 socket 才清理。
+		const widget = getWidget(node, input.name);
+		const isGhost = input.__gjjLtx23Ghost === true || !widget;
+		if (!isGhost && !force) {
+			continue;
+		}
+		node.removeInput(index);
+	}
+	node.__gjjLtx23InitialWidgetSocketPruneDone = true;
+}
+
+function widgetInputType(name) {
+	const text = String(name || "");
+	if (text === "ltx_model_name" || text === "positive_prompt" || text === "negative_prompt") {
+		return "STRING";
+	}
+	if (["segment_seconds", "denoise_strength", "transition_early_tail_ratio", "transition_implicit_guide_strength", "transition_early_tail_strength", "transition_final_guide_strength"].includes(text)) {
+		return "FLOAT";
+	}
+	if (["width", "height", "fps", "seed", "transition_implicit_guide_count"].includes(text)) {
+		return "INT";
+	}
+	if (text === "transition_enabled" || text === "segmented_execution") {
+		return "BOOLEAN";
+	}
+	return "STRING";
+}
+
+function inputDisplayRank(input, originalOrder) {
+	const fixedRank = getFixedInputRank(input?.name);
+	if (fixedRank >= 0) {
+		// 固定接口永远在动态场景接口之前，防止“场景2”追加后把 Audio / LoRA 的 slot 挤错位。
+		return fixedRank;
+	}
+	const widgetRank = getConvertibleWidgetInputRank(input?.name);
+	if (widgetRank >= 0) {
+		// 用户从 widget 拉出来的输入口必须排在动态场景口之前。
+		// 否则新建“场景2”后，ComfyUI 可能把正向提示词的连线修到场景2。
+		return 20 + widgetRank;
+	}
+	if (isManagedSceneInput(input)) {
+		return 200 + getSceneIndex(input);
+	}
+	return 10000 + (originalOrder.get(input) ?? 0);
 }
 
 function reorderInputs(node) {
@@ -705,27 +1002,42 @@ function reorderInputs(node) {
 		return;
 	}
 	const originalOrder = new Map(node.inputs.map((input, index) => [input, index]));
-	const rankInput = (input) => {
-		const fixedRank = getFixedInputRank(input?.name);
-		if (fixedRank >= 0) {
-			return fixedRank;
-		}
-		if (isManagedSceneInput(input)) {
-			return 10 + getSceneIndex(input?.name);
-		}
-		return 10000 + (originalOrder.get(input) ?? 0);
-	};
 	node.inputs.sort((left, right) => {
-		const diff = rankInput(left) - rankInput(right);
+		const diff = inputDisplayRank(left, originalOrder) - inputDisplayRank(right, originalOrder);
 		return diff || ((originalOrder.get(left) ?? 0) - (originalOrder.get(right) ?? 0));
 	});
-	for (let index = 0; index < node.inputs.length; index += 1) {
-		const input = node.inputs[index];
-		const linkId = input?.link;
-		if (linkId != null && app.graph?.links?.[linkId]) {
-			app.graph.links[linkId].target_slot = index;
+	repairInputLinkSlots(node);
+}
+
+function hardNormalizeInputOrderAndTypes(node) {
+	if (!Array.isArray(node?.inputs)) {
+		return;
+	}
+	// 先固定所有受管接口的类型，避免 LiteGraph 在动态追加后继承成 COMBO。
+	const audioInput = getInput(node, AUDIO_INPUT_NAME);
+	forceInputType(audioInput, "AUDIO");
+	const loraInput = getInput(node, LORA_CHAIN_INPUT_NAME);
+	forceInputType(loraInput, "LORA_CHAIN_CONFIG");
+	const referenceVideoInput = getInput(node, REFERENCE_VIDEO_INPUT_NAME);
+	forceInputType(referenceVideoInput, "VIDEO");
+	for (const input of node.inputs) {
+		if (isConvertibleWidgetInput(input)) {
+			forceInputType(input, widgetInputType(input.name));
 		}
 	}
+	getSceneInputs(node).forEach((input, zeroIndex) => {
+		forceInputType(input, sceneInputType(zeroIndex + 1));
+	});
+
+	// 再重排：固定口在前，场景口在后。这样场景2出现时不会挤乱 Audio/LoRA 的 target_slot。
+	const originalOrder = new Map(node.inputs.map((input, index) => [input, index]));
+	const sorted = [...node.inputs].sort((left, right) => {
+		const diff = inputDisplayRank(left, originalOrder) - inputDisplayRank(right, originalOrder);
+		return diff || ((originalOrder.get(left) ?? 0) - (originalOrder.get(right) ?? 0));
+	});
+	node.inputs.length = 0;
+	node.inputs.push(...sorted);
+	repairInputLinkSlots(node);
 }
 
 function sceneHasLink(input) {
@@ -739,7 +1051,9 @@ function getSceneLinkSignature(node) {
 }
 
 function estimateBatchSceneCount(node) {
-	const info = linkedSourceInfo(getInput(node, BATCH_SCENES_INPUT_NAME));
+	const firstScene = getSceneInputs(node)[0];
+	const batchInput = getInput(node, BATCH_SCENES_INPUT_NAME) || getInput(node, "scene_batch");
+	const info = linkedSourceInfo(firstScene) || linkedSourceInfo(batchInput);
 	if (!info) {
 		return 0;
 	}
@@ -756,8 +1070,168 @@ function estimateBatchSceneCount(node) {
 
 function estimateReferenceSceneCount(node) {
 	const batchCount = estimateBatchSceneCount(node);
-	const socketCount = getSceneInputs(node).filter((input) => sceneHasLink(input)).length;
+	const sceneInputs = getSceneInputs(node);
+	const firstScene = sceneInputs[0];
+	const socketCount = sceneInputs.filter((input) => {
+		if (batchCount > 0 && input === firstScene) {
+			return false;
+		}
+		return sceneHasLink(input);
+	}).length;
 	return batchCount + socketCount;
+}
+
+
+function getActiveSection(node) {
+	const raw = String(node?.properties?.[SECTION_STATE_PROPERTY] || SECTION_NONE);
+	return [SECTION_TRANSITION, SECTION_SEGMENT].includes(raw) ? raw : SECTION_NONE;
+}
+
+function setActiveSection(node, section) {
+	const props = ensureNodeProperties(node);
+	props[SECTION_STATE_PROPERTY] = [SECTION_TRANSITION, SECTION_SEGMENT].includes(section) ? section : SECTION_NONE;
+}
+
+function widgetLabelText(widget, fallback = "") {
+	return fallback || String(widget?.localized_name || widget?.label || widget?.options?.display_name || widget?.name || "");
+}
+
+function showSectionWidget(widget, visible, label = "") {
+	if (!widget) {
+		return;
+	}
+	if (visible) {
+		restoreWidget(widget, widgetLabelText(widget, label));
+		setWidgetEnabled(widget, true);
+	} else {
+		hideWidget(widget);
+	}
+}
+
+function styleSectionButton(button, enabled, active) {
+	if (!button?.style) {
+		return;
+	}
+	button.style.cssText = [
+		"flex:1 1 0",
+		"height:28px",
+		"border-radius:9px",
+		"border:1px solid " + (active ? "#5eead4" : enabled ? "#3f6c78" : "#34444c"),
+		"background:" + (active ? "linear-gradient(180deg,#1f5560,#16343c)" : enabled ? "#182a31" : "#121a1f"),
+		"color:" + (active ? "#eafffb" : enabled ? "#d7f3ee" : "#9fb0b8"),
+		"font-size:12px",
+		"font-weight:700",
+		"cursor:pointer",
+		"user-select:none",
+		"white-space:nowrap",
+		"overflow:hidden",
+		"text-overflow:ellipsis",
+		"box-shadow:" + (active ? "0 0 0 1px rgba(94,234,212,.18) inset" : "none"),
+	].join(";");
+}
+
+function installButtonEvents(button, handler) {
+	for (const eventName of ["pointerdown", "pointerup", "mousedown", "mouseup", "click"]) {
+		button.addEventListener(eventName, (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			if (eventName === "click") {
+				handler(event);
+			}
+		});
+	}
+}
+
+function ensureSectionTabsWidget(node) {
+	// v23：旧工作流/热更新后，缓存对象可能还在，但 widget 已经被 ComfyUI 移出 node.widgets，
+	// 这会导致“按钮全部没有了”。缓存无效时必须重建。
+	if (node.__gjjLtx23SectionTabs?.widget && node.widgets?.includes?.(node.__gjjLtx23SectionTabs.widget)) {
+		return node.__gjjLtx23SectionTabs;
+	}
+	if (node.__gjjLtx23SectionTabs) {
+		try {
+			node.__gjjLtx23SectionTabs.root?.remove?.();
+			node.__gjjLtx23SectionTabs.wrap?.remove?.();
+		} catch (_) {}
+		node.__gjjLtx23SectionTabs = null;
+	}
+	const wrap = document.createElement("div");
+	wrap.style.cssText = [
+		"display:flex",
+		"gap:6px",
+		"align-items:center",
+		"padding:2px 0 4px 0",
+		"box-sizing:border-box",
+	].join(";");
+	const transitionButton = document.createElement("button");
+	const segmentButton = document.createElement("button");
+	transitionButton.type = "button";
+	segmentButton.type = "button";
+	wrap.append(transitionButton, segmentButton);
+
+	installButtonEvents(transitionButton, () => {
+		const toggle = getWidget(node, TRANSITION_TOGGLE_WIDGET);
+		const isOpen = getActiveSection(node) === SECTION_TRANSITION;
+		const isEnabled = widgetBooleanValue(toggle);
+		if (isOpen && isEnabled) {
+			setWidgetValue(toggle, false);
+			setActiveSection(node, SECTION_NONE);
+		} else {
+			setWidgetValue(toggle, true);
+			setActiveSection(node, SECTION_TRANSITION);
+		}
+		scheduleStabilize(node, 0);
+	});
+	installButtonEvents(segmentButton, () => {
+		const toggle = getWidget(node, SEGMENT_TOGGLE_WIDGET);
+		const isOpen = getActiveSection(node) === SECTION_SEGMENT;
+		const isEnabled = widgetBooleanValue(toggle);
+		if (isOpen && isEnabled) {
+			setWidgetValue(toggle, false);
+			setActiveSection(node, SECTION_NONE);
+		} else {
+			setWidgetValue(toggle, true);
+			setActiveSection(node, SECTION_SEGMENT);
+		}
+		scheduleStabilize(node, 0);
+	});
+
+	const widget = node.addDOMWidget?.(SECTION_TABS_WIDGET_NAME, SECTION_TABS_WIDGET_NAME, wrap, {
+		hideOnZoom: false,
+		getHeight: () => 36,
+	});
+	if (widget) {
+		widget.computeSize = (width) => [width || 320, 36];
+		const currentIndex = node.widgets?.indexOf(widget) ?? -1;
+		const transitionIndex = getWidgetIndex(node, TRANSITION_TOGGLE_WIDGET);
+		const segmentIndex = getWidgetIndex(node, SEGMENT_TOGGLE_WIDGET);
+		const targetIndex = Math.min(
+			...([transitionIndex, segmentIndex].filter((index) => index >= 0))
+		);
+		if (currentIndex >= 0 && Number.isFinite(targetIndex) && targetIndex >= 0 && currentIndex !== targetIndex) {
+			node.widgets.splice(currentIndex, 1);
+			node.widgets.splice(Math.max(0, Math.min(targetIndex, node.widgets.length)), 0, widget);
+		}
+	}
+	node.__gjjLtx23SectionTabs = { widget, wrap, transitionButton, segmentButton };
+	return node.__gjjLtx23SectionTabs;
+}
+
+function updateSectionTabs(node) {
+	const state = ensureSectionTabsWidget(node);
+	const active = getActiveSection(node);
+	const transitionEnabled = widgetBooleanValue(getWidget(node, TRANSITION_TOGGLE_WIDGET));
+	const segmentEnabled = widgetBooleanValue(getWidget(node, SEGMENT_TOGGLE_WIDGET));
+	if (state.transitionButton) {
+		state.transitionButton.textContent = `${transitionEnabled ? "✅" : "⬜"} 转场控制`;
+		state.transitionButton.title = transitionEnabled ? "点击关闭转场控制并隐藏参数" : "点击开启转场控制并显示参数";
+		styleSectionButton(state.transitionButton, transitionEnabled, active === SECTION_TRANSITION);
+	}
+	if (state.segmentButton) {
+		state.segmentButton.textContent = `${segmentEnabled ? "✅" : "⬜"} 多图分段执行`;
+		state.segmentButton.title = segmentEnabled ? "点击关闭多图分段执行并隐藏参数" : "点击开启多图分段执行并显示参数";
+		styleSectionButton(state.segmentButton, segmentEnabled, active === SECTION_SEGMENT);
+	}
 }
 
 function patchTransitionToggleCallback(node) {
@@ -778,33 +1252,70 @@ function patchTransitionToggleCallback(node) {
 
 function updateTransitionWidgets(node) {
 	patchTransitionToggleCallback(node);
-	const referenceCount = estimateReferenceSceneCount(node);
-	const hasEnoughReferences = referenceCount >= 2;
-	const toggle = getWidget(node, TRANSITION_TOGGLE_WIDGET);
-	setWidgetEnabled(toggle, hasEnoughReferences, "至少需要两张有效场景图才可启用转场控制。");
-	if (toggle) {
-		toggle.label = "转场控制";
-		toggle.localized_name = "转场控制";
-		if (toggle.options) {
-			toggle.options.display_name = "转场控制";
-		}
+	const transitionToggle = getWidget(node, TRANSITION_TOGGLE_WIDGET);
+	const segmentToggle = getWidget(node, SEGMENT_TOGGLE_WIDGET);
+	if (transitionToggle) {
+		transitionToggle.label = "转场控制";
+		transitionToggle.localized_name = "转场控制";
+		transitionToggle.options = transitionToggle.options || {};
+		transitionToggle.options.display_name = "转场控制";
+		transitionToggle.options.disabled = false;
+		setWidgetEnabled(transitionToggle, true);
+		hideWidget(transitionToggle);
 	}
-	const controlsEnabled = hasEnoughReferences && widgetBooleanValue(toggle);
-	const disabledText = hasEnoughReferences
-		? "开启“转场控制”后此项参与运算。"
-		: "至少需要两张有效场景图才参与运算。";
+	if (segmentToggle) {
+		segmentToggle.label = "多图分段执行";
+		segmentToggle.localized_name = "多图分段执行";
+		segmentToggle.options = segmentToggle.options || {};
+		segmentToggle.options.display_name = "多图分段执行";
+		segmentToggle.options.disabled = false;
+		setWidgetEnabled(segmentToggle, true);
+		hideWidget(segmentToggle);
+	}
+
+	let active = getActiveSection(node);
+	const transitionEnabled = widgetBooleanValue(transitionToggle);
+	const segmentEnabled = widgetBooleanValue(segmentToggle);
+	if (active === SECTION_TRANSITION && !transitionEnabled) {
+		active = SECTION_NONE;
+		setActiveSection(node, SECTION_NONE);
+	}
+	if (active === SECTION_SEGMENT && !segmentEnabled) {
+		active = SECTION_NONE;
+		setActiveSection(node, SECTION_NONE);
+	}
+	const showTransition = active === SECTION_TRANSITION && transitionEnabled;
+	const showSegment = active === SECTION_SEGMENT && segmentEnabled;
+
 	for (const [name, label] of TRANSITION_CONTROL_WIDGETS) {
 		const widget = getWidget(node, name);
 		if (!widget) {
 			continue;
 		}
-		widget.label = label;
-		widget.localized_name = label;
+		widget.__gjjLtx23MultiRefDisabledText = "";
 		if (widget.options) {
 			widget.options.display_name = label;
+			widget.options.disabled = false;
 		}
-		setWidgetEnabled(widget, controlsEnabled, disabledText);
+		widget.label = label;
+		widget.localized_name = label;
+		showSectionWidget(widget, showTransition, label);
 	}
+	for (const [name, label] of SEGMENT_CONTROL_WIDGETS) {
+		const widget = getWidget(node, name);
+		if (!widget) {
+			continue;
+		}
+		widget.__gjjLtx23MultiRefDisabledText = "";
+		if (widget.options) {
+			widget.options.display_name = label;
+			widget.options.disabled = false;
+		}
+		widget.label = label;
+		widget.localized_name = label;
+		showSectionWidget(widget, showSegment, label);
+	}
+	updateSectionTabs(node);
 }
 
 function patchSizeWidgetPersistence(node) {
@@ -880,12 +1391,21 @@ function getStabilizeSignature(node) {
 		imageSourceSignature(node),
 		`refs:${estimateReferenceSceneCount(node)}`,
 		`transition:${widgetBooleanValue(getWidget(node, TRANSITION_TOGGLE_WIDGET)) ? 1 : 0}`,
+		`segment:${widgetBooleanValue(getWidget(node, SEGMENT_TOGGLE_WIDGET)) ? 1 : 0}`,
+		`section:${getActiveSection(node)}`,
 	].join("||");
 }
 
 function addSceneInput(node) {
 	const nextIndex = getSceneInputs(node).length + 1;
-	node.addInput(formatSceneName(nextIndex), "IMAGE");
+	node.addInput(formatSceneName(nextIndex), sceneInputType(nextIndex));
+	const input = getInput(node, formatSceneName(nextIndex));
+	if (input) {
+		const label = `场景${nextIndex}`;
+		setInputText(input, formatSceneName(nextIndex), label, sceneTooltip(nextIndex));
+		forceInputType(input, sceneInputType(nextIndex));
+	}
+	hardNormalizeInputOrderAndTypes(node);
 }
 
 function trimTrailingUnusedScenes(node) {
@@ -926,11 +1446,10 @@ function renameScenesSequentially(node) {
 		input.name = formatSceneName(index);
 		input.label = label;
 		input.localized_name = label;
-		input.type = "IMAGE";
-		input.tooltip = index === 1
-			? "可选起始场景图。新连接图片时会同步面板宽高；留空时走文生视频；连上当前最后一张场景图后，会自动扩展下一张输入。"
-			: "场景参考图。中间图会作为过渡帧，当前最后一张会作为结束帧。连上当前最后一张场景图后，会自动扩展下一张输入。";
+		forceInputType(input, sceneInputType(index));
+		input.tooltip = sceneTooltip(index);
 	});
+	repairInputLinkSlots(node);
 }
 
 function parseProgress(detail = {}, fallback = 0) {
@@ -1067,8 +1586,16 @@ function addSegmentPreview(node, detail) {
 }
 
 function ensureStatusWidget(node) {
-	if (node.__gjjLtx23MultiRefStatus) {
+	// v23：缓存状态存在但 DOM widget 已不在 node.widgets 时，重新创建状态条。
+	// 解决“状态条消失”的问题。
+	if (node.__gjjLtx23MultiRefStatus?.widget && node.widgets?.includes?.(node.__gjjLtx23MultiRefStatus.widget)) {
 		return node.__gjjLtx23MultiRefStatus;
+	}
+	if (node.__gjjLtx23MultiRefStatus) {
+		try {
+			node.__gjjLtx23MultiRefStatus.wrap?.remove?.();
+		} catch (_) {}
+		node.__gjjLtx23MultiRefStatus = null;
 	}
 	const wrap = document.createElement("div");
 	wrap.style.cssText = [
@@ -1132,10 +1659,14 @@ function ensureStatusWidget(node) {
 	].join(";");
 
 	wrap.append(text, notice, progressOuter, segmentList);
-	const widget = node.addDOMWidget?.(STATUS_WIDGET_NAME, STATUS_WIDGET_NAME, wrap, {
+	let widget = node.addDOMWidget?.(STATUS_WIDGET_NAME, STATUS_WIDGET_NAME, wrap, {
 		hideOnZoom: false,
 		getHeight: () => node.__gjjLtx23MultiRefStatus?.height || 92,
 	});
+	if (!widget && typeof node.addWidget === "function") {
+		widget = node.addWidget("text", STATUS_WIDGET_NAME, "等待执行", () => {}, { multiline: false });
+		widget.computeSize = (width) => [width || 320, 28];
+	}
 	node.__gjjLtx23MultiRefStatus = {
 		widget,
 		wrap,
@@ -1193,11 +1724,18 @@ function stabilizeNode(node) {
 	patchSizeWidgetPersistence(node);
 	ensureStatusWidget(node);
 	hideLegacyWidgets(node);
-	trimTrailingUnusedScenes(node);
-	ensureTrailingEmptyScene(node);
-	renameScenesSequentially(node);
+	// 先清理未连线的 widget 转输入口，再补齐/纠正固定口；最后再完整重排并修复 link.target_slot。
+	pruneUnlinkedConvertibleWidgetInputs(node, { force: !node.__gjjLtx23InitialWidgetSocketPruneDone });
 	normalizeFixedInputs(node);
 	reorderInputs(node);
+	dedupeSceneInputs(node);
+	trimTrailingUnusedScenes(node);
+	ensureTrailingEmptyScene(node);
+	dedupeSceneInputs(node);
+	renameScenesSequentially(node);
+	pruneUnlinkedConvertibleWidgetInputs(node);
+	normalizeFixedInputs(node);
+	hardNormalizeInputOrderAndTypes(node);
 	updateSizeInputLabels(node);
 	updateTransitionWidgets(node);
 	trySyncPanelSizeFromImageSource(node);
@@ -1210,13 +1748,22 @@ function scheduleStabilize(node, ms = 32) {
 	node.__gjjLtx23MultiRefTimer = setTimeout(() => stabilizeNode(node), ms);
 }
 
+const GJJ_LTX23_PATCH_VERSION = "v24_force_ui_scene_expand";
+
 function patchNode(node) {
-	if (!node || node.__gjjLtx23MultiRefPatched) {
+	if (!node) {
 		return;
 	}
+	const alreadySameVersion = node.__gjjLtx23MultiRefPatchedVersion === GJJ_LTX23_PATCH_VERSION;
+	if (!alreadySameVersion) {
+		console.log("[GJJ LTX2.3] input order patch v24: force DOM tabs/status restore + reliable scene expansion");
+	}
 	node.__gjjLtx23MultiRefPatched = true;
+	node.__gjjLtx23MultiRefPatchedVersion = GJJ_LTX23_PATCH_VERSION;
 	patchSizeWidgetPersistence(node);
 	restorePanelSizeFromProperties(node);
+	if (node.__gjjLtx23MultiRefStatus?.widget && !node.widgets?.includes?.(node.__gjjLtx23MultiRefStatus.widget)) node.__gjjLtx23MultiRefStatus = null;
+	if (node.__gjjLtx23SectionTabs?.widget && !node.widgets?.includes?.(node.__gjjLtx23SectionTabs.widget)) node.__gjjLtx23SectionTabs = null;
 	ensureStatusWidget(node);
 	setStatus(node, { text: "等待执行", progress: 0 });
 	stabilizeNode(node);
@@ -1225,7 +1772,7 @@ function patchNode(node) {
 api.addEventListener("gjj_node_progress", (event) => {
 	const detail = event?.detail || {};
 	const targetNode = app.graph?._nodes?.find((node) => String(node?.id) === String(detail.node));
-	if (!targetNode || !TARGET_NODES.has(String(targetNode.comfyClass || targetNode.type || ""))) {
+	if (!targetNode || !isTargetNodeInstance(targetNode)) {
 		return;
 	}
 	setStatus(targetNode, detail);
@@ -1234,16 +1781,317 @@ api.addEventListener("gjj_node_progress", (event) => {
 api.addEventListener("gjj_ltx23_multiref_segment", (event) => {
 	const detail = event?.detail || {};
 	const targetNode = app.graph?._nodes?.find((node) => String(node?.id) === String(detail.node));
-	if (!targetNode || !TARGET_NODES.has(String(targetNode.comfyClass || targetNode.type || ""))) {
+	if (!targetNode || !isTargetNodeInstance(targetNode)) {
 		return;
 	}
 	addSegmentPreview(targetNode, detail);
 });
 
+
+
+// v22 override：转场/分段参数改为纯前端 DOM + node.properties。
+// Python 后端不再声明这些 widgets，所以不会再有“隐藏控件仍占高度”的空白。
+const GJJ_LTX23_V22_SECTION_FIELDS = new Set([
+	"transition_enabled",
+	"transition_curve",
+	"transition_early_tail_ratio",
+	"transition_implicit_guide_count",
+	"transition_implicit_guide_strength",
+	"transition_early_tail_strength",
+	"transition_final_guide_strength",
+	"segmented_execution",
+	"segment_save_preset",
+	"segment_video_format",
+]);
+
+function gjjV22Props(node) {
+	return ensureNodeProperties(node);
+}
+
+function gjjV22Get(node, name, fallback) {
+	const props = gjjV22Props(node);
+	const value = props[name];
+	return value === undefined || value === null || value === "" ? fallback : value;
+}
+
+function gjjV22Set(node, name, value) {
+	const props = gjjV22Props(node);
+	props[name] = value;
+	node.graph?.change?.();
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function gjjV22Bool(node, name, fallback = false) {
+	const value = gjjV22Get(node, name, fallback);
+	if (typeof value === "boolean") {
+		return value;
+	}
+	const text = String(value).trim().toLowerCase();
+	return ["true", "1", "yes", "on", "启用", "开启"].includes(text);
+}
+
+function gjjV22RemoveLegacySectionWidgets(node) {
+	if (!Array.isArray(node?.widgets)) {
+		return;
+	}
+	for (let index = node.widgets.length - 1; index >= 0; index -= 1) {
+		const widget = node.widgets[index];
+		if (!GJJ_LTX23_V22_SECTION_FIELDS.has(String(widget?.name || ""))) {
+			continue;
+		}
+		try {
+			widget.element?.remove?.();
+			widget.inputEl?.remove?.();
+		} catch (_) {}
+		node.widgets.splice(index, 1);
+	}
+}
+
+function gjjV22RemoveUnlinkedLegacySectionInputs(node) {
+	if (!Array.isArray(node?.inputs)) {
+		return;
+	}
+	for (let index = node.inputs.length - 1; index >= 0; index -= 1) {
+		const input = node.inputs[index];
+		if (!GJJ_LTX23_V22_SECTION_FIELDS.has(String(input?.name || ""))) {
+			continue;
+		}
+		if (input?.link) {
+			continue;
+		}
+		node.removeInput(index);
+	}
+}
+
+
+function gjjV23StopCanvasEvents(element) {
+	for (const eventName of ["pointerdown", "pointerup", "mousedown", "mouseup", "click", "dblclick", "wheel", "keydown"]) {
+		element.addEventListener(eventName, (event) => {
+			event.stopPropagation();
+		});
+	}
+}
+
+function gjjV22ControlStyle(el) {
+	if (!el?.style) {
+		return;
+	}
+	el.style.cssText = [
+		"width:100%",
+		"height:28px",
+		"box-sizing:border-box",
+		"border:1px solid #314a55",
+		"border-radius:8px",
+		"background:#202b31",
+		"color:#e5f2f4",
+		"padding:0 8px",
+		"font-size:12px",
+		"outline:none",
+	].join(";");
+}
+
+function gjjV22MakeRow(labelText, inputEl) {
+	const row = document.createElement("div");
+	row.style.cssText = [
+		"display:grid",
+		"grid-template-columns:118px 1fr",
+		"gap:8px",
+		"align-items:center",
+		"height:32px",
+		"box-sizing:border-box",
+	].join(";");
+	const label = document.createElement("div");
+	label.textContent = labelText;
+	label.style.cssText = "font-size:12px;color:#b7c9d0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+	row.append(label, inputEl);
+	return row;
+}
+
+function gjjV22CreateSelect(node, name, values, fallback) {
+	const select = document.createElement("select");
+	for (const value of values) {
+		const option = document.createElement("option");
+		option.value = value;
+		option.textContent = value;
+		select.appendChild(option);
+	}
+	select.value = String(gjjV22Get(node, name, fallback));
+	gjjV22ControlStyle(select);
+	gjjV23StopCanvasEvents(select);
+	select.addEventListener("change", (event) => {
+		event.stopPropagation();
+		gjjV22Set(node, name, select.value);
+		scheduleStabilize(node, 0);
+	});
+	return select;
+}
+
+function gjjV22CreateNumber(node, name, fallback, step = 0.01, min = 0, max = 1) {
+	const input = document.createElement("input");
+	input.type = "number";
+	input.step = String(step);
+	input.min = String(min);
+	input.max = String(max);
+	input.value = String(gjjV22Get(node, name, fallback));
+	gjjV22ControlStyle(input);
+	gjjV23StopCanvasEvents(input);
+	input.addEventListener("change", (event) => {
+		event.stopPropagation();
+		const numeric = Number(input.value);
+		gjjV22Set(node, name, Number.isFinite(numeric) ? numeric : fallback);
+		scheduleStabilize(node, 0);
+	});
+	return input;
+}
+
+function gjjV22PanelHeight(node) {
+	const active = getActiveSection(node);
+	const showTransition = active === SECTION_TRANSITION && gjjV22Bool(node, "transition_enabled", false);
+	const showSegment = active === SECTION_SEGMENT && gjjV22Bool(node, "segmented_execution", false);
+	if (showTransition) {
+		return 36 + 6 * 32 + 8;
+	}
+	if (showSegment) {
+		return 36 + 2 * 32 + 8;
+	}
+	return 36;
+}
+
+function ensureSectionTabsWidget(node) {
+	// v23：旧工作流/热更新后，缓存对象可能还在，但 widget 已经被 ComfyUI 移出 node.widgets，
+	// 这会导致“按钮全部没有了”。缓存无效时必须重建。
+	if (node.__gjjLtx23SectionTabs?.widget && node.widgets?.includes?.(node.__gjjLtx23SectionTabs.widget)) {
+		return node.__gjjLtx23SectionTabs;
+	}
+	if (node.__gjjLtx23SectionTabs) {
+		try {
+			node.__gjjLtx23SectionTabs.root?.remove?.();
+			node.__gjjLtx23SectionTabs.wrap?.remove?.();
+		} catch (_) {}
+		node.__gjjLtx23SectionTabs = null;
+	}
+	const root = document.createElement("div");
+	root.style.cssText = "display:flex;flex-direction:column;gap:6px;box-sizing:border-box;";
+	const tabs = document.createElement("div");
+	tabs.style.cssText = "display:flex;gap:6px;align-items:center;box-sizing:border-box;";
+	const transitionButton = document.createElement("button");
+	const segmentButton = document.createElement("button");
+	transitionButton.type = "button";
+	segmentButton.type = "button";
+	tabs.append(transitionButton, segmentButton);
+
+	const transitionPanel = document.createElement("div");
+	transitionPanel.style.cssText = "display:flex;flex-direction:column;gap:2px;";
+	transitionPanel.append(
+		gjjV22MakeRow("过渡曲线", gjjV22CreateSelect(node, "transition_curve", ["前置过渡", "平滑过渡", "线性过渡", "后置过渡"], "前置过渡")),
+		gjjV22MakeRow("尾帧提前注入", gjjV22CreateNumber(node, "transition_early_tail_ratio", 0.75, 0.01, 0.1, 0.95)),
+		gjjV22MakeRow("中间隐式guide", gjjV22CreateNumber(node, "transition_implicit_guide_count", 2, 1, 0, 4)),
+		gjjV22MakeRow("隐式guide强度", gjjV22CreateNumber(node, "transition_implicit_guide_strength", 0.55, 0.01, 0, 1)),
+		gjjV22MakeRow("提前尾帧强度", gjjV22CreateNumber(node, "transition_early_tail_strength", 0.75, 0.01, 0, 1)),
+		gjjV22MakeRow("终点guide强度", gjjV22CreateNumber(node, "transition_final_guide_strength", 1.0, 0.01, 0, 1)),
+	);
+
+	const segmentPanel = document.createElement("div");
+	segmentPanel.style.cssText = "display:flex;flex-direction:column;gap:2px;";
+	segmentPanel.append(
+		gjjV22MakeRow("保存位置预设", gjjV22CreateSelect(node, "segment_save_preset", [
+			"video/GJJ_LTX多图分段",
+			"video/GJJ_LTX多图分段/{date}",
+			"video/GJJ_LTX多图分段/{date}/{time}",
+			"video/GJJ_LTX多图分段/{date}/任务{node}",
+		], "video/GJJ_LTX多图分段")),
+		gjjV22MakeRow("视频格式", gjjV22CreateSelect(node, "segment_video_format", ["video/h264-mp4", "video/h265-mp4", "video/webm"], "video/h264-mp4")),
+	);
+
+	root.append(tabs, transitionPanel, segmentPanel);
+	installButtonEvents(transitionButton, () => {
+		const enabled = gjjV22Bool(node, "transition_enabled", false);
+		const isOpen = getActiveSection(node) === SECTION_TRANSITION;
+		if (enabled && isOpen) {
+			gjjV22Set(node, "transition_enabled", false);
+			setActiveSection(node, SECTION_NONE);
+		} else {
+			gjjV22Set(node, "transition_enabled", true);
+			setActiveSection(node, SECTION_TRANSITION);
+		}
+		scheduleStabilize(node, 0);
+	});
+	installButtonEvents(segmentButton, () => {
+		const enabled = gjjV22Bool(node, "segmented_execution", false);
+		const isOpen = getActiveSection(node) === SECTION_SEGMENT;
+		if (enabled && isOpen) {
+			gjjV22Set(node, "segmented_execution", false);
+			setActiveSection(node, SECTION_NONE);
+		} else {
+			gjjV22Set(node, "segmented_execution", true);
+			setActiveSection(node, SECTION_SEGMENT);
+		}
+		scheduleStabilize(node, 0);
+	});
+
+	let widget = node.addDOMWidget?.(SECTION_TABS_WIDGET_NAME, SECTION_TABS_WIDGET_NAME, root, {
+		hideOnZoom: false,
+		getHeight: () => gjjV22PanelHeight(node),
+	});
+	if (!widget && typeof node.addWidget === "function") {
+		// 极少数前端版本没有 addDOMWidget 时，至少保留一个可见占位，避免按钮完全消失。
+		widget = node.addWidget("button", SECTION_TABS_WIDGET_NAME, "高级参数", () => {
+			const enabled = gjjV22Bool(node, "transition_enabled", false);
+			gjjV22Set(node, "transition_enabled", !enabled);
+			setActiveSection(node, !enabled ? SECTION_TRANSITION : SECTION_NONE);
+			scheduleStabilize(node, 0);
+		});
+	}
+	if (widget) {
+		widget.computeSize = (width) => [width || 320, gjjV22PanelHeight(node)];
+		const currentIndex = node.widgets?.indexOf(widget) ?? -1;
+		const denoiseIndex = getWidgetIndex(node, "denoise_strength");
+		const targetIndex = denoiseIndex >= 0 ? denoiseIndex + 1 : node.widgets.length;
+		if (currentIndex >= 0 && currentIndex !== targetIndex) {
+			node.widgets.splice(currentIndex, 1);
+			node.widgets.splice(Math.max(0, Math.min(targetIndex, node.widgets.length)), 0, widget);
+		}
+	}
+	node.__gjjLtx23SectionTabs = { widget, root, tabs, transitionButton, segmentButton, transitionPanel, segmentPanel };
+	return node.__gjjLtx23SectionTabs;
+}
+
+function updateSectionTabs(node) {
+	const state = ensureSectionTabsWidget(node);
+	const active = getActiveSection(node);
+	const transitionEnabled = gjjV22Bool(node, "transition_enabled", false);
+	const segmentEnabled = gjjV22Bool(node, "segmented_execution", false);
+	state.transitionPanel.style.display = active === SECTION_TRANSITION && transitionEnabled ? "flex" : "none";
+	state.segmentPanel.style.display = active === SECTION_SEGMENT && segmentEnabled ? "flex" : "none";
+	state.transitionButton.textContent = `${transitionEnabled ? "✅" : "⬜"} 转场控制`;
+	state.transitionButton.title = transitionEnabled ? "点击关闭转场控制并隐藏参数" : "点击开启转场控制并显示参数";
+	styleSectionButton(state.transitionButton, transitionEnabled, active === SECTION_TRANSITION);
+	state.segmentButton.textContent = `${segmentEnabled ? "✅" : "⬜"} 多图分段执行`;
+	state.segmentButton.title = segmentEnabled ? "点击关闭多图分段执行并隐藏参数" : "点击开启多图分段执行并显示参数";
+	styleSectionButton(state.segmentButton, segmentEnabled, active === SECTION_SEGMENT);
+	if (state.widget) {
+		state.widget.computeSize = (width) => [width || 320, gjjV22PanelHeight(node)];
+	}
+}
+
+function updateTransitionWidgets(node) {
+	gjjV22RemoveLegacySectionWidgets(node);
+	gjjV22RemoveUnlinkedLegacySectionInputs(node);
+	const active = getActiveSection(node);
+	if (active === SECTION_TRANSITION && !gjjV22Bool(node, "transition_enabled", false)) {
+		setActiveSection(node, SECTION_NONE);
+	}
+	if (active === SECTION_SEGMENT && !gjjV22Bool(node, "segmented_execution", false)) {
+		setActiveSection(node, SECTION_NONE);
+	}
+	ensureSectionTabsWidget(node);
+	updateSectionTabs(node);
+}
+
 app.registerExtension({
 	name: "GJJ.LTX23ImageToVideoMultiRef",
 	beforeRegisterNodeDef(nodeType, nodeData) {
-		if (!TARGET_NODES.has(String(nodeData?.name || ""))) {
+		if (!isTargetNodeDef(nodeData)) {
 			return;
 		}
 
@@ -1305,9 +2153,27 @@ app.registerExtension({
 
 	setup() {
 		for (const node of app.graph?._nodes || []) {
-			if (TARGET_NODES.has(node?.comfyClass)) {
+			if (isTargetNodeInstance(node)) {
 				patchNode(node);
 			}
+		}
+		if (!window.__gjjLtx23V24SceneExpandTimer) {
+			window.__gjjLtx23V24SceneExpandTimer = setInterval(() => {
+				for (const node of app.graph?._nodes || []) {
+					if (!isTargetNodeInstance(node)) {
+						continue;
+					}
+					patchNode(node);
+					// 连接场景1后，有些 ComfyUI 版本不会立刻触发 onConnectionsChange；
+					// 这里低频兜底，确保动态场景口、DOM 按钮、状态条都能恢复。
+					const before = getSceneInputs(node).length;
+					stabilizeNode(node);
+					const after = getSceneInputs(node).length;
+					if (after !== before) {
+						refreshNode(node);
+					}
+				}
+			}, 600);
 		}
 	},
 });

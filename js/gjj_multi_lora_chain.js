@@ -11,7 +11,7 @@ const GROUP_RULES_PROPERTY = "gjj_lora_group_rules";
 const ADVANCED_OPEN_PROPERTY = "gjj_lora_advanced_open";
 const DEFAULT_EMPTY_OPTION = { value: "", label: "未选择" };
 const DEFAULT_ROW = { enabled: true, name: "", strength: 1.0 };
-const DEFAULT_FIRST_SEARCH_TERMS = "turbo,lightning,hyper,lightx2v,quick,fast,speed,ultra,ultrafast,flash,rapid";
+const DEFAULT_FIRST_SEARCH_TERMS = "";
 
 function normalizeStrength(value, fallback = 1.0) {
 	const parsed = Number.parseFloat(value);
