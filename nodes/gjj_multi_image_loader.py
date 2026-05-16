@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import comfy.utils
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,9 +24,11 @@ from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
 NODE_NAME = "GJJ_MultiImageLoader"
 IMAGE_API_PATH = "/gjj/input_images"
+THUMB_API_PATH = "/gjj/input_image_thumb"
 MAX_OUTPUT_IMAGES = 20
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".avif"}
 INPUT_IMAGE_TYPES = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
+_IMAGE_META_CACHE: dict[str, tuple[int, int, int, int]] = {}
 
 
 def list_input_images() -> list[dict[str, Any]]:
@@ -55,11 +58,19 @@ def list_input_images() -> list[dict[str, Any]]:
         width = 0
         height = 0
         try:
-            # 先完整解码一次，避免损坏/伪 PNG 文件进入前端选择列表。
-            # 只读取尺寸但不解码时，部分坏文件会在执行阶段才触发 PIL.UnidentifiedImageError。
-            with Image.open(file_path) as image:
-                image.load()
-                width, height = image.size
+            stat = file_path.stat()
+            mtime_ns = int(stat.st_mtime_ns)
+            size_bytes = int(stat.st_size)
+            cache_key = str(file_path)
+            cached = _IMAGE_META_CACHE.get(cache_key)
+            if cached and cached[0] == mtime_ns and cached[1] == size_bytes:
+                width, height = cached[2], cached[3]
+            else:
+                # 只读取图片头部尺寸，不完整解码。完整 image.load() 在图片很多/很大时会明显拖慢前端刷新。
+                with Image.open(file_path) as image:
+                    width, height = image.size
+                    image.verify()
+                _IMAGE_META_CACHE[cache_key] = (mtime_ns, size_bytes, int(width), int(height))
         except Exception as error:
             try:
                 print(f"[GJJ_MultiImageLoader] 跳过无法识别的图片：{file_path} ({error})")
@@ -74,6 +85,8 @@ def list_input_images() -> list[dict[str, Any]]:
                 "label": f"{subfolder}/{filename}" if subfolder else filename,
                 "width": width,
                 "height": height,
+                "mtime_ns": mtime_ns,
+                "size_bytes": size_bytes,
             }
         )
     return items
@@ -83,8 +96,59 @@ async def get_gjj_input_images(request):
     return web.json_response({"images": list_input_images()})
 
 
+def _safe_int(value: Any, default: int, min_value: int, max_value: int) -> int:
+    try:
+        number = int(value)
+    except Exception:
+        return default
+    return max(min_value, min(max_value, number))
+
+
+def _thumbnail_cache_dir() -> Path:
+    try:
+        base = Path(folder_paths.get_temp_directory()).resolve()
+    except Exception:
+        base = Path(folder_paths.get_input_directory()).resolve() / ".gjj_thumb_cache"
+    path = base / "gjj_multi_image_loader_thumbs"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _thumbnail_cache_path(source: Path, subfolder: str, filename: str, size: int) -> Path:
+    stat = source.stat()
+    key = f"{subfolder}/{filename}|{stat.st_mtime_ns}|{stat.st_size}|{size}"
+    digest = hashlib.sha1(key.encode("utf-8", "ignore")).hexdigest()
+    return _thumbnail_cache_dir() / f"{digest}.jpg"
+
+
+async def get_gjj_input_image_thumb(request):
+    filename = str(request.query.get("filename") or "").strip()
+    subfolder = str(request.query.get("subfolder") or "").strip().replace("\\", "/")
+    image_type = str(request.query.get("type") or "input").strip()
+    size = _safe_int(request.query.get("size"), 192, 64, 512)
+    if image_type != "input" or not filename:
+        raise web.HTTPBadRequest(text="Only input images are supported.")
+
+    source = resolve_input_image_path({"filename": filename, "subfolder": subfolder})
+    cache_path = _thumbnail_cache_path(source, subfolder, filename, size)
+    if not cache_path.exists():
+        try:
+            with Image.open(source) as opened:
+                opened.load()
+                image = ImageOps.exif_transpose(opened).convert("RGB")
+                image.thumbnail((size, size), Image.Resampling.LANCZOS)
+                image.save(cache_path, "JPEG", quality=82, optimize=True, progressive=True)
+        except Exception as error:
+            raise web.HTTPInternalServerError(text=f"生成缩略图失败：{error}") from error
+
+    response = web.FileResponse(cache_path)
+    response.headers["Cache-Control"] = "public, max-age=604800, immutable"
+    return response
+
+
 if PromptServer is not None and getattr(PromptServer, "instance", None) is not None:
     PromptServer.instance.routes.get(IMAGE_API_PATH)(get_gjj_input_images)
+    PromptServer.instance.routes.get(THUMB_API_PATH)(get_gjj_input_image_thumb)
 
 
 def parse_selected_images(raw_value: Any) -> list[dict[str, str]]:
@@ -114,7 +178,8 @@ def parse_selected_images(raw_value: Any) -> list[dict[str, str]]:
             continue
         seen.add(key)
         cleaned.append({"filename": filename, "subfolder": subfolder})
-    return cleaned[:MAX_OUTPUT_IMAGES]
+    # 批量队列不限制图片数量；单图输出仍由前端最多展开 20 个。
+    return cleaned
 
 
 def recover_selected_images(raw_value: Any, extra_pnginfo: Any = None, unique_id: Any = None) -> list[dict[str, str]]:
@@ -152,6 +217,84 @@ def recover_selected_images(raw_value: Any, extra_pnginfo: Any = None, unique_id
     if unique_id is not None and candidates:
         return candidates[0]
     return candidates[0] if len(candidates) == 1 else []
+
+
+
+
+def recover_sequence_range(raw_value: Any, extra_pnginfo: Any = None, unique_id: Any = None) -> str:
+    text = str(raw_value or "").strip()
+    if text:
+        return text
+    if not isinstance(extra_pnginfo, dict):
+        return ""
+    workflow = extra_pnginfo.get("workflow")
+    if not isinstance(workflow, dict):
+        return ""
+    nodes = workflow.get("nodes")
+    if not isinstance(nodes, list):
+        return ""
+
+    candidates: list[str] = []
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("type") != NODE_NAME:
+            continue
+        if unique_id is not None and str(node.get("id")) != str(unique_id):
+            continue
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            value = str(properties.get("sequence_range") or "").strip()
+            if value:
+                candidates.append(value)
+                continue
+        widget_values = node.get("widgets_values")
+        if isinstance(widget_values, list):
+            for value in widget_values:
+                value_text = str(value or "").strip()
+                if value_text.startswith("[") and (":" in value_text or "," in value_text):
+                    candidates.append(value_text)
+                    break
+    if unique_id is not None and candidates:
+        return candidates[0]
+    return candidates[0] if len(candidates) == 1 else ""
+
+def recover_sequence_range(raw_value: Any = "", extra_pnginfo: Any = None, unique_id: Any = None) -> str:
+    text = str(raw_value or "").strip()
+    if text:
+        return text
+    if not isinstance(extra_pnginfo, dict):
+        return ""
+    workflow = extra_pnginfo.get("workflow")
+    if not isinstance(workflow, dict):
+        return ""
+    nodes = workflow.get("nodes")
+    if not isinstance(nodes, list):
+        return ""
+
+    candidates: list[str] = []
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("type") != NODE_NAME:
+            continue
+        if unique_id is not None and str(node.get("id")) != str(unique_id):
+            continue
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            value = str(properties.get("sequence_range") or "").strip()
+            if value:
+                candidates.append(value)
+                continue
+        widget_values = node.get("widgets_values")
+        if isinstance(widget_values, list):
+            for value in widget_values:
+                text = str(value or "").strip()
+                # 兼容旧工作流：序列范围通常是 [1:5] / [1,3,5] 这类短字符串，
+                # selected_images 则是 JSON 数组对象，避免误判。
+                if text and not text.startswith('[{"filename"') and not text.startswith("[{'"):
+                    if ":" in text or "," in text or text.isdigit() or (text.startswith("[") and text.endswith("]")):
+                        candidates.append(text)
+                        break
+    if unique_id is not None and candidates:
+        return candidates[0]
+    return candidates[0] if len(candidates) == 1 else ""
 
 
 def selected_images_signature(selected: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -441,28 +584,13 @@ class GJJ_MultiImageLoader:
 
     @classmethod
     def INPUT_TYPES(cls):
+        # selected_images 和 sequence_range 改为前端 properties 维护，
+        # 不再作为 required/widget 输入暴露。
+        # 这样既不会挤出隐藏空行，也不会因为前端移除 widget/input 后触发
+        # “Required input is missing: selected_images”。
         return {
-            "required": {
-                "selected_images": (
-                    "STRING",
-                    {
-                        "default": "[]",
-                        "multiline": False,
-                        "display_name": "已选图片",
-                        "tooltip": "前端多图片面板自动维护的选择清单；正常使用时会自动隐藏。",
-                    },
-                ),
-            },
+            "required": {},
             "optional": {
-                "sequence_range": (
-                    "STRING",
-                    {
-                        "default": "",
-                        "multiline": False,
-                        "display_name": "序列范围",
-                        "tooltip": "可接入 GJJ · 递增数值 的“序列范围”。支持 [1,2] 和闭区间 [1:2]，编号与预览里的图片 1、图片 2 对齐。",
-                    },
-                ),
                 "input_images": (
                     INPUT_IMAGE_TYPES,
                     {
@@ -484,11 +612,12 @@ class GJJ_MultiImageLoader:
     @classmethod
     def IS_CHANGED(cls, selected_images="[]", sequence_range="", input_images=None, prompt=None, extra_pnginfo=None, unique_id=None):
         selected = recover_selected_images(selected_images, extra_pnginfo, unique_id)
+        resolved_sequence_range = recover_sequence_range(sequence_range, extra_pnginfo, unique_id)
         input_shape = tuple(input_images.shape) if isinstance(input_images, torch.Tensor) else ()
         return json.dumps(
             {
                 "selected": selected_images_signature(selected),
-                "sequence_range": str(sequence_range or ""),
+                "sequence_range": resolved_sequence_range,
                 "input_shape": input_shape,
             },
             ensure_ascii=False,
@@ -497,6 +626,7 @@ class GJJ_MultiImageLoader:
 
     def load_images(self, selected_images="[]", sequence_range="", input_images=None, prompt=None, extra_pnginfo=None, unique_id=None):
         selected = recover_selected_images(selected_images, extra_pnginfo, unique_id)
+        sequence_range = recover_sequence_range(sequence_range, extra_pnginfo, unique_id)
         collected: list[dict[str, Any]] = []
 
         if isinstance(input_images, torch.Tensor):

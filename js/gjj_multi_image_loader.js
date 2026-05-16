@@ -10,9 +10,16 @@ const MIN_WIDTH = 420;
 const MIN_HEIGHT = 220;
 const DOM_WIDGET_NAME = "gjj_multi_image_loader_dom";
 const IMAGE_API_PATH = "/gjj/input_images";
+const THUMB_API_PATH = "/gjj/input_image_thumb";
 const UPLOAD_SUBFOLDER = "gjj_multi_image_loader";
 const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE";
 const FILE_NAME_COLLATOR = new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "base" });
+const DEFAULT_THUMB_SIZE = 132;
+const MIN_THUMB_SIZE = 72;
+const MAX_THUMB_SIZE = 220;
+const THUMB_STEP = 16;
+const MAX_PREVIEW_HEIGHT = 560;
+const RANGE_PLACEHOLDER = "例如：[1,3,5] 或 [1:8]";
 
 function getDataWidget(node) {
 	return node.widgets?.find((widget) => widget?.name === DATA_WIDGET_NAME);
@@ -28,7 +35,7 @@ function hideDataWidget(widget) {
 	}
 	widget.serialize = false;
 	if (widget.__gjjHidden) {
-		widget.computeSize = () => [0, -4];
+		widget.computeSize = () => [0, 0];
 		widget.draw = () => {};
 		if (widget.inputEl) {
 			widget.inputEl.style.display = "none";
@@ -46,7 +53,7 @@ function hideDataWidget(widget) {
 	widget.__gjjOriginalComputeSize = widget.computeSize;
 	widget.type = `converted-widget:${widget.name || "hidden"}`;
 	widget.hidden = true;
-	widget.computeSize = () => [0, -4];
+	widget.computeSize = () => [0, 0];
 	widget.draw = () => {};
 	if (widget.inputEl) {
 		widget.inputEl.style.display = "none";
@@ -59,15 +66,26 @@ function hideDataWidget(widget) {
 	}
 }
 
+function detachWidgetByName(node, name) {
+	if (!Array.isArray(node?.widgets)) {
+		return null;
+	}
+	const index = node.widgets.findIndex((widget) => widget?.name === name);
+	if (index < 0) {
+		return null;
+	}
+	const [widget] = node.widgets.splice(index, 1);
+	hideDataWidget(widget);
+	return widget;
+}
+
 function removeInternalDataWidget(node) {
 	if (!Array.isArray(node?.widgets)) {
 		return;
 	}
-	const widget = getDataWidget(node);
-	if (!widget) {
-		return;
-	}
-	hideDataWidget(widget);
+	// 这里不只是隐藏，而是从 widgets 布局数组中移除，避免前台 JSON/序列范围 widget 继续挤出空行。
+	node.__gjjSelectedImagesWidget = node.__gjjSelectedImagesWidget || detachWidgetByName(node, DATA_WIDGET_NAME);
+	node.__gjjSequenceRangeWidget = node.__gjjSequenceRangeWidget || detachWidgetByName(node, SEQUENCE_RANGE_WIDGET_NAME);
 }
 
 function removeInternalDataInputs(node) {
@@ -89,18 +107,11 @@ function removeInternalDataInputs(node) {
 }
 
 function normalizeSequenceRangeWidget(node) {
-	const widget = getWidget(node, SEQUENCE_RANGE_WIDGET_NAME);
-	if (!widget) {
-		return null;
+	const widget = getWidget(node, SEQUENCE_RANGE_WIDGET_NAME) || node.__gjjSequenceRangeWidget;
+	if (widget) {
+		hideDataWidget(widget);
 	}
-	widget.label = "序列范围";
-	widget.localized_name = "序列范围";
-	widget.tooltip = "可接入 GJJ · 递增数值 的“序列范围”。支持 [1,2] 和闭区间 [1:2]，编号与预览里的图片 1、图片 2 对齐。";
-	if (widget.options) {
-		widget.options.display_name = "序列范围";
-		widget.options.tooltip = widget.tooltip;
-	}
-	return widget;
+	return null;
 }
 
 function reorderWidgets(node) {
@@ -117,8 +128,7 @@ function reorderWidgets(node) {
 		used.add(widget);
 	};
 	pushWidget(getWidget(node, GJJ_HELP_WIDGET_NAME));
-	pushWidget(getDataWidget(node));
-	pushWidget(normalizeSequenceRangeWidget(node));
+	normalizeSequenceRangeWidget(node);
 	pushWidget(node.__gjjMultiImageWidget);
 	for (const widget of node.widgets) {
 		pushWidget(widget);
@@ -174,14 +184,29 @@ function serializedSelectionFromNode(node, serializedNode = null) {
 	return propertyValue || widgetValue || "[]";
 }
 
-function imageDataToUrl(item) {
+function imageDataToUrl(item, options = {}) {
 	if (!item?.filename) {
 		return "";
 	}
+	const type = String(item.type || "input");
+	const subfolder = String(item.subfolder || "");
+	const filename = String(item.filename || "");
+	const size = Math.max(64, Math.min(512, Number(options.size || DEFAULT_THUMB_SIZE)));
+
+	// 节点内缩略图优先走后端缩略图缓存，避免 88px 小图反复加载 2K/4K 原图。
+	// 只有 input 目录图片使用缩略图接口；执行后的 temp/output 预览继续使用 ComfyUI 原生 /view。
+	if (options.thumbnail && type === "input" && !item.image) {
+		const version = item.mtime_ns || item.size_bytes || "";
+		return api.apiURL(
+			`${THUMB_API_PATH}?filename=${encodeURIComponent(filename)}&type=input&subfolder=${encodeURIComponent(subfolder)}&size=${encodeURIComponent(size)}${version ? `&v=${encodeURIComponent(version)}` : ""}`,
+		);
+	}
+
 	const previewFormat = typeof app.getPreviewFormatParam === "function" ? app.getPreviewFormatParam() : "";
-	const randParam = typeof app.getRandParam === "function" ? app.getRandParam() : "";
+	// 不再给节点内缩略图附加 randParam；randParam 会强制绕过浏览器缓存，是加载变慢的主要原因之一。
+	const randParam = options.noRand ? "" : (typeof app.getRandParam === "function" ? app.getRandParam() : "");
 	return api.apiURL(
-		`/view?filename=${encodeURIComponent(item.filename)}&type=${encodeURIComponent(item.type || "input")}&subfolder=${encodeURIComponent(item.subfolder || "")}${previewFormat}${randParam}`,
+		`/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(type)}&subfolder=${encodeURIComponent(subfolder)}${previewFormat}${randParam}`,
 	);
 }
 
@@ -193,6 +218,10 @@ function ensureState(node) {
 		externalCount: 0,
 		executedImages: [],
 		mergedCount: 0,
+		showIndividualOutputs: Boolean(node?.properties?.show_individual_outputs),
+		thumbSize: Number(node?.properties?.thumb_size || DEFAULT_THUMB_SIZE),
+		rangeExpanded: Boolean(node?.properties?.sequence_range_expanded),
+		dragIndex: null,
 	};
 	return node.__gjjMultiImageState;
 }
@@ -207,6 +236,23 @@ async function fetchOptions() {
 		return Array.isArray(data?.images) ? data.images : [];
 	} catch (error) {
 		return [];
+	}
+}
+
+function enrichSelectionWithOptions(state) {
+	if (!state || !Array.isArray(state.selection) || !Array.isArray(state.options) || state.options.length === 0) {
+		return;
+	}
+	const metaByKey = new Map(state.options.map((item) => [itemKey(item), item]));
+	for (const item of state.selection) {
+		const meta = metaByKey.get(itemKey(item));
+		if (!meta) {
+			continue;
+		}
+		if (meta.width) item.width = meta.width;
+		if (meta.height) item.height = meta.height;
+		if (meta.mtime_ns) item.mtime_ns = meta.mtime_ns;
+		if (meta.size_bytes) item.size_bytes = meta.size_bytes;
 	}
 }
 
@@ -248,8 +294,9 @@ async function uploadFiles(node, files) {
 			state.selection.push(item);
 		}
 	}
+	enrichSelectionWithOptions(state);
 	syncDataWidget(node);
-	ensureOutputs(node, state.selection.length);
+	ensureOutputs(node, totalImageCount(node));
 	renderBrowser(node);
 	renderPreview(node);
 	updateSummary(node);
@@ -261,7 +308,7 @@ function syncDataWidget(node) {
 	const serialized = serializeSelection(state.selection);
 	node.properties = node.properties || {};
 	node.properties[DATA_WIDGET_NAME] = serialized;
-	const widget = getDataWidget(node);
+	const widget = getDataWidget(node) || node.__gjjSelectedImagesWidget;
 	if (widget) {
 		widget.value = serialized;
 		widget.callback?.(serialized, app.canvas, node, undefined, widget);
@@ -270,17 +317,49 @@ function syncDataWidget(node) {
 	markGraphChanged(node);
 }
 
+function getSequenceRange(node) {
+	return String(node?.properties?.[SEQUENCE_RANGE_WIDGET_NAME] ?? (getWidget(node, SEQUENCE_RANGE_WIDGET_NAME) || node.__gjjSequenceRangeWidget)?.value ?? "");
+}
+
+function syncSequenceRange(node, value) {
+	node.properties = node.properties || {};
+	node.properties[SEQUENCE_RANGE_WIDGET_NAME] = String(value || "");
+	const widget = getWidget(node, SEQUENCE_RANGE_WIDGET_NAME) || node.__gjjSequenceRangeWidget;
+	if (widget) {
+		widget.value = String(value || "");
+		widget.callback?.(widget.value, app.canvas, node, undefined, widget);
+	}
+	markGraphChanged(node);
+}
+
+function totalImageCount(node) {
+	const state = ensureState(node);
+	return Math.max(0, Number(state.mergedCount || 0) || (Number(state.selection?.length || 0) + Number(state.externalCount || 0)));
+}
+
+function updateOutputButtonState(node) {
+	const state = ensureState(node);
+	const button = node.__gjjMultiImageOutputButton;
+	if (!button) {
+		return;
+	}
+	const count = totalImageCount(node);
+	button.textContent = state.showIndividualOutputs ? "🔌" : "➕";
+	button.title = state.showIndividualOutputs
+		? `当前已展开 ${Math.min(count, MAX_OUTPUT_IMAGES)} 个单图输出口。点击后收起未连接的单图输出口。`
+		: `单图片输出口默认隐藏。点击后按当前图片数量展开，最多 ${MAX_OUTPUT_IMAGES} 个。`;
+	button.style.opacity = count > 0 ? "1" : "0.55";
+}
+
 function hasExternalImageLink(node) {
 	return Array.isArray(node?.inputs) && node.inputs.some((input) => input?.name === "input_images" && !!input?.link);
 }
 
 function ensureOutputs(node, count) {
+	const state = ensureState(node);
 	const imageCount = Math.max(0, Number(count || 0));
-
-	// 当超过20张时，只显示批量图片队列接口
-	// 当20张以内时，显示批量队列 + 单图输出接口
-	const showIndividualOutputs = imageCount <= MAX_OUTPUT_IMAGES;
-	const visibleCount = showIndividualOutputs ? (imageCount + 1) : 1;
+	const individualCount = state.showIndividualOutputs ? Math.min(imageCount, MAX_OUTPUT_IMAGES) : 0;
+	const visibleCount = 1 + individualCount;
 
 	while ((node.outputs?.length || 0) < visibleCount) {
 		const outputIndex = node.outputs?.length || 0;
@@ -307,11 +386,9 @@ function ensureOutputs(node, count) {
 			output.label = output.name;
 			output.localized_name = output.name;
 			output.type = BATCH_IMAGE_TYPE;
-			if (imageCount > MAX_OUTPUT_IMAGES) {
-				output.tooltip = `已选择 ${imageCount} 张图片（超过20张限制），仅支持批量图片队列输出。`;
-			} else {
-				output.tooltip = "将所有已选图片按顺序打包成一个 GJJ 专用批量图片队列输出。";
-			}
+			output.tooltip = imageCount > MAX_OUTPUT_IMAGES
+				? `已选择 ${imageCount} 张图片，单图输出最多展开 ${MAX_OUTPUT_IMAGES} 个；批量队列不限制。`
+				: "将所有已选图片按顺序打包成一个 GJJ 专用批量图片队列输出。";
 			return;
 		}
 		output.name = `图片 ${index}`;
@@ -320,6 +397,9 @@ function ensureOutputs(node, count) {
 		output.type = "IMAGE";
 		output.tooltip = `第 ${index} 张已选图片的单独输出。`;
 	});
+	node.properties = node.properties || {};
+	node.properties.show_individual_outputs = Boolean(state.showIndividualOutputs);
+	updateOutputButtonState(node);
 	globalThis.GJJApplyTypeColorsToNode?.(node);
 }
 
@@ -337,7 +417,7 @@ function toggleSelection(node, item) {
 		state.selection.push(item);
 	}
 	syncDataWidget(node);
-	ensureOutputs(node, state.selection.length);
+	ensureOutputs(node, totalImageCount(node));
 	renderBrowser(node);
 	renderPreview(node);
 	updateSummary(node);
@@ -348,6 +428,40 @@ function renderBrowser(node) {
 	return;
 }
 
+function itemKey(item) {
+	return `${String(item?.subfolder || "")}\u0000${String(item?.filename || "")}`;
+}
+
+function moveSelectionItem(node, fromIndex, toIndex) {
+	const state = ensureState(node);
+	if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0) {
+		return;
+	}
+	if (fromIndex >= state.selection.length || toIndex >= state.selection.length) {
+		return;
+	}
+	const [item] = state.selection.splice(fromIndex, 1);
+	state.selection.splice(toIndex, 0, item);
+	syncDataWidget(node);
+	renderPreview(node);
+	updateSummary(node);
+	scheduleLayout(node);
+}
+
+function applyThumbnailSize(node) {
+	const state = ensureState(node);
+	const size = Math.max(MIN_THUMB_SIZE, Math.min(MAX_THUMB_SIZE, Number(state.thumbSize || DEFAULT_THUMB_SIZE)));
+	state.thumbSize = size;
+	node.properties = node.properties || {};
+	node.properties.thumb_size = size;
+	if (node.__gjjMultiImageGrid) {
+		node.__gjjMultiImageGrid.style.gridTemplateColumns = `repeat(auto-fill, minmax(${size}px, 1fr))`;
+	}
+	if (node.__gjjMultiImageThumbLabel) {
+		node.__gjjMultiImageThumbLabel.textContent = `${size}px`;
+	}
+}
+
 function renderPreview(node) {
 	const state = ensureState(node);
 	const grid = node.__gjjMultiImageGrid;
@@ -355,39 +469,79 @@ function renderPreview(node) {
 	if (!grid || !empty) {
 		return;
 	}
+	applyThumbnailSize(node);
 	grid.replaceChildren();
 	const executedItems = Array.isArray(state.executedImages) ? state.executedImages : [];
 	const hasExternalPreview = Number(state.externalCount || 0) > 0 && executedItems.length > 0;
 	const items = hasExternalPreview ? executedItems : (state.selection || []);
 	empty.style.display = items.length > 0 ? "none" : "flex";
 
-	// 存储节点引用以便后续调用
 	const nodeRef = node;
-
 	for (const [index, item] of items.entries()) {
 		const card = document.createElement("div");
 		card.className = "gjj-image-card";
+		card.draggable = !hasExternalPreview;
+		card.dataset.index = String(index);
+		card.title = hasExternalPreview ? "外部输入预览不能在这里排序" : "拖拽可调整图片顺序";
 		card.style.cssText = [
 			"position:relative",
 			"width:100%",
 			"aspect-ratio:1/1",
 			"overflow:hidden",
-			"border-radius:6px",
-			"cursor:pointer",
-			"transition:transform 0.2s ease",
+			"border-radius:7px",
+			"cursor:grab",
+			"transition:transform 0.15s ease, opacity 0.15s ease, outline 0.15s ease",
+			"background:#111a20",
 		].join(";");
 
-		// 鼠标悬停效果
+		card.addEventListener("dragstart", (event) => {
+			if (hasExternalPreview) {
+				event.preventDefault();
+				return;
+			}
+			state.dragIndex = index;
+			card.style.opacity = "0.45";
+			event.dataTransfer.effectAllowed = "move";
+			event.dataTransfer.setData("text/plain", String(index));
+		});
+		card.addEventListener("dragend", () => {
+			state.dragIndex = null;
+			card.style.opacity = "1";
+			card.style.outline = "none";
+		});
+		card.addEventListener("dragover", (event) => {
+			if (hasExternalPreview || state.dragIndex == null) {
+				return;
+			}
+			event.preventDefault();
+			event.dataTransfer.dropEffect = "move";
+			card.style.outline = "2px solid rgba(100, 190, 255, 0.85)";
+		});
+		card.addEventListener("dragleave", () => {
+			card.style.outline = "none";
+		});
+		card.addEventListener("drop", (event) => {
+			if (hasExternalPreview) {
+				return;
+			}
+			event.preventDefault();
+			card.style.outline = "none";
+			const fromIndex = Number(event.dataTransfer.getData("text/plain") || state.dragIndex);
+			moveSelectionItem(nodeRef, fromIndex, index);
+		});
+
 		card.addEventListener("mouseenter", () => {
-			card.style.transform = "scale(1.05)";
+			card.style.transform = "scale(1.025)";
 		});
 		card.addEventListener("mouseleave", () => {
 			card.style.transform = "scale(1)";
 		});
 
-		// 图片元素
 		const image = document.createElement("img");
-		image.src = imageDataToUrl(item);
+		image.decoding = "async";
+		image.loading = index < 12 ? "eager" : "lazy";
+		image.fetchPriority = index < 8 ? "high" : "low";
+		image.src = imageDataToUrl(item, { thumbnail: true, size: Math.ceil(Number(state.thumbSize || DEFAULT_THUMB_SIZE) * Math.max(1, window.devicePixelRatio || 1)), noRand: true });
 		image.draggable = false;
 		image.className = "gjj-image-preview";
 		image.style.cssText = [
@@ -395,11 +549,10 @@ function renderPreview(node) {
 			"height:100%",
 			"object-fit:cover",
 			"display:block",
+			"user-select:none",
 		].join(";");
 
-		// 左上角：图片序号
 		const indexBadge = document.createElement("div");
-		indexBadge.className = "gjj-image-index-badge";
 		indexBadge.textContent = index + 1;
 		indexBadge.style.cssText = [
 			"position:absolute",
@@ -409,7 +562,7 @@ function renderPreview(node) {
 			"height:24px",
 			"padding:0 6px",
 			"border-radius:12px",
-			"background:rgba(0, 0, 0, 0.5)",
+			"background:rgba(0,0,0,0.52)",
 			"backdrop-filter:blur(4px)",
 			"color:#fff",
 			"font-size:11px",
@@ -421,16 +574,14 @@ function renderPreview(node) {
 			"z-index:2",
 		].join(";");
 
-		// 右上角：图片尺寸
 		const sizeBadge = document.createElement("div");
-		sizeBadge.className = "gjj-image-size-badge";
 		sizeBadge.style.cssText = [
 			"position:absolute",
 			"top:6px",
 			"right:6px",
 			"padding:2px 8px",
 			"border-radius:4px",
-			"background:rgba(0, 0, 0, 0.5)",
+			"background:rgba(0,0,0,0.52)",
 			"backdrop-filter:blur(4px)",
 			"color:#fff",
 			"font-size:10px",
@@ -438,89 +589,67 @@ function renderPreview(node) {
 			"z-index:2",
 			"white-space:nowrap",
 		].join(";");
-
-		// 设置尺寸文字
 		if (item.width && item.height) {
 			sizeBadge.textContent = `${item.width}×${item.height}`;
 		} else if (item.image) {
 			sizeBadge.textContent = "外部输入";
 		} else {
 			sizeBadge.textContent = "加载中...";
-			// 图片加载完成后更新尺寸
 			image.onload = () => {
 				sizeBadge.textContent = `${image.naturalWidth}×${image.naturalHeight}`;
-				scheduleLayout(nodeRef);
+				requestRedraw(nodeRef);
 			};
 		}
-		// 图片加载失败标记
 		image.onerror = () => {
 			sizeBadge.textContent = "加载失败";
-			// 标记为错误图片
 			item._error = true;
 			card.style.opacity = "0.5";
 			card.style.filter = "grayscale(0.8)";
 			scheduleLayout(nodeRef);
 		};
 
-		// 右下角：删除按钮
 		const deleteBtn = document.createElement("button");
-		deleteBtn.className = "gjj-image-delete-btn";
+		deleteBtn.type = "button";
 		deleteBtn.innerHTML = "×";
+		deleteBtn.title = "从当前选择中移除这张图片";
 		deleteBtn.style.cssText = [
 			"position:absolute",
 			"bottom:6px",
 			"right:6px",
-			"width:28px",
-			"height:28px",
+			"width:26px",
+			"height:26px",
 			"border-radius:50%",
 			"border:none",
-			"background:rgba(220, 53, 69, 0.8)",
+			"background:rgba(220,53,69,0.86)",
 			"backdrop-filter:blur(4px)",
 			"color:#fff",
 			"font-size:18px",
 			"font-weight:bold",
 			"line-height:1",
 			"cursor:pointer",
-			"transition:all 0.2s ease",
 			"pointer-events:auto",
 			"z-index:3",
 			"display:flex",
 			"align-items:center",
 			"justify-content:center",
 		].join(";");
-
-		// 删除按钮悬停效果
-		deleteBtn.addEventListener("mouseenter", () => {
-			deleteBtn.style.background = "rgba(220, 53, 69, 1)";
-			deleteBtn.style.transform = "scale(1.1)";
-		});
-		deleteBtn.addEventListener("mouseleave", () => {
-			deleteBtn.style.background = "rgba(220, 53, 69, 0.8)";
-			deleteBtn.style.transform = "scale(1)";
-		});
-
-		// 删除按钮点击事件
 		deleteBtn.addEventListener("click", (event) => {
 			event.preventDefault();
 			event.stopPropagation();
 			toggleSelection(nodeRef, item);
 		});
 
-		// 点击图片放大查看
 		card.addEventListener("click", (event) => {
-			// 如果点击的是删除按钮，不触发放大
 			if (event.target === deleteBtn || deleteBtn.contains(event.target)) {
 				return;
 			}
 			event.preventDefault();
 			event.stopPropagation();
-
-			// 创建全屏预览
 			const overlay = document.createElement("div");
 			overlay.style.cssText = [
 				"position:fixed",
 				"inset:0",
-				"background:rgba(0, 0, 0, 0.9)",
+				"background:rgba(0,0,0,0.9)",
 				"backdrop-filter:blur(10px)",
 				"z-index:10000",
 				"display:flex",
@@ -528,71 +657,44 @@ function renderPreview(node) {
 				"justify-content:center",
 				"cursor:zoom-out",
 			].join(";");
-
 			const previewImg = document.createElement("img");
-			previewImg.src = imageDataToUrl(item);
+			previewImg.src = imageDataToUrl(item, { noRand: true });
 			previewImg.style.cssText = [
 				"max-width:90%",
 				"max-height:90%",
 				"object-fit:contain",
 				"border-radius:8px",
-				"box-shadow:0 0 40px rgba(0, 0, 0, 0.5)",
+				"box-shadow:0 0 40px rgba(0,0,0,0.5)",
 				"transition:transform 0.1s ease",
-				"cursor:grab",
 			].join(";");
-
-			// 滚轮缩放功能
 			let currentScale = 1;
-			const minScale = 0.1;
-			const maxScale = 10;
-
 			overlay.addEventListener("wheel", (e) => {
 				e.preventDefault();
 				e.stopPropagation();
-
-				const delta = e.deltaY > 0 ? -0.1 : 0.1;
-				currentScale = Math.max(minScale, Math.min(maxScale, currentScale + delta));
+				currentScale = Math.max(0.1, Math.min(10, currentScale + (e.deltaY > 0 ? -0.1 : 0.1)));
 				previewImg.style.transform = `scale(${currentScale})`;
 			});
-
-			// 双击重置缩放
 			previewImg.addEventListener("dblclick", (e) => {
 				e.stopPropagation();
 				currentScale = 1;
-				previewImg.style.transform = `scale(${currentScale})`;
+				previewImg.style.transform = "scale(1)";
 			});
-
 			const closeHint = document.createElement("div");
 			closeHint.textContent = "滚轮缩放 · 双击重置 · 点击关闭";
-			closeHint.style.cssText = [
-				"position:absolute",
-				"bottom:20px",
-				"left:50%",
-				"transform:translateX(-50%)",
-				"color:#fff",
-				"font-size:13px",
-				"opacity:0.6",
-				"pointer-events:none",
-				"white-space:nowrap",
-			].join(";");
-
+			closeHint.style.cssText = "position:absolute;bottom:20px;left:50%;transform:translateX(-50%);color:#fff;font-size:13px;opacity:.65;pointer-events:none;white-space:nowrap";
 			overlay.appendChild(previewImg);
 			overlay.appendChild(closeHint);
 			document.body.appendChild(overlay);
-
-			// 点击关闭
-			overlay.addEventListener("click", () => {
-				overlay.remove();
-			});
+			overlay.addEventListener("click", () => overlay.remove());
 		});
 
-		// 组装卡片
 		card.appendChild(image);
 		card.appendChild(indexBadge);
 		card.appendChild(sizeBadge);
 		card.appendChild(deleteBtn);
 		grid.appendChild(card);
 	}
+	updatePreviewPanelHeight(node);
 }
 
 function updateSummary(node) {
@@ -612,13 +714,14 @@ function updateSummary(node) {
 			// 当超过20张时，显示实际总数，不再限制为MAX_OUTPUT_IMAGES
 			const total = mergedCount > 0 ? mergedCount : (externalCount + selectedCount);
 			if (total > MAX_OUTPUT_IMAGES) {
-				node.__gjjMultiImageSummary.textContent = `${parts.join(" + ")}，共 ${total} 张（仅批量队列输出）`;
+				node.__gjjMultiImageSummary.textContent = `${parts.join(" + ")}，共 ${total} 张（批量队列输出）`;
 			} else {
-				node.__gjjMultiImageSummary.textContent = `${parts.join(" + ")}，共 ${total} / ${MAX_OUTPUT_IMAGES} 张`;
+				const outputText = ensureState(node).showIndividualOutputs ? "单图口已展开" : "单图口隐藏";
+			node.__gjjMultiImageSummary.textContent = `${parts.join(" + ")}，共 ${total} / ${MAX_OUTPUT_IMAGES} 张 · ${outputText}`;
 			}
 			return;
 		}
-		node.__gjjMultiImageSummary.textContent = '点击"浏览图片"导入，或外部连接 GJJ 批量图片队列';
+		node.__gjjMultiImageSummary.textContent = "点击 📁 导入，或外部连接 GJJ 批量图片队列";
 	}
 }
 
@@ -629,7 +732,7 @@ function clearErrorImages(node) {
 	const removedCount = beforeCount - state.selection.length;
 	if (removedCount > 0) {
 		syncDataWidget(node);
-		ensureOutputs(node, state.selection.length);
+		ensureOutputs(node, totalImageCount(node));
 		renderPreview(node);
 		updateSummary(node);
 		scheduleLayout(node);
@@ -643,10 +746,33 @@ function clearAllImages(node) {
 	}
 	state.selection = [];
 	syncDataWidget(node);
-	ensureOutputs(node, 0);
+	ensureOutputs(node, totalImageCount(node));
 	renderPreview(node);
 	updateSummary(node);
 	scheduleLayout(node);
+}
+
+function getLayoutSignature(node) {
+	const state = ensureState(node);
+	const count = Math.max(0, (Number(state.externalCount || 0) > 0 && Array.isArray(state.executedImages)) ? state.executedImages.length : state.selection.length);
+	const widthBucket = Math.round(Number(node.size?.[0] || MIN_WIDTH));
+	const compact = widthBucket < 520 ? 1 : 0;
+	const ultraCompact = widthBucket < 390 ? 1 : 0;
+	const rangeExpanded = state.rangeExpanded ? 1 : 0;
+	const extraExpanded = state.extraToolsExpanded ? 1 : 0;
+	const outputs = state.showIndividualOutputs ? Math.min(totalImageCount(node), MAX_OUTPUT_IMAGES) : 0;
+	return [count, Number(state.thumbSize || DEFAULT_THUMB_SIZE), widthBucket, compact, ultraCompact, rangeExpanded, extraExpanded, outputs].join("|");
+}
+
+function computePreviewNaturalHeight(node) {
+	const state = ensureState(node);
+	const count = Math.max(1, (Number(state.externalCount || 0) > 0 && Array.isArray(state.executedImages)) ? state.executedImages.length : state.selection.length);
+	const width = Math.max(220, Number(node.size?.[0] || MIN_WIDTH) - 28);
+	const thumb = Math.max(MIN_THUMB_SIZE, Math.min(MAX_THUMB_SIZE, Number(state.thumbSize || DEFAULT_THUMB_SIZE)));
+	const gap = 8;
+	const cols = Math.max(1, Math.floor((width - 20 + gap) / (thumb + gap)));
+	const rows = Math.max(1, Math.ceil(count / cols));
+	return Math.min(MAX_PREVIEW_HEIGHT, Math.max(132, rows * thumb + Math.max(0, rows - 1) * gap + 22));
 }
 
 function measureHeight(node) {
@@ -654,47 +780,129 @@ function measureHeight(node) {
 	if (!container) {
 		return MIN_HEIGHT;
 	}
+	updatePreviewPanelHeight(node);
 	const contentHeight = Math.ceil(container.scrollHeight || container.offsetHeight || MIN_HEIGHT);
-	return Math.max(MIN_HEIGHT, contentHeight + 8);
+	return Math.max(MIN_HEIGHT, contentHeight + 10);
 }
 
-function updateLayout(node) {
+function updateLayout(node, force = false) {
+	if (!node) {
+		return;
+	}
+	const signature = getLayoutSignature(node);
+	if (!force && node.__gjjMultiImageLayoutSignature === signature) {
+		return;
+	}
+	node.__gjjMultiImageLayoutSignature = signature;
 	updateSummary(node);
-	// 只更新高度，保留用户设置的宽度
 	const height = measureHeight(node);
-
-	// 关键修复：强制更新节点大小，即使高度减少
+	node.__gjjMultiImageCachedHeight = height;
 	const currentHeight = Number(node.size?.[1] || MIN_HEIGHT);
-	if (height !== currentHeight) {
+	// 加 2px 容差，避免浏览器 scrollHeight / 小数取整导致节点反复抖动。
+	if (Math.abs(height - currentHeight) > 2) {
 		node.setSize?.([node.size?.[0], height]);
-		if (node.__gjjMultiImageWidget) {
-			node.__gjjMultiImageWidget.last_y = 0;
-		}
 		requestRedraw(node);
 	}
 }
 
-function scheduleLayout(node) {
+function scheduleLayout(node, force = false) {
 	if (!node || node.__gjjMultiImageLayoutQueued) {
 		return;
 	}
 	node.__gjjMultiImageLayoutQueued = true;
 	requestAnimationFrame(() => {
 		node.__gjjMultiImageLayoutQueued = false;
-		updateLayout(node);
+		updateLayout(node, force);
 	});
 }
 
 async function refreshOptions(node) {
 	const state = ensureState(node);
 	state.options = await fetchOptions();
+	enrichSelectionWithOptions(state);
 	renderBrowser(node);
 	renderPreview(node);
 	updateSummary(node);
 	scheduleLayout(node);
 }
 
+function makeIconButton(icon, tooltip) {
+	const button = document.createElement("button");
+	button.type = "button";
+	button.textContent = icon;
+	button.title = tooltip;
+	button.style.cssText = [
+		"width:28px",
+		"height:26px",
+		"padding:0",
+		"border:1px solid #465761",
+		"border-radius:7px",
+		"background:#1a2328",
+		"color:#dce7e2",
+		"font-size:14px",
+		"line-height:1",
+		"cursor:pointer",
+		"transition:all 0.15s ease",
+		"display:inline-flex",
+		"align-items:center",
+		"justify-content:center",
+	].join(";");
+	button.addEventListener("mouseenter", () => {
+		button.style.background = "#243039";
+		button.style.borderColor = "#5f7b8d";
+	});
+	button.addEventListener("mouseleave", () => {
+		button.style.background = "#1a2328";
+		button.style.borderColor = "#465761";
+	});
+	return button;
+}
+
+function updateToolbarCompact(node) {
+	const toolbar = node.__gjjMultiImageToolbar;
+	if (!toolbar) {
+		return;
+	}
+	const width = Number(node.size?.[0] || MIN_WIDTH);
+	const extraTools = node.__gjjMultiImageExtraTools || [];
+	const summary = node.__gjjMultiImageSummary;
+	const thumbLabel = node.__gjjMultiImageThumbLabel;
+	const compact = width < 520;
+	const ultraCompact = width < 390;
+	const expanded = Boolean(ensureState(node).extraToolsExpanded);
+	for (const item of extraTools) {
+		item.style.display = compact && !expanded ? "none" : "inline-flex";
+	}
+	if (thumbLabel) {
+		thumbLabel.style.display = compact && !expanded ? "none" : "inline-flex";
+	}
+	if (summary) {
+		summary.style.display = ultraCompact ? "none" : "block";
+		summary.style.flexBasis = compact ? "100%" : "80px";
+		summary.style.order = compact ? "99" : "0";
+	}
+	if (node.__gjjMultiImageMoreButton) {
+		node.__gjjMultiImageMoreButton.style.display = compact ? "inline-flex" : "none";
+	}
+}
+
+function updatePreviewPanelHeight(node) {
+	const wrap = node.__gjjMultiImagePreviewWrap;
+	if (!wrap) {
+		return;
+	}
+	updateToolbarCompact(node);
+	// 只按图片数量、缩略图尺寸和节点宽度计算自然高度；不再反向读取当前节点高度填满剩余空间，避免越算越高/抖动。
+	const height = computePreviewNaturalHeight(node);
+	if (wrap.__gjjLastPreviewHeight !== height) {
+		wrap.__gjjLastPreviewHeight = height;
+		wrap.style.height = `${height}px`;
+		wrap.style.maxHeight = `${MAX_PREVIEW_HEIGHT}px`;
+	}
+}
+
 function buildDom(node) {
+	const state = ensureState(node);
 	const container = document.createElement("div");
 	container.style.cssText = [
 		"display:flex",
@@ -704,73 +912,104 @@ function buildDom(node) {
 		"height:auto",
 		"min-height:unset",
 		"box-sizing:border-box",
-		"padding:4px 0 0 0",
+		"padding:2px 0 0 0",
 	].join(";");
 
 	const toolbar = document.createElement("div");
-	toolbar.style.cssText = "display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:0 2px;";
-
-	const browseButton = document.createElement("button");
-	browseButton.type = "button";
-	browseButton.textContent = " 浏览图片";
-	browseButton.title = "打开系统图片选择器；可用 Shift 或 Ctrl 一次选择多张图片。";
-	browseButton.style.cssText = [
-		"height:26px",
-		"padding:0 10px",
-		"border:1px solid #465761",
-		"border-radius:6px",
-		"background:#1a2328",
-		"color:#dce7e2",
-		"font-size:11px",
-		"cursor:pointer",
-		"transition:all 0.2s ease",
+	toolbar.style.cssText = [
+		"display:flex",
+		"gap:5px",
+		"row-gap:5px",
+		"align-items:flex-start",
+		"align-content:flex-start",
+		"flex-wrap:wrap",
+		"padding:0 2px",
+		"box-sizing:border-box",
+		"max-width:100%",
+		"overflow:hidden",
 	].join(";");
 
-	const refreshButton = document.createElement("button");
-	refreshButton.type = "button";
-	refreshButton.textContent = "🔄 刷新";
-	refreshButton.title = "刷新图片列表";
-	refreshButton.style.cssText = browseButton.style.cssText;
+	const browseButton = makeIconButton("📁", "浏览图片：打开系统图片选择器，可用 Shift/Ctrl 一次选择多张图片。");
+	const refreshButton = makeIconButton("🔄", "刷新：重新扫描 ComfyUI input 目录中的图片列表，并刷新当前预览。");
+	const clearErrorButton = makeIconButton("🧹", "清理错误：移除当前列表里加载失败或损坏的图片。");
+	const clearAllButton = makeIconButton("🗑️", "清空：清空所有已选图片，保留外部输入连接。");
+	const rangeButton = makeIconButton("#️⃣", "序列范围：点击展开/收起设置栏。支持 [1,3,5] 和 [1:8]。");
+	const outputButton = makeIconButton("➕", `单图片输出口：默认隐藏。点击后按当前图片数量展开，最多 ${MAX_OUTPUT_IMAGES} 个。`);
+	const zoomOutButton = makeIconButton("🔎−", "缩小缩略图：减少每张预览图尺寸，节点高度会自动重算。");
+	const zoomInButton = makeIconButton("🔍+", "放大缩略图：增加每张预览图尺寸，节点高度会自动重算。");
+	const moreButton = makeIconButton("⋯", "更多工具：当前节点宽度较窄时，清理、清空、缩略图缩放会自动折叠到这里。点击临时展开/收起。");
+	zoomOutButton.style.width = "36px";
+	zoomInButton.style.width = "36px";
+
+	const thumbLabel = document.createElement("span");
+	thumbLabel.style.cssText = "font-size:10px;color:#8ea0a8;min-width:34px;text-align:center;user-select:none";
+
 	refreshButton.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
 		refreshOptions(node);
 	});
-
-	// 清理错误图片按钮
-	const clearErrorButton = document.createElement("button");
-	clearErrorButton.type = "button";
-	clearErrorButton.textContent = "🗑️ 清理错误";
-	clearErrorButton.title = "清理加载失败的图片";
-	clearErrorButton.style.cssText = browseButton.style.cssText;
 	clearErrorButton.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
 		clearErrorImages(node);
 	});
-
-	// 清空所有图片按钮
-	const clearAllButton = document.createElement("button");
-	clearAllButton.type = "button";
-	clearAllButton.textContent = "🧹 清空";
-	clearAllButton.title = "清空所有已选图片";
-	clearAllButton.style.cssText = browseButton.style.cssText;
 	clearAllButton.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
 		clearAllImages(node);
 	});
-
-	// 按钮悬停效果
-	[browseButton, refreshButton, clearErrorButton, clearAllButton].forEach(btn => {
-		btn.addEventListener("mouseenter", () => {
-			btn.style.background = "#243039";
-			btn.style.borderColor = "#567080";
-		});
-		btn.addEventListener("mouseleave", () => {
-			btn.style.background = "#1a2328";
-			btn.style.borderColor = "#465761";
-		});
+	rangeButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		state.rangeExpanded = !state.rangeExpanded;
+		node.properties = node.properties || {};
+		node.properties.sequence_range_expanded = state.rangeExpanded;
+		if (node.__gjjMultiImageRangeRow) {
+			node.__gjjMultiImageRangeRow.style.display = state.rangeExpanded ? "flex" : "none";
+		}
+		rangeButton.style.background = state.rangeExpanded ? "#2b4250" : "#1a2328";
+		scheduleLayout(node);
+	});
+	outputButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		state.showIndividualOutputs = !state.showIndividualOutputs;
+		node.properties = node.properties || {};
+		node.properties.show_individual_outputs = state.showIndividualOutputs;
+		ensureOutputs(node, totalImageCount(node));
+		updateSummary(node);
+		requestRedraw(node);
+	});
+	zoomOutButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		state.thumbSize = Math.max(MIN_THUMB_SIZE, Number(state.thumbSize || DEFAULT_THUMB_SIZE) - THUMB_STEP);
+		applyThumbnailSize(node);
+		renderPreview(node);
+		scheduleLayout(node);
+	});
+	zoomInButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		state.thumbSize = Math.min(MAX_THUMB_SIZE, Number(state.thumbSize || DEFAULT_THUMB_SIZE) + THUMB_STEP);
+		applyThumbnailSize(node);
+		renderPreview(node);
+		scheduleLayout(node);
+	});
+	moreButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		state.extraToolsExpanded = !state.extraToolsExpanded;
+		const extraTools = node.__gjjMultiImageExtraTools || [clearErrorButton, clearAllButton, zoomOutButton, zoomInButton];
+		for (const item of extraTools) {
+			item.style.display = state.extraToolsExpanded ? "inline-flex" : "none";
+		}
+		if (thumbLabel) {
+			thumbLabel.style.display = state.extraToolsExpanded ? "inline-flex" : "none";
+		}
+		moreButton.style.background = state.extraToolsExpanded ? "#2b4250" : "#1a2328";
+		scheduleLayout(node);
 	});
 
 	const fileInput = document.createElement("input");
@@ -778,9 +1017,7 @@ function buildDom(node) {
 	fileInput.accept = "image/*";
 	fileInput.multiple = true;
 	fileInput.style.display = "none";
-	fileInput.addEventListener("click", (event) => {
-		event.stopPropagation();
-	});
+	fileInput.addEventListener("click", (event) => event.stopPropagation());
 	fileInput.addEventListener("change", async (event) => {
 		event.stopPropagation();
 		const files = Array.from(event.target?.files || []);
@@ -807,18 +1044,60 @@ function buildDom(node) {
 	summary.style.cssText = [
 		"font-size:11px",
 		"color:#dce7e2",
-		"padding:2px 8px",
-		"background:rgba(0, 0, 0, 0.3)",
-		"border-radius:4px",
-		"flex:1",
-		"min-width:120px",
+		"padding:2px 7px",
+		"background:rgba(0,0,0,0.28)",
+		"border-radius:5px",
+		"flex:1 1 80px",
+		"min-width:0",
+		"overflow:hidden",
+		"text-overflow:ellipsis",
+		"white-space:nowrap",
 	].join(";");
 
 	toolbar.appendChild(browseButton);
 	toolbar.appendChild(refreshButton);
+	toolbar.appendChild(rangeButton);
+	toolbar.appendChild(outputButton);
+	toolbar.appendChild(moreButton);
 	toolbar.appendChild(clearErrorButton);
 	toolbar.appendChild(clearAllButton);
+	toolbar.appendChild(zoomOutButton);
+	toolbar.appendChild(thumbLabel);
+	toolbar.appendChild(zoomInButton);
 	toolbar.appendChild(summary);
+
+	const rangeRow = document.createElement("div");
+	rangeRow.style.cssText = [
+		"display:flex",
+		"gap:6px",
+		"align-items:center",
+		"padding:0 2px",
+	].join(";");
+	rangeRow.style.display = state.rangeExpanded ? "flex" : "none";
+	const rangeInput = document.createElement("input");
+	rangeInput.type = "text";
+	rangeInput.placeholder = RANGE_PLACEHOLDER;
+	rangeInput.value = getSequenceRange(node);
+	rangeInput.title = "序列范围：留空输出全部；[1,3,5] 输出指定序号；[1:8] 输出闭区间。";
+	rangeInput.style.cssText = [
+		"height:26px",
+		"flex:1",
+		"min-width:0",
+		"box-sizing:border-box",
+		"border:1px solid #465761",
+		"border-radius:7px",
+		"background:#121a1f",
+		"color:#dce7e2",
+		"font-size:11px",
+		"padding:0 8px",
+		"outline:none",
+	].join(";");
+	rangeInput.addEventListener("pointerdown", (event) => event.stopPropagation());
+	rangeInput.addEventListener("keydown", (event) => event.stopPropagation());
+	rangeInput.addEventListener("input", () => {
+		syncSequenceRange(node, rangeInput.value);
+	});
+	rangeRow.appendChild(rangeInput);
 
 	const previewWrap = document.createElement("div");
 	previewWrap.style.cssText = [
@@ -830,12 +1109,13 @@ function buildDom(node) {
 		"box-sizing:border-box",
 		"overflow-y:auto",
 		"overflow-x:hidden",
-		"min-height:160px",
-		"max-height:480px",
+		"min-height:132px",
+		"flex:1 1 auto",
+		"scrollbar-width:thin",
 	].join(";");
 
 	const empty = document.createElement("div");
-	empty.textContent = '点击"浏览图片"导入，或外部连接 GJJ 批量图片队列';
+	empty.textContent = "点击 📁 导入图片，或连接外部 GJJ 批量图片队列";
 	empty.style.cssText = [
 		"position:absolute",
 		"inset:0",
@@ -852,23 +1132,35 @@ function buildDom(node) {
 	const grid = document.createElement("div");
 	grid.style.cssText = [
 		"display:grid",
-		"grid-template-columns:repeat(auto-fill, minmax(140px, 1fr))",
+		`grid-template-columns:repeat(auto-fill, minmax(${state.thumbSize || DEFAULT_THUMB_SIZE}px, 1fr))`,
 		"gap:8px",
 		"padding:4px",
 	].join(";");
 
 	previewWrap.appendChild(grid);
 	previewWrap.appendChild(empty);
-
 	container.appendChild(toolbar);
+	container.appendChild(rangeRow);
 	container.appendChild(previewWrap);
 	container.appendChild(fileInput);
 
 	node.__gjjMultiImageContainer = container;
+	node.__gjjMultiImageToolbar = toolbar;
+	node.__gjjMultiImageExtraTools = [clearErrorButton, clearAllButton, zoomOutButton, zoomInButton];
+	node.__gjjMultiImageMoreButton = moreButton;
 	node.__gjjMultiImageBrowseButton = browseButton;
+	node.__gjjMultiImageOutputButton = outputButton;
+	node.__gjjMultiImageThumbLabel = thumbLabel;
+	node.__gjjMultiImageRangeButton = rangeButton;
+	node.__gjjMultiImageRangeRow = rangeRow;
+	node.__gjjMultiImageRangeInput = rangeInput;
 	node.__gjjMultiImageSummary = summary;
+	node.__gjjMultiImagePreviewWrap = previewWrap;
 	node.__gjjMultiImageGrid = grid;
 	node.__gjjMultiImageEmpty = empty;
+	applyThumbnailSize(node);
+	updateOutputButtonState(node);
+	updateToolbarCompact(node);
 	return container;
 }
 
@@ -878,10 +1170,11 @@ function ensureDomWidget(node) {
 	}
 	const container = buildDom(node);
 	const widget = node.addDOMWidget(DOM_WIDGET_NAME, "HTML", container, { serialize: false, hideOnZoom: false });
-	widget.computeSize = (width) => [
-		Math.max(MIN_WIDTH, Number(width || MIN_WIDTH)),
-		Math.max(MIN_HEIGHT, measureHeight(node)),
-	];
+	widget.computeSize = (width) => {
+		const w = Math.max(MIN_WIDTH, Number(width || MIN_WIDTH));
+		// computeSize 会被 ComfyUI 频繁调用，只返回缓存高度；真正重算由 scheduleLayout 控制。
+		return [w, Math.max(MIN_HEIGHT, Number(node.__gjjMultiImageCachedHeight || measureHeight(node)))];
+	};
 	widget.draw = () => {};
 	node.__gjjMultiImageWidget = widget;
 	reorderWidgets(node);
@@ -898,7 +1191,7 @@ function stabilizeNode(node) {
 	reorderWidgets(node);
 	const state = ensureState(node);
 	syncDataWidget(node);
-	ensureOutputs(node, Math.min(MAX_OUTPUT_IMAGES, Number(state.selection.length || 0) + Number(state.externalCount || 0)));
+	ensureOutputs(node, totalImageCount(node));
 	renderBrowser(node);
 	renderPreview(node);
 	updateSummary(node);
@@ -934,6 +1227,9 @@ app.registerExtension({
 			const result = originalOnConfigure?.apply(this, args);
 			const state = ensureState(this);
 			state.selection = parseSelection(serializedSelectionFromNode(this, args[0]));
+			state.showIndividualOutputs = Boolean(this.properties?.show_individual_outputs);
+			state.thumbSize = Number(this.properties?.thumb_size || DEFAULT_THUMB_SIZE);
+			state.rangeExpanded = Boolean(this.properties?.sequence_range_expanded);
 			state.externalCount = 0;
 			state.executedImages = [];
 			state.mergedCount = state.selection.length;
@@ -951,6 +1247,10 @@ app.registerExtension({
 			if (serializedNode) {
 				serializedNode.properties = serializedNode.properties || {};
 				serializedNode.properties[DATA_WIDGET_NAME] = serialized;
+				serializedNode.properties[SEQUENCE_RANGE_WIDGET_NAME] = getSequenceRange(this);
+				serializedNode.properties.show_individual_outputs = Boolean(ensureState(this).showIndividualOutputs);
+				serializedNode.properties.thumb_size = Number(ensureState(this).thumbSize || DEFAULT_THUMB_SIZE);
+				serializedNode.properties.sequence_range_expanded = Boolean(ensureState(this).rangeExpanded);
 				if (Array.isArray(serializedNode.widgets_values) && Array.isArray(this.widgets)) {
 					const widgetIndex = this.widgets.findIndex((widget) => widget?.name === DATA_WIDGET_NAME);
 					if (widgetIndex >= 0) {
@@ -988,8 +1288,12 @@ app.registerExtension({
 		const originalOnResize = nodeType.prototype.onResize;
 		nodeType.prototype.onResize = function (...args) {
 			const result = originalOnResize?.apply(this, args);
-			// 用户手动调整宽度后，立即重新计算高度
-			scheduleLayout(this);
+			// 只有宽度变化会影响列数和高度；高度变化不反向驱动预览区，避免抖动。
+			const width = Math.round(Number(this.size?.[0] || MIN_WIDTH));
+			if (this.__gjjMultiImageLastWidth !== width) {
+				this.__gjjMultiImageLastWidth = width;
+				scheduleLayout(this, true);
+			}
 			return result;
 		};
 	},
