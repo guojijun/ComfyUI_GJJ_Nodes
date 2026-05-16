@@ -62,7 +62,7 @@ def _load_soundfile():
 			"这个 GJJ 节点需要 soundfile 和 numpy Python 包才能运行。\n"
 			"\n"
 			" 必需依赖（请安装）：\n"
-			"  • soundfile (音频文件读写库)\n"
+			"  • soundfile (音频/视频文件读写库)\n"
 			"  • numpy (数值计算库)\n"
 			"\n"
 			"🔧 快速安装命令（使用实际 Python 路径）：\n"
@@ -75,6 +75,7 @@ def _load_soundfile():
 
 
 NODE_NAME = "GJJ_AudioTimestampEditor"
+BACKEND_VERSION = "V16"
 MAX_SEGMENTS = 99  # 最大分段数量
 MIN_OUTPUTS = 1  # 最小输出数量
 
@@ -112,6 +113,28 @@ def format_segments_list(segments: list[dict[str, Any]]) -> str:
 	if not segments:
 		return "[]"
 	return json.dumps(segments, ensure_ascii=False, indent=2)
+
+def _segments_from_workflow_properties(extra_pnginfo: Any, unique_id: Any) -> list[dict[str, Any]]:
+	"""从工作流节点 properties 中读取前端最新分段。
+
+	原因：隐藏 widget 在某些 ComfyUI 前端版本中可能不会及时把 widgets_values 缓存更新到 prompt，
+	导致后端收到旧的 segments_json。properties.segments 由前端拖动时同步写入，作为更可靠的兜底。
+	"""
+	if unique_id is None or not isinstance(extra_pnginfo, dict):
+		return []
+	try:
+		workflow = extra_pnginfo.get("workflow") or {}
+		nodes = workflow.get("nodes") or []
+		uid = str(unique_id)
+		for node in nodes:
+			if str(node.get("id")) != uid:
+				continue
+			props = node.get("properties") or {}
+			text = props.get("segments") or props.get("segments_json") or ""
+			return parse_segments_list(text)
+	except Exception:
+		return []
+	return []
 
 
 def audio_to_waveform_data(audio: dict[str, Any]) -> tuple[np.ndarray, int]:
@@ -184,24 +207,36 @@ def crop_audio_segment(audio: dict[str, Any], start_time: float, end_time: float
 	}
 
 
-def generate_auto_segments(duration: float, segment_count: int = 4) -> list[dict[str, Any]]:
-	"""根据音频时长自动生成等分的时间段"""
+def generate_auto_segments(duration: float, segment_count: int = 1, segment_duration: float = 3.0) -> list[dict[str, Any]]:
+	"""根据音频时长生成默认时间段。默认只生成 1 段，并按单段时长截取。"""
 	if duration <= 0:
 		return []
 
-	segment_duration = duration / segment_count
-	segments = []
+	segment_count = max(1, int(segment_count or 1))
+	segment_duration = max(0.05, float(segment_duration or 3.0))
 
+	# 单段模式：从 0 秒开始，长度由“单段时长”决定，前端可拖动位置或拉长拉短。
+	if segment_count <= 1:
+		return [{
+			"start": 0.0,
+			"end": round(min(duration, segment_duration), 3),
+			"label": "片段 1",
+		}]
+
+	# 多段模式：每段优先使用单段时长，不足时自动裁到音频尾部。
+	segments = []
 	for i in range(segment_count):
-		start = i * segment_duration
-		end = (i + 1) * segment_duration
+		start = min(duration, i * segment_duration)
+		end = min(duration, start + segment_duration)
+		if end <= start:
+			break
 		segments.append({
 			"start": round(start, 3),
 			"end": round(end, 3),
 			"label": f"片段 {i + 1}",
 		})
 
-	return segments
+	return segments or [{"start": 0.0, "end": round(min(duration, segment_duration), 3), "label": "片段 1"}]
 
 
 class GJJ_AudioSegmentEditor:
@@ -211,7 +246,7 @@ class GJJ_AudioSegmentEditor:
 	DESCRIPTION = """音频分段编辑器：加载音频后自动生成分段，可视化编辑起止时间，按时间段裁剪并输出多个音频片段。
 
 【核心功能】
-• 节点内加载音频 - 支持从下拉列表选择音频文件
+• 节点内加载音频 - 支持从下拉列表选择音频/视频文件
 • 自动生成分段 - 根据音频时长自动创建等分时间段
 • 可视化编辑 - Canvas波形显示，拖拽调整起止时间标记
 • 动态输出 - 根据分段数量自动扩展输出接口
@@ -244,20 +279,20 @@ class GJJ_AudioSegmentEditor:
 
 	GJJ_HELP = {
 		"title": "GJJ · ✂️ 音频分段编辑器",
-		"version": "2.0.0",
+		"version": "2.1.0",
 		"author": "GJJ Custom Nodes Team",
 		"description": "可视化音频分段裁剪工具，支持动态输出多个音频片段",
 
 		"features": [
 			{
 				"name": "节点内音频加载",
-				"description": "内置音频文件选择器，无需外部节点连接",
+				"description": "内置音频/视频文件选择器，无需外部节点连接",
 				"supported_formats": ["WAV", "MP3", "FLAC"],
 			},
 			{
 				"name": "自动分段生成",
-				"description": "根据音频时长自动创建等分时间段",
-				"default_segments": 4,
+				"description": "默认创建 1 个按单段时长截取的时间段，也可手动添加多段",
+				"default_segments": 1,
 				"customizable": True,
 			},
 			{
@@ -286,7 +321,7 @@ class GJJ_AudioSegmentEditor:
 			"audio_file": {
 				"type": "COMBO",
 				"required": False,
-				"description": "节点内音频文件选择器",
+				"description": "节点内音频/视频文件选择器；视频会自动只提取音频",
 			},
 			"segments_json": {
 				"type": "STRING",
@@ -352,7 +387,7 @@ class GJJ_AudioSegmentEditor:
 
 		"changelog": [
 			{
-				"version": "2.0.0",
+				"version": "2.1.0",
 				"date": "2026-05-04",
 				"changes": [
 					"✨ 重构为音频分段编辑器",
@@ -377,22 +412,23 @@ class GJJ_AudioSegmentEditor:
 		"segment extractor",
 	]
 
-	# 输出定义：第一个是分段列表JSON（STRING），第二个及之后是音频片段（AUDIO）
-	# 由前端动态添加更多AUDIO输出
-	RETURN_TYPES = ("STRING",) + ("AUDIO",) * MAX_SEGMENTS
-	RETURN_NAMES = ("分段列表",) + tuple(f"音频片段{i}" for i in range(1, MAX_SEGMENTS + 1))
-	OUTPUT_TOOLTIPS = ("编辑后的时间段JSON配置",) + tuple(f"第{i}个时间段的音频片段" for i in range(1, MAX_SEGMENTS + 1))
+	# 输出定义：必须与前端可见输出槽位顺序完全一致：
+	# slot0 = 音频片段1，slot1 = 分段列表，slot2... = 音频片段2...
+	# 之前把“分段列表”放在最后，会导致前端动态输出槽位和后端 result 槽位错位。
+	RETURN_TYPES = ("AUDIO", "STRING") + ("AUDIO",) * (MAX_SEGMENTS - 1)
+	RETURN_NAMES = ("音频片段1", "分段列表") + tuple(f"音频片段{i}" for i in range(2, MAX_SEGMENTS + 1))
+	OUTPUT_TOOLTIPS = ("第1个时间段的音频片段", "编辑后的时间段JSON配置") + tuple(f"第{i}个时间段的音频片段" for i in range(2, MAX_SEGMENTS + 1))
 
 	@classmethod
 	def INPUT_TYPES(cls):
-		# 获取音频文件列表
+		# 获取音频/视频文件列表
 		audio_files = cls._get_audio_files()
 
 		return {
 			"required": {
 				"audio_file": (audio_files, {
-					"display_name": "音频文件",
-					"tooltip": "节点内音频文件选择器",
+					"display_name": "音频/视频文件",
+					"tooltip": "节点内音频/视频文件选择器；视频会自动只提取音频",
 				}),
 			},
 			"optional": {
@@ -404,7 +440,15 @@ class GJJ_AudioSegmentEditor:
 					"default": "[]",
 					"multiline": True,
 					"display_name": "分段列表JSON",
-					"tooltip": "时间段列表，格式：[{\"start\": 0.0, \"end\": 2.5, \"label\": \"片段1\"}, ...]",
+					"tooltip": "时间段列表，格式：[{\"start\": 0.0, \"end\": 2.5, \"label\": \"片段1\"}, ...]。前端会完整隐藏，不占空行。",
+				}),
+				"segment_duration": ("FLOAT", {
+					"default": 3.0,
+					"min": 0.05,
+					"max": 3600.0,
+					"step": 0.1,
+					"display_name": "单段时长",
+					"tooltip": "默认只生成 1 段，并按这个时长截取；前端可在波形区拖动位置或拉长拉短。",
 				}),
 			},
 			"hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO", "unique_id": "UNIQUE_ID"},
@@ -412,16 +456,16 @@ class GJJ_AudioSegmentEditor:
 
 	@classmethod
 	def _get_audio_files(cls) -> list[str]:
-		"""获取可用的音频文件列表"""
+		"""获取可用的音频/视频文件列表"""
 		files = ["[不加载]"]
 
-		# 从多个目录查找音频文件
+		# 从多个目录查找音频/视频文件
 		search_dirs = [
 			folder_paths.get_input_directory(),
 			folder_paths.get_output_directory(),
 		]
 
-		audio_extensions = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
+		audio_extensions = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".aiff", ".aif", ".opus", ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv", ".wmv", ".mpeg", ".mpg"}
 
 		for search_dir in search_dirs:
 			if not search_dir or not os.path.exists(search_dir):
@@ -434,6 +478,15 @@ class GJJ_AudioSegmentEditor:
 
 		return files
 
+	@classmethod
+	def IS_CHANGED(cls, audio_file="[不加载]", audio=None, segments_json: str = "[]", segment_duration: float = 3.0, **kwargs):
+		# V15：这个节点的分段信息主要由前端 Canvas 写入隐藏 widget / workflow properties。
+		# 不同 ComfyUI 版本对隐藏 widget、properties、widgets_values 的缓存策略不一致，
+		# 只返回 segments_json 可能会复用旧结果，导致界面高亮已变但输出仍是 0:00 或旧片段。
+		# 因此作为 OUTPUT_NODE，每次队列执行都强制重新计算一次，保证输出音频一定来自当前高亮分段。
+		import time
+		return f"{audio_file}|{segments_json}|{float(segment_duration or 0):.6f}|v12|{time.time_ns()}"
+
 	def __init__(self):
 		self.preview_audio_path = None
 
@@ -442,6 +495,7 @@ class GJJ_AudioSegmentEditor:
 		audio_file: str = "[不加载]",
 		audio = None,
 		segments_json: str = "[]",
+		segment_duration: float = 3.0,
 		prompt=None,
 		extra_pnginfo=None,
 		unique_id=None,
@@ -454,17 +508,35 @@ class GJJ_AudioSegmentEditor:
 				# 从文件加载音频
 				current_audio = self._load_audio_from_file(audio_file)
 			else:
-				raise RuntimeError("请连接外部音频或在节点内选择音频文件")
+				raise RuntimeError("请连接外部音频或在节点内选择音频/视频文件")
 
 			# 2. 转换音频数据
 			audio_np, sample_rate = audio_to_waveform_data(current_audio)
 			duration = len(audio_np) / sample_rate if sample_rate > 0 else 0
 
-			# 3. 解析或生成分段列表（默认4段）
-			segments = parse_segments_list(segments_json)
+			# 3. 解析或生成分段列表。优先使用前端拖动后写入 workflow properties 的最新分段，
+			#    再使用隐藏 widget 传入的 segments_json，最后才自动生成默认单段。
+			property_segments = _segments_from_workflow_properties(extra_pnginfo, unique_id)
+			segments = property_segments or parse_segments_list(segments_json)
 			if not segments:
-				# 自动生成分段
-				segments = generate_auto_segments(duration, 4)
+				# 默认只生成 1 段，按“单段时长”截取；前端可拖动高亮区域调整位置。
+				segments = generate_auto_segments(duration, 1, segment_duration)
+			else:
+				# 边界兜底，避免前端传入超出总时长的时间段。
+				normalized_segments = []
+				for idx, seg in enumerate(segments):
+					try:
+						start = max(0.0, min(float(seg.get("start", 0.0)), max(0.0, duration - 0.001)))
+						end = max(start + 0.001, min(float(seg.get("end", duration)), duration))
+						normalized_segments.append({
+							"start": round(start, 3),
+							"end": round(end, 3),
+							"label": seg.get("label") or f"片段 {idx + 1}",
+							"color": seg.get("color"),
+						})
+					except Exception:
+						pass
+				segments = normalized_segments or generate_auto_segments(duration, 1, segment_duration)
 
 			# 4. 保存音频用于预览
 			try:
@@ -485,7 +557,8 @@ class GJJ_AudioSegmentEditor:
 
 			# 6. 构建 UI数据（遵循ComfyUI规范：所有值必须用元组包裹）
 			ui: dict[str, Any] = {
-				"preview_text": (f"音频时长: {duration:.2f}秒 | 采样率: {sample_rate}Hz | 分段数量: {len(segments)}",),
+				"preview_text": (f"后端 {BACKEND_VERSION} | 音频时长: {duration:.2f}秒 | 采样率: {sample_rate}Hz | 分段数量: {len(segments)}",),
+				"backend_version": (BACKEND_VERSION,),
 				"preview_kind": ("audio_segment_editor",),
 				"preview_audio": (preview_audio_data,) if preview_audio_data else (),
 				"preview_segments": (format_segments_list(segments),),  # 字符串必须用元组包裹
@@ -494,7 +567,7 @@ class GJJ_AudioSegmentEditor:
 				"preview_segment_count": (len(segments),),  # 数值必须用元组包裹
 			}
 
-			print(f"[GJJ] 音频分段编辑器 - 音频时长: {duration:.2f}秒, 分段数量: {len(segments)}")
+			print(f"[GJJ] 音频分段编辑器 {BACKEND_VERSION} - 音频时长: {duration:.2f}秒, 分段数量: {len(segments)}")
 
 			# 7. 按时间段裁剪音频
 			audio_segments = []
@@ -521,14 +594,31 @@ class GJJ_AudioSegmentEditor:
 						"sample_rate": sample_rate,
 					})
 
-			# 8. 构建返回结果：
-			# 第一个输出 = 分段列表JSON（STRING）
-			# 后续输出 = 各音频片段（AUDIO）
-			result_list = [format_segments_list(segments)]
-			result_list.extend(audio_segments)
+			# 8. 构建返回结果，必须按 RETURN_TYPES 槽位顺序返回：
+			# slot0=音频片段1，slot1=分段列表JSON，slot2...=音频片段2...
+			# 同时补齐到 RETURN_TYPES 长度，避免 ComfyUI 动态输出/缓存时错位。
+			empty_audio = {
+				"waveform": torch.zeros((1, 1, 1), dtype=torch.float32),
+				"sample_rate": sample_rate,
+			}
+			first_audio = audio_segments[0] if audio_segments else empty_audio
+			result_list = [first_audio, format_segments_list(segments)]
+			for idx in range(1, MAX_SEGMENTS):
+				result_list.append(audio_segments[idx] if idx < len(audio_segments) else empty_audio)
 
-			# 调试日志
-			print(f"[GJJ] 音频分段编辑器 - 输出: 1个JSON + {len(audio_segments)}个音频片段")
+			# 调试日志：直接打印后端实际裁剪区间，方便核对前端高亮是否进入最终计算。
+			first_samples = 0
+			try:
+				first_samples = int((first_audio.get("waveform")).shape[-1])
+			except Exception:
+				first_samples = 0
+			ui["preview_output_duration"] = (round(first_samples / sample_rate, 3) if sample_rate else 0.0,)
+
+			debug_ranges = ", ".join(
+				f"{float(s.get('start', 0)):.3f}-{float(s.get('end', 0)):.3f}s"
+				for s in segments if isinstance(s, dict)
+			)
+			print(f"[GJJ] 音频分段编辑器 {BACKEND_VERSION} - 输出: {len(audio_segments)}个音频片段 + 1个JSON；分段={debug_ranges}；slot0时长={ui['preview_output_duration'][0]}s")
 
 			return {
 				"ui": ui,
@@ -565,12 +655,12 @@ class GJJ_AudioSegmentEditor:
 				# 其他错误使用标准格式
 				raise RuntimeError(
 					f"🎤 音频分段编辑器执行失败\n"
-					f"参数：audio_file={audio_file}\n\n"
+					f"参数：audio_file={audio_file}, segment_duration={segment_duration}\n\n"
 					f"详细错误：{exc}"
 				) from exc
 
 	def _load_audio_from_file(self, filename: str) -> dict[str, Any]:
-		"""从文件加载音频，自动回退到 ffmpeg 解码不支持的格式"""
+		"""从音频/视频文件加载音频；视频文件通过 ffmpeg 只提取音频"""
 		import subprocess
 		import tempfile
 
@@ -606,7 +696,7 @@ class GJJ_AudioSegmentEditor:
 					}
 				except Exception as e:
 					# soundfile 不支持时尝试 ffmpeg 解码
-					print(f"[GJJ] soundfile 无法加载 {filename}，尝试 ffmpeg 解码... ({e})")
+					print(f"[GJJ] soundfile 无法直接加载 {filename}，尝试 ffmpeg 提取/解码音频... ({e})")
 
 				# ffmpeg 回退：转换成临时 WAV
 				try:
@@ -639,7 +729,7 @@ class GJJ_AudioSegmentEditor:
 
 					waveform = torch.from_numpy(audio_data).float().unsqueeze(0)
 
-					print(f"[GJJ] ffmpeg 解码成功: {filename}")
+					print(f"[GJJ] ffmpeg 提取音频成功: {filename}")
 					return {
 						"waveform": waveform,
 						"sample_rate": sample_rate,
@@ -650,9 +740,9 @@ class GJJ_AudioSegmentEditor:
 						os.unlink(tmp_path)
 					except (OSError, NameError):
 						pass
-					raise RuntimeError(f"加载音频文件失败 {filename}: soundfile={e}, ffmpeg={e2}")
+					raise RuntimeError(f"加载音频/视频文件失败 {filename}: soundfile={e}, ffmpeg={e2}")
 
-		raise RuntimeError(f"找不到音频文件: {filename}")
+		raise RuntimeError(f"找不到音频/视频文件: {filename}")
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_AudioSegmentEditor}
