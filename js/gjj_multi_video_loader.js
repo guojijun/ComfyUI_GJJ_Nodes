@@ -31,14 +31,14 @@ const PARAM_WIDGET_ALIASES = new Map([
 	["最大帧数", "max_frames"],
 ]);
 const PARAM_DEFS = [
-	{ name: "frame_rate", label: "帧率", kind: "number", step: "0.01", min: "1", tip: "最终输出帧率。" },
-	{ name: "width", label: "宽度", kind: "number", step: "8", min: "0", tip: "0 表示跟随源视频；只填宽度会按比例计算高度。" },
-	{ name: "height", label: "高度", kind: "number", step: "8", min: "0", tip: "0 表示跟随源视频；只填高度会按比例计算宽度。" },
-	{ name: "video_format", label: "视频格式", kind: "select", tip: "格式参数命名参考 VHS_VideoCombine。" },
-	{ name: "start_frame", label: "起始帧", kind: "number", step: "1", min: "0", tip: "从第几帧开始读取。" },
-	{ name: "end_frame", label: "结束帧", kind: "number", step: "1", min: "0", tip: "0 表示读取到末尾或达到最大帧数。" },
-	{ name: "frame_stride", label: "抽帧间隔", kind: "number", step: "1", min: "1", tip: "每隔多少帧取一帧。" },
-	{ name: "max_frames", label: "最大帧数", kind: "number", step: "1", min: "1", tip: "每个视频最多解码多少帧。" },
+	{ name: "frame_rate", label: "帧率", kind: "number", step: "0.01", min: "1", default: 24.0, tip: "最终输出帧率。" },
+	{ name: "width", label: "宽度", kind: "number", step: "8", min: "0", default: 0, tip: "0 表示跟随源视频；只填宽度会按比例计算高度。" },
+	{ name: "height", label: "高度", kind: "number", step: "8", min: "0", default: 0, tip: "0 表示跟随源视频；只填高度会按比例计算宽度。" },
+	{ name: "video_format", label: "视频格式", kind: "select", default: "video/h264-mp4", tip: "格式参数命名参考 VHS_VideoCombine。" },
+	{ name: "start_frame", label: "起始帧", kind: "number", step: "1", min: "0", default: 0, tip: "从第几帧开始读取。" },
+	{ name: "end_frame", label: "结束帧", kind: "number", step: "1", min: "0", default: 0, tip: "0 表示读取到末尾或达到最大帧数。" },
+	{ name: "frame_stride", label: "抽帧间隔", kind: "number", step: "1", min: "1", default: 1, tip: "每隔多少帧取一帧。" },
+	{ name: "max_frames", label: "最大帧数", kind: "number", step: "1", min: "1", default: 240, tip: "每个视频最多解码多少帧。" },
 ];
 const FALLBACK_FORMATS = ["video/h264-mp4", "video/webm", "image/gif", "image/webp"];
 const TAB_DEFS = [
@@ -229,11 +229,27 @@ function normalizeParamWidgetName(name) {
 
 function findWidget(node, name) {
 	const wanted = normalizeParamWidgetName(name);
-	return (node.widgets || []).find((widget) => {
-		if (!widget || widget.name === DOM_WIDGET_NAME) return false;
+	const widgets = node.widgets || [];
+	
+	for (const widget of widgets) {
+		if (!widget || widget.name === DOM_WIDGET_NAME) continue;
+		
+		const widgetName = String(widget.name || "").trim();
+		if (widgetName && normalizeParamWidgetName(widgetName) === wanted) {
+			return widget;
+		}
+	}
+	
+	for (const widget of widgets) {
+		if (!widget || widget.name === DOM_WIDGET_NAME) continue;
+		
 		const names = widgetNames(widget);
-		return names.some((item) => normalizeParamWidgetName(item) === wanted);
-	});
+		if (names.some((item) => normalizeParamWidgetName(item) === wanted)) {
+			return widget;
+		}
+	}
+	
+	return null;
 }
 
 function hasLinkedInput(node, name) {
@@ -242,8 +258,34 @@ function hasLinkedInput(node, name) {
 
 function setWidgetValue(node, name, value, force = false) {
 	if (!force && hasLinkedInput(node, name)) return;
+	
 	const widget = findWidget(node, name);
 	if (!widget) return;
+	
+	const paramDef = PARAM_DEFS.find((def) => def.name === name);
+	
+	if (paramDef && paramDef.kind === "number") {
+		if (typeof value === "string") {
+			if (!/^-?\d+(\.\d+)?$/.test(value.trim())) {
+				console.warn(`[GJJ] Invalid numeric value "${value}" for ${name}, using default`);
+				value = paramDef.default ?? 0;
+			} else if (paramDef.step === "0.01") {
+				value = Number.parseFloat(value) || (paramDef.default ?? 0);
+			} else {
+				value = Number.parseInt(value, 10) || (paramDef.default ?? 0);
+			}
+		} else if (typeof value !== "number" || Number.isNaN(value)) {
+			console.warn(`[GJJ] Non-numeric value for ${name}, using default`);
+			value = paramDef.default ?? 0;
+		}
+		
+		const min = Number(paramDef.min) || 0;
+		const max = paramDef.max ? Number(paramDef.max) : Infinity;
+		value = Math.max(min, Math.min(max, value));
+	} else if (paramDef && paramDef.kind === "select" && typeof value !== "string") {
+		value = String(value || paramDef.default || "");
+	}
+	
 	widget.value = value;
 	widget.callback?.(value, app.canvas, node, app.canvas?.graph_mouse);
 }
@@ -286,11 +328,16 @@ async function applyMediaInfoToPanel(node, force = false, preferredItem = null) 
 	const fps = Number(first.fps || 0);
 	const width = Number(first.width || 0);
 	const height = Number(first.height || 0);
+	const frames = Number(first.frames || 0);
 	if (fps > 0) setWidgetValue(node, "frame_rate", Number(fps.toFixed(3)), force);
 	if (width > 0) setWidgetValue(node, "width", Math.round(width), force);
 	if (height > 0) setWidgetValue(node, "height", Math.round(height), force);
+	if (frames > 0) {
+		setWidgetValue(node, "end_frame", frames - 1, force);
+		setWidgetValue(node, "max_frames", frames, force);
+	}
 	setWidgetValue(node, "video_format", guessFormatFromFilename(node, first), force);
-	setSummary(node, `已提取：${fps > 0 ? fps.toFixed(2) + " FPS" : "帧率未知"}${width > 0 && height > 0 ? `，${width}×${height}` : ""}`);
+	setSummary(node, `已提取：${fps > 0 ? fps.toFixed(2) + " FPS" : "帧率未知"}${width > 0 && height > 0 ? `，${width}×${height}` : ""}${frames > 0 ? `，共 ${frames} 帧` : ""}`);
 	renderParamControls(node);
 	requestRedraw(node);
 	return true;
@@ -311,21 +358,24 @@ function setSummary(node, text) {
 
 function buttonStyle(active = false) {
 	return [
-		"height:24px",
-		"min-width:28px",
-		"padding:0 8px",
+		"height:32px",
+		"min-width:36px",
+		"padding:0 12px",
 		"box-sizing:border-box",
 		`border:1px solid ${active ? "#2ec4b6" : "#465761"}`,
-		"border-radius:6px",
+		"border-radius:8px",
 		`background:${active ? "#123432" : "#1a2328"}`,
 		`color:${active ? "#eafffb" : "#dce7e2"}`,
-		"font-size:14px",
-		"line-height:22px",
+		"font-size:16px",
+		"line-height:30px",
 		"cursor:pointer",
 		"white-space:nowrap",
 		"display:inline-flex",
 		"align-items:center",
 		"justify-content:center",
+		"transition:all 0.2s ease",
+		"hover:border-color:#3ddbd9",
+		"hover:background:#234442",
 	].join(";");
 }
 
@@ -338,19 +388,24 @@ function setIconButton(button, icon, title, description) {
 
 function tabButtonStyle(active = false) {
 	return [
-		"height:26px",
-		"padding:0 10px",
-		`border:1px solid ${active ? "#2ec4b6" : "#465761"}`,
-		"border-radius:8px",
-		`background:${active ? "#123432" : "#11181c"}`,
-		`color:${active ? "#eafffb" : "#dce7e2"}`,
+		"height:28px",
+		"min-width:70px",
+		"padding:0 12px",
+		"border:none",
+		"border-radius:6px",
+		`background:${active ? "#2ec4b6" : "transparent"}`,
+		`color:${active ? "#0a1929" : "#aebbc2"}`,
 		"font-size:12px",
+		"font-weight:600",
 		"cursor:pointer",
 		"display:inline-flex",
 		"align-items:center",
 		"justify-content:center",
-		"gap:4px",
+		"gap:5px",
 		"white-space:nowrap",
+		"transition:all 0.2s ease",
+		"hover:color:#c8e8e6",
+		"hover:background:#234a48",
 	].join(";");
 }
 
@@ -502,8 +557,11 @@ function renderParamControls(node) {
 		const linked = hasLinkedInput(node, def.name);
 		input.disabled = linked;
 		input.title = linked ? `${def.label} 已连接外部输入，面板内不可覆盖。` : (def.tip || "");
+		
+		let currentValue = getWidgetValue(node, def.name);
+		
 		if (def.kind === "select") {
-			const current = String(getWidgetValue(node, def.name) ?? "");
+			const current = String(currentValue ?? "");
 			const options = getParamOptions(node, def.name);
 			input.replaceChildren();
 			for (const value of options) {
@@ -514,7 +572,15 @@ function renderParamControls(node) {
 			}
 			input.value = current;
 		} else {
-			input.value = String(getWidgetValue(node, def.name) ?? 0);
+			if (typeof currentValue === "string" && !/^-?\d+(\.\d+)?$/.test(currentValue.trim())) {
+				console.warn(`[GJJ] Invalid numeric value "${currentValue}" for ${def.name}, correcting to default`);
+				setWidgetValue(node, def.name, def.default ?? 0, true);
+				currentValue = def.default ?? 0;
+			} else if (currentValue === null || currentValue === undefined || Number.isNaN(Number(currentValue))) {
+				setWidgetValue(node, def.name, def.default ?? 0, true);
+				currentValue = def.default ?? 0;
+			}
+			input.value = String(currentValue);
 		}
 	}
 }
@@ -901,7 +967,7 @@ function buildDom(node) {
 
 	const uploadButton = document.createElement("button");
 	uploadButton.type = "button";
-	setIconButton(uploadButton, "📥", "导入视频", "从本地选择一个或多个视频，复制到 ComfyUI input/gjj_multi_video_loader 后自动加入。");
+	setIconButton(uploadButton, "📁", "导入视频", "从本地选择一个或多个视频，复制到 ComfyUI input/gjj_multi_video_loader 后自动加入。");
 	uploadButton.style.cssText = buttonStyle(false);
 
 	const refreshButton = document.createElement("button");

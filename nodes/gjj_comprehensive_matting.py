@@ -7,20 +7,20 @@ import sys
 import types
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
-import numpy as np
-import safetensors.torch
+# ComfyUI 原生依赖（可以安全保留在顶部）
 import torch
 import torch.nn.functional as F
 from PIL import Image, ImageFilter
-from torchvision import transforms
-from torchvision.transforms.functional import to_pil_image
-
 import folder_paths
 from server import PromptServer
 
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
-
+from .common_utils.dependency_checker import (
+    load_dependency_at_runtime,
+    get_pip_install_command_text,
+)
 
 NODE_NAME = "GJJ_ComprehensiveMatting"
 METHOD_RMBG2 = "RMBG2"
@@ -28,7 +28,13 @@ METHOD_BIREF_GENERAL = "BiRefNet 通用"
 METHOD_BIREF_MATTING = "BiRefNet 精细"
 METHOD_BEN2 = "BEN2"
 METHOD_INSPYRENET = "Inspyrenet"
-METHODS = [METHOD_RMBG2, METHOD_BIREF_GENERAL, METHOD_BIREF_MATTING, METHOD_BEN2, METHOD_INSPYRENET]
+METHODS = [
+    METHOD_RMBG2,
+    METHOD_BIREF_GENERAL,
+    METHOD_BIREF_MATTING,
+    METHOD_BEN2,
+    METHOD_INSPYRENET,
+]
 METHOD_OUTPUT_SUFFIXES = {
     METHOD_RMBG2: "RMBG2",
     METHOD_BIREF_GENERAL: "BiRef通用",
@@ -47,71 +53,36 @@ _BIREFNET_CLASS: type | None = None
 _BEN2_CLASS: type | None = None
 _INSPYRENET_REMOVER_CACHE: dict[tuple[str, str, bool], object] = {}
 
-# ═══════════════════════════════════════════════
-# 运行时依赖加载（懒加载模式）
-# ═══════════════════════════════════════════════
-_DEPS = {}
 
 def _send_error_to_frontend(unique_id, error_message, install_command=""):
     """将错误信息和安装命令发送给前端"""
     if not unique_id:
         return
     try:
-        PromptServer.instance.send_sync("gjj_comprehensive_matting_error", {
-            "node": str(unique_id),
-            "error": error_message,
-            "install_command": install_command,
-        })
+        PromptServer.instance.send_sync(
+            "gjj_comprehensive_matting_error",
+            {
+                "node": str(unique_id),
+                "error": error_message,
+                "install_command": install_command,
+            },
+        )
     except Exception:
         pass
-
-def _load_comprehensive_matting_runtime(unique_id=None):
-    """运行时懒加载依赖库"""
-    if _DEPS.get("_loaded"):
-        return _DEPS
-
-    python_exe = sys.executable
-
-    try:
-        # RMBG2/BiRefNet 需要的核心依赖
-        import timm  # noqa: F401
-        import kornia  # noqa: F401
-    except ImportError as exc:
-        # 提取缺失的包名
-        error_str = str(exc)
-        missing_module = "未知模块"
-        if "'" in error_str:
-            missing_module = error_str.split("'")[1]
-        elif '"' in error_str:
-            missing_module = error_str.split('"')[1]
-
-        # 使用规范的公共函数打印彩色控制台错误
-        from .common_utils.dependency_checker import print_runtime_dependency_error, get_pip_install_command_text
-        install_cmd = get_pip_install_command_text(missing_module)
-        print_runtime_dependency_error(
-            node_name="综合抠图 (RMBG2/BiRefNet)",
-            dependency_name=missing_module,
-            install_command=install_cmd,
-            description=f"该节点需要 {missing_module} Python 包才能运行",
-            extra_info=f"原始导入错误：{exc}",
-        )
-
-        # 发送错误到前端显示
-        _send_error_to_frontend(
-            unique_id=unique_id,
-            error_message=f"缺少 Python 依赖：{missing_module}",
-            install_command=install_cmd,
-        )
-
-        raise RuntimeError(f"运行时依赖缺失：{missing_module}。详细信息请查看控制台。") from exc
-
-    _DEPS["_loaded"] = True
-    return _DEPS
 
 
 @contextmanager
 def _force_cpu_tensor_construction():
-    patched_names = ["linspace", "zeros", "ones", "empty", "full", "rand", "randn", "arange"]
+    patched_names = [
+        "linspace",
+        "zeros",
+        "ones",
+        "empty",
+        "full",
+        "rand",
+        "randn",
+        "arange",
+    ]
     originals: dict[str, object] = {}
 
     def _wrap_constructor(fn):
@@ -123,7 +94,9 @@ def _force_cpu_tensor_construction():
         return _wrapped
 
     previous_default_device = None
-    can_restore_default_device = hasattr(torch, "get_default_device") and hasattr(torch, "set_default_device")
+    can_restore_default_device = hasattr(torch, "get_default_device") and hasattr(
+        torch, "set_default_device"
+    )
     if can_restore_default_device:
         try:
             previous_default_device = torch.get_default_device()
@@ -194,7 +167,10 @@ def _display_model_path(path: Path) -> str:
     return str(Path("models") / resolved.name).replace("\\", "/")
 
 
-def _score_model_path(path: Path, includes: tuple[str, ...], excludes: tuple[str, ...] = ()) -> int:
+def _score_model_path(
+    path: Path, includes: tuple[str, ...], excludes: tuple[str, ...] = ()
+) -> int:
+    np = load_dependency_at_runtime("numpy", "GJJ · ✂️ 批量多功能综合抠图")
     text = str(path).replace("\\", "/").lower()
     name = path.name.lower()
     if any(item.lower() in text for item in excludes):
@@ -232,18 +208,26 @@ def _find_model_file(
         for path in root.rglob("*"):
             if not path.is_file() or path.suffix.lower() not in exts:
                 continue
-            best = max(_score_model_path(path, includes, excludes) for includes in include_sets)
+            best = max(
+                _score_model_path(path, includes, excludes) for includes in include_sets
+            )
             if best > -10000:
                 candidates.append((best, path))
     if candidates:
-        candidates.sort(key=lambda item: (-item[0], len(str(item[1])), str(item[1]).lower()))
+        candidates.sort(
+            key=lambda item: (-item[0], len(str(item[1])), str(item[1]).lower())
+        )
         return candidates[0][1]
-    raise RuntimeError(f"未找到 {display_name} 模型文件。已在 models 目录下相关子目录模糊搜索。")
+    raise RuntimeError(
+        f"未找到 {display_name} 模型文件。已在 models 目录下相关目录模糊搜索。"
+    )
 
 
 def _resolve_model_path(method: str) -> Path:
     if method == METHOD_RMBG2:
-        return _find_model_file("RMBG2", (("rmbg2",), ("rmbg-2",)), (".safetensors", ".pth"))
+        return _find_model_file(
+            "RMBG2", (("rmbg2",), ("rmbg-2",)), (".safetensors", ".pth")
+        )
     if method == METHOD_BIREF_GENERAL:
         return _find_model_file(
             "BiRefNet General",
@@ -261,7 +245,9 @@ def _resolve_model_path(method: str) -> Path:
     if method == METHOD_BEN2:
         return _find_model_file("BEN2", (("ben2", "base"), ("ben2",)), (".pth",))
     if method == METHOD_INSPYRENET:
-        return _find_model_file("InSPyReNet", (("inspyrenet",), ("inspyr",), ("isnet",)), (".pth", ".pt"))
+        return _find_model_file(
+            "InSPyReNet", (("inspyrenet",), ("inspyr",), ("isnet",)), (".pth", ".pt")
+        )
     raise RuntimeError(f"未知抠图方式：{method}")
 
 
@@ -316,15 +302,19 @@ def _select_device(device: str) -> torch.device:
 
 
 def _tensor_to_pil_list(tensor: torch.Tensor) -> list[Image.Image]:
+    np = load_dependency_at_runtime("numpy", "GJJ · ✂️ 批量多功能综合抠图")
     if tensor.ndim == 3:
         tensor = tensor.unsqueeze(0)
     return [
-        Image.fromarray(np.clip(255.0 * tensor[index].cpu().numpy(), 0, 255).astype(np.uint8))
+        Image.fromarray(
+            np.clip(255.0 * tensor[index].cpu().numpy(), 0, 255).astype(np.uint8)
+        )
         for index in range(tensor.shape[0])
     ]
 
 
 def _pil_list_to_tensor(images: list[Image.Image]) -> torch.Tensor:
+    np = load_dependency_at_runtime("numpy", "GJJ · ✂️ 批量多功能综合抠图")
     tensors = []
     for image in images:
         array = np.array(image, dtype=np.float32) / 255.0
@@ -334,7 +324,9 @@ def _pil_list_to_tensor(images: list[Image.Image]) -> torch.Tensor:
     return torch.stack(tensors, dim=0)
 
 
-def _normalize_state_dict_keys(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+def _normalize_state_dict_keys(
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
     if state_dict and all(key.startswith("module.") for key in state_dict):
         return {key[7:]: value for key, value in state_dict.items()}
     return state_dict
@@ -417,9 +409,20 @@ def _load_rmbg2_model(weight_path: Path, device: torch.device) -> torch.nn.Modul
         return cached_model  # type: ignore[return-value]
 
     BiRefNetConfig, BiRefNet = _load_rmbg2_components()
+    safetensors_torch = load_dependency_at_runtime(
+        "safetensors.torch",
+        "GJJ · ✂️ 批量多功能综合抠图",
+        "safetensors"
+    )
     with _force_cpu_tensor_construction():
-        model = BiRefNet(bb_pretrained=False, config=BiRefNetConfig(bb_pretrained=False))
-        state_dict = safetensors.torch.load_file(str(weight_path), device="cpu") if weight_path.suffix == ".safetensors" else torch.load(str(weight_path), map_location="cpu")
+        model = BiRefNet(
+            bb_pretrained=False, config=BiRefNetConfig(bb_pretrained=False)
+        )
+        state_dict = (
+            safetensors_torch.load_file(str(weight_path), device="cpu")
+            if weight_path.suffix == ".safetensors"
+            else torch.load(str(weight_path), map_location="cpu")
+        )
         model.load_state_dict(_normalize_state_dict_keys(state_dict), strict=True)
 
     target_dtype = torch.float16 if device.type == "cuda" else torch.float32
@@ -429,16 +432,27 @@ def _load_rmbg2_model(weight_path: Path, device: torch.device) -> torch.nn.Modul
     return model
 
 
-def _load_birefnet_model(method: str, weight_path: Path, device: torch.device) -> torch.nn.Module:
+def _load_birefnet_model(
+    method: str, weight_path: Path, device: torch.device
+) -> torch.nn.Module:
     cache_key = (method, str(weight_path), str(device))
     cached_model = _MODEL_CACHE.get(cache_key)
     if cached_model is not None:
         return cached_model  # type: ignore[return-value]
 
     BiRefNet = _load_birefnet_class()
+    safetensors_torch = load_dependency_at_runtime(
+        "safetensors.torch",
+        "GJJ · ✂️ 批量多功能综合抠图",
+        "safetensors"
+    )
     with _force_cpu_tensor_construction():
         model = BiRefNet(bb_pretrained=False, bb_index=6)
-        state_dict = safetensors.torch.load_file(str(weight_path), device="cpu") if weight_path.suffix == ".safetensors" else torch.load(str(weight_path), map_location="cpu")
+        state_dict = (
+            safetensors_torch.load_file(str(weight_path), device="cpu")
+            if weight_path.suffix == ".safetensors"
+            else torch.load(str(weight_path), map_location="cpu")
+        )
         model.load_state_dict(_normalize_state_dict_keys(state_dict), strict=True)
 
     target_dtype = torch.float16 if device.type == "cuda" else torch.float32
@@ -461,16 +475,22 @@ def _load_ben2_model(weight_path: Path, device: torch.device) -> torch.nn.Module
     return model
 
 
-def _make_rgba_and_mask(original: Image.Image, mask: Image.Image) -> tuple[Image.Image, Image.Image]:
+def _make_rgba_and_mask(
+    original: Image.Image, mask: Image.Image
+) -> tuple[Image.Image, Image.Image]:
     mask = mask.convert("L")
     rgba = original.convert("RGBA")
     rgba.putalpha(mask)
     return rgba, mask
 
 
-def _finish_outputs(rgba_images: list[Image.Image], masks: list[Image.Image], background: str) -> tuple[torch.Tensor, torch.Tensor]:
+def _finish_outputs(
+    rgba_images: list[Image.Image], masks: list[Image.Image], background: str
+) -> tuple[torch.Tensor, torch.Tensor]:
     if background in ("transparent", "透明"):
-        image_tensor = _pil_list_to_tensor([item.convert("RGBA") for item in rgba_images])
+        image_tensor = _pil_list_to_tensor(
+            [item.convert("RGBA") for item in rgba_images]
+        )
     else:
         canvas_color = (255, 255, 255) if background in ("white", "白色") else (0, 0, 0)
         composed = []
@@ -483,7 +503,9 @@ def _finish_outputs(rgba_images: list[Image.Image], masks: list[Image.Image], ba
     return image_tensor, mask_tensor
 
 
-def _collect_input_images(batch_image: torch.Tensor | None, image: torch.Tensor | None) -> list[Image.Image]:
+def _collect_input_images(
+    batch_image: torch.Tensor | None, image: torch.Tensor | None
+) -> list[Image.Image]:
     images: list[Image.Image] = []
     for value in (batch_image, image):
         if value is None:
@@ -494,7 +516,9 @@ def _collect_input_images(batch_image: torch.Tensor | None, image: torch.Tensor 
         if tensor.ndim == 3:
             tensor = tensor.unsqueeze(0)
         if tensor.ndim != 4:
-            raise RuntimeError("综合抠图收到的图片张量格式不正确，应为 IMAGE 或 GJJ 批量图片。")
+            raise RuntimeError(
+                "综合抠图收到的图片张量格式不正确，应为 IMAGE 或 GJJ 批量图片。"
+            )
         images.extend(_tensor_to_pil_list(tensor.detach().float().contiguous()))
     if not images:
         raise RuntimeError("综合抠图至少需要连接 GJJ 批量图片或普通图像。")
@@ -510,7 +534,9 @@ def _parse_selected_methods(raw_value: str, fallback: str) -> list[str]:
             if isinstance(parsed, list):
                 selected = [str(item) for item in parsed if str(item) in METHODS]
         except Exception:
-            selected = [item.strip() for item in text.split(",") if item.strip() in METHODS]
+            selected = [
+                item.strip() for item in text.split(",") if item.strip() in METHODS
+            ]
     if not selected:
         selected = [fallback if fallback in METHODS else METHOD_RMBG2]
 
@@ -521,7 +547,9 @@ def _parse_selected_methods(raw_value: str, fallback: str) -> list[str]:
     return ordered or [METHOD_RMBG2]
 
 
-def _recover_selected_methods(raw_value: str, fallback: str, extra_pnginfo: Any = None, unique_id: Any = None) -> list[str]:
+def _recover_selected_methods(
+    raw_value: str, fallback: str, extra_pnginfo: Any = None, unique_id: Any = None
+) -> list[str]:
     if str(raw_value or "").strip():
         return _parse_selected_methods(raw_value, fallback)
     selected = _parse_selected_methods(raw_value, fallback)
@@ -552,7 +580,9 @@ def _recover_selected_methods(raw_value: str, fallback: str, extra_pnginfo: Any 
     return selected
 
 
-def _empty_route_output(reference: list[Image.Image], background: str) -> tuple[torch.Tensor, torch.Tensor]:
+def _empty_route_output(
+    reference: list[Image.Image], background: str
+) -> tuple[torch.Tensor, torch.Tensor]:
     width, height = reference[0].size if reference else (64, 64)
     alpha = Image.new("L", (width, height), 0)
     rgba = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -560,7 +590,10 @@ def _empty_route_output(reference: list[Image.Image], background: str) -> tuple[
     return image_tensor.contiguous(), mask_tensor
 
 
-def _postprocess_mask(mask: Image.Image, threshold: float, blur: float, invert: bool) -> Image.Image:
+def _postprocess_mask(
+    mask: Image.Image, threshold: float, blur: float, invert: bool
+) -> Image.Image:
+    np = load_dependency_at_runtime("numpy", "GJJ · ✂️ 批量多功能综合抠图")
     if threshold > 0:
         arr = np.array(mask.convert("L"), dtype=np.uint8)
         arr = np.where(arr >= int(threshold * 255), 255, 0).astype(np.uint8)
@@ -579,6 +612,13 @@ def _run_torch_mask_model(
     device: torch.device,
     process_res: int,
 ) -> list[Image.Image]:
+    transforms = load_dependency_at_runtime(
+        "torchvision.transforms",
+        "GJJ · ✂️ 批量多功能综合抠图",
+        "torchvision"
+    )
+    from torchvision.transforms.functional import to_pil_image
+
     input_size = max(64, int(process_res or MODEL_INPUT_SIZE))
     preprocess = transforms.Compose(
         [
@@ -587,7 +627,9 @@ def _run_torch_mask_model(
             transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
         ]
     )
-    input_images = torch.stack([preprocess(item.convert("RGB")) for item in images]).to(device)
+    input_images = torch.stack([preprocess(item.convert("RGB")) for item in images]).to(
+        device
+    )
     if device.type == "cuda":
         input_images = input_images.half()
 
@@ -607,10 +649,15 @@ def _run_torch_mask_model(
     return masks
 
 
-def _run_ben2(model: torch.nn.Module, images: list[Image.Image]) -> tuple[list[Image.Image], list[Image.Image]]:
+def _run_ben2(
+    model: torch.nn.Module, images: list[Image.Image]
+) -> tuple[list[Image.Image], list[Image.Image]]:
+    np = load_dependency_at_runtime("numpy", "GJJ · ✂️ 批量多功能综合抠图")
     rgba_images: list[Image.Image] = []
     masks: list[Image.Image] = []
-    resample_lanczos = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+    resample_lanczos = getattr(
+        getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS
+    )
     with torch.inference_mode():
         for image in images:
             result = model.inference(image.convert("RGB"))
@@ -641,12 +688,17 @@ def _run_inspyrenet(
     device: torch.device,
     threshold: float,
     jit: bool,
+    unique_id=None,
 ) -> tuple[list[Image.Image], list[Image.Image]]:
+    Remover = load_dependency_at_runtime(
+        "transparent_background",
+        "GJJ · ✂️ 批量多功能综合抠图",
+        "transparent-background",
+        "该节点需要 transparent-background Python 包才能运行 Inspyrenet 功能"
+    ).Remover
     cache_key = (str(weight_path), str(device), bool(jit))
     remover = _INSPYRENET_REMOVER_CACHE.get(cache_key)
     if remover is None:
-        from transparent_background import Remover  # type: ignore
-
         remover = Remover(jit=jit, device=str(device), ckpt=str(weight_path))
         _INSPYRENET_REMOVER_CACHE[cache_key] = remover
 
@@ -662,14 +714,80 @@ def _run_inspyrenet(
     return rgba_images, masks
 
 
+# ═══════════════════════════════════════════════
+# 节点类定义
+# ═══════════════════════════════════════════════
 class GJJ_ComprehensiveMatting:
     CATEGORY = "GJJ"
     FUNCTION = "remove_background"
-    DESCRIPTION = "综合抠图节点：RMBG2、BiRefNet 通用/精细、BEN2、Inspyrenet。模型会在 models 下相关目录模糊搜索。"
-    SEARCH_ALIASES = ["rmbg", "remove background", "抠图", "去背景", "背景移除", "前景提取", "birefnet", "ben2", "inspyrenet"]
+    SEARCH_ALIASES = [
+        "rmbg",
+        "remove background",
+        "抠图",
+        "去背景",
+        "背景移除",
+        "前景提取",
+        "birefnet",
+        "ben2",
+        "inspyrenet",
+    ]
     RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE",)
     RETURN_NAMES = ("综合批量图",)
-    OUTPUT_TOOLTIPS = ("把所有已选路线的结果按路线顺序合并成一个 GJJ 专用批量图片输出。",)
+    OUTPUT_TOOLTIPS = (
+        "把所有已选路线的结果按路线顺序合并成一个 GJJ 专用批量图片输出。",
+    )
+
+    DESCRIPTION = """综合抠图节点：RMBG2、BiRefNet 通用/精细、BEN2、Inspyrenet。模型会在 models 下相关目录模糊搜索。
+
+支持批量处理多张图片，可同时选择多种抠图方式进行对比。
+
+📦 运行时依赖：
+  • numpy (数值计算)
+  • safetensors (模型权重加载)
+  • torchvision (图像变换)
+  • timm (RMBG2/BiRefNet 模型架构)
+  • kornia (RMBG2/BiRefNet 图像处理)
+  • transparent-background (Inspyrenet 抠图)
+
+💡 提示：缺少的依赖会在首次执行时自动提示安装命令。"""
+
+    GJJ_HELP = {
+        "models": [
+            {
+                "label": "🟣RMBG2 模型",
+                "value": "📁models/rmbg/rmbg-2.0.safetensors",
+                "tooltip": "📘RMBG2 抠图模型；会在 models 目录下搜索 rmbg2 或 rmbg-2 相关文件。",
+            },
+            {
+                "label": "🟢BiRefNet 通用模型",
+                "value": "📁models/birefnet/general.safetensors",
+                "tooltip": "📘BiRefNet 通用分割模型；会搜索包含 general 的 birefnet 模型文件。",
+            },
+            {
+                "label": "🟢BiRefNet 精细模型",
+                "value": "📁models/birefnet/matting.safetensors",
+                "tooltip": "📘BiRefNet 精细抠图模型；会搜索包含 matting 的 birefnet 模型文件。",
+            },
+            {
+                "label": "🟡BEN2 模型",
+                "value": "📁models/ben2/ben2_base.pth",
+                "tooltip": "📘BEN2 抠图模型；会搜索 ben2 相关的 pth 文件，需要同时存在 BEN2.py 代码文件。",
+            },
+            {
+                "label": "🔵InSPyReNet 模型",
+                "value": "📁models/inspyrenet/inspyrenet.pth",
+                "tooltip": "📘InSPyReNet 抠图模型；会搜索 inspyrenet 或 isnet 相关的 pth/pt 文件。",
+            },
+        ],
+        "dependencies": [
+            "numpy（数值计算）",
+            "safetensors（模型权重加载）",
+            "torchvision（图像变换）",
+            "timm（RMBG2/BiRefNet 模型架构）",
+            "kornia（RMBG2/BiRefNet 图像处理）",
+            "transparent-background（Inspyrenet 运行时依赖）",
+        ],
+    }
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -687,7 +805,9 @@ class GJJ_ComprehensiveMatting:
                 "model_status_json": (
                     "STRING",
                     {
-                        "default": json.dumps(method_status, ensure_ascii=False, indent=2),
+                        "default": json.dumps(
+                            method_status, ensure_ascii=False, indent=2
+                        ),
                         "multiline": True,
                         "display_name": "模型状态",
                         "tooltip": "显示各抠图路线的模型可用状态、模型名和 models/相对路径；界面节点上会自动隐藏。",
@@ -792,15 +912,36 @@ class GJJ_ComprehensiveMatting:
         }
 
     @classmethod
-    def IS_CHANGED(cls, matting_method, model_status_json, selected_methods_json, background, device, process_res, threshold, mask_blur, invert_output, inspyrenet_jit, batch_image=None, image=None, prompt=None, extra_pnginfo=None, unique_id=None):
-        selected_methods = _recover_selected_methods(selected_methods_json, matting_method, extra_pnginfo, unique_id)
+    def IS_CHANGED(
+        cls,
+        matting_method,
+        model_status_json,
+        selected_methods_json,
+        background,
+        device,
+        process_res,
+        threshold,
+        mask_blur,
+        invert_output,
+        inspyrenet_jit,
+        batch_image=None,
+        image=None,
+        prompt=None,
+        extra_pnginfo=None,
+        unique_id=None,
+    ):
+        selected_methods = _recover_selected_methods(
+            selected_methods_json, matting_method, extra_pnginfo, unique_id
+        )
         model_hints = []
         for method in selected_methods:
             try:
                 model_hints.append(f"{method}:{_resolve_model_path(method)}")
             except Exception:
                 model_hints.append(method)
-        batch_shape = tuple(batch_image.shape) if isinstance(batch_image, torch.Tensor) else ()
+        batch_shape = (
+            tuple(batch_image.shape) if isinstance(batch_image, torch.Tensor) else ()
+        )
         image_shape = tuple(image.shape) if isinstance(image, torch.Tensor) else ()
         return f"{batch_shape}|{image_shape}|{selected_methods}|{background}|{device}|{process_res}|{threshold}|{mask_blur}|{invert_output}|{inspyrenet_jit}|{model_hints}"
 
@@ -822,10 +963,17 @@ class GJJ_ComprehensiveMatting:
         extra_pnginfo=None,
         unique_id=None,
     ):
-        # ⬅ 运行时依赖检查（懒加载）
-        _load_comprehensive_matting_runtime(unique_id=unique_id)
+        # ⬅ 使用公共函数加载核心运行时依赖
+        # 这些依赖会在首次使用时自动加载，如果缺失会显示友好提示
+        load_dependency_at_runtime("numpy", "GJJ · ✂️ 批量多功能综合抠图")
+        load_dependency_at_runtime("safetensors.torch", "GJJ · ✂️ 批量多功能综合抠图", "safetensors")
+        load_dependency_at_runtime("torchvision", "GJJ · ✂️ 批量多功能综合抠图")
+        load_dependency_at_runtime("timm", "GJJ · ✂️ 批量多功能综合抠图")
+        load_dependency_at_runtime("kornia", "GJJ · ✂️ 批量多功能综合抠图")
 
-        selected_methods = _recover_selected_methods(selected_methods_json, matting_method, extra_pnginfo, unique_id)
+        selected_methods = _recover_selected_methods(
+            selected_methods_json, matting_method, extra_pnginfo, unique_id
+        )
         method = selected_methods[0]
         if method not in METHODS:
             method = METHOD_RMBG2
@@ -844,7 +992,9 @@ class GJJ_ComprehensiveMatting:
 
             if method == METHOD_RMBG2:
                 model = _load_rmbg2_model(weight_path, route_device)
-                masks = _run_torch_mask_model(model, pil_images, route_device, process_res)
+                masks = _run_torch_mask_model(
+                    model, pil_images, route_device, process_res
+                )
                 rgba_images = []
                 for original, mask in zip(pil_images, masks):
                     rgba, alpha = _make_rgba_and_mask(original, mask)
@@ -852,7 +1002,9 @@ class GJJ_ComprehensiveMatting:
                 masks = [rgba.getchannel("A") for rgba in rgba_images]
             elif method in (METHOD_BIREF_GENERAL, METHOD_BIREF_MATTING):
                 model = _load_birefnet_model(method, weight_path, route_device)
-                masks = _run_torch_mask_model(model, pil_images, route_device, process_res)
+                masks = _run_torch_mask_model(
+                    model, pil_images, route_device, process_res
+                )
                 rgba_images = []
                 for original, mask in zip(pil_images, masks):
                     rgba, alpha = _make_rgba_and_mask(original, mask)
@@ -860,21 +1012,37 @@ class GJJ_ComprehensiveMatting:
                 masks = [rgba.getchannel("A") for rgba in rgba_images]
             elif method == METHOD_BEN2:
                 if route_device.type != "cuda":
-                    route_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                    route_device = torch.device(
+                        "cuda" if torch.cuda.is_available() else "cpu"
+                    )
                 model = _load_ben2_model(weight_path, route_device)
                 rgba_images, masks = _run_ben2(model, pil_images)
             else:
-                rgba_images, masks = _run_inspyrenet(pil_images, weight_path, route_device, threshold, bool(inspyrenet_jit))
+                rgba_images, masks = _run_inspyrenet(
+                    pil_images,
+                    weight_path,
+                    route_device,
+                    threshold,
+                    bool(inspyrenet_jit),
+                    unique_id,
+                )
 
             final_rgba: list[Image.Image] = []
             final_masks: list[Image.Image] = []
             for original, rgba, mask in zip(pil_images, rgba_images, masks):
-                mask = _postprocess_mask(mask, threshold if method != METHOD_INSPYRENET else 0.0, mask_blur, invert_output)
+                mask = _postprocess_mask(
+                    mask,
+                    threshold if method != METHOD_INSPYRENET else 0.0,
+                    mask_blur,
+                    invert_output,
+                )
                 new_rgba, new_mask = _make_rgba_and_mask(original, mask)
                 final_rgba.append(new_rgba)
                 final_masks.append(new_mask)
 
-            image_tensor, mask_tensor = _finish_outputs(final_rgba, final_masks, background)
+            image_tensor, mask_tensor = _finish_outputs(
+                final_rgba, final_masks, background
+            )
             image_tensor = image_tensor.contiguous()
             combined_batches.append(image_tensor)
 

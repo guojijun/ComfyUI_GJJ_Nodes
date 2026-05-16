@@ -9,9 +9,9 @@ from typing import Any
 
 # import cv2  # 在函数内部延迟导入
 import numpy as np
+
 # import soundfile as sf  # 在函数内部延迟导入
 from scipy import signal as sp_signal
-
 
 NODE_NAME = "GJJ_LocalLipSync"
 
@@ -69,7 +69,9 @@ def _ensure_image_batch(images: Any) -> np.ndarray:
     if images.ndim == 3:
         images = np.expand_dims(images, axis=0)
     if images.ndim != 4:
-        raise RuntimeError(f"图像/视频帧维度无效：{tuple(images.shape)}，应为 [批次, 高, 宽, 通道]。")
+        raise RuntimeError(
+            f"图像/视频帧维度无效：{tuple(images.shape)}，应为 [批次, 高, 宽, 通道]。"
+        )
     if int(images.shape[0]) <= 0:
         raise RuntimeError("输入图像/视频没有可处理的帧。")
     if int(images.shape[-1]) not in (3, 4):
@@ -80,12 +82,14 @@ def _ensure_image_batch(images: Any) -> np.ndarray:
 def _frames_to_torch(frames: np.ndarray) -> Any:
     """将 numpy 帧数组转为 torch.Tensor（ComfyUI IMAGE 格式）。"""
     import torch
+
     return torch.from_numpy(frames).float().contiguous()
 
 
 def _audio_to_torch(audio: dict[str, Any]) -> dict[str, Any]:
     """将音频 dict 中的 waveform 从 numpy 转为 torch.Tensor（ComfyUI AUDIO 格式）。"""
     import torch
+
     waveform = audio.get("waveform")
     if isinstance(waveform, np.ndarray):
         result = dict(audio)
@@ -104,10 +108,13 @@ def _extract_video_components(video: Any) -> tuple[np.ndarray, Any, float]:
     if isinstance(video, np.ndarray):
         return _ensure_image_batch(video), None, 24.0
     if not hasattr(video, "get_components"):
-        raise RuntimeError("输入视频不是有效 VIDEO 对象。请连接 ComfyUI 核心 Load Video 或其它 VIDEO 输出。")
+        raise RuntimeError(
+            "输入视频不是有效 VIDEO 对象。请连接 ComfyUI 核心 Load Video 或其它 VIDEO 输出。"
+        )
     try:
         components = video.get_components()
         import torch
+
         torch_images = getattr(components, "images", None)
         if torch_images is not None:
             frames = _ensure_image_batch(torch_images.detach().cpu().numpy())
@@ -124,7 +131,9 @@ def _is_video_object(value: Any) -> bool:
     return value is not None and hasattr(value, "get_components")
 
 
-def _extract_video_first_frame(video: Any) -> tuple[np.ndarray | None, Any, float | None]:
+def _extract_video_first_frame(
+    video: Any,
+) -> tuple[np.ndarray | None, Any, float | None]:
     if video is None:
         return None, None, None
     frames, audio, frame_rate = _extract_video_components(video)
@@ -160,6 +169,7 @@ def _has_valid_audio(audio: Any) -> bool:
     if isinstance(waveform, np.ndarray) and waveform.size > 0 and sample_rate > 0:
         return True
     import torch
+
     if isinstance(waveform, torch.Tensor) and waveform.numel() > 0 and sample_rate > 0:
         return True
     return False
@@ -174,6 +184,7 @@ def _audio_waveform_to_numpy(audio: dict[str, Any]) -> dict[str, Any]:
         result["sample_rate"] = sample_rate
         return result
     import torch
+
     if isinstance(waveform, torch.Tensor):
         result = dict(audio)
         result["waveform"] = waveform.detach().cpu().numpy()
@@ -210,7 +221,9 @@ def _audio_duration_seconds(audio: dict[str, Any]) -> float:
     return float(waveform.shape[-1]) / float(sample_rate)
 
 
-def _resample_audio(waveform: np.ndarray, orig_sr: int, target_sr: int = 16000) -> np.ndarray:
+def _resample_audio(
+    waveform: np.ndarray, orig_sr: int, target_sr: int = 16000
+) -> np.ndarray:
     """使用 scipy.signal.resample 对音频波形重采样（替代 torchaudio.transforms.Resample）。"""
     if orig_sr == target_sr:
         return waveform
@@ -220,7 +233,9 @@ def _resample_audio(waveform: np.ndarray, orig_sr: int, target_sr: int = 16000) 
     channels = []
     for ch in range(waveform.shape[0]):
         num_samples = int(round(waveform.shape[1] * target_sr / orig_sr))
-        channels.append(sp_signal.resample(waveform[ch], num_samples).astype(np.float32))
+        channels.append(
+            sp_signal.resample(waveform[ch], num_samples).astype(np.float32)
+        )
     return np.stack(channels, axis=0)
 
 
@@ -262,7 +277,9 @@ def _restore_modules(modules: dict[str, Any]) -> None:
 def _get_internal_latentsync_class():
     node_path = _gjj_root() / "vendor" / "latentsync_enhanced" / "nodes.py"
     if not node_path.is_file():
-        raise RuntimeError("GJJ 内部 LatentSync 运行库不存在，请确认 vendor/latentsync_enhanced 已随 GJJ 一起复制。")
+        raise RuntimeError(
+            "GJJ 内部 LatentSync 运行库不存在，请确认 vendor/latentsync_enhanced 已随 GJJ 一起复制。"
+        )
     removed = _pop_modules(("latentsync",))
     try:
         module = _import_module_from_path("gjj_internal_latentsync_enhanced", node_path)
@@ -274,7 +291,9 @@ def _get_internal_latentsync_class():
             "请安装 GJJ/vendor/latentsync_enhanced/requirements.txt 中的依赖。"
         ) from exc
     except Exception as exc:
-        raise RuntimeError(f"加载 GJJ 内部 LatentSync 运行库失败。\n详细错误：{exc}") from exc
+        raise RuntimeError(
+            f"加载 GJJ 内部 LatentSync 运行库失败。\n详细错误：{exc}"
+        ) from exc
     finally:
         _restore_modules(removed)
 
@@ -286,6 +305,7 @@ def _check_latentsync_models() -> list[str]:
     details: list[str] = []
     try:
         import folder_paths
+
         models_dir = Path(folder_paths.models_dir)
     except Exception:
         models_dir = None
@@ -293,7 +313,12 @@ def _check_latentsync_models() -> list[str]:
     found_root = models_dir / "latentsync" if models_dir else None
     if found_root and found_root.is_dir():
         details.append(f"LatentSync 模型目录：{found_root}")
-        for rel in ("latentsync_unet.pt", "whisper/tiny.pt", "vae/config.json", "vae/diffusion_pytorch_model.safetensors"):
+        for rel in (
+            "latentsync_unet.pt",
+            "whisper/tiny.pt",
+            "vae/config.json",
+            "vae/diffusion_pytorch_model.safetensors",
+        ):
             p = found_root / rel
             details.append(f"{rel}：{'已找到' if p.is_file() else '未找到'}")
         return details
@@ -308,10 +333,17 @@ def _check_latentsync_models() -> list[str]:
     except Exception:
         pass
     if found_root is None:
-        details.append("LatentSync 模型目录：未找到，期望 models/latentsync/ 或 models/checkpoints/LatentSync-1.6/")
+        details.append(
+            "LatentSync 模型目录：未找到，期望 models/latentsync/ 或 models/checkpoints/LatentSync-1.6/"
+        )
     else:
         details.append(f"LatentSync 模型目录：{found_root}")
-        for rel in ("latentsync_unet.pt", "whisper/tiny.pt", "vae/config.json", "vae/diffusion_pytorch_model.safetensors"):
+        for rel in (
+            "latentsync_unet.pt",
+            "whisper/tiny.pt",
+            "vae/config.json",
+            "vae/diffusion_pytorch_model.safetensors",
+        ):
             p = found_root / rel
             details.append(f"{rel}：{'已找到' if p.is_file() else '未找到'}")
     return details
@@ -324,7 +356,10 @@ def _check_wan22_s2v_environment() -> str:
 
         diffusion_models = folder_paths.get_filename_list("diffusion_models")
         audio_encoders = folder_paths.get_filename_list("audio_encoders")
-        has_s2v = any("wan2.2" in item.lower() and "s2v" in item.lower() for item in diffusion_models)
+        has_s2v = any(
+            "wan2.2" in item.lower() and "s2v" in item.lower()
+            for item in diffusion_models
+        )
         has_wav2vec = any("wav2vec" in item.lower() for item in audio_encoders)
         details.append(f"Wan2.2 S2V 权重：{'已找到' if has_s2v else '未找到'}")
         details.append(f"音频编码器 wav2vec：{'已找到' if has_wav2vec else '未找到'}")
@@ -343,6 +378,7 @@ def _check_wan22_s2v_environment() -> str:
 try:
     import cv2
     import soundfile as sf
+
     _DEPENDENCIES_AVAILABLE = True
 except ImportError as exc:
     _DEPENDENCIES_AVAILABLE = False
@@ -353,21 +389,23 @@ def _ensure_cv2():
     """确保 cv2 已安装"""
     try:
         import cv2
+
         return cv2
     except ImportError as exc:
         # 获取当前 Python 解释器的实际路径
         python_executable = sys.executable
 
         # ANSI 颜色代码（用于控制台彩色输出）
-        RED = '\033[91m'
-        YELLOW = '\033[93m'
-        CYAN = '\033[96m'
-        GREEN = '\033[92m'
-        RESET = '\033[0m'
-        BOLD = '\033[1m'
+        RED = "\033[91m"
+        YELLOW = "\033[93m"
+        CYAN = "\033[96m"
+        GREEN = "\033[92m"
+        RESET = "\033[0m"
+        BOLD = "\033[1m"
 
         # 构建安装命令
         from .common_utils.dependency_checker import get_pip_install_command_text
+
         install_cmd = get_pip_install_command_text("opencv-python")
 
         # 在控制台打印美观的错误提示（更加突出）
@@ -401,21 +439,23 @@ def _ensure_soundfile():
     """确保 soundfile 已安装"""
     try:
         import soundfile as sf
+
         return sf
     except ImportError as exc:
         # 获取当前 Python 解释器的实际路径
         python_executable = sys.executable
 
         # ANSI 颜色代码（用于控制台彩色输出）
-        RED = '\033[91m'
-        YELLOW = '\033[93m'
-        CYAN = '\033[96m'
-        GREEN = '\033[92m'
-        RESET = '\033[0m'
-        BOLD = '\033[1m'
+        RED = "\033[91m"
+        YELLOW = "\033[93m"
+        CYAN = "\033[96m"
+        GREEN = "\033[92m"
+        RESET = "\033[0m"
+        BOLD = "\033[1m"
 
         # 构建安装命令
         from .common_utils.dependency_checker import get_pip_install_command_text
+
         install_cmd = get_pip_install_command_text("soundfile")
 
         # 在控制台打印美观的错误提示（更加突出）
@@ -449,96 +489,96 @@ class GJJ_LocalLipSync:
     CATEGORY = "GJJ"
     FUNCTION = "generate"
 
-    # 如果缺少关键依赖，显示错误信息
-    if not _DEPENDENCIES_AVAILABLE:
-        DESCRIPTION = """❌ 节点 GJJ · 💄 本地口型同步 缺少必需的 Python 依赖：
+    DESCRIPTION = (
+        """GJJ 内部本地零 API 口型同步：图片+音频使用 GJJ 已有 LTX2.3 功能，视频+音频使用 GJJ 内部 LatentSync 或 LatentSync 功能；只引用 ComfyUI 官方能力和 GJJ 包内功能，不依赖其它自定义节点。"""
+        if _DEPENDENCIES_AVAILABLE
+        else """❌ 节点 GJJ · 💄 本地口型同步 缺少必需的 Python 依赖：
 
 📦 必需依赖（请安装）：
   • opencv-python (cv2, 图像处理)
   • soundfile (音频文件处理)
   • scipy (信号处理)
+🔧 PowerShell 中子执行安装命令（自动适配您的环境，使用清华园镜像）：
 
-🔧 快速安装命令（使用国内镜像）：
-  pip install opencv-python soundfile scipy -i https://pypi.tuna.tsinghua.edu.cn/simple
+& "{sys.executable}" -m pip install opencv-python soundfile scipy -i https://pypi.tuna.tsinghua.edu.cn/simple --ignore-installed --target "{os.path.join(os.path.dirname(sys.executable), "Lib", "site-packages")}"
 
-或者逐个安装：
-  pip install opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple
-  pip install soundfile -i https://pypi.tuna.tsinghua.edu.cn/simple
-  pip install scipy -i https://pypi.tuna.tsinghua.edu.cn/simple
-
-💡 提示：安装后请重启 ComfyUI 服务器。
-
----
-GJJ 内部本地零 API 口型同步：图片+音频使用 GJJ 已有 LTX2.3 功能，视频+音频使用 GJJ 内部 LatentSync 或 LatentSync 功能；只引用 ComfyUI 官方能力和 GJJ 包内功能，不依赖其它自定义节点。"""
-    else:
-        DESCRIPTION = "GJJ 内部本地零 API 口型同步：图片+音频使用 GJJ 已有 LTX2.3 功能，视频+音频使用 GJJ 内部 LatentSync 或 LatentSync 功能；只引用 ComfyUI 官方能力和 GJJ 包内功能，不依赖其它自定义节点。"
-    SEARCH_ALIASES = ["口型同步", "唇形同步", "数字人", "lipsync", "LatentSync", "LTX2.3", "Wan2.2"]
+💡 提示：安装后请重启 ComfyUI 服务器。"""
+    )
+    SEARCH_ALIASES = [
+        "口型同步",
+        "唇形同步",
+        "数字人",
+        "lipsync",
+        "LatentSync",
+        "LTX2.3",
+        "Wan2.2",
+    ]
     GJJ_HELP = {
         "models": [
             {
-                "label": "LTX2.3 主模型",
-                "value": "models/checkpoints/ltx-2.3-22b 或 models/checkpoints/ltx-2.3-22b-dev-fp8.safetensors",
-                "tooltip": "图片+音频分支使用；实际加载会按本机 checkpoints 列表做子目录感知匹配。",
+                "label": "🟣LTX2.3 主模型",
+                "value": "📁models/checkpoints/ltx-2.3-22b 或 models/checkpoints/ltx-2.3-22b-dev-fp8.safetensors",
+                "tooltip": "📘图片+音频分支使用；实际加载会按本机 checkpoints 列表做子目录感知匹配。",
             },
             {
-                "label": "LTX2.3 文本编码器",
-                "value": "models/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors",
-                "tooltip": "LTX2.3 图片说话分支需要的文本编码器。",
+                "label": "🟡LTX2.3 文本编码器",
+                "value": "📁models/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors",
+                "tooltip": "📘LTX2.3 图片说话分支需要的文本编码器。",
             },
             {
-                "label": "LTX2.3 蒸馏 LoRA",
-                "value": "models/loras/LTX/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
-                "tooltip": "LTX2.3 图片说话分支默认 LoRA 1。",
+                "label": "⚪LTX2.3 蒸馏 LoRA",
+                "value": "📁models/loras/LTX/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+                "tooltip": "📘LTX2.3 图片说话分支默认 LoRA 1。",
             },
             {
-                "label": "LTX2.3 口型同步 LoRA",
-                "value": "models/loras/LTX/LTX-2.3-22b-AV-LoRA-talking-head-v1-音视频同步.safetensors",
-                "tooltip": "LTX2.3 图片说话分支默认 LoRA 2，用于音视频口型同步。",
+                "label": "⚪LTX2.3 口型同步 LoRA",
+                "value": "📁models/loras/LTX/LTX-2.3-22b-AV-LoRA-talking-head-v1-音视频同步.safetensors",
+                "tooltip": "📘LTX2.3 图片说话分支默认 LoRA 2，用于音视频口型同步。",
             },
             {
-                "label": "LTX2.3 潜空间放大模型",
-                "value": "models/upscale_models/ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
-                "tooltip": "LTX2.3 高分辨率阶段可能使用的 latent upscaler。",
+                "label": "🟤LTX2.3 潜空间放大模型",
+                "value": "📁models/upscale_models/ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+                "tooltip": "📘LTX2.3 高分辨率阶段可能使用的 latent upscaler。",
             },
             {
-                "label": "LTX2.3 视频 VAE",
-                "value": "models/vae/LTX23_video_vae_bf16.safetensors",
-                "tooltip": "LTX2.3 音视频工作流常用的视频 VAE；本节点按本机 LTX 运行链路加载。",
+                "label": "🔴LTX2.3 视频 VAE",
+                "value": "📁models/vae/LTX23_video_vae_bf16.safetensors",
+                "tooltip": "📘LTX2.3 音视频工作流常用的视频 VAE；本节点按本机 LTX 运行链路加载。",
             },
             {
-                "label": "LTX2.3 音频 VAE",
-                "value": "models/vae/LTX23_audio_vae_bf16.safetensors",
-                "tooltip": "LTX2.3 音频驱动口型链路常用的音频 VAE。",
+                "label": "🔴LTX2.3 音频 VAE",
+                "value": "📁models/vae/LTX23_audio_vae_bf16.safetensors",
+                "tooltip": "📘LTX2.3 音频驱动口型链路常用的音频 VAE。",
             },
             {
-                "label": "LatentSync 1.6 主模型",
-                "value": "models/checkpoints/LatentSync-1.6/latentsync_unet.pt",
-                "tooltip": "视频+音频默认分支使用的口型扩散 UNet。",
+                "label": "🔵LatentSync 1.6 主模型",
+                "value": "📁models/checkpoints/LatentSync-1.6/latentsync_unet.pt",
+                "tooltip": "📘视频+音频默认分支使用的口型扩散 UNet。",
             },
             {
-                "label": "LatentSync 1.6 Whisper",
-                "value": "models/checkpoints/LatentSync-1.6/whisper/tiny.pt",
-                "tooltip": "LatentSync 音频特征提取模型。",
+                "label": "🔵LatentSync 1.6 Whisper",
+                "value": "📁models/checkpoints/LatentSync-1.6/whisper/tiny.pt",
+                "tooltip": "📘LatentSync 音频特征提取模型。",
             },
             {
-                "label": "LatentSync 1.6 VAE 配置",
-                "value": "models/checkpoints/LatentSync-1.6/vae/config.json",
-                "tooltip": "LatentSync VAE 目录配置文件。",
+                "label": "🔵LatentSync 1.6 VAE 配置",
+                "value": "📁models/checkpoints/LatentSync-1.6/vae/config.json",
+                "tooltip": "📘LatentSync VAE 目录配置文件。",
             },
             {
-                "label": "LatentSync 1.6 VAE 权重",
-                "value": "models/checkpoints/LatentSync-1.6/vae/diffusion_pytorch_model.safetensors",
-                "tooltip": "LatentSync VAE 权重文件。",
+                "label": "🔵LatentSync 1.6 VAE 权重",
+                "value": "📁models/checkpoints/LatentSync-1.6/vae/diffusion_pytorch_model.safetensors",
+                "tooltip": "📘LatentSync VAE 权重文件。",
             },
             {
-            "label": "Wan2.2 S2V 主模型",
-                "value": "models/diffusion_models/wan2.2_s2v_14B_fp8_scaled.safetensors",
-                "tooltip": "Wan2.2 S2V 检测分支需要的真实音频条件视频模型。",
+                "label": "🟣Wan2.2 S2V 主模型",
+                "value": "📁models/diffusion_models/wan2.2_s2v_14B_fp8_scaled.safetensors",
+                "tooltip": "📘Wan2.2 S2V 检测分支需要的真实音频条件视频模型。",
             },
             {
-                "label": "Wan2.2 S2V 音频编码器",
-                "value": "models/audio_encoders/wav2vec2_large_english_fp16.safetensors",
-                "tooltip": "Wan S2V 音频条件编码器。",
+                "label": "🟣Wan2.2 S2V 音频编码器",
+                "value": "📁models/audio_encoders/wav2vec2_large_english_fp16.safetensors",
+                "tooltip": "📘Wan S2V 音频条件编码器。",
             },
         ],
         "dependencies": [
@@ -549,44 +589,155 @@ GJJ 内部本地零 API 口型同步：图片+音频使用 GJJ 已有 LTX2.3 功
     }
     RETURN_TYPES = ("VIDEO", "STRING")
     RETURN_NAMES = ("视频", "状态")
-    OUTPUT_TOOLTIPS = ("本地生成或修正口型后的视频，可继续连接保存、合成或视频处理节点。", "本次执行使用的分支、帧数和关键状态。")
+    OUTPUT_TOOLTIPS = (
+        "本地生成或修正口型后的视频，可继续连接保存、合成或视频处理节点。",
+        "本次执行使用的分支、帧数和关键状态。",
+    )
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "mode": ([MODE_AUTO, MODE_LTX23, MODE_LATENTSYNC, MODE_WAN22], {
-                    "default": MODE_AUTO,
-                    "display_name": "本地同步方式",
-                    "tooltip": "自动模式：输入 VIDEO 时使用 GJJ 内部 LatentSync；输入 IMAGE 时使用 GJJ 已有 LTX2.3 图片说话功能。LatentSync 是高质量视频方案。",
-                }),
-                "positive_prompt": ("STRING", {
-                    "default": DEFAULT_PROMPT,
-                    "multiline": False,
-                    "dynamicPrompts": True,
-                    "display_name": "正向提示词",
-                    "tooltip": "仅 LTX2.3 图片说话分支使用，用于描述人物、镜头、动作和说话状态。",
-                }),
-                "negative_prompt": ("STRING", {
-                    "default": DEFAULT_NEGATIVE,
-                    "multiline": False,
-                    "dynamicPrompts": True,
-                    "display_name": "反向提示词",
-                    "tooltip": "仅 LTX2.3 图片说话分支使用，用于压制低清、字幕、水印、嘴部畸变和口型错位。",
-                }),
-                "width": ("INT", {"default": 1280, "min": 64, "max": 8192, "step": 32, "display_name": "LTX宽度", "tooltip": "LTX2.3 图片说话分支的输出宽度。"}),
-                "height": ("INT", {"default": 736, "min": 64, "max": 8192, "step": 32, "display_name": "LTX高度", "tooltip": "LTX2.3 图片说话分支的输出高度。"}),
-                "fps": ("INT", {"default": 25, "min": 1, "max": 120, "step": 1, "display_name": "LTX帧率", "tooltip": "LTX2.3 图片说话分支的输出帧率；视频口型分支优先沿用输入视频帧率。"}),
-                "seed": ("INT", {"default": 483811081311996, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "control_after_generate": True, "display_name": "种子", "tooltip": "随机种子。"}),
-                "max_seconds": ("FLOAT", {"default": 12.0, "min": 0.5, "max": 120.0, "step": 0.5, "display_name": "最长音频秒数", "tooltip": "输入音频会按这个上限裁切，避免一次性视频过长。"}),
-                "inference_steps": ("INT", {"default": 20, "min": 1, "max": 100, "step": 1, "display_name": "LatentSync步数", "tooltip": "LatentSync 扩散步数；官方默认 20。"}),
-                "guidance_scale": ("FLOAT", {"default": 1.5, "min": 1.0, "max": 3.0, "step": 0.1, "display_name": "LatentSync口型强度", "tooltip": "LatentSync 的 lips_expression/guidance scale。越高口型更强，但可能更抖。"}),
-                "chunk_frames": ("INT", {"default": 80, "min": 16, "max": 512, "step": 16, "display_name": "LatentSync分段帧数", "tooltip": "显存不足时调低。24GB 可从 80 开始，16GB 建议 48，12GB 建议 32。"}),
+                "mode": (
+                    [MODE_AUTO, MODE_LTX23, MODE_LATENTSYNC, MODE_WAN22],
+                    {
+                        "default": MODE_AUTO,
+                        "display_name": "本地同步方式",
+                        "tooltip": "自动模式：输入 VIDEO 时使用 GJJ 内部 LatentSync；输入 IMAGE 时使用 GJJ 已有 LTX2.3 图片说话功能。LatentSync 是高质量视频方案。",
+                    },
+                ),
+                "positive_prompt": (
+                    "STRING",
+                    {
+                        "default": DEFAULT_PROMPT,
+                        "multiline": False,
+                        "dynamicPrompts": True,
+                        "display_name": "正向提示词",
+                        "tooltip": "仅 LTX2.3 图片说话分支使用，用于描述人物、镜头、动作和说话状态。",
+                    },
+                ),
+                "negative_prompt": (
+                    "STRING",
+                    {
+                        "default": DEFAULT_NEGATIVE,
+                        "multiline": False,
+                        "dynamicPrompts": True,
+                        "display_name": "反向提示词",
+                        "tooltip": "仅 LTX2.3 图片说话分支使用，用于压制低清、字幕、水印、嘴部畸变和口型错位。",
+                    },
+                ),
+                "width": (
+                    "INT",
+                    {
+                        "default": 1280,
+                        "min": 64,
+                        "max": 8192,
+                        "step": 32,
+                        "display_name": "LTX宽度",
+                        "tooltip": "LTX2.3 图片说话分支的输出宽度。",
+                    },
+                ),
+                "height": (
+                    "INT",
+                    {
+                        "default": 736,
+                        "min": 64,
+                        "max": 8192,
+                        "step": 32,
+                        "display_name": "LTX高度",
+                        "tooltip": "LTX2.3 图片说话分支的输出高度。",
+                    },
+                ),
+                "fps": (
+                    "INT",
+                    {
+                        "default": 25,
+                        "min": 1,
+                        "max": 120,
+                        "step": 1,
+                        "display_name": "LTX帧率",
+                        "tooltip": "LTX2.3 图片说话分支的输出帧率；视频口型分支优先沿用输入视频帧率。",
+                    },
+                ),
+                "seed": (
+                    "INT",
+                    {
+                        "default": 483811081311996,
+                        "min": 0,
+                        "max": 0xFFFFFFFFFFFFFFFF,
+                        "control_after_generate": True,
+                        "display_name": "种子",
+                        "tooltip": "随机种子。",
+                    },
+                ),
+                "max_seconds": (
+                    "FLOAT",
+                    {
+                        "default": 12.0,
+                        "min": 0.5,
+                        "max": 120.0,
+                        "step": 0.5,
+                        "display_name": "最长音频秒数",
+                        "tooltip": "输入音频会按这个上限裁切，避免一次性视频过长。",
+                    },
+                ),
+                "inference_steps": (
+                    "INT",
+                    {
+                        "default": 20,
+                        "min": 1,
+                        "max": 100,
+                        "step": 1,
+                        "display_name": "LatentSync步数",
+                        "tooltip": "LatentSync 扩散步数；官方默认 20。",
+                    },
+                ),
+                "guidance_scale": (
+                    "FLOAT",
+                    {
+                        "default": 1.5,
+                        "min": 1.0,
+                        "max": 3.0,
+                        "step": 0.1,
+                        "display_name": "LatentSync口型强度",
+                        "tooltip": "LatentSync 的 lips_expression/guidance scale。越高口型更强，但可能更抖。",
+                    },
+                ),
+                "chunk_frames": (
+                    "INT",
+                    {
+                        "default": 80,
+                        "min": 16,
+                        "max": 512,
+                        "step": 16,
+                        "display_name": "LatentSync分段帧数",
+                        "tooltip": "显存不足时调低。24GB 可从 80 开始，16GB 建议 48，12GB 建议 32。",
+                    },
+                ),
             },
             "optional": {
-                "input_media": (any_type, {"display_name": "输入图片/视频", "tooltip": "接图片时自动使用 LTX2.3 图片说话；接 VIDEO 时自动使用 LatentSync 视频口型。"}),
-                "input_audio": ("AUDIO", {"display_name": "输入音频", "tooltip": "用于驱动口型；如果输入视频自带音轨，也可不单独连接。"}),
-                "relay_prompt_input": ("STRING", {"forceInput": True, "display_name": "时序提示词输入", "tooltip": "可选。连接 ASR 时间戳文本，用于 LTX PromptRelay 分段提示。"}),
+                "input_media": (
+                    any_type,
+                    {
+                        "display_name": "输入图片/视频",
+                        "tooltip": "接图片时自动使用 LTX2.3 图片说话；接 VIDEO 时自动使用 LatentSync 视频口型。",
+                    },
+                ),
+                "input_audio": (
+                    "AUDIO",
+                    {
+                        "display_name": "输入音频",
+                        "tooltip": "用于驱动口型；如果输入视频自带音轨，也可不单独连接。",
+                    },
+                ),
+                "relay_prompt_input": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "display_name": "时序提示词输入",
+                        "tooltip": "可选。连接 ASR 时间戳文本，用于 LTX PromptRelay 分段提示。",
+                    },
+                ),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -621,7 +772,11 @@ GJJ 内部本地零 API 口型同步：图片+音频使用 GJJ 已有 LTX2.3 功
 
         # ── 音频预处理：提取 → 统一为 numpy ──
         if not _has_valid_audio(input_audio):
-            _, video_audio, _ = _extract_video_first_frame(input_media) if _is_video_object(input_media) else (None, None, None)
+            _, video_audio, _ = (
+                _extract_video_first_frame(input_media)
+                if _is_video_object(input_media)
+                else (None, None, None)
+            )
             if _has_valid_audio(video_audio):
                 input_audio = video_audio
             else:
@@ -632,7 +787,9 @@ GJJ 内部本地零 API 口型同步：图片+音频使用 GJJ 已有 LTX2.3 功
         # ── LatentSync 视频口型分支 ──
         if mode == MODE_LATENTSYNC:
             if not _is_video_object(input_media):
-                raise RuntimeError("LatentSync 视频口型分支需要输入 VIDEO。图片+音频请使用自动模式或 LTX2.3 图片说话。")
+                raise RuntimeError(
+                    "LatentSync 视频口型分支需要输入 VIDEO。图片+音频请使用自动模式或 LTX2.3 图片说话。"
+                )
             frames_np, _, source_fps = _extract_video_components(input_media)
             details = _check_latentsync_models()
             _send_status(unique_id, "GJJ 内部 LatentSync：加载运行库...", 0.08)
@@ -657,14 +814,20 @@ GJJ 内部本地零 API 口型同步：图片+音频使用 GJJ 已有 LTX2.3 功
                     + f"\n详细错误：{exc}"
                 ) from exc
             # 结果转回 numpy 后封装 VIDEO
-            video = _make_video(images_torch.cpu().numpy(), audio_result, float(source_fps or fps))
+            video = _make_video(
+                images_torch.cpu().numpy(), audio_result, float(source_fps or fps)
+            )
             status = f"GJJ 内部 LatentSync 完成：{int(images_torch.shape[0])} 帧 / {float(source_fps or fps):.3f} fps / {int(inference_steps)} steps。"
             _send_status(unique_id, status, 1.0)
             return (video, status)
 
         # ── LTX2.3 图片说话分支 ──
         # 在调用 LTX workflow 前，将 numpy 转回 torch 以满足 LTX 接口要求
-        video_frame_np, _, _video_fps = _extract_video_first_frame(input_media) if _is_video_object(input_media) else (None, None, None)
+        video_frame_np, _, _video_fps = (
+            _extract_video_first_frame(input_media)
+            if _is_video_object(input_media)
+            else (None, None, None)
+        )
         source_image = video_frame_np if video_frame_np is not None else input_media
         if source_image is None:
             raise RuntimeError("LTX2.3 图片说话需要输入图片，或输入可读取首帧的视频。")
@@ -678,7 +841,9 @@ GJJ 内部本地零 API 口型同步：图片+音频使用 GJJ 已有 LTX2.3 功
         frame_count = max(1, int(round(duration * float(fps))) + 1)
         _send_status(unique_id, f"GJJ 内部 LTX2.3：{frame_count} 帧 / {fps} fps", 0.08)
         try:
-            from .gjj_ltx23_template_workflows import GJJ_LTX23WorkflowPromptRelayTalkingHead
+            from .gjj_ltx23_template_workflows import (
+                GJJ_LTX23WorkflowPromptRelayTalkingHead,
+            )
 
             # LTX workflow 需要 torch 音频
             audio_torch = _audio_to_torch(input_audio)
@@ -700,14 +865,16 @@ GJJ 内部本地零 API 口型同步：图片+音频使用 GJJ 已有 LTX2.3 功
                 relay_local_prompts=str(relay_prompt_input or ""),
                 relay_segment_lengths="",
                 relay_epsilon=0.001,
-                input_image=source_image,       # torch.Tensor [B,H,W,C]
-                input_audio=audio_torch,        # dict with torch.Tensor waveform
+                input_image=source_image,  # torch.Tensor [B,H,W,C]
+                input_audio=audio_torch,  # dict with torch.Tensor waveform
                 relay_prompt_input=relay_prompt_input,
                 lora_chain_config="",
                 unique_id=unique_id,
             )
         except Exception as exc:
-            raise RuntimeError(f"GJJ 内部 LTX2.3 图片说话分支执行失败。\n详细错误：{exc}") from exc
+            raise RuntimeError(
+                f"GJJ 内部 LTX2.3 图片说话分支执行失败。\n详细错误：{exc}"
+            ) from exc
         video = result["result"][0] if isinstance(result, dict) else result[0]
         status = f"GJJ 内部 LTX2.3 完成：{frame_count} 帧，音频驱动口型。"
         _send_status(unique_id, status, 1.0)

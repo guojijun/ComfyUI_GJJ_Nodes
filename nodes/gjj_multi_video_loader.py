@@ -77,21 +77,42 @@ def _unique_path(directory: Path, filename: str) -> Path:
 
 def _video_meta_cv2(path: Path) -> dict[str, Any]:
     try:
-        import cv2
+        import av
     except Exception:
         return {"width": 0, "height": 0, "fps": 0.0, "frames": 0, "duration": 0.0}
 
-    capture = cv2.VideoCapture(str(path))
-    if not capture.isOpened():
-        return {"width": 0, "height": 0, "fps": 0.0, "frames": 0, "duration": 0.0}
     try:
-        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
-        frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        container = av.open(str(path))
+    except Exception:
+        return {"width": 0, "height": 0, "fps": 0.0, "frames": 0, "duration": 0.0}
+
+    try:
+        video_stream = None
+        for stream in container.streams:
+            if stream.type == "video":
+                video_stream = stream
+                break
+
+        if video_stream is None:
+            return {"width": 0, "height": 0, "fps": 0.0, "frames": 0, "duration": 0.0}
+
+        width = video_stream.width or 0
+        height = video_stream.height or 0
+        fps = float(video_stream.average_rate) if video_stream.average_rate else 0.0
+        frames = int(video_stream.frames) if video_stream.frames and video_stream.frames > 0 else 0
+        
+        if frames <= 0 and fps > 0 and video_stream.duration and video_stream.time_base:
+            raw_duration = float(video_stream.duration * video_stream.time_base)
+            frames = int(round(raw_duration * fps))
+        
+        duration = float(frames / fps) if fps > 0 and frames > 0 else 0.0
+        
+        if container.duration is not None:
+            duration = float(container.duration / av.time_base)
+        
     finally:
-        capture.release()
-    duration = float(frames / fps) if fps > 0 and frames > 0 else 0.0
+        container.close()
+
     return {"width": width, "height": height, "fps": fps, "frames": frames, "duration": duration}
 
 
@@ -418,6 +439,18 @@ def _frame_to_tensor(frame: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(array[..., :3]).unsqueeze(0)
 
 
+def _get_ffmpeg_path() -> str:
+    """获取 FFmpeg 可执行文件路径"""
+    try:
+        import imageio_ffmpeg
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if Path(ffmpeg_exe).exists():
+            return str(ffmpeg_exe)
+    except Exception:
+        pass
+    return "ffmpeg"
+
+
 def decode_video_cv2(
     path: Path,
     start_frame: int,
@@ -427,57 +460,90 @@ def decode_video_cv2(
     width: int = 0,
     height: int = 0,
 ) -> tuple[list[torch.Tensor], dict[str, Any]]:
+    ffmpeg = _get_ffmpeg_path()
+    start = max(0, int(start_frame))
+    stride = max(1, int(frame_stride))
+    limit = max(1, int(max_frames))
+
+    meta = video_meta(path)
+    fps = float(meta.get("fps") or 24.0)
+    source_width = int(meta.get("width") or 0)
+    source_height = int(meta.get("height") or 0)
+    total = int(meta.get("frames") or 0)
+    duration = float(meta.get("duration") or 0.0)
+    
+    stop = int(end_frame) if int(end_frame) > 0 else (total - 1 if total > 0 else 10**12)
+    stop = max(start, stop)
+
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-ss", str(start / fps),
+        "-i", str(path),
+        "-frames:v", str((stop - start + 1) // stride + 1),
+        "-vf", f"select=not(mod(n\,{stride}))",
+        "-vsync", "vfr",
+        "-f", "image2pipe",
+        "-pix_fmt", "rgb24",
+        "-vcodec", "rawvideo",
+        "-",
+    ]
+
     try:
-        import cv2
-    except Exception as error:
-        raise RuntimeError("当前 Python 环境缺少 cv2，无法解码视频。请确认 ComfyUI 环境已安装 opencv-python。") from error
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=120,
+        )
+        
+        if proc.returncode != 0:
+            if proc.stderr:
+                raise RuntimeError(f"FFmpeg 解码失败: {proc.stderr.decode('utf-8', errors='ignore')}")
+            raise RuntimeError(f"FFmpeg 解码失败，返回码: {proc.returncode}")
 
-    capture = cv2.VideoCapture(str(path))
-    if not capture.isOpened():
-        raise RuntimeError(f"无法打开视频：{path.name}")
+        raw_data = proc.stdout
+        if not raw_data:
+            raise RuntimeError(f"FFmpeg 未输出任何数据")
 
-    try:
-        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
-        total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        source_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-        source_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-        start = max(0, int(start_frame))
-        stop = int(end_frame) if int(end_frame) > 0 else (total - 1 if total > 0 else 10**12)
-        stop = max(start, stop)
-        stride = max(1, int(frame_stride))
-        limit = max(1, int(max_frames))
+        if source_width <= 0 or source_height <= 0:
+            raise RuntimeError(f"无法确定视频原始尺寸")
 
-        if start > 0:
-            capture.set(cv2.CAP_PROP_POS_FRAMES, start)
+        frame_size = source_width * source_height * 3
+        if len(raw_data) % frame_size != 0:
+            raise RuntimeError(f"FFmpeg 输出数据不完整")
 
+        num_frames = len(raw_data) // frame_size
         frames: list[torch.Tensor] = []
-        current = start
-        while current <= stop and len(frames) < limit:
-            ok, frame = capture.read()
-            if not ok:
-                break
-            if (current - start) % stride == 0:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                image = _frame_to_tensor(rgb)
-                image = _resize_image_tensor(image, int(width), int(height))
-                frames.append(image)
-            current += 1
-    finally:
-        capture.release()
+        
+        for i in range(min(num_frames, limit)):
+            start_idx = i * frame_size
+            end_idx = start_idx + frame_size
+            frame_data = raw_data[start_idx:end_idx]
+            
+            img = np.frombuffer(frame_data, dtype=np.uint8).reshape(source_height, source_width, 3)
+            image = _frame_to_tensor(img)
+            image = _resize_image_tensor(image, int(width), int(height))
+            frames.append(image)
+
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"FFmpeg 解码超时")
+    except Exception as e:
+        raise RuntimeError(f"FFmpeg 解码错误: {str(e)}")
 
     if not frames:
         raise RuntimeError(f"未从视频读取到有效帧：{path.name}")
 
-    duration = float(total / fps) if fps > 0 and total > 0 else 0.0
-    output_width = int(frames[0].shape[2]) if frames else 0
-    output_height = int(frames[0].shape[1]) if frames else 0
+    actual_output_width = int(frames[0].shape[2]) if frames else 0
+    actual_output_height = int(frames[0].shape[1]) if frames else 0
+    
     return frames, {
         "fps": fps or 24.0,
         "frames": total,
         "width": source_width,
         "height": source_height,
-        "output_width": output_width,
-        "output_height": output_height,
+        "output_width": actual_output_width,
+        "output_height": actual_output_height,
         "duration": duration,
     }
 
@@ -665,10 +731,27 @@ class GJJ_MultiVideoLoader:
         selected = recover_selected_videos(selected_videos, extra_pnginfo, unique_id)
         enabled_outputs = recover_enabled_outputs(None, extra_pnginfo, unique_id)
 
-        output_fps = float(frame_rate or 24.0)
-        target_width = int(width or 0)
-        target_height = int(height or 0)
+        def _safe_int(value, default=0, min_val=0, max_val=999999):
+            try:
+                return max(min_val, min(max_val, int(value)))
+            except (ValueError, TypeError):
+                return default
+        
+        def _safe_float(value, default=0.0, min_val=0.0, max_val=1e10):
+            try:
+                return max(min_val, min(max_val, float(value)))
+            except (ValueError, TypeError):
+                return default
+        
+        output_fps = _safe_float(frame_rate, 24.0, 1.0, 240.0)
+        target_width = _safe_int(width, 0, 0, 16384)
+        target_height = _safe_int(height, 0, 0, 16384)
         output_format = str(video_format or "video/h264-mp4")
+        
+        start_frame_val = _safe_int(start_frame, 0, 0, 999999)
+        end_frame_val = _safe_int(end_frame, 0, 0, 999999)
+        frame_stride_val = _safe_int(frame_stride, 1, 1, 1000)
+        max_frames_val = _safe_int(max_frames, 240, 1, 100000)
 
         external_frames = self._coerce_external_frames(视频帧队列)
         if external_frames is not None:
@@ -704,10 +787,10 @@ class GJJ_MultiVideoLoader:
                 path = resolve_input_video_path(entry)
                 frames, meta = decode_video_cv2(
                     path,
-                    int(start_frame),
-                    int(end_frame),
-                    int(frame_stride),
-                    int(max_frames),
+                    start_frame_val,
+                    end_frame_val,
+                    frame_stride_val,
+                    max_frames_val,
                     target_width,
                     target_height,
                 )
@@ -763,10 +846,10 @@ class GJJ_MultiVideoLoader:
             "height": final_height,
             "video_format": output_format,
             "total_source_duration": total_duration,
-            "start_frame": int(start_frame),
-            "end_frame": int(end_frame),
-            "frame_stride": int(frame_stride),
-            "max_frames_per_video": int(max_frames),
+            "start_frame": start_frame_val,
+            "end_frame": end_frame_val,
+            "frame_stride": frame_stride_val,
+            "max_frames_per_video": max_frames_val,
         }
 
         optional_values = {

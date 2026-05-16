@@ -597,9 +597,15 @@ class GJJ_AnyPreview:
         print(f"[GJJ] 最终返回的ui数据: {ui}")
         print(f"[GJJ] ui.keys: {list(ui.keys())}")
 
-        # 确保返回的是原始输入值，而不是内部处理后的 merged 对象
-        # 如果 values 只有一个元素，返回该元素；否则返回合并后的结果
-        result_output = values[0] if len(values) == 1 else merged
+        # 输出规则：
+        # - 图片预览时必须返回 merged 批量张量。
+        #   否则单个 GJJ_BATCH_IMAGE / IMAGE 批次输入会因为 len(values)==1 被原样返回，
+        #   下游节点可能只识别成 1 张图；预览能显示多张，但数据流只传 1 张。
+        # - 非图片对象保持旧逻辑：单输入返回原对象，多输入返回合并对象。
+        if preview_kind == "image" and isinstance(merged, torch.Tensor):
+            result_output = merged
+        else:
+            result_output = values[0] if len(values) == 1 else merged
 
         return {
             "ui": ui,

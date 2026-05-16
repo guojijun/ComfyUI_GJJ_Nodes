@@ -28,7 +28,7 @@ def _ensure_runtime_dependencies() -> None:
 	global InputImpl, Types
 	global CFGNorm, CFGGuider, KSamplerSelect, ManualSigmas, RandomNoise, SamplerCustomAdvanced
 	global LatentUpscaleModelLoader
-	global EmptyLTXVLatentVideo, LTXVAddGuide, LTXVConcatAVLatent, LTXVConditioning, LTXVCropGuides, LTXVSeparateAVLatent
+	global EmptyLTXVLatentVideo, LTXVAddGuide, LTXVConcatAVLatent, LTXVConditioning, LTXVCropGuides, LTXVSeparateAVLatent, LTXVPreprocess, LTXVImgToVideoInplace
 	global LTXAVTextEncoderLoader, LTXVAudioVAEDecode, LTXVAudioVAEEncode, LTXVAudioVAELoader, LTXVEmptyLatentAudio
 	global LTXVLatentUpsampler, CreateVideo
 	global core_nodes, CheckpointLoaderSimple, CLIPTextEncode, VAEDecodeTiled
@@ -67,6 +67,8 @@ def _ensure_runtime_dependencies() -> None:
 		LTXVConditioning = nodes_lt.LTXVConditioning
 		LTXVCropGuides = nodes_lt.LTXVCropGuides
 		LTXVSeparateAVLatent = nodes_lt.LTXVSeparateAVLatent
+		LTXVPreprocess = getattr(nodes_lt, "LTXVPreprocess", None)
+		LTXVImgToVideoInplace = getattr(nodes_lt, "LTXVImgToVideoInplace", None)
 
 		nodes_lt_audio = importlib.import_module("comfy_extras.nodes_lt_audio")
 		LTXAVTextEncoderLoader = nodes_lt_audio.LTXAVTextEncoderLoader
@@ -100,7 +102,7 @@ def _ensure_runtime_dependencies() -> None:
 		) from exc
 	_RUNTIME_DEPS_READY = True
 
-GJJ_LTX23_RUNTIME_PATCH_VERSION = "workflow_json_reorg_v7_no_dualclip_projection_check"
+GJJ_LTX23_RUNTIME_PATCH_VERSION = "workflow_v40_switch_fix_description"
 
 DEFAULT_NEGATIVE_PROMPT = (
 	"titles, subtitles, text, watermark, logo, blurry text, distorted text, overexposed, underexposed, "
@@ -143,6 +145,15 @@ DEFAULT_VAE_TEMPORAL_SIZE = 512
 DEFAULT_VAE_TEMPORAL_OVERLAP = 4
 DEFAULT_STAGE2_UPSCALE_FACTOR = 2
 
+WORKFLOW_FIRST_LAST_IMG_COMPRESSION = 18
+WORKFLOW_FIRST_LAST_GUIDE_STRENGTH = 0.7
+WORKFLOW_FIRST_LAST_INPLACE_STRENGTH = 1.0
+WORKFLOW_FIRST_LAST_STAGE1_SIGMAS = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
+WORKFLOW_FIRST_LAST_STAGE2_SIGMAS = "0.85, 0.7250, 0.4219, 0.0"
+WORKFLOW_FIRST_LAST_NAG_SCALE = 11.0
+WORKFLOW_FIRST_LAST_NAG_ALPHA = 0.25
+WORKFLOW_FIRST_LAST_NAG_TAU = 2.5
+
 MODE_GENERATED_AUDIO = "generated_audio"
 MODE_AUDIO_CONDITIONED = "audio_conditioned"
 PROGRESS_TEXT_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
@@ -176,6 +187,24 @@ def _send_status(unique_id: Any, text: str, progress: float | None = None) -> No
 		)
 	except Exception:
 		pass
+
+
+def _debug_tensor_info(value: Any) -> str:
+	try:
+		if isinstance(value, dict) and isinstance(value.get("samples"), torch.Tensor):
+			t = value.get("samples")
+			return f"LATENT samples.shape={tuple(t.shape)}, dtype={t.dtype}, device={t.device}"
+	except Exception:
+		pass
+	try:
+		if isinstance(value, torch.Tensor):
+			return f"Tensor shape={tuple(value.shape)}, dtype={value.dtype}, device={value.device}"
+	except Exception:
+		pass
+	try:
+		return f"{type(value).__name__}"
+	except Exception:
+		return "(unknown)"
 
 
 def _send_segment_preview(unique_id: Any, payload: dict[str, Any]) -> None:
@@ -240,6 +269,75 @@ def _is_ltx_transition_lora_name(lora_name: Any) -> bool:
 	return ("ltx23transition" in normalized or ("ltx23" in normalized and "transition" in normalized) or ("ltx" in normalized and "zhuanchang" in normalized))
 
 
+def _find_auto_transition_lora_name() -> tuple[str, str]:
+	"""从 models/loras（含子目录）搜索关键词 ltx2.3-transition，不分大小写。返回 (loras_name, full_path)。"""
+	keyword = "ltx2.3-transition"
+	candidates: list[str] = []
+	try:
+		for name in folder_paths.get_filename_list("loras") or []:
+			if keyword in str(name or "").lower():
+				candidates.append(str(name))
+	except Exception:
+		pass
+	if not candidates:
+		try:
+			for root in folder_paths.get_folder_paths("loras") or []:
+				root_path = Path(root)
+				if not root_path.exists():
+					continue
+				for file in root_path.rglob("*"):
+					if file.is_file() and keyword in str(file.relative_to(root_path)).replace('\\','/').lower():
+						candidates.append(str(file.relative_to(root_path)).replace('\\','/'))
+		except Exception:
+			pass
+	if not candidates:
+		return "", ""
+	candidates = sorted(dict.fromkeys(candidates), key=lambda s: (len(s), s.lower()))
+	name = candidates[0]
+	full_path = ""
+	try:
+		full_path = folder_paths.get_full_path("loras", name) or ""
+	except Exception:
+		pass
+	if not full_path:
+		try:
+			for root in folder_paths.get_folder_paths("loras") or []:
+				probe = Path(root) / name
+				if probe.exists():
+					full_path = str(probe)
+					break
+		except Exception:
+			pass
+	return name, full_path
+
+
+def _ensure_transition_lora_in_chain(lora_chain_config: Any, enable_auto: bool) -> tuple[str, bool, str, str]:
+	"""若首尾帧分支需要，自动把转场 lora 注入 lora_chain_config。返回 (prepared_config, enabled, lora_name, lora_path)。"""
+	items = parse_lora_data(lora_chain_config)
+	if not items:
+		items = []
+	auto_name = ""
+	auto_path = ""
+	enabled = False
+	for item in items:
+		if item.get("enabled", True) is not False and _is_ltx_transition_lora_name(item.get("name", "")):
+			enabled = True
+			auto_name = str(item.get("name", "") or "")
+			try:
+				auto_path = folder_paths.get_full_path("loras", auto_name) or ""
+			except Exception:
+				auto_path = ""
+			item["strength"] = 1.0
+			break
+	if (not enabled) and enable_auto:
+		auto_name, auto_path = _find_auto_transition_lora_name()
+		if auto_name:
+			items.append({"name": auto_name, "strength": 1.0, "enabled": True})
+			enabled = True
+	prepared = normalize_lora_chain_data(json.dumps(items, ensure_ascii=False)) if items else normalize_lora_chain_data(lora_chain_config)
+	return prepared, enabled, auto_name, auto_path
+
+
 def _prepare_ltx_lora_chain_config(lora_chain_config: Any) -> tuple[str, bool, bool]:
 	items = parse_lora_data(lora_chain_config)
 	if not items:
@@ -262,6 +360,63 @@ def _prepare_ltx_lora_chain_config(lora_chain_config: Any) -> tuple[str, bool, b
 			copied["strength"] = 1.0
 		prepared.append(copied)
 	return normalize_lora_chain_data(json.dumps(prepared, ensure_ascii=False)), transition_enabled, changed_strength
+
+
+def _strip_transition_lora_from_chain(lora_chain_config: Any) -> str:
+	items = parse_lora_data(lora_chain_config)
+	if not items:
+		return normalize_lora_chain_data(lora_chain_config)
+	prepared: list[dict[str, Any]] = []
+	for item in items:
+		copied = dict(item)
+		name = str(copied.get("name", "") or "").strip()
+		if name and _is_ltx_transition_lora_name(name):
+			continue
+		prepared.append(copied)
+	return normalize_lora_chain_data(json.dumps(prepared, ensure_ascii=False)) if prepared else ""
+
+
+def _parse_transition_lora_switches(value: Any) -> list[str]:
+	text = str(value or "").strip()
+	if not text:
+		return []
+	return [str(part).strip() for part in text.split(",")]
+
+
+def _resolve_transition_lora_switch_for_segment(value: Any, segment_index: int | None = None) -> bool:
+	"""1=启用，0=关闭。默认不填/没数据/越界都启用。segment_index 从 1 开始。"""
+	parts = _parse_transition_lora_switches(value)
+	if not parts:
+		return True
+	idx = 0 if segment_index is None else max(0, int(segment_index) - 1)
+	if idx >= len(parts):
+		return True
+	raw = str(parts[idx] or "").strip()
+	if raw == "0":
+		return False
+	if raw == "1":
+		return True
+	return True
+
+def _resolve_transition_lora_switch_any(value: Any, segment_count: int = 1) -> bool:
+	"""是否需要全局加载转场 LoRA。
+
+	默认：不填/越界/非法值都启用。
+	如果用户明确填的可用段全部是 0，则不加载转场 LoRA。
+	"""
+	parts = _parse_transition_lora_switches(value)
+	if not parts:
+		return True
+	limit = max(1, int(segment_count or 1))
+	has_effective = False
+	for index in range(1, limit + 1):
+		if index <= len(parts):
+			has_effective = True
+		if _resolve_transition_lora_switch_for_segment(value, index):
+			return True
+	return not has_effective
+
+
 
 
 def _append_ltx_transition_trigger(prompt_text: str, transition_lora_enabled: bool) -> tuple[str, bool]:
@@ -1139,6 +1294,278 @@ def _resize_guide_to_size(image: torch.Tensor, width: int, height: int) -> torch
 	return resized.movedim(1, -1)[:, :target_height, :target_width, :].contiguous()
 
 
+def _call_node_with_fallback(node_obj: Any, method_names: tuple[str, ...], *args):
+	last_error = None
+	candidates = []
+	if node_obj is None:
+		raise RuntimeError("目标节点未加载")
+	candidates.append(node_obj)
+	if inspect.isclass(node_obj):
+		try:
+			candidates.append(node_obj())
+		except Exception:
+			pass
+	for candidate in candidates:
+		for method_name in method_names:
+			func = getattr(candidate, method_name, None)
+			if callable(func):
+				try:
+					return func(*args)
+				except Exception as exc:
+					last_error = exc
+	if last_error is not None:
+		raise last_error
+	raise RuntimeError(f"无法调用节点：{getattr(node_obj, '__name__', type(node_obj).__name__)}")
+
+
+def _ltx_preprocess_image(image: torch.Tensor | None, compression: int = WORKFLOW_FIRST_LAST_IMG_COMPRESSION) -> torch.Tensor | None:
+	if image is None:
+		return None
+	batch = _ensure_image_batch(image)[:1]
+	if LTXVPreprocess is None:
+		return batch
+	try:
+		result = _call_node_with_fallback(LTXVPreprocess, ("execute", "preprocess"), batch, int(compression))
+		if isinstance(result, (tuple, list)) and result:
+			return _ensure_image_batch(result[0])[:1]
+		return _ensure_image_batch(result)[:1]
+	except Exception:
+		return batch
+
+
+def _find_node_class_by_name(class_name: str):
+	"""从已加载模块 / NODE_CLASS_MAPPINGS 中寻找真实自定义节点类。"""
+	try:
+		for module in list(sys.modules.values()):
+			if module is None:
+				continue
+			mapping = getattr(module, "NODE_CLASS_MAPPINGS", None)
+			if isinstance(mapping, dict) and class_name in mapping:
+				return mapping[class_name]
+	except Exception:
+		pass
+	try:
+		for module_name in (
+			"GJJ",
+			"custom_nodes.GJJ",
+			"GJJ.nodes",
+			"custom_nodes.GJJ.nodes",
+		):
+			try:
+				module = importlib.import_module(module_name)
+				mapping = getattr(module, "NODE_CLASS_MAPPINGS", None)
+				if isinstance(mapping, dict) and class_name in mapping:
+					return mapping[class_name]
+			except Exception:
+				pass
+	except Exception:
+		pass
+	try:
+		for module in list(sys.modules.values()):
+			if module is None:
+				continue
+			obj = getattr(module, class_name, None)
+			if inspect.isclass(obj):
+				return obj
+	except Exception:
+		pass
+	return None
+
+
+def _call_real_comfy_node(node_class: Any, **kwargs):
+	"""按节点 FUNCTION 调用真实 ComfyUI 节点；自动过滤不支持的参数。"""
+	if node_class is None:
+		raise RuntimeError("node_class is None")
+	instance = node_class() if inspect.isclass(node_class) else node_class
+	func_name = getattr(instance, "FUNCTION", None) or getattr(node_class, "FUNCTION", None)
+	method_candidates = []
+	if func_name:
+		method_candidates.append(str(func_name))
+	method_candidates.extend(["execute", "run", "process", "apply", "generate", "forward"])
+	last_error = None
+	for name in dict.fromkeys(method_candidates):
+		func = getattr(instance, name, None)
+		if not callable(func):
+			continue
+		try:
+			sig = inspect.signature(func)
+			accepted = {}
+			has_var_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+			for key, value in kwargs.items():
+				if has_var_kwargs or key in sig.parameters:
+					accepted[key] = value
+			return func(**accepted)
+		except TypeError as exc:
+			last_error = exc
+			# 再试一次按常见顺序位置参数。
+			try:
+				order = [
+					"model", "nag_cond_video", "nag_cond_audio", "nag_scale", "nag_alpha", "nag_tau", "inplace",
+					"vae", "latent", "positive", "negative", "image_01", "image_02", "image_03",
+					"guide_config_json", "image_names_json",
+				]
+				args = [kwargs[k] for k in order if k in kwargs]
+				return func(*args)
+			except Exception as exc2:
+				last_error = exc2
+		except Exception as exc:
+			last_error = exc
+	if last_error is not None:
+		raise last_error
+	raise RuntimeError(f"无法调用真实节点 {node_class}")
+
+
+def _apply_real_gjj_ltx_first_last_frame(
+	*,
+	video_vae: Any,
+	latent: dict[str, Any],
+	positive: Any,
+	negative: Any,
+	main_image: torch.Tensor | None,
+	guide_images: Iterable[torch.Tensor | None],
+) -> tuple[Any, Any, dict[str, Any], bool]:
+	"""优先调用用户本地真实 GJJ_LTX_FirstLastFrame 节点，失败则返回原 latent。"""
+	node_class = _find_node_class_by_name("GJJ_LTX_FirstLastFrame")
+	if node_class is None:
+		print("[GJJ LTX2.3 Clean v40][GJJ_LTX_FirstLastFrame] real node not found, fallback to internal injection.", flush=True)
+		return positive, negative, latent, False
+	images = [img for img in list(guide_images or []) if img is not None]
+	image_01 = _ltx_preprocess_image(main_image) if main_image is not None else None
+	image_02 = _ltx_preprocess_image(images[0]) if images else None
+	config = json.dumps([{"frame": 0, "strength": 0.7}, {"frame": -1, "strength": 0.7}], ensure_ascii=False)
+	try:
+		result = _call_real_comfy_node(
+			node_class,
+			vae=video_vae,
+			latent=latent,
+			positive=positive,
+			negative=negative,
+			image_01=image_01,
+			image_02=image_02,
+			image_03=None,
+			guide_config_json=config,
+			image_names_json="",
+		)
+		if not isinstance(result, (tuple, list)):
+			result = (result,)
+		out_positive = positive
+		out_negative = negative
+		out_latent = latent
+		# 源工作流只连接第 3 个输出“视频潜空间”；前两个 conditioning 输出未接。
+		if len(result) >= 3 and isinstance(result[2], dict):
+			out_latent = result[2]
+		elif len(result) >= 1 and isinstance(result[0], dict):
+			out_latent = result[0]
+		if len(result) >= 1 and not isinstance(result[0], dict):
+			out_positive = result[0]
+		if len(result) >= 2 and not isinstance(result[1], dict):
+			out_negative = result[1]
+		print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX_FirstLastFrame] REAL node called: class={node_class.__name__ if hasattr(node_class, '__name__') else node_class}; result_len={len(result)}; latent={_debug_tensor_info(out_latent)}", flush=True)
+		return out_positive, out_negative, out_latent, True
+	except Exception as exc:
+		print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX_FirstLastFrame] REAL node call failed, fallback to internal injection: {exc}", flush=True)
+		return positive, negative, latent, False
+
+
+def _apply_real_gjj_ltx2nag(
+	*,
+	model: Any,
+	positive: Any,
+	negative: Any,
+	nag_scale: float,
+	nag_alpha: float,
+	nag_tau: float,
+	inplace: bool = True,
+) -> tuple[Any, bool]:
+	"""优先调用用户本地真实 GJJ_LTX2NAG 节点，失败再用内部 patch。"""
+	node_class = _find_node_class_by_name("GJJ_LTX2NAG")
+	if node_class is None:
+		print("[GJJ LTX2.3 Clean v40][GJJ_LTX2NAG] real node not found, fallback to internal patch.", flush=True)
+		return model, False
+	try:
+		result = _call_real_comfy_node(
+			node_class,
+			model=model,
+			nag_cond_video=positive,
+			nag_cond_audio=negative,
+			nag_scale=float(nag_scale),
+			nag_alpha=float(nag_alpha),
+			nag_tau=float(nag_tau),
+			inplace=bool(inplace),
+		)
+		if isinstance(result, (tuple, list)) and result:
+			out_model = result[0]
+		else:
+			out_model = result
+		print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX2NAG] REAL node called: class={node_class.__name__ if hasattr(node_class, '__name__') else node_class}; output_model_type={type(out_model).__name__}", flush=True)
+		return out_model, True
+	except Exception as exc:
+		print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX2NAG] REAL node call failed, fallback to internal patch: {exc}", flush=True)
+		return model, False
+
+
+def _build_first_last_reference_guides(
+	main_image: torch.Tensor | None,
+	guide_images: Iterable[torch.Tensor | None],
+	total_duration_seconds: float,
+	fps: int,
+	output_frame_count: int,
+) -> list[tuple[torch.Tensor, float, float]]:
+	items: list[tuple[torch.Tensor, float, float]] = []
+	main = _ltx_preprocess_image(main_image)
+	if main is not None:
+		items.append((main, 0.0, float(WORKFLOW_FIRST_LAST_GUIDE_STRENGTH)))
+	# 关键修正：源工作流是 frame=-1，不是 seconds=duration。
+	# 这里改成最后一帧对应的秒数 (frame_count-1)/fps，避免尾帧越界被跳过。
+	# Clean v40：严格复刻 GJJ_LTX_FirstLastFrame 的 frame=-1。
+	# 之前为了避免 seconds=duration 越界，做了 duration-1/fps，结果 241 帧时会落到 frame 239，
+	# 再除以 LTX 时间压缩因子后注入到 latent index 29，而不是最后一个 latent index 30。
+	# 这里必须直接使用最后一帧：(output_frame_count - 1) / fps。
+	last_frame_seconds = max(0.0, (max(1, int(output_frame_count)) - 1) / max(1, int(fps)))
+	for image in list(guide_images or []):
+		if image is None:
+			continue
+		guide = _ltx_preprocess_image(image)
+		if guide is not None:
+			items.append((guide, float(last_frame_seconds), float(WORKFLOW_FIRST_LAST_GUIDE_STRENGTH)))
+		break
+	return items
+
+
+def _apply_img_to_video_inplace_exact(
+	*,
+	video_vae: Any,
+	latent: dict[str, Any],
+	anchor_image: torch.Tensor | None,
+	strength: float = WORKFLOW_FIRST_LAST_INPLACE_STRENGTH,
+) -> dict[str, Any]:
+	if anchor_image is None:
+		return latent
+	image = _ltx_preprocess_image(anchor_image)
+	if image is None:
+		return latent
+	if LTXVImgToVideoInplace is not None:
+		for methods in (("execute", "img_to_video_inplace", "run"), ("execute",)):
+			try:
+				result = _call_node_with_fallback(LTXVImgToVideoInplace, methods, video_vae, image, latent, float(strength), False)
+				if isinstance(result, (tuple, list)) and result:
+					return result[0]
+				if isinstance(result, dict):
+					return result
+			except Exception:
+				pass
+	fallback_guides = [(image, 0.0, float(strength))]
+	latent2, _ = _inject_ltxv_images_inplace(
+		video_vae=video_vae,
+		latent=latent,
+		reference_guides=fallback_guides,
+		fps=1,
+		output_frame_count=max(1, int(latent.get("samples").shape[2]) if isinstance(latent, dict) and isinstance(latent.get("samples"), torch.Tensor) else 1),
+		trim_start=0,
+	)
+	return latent2
+
+
 def _build_latent_inplace_guides(
 	main_image: torch.Tensor | None,
 	guide_images: Iterable[torch.Tensor | None],
@@ -1341,6 +1768,23 @@ def _slice_output_frames(frames: torch.Tensor, start_index: int, frame_count: in
 	if int(sliced.shape[0]) <= 0:
 		raise RuntimeError("裁切输出视频帧后为空。")
 	return sliced
+
+
+
+def _resize_frames_to_size(frames: torch.Tensor, width: int, height: int) -> torch.Tensor:
+	if not isinstance(frames, torch.Tensor) or frames.ndim != 4:
+		return frames
+	target_width = max(1, int(width))
+	target_height = max(1, int(height))
+	if int(frames.shape[2]) == target_width and int(frames.shape[1]) == target_height:
+		return frames
+	resized = F.interpolate(
+		frames.movedim(-1, 1),
+		size=(target_height, target_width),
+		mode="bilinear",
+		align_corners=False,
+	).movedim(1, -1)
+	return resized.clamp(0.0, 1.0).contiguous()
 
 
 def _crop_frames_to_size(frames: torch.Tensor, width: int, height: int) -> torch.Tensor:
@@ -1920,8 +2364,20 @@ def _prepare_guides(
 		source_width = int(main_image.shape[2])
 		source_height = int(main_image.shape[1])
 
-	output_width = _resolve_output_dimension(fallback_width, source_width)
-	output_height = _resolve_output_dimension(fallback_height, source_height)
+	# Clean v40：如果上层已明确给了 target_width / target_height，就强制以它们为最终输出尺寸，
+	# 不再回退到参考图原始尺寸，避免出现“面板设 512x512，结果仍按 1280x720 输出”的问题。
+	if fallback_width is not None and fallback_height is not None:
+		try:
+			output_width = max(64, int(round(float(fallback_width))))
+		except Exception:
+			output_width = _resolve_output_dimension(None, source_width)
+		try:
+			output_height = max(64, int(round(float(fallback_height))))
+		except Exception:
+			output_height = _resolve_output_dimension(None, source_height)
+	else:
+		output_width = _resolve_output_dimension(fallback_width, source_width)
+		output_height = _resolve_output_dimension(fallback_height, source_height)
 	width, height = _resolve_stage1_sample_size(output_width, output_height, output_long_edge)
 
 	if main_image is not None:
@@ -2083,10 +2539,22 @@ def run_ltx23_multiref_video(
 ):
 	_ensure_runtime_dependencies()
 	prompt_text = str(positive_prompt or "").strip() or "电影感视频，主体自然运动，镜头稳定，细节清晰。"
-	prepared_lora_chain_config, transition_lora_enabled, transition_strength_changed = _prepare_ltx_lora_chain_config(lora_chain_config)
-	prompt_text, transition_trigger_added = _append_ltx_transition_trigger(prompt_text, transition_lora_enabled)
 	negative_text = str(negative_prompt or "").strip() or DEFAULT_NEGATIVE_PROMPT
 	fps = max(1, int(fps))
+	try:
+		target_width = max(64, int(round(float(target_width)))) if target_width is not None else None
+	except Exception:
+		target_width = None
+	try:
+		target_height = max(64, int(round(float(target_height)))) if target_height is not None else None
+	except Exception:
+		target_height = None
+	if target_width is not None and target_height is not None:
+		_send_status(unique_id, f"Clean v40 入口尺寸：target_width={target_width} / target_height={target_height}")
+		try:
+			print(f"[GJJ LTX2.3 Clean v40] runtime entry: target_width={target_width}, target_height={target_height}, fps={fps}, seed={seed}", flush=True)
+		except Exception:
+			pass
 	base_guide_images = list(guide_images or [])
 	base_guide_times = list(guide_times or [])
 	visual_scene_count = (1 if main_image is not None else 0) + sum(1 for image in base_guide_images if image is not None)
@@ -2098,12 +2566,38 @@ def run_ltx23_multiref_video(
 		route_label = "首尾帧"
 	else:
 		route_label = _resolve_visual_route_label(main_image, base_guide_images)
+	# Clean v40：多图模式也需要转场 LoRA。
+	# 之前只在 exactly 2 张图的“首尾帧”分支自动启用，>=3 张多图分段时没有自动加载转场 LoRA，
+	# 所以多图转场会明显不如双图丝滑。
+	segment_switch_text = ""
+	try:
+		segment_switch_text = str(_resolve_transition_options(transition_options).get("lora_switches") or "").strip()
+	except Exception:
+		segment_switch_text = ""
+	segment_count_for_switch = max(1, visual_scene_count - 1) if visual_scene_count >= 2 else 1
+	global_transition_lora_enabled_by_switch = _resolve_transition_lora_switch_any(segment_switch_text, segment_count_for_switch)
+	auto_enable_transition_lora = (visual_scene_count >= 2) and bool(global_transition_lora_enabled_by_switch)
+	prepared_lora_chain_source = lora_chain_config if global_transition_lora_enabled_by_switch else _strip_transition_lora_from_chain(lora_chain_config)
+	prepared_lora_chain_config, transition_lora_enabled, auto_transition_lora_name, auto_transition_lora_path = _ensure_transition_lora_in_chain(prepared_lora_chain_source, auto_enable_transition_lora)
+	prepared_lora_chain_config, transition_lora_enabled2, transition_strength_changed = _prepare_ltx_lora_chain_config(prepared_lora_chain_config)
+	transition_lora_enabled = bool(global_transition_lora_enabled_by_switch and (transition_lora_enabled or transition_lora_enabled2))
+	# prompt 是否添加 zhuanchang 改到 _render_once 内按段处理；这里仅记录全局是否加载 LoRA。
+	transition_trigger_added = False
+	try:
+		print(f"[GJJ LTX2.3 Clean v40] transition-lora global check: visual_scene_count={visual_scene_count}, route={route_label}, switch_seq={segment_switch_text or '(default all on)'}, global_lora_enabled={global_transition_lora_enabled_by_switch}, auto_enable_transition_lora={auto_enable_transition_lora}", flush=True)
+		print(f"[GJJ LTX2.3 Clean v40] transition lora search result: name={auto_transition_lora_name or '(none)'} path={auto_transition_lora_path or '(none)'}", flush=True)
+	except Exception:
+		pass
 	resolved_denoise_strength = _clamp_float(denoise_strength, DEFAULT_DENOISE_STRENGTH, 0.0, 1.0)
 	debug_route_key = ""
 	debug_source_summary = ""
 	if isinstance(branch_debug, dict):
 		debug_route_key = str(branch_debug.get("route_key") or "").strip()
 		debug_source_summary = str(branch_debug.get("source_summary") or "").strip()
+		# Clean v40：双图首尾帧时，route_label 必须稳定保持“首尾帧”，
+		# 不能再被 debug_route_key=multi_frame 覆盖。只有 3 张及以上时才显示多帧参考。
+		if debug_route_key == "multi_frame" and visual_scene_count > 2:
+			route_label = f"多帧参考（{visual_scene_count}张）"
 
 	def _branch_status_text() -> str:
 		key_text = f" / {debug_route_key}" if debug_route_key else ""
@@ -2138,13 +2632,31 @@ def run_ltx23_multiref_video(
 				details = []
 				if transition_strength_changed:
 					details.append("强度已按 1.00 应用")
-				if transition_trigger_added:
-					details.append(f"已自动补触发词 {LTX_TRANSITION_LORA_TRIGGER}")
-				if details:
-					_send_status(unique_id, f"提示：检测到 LTX 转场 LoRA，{'，'.join(details)}。")
+				if transition_lora_enabled:
+					details.append("触发词按段自动处理")
+				if auto_transition_lora_name:
+					details.append(f"自动启用 LoRA={auto_transition_lora_name}")
+				_send_status(unique_id, f"提示：检测到/启用了 LTX 转场 LoRA，{'，'.join(details) if details else '已启用'}。")
+				try:
+					print(f"[GJJ LTX2.3 Clean v40] transition lora enabled: name={auto_transition_lora_name or '(from chain)'} path={auto_transition_lora_path or '(unknown)'} trigger_added={transition_trigger_added} strength_fixed={transition_strength_changed}", flush=True)
+					print(f"[GJJ LTX2.3 Clean v40] final lora chain config: {prepared_lora_chain_config}", flush=True)
+				except Exception:
+					pass
+			else:
+				try:
+					print(f"[GJJ LTX2.3 Clean v40] no transition lora enabled for this run. switch_seq={segment_switch_text or '(default all on)'} global_lora_enabled={global_transition_lora_enabled_by_switch}", flush=True)
+				except Exception:
+					pass
 			model = _apply_ff_chunking(model, DEFAULT_FF_CHUNKS, DEFAULT_FF_DIM_THRESHOLD)
 		except Exception as exc:
 			raise RuntimeError(f"LTX 多图参考节点加载模型失败：{exc}") from exc
+
+		def _branch_kind_label(branch_kind: str) -> str:
+			if branch_kind == "first_last_workflow":
+				return "首尾帧-源工作流复刻"
+			if branch_kind == "multiframe_workflow_segment":
+				return "多图参考-逐段复刻源工作流"
+			return "默认分支"
 
 		def _render_once(
 			*,
@@ -2157,17 +2669,50 @@ def run_ltx23_multiref_video(
 			render_seed: int,
 			render_frame_trim_start: int,
 			render_route_label: str,
+			render_branch_kind: str = "default",
+			render_segment_index: int | None = None,
 			status_prefix: str = "",
 		) -> dict[str, Any]:
 			prefix = f"{status_prefix} · " if status_prefix else ""
+			render_segment_lora_enabled = _resolve_transition_lora_switch_for_segment(segment_switch_text, render_segment_index)
+			render_segment_label = "启用" if render_segment_lora_enabled else "关闭"
+			render_prompt_text = prompt_text
+			render_trigger_added = False
+			if transition_lora_enabled and render_segment_lora_enabled:
+				render_prompt_text, render_trigger_added = _append_ltx_transition_trigger(prompt_text, True)
+			_send_status(unique_id, f"{prefix}Clean v40 当前分支：{_branch_kind_label(str(render_branch_kind or 'default'))} / route={render_route_label}")
+			_send_status(unique_id, f"{prefix}Clean v40 转场LoRA段控制：序列={segment_switch_text or '默认全启用'}；当前段={render_segment_index or 1}；本段={render_segment_label}")
+			try:
+				print(f"[GJJ LTX2.3 Clean v40] render_once branch={render_branch_kind} route={render_route_label}", flush=True)
+			except Exception:
+				pass
 			original_guide_images = list(render_guide_images or [])
 			original_guide_times = list(render_guide_times or [])
-			render_guide_images, render_guide_times, render_guide_strengths = _build_transition_conditioning_guides(
-				render_main_image,
-				original_guide_images,
-				original_guide_times,
-				transition_options,
-			)
+			workflow_first_last = str(render_branch_kind or "") == "first_last_workflow"
+			if workflow_first_last:
+				render_guide_images = original_guide_images
+				render_guide_times = original_guide_times
+				render_guide_strengths = [float(WORKFLOW_FIRST_LAST_GUIDE_STRENGTH) for _ in original_guide_images if _ is not None]
+				_send_status(unique_id, f"{prefix}Clean v40 首尾帧：严格按最新工作流复刻（不使用面板转场参数）。")
+				try:
+					main_shape = tuple(render_main_image.shape) if hasattr(render_main_image, 'shape') else '(unknown)'
+					guide_shapes = [tuple(x.shape) if hasattr(x, 'shape') else '(unknown)' for x in original_guide_images if x is not None]
+					print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX_FirstLastFrame] using original scene tensors: main={main_shape}, guides={guide_shapes}", flush=True)
+				except Exception:
+					pass
+			else:
+				render_guide_images, render_guide_times, render_guide_strengths = _build_transition_conditioning_guides(
+					render_main_image,
+					original_guide_images,
+					original_guide_times,
+					transition_options,
+				)
+				try:
+					opts = _resolve_transition_options(transition_options)
+					if opts.get("enabled"):
+						_send_status(unique_id, f"{prefix}Clean v40 转场guide：原始guide={len(original_guide_images)}，增强后guide={len(render_guide_images)}，强度={','.join(f'{float(x):.2f}' for x in render_guide_strengths[:6])}")
+				except Exception:
+					pass
 
 			_send_status(unique_id, f"{prefix}2/8 处理{render_route_label}输入...")
 			try:
@@ -2180,12 +2725,22 @@ def run_ltx23_multiref_video(
 					fallback_width=target_width,
 					fallback_height=target_height,
 				)
-				latent_reference_guides = _build_latent_inplace_guides(
-					render_main_image,
-					render_guide_images,
-					render_guide_times,
-					render_guide_strengths,
-				)
+				# Clean v40：
+				# 这里还不知道 output_frame_count，不能构建 frame=-1 对应的尾帧 guide。
+				# 先占位，等音频/空音频 latent 创建完成、output_frame_count 确定后再构建。
+				latent_reference_guides = []
+				if not workflow_first_last:
+					latent_reference_guides = _build_latent_inplace_guides(
+						render_main_image,
+						render_guide_images,
+						render_guide_times,
+						render_guide_strengths,
+					)
+				_send_status(unique_id, f"{prefix}Clean v40 尺寸锁定：target={target_width}x{target_height} / sample={sample_width}x{sample_height} / output={output_width}x{output_height}")
+				try:
+					print(f"[GJJ LTX2.3 Clean v40] size lock: target={target_width}x{target_height}, sample={sample_width}x{sample_height}, output={output_width}x{output_height}, guides={len(guides)}", flush=True)
+				except Exception:
+					pass
 			except Exception as exc:
 				raise RuntimeError(f"LTX 多图参考节点处理参考图失败：{exc}") from exc
 
@@ -2252,6 +2807,39 @@ def run_ltx23_multiref_video(
 				except Exception as exc:
 					raise RuntimeError(f"LTX 图生视频节点初始化音频 latent 失败：{exc}") from exc
 
+			if workflow_first_last:
+				reference_duration = float(render_duration_seconds or 0.0)
+				latent_reference_guides = _build_first_last_reference_guides(
+					render_main_image,
+					render_guide_images,
+					reference_duration,
+					fps,
+					output_frame_count,
+				)
+				try:
+					guide_desc = []
+					for gi, (gimg, gsec, gstrength) in enumerate(latent_reference_guides, start=1):
+						shape = tuple(gimg.shape) if hasattr(gimg, "shape") else "(unknown)"
+						frame_idx = _guide_frame_index(float(gsec), fps, output_frame_count, render_frame_trim_start)
+						guide_desc.append(f"guide{gi}: seconds={gsec}, frame_index={frame_idx}, strength={gstrength}, shape={shape}")
+					print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX_FirstLastFrame] guide_config_json=[{{\"frame\":0,\"strength\":0.7}},{{\"frame\":-1,\"strength\":0.7}}]", flush=True)
+					print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX_FirstLastFrame] main_image={_debug_tensor_info(render_main_image)}", flush=True)
+					print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX_FirstLastFrame] guide_images_count={len([x for x in list(render_guide_images or []) if x is not None])}; output_frame_count={output_frame_count}; true_last_frame={max(0, int(output_frame_count)-1)}; fps={fps}; render_frame_trim_start={render_frame_trim_start}; duration={render_duration_seconds}", flush=True)
+					print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX_FirstLastFrame] latent guides: {'; '.join(guide_desc) if guide_desc else '(none)'}", flush=True)
+					if len(latent_reference_guides) >= 2:
+						expected_last = max(0, int(output_frame_count) - 1)
+						actual_last = _guide_frame_index(float(latent_reference_guides[1][1]), fps, output_frame_count, render_frame_trim_start)
+						print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX_FirstLastFrame] last_frame_check: expected={expected_last}, actual={actual_last}, ok={expected_last == actual_last}", flush=True)
+				except Exception:
+					pass
+
+			if workflow_first_last:
+				try:
+					print("[GJJ LTX2.3 Clean v40][WorkflowCompare] 源工作流关键参数：优先调用真实GJJ_LTX_FirstLastFrame；frame0=0 strength=0.7 / frame2=-1 strength=0.7; NAG=11,0.25,2.5,inplace=True，优先调用真实GJJ_LTX2NAG；NAG输入使用原始CLIPTextEncode正/负；NAG输出同时连接Stage1/Stage2两个CFGGuider; Stage1 sigmas=1.0,0.99375,0.9875,0.98125,0.975,0.909375,0.725,0.421875,0.0; Stage2 sigmas=0.85,0.7250,0.4219,0.0; ImgToVideoInplace strength=1,bypass=False; LTXVPreprocess img_compression=18", flush=True)
+					print(f"[GJJ LTX2.3 Clean v40][WorkflowCompare] 当前关键参数：target={target_width}x{target_height}; sample={sample_width}x{sample_height}; output={output_width}x{output_height}; output_frame_count={output_frame_count}; true_last_frame={max(0, int(output_frame_count)-1)}; latent_guides={len(latent_reference_guides)}", flush=True)
+				except Exception:
+					pass
+
 			original_guide_count = (1 if render_main_image is not None else 0) + sum(1 for image in original_guide_images if image is not None)
 			transition_guide_count = max(0, len(guides) - original_guide_count)
 			guide_text = f"{len(guides)}张guide"
@@ -2261,45 +2849,128 @@ def run_ltx23_multiref_video(
 				guide_text += f"，latent锚定{len(latent_reference_guides)}帧位"
 			_send_status(unique_id, f"{prefix}4/8 编码提示词并注入时间参考图...（采样 {sample_width}x{sample_height} -> 输出 {output_width}x{output_height} / 输出{output_frame_count}帧 / LTX内部{frame_count}帧 / 降噪{resolved_denoise_strength:.2f} / {guide_text}）")
 			try:
-				positive = CLIPTextEncode().encode(clip, prompt_text)[0]
-				negative = CLIPTextEncode().encode(clip, negative_text)[0]
-				positive, negative = LTXVConditioning.execute(positive, negative, float(fps))[0:2]
+				raw_positive = CLIPTextEncode().encode(clip, render_prompt_text)[0]
+				raw_negative = CLIPTextEncode().encode(clip, negative_text)[0]
+				# 源工作流连线：
+				#   CLIPTextEncode 正/负 -> GJJ_LTX2NAG
+				#   CLIPTextEncode 正/负 -> LTXVConditioning -> CFGGuider / LTXVCropGuides
+				# 所以 NAG 必须吃 raw_positive/raw_negative，CFG/CropGuides 才吃 LTXVConditioning 后的 positive/negative。
+				positive, negative = LTXVConditioning.execute(raw_positive, raw_negative, float(fps))[0:2]
+				try:
+					print(f"[GJJ LTX2.3 Clean v40][WorkflowWiring] raw CLIPTextEncode -> GJJ_LTX2NAG; LTXVConditioning -> CFGGuiders/CropGuides", flush=True)
+					print(f"[GJJ LTX2.3 Clean v40][WorkflowWiring] raw_positive_type={type(raw_positive).__name__}, conditioned_positive_type={type(positive).__name__}", flush=True)
+				except Exception:
+					pass
 
 				video_latent = EmptyLTXVLatentVideo.execute(sample_width, sample_height, frame_count, 1)[0]
-				for guide_image, seconds, strength in guides:
-					frame_index = _guide_frame_index(seconds, fps, output_frame_count, render_frame_trim_start)
-					if frame_index >= frame_count:
-						continue
-					positive, negative, video_latent = LTXVAddGuide.execute(
-						positive,
-						negative,
-						video_vae,
-						video_latent,
-						guide_image,
-						frame_index,
-						float(strength),
-					)[0:3]
-				video_latent, _ = _inject_ltxv_images_inplace(
-					video_vae=video_vae,
-					latent=video_latent,
-					reference_guides=latent_reference_guides,
-					fps=fps,
-					output_frame_count=output_frame_count,
-					trim_start=render_frame_trim_start,
-				)
+				if workflow_first_last:
+					try:
+						print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX_FirstLastFrame] before latent injection: {_debug_tensor_info(video_latent)}", flush=True)
+					except Exception:
+						pass
+					real_positive, real_negative, real_latent, used_real_firstlast = _apply_real_gjj_ltx_first_last_frame(
+						video_vae=video_vae,
+						latent=video_latent,
+						# 源工作流中 GJJ_LTX_FirstLastFrame 的 positive/negative 输入未连接，
+						# 只使用 latent + image_01/image_02 输出视频潜空间。
+						positive=None,
+						negative=None,
+						main_image=render_main_image,
+						guide_images=render_guide_images,
+					)
+					if used_real_firstlast:
+						video_latent = real_latent
+						# 源工作流不接 FirstLast 的 positive/negative 输出，这里只记录，不覆盖后续 conditioning。
+						injected_count = 2
+						print("[GJJ LTX2.3 Clean v40][GJJ_LTX_FirstLastFrame] REAL node path used; conditioning outputs intentionally not connected, matching source workflow.", flush=True)
+					else:
+						video_latent, injected_count = _inject_ltxv_images_inplace(
+							video_vae=video_vae,
+							latent=video_latent,
+							reference_guides=latent_reference_guides,
+							fps=fps,
+							output_frame_count=output_frame_count,
+							trim_start=render_frame_trim_start,
+						)
+					try:
+						print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX_FirstLastFrame] after latent injection: {_debug_tensor_info(video_latent)}; injected_count={injected_count}; used_real_node={used_real_firstlast}", flush=True)
+					except Exception:
+						pass
+					_send_status(unique_id, f"{prefix}Clean v40 首尾帧 latent 注入：{injected_count} 个关键帧位（frame 0 / frame -1，strength=0.7，real_node={used_real_firstlast}）。")
+					try:
+						print(f"[GJJ LTX2.3 Clean v40] first/last latent injection count={injected_count}, frame0_strength={WORKFLOW_FIRST_LAST_GUIDE_STRENGTH}, last_strength={WORKFLOW_FIRST_LAST_GUIDE_STRENGTH}", flush=True)
+						if int(injected_count) < 2:
+							print("[GJJ LTX2.3 Clean v40] WARNING: expected 2 first/last injections but got less than 2.", flush=True)
+					except Exception:
+						pass
+				else:
+					for guide_image, seconds, strength in guides:
+						frame_index = _guide_frame_index(seconds, fps, output_frame_count, render_frame_trim_start)
+						if frame_index >= frame_count:
+							continue
+						positive, negative, video_latent = LTXVAddGuide.execute(
+							positive,
+							negative,
+							video_vae,
+							video_latent,
+							guide_image,
+							frame_index,
+							float(strength),
+						)[0:3]
+					video_latent, _ = _inject_ltxv_images_inplace(
+						video_vae=video_vae,
+						latent=video_latent,
+						reference_guides=latent_reference_guides,
+						fps=fps,
+						output_frame_count=output_frame_count,
+						trim_start=render_frame_trim_start,
+					)
 				av_latent_stage1 = LTXVConcatAVLatent.execute(video_latent, audio_latent)[0]
 			except Exception as exc:
 				raise RuntimeError(f"LTX 多图参考节点构建初始 latent 失败：{exc}") from exc
 
 			_send_status(unique_id, f"{prefix}5/8 第一阶段低清采样...")
 			try:
-				stage1_model = CFGNorm.execute(
-					_apply_ltx_nag(model, negative, DEFAULT_NAG_SCALE, DEFAULT_NAG_ALPHA, DEFAULT_NAG_TAU, inplace=True),
-					1.0,
-				)[0]
+				stage1_nag_scale = WORKFLOW_FIRST_LAST_NAG_SCALE if workflow_first_last else DEFAULT_NAG_SCALE
+				stage1_nag_alpha = WORKFLOW_FIRST_LAST_NAG_ALPHA if workflow_first_last else DEFAULT_NAG_ALPHA
+				stage1_nag_tau = WORKFLOW_FIRST_LAST_NAG_TAU if workflow_first_last else DEFAULT_NAG_TAU
+				stage1_sigmas_text = WORKFLOW_FIRST_LAST_STAGE1_SIGMAS if workflow_first_last else DEFAULT_STAGE1_SIGMAS
+				try:
+					print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX2NAG] workflow_first_last={workflow_first_last}; nag_scale={stage1_nag_scale}; nag_alpha={stage1_nag_alpha}; nag_tau={stage1_nag_tau}; inplace=True", flush=True)
+					print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX2NAG] source wiring: nag_cond_video=raw_positive; nag_cond_audio=raw_negative; stage1_sigmas={stage1_sigmas_text}", flush=True)
+				except Exception:
+					pass
+				nag_model, used_real_nag = _apply_real_gjj_ltx2nag(
+					model=model,
+					positive=raw_positive,
+					negative=raw_negative,
+					nag_scale=stage1_nag_scale,
+					nag_alpha=stage1_nag_alpha,
+					nag_tau=stage1_nag_tau,
+					inplace=True,
+				)
+				if not used_real_nag:
+					# fallback 内部等价实现：同样使用 raw_positive，严格对齐源工作流的 GJJ_LTX2NAG 输入。
+					nag_model = _apply_ltx_nag(model, raw_positive, stage1_nag_scale, stage1_nag_alpha, stage1_nag_tau, inplace=True)
+				try:
+					print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX2NAG] source_exact=using RAW CLIP positive as nag_cond_video, RAW CLIP negative as nag_cond_audio; used_real_node={used_real_nag}", flush=True)
+					print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX2NAG] raw_positive_type={type(raw_positive).__name__}, conditioned_positive_type={type(positive).__name__}", flush=True)
+					print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX2NAG] output_model_type={type(nag_model).__name__}", flush=True)
+				except Exception:
+					pass
+				# Clean v40：严格对齐源工作流。
+				# GJJ_LTX2NAG 的输出直接一分二连接到两个 CFGGuider：
+				#   1) 第一阶段 CFGGuider
+				#   2) 第二阶段 CFGGuider
+				# 源工作流没有额外 CFGNorm，所以这里不再包 CFGNorm。
+				stage1_model = nag_model
 				guider_stage1 = CFGGuider.execute(stage1_model, positive, negative, DEFAULT_CFG)[0]
+				try:
+					print("[GJJ LTX2.3 Clean v40][GJJ_LTX2NAG] output connected to Stage1 CFGGuider directly; CFGNorm removed to match source workflow.", flush=True)
+				except Exception:
+					pass
 				sampler_stage1 = KSamplerSelect.execute(DEFAULT_STAGE1_SAMPLER)[0]
-				sigmas_stage1 = _apply_denoise_to_sigmas(ManualSigmas.execute(DEFAULT_STAGE1_SIGMAS)[0], resolved_denoise_strength)
+				sigmas_stage1 = _apply_denoise_to_sigmas(ManualSigmas.execute(stage1_sigmas_text)[0], resolved_denoise_strength)
 				noise_stage1 = RandomNoise.execute(int(render_seed))[0]
 				with _fp16_accumulation(True):
 					stage1_result = SamplerCustomAdvanced.execute(
@@ -2317,24 +2988,56 @@ def run_ltx23_multiref_video(
 					video_latent_stage1,
 				)[0:3]
 			except Exception as exc:
-				raise RuntimeError(f"LTX 多图参考节点第一阶段采样失败：{exc}") from exc
+				raise RuntimeError(f"LTX 多图参考节点第一阶段采样失败：{exc if str(exc) else repr(exc)}") from exc
 
 			_send_status(unique_id, f"{prefix}6/8 latent 放大并进入第二阶段采样...")
 			try:
 				upscaled_video_latent = LTXVLatentUpsampler().upsample_latent(video_latent_stage1, latent_upscaler, video_vae)[0]
-				upscaled_video_latent, _ = _inject_ltxv_images_inplace(
-					video_vae=video_vae,
-					latent=upscaled_video_latent,
-					reference_guides=latent_reference_guides,
-					fps=fps,
-					output_frame_count=output_frame_count,
-					trim_start=render_frame_trim_start,
-				)
+				if workflow_first_last:
+					try:
+						print(f"[GJJ LTX2.3 Clean v40][LTXVLatentUpsampler] before_inplace={_debug_tensor_info(upscaled_video_latent)}", flush=True)
+					except Exception:
+						pass
+					upscaled_video_latent = _apply_img_to_video_inplace_exact(
+						video_vae=video_vae,
+						latent=upscaled_video_latent,
+						anchor_image=render_main_image,
+						strength=WORKFLOW_FIRST_LAST_INPLACE_STRENGTH,
+					)
+					_send_status(unique_id, f"{prefix}Clean v40 二阶段：按源工作流执行 LTXVImgToVideoInplace（strength=1）。")
+					try:
+						print(f"[GJJ LTX2.3 Clean v40][LTXVImgToVideoInplace] after_inplace={_debug_tensor_info(upscaled_video_latent)}", flush=True)
+					except Exception:
+						pass
+					try:
+						anchor_shape = tuple(render_main_image.shape) if hasattr(render_main_image, 'shape') else '(unknown)'
+						print(f"[GJJ LTX2.3 Clean v40] LTXVImgToVideoInplace applied: strength={WORKFLOW_FIRST_LAST_INPLACE_STRENGTH}, anchor_shape={anchor_shape}", flush=True)
+					except Exception:
+						pass
+				else:
+					upscaled_video_latent, _ = _inject_ltxv_images_inplace(
+						video_vae=video_vae,
+						latent=upscaled_video_latent,
+						reference_guides=latent_reference_guides,
+						fps=fps,
+						output_frame_count=output_frame_count,
+						trim_start=render_frame_trim_start,
+					)
 				av_latent_stage2 = LTXVConcatAVLatent.execute(upscaled_video_latent, audio_latent_stage1)[0]
 
-				guider_stage2 = CFGGuider.execute(model, positive_stage2, negative_stage2, DEFAULT_CFG)[0]
+				stage2_model = nag_model if workflow_first_last else model
+				guider_stage2 = CFGGuider.execute(stage2_model, positive_stage2, negative_stage2, DEFAULT_CFG)[0]
+				try:
+					print(f"[GJJ LTX2.3 Clean v40][GJJ_LTX2NAG] output connected to Stage2 CFGGuider: using_nag_model={workflow_first_last}; model_type={type(stage2_model).__name__}", flush=True)
+				except Exception:
+					pass
 				sampler_stage2 = KSamplerSelect.execute(DEFAULT_STAGE2_SAMPLER)[0]
-				sigmas_stage2 = _apply_denoise_to_sigmas(ManualSigmas.execute(DEFAULT_STAGE2_SIGMAS)[0], resolved_denoise_strength)
+				stage2_sigmas_text = WORKFLOW_FIRST_LAST_STAGE2_SIGMAS if workflow_first_last else DEFAULT_STAGE2_SIGMAS
+				try:
+					print(f"[GJJ LTX2.3 Clean v40][Stage2] sampler={DEFAULT_STAGE2_SAMPLER}; sigmas={stage2_sigmas_text}; cfg={DEFAULT_CFG}", flush=True)
+				except Exception:
+					pass
+				sigmas_stage2 = _apply_denoise_to_sigmas(ManualSigmas.execute(stage2_sigmas_text)[0], resolved_denoise_strength)
 				noise_stage2 = RandomNoise.execute(int(render_seed) + 1)[0]
 				with _fp16_accumulation(True):
 					stage2_result = SamplerCustomAdvanced.execute(
@@ -2347,7 +3050,7 @@ def run_ltx23_multiref_video(
 				_maybe_purge_vram()
 				video_latent_stage2, audio_latent_stage2 = LTXVSeparateAVLatent.execute(stage2_result)[0:2]
 			except Exception as exc:
-				raise RuntimeError(f"LTX 多图参考节点第二阶段采样失败：{exc}") from exc
+				raise RuntimeError(f"LTX 多图参考节点第二阶段采样失败：{exc if str(exc) else repr(exc)}") from exc
 
 			_send_status(unique_id, f"{prefix}7/8 解码视频帧与音频...")
 			try:
@@ -2370,11 +3073,24 @@ def run_ltx23_multiref_video(
 					output_width,
 					output_height,
 				)
+				# Clean v40：最后一道保险，确保视频帧尺寸等于最终输出目标。
+				if target_width is not None and target_height is not None:
+					forced_width = max(64, int(target_width))
+					forced_height = max(64, int(target_height))
+					if int(output_width) != forced_width or int(output_height) != forced_height or int(frames.shape[2]) != forced_width or int(frames.shape[1]) != forced_height:
+						_send_status(unique_id, f"Clean v40 尺寸保险：{int(frames.shape[2])}x{int(frames.shape[1])} / 输出声明 {output_width}x{output_height} -> 强制 {forced_width}x{forced_height}")
+						frames = _resize_frames_to_size(frames, forced_width, forced_height)
+						output_width = forced_width
+						output_height = forced_height
 				if render_mode == MODE_GENERATED_AUDIO and bool(decode_generated_audio):
 					output_audio = LTXVAudioVAEDecode.execute(audio_latent_stage2, audio_vae)[0]
 			except Exception as exc:
 				raise RuntimeError(f"LTX 多图参考节点解码失败：{exc}") from exc
 
+			try:
+				print(f"[GJJ LTX2.3 Clean v40] final frames before video: {int(frames.shape[2])}x{int(frames.shape[1])}, declared={output_width}x{output_height}", flush=True)
+			except Exception:
+				pass
 			_send_status(unique_id, f"{prefix}8/8 创建视频...")
 			video = _create_video(frames, float(fps), output_audio)
 			return {
@@ -2387,9 +3103,16 @@ def run_ltx23_multiref_video(
 			}
 
 		scene_images = [main_image] + [image for image in base_guide_images if image is not None] if main_image is not None else []
-		use_segmented = bool(segmented_execution) and mode == MODE_GENERATED_AUDIO and len(scene_images) >= 2
+		auto_workflow_multiframe = mode == MODE_GENERATED_AUDIO and len(scene_images) >= 3
+		use_segmented = (bool(segmented_execution) and mode == MODE_GENERATED_AUDIO and len(scene_images) >= 2) or auto_workflow_multiframe
 		if bool(segmented_execution) and mode == MODE_AUDIO_CONDITIONED:
 			_send_status(unique_id, "提示：接入驱动音频时已自动关闭分段执行，避免外部音频被错误切段。")
+		if auto_workflow_multiframe:
+			_send_status(unique_id, f"Clean v40 多图参考：检测到 {len(scene_images)} 张去重后场景图，自动按相邻两图分段；每段强制走首尾帧源工作流，并自动启用转场 LoRA（共 {len(scene_images)-1} 段）。")
+			try:
+				print(f"[GJJ LTX2.3 Clean v40] auto segmented workflow: deduped_scene_count={len(scene_images)}", flush=True)
+			except Exception:
+				pass
 
 		if use_segmented:
 			segment_count = len(scene_images) - 1
@@ -2406,6 +3129,14 @@ def run_ltx23_multiref_video(
 				previous_time = end_time
 				segment_label = f"分段 第{segment_index}段（共{segment_count}段）"
 				segment_route_label = f"首尾帧分段（场景{segment_index}→场景{segment_index + 1}）"
+				# Clean v40：多图分段的每一段本质都是“相邻两张图首尾帧”。
+				# 必须走 first_last_workflow，才能调用真实 GJJ_LTX_FirstLastFrame / GJJ_LTX2NAG、
+				# LTXVImgToVideoInplace、源工作流 sigmas 和自动转场 LoRA。
+				segment_branch_kind = "first_last_workflow"
+				try:
+					print(f"[GJJ LTX2.3 Clean v40] multiframe segment {segment_index}/{segment_count}: forcing first_last_workflow + transition LoRA", flush=True)
+				except Exception:
+					pass
 				result = _render_once(
 					render_main_image=scene_images[segment_index - 1],
 					render_guide_images=[scene_images[segment_index]],
@@ -2416,6 +3147,8 @@ def run_ltx23_multiref_video(
 					render_seed=int(seed) + (segment_index - 1) * 2,
 					render_frame_trim_start=frame_trim_start,
 					render_route_label=segment_route_label,
+					render_branch_kind=segment_branch_kind,
+					render_segment_index=segment_index,
 					status_prefix=segment_label,
 				)
 				segment_frames.append(result["frames"])
@@ -2445,6 +3178,7 @@ def run_ltx23_multiref_video(
 			output_width = int(combined_frames.shape[2])
 			output_height = int(combined_frames.shape[1])
 			_send_status(unique_id, f"完成：{route_label}（分段执行 {segment_count} 段）/ 合并输出 {output_width}x{output_height} / {int(combined_frames.shape[0])} 帧 / {audio_label}")
+			_send_status(unique_id, f"最终输出尺寸：{output_width}x{output_height}")
 			return {
 				"ui": {
 					"segment_videos": segment_previews,
@@ -2453,6 +3187,11 @@ def run_ltx23_multiref_video(
 				"result": (final_video,),
 			}
 
+		resolved_branch_kind = "first_last_workflow" if (mode != MODE_AUDIO_CONDITIONED and visual_scene_count == 2) else "default"
+		try:
+			print(f"[GJJ LTX2.3 Clean v40] resolved_branch_kind={resolved_branch_kind}, visual_scene_count={visual_scene_count}, route_label={route_label}", flush=True)
+		except Exception:
+			pass
 		result = _render_once(
 			render_main_image=main_image,
 			render_guide_images=base_guide_images,
@@ -2463,6 +3202,7 @@ def run_ltx23_multiref_video(
 			render_seed=int(seed),
 			render_frame_trim_start=frame_trim_start,
 			render_route_label=route_label,
+			render_branch_kind=resolved_branch_kind,
 		)
 		if mode == MODE_AUDIO_CONDITIONED:
 			audio_label = "外部音频驱动"
@@ -2471,6 +3211,7 @@ def run_ltx23_multiref_video(
 		else:
 			audio_label = "静音输出"
 		_send_status(unique_id, f"完成：{route_label} / 有效场景 {visual_scene_count} 张 / {result['output_width']}x{result['output_height']} / {result['output_frame_count']} 帧 / {audio_label}")
+		_send_status(unique_id, f"最终输出尺寸：{result['output_width']}x{result['output_height']}")
 		return (result["video"],)
 
 	try:
