@@ -12,7 +12,8 @@ const DEFAULT_ALIGN = 16;
 const MAX_ROWS = 4;
 const MAX_COLS = 4;
 
-const NODE_WIDTH = 520;
+const NODE_WIDTH = 420;
+const MIN_NODE_WIDTH = 340;
 const CANVAS_W = NODE_WIDTH - 44;
 const CANVAS_H = 380;
 const HEADER_H = 26;
@@ -23,7 +24,7 @@ const TOTAL_H = HEADER_H + CANVAS_H + CONTROLS_H + BLOCK_PREVIEW_H + 18;
 // ─── State ─────────────────────────────────────────────────────────
 
 function defaultState() {
-	return { rows: 2, cols: 2, h_positions: [0.5], v_positions: [0.5] };
+	return { rows: 2, cols: 2, h_positions: [0.5], v_positions: [0.5], show_blocks: false, align_px: DEFAULT_ALIGN };
 }
 
 function parseState(raw) {
@@ -52,21 +53,55 @@ function findWidget(n, name) {
 	return n.widgets?.find?.((w) => w.name === name);
 }
 
+function getHiddenValue(node, name, fallback = "") {
+	const prop = node.properties?.[name];
+	if (prop !== undefined && prop !== null) return prop;
+	const w = findWidget(node, name);
+	return w?.value ?? fallback;
+}
+
+function setHiddenValue(node, name, value) {
+	node.properties = node.properties || {};
+	node.properties[name] = value;
+	const w = findWidget(node, name);
+	if (w) {
+		w.value = value;
+		w.callback?.(value);
+	}
+}
+
 function hideWidget(w) {
 	if (!w || w.__gjjSplitHidden) return;
 	w.__gjjSplitHidden = true;
 	w.hidden = true;
+	w.__gjjOriginalType = w.type;
+	// 关键：不要用负高度 / y=-10000。负高度会把隐藏 widget 的悬浮提示推到节点顶部。
+	// 保留 widget 本体用于 ComfyUI 序列化和执行取值，但让它完全不绘制、不响应、不显示 tooltip。
 	w.type = `converted-widget:${w.name || "hidden"}`;
+	w.label = "";
+	w.localized_name = "";
+	w.tooltip = "";
+	w.options = { ...(w.options || {}), tooltip: "" };
 	w.computeSize = () => [0, -4];
 	w.getHeight = () => -4;
+	w.y = 0;
+	w.last_y = 0;
 	w.draw = () => {};
-	w.y = -10000;
-	w.last_y = -10000;
+	w.mouse = () => false;
+	w.callback = w.callback || (() => {});
 	if (w.element) {
 		w.element.style.display = "none";
+		w.element.style.height = "0px";
+		w.element.style.minHeight = "0px";
+		w.element.style.margin = "0";
+		w.element.style.padding = "0";
+		w.element.style.overflow = "hidden";
+		w.element.style.pointerEvents = "none";
 	}
 	if (w.inputEl) {
 		w.inputEl.style.display = "none";
+		w.inputEl.title = "";
+		w.inputEl.style.pointerEvents = "none";
 	}
 }
 
@@ -108,9 +143,15 @@ function reorderWidgets(node) {
 }
 
 function compactNode(node) {
-	hideInternalWidgets(node);
-	// 不删除 split_state / internal_file 的输入插槽 —— 它们是核心数据，
-	// 删除后 ComfyUI 无法正确序列化 widget 值，导致工作流保存丢失状态和图片。
+	// v6：状态改由 node.properties + 后端 hidden EXTRA_PNGINFO 读取。
+	// 旧工作流如果残留 split_state/internal_file widget，先把值迁移到 properties，再从 widgets 队列移除，彻底不参与布局。
+	for (const name of HIDDEN_WIDGETS) {
+		const w = findWidget(node, name);
+		if (w && w.value !== undefined && node.properties?.[name] === undefined) setHiddenValue(node, name, w.value);
+	}
+	if (Array.isArray(node.widgets)) {
+		node.widgets = node.widgets.filter((w) => !HIDDEN_WIDGETS.has(String(w?.name || "")));
+	}
 	reorderWidgets(node);
 	GJJ_Utils.refreshNode(node);
 }
@@ -153,10 +194,19 @@ function getUpstreamImageSrc(node) {
 
 // ─── Dynamic Output Manager ────────────────────────────────────────
 
-function syncOutputs(node, rows, cols) {
+function disconnectOutputLinks(node, outputIndex) {
+	try { node.disconnectOutput?.(outputIndex); } catch (_) {}
+	const out = node.outputs?.[outputIndex];
+	const links = Array.isArray(out?.links) ? [...out.links] : (out?.link != null ? [out.link] : []);
+	for (const linkId of links) {
+		try { app.graph?.removeLink?.(linkId); } catch (_) {}
+	}
+}
+
+function syncOutputs(node, rows, cols, showBlocks = false) {
 	const imageCount = rows * cols;
-	const visibleCount = 1 + imageCount;
-	// 添加输出口（slot 0 固定为批量图片）
+	const visibleCount = showBlocks ? 1 + imageCount : 1;
+	// slot 0 固定为批量图片；区块输出口默认隐藏，由顶部按钮控制显示。
 	while ((node.outputs?.length || 0) < visibleCount) {
 		const idx = node.outputs?.length || 0;
 		if (idx === 0) {
@@ -168,12 +218,11 @@ function syncOutputs(node, rows, cols) {
 			node.addOutput?.(`区块_${r + 1}_${c + 1}`, "IMAGE");
 		}
 	}
-	// 移除尾部多余输出口（保护 slot 0 和已连接的）
+	// 根据开关状态强制收拢/扩充区块输出口。
 	while ((node.outputs?.length || 0) > visibleCount) {
 		const lastIdx = node.outputs.length - 1;
 		if (lastIdx === 0) break;
-		const last = node.outputs[lastIdx];
-		if (last && last.link != null) break;
+		disconnectOutputLinks(node, lastIdx);
 		node.removeOutput?.(lastIdx);
 	}
 	// 统一重命名
@@ -195,6 +244,7 @@ function syncOutputs(node, rows, cols) {
 			out.tooltip = `第${r + 1}行第${c + 1}列的裁剪区块`;
 		}
 	});
+	GJJ_Utils.refreshNode(node);
 }
 
 // ─── Image Upload ──────────────────────────────────────────────────
@@ -219,9 +269,7 @@ function createFileInput(node, onFileLoaded) {
 			const fn = data.name || data.image || "";
 			if (!fn) return;
 
-			const fw = findWidget(node, FILE_WIDGET);
-			if (fw) { fw.value = fn;
-				fw.callback?.(fn); }
+			setHiddenValue(node, FILE_WIDGET, fn);
 
 			const url = api.apiURL(`/view?filename=${encodeURIComponent(fn)}&type=input&subfolder=&rand=${Date.now()}`);
 			onFileLoaded(url);
@@ -240,7 +288,8 @@ function createSplitterWidget(node) {
 	node.__gjjSplitterWidget = true;
 
 	const uid = `gjj_split_${++widgetCounter}_${Date.now()}`;
-	const state = parseState(findWidget(node, STATE_WIDGET)?.value);
+	const state = parseState(getHiddenValue(node, STATE_WIDGET, JSON.stringify(defaultState())));
+	let showBlocks = state.show_blocks === true;
 
 	let loadedImage = null;
 	let imgW = 0;
@@ -248,11 +297,11 @@ function createSplitterWidget(node) {
 
 	// ── Container ──────────────────────────────────────────────
 	const wrap = document.createElement("div");
-	wrap.style.cssText = "position:relative;width:100%;box-sizing:border-box;padding:0 10px 4px;overflow:hidden;pointer-events:auto;user-select:none;";
+	wrap.style.cssText = "position:relative;width:100%;box-sizing:border-box;padding:0 10px 0;overflow:hidden;pointer-events:auto;user-select:none;";
 
 	// ── Header ─────────────────────────────────────────────────
 	const header = document.createElement("div");
-	header.style.cssText = "display:flex;align-items:center;justify-content:space-between;height:20px;padding:3px 4px 1px;font-size:11px;color:#98d6d1;";
+	header.style.cssText = "display:none;align-items:center;justify-content:space-between;height:20px;padding:3px 4px 1px;font-size:11px;color:#98d6d1;";
 	const dimEl = document.createElement("span");
 	dimEl.title = "当前预览图片的宽×高（像素）";
 	dimEl.textContent = "等待图片...";
@@ -263,7 +312,7 @@ function createSplitterWidget(node) {
 
 	// ── Canvas ─────────────────────────────────────────────────
 	const canvasWrap = document.createElement("div");
-	canvasWrap.style.cssText = "position:relative;width:100%;height:" + CANVAS_H + "px;border:1px solid rgba(113,137,148,0.4);border-radius:6px;overflow:hidden;background:#0d1216;";
+	canvasWrap.style.cssText = "display:none;position:relative;width:100%;height:" + CANVAS_H + "px;border:1px solid rgba(113,137,148,0.4);border-radius:6px;overflow:hidden;background:#0d1216;";
 
 	const canvas = document.createElement("canvas");
 	canvas.width = CANVAS_W;
@@ -288,83 +337,88 @@ function createSplitterWidget(node) {
 		return b;
 	}
 
-	// ── Line 1: 🔲 Rows / Cols / Even Split ───────────────────
-	const line1 = document.createElement("div");
-	line1.style.cssText = "display:flex;align-items:center;gap:5px;flex-wrap:wrap;";
+	// ── Top Toolbar: all buttons in one row ────────────────────
+	const toolbar = document.createElement("div");
+	toolbar.style.cssText = "display:flex;align-items:center;gap:4px;flex-wrap:nowrap;white-space:nowrap;overflow:hidden;";
 
-	const icon1 = document.createElement("span");
-	icon1.textContent = "🔲";
-	icon1.title = "行列设置";
+	const openBtn = document.createElement("button");
+	openBtn.type = "button";
+	openBtn.textContent = "📁";
+	openBtn.title = "打开图片：从本地选择图片加载到节点内（无需外部 IMAGE 连接）";
+	openBtn.style.cssText = "width:24px;height:22px;padding:0;border:1px solid rgba(113,137,148,0.45);border-radius:4px;background:#1b2f35;color:#d9e4e8;font-size:13px;cursor:pointer;line-height:20px;";
+	openBtn.onclick = () => fileInput.click();
 
-	const rowLbl = document.createElement("span");
-	rowLbl.title = "分割行数，调整后自动均分并更新输出口";
-	rowLbl.textContent = "行:";
 	const rowDec = btn("−", "减少一行");
 	const rowVal = document.createElement("span");
-	rowVal.style.cssText = "min-width:14px;text-align:center;font-weight:620;";
+	rowVal.style.cssText = "min-width:13px;text-align:center;font-weight:620;color:#98d6d1;";
 	rowVal.title = "当前行数";
 	rowVal.textContent = String(state.rows);
 	const rowInc = btn("+", "增加一行");
-
-	const colLbl = document.createElement("span");
-	colLbl.title = "分割列数，调整后自动均分并更新输出口";
-	colLbl.textContent = "列:";
 	const colDec = btn("−", "减少一列");
 	const colVal = document.createElement("span");
-	colVal.style.cssText = "min-width:14px;text-align:center;font-weight:620;";
+	colVal.style.cssText = "min-width:13px;text-align:center;font-weight:620;color:#98d6d1;";
 	colVal.title = "当前列数";
 	colVal.textContent = String(state.cols);
 	const colInc = btn("+", "增加一列");
 
+	const rowBox = document.createElement("span");
+	rowBox.title = "行数设置";
+	rowBox.style.cssText = "display:inline-flex;align-items:center;gap:2px;";
+	rowBox.append("↕", rowDec, rowVal, rowInc);
+	const colBox = document.createElement("span");
+	colBox.title = "列数设置";
+	colBox.style.cssText = "display:inline-flex;align-items:center;gap:2px;";
+	colBox.append("↔", colDec, colVal, colInc);
+
 	const evenBtn = document.createElement("button");
 	evenBtn.type = "button";
-	evenBtn.textContent = "均分";
+	evenBtn.textContent = "▦";
 	evenBtn.title = "均分行列，使每个区块等大";
-	evenBtn.style.cssText = "padding:2px 10px;border:1px solid rgba(152,214,209,0.5);border-radius:4px;background:#1b2f35;color:#98d6d1;font-size:11px;cursor:pointer;";
+	evenBtn.style.cssText = "width:24px;height:22px;padding:0;border:1px solid rgba(152,214,209,0.5);border-radius:4px;background:#1b2f35;color:#98d6d1;font-size:13px;cursor:pointer;line-height:20px;";
 
-	line1.append(icon1, rowLbl, rowDec, rowVal, rowInc, colLbl, colDec, colVal, colInc, evenBtn);
+	const blockToggleBtn = document.createElement("button");
+	blockToggleBtn.type = "button";
+	blockToggleBtn.textContent = "🔌";
+	blockToggleBtn.title = "显示/隐藏区块输出口。默认隐藏，只保留“批量图片”输出口；打开后按行列数量显示独立 IMAGE 输出口。";
+	blockToggleBtn.style.cssText = "width:24px;height:22px;padding:0;border:1px solid rgba(113,137,148,0.45);border-radius:4px;background:#1b252b;color:#9fb3bd;font-size:13px;cursor:pointer;line-height:20px;";
+	function updateBlockToggleStyle() {
+		blockToggleBtn.style.background = showBlocks ? "#1b3a30" : "#1b252b";
+		blockToggleBtn.style.color = showBlocks ? "#9df0b1" : "#9fb3bd";
+		blockToggleBtn.style.borderColor = showBlocks ? "rgba(157,240,177,0.55)" : "rgba(113,137,148,0.45)";
+	}
+	blockToggleBtn.onclick = () => {
+		showBlocks = !showBlocks;
+		state.show_blocks = showBlocks;
+		updateBlockToggleStyle();
+		syncOutputs(node, state.rows, state.cols, showBlocks);
+		syncState();
+	};
+	updateBlockToggleStyle();
 
-	// ── Line 2: 🎯 Alignment / 📂 Open ────────────────────────
-	const line2 = document.createElement("div");
-	line2.style.cssText = "display:flex;align-items:center;gap:4px;flex-wrap:wrap;";
-
-	const icon2 = document.createElement("span");
-	icon2.textContent = "🎯";
-	icon2.title = "对齐与图片加载";
-
-	const alignLbl = document.createElement("span");
-	alignLbl.title = "拖拽分割线时吸附到指定像素的倍数";
-	alignLbl.textContent = "对齐:";
-
-	let currentAlign = DEFAULT_ALIGN;
+	let currentAlign = ALIGN_PX.includes(Number(state.align_px)) ? Number(state.align_px) : DEFAULT_ALIGN;
+	const alignBox = document.createElement("span");
+	alignBox.title = "拖拽分割线时吸附到指定像素倍数";
+	alignBox.style.cssText = "display:inline-flex;align-items:center;gap:2px;margin-left:2px;color:#9fb3bd;font-size:10px;";
+	alignBox.append("🎯");
 	for (const v of ALIGN_PX) {
 		const radio = document.createElement("input");
 		radio.type = "radio";
 		radio.name = uid + "_align";
 		radio.value = String(v);
-		radio.style.cssText = "margin:0 2px 0 4px;accent-color:#4fd1c5;";
-		if (v === DEFAULT_ALIGN) radio.checked = true;
+		radio.style.cssText = "margin:0;accent-color:#4fd1c5;transform:scale(0.85);";
+		if (v === currentAlign) radio.checked = true;
 		radio.title = `吸附到 ${v}px 的倍数`;
-		radio.onchange = () => { currentAlign = v; };
+		radio.onchange = () => { currentAlign = v; state.align_px = v; syncState(); updateBlockPreviews(); };
 		const lbl = document.createElement("label");
-		lbl.style.cssText = "font-size:10px;color:#bccfd6;cursor:pointer;";
-		lbl.textContent = v + "px";
-		lbl.title = `拖拽分割线时自动吸附到 ${v}px 的整数倍位置（视频/模型常用 ${v} 倍数对齐）`;
-		lbl.prepend(radio);
-		line2.appendChild(lbl);
+		lbl.style.cssText = "display:inline-flex;align-items:center;gap:1px;font-size:10px;color:#bccfd6;cursor:pointer;";
+		lbl.title = `拖拽分割线时自动吸附到 ${v}px 的整数倍位置`;
+		lbl.append(radio, String(v));
+		alignBox.appendChild(lbl);
 	}
 
-	const openBtn = document.createElement("button");
-	openBtn.type = "button";
-	openBtn.textContent = "📂 打开图片";
-	openBtn.title = "从本地选择图片加载到节点内（无需外部 IMAGE 连接）";
-	openBtn.style.cssText = "padding:2px 8px;border:1px solid rgba(113,137,148,0.45);border-radius:4px;background:#1b2f35;color:#d9e4e8;font-size:11px;cursor:pointer;margin-left:6px;";
-	openBtn.onclick = () => fileInput.click();
-
-	line2.append(icon2, alignLbl, openBtn);
-
-	ctrl.append(line1, line2);
-	wrap.appendChild(ctrl);
+	toolbar.append(openBtn, rowBox, colBox, evenBtn, blockToggleBtn, alignBox);
+	ctrl.append(toolbar);
+	wrap.insertBefore(ctrl, header);
 
 	// ── Block previews ─────────────────────────────────────────
 	const blocksHdr = document.createElement("div");
@@ -373,10 +427,10 @@ function createSplitterWidget(node) {
 	blocksHdr.textContent = "📦 区块:";
 
 	const blocksGrid = document.createElement("div");
-	blocksGrid.style.cssText = "display:grid;gap:3px;padding:1px;min-height:30px;";
+	blocksGrid.style.cssText = "display:grid;gap:3px;padding:1px;min-height:0;";
 
 	const blocksOuter = document.createElement("div");
-	blocksOuter.style.cssText = "max-height:180px;overflow-y:auto;touch-action:auto;";
+	blocksOuter.style.cssText = "display:none;max-height:180px;overflow-y:auto;touch-action:auto;";
 	blocksOuter.addEventListener("wheel", (e) => {
 		const canScroll = e.deltaY > 0
 			? blocksOuter.scrollTop + blocksOuter.clientHeight < blocksOuter.scrollHeight
@@ -386,18 +440,20 @@ function createSplitterWidget(node) {
 	blocksOuter.append(blocksHdr, blocksGrid);
 	wrap.appendChild(blocksOuter);
 
+	const statusEl = document.createElement("div");
+	statusEl.style.cssText = "display:none;position:absolute;left:12px;right:12px;bottom:2px;padding:3px 7px;border:1px solid rgba(113,137,148,0.35);border-radius:6px;background:rgba(16,24,29,0.92);color:#b9d7df;font-size:10px;line-height:1.15;pointer-events:none;z-index:20;box-sizing:border-box;";
+	wrap.appendChild(statusEl);
+
 	// ── Sync state ─────────────────────────────────────────────
 	function syncState() {
-		const w = findWidget(node, STATE_WIDGET);
-		if (w) {
-			w.value = JSON.stringify({
-				rows: state.rows,
-				cols: state.cols,
-				h_positions: state.h_positions.map(p => Math.round(p * 1e6) / 1e6),
-				v_positions: state.v_positions.map(p => Math.round(p * 1e6) / 1e6),
-			});
-			w.callback?.(w.value);
-		}
+		setHiddenValue(node, STATE_WIDGET, JSON.stringify({
+			rows: state.rows,
+			cols: state.cols,
+			h_positions: state.h_positions.map(p => Math.round(p * 1e6) / 1e6),
+			v_positions: state.v_positions.map(p => Math.round(p * 1e6) / 1e6),
+			show_blocks: showBlocks,
+			align_px: currentAlign,
+		}));
 		if (app.graph) app.graph.setDirtyCanvas(true, true);
 	}
 
@@ -408,7 +464,7 @@ function createSplitterWidget(node) {
 		state.rows = r;
 		state.h_positions = evenSplitPositions(r);
 		rowVal.textContent = String(r);
-		syncOutputs(node, state.rows, state.cols);
+		syncOutputs(node, state.rows, state.cols, showBlocks);
 		syncState();
 		draw();
 		updateBlockPreviews();
@@ -420,7 +476,7 @@ function createSplitterWidget(node) {
 		state.cols = c;
 		state.v_positions = evenSplitPositions(c);
 		colVal.textContent = String(c);
-		syncOutputs(node, state.rows, state.cols);
+		syncOutputs(node, state.rows, state.cols, showBlocks);
 		syncState();
 		draw();
 		updateBlockPreviews();
@@ -438,6 +494,46 @@ function createSplitterWidget(node) {
 		draw();
 		updateBlockPreviews();
 	};
+
+	// ── Visibility / sizing ─────────────────────────────────────
+	function getAdaptiveCanvasHeight() {
+		const nodeW = Math.max(MIN_NODE_WIDTH, Number(node.size?.[0] || NODE_WIDTH));
+		const innerW = Math.max(260, nodeW - 44);
+		// 窄节点时降低预览高度，避免 DOM 从节点底部/侧边冒出；宽节点仍保持大预览。
+		return Math.max(260, Math.min(CANVAS_H, Math.round(innerW * 0.82)));
+	}
+
+	function calcWidgetHeight() {
+		const ctrlH = Math.max(24, Math.ceil(ctrl.getBoundingClientRect?.().height || 26));
+		if (!loadedImage) return ctrlH;
+		const canvasH = getAdaptiveCanvasHeight();
+		const visibleBlockH = blocksOuter.style.display === "none" ? 0 : Math.min(BLOCK_PREVIEW_H, Math.max(0, blocksOuter.scrollHeight || 0));
+		return ctrlH + HEADER_H + canvasH + visibleBlockH;
+	}
+
+	function resizeN() {
+		const currentW = Number(node.size?.[0] || NODE_WIDTH);
+		const w = Math.max(MIN_NODE_WIDTH, currentW);
+		const exactH = Math.ceil(calcWidgetHeight());
+		const h = Math.max(58, exactH);
+		node.__gjjSplitterHeight = exactH;
+		node.minWidth = MIN_NODE_WIDTH;
+		node.min_width = MIN_NODE_WIDTH;
+		node.size = [w, h];
+		node.setSize?.(node.size);
+		GJJ_Utils.refreshNode?.(node);
+		node.setDirtyCanvas?.(true, true);
+		app.graph?.setDirtyCanvas?.(true, true);
+	}
+
+	function applyVisibility() {
+		const has = !!loadedImage;
+		header.style.display = has ? "flex" : "none";
+		canvasWrap.style.display = has ? "block" : "none";
+		if (has) canvasWrap.style.height = `${getAdaptiveCanvasHeight()}px`;
+		blocksOuter.style.display = has ? "block" : "none";
+		requestAnimationFrame(resizeN);
+	}
 
 	// ── Canvas layout ──────────────────────────────────────────
 	function getLayout() {
@@ -594,8 +690,9 @@ function createSplitterWidget(node) {
 	// ── Block Previews ─────────────────────────────────────────
 	function updateBlockPreviews() {
 		if (!loadedImage) {
-			blocksGrid.innerHTML = "<div style='color:#687f8a;font-size:11px;padding:6px;text-align:center;'>执行或打开图片后显示区块预览</div>";
+			blocksGrid.innerHTML = "";
 			blocksGrid.style.gridTemplateColumns = "";
+			applyVisibility();
 			return;
 		}
 		const rows = state.rows;
@@ -612,6 +709,8 @@ function createSplitterWidget(node) {
 				const sy = allH[r] * imgH;
 				const sw = (allV[c + 1] - allV[c]) * imgW;
 				const sh = (allH[r + 1] - allH[r]) * imgH;
+				const outW = Math.max(1, Math.floor(Math.round(sw) / currentAlign) * currentAlign || Math.round(sw));
+				const outH = Math.max(1, Math.floor(Math.round(sh) / currentAlign) * currentAlign || Math.round(sh));
 				const mw = 60;
 				const mh = Math.max(24, Math.min(70, Math.round(mw * sh / sw)));
 
@@ -626,13 +725,14 @@ function createSplitterWidget(node) {
 
 				const lbl = document.createElement("span");
 				lbl.style.cssText = "font-size:9px;color:#98d6d1;line-height:1;";
-				lbl.title = `${Math.round(sw)}×${Math.round(sh)} 像素`;
-				lbl.textContent = `${Math.round(sw)}×${Math.round(sh)}`;
+				lbl.title = `输出 ${outW}×${outH} 像素（${currentAlign}px 对齐）`;
+				lbl.textContent = `${outW}×${outH}`;
 
 				b.append(mc, lbl);
 				blocksGrid.appendChild(b);
 			}
 		}
+		applyVisibility();
 	}
 
 	// ── Image loading ──────────────────────────────────────────
@@ -642,18 +742,18 @@ function createSplitterWidget(node) {
 		imgH = img.naturalHeight || img.height;
 		dimEl.title = `${imgW}×${imgH} 像素`;
 		dimEl.textContent = `${imgW} × ${imgH}`;
-		syncOutputs(node, state.rows, state.cols);
+		syncOutputs(node, state.rows, state.cols, showBlocks);
+		applyVisibility();
 		draw();
 		updateBlockPreviews();
 	}
 
 	function tryLoadImage(src) {
-		if (!src) { draw();
-			updateBlockPreviews(); return; }
+		if (!src) { loadedImage = null; applyVisibility(); updateBlockPreviews(); return; }
 		const img = new Image();
 		img.crossOrigin = "anonymous";
 		img.onload = () => setImage(img);
-		img.onerror = () => { dimEl.textContent = "加载失败"; draw(); };
+		img.onerror = () => { loadedImage = null; dimEl.textContent = "加载失败"; applyVisibility(); };
 		img.src = src;
 	}
 
@@ -662,24 +762,18 @@ function createSplitterWidget(node) {
 		node.addDOMWidget("gjj_splitter_main", "custom", wrap, {
 			serialize: false,
 			hideOnZoom: false,
-			getHeight: () => TOTAL_H,
-			getWidth: () => NODE_WIDTH,
+			getHeight: () => node.__gjjSplitterHeight || calcWidgetHeight(),
+			getWidth: () => Math.max(MIN_NODE_WIDTH, Number(node.size?.[0] || NODE_WIDTH)),
 		});
 	}
 
 	// ── Node sizing ────────────────────────────────────────────
-	const resizeN = () => {
-		const w = Math.max(NODE_WIDTH, node.size?.[0] || NODE_WIDTH);
-		node.size = [w, Math.max(TOTAL_H + 60, node.size?.[1] || 0)];
-		node.minWidth = NODE_WIDTH;
-		node.min_width = NODE_WIDTH;
-		node.setSize?.(node.size);
-		node.setDirtyCanvas?.(true, true);
-	};
+	reorderWidgets(node);
+	hideInternalWidgets(node);
 	resizeN();
 
 	// ── ResizeObserver ─────────────────────────────────────────
-	const ro = new ResizeObserver(() => draw());
+	const ro = new ResizeObserver(() => { if (loadedImage) draw(); resizeN(); });
 	ro.observe(canvasWrap);
 
 	// ── Cleanup ────────────────────────────────────────────────
@@ -695,6 +789,11 @@ function createSplitterWidget(node) {
 	node.onExecuted = function (message) {
 		origExec?.apply(this, arguments);
 		try {
+			statusEl.textContent = "执行完成";
+			statusEl.style.display = "block";
+			clearTimeout(node.__gjjSplitStatusTimer);
+			node.__gjjSplitStatusTimer = setTimeout(() => { statusEl.style.display = "none"; app.graph?.setDirtyCanvas?.(true, true); }, 1800);
+			resizeN();
 			const pd = message?.preview?.[0] || message?.preview;
 			if (pd?.filename) {
 				const url = api.apiURL(`/view?filename=${encodeURIComponent(pd.filename)}&type=temp&subfolder=&rand=${Date.now()}`);
@@ -736,19 +835,18 @@ function createSplitterWidget(node) {
 	};
 
 	// ── Initial load ───────────────────────────────────────────
-	syncOutputs(node, state.rows, state.cols);
+	syncOutputs(node, state.rows, state.cols, showBlocks);
 	setTimeout(() => {
 		// Try internal file first
-		const fw = findWidget(node, FILE_WIDGET);
-		if (fw?.value) {
-			const url = api.apiURL(`/view?filename=${encodeURIComponent(fw.value)}&type=input&subfolder=&rand=${Date.now()}`);
+		const internalFile = getHiddenValue(node, FILE_WIDGET, "");
+		if (internalFile) {
+			const url = api.apiURL(`/view?filename=${encodeURIComponent(internalFile)}&type=input&subfolder=&rand=${Date.now()}`);
 			tryLoadImage(url);
 			return;
 		}
 		// Then upstream
 		const src = getUpstreamImageSrc(node);
-		if (src) { tryLoadImage(src); } else { draw();
-			updateBlockPreviews(); }
+		if (src) { tryLoadImage(src); } else { loadedImage = null; applyVisibility(); updateBlockPreviews(); }
 	}, 400);
 	requestAnimationFrame(resizeN);
 }
@@ -756,7 +854,7 @@ function createSplitterWidget(node) {
 // ─── Extension ─────────────────────────────────────────────────────
 
 app.registerExtension({
-	name: "GJJ.ImageSplitter",
+	name: "GJJ.ImageSplitter.v6",
 
 	async beforeRegisterNodeDef(nodeType, nodeData) {
 		if (nodeData?.name !== TARGET_CLASS) return;
@@ -764,24 +862,13 @@ app.registerExtension({
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalOnConfigure?.apply(this, args);
-			// 从 node.properties 恢复核心数据（不受 widget 重排影响）
-			const props = this.properties || {};
-			if (props[STATE_WIDGET]) {
-				const sw = findWidget(this, STATE_WIDGET);
-				if (sw) { sw.value = props[STATE_WIDGET];
-					sw.callback?.(props[STATE_WIDGET]); }
-			}
-			if (props[FILE_WIDGET]) {
-				const fw = findWidget(this, FILE_WIDGET);
-				if (fw) { fw.value = props[FILE_WIDGET];
-					fw.callback?.(props[FILE_WIDGET]); }
-			}
+			this.properties = this.properties || {};
 			compactNode(this);
-			const state = parseState(findWidget(this, STATE_WIDGET)?.value);
-			syncOutputs(this, state.rows, state.cols);
+			const state = parseState(getHiddenValue(this, STATE_WIDGET, JSON.stringify(defaultState())));
+			syncOutputs(this, state.rows, state.cols, state.show_blocks === true);
 			setTimeout(() => {
-				const st = parseState(findWidget(this, STATE_WIDGET)?.value);
-				syncOutputs(this, st.rows, st.cols);
+				const st = parseState(getHiddenValue(this, STATE_WIDGET, JSON.stringify(defaultState())));
+				syncOutputs(this, st.rows, st.cols, st.show_blocks === true);
 				createSplitterWidget(this);
 			}, 80);
 			setTimeout(() => compactNode(this), 120);
@@ -790,15 +877,13 @@ app.registerExtension({
 
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode) {
-			const sw = findWidget(this, STATE_WIDGET);
-			const fw = findWidget(this, FILE_WIDGET);
-			// 核心数据写入 properties（用 key 存储，不受 widget 重排影响）
+			// 核心数据只写入 properties，不再创建任何隐藏 widget 行。
 			serializedNode.properties = serializedNode.properties || {};
-			serializedNode.properties[STATE_WIDGET] = sw?.value || '';
-			serializedNode.properties[FILE_WIDGET] = fw?.value || '';
+			serializedNode.properties[STATE_WIDGET] = getHiddenValue(this, STATE_WIDGET, JSON.stringify(defaultState()));
+			serializedNode.properties[FILE_WIDGET] = getHiddenValue(this, FILE_WIDGET, "");
 			// 保存前修剪输出口
-			const state = parseState(sw?.value);
-			syncOutputs(this, state.rows, state.cols);
+			const state = parseState(serializedNode.properties[STATE_WIDGET]);
+			syncOutputs(this, state.rows, state.cols, state.show_blocks === true);
 			return originalOnSerialize?.apply(this, [serializedNode]);
 		};
 	},

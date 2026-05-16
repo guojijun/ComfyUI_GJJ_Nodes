@@ -21,6 +21,8 @@ DEFAULT_STATE = json.dumps({
     "cols": 2,
     "h_positions": [0.5],
     "v_positions": [0.5],
+    "show_blocks": False,
+    "align_px": 16,
 })
 
 
@@ -36,20 +38,21 @@ class GJJ_ImageSplitter:
 🎯 一键均分行列
 📂 节点内部可直接加载图片
 📦 分割后每个区块在节点内预览显示
-🔗 每个区块独立输出为 IMAGE 类型，输出口数量跟随行列数动态变化
+🔗 区块独立 IMAGE 输出口默认隐藏，可在顶部 🔌 按钮中按需展开
 📦 批量图片输出，一次输出所有区块
 
 【使用说明】
 1. 通过 IMAGE 输入口连接图片，或点击 📂 打开图片 按钮从节点内部加载
 2. 在节点面板中拖拽分割线调整位置
 3. 点击「均分」快速等分
-4. 调整行列数后自动均分，输出口同步更新
-5. 执行节点即可获得每个区块的裁剪图片
-6. 「批量图片」输出口一次输出所有区块，便于后续批量处理
+4. 调整行列数后自动均分
+5. 默认只显示「批量图片」输出口；需要独立区块输出时点击顶部 🔌 按钮展开
+6. 执行节点即可获得每个区块的裁剪图片
+7. 「批量图片」输出口一次输出所有区块，便于后续批量处理
 
 【注意事项】
-• 最多支持 4×4=16 个区块，按实际行列数动态显示对应数量的输出口
-• 多余输出接口自动隐藏
+• 最多支持 4×4=16 个区块，独立区块输出口默认隐藏
+• 点击顶部 🔌 按钮后，按实际行列数动态显示对应数量的输出口
 • 分割线位置以图片尺寸的比例存储
 • 对齐值单位为像素（px），拖拽时自动吸附到最近的像素倍数"""
 
@@ -84,7 +87,7 @@ class GJJ_ImageSplitter:
             {"name": "一键均分", "description": "点击按钮快速等分行列，适合均匀网格切割"},
             {"name": "区块预览", "description": "分割后的每个区块在节点内缩略图预览"},
             {"name": "内部加载", "description": "节点内部可直接加载图片，无需依赖外部 IMAGE 输入"},
-            {"name": "动态输出口", "description": "输出口数量跟随行列数动态变化，不占用多余接口"},
+            {"name": "动态输出口", "description": "默认只保留批量图片输出口，点击顶部 🔌 按钮后按行列数展开独立区块输出口"},
             {"name": "批量图片输出", "description": "所有区块合并为一张批量图片输出，便于批量处理"},
         ],
         "inputs": {
@@ -92,34 +95,27 @@ class GJJ_ImageSplitter:
         },
         "outputs": {
             "批量图片": {"type": "GJJ_BATCH_IMAGE,IMAGE", "description": "所有裁剪区块合并为一张批量图片，便于后续批量处理"},
-            "区块_1_1 ~ 区块_N_N": {"type": "IMAGE", "description": "按 4×4 网格位置输出的裁剪区块，仅激活的区块有数据"},
+            "区块_1_1 ~ 区块_N_N": {"type": "IMAGE", "description": "按当前行列位置输出的裁剪区块；前端默认隐藏，可通过顶部 🔌 按钮展开"},
         },
     }
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {
-                "split_state": ("STRING", {
-                    "default": DEFAULT_STATE,
-                    "multiline": False,
-                    "socketless": True,
-                    "display_name": "分割配置",
-                    "tooltip": "前端内部使用的隐藏数据，不需要手动填写。",
-                }),
-                "internal_file": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "socketless": True,
-                    "display_name": "内部加载图片",
-                    "tooltip": "通过 📂 按钮加载的图片文件名，不需要手动填写。",
-                }),
-            },
+            # v6：split_state / internal_file 不再作为 STRING widget 暴露，
+            # 避免 ComfyUI 布局中出现隐藏 widget 空行。
+            # 前端把它们保存到 node.properties；后端通过 EXTRA_PNGINFO 的 workflow 读取。
+            "required": {},
             "optional": {
                 "image": ("IMAGE", {
                     "display_name": "输入图片",
                     "tooltip": "输入待分割的图片（可选）。不连接时可通过节点内的 📂 打开图片 按钮加载。",
                 }),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
             },
         }
 
@@ -136,7 +132,16 @@ class GJJ_ImageSplitter:
     def __init__(self):
         self._preview_filename = ""
 
-    def split(self, split_state: str, image: torch.Tensor | None = None, internal_file: str = "") -> dict[str, Any]:
+    def split(
+        self,
+        image: torch.Tensor | None = None,
+        unique_id: str | None = None,
+        prompt: dict[str, Any] | None = None,
+        extra_pnginfo: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        split_state = self._read_workflow_property(unique_id, prompt, extra_pnginfo, "split_state", DEFAULT_STATE)
+        internal_file = self._read_workflow_property(unique_id, prompt, extra_pnginfo, "internal_file", "")
+
         source = image
         if source is None:
             source = self._load_internal(internal_file)
@@ -149,6 +154,7 @@ class GJJ_ImageSplitter:
         cols = int(state.get("cols", 2))
         h_positions: list[float] = list(state.get("h_positions", []))
         v_positions: list[float] = list(state.get("v_positions", []))
+        align_px = self._parse_align_px(state.get("align_px", 16))
 
         image = torch.clamp(image, 0.0, 1.0)
         if image.ndim == 3:
@@ -183,6 +189,7 @@ class GJJ_ImageSplitter:
                 x1 = v_pixels[c + 1]
                 if y1 > y0 and x1 > x0:
                     cropped = image[:, y0:y1, x0:x1, :].contiguous()
+                    cropped = self._trim_to_multiple(cropped, align_px)
                     active_blocks.append(cropped)
                 else:
                     active_blocks.append(torch.zeros((1, 1, 1, C), device=image.device, dtype=image.dtype))
@@ -191,6 +198,8 @@ class GJJ_ImageSplitter:
         if active_blocks:
             max_h = max(b.shape[1] for b in active_blocks)
             max_w = max(b.shape[2] for b in active_blocks)
+            max_h = self._ceil_to_multiple(max_h, align_px)
+            max_w = self._ceil_to_multiple(max_w, align_px)
             padded_blocks = []
             for b in active_blocks:
                 pad_h = max_h - b.shape[1]
@@ -214,13 +223,15 @@ class GJJ_ImageSplitter:
                 x1 = v_pixels[c + 1]
                 if y1 > y0 and x1 > x0:
                     block = image[:, y0:y1, x0:x1, :].contiguous()
+                    block = self._trim_to_multiple(block, align_px)
                     block_file = self._save_block_preview(block, r, c)
                     block_previews.append({
                         "row": r,
                         "col": c,
                         "filename": block_file,
-                        "w": int(x1 - x0),
-                        "h": int(y1 - y0),
+                        "w": int(block.shape[2]),
+                        "h": int(block.shape[1]),
+                        "align_px": int(align_px),
                     })
 
         ui: dict[str, Any] = {
@@ -232,6 +243,7 @@ class GJJ_ImageSplitter:
                 "cols": cols,
                 "h_positions": h_positions,
                 "v_positions": v_positions,
+                "align_px": int(align_px),
                 "blocks": block_previews,
             },),
         }
@@ -247,6 +259,43 @@ class GJJ_ImageSplitter:
             "ui": ui,
             "result": result,
         }
+
+    @staticmethod
+    def _read_workflow_property(
+        unique_id: str | None,
+        prompt: dict[str, Any] | None,
+        extra_pnginfo: dict[str, Any] | None,
+        key: str,
+        default: str,
+    ) -> str:
+        """读取前端保存在 node.properties 里的隐藏状态。
+
+        这样可以从源头移除 split_state/internal_file 这两个 STRING widget，
+        它们不再参与 ComfyUI 的 widget 排版，也就不会产生顶部/底部空行。
+        """
+        uid = str(unique_id) if unique_id is not None else ""
+
+        # 兼容少数队列数据：如果 prompt 节点里仍然带 inputs。
+        try:
+            node_prompt = (prompt or {}).get(uid) or (prompt or {}).get(int(uid))
+            value = (node_prompt or {}).get("inputs", {}).get(key)
+            if value not in (None, ""):
+                return str(value)
+        except Exception:
+            pass
+
+        # UI 执行时 EXTRA_PNGINFO 通常包含完整 workflow，其中有 node.properties。
+        try:
+            workflow = (extra_pnginfo or {}).get("workflow") or {}
+            for node in workflow.get("nodes", []) or []:
+                if str(node.get("id")) == uid:
+                    value = (node.get("properties") or {}).get(key)
+                    if value not in (None, ""):
+                        return str(value)
+        except Exception:
+            pass
+
+        return default
 
     def _load_internal(self, filename: str) -> torch.Tensor | None:
         if not filename or not isinstance(filename, str) or not filename.strip():
@@ -267,6 +316,38 @@ class GJJ_ImageSplitter:
         except Exception as e:
             print(f"[GJJ_ImageSplitter] 内部图片加载失败: {e}")
             return None
+
+    @staticmethod
+    def _parse_align_px(raw: Any) -> int:
+        try:
+            v = int(raw)
+        except Exception:
+            v = 16
+        return v if v in {2, 4, 8, 16, 32} else 16
+
+    @staticmethod
+    def _floor_to_multiple(value: int, align_px: int) -> int:
+        value = int(value)
+        align_px = max(1, int(align_px))
+        if value <= 0 or value < align_px:
+            return max(1, value)
+        return max(align_px, (value // align_px) * align_px)
+
+    @staticmethod
+    def _ceil_to_multiple(value: int, align_px: int) -> int:
+        value = int(value)
+        align_px = max(1, int(align_px))
+        if value <= 0 or value < align_px:
+            return max(1, value)
+        return ((value + align_px - 1) // align_px) * align_px
+
+    @classmethod
+    def _trim_to_multiple(cls, block: torch.Tensor, align_px: int) -> torch.Tensor:
+        if block.ndim != 4:
+            return block
+        h = cls._floor_to_multiple(block.shape[1], align_px)
+        w = cls._floor_to_multiple(block.shape[2], align_px)
+        return block[:, :h, :w, :].contiguous()
 
     @staticmethod
     def _parse_state(raw: str) -> dict[str, Any]:
