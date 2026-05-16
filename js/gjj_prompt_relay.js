@@ -11,23 +11,123 @@ const CANVAS_HEIGHT = RULER_HEIGHT + BLOCK_HEIGHT;
 const HANDLE_HIT_PX = 6;
 const REORDER_THRESHOLD_PX = 6;
 const MIN_SEGMENT_LENGTH = 1;
-const HIDDEN_WIDGET_NAMES = ["timeline_data", "local_prompts", "segment_lengths"];
+const INTERNAL_WIDGET_NAMES = ["timeline_data", "local_prompts", "segment_lengths"];
+const SETTINGS_WIDGET_NAMES = ["max_frames", "epsilon", "fps", "time_units"];
+const HIDDEN_WIDGET_NAMES = [...INTERNAL_WIDGET_NAMES, ...SETTINGS_WIDGET_NAMES];
+
+function safeGet(obj, key, fallback = undefined) {
+  try { return obj?.[key]; } catch (_) { return fallback; }
+}
+
+function safeSet(obj, key, value) {
+  if (!obj) return false;
+  try {
+    const desc = findPropertyDescriptor(obj, key);
+    // 新版 ComfyUI 的 BaseWidget.height 是 getter-only，直接赋值会抛 TypeError。
+    // 这类只读布局字段不要硬写，靠 computeSize/draw/last_y/y 清掉占位。
+    if (desc && desc.get && !desc.set) return false;
+    obj[key] = value;
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function findPropertyDescriptor(obj, key) {
+  let cur = obj;
+  while (cur) {
+    const desc = Object.getOwnPropertyDescriptor(cur, key);
+    if (desc) return desc;
+    cur = Object.getPrototypeOf(cur);
+  }
+  return null;
+}
 
 function hideWidget(w) {
-  if (!w) return;
+  if (!w || w.__gjjPromptRelayFullyHidden) return;
   if (!w.__gjjPromptRelayHiddenState) {
     w.__gjjPromptRelayHiddenState = {
-      type: w.type,
-      draw: w.draw,
-      computeSize: w.computeSize,
+      type: safeGet(w, "type"),
+      draw: safeGet(w, "draw"),
+      computeSize: safeGet(w, "computeSize"),
+      y: safeGet(w, "y"),
+      last_y: safeGet(w, "last_y"),
+      height: safeGet(w, "height"),
+      width: safeGet(w, "width"),
     };
   }
-  w.type = "hidden";
-  w.hidden = true;
-  w.draw = () => {};
-  w.computeSize = () => [0, -4];
-  if (w.inputEl?.style) w.inputEl.style.display = "none";
-  if (w.element?.style) w.element.style.display = "none";
+
+  // 不能只设置 hidden=true：LiteGraph 仍可能把 last_y / computeSize 计入布局，挤出空行。
+  safeSet(w, "type", "hidden");
+  safeSet(w, "hidden", true);
+  safeSet(w, "disabled", true);
+  safeSet(w, "y", 0);
+  safeSet(w, "last_y", 0);
+  safeSet(w, "draw", () => {});
+  safeSet(w, "computeSize", () => [0, 0]);
+  safeSet(w, "serialize", true);
+  // 注意：不要写 w.height / w.width。新版 BaseWidget 这些可能是 getter-only。
+  w.__gjjPromptRelayFullyHidden = true;
+
+  const hideEl = (el) => {
+    if (!el?.style) return;
+    el.style.display = "none";
+    el.style.visibility = "hidden";
+    el.style.height = "0px";
+    el.style.minHeight = "0px";
+    el.style.maxHeight = "0px";
+    el.style.margin = "0";
+    el.style.padding = "0";
+    el.style.border = "0";
+    el.style.overflow = "hidden";
+  };
+  hideEl(w.inputEl);
+  hideEl(w.element);
+}
+
+function hideInternalWidgets(node) {
+  if (!node?.widgets) return;
+  for (const name of HIDDEN_WIDGET_NAMES) hideWidget(node.widgets.find(w => w.name === name));
+  // 清掉隐藏 widget 留下的布局缓存，否则缩放/配置恢复后仍会占一行。
+  node.widgets = node.widgets.filter(w => {
+    if (!HIDDEN_WIDGET_NAMES.includes(w.name)) return true;
+    hideWidget(w);
+    return true; // 保留用于序列化和后台执行，只是不参与绘制/布局。
+  });
+  node.setDirtyCanvas?.(true, true);
+  node.graph?.setDirtyCanvas?.(true, true);
+}
+
+function dispatchWidgetCallback(widget, node) {
+  try { widget?.callback?.call(widget, widget.value, node, widget); } catch (err) {
+    console.warn("[GJJ PromptRelay] 设置项回调执行失败:", err);
+  }
+  node?.graph?.setDirtyCanvas?.(true, true);
+  node?.setDirtyCanvas?.(true, true);
+}
+
+function bindNativeNumber(input, widget, node, { integer = false, min = null, max = null } = {}) {
+  if (!input || !widget) return;
+  input.value = widget.value ?? "";
+  input.addEventListener("input", e => {
+    e.stopPropagation();
+    let v = integer ? parseInt(input.value, 10) : parseFloat(input.value);
+    if (!Number.isFinite(v)) return;
+    if (min != null) v = Math.max(min, v);
+    if (max != null) v = Math.min(max, v);
+    widget.value = integer ? Math.round(v) : v;
+    dispatchWidgetCallback(widget, node);
+  });
+}
+
+function bindNativeSelect(select, widget, node) {
+  if (!select || !widget) return;
+  select.value = widget.value || "帧";
+  select.addEventListener("change", e => {
+    e.stopPropagation();
+    widget.value = select.value;
+    dispatchWidgetCallback(widget, node);
+  });
 }
 
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
@@ -138,17 +238,72 @@ class TimelineEditor {
       width: 100%; height: 100%;
     `;
 
+    const row = document.createElement("div");
+    row.style.cssText = `
+      display: flex; gap: 6px; align-items: center;
+      min-height: 26px; flex: 0 0 auto;
+    `;
+
+    const lengthLabel = document.createElement("label");
+    lengthLabel.title = "当前选中片段的长度。帧模式下输入帧数；秒模式下输入秒数，内部会自动换算为整帧。";
+    lengthLabel.style.cssText = "display: flex; align-items: center; gap: 4px; white-space: nowrap;";
+    const lengthIcon = document.createElement("span");
+    lengthIcon.textContent = "⏱️";
+    lengthIcon.title = "片段长度";
+    lengthLabel.appendChild(lengthIcon);
+    this.lengthInput = document.createElement("input");
+    this.lengthInput.type = "number";
+    this.lengthInput.title = "片段长度：帧模式输入帧数；秒模式输入秒数。修改后会自动从后续片段借/还长度，保持总长度不超过时间轴总帧数。";
+    this.lengthInput.style.cssText = `
+      width: 64px; background: #2a2a2a; color: #eee;
+      border: 1px solid #444; border-radius: 3px; padding: 2px 4px;
+    `;
+    lengthLabel.appendChild(this.lengthInput);
+    row.appendChild(lengthLabel);
+
+    this.addBtn = this.makeButton(
+      "➕",
+      "添加片段：在时间轴末尾新增一个片段；如果总长度已满，会自动从末尾已有片段借出长度。",
+    );
+    this.distributeBtn = this.makeButton(
+      "⚖️",
+      "均分片段：把所有片段平均分配到时间轴总帧数内，适合快速重置每段时长。",
+    );
+    this.deleteBtn = this.makeButton(
+      "🗑️",
+      "删除片段：删除当前选中的片段；至少会保留一个片段，避免时间轴为空。",
+    );
+    this.settingsBtn = this.makeButton(
+      "⚙️",
+      "高级设置：显示/隐藏时间轴总帧数、边界衰减、帧率、显示单位。默认折叠，避免这些参数占用节点面板空间。",
+    );
+    row.appendChild(this.settingsBtn);
+    row.appendChild(this.addBtn);
+    row.appendChild(this.distributeBtn);
+    row.appendChild(this.deleteBtn);
+
+    this.totalLabel = document.createElement("span");
+    this.totalLabel.title = "当前所有片段长度合计 / 时间轴总帧数。用于检查是否已经填满整段视频。";
+    this.totalLabel.style.cssText = "color: #888; margin-left: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto;";
+    row.appendChild(this.totalLabel);
+    this.container.appendChild(row);
+
+    this.settingsPanel = this.createSettingsPanel();
+    this.container.appendChild(this.settingsPanel);
+    this.applySettingsPanelVisibility(!!this.node.properties?.gjj_prompt_relay_settings_open);
+
     this.canvas = document.createElement("canvas");
     this.canvas.style.cssText = `
       width: 100%; height: ${CANVAS_HEIGHT}px;
       display: block; background: #1a1a1a; border-radius: 4px;
-      cursor: default;
+      cursor: default; flex: 0 0 auto;
     `;
     this.container.appendChild(this.canvas);
     this.ctx = this.canvas.getContext("2d");
 
     this.textarea = document.createElement("textarea");
     this.textarea.placeholder = "点击上方片段后编辑该段提示词...";
+    this.textarea.title = "当前片段提示词：这里的内容只作用于选中的时间片段。多个片段会自动同步到隐藏的局部提示词参数，运行时由后台读取。";
     this.textarea.style.cssText = `
       width: 100%; min-height: 60px; flex: 1 1 auto;
       box-sizing: border-box; resize: none;
@@ -156,59 +311,112 @@ class TimelineEditor {
       border-radius: 4px; padding: 6px; font-family: inherit; font-size: 12px;
     `;
     this.container.appendChild(this.textarea);
+  }
 
-    const row = document.createElement("div");
-    row.style.cssText = "display: flex; gap: 6px; align-items: center;";
-
-    const lengthLabel = document.createElement("label");
-    lengthLabel.style.cssText = "display: flex; align-items: center; gap: 4px;";
-    lengthLabel.textContent = "长度:";
-    this.lengthInput = document.createElement("input");
-    this.lengthInput.type = "number";
-    this.lengthInput.style.cssText = `
-      width: 70px; background: #2a2a2a; color: #eee;
-      border: 1px solid #444; border-radius: 3px; padding: 2px 4px;
+  createSettingsPanel() {
+    const panel = document.createElement("div");
+    panel.style.cssText = `
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 6px; padding: 6px; box-sizing: border-box;
+      background: rgba(255,255,255,0.04); border: 1px solid #3a3a3a;
+      border-radius: 6px; flex: 0 0 auto;
     `;
-    lengthLabel.appendChild(this.lengthInput);
-    row.appendChild(lengthLabel);
 
-    this.totalLabel = document.createElement("span");
-    this.totalLabel.style.cssText = "color: #888; margin-left: 4px;";
-    row.appendChild(this.totalLabel);
+    const makeField = (icon, tooltip, input) => {
+      const wrap = document.createElement("label");
+      wrap.title = tooltip;
+      wrap.style.cssText = `
+        display: flex; align-items: center; gap: 4px; min-width: 0;
+        background: #242424; border: 1px solid #444; border-radius: 5px;
+        padding: 3px 5px; box-sizing: border-box;
+      `;
+      const span = document.createElement("span");
+      span.textContent = icon;
+      span.style.cssText = "flex: 0 0 auto;";
+      input.title = tooltip;
+      input.style.cssText = `
+        width: 100%; min-width: 0; background: transparent; color: #eee;
+        border: 0; outline: none; font-size: 11px;
+      `;
+      for (const ev of ["pointerdown", "pointerup", "click", "dblclick", "keydown", "keyup", "wheel"]) {
+        input.addEventListener(ev, e => e.stopPropagation(), { passive: ev === "wheel" });
+      }
+      wrap.appendChild(span);
+      wrap.appendChild(input);
+      return wrap;
+    };
 
-    const spacer = document.createElement("div");
-    spacer.style.flex = "1";
-    row.appendChild(spacer);
+    this.maxFramesInput = document.createElement("input");
+    this.maxFramesInput.type = "number";
+    this.maxFramesInput.step = "1";
+    this.maxFramesInput.min = "1";
+    bindNativeNumber(this.maxFramesInput, this.maxFramesWidget, this.node, { integer: true, min: 1 });
+    panel.appendChild(makeField("🎞️", "时间轴总帧数：只影响前端时间轴比例尺；实际 latent 帧数仍由输入 latent 决定。", this.maxFramesInput));
 
-    this.addBtn = this.makeButton(
-      "+ 添加",
-      "添加一个新片段；如果时间轴已满，会从末尾片段借出长度。",
-    );
-    this.distributeBtn = this.makeButton(
-      "均分",
-      "将所有片段设置为相同长度，并填满时间轴总帧数。",
-    );
-    this.deleteBtn = this.makeButton(
-      "删除",
-      "删除当前选中的片段；只剩一个片段时不可删除。",
-    );
-    row.appendChild(this.addBtn);
-    row.appendChild(this.distributeBtn);
-    row.appendChild(this.deleteBtn);
+    this.epsilonInput = document.createElement("input");
+    this.epsilonInput.type = "number";
+    this.epsilonInput.step = "0.0001";
+    this.epsilonInput.min = "0.000001";
+    this.epsilonInput.max = "0.99";
+    bindNativeNumber(this.epsilonInput, this.node.widgets.find(w => w.name === "epsilon"), this.node, { min: 0.000001, max: 0.99 });
+    panel.appendChild(makeField("〰️", "边界衰减：越小片段边界越硬；需要柔和过渡可尝试 0.5 或更高。", this.epsilonInput));
 
-    this.container.appendChild(row);
+    this.fpsInput = document.createElement("input");
+    this.fpsInput.type = "number";
+    this.fpsInput.step = "0.1";
+    this.fpsInput.min = "0.1";
+    bindNativeNumber(this.fpsInput, this.fpsWidget, this.node, { min: 0.1 });
+    panel.appendChild(makeField("🎬", "帧率：只影响时间轴以秒显示时的换算，不改变真实视频帧数。", this.fpsInput));
+
+    this.unitsSelect = document.createElement("select");
+    for (const text of ["帧", "秒"]) {
+      const opt = document.createElement("option");
+      opt.value = text;
+      opt.textContent = text;
+      this.unitsSelect.appendChild(opt);
+    }
+    bindNativeSelect(this.unitsSelect, this.timeUnitsWidget, this.node);
+    panel.appendChild(makeField("📏", "显示单位：选择时间轴标尺显示为帧或秒；内部仍按帧保存。", this.unitsSelect));
+
+    return panel;
+  }
+
+  applySettingsPanelVisibility(open = null) {
+    const value = open == null ? !!this.node.properties?.gjj_prompt_relay_settings_open : !!open;
+    this.node.properties = this.node.properties || {};
+    this.node.properties.gjj_prompt_relay_settings_open = value;
+    if (this.settingsPanel) this.settingsPanel.style.display = value ? "grid" : "none";
+    if (this.settingsBtn) {
+      this.settingsBtn.dataset.active = value ? "1" : "0";
+      this.settingsBtn.style.background = value ? "#555" : "#3a3a3a";
+    }
+    this.node.graph?.setDirtyCanvas?.(true, true);
+  }
+
+  syncSettingsPanelValues() {
+    if (this.maxFramesInput && this.maxFramesWidget) this.maxFramesInput.value = this.maxFramesWidget.value ?? "";
+    const epsilon = this.node.widgets.find(w => w.name === "epsilon");
+    if (this.epsilonInput && epsilon) this.epsilonInput.value = epsilon.value ?? "";
+    if (this.fpsInput && this.fpsWidget) this.fpsInput.value = this.fpsWidget.value ?? "";
+    if (this.unitsSelect && this.timeUnitsWidget) this.unitsSelect.value = this.timeUnitsWidget.value || "帧";
   }
 
   makeButton(label, tooltip) {
     const b = document.createElement("button");
     b.textContent = label;
+    b.setAttribute("aria-label", tooltip || label);
     if (tooltip) b.title = tooltip;
     b.style.cssText = `
+      width: 26px; height: 24px; min-width: 26px;
+      display: inline-flex; align-items: center; justify-content: center;
       background: #3a3a3a; color: #eee; border: 1px solid #555;
-      border-radius: 3px; padding: 3px 10px; cursor: pointer; font-size: 11px;
+      border-radius: 5px; padding: 0; cursor: pointer; font-size: 14px;
+      line-height: 1; user-select: none;
     `;
+    b.addEventListener("pointerdown", e => e.stopPropagation());
+    b.addEventListener("wheel", e => e.stopPropagation(), { passive: true });
     b.addEventListener("mouseenter", () => b.style.background = "#4a4a4a");
-    b.addEventListener("mouseleave", () => b.style.background = "#3a3a3a");
+    b.addEventListener("mouseleave", () => { if (b.dataset.active !== "1") b.style.background = "#3a3a3a"; });
     return b;
   }
 
@@ -281,9 +489,15 @@ class TimelineEditor {
       this.updateTotalLabel();
     });
 
-    this.addBtn.addEventListener("click", () => this.addSegment());
-    this.distributeBtn.addEventListener("click", () => this.distributeEvenly());
-    this.deleteBtn.addEventListener("click", () => this.deleteSelected());
+    this.settingsBtn.addEventListener("click", e => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.syncSettingsPanelValues();
+      this.applySettingsPanelVisibility(!this.node.properties?.gjj_prompt_relay_settings_open);
+    });
+    this.addBtn.addEventListener("click", e => { e.stopPropagation(); this.addSegment(); });
+    this.distributeBtn.addEventListener("click", e => { e.stopPropagation(); this.distributeEvenly(); });
+    this.deleteBtn.addEventListener("click", e => { e.stopPropagation(); this.deleteSelected(); });
 
     if (this.maxFramesWidget) {
       const prev = this.maxFramesWidget.callback;
@@ -292,6 +506,7 @@ class TimelineEditor {
         this.trimToFit();
         this.commit();
         this.updateUIFromSelection();
+        this.syncSettingsPanelValues();
         this.render();
       };
     }
@@ -303,6 +518,7 @@ class TimelineEditor {
       w.callback = (...args) => {
         prev?.apply(w, args);
         this.updateUIFromSelection();
+        this.syncSettingsPanelValues();
         this.render();
       };
     }
@@ -906,6 +1122,19 @@ app.registerExtension({
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData?.name !== "GJJ_PromptRelayEncodeTimeline") return;
 
+    const originalAddWidget = nodeType.prototype.addWidget;
+    if (originalAddWidget && !nodeType.prototype.__gjjPromptRelayAddWidgetPatched) {
+      nodeType.prototype.addWidget = function (type, name, value, callback, options) {
+        const w = originalAddWidget.apply(this, arguments);
+        if (HIDDEN_WIDGET_NAMES.includes(name) || options?.gjj_frontend_hidden) {
+          hideWidget(w);
+          setTimeout(() => hideInternalWidgets(this), 0);
+        }
+        return w;
+      };
+      nodeType.prototype.__gjjPromptRelayAddWidgetPatched = true;
+    }
+
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
       const r = onNodeCreated?.apply(this, arguments);
@@ -913,9 +1142,7 @@ app.registerExtension({
       this.properties = this.properties || {};
       this.properties.gjj_prompt_relay_timeline = true;
 
-      for (const name of HIDDEN_WIDGET_NAMES) {
-        hideWidget(this.widgets.find(w => w.name === name));
-      }
+      hideInternalWidgets(this);
 
       const container = document.createElement("div");
       this._timelineWidget = this.addDOMWidget("gjj_prompt_relay_timeline", "GJJPromptRelayTimeline", container, {
@@ -929,7 +1156,9 @@ app.registerExtension({
       const self = this;
       setTimeout(() => {
         try {
+          hideInternalWidgets(self);
           self._timelineEditor = new TimelineEditor(self, container);
+          hideInternalWidgets(self);
         } catch (err) {
           console.error("[GJJ PromptRelay] 时间轴编辑器初始化失败:", err);
         }
@@ -948,6 +1177,7 @@ app.registerExtension({
           const w = this.widgets.find(x => x.name === name);
           if (w && (w.value == null || w.value === "")) w.value = def;
         }
+        hideInternalWidgets(this);
         // Rebuild from restored widget values
         setTimeout(() => {
           if (this._timelineEditor) {

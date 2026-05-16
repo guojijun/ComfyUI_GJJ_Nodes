@@ -481,6 +481,8 @@ class GJJ_PromptRelayTimeline(GJJ_PromptRelayEncode):
                         "step": 1,
                         "display_name": "时间轴总帧数",
                         "tooltip": "仅用于前端时间轴比例尺；实际 latent 帧数仍从输入 latent 读取。",
+                        "gjj_frontend_hidden": True,
+                        "hidden": True,
                     },
                 ),
                 "timeline_data": (
@@ -489,6 +491,8 @@ class GJJ_PromptRelayTimeline(GJJ_PromptRelayEncode):
                         "default": "",
                         "display_name": "时间轴数据",
                         "tooltip": "前端自动维护的时间轴 JSON，通常不需要手动编辑。",
+                        "gjj_frontend_hidden": True,
+                        "hidden": True,
                     },
                 ),
                 "local_prompts": (
@@ -497,7 +501,9 @@ class GJJ_PromptRelayTimeline(GJJ_PromptRelayEncode):
                         "multiline": True,
                         "default": "",
                         "display_name": "局部提示词",
-                        "tooltip": "由时间轴自动生成，也可手动使用 | 分隔。",
+                        "tooltip": "由时间轴自动生成并传给后台，前端面板不显示，避免隐藏参数挤出空行。",
+                        "gjj_frontend_hidden": True,
+                        "hidden": True,
                     },
                 ),
                 "segment_lengths": (
@@ -505,7 +511,9 @@ class GJJ_PromptRelayTimeline(GJJ_PromptRelayEncode):
                     {
                         "default": "",
                         "display_name": "分段长度",
-                        "tooltip": "由时间轴自动生成的像素帧长度。",
+                        "tooltip": "由时间轴自动生成并传给后台，前端面板不显示，避免隐藏参数挤出空行。",
+                        "gjj_frontend_hidden": True,
+                        "hidden": True,
                     },
                 ),
                 "epsilon": (
@@ -517,6 +525,8 @@ class GJJ_PromptRelayTimeline(GJJ_PromptRelayEncode):
                         "step": 0.0001,
                         "display_name": "边界衰减",
                         "tooltip": "越小片段边界越硬；需要柔和过渡时可尝试 0.5 或更高。",
+                        "gjj_frontend_hidden": True,
+                        "hidden": True,
                     },
                 ),
                 "fps": (
@@ -528,6 +538,8 @@ class GJJ_PromptRelayTimeline(GJJ_PromptRelayEncode):
                         "step": 0.1,
                         "display_name": "帧率",
                         "tooltip": "只影响时间轴以秒显示时的换算。",
+                        "gjj_frontend_hidden": True,
+                        "hidden": True,
                     },
                 ),
                 "time_units": (
@@ -536,6 +548,8 @@ class GJJ_PromptRelayTimeline(GJJ_PromptRelayEncode):
                         "default": "帧",
                         "display_name": "显示单位",
                         "tooltip": "选择时间轴标尺显示为帧或秒；内部仍按帧保存。",
+                        "gjj_frontend_hidden": True,
+                        "hidden": True,
                     },
                 ),
             }

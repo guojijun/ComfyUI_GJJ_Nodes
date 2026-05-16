@@ -8,7 +8,8 @@ const MODE_PROPERTY = "gjj_text_input_mode";
 const WIDTH_PROPERTY = "gjj_text_input_width";
 const MODE_EDIT = "edit";
 const MODE_PREVIEW = "preview";
-const MIN_WIDTH = 320;
+const DEFAULT_WIDTH = 320;
+const MIN_WIDTH = 120;
 const EMPTY_TEXT = "空文本";
 const DOUBLE_CLICK_MS = 420;
 
@@ -29,7 +30,8 @@ function setMode(node, mode) {
 function getCurrentWidth(node) {
 	const sizeWidth = Number(node?.size?.[0] || 0);
 	const savedWidth = Number(node?.properties?.[WIDTH_PROPERTY] || 0);
-	return Math.max(MIN_WIDTH, sizeWidth || savedWidth || MIN_WIDTH);
+	const width = sizeWidth || savedWidth || DEFAULT_WIDTH;
+	return Math.max(MIN_WIDTH, width);
 }
 
 function rememberWidth(node) {
@@ -322,6 +324,54 @@ function restoreSavedValue(node, serializedNode = null) {
 	syncSavedValue(node);
 }
 
+function safeAssignWidgetProperty(widget, key, value) {
+	if (!widget) {
+		return;
+	}
+	let target = widget;
+	while (target) {
+		const descriptor = Object.getOwnPropertyDescriptor(target, key);
+		if (descriptor) {
+			if (descriptor.set || descriptor.writable) {
+				try { widget[key] = value; } catch (_) {}
+			}
+			return;
+		}
+		target = Object.getPrototypeOf(target);
+	}
+	try { widget[key] = value; } catch (_) {}
+}
+
+function collapseElement(el) {
+	if (!el?.style) {
+		return;
+	}
+	el.style.display = "none";
+	el.style.pointerEvents = "none";
+	el.style.height = "0px";
+	el.style.minHeight = "0px";
+	el.style.maxHeight = "0px";
+	el.style.margin = "0px";
+	el.style.padding = "0px";
+	el.style.border = "0px";
+	el.style.overflow = "hidden";
+}
+
+function restoreElement(el) {
+	if (!el?.style) {
+		return;
+	}
+	el.style.display = "";
+	el.style.pointerEvents = "";
+	el.style.height = "";
+	el.style.minHeight = "";
+	el.style.maxHeight = "";
+	el.style.margin = "";
+	el.style.padding = "";
+	el.style.border = "";
+	el.style.overflow = "";
+}
+
 function setWidgetVisible(widget, visible) {
 	if (!widget) {
 		return;
@@ -336,59 +386,50 @@ function setWidgetVisible(widget, visible) {
 			type: widget.type,
 			y: widget.y,
 			last_y: widget.last_y,
+			serialize: widget.serialize,
 		};
 	}
 	if (visible) {
 		const originals = widget.__gjjTextInputOriginals;
-		widget.hidden = originals.hidden || false;
+		safeAssignWidgetProperty(widget, "hidden", originals.hidden || false);
 		widget.computeSize = originals.computeSize;
 		widget.draw = originals.draw;
 		widget.getHeight = originals.getHeight;
-		widget.type = originals.type;
-		widget.label = originals.label;
-		widget.y = originals.y;
-		widget.last_y = originals.last_y;
-		if (widget.inputEl) {
-			widget.inputEl.style.display = "";
-			widget.inputEl.style.pointerEvents = "";
-		}
-		if (widget.element) {
-			widget.element.style.display = "";
-			widget.element.style.pointerEvents = "";
-		}
-		if (widget.widget) {
-			widget.widget.style.display = "";
-			widget.widget.style.pointerEvents = "";
-		}
+		safeAssignWidgetProperty(widget, "type", originals.type);
+		safeAssignWidgetProperty(widget, "label", originals.label);
+		safeAssignWidgetProperty(widget, "y", originals.y);
+		safeAssignWidgetProperty(widget, "last_y", originals.last_y);
+		safeAssignWidgetProperty(widget, "serialize", originals.serialize);
+		restoreElement(widget.inputEl);
+		restoreElement(widget.element);
+		restoreElement(widget.widget);
 		return;
 	}
-	widget.hidden = true;
-	widget.type = `converted-widget:${widget.name || "hidden"}`;
-	widget.label = "";
-	widget.computeSize = () => [0, -4];
-	widget.getHeight = () => -4;
+
+	// 完整隐藏：不能只设 hidden，也不能写 height/margin/padding 这些只读 getter。
+	// 只改可写的布局字段 + DOM style，避免 BaseWidget / BaseDOMWidgetImpl getter-only 报错。
+	safeAssignWidgetProperty(widget, "hidden", true);
+	safeAssignWidgetProperty(widget, "type", `converted-widget:${widget.name || "hidden"}`);
+	safeAssignWidgetProperty(widget, "label", "");
+	widget.computeSize = () => [0, 0];
+	widget.getHeight = () => 0;
 	widget.draw = () => {};
-	widget.y = -10000;
-	widget.last_y = -10000;
-	if (widget.inputEl) {
-		widget.inputEl.style.display = "none";
-		widget.inputEl.style.pointerEvents = "none";
-	}
-	if (widget.element) {
-		widget.element.style.display = "none";
-		widget.element.style.pointerEvents = "none";
-	}
-	if (widget.widget) {
-		widget.widget.style.display = "none";
-		widget.widget.style.pointerEvents = "none";
-	}
+	safeAssignWidgetProperty(widget, "y", 0);
+	safeAssignWidgetProperty(widget, "last_y", 0);
+	safeAssignWidgetProperty(widget, "serialize", false);
+	collapseElement(widget.inputEl);
+	collapseElement(widget.element);
+	collapseElement(widget.widget);
+}
+
+function collapseNativeTextWidget(node) {
+	setWidgetVisible(getTextWidget(node), false);
 }
 
 function applyMode(node) {
 	const mode = getMode(node);
 	const preview = mode === MODE_PREVIEW;
-	const textWidget = getTextWidget(node);
-	setWidgetVisible(textWidget, false);
+	collapseNativeTextWidget(node);
 
 	if (node.__gjjTextInputPreviewBody) {
 		node.__gjjTextInputPreviewBody.style.display = preview ? "block" : "none";
@@ -739,6 +780,15 @@ app.registerExtension({
 		if (!TARGET_NODES.has(nodeData?.name)) {
 			return;
 		}
+
+		const originalAddWidget = nodeType.prototype.addWidget;
+		nodeType.prototype.addWidget = function (type, name, value, callback, options, ...rest) {
+			const widget = originalAddWidget?.apply(this, [type, name, value, callback, options, ...rest]);
+			if (name === TEXT_WIDGET_NAME) {
+				collapseNativeTextWidget(this);
+			}
+			return widget;
+		};
 
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
