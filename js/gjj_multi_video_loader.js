@@ -2,6 +2,7 @@ import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
 const TARGET_NODES = new Set(["GJJ_MultiVideoLoader"]);
+const NODE_CLASS_NAME = "GJJ_MultiVideoLoader";
 const DATA_PROPERTY = "selected_videos";
 const OUTPUTS_PROPERTY = "enabled_outputs";
 const TAB_PROPERTY = "active_tab";
@@ -14,7 +15,8 @@ const MIN_HEIGHT = 220;
 const DOM_WIDGET_NAME = "gjj_multi_video_loader_dom";
 const DOM_VERSION = 8;
 const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE";
-const OPTIONAL_INPUT_NAME = "视频帧队列";
+const OPTIONAL_INPUT_NAME = "input_frames";
+const OPTIONAL_INPUT_DISPLAY_NAME = "视频帧队列";
 const OPTIONAL_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
 const FILE_NAME_COLLATOR = new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "base" });
 
@@ -31,14 +33,14 @@ const PARAM_WIDGET_ALIASES = new Map([
 	["最大帧数", "max_frames"],
 ]);
 const PARAM_DEFS = [
-	{ name: "frame_rate", label: "帧率", kind: "number", step: "0.01", min: "1", default: 24.0, tip: "最终输出帧率。" },
-	{ name: "width", label: "宽度", kind: "number", step: "8", min: "0", default: 0, tip: "0 表示跟随源视频；只填宽度会按比例计算高度。" },
-	{ name: "height", label: "高度", kind: "number", step: "8", min: "0", default: 0, tip: "0 表示跟随源视频；只填高度会按比例计算宽度。" },
+	{ name: "frame_rate", label: "帧率", kind: "number", step: "0.01", min: "1", max: "240", default: 24.0, tip: "最终输出帧率。" },
+	{ name: "width", label: "宽度", kind: "number", step: "8", min: "0", max: "16384", default: 0, tip: "0 表示跟随源视频；只填宽度会按比例计算高度。" },
+	{ name: "height", label: "高度", kind: "number", step: "8", min: "0", max: "16384", default: 0, tip: "0 表示跟随源视频；只填高度会按比例计算宽度。" },
 	{ name: "video_format", label: "视频格式", kind: "select", default: "video/h264-mp4", tip: "格式参数命名参考 VHS_VideoCombine。" },
-	{ name: "start_frame", label: "起始帧", kind: "number", step: "1", min: "0", default: 0, tip: "从第几帧开始读取。" },
-	{ name: "end_frame", label: "结束帧", kind: "number", step: "1", min: "0", default: 0, tip: "0 表示读取到末尾或达到最大帧数。" },
-	{ name: "frame_stride", label: "抽帧间隔", kind: "number", step: "1", min: "1", default: 1, tip: "每隔多少帧取一帧。" },
-	{ name: "max_frames", label: "最大帧数", kind: "number", step: "1", min: "1", default: 240, tip: "每个视频最多解码多少帧。" },
+	{ name: "start_frame", label: "起始帧", kind: "number", step: "1", min: "0", max: "999999", default: 0, tip: "从第几帧开始读取。" },
+	{ name: "end_frame", label: "结束帧", kind: "number", step: "1", min: "0", max: "999999", default: 0, tip: "0 表示读取到末尾或达到最大帧数。" },
+	{ name: "frame_stride", label: "抽帧间隔", kind: "number", step: "1", min: "1", max: "1000", default: 1, tip: "每隔多少帧取一帧。" },
+	{ name: "max_frames", label: "最大帧数", kind: "number", step: "1", min: "1", max: "100000", default: 240, tip: "每个视频最多解码多少帧。" },
 ];
 const FALLBACK_FORMATS = ["video/h264-mp4", "video/webm", "image/gif", "image/webp"];
 const TAB_DEFS = [
@@ -121,6 +123,23 @@ function outputsFromNode(node, serializedNode = null) {
 function requestRedraw(node) {
 	node?.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function initParamDefaults(node) {
+	for (const def of PARAM_DEFS) {
+		const currentValue = getWidgetValue(node, def.name);
+		const min = parseFloat(def.min);
+		const max = parseFloat(def.max);
+		let defaultValue = def.default;
+
+		if (currentValue === null || currentValue === undefined) {
+			setWidgetValue(node, def.name, defaultValue, true);
+		} else if (!isNaN(min) && currentValue < min) {
+			setWidgetValue(node, def.name, min, true);
+		} else if (!isNaN(max) && currentValue > max) {
+			setWidgetValue(node, def.name, max, true);
+		}
+	}
 }
 
 function ensureState(node) {
@@ -230,25 +249,18 @@ function normalizeParamWidgetName(name) {
 function findWidget(node, name) {
 	const wanted = normalizeParamWidgetName(name);
 	const widgets = node.widgets || [];
-	
+
 	for (const widget of widgets) {
 		if (!widget || widget.name === DOM_WIDGET_NAME) continue;
-		
+
 		const widgetName = String(widget.name || "").trim();
 		if (widgetName && normalizeParamWidgetName(widgetName) === wanted) {
+			console.debug(`[GJJ] Found widget "${widgetName}" for "${name}"`);
 			return widget;
 		}
 	}
-	
-	for (const widget of widgets) {
-		if (!widget || widget.name === DOM_WIDGET_NAME) continue;
-		
-		const names = widgetNames(widget);
-		if (names.some((item) => normalizeParamWidgetName(item) === wanted)) {
-			return widget;
-		}
-	}
-	
+
+	console.warn(`[GJJ] Widget not found for "${name}", available widgets:`, widgets.map(w => w?.name).filter(Boolean));
 	return null;
 }
 
@@ -258,16 +270,28 @@ function hasLinkedInput(node, name) {
 
 function setWidgetValue(node, name, value, force = false) {
 	if (!force && hasLinkedInput(node, name)) return;
-	
+
 	const widget = findWidget(node, name);
-	if (!widget) return;
-	
+	if (!widget) {
+		console.warn(`[GJJ] Widget not found for ${name}`);
+		return;
+	}
+
+	const widgetName = String(widget.name || "");
+	const expectedName = normalizeParamWidgetName(name);
+	const actualNormalized = normalizeParamWidgetName(widgetName);
+
+	if (actualNormalized !== expectedName) {
+		console.error(`[GJJ] Widget mismatch! Looking for "${name}" but found "${widgetName}". Aborting setWidgetValue.`);
+		return;
+	}
+
 	const paramDef = PARAM_DEFS.find((def) => def.name === name);
-	
+
 	if (paramDef && paramDef.kind === "number") {
 		if (typeof value === "string") {
 			if (!/^-?\d+(\.\d+)?$/.test(value.trim())) {
-				console.warn(`[GJJ] Invalid numeric value "${value}" for ${name}, using default`);
+				console.warn(`[GJJ] Invalid numeric value "${value}" for ${name}, using default ${paramDef.default}`);
 				value = paramDef.default ?? 0;
 			} else if (paramDef.step === "0.01") {
 				value = Number.parseFloat(value) || (paramDef.default ?? 0);
@@ -275,19 +299,87 @@ function setWidgetValue(node, name, value, force = false) {
 				value = Number.parseInt(value, 10) || (paramDef.default ?? 0);
 			}
 		} else if (typeof value !== "number" || Number.isNaN(value)) {
-			console.warn(`[GJJ] Non-numeric value for ${name}, using default`);
+			console.warn(`[GJJ] Non-numeric value for ${name} (type: ${typeof value}, value: ${value}), using default ${paramDef.default}`);
 			value = paramDef.default ?? 0;
 		}
-		
+
 		const min = Number(paramDef.min) || 0;
 		const max = paramDef.max ? Number(paramDef.max) : Infinity;
 		value = Math.max(min, Math.min(max, value));
-	} else if (paramDef && paramDef.kind === "select" && typeof value !== "string") {
-		value = String(value || paramDef.default || "");
+
+		if (name === "frame_stride") {
+			const startFrame = getWidgetValue(node, "start_frame") || 0;
+			const endFrame = getWidgetValue(node, "end_frame") || 0;
+			const frameRange = endFrame > startFrame ? (endFrame - startFrame + 1) : 100;
+			if (value > frameRange) {
+				console.warn(`[GJJ] frame_stride(${value}) exceeds frame range(${frameRange}), limiting to ${frameRange}`);
+				value = Math.min(value, frameRange);
+			}
+		}
+	} else if (paramDef && paramDef.kind === "select") {
+		if (typeof value !== "string") {
+			console.warn(`[GJJ] Non-string value for ${name} (type: ${typeof value}, value: ${value}), using default ${paramDef.default}`);
+			value = String(paramDef.default || "");
+		} else {
+			const options = getParamOptions(node, name);
+			if (!options.includes(value)) {
+				console.warn(`[GJJ] Value "${value}" not in options for ${name}, using default ${paramDef.default}`);
+				value = paramDef.default || "";
+			}
+		}
 	}
-	
+
+	console.debug(`[GJJ] Setting ${name} to ${value} (widget: ${widget.name})`);
 	widget.value = value;
 	widget.callback?.(value, app.canvas, node, app.canvas?.graph_mouse);
+}
+
+function validateVideoFormat(node) {
+	const widget = findWidget(node, "video_format");
+	if (!widget) return;
+
+	const value = String(widget.value || "");
+	const options = getParamOptions(node, "video_format");
+
+	if (!options.includes(value)) {
+		console.error(`[GJJ] Invalid video_format value "${value}", resetting to default`);
+		widget.value = "video/h264-mp4";
+		widget.callback?.("video/h264-mp4", app.canvas, node, app.canvas?.graph_mouse);
+	}
+}
+
+function fixParameterMismatch(node) {
+	const issues = [];
+
+	const width = getWidgetValue(node, "width");
+	if (width && width < 100 && width > 0) {
+		issues.push(`width(${width}) too small`);
+	}
+
+	const height = getWidgetValue(node, "height");
+	if (height && height < 100 && height > 0) {
+		issues.push(`height(${height}) too small`);
+	}
+
+	const startFrame = getWidgetValue(node, "start_frame");
+	if (startFrame && startFrame > 10000) {
+		issues.push(`start_frame(${startFrame}) too large`);
+	}
+
+	const frameStride = getWidgetValue(node, "frame_stride");
+	if (frameStride && frameStride > 1000) {
+		issues.push(`frame_stride(${frameStride}) exceeds max`);
+	}
+
+	if (issues.length > 2) {
+		console.warn(`[GJJ] Detected parameter mismatch: ${issues.join(", ")}. Resetting all parameters to defaults.`);
+		for (const def of PARAM_DEFS) {
+			setWidgetValue(node, def.name, def.default, true);
+		}
+		validateVideoFormat(node);
+		return true;
+	}
+	return false;
 }
 
 function guessFormatFromFilename(node, item) {
@@ -320,6 +412,7 @@ async function applyMediaInfoToPanel(node, force = false, preferredItem = null) 
 	}
 	setSummary(node, "正在解析视频参数...");
 	first = await fetchMediaMeta(first);
+	console.debug(`[GJJ] Media meta:`, first);
 	const state = ensureState(node);
 	const key = itemKey(first);
 	state.options = (state.options || []).map((item) => itemKey(item) === key ? { ...item, ...first } : item);
@@ -329,14 +422,39 @@ async function applyMediaInfoToPanel(node, force = false, preferredItem = null) 
 	const width = Number(first.width || 0);
 	const height = Number(first.height || 0);
 	const frames = Number(first.frames || 0);
-	if (fps > 0) setWidgetValue(node, "frame_rate", Number(fps.toFixed(3)), force);
-	if (width > 0) setWidgetValue(node, "width", Math.round(width), force);
-	if (height > 0) setWidgetValue(node, "height", Math.round(height), force);
+
+	console.debug(`[GJJ] Applying media info: fps=${fps}, width=${width}, height=${height}, frames=${frames}`);
+
+	if (fps > 0) {
+		setWidgetValue(node, "frame_rate", Number(fps.toFixed(3)), force);
+	} else {
+		setWidgetValue(node, "frame_rate", 24.0, force);
+	}
+
+	if (width > 0) {
+		setWidgetValue(node, "width", Math.round(width), force);
+	} else {
+		setWidgetValue(node, "width", 512, force);
+	}
+
+	if (height > 0) {
+		setWidgetValue(node, "height", Math.round(height), force);
+	} else {
+		setWidgetValue(node, "height", 512, force);
+	}
+
 	if (frames > 0) {
 		setWidgetValue(node, "end_frame", frames - 1, force);
 		setWidgetValue(node, "max_frames", frames, force);
+	} else {
+		setWidgetValue(node, "end_frame", 239, force);
+		setWidgetValue(node, "max_frames", 240, force);
 	}
+
 	setWidgetValue(node, "video_format", guessFormatFromFilename(node, first), force);
+	setWidgetValue(node, "start_frame", 0, force);
+	setWidgetValue(node, "frame_stride", 1, force);
+
 	setSummary(node, `已提取：${fps > 0 ? fps.toFixed(2) + " FPS" : "帧率未知"}${width > 0 && height > 0 ? `，${width}×${height}` : ""}${frames > 0 ? `，共 ${frames} 帧` : ""}`);
 	renderParamControls(node);
 	requestRedraw(node);
@@ -551,15 +669,18 @@ function renderParamControls(node) {
 		for (const def of PARAM_DEFS) box.appendChild(makeParamControl(node, def));
 		box.__built = true;
 	}
+
+	fixParameterMismatch(node);
+
 	for (const def of PARAM_DEFS) {
 		const input = box.querySelector(`[data-widget-name="${def.name}"]`);
 		if (!input) continue;
 		const linked = hasLinkedInput(node, def.name);
 		input.disabled = linked;
 		input.title = linked ? `${def.label} 已连接外部输入，面板内不可覆盖。` : (def.tip || "");
-		
+
 		let currentValue = getWidgetValue(node, def.name);
-		
+
 		if (def.kind === "select") {
 			const current = String(currentValue ?? "");
 			const options = getParamOptions(node, def.name);
@@ -583,6 +704,7 @@ function renderParamControls(node) {
 			input.value = String(currentValue);
 		}
 	}
+	validateVideoFormat(node);
 }
 
 function applyWidgetTabVisibility(node) {
@@ -648,13 +770,17 @@ function makeSelectedCard(node, item) {
 	video.addEventListener("mouseenter", () => video.play?.().catch(() => {}));
 	video.addEventListener("mouseleave", () => { video.pause?.(); video.currentTime = 0; });
 
-	const removeButton = document.createElement("button");
-	removeButton.type = "button";
-	setIconButton(removeButton, "🗑️", "移除", "从已选视频中移除此项，不删除 input 目录里的源文件。");
-	removeButton.style.cssText = [
+	const buttonContainer = document.createElement("div");
+	buttonContainer.style.cssText = [
 		"position:absolute",
-		"top:9px",
-		"right:9px",
+		"top:6px",
+		"right:6px",
+		"display:flex",
+		"flex-direction:column",
+		"gap:8px",
+	].join(";");
+
+	const buttonStyle = [
 		"width:26px",
 		"height:26px",
 		"padding:0",
@@ -668,17 +794,62 @@ function makeSelectedCard(node, item) {
 		"display:flex",
 		"align-items:center",
 		"justify-content:center",
+		"transition:all 0.15s ease",
+		"hover:background:#2ec4b6",
+		"hover:border-color:#2ec4b6",
 	].join(";");
+
+	const removeButton = document.createElement("button");
+	removeButton.type = "button";
+	setIconButton(removeButton, "🗑️", "移除", "从已选视频中移除此项，不删除 input 目录里的源文件。");
+	removeButton.style.cssText = buttonStyle;
 	removeButton.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
 		removeSelection(node, item);
 	});
 
+	const zoomButton = document.createElement("button");
+	zoomButton.type = "button";
+	setIconButton(zoomButton, "🔍", "放大预览", "在弹窗中放大查看视频预览。");
+	zoomButton.style.cssText = buttonStyle;
+	zoomButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const modal = document.createElement("div");
+		modal.style.cssText = [
+			"position:fixed",
+			"top:0",
+			"left:0",
+			"right:0",
+			"bottom:0",
+			"background:rgba(0,0,0,.85)",
+			"display:flex",
+			"align-items:center",
+			"justify-content:center",
+			"z-index:9999",
+			"cursor:zoom-out",
+		].join(";");
+		const zoomedVideo = document.createElement("video");
+		zoomedVideo.src = inputVideoUrl(item);
+		zoomedVideo.muted = true;
+		zoomedVideo.controls = true;
+		zoomedVideo.playsInline = true;
+		zoomedVideo.style.cssText = "max-width:90vw;max-height:90vh;object-contain;border-radius:8px;background:#000;";
+		zoomedVideo.addEventListener("click", (e) => e.stopPropagation());
+		modal.appendChild(zoomedVideo);
+		modal.addEventListener("click", () => {
+			zoomedVideo.pause();
+			modal.remove();
+		});
+		document.body.appendChild(modal);
+		zoomedVideo.play().catch(() => {});
+	});
+
 	const extractButton = document.createElement("button");
 	extractButton.type = "button";
 	setIconButton(extractButton, "🧾", "覆盖面板参数", "读取这个视频的帧率、宽度、高度和格式，并覆盖到参数面板。外部连接的参数不会被覆盖。");
-	extractButton.style.cssText = removeButton.style.cssText.replace("top:9px", "top:40px");
+	extractButton.style.cssText = buttonStyle;
 	extractButton.addEventListener("click", async (event) => {
 		event.preventDefault();
 		event.stopPropagation();
@@ -688,9 +859,12 @@ function makeSelectedCard(node, item) {
 		scheduleLayout(node);
 	});
 
+	buttonContainer.appendChild(removeButton);
+	buttonContainer.appendChild(zoomButton);
+	buttonContainer.appendChild(extractButton);
+
 	wrap.appendChild(video);
-	wrap.appendChild(removeButton);
-	wrap.appendChild(extractButton);
+	wrap.appendChild(buttonContainer);
 	return wrap;
 }
 
@@ -775,12 +949,96 @@ function renderExecutedPreview(node) {
 	);
 	if (!grid) return;
 	grid.replaceChildren();
-	for (const item of items) {
+	for (let index = 0; index < items.length; index++) {
+		const item = items[index];
+		const wrap = document.createElement("div");
+		wrap.title = `${item?.filename || `帧 ${index + 1}`}`;
+		wrap.style.cssText = [
+			"position:relative",
+			"display:flex",
+			"min-width:0",
+			"padding:4px",
+			"border:1px solid #33434a",
+			"border-radius:8px",
+			"background:#12191d",
+			"box-sizing:border-box",
+		].join(";");
+
 		const image = document.createElement("img");
 		image.src = imageDataToUrl(item);
 		image.draggable = false;
-		image.style.cssText = "width:100%;height:72px;object-fit:contain;background:#0c1114;border-radius:6px;display:block;";
-		grid.appendChild(image);
+		image.style.cssText = "width:100%;height:64px;object-fit:contain;background:#0c1114;border-radius:6px;display:block;";
+
+		const deleteButton = document.createElement("button");
+		deleteButton.type = "button";
+		setIconButton(deleteButton, "🗑️", "删除", "从预览中移除此帧。");
+		deleteButton.style.cssText = [
+			"position:absolute",
+			"top:6px",
+			"right:6px",
+			"width:22px",
+			"height:22px",
+			"padding:0",
+			"border:1px solid rgba(255,255,255,.35)",
+			"border-radius:999px",
+			"background:rgba(0,0,0,.58)",
+			"color:#fff",
+			"font-size:12px",
+			"line-height:20px",
+			"cursor:pointer",
+			"display:flex",
+			"align-items:center",
+			"justify-content:center",
+			"transition:all 0.15s ease",
+			"hover:background:#e74c3c",
+			"hover:border-color:#e74c3c",
+		].join(";");
+		deleteButton.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			state.executedFrames.splice(index, 1);
+			state.executedFrameCount = state.executedFrames.length;
+			syncProperties(node);
+			renderExecutedPreview(node);
+			updateSummary(node);
+			scheduleLayout(node);
+		});
+
+		const zoomButton = document.createElement("button");
+		zoomButton.type = "button";
+		setIconButton(zoomButton, "🔍", "放大", "在弹窗中放大查看此帧。");
+		zoomButton.style.cssText = deleteButton.style.cssText.replace("right:6px", "right:34px");
+		zoomButton.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			const modal = document.createElement("div");
+			modal.style.cssText = [
+				"position:fixed",
+				"top:0",
+				"left:0",
+				"right:0",
+				"bottom:0",
+				"background:rgba(0,0,0,.85)",
+				"display:flex",
+				"align-items:center",
+				"justify-content:center",
+				"z-index:9999",
+				"cursor:zoom-out",
+			].join(";");
+			const zoomedImage = document.createElement("img");
+			zoomedImage.src = imageDataToUrl(item);
+			zoomedImage.draggable = false;
+			zoomedImage.style.cssText = "max-width:90vw;max-height:90vh;object-contain;border-radius:8px;";
+			zoomedImage.addEventListener("click", (e) => e.stopPropagation());
+			modal.appendChild(zoomedImage);
+			modal.addEventListener("click", () => modal.remove());
+			document.body.appendChild(modal);
+		});
+
+		wrap.appendChild(image);
+		wrap.appendChild(deleteButton);
+		wrap.appendChild(zoomButton);
+		grid.appendChild(wrap);
 	}
 }
 
@@ -1122,8 +1380,8 @@ function ensureOptionalInput(node) {
 	}
 	if (input) {
 		input.name = OPTIONAL_INPUT_NAME;
-		input.label = OPTIONAL_INPUT_NAME;
-		input.localized_name = OPTIONAL_INPUT_NAME;
+		input.label = OPTIONAL_INPUT_DISPLAY_NAME;
+		input.localized_name = OPTIONAL_INPUT_DISPLAY_NAME;
 		input.type = OPTIONAL_INPUT_TYPE;
 	}
 }
@@ -1142,37 +1400,424 @@ function applyDynamicOutputs(node) {
 	if (!node) return;
 	const state = ensureState(node);
 	const firstName = "视频帧队列";
-	if (!node.outputs || node.outputs.length === 0) node.addOutput?.(firstName, BATCH_IMAGE_TYPE);
-	while ((node.outputs || []).length > 1) node.removeOutput?.(1);
+
+	// 这版改为“真正动态输出”：只保留主输出 + 已启用的扩展输出。
+	// 原来保留 10 个 slot 再 hidden，在新版 ComfyUI/LiteGraph 里仍会把灰色输出口画出来。
+	const enabledSet = new Set(state.enabledOutputs || []);
+	const visibleDefs = OUTPUT_DEFS.filter((def) => enabledSet.has(def.key));
+	const desiredCount = 1 + visibleDefs.length;
+
+	while ((node.outputs?.length || 0) < desiredCount) {
+		node.addOutput?.("temp", "STRING");
+	}
+	while ((node.outputs?.length || 0) > desiredCount) {
+		node.removeOutput?.(node.outputs.length - 1);
+	}
+
 	if (node.outputs?.[0]) {
 		node.outputs[0].name = firstName;
 		node.outputs[0].label = firstName;
 		node.outputs[0].localized_name = firstName;
 		node.outputs[0].type = BATCH_IMAGE_TYPE;
+		node.outputs[0].__gjj_key = "main";
+		node.outputs[0].hidden = false;
+		node.outputs[0].visible = true;
+		node.outputs[0].disabled = false;
 	}
-	for (const key of state.enabledOutputs) {
-		const def = OUTPUT_DEFS.find((item) => item.key === key);
-		if (!def) continue;
-		node.addOutput?.(def.name, def.type);
-		const output = node.outputs?.[node.outputs.length - 1];
-		if (output) {
-			output.name = def.name;
-			output.label = def.name;
-			output.localized_name = def.name;
-			output.type = def.type;
-			output.__gjj_key = def.key;
+
+	for (let i = 0; i < visibleDefs.length; i++) {
+		const def = visibleDefs[i];
+		const slotIndex = i + 1;
+		const output = node.outputs?.[slotIndex];
+		if (!output) continue;
+		output.name = def.name;
+		output.label = def.name;
+		output.localized_name = def.name;
+		output.type = def.type;
+		output.__gjj_key = def.key;
+		output.hidden = false;
+		output.visible = true;
+		output.disabled = false;
+		output.not_show = false;
+		output.__gjj_hidden = false;
+	}
+
+	globalThis.GJJApplyTypeColorsToNode?.(node);
+	refreshNodeAfterOutputChange(node);
+}
+
+function refreshNodeAfterOutputChange(node) {
+	if (!node) return;
+	// 让 LiteGraph 重新计算 slot 布局，避免隐藏口仍占高度或旧位置残留。
+	if (typeof node.computeSize === "function") {
+		try {
+			const size = node.computeSize();
+			if (Array.isArray(size) && size.length >= 2) {
+				node.size = [Math.max(node.size?.[0] || MIN_WIDTH, size[0]), Math.max(MIN_HEIGHT, size[1])];
+			}
+		} catch (_) {}
+	}
+	node.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+// 全局样式注入，确保输出端口正确隐藏
+let styleInjected = false;
+
+function injectOutputVisibilityStyles() {
+	if (styleInjected) return;
+	styleInjected = true;
+
+	const style = document.createElement('style');
+	style.textContent = `
+		/* 隐藏未启用的输出端口 */
+		.node[data-node-type="${NODE_CLASS_NAME}"] .outputs .slot.hidden,
+		.node[data-node-type="${NODE_CLASS_NAME}"] .outputs tr.hidden,
+		.node[data-node-type="${NODE_CLASS_NAME}"] .outputs div.hidden {
+			display: none !important;
+			visibility: hidden !important;
+			height: 0 !important;
+			overflow: hidden !important;
+		}
+	`;
+	document.head.appendChild(style);
+}
+
+// 全局绘制钩子，确保每次绘制前更新输出可见性
+let globalDrawHookRegistered = false;
+
+function registerGlobalDrawHook() {
+	if (globalDrawHookRegistered) return;
+	globalDrawHookRegistered = true;
+
+	// 注入样式
+	injectOutputVisibilityStyles();
+
+	// 获取原始的 LiteGraph 节点绘制方法
+	const originalNodeDraw = LiteGraph?.Node?.prototype?.draw;
+	if (!originalNodeDraw) return;
+
+	LiteGraph.Node.prototype.draw = function(ctx) {
+		// 在绘制前更新输出可见性
+		if (this.type === NODE_CLASS_NAME) {
+			updateOutputVisibilityBeforeDraw(this);
+		}
+
+		// 调用原始绘制方法
+		return originalNodeDraw.call(this, ctx);
+	};
+}
+
+function updateOutputVisibilityBeforeDraw(node) {
+	if (!node || node.type !== NODE_CLASS_NAME) return;
+
+	const state = ensureState(node);
+	if (!node.outputs) return;
+
+	// 更新所有输出的可见性
+	node.outputs.forEach((output, index) => {
+		if (index === 0) {
+			output.visible = true;
+			return;
+		}
+
+		const isEnabled = !output.__gjj_key || state.enabledOutputs.includes(output.__gjj_key);
+		output.hidden = !isEnabled;
+		output.visible = isEnabled;
+		output.disabled = !isEnabled;
+		output.not_show = !isEnabled;
+		output.__gjj_hidden = !isEnabled;
+
+		// 使用 LiteGraph 的隐藏机制
+		if (typeof node.hideOutput === 'function') {
+			try { node.hideOutput(index, !isEnabled); } catch (_) {}
+		}
+	});
+
+	// 直接操作 DOM
+	updateOutputVisibilityDOM(node);
+}
+
+function updateOutputVisibilityDOM(node) {
+	if (!node.canvas || !node.canvas.parentNode) return;
+
+	const nodeElement = node.canvas.parentNode;
+	nodeElement.setAttribute('data-node-type', NODE_CLASS_NAME);
+
+	const outputsContainer = nodeElement.querySelector('.outputs');
+	if (!outputsContainer) return;
+
+	// 获取所有输出行
+	const rows = outputsContainer.querySelectorAll('tr, .slot-row, div.slot');
+	if (!rows || rows.length === 0) return;
+
+	const state = ensureState(node);
+
+	// 隐藏未启用的输出
+	let outputIndex = 0;
+	rows.forEach((row) => {
+		// 跳过第一个输出（始终显示）
+		if (outputIndex === 0) {
+			row.classList.remove('hidden');
+			outputIndex++;
+			return;
+		}
+
+		// 检查是否在输出范围内
+		if (outputIndex < node.outputs?.length) {
+			const output = node.outputs[outputIndex];
+			const isEnabled = !output.__gjj_key || state.enabledOutputs.includes(output.__gjj_key);
+
+			if (isEnabled) {
+				row.classList.remove('hidden');
+			} else {
+				row.classList.add('hidden');
+			}
+		}
+		outputIndex++;
+	});
+}
+
+function hideDisabledOutputs(node) {
+	if (!node) return;
+	const state = ensureState(node);
+
+	// 方法1：直接操作输出对象的 visible 属性
+	if (node.outputs) {
+		node.outputs.forEach((output, index) => {
+			if (index === 0) {
+				output.visible = true;
+				return;
+			}
+			const isEnabled = !output?.__gjj_key || state.enabledOutputs.includes(output.__gjj_key);
+			output.hidden = !isEnabled;
+			output.visible = isEnabled;
+			output.disabled = !isEnabled;
+			output.not_show = !isEnabled;
+			output.__gjj_hidden = !isEnabled;
+		});
+	}
+
+	// 方法2：使用节点的原生方法隐藏输出
+	if (typeof node.hideOutput === 'function') {
+		node.outputs?.forEach((output, index) => {
+			if (index === 0) return;
+			const isEnabled = !output?.__gjj_key || state.enabledOutputs.includes(output.__gjj_key);
+			try { node.hideOutput(index, !isEnabled); } catch (_) {}
+		});
+	}
+
+	// 方法3：强制刷新节点显示
+	node.size = node.size || [400, 600];
+	node.size[1] += 1;
+	node.setDirtyCanvas?.();
+	node.size[1] -= 1;
+	node.setDirtyCanvas?.();
+
+	// 方法4：使用 MutationObserver 监听并隐藏
+	setupOutputVisibilityObserver(node);
+}
+
+function setupOutputVisibilityObserver(node) {
+	// 如果已经有 observer，先移除
+	if (node.__gjjOutputObserver) {
+		node.__gjjOutputObserver.disconnect();
+	}
+
+	// 等待节点 DOM 创建
+	setTimeout(() => {
+		// 获取节点的 DOM 元素
+		let target = null;
+		if (node.canvas && node.canvas.parentNode) {
+			target = node.canvas.parentNode;
+		} else if (node.widgets) {
+			for (const widget of node.widgets) {
+				if (widget.element) {
+					target = widget.element.closest?.('.node');
+					if (target) break;
+				}
+			}
+		}
+
+		if (!target) return;
+
+		// 创建 observer
+		const observer = new MutationObserver(() => {
+			updateOutputVisibilityFromDOM(node);
+		});
+
+		// 监听子节点变化
+		observer.observe(target, {
+			childList: true,
+			subtree: true,
+			attributes: true
+		});
+
+		node.__gjjOutputObserver = observer;
+
+		// 立即执行一次
+		updateOutputVisibilityFromDOM(node);
+	}, 100);
+}
+
+function updateOutputVisibilityFromDOM(node) {
+	const state = ensureState(node);
+
+	// 获取节点的 DOM 元素
+	let nodeElement = null;
+	if (node.canvas && node.canvas.parentNode) {
+		nodeElement = node.canvas.parentNode;
+	} else if (node.widgets) {
+		for (const widget of node.widgets) {
+			if (widget.element) {
+				nodeElement = widget.element.closest?.('.node');
+				if (nodeElement) break;
+			}
 		}
 	}
-	globalThis.GJJApplyTypeColorsToNode?.(node);
+
+	if (!nodeElement) return;
+
+	// 查找输出区域
+	const outputsContainer = nodeElement.querySelector('.outputs');
+	if (!outputsContainer) return;
+
+	// 获取所有输出插槽元素
+	const slotElements = outputsContainer.querySelectorAll('[data-output-slot], .slot, .socket');
+	if (!slotElements || slotElements.length === 0) return;
+
+	// 隐藏未启用的输出
+	slotElements.forEach((element, index) => {
+		if (index === 0) {
+			element.style.display = '';
+			return;
+		}
+
+		if (index < node.outputs?.length) {
+			const output = node.outputs[index];
+			const isEnabled = !output?.__gjj_key || state.enabledOutputs.includes(output.__gjj_key);
+
+			if (isEnabled) {
+				element.style.display = '';
+				element.style.visibility = '';
+			} else {
+				element.style.display = 'none';
+				element.style.visibility = 'hidden';
+			}
+		}
+	});
+}
+
+function processOutputSockets(sockets, node, state) {
+	let index = 0;
+	sockets.forEach((socket) => {
+		if (index === 0) {
+			socket.style.display = "";
+			socket.style.visibility = "";
+			index++;
+			return;
+		}
+
+		if (index < node.outputs?.length) {
+			const output = node.outputs[index];
+			const isEnabled = !output?.__gjj_key || state.enabledOutputs.includes(output.__gjj_key);
+
+			if (isEnabled) {
+				socket.style.display = "";
+				socket.style.visibility = "";
+				socket.style.opacity = "";
+			} else {
+				socket.style.display = "none";
+				socket.style.visibility = "hidden";
+				socket.style.opacity = "0";
+			}
+		}
+		index++;
+	});
+}
+
+function injectOutputVisibilityLogic(node) {
+	// 如果已经注入过，跳过
+	if (node.__gjjVisibilityInjected) return;
+	node.__gjjVisibilityInjected = true;
+
+	// 保存原始方法
+	const originalDrawBackground = node.drawBackground?.bind(node);
+	const originalDraw = node.draw?.bind(node);
+
+	// 修改 drawBackground 方法
+	node.drawBackground = function(ctx) {
+		// 先调用原始方法
+		if (originalDrawBackground) {
+			originalDrawBackground(ctx);
+		}
+
+		// 在绘制后立即更新输出可见性
+		updateOutputVisibilityAfterDraw(this);
+	};
+
+	// 修改 draw 方法
+	node.draw = function(ctx) {
+		// 先调用原始方法
+		if (originalDraw) {
+			originalDraw(ctx);
+		}
+
+		// 在绘制后立即更新输出可见性
+		updateOutputVisibilityAfterDraw(this);
+	};
+}
+
+function updateOutputVisibilityAfterDraw(node) {
+	const state = ensureState(node);
+
+	// 检查节点是否有 DOM 元素
+	if (!node.canvas || !node.canvas.parentNode) return;
+
+	const nodeElement = node.canvas.parentNode;
+	const outputsContainer = nodeElement.querySelector('.outputs');
+	if (!outputsContainer) return;
+
+	// 获取所有输出行
+	const rows = outputsContainer.querySelectorAll('tr, .slot-row, div');
+	if (!rows || rows.length === 0) return;
+
+	// 隐藏未启用的输出
+	let outputIndex = 0;
+	rows.forEach((row) => {
+		// 跳过第一个输出（始终显示）
+		if (outputIndex === 0) {
+			outputIndex++;
+			return;
+		}
+
+		// 检查是否在输出范围内
+		if (outputIndex < node.outputs?.length) {
+			const output = node.outputs[outputIndex];
+			const isEnabled = !output?.__gjj_key || state.enabledOutputs.includes(output.__gjj_key);
+
+			if (isEnabled) {
+				row.style.display = '';
+				row.style.visibility = '';
+			} else {
+				row.style.display = 'none';
+				row.style.visibility = 'hidden';
+			}
+		}
+		outputIndex++;
+	});
 }
 
 function stabilizeNode(node) {
 	if (!node) return;
+
+	// 输出口现在采用真正删除/重建，不再注入绘制隐藏逻辑。
 	forceHideNativeParamWidgets(node);
 	ensureDomWidget(node);
 	forceHideNativeParamWidgets(node);
 	moveDomWidgetToTop(node);
 	ensureOptionalInput(node);
+	initParamDefaults(node);
 	syncProperties(node);
 	applyDynamicOutputs(node);
 	renderAll(node);
@@ -1266,3 +1911,4 @@ app.registerExtension({
 		}
 	},
 });
+

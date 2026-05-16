@@ -471,9 +471,21 @@ def decode_video_cv2(
     source_height = int(meta.get("height") or 0)
     total = int(meta.get("frames") or 0)
     duration = float(meta.get("duration") or 0.0)
-    
-    stop = int(end_frame) if int(end_frame) > 0 else (total - 1 if total > 0 else 10**12)
-    stop = max(start, stop)
+
+    stop = int(end_frame) if int(end_frame) > 0 else (total - 1 if total > 0 else 0)
+    if stop < start:
+        stop = start
+
+    total_frames_to_decode = stop - start + 1
+    if total_frames_to_decode <= 0:
+        raise RuntimeError(f"无效的帧范围：start={start}, stop={stop}, total={total}")
+
+    if stride > total_frames_to_decode:
+        raise RuntimeError(f"抽帧间隔({stride})过大，超过了帧范围({total_frames_to_decode})，无法提取任何帧")
+
+    frames_to_output = min((total_frames_to_decode + stride - 1) // stride, limit)
+    if frames_to_output <= 0:
+        frames_to_output = 1
 
     cmd = [
         ffmpeg,
@@ -481,7 +493,7 @@ def decode_video_cv2(
         "-loglevel", "error",
         "-ss", str(start / fps),
         "-i", str(path),
-        "-frames:v", str((stop - start + 1) // stride + 1),
+        "-frames:v", str(frames_to_output),
         "-vf", f"select=not(mod(n\,{stride}))",
         "-vsync", "vfr",
         "-f", "image2pipe",
@@ -496,15 +508,14 @@ def decode_video_cv2(
             capture_output=True,
             timeout=120,
         )
-        
+
         if proc.returncode != 0:
-            if proc.stderr:
-                raise RuntimeError(f"FFmpeg 解码失败: {proc.stderr.decode('utf-8', errors='ignore')}")
-            raise RuntimeError(f"FFmpeg 解码失败，返回码: {proc.returncode}")
+            stderr_msg = proc.stderr.decode('utf-8', errors='ignore') if proc.stderr else ""
+            raise RuntimeError(f"FFmpeg 解码失败: {stderr_msg}\n命令: {' '.join(cmd)}")
 
         raw_data = proc.stdout
         if not raw_data:
-            raise RuntimeError(f"FFmpeg 未输出任何数据")
+            raise RuntimeError(f"FFmpeg 未输出任何数据\n命令: {' '.join(cmd)}\nstart={start}, stop={stop}, stride={stride}, frames_to_output={frames_to_output}")
 
         if source_width <= 0 or source_height <= 0:
             raise RuntimeError(f"无法确定视频原始尺寸")
@@ -571,11 +582,44 @@ class GJJ_MultiVideoLoader:
     OUTPUT_NODE = False
     DESCRIPTION = "一次选择多个 input 目录视频，按帧范围、帧率、宽高和格式参数解码为 GJJ 批量图片帧队列。"
     SEARCH_ALIASES = ["multi video loader", "video loader", "批量视频", "视频加载", "视频解码", "视频帧", "视频预览", "批量视频加载预览器"]
-    # 后端只声明第一个固定输出；其它输出由前端按钮动态扩充。
-    # 执行时会根据 workflow properties[enabled_outputs] 返回同顺序的附加值。
-    RETURN_TYPES = (GJJ_BATCH_IMAGE_TYPE,)
-    RETURN_NAMES = ("视频帧队列",)
-    OUTPUT_TOOLTIPS = ("按选择顺序解码后拼接的帧序列，类型为 GJJ_BATCH_IMAGE。",)
+    # 声明所有可能的输出，按 OPTIONAL_OUTPUT_KEYS 顺序排列
+    # 执行时根据 enabled_outputs 控制实际返回哪些值（未启用的输出返回 None）
+    RETURN_TYPES = (
+        GJJ_BATCH_IMAGE_TYPE,  # 视频帧队列
+        "IMAGE",               # 首帧预览
+        "IMAGE",               # 尾帧预览
+        "STRING",              # 视频信息JSON
+        "FLOAT",               # 帧率
+        "INT",                 # 输出帧数
+        "FLOAT",               # 源时长
+        "INT",                 # 宽度
+        "INT",                 # 高度
+        "STRING",              # 视频格式
+    )
+    RETURN_NAMES = (
+        "视频帧队列",
+        "首帧预览",
+        "尾帧预览",
+        "视频信息JSON",
+        "帧率",
+        "输出帧数",
+        "源时长",
+        "宽度",
+        "高度",
+        "视频格式",
+    )
+    OUTPUT_TOOLTIPS = (
+        "按选择顺序解码后拼接的帧序列，类型为 GJJ_BATCH_IMAGE。",
+        "首帧预览图片。",
+        "尾帧预览图片。",
+        "视频信息JSON字符串。",
+        "输出帧率。",
+        "输出总帧数。",
+        "源视频总时长（秒）。",
+        "输出宽度。",
+        "输出高度。",
+        "视频格式参数。",
+    )
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -668,7 +712,7 @@ class GJJ_MultiVideoLoader:
                 ),
             },
             "optional": {
-                "视频帧队列": ("GJJ_BATCH_IMAGE,IMAGE,VIDEO", {"tooltip": "非必选：可直接输入上游帧队列。接入后优先使用输入帧，未接入时读取下拉选择的视频。"}),
+                "input_frames": ("GJJ_BATCH_IMAGE,IMAGE,VIDEO", {"display_name": "视频帧队列", "tooltip": "非必选：可直接输入上游帧队列。接入后优先使用输入帧，未接入时读取下拉选择的视频。"}),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -714,21 +758,20 @@ class GJJ_MultiVideoLoader:
 
     def load_videos(
         self,
-        frame_rate,
-        width,
-        height,
-        video_format,
-        start_frame,
-        end_frame,
-        frame_stride,
-        max_frames,
-        视频帧队列=None,
-        selected_videos="[]",
+        frame_rate=None,
+        width=None,
+        height=None,
+        video_format=None,
+        start_frame=None,
+        end_frame=None,
+        frame_stride=None,
+        max_frames=None,
+        input_frames=None,
         prompt=None,
         extra_pnginfo=None,
         unique_id=None,
     ):
-        selected = recover_selected_videos(selected_videos, extra_pnginfo, unique_id)
+        selected = recover_selected_videos(None, extra_pnginfo, unique_id)
         enabled_outputs = recover_enabled_outputs(None, extra_pnginfo, unique_id)
 
         def _safe_int(value, default=0, min_val=0, max_val=999999):
@@ -753,7 +796,7 @@ class GJJ_MultiVideoLoader:
         frame_stride_val = _safe_int(frame_stride, 1, 1, 1000)
         max_frames_val = _safe_int(max_frames, 240, 1, 100000)
 
-        external_frames = self._coerce_external_frames(视频帧队列)
+        external_frames = self._coerce_external_frames(input_frames)
         if external_frames is not None:
             batch_output = _resize_image_tensor(external_frames, target_width, target_height)
             source_fps = output_fps
@@ -786,13 +829,13 @@ class GJJ_MultiVideoLoader:
             for index, entry in enumerate(selected):
                 path = resolve_input_video_path(entry)
                 frames, meta = decode_video_cv2(
-                    path,
-                    start_frame_val,
-                    end_frame_val,
-                    frame_stride_val,
-                    max_frames_val,
-                    target_width,
-                    target_height,
+                    path=path,
+                    start_frame=start_frame_val,
+                    end_frame=end_frame_val,
+                    frame_stride=frame_stride_val,
+                    max_frames=max_frames_val,
+                    width=target_width,
+                    height=target_height,
                 )
                 if index == 0:
                     source_fps = float(meta.get("fps") or 24.0)
@@ -863,10 +906,14 @@ class GJJ_MultiVideoLoader:
             "height": int(final_height),
             "video_format": output_format,
         }
-        dynamic_result = [batch_output]
-        for key in enabled_outputs:
-            if key in optional_values:
-                dynamic_result.append(optional_values[key])
+        
+        # 返回真正显示的动态输出，顺序必须与 JS 里的 OUTPUT_DEFS 过滤顺序一致。
+        # 这样前端删除未启用输出口后，连接索引不会错位。
+        enabled_set = set(enabled_outputs or [])
+        result = [batch_output]
+        for key in OPTIONAL_OUTPUT_KEYS:
+            if key in enabled_set and key in optional_values:
+                result.append(optional_values[key])
 
         return {
             "ui": {
@@ -879,7 +926,7 @@ class GJJ_MultiVideoLoader:
                 "height": [int(final_height)],
                 "video_format": [output_format],
             },
-            "result": tuple(dynamic_result),
+            "result": tuple(result),
         }
 
 
