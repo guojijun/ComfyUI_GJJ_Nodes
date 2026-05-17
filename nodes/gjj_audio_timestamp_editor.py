@@ -14,70 +14,153 @@ import folder_paths
 import numpy as np
 import torch
 
+# 步骤1: 导入公共依赖检查函数
+try:
+	from .common_utils.dependency_checker import (
+		load_dependency_at_runtime,
+		get_pip_install_command_text,
+	)
+except ImportError:
+	from common_utils.dependency_checker import (
+		load_dependency_at_runtime,
+		get_pip_install_command_text,
+	)
 
-# 延迟导入：运行时依赖检查
-_soundfile = None
-
-def _load_soundfile():
-	"""运行时加载 soundfile，失败时提供友好提示"""
-	global _soundfile
-	if _soundfile is not None:
-		return _soundfile
-
-	try:
-		import soundfile as sf
-		_soundfile = sf
-		return sf
-	except Exception as exc:
-		import sys
-		python_executable = sys.executable
-
-		# ANSI 颜色代码（用于控制台彩色输出）
-		RED = '\033[91m'
-		YELLOW = '\033[93m'
-		CYAN = '\033[96m'
-		GREEN = '\033[92m'
-		RESET = '\033[0m'
-		BOLD = '\033[1m'
-
-		# 构建安装命令
-		from .common_utils.dependency_checker import get_pip_install_command_text
-		install_cmd = get_pip_install_command_text("soundfile numpy")
-
-		# 在控制台打印美观的错误提示
-		print(f"\n{RED}{'=' * 80}{RESET}")
-		print(f"{RED}{BOLD}  GJJ 节点运行时依赖缺失！{RESET}")
-		print(f"{RED}{'=' * 80}{RESET}")
-		print(f"{YELLOW}[GJJ] {BOLD}节点:{RESET} {CYAN}音频分段编辑器{RESET}")
-		print(f"{YELLOW}[GJJ] {BOLD}缺失依赖:{RESET} {RED}{BOLD}soundfile{RESET}")
-		print(f"{YELLOW}[GJJ]{RESET} 该节点需要 soundfile 和 numpy Python 包才能运行。\n")
-		print(f"{YELLOW}{BOLD} 快速安装命令:{RESET}")
-		print(f"{GREEN}{BOLD}  {install_cmd}{RESET}\n")
-		print(f"{YELLOW}{BOLD} 提示:{RESET} 安装后请重启 ComfyUI 服务器")
-		print(f"{RED}{'=' * 80}{RESET}\n")
-
-		raise RuntimeError(
-			"\n 未找到 soundfile 运行库。\n"
-			"\n"
-			"这个 GJJ 节点需要 soundfile 和 numpy Python 包才能运行。\n"
-			"\n"
-			" 必需依赖（请安装）：\n"
-			"  • soundfile (音频/视频文件读写库)\n"
-			"  • numpy (数值计算库)\n"
-			"\n"
-			"🔧 快速安装命令（使用实际 Python 路径）：\n"
-			f"{install_cmd}\n"
-			"\n"
-			f"原始导入错误：{exc}\n"
-			"\n"
-			" 提示：安装后请重启 ComfyUI 服务器。"
-		) from exc
+# 步骤2: 依赖可用性检查
+try:
+	import soundfile as sf
+	_DEPENDENCIES_AVAILABLE = True
+	_IMPORT_ERROR = None
+except ImportError as exc:
+	_DEPENDENCIES_AVAILABLE = False
+	_IMPORT_ERROR = str(exc)
 
 
 NODE_NAME = "GJJ_AudioTimestampEditor"
-BACKEND_VERSION = "V16"
+BACKEND_VERSION = "V20_CACHE_DEBOUNCE_NO_UPSTREAM_LOOP"
 MAX_SEGMENTS = 99  # 最大分段数量
 MIN_OUTPUTS = 1  # 最小输出数量
+
+
+# V19：后端缓存。避免前端为了刷新波形/下游预览而重复请求上游时，
+# 本节点反复保存预览、裁剪音频或在二次请求缺少外部 AUDIO 时直接报错。
+_RESULT_CACHE: dict[str, dict[str, Any]] = {}
+_LAST_SUCCESS_BY_NODE: dict[str, dict[str, Any]] = {}
+_MAX_RESULT_CACHE = 12
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+	try:
+		return float(value)
+	except Exception:
+		return default
+
+
+def _audio_fingerprint(audio: Any) -> str:
+	"""生成轻量音频指纹。只抽样少量数据，避免为了判重整段 hash 大音频。"""
+	if not is_audio_object(audio):
+		return "no-audio"
+	try:
+		waveform = audio.get("waveform")
+		sample_rate = int(audio.get("sample_rate", 0) or 0)
+		if isinstance(waveform, torch.Tensor):
+			w = waveform.detach()
+			shape = tuple(int(x) for x in w.shape)
+			numel = int(w.numel())
+			if numel <= 0:
+				return f"tensor|sr={sample_rate}|shape={shape}|empty"
+			flat = w.reshape(-1)
+			# 均匀抽样 64 个点；用于判断是否换了音频，不追求密码学 hash。
+			count = min(64, numel)
+			idx = torch.linspace(0, numel - 1, steps=count, device=flat.device).long()
+			samples = flat.index_select(0, idx).float().cpu()
+			sum_v = float(samples.sum().item())
+			abs_v = float(samples.abs().sum().item())
+			mean_v = float(samples.mean().item())
+			return f"tensor|sr={sample_rate}|shape={shape}|sum={sum_v:.8f}|abs={abs_v:.8f}|mean={mean_v:.8f}"
+		return f"array|sr={sample_rate}|shape={getattr(waveform, 'shape', None)}|id={id(waveform)}"
+	except Exception as exc:
+		return f"audio-fingerprint-error:{type(exc).__name__}:{id(audio)}"
+
+
+def _find_media_path(filename: str) -> str | None:
+	if not filename or filename == "[不加载]":
+		return None
+	for search_dir in (folder_paths.get_input_directory(), folder_paths.get_output_directory()):
+		if not search_dir:
+			continue
+		path = os.path.join(search_dir, filename)
+		if os.path.exists(path):
+			return path
+	return None
+
+
+def _file_fingerprint(filename: str) -> str:
+	path = _find_media_path(filename)
+	if not path:
+		return f"file-missing:{filename}"
+	try:
+		st = os.stat(path)
+		return f"file|{os.path.abspath(path)}|size={st.st_size}|mtime={st.st_mtime_ns}"
+	except Exception:
+		return f"file|{path}|stat-error"
+
+
+def _segments_cache_text(segments: list[dict[str, Any]]) -> str:
+	try:
+		return json.dumps(segments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+	except Exception:
+		return str(segments)
+
+
+def _remember_result(cache_key: str, node_key: str, payload: dict[str, Any]) -> None:
+	_RESULT_CACHE[cache_key] = payload
+	_LAST_SUCCESS_BY_NODE[node_key] = payload
+	while len(_RESULT_CACHE) > _MAX_RESULT_CACHE:
+		try:
+			_RESULT_CACHE.pop(next(iter(_RESULT_CACHE)))
+		except Exception:
+			break
+
+
+def _clone_payload(payload: dict[str, Any], status_suffix: str = "") -> dict[str, Any]:
+	"""返回缓存结果。Tensor 不深拷贝，避免额外内存；UI 字典浅拷贝并补充状态。"""
+	ui = dict(payload.get("ui") or {})
+	if status_suffix:
+		old = ""
+		try:
+			old = str((ui.get("preview_text") or ("",))[0])
+		except Exception:
+			old = ""
+		ui["preview_text"] = (f"{old}\n{status_suffix}" if old else status_suffix,)
+	return {"ui": ui, "result": payload.get("result")}
+
+# 步骤3: 配置动态 DESCRIPTION
+DESCRIPTION = """
+🟢 音频分段编辑器：加载音频后自动生成分段，可视化编辑起止时间，按时间段裁剪并输出多个音频片段。
+
+【核心功能】
+• 节点内加载音频 - 支持从下拉列表选择音频/视频文件
+• 自动生成分段 - 根据音频时长自动创建等分时间段
+• 可视化编辑 - Canvas波形显示，拖拽调整起止时间标记
+• 动态输出 - 根据分段数量自动扩展输出接口
+• 批量裁剪 - 一次性输出所有分段的音频片段
+
+📦 运行时依赖：
+  • soundfile（音频文件读写库）
+  • numpy（数值计算库）
+""" if _DEPENDENCIES_AVAILABLE else f"""
+❌ 节点 GJJ · ✂️ 音频分段编辑器 缺少必需的 Python 依赖
+
+📦 必需依赖（请安装）：
+  • soundfile（音频文件读写库）
+  • numpy（数值计算库）
+
+🔧 安装命令：
+{get_pip_install_command_text("soundfile numpy")}
+
+💡 提示：安装后请重启 ComfyUI 服务器。
+"""
 
 
 def is_audio_object(value: Any) -> bool:
@@ -154,12 +237,24 @@ def audio_to_waveform_data(audio: dict[str, Any]) -> tuple[np.ndarray, int]:
 	return audio_np, sample_rate
 
 
-def save_audio_for_preview(audio_np: np.ndarray, sample_rate: int, prompt: Any = None) -> tuple[str, str]:
-	"""保存音频到临时文件用于预览"""
-	sf = _load_soundfile()
+def save_audio_for_preview(audio_np: np.ndarray, sample_rate: int, prompt: Any = None, unique_id: Any = None) -> tuple[str, str]:
+	"""保存音频到临时文件用于预览。
+
+	注意：文件名必须每次执行都变化。
+	上游 AUDIO 对象更新时，工作流 prompt 结构通常不变；如果继续使用 hash(prompt) 作为文件名，
+	浏览器 /view 会命中旧缓存，前端拿到的还是旧音频，表现为“上游传入了音频但波形不刷新”。
+	"""
+	import time
+
+	sf = load_dependency_at_runtime(
+		"soundfile",
+		"GJJ · ✂️ 音频分段编辑器",
+		description="音频文件读写库"
+	)
 
 	output_dir = folder_paths.get_temp_directory()
-	filename = f"GJJ_AudioSegmentEditor_{hash(str(prompt))}.wav"
+	node_part = str(unique_id if unique_id is not None else hash(str(prompt)))
+	filename = f"GJJ_AudioSegmentEditor_{node_part}_{time.time_ns()}.wav"
 	filepath = os.path.join(output_dir, filename)
 
 	os.makedirs(output_dir, exist_ok=True)
@@ -243,31 +338,7 @@ class GJJ_AudioSegmentEditor:
 	CATEGORY = "GJJ/音频"
 	FUNCTION = "edit_segments"
 	OUTPUT_NODE = True
-	DESCRIPTION = """音频分段编辑器：加载音频后自动生成分段，可视化编辑起止时间，按时间段裁剪并输出多个音频片段。
-
-【核心功能】
-• 节点内加载音频 - 支持从下拉列表选择音频/视频文件
-• 自动生成分段 - 根据音频时长自动创建等分时间段
-• 可视化编辑 - Canvas波形显示，拖拽调整起止时间标记
-• 动态输出 - 根据分段数量自动扩展输出接口
-• 批量裁剪 - 一次性输出所有分段的音频片段
-
-【时间戳格式】
-支持 start（开始时间）和 end（结束时间）：
-[
-  {"start": 0.0, "end": 2.5, "label": "片段 1"},
-  {"start": 2.5, "end": 5.0, "label": "片段 2"}
-]
-
-【交互操作】
-• 左键拖拽蓝色标记 - 调整开始时间
-• 左键拖拽红色标记 - 调整结束时间
-• 滚轮缩放 - 查看波形细节
-• 右键菜单 - 添加/删除/自动生成分段
-
-【输出说明】
-• 音频片段1...N - 按时间段裁剪的音频
-• 分段列表JSON - 编辑后的时间段配置"""
+	DESCRIPTION = DESCRIPTION  # 引用模块级别的动态 DESCRIPTION
 
 	# 依赖声明
 	REQUIRED_PACKAGES = [
@@ -282,6 +353,13 @@ class GJJ_AudioSegmentEditor:
 		"version": "2.1.0",
 		"author": "GJJ Custom Nodes Team",
 		"description": "可视化音频分段裁剪工具，支持动态输出多个音频片段",
+
+		"models": [],
+
+		"dependencies": [
+			"soundfile（音频文件读写库）",
+			"numpy（数值计算库）",
+		],
 
 		"features": [
 			{
@@ -479,13 +557,17 @@ class GJJ_AudioSegmentEditor:
 		return files
 
 	@classmethod
-	def IS_CHANGED(cls, audio_file="[不加载]", audio=None, segments_json: str = "[]", segment_duration: float = 3.0, **kwargs):
-		# V15：这个节点的分段信息主要由前端 Canvas 写入隐藏 widget / workflow properties。
-		# 不同 ComfyUI 版本对隐藏 widget、properties、widgets_values 的缓存策略不一致，
-		# 只返回 segments_json 可能会复用旧结果，导致界面高亮已变但输出仍是 0:00 或旧片段。
-		# 因此作为 OUTPUT_NODE，每次队列执行都强制重新计算一次，保证输出音频一定来自当前高亮分段。
-		import time
-		return f"{audio_file}|{segments_json}|{float(segment_duration or 0):.6f}|v12|{time.time_ns()}"
+	def IS_CHANGED(cls, audio_file="[不加载]", audio=None, segments_json: str = "[]", segment_duration: float = 3.0, extra_pnginfo=None, unique_id=None, **kwargs):
+		# V19：稳定缓存 key。不要再 time_ns 强制重跑；否则前端刷新波形/下游预览时会不断请求上游。
+		property_segments = _segments_from_workflow_properties(extra_pnginfo, unique_id)
+		seg_text = _segments_cache_text(property_segments) if property_segments else str(segments_json or "[]")
+		if is_audio_object(audio):
+			source_sig = _audio_fingerprint(audio)
+		elif audio_file and audio_file != "[不加载]":
+			source_sig = _file_fingerprint(audio_file)
+		else:
+			source_sig = "no-input"
+		return f"{BACKEND_VERSION}|src={source_sig}|segments={seg_text}|dur={_safe_float(segment_duration):.6f}"
 
 	def __init__(self):
 		self.preview_audio_path = None
@@ -501,13 +583,20 @@ class GJJ_AudioSegmentEditor:
 		unique_id=None,
 	):
 		try:
+			node_key = str(unique_id if unique_id is not None else id(self))
 			# 1. 加载音频（优先使用外部连接，其次使用内部加载）
 			if audio is not None and is_audio_object(audio):
 				current_audio = audio
+				source_sig = _audio_fingerprint(audio)
 			elif audio_file != "[不加载]":
 				# 从文件加载音频
 				current_audio = self._load_audio_from_file(audio_file)
+				source_sig = _file_fingerprint(audio_file)
 			else:
+				last = _LAST_SUCCESS_BY_NODE.get(node_key)
+				if last is not None:
+					print(f"[GJJ] 音频分段编辑器 {BACKEND_VERSION} - 二次请求未携带输入，复用本节点上次成功输出")
+					return _clone_payload(last, "♻️ 二次请求未携带输入，已复用上次成功输出")
 				raise RuntimeError("请连接外部音频或在节点内选择音频/视频文件")
 
 			# 2. 转换音频数据
@@ -538,9 +627,17 @@ class GJJ_AudioSegmentEditor:
 						pass
 				segments = normalized_segments or generate_auto_segments(duration, 1, segment_duration)
 
+			segments_sig = _segments_cache_text(segments)
+			cache_key = f"{BACKEND_VERSION}|{source_sig}|segments={segments_sig}|segment_duration={_safe_float(segment_duration):.6f}"
+			cached = _RESULT_CACHE.get(cache_key)
+			if cached is not None:
+				_LAST_SUCCESS_BY_NODE[node_key] = cached
+				print(f"[GJJ] 音频分段编辑器 {BACKEND_VERSION} - 缓存命中，跳过预览保存和音频裁剪")
+				return _clone_payload(cached, "♻️ 缓存命中：音频和分段未变化，跳过重复计算")
+
 			# 4. 保存音频用于预览
 			try:
-				filepath, filename = save_audio_for_preview(audio_np, sample_rate, prompt)
+				filepath, filename = save_audio_for_preview(audio_np, sample_rate, prompt, unique_id)
 				self.preview_audio_path = filepath
 			except Exception as e:
 				print(f"[GJJ] 音频分段编辑器 - 保存预览文件失败: {e}")
@@ -620,13 +717,13 @@ class GJJ_AudioSegmentEditor:
 			)
 			print(f"[GJJ] 音频分段编辑器 {BACKEND_VERSION} - 输出: {len(audio_segments)}个音频片段 + 1个JSON；分段={debug_ranges}；slot0时长={ui['preview_output_duration'][0]}s")
 
-			return {
+			payload = {
 				"ui": ui,
 				"result": tuple(result_list),
 			}
+			_remember_result(cache_key, node_key, payload)
+			return payload
 		except Exception as exc:
-			_send_status(unique_id, f"执行失败：{exc}", 1.0)
-
 			# 如果原始错误包含详细安装命令（来自 _load_soundfile），则保留它
 			if isinstance(exc, RuntimeError) and "未找到 soundfile 运行库" in str(exc):
 				# 提取安装命令
@@ -664,7 +761,11 @@ class GJJ_AudioSegmentEditor:
 		import subprocess
 		import tempfile
 
-		sf = _load_soundfile()
+		sf = load_dependency_at_runtime(
+			"soundfile",
+			"GJJ · ✂️ 音频分段编辑器",
+			description="音频文件读写库"
+		)
 
 		# 在多个目录中查找文件
 		search_dirs = [

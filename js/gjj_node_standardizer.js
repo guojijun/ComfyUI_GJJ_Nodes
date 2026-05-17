@@ -673,10 +673,39 @@ function showHelpDialog(node) {
 	const body = document.createElement("div");
 	body.className = "gjj-help-body";
 	body.appendChild(createHelpSection("功能", escapeText(meta.description, "这个节点暂未提供功能说明。")));
-	body.appendChild(createHelpSection("用到的模型", createHelpList(
-		currentModelEntries(node, meta),
-		"未从当前节点面板识别到模型选择项或模型输入口。"
-	)));
+	
+	// 创建模型下载链接
+	const downloadLink = document.createElement("p");
+	downloadLink.style.marginBottom = "10px";
+	
+	const linkText = document.createTextNode("🌏模型下载：");
+	const linkElement = document.createElement("a");
+	linkElement.href = "https://pan.quark.cn/s/6ec846f1f58d";
+	linkElement.textContent = "https://pan.quark.cn/s/6ec846f1f58d";
+	linkElement.target = "_blank";
+	linkElement.rel = "noopener noreferrer";
+	linkElement.style.color = "#98d6d1";
+	linkElement.style.textDecoration = "underline";
+	
+	downloadLink.appendChild(linkText);
+	downloadLink.appendChild(linkElement);
+	
+	// 创建用到的模型内容
+	const modelEntries = currentModelEntries(node, meta);
+	let modelContent;
+	if (Array.isArray(modelEntries) && modelEntries.length > 0) {
+		modelContent = createHelpList(modelEntries, "未从当前节点面板识别到模型选择项或模型输入口。");
+	} else {
+		const empty = document.createElement("p");
+		empty.className = "gjj-help-empty";
+		empty.textContent = "未从当前节点面板识别到模型选择项或模型输入口。";
+		modelContent = empty;
+	}
+	
+	// 将下载链接添加到模型内容的开头
+	modelContent.insertBefore(downloadLink, modelContent.firstChild);
+	
+	body.appendChild(createHelpSection("用到的模型", modelContent));
 	body.appendChild(createHelpSection("依赖", createHelpList(
 		dependencyEntries(meta),
 		"未声明额外依赖；按 GJJ 与 ComfyUI 基础环境运行。"

@@ -137,7 +137,8 @@ function audioDataToUrl(previewAudio) {
 	if (!previewAudio || !Array.isArray(previewAudio) || previewAudio.length === 0) return null;
 	const data = previewAudio[0];
 	if (!data?.filename) return null;
-	return `/view?filename=${encodeURIComponent(data.filename)}&type=${data.type || "temp"}&subfolder=${data.subfolder || ""}`;
+	// 加 _t：即使后端复用了同名临时文件，也强制浏览器重新读取，避免上游音频变化后波形仍显示旧缓存。
+	return `/view?filename=${encodeURIComponent(data.filename)}&type=${data.type || "temp"}&subfolder=${encodeURIComponent(data.subfolder || "")}&_t=${Date.now()}`;
 }
 
 function getWidgetValue(node, name, fallback = null) {
@@ -168,6 +169,55 @@ function syncNodeWidgetValues(node) {
 	} catch (_) {}
 }
 
+
+function getInputLinkSignature(node) {
+	try {
+		const idx = getAudioInputIndex(node);
+		const input = idx >= 0 ? node.inputs?.[idx] : null;
+		const linkId = input?.link;
+		if (linkId == null) return "no-link";
+		const link = node.graph?.links?.[linkId] || app.graph?.links?.[linkId];
+		return `link=${linkId}|origin=${link?.origin_id ?? "?"}|slot=${link?.origin_slot ?? "?"}`;
+	} catch (_) {
+		return "link-error";
+	}
+}
+
+function getRefreshSignature(node, reason = "") {
+	try {
+		const audioFile = getWidgetValue(node, "audio_file", "[不加载]");
+		const segments = node?.properties?.segments || getWidgetValue(node, "segments_json", "[]");
+		const duration = node?.properties?.segment_duration || getWidgetValue(node, "segment_duration", DEFAULT_SEGMENT_DURATION);
+		return [getInputLinkSignature(node), audioFile, String(segments || "[]"), String(duration || ""), String(reason || "")].join("||");
+	} catch (_) {
+		return `${Date.now()}`;
+	}
+}
+
+function markRefreshScheduled(node, signature, cooldownMs = 650) {
+	if (!node) return false;
+	const now = performance.now();
+	// 同一个刷新签名在短时间内只允许排队一次，避免 onExecuted / onConnectionsChange / 文件回调互相触发。
+	if (node.__gjjAudioRefreshInFlight) {
+		node.__gjjAudioRefreshPendingSignature = signature;
+		return false;
+	}
+	if (node.__gjjLastRefreshSignature === signature && now - (node.__gjjLastRefreshAt || 0) < cooldownMs) {
+		return false;
+	}
+	node.__gjjLastRefreshSignature = signature;
+	node.__gjjLastRefreshAt = now;
+	return true;
+}
+
+function clearRefreshInFlight(node) {
+	if (!node) return;
+	node.__gjjAudioRefreshInFlight = false;
+	node.__gjjAudioRefreshFinishedAt = performance.now();
+	// pending 只记录，不立即二次 queue；下一次真实变化再触发，防止“执行完成 → 刷新 → 执行完成”循环。
+	node.__gjjAudioRefreshPendingSignature = null;
+}
+
 function pickColor(existingColors) {
 	for (const c of SEGMENT_COLORS) if (!existingColors.has(c)) return c;
 	const hue = (existingColors.size * 137.508) % 360;
@@ -179,16 +229,43 @@ function isExecutionOutputNode(node) {
 	return node.comfyClass === NODE_NAME || node.constructor?.nodeData?.output_node === true || node.nodeData?.output_node === true || node.flags?.output === true;
 }
 
+function collectUpstreamNodeIds(node) {
+	// 当前节点单独刷新时，不能把它的上游输出节点临时禁用。
+	// 否则 ComfyUI 会只执行本节点，但 optional audio 拿不到上游结果，后端就收到 audio=None。
+	const graph = node?.graph || app.graph;
+	const keep = new Set();
+	const visit = (n) => {
+		if (!n?.inputs || keep.has(String(n.id))) return;
+		for (const input of n.inputs) {
+			const linkId = input?.link;
+			if (linkId == null) continue;
+			const link = graph?.links?.[linkId] || app.graph?.links?.[linkId];
+			if (!link || link.origin_id == null) continue;
+			const originId = String(link.origin_id);
+			keep.add(originId);
+			const originNode = graph?.getNodeById?.(link.origin_id) || (graph?._nodes || []).find(x => String(x?.id) === originId);
+			if (originNode) visit(originNode);
+		}
+	};
+	visit(node);
+	return keep;
+}
+
 async function queueOnlyCurrentNode(node) {
 	if (!node || !node.graph) return false;
+	if (node.__gjjAudioRefreshInFlight) return false;
+	node.__gjjAudioRefreshInFlight = true;
 	const graph = node.graph || app.graph;
 	const allNodes = graph?._nodes || app.graph?._nodes || [];
+	const upstreamNodeIds = collectUpstreamNodeIds(node);
 	const savedModes = [];
 	const oldSelectedNodes = app.canvas?.selected_nodes;
 	const oldSelectedNode = app.canvas?.selected_node;
 	try {
 		for (const n of allNodes) {
 			if (!n || n === node) continue;
+			// 只禁用“无关的”输出节点；上游链路必须保留，否则外部音频输入会变成 None。
+			if (upstreamNodeIds.has(String(n.id))) continue;
 			if (isExecutionOutputNode(n)) {
 				savedModes.push([n, n.mode]);
 				n.mode = 2;
@@ -212,6 +289,7 @@ async function queueOnlyCurrentNode(node) {
 			app.canvas.selected_nodes = oldSelectedNodes;
 			app.canvas.selected_node = oldSelectedNode;
 		}
+		clearRefreshInFlight(node);
 		refreshNodeCanvas(node);
 	}
 }
@@ -334,7 +412,7 @@ class AudioSegmentEditorWidget {
 		this.playTimeLabel.title = "当前播放时间 / 当前分段结束时间";
 		this.playTimeLabel.style.cssText = "color:#aaa; font-size:10px; min-width:54px; white-space:nowrap;";
 
-		toolbar.append(this.addBtn, this.distributeBtn, this.deleteBtn, this.playBtn, this.folderBtn, this.listBtn, this.outputBtn, this.loopBtn, this.playTimeLabel, durationWrap);
+		toolbar.append(this.folderBtn, this.addBtn, this.distributeBtn, this.deleteBtn, this.playBtn, this.listBtn, this.outputBtn, this.loopBtn, this.playTimeLabel, durationWrap);
 		this.container.appendChild(toolbar);
 
 		this.audioPlayer = document.createElement("audio");
@@ -373,8 +451,16 @@ class AudioSegmentEditorWidget {
 			background:#172129; border:1px solid #2d4653; color:#9fd3ff;
 			white-space:pre-wrap; font-size:11px; line-height:1.35;
 		`;
-		this.copyBtn = this.makeEmojiButton("📋", "复制状态/安装命令");
-		this.copyBtn.style.display = "none";
+		this.copyBtn = document.createElement("button");
+		this.copyBtn.textContent = "📋 复制安装命令";
+		this.copyBtn.title = "复制PowerShell完整安装命令";
+		this.copyBtn.style.cssText = `
+			display: none; margin-top: 8px; padding: 6px 12px;
+			border-radius: 6px; border: 1px solid rgba(255,255,255,0.32);
+			background: rgba(255,80,80,0.25); color: #fff;
+			cursor: pointer; font-size: 13px;
+		`;
+		this.copyBtn.addEventListener("pointerdown", stop);
 		this.statusDisplay.appendChild(this.copyBtn);
 		this.container.appendChild(this.statusDisplay);
 
@@ -688,21 +774,55 @@ class AudioSegmentEditorWidget {
 
 	loadAudio(url) {
 		if (!url) {
+			this.__lastAudioUrlKey = "";
 			this.audioBuffer = null;
 			this.audioPlayer.src = "";
 			this.render();
 			return;
 		}
-		if (this.audioPlayer.src !== new URL(url, window.location.href).href) this.audioPlayer.src = url;
+		// V20：同一个预览文件不要反复创建 AudioContext / decodeAudioData。
+		// 后端缓存命中时 preview_audio 文件名不变；重复解码会在浏览器里刷出大量 AudioContext 错误。
+		const urlKey = String(url).replace(/([?&])_t=\d+(&|$)/, "$1").replace(/[?&]$/, "");
+		if (this.__lastAudioUrlKey === urlKey && this.audioBuffer) {
+			this.render();
+			return;
+		}
+		this.__lastAudioUrlKey = urlKey;
+		const finalUrl = url.includes("_t=") ? url : `${url}${url.includes("?") ? "&" : "?"}_t=${Date.now()}`;
+		this.audioBuffer = null;
+		this.render();
+		this.audioPlayer.src = finalUrl;
 		try {
-			const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-			fetch(url)
-				.then(res => res.arrayBuffer())
-				.then(buf => audioCtx.decodeAudioData(buf))
-				.then(audioBuffer => { this.audioBuffer = audioBuffer; this.render(); })
-				.catch(err => { console.warn("[GJJ] 音频波形加载失败:", err); this.audioBuffer = null; this.render(); });
+			if (!AudioSegmentEditorWidget.__audioCtx) {
+				AudioSegmentEditorWidget.__audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+			}
+			const audioCtx = AudioSegmentEditorWidget.__audioCtx;
+			fetch(finalUrl, { cache: "no-store" })
+				.then(res => {
+					if (!res.ok) throw new Error(`HTTP ${res.status}`);
+					return res.arrayBuffer();
+				})
+				.then(buf => audioCtx.decodeAudioData(buf.slice(0)))
+				.then(audioBuffer => {
+					this.audioBuffer = audioBuffer;
+					this.duration = audioBuffer.duration || this.duration;
+					this.sampleRate = audioBuffer.sampleRate || this.sampleRate;
+					this.render();
+				})
+				.catch(err => {
+					// 只提示一次，避免控制台刷屏。
+					if (this.__lastAudioDecodeErrorKey !== urlKey) {
+						this.__lastAudioDecodeErrorKey = urlKey;
+						console.warn("[GJJ] 音频波形加载失败:", err);
+					}
+					this.audioBuffer = null;
+					this.render();
+				});
 		} catch (e) {
-			console.warn("[GJJ] Web Audio API 不可用:", e);
+			if (this.__lastAudioDecodeErrorKey !== urlKey) {
+				this.__lastAudioDecodeErrorKey = urlKey;
+				console.warn("[GJJ] Web Audio API 不可用:", e);
+			}
 			this.render();
 		}
 	}
@@ -758,7 +878,7 @@ class AudioSegmentEditorWidget {
 	}
 
 	getAudioFileWidget() {
-		return this.node?.widgets?.find(w => String(w?.name || "") === "audio_file" || String(w?.label || "") === "音频/视频文件" || String(w?.label || "") === "音频文件");
+		return this.node?.widgets?.find(w => String(w?.name || "") === "audio_file" || String(w?.label || "") === "音频/视频文件" || String(w?.label || "") === "音频文件" || String(w?.label || "") === "音频/视频文件");
 	}
 
 	setAudioFileWidgetValue(filename) {
@@ -840,16 +960,23 @@ class AudioSegmentEditorWidget {
 		this.fileInput.click();
 	}
 
-	async refreshAudio(statusText = "自动加载音频中…") {
+	async refreshAudio(statusText = "自动加载音频中…", options = {}) {
+		const signature = options.signature || getRefreshSignature(this.node, statusText);
+		const cooldownMs = Number(options.cooldownMs ?? 900);
+		if (!markRefreshScheduled(this.node, signature, cooldownMs)) {
+			this.setStatus("⏳ 已有刷新任务或短时间内重复请求，已自动合并。上游音频未变化时不会重复执行。");
+			return false;
+		}
 		try {
 			this.folderBtn.disabled = true;
 			this.folderBtn.textContent = "⏳";
 			this.commit(false);
 			this.setStatus(statusText);
-			await queueOnlyCurrentNode(this.node);
+			return await queueOnlyCurrentNode(this.node);
 		} catch (err) {
 			console.error("[GJJ] 刷新音频失败:", err);
 			this.setStatus(`❌ 刷新失败：${err?.message || err}`);
+			return false;
 		} finally {
 			setTimeout(() => {
 				this.folderBtn.textContent = "📁";
@@ -1150,12 +1277,51 @@ function installAudioFileAutoRefresh(node) {
 	widget.options.tooltip = widget.options.tooltip || widget.tooltip;
 }
 
+function getAudioInputIndex(node) {
+	if (!node?.inputs) return -1;
+	return node.inputs.findIndex(input => {
+		const name = String(input?.name || input?.label || input?.localized_name || "");
+		const type = String(input?.type || "").toUpperCase();
+		return type === "AUDIO" || name.includes("外部音频") || name.toLowerCase() === "audio";
+	});
+}
+
+function hasExternalAudioLink(node) {
+	const idx = getAudioInputIndex(node);
+	return idx >= 0 && node?.inputs?.[idx]?.link != null;
+}
+
+function isLinkedFromNode(editorNode, originNodeId) {
+	if (!editorNode?.graph || originNodeId == null) return false;
+	const idx = getAudioInputIndex(editorNode);
+	const linkId = idx >= 0 ? editorNode.inputs?.[idx]?.link : null;
+	if (linkId == null) return false;
+	const link = editorNode.graph.links?.[linkId] || app.graph?.links?.[linkId];
+	return link && String(link.origin_id) === String(originNodeId);
+}
+
+function scheduleExternalAudioRefresh(node, reason = "外部音频已更新，自动刷新波形…", ms = 260, eventKey = "") {
+	if (!node?._editor || !hasExternalAudioLink(node)) return;
+	const signature = `${getRefreshSignature(node, reason)}||event=${eventKey || ""}`;
+	const now = performance.now();
+	// 同一个上游事件/同一条连接短时间内只刷新一次；多个来源同时触发时合并到最后一次。
+	if (node.__gjjLastScheduledExternalSignature === signature && now - (node.__gjjLastScheduledExternalAt || 0) < 1200) return;
+	node.__gjjLastScheduledExternalSignature = signature;
+	node.__gjjLastScheduledExternalAt = now;
+	clearTimeout(node.__gjjExternalAudioRefreshTimer);
+	node.__gjjExternalAudioRefreshTimer = setTimeout(() => {
+		if (!node._editor || !hasExternalAudioLink(node)) return;
+		node._editor.refreshAudio(reason, { signature, cooldownMs: 1200 });
+	}, ms);
+}
+
+
 app.registerExtension({
-	name: "GJJ.AudioSegmentEditor.V16ButtonFix",
+	name: "GJJ.AudioSegmentEditor.V20CacheDebounceNoUpstreamLoop",
 	async beforeRegisterNodeDef(nodeType, nodeData) {
 		if (nodeData?.name !== NODE_NAME) return;
 
-		// V16：从“节点定义数据”源头裁剪输出口。
+		// V18：从“节点定义数据”源头裁剪输出口。
 		// 后端为了支持动态多段输出仍声明了 99 个返回值；但前端如果照单全收，
 		// 新建节点时会直接展开 99 个输出口。这里在 LiteGraph 创建节点前，
 		// 只暴露默认需要的两个槽位：slot0=音频片段1，slot1=分段列表。
@@ -1168,7 +1334,7 @@ app.registerExtension({
 			if (Array.isArray(nodeData.output_tooltips)) nodeData.output_tooltips = ["第1个时间段的音频片段"];
 			if (Array.isArray(nodeData.output_is_list)) nodeData.output_is_list = [false];
 		} catch (err) {
-			console.warn("[GJJ] V16 裁剪 nodeData 输出定义失败：", err);
+			console.warn("[GJJ] V18 裁剪 nodeData 输出定义失败：", err);
 		}
 
 		installHiddenWidgetGuard(nodeType);
@@ -1267,6 +1433,11 @@ app.registerExtension({
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalOnConnectionsChange?.apply(this, args);
 			scheduleStabilize(this, this._editor?.segments?.length || 1);
+			// 连接/更换上游 AUDIO 后，自动执行当前编辑器一次，生成 preview_audio 给前端解码波形。
+			const inputIndex = typeof args[1] === "number" ? args[1] : (typeof args[2] === "number" ? args[2] : -1);
+			if (inputIndex === getAudioInputIndex(this) || inputIndex < 0) {
+				scheduleExternalAudioRefresh(this, "外部音频连接已变化，自动刷新波形…", 500);
+			}
 			return result;
 		};
 
@@ -1293,6 +1464,10 @@ app.registerExtension({
 				setTimeout(() => stabilizeNode(node, node._editor?.segments?.length || 1, false, false), 250);
 			}
 		}
+		// V20：禁用全局 executed 监听自动 queue。
+		// 原逻辑会在上游音频分离器执行完成后，给每个下游分段编辑器再 queue 一次当前节点；
+		// queue 当前节点时又会保留上游链路，结果导致 separator 被二次、三次请求。
+		// 现在只依赖正常工作流执行结果更新波形；连接变化/手动打开文件仍可触发一次刷新。
 		api?.addEventListener?.("gjj_audio_timestamp_error", (event) => {
 			try {
 				const data = event.detail || {};
@@ -1303,10 +1478,24 @@ app.registerExtension({
 				for (const node of app.graph?._nodes || []) {
 					if (String(node.id) !== String(nodeId)) continue;
 					if (node._editor) {
-						node._editor.setStatus(`❌ 执行失败：\n${errorMessage}${installCommand ? "\n\n🔧 点击复制按钮复制安装命令" : ""}`);
+						// 直接显示后端发送的错误信息，不再添加额外前缀
+						node._editor.setStatus(errorMessage);
 						if (installCommand && node._editor.copyBtn) {
 							node._editor.copyBtn.style.display = "inline-flex";
-							node._editor.copyBtn.onclick = () => navigator.clipboard?.writeText(installCommand);
+							node._editor.copyBtn.onclick = async () => {
+								try {
+									await navigator.clipboard.writeText(installCommand);
+									const oldText = node._editor.copyBtn.textContent;
+									node._editor.copyBtn.textContent = "✅ 已复制";
+									node._editor.copyBtn.style.background = "rgba(80,200,80,0.35)";
+									setTimeout(() => {
+										node._editor.copyBtn.textContent = oldText;
+										node._editor.copyBtn.style.background = "rgba(255,80,80,0.25)";
+									}, 1500);
+								} catch (e) {
+									console.error("[GJJ] 复制失败：", e);
+								}
+							};
 						}
 					}
 					break;
