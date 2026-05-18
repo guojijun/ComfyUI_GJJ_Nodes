@@ -112,12 +112,14 @@ async function uploadTempImage(dataUrl) {
 	const body = new FormData();
 	body.append("image", file);
 	body.append("subfolder", "mesh2motion");
-	body.append("type", "temp");
+	body.append("type", "input");
+	body.append("overwrite", "true");
 	const response = await api.fetchApi("/upload/image", { method: "POST", body });
 	if (!response.ok) {
 		throw new Error(`上传截图失败：${response.status}`);
 	}
-	return await response.json();
+	const result = await response.json();
+	return { name: result.name, subfolder: "mesh2motion", type: "input" };
 }
 
 function sendBooleanStates(node) {
@@ -299,10 +301,19 @@ function hookSerialization(node) {
 		imageWidget.serializeValue = async () => {
 			try {
 				setStatus(node, "正在捕获截图...", "busy");
+				console.log("[GJJ Mesh2Motion] 开始捕获截图...");
 				const dataUrl = await captureFromIframe(node._gjjMesh2MotionIframe);
+				console.log("[GJJ Mesh2Motion] 截图 dataUrl 长度:", dataUrl?.length);
 				const result = await uploadTempImage(dataUrl);
+				console.log("[GJJ Mesh2Motion] 上传结果:", result);
 				setStatus(node, "截图已捕获", "ok");
-				return `mesh2motion/${result.name} [temp]`;
+				const serialized = JSON.stringify({
+					name: result.name,
+					subfolder: result.subfolder,
+					type: result.type,
+				});
+				console.log("[GJJ Mesh2Motion] 截图序列化值:", serialized);
+				return serialized;
 			} catch (error) {
 				console.error("[GJJ Mesh2Motion] 截图捕获失败：", error);
 				setStatus(node, `截图捕获失败：${error?.message || error}`, "error");
@@ -460,6 +471,22 @@ app.registerExtension({
 			return;
 		}
 		ensureStyle();
+
+		// 检查 mesh2motion 资源是否存在
+		const checkResource = async () => {
+			try {
+				const response = await api.fetchApi(`${ROUTE_BASE}/index-comfyui.html`);
+				if (response.status !== 200) {
+					console.warn("[GJJ Mesh2Motion] ⚠️ Mesh2Motion 资源未找到！");
+					console.warn("🌏模型下载：https://github.com/scottpetrovic/mesh2motion-app/releases");
+				}
+			} catch (error) {
+				console.warn("[GJJ Mesh2Motion] ⚠️ Mesh2Motion 资源未找到！");
+				console.warn("🌏模型下载：https://github.com/scottpetrovic/mesh2motion-app/releases");
+			}
+		};
+
+		checkResource();
 		createPanel(node);
 	},
 });

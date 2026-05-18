@@ -30,6 +30,9 @@ const FULLY_BYPASS_CLASSES = new Set([
 	"GJJ_AnyPreview",
 ]);
 const STATUS_DISABLED_CLASSES = new Set([
+	"GJJ_BoolSwitch",
+	"GJJ_TemplateParams",
+	"GJJ_MultifunctionCalculator",
 	"GJJ_AnyPreview",
 	"GJJ_MemoryManager",
 	"GJJ_AnimeLineartRealConverter",
@@ -62,6 +65,28 @@ const STATUS_DISABLED_CLASSES = new Set([
 	"GJJ_Wan22FirstLastVideo",
 	"GJJ_Wan22RapidAIOMega",
 ]);
+
+
+const BOOL_SWITCH_CLASS = "GJJ_BoolSwitch";
+const BOOL_SWITCH_WILDCARD_INPUTS = new Set(["on_true", "on_false", "为真时", "为假时"]);
+
+function isBoolSwitchNode(node) {
+	return String(node?.comfyClass || node?.type || "") === BOOL_SWITCH_CLASS;
+}
+
+function patchBoolSwitchWildcardInputs(node) {
+	if (!isBoolSwitchNode(node)) {
+		return;
+	}
+	for (const input of node?.inputs || []) {
+		const names = [input?.name, input?.label, input?.localized_name].map((item) => String(item || ""));
+		if (!names.some((name) => BOOL_SWITCH_WILDCARD_INPUTS.has(name))) {
+			continue;
+		}
+		// Python 端用 STRING 才能生成文本框；前端这里把插槽改回 *，允许 MODEL / VAE / CLIP / IMAGE / AUDIO 等任意类型接入。
+		input.type = "*";
+	}
+}
 
 const COMMON_NAME_LABELS = {
 	system_prompt: "系统提示词",
@@ -673,11 +698,11 @@ function showHelpDialog(node) {
 	const body = document.createElement("div");
 	body.className = "gjj-help-body";
 	body.appendChild(createHelpSection("功能", escapeText(meta.description, "这个节点暂未提供功能说明。")));
-	
+
 	// 创建模型下载链接
 	const downloadLink = document.createElement("p");
 	downloadLink.style.marginBottom = "10px";
-	
+
 	const linkText = document.createTextNode("🌏模型下载：");
 	const linkElement = document.createElement("a");
 	linkElement.href = "https://pan.quark.cn/s/6ec846f1f58d";
@@ -686,10 +711,10 @@ function showHelpDialog(node) {
 	linkElement.rel = "noopener noreferrer";
 	linkElement.style.color = "#98d6d1";
 	linkElement.style.textDecoration = "underline";
-	
+
 	downloadLink.appendChild(linkText);
 	downloadLink.appendChild(linkElement);
-	
+
 	// 创建用到的模型内容
 	const modelEntries = currentModelEntries(node, meta);
 	let modelContent;
@@ -701,10 +726,10 @@ function showHelpDialog(node) {
 		empty.textContent = "未从当前节点面板识别到模型选择项或模型输入口。";
 		modelContent = empty;
 	}
-	
+
 	// 将下载链接添加到模型内容的开头
 	modelContent.insertBefore(downloadLink, modelContent.firstChild);
-	
+
 	body.appendChild(createHelpSection("用到的模型", modelContent));
 	body.appendChild(createHelpSection("依赖", createHelpList(
 		dependencyEntries(meta),
@@ -1058,6 +1083,7 @@ function applyNodeMetadata(node) {
 	}
 	applyWidgetMetadata(node);
 	applySlotMetadata(node);
+	patchBoolSwitchWildcardInputs(node);
 	protectDomWidgets(node);
 	scheduleHelpWidgetPositionUpdate(node);
 }

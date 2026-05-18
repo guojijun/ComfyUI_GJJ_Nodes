@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import shutil
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,29 @@ from PIL import Image, ImageOps
 
 NODE_NAME = "GJJ_Mesh2MotionExplore"
 ROUTE_BASE = "/gjj/mesh2motion"
-UI_DIR = Path(__file__).resolve().parents[1] / "web" / "mesh2motion"
+
+def _get_mesh2motion_dir() -> Path:
+    """获取 Mesh2Motion 资源目录，优先使用全局 models 目录"""
+    # 首先检查全局 models 目录
+    global_models_dir = Path(folder_paths.models_dir) / "mesh2motion"
+    if global_models_dir.exists():
+        return global_models_dir
+
+    # 其次检查本地 web 目录（向后兼容）
+    local_web_dir = Path(__file__).resolve().parents[1] / "web" / "mesh2motion"
+    if local_web_dir.exists():
+        return local_web_dir
+
+    # 如果都不存在，提示用户下载
+    print(f"[GJJ Mesh2Motion] ⚠️  Mesh2Motion 资源未找到！")
+    print(f"🌏模型下载：https://github.com/scottpetrovic/mesh2motion-app/releases")
+    print(f"请将解压后的 mesh2motion 文件夹放入：{global_models_dir}")
+
+    # 创建空目录以便后续下载
+    global_models_dir.mkdir(parents=True, exist_ok=True)
+    return global_models_dir
+
+UI_DIR = _get_mesh2motion_dir()
 
 
 def _register_mime_types() -> None:
@@ -216,30 +239,30 @@ class GJJ_Mesh2MotionExplore:
                     "BOOLEAN",
                     {
                         "default": False,
-                        "display_name": "棋盘房间",
-                        "tooltip": "开启后用棋盘房间替代默认地面参考，便于观察运动和空间。",
+                        "display_name": "棋盘格背景",
+                        "tooltip": "开启后在 3D 面板中显示棋盘格背景，便于观察透明区域。",
                     },
                 ),
                 "width": (
                     "INT",
                     {
                         "default": 1024,
-                        "min": 1,
+                        "min": 128,
                         "max": 4096,
-                        "step": 1,
+                        "step": 64,
                         "display_name": "输出宽度",
-                        "tooltip": "截图和视频帧的输出宽度。",
+                        "tooltip": "最终截图和视频的宽度（像素）。",
                     },
                 ),
                 "height": (
                     "INT",
                     {
                         "default": 1024,
-                        "min": 1,
+                        "min": 128,
                         "max": 4096,
-                        "step": 1,
+                        "step": 64,
                         "display_name": "输出高度",
-                        "tooltip": "截图和视频帧的输出高度。",
+                        "tooltip": "最终截图和视频的高度（像素）。",
                     },
                 ),
                 "fps": (
@@ -250,32 +273,14 @@ class GJJ_Mesh2MotionExplore:
                         "max": 120,
                         "step": 1,
                         "display_name": "视频帧率",
-                        "tooltip": "动画视频输出的帧率。",
+                        "tooltip": "录制视频时的帧率（FPS）。",
                     },
                 ),
-                "image": (
-                    "STRING",
-                    {
-                        "default": "",
-                        "multiline": False,
-                        "socketless": True,
-                        "advanced": True,
-                        "display_name": "截图缓存",
-                        "tooltip": "前端内部使用的截图缓存，不需要手动填写。",
-                    },
-                ),
-                "video_frames": (
-                    "STRING",
-                    {
-                        "default": "",
-                        "multiline": False,
-                        "socketless": True,
-                        "advanced": True,
-                        "display_name": "视频缓存",
-                        "tooltip": "前端内部使用的视频缓存，不需要手动填写。",
-                    },
-                ),
-            }
+            },
+            "hidden": {
+                "image": "IMAGE",
+                "video_frames": "STRING",
+            },
         }
 
     def execute(
@@ -295,8 +300,25 @@ class GJJ_Mesh2MotionExplore:
         fps = max(1, min(120, int(fps)))
 
         if image:
-            image_path = folder_paths.get_annotated_filepath(image)
-            screenshot = _load_and_resize_image(image_path, width, height)
+            try:
+                payload = json.loads(str(image))
+                name = payload.get("name", "")
+                subfolder = payload.get("subfolder", "")
+                file_type = payload.get("type", "temp")
+                annotated = f"{name} [{file_type}]"
+                if subfolder:
+                    annotated = f"{subfolder}/{name} [{file_type}]"
+                print(f"[GJJ Mesh2Motion] 截图 annotated 路径: {annotated}")
+                image_path = folder_paths.get_annotated_filepath(annotated)
+                print(f"[GJJ Mesh2Motion] 截图解析路径: {image_path}")
+                if not image_path or not Path(image_path).exists():
+                    raise RuntimeError(f"截图文件不存在：{image_path} (annotated: {annotated})")
+                print(f"[GJJ Mesh2Motion] 截图文件存在，大小: {Path(image_path).stat().st_size} bytes")
+                screenshot = _load_and_resize_image(image_path, width, height)
+                print(f"[GJJ Mesh2Motion] 截图加载成功，shape: {screenshot.shape}")
+            except Exception as exc:
+                print(f"[GJJ Mesh2Motion] 截图加载失败，使用黑色图像占位：{exc}")
+                screenshot = _blank_image(width, height)
         else:
             screenshot = _blank_image(width, height)
 
@@ -307,7 +329,11 @@ class GJJ_Mesh2MotionExplore:
                 video_name = payload.get("video") if isinstance(payload, dict) else None
                 if video_name:
                     video_path = folder_paths.get_annotated_filepath(video_name)
+                    print(f"[GJJ Mesh2Motion] 尝试加载视频：{video_path}")
+                    if not video_path or not Path(video_path).exists():
+                        raise RuntimeError(f"视频文件不存在：{video_path}")
                     video_tensor = _decode_video_to_tensor(video_path, width, height)
+                    print(f"[GJJ Mesh2Motion] 视频加载成功，共 {video_tensor.shape[0]} 帧")
             except Exception as exc:
                 print(f"[GJJ Mesh2Motion] 视频读取失败，改用黑色视频占位：{exc}")
 

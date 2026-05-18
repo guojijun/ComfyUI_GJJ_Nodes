@@ -626,3 +626,38 @@ class GJJ_SaveAnyObject:
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_SaveAnyObject}
 NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 💾 保存任意对象"}
+
+
+try:
+    import subprocess
+    from aiohttp import web
+    from server import PromptServer
+
+    @PromptServer.instance.routes.post("/gjj/open_folder")
+    async def gjj_open_folder_api(request):
+        try:
+            folder_path = request.query.get("path", "output")
+            full_path = Path(_output_root()) / folder_path
+            full_path = full_path.resolve()
+
+            root = _output_root()
+            try:
+                full_path.relative_to(root)
+            except ValueError:
+                return web.json_response({"error": "路径越界"}, status=400)
+
+            full_path.mkdir(parents=True, exist_ok=True)
+
+            if os.name == "nt":
+                subprocess.Popen(["explorer", str(full_path)])
+            elif os.name == "posix":
+                subprocess.Popen(["xdg-open", str(full_path)])
+            else:
+                subprocess.Popen(["open", str(full_path)])
+
+            return web.json_response({"status": "ok", "path": str(full_path)})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+except Exception:
+    pass

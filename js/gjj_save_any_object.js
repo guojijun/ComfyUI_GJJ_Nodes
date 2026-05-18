@@ -17,6 +17,8 @@ const MULTI_IMAGE_HEIGHT = 108;
 const SINGLE_IMAGE_MIN_HEIGHT = 220;
 const SINGLE_IMAGE_MAX_HEIGHT = 620;
 const MEDIA_PREVIEW_HEIGHT = 220;
+const BUTTON_WIDGET_NAME = "gjj_save_any_object_output_button";
+const FOLDER_WIDGET_NAME = "gjj_save_any_object_folder_button";
 
 function previewDataToUrl(data, includePreviewFormat = true) {
 	if (!data?.filename) {
@@ -120,6 +122,27 @@ function normalizeOutputs(node) {
 		output.label = OUTPUT_NAMES[index];
 		output.localized_name = OUTPUT_NAMES[index];
 		output.type = OUTPUT_TYPES[index];
+	}
+}
+
+function addAllOutputs(node) {
+	if (!Array.isArray(node.outputs)) {
+		node.outputs = [];
+	}
+	for (let index = 0; index < OUTPUT_NAMES.length; index += 1) {
+		if (!node.outputs[index]) {
+			node.addOutput?.(OUTPUT_NAMES[index], OUTPUT_TYPES[index]);
+		}
+	}
+	normalizeOutputs(node);
+}
+
+function removeAllOutputs(node) {
+	if (!Array.isArray(node.outputs)) {
+		return;
+	}
+	for (let index = node.outputs.length - 1; index >= 0; index -= 1) {
+		node.removeOutput?.(index);
 	}
 }
 
@@ -324,9 +347,148 @@ function applyPreviewContent(node) {
 	});
 }
 
+function moveWidgetAfter(node, widgetName, afterName) {
+	if (!Array.isArray(node.widgets)) {
+		return;
+	}
+	const targetIndex = node.widgets.findIndex((w) => String(w?.name || "") === widgetName);
+	const afterIndex = node.widgets.findIndex((w) => String(w?.name || "") === afterName);
+	if (targetIndex < 0 || afterIndex < 0 || targetIndex === afterIndex + 1) {
+		return;
+	}
+	const [widget] = node.widgets.splice(targetIndex, 1);
+	const newAfterIndex = node.widgets.findIndex((w) => String(w?.name || "") === afterName);
+	node.widgets.splice(newAfterIndex + 1, 0, widget);
+}
+
+function ensureButtonWidget(node) {
+	if (node.__gjjSaveAnyObjectButtonContainer) {
+		updateButtonState(node);
+		moveWidgetAfter(node, BUTTON_WIDGET_NAME, "filename_prefix");
+		return;
+	}
+
+	const container = document.createElement("div");
+	container.style.cssText = [
+		"display:flex",
+		"gap:8px",
+		"width:100%",
+		"box-sizing:border-box",
+	].join(";");
+
+	const outputButton = document.createElement("button");
+	outputButton.style.cssText = [
+		"flex:1",
+		"padding:6px 12px",
+		"background:#2a3a42",
+		"color:#d9e4df",
+		"border:1px solid #33434a",
+		"border-radius:6px",
+		"cursor:pointer",
+		"font-size:12px",
+		"font-weight:500",
+		"transition:background 0.15s",
+	].join(";");
+	outputButton.onmouseover = () => { outputButton.style.background = "#3a4a52"; };
+	outputButton.onmouseout = () => { outputButton.style.background = "#2a3a42"; };
+
+	outputButton.onclick = () => {
+		node.__gjjSaveAnyObjectHasOutput = !node.__gjjSaveAnyObjectHasOutput;
+		if (node.__gjjSaveAnyObjectHasOutput) {
+			addAllOutputs(node);
+			ensurePreviewWidget(node);
+		} else {
+			removeAllOutputs(node);
+			removePreviewWidget(node);
+		}
+		updateButtonState(node);
+		setDirty(node);
+	};
+
+	const folderButton = document.createElement("button");
+	folderButton.textContent = "📁";
+	folderButton.title = "打开保存文件夹";
+	folderButton.style.cssText = [
+		"padding:6px 12px",
+		"background:#2a3a42",
+		"color:#d9e4df",
+		"border:1px solid #33434a",
+		"border-radius:6px",
+		"cursor:pointer",
+		"font-size:14px",
+		"transition:background 0.15s",
+	].join(";");
+	folderButton.onmouseover = () => { folderButton.style.background = "#3a4a52"; };
+	folderButton.onmouseout = () => { folderButton.style.background = "#2a3a42"; };
+
+	folderButton.onclick = () => {
+		const prefixWidget = getWidget(node, "filename_prefix");
+		const prefix = prefixWidget ? String(prefixWidget.value || DEFAULT_PREFIX).trim() : DEFAULT_PREFIX;
+		const parts = prefix.split("/").filter((p) => p && p !== "." && p !== "..");
+		const folderPath = parts.length > 1 ? parts.slice(0, -1).join("/") : "";
+		api.fetchApi(`/gjj/open_folder?path=${encodeURIComponent(folderPath)}`, { method: "POST" }).catch(() => {});
+	};
+
+	container.appendChild(outputButton);
+	container.appendChild(folderButton);
+
+	const widget = node.addDOMWidget?.(BUTTON_WIDGET_NAME, "操作按钮", container, {
+		serialize: false,
+		hideOnZoom: false,
+		getHeight: () => 32,
+	});
+	if (widget) {
+		widget.computeSize = (width) => [Math.max(MIN_WIDTH, Number(width || MIN_WIDTH)), 32];
+		widget.draw = () => {};
+		node.__gjjSaveAnyObjectButtonWidget = widget;
+	}
+
+	moveWidgetAfter(node, BUTTON_WIDGET_NAME, "filename_prefix");
+
+	node.__gjjSaveAnyObjectButtonContainer = container;
+	node.__gjjSaveAnyObjectButton = outputButton;
+	node.__gjjSaveAnyObjectFolderButton = folderButton;
+	updateButtonState(node);
+}
+
+function updateButtonState(node) {
+	const button = node.__gjjSaveAnyObjectButton;
+	if (!button) {
+		return;
+	}
+	if (node.__gjjSaveAnyObjectHasOutput) {
+		button.textContent = "隐藏输出";
+		button.style.background = "#3a4a52";
+	} else {
+		button.textContent = "输出";
+		button.style.background = "#2a3a42";
+	}
+}
+
+function removePreviewWidget(node) {
+	if (!node.__gjjSaveAnyObjectPreviewContainer) {
+		return;
+	}
+	const widgetIndex = Array.isArray(node.widgets) ? node.widgets.indexOf(node.__gjjSaveAnyObjectPreviewWidget) : -1;
+	if (widgetIndex >= 0) {
+		node.widgets.splice(widgetIndex, 1);
+	}
+	node.__gjjSaveAnyObjectPreviewContainer = null;
+	node.__gjjSaveAnyObjectImageGrid = null;
+	node.__gjjSaveAnyObjectMediaGrid = null;
+	node.__gjjSaveAnyObjectTextBlock = null;
+	node.__gjjSaveAnyObjectEmpty = null;
+	node.__gjjSaveAnyObjectPreviewWidget = null;
+	node.__gjjSaveAnyObjectPreviewHeight = null;
+}
+
 function ensurePreviewWidget(node) {
 	if (node.__gjjSaveAnyObjectPreviewContainer) {
 		applyPreviewContent(node);
+		return;
+	}
+
+	if (!node.__gjjSaveAnyObjectHasOutput) {
 		return;
 	}
 
@@ -423,8 +585,13 @@ function stabilizeNode(node) {
 	removeUnusedInputsFromEnd(node, MIN_VISIBLE_INPUTS);
 	ensureTrailingEmptyInput(node);
 	renameInputsSequentially(node);
-	normalizeOutputs(node);
+	if (node.__gjjSaveAnyObjectHasOutput) {
+		addAllOutputs(node);
+	} else {
+		removeAllOutputs(node);
+	}
 	maybeUpdateFilenamePrefix(node);
+	ensureButtonWidget(node);
 	ensurePreviewWidget(node);
 	setDirty(node);
 }
@@ -452,6 +619,7 @@ app.registerExtension({
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
 			const result = originalOnNodeCreated?.apply(this, args);
+			this.__gjjSaveAnyObjectHasOutput = false;
 			setTimeout(() => stabilizeNode(this), 0);
 			return result;
 		};
@@ -459,6 +627,9 @@ app.registerExtension({
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalOnConfigure?.apply(this, args);
+			if (this.__gjjSaveAnyObjectHasOutput === undefined) {
+				this.__gjjSaveAnyObjectHasOutput = false;
+			}
 			setTimeout(() => stabilizeNode(this), 0);
 			return result;
 		};
@@ -493,6 +664,10 @@ app.registerExtension({
 			if (firstPath) {
 				this.__gjjSaveAnyObjectLastPath = firstPath;
 			}
+			if (count > 0) {
+				this.__gjjSaveAnyObjectHasOutput = true;
+			}
+			ensureButtonWidget(this);
 			ensurePreviewWidget(this);
 			setDirty(this);
 			return result;
@@ -502,6 +677,9 @@ app.registerExtension({
 	setup() {
 		for (const node of app.graph?._nodes || []) {
 			if (TARGET_NODES.has(node?.comfyClass)) {
+				if (node.__gjjSaveAnyObjectHasOutput === undefined) {
+					node.__gjjSaveAnyObjectHasOutput = false;
+				}
 				stabilizeNode(node);
 			}
 		}

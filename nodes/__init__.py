@@ -35,6 +35,7 @@ DEFAULT_NODE_OUTLINE = "#3E4D54"
 # 缺依赖时允许跳过，不影响整个 GJJ 包加载。
 OPTIONAL_NODE_MODULES = {
     "gjj_latentsync_node",
+    "gjj_wanvideo_model_loader",
 }
 
 # 这些是工具脚本（非节点模块），不应被自动导入

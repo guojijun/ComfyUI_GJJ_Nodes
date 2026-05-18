@@ -68,16 +68,40 @@ function escapeAttribute(text) {
 	return escapeHtml(text).replaceAll("`", "&#96;");
 }
 
+function stripTrailingUrlPunctuation(url) {
+	let clean = String(url || "");
+	let tail = "";
+	while (/[.,;:!?，。；：！？）)\]\}]+$/.test(clean)) {
+		tail = clean.slice(-1) + tail;
+		clean = clean.slice(0, -1);
+	}
+	return [clean, tail];
+}
+
+function makeSafeLink(href, label) {
+	const safeHref = escapeAttribute(href);
+	return `<a href="${safeHref}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+}
+
 function renderInlineMarkdown(text) {
-	let output = escapeHtml(text);
-	output = output.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_match, alt, src) => {
-		const safeSrc = escapeAttribute(src);
-		return `<img src="${safeSrc}" alt="${escapeAttribute(alt)}">`;
+	const placeholders = [];
+	const stash = (html) => {
+		const key = `\u0000GJJ_MD_${placeholders.length}\u0000`;
+		placeholders.push(html);
+		return key;
+	};
+
+	// 关键：先在原始文本里把 Markdown 图片/链接转成占位符，避免后面的裸链接规则
+	// 再去扫描已经生成的 <a href="https://...">，导致链接 HTML 被二次替换破坏。
+	let source = String(text || "");
+	source = source.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_match, alt, src) => {
+		return stash(`<img src="${escapeAttribute(src)}" alt="${escapeAttribute(alt)}">`);
 	});
-	output = output.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_match, label, href) => {
-		const safeHref = escapeAttribute(href);
-		return `<a href="${safeHref}" target="_blank" rel="noreferrer">${label}</a>`;
+	source = source.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_match, label, href) => {
+		return stash(makeSafeLink(href, renderInlineMarkdown(label)));
 	});
+
+	let output = escapeHtml(source);
 	output = output.replace(/`([^`]+)`/g, "<code>$1</code>");
 	output = output.replace(/\*\*\*([\s\S]+?)\*\*\*/g, "<strong><em>$1</em></strong>");
 	output = output.replace(/___([\s\S]+?)___/g, "<strong><em>$1</em></strong>");
@@ -86,10 +110,15 @@ function renderInlineMarkdown(text) {
 	output = output.replace(/(^|[^*])\*([^*\s](?:[\s\S]*?[^*\s])?)\*(?!\*)/g, "$1<em>$2</em>");
 	output = output.replace(/(^|[\s([{>])_([^_\s][\s\S]*?[^_\s]|\S)_(?=$|[\s.,;:!?，。；：！？)\]}>])/g, "$1<em>$2</em>");
 	output = output.replace(/~~([^~]+)~~/g, "<del>$1</del>");
-	output = output.replace(/(^|[\s(])((?:https?:\/\/|www\.)[^\s<]+)/g, (_match, prefix, url) => {
+	output = output.replace(/(^|[\s(])((?:https?:\/\/|www\.)[^\s<]+)/g, (_match, prefix, rawUrl) => {
+		const [url, tail] = stripTrailingUrlPunctuation(rawUrl);
 		const href = url.startsWith("www.") ? `https://${url}` : url;
-		return `${prefix}<a href="${escapeAttribute(href)}" target="_blank" rel="noreferrer">${url}</a>`;
+		return `${prefix}${makeSafeLink(href, escapeHtml(url))}${escapeHtml(tail)}`;
 	});
+
+	for (let i = 0; i < placeholders.length; i += 1) {
+		output = output.replaceAll(escapeHtml(`\u0000GJJ_MD_${i}\u0000`), placeholders[i]);
+	}
 	return output;
 }
 
@@ -407,16 +436,25 @@ function setWidgetVisible(widget, visible) {
 	}
 
 	// 完整隐藏：不能只设 hidden，也不能写 height/margin/padding 这些只读 getter。
-	// 只改可写的布局字段 + DOM style，避免 BaseWidget / BaseDOMWidgetImpl getter-only 报错。
+	// ComfyUI/LiteGraph 会给每个 widget 额外叠加一点间距，
+	// 所以隐藏 widget 不能返回 [0, 0]，否则仍会挤出一行空白。
+	// 用 -4 抵消默认 widget 间距，同时清掉 y/last_y/size。
 	safeAssignWidgetProperty(widget, "hidden", true);
 	safeAssignWidgetProperty(widget, "type", `converted-widget:${widget.name || "hidden"}`);
 	safeAssignWidgetProperty(widget, "label", "");
-	widget.computeSize = () => [0, 0];
-	widget.getHeight = () => 0;
+	widget.computeSize = () => [0, -4];
+	widget.getHeight = () => -4;
 	widget.draw = () => {};
 	safeAssignWidgetProperty(widget, "y", 0);
 	safeAssignWidgetProperty(widget, "last_y", 0);
-	safeAssignWidgetProperty(widget, "serialize", false);
+	safeAssignWidgetProperty(widget, "size", [0, -4]);
+	safeAssignWidgetProperty(widget, "height", -4);
+	// 仍然保留 widget 本体，避免影响 prompt 序列化；只是不参与面板布局。
+	safeAssignWidgetProperty(widget, "serialize", true);
+	if (widget.options && typeof widget.options === "object") {
+		widget.options.hidden = true;
+		widget.options.display = "hidden";
+	}
 	collapseElement(widget.inputEl);
 	collapseElement(widget.element);
 	collapseElement(widget.widget);
@@ -480,6 +518,9 @@ function enterEditMode(node) {
 }
 
 function handlePreviewPointer(node, event) {
+	if (handleMarkdownLinkEvent(event)) {
+		return;
+	}
 	const now = Date.now();
 	if (event.type === "mousedown" && now - Number(node.__gjjTextInputLastPointerEvent || 0) < 40) {
 		event.stopPropagation();
@@ -498,6 +539,45 @@ function handlePreviewPointer(node, event) {
 function enterPreviewMode(node) {
 	setMode(node, MODE_PREVIEW);
 	applyMode(node);
+}
+
+
+function findLinkTarget(event) {
+	const target = event?.target;
+	return target?.closest?.("a[href]") || null;
+}
+
+function handleMarkdownLinkEvent(event) {
+	const link = findLinkTarget(event);
+	if (!link) {
+		return false;
+	}
+	event.stopPropagation();
+	return true;
+}
+
+function openMarkdownLink(event) {
+	const link = findLinkTarget(event);
+	if (!link) {
+		return false;
+	}
+	event.preventDefault();
+	event.stopPropagation();
+	if (typeof event.stopImmediatePropagation === "function") {
+		event.stopImmediatePropagation();
+	}
+
+	const now = Date.now();
+	if (now - Number(link.__gjjTextInputLastOpen || 0) < 500) {
+		return true;
+	}
+	link.__gjjTextInputLastOpen = now;
+
+	const href = link.href || link.getAttribute("href") || "";
+	if (href) {
+		window.open(href, "_blank", "noopener,noreferrer");
+	}
+	return true;
 }
 
 function bindTextWidget(node) {
@@ -564,6 +644,7 @@ function buildDom(node) {
 		"word-break:break-word",
 		"box-sizing:border-box",
 		"cursor:text",
+		"pointer-events:auto",
 	].join(";");
 
 	const editor = document.createElement("textarea");
@@ -657,7 +738,7 @@ function buildDom(node) {
 			text-align: left;
 		}
 		.gjj-text-input-markdown-body th { background: #1b2930; }
-		.gjj-text-input-markdown-body a { color: #7dd3fc; text-decoration: none; }
+		.gjj-text-input-markdown-body a { color: #7dd3fc; text-decoration: underline; cursor: pointer; pointer-events: auto; }
 		.gjj-text-input-markdown-body a:hover { text-decoration: underline; }
 		.gjj-text-input-markdown-body img {
 			max-width: 100%;
@@ -675,6 +756,25 @@ function buildDom(node) {
 		.gjj-text-input-empty { color: #8ea0a8; }
 	`;
 
+	// 链接事件必须在捕获阶段先截住，否则 ComfyUI 画布/节点拖拽事件会吃掉点击。
+	// 关键：pointerdown 直接打开链接，不再等 click；ComfyUI 的节点拖拽逻辑有时会吞掉 click，
+	// 所以之前会出现“单击没反应，双击才打开”。
+	previewBody.addEventListener("pointerdown", (event) => {
+		if (findLinkTarget(event)) {
+			openMarkdownLink(event);
+		}
+	}, true);
+	previewBody.addEventListener("mousedown", (event) => {
+		if (findLinkTarget(event)) {
+			handleMarkdownLinkEvent(event);
+		}
+	}, true);
+	previewBody.addEventListener("click", (event) => {
+		if (findLinkTarget(event)) {
+			openMarkdownLink(event);
+		}
+	}, true);
+
 	container.addEventListener("pointerdown", (event) => handlePreviewPointer(node, event));
 	container.addEventListener("mousedown", (event) => handlePreviewPointer(node, event));
 	container.addEventListener("dblclick", (event) => {
@@ -690,10 +790,7 @@ function buildDom(node) {
 		enterEditMode(node);
 	});
 	previewBody.addEventListener("click", (event) => {
-		const target = event.target;
-		if (target?.tagName === "A") {
-			event.stopPropagation();
-		}
+		openMarkdownLink(event);
 	});
 	editor.addEventListener("pointerdown", (event) => event.stopPropagation());
 	editor.addEventListener("mousedown", (event) => event.stopPropagation());

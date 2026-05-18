@@ -5,7 +5,6 @@ import math
 import operator
 from typing import Any
 
-
 NODE_NAME = "GJJ_MultifunctionCalculator"
 INPUT_PREFIX = "value_"
 MAX_INPUTS = 24
@@ -150,7 +149,9 @@ def _eval_ast(node: ast.AST, values: dict[str, float]) -> float:
         return _guard_number(UNARY_OPS[op_type](_eval_ast(node.operand, values)))
     if isinstance(node, ast.Call):
         if not isinstance(node.func, ast.Name) or node.func.id not in SAFE_FUNCS:
-            raise ValueError("公式只允许 abs、round、floor、ceil、min、max、sum、avg、mean、any、pow、mod 函数。")
+            raise ValueError(
+                "公式只允许 abs、round、floor、ceil、min、max、sum、avg、mean、any、pow、mod 函数。"
+            )
         if node.keywords:
             raise ValueError("公式函数不支持关键字参数。")
         args = [_eval_ast(arg, values) for arg in node.args]
@@ -221,7 +222,7 @@ class GJJ_MultifunctionCalculator:
                     "STRING",
                     {
                         "default": "x1 + x2",
-                        "multiline": True,
+                        "multiline": False,
                         "display_name": "计算公式",
                         "tooltip": "在这里填写公式；动态输入按 x1、x2、x3 引用。支持 + - * / % // ** 和 abs、round、floor、ceil、min、max、sum、avg、mean、any、pow、mod。",
                     },
