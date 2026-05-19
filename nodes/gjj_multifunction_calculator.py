@@ -8,6 +8,8 @@ from typing import Any
 NODE_NAME = "GJJ_MultifunctionCalculator"
 INPUT_PREFIX = "value_"
 MAX_INPUTS = 24
+SHOW_INT_OUTPUT_NAME = "show_int_output"
+SHOW_FORMULA_OUTPUT_NAME = "show_formula_output"
 
 
 class AnyType(str):
@@ -206,8 +208,9 @@ class GJJ_MultifunctionCalculator:
         "取余",
         "模数",
     ]
-    RETURN_TYPES = ("FLOAT", "INT", "STRING")
-    RETURN_NAMES = ("浮点结果", "整数结果", "公式文本")
+    # 前端会按按钮动态显示输出口；后端按同一顺序动态返回，避免隐藏槽位错位。
+    RETURN_TYPES = ("FLOAT", any_type, any_type)
+    RETURN_NAMES = ("浮点结果", "整数结果", "输出公式")
     OUTPUT_TOOLTIPS = (
         "公式计算后的浮点结果。",
         "公式计算后四舍五入得到的整数结果。",
@@ -238,6 +241,26 @@ class GJJ_MultifunctionCalculator:
                             "forceInput": True,
                         },
                     ),
+                    SHOW_INT_OUTPUT_NAME: (
+                        "BOOLEAN",
+                        {
+                            "default": False,
+                            "display_name": "",
+                            "tooltip": "内部状态：是否显示整数结果输出口。前端按钮控制，默认隐藏。",
+                            "display": "hidden",
+                            "hidden": True,
+                        },
+                    ),
+                    SHOW_FORMULA_OUTPUT_NAME: (
+                        "BOOLEAN",
+                        {
+                            "default": False,
+                            "display_name": "",
+                            "tooltip": "内部状态：是否显示输出公式输出口。前端按钮控制，默认隐藏。",
+                            "display": "hidden",
+                            "hidden": True,
+                        },
+                    ),
                 }
             ),
         }
@@ -246,19 +269,27 @@ class GJJ_MultifunctionCalculator:
     def IS_CHANGED(cls, formula, **kwargs):
         values = _collect_values(kwargs)
         parts = [str(_normalize_formula(formula))]
+        parts.append(f"int:{bool(kwargs.get(SHOW_INT_OUTPUT_NAME, False))}")
+        parts.append(f"formula:{bool(kwargs.get(SHOW_FORMULA_OUTPUT_NAME, False))}")
         parts.extend(f"{key}:{values[key]}" for key in sorted(values))
         return "|".join(parts)
 
     def calculate(self, formula, **kwargs):
         values = _collect_values(kwargs)
         result = _calculate_formula(formula, values)
+        formula_text = _normalize_formula(formula)
+        outputs: list[Any] = [result]
+        if bool(kwargs.get(SHOW_INT_OUTPUT_NAME, False)):
+            outputs.append(int(round(result)))
+        if bool(kwargs.get(SHOW_FORMULA_OUTPUT_NAME, False)):
+            outputs.append(formula_text)
         return {
             "ui": {
                 "calculator_result": [result],
-                "calculator_formula": [_normalize_formula(formula)],
+                "calculator_formula": [formula_text],
                 "calculator_inputs": [len(values)],
             },
-            "result": (result, int(round(result)), _normalize_formula(formula)),
+            "result": tuple(outputs),
         }
 
 

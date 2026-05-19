@@ -6,7 +6,18 @@ const INPUT_PREFIX = "value_";
 const MAX_INPUTS = 24;
 const FORMULA_WIDGET = "formula";
 const ADVANCED_STATE_PROPERTY = "gjj_calculator_advanced_open";
+const SHOW_INT_OUTPUT_PROPERTY = "gjj_calculator_show_int_output";
+const SHOW_FORMULA_OUTPUT_PROPERTY = "gjj_calculator_show_formula_output";
+const SHOW_INT_WIDGET = "show_int_output";
+const SHOW_FORMULA_WIDGET = "show_formula_output";
+const INTERNAL_CONTROL_WIDGETS = new Set([SHOW_INT_WIDGET, SHOW_FORMULA_WIDGET]);
 const MIN_VISIBLE_INPUTS = 1;
+const PANEL_MIN_HEIGHT = 28;
+const OUTPUT_DEFS = [
+	{ index: 0, type: "FLOAT", name: "浮点结果", tooltip: "公式计算后的浮点结果。", always: true },
+	{ index: 1, type: "INT", name: "整数结果", tooltip: "公式计算后四舍五入得到的整数结果。", property: SHOW_INT_OUTPUT_PROPERTY },
+	{ index: 2, type: "STRING", name: "输出公式", tooltip: "实际参与计算的公式文本，便于传给其他文本节点记录。", property: SHOW_FORMULA_OUTPUT_PROPERTY },
+];
 const OPERATORS = [
 	{ label: "➕", insert: " + ", title: "加法" },
 	{ label: "➖", insert: " - ", title: "减法" },
@@ -133,9 +144,13 @@ function hideLegacyValueWidgets(node) {
 		widget.__gjjCalculatorHidden = true;
 		widget.type = `converted-widget:${widget.name || "value"}`;
 		widget.hidden = true;
+		widget.serialize = false;
 		widget.computeSize = () => [0, 0];
 		widget.draw = () => {};
 		widget.label = "";
+		widget.name = widget.name || "gjj_hidden_value";
+		widget.last_y = 0;
+		widget.y = 0;
 		if (widget.inputEl) {
 			widget.inputEl.style.display = "none";
 		}
@@ -195,6 +210,167 @@ function setAdvancedOpen(node, open) {
 	updateAdvancedVisibility(node);
 	measurePanel(node);
 	setDirty(node);
+}
+
+function boolFromValue(value, fallback = false) {
+	if (value === undefined || value === null || value === "") {
+		return Boolean(fallback);
+	}
+	if (typeof value === "string") {
+		return ["true", "1", "yes", "on"].includes(value.toLowerCase());
+	}
+	return Boolean(value);
+}
+
+function propertyToWidgetName(property) {
+	if (property === SHOW_INT_OUTPUT_PROPERTY) {
+		return SHOW_INT_WIDGET;
+	}
+	if (property === SHOW_FORMULA_OUTPUT_PROPERTY) {
+		return SHOW_FORMULA_WIDGET;
+	}
+	return null;
+}
+
+function getBoolProperty(node, property, fallback = false) {
+	const widgetName = propertyToWidgetName(property);
+	const widget = widgetName ? getWidget(node, widgetName) : null;
+	if (node?.properties && Object.prototype.hasOwnProperty.call(node.properties, property)) {
+		return boolFromValue(node.properties[property], fallback);
+	}
+	if (widget) {
+		return boolFromValue(widget.value, fallback);
+	}
+	return Boolean(fallback);
+}
+
+function setBoolProperty(node, property, value) {
+	const resolved = Boolean(value);
+	node.properties = node.properties || {};
+	node.properties[property] = resolved;
+	const widgetName = propertyToWidgetName(property);
+	const widget = widgetName ? getWidget(node, widgetName) : null;
+	if (widget) {
+		widget.value = resolved;
+		if (widget.inputEl) {
+			widget.inputEl.value = String(resolved);
+			widget.inputEl.checked = resolved;
+		}
+		if (widget.element) {
+			if ("value" in widget.element) widget.element.value = String(resolved);
+			if ("checked" in widget.element) widget.element.checked = resolved;
+		}
+		widget.callback?.(resolved);
+	}
+}
+
+function hideInternalControlWidgets(node) {
+	for (const widget of node.widgets || []) {
+		if (!INTERNAL_CONTROL_WIDGETS.has(String(widget?.name || ""))) {
+			continue;
+		}
+		// 这些 BOOLEAN 只是给后端传递开关状态，必须保留 serialize，
+		// 但不能改成 converted-widget，否则 ComfyUI 会在左侧画出一个输入点。
+		widget.__gjjCalculatorInternalHidden = true;
+		widget.hidden = true;
+		widget.serialize = true;
+		widget.computeSize = () => [0, 0];
+		widget.draw = () => {};
+		widget.label = "";
+		widget.display_name = "";
+		widget.options = widget.options || {};
+		widget.options.display = "hidden";
+		widget.options.hidden = true;
+		widget.last_y = 0;
+		widget.y = 0;
+		if (widget.inputEl) {
+			widget.inputEl.style.display = "none";
+			widget.inputEl.style.height = "0";
+			widget.inputEl.style.margin = "0";
+			widget.inputEl.style.padding = "0";
+		}
+		if (widget.element) {
+			widget.element.style.display = "none";
+			widget.element.style.height = "0";
+			widget.element.style.margin = "0";
+			widget.element.style.padding = "0";
+		}
+	}
+}
+
+function removeInternalControlInputs(node) {
+	// 保险处理：某些版本/主题会把隐藏 BOOLEAN 误转为输入槽，直接移除，避免左侧多一个蓝点。
+	for (let index = (node.inputs?.length || 0) - 1; index >= 0; index -= 1) {
+		const name = String(node.inputs[index]?.name || "");
+		if (INTERNAL_CONTROL_WIDGETS.has(name)) {
+			node.removeInput(index);
+		}
+	}
+}
+
+function syncOutputStateFromWidgets(node) {
+	setBoolProperty(node, SHOW_INT_OUTPUT_PROPERTY, getBoolProperty(node, SHOW_INT_OUTPUT_PROPERTY, false));
+	setBoolProperty(node, SHOW_FORMULA_OUTPUT_PROPERTY, getBoolProperty(node, SHOW_FORMULA_OUTPUT_PROPERTY, false));
+}
+
+function setButtonActive(button, active) {
+	if (!button) {
+		return;
+	}
+	button.style.borderColor = active ? "#7fa7b3" : "#465960";
+	button.style.background = active ? "#20333b" : "#172026";
+	button.style.color = active ? "#ffffff" : "#dce7e2";
+	button.style.opacity = active ? "1" : "0.78";
+}
+
+function outputVisible(node, def) {
+	return Boolean(def.always || getBoolProperty(node, def.property, false));
+}
+
+function getVisibleOutputDefs(node) {
+	return OUTPUT_DEFS.filter((def) => outputVisible(node, def));
+}
+
+function ensureOutputSlots(node) {
+	if (!node) {
+		return;
+	}
+	if (!Array.isArray(node.outputs)) {
+		node.outputs = [];
+	}
+	const visibleDefs = getVisibleOutputDefs(node);
+	// 真正移除隐藏输出口，而不是改名为 hidden，避免界面上出现 __gjj_hidden_output。
+	while (node.outputs.length > visibleDefs.length) {
+		node.removeOutput(node.outputs.length - 1);
+	}
+	while (node.outputs.length < visibleDefs.length) {
+		const def = visibleDefs[node.outputs.length];
+		node.addOutput(def.name, def.type);
+	}
+	visibleDefs.forEach((def, slot) => {
+		const output = node.outputs[slot];
+		if (!output) return;
+		output.name = def.name;
+		output.label = def.name;
+		output.localized_name = def.name;
+		output.type = def.type;
+		output.tooltip = def.tooltip;
+		delete output.hidden;
+		delete output.__gjjCalculatorHidden;
+	});
+	updateOutputButtons(node);
+}
+
+function toggleOutput(node, property) {
+	setBoolProperty(node, property, !getBoolProperty(node, property, false));
+	ensureOutputSlots(node);
+	measurePanel(node);
+	setDirty(node);
+}
+
+function updateOutputButtons(node) {
+	setButtonActive(node.__gjjCalculatorIntOutputButton, getBoolProperty(node, SHOW_INT_OUTPUT_PROPERTY, false));
+	setButtonActive(node.__gjjCalculatorFormulaOutputButton, getBoolProperty(node, SHOW_FORMULA_OUTPUT_PROPERTY, false));
 }
 
 function updateAdvancedVisibility(node) {
@@ -405,22 +581,44 @@ function rebuildInputButtons(node) {
 		const advancedButton = createButton("高级", "显示高级计算按钮", () => setAdvancedOpen(node, !isAdvancedOpen(node)));
 		node.__gjjCalculatorAdvancedButton = advancedButton;
 	}
+	if (!node.__gjjCalculatorIntOutputButton) {
+		const button = createButton("整数结果", "显示/隐藏“整数结果”输出口", () => toggleOutput(node, SHOW_INT_OUTPUT_PROPERTY));
+		node.__gjjCalculatorIntOutputButton = button;
+	}
+	if (!node.__gjjCalculatorFormulaOutputButton) {
+		const button = createButton("输出公式", "显示/隐藏“公式文本”输出口", () => toggleOutput(node, SHOW_FORMULA_OUTPUT_PROPERTY));
+		node.__gjjCalculatorFormulaOutputButton = button;
+	}
 	row.appendChild(node.__gjjCalculatorAdvancedButton);
+	row.appendChild(node.__gjjCalculatorIntOutputButton);
+	row.appendChild(node.__gjjCalculatorFormulaOutputButton);
 	updateAdvancedVisibility(node);
+	updateOutputButtons(node);
+	measurePanel(node);
 }
 
 function measurePanel(node) {
-	const container = node?.__gjjCalculatorPanel?.element || node?.__gjjCalculatorPanel;
+	const widget = node?.__gjjCalculatorPanel;
+	const container = widget?.element || widget;
 	if (!container) {
 		return;
 	}
-	requestAnimationFrame(() => {
-		const height = Math.max(170, Math.ceil(container.scrollHeight || container.offsetHeight || 170));
-		if (node.__gjjCalculatorPanelHeight !== height) {
-			node.__gjjCalculatorPanelHeight = height;
-			setDirty(node);
-		}
-	});
+	clearTimeout(node.__gjjCalculatorMeasureTimer);
+	node.__gjjCalculatorMeasureTimer = setTimeout(() => {
+		requestAnimationFrame(() => {
+			// 先把 DOM widget 高度收回到内容高度，再读取 scrollHeight，避免旧高度反向撑开。
+			container.style.height = "auto";
+			container.style.minHeight = "0";
+			const height = Math.max(PANEL_MIN_HEIGHT, Math.ceil(container.scrollHeight || container.getBoundingClientRect?.().height || PANEL_MIN_HEIGHT) + 2);
+			if (node.__gjjCalculatorPanelHeight !== height) {
+				node.__gjjCalculatorPanelHeight = height;
+				if (widget && typeof widget.computeSize === "function") {
+					widget.last_y = 0;
+				}
+				setDirty(node);
+			}
+		});
+	}, 20);
 }
 
 function ensureCalculatorPanel(node) {
@@ -434,7 +632,7 @@ function ensureCalculatorPanel(node) {
 	}
 
 	const container = document.createElement("div");
-	container.style.cssText = "display:flex;flex-direction:column;gap:7px;padding:4px 0 2px;color:#dce7e2;";
+	container.style.cssText = "display:flex;flex-direction:column;gap:6px;padding:2px 0 0;color:#dce7e2;overflow:visible;";
 
 	const inputRow = createRow();
 	container.appendChild(inputRow);
@@ -490,10 +688,11 @@ function ensureCalculatorPanel(node) {
 	const widget = node.addDOMWidget?.("gjj_calculator_panel", "calculator_panel", container, {
 		serialize: false,
 		hideOnZoom: false,
-		getHeight: () => Math.max(170, node.__gjjCalculatorPanelHeight || 170),
+		getHeight: () => Math.max(PANEL_MIN_HEIGHT, node.__gjjCalculatorPanelHeight || PANEL_MIN_HEIGHT),
 	});
 	if (widget) {
-		widget.computeSize = (width) => [Math.max(300, width || 300), Math.max(170, node.__gjjCalculatorPanelHeight || 170)];
+		widget.computeSize = (width) => [Math.max(260, width || 260), Math.max(PANEL_MIN_HEIGHT, node.__gjjCalculatorPanelHeight || PANEL_MIN_HEIGHT)];
+		widget.last_y = 0;
 	}
 	node.__gjjCalculatorPanel = widget || { element: container };
 	updateResultPreview(node, node.__gjjCalculatorLastResult);
@@ -552,10 +751,14 @@ function stabilizeNode(node) {
 	if (!node) {
 		return;
 	}
+	removeInternalControlInputs(node);
 	trimTrailingUnusedInputs(node);
 	ensureTrailingEmptyInput(node);
 	renameInputs(node);
 	hideLegacyValueWidgets(node);
+	hideInternalControlWidgets(node);
+	syncOutputStateFromWidgets(node);
+	ensureOutputSlots(node);
 	patchFormulaWidget(node);
 	patchExecution(node);
 	ensureCalculatorPanel(node);
@@ -575,6 +778,11 @@ app.registerExtension({
 		if (!TARGET_NODES.has(nodeData?.name)) {
 			return;
 		}
+
+		// 新建节点时默认只显示“浮点结果”，另外两个输出由按钮真正添加。
+		nodeData.output = ["FLOAT"];
+		nodeData.output_name = ["浮点结果"];
+		nodeData.output_tooltips = ["公式计算后的浮点结果。"];
 
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
