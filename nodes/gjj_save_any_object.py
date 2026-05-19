@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import re
 import wave
@@ -480,6 +481,25 @@ def _output_image_preview(path: str) -> dict[str, str | int] | None:
     }
 
 
+def _guess_mime_type(path: str, fallback: str = "application/octet-stream") -> str:
+    suffix = Path(path).suffix.lower()
+    forced = {
+        ".mp4": "video/mp4",
+        ".m4v": "video/mp4",
+        ".webm": "video/webm",
+        ".mov": "video/quicktime",
+        ".mkv": "video/x-matroska",
+        ".avi": "video/x-msvideo",
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".flac": "audio/flac",
+        ".ogg": "audio/ogg",
+        ".m4a": "audio/mp4",
+        ".aac": "audio/aac",
+    }
+    return forced.get(suffix) or mimetypes.guess_type(path)[0] or fallback
+
+
 def _output_media_preview(path: str) -> dict[str, str | int] | None:
     file_path = Path(path)
     suffix = file_path.suffix.lower()
@@ -500,7 +520,49 @@ def _output_media_preview(path: str) -> dict[str, str | int] | None:
         "type": "output",
         "path": str(file_path),
         "media_type": media_type,
+        "format": _guess_mime_type(str(file_path), f"{media_type}/{suffix.lstrip('.') or 'unknown'}"),
     }
+
+
+def _standard_output_item(item: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "filename": item.get("filename", ""),
+        "subfolder": item.get("subfolder", ""),
+        "type": item.get("type", "output"),
+    }
+    for key in ("width", "height", "format"):
+        if key in item and item.get(key) not in (None, ""):
+            result[key] = item[key]
+    return result
+
+
+def _build_standard_ui_payload(
+    preview_images: list[dict[str, Any]],
+    preview_media: list[dict[str, Any]],
+    preview_text: str,
+) -> dict[str, Any]:
+    """
+    ComfyUI 的任务队列 / 历史记录只识别标准 ui 字段。
+    自定义 preview_* 给本节点 DOM 使用；标准 images/gifs/audio 给右侧任务队列使用。
+    """
+    images = [_standard_output_item(item) for item in preview_images]
+    videos = [_standard_output_item(item) for item in preview_media if str(item.get("media_type", "")) == "video"]
+    audios = [_standard_output_item(item) for item in preview_media if str(item.get("media_type", "")) == "audio"]
+
+    payload: dict[str, Any] = {}
+    if images:
+        payload["images"] = images
+    if videos:
+        # ComfyUI 原生保存视频节点/历史记录通常读取 gifs 字段显示动图/视频缩略图。
+        payload["gifs"] = videos
+        # 兼容部分新版/第三方前端读取 animated 的情况。
+        payload["animated"] = videos
+    if audios:
+        # 原生音频预览/历史记录读取 audio 字段；不支持的前端会安全忽略。
+        payload["audio"] = audios
+    if preview_text:
+        payload["text"] = [preview_text]
+    return payload
 
 
 def _read_text_preview(path: str, max_chars: int = 1600) -> str:
@@ -611,8 +673,10 @@ class GJJ_SaveAnyObject:
         paths_json = json.dumps(saved_paths, ensure_ascii=False, indent=2)
         first_path = saved_paths[0] if saved_paths else ""
         preview_images, preview_media, preview_text = _build_preview_payload(saved_paths)
+        standard_ui = _build_standard_ui_payload(preview_images, preview_media, preview_text)
         return {
             "ui": {
+                **standard_ui,
                 "saved_paths": saved_paths,
                 "saved_count": [len(saved_paths)],
                 "first_path": [first_path],

@@ -654,7 +654,17 @@ app.registerExtension({
 
 		const originalOnExecuted = nodeType.prototype.onExecuted;
 		nodeType.prototype.onExecuted = function (message) {
-			const result = originalOnExecuted?.apply(this, [message]);
+			const cleanMessage = { ...(message || {}) };
+
+			// 后端保留这些标准字段给 ComfyUI 任务队列/历史记录显示缩略图；
+			// 本节点面板使用自定义 DOM 预览，这里交给原生 onExecuted 前先删掉，避免重复预览。
+			delete cleanMessage.images;
+			delete cleanMessage.gifs;
+			delete cleanMessage.animated;
+			delete cleanMessage.audio;
+			delete cleanMessage.text;
+
+			const result = originalOnExecuted?.apply(this, [cleanMessage]);
 			const count = Number(message?.saved_count?.[0] || 0);
 			const firstPath = String(message?.first_path?.[0] || "");
 			this.__gjjSaveAnyObjectPreviewImages = Array.isArray(message?.preview_images) ? message.preview_images : [];
