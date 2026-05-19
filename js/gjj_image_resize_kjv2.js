@@ -107,9 +107,9 @@ const OPTIONS = {
 };
 
 function ensureStyles() {
-  if (document.getElementById("gjj-mf-resize-style-v26")) return;
+  if (document.getElementById("gjj-mf-resize-style-v40")) return;
   const style = document.createElement("style");
-  style.id = "gjj-mf-resize-style-v26";
+  style.id = "gjj-mf-resize-style-v40";
   style.textContent = `
 .gjj-mf-root{box-sizing:border-box;width:100%;padding:4px 0 7px 0;font-family:system-ui,"Microsoft YaHei",sans-serif;color:#dbeafe;pointer-events:auto;user-select:none;}
 .gjj-mf-row-title{font-size:11px;color:#93c5fd;margin:2px 0 5px 2px;opacity:.95;}
@@ -198,7 +198,7 @@ function hideWidgetCompletely(widget) {
   widget.hidden = true;
   widget.disabled = true;
   widget.serialize = true;
-  widget.computeSize = () => [0, -8];
+  widget.computeSize = () => [0, 0];
   widget.draw = () => {};
   widget.mouse = () => false;
   widget.label = "";
@@ -218,14 +218,90 @@ function hideWidgetCompletely(widget) {
   }
 }
 
+function outputHasLinks(output) {
+  if (!output) return false;
+  if (Array.isArray(output.links)) return output.links.length > 0;
+  return output.link != null;
+}
+
+function keyFromOutputName(name) {
+  const text = String(name || "").trim();
+  const found = OUTPUTS.find((x) => x.outName === text || x.label === text || x.key === text);
+  return found?.key || null;
+}
+
+function collectOutputKeysFromSlots(outputs, { linkedOnly = false } = {}) {
+  const keys = [];
+  for (const output of (outputs || []).slice(2)) {
+    if (linkedOnly && !outputHasLinks(output)) continue;
+    const key = keyFromOutputName(output?.name || output?.label || output?.localized_name);
+    if (key && !keys.includes(key)) keys.push(key);
+  }
+  return keys.slice(0, 3);
+}
+
+function rememberSerializedOutputKeys(node, data) {
+  const keys = collectOutputKeysFromSlots(data?.outputs || data?.outputs_values || [], { linkedOnly: false });
+  if (keys.length) node.__gjjMfSerializedExtraOutputs = keys;
+}
+
+function repairConfigFromOutputs(node, cfg = readConfig(node)) {
+  const selected = Array.isArray(cfg.extra_outputs) ? [...cfg.extra_outputs] : [];
+  const serialized = Array.isArray(node.__gjjMfSerializedExtraOutputs) ? node.__gjjMfSerializedExtraOutputs : [];
+  const linked = collectOutputKeysFromSlots(node.outputs, { linkedOnly: true });
+  const named = collectOutputKeysFromSlots(node.outputs, { linkedOnly: false });
+  const merged = [...selected];
+
+  // 载入工作流时，先按序列化输出名/已有连线恢复按钮状态，避免初始化阶段误删输出槽导致断线。
+  for (const key of [...serialized, ...linked, ...(selected.length ? [] : named)]) {
+    if (key && !merged.includes(key)) merged.push(key);
+  }
+
+  const next = merged.filter((key) => OUTPUTS.some((x) => x.key === key)).slice(0, 3);
+  if (next.join("|") !== selected.join("|")) {
+    cfg = writeConfig(node, { extra_outputs: next });
+  }
+  return cfg;
+}
+
+function applyOutputSlot(output, def) {
+  if (!output || !def) return;
+  output.name = def.outName;
+  output.label = def.outName;
+  output.localized_name = def.outName;
+  output.type = def.type;
+  output.tooltip = def.title;
+}
+
 function updateOutputs(node) {
   if (!node.outputs) return;
-  const cfg = writeConfig(node);
-  while (node.outputs.length > 2) node.removeOutput(2);
-  for (const key of cfg.extra_outputs.slice(0, 3)) {
-    const out = OUTPUTS.find((x) => x.key === key);
-    if (out) node.addOutput(out.outName, out.type);
+  const cfg = repairConfigFromOutputs(node, readConfig(node));
+  const selected = cfg.extra_outputs.slice(0, 3).filter((key) => OUTPUTS.some((x) => x.key === key));
+
+  // 只收缩未使用的尾部输出；已有连线的槽位不硬删，先通过 repairConfigFromOutputs 并入 selected。
+  for (let i = node.outputs.length - 1; i >= 2; i--) {
+    if (i < 2 + selected.length) continue;
+    if (outputHasLinks(node.outputs[i])) continue;
+    try { node.removeOutput(i); } catch (_) { node.outputs.splice(i, 1); }
   }
+
+  for (let i = 0; i < selected.length; i++) {
+    const def = OUTPUTS.find((x) => x.key === selected[i]);
+    const slot = 2 + i;
+    if (!node.outputs[slot]) {
+      node.addOutput(def.outName, def.type);
+    } else {
+      applyOutputSlot(node.outputs[slot], def);
+    }
+  }
+
+  // 如果仍有多余的未连接输出，继续清掉；连接中的保留，避免刷新瞬间断线。
+  for (let i = node.outputs.length - 1; i >= 2 + selected.length; i--) {
+    if (outputHasLinks(node.outputs[i])) continue;
+    try { node.removeOutput(i); } catch (_) { node.outputs.splice(i, 1); }
+  }
+
+  writeConfig(node, { extra_outputs: selected });
 }
 
 function redraw(node) {
@@ -233,6 +309,11 @@ function redraw(node) {
     try {
       const minW = 260;
       if (node.size) node.size[0] = Math.max(node.size[0], minW);
+      if (node.__gjjMfDomWidget?.element) {
+        const h = Math.max(1, Math.ceil(node.__gjjMfDomWidget.element.scrollHeight || node.__gjjMfDomWidget.element.offsetHeight || 1));
+        node.__gjjMfDomWidget.computedHeight = h + 6;
+        node.__gjjMfDomWidget.last_y = 0;
+      }
     } catch (_) {}
     node.setDirtyCanvas?.(true, true);
     node.graph?.setDirtyCanvas?.(true, true);
@@ -449,7 +530,10 @@ function ensureDomWidget(node) {
     widget.element = root;
   }
   widget.serialize = false;
-  widget.computeSize = () => [Math.max(235, (node.size?.[0] || 270) - 28), Math.max(230, root.offsetHeight || 260)];
+  widget.computeSize = () => {
+    const h = Math.max(1, Math.ceil(root.scrollHeight || root.offsetHeight || 1));
+    return [Math.max(235, (node.size?.[0] || 270) - 28), h + 6];
+  };
   node.__gjjMfDomWidget = widget;
   purgeLegacyStatusAndPanels(node, widget);
 }
@@ -537,8 +621,8 @@ function handleBackendStatus(detail) {
 }
 
 function ensureBackendStatusListener() {
-  if (window.__gjjMfResizeStatusListenerV29) return;
-  window.__gjjMfResizeStatusListenerV29 = true;
+  if (window.__gjjMfResizeStatusListenerV40) return;
+  window.__gjjMfResizeStatusListenerV40 = true;
   try {
     api.addEventListener("gjj_image_resize_kjv2_status", handleBackendStatus);
   } catch (_) {}
@@ -569,7 +653,7 @@ function initNode(node) {
 }
 
 app.registerExtension({
-  name: "GJJ.MultiFunctionImageResize.v29.batchCount",
+  name: "GJJ.MultiFunctionImageResize.v40.keepLinks",
   async beforeRegisterNodeDef(nodeType, nodeData) {
     ensureBackendStatusListener();
     if (nodeData.name !== NODE_CLASS) return;
@@ -592,9 +676,12 @@ app.registerExtension({
     };
 
     const originalOnConfigure = nodeType.prototype.onConfigure;
-    nodeType.prototype.onConfigure = function () {
+    nodeType.prototype.onConfigure = function (data) {
+      rememberSerializedOutputKeys(this, data);
       const ret = originalOnConfigure?.apply(this, arguments);
+      rememberSerializedOutputKeys(this, data);
       setTimeout(() => initNode(this), 0);
+      setTimeout(() => initNode(this), 180);
       return ret;
     };
 
