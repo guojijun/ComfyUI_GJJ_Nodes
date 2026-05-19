@@ -21,14 +21,14 @@ function refreshNode(node) {
 	GJJ_Utils.refreshNode(node);
 }
 
-function hideWidget(widget) {
+function hideWidget(node, widget) {
 	if (!widget) {
 		return;
 	}
-	widget.type = `converted-widget:${widget.name || "hidden"}`;
+	// 使用 ComfyUI 标准方式隐藏 widget：改变类型但不破坏序列化
+	widget.type = "hidden";
 	widget.options = widget.options || {};
 	widget.options.hidden = true;
-	widget.computeSize = () => [0, -4];
 }
 
 function setStatus(node, text, tone = "idle") {
@@ -292,71 +292,69 @@ function computeVideoSignature(node) {
 }
 
 function hookSerialization(node) {
-	for (const name of INTERNAL_WIDGETS) {
-		hideWidget(getWidget(node, name));
-	}
-
-	const imageWidget = getWidget(node, "image");
-	if (imageWidget) {
-		imageWidget.serializeValue = async () => {
-			try {
-				setStatus(node, "正在捕获截图...", "busy");
-				console.log("[GJJ Mesh2Motion] 开始捕获截图...");
-				const dataUrl = await captureFromIframe(node._gjjMesh2MotionIframe);
-				console.log("[GJJ Mesh2Motion] 截图 dataUrl 长度:", dataUrl?.length);
-				const result = await uploadTempImage(dataUrl);
-				console.log("[GJJ Mesh2Motion] 上传结果:", result);
-				setStatus(node, "截图已捕获", "ok");
-				const serialized = JSON.stringify({
-					name: result.name,
-					subfolder: result.subfolder,
-					type: result.type,
-				});
-				console.log("[GJJ Mesh2Motion] 截图序列化值:", serialized);
-				return serialized;
-			} catch (error) {
-				console.error("[GJJ Mesh2Motion] 截图捕获失败：", error);
-				setStatus(node, `截图捕获失败：${error?.message || error}`, "error");
-				return "";
-			}
-		};
-	}
-
-	const videoWidget = getWidget(node, "video_frames");
-	if (videoWidget) {
-		videoWidget.serializeValue = async () => {
+	// 不再依赖 hidden widget 的 serializeValue，改为在执行前捕获数据
+	// 监听 ComfyUI 的执行事件
+	
+	const originalOnGraphChange = node.onGraphChange;
+	
+	// 创建捕获函数
+	const captureData = async () => {
+		try {
+			console.log("[GJJ Mesh2Motion] ⚡ 开始捕获数据...");
+			
+			// 捕获截图
+			setStatus(node, "正在捕获截图...", "busy");
+			const dataUrl = await captureFromIframe(node._gjjMesh2MotionIframe);
+			console.log("[GJJ Mesh2Motion] 截图 dataUrl 长度:", dataUrl?.length);
+			const imageResult = await uploadTempImage(dataUrl);
+			console.log("[GJJ Mesh2Motion] 上传结果:", imageResult);
+			
+			node.properties = node.properties || {};
+			node.properties.mesh2motion_image = JSON.stringify({
+				name: imageResult.name,
+				subfolder: imageResult.subfolder,
+				type: imageResult.type,
+			});
+			setStatus(node, "截图已捕获", "ok");
+			
+			// 如果有相机预设，捕获视频
 			const presetFile = node.properties?.mesh2motion_camera_preset;
-			if (!presetFile) {
-				return "";
+			if (presetFile) {
+				const fileName = String(presetFile).split("/").pop() || "";
+				const presetId = fileName.replace(/\.json$/i, "");
+				if (presetId) {
+					setStatus(node, "正在录制相机预设视频...", "busy");
+					const videoResult = await captureVideoFromIframe(
+						node._gjjMesh2MotionIframe,
+						presetId,
+						Number(widgetValue(node, "width", 1024)) || 1024,
+						Number(widgetValue(node, "height", 1024)) || 1024,
+					);
+					node.properties.mesh2motion_video = JSON.stringify({
+						video: videoResult.videoPath,
+						fps: videoResult.fps,
+					});
+					setStatus(node, "视频已录制", "ok");
+				}
 			}
-			const signature = computeVideoSignature(node);
-			if (signature && signature === node._gjjMesh2MotionVideoSig && node._gjjMesh2MotionVideoSerialized) {
-				return node._gjjMesh2MotionVideoSerialized;
-			}
-			const fileName = String(presetFile).split("/").pop() || "";
-			const presetId = fileName.replace(/\.json$/i, "");
-			if (!presetId) {
-				return "";
-			}
-			try {
-				setStatus(node, "正在录制相机预设视频...", "busy");
-				const result = await captureVideoFromIframe(
-					node._gjjMesh2MotionIframe,
-					presetId,
-					Number(widgetValue(node, "width", 1024)) || 1024,
-					Number(widgetValue(node, "height", 1024)) || 1024,
-				);
-				const serialized = JSON.stringify({ video: result.videoPath, fps: result.fps });
-				node._gjjMesh2MotionVideoSig = signature;
-				node._gjjMesh2MotionVideoSerialized = serialized;
-				setStatus(node, "视频已录制", "ok");
-				return serialized;
-			} catch (error) {
-				console.error("[GJJ Mesh2Motion] 视频捕获失败：", error);
-				setStatus(node, `视频捕获失败：${error?.message || error}`, "error");
-				return "";
-			}
-		};
+			
+			console.log("[GJJ Mesh2Motion] ✅ 数据捕获完成，已保存到 properties");
+			console.log("[GJJ Mesh2Motion] properties 内容:", JSON.stringify(node.properties));
+		} catch (error) {
+			console.error("[GJJ Mesh2Motion] 捕获失败：", error);
+			setStatus(node, `捕获失败：${error?.message || error}`, "error");
+		}
+	};
+	
+	// 存储捕获函数供外部调用
+	node._gjjMesh2MotionCapture = captureData;
+	
+	// 隐藏内部 widget（如果存在）
+	for (const name of INTERNAL_WIDGETS) {
+		const widget = getWidget(node, name);
+		if (widget) {
+			hideWidget(node, widget);
+		}
 	}
 }
 
@@ -368,6 +366,40 @@ function createPanel(node) {
 
 	const container = document.createElement("div");
 	container.className = "gjj-mesh2motion-panel";
+
+	// 添加捕获按钮
+	const buttonRow = document.createElement("div");
+	buttonRow.style.cssText = "display:flex;gap:8px;padding:8px;background:#1a2328;";
+	
+	const captureBtn = document.createElement("button");
+	captureBtn.textContent = "📸 捕获并执行";
+	captureBtn.style.cssText = "flex:1;padding:8px 12px;background:#4a9eff;color:white;border:none;border-radius:6px;cursor:pointer;font-size:13px;";
+	captureBtn.onclick = async () => {
+		if (node._gjjMesh2MotionCapture) {
+			await node._gjjMesh2MotionCapture();
+			// 等待 properties 被序列化
+			await new Promise(resolve => setTimeout(resolve, 200));
+			// 强制刷新节点状态
+			refreshNode(node);
+			// 等待 UI 更新
+			await new Promise(resolve => setTimeout(resolve, 100));
+			// 触发 ComfyUI 执行
+			app.queuePrompt(0, 1);
+		}
+	};
+	
+	const refreshBtn = document.createElement("button");
+	refreshBtn.textContent = "🔄 刷新";
+	refreshBtn.style.cssText = "padding:8px 12px;background:#314147;color:white;border:none;border-radius:6px;cursor:pointer;font-size:13px;";
+	refreshBtn.onclick = () => {
+		if (node._gjjMesh2MotionIframe) {
+			node._gjjMesh2MotionIframe.src = node._gjjMesh2MotionIframe.src;
+		}
+	};
+	
+	buttonRow.appendChild(captureBtn);
+	buttonRow.appendChild(refreshBtn);
+	container.appendChild(buttonRow);
 
 	const iframe = document.createElement("iframe");
 	iframe.className = "gjj-mesh2motion-frame";
@@ -396,14 +428,14 @@ function createPanel(node) {
 	node.addDOMWidget(VIEW_WIDGET, "HTML", container, {
 		hideOnZoom: false,
 		serialize: false,
-		getMinHeight: () => 460,
+		getMinHeight: () => 520,
 	});
 
 	hookLiveControls(node);
 	hookSerialization(node);
 
-	const [width, height] = node.size || [560, 760];
-	node.setSize?.([Math.max(width, 560), Math.max(height, 760)]);
+	const [width, height] = node.size || [560, 820];
+	node.setSize?.([Math.max(width, 560), Math.max(height, 820)]);
 	refreshNode(node);
 }
 
@@ -463,13 +495,19 @@ app.registerExtension({
 	name: "GJJ.Mesh2MotionExplore",
 
 	setup() {
+		console.log("[GJJ Mesh2Motion] 🚀 扩展已注册");
 		ensureStyle();
 	},
 
 	nodeCreated(node) {
-		if (String(node?.constructor?.comfyClass || node?.comfyClass || "") !== NODE_CLASS) {
+		const nodeClass = String(node?.constructor?.comfyClass || node?.comfyClass || "");
+		console.log(`[GJJ Mesh2Motion] nodeCreated 触发，节点类: ${nodeClass}`);
+		
+		if (nodeClass !== NODE_CLASS) {
 			return;
 		}
+		
+		console.log(`[GJJ Mesh2Motion] ✅ 匹配到目标节点，开始创建面板`);
 		ensureStyle();
 
 		// 检查 mesh2motion 资源是否存在

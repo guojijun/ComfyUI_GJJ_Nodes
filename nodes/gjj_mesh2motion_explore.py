@@ -123,6 +123,20 @@ def _blank_image(width: int, height: int) -> torch.Tensor:
     return torch.zeros((1, int(height), int(width), 3), dtype=torch.float32)
 
 
+def _get_node_properties(extra_pnginfo: dict | None, unique_id: str | None) -> dict:
+    """从 workflow 中读取节点 properties"""
+    try:
+        if not unique_id or not extra_pnginfo:
+            return {}
+        workflow = extra_pnginfo.get("workflow") or {}
+        for node in workflow.get("nodes") or []:
+            if str(node.get("id")) == str(unique_id):
+                return node.get("properties") or {}
+    except Exception:
+        pass
+    return {}
+
+
 def _load_and_resize_image(image_path: str, width: int, height: int) -> torch.Tensor:
     try:
         image = Image.open(image_path)
@@ -280,6 +294,8 @@ class GJJ_Mesh2MotionExplore:
             "hidden": {
                 "image": "IMAGE",
                 "video_frames": "STRING",
+                "unique_id": "UNIQUE_ID",
+                "extra_pnginfo": "EXTRA_PNGINFO",
             },
         }
 
@@ -294,13 +310,39 @@ class GJJ_Mesh2MotionExplore:
         fps=24,
         image="",
         video_frames="",
+        unique_id=None,
+        extra_pnginfo=None,
     ):
+        print(f"[GJJ Mesh2Motion] ========== 开始执行 ==========")
+        print(f"[GJJ Mesh2Motion] unique_id: {unique_id}")
+        print(f"[GJJ Mesh2Motion] image 参数长度: {len(str(image)) if image else 0}")
+        print(f"[GJJ Mesh2Motion] video_frames 参数长度: {len(str(video_frames)) if video_frames else 0}")
+        
         width = _normalize_size(width, 1024, "输出宽度")
         height = _normalize_size(height, 1024, "输出高度")
         fps = max(1, min(120, int(fps)))
 
+        # 优先从 properties 读取数据（新方案）
+        props = _get_node_properties(extra_pnginfo, unique_id)
+        print(f"[GJJ Mesh2Motion] 节点 properties: {list(props.keys())}")
+        
+        image_data = props.get("mesh2motion_image", "")
+        video_data = props.get("mesh2motion_video", "")
+
+        print(f"[GJJ Mesh2Motion] properties 中的 image_data 长度: {len(image_data) if image_data else 0}")
+        print(f"[GJJ Mesh2Motion] properties 中的 video_data 长度: {len(video_data) if video_data else 0}")
+
+        # 如果 properties 有数据，优先使用
+        if image_data:
+            print(f"[GJJ Mesh2Motion] 使用 properties 中的截图数据")
+            image = image_data
+        if video_data:
+            print(f"[GJJ Mesh2Motion] 使用 properties 中的视频数据")
+            video_frames = video_data
+
         if image:
             try:
+                print(f"[GJJ Mesh2Motion] 开始解析截图数据...")
                 payload = json.loads(str(image))
                 name = payload.get("name", "")
                 subfolder = payload.get("subfolder", "")
@@ -318,13 +360,16 @@ class GJJ_Mesh2MotionExplore:
                 print(f"[GJJ Mesh2Motion] 截图加载成功，shape: {screenshot.shape}")
             except Exception as exc:
                 print(f"[GJJ Mesh2Motion] 截图加载失败，使用黑色图像占位：{exc}")
+                traceback.print_exc()
                 screenshot = _blank_image(width, height)
         else:
+            print(f"[GJJ Mesh2Motion] 没有截图数据，使用黑色图像占位")
             screenshot = _blank_image(width, height)
 
         video_tensor = None
         if video_frames:
             try:
+                print(f"[GJJ Mesh2Motion] 开始解析视频数据...")
                 payload = json.loads(str(video_frames))
                 video_name = payload.get("video") if isinstance(payload, dict) else None
                 if video_name:
@@ -336,10 +381,13 @@ class GJJ_Mesh2MotionExplore:
                     print(f"[GJJ Mesh2Motion] 视频加载成功，共 {video_tensor.shape[0]} 帧")
             except Exception as exc:
                 print(f"[GJJ Mesh2Motion] 视频读取失败，改用黑色视频占位：{exc}")
+                traceback.print_exc()
 
         if video_tensor is None:
+            print(f"[GJJ Mesh2Motion] 没有视频数据，使用黑色视频占位")
             video_tensor = _blank_image(width, height)
 
+        print(f"[GJJ Mesh2Motion] ========== 执行完成 ==========")
         return (screenshot, _video_from_frames(video_tensor, fps))
 
 
