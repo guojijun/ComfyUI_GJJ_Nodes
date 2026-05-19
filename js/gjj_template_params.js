@@ -1,3 +1,123 @@
+
+/* =========================
+   GJJ MEDIA V2 PATCH
+   ========================= */
+
+const IMAGE_EXTS = new Set(["png","jpg","jpeg","webp","bmp","gif","avif","tiff"]);
+const AUDIO_EXTS = new Set(["mp3","wav","flac","ogg","m4a","aac","wma"]);
+const VIDEO_EXTS = new Set(["mp4","mov","mkv","webm","avi","flv","mpeg","m4v"]);
+
+function detectMediaType(value) {
+	if (typeof value !== "string") return null;
+
+	const text = value.trim().toLowerCase();
+
+	if (!text.includes(".")) return null;
+
+	const ext = text.split(".").pop();
+
+	if (IMAGE_EXTS.has(ext)) return "IMAGE";
+	if (AUDIO_EXTS.has(ext)) return "AUDIO";
+	if (VIDEO_EXTS.has(ext)) return "VIDEO";
+
+	return null;
+}
+
+function updatePreview(preview, value, isImage, isAudio, isVideo) {
+	if (!preview) return;
+
+	if (!value || value.trim() === "") {
+		let tip = "无媒体";
+
+		if (isImage) tip = "无图片";
+		else if (isVideo) tip = "无视频";
+		else if (isAudio) tip = "无音频";
+
+		preview.innerHTML = "<span style='color:#777;font-size:11px;'>" + tip + "</span>";
+		return;
+	}
+
+	const fileName = value.trim().split(/[\\\\/]/).pop();
+	const apiUrl = "/view?filename=" + encodeURIComponent(fileName) + "&type=input";
+
+	if (isImage) {
+		preview.innerHTML =
+			'<img src="' + apiUrl + '" style="max-width:100%;max-height:160px;object-fit:contain;border-radius:6px;">';
+	}
+	else if (isVideo) {
+		preview.innerHTML =
+			'<video controls src="' + apiUrl + '" style="width:100%;max-height:220px;object-fit:contain;border-radius:6px;"></video>';
+	}
+	else if (isAudio) {
+		preview.innerHTML =
+			'<audio controls src="' + apiUrl + '" style="width:100%;"></audio>';
+	}
+}
+
+// 从后端获取媒体对象的预览 URL
+async function getMediaPreviewUrl(mediaObj, mediaType) {
+	if (!mediaObj) return null;
+	
+	try {
+		// 如果是字符串路径，直接返回
+		if (typeof mediaObj === 'string') {
+			const fileName = mediaObj.trim().split(/[\\/]/).pop();
+			return "/view?filename=" + encodeURIComponent(fileName) + "&type=input";
+		}
+		
+		// 如果是 IMAGE tensor，需要通过后端 API 转换
+		// 如果是 AUDIO/VIDEO 对象，也需要通过后端保存为临时文件
+		
+		// 目前简单处理：如果对象不是字符串，显示提示
+		return null;
+	} catch (e) {
+		console.error("[GJJ_TemplateParams] 获取媒体预览失败:", e);
+		return null;
+	}
+}
+
+function openFileDialog(node, field, input, values, isImage, isAudio, isVideo) {
+	const inputElement = document.createElement("input");
+
+	inputElement.type = "file";
+
+	inputElement.accept = isImage
+		? "image/*"
+		: isVideo
+			? "video/*"
+			: "audio/*";
+
+	inputElement.addEventListener("change", (event) => {
+		const file = event.target.files?.[0];
+
+		if (!file) return;
+
+		input.value = file.name;
+		values[field.key] = file.name;
+
+		const template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
+		const fields = parseTemplate(template);
+
+		saveState(node, template, fields, values);
+		updateOutputs(node, fields, values);
+
+		const row = input.closest(".gjj-template-param-row");
+
+		if (row) {
+			const preview = row.querySelector(
+				".gjj-template-param-preview-image, .gjj-template-param-preview-audio, .gjj-template-param-preview-video"
+			);
+
+			if (preview) {
+				updatePreview(preview, file.name, isImage, isAudio, isVideo);
+			}
+		}
+	});
+
+	inputElement.click();
+}
+
+
 import { app } from "/scripts/app.js";
 
 const TARGET_NODES = new Set(["GJJ_TemplateParams"]);
@@ -74,6 +194,10 @@ function parseValue(text) {
 }
 
 function inferType(value) {
+	const mediaType = detectMediaType(value);
+
+	if (mediaType) return mediaType;
+
 	if (typeof value === "boolean") return "BOOLEAN";
 	if (Number.isInteger(value)) return "INT";
 	if (typeof value === "number") return "FLOAT";
@@ -84,6 +208,10 @@ function inferType(value) {
 
 function inferTypeFromRaw(rawText, parsedValue) {
 	const raw = String(rawText ?? "").trim();
+
+	const mediaType = detectMediaType(raw);
+
+	if (mediaType) return mediaType;
 
 	// 强制格式优先：float(5) 必须是 FLOAT，int(5.0) 必须是 INT。
 	const forced = raw.match(/^\s*(int|float|str|string|bool|boolean|json)\s*\(/i);
@@ -514,18 +642,33 @@ function buildInputForField(node, field, values) {
 	if (isBooleanField(field, values)) {
 		return buildBoolButtonForField(node, field, values);
 	}
-	const wrap = document.createElement("label");
+
+	const isImage = field.type === "IMAGE";
+	const isAudio = field.type === "AUDIO";
+	const isVideo = field.type === "VIDEO";
+	const isMedia = isImage || isAudio || isVideo;
+
+	const wrap = document.createElement("div");
 	wrap.className = "gjj-template-param-row";
+
 	const label = document.createElement("span");
 	label.className = "gjj-template-param-label";
 	label.textContent = field.label;
 	label.title = field.tooltip || field.type || "STRING";
+
+	const inputWrap = document.createElement("div");
+	inputWrap.style.display = "flex";
+	inputWrap.style.gap = "6px";
+	inputWrap.style.alignItems = "center";
+
 	const input = document.createElement("input");
 	input.className = "gjj-template-param-input";
 	input.value = String(values[field.key] ?? field.default ?? "");
 	input.placeholder = String(field.default ?? "");
 	input.spellcheck = false;
 	input.title = field.tooltip || field.type || "STRING";
+	input.style.flex = "1";
+
 	input.addEventListener("pointerdown", (event) => event.stopPropagation());
 	input.addEventListener("mousedown", (event) => event.stopPropagation());
 	input.addEventListener("input", () => {
@@ -534,8 +677,79 @@ function buildInputForField(node, field, values) {
 		const fields = parseTemplate(template);
 		saveState(node, template, fields, values);
 		updateOutputs(node, fields, values);
+
+		// 更新预览
+		if (isMedia) {
+			const previewClass = isImage
+				? ".gjj-template-param-preview-image"
+				: isVideo
+					? ".gjj-template-param-preview-video"
+					: ".gjj-template-param-preview-audio";
+			const preview = wrap.querySelector(previewClass);
+			if (preview) {
+				updatePreview(preview, input.value, isImage, isAudio, isVideo);
+			}
+		}
 	});
-	wrap.append(label, input);
+
+	inputWrap.appendChild(input);
+
+	// 添加文件选择按钮（仅媒体类型）
+	if (isMedia) {
+		const fileButton = document.createElement("button");
+		fileButton.type = "button";
+		fileButton.className = "gjj-template-param-file-button";
+		fileButton.textContent = "📁";
+		fileButton.title = isImage ? "选择图片" : isVideo ? "选择视频" : "选择音频";
+		fileButton.style.cssText = [
+			"height:30px",
+			"width:36px",
+			"padding:0",
+			"border:1px solid #33464e",
+			"border-radius:8px",
+			"background:#2b2d30",
+			"color:#f1f5f5",
+			"cursor:pointer",
+			"font-size:14px",
+			"display:flex",
+			"align-items:center",
+			"justify-content:center",
+		].join(";");
+
+		fileButton.addEventListener("pointerdown", (event) => event.stopPropagation());
+		fileButton.addEventListener("mousedown", (event) => event.stopPropagation());
+		fileButton.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			openFileDialog(node, field, input, values, isImage, isAudio, isVideo);
+		});
+
+		inputWrap.appendChild(fileButton);
+	}
+
+	wrap.append(label, inputWrap);
+
+	// 添加预览区域（仅媒体类型）
+	if (isMedia) {
+		const preview = document.createElement("div");
+		preview.className = isImage
+			? "gjj-template-param-preview-image"
+			: isVideo
+				? "gjj-template-param-preview-video"
+				: "gjj-template-param-preview-audio";
+		preview.style.cssText = [
+			"grid-column: 1 / -1",
+			"margin-top: 4px",
+			"min-height: 40px",
+			"display:flex",
+			"align-items:center",
+			"justify-content:center",
+		].join(";");
+
+		updatePreview(preview, input.value, isImage, isAudio, isVideo);
+		wrap.appendChild(preview);
+	}
+
 	node.__gjjTemplateParamsRows.set(field.key, input);
 	return wrap;
 }
@@ -579,6 +793,9 @@ function buildDom(node) {
 		.gjj-template-param-label { color:#b9c8cc; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 		.gjj-template-param-input { width:100%; height:30px; padding:4px 8px; border:1px solid #33464e; border-radius:8px; outline:none; background:#2b2d30; color:#f1f5f5; font-size:13px; }
 		.gjj-template-param-input:focus { border-color:#6aa6b8; background:#22282c; }
+		.gjj-template-param-file-button { height:30px; width:36px; padding:0; border:1px solid #33464e; border-radius:8px; background:#2b2d30; color:#f1f5f5; cursor:pointer; font-size:14px; display:flex; align-items:center; justify-content:center; }
+		.gjj-template-param-file-button:hover { background:#3a3d40; border-color:#6aa6b8; }
+		.gjj-template-param-preview-image, .gjj-template-param-preview-video, .gjj-template-param-preview-audio { grid-column: 1 / -1; margin-top: 4px; min-height: 40px; display:flex; align-items:center; justify-content:center; }
 		.gjj-template-param-bool { display:flex; align-items:center; min-width:0; }
 		.gjj-template-param-bool-button { width:100%; height:30px; padding:4px 8px; border:1px solid #33464e; border-radius:8px; outline:none; background:#2b2d30; color:#f1f5f5; font-size:13px; cursor:pointer; text-align:left; }
 		.gjj-template-param-bool-button[data-value="true"] { border-color:#4f8f7a; background:#20362f; color:#dff8ea; }

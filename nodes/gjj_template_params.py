@@ -1,5 +1,183 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+from typing import Any
+
+import folder_paths
+import numpy as np
+import torch
+from PIL import Image, ImageOps
+
+# =========================
+# GJJ MEDIA V2 PATCH
+# =========================
+
+IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "bmp", "gif", "avif", "tiff"}
+AUDIO_EXTS = {"mp3", "wav", "flac", "ogg", "m4a", "aac", "wma"}
+VIDEO_EXTS = {"mp4", "mov", "mkv", "webm", "avi", "flv", "mpeg", "m4v"}
+
+
+def _detect_media_type(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip().lower()
+
+    if "." not in text:
+        return None
+
+    ext = text.rsplit(".", 1)[-1]
+
+    if ext in IMAGE_EXTS:
+        return "IMAGE"
+
+    if ext in AUDIO_EXTS:
+        return "AUDIO"
+
+    if ext in VIDEO_EXTS:
+        return "VIDEO"
+
+    return None
+
+
+def _load_image_from_path(file_path: str) -> torch.Tensor:
+    """从文件路径加载图片为 IMAGE tensor"""
+    try:
+        with Image.open(file_path) as img:
+            img.load()
+            img = ImageOps.exif_transpose(img)
+            if img.mode == "RGBA":
+                array = np.asarray(img).astype(np.float32) / 255.0
+            else:
+                img = img.convert("RGB")
+                array = np.asarray(img).astype(np.float32) / 255.0
+        return torch.from_numpy(array)[None, ...]
+    except Exception as e:
+        print(f"[GJJ_TemplateParams] 加载图片失败: {file_path}, 错误: {e}")
+        return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+
+
+def _load_audio_object(file_path: str) -> dict[str, Any]:
+    """从文件路径加载音频为 AUDIO 对象（兼容旧版 API）"""
+    try:
+        import av
+        with av.open(file_path) as container:
+            if not container.streams.audio:
+                raise ValueError("No audio stream found")
+            stream = container.streams.audio[0]
+            sample_rate = stream.codec_context.sample_rate
+            frames = []
+            for frame in container.decode(streams=stream.index):
+                buf = torch.from_numpy(frame.to_ndarray())
+                if buf.shape[0] != stream.channels:
+                    buf = buf.view(-1, stream.channels).t()
+                frames.append(buf)
+            if not frames:
+                raise ValueError("No audio frames decoded")
+            waveform = torch.cat(frames, dim=1)
+            # 转换为 float32
+            if waveform.dtype != torch.float32:
+                if waveform.dtype == torch.int16:
+                    waveform = waveform.float() / 32768.0
+                elif waveform.dtype == torch.int32:
+                    waveform = waveform.float() / 2147483648.0
+            return {"waveform": waveform.unsqueeze(0), "sample_rate": sample_rate}
+    except Exception as e:
+        print(f"[GJJ_TemplateParams] 加载音频失败: {file_path}, 错误: {e}")
+        # 加载失败时返回默认空音频对象，避免中断执行
+        return {"waveform": torch.zeros((1, 1, 44100)), "sample_rate": 44100}
+
+
+def _load_video_from_path(file_path: str):
+    """从文件路径加载视频为 Video 对象"""
+    try:
+        from comfy_api.latest import InputImpl
+        return InputImpl.VideoFromFile(file_path)
+    except Exception as e:
+        print(f"[GJJ_TemplateParams] 加载视频失败: {file_path}, 错误: {e}")
+        # 回退到 Tensor 格式（兼容旧版）
+        try:
+            import av
+            frames = []
+            container = av.open(file_path)
+            for frame in container.decode(video=0):
+                rgb = frame.to_ndarray(format="rgb24")
+                tensor = torch.from_numpy(rgb).float() / 255.0
+                frames.append(tensor)
+            container.close()
+            if frames:
+                return torch.stack(frames)
+        except Exception:
+            pass
+        return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+
+
+def _resolve_media_file(filename: str) -> str | None:
+    """解析媒体文件路径，支持 input/output/temp 目录"""
+    if not filename or not filename.strip():
+        return None
+    
+    filename = filename.strip()
+    
+    # 尝试在 input 目录查找
+    input_dir = folder_paths.get_input_directory()
+    candidate = os.path.join(input_dir, filename)
+    if os.path.exists(candidate):
+        return candidate
+    
+    # 尝试在 output 目录查找
+    output_dir = folder_paths.get_output_directory()
+    candidate = os.path.join(output_dir, filename)
+    if os.path.exists(candidate):
+        return candidate
+    
+    # 尝试在 temp 目录查找
+    temp_dir = folder_paths.get_temp_directory()
+    candidate = os.path.join(temp_dir, filename)
+    if os.path.exists(candidate):
+        return candidate
+    
+    # 如果是绝对路径且存在
+    if os.path.isabs(filename) and os.path.exists(filename):
+        return filename
+    
+    return None
+
+
+def _load_media_object(filename: str, media_type: str) -> Any:
+    """根据类型加载媒体对象"""
+    file_path = _resolve_media_file(filename)
+    if not file_path:
+        print(f"[GJJ_TemplateParams] 找不到媒体文件: {filename}")
+        # 返回默认值而非抛出异常
+        if media_type == "IMAGE":
+            return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+        elif media_type == "AUDIO":
+            return {"waveform": torch.zeros((1, 1, 44100)), "sample_rate": 44100}
+        elif media_type == "VIDEO":
+            return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+        raise ValueError(f"不支持的媒体类型: {media_type}")
+    
+    try:
+        if media_type == "IMAGE":
+            return _load_image_from_path(file_path)
+        elif media_type == "AUDIO":
+            return _load_audio_object(file_path)
+        elif media_type == "VIDEO":
+            return _load_video_from_path(file_path)
+    except Exception as e:
+        print(f"[GJJ_TemplateParams] 加载媒体对象失败: {filename}, 错误: {e}")
+        # 返回默认值
+        if media_type == "IMAGE":
+            return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+        elif media_type == "AUDIO":
+            return {"waveform": torch.zeros((1, 1, 44100)), "sample_rate": 44100}
+        elif media_type == "VIDEO":
+            return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+        raise
+
+
 import ast
 import json
 import re
@@ -42,7 +220,7 @@ def _strip_quotes(text: str) -> str:
 
 
 def _split_value_and_tooltip(text: str) -> tuple[str, str]:
-    """Split `值 # 提示` into (值, 提示). Supports escaping literal # with \#."""
+    """Split `값 # 提시` into (값, 提시). Supports escaping literal # with \#."""
     raw = str(text or "")
     escaped = False
     quote: str | None = None
@@ -130,6 +308,11 @@ def parse_value(value: Any) -> Any:
 
 
 def _infer_type(value: Any) -> str:
+    media_type = _detect_media_type(value)
+
+    if media_type:
+        return media_type
+
     if isinstance(value, bool):
         return "BOOLEAN"
     if isinstance(value, int) and not isinstance(value, bool):
@@ -141,6 +324,40 @@ def _infer_type(value: Any) -> str:
     if value is None:
         return "NONE"
     return "STRING"
+
+
+def _infer_type_from_raw(raw_text: str, parsed_value: Any) -> str:
+    """从原始文本和解析后的值推断类型。"""
+    raw = str(raw_text or "").strip()
+
+    # 优先检测媒体类型
+    media_type = _detect_media_type(raw)
+    if media_type:
+        return media_type
+
+    # 强制格式优先
+    forced = re.fullmatch(r"(?is)\s*(int|float|str|string|bool|boolean|json)\s*\((.*)\)\s*", raw)
+    if forced:
+        kind = forced.group(1).lower()
+        if kind == "int":
+            return "INT"
+        if kind == "float":
+            return "FLOAT"
+        if kind in {"bool", "boolean"}:
+            return "BOOLEAN"
+        if kind == "json":
+            return "*"
+        return "STRING"
+
+    # 检测浮点数（包括科学计数法）
+    if re.fullmatch(r"[-+]?(?:\d+\.\d*|\.\d+)(?:[eE][-+]?\d+)?", raw) or re.fullmatch(r"[-+]?\d+[eE][-+]?\d+", raw):
+        return "FLOAT"
+
+    # 检测整数
+    if re.fullmatch(r"[-+]?\d+", raw):
+        return "INT"
+
+    return _infer_type(parsed_value)
 
 
 def parse_template(template_text: Any) -> list[dict[str, Any]]:
@@ -191,7 +408,7 @@ def values_from_json(values_json: Any) -> dict[str, Any]:
 class GJJ_TemplateParams:
     CATEGORY = "GJJ/逻辑控制"
     FUNCTION = "output_params"
-    DESCRIPTION = "通过模板文本自动生成参数输入框和输出口。支持格式：帧率：24.0 # 每秒帧数"
+    DESCRIPTION = "通过模板文本自动生成参数输入框和输出口。支持格式：帧率：24.0 # 每秒帧数\n媒体文件会自动加载为 IMAGE/AUDIO/VIDEO 对象"
     SEARCH_ALIASES = [
         "template params",
         "params",
@@ -202,7 +419,7 @@ class GJJ_TemplateParams:
     ]
     RETURN_TYPES = tuple(any_type for _ in range(MAX_OUTPUTS))
     RETURN_NAMES = tuple(f"输出{i + 1}" for i in range(MAX_OUTPUTS))
-    OUTPUT_TOOLTIPS = tuple("由模板自动解析出的参数值。" for _ in range(MAX_OUTPUTS))
+    OUTPUT_TOOLTIPS = tuple("由模板自动解析出的参数值（媒体文件会加载为对象）。" for _ in range(MAX_OUTPUTS))
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -250,11 +467,23 @@ class GJJ_TemplateParams:
         fields = parse_template(template_text)
         value_map = values_from_json(values_json)
         outputs: list[Any] = []
+        
         for field in fields:
             key = str(field.get("key") or "")
             label = str(field.get("label") or "")
             raw_value = value_map.get(key, value_map.get(label, field.get("default", "")))
-            outputs.append(parse_value(raw_value))
+            
+            # 检测是否为媒体文件
+            media_type = _detect_media_type(str(raw_value))
+            
+            if media_type and isinstance(raw_value, str):
+                # 直接加载为媒体对象（失败时返回默认值）
+                media_obj = _load_media_object(raw_value, media_type)
+                outputs.append(media_obj)
+            else:
+                # 非媒体类型：正常解析
+                outputs.append(parse_value(raw_value))
+        
         while len(outputs) < MAX_OUTPUTS:
             outputs.append(None)
         return tuple(outputs[:MAX_OUTPUTS])
