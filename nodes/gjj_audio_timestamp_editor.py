@@ -17,13 +17,17 @@ import torch
 # 步骤1: 导入公共依赖检查函数
 try:
 	from .common_utils.dependency_checker import (
+		build_dependency_model_report,
 		load_dependency_at_runtime,
-		get_pip_install_command_text,
+		print_dependency_model_report,
+		send_dependency_model_notice,
 	)
 except ImportError:
 	from common_utils.dependency_checker import (
+		build_dependency_model_report,
 		load_dependency_at_runtime,
-		get_pip_install_command_text,
+		print_dependency_model_report,
+		send_dependency_model_notice,
 	)
 
 # 步骤2: 依赖可用性检查
@@ -37,9 +41,28 @@ except ImportError as exc:
 
 
 NODE_NAME = "GJJ_AudioTimestampEditor"
+NODE_DISPLAY_NAME = "GJJ · ✂️ 可视化音频分段编辑器"
 BACKEND_VERSION = "V20_CACHE_DEBOUNCE_NO_UPSTREAM_LOOP"
 MAX_SEGMENTS = 99  # 最大分段数量
 MIN_OUTPUTS = 1  # 最小输出数量
+DEPENDENCY_SPECS = [
+	{
+		"module_name": "soundfile",
+		"package_name": "soundfile",
+		"display_name": "soundfile",
+		"description": "可视化音频分段编辑器需要 soundfile 读取、保存和预览音频文件。",
+	},
+]
+_MISSING_DEPENDENCIES = [] if _DEPENDENCIES_AVAILABLE else DEPENDENCY_SPECS
+_MODELS_AVAILABLE = True
+_MISSING_MODELS: list[dict[str, str]] = []
+_DEPENDENCY_REPORT = build_dependency_model_report(
+	node_name=NODE_DISPLAY_NAME,
+	missing_dependencies=_MISSING_DEPENDENCIES,
+	missing_models=_MISSING_MODELS,
+	install_packages=[spec["package_name"] for spec in _MISSING_DEPENDENCIES],
+	original_error=_IMPORT_ERROR or "",
+)
 
 
 # V19：后端缓存。避免前端为了刷新波形/下游预览而重复请求上游时，
@@ -135,8 +158,7 @@ def _clone_payload(payload: dict[str, Any], status_suffix: str = "") -> dict[str
 		ui["preview_text"] = (f"{old}\n{status_suffix}" if old else status_suffix,)
 	return {"ui": ui, "result": payload.get("result")}
 
-# 步骤3: 配置动态 DESCRIPTION
-DESCRIPTION = """
+_DESCRIPTION_INTRO = """
 🟢 音频分段编辑器：加载音频后自动生成分段，可视化编辑起止时间，按时间段裁剪并输出多个音频片段。
 
 【核心功能】
@@ -149,18 +171,14 @@ DESCRIPTION = """
 📦 运行时依赖：
   • soundfile（音频文件读写库）
   • numpy（数值计算库）
-""" if _DEPENDENCIES_AVAILABLE else f"""
-❌ 节点 GJJ · ✂️ 音频分段编辑器 缺少必需的 Python 依赖
-
-📦 必需依赖（请安装）：
-  • soundfile（音频文件读写库）
-  • numpy（数值计算库）
-
-🔧 安装命令：
-{get_pip_install_command_text("soundfile numpy")}
-
-💡 提示：安装后请重启 ComfyUI 服务器。
 """
+
+# 步骤3: 配置动态 DESCRIPTION
+DESCRIPTION = (
+	_DESCRIPTION_INTRO
+	if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
+	else f"{_DEPENDENCY_REPORT['warning_message']}\n\n{_DESCRIPTION_INTRO}"
+)
 
 
 def is_audio_object(value: Any) -> bool:
@@ -352,7 +370,12 @@ class GJJ_AudioSegmentEditor:
 		"title": "GJJ · ✂️ 音频分段编辑器",
 		"version": "2.1.0",
 		"author": "GJJ Custom Nodes Team",
-		"description": "可视化音频分段裁剪工具，支持动态输出多个音频片段",
+		"description": DESCRIPTION,
+		"notice": _DEPENDENCY_REPORT["help_message"] if not _DEPENDENCY_REPORT["available"] else "",
+		"install_cmd": _DEPENDENCY_REPORT["install_cmd"] if not _DEPENDENCY_REPORT["available"] else "",
+		"copy_text": _DEPENDENCY_REPORT["copy_text"] if not _DEPENDENCY_REPORT["available"] else "",
+		"copy_label": _DEPENDENCY_REPORT["copy_label"] if not _DEPENDENCY_REPORT["available"] else "",
+		"warning_message": _DEPENDENCY_REPORT["warning_message"] if not _DEPENDENCY_REPORT["available"] else "",
 
 		"models": [],
 
@@ -724,37 +747,29 @@ class GJJ_AudioSegmentEditor:
 			_remember_result(cache_key, node_key, payload)
 			return payload
 		except Exception as exc:
-			# 如果原始错误包含详细安装命令（来自 _load_soundfile），则保留它
-			if isinstance(exc, RuntimeError) and "未找到 soundfile 运行库" in str(exc):
-				# 提取安装命令
-				error_str = str(exc)
-				install_command = ""
-				# 尝试从错误信息中提取安装命令（包含 pip install 的行）
-				import re
-				match = re.search(r'(.+?python\.exe.*?pip install soundfile.*?)\n', error_str)
-				if match:
-					install_command = match.group(1).strip()
-
-				# 发送错误事件到前端
+			report = getattr(exc, "gjj_report", None)
+			if report is not None:
 				try:
 					from server import PromptServer
 					PromptServer.instance.send_sync("gjj_audio_timestamp_error", {
 						"node": str(unique_id),
-						"error": error_str,
-						"install_command": install_command,
+						"warning_message": report.get("warning_message", ""),
+						"panel_message": report.get("panel_message", ""),
+						"error": report.get("panel_message", ""),
+						"install_command": report.get("install_cmd", ""),
+						"copy_text": report.get("copy_text", ""),
+						"copy_label": report.get("copy_label", ""),
 					})
 				except Exception:
 					pass
-
-				# 抛出简洁的错误信息（在默认错误区域显示）
-				raise RuntimeError("运行时依赖缺失：soundfile。详细信息请查看节点前端面板。") from exc
-			else:
-				# 其他错误使用标准格式
-				raise RuntimeError(
-					f"🎤 音频分段编辑器执行失败\n"
-					f"参数：audio_file={audio_file}, segment_duration={segment_duration}\n\n"
-					f"详细错误：{exc}"
-				) from exc
+				send_dependency_model_notice(report, unique_id=unique_id)
+				raise RuntimeError(report.get("warning_message") or "运行时依赖缺失。") from exc
+			# 其他错误使用标准格式
+			raise RuntimeError(
+				f"🎤 音频分段编辑器执行失败\n"
+				f"参数：audio_file={audio_file}, segment_duration={segment_duration}\n\n"
+				f"详细错误：{exc}"
+			) from exc
 
 	def _load_audio_from_file(self, filename: str) -> dict[str, Any]:
 		"""从音频/视频文件加载音频；视频文件通过 ffmpeg 只提取音频"""
@@ -847,4 +862,4 @@ class GJJ_AudioSegmentEditor:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_AudioSegmentEditor}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · ✂️ 可视化音频分段编辑器"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: NODE_DISPLAY_NAME}

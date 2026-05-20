@@ -7,13 +7,17 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-# import cv2  # 在函数内部延迟导入
 import numpy as np
 
-# import soundfile as sf  # 在函数内部延迟导入
-from scipy import signal as sp_signal
+from .common_utils.dependency_checker import (
+    build_dependency_model_report,
+    load_dependency_at_runtime,
+    print_dependency_model_report,
+    send_dependency_model_notice,
+)
 
 NODE_NAME = "GJJ_LocalLipSync"
+NODE_DISPLAY_NAME = "GJJ · 👄 本地口型同步"
 
 MODE_AUTO = "自动：图片用LTX，视频用LatentSync"
 MODE_LTX23 = "LTX2.3 图片说话"
@@ -25,6 +29,52 @@ DEFAULT_NEGATIVE = (
     "blurry, oversaturated, pixelated, low resolution, grainy, distorted, noise, "
     "compression artifacts, watermark, text, logo, subtitles, distorted mouth, bad lip sync"
 )
+DEPENDENCY_SPECS = [
+    {
+        "module_name": "cv2",
+        "package_name": "opencv-python",
+        "display_name": "opencv-python / cv2",
+        "description": "该节点需要 OpenCV 处理图像、帧转换和视频边界图像操作。",
+    },
+    {
+        "module_name": "soundfile",
+        "package_name": "soundfile",
+        "display_name": "soundfile",
+        "description": "该节点需要 soundfile 读取和处理音频文件。",
+    },
+    {
+        "module_name": "scipy",
+        "package_name": "scipy",
+        "display_name": "scipy",
+        "description": "该节点需要 scipy.signal.resample 进行音频重采样。",
+    },
+]
+LATENTSYNC_MODEL_SPECS = [
+    {
+        "label": "LatentSync 1.6 主模型",
+        "subdir": "models/checkpoints/LatentSync-1.6",
+        "filename": "latentsync_unet.pt",
+        "description": "视频+音频默认分支使用的口型扩散 UNet。",
+    },
+    {
+        "label": "LatentSync 1.6 Whisper",
+        "subdir": "models/checkpoints/LatentSync-1.6/whisper",
+        "filename": "tiny.pt",
+        "description": "LatentSync 音频特征提取模型。",
+    },
+    {
+        "label": "LatentSync 1.6 VAE 配置",
+        "subdir": "models/checkpoints/LatentSync-1.6/vae",
+        "filename": "config.json",
+        "description": "LatentSync VAE 目录配置文件。",
+    },
+    {
+        "label": "LatentSync 1.6 VAE 权重",
+        "subdir": "models/checkpoints/LatentSync-1.6/vae",
+        "filename": "diffusion_pytorch_model.safetensors",
+        "description": "LatentSync VAE 权重文件。",
+    },
+]
 
 
 class AnyType(str):
@@ -57,6 +107,71 @@ def _send_status(unique_id: Any, text: str, progress: float | None = None) -> No
         pass
 
 
+def _module_available(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except Exception:
+        return False
+
+
+def _collect_dependency_state() -> tuple[bool, list[dict[str, str]], dict[str, Any]]:
+    missing = [spec for spec in DEPENDENCY_SPECS if not _module_available(spec["module_name"])]
+    missing_models = _missing_latentsync_model_specs()
+    report = build_dependency_model_report(
+        node_name=NODE_DISPLAY_NAME,
+        missing_dependencies=missing,
+        missing_models=missing_models,
+        install_packages=[spec["package_name"] for spec in missing],
+    )
+    report["node_name"] = NODE_DISPLAY_NAME
+    return (not missing, missing, report)
+
+
+def _latentsync_model_roots() -> list[Path]:
+    roots: list[Path] = []
+    try:
+        import folder_paths
+
+        models_dir = Path(folder_paths.models_dir)
+        roots.append(models_dir / "latentsync")
+        for root in folder_paths.get_folder_paths("checkpoints"):
+            roots.append(Path(root) / "LatentSync-1.6")
+    except Exception:
+        pass
+    result = []
+    seen = set()
+    for root in roots:
+        key = str(root)
+        if key not in seen:
+            seen.add(key)
+            result.append(root)
+    return result
+
+
+def _latentsync_model_exists(relative_path: str) -> bool:
+    return any((root / relative_path).is_file() for root in _latentsync_model_roots())
+
+
+def _missing_latentsync_model_specs() -> list[dict[str, str]]:
+    rel_by_filename = {
+        "latentsync_unet.pt": "latentsync_unet.pt",
+        "tiny.pt": "whisper/tiny.pt",
+        "config.json": "vae/config.json",
+        "diffusion_pytorch_model.safetensors": "vae/diffusion_pytorch_model.safetensors",
+    }
+    missing = []
+    for spec in LATENTSYNC_MODEL_SPECS:
+        rel = rel_by_filename.get(spec["filename"], spec["filename"])
+        if not _latentsync_model_exists(rel):
+            missing.append(spec)
+    return missing
+
+
+_DEPENDENCIES_AVAILABLE, _MISSING_DEPENDENCIES, _DEPENDENCY_REPORT = _collect_dependency_state()
+_MISSING_MODELS: list[dict[str, str]] = _DEPENDENCY_REPORT.get("missing_models", [])
+_MODELS_AVAILABLE = not _MISSING_MODELS
+
+
 # ─── 图像/帧处理（numpy/cv2） ─────────────────────────────────────
 
 
@@ -84,6 +199,33 @@ def _frames_to_torch(frames: np.ndarray) -> Any:
     import torch
 
     return torch.from_numpy(frames).float().contiguous()
+
+
+def _load_cv2_runtime():
+    return load_dependency_at_runtime(
+        module_name="cv2",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="opencv-python",
+        description="该节点需要 OpenCV 处理图像和帧。",
+    )
+
+
+def _load_soundfile_runtime():
+    return load_dependency_at_runtime(
+        module_name="soundfile",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="soundfile",
+        description="该节点需要 soundfile 处理音频文件。",
+    )
+
+
+def _load_scipy_signal_runtime():
+    return load_dependency_at_runtime(
+        module_name="scipy.signal",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="scipy",
+        description="该节点需要 scipy.signal.resample 进行音频重采样。",
+    )
 
 
 def _audio_to_torch(audio: dict[str, Any]) -> dict[str, Any]:
@@ -225,6 +367,7 @@ def _resample_audio(
     waveform: np.ndarray, orig_sr: int, target_sr: int = 16000
 ) -> np.ndarray:
     """使用 scipy.signal.resample 对音频波形重采样（替代 torchaudio.transforms.Resample）。"""
+    sp_signal = _load_scipy_signal_runtime()
     if orig_sr == target_sr:
         return waveform
     if waveform.ndim == 1:
@@ -349,6 +492,20 @@ def _check_latentsync_models() -> list[str]:
     return details
 
 
+def _ensure_latentsync_models():
+    missing = _missing_latentsync_model_specs()
+    if not missing:
+        return
+    report = build_dependency_model_report(
+        node_name=NODE_DISPLAY_NAME,
+        missing_models=missing,
+    )
+    print_dependency_model_report(report, title="GJJ 节点模型缺失！")
+    err = RuntimeError(report.get("warning_message") or "LatentSync 模型缺失。")
+    setattr(err, "gjj_report", report)
+    raise err
+
+
 def _check_wan22_s2v_environment() -> str:
     details: list[str] = []
     try:
@@ -372,137 +529,16 @@ def _check_wan22_s2v_environment() -> str:
     )
 
 
-# ─── 主节点 ────────────────────────────────────────────────────
-
-# 检查关键依赖
-try:
-    import cv2
-    import soundfile as sf
-
-    _DEPENDENCIES_AVAILABLE = True
-except ImportError as exc:
-    _DEPENDENCIES_AVAILABLE = False
-    _IMPORT_ERROR = str(exc)
-
-
-def _ensure_cv2():
-    """确保 cv2 已安装"""
-    try:
-        import cv2
-
-        return cv2
-    except ImportError as exc:
-        # 获取当前 Python 解释器的实际路径
-        python_executable = sys.executable
-
-        # ANSI 颜色代码（用于控制台彩色输出）
-        RED = "\033[91m"
-        YELLOW = "\033[93m"
-        CYAN = "\033[96m"
-        GREEN = "\033[92m"
-        RESET = "\033[0m"
-        BOLD = "\033[1m"
-
-        # 构建安装命令
-        from .common_utils.dependency_checker import get_pip_install_command_text
-
-        install_cmd = get_pip_install_command_text("opencv-python")
-
-        # 在控制台打印美观的错误提示（更加突出）
-        print(f"\n{RED}{'=' * 80}{RESET}")
-        print(f"{RED}{BOLD}  GJJ 节点运行时依赖缺失！{RESET}")
-        print(f"{RED}{'=' * 80}{RESET}")
-        print(f"{YELLOW}[GJJ] {BOLD}节点:{RESET} {CYAN}本地口型同步{RESET}")
-        print(f"{YELLOW}[GJJ] {BOLD}缺失依赖:{RESET} {RED}{BOLD}opencv-python{RESET}")
-        print(f"{YELLOW}[GJJ]{RESET} 该节点需要 opencv-python (cv2) 来处理图像。\n")
-        print(f"{YELLOW}{BOLD} 快速安装命令:{RESET}")
-        print(f"{GREEN}{BOLD}  {install_cmd}{RESET}\n")
-        print(f"{YELLOW}{BOLD} 提示:{RESET} 安装后请重启 ComfyUI 服务器")
-        print(f"{RED}{'=' * 80}{RESET}\n")
-
-        raise RuntimeError(
-            "\n💄 GJJ · 本地口型同步 需要 opencv-python (cv2) 来处理图像。\n"
-            "\n"
-            " 必需依赖（请安装）：\n"
-            "  • opencv-python (cv2, 图像处理)\n"
-            "\n"
-            " 快速安装命令（使用实际 Python 路径）：\n"
-            f"{install_cmd}\n"
-            "\n"
-            f"原始导入错误：{exc}\n"
-            "\n"
-            " 提示：安装后请重启 ComfyUI 服务器。"
-        ) from exc
-
-
-def _ensure_soundfile():
-    """确保 soundfile 已安装"""
-    try:
-        import soundfile as sf
-
-        return sf
-    except ImportError as exc:
-        # 获取当前 Python 解释器的实际路径
-        python_executable = sys.executable
-
-        # ANSI 颜色代码（用于控制台彩色输出）
-        RED = "\033[91m"
-        YELLOW = "\033[93m"
-        CYAN = "\033[96m"
-        GREEN = "\033[92m"
-        RESET = "\033[0m"
-        BOLD = "\033[1m"
-
-        # 构建安装命令
-        from .common_utils.dependency_checker import get_pip_install_command_text
-
-        install_cmd = get_pip_install_command_text("soundfile")
-
-        # 在控制台打印美观的错误提示（更加突出）
-        print(f"\n{RED}{'=' * 80}{RESET}")
-        print(f"{RED}{BOLD}  GJJ 节点运行时依赖缺失！{RESET}")
-        print(f"{RED}{'=' * 80}{RESET}")
-        print(f"{YELLOW}[GJJ] {BOLD}节点:{RESET} {CYAN}本地口型同步{RESET}")
-        print(f"{YELLOW}[GJJ] {BOLD}缺失依赖:{RESET} {RED}{BOLD}soundfile{RESET}")
-        print(f"{YELLOW}[GJJ]{RESET} 该节点需要 soundfile 来处理音频文件。\n")
-        print(f"{YELLOW}{BOLD} 快速安装命令:{RESET}")
-        print(f"{GREEN}{BOLD}  {install_cmd}{RESET}\n")
-        print(f"{YELLOW}{BOLD} 提示:{RESET} 安装后请重启 ComfyUI 服务器")
-        print(f"{RED}{'=' * 80}{RESET}\n")
-
-        raise RuntimeError(
-            "\n💄 GJJ · 本地口型同步 需要 soundfile 来处理音频文件。\n"
-            "\n"
-            " 必需依赖（请安装）：\n"
-            "  • soundfile (音频文件处理)\n"
-            "\n"
-            " 快速安装命令（使用实际 Python 路径）：\n"
-            f"{install_cmd}\n"
-            "\n"
-            f"原始导入错误：{exc}\n"
-            "\n"
-            " 提示：安装后请重启 ComfyUI 服务器。"
-        ) from exc
-
-
 class GJJ_LocalLipSync:
     CATEGORY = "GJJ"
     FUNCTION = "generate"
 
     DESCRIPTION = (
-        """GJJ 内部本地零 API 口型同步：图片+音频使用 GJJ 已有 LTX2.3 功能，视频+音频使用 GJJ 内部 LatentSync 或 LatentSync 功能；只引用 ComfyUI 官方能力和 GJJ 包内功能，不依赖其它自定义节点。"""
-        if _DEPENDENCIES_AVAILABLE
-        else """❌ 节点 GJJ · 💄 本地口型同步 缺少必需的 Python 依赖：
-
-📦 必需依赖（请安装）：
-  • opencv-python (cv2, 图像处理)
-  • soundfile (音频文件处理)
-  • scipy (信号处理)
-🔧 PowerShell 中子执行安装命令（自动适配您的环境，使用清华园镜像）：
-
-& "{sys.executable}" -m pip install opencv-python soundfile scipy -i https://pypi.tuna.tsinghua.edu.cn/simple --ignore-installed --target "{os.path.join(os.path.dirname(sys.executable), "Lib", "site-packages")}"
-
-💡 提示：安装后请重启 ComfyUI 服务器。"""
+        (
+            "GJJ 内部本地零 API 口型同步：图片+音频使用 GJJ 已有 LTX2.3 功能，视频+音频使用 GJJ 内部 LatentSync 或 LatentSync 功能；只引用 ComfyUI 官方能力和 GJJ 包内功能，不依赖其它自定义节点。"
+            if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
+            else _DEPENDENCY_REPORT["warning_message"]
+        )
     )
     SEARCH_ALIASES = [
         "口型同步",
@@ -514,6 +550,12 @@ class GJJ_LocalLipSync:
         "Wan2.2",
     ]
     GJJ_HELP = {
+        "description": DESCRIPTION,
+        "notice": _DEPENDENCY_REPORT["help_message"] if not _DEPENDENCY_REPORT["available"] else "",
+        "install_cmd": _DEPENDENCY_REPORT["install_cmd"] if not _DEPENDENCY_REPORT["available"] else "",
+        "copy_text": _DEPENDENCY_REPORT["copy_text"] if not _DEPENDENCY_REPORT["available"] else "",
+        "copy_label": _DEPENDENCY_REPORT["copy_label"] if not _DEPENDENCY_REPORT["available"] else "",
+        "warning_message": _DEPENDENCY_REPORT["warning_message"] if not _DEPENDENCY_REPORT["available"] else "",
         "models": [
             {
                 "label": "🟣LTX2.3 主模型",
@@ -552,22 +594,22 @@ class GJJ_LocalLipSync:
             },
             {
                 "label": "🔵LatentSync 1.6 主模型",
-                "value": "📁models/checkpoints/LatentSync-1.6/latentsync_unet.pt",
+                "value": "📁models/checkpoints/LatentSync-1.6/latentsync_unet.pt 或 models/latentsync/latentsync_unet.pt",
                 "tooltip": "📘视频+音频默认分支使用的口型扩散 UNet。",
             },
             {
                 "label": "🔵LatentSync 1.6 Whisper",
-                "value": "📁models/checkpoints/LatentSync-1.6/whisper/tiny.pt",
+                "value": "📁models/checkpoints/LatentSync-1.6/whisper/tiny.pt 或 models/latentsync/whisper/tiny.pt",
                 "tooltip": "📘LatentSync 音频特征提取模型。",
             },
             {
                 "label": "🔵LatentSync 1.6 VAE 配置",
-                "value": "📁models/checkpoints/LatentSync-1.6/vae/config.json",
+                "value": "📁models/checkpoints/LatentSync-1.6/vae/config.json 或 models/latentsync/vae/config.json",
                 "tooltip": "📘LatentSync VAE 目录配置文件。",
             },
             {
                 "label": "🔵LatentSync 1.6 VAE 权重",
-                "value": "📁models/checkpoints/LatentSync-1.6/vae/diffusion_pytorch_model.safetensors",
+                "value": "📁models/checkpoints/LatentSync-1.6/vae/diffusion_pytorch_model.safetensors 或 models/latentsync/vae/diffusion_pytorch_model.safetensors",
                 "tooltip": "📘LatentSync VAE 权重文件。",
             },
             {
@@ -582,6 +624,9 @@ class GJJ_LocalLipSync:
             },
         ],
         "dependencies": [
+            "opencv-python（cv2，图像和帧处理）",
+            "soundfile（音频文件处理）",
+            "scipy（音频重采样）",
             "GJJ/vendor/latentsync_enhanced（GJJ 内部 LatentSync 运行库）",
             "diffusers / accelerate / omegaconf / einops / soundfile（LatentSync 推理依赖）",
             "ffmpeg（LatentSync 输出封装需要）",
@@ -763,6 +808,13 @@ class GJJ_LocalLipSync:
         # torch 仅在 ComfyUI 边界处使用（输入转换 + 输出封装）
         import torch
 
+        if not _DEPENDENCIES_AVAILABLE:
+            print_dependency_model_report(_DEPENDENCY_REPORT, title="GJJ 节点运行时依赖缺失！")
+            send_dependency_model_notice(_DEPENDENCY_REPORT, unique_id=unique_id)
+            err = RuntimeError(_DEPENDENCY_REPORT["warning_message"])
+            setattr(err, "gjj_report", _DEPENDENCY_REPORT)
+            raise err
+
         if mode == MODE_WAN22:
             _send_status(unique_id, "Wan2.2 S2V 环境检测中...", 0.05)
             _check_wan22_s2v_environment()
@@ -791,6 +843,12 @@ class GJJ_LocalLipSync:
                     "LatentSync 视频口型分支需要输入 VIDEO。图片+音频请使用自动模式或 LTX2.3 图片说话。"
                 )
             frames_np, _, source_fps = _extract_video_components(input_media)
+            try:
+                _ensure_latentsync_models()
+            except Exception as exc:
+                report = getattr(exc, "gjj_report", None) or _DEPENDENCY_REPORT
+                send_dependency_model_notice(report, unique_id=unique_id)
+                raise
             details = _check_latentsync_models()
             _send_status(unique_id, "GJJ 内部 LatentSync：加载运行库...", 0.08)
             try:

@@ -1686,10 +1686,7 @@ function patchNodeHooks(node) {
 	const originalOnSerialize = node.onSerialize;
 	node.onSerialize = function (serializedNode) {
 		replaceState(this, getState(this));
-		const result = typeof originalOnSerialize === "function"
-			? originalOnSerialize.apply(this, arguments)
-			: serializedNode;
-		return result ?? serializedNode;
+		originalOnSerialize?.apply(this, arguments);
 	};
 
 	const originalOnResize = node.onResize;

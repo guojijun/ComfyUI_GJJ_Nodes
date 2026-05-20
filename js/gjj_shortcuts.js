@@ -1,4 +1,5 @@
 import { app } from "/scripts/app.js";
+import "./gjj_group_run.js";
 
 const ACTIVE_MODE = 0;
 const BYPASS_MODE = 4;

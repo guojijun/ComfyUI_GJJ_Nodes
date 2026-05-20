@@ -884,7 +884,7 @@ app.registerExtension({
 			// 保存前修剪输出口
 			const state = parseState(serializedNode.properties[STATE_WIDGET]);
 			syncOutputs(this, state.rows, state.cols, state.show_blocks === true);
-			return originalOnSerialize?.apply(this, [serializedNode]);
+			originalOnSerialize?.apply(this, [serializedNode]);
 		};
 	},
 

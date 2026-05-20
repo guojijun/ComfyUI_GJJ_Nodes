@@ -1,5 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET = "GJJ_AudioSeparator";
 const PROP_MORE_OUTPUTS = "gjj_audio_separator_more_outputs";
@@ -38,6 +39,9 @@ function ensureStyles() {
       gap: 6px;
       padding: 4px 0 2px 0;
       user-select: none;
+    }
+    .gjj-audio-separator-toolbar.gjj-has-copy {
+      grid-template-columns: repeat(5, minmax(0, 1fr));
     }
     .gjj-audio-separator-toolbar button {
       min-width: 0;
@@ -152,6 +156,14 @@ function markCanvasDirty(node) {
   try { node.graph?.setDirtyCanvas?.(true, true); } catch (_) {}
 }
 
+function refreshAudioNode(node) {
+  try {
+    GJJ_Utils.scheduleRefreshNode(node, { minWidth: MIN_NODE_WIDTH_FOR_NATIVE_LABELS, minHeight: 80 });
+  } catch (_) {
+    markCanvasDirty(node);
+  }
+}
+
 function ensureNativeLabelSpace(node) {
   // 不画标签、不改标签，只把节点默认宽度留够，避免 ComfyUI 原生 display_name 被压缩成只剩 emoji。
   if (!node) return;
@@ -188,6 +200,14 @@ function findWidgetAny(node, names) {
 
 function getMediaFileWidget(node) {
   return findWidgetAny(node, ["📁 音视频文件", "media_file"]);
+}
+
+function getModelWidget(node) {
+  return findWidgetAny(node, ["📦 模型选择", "model_name"]);
+}
+
+function getAudioTagWidget(node) {
+  return findWidgetAny(node, ["🏷️ 音频标签", "audio_tag"]);
 }
 
 function getCompatWidget(node) {
@@ -317,6 +337,87 @@ function setComboValue(widget, value) {
   try { widget.callback?.(value); } catch (_) {}
 }
 
+function comboValues(widget) {
+  const values = widget?.options?.values || widget?.options?.comboValues || widget?.values;
+  return Array.isArray(values) ? values : [];
+}
+
+function isComboValueValid(widget, value) {
+  const values = comboValues(widget);
+  return !values.length || values.includes(value);
+}
+
+function setWidgetValue(widget, value) {
+  if (!widget) return;
+  widget.value = value;
+  try { widget.callback?.(value); } catch (_) {}
+}
+
+function isModelFilename(value) {
+  return /(?:melbandroformer|mel[-_ ]?band[-_ ]?roformer|\.safetensors$|\.ckpt$|\.pt$|\.pth$|\.bin$)/i.test(String(value || ""));
+}
+
+function repairShiftedWidgetValues(node) {
+  const modelWidget = getModelWidget(node);
+  const mediaWidget = getMediaFileWidget(node);
+  const tagWidget = getAudioTagWidget(node);
+  const compatWidget = getCompatWidget(node);
+  const debugWidget = getDebugWidget(node);
+
+  const modelValue = String(modelWidget?.value || "");
+  const mediaValue = String(mediaWidget?.value || "");
+  const tagValue = String(tagWidget?.value || "");
+  const compatValue = String(compatWidget?.value || "");
+  const modelChoices = comboValues(modelWidget);
+  const shiftedValues = [mediaValue, tagValue, compatValue].map((item) => String(item || "").trim()).filter(Boolean);
+
+  if (modelWidget && (!modelValue || !isComboValueValid(modelWidget, modelWidget.value))) {
+    const shiftedModel = shiftedValues.find((value) => modelChoices.includes(value))
+      || shiftedValues.find((value) => isModelFilename(value) && (!modelChoices.length || modelChoices.includes(value)));
+    if (shiftedModel) setWidgetValue(modelWidget, shiftedModel);
+    else if (modelChoices.length) setWidgetValue(modelWidget, modelChoices[0]);
+  }
+
+  if (mediaWidget && (!isComboValueValid(mediaWidget, mediaWidget.value) || isModelFilename(mediaValue) || /^&\s*"/.test(mediaValue))) {
+    setWidgetValue(mediaWidget, MEDIA_SENTINEL);
+  }
+  if (compatWidget && !isComboValueValid(compatWidget, compatWidget.value)) {
+    setWidgetValue(compatWidget, MODE_REPAIR);
+  }
+  if (tagWidget && (!tagValue || tagValue === MEDIA_SENTINEL || tagValue === MODE_REPAIR || tagValue === MODE_AUTO || isModelFilename(tagValue) || tagValue === modelValue || /^&\s*"/.test(tagValue))) {
+    setWidgetValue(tagWidget, "input_audio");
+  }
+  if (debugWidget && typeof debugWidget.value !== "boolean") {
+    setWidgetValue(debugWidget, false);
+  }
+}
+
+function makeTransientWidget(widget) {
+  if (!widget) return widget;
+  widget.serialize = false;
+  widget.value = undefined;
+  widget.options = widget.options || {};
+  widget.options.serialize = false;
+  return widget;
+}
+
+function shouldSerializeAudioWidget(widget) {
+  if (!widget) return false;
+  const name = String(widget.name || widget.label || "");
+  if (name === "gjj_audio_toolbar" || name === "gjj_audio_status" || name === "gjj_audio_copy_command") return false;
+  if (name.startsWith("gjj_") || name.startsWith("GJJ_")) return false;
+  if (widget.serialize === false || widget.options?.serialize === false) return false;
+  return Object.prototype.hasOwnProperty.call(widget, "value");
+}
+
+function sanitizeSerializedWidgetValues(node, data) {
+  if (!data || !Array.isArray(node?.widgets)) return;
+  repairShiftedWidgetValues(node);
+  data.widgets_values = node.widgets
+    .filter(shouldSerializeAudioWidget)
+    .map((widget) => widget.value);
+}
+
 function setBooleanWidget(widget, value) {
   if (!widget) return;
   widget.value = !!value;
@@ -391,6 +492,162 @@ function button(label, tooltip, onClick) {
   return b;
 }
 
+function copyButtonLabel(copyText, copyLabel = "") {
+  const text = String(copyText || "").trim();
+  if (!text) return "";
+  if (copyLabel) return copyLabel;
+  return /^https?:\/\//i.test(text) ? "🌏 复制下载网址" : "📋 复制安装命令";
+}
+
+async function copyTextToClipboard(text) {
+  const value = String(text || "").trim();
+  if (!value) return false;
+  try {
+    await navigator.clipboard.writeText(value);
+    return true;
+  } catch (_) {
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try {
+      document.execCommand("copy");
+      return true;
+    } finally {
+      textarea.remove();
+    }
+  }
+}
+
+function firstWarningLine(text) {
+  const line = String(text || "").split(/\r?\n/).map((item) => item.trim()).find(Boolean) || "";
+  return line.startsWith("⚠️") ? line : "";
+}
+
+let audioHelpByClass = null;
+let audioHelpPromise = null;
+
+function currentHelpPayload(nodeData = null) {
+  const backend = audioHelpByClass?.[TARGET] || {};
+  const inlineHelp = nodeData?.help || nodeData?.GJJ_HELP || null;
+  const inlineHasNotice = !!(
+    inlineHelp?.warning_message
+    || inlineHelp?.notice
+    || inlineHelp?.copy_text
+    || inlineHelp?.install_cmd
+    || inlineHelp?.model_download_url
+  );
+  const help = inlineHasNotice ? inlineHelp : (backend?.help || inlineHelp || {});
+  const description = String(nodeData?.description || nodeData?.DESCRIPTION || backend?.description || "").trim();
+  return { help, description };
+}
+
+function startupNotice(nodeData = null) {
+  const { help, description } = currentHelpPayload(nodeData);
+  const warning = firstWarningLine(help?.warning_message || help?.notice || help?.description) || firstWarningLine(description);
+  const copyText = warning ? String(help?.copy_text || help?.install_cmd || help?.model_download_url || "").trim() : "";
+  const copyLabel = String(help?.copy_label || "").trim();
+  return { warning, copyText, copyLabel };
+}
+
+function applyStartupNotice(node, nodeData = null) {
+  if (!node || node.__gjjAudioRuntimeStatusShown) return;
+  const { warning, copyText, copyLabel } = startupNotice(nodeData);
+  if (warning && node.__gjjStatusText) {
+    node.__gjjStatusText.textContent = warning;
+  }
+  setPanelCopy(node, copyText, copyLabel);
+  setToolbarCopy(node, copyText, copyLabel);
+  refreshAudioNode(node);
+  markCanvasDirty(node);
+}
+
+async function loadAudioHelpData() {
+  if (audioHelpByClass) return audioHelpByClass;
+  if (audioHelpPromise) return audioHelpPromise;
+  audioHelpPromise = (async () => {
+    try {
+      const response = await api.fetchApi("/gjj/node_help");
+      if (!response?.ok) return {};
+      const payload = await response.json();
+      audioHelpByClass = payload || {};
+      return audioHelpByClass;
+    } catch (error) {
+      console.warn("[GJJ AudioSeparator] 节点帮助信息加载失败：", error);
+      return {};
+    }
+  })();
+  return audioHelpPromise;
+}
+
+function setToolbarCopy(node, copyText = "", copyLabel = "") {
+  const copy = node?.__gjjToolbarButtons?.copy;
+  const wrap = node?.__gjjToolbarButtons?.wrap;
+  if (!copy) return;
+  const text = String(copyText || "").trim();
+  copy.__gjj_copy_text = text;
+  copy.textContent = /^https?:\/\//i.test(text) ? "🌏" : "📋";
+  copy.title = text ? `${copyButtonLabel(text, copyLabel)}\n${text}` : "复制安装命令或模型下载网址";
+  copy.style.display = text ? "" : "none";
+  wrap?.classList?.toggle("gjj-has-copy", !!text);
+}
+
+function setPanelCopy(node, copyText = "", copyLabel = "") {
+  const copyBtn = node?.__gjjCopyBtn;
+  if (!copyBtn) return;
+  const text = String(copyText || "").trim();
+  copyBtn.__gjj_copy_text = text;
+  copyBtn.__gjj_install_cmd = text;
+  copyBtn.__gjj_copy_label = String(copyLabel || "").trim();
+  copyBtn.textContent = text ? copyButtonLabel(text, copyLabel) : "📋 复制安装命令";
+  copyBtn.title = text ? `${copyButtonLabel(text, copyLabel)}\n${text}` : "复制安装命令或模型下载网址";
+  copyBtn.style.display = text ? "inline-flex" : "none";
+  refreshAudioNode(node);
+}
+
+function flashPanelCopy(node) {
+  const copyBtn = node?.__gjjCopyBtn;
+  if (!copyBtn) return;
+  const old = copyButtonLabel(copyBtn.__gjj_copy_text, copyBtn.__gjj_copy_label) || "📋 复制安装命令";
+  copyBtn.classList.add("gjj-copied");
+  copyBtn.textContent = "✅ 已复制";
+  setTimeout(() => {
+    copyBtn.classList.remove("gjj-copied");
+    copyBtn.textContent = old;
+  }, 1200);
+}
+
+function copyPanelText(node) {
+  const text = String(node?.__gjjCopyBtn?.__gjj_copy_text || node?.__gjjCopyBtn?.__gjj_install_cmd || "").trim();
+  if (!text) return false;
+  const now = Date.now();
+  if (now - Number(node.__gjjAudioLastPanelCopyAt || 0) < 350) return true;
+  node.__gjjAudioLastPanelCopyAt = now;
+  copyTextToClipboard(text).then(() => {
+    flashPanelCopy(node);
+    flashToolbarCopy(node);
+  }).catch((error) => {
+    console.error("[GJJ AudioSeparator] 复制失败：", error);
+  });
+  return true;
+}
+
+function flashToolbarCopy(node) {
+  const copy = node?.__gjjToolbarButtons?.copy;
+  if (!copy) return;
+  const old = copy.textContent || "📋";
+  copy.textContent = "✅";
+  copy.classList.add("gjj-active");
+  setTimeout(() => {
+    copy.textContent = old;
+    copy.classList.remove("gjj-active");
+  }, 1200);
+}
+
 function updateToolbarState(node) {
   const buttons = node?.__gjjToolbarButtons;
   if (!buttons) return;
@@ -430,14 +687,58 @@ function createToolbar(node) {
     const current = !!node.properties?.[PROP_MORE_OUTPUTS] || hasExtraOutputLinks(node);
     applyOutputMode(node, !current);
   });
+  const copy = button("📋", "复制安装命令或模型下载网址", async () => {
+    const text = String(copy.__gjj_copy_text || "").trim();
+    if (!text) return;
+    try {
+      await copyTextToClipboard(text);
+      flashToolbarCopy(node);
+    } catch (error) {
+      console.error("[GJJ AudioSeparator] 复制失败：", error);
+    }
+  });
+  copy.style.display = "none";
 
-  wrap.append(open, repair, log, more);
+  wrap.append(open, repair, log, more, copy);
 
-  node.__gjjToolbarButtons = { open, repair, log, more };
+  node.__gjjToolbarButtons = { open, repair, log, more, copy, wrap };
   return wrap;
 }
 
-function createStatusBar(node) {
+function handleToolbarMouse(event, pos, node) {
+  const buttons = node?.__gjjToolbarButtons;
+  if (!buttons) return false;
+  const hasCopy = !!String(buttons.copy?.__gjj_copy_text || "").trim();
+  const labels = hasCopy ? ["open", "repair", "log", "more", "copy"] : ["open", "repair", "log", "more"];
+  const width = Math.max(1, Number(node.size?.[0] || 1) - 20);
+  const rawX = Number(pos?.[0] ?? 0);
+  const x = Math.max(0, Math.min(width - 1, rawX > width ? rawX - 10 : rawX));
+  const target = labels[Math.max(0, Math.min(labels.length - 1, Math.floor((x / width) * labels.length)))];
+
+  try { event?.preventDefault?.(); } catch (_) {}
+  try { event?.stopPropagation?.(); } catch (_) {}
+
+  if (target === "open") openMediaPicker(node);
+  else if (target === "repair") toggleRepairMode(node);
+  else if (target === "log") toggleLog(node);
+  else if (target === "more") {
+    const current = !!node.properties?.[PROP_MORE_OUTPUTS] || hasExtraOutputLinks(node);
+    applyOutputMode(node, !current);
+  } else if (target === "copy") {
+    const text = String(buttons.copy?.__gjj_copy_text || "").trim();
+    if (!text) return true;
+    const now = Date.now();
+    if (now - Number(node.__gjjAudioLastCopyAt || 0) < 350) return true;
+    node.__gjjAudioLastCopyAt = now;
+    copyTextToClipboard(text).then(() => flashToolbarCopy(node)).catch((error) => {
+      console.error("[GJJ AudioSeparator] 复制失败：", error);
+    });
+  }
+  markCanvasDirty(node);
+  return true;
+}
+
+function createStatusBar(node, initialText = "", initialCopyText = "", initialCopyLabel = "") {
   // 创建状态栏容器
   const statusContainer = document.createElement("div");
   statusContainer.style.width = "100%";
@@ -446,7 +747,7 @@ function createStatusBar(node) {
   // 状态栏文字
   const statusText = document.createElement("div");
   statusText.className = "gjj-audio-separator-status";
-  statusText.textContent = "";
+  statusText.textContent = initialText || "";
   statusContainer.appendChild(statusText);
 
   // 复制按钮
@@ -455,40 +756,7 @@ function createStatusBar(node) {
   copyBtn.style.display = "none";
   copyBtn.textContent = "📋 复制安装命令";
   copyBtn.addEventListener("click", async () => {
-    const cmd = copyBtn.__gjj_install_cmd || "";
-    if (!cmd) return;
-    try {
-      await navigator.clipboard.writeText(cmd);
-      copyBtn.classList.add("gjj-copied");
-      copyBtn.textContent = "✅ 已复制";
-      setTimeout(() => {
-        copyBtn.classList.remove("gjj-copied");
-        copyBtn.textContent = "📋 复制安装命令";
-      }, 1500);
-    } catch (e) {
-      console.error("[GJJ AudioSeparator] 复制失败：", e);
-      // 回退方案
-      const textarea = document.createElement("textarea");
-      textarea.value = cmd;
-      textarea.style.position = "fixed";
-      textarea.style.top = "-9999px";
-      textarea.style.left = "-9999px";
-      document.body.appendChild(textarea);
-      textarea.select();
-      try {
-        document.execCommand("copy");
-        copyBtn.classList.add("gjj-copied");
-        copyBtn.textContent = "✅ 已复制";
-        setTimeout(() => {
-          copyBtn.classList.remove("gjj-copied");
-          copyBtn.textContent = "📋 复制安装命令";
-        }, 1500);
-      } catch (e2) {
-        console.error("[GJJ AudioSeparator] 回退复制也失败：", e2);
-      } finally {
-        textarea.remove();
-      }
-    }
+    copyPanelText(node);
   });
   statusContainer.appendChild(copyBtn);
 
@@ -496,8 +764,24 @@ function createStatusBar(node) {
   node.__gjjStatusText = statusText;
   node.__gjjCopyBtn = copyBtn;
   node.__gjjStatusContainer = statusContainer;
+  if (initialCopyText) {
+    setPanelCopy(node, initialCopyText, initialCopyLabel);
+  }
 
   return statusContainer;
+}
+
+function handleStatusMouse(event, pos, node) {
+  const copyText = String(node?.__gjjCopyBtn?.__gjj_copy_text || "").trim();
+  if (!copyText) return false;
+  const eventType = String(event?.type || "");
+  if (eventType && !["pointerdown", "mousedown", "click"].includes(eventType)) return false;
+
+  try { event?.preventDefault?.(); } catch (_) {}
+  try { event?.stopPropagation?.(); } catch (_) {}
+  copyPanelText(node);
+  markCanvasDirty(node);
+  return true;
 }
 
 function completeHideWidget(widget) {
@@ -526,6 +810,8 @@ function addToolbar(node) {
       getValue: () => node.properties?.[PROP_TOOLBAR_READY] || "1",
       setValue: () => {},
       serialize: false,
+      hideOnZoom: false,
+      getHeight: () => 34,
     });
   } else if (typeof node.addWidget === "function") {
     widget = node.addWidget("button", "📁 🛠️ 🧾 🔌", null, () => openMediaPicker(node));
@@ -534,10 +820,14 @@ function addToolbar(node) {
   }
 
   if (widget) {
+    makeTransientWidget(widget);
     widget.name = "gjj_audio_toolbar";
     widget.label = "";
-    widget.options = widget.options || {};
-    widget.options.serialize = false;
+    widget.mouse = function (event, pos, canvasNode) {
+      const eventType = String(event?.type || "");
+      if (eventType && !["pointerdown", "mousedown", "click"].includes(eventType)) return false;
+      return handleToolbarMouse(event, pos, canvasNode || node);
+    };
     node.__gjjAudioToolbarWidget = widget;
   }
 
@@ -546,24 +836,33 @@ function addToolbar(node) {
   updateToolbarState(node);
 }
 
-function addStatusBar(node) {
+function addStatusBar(node, initialText = "", initialCopyText = "", initialCopyLabel = "") {
   if (!node || node.__gjjAudioStatusWidget) return;
 
-  const el = createStatusBar(node);
+  const el = createStatusBar(node, initialText, initialCopyText, initialCopyLabel);
   let widget = null;
   if (typeof node.addDOMWidget === "function") {
     widget = node.addDOMWidget("gjj_audio_status", "GJJ 音频状态栏", el, {
       getValue: () => "",
       setValue: () => {},
       serialize: false,
+      hideOnZoom: false,
+      getHeight: () => {
+        const hasText = !!String(node.__gjjStatusText?.textContent || "").trim();
+        const hasCopy = !!String(node.__gjjCopyBtn?.__gjj_copy_text || "").trim();
+        if (!hasText && !hasCopy) return 0;
+        return Math.max(42, (node.__gjjStatusContainer?.scrollHeight || 34) + 10);
+      },
     });
   }
 
   if (widget) {
+    makeTransientWidget(widget);
     widget.name = "gjj_audio_status";
     widget.label = "";
-    widget.options = widget.options || {};
-    widget.options.serialize = false;
+    widget.mouse = function (event, pos, canvasNode) {
+      return handleStatusMouse(event, pos, canvasNode || node);
+    };
     node.__gjjAudioStatusWidget = widget;
   }
 }
@@ -580,11 +879,25 @@ function sortWidgets(node) {
   } catch (_) {}
 }
 
-function setupNode(node) {
+function removeLegacyCopyWidget(node) {
+  if (!Array.isArray(node?.widgets)) return;
+  for (let i = node.widgets.length - 1; i >= 0; i--) {
+    const name = String(node.widgets[i]?.name || node.widgets[i]?.label || "");
+    if (name === "gjj_audio_copy_command") {
+      node.widgets.splice(i, 1);
+    }
+  }
+}
+
+function setupNode(node, nodeData = null) {
+  const { warning, copyText, copyLabel } = startupNotice(nodeData);
   ensureSingleMediaInput(node);
   ensureNativeLabelSpace(node);
+  removeLegacyCopyWidget(node);
+  repairShiftedWidgetValues(node);
   addToolbar(node);
-  addStatusBar(node);
+  addStatusBar(node, warning, copyText, copyLabel);
+  applyStartupNotice(node, nodeData);
   completeHideWidget(getCompatWidget(node));
   completeHideWidget(getDebugWidget(node));
   sortWidgets(node);
@@ -593,8 +906,10 @@ function setupNode(node) {
     const showMore = !!node.properties?.[PROP_MORE_OUTPUTS] || hasExtraOutputLinks(node);
       applyOutputMode(node, showMore);
       updateToolbarState(node);
+    repairShiftedWidgetValues(node);
     ensureSingleMediaInput(node);
     syncMediaFileForExternalInput(node);
+    applyStartupNotice(node, nodeData);
     markCanvasDirty(node);
   }, 0);
 }
@@ -607,15 +922,28 @@ app.registerExtension({
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function (...args) {
       const r = onNodeCreated?.apply(this, args);
-      setupNode(this);
+      setupNode(this, nodeData);
       return r;
     };
 
     const onConfigure = nodeType.prototype.onConfigure;
     nodeType.prototype.onConfigure = function (...args) {
       const r = onConfigure?.apply(this, args);
-      setupNode(this);
+      setupNode(this, nodeData);
       return r;
+    };
+
+    const onMouseDown = nodeType.prototype.onMouseDown;
+    nodeType.prototype.onMouseDown = function (event, pos, canvas) {
+      const toolbar = this.__gjjAudioToolbarWidget;
+      if (toolbar) {
+        const y = Number(pos?.[1] ?? -1);
+        const widgetY = Number(toolbar.last_y ?? toolbar.y ?? -9999);
+        if ((y >= widgetY && y <= widgetY + 36) || (y >= 0 && y <= 36)) {
+          if (handleToolbarMouse(event, pos, this)) return true;
+        }
+      }
+      return onMouseDown?.apply(this, arguments);
     };
 
     const onConnectionsChange = nodeType.prototype.onConnectionsChange;
@@ -626,21 +954,44 @@ app.registerExtension({
       markCanvasDirty(this);
       return r;
     };
+
+    const onSerialize = nodeType.prototype.onSerialize;
+    nodeType.prototype.onSerialize = function (data) {
+      repairShiftedWidgetValues(this);
+      const r = onSerialize?.apply(this, arguments);
+      sanitizeSerializedWidgetValues(this, data);
+      return r;
+    };
   },
 
   async setup() {
+    loadAudioHelpData().then(() => {
+      for (const node of app.graph?._nodes || []) {
+        if (String(node?.comfyClass || node?.type || "") === TARGET) {
+          setupNode(node, {});
+        }
+      }
+    });
+
     // 监听后端发送的错误事件
     api?.addEventListener?.("gjj_audio_separator_error", (event) => {
       try {
         const data = event.detail || {};
         const nodeId = data.node;
-        const errorMessage = data.error || "";
-        const installCommand = data.install_command || "";
-        if (!nodeId) return;
+        const errorMessage = data.panel_message || data.warning_message || data.error || "";
+        const copyText = data.copy_text || data.install_command || data.model_download_url || "";
+        const copyLabel = data.copy_label || "";
 
-        // 遍历所有节点，找到匹配的那个
-        for (const node of app.graph?._nodes || []) {
-          if (String(node.id) !== String(nodeId)) continue;
+        const nodes = (app.graph?._nodes || []).filter((node) => {
+          if (String(node?.comfyClass || node?.type || "") !== TARGET) return false;
+          return nodeId ? String(node.id) === String(nodeId) : true;
+        });
+
+        // 优先更新匹配 unique_id 的节点；如果后端没带 unique_id，则更新当前图里的同类节点。
+        for (const node of nodes) {
+
+          addStatusBar(node);
+          node.__gjjAudioRuntimeStatusShown = true;
 
           // 更新状态栏
           if (node.__gjjStatusText) {
@@ -648,17 +999,12 @@ app.registerExtension({
           }
 
           // 显示复制按钮
-          if (node.__gjjCopyBtn) {
-            if (installCommand) {
-              node.__gjjCopyBtn.style.display = "inline-flex";
-              node.__gjjCopyBtn.__gjj_install_cmd = installCommand;
-            } else {
-              node.__gjjCopyBtn.style.display = "none";
-            }
-          }
+          setPanelCopy(node, copyText, copyLabel);
+          setToolbarCopy(node, copyText, copyLabel);
 
+          refreshAudioNode(node);
           markCanvasDirty(node);
-          break;
+          if (nodeId) break;
         }
       } catch (e) {
         console.error("[GJJ AudioSeparator] 处理错误事件失败：", e);

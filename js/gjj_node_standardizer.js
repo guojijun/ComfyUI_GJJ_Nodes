@@ -4,8 +4,8 @@ import { GJJ_Utils } from "./gjj_utils.js";
 
 const STATUS_WIDGET_NAME = "gjj_standard_status";
 const HELP_WIDGET_NAME = "gjj_help_button";
-const HELP_WIDGET_TOP = -44;
-const HELP_BUTTON_X_RATIO = 0.65;
+const HELP_WIDGET_TOP = -28;
+const HELP_BUTTON_RIGHT = 14;
 const HELP_WIDGET_WIDTH = 24;
 const HELP_MODEL_KEYWORDS = [
 	"模型",
@@ -34,6 +34,7 @@ const STATUS_DISABLED_CLASSES = new Set([
 	"GJJ_TemplateParams",
 	"GJJ_MultifunctionCalculator",
 	"GJJ_AnyPreview",
+	"GJJ_AudioSeparator",
 	"GJJ_MemoryManager",
 	"GJJ_AnimeLineartRealConverter",
 	"GJJ_AnimeLineartRealEditor",
@@ -49,7 +50,6 @@ const STATUS_DISABLED_CLASSES = new Set([
 	"GJJ_LoraFaceMaterialGenerator",
 	"GJJ_LTX23ImageToVideo",
 	"GJJ_LTX23ImageToVideoMultiRef",
-	"GJJ_Mesh2MotionExplore",
 	"GJJ_MultiImageLoader",
 	"GJJ_OldPhotoRestorer",
 	"GJJ_OllamaDirectoryCaptioner",
@@ -65,10 +65,9 @@ const STATUS_DISABLED_CLASSES = new Set([
 	"GJJ_Wan22FirstLastVideo",
 	"GJJ_Wan22RapidAIOMega",
 ]);
-
-
 const BOOL_SWITCH_CLASS = "GJJ_BoolSwitch";
 const BOOL_SWITCH_WILDCARD_INPUTS = new Set(["on_true", "on_false", "为真时", "为假时"]);
+const DEPENDENCY_NOTICE_EVENT = "gjj_dependency_model_notice";
 
 function isBoolSwitchNode(node) {
 	return String(node?.comfyClass || node?.type || "") === BOOL_SWITCH_CLASS;
@@ -356,6 +355,49 @@ function escapeText(text, fallback = "") {
 	return raw || fallback;
 }
 
+function firstWarningLine(text) {
+	const line = String(text || "").split(/\r?\n/).map((item) => item.trim()).find(Boolean) || "";
+	return line.startsWith("⚠️") ? line : "";
+}
+
+function copyTextToClipboard(text) {
+	const value = String(text || "").trim();
+	if (!value) {
+		return Promise.resolve(false);
+	}
+	return navigator.clipboard?.writeText(value).then(() => true).catch(() => {
+		const textarea = document.createElement("textarea");
+		textarea.value = value;
+		textarea.style.position = "fixed";
+		textarea.style.left = "-9999px";
+		textarea.style.top = "-9999px";
+		document.body.appendChild(textarea);
+		textarea.focus();
+		textarea.select();
+		try {
+			const ok = document.execCommand("copy");
+			return ok;
+		} finally {
+			textarea.remove();
+		}
+	});
+}
+
+function copyButtonLabel(copyText, copyLabel = "") {
+	const text = String(copyText || "").trim();
+	if (!text) {
+		return "";
+	}
+	if (copyLabel) {
+		return copyLabel;
+	}
+	return /^https?:\/\//i.test(text) ? "🌏 复制下载网址" : "📋 复制安装命令";
+}
+
+function statusCopyText(meta) {
+	return String(meta?.help?.copy_text || meta?.help?.install_cmd || meta?.help?.model_download_url || "").trim();
+}
+
 function formatHelpText(text, fallback = "") {
 	const raw = escapeText(text, fallback);
 	if (!raw) {
@@ -373,6 +415,36 @@ function formatHelpText(text, fallback = "") {
 		}
 	}
 	return normalized;
+}
+
+function normalizeComparableHelpText(text) {
+	return formatHelpText(text, "")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function shouldShowNoticeSection(descriptionText, noticeText) {
+	const notice = normalizeComparableHelpText(noticeText);
+	if (!notice) {
+		return false;
+	}
+	const description = normalizeComparableHelpText(descriptionText);
+	return description !== notice && !description.startsWith(notice);
+}
+
+function initialWarningText(meta) {
+	const candidates = [
+		meta?.description,
+		meta?.help?.notice,
+		meta?.help?.warning_message,
+	];
+	for (const candidate of candidates) {
+		const text = firstWarningLine(candidate);
+		if (text) {
+			return text;
+		}
+	}
+	return "";
 }
 
 function modelMetaEntries(meta) {
@@ -445,13 +517,18 @@ function currentModelEntries(node, meta) {
 		const widgetLabel = escapeText(widget?.label || widget?.options?.display_name || "", widgetName);
 		const tooltip = escapeText(widget?.tooltip || widget?.options?.tooltip || "");
 		const searchable = [widgetName, widgetLabel, tooltip].join(" ");
+		const widgetValue = escapeText(widget?.value, "");
 		if (!metaByName.has(widgetName) && !includesAny(searchable, HELP_MODEL_KEYWORDS)) {
+			continue;
+		}
+		if (!widgetValue) {
+			metaByName.delete(widgetName);
 			continue;
 		}
 		const inputMeta = metaByName.get(widgetName) || {};
 		pushUniqueModelEntry(entries, {
 			label: escapeText(inputMeta.label || widgetLabel, widgetName),
-			value: escapeText(widget?.value, "未选择"),
+			value: widgetValue,
 			tooltip: escapeText(inputMeta.tooltip || tooltip, ""),
 		});
 		metaByName.delete(widgetName);
@@ -697,23 +774,15 @@ function showHelpDialog(node) {
 
 	const body = document.createElement("div");
 	body.className = "gjj-help-body";
-	body.appendChild(createHelpSection("功能", escapeText(meta.description, "这个节点暂未提供功能说明。")));
-
-	// 创建模型下载链接
-	const downloadLink = document.createElement("p");
-	downloadLink.style.marginBottom = "10px";
-
-	const linkText = document.createTextNode("🌏模型下载：");
-	const linkElement = document.createElement("a");
-	linkElement.href = "https://pan.quark.cn/s/6ec846f1f58d";
-	linkElement.textContent = "https://pan.quark.cn/s/6ec846f1f58d";
-	linkElement.target = "_blank";
-	linkElement.rel = "noopener noreferrer";
-	linkElement.style.color = "#98d6d1";
-	linkElement.style.textDecoration = "underline";
-
-	downloadLink.appendChild(linkText);
-	downloadLink.appendChild(linkElement);
+	const descriptionText = formatHelpText(meta.description, "这个节点暂未提供功能说明。");
+	const noticeText = formatHelpText(meta?.help?.notice || "");
+	body.appendChild(createHelpSection("功能", descriptionText));
+	if (shouldShowNoticeSection(descriptionText, noticeText)) {
+		body.appendChild(createHelpSection("说明", noticeText));
+	}
+	if (meta?.help?.install_cmd) {
+		body.appendChild(createHelpSection("安装命令", formatHelpText(meta.help.install_cmd)));
+	}
 
 	// 创建用到的模型内容
 	const modelEntries = currentModelEntries(node, meta);
@@ -726,9 +795,6 @@ function showHelpDialog(node) {
 		empty.textContent = "未从当前节点面板识别到模型选择项或模型输入口。";
 		modelContent = empty;
 	}
-
-	// 将下载链接添加到模型内容的开头
-	modelContent.insertBefore(downloadLink, modelContent.firstChild);
 
 	body.appendChild(createHelpSection("用到的模型", modelContent));
 	body.appendChild(createHelpSection("依赖", createHelpList(
@@ -789,6 +855,28 @@ async function loadBackendHelpMetadata() {
 	}
 }
 
+function refreshGjjNodesAfterHelpLoad() {
+	for (const node of app.graph?._nodes || []) {
+		if (!isGjjNode(node)) {
+			continue;
+		}
+		patchNode(node);
+		applyNodeMetadata(node);
+		if (shouldAttachStatus(node)) {
+			const meta = META_BY_CLASS.get(String(node?.comfyClass || ""));
+			const warningText = initialWarningText(meta);
+			if (warningText) {
+				updateStatus(node, {
+					text: warningText,
+					progress: 0,
+					copy_text: statusCopyText(meta),
+					copy_label: meta?.help?.copy_label || "",
+				}, { visible: true });
+			}
+		}
+	}
+}
+
 function moveHelpWidgetToFront(node, widget) {
 	if (!node?.widgets || !widget) {
 		return;
@@ -817,16 +905,14 @@ function updateHelpWidgetPosition(node) {
 		return;
 	}
 	const width = Math.max(160, Number(node?.size?.[0] || 160));
-	const x = Math.min(
-		Math.max(34, (width * HELP_BUTTON_X_RATIO) - (HELP_WIDGET_WIDTH / 2)),
-		width - HELP_WIDGET_WIDTH - 12
-	);
+	const x = Math.max(34, width - HELP_WIDGET_WIDTH - HELP_BUTTON_RIGHT);
 	const lastY = Number(state.widget?.last_y);
 	const y = Number(state.widget?.y);
 	const widgetY = Number.isFinite(lastY) && lastY !== 0
 		? lastY
 		: (Number.isFinite(y) ? y : 0);
 	state.button.style.left = `${Math.round(x)}px`;
+	// 锚定在标题栏区域，避免正文面板高度变化时跟着下移。
 	state.button.style.top = `${Math.round(HELP_WIDGET_TOP - widgetY)}px`;
 	state.button.style.transform = "none";
 }
@@ -866,7 +952,7 @@ function ensureHelpWidget(node) {
 	button.title = "查看这个节点的功能、模型和依赖";
 	button.style.cssText = [
 		"position:absolute",
-		"left:50%",
+		"left:calc(100% - 38px)",
 		`top:${HELP_WIDGET_TOP}px`,
 		"transform:none",
 		`width:${HELP_WIDGET_WIDTH}px`,
@@ -995,6 +1081,40 @@ function ensureStatusWidget(node) {
 		"word-break:break-word",
 	].join(";");
 
+	const copyBtn = document.createElement("button");
+	copyBtn.type = "button";
+	copyBtn.textContent = "📋 复制安装命令";
+	copyBtn.title = "复制安装命令或模型下载网址";
+	copyBtn.style.cssText = [
+		"display:none",
+		"align-self:flex-start",
+		"padding:5px 10px",
+		"border:1px solid rgba(255,255,255,0.25)",
+		"border-radius:6px",
+		"background:rgba(255,80,80,0.25)",
+		"color:#fff",
+		"font-size:12px",
+		"cursor:pointer",
+	].join(";");
+	copyBtn.addEventListener("pointerdown", (event) => event.stopPropagation());
+	copyBtn.addEventListener("mousedown", (event) => event.stopPropagation());
+	copyBtn.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		copyTextToClipboard(copyBtn.__gjj_copy_text || copyBtn.__gjj_install_cmd || "").then((ok) => {
+			if (!ok) {
+				return;
+			}
+			const old = copyBtn.textContent;
+			copyBtn.textContent = "✅ 已复制";
+			copyBtn.style.background = "rgba(80,200,80,0.35)";
+			setTimeout(() => {
+				copyBtn.textContent = old;
+				copyBtn.style.background = "rgba(255,80,80,0.25)";
+			}, 1200);
+		});
+	});
+
 	const progressOuter = document.createElement("div");
 	progressOuter.style.cssText = [
 		"height:6px",
@@ -1013,12 +1133,12 @@ function ensureStatusWidget(node) {
 	].join(";");
 
 	progressOuter.appendChild(progressInner);
-	wrap.append(text, progressOuter);
+	wrap.append(text, copyBtn, progressOuter);
 
 	const widget = node.addDOMWidget?.(STATUS_WIDGET_NAME, STATUS_WIDGET_NAME, wrap, {
 		serialize: false,
 		hideOnZoom: false,
-		getHeight: () => node?.__gjjStandardStatus?.visible ? 46 : 0,
+		getHeight: () => node?.__gjjStandardStatus?.visible ? 78 : 0,
 	});
 
 	node.__gjjStandardStatus = {
@@ -1026,9 +1146,19 @@ function ensureStatusWidget(node) {
 		wrap,
 		text,
 		progressInner,
+		copyBtn,
 		visible: false,
 		progress: 0,
 	};
+	if (widget) {
+		widget.mouse = function (event) {
+			const type = String(event?.type || "");
+			if (!["pointerdown", "mousedown", "click"].includes(type)) {
+				return false;
+			}
+			return false;
+		};
+	}
 	return node.__gjjStandardStatus;
 }
 
@@ -1069,11 +1199,20 @@ function updateStatus(node, detail = {}, options = {}) {
 	const visible = options.visible !== false;
 	const text = String(detail?.text || "等待执行");
 	const progress = parseProgress(detail, state.progress);
+	const copyText = String(detail?.copy_text || detail?.install_command || detail?.model_download_url || options.copyText || "").trim();
+	const copyLabel = String(detail?.copy_label || options.copyLabel || "").trim();
 	state.visible = visible;
 	state.wrap.style.display = visible ? "flex" : "none";
 	state.text.textContent = text;
 	state.progress = progress;
 	state.progressInner.style.width = `${Math.round(progress * 100)}%`;
+	if (state.copyBtn) {
+		state.copyBtn.__gjj_copy_text = copyText;
+		state.copyBtn.__gjj_install_cmd = copyText;
+		state.copyBtn.textContent = copyText ? copyButtonLabel(copyText, copyLabel) : "📋 复制安装命令";
+		state.copyBtn.title = copyText ? `${copyButtonLabel(copyText, copyLabel)}\n${copyText}` : "复制安装命令或模型下载网址";
+		state.copyBtn.style.display = copyText ? "inline-flex" : "none";
+	}
 	refreshNode(node);
 }
 
@@ -1086,6 +1225,18 @@ function applyNodeMetadata(node) {
 	patchBoolSwitchWildcardInputs(node);
 	protectDomWidgets(node);
 	scheduleHelpWidgetPositionUpdate(node);
+}
+
+function seedInitialStatus(node) {
+	if (!shouldAttachStatus(node) || node?.__gjjStandardStatus?.visible) {
+		return;
+	}
+	const meta = META_BY_CLASS.get(String(node?.comfyClass || ""));
+	const warningText = initialWarningText(meta);
+	if (!warningText) {
+		return;
+	}
+	updateStatus(node, { text: warningText, progress: 0, copy_text: statusCopyText(meta), copy_label: meta?.help?.copy_label || "" }, { visible: true });
 }
 
 function patchNode(node) {
@@ -1165,6 +1316,7 @@ function patchNode(node) {
 	setTimeout(() => protectDomWidgets(node), 80);
 	if (!shouldBypassNode(node) && shouldAttachStatus(node)) {
 		updateStatus(node, {}, { visible: false });
+		setTimeout(() => seedInitialStatus(node), 0);
 	}
 }
 
@@ -1207,7 +1359,7 @@ app.registerExtension({
 
 	setup() {
 			loadGjjSettings();
-			loadBackendHelpMetadata();
+			loadBackendHelpMetadata().then(() => refreshGjjNodesAfterHelpLoad());
 
 		api.addEventListener("executing", ({ detail }) => {
 			const targetId = String(detail ?? "");
@@ -1237,6 +1389,30 @@ app.registerExtension({
 					if (shouldAttachStatus(node)) {
 						updateStatus(node, detail, { visible: true });
 					}
+				}
+			}
+		});
+
+		api.addEventListener(DEPENDENCY_NOTICE_EVENT, (event) => {
+			const detail = event?.detail || {};
+			const targetId = String(detail?.node || "");
+			for (const node of app.graph?._nodes || []) {
+				if (!isGjjNode(node)) {
+					continue;
+				}
+				if (targetId && String(node.id) !== targetId) {
+					continue;
+				}
+				patchNode(node);
+				applyNodeMetadata(node);
+				updateStatus(node, {
+					text: detail?.panel_message || detail?.warning_message || detail?.error || "",
+					progress: 0,
+					copy_text: detail?.copy_text || detail?.install_command || detail?.model_download_url || "",
+					copy_label: detail?.copy_label || "",
+				}, { visible: true });
+				if (targetId) {
+					break;
 				}
 			}
 		});

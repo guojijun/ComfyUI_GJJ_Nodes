@@ -8,6 +8,41 @@ import torch
 import comfy.utils
 import sys
 
+from .common_utils.dependency_checker import (
+    build_dependency_model_report,
+    load_dependency_at_runtime,
+    print_dependency_model_report,
+    send_dependency_model_notice,
+)
+
+NODE_DISPLAY_NAME = "GJJ · LatentSync 视频音频同步"
+CV2_DEPENDENCY = {
+    "module_name": "cv2",
+    "package_name": "opencv-python",
+    "display_name": "cv2",
+    "description": "LatentSync 视频音频同步需要 OpenCV 读取、写入和处理视频帧。",
+}
+SCIPY_DEPENDENCY = {
+    "module_name": "scipy.signal",
+    "package_name": "scipy",
+    "display_name": "scipy",
+    "description": "LatentSync 视频音频同步需要 scipy.signal.resample 进行音频重采样。",
+}
+LATENTSYNC_MODEL_SPECS = [
+    {
+        "label": "LatentSync 主模型",
+        "subdir": "models/latentsync",
+        "filename": "latentsync_unet.pt",
+        "description": "LatentSync 口型同步 UNet 主模型。",
+    },
+    {
+        "label": "LatentSync Whisper",
+        "subdir": "models/latentsync/whisper",
+        "filename": "tiny.pt",
+        "description": "LatentSync 音频特征提取 Whisper tiny 模型。",
+    },
+]
+
 # 检查关键依赖
 try:
     import cv2
@@ -17,27 +52,45 @@ except ImportError as exc:
     _IMPORT_ERROR = str(exc)
 
 
+def _model_file_exists(model_spec):
+    try:
+        model_path = os.path.join(
+            folder_paths.models_dir,
+            str(model_spec.get("subdir") or "models").replace("models/", "").replace("/", os.sep),
+            str(model_spec.get("filename") or ""),
+        )
+        return os.path.exists(model_path)
+    except Exception:
+        return False
+
+
+_DEPENDENCIES_AVAILABLE = _CV2_AVAILABLE
+_MISSING_DEPENDENCIES = [] if _DEPENDENCIES_AVAILABLE else [CV2_DEPENDENCY]
+_MISSING_MODELS = [spec for spec in LATENTSYNC_MODEL_SPECS if not _model_file_exists(spec)]
+_MODELS_AVAILABLE = not _MISSING_MODELS
+_ENV_REPORT = build_dependency_model_report(
+    node_name=NODE_DISPLAY_NAME,
+    missing_dependencies=_MISSING_DEPENDENCIES,
+    missing_models=_MISSING_MODELS,
+    install_packages=[spec["package_name"] for spec in _MISSING_DEPENDENCIES],
+    original_error=_IMPORT_ERROR if not _DEPENDENCIES_AVAILABLE else "",
+)
+_DESCRIPTION_INTRO = "通过音频同步视频唇形的节点。需要预下载模型到 ComfyUI/models/latentsync 目录。"
+DESCRIPTION = (
+    _DESCRIPTION_INTRO
+    if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
+    else f"{_ENV_REPORT['warning_message']}\n\n{_DESCRIPTION_INTRO}"
+)
+
+
 def _ensure_cv2():
     """确保 cv2 已安装"""
-    try:
-        import cv2
-        return cv2
-    except ImportError as exc:
-        from .common_utils.dependency_checker import print_runtime_dependency_error, get_pip_install_command_text
-
-        install_cmd = get_pip_install_command_text("opencv-python")
-
-        # 打印美观的控制台错误提示
-        print_runtime_dependency_error(
-            node_name="LatentSync",
-            dependency_name="opencv-python",
-            install_command=install_cmd,
-            description="该节点需要 opencv-python (cv2) 来处理视频",
-            extra_info=f"原始导入错误：{exc}"
-        )
-
-        # 抛出简洁的错误信息（在前端显示）
-        raise RuntimeError("运行时依赖缺失：opencv-python。详细信息请查看控制台。") from exc
+    return load_dependency_at_runtime(
+        module_name="cv2",
+        node_name=NODE_DISPLAY_NAME,
+        package_name=CV2_DEPENDENCY["package_name"],
+        description=CV2_DEPENDENCY["description"],
+    )
 
 
 class LatentSyncNode:
@@ -47,34 +100,23 @@ class LatentSyncNode:
     音频处理使用 soundfile / pydub / librosa / wave（零 torchcodec 冲突）
     """
 
-    # 如果缺少关键依赖，显示错误信息
-    if not _CV2_AVAILABLE:
-        DESCRIPTION = """❌ 节点 GJJ · 🎬 LatentSync 缺少必需的 Python 依赖：
-
-📦 必需依赖（请安装）：
-  • opencv-python (cv2, 视频处理)
-
-🔧 快速安装命令（使用国内镜像）：
-  pip install opencv-python -i https://pypi.tuna.tsinghua.edu.cn/simple
-
-💡 提示：安装后请重启 ComfyUI 服务器。
-
----
-通过音频同步视频唇形的节点。需要预下载模型到 ComfyUI/models/latentsync 目录"""
-    else:
-        DESCRIPTION = "通过音频同步视频唇形的节点。需要预下载模型到 ComfyUI/models/latentsync 目录"
-    REQUIRED_MODELS = [
-        {
-            "filename": "latentsync_unet.pt",
-            "url": "https://huggingface.co/chunyu-li/LatentSync/resolve/main/latentsync_unet.pt",
-            "dest": "models/latentsync/"
-        },
-        {
-            "filename": "whisper/tiny.pt",
-            "url": "https://huggingface.co/chunyu-li/LatentSync/resolve/main/whisper/tiny.pt",
-            "dest": "models/latentsync/whisper/"
-        }
-    ]
+    DESCRIPTION = DESCRIPTION
+    REQUIRED_MODELS = LATENTSYNC_MODEL_SPECS
+    GJJ_HELP = {
+        "description": DESCRIPTION,
+        "notice": _ENV_REPORT["help_message"] if not _ENV_REPORT["available"] else "",
+        "install_cmd": _ENV_REPORT["install_cmd"] if not _ENV_REPORT["available"] else "",
+        "copy_text": _ENV_REPORT["copy_text"] if not _ENV_REPORT["available"] else "",
+        "copy_label": _ENV_REPORT["copy_label"] if not _ENV_REPORT["available"] else "",
+        "warning_message": _ENV_REPORT["warning_message"] if not _ENV_REPORT["available"] else "",
+        "models": REQUIRED_MODELS,
+        "dependencies": [
+            "opencv-python（cv2；视频帧读取、写入和处理）",
+            "scipy（音频重采样；仅输入采样率不是 16000Hz 时需要）",
+            "soundfile / librosa / pydub（音频文件读取；按本机可用项回退）",
+            "ffmpeg 或 moviepy（音视频封装合并）",
+        ],
+    }
 
     @classmethod
     def INPUT_TYPES(s):
@@ -88,6 +130,8 @@ class LatentSyncNode:
                 "video_path": ("STRING", {"default": "", "tooltip": "视频文件路径，如果未使用VIDEO输入则使用此项"}),
                 "audio_path": ("STRING", {"default": "", "tooltip": "音频文件路径，如果未使用AUDIO输入则使用此项"}),
             }
+            ,
+            "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
     CATEGORY = "GJJ/音视频处理"
@@ -247,21 +291,16 @@ class LatentSyncNode:
             result = np.stack(channels, axis=0)
             return torch.from_numpy(result)
         except ImportError as exc:
-            from .common_utils.dependency_checker import print_runtime_dependency_error, get_pip_install_command_text
-
-            install_cmd = get_pip_install_command_text("scipy")
-
-            # 打印美观的控制台错误提示
-            print_runtime_dependency_error(
-                node_name="LatentSync",
-                dependency_name="scipy",
-                install_command=install_cmd,
-                description="该节点需要 scipy 来进行音频重采样",
-                extra_info=f"原始导入错误：{exc}"
+            report = build_dependency_model_report(
+                node_name=NODE_DISPLAY_NAME,
+                missing_dependencies=[SCIPY_DEPENDENCY],
+                install_packages=[SCIPY_DEPENDENCY["package_name"]],
+                original_error=str(exc),
             )
-
-            # 抛出简洁的错误信息（在前端显示）
-            raise RuntimeError("运行时依赖缺失：scipy。详细信息请查看控制台。") from exc
+            print_dependency_model_report(report, title="GJJ 节点运行时依赖缺失！")
+            err = RuntimeError(report.get("warning_message") or "运行时依赖缺失。")
+            setattr(err, "gjj_report", report)
+            raise err from exc
 
     def _save_audio(self, waveform, sample_rate, output_path):
         """保存音频到 wav 文件（替代 torchaudio.save）"""
@@ -336,17 +375,32 @@ class LatentSyncNode:
         except Exception as e:
             raise RuntimeError(f"MoviePy 合并失败: {str(e)}")
 
-    def inference(self, seed, video=None, audio=None, video_path="", audio_path=""):
+    def inference(self, seed, video=None, audio=None, video_path="", audio_path="", unique_id=None):
         # 运行时检查依赖
-        cv2 = _ensure_cv2()
+        try:
+            cv2 = _ensure_cv2()
+        except Exception as exc:
+            report = getattr(exc, "gjj_report", None) or _ENV_REPORT
+            print_dependency_model_report(report, title="GJJ 节点运行时依赖缺失！")
+            send_dependency_model_notice(report, unique_id=unique_id)
+            raise RuntimeError(report.get("warning_message") or "运行时依赖缺失。") from exc
 
         # 检查模型
         models_dir = folder_paths.models_dir
         latentsync_model_dir = os.path.join(models_dir, "latentsync")
         unet_model_path = os.path.join(latentsync_model_dir, "latentsync_unet.pt")
 
-        if not os.path.exists(unet_model_path):
-            raise FileNotFoundError(f"未找到模型文件: {unet_model_path}\n请下载 latentsync_unet.pt 到 models/latentsync 目录")
+        missing_models = [spec for spec in LATENTSYNC_MODEL_SPECS if not _model_file_exists(spec)]
+        if missing_models:
+            report = build_dependency_model_report(
+                node_name=NODE_DISPLAY_NAME,
+                missing_models=missing_models,
+            )
+            print_dependency_model_report(report, title="GJJ 节点模型缺失！")
+            send_dependency_model_notice(report, unique_id=unique_id)
+            err = RuntimeError(report.get("warning_message") or "LatentSync 模型缺失。")
+            setattr(err, "gjj_report", report)
+            raise err
 
         # 解析视频路径
         if video is not None:
@@ -429,5 +483,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "GJJ_LatentSyncNode": "LatentSync 视频音频同步",
+    "GJJ_LatentSyncNode": NODE_DISPLAY_NAME,
 }

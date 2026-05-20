@@ -263,18 +263,77 @@ export class GJJ_Utils {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * 刷新节点尺寸和画布。宽度优先使用 node.size[0]（保留用户手动调整宽度），
-     * 高度使用 computeSize()[1] 自动适配内容。
+     * 刷新节点尺寸和画布。默认保留当前宽度，仅按 computeSize() 自动回收高度。
      * @param {object} node - ComfyUI 节点实例
+     * @param {object} [options={}] - 可选参数
+     * @param {boolean} [options.preserveWidth=true] - 是否保留当前宽度
+     * @param {number} [options.minWidth=300] - 最小宽度
+     * @param {number} [options.minHeight=80] - 最小高度
+     * @param {number} [options.width] - 强制指定宽度
+     * @param {number} [options.height] - 强制指定高度
+     * @param {boolean} [options.dirtyCanvas=true] - 是否刷新画布
      */
-    static refreshNode(node) {
+    static refreshNode(node, options = {}) {
         if (!node) return;
-        node.setSize?.([
-            node.size?.[0] || node.computeSize?.()?.[0] || 300,
-            node.computeSize?.()?.[1] || node.size?.[1] || 80,
-        ]);
-        node.setDirtyCanvas?.(true, true);
-        app.graph?.setDirtyCanvas?.(true, true);
+        const {
+            preserveWidth = true,
+            minWidth = 300,
+            minHeight = 80,
+            width = null,
+            height = null,
+            dirtyCanvas = true,
+        } = options || {};
+
+        const size = node.computeSize?.() || [];
+        const currentWidth = Number(node.size?.[0] || 0);
+        const currentHeight = Number(node.size?.[1] || 0);
+        const computedWidth = Number(size[0] || 0);
+        const computedHeight = Number(size[1] || 0);
+
+        const nextWidth = Number.isFinite(width)
+            ? width
+            : Math.max(
+                preserveWidth ? (currentWidth || computedWidth || minWidth) : (computedWidth || currentWidth || minWidth),
+                minWidth
+            );
+        const nextHeight = Number.isFinite(height)
+            ? height
+            : Math.max(computedHeight || currentHeight || minHeight, minHeight);
+
+        node.setSize?.([nextWidth, nextHeight]);
+        if (dirtyCanvas) {
+            node.setDirtyCanvas?.(true, true);
+            app.graph?.setDirtyCanvas?.(true, true);
+        }
+    }
+
+    /**
+     * 在下一帧或延迟后再刷新节点尺寸，适合 DOMWidget 还没完成渲染时调用。
+     * @param {object} node - ComfyUI 节点实例
+     * @param {object} [options={}] - 与 refreshNode 相同的参数
+     * @param {number} [options.delay=0] - 额外延迟毫秒数
+     * @param {boolean} [options.useAnimationFrame=true] - 是否先等一帧
+     */
+    static scheduleRefreshNode(node, options = {}) {
+        if (!node) return;
+        const {
+            delay = 0,
+            useAnimationFrame = true,
+            ...refreshOptions
+        } = options || {};
+        const run = () => GJJ_Utils.refreshNode(node, refreshOptions);
+        if (useAnimationFrame && typeof requestAnimationFrame === "function") {
+            requestAnimationFrame(() => {
+                if (delay > 0) setTimeout(run, delay);
+                else run();
+            });
+            return;
+        }
+        if (delay > 0) {
+            setTimeout(run, delay);
+            return;
+        }
+        run();
     }
 
     /**

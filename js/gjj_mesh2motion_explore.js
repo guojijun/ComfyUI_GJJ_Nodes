@@ -7,6 +7,11 @@ const ROUTE_BASE = "/gjj/mesh2motion";
 const POST_MESSAGE_ORIGIN = window.location.origin;
 const VIEW_WIDGET = "gjj_mesh2motion_view";
 const INTERNAL_WIDGETS = ["image", "video_frames"];
+const DEFAULT_RECORDING_PRESET = {
+	file: "basic-moves/pan_180_degree.json",
+	id: "pan_180_degree",
+	label: "180 Degree Pan",
+};
 const MIN_NODE_WIDTH = 920;
 const MIN_PANEL_HEIGHT = 700;
 const MIN_NODE_HEIGHT = 940;
@@ -351,6 +356,68 @@ function captureVideoFromIframe(iframe, presetName, width, height) {
 	});
 }
 
+function presetIdFromFile(presetFile) {
+	const fileName = String(presetFile || "").split("/").pop() || "";
+	return fileName.replace(/\.json$/i, "");
+}
+
+function parseAnnotatedUploadPath(value, fallbackType = "temp") {
+	const raw = String(value || "").trim();
+	const match = raw.match(/\s*\[(input|output|temp)\]\s*$/i);
+	const type = match?.[1]?.toLowerCase() || fallbackType;
+	const clean = raw.replace(/\s*\[(?:input|output|temp)\]\s*$/i, "").trim().replace(/\\/g, "/");
+	const parts = clean.split("/").filter(Boolean);
+	const name = parts.pop() || clean;
+	return {
+		name,
+		subfolder: parts.join("/"),
+		type,
+		raw,
+	};
+}
+
+function waitForCameraPreset(node, presetFile, timeoutMs = 2500) {
+	return new Promise((resolve) => {
+		const iframe = node?._gjjMesh2MotionIframe;
+		if (!iframe?.contentWindow) {
+			resolve(false);
+			return;
+		}
+		const wanted = String(presetFile || "");
+		const timeout = setTimeout(() => {
+			window.removeEventListener("message", handler);
+			resolve(false);
+		}, timeoutMs);
+		const handler = (event) => {
+			if (event.origin !== POST_MESSAGE_ORIGIN || event.source !== iframe.contentWindow) {
+				return;
+			}
+			if (event.data?.type === "mesh2motion:cameraPresetChanged" && event.data?.data?.value === wanted) {
+				clearTimeout(timeout);
+				window.removeEventListener("message", handler);
+				resolve(true);
+			}
+		};
+		window.addEventListener("message", handler);
+		iframe.contentWindow.postMessage({
+			type: "mesh2motion:restoreCameraPreset",
+			data: { value: wanted },
+		}, POST_MESSAGE_ORIGIN);
+	});
+}
+
+async function ensureRecordingPreset(node) {
+	const current = node?.properties?.mesh2motion_camera_preset;
+	if (current && current !== "__free__") {
+		return { file: current, id: presetIdFromFile(current) };
+	}
+	setStatus(node, `未选择相机预设，使用默认 ${DEFAULT_RECORDING_PRESET.label} 录制...`, "busy");
+	node.properties = node.properties || {};
+	node.properties.mesh2motion_camera_preset = DEFAULT_RECORDING_PRESET.file;
+	await waitForCameraPreset(node, DEFAULT_RECORDING_PRESET.file);
+	return { file: DEFAULT_RECORDING_PRESET.file, id: DEFAULT_RECORDING_PRESET.id };
+}
+
 async function syncCaptureStateToBackend(node, state) {
 	const response = await api.fetchApi(`${ROUTE_BASE}/capture-state`, {
 		method: "POST",
@@ -501,24 +568,21 @@ function hookLiveControls(node) {
 }
 
 function computeVideoSignature(node) {
-	const presetFile = node.properties?.mesh2motion_camera_preset;
-	if (!presetFile) {
-		return null;
-	}
+	const presetFile = node.properties?.mesh2motion_camera_preset || DEFAULT_RECORDING_PRESET.file;
 	const tuningMap = node.properties?.mesh2motion_preset_tuning;
-		return JSON.stringify({
-			presetFile,
-			skeleton: node.properties?.mesh2motion_skeleton ?? null,
-			timeline: node.properties?.mesh2motion_timeline ?? null,
-			tuning: tuningMap?.[presetFile] ?? null,
-			width: Number(getState(node, "width")) || 1024,
-			height: Number(getState(node, "height")) || 1024,
-			fps: Number(getState(node, "fps")) || 24,
-			showSkeleton: !!getState(node, "show_skeleton"),
-			mirror: !!getState(node, "mirror_animations"),
-			checkerRoom: !!getState(node, "checker_room"),
-		});
-	}
+	return JSON.stringify({
+		presetFile,
+		skeleton: node.properties?.mesh2motion_skeleton ?? null,
+		timeline: node.properties?.mesh2motion_timeline ?? null,
+		tuning: tuningMap?.[presetFile] ?? null,
+		width: Number(getState(node, "width")) || 1024,
+		height: Number(getState(node, "height")) || 1024,
+		fps: Number(getState(node, "fps")) || 24,
+		showSkeleton: !!getState(node, "show_skeleton"),
+		mirror: !!getState(node, "mirror_animations"),
+		checkerRoom: !!getState(node, "checker_room"),
+	});
+}
 
 function hookSerialization(node) {
 	// 不再依赖 hidden widget 的 serializeValue，改为在执行前捕获数据。
@@ -549,11 +613,10 @@ function hookSerialization(node) {
 			setStatus(node, "截图已捕获", "ok");
 			
 			// 如果有相机预设，捕获视频
-			const presetFile = node.properties?.mesh2motion_camera_preset;
 			node.properties.mesh2motion_video = "";
-			if (presetFile) {
-				const fileName = String(presetFile).split("/").pop() || "";
-				const presetId = fileName.replace(/\.json$/i, "");
+			const recordingPreset = await ensureRecordingPreset(node);
+			if (recordingPreset?.id) {
+				const presetId = recordingPreset.id;
 				if (presetId) {
 					setStatus(node, "正在录制相机预设视频...", "busy");
 					const videoResult = await captureVideoFromIframe(
@@ -563,14 +626,12 @@ function hookSerialization(node) {
 						Number(getState(node, "height")) || 1024,
 					);
 					captureState.video = {
-						video: videoResult.videoPath,
+						video: parseAnnotatedUploadPath(videoResult.videoPath, "temp"),
 						fps: videoResult.fps,
 					};
 					node.properties.mesh2motion_video = JSON.stringify(captureState.video);
 					setStatus(node, "视频已录制", "ok");
 				}
-			} else {
-				node.properties.mesh2motion_video = "";
 			}
 			await syncCaptureStateToBackend(node, captureState);
 			console.log("[GJJ Mesh2Motion] ✅ 数据捕获完成，已保存到 properties 与 Python 缓存");
@@ -837,18 +898,18 @@ app.registerExtension({
 				const response = await api.fetchApi(`${ROUTE_BASE}/index-comfyui.html`);
 				if (response.status !== 200) {
 					console.warn("[GJJ Mesh2Motion] ⚠️ Mesh2Motion 资源未找到！");
-					console.warn("🌏模型下载：https://github.com/scottpetrovic/mesh2motion-app/releases");
+					console.warn("🌏模型下载：https://pan.quark.cn/s/6ec846f1f58d");
 				}
 			} catch (error) {
 				console.warn("[GJJ Mesh2Motion] ⚠️ Mesh2Motion 资源未找到！");
-			console.warn("🌏模型下载：https://github.com/scottpetrovic/mesh2motion-app/releases");
-		}
-	};
+				console.warn("🌏模型下载：https://pan.quark.cn/s/6ec846f1f58d");
+			}
+		};
 
 		checkResource();
 		createPanel(node);
 		compactMesh2MotionNode(node);
 		setTimeout(() => compactMesh2MotionNode(node), 0);
 		setTimeout(() => compactMesh2MotionNode(node), 120);
-		},
+	},
 	});

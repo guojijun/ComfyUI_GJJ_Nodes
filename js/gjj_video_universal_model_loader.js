@@ -23,7 +23,7 @@ const OUTPUT_TYPE_BY_KIND = {
 };
 
 const ALL_FIELDS = ["config", "use_accel_lora", "clip_type_override"];
-for (let i = 1; i <= MAX_SLOTS; i++) ALL_FIELDS.push(`file_${i}`, `dtype_${i}`);
+for (let i = 1; i <= MAX_SLOTS; i++) ALL_FIELDS.push(`file_${i}`, `secondary_file_${i}`, `dtype_${i}`);
 
 function getWidget(node, name) { return node.widgets?.find((w) => w?.name === name); }
 function valueOf(node, name, fallback = "") { return String(getWidget(node, name)?.value ?? fallback ?? ""); }
@@ -76,11 +76,16 @@ function fillSelect(select, values, labels = null) {
 	});
 }
 
-function selectFirstIfInvalid(node, name, values) {
+function selectFirstIfInvalid(node, name, values, preferred = "") {
 	const w = getWidget(node, name); if (!w) return;
 	const list = Array.isArray(values) ? values.map(String) : [];
 	const cur = String(w.value ?? "");
-	if (!cur || !list.includes(cur)) { w.value = list[0] || ""; w.callback?.(w.value); }
+	const preferredValue = String(preferred ?? "");
+	if (!cur || !list.includes(cur)) {
+		if (preferredValue && list.includes(preferredValue)) w.value = preferredValue;
+		else w.value = list[0] || "";
+		w.callback?.(w.value);
+	}
 	if (w.__gjjVUInput && "value" in w.__gjjVUInput) w.__gjjVUInput.value = String(w.value ?? "");
 	if (typeof w.__gjjVUSetValue === "function") w.__gjjVUSetValue(String(w.value ?? ""), false);
 	saveWidgetValues(node);
@@ -353,6 +358,7 @@ function effectiveUseLora(node) {
 }
 
 function isLoraSlot(slot) { return String(slot?.folder || "") === "loras"; }
+function isDualClipSlot(slot) { return String(slot?.loader || "") === "dual_clip"; }
 function isModelOutputSlot(slot) {
 	return ["diffusion", "checkpoint_model"].includes(String(slot?.kind || ""));
 }
@@ -375,23 +381,6 @@ function slotKey(slot, idx = 0) {
 function isGjjLoraInput(input) {
 	const text = [input?.name, input?.localized_name, input?.label].map((v) => String(v || "")).join(" ");
 	return text.includes("use_accel_lora_in") || text.includes("lora_chain_config") || text.includes("🚕") || text.includes("🧬");
-}
-
-function applyInputSlotLabels(node) {
-	for (const input of node.inputs || []) {
-		const raw = String(input?.name || "");
-		const text = [input?.name, input?.localized_name, input?.label].map((v) => String(v || "")).join(" ");
-		if (raw === "use_accel_lora_in" || text.includes("use_accel_lora_in") || text.includes("🚕")) {
-			input.label = "🚕 加速LoRA";
-			input.localized_name = "🚕 加速LoRA";
-			input.tooltip = "外部 BOOLEAN 控制加速 LoRA；连接后优先使用外部输入。";
-		}
-		if (raw === "lora_chain_config" || text.includes("lora_chain_config") || text.includes("🧬")) {
-			input.label = "🧬 LoRA配置";
-			input.localized_name = "🧬 LoRA配置";
-			input.tooltip = "接入 GJJ · 🧬 LoRA串联配置 的输出口，开启加速 LoRA 后额外叠加。";
-		}
-	}
 }
 
 function createLoraBar(node, cfg) {
@@ -441,12 +430,25 @@ function createLoraBar(node, cfg) {
 	return bar;
 }
 
+function estimateNodeHeight(node) {
+	const container = node?.__gjjVUContainer;
+	const rows = node?.__gjjVURows;
+	const rowCount = Math.max(
+		Number(node?.__gjjVUVisibleRowCount || 0),
+		Number(rows?.children?.length || rows?.childElementCount || 0),
+	);
+	const hasLoraBar = !!(node?.__gjjVULoraBarWrap?.childElementCount && node.__gjjVULoraBarWrap.style.display !== "none");
+	const measured = Math.ceil(Number(container?.scrollHeight || rows?.scrollHeight || 0)) + 8;
+	const estimated = 52 + (hasLoraBar ? 32 : 0) + (rowCount * 40);
+	return Math.max(120, measured, estimated);
+}
+
 function buildDom(node) {
 	const wrap = document.createElement("div");
 	wrap.className = "gjj-vu-loader";
 	// 关键：DOMWidget 不能覆盖最右侧输出插口命中区域，否则低位输出口（例如 CLIP）会拖不出线。
 	// DOM 内容宽度只留出右侧必要输出端口通道，避免面板右侧空白过大。
-	wrap.style.cssText = "width:calc(100% - 36px);box-sizing:border-box;display:flex;flex-direction:column;gap:6px;padding:0;margin-right:36px;pointer-events:none;";
+	wrap.style.cssText = "width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:6px;padding:0;margin-right:0;pointer-events:none;position:relative;";
 	const style = document.createElement("style");
 	style.textContent = `
 		.gjj-vu-loader * { box-sizing:border-box; }
@@ -548,9 +550,8 @@ function ensureDom(node) {
 	const domWidget = node.addDOMWidget?.("gjj_video_universal_loader_dom", "HTML", container, { serialize: false, hideOnZoom: false });
 	if (domWidget) {
 		domWidget.computeSize = (width) => {
-			const nodeWidth = Math.max(470, Number(width || node.size?.[0] || 500));
-			// HTML 覆盖层宽度小于节点宽度，给右侧输出插口留出可点击/可拖拽区域。
-			return [Math.max(420, nodeWidth - 36), Math.max(80, Math.ceil(container.scrollHeight || 80))];
+			const nodeWidth = Math.max(430, Number(width || node.size?.[0] || 470));
+			return [Math.max(400, nodeWidth), estimateNodeHeight(node)];
 		};
 		node.__gjjVUWidget = domWidget;
 		forceDomPassThrough(node);
@@ -592,7 +593,11 @@ function restoreWidgetValues(node, serializedNode = null) {
 	if (props?.[FILTER_PROPERTY]) { node.properties = node.properties || {}; node.properties[FILTER_PROPERTY] = { ...props[FILTER_PROPERTY] }; }
 }
 
-function slotNeedsDtype(slot) { return ["diffusion", "clip"].includes(String(slot?.kind || "")); }
+function slotNeedsDtype(slot) {
+	const kind = String(slot?.kind || "");
+	if (kind === "clip" && String(slot?.loader || "") === "dual_clip") return false;
+	return ["diffusion", "clip"].includes(kind);
+}
 function officialIconFor(slot) {
 	const kind = String(slot?.kind || "");
 	// 与官方插口颜色对齐：MODEL 紫、VAE 红、CLIP 黄。
@@ -629,6 +634,9 @@ function sameOutputShape(node, slots) {
 		const out = node.outputs[i];
 		const label = outputLabelFor(slots[i]);
 		const type = outputTypeFor(slots[i]);
+		const expectedKey = slotKey(slots[i], i);
+		const actualKey = String(out?.gjj_slot_key || "");
+		if (actualKey && actualKey !== expectedKey) return false;
 		if (String(out?.name || out?.label || "") !== label) return false;
 		if (String(out?.type || "") !== type) return false;
 	}
@@ -840,20 +848,10 @@ function deleteUnrestoredOutputLinks(savedLinks, restoredIds) {
 function unusedOutputLabel(index) { return ``; }
 function unusedOutputType() { return "*"; }
 function hardRefreshOutputs(node) {
-	try { node.setSize?.([node.size?.[0] || 560, node.size?.[1] || 100]); } catch (_) {}
 	try { node.onResize?.(node.size); } catch (_) {}
 	try { node.setDirtyCanvas?.(true, true); } catch (_) {}
 	try { app.graph?.setDirtyCanvas?.(true, true); } catch (_) {}
-	requestAnimationFrame(() => {
-		try { node.onResize?.(node.size); } catch (_) {}
-		try { node.setDirtyCanvas?.(true, true); } catch (_) {}
-		try { app.graph?.setDirtyCanvas?.(true, true); } catch (_) {}
-	});
-	setTimeout(() => {
-		try { node.onResize?.(node.size); } catch (_) {}
-		try { node.setDirtyCanvas?.(true, true); } catch (_) {}
-		try { app.graph?.setDirtyCanvas?.(true, true); } catch (_) {}
-	}, 60);
+	scheduleLayoutRefresh(node, [0, 48, 160]);
 }
 function ensureActiveOutputCount(node, count) {
 	if (!Array.isArray(node.outputs)) node.outputs = [];
@@ -929,7 +927,8 @@ function updateOutputs(node, cfg, opts = {}) {
 	const slots = visibleOutputSlots(cfg);
 	const nextConfigKey = currentConfigKey(node);
 	const previousConfigKey = String(node.__gjjVUAppliedConfigKey || node.properties?.gjj_vu_applied_config_key || "");
-	const configChanged = Boolean(opts?.userConfigChanged || (previousConfigKey && nextConfigKey && previousConfigKey !== nextConfigKey));
+	const layoutChanged = !sameOutputShape(node, slots);
+	const configChanged = Boolean(opts?.userConfigChanged || (previousConfigKey && nextConfigKey && previousConfigKey !== nextConfigKey) || layoutChanged);
 
 	// 配置切换时不能按 output 序号复用连线：
 	// TI2V/S2V -> I2V 时，output2 会从 VAE 变成 Low模型，output3 会从 CLIP 变成 VAE。
@@ -966,30 +965,52 @@ function updateOutputs(node, cfg, opts = {}) {
 
 	hardRefreshOutputs(node);
 }
-function makeInput(name, type, label, oldIn = null) {
+function isLoraConfigInput(input) {
+	const text = [input?.name, input?.display_name, input?.displayName, input?.localized_name, input?.label].map((v) => String(v || "")).join(" ");
+	return text.includes("lora_chain_config") || text.includes("🧬");
+}
+function isAccelLoraInput(input) {
+	const text = [input?.name, input?.display_name, input?.displayName, input?.localized_name, input?.label].map((v) => String(v || "")).join(" ");
+	return text.includes("use_accel_lora_in") || text.includes("🚕");
+}
+function captureBackendInputs(node) {
+	if (node.__gjjVUBackendInputsCaptured) return;
+	node.__gjjVUBackendInputsCaptured = true;
+	node.__gjjVULoraConfigInput = (node.inputs || []).find(isLoraConfigInput) || null;
+	node.__gjjVUAccelLoraInput = (node.inputs || []).find(isAccelLoraInput) || null;
+}
+function fallbackBackendInput(name, type, displayName, oldIn = null) {
+	// 仅作为异常兜底。正常情况下直接使用 Python INPUT_TYPES 生成的原生 input，显示文字完全依赖后端 display_name。
 	return {
-		name: label,
+		name,
 		type,
 		link: oldIn?.link ?? null,
-		localized_name: label,
-		label,
-		display_name: label,
-		displayName: label,
+		display_name: displayName,
 		tooltip: oldIn?.tooltip || "",
-		gjj_dynamic_lora_input: true,
-		gjj_backend_name: name,
 	};
 }
 function updateInputs(node, cfg) {
 	if (!Array.isArray(node.inputs)) node.inputs = [];
+	captureBackendInputs(node);
 	const old = node.inputs || [];
-	const boolOld = getInputSlot(node, "🚕 加速LoRA", "🚕 加速LoRA") || getInputSlot(node, "use_accel_lora_in", "🚕 加速LoRA");
-	const cfgOld = getInputSlot(node, "🧬 LoRA配置", "🧬 LoRA配置") || getInputSlot(node, "lora_chain_config", "🧬 LoRA配置");
-	// LoRA 串联输入口始终保留，方便任何视频模型配置额外接入 GJJ · 🧬 LoRA串联配置。
-	node.inputs = old.filter((input) => !isGjjLoraInput(input));
-	node.inputs.unshift(makeInput("lora_chain_config", "LORA_CHAIN_CONFIG", "🧬 LoRA配置", cfgOld));
-	node.inputs.unshift(makeInput("use_accel_lora_in", "BOOLEAN", "🚕 加速LoRA", boolOld));
-	applyInputSlotLabels(node);
+	const cfgInput = old.find(isLoraConfigInput) || node.__gjjVULoraConfigInput || fallbackBackendInput("lora_chain_config", "LORA_CHAIN_CONFIG", "🧬 LoRA配置");
+	const boolInput = old.find(isAccelLoraInput) || node.__gjjVUAccelLoraInput || fallbackBackendInput("use_accel_lora_in", "BOOLEAN", "🚕 加速LoRA");
+
+	// 关键：前后端顺序保持一致：LoRA 配置在前，加速 LoRA BOOL 在后。
+	// 不再新建/强改 label/localized_name/displayName，避免破坏 ComfyUI 根据后端 display_name 绘制输入文字。
+	const rest = old.filter((input) => !isLoraConfigInput(input) && !isAccelLoraInput(input));
+	const nextInputs = [cfgInput];
+	if (hasLoraSlots(cfg)) nextInputs.push(boolInput);
+	node.inputs = [...nextInputs, ...rest];
+}
+
+function scheduleLayoutRefresh(node, delays = [0, 48, 160]) {
+	if (!node) return;
+	for (const delay of Array.isArray(delays) ? delays : [Number(delays) || 0]) {
+		setTimeout(() => {
+			requestAnimationFrame(() => refreshNode(node));
+		}, Math.max(0, Number(delay) || 0));
+	}
 }
 
 function currentConfig(node, state) {
@@ -1013,19 +1034,21 @@ function applyConfig(node, opts = {}) {
 	const cfg = currentConfig(node, state);
 	updateInputs(node, cfg);
 	const rows = node.__gjjVURows; if (!rows) return;
+	node.__gjjVUVisibleRowCount = 0;
 	rows.replaceChildren();
 	if (node.__gjjVULoraBarWrap) {
 		node.__gjjVULoraBarWrap.replaceChildren();
 		node.__gjjVULoraBarWrap.appendChild(createLoraBar(node, cfg));
 	}
 	if (!cfg) {
-		const empty = document.createElement("div"); empty.className = "gjj-vu-empty"; empty.textContent = "未读取到模型配置。"; rows.appendChild(empty); refreshNode(node); return;
+		const empty = document.createElement("div"); empty.className = "gjj-vu-empty"; empty.textContent = "未读取到模型配置。"; rows.appendChild(empty); node.__gjjVUVisibleRowCount = 1; scheduleLayoutRefresh(node, [0, 48, 160]); return;
 	}
 	const loraEnabled = effectiveUseLora(node);
 	(cfg.slots || []).slice(0, MAX_SLOTS).forEach((slot, index) => {
 		const i = index + 1;
 		if (String(slot?.kind || "") === "empty") {
 			syncWidget(node, `file_${i}`, "");
+			syncWidget(node, `secondary_file_${i}`, "");
 			syncWidget(node, `dtype_${i}`, "default");
 			return;
 		}
@@ -1033,10 +1056,20 @@ function applyConfig(node, opts = {}) {
 		const list = state.folders?.[folder] || [];
 		const allowAny = String(slot.kind || "") === "name_any";
 		const values = filterList(list, slot.keywords || [], allowAny);
+		const secondaryValues = Array.isArray(list) ? list.map(String) : [];
 		const fileName = `file_${i}`;
+		const secondaryFileName = `secondary_file_${i}`;
 		const dtypeName = `dtype_${i}`;
 		setComboOptions(getWidget(node, fileName), values);
-		selectFirstIfInvalid(node, fileName, values);
+		const preferredName = String(slot.preferred_name || slot.required_name || "").trim();
+		selectFirstIfInvalid(node, fileName, values, preferredName);
+		if (isDualClipSlot(slot)) {
+			setComboOptions(getWidget(node, secondaryFileName), secondaryValues);
+			const preferredSecondary = String(slot.secondary_name || "").trim();
+			selectFirstIfInvalid(node, secondaryFileName, secondaryValues, preferredSecondary);
+		} else {
+			syncWidget(node, secondaryFileName, "");
+		}
 		setComboOptions(getWidget(node, dtypeName), state.dtypes || ["default"]);
 		selectFirstIfInvalid(node, dtypeName, state.dtypes || ["default"]);
 
@@ -1056,19 +1089,33 @@ function applyConfig(node, opts = {}) {
 			row.append(dtype);
 		}
 		rows.appendChild(row);
+		node.__gjjVUVisibleRowCount += 1;
+		if (isDualClipSlot(slot)) {
+			const secondaryRow = document.createElement("div");
+			secondaryRow.className = "gjj-vu-row no-dtype";
+			const secondaryLabel = document.createElement("div");
+			secondaryLabel.className = "gjj-vu-label";
+			const secondaryIcon = officialIconFor(slot);
+			const secondaryLabelText = String(slot.secondary_label || "另一个模型");
+			secondaryLabel.textContent = `${secondaryIcon} ${secondaryLabelText}`;
+			secondaryLabel.title = `目录: models/${folder}\n类型: 另一个模型\n默认值: ${String(slot.secondary_name || "").trim() || "未设置"}`;
+			const secondarySelect = createSearchableSelect(node, secondaryFileName, secondaryValues, () => saveWidgetValues(node), null, { placeholder: "输入关键词实时过滤", title: secondaryLabel.title });
+			secondaryRow.append(secondaryLabel, secondarySelect);
+			rows.appendChild(secondaryRow);
+			node.__gjjVUVisibleRowCount += 1;
+		}
 	});
-	for (let i = (cfg.slots || []).length + 1; i <= MAX_SLOTS; i++) { syncWidget(node, `file_${i}`, ""); syncWidget(node, `dtype_${i}`, "default"); }
+	for (let i = (cfg.slots || []).length + 1; i <= MAX_SLOTS; i++) { syncWidget(node, `file_${i}`, ""); syncWidget(node, `secondary_file_${i}`, ""); syncWidget(node, `dtype_${i}`, "default"); }
 	updateOutputs(node, cfg, opts);
 	node.__gjjVULoraToggleSync?.();
 	saveWidgetValues(node);
-	refreshNode(node);
-	requestAnimationFrame(() => refreshNode(node));
+	scheduleLayoutRefresh(node, [0, 48, 160]);
 }
 
 function refreshNode(node) {
 	if (!node) return;
-	const width = Math.max(470, Math.min(Number(node.size?.[0] || 500), 520));
-	const height = Math.max(80, Math.ceil(node.__gjjVUContainer?.scrollHeight || node.size?.[1] || 90) + 6);
+	const width = Math.max(430, Math.min(Number(node.size?.[0] || 470), 500));
+	const height = estimateNodeHeight(node);
 	if (!node.__gjjVUSizing && (Math.abs(Number(node.size?.[0] || 0) - width) > 1 || Math.abs(Number(node.size?.[1] || 0) - height) > 1)) {
 		node.__gjjVUSizing = true;
 		try { node.setSize?.([width, height]); }
@@ -1082,7 +1129,6 @@ function refreshNode(node) {
 function stabilize(node) {
 	if (!node) return;
 	restoreWidgetValues(node);
-	applyInputSlotLabels(node);
 	ensureDom(node);
 	hideNativeWidgets(node);
 	applyConfig(node);

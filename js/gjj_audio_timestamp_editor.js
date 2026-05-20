@@ -1472,8 +1472,9 @@ app.registerExtension({
 			try {
 				const data = event.detail || {};
 				const nodeId = data.node;
-				const errorMessage = data.error || "";
-				const installCommand = data.install_command || "";
+				const errorMessage = data.panel_message || data.warning_message || data.error || "";
+				const installCommand = data.copy_text || data.install_command || data.model_download_url || "";
+				const copyLabel = data.copy_label || "📋 复制安装命令";
 				if (!nodeId || !errorMessage) return;
 				for (const node of app.graph?._nodes || []) {
 					if (String(node.id) !== String(nodeId)) continue;
@@ -1482,6 +1483,7 @@ app.registerExtension({
 						node._editor.setStatus(errorMessage);
 						if (installCommand && node._editor.copyBtn) {
 							node._editor.copyBtn.style.display = "inline-flex";
+							node._editor.copyBtn.textContent = copyLabel;
 							node._editor.copyBtn.onclick = async () => {
 								try {
 									await navigator.clipboard.writeText(installCommand);

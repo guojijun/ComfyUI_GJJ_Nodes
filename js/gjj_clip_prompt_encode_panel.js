@@ -429,9 +429,8 @@ app.registerExtension({
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode) {
 			saveValues(this, serializedNode);
-			const result = originalOnSerialize?.apply(this, [serializedNode]);
+			originalOnSerialize?.apply(this, [serializedNode]);
 			saveValues(this, serializedNode);
-			return result ?? serializedNode;
 		};
 
 		const originalOnResize = nodeType.prototype.onResize;

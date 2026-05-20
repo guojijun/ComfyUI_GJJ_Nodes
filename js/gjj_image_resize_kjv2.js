@@ -688,7 +688,7 @@ app.registerExtension({
     const originalOnSerialize = nodeType.prototype.onSerialize;
     nodeType.prototype.onSerialize = function (o) {
       writeConfig(this, readConfig(this));
-      return originalOnSerialize?.apply(this, arguments);
+      originalOnSerialize?.apply(this, arguments);
     };
 
     const originalOnExecutionStart = nodeType.prototype.onExecutionStart;

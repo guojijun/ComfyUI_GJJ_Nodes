@@ -976,9 +976,9 @@ function setupUi(node) {
 	const originalOnSerialize = node.onSerialize;
 	node.onSerialize = function (serializedNode) {
 		updateDataWidget(this);
-		const result = typeof originalOnSerialize === "function"
-			? originalOnSerialize.apply(this, arguments)
-			: serializedNode;
+		if (typeof originalOnSerialize === "function") {
+			originalOnSerialize.apply(this, arguments);
+		}
 		serializedNode.properties = serializedNode.properties || {};
 		const widgetIndex = Array.isArray(this.widgets)
 			? this.widgets.findIndex((widget) => widget?.name === DATA_WIDGET_NAME)
@@ -995,7 +995,6 @@ function setupUi(node) {
 		serializedNode.properties[GLOBAL_SEARCH_PROPERTY] = String(ensureNodeState(this).globalSearch || "");
 		serializedNode.properties[GROUP_RULES_PROPERTY] = ensureNodeState(this).groupRulesText;
 		serializedNode.properties[ADVANCED_OPEN_PROPERTY] = ensureNodeState(this).advancedOpen;
-		return result ?? serializedNode;
 	};
 	node.addDOMWidget("LoRA 串联", "HTML", container, { serialize: false });
 

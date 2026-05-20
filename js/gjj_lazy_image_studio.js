@@ -1618,14 +1618,13 @@ function setupLoraUi(node) {
 
 	const originalOnSerialize = node.onSerialize;
 	node.onSerialize = function (serializedNode) {
-		const result = typeof originalOnSerialize === "function"
-			? originalOnSerialize.apply(this, arguments)
-			: serializedNode;
+		if (typeof originalOnSerialize === "function") {
+			originalOnSerialize.apply(this, arguments);
+		}
 		if (serializedNode) {
 			serializedNode.properties = serializedNode.properties || {};
 			serializedNode.properties[LORA_DATA_WIDGET_NAME] = serializeRows(ensureLoraNodeState(this).rows);
 		}
-		return result ?? serializedNode;
 	};
 
 	node.addDOMWidget("LoRA 串联", "HTML", container, { serialize: false });
