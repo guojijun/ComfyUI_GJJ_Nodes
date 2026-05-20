@@ -7,28 +7,273 @@ const ROUTE_BASE = "/gjj/mesh2motion";
 const POST_MESSAGE_ORIGIN = window.location.origin;
 const VIEW_WIDGET = "gjj_mesh2motion_view";
 const INTERNAL_WIDGETS = ["image", "video_frames"];
-
-function getWidget(node, name) {
-	return node?.widgets?.find((widget) => widget?.name === name);
-}
-
-function widgetValue(node, name, fallback = null) {
-	const widget = getWidget(node, name);
-	return widget ? widget.value : fallback;
-}
+const MIN_NODE_WIDTH = 920;
+const MIN_PANEL_HEIGHT = 700;
+const MIN_NODE_HEIGHT = 940;
+const MIN_WIDGET_HEIGHT = 660;
+const BOOLEAN_WIDGETS = [
+	["show_skeleton", "🦴 显示骨骼", "开启后在 3D 面板中显示角色骨骼辅助线。"],
+	["mirror_animations", "🪞 镜像动画", "开启后把当前动画左右镜像显示和输出。"],
+	["preview_output", "📐 显示输出取景框", "在 3D 面板中显示最终输出比例的取景提示。"],
+	["checker_room", "🏁 棋盘格背景", "开启后在 3D 面板中显示棋盘格背景，便于观察透明区域。"],
+];
+const SLIDER_WIDGETS = [
+	["width", "📏 输出宽度", 128, 4096, 64],
+	["height", "📏 输出高度", 128, 4096, 64],
+	["fps", "🎞️ 视频帧率", 1, 120, 1],
+];
+const STATE_KEYS = {
+	show_skeleton: "mesh2motion_show_skeleton",
+	mirror_animations: "mesh2motion_mirror_animations",
+	preview_output: "mesh2motion_preview_output",
+	checker_room: "mesh2motion_checker_room",
+	width: "mesh2motion_width",
+	height: "mesh2motion_height",
+	fps: "mesh2motion_fps",
+};
+const CONTROL_WIDGET_NAMES = ["show_skeleton", "mirror_animations", "preview_output", "checker_room", "width", "height", "fps"];
+const HIDDEN_WIDGET_NAMES = new Set([...CONTROL_WIDGET_NAMES, ...INTERNAL_WIDGETS]);
+const DEFAULT_STATE = {
+	show_skeleton: false,
+	mirror_animations: false,
+	preview_output: false,
+	checker_room: false,
+	width: 1024,
+	height: 1024,
+	fps: 24,
+};
 
 function refreshNode(node) {
 	GJJ_Utils.refreshNode(node);
+}
+
+function getWidget(node, name) {
+	return node?.widgets?.find((widget) => widget?.name === name);
 }
 
 function hideWidget(node, widget) {
 	if (!widget) {
 		return;
 	}
-	// 使用 ComfyUI 标准方式隐藏 widget：改变类型但不破坏序列化
-	widget.type = "hidden";
+	if (widget.__gjjMesh2MotionHidden) {
+		return;
+	}
+	widget.__gjjMesh2MotionHidden = true;
+	widget.hidden = true;
+	widget.type = `converted-widget:${widget.name || "hidden"}`;
+	widget.serialize = false;
+	widget.serializeValue = () => undefined;
+	if (widget.options) {
+		widget.options.serialize = false;
+	}
+	widget.computeSize = () => [0, 0];
+	widget.getHeight = () => 0;
+	widget.draw = () => {};
+	widget.mouse = () => false;
+	widget.y = 0;
+	widget.last_y = 0;
+	widget.label = "";
+	widget.localized_name = "";
+	widget.tooltip = "";
 	widget.options = widget.options || {};
-	widget.options.hidden = true;
+	widget.options.tooltip = "";
+	widget.disabled = true;
+	if (widget.element) {
+		widget.element.style.display = "none";
+		widget.element.style.height = "0px";
+		widget.element.style.minHeight = "0px";
+		widget.element.style.margin = "0";
+		widget.element.style.padding = "0";
+	}
+	if (widget.inputEl) {
+		widget.inputEl.style.display = "none";
+		widget.inputEl.style.height = "0px";
+		widget.inputEl.style.minHeight = "0px";
+		widget.inputEl.style.margin = "0";
+		widget.inputEl.style.padding = "0";
+	}
+}
+
+function getState(node, name) {
+	const key = STATE_KEYS[name];
+	const props = node?.properties || {};
+	if (key in props) {
+		return props[key];
+	}
+	return DEFAULT_STATE[name];
+}
+
+function setState(node, name, value) {
+	const key = STATE_KEYS[name];
+	node.properties = node.properties || {};
+	node.properties[key] = value;
+}
+
+function hideNativeControls(node) {
+	for (const name of CONTROL_WIDGET_NAMES) {
+		const widget = getWidget(node, name);
+		if (widget) {
+			hideWidget(node, widget);
+		}
+	}
+}
+
+function compactMesh2MotionNode(node) {
+	if (!node) {
+		return;
+	}
+	hideNativeControls(node);
+	node.properties = node.properties || {};
+	for (const name of CONTROL_WIDGET_NAMES) {
+		const widget = getWidget(node, name);
+		if (widget && !(STATE_KEYS[name] in node.properties)) {
+			setState(node, name, widget.value);
+		}
+	}
+	for (const name of INTERNAL_WIDGETS) {
+		const widget = getWidget(node, name);
+		const key = `mesh2motion_${name}`;
+		if (widget && !(key in node.properties) && widget.value) {
+			node.properties[key] = widget.value;
+		}
+	}
+	GJJ_Utils.removeHiddenInputSockets(node, HIDDEN_WIDGET_NAMES);
+	if (Array.isArray(node.widgets)) {
+		node.widgets = node.widgets.filter((widget) => !HIDDEN_WIDGET_NAMES.has(String(widget?.name || "")));
+	}
+	if (Array.isArray(node.widgets_values)) {
+		node.widgets_values.length = 0;
+	} else {
+		node.widgets_values = [];
+	}
+	GJJ_Utils.reorderWidgets(node, HIDDEN_WIDGET_NAMES);
+	refreshNode(node);
+}
+
+function setButtonActive(button, active) {
+	button.dataset.active = active ? "1" : "0";
+	button.style.background = active ? "#4a9eff" : "#22323a";
+	button.style.borderColor = active ? "#7bb7ff" : "#40555f";
+	button.style.color = active ? "#ffffff" : "#d9e7df";
+}
+
+function toggleBooleanState(node, stateName, button) {
+	const value = !getState(node, stateName);
+	setState(node, stateName, value);
+	setButtonActive(button, value);
+	if (stateName === "mirror_animations" || stateName === "checker_room") {
+		node._gjjMesh2MotionVideoSig = null;
+	}
+	if (stateName === "preview_output" || stateName === "width" || stateName === "height" || stateName === "fps") {
+		sendPreviewState(node);
+		node._gjjMesh2MotionVideoSig = null;
+	}
+	if (stateName === "show_skeleton" || stateName === "mirror_animations" || stateName === "checker_room") {
+		postToIframe(node, `mesh2motion:set${stateName === "show_skeleton" ? "ShowSkeleton" : stateName === "mirror_animations" ? "MirrorAnimations" : "CheckerRoom"}`, { value });
+	}
+	refreshNode(node);
+}
+
+function updateSliderState(node, stateName, valueEl, rangeEl) {
+	const current = Number(rangeEl.value);
+	setState(node, stateName, current);
+	valueEl.textContent = String(current);
+	if (stateName === "width" || stateName === "height" || stateName === "fps" || stateName === "preview_output") {
+		sendPreviewState(node);
+		node._gjjMesh2MotionVideoSig = null;
+	}
+	node._gjjMesh2MotionVideoSig = null;
+	refreshNode(node);
+}
+
+function createSliderControls(node, container) {
+	const wrap = document.createElement("div");
+	wrap.style.cssText = [
+		"display:grid",
+		"grid-template-columns:repeat(3, minmax(0, 1fr))",
+		"gap:8px",
+		"padding:0 8px 6px",
+	].join(";");
+
+	for (const [stateName, label, min, max, step] of SLIDER_WIDGETS) {
+		const box = document.createElement("div");
+		box.style.cssText = [
+			"display:flex",
+			"flex-direction:column",
+			"gap:4px",
+			"padding:6px 8px",
+			"border:1px solid #314147",
+			"border-radius:8px",
+			"background:#182228",
+			"box-sizing:border-box",
+			"min-width:0",
+		].join(";");
+
+		const top = document.createElement("div");
+		top.style.cssText = "display:flex;justify-content:space-between;align-items:center;gap:8px;font:700 12px/1.1 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;color:#d9e7df;";
+
+		const title = document.createElement("span");
+		title.textContent = label;
+
+		const value = document.createElement("span");
+		value.style.cssText = "min-width:44px;text-align:right;color:#8fd0ff;";
+		value.textContent = String(Number(getState(node, stateName) ?? min));
+
+		top.appendChild(title);
+		top.appendChild(value);
+
+		const range = document.createElement("input");
+		range.type = "range";
+		range.min = String(min);
+		range.max = String(max);
+		range.step = String(step);
+		range.value = String(Number(getState(node, stateName) ?? min));
+		range.style.cssText = "width:100%;margin:0;";
+		range.addEventListener("input", () => updateSliderState(node, stateName, value, range));
+
+		box.appendChild(top);
+		box.appendChild(range);
+		wrap.appendChild(box);
+	}
+
+	container.appendChild(wrap);
+}
+
+function createBooleanControls(node, container) {
+	const wrap = document.createElement("div");
+	wrap.style.cssText = [
+		"display:grid",
+		"grid-template-columns:repeat(4, minmax(0, 1fr))",
+		"gap:6px",
+		"padding:8px 8px 4px",
+	].join(";");
+
+	for (const [stateName, label, tooltip] of BOOLEAN_WIDGETS) {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.textContent = label;
+			button.setAttribute("aria-label", tooltip);
+			button.style.cssText = [
+			"height:30px",
+			"padding:0 10px",
+			"border:1px solid #40555f",
+			"border-radius:8px",
+			"font:700 12px/1.1 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+			"cursor:pointer",
+			"white-space:nowrap",
+			"overflow:hidden",
+			"text-overflow:ellipsis",
+		].join(";");
+		setButtonActive(button, !!getState(node, stateName));
+		button.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			toggleBooleanState(node, stateName, button);
+		});
+		wrap.appendChild(button);
+	}
+
+	container.appendChild(wrap);
 }
 
 function setStatus(node, text, tone = "idle") {
@@ -106,6 +351,20 @@ function captureVideoFromIframe(iframe, presetName, width, height) {
 	});
 }
 
+async function syncCaptureStateToBackend(node, state) {
+	const response = await api.fetchApi(`${ROUTE_BASE}/capture-state`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			node_id: String(node?.id ?? ""),
+			state,
+		}),
+	});
+	if (!response.ok) {
+		throw new Error(`保存 Mesh2Motion 捕获状态失败：${response.status}`);
+	}
+}
+
 async function uploadTempImage(dataUrl) {
 	const blob = await fetch(dataUrl).then((response) => response.blob());
 	const file = new File([blob], `gjj_mesh2motion_${Date.now()}.png`, { type: "image/png" });
@@ -128,16 +387,16 @@ function sendBooleanStates(node) {
 		["mirror_animations", "mesh2motion:setMirrorAnimations"],
 		["checker_room", "mesh2motion:setCheckerRoom"],
 	];
-	for (const [widgetName, messageType] of mappings) {
-		postToIframe(node, messageType, { value: !!widgetValue(node, widgetName, false) });
+	for (const [stateName, messageType] of mappings) {
+		postToIframe(node, messageType, { value: !!getState(node, stateName) });
 	}
 }
 
 function sendPreviewState(node) {
 	postToIframe(node, "mesh2motion:setPreviewOverlay", {
-		active: !!widgetValue(node, "preview_output", false),
-		width: Number(widgetValue(node, "width", 1024)) || 1024,
-		height: Number(widgetValue(node, "height", 1024)) || 1024,
+		active: !!getState(node, "preview_output"),
+		width: Number(getState(node, "width")) || 1024,
+		height: Number(getState(node, "height")) || 1024,
 	});
 }
 
@@ -237,38 +496,8 @@ function handleIframeMessage(node, iframe, event) {
 	}
 }
 
-function hookWidgetCallback(node, widgetName, callback) {
-	const widget = getWidget(node, widgetName);
-	if (!widget || widget.__gjjMesh2MotionHooked) {
-		return;
-	}
-	const original = widget.callback;
-	widget.callback = function (...args) {
-		const result = original?.apply(this, args);
-		callback(widget.value);
-		return result;
-	};
-	widget.__gjjMesh2MotionHooked = true;
-}
-
 function hookLiveControls(node) {
-	hookWidgetCallback(node, "show_skeleton", (value) => {
-		postToIframe(node, "mesh2motion:setShowSkeleton", { value: !!value });
-	});
-	hookWidgetCallback(node, "mirror_animations", (value) => {
-		postToIframe(node, "mesh2motion:setMirrorAnimations", { value: !!value });
-		node._gjjMesh2MotionVideoSig = null;
-	});
-	hookWidgetCallback(node, "checker_room", (value) => {
-		postToIframe(node, "mesh2motion:setCheckerRoom", { value: !!value });
-		node._gjjMesh2MotionVideoSig = null;
-	});
-	for (const name of ["preview_output", "width", "height", "fps"]) {
-		hookWidgetCallback(node, name, () => {
-			sendPreviewState(node);
-			node._gjjMesh2MotionVideoSig = null;
-		});
-	}
+	return;
 }
 
 function computeVideoSignature(node) {
@@ -277,30 +506,31 @@ function computeVideoSignature(node) {
 		return null;
 	}
 	const tuningMap = node.properties?.mesh2motion_preset_tuning;
-	return JSON.stringify({
-		presetFile,
-		skeleton: node.properties?.mesh2motion_skeleton ?? null,
-		timeline: node.properties?.mesh2motion_timeline ?? null,
-		tuning: tuningMap?.[presetFile] ?? null,
-		width: widgetValue(node, "width", 1024),
-		height: widgetValue(node, "height", 1024),
-		fps: widgetValue(node, "fps", 24),
-		showSkeleton: !!widgetValue(node, "show_skeleton", false),
-		mirror: !!widgetValue(node, "mirror_animations", false),
-		checkerRoom: !!widgetValue(node, "checker_room", false),
-	});
-}
+		return JSON.stringify({
+			presetFile,
+			skeleton: node.properties?.mesh2motion_skeleton ?? null,
+			timeline: node.properties?.mesh2motion_timeline ?? null,
+			tuning: tuningMap?.[presetFile] ?? null,
+			width: Number(getState(node, "width")) || 1024,
+			height: Number(getState(node, "height")) || 1024,
+			fps: Number(getState(node, "fps")) || 24,
+			showSkeleton: !!getState(node, "show_skeleton"),
+			mirror: !!getState(node, "mirror_animations"),
+			checkerRoom: !!getState(node, "checker_room"),
+		});
+	}
 
 function hookSerialization(node) {
-	// 不再依赖 hidden widget 的 serializeValue，改为在执行前捕获数据
-	// 监听 ComfyUI 的执行事件
-	
-	const originalOnGraphChange = node.onGraphChange;
-	
-	// 创建捕获函数
+	// 不再依赖 hidden widget 的 serializeValue，改为在执行前捕获数据。
 	const captureData = async () => {
+		let captureState = null;
 		try {
 			console.log("[GJJ Mesh2Motion] ⚡ 开始捕获数据...");
+			captureState = {
+				image: null,
+				video: null,
+				signature: computeVideoSignature(node),
+			};
 			
 			// 捕获截图
 			setStatus(node, "正在捕获截图...", "busy");
@@ -310,15 +540,17 @@ function hookSerialization(node) {
 			console.log("[GJJ Mesh2Motion] 上传结果:", imageResult);
 			
 			node.properties = node.properties || {};
-			node.properties.mesh2motion_image = JSON.stringify({
+			captureState.image = {
 				name: imageResult.name,
 				subfolder: imageResult.subfolder,
 				type: imageResult.type,
-			});
+			};
+			node.properties.mesh2motion_image = JSON.stringify(captureState.image);
 			setStatus(node, "截图已捕获", "ok");
 			
 			// 如果有相机预设，捕获视频
 			const presetFile = node.properties?.mesh2motion_camera_preset;
+			node.properties.mesh2motion_video = "";
 			if (presetFile) {
 				const fileName = String(presetFile).split("/").pop() || "";
 				const presetId = fileName.replace(/\.json$/i, "");
@@ -327,22 +559,34 @@ function hookSerialization(node) {
 					const videoResult = await captureVideoFromIframe(
 						node._gjjMesh2MotionIframe,
 						presetId,
-						Number(widgetValue(node, "width", 1024)) || 1024,
-						Number(widgetValue(node, "height", 1024)) || 1024,
+						Number(getState(node, "width")) || 1024,
+						Number(getState(node, "height")) || 1024,
 					);
-					node.properties.mesh2motion_video = JSON.stringify({
+					captureState.video = {
 						video: videoResult.videoPath,
 						fps: videoResult.fps,
-					});
+					};
+					node.properties.mesh2motion_video = JSON.stringify(captureState.video);
 					setStatus(node, "视频已录制", "ok");
 				}
+			} else {
+				node.properties.mesh2motion_video = "";
 			}
-			
-			console.log("[GJJ Mesh2Motion] ✅ 数据捕获完成，已保存到 properties");
+			await syncCaptureStateToBackend(node, captureState);
+			console.log("[GJJ Mesh2Motion] ✅ 数据捕获完成，已保存到 properties 与 Python 缓存");
 			console.log("[GJJ Mesh2Motion] properties 内容:", JSON.stringify(node.properties));
+			return true;
 		} catch (error) {
 			console.error("[GJJ Mesh2Motion] 捕获失败：", error);
+			if (captureState?.image) {
+				try {
+					await syncCaptureStateToBackend(node, captureState);
+				} catch (syncError) {
+					console.warn("[GJJ Mesh2Motion] 同步部分捕获状态失败：", syncError);
+				}
+			}
 			setStatus(node, `捕获失败：${error?.message || error}`, "error");
+			return false;
 		}
 	};
 	
@@ -356,6 +600,33 @@ function hookSerialization(node) {
 			hideWidget(node, widget);
 		}
 	}
+
+	const originalOnSerialize = node.onSerialize;
+	node.onSerialize = function (serializedNode) {
+		originalOnSerialize?.apply(this, [serializedNode]);
+		const props = this.properties || {};
+		if (serializedNode) {
+			serializedNode.properties = serializedNode.properties || {};
+			for (const [key, value] of Object.entries(props)) {
+				if (String(key).startsWith("mesh2motion_")) {
+					serializedNode.properties[key] = value;
+				}
+			}
+			for (const [stateName, stateKey] of Object.entries(STATE_KEYS)) {
+				serializedNode.properties[stateKey] = getState(this, stateName);
+			}
+			if (Array.isArray(serializedNode.widgets_values)) {
+				serializedNode.widgets_values.length = 0;
+			} else {
+				serializedNode.widgets_values = [];
+			}
+		}
+		if (Array.isArray(this.widgets_values)) {
+			this.widgets_values.length = 0;
+		} else {
+			this.widgets_values = [];
+		}
+	};
 }
 
 function createPanel(node) {
@@ -366,17 +637,24 @@ function createPanel(node) {
 
 	const container = document.createElement("div");
 	container.className = "gjj-mesh2motion-panel";
+	container.style.display = "flex";
+	container.style.flexDirection = "column";
+	createBooleanControls(node, container);
+	createSliderControls(node, container);
 
 	// 添加捕获按钮
 	const buttonRow = document.createElement("div");
-	buttonRow.style.cssText = "display:flex;gap:8px;padding:8px;background:#1a2328;";
+	buttonRow.style.cssText = "display:flex;gap:8px;padding:4px 8px 8px;background:#1a2328;";
 	
 	const captureBtn = document.createElement("button");
 	captureBtn.textContent = "📸 捕获并执行";
 	captureBtn.style.cssText = "flex:1;padding:8px 12px;background:#4a9eff;color:white;border:none;border-radius:6px;cursor:pointer;font-size:13px;";
 	captureBtn.onclick = async () => {
 		if (node._gjjMesh2MotionCapture) {
-			await node._gjjMesh2MotionCapture();
+			const ok = await node._gjjMesh2MotionCapture();
+			if (!ok) {
+				return;
+			}
 			// 等待 properties 被序列化
 			await new Promise(resolve => setTimeout(resolve, 200));
 			// 强制刷新节点状态
@@ -428,15 +706,30 @@ function createPanel(node) {
 	node.addDOMWidget(VIEW_WIDGET, "HTML", container, {
 		hideOnZoom: false,
 		serialize: false,
-		getMinHeight: () => 520,
+		getMinHeight: () => MIN_WIDGET_HEIGHT,
 	});
 
-	hookLiveControls(node);
+	compactMesh2MotionNode(node);
+	requestAnimationFrame(() => {
+		compactMesh2MotionNode(node);
+		requestAnimationFrame(() => {
+			compactMesh2MotionNode(node);
+		});
+	});
+
 	hookSerialization(node);
 
-	const [width, height] = node.size || [560, 820];
-	node.setSize?.([Math.max(width, 560), Math.max(height, 820)]);
+	const [width, height] = node.size || [MIN_NODE_WIDTH, MIN_NODE_HEIGHT];
+	node.minWidth = Math.max(node.minWidth || 0, MIN_NODE_WIDTH);
+	node.setSize?.([Math.max(width, MIN_NODE_WIDTH), Math.max(height, MIN_NODE_HEIGHT)]);
 	refreshNode(node);
+}
+
+function stabilizeNode(node) {
+	compactMesh2MotionNode(node);
+	requestAnimationFrame(() => {
+		compactMesh2MotionNode(node);
+	});
 }
 
 const STYLE_ID = "gjj-mesh2motion-style";
@@ -447,23 +740,25 @@ function ensureStyle() {
 	const style = document.createElement("style");
 	style.id = STYLE_ID;
 	style.textContent = `
-.gjj-mesh2motion-panel {
-	width: 100%;
-	height: 100%;
-	min-height: 460px;
-	position: relative;
-	overflow: hidden;
-	background: #10171b;
+	.gjj-mesh2motion-panel {
+		width: 100%;
+		height: 100%;
+		min-height: ${MIN_PANEL_HEIGHT}px;
+		position: relative;
+		overflow: hidden;
+		background: #10171b;
 	border: 1px solid #314147;
 	box-sizing: border-box;
 }
-.gjj-mesh2motion-frame {
-	width: 100%;
-	height: 100%;
-	border: 0;
-	display: block;
-	background: #10171b;
-}
+	.gjj-mesh2motion-frame {
+		width: 100%;
+		flex: 1 1 auto;
+		min-height: 0;
+		height: auto;
+		border: 0;
+		display: block;
+		background: #10171b;
+	}
 .gjj-mesh2motion-status {
 	position: absolute;
 	left: 10px;
@@ -499,6 +794,32 @@ app.registerExtension({
 		ensureStyle();
 	},
 
+	beforeRegisterNodeDef(nodeType, nodeData) {
+		if (nodeData?.name !== NODE_CLASS) {
+			return;
+		}
+		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
+		nodeType.prototype.onNodeCreated = function (...args) {
+			const result = originalOnNodeCreated?.apply(this, args);
+			requestAnimationFrame(() => {
+				stabilizeNode(this);
+				setTimeout(() => compactMesh2MotionNode(this), 0);
+				setTimeout(() => compactMesh2MotionNode(this), 120);
+			});
+			return result;
+		};
+		const originalOnConfigure = nodeType.prototype.onConfigure;
+		nodeType.prototype.onConfigure = function (...args) {
+			const result = originalOnConfigure?.apply(this, args);
+			requestAnimationFrame(() => {
+				stabilizeNode(this);
+				setTimeout(() => compactMesh2MotionNode(this), 0);
+				setTimeout(() => compactMesh2MotionNode(this), 120);
+			});
+			return result;
+		};
+	},
+
 	nodeCreated(node) {
 		const nodeClass = String(node?.constructor?.comfyClass || node?.comfyClass || "");
 		console.log(`[GJJ Mesh2Motion] nodeCreated 触发，节点类: ${nodeClass}`);
@@ -520,11 +841,14 @@ app.registerExtension({
 				}
 			} catch (error) {
 				console.warn("[GJJ Mesh2Motion] ⚠️ Mesh2Motion 资源未找到！");
-				console.warn("🌏模型下载：https://github.com/scottpetrovic/mesh2motion-app/releases");
-			}
-		};
+			console.warn("🌏模型下载：https://github.com/scottpetrovic/mesh2motion-app/releases");
+		}
+	};
 
 		checkResource();
 		createPanel(node);
-	},
-});
+		compactMesh2MotionNode(node);
+		setTimeout(() => compactMesh2MotionNode(node), 0);
+		setTimeout(() => compactMesh2MotionNode(node), 120);
+		},
+	});
