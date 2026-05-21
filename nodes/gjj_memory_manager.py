@@ -191,21 +191,21 @@ def _run_action(action: str) -> str:
         gpu_result = _clean_gpu_memory()
         return f"内存清理: {mem_result.get('message', '')}\nGPU 清理: {gpu_result.get('message', '')}"
 
-    return "刷新状态"
+    return "已更新"
 
 
-def _build_stats_payload(node_id=None, action=ACTION_REFRESH, message="刷新状态"):
+def _build_stats_payload(node_id=None, action=ACTION_REFRESH, message="已更新"):
     return {
         "node": str(node_id or ""),
         "memory": _get_memory_info(),
         "gpu": _get_gpu_info(),
         "action": str(action or ACTION_REFRESH),
-        "message": str(message or "刷新状态"),
+        "message": str(message or "已更新"),
         "timestamp": time.time(),
     }
 
 
-def _send_stats(node_id=None, action=ACTION_REFRESH, message="刷新状态"):
+def _send_stats(node_id=None, action=ACTION_REFRESH, message="已更新"):
     """发送统计信息给前端事件监听。"""
     try:
         PromptServer.instance.send_sync(
@@ -256,7 +256,7 @@ def _register_routes_once():
         node_id = request.query.get("node", "")
         return web.json_response(
             _build_stats_payload(
-                node_id=node_id, action=ACTION_REFRESH, message="刷新状态"
+                node_id=node_id, action=ACTION_REFRESH, message="已更新"
             )
         )
 
@@ -338,7 +338,7 @@ class GJJ_MemoryManager:
                 result = _clean_gpu_memory()
                 messages.append(f"自动 GPU 清理: {result.get('message', '')}")
             if not messages:
-                messages.append("刷新状态")
+                messages.append("已更新")
 
         _send_stats(str(unique_id), action=action, message="\n".join(messages))
 

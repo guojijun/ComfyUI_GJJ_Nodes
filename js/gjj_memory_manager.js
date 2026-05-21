@@ -12,9 +12,9 @@ const ACTION_CLEAN_MEMORY = "clean_memory";
 const ACTION_CLEAN_GPU = "clean_gpu";
 const ACTION_CLEAN_ALL = "clean_all";
 
-const MIN_NODE_WIDTH = 340;
-const MIN_NODE_HEIGHT = 420;
-const PANEL_HEIGHT = 326;
+const MIN_NODE_WIDTH = 240;
+const MIN_NODE_HEIGHT = 382;
+const PANEL_HEIGHT = 288;
 const POLL_INTERVAL_MS = 2000;
 
 function ensureStyles() {
@@ -43,7 +43,7 @@ function ensureStyles() {
         }
         .gjj-memory-top-row {
             grid-template-columns: 1fr 1fr;
-            margin-bottom: 12px;
+            margin-bottom: 10px;
         }
         .gjj-memory-action-row {
             grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -69,11 +69,11 @@ function ensureStyles() {
             transform: translateY(0px) scale(0.98);
         }
         .gjj-memory-top-btn {
-            min-height: 52px;
-            padding: 10px 8px;
+            min-height: 36px;
+            padding: 6px 8px;
             opacity: 0.46;
             background: #35454e;
-            font-size: 15px;
+            font-size: 14px;
         }
         .gjj-memory-top-btn.active.memory {
             opacity: 1;
@@ -101,11 +101,10 @@ function ensureStyles() {
         .gjj-memory-section-title {
             display: flex;
             align-items: center;
-            justify-content: space-between;
+            justify-content: flex-end;
             gap: 8px;
-            margin: 4px 4px 8px;
-            font-size: 18px;
-            font-weight: 900;
+            margin: 0 4px 6px;
+            min-height: 16px;
         }
         .gjj-memory-updated {
             color: #9aaeb7;
@@ -125,6 +124,11 @@ function ensureStyles() {
             padding: 4px 8px;
             white-space: pre-line;
             overflow: hidden;
+        }
+        .gjj-memory-message.is-empty {
+            display: none;
+            height: 0;
+            padding: 0;
         }
         .gjj-memory-stats {
             height: 112px;
@@ -279,8 +283,8 @@ function makeTopToggleButton(node, label, propName, icon, className) {
         btn.className = `gjj-memory-btn gjj-memory-top-btn ${className}${active ? " active" : ""}`;
         btn.textContent = `${icon} ${label}`;
         btn.title = active
-            ? `已开启：数据流过此节点时自动${label}`
-            : `已关闭：数据流过此节点时不自动${label}`;
+            ? `已开启：数据流过此节点时自动清理${label}`
+            : `已关闭：数据流过此节点时不自动清理${label}`;
     };
 
     btn.addEventListener("click", (event) => {
@@ -310,7 +314,7 @@ function makeActionButton(node, label, action, icon, className, statusEl) {
         event.stopPropagation();
 
         try {
-            if (statusEl) statusEl.textContent = "正在处理...";
+            setStatusMessage(statusEl, "正在处理...");
             const props = ensureProps(node);
             props[ACTION_PROP] = ACTION_REFRESH; // 避免手动动作残留到后续正常队列。
             markDirty(node);
@@ -319,7 +323,7 @@ function makeActionButton(node, label, action, icon, className, statusEl) {
             updateStatsForNode(node, detail);
         } catch (error) {
             console.warn("[GJJ_MemoryManager] action failed:", error);
-            if (statusEl) statusEl.textContent = `执行失败：${error.message || error}`;
+            setStatusMessage(statusEl, `执行失败：${error.message || error}`);
         }
     });
 
@@ -396,6 +400,13 @@ function renderStatsHtml(detail) {
     return parts.join("");
 }
 
+function setStatusMessage(element, text) {
+    if (!element) return;
+    const value = String(text || "").trim();
+    element.textContent = value;
+    element.classList.toggle("is-empty", !value);
+}
+
 function createPanel(node) {
     ensureStyles();
     ensureProps(node);
@@ -405,18 +416,18 @@ function createPanel(node) {
 
     const topRow = document.createElement("div");
     topRow.className = "gjj-memory-top-row";
-    topRow.appendChild(makeTopToggleButton(node, "清理内存", AUTO_CLEAN_MEMORY_PROP, "🧹", "memory"));
-    topRow.appendChild(makeTopToggleButton(node, "清理显存", AUTO_CLEAN_GPU_PROP, "🎮", "gpu"));
+    topRow.appendChild(makeTopToggleButton(node, "内存", AUTO_CLEAN_MEMORY_PROP, "🧹", "memory"));
+    topRow.appendChild(makeTopToggleButton(node, "显存", AUTO_CLEAN_GPU_PROP, "🎮", "gpu"));
     panel.appendChild(topRow);
 
     const title = document.createElement("div");
     title.className = "gjj-memory-section-title";
-    title.innerHTML = `<span>资源监控</span><span class="gjj-memory-updated">最后更新: --:--:--</span>`;
+    title.innerHTML = `<span class="gjj-memory-updated">最后更新: --:--:--</span>`;
     panel.appendChild(title);
 
     const message = document.createElement("div");
     message.className = "gjj-memory-message";
-    message.textContent = "正在获取资源状态...";
+    setStatusMessage(message, "正在获取资源状态...");
     panel.appendChild(message);
 
     const stats = document.createElement("div");
@@ -430,7 +441,7 @@ function createPanel(node) {
 
     const actionRow = document.createElement("div");
     actionRow.className = "gjj-memory-action-row";
-    actionRow.appendChild(makeActionButton(node, "刷新状态", ACTION_REFRESH, "🔄", "gjj-memory-action-refresh", message));
+    actionRow.appendChild(makeActionButton(node, "刷新", ACTION_REFRESH, "🔄", "gjj-memory-action-refresh", message));
     actionRow.appendChild(makeActionButton(node, "清理内存", ACTION_CLEAN_MEMORY, "🧹", "gjj-memory-action-ram", message));
     actionRow.appendChild(makeActionButton(node, "清理显存", ACTION_CLEAN_GPU, "🎮", "gjj-memory-action-gpu", message));
     actionRow.appendChild(makeActionButton(node, "一键清理", ACTION_CLEAN_ALL, "🧨", "gjj-memory-action-all", message));
@@ -459,7 +470,7 @@ function startPolling(node) {
             updateStatsForNode(node, detail, true);
         } catch (error) {
             if (node.__gjjMemoryMessage) {
-                node.__gjjMemoryMessage.textContent = `状态更新失败：${error.message || error}`;
+                setStatusMessage(node.__gjjMemoryMessage, `状态更新失败：${error.message || error}`);
             }
         }
     };
@@ -502,11 +513,11 @@ function installPanel(node) {
 function updateStatsForNode(node, detail, keepCurrentMessage = false) {
     if (!node || !node.__gjjMemoryPanel) return;
 
-    const message = detail?.message || "刷新状态";
+    const message = detail?.message || "已更新";
     if (node.__gjjMemoryMessage && !keepCurrentMessage) {
-        node.__gjjMemoryMessage.textContent = message;
+        setStatusMessage(node.__gjjMemoryMessage, message === "已更新" ? "" : message);
     } else if (node.__gjjMemoryMessage && node.__gjjMemoryMessage.textContent === "正在获取资源状态...") {
-        node.__gjjMemoryMessage.textContent = message;
+        setStatusMessage(node.__gjjMemoryMessage, message === "已更新" ? "" : message);
     }
 
     if (node.__gjjMemoryStats) {

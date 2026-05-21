@@ -13,8 +13,8 @@ const MAX_SELECTED_VIDEOS = 20;
 const MIN_WIDTH = 320;
 const MIN_HEIGHT = 220;
 const DOM_WIDGET_NAME = "gjj_multi_video_loader_dom";
-const DOM_VERSION = 8;
-const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE";
+const DOM_VERSION = 9;
+const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const OPTIONAL_INPUT_NAME = "input_frames";
 const OPTIONAL_INPUT_DISPLAY_NAME = "视频帧队列";
 const OPTIONAL_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
@@ -59,6 +59,7 @@ const OUTPUT_DEFS = [
 	{ key: "width", name: "宽度", type: "INT" },
 	{ key: "height", name: "高度", type: "INT" },
 	{ key: "video_format", name: "视频格式", type: "STRING" },
+	{ key: "audio", name: "音频", type: "AUDIO" },
 ];
 
 function parseJsonArray(rawValue, fallback = []) {
@@ -1911,4 +1912,3 @@ app.registerExtension({
 		}
 	},
 });
-

@@ -22,6 +22,7 @@ from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
 
 NODE_NAME = "GJJ_MultiVideoLoader"
+VIDEO_FRAME_QUEUE_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
 VIDEO_API_PATH = "/gjj/input_videos"
 VIDEO_UPLOAD_API_PATH = "/gjj/upload_video"
 VIDEO_META_API_PATH = "/gjj/video_meta"
@@ -40,6 +41,7 @@ OPTIONAL_OUTPUT_KEYS = [
     "width",
     "height",
     "video_format",
+    "audio",
 ]
 
 # 与 VHS_VideoCombine 的常用格式保持相近命名；这里只作为格式参数输出，真正合成仍交给后续视频合成节点。
@@ -430,6 +432,92 @@ def build_uniform_batch(images: list[torch.Tensor]) -> torch.Tensor:
     return torch.cat(padded, dim=0)
 
 
+def empty_audio(duration: float = 0.0, sample_rate: int = 44100, channels: int = 2) -> dict[str, Any]:
+    samples = max(1, int(round(max(0.0, float(duration)) * int(sample_rate))))
+    waveform = torch.zeros((1, int(channels), samples), dtype=torch.float32)
+    return {"waveform": waveform, "sample_rate": int(sample_rate)}
+
+
+def _audio_window_from_meta(
+    meta: dict[str, Any],
+    start_frame: int,
+    end_frame: int,
+    frame_stride: int,
+    max_frames: int,
+) -> tuple[float, float]:
+    fps = max(1e-6, float(meta.get("fps") or 24.0))
+    start = max(0, int(start_frame))
+    total = int(meta.get("frames") or 0)
+    stop = int(end_frame) if int(end_frame) > 0 else (total - 1 if total > 0 else 0)
+    if stop < start:
+        stop = start
+    stride = max(1, int(frame_stride))
+    limit = max(1, int(max_frames))
+    total_frames_to_decode = max(1, stop - start + 1)
+    frames_to_output = min((total_frames_to_decode + stride - 1) // stride, limit)
+    last_source_frame = start + max(0, frames_to_output - 1) * stride
+    last_source_frame = min(stop, last_source_frame)
+    return float(start) / fps, max(1.0 / fps, float(last_source_frame - start + 1) / fps)
+
+
+def decode_audio_ffmpeg(
+    path: Path,
+    start_seconds: float = 0.0,
+    duration_seconds: float = 0.0,
+    sample_rate: int = 44100,
+    channels: int = 2,
+) -> dict[str, Any]:
+    ffmpeg = _get_ffmpeg_path()
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel", "error",
+    ]
+    if start_seconds > 0:
+        cmd.extend(["-ss", f"{float(start_seconds):.6f}"])
+    cmd.extend(["-i", str(path), "-vn"])
+    if duration_seconds > 0:
+        cmd.extend(["-t", f"{float(duration_seconds):.6f}"])
+    cmd.extend([
+        "-ac", str(int(channels)),
+        "-ar", str(int(sample_rate)),
+        "-f", "f32le",
+        "-acodec", "pcm_f32le",
+        "-",
+    ])
+    proc = subprocess.run(cmd, capture_output=True, timeout=120)
+    if proc.returncode != 0 or not proc.stdout:
+        return empty_audio(duration_seconds, sample_rate, channels)
+    audio = np.frombuffer(proc.stdout, dtype=np.float32)
+    usable = (audio.size // int(channels)) * int(channels)
+    if usable <= 0:
+        return empty_audio(duration_seconds, sample_rate, channels)
+    audio = audio[:usable].reshape(-1, int(channels)).T
+    waveform = torch.from_numpy(audio.copy()).float().unsqueeze(0).clamp(-1.0, 1.0).contiguous()
+    return {"waveform": waveform, "sample_rate": int(sample_rate)}
+
+
+def concat_audio_segments(segments: list[dict[str, Any]], sample_rate: int = 44100, channels: int = 2) -> dict[str, Any]:
+    waveforms: list[torch.Tensor] = []
+    for segment in segments:
+        waveform = segment.get("waveform") if isinstance(segment, dict) else None
+        if not isinstance(waveform, torch.Tensor):
+            continue
+        if waveform.ndim == 2:
+            waveform = waveform.unsqueeze(0)
+        if waveform.ndim != 3:
+            continue
+        waveform = waveform.detach().cpu().float()
+        if int(waveform.shape[1]) < channels:
+            waveform = waveform.repeat(1, int(np.ceil(channels / max(1, int(waveform.shape[1])))), 1)[:, :channels, :]
+        elif int(waveform.shape[1]) > channels:
+            waveform = waveform[:, :channels, :]
+        waveforms.append(waveform)
+    if not waveforms:
+        return empty_audio(0.0, sample_rate, channels)
+    return {"waveform": torch.cat(waveforms, dim=-1).contiguous(), "sample_rate": int(sample_rate)}
+
+
 def _frame_to_tensor(frame: np.ndarray) -> torch.Tensor:
     array = np.asarray(frame).astype(np.float32) / 255.0
     if array.ndim == 2:
@@ -494,7 +582,7 @@ def decode_video_cv2(
         "-ss", str(start / fps),
         "-i", str(path),
         "-frames:v", str(frames_to_output),
-        "-vf", f"select=not(mod(n\,{stride}))",
+        "-vf", f"select=not(mod(n\\,{stride}))",
         "-vsync", "vfr",
         "-f", "image2pipe",
         "-pix_fmt", "rgb24",
@@ -585,7 +673,7 @@ class GJJ_MultiVideoLoader:
     # 声明所有可能的输出，按 OPTIONAL_OUTPUT_KEYS 顺序排列
     # 执行时根据 enabled_outputs 控制实际返回哪些值（未启用的输出返回 None）
     RETURN_TYPES = (
-        GJJ_BATCH_IMAGE_TYPE,  # 视频帧队列
+        VIDEO_FRAME_QUEUE_TYPE,  # 视频帧队列
         "IMAGE",               # 首帧预览
         "IMAGE",               # 尾帧预览
         "STRING",              # 视频信息JSON
@@ -595,6 +683,7 @@ class GJJ_MultiVideoLoader:
         "INT",                 # 宽度
         "INT",                 # 高度
         "STRING",              # 视频格式
+        "AUDIO",               # 视频音频
     )
     RETURN_NAMES = (
         "视频帧队列",
@@ -607,9 +696,10 @@ class GJJ_MultiVideoLoader:
         "宽度",
         "高度",
         "视频格式",
+        "音频",
     )
     OUTPUT_TOOLTIPS = (
-        "按选择顺序解码后拼接的帧序列，类型为 GJJ_BATCH_IMAGE。",
+        "按选择顺序解码后拼接的帧序列，类型为 GJJ_BATCH_IMAGE,IMAGE，兼容 GJJ 批量帧队列和普通 IMAGE 输入。",
         "首帧预览图片。",
         "尾帧预览图片。",
         "视频信息JSON字符串。",
@@ -619,6 +709,7 @@ class GJJ_MultiVideoLoader:
         "输出宽度。",
         "输出高度。",
         "视频格式参数。",
+        "从所选视频音轨提取并按选择顺序拼接的 AUDIO；没有音轨时输出同段静音。",
     )
 
     @classmethod
@@ -773,6 +864,7 @@ class GJJ_MultiVideoLoader:
     ):
         selected = recover_selected_videos(None, extra_pnginfo, unique_id)
         enabled_outputs = recover_enabled_outputs(None, extra_pnginfo, unique_id)
+        audio_enabled = "audio" in set(enabled_outputs or [])
 
         def _safe_int(value, default=0, min_val=0, max_val=999999):
             try:
@@ -817,11 +909,13 @@ class GJJ_MultiVideoLoader:
                 "video_format": output_format,
             }]
             selected_count = 0
+            output_audio = empty_audio(total_duration) if audio_enabled else None
         else:
             if not selected:
                 raise RuntimeError("请先在 GJJ · 批量视频加载预览器里选择或导入视频，或接入左侧视频帧队列。")
 
             all_frames: list[torch.Tensor] = []
+            audio_segments: list[dict[str, Any]] = []
             video_infos: list[dict[str, Any]] = []
             total_duration = 0.0
             source_fps = 24.0
@@ -837,6 +931,15 @@ class GJJ_MultiVideoLoader:
                     width=target_width,
                     height=target_height,
                 )
+                if audio_enabled:
+                    audio_start, audio_duration = _audio_window_from_meta(
+                        meta,
+                        start_frame_val,
+                        end_frame_val,
+                        frame_stride_val,
+                        max_frames_val,
+                    )
+                    audio_segments.append(decode_audio_ffmpeg(path, audio_start, audio_duration))
                 if index == 0:
                     source_fps = float(meta.get("fps") or 24.0)
                 total_duration += float(meta.get("duration") or 0.0)
@@ -861,6 +964,7 @@ class GJJ_MultiVideoLoader:
 
             batch_output = build_uniform_batch(all_frames)
             selected_count = len(selected)
+            output_audio = concat_audio_segments(audio_segments) if audio_enabled else None
         first_frame = batch_output[0:1].contiguous() if int(batch_output.shape[0]) > 0 else empty_image_tensor()
         last_frame = batch_output[-1:].contiguous() if int(batch_output.shape[0]) > 0 else empty_image_tensor()
         final_width = int(batch_output.shape[2]) if int(batch_output.ndim) == 4 else 0
@@ -905,6 +1009,7 @@ class GJJ_MultiVideoLoader:
             "width": int(final_width),
             "height": int(final_height),
             "video_format": output_format,
+            "audio": output_audio if output_audio is not None else empty_audio(0.0),
         }
         
         # 返回真正显示的动态输出，顺序必须与 JS 里的 OUTPUT_DEFS 过滤顺序一致。
