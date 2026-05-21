@@ -453,7 +453,7 @@ class GJJ_TemplateParams:
                         "multiline": True,
                         "display": "hidden",
                         "display_name": "隐藏模板",
-                        "tooltip": "由前端 ⚙ 设置按钮维护。每行一个参数，支持格式：名称：默认值 # 说明",
+                        "tooltip": "由前端 ⚙️ 设置按钮维护。每行一个参数，支持格式：名称：默认值 # 说明",
                     },
                 ),
                 "values_json": (
@@ -510,4 +510,4 @@ class GJJ_TemplateParams:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_TemplateParams}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · ⚙ 模板参数输入器"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · ⚙️ 模板参数输入器"}
