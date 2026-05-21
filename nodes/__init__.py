@@ -106,7 +106,7 @@ def _safe_import_node_module(module_name):
         "soundfile": _get_pip_cmd("soundfile"),
         "cv2": _get_pip_cmd("opencv-python"),
         "timm": _get_pip_cmd("timm"),
-        "insightface": _get_pip_cmd("insightface onnxruntime-gpu"),
+        "insightface": _get_pip_cmd("onnx onnxruntime-gpu"),
         "torchcodec": _get_pip_cmd("torchcodec"),
         "mediapipe": _get_pip_cmd("mediapipe"),
         "hydra": _get_pip_cmd("hydra-core"),

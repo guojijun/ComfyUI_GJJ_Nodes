@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # @Organization  : insightface.ai
 # @Author        : Jia Guo
-# @Time          : 2021-05-04
+# @Time          : 2021-09-18
 # @Function      : 
 
 from __future__ import division
@@ -69,13 +69,12 @@ def distance2kps(points, distance, max_shape=None):
         preds.append(py)
     return np.stack(preds, axis=-1)
 
-class SCRFD:
+class RetinaFace:
     def __init__(self, model_file=None, session=None):
         import onnxruntime
         self.model_file = model_file
         self.session = session
         self.taskname = 'detection'
-        self.batched = False
         if self.session is None:
             assert self.model_file is not None
             assert osp.exists(self.model_file)
@@ -97,8 +96,6 @@ class SCRFD:
         input_name = input_cfg.name
         self.input_shape = input_shape
         outputs = self.session.get_outputs()
-        if len(outputs[0].shape) == 3:
-            self.batched = True
         output_names = []
         for o in outputs:
             output_names.append(o.name)
@@ -142,7 +139,7 @@ class SCRFD:
         input_size = kwargs.get('input_size', None)
         if input_size is not None:
             if self.input_size is not None:
-                print('warning: det_size is already set in scrfd model, ignore')
+                print('warning: det_size is already set in detection model, ignore')
             else:
                 self.input_size = input_size
 
@@ -158,21 +155,11 @@ class SCRFD:
         input_width = blob.shape[3]
         fmc = self.fmc
         for idx, stride in enumerate(self._feat_stride_fpn):
-            # If model support batch dim, take first output
-            if self.batched:
-                scores = net_outs[idx][0]
-                bbox_preds = net_outs[idx + fmc][0]
-                bbox_preds = bbox_preds * stride
-                if self.use_kps:
-                    kps_preds = net_outs[idx + fmc * 2][0] * stride
-            # If model doesn't support batching take output as is
-            else:
-                scores = net_outs[idx]
-                bbox_preds = net_outs[idx + fmc]
-                bbox_preds = bbox_preds * stride
-                if self.use_kps:
-                    kps_preds = net_outs[idx + fmc * 2] * stride
-
+            scores = net_outs[idx]
+            bbox_preds = net_outs[idx+fmc]
+            bbox_preds = bbox_preds * stride
+            if self.use_kps:
+                kps_preds = net_outs[idx+fmc*2] * stride
             height = input_height // stride
             width = input_width // stride
             K = height * width
@@ -302,47 +289,13 @@ class SCRFD:
 
         return keep
 
-def get_scrfd(name, download=False, root='~/.insightface/models', **kwargs):
+def get_retinaface(name, download=False, root='~/.insightface/models', **kwargs):
     if not download:
         assert os.path.exists(name)
-        return SCRFD(name)
+        return RetinaFace(name)
     else:
         from .model_store import get_model_file
-        _file = get_model_file("scrfd_%s" % name, root=root)
-        return SCRFD(_file)
+        _file = get_model_file("retinaface_%s" % name, root=root)
+        return retinaface(_file)
 
-
-def scrfd_2p5gkps(**kwargs):
-    return get_scrfd("2p5gkps", download=True, **kwargs)
-
-
-if __name__ == '__main__':
-    import glob
-    detector = SCRFD(model_file='./det.onnx')
-    detector.prepare(-1)
-    img_paths = ['tests/data/t1.jpg']
-    for img_path in img_paths:
-        img = cv2.imread(img_path)
-
-        for _ in range(1):
-            ta = datetime.datetime.now()
-            #bboxes, kpss = detector.detect(img, 0.5, input_size = (640, 640))
-            bboxes, kpss = detector.detect(img, 0.5)
-            tb = datetime.datetime.now()
-            print('all cost:', (tb-ta).total_seconds()*1000)
-        print(img_path, bboxes.shape)
-        if kpss is not None:
-            print(kpss.shape)
-        for i in range(bboxes.shape[0]):
-            bbox = bboxes[i]
-            x1,y1,x2,y2,score = bbox.astype(np.int)
-            cv2.rectangle(img, (x1,y1)  , (x2,y2) , (255,0,0) , 2)
-            if kpss is not None:
-                kps = kpss[i]
-                for kp in kps:
-                    kp = kp.astype(np.int)
-                    cv2.circle(img, tuple(kp) , 1, (0,0,255) , 2)
-        filename = img_path.split('/')[-1]
-        print('output:', filename)
-        cv2.imwrite('./outputs/%s'%filename, img)
 

@@ -50,7 +50,7 @@ CATEGORY = "GJJ/图像"
 # 延迟导入：运行时依赖检查
 def _load_dependencies():
 	"""运行时加载 insightface、cv2 等依赖，失败时提供友好提示"""
-	from .common_utils.dependency_checker import load_dependency_at_runtime
+	from .common_utils.dependency_checker import get_pip_install_command_text, load_dependency_at_runtime
 	import sys
 
 	# 加载 cv2
@@ -65,9 +65,8 @@ def _load_dependencies():
 	insightface = load_dependency_at_runtime(
 		module_name="insightface",
 		node_name="GJJ · 🎭 换脸分析器",
-		package_name="insightface",
-		extra_packages=["onnxruntime-gpu"],
-		description="该节点需要 InsightFace 进行人脸识别和换脸"
+		package_name="onnx onnxruntime-gpu",
+		description="该节点已内置 InsightFace 代码；运行时仍需要 onnx / onnxruntime-gpu 加载本地 ONNX 人脸模型"
 	)
 
 	# 从 insightface 导入 Face 类
@@ -77,10 +76,10 @@ def _load_dependencies():
 		raise RuntimeError(
 			f"\n 未找到 insightface.app.common.Face。\n"
 			f"\n"
-			f"这个 GJJ 节点需要 insightface Python 包才能运行。\n"
+			f"这个 GJJ 节点已内置 InsightFace，但当前内置包结构不完整或运行时依赖缺失。\n"
 			f"\n"
 			f"🔧 快速安装命令：\n"
-			f"  {get_pip_install_command_text('insightface onnxruntime-gpu')}\n"
+			f"  {get_pip_install_command_text('onnx onnxruntime-gpu')}\n"
 			f"\n"
 			f"原始导入错误：{exc}\n"
 			f"\n"

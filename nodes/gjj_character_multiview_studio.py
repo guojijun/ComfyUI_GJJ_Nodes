@@ -46,6 +46,10 @@ from .gjj_model_bundle_loader import (
 )
 from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
 from .gjj_multi_lora_chain import normalize_lora_chain_data
+from .common_utils.dependency_checker import (
+	DEFAULT_MODEL_DOWNLOAD_URL,
+	build_dependency_model_report,
+)
 
 
 
@@ -268,7 +272,12 @@ def _prepare_primary_image_for_target(
 
 
 NODE_NAME = "GJJ_CharacterMultiViewStudio"
+NODE_DISPLAY_NAME = "GJJ · 👤 主体一键多视图"
 DEFAULT_MULTI_ANGLES_LORA = "qwen-image-edit-2511-multiple-angles-lora.safetensors"
+DEFAULT_QWEN2511_UNET = "qwen_image_edit_2511_fp8mixed.safetensors"
+DEFAULT_QWEN2511_CLIP = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
+DEFAULT_QWEN2511_VAE = "qwen_image_vae.safetensors"
+DEFAULT_QWEN2511_LIGHTNING_LORA = "QWEN\\lighting\\Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
 ACTION_MIGRATION_LORA_1 = "QWEN\\lighting\\FireRed-Image-Edit-1.0-Lightning-8steps-v1.1.safetensors"
 ACTION_MIGRATION_LORA_1_STRENGTH = 1.0
 ACTION_MIGRATION_LORA_2 = "QWEN\\2511\\edit_2511人景融合20.safetensors"
@@ -306,6 +315,63 @@ CAPTION_PADDING_Y = 6
 DEFAULT_SAVE_PREFIX = "主体多视图"
 MAX_SAVE_FILENAME_LENGTH = 96
 EMPTY_GRID_SLOT_PENALTY = 2.0
+MODEL_DOWNLOAD_URL = DEFAULT_MODEL_DOWNLOAD_URL
+
+REQUIRED_MULTIVIEW_MODELS = [
+	{
+		"label": "Qwen Image Edit 2511 主模型",
+		"subdir": "models/diffusion_models",
+		"filename": DEFAULT_QWEN2511_UNET,
+		"download_url": MODEL_DOWNLOAD_URL,
+		"description": "主体多视图主生成模型；也可放在 ComfyUI 可识别的 unet/checkpoints 目录。",
+	},
+	{
+		"label": "Qwen 2.5 VL 文本编码器",
+		"subdir": "models/text_encoders",
+		"filename": DEFAULT_QWEN2511_CLIP,
+		"download_url": MODEL_DOWNLOAD_URL,
+		"description": "Qwen Image Edit 系列 CLIP/VL 编码器。",
+	},
+	{
+		"label": "Qwen Image VAE",
+		"subdir": "models/vae",
+		"filename": DEFAULT_QWEN2511_VAE,
+		"download_url": MODEL_DOWNLOAD_URL,
+		"description": "Qwen Image Edit 系列 VAE。",
+	},
+	{
+		"label": "Qwen 2511 Lightning LoRA",
+		"subdir": "models/loras/QWEN/lighting",
+		"filename": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+		"download_url": MODEL_DOWNLOAD_URL,
+		"description": "默认加速 LoRA；用于 4 步生成。",
+	},
+	{
+		"label": "Qwen 2511 多角度 LoRA",
+		"subdir": "models/loras/QWEN/2511",
+		"filename": DEFAULT_MULTI_ANGLES_LORA,
+		"download_url": MODEL_DOWNLOAD_URL,
+		"description": "多视图角度一致性 LoRA。",
+	},
+]
+
+OPTIONAL_ACTION_MODELS = [
+	{
+		"label": "FireRed 动作迁移 LoRA",
+		"value": "models/loras/QWEN/lighting/FireRed-Image-Edit-1.0-Lightning-8steps-v1.1.safetensors",
+		"tooltip": "仅在接入动作图并启用动作迁移模式时自动使用。",
+	},
+	{
+		"label": "人景融合动作 LoRA",
+		"value": "models/loras/QWEN/2511/edit_2511人景融合20.safetensors",
+		"tooltip": "仅在接入动作图并启用动作迁移模式时自动使用。",
+	},
+	{
+		"label": "OpenPose 模型",
+		"value": "GJJ/ckpts/openpose/body_pose_model.pth、hand_pose_model.pth、facenet.pth",
+		"tooltip": "仅当动作图不是骨架图、需要节点内部转 OpenPose 时使用；直接输入骨架图可不需要。",
+	},
+]
 
 
 # ============================================================================
@@ -325,6 +391,39 @@ def _resolve_effective_steps(
 	if base_steps is not None:
 		return int(base_steps)
 	return int(requested_steps)
+
+
+def _resolve_native_sampler_scheduler(
+	sampler_name: Any,
+	scheduler: Any,
+	unique_id: str | None = None,
+) -> tuple[str, str]:
+	"""Resolve sampler fields against ComfyUI core, with stable local fallbacks."""
+	requested_sampler = str(sampler_name or "").strip() or "euler"
+	requested_scheduler = str(scheduler or "").strip() or "simple"
+	fallback_samplers = ("euler", "dpmpp_2m", "dpmpp_2m_sde", "lcm")
+	fallback_schedulers = ("simple", "normal", "karras", "exponential", "sgm_uniform")
+
+	try:
+		import comfy.samplers
+
+		samplers = list(getattr(comfy.samplers.KSampler, "SAMPLERS", []) or [])
+		schedulers = list(getattr(comfy.samplers.KSampler, "SCHEDULERS", []) or [])
+	except Exception:
+		samplers = []
+		schedulers = []
+
+	if requested_sampler not in samplers:
+		replacement = next((name for name in fallback_samplers if not samplers or name in samplers), "euler")
+		if requested_sampler != replacement:
+			_send_status(unique_id, f"⚠️ 采样器 {requested_sampler} 不可用，已回退为 {replacement}")
+		requested_sampler = replacement
+	if requested_scheduler not in schedulers:
+		replacement = next((name for name in fallback_schedulers if not schedulers or name in schedulers), "simple")
+		if requested_scheduler != replacement:
+			_send_status(unique_id, f"⚠️ 调度器 {requested_scheduler} 不可用，已回退为 {replacement}")
+		requested_scheduler = replacement
+	return requested_sampler, requested_scheduler
 
 
 PREFERED_KONTEXT_RESOLUTIONS = [
@@ -630,6 +729,55 @@ def _pick_available_lora_name(candidates: list[str], preferred_name: str, fallba
 				return candidate
 
 	return preferred or fallback
+
+
+def _normalized_model_basename(value: str) -> str:
+	return os.path.splitext(str(value or "").replace("\\", "/").split("/")[-1].lower())[0]
+
+
+def _has_model_candidate(candidates: list[str], filenames: list[str]) -> bool:
+	available = {_normalized_model_basename(candidate) for candidate in candidates}
+	for filename in filenames:
+		if _normalized_model_basename(filename) in available:
+			return True
+	return False
+
+
+def _missing_multiview_models() -> list[dict[str, str]]:
+	unet_models = list_unet_models() or []
+	clip_models = list_clip_models() or []
+	vae_models = list_vae_models() or []
+	lora_models = _safe_filename_list("loras")
+	missing: list[dict[str, str]] = []
+	checks = [
+		(REQUIRED_MULTIVIEW_MODELS[0], unet_models, [DEFAULT_QWEN2511_UNET, "qwen_image_edit_2511_nvfp4.safetensors"]),
+		(REQUIRED_MULTIVIEW_MODELS[1], clip_models, [DEFAULT_QWEN2511_CLIP]),
+		(REQUIRED_MULTIVIEW_MODELS[2], vae_models, [DEFAULT_QWEN2511_VAE]),
+		(REQUIRED_MULTIVIEW_MODELS[3], lora_models, [DEFAULT_QWEN2511_LIGHTNING_LORA, "Qwen-Image-Edit-2511-Lightning"]),
+		(REQUIRED_MULTIVIEW_MODELS[4], lora_models, [DEFAULT_MULTI_ANGLES_LORA]),
+	]
+	for model_info, candidates, filenames in checks:
+		if not _has_model_candidate(candidates, filenames):
+			missing.append(model_info)
+	return missing
+
+
+_MULTIVIEW_DESCRIPTION_READY = (
+	"主体一键多视图：主图必选，动作可用图片参考、文字描述或按钮预设。"
+	"节点会自动匹配 Qwen Image Edit 2511 为主线的图生图模型族，并将结果拼接成多视图图板。\n\n"
+	"🌏模型下载：\n"
+	f"{MODEL_DOWNLOAD_URL}\n\n"
+	"📦 推荐模型：Qwen Image Edit 2511 主模型 + Qwen 2.5 VL CLIP + Qwen Image VAE + Lightning / 多角度 LoRA。\n"
+	"🔧 Python 依赖：无需额外安装；使用 ComfyUI 官方模型加载、采样、VAE 与 GJJ 内部工具。\n"
+	"💡 动作图模式：普通 RGB 动作图会尝试内部转 OpenPose；直接输入骨架图可跳过 OpenPose 模型。"
+)
+_MISSING_MULTIVIEW_MODELS = _missing_multiview_models()
+_MULTIVIEW_MODEL_REPORT = build_dependency_model_report(
+	node_name=NODE_DISPLAY_NAME,
+	missing_models=_MISSING_MULTIVIEW_MODELS,
+	description="主体一键多视图需要本地 Qwen Image Edit 2511 模型链。缺少模型时，节点仍会注册，但运行时可能加载失败。",
+	model_download_url=MODEL_DOWNLOAD_URL,
+)
 
 
 def _parse_action_lines(action_prompts: str) -> list[str]:
@@ -1475,15 +1623,9 @@ class GJJ_CharacterMultiViewStudio:
 	CATEGORY = "GJJ"
 	FUNCTION = "generate"
 	DESCRIPTION = (
-		"主体一键多视图：主图必选，动作可用图片参考、文字描述或按钮预设。\n"
-		"节点会自动匹配 qwen_image_edit_2511 为主线的图生图模型族，并将结果尽量方正地拼接成多视图图板。\n\n"
-		"📦 所需模型：\n"
-		"• UNET: models/unet/ 或 models/checkpoints/ (推荐 qwen_image_edit_2511 系列)\n"
-		"• CLIP: models/clip/ (根据 UNET 自动匹配)\n"
-		"• VAE: models/vae/ (根据 UNET 自动匹配)\n"
-		"• LoRA: models/loras/ (推荐 QWEN/lighting/* 和 multiple-angles-lora)\n\n"
-		"🔧 Python 依赖：无需额外安装（所有依赖已包含在 ComfyUI 中）\n\n"
-		"📖 详细帮助文档：SKILL/MD/GJJ_CharacterMultiViewStudio.md"
+		_MULTIVIEW_DESCRIPTION_READY
+		if _MULTIVIEW_MODEL_REPORT.get("available", True)
+		else f"{_MULTIVIEW_MODEL_REPORT['warning_message']}\n\n{_MULTIVIEW_DESCRIPTION_READY}"
 	)
 	SEARCH_ALIASES = [
 		"主体一键多视图",
@@ -1501,6 +1643,29 @@ class GJJ_CharacterMultiViewStudio:
 		"自动拼接后的多视图成品图。",
 		"按视角顺序输出的 GJJ 专用批量图片，可直接接入批量图片输入接口。",
 	)
+	REQUIRED_MODELS = REQUIRED_MULTIVIEW_MODELS
+	GJJ_HELP = {
+		"title": NODE_DISPLAY_NAME,
+		"description": _MULTIVIEW_DESCRIPTION_READY,
+		"notice": _MULTIVIEW_MODEL_REPORT["help_message"] if not _MULTIVIEW_MODEL_REPORT.get("available", True) else "",
+		"warning_message": _MULTIVIEW_MODEL_REPORT["warning_message"] if not _MULTIVIEW_MODEL_REPORT.get("available", True) else "",
+		"copy_text": _MULTIVIEW_MODEL_REPORT["copy_text"] if not _MULTIVIEW_MODEL_REPORT.get("available", True) else MODEL_DOWNLOAD_URL,
+		"copy_label": _MULTIVIEW_MODEL_REPORT["copy_label"] if not _MULTIVIEW_MODEL_REPORT.get("available", True) else "🌏 复制模型下载网址",
+		"model_download_url": MODEL_DOWNLOAD_URL,
+		"install_cmd": "",
+		"dependencies": [
+			"无需额外 Python 依赖；依赖 ComfyUI 官方模型加载、采样、VAE 解码和 GJJ 内部工具。",
+			"动作图不是骨架图时，会调用 GJJ 内置 OpenPose 转骨架；OpenPose 模型缺失时请改用骨架图或补齐可选模型。",
+		],
+		"models": REQUIRED_MULTIVIEW_MODELS,
+		"optional_models": OPTIONAL_ACTION_MODELS,
+		"tips": [
+			"推荐使用 qwen_image_edit_2511_fp8mixed.safetensors；本地若有 nvfp4 版本也可在下拉框中选择。",
+			"主图是主体身份和外观参考；动作文本每行生成一个视图。",
+			"连入动作图后会切换动作迁移模式，并自动优先使用 FireRed 动作迁移 LoRA 与人景融合 LoRA。",
+			"额外 LoRA 请接入 LoRA串联配置，节点会在面板 LoRA 之后继续串联应用。",
+		],
+	}
 
 	@classmethod
 	def INPUT_TYPES(cls):
@@ -2017,13 +2182,22 @@ class GJJ_CharacterMultiViewStudio:
 			lora_2_name,
 			lora_2_strength,
 		)
+		sampler_name, scheduler = _resolve_native_sampler_scheduler(
+			preset.get("sampler_name", "euler"),
+			preset.get("scheduler", "simple"),
+			unique_id,
+		)
+		_send_status(
+			unique_id,
+			f"采样参数：steps={effective_steps}, cfg={float(preset.get('cfg', 1.0)):g}, sampler={sampler_name}, scheduler={scheduler}",
+		)
 		sampled_latent = common_ksampler(
 			model,
 			int(seed),
 			effective_steps,
 			float(preset.get("cfg", 1.0)),
-			str(preset.get("sampler_name", "euler")),
-			str(preset.get("scheduler", "normal")),
+			sampler_name,
+			scheduler,
 			positive,
 			negative,
 			latent_out,

@@ -72,7 +72,7 @@ pip install -r requirements-accelerate.txt -i https://pypi.tuna.tsinghua.edu.cn/
 
 ```bash
 # 人脸分析 / 换脸
-pip install insightface onnxruntime-gpu -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install onnx onnxruntime-gpu -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # Ollama 相关（提示词生成、图片分析等）
 pip install ollama -i https://pypi.tuna.tsinghua.edu.cn/simple
