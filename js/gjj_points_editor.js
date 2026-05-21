@@ -30,6 +30,15 @@ function graphDirty() {
 	app.graph?.setDirtyCanvas?.(true, true);
 }
 
+function compactPointsNode(node) {
+	if (!node) {
+		return;
+	}
+	HIDDEN_WIDGET_SET.forEach((name) => hideWidget(node.widgets?.find((widget) => widget?.name === name)));
+	GJJ_Utils.removeHiddenInputSockets?.(node, HIDDEN_WIDGET_SET);
+	GJJ_Utils.reorderWidgets?.(node, HIDDEN_WIDGET_SET);
+}
+
 function hideWidget(widget) {
 	if (!widget) {
 		return;
@@ -130,7 +139,14 @@ function validBboxFormat(value) {
 }
 
 function validNormalizeValue(value) {
-	return ["boolean", "number", "string"].includes(typeof value) ? value : null;
+	if (typeof value === "boolean" || typeof value === "number") {
+		return value;
+	}
+	if (typeof value === "string") {
+		const text = value.trim().toLowerCase();
+		return ["true", "false", "1", "0", "yes", "no", "on", "off", ""].includes(text) ? value : null;
+	}
+	return null;
 }
 
 function hasStatePayload(state) {
@@ -193,11 +209,15 @@ function parseBox(box) {
 	};
 }
 
+function hasPoints(points) {
+	return Array.isArray(points) && points.length > 0;
+}
+
 function getWidget(node, name) {
 	return node.widgets?.find((widget) => widget?.name === name) || null;
 }
 
-function setWidgetValue(widget, value) {
+function setWidgetValue(widget, value, callCallback = true) {
 	if (!widget) {
 		return;
 	}
@@ -205,7 +225,9 @@ function setWidgetValue(widget, value) {
 		return;
 	}
 	widget.value = value;
-	widget.callback?.(value);
+	if (callCallback) {
+		widget.callback?.(value);
+	}
 }
 
 function getStoredWidth(node) {
@@ -560,6 +582,7 @@ function ensureEditor(node) {
 	toolbar.appendChild(moreOutputsButton);
 
 	const wrap = document.createElement("div");
+	wrap.title = "左键添加前景点，右键添加背景点；按住 Ctrl 并拖拽可创建第三输出口的框选范围。";
 	wrap.style.cssText = [
 		"position:relative",
 		"height:320px",
@@ -618,14 +641,18 @@ function ensureEditor(node) {
 		boxes: initialBoxes.map(parseBox).filter(Boolean),
 		currentBox: null,
 		drawingBox: false,
+		pendingPoint: null,
+		usingDefaultPoints: false,
 		loadingToken: 0,
 		getModelWidth() {
+			sanitizeVisibleWidgets(false);
 			if (this.imageLoaded && image.naturalWidth > 0) {
 				return Math.max(1, Math.round(image.naturalWidth));
 			}
 			return Math.max(1, Math.round(coerceDimension(widthWidget?.value, 512)));
 		},
 		getModelHeight() {
+			sanitizeVisibleWidgets(false);
 			if (this.imageLoaded && image.naturalHeight > 0) {
 				return Math.max(1, Math.round(image.naturalHeight));
 			}
@@ -648,36 +675,80 @@ function ensureEditor(node) {
 		},
 	};
 
-	function repairWidgetValues() {
-		let repaired = false;
-		if (bboxFormatWidget && !validBboxFormat(bboxFormatWidget.value)) {
-			setWidgetValue(bboxFormatWidget, "xyxy");
-			repaired = true;
+	function makeDefaultPoints() {
+		const width = editor.getModelWidth();
+		const height = editor.getModelHeight();
+		return {
+			positive: [{ x: Math.round(width / 2), y: Math.round(height / 2) }],
+			negative: [{
+				x: Math.max(0, Math.min(width, Math.round(width * 0.05))),
+				y: Math.max(0, Math.min(height, Math.round(height * 0.05))),
+			}],
+		};
+	}
+
+	function setDefaultPoints() {
+		const defaults = makeDefaultPoints();
+		editor.posPoints = defaults.positive;
+		editor.negPoints = defaults.negative;
+		editor.usingDefaultPoints = true;
+	}
+
+	function sanitizeVisibleWidgets(forceImageSize = false) {
+		if (node.__gjjPointsSanitizing) {
+			return false;
 		}
-		const fallbackWidth = editor.imageLoaded && image.naturalWidth > 0 ? image.naturalWidth : 512;
-		const fallbackHeight = editor.imageLoaded && image.naturalHeight > 0 ? image.naturalHeight : 512;
-		for (const [widget, fallback] of [[widthWidget, fallbackWidth], [heightWidget, fallbackHeight]]) {
-			if (!widget) {
-				continue;
+		node.__gjjPointsSanitizing = true;
+		let changed = false;
+		try {
+			if (bboxFormatWidget && !validBboxFormat(bboxFormatWidget.value)) {
+				setWidgetValue(bboxFormatWidget, "xyxy", false);
+				changed = true;
 			}
-			if (finitePositiveNumber(widget.value) == null) {
-				setWidgetValue(widget, fallback);
-				repaired = true;
+			const imageWidth = editor.imageLoaded && image.naturalWidth > 0 ? Math.round(image.naturalWidth) : null;
+			const imageHeight = editor.imageLoaded && image.naturalHeight > 0 ? Math.round(image.naturalHeight) : null;
+			const fallbackWidth = imageWidth || 512;
+			const fallbackHeight = imageHeight || 512;
+			const currentWidth = finitePositiveNumber(widthWidget?.value);
+			const currentHeight = finitePositiveNumber(heightWidget?.value);
+			if (widthWidget && (currentWidth == null || (forceImageSize && imageWidth != null && Math.round(currentWidth) !== imageWidth))) {
+				setWidgetValue(widthWidget, fallbackWidth, false);
+				changed = true;
 			}
+			if (heightWidget && (currentHeight == null || (forceImageSize && imageHeight != null && Math.round(currentHeight) !== imageHeight))) {
+				setWidgetValue(heightWidget, fallbackHeight, false);
+				changed = true;
+			}
+			if (normalizeWidget && validNormalizeValue(normalizeWidget.value) == null) {
+				setWidgetValue(normalizeWidget, false, false);
+				changed = true;
+			}
+		} finally {
+			node.__gjjPointsSanitizing = false;
 		}
+		if (changed) {
+			graphDirty();
+		}
+		return changed;
+	}
+
+	function repairWidgetValues(forceImageSize = false) {
+		const repaired = sanitizeVisibleWidgets(forceImageSize);
 		const state = readEditorState(node, editorStateWidget);
+		if (normalizeWidget && validNormalizeValue(state.normalize) != null) {
+			setWidgetValue(normalizeWidget, coerceBoolean(state.normalize), false);
+		}
 		if (editorStateWidget && !hasStatePayload(state)) {
 			const builtState = buildEditorState();
 			const text = JSON.stringify(builtState);
-			setWidgetValue(editorStateWidget, text);
+			setWidgetValue(editorStateWidget, text, false);
 			node.properties ||= {};
 			node.properties[STATE_PROPERTY] = text;
-		} else if (normalizeWidget && validNormalizeValue(state.normalize) != null) {
-			setWidgetValue(normalizeWidget, coerceBoolean(state.normalize));
 		}
 		if (repaired) {
-			writeBack();
+			scheduleDraw();
 		}
+		return repaired;
 	}
 
 	function buildEditorState() {
@@ -703,6 +774,9 @@ function ensureEditor(node) {
 		widget.callback = function (...args) {
 			const result = originalCallback?.apply(this, args);
 			if (!editor.imageLoaded) {
+				if (editor.usingDefaultPoints) {
+					setDefaultPoints();
+				}
 				syncLayout();
 				scheduleDraw();
 			}
@@ -785,6 +859,7 @@ function ensureEditor(node) {
 	}
 
 	function writeBack() {
+		sanitizeVisibleWidgets(false);
 		editor.boxes = editor.boxes.map(parseBox).filter(Boolean);
 		const payload = { positive: editor.posPoints, negative: editor.negPoints };
 		if (coordsWidget) {
@@ -837,8 +912,8 @@ function ensureEditor(node) {
 		const heightChanged = finitePositiveNumber(currentHeight) == null || currentHeight === 512;
 		const dimensionsMismatch = !Number.isFinite(currentWidth) || !Number.isFinite(currentHeight) || Math.abs(currentWidth - image.naturalWidth) > 1 || Math.abs(currentHeight - image.naturalHeight) > 1;
 		if (signature && (node.properties[SOURCE_PROPERTY] !== signature || widthChanged || heightChanged || dimensionsMismatch)) {
-			setWidgetValue(widthWidget, image.naturalWidth);
-			setWidgetValue(heightWidget, image.naturalHeight);
+			setWidgetValue(widthWidget, image.naturalWidth, false);
+			setWidgetValue(heightWidget, image.naturalHeight, false);
 			node.properties[SOURCE_PROPERTY] = signature;
 			writeBack();
 		}
@@ -938,8 +1013,8 @@ function ensureEditor(node) {
 		if (editor.currentBox) {
 			drawBox(ctx, bounds, editor.currentBox, "#79dcff");
 		}
-		editor.posPoints.forEach((point, index) => drawPoint(ctx, bounds, point, index + 1, "#08cc48", "#2cff68"));
-		editor.negPoints.forEach((point, index) => drawPoint(ctx, bounds, point, index + 1, "#e03b3b", "#ff6d6d"));
+		editor.posPoints.forEach((point, index) => drawPoint(ctx, bounds, point, index, "#08cc48", "#2cff68"));
+		editor.negPoints.forEach((point, index) => drawPoint(ctx, bounds, point, index, "#e03b3b", "#ff6d6d"));
 	}
 
 	let drawHandle = 0;
@@ -949,6 +1024,7 @@ function ensureEditor(node) {
 	}
 
 	function syncFromWidgets() {
+		sanitizeVisibleWidgets(false);
 		const store = safeParseStore(storeWidget?.value);
 		const state = readEditorState(node, editorStateWidget);
 		const positiveSource = Array.isArray(state.positive)
@@ -969,23 +1045,28 @@ function ensureEditor(node) {
 		editor.posPoints = positiveSource;
 		editor.negPoints = negativeSource;
 		editor.boxes = boxesSource.map(parseBox).filter(Boolean);
+		if (!hasPoints(editor.posPoints) && !hasPoints(editor.negPoints)) {
+			setDefaultPoints();
+		} else {
+			editor.usingDefaultPoints = false;
+		}
 		if (state.image_store != null) {
 			syncStoredImage(String(state.image_store || ""));
 		}
 		const stateBboxFormat = validBboxFormat(state.bbox_format);
 		if (stateBboxFormat) {
-			setWidgetValue(bboxFormatWidget, stateBboxFormat);
+			setWidgetValue(bboxFormatWidget, stateBboxFormat, false);
 		}
 		const stateWidth = finitePositiveNumber(state.width);
 		if (stateWidth != null) {
-			setWidgetValue(widthWidget, stateWidth);
+			setWidgetValue(widthWidget, stateWidth, false);
 		}
 		const stateHeight = finitePositiveNumber(state.height);
 		if (stateHeight != null) {
-			setWidgetValue(heightWidget, stateHeight);
+			setWidgetValue(heightWidget, stateHeight, false);
 		}
 		if (normalizeWidget && validNormalizeValue(state.normalize) != null) {
-			setWidgetValue(normalizeWidget, coerceBoolean(state.normalize));
+			setWidgetValue(normalizeWidget, coerceBoolean(state.normalize), false);
 		}
 		repairWidgetValues();
 		scheduleDraw();
@@ -1043,8 +1124,7 @@ function ensureEditor(node) {
 
 	function newCanvas() {
 		syncStoredImage("");
-		editor.posPoints = [];
-		editor.negPoints = [];
+		setDefaultPoints();
 		editor.boxes = [];
 		editor.currentBox = null;
 		writeBack();
@@ -1065,6 +1145,13 @@ function ensureEditor(node) {
 	moreOutputsButton.onclick = revealMoreOutputs;
 
 	wrap.addEventListener("contextmenu", stopEvent);
+	function startBox(point) {
+		editor.pendingPoint = null;
+		editor.drawingBox = true;
+		editor.currentBox = { startX: point.x, startY: point.y, endX: point.x, endY: point.y };
+		scheduleDraw();
+	}
+
 	wrap.addEventListener("pointerdown", (event) => {
 		stopEvent(event);
 		wrap.setPointerCapture?.(event.pointerId);
@@ -1073,20 +1160,31 @@ function ensureEditor(node) {
 			return;
 		}
 		if (event.ctrlKey) {
-			editor.drawingBox = true;
-			editor.currentBox = { startX: point.x, startY: point.y, endX: point.x, endY: point.y };
-			scheduleDraw();
+			startBox(point);
 			return;
 		}
 		if (event.button === 2) {
+			editor.usingDefaultPoints = false;
 			editor.negPoints.push(point);
-		} else {
-			editor.posPoints.push(point);
+			writeBack();
+			return;
 		}
-		writeBack();
+		editor.pendingPoint = {
+			point,
+			clientX: event.clientX,
+			clientY: event.clientY,
+			pointerId: event.pointerId,
+		};
 	});
 
 	wrap.addEventListener("pointermove", (event) => {
+		if (editor.pendingPoint && event.pointerId === editor.pendingPoint.pointerId) {
+			const moved = Math.hypot(event.clientX - editor.pendingPoint.clientX, event.clientY - editor.pendingPoint.clientY);
+			if (moved >= 6) {
+				stopEvent(event);
+				startBox(editor.pendingPoint.point);
+			}
+		}
 		if (!editor.drawingBox || !editor.currentBox) {
 			return;
 		}
@@ -1100,24 +1198,54 @@ function ensureEditor(node) {
 		scheduleDraw();
 	});
 
-	window.addEventListener("pointerup", (event) => {
+	function finishPointer(event) {
+		if (editor.pendingPoint && event.pointerId === editor.pendingPoint.pointerId) {
+			stopEvent(event);
+			editor.usingDefaultPoints = false;
+			editor.posPoints.push(editor.pendingPoint.point);
+			editor.pendingPoint = null;
+			writeBack();
+			return;
+		}
 		if (!editor.drawingBox || !editor.currentBox) {
 			return;
 		}
 		stopEvent(event);
+		const point = toModelPoint(event);
+		if (point) {
+			editor.currentBox.endX = point.x;
+			editor.currentBox.endY = point.y;
+		}
 		const box = parseBox(editor.currentBox);
-		if (box) {
+		if (box && Math.abs(box.endX - box.startX) > 0 && Math.abs(box.endY - box.startY) > 0) {
 			editor.boxes.push(box);
 		}
 		editor.currentBox = null;
 		editor.drawingBox = false;
+		try {
+			if (event?.pointerId != null) {
+				wrap.releasePointerCapture?.(event.pointerId);
+			}
+		} catch {
+			// Pointer capture may already be released by the browser.
+		}
 		writeBack();
-	});
+	}
+
+	wrap.addEventListener("pointerup", finishPointer);
+	wrap.addEventListener("pointercancel", finishPointer);
+	canvas.addEventListener("pointerup", finishPointer);
+	canvas.addEventListener("pointercancel", finishPointer);
+	window.addEventListener("pointerup", finishPointer);
 
 	image.onload = () => {
 		editor.imageLoaded = true;
-		repairWidgetValues();
+		repairWidgetValues(true);
 		syncImageSizeFromSource();
+		if (editor.usingDefaultPoints) {
+			setDefaultPoints();
+			writeBack();
+		}
 		syncLayout();
 		scheduleDraw();
 	};
@@ -1170,8 +1298,9 @@ function patchNode(node) {
 	if (!node.properties[HEIGHT_PROPERTY]) {
 		node.properties[HEIGHT_PROPERTY] = Math.max(DEFAULT_NODE_HEIGHT, Number(node.size?.[1] || 0));
 	}
-	HIDDEN_WIDGET_SET.forEach((name) => hideWidget(node.widgets?.find((widget) => widget?.name === name)));
+	compactPointsNode(node);
 	ensureEditor(node);
+	compactPointsNode(node);
 	ensureNodeSize(node);
 	stabilizeOutputs(node);
 	graphDirty();
@@ -1180,16 +1309,17 @@ function patchNode(node) {
 function afterNodeReady(node) {
 	patchNode(node);
 	const view = ensureEditor(node);
-	HIDDEN_WIDGET_SET.forEach((name) => hideWidget(node.widgets?.find((widget) => widget?.name === name)));
-	view.repairWidgetValues?.();
+	compactPointsNode(node);
 	view.syncFromWidgets();
+	view.repairWidgetValues?.(true);
 	view.loadCurrentPreview();
 	view.syncLayout?.();
 	stabilizeOutputs(node);
-	for (const delay of [0, 120, 450]) {
+	for (const delay of [0, 120, 450, 1000, 2000]) {
 		window.setTimeout(() => {
 			const delayedView = ensureEditor(node);
-			delayedView.repairWidgetValues?.();
+			compactPointsNode(node);
+			delayedView.repairWidgetValues?.(true);
 			delayedView.syncLayout?.();
 			delayedView.draw?.();
 		}, delay);

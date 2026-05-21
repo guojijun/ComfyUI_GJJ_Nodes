@@ -146,6 +146,17 @@ def _coerce_bool(value: Any, fallback: bool = False) -> bool:
 	return fallback
 
 
+def _default_positive_point(width: int, height: int) -> dict[str, int]:
+	return {"x": int(round(width / 2)), "y": int(round(height / 2))}
+
+
+def _default_negative_point(width: int, height: int) -> dict[str, int]:
+	return {
+		"x": max(0, min(width, int(round(width * 0.05)))),
+		"y": max(0, min(height, int(round(height * 0.05)))),
+	}
+
+
 def _load_image_from_path(file_path: str) -> torch.Tensor:
 	with Image.open(file_path) as img:
 		img.load()
@@ -363,6 +374,10 @@ class GJJ_PointsEditor:
 		normalize = _coerce_bool(normalize, _coerce_bool(state.get("normalize"), False))
 		pos_input = _safe_parse_points(coordinates)
 		neg_input = _safe_parse_points(neg_coordinates)
+		if not pos_input:
+			pos_input = [_default_positive_point(width, height)]
+		if not neg_input:
+			neg_input = [_default_negative_point(width, height)]
 		bbox_input = _safe_parse_boxes(bboxes) or _safe_parse_boxes(bbox_store)
 		stored_image = _resolve_annotated_image(image_store)
 

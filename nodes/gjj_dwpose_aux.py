@@ -132,22 +132,28 @@ def _list_dwpose_model_names(kind):
         "bbox": ("yolox", "yolo_nas"),
     }[kind]
     names = []
+    seen = set()
     for name in folder_paths.get_filename_list("controlnet"):
         lower = str(name).replace("\\", "/").lower()
         if not lower.endswith(suffixes):
             continue
         if all(keyword in lower for keyword in keywords[:1]) or any(keyword in lower for keyword in keywords):
-            names.append(name)
-    return sorted(set(names), key=lambda item: (DWPOSE_MODEL_SUBDIR.lower() not in item.replace("\\", "/").lower(), item.lower()))
+            basename = os.path.basename(str(name).replace("\\", "/"))
+            key = basename.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(basename)
+    return sorted(names, key=lambda item: (item.lower() != {
+        "pose": DEFAULT_DWPOSE_POSE,
+        "bbox": DEFAULT_DWPOSE_DET,
+    }[kind].lower(), item.lower()))
 
 
 def _combo_with_default(names, default):
     values = list(names)
-    rel_default = f"{DWPOSE_MODEL_SUBDIR}/{default}"
-    if rel_default not in values:
-        values.insert(0, rel_default)
     if default not in values:
-        values.append(default)
+        values.insert(0, default)
     return values
 
 
@@ -155,13 +161,16 @@ def _resolve_controlnet_file(name, role):
     if not name or name == "None":
         return None
     _ensure_controlnet_model_folder()
-    candidates = [str(name)]
     basename = os.path.basename(str(name).replace("\\", "/"))
-    candidates.extend([
+    candidates = [
         f"{DWPOSE_MODEL_SUBDIR}/{basename}",
         basename,
-    ])
+    ]
+    checked = set()
     for candidate in candidates:
+        if candidate in checked:
+            continue
+        checked.add(candidate)
         path = folder_paths.get_full_path("controlnet", candidate)
         if path and os.path.exists(path):
             return path
@@ -172,7 +181,7 @@ def _resolve_controlnet_file(name, role):
                 "label": f"DWPose {role}模型",
                 "subdir": f"models/controlnet/{DWPOSE_MODEL_SUBDIR}",
                 "filename": basename,
-                "description": f"当前选择的 DWPose {role}模型未找到。",
+                "description": f"当前选择的 DWPose {role}模型未找到；优先查找 models/controlnet/{DWPOSE_MODEL_SUBDIR}/{basename}。",
             }
         ],
     )
@@ -222,7 +231,7 @@ def _compress_keypoints(keypoints):
         value
         for keypoint in keypoints
         for value in (
-            [float(keypoint.x), float(keypoint.y), float(keypoint.score)]
+            [float(keypoint.x), float(keypoint.y), 1.0]
             if keypoint is not None
             else [0.0, 0.0, 0.0]
         )
@@ -310,15 +319,17 @@ def _draw_face(canvas, keypoints):
 
 
 def _draw_poses(poses, height, width, draw_body=True, draw_hand=True, draw_face=True, xinsr_stick_scaling=False):
+    from ..vendor.gjj_dwpose import util
+
     canvas = np.zeros((height, width, 3), dtype=np.uint8)
     for pose in poses:
         if draw_body:
-            canvas = _draw_body(canvas, pose.body.keypoints, xinsr_stick_scaling)
+            canvas = util.draw_bodypose(canvas, pose.body.keypoints, xinsr_stick_scaling)
         if draw_hand:
-            canvas = _draw_hand(canvas, pose.left_hand)
-            canvas = _draw_hand(canvas, pose.right_hand)
+            canvas = util.draw_handpose(canvas, pose.left_hand)
+            canvas = util.draw_handpose(canvas, pose.right_hand)
         if draw_face:
-            canvas = _draw_face(canvas, pose.face)
+            canvas = util.draw_facepose(canvas, pose.face)
     return canvas
 
 
@@ -390,19 +401,20 @@ class GJJ_DWPoseEstimator:
         return {
             "required": {
                 "image": ("IMAGE", {"display_name": "图像", "tooltip": "需要检测姿态的输入图像，支持批量。"}),
-                "detect_body": (["enable", "disable"], {"default": "enable", "display_name": "检测身体", "tooltip": "是否输出身体骨架关键点。"}),
-                "detect_hand": (["enable", "disable"], {"default": "enable", "display_name": "检测手部", "tooltip": "是否输出手部关键点。"}),
-                "detect_face": (["enable", "disable"], {"default": "enable", "display_name": "检测面部", "tooltip": "是否输出面部关键点。"}),
+            },
+            "optional": {
+                "detect_hand": ("BOOLEAN", {"default": True, "display_name": "检测手部", "tooltip": "是否输出手部关键点。"}),
+                "detect_body": ("BOOLEAN", {"default": True, "display_name": "检测身体", "tooltip": "是否输出身体骨架关键点。"}),
+                "detect_face": ("BOOLEAN", {"default": True, "display_name": "检测面部", "tooltip": "是否输出面部关键点。"}),
                 "resolution": ("INT", {"default": 512, "min": 64, "max": MAX_RESOLUTION, "step": 64, "display_name": "预处理分辨率", "tooltip": "姿态图输出的短边分辨率；可接像素完美分辨率节点。"}),
-                "bbox_detector": (bbox_models, {"default": f"{DWPOSE_MODEL_SUBDIR}/{DEFAULT_DWPOSE_DET}", "display_name": "人体框检测器", "tooltip": "用于先找人物位置。设为 None 时按整张图估计，可避免 ONNX 检测器加载问题。"}),
-                "pose_estimator": (pose_models, {"default": f"{DWPOSE_MODEL_SUBDIR}/{DEFAULT_DWPOSE_POSE}", "display_name": "姿态模型", "tooltip": "DWPose 姿态估计模型；推荐 TorchScript bs5 版本。"}),
-                "scale_stick_for_xinsr_cn": (["disable", "enable"], {"default": "disable", "display_name": "Xinsir骨架加粗", "tooltip": "为 Xinsir OpenPose ControlNet 放大骨架线宽。"}),
-            }
-            ,
+                "bbox_detector": (bbox_models, {"default": DEFAULT_DWPOSE_DET, "display_name": "人体框检测器", "tooltip": "用于先找人物位置。模型实际优先从 models/controlnet/DWPose 加载；设为 None 时按整张图估计。"}),
+                "pose_estimator": (pose_models, {"default": DEFAULT_DWPOSE_POSE, "display_name": "姿态模型", "tooltip": "DWPose 姿态估计模型；模型实际优先从 models/controlnet/DWPose 加载。推荐 TorchScript bs5 版本。"}),
+                "scale_stick_for_xinsr_cn": ("BOOLEAN", {"default": False, "display_name": "Xinsir骨架加粗", "tooltip": "为 Xinsir OpenPose ControlNet 放大骨架线宽。"}),
+            },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    def estimate_pose(self, image, detect_body="enable", detect_hand="enable", detect_face="enable", resolution=512, bbox_detector=f"{DWPOSE_MODEL_SUBDIR}/{DEFAULT_DWPOSE_DET}", pose_estimator=f"{DWPOSE_MODEL_SUBDIR}/{DEFAULT_DWPOSE_POSE}", scale_stick_for_xinsr_cn="disable", unique_id=None):
+    def estimate_pose(self, image, detect_hand=True, detect_body=True, detect_face=True, resolution=512, bbox_detector=DEFAULT_DWPOSE_DET, pose_estimator=DEFAULT_DWPOSE_POSE, scale_stick_for_xinsr_cn=False, unique_id=None):
         try:
             Wholebody = _load_wholebody_runtime()
         except Exception as exc:
@@ -426,10 +438,10 @@ class GJJ_DWPoseEstimator:
         pbar = comfy.utils.ProgressBar(batch_size)
         outputs = []
         openpose_dicts = []
-        include_body = detect_body == "enable"
-        include_hand = detect_hand == "enable"
-        include_face = detect_face == "enable"
-        xinsr = scale_stick_for_xinsr_cn == "enable"
+        include_body = bool(detect_body)
+        include_hand = bool(detect_hand)
+        include_face = bool(detect_face)
+        xinsr = bool(scale_stick_for_xinsr_cn)
         for tensor_image in image:
             np_image = np.asarray(tensor_image.cpu() * 255.0, dtype=np.uint8)
             np_image, _ = _resize_image_with_pad(np_image, 0)
@@ -445,7 +457,7 @@ class GJJ_DWPoseEstimator:
                 )
                 for pose in poses
             ]
-            canvas = _draw_poses(filtered, np_image.shape[0], np_image.shape[1], include_body, include_hand, include_face, xinsr)
+            canvas = _draw_poses(poses, np_image.shape[0], np_image.shape[1], include_body, include_hand, include_face, xinsr)
             canvas, remove_pad = _resize_image_with_pad(canvas, int(resolution))
             canvas = _hwc3(remove_pad(canvas))
             openpose_dicts.append(_encode_poses(filtered, np_image.shape[0], np_image.shape[1]))

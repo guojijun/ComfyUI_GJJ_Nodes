@@ -143,7 +143,7 @@ _ensure_model_folder("sam2")
 # 根据官方工作流整理出的配置：关键词已按“去量化、去版本号、去扩展名后取核心小写词”的思路手工固化。
 VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "wan22_t2v_dual": {
-        "label": "Wan2.2 T2V 双模型 14B",
+        "label": "Wan2.2 T2V 官方流 14B",
         "clip_type": "wan",
         "slots": [
             S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "t2v", "high", "noise"]),
@@ -155,7 +155,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         ],
     },
     "wan22_i2v_dual": {
-        "label": "Wan2.2 I2V 双模型 14B",
+        "label": "Wan2.2 I2V 官方流 14B",
         "clip_type": "wan",
         "slots": [
             S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "i2v", "high", "noise"]),
@@ -179,7 +179,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         ],
     },
     "wan22_ti2v_5b": {
-        "label": "Wan2.2 TI2V 5B",
+        "label": "Wan2.2 TI2V 官方流 5B",
         "clip_type": "wan",
         "slots": [
             S("model", "TI2V模型", "diffusion_models", "diffusion", ["wan", "ti2v"]),
@@ -189,7 +189,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         ],
     },
     "wan22_flf2v_dual": {
-        "label": "Wan2.2 首尾帧 FLF2V 双模型 14B",
+        "label": "Wan2.2 首尾帧 FLF2V 官方流 14B",
         "clip_type": "wan",
         "slots": [
             S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "i2v", "high", "noise"]),
@@ -201,15 +201,15 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         ],
     },
     "wan22_fun_camera_dual": {
-        "label": "Wan2.2 Fun Camera 双模型 14B",
+        "label": "Wan2.2 Fun Camera 官方流 14B",
         "clip_type": "wan",
         "slots": [
             S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "fun", "camera", "high", "noise"]),
             S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "fun", "camera", "low", "noise"]),
             S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "high", "noise"]),
-            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "low", "noise"]),
+            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "t2v", "lightx2v", "high", "noise"]),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "t2v", "lightx2v", "low", "noise"]),
         ],
     },
     "wan22_fun_control_dual": {
