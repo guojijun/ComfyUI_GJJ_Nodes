@@ -136,7 +136,7 @@ const SAVED_VALUES = "gjj_template_params_values";
 const SAVED_SCHEMA = "gjj_template_params_schema";
 const SAVED_SIZE = "gjj_template_params_size";
 const MAX_OUTPUTS = 64;
-const DEFAULT_TEMPLATE = "帧率：24.0 # 每秒帧数\n时长：5 # 总时长\nLora加速：true # 是否启用Lora加速";
+const DEFAULT_TEMPLATE = "帧率：24.0 # 浮点\n时长：5 # 整数\nLora加速：true # 布尔\n是否启用：[enable,disable] # 枚举";
 const MIN_WIDTH = 210;
 const DEFAULT_WIDTH = 300;
 const MAX_EXTRA_IDLE_HEIGHT = 72;
@@ -281,6 +281,69 @@ function splitValueAndTooltip(text) {
 	return { value: raw.replace(/\\#/g, "#").trim(), tooltip: "" };
 }
 
+function stripQuotes(text) {
+	const raw = String(text ?? "").trim();
+	if (raw.length >= 2 && ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'")))) {
+		return raw.slice(1, -1);
+	}
+	return raw;
+}
+
+function splitEnumOptions(inner) {
+	const options = [];
+	let escaped = false;
+	let quote = "";
+	let current = "";
+	for (const ch of String(inner || "")) {
+		if (escaped) {
+			current += ch;
+			escaped = false;
+			continue;
+		}
+		if (ch === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			if (quote === ch) {
+				quote = "";
+				continue;
+			}
+			if (!quote) {
+				quote = ch;
+				continue;
+			}
+		}
+		if ((ch === "," || ch === "，" || ch === "|") && !quote) {
+			const option = stripQuotes(current);
+			if (option) options.push(option);
+			current = "";
+			continue;
+		}
+		current += ch;
+	}
+	const option = stripQuotes(current);
+	if (option) options.push(option);
+	return options;
+}
+
+function parseEnumOptions(defaultText, tooltip = "") {
+	const raw = String(defaultText || "").trim();
+	if (!raw.startsWith("[") || !raw.endsWith("]")) return [];
+	const inner = raw.slice(1, -1).trim();
+	if (!inner) return [];
+	const tooltipText = String(tooltip || "").toLowerCase();
+	try {
+		const parsed = JSON.parse(raw);
+		if (Array.isArray(parsed) && (tooltipText.includes("枚举") || tooltipText.includes("enum"))) {
+			return parsed.map((item) => String(item));
+		}
+		return [];
+	} catch (_) {
+		return splitEnumOptions(inner);
+	}
+}
+
 function parseTemplate(template) {
 	const seen = new Map();
 	const fields = [];
@@ -293,13 +356,15 @@ function parseTemplate(template) {
 		const label = match[1].trim();
 		const { value: defaultText, tooltip } = splitValueAndTooltip(match[2].trim());
 		if (!label) continue;
+		const enumOptions = parseEnumOptions(defaultText, tooltip);
 		const value = parseValue(defaultText);
 		fields.push({
 			key: slugKey(label, fields.length, seen),
 			label,
-			default: defaultText,
+			default: enumOptions.length ? enumOptions[0] : defaultText,
 			tooltip,
-			type: inferType(value),
+			type: enumOptions.length ? "ENUM" : inferType(value),
+			options: enumOptions,
 		});
 		if (fields.length >= MAX_OUTPUTS) break;
 	}
@@ -468,6 +533,7 @@ function makeFieldSignature(field) {
 		String(field?.label ?? ""),
 		String(field?.default ?? ""),
 		String(field?.type ?? ""),
+		JSON.stringify(Array.isArray(field?.options) ? field.options : []),
 		String(field?.tooltip ?? ""),
 	].join("\u0001");
 }
@@ -562,7 +628,7 @@ function updateOutputs(node, fields, values) {
 		const value = parseValue(rawValue);
 		// 输出类型必须按“当前输入文本”实时推断。
 		// JS 的 Number.isInteger(5.0) 会返回 true，所以 5.0 不能只看 parsed number。
-		const nextType = inferTypeFromRaw(rawValue, value);
+		const nextType = field.type === "ENUM" ? "COMBO" : inferTypeFromRaw(rawValue, value);
 		output.name = field.label || `输出${i + 1}`;
 		output.label = output.name;
 		output.localized_name = output.name;
@@ -644,9 +710,56 @@ function buildBoolButtonForField(node, field, values) {
 	return wrap;
 }
 
+function buildEnumSelectForField(node, field, values) {
+	const options = Array.isArray(field.options) ? field.options.map((item) => String(item)) : [];
+	const fallback = options[0] || "";
+	if (!options.length) return null;
+
+	const wrap = document.createElement("div");
+	wrap.className = "gjj-template-param-row";
+
+	const label = document.createElement("span");
+	label.className = "gjj-template-param-label";
+	label.textContent = field.label;
+	label.title = field.tooltip || "ENUM";
+
+	const select = document.createElement("select");
+	select.className = "gjj-template-param-input gjj-template-param-select";
+	select.title = field.tooltip || "枚举参数";
+	select.style.flex = "1";
+	for (const optionText of options) {
+		const option = document.createElement("option");
+		option.value = optionText;
+		option.textContent = optionText;
+		select.appendChild(option);
+	}
+
+	const current = String(values[field.key] ?? field.default ?? fallback);
+	select.value = options.includes(current) ? current : fallback;
+	values[field.key] = select.value;
+
+	select.addEventListener("pointerdown", (event) => event.stopPropagation());
+	select.addEventListener("mousedown", (event) => event.stopPropagation());
+	select.addEventListener("change", () => {
+		values[field.key] = select.value;
+		const template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
+		const fields = parseTemplate(template);
+		saveState(node, template, fields, values);
+		updateOutputs(node, fields, values);
+	});
+
+	wrap.append(label, select);
+	node.__gjjTemplateParamsRows.set(field.key, select);
+	return wrap;
+}
+
 function buildInputForField(node, field, values) {
 	if (isBooleanField(field, values)) {
 		return buildBoolButtonForField(node, field, values);
+	}
+	if (field?.type === "ENUM") {
+		const enumRow = buildEnumSelectForField(node, field, values);
+		if (enumRow) return enumRow;
 	}
 
 	const isImage = field.type === "IMAGE";
@@ -839,7 +952,8 @@ function buildDom(node) {
 	help.textContent = [
 		"每行一个参数：名称：默认值 # 说明",
 		"示例：帧率：24.0 # 每秒帧数",
-		"支持 int(1)、float(1)、true / false、bool(1)、json([1,2])；布尔值会显示为按钮。",
+		"支持 int(1)、float(1)、true / false、bool(1)、json([1,2])、[enable,disable] # 枚举。",
+		"布尔值会显示为按钮；枚举值会显示为下拉框。",
 		"空行、整行 # 注释、.... 会被忽略；如果值里要写 #，请用 \\#。",
 	].join("\n");
 	const actions = document.createElement("div");

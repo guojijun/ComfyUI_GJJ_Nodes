@@ -264,6 +264,69 @@ def _split_value_and_tooltip(text: str) -> tuple[str, str]:
     return raw.replace("\\#", "#").strip(), ""
 
 
+def _split_enum_options(inner: str) -> list[str]:
+    options: list[str] = []
+    escaped = False
+    quote: str | None = None
+    current: list[str] = []
+    for ch in str(inner or ""):
+        if escaped:
+            current.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch in {'"', "'"}:
+            if quote == ch:
+                quote = None
+                continue
+            if quote is None:
+                quote = ch
+                continue
+        if ch in {",", "，", "|"} and quote is None:
+            option = "".join(current).strip()
+            if option:
+                options.append(_strip_quotes(option))
+            current = []
+            continue
+        current.append(ch)
+    option = "".join(current).strip()
+    if option:
+        options.append(_strip_quotes(option))
+    return options
+
+
+def _parse_enum_options(default_text: Any, tooltip: str = "") -> list[str]:
+    raw = str(default_text or "").strip()
+    if not (raw.startswith("[") and raw.endswith("]")):
+        return []
+    inner = raw[1:-1].strip()
+    if not inner:
+        return []
+    tooltip_lower = str(tooltip or "").lower()
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list) and ("枚举" in tooltip_lower or "enum" in tooltip_lower):
+            return [str(item) for item in parsed]
+        return []
+    except Exception:
+        pass
+    return _split_enum_options(inner)
+
+
+def _coerce_enum_value(raw_value: Any, options: list[str]) -> str:
+    if not options:
+        return _normalize_text(raw_value)
+    text = _normalize_text(raw_value).strip()
+    if text in options:
+        return text
+    nested_options = _parse_enum_options(text, "枚举")
+    if nested_options:
+        return nested_options[0]
+    return options[0]
+
+
 def parse_value(value: Any) -> Any:
     """Parse widget text into int/float/bool/json when it is clearly typed.
 
@@ -406,13 +469,15 @@ def parse_template(template_text: Any) -> list[dict[str, Any]]:
         seen[key] = count + 1
         if count:
             key = f"{key}_{count + 1}"
-        value = parse_value(default_text)
+        enum_options = _parse_enum_options(default_text, tooltip)
+        value = enum_options[0] if enum_options else parse_value(default_text)
         fields.append({
             "key": key,
             "label": label,
-            "default": default_text,
+            "default": enum_options[0] if enum_options else default_text,
             "value": value,
-            "type": _infer_type(value),
+            "type": "ENUM" if enum_options else _infer_type(value),
+            "options": enum_options,
             "tooltip": tooltip,
         })
         if len(fields) >= MAX_OUTPUTS:
@@ -428,7 +493,7 @@ def values_from_json(values_json: Any) -> dict[str, Any]:
 class GJJ_TemplateParams:
     CATEGORY = "GJJ/逻辑控制"
     FUNCTION = "output_params"
-    DESCRIPTION = "通过模板文本自动生成参数输入框和输出口。支持格式：帧率：24.0 # 每秒帧数\n媒体文件会自动加载为 IMAGE/AUDIO/VIDEO 对象"
+    DESCRIPTION = "通过模板文本自动生成参数输入框和输出口。支持格式：帧率：24.0 # 浮点\n是否启用：[enable,disable] # 枚举\n媒体文件会自动加载为 IMAGE/AUDIO/VIDEO 对象。"
     SEARCH_ALIASES = [
         "template params",
         "params",
@@ -443,7 +508,7 @@ class GJJ_TemplateParams:
 
     @classmethod
     def INPUT_TYPES(cls):
-        default_template = "帧率：24.0 # 每秒帧数\n时长：5 # 总时长\nLora加速：true # 是否启用Lora加速"
+        default_template = "帧率：24.0 # 浮点\n时长：5 # 整数\nLora加速：true # 布尔\n是否启用：[enable,disable] # 枚举"
         return {
             "required": {
                 "template_text": (
@@ -492,6 +557,9 @@ class GJJ_TemplateParams:
             key = str(field.get("key") or "")
             label = str(field.get("label") or "")
             raw_value = value_map.get(key, value_map.get(label, field.get("default", "")))
+            if field.get("type") == "ENUM":
+                outputs.append(_coerce_enum_value(raw_value, [str(item) for item in field.get("options", [])]))
+                continue
             
             # 检测是否为媒体文件
             media_type = _detect_media_type(str(raw_value))
