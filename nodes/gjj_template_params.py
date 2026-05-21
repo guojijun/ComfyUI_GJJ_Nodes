@@ -3,11 +3,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, unquote, urlparse
 
 import folder_paths
 import numpy as np
 import torch
-from PIL import Image, ImageOps
+from PIL import Image, ImageFile, ImageOps, UnidentifiedImageError
 
 # =========================
 # GJJ MEDIA V2 PATCH
@@ -42,20 +43,28 @@ def _detect_media_type(value: Any) -> str | None:
 
 
 def _load_image_from_path(file_path: str) -> torch.Tensor:
-    """从文件路径加载图片为 IMAGE tensor"""
+    """从文件路径加载图片为 ComfyUI 标准 IMAGE tensor: [B, H, W, 3] RGB float32。"""
     try:
-        with Image.open(file_path) as img:
-            img.load()
-            img = ImageOps.exif_transpose(img)
-            if img.mode == "RGBA":
-                array = np.asarray(img).astype(np.float32) / 255.0
-            else:
+        try:
+            with Image.open(file_path) as img:
+                img.load()
+                img = ImageOps.exif_transpose(img)
                 img = img.convert("RGB")
                 array = np.asarray(img).astype(np.float32) / 255.0
+        except UnidentifiedImageError:
+            old_load_truncated = ImageFile.LOAD_TRUNCATED_IMAGES
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+            try:
+                with Image.open(file_path) as img:
+                    img.load()
+                    img = ImageOps.exif_transpose(img)
+                    img = img.convert("RGB")
+                    array = np.asarray(img).astype(np.float32) / 255.0
+            finally:
+                ImageFile.LOAD_TRUNCATED_IMAGES = old_load_truncated
         return torch.from_numpy(array)[None, ...]
     except Exception as e:
-        print(f"[GJJ_TemplateParams] 加载图片失败: {file_path}, 错误: {e}")
-        return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+        raise ValueError(f"加载图片失败：{file_path}，错误：{e}") from e
 
 
 def _load_audio_object(file_path: str) -> dict[str, Any]:
@@ -119,6 +128,19 @@ def _resolve_media_file(filename: str) -> str | None:
         return None
     
     filename = filename.strip()
+    parsed = urlparse(filename)
+    if parsed.path.endswith("/view") and parsed.query:
+        query = parse_qs(parsed.query)
+        name = query.get("filename", [""])[0]
+        subfolder = query.get("subfolder", [""])[0]
+        filename = os.path.join(subfolder, name) if subfolder else name
+
+    filename = unquote(filename).strip().replace("\\", os.sep).replace("/", os.sep)
+    lowered = filename.lower()
+    for prefix in ("input" + os.sep, "output" + os.sep, "temp" + os.sep):
+        if lowered.startswith(prefix):
+            filename = filename[len(prefix):]
+            break
     
     # 尝试在 input 目录查找
     input_dir = folder_paths.get_input_directory()
@@ -149,10 +171,8 @@ def _load_media_object(filename: str, media_type: str) -> Any:
     """根据类型加载媒体对象"""
     file_path = _resolve_media_file(filename)
     if not file_path:
-        print(f"[GJJ_TemplateParams] 找不到媒体文件: {filename}")
-        # 返回默认值而非抛出异常
         if media_type == "IMAGE":
-            return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+            raise FileNotFoundError(f"找不到图片文件：{filename}。请确认文件在当前 ComfyUI 的 input 目录，或填写 input 子目录相对路径。")
         elif media_type == "AUDIO":
             return {"waveform": torch.zeros((1, 1, 44100)), "sample_rate": 44100}
         elif media_type == "VIDEO":
@@ -167,13 +187,13 @@ def _load_media_object(filename: str, media_type: str) -> Any:
         elif media_type == "VIDEO":
             return _load_video_from_path(file_path)
     except Exception as e:
-        print(f"[GJJ_TemplateParams] 加载媒体对象失败: {filename}, 错误: {e}")
-        # 返回默认值
         if media_type == "IMAGE":
-            return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+            raise
         elif media_type == "AUDIO":
+            print(f"[GJJ_TemplateParams] 加载音频失败: {filename}, 错误: {e}")
             return {"waveform": torch.zeros((1, 1, 44100)), "sample_rate": 44100}
         elif media_type == "VIDEO":
+            print(f"[GJJ_TemplateParams] 加载视频失败: {filename}, 错误: {e}")
             return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
         raise
 
@@ -220,7 +240,7 @@ def _strip_quotes(text: str) -> str:
 
 
 def _split_value_and_tooltip(text: str) -> tuple[str, str]:
-    """Split `값 # 提시` into (값, 提시). Supports escaping literal # with \#."""
+    r"""Split `值 # 提示` into (值, 提示). Supports escaping literal # with \#."""
     raw = str(text or "")
     escaped = False
     quote: str | None = None

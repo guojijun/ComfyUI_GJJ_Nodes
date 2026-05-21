@@ -3,6 +3,8 @@
    GJJ MEDIA V2 PATCH
    ========================= */
 
+import { app } from "/scripts/app.js";
+
 const IMAGE_EXTS = new Set(["png","jpg","jpeg","webp","bmp","gif","avif","tiff"]);
 const AUDIO_EXTS = new Set(["mp3","wav","flac","ogg","m4a","aac","wma"]);
 const VIDEO_EXTS = new Set(["mp4","mov","mkv","webm","avi","flv","mpeg","m4v"]);
@@ -37,8 +39,7 @@ function updatePreview(preview, value, isImage, isAudio, isVideo) {
 		return;
 	}
 
-	const fileName = value.trim().split(/[\\\\/]/).pop();
-	const apiUrl = "/view?filename=" + encodeURIComponent(fileName) + "&type=input";
+	const apiUrl = mediaRefToViewUrl(value);
 
 	if (isImage) {
 		preview.innerHTML =
@@ -52,6 +53,16 @@ function updatePreview(preview, value, isImage, isAudio, isVideo) {
 		preview.innerHTML =
 			'<audio controls src="' + apiUrl + '" style="width:100%;"></audio>';
 	}
+}
+
+function mediaRefToViewUrl(value) {
+	const text = String(value || "").trim().replace(/\\/g, "/");
+	const parts = text.split("/").filter(Boolean);
+	const filename = parts.pop() || text;
+	const subfolder = parts.join("/");
+	let url = "/view?filename=" + encodeURIComponent(filename) + "&type=input";
+	if (subfolder) url += "&subfolder=" + encodeURIComponent(subfolder);
+	return url;
 }
 
 // 从后端获取媒体对象的预览 URL
@@ -108,17 +119,12 @@ function openFileDialog(node, field, input, values, isImage, isAudio, isVideo) {
 				".gjj-template-param-preview-image, .gjj-template-param-preview-audio, .gjj-template-param-preview-video"
 			);
 
-			if (preview) {
-				updatePreview(preview, file.name, isImage, isAudio, isVideo);
-			}
+			if (preview) updatePreview(preview, file.name, isImage, isAudio, isVideo);
 		}
 	});
 
 	inputElement.click();
 }
-
-
-import { app } from "/scripts/app.js";
 
 const TARGET_NODES = new Set(["GJJ_TemplateParams"]);
 const TEMPLATE_WIDGET = "template_text";

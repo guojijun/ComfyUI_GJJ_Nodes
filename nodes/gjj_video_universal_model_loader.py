@@ -892,7 +892,12 @@ def _call_loader_class(possible_modules: list[str], class_name: str, model_name:
 
 def _load_audio_encoder(name: str):
     # 对应官方 AudioEncoderLoader，输出 AUDIO_ENCODER。
-    return _call_loader_class(["comfy_extras.nodes_audio", "comfy_extras.nodes_wan", "nodes"], "AudioEncoderLoader", name)
+    return _call_loader_class([
+        "comfy_extras.nodes_audio_encoder",
+        "comfy_extras.nodes_audio",
+        "comfy_extras.nodes_wan",
+        "nodes",
+    ], "AudioEncoderLoader", name)
 
 
 
