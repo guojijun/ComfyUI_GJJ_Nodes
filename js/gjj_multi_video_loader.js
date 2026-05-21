@@ -13,7 +13,7 @@ const MAX_SELECTED_VIDEOS = 20;
 const MIN_WIDTH = 320;
 const MIN_HEIGHT = 220;
 const DOM_WIDGET_NAME = "gjj_multi_video_loader_dom";
-const DOM_VERSION = 9;
+const DOM_VERSION = 10;
 const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const OPTIONAL_INPUT_NAME = "input_frames";
 const OPTIONAL_INPUT_DISPLAY_NAME = "视频帧队列";
@@ -61,14 +61,19 @@ const OUTPUT_DEFS = [
 	{ key: "video_format", name: "视频格式", type: "STRING" },
 	{ key: "audio", name: "音频", type: "AUDIO" },
 ];
+const OUTPUT_DEF_BY_KEY = new Map(OUTPUT_DEFS.map((def) => [def.key, def]));
 
-function parseJsonArray(rawValue, fallback = []) {
+function parseJsonValue(rawValue, fallback = null) {
 	try {
-		const parsed = JSON.parse(String(rawValue || "[]"));
-		return Array.isArray(parsed) ? parsed : fallback;
+		return JSON.parse(String(rawValue || ""));
 	} catch (error) {
 		return fallback;
 	}
+}
+
+function parseJsonArray(rawValue, fallback = []) {
+	const parsed = parseJsonValue(rawValue, fallback);
+	return Array.isArray(parsed) ? parsed : fallback;
 }
 
 function parseSelection(rawValue) {
@@ -76,8 +81,46 @@ function parseSelection(rawValue) {
 }
 
 function parseEnabledOutputs(rawValue) {
-	const keys = new Set(OUTPUT_DEFS.map((item) => item.key));
-	return parseJsonArray(rawValue).filter((key) => keys.has(String(key)));
+	return normalizeOutputKeys(parseJsonValue(rawValue, []));
+}
+
+function normalizeOutputKeys(value) {
+	const source = Array.isArray(value)
+		? value
+		: Array.isArray(value?.outputs)
+			? value.outputs
+			: Array.isArray(value?.enabled_outputs)
+				? value.enabled_outputs
+				: [];
+	const result = [];
+	for (const item of source) {
+		const key = String(typeof item === "object" && item ? item.key : item || "");
+		if (OUTPUT_DEF_BY_KEY.has(key) && !result.includes(key)) result.push(key);
+	}
+	return result;
+}
+
+function selectedOutputDefsFromKeys(keys) {
+	return normalizeOutputKeys(keys).map((key) => OUTPUT_DEF_BY_KEY.get(key)).filter(Boolean);
+}
+
+function outputKeysFromSlots(outputs) {
+	const result = [];
+	if (!Array.isArray(outputs)) return result;
+	outputs.forEach((output, index) => {
+		if (index === 0) return;
+		const key = outputSlotKey(output, index);
+		if (OUTPUT_DEF_BY_KEY.has(key) && !result.includes(key)) result.push(key);
+	});
+	return result;
+}
+
+function currentOutputDefs(node) {
+	const state = ensureState(node);
+	return [
+		{ key: "main", name: "视频帧队列", type: BATCH_IMAGE_TYPE },
+		...selectedOutputDefsFromKeys(state.enabledOutputs || []),
+	];
 }
 
 function serializeSelection(selection) {
@@ -90,7 +133,13 @@ function serializeSelection(selection) {
 }
 
 function serializeOutputs(outputs) {
-	return JSON.stringify(parseEnabledOutputs(JSON.stringify(outputs || [])));
+	const outputDefs = selectedOutputDefsFromKeys(outputs).map((def, index) => ({
+		key: def.key,
+		name: def.name,
+		type: def.type,
+		index: index + 1,
+	}));
+	return JSON.stringify({ version: 2, outputs: outputDefs });
 }
 
 function itemKey(item) {
@@ -117,6 +166,10 @@ function outputsFromNode(node, serializedNode = null) {
 	const serializedProperty = String(serializedNode?.properties?.[OUTPUTS_PROPERTY] || "");
 	if (parseEnabledOutputs(serializedProperty).length > 0) {
 		return serializedProperty;
+	}
+	const serializedOutputs = outputKeysFromSlots(serializedNode?.outputs);
+	if (serializedOutputs.length > 0) {
+		return serializeOutputs(serializedOutputs);
 	}
 	return propertyValue || serializedProperty || "[]";
 }
@@ -355,11 +408,13 @@ function fixParameterMismatch(node) {
 	const width = getWidgetValue(node, "width");
 	if (width && width < 100 && width > 0) {
 		issues.push(`width(${width}) too small`);
+		if (width < 64) setWidgetValue(node, "width", 0, true);
 	}
 
 	const height = getWidgetValue(node, "height");
 	if (height && height < 100 && height > 0) {
 		issues.push(`height(${height}) too small`);
+		if (height < 64) setWidgetValue(node, "height", 0, true);
 	}
 
 	const startFrame = getWidgetValue(node, "start_frame");
@@ -380,7 +435,7 @@ function fixParameterMismatch(node) {
 		validateVideoFormat(node);
 		return true;
 	}
-	return false;
+	return issues.some((issue) => issue.includes("too small"));
 }
 
 function guessFormatFromFilename(node, item) {
@@ -1397,50 +1452,168 @@ function moveDomWidgetToTop(node) {
 	}
 }
 
+function normalizeLinks(output) {
+	return Array.isArray(output?.links) ? output.links : [];
+}
+
+function outputSlotKey(output, index) {
+	if (index === 0) return "main";
+	const explicit = String(output?.__gjj_key || "");
+	if (OUTPUT_DEF_BY_KEY.has(explicit)) return explicit;
+	const serializedKey = String(output?.gjj_key || output?.key || "");
+	if (OUTPUT_DEF_BY_KEY.has(serializedKey)) return serializedKey;
+	const label = String(output?.name || output?.label || output?.localized_name || "");
+	for (const def of OUTPUT_DEFS) {
+		if (label === def.name) return def.key;
+	}
+	return "";
+}
+
+function applyOutputSpec(output, def, index) {
+	if (!output || !def) return;
+	output.name = def.name;
+	output.label = def.name;
+	output.localized_name = def.name;
+	output.display_name = def.name;
+	output.type = def.type;
+	output.tooltip = def.key === "main"
+		? "按选择顺序解码后拼接的帧序列，兼容 GJJ_BATCH_IMAGE 和 IMAGE。"
+		: `用户选择输出：${def.name}`;
+	output.__gjj_key = def.key;
+	output.hidden = false;
+	output.visible = true;
+	output.disabled = false;
+	output.not_show = false;
+	output.__gjj_hidden = false;
+	output.slot_index = index;
+	if (!Array.isArray(output.links)) output.links = [];
+}
+
+function outputShapeMatches(node, defs) {
+	if (!Array.isArray(node?.outputs) || node.outputs.length !== defs.length) return false;
+	for (let index = 0; index < defs.length; index++) {
+		const output = node.outputs[index];
+		const def = defs[index];
+		if (!output || outputSlotKey(output, index) !== def.key) return false;
+		if (String(output.name || output.label || "") !== def.name) return false;
+		if (String(output.type || "") !== def.type) return false;
+	}
+	return true;
+}
+
+function collectOutputLinksByKey(node) {
+	const saved = [];
+	for (let index = 0; index < (node.outputs || []).length; index++) {
+		const output = node.outputs[index];
+		const key = outputSlotKey(output, index);
+		if (!key) continue;
+		for (const linkId of normalizeLinks(output).slice()) {
+			const link = app.graph?.links?.[linkId];
+			if (!link) continue;
+			saved.push({
+				id: linkId,
+				key,
+				link,
+				target_id: link.target_id,
+				target_slot: link.target_slot,
+			});
+		}
+		output.links = [];
+	}
+	return saved;
+}
+
+function restoreOutputLinksByKey(node, savedLinks, defs) {
+	const byKey = new Map(defs.map((def, index) => [def.key, { def, index }]));
+	const restored = new Set();
+	for (const item of savedLinks || []) {
+		const target = byKey.get(item.key);
+		if (!target) continue;
+		const output = node.outputs?.[target.index];
+		if (!output) continue;
+		const link = app.graph?.links?.[item.id] || item.link;
+		if (!link) continue;
+		const graphUsesSerializableLinks = Object.values(app.graph?.links || {}).some((candidate) => candidate && typeof candidate.asSerialisable === "function");
+		if (graphUsesSerializableLinks && typeof link.asSerialisable !== "function") continue;
+		link.id = item.id;
+		link.origin_id = node.id;
+		link.origin_slot = target.index;
+		link.type = target.def.type;
+		app.graph.links = app.graph.links || {};
+		app.graph.links[item.id] = link;
+		if (!Array.isArray(output.links)) output.links = [];
+		if (!output.links.includes(item.id)) output.links.push(item.id);
+		const targetNode = app.graph?.getNodeById?.(item.target_id) || app.graph?._nodes_by_id?.[item.target_id];
+		const targetInput = targetNode?.inputs?.[item.target_slot];
+		if (targetInput) targetInput.link = item.id;
+		restored.add(item.id);
+	}
+	return restored;
+}
+
+function deleteUnrestoredOutputLinks(savedLinks, restoredIds) {
+	for (const item of savedLinks || []) {
+		if (restoredIds?.has?.(item.id)) continue;
+		const targetNode = app.graph?.getNodeById?.(item.target_id) || app.graph?._nodes_by_id?.[item.target_id];
+		const targetInput = targetNode?.inputs?.[item.target_slot];
+		if (targetInput?.link === item.id) targetInput.link = null;
+		try { app.graph?.removeLink?.(item.id); } catch (_) {}
+		try { if (app.graph?.links?.[item.id]) delete app.graph.links[item.id]; } catch (_) {}
+	}
+}
+
+function rebuildOutputSlots(node, defs) {
+	if (!Array.isArray(node.outputs)) node.outputs = [];
+	const savedLinks = collectOutputLinksByKey(node);
+	while (node.outputs.length > 0) {
+		try { node.removeOutput?.(node.outputs.length - 1); }
+		catch (_) { node.outputs.pop(); }
+	}
+	for (const def of defs) {
+		try { node.addOutput?.(def.name, def.type); }
+		catch (_) { node.outputs.push({ name: def.name, type: def.type, links: [] }); }
+	}
+	defs.forEach((def, index) => applyOutputSpec(node.outputs?.[index], def, index));
+	const restored = restoreOutputLinksByKey(node, savedLinks, defs);
+	deleteUnrestoredOutputLinks(savedLinks, restored);
+}
+
+function serializedOutputObject(existing, def, index) {
+	const links = Array.isArray(existing?.links) ? [...existing.links] : [];
+	return {
+		...(existing && typeof existing === "object" ? existing : {}),
+		name: def.name,
+		label: def.name,
+		localized_name: def.name,
+		display_name: def.name,
+		type: def.type,
+		links,
+		slot_index: index,
+		tooltip: def.key === "main"
+			? "按选择顺序解码后拼接的帧序列，兼容 GJJ_BATCH_IMAGE 和 IMAGE。"
+			: `用户选择输出：${def.name}`,
+		gjj_key: def.key,
+		hidden: false,
+		visible: true,
+		disabled: false,
+		not_show: false,
+		__gjj_hidden: false,
+	};
+}
+
+function writeSerializedOutputSlots(serializedNode, defs) {
+	if (!serializedNode) return;
+	const existing = Array.isArray(serializedNode.outputs) ? serializedNode.outputs : [];
+	serializedNode.outputs = defs.map((def, index) => serializedOutputObject(existing[index], def, index));
+}
+
 function applyDynamicOutputs(node) {
 	if (!node) return;
-	const state = ensureState(node);
-	const firstName = "视频帧队列";
-
-	// 这版改为“真正动态输出”：只保留主输出 + 已启用的扩展输出。
-	// 原来保留 10 个 slot 再 hidden，在新版 ComfyUI/LiteGraph 里仍会把灰色输出口画出来。
-	const enabledSet = new Set(state.enabledOutputs || []);
-	const visibleDefs = OUTPUT_DEFS.filter((def) => enabledSet.has(def.key));
-	const desiredCount = 1 + visibleDefs.length;
-
-	while ((node.outputs?.length || 0) < desiredCount) {
-		node.addOutput?.("temp", "STRING");
-	}
-	while ((node.outputs?.length || 0) > desiredCount) {
-		node.removeOutput?.(node.outputs.length - 1);
-	}
-
-	if (node.outputs?.[0]) {
-		node.outputs[0].name = firstName;
-		node.outputs[0].label = firstName;
-		node.outputs[0].localized_name = firstName;
-		node.outputs[0].type = BATCH_IMAGE_TYPE;
-		node.outputs[0].__gjj_key = "main";
-		node.outputs[0].hidden = false;
-		node.outputs[0].visible = true;
-		node.outputs[0].disabled = false;
-	}
-
-	for (let i = 0; i < visibleDefs.length; i++) {
-		const def = visibleDefs[i];
-		const slotIndex = i + 1;
-		const output = node.outputs?.[slotIndex];
-		if (!output) continue;
-		output.name = def.name;
-		output.label = def.name;
-		output.localized_name = def.name;
-		output.type = def.type;
-		output.__gjj_key = def.key;
-		output.hidden = false;
-		output.visible = true;
-		output.disabled = false;
-		output.not_show = false;
-		output.__gjj_hidden = false;
+	const defs = currentOutputDefs(node);
+	if (!outputShapeMatches(node, defs)) {
+		rebuildOutputSlots(node, defs);
+	} else {
+		defs.forEach((def, index) => applyOutputSpec(node.outputs?.[index], def, index));
 	}
 
 	globalThis.GJJApplyTypeColorsToNode?.(node);
@@ -1831,6 +2004,11 @@ function scheduleStabilize(node, ms = 32) {
 	node.__gjjMultiVideoStabilizeTimer = setTimeout(() => stabilizeNode(node), ms);
 }
 
+function scheduleStabilizeAfterConnection(node) {
+	scheduleStabilize(node, 0);
+	setTimeout(() => scheduleStabilize(node, 0), 80);
+}
+
 app.registerExtension({
 	name: "Comfy.GJJ.MultiVideoLoader.Optimized",
 
@@ -1871,7 +2049,10 @@ app.registerExtension({
 			state.executedFrameCount = 0;
 			state.sourceFps = 0;
 			syncProperties(this);
+			applyDynamicOutputs(this);
 			scheduleStabilize(this, 0);
+			setTimeout(() => scheduleStabilize(this, 0), 80);
+			setTimeout(() => scheduleStabilize(this, 0), 240);
 			refreshOptions(this);
 			return result;
 		};
@@ -1879,11 +2060,16 @@ app.registerExtension({
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode) {
 			syncProperties(this);
+			applyDynamicOutputs(this);
 			const result = originalOnSerialize?.apply(this, [serializedNode]);
 			if (serializedNode) {
+				const state = ensureState(this);
+				const defs = currentOutputDefs(this);
 				serializedNode.properties = serializedNode.properties || {};
-				serializedNode.properties[DATA_PROPERTY] = serializeSelection(ensureState(this).selection);
-				serializedNode.properties[OUTPUTS_PROPERTY] = serializeOutputs(ensureState(this).enabledOutputs);
+				serializedNode.properties[DATA_PROPERTY] = serializeSelection(state.selection);
+				serializedNode.properties[OUTPUTS_PROPERTY] = serializeOutputs(state.enabledOutputs);
+				serializedNode.properties[TAB_PROPERTY] = TAB_DEFS.some((tab) => tab.key === state.activeTab) ? state.activeTab : "video";
+				writeSerializedOutputSlots(serializedNode, defs);
 			}
 			return result;
 		};
@@ -1899,6 +2085,26 @@ app.registerExtension({
 			state.outputHeight = Number(message?.height?.[0] || 0);
 			state.videoFormat = String(message?.video_format?.[0] || "");
 			scheduleStabilize(this, 0);
+			return result;
+		};
+
+		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+		nodeType.prototype.onConnectionsChange = function (...args) {
+			const result = originalOnConnectionsChange?.apply(this, args);
+			scheduleStabilizeAfterConnection(this);
+			return result;
+		};
+
+		const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
+		nodeType.prototype.onDrawBackground = function (...args) {
+			const result = originalOnDrawBackground?.apply(this, args);
+			if (!this.__gjjMultiVideoDrawStabilizeQueued && !outputShapeMatches(this, currentOutputDefs(this))) {
+				this.__gjjMultiVideoDrawStabilizeQueued = true;
+				requestAnimationFrame(() => {
+					this.__gjjMultiVideoDrawStabilizeQueued = false;
+					stabilizeNode(this);
+				});
+			}
 			return result;
 		};
 	},

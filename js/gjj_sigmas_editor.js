@@ -1,24 +1,25 @@
 import { app } from "/scripts/app.js";
 
 const TARGET_NODES = new Set(["GJJ_SigmasEditor"]);
-const MIN_NODE_WIDTH = 520;
-const CHART_HEIGHT = 280;
-const CHART_PADDING = { top: 30, right: 30, bottom: 40, left: 50 };
+const MIN_NODE_WIDTH = 420;
+const CHART_HEIGHT = 220;
+const CHART_PADDING = { top: 16, right: 18, bottom: 22, left: 40 };
+const JSON_OUTPUT = { name: "Sigmas JSON", type: "STRING" };
 
 const CURVE_MODES = [
-    { value: "linear", label: "线性" },
-    { value: "smooth", label: "平滑" },
-    { value: "step", label: "阶梯" },
+    { value: "linear", label: "📏", tooltip: "线性曲线" },
+    { value: "smooth", label: "〰️", tooltip: "平滑曲线" },
+    { value: "step", label: "🪜", tooltip: "阶梯曲线" },
 ];
 
 const PRESET_OPTIONS = [
-    { value: "默认1", label: "默认1" },
-    { value: "默认2", label: "默认2" },
-    { value: "自定义", label: "自定义" },
+    { value: "默认1", label: "1️⃣", tooltip: "预设模板 1" },
+    { value: "默认2", label: "2️⃣", tooltip: "预设模板 2" },
+    { value: "自定义", label: "🔢", tooltip: "自定义 Sigmas" },
 ];
 
 const HIDDEN_WIDGET_NAMES = new Set(["sigmas_data", "curve_mode", "preset"]);
-const DEFAULT_NODE_HEIGHT = CHART_HEIGHT + 120;
+const DEFAULT_NODE_HEIGHT = CHART_HEIGHT + 42;
 
 function hideOriginalPythonWidgets(node) {
     const widgetsToHide = ["sigmas_data", "curve_mode", "preset"];
@@ -77,15 +78,57 @@ function hideOriginalPythonWidgets(node) {
 }
 
 function preserveNodeSize(node) {
-    const currentWidth = Math.max(MIN_NODE_WIDTH, Number(node?.size?.[0] || 0));
+    node.properties ||= {};
+    const savedWidth = Number(node?.size?.[0] || 0);
+    const shouldCompactOnce = !node.properties.gjj_sigmas_compacted_layout_v2;
+    const currentWidth = shouldCompactOnce ? MIN_NODE_WIDTH : Math.max(MIN_NODE_WIDTH, savedWidth);
     node.size ||= [currentWidth, DEFAULT_NODE_HEIGHT];
     node.size[0] = currentWidth;
     node.min_width = currentWidth;
     node.minWidth = currentWidth;
-    const currentHeight = Math.max(Number(node.size?.[1] || 0), DEFAULT_NODE_HEIGHT);
+    const currentHeight = shouldCompactOnce ? DEFAULT_NODE_HEIGHT : Math.max(Number(node.size?.[1] || 0), DEFAULT_NODE_HEIGHT);
+    node.properties.gjj_sigmas_compacted_layout_v2 = true;
     node.setSize?.([currentWidth, currentHeight]);
     node.setDirtyCanvas?.(true, true);
     app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function findJsonOutputIndex(node) {
+    return (node.outputs || []).findIndex((output) => String(output?.name || "") === JSON_OUTPUT.name);
+}
+
+function jsonOutputHasLinks(node) {
+    const index = findJsonOutputIndex(node);
+    const output = index >= 0 ? node.outputs[index] : null;
+    return Array.isArray(output?.links) && output.links.length > 0;
+}
+
+function setJsonOutputVisible(node, visible) {
+    node.properties ||= {};
+    const currentlyVisible = findJsonOutputIndex(node) >= 0;
+    const shouldKeepForLinks = jsonOutputHasLinks(node);
+
+    if (visible && !currentlyVisible) {
+        node.addOutput?.(JSON_OUTPUT.name, JSON_OUTPUT.type);
+    } else if (!visible && currentlyVisible && !shouldKeepForLinks) {
+        const index = findJsonOutputIndex(node);
+        if (index >= 0) {
+            if (typeof node.removeOutput === "function") {
+                node.removeOutput(index);
+            } else {
+                node.outputs.splice(index, 1);
+            }
+        }
+    }
+
+    node.properties.gjj_sigmas_show_json_output = Boolean(visible || shouldKeepForLinks);
+    node.setDirtyCanvas?.(true, true);
+    app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function syncJsonOutputVisibility(node) {
+    const showJson = Boolean(node.properties?.gjj_sigmas_show_json_output || jsonOutputHasLinks(node));
+    setJsonOutputVisible(node, showJson);
 }
 
 function safeParseArray(text, fallback = []) {
@@ -110,64 +153,49 @@ function ensureEditor(node) {
     const presetWidget = node.widgets?.find((w) => w.name === "preset");
 
     const root = document.createElement("div");
-    root.style.cssText = "display:flex;flex-direction:column;gap:8px;height:100%;width:100%;box-sizing:border-box;padding:2px 0;";
+    root.style.cssText = "display:flex;flex-direction:column;gap:0;height:100%;width:100%;box-sizing:border-box;padding:0;";
 
     const toolbar = document.createElement("div");
-    toolbar.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap;";
+    toolbar.style.cssText = "display:flex;gap:0;align-items:center;flex-wrap:wrap;margin:0;padding:0;";
     root.appendChild(toolbar);
 
-    const hint = document.createElement("span");
-    hint.textContent = "点击图表添加点，拖拽调整位置，右键删除";
-    hint.style.cssText = "font-size:12px;color:#c9d6d0;flex:1 1 auto;";
-    toolbar.appendChild(hint);
-
-    const addButton = document.createElement("button");
-    addButton.textContent = "+ 添加点";
-    addButton.style.cssText = "padding:4px 10px;border-radius:999px;border:1px solid #41535b;background:#182127;color:#dce7e2;cursor:pointer;font-size:12px;transition:all 0.15s;";
-    addButton.addEventListener("mouseenter", () => { addButton.style.background = "#253038"; addButton.style.borderColor = "#4d636e"; });
-    addButton.addEventListener("mouseleave", () => { addButton.style.background = "#182127"; addButton.style.borderColor = "#41535b"; });
-    addButton.addEventListener("mousedown", () => { addButton.style.background = "#0f1519"; addButton.style.transform = "scale(0.95)"; });
-    addButton.addEventListener("mouseup", () => { addButton.style.background = "#253038"; addButton.style.transform = "scale(1)"; });
-    toolbar.appendChild(addButton);
-
-    const clearButton = document.createElement("button");
-    clearButton.textContent = "清空";
-    clearButton.style.cssText = "padding:4px 10px;border-radius:999px;border:1px solid #41535b;background:#182127;color:#dce7e2;cursor:pointer;font-size:12px;transition:all 0.15s;";
-    clearButton.addEventListener("mouseenter", () => { clearButton.style.background = "#253038"; clearButton.style.borderColor = "#4d636e"; });
-    clearButton.addEventListener("mouseleave", () => { clearButton.style.background = "#182127"; clearButton.style.borderColor = "#41535b"; });
-    clearButton.addEventListener("mousedown", () => { clearButton.style.background = "#0f1519"; clearButton.style.transform = "scale(0.95)"; });
-    clearButton.addEventListener("mouseup", () => { clearButton.style.background = "#253038"; clearButton.style.transform = "scale(1)"; });
-    toolbar.appendChild(clearButton);
+    function createIconButton(label, tooltip) {
+        const button = document.createElement("button");
+        button.textContent = label;
+        button.title = tooltip;
+        button.style.cssText = "width:28px;height:24px;display:inline-flex;align-items:center;justify-content:center;padding:0;margin:0;border-radius:5px;border:1px solid #41535b;background:#182127;color:#dce7e2;cursor:pointer;font-size:13px;line-height:1;transition:all 0.15s;";
+        button.addEventListener("mouseenter", () => { button.style.background = "#253038"; button.style.borderColor = "#4d636e"; });
+        button.addEventListener("mouseleave", () => { button.style.background = "#182127"; button.style.borderColor = "#41535b"; });
+        button.addEventListener("mousedown", () => { button.style.background = "#0f1519"; button.style.transform = "scale(0.95)"; });
+        button.addEventListener("mouseup", () => { button.style.background = "#253038"; button.style.transform = "scale(1)"; });
+        return button;
+    }
 
     const wrap = document.createElement("div");
-    wrap.style.cssText = `position:relative;height:${CHART_HEIGHT}px;width:100%;box-sizing:border-box;border:1px solid #34444c;border-radius:12px;background:#0b1013;overflow:hidden;touch-action:none;`;
+    wrap.title = "点击图表添加点，拖拽调整位置，右键删除";
+    wrap.style.cssText = `position:relative;height:${CHART_HEIGHT}px;width:100%;box-sizing:border-box;border:1px solid #34444c;border-radius:8px;background:#0b1013;overflow:hidden;touch-action:none;margin:0;padding:0;`;
     root.appendChild(wrap);
 
     const canvas = document.createElement("canvas");
-    canvas.style.cssText = "display:block;width:100%;height:100%;background:#0f1519;user-select:none;";
+    canvas.style.cssText = "display:block;width:100%;height:100%;background:#0f1519;user-select:none;margin:0;padding:0;";
     wrap.appendChild(canvas);
 
-    const controlsRow = document.createElement("div");
-    controlsRow.style.cssText = "display:flex;gap:12px;align-items:center;flex-wrap:wrap;";
-    root.appendChild(controlsRow);
-
-    const curveModeLabel = document.createElement("span");
-    curveModeLabel.textContent = "曲线方式:";
-    curveModeLabel.style.cssText = "font-size:12px;color:#9eb3ab;";
-    controlsRow.appendChild(curveModeLabel);
-
     const curveButtonsContainer = document.createElement("div");
-    curveButtonsContainer.style.cssText = "display:flex;gap:4px;";
-    controlsRow.appendChild(curveButtonsContainer);
-
-    const presetLabel = document.createElement("span");
-    presetLabel.textContent = "预设模板:";
-    presetLabel.style.cssText = "font-size:12px;color:#9eb3ab;margin-left:12px;";
-    controlsRow.appendChild(presetLabel);
+    curveButtonsContainer.style.cssText = "display:flex;gap:0;margin:0;padding:0;";
+    toolbar.appendChild(curveButtonsContainer);
 
     const presetButtonsContainer = document.createElement("div");
-    presetButtonsContainer.style.cssText = "display:flex;gap:4px;";
-    controlsRow.appendChild(presetButtonsContainer);
+    presetButtonsContainer.style.cssText = "display:flex;gap:0;margin:0;padding:0;";
+    toolbar.appendChild(presetButtonsContainer);
+
+    const addButton = createIconButton("➕", "添加一个 Sigma 点");
+    toolbar.appendChild(addButton);
+
+    const clearButton = createIconButton("🧹", "清空为起点和终点");
+    toolbar.appendChild(clearButton);
+
+    const jsonButton = createIconButton("📄", "显示或收起 Sigmas JSON 输出口");
+    toolbar.appendChild(jsonButton);
 
     const editor = {
         canvas,
@@ -188,7 +216,8 @@ function ensureEditor(node) {
         options.forEach((opt) => {
             const btn = document.createElement("button");
             btn.textContent = opt.label;
-            btn.style.cssText = "padding:4px 10px;border-radius:6px;border:1px solid #41535b;background:#182127;color:#dce7e2;cursor:pointer;font-size:12px;transition:all 0.2s;";
+            btn.title = opt.tooltip || opt.value;
+            btn.style.cssText = "width:28px;height:24px;display:inline-flex;align-items:center;justify-content:center;padding:0;margin:0;border-radius:5px;border:1px solid #41535b;background:#182127;color:#dce7e2;cursor:pointer;font-size:13px;line-height:1;transition:all 0.2s;";
 
             const updateBtnStyle = () => {
                 if (btn.dataset.value === getCurrent()) {
@@ -216,6 +245,8 @@ function ensureEditor(node) {
 
             container.appendChild(btn);
         });
+
+        return buttons;
     }
 
     createModeButtons(
@@ -229,7 +260,7 @@ function ensureEditor(node) {
         null
     );
 
-    createModeButtons(
+    const presetButtons = createModeButtons(
         presetButtonsContainer,
         PRESET_OPTIONS,
         () => editor.currentPreset,
@@ -258,6 +289,18 @@ function ensureEditor(node) {
             }
         }
     );
+
+    function markCustomPresetForEdit() {
+        editor.currentPreset = "自定义";
+        presetButtons.forEach((b) => b.updateBtnStyle());
+    }
+
+    function updateJsonButton() {
+        const enabled = Boolean(node.properties?.gjj_sigmas_show_json_output || jsonOutputHasLinks(node));
+        jsonButton.style.background = enabled ? "#2a3a42" : "#182127";
+        jsonButton.style.borderColor = enabled ? "#38c8ff" : "#41535b";
+        jsonButton.style.color = enabled ? "#38c8ff" : "#dce7e2";
+    }
 
     function getChartArea() {
         const rect = wrap.getBoundingClientRect();
@@ -365,18 +408,6 @@ function ensureEditor(node) {
         drawGrid(ctx, area);
         drawCurve(ctx, area);
         drawPoints(ctx, area);
-
-        ctx.fillStyle = "#91a39b";
-        ctx.font = "bold 13px sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillText("Sigmas Curve", cssWidth / 2, 18);
-
-        ctx.fillStyle = "#6b7b85";
-        ctx.font = "11px sans-serif";
-        ctx.textAlign = "left";
-        ctx.fillText("Step", 8, cssHeight - 8);
-        ctx.textAlign = "right";
-        ctx.fillText("Value", cssWidth - 8, cssHeight - 8);
     }
 
     function drawGrid(ctx, area) {
@@ -533,12 +564,22 @@ function ensureEditor(node) {
         const leftVal = editor.sigmas[Math.max(0, newIndex - 1)] || 1.0;
         const rightVal = editor.sigmas[Math.min(editor.sigmas.length - 1, newIndex)] || 0.0;
         editor.sigmas.splice(newIndex, 0, (leftVal + rightVal) / 2);
+        markCustomPresetForEdit();
         writeBack();
     };
 
     clearButton.onclick = () => {
         editor.sigmas = [1.0, 0.0];
+        markCustomPresetForEdit();
         writeBack();
+    };
+
+    jsonButton.onclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const nextVisible = !(node.properties?.gjj_sigmas_show_json_output || jsonOutputHasLinks(node));
+        setJsonOutputVisible(node, nextVisible);
+        updateJsonButton();
     };
 
     wrap.addEventListener("contextmenu", (event) => {
@@ -549,6 +590,7 @@ function ensureEditor(node) {
         const index = findNearestPoint(point.t, 0.1);
         if (index >= 0 && editor.sigmas.length > 2) {
             editor.sigmas.splice(index, 1);
+            markCustomPresetForEdit();
             writeBack();
         }
     });
@@ -570,6 +612,7 @@ function ensureEditor(node) {
             const newIndex = Math.floor(point.t * (editor.sigmas.length - 1)) + 1;
             editor.sigmas.splice(newIndex, 0, clamp(point.value, 0, 1));
             editor.draggingIndex = newIndex;
+            markCustomPresetForEdit();
             writeBack();
         }
     });
@@ -579,6 +622,7 @@ function ensureEditor(node) {
             const point = toChartPoint(event);
             if (point) {
                 editor.sigmas[editor.draggingIndex] = clamp(point.value, 0, 1);
+                markCustomPresetForEdit();
                 writeBack();
             }
         } else {
@@ -601,14 +645,15 @@ function ensureEditor(node) {
 
     const widget = node.addDOMWidget("gjj_sigmas_editor", "gjj_sigmas_editor", root, {
         hideOnZoom: false,
-        getHeight: () => CHART_HEIGHT + 80,
-        getMinHeight: () => CHART_HEIGHT + 80,
-        getMaxHeight: () => CHART_HEIGHT + 80,
+        getHeight: () => CHART_HEIGHT + 26,
+        getMinHeight: () => CHART_HEIGHT + 26,
+        getMaxHeight: () => CHART_HEIGHT + 26,
     });
-    widget.computeSize = (width) => [Math.max(MIN_NODE_WIDTH, Number(width || 0)), CHART_HEIGHT + 80];
+    widget.computeSize = (width) => [Math.max(MIN_NODE_WIDTH, Number(width || 0)), CHART_HEIGHT + 26];
 
     node.__gjjSigmasEditor = { widget, editor, draw, syncFromWidgets };
     syncFromWidgets();
+    updateJsonButton();
     return node.__gjjSigmasEditor;
 }
 
@@ -632,6 +677,7 @@ function afterNodeReady(node) {
         }
     }
 
+    syncJsonOutputVisibility(node);
     const view = ensureEditor(node);
     view.syncFromWidgets();
     preserveNodeSize(node);

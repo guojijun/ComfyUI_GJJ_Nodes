@@ -56,6 +56,36 @@ function imageDataToUrl(data) {
 	);
 }
 
+function isMediaFileItem(item) {
+	return Boolean(item && typeof item === "object" && item.filename);
+}
+
+function normalizeMediaPayload(payload) {
+	if (!payload) {
+		return [];
+	}
+	if (isMediaFileItem(payload)) {
+		return [payload];
+	}
+	if (!Array.isArray(payload)) {
+		return [];
+	}
+	if (payload.length === 1 && Array.isArray(payload[0])) {
+		return normalizeMediaPayload(payload[0]);
+	}
+	return payload.filter(isMediaFileItem);
+}
+
+function firstMediaPayload(...payloads) {
+	for (const payload of payloads) {
+		const normalized = normalizeMediaPayload(payload);
+		if (normalized.length > 0) {
+			return normalized;
+		}
+	}
+	return [];
+}
+
 function formatInputName(index) {
 	return `${INPUT_PREFIX}${String(index).padStart(2, "0")}`;
 }
@@ -763,31 +793,14 @@ function applyPreviewContent(node) {
 		}
 		// 图片预览分支结束，body 已在前置逻辑中隐藏
 	} else if (showAudio) {
-		// 新增：音频预览 - 同时显示播放器和简介文本
-		console.log("[GJJ AnyPreview] === 音频预览开始 ===");
-		console.log("[GJJ AnyPreview] kind:", kind);
-		console.log("[GJJ AnyPreview] showAudio:", showAudio);
-		console.log("[GJJ AnyPreview] hasText:", hasText);
-		console.log("[GJJ AnyPreview] audio数组:", audio);
-		console.log("[GJJ AnyPreview] audio数组长度:", audio.length);
-		console.log("[GJJ AnyPreview] node.__gjjAnyPreviewAudio:", node.__gjjAnyPreviewAudio);
-
-		if (audio.length === 0) {
-			console.error("[GJJ AnyPreview] 错误：audio数组为空！");
-		}
-
+		// 音频预览：显示播放器和简介文本。
 		grid.style.gridTemplateColumns = "1fr";
 		grid.style.height = "auto";
 		grid.style.alignItems = "center";
 		grid.replaceChildren();
 
 		const audioItem = audio[0];
-		console.log("[GJJ AnyPreview] audioItem:", audioItem);
-		console.log("[GJJ AnyPreview] audioItem.filename:", audioItem?.filename);
-		console.log("[GJJ AnyPreview] audioItem.type:", audioItem?.type);
-
 		const audioUrl = imageDataToUrl(audioItem);
-		console.log("[GJJ AnyPreview] 生成的audioUrl:", audioUrl);
 
 		const audioCard = document.createElement("div");
 		audioCard.style.cssText = [
@@ -1327,16 +1340,6 @@ app.registerExtension({
 
 		const originalOnExecuted = nodeType.prototype.onExecuted;
 		nodeType.prototype.onExecuted = function (message) {
-			// 调试：打印onExecuted收到的完整message
-			console.log("========== [GJJ onExecuted] 收到的message ==========");
-			console.log("[GJJ onExecuted] message:", message);
-			console.log("[GJJ onExecuted] message.preview_kind:", message?.preview_kind);
-			console.log("[GJJ onExecuted] message.preview_audio:", message?.preview_audio);
-			console.log("[GJJ onExecuted] message.preview_video:", message?.preview_video);
-			console.log("[GJJ onExecuted] message.preview_images:", message?.preview_images);
-			console.log("[GJJ onExecuted] message.preview_text:", message?.preview_text);
-			console.log("======================================================");
-
 			const result =
 				typeof originalOnExecuted === "function"
 					? originalOnExecuted.call(this, message)
@@ -1352,13 +1355,11 @@ app.registerExtension({
 					: Array.isArray(message?.preview_images)
 						? message.preview_images
 						: [];
-			// 修复：音频数据是元组，需要取第一个元素
+			// 同时兼容本节点 preview_audio 和 ComfyUI 原生 audio 字段。
 			this.__gjjAnyPreviewAudio =
 				liveText !== null
 					? []
-					: Array.isArray(message?.preview_audio?.[0])
-						? message.preview_audio[0]
-						: [];
+					: firstMediaPayload(message?.preview_audio, message?.audio);
 			// 修复：视频数据是元组，需要取第一个元素
 			this.__gjjAnyPreviewVideo =
 				liveText !== null

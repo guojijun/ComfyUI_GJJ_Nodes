@@ -72,6 +72,7 @@ SAM2_CONFIG_MAP = {
 }
 
 _MODEL_CACHE: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+_PRINTED_ENV_REPORT_KEYS: set[str] = set()
 
 
 def _send_status(unique_id: Any, text: str, progress: float | None = None) -> None:
@@ -861,8 +862,28 @@ def _missing_model_specs() -> list[dict[str, str]]:
 	return [required[0]]
 
 
-def _build_env_report(original_error: str = "") -> dict[str, Any]:
-	missing_dependencies = _missing_dependency_specs()
+def _report_key(report: dict[str, Any]) -> str:
+	deps = ",".join(
+		str(dep.get("module_name") or dep.get("package_name") or "")
+		for dep in report.get("missing_dependencies", [])
+	)
+	models = ",".join(
+		str(model.get("path") or model.get("filename") or model.get("label") or "")
+		for model in report.get("missing_models", [])
+	)
+	return f"{deps}|{models}"
+
+
+def _print_env_report_once(report: dict[str, Any], *, title: str = "GJJ 节点运行环境缺失！") -> None:
+	key = _report_key(report)
+	if key in _PRINTED_ENV_REPORT_KEYS:
+		return
+	_PRINTED_ENV_REPORT_KEYS.add(key)
+	print_dependency_model_report(report, title=title)
+
+
+def _build_env_report(original_error: str = "", *, include_runtime_dependencies: bool = False) -> dict[str, Any]:
+	missing_dependencies = _missing_dependency_specs() if include_runtime_dependencies else []
 	missing_models = _missing_model_specs()
 	install_packages = [spec["package_name"] for spec in missing_dependencies if spec.get("package_name")]
 	report = build_dependency_model_report(
@@ -884,7 +905,7 @@ _MODELS_AVAILABLE = bool(_ENV_REPORT.get("models_available"))
 _MISSING_DEPENDENCIES = list(_ENV_REPORT.get("missing_dependencies") or [])
 _MISSING_MODELS = list(_ENV_REPORT.get("missing_models") or [])
 if not (_DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE):
-	print_dependency_model_report(_ENV_REPORT)
+	_print_env_report_once(_ENV_REPORT)
 
 _DESCRIPTION_READY = f"{NODE_DESCRIPTION_INTRO}\n\n🌏模型下载：{SAM2_MODEL_DOWNLOAD_URL}"
 DESCRIPTION = (
@@ -1072,9 +1093,10 @@ class GJJ_SAM2PointMaskEditor:
 		image=None,
 		unique_id=None,
 	):
-		runtime_report = _build_env_report()
+		runtime_report = _build_env_report(include_runtime_dependencies=True)
 		if not runtime_report.get("available"):
 			_send_status(unique_id, runtime_report.get("warning_message", "运行环境缺失"), 0.0)
+			_print_env_report_once(runtime_report, title="GJJ 节点运行时依赖或模型缺失！")
 			send_dependency_model_notice(runtime_report, unique_id=unique_id)
 			raise RuntimeError(runtime_report.get("panel_message") or runtime_report.get("warning_message") or "SAM2 运行环境缺失。")
 
@@ -1115,6 +1137,13 @@ class GJJ_SAM2PointMaskEditor:
 				},
 				"result": (expanded_mask.detach().cpu().float().contiguous(), covered),
 			}
+		except RuntimeError as exc:
+			report = getattr(exc, "gjj_report", None)
+			if report:
+				report["node_name"] = NODE_DISPLAY_NAME
+				_send_status(unique_id, report.get("warning_message", "运行时依赖缺失"), 0.0)
+				send_dependency_model_notice(report, unique_id=unique_id)
+			raise
 		finally:
 			if not bool(keep_model_loaded):
 				try:

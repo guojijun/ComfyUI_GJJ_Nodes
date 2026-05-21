@@ -31,18 +31,28 @@ MAX_SELECTED_VIDEOS = 20
 MAX_PREVIEW_FRAMES = 16
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".wmv", ".flv", ".gif"}
 ENABLED_OUTPUTS_PROPERTY = "enabled_outputs"
-OPTIONAL_OUTPUT_KEYS = [
-    "first_frame",
-    "last_frame",
-    "info_json",
-    "frame_rate",
-    "frame_count",
-    "source_duration",
-    "width",
-    "height",
-    "video_format",
-    "audio",
-]
+OPTIONAL_OUTPUT_DEFS = {
+    "first_frame": {"name": "首帧预览", "type": "IMAGE"},
+    "last_frame": {"name": "尾帧预览", "type": "IMAGE"},
+    "info_json": {"name": "视频信息JSON", "type": "STRING"},
+    "frame_rate": {"name": "帧率", "type": "FLOAT"},
+    "frame_count": {"name": "输出帧数", "type": "INT"},
+    "source_duration": {"name": "源时长", "type": "FLOAT"},
+    "width": {"name": "宽度", "type": "INT"},
+    "height": {"name": "高度", "type": "INT"},
+    "video_format": {"name": "视频格式", "type": "STRING"},
+    "audio": {"name": "音频", "type": "AUDIO"},
+}
+OPTIONAL_OUTPUT_KEYS = list(OPTIONAL_OUTPUT_DEFS.keys())
+
+
+class AnyType(str):
+    def __ne__(self, __value: object) -> bool:
+        return False
+
+
+any_type = AnyType("*")
+
 
 # 与 VHS_VideoCombine 的常用格式保持相近命名；这里只作为格式参数输出，真正合成仍交给后续视频合成节点。
 VIDEO_FORMATS = [
@@ -328,16 +338,48 @@ def recover_selected_videos(raw_value: Any, extra_pnginfo: Any = None, unique_id
 def parse_enabled_outputs(raw_value: Any) -> list[str]:
     if raw_value is None:
         return []
-    try:
-        parsed = json.loads(str(raw_value or "[]"))
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(parsed, list):
+    if isinstance(raw_value, (dict, list)):
+        parsed = raw_value
+    else:
+        try:
+            parsed = json.loads(str(raw_value or "[]"))
+        except json.JSONDecodeError:
+            return []
+    if isinstance(parsed, dict):
+        items = parsed.get("outputs") or parsed.get("enabled_outputs") or []
+    elif isinstance(parsed, list):
+        items = parsed
+    else:
         return []
     enabled: list[str] = []
-    for item in parsed:
-        key = str(item or "")
+    for item in items:
+        key = str(item.get("key") if isinstance(item, dict) else item or "")
         if key in OPTIONAL_OUTPUT_KEYS and key not in enabled:
+            enabled.append(key)
+    return enabled
+
+
+def parse_enabled_outputs_from_workflow_outputs(outputs: Any) -> list[str]:
+    if not isinstance(outputs, list):
+        return []
+    enabled: list[str] = []
+    name_to_key = {
+        str(definition.get("name") or ""): key
+        for key, definition in OPTIONAL_OUTPUT_DEFS.items()
+    }
+    for index, item in enumerate(outputs):
+        if index == 0 or not isinstance(item, dict):
+            continue
+        key = str(item.get("gjj_key") or item.get("key") or "")
+        if key not in OPTIONAL_OUTPUT_DEFS:
+            label = str(
+                item.get("name")
+                or item.get("label")
+                or item.get("localized_name")
+                or ""
+            )
+            key = name_to_key.get(label, "")
+        if key in OPTIONAL_OUTPUT_DEFS and key not in enabled:
             enabled.append(key)
     return enabled
 
@@ -366,6 +408,10 @@ def recover_enabled_outputs(raw_value: Any = None, extra_pnginfo: Any = None, un
             from_property = parse_enabled_outputs(properties.get(ENABLED_OUTPUTS_PROPERTY))
             if from_property:
                 candidates.append(from_property)
+                continue
+        from_outputs = parse_enabled_outputs_from_workflow_outputs(node.get("outputs"))
+        if from_outputs:
+            candidates.append(from_outputs)
     if unique_id is not None and candidates:
         return candidates[0]
     return candidates[0] if len(candidates) == 1 else []
@@ -410,6 +456,21 @@ def _resize_image_tensor(image: torch.Tensor, target_width: int, target_height: 
     chw = image.permute(0, 3, 1, 2).contiguous()
     resized = F.interpolate(chw, size=(th, tw), mode="bilinear", align_corners=False)
     return resized.permute(0, 2, 3, 1).clamp(0.0, 1.0).contiguous()
+
+
+def _normalize_target_dimension(value: int) -> int:
+    """Treat tiny stale UI dimensions as source-following.
+
+    Width/height widgets are hidden and maintained by JS. Old or mismatched
+    workflows can leave them at tiny preview-like values such as 1, 14, or 25,
+    which would collapse a valid video into tiny blurry thumbnails. Real
+    video/image output below 64 px is not useful in this loader, so keep the
+    source size instead.
+    """
+    value = int(value or 0)
+    if 0 < value < 64:
+        return 0
+    return value
 
 
 def build_uniform_batch(images: list[torch.Tensor]) -> torch.Tensor:
@@ -670,20 +731,20 @@ class GJJ_MultiVideoLoader:
     OUTPUT_NODE = False
     DESCRIPTION = "一次选择多个 input 目录视频，按帧范围、帧率、宽高和格式参数解码为 GJJ 批量图片帧队列。"
     SEARCH_ALIASES = ["multi video loader", "video loader", "批量视频", "视频加载", "视频解码", "视频帧", "视频预览", "批量视频加载预览器"]
-    # 声明所有可能的输出，按 OPTIONAL_OUTPUT_KEYS 顺序排列
-    # 执行时根据 enabled_outputs 控制实际返回哪些值（未启用的输出返回 None）
+    # 扩展输出由前端动态重建，用户可任意排序；后端静态类型必须用通配，
+    # 否则例如“音频”落在静态 STRING 槽位时会被严格 AUDIO 输入拒绝。
     RETURN_TYPES = (
         VIDEO_FRAME_QUEUE_TYPE,  # 视频帧队列
-        "IMAGE",               # 首帧预览
-        "IMAGE",               # 尾帧预览
-        "STRING",              # 视频信息JSON
-        "FLOAT",               # 帧率
-        "INT",                 # 输出帧数
-        "FLOAT",               # 源时长
-        "INT",                 # 宽度
-        "INT",                 # 高度
-        "STRING",              # 视频格式
-        "AUDIO",               # 视频音频
+        any_type,
+        any_type,
+        any_type,
+        any_type,
+        any_type,
+        any_type,
+        any_type,
+        any_type,
+        any_type,
+        any_type,
     )
     RETURN_NAMES = (
         "视频帧队列",
@@ -847,6 +908,162 @@ class GJJ_MultiVideoLoader:
             tensor = tensor[..., :3]
         return tensor.float().clamp(0.0, 1.0).contiguous()
 
+    @staticmethod
+    def _component_value(value: Any, key: str) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            return value.get(key)
+        return getattr(value, key, None)
+
+    @staticmethod
+    def _float_value(value: Any, default: float = 0.0) -> float:
+        if value is None:
+            return default
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return default
+        return number if np.isfinite(number) else default
+
+    @staticmethod
+    def _int_value(value: Any, default: int = 0) -> int:
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _normalize_external_audio(value: Any) -> dict[str, Any] | None:
+        if value is None:
+            return None
+
+        waveform = None
+        sample_rate = None
+        if isinstance(value, dict):
+            waveform = value.get("waveform")
+            sample_rate = value.get("sample_rate")
+        else:
+            waveform = getattr(value, "waveform", None)
+            sample_rate = getattr(value, "sample_rate", None)
+            if waveform is None and hasattr(value, "get"):
+                try:
+                    waveform = value.get("waveform")
+                    sample_rate = value.get("sample_rate")
+                except Exception:
+                    pass
+
+        sample_rate = GJJ_MultiVideoLoader._int_value(sample_rate, 0)
+        if waveform is None or sample_rate <= 0:
+            return None
+        if not isinstance(waveform, torch.Tensor):
+            try:
+                waveform = torch.as_tensor(waveform)
+            except Exception:
+                return None
+        if waveform.ndim == 1:
+            waveform = waveform.unsqueeze(0).unsqueeze(0)
+        elif waveform.ndim == 2:
+            waveform = waveform.unsqueeze(0)
+        elif waveform.ndim == 3:
+            pass
+        elif waveform.ndim > 3:
+            waveform = waveform.reshape(-1, waveform.shape[-2], waveform.shape[-1])
+        else:
+            return None
+        return {"waveform": waveform.float().contiguous(), "sample_rate": sample_rate}
+
+    @classmethod
+    def _coerce_external_video(cls, value: Any) -> dict[str, Any] | None:
+        if value is None:
+            return None
+
+        direct_frames = cls._coerce_external_frames(value)
+        if direct_frames is not None:
+            fps = 0.0
+            duration = 0.0
+            audio = None
+            metadata = None
+            if isinstance(value, dict):
+                for key in ("frame_rate", "fps", "source_fps"):
+                    if key in value:
+                        fps = cls._float_value(value.get(key), 0.0)
+                        break
+                for key in ("duration", "source_duration", "total_source_duration"):
+                    if key in value:
+                        duration = cls._float_value(value.get(key), 0.0)
+                        break
+                audio = cls._normalize_external_audio(value.get("audio"))
+                metadata = value.get("metadata")
+            return {
+                "frames": direct_frames,
+                "fps": fps,
+                "duration": duration,
+                "frame_count": int(direct_frames.shape[0]),
+                "audio": audio,
+                "metadata": metadata if isinstance(metadata, dict) else {},
+                "source": "external_input",
+                "format": "",
+            }
+
+        if not hasattr(value, "get_components"):
+            return None
+
+        try:
+            components = value.get_components()
+        except Exception as error:
+            raise RuntimeError(f"左侧视频输入可识别为 VIDEO，但读取视频帧失败：{error}") from error
+
+        frames = cls._coerce_external_frames(cls._component_value(components, "images"))
+        if frames is None:
+            raise RuntimeError("左侧视频输入可识别为 VIDEO，但没有解析出可用的视频帧。")
+
+        fps = cls._float_value(cls._component_value(components, "frame_rate"), 0.0)
+        audio = cls._normalize_external_audio(cls._component_value(components, "audio"))
+        metadata = cls._component_value(components, "metadata")
+        duration = 0.0
+        frame_count = int(frames.shape[0])
+        source = "external_video"
+        container_format = ""
+
+        for method_name, field_name in (
+            ("get_frame_rate", "fps"),
+            ("get_duration", "duration"),
+            ("get_frame_count", "frame_count"),
+            ("get_container_format", "format"),
+            ("get_stream_source", "source"),
+        ):
+            method = getattr(value, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                method_value = method()
+            except Exception:
+                continue
+            if field_name == "fps":
+                fps = cls._float_value(method_value, fps)
+            elif field_name == "duration":
+                duration = cls._float_value(method_value, duration)
+            elif field_name == "frame_count":
+                frame_count = cls._int_value(method_value, frame_count)
+            elif field_name == "format":
+                container_format = str(method_value or "")
+            elif field_name == "source":
+                source = Path(method_value).name if isinstance(method_value, (str, Path)) else "external_video"
+
+        return {
+            "frames": frames,
+            "fps": fps,
+            "duration": duration,
+            "frame_count": frame_count,
+            "audio": audio,
+            "metadata": metadata if isinstance(metadata, dict) else {},
+            "source": source,
+            "format": container_format,
+        }
+
     def load_videos(
         self,
         frame_rate=None,
@@ -879,8 +1096,8 @@ class GJJ_MultiVideoLoader:
                 return default
         
         output_fps = _safe_float(frame_rate, 24.0, 1.0, 240.0)
-        target_width = _safe_int(width, 0, 0, 16384)
-        target_height = _safe_int(height, 0, 0, 16384)
+        target_width = _normalize_target_dimension(_safe_int(width, 0, 0, 16384))
+        target_height = _normalize_target_dimension(_safe_int(height, 0, 0, 16384))
         output_format = str(video_format or "video/h264-mp4")
         
         start_frame_val = _safe_int(start_frame, 0, 0, 999999)
@@ -888,28 +1105,39 @@ class GJJ_MultiVideoLoader:
         frame_stride_val = _safe_int(frame_stride, 1, 1, 1000)
         max_frames_val = _safe_int(max_frames, 240, 1, 100000)
 
-        external_frames = self._coerce_external_frames(input_frames)
-        if external_frames is not None:
+        external_video = self._coerce_external_video(input_frames)
+        if external_video is not None:
+            external_frames = external_video["frames"]
+            source_fps = float(external_video.get("fps") or output_fps)
+            if source_fps > 0:
+                output_fps = source_fps
             batch_output = _resize_image_tensor(external_frames, target_width, target_height)
-            source_fps = output_fps
-            total_duration = float(batch_output.shape[0]) / max(1e-6, output_fps)
+            source_frame_count = int(external_video.get("frame_count") or external_frames.shape[0])
+            total_duration = float(external_video.get("duration") or 0.0)
+            if total_duration <= 0.0:
+                total_duration = float(external_frames.shape[0]) / max(1e-6, source_fps)
+            external_audio = external_video.get("audio")
+            source_name = str(external_video.get("source") or "external_input")
             video_infos = [{
-                "filename": "external_input",
+                "filename": source_name,
                 "subfolder": "",
                 "path": "",
                 "source_width": int(external_frames.shape[2]),
                 "source_height": int(external_frames.shape[1]),
                 "output_width": int(batch_output.shape[2]),
                 "output_height": int(batch_output.shape[1]),
-                "source_fps": output_fps,
+                "source_fps": source_fps,
                 "output_fps": output_fps,
-                "source_frames": int(batch_output.shape[0]),
+                "source_frames": source_frame_count,
                 "duration": total_duration,
                 "output_frames": int(batch_output.shape[0]),
-                "video_format": output_format,
+                "video_format": str(external_video.get("format") or output_format),
             }]
             selected_count = 0
-            output_audio = empty_audio(total_duration) if audio_enabled else None
+            if audio_enabled:
+                output_audio = external_audio if external_audio is not None else empty_audio(total_duration)
+            else:
+                output_audio = None
         else:
             if not selected:
                 raise RuntimeError("请先在 GJJ · 批量视频加载预览器里选择或导入视频，或接入左侧视频帧队列。")
@@ -1012,12 +1240,12 @@ class GJJ_MultiVideoLoader:
             "audio": output_audio if output_audio is not None else empty_audio(0.0),
         }
         
-        # 返回真正显示的动态输出，顺序必须与 JS 里的 OUTPUT_DEFS 过滤顺序一致。
-        # 这样前端删除未启用输出口后，连接索引不会错位。
-        enabled_set = set(enabled_outputs or [])
+        # 返回真正显示的动态输出，顺序必须与前端 enabled_outputs JSON 配置一致。
+        # 前端会把用户当前选择序列化为 {outputs:[{key,name,type}]}，这里只按 key 取值，
+        # 避免右侧输出标签和实际返回值在增删输出口后错位。
         result = [batch_output]
-        for key in OPTIONAL_OUTPUT_KEYS:
-            if key in enabled_set and key in optional_values:
+        for key in enabled_outputs or []:
+            if key in optional_values:
                 result.append(optional_values[key])
 
         return {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from typing import Any
 
 import comfy.utils
@@ -144,6 +145,106 @@ def serialize_audio_preview(value: dict[str, Any]) -> str:
         return "音频对象"
 
 
+def normalize_audio_object(value: Any) -> dict[str, Any] | None:
+    """转换为 ComfyUI 标准音频结构：[B, C, T] + sample_rate。"""
+    if not is_audio_object(value):
+        return None
+
+    waveform = value.get("waveform")
+    if not isinstance(waveform, torch.Tensor):
+        return None
+
+    try:
+        sample_rate = int(value.get("sample_rate") or 44100)
+    except Exception:
+        sample_rate = 44100
+    if sample_rate <= 0:
+        sample_rate = 44100
+
+    waveform = waveform.detach().cpu().float()
+    if waveform.ndim == 1:
+        waveform = waveform.reshape(1, 1, -1)
+    elif waveform.ndim == 2:
+        # 常见输入是 [C, T]；若明显是 [T, C]，转回标准声道优先格式。
+        if waveform.shape[0] > waveform.shape[1] and waveform.shape[1] <= 8:
+            waveform = waveform.transpose(0, 1)
+        waveform = waveform.unsqueeze(0)
+    elif waveform.ndim == 3:
+        pass
+    elif waveform.ndim > 3 and waveform.shape[-2] > 0 and waveform.shape[-1] > 0:
+        waveform = waveform.reshape(-1, waveform.shape[-2], waveform.shape[-1])
+    else:
+        return None
+
+    if waveform.shape[0] <= 0 or waveform.shape[1] <= 0 or waveform.shape[2] <= 0:
+        return None
+    if waveform.shape[1] > 2:
+        waveform = waveform[:, :2, :]
+
+    waveform = torch.nan_to_num(waveform, nan=0.0, posinf=1.0, neginf=-1.0)
+    waveform = waveform.clamp(-1.0, 1.0).contiguous()
+
+    normalized = dict(value)
+    normalized["waveform"] = waveform
+    normalized["sample_rate"] = sample_rate
+    return normalized
+
+
+def normalize_preview_media_items(items: Any) -> list[dict[str, Any]]:
+    """把 ComfyUI SavedResult / dict 列表统一成前端可识别的文件描述。"""
+    if not isinstance(items, (list, tuple)):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        filename = item.get("filename")
+        if not filename:
+            continue
+        result.append(
+            {
+                "filename": str(filename),
+                "subfolder": str(item.get("subfolder") or ""),
+                "type": str(item.get("type") or "temp"),
+            }
+        )
+    return result
+
+
+def save_audio_with_native_preview(audio: dict[str, Any]) -> list[dict[str, Any]]:
+    """优先复用 ComfyUI 原生音频预览保存逻辑。"""
+    try:
+        from comfy_api.latest import UI
+
+        native_ui = UI.PreviewAudio(audio, cls=None).as_dict()
+        return normalize_preview_media_items(native_ui.get("audio"))
+    except Exception as error:
+        print(f"[GJJ] 原生音频预览保存失败，改用 WAV 预览: {error}")
+        return []
+
+
+def save_audio_with_wav_fallback(audio: dict[str, Any]) -> list[dict[str, Any]]:
+    """在原生 FLAC 保存不可用时，写入浏览器兼容的临时 WAV。"""
+    try:
+        import soundfile as sf
+
+        waveform = audio["waveform"][0].movedim(0, 1).numpy()
+        sample_rate = int(audio["sample_rate"])
+        output_dir = folder_paths.get_temp_directory()
+        os.makedirs(output_dir, exist_ok=True)
+        filename = f"GJJ_AnyPreview_audio_{uuid.uuid4().hex[:12]}.wav"
+        filepath = os.path.join(output_dir, filename)
+        sf.write(filepath, waveform, sample_rate, subtype="PCM_16")
+        return [{"filename": filename, "subfolder": "", "type": "temp"}]
+    except Exception as error:
+        print(f"[GJJ] WAV 音频预览保存失败: {error}")
+        return []
+
+
+def save_audio_preview(audio: dict[str, Any]) -> list[dict[str, Any]]:
+    return save_audio_with_native_preview(audio) or save_audio_with_wav_fallback(audio)
+
+
 def serialize_video_preview(value: Any) -> str:
     """序列化视频对象为预览文本"""
     try:
@@ -260,8 +361,8 @@ class GJJ_AnyPreview:
             },
             {
                 "name": "音频预览",
-                "description": "内置播放器，支持播放控制、进度拖拽、波形显示",
-                "supported_formats": ["WAV", "MP3"],
+                "description": "内置播放器，直接播放 ComfyUI AUDIO 对象",
+                "supported_formats": ["FLAC", "WAV", "MP3"],
                 "sample_rates": [16000, 22050, 44100, 48000],
             },
             {
@@ -380,9 +481,9 @@ class GJJ_AnyPreview:
         "video preview",
         "媒体预览",
     ]
-    RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE",)
-    RETURN_NAMES = ("批量图片",)
-    OUTPUT_TOOLTIPS = ("GJJ 批量图片，兼容标准 IMAGE 类型。",)
+    RETURN_TYPES = (any_type,)
+    RETURN_NAMES = ("预览结果",)
+    OUTPUT_TOOLTIPS = ("按输入类型输出图片、文本、音频、视频或原始对象。",)
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -442,54 +543,22 @@ class GJJ_AnyPreview:
 
         # 新增：音频预览
         elif preview_kind == "audio" and is_audio_object(merged):
-            try:
-                import numpy as np
-                import soundfile as sf
-
-                # 获取音频数据
-                waveform = merged.get("waveform")
-                sample_rate = merged.get("sample_rate", 44100)
-
-                print(
-                    f"[GJJ] 音频预览开始 - waveform类型: {type(waveform)}, sample_rate: {sample_rate}"
-                )
-
-                if isinstance(waveform, torch.Tensor):
-                    # 转换为numpy数组
-                    audio_np = waveform.squeeze(0).cpu().numpy()
-                    # 如果是多声道，转置为[样本数, 通道数]
-                    if audio_np.ndim == 2:
-                        audio_np = audio_np.T
-
-                    # 保存到临时文件
-                    output_dir = folder_paths.get_temp_directory()
-                    filename = f"GJJ_AnyPreview_{hash(str(prompt))}.wav"
-                    filepath = os.path.join(output_dir, filename)
-
-                    # 确保目录存在
-                    os.makedirs(output_dir, exist_ok=True)
-
-                    # 保存WAV文件
-                    sf.write(filepath, audio_np, sample_rate)
-
-                    print(f"[GJJ] 音频文件已保存: {filepath}")
-
-                    # 构建预览数据
-                    preview_audio_data = [
-                        {
-                            "filename": filename,
-                            "subfolder": "",
-                            "type": "temp",
-                        }
-                    ]
+            normalized_audio = normalize_audio_object(merged)
+            if normalized_audio is None:
+                ui["preview_text"] = ("音频对象无有效 waveform，无法生成播放器。",)
+            else:
+                preview_audio_data = save_audio_preview(normalized_audio)
+                if preview_audio_data:
+                    waveform = normalized_audio["waveform"]
+                    sample_rate = int(normalized_audio["sample_rate"])
+                    duration = float(waveform.shape[-1]) / float(sample_rate)
                     ui["preview_audio"] = (preview_audio_data,)
+                    ui["audio"] = preview_audio_data
+                    ui["preview_sample_rate"] = (sample_rate,)
+                    ui["preview_duration"] = (duration,)
                     print(f"[GJJ] 音频预览数据: {preview_audio_data}")
-            except Exception as e:
-                print(f"[GJJ] 音频预览失败: {e}")
-                import traceback
-
-                traceback.print_exc()
-                pass
+                else:
+                    ui["preview_text"] = ("音频临时文件生成失败，无法显示播放器。",)
 
         # 新增：视频预览
         elif preview_kind == "video" and is_video_object(merged):

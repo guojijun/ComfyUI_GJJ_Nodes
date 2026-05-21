@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import json
 
+try:
+    import torch
+except Exception:
+    torch = None
+
 
 DEFAULT_SIGMAS_1 = [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.881203, 0.863321, 0.841251, 0.820089, 0.655, 0.381875, 0.0]
 DEFAULT_SIGMAS_2 = [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0]
@@ -13,6 +18,27 @@ def _safe_parse_sigmas(raw: str) -> list[float]:
         if isinstance(value, list):
             return [float(v) for v in value if isinstance(v, (int, float))]
         return []
+    except Exception:
+        return []
+
+
+def _normalize_sigmas(value) -> list[float]:
+    if value is None:
+        return []
+    if torch is not None and isinstance(value, torch.Tensor):
+        return [float(v) for v in value.detach().cpu().flatten().tolist()]
+    if isinstance(value, str):
+        parsed = _safe_parse_sigmas(value)
+        if parsed:
+            return parsed
+        try:
+            return [float(x.strip()) for x in value.split(",") if x.strip()]
+        except Exception:
+            return []
+    if isinstance(value, (list, tuple)):
+        return [float(x) for x in value]
+    try:
+        return [float(value)]
     except Exception:
         return []
 
@@ -64,26 +90,25 @@ class GJJ_SigmasEditor:
 
     def process(self, sigmas_in=None, sigmas_data: str = "", curve_mode: str = "smooth", preset: str = "默认1"):
         if sigmas_in is not None:
-            if isinstance(sigmas_in, str):
-                sigmas = _safe_parse_sigmas(sigmas_in)
-            elif isinstance(sigmas_in, list):
-                sigmas = [float(x) for x in sigmas_in]
-            else:
-                sigmas = None
-        elif preset == "默认1":
-            sigmas = DEFAULT_SIGMAS_1.copy()
-        elif preset == "默认2":
-            sigmas = DEFAULT_SIGMAS_2.copy()
+            sigmas = _normalize_sigmas(sigmas_in)
         else:
             sigmas = _safe_parse_sigmas(sigmas_data)
+            if not sigmas:
+                if preset == "默认2":
+                    sigmas = DEFAULT_SIGMAS_2.copy()
+                else:
+                    sigmas = DEFAULT_SIGMAS_1.copy()
 
         if not sigmas:
             sigmas = [1.0, 0.0]
+        if torch is None:
+            raise RuntimeError("Sigmas编辑器需要 ComfyUI 的 torch 环境才能输出 SIGMAS 张量。")
+        sigmas_tensor = torch.tensor(sigmas, dtype=torch.float32)
 
         return {
             "ui": {"sigmas": [sigmas]},
             "result": (
-                sigmas,
+                sigmas_tensor,
                 json.dumps(sigmas, ensure_ascii=False),
             ),
         }

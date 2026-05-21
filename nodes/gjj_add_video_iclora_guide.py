@@ -1,6 +1,6 @@
 import torch
 import comfy
-import folder_paths
+import comfy_extras.nodes_lt as nodes_lt
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -38,12 +38,7 @@ def append_guide_attention_entry(conditioning, pre_filter_count, latent_shape, a
 
 def get_noise_mask(latent):
     """从 latent 中获取 noise_mask，如果不存在则创建全 1 的 mask。"""
-    if "noise_mask" in latent:
-        return latent["noise_mask"]
-    # 创建全 1 的 mask
-    samples = latent["samples"]
-    return torch.ones((samples.shape[0], samples.shape[2], samples.shape[3], samples.shape[4]), 
-                      dtype=torch.float32, device=samples.device)
+    return nodes_lt.get_noise_mask(latent)
 
 
 class GJJ_AddVideoICLoRAGuide:
@@ -160,29 +155,43 @@ class GJJ_AddVideoICLoRAGuide:
         返回：
             (扩张后的 latent, noise_mask)
         """
+        if horizontal_scale == 1 and vertical_scale == 1:
+            return latent
+
         samples = latent["samples"]
-        batch, channels, frames, height, width = samples.shape
-        
-        # 计算扩张后的尺寸
-        new_height = height * vertical_scale
-        new_width = width * horizontal_scale
-        
-        # 使用双线性插值进行上采样
-        dilated = torch.nn.functional.interpolate(
-            samples.view(batch * channels, frames, height, width),
-            size=(new_height, new_width),
-            mode='bilinear',
-            align_corners=False
-        ).view(batch, channels, frames, new_height, new_width)
-        
-        # 创建 noise_mask
-        noise_mask = torch.ones((batch, frames, new_height, new_width), 
-                                dtype=torch.float32, device=samples.device)
-        
-        # 在原始区域设置 mask 值为 0，扩张区域为 1
-        noise_mask[:, :, :height, :width] = 0.0
-        
-        return {"samples": dilated, "noise_mask": noise_mask}
+        mask = latent.get("noise_mask", None)
+        dilated_shape = samples.shape[:3] + (
+            samples.shape[3] * vertical_scale,
+            samples.shape[4] * horizontal_scale,
+        )
+
+        dilated_samples = torch.zeros(
+            dilated_shape,
+            device=samples.device,
+            dtype=samples.dtype,
+            requires_grad=False,
+        )
+        dilated_samples[..., ::vertical_scale, ::horizontal_scale] = samples
+
+        dilated_mask_shape = (
+            dilated_samples.shape[0],
+            1,
+            dilated_samples.shape[2],
+            dilated_samples.shape[3],
+            dilated_samples.shape[4],
+        )
+        dilated_mask = torch.full(
+            dilated_mask_shape,
+            -1.0,
+            device=samples.device,
+            dtype=samples.dtype,
+            requires_grad=False,
+        )
+        dilated_mask[..., ::vertical_scale, ::horizontal_scale] = (
+            mask if mask is not None else 1.0
+        )
+
+        return {"samples": dilated_samples, "noise_mask": dilated_mask}
 
     def get_latent_index(self, positive, latent_length, num_images, frame_idx, scale_factors):
         """
@@ -198,21 +207,9 @@ class GJJ_AddVideoICLoRAGuide:
         返回：
             (调整后的 frame_idx, latent_idx)
         """
-        time_scale_factor = scale_factors[0]
-        
-        # 处理负索引
-        if frame_idx < 0:
-            frame_idx = latent_length + frame_idx
-        
-        # 对于长视频，向下取整到最接近的 1 mod 8
-        if latent_length > 8:
-            frame_idx = (frame_idx // time_scale_factor) * time_scale_factor
-        
-        # 确保在有效范围内
-        frame_idx = max(0, min(latent_length - 1, frame_idx))
-        latent_idx = frame_idx // time_scale_factor
-        
-        return frame_idx, latent_idx
+        return nodes_lt.LTXVAddGuide.get_latent_index(
+            positive, latent_length, num_images, frame_idx, scale_factors
+        )
 
     def append_keyframe(self, positive, negative, frame_idx, latent_image, noise_mask, 
                        guide_latent, strength, scale_factors, guide_mask=None, 
@@ -236,34 +233,19 @@ class GJJ_AddVideoICLoRAGuide:
         返回：
             (positive, negative, latent_image, noise_mask)
         """
-        time_scale_factor = scale_factors[0]
-        latent_idx = frame_idx // time_scale_factor
-        
-        # 将 guide latent 应用到视频 latent 的相应位置
-        guide_frames = guide_latent.shape[2]
-        end_idx = min(latent_idx + guide_frames, latent_image.shape[2])
-        actual_guide_frames = end_idx - latent_idx
-        
-        if actual_guide_frames > 0:
-            # 应用 guide latent（考虑强度）
-            latent_image[:, :, latent_idx:end_idx] = (
-                latent_image[:, :, latent_idx:end_idx] * (1 - strength) +
-                guide_latent[:, :, :actual_guide_frames] * strength
-            )
-        
-        # 更新 noise_mask（如果提供了 guide_mask）
-        if guide_mask is not None:
-            guide_mask = guide_mask[:, :, :actual_guide_frames]
-            if noise_mask is not None:
-                # 将 guide_mask 应用到相应位置
-                noise_mask[:, latent_idx:end_idx] = (
-                    noise_mask[:, latent_idx:end_idx] * (1 - strength) +
-                    guide_mask[:, :, :, 0, 0] * strength
-                )
-            else:
-                noise_mask = guide_mask[:, :, :, 0, 0]
-        
-        return positive, negative, latent_image, noise_mask
+        return nodes_lt.LTXVAddGuide.append_keyframe(
+            positive,
+            negative,
+            frame_idx,
+            latent_image,
+            noise_mask,
+            guide_latent,
+            strength,
+            scale_factors,
+            guide_mask=guide_mask,
+            latent_downscale_factor=latent_downscale_factor,
+            causal_fix=causal_fix,
+        )
 
     def generate(self, positive, negative, vae, latent, image, frame_idx, strength,
                  latent_downscale_factor=1.0, crop="disabled", use_tiled_encode=False,
