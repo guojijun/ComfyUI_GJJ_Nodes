@@ -25,6 +25,7 @@ from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .common_utils.dependency_checker import (
 	DEFAULT_MODEL_DOWNLOAD_URL,
 	build_dependency_model_report,
+	load_dependency_at_runtime,
 	print_dependency_model_report,
 	send_dependency_model_notice,
 )
@@ -45,7 +46,14 @@ SAM2_REQUIRED_MODEL_FILES = (
 	"sam2.1_hiera_large-fp16.safetensors",
 )
 SAM2_MODEL_DOWNLOAD_URL = DEFAULT_MODEL_DOWNLOAD_URL
-DEPENDENCY_SPECS: list[dict[str, str]] = []
+DEPENDENCY_SPECS: list[dict[str, str]] = [
+	{
+		"module_name": "iopath.common.file_io",
+		"package_name": "iopath",
+		"display_name": "iopath",
+		"description": "SAM2 内置运行时使用 iopath 进行文件路径管理。",
+	},
+]
 
 
 SAM2_CONFIG_MAP = {
@@ -299,6 +307,16 @@ def _ensure_gjj_sam2_package() -> None:
 
 def _load_sam2_runtime() -> dict[str, Any]:
 	_ensure_gjj_sam2_package()
+
+	# 运行时依赖检查（使用公共函数，从 DEPENDENCY_SPECS 读取）
+	for spec in DEPENDENCY_SPECS:
+		load_dependency_at_runtime(
+			module_name=spec["module_name"],
+			node_name=NODE_DISPLAY_NAME,
+			package_name=spec["package_name"],
+			description=spec["description"],
+		)
+
 	try:
 		from sam2.modeling.sam2_base import SAM2Base
 		from sam2.modeling.backbones.image_encoder import FpnNeck, ImageEncoder

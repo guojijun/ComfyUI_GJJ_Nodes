@@ -57,7 +57,6 @@ const STATUS_DISABLED_CLASSES = new Set([
 	"GJJ_CharacterMultiViewStudio",
 	"GJJ_Qwen2511EditOutpaint",
 	"GJJ_RifeVideoInterpolator",
-	"GJJ_SEM2PointSegmenter",
 	"GJJ_SeedVR2ImageUpscaler",
 	"GJJ_Translation",
 	"GJJ_TextInput",

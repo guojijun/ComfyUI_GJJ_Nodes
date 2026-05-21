@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
-import re
 import shutil
-import tempfile
-import traceback
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -16,107 +13,32 @@ import torch
 from comfy_api.latest import InputImpl, Types
 from PIL import Image, ImageOps
 
-from .common_utils.dependency_checker import (
-    build_dependency_model_report,
-    print_dependency_model_report,
-    send_dependency_model_notice,
-)
-
 
 NODE_NAME = "GJJ_Mesh2MotionExplore"
-NODE_DISPLAY_NAME = "GJJ · 🦴 Mesh2Motion 骨骼动画"
 ROUTE_BASE = "/gjj/mesh2motion"
-MESH2MOTION_CAPTURE_STATE: dict[str, dict[str, Any]] = {}
-MESH2MOTION_MODEL_DIR_NAME = "mesh2motion"
-MESH2MOTION_MIN_FILES = 430
-MESH2MOTION_MIN_DIRS = 15
-MESH2MOTION_MIN_BYTES = 38_000_000
-MESH2MOTION_MODEL_SPEC = {
-    "label": "Mesh2Motion 前端资源",
-    "subdir": "models",
-    "filename": MESH2MOTION_MODEL_DIR_NAME,
-    "description": (
-        "Mesh2Motion 骨骼动画编辑器完整资源目录。需要放在 models/mesh2motion，"
-        f"不少于 {MESH2MOTION_MIN_FILES} 个文件、{MESH2MOTION_MIN_DIRS} 个文件夹、{MESH2MOTION_MIN_BYTES} 字节。"
-    ),
-}
-
-
-def _inspect_mesh2motion_dir(path: Path) -> dict[str, Any]:
-    info = {
-        "path": path,
-        "exists": path.exists(),
-        "is_dir": path.is_dir(),
-        "file_count": 0,
-        "dir_count": 0,
-        "total_bytes": 0,
-    }
-    if not info["is_dir"]:
-        return info
-    try:
-        for item in path.rglob("*"):
-            try:
-                if item.is_file():
-                    info["file_count"] += 1
-                    info["total_bytes"] += int(item.stat().st_size)
-                elif item.is_dir():
-                    info["dir_count"] += 1
-            except OSError:
-                continue
-    except Exception:
-        pass
-    return info
-
-
-def _mesh2motion_model_report() -> tuple[bool, dict[str, Any], dict[str, Any]]:
-    model_dir = Path(folder_paths.models_dir) / MESH2MOTION_MODEL_DIR_NAME
-    info = _inspect_mesh2motion_dir(model_dir)
-    ok = (
-        bool(info["is_dir"])
-        and int(info["file_count"]) >= MESH2MOTION_MIN_FILES
-        and int(info["dir_count"]) >= MESH2MOTION_MIN_DIRS
-        and int(info["total_bytes"]) >= MESH2MOTION_MIN_BYTES
-    )
-    missing_models = []
-    if not ok:
-        reason = (
-            f"当前状态：目录={'存在' if info['is_dir'] else '不存在'}，"
-            f"文件 {info['file_count']}/{MESH2MOTION_MIN_FILES}，"
-            f"文件夹 {info['dir_count']}/{MESH2MOTION_MIN_DIRS}，"
-            f"大小 {info['total_bytes']}/{MESH2MOTION_MIN_BYTES} 字节。"
-        )
-        spec = dict(MESH2MOTION_MODEL_SPEC)
-        spec["description"] = f"{spec['description']} {reason}"
-        missing_models.append(spec)
-    report = build_dependency_model_report(
-        node_name=NODE_DISPLAY_NAME,
-        missing_models=missing_models,
-    )
-    return ok, info, report
-
-
-_MODELS_AVAILABLE, _MESH2MOTION_DIR_INFO, _MODEL_REPORT = _mesh2motion_model_report()
-_MISSING_MODELS = _MODEL_REPORT.get("missing_models", [])
-_DEPENDENCIES_AVAILABLE = True
-_MISSING_DEPENDENCIES = []
 
 def _get_mesh2motion_dir() -> Path:
-    """获取 Mesh2Motion 资源目录；只使用全局 models/mesh2motion。"""
+    """获取 Mesh2Motion 资源目录，优先使用全局 models 目录"""
+    # 首先检查全局 models 目录
     global_models_dir = Path(folder_paths.models_dir) / "mesh2motion"
-    if not _MODELS_AVAILABLE:
-        print_dependency_model_report(_MODEL_REPORT, title="GJJ 节点模型缺失！")
+    if global_models_dir.exists():
+        return global_models_dir
+
+    # 其次检查本地 web 目录（向后兼容）
+    local_web_dir = Path(__file__).resolve().parents[1] / "web" / "mesh2motion"
+    if local_web_dir.exists():
+        return local_web_dir
+
+    # 如果都不存在，提示用户下载
+    print(f"[GJJ Mesh2Motion] ⚠️  Mesh2Motion 资源未找到！")
+    print(f"🌏模型下载：https://github.com/scottpetrovic/mesh2motion-app/releases")
+    print(f"请将解压后的 mesh2motion 文件夹放入：{global_models_dir}")
+
+    # 创建空目录以便后续下载
+    global_models_dir.mkdir(parents=True, exist_ok=True)
     return global_models_dir
 
 UI_DIR = _get_mesh2motion_dir()
-MESH2MOTION_DEFAULTS = {
-    "show_skeleton": False,
-    "mirror_animations": False,
-    "preview_output": False,
-    "checker_room": False,
-    "width": 1024,
-    "height": 1024,
-    "fps": 24,
-}
 
 
 def _register_mime_types() -> None:
@@ -133,31 +55,6 @@ def _safe_child(base: Path, candidate: Path) -> bool:
         return True
     except Exception:
         return False
-
-
-def _capture_state_key(node_id: Any) -> str | None:
-    key = str(node_id or "").strip()
-    return key or None
-
-
-def _set_capture_state(node_id: Any, state: dict[str, Any]) -> dict[str, Any]:
-    key = _capture_state_key(node_id)
-    if not key:
-        return {}
-    cleaned: dict[str, Any] = {}
-    for name, value in (state or {}).items():
-        if value is not None:
-            cleaned[str(name)] = value
-    MESH2MOTION_CAPTURE_STATE[key] = cleaned
-    return cleaned
-
-
-def _get_capture_state(unique_id: Any) -> dict[str, Any]:
-    key = _capture_state_key(unique_id)
-    if not key:
-        return {}
-    state = MESH2MOTION_CAPTURE_STATE.get(key)
-    return dict(state) if isinstance(state, dict) else {}
 
 
 def _register_routes() -> None:
@@ -209,29 +106,6 @@ def _register_routes() -> None:
 
         return web.Response(text="文件不存在。", status=404)
 
-    @routes.post(f"{ROUTE_BASE}/capture-state")
-    async def save_mesh2motion_capture_state(request):
-        try:
-            data = await request.json()
-        except Exception:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
-
-        node_id = data.get("node_id") or data.get("nodeId") or data.get("node") or data.get("id")
-        state = data.get("state") if isinstance(data.get("state"), dict) else None
-        if state is None:
-            state = {
-                key: value
-                for key, value in data.items()
-                if key not in {"node_id", "nodeId", "node", "id"}
-            }
-
-        saved = _set_capture_state(node_id, state)
-        if not saved:
-            return web.json_response({"ok": False, "error": "缺少 node_id 或状态内容。"}, status=400)
-        return web.json_response({"ok": True, "node_id": str(node_id), "keys": list(saved.keys())})
-
     setattr(server, "_gjj_mesh2motion_routes_registered", True)
 
 
@@ -261,13 +135,6 @@ def _get_node_properties(extra_pnginfo: dict | None, unique_id: str | None) -> d
     except Exception:
         pass
     return {}
-
-
-def _prop_value(props: dict, key: str, fallback: Any) -> Any:
-    value = props.get(key, fallback)
-    if value is None:
-        return fallback
-    return value
 
 
 def _load_and_resize_image(image_path: str, width: int, height: int) -> torch.Tensor:
@@ -304,7 +171,7 @@ def _decode_video_to_tensor(video_path: str, width: int, height: int) -> torch.T
         raise RuntimeError("当前环境缺少 PyAV，无法把 Mesh2Motion 的 WebM 临时文件解码为 VIDEO。") from exc
 
     frames: list[torch.Tensor] = []
-    container = av.open(str(video_path))
+    container = av.open(video_path)
     try:
         for frame in container.decode(video=0):
             rgb = frame.to_ndarray(format="rgb24")
@@ -316,79 +183,8 @@ def _decode_video_to_tensor(video_path: str, width: int, height: int) -> torch.T
         container.close()
 
     if not frames:
-        raise RuntimeError(f"视频没有可解码帧：{video_path}")
+        return _blank_image(width, height)
     return torch.stack(frames)
-
-
-def _strip_annotated_suffix(value: str) -> str:
-    return re.sub(r"\s*\[(?:input|output|temp)\]\s*$", "", value, flags=re.IGNORECASE).strip()
-
-
-def _existing_file(path: Path) -> Path | None:
-    try:
-        return path if path.exists() and path.is_file() else None
-    except OSError:
-        return None
-
-
-def _resolve_video_path(video_name: Any) -> Path | None:
-    if not video_name:
-        return None
-
-    if isinstance(video_name, dict):
-        name = str(video_name.get("name") or video_name.get("video") or video_name.get("path") or video_name.get("file") or "").strip()
-        subfolder = str(video_name.get("subfolder") or "").strip().strip("/\\")
-        file_type = str(video_name.get("type") or "temp").strip() or "temp"
-        raw_name = f"{subfolder}/{name} [{file_type}]" if name and subfolder else (f"{name} [{file_type}]" if name else "")
-    else:
-        raw_name = str(video_name).strip()
-
-    if not raw_name:
-        return None
-
-    cleaned_name = _strip_annotated_suffix(raw_name)
-    candidates: list[Path] = []
-
-    def add(path_like: Any) -> None:
-        try:
-            path = Path(str(path_like).strip())
-        except Exception:
-            return
-        if path not in candidates:
-            candidates.append(path)
-
-    for annotated in (raw_name, cleaned_name):
-        if annotated:
-            try:
-                add(folder_paths.get_annotated_filepath(annotated))
-            except Exception:
-                pass
-
-    raw_path = Path(cleaned_name)
-    if raw_path.is_absolute():
-        add(raw_path)
-    else:
-        for getter_name in ("get_temp_directory", "get_input_directory", "get_output_directory"):
-            getter = getattr(folder_paths, getter_name, None)
-            if callable(getter):
-                try:
-                    root = Path(getter())
-                    add(root / raw_path)
-                    add(root / "mesh2motion" / raw_path.name)
-                except Exception:
-                    pass
-        add(Path(tempfile.gettempdir()) / raw_path)
-        add(Path(tempfile.gettempdir()) / "mesh2motion" / raw_path.name)
-
-    for candidate in candidates:
-        existing = _existing_file(candidate)
-        if existing:
-            return existing
-
-    print("[GJJ Mesh2Motion] 视频文件解析失败，已检查候选路径：")
-    for candidate in candidates:
-        print(f"[GJJ Mesh2Motion]   - {candidate}")
-    return None
 
 
 def _video_from_frames(frames: torch.Tensor, fps: int):
@@ -405,32 +201,10 @@ class GJJ_Mesh2MotionExplore:
     CATEGORY = "GJJ/3D"
     FUNCTION = "execute"
     OUTPUT_NODE = True
-    DESCRIPTION_INTRO = (
+    DESCRIPTION = (
         "GJJ 本地零依赖 Mesh2Motion 单节点：内嵌 3D 骨骼动画编辑器，"
         "执行时输出当前截图和相机预设录制的视频。"
     )
-    DESCRIPTION = (
-        DESCRIPTION_INTRO
-        if _MODELS_AVAILABLE
-        else f"{_MODEL_REPORT['warning_message']}\n\n{DESCRIPTION_INTRO}"
-    )
-    REQUIRED_MODELS = [MESH2MOTION_MODEL_SPEC]
-    GJJ_HELP = {
-        "description": DESCRIPTION,
-        "notice": _MODEL_REPORT["help_message"] if not _MODEL_REPORT["available"] else "",
-        "install_cmd": _MODEL_REPORT["install_cmd"] if not _MODEL_REPORT["available"] else "",
-        "copy_text": _MODEL_REPORT["copy_text"] if not _MODEL_REPORT["available"] else "",
-        "copy_label": _MODEL_REPORT["copy_label"] if not _MODEL_REPORT["available"] else "",
-        "warning_message": _MODEL_REPORT["warning_message"] if not _MODEL_REPORT["available"] else "",
-        "models": REQUIRED_MODELS,
-        "dependencies": [
-            "Mesh2Motion 前端资源目录：models/mesh2motion",
-        ],
-        "tips": [
-            f"完整资源不少于 {MESH2MOTION_MIN_FILES} 个文件、{MESH2MOTION_MIN_DIRS} 个文件夹、{MESH2MOTION_MIN_BYTES} 字节。",
-            "资源缺失或不完整时，节点面板会显示模型下载提示和复制下载网址按钮。",
-        ],
-    }
     SEARCH_ALIASES = [
         "Mesh2Motion",
         "mesh motion",
@@ -451,6 +225,71 @@ class GJJ_Mesh2MotionExplore:
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "show_skeleton": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display_name": "显示骨骼",
+                        "tooltip": "开启后在 3D 面板中显示角色骨骼辅助线。",
+                    },
+                ),
+                "mirror_animations": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display_name": "镜像动画",
+                        "tooltip": "开启后把当前动画左右镜像显示和输出。",
+                    },
+                ),
+                "preview_output": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display_name": "显示输出取景框",
+                        "tooltip": "在 3D 面板中显示最终输出比例的取景提示。",
+                    },
+                ),
+                "checker_room": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display_name": "棋盘格背景",
+                        "tooltip": "开启后在 3D 面板中显示棋盘格背景，便于观察透明区域。",
+                    },
+                ),
+                "width": (
+                    "INT",
+                    {
+                        "default": 1024,
+                        "min": 128,
+                        "max": 4096,
+                        "step": 64,
+                        "display_name": "输出宽度",
+                        "tooltip": "最终截图和视频的宽度（像素）。",
+                    },
+                ),
+                "height": (
+                    "INT",
+                    {
+                        "default": 1024,
+                        "min": 128,
+                        "max": 4096,
+                        "step": 64,
+                        "display_name": "输出高度",
+                        "tooltip": "最终截图和视频的高度（像素）。",
+                    },
+                ),
+                "fps": (
+                    "INT",
+                    {
+                        "default": 24,
+                        "min": 1,
+                        "max": 120,
+                        "step": 1,
+                        "display_name": "视频帧率",
+                        "tooltip": "录制视频时的帧率（FPS）。",
+                    },
+                ),
             },
             "hidden": {
                 "image": "IMAGE",
@@ -460,66 +299,51 @@ class GJJ_Mesh2MotionExplore:
             },
         }
 
-    @classmethod
-    def VALIDATE_INPUTS(cls, **kwargs):
-        # 面板状态存放在 workflow properties 字典里；旧工作流残留输入不应触发 ComfyUI 通用 min/max 校验。
-        return True
-
     def execute(
         self,
+        show_skeleton=False,
+        mirror_animations=False,
+        preview_output=False,
+        checker_room=False,
+        width=1024,
+        height=1024,
+        fps=24,
         image="",
         video_frames="",
         unique_id=None,
         extra_pnginfo=None,
-        **kwargs,
     ):
-        if not _MODELS_AVAILABLE:
-            print_dependency_model_report(_MODEL_REPORT, title="GJJ 节点模型缺失！")
-            send_dependency_model_notice(_MODEL_REPORT, unique_id=unique_id)
-            raise RuntimeError(_MODEL_REPORT.get("warning_message") or "Mesh2Motion 模型资源缺失。")
-
         print(f"[GJJ Mesh2Motion] ========== 开始执行 ==========")
         print(f"[GJJ Mesh2Motion] unique_id: {unique_id}")
         print(f"[GJJ Mesh2Motion] image 参数长度: {len(str(image)) if image else 0}")
         print(f"[GJJ Mesh2Motion] video_frames 参数长度: {len(str(video_frames)) if video_frames else 0}")
         
+        width = _normalize_size(width, 1024, "输出宽度")
+        height = _normalize_size(height, 1024, "输出高度")
+        fps = max(1, min(120, int(fps)))
+
         # 优先从 properties 读取数据（新方案）
         props = _get_node_properties(extra_pnginfo, unique_id)
         print(f"[GJJ Mesh2Motion] 节点 properties: {list(props.keys())}")
-        cached_state = _get_capture_state(unique_id)
-        print(f"[GJJ Mesh2Motion] 后端缓存状态: {list(cached_state.keys())}")
-
-        defaults = MESH2MOTION_DEFAULTS
-        show_skeleton = bool(_prop_value(props, "mesh2motion_show_skeleton", kwargs.get("show_skeleton", defaults["show_skeleton"])))
-        mirror_animations = bool(_prop_value(props, "mesh2motion_mirror_animations", kwargs.get("mirror_animations", defaults["mirror_animations"])))
-        preview_output = bool(_prop_value(props, "mesh2motion_preview_output", kwargs.get("preview_output", defaults["preview_output"])))
-        checker_room = bool(_prop_value(props, "mesh2motion_checker_room", kwargs.get("checker_room", defaults["checker_room"])))
-        width = _normalize_size(_prop_value(props, "mesh2motion_width", kwargs.get("width", defaults["width"])), defaults["width"], "输出宽度")
-        height = _normalize_size(_prop_value(props, "mesh2motion_height", kwargs.get("height", defaults["height"])), defaults["height"], "输出高度")
-        fps = max(1, min(120, int(_prop_value(props, "mesh2motion_fps", kwargs.get("fps", defaults["fps"])))))
         
-        if cached_state:
-            image_data = cached_state.get("image")
-            video_data = cached_state.get("video")
-        else:
-            image_data = props.get("mesh2motion_image", "")
-            video_data = props.get("mesh2motion_video", "")
+        image_data = props.get("mesh2motion_image", "")
+        video_data = props.get("mesh2motion_video", "")
 
-        print(f"[GJJ Mesh2Motion] image_data 类型: {type(image_data).__name__ if image_data is not None else 'None'}")
-        print(f"[GJJ Mesh2Motion] video_data 类型: {type(video_data).__name__ if video_data is not None else 'None'}")
+        print(f"[GJJ Mesh2Motion] properties 中的 image_data 长度: {len(image_data) if image_data else 0}")
+        print(f"[GJJ Mesh2Motion] properties 中的 video_data 长度: {len(video_data) if video_data else 0}")
 
         # 如果 properties 有数据，优先使用
         if image_data:
-            print(f"[GJJ Mesh2Motion] 使用缓存/属性中的截图数据")
+            print(f"[GJJ Mesh2Motion] 使用 properties 中的截图数据")
             image = image_data
         if video_data:
-            print(f"[GJJ Mesh2Motion] 使用缓存/属性中的视频数据")
+            print(f"[GJJ Mesh2Motion] 使用 properties 中的视频数据")
             video_frames = video_data
 
         if image:
             try:
                 print(f"[GJJ Mesh2Motion] 开始解析截图数据...")
-                payload = image if isinstance(image, dict) else json.loads(str(image))
+                payload = json.loads(str(image))
                 name = payload.get("name", "")
                 subfolder = payload.get("subfolder", "")
                 file_type = payload.get("type", "temp")
@@ -543,20 +367,13 @@ class GJJ_Mesh2MotionExplore:
             screenshot = _blank_image(width, height)
 
         video_tensor = None
-        output_fps = fps
         if video_frames:
             try:
                 print(f"[GJJ Mesh2Motion] 开始解析视频数据...")
-                payload = video_frames if isinstance(video_frames, dict) else json.loads(str(video_frames))
-                video_name = None
-                if isinstance(payload, dict):
-                    video_name = payload.get("video") or payload.get("path") or payload.get("file")
-                    try:
-                        output_fps = max(1, min(120, int(payload.get("fps", output_fps))))
-                    except Exception:
-                        output_fps = fps
+                payload = json.loads(str(video_frames))
+                video_name = payload.get("video") if isinstance(payload, dict) else None
                 if video_name:
-                    video_path = _resolve_video_path(video_name)
+                    video_path = folder_paths.get_annotated_filepath(video_name)
                     print(f"[GJJ Mesh2Motion] 尝试加载视频：{video_path}")
                     if not video_path or not Path(video_path).exists():
                         raise RuntimeError(f"视频文件不存在：{video_path}")
@@ -567,15 +384,15 @@ class GJJ_Mesh2MotionExplore:
                 traceback.print_exc()
 
         if video_tensor is None:
-            print(f"[GJJ Mesh2Motion] 没有可用视频数据，使用当前截图作为单帧视频占位")
-            video_tensor = screenshot.clone()
+            print(f"[GJJ Mesh2Motion] 没有视频数据，使用黑色视频占位")
+            video_tensor = _blank_image(width, height)
 
         print(f"[GJJ Mesh2Motion] ========== 执行完成 ==========")
-        return (screenshot, _video_from_frames(video_tensor, output_fps))
+        return (screenshot, _video_from_frames(video_tensor, fps))
 
 
 _register_routes()
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_Mesh2MotionExplore}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: NODE_DISPLAY_NAME}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🦴 Mesh2Motion 骨骼动画"}
