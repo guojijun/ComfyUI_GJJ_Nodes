@@ -74,6 +74,39 @@ def is_image_tensor(value: Any) -> bool:
     return False
 
 
+def is_mask_tensor(value: Any) -> bool:
+    if not isinstance(value, torch.Tensor):
+        return False
+    if is_image_tensor(value):
+        return False
+    if value.ndim == 2:
+        return True
+    if value.ndim == 3:
+        return True
+    if value.ndim == 4 and value.shape[-1] == 1:
+        return True
+    if value.ndim == 4 and value.shape[1] == 1:
+        return True
+    return False
+
+
+def normalize_mask_tensor(value: torch.Tensor) -> torch.Tensor:
+    if value.ndim == 2:
+        value = value.unsqueeze(0)
+    elif value.ndim == 4 and value.shape[-1] == 1:
+        value = value[..., 0]
+    elif value.ndim == 4 and value.shape[1] == 1:
+        value = value[:, 0]
+    elif value.ndim != 3:
+        raise ValueError(f"不支持的 MASK 维度: {tuple(value.shape)}")
+    return value.detach().cpu().float().clamp(0.0, 1.0).contiguous()
+
+
+def mask_to_preview_image(value: torch.Tensor) -> torch.Tensor:
+    mask = normalize_mask_tensor(value)
+    return mask.unsqueeze(-1).expand(-1, -1, -1, 3).contiguous()
+
+
 def normalize_image_tensor(value: torch.Tensor) -> torch.Tensor:
     if value.ndim == 3:
         return value.unsqueeze(0)
@@ -275,6 +308,13 @@ def merge_values(values: list[Any]) -> tuple[str, Any, str]:
         preview_text = f"已合并 {int(merged.shape[0])} 张图片，尺寸 {int(merged.shape[2])} x {int(merged.shape[1])}"
         return "image", merged, preview_text
 
+    if all(is_mask_tensor(value) for value in values):
+        merged = merge_images(
+            [mask_to_preview_image(value) for value in values if isinstance(value, torch.Tensor)]
+        )
+        preview_text = f"已转换 {int(merged.shape[0])} 张遮罩为灰度预览图，尺寸 {int(merged.shape[2])} x {int(merged.shape[1])}"
+        return "mask", merged, preview_text
+
     if all(isinstance(value, str) for value in values):
         merged = "\n".join(str(value) for value in values if str(value) != "")
         return "text", merged, merged or "空文本"
@@ -354,6 +394,11 @@ class GJJ_AnyPreview:
                 "max_batch_size": 100,
             },
             {
+                "name": "遮罩预览",
+                "description": "自动把 MASK 转换为黑白灰度图预览，白色代表遮罩值 1，黑色代表遮罩值 0",
+                "supported_formats": ["MASK"],
+            },
+            {
                 "name": "文本预览",
                 "description": "支持 Markdown 渲染、代码高亮、自动换行",
                 "supported_formats": ["plain text", "markdown"],
@@ -374,20 +419,20 @@ class GJJ_AnyPreview:
         ],
         "inputs": {
             "batch_image": {
-                "type": "GJJ_BATCH_IMAGE,IMAGE,STRING,VIDEO",
+                "type": "GJJ_BATCH_IMAGE,IMAGE,MASK,STRING,VIDEO",
                 "required": False,
-                "description": "GJJ 专用批量图片接口，优先作为图片批次预览（兼容标准 IMAGE）",
+                "description": "GJJ 专用批量图片接口，优先作为图片批次预览（兼容标准 IMAGE；MASK 会转灰度图预览）",
             },
             "any_XX": {
                 "type": "*",
                 "required": False,
-                "description": "动态插槽，可连接任意类型数据（自动编号 XX）",
+                "description": "动态插槽，可连接任意类型数据（自动编号 XX；MASK 会转灰度图预览）",
             },
         },
         "outputs": {
             "统一预览结果": {
                 "type": "*",
-                "description": "合并后的结果；图片输出 IMAGE 批次，文本输出 STRING，其他输出原对象",
+                "description": "合并后的结果；图片输出 IMAGE 批次，单个 MASK 保持原 MASK，文本输出 STRING，其他输出原对象",
             },
         },
         "usage_examples": [
@@ -400,6 +445,11 @@ class GJJ_AnyPreview:
                 "title": "批量图片检查",
                 "description": "使用 GJJ 批量图片节点进行批次预览",
                 "workflow": "[GJJ Batch Image] → [GJJ Any Preview]",
+            },
+            {
+                "title": "遮罩检查",
+                "description": "连接 MASK 后自动显示黑白灰度遮罩图",
+                "workflow": "[MASK Output] → [GJJ Any Preview]",
             },
             {
                 "title": "音频生成预览",
@@ -447,6 +497,7 @@ class GJJ_AnyPreview:
                 "version": "2.0.0",
                 "date": "2026-05-04",
                 "changes": [
+                    "✨ 新增 MASK 自动灰度图预览",
                     "✨ 新增音频预览功能（WAV/MP3 支持）",
                     "✨ 新增视频预览功能（MP4/H.264 支持）",
                     "🐛 修复 UI 数据格式问题（元组包裹规范）",
@@ -490,10 +541,10 @@ class GJJ_AnyPreview:
         # 将 batch_image 定义传给 FlexibleOptionalInputType
         batch_image_data = {
             "batch_image": (
-                "GJJ_BATCH_IMAGE,IMAGE",
+                "GJJ_BATCH_IMAGE,IMAGE,MASK",
                 {
                     "display_name": "GJJ 批量图片",
-                    "tooltip": "GJJ 专用批量图片接口，优先作为图片批次预览（兼容标准 IMAGE）",
+                    "tooltip": "GJJ 专用批量图片接口，优先作为图片批次预览（兼容标准 IMAGE；MASK 会自动转为黑白图预览）",
                 },
             ),
         }
@@ -531,7 +582,7 @@ class GJJ_AnyPreview:
         # 添加调试日志
         print(f"[GJJ] 开始构建ui数据 - preview_kind: {preview_kind}")
 
-        if preview_kind == "image" and isinstance(merged, torch.Tensor):
+        if preview_kind in {"image", "mask"} and isinstance(merged, torch.Tensor):
             image_ui = self.preview_image.save_images(
                 merged,
                 filename_prefix="GJJ_AnyPreview",
@@ -539,6 +590,8 @@ class GJJ_AnyPreview:
                 extra_pnginfo=extra_pnginfo,
             )
             ui["preview_images"] = image_ui.get("ui", {}).get("images", [])
+            if preview_kind == "mask":
+                ui["preview_kind"] = ("image",)
             print(f"[GJJ] 图片ui数据: {ui['preview_images']}")
 
         # 新增：音频预览
@@ -673,6 +726,8 @@ class GJJ_AnyPreview:
         # - 非图片对象保持旧逻辑：单输入返回原对象，多输入返回合并对象。
         if preview_kind == "image" and isinstance(merged, torch.Tensor):
             result_output = merged
+        elif preview_kind == "mask":
+            result_output = values[0] if len(values) == 1 else merged
         else:
             result_output = values[0] if len(values) == 1 else merged
 

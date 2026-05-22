@@ -24,14 +24,14 @@ def _load_wanvideo_deps():
         return
 
     try:
-        import WanVideoWrapper.nodes_model_loading as wan_video_module
+        from ..vendor.wanvideo_wrapper import nodes_model_loading as wan_video_module
         _wan_video_wrapper = wan_video_module
         _WANVIDEO_LOADED = True
     except ImportError as e:
         raise RuntimeError(
-            f"缺少 WanVideoWrapper 依赖，请先安装 ComfyUI-WanVideoWrapper 插件。\n"
+            f"GJJ 内置 WanVideo runtime 加载失败。\n"
             f"错误信息: {e}\n"
-            f"安装命令: git clone https://github.com/WanVideo/ComfyUI-WanVideoWrapper.git custom_nodes/ComfyUI-WanVideoWrapper"
+            f"说明: GJJ 不依赖 ComfyUI-WanVideoWrapper 插件本体；如果这里报 pip 库缺失，请按 GJJ SKILL 的运行时依赖方案安装。"
         )
 
 def _filter_models_by_keyword(model_list, keyword):
@@ -123,23 +123,12 @@ class GJJ_WanVideoModelLoader:
         _load_wanvideo_deps()
 
         loader = _wan_video_wrapper.WanVideoModelLoader()
-        wanvideo_result = loader.loadmodel(
-            model=model,
-            base_precision=base_precision,
-            quantization=quantization,
-            load_device=load_device,
-            attention_mode=attention_mode,
-            rms_norm_function=rms_norm_function,
-            unique_id=unique_id,
-            extra_pnginfo=extra_pnginfo
-        )
-
         multitalk_result = None
         if multitalk_model and multitalk_model not in ("[未找到模型]", ""):
             try:
-                from WanVideoWrapper.multitalk.nodes import MultiTalkModelLoader
-                multitalk_loader = MultiTalkModelLoader()
-                multitalk_result = multitalk_loader.loadmodel(model=multitalk_model)
+                from ..vendor.wanvideo_wrapper.multitalk import nodes as multitalk_nodes
+                multitalk_loader = multitalk_nodes.MultiTalkModelLoader()
+                multitalk_result = multitalk_loader.loadmodel(model=multitalk_model)[0]
             except Exception as e:
                 if PromptServer:
                     PromptServer.instance.send_sync("gjj_wanvideo_model_loader_error", {
@@ -149,7 +138,17 @@ class GJJ_WanVideoModelLoader:
                     })
                 raise RuntimeError(f"加载 MultiTalk 模型失败: {e}")
 
-        return (wanvideo_result, multitalk_result)
+        wanvideo_result = loader.loadmodel(
+            model=model,
+            base_precision=base_precision,
+            quantization=quantization,
+            load_device=load_device,
+            attention_mode=attention_mode,
+            rms_norm_function=rms_norm_function,
+            multitalk_model=multitalk_result
+        )
+
+        return (wanvideo_result[0], multitalk_result)
 
 NODE_CLASS_MAPPINGS = {
     "GJJ_WanVideoModelLoader": GJJ_WanVideoModelLoader,

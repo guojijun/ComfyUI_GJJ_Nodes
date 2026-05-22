@@ -537,30 +537,184 @@ NODE_CLASS_MAPPINGS["GJJ_CFGZeroStar"] = GJJ_CFGZeroStar
 NODE_DISPLAY_NAME_MAPPINGS["GJJ_CFGZeroStar"] = "⭐ GJJ CFG ZeroStar"
 
 
+GJJ_TEACACHE_WAN_MODEL_TYPES = {
+    "Wan2.1 文生视频 1.3B": "wan2.1_t2v_1.3B",
+    "Wan2.1 文生视频 14B": "wan2.1_t2v_14B",
+    "Wan2.1 图生视频 480p 14B": "wan2.1_i2v_480p_14B",
+    "Wan2.1 图生视频 720p 14B": "wan2.1_i2v_720p_14B",
+    "Wan2.1 文生视频 1.3B ret_mode": "wan2.1_t2v_1.3B_ret_mode",
+    "Wan2.1 文生视频 14B ret_mode": "wan2.1_t2v_14B_ret_mode",
+    "Wan2.1 图生视频 480p 14B ret_mode": "wan2.1_i2v_480p_14B_ret_mode",
+    "Wan2.1 图生视频 720p 14B ret_mode": "wan2.1_i2v_720p_14B_ret_mode",
+    "1.3B": "wan2.1_t2v_1.3B",
+    "14B": "wan2.1_t2v_14B",
+    "图生视频480p": "wan2.1_i2v_480p_14B",
+    "图生视频720p": "wan2.1_i2v_720p_14B",
+}
+
+GJJ_TEACACHE_WAN_MODEL_CHOICES = [
+    "Wan2.1 文生视频 1.3B",
+    "Wan2.1 文生视频 14B",
+    "Wan2.1 图生视频 480p 14B",
+    "Wan2.1 图生视频 720p 14B",
+    "Wan2.1 文生视频 1.3B ret_mode",
+    "Wan2.1 文生视频 14B ret_mode",
+    "Wan2.1 图生视频 480p 14B ret_mode",
+    "Wan2.1 图生视频 720p 14B ret_mode",
+]
+
+GJJ_TEACACHE_WAN_COEFFICIENTS = {
+    "wan2.1_t2v_1.3B": [2.39676752e03, -1.31110545e03, 2.01331979e02, -8.29855975e00, 1.37887774e-01],
+    "wan2.1_t2v_14B": [-5784.54975374, 5449.50911966, -1811.16591783, 256.27178429, -13.02252404],
+    "wan2.1_i2v_480p_14B": [-3.02331670e02, 2.23948934e02, -5.25463970e01, 5.87348440e00, -2.01973289e-01],
+    "wan2.1_i2v_720p_14B": [-114.36346466, 65.26524496, -18.82220707, 4.91518089, -0.23412683],
+    "wan2.1_t2v_1.3B_ret_mode": [-5.21862437e04, 9.23041404e03, -5.28275948e02, 1.36987616e01, -4.99875664e-02],
+    "wan2.1_t2v_14B_ret_mode": [-3.03318725e05, 4.90537029e04, -2.65530556e03, 5.87365115e01, -3.15583525e-01],
+    "wan2.1_i2v_480p_14B_ret_mode": [2.57151496e05, -3.54229917e04, 1.40286849e03, -1.35890334e01, 1.32517977e-01],
+    "wan2.1_i2v_720p_14B_ret_mode": [8.10705460e03, 2.13393892e03, -3.72934672e02, 1.66203073e01, -4.17769401e-02],
+}
+
+
+def _gjj_teacache_poly1d(coefficients, x):
+    result = torch.zeros_like(x)
+    degree = len(coefficients) - 1
+    for index, coeff in enumerate(coefficients):
+        result += float(coeff) * (x ** (degree - index))
+    return result
+
+
+def _gjj_teacache_wan_forward(self, x, t, context, clip_fea=None, freqs=None, transformer_options=None, **kwargs):
+    if transformer_options is None:
+        transformer_options = {}
+    try:
+        from comfy.ldm.wan.model import sinusoidal_embedding_1d
+    except Exception as error:
+        raise RuntimeError("当前 ComfyUI 缺少 WanVideo 官方模型函数 sinusoidal_embedding_1d，无法启用 TeaCache。") from error
+
+    patches_replace = transformer_options.get("patches_replace", {})
+    rel_l1_thresh = transformer_options.get("rel_l1_thresh")
+    coefficients = transformer_options.get("coefficients")
+    cond_or_uncond = transformer_options.get("cond_or_uncond") or [0]
+    model_type = transformer_options.get("model_type", "")
+    enable_teacache = transformer_options.get("enable_teacache", True)
+    cache_device = transformer_options.get("cache_device") or x.device
+
+    x = self.patch_embedding(x.float()).to(x.dtype)
+    grid_sizes = x.shape[2:]
+    x = x.flatten(2).transpose(1, 2)
+
+    e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).to(dtype=x[0].dtype))
+    e0 = self.time_projection(e).unflatten(1, (6, self.dim))
+
+    context = self.text_embedding(context)
+
+    context_img_len = None
+    if clip_fea is not None:
+        if self.img_emb is not None:
+            context_clip = self.img_emb(clip_fea)
+            context = torch.concat([context_clip, context], dim=1)
+        context_img_len = clip_fea.shape[-2]
+
+    blocks_replace = patches_replace.get("dit", {})
+    modulated_input = e0.to(cache_device) if "ret_mode" in model_type else e.to(cache_device)
+    if not hasattr(self, "teacache_state"):
+        self.teacache_state = {
+            0: {"should_calc": True, "accumulated_rel_l1_distance": 0, "previous_modulated_input": None, "previous_residual": None},
+            1: {"should_calc": True, "accumulated_rel_l1_distance": 0, "previous_modulated_input": None, "previous_residual": None},
+        }
+
+    def update_cache_state(cache, current_input):
+        if cache["previous_modulated_input"] is not None:
+            try:
+                delta = (current_input - cache["previous_modulated_input"]).abs().mean() / cache["previous_modulated_input"].abs().mean()
+                cache["accumulated_rel_l1_distance"] += _gjj_teacache_poly1d(coefficients, delta)
+                if cache["accumulated_rel_l1_distance"] < rel_l1_thresh:
+                    cache["should_calc"] = False
+                else:
+                    cache["should_calc"] = True
+                    cache["accumulated_rel_l1_distance"] = 0
+            except Exception:
+                cache["should_calc"] = True
+                cache["accumulated_rel_l1_distance"] = 0
+        cache["previous_modulated_input"] = current_input
+
+    batch_per_branch = max(1, int(len(x) / max(1, len(cond_or_uncond))))
+    for i, key in enumerate(cond_or_uncond):
+        cache_key = int(key)
+        if cache_key not in self.teacache_state:
+            self.teacache_state[cache_key] = {"should_calc": True, "accumulated_rel_l1_distance": 0, "previous_modulated_input": None, "previous_residual": None}
+        update_cache_state(self.teacache_state[cache_key], modulated_input[i * batch_per_branch:(i + 1) * batch_per_branch])
+
+    if enable_teacache:
+        should_calc = False
+        for key in cond_or_uncond:
+            should_calc = should_calc or self.teacache_state[int(key)]["should_calc"]
+    else:
+        should_calc = True
+
+    if not should_calc:
+        for i, key in enumerate(cond_or_uncond):
+            previous_residual = self.teacache_state[int(key)].get("previous_residual")
+            if previous_residual is None:
+                should_calc = True
+                break
+            x[i * batch_per_branch:(i + 1) * batch_per_branch] += previous_residual.to(x.device)
+
+    if should_calc:
+        original_x = x.to(cache_device)
+        for index, block in enumerate(self.blocks):
+            if ("double_block", index) in blocks_replace:
+                def block_wrap(args):
+                    out = {}
+                    out["img"] = block(args["img"], context=args["txt"], e=args["vec"], freqs=args["pe"], context_img_len=context_img_len)
+                    return out
+
+                out = blocks_replace[("double_block", index)](
+                    {"img": x, "txt": context, "vec": e0, "pe": freqs},
+                    {"original_block": block_wrap, "transformer_options": transformer_options},
+                )
+                x = out["img"]
+            else:
+                x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len)
+        for i, key in enumerate(cond_or_uncond):
+            self.teacache_state[int(key)]["previous_residual"] = (x.to(cache_device) - original_x)[i * batch_per_branch:(i + 1) * batch_per_branch]
+
+    x = self.head(x, e)
+    return self.unpatchify(x, grid_sizes)
+
+
 class GJJ_TeaCacheWanVideo:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("MODEL",),
+                "model": (
+                    "MODEL",
+                    {
+                        "display_name": "模型",
+                        "tooltip": "WanVideo 扩散模型。节点会在模型上挂载 TeaCache 加速逻辑。",
+                    },
+                ),
                 "rel_l1_thresh": (
                     "FLOAT",
                     {
-                        "default": 0.275,
+                        "default": 0.4,
                         "min": 0.0,
                         "max": 10.0,
-                        "step": 0.001,
-                        "tooltip": "TeaCache 阈值，越大跳过越多但可能失真。使用系数时推荐 0.2-0.4",
+                        "step": 0.01,
+                        "display_name": "缓存阈值",
+                        "tooltip": "TeaCache 缓存强度。数值越大跳过越多、速度越快，但画面变化可能更大；0 表示关闭。",
                     },
                 ),
                 "start_percent": (
                     "FLOAT",
                     {
-                        "default": 0.1,
+                        "default": 0.0,
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.01,
-                        "tooltip": "开始启用 TeaCache 的步数百分比（避免前期跳过）",
+                        "display_name": "开始比例",
+                        "tooltip": "从采样进度的哪个比例开始启用 TeaCache。0 表示从第一步开始。",
                     },
                 ),
                 "end_percent": (
@@ -570,260 +724,134 @@ class GJJ_TeaCacheWanVideo:
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.01,
-                        "tooltip": "停止启用 TeaCache 的步数百分比",
+                        "display_name": "结束比例",
+                        "tooltip": "采样进度超过该比例后停止启用 TeaCache。1 表示一直启用到最后。",
                     },
                 ),
                 "cache_device": (
                     ["主设备", "卸载设备"],
                     {
-                        "default": "卸载设备",
-                        "tooltip": "缓存存储设备：主设备（快但占显存）或卸载设备（省显存）",
+                        "default": "主设备",
+                        "display_name": "缓存设备",
+                        "tooltip": "缓存存放位置。主设备速度更快但占显存；卸载设备更省显存。",
                     },
                 ),
-                "coefficients": (
-                    ["关闭", "1.3B", "14B", "图生视频480p", "图生视频720p"],
+                "model_type": (
+                    GJJ_TEACACHE_WAN_MODEL_CHOICES,
                     {
-                        "default": "图生视频480p",
-                        "tooltip": "模型对应的系数预设，正确选择可提高缓存准确性",
+                        "default": "Wan2.1 图生视频 480p 14B",
+                        "display_name": "模型类型",
+                        "tooltip": "选择与当前 WanVideo 模型对应的 TeaCache 系数。旧工作流中的 1.3B/14B/图生视频480p/720p 会自动兼容。",
                     },
                 ),
             }
         }
 
     RETURN_TYPES = ("MODEL",)
-    RETURN_NAMES = ("model",)
+    RETURN_NAMES = ("模型",)
+    OUTPUT_TOOLTIPS = ("已挂载 WanVideo TeaCache 的模型。",)
     FUNCTION = "patch"
     CATEGORY = "GJJ/模型优化"
-    DESCRIPTION = "TeaCache for WanVideo：加速 WanVideo 模型推理，https://github.com/ali-vilab/TeaCache"
+    DESCRIPTION = "GJJ · 🍵 GJJ TeaCache (WanVideo)：为 Wan2.1 视频模型挂载 TeaCache，加速采样推理。"
+    GJJ_HELP = {
+        "title": "WanVideo TeaCache",
+        "description": "按新版 ComfyUI-TeaCache 的 Wan2.1 路径迁移，只使用 ComfyUI 官方 WanVideo 模型接口和 GJJ 本地代码。",
+        "🌏模型下载": "无需额外模型；复用已加载的 WanVideo 模型。",
+        "requirements": [
+            "需要当前 ComfyUI 内置 `comfy.ldm.wan.model.sinusoidal_embedding_1d`。",
+            "需要输入模型本身是 Wan2.1/WanVideo 结构，否则模型没有对应 forward_orig 可挂载。",
+            "不需要安装 ComfyUI-TeaCache 插件；本节点已迁移 WanVideo 必要逻辑。",
+        ],
+        "usage": [
+            "模型类型必须与实际 WanVideo 模型匹配。",
+            "缓存阈值越大越快，但可能带来更多画面差异。",
+            "若画面变化明显，先降低缓存阈值或缩小启用区间。",
+        ],
+        "source": "D:/AI/MOD/custom_nodes/ComfyUI-TeaCache/nodes.py",
+    }
 
     def patch(
         self,
         model,
-        rel_l1_thresh=0.275,
-        start_percent=0.1,
+        rel_l1_thresh=0.4,
+        start_percent=0.0,
         end_percent=1.0,
-        cache_device="卸载设备",
-        coefficients="图生视频480p",
+        cache_device="主设备",
+        model_type="Wan2.1 图生视频 480p 14B",
         unique_id=None,
         **kwargs,
     ):
-        try:
-            import numpy as np
-            from unittest.mock import patch as mock_patch
-        except ImportError:
-            send_error_to_frontend(
-                unique_id,
-                "缺少依赖",
-                "请安装 numpy",
-                f'"{sys.executable}" -m pip install numpy',
-            )
-            return (model,)
-
         if rel_l1_thresh == 0:
             return (model,)
 
-        coef_map = {
-            "关闭": "disabled",
-            "1.3B": "1.3B",
-            "14B": "14B",
-            "图生视频480p": "i2v_480",
-            "图生视频720p": "i2v_720",
-        }
-        dev_map = {"主设备": "main_device", "卸载设备": "offload_device"}
-
         try:
-            teacache_coefficients_map = {
-                "disabled": [],
-                "1.3B": [2396.76752, -1311.10545, 201.331979, -8.29855975, 0.137887774],
-                "14B": [
-                    -5784.54975374,
-                    5449.50911966,
-                    -1811.16591783,
-                    256.27178429,
-                    -13.02252404,
-                ],
-                "i2v_480": [
-                    -302.33167,
-                    223.948934,
-                    -52.546397,
-                    5.8734844,
-                    -0.201973289,
-                ],
-                "i2v_720": [
-                    -114.36346466,
-                    65.26524496,
-                    -18.82220707,
-                    4.91518089,
-                    -0.23412683,
-                ],
-            }
-            coef_key = coef_map.get(coefficients, coefficients)
-            coeffs = teacache_coefficients_map.get(coef_key, [])
+            if torch is None:
+                raise RuntimeError("缺少 torch，无法启用 TeaCache。")
+            if mm is None:
+                raise RuntimeError("缺少 ComfyUI model_management，无法判断缓存设备。")
 
-            dev_key = dev_map.get(cache_device, cache_device)
-            teacache_device = (
-                mm.get_torch_device()
-                if dev_key == "main_device"
-                else mm.unet_offload_device()
-            )
+            source_type = GJJ_TEACACHE_WAN_MODEL_TYPES.get(model_type, str(model_type))
+            coeffs = GJJ_TEACACHE_WAN_COEFFICIENTS.get(source_type)
+            if not coeffs:
+                raise RuntimeError(f"未找到模型类型 `{model_type}` 对应的 TeaCache 系数。")
+            teacache_device = mm.get_torch_device() if cache_device == "主设备" else mm.unet_offload_device()
 
             model_clone = model.clone()
             if "transformer_options" not in model_clone.model_options:
                 model_clone.model_options["transformer_options"] = {}
-            model_clone.model_options["transformer_options"][
-                "rel_l1_thresh"
-            ] = rel_l1_thresh
-            model_clone.model_options["transformer_options"][
-                "teacache_device"
-            ] = teacache_device
+            model_clone.model_options["transformer_options"]["rel_l1_thresh"] = float(rel_l1_thresh)
+            model_clone.model_options["transformer_options"]["cache_device"] = teacache_device
             model_clone.model_options["transformer_options"]["coefficients"] = coeffs
+            model_clone.model_options["transformer_options"]["model_type"] = source_type
             diffusion_model = model_clone.get_model_object("diffusion_model")
+            if not hasattr(diffusion_model, "forward_orig"):
+                raise RuntimeError("输入模型不是可识别的 WanVideo 模型：未找到 forward_orig。")
 
-            def relative_l1_distance(last_tensor, current_tensor):
-                l1_distance = torch.abs(last_tensor - current_tensor).mean()
-                norm = torch.abs(last_tensor).mean()
-                relative_l1_distance = l1_distance / norm
-                return relative_l1_distance.to(torch.float32)
-
-            @torch.compiler.disable() if hasattr(torch, "compiler") else lambda f: f
-            def tea_cache(self_obj, x, e0, e, transformer_options):
-                rel_l1_thresh_val = transformer_options["rel_l1_thresh"]
-                is_cond = (
-                    True if transformer_options["cond_or_uncond"] == [0] else False
-                )
-                should_calc = True
-                suffix = "cond" if is_cond else "uncond"
-
-                if not hasattr(self_obj, "teacache_state"):
-                    self_obj.teacache_state = {
-                        "cond": {
-                            "accumulated_rel_l1_distance": 0,
-                            "prev_input": None,
-                            "teacache_skipped_steps": 0,
-                            "previous_residual": None,
-                        },
-                        "uncond": {
-                            "accumulated_rel_l1_distance": 0,
-                            "prev_input": None,
-                            "teacache_skipped_steps": 0,
-                            "previous_residual": None,
-                        },
-                    }
-
-                cache = self_obj.teacache_state[suffix]
-
-                if cache["prev_input"] is not None:
-                    if transformer_options["coefficients"] == []:
-                        temb_relative_l1 = relative_l1_distance(cache["prev_input"], e0)
-                        curr_acc_dist = (
-                            cache["accumulated_rel_l1_distance"] + temb_relative_l1
-                        )
-                    else:
-                        rescale_func = np.poly1d(transformer_options["coefficients"])
-                        curr_acc_dist = cache[
-                            "accumulated_rel_l1_distance"
-                        ] + rescale_func(
-                            (
-                                (e - cache["prev_input"]).abs().mean()
-                                / cache["prev_input"].abs().mean()
-                            )
-                            .cpu()
-                            .item()
-                        )
-                    try:
-                        if curr_acc_dist < rel_l1_thresh_val:
-                            should_calc = False
-                            cache["accumulated_rel_l1_distance"] = curr_acc_dist
-                        else:
-                            should_calc = True
-                            cache["accumulated_rel_l1_distance"] = 0
-                    except:
-                        should_calc = True
-                        cache["accumulated_rel_l1_distance"] = 0
-
-                if transformer_options["coefficients"] == []:
-                    cache["prev_input"] = e0.clone().detach()
+            def unet_wrapper_function(model_function, model_kwargs):
+                input_value = model_kwargs["input"]
+                timestep_value = model_kwargs["timestep"]
+                c_value = model_kwargs["c"]
+                sigmas = c_value["transformer_options"]["sample_sigmas"]
+                cond_or_uncond = model_kwargs.get("cond_or_uncond", c_value["transformer_options"].get("cond_or_uncond", [0]))
+                last_step_index = len(sigmas) - 1
+                matched_step_index = (sigmas == timestep_value[0]).nonzero()
+                if len(matched_step_index) > 0:
+                    current_step_index = matched_step_index.item()
                 else:
-                    cache["prev_input"] = e.clone().detach()
+                    current_step_index = 0
+                    for i in range(len(sigmas) - 1):
+                        if (sigmas[i] - timestep_value[0]) * (sigmas[i + 1] - timestep_value[0]) <= 0:
+                            current_step_index = i
+                            break
 
-                if not should_calc:
-                    x += cache["previous_residual"].to(x.device)
-                    cache["teacache_skipped_steps"] += 1
-                return should_calc, cache
-
-            def create_wrapper(diff_mod, start_p, end_p):
-                def outer(func, kwargs):
-                    input_val = kwargs["input"]
-                    timestep_val = kwargs["timestep"]
-                    c_val = kwargs["c"]
-                    sigmas_val = c_val["transformer_options"]["sample_sigmas"]
-                    cond_or_uncond_val = kwargs["cond_or_uncond"]
-                    last_step_idx = len(sigmas_val) - 1
-
-                    matched_idx = (sigmas_val == timestep_val[0]).nonzero()
-                    if len(matched_idx) > 0:
-                        current_step = matched_idx.item()
-                    else:
-                        current_step = 0
-                        for i in range(len(sigmas_val) - 1):
-                            if (sigmas_val[i] - timestep_val[0]) * (
-                                sigmas_val[i + 1] - timestep_val[0]
-                            ) <= 0:
-                                current_step = i
-                                break
-
-                    if current_step == 0:
-                        if (
-                            len(cond_or_uncond_val) == 1 and cond_or_uncond_val[0] == 1
-                        ) or len(cond_or_uncond_val) == 2:
-                            if hasattr(diff_mod, "teacache_state"):
-                                delattr(diff_mod, "teacache_state")
-
-                    current_percent = current_step / (len(sigmas_val) - 1)
-                    c_val["transformer_options"]["current_percent"] = current_percent
-                    if start_p <= current_percent <= end_p:
-                        c_val["transformer_options"]["teacache_enabled"] = True
-
-                    original_forward = diff_mod.forward
-
-                    def patched_forward(*args, **forward_kwargs):
-                        forward_kwargs["transformer_options"] = c_val[
-                            "transformer_options"
-                        ]
-                        return original_forward(*args, **forward_kwargs)
-
-                    diff_mod.forward = patched_forward
-
-                    result = func(input_val, timestep_val, **c_val)
-
-                    if current_step + 1 == last_step_idx and hasattr(
-                        diff_mod, "teacache_state"
+                if current_step_index == 0:
+                    if (
+                        hasattr(diffusion_model, "teacache_state")
+                        and diffusion_model.teacache_state.get(0, {}).get("previous_modulated_input") is not None
+                        and diffusion_model.teacache_state.get(1, {}).get("previous_modulated_input") is not None
                     ):
-                        skipped_cond = diff_mod.teacache_state["cond"][
-                            "teacache_skipped_steps"
-                        ]
-                        skipped_uncond = diff_mod.teacache_state["uncond"][
-                            "teacache_skipped_steps"
-                        ]
-                        logging.info(
-                            f"TeaCache 已跳过: cond={skipped_cond}, uncond={skipped_uncond}"
-                        )
+                        delattr(diffusion_model, "teacache_state")
 
-                    diff_mod.forward = original_forward
-                    return result
+                current_percent = current_step_index / max(1, last_step_index)
+                c_value["transformer_options"]["current_percent"] = current_percent
+                c_value["transformer_options"]["enable_teacache"] = bool(start_percent <= current_percent <= end_percent)
 
-                return outer
+                original_forward_orig = diffusion_model.forward_orig
+                diffusion_model.forward_orig = _gjj_teacache_wan_forward.__get__(diffusion_model, diffusion_model.__class__)
+                try:
+                    return model_function(input_value, timestep_value, **c_value)
+                finally:
+                    diffusion_model.forward_orig = original_forward_orig
 
-            wrapper_func = create_wrapper(diffusion_model, start_percent, end_percent)
-            model_clone.set_model_unet_function_wrapper(wrapper_func)
-            logging.info("TeaCache 已应用")
+            model_clone.set_model_unet_function_wrapper(unet_wrapper_function)
+            logging.info("GJJ TeaCache(WanVideo) 已应用：%s", source_type)
             return (model_clone,)
         except Exception as e:
             logging.error(f"TeaCache 应用失败: {e}")
             traceback.print_exc()
-            send_error_to_frontend(unique_id, "TeaCache 失败", str(e))
+            send_error_to_frontend(unique_id, "TeaCache 失败", f"{e}", None)
             return (model,)
 
 
 NODE_CLASS_MAPPINGS["GJJ_TeaCacheWanVideo"] = GJJ_TeaCacheWanVideo
-NODE_DISPLAY_NAME_MAPPINGS["GJJ_TeaCacheWanVideo"] = "🍵 GJJ TeaCache (WanVideo)"
+NODE_DISPLAY_NAME_MAPPINGS["GJJ_TeaCacheWanVideo"] = "GJJ · 🍵 GJJ TeaCache (WanVideo)"

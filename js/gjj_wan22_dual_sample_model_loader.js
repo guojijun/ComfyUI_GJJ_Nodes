@@ -4,6 +4,17 @@ const TARGET_NODES = new Set(["GJJ_Wan22DualSampleModelLoader"]);
 
 const FIELD = {
 	baseFilter: "base_filter",
+	useExtraModel: "use_extra_model",
+	useFantasyTalkingModel: "use_fantasytalking_model",
+	useMultitalkModel: "use_multitalk_model",
+	useFantasyPortraitModel: "use_fantasyportrait_model",
+	showMoreParams: "show_more_params",
+	basePrecision: "base_precision",
+	quantization: "quantization",
+	loadDevice: "load_device",
+	attentionMode: "attention_mode",
+	rmsNormFunction: "rms_norm_function",
+	compileArgs: "compile_args",
 	useLora: "use_accel_lora",
 	useLoraIn: "use_accel_lora_in",
 	loraConfig: "lora_chain_config",
@@ -25,17 +36,36 @@ const FIELD = {
 	highLoraStrength: "high_lora_strength",
 	lowLora: "low_lora",
 	lowLoraStrength: "low_lora_strength",
+	highExtraModel: "high_extra_model",
+	lowExtraModel: "low_extra_model",
+	highFantasyTalkingModel: "high_fantasytalking_model",
+	lowFantasyTalkingModel: "low_fantasytalking_model",
+	highMultitalkModel: "high_multitalk_model",
+	lowMultitalkModel: "low_multitalk_model",
+	highFantasyPortraitModel: "high_fantasyportrait_model",
+	lowFantasyPortraitModel: "low_fantasyportrait_model",
 };
 
 const ALL_FIELDS = Object.values(FIELD);
 const SELECT_FIELDS = new Set([
+	FIELD.basePrecision, FIELD.quantization, FIELD.loadDevice, FIELD.attentionMode, FIELD.rmsNormFunction,
 	FIELD.highModel, FIELD.lowModel, FIELD.highLora, FIELD.lowLora,
 	FIELD.highDtype, FIELD.lowDtype, FIELD.vaeName, FIELD.clipName, FIELD.clipType, FIELD.clipDtype,
+	FIELD.highExtraModel, FIELD.lowExtraModel,
+	FIELD.highFantasyTalkingModel, FIELD.lowFantasyTalkingModel,
+	FIELD.highMultitalkModel, FIELD.lowMultitalkModel,
+	FIELD.highFantasyPortraitModel, FIELD.lowFantasyPortraitModel,
 ]);
 const LIST_API = "/gjj/wan22_dual_loader_lists";
 const SAVED_VALUES_PROPERTY = "gjj_wan22_saved_values";
 const DEFAULTS = {
 	[FIELD.baseFilter]: "wan2.2_t2v",
+	[FIELD.showMoreParams]: false,
+	[FIELD.basePrecision]: "bf16",
+	[FIELD.quantization]: "disabled",
+	[FIELD.loadDevice]: "offload_device",
+	[FIELD.attentionMode]: "sdpa",
+	[FIELD.rmsNormFunction]: "default",
 	[FIELD.highModelFilter]: "high_",
 	[FIELD.lowModelFilter]: "low_",
 	[FIELD.highLoraFilter]: "high_",
@@ -52,6 +82,16 @@ const DEFAULTS = {
 
 const LABELS = {
 	[FIELD.baseFilter]: "🔍",
+	[FIELD.useExtraModel]: "➕",
+	[FIELD.useFantasyTalkingModel]: "🗣",
+	[FIELD.useMultitalkModel]: "🎤",
+	[FIELD.useFantasyPortraitModel]: "🧑",
+	[FIELD.showMoreParams]: "更多",
+	[FIELD.basePrecision]: "精度",
+	[FIELD.quantization]: "量化",
+	[FIELD.loadDevice]: "设备",
+	[FIELD.attentionMode]: "Attn",
+	[FIELD.rmsNormFunction]: "RMS",
 	[FIELD.useLora]: "🚕",
 	[FIELD.highModel]: "High",
 	[FIELD.lowModel]: "Low",
@@ -61,10 +101,28 @@ const LABELS = {
 	[FIELD.lowLora]: "Low LoRA",
 	[FIELD.highLoraStrength]: "💪",
 	[FIELD.lowLoraStrength]: "💪",
+	[FIELD.highExtraModel]: "H-Extra",
+	[FIELD.lowExtraModel]: "L-Extra",
+	[FIELD.highFantasyTalkingModel]: "H-FTalk",
+	[FIELD.lowFantasyTalkingModel]: "L-FTalk",
+	[FIELD.highMultitalkModel]: "H-Talk",
+	[FIELD.lowMultitalkModel]: "L-Talk",
+	[FIELD.highFantasyPortraitModel]: "H-FPort",
+	[FIELD.lowFantasyPortraitModel]: "L-FPort",
 };
 
 const TIPS = {
 	[FIELD.baseFilter]: "总过滤词：不区分大小写，支持子目录。默认 wan2.2_t2v。",
+	[FIELD.useExtraModel]: "开启后显示并输出 High/Low 成对 Extra 模型。",
+	[FIELD.useFantasyTalkingModel]: "开启后显示并输出 High/Low 成对 FantasyTalking 模型。",
+	[FIELD.useMultitalkModel]: "开启后显示并输出 High/Low 成对 MultiTalk/InfiniteTalk 模型。",
+	[FIELD.useFantasyPortraitModel]: "开启后显示并输出 High/Low 成对 FantasyPortrait 模型。",
+	[FIELD.showMoreParams]: "显示或隐藏 base_precision、quantization、load_device、attention_mode、rms_norm_function。",
+	[FIELD.basePrecision]: "WanVideoModelLoader base_precision。",
+	[FIELD.quantization]: "WanVideoModelLoader quantization。",
+	[FIELD.loadDevice]: "WanVideoModelLoader load_device。",
+	[FIELD.attentionMode]: "WanVideoModelLoader attention_mode。",
+	[FIELD.rmsNormFunction]: "WanVideoModelLoader rms_norm_function。",
 	[FIELD.useLora]: "加速 LoRA：开启后加载 high / low 对应 LoRA；关闭后隐藏 LoRA 行。",
 	[FIELD.highModel]: "High 模型：models/diffusion_models 中匹配 总过滤词 + high_ 的文件。",
 	[FIELD.lowModel]: "Low 模型：models/diffusion_models 中匹配 总过滤词 + low_ 的文件。",
@@ -74,6 +132,14 @@ const TIPS = {
 	[FIELD.lowLora]: "Low LoRA：models/loras 中匹配 总过滤词 + low_ 的文件。",
 	[FIELD.highLoraStrength]: "High LoRA 模型强度",
 	[FIELD.lowLoraStrength]: "Low LoRA 模型强度",
+	[FIELD.highExtraModel]: "High 分支 Extra 模型。",
+	[FIELD.lowExtraModel]: "Low 分支 Extra 模型。",
+	[FIELD.highFantasyTalkingModel]: "High 分支 FantasyTalking 模型。",
+	[FIELD.lowFantasyTalkingModel]: "Low 分支 FantasyTalking 模型。",
+	[FIELD.highMultitalkModel]: "High 分支 MultiTalk/InfiniteTalk 模型。",
+	[FIELD.lowMultitalkModel]: "Low 分支 MultiTalk/InfiniteTalk 模型。",
+	[FIELD.highFantasyPortraitModel]: "High 分支 FantasyPortrait 模型。",
+	[FIELD.lowFantasyPortraitModel]: "Low 分支 FantasyPortrait 模型。",
 	[FIELD.vaeName]: "VAE：models/vae 中默认匹配 wan 的文件。",
 	[FIELD.clipName]: "CLIP：models/text_encoders 中默认匹配 umt5_xxl 的文件。",
 	[FIELD.clipType]: "CLIP 类型。Wan2.2 通常使用 wan。",
@@ -139,6 +205,7 @@ function comboValues(w) {
 function ensureNodeState(node) {
 	node.__gjjWan22State = node.__gjjWan22State || {
 		diffusionModels: null,
+		unetGguf: null,
 		loras: null,
 		vaes: null,
 		textEncoders: null,
@@ -149,6 +216,17 @@ function ensureNodeState(node) {
 
 function originalValues(node, name) {
 	const state = ensureNodeState(node);
+	if (name === FIELD.highExtraModel || name === FIELD.lowExtraModel
+		|| name === FIELD.highFantasyTalkingModel || name === FIELD.lowFantasyTalkingModel
+		|| name === FIELD.highFantasyPortraitModel || name === FIELD.lowFantasyPortraitModel) {
+		return Array.isArray(state.diffusionModels) ? state.diffusionModels : comboValues(getWidget(node, name));
+	}
+	if (name === FIELD.highMultitalkModel || name === FIELD.lowMultitalkModel) {
+		const diffusion = Array.isArray(state.diffusionModels) ? state.diffusionModels : [];
+		const gguf = Array.isArray(state.unetGguf) ? state.unetGguf : [];
+		const current = comboValues(getWidget(node, name));
+		return [...gguf, ...diffusion, ...current];
+	}
 	if (name === FIELD.highModel || name === FIELD.lowModel) {
 		return Array.isArray(state.diffusionModels) ? state.diffusionModels : comboValues(getWidget(node, name));
 	}
@@ -173,6 +251,7 @@ async function refreshBackendLists(node, rerender = true) {
 		if (response?.ok) {
 			const payload = await response.json();
 			state.diffusionModels = Array.isArray(payload?.diffusion_models) ? payload.diffusion_models.map(String) : state.diffusionModels;
+			state.unetGguf = Array.isArray(payload?.unet_gguf) ? payload.unet_gguf.map(String) : state.unetGguf;
 			state.loras = Array.isArray(payload?.loras) ? payload.loras.map(String) : state.loras;
 			state.vaes = Array.isArray(payload?.vae) ? payload.vae.map(String) : state.vaes;
 			state.textEncoders = Array.isArray(payload?.text_encoders) ? payload.text_encoders.map(String) : state.textEncoders;
@@ -198,8 +277,13 @@ async function refreshBackendLists(node, rerender = true) {
 
 function rememberOriginalLists(node) {
 	for (const name of [
+		FIELD.basePrecision, FIELD.quantization, FIELD.loadDevice, FIELD.attentionMode, FIELD.rmsNormFunction,
 		FIELD.highModel, FIELD.lowModel, FIELD.highLora, FIELD.lowLora,
 		FIELD.highDtype, FIELD.lowDtype, FIELD.vaeName, FIELD.clipName, FIELD.clipType, FIELD.clipDtype,
+		FIELD.highExtraModel, FIELD.lowExtraModel,
+		FIELD.highFantasyTalkingModel, FIELD.lowFantasyTalkingModel,
+		FIELD.highMultitalkModel, FIELD.lowMultitalkModel,
+		FIELD.highFantasyPortraitModel, FIELD.lowFantasyPortraitModel,
 	]) {
 		const w = getWidget(node, name);
 		if (w) w.__gjjWan22Node = node;
@@ -208,7 +292,7 @@ function rememberOriginalLists(node) {
 		}
 	}
 	const state = ensureNodeState(node);
-	if (!Array.isArray(state.diffusionModels) || !Array.isArray(state.loras) || !Array.isArray(state.vaes) || !Array.isArray(state.textEncoders)) {
+	if (!Array.isArray(state.diffusionModels) || !Array.isArray(state.unetGguf) || !Array.isArray(state.loras) || !Array.isArray(state.vaes) || !Array.isArray(state.textEncoders)) {
 		refreshBackendLists(node, true);
 	}
 }
@@ -323,6 +407,14 @@ function applyFilters(node) {
 	const lowModel = getWidget(node, FIELD.lowModel);
 	const highLora = getWidget(node, FIELD.highLora);
 	const lowLora = getWidget(node, FIELD.lowLora);
+	const highExtraModel = getWidget(node, FIELD.highExtraModel);
+	const lowExtraModel = getWidget(node, FIELD.lowExtraModel);
+	const highFantasyTalkingModel = getWidget(node, FIELD.highFantasyTalkingModel);
+	const lowFantasyTalkingModel = getWidget(node, FIELD.lowFantasyTalkingModel);
+	const highMultitalkModel = getWidget(node, FIELD.highMultitalkModel);
+	const lowMultitalkModel = getWidget(node, FIELD.lowMultitalkModel);
+	const highFantasyPortraitModel = getWidget(node, FIELD.highFantasyPortraitModel);
+	const lowFantasyPortraitModel = getWidget(node, FIELD.lowFantasyPortraitModel);
 	const vae = getWidget(node, FIELD.vaeName);
 	const clip = getWidget(node, FIELD.clipName);
 
@@ -343,6 +435,31 @@ function applyFilters(node) {
 	// LoRA 按你的要求只用后台 high_/low_ 过滤，不强制叠加总过滤词。
 	let highLoraList = filterLoraList(originalValues(node, FIELD.highLora), highLoraRole);
 	let lowLoraList = filterLoraList(originalValues(node, FIELD.lowLora), lowLoraRole);
+	let highExtraModelList = filterModelList(originalValues(node, FIELD.highExtraModel), "vace", highModelRole);
+	let lowExtraModelList = filterModelList(originalValues(node, FIELD.lowExtraModel), "vace", lowModelRole);
+	if (!highExtraModelList.length) highExtraModelList = filterModelList(originalValues(node, FIELD.highExtraModel), highModelRole);
+	if (!lowExtraModelList.length) lowExtraModelList = filterModelList(originalValues(node, FIELD.lowExtraModel), lowModelRole);
+	if (!highExtraModelList.length) highExtraModelList = filterModelList(originalValues(node, FIELD.highExtraModel), "vace");
+	if (!lowExtraModelList.length) lowExtraModelList = filterModelList(originalValues(node, FIELD.lowExtraModel), "vace");
+
+	let highFantasyTalkingList = filterModelList(originalValues(node, FIELD.highFantasyTalkingModel), "fantasytalking", highModelRole);
+	let lowFantasyTalkingList = filterModelList(originalValues(node, FIELD.lowFantasyTalkingModel), "fantasytalking", lowModelRole);
+	if (!highFantasyTalkingList.length) highFantasyTalkingList = filterModelList(originalValues(node, FIELD.highFantasyTalkingModel), "talk", highModelRole);
+	if (!lowFantasyTalkingList.length) lowFantasyTalkingList = filterModelList(originalValues(node, FIELD.lowFantasyTalkingModel), "talk", lowModelRole);
+	if (!highFantasyTalkingList.length) highFantasyTalkingList = filterModelList(originalValues(node, FIELD.highFantasyTalkingModel), "fantasytalking");
+	if (!lowFantasyTalkingList.length) lowFantasyTalkingList = filterModelList(originalValues(node, FIELD.lowFantasyTalkingModel), "fantasytalking");
+
+	let highMultitalkList = filterModelList(originalValues(node, FIELD.highMultitalkModel), "talk", highModelRole);
+	let lowMultitalkList = filterModelList(originalValues(node, FIELD.lowMultitalkModel), "talk", lowModelRole);
+	if (!highMultitalkList.length) highMultitalkList = filterModelList(originalValues(node, FIELD.highMultitalkModel), "talk");
+	if (!lowMultitalkList.length) lowMultitalkList = filterModelList(originalValues(node, FIELD.lowMultitalkModel), "talk");
+
+	let highFantasyPortraitList = filterModelList(originalValues(node, FIELD.highFantasyPortraitModel), "fantasyportrait", highModelRole);
+	let lowFantasyPortraitList = filterModelList(originalValues(node, FIELD.lowFantasyPortraitModel), "fantasyportrait", lowModelRole);
+	if (!highFantasyPortraitList.length) highFantasyPortraitList = filterModelList(originalValues(node, FIELD.highFantasyPortraitModel), "portrait", highModelRole);
+	if (!lowFantasyPortraitList.length) lowFantasyPortraitList = filterModelList(originalValues(node, FIELD.lowFantasyPortraitModel), "portrait", lowModelRole);
+	if (!highFantasyPortraitList.length) highFantasyPortraitList = filterModelList(originalValues(node, FIELD.highFantasyPortraitModel), "fantasyportrait");
+	if (!lowFantasyPortraitList.length) lowFantasyPortraitList = filterModelList(originalValues(node, FIELD.lowFantasyPortraitModel), "fantasyportrait");
 
 	// 加速 LoRA、VAE、CLIP 基本固定，不受顶部动态关键词影响。
 	// LoRA 只按后台 high_/low_ 分支词过滤；不再用 base 兜底，避免关键词改变时影响 LoRA 列表。
@@ -356,11 +473,27 @@ function applyFilters(node) {
 	lowModelList = sortBranchList(lowModelList, lowModelRole);
 	highLoraList = sortBranchList(highLoraList, highLoraRole);
 	lowLoraList = sortBranchList(lowLoraList, lowLoraRole);
+	highExtraModelList = sortBranchList(highExtraModelList, highModelRole);
+	lowExtraModelList = sortBranchList(lowExtraModelList, lowModelRole);
+	highFantasyTalkingList = sortBranchList(highFantasyTalkingList, highModelRole);
+	lowFantasyTalkingList = sortBranchList(lowFantasyTalkingList, lowModelRole);
+	highMultitalkList = sortBranchList(highMultitalkList, highModelRole);
+	lowMultitalkList = sortBranchList(lowMultitalkList, lowModelRole);
+	highFantasyPortraitList = sortBranchList(highFantasyPortraitList, highModelRole);
+	lowFantasyPortraitList = sortBranchList(lowFantasyPortraitList, lowModelRole);
 
 	setComboOptions(highModel, highModelList);
 	setComboOptions(lowModel, lowModelList);
 	setComboOptions(highLora, highLoraList);
 	setComboOptions(lowLora, lowLoraList);
+	setComboOptions(highExtraModel, highExtraModelList);
+	setComboOptions(lowExtraModel, lowExtraModelList);
+	setComboOptions(highFantasyTalkingModel, highFantasyTalkingList);
+	setComboOptions(lowFantasyTalkingModel, lowFantasyTalkingList);
+	setComboOptions(highMultitalkModel, highMultitalkList);
+	setComboOptions(lowMultitalkModel, lowMultitalkList);
+	setComboOptions(highFantasyPortraitModel, highFantasyPortraitList);
+	setComboOptions(lowFantasyPortraitModel, lowFantasyPortraitList);
 	setComboOptions(vae, vaeList);
 	setComboOptions(clip, clipList);
 
@@ -368,6 +501,14 @@ function applyFilters(node) {
 	selectFirstIfInvalid(lowModel, lowModelList, lowModelRole);
 	selectFirstIfInvalid(highLora, highLoraList, highLoraRole);
 	selectFirstIfInvalid(lowLora, lowLoraList, lowLoraRole);
+	selectFirstIfInvalid(highExtraModel, highExtraModelList, highModelRole);
+	selectFirstIfInvalid(lowExtraModel, lowExtraModelList, lowModelRole);
+	selectFirstIfInvalid(highFantasyTalkingModel, highFantasyTalkingList, highModelRole);
+	selectFirstIfInvalid(lowFantasyTalkingModel, lowFantasyTalkingList, lowModelRole);
+	selectFirstIfInvalid(highMultitalkModel, highMultitalkList, highModelRole);
+	selectFirstIfInvalid(lowMultitalkModel, lowMultitalkList, lowModelRole);
+	selectFirstIfInvalid(highFantasyPortraitModel, highFantasyPortraitList, highModelRole);
+	selectFirstIfInvalid(lowFantasyPortraitModel, lowFantasyPortraitList, lowModelRole);
 	selectFirstIfInvalid(vae, vaeList);
 	selectFirstIfInvalid(clip, clipList);
 
@@ -539,10 +680,13 @@ function buildDom(node) {
 	style.textContent = `
 		.gjj-wan22-loader * { box-sizing:border-box; }
 		.gjj-wan22-row { display:grid; gap:6px; align-items:center; min-width:0; }
-		.gjj-wan22-row.top { grid-template-columns:minmax(0,1fr) 34px 86px 66px; }
+		.gjj-wan22-row.top { grid-template-columns:minmax(0,1fr) 34px; }
+		.gjj-wan22-row.switches { grid-template-columns:repeat(6,minmax(0,1fr)); }
 		.gjj-wan22-row.triple { grid-template-columns:minmax(0,1fr) 86px 74px; }
+		.gjj-wan22-row.quad { grid-template-columns:minmax(0,1fr) 76px minmax(0,1fr) 76px; }
 		.gjj-wan22-row.cols1 { grid-template-columns:1fr; }
 		.gjj-wan22-row.double { grid-template-columns:minmax(0,1fr) 96px; }
+		.gjj-wan22-row.pair { grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
 		.gjj-wan22-field { display:grid; grid-template-columns:48px minmax(0,1fr); gap:5px; align-items:center; min-width:0; }
 		.gjj-wan22-field.compact { grid-template-columns:22px minmax(0,1fr); }
 		.gjj-wan22-label { color:#b9c8cc; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; }
@@ -596,8 +740,21 @@ function buildDom(node) {
 		refreshBackendLists(node, true);
 	});
 
+	rowTop.append(refresh);
+	container.append(rowTop);
+
+	const rowSwitches = document.createElement("div");
+	rowSwitches.className = "gjj-wan22-row switches";
+
 	const useLoraField = createField(node, FIELD.useLora, { label: "🚕", compact: true });
 	node.__gjjWan22UseLoraField = useLoraField;
+	rowSwitches.append(useLoraField);
+	rowSwitches.append(createField(node, FIELD.useExtraModel, { label: "➕", compact: true }));
+	rowSwitches.append(createField(node, FIELD.useFantasyTalkingModel, { label: "🗣", compact: true }));
+	rowSwitches.append(createField(node, FIELD.useMultitalkModel, { label: "🎤", compact: true }));
+	rowSwitches.append(createField(node, FIELD.useFantasyPortraitModel, { label: "🧑", compact: true }));
+	rowSwitches.append(createField(node, FIELD.showMoreParams, { label: "更多", compact: true }));
+	container.append(rowSwitches);
 
 	const externalHint = document.createElement("div");
 	externalHint.className = "gjj-wan22-external-hint";
@@ -606,23 +763,31 @@ function buildDom(node) {
 	externalHint.style.display = "none";
 	node.__gjjWan22ExternalHint = externalHint;
 
-	rowTop.append(refresh);
-	rowTop.append(useLoraField);
-	rowTop.append(externalHint);
-	container.append(rowTop);
-
 	const sep1 = document.createElement("div");
 	sep1.className = "gjj-wan22-sep";
 	container.append(sep1);
 
+	const rowMore1 = document.createElement("div");
+	rowMore1.className = "gjj-wan22-row triple gjj-wan22-more-row";
+	rowMore1.append(createField(node, FIELD.basePrecision, { label: "精度" }));
+	rowMore1.append(createIconField(node, FIELD.quantization, "量化"));
+	rowMore1.append(createIconField(node, FIELD.loadDevice, "设备"));
+	container.append(rowMore1);
+
+	const rowMore2 = document.createElement("div");
+	rowMore2.className = "gjj-wan22-row double gjj-wan22-more-row";
+	rowMore2.append(createField(node, FIELD.attentionMode, { label: "Attn" }));
+	rowMore2.append(createField(node, FIELD.rmsNormFunction, { label: "RMS" }));
+	container.append(rowMore2);
+
 	const rowHigh = document.createElement("div");
-	rowHigh.className = "gjj-wan22-row double";
+	rowHigh.className = "gjj-wan22-row double gjj-wan22-dual-row";
 	rowHigh.append(createField(node, FIELD.highModel, { label: "High" }));
 	rowHigh.append(createIconField(node, FIELD.highDtype, "⚙"));
 	container.append(rowHigh);
 
 	const rowLow = document.createElement("div");
-	rowLow.className = "gjj-wan22-row double";
+	rowLow.className = "gjj-wan22-row double gjj-wan22-dual-row";
 	rowLow.append(createField(node, FIELD.lowModel, { label: "Low" }));
 	rowLow.append(createIconField(node, FIELD.lowDtype, "⚙"));
 	container.append(rowLow);
@@ -632,12 +797,12 @@ function buildDom(node) {
 	container.append(sepVae);
 
 	const rowVae = document.createElement("div");
-	rowVae.className = "gjj-wan22-row cols1";
+	rowVae.className = "gjj-wan22-row cols1 gjj-wan22-dual-row";
 	rowVae.append(createField(node, FIELD.vaeName, { label: "VAE" }));
 	container.append(rowVae);
 
 	const rowClip = document.createElement("div");
-	rowClip.className = "gjj-wan22-row triple";
+	rowClip.className = "gjj-wan22-row triple gjj-wan22-dual-row";
 	rowClip.append(createField(node, FIELD.clipName, { label: "CLIP" }));
 	rowClip.append(createIconField(node, FIELD.clipType, "🏷"));
 	rowClip.append(createIconField(node, FIELD.clipDtype, "⚙"));
@@ -665,6 +830,30 @@ function buildDom(node) {
 	rowLowLora.append(createIconField(node, FIELD.lowLoraStrength, "💪"));
 	container.append(rowLowLora);
 
+	const rowExtraPair = document.createElement("div");
+	rowExtraPair.className = "gjj-wan22-row pair gjj-wan22-extra-model-row";
+	rowExtraPair.append(createField(node, FIELD.highExtraModel, { label: "H-Extra" }));
+	rowExtraPair.append(createField(node, FIELD.lowExtraModel, { label: "L-Extra" }));
+	container.append(rowExtraPair);
+
+	const rowFantasyTalkingPair = document.createElement("div");
+	rowFantasyTalkingPair.className = "gjj-wan22-row pair gjj-wan22-fantasytalking-row";
+	rowFantasyTalkingPair.append(createField(node, FIELD.highFantasyTalkingModel, { label: "H-FTalk" }));
+	rowFantasyTalkingPair.append(createField(node, FIELD.lowFantasyTalkingModel, { label: "L-FTalk" }));
+	container.append(rowFantasyTalkingPair);
+
+	const rowMultitalkPair = document.createElement("div");
+	rowMultitalkPair.className = "gjj-wan22-row pair gjj-wan22-multitalk-row";
+	rowMultitalkPair.append(createField(node, FIELD.highMultitalkModel, { label: "H-Talk" }));
+	rowMultitalkPair.append(createField(node, FIELD.lowMultitalkModel, { label: "L-Talk" }));
+	container.append(rowMultitalkPair);
+
+	const rowFantasyPortraitPair = document.createElement("div");
+	rowFantasyPortraitPair.className = "gjj-wan22-row pair gjj-wan22-fantasyportrait-row";
+	rowFantasyPortraitPair.append(createField(node, FIELD.highFantasyPortraitModel, { label: "H-FPort" }));
+	rowFantasyPortraitPair.append(createField(node, FIELD.lowFantasyPortraitModel, { label: "L-FPort" }));
+	container.append(rowFantasyPortraitPair);
+
 	// 外接 LoRA 提示放到最下面，避免打断内部 LoRA 行。
 	container.append(externalLoraHint);
 
@@ -673,14 +862,32 @@ function buildDom(node) {
 	container.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true });
 
 	node.__gjjWan22Container = container;
+	node.__gjjWan22MoreRows = [rowMore1, rowMore2];
+	node.__gjjWan22DualRows = [rowTop, sep1, rowHigh, rowLow, sepVae, rowVae, rowClip];
 	node.__gjjWan22LoraRows = [sep2, rowHighLora, rowLowLora];
+	node.__gjjWan22ExtraRows = [rowExtraPair];
+	node.__gjjWan22FantasyTalkingRows = [rowFantasyTalkingPair];
+	node.__gjjWan22MultitalkRows = [rowMultitalkPair];
+	node.__gjjWan22FantasyPortraitRows = [rowFantasyPortraitPair];
 	return container;
 }
 
 function updateLoraRows(node) {
+	const showMore = Boolean(getWidget(node, FIELD.showMoreParams)?.value);
+	for (const row of node.__gjjWan22MoreRows || []) {
+		row.style.display = showMore ? "" : "none";
+	}
+	for (const row of node.__gjjWan22DualRows || []) {
+		row.style.display = "";
+	}
+
 	const externalBool = hasLoraExternalControl(node);
 	const externalLora = hasExternalLoraConfig(node);
 	const enabled = effectiveUseLoraEnabled(node);
+	const useExtra = Boolean(getWidget(node, FIELD.useExtraModel)?.value);
+	const useFantasyTalking = Boolean(getWidget(node, FIELD.useFantasyTalkingModel)?.value);
+	const useMultitalk = Boolean(getWidget(node, FIELD.useMultitalkModel)?.value);
+	const useFantasyPortrait = Boolean(getWidget(node, FIELD.useFantasyPortraitModel)?.value);
 
 	// 先同步普通按钮状态；外接时后面再覆盖加速 LoRA 按钮，避免被 sync 改回“开”。
 	for (const w of node.widgets || []) {
@@ -717,6 +924,48 @@ function updateLoraRows(node) {
 	for (const row of node.__gjjWan22LoraRows || []) {
 		row.style.display = enabled ? "" : "none";
 	}
+	for (const row of node.__gjjWan22ExtraRows || []) row.style.display = useExtra ? "" : "none";
+	for (const row of node.__gjjWan22FantasyTalkingRows || []) row.style.display = useFantasyTalking ? "" : "none";
+	for (const row of node.__gjjWan22MultitalkRows || []) row.style.display = useMultitalk ? "" : "none";
+	for (const row of node.__gjjWan22FantasyPortraitRows || []) row.style.display = useFantasyPortrait ? "" : "none";
+	updateOutputLabels(node, { useExtra, useFantasyTalking, useMultitalk, useFantasyPortrait });
+}
+
+function setOutputVisible(output, visible) {
+	if (!output) return;
+	output.hidden = !visible;
+	output.visible = visible;
+	output.disabled = !visible;
+	output.not_show = !visible;
+	output.__gjj_hidden = !visible;
+}
+
+function updateOutputLabels(node, state = {}) {
+	if (!Array.isArray(node.outputs)) return;
+	const labels = [
+		["High模型", "MODEL", true],
+		["Low模型", "MODEL", true],
+		["VAE", "VAE", true],
+		["CLIP", "CLIP", true],
+		["High Extra", "VACEPATH", state.useExtra],
+		["Low Extra", "VACEPATH", state.useExtra],
+		["High FantasyTalking", "FANTASYTALKINGMODEL", state.useFantasyTalking],
+		["Low FantasyTalking", "FANTASYTALKINGMODEL", state.useFantasyTalking],
+		["High MultiTalk", "MULTITALKMODEL", state.useMultitalk],
+		["Low MultiTalk", "MULTITALKMODEL", state.useMultitalk],
+		["High FantasyPortrait", "FANTASYPORTRAITMODEL", state.useFantasyPortrait],
+		["Low FantasyPortrait", "FANTASYPORTRAITMODEL", state.useFantasyPortrait],
+	];
+	labels.forEach(([name, type, visible], index) => {
+		if (!node.outputs[index]) return;
+		node.outputs[index].name = name;
+		node.outputs[index].localized_name = name;
+		node.outputs[index].type = type;
+		setOutputVisible(node.outputs[index], Boolean(visible));
+		if (typeof node.hideOutput === "function") {
+			try { node.hideOutput(index, !visible); } catch (_) {}
+		}
+	});
 }
 
 function syncProxyInputs(node) {
@@ -765,6 +1014,11 @@ function ensureDom(node) {
 
 function ensureWidgetDefaults(node) {
 	const pairs = [
+		[FIELD.basePrecision, "bf16"],
+		[FIELD.quantization, "disabled"],
+		[FIELD.loadDevice, "offload_device"],
+		[FIELD.attentionMode, "sdpa"],
+		[FIELD.rmsNormFunction, "default"],
 		[FIELD.highDtype, "default"],
 		[FIELD.lowDtype, "default"],
 		[FIELD.clipType, "wan"],
@@ -783,7 +1037,7 @@ function ensureWidgetDefaults(node) {
 	}
 
 	// dtype 下拉列表必须包含 default，并默认选中 default。
-	for (const name of [FIELD.highDtype, FIELD.lowDtype, FIELD.clipDtype]) {
+	for (const name of [FIELD.basePrecision, FIELD.quantization, FIELD.loadDevice, FIELD.attentionMode, FIELD.rmsNormFunction, FIELD.highDtype, FIELD.lowDtype, FIELD.clipDtype]) {
 		const w = getWidget(node, name);
 		if (!w) continue;
 		const values = w.options?.values || w.__gjjWan22AllValues || [];
@@ -811,6 +1065,11 @@ function applyInputSlotLabels(node) {
 			input.label = "🧬 LoRA配置";
 			input.localized_name = "🧬 LoRA配置";
 			input.tooltip = "接入 GJJ 多 LoRA 串联配置。外接 LoRA 会额外叠加，不会替代或修改节点内部 High/Low LoRA。";
+		}
+		if (raw === FIELD.compileArgs || text.includes(FIELD.compileArgs) || text.includes("编译参数")) {
+			input.label = "⚙️ 编译参数";
+			input.localized_name = "⚙️ 编译参数";
+			input.tooltip = "连接 GJJ · WanVideo编译设置 输出的 WANCOMPILEARGS。";
 		}
 	}
 }
