@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import shutil
+import traceback
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,28 @@ def _register_routes() -> None:
         if index_path.exists():
             return web.FileResponse(index_path)
         return web.Response(text="GJJ Mesh2Motion UI 文件不存在。", status=404)
+
+    # 存储捕获状态的全局缓存
+    _capture_state_cache = {}
+
+    @routes.post(f"{ROUTE_BASE}/capture-state")
+    async def handle_capture_state(request):
+        """接收前端捕获的截图和视频状态，保存到缓存供 execute 使用"""
+        try:
+            body = await request.json()
+            node_id = body.get("node_id", "")
+            state = body.get("state", {})
+            _capture_state_cache[node_id] = state
+            return web.json_response({"status": "ok", "node_id": node_id})
+        except Exception as exc:
+            return web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+    @routes.get(f"{ROUTE_BASE}/capture-state/{{node_id}}")
+    async def get_capture_state(request):
+        """获取指定节点的捕获状态"""
+        node_id = request.match_info.get("node_id", "")
+        state = _capture_state_cache.get(node_id)
+        return web.json_response({"state": state or {}})
 
     @routes.get(ROUTE_BASE)
     async def serve_mesh2motion_index(request):
@@ -224,7 +247,8 @@ class GJJ_Mesh2MotionExplore:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {
+            "required": {},
+            "optional": {
                 "show_skeleton": (
                     "BOOLEAN",
                     {
@@ -315,19 +339,51 @@ class GJJ_Mesh2MotionExplore:
     ):
         print(f"[GJJ Mesh2Motion] ========== 开始执行 ==========")
         print(f"[GJJ Mesh2Motion] unique_id: {unique_id}")
-        print(f"[GJJ Mesh2Motion] image 参数长度: {len(str(image)) if image else 0}")
-        print(f"[GJJ Mesh2Motion] video_frames 参数长度: {len(str(video_frames)) if video_frames else 0}")
+        
+        # 优先从 properties 读取参数（前端自定义 UI 的值）
+        props = _get_node_properties(extra_pnginfo, unique_id)
+        print(f"[GJJ Mesh2Motion] 节点 properties: {list(props.keys())}")
+        
+        # 如果 properties 有值，优先使用 properties 的参数
+        if "mesh2motion_show_skeleton" in props:
+            show_skeleton = bool(props["mesh2motion_show_skeleton"])
+        if "mesh2motion_mirror_animations" in props:
+            mirror_animations = bool(props["mesh2motion_mirror_animations"])
+        if "mesh2motion_preview_output" in props:
+            preview_output = bool(props["mesh2motion_preview_output"])
+        if "mesh2motion_checker_room" in props:
+            checker_room = bool(props["mesh2motion_checker_room"])
+        if "mesh2motion_width" in props:
+            width = int(props["mesh2motion_width"])
+        if "mesh2motion_height" in props:
+            height = int(props["mesh2motion_height"])
+        if "mesh2motion_fps" in props:
+            fps = int(props["mesh2motion_fps"])
+        
+        print(f"[GJJ Mesh2Motion] 最终参数: show_skeleton={show_skeleton}, mirror_animations={mirror_animations}, preview_output={preview_output}, checker_room={checker_room}")
+        print(f"[GJJ Mesh2Motion] 最终参数: width={width}, height={height}, fps={fps}")
         
         width = _normalize_size(width, 1024, "输出宽度")
         height = _normalize_size(height, 1024, "输出高度")
         fps = max(1, min(120, int(fps)))
 
-        # 优先从 properties 读取数据（新方案）
-        props = _get_node_properties(extra_pnginfo, unique_id)
-        print(f"[GJJ Mesh2Motion] 节点 properties: {list(props.keys())}")
-        
+        # 读取图片和视频数据（优先 properties，其次缓存）
         image_data = props.get("mesh2motion_image", "")
         video_data = props.get("mesh2motion_video", "")
+        
+        # 如果 properties 没有数据，尝试从缓存读取
+        if not image_data or not video_data:
+            try:
+                cached_state = _capture_state_cache.get(str(unique_id), {})
+                if cached_state:
+                    if not image_data and cached_state.get("image"):
+                        image_data = json.dumps(cached_state["image"])
+                        print(f"[GJJ Mesh2Motion] 从缓存读取截图数据")
+                    if not video_data and cached_state.get("video"):
+                        video_data = json.dumps(cached_state["video"])
+                        print(f"[GJJ Mesh2Motion] 从缓存读取视频数据")
+            except Exception as e:
+                print(f"[GJJ Mesh2Motion] 读取缓存失败：{e}")
 
         print(f"[GJJ Mesh2Motion] properties 中的 image_data 长度: {len(image_data) if image_data else 0}")
         print(f"[GJJ Mesh2Motion] properties 中的 video_data 长度: {len(video_data) if video_data else 0}")
@@ -371,12 +427,29 @@ class GJJ_Mesh2MotionExplore:
             try:
                 print(f"[GJJ Mesh2Motion] 开始解析视频数据...")
                 payload = json.loads(str(video_frames))
-                video_name = payload.get("video") if isinstance(payload, dict) else None
-                if video_name:
-                    video_path = folder_paths.get_annotated_filepath(video_name)
-                    print(f"[GJJ Mesh2Motion] 尝试加载视频：{video_path}")
+                video_info = payload.get("video") if isinstance(payload, dict) else None
+                
+                if video_info:
+                    # 优先使用 raw 字段（完整 annotated 路径）
+                    if isinstance(video_info, dict) and video_info.get("raw"):
+                        video_annotated = video_info["raw"]
+                    elif isinstance(video_info, str):
+                        video_annotated = video_info
+                    else:
+                        # 手动构建 annotated 路径
+                        name = video_info.get("name", "")
+                        subfolder = video_info.get("subfolder", "")
+                        file_type = video_info.get("type", "temp")
+                        video_annotated = f"{subfolder}/{name} [{file_type}]" if subfolder else f"{name} [{file_type}]"
+                    
+                    print(f"[GJJ Mesh2Motion] 视频 annotated 路径: {video_annotated}")
+                    video_path = folder_paths.get_annotated_filepath(video_annotated)
+                    print(f"[GJJ Mesh2Motion] 视频解析路径: {video_path}")
+                    
                     if not video_path or not Path(video_path).exists():
-                        raise RuntimeError(f"视频文件不存在：{video_path}")
+                        raise RuntimeError(f"视频文件不存在：{video_path} (annotated: {video_annotated})")
+                    
+                    print(f"[GJJ Mesh2Motion] 视频文件存在，大小: {Path(video_path).stat().st_size} bytes")
                     video_tensor = _decode_video_to_tensor(video_path, width, height)
                     print(f"[GJJ Mesh2Motion] 视频加载成功，共 {video_tensor.shape[0]} 帧")
             except Exception as exc:
