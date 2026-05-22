@@ -297,10 +297,11 @@ def _aspect_ratio(aspect_ratio: Any, w: int, h: int, proportional_width: Any, pr
 def _default_config() -> Dict[str, Any]:
     return {
         "mode": "等比",
-        "fit_mode": "拉伸",
+        "fit_mode": "留边填充",
         "upscale_method": "兰索斯",
         "round_to_multiple": "8",
         "pad_color": "#000000",
+        "pad_feather": 0,
         "device": "CPU",
         "width": 1024,
         "height": 1024,
@@ -598,6 +599,19 @@ def _resize_one(image: torch.Tensor, mask: torch.Tensor | None, cfg: Dict[str, A
         use_method = "bilinear" if method == "lanczos" else method
         return common_upscale(x.unsqueeze(1), ow, oh, use_method, crop="disabled").squeeze(1)
 
+    def feather_mask(x: torch.Tensor) -> torch.Tensor:
+        feather = max(0, _to_int(cfg.get("pad_feather"), 0))
+        if feather <= 0:
+            return x
+        kernel = max(3, feather * 2 + 1)
+        if kernel % 2 == 0:
+            kernel += 1
+        value = x.unsqueeze(1).float()
+        passes = max(1, min(4, int(math.ceil(feather / 8))))
+        for _ in range(passes):
+            value = F.avg_pool2d(value, kernel_size=kernel, stride=1, padding=kernel // 2)
+        return value.squeeze(1).clamp(0.0, 1.0).to(dtype=x.dtype)
+
     # 等比/长边模式本身已经按比例算目标尺寸；fit_mode 不再额外裁剪/补边。
     if fit == "stretch" or mode in ("等比", "长边"):
         out = upscale_image(img, target_w, target_h)
@@ -634,7 +648,9 @@ def _resize_one(image: torch.Tensor, mask: torch.Tensor | None, cfg: Dict[str, A
         out_mask = torch.ones((resized.shape[0], target_h, target_w), dtype=resized_mask.dtype, device=resized_mask.device)
         out_mask[:, y:y + inner_h, x:x + inner_w] = resized_mask
     else:
-        out_mask = None
+        out_mask = torch.ones((resized.shape[0], target_h, target_w), dtype=torch.float32, device=resized.device)
+        out_mask[:, y:y + inner_h, x:x + inner_w] = 0.0
+        out_mask = feather_mask(out_mask)
     return out.cpu(), None if out_mask is None else out_mask.cpu(), w0, h0, target_w, target_h
 
 
@@ -682,10 +698,11 @@ GJJ · 🔍 多功能图片缩放
 输入：
 - 图片：GJJ_BATCH_IMAGE,IMAGE。
 - 遮罩：MASK，可选。
+  - 留边填充且未接入遮罩时，会自动把补边填充区域输出为遮罩。
 
 输出：
 - 图片：GJJ_BATCH_IMAGE,IMAGE，尽量保持输入批量容器结构。
-- 遮罩：MASK。
+- 遮罩：MASK。接入遮罩时同步缩放/裁剪；无遮罩留边填充时输出补边区域。
 - 扩展输出 1-3：由前端按钮动态决定。
 
 依赖：

@@ -6,10 +6,11 @@ const CONFIG_WIDGET = "config_json";
 
 const DEFAULT_CONFIG = {
   mode: "等比",
-  fit_mode: "拉伸",
+  fit_mode: "留边填充",
   upscale_method: "兰索斯",
   round_to_multiple: "8",
   pad_color: "#000000",
+  pad_feather: 0,
   device: "CPU",
   width: 1024,
   height: 1024,
@@ -23,10 +24,21 @@ const DEFAULT_CONFIG = {
 };
 
 const MODES = ["宽高", "等比", "长边", "像素"];
+const MODE_BUTTONS = {
+  "宽高": { icon: "宽高", title: "宽高：按目标宽度和目标高度输出。" },
+  "等比": { icon: "等比", title: "等比：按缩放百分比输出。" },
+  "长边": { icon: "长边", title: "长边：把最长边缩放到指定长度。" },
+  "像素": { icon: "像素", title: "像素：按总像素和画幅比例计算输出尺寸。" },
+};
+const FIT_BUTTONS = {
+  "拉伸": { icon: "拉伸", title: "拉伸：直接变成目标尺寸。" },
+  "留边填充": { icon: "留边", title: "留边填充：等比缩放后补边；未接入遮罩时会输出补边遮罩。" },
+  "裁剪填满": { icon: "裁剪", title: "裁剪填满：等比缩放后居中裁剪。" },
+};
 const OUTPUTS = [
-  { key: "original_size", label: "📦 原始尺寸", outName: "原始尺寸", type: "*", title: "输出原始尺寸 [宽度, 高度]。Original size output." },
-  { key: "output_height", label: "↕️ 输出高度", outName: "输出高度", type: "*", title: "输出处理后的高度。Output height." },
-  { key: "output_width", label: "↔️ 输出宽度", outName: "输出宽度", type: "*", title: "输出处理后的宽度。Output width." },
+  { key: "original_size", icon: "📦", label: "📦 原始尺寸", outName: "原始尺寸", type: "*", title: "更多输出：原始尺寸 [宽度, 高度]。单击单选，Ctrl/Shift 可复选。" },
+  { key: "output_height", icon: "↕️", label: "↕️ 输出高度", outName: "输出高度", type: "*", title: "更多输出：输出处理后的高度。单击单选，Ctrl/Shift 可复选。" },
+  { key: "output_width", icon: "↔️", label: "↔️ 输出宽度", outName: "输出宽度", type: "*", title: "更多输出：输出处理后的宽度。单击单选，Ctrl/Shift 可复选。" },
 ];
 
 
@@ -107,24 +119,24 @@ const OPTIONS = {
 };
 
 function ensureStyles() {
-  if (document.getElementById("gjj-mf-resize-style-v40")) return;
+  if (document.getElementById("gjj-mf-resize-style-v41")) return;
   const style = document.createElement("style");
-  style.id = "gjj-mf-resize-style-v40";
+  style.id = "gjj-mf-resize-style-v41";
   style.textContent = `
 .gjj-mf-root{box-sizing:border-box;width:100%;padding:4px 0 7px 0;font-family:system-ui,"Microsoft YaHei",sans-serif;color:#dbeafe;pointer-events:auto;user-select:none;}
-.gjj-mf-row-title{font-size:11px;color:#93c5fd;margin:2px 0 5px 2px;opacity:.95;}
-.gjj-mf-output-row{display:flex;gap:6px;margin:0 0 9px 0;}
-.gjj-mf-output-btn{flex:1;border:1px solid rgba(148,163,184,.42);background:rgba(15,23,42,.58);color:#e5e7eb;border-radius:8px;padding:5px 3px;font-size:11px;line-height:1.15;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:background .18s,border-color .18s,box-shadow .18s,color .18s;}
-.gjj-mf-output-btn:hover{border-color:#22d3ee;color:#fff;background:rgba(8,145,178,.22);}
-.gjj-mf-output-btn.active{border-color:#22d3ee;color:#fff;background:rgba(14,165,233,.38);box-shadow:0 0 0 1px rgba(34,211,238,.25) inset;}
-.gjj-mf-tabs{position:relative;display:flex;gap:6px;border-bottom:1px solid rgba(34,211,238,.32);margin:0 0 10px 0;padding-bottom:0;}
-.gjj-mf-tab{position:relative;flex:1;text-align:center;border:1px solid rgba(148,163,184,.46);border-bottom:none;border-radius:8px 8px 0 0;background:rgba(15,23,42,.42);color:#d1d5db;font-weight:700;font-size:12px;padding:6px 2px;cursor:pointer;transition:border-color .2s,background .2s,color .2s;z-index:2;}
-.gjj-mf-tab:hover{border-color:rgba(34,211,238,.72);color:#fff;}
-.gjj-mf-tab.active{border-left-color:#22d3ee;border-top-color:#22d3ee;border-right-color:#22d3ee;border-bottom-color:transparent;background:rgba(14,165,233,.28);color:#fff;}
-.gjj-mf-underline{position:absolute;left:0;bottom:-2px;height:3px;width:0;border-radius:999px;background:#22d3ee;box-shadow:0 0 9px rgba(34,211,238,.9);transition:left .3s ease,width .3s ease;z-index:4;}
+.gjj-mf-output-row{display:flex;align-items:center;gap:5px;margin:0 0 6px 0;min-width:0;}
+.gjj-mf-mini-label{flex:0 0 auto;color:#93c5fd;font-size:11px;white-space:nowrap;}
 .gjj-mf-panel{display:flex;flex-direction:column;gap:7px;}
+.gjj-mf-button-row{display:flex;gap:6px;min-width:0;flex:1;}
+.gjj-mf-choice{flex:1;min-width:0;height:28px;border:1px solid rgba(148,163,184,.36);background:rgba(15,23,42,.55);color:#dbeafe;border-radius:8px;padding:0 6px;font-size:15px;font-weight:700;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center;}
+.gjj-mf-choice:hover{border-color:rgba(34,211,238,.72);color:#fff;background:rgba(8,145,178,.2);}
+.gjj-mf-choice.active{border-color:#22d3ee;color:#fff;background:rgba(14,165,233,.38);box-shadow:0 0 0 1px rgba(34,211,238,.22) inset;}
+.gjj-mf-output-btn{flex:1 1 28px;}
+.gjj-mf-settings-btn{flex:0 0 auto;height:28px;border:1px solid rgba(148,163,184,.38);background:rgba(15,23,42,.6);color:#dbeafe;border-radius:8px;padding:0 8px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;}
+.gjj-mf-settings-btn.active{border-color:#22d3ee;color:#fff;background:rgba(14,165,233,.33);}
 .gjj-mf-field{display:flex;align-items:center;gap:7px;min-height:28px;}
 .gjj-mf-label{width:82px;min-width:82px;color:#cbd5e1;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.gjj-mf-icon-label{width:24px;min-width:24px;text-align:center;font-size:15px;}
 .gjj-mf-control{flex:1;min-width:0;height:28px;border:1px solid rgba(148,163,184,.28);background:rgba(17,24,39,.82);color:#fff;border-radius:8px;padding:0 8px;font-size:12px;outline:none;box-sizing:border-box;}
 .gjj-mf-control:focus{border-color:#22d3ee;box-shadow:0 0 0 1px rgba(34,211,238,.25);}
 .gjj-mf-control[type="color"]{padding:2px 5px;min-width:60px;}
@@ -245,8 +257,16 @@ function rememberSerializedOutputKeys(node, data) {
   if (keys.length) node.__gjjMfSerializedExtraOutputs = keys;
 }
 
-function repairConfigFromOutputs(node, cfg = readConfig(node)) {
+function repairConfigFromOutputs(node, cfg = readConfig(node), { restoreFromSlots = true } = {}) {
   const selected = Array.isArray(cfg.extra_outputs) ? [...cfg.extra_outputs] : [];
+  if (!restoreFromSlots) {
+    const next = selected.filter((key) => OUTPUTS.some((x) => x.key === key)).slice(0, 3);
+    if (next.join("|") !== selected.join("|")) {
+      cfg = writeConfig(node, { extra_outputs: next });
+    }
+    return cfg;
+  }
+
   const serialized = Array.isArray(node.__gjjMfSerializedExtraOutputs) ? node.__gjjMfSerializedExtraOutputs : [];
   const linked = collectOutputKeysFromSlots(node.outputs, { linkedOnly: true });
   const named = collectOutputKeysFromSlots(node.outputs, { linkedOnly: false });
@@ -273,15 +293,21 @@ function applyOutputSlot(output, def) {
   output.tooltip = def.title;
 }
 
-function updateOutputs(node) {
+function updateOutputs(node, { fromUser = false } = {}) {
   if (!node.outputs) return;
-  const cfg = repairConfigFromOutputs(node, readConfig(node));
+  const cfg = repairConfigFromOutputs(node, readConfig(node), { restoreFromSlots: !fromUser });
   const selected = cfg.extra_outputs.slice(0, 3).filter((key) => OUTPUTS.some((x) => x.key === key));
+
+  if (fromUser) {
+    for (let i = node.outputs.length - 1; i >= 2; i--) {
+      try { node.removeOutput(i); } catch (_) { node.outputs.splice(i, 1); }
+    }
+  }
 
   // 只收缩未使用的尾部输出；已有连线的槽位不硬删，先通过 repairConfigFromOutputs 并入 selected。
   for (let i = node.outputs.length - 1; i >= 2; i--) {
     if (i < 2 + selected.length) continue;
-    if (outputHasLinks(node.outputs[i])) continue;
+    if (!fromUser && outputHasLinks(node.outputs[i])) continue;
     try { node.removeOutput(i); } catch (_) { node.outputs.splice(i, 1); }
   }
 
@@ -297,7 +323,7 @@ function updateOutputs(node) {
 
   // 如果仍有多余的未连接输出，继续清掉；连接中的保留，避免刷新瞬间断线。
   for (let i = node.outputs.length - 1; i >= 2 + selected.length; i--) {
-    if (outputHasLinks(node.outputs[i])) continue;
+    if (!fromUser && outputHasLinks(node.outputs[i])) continue;
     try { node.removeOutput(i); } catch (_) { node.outputs.splice(i, 1); }
   }
 
@@ -371,6 +397,35 @@ function selectField(root, node, cfg, key, label, title, values) {
   root.appendChild(row);
 }
 
+function choiceField(root, node, cfg, key, label, title, values) {
+  const row = document.createElement("div");
+  row.className = "gjj-mf-field";
+  row.title = title;
+  const span = document.createElement("span");
+  span.className = "gjj-mf-label gjj-mf-icon-label";
+  span.textContent = label;
+  const group = document.createElement("div");
+  group.className = "gjj-mf-button-row";
+  for (const v of values) {
+    const meta = key === "fit_mode" ? FIT_BUTTONS[v] : key === "mode" ? MODE_BUTTONS[v] : null;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "gjj-mf-choice";
+    btn.textContent = meta?.icon || v;
+    btn.classList.toggle("active", cfg[key] === v);
+    btn.title = meta?.title || `${label}：${v}`;
+    btn.addEventListener("click", (e) => {
+      stop(e);
+      writeConfig(node, { [key]: v });
+      buildPanel(node);
+    });
+    for (const ev of ["pointerdown", "mousedown", "mouseup", "dblclick", "keydown", "keyup", "wheel"]) btn.addEventListener(ev, stop);
+    group.appendChild(btn);
+  }
+  row.append(span, group);
+  root.appendChild(row);
+}
+
 function colorField(root, node, cfg) {
   const row = document.createElement("label");
   row.className = "gjj-mf-field";
@@ -395,11 +450,21 @@ function buildPanel(node) {
   const cfg = readConfig(node);
   dom.panel.replaceChildren();
 
-  selectField(dom.panel, node, cfg, "fit_mode", "🧲 适配方式", "拉伸 Stretch：直接变成目标尺寸；留边填充 Letterbox/Padding：等比缩放后补边；裁剪填满 Crop Fill：等比缩放后居中裁剪。", OPTIONS.fit_mode);
-  selectField(dom.panel, node, cfg, "upscale_method", "🔄 缩放算法", "缩放采样算法。Lanczos 高质量；Bicubic/Bilinear 更快。Resampling method.", OPTIONS.upscale_method);
-  selectField(dom.panel, node, cfg, "round_to_multiple", "🔢 尺寸对齐", "输出宽高向上对齐到指定倍数。Round output size to multiple.", OPTIONS.round_to_multiple);
-  colorField(dom.panel, node, cfg);
-  selectField(dom.panel, node, cfg, "device", "⚙️ 计算设备", "选择 CPU 或 GPU 执行。Lanczos 在 CPU 更稳定。Compute device.", OPTIONS.device);
+  choiceField(dom.panel, node, { ...cfg, mode: cfg.mode }, "mode", "📐", "尺寸模式：宽高、等比、长边、像素。", MODES);
+  choiceField(dom.panel, node, cfg, "fit_mode", "🧲", "适配方式：拉伸、留边填充、裁剪填满。", OPTIONS.fit_mode);
+
+  if (node.__gjjMfShowSettings) {
+    const commonSection = document.createElement("div");
+    commonSection.className = "gjj-mf-section";
+    dom.panel.appendChild(commonSection);
+    selectField(commonSection, node, cfg, "upscale_method", "🔄 缩放算法", "缩放采样算法。Lanczos 高质量；Bicubic/Bilinear 更快。Resampling method.", OPTIONS.upscale_method);
+    selectField(commonSection, node, cfg, "round_to_multiple", "🔢 尺寸对齐", "输出宽高向上对齐到指定倍数。Round output size to multiple.", OPTIONS.round_to_multiple);
+    if (cfg.fit_mode === "留边填充") {
+      colorField(commonSection, node, cfg);
+      numberField(commonSection, node, cfg, "pad_feather", "🪶 边缘羽化", "未接入外部遮罩时，对自动生成的补边遮罩边缘做柔化。0 为关闭。", { min: 0, max: 256, step: 1 });
+    }
+    selectField(commonSection, node, cfg, "device", "⚙️ 计算设备", "选择 CPU 或 GPU 执行。Lanczos 在 CPU 更稳定。Compute device.", OPTIONS.device);
+  }
 
   const section = document.createElement("div");
   section.className = "gjj-mf-section";
@@ -433,12 +498,9 @@ function updateDomState(node) {
   dom.outputs.querySelectorAll("button").forEach((btn) => {
     btn.classList.toggle("active", cfg.extra_outputs.includes(btn.dataset.key));
   });
-  const tabs = Array.from(dom.tabs.querySelectorAll("button.gjj-mf-tab"));
-  for (const tab of tabs) tab.classList.toggle("active", tab.dataset.mode === cfg.mode);
-  const active = tabs.find((tab) => tab.dataset.mode === cfg.mode) || tabs[1];
-  if (active) {
-    dom.underline.style.left = `${active.offsetLeft}px`;
-    dom.underline.style.width = `${active.offsetWidth}px`;
+  if (dom.settingsBtn) {
+    dom.settingsBtn.classList.toggle("active", !!node.__gjjMfShowSettings);
+    dom.settingsBtn.textContent = node.__gjjMfShowSettings ? "⚙更多设置 收起" : "⚙更多设置";
   }
 }
 
@@ -448,17 +510,36 @@ function createDom(node) {
   root.className = "gjj-mf-root";
   for (const ev of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "wheel"]) root.addEventListener(ev, stop);
 
-  const outTitle = document.createElement("div");
-  outTitle.className = "gjj-mf-row-title";
-  outTitle.textContent = "🧩 输出扩充口：单选，Ctrl/Shift 复选";
   const outputs = document.createElement("div");
   outputs.className = "gjj-mf-output-row";
+  outputs.title = "更多输出：单击为单选，Ctrl/Shift 可复选。";
+
+  const settingsBtn = document.createElement("button");
+  settingsBtn.type = "button";
+  settingsBtn.className = "gjj-mf-settings-btn";
+  settingsBtn.textContent = "⚙更多设置";
+  settingsBtn.title = "显示或隐藏缩放算法、尺寸对齐、补边颜色、边缘羽化和计算设备。";
+  settingsBtn.addEventListener("click", (e) => {
+    stop(e);
+    node.__gjjMfShowSettings = !node.__gjjMfShowSettings;
+    updateDomState(node);
+    buildPanel(node);
+  });
+  for (const ev of ["pointerdown", "mousedown", "mouseup", "dblclick", "keydown", "keyup", "wheel"]) settingsBtn.addEventListener(ev, stop);
+  outputs.appendChild(settingsBtn);
+
+  const outputLabel = document.createElement("span");
+  outputLabel.className = "gjj-mf-mini-label";
+  outputLabel.textContent = "更多输出:";
+  outputLabel.title = "输出扩充口：单击为单选，Ctrl/Shift 可复选。";
+  outputs.appendChild(outputLabel);
+
   for (const item of OUTPUTS) {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "gjj-mf-output-btn";
+    btn.className = "gjj-mf-choice gjj-mf-output-btn";
     btn.dataset.key = item.key;
-    btn.textContent = item.label;
+    btn.textContent = item.icon;
     btn.title = item.title;
     btn.addEventListener("click", (e) => {
       stop(e);
@@ -470,32 +551,13 @@ function createDom(node) {
         selected = selected.length === 1 && selected[0] === item.key ? [] : [item.key];
       }
       writeConfig(node, { extra_outputs: selected.slice(0, 3) });
-      updateOutputs(node);
+      updateOutputs(node, { fromUser: true });
       updateDomState(node);
       redraw(node);
     });
+    for (const ev of ["pointerdown", "mousedown", "mouseup", "dblclick", "keydown", "keyup", "wheel"]) btn.addEventListener(ev, stop);
     outputs.appendChild(btn);
   }
-
-  const tabs = document.createElement("div");
-  tabs.className = "gjj-mf-tabs";
-  for (const mode of MODES) {
-    const tab = document.createElement("button");
-    tab.type = "button";
-    tab.className = "gjj-mf-tab";
-    tab.dataset.mode = mode;
-    tab.textContent = mode;
-    tab.title = `切换到【${mode}】模式。Switch to ${mode} mode.`;
-    tab.addEventListener("click", (e) => {
-      stop(e);
-      writeConfig(node, { mode });
-      buildPanel(node);
-    });
-    tabs.appendChild(tab);
-  }
-  const underline = document.createElement("div");
-  underline.className = "gjj-mf-underline";
-  tabs.appendChild(underline);
 
   const panel = document.createElement("div");
   panel.className = "gjj-mf-panel";
@@ -504,8 +566,8 @@ function createDom(node) {
   status.className = "gjj-mf-status";
   status.innerHTML = `<div class="gjj-mf-status-text">准备就绪</div><div class="gjj-mf-bar"><div class="gjj-mf-fill"></div></div>`;
 
-  root.append(outTitle, outputs, tabs, panel, status);
-  node.__gjjMfDom = { root, outputs, tabs, underline, panel, status };
+  root.append(outputs, panel, status);
+  node.__gjjMfDom = { root, outputs, settingsBtn, panel, status };
   return root;
 }
 
@@ -653,7 +715,7 @@ function initNode(node) {
 }
 
 app.registerExtension({
-  name: "GJJ.MultiFunctionImageResize.v40.keepLinks",
+  name: "GJJ.MultiFunctionImageResize.v41.compactPanel",
   async beforeRegisterNodeDef(nodeType, nodeData) {
     ensureBackendStatusListener();
     if (nodeData.name !== NODE_CLASS) return;
