@@ -36,6 +36,9 @@ DEFAULT_NODE_OUTLINE = "#3E4D54"
 OPTIONAL_NODE_MODULES = {
     "gjj_latentsync_node",
     "gjj_wanvideo_model_loader",
+    "gjj_wanvideo_vae_loader",
+    "gjj_wanvideo_text_encode_cached",
+    "gjj_wanvideo_vace_module_select",
 }
 
 # 这些是工具脚本（非节点模块），不应被自动导入

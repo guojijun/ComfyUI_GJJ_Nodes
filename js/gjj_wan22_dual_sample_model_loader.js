@@ -25,6 +25,9 @@ const FIELD = {
 	vaeFilter: "vae_filter",
 	clipFilter: "clip_filter",
 	vaeName: "vae_name",
+	vaePrecision: "vae_precision",
+	vaeUseCpuCache: "vae_use_cpu_cache",
+	vaeVerbose: "vae_verbose",
 	clipName: "clip_name",
 	clipType: "clip_type",
 	clipDtype: "clip_dtype",
@@ -50,7 +53,7 @@ const ALL_FIELDS = Object.values(FIELD);
 const SELECT_FIELDS = new Set([
 	FIELD.basePrecision, FIELD.quantization, FIELD.loadDevice, FIELD.attentionMode, FIELD.rmsNormFunction,
 	FIELD.highModel, FIELD.lowModel, FIELD.highLora, FIELD.lowLora,
-	FIELD.highDtype, FIELD.lowDtype, FIELD.vaeName, FIELD.clipName, FIELD.clipType, FIELD.clipDtype,
+	FIELD.highDtype, FIELD.lowDtype, FIELD.vaeName, FIELD.vaePrecision, FIELD.clipName, FIELD.clipType, FIELD.clipDtype,
 	FIELD.highExtraModel, FIELD.lowExtraModel,
 	FIELD.highFantasyTalkingModel, FIELD.lowFantasyTalkingModel,
 	FIELD.highMultitalkModel, FIELD.lowMultitalkModel,
@@ -72,6 +75,9 @@ const DEFAULTS = {
 	[FIELD.lowLoraFilter]: "low_",
 	[FIELD.vaeFilter]: "wan",
 	[FIELD.clipFilter]: "umt5_xxl",
+	[FIELD.vaePrecision]: "bf16",
+	[FIELD.vaeUseCpuCache]: false,
+	[FIELD.vaeVerbose]: false,
 	[FIELD.clipType]: "wan",
 	[FIELD.clipDtype]: "default",
 	[FIELD.highDtype]: "default",
@@ -101,6 +107,9 @@ const LABELS = {
 	[FIELD.lowLora]: "Low LoRA",
 	[FIELD.highLoraStrength]: "💪",
 	[FIELD.lowLoraStrength]: "💪",
+	[FIELD.vaePrecision]: "精度",
+	[FIELD.vaeUseCpuCache]: "缓存",
+	[FIELD.vaeVerbose]: "日志",
 	[FIELD.highExtraModel]: "H-Extra",
 	[FIELD.lowExtraModel]: "L-Extra",
 	[FIELD.highFantasyTalkingModel]: "H-FTalk",
@@ -113,10 +122,10 @@ const LABELS = {
 
 const TIPS = {
 	[FIELD.baseFilter]: "总过滤词：不区分大小写，支持子目录。默认 wan2.2_t2v。",
-	[FIELD.useExtraModel]: "开启后显示并输出 High/Low 成对 Extra 模型。",
-	[FIELD.useFantasyTalkingModel]: "开启后显示并输出 High/Low 成对 FantasyTalking 模型。",
-	[FIELD.useMultitalkModel]: "开启后显示并输出 High/Low 成对 MultiTalk/InfiniteTalk 模型。",
-	[FIELD.useFantasyPortraitModel]: "开启后显示并输出 High/Low 成对 FantasyPortrait 模型。",
+	[FIELD.useExtraModel]: "开启后在节点内部启用 High/Low 成对 Extra 模型。",
+	[FIELD.useFantasyTalkingModel]: "开启后在节点内部启用 High/Low 成对 FantasyTalking 模型。",
+	[FIELD.useMultitalkModel]: "开启后在节点内部启用 High/Low 成对 MultiTalk/InfiniteTalk 模型。",
+	[FIELD.useFantasyPortraitModel]: "开启后在节点内部启用 High/Low 成对 FantasyPortrait 模型。",
 	[FIELD.showMoreParams]: "显示或隐藏 base_precision、quantization、load_device、attention_mode、rms_norm_function。",
 	[FIELD.basePrecision]: "WanVideoModelLoader base_precision。",
 	[FIELD.quantization]: "WanVideoModelLoader quantization。",
@@ -141,6 +150,9 @@ const TIPS = {
 	[FIELD.highFantasyPortraitModel]: "High 分支 FantasyPortrait 模型。",
 	[FIELD.lowFantasyPortraitModel]: "Low 分支 FantasyPortrait 模型。",
 	[FIELD.vaeName]: "VAE：models/vae 中默认匹配 wan 的文件。",
+	[FIELD.vaePrecision]: "VAE 精度：对齐 WanVideo VAE Loader 的 precision。",
+	[FIELD.vaeUseCpuCache]: "CPU 缓存：对齐 WanVideo VAE Loader 的 use_cpu_cache 参数位。",
+	[FIELD.vaeVerbose]: "日志：对齐 WanVideo VAE Loader 的 verbose 参数位。",
 	[FIELD.clipName]: "CLIP：models/text_encoders 中默认匹配 umt5_xxl 的文件。",
 	[FIELD.clipType]: "CLIP 类型。Wan2.2 通常使用 wan。",
 	[FIELD.clipDtype]: "CLIP 数据类型，默认 default。",
@@ -279,7 +291,7 @@ function rememberOriginalLists(node) {
 	for (const name of [
 		FIELD.basePrecision, FIELD.quantization, FIELD.loadDevice, FIELD.attentionMode, FIELD.rmsNormFunction,
 		FIELD.highModel, FIELD.lowModel, FIELD.highLora, FIELD.lowLora,
-		FIELD.highDtype, FIELD.lowDtype, FIELD.vaeName, FIELD.clipName, FIELD.clipType, FIELD.clipDtype,
+		FIELD.highDtype, FIELD.lowDtype, FIELD.vaeName, FIELD.vaePrecision, FIELD.clipName, FIELD.clipType, FIELD.clipDtype,
 		FIELD.highExtraModel, FIELD.lowExtraModel,
 		FIELD.highFantasyTalkingModel, FIELD.lowFantasyTalkingModel,
 		FIELD.highMultitalkModel, FIELD.lowMultitalkModel,
@@ -360,10 +372,14 @@ function sortBranchList(values, branch) {
 }
 
 function firstBranchValue(values, branch) {
-	const sorted = sortBranchList(values, branch);
+	const sorted = sortBranchList((values || []).filter((value) => String(value || "").trim()), branch);
 	return sorted[0] || "";
 }
 
+function withEmptyChoice(values) {
+	const result = Array.isArray(values) ? values.filter((value) => String(value || "").trim()) : [];
+	return ["", ...result];
+}
 
 function setComboOptions(w, values) {
 	if (!w) return;
@@ -386,6 +402,14 @@ function setComboOptions(w, values) {
 function selectFirstIfInvalid(w, values, branch = "") {
 	if (!w) return;
 	const cur = String(w.value || "");
+	if (cur === "" && values.includes("")) {
+		if (w.__gjjWan22Input && "value" in w.__gjjWan22Input) {
+			w.__gjjWan22Input.value = "";
+		}
+		const node = w?.__gjjWan22Node;
+		if (node) saveWidgetValues(node);
+		return;
+	}
 	if (!cur || !values.includes(cur)) {
 		w.value = branch ? firstBranchValue(values, branch) : (values[0] || "");
 		w.callback?.(w.value);
@@ -484,31 +508,31 @@ function applyFilters(node) {
 
 	setComboOptions(highModel, highModelList);
 	setComboOptions(lowModel, lowModelList);
-	setComboOptions(highLora, highLoraList);
-	setComboOptions(lowLora, lowLoraList);
-	setComboOptions(highExtraModel, highExtraModelList);
-	setComboOptions(lowExtraModel, lowExtraModelList);
-	setComboOptions(highFantasyTalkingModel, highFantasyTalkingList);
-	setComboOptions(lowFantasyTalkingModel, lowFantasyTalkingList);
-	setComboOptions(highMultitalkModel, highMultitalkList);
-	setComboOptions(lowMultitalkModel, lowMultitalkList);
-	setComboOptions(highFantasyPortraitModel, highFantasyPortraitList);
-	setComboOptions(lowFantasyPortraitModel, lowFantasyPortraitList);
+	setComboOptions(highLora, withEmptyChoice(highLoraList));
+	setComboOptions(lowLora, withEmptyChoice(lowLoraList));
+	setComboOptions(highExtraModel, withEmptyChoice(highExtraModelList));
+	setComboOptions(lowExtraModel, withEmptyChoice(lowExtraModelList));
+	setComboOptions(highFantasyTalkingModel, withEmptyChoice(highFantasyTalkingList));
+	setComboOptions(lowFantasyTalkingModel, withEmptyChoice(lowFantasyTalkingList));
+	setComboOptions(highMultitalkModel, withEmptyChoice(highMultitalkList));
+	setComboOptions(lowMultitalkModel, withEmptyChoice(lowMultitalkList));
+	setComboOptions(highFantasyPortraitModel, withEmptyChoice(highFantasyPortraitList));
+	setComboOptions(lowFantasyPortraitModel, withEmptyChoice(lowFantasyPortraitList));
 	setComboOptions(vae, vaeList);
 	setComboOptions(clip, clipList);
 
 	selectFirstIfInvalid(highModel, highModelList, highModelRole);
 	selectFirstIfInvalid(lowModel, lowModelList, lowModelRole);
-	selectFirstIfInvalid(highLora, highLoraList, highLoraRole);
-	selectFirstIfInvalid(lowLora, lowLoraList, lowLoraRole);
-	selectFirstIfInvalid(highExtraModel, highExtraModelList, highModelRole);
-	selectFirstIfInvalid(lowExtraModel, lowExtraModelList, lowModelRole);
-	selectFirstIfInvalid(highFantasyTalkingModel, highFantasyTalkingList, highModelRole);
-	selectFirstIfInvalid(lowFantasyTalkingModel, lowFantasyTalkingList, lowModelRole);
-	selectFirstIfInvalid(highMultitalkModel, highMultitalkList, highModelRole);
-	selectFirstIfInvalid(lowMultitalkModel, lowMultitalkList, lowModelRole);
-	selectFirstIfInvalid(highFantasyPortraitModel, highFantasyPortraitList, highModelRole);
-	selectFirstIfInvalid(lowFantasyPortraitModel, lowFantasyPortraitList, lowModelRole);
+	selectFirstIfInvalid(highLora, withEmptyChoice(highLoraList), highLoraRole);
+	selectFirstIfInvalid(lowLora, withEmptyChoice(lowLoraList), lowLoraRole);
+	selectFirstIfInvalid(highExtraModel, withEmptyChoice(highExtraModelList), highModelRole);
+	selectFirstIfInvalid(lowExtraModel, withEmptyChoice(lowExtraModelList), lowModelRole);
+	selectFirstIfInvalid(highFantasyTalkingModel, withEmptyChoice(highFantasyTalkingList), highModelRole);
+	selectFirstIfInvalid(lowFantasyTalkingModel, withEmptyChoice(lowFantasyTalkingList), lowModelRole);
+	selectFirstIfInvalid(highMultitalkModel, withEmptyChoice(highMultitalkList), highModelRole);
+	selectFirstIfInvalid(lowMultitalkModel, withEmptyChoice(lowMultitalkList), lowModelRole);
+	selectFirstIfInvalid(highFantasyPortraitModel, withEmptyChoice(highFantasyPortraitList), highModelRole);
+	selectFirstIfInvalid(lowFantasyPortraitModel, withEmptyChoice(lowFantasyPortraitList), lowModelRole);
 	selectFirstIfInvalid(vae, vaeList);
 	selectFirstIfInvalid(clip, clipList);
 
@@ -596,6 +620,10 @@ function createField(node, name, opts = {}) {
 	label.className = "gjj-wan22-label";
 	label.textContent = opts.label || LABELS[name] || name;
 	label.title = opts.tip || TIPS[name] || w.tooltip || "";
+	if (opts.hideLabel) {
+		field.classList.add("no-label");
+		label.style.display = "none";
+	}
 
 	let input;
 	const values = originalValues(w);
@@ -607,7 +635,8 @@ function createField(node, name, opts = {}) {
 		const sync = () => {
 			const on = w.value === true || String(w.value).toLowerCase() === "true";
 			input.dataset.value = on ? "true" : "false";
-			input.textContent = on ? "✅ 开" : "⬜ 关";
+			input.textContent = opts.buttonText || (on ? "开" : "关");
+			input.title = `${opts.buttonText || opts.label || LABELS[name] || name}：${on ? "开" : "关"}`;
 		};
 		input.addEventListener("click", (event) => {
 			event.preventDefault();
@@ -661,7 +690,7 @@ function createField(node, name, opts = {}) {
 		w.__gjjWan22Input = input;
 	}
 
-	input.title = opts.tip || TIPS[name] || w.tooltip || "";
+	if (!input.title) input.title = opts.tip || TIPS[name] || w.tooltip || "";
 	protect(input);
 	field.append(label, input);
 	return field;
@@ -681,14 +710,21 @@ function buildDom(node) {
 		.gjj-wan22-loader * { box-sizing:border-box; }
 		.gjj-wan22-row { display:grid; gap:6px; align-items:center; min-width:0; }
 		.gjj-wan22-row.top { grid-template-columns:minmax(0,1fr) 34px; }
-		.gjj-wan22-row.switches { grid-template-columns:repeat(6,minmax(0,1fr)); }
+		.gjj-wan22-row.switches { display:flex; gap:6px; align-items:center; justify-content:space-between; width:100%; flex-wrap:nowrap; }
+		.gjj-wan22-row.switches .gjj-wan22-field { display:block; flex:1 1 0; min-width:0; }
+		.gjj-wan22-row.switches .gjj-wan22-label { display:none; }
+		.gjj-wan22-row.switches .gjj-wan22-toggle { width:100%; min-width:0; padding:3px 8px; }
 		.gjj-wan22-row.triple { grid-template-columns:minmax(0,1fr) 86px 74px; }
 		.gjj-wan22-row.quad { grid-template-columns:minmax(0,1fr) 76px minmax(0,1fr) 76px; }
+		.gjj-wan22-row.vae { display:flex; gap:6px; align-items:center; flex-wrap:wrap; width:100%; }
+		.gjj-wan22-row.vae .gjj-wan22-field:first-child { flex:1 1 170px; min-width:150px; }
+		.gjj-wan22-row.vae .gjj-wan22-field:not(:first-child) { flex:0 0 auto; min-width:58px; }
 		.gjj-wan22-row.cols1 { grid-template-columns:1fr; }
 		.gjj-wan22-row.double { grid-template-columns:minmax(0,1fr) 96px; }
 		.gjj-wan22-row.pair { grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
 		.gjj-wan22-field { display:grid; grid-template-columns:48px minmax(0,1fr); gap:5px; align-items:center; min-width:0; }
 		.gjj-wan22-field.compact { grid-template-columns:22px minmax(0,1fr); }
+		.gjj-wan22-field.no-label { grid-template-columns:minmax(0,1fr); }
 		.gjj-wan22-label { color:#b9c8cc; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; }
 		.gjj-wan22-field.compact .gjj-wan22-label { text-align:center; color:#93a7ad; }
 		.gjj-wan22-input, .gjj-wan22-select {
@@ -746,14 +782,14 @@ function buildDom(node) {
 	const rowSwitches = document.createElement("div");
 	rowSwitches.className = "gjj-wan22-row switches";
 
-	const useLoraField = createField(node, FIELD.useLora, { label: "🚕", compact: true });
+	const useLoraField = createField(node, FIELD.useLora, { label: "🚕", buttonText: "LORA", compact: true });
 	node.__gjjWan22UseLoraField = useLoraField;
 	rowSwitches.append(useLoraField);
-	rowSwitches.append(createField(node, FIELD.useExtraModel, { label: "➕", compact: true }));
-	rowSwitches.append(createField(node, FIELD.useFantasyTalkingModel, { label: "🗣", compact: true }));
-	rowSwitches.append(createField(node, FIELD.useMultitalkModel, { label: "🎤", compact: true }));
-	rowSwitches.append(createField(node, FIELD.useFantasyPortraitModel, { label: "🧑", compact: true }));
-	rowSwitches.append(createField(node, FIELD.showMoreParams, { label: "更多", compact: true }));
+	rowSwitches.append(createField(node, FIELD.useExtraModel, { label: "➕", buttonText: "扩展", compact: true }));
+	rowSwitches.append(createField(node, FIELD.useFantasyTalkingModel, { label: "🗣", buttonText: "讲话", compact: true }));
+	rowSwitches.append(createField(node, FIELD.useMultitalkModel, { label: "🎤", buttonText: "交谈", compact: true }));
+	rowSwitches.append(createField(node, FIELD.useFantasyPortraitModel, { label: "🧑", buttonText: "肖像", compact: true }));
+	rowSwitches.append(createField(node, FIELD.showMoreParams, { label: "更多", buttonText: "更多", compact: true }));
 	container.append(rowSwitches);
 
 	const externalHint = document.createElement("div");
@@ -797,8 +833,11 @@ function buildDom(node) {
 	container.append(sepVae);
 
 	const rowVae = document.createElement("div");
-	rowVae.className = "gjj-wan22-row cols1 gjj-wan22-dual-row";
+	rowVae.className = "gjj-wan22-row vae gjj-wan22-dual-row";
 	rowVae.append(createField(node, FIELD.vaeName, { label: "VAE" }));
+	rowVae.append(createField(node, FIELD.vaePrecision, { label: "精度", hideLabel: true, compact: true }));
+	rowVae.append(createField(node, FIELD.vaeUseCpuCache, { label: "缓存", buttonText: "缓存", hideLabel: true, compact: true }));
+	rowVae.append(createField(node, FIELD.vaeVerbose, { label: "日志", buttonText: "日志", hideLabel: true, compact: true }));
 	container.append(rowVae);
 
 	const rowClip = document.createElement("div");
@@ -931,41 +970,46 @@ function updateLoraRows(node) {
 	updateOutputLabels(node, { useExtra, useFantasyTalking, useMultitalk, useFantasyPortrait });
 }
 
-function setOutputVisible(output, visible) {
-	if (!output) return;
-	output.hidden = !visible;
-	output.visible = visible;
-	output.disabled = !visible;
-	output.not_show = !visible;
-	output.__gjj_hidden = !visible;
-}
-
 function updateOutputLabels(node, state = {}) {
 	if (!Array.isArray(node.outputs)) return;
-	const labels = [
-		["High模型", "MODEL", true],
-		["Low模型", "MODEL", true],
-		["VAE", "VAE", true],
-		["CLIP", "CLIP", true],
-		["High Extra", "VACEPATH", state.useExtra],
-		["Low Extra", "VACEPATH", state.useExtra],
-		["High FantasyTalking", "FANTASYTALKINGMODEL", state.useFantasyTalking],
-		["Low FantasyTalking", "FANTASYTALKINGMODEL", state.useFantasyTalking],
-		["High MultiTalk", "MULTITALKMODEL", state.useMultitalk],
-		["Low MultiTalk", "MULTITALKMODEL", state.useMultitalk],
-		["High FantasyPortrait", "FANTASYPORTRAITMODEL", state.useFantasyPortrait],
-		["Low FantasyPortrait", "FANTASYPORTRAITMODEL", state.useFantasyPortrait],
+	const visibleDefs = [
+		{ name: "High模型", type: "MODEL", tooltip: "高噪声阶段模型" },
+		{ name: "Low模型", type: "MODEL", tooltip: "低噪声阶段模型" },
+		{ name: "VAE", type: "VAE", tooltip: "VAE 解码器" },
+		{ name: "CLIP", type: "CLIP", tooltip: "CLIP / 文本编码器" },
 	];
-	labels.forEach(([name, type, visible], index) => {
-		if (!node.outputs[index]) return;
-		node.outputs[index].name = name;
-		node.outputs[index].localized_name = name;
-		node.outputs[index].type = type;
-		setOutputVisible(node.outputs[index], Boolean(visible));
-		if (typeof node.hideOutput === "function") {
-			try { node.hideOutput(index, !visible); } catch (_) {}
+
+	while (node.outputs.length > visibleDefs.length) {
+		try { node.removeOutput(node.outputs.length - 1); }
+		catch (_) { node.outputs.splice(node.outputs.length - 1, 1); }
+	}
+	while (node.outputs.length < visibleDefs.length) {
+		const def = visibleDefs[node.outputs.length];
+		node.addOutput?.(def.name, def.type);
+		if (!node.outputs[node.outputs.length - 1]) {
+			node.outputs.push({ name: def.name, type: def.type });
 		}
+	}
+	visibleDefs.forEach((def, index) => {
+		const output = node.outputs[index];
+		if (!output) return;
+		output.name = def.name;
+		output.label = def.name;
+		output.localized_name = def.name;
+		output.type = def.type;
+		output.tooltip = def.tooltip || "";
+		delete output.hidden;
+		delete output.visible;
+		delete output.disabled;
+		delete output.not_show;
+		delete output.__gjj_hidden;
 	});
+	node.__gjjWan22VisibleOutputSignature = visibleDefs.map((def) => `${def.name}:${def.type}`).join("|");
+}
+
+function enforceOutputVisibility(node) {
+	if (!node || !Array.isArray(node.outputs)) return;
+	updateOutputLabels(node);
 }
 
 function syncProxyInputs(node) {
@@ -1019,6 +1063,9 @@ function ensureWidgetDefaults(node) {
 		[FIELD.loadDevice, "offload_device"],
 		[FIELD.attentionMode, "sdpa"],
 		[FIELD.rmsNormFunction, "default"],
+		[FIELD.vaePrecision, "bf16"],
+		[FIELD.vaeUseCpuCache, false],
+		[FIELD.vaeVerbose, false],
 		[FIELD.highDtype, "default"],
 		[FIELD.lowDtype, "default"],
 		[FIELD.clipType, "wan"],
@@ -1209,6 +1256,18 @@ app.registerExtension({
 			const result = originalOnConnectionsChange?.apply(this, args);
 			schedule(this, 0);
 			return result;
+		};
+
+		const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
+		nodeType.prototype.onDrawBackground = function (...args) {
+			enforceOutputVisibility(this);
+			return originalOnDrawBackground?.apply(this, args);
+		};
+
+		const originalOnDrawForeground = nodeType.prototype.onDrawForeground;
+		nodeType.prototype.onDrawForeground = function (...args) {
+			enforceOutputVisibility(this);
+			return originalOnDrawForeground?.apply(this, args);
 		};
 	},
 

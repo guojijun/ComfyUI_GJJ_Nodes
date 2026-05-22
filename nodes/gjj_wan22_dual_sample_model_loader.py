@@ -41,6 +41,7 @@ ATTENTION_MODE_VALUES = [
     "comfy",
 ]
 RMS_NORM_VALUES = ["default", "pytorch"]
+VAE_PRECISION_VALUES = ["bf16", "fp16", "fp32"]
 
 
 def _filename_list(kind: str) -> list[str]:
@@ -129,6 +130,18 @@ def _first_or_empty(values: list[str]) -> str:
     return values[0] if values else ""
 
 
+def _first_nonempty_or_empty(values: list[str]) -> str:
+    for value in values:
+        if str(value or "").strip():
+            return str(value)
+    return ""
+
+
+def _with_empty_choice(values: list[str]) -> list[str]:
+    cleaned = [str(item) for item in values if str(item or "").strip()]
+    return ["", *cleaned] if "" not in cleaned else cleaned
+
+
 def _resolve_selected(
     name: str, names: list[str], base_filter: str = "", role_filter: str = ""
 ) -> str:
@@ -166,6 +179,12 @@ def _torch_dtype(dtype: str):
     return mapping.get(value)
 
 
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "开"}
+    return bool(value)
+
+
 def _load_diffusion_model(model_name: str, weight_dtype: str = "default"):
     model_path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
     dtype = _torch_dtype(weight_dtype)
@@ -185,10 +204,16 @@ def _load_diffusion_model(model_name: str, weight_dtype: str = "default"):
     return comfy.sd.load_diffusion_model(model_path)
 
 
-def _load_vae(vae_name: str):
+def _load_vae(vae_name: str, precision: str = "bf16", use_cpu_cache: bool = False, verbose: bool = False):
     vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
     sd = comfy.utils.load_torch_file(vae_path)
-    return comfy.sd.VAE(sd=sd)
+    dtype = _torch_dtype(precision)
+    vae = comfy.sd.VAE(sd=sd, dtype=dtype)
+    # 保留 WanVideo VAE Loader 对应参数位；普通 ComfyUI VAE 没有这些专有行为。
+    vae.gjj_wanvideo_use_cpu_cache = _coerce_bool(use_cpu_cache)
+    vae.gjj_wanvideo_verbose = _coerce_bool(verbose)
+    vae.gjj_wanvideo_precision = str(precision or "bf16")
+    return vae
 
 
 def _clip_type_from_text(clip_type: str):
@@ -277,23 +302,28 @@ def _parse_lora_chain_config(config: Any) -> list[dict[str, Any]]:
     return items
 
 
-def _lora_matches_branch(name: str, branch_filter: str) -> bool:
-    return (
-        str(branch_filter or "").strip().lower()
-        in str(name or "").replace("\\", "/").lower()
-    )
+def _external_lora_targets(name: str) -> set[str]:
+    text = str(name or "").replace("\\", "/").lower()
+    has_high = "_high_" in text or "-high-" in text
+    has_low = "_low_" in text or "-low-" in text
+    targets: set[str] = set()
+    if has_high:
+        targets.add("high")
+    if has_low:
+        targets.add("low")
+    return targets or {"high", "low"}
 
 
 def _apply_lora_items_for_branch(
-    model: Any, lora_items: list[dict[str, Any]], branch_filter: str
+    model: Any, lora_items: list[dict[str, Any]], branch: str
 ) -> Any:
     available = _filename_list("loras")
     current = model
     for item in lora_items:
         name = str(item.get("name", "") or "")
-        if not _lora_matches_branch(name, branch_filter):
+        if branch not in _external_lora_targets(name):
             continue
-        resolved = _resolve_selected(name, available, branch_filter)
+        resolved = _resolve_selected(name, available)
         if resolved:
             current = _load_lora_patch_model(
                 current, resolved, float(item.get("strength", 1.0))
@@ -386,42 +416,18 @@ class GJJ_Wan22DualSampleModelLoader:
         "MODEL",
         "VAE",
         "CLIP",
-        "VACEPATH",
-        "VACEPATH",
-        "FANTASYTALKINGMODEL",
-        "FANTASYTALKINGMODEL",
-        "MULTITALKMODEL",
-        "MULTITALKMODEL",
-        "FANTASYPORTRAITMODEL",
-        "FANTASYPORTRAITMODEL",
     )
     RETURN_NAMES = (
         "High模型",
         "Low模型",
         "VAE",
         "CLIP",
-        "High Extra",
-        "Low Extra",
-        "High FantasyTalking",
-        "Low FantasyTalking",
-        "High MultiTalk",
-        "Low MultiTalk",
-        "High FantasyPortrait",
-        "Low FantasyPortrait",
     )
     OUTPUT_TOOLTIPS = (
         "高噪声阶段模型；开启加速 LoRA 时会返回已叠加 high LoRA 的模型。",
         "低噪声阶段模型；开启加速 LoRA 时会返回已叠加 low LoRA 的模型。",
         "从 models/vae 中按 wan 默认过滤加载的 VAE。",
         "从 models/text_encoders 中按 umt5_xxl 默认过滤加载的 CLIP / 文本编码器。",
-        "可选 High 分支 extra_model / VACEPATH；关闭扩展模型时为空。",
-        "可选 Low 分支 extra_model / VACEPATH；关闭扩展模型时为空。",
-        "可选 High 分支 FantasyTalking 模型；关闭扩展模型时为空。",
-        "可选 Low 分支 FantasyTalking 模型；关闭扩展模型时为空。",
-        "可选 High 分支 MultiTalk/InfiniteTalk 模型；关闭扩展模型时为空。",
-        "可选 Low 分支 MultiTalk/InfiniteTalk 模型；关闭扩展模型时为空。",
-        "可选 High 分支 FantasyPortrait 模型；关闭扩展模型时为空。",
-        "可选 Low 分支 FantasyPortrait 模型；关闭扩展模型时为空。",
     )
 
     @classmethod
@@ -447,18 +453,20 @@ class GJJ_Wan22DualSampleModelLoader:
             or diffusion_models
             or [""]
         )
-        high_loras = (
-            _sort_branch(_filter_names(loras, "high_"), "high_") or loras or [""]
+        high_loras = _with_empty_choice(
+            _sort_branch(_filter_names(loras, "high_"), "high_") or loras
         )
-        low_loras = _sort_branch(_filter_names(loras, "low_"), "low_") or loras or [""]
-        high_extra_models = _sort_branch(_filter_names(extra_models, "high_"), "high_") or extra_models
-        low_extra_models = _sort_branch(_filter_names(extra_models, "low_"), "low_") or extra_models
-        high_fantasytalking_models = _sort_branch(_filter_names(fantasytalking_models, "high_"), "high_") or fantasytalking_models
-        low_fantasytalking_models = _sort_branch(_filter_names(fantasytalking_models, "low_"), "low_") or fantasytalking_models
-        high_multitalk_models = _sort_branch(_filter_names(multitalk_models, "high_"), "high_") or multitalk_models
-        low_multitalk_models = _sort_branch(_filter_names(multitalk_models, "low_"), "low_") or multitalk_models
-        high_fantasyportrait_models = _sort_branch(_filter_names(fantasyportrait_models, "high_"), "high_") or fantasyportrait_models
-        low_fantasyportrait_models = _sort_branch(_filter_names(fantasyportrait_models, "low_"), "low_") or fantasyportrait_models
+        low_loras = _with_empty_choice(
+            _sort_branch(_filter_names(loras, "low_"), "low_") or loras
+        )
+        high_extra_models = _with_empty_choice(_sort_branch(_filter_names(extra_models, "high_"), "high_") or extra_models)
+        low_extra_models = _with_empty_choice(_sort_branch(_filter_names(extra_models, "low_"), "low_") or extra_models)
+        high_fantasytalking_models = _with_empty_choice(_sort_branch(_filter_names(fantasytalking_models, "high_"), "high_") or fantasytalking_models)
+        low_fantasytalking_models = _with_empty_choice(_sort_branch(_filter_names(fantasytalking_models, "low_"), "low_") or fantasytalking_models)
+        high_multitalk_models = _with_empty_choice(_sort_branch(_filter_names(multitalk_models, "high_"), "high_") or multitalk_models)
+        low_multitalk_models = _with_empty_choice(_sort_branch(_filter_names(multitalk_models, "low_"), "low_") or multitalk_models)
+        high_fantasyportrait_models = _with_empty_choice(_sort_branch(_filter_names(fantasyportrait_models, "high_"), "high_") or fantasyportrait_models)
+        low_fantasyportrait_models = _with_empty_choice(_sort_branch(_filter_names(fantasyportrait_models, "low_"), "low_") or fantasyportrait_models)
         vae_files = _filter_names(vaes, "wan_2.1_vae") or vaes or [""]
         clip_files = _filter_names(text_encoders, "umt5_xxl") or text_encoders or [""]
 
@@ -479,7 +487,7 @@ class GJJ_Wan22DualSampleModelLoader:
                     {
                         "default": False,
                         "display_name": "➕",
-                        "tooltip": "是否启用 High/Low 成对 Extra 模型输出。",
+                        "tooltip": "是否在节点内部启用 High/Low 成对 Extra 模型。",
                     },
                 ),
                 "use_fantasytalking_model": (
@@ -487,7 +495,7 @@ class GJJ_Wan22DualSampleModelLoader:
                     {
                         "default": False,
                         "display_name": "🗣",
-                        "tooltip": "是否启用 High/Low 成对 FantasyTalking 模型输出。",
+                        "tooltip": "是否在节点内部启用 High/Low 成对 FantasyTalking 模型。",
                     },
                 ),
                 "use_multitalk_model": (
@@ -495,7 +503,7 @@ class GJJ_Wan22DualSampleModelLoader:
                     {
                         "default": False,
                         "display_name": "🎤",
-                        "tooltip": "是否启用 High/Low 成对 MultiTalk/InfiniteTalk 模型输出。",
+                        "tooltip": "是否在节点内部启用 High/Low 成对 MultiTalk/InfiniteTalk 模型。",
                     },
                 ),
                 "use_fantasyportrait_model": (
@@ -503,7 +511,7 @@ class GJJ_Wan22DualSampleModelLoader:
                     {
                         "default": False,
                         "display_name": "🧑",
-                        "tooltip": "是否启用 High/Low 成对 FantasyPortrait 模型输出。",
+                        "tooltip": "是否在节点内部启用 High/Low 成对 FantasyPortrait 模型。",
                     },
                 ),
                 "show_more_params": (
@@ -631,6 +639,30 @@ class GJJ_Wan22DualSampleModelLoader:
                         "tooltip": "从 models/vae 中按 wan 默认过滤。为空或不匹配时自动选择第一个满足条件的 VAE。",
                     },
                 ),
+                "vae_precision": (
+                    VAE_PRECISION_VALUES,
+                    {
+                        "default": "bf16",
+                        "display_name": "VAE精度",
+                        "tooltip": "对齐 WanVideo VAE Loader 的 precision；用于普通 ComfyUI VAE 加载 dtype。",
+                    },
+                ),
+                "vae_use_cpu_cache": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display_name": "CPU缓存",
+                        "tooltip": "对齐 WanVideo VAE Loader 的 use_cpu_cache 参数位；普通 ComfyUI VAE 会保存该设置但不启用专有缓存。",
+                    },
+                ),
+                "vae_verbose": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display_name": "VAE日志",
+                        "tooltip": "对齐 WanVideo VAE Loader 的 verbose 参数位；普通 ComfyUI VAE 会保存该设置供兼容路径读取。",
+                    },
+                ),
                 "clip_name": (
                     clip_files,
                     {
@@ -690,7 +722,7 @@ class GJJ_Wan22DualSampleModelLoader:
                 "high_lora": (
                     high_loras,
                     {
-                        "default": _first_or_empty(high_loras),
+                        "default": _first_nonempty_or_empty(high_loras),
                         "display_name": "High LoRA",
                         "tooltip": "从 models/loras 中按 总过滤词 + high_ 过滤。关闭加速 LoRA 时不使用。",
                     },
@@ -709,7 +741,7 @@ class GJJ_Wan22DualSampleModelLoader:
                 "low_lora": (
                     low_loras,
                     {
-                        "default": _first_or_empty(low_loras),
+                        "default": _first_nonempty_or_empty(low_loras),
                         "display_name": "Low LoRA",
                         "tooltip": "从 models/loras 中按 总过滤词 + low_ 过滤。关闭加速 LoRA 时不使用。",
                     },
@@ -730,7 +762,7 @@ class GJJ_Wan22DualSampleModelLoader:
                     {
                         "default": _first_or_empty(high_extra_models),
                         "display_name": "High Extra",
-                        "tooltip": "High 分支 extra_model，例如 VACE / MTV Crafter。打开 ➕ 后才加载并输出。",
+                        "tooltip": "High 分支 extra_model，例如 VACE / MTV Crafter。打开【扩展】后在节点内部使用。",
                     },
                 ),
                 "low_extra_model": (
@@ -738,7 +770,7 @@ class GJJ_Wan22DualSampleModelLoader:
                     {
                         "default": _first_or_empty(low_extra_models),
                         "display_name": "Low Extra",
-                        "tooltip": "Low 分支 extra_model，例如 VACE / MTV Crafter。打开 ➕ 后才加载并输出。",
+                        "tooltip": "Low 分支 extra_model，例如 VACE / MTV Crafter。打开【扩展】后在节点内部使用。",
                     },
                 ),
                 "high_fantasytalking_model": (
@@ -746,7 +778,7 @@ class GJJ_Wan22DualSampleModelLoader:
                     {
                         "default": _first_or_empty(high_fantasytalking_models),
                         "display_name": "High FantasyTalking",
-                        "tooltip": "High 分支 FantasyTalking 模型。打开 🗣 后才加载并输出。",
+                        "tooltip": "High 分支 FantasyTalking 模型。打开【讲话】后在节点内部使用。",
                     },
                 ),
                 "low_fantasytalking_model": (
@@ -754,7 +786,7 @@ class GJJ_Wan22DualSampleModelLoader:
                     {
                         "default": _first_or_empty(low_fantasytalking_models),
                         "display_name": "Low FantasyTalking",
-                        "tooltip": "Low 分支 FantasyTalking 模型。打开 🗣 后才加载并输出。",
+                        "tooltip": "Low 分支 FantasyTalking 模型。打开【讲话】后在节点内部使用。",
                     },
                 ),
                 "high_multitalk_model": (
@@ -762,7 +794,7 @@ class GJJ_Wan22DualSampleModelLoader:
                     {
                         "default": _first_or_empty(high_multitalk_models),
                         "display_name": "High MultiTalk",
-                        "tooltip": "High 分支 MultiTalk/InfiniteTalk 模型。打开 🎤 后才加载并输出。",
+                        "tooltip": "High 分支 MultiTalk/InfiniteTalk 模型。打开【交谈】后在节点内部使用。",
                     },
                 ),
                 "low_multitalk_model": (
@@ -770,7 +802,7 @@ class GJJ_Wan22DualSampleModelLoader:
                     {
                         "default": _first_or_empty(low_multitalk_models),
                         "display_name": "Low MultiTalk",
-                        "tooltip": "Low 分支 MultiTalk/InfiniteTalk 模型。打开 🎤 后才加载并输出。",
+                        "tooltip": "Low 分支 MultiTalk/InfiniteTalk 模型。打开【交谈】后在节点内部使用。",
                     },
                 ),
                 "high_fantasyportrait_model": (
@@ -778,7 +810,7 @@ class GJJ_Wan22DualSampleModelLoader:
                     {
                         "default": _first_or_empty(high_fantasyportrait_models),
                         "display_name": "High FantasyPortrait",
-                        "tooltip": "High 分支 FantasyPortrait 模型。打开 🧑 后才加载并输出。",
+                        "tooltip": "High 分支 FantasyPortrait 模型。打开【肖像】后在节点内部使用。",
                     },
                 ),
                 "low_fantasyportrait_model": (
@@ -786,7 +818,7 @@ class GJJ_Wan22DualSampleModelLoader:
                     {
                         "default": _first_or_empty(low_fantasyportrait_models),
                         "display_name": "Low FantasyPortrait",
-                        "tooltip": "Low 分支 FantasyPortrait 模型。打开 🧑 后才加载并输出。",
+                        "tooltip": "Low 分支 FantasyPortrait 模型。打开【肖像】后在节点内部使用。",
                     },
                 ),
             },
@@ -849,6 +881,9 @@ class GJJ_Wan22DualSampleModelLoader:
             "vae_filter",
             "clip_filter",
             "vae_name",
+            "vae_precision",
+            "vae_use_cpu_cache",
+            "vae_verbose",
             "clip_name",
             "clip_type",
             "clip_dtype",
@@ -903,6 +938,9 @@ class GJJ_Wan22DualSampleModelLoader:
         clip_filter = str(kwargs.get("clip_filter", "umt5_xxl") or "umt5_xxl")
 
         vae_name = str(kwargs.get("vae_name", "") or "")
+        vae_precision = str(kwargs.get("vae_precision", "bf16") or "bf16")
+        vae_use_cpu_cache = _coerce_bool(kwargs.get("vae_use_cpu_cache", False))
+        vae_verbose = _coerce_bool(kwargs.get("vae_verbose", False))
         clip_name = str(kwargs.get("clip_name", "") or "")
         clip_type = str(kwargs.get("clip_type", "wan") or "wan")
         clip_dtype = str(kwargs.get("clip_dtype", "default") or "default")
@@ -967,7 +1005,7 @@ class GJJ_Wan22DualSampleModelLoader:
 
         high = _load_diffusion_model(high_model, high_dtype)
         low = _load_diffusion_model(low_model, low_dtype)
-        vae = _load_vae(vae_name)
+        vae = _load_vae(vae_name, vae_precision, vae_use_cpu_cache, vae_verbose)
         clip = _load_clip(clip_name, clip_type, clip_dtype)
 
         if effective_use_accel_lora:
@@ -983,52 +1021,31 @@ class GJJ_Wan22DualSampleModelLoader:
             external_loras = _parse_lora_chain_config(lora_chain_config)
             if external_loras:
                 high = _apply_lora_items_for_branch(
-                    high, external_loras, high_lora_filter
+                    high, external_loras, "high"
                 )
-                low = _apply_lora_items_for_branch(low, external_loras, low_lora_filter)
+                low = _apply_lora_items_for_branch(low, external_loras, "low")
 
         # compile_args 是给 WanVideo runtime 路径预留的输入；当前 wan22_dual 基础 MODEL 路径不主动编译。
         _ = (compile_args, base_precision, quantization, load_device, attention_mode, rms_norm_function)
 
-        high_extra = _make_extra_model_payload(high_extra_model) if use_extra_model else None
-        low_extra = _make_extra_model_payload(low_extra_model) if use_extra_model else None
-        high_fantasytalking = (
-            _load_fantasytalking_model(high_fantasytalking_model, base_precision)
-            if use_fantasytalking_model
-            else None
-        )
-        low_fantasytalking = (
-            _load_fantasytalking_model(low_fantasytalking_model, base_precision)
-            if use_fantasytalking_model
-            else None
-        )
-        high_multitalk = _load_multitalk_model(high_multitalk_model) if use_multitalk_model else None
-        low_multitalk = _load_multitalk_model(low_multitalk_model) if use_multitalk_model else None
-        high_fantasyportrait = (
-            _load_fantasyportrait_model(high_fantasyportrait_model, base_precision)
-            if use_fantasyportrait_model
-            else None
-        )
-        low_fantasyportrait = (
-            _load_fantasyportrait_model(low_fantasyportrait_model, base_precision)
-            if use_fantasyportrait_model
-            else None
+        # Extra/FantasyTalking/MultiTalk/FantasyPortrait 选择项保留在面板内部，
+        # 不再作为对外输出口暴露；当前普通 MODEL 输出路径只返回 High/Low/VAE/CLIP。
+        _ = (
+            use_extra_model,
+            use_fantasytalking_model,
+            use_multitalk_model,
+            use_fantasyportrait_model,
+            high_extra_model,
+            low_extra_model,
+            high_fantasytalking_model,
+            low_fantasytalking_model,
+            high_multitalk_model,
+            low_multitalk_model,
+            high_fantasyportrait_model,
+            low_fantasyportrait_model,
         )
 
-        return (
-            high,
-            low,
-            vae,
-            clip,
-            high_extra,
-            low_extra,
-            high_fantasytalking,
-            low_fantasytalking,
-            high_multitalk,
-            low_multitalk,
-            high_fantasyportrait,
-            low_fantasyportrait,
-        )
+        return (high, low, vae, clip)
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_Wan22DualSampleModelLoader}

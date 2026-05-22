@@ -58,6 +58,15 @@ def format_segments_list(segments: list[dict[str, Any]]) -> str:
 	return json.dumps(segments, ensure_ascii=False, indent=2)
 
 
+def get_ffmpeg_executable() -> str:
+	"""获取可用 ffmpeg 路径，优先使用 imageio-ffmpeg 内置二进制。"""
+	try:
+		import imageio_ffmpeg
+		return imageio_ffmpeg.get_ffmpeg_exe()
+	except Exception:
+		return "ffmpeg"
+
+
 def video_to_frames_data(video: dict[str, Any]) -> tuple[np.ndarray, float, int, int]:
 	"""将ComfyUI视频对象转换为帧数组、帧率、宽度和高度"""
 	if hasattr(video, "get_components"):
@@ -87,6 +96,55 @@ def video_to_frames_data(video: dict[str, Any]) -> tuple[np.ndarray, float, int,
 				return frames_np, frame_rate, width, height
 
 	raise RuntimeError("无法从视频对象中提取帧数据")
+
+
+def get_video_audio_data(video: Any) -> dict[str, Any] | None:
+	"""从 ComfyUI VIDEO 对象中提取 AUDIO 数据。"""
+	try:
+		if hasattr(video, "get_components"):
+			components = video.get_components()
+			audio = getattr(components, "audio", None)
+			if isinstance(audio, dict) and isinstance(audio.get("waveform"), torch.Tensor):
+				return audio
+		if isinstance(video, dict):
+			audio = video.get("audio")
+			if isinstance(audio, dict) and isinstance(audio.get("waveform"), torch.Tensor):
+				return audio
+	except Exception as e:
+		print(f"[GJJ] 视频分段编辑器 - 提取视频音频失败: {e}")
+	return None
+
+
+def crop_audio_segment(audio: dict[str, Any] | None, start: float, end: float) -> dict[str, Any] | None:
+	"""按秒裁剪 ComfyUI AUDIO，保持 [B,C,N] waveform 结构。"""
+	if not isinstance(audio, dict):
+		return None
+	waveform = audio.get("waveform")
+	if not isinstance(waveform, torch.Tensor):
+		return None
+	sample_rate = int(audio.get("sample_rate") or 44100)
+	total = int(waveform.shape[-1])
+	if total <= 0 or sample_rate <= 0:
+		return None
+	start_sample = max(0, min(int(float(start) * sample_rate), total))
+	end_sample = max(0, min(int(float(end) * sample_rate), total))
+	if end_sample <= start_sample:
+		return None
+	return {
+		"waveform": waveform[..., start_sample:end_sample].contiguous(),
+		"sample_rate": sample_rate,
+	}
+
+
+def load_audio_from_media_file(filepath: str) -> dict[str, Any] | None:
+	"""从音视频文件中解码音轨为 ComfyUI AUDIO。没有音轨时返回 None。"""
+	try:
+		from comfy_extras.nodes_audio import load as load_audio
+		waveform, sample_rate = load_audio(filepath)
+		return {"waveform": waveform.unsqueeze(0).contiguous(), "sample_rate": int(sample_rate)}
+	except Exception as e:
+		print(f"[GJJ] 视频分段编辑器 - 未读取到音轨: {e}")
+		return None
 
 
 def save_frames_for_preview(frames: np.ndarray, prompt: Any = None, suffix: str = "") -> tuple[str, str]:
@@ -122,13 +180,16 @@ def crop_video_segment_ffmpeg(
 		duration = end_time - start_time
 
 		cmd = [
-			"ffmpeg", "-y", "-v", "error",
+			get_ffmpeg_executable(), "-y", "-v", "error",
 			"-ss", str(start_time),
 			"-t", str(duration),
 			"-i", video_path,
+			"-map", "0:v:0",
+			"-map", "0:a?",
 			"-c:v", "libx264",
 			"-pix_fmt", "yuv420p",
 			"-c:a", "aac",
+			"-avoid_negative_ts", "make_zero",
 			output_path,
 		]
 
@@ -144,7 +205,8 @@ def load_video_from_path(filepath: str):
 	if not os.path.exists(filepath):
 		raise RuntimeError(f"找不到视频文件: {filepath}")
 	video_data = _decode_video_with_ffmpeg(filepath)
-	return create_video_object(video_data["images"], video_data["frame_rate"])
+	audio = load_audio_from_media_file(filepath)
+	return create_video_object(video_data["images"], video_data["frame_rate"], audio=audio)
 
 
 def load_video_from_file(filename: str):
@@ -166,7 +228,8 @@ def load_video_from_file(filename: str):
 		if os.path.exists(filepath):
 			video_data = _decode_video_with_ffmpeg(filepath)
 			# 创建标准VIDEO对象
-			return create_video_object(video_data["images"], video_data["frame_rate"])
+			audio = load_audio_from_media_file(filepath)
+			return create_video_object(video_data["images"], video_data["frame_rate"], audio=audio)
 
 		# 尝试在子文件夹中查找
 		for root, dirs, files in os.walk(search_dir):
@@ -174,7 +237,8 @@ def load_video_from_file(filename: str):
 				if f == basename:
 					filepath = os.path.join(root, f)
 					video_data = _decode_video_with_ffmpeg(filepath)
-					return create_video_object(video_data["images"], video_data["frame_rate"])
+					audio = load_audio_from_media_file(filepath)
+					return create_video_object(video_data["images"], video_data["frame_rate"], audio=audio)
 
 	raise RuntimeError(f"找不到视频文件: {filename} (已搜索目录: {search_dirs})")
 
@@ -463,7 +527,7 @@ def generate_auto_segments(duration: float, segment_count: int = 4) -> list[dict
 	return segments
 
 
-def create_video_object(frames: torch.Tensor, fps: float):
+def create_video_object(frames: torch.Tensor, fps: float, audio: dict[str, Any] | None = None):
 	"""创建ComfyUI VIDEO对象"""
 	try:
 		from comfy_api.latest import InputImpl, Types
@@ -480,7 +544,7 @@ def create_video_object(frames: torch.Tensor, fps: float):
 		return InputImpl.VideoFromComponents(
 			Types.VideoComponents(
 				images=frames.contiguous(),
-				audio=None,
+				audio=audio,
 				frame_rate=Fraction(str(float(fps))).limit_denominator(1000),
 			)
 		)
@@ -488,7 +552,7 @@ def create_video_object(frames: torch.Tensor, fps: float):
 		# 回退方案：使用内置的 CreateVideo
 		try:
 			from .common_utils.video_tools import CreateVideo
-			return CreateVideo.execute(frames.contiguous(), float(fps), None)[0]
+			return CreateVideo.execute(frames.contiguous(), float(fps), audio)[0]
 		except Exception:
 			# 最后回退：创建空视频
 			empty_frames = torch.zeros((1, 512, 512, 3), dtype=torch.float32)
@@ -760,11 +824,13 @@ class GJJ_VideoSegmentEditor:
 		height = 0
 		total_frames = 0
 		duration = 0
+		source_audio = None
 
 		if video is not None and is_video_object(video):
 			# 外部连接的视频对象
 			current_video = video
 			frames, frame_rate, width, height = video_to_frames_data(current_video)
+			source_audio = get_video_audio_data(current_video)
 			total_frames = len(frames)
 			duration = total_frames / frame_rate if frame_rate > 0 else 0
 		elif video_file != "[不加载]":
@@ -912,7 +978,7 @@ class GJJ_VideoSegmentEditor:
 						segment_video = self._crop_video_with_ffmpeg(video_path, start, end, frame_rate)
 					else:
 						# 否则从帧数组中裁剪
-						segment_video = self._crop_video_from_frames(frames, start, end, frame_rate)
+						segment_video = self._crop_video_from_frames(frames, start, end, frame_rate, source_audio)
 
 					video_segments.append(segment_video)
 					print(f"[GJJ] 成功裁剪分段{i+1}: {start}s - {end}s")
@@ -954,7 +1020,7 @@ class GJJ_VideoSegmentEditor:
 		finally:
 			tmpdir.cleanup()
 
-	def _crop_video_from_frames(self, frames: np.ndarray, start: float, end: float, fps: float) -> dict[str, Any]:
+	def _crop_video_from_frames(self, frames: np.ndarray, start: float, end: float, fps: float, audio: dict[str, Any] | None = None) -> dict[str, Any]:
 		"""从帧数组中裁剪视频片段"""
 		total_frames = len(frames)
 		if total_frames == 0:
@@ -975,8 +1041,9 @@ class GJJ_VideoSegmentEditor:
 
 		# 转换为tensor
 		frames_tensor = torch.from_numpy(cropped_frames).float()
+		cropped_audio = crop_audio_segment(audio, start, end)
 
-		return create_video_object(frames_tensor, fps)
+		return create_video_object(frames_tensor, fps, audio=cropped_audio)
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_VideoSegmentEditor}

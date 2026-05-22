@@ -135,10 +135,69 @@ class GJJ_WanVideoBlockSwap:
         return (args,)
 
 
+class GJJ_WanVideoSetBlockSwap:
+    CATEGORY = "GJJ/视频模型/WanVideo"
+    FUNCTION = "loadmodel"
+    DESCRIPTION = "GJJ 零依赖复刻 WanVideoSetBlockSwap：把 BLOCKSWAPARGS 写入 WanVideo 模型的 transformer_options。"
+    SEARCH_ALIASES = [
+        "wan set block swap",
+        "wanvideo set block swap",
+        "WanVideoSetBlockSwap",
+        "设置分块交换",
+        "模型分块交换",
+    ]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("WANVIDEOMODEL,MODEL", {
+                    "display_name": "WanVideo 模型",
+                    "tooltip": "可接 WanVideo 模型，也可接 GJJ · WanVideo模型加载输出的普通 MODEL。节点会 clone 模型并写入分块交换参数，不直接修改输入模型。",
+                }),
+            },
+            "optional": {
+                "block_swap_args": ("BLOCKSWAPARGS", {
+                    "display_name": "分块交换参数",
+                    "tooltip": "连接 GJJ · Wan 分块交换 输出；不连接时原样返回模型。",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("WANVIDEOMODEL,MODEL",)
+    RETURN_NAMES = ("WanVideo 模型",)
+    OUTPUT_TOOLTIPS = ("已写入 block_swap_args 的 WanVideo / MODEL 兼容模型。",)
+    GJJ_HELP = {
+        "title": "WanVideo 设置分块交换",
+        "description": "复刻源 WanVideoSetBlockSwap：将 BLOCKSWAPARGS 写入模型的 transformer_options.block_swap_args，供采样器在执行时启用分块换入/卸载。",
+        "usage": [
+            "上游可接 WanVideo 模型加载器，也可接 GJJ · WanVideo模型加载 的 MODEL 输出。",
+            "block_swap_args 接 GJJ · Wan 分块交换。",
+            "输出模型再接 WanVideo Sampler / GJJ WanVideo Sampler。",
+        ],
+        "notes": [
+            "逻辑与源节点一致：无参数时直接返回原模型；有参数时 clone 模型后写入 model_options。",
+            "不导入 ComfyUI-WanVideoWrapper 源插件，也不新增 pip 依赖。",
+        ],
+    }
+
+    def loadmodel(self, model, block_swap_args=None):
+        if block_swap_args is None:
+            return (model,)
+        patcher = model.clone()
+        if not hasattr(patcher, "model_options") or patcher.model_options is None:
+            patcher.model_options = {}
+        transformer_options = patcher.model_options.setdefault("transformer_options", {})
+        transformer_options["block_swap_args"] = block_swap_args
+        return (patcher,)
+
+
 NODE_CLASS_MAPPINGS = {
     "GJJ_WanVideoBlockSwap": GJJ_WanVideoBlockSwap,
+    "GJJ_WanVideoSetBlockSwap": GJJ_WanVideoSetBlockSwap,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "GJJ_WanVideoBlockSwap": "🧱 Wan 分块交换",
+    "GJJ_WanVideoSetBlockSwap": "GJJ · 🧱 WanVideo 设置分块交换",
 }

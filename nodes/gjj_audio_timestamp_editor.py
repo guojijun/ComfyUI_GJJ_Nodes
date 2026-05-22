@@ -42,7 +42,7 @@ except ImportError as exc:
 
 NODE_NAME = "GJJ_AudioTimestampEditor"
 NODE_DISPLAY_NAME = "GJJ · ✂️ 可视化音频分段编辑器"
-BACKEND_VERSION = "V20_CACHE_DEBOUNCE_NO_UPSTREAM_LOOP"
+BACKEND_VERSION = "V22_MATCH_VISIBLE_AUDIO_SOURCE"
 MAX_SEGMENTS = 99  # 最大分段数量
 MIN_OUTPUTS = 1  # 最小输出数量
 DEPENDENCY_SPECS = [
@@ -235,6 +235,29 @@ def _segments_from_workflow_properties(extra_pnginfo: Any, unique_id: Any) -> li
 			return parse_segments_list(text)
 	except Exception:
 		return []
+	return []
+
+
+def _segments_from_prompt_inputs(prompt: Any, unique_id: Any) -> list[dict[str, Any]]:
+	"""从当前 prompt 的节点输入里读取分段。
+
+	部分前端版本在点击执行时会先生成 API prompt，再异步刷新 workflow extra_pnginfo。
+	隐藏 widget 的 segments_json 如果已经进入 prompt inputs，应优先作为后端执行兜底。
+	"""
+	if unique_id is None or not isinstance(prompt, dict):
+		return []
+	node = prompt.get(str(unique_id)) or prompt.get(unique_id)
+	if not isinstance(node, dict):
+		return []
+	inputs = node.get("inputs") or {}
+	if not isinstance(inputs, dict):
+		return []
+	for key in ("segments_json", "分段列表JSON", "segments"):
+		value = inputs.get(key)
+		if isinstance(value, str):
+			segments = parse_segments_list(value)
+			if segments:
+				return segments
 	return []
 
 
@@ -535,7 +558,7 @@ class GJJ_AudioSegmentEditor:
 			"optional": {
 				"audio": ("AUDIO", {
 					"display_name": "外部音频",
-					"tooltip": "可选：外部连接的音频对象（优先级高于内部加载）",
+					"tooltip": "可选：外部连接的音频对象；当上方文件为[不加载]时生效，避免界面显示文件波形但后端裁剪外部音频。",
 				}),
 				"segments_json": ("STRING", {
 					"default": "[]",
@@ -580,14 +603,16 @@ class GJJ_AudioSegmentEditor:
 		return files
 
 	@classmethod
-	def IS_CHANGED(cls, audio_file="[不加载]", audio=None, segments_json: str = "[]", segment_duration: float = 3.0, extra_pnginfo=None, unique_id=None, **kwargs):
+	def IS_CHANGED(cls, audio_file="[不加载]", audio=None, segments_json: str = "[]", segment_duration: float = 3.0, prompt=None, extra_pnginfo=None, unique_id=None, **kwargs):
 		# V19：稳定缓存 key。不要再 time_ns 强制重跑；否则前端刷新波形/下游预览时会不断请求上游。
 		property_segments = _segments_from_workflow_properties(extra_pnginfo, unique_id)
-		seg_text = _segments_cache_text(property_segments) if property_segments else str(segments_json or "[]")
-		if is_audio_object(audio):
-			source_sig = _audio_fingerprint(audio)
-		elif audio_file and audio_file != "[不加载]":
+		prompt_segments = _segments_from_prompt_inputs(prompt, unique_id)
+		segments = property_segments or prompt_segments
+		seg_text = _segments_cache_text(segments) if segments else str(segments_json or "[]")
+		if audio_file and audio_file != "[不加载]":
 			source_sig = _file_fingerprint(audio_file)
+		elif is_audio_object(audio):
+			source_sig = _audio_fingerprint(audio)
 		else:
 			source_sig = "no-input"
 		return f"{BACKEND_VERSION}|src={source_sig}|segments={seg_text}|dur={_safe_float(segment_duration):.6f}"
@@ -607,14 +632,16 @@ class GJJ_AudioSegmentEditor:
 	):
 		try:
 			node_key = str(unique_id if unique_id is not None else id(self))
-			# 1. 加载音频（优先使用外部连接，其次使用内部加载）
-			if audio is not None and is_audio_object(audio):
-				current_audio = audio
-				source_sig = _audio_fingerprint(audio)
-			elif audio_file != "[不加载]":
-				# 从文件加载音频
+			# 1. 加载音频。这里必须与前端可见波形一致：
+			#    只要下拉框选择了文件，就裁剪该文件；文件为[不加载]时才使用外部 AUDIO。
+			if audio_file != "[不加载]":
 				current_audio = self._load_audio_from_file(audio_file)
 				source_sig = _file_fingerprint(audio_file)
+				source_label = f"文件:{audio_file}"
+			elif audio is not None and is_audio_object(audio):
+				current_audio = audio
+				source_sig = _audio_fingerprint(audio)
+				source_label = "外部音频"
 			else:
 				last = _LAST_SUCCESS_BY_NODE.get(node_key)
 				if last is not None:
@@ -629,7 +656,8 @@ class GJJ_AudioSegmentEditor:
 			# 3. 解析或生成分段列表。优先使用前端拖动后写入 workflow properties 的最新分段，
 			#    再使用隐藏 widget 传入的 segments_json，最后才自动生成默认单段。
 			property_segments = _segments_from_workflow_properties(extra_pnginfo, unique_id)
-			segments = property_segments or parse_segments_list(segments_json)
+			prompt_segments = _segments_from_prompt_inputs(prompt, unique_id)
+			segments = property_segments or prompt_segments or parse_segments_list(segments_json)
 			if not segments:
 				# 默认只生成 1 段，按“单段时长”截取；前端可拖动高亮区域调整位置。
 				segments = generate_auto_segments(duration, 1, segment_duration)
@@ -677,7 +705,7 @@ class GJJ_AudioSegmentEditor:
 
 			# 6. 构建 UI数据（遵循ComfyUI规范：所有值必须用元组包裹）
 			ui: dict[str, Any] = {
-				"preview_text": (f"后端 {BACKEND_VERSION} | 音频时长: {duration:.2f}秒 | 采样率: {sample_rate}Hz | 分段数量: {len(segments)}",),
+				"preview_text": (f"后端 {BACKEND_VERSION} | 来源: {source_label} | 音频时长: {duration:.2f}秒 | 采样率: {sample_rate}Hz | 分段数量: {len(segments)}",),
 				"backend_version": (BACKEND_VERSION,),
 				"preview_kind": ("audio_segment_editor",),
 				"preview_audio": (preview_audio_data,) if preview_audio_data else (),

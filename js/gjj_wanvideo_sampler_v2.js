@@ -1,167 +1,106 @@
 import { app } from "/scripts/app.js";
 
 const TARGET_NODES = new Set(["GJJ_WanVideoSamplerV2"]);
-const LEGACY_CONTROL_VALUES = new Set(["fixed", "increment", "decrement", "randomize"]);
-const VALUE_FIELDS = [
-	"steps",
-	"cfg",
-	"shift",
-	"seed",
-	"force_offload",
-	"scheduler",
-	"riflex_freq_index",
-	"denoise_strength",
-	"batched_cfg",
-	"rope_function",
-	"start_step",
-	"end_step",
-	"add_noise_to_samples",
+const FIXED_INPUT_SPECS = [
+	["model", "WANVIDEOMODEL", null, "WanVideo 模型"],
+	["image_embeds", "WANVIDIMAGE_EMBEDS", null, "图像条件"],
+	["steps", "INT", "steps", "采样步数"],
+	["cfg", "FLOAT", "cfg", "CFG"],
+	["shift", "FLOAT", "shift", "Shift"],
+	["force_offload", "BOOLEAN", "force_offload", "采样后卸载"],
+	["scheduler", "COMBO", "scheduler", "调度器"],
+	["riflex_freq_index", "INT", "riflex_freq_index", "RIFLEX 频率索引"],
+	["text_embeds", "WANVIDEOTEXTEMBEDS", null, "文本条件"],
+	["samples", "LATENT", null, "初始 latent"],
+	["denoise_strength", "FLOAT", "denoise_strength", "降噪强度"],
+	["feta_args", "FETAARGS", null, "FETA 参数"],
+	["context_options", "WANVIDCONTEXT", null, "上下文窗口"],
+	["cache_args", "CACHEARGS", null, "缓存参数"],
+	["teacache_args", "CACHEARGS", null, "TeaCache 兼容参数"],
+	["flowedit_args", "FLOWEDITARGS", null, "FlowEdit 参数"],
+	["batched_cfg", "BOOLEAN", "batched_cfg", "批量 CFG"],
+	["slg_args", "SLGARGS", null, "SLG 参数"],
+	["rope_function", "COMBO", "rope_function", "RoPE 函数"],
+	["loop_args", "LOOPARGS", null, "循环参数"],
+	["experimental_args", "EXPERIMENTALARGS", null, "实验参数"],
+	["sigmas", "SIGMAS", null, "Sigmas"],
+	["unianimate_poses", "UNIANIMATE_POSE", null, "UniAnimate 姿态"],
+	["fantasytalking_embeds", "FANTASYTALKING_EMBEDS", null, "FantasyTalking 条件"],
+	["uni3c_embeds", "UNI3C_EMBEDS", null, "Uni3C 条件"],
+	["multitalk_embeds", "MULTITALK_EMBEDS", null, "MultiTalk 条件"],
+	["freeinit_args", "FREEINITARGS", null, "FreeInit 参数"],
+	["start_step", "INT", "start_step", "起始步"],
+	["end_step", "INT", "end_step", "结束步"],
+	["add_noise_to_samples", "BOOLEAN", "add_noise_to_samples", "给 latent 加噪"],
+	["extra_args", "WANVIDSAMPLEREXTRAARGS", null, "扩展参数"],
+	["seed", "INT", "seed", "种子"],
 ];
 
-const SERIALIZED_FIELDS = [
-	"steps",
-	"cfg",
-	"shift",
-	"seed",
-	"control_after_generate",
-	"force_offload",
-	"scheduler",
-	"riflex_freq_index",
-	"denoise_strength",
-	"batched_cfg",
-	"rope_function",
-	"start_step",
-	"end_step",
-	"add_noise_to_samples",
-];
+const FIXED_BY_NAME = new Map(FIXED_INPUT_SPECS.map((spec) => [spec[0], spec]));
+const FIXED_BY_WIDGET = new Map(FIXED_INPUT_SPECS.filter((spec) => spec[2]).map((spec) => [spec[2], spec]));
+const FIXED_BY_LABEL = new Map(FIXED_INPUT_SPECS.map((spec) => [spec[3], spec]));
 
-const NATIVE_WIDGET_NAMES = new Set(SERIALIZED_FIELDS);
-
-function isLegacyShiftedValues(values) {
-	return Array.isArray(values) &&
-		values.length >= 16 &&
-		values[0] === "" &&
-		LEGACY_CONTROL_VALUES.has(values[5]) &&
-		values[6] === "" &&
-		typeof values[7] === "string";
+function getFixedSpec(input) {
+	const widgetName = String(input?.widget?.name || "");
+	if (FIXED_BY_WIDGET.has(widgetName)) return FIXED_BY_WIDGET.get(widgetName);
+	const name = String(input?.name || "");
+	if (FIXED_BY_NAME.has(name)) return FIXED_BY_NAME.get(name);
+	const dynamicMatch = name.match(/^wan_args_\d+__(.+)$/);
+	if (dynamicMatch && FIXED_BY_NAME.has(dynamicMatch[1])) return FIXED_BY_NAME.get(dynamicMatch[1]);
+	const label = String(input?.localized_name || input?.label || "");
+	return FIXED_BY_LABEL.get(label) || null;
 }
 
-function normalizeLegacyValues(values) {
-	if (!isLegacyShiftedValues(values)) return null;
-	return {
-		steps: values[1],
-		cfg: values[2],
-		shift: values[3],
-		seed: values[4],
-		control_after_generate: values[5],
-		force_offload: true,
-		scheduler: values[7],
-		riflex_freq_index: values[8],
-		denoise_strength: values[9],
-		batched_cfg: values[10],
-		rope_function: values[11],
-		start_step: values[12],
-		end_step: values[13],
-		add_noise_to_samples: values[14],
-	};
-}
-
-function getWidget(node, name) {
-	return (node.widgets || []).find((widget) => widget?.name === name);
-}
-
-function setWidgetValue(widget, value) {
-	if (!widget) return false;
-	const changed = widget.value !== value;
-	widget.value = value;
-	widget.callback?.(value);
-	if (widget.inputEl && "value" in widget.inputEl) widget.inputEl.value = value;
-	if (widget.element && "value" in widget.element) widget.element.value = value;
-	return changed;
-}
-
-function applyValues(node, values) {
-	if (!values || typeof values !== "object") return false;
+function applyFixedSpec(input, spec) {
+	if (!input || !spec) return false;
+	const [name, type, widgetName, label] = spec;
 	let changed = false;
-	for (const name of SERIALIZED_FIELDS) {
-		const widget = getWidget(node, name);
-		if (!widget || !(name in values)) continue;
-		if (setWidgetValue(widget, values[name])) changed = true;
+	if (input.name !== name) {
+		input.name = name;
+		changed = true;
 	}
+	if (input.type !== type) {
+		input.type = type;
+		changed = true;
+	}
+	input.label = label;
+	input.localized_name = label;
+	if (widgetName) input.widget = { name: widgetName };
+	else delete input.widget;
 	return changed;
 }
 
-function valuesToSerializedArray(values) {
-	return SERIALIZED_FIELDS.map((name) => values?.[name]);
-}
-
-function normalizeNode(node, serializedNode = null) {
-	if (!node) return;
-	const sourceValues = serializedNode?.widgets_values || node.widgets_values;
-	const normalized = normalizeLegacyValues(sourceValues);
-	if (!normalized) return;
-	node.properties = node.properties || {};
-	node.properties.gjj_wanvideo_sampler_v2_widget_migrated = true;
-	applyValues(node, normalized);
-	node.widgets_values = valuesToSerializedArray(normalized);
-	node.setDirtyCanvas?.(true, true);
-	app.graph?.setDirtyCanvas?.(true, true);
-}
-
-function normalizeSerialized(node, serializedNode) {
-	if (!serializedNode) return;
-	const normalized = normalizeLegacyValues(serializedNode.widgets_values);
-	if (normalized) serializedNode.widgets_values = valuesToSerializedArray(normalized);
-	serializedNode.widgets_values = Array.isArray(serializedNode.widgets_values)
-		? serializedNode.widgets_values
-		: [];
-	for (let index = 0; index < SERIALIZED_FIELDS.length; index += 1) {
-		const name = SERIALIZED_FIELDS[index];
-		const widget = getWidget(node, name);
-		if (widget) serializedNode.widgets_values[index] = widget.value;
+function sanitizeInputs(owner) {
+	if (!Array.isArray(owner?.inputs)) return false;
+	let changed = false;
+	for (const input of owner.inputs) {
+		const spec = getFixedSpec(input);
+		if (spec && applyFixedSpec(input, spec)) changed = true;
 	}
+	return changed;
 }
 
 app.registerExtension({
-	name: "Comfy.GJJ.WanVideoSamplerV2Compat",
+	name: "Comfy.GJJ.WanVideoSamplerV2FixedInputs",
 
 	beforeRegisterNodeDef(nodeType, nodeData) {
 		if (!TARGET_NODES.has(nodeData?.name)) return;
 
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
-			const normalized = normalizeLegacyValues(serializedNode?.widgets_values);
-			if (normalized) {
-				serializedNode.widgets_values = valuesToSerializedArray(normalized);
-			}
-			const result = originalOnConfigure?.apply(this, [serializedNode, ...args]);
-			if (normalized) {
-				this.properties = this.properties || {};
-				this.properties.gjj_wanvideo_sampler_v2_widget_migrated = true;
-				applyValues(this, normalized);
-				this.widgets_values = valuesToSerializedArray(normalized);
-				this.setDirtyCanvas?.(true, true);
-				app.graph?.setDirtyCanvas?.(true, true);
-			} else {
-				normalizeNode(this, serializedNode);
-			}
-			return result;
+			sanitizeInputs(serializedNode);
+			return originalOnConfigure?.apply(this, [serializedNode, ...args]);
 		};
 
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode) {
 			originalOnSerialize?.apply(this, [serializedNode]);
-			normalizeSerialized(this, serializedNode);
+			sanitizeInputs(serializedNode);
 		};
 	},
 
 	nodeCreated(node) {
-		if (TARGET_NODES.has(node?.comfyClass)) normalizeNode(node);
-	},
-
-	setup() {
-		for (const node of app.graph?._nodes || []) {
-			if (TARGET_NODES.has(node?.comfyClass)) normalizeNode(node);
-		}
+		if (!TARGET_NODES.has(node?.comfyClass)) return;
+		if (sanitizeInputs(node)) node.setDirtyCanvas?.(true, true);
 	},
 });

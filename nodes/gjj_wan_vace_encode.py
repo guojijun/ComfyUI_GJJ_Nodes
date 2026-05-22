@@ -48,6 +48,65 @@ def _move_vae(vae: Any, device: Any) -> None:
                 pass
 
 
+class _ComfyWanVAEAdapter:
+    """Expose ComfyUI's native VAE object through the small WanVAE API VACE uses."""
+
+    def __init__(self, vae: Any):
+        self._vae = vae
+        self.dtype = getattr(vae, "vae_dtype", torch.float32)
+
+    def to(self, *_args, **_kwargs):
+        return self
+
+    def encode(self, videos, device: Any = None, tiled: bool = False, **_kwargs):
+        target_device = device if device is not None else _device()
+        if isinstance(videos, torch.Tensor):
+            if videos.ndim == 4:
+                videos = [videos]
+            elif videos.ndim == 5:
+                videos = [video for video in videos]
+            else:
+                raise RuntimeError(f"VAE 视频输入维度无效：{tuple(videos.shape)}")
+
+        latents = []
+        for video in videos:
+            if not isinstance(video, torch.Tensor) or video.ndim != 4:
+                raise RuntimeError(f"VAE 视频帧维度无效，应为 C/T/H/W，实际为：{getattr(video, 'shape', None)}")
+
+            pixels = ((video.movedim(0, -1) + 1.0) / 2.0).clamp(0.0, 1.0)
+            pixels = pixels.to(device=target_device, dtype=torch.float32)
+
+            if tiled and hasattr(self._vae, "encode_tiled"):
+                encoded = self._vae.encode_tiled(
+                    pixels,
+                    tile_x=512,
+                    tile_y=512,
+                    overlap=64,
+                    tile_t=64,
+                    overlap_t=8,
+                )
+            else:
+                encoded = self._vae.encode(pixels)
+
+            if encoded.ndim == 5 and int(encoded.shape[0]) == 1:
+                encoded = encoded[0]
+            elif encoded.ndim == 4:
+                pass
+            else:
+                raise RuntimeError(f"VAE 编码结果维度异常：{tuple(encoded.shape)}")
+            latents.append(encoded.to(device=target_device, dtype=torch.float32))
+
+        return torch.stack(latents).to(device=target_device, dtype=torch.float32)
+
+
+def _adapt_vae_for_vace(vae: Any) -> Any:
+    if hasattr(vae, "dtype"):
+        return vae
+    if hasattr(vae, "first_stage_model") and hasattr(vae, "encode"):
+        return _ComfyWanVAEAdapter(vae)
+    return vae
+
+
 def _as_batched_image(image: torch.Tensor | None) -> torch.Tensor | None:
     if image is None:
         return None
@@ -114,10 +173,10 @@ class GJJ_WanVACEEncode:
         return {
             "required": {
                 "vae": (
-                    "WANVAE",
+                    "WANVAE,VAE",
                     {
                         "display_name": "Wan VAE",
-                        "tooltip": "WanVideo VAE 对象。节点只调用该对象的 encode/to/dtype 接口，不依赖来源插件包。",
+                        "tooltip": "可接 WanVideo VAE，也可接 GJJ WanVideo模型加载输出的普通 VAE；普通 VAE 会自动按 Wan VACE 编码方式适配。",
                     },
                 ),
                 "width": (
@@ -242,8 +301,8 @@ class GJJ_WanVACEEncode:
         prev_vace_embeds: dict[str, Any] | None = None,
         tiled_vae: bool = False,
     ):
-        runtime = _load_vace_runtime()
-        return runtime.WanVideoVACEEncode().process(
+        vae = _adapt_vae_for_vace(vae)
+        return self._process_local(
             vae=vae,
             width=width,
             height=height,
@@ -425,6 +484,7 @@ class GJJ_WanVACEEncode:
                     ref_latent = [torch.cat((u, torch.zeros_like(u)), dim=0) for u in ref_latent]
                 if not all(int(x.shape[1]) == 1 for x in ref_latent):
                     raise RuntimeError("VACE 参考图编码结果帧数异常。")
+                ref_latent = [item.to(device=latent.device, dtype=latent.dtype) for item in ref_latent]
                 latent = torch.cat([*ref_latent, latent], dim=1)
             cat_latents.append(latent)
             pbar.update(1)
@@ -462,7 +522,7 @@ class GJJ_WanVACEEncode:
 
     @staticmethod
     def _vace_latent(z: list[torch.Tensor], m: list[torch.Tensor]) -> list[torch.Tensor]:
-        return [torch.cat([zz, mm], dim=0) for zz, mm in zip(z, m)]
+        return [torch.cat([zz, mm.to(device=zz.device, dtype=zz.dtype)], dim=0) for zz, mm in zip(z, m)]
 
 
 NODE_CLASS_MAPPINGS = {

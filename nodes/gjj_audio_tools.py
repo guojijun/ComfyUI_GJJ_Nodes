@@ -14,6 +14,13 @@ def _parse_time(value: str | float | int) -> float:
     if not text:
         return 0.0
     if ":" not in text:
+        # Users often type "0.06" when they mean "0:06" because the ComfyUI
+        # audio preview displays durations as m:ss. Keep normal decimal seconds
+        # for values like "0.5", but accept two-digit dot notation as m.ss.
+        if "." in text:
+            head, tail = text.split(".", 1)
+            if head.isdigit() and tail.isdigit() and len(tail) == 2 and int(tail) < 60:
+                return max(0.0, int(head) * 60.0 + int(tail))
         return max(0.0, float(text))
     parts = [float(part) for part in text.split(":")]
     if len(parts) == 2:
@@ -79,8 +86,8 @@ class GJJ_AudioCrop:
         return {
             "required": {
                 "audio": ("AUDIO", {"display_name": "音频", "tooltip": "需要裁剪的 AUDIO。"}),
-                "start_time": ("STRING", {"default": "0:00", "display_name": "开始时间", "tooltip": "支持秒数、MM:SS 或 HH:MM:SS。"}),
-                "end_time": ("STRING", {"default": "1:00", "display_name": "结束时间", "tooltip": "支持秒数、MM:SS 或 HH:MM:SS。"}),
+                "start_time": ("STRING", {"default": "0:00", "display_name": "开始时间", "tooltip": "支持秒数、MM:SS、MM.SS 或 HH:MM:SS。"}),
+                "end_time": ("STRING", {"default": "1:00", "display_name": "结束时间", "tooltip": "支持秒数、MM:SS、MM.SS 或 HH:MM:SS。"}),
             }
         }
 
@@ -92,8 +99,15 @@ class GJJ_AudioCrop:
         total = int(waveform.shape[-1])
         start = int(_parse_time(start_time) * sample_rate)
         end = int(_parse_time(end_time) * sample_rate)
-        start = max(0, min(start, total - 1))
-        end = max(start + 1, min(end, total))
+        if total <= 0:
+            raise RuntimeError("AUDIO 输入为空，无法裁剪。")
+        start = max(0, min(start, total))
+        end = max(0, min(end, total))
+        if end <= start:
+            raise RuntimeError(
+                f"结束时间必须大于开始时间：开始 {start_time}，结束 {end_time}。"
+                "例如裁剪到 6 秒请填写 0:06 或 0.06。"
+            )
         cropped = waveform[..., start:end].contiguous()
         return ({"waveform": cropped, "sample_rate": sample_rate}, float(end - start) / float(sample_rate))
 

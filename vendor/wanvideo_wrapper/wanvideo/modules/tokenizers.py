@@ -1,5 +1,6 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import html
+import os
 import string
 
 import ftfy
@@ -43,7 +44,16 @@ class HuggingfaceTokenizer:
         self.clean = clean
 
         # init tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(name, **kwargs)
+        # 如果是本地路径且存在，使用绝对路径并设置 local_files_only，避免 Hugging Face repo ID 验证
+        if os.path.isdir(name):
+            abs_path = os.path.abspath(name)
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                abs_path,
+                local_files_only=True,
+                **kwargs
+            )
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(name, **kwargs)
         self.vocab_size = self.tokenizer.vocab_size
 
     def __call__(self, sequence, **kwargs):
