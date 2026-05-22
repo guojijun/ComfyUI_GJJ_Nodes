@@ -16,8 +16,8 @@ const DEFAULT_CONFIG = {
   height: 1024,
   scale_percent: 100,
   long_side_length: 1024,
-  total_pixel_k: 1024,
-  aspect_ratio: "原始比例",
+  total_pixel_k: 260,
+  aspect_ratio: "1:1",
   proportional_width: 1,
   proportional_height: 1,
   extra_outputs: [],
@@ -39,6 +39,7 @@ const OUTPUTS = [
   { key: "original_size", icon: "📦", label: "📦 原始尺寸", outName: "原始尺寸", type: "*", title: "更多输出：原始尺寸 [宽度, 高度]。单击单选，Ctrl/Shift 可复选。" },
   { key: "output_height", icon: "↕️", label: "↕️ 输出高度", outName: "输出高度", type: "*", title: "更多输出：输出处理后的高度。单击单选，Ctrl/Shift 可复选。" },
   { key: "output_width", icon: "↔️", label: "↔️ 输出宽度", outName: "输出宽度", type: "*", title: "更多输出：输出处理后的宽度。单击单选，Ctrl/Shift 可复选。" },
+  { key: "image_count", icon: "🔢", label: "数量", outName: "数量", type: "*", title: "更多输出：本次总共处理的图片数量。单击单选，Ctrl/Shift 可复选。" },
 ];
 
 

@@ -307,8 +307,8 @@ def _default_config() -> Dict[str, Any]:
         "height": 1024,
         "scale_percent": 100.0,
         "long_side_length": 1024,
-        "total_pixel_k": 1024,
-        "aspect_ratio": "原始比例",
+        "total_pixel_k": 260,
+        "aspect_ratio": "1:1",
         "proportional_width": 1,
         "proportional_height": 1,
         "extra_outputs": [],
@@ -543,6 +543,37 @@ def _pack_output_like(original: Any, processed: List[torch.Tensor]) -> Any:
     return torch.cat(processed, dim=0)
 
 
+def _pack_image_batch(processed: List[torch.Tensor]) -> torch.Tensor:
+    """输出标准 IMAGE batch，避免 INPUT_IS_LIST 下游收到 list[1张batch]。"""
+    if not processed:
+        return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+    normalized: List[torch.Tensor] = []
+    max_h = 1
+    max_w = 1
+    max_c = 3
+    dtype = processed[0].dtype
+    for img in processed:
+        if img.ndim == 3:
+            img = img.unsqueeze(0)
+        img = img.detach().cpu()
+        normalized.append(img)
+        max_h = max(max_h, int(img.shape[1]))
+        max_w = max(max_w, int(img.shape[2]))
+        max_c = max(max_c, int(img.shape[3]))
+        dtype = img.dtype
+    packed: List[torch.Tensor] = []
+    for img in normalized:
+        if int(img.shape[1]) == max_h and int(img.shape[2]) == max_w and int(img.shape[3]) == max_c:
+            packed.append(img)
+            continue
+        canvas = torch.zeros((int(img.shape[0]), max_h, max_w, max_c), dtype=dtype)
+        canvas[:, : int(img.shape[1]), : int(img.shape[2]), : int(img.shape[3])] = img.to(dtype=dtype)
+        if max_c == 4 and int(img.shape[3]) < 4:
+            canvas[..., 3:4] = 1.0
+        packed.append(canvas)
+    return torch.cat(packed, dim=0)
+
+
 # ============================================================
 # 图像缩放核心
 # ============================================================
@@ -655,6 +686,8 @@ def _resize_one(image: torch.Tensor, mask: torch.Tensor | None, cfg: Dict[str, A
 
 
 class GJJ_ImageResizeKJv2:
+    INPUT_IS_LIST = True
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -765,7 +798,7 @@ GJJ · 🔍 多功能图片缩放
                 if idx == 0:
                     first_orig_w, first_orig_h, first_out_w, first_out_h = ow, oh, tw, th
 
-            out_image = _pack_output_like(image, processed_images)
+            out_image = _pack_image_batch(processed_images)
             out_mask = torch.cat(processed_masks, dim=0) if processed_masks else torch.zeros((1, 64, 64), dtype=torch.float32)
 
             selected = cfg.get("extra_outputs", [])
@@ -775,6 +808,7 @@ GJJ · 🔍 多功能图片缩放
                 "original_size": [int(first_orig_w), int(first_orig_h)],
                 "output_height": int(first_out_h),
                 "output_width": int(first_out_w),
+                "image_count": int(done_units),
             }
             extras = [values.get(k, None) for k in selected[:3]]
             while len(extras) < 3:
