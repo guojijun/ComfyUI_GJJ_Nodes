@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import os
 import sys
 import torch
@@ -164,11 +165,11 @@ class GJJ_WanVideoModelLoader:
                     },
                 ),
                 "lora": (
-                    "WANVIDLORA",
+                    "WANVIDLORA,LORA_CHAIN_CONFIG",
                     {
                         "default": None,
                         "display_name": "LoRA",
-                        "tooltip": "WanVideo LoRA 权重。",
+                        "tooltip": "WanVideo LoRA 权重，自动识别 WANVIDLORA 或 LORA_CHAIN_CONFIG 类型。",
                     },
                 ),
                 "vram_management_args": (
@@ -247,6 +248,11 @@ class GJJ_WanVideoModelLoader:
         print(f"[GJJ WanVideoModelLoader] 注意力模式: {attention_mode}")
         print(f"[GJJ WanVideoModelLoader] RMSNorm: {rms_norm_function}")
 
+        # 处理 LoRA 输入，根据数据类型选择相应处理方式
+        final_lora = self._normalize_lora_input(lora)
+        if final_lora:
+            print(f"[GJJ WanVideoModelLoader] LoRA 已处理，共 {len(final_lora)} 个 LoRA")
+
         wan_model_loading = _load_wanvideo_model_loading()
         WanVideoModelLoader = getattr(wan_model_loading, "WanVideoModelLoader")
 
@@ -260,7 +266,7 @@ class GJJ_WanVideoModelLoader:
             attention_mode=attention_mode,
             compile_args=compile_args,
             block_swap_args=block_swap_args,
-            lora=lora,
+            lora=final_lora,
             vram_management_args=vram_management_args,
             extra_model=extra_model,
             fantasytalking_model=fantasytalking_model,
@@ -273,6 +279,96 @@ class GJJ_WanVideoModelLoader:
         print(f"[GJJ WanVideoModelLoader] ========== 加载完成 ==========")
 
         return result
+
+    def _normalize_lora_input(self, lora):
+        """统一处理 LoRA 输入，根据数据类型选择相应处理方式。
+        
+        Args:
+            lora: WANVIDLORA 列表 或 LORA_CHAIN_CONFIG JSON 字符串/列表
+            
+        Returns:
+            WANVIDLORA 格式的 LoRA 列表，或 None
+        """
+        if lora is None:
+            return None
+        
+        # 情况 1: 已经是 WANVIDLORA 格式（列表且包含 path 字段）
+        if isinstance(lora, list) and lora and isinstance(lora[0], dict) and "path" in lora[0]:
+            return lora
+        
+        # 情况 2: LORA_CHAIN_CONFIG 格式（JSON 字符串或列表）
+        return self._convert_lora_chain_config(lora)
+
+    def _convert_lora_chain_config(self, lora_chain_config):
+        """将 LORA_CHAIN_CONFIG JSON 数据转换为 WANVIDLORA 格式。
+        
+        Args:
+            lora_chain_config: JSON 字符串或已解析的列表
+            
+        Returns:
+            WANVIDLORA 格式的 LoRA 列表，或 None
+        """
+        if lora_chain_config is None:
+            return None
+        
+        # 解析 JSON 数据
+        if isinstance(lora_chain_config, str):
+            try:
+                lora_list = json.loads(lora_chain_config)
+            except json.JSONDecodeError as e:
+                print(f"[GJJ WanVideoModelLoader] LoRA 串联配置 JSON 解析失败: {e}")
+                return None
+        elif isinstance(lora_chain_config, list):
+            lora_list = lora_chain_config
+        else:
+            print(f"[GJJ WanVideoModelLoader] LoRA 串联配置类型无效: {type(lora_chain_config)}")
+            return None
+        
+        if not isinstance(lora_list, list) or not lora_list:
+            return None
+        
+        # 转换为 WANVIDLORA 格式
+        wanvid_loras = []
+        for item in lora_list:
+            if not isinstance(item, dict):
+                continue
+            
+            # 检查是否启用
+            if item.get("enabled", True) is False:
+                continue
+            
+            lora_name = item.get("name", "").strip()
+            if not lora_name or lora_name.lower() == "none":
+                continue
+            
+            strength = item.get("strength", 1.0)
+            try:
+                strength = float(strength)
+            except (TypeError, ValueError):
+                strength = 1.0
+            
+            if strength == 0.0:
+                continue
+            
+            # 获取 LoRA 文件路径
+            try:
+                lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
+            except Exception as e:
+                print(f"[GJJ WanVideoModelLoader] 获取 LoRA 路径失败: {lora_name}, 错误: {e}")
+                continue
+            
+            # 构建 WANVIDLORA 格式
+            wanvid_loras.append({
+                "path": lora_path,
+                "strength": round(strength, 4),
+                "name": os.path.splitext(lora_name)[0],
+                "blocks": item.get("blocks", {}),
+                "layer_filter": item.get("layer_filter", ""),
+                "low_mem_load": item.get("low_mem_load", False),
+                "merge_loras": item.get("merge_loras", True),
+            })
+        
+        return wanvid_loras if wanvid_loras else None
 
 
 NODE_CLASS_MAPPINGS = {
