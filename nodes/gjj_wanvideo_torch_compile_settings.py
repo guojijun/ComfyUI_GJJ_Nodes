@@ -40,6 +40,22 @@ class GJJ_WanVideoTorchCompileSettings:
             "不依赖 ComfyUI-WanVideoWrapper 插件本体，也不新增第三方 pip 依赖。",
             "如果下游实际启用 torch.compile，Triton 与 PyTorch 版本要求仍由下游运行环境决定。",
         ],
+        "⚠️ Triton 依赖要求": [
+            "当 backend 选择 'inductor' 时，PyTorch 需要 Triton 编译器支持。",
+            "错误提示: 'Cannot find a working triton installation'",
+            "解决方法:",
+            "1. 安装 Triton: pip install triton",
+            "2. 或切换 backend 为 'cudagraphs' (不需要 Triton)",
+            "3. 或不连接本节点以禁用 torch.compile",
+        ],
+        "📦 依赖安装命令": [
+            "# 安装 Triton (推荐)",
+            "pip install triton",
+            "",
+            "# Windows 用户注意",
+            "# 如果标准安装失败，可尝试预编译版本:",
+            "# pip install https://github.com/woct0rdho/triton-windows/releases/download/v3.5.0-windows.post21/triton-3.5.0.dev20241205-cp310-none-win_amd64.whl",
+        ],
     }
 
     @classmethod

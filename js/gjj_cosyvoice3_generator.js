@@ -208,24 +208,7 @@ function ensureStatusWidget(node) {
 	generateBtn.addEventListener("mouseenter", () => generateBtn.style.background = "#3d6aae");
 	generateBtn.addEventListener("mouseleave", () => generateBtn.style.background = "#2d5a9e");
 
-	// 复制按钮（用于复制安装命令）
-	const copyBtn = document.createElement("button");
-	copyBtn.textContent = "📋";
-	copyBtn.title = "复制";
-	copyBtn.style.cssText = [
-		"background: #4a5a6a",
-		"color: #fff",
-		"border: none",
-		"border-radius:4px",
-		"padding: 4px 8px",
-		"cursor: pointer",
-		"font-size: 11px",
-		"font-weight: bold",
-		"white-space: nowrap",
-		"display: none",
-	].join(";");
-
-	statusRow.append(statusContent, generateBtn, copyBtn);
+	statusRow.append(statusContent, generateBtn);
 	box.appendChild(statusRow);
 
 	const widget = node.addDOMWidget?.(STATUS_WIDGET_NAME, STATUS_WIDGET_NAME, box, {
@@ -235,7 +218,7 @@ function ensureStatusWidget(node) {
 	});
 
 	node.__gjjCosyVoice3Status = {
-		widget, box, label, bar, generateBtn, copyBtn,
+		widget, box, label, bar, generateBtn,
 		boolButtons, boolBtnRow, statusRow
 	};
 	return node.__gjjCosyVoice3Status;
@@ -463,49 +446,7 @@ api.addEventListener("gjj_cosyvoice3_error", (event) => {
 	}
 	
 	patchNode(targetNode);
-	const status = targetNode.__gjjCosyVoice3Status;
-	const errorMessage = detail.error || "";
-	const installCommand = detail.install_command || "";
-
-	// 更新状态标签显示错误信息
-	if (status?.label) {
-		status.label.textContent = "❌ 缺少依赖";
-	}
-
-	// 显示复制按钮如果有安装命令
-	if (status?.copyBtn && installCommand) {
-		status.copyBtn.style.display = "inline-block";
-		status.copyBtn.textContent = "📋 复制安装命令";
-		status.copyBtn.title = "复制安装命令到剪贴板";
-		status.copyBtn.style.background = "#ff4757";
-		status.copyBtn.style.color = "#fff";
-
-		// 更新复制按钮事件
-		status.copyBtn.onclick = () => {
-			navigator.clipboard.writeText(installCommand).then(() => {
-				const originalText = status.copyBtn.textContent;
-				status.copyBtn.textContent = "✅ 已复制";
-				status.copyBtn.style.background = "#2ed573";
-				setTimeout(() => {
-					status.copyBtn.textContent = originalText;
-					status.copyBtn.style.background = "#ff4757";
-				}, 1500);
-			}).catch(err => {
-				console.error("[GJJ] 复制失败:", err);
-				alert("复制失败，请手动选择安装命令复制");
-			});
-		};
-
-		status.copyBtn.onmouseenter = () => {
-			status.copyBtn.style.background = "#ff5767";
-		};
-
-		status.copyBtn.onmouseleave = () => {
-			if (status.copyBtn.textContent !== "✅ 已复制") {
-				status.copyBtn.style.background = "#ff4757";
-			}
-		};
-	}
+	setStatus(targetNode, detail.error || "执行失败", 100);
 });
 
 app.registerExtension({

@@ -10,6 +10,7 @@ import { api } from "/scripts/api.js";
 
     const STATUS_WIDGET_NAME = "__gjj_faster_whisper_status";
     const BOOL_WIDGETS = ["segment_by_sentence", "auto_download"];
+    const EMPTY_TEXT = "（暂无生成文本）";
 
     function isExecutionOutputNode(node) {
         if (!node) return false;
@@ -81,6 +82,37 @@ import { api } from "/scripts/api.js";
             const pct = Math.max(0, Math.min(100, Math.round(progress * 100)));
             status.bar.style.width = `${pct}%`;
         }
+    }
+
+    function bindGeneratedTextCopyButton(status) {
+        if (!status?.copyBtn) return;
+        const oldCopyBtn = status.copyBtn.cloneNode(true);
+        status.copyBtn.parentNode.replaceChild(oldCopyBtn, status.copyBtn);
+        status.copyBtn = oldCopyBtn;
+        status.copyBtn.textContent = "📋";
+        status.copyBtn.title = "复制生成的文本到剪贴板";
+        status.copyBtn.style.display = "none";
+        status.copyBtn.style.background = "#4a5a6a";
+        status.copyBtn.style.color = "#fff";
+        status.copyBtn.addEventListener("mouseenter", () => status.copyBtn.style.background = "#5a6a7a");
+        status.copyBtn.addEventListener("mouseleave", () => status.copyBtn.style.background = "#4a5a6a");
+        status.copyBtn.addEventListener("click", () => {
+            const text = status.textDisplay?.textContent;
+            if (text && text !== EMPTY_TEXT) {
+                navigator.clipboard.writeText(text).then(() => {
+                    const originalText = status.copyBtn.textContent;
+                    status.copyBtn.textContent = "✅ 已复制";
+                    setTimeout(() => {
+                        status.copyBtn.textContent = originalText;
+                    }, 1500);
+                }).catch(err => {
+                    console.error("[GJJ] 复制失败:", err);
+                    alert("复制失败，请手动选择文本复制");
+                });
+            } else {
+                alert("暂无文本可复制");
+            }
+        });
     }
 
     function ensureStatusWidget(node) {
@@ -228,7 +260,7 @@ import { api } from "/scripts/api.js";
             "word-break:break-word",
             "color:#c8d6e5",
         ].join(";");
-        textDisplay.textContent = "（暂无生成文本）";
+        textDisplay.textContent = EMPTY_TEXT;
         textRow.appendChild(textDisplay);
 
         // 复制按钮（默认隐藏）
@@ -364,27 +396,7 @@ import { api } from "/scripts/api.js";
 
         // 绑定复制按钮事件
         if (status?.copyBtn) {
-            const oldCopyBtn = status.copyBtn.cloneNode(true);
-            status.copyBtn.parentNode.replaceChild(oldCopyBtn, status.copyBtn);
-            status.copyBtn = oldCopyBtn;
-
-            status.copyBtn.addEventListener("click", () => {
-                const text = status.textDisplay.textContent;
-                if (text && text !== "（暂无生成文本）") {
-                    navigator.clipboard.writeText(text).then(() => {
-                        const originalText = status.copyBtn.textContent;
-                        status.copyBtn.textContent = "✅ 已复制";
-                        setTimeout(() => {
-                            status.copyBtn.textContent = originalText;
-                        }, 1500);
-                    }).catch(err => {
-                        console.error("[GJJ] 复制失败:", err);
-                        alert("复制失败，请手动选择文本复制");
-                    });
-                } else {
-                    alert("暂无文本可复制");
-                }
-            });
+            bindGeneratedTextCopyButton(status);
         }
     }
 
@@ -430,13 +442,12 @@ import { api } from "/scripts/api.js";
                 }
             });
 
-            // 监听后端发送的运行时错误事件（包含安装命令）
+            // 监听后端发送的普通执行错误事件
             api.addEventListener("gjj_faster_whisper_error", (event) => {
                 try {
                     const data = event.detail || {};
                     const nodeId = data.node;
                     const errorMessage = data.error || "";
-                    const installCommand = data.install_command || "";
 
                     if (!nodeId || !errorMessage) return;
 
@@ -446,63 +457,9 @@ import { api } from "/scripts/api.js";
                         if (String(node.id) === String(nodeId)) {
                             const status = node.__gjjFasterWhisperStatus;
                             if (status?.textDisplay) {
-                                // 显示错误信息
-                                let displayText = `❌ 执行失败：\n\n${errorMessage}`;
-
-                                // 如果有安装命令，添加提示
-                                if (installCommand) {
-                                    displayText += `\n\n🔧 快速安装命令（点击按钮复制）：`;
-                                }
-
-                                status.textDisplay.textContent = displayText;
-                                status.textDisplay.style.color = "#ff6b6b";
-
-                                // 显示复制按钮
-                                if (status.copyBtn) {
-                                    status.copyBtn.style.display = "inline-block";
-                                    status.copyBtn.textContent = "📋 复制安装命令";
-                                    status.copyBtn.title = "复制安装命令到剪贴板";
-                                    status.copyBtn.style.background = "#ff4757";
-                                    status.copyBtn.style.color = "#fff";
-                                    status.copyBtn.style.position = "relative";
-                                    status.copyBtn.style.zIndex = "1000";
-                                    status.copyBtn.style.pointerEvents = "auto";
-                                    status.copyBtn.style.cursor = "pointer";
-                                    status.copyBtn.style.border = "none";
-                                    status.copyBtn.style.borderRadius = "4px";
-                                    status.copyBtn.style.padding = "4px 8px";
-                                    status.copyBtn.style.fontSize = "11px";
-                                    status.copyBtn.style.fontWeight = "bold";
-                                    status.copyBtn.style.whiteSpace = "nowrap";
-                                    status.copyBtn.style.height = "fit-content";
-
-                                    // 更新复制按钮事件，复制安装命令
-                                    status.copyBtn.onclick = () => {
-                                        if (installCommand) {
-                                            navigator.clipboard.writeText(installCommand).then(() => {
-                                                const originalText = status.copyBtn.textContent;
-                                                status.copyBtn.textContent = "✅ 已复制";
-                                                status.copyBtn.style.background = "#2ed573";
-                                                setTimeout(() => {
-                                                    status.copyBtn.textContent = originalText;
-                                                    status.copyBtn.style.background = "#ff4757";
-                                                }, 1500);
-                                            }).catch(err => {
-                                                console.error("[GJJ] 复制失败:", err);
-                                                alert("复制失败，请手动选择安装命令复制");
-                                            });
-                                        }
-                                    };
-
-                                    status.copyBtn.onmouseenter = () => {
-                                        status.copyBtn.style.background = "#ff5767";
-                                    };
-
-                                    status.copyBtn.onmouseleave = () => {
-                                        status.copyBtn.style.background = "#ff4757";
-                                    };
-                                }
-
+                                status.textDisplay.textContent = `❌ 执行失败：\n\n${errorMessage}`;
+                                status.textDisplay.style.color = "#ffb86b";
+                                status.copyBtn.style.display = "none";
                                 setStatus(node, "执行失败");
                             }
                             break;
@@ -530,32 +487,8 @@ import { api } from "/scripts/api.js";
                             if (status?.textDisplay) {
                                 status.textDisplay.textContent = textList;
                                 status.textDisplay.style.color = "#c8d6e5";
-                                // 显示复制按钮
-                                if (status.copyBtn) {
-                                    status.copyBtn.style.display = "block";
-                                    status.copyBtn.textContent = "📋";
-                                    status.copyBtn.title = "复制生成的文本到剪贴板";
-                                    status.copyBtn.style.background = "#4a5a6a";
-                                    status.copyBtn.style.color = "#fff";
-
-                                    // 更新复制按钮事件，复制生成的文本
-                                    const newCopyBtn = status.copyBtn.cloneNode(true);
-                                    status.copyBtn.parentNode.replaceChild(newCopyBtn, status.copyBtn);
-                                    status.copyBtn = newCopyBtn;
-
-                                    status.copyBtn.addEventListener("click", () => {
-                                        navigator.clipboard.writeText(textList).then(() => {
-                                            const originalText = status.copyBtn.textContent;
-                                            status.copyBtn.textContent = "✅ 已复制";
-                                            setTimeout(() => {
-                                                status.copyBtn.textContent = originalText;
-                                            }, 1500);
-                                        }).catch(err => {
-                                            console.error("[GJJ] 复制失败:", err);
-                                            alert("复制失败，请手动选择文本复制");
-                                        });
-                                    });
-                                }
+                                bindGeneratedTextCopyButton(status);
+                                status.copyBtn.style.display = "block";
                                 setStatus(node, "文本已生成");
                             }
                             break;

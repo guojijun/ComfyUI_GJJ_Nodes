@@ -1907,7 +1907,26 @@ class WanVideoVAELoader:
         vae.eval()
         vae.to(device=offload_device, dtype=dtype)
         if compile_args is not None:
-            vae.model.decoder = torch.compile(vae.model.decoder, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+            try:
+                vae.model.decoder = torch.compile(vae.model.decoder, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+            except Exception as e:
+                import sys
+                exc_type, exc_value, exc_tb = sys.exc_info()
+                if "TritonMissing" in str(exc_type.__name__) or "triton" in str(e).lower():
+                    log.error(
+                        f"\n{'='*60}\n"
+                        f"GJJ WanVideo VAE torch.compile 错误\n"
+                        f"{'='*60}\n"
+                        f"错误原因: Triton 编译器未安装或版本过旧\n"
+                        f"当前 backend: {compile_args.get('backend', 'inductor')}\n"
+                        f"{'='*60}\n"
+                        f"解决方法:\n"
+                        f"1. 安装 Triton: pip install triton\n"
+                        f"2. 或在 'GJJ · ⚙️ WanVideo编译设置' 节点中选择其他 backend (如 'cudagraphs')\n"
+                        f"3. 或不连接 'GJJ · ⚙️ WanVideo编译设置' 节点以禁用 torch.compile\n"
+                        f"{'='*60}\n"
+                    )
+                raise
 
         return (vae,)
 

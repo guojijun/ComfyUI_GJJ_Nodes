@@ -922,6 +922,11 @@ def _save_webp_or_gif(
                 save_kwargs["quality"] = int(overrides["quality"])
             except Exception:
                 pass
+        if "method" in overrides:
+            try:
+                save_kwargs["method"] = int(overrides["method"])
+            except Exception:
+                pass
 
     pil_frames[0].save(file_path, **save_kwargs)
 

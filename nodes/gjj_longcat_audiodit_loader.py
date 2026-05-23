@@ -8,8 +8,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .common_utils.dependency_checker import (
+    load_dependency_at_runtime,
+    make_missing_model_spec,
+    raise_dependency_model_error,
+)
 
 logger = logging.getLogger("LongCatAudioDiT")
+NODE_DISPLAY_NAME = "📢 语音克隆TTS(LongCat AudioDiT)"
 
 VENDOR_ROOT = Path(__file__).resolve().parent.parent / "vendor"
 if str(VENDOR_ROOT) not in sys.path:
@@ -19,6 +25,15 @@ if str(VENDOR_ROOT) not in sys.path:
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
 MODELS_FOLDER_NAME = "audiodit"
+HF_MODELS_FOLDER_NAME = MODELS_FOLDER_NAME
+LOCAL_MODEL_PLACEHOLDER = "[未找到本地LongCat AudioDiT模型]"
+RUNTIME_INSTALL_PACKAGES = [
+    "transformers",
+    "soundfile",
+    "huggingface_hub",
+    "librosa",
+    "safetensors",
+]
 
 
 def _get_models_base() -> Path:
@@ -75,7 +90,7 @@ def _get_tokenizer_path() -> Path:
     return _get_models_base() / _LOCAL_TOKENIZER_DIR
 
 
-def _ensure_tokenizer_downloaded(tokenizer_model_id: str) -> Path:
+def _ensure_tokenizer_downloaded(tokenizer_model_id: str, unique_id=None) -> Path:
     """Download the tokenizer to a persistent local directory if not already present.
 
     Returns the local path from which the tokenizer can be loaded offline.
@@ -90,16 +105,14 @@ def _ensure_tokenizer_downloaded(tokenizer_model_id: str) -> Path:
         f"Downloading tokenizer '{tokenizer_model_id}' for offline use..."
     )
 
-    try:
-        from huggingface_hub import snapshot_download
-    except ImportError:
-        logger.error(
-            "huggingface_hub is not installed — cannot auto-download tokenizer.\n"
-            "Install it with:  pip install huggingface_hub\n"
-            f"Then manually download from: https://huggingface.co/{tokenizer_model_id}"
-        )
-        # Fall back to online loading — will fail offline but works online
-        return tokenizer_model_id
+    huggingface_hub = load_dependency_at_runtime(
+        module_name="huggingface_hub",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="huggingface_hub",
+        description="自动下载 LongCat AudioDiT tokenizer 需要 huggingface_hub。",
+        unique_id=unique_id,
+    )
+    snapshot_download = huggingface_hub.snapshot_download
 
     try:
         snapshot_download(
@@ -118,12 +131,24 @@ def _ensure_tokenizer_downloaded(tokenizer_model_id: str) -> Path:
         logger.info(f"Tokenizer cached locally at: {tok_path}")
         return tok_path
     except Exception as e:
-        logger.error(f"Tokenizer download failed: {e}")
-        # Fall back to online loading
-        return tokenizer_model_id
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_models=[
+                make_missing_model_spec(
+                    label="UMT5 tokenizer",
+                    subdir=MODELS_FOLDER_NAME,
+                    filename=_LOCAL_TOKENIZER_DIR,
+                    description="Tokenizer 下载失败，请手动补齐 tokenizer 文件。",
+                )
+            ],
+            description=f"LongCat AudioDiT tokenizer 下载失败：{tok_path}",
+            original_error=str(e),
+            unique_id=unique_id,
+            title="GJJ 节点模型缺失！",
+        )
 
 
-def _auto_download_model(model_name: str = HF_DEFAULT_MODEL_NAME) -> bool:
+def _auto_download_model(model_name: str = HF_DEFAULT_MODEL_NAME, unique_id=None) -> bool:
     if model_name not in HF_MODELS:
         logger.error(f"Unknown model: {model_name}")
         return False
@@ -141,15 +166,14 @@ def _auto_download_model(model_name: str = HF_DEFAULT_MODEL_NAME) -> bool:
     logger.info(f"Repo: {repo_id}")
     logger.info(f"Destination: {dest}")
 
-    try:
-        from huggingface_hub import snapshot_download
-    except ImportError:
-        logger.error(
-            "huggingface_hub is not installed — cannot auto-download model.\n"
-            "Install it with:  pip install huggingface_hub\n"
-            f"Then manually download from: https://huggingface.co/{repo_id}"
-        )
-        return False
+    huggingface_hub = load_dependency_at_runtime(
+        module_name="huggingface_hub",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="huggingface_hub",
+        description="自动下载 LongCat AudioDiT 模型需要 huggingface_hub。",
+        unique_id=unique_id,
+    )
+    snapshot_download = huggingface_hub.snapshot_download
 
     try:
         snapshot_download(
@@ -160,8 +184,21 @@ def _auto_download_model(model_name: str = HF_DEFAULT_MODEL_NAME) -> bool:
         logger.info(f"Model downloaded to: {dest}")
         return True
     except Exception as e:
-        logger.error(f"Model download failed: {e}")
-        return False
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_models=[
+                make_missing_model_spec(
+                    label=model_name,
+                    subdir=MODELS_FOLDER_NAME,
+                    filename=model_name,
+                    description="模型自动下载失败，请手动下载后放入对应目录。",
+                )
+            ],
+            description=f"LongCat AudioDiT 模型下载失败：{dest}",
+            original_error=str(e),
+            unique_id=unique_id,
+            title="GJJ 节点模型缺失！",
+        )
 
 
 def _is_model_downloaded(model_name: str) -> bool:
@@ -214,7 +251,7 @@ def _strip_auto_download_suffix(name: str) -> str:
     return name
 
 
-def resolve_model_path(name: str) -> Path:
+def resolve_model_path(name: str, unique_id=None) -> Path:
     name = _strip_auto_download_suffix(name)
     path = _get_models_base() / name
     if not path.is_dir() or not any(path.iterdir() if path.exists() else []):
@@ -223,17 +260,21 @@ def resolve_model_path(name: str) -> Path:
                 f"Model '{name}' not found locally — "
                 "downloading from HuggingFace at inference time..."
             )
-            if not _auto_download_model(name):
-                raise FileNotFoundError(
-                    f"Model '{name}' could not be downloaded.\n"
-                    f"Manually download from: https://huggingface.co/{HF_MODELS[name]['repo_id']}\n"
-                    f"Place it in: ComfyUI/models/{MODELS_FOLDER_NAME}/{name}/"
-                )
+            _auto_download_model(name, unique_id=unique_id)
         else:
-            raise FileNotFoundError(
-                f"Model folder not found: {path}\n"
-                f"Place your checkpoint in: "
-                f"ComfyUI/models/{MODELS_FOLDER_NAME}/{name}/"
+            raise_dependency_model_error(
+                node_name=NODE_DISPLAY_NAME,
+                missing_models=[
+                    make_missing_model_spec(
+                        label=name,
+                        subdir=MODELS_FOLDER_NAME,
+                        filename=name,
+                        description="请把模型目录放到 models/audiodit/ 下。",
+                    )
+                ],
+                description=f"Model folder not found: {path}",
+                unique_id=unique_id,
+                title="GJJ 节点模型缺失！",
             )
     return path
 
@@ -603,14 +644,13 @@ def _patch_flash_attention(model):
 
 
 def _patch_sage_attention(model):
-    try:
-        from sageattention import sageattn
-    except ImportError:
-        raise ImportError(
-            "SageAttention is not installed.\n"
-            "Install it with:  pip install sageattention\n"
-            "Then restart ComfyUI."
-        )
+    sageattention_module = load_dependency_at_runtime(
+        module_name="sageattention",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="sageattention",
+        description="LongCat AudioDiT 的 SageAttention 模式需要 sageattention。",
+    )
+    sageattn = sageattention_module.sageattn
 
     import torch.nn.functional as F
 
@@ -668,7 +708,13 @@ def _has_safetensors_metadata(model_path: Path) -> bool:
     Original meituan-longcat models have safetensors without metadata,
     which causes transformers.from_pretrained to fail.
     """
-    from safetensors import safe_open
+    safetensors_module = load_dependency_at_runtime(
+        module_name="safetensors",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="safetensors",
+        description="LongCat AudioDiT 读取 safetensors 模型需要 safetensors。",
+    )
+    safe_open = safetensors_module.safe_open
 
     safetensors_path = model_path / "model.safetensors"
     if not safetensors_path.exists():
@@ -689,7 +735,13 @@ def _load_model_direct(model_path: Path, model_class, torch_dtype):
 
     Fallback for safetensors files without format metadata.
     """
-    from safetensors.torch import load_file
+    safetensors_torch = load_dependency_at_runtime(
+        module_name="safetensors.torch",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="safetensors",
+        description="LongCat AudioDiT 直接加载 safetensors 模型需要 safetensors。",
+    )
+    load_file = safetensors_torch.load_file
 
     # Load config
     config = model_class.config_class.from_pretrained(str(model_path))
@@ -709,15 +761,41 @@ def _load_model_direct(model_path: Path, model_class, torch_dtype):
     return model
 
 
-def load_model(model_name: str, device: str, precision: str, attention: str):
+def load_model(model_name: str, device: str, precision: str, attention: str, unique_id=None):
     model_name = _strip_auto_download_suffix(model_name)
-    model_path = resolve_model_path(model_name)
+    model_path = resolve_model_path(model_name, unique_id=unique_id)
     device_str, _ = resolve_device(device)
     dtype = resolve_precision(precision, device_str)
 
-    import audiodit
-    from audiodit import AudioDiTModel
-    from transformers import AutoTokenizer
+    transformers_module = load_dependency_at_runtime(
+        module_name="transformers",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="transformers",
+        description="LongCat AudioDiT 运行时需要 transformers。",
+        extra_packages=["huggingface_hub", "safetensors"],
+        unique_id=unique_id,
+    )
+    AutoTokenizer = transformers_module.AutoTokenizer
+
+    try:
+        import audiodit
+        from audiodit import AudioDiTModel
+    except Exception as exc:
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_dependencies=[{
+                "module_name": "",
+                "package_name": "",
+                "display_name": "GJJ 内置 audiodit 运行时",
+                "description": "GJJ 自带的 LongCat AudioDiT 运行时代码缺失或损坏。",
+            }],
+            install_packages=["transformers", "huggingface_hub", "safetensors"],
+            description="LongCat AudioDiT 运行时加载失败。",
+            original_error=str(exc),
+            unique_id=unique_id,
+            copy_text="",
+            copy_label="",
+        )
 
     fp8 = _is_fp8_model(model_path)
 
@@ -754,7 +832,14 @@ def load_model(model_name: str, device: str, precision: str, attention: str):
     # Fix weight_norm params (weight_g/weight_v) that from_pretrained fails to load
     safetensors_path = model_path / "model.safetensors"
     if safetensors_path.exists():
-        from safetensors.torch import load_file
+        safetensors_torch = load_dependency_at_runtime(
+            module_name="safetensors.torch",
+            node_name=NODE_DISPLAY_NAME,
+            package_name="safetensors",
+            description="LongCat AudioDiT 读取 safetensors 模型需要 safetensors。",
+            unique_id=unique_id,
+        )
+        load_file = safetensors_torch.load_file
 
         sd = load_file(str(safetensors_path))
         wn_keys = {k: v for k, v in sd.items() if "weight_g" in k or "weight_v" in k}
@@ -820,7 +905,7 @@ def load_model(model_name: str, device: str, precision: str, attention: str):
     model.eval()
 
     # Load tokenizer from persistent local cache (works fully offline after first download)
-    tokenizer_source = _ensure_tokenizer_downloaded(model.config.text_encoder_model)
+    tokenizer_source = _ensure_tokenizer_downloaded(model.config.text_encoder_model, unique_id=unique_id)
     tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_source, local_files_only=isinstance(tokenizer_source, Path)
     )

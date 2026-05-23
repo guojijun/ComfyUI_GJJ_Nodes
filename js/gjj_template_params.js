@@ -753,6 +753,22 @@ function buildEnumSelectForField(node, field, values) {
 	return wrap;
 }
 
+function shouldUseMultilineText(field, value, isMedia) {
+	if (isMedia || field?.type !== "STRING") return false;
+	const text = String(value ?? field?.default ?? "");
+	const hint = [field?.label, field?.tooltip].filter(Boolean).join(" ");
+	return text.length > 28
+		|| text.includes("\n")
+		|| /(文本|内容|描述|提示词|正向|反向|prompt|text|description|caption)/i.test(hint);
+}
+
+function autoresizeTextarea(textarea, node = null) {
+	if (!textarea) return;
+	textarea.style.height = "auto";
+	textarea.style.height = `${Math.max(58, textarea.scrollHeight || 58)}px`;
+	if (node) refreshNode(node);
+}
+
 function buildInputForField(node, field, values) {
 	if (isBooleanField(field, values)) {
 		return buildBoolButtonForField(node, field, values);
@@ -766,9 +782,11 @@ function buildInputForField(node, field, values) {
 	const isAudio = field.type === "AUDIO";
 	const isVideo = field.type === "VIDEO";
 	const isMedia = isImage || isAudio || isVideo;
+	const currentValue = String(values[field.key] ?? field.default ?? "");
+	const multiline = shouldUseMultilineText(field, currentValue, isMedia);
 
 	const wrap = document.createElement("div");
-	wrap.className = "gjj-template-param-row";
+	wrap.className = multiline ? "gjj-template-param-row gjj-template-param-row-full gjj-template-param-row-multiline" : "gjj-template-param-row";
 
 	const label = document.createElement("span");
 	label.className = "gjj-template-param-label";
@@ -778,20 +796,25 @@ function buildInputForField(node, field, values) {
 	const inputWrap = document.createElement("div");
 	inputWrap.style.display = "flex";
 	inputWrap.style.gap = "6px";
-	inputWrap.style.alignItems = "center";
+	inputWrap.style.alignItems = multiline ? "stretch" : "center";
 
-	const input = document.createElement("input");
-	input.className = "gjj-template-param-input";
-	input.value = String(values[field.key] ?? field.default ?? "");
+	const input = document.createElement(multiline ? "textarea" : "input");
+	input.className = multiline ? "gjj-template-param-input gjj-template-param-textarea" : "gjj-template-param-input";
+	input.value = currentValue;
 	input.placeholder = String(field.default ?? "");
 	input.spellcheck = false;
 	input.title = field.tooltip || field.type || "STRING";
 	input.style.flex = "1";
+	if (multiline) {
+		input.rows = 2;
+		input.wrap = "soft";
+	}
 
 	input.addEventListener("pointerdown", (event) => event.stopPropagation());
 	input.addEventListener("mousedown", (event) => event.stopPropagation());
 	input.addEventListener("input", () => {
 		values[field.key] = input.value;
+		if (multiline) autoresizeTextarea(input, node);
 		const template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
 		const fields = parseTemplate(template);
 		saveState(node, template, fields, values);
@@ -810,6 +833,9 @@ function buildInputForField(node, field, values) {
 			}
 		}
 	});
+	if (multiline) {
+		setTimeout(() => autoresizeTextarea(input, node), 0);
+	}
 
 	inputWrap.appendChild(input);
 
@@ -909,8 +935,12 @@ function buildDom(node) {
 		.gjj-template-param-actions { display:flex; gap:6px; justify-content:flex-end; }
 		.gjj-template-param-rows { display:flex; flex-direction:column; gap:6px; }
 		.gjj-template-param-row { display:grid; grid-template-columns:74px minmax(0,1fr); gap:7px; align-items:center; }
+		.gjj-template-param-row-full { grid-template-columns:1fr; gap:4px; align-items:stretch; }
+		.gjj-template-param-row-full .gjj-template-param-label { width:100%; }
+		.gjj-template-param-row-full > div { width:100%; }
 		.gjj-template-param-label { color:#b9c8cc; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 		.gjj-template-param-input { width:100%; height:30px; padding:4px 8px; border:1px solid #33464e; border-radius:8px; outline:none; background:#2b2d30; color:#f1f5f5; font-size:13px; }
+		.gjj-template-param-textarea { min-height:58px; height:auto; resize:vertical; line-height:1.45; white-space:pre-wrap; overflow:hidden; }
 		.gjj-template-param-input:focus { border-color:#6aa6b8; background:#22282c; }
 		.gjj-template-param-file-button { height:30px; width:36px; padding:0; border:1px solid #33464e; border-radius:8px; background:#2b2d30; color:#f1f5f5; cursor:pointer; font-size:14px; display:flex; align-items:center; justify-content:center; }
 		.gjj-template-param-file-button:hover { background:#3a3d40; border-color:#6aa6b8; }

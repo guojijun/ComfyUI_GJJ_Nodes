@@ -1,28 +1,36 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import comfy.utils
 import torch
+from .common_utils.dependency_checker import (
+	build_dependency_model_report,
+	check_dependencies,
+	get_report_from_exception,
+	send_dependency_model_notice,
+)
 
 # 延迟导入 cosyvoice，避免缺失时导致整个模块无法加载
 # from cosyvoice.cli.cosyvoice import AutoModel  # 在 runtime 中导入
 
 from .gjj_cosyvoice3_runtime import (
 	DEFAULT_MODEL_NAME,
+	MODEL_DOWNLOAD_URL,
 	audio_file_to_tempfile,
 	cleanup_temp_file,
 	comfy_audio_to_tempfile,
 	ensure_demo_reference,
 	local_example_audio_to_tempfile,
 	list_cosyvoice_models,
+	list_local_cosyvoice_models,
 	list_demo_references,
 	list_local_example_audios,
 	load_cosyvoice_model,
 	pick_available_name,
 	save_audio_mp3_ui,
 	send_audio_preview,
+	send_error_to_frontend,
 	send_status,
 	set_random_seed,
 	tensor_to_comfy_audio,
@@ -30,10 +38,22 @@ from .gjj_cosyvoice3_runtime import (
 )
 
 
+NODE_NAME = "GJJ_CosyVoice3Generator"
+NODE_DISPLAY_NAME = "📢[风格指令]语音克隆器TTS(CosyVoice3)"
 MODE_OPTIONS = ["零样本复刻", "跨语言复刻", "指令风格"]
 MP3_QUALITY_OPTIONS = ["320k", "128k", "V0"]
 MISSING_EXAMPLE_AUDIO = "[未找到示例音频]"
 DEFAULT_REFERENCE_TEXT = "人生不如意十有八九。要么看得开，要么就认栽！"
+DEPENDENCY_SPECS = [
+	{"module_name": "cosyvoice", "package_name": "cosyvoice", "display_name": "cosyvoice", "description": "CosyVoice3 运行时主依赖。"},
+	{"module_name": "soundfile", "package_name": "soundfile", "display_name": "soundfile", "description": "CosyVoice3 音频读写依赖。"},
+]
+OPTIONAL_DOWNLOAD_DEPENDENCY = {
+	"module_name": "huggingface_hub",
+	"package_name": "huggingface_hub",
+	"display_name": "huggingface_hub",
+	"description": "首次自动下载 CosyVoice3 模型依赖。",
+}
 
 
 def _list_example_audio_choices() -> list[str]:
@@ -48,36 +68,106 @@ def _has_valid_audio_input(audio: Any) -> bool:
 	return isinstance(audio, dict) and audio.get("waveform") is not None and audio.get("sample_rate") is not None
 
 
+def _collect_model_state() -> tuple[bool, list[dict[str, str]]]:
+	if list_local_cosyvoice_models():
+		return True, []
+	return False, [
+		{
+			"label": "CosyVoice3 模型",
+			"subdir": "cosyvoice",
+			"filename": DEFAULT_MODEL_NAME,
+			"description": "请放到 models/cosyvoice/，或安装 huggingface_hub 后首次执行自动下载。",
+		}
+	]
+
+
+def _collect_dependency_state(require_download: bool) -> tuple[bool, list[dict[str, str]]]:
+	specs = list(DEPENDENCY_SPECS)
+	if require_download:
+		specs.append(OPTIONAL_DOWNLOAD_DEPENDENCY)
+	missing_dependencies: list[dict[str, str]] = []
+	for spec in specs:
+		available, _ = check_dependencies([spec["module_name"]], NODE_DISPLAY_NAME)
+		if not available:
+			missing_dependencies.append(spec)
+	return (not missing_dependencies), missing_dependencies
+
+
+_MODELS_AVAILABLE, _MISSING_MODELS = _collect_model_state()
+_DEPENDENCIES_AVAILABLE, _MISSING_DEPENDENCIES = _collect_dependency_state(not _MODELS_AVAILABLE)
+_ENV_REPORT = build_dependency_model_report(
+	node_name=NODE_DISPLAY_NAME,
+	missing_dependencies=_MISSING_DEPENDENCIES,
+	missing_models=_MISSING_MODELS,
+	install_packages=[spec["package_name"] for spec in _MISSING_DEPENDENCIES],
+	description="CosyVoice3 一体式语音克隆器，支持零样本复刻、跨语言复刻与指令风格控制。",
+)
+_HELP_NOTICE = (
+	f"{_ENV_REPORT['warning_message']}\n请参考下方依赖、模型说明和安装命令。"
+	if not _ENV_REPORT.get("available", True)
+	else ""
+)
+_DESCRIPTION_READY = """
+📢[风格指令]语音克隆器TTS(CosyVoice3)
+
+CosyVoice3 一体式语音克隆器，支持零样本复刻、跨语言复刻与指令风格控制。
+
+📁 模型目录：
+models/cosyvoice/
+
+🌏模型下载：
+https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512
+
+💡 使用提示：
+- 默认模型为 Fun-CosyVoice3-0.5B-2512，约 1GB
+- 本地示例音频放到 models/mp3/，官方示例会自动缓存到 models/cosyvoice/demo/
+- 生成后会自动保存 MP3，并在节点中间显示播放器
+""".strip()
+DESCRIPTION = (
+	_DESCRIPTION_READY
+	if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
+	else f"{_ENV_REPORT['warning_message']}\n\n{_DESCRIPTION_READY}"
+)
+
+
 class GJJ_CosyVoice3Generator:
-	DESCRIPTION = """CosyVoice3 一体式语音克隆器。内部自动加载本地 models/cosyvoice 模型，支持零样本复刻、跨语言复刻与指令风格控制。
-
-📦 所需模型：
-  • 模型目录: models/cosyvoice/
-    - Fun-CosyVoice3-0.5B-2512 (默认，约 1GB)
-  • 示例音频目录: models/mp3/ (存放参考音频)
-  • 官方示例: 首次执行时自动下载到 models/cosyvoice/demo/
-  • 自动下载: 开启后首次执行时从 HuggingFace 国内镜像下载（需 huggingface_hub）
-
-🔧 Python 依赖：
-  • cosyvoice (必需，CosyVoice3 运行时库)
-  • huggingface_hub (可选，用于自动下载模型)
-  • soundfile (音频读写)
-  • 安装命令: pip install cosyvoice huggingface_hub soundfile
-
-✅ 优点：
-  • 支持三种合成模式：零样本复刻、跨语言复刻、指令风格
-  • 音质自然，情感表达丰富
-  • 支持自动转录参考音频文本（零样本模式下）
-  • 内置官方示例音色，方便快速测试
-  • 模型较小（0.5B 约 1GB），显存占用低
-  • 支持语速调节和风格指令控制
-
-⚠️ 缺点：
-  • 仅支持单一说话人克隆（不支持多说话人）
-  • 跨语言复刻效果可能不如母语自然
-  • 指令风格模式需要手动编写风格描述
-  • 依赖 cosyvoice 包，安装可能遇到兼容性问题
-  • 不支持动态扩展输入口"""
+	CATEGORY = "GJJ/Audio"
+	FUNCTION = "generate"
+	OUTPUT_NODE = True
+	DESCRIPTION = DESCRIPTION
+	SEARCH_ALIASES = ["CosyVoice3", "TTS", "语音克隆", "跨语言复刻", "指令风格", "文字转语音"]
+	RETURN_TYPES = ("AUDIO",)
+	RETURN_NAMES = ("语音音频输出",)
+	OUTPUT_TOOLTIPS = ("生成好的 ComfyUI 音频对象，可直接接保存音频或播放节点。",)
+	GJJ_HELP = {
+		"title": NODE_DISPLAY_NAME,
+		"description": _DESCRIPTION_READY,
+		"notice": _HELP_NOTICE,
+		"warning_message": _ENV_REPORT["warning_message"] if not _ENV_REPORT.get("available", True) else "",
+		"install_cmd": _ENV_REPORT["install_cmd"] if not _ENV_REPORT.get("available", True) else "",
+		"copy_text": _ENV_REPORT["copy_text"] if not _ENV_REPORT.get("available", True) else "",
+		"copy_label": _ENV_REPORT["copy_label"] if not _ENV_REPORT.get("available", True) else "",
+		"model_download_url": MODEL_DOWNLOAD_URL,
+		"missing_dependencies": _MISSING_DEPENDENCIES,
+		"missing_models": _MISSING_MODELS,
+		"dependencies": [
+			"需要 cosyvoice 和 soundfile 这两个核心 Python 依赖。",
+			"如果本地没有 CosyVoice3 模型，首次自动下载还需要 huggingface_hub。",
+			"官方示例音频会自动缓存到 models/cosyvoice/demo/。",
+		],
+		"models": _MISSING_MODELS or [
+			{
+				"label": DEFAULT_MODEL_NAME,
+				"value": f"models/cosyvoice/{DEFAULT_MODEL_NAME}",
+				"tooltip": "默认官方模型，约 1GB。",
+			},
+		],
+		"tips": [
+			"不接参考音频时，会直接使用上方示例音频；连接外部音频后自动优先使用输入音频。",
+			"零样本复刻可自动转录参考音频文本；转录失败时会自动退回跨语言复刻逻辑。",
+			"指令风格模式需要填写风格指令，适合控制语气、情绪和表达方式。",
+		],
+	}
 
 	@classmethod
 	def INPUT_TYPES(cls):
@@ -156,13 +246,6 @@ class GJJ_CosyVoice3Generator:
 				"extra_pnginfo": "EXTRA_PNGINFO",
 			},
 		}
-
-	RETURN_TYPES = ("AUDIO",)
-	RETURN_NAMES = ("语音音频输出",)
-	OUTPUT_TOOLTIPS = ("生成好的 ComfyUI 音频对象，可直接接保存音频或播放节点。",)
-	FUNCTION = "generate"
-	CATEGORY = "GJJ/Audio"
-	OUTPUT_NODE = True
 
 	def _validate_audio_duration(self, reference_audio: dict[str, Any]) -> float:
 		ref_waveform = reference_audio["waveform"]
@@ -329,21 +412,30 @@ class GJJ_CosyVoice3Generator:
 			pbar.update_absolute(4, 4)
 			return {"ui": audio_ui, "result": (audio,)}
 		except Exception as exc:
-			raise RuntimeError(
-				f"CosyVoice3 语音克隆器执行失败。\n"
+			report = get_report_from_exception(exc)
+			if report:
+				send_status(unique_id, "执行失败，请查看上方面板")
+				send_dependency_model_notice(report, unique_id=unique_id)
+				raise RuntimeError(report.get("warning_message") or "运行环境缺失。") from exc
+
+			send_status(unique_id, f"执行失败：{exc}")
+			detailed_error = (
+				"CosyVoice3 语音克隆器执行失败。\n"
 				f"模式：{mode}\n"
 				f"参考来源：{reference_source}\n"
 				f"模型：{model_name}\n"
 				f"详细错误：{exc}"
-			) from exc
+			)
+			send_error_to_frontend(unique_id, detailed_error)
+			raise RuntimeError(detailed_error) from exc
 		finally:
 			cleanup_temp_file(temp_file)
 
 
 NODE_CLASS_MAPPINGS = {
-	"GJJ_CosyVoice3Generator": GJJ_CosyVoice3Generator,
+	NODE_NAME: GJJ_CosyVoice3Generator,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-	"GJJ_CosyVoice3Generator": "GJJ·📢[风格指令]语音克隆器TTS(CosyVoice3)",
+	NODE_NAME: f"GJJ·{NODE_DISPLAY_NAME}",
 }

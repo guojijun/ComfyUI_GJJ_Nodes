@@ -22,7 +22,7 @@ def _load_wanvideo_model_loading():
         raise RuntimeError(
             "GJJ 内置 WanVideo 模型加载模块失败。\n"
             f"错误信息: {error}\n"
-            "说明: 本节点使用 GJJ vendor/wanvideo_wrapper 内置运行时，不依赖外部 ComfyUI-WanVideoWrapper 插件。"
+            "说明: 本节点使用 GJJ vendor/wanvideo_wrapper 内置运行时。"
         ) from error
     return nodes_model_loading
 

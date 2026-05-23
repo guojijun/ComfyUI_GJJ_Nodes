@@ -27,8 +27,15 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from .common_utils.dependency_checker import (
+    get_report_from_exception,
+    load_dependency_at_runtime,
+    make_missing_model_spec,
+    raise_dependency_model_error,
+)
 
 logger = logging.getLogger("GJJ.FishAudioS2")
+NODE_DISPLAY_NAME = "📢 语音克隆TTS(FishAudioS2)"
 
 # Sub-folder name inside ComfyUI/models/
 MODELS_FOLDER_NAME = "fishaudioS2"
@@ -45,11 +52,45 @@ DECODER_FILE_NAMES = (
     "decoder.pth",
     "vocoder.pth",
 )
+RUNTIME_INSTALL_PACKAGES = [
+    "transformers",
+    "loguru",
+    "pydantic",
+    "tiktoken",
+    "hydra-core",
+    "descript-audio-codec",
+    "descript-audiotools",
+    "soundfile",
+    "pyrootutils",
+    "omegaconf",
+    "huggingface_hub",
+    "torchvision",
+    "librosa",
+    "pyarrow",
+    "protobuf",
+    "natsort",
+    "loralib",
+    "datasets",
+    "imageio-ffmpeg",
+]
 
 
-def _ensure_vendor_fish_speech() -> None:
+def _ensure_vendor_fish_speech(unique_id=None) -> None:
     if not FISH_SPEECH_PACKAGE.is_dir():
-        raise RuntimeError(f"GJJ 内置 Fish Speech 运行时缺失：{FISH_SPEECH_PACKAGE}")
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_dependencies=[{
+                "module_name": "",
+                "package_name": "",
+                "display_name": "GJJ 内置 fish_speech 运行时",
+                "description": "GJJ 自带的 Fish Speech 运行时目录缺失或损坏。",
+            }],
+            install_packages=[],
+            description=f"未找到 GJJ 内置 Fish Speech 运行时目录：{FISH_SPEECH_PACKAGE}",
+            unique_id=unique_id,
+            copy_text="",
+            copy_label="",
+        )
 
     if not FISH_SPEECH_PROJECT_MARKER.exists():
         try:
@@ -58,11 +99,21 @@ def _ensure_vendor_fish_speech() -> None:
                 encoding="utf-8",
             )
         except OSError as exc:
-            raise RuntimeError(
-                "GJJ 内置 Fish Speech 运行时缺少 .project-root 标记，且自动创建失败："
-                f"{FISH_SPEECH_PROJECT_MARKER}\n"
-                f"原始错误：{exc}"
-            ) from exc
+            raise_dependency_model_error(
+                node_name=NODE_DISPLAY_NAME,
+                missing_dependencies=[{
+                    "module_name": "",
+                    "package_name": "",
+                    "display_name": "GJJ 内置 fish_speech 运行时",
+                    "description": "内置运行时缺少 .project-root 标记，且自动修复失败。",
+                }],
+                install_packages=[],
+                description=f"无法修复 Fish Speech 运行时标记文件：{FISH_SPEECH_PROJECT_MARKER}",
+                original_error=str(exc),
+                unique_id=unique_id,
+                copy_text="",
+                copy_label="",
+            )
 
     vendor_root = str(VENDOR_ROOT)
     if vendor_root not in sys.path:
@@ -86,22 +137,19 @@ def _ensure_vendor_fish_speech() -> None:
     try:
         import fish_speech.models  # noqa: F401
     except ImportError as exc:
-        raise RuntimeError(
-            "Fish Audio S2 运行时导入失败，请先补齐 Fish S2 的 Python 推理依赖。\n"
-            "\n"
-            "不要 pip install fish-speech；GJJ 已内置 fish_speech 源码，只需要环境依赖。\n"
-            "\n"
-            "🔧 快速安装命令（使用国内镜像）：\n"
-            "pip install transformers loguru pydantic tiktoken hydra-core descript-audio-codec descript-audiotools soundfile -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
-            "\n"
-            "或者逐个安装：\n"
-            "pip install transformers -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
-            "pip install hydra-core -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
-            "pip install descript-audio-codec descript-audiotools -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
-            "pip install soundfile -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
-            "\n"
-            f"原始导入错误：{exc}"
-        ) from exc
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_dependencies=[{
+                "module_name": "fish_speech",
+                "package_name": "",
+                "display_name": "Fish Speech 环境依赖",
+                "description": "不要安装 fish-speech；GJJ 已内置源码，只需要补齐 Python 运行依赖。",
+            }],
+            install_packages=RUNTIME_INSTALL_PACKAGES,
+            description="Fish Audio S2 运行时导入失败，请先补齐 Fish S2 的 Python 推理依赖。",
+            original_error=str(exc),
+            unique_id=unique_id,
+        )
 
 
 def _get_models_base() -> Path:
@@ -161,7 +209,7 @@ HF_MODELS = {
 HF_DEFAULT_MODEL_NAME = "s2-pro-fp8"
 
 
-def _auto_download_model(model_name: str = HF_DEFAULT_MODEL_NAME) -> bool:
+def _auto_download_model(model_name: str = HF_DEFAULT_MODEL_NAME, unique_id=None) -> bool:
     """
     Download a model from HuggingFace into models/fishaudioS2/<model_name>/
     using huggingface_hub.
@@ -187,15 +235,14 @@ def _auto_download_model(model_name: str = HF_DEFAULT_MODEL_NAME) -> bool:
     logger.info(f"Repo: {repo_id}")
     logger.info(f"Destination: {dest}")
 
-    try:
-        from huggingface_hub import snapshot_download
-    except ImportError:
-        logger.error(
-            "huggingface_hub is not installed — cannot auto-download model.\n"
-            "Install it with:  pip install huggingface_hub\n"
-            f"Then manually download from: https://huggingface.co/{repo_id}"
-        )
-        return False
+    huggingface_hub = load_dependency_at_runtime(
+        module_name="huggingface_hub",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="huggingface_hub",
+        description="自动下载 Fish Audio S2 模型需要 huggingface_hub。",
+        unique_id=unique_id,
+    )
+    snapshot_download = huggingface_hub.snapshot_download
 
     try:
         snapshot_download(
@@ -207,8 +254,24 @@ def _auto_download_model(model_name: str = HF_DEFAULT_MODEL_NAME) -> bool:
         logger.info(f"Model downloaded to: {dest}")
         return True
     except Exception as e:
-        logger.error(f"Model download failed: {e}")
-        return False
+        report = get_report_from_exception(e)
+        if report:
+            raise
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_models=[
+                make_missing_model_spec(
+                    label=model_name,
+                    subdir=MODELS_FOLDER_NAME,
+                    filename=folder_name,
+                    description="模型自动下载失败，请手动下载后放入对应目录。",
+                )
+            ],
+            description=f"Fish Audio S2 模型下载失败：{dest}",
+            original_error=str(e),
+            unique_id=unique_id,
+            title="GJJ 节点模型缺失！",
+        )
 
 
 def _has_complete_model_files(model_path: Path) -> bool:
@@ -300,7 +363,7 @@ def _strip_auto_download_suffix(name: str) -> str:
     return name
 
 
-def resolve_model_path(name: str) -> Path:
+def resolve_model_path(name: str, unique_id=None) -> Path:
     """
     Resolve a model folder name → full absolute Path at execution time.
     Only local models are accepted; the node never downloads during generation.
@@ -308,16 +371,37 @@ def resolve_model_path(name: str) -> Path:
     # Strip the " (auto download)" suffix if present
     name = _strip_auto_download_suffix(name)
     if not name or name == LOCAL_MODEL_PLACEHOLDER:
-        raise FileNotFoundError(
-            f"未找到本地 Fish S2 模型。请把模型放到：{_get_models_base()}"
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_models=[
+                make_missing_model_spec(
+                    label="Fish S2 模型",
+                    subdir=MODELS_FOLDER_NAME,
+                    filename="",
+                    description=f"请把模型放到：{_get_models_base()}",
+                )
+            ],
+            description="未找到本地 Fish S2 模型。",
+            unique_id=unique_id,
+            title="GJJ 节点模型缺失！",
         )
 
     path = _get_models_base() / name
 
     if not _has_complete_model_files(path):
-        raise FileNotFoundError(
-            f"本地 Fish S2 模型不完整或不存在：{path}\n"
-            "请确认该目录内至少包含 config.json 和模型权重文件。"
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_models=[
+                make_missing_model_spec(
+                    label=name,
+                    subdir=MODELS_FOLDER_NAME,
+                    filename=name,
+                    description="请确认目录内至少包含 config.json、文本权重和 DAC 解码器文件。",
+                )
+            ],
+            description=f"本地 Fish S2 模型不完整或不存在：{path}",
+            unique_id=unique_id,
+            title="GJJ 节点模型缺失！",
         )
 
     return path
@@ -398,6 +482,7 @@ def load_engine(
     precision: str,
     attention: str,
     compile_model: bool,
+    unique_id=None,
 ):
     """
     Load the Fish Speech TTSInferenceEngine and apply the requested attention
@@ -413,7 +498,7 @@ def load_engine(
                         including the masked path.
     'sage_attention'  — monkey-patch every Attention layer with sageattn.
     """
-    _ensure_vendor_fish_speech()
+    _ensure_vendor_fish_speech(unique_id)
 
     # Strip the " (auto download)" suffix before any HF_MODELS lookups or
     # bnb detection — the suffix is only display-layer metadata.
@@ -463,30 +548,19 @@ def load_engine(
         from fish_speech.models.text2semantic import inference as text2semantic_inference
         from fish_speech.inference_engine import TTSInferenceEngine
     except ImportError as e:
-        from .common_utils.dependency_checker import print_runtime_dependency_error, get_pip_install_command_text
-
-        install_cmd = get_pip_install_command_text("transformers loguru pydantic tiktoken hydra-core descript-audio-codec descript-audiotools soundfile pyrootutils omegaconf huggingface_hub torchvision librosa pyarrow protobuf natsort loralib datasets imageio-ffmpeg")
-
-        description = (
-            "FishAudioS2 节点缺少 Python 依赖。\n"
-            "❌ 不要执行 pip install fish-speech；GJJ 已内置源码，只需要环境依赖。\n"
-            "运行节点时会显示完整的安装命令，复制后执行即可。"
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_dependencies=[{
+                "module_name": "fish_speech",
+                "package_name": "",
+                "display_name": "Fish Speech 环境依赖",
+                "description": "不要安装 fish-speech；GJJ 已内置源码，只需要补齐 Python 运行依赖。",
+            }],
+            install_packages=RUNTIME_INSTALL_PACKAGES,
+            description="Fish Audio S2 运行时导入失败，请先补齐依赖。",
+            original_error=str(e),
+            unique_id=unique_id,
         )
-
-        print_runtime_dependency_error(
-            node_name="[语气]语音克隆TTS(FishAudioS2)",
-            dependency_name="fish_speech 环境依赖",
-            install_command=install_cmd,
-            description=description,
-            extra_info=f"原始导入错误：{e}"
-        )
-
-        raise RuntimeError(
-            f"🎵 Fish Audio S2 运行时导入失败，请先补齐依赖。\n\n"
-            f"快速安装命令：\n{install_cmd}\n\n"
-            f"原始导入错误：{e}\n\n"
-            "💡 提示：安装后请重启 ComfyUI 服务器。"
-        ) from e
 
     launch_thread_safe_queue = text2semantic_inference.launch_thread_safe_queue
     try:
@@ -500,10 +574,10 @@ def load_engine(
     # (BNB quantization is applied on-the-fly, not stored separately)
     if bnb_mode is not None:
         base_model_name = HF_MODELS.get(model_name, {}).get("base_model", "s2-pro")
-        model_path = resolve_model_path(base_model_name)
+        model_path = resolve_model_path(base_model_name, unique_id=unique_id)
         logger.info(f"BNB model '{model_name}' -> loading base weights from '{base_model_name}'")
     else:
-        model_path = resolve_model_path(model_name)
+        model_path = resolve_model_path(model_name, unique_id=unique_id)
 
     dtype = resolve_precision(precision, model_name, device_str)
 
@@ -539,7 +613,7 @@ def load_engine(
     finally:
         _restore_attention_class(_orig_forward, _attn_cls)
 
-    decoder_ckpt = _find_decoder(model_path)
+    decoder_ckpt = _find_decoder(model_path, unique_id=unique_id)
     logger.info(f"Loading Fish S2 decoder from: {decoder_ckpt}")
 
     decoder_model = load_decoder_model(
@@ -654,18 +728,16 @@ def _make_attention_forward(attention: str):
         return _forward
 
     if attention == "sage_attention":
-        try:
-            from sageattention import sageattn  # noqa: F401 — verify it imports
-        except ImportError:
-            raise ImportError(
-                "SageAttention is not installed.\n"
-                "Install it with:  pip install sageattention\n"
-                "Then restart ComfyUI."
-            )
+        sageattention_module = load_dependency_at_runtime(
+            module_name="sageattention",
+            node_name=NODE_DISPLAY_NAME,
+            package_name="sageattention",
+            description="Fish Audio S2 的 SageAttention 模式需要 sageattention。",
+        )
+        sageattn = sageattention_module.sageattn
 
         def _forward(self, x, freqs_cis, mask, input_pos=None):
             from fish_speech.models.text2semantic.llama import apply_rotary_emb
-            from sageattention import sageattn
             import torch.nn.functional as F
             bsz, seqlen, _ = x.shape
             q_size = self.n_head * self.head_dim
@@ -729,7 +801,7 @@ def _restore_attention_class(original_forward, attention_cls) -> None:
         logger.info("Attention class restored to default.")
 
 
-def _find_decoder(model_dir: Path) -> Path:
+def _find_decoder(model_dir: Path, unique_id=None) -> Path:
     """
     Locate the DAC vocoder weight file near the LLaMA checkpoint.
     Fish Speech ships it as firefly-gan-vq-fsq-8x1024-21hz-generator.pth.
@@ -741,10 +813,19 @@ def _find_decoder(model_dir: Path) -> Path:
             if p.is_file():
                 return p
 
-    raise FileNotFoundError(
-        f"DAC decoder checkpoint not found near: {model_dir}\n"
-        f"Expected one of: {list(DECODER_FILE_NAMES)}\n"
-        "Download it from https://huggingface.co/fishaudio/s2-pro"
+    raise_dependency_model_error(
+        node_name=NODE_DISPLAY_NAME,
+        missing_models=[
+            make_missing_model_spec(
+                label="Fish S2 DAC 解码器",
+                subdir=MODELS_FOLDER_NAME,
+                filename=model_dir.name,
+                description=f"目录附近需要包含以下任一文件：{', '.join(DECODER_FILE_NAMES)}",
+            )
+        ],
+        description=f"DAC decoder checkpoint not found near: {model_dir}",
+        unique_id=unique_id,
+        title="GJJ 节点模型缺失！",
     )
 
 
@@ -753,7 +834,12 @@ def audio_bytes_from_comfy(audio_dict: dict) -> bytes:
     Convert a ComfyUI AUDIO dict → WAV bytes for Fish Speech.
     ComfyUI format: {"waveform": Tensor[B, C, S], "sample_rate": int}
     """
-    import soundfile as sf
+    sf = load_dependency_at_runtime(
+        module_name="soundfile",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="soundfile",
+        description="Fish Audio S2 导出参考音频需要 soundfile。",
+    )
 
     waveform = audio_dict["waveform"]       # [B, C, S]
     sample_rate = audio_dict["sample_rate"]

@@ -5,6 +5,8 @@ const LIST_API = "/gjj/video_universal_loader_lists";
 const MAX_SLOTS = 12;
 const SAVED_VALUES_PROPERTY = "gjj_video_universal_loader_values";
 const FILTER_PROPERTY = "gjj_video_universal_loader_filters";
+const MIN_NODE_WIDTH = 500;
+const OUTPUT_HIT_LANE = 96;
 
 const OUTPUT_TYPE_BY_KIND = {
 	diffusion: "MODEL",
@@ -447,8 +449,8 @@ function buildDom(node) {
 	const wrap = document.createElement("div");
 	wrap.className = "gjj-vu-loader";
 	// 关键：DOMWidget 不能覆盖最右侧输出插口命中区域，否则低位输出口（例如 CLIP）会拖不出线。
-	// DOM 内容宽度只留出右侧必要输出端口通道，避免面板右侧空白过大。
-	wrap.style.cssText = "width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:6px;padding:0;margin-right:0;pointer-events:none;position:relative;";
+	// 右侧留出固定命中通道；按钮/下拉仍可交互，但不会压住输出圆点。
+	wrap.style.cssText = `width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:6px;padding:0 ${OUTPUT_HIT_LANE}px 0 0;margin-right:0;pointer-events:none;position:relative;`;
 	const style = document.createElement("style");
 	style.textContent = `
 		.gjj-vu-loader * { box-sizing:border-box; }
@@ -550,8 +552,8 @@ function ensureDom(node) {
 	const domWidget = node.addDOMWidget?.("gjj_video_universal_loader_dom", "HTML", container, { serialize: false, hideOnZoom: false });
 	if (domWidget) {
 		domWidget.computeSize = (width) => {
-			const nodeWidth = Math.max(430, Number(width || node.size?.[0] || 470));
-			return [Math.max(400, nodeWidth), estimateNodeHeight(node)];
+			const nodeWidth = Math.max(MIN_NODE_WIDTH, Number(width || node.size?.[0] || MIN_NODE_WIDTH));
+			return [nodeWidth, estimateNodeHeight(node)];
 		};
 		node.__gjjVUWidget = domWidget;
 		forceDomPassThrough(node);
@@ -1114,7 +1116,7 @@ function applyConfig(node, opts = {}) {
 
 function refreshNode(node) {
 	if (!node) return;
-	const width = Math.max(430, Math.min(Number(node.size?.[0] || 470), 500));
+	const width = Math.max(MIN_NODE_WIDTH, Number(node.size?.[0] || MIN_NODE_WIDTH));
 	const height = estimateNodeHeight(node);
 	if (!node.__gjjVUSizing && (Math.abs(Number(node.size?.[0] || 0) - width) > 1 || Math.abs(Number(node.size?.[1] || 0) - height) > 1)) {
 		node.__gjjVUSizing = true;

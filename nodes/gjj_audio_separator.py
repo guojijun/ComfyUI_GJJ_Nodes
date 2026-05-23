@@ -14,9 +14,7 @@ from __future__ import annotations
 import os
 import re
 import sys
-import importlib
 import inspect
-import site
 import traceback
 import time
 import hashlib
@@ -73,27 +71,18 @@ _RUNTIME_DEP_CACHE = {}
 # 步骤1: 导入公共依赖检查函数
 try:
     from .common_utils.dependency_checker import (
+        check_dependencies,
         load_dependency_at_runtime,
-        get_pip_install_command_text,
         build_dependency_model_report,
-        print_dependency_model_report,
-        _generate_warning_message,
+        send_dependency_model_notice,
     )
 except ImportError:
-    try:
-        from common_utils.dependency_checker import (
-            load_dependency_at_runtime,
-            get_pip_install_command_text,
-            build_dependency_model_report,
-            print_dependency_model_report,
-            _generate_warning_message,
-        )
-    except ImportError:
-        load_dependency_at_runtime = None
-        get_pip_install_command_text = None
-        build_dependency_model_report = None
-        print_dependency_model_report = None
-        _generate_warning_message = None
+    from common_utils.dependency_checker import (
+        check_dependencies,
+        load_dependency_at_runtime,
+        build_dependency_model_report,
+        send_dependency_model_notice,
+    )
 
 
 def _scan_melband_models():
@@ -136,47 +125,48 @@ def _scan_melband_models():
     return models
 
 
-try:
-    import numpy as np
-    import torchaudio.functional
+def _dependency_specs_with_display():
+    return [
+        {
+            "module_name": spec["module_name"],
+            "package_name": spec["package_name"],
+            "display_name": spec["module_name"],
+            "description": spec["description"],
+        }
+        for spec in REQUIRED_DEPENDENCIES
+    ]
 
-    _ = __import__("rotary_embedding_torch")
-    _ = __import__("einops")
-    _DEPENDENCIES_AVAILABLE = True
-    _IMPORT_ERROR = None
-except ImportError as exc:
-    _DEPENDENCIES_AVAILABLE = False
-    _IMPORT_ERROR = str(exc)
+
+def _collect_dependency_state():
+    missing_dependencies = []
+    messages = []
+    for spec in _dependency_specs_with_display():
+        available, message = check_dependencies([spec["module_name"]], NODE_DISPLAY_NAME)
+        if not available:
+            missing_dependencies.append(spec)
+            if message:
+                messages.append(message)
+    return (not missing_dependencies), missing_dependencies, "\n".join(messages)
+
+
+_DEPENDENCIES_AVAILABLE, _MISSING_DEPENDENCIES, _IMPORT_ERROR = _collect_dependency_state()
 
 _MODEL_CHOICES = _scan_melband_models()
 _MODELS_AVAILABLE = bool(_MODEL_CHOICES and _MODEL_CHOICES[0] != "[未找到 MelBandRoformer 模型]")
-_MISSING_DEPENDENCIES = [] if _DEPENDENCIES_AVAILABLE else [spec["module_name"] for spec in REQUIRED_DEPENDENCIES]
 _MISSING_MODELS = [] if _MODELS_AVAILABLE else [REQUIRED_MODEL]
 
-_ENV_REPORT = None
-if build_dependency_model_report is not None:
-    _ENV_REPORT = build_dependency_model_report(
-        node_name=NODE_DISPLAY_NAME,
-        missing_dependencies=[
-            {
-                "module_name": spec["module_name"],
-                "package_name": spec["package_name"],
-                "display_name": spec["module_name"],
-                "description": spec["description"],
-            }
-            for spec in REQUIRED_DEPENDENCIES
-            if not _DEPENDENCIES_AVAILABLE
-        ],
-        missing_models=_MISSING_MODELS,
-        install_packages=[spec["package_name"] for spec in REQUIRED_DEPENDENCIES] if not _DEPENDENCIES_AVAILABLE else [],
-        description=(
-            "使用 Mel-Band RoFormer 模型进行高质量人声/背景音分离，支持外部音频输入和节点内文件加载"
-            if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
-            else ""
-        ),
-        original_error=_IMPORT_ERROR or "",
-        model_download_url=MODEL_DOWNLOAD_URL,
-    )
+_ENV_REPORT = build_dependency_model_report(
+    node_name=NODE_DISPLAY_NAME,
+    missing_dependencies=_MISSING_DEPENDENCIES,
+    missing_models=_MISSING_MODELS,
+    install_packages=[spec["package_name"] for spec in _MISSING_DEPENDENCIES],
+    description=(
+        "使用 Mel-Band RoFormer 模型进行高质量人声/背景音分离，支持外部音频输入和节点内文件加载"
+        if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
+        else ""
+    ),
+    original_error=_IMPORT_ERROR or "",
+)
 
 def _build_audio_separator_description():
     intro = """
@@ -197,22 +187,11 @@ def _build_audio_separator_description():
 📁 模型要求：
   • MelBandRoformer 模型，请放置在 models/diffusion_models/ 目录
 """
-    warning = (
-        _ENV_REPORT["warning_message"]
-        if _ENV_REPORT is not None
-        else _generate_warning_message(
-            NODE_DISPLAY_NAME,
-            dependencies_available=_DEPENDENCIES_AVAILABLE,
-            models_available=_MODELS_AVAILABLE,
-            missing_dependencies=_MISSING_DEPENDENCIES,
-            missing_models=_MISSING_MODELS,
-        )
-    )
     if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE:
-        status = _ENV_REPORT.get("description_message", "✅ 运行依赖正常，模型已就绪。") if _ENV_REPORT else "✅ 运行依赖正常，模型已就绪。"
+        status = "✅ 运行依赖正常，模型已就绪。"
         return f"{status}\n\n{intro}"
 
-    status = _ENV_REPORT.get("description_message", warning) if _ENV_REPORT else warning
+    status = _ENV_REPORT.get("description_message", _ENV_REPORT["warning_message"])
     return f"{status}\n\n{intro}"
 
 
@@ -261,137 +240,6 @@ def _diag(msg):
     return None
 
 
-def _get_site_packages_target():
-    """返回当前 ComfyUI Python 的 site-packages 路径，用于 pip --target。"""
-    candidates = []
-    try:
-        candidates.extend(site.getsitepackages())
-    except Exception:
-        pass
-    try:
-        user_site = site.getusersitepackages()
-        if user_site:
-            candidates.append(user_site)
-    except Exception:
-        pass
-
-    for path in candidates:
-        if path and "site-packages" in str(path):
-            return path
-
-    # Windows embedded Python 常见路径：python_embeded/Lib/site-packages
-    return os.path.join(sys.prefix, "Lib", "site-packages")
-
-
-def _build_pip_command(packages):
-    """内置 fallback：生成带清华源和 --target 的安装命令。"""
-    pkgs = " ".join(dict.fromkeys([str(p).strip() for p in packages if str(p).strip()]))
-    target = _get_site_packages_target()
-    return (
-        f'"{sys.executable}" -m pip install {pkgs} '
-        f'--target "{target}" '
-        "-i https://pypi.tuna.tsinghua.edu.cn/simple"
-    )
-
-
-def _load_dependency_checker_module():
-    """运行时加载 GJJ 公共依赖提示工具；不存在时返回 None。"""
-    try:
-        try:
-            from .common_utils import dependency_checker as checker
-        except Exception:
-            from common_utils import dependency_checker as checker
-        return checker
-    except Exception:
-        return None
-
-
-def _call_get_pip_install_command_text(func, packages):
-    """兼容不同版本 get_pip_install_command_text 的函数签名。"""
-    packages = list(dict.fromkeys([str(p).strip() for p in packages if str(p).strip()]))
-    attempts = [
-        lambda: func(packages=packages),
-        lambda: func(package_names=packages),
-        lambda: func(pip_packages=packages),
-        lambda: func(package_name=packages[0] if packages else ""),
-        lambda: func(" ".join(packages)),
-        lambda: func(packages),
-    ]
-    for call in attempts:
-        try:
-            text = call()
-            if text:
-                return str(text)
-        except Exception:
-            continue
-    return _build_pip_command(packages)
-
-
-def _print_friendly_dependency_error(
-    *, module_name, packages, description, original_error
-):
-    """控制台友好输出。优先使用 common_utils.dependency_checker，失败时用内置彩色提示。"""
-    checker = _load_dependency_checker_module()
-    packages = list(dict.fromkeys([str(p).strip() for p in packages if str(p).strip()]))
-    report = None
-
-    if checker is not None and hasattr(checker, "build_dependency_model_report"):
-        report = checker.build_dependency_model_report(
-            node_name=NODE_DISPLAY_NAME,
-            missing_dependencies=[
-                {
-                    "module_name": module_name,
-                    "package_name": packages[0] if packages else module_name,
-                    "display_name": module_name,
-                    "description": description,
-                }
-            ],
-            install_packages=packages,
-            original_error=str(original_error or ""),
-        )
-        report["node_name"] = NODE_DISPLAY_NAME
-        if hasattr(checker, "print_dependency_model_report"):
-            checker.print_dependency_model_report(report, title="GJJ 节点运行时依赖缺失！")
-            return report.get("install_cmd", "") or _build_pip_command(packages)
-
-    pip_cmd = _build_pip_command(packages)
-    if report is None:
-        report = {
-            "node_name": NODE_DISPLAY_NAME,
-            "missing_dependencies": [
-                {
-                    "module_name": module_name,
-                    "package_name": packages[0] if packages else module_name,
-                    "display_name": module_name,
-                    "description": description,
-                }
-            ],
-            "missing_models": [],
-            "install_cmd": pip_cmd,
-        }
-
-    red = "\033[91m"
-    yellow = "\033[93m"
-    cyan = "\033[96m"
-    green = "\033[92m"
-    reset = "\033[0m"
-    line = "=" * 90
-    print(f"\n{red}{line}{reset}")
-    print(f"{red}  GJJ 节点运行时依赖缺失！{reset}")
-    print(f"{red}{line}{reset}")
-    print(f"{yellow}[GJJ] {reset}节点: {cyan}{NODE_DISPLAY_NAME}{reset}")
-    print(f"{yellow}[GJJ] {reset}缺失依赖: {red}{module_name}{reset}")
-    if description:
-        print(f"{yellow}[GJJ] {reset}{description}")
-    print(f"\n{yellow}[GJJ] {reset}快速安装命令:")
-    print(f"{green}{pip_cmd}{reset}")
-    print(f"\n{yellow}[GJJ] {reset}提示: 安装后请重启 ComfyUI 服务器")
-    if original_error:
-        print(f"{yellow}[GJJ] {reset}原始错误: {original_error}")
-    print(f"{red}{line}{reset}\n")
-    return pip_cmd
-
-
 def _runtime_import(
     module_name, *, package_name=None, description="", extra_packages=None
 ):
@@ -399,30 +247,20 @@ def _runtime_import(
     cache_key = module_name
     if cache_key in _RUNTIME_DEP_CACHE:
         return _RUNTIME_DEP_CACHE[cache_key]
-
-    packages = []
-    if package_name:
-        packages.append(package_name)
-    else:
-        packages.append(module_name.split(".")[0])
-    if extra_packages:
-        packages.extend(extra_packages)
-    packages = list(dict.fromkeys(packages))
-
-    # 优先使用 GJJ 项目已有统一加载器；它内部通常已经包含缓存和友好提示。
-    checker = _load_dependency_checker_module()
-    if checker is not None and hasattr(checker, "load_dependency_at_runtime"):
-        pass
-
-    # 没有公共加载器时，使用 importlib + 内置友好提示。
     try:
-        mod = importlib.import_module(module_name)
+        mod = load_dependency_at_runtime(
+            module_name,
+            NODE_DISPLAY_NAME,
+            package_name=package_name or module_name.split(".")[0],
+            description=description,
+            extra_packages=extra_packages,
+        )
         _RUNTIME_DEP_CACHE[cache_key] = mod
         return mod
     except Exception as import_error:
-        report = None
-        if checker is not None and hasattr(checker, "build_dependency_model_report"):
-            report = checker.build_dependency_model_report(
+        report = getattr(import_error, "gjj_report", None)
+        if report is None:
+            report = build_dependency_model_report(
                 node_name=NODE_DISPLAY_NAME,
                 missing_dependencies=[
                     {
@@ -432,53 +270,12 @@ def _runtime_import(
                         "description": description,
                     }
                 ],
-                install_packages=packages,
+                install_packages=[package_name or module_name] + list(extra_packages or []),
                 original_error=str(import_error),
             )
-            report["node_name"] = NODE_DISPLAY_NAME
-            if hasattr(checker, "print_dependency_model_report"):
-                checker.print_dependency_model_report(report, title="GJJ 节点运行时依赖缺失！")
-        if report is None:
-            pip_cmd = _build_pip_command(packages)
-            report = {
-                "node_name": NODE_DISPLAY_NAME,
-                "missing_dependencies": [
-                    {
-                        "module_name": module_name,
-                        "package_name": package_name or module_name,
-                        "display_name": module_name,
-                        "description": description,
-                    }
-                ],
-                "missing_models": [],
-                "install_cmd": pip_cmd,
-                "warning_message": _generate_warning_message(
-                    NODE_DISPLAY_NAME,
-                    dependencies_available=False,
-                    models_available=True,
-                    missing_dependencies=[module_name],
-                    missing_models=[],
-                ),
-                "panel_message": (
-                    f"⚠️缺失运行依赖 {module_name}，点击❓按钮了解详情。\n\n"
-                    f"📦 必需依赖（请安装）：\n• {package_name or module_name}"
-                ),
-                "help_message": "",
-                "console_message": "",
-            }
-        pip_cmd = report.get("install_cmd") or _build_pip_command(packages)
-        _LAST_INSTALL_CMD = pip_cmd
-        _LAST_MISSING_MODULE = module_name
-        _LAST_DESCRIPTION = description
-        err = RuntimeError((report or {}).get("panel_message") or f"未找到 {module_name} 运行库。")
-        setattr(err, "gjj_report", report or {})
+        err = RuntimeError(report.get("warning_message") or f"未找到 {module_name} 运行库。")
+        setattr(err, "gjj_report", report)
         raise err from import_error
-
-
-# 用于存储最后一次依赖检查失败时的信息
-_LAST_INSTALL_CMD = ""
-_LAST_MISSING_MODULE = ""
-_LAST_DESCRIPTION = ""
 
 
 class _LazyDependency:
@@ -2024,26 +1821,12 @@ def _process_with_real_melroformer(
 
 def _check_runtime_dependencies():
     """在执行开头集中检查运行时依赖，缺失时给出友好提示。"""
-    _runtime_import(
-        "numpy",
-        package_name="numpy",
-        description="该节点需要 numpy 生成 Mel 滤波器。ComfyUI 通常已自带该依赖。",
-    )
-    _runtime_import(
-        "einops",
-        package_name="einops",
-        description="Mel-Band RoFormer 模型结构需要 einops 做张量维度重排。ComfyUI 通常已自带该依赖。",
-    )
-    _runtime_import(
-        "rotary_embedding_torch",
-        package_name="rotary-embedding-torch",
-        description="Mel-Band RoFormer 模型结构需要 rotary_embedding_torch。",
-    )
-    _runtime_import(
-        "torchaudio.functional",
-        package_name="torchaudio",
-        description="该节点需要 torchaudio.functional 对输入音频重采样到 44100Hz。ComfyUI 音频节点通常已安装 torchaudio。",
-    )
+    for spec in REQUIRED_DEPENDENCIES:
+        _runtime_import(
+            spec["module_name"],
+            package_name=spec["package_name"],
+            description=spec["description"],
+        )
 
 
 def _pick_input_value(kwargs, current, *names, default=None):
@@ -2076,7 +1859,7 @@ class GJJ_AudioSeparator:
         "description": (
             "使用 Mel-Band RoFormer 模型进行高质量人声/背景音分离，支持外部音频输入和节点内文件加载"
             if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
-            else (_ENV_REPORT["warning_message"] if _ENV_REPORT is not None else _generate_warning_message(NODE_DISPLAY_NAME, dependencies_available=_DEPENDENCIES_AVAILABLE, models_available=_MODELS_AVAILABLE, missing_dependencies=_MISSING_DEPENDENCIES, missing_models=_MISSING_MODELS))
+            else _ENV_REPORT["warning_message"]
         ),
         "warning_message": _ENV_REPORT["warning_message"] if _ENV_REPORT is not None and not _ENV_REPORT.get("available", True) else "",
         "notice": _ENV_REPORT["warning_message"] if _ENV_REPORT is not None and not _ENV_REPORT.get("available", True) else "",
@@ -2410,6 +2193,7 @@ class GJJ_AudioSeparator:
                 )
             except Exception:
                 pass
+            send_dependency_model_notice(report, unique_id=unique_id)
             _log_error("运行时依赖缺失，详情已显示在节点面板。")
             raise RuntimeError(report.get("warning_message") or "运行时依赖缺失。") from e
 
@@ -2419,7 +2203,6 @@ class GJJ_AudioSeparator:
                 missing_models=[REQUIRED_MODEL],
                 install_packages=[],
                 original_error="",
-                model_download_url=MODEL_DOWNLOAD_URL,
             )
             try:
                 from server import PromptServer
@@ -2441,6 +2224,7 @@ class GJJ_AudioSeparator:
                 )
             except Exception:
                 pass
+            send_dependency_model_notice(report, unique_id=unique_id)
             _log_error("模型缺失，详情已显示在节点面板。")
             raise RuntimeError(report.get("warning_message") or "未找到 MelBandRoformer 模型。") from None
 

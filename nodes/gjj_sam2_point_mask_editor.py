@@ -23,7 +23,7 @@ from PIL import Image
 from .common_utils.mask_tools import GrowMask_execute
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .common_utils.dependency_checker import (
-	DEFAULT_MODEL_DOWNLOAD_URL,
+	DEFAULT_MODEL_URL,
 	build_dependency_model_report,
 	load_dependency_at_runtime,
 	print_dependency_model_report,
@@ -45,7 +45,7 @@ SAM2_REQUIRED_MODEL_FILES = (
 	"sam2.1_hiera_base_plus-fp16.safetensors",
 	"sam2.1_hiera_large-fp16.safetensors",
 )
-SAM2_MODEL_DOWNLOAD_URL = DEFAULT_MODEL_DOWNLOAD_URL
+SAM2_MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 DEPENDENCY_SPECS: list[dict[str, str]] = [
 	{
 		"module_name": "iopath.common.file_io",

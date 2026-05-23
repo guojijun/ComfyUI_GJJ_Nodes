@@ -1,5 +1,6 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
+import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set(["GJJ_BatchTextSegmenter"]);
 const STALE_STATUS_WIDGET = "gjj_batch_text_segmenter_status";
@@ -86,24 +87,7 @@ function ensureStatusWidget(node) {
 	box.appendChild(textDisplay);
 
 	const copyBtn = document.createElement("button");
-	copyBtn.textContent = "📋 复制安装命令";
-	copyBtn.title = "复制安装命令到剪贴板";
-	copyBtn.style.cssText = [
-		"padding:6px 12px",
-		"border:none",
-		"border-radius:6px",
-		"background:#ff4757",
-		"color:#fff",
-		"font-size:12px",
-		"cursor:pointer",
-		"display:none",
-	].join(";");
-	copyBtn.addEventListener("mouseenter", () => {
-		copyBtn.style.background = "#ff6b6b";
-	});
-	copyBtn.addEventListener("mouseleave", () => {
-		copyBtn.style.background = "#ff4757";
-	});
+	GJJ_Utils.applyDependencyCopyButton(copyBtn, { visible: false });
 	box.appendChild(copyBtn);
 
 	const widget = node.addDOMWidget?.("batch_text_status", "Status Display", box, {
@@ -172,32 +156,12 @@ api.addEventListener("gjj_batch_text_error", (event) => {
 
 					// 显示复制按钮
 					if (status.copyBtn) {
-						status.copyBtn.style.display = "block";
-						status.copyBtn.textContent = " 复制安装命令";
-						status.copyBtn.title = "复制安装命令到剪贴板";
-						status.copyBtn.style.background = "#ff4757";
-						status.copyBtn.style.color = "#fff";
-
-						// 更新复制按钮事件，复制安装命令
-						const newCopyBtn = status.copyBtn.cloneNode(true);
-						status.copyBtn.parentNode.replaceChild(newCopyBtn, status.copyBtn);
-						status.copyBtn = newCopyBtn;
-
-						status.copyBtn.addEventListener("click", () => {
-							if (installCommand) {
-								navigator.clipboard.writeText(installCommand).then(() => {
-									const originalText = status.copyBtn.textContent;
-									status.copyBtn.textContent = "✅ 已复制";
-									status.copyBtn.style.background = "#2ed573";
-									setTimeout(() => {
-										status.copyBtn.textContent = originalText;
-										status.copyBtn.style.background = "#ff4757";
-									}, 1500);
-								}).catch(err => {
-									console.error("[GJJ] 复制失败:", err);
-									alert("复制失败，请手动选择安装命令复制");
-								});
-							}
+						GJJ_Utils.applyDependencyCopyButton(status.copyBtn, {
+							copyText: installCommand,
+							visible: !!installCommand,
+							onFailed: () => {
+								alert("复制失败，请手动选择安装命令复制");
+							},
 						});
 					}
 

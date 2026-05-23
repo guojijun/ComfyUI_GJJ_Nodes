@@ -9,11 +9,21 @@ from typing import Any
 import folder_paths
 import numpy as np
 import torch
+from .common_utils.dependency_checker import (
+    build_dependency_model_report,
+    check_dependencies,
+    get_report_from_exception,
+    raise_dependency_model_error,
+    send_dependency_model_notice,
+)
 
 # 延迟导入 soundfile，避免缺失时导致整个模块无法加载
 # import soundfile as sf  # 在函数内部导入
 
 from .gjj_fish_audio_s2_loader import (
+    HF_MODELS,
+    LOCAL_MODEL_PLACEHOLDER,
+    RUNTIME_INSTALL_PACKAGES,
     _register_folder,
     _strip_auto_download_suffix,
     audio_bytes_from_comfy,
@@ -49,9 +59,94 @@ LANGUAGES = [
     "my", "km", "am", "ka", "az", "kk", "mn", "sw", "yo", "eu", "ca",
     "gl", "cy", "la", "sa", "ur", "ne", "tl", "jw",
 ]
+NODE_DISPLAY_NAME = "📢[语气]语音克隆TTS(FishAudioS2)"
+MODEL_DOWNLOAD_URL = "https://huggingface.co/fishaudio"
+DEPENDENCY_SPECS = [
+    {"module_name": "transformers", "package_name": "transformers", "display_name": "transformers", "description": "Fish Audio S2 文本语义模型依赖。"},
+    {"module_name": "loguru", "package_name": "loguru", "display_name": "loguru", "description": "Fish Audio S2 运行日志依赖。"},
+    {"module_name": "pydantic", "package_name": "pydantic", "display_name": "pydantic", "description": "Fish Audio S2 请求结构依赖。"},
+    {"module_name": "tiktoken", "package_name": "tiktoken", "display_name": "tiktoken", "description": "Fish Audio S2 文本编码依赖。"},
+    {"module_name": "hydra", "package_name": "hydra-core", "display_name": "hydra-core", "description": "Fish Audio S2 配置系统依赖。"},
+    {"module_name": "pyrootutils", "package_name": "pyrootutils", "display_name": "pyrootutils", "description": "Fish Audio S2 项目路径依赖。"},
+    {"module_name": "omegaconf", "package_name": "omegaconf", "display_name": "omegaconf", "description": "Fish Audio S2 配置解析依赖。"},
+    {"module_name": "descript_audio_codec", "package_name": "descript-audio-codec", "display_name": "descript-audio-codec", "description": "Fish Audio S2 DAC 编解码依赖。"},
+    {"module_name": "audiotools", "package_name": "descript-audiotools", "display_name": "descript-audiotools", "description": "Fish Audio S2 音频工具依赖。"},
+    {"module_name": "soundfile", "package_name": "soundfile", "display_name": "soundfile", "description": "Fish Audio S2 音频读写依赖。"},
+    {"module_name": "librosa", "package_name": "librosa", "display_name": "librosa", "description": "Fish Audio S2 音频处理依赖。"},
+    {"module_name": "huggingface_hub", "package_name": "huggingface_hub", "display_name": "huggingface_hub", "description": "自动下载 Fish S2 模型依赖。"},
+    {"module_name": "torchvision", "package_name": "torchvision", "display_name": "torchvision", "description": "Fish Audio S2 运行时依赖。"},
+    {"module_name": "datasets", "package_name": "datasets", "display_name": "datasets", "description": "Fish Audio S2 数据处理依赖。"},
+    {"module_name": "pyarrow", "package_name": "pyarrow", "display_name": "pyarrow", "description": "Fish Audio S2 数据缓存依赖。"},
+    {"module_name": "google.protobuf", "package_name": "protobuf", "display_name": "protobuf", "description": "Fish Audio S2 模型序列化依赖。"},
+    {"module_name": "natsort", "package_name": "natsort", "display_name": "natsort", "description": "Fish Audio S2 文件排序依赖。"},
+    {"module_name": "loralib", "package_name": "loralib", "display_name": "loralib", "description": "Fish Audio S2 LoRA 运行依赖。"},
+    {"module_name": "imageio_ffmpeg", "package_name": "imageio-ffmpeg", "display_name": "imageio-ffmpeg", "description": "Fish Audio S2 音频回退解码依赖。"},
+    {"module_name": "av", "package_name": "av", "display_name": "av", "description": "Fish Audio S2 本地音频回退解码依赖。"},
+]
 
 
 _register_folder()
+
+
+def _collect_dependency_state() -> tuple[bool, list[dict[str, str]]]:
+    missing_dependencies: list[dict[str, str]] = []
+    for spec in DEPENDENCY_SPECS:
+        available, _ = check_dependencies([spec["module_name"]], NODE_DISPLAY_NAME)
+        if not available:
+            missing_dependencies.append(spec)
+    return (not missing_dependencies), missing_dependencies
+
+
+def _collect_model_state() -> tuple[bool, list[dict[str, str]]]:
+    model_names = get_model_names()
+    if model_names and model_names[0] != LOCAL_MODEL_PLACEHOLDER:
+        return True, []
+    preferred = HF_MODELS.get("s2-pro", {})
+    return False, [
+        {
+            "label": "Fish S2 模型",
+            "subdir": "fishaudioS2",
+            "filename": "s2-pro / s2-base / 其它 S2 变体",
+            "description": preferred.get("description") or "请放到 models/fishaudioS2/。",
+        }
+    ]
+
+
+_DEPENDENCIES_AVAILABLE, _MISSING_DEPENDENCIES = _collect_dependency_state()
+_MODELS_AVAILABLE, _MISSING_MODELS = _collect_model_state()
+_ENV_REPORT = build_dependency_model_report(
+    node_name=NODE_DISPLAY_NAME,
+    missing_dependencies=_MISSING_DEPENDENCIES,
+    missing_models=_MISSING_MODELS,
+    install_packages=RUNTIME_INSTALL_PACKAGES + ["av"],
+    description="Fish Audio S2 一体式 TTS、单人语音克隆和多说话人语音克隆节点。",
+)
+_HELP_NOTICE = (
+    f"{_ENV_REPORT['warning_message']}\n请参考下方依赖、模型说明和安装命令。"
+    if not _ENV_REPORT.get("available", True)
+    else ""
+)
+_DESCRIPTION_READY = """
+📢[语气]语音克隆TTS(FishAudioS2)
+
+Fish Audio S2 一体式 TTS、单人语音克隆和多说话人语音克隆节点。
+
+📁 模型目录：
+models/fishaudioS2/
+
+🌏模型下载：
+https://huggingface.co/fishaudio
+
+💡 使用提示：
+- 支持普通 TTS、单人克隆、多说话人克隆三种模式
+- 单人克隆可用本地参考音频或外部输入；多说话人支持最多 10 人
+- 节点会自动保存 MP3 预览，便于快速试听
+""".strip()
+DESCRIPTION = (
+    _DESCRIPTION_READY
+    if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
+    else f"{_ENV_REPORT['warning_message']}\n\n{_DESCRIPTION_READY}"
+)
 
 
 def _send_status(unique_id: Any, text: str, progress: float | None = None) -> None:
@@ -82,15 +177,14 @@ def _send_audio_preview(unique_id: Any, audio_ui: dict[str, Any]) -> None:
         pass
 
 
-def _send_error_to_frontend(unique_id: Any, error_message: str, install_command: str = ""):
-    """将错误信息和安装命令发送给前端"""
+def _send_error_to_frontend(unique_id: Any, error_message: str):
+    """将普通执行错误发送给前端状态区"""
     try:
         from server import PromptServer
 
         PromptServer.instance.send_sync("gjj_fish_audio_s2_error", {
             "node": str(unique_id),
             "error": error_message,
-            "install_command": install_command,
         })
     except Exception:
         pass
@@ -212,36 +306,50 @@ def _decode_audio_with_av(source_path: Path) -> tuple[np.ndarray, int]:
 
 
 def _read_audio_file(path: Path) -> tuple[np.ndarray, int]:
+    sf_exc = None
     try:
         import soundfile as sf
         audio_np, sample_rate = sf.read(str(path), always_2d=True)
-    except ImportError as exc:
-        from .common_utils.dependency_checker import print_runtime_dependency_error, get_pip_install_command_text
+    except Exception as exc:
+        sf_exc = exc
+        audio_np = None
+        sample_rate = 0
+    else:
+        if audio_np.size == 0:
+            raise RuntimeError(f"参考音频为空：{path}")
+        return audio_np.astype(np.float32, copy=False), int(sample_rate)
 
-        install_cmd = get_pip_install_command_text("soundfile")
-
-        # 打印美观的控制台错误提示
-        print_runtime_dependency_error(
-            node_name="Fish Audio S2",
-            dependency_name="soundfile",
-            install_command=install_cmd,
-            description="该节点需要 soundfile 来读取音频文件",
-            extra_info=f"原始导入错误：{exc}"
-        )
-
-        # 抛出简洁的错误信息（在前端显示）
-        raise RuntimeError("运行时依赖缺失：soundfile。详细信息请查看控制台。") from exc
-    except Exception as sf_exc:
-        try:
-            audio_np, sample_rate = _decode_audio_with_av(path)
-        except Exception as av_exc:
-            raise RuntimeError(
-                f"无法解码本地参考音频：{path}\n"
-                f"soundfile 错误：{sf_exc}\n"
-                f"PyAV 错误：{av_exc}"
-            ) from av_exc
-    if audio_np.size == 0:
-        raise RuntimeError(f"参考音频为空：{path}")
+    try:
+        audio_np, sample_rate = _decode_audio_with_av(path)
+    except Exception as av_exc:
+        missing_dependencies = []
+        if isinstance(sf_exc, (ImportError, ModuleNotFoundError)):
+            missing_dependencies.append({
+                "module_name": "soundfile",
+                "package_name": "soundfile",
+                "display_name": "soundfile",
+                "description": "Fish Audio S2 读取本地参考音频建议安装 soundfile。",
+            })
+        if isinstance(av_exc, (ImportError, ModuleNotFoundError)):
+            missing_dependencies.append({
+                "module_name": "av",
+                "package_name": "av",
+                "display_name": "PyAV",
+                "description": "Fish Audio S2 回退音频解码需要 av。",
+            })
+        if missing_dependencies:
+            raise_dependency_model_error(
+                node_name="📢 语音克隆TTS(FishAudioS2)",
+                missing_dependencies=missing_dependencies,
+                install_packages=["soundfile", "av"],
+                description="缺少可用的本地参考音频解码依赖。",
+                original_error=f"soundfile: {sf_exc}\nPyAV: {av_exc}",
+            )
+        raise RuntimeError(
+            f"无法解码本地参考音频：{path}\n"
+            f"soundfile 错误：{sf_exc}\n"
+            f"PyAV 错误：{av_exc}"
+        ) from av_exc
     return audio_np.astype(np.float32, copy=False), int(sample_rate)
 
 
@@ -330,7 +438,7 @@ def _parse_dialogue_lines(text: str) -> list[tuple[int, str]]:
     return [(speaker, line) for speaker, line in turns if line]
 
 
-def _get_engine(model_path, device, precision, attention, compile_model, keep_loaded=False):
+def _get_engine(model_path, device, precision, attention, compile_model, keep_loaded=False, unique_id=None):
     model_name = _strip_auto_download_suffix(str(model_path))
     key = get_cache_key(model_path, device, precision, attention, model_name, compile_model)
     cached_engine, cached_key = get_cached_engine()
@@ -341,7 +449,7 @@ def _get_engine(model_path, device, precision, attention, compile_model, keep_lo
         return cached_engine
     if cached_engine is not None:
         unload_engine()
-    engine = load_engine(model_path, device, precision, attention, bool(compile_model))
+    engine = load_engine(model_path, device, precision, attention, bool(compile_model), unique_id=unique_id)
     set_cached_engine(engine, key, keep_loaded=bool(keep_loaded))
     return engine
 
@@ -350,43 +458,45 @@ class GJJ_FishAudioS2Generator:
     CATEGORY = "GJJ/Audio"
     FUNCTION = "generate"
     OUTPUT_NODE = True
-    DESCRIPTION = """Fish Audio S2 一体式 TTS、单人语音克隆和多说话人语音克隆节点。内置 Fish Speech 运行时源码，不依赖原 ComfyUI-fish-audio-s2 节点包。
-
-📦 所需模型：
-  • 模型目录: models/fishaudioS2/
-    - s2-pro (推荐，音质最佳)
-    - s2-base (轻量，速度快)
-    - 或其他 Fish Speech S2 模型变体
-  • 自动下载: 开启后首次执行时从 HuggingFace 下载（需 huggingface_hub）
-
-🔧 Python 依赖（❓查看完整安装命令）：
-  • transformers, loguru, pydantic, tiktoken
-  • hydra-core, pyrootutils, omegaconf
-  • descript-audio-codec, descript-audiotools
-  • soundfile, librosa, natsort
-  • huggingface_hub, torchvision, datasets
-  • pyarrow, protobuf, loralib
-  • imageio-ffmpeg (音频回退解码)
-  • 缺失依赖时运行节点会显示完整安装命令
-
-✅ 优点：
-  • 音质出色，接近真人发音
-  • 支持多说话人同时克隆（最多 10 人）
-  • 内置 vendor 版 Fish Speech 运行时，无需额外安装
-  • 支持 50+ 种语言
-  • 提供普通 TTS、单人克隆、多说话人克隆三种模式
-  • 自动保存 MP3 预览，方便快速试听
-
-⚠️ 缺点：
-  • 模型较大（s2-pro 约 2-3GB）
-  • 需要较多显存（建议 ≥6GB）
-  • 推理速度中等（取决于文本长度）
-  • 依赖较多 Python 包，环境配置复杂
-  • 跨语言克隆效果可能不如母语自然"""
+    DESCRIPTION = DESCRIPTION
     SEARCH_ALIASES = ["Fish Audio", "Fish S2", "TTS", "语音克隆", "多说话人", "文字转语音"]
     RETURN_TYPES = ("AUDIO",)
     RETURN_NAMES = ("合成音频",)
     OUTPUT_TOOLTIPS = ("Fish Audio S2 合成后的 ComfyUI 音频对象；节点内部也会保存 MP3 并显示播放器。",)
+    GJJ_HELP = {
+        "title": NODE_DISPLAY_NAME,
+        "description": _DESCRIPTION_READY,
+        "notice": _HELP_NOTICE,
+        "warning_message": _ENV_REPORT["warning_message"] if not _ENV_REPORT.get("available", True) else "",
+        "install_cmd": _ENV_REPORT["install_cmd"] if not _ENV_REPORT.get("available", True) else "",
+        "copy_text": _ENV_REPORT["copy_text"] if not _ENV_REPORT.get("available", True) else "",
+        "copy_label": _ENV_REPORT["copy_label"] if not _ENV_REPORT.get("available", True) else "",
+        "model_download_url": MODEL_DOWNLOAD_URL,
+        "missing_dependencies": _MISSING_DEPENDENCIES,
+        "missing_models": _MISSING_MODELS,
+        "dependencies": [
+            "Fish Speech vendor 运行时源码由 GJJ 内置，不需要额外安装 fish-speech。",
+            "需要补齐 transformers、hydra-core、descript-audio-codec、soundfile、huggingface_hub 等 Python 依赖。",
+            "本地参考音频回退解码会用到 av 和 imageio-ffmpeg。",
+        ],
+        "models": _MISSING_MODELS or [
+            {
+                "label": "s2-pro",
+                "value": "models/fishaudioS2/s2-pro",
+                "tooltip": "推荐，音质最佳。",
+            },
+            {
+                "label": "s2-pro-fp8",
+                "value": "models/fishaudioS2/s2-pro-fp8",
+                "tooltip": "FP8 量化，显存占用更低。",
+            },
+        ],
+        "tips": [
+            "普通 TTS 不需要参考音频；单人克隆优先使用第 1 路输入，没有时才读本地参考音频。",
+            "多说话人模式请使用 [speaker_1]:、[speaker_2]: 这样的行首标签。",
+            "首次运行前建议先把本地模型放好，避免执行期在线下载带来的等待。",
+        ],
+    }
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -682,6 +792,7 @@ class GJJ_FishAudioS2Generator:
                 str(attention),
                 bool(compile_model),
                 bool(keep_model_loaded),
+                unique_id=unique_id,
             )
 
             prompt_prefix = f"[{language}] " if str(language or "auto") != "auto" else ""
@@ -776,39 +887,21 @@ class GJJ_FishAudioS2Generator:
             _send_status(unique_id, f"完成：输出 {len(audio_np) / sample_rate:.2f} 秒，耗时 {elapsed:.2f} 秒。", 1.0)
             return {"ui": audio_ui, "result": (result,)}
         except Exception as exc:
+            report = get_report_from_exception(exc)
+            if report:
+                _send_status(unique_id, "执行失败，请查看上方面板", 1.0)
+                send_dependency_model_notice(report, unique_id=unique_id)
+                raise RuntimeError(report.get("warning_message") or "运行环境缺失。") from exc
+
             _send_status(unique_id, f"执行失败：{exc}", 1.0)
-
-            # 如果原始错误包含详细安装命令（来自 load_engine），则保留它
-            # 否则包装成标准格式
-            if isinstance(exc, RuntimeError) and "运行时导入失败" in str(exc):
-                # 提取安装命令
-                error_str = str(exc)
-                install_command = ""
-                # 从错误信息中提取安装命令（查找以 & " 开头的行）
-                lines = error_str.split("\n")
-                for line in lines:
-                    if line.strip().startswith('& "') and "-m pip install" in line:
-                        install_command = line.strip()
-                        break
-
-                # 发送错误事件到前端
-                _send_error_to_frontend(unique_id, str(exc), install_command)
-
-                # 保留原始的详细错误信息（包含安装命令）
-                raise RuntimeError(
-                    f"🎵 GJJ · [语气]语音克隆TTS(FishAudioS2) 执行失败\n"
-                    f"模式：{resolved_mode}\n"
-                    f"模型：{model_path}\n\n"
-                    f"{exc}"
-                ) from exc
-            else:
-                # 其他错误使用标准格式
-                raise RuntimeError(
-                    "🎵 Fish Audio S2 单节点执行失败。\n"
-                    f"模式：{resolved_mode}\n"
-                    f"模型：{model_path}\n\n"
-                    f"详细错误：{exc}"
-                ) from exc
+            detailed_error = (
+                "🎵 Fish Audio S2 单节点执行失败。\n"
+                f"模式：{resolved_mode}\n"
+                f"模型：{model_path}\n\n"
+                f"详细错误：{exc}"
+            )
+            _send_error_to_frontend(unique_id, detailed_error)
+            raise RuntimeError(detailed_error) from exc
         finally:
             if not bool(keep_model_loaded):
                 unload_engine()

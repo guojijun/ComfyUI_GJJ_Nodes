@@ -10,11 +10,22 @@ import folder_paths
 import numpy as np
 import torch
 import torch.nn.functional as F
+from .common_utils.dependency_checker import (
+    build_dependency_model_report,
+    check_dependencies,
+    get_report_from_exception,
+    raise_dependency_model_error,
+    send_dependency_model_notice,
+)
 
 # 延迟导入 soundfile，避免缺失时导致整个模块无法加载
 # import soundfile as sf  # 在函数内部导入
 
 from .gjj_longcat_audiodit_loader import (
+    HF_MODELS,
+    HF_MODELS_FOLDER_NAME,
+    LOCAL_MODEL_PLACEHOLDER,
+    RUNTIME_INSTALL_PACKAGES,
     _strip_auto_download_suffix,
     approx_duration_from_text,
     get_model_names,
@@ -43,6 +54,89 @@ MISSING_AUDIO_CHOICE = "[未找到models/mp3音频]"
 MP3_QUALITY_OPTIONS = ["320k", "128k", "V0"]
 DEFAULT_REFERENCE_TEXT = "人生不如意十有八九。要么看得开，要么就认栽!"
 MIN_VISIBLE_PAIRS = 1  # 默认只显示 1 对输入口
+NODE_DISPLAY_NAME = "📢[多人]语音克隆TTS (LongCat)"
+MODEL_DOWNLOAD_URL = "https://huggingface.co/meituan-longcat"
+DEPENDENCY_SPECS = [
+    {"module_name": "transformers", "package_name": "transformers", "display_name": "transformers", "description": "LongCat AudioDiT 文本编码与推理依赖。"},
+    {"module_name": "soundfile", "package_name": "soundfile", "display_name": "soundfile", "description": "LongCat AudioDiT 音频读写依赖。"},
+    {"module_name": "huggingface_hub", "package_name": "huggingface_hub", "display_name": "huggingface_hub", "description": "自动下载 LongCat 模型与 tokenizer 依赖。"},
+    {"module_name": "librosa", "package_name": "librosa", "display_name": "librosa", "description": "LongCat AudioDiT 音频重采样依赖。"},
+    {"module_name": "av", "package_name": "av", "display_name": "PyAV", "description": "LongCat AudioDiT 回退音频解码依赖。"},
+]
+
+
+def _collect_dependency_state() -> tuple[bool, list[dict[str, str]]]:
+    missing_dependencies: list[dict[str, str]] = []
+    for spec in DEPENDENCY_SPECS:
+        available, _ = check_dependencies([spec["module_name"]], NODE_DISPLAY_NAME)
+        if not available:
+            missing_dependencies.append(spec)
+    return (not missing_dependencies), missing_dependencies
+
+
+def _collect_model_state() -> tuple[bool, list[dict[str, str]]]:
+    model_names = get_model_names()
+    if model_names and model_names[0] != LOCAL_MODEL_PLACEHOLDER:
+        return True, []
+    return False, [
+        {
+            "label": "LongCat AudioDiT 模型",
+            "subdir": HF_MODELS_FOLDER_NAME,
+            "filename": "LongCat-AudioDiT-*",
+            "description": "请放到 models/audiodit/ 或开启自动下载。",
+        }
+    ]
+
+
+_DEPENDENCIES_AVAILABLE, _MISSING_DEPENDENCIES = _collect_dependency_state()
+_MODELS_AVAILABLE, _MISSING_MODELS = _collect_model_state()
+_ENV_REPORT = build_dependency_model_report(
+    node_name=NODE_DISPLAY_NAME,
+    missing_dependencies=_MISSING_DEPENDENCIES,
+    missing_models=_MISSING_MODELS,
+    install_packages=RUNTIME_INSTALL_PACKAGES + ["av"],
+    description="LongCat AudioDiT 一体式语音克隆与多说话人 TTS 节点。",
+)
+_HELP_NOTICE = (
+    f"{_ENV_REPORT['warning_message']}\n请参考下方依赖、模型说明和安装命令。"
+    if not _ENV_REPORT.get("available", True)
+    else ""
+)
+_DESCRIPTION_READY = """
+📢[多人]语音克隆TTS (LongCat)
+
+LongCat AudioDiT 一体式语音克隆与多说话人 TTS。
+
+📁 模型目录：
+models/audiodit/
+
+🌏模型下载：
+https://huggingface.co/meituan-longcat
+
+💡 使用提示：
+- 支持多说话人输入，按 [speaker_1]:、[speaker_2]: 这样的行首标签逐句合成
+- 默认从 models/mp3 选择参考音频；连接输入音频后自动按实际输入数量匹配说话人
+- 节点会自动保存 MP3 预览，便于快速试听
+""".strip()
+DESCRIPTION = (
+    _DESCRIPTION_READY
+    if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
+    else f"{_ENV_REPORT['warning_message']}\n\n{_DESCRIPTION_READY}"
+)
+
+
+def _send_error_to_frontend(unique_id: Any, error_message: str) -> None:
+    if not unique_id:
+        return
+    try:
+        from server import PromptServer
+
+        PromptServer.instance.send_sync("gjj_longcat_error", {
+            "node": str(unique_id),
+            "error": error_message,
+        })
+    except Exception:
+        pass
 
 
 def _send_status(unique_id: Any, text: str, progress: float | None = None) -> None:
@@ -195,36 +289,50 @@ def _decode_audio_with_av(source_path: Path) -> tuple[np.ndarray, int]:
 
 
 def _read_audio_file(path: Path) -> tuple[np.ndarray, int]:
+    sf_exc = None
     try:
         import soundfile as sf
         audio_np, sample_rate = sf.read(str(path), always_2d=True)
-    except ImportError as exc:
-        from .common_utils.dependency_checker import print_runtime_dependency_error, get_pip_install_command_text
+    except Exception as exc:
+        sf_exc = exc
+        audio_np = None
+        sample_rate = 0
+    else:
+        if audio_np.size == 0:
+            raise RuntimeError(f"参考音频为空：{path}")
+        return audio_np.astype(np.float32, copy=False), int(sample_rate)
 
-        install_cmd = get_pip_install_command_text("soundfile")
-
-        # 打印美观的控制台错误提示
-        print_runtime_dependency_error(
-            node_name="LongCat AudioDiT TTS",
-            dependency_name="soundfile",
-            install_command=install_cmd,
-            description="该节点需要 soundfile 来读取音频文件",
-            extra_info=f"原始导入错误：{exc}"
-        )
-
-        # 抛出简洁的错误信息（在前端显示）
-        raise RuntimeError("运行时依赖缺失：soundfile。详细信息请查看控制台。") from exc
-    except Exception as sf_exc:
-        try:
-            audio_np, sample_rate = _decode_audio_with_av(path)
-        except Exception as av_exc:
-            raise RuntimeError(
-                f"无法解码本地参考音频：{path}\n"
-                f"soundfile 错误：{sf_exc}\n"
-                f"PyAV 错误：{av_exc}"
-            ) from av_exc
-    if audio_np.size == 0:
-        raise RuntimeError(f"参考音频为空：{path}")
+    try:
+        audio_np, sample_rate = _decode_audio_with_av(path)
+    except Exception as av_exc:
+        missing_dependencies = []
+        if isinstance(sf_exc, (ImportError, ModuleNotFoundError)):
+            missing_dependencies.append({
+                "module_name": "soundfile",
+                "package_name": "soundfile",
+                "display_name": "soundfile",
+                "description": "LongCat AudioDiT 读取本地参考音频建议安装 soundfile。",
+            })
+        if isinstance(av_exc, (ImportError, ModuleNotFoundError)):
+            missing_dependencies.append({
+                "module_name": "av",
+                "package_name": "av",
+                "display_name": "PyAV",
+                "description": "LongCat AudioDiT 回退音频解码需要 av。",
+            })
+        if missing_dependencies:
+            raise_dependency_model_error(
+                node_name="📢 语音克隆TTS(LongCat AudioDiT)",
+                missing_dependencies=missing_dependencies,
+                install_packages=["soundfile", "av"],
+                description="缺少可用的本地参考音频解码依赖。",
+                original_error=f"soundfile: {sf_exc}\nPyAV: {av_exc}",
+            )
+        raise RuntimeError(
+            f"无法解码本地参考音频：{path}\n"
+            f"soundfile 错误：{sf_exc}\n"
+            f"PyAV 错误：{av_exc}"
+        ) from av_exc
     return audio_np.astype(np.float32, copy=False), int(sample_rate)
 
 
@@ -347,7 +455,7 @@ def _pick_default_model(models: list[str]) -> str:
     return models[0] if models else ""
 
 
-def _get_model(model_path: str, device: str, dtype: str, attention: str, keep_loaded: bool):
+def _get_model(model_path: str, device: str, dtype: str, attention: str, keep_loaded: bool, unique_id=None):
     if dtype == "fp16":
         dtype = "bf16"
     key = get_cache_key(model_path, device, dtype, attention)
@@ -360,7 +468,7 @@ def _get_model(model_path: str, device: str, dtype: str, attention: str, keep_lo
             device_str, _ = resolve_device(device)
             resume_model_to_cuda(device_str)
         return cached_model, cached_tokenizer
-    model, tokenizer = load_model(model_path, device, dtype, attention)
+    model, tokenizer = load_model(model_path, device, dtype, attention, unique_id=unique_id)
     set_cached_model(model, tokenizer, key, keep_loaded=keep_loaded)
     return model, tokenizer
 
@@ -369,41 +477,45 @@ class GJJ_LongCatAudioDiTTTS:
     CATEGORY = "GJJ/Audio"
     FUNCTION = "generate"
     OUTPUT_NODE = True
-    DESCRIPTION = """LongCat AudioDiT 一体式语音克隆与多说话人 TTS。默认从 models/mp3 选择参考音频；连接音频后按实际音频输入数量自动计算说话人数，并自动保存 MP3 供节点内预览。
-
-📦 所需模型：
-  • 模型目录: models/audiodit/
-    - LongCat-AudioDiT-1B (轻量，~6GB FP32)
-    - LongCat-AudioDiT-3.5B (标准，~14GB FP32)
-    - LongCat-AudioDiT-3.5B-bf16 (推荐，~7GB VRAM, bf16 量化)
-    - LongCat-AudioDiT-3.5B-fp8 (极速，~4GB VRAM, fp8 量化)
-  • Tokenizer: google/umt5-base (首次执行时自动下载)
-  • 自动下载: 开启后首次执行时从 HuggingFace 下载（需 huggingface_hub）
-
-🔧 Python 依赖：
-  • transformers (文本编码和 tokenizer)
-  • soundfile (音频读写)
-  • huggingface_hub (可选，用于自动下载模型)
-  • 安装命令: pip install transformers soundfile huggingface_hub
-
-✅ 优点：
-  • 支持动态扩展输入口（最多 10 个说话人）
-  • 自动检测连接的音频数量，智能调整说话人数
-  • 提供多种模型尺寸，适配不同显存配置
-  • fp8 量化版本显存占用低，适合消费级显卡
-  • 自动保存 MP3 预览，方便快速试听
-  • 默认参考文本可自定义
-
-⚠️ 缺点：
-  • 大模型需要较多显存（3.5B FP32 约 14GB）
-  • 推理速度较慢（尤其是大模型）
-  • 跨语言克隆效果可能不如母语自然
-  • 需要手动提供参考音频对应的文本（或留空使用默认文本）
-  • 音质略逊于 Fish Audio S2"""
+    DESCRIPTION = DESCRIPTION
     SEARCH_ALIASES = ["LongCat", "AudioDiT", "TTS", "语音克隆", "多说话人", "文字转语音"]
     RETURN_TYPES = ("AUDIO",)
     RETURN_NAMES = ("合成音频",)
     OUTPUT_TOOLTIPS = ("LongCat AudioDiT 合成后的 ComfyUI 音频对象；节点内部也会保存 MP3 并显示播放器。",)
+    GJJ_HELP = {
+        "title": NODE_DISPLAY_NAME,
+        "description": _DESCRIPTION_READY,
+        "notice": _HELP_NOTICE,
+        "warning_message": _ENV_REPORT["warning_message"] if not _ENV_REPORT.get("available", True) else "",
+        "install_cmd": _ENV_REPORT["install_cmd"] if not _ENV_REPORT.get("available", True) else "",
+        "copy_text": _ENV_REPORT["copy_text"] if not _ENV_REPORT.get("available", True) else "",
+        "copy_label": _ENV_REPORT["copy_label"] if not _ENV_REPORT.get("available", True) else "",
+        "model_download_url": MODEL_DOWNLOAD_URL,
+        "missing_dependencies": _MISSING_DEPENDENCIES,
+        "missing_models": _MISSING_MODELS,
+        "dependencies": [
+            "需要 transformers、soundfile、huggingface_hub、librosa 等 Python 依赖。",
+            "本地参考音频回退解码会使用 PyAV。",
+            "Tokenizer 会在首次执行时按需自动下载。",
+        ],
+        "models": _MISSING_MODELS or [
+            {
+                "label": "LongCat-AudioDiT-3.5B-bf16",
+                "value": "models/audiodit/LongCat-AudioDiT-3.5B-bf16",
+                "tooltip": "推荐，显存占用和效果更平衡。",
+            },
+            {
+                "label": "LongCat-AudioDiT-3.5B-fp8",
+                "value": "models/audiodit/LongCat-AudioDiT-3.5B-fp8",
+                "tooltip": "显存更低，速度更快。",
+            },
+        ],
+        "tips": [
+            "连接多个参考音频时，文本必须使用 [speaker_1]:、[speaker_2]: 这样的行首标签。",
+            "没有连接参考音频时，会优先使用 models/mp3 下最新的本地音频文件。",
+            "LongCat 音质通常不如 FishAudioS2，但多说话人流程更直接。",
+        ],
+    }
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -638,7 +750,14 @@ class GJJ_LongCatAudioDiTTTS:
         try:
             _check_interrupt()
             _send_status(unique_id, "1/5 正在加载 LongCat AudioDiT 模型...", 0.06)
-            model, tokenizer = _get_model(str(model_path), str(device), str(dtype), str(attention), bool(keep_model_loaded))
+            model, tokenizer = _get_model(
+                str(model_path),
+                str(device),
+                str(dtype),
+                str(attention),
+                bool(keep_model_loaded),
+                unique_id=unique_id,
+            )
             sr = int(model.config.sampling_rate)
             full_hop = int(model.config.latent_hop)
             max_duration = float(model.config.max_wav_duration)
@@ -735,13 +854,21 @@ class GJJ_LongCatAudioDiTTTS:
             _send_status(unique_id, f"完成：{len(references)} 个说话人，输出 {len(output_audio) / sr:.2f} 秒，耗时 {elapsed:.2f} 秒。", 1.0)
             return {"ui": audio_ui, "result": (result,)}
         except Exception as exc:
+            report = get_report_from_exception(exc)
+            if report:
+                _send_status(unique_id, "执行失败，请查看上方面板", 1.0)
+                send_dependency_model_notice(report, unique_id=unique_id)
+                raise RuntimeError(report.get("warning_message") or "运行环境缺失。") from exc
+
             _send_status(unique_id, f"执行失败：{exc}", 1.0)
-            raise RuntimeError(
+            detailed_error = (
                 "LongCat AudioDiT 单节点执行失败。\n"
                 f"参考来源：{reference_mode}\n"
                 f"模型：{model_path}\n"
                 f"详细错误：{exc}"
-            ) from exc
+            )
+            _send_error_to_frontend(unique_id, detailed_error)
+            raise RuntimeError(detailed_error) from exc
         finally:
             if not bool(keep_model_loaded):
                 unload_model()

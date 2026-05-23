@@ -635,6 +635,16 @@ api.addEventListener("gjj_node_audio", (event) => {
 	setStatus(targetNode, "完成，音频已保存", 100);
 });
 
+api.addEventListener("gjj_longcat_error", (event) => {
+	const detail = event?.detail || {};
+	const targetNode = app.graph?._nodes?.find((node) => String(node?.id) === String(detail.node));
+	if (!targetNode || !TARGET_NODES.has(String(targetNode.comfyClass || targetNode.type || ""))) {
+		return;
+	}
+	patchNode(targetNode);
+	setStatus(targetNode, `❌ ${detail.error || "执行失败"}`, 100);
+});
+
 app.registerExtension({
 	name: "Comfy.GJJ.LongCatAudioDiTTTS",
 

@@ -90,27 +90,6 @@ function ensureStyles() {
     .gjj-audio-separator-status:empty {
       display: none;
     }
-    .gjj-audio-separator-copy-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      margin-top: 8px;
-      padding: 6px 12px;
-      border: 1px solid rgba(255, 255, 255, 0.32);
-      border-radius: 6px;
-      background: rgba(255, 80, 80, 0.25);
-      color: #fff;
-      font-size: 13px;
-      cursor: pointer;
-      user-select: none;
-    }
-    .gjj-audio-separator-copy-btn:hover {
-      background: rgba(255, 100, 100, 0.35);
-    }
-    .gjj-audio-separator-copy-btn.gjj-copied {
-      background: rgba(80, 200, 80, 0.35);
-      border-color: rgba(120, 255, 120, 0.5);
-    }
   `;
   document.head.appendChild(style);
 }
@@ -492,37 +471,6 @@ function button(label, tooltip, onClick) {
   return b;
 }
 
-function copyButtonLabel(copyText, copyLabel = "") {
-  const text = String(copyText || "").trim();
-  if (!text) return "";
-  if (copyLabel) return copyLabel;
-  return /^https?:\/\//i.test(text) ? "🌏 复制下载网址" : "📋 复制安装命令";
-}
-
-async function copyTextToClipboard(text) {
-  const value = String(text || "").trim();
-  if (!value) return false;
-  try {
-    await navigator.clipboard.writeText(value);
-    return true;
-  } catch (_) {
-    const textarea = document.createElement("textarea");
-    textarea.value = value;
-    textarea.style.position = "fixed";
-    textarea.style.left = "-9999px";
-    textarea.style.top = "-9999px";
-    document.body.appendChild(textarea);
-    textarea.focus();
-    textarea.select();
-    try {
-      document.execCommand("copy");
-      return true;
-    } finally {
-      textarea.remove();
-    }
-  }
-}
-
 function firstWarningLine(text) {
   const line = String(text || "").split(/\r?\n/).map((item) => item.trim()).find(Boolean) || "";
   return line.startsWith("⚠️") ? line : "";
@@ -591,7 +539,7 @@ function setToolbarCopy(node, copyText = "", copyLabel = "") {
   const text = String(copyText || "").trim();
   copy.__gjj_copy_text = text;
   copy.textContent = /^https?:\/\//i.test(text) ? "🌏" : "📋";
-  copy.title = text ? `${copyButtonLabel(text, copyLabel)}\n${text}` : "复制安装命令或模型下载网址";
+  copy.title = text ? `${GJJ_Utils.getDependencyCopyLabel(text, copyLabel)}\n${text}` : "复制安装命令或模型下载网址";
   copy.style.display = text ? "" : "none";
   wrap?.classList?.toggle("gjj-has-copy", !!text);
 }
@@ -603,22 +551,21 @@ function setPanelCopy(node, copyText = "", copyLabel = "") {
   copyBtn.__gjj_copy_text = text;
   copyBtn.__gjj_install_cmd = text;
   copyBtn.__gjj_copy_label = String(copyLabel || "").trim();
-  copyBtn.textContent = text ? copyButtonLabel(text, copyLabel) : "📋 复制安装命令";
-  copyBtn.title = text ? `${copyButtonLabel(text, copyLabel)}\n${text}` : "复制安装命令或模型下载网址";
-  copyBtn.style.display = text ? "inline-flex" : "none";
+  GJJ_Utils.applyDependencyCopyButton(copyBtn, {
+    copyText: text,
+    copyLabel,
+    visible: !!text,
+    onCopied: () => {
+      flashToolbarCopy(node);
+    },
+  });
   refreshAudioNode(node);
 }
 
 function flashPanelCopy(node) {
   const copyBtn = node?.__gjjCopyBtn;
   if (!copyBtn) return;
-  const old = copyButtonLabel(copyBtn.__gjj_copy_text, copyBtn.__gjj_copy_label) || "📋 复制安装命令";
-  copyBtn.classList.add("gjj-copied");
-  copyBtn.textContent = "✅ 已复制";
-  setTimeout(() => {
-    copyBtn.classList.remove("gjj-copied");
-    copyBtn.textContent = old;
-  }, 1200);
+  GJJ_Utils.flashDependencyCopyButton(copyBtn);
 }
 
 function copyPanelText(node) {
@@ -627,7 +574,8 @@ function copyPanelText(node) {
   const now = Date.now();
   if (now - Number(node.__gjjAudioLastPanelCopyAt || 0) < 350) return true;
   node.__gjjAudioLastPanelCopyAt = now;
-  copyTextToClipboard(text).then(() => {
+  GJJ_Utils.copyTextToClipboard(text).then((ok) => {
+    if (!ok) return;
     flashPanelCopy(node);
     flashToolbarCopy(node);
   }).catch((error) => {
@@ -691,7 +639,8 @@ function createToolbar(node) {
     const text = String(copy.__gjj_copy_text || "").trim();
     if (!text) return;
     try {
-      await copyTextToClipboard(text);
+      const ok = await GJJ_Utils.copyTextToClipboard(text);
+      if (!ok) return;
       flashToolbarCopy(node);
     } catch (error) {
       console.error("[GJJ AudioSeparator] 复制失败：", error);
@@ -730,7 +679,10 @@ function handleToolbarMouse(event, pos, node) {
     const now = Date.now();
     if (now - Number(node.__gjjAudioLastCopyAt || 0) < 350) return true;
     node.__gjjAudioLastCopyAt = now;
-    copyTextToClipboard(text).then(() => flashToolbarCopy(node)).catch((error) => {
+    GJJ_Utils.copyTextToClipboard(text).then((ok) => {
+      if (!ok) return;
+      flashToolbarCopy(node);
+    }).catch((error) => {
       console.error("[GJJ AudioSeparator] 复制失败：", error);
     });
   }
@@ -753,11 +705,8 @@ function createStatusBar(node, initialText = "", initialCopyText = "", initialCo
   // 复制按钮
   const copyBtn = document.createElement("button");
   copyBtn.className = "gjj-audio-separator-copy-btn";
-  copyBtn.style.display = "none";
-  copyBtn.textContent = "📋 复制安装命令";
-  copyBtn.addEventListener("click", async () => {
-    copyPanelText(node);
-  });
+  GJJ_Utils.applyDependencyCopyButton(copyBtn, { visible: false });
+  copyBtn.style.marginTop = "8px";
   statusContainer.appendChild(copyBtn);
 
   // 保存引用到节点

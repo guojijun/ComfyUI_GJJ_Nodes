@@ -47,7 +47,7 @@ class GJJ_SolidColorImage:
             "required": {
                 "width": ("INT", {"default": 1024, "min": 1, "max": 16384, "step": 1, "display_name": "宽度", "tooltip": "输出图片宽度。"}),
                 "height": ("INT", {"default": 1024, "min": 1, "max": 16384, "step": 1, "display_name": "高度", "tooltip": "输出图片高度。"}),
-                "color": ("STRING", {"default": "#000000", "display_name": "颜色", "tooltip": "纯色颜色，支持 #RRGGBB 或常见颜色名。"}),
+                "color": ("COLOR", {"default": "#000000", "display_name": "颜色", "tooltip": "纯色颜色。"}),
             }
         }
 
@@ -71,8 +71,8 @@ class GJJ_GradientImage:
             "required": {
                 "width": ("INT", {"default": 1024, "min": 1, "max": 16384, "step": 1, "display_name": "宽度", "tooltip": "输出图片宽度。"}),
                 "height": ("INT", {"default": 1024, "min": 1, "max": 16384, "step": 1, "display_name": "高度", "tooltip": "输出图片高度。"}),
-                "start_color": ("STRING", {"default": "#000000", "display_name": "起始颜色", "tooltip": "渐变起始颜色。"}),
-                "end_color": ("STRING", {"default": "#FFFFFF", "display_name": "结束颜色", "tooltip": "渐变结束颜色。"}),
+                "start_color": ("COLOR", {"default": "#000000", "display_name": "起始颜色", "tooltip": "渐变起始颜色。"}),
+                "end_color": ("COLOR", {"default": "#FFFFFF", "display_name": "结束颜色", "tooltip": "渐变结束颜色。"}),
                 "direction": (["左到右", "上到下", "左上到右下", "径向"], {"default": "左到右", "display_name": "渐变方向", "tooltip": "选择线性渐变方向或径向渐变。"}),
             }
         }

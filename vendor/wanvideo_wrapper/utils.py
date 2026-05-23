@@ -7,7 +7,8 @@ from pathlib import Path
 import gc
 import types, collections
 from comfy.utils import ProgressBar, copy_to_param, set_attr_param
-from comfy.model_patcher import get_key_weight, string_to_seed
+from comfy.model_patcher import get_key_weight
+from comfy.utils import string_to_seed
 from comfy.lora import calculate_weight
 
 from comfy.float import stochastic_rounding
@@ -624,18 +625,37 @@ def compile_model(transformer, compile_args=None):
         except Exception as e:
             log.warning(f"Could not set recompile_limit: {e}")
 
-    if compile_args["compile_transformer_blocks_only"]:
-        for i, block in enumerate(transformer.blocks):
-            if hasattr(block, "_orig_mod"):
-                block = block._orig_mod
-            transformer.blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-        if transformer.vace_layers is not None:
-            for i, block in enumerate(transformer.vace_blocks):
+    try:
+        if compile_args["compile_transformer_blocks_only"]:
+            for i, block in enumerate(transformer.blocks):
                 if hasattr(block, "_orig_mod"):
                     block = block._orig_mod
-                transformer.vace_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-    else:
-        transformer = torch.compile(transformer, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+                transformer.blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+            if transformer.vace_layers is not None:
+                for i, block in enumerate(transformer.vace_blocks):
+                    if hasattr(block, "_orig_mod"):
+                        block = block._orig_mod
+                    transformer.vace_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+        else:
+            transformer = torch.compile(transformer, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+    except Exception as e:
+        import sys
+        exc_type, exc_value, exc_tb = sys.exc_info()
+        if "TritonMissing" in str(exc_type.__name__) or "triton" in str(e).lower():
+            log.error(
+                f"\n{'='*60}\n"
+                f"GJJ WanVideo torch.compile 错误\n"
+                f"{'='*60}\n"
+                f"错误原因: Triton 编译器未安装或版本过旧\n"
+                f"当前 backend: {compile_args.get('backend', 'inductor')}\n"
+                f"{'='*60}\n"
+                f"解决方法:\n"
+                f"1. 安装 Triton: pip install triton\n"
+                f"2. 或在 'GJJ · ⚙️ WanVideo编译设置' 节点中选择其他 backend (如 'cudagraphs')\n"
+                f"3. 或不连接 'GJJ · ⚙️ WanVideo编译设置' 节点以禁用 torch.compile\n"
+                f"{'='*60}\n"
+            )
+        raise
     return transformer
 
 #https://5410tiffany.github.io/tcfg.github.io/

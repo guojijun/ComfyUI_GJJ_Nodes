@@ -2,17 +2,26 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import time
 from typing import Any
 
 import folder_paths
 import numpy as np
 import torch
+from .common_utils.dependency_checker import (
+    build_dependency_model_report,
+    check_dependencies,
+    get_report_from_exception,
+    load_dependency_at_runtime,
+    make_missing_model_spec,
+    raise_dependency_model_error,
+    send_dependency_model_notice,
+)
 
 NODE_NAME = "GJJ_SenseVoiceASR"
 MODEL_ROOT_NAME = "ASR"
 MODEL_NAME = "SenseVoice-small-nonx"
+MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
 
 LANGUAGES = [
     "自动",
@@ -28,6 +37,84 @@ PRECISION_OPTIONS = ["自动", "float16", "float32", "int8"]
 
 
 _DEPS = {}
+NODE_DISPLAY_NAME = "🎤 语音识别 (SenseVoice)"
+DEPENDENCY_SPECS = [
+    {
+        "module_name": "funasr",
+        "package_name": "funasr",
+        "display_name": "funasr",
+        "description": "SenseVoice 运行时需要 funasr 加载和执行语音识别模型。",
+    },
+    {
+        "module_name": "soundfile",
+        "package_name": "soundfile",
+        "display_name": "soundfile",
+        "description": "SenseVoice 需要 soundfile 读取示例音频文件。",
+    },
+]
+REQUIRED_MODEL = make_missing_model_spec(
+    label="SenseVoice-small-nonx",
+    subdir=MODEL_ROOT_NAME,
+    filename=MODEL_NAME,
+    description="SenseVoice 本地模型目录，请放到 models/ASR/SenseVoice-small-nonx/。",
+)
+
+
+def _collect_dependency_state() -> tuple[bool, list[dict[str, str]]]:
+    missing_dependencies: list[dict[str, str]] = []
+    for spec in DEPENDENCY_SPECS:
+        available, _ = check_dependencies([spec["module_name"]], NODE_DISPLAY_NAME)
+        if not available:
+            missing_dependencies.append(spec)
+    return (not missing_dependencies), missing_dependencies
+
+
+def _resolve_local_model_dir(model_name: str = MODEL_NAME) -> str:
+    return os.path.join(folder_paths.models_dir, MODEL_ROOT_NAME, model_name)
+
+
+def _collect_model_state() -> tuple[bool, list[dict[str, str]]]:
+    model_dir = _resolve_local_model_dir()
+    if os.path.isdir(model_dir):
+        return True, []
+    return False, [REQUIRED_MODEL]
+
+
+_DEPENDENCIES_AVAILABLE, _MISSING_DEPENDENCIES = _collect_dependency_state()
+_MODELS_AVAILABLE, _MISSING_MODELS = _collect_model_state()
+_ENV_REPORT = build_dependency_model_report(
+    node_name=NODE_DISPLAY_NAME,
+    missing_dependencies=_MISSING_DEPENDENCIES,
+    missing_models=_MISSING_MODELS,
+    install_packages=[spec["package_name"] for spec in _MISSING_DEPENDENCIES],
+    description="SenseVoice 语音识别节点，支持中文、英文、日文、韩文、粤语等多语言识别。",
+)
+_HELP_NOTICE = (
+    f"{_ENV_REPORT['warning_message']}\n请参考下方依赖、模型说明和安装命令。"
+    if not _ENV_REPORT.get("available", True)
+    else ""
+)
+_DESCRIPTION_READY = """
+🎤 语音识别 (SenseVoice)
+
+基于阿里巴巴达摩院 SenseVoice 的语音识别节点。
+
+📁 模型目录：
+models/ASR/SenseVoice-small-nonx/
+
+🌏模型下载：
+https://pan.quark.cn/s/6ec846f1f58d
+
+💡 使用提示：
+- 支持中文、英文、日文、韩文、粤语等多种语言
+- 推荐使用 CPU + int8 模式获得最佳兼容性
+- 本地模型缺失时，执行阶段可尝试自动下载
+""".strip()
+DESCRIPTION = (
+    _DESCRIPTION_READY
+    if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
+    else f"{_ENV_REPORT['warning_message']}\n\n{_DESCRIPTION_READY}"
+)
 
 
 def _load_sense_voice_runtime(unique_id: Any = None) -> dict[str, Any]:
@@ -35,41 +122,31 @@ def _load_sense_voice_runtime(unique_id: Any = None) -> dict[str, Any]:
     if _DEPS.get("_sense_voice_loaded"):
         return _DEPS
 
-    python_exe = sys.executable
+    funasr = load_dependency_at_runtime(
+        module_name="funasr",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="funasr",
+        description="SenseVoice 运行时需要 funasr。",
+        extra_packages=["soundfile", "huggingface_hub"],
+        unique_id=unique_id,
+    )
+    load_dependency_at_runtime(
+        module_name="soundfile",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="soundfile",
+        description="SenseVoice 读取示例音频需要 soundfile。",
+        extra_packages=["funasr"],
+        unique_id=unique_id,
+    )
 
-    try:
-        from funasr import AutoModel
-        import soundfile  # noqa: F401
-
-        _DEPS["_sense_voice_loaded"] = True
-        _DEPS["AutoModel"] = AutoModel
-    except ImportError as exc:
-        from .common_utils.dependency_checker import print_runtime_dependency_error, get_pip_install_command_text
-
-        install_cmd = get_pip_install_command_text("funasr soundfile")
-        print_runtime_dependency_error(
-            node_name="🎤 语音识别 (SenseVoice)",
-            dependency_name="funasr / soundfile",
-            install_command=install_cmd,
-            description="该节点需要 funasr 和 soundfile Python 包才能运行",
-            extra_info=f"原始导入错误：{exc}",
-        )
-        _send_error_to_frontend(
-            unique_id,
-            error_message=f"未找到 funasr 或 soundfile 运行库。\n\n原始导入错误：{exc}",
-            install_command=install_cmd,
-        )
-        raise RuntimeError(
-            "运行时依赖缺失：funasr、soundfile。详细信息请查看控制台。"
-        ) from exc
+    _DEPS["_sense_voice_loaded"] = True
+    _DEPS["AutoModel"] = funasr.AutoModel
 
     return _DEPS
 
 
-def _send_error_to_frontend(
-    unique_id: Any, error_message: str, install_command: str = ""
-) -> None:
-    """将错误信息和安装命令发送给前端"""
+def _send_error_to_frontend(unique_id: Any, error_message: str) -> None:
+    """将普通执行错误发送给前端结果区"""
     try:
         from server import PromptServer
 
@@ -78,7 +155,6 @@ def _send_error_to_frontend(
             {
                 "node": str(unique_id),
                 "error": error_message,
-                "install_command": install_command,
             },
         )
     except Exception:
@@ -142,7 +218,14 @@ def _resolve_model_path(model_name: str, auto_download: bool, unique_id: Any) ->
         print(f"\n[GJJ] 正在下载模型: {model_name}")
 
         try:
-            from huggingface_hub import snapshot_download
+            huggingface_hub = load_dependency_at_runtime(
+                module_name="huggingface_hub",
+                node_name=NODE_DISPLAY_NAME,
+                package_name="huggingface_hub",
+                description="自动下载 SenseVoice 模型需要 huggingface_hub。",
+                unique_id=unique_id,
+            )
+            snapshot_download = huggingface_hub.snapshot_download
 
             os.makedirs(model_dir, exist_ok=True)
             snapshot_download(
@@ -152,26 +235,40 @@ def _resolve_model_path(model_name: str, auto_download: bool, unique_id: Any) ->
             )
             return model_dir
         except Exception as exc:
-            error_msg = (
-                f"❌ 模型下载失败：{exc}\n\n"
-                f"📥 请手动从以下地址下载模型：\n"
-                f"🔗 https://huggingface.co/alibaba-damo-academy/{model_name}\n\n"
-                f"📁 请将模型放置到：\n"
-                f"models/{MODEL_ROOT_NAME}/{model_name}/"
+            raise_dependency_model_error(
+                node_name=NODE_DISPLAY_NAME,
+                missing_models=[
+                    make_missing_model_spec(
+                        label=model_name,
+                        subdir=MODEL_ROOT_NAME,
+                        filename=model_name,
+                        description="模型自动下载失败，请手动补齐对应目录。",
+                    )
+                ],
+                description="SenseVoice 模型下载失败。",
+                original_error=str(exc),
+                unique_id=unique_id,
+                title="GJJ 节点模型缺失！",
+                copy_text=f"https://huggingface.co/alibaba-damo-academy/{model_name}",
+                copy_label="🌏 复制下载网址",
             )
-            _send_error_to_frontend(unique_id, error_msg)
-            raise RuntimeError(error_msg) from exc
     else:
-        error_msg = (
-            f"❌ 模型未找到：{model_name}\n\n"
-            f"📥 请从以下地址下载模型：\n"
-            f"🔗 https://huggingface.co/alibaba-damo-academy/{model_name}\n\n"
-            f"📁 请将模型放置到：\n"
-            f"models/{MODEL_ROOT_NAME}/{model_name}/\n\n"
-            f"💡 或者开启「自动下载」选项"
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_models=[
+                make_missing_model_spec(
+                    label=model_name,
+                    subdir=MODEL_ROOT_NAME,
+                    filename=model_name,
+                    description="请手动下载，或开启自动下载。",
+                )
+            ],
+            description=f"未找到 SenseVoice 模型：models/{MODEL_ROOT_NAME}/{model_name}/",
+            unique_id=unique_id,
+            title="GJJ 节点模型缺失！",
+            copy_text=f"https://huggingface.co/alibaba-damo-academy/{model_name}",
+            copy_label="🌏 复制下载网址",
         )
-        _send_error_to_frontend(unique_id, error_msg)
-        raise RuntimeError(error_msg)
 
 
 def _audio_to_numpy(audio: Any) -> tuple[np.ndarray, int]:
@@ -200,25 +297,30 @@ class GJJ_SenseVoiceASR:
     OUTPUT_NODE = True
     RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("时间戳表", "分段文本", "开始时间列表", "结束时间列表")
-    DESCRIPTION = f"""
-🎤 语音识别 (SenseVoice)
-
-基于阿里巴巴达摩院 SenseVoice 的语音识别节点。
-
-📁 模型目录：
-models/ASR/SenseVoice-small-nonx/
-
-📥 模型下载：
-🔗 https://pan.quark.cn/s/6ec846f1f58d
-
-🔧 依赖安装：
-& "{sys.executable}" -m pip install funasr soundfile -i https://pypi.tuna.tsinghua.edu.cn/simple --ignore-installed --target "{os.path.join(os.path.dirname(sys.executable), "Lib", "site-packages")}"
-
-💡 使用提示：
-- 支持中文、英文、日文、韩文、粤语等多种语言
-- 推荐使用 CPU + int8 模式获得最佳兼容性
-- 开启「自动下载」选项可自动从 HuggingFace 下载模型
-"""
+    DESCRIPTION = DESCRIPTION
+    GJJ_HELP = {
+        "title": NODE_DISPLAY_NAME,
+        "description": _DESCRIPTION_READY,
+        "notice": _HELP_NOTICE,
+        "warning_message": _ENV_REPORT["warning_message"] if not _ENV_REPORT.get("available", True) else "",
+        "install_cmd": _ENV_REPORT["install_cmd"] if not _ENV_REPORT.get("available", True) else "",
+        "copy_text": _ENV_REPORT["copy_text"] if not _ENV_REPORT.get("available", True) else "",
+        "copy_label": _ENV_REPORT["copy_label"] if not _ENV_REPORT.get("available", True) else "",
+        "model_download_url": MODEL_DOWNLOAD_URL,
+        "missing_dependencies": _MISSING_DEPENDENCIES,
+        "missing_models": _MISSING_MODELS,
+        "models": [REQUIRED_MODEL],
+        "dependencies": [
+            "funasr（SenseVoice 主运行库）",
+            "soundfile（读取示例音频）",
+            "huggingface_hub（模型自动下载时按需使用）",
+        ],
+        "tips": [
+            "推荐优先把模型放到 models/ASR/SenseVoice-small-nonx/，避免首次执行时在线下载失败。",
+            "CPU + int8 兼容性最好；CUDA 环境不完整时请先切回 CPU。",
+            "若只是测试流程，可先在 models/mp3/ 放一个示例音频供下拉框选择。",
+        ],
+    }
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -299,7 +401,13 @@ models/ASR/SenseVoice-small-nonx/
                 audio_path = os.path.join(mp3_dir, example_audio)
                 if os.path.exists(audio_path):
                     try:
-                        import soundfile as sf
+                        sf = load_dependency_at_runtime(
+                            module_name="soundfile",
+                            node_name=NODE_DISPLAY_NAME,
+                            package_name="soundfile",
+                            description="SenseVoice 读取示例音频需要 soundfile。",
+                            unique_id=unique_id,
+                        )
 
                         audio_np, sample_rate = sf.read(audio_path, always_2d=True)
                         # soundfile 返回 (samples, channels)，需要转为 (channels, samples)
@@ -436,8 +544,13 @@ models/ASR/SenseVoice-small-nonx/
             return (timestamps_json, full_text, start_times_str, end_times_str)
 
         except Exception as exc:
-            _send_status(unique_id, f"执行失败：{exc}", 1.0)
+            report = get_report_from_exception(exc)
+            if report:
+                _send_status(unique_id, "执行失败，请查看上方面板", 1.0)
+                send_dependency_model_notice(report, unique_id=unique_id)
+                raise RuntimeError(report.get("warning_message") or "运行环境缺失。") from exc
 
+            _send_status(unique_id, f"执行失败：{exc}", 1.0)
             error_msg = str(exc)
 
             # 检测是否为 CUDA 错误
@@ -456,37 +569,9 @@ models/ASR/SenseVoice-small-nonx/
                 _send_error_to_frontend(unique_id, cuda_error)
                 raise RuntimeError(cuda_error) from exc
 
-            # 检测是否为模型缺失错误
-            elif "Unable to open file" in error_msg or "model" in error_msg.lower():
-                model_error = (
-                    "🎤 SenseVoice 执行失败\n\n"
-                    "❌ 模型文件缺失\n\n"
-                    "📥 请从以下地址下载模型：\n"
-                    f"🔗 https://huggingface.co/alibaba-damo-academy/{MODEL_NAME}\n\n"
-                    f"📁 请将模型放置到：\n"
-                    f"models/{MODEL_ROOT_NAME}/{MODEL_NAME}/\n\n"
-                    "💡 提示：开启「自动下载」选项可自动从 HuggingFace 下载模型"
-                )
-                _send_error_to_frontend(unique_id, model_error)
-                raise RuntimeError(model_error) from exc
-
-            # 检测是否为依赖缺失错误
-            elif (
-                "未找到" in error_msg
-                or "ImportError" in error_msg
-                or "ModuleNotFoundError" in error_msg
-                or "No module named" in error_msg
-            ):
-                from .common_utils.dependency_checker import get_pip_install_command_text
-                install_cmd = get_pip_install_command_text("funasr soundfile")
-                _send_error_to_frontend(unique_id, error_msg, install_cmd)
-                raise
-
-            # 其他错误
-            else:
-                detailed_error = f"🎤 SenseVoice 执行失败\n\n" f"详细错误：{error_msg}"
-                _send_error_to_frontend(unique_id, detailed_error)
-                raise RuntimeError(detailed_error) from exc
+            detailed_error = f"🎤 SenseVoice 执行失败\n\n详细错误：{error_msg}"
+            _send_error_to_frontend(unique_id, detailed_error)
+            raise RuntimeError(detailed_error) from exc
 
 
 # ═══════════════════════════════════════════════

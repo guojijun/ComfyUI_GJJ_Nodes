@@ -1,0 +1,10 @@
+{
+    "main_pass": [
+        "-n",
+        "-plays", ["plays", "INT", {"default": 0, "min": 0, "max": 1000, "step": 1}],
+        "-f", "apng"
+    ],
+    "save_metadata": false,
+    "dim_alignment": 1,
+    "extension": "apng"
+}

@@ -211,13 +211,24 @@ class GJJ_CLIPPromptEncodePanel:
                         "tooltip": "翻译完成后是否卸载 Opus-MT 模型。",
                     },
                 ),
-            }
+            },
+            "optional": {
+                "positive_prompt_input": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "display_name": "正向提示词",
+                        "tooltip": "外部正向提示词输入；连接后优先使用此文本，并清空面板里的正向提示词。",
+                    },
+                ),
+            },
         }
 
     @classmethod
     def IS_CHANGED(cls, *args, **kwargs):
         keys = [
             "positive_text",
+            "positive_prompt_input",
             "negative_text",
             "zero_conditioning",
             "translation_device",
@@ -230,7 +241,8 @@ class GJJ_CLIPPromptEncodePanel:
         if clip is None:
             raise RuntimeError("请连接 CLIP 输入。")
 
-        positive_text = str(kwargs.get("positive_text", "") or "")
+        external_positive = kwargs.get("positive_prompt_input", None)
+        positive_text = str(external_positive if external_positive is not None else kwargs.get("positive_text", "") or "")
         negative_text = str(kwargs.get("negative_text", "") or "")
         zero_conditioning = bool(kwargs.get("zero_conditioning", False))
 

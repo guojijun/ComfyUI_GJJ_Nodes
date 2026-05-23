@@ -8,6 +8,15 @@ from typing import Any
 import folder_paths
 import numpy as np
 import torch
+from .common_utils.dependency_checker import (
+    build_dependency_model_report,
+    check_dependencies,
+    get_report_from_exception,
+    load_dependency_at_runtime,
+    make_missing_model_spec,
+    raise_dependency_model_error,
+    send_dependency_model_notice,
+)
 
 
 NODE_NAME = "GJJ_Qwen3ASRTextFormats"
@@ -73,6 +82,95 @@ PRECISION_OPTIONS = ["自动", "bfloat16", "float16", "float32"]
 
 _ASR_CACHE: dict[tuple[str, str, str, int, int], Any] = {}
 _ALIGNER_CACHE: dict[tuple[str, str, str], Any] = {}
+NODE_DISPLAY_NAME = "🎤 语音识别四文本TTS(Qwen3)"
+MODEL_DOWNLOAD_BASE_URL = "https://huggingface.co/Qwen"
+DEPENDENCY_SPECS = [
+    {
+        "module_name": "qwen_asr",
+        "package_name": "qwen-asr",
+        "display_name": "qwen-asr",
+        "description": "Qwen3-ASR 主运行库。",
+    },
+]
+REQUIRED_QWEN_MODELS = [
+    make_missing_model_spec(
+        label="Qwen3-ASR-1.7B",
+        subdir=MODEL_ROOT_NAME,
+        filename="Qwen3-ASR-1.7B",
+        description="推荐，高精度 ASR 模型。",
+    ),
+    make_missing_model_spec(
+        label="Qwen3-ASR-0.6B",
+        subdir=MODEL_ROOT_NAME,
+        filename="Qwen3-ASR-0.6B",
+        description="轻量 ASR 模型。",
+    ),
+    make_missing_model_spec(
+        label="Qwen3-ForcedAligner-0.6B",
+        subdir=MODEL_ROOT_NAME,
+        filename="Qwen3-ForcedAligner-0.6B",
+        description="强制对齐模型。",
+    ),
+]
+
+
+def _collect_dependency_state() -> tuple[bool, list[dict[str, str]]]:
+    missing_dependencies: list[dict[str, str]] = []
+    for spec in DEPENDENCY_SPECS:
+        available, _ = check_dependencies([spec["module_name"]], NODE_DISPLAY_NAME)
+        if not available:
+            missing_dependencies.append(spec)
+    return (not missing_dependencies), missing_dependencies
+
+
+_DEPENDENCIES_AVAILABLE, _MISSING_DEPENDENCIES = _collect_dependency_state()
+_ENV_REPORT = build_dependency_model_report(
+    node_name=NODE_DISPLAY_NAME,
+    missing_dependencies=_MISSING_DEPENDENCIES,
+    missing_models=[],
+    install_packages=[spec["package_name"] for spec in _MISSING_DEPENDENCIES],
+    description="Qwen3-ASR 一体式语音识别与强制对齐节点，输出时间戳表、分段文本、开始时间和结束时间四种文本。",
+)
+_HELP_NOTICE = (
+    f"{_ENV_REPORT['warning_message']}\n请参考下方依赖、模型说明和安装命令。"
+    if not _ENV_REPORT.get("available", True)
+    else ""
+)
+_DESCRIPTION_READY = """
+🎤 语音识别四文本TTS(Qwen3)
+
+Qwen3-ASR 一体式语音识别与强制对齐节点。
+
+📁 模型目录：
+models/Qwen3-ASR/
+
+🌏模型下载：
+https://huggingface.co/Qwen
+
+💡 使用提示：
+- 支持 28+ 种语言自动识别
+- 内置强制对齐，输出时间戳表、分段文本、开始时间和结束时间
+- 支持上下文提示，适合 Wan/LTX 等视频字幕时序场景
+""".strip()
+DESCRIPTION = (
+    _DESCRIPTION_READY
+    if _DEPENDENCIES_AVAILABLE
+    else f"{_ENV_REPORT['warning_message']}\n\n{_DESCRIPTION_READY}"
+)
+
+
+def _send_error_to_frontend(unique_id: Any, error_message: str) -> None:
+    if not unique_id:
+        return
+    try:
+        from server import PromptServer
+
+        PromptServer.instance.send_sync("gjj_qwen3_error", {
+            "node": str(unique_id),
+            "error": error_message,
+        })
+    except Exception:
+        pass
 
 
 def _send_status(unique_id: Any, text: str, progress: float | None = None) -> None:
@@ -300,13 +398,14 @@ def _find_local_model_dir(model_name: str, kind: str) -> str | None:
 
 
 def _download_model(model_name: str, repos: dict[str, str], unique_id: Any = None) -> str:
-    try:
-        from huggingface_hub import snapshot_download
-    except Exception as exc:
-        raise RuntimeError(
-            "未找到 huggingface_hub，无法自动下载 Qwen3-ASR 模型。"
-            "请先把模型放到 ComfyUI/models/Qwen3-ASR，或在当前 ComfyUI Python 环境安装 huggingface_hub。"
-        ) from exc
+    huggingface_hub = load_dependency_at_runtime(
+        module_name="huggingface_hub",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="huggingface_hub",
+        description="自动下载 Qwen3-ASR 模型需要 huggingface_hub。",
+        unique_id=unique_id,
+    )
+    snapshot_download = huggingface_hub.snapshot_download
 
     resolved_name = _resolve_known_model_name(model_name, repos)
     target_dir = os.path.join(_model_root(), resolved_name)
@@ -318,7 +417,22 @@ def _download_model(model_name: str, repos: dict[str, str], unique_id: Any = Non
         local_dir_use_symlinks=False,
     )
     if not _is_model_dir(target_dir):
-        raise RuntimeError(f"模型下载后仍不完整：{target_dir}")
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_models=[
+                make_missing_model_spec(
+                    label=resolved_name,
+                    subdir=MODEL_ROOT_NAME,
+                    filename=resolved_name,
+                    description="模型下载后目录仍不完整，请重新下载或手动补齐模型文件。",
+                )
+            ],
+            description=f"模型下载后仍不完整：{target_dir}",
+            unique_id=unique_id,
+            title="GJJ 节点模型缺失！",
+            copy_text=f"https://huggingface.co/{repo_id}",
+            copy_label="🌏 复制下载网址",
+        )
     return target_dir
 
 
@@ -330,59 +444,34 @@ def _resolve_model_dir(model_name: str, kind: str, auto_download: bool, unique_i
     if auto_download:
         return _download_model(model_name, repos, unique_id)
     root = os.path.join(folder_paths.models_dir, MODEL_ROOT_NAME)
-    raise RuntimeError(f"未找到本地模型：{model_name}。请放到 {root}，或开启自动下载模型。")
+    raise_dependency_model_error(
+        node_name=NODE_DISPLAY_NAME,
+        missing_models=[
+            make_missing_model_spec(
+                label=str(model_name or "Qwen3-ASR 模型"),
+                subdir=MODEL_ROOT_NAME,
+                filename=str(model_name or ""),
+                description=f"请放到 {root}，或开启自动下载模型。",
+            )
+        ],
+        description=f"未找到本地模型：{model_name}",
+        unique_id=unique_id,
+        title="GJJ 节点模型缺失！",
+        copy_text=f"https://huggingface.co/{repos.get(_resolve_known_model_name(model_name, repos), '')}",
+        copy_label="🌏 复制下载网址",
+    )
 
 
-def _load_qwen_runtime():
-    try:
-        from qwen_asr import Qwen3ASRModel, Qwen3ForcedAligner
-
-        return Qwen3ASRModel, Qwen3ForcedAligner
-    except Exception as exc:
-        # 获取当前 Python 解释器的实际路径
-        import sys
-        python_executable = sys.executable
-
-        # ANSI 颜色代码（用于控制台彩色输出）
-        RED = '\033[91m'
-        YELLOW = '\033[93m'
-        CYAN = '\033[96m'
-        GREEN = '\033[92m'
-        RESET = '\033[0m'
-        BOLD = '\033[1m'
-
-        # 构建安装命令
-        from .common_utils.dependency_checker import get_pip_install_command_text
-        install_cmd = get_pip_install_command_text("qwen-asr")
-
-        # 在控制台打印美观的错误提示（更加突出）
-        print(f"\n{RED}{'=' * 80}{RESET}")
-        print(f"{RED}{BOLD}  GJJ 节点运行时依赖缺失！{RESET}")
-        print(f"{RED}{'=' * 80}{RESET}")
-        print(f"{YELLOW}[GJJ] {BOLD}节点:{RESET} {CYAN}语音识别四文本TTS(Qwen3){RESET}")
-        print(f"{YELLOW}[GJJ] {BOLD}缺失依赖:{RESET} {RED}{BOLD}qwen-asr{RESET}")
-        print(f"{YELLOW}[GJJ]{RESET} 该节点需要 qwen-asr Python 包才能运行。\n")
-        print(f"{YELLOW}{BOLD} 快速安装命令:{RESET}")
-        print(f"{GREEN}{BOLD}  {install_cmd}{RESET}\n")
-        print(f"{YELLOW}{BOLD} 提示:{RESET} 安装后请重启 ComfyUI 服务器")
-        print(f"{RED}{'=' * 80}{RESET}\n")
-
-        raise RuntimeError(
-            "\n 未找到 qwen-asr 运行库。\n"
-            "\n"
-            "这个 GJJ 节点不依赖原 Comfyui_SynVow_Qwen3ASR 插件，\n"
-            "但 Qwen3-ASR 模型本身需要 qwen-asr Python 包。\n"
-            "\n"
-            " 必需依赖（请安装）：\n"
-            "  • qwen-asr (Qwen3-ASR 语音识别运行库)\n"
-            "\n"
-            "🔧 快速安装命令（使用实际 Python 路径）：\n"
-            f"{install_cmd}\n"
-            "\n"
-            f"原始导入错误：{exc}\n"
-            "\n"
-            " 提示：安装后请重启 ComfyUI 服务器。"
-        ) from exc
+def _load_qwen_runtime(unique_id: Any = None):
+    qwen_asr = load_dependency_at_runtime(
+        module_name="qwen_asr",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="qwen-asr",
+        description="Qwen3-ASR 运行时依赖 qwen-asr。",
+        extra_packages=["huggingface_hub", "soundfile", "av"],
+        unique_id=unique_id,
+    )
+    return qwen_asr.Qwen3ASRModel, qwen_asr.Qwen3ForcedAligner
 
 
 def _resolve_device_map() -> str:
@@ -417,12 +506,13 @@ def _load_asr_model(
     device_map: str,
     max_inference_batch_size: int,
     max_new_tokens: int,
+    unique_id: Any = None,
 ):
     cache_key = (model_dir, dtype_name, device_map, int(max_inference_batch_size), int(max_new_tokens))
     if cache_key in _ASR_CACHE:
         return _ASR_CACHE[cache_key]
 
-    Qwen3ASRModel, _ = _load_qwen_runtime()
+    Qwen3ASRModel, _ = _load_qwen_runtime(unique_id)
     model = Qwen3ASRModel.from_pretrained(
         model_dir,
         dtype=_dtype_from_name(dtype_name),
@@ -434,12 +524,12 @@ def _load_asr_model(
     return model
 
 
-def _load_aligner_model(model_dir: str, dtype_name: str, device_map: str):
+def _load_aligner_model(model_dir: str, dtype_name: str, device_map: str, unique_id: Any = None):
     cache_key = (model_dir, dtype_name, device_map)
     if cache_key in _ALIGNER_CACHE:
         return _ALIGNER_CACHE[cache_key]
 
-    _, Qwen3ForcedAligner = _load_qwen_runtime()
+    _, Qwen3ForcedAligner = _load_qwen_runtime(unique_id)
     aligner = Qwen3ForcedAligner.from_pretrained(
         model_dir,
         dtype=_dtype_from_name(dtype_name),
@@ -564,34 +654,7 @@ class GJJ_Qwen3ASRTextFormats:
     CATEGORY = "GJJ/Audio"
     FUNCTION = "transcribe_and_align"
     OUTPUT_NODE = True
-    DESCRIPTION = """Qwen3-ASR 一体式语音识别与强制对齐节点。输入 ComfyUI 音频，输出时间戳表、分段文本、开始时间和结束时间四种文本。
-
-📦 所需模型：
-  • ASR 模型目录: models/Qwen3-ASR/
-    - Qwen3-ASR-1.7B (推荐，精度高)
-    - Qwen3-ASR-0.6B (轻量，速度快)
-  • 对齐模型目录: models/Qwen3-ASR/
-    - Qwen3-ForcedAligner-0.6B
-  • 自动下载: 开启后首次执行时从 HuggingFace 下载（需 huggingface_hub）
-
-🔧 Python 依赖：
-  • qwen-asr (必需，Qwen3-ASR 运行时库)
-  • huggingface_hub (可选，用于自动下载模型)
-  • soundfile, torchaudio, librosa, av (音频加载，至少安装其一)
-  • 安装命令: pip install qwen-asr huggingface_hub soundfile av
-
-✅ 优点：
-  • 支持 28+ 种语言自动识别
-  • 内置强制对齐，生成精确时间戳
-  • 支持上下文提示，提升专有名词识别准确率
-  • 多种文本输出格式，适配 Wan/LTX 等视频生成节点
-  • 支持 WMA/MP3/WAV/FLAC 等多种音频格式
-
-⚠️ 缺点：
-  • 模型较大（1.7B 约 3.4GB，0.6B 约 1.2GB）
-  • 需要较多显存（建议 ≥8GB）
-  • 推理速度较慢（长音频可能需要数分钟）
-  • 依赖 qwen-asr 包，安装可能遇到兼容性问题"""
+    DESCRIPTION = DESCRIPTION
     SEARCH_ALIASES = ["qwen3 asr", "qwen asr", "语音识别", "音频转文字", "强制对齐", "字幕时间戳"]
     RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("时间戳表", "分段文本", "开始时间列表", "结束时间列表")
@@ -601,6 +664,29 @@ class GJJ_Qwen3ASRTextFormats:
         "每个片段的开始时间，输出为 [1,2,] 形式的数组字符串。",
         "每个片段的结束时间，输出为 [1,2,] 形式的数组字符串。",
     )
+    GJJ_HELP = {
+        "title": NODE_DISPLAY_NAME,
+        "description": _DESCRIPTION_READY,
+        "notice": _HELP_NOTICE,
+        "warning_message": _ENV_REPORT["warning_message"] if not _ENV_REPORT.get("available", True) else "",
+        "install_cmd": _ENV_REPORT["install_cmd"] if not _ENV_REPORT.get("available", True) else "",
+        "copy_text": _ENV_REPORT["copy_text"] if not _ENV_REPORT.get("available", True) else "",
+        "copy_label": _ENV_REPORT["copy_label"] if not _ENV_REPORT.get("available", True) else "",
+        "model_download_url": MODEL_DOWNLOAD_BASE_URL,
+        "missing_dependencies": _MISSING_DEPENDENCIES,
+        "missing_models": [],
+        "dependencies": [
+            "qwen-asr（主识别与强制对齐运行库）",
+            "huggingface_hub（自动下载模型时按需使用）",
+            "soundfile / torchaudio / av / librosa（音频解码，至少可用一套）",
+        ],
+        "models": REQUIRED_QWEN_MODELS,
+        "tips": [
+            "推荐优先准备 Qwen3-ASR-1.7B 和 Qwen3-ForcedAligner-0.6B。",
+            "长音频或显存不足时可降低推理批量，或切回 CPU。",
+            "示例音频支持多种格式；若某种格式解码失败，可改用外部 AUDIO 输入。",
+        ],
+    }
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -767,6 +853,7 @@ class GJJ_Qwen3ASRTextFormats:
                 device_map,
                 int(max_inference_batch_size),
                 int(max_new_tokens),
+                unique_id,
             )
             _update_progress(pbar, 2, 5)
 
@@ -792,7 +879,7 @@ class GJJ_Qwen3ASRTextFormats:
             resolved_align_language = _resolve_align_language(detected_language, align_language, asr_language)
             _send_status(unique_id, f"4/5 正在执行强制对齐：{resolved_align_language}...", 0.72)
             aligner_dir = _resolve_model_dir(aligner_model_name, "aligner", bool(auto_download), unique_id)
-            aligner = _load_aligner_model(aligner_dir, dtype_name, device_map)
+            aligner = _load_aligner_model(aligner_dir, dtype_name, device_map, unique_id)
             align_results = aligner.align(
                 audio=(waveform, sample_rate),
                 text=full_text,
@@ -832,85 +919,59 @@ class GJJ_Qwen3ASRTextFormats:
                 "result": (timestamps, text_list, start_times, end_times),
             }
         except Exception as exc:
+            report = get_report_from_exception(exc)
+            if report:
+                _send_status(unique_id, "执行失败，请查看上方面板", 1.0)
+                send_dependency_model_notice(report, unique_id=unique_id)
+                raise RuntimeError(report.get("warning_message") or "运行环境缺失。") from exc
+
             _send_status(unique_id, f"执行失败：{exc}", 1.0)
+            error_msg = str(exc)
 
-            # 如果原始错误包含详细安装命令（来自 _load_qwen_runtime），则保留它
-            # 否则包装成标准格式
-            if isinstance(exc, RuntimeError) and "未找到 qwen-asr 运行库" in str(exc):
-                # 提取安装命令
-                error_str = str(exc)
-                install_command = ""
-                # 尝试从错误信息中提取安装命令（包含 pip install 的行）
-                import re
-                match = re.search(r'(.+?python\.exe.*?pip install qwen-asr.*?)\n', error_str)
-                if match:
-                    install_command = match.group(1).strip()
+            # 检测是否为 CUDA 错误，如果是则尝试自动降级到 CPU
+            if ("CUDA error" in error_msg or "cuda" in error_msg.lower()) and torch.cuda.is_available():
+                import warnings
+                warnings.warn(
+                    f"⚠️ 检测到 CUDA 错误，正在自动切换到 CPU 模式...\n"
+                    f"原始错误：{exc}"
+                )
 
-                # 发送错误事件到前端
                 try:
-                    from server import PromptServer
-                    PromptServer.instance.send_sync("gjj_qwen3_error", {
-                        "node": str(unique_id),
-                        "error": error_str,
-                        "install_command": install_command,
-                    })
-                except Exception:
-                    pass
+                    _send_status(unique_id, "⚠️ CUDA 错误，正在切换到 CPU 模式重试...", 0.1)
 
-                # 抛出简洁的错误信息（在默认错误区域显示）
-                raise RuntimeError("运行时依赖缺失：qwen-asr。详细信息请查看节点前端面板。") from exc
-            else:
-                # 其他错误使用标准格式
-                error_msg = str(exc)
+                    original_device_map = _resolve_device_map
 
-                # 检测是否为 CUDA 错误，如果是则尝试自动降级到 CPU
-                if ("CUDA error" in error_msg or "cuda" in error_msg.lower()) and torch.cuda.is_available():
-                    # 记录警告信息
-                    import warnings
-                    warnings.warn(
-                        f"⚠️ 检测到 CUDA 错误，正在自动切换到 CPU 模式...\n"
-                        f"原始错误：{exc}"
-                    )
+                    def _cpu_device_map():
+                        return "cpu"
 
-                    # 尝试使用 CPU 重新执行
-                    try:
-                        _send_status(unique_id, "⚠️ CUDA 错误，正在切换到 CPU 模式重试...", 0.1)
+                    import gjj_qwen3_asr_text_formats as module
+                    module._resolve_device_map = _cpu_device_map
 
-                        # 临时修改 device_map 为 cpu
-                        original_device_map = _resolve_device_map
-                        def _cpu_device_map():
-                            return "cpu"
+                    _send_status(unique_id, "💡 请将节点中的「设备」参数改为 cpu，然后重新运行", 1.0)
 
-                        # 替换函数
-                        import gjj_qwen3_asr_text_formats as module
-                        module._resolve_device_map = _cpu_device_map
-
-                        # 重新执行（这里只是提示用户，实际重试需要用户手动操作）
-                        _send_status(unique_id, "💡 请将节点中的「设备」参数改为 cpu，然后重新运行", 1.0)
-
-                        raise RuntimeError(
-                            "🎤 Qwen3-ASR 四文本单节点执行失败（CUDA 兼容性错误）\n"
-                            f"ASR模型：{asr_model_name}\n"
-                            f"对齐模型：{aligner_model_name}\n\n"
-                            "❌ CUDA 兼容性错误：您的 GPU 架构与当前 PyTorch/CUDA 版本不兼容。\n\n"
-                            "✅ 已为您准备解决方案：\n"
-                            "1. 【推荐】将节点中的「设备」参数改为 cpu，然后重新运行\n"
-                            "2. 更新 PyTorch 到最新版本以支持您的 GPU\n"
-                            "3. 如果使用的是较新的 GPU（如 RTX 40/50 系列），请确保安装了支持该架构的 PyTorch\n\n"
-                            f"详细错误：{exc}"
-                        ) from exc
-                    finally:
-                        # 恢复原函数
-                        import gjj_qwen3_asr_text_formats as module
-                        module._resolve_device_map = original_device_map
-                else:
-                    # 其他错误使用标准格式
                     raise RuntimeError(
-                        "🎤 Qwen3-ASR 四文本单节点执行失败。\n"
+                        "🎤 Qwen3-ASR 四文本单节点执行失败（CUDA 兼容性错误）\n"
                         f"ASR模型：{asr_model_name}\n"
                         f"对齐模型：{aligner_model_name}\n\n"
+                        "❌ CUDA 兼容性错误：您的 GPU 架构与当前 PyTorch/CUDA 版本不兼容。\n\n"
+                        "✅ 已为您准备解决方案：\n"
+                        "1. 【推荐】将节点中的「设备」参数改为 cpu，然后重新运行\n"
+                        "2. 更新 PyTorch 到最新版本以支持您的 GPU\n"
+                        "3. 如果使用的是较新的 GPU（如 RTX 40/50 系列），请确保安装了支持该架构的 PyTorch\n\n"
                         f"详细错误：{exc}"
                     ) from exc
+                finally:
+                    import gjj_qwen3_asr_text_formats as module
+                    module._resolve_device_map = original_device_map
+            else:
+                detailed_error = (
+                    "🎤 Qwen3-ASR 四文本单节点执行失败。\n"
+                    f"ASR模型：{asr_model_name}\n"
+                    f"对齐模型：{aligner_model_name}\n\n"
+                    f"详细错误：{exc}"
+                )
+                _send_error_to_frontend(unique_id, detailed_error)
+                raise RuntimeError(detailed_error) from exc
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_Qwen3ASRTextFormats}

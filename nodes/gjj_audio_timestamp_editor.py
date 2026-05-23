@@ -11,13 +11,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import folder_paths
-import numpy as np
 import torch
 
-# 步骤1: 导入公共依赖检查函数
 try:
 	from .common_utils.dependency_checker import (
 		build_dependency_model_report,
+		check_dependencies,
 		load_dependency_at_runtime,
 		print_dependency_model_report,
 		send_dependency_model_notice,
@@ -25,19 +24,11 @@ try:
 except ImportError:
 	from common_utils.dependency_checker import (
 		build_dependency_model_report,
+		check_dependencies,
 		load_dependency_at_runtime,
 		print_dependency_model_report,
 		send_dependency_model_notice,
 	)
-
-# 步骤2: 依赖可用性检查
-try:
-	import soundfile as sf
-	_DEPENDENCIES_AVAILABLE = True
-	_IMPORT_ERROR = None
-except ImportError as exc:
-	_DEPENDENCIES_AVAILABLE = False
-	_IMPORT_ERROR = str(exc)
 
 
 NODE_NAME = "GJJ_AudioTimestampEditor"
@@ -52,8 +43,28 @@ DEPENDENCY_SPECS = [
 		"display_name": "soundfile",
 		"description": "可视化音频分段编辑器需要 soundfile 读取、保存和预览音频文件。",
 	},
+	{
+		"module_name": "numpy",
+		"package_name": "numpy",
+		"display_name": "numpy",
+		"description": "可视化音频分段编辑器需要 numpy 处理波形数组并生成预览数据。",
+	},
 ]
-_MISSING_DEPENDENCIES = [] if _DEPENDENCIES_AVAILABLE else DEPENDENCY_SPECS
+
+
+def _collect_dependency_state() -> tuple[bool, list[dict[str, str]], str]:
+	missing_dependencies: list[dict[str, str]] = []
+	messages: list[str] = []
+	for spec in DEPENDENCY_SPECS:
+		available, message = check_dependencies([spec["module_name"]], NODE_DISPLAY_NAME)
+		if not available:
+			missing_dependencies.append(spec)
+			if message:
+				messages.append(message)
+	return (not missing_dependencies), missing_dependencies, "\n".join(messages)
+
+
+_DEPENDENCIES_AVAILABLE, _MISSING_DEPENDENCIES, _IMPORT_ERROR = _collect_dependency_state()
 _MODELS_AVAILABLE = True
 _MISSING_MODELS: list[dict[str, str]] = []
 _DEPENDENCY_REPORT = build_dependency_model_report(
@@ -63,6 +74,8 @@ _DEPENDENCY_REPORT = build_dependency_model_report(
 	install_packages=[spec["package_name"] for spec in _MISSING_DEPENDENCIES],
 	original_error=_IMPORT_ERROR or "",
 )
+_numpy = None
+_soundfile = None
 
 
 # V19：后端缓存。避免前端为了刷新波形/下游预览而重复请求上游时，
@@ -261,8 +274,34 @@ def _segments_from_prompt_inputs(prompt: Any, unique_id: Any) -> list[dict[str, 
 	return []
 
 
-def audio_to_waveform_data(audio: dict[str, Any]) -> tuple[np.ndarray, int]:
+def _load_numpy_runtime():
+	global _numpy
+	if _numpy is None:
+		_numpy = load_dependency_at_runtime(
+			"numpy",
+			NODE_DISPLAY_NAME,
+			package_name="numpy",
+			description="音频分段编辑器需要 numpy 处理波形数组。",
+		)
+	return _numpy
+
+
+def _load_soundfile_runtime(unique_id: Any = None):
+	global _soundfile
+	if _soundfile is None:
+		_soundfile = load_dependency_at_runtime(
+			"soundfile",
+			NODE_DISPLAY_NAME,
+			package_name="soundfile",
+			description="音频文件读写库",
+			unique_id=unique_id,
+		)
+	return _soundfile
+
+
+def audio_to_waveform_data(audio: dict[str, Any]) -> tuple[Any, int]:
 	"""将ComfyUI音频对象转换为numpy波形数据和采样率"""
+	np = _load_numpy_runtime()
 	waveform = audio.get("waveform")
 	sample_rate = int(audio.get("sample_rate", 44100))
 
@@ -278,7 +317,7 @@ def audio_to_waveform_data(audio: dict[str, Any]) -> tuple[np.ndarray, int]:
 	return audio_np, sample_rate
 
 
-def save_audio_for_preview(audio_np: np.ndarray, sample_rate: int, prompt: Any = None, unique_id: Any = None) -> tuple[str, str]:
+def save_audio_for_preview(audio_np: Any, sample_rate: int, prompt: Any = None, unique_id: Any = None) -> tuple[str, str]:
 	"""保存音频到临时文件用于预览。
 
 	注意：文件名必须每次执行都变化。
@@ -287,11 +326,7 @@ def save_audio_for_preview(audio_np: np.ndarray, sample_rate: int, prompt: Any =
 	"""
 	import time
 
-	sf = load_dependency_at_runtime(
-		"soundfile",
-		"GJJ · ✂️ 音频分段编辑器",
-		description="音频文件读写库"
-	)
+	sf = _load_soundfile_runtime(unique_id=unique_id)
 
 	output_dir = folder_paths.get_temp_directory()
 	node_part = str(unique_id if unique_id is not None else hash(str(prompt)))
@@ -804,11 +839,7 @@ class GJJ_AudioSegmentEditor:
 		import subprocess
 		import tempfile
 
-		sf = load_dependency_at_runtime(
-			"soundfile",
-			"GJJ · ✂️ 音频分段编辑器",
-			description="音频文件读写库"
-		)
+		sf = _load_soundfile_runtime()
 
 		# 在多个目录中查找文件
 		search_dirs = [

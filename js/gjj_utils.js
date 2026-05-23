@@ -41,83 +41,152 @@ export class GJJ_Utils {
      * @param {string[]} colorWidgetNames - 需要设置颜色选择器的 widget 名称数组
      */
     static setupColorPickers(node, colorWidgetNames) {
-        if (node.__gjjColorPickersSetup) return;
-        node.__gjjColorPickersSetup = true;
+        if (!node || !Array.isArray(colorWidgetNames) || !colorWidgetNames.length) return false;
 
-        // 找到颜色相关的 widgets
-        const colorWidgets = [];
-        (node.widgets || []).forEach(widget => {
-            if (colorWidgetNames.includes(widget.name)) {
-                colorWidgets.push(widget);
+        const intToHex = (value) => {
+            const numeric = Math.max(0, Math.min(0xFFFFFF, Number.parseInt(value, 10) || 0));
+            return `#${numeric.toString(16).padStart(6, "0")}`.toUpperCase();
+        };
+
+        const hexToInt = (value) => {
+            const text = String(value || "").trim();
+            if (!/^#[0-9a-fA-F]{6}$/.test(text)) return 0;
+            return Number.parseInt(text.slice(1), 16);
+        };
+
+        const normalizeColor = (value) => {
+            if (typeof value === "number" && Number.isFinite(value)) return intToHex(value);
+            const text = String(value || "").trim();
+            if (/^#[0-9a-fA-F]{6}$/.test(text)) return text.toUpperCase();
+            if (/^#[0-9a-fA-F]{8}$/.test(text)) return text.slice(0, 7).toUpperCase();
+            return "#000000";
+        };
+
+        const targetNames = colorWidgetNames.map((name) => String(name || ""));
+        const isTargetColorWidget = (widget) => {
+            if (!widget) return false;
+            const searchable = [
+                widget.name,
+                widget.label,
+                widget.localized_name,
+                widget.options?.display_name,
+            ].map((value) => String(value || ""));
+            return searchable.some((value) => targetNames.includes(value));
+        };
+
+        const colorWidgets = (node.widgets || []).filter(isTargetColorWidget);
+        if (!colorWidgets.length) {
+            node.__gjjColorPickersSetup = false;
+            return false;
+        }
+
+        let patchedCount = 0;
+        colorWidgets.forEach((widget) => {
+            if (!widget || widget.__gjjColorPickerPatched) return;
+
+            const numericColor = widget.options?.display === "color" || typeof widget.value === "number";
+            widget.__gjjColorPickerPatched = true;
+            widget.type = "color";
+            widget.options ||= {};
+            if (numericColor) {
+                widget.value = Math.max(0, Math.min(0xFFFFFF, Number.parseInt(widget.value, 10) || 0));
+            } else {
+                widget.value = normalizeColor(widget.value);
             }
-        });
-        
-        // 为每个颜色 widget 添加颜色选择器功能
-        colorWidgets.forEach(widget => {
-            if (!widget) return;
-            
-            // 重写绘制方法，显示颜色预览
-            widget.draw = function(ctx, node, widgetWidth, widgetY, height) {
-                const border = 3;
-                const x = 10;
-                const y = widgetY;
-                const w = widgetWidth - 20;
-                const h = height - 6;
-                
-                // 绘制背景
-                ctx.fillStyle = '#000';
-                ctx.fillRect(x, y, w, h);
-                
-                // 绘制颜色预览
-                const color = this.value || '#000000';
-                ctx.fillStyle = color;
-                ctx.fillRect(x + border, y + border, w - border * 2, h - border * 2);
-                
-                // 绘制边框
-                ctx.strokeStyle = '#555';
-                ctx.lineWidth = 1;
-                ctx.strokeRect(x, y, w, h);
-                
-                // 保存位置用于点击检测
-                this.last_y = y;
-            };
-            
-            // 鼠标点击事件 - 使用浏览器原生颜色选择器
-            widget.mouse = function(e, pos, node) {
-                if (e.type === 'pointerdown' || e.type === 'mousedown') {
-                    const rect = [this.last_y, this.last_y + 32];
-                    if (pos[1] > rect[0] && pos[1] < rect[1]) {
-                        // 创建原生颜色选择器
-                        const picker = document.createElement('input');
-                        picker.type = 'color';
-                        picker.value = this.value || '#000000';
-                        
-                        // 定位到屏幕外
-                        picker.style.position = 'absolute';
-                        picker.style.left = '-9999px';
-                        picker.style.top = '-9999px';
-                        
-                        document.body.appendChild(picker);
-                        
-                        // 监听颜色变化
-                        picker.addEventListener('change', () => {
-                            this.value = picker.value;
-                            node.graph._version++;
-                            node.setDirtyCanvas(true, true);
-                            picker.remove();
-                        });
-                        
-                        // 触发点击
-                        picker.click();
-                    }
+
+            const originalDraw = typeof widget.draw === "function" ? widget.draw : null;
+            const originalMouse = typeof widget.mouse === "function" ? widget.mouse : null;
+            const originalComputeSize = typeof widget.computeSize === "function" ? widget.computeSize : null;
+
+            widget.draw = function(ctx, nodeRef, widgetWidth, widgetY, height) {
+                if (originalDraw && !numericColor) {
+                    try {
+                        originalDraw.apply(this, arguments);
+                    } catch (_) {}
                 }
+
+                const color = normalizeColor(this.value);
+                const padding = 4;
+                const label = String(this.label || this.options?.display_name || this.name || "");
+                const labelWidth = numericColor ? Math.min(96, Math.max(54, ctx.measureText(label).width + 16)) : 0;
+                const colorBoxX = numericColor ? labelWidth : widgetWidth - Math.max(16, height - padding * 2) - padding;
+                const colorBoxY = widgetY + padding;
+                const colorBoxW = numericColor ? Math.max(30, widgetWidth - labelWidth - padding * 2) : Math.max(16, height - padding * 2);
+                const colorBoxH = Math.max(16, height - padding * 2);
+
+                if (numericColor) {
+                    ctx.fillStyle = "#9ca3af";
+                    ctx.textAlign = "left";
+                    ctx.textBaseline = "middle";
+                    ctx.font = "12px sans-serif";
+                    ctx.fillText(label, 0, widgetY + height * 0.5);
+                }
+
+                ctx.fillStyle = color;
+                ctx.strokeStyle = "#666";
+                ctx.lineWidth = 1;
+                ctx.fillRect(colorBoxX, colorBoxY, colorBoxW, colorBoxH);
+                ctx.strokeRect(colorBoxX, colorBoxY, colorBoxW, colorBoxH);
+
+                this.last_y = widgetY;
             };
-            
-            // 设置 widget 尺寸
+
+            widget.mouse = function(e, pos, nodeRef) {
+                if (e.type !== "pointerdown" && e.type !== "mousedown") {
+                    return originalMouse ? originalMouse.apply(this, arguments) : false;
+                }
+
+                const widgetY = Number(this.last_y || 0);
+                const widgetHeight = 32;
+                if (!(pos?.[1] > widgetY && pos?.[1] < widgetY + widgetHeight)) {
+                    return originalMouse ? originalMouse.apply(this, arguments) : false;
+                }
+
+                const picker = document.createElement("input");
+                picker.type = "color";
+                picker.value = normalizeColor(this.value);
+                picker.style.position = "absolute";
+                picker.style.left = "-9999px";
+                picker.style.top = "-9999px";
+                document.body.appendChild(picker);
+
+                const cleanup = () => {
+                    try {
+                        picker.remove();
+                    } catch (_) {}
+                };
+
+                picker.addEventListener("input", () => {
+                    this.value = numericColor ? hexToInt(picker.value) : normalizeColor(picker.value);
+                    try {
+                        this.callback?.(this.value);
+                    } catch (_) {}
+                    nodeRef?.graph && (nodeRef.graph._version += 1);
+                    GJJ_Utils.refreshNode(nodeRef);
+                });
+                picker.addEventListener("change", cleanup, { once: true });
+                picker.addEventListener("blur", cleanup, { once: true });
+                picker.click();
+                return true;
+            };
+
             widget.computeSize = function(width) {
+                if (originalComputeSize) {
+                    try {
+                        const size = originalComputeSize.call(this, width);
+                        if (Array.isArray(size) && size.length >= 2) {
+                            return [size[0], Math.max(32, Number(size[1] || 0))];
+                        }
+                    } catch (_) {}
+                }
                 return [width, 32];
             };
+
+            patchedCount += 1;
         });
+
+        node.__gjjColorPickersSetup = colorWidgets.length > 0;
+        return colorWidgets.length > 0;
     }
 
     /**
@@ -256,6 +325,188 @@ export class GJJ_Utils {
     static getFirstValue(arr) {
         if (Array.isArray(arr) && arr.length > 0) return arr[0];
         return arr;
+    }
+
+    /**
+     * 复制文本到剪贴板，优先使用 navigator.clipboard，失败时回退到 textarea 方案。
+     * @param {string} text - 待复制文本
+     * @returns {Promise<boolean>} 是否复制成功
+     */
+    static async copyTextToClipboard(text) {
+        const value = String(text || "").trim();
+        if (!value) return false;
+        try {
+            if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(value);
+                return true;
+            }
+        } catch (_) {
+            // 继续走 textarea 回退方案
+        }
+        try {
+            const textarea = document.createElement("textarea");
+            textarea.value = value;
+            textarea.style.position = "fixed";
+            textarea.style.left = "-9999px";
+            textarea.style.top = "-9999px";
+            document.body.appendChild(textarea);
+            textarea.focus();
+            textarea.select();
+            try {
+                return !!document.execCommand("copy");
+            } finally {
+                textarea.remove();
+            }
+        } catch (_) {
+            return false;
+        }
+    }
+
+    /**
+     * 统一生成依赖安装/下载按钮文案。
+     * @param {string} copyText - 实际可复制内容
+     * @param {string} [copyLabel=""] - 后端指定文案
+     * @returns {string} 按钮文案
+     */
+    static getDependencyCopyLabel(copyText, copyLabel = "") {
+        const text = String(copyText || "").trim();
+        if (!text) return "";
+        if (copyLabel) return String(copyLabel).trim();
+        return /^https?:\/\//i.test(text) ? "🌏 复制下载网址" : "📋 复制安装命令";
+    }
+
+    /**
+     * 统一设置“复制安装命令 / 复制下载网址”按钮的样式、文案和点击行为。
+     * @param {HTMLButtonElement} button - 目标按钮
+     * @param {object} [options={}] - 配置项
+     * @param {string} [options.copyText=""] - 待复制文本
+     * @param {string} [options.copyLabel=""] - 按钮文案覆盖
+     * @param {boolean} [options.visible] - 是否显示按钮；默认有文本时显示
+     * @param {boolean} [options.compact=false] - 是否使用紧凑按钮样式
+     * @param {string} [options.emptyLabel="📋 复制安装命令"] - 无文本时占位文案
+     * @param {string} [options.emptyTitle="复制安装命令或模型下载网址"] - 无文本时提示
+     * @param {number} [options.successDuration=1200] - 成功提示持续毫秒
+     * @param {Function} [options.onCopied] - 复制成功回调
+     * @param {Function} [options.onFailed] - 复制失败回调
+     * @returns {HTMLButtonElement|null} 配置后的按钮
+     */
+    static applyDependencyCopyButton(button, options = {}) {
+        if (!button) return null;
+
+        const {
+            copyText = "",
+            copyLabel = "",
+            visible = null,
+            compact = false,
+            emptyLabel = "📋 复制安装命令",
+            emptyTitle = "复制安装命令或模型下载网址",
+            successDuration = 1200,
+            onCopied = null,
+            onFailed = null,
+        } = options || {};
+
+        const text = String(copyText || "").trim();
+        const label = text ? GJJ_Utils.getDependencyCopyLabel(text, copyLabel) : emptyLabel;
+
+        button.__gjj_dependency_copy_text = text;
+        button.__gjj_dependency_copy_label = String(copyLabel || "").trim();
+        button.__gjj_dependency_copy_restore_label = label;
+        button.__gjj_dependency_copy_compact = !!compact;
+        button.__gjj_dependency_copy_success_duration = Math.max(0, Number(successDuration) || 1200);
+        button.__gjj_dependency_copy_on_copied = typeof onCopied === "function" ? onCopied : null;
+        button.__gjj_dependency_copy_on_failed = typeof onFailed === "function" ? onFailed : null;
+
+        const baseStyle = compact
+            ? [
+                "display:inline-flex",
+                "align-items:center",
+                "justify-content:center",
+                "gap:4px",
+                "box-sizing:border-box",
+                "padding:4px 8px",
+                "border:1px solid rgba(255,180,180,0.42)",
+                "border-radius:6px",
+                "background:#b33232",
+                "color:#fff",
+                "font-size:11px",
+                "font-weight:700",
+                "line-height:1.2",
+                "cursor:pointer",
+                "white-space:nowrap",
+                "user-select:none",
+            ]
+            : [
+                "display:inline-flex",
+                "align-items:center",
+                "justify-content:center",
+                "gap:4px",
+                "width:100%",
+                "box-sizing:border-box",
+                "align-self:stretch",
+                "padding:8px 12px",
+                "border:1px solid rgba(255,180,180,0.42)",
+                "border-radius:6px",
+                "background:#b33232",
+                "color:#fff",
+                "font-size:12px",
+                "font-weight:700",
+                "line-height:1.3",
+                "cursor:pointer",
+                "user-select:none",
+            ];
+        button.style.cssText = baseStyle.join(";");
+        button.textContent = label;
+        button.title = text ? `${GJJ_Utils.getDependencyCopyLabel(text, copyLabel)}\n${text}` : emptyTitle;
+        button.style.display = (visible ?? !!text) ? "inline-flex" : "none";
+
+        if (!button.__gjj_dependency_copy_bound) {
+            button.__gjj_dependency_copy_bound = true;
+            button.addEventListener("pointerdown", (event) => event.stopPropagation());
+            button.addEventListener("mousedown", (event) => event.stopPropagation());
+            button.addEventListener("mouseenter", () => {
+                if (!button.__gjj_dependency_copy_copied) {
+                    button.style.filter = "brightness(1.08)";
+                }
+            });
+            button.addEventListener("mouseleave", () => {
+                button.style.filter = "";
+            });
+            button.addEventListener("click", async (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const nextText = String(button.__gjj_dependency_copy_text || "").trim();
+                if (!nextText) return;
+                const ok = await GJJ_Utils.copyTextToClipboard(nextText);
+                if (!ok) {
+                    button.__gjj_dependency_copy_on_failed?.(button);
+                    return;
+                }
+                GJJ_Utils.flashDependencyCopyButton(button);
+                button.__gjj_dependency_copy_on_copied?.(button);
+            });
+        }
+
+        return button;
+    }
+
+    /**
+     * 统一显示“已复制”反馈，并自动恢复依赖复制按钮外观。
+     * @param {HTMLButtonElement} button - 目标按钮
+     */
+    static flashDependencyCopyButton(button) {
+        if (!button) return;
+        clearTimeout(button.__gjj_dependency_copy_timer);
+        button.__gjj_dependency_copy_copied = true;
+        button.textContent = "✅ 已复制";
+        button.style.background = "#2d9a57";
+        button.style.borderColor = "rgba(120,255,120,0.5)";
+        button.style.filter = "";
+        button.__gjj_dependency_copy_timer = setTimeout(() => {
+            button.__gjj_dependency_copy_copied = false;
+            button.textContent = button.__gjj_dependency_copy_restore_label || "📋 复制安装命令";
+            button.style.background = "#b33232";
+            button.style.borderColor = "rgba(255,180,180,0.42)";
+        }, Math.max(0, Number(button.__gjj_dependency_copy_success_duration) || 1200));
     }
 
     // ═══════════════════════════════════════════════════════════════

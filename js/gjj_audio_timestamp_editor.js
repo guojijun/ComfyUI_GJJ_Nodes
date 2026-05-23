@@ -482,14 +482,8 @@ class AudioSegmentEditorWidget {
 			white-space:pre-wrap; font-size:11px; line-height:1.35;
 		`;
 		this.copyBtn = document.createElement("button");
-		this.copyBtn.textContent = "📋 复制安装命令";
-		this.copyBtn.title = "复制PowerShell完整安装命令";
-		this.copyBtn.style.cssText = `
-			display: none; margin-top: 8px; padding: 6px 12px;
-			border-radius: 6px; border: 1px solid rgba(255,255,255,0.32);
-			background: rgba(255,80,80,0.25); color: #fff;
-			cursor: pointer; font-size: 13px;
-		`;
+		GJJ_Utils.applyDependencyCopyButton(this.copyBtn, { visible: false });
+		this.copyBtn.style.marginTop = "8px";
 		this.copyBtn.addEventListener("pointerdown", stop);
 		this.statusDisplay.appendChild(this.copyBtn);
 		this.container.appendChild(this.statusDisplay);
@@ -1505,31 +1499,18 @@ app.registerExtension({
 				const nodeId = data.node;
 				const errorMessage = data.panel_message || data.warning_message || data.error || "";
 				const installCommand = data.copy_text || data.install_command || data.model_download_url || "";
-				const copyLabel = data.copy_label || "📋 复制安装命令";
+				const copyLabel = data.copy_label || "";
 				if (!nodeId || !errorMessage) return;
 				for (const node of app.graph?._nodes || []) {
 					if (String(node.id) !== String(nodeId)) continue;
 					if (node._editor) {
 						// 直接显示后端发送的错误信息，不再添加额外前缀
 						node._editor.setStatus(errorMessage);
-						if (installCommand && node._editor.copyBtn) {
-							node._editor.copyBtn.style.display = "inline-flex";
-							node._editor.copyBtn.textContent = copyLabel;
-							node._editor.copyBtn.onclick = async () => {
-								try {
-									await navigator.clipboard.writeText(installCommand);
-									const oldText = node._editor.copyBtn.textContent;
-									node._editor.copyBtn.textContent = "✅ 已复制";
-									node._editor.copyBtn.style.background = "rgba(80,200,80,0.35)";
-									setTimeout(() => {
-										node._editor.copyBtn.textContent = oldText;
-										node._editor.copyBtn.style.background = "rgba(255,80,80,0.25)";
-									}, 1500);
-								} catch (e) {
-									console.error("[GJJ] 复制失败：", e);
-								}
-							};
-						}
+						GJJ_Utils.applyDependencyCopyButton(node._editor.copyBtn, {
+							copyText: installCommand,
+							copyLabel,
+							visible: !!installCommand,
+						});
 					}
 					break;
 				}

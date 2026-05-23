@@ -47,7 +47,7 @@ from .gjj_model_bundle_loader import (
 from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
 from .gjj_multi_lora_chain import normalize_lora_chain_data
 from .common_utils.dependency_checker import (
-	DEFAULT_MODEL_DOWNLOAD_URL,
+	DEFAULT_MODEL_URL,
 	build_dependency_model_report,
 )
 
@@ -315,7 +315,7 @@ CAPTION_PADDING_Y = 6
 DEFAULT_SAVE_PREFIX = "主体多视图"
 MAX_SAVE_FILENAME_LENGTH = 96
 EMPTY_GRID_SLOT_PENALTY = 2.0
-MODEL_DOWNLOAD_URL = DEFAULT_MODEL_DOWNLOAD_URL
+MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 
 REQUIRED_MULTIVIEW_MODELS = [
 	{

@@ -87,7 +87,26 @@ def enable_vram_management_recursively(model: torch.nn.Module, module_map: dict,
                     print("Compiling", name)
                     torch._dynamo.config.cache_size_limit = compile_args["dynamo_cache_size_limit"]
                     torch._dynamo.config.recompile_limit = compile_args["dynamo_cache_size_limit"]
-                    module_ = torch.compile(target_module(module, **module_config_), fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+                    try:
+                        module_ = torch.compile(target_module(module, **module_config_), fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
+                    except Exception as e:
+                        if "TritonMissing" in str(type(e).__name__) or "triton" in str(e).lower():
+                            import logging
+                            log = logging.getLogger(__name__)
+                            log.error(
+                                f"\n{'='*60}\n"
+                                f"GJJ WanVideo diffsynth torch.compile 错误\n"
+                                f"{'='*60}\n"
+                                f"错误原因: Triton 编译器未安装或版本过旧\n"
+                                f"当前 backend: {compile_args.get('backend', 'inductor')}\n"
+                                f"{'='*60}\n"
+                                f"解决方法:\n"
+                                f"1. 安装 Triton: pip install triton\n"
+                                f"2. 或在 'GJJ · ⚙️ WanVideo编译设置' 节点中选择其他 backend (如 'cudagraphs')\n"
+                                f"3. 或不连接 'GJJ · ⚙️ WanVideo编译设置' 节点以禁用 torch.compile\n"
+                                f"{'='*60}\n"
+                            )
+                        raise
                 else:
                     module_ = target_module(module, **module_config_)
                 setattr(model, name, module_)

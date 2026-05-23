@@ -359,40 +359,6 @@ function firstWarningLine(text) {
 	return line.startsWith("⚠️") ? line : "";
 }
 
-function copyTextToClipboard(text) {
-	const value = String(text || "").trim();
-	if (!value) {
-		return Promise.resolve(false);
-	}
-	return navigator.clipboard?.writeText(value).then(() => true).catch(() => {
-		const textarea = document.createElement("textarea");
-		textarea.value = value;
-		textarea.style.position = "fixed";
-		textarea.style.left = "-9999px";
-		textarea.style.top = "-9999px";
-		document.body.appendChild(textarea);
-		textarea.focus();
-		textarea.select();
-		try {
-			const ok = document.execCommand("copy");
-			return ok;
-		} finally {
-			textarea.remove();
-		}
-	});
-}
-
-function copyButtonLabel(copyText, copyLabel = "") {
-	const text = String(copyText || "").trim();
-	if (!text) {
-		return "";
-	}
-	if (copyLabel) {
-		return copyLabel;
-	}
-	return /^https?:\/\//i.test(text) ? "🌏 复制下载网址" : "📋 复制安装命令";
-}
-
 function statusCopyText(meta) {
 	return String(meta?.help?.copy_text || meta?.help?.install_cmd || meta?.help?.model_download_url || "").trim();
 }
@@ -1082,37 +1048,7 @@ function ensureStatusWidget(node) {
 
 	const copyBtn = document.createElement("button");
 	copyBtn.type = "button";
-	copyBtn.textContent = "📋 复制安装命令";
-	copyBtn.title = "复制安装命令或模型下载网址";
-	copyBtn.style.cssText = [
-		"display:none",
-		"align-self:flex-start",
-		"padding:5px 10px",
-		"border:1px solid rgba(255,255,255,0.25)",
-		"border-radius:6px",
-		"background:rgba(255,80,80,0.25)",
-		"color:#fff",
-		"font-size:12px",
-		"cursor:pointer",
-	].join(";");
-	copyBtn.addEventListener("pointerdown", (event) => event.stopPropagation());
-	copyBtn.addEventListener("mousedown", (event) => event.stopPropagation());
-	copyBtn.addEventListener("click", (event) => {
-		event.preventDefault();
-		event.stopPropagation();
-		copyTextToClipboard(copyBtn.__gjj_copy_text || copyBtn.__gjj_install_cmd || "").then((ok) => {
-			if (!ok) {
-				return;
-			}
-			const old = copyBtn.textContent;
-			copyBtn.textContent = "✅ 已复制";
-			copyBtn.style.background = "rgba(80,200,80,0.35)";
-			setTimeout(() => {
-				copyBtn.textContent = old;
-				copyBtn.style.background = "rgba(255,80,80,0.25)";
-			}, 1200);
-		});
-	});
+	GJJ_Utils.applyDependencyCopyButton(copyBtn, { visible: false });
 
 	const progressOuter = document.createElement("div");
 	progressOuter.style.cssText = [
@@ -1208,9 +1144,11 @@ function updateStatus(node, detail = {}, options = {}) {
 	if (state.copyBtn) {
 		state.copyBtn.__gjj_copy_text = copyText;
 		state.copyBtn.__gjj_install_cmd = copyText;
-		state.copyBtn.textContent = copyText ? copyButtonLabel(copyText, copyLabel) : "📋 复制安装命令";
-		state.copyBtn.title = copyText ? `${copyButtonLabel(copyText, copyLabel)}\n${copyText}` : "复制安装命令或模型下载网址";
-		state.copyBtn.style.display = copyText ? "inline-flex" : "none";
+		GJJ_Utils.applyDependencyCopyButton(state.copyBtn, {
+			copyText,
+			copyLabel,
+			visible: !!copyText,
+		});
 	}
 	refreshNode(node);
 }

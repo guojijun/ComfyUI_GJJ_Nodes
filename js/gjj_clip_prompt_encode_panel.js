@@ -10,6 +10,7 @@ const FIELD = {
 	device: "translation_device",
 	unload: "translation_unload_after_use",
 };
+const POSITIVE_PROMPT_INPUT = "positive_prompt_input";
 
 const DOM_WIDGET = "gjj_clip_prompt_encode_panel";
 const SAVED_VALUES_PROPERTY = "gjj_clip_prompt_encode_panel_values";
@@ -137,6 +138,89 @@ function protect(el) {
 	}
 }
 
+function inputText(input) {
+	return [input?.name, input?.display_name, input?.displayName, input?.localized_name, input?.label, input?.type]
+		.map((value) => String(value || ""))
+		.join(" ");
+}
+
+function getInputIndex(node, predicate) {
+	return (node.inputs || []).findIndex((input) => predicate(input));
+}
+
+function inputHasLink(input) {
+	return input?.link !== undefined && input?.link !== null;
+}
+
+function getPositivePromptInputIndex(node) {
+	return getInputIndex(node, (input) => {
+		const text = inputText(input);
+		return text.includes(POSITIVE_PROMPT_INPUT) || text.includes("正向提示词");
+	});
+}
+
+function isLegacyPositiveInput(input) {
+	const text = inputText(input);
+	if (text.includes(POSITIVE_PROMPT_INPUT) || text.includes("正向提示词")) return false;
+	return text.includes(FIELD.positive) || text.includes(`converted-widget:${FIELD.positive}`) || text.includes("正面提示词");
+}
+
+function getLegacyPositiveInputIndex(node) {
+	return getInputIndex(node, isLegacyPositiveInput);
+}
+
+function moveLegacyPositiveLink(node) {
+	const targetIndex = getPositivePromptInputIndex(node);
+	const legacyIndex = getLegacyPositiveInputIndex(node);
+	if (targetIndex < 0 || legacyIndex < 0 || targetIndex === legacyIndex) return;
+	const target = node.inputs?.[targetIndex];
+	const legacy = node.inputs?.[legacyIndex];
+	if (!legacy || !inputHasLink(legacy) || inputHasLink(target)) return;
+	const linkId = legacy.link;
+	legacy.link = null;
+	target.link = linkId;
+	const link = app.graph?.links?.[linkId];
+	if (link) {
+		link.target_id = node.id;
+		link.target_slot = targetIndex;
+		link.type = target.type || link.type || "STRING";
+	}
+}
+
+function refreshInputLinkSlots(node) {
+	for (let index = 0; index < (node.inputs || []).length; index++) {
+		const input = node.inputs[index];
+		if (!inputHasLink(input)) continue;
+		const link = app.graph?.links?.[input.link];
+		if (!link) continue;
+		link.target_id = node.id;
+		link.target_slot = index;
+		if (input.type) link.type = input.type;
+	}
+}
+
+function cleanupLegacyPositiveInputs(node) {
+	for (let index = (node.inputs || []).length - 1; index >= 0; index--) {
+		const input = node.inputs[index];
+		if (!input || !isLegacyPositiveInput(input)) continue;
+		if (inputHasLink(input)) continue;
+		try {
+			if (typeof node.removeInput === "function") node.removeInput(index);
+			else node.inputs?.splice?.(index, 1);
+		} catch (_) {
+			node.inputs?.splice?.(index, 1);
+		}
+	}
+	refreshInputLinkSlots(node);
+}
+
+function isPositivePromptConnected(node) {
+	moveLegacyPositiveLink(node);
+	cleanupLegacyPositiveInputs(node);
+	const index = getPositivePromptInputIndex(node);
+	return index >= 0 && inputHasLink(node.inputs?.[index]);
+}
+
 function refreshNode(node) {
 	if (!node) return;
 	const width = Math.max(360, Number(node.size?.[0] || 460));
@@ -151,8 +235,21 @@ function refreshNode(node) {
 }
 
 function syncDomFromWidgets(node) {
-	if (node.__gjjClipPositive && node.__gjjClipPositive.value !== String(getValue(node, FIELD.positive, ""))) {
-		node.__gjjClipPositive.value = String(getValue(node, FIELD.positive, ""));
+	const positiveConnected = isPositivePromptConnected(node);
+	if (positiveConnected && String(getValue(node, FIELD.positive, "") || "")) {
+		setValue(node, FIELD.positive, "");
+	}
+	if (node.__gjjClipPositive) {
+		const nextPositive = positiveConnected ? "" : String(getValue(node, FIELD.positive, ""));
+		if (node.__gjjClipPositive.value !== nextPositive) node.__gjjClipPositive.value = nextPositive;
+		node.__gjjClipPositive.disabled = positiveConnected;
+		node.__gjjClipPositive.placeholder = positiveConnected
+			? "已连接外部正向提示词，面板正向提示词已清空"
+			: "输入正面提示词，可写中文后点击翻译";
+		node.__gjjClipPositive.title = positiveConnected
+			? "当前使用左侧“正向提示词”输入口的外部文本。"
+			: "";
+		node.__gjjClipPositive.classList.toggle("external", positiveConnected);
 	}
 	if (node.__gjjClipNegative && node.__gjjClipNegative.value !== String(getValue(node, FIELD.negative, ""))) {
 		node.__gjjClipNegative.value = String(getValue(node, FIELD.negative, ""));
@@ -239,6 +336,12 @@ function createTextarea(node, name, placeholder) {
 	area.spellcheck = false;
 	protect(area);
 	area.addEventListener("input", () => {
+		if (name === FIELD.positive && isPositivePromptConnected(node)) {
+			area.value = "";
+			setValue(node, FIELD.positive, "");
+			setStatus(node, "已连接外部正向提示词，面板正向提示词保持清空");
+			return;
+		}
 		setValue(node, name, area.value);
 		area.style.height = "auto";
 		area.style.height = `${Math.max(78, area.scrollHeight || 78)}px`;
@@ -271,6 +374,7 @@ function buildDom(node) {
 			font:12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
 		}
 		.gjj-clip-prompt-textarea:focus { border-color:#6aa6b8; background:#111d22; }
+		.gjj-clip-prompt-textarea.external { border-color:#4b5860; background:#101417; color:#8ea0a8; opacity:.78; }
 		.gjj-clip-prompt-status { flex:1; min-width:0; color:#8ea0a8; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 	`;
 
@@ -437,6 +541,13 @@ app.registerExtension({
 		nodeType.prototype.onResize = function (...args) {
 			const result = originalOnResize?.apply(this, args);
 			if (!this.__gjjClipPromptSizing) refreshNode(this);
+			return result;
+		};
+
+		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+		nodeType.prototype.onConnectionsChange = function (...args) {
+			const result = originalOnConnectionsChange?.apply(this, args);
+			schedule(this, 0);
 			return result;
 		};
 	},

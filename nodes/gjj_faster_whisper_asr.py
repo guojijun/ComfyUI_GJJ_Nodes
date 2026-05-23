@@ -1,47 +1,28 @@
-"""
-GJJ · 🎤 语音识别 (Faster Whisper)
-
-基于 faster-whisper 的语音识别节点，支持多种模型尺寸和语言。
-faster-whisper 使用 CTranslate2 实现，速度快，显存占用低。
-
- 所需模型：
-  • 模型目录: models/faster-whisper/
-    - tiny (约 75MB, 最快，精度最低)
-    - base (约 150MB, 快速，精度较低)
-    - small (约 480MB, 平衡速度和精度)
-    - medium (约 1.5GB, 较慢，精度高)
-    - large-v3 (约 3GB, 最慢，精度最高，推荐)
-  • 自动下载: 开启后首次执行时从 HuggingFace 下载（需 huggingface_hub）
-
-🔧 Python 依赖：
-  • faster-whisper (必需，CTranslate2 实现的 Whisper)
-  • soundfile (音频读写)
-  • huggingface_hub (可选，用于自动下载模型)
-  • 安装命令: pip install faster-whisper soundfile huggingface_hub
-
-✅ 优点：
-  • 速度快，比官方 whisper 快 4-5 倍
-  • 显存占用低，适合消费级显卡
-  • 支持多种模型尺寸，灵活选择
-
-📝 参考实现：
-  • Qwen3 ASR: nodes/gjj_qwen3_asr_text_formats.py
-"""
 from __future__ import annotations
 
 import json
 import os
-import sys
 import time
 from typing import Any
 
 import folder_paths
 import numpy as np
 import torch
+from .common_utils.dependency_checker import (
+    build_dependency_model_report,
+    check_dependencies,
+    get_report_from_exception,
+    load_dependency_at_runtime,
+    make_missing_model_spec,
+    raise_dependency_model_error,
+    send_dependency_model_notice,
+)
 
 NODE_NAME = "GJJ_FasterWhisperASR"
 MODEL_ROOT_NAME = "faster-whisper"
 CATEGORY = "GJJ/Audio"
+NODE_DISPLAY_NAME = "🎤 语音识别 (Faster Whisper)"
+MODEL_DOWNLOAD_BASE_URL = "https://huggingface.co/Systran"
 
 # 可用模型列表
 AVAILABLE_MODELS = ["tiny", "base", "small", "medium", "large-v3"]
@@ -67,6 +48,20 @@ MODEL_REPOS = {
     "medium": "Systran/faster-whisper-medium",
     "large-v3": "Systran/faster-whisper-large-v3",
 }
+DEPENDENCY_SPECS = [
+    {
+        "module_name": "faster_whisper",
+        "package_name": "faster-whisper",
+        "display_name": "faster-whisper",
+        "description": "Faster Whisper 语音识别主运行库。",
+    },
+    {
+        "module_name": "soundfile",
+        "package_name": "soundfile",
+        "display_name": "soundfile",
+        "description": "读取示例音频需要 soundfile。",
+    },
+]
 
 
 # ═══════════════════════════════════════════════
@@ -75,85 +70,77 @@ MODEL_REPOS = {
 _DEPS = {}
 
 
+def _collect_dependency_state() -> tuple[bool, list[dict[str, str]]]:
+    missing_dependencies: list[dict[str, str]] = []
+    for spec in DEPENDENCY_SPECS:
+        available, _ = check_dependencies([spec["module_name"]], NODE_DISPLAY_NAME)
+        if not available:
+            missing_dependencies.append(spec)
+    return (not missing_dependencies), missing_dependencies
+
+
+_DEPENDENCIES_AVAILABLE, _MISSING_DEPENDENCIES = _collect_dependency_state()
+_ENV_REPORT = build_dependency_model_report(
+    node_name=NODE_DISPLAY_NAME,
+    missing_dependencies=_MISSING_DEPENDENCIES,
+    missing_models=[],
+    install_packages=[spec["package_name"] for spec in _MISSING_DEPENDENCIES],
+    description="Faster Whisper 多语言语音识别节点，支持多模型尺寸、自动下载和 CPU/CUDA 切换。",
+)
+_HELP_NOTICE = (
+    f"{_ENV_REPORT['warning_message']}\n请参考下方依赖、模型说明和安装命令。"
+    if not _ENV_REPORT.get("available", True)
+    else ""
+)
+_DESCRIPTION_READY = """
+🎤 语音识别多语言场景 (Faster Whisper)
+
+基于 faster-whisper 的多语言语音识别节点。
+
+📁 模型目录：
+models/faster-whisper/
+
+🌏模型下载：
+https://huggingface.co/Systran
+
+💡 使用提示：
+- 支持 tiny、base、small、medium、large-v3 多种模型尺寸
+- 可开启自动下载，首次执行时自动拉取缺失模型
+- CUDA 不稳定时建议切换为 CPU + int8
+""".strip()
+DESCRIPTION = (
+    _DESCRIPTION_READY
+    if _DEPENDENCIES_AVAILABLE
+    else f"{_ENV_REPORT['warning_message']}\n\n{_DESCRIPTION_READY}"
+)
+
+
 def _load_faster_whisper_runtime(unique_id: Any = None):
     """运行时懒加载 faster-whisper 依赖库"""
     if _DEPS.get("_faster_whisper_loaded"):
         return _DEPS
 
-    # 使用公共工具函数进行运行时依赖检查
-    from .common_utils.dependency_checker import load_dependency_at_runtime
-
-    try:
-        # 加载 faster-whisper
-        faster_whisper = load_dependency_at_runtime(
-            module_name="faster_whisper",
-            node_name="🎤 语音识别 (Faster Whisper)",
-            package_name="faster-whisper",
-            description="该节点需要 faster-whisper Python 包才能运行",
-            extra_packages=["soundfile"],
-        )
-        _DEPS["_faster_whisper_loaded"] = True
-        _DEPS["WhisperModel"] = faster_whisper.WhisperModel
-        return _DEPS
-
-    except Exception as exc:
-        error_msg = str(exc)
-
-        # 检测是否为 CUDA 库缺失错误（在导入阶段就可能发生）
-        is_cuda_error = (
-            "cublas64_12.dll" in error_msg or
-            "CUDA error" in error_msg or
-            "cuda" in error_msg.lower() or
-            "cudnn" in error_msg.lower()
-        )
-
-        if is_cuda_error:
-            # 发送友好的 CUDA 错误提示，告诉用户切换到 CPU
-            cuda_error = (
-                "❌ CUDA 库缺失：无法加载 cublas64_12.dll\n\n"
-                "💡 解决方案：\n"
-                "1. 💻 将节点中的「设备」参数改为 cpu\n"
-                "2. 📦 安装 NVIDIA CUDA Toolkit 12.x\n"
-                "3. 🔄 确保 PyTorch 安装了 CUDA 版本\n\n"
-                "⚠️ 提示：即使切换到 CPU，仍然需要先安装依赖\n"
-                "运行以下命令安装依赖：\n"
-            )
-
-            python_exe = sys.executable
-            site_packages = os.path.join(os.path.dirname(python_exe), "Lib", "site-packages")
-            from .common_utils.dependency_checker import get_pip_install_command_text
-            install_cmd = get_pip_install_command_text("faster-whisper soundfile")
-
-            _send_error_to_frontend(
-                unique_id,
-                error_message=cuda_error,
-                install_command=install_cmd,
-            )
-        else:
-            # 发送错误事件到前端（错误信息不含安装命令，安装命令单独发送）
-            # 生成 PowerShell 格式的安装命令，安装到用户环境的 site-packages
-            python_exe = sys.executable
-            site_packages = os.path.join(os.path.dirname(python_exe), "Lib", "site-packages")
-            from .common_utils.dependency_checker import get_pip_install_command_text
-            install_cmd = get_pip_install_command_text("faster-whisper soundfile")
-            _send_error_to_frontend(
-                unique_id,
-                error_message=f"未找到 faster-whisper 运行库。\n\n原始导入错误：{exc}",
-                install_command=install_cmd,
-            )
-
-        raise
+    faster_whisper = load_dependency_at_runtime(
+        module_name="faster_whisper",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="faster-whisper",
+        description="Faster Whisper 运行时需要 faster-whisper。",
+        extra_packages=["soundfile"],
+        unique_id=unique_id,
+    )
+    _DEPS["_faster_whisper_loaded"] = True
+    _DEPS["WhisperModel"] = faster_whisper.WhisperModel
+    return _DEPS
 
 
-def _send_error_to_frontend(unique_id: Any, error_message: str, install_command: str = ""):
-    """将错误信息和安装命令发送给前端"""
+def _send_error_to_frontend(unique_id: Any, error_message: str):
+    """将普通执行错误发送给前端结果区"""
     try:
         from server import PromptServer
 
         PromptServer.instance.send_sync("gjj_faster_whisper_error", {
             "node": str(unique_id),
             "error": error_message,
-            "install_command": install_command,
         })
     except Exception:
         pass
@@ -251,28 +238,21 @@ def _find_local_model_dir(model_name: str) -> str | None:
 
 def _download_model(model_name: str, unique_id: Any = None) -> str:
     """下载模型"""
-    from .common_utils.dependency_checker import load_dependency_at_runtime
-
     try:
         # 使用标准方式加载 huggingface_hub
         huggingface_hub = load_dependency_at_runtime(
             module_name="huggingface_hub",
-            node_name="🎤 语音识别 (Faster Whisper)",
+            node_name=NODE_DISPLAY_NAME,
             package_name="huggingface_hub",
             description="该节点需要 huggingface_hub 才能自动下载模型",
+            unique_id=unique_id,
         )
         snapshot_download = huggingface_hub.snapshot_download
     except Exception as exc:
-        from .common_utils.dependency_checker import get_pip_install_command_text
-        install_cmd = get_pip_install_command_text("huggingface_hub")
-        error_msg = (
-            "未找到 huggingface_hub，无法自动下载 Faster Whisper 模型。\n"
-            "请先把模型放到 ComfyUI/models/faster-whisper，或安装 huggingface_hub。\n"
-            "\n"
-            f"🔧 安装命令：\n{install_cmd}"
-        )
-        _send_error_to_frontend(unique_id, error_msg, install_cmd)
-        raise RuntimeError(error_msg) from exc
+        report = get_report_from_exception(exc)
+        if report:
+            raise
+        raise exc
 
     repo_id = MODEL_REPOS.get(model_name)
     if not repo_id:
@@ -288,7 +268,22 @@ def _download_model(model_name: str, unique_id: Any = None) -> str:
     )
 
     if not _is_model_dir(target_dir):
-        raise RuntimeError(f"模型下载后仍不完整：{target_dir}")
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_models=[
+                make_missing_model_spec(
+                    label=model_name,
+                    subdir=MODEL_ROOT_NAME,
+                    filename=model_name,
+                    description="模型下载后目录仍不完整，请重新下载或手动补齐文件。",
+                )
+            ],
+            description=f"模型下载后仍不完整：{target_dir}",
+            unique_id=unique_id,
+            title="GJJ 节点模型缺失！",
+            copy_text=f"https://huggingface.co/{repo_id}",
+            copy_label="🌏 复制下载网址",
+        )
     return target_dir
 
 
@@ -300,18 +295,62 @@ def _resolve_model_dir(model_name: str, auto_download: bool, unique_id: Any = No
     if auto_download:
         return _download_model(model_name, unique_id)
     root = os.path.join(folder_paths.models_dir, MODEL_ROOT_NAME)
-    raise RuntimeError(f"未找到本地模型：{model_name}。请放到 {root}，或开启自动下载模型。")
+    raise_dependency_model_error(
+        node_name=NODE_DISPLAY_NAME,
+        missing_models=[
+            make_missing_model_spec(
+                label=model_name,
+                subdir=MODEL_ROOT_NAME,
+                filename=model_name,
+                description=f"请放到 {root}，或开启自动下载模型。",
+            )
+        ],
+        description=f"未找到本地模型：{model_name}",
+        unique_id=unique_id,
+        title="GJJ 节点模型缺失！",
+        copy_text=f"https://huggingface.co/{MODEL_REPOS.get(model_name, '')}",
+        copy_label="🌏 复制下载网址",
+    )
 
 
 class GJJ_FasterWhisperASR:
     """GJJ · 🎤 语音识别 (Faster Whisper)"""
 
-    DESCRIPTION = __doc__
+    DESCRIPTION = DESCRIPTION
     CATEGORY = CATEGORY
     FUNCTION = "transcribe"
     OUTPUT_NODE = True
     RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("时间戳JSON", "分段文本", "开始时间列表", "结束时间列表")
+    GJJ_HELP = {
+        "title": "🎤 语音识别多语言场景 (Faster Whisper)",
+        "description": _DESCRIPTION_READY,
+        "notice": _HELP_NOTICE,
+        "warning_message": _ENV_REPORT["warning_message"] if not _ENV_REPORT.get("available", True) else "",
+        "install_cmd": _ENV_REPORT["install_cmd"] if not _ENV_REPORT.get("available", True) else "",
+        "copy_text": _ENV_REPORT["copy_text"] if not _ENV_REPORT.get("available", True) else "",
+        "copy_label": _ENV_REPORT["copy_label"] if not _ENV_REPORT.get("available", True) else "",
+        "model_download_url": MODEL_DOWNLOAD_BASE_URL,
+        "missing_dependencies": _MISSING_DEPENDENCIES,
+        "missing_models": [],
+        "dependencies": [
+            "faster-whisper（主识别运行库）",
+            "soundfile（读取示例音频）",
+            "huggingface_hub（自动下载模型时按需使用）",
+        ],
+        "models": [
+            make_missing_model_spec(label="tiny", subdir=MODEL_ROOT_NAME, filename="tiny", description="最快，精度最低。"),
+            make_missing_model_spec(label="base", subdir=MODEL_ROOT_NAME, filename="base", description="快速，精度较低。"),
+            make_missing_model_spec(label="small", subdir=MODEL_ROOT_NAME, filename="small", description="速度与精度平衡。"),
+            make_missing_model_spec(label="medium", subdir=MODEL_ROOT_NAME, filename="medium", description="较慢，精度高。"),
+            make_missing_model_spec(label="large-v3", subdir=MODEL_ROOT_NAME, filename="large-v3", description="最慢，精度最高，推荐。"),
+        ],
+        "tips": [
+            "首次运行可开启自动下载；若不想联网，请先手动把模型放到 models/faster-whisper/ 下。",
+            "CPU 模式推荐 int8，CUDA 模式可优先 float16。",
+            "只做快速预览时可先选 tiny 或 base，正式转写再换 large-v3。",
+        ],
+    }
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -404,10 +443,6 @@ class GJJ_FasterWhisperASR:
         segment_by_sentence = bool(props.get("segment_by_sentence", True))
         auto_download = bool(props.get("auto_download", True))
 
-        # 获取实际 Python 路径
-        import sys
-        python_executable = sys.executable
-
         try:
             start_time = time.time()
 
@@ -419,7 +454,14 @@ class GJJ_FasterWhisperASR:
                 if os.path.exists(audio_path):
                     try:
                         # 使用 soundfile 加载音频
-                        import soundfile as sf
+                        sf = load_dependency_at_runtime(
+                            module_name="soundfile",
+                            node_name=NODE_DISPLAY_NAME,
+                            package_name="soundfile",
+                            description="读取示例音频需要 soundfile。",
+                            extra_packages=["faster-whisper"],
+                            unique_id=unique_id,
+                        )
                         audio_np, sample_rate = sf.read(audio_path, always_2d=True)
                         # 转换为 torch tensor
                         if audio_np.ndim == 1:
@@ -540,8 +582,13 @@ class GJJ_FasterWhisperASR:
             return (timestamps_json, full_text, start_times_str, end_times_str)
 
         except Exception as exc:
-            _send_status(unique_id, f"执行失败：{exc}", 1.0)
+            report = get_report_from_exception(exc)
+            if report:
+                _send_status(unique_id, "执行失败，请查看上方面板", 1.0)
+                send_dependency_model_notice(report, unique_id=unique_id)
+                raise RuntimeError(report.get("warning_message") or "运行环境缺失。") from exc
 
+            _send_status(unique_id, f"执行失败：{exc}", 1.0)
             error_msg = str(exc)
 
             # 检测是否为 CUDA 错误
@@ -560,32 +607,13 @@ class GJJ_FasterWhisperASR:
                 _send_error_to_frontend(unique_id, cuda_error)
                 raise RuntimeError(cuda_error) from exc
 
-            # 检测是否为依赖缺失错误
-            elif "未找到" in error_msg or "ImportError" in error_msg or "ModuleNotFoundError" in error_msg or "No module named" in error_msg:
-                # 根据缺失的模块名生成安装命令（PowerShell 格式，安装到用户环境）
-                from .common_utils.dependency_checker import get_pip_install_command_text
-
-                if "soundfile" in error_msg:
-                    install_command = get_pip_install_command_text("soundfile")
-                elif "faster_whisper" in error_msg:
-                    install_command = get_pip_install_command_text("faster-whisper soundfile")
-
-                # 如果没有匹配的模块，使用默认的安装命令
-                if not install_command:
-                    install_command = get_pip_install_command_text("faster-whisper soundfile")
-
-                _send_error_to_frontend(unique_id, error_msg, install_command)
-                raise
-
-            # 其他错误
-            else:
-                detailed_error = (
-                    f"🎤 Faster Whisper ASR 执行失败\n"
-                    f"模型：{model_name}\n\n"
-                    f"详细错误：{error_msg}"
-                )
-                _send_error_to_frontend(unique_id, detailed_error)
-                raise RuntimeError(detailed_error) from exc
+            detailed_error = (
+                f"🎤 Faster Whisper ASR 执行失败\n"
+                f"模型：{model_name}\n\n"
+                f"详细错误：{error_msg}"
+            )
+            _send_error_to_frontend(unique_id, detailed_error)
+            raise RuntimeError(detailed_error) from exc
 
 
 # ═══════════════════════════════════════════════

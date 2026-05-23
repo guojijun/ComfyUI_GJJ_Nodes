@@ -245,21 +245,11 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
         ],
     },
-    "wan21_i2v_480p": {
-        "label": "Wan2.1 I2V 480P 14B",
+    "wan21_i2v": {
+        "label": "Wan2.1 I2V 14B 图生视频",
         "clip_type": "wan",
         "slots": [
-            S("model", "模型", "diffusion_models", "diffusion", ["wan", "i2v", "480p"]),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip", "vision"]),
-        ],
-    },
-    "wan21_i2v_720p": {
-        "label": "Wan2.1 I2V 720P 14B",
-        "clip_type": "wan",
-        "slots": [
-            S("model", "模型", "diffusion_models", "diffusion", ["wan", "i2v", "720p"]),
+            S("model", "模型", "diffusion_models", "diffusion", ["wan", "i2v"]),
             S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
             S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip", "vision"]),
@@ -269,7 +259,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "label": "Wan2.1 首尾帧 FLF2V 720P",
         "clip_type": "wan",
         "slots": [
-            S("model", "模型", "diffusion_models", "diffusion", ["wan", "flf2v", "720p"]),
+            S("model", "模型", "diffusion_models", "diffusion", ["wan", "flf2v"]),
             S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
             S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip", "vision"]),
@@ -319,11 +309,11 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "label": "Wan Alpha 透明通道",
         "clip_type": "wan",
         "slots": [
-            S("model", "模型", "diffusion_models", "diffusion", ["wan", "t2v"]),
+            S("model", "模型", "diffusion_models", "diffusion", ["wan2_1","t2v"]),
             S("rgb_vae", "RGB VAE", "vae", "vae", ["wan", "alpha", "rgb"]),
             S("alpha_vae", "Alpha VAE", "vae", "vae", ["wan", "alpha", "alpha"]),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("lightx2v_lora", "LightX2V LoRA名称", "loras", "name", ["lightx2v", "t2v"]),
+            S("lightx2v_lora", "LightX2V LoRA名称", "loras", "name", ["lightx2v", "rank256"]),
             S("alpha_lora", "Alpha LoRA名称", "loras", "name", ["epoch", "changed"]),
         ],
     },
@@ -1602,4 +1592,4 @@ class GJJ_VideoUniversalModelLoader:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_VideoUniversalModelLoader}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 视频通用模型加载"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ ·🎬 视频通用模型加载"}

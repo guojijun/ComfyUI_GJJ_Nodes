@@ -10,9 +10,13 @@ import urllib.request
 from typing import Any
 
 import folder_paths
-import huggingface_hub
 import numpy as np
 import torch
+from .common_utils.dependency_checker import (
+	load_dependency_at_runtime,
+	make_missing_model_spec,
+	raise_dependency_model_error,
+)
 
 # 延迟导入 soundfile，在函数内部使用
 # import soundfile as sf
@@ -35,6 +39,7 @@ LOCAL_AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac"}
 MODEL_REPOS = {
 	"Fun-CosyVoice3-0.5B-2512": "FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
 }
+MODEL_DOWNLOAD_URL = "https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512"
 DEMO_REFERENCES = {
 	"官方示例·中文男声": {
 		"url": "https://funaudiollm.github.io/cosyvoice3/audio/prompt/zero-shot/zh/prompt_audio_4.wav",
@@ -54,6 +59,7 @@ DEMO_REFERENCES = {
 }
 _MODEL_CACHE: dict[str, dict[str, Any]] = {}
 _WHISPER_MODEL = None
+NODE_DISPLAY_NAME = "📢 语音克隆器 (CosyVoice3)"
 
 
 def send_status(unique_id: Any, text: str) -> None:
@@ -84,29 +90,14 @@ def send_audio_preview(unique_id: Any, audio_ui: dict[str, Any]) -> None:
 		pass
 
 
-def send_audio_preview(unique_id: Any, audio_ui: dict[str, Any]) -> None:
-	if not unique_id or not audio_ui:
-		return
-	try:
-		from server import PromptServer
-
-		PromptServer.instance.send_sync(
-			"gjj_node_audio",
-			{"node": str(unique_id), "audio": audio_ui.get("audio", [])},
-		)
-	except Exception:
-		pass
-
-
-def send_error_to_frontend(unique_id: Any, error_message: str, install_command: str = ""):
-	"""将错误信息和安装命令发送给前端"""
+def send_error_to_frontend(unique_id: Any, error_message: str):
+	"""将普通执行错误发送给前端状态区"""
 	try:
 		from server import PromptServer
 
 		PromptServer.instance.send_sync("gjj_cosyvoice3_error", {
 			"node": str(unique_id),
 			"error": error_message,
-			"install_command": install_command,
 		})
 	except Exception:
 		pass
@@ -135,7 +126,7 @@ def _is_valid_model_dir(model_dir: str) -> bool:
 	return config_ok and llm_ok and flow_ok and hift_ok
 
 
-def list_cosyvoice_models() -> list[str]:
+def list_local_cosyvoice_models() -> list[str]:
 	os.makedirs(COSYVOICE_ROOT, exist_ok=True)
 	items: list[str] = []
 	for root, dirs, _ in os.walk(COSYVOICE_ROOT):
@@ -143,6 +134,11 @@ def list_cosyvoice_models() -> list[str]:
 			rel = os.path.relpath(root, COSYVOICE_ROOT).replace("/", "\\")
 			if rel not in items:
 				items.append(rel)
+	return sorted(items, key=lambda item: (item.count("\\"), item.lower()))
+
+
+def list_cosyvoice_models() -> list[str]:
+	items = list_local_cosyvoice_models()
 	for name in MODEL_REPOS:
 		if name not in items:
 			items.append(name)
@@ -189,6 +185,13 @@ def ensure_model_dir(model_name: str, unique_id: Any = None) -> str:
 			candidate = os.path.join(root, dirname)
 			if _normalize_key(base) in _normalize_key(dirname) and _is_valid_model_dir(candidate):
 				return candidate
+	huggingface_hub = load_dependency_at_runtime(
+		module_name="huggingface_hub",
+		node_name=NODE_DISPLAY_NAME,
+		package_name="huggingface_hub",
+		description="自动下载 CosyVoice3 模型需要 huggingface_hub。",
+		unique_id=unique_id,
+	)
 	repo_id = MODEL_REPOS.get(model_name) or MODEL_REPOS.get(DEFAULT_MODEL_NAME)
 	target_dir = os.path.join(COSYVOICE_ROOT, model_name if model_name in MODEL_REPOS else DEFAULT_MODEL_NAME)
 	send_status(unique_id, f"未找到本地模型，正在从国内镜像下载：{os.path.basename(target_dir)}")
@@ -202,50 +205,33 @@ def ensure_model_dir(model_name: str, unique_id: Any = None) -> str:
 		else:
 			os.environ["HF_ENDPOINT"] = old_endpoint
 	if not _is_valid_model_dir(target_dir):
-		raise RuntimeError(f"CosyVoice3 模型下载后仍不完整：{target_dir}")
+		raise_dependency_model_error(
+			node_name=NODE_DISPLAY_NAME,
+			missing_models=[
+				make_missing_model_spec(
+					label=os.path.basename(target_dir),
+					subdir="cosyvoice",
+					filename=os.path.basename(target_dir),
+					description="模型下载后目录仍不完整，请重新下载或手动补齐文件。",
+				)
+			],
+			description=f"CosyVoice3 模型下载后仍不完整：{target_dir}",
+			unique_id=unique_id,
+			title="GJJ 节点模型缺失！",
+		)
 	return target_dir
 
 
 def load_cosyvoice_model(model_name: str, unique_id: Any = None) -> dict[str, Any]:
-	# 运行时检查依赖
-	try:
-		from cosyvoice.cli.cosyvoice import AutoModel  # type: ignore  # noqa: F811
-	except ImportError as exc:
-		from .common_utils.dependency_checker import print_runtime_dependency_error, get_pip_install_command_text
-		
-		install_cmd = get_pip_install_command_text("cosyvoice==0.0.7 soundfile")
-		
-		description = (
-			"CosyVoice3 节点需要以下依赖：\n"
-			"• cosyvoice (语音合成模型)\n"
-			"• soundfile (音频处理)\n\n"
-			"📌 安装建议：\n"
-			"1. 先升级 pip：\n"
-			"   pip install --upgrade pip\n"
-			"2. 安装构建工具（如果需要）：\n"
-			"   pip install setuptools wheel\n"
-			"3. 尝试安装指定版本：\n"
-			"   pip install cosyvoice==0.0.7 soundfile\n"
-			"4. 如果仍失败，从源码安装：\n"
-			"   git clone https://github.com/modelscope/CosyVoice.git\n"
-			"   cd CosyVoice && pip install -e .\n"
-			"5. 确保已安装 PyTorch 和 CUDA"
-		)
-
-		# 打印美观的控制台错误提示
-		print_runtime_dependency_error(
-			node_name="CosyVoice3",
-			dependency_name="cosyvoice",
-			install_command=install_cmd,
-			description=description,
-			extra_info=f"原始导入错误：{exc}"
-		)
-
-		# 发送错误事件到前端
-		send_error_to_frontend(unique_id, "运行时依赖缺失：cosyvoice", install_cmd)
-
-		# 抛出简洁的错误信息（在前端显示）
-		raise RuntimeError("运行时依赖缺失：cosyvoice。详细信息请查看控制台。") from exc
+	cosyvoice_module = load_dependency_at_runtime(
+		module_name="cosyvoice.cli.cosyvoice",
+		node_name=NODE_DISPLAY_NAME,
+		package_name="cosyvoice",
+		description="CosyVoice3 运行时需要 cosyvoice。",
+		extra_packages=["soundfile", "huggingface_hub"],
+		unique_id=unique_id,
+	)
+	AutoModel = cosyvoice_module.AutoModel
 
 	model_dir = ensure_model_dir(model_name, unique_id)
 	cache_key = model_dir
@@ -265,25 +251,13 @@ def load_cosyvoice_model(model_name: str, unique_id: Any = None) -> dict[str, An
 
 def _ensure_soundfile():
 	"""确保 soundfile 已安装"""
-	try:
-		import soundfile as sf  # noqa: F811
-		return sf
-	except ImportError as exc:
-		from .common_utils.dependency_checker import print_runtime_dependency_error, get_pip_install_command_text
-
-		install_cmd = get_pip_install_command_text("soundfile")
-
-		# 打印美观的控制台错误提示
-		print_runtime_dependency_error(
-			node_name="CosyVoice3",
-			dependency_name="soundfile",
-			install_command=install_cmd,
-			description="该节点需要 soundfile 库来处理音频文件",
-			extra_info=f"原始导入错误：{exc}"
-		)
-
-		# 抛出简洁的错误信息（在前端显示）
-		raise RuntimeError("运行时依赖缺失：soundfile。详细信息请查看控制台。") from exc
+	return load_dependency_at_runtime(
+		module_name="soundfile",
+		node_name=NODE_DISPLAY_NAME,
+		package_name="soundfile",
+		description="CosyVoice3 音频处理需要 soundfile。",
+		extra_packages=["cosyvoice"],
+	)
 
 
 def get_speaker_dir() -> str:
@@ -424,7 +398,13 @@ def audio_file_to_tempfile(source_path: str) -> tuple[str, float]:
 
 
 def _decode_audio_with_av(source_path: str) -> tuple[np.ndarray, int]:
-	import av
+	av = load_dependency_at_runtime(
+		module_name="av",
+		node_name=NODE_DISPLAY_NAME,
+		package_name="av",
+		description="CosyVoice3 回退音频解码需要 av。",
+		extra_packages=["soundfile", "cosyvoice"],
+	)
 
 	with av.open(source_path) as container:
 		if not container.streams.audio:

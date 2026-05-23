@@ -7,6 +7,25 @@ import folder_paths
 import comfy.model_management as mm
 from comfy.utils import load_torch_file
 
+# 导入公共依赖检查器
+try:
+    from .common_utils.dependency_checker import (
+        check_dependencies,
+        load_dependency_at_runtime,
+        print_runtime_dependency_error,
+        build_dependency_model_report,
+        print_dependency_model_report,
+        get_pip_install_command_text,
+    )
+except ImportError:
+    from common_utils.dependency_checker import (
+        check_dependencies,
+        load_dependency_at_runtime,
+        print_runtime_dependency_error,
+        build_dependency_model_report,
+        print_dependency_model_report,
+        get_pip_install_command_text,
+    )
 
 NODE_NAME = "GJJ_WanVideoVAELoader"
 NODE_DISPLAY_NAME = "🎬 WanVideo VAE 加载器"
@@ -14,11 +33,7 @@ NODE_DISPLAY_NAME = "🎬 WanVideo VAE 加载器"
 # ============================================================================
 # 启动时依赖检查
 # ============================================================================
-_DEPENDENCY_CHECKER = None
 _DEPENDENCIES_AVAILABLE = False
-_MODELS_AVAILABLE = True
-_MISSING_DEPENDENCIES = []
-_MISSING_MODELS = []
 _DESCRIPTION = "加载 WanVideo VAE 模型，支持自动检测模型类型（标准/38层/轻量）"
 _GJJ_HELP = {
     "title": "WanVideo VAE 加载器",
@@ -36,230 +51,62 @@ _GJJ_HELP = {
         "gguf：仅在加载 GGUF 量化格式 VAE 模型时需要，普通 safetensors 格式不需要。",
     ],
     "notes": [
-        "本节点使用 GJJ vendor/wanvideo_wrapper 内置运行时，不依赖外部 ComfyUI-WanVideoWrapper 插件。",
+        "本节点使用 GJJ vendor/wanvideo_wrapper 内置运行时。",
         "缺失依赖时，节点面板会显示复制安装命令按钮，点击后可在 PowerShell 中直接执行安装。",
         "安装完成后请重启 ComfyUI 服务器。",
     ],
 }
 
 
-def _load_dependency_checker():
-    """懒加载 GJJ 公共依赖检查工具。"""
-    global _DEPENDENCY_CHECKER
-    if _DEPENDENCY_CHECKER is not None:
-        return _DEPENDENCY_CHECKER
-    try:
-        try:
-            from .common_utils import dependency_checker as checker
-        except Exception:
-            from common_utils.dependency_checker import (
-                build_dependency_model_report,
-                print_dependency_model_report,
-                get_pip_install_command_text,
-                send_dependency_model_notice,
-                _generate_warning_message,
-            )
-            _DEPENDENCY_CHECKER = {
-                "build_dependency_model_report": build_dependency_model_report,
-                "print_dependency_model_report": print_dependency_model_report,
-                "get_pip_install_command_text": get_pip_install_command_text,
-                "send_dependency_model_notice": send_dependency_model_notice,
-                "_generate_warning_message": _generate_warning_message,
-            }
-            return _DEPENDENCY_CHECKER
-    except Exception:
-        pass
-    return None
-
-
 def _check_startup_dependencies():
     """启动时检查依赖，只跳过当前节点，不影响其他节点。"""
-    global _DEPENDENCIES_AVAILABLE, _MISSING_DEPENDENCIES, _DESCRIPTION
+    global _DEPENDENCIES_AVAILABLE, _DESCRIPTION
 
-    checker = _load_dependency_checker()
-    required_modules = [
-        ("accelerate", "accelerate", "WanVideo 模型加载需要 accelerate 库做权重分配。"),
-        ("einops", "einops", "WanVideo VAE 结构需要 einops 做张量维度重排。"),
+    # 定义必需依赖及其描述
+    required_deps = [
+        ("accelerate", "WanVideo 模型加载需要 accelerate 库做权重分配。"),
+        ("einops", "WanVideo VAE 结构需要 einops 做张量维度重排。"),
     ]
 
-    missing = []
-    for module_name, package_name, description in required_modules:
+    # 检查缺失的依赖
+    missing_deps = []
+    for module_name, description in required_deps:
         try:
             __import__(module_name)
         except ImportError:
-            missing.append({
+            missing_deps.append({
                 "module_name": module_name,
-                "package_name": package_name,
+                "package_name": module_name,
                 "display_name": module_name,
                 "description": description,
             })
 
-    if missing:
+    if missing_deps:
         _DEPENDENCIES_AVAILABLE = False
-        _MISSING_DEPENDENCIES = missing
-
-        if checker is not None:
-            report = checker["build_dependency_model_report"](
-                node_name=NODE_DISPLAY_NAME,
-                missing_dependencies=missing,
-                install_packages=[m["package_name"] for m in missing],
-            )
-            report["node_name"] = NODE_DISPLAY_NAME
-            _DESCRIPTION = report.get("description_message") or report.get("warning_message")
-            _GJJ_HELP["description"] = report.get("help_message") or _GJJ_HELP["description"]
-            _GJJ_HELP["install_cmd"] = report.get("install_cmd", "")
-            _GJJ_HELP["warning_message"] = report.get("warning_message", "")
-
-            try:
-                checker["print_dependency_model_report"](
-                    report,
-                    title="GJJ WanVideo VAE 加载器 启动时依赖缺失！",
-                )
-            except Exception:
-                pass
-        else:
-            install_cmd = _build_fallback_install_cmd([m["package_name"] for m in missing])
-            _DESCRIPTION = (
-                f"⚠️缺失运行依赖，点击❓按钮了解详情。\n\n"
-                f"📦 必需依赖：{', '.join(m['package_name'] for m in missing)}\n\n"
-                f"🔧 快速安装命令：\n{install_cmd}\n\n"
-                f"提示：安装后请重启 ComfyUI 服务器。"
-            )
-
-            red = "\033[91m"
-            yellow = "\033[93m"
-            cyan = "\033[96m"
-            green = "\033[92m"
-            reset = "\033[0m"
-            line = "=" * 90
-            print(f"\n{red}{line}{reset}")
-            print(f"{red}  GJJ WanVideo VAE 加载器 启动时依赖缺失！{reset}")
-            print(f"{red}{line}{reset}")
-            print(f"{yellow}[GJJ] {reset}节点: {cyan}{NODE_DISPLAY_NAME}{reset}")
-            for m in missing:
-                print(f"{yellow}[GJJ] {reset}缺失依赖: {red}{m['module_name']}{reset}")
-                if m.get("description"):
-                    print(f"{yellow}[GJJ] {reset}{m['description']}")
-            print(f"\n{yellow}[GJJ] {reset}快速安装命令:")
-            print(f"{green}{install_cmd}{reset}")
-            print(f"\n{yellow}[GJJ] {reset}提示: 安装后请重启 ComfyUI 服务器")
-            print(f"{red}{line}{reset}\n")
-    else:
-        _DEPENDENCIES_AVAILABLE = True
-
-
-def _build_fallback_install_cmd(packages):
-    """兜底安装命令生成。"""
-    import os
-    python_path = sys.executable
-    site_packages = os.path.join(os.path.dirname(python_path), "Lib", "site-packages")
-    pkgs = " ".join(packages)
-    return f'& "{python_path}" -m pip install {pkgs} -i https://pypi.tuna.tsinghua.edu.cn/simple --ignore-installed --target "{site_packages}"'
-
-
-def _handle_runtime_dependency_error(error, unique_id=None):
-    """运行时依赖缺失处理：控制台彩色输出 + 前端事件推送。"""
-    checker = _load_dependency_checker()
-
-    missing_modules = []
-    error_str = str(error)
-    if "accelerate" in error_str.lower():
-        missing_modules.append({
-            "module_name": "accelerate",
-            "package_name": "accelerate",
-            "display_name": "accelerate",
-            "description": "WanVideo 模型加载需要 accelerate 库做权重分配。",
-        })
-    if "einops" in error_str.lower():
-        missing_modules.append({
-            "module_name": "einops",
-            "package_name": "einops",
-            "display_name": "einops",
-            "description": "WanVideo VAE 结构需要 einops 做张量维度重排。",
-        })
-
-    if not missing_modules:
-        missing_modules.append({
-            "module_name": "accelerate",
-            "package_name": "accelerate",
-            "display_name": "accelerate",
-            "description": "WanVideo 运行时依赖 accelerate 库。",
-        })
-
-    packages = [m["package_name"] for m in missing_modules]
-
-    if checker is not None:
-        report = checker["build_dependency_model_report"](
+        
+        # 使用公共函数生成报告
+        report = build_dependency_model_report(
             node_name=NODE_DISPLAY_NAME,
-            missing_dependencies=missing_modules,
-            install_packages=packages,
-            original_error=error_str,
+            missing_dependencies=missing_deps,
+            install_packages=[m["package_name"] for m in missing_deps],
         )
-        report["node_name"] = NODE_DISPLAY_NAME
+        
+        _DESCRIPTION = report.get("warning_message", _DESCRIPTION)
+        _GJJ_HELP["description"] = report.get("panel_message", _GJJ_HELP["description"])
+        _GJJ_HELP["install_cmd"] = report.get("install_cmd", "")
+        _GJJ_HELP["warning_message"] = report.get("warning_message", "")
 
+        # 打印控制台报告
         try:
-            checker["print_dependency_model_report"](
+            print_dependency_model_report(
                 report,
-                title="GJJ 节点运行时依赖缺失！",
+                title="GJJ WanVideo VAE 加载器 启动时依赖缺失！",
             )
         except Exception:
             pass
-
-        if unique_id is not None:
-            try:
-                checker["send_dependency_model_notice"](
-                    report,
-                    unique_id=unique_id,
-                )
-            except Exception:
-                pass
-
-        return report.get("install_cmd", "") or _build_fallback_install_cmd(packages)
     else:
-        install_cmd = _build_fallback_install_cmd(packages)
-
-        red = "\033[91m"
-        yellow = "\033[93m"
-        cyan = "\033[96m"
-        green = "\033[92m"
-        reset = "\033[0m"
-        line = "=" * 90
-        print(f"\n{red}{line}{reset}")
-        print(f"{red}  GJJ 节点运行时依赖缺失！{reset}")
-        print(f"{red}{line}{reset}")
-        print(f"{yellow}[GJJ] {reset}节点: {cyan}{NODE_DISPLAY_NAME}{reset}")
-        for m in missing_modules:
-            print(f"{yellow}[GJJ] {reset}缺失依赖: {red}{m['module_name']}{reset}")
-            if m.get("description"):
-                print(f"{yellow}[GJJ] {reset}{m['description']}")
-        print(f"\n{yellow}[GJJ] {reset}快速安装命令:")
-        print(f"{green}{install_cmd}{reset}")
-        print(f"\n{yellow}[GJJ] {reset}原始错误: {error_str}")
-        print(f"\n{yellow}[GJJ] {reset}提示: 安装后请重启 ComfyUI 服务器")
-        print(f"{red}{line}{reset}\n")
-
-        if unique_id is not None:
-            try:
-                from server import PromptServer
-                PromptServer.instance.send_sync("gjj_dependency_model_notice", {
-                    "node": str(unique_id),
-                    "warning_message": f"⚠️缺失运行依赖，点击❓按钮了解详情。",
-                    "panel_message": (
-                        f"⚠️缺失运行依赖，点击❓按钮了解详情。\n\n"
-                        f"📦 必需依赖（请安装）：\n"
-                        + "\n".join(f"• {m['package_name']}（{m['description']}）" for m in missing_modules)
-                        + f"\n\n🔧 快速安装命令：\n{install_cmd}\n\n"
-                        f"原始错误：{error_str}\n\n"
-                        f"提示：安装后请重启 ComfyUI 服务器。"
-                    ),
-                    "install_command": install_cmd,
-                    "copy_text": install_cmd,
-                    "copy_label": "📋 复制安装命令",
-                })
-            except Exception:
-                pass
-
-        return install_cmd
+        _DEPENDENCIES_AVAILABLE = True
+        _DESCRIPTION = f"✅ {_DESCRIPTION}"
 
 
 # 启动时检查依赖
@@ -296,7 +143,7 @@ def _load_wan_video_vae():
         raise RuntimeError(
             "GJJ 内置 WanVideoVAE 加载失败。\n"
             f"错误信息: {error}\n"
-            "说明: 本节点使用 GJJ vendor/wanvideo_wrapper 内置运行时，不依赖外部 ComfyUI-WanVideoWrapper 插件。"
+            "说明: 本节点使用 GJJ vendor/wanvideo_wrapper 内置运行时。"
         ) from error
     
     WanVideoVAE = getattr(vae_module, "WanVideoVAE")
@@ -391,14 +238,26 @@ class GJJ_WanVideoVAELoader:
         try:
             WanVideoVAE, WanVideoVAE38 = _load_wan_video_vae()
         except RuntimeError as e:
-            _handle_runtime_dependency_error(e, unique_id=unique_id)
+            # 使用公共函数处理运行时依赖错误（传递 unique_id 以支持前端通知）
+            print_runtime_dependency_error(
+                node_name=NODE_DISPLAY_NAME,
+                dependency_name="accelerate/einops",
+                description=str(e),
+                unique_id=unique_id,
+            )
             raise
         except Exception as e:
-            _handle_runtime_dependency_error(e, unique_id=unique_id)
+            # 使用公共函数处理运行时依赖错误（传递 unique_id 以支持前端通知）
+            print_runtime_dependency_error(
+                node_name=NODE_DISPLAY_NAME,
+                dependency_name="accelerate/einops",
+                description=str(e),
+                unique_id=unique_id,
+            )
             raise RuntimeError(
                 f"GJJ 内置 WanVideoVAE 加载失败。\n"
                 f"错误信息: {e}\n"
-                f"说明: 本节点使用 GJJ vendor/wanvideo_wrapper 内置运行时，不依赖外部 ComfyUI-WanVideoWrapper 插件。"
+                f"说明: 本节点使用 GJJ vendor/wanvideo_wrapper 内置运行时。"
             ) from e
         
         # 设置精度

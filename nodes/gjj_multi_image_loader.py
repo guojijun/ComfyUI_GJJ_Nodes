@@ -73,7 +73,7 @@ def list_input_images() -> list[dict[str, Any]]:
                 _IMAGE_META_CACHE[cache_key] = (mtime_ns, size_bytes, int(width), int(height))
         except Exception as error:
             try:
-                print(f"[GJJ_MultiImageLoader] 跳过无法识别的图片：{file_path} ({error})")
+                print(f"✖{file_path} ({error})")
             except Exception:
                 pass
             continue

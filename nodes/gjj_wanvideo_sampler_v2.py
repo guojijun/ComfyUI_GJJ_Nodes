@@ -3,6 +3,140 @@ from __future__ import annotations
 import sys
 from typing import Any
 
+# ============================================================================
+# 导入公共依赖检查工具
+# ============================================================================
+try:
+    from .common_utils.dependency_checker import (
+        check_dependencies,
+        load_dependency_at_runtime,
+        print_runtime_dependency_error,
+        build_dependency_model_report,
+        print_dependency_model_report,
+        get_pip_install_command_text,
+    )
+except ImportError:
+    from common_utils.dependency_checker import (
+        check_dependencies,
+        load_dependency_at_runtime,
+        print_runtime_dependency_error,
+        build_dependency_model_report,
+        print_dependency_model_report,
+        get_pip_install_command_text,
+    )
+
+
+NODE_NAME = "GJJ_WanVideoSamplerV2"
+NODE_DISPLAY_NAME = "🎬 WanVideo Sampler v2"
+
+# ============================================================================
+# 节点描述和帮助信息
+# ============================================================================
+_DESCRIPTION = "GJJ WanVideo 视频采样器 v2：固定经典插槽版，调用 GJJ 内置 vendored WanVideoWrapper 核心 runtime。"
+_GJJ_HELP = {
+    "title": "WanVideo Sampler v2",
+    "description": "复刻 WanVideoWrapper 的 Sampler 调用层。此版使用固定经典插槽，避免前端动态重排导致类型错位。",
+    "usage": [
+        "模型选择：由 WanVideo 模型加载器输出的 WANVIDEOMODEL。",
+        "调度器：直接在节点面板选择采样调度器（unipc、dpm++_sde、euler 等）。",
+        "采样步数：控制生成质量，通常 6-20 步即可。",
+        "CFG：提示词引导强度，1.0-5.0 为常用范围。",
+    ],
+    "dependencies": [
+        "accelerate：WanVideo 采样需要 accelerate 库做权重分配和模型加载。",
+        "einops：WanVideo 模型结构需要 einops 做张量维度重排。",
+        "diffusers：WanVideo 采样需要 diffusers 库提供调度器和工具函数。",
+        "ftfy：WanVideo 文本处理需要 ftfy 修复文本编码问题。",
+    ],
+    "optional_dependencies": [
+        "triton-windows：PyTorch 编译加速需要 triton-windows 库（Windows 专用，用于 torch.compile/torch._inductor）。",
+        "triton：PyTorch 编译加速需要 triton 库（Linux/macOS 专用，用于 torch.compile/torch._inductor）。",
+        "peft：LoRA 支持需要 peft 库。",
+        "sentencepiece：分词器需要 sentencepiece 库。",
+        "protobuf：模型序列化需要 protobuf 库。",
+        "gguf：GGUF 格式模型支持需要 gguf 库。",
+        "opencv-python：图像处理功能需要 opencv-python 库。",
+        "scipy：科学计算需要 scipy 库。",
+    ],
+    "🌏模型下载": "复用本机 ComfyUI models/diffusion_models、models/unet_gguf、models/vae 等 WanVideo 模型目录。",
+    "runtime": "无需安装 ComfyUI-WanVideoWrapper 插件本体；pip 依赖仍按 GJJ SKILL 的 WanVideo 运行时依赖方案安装。",
+    "notes": [
+        "缺失依赖时，节点面板会显示复制安装命令按钮，点击后可在 PowerShell 中直接执行安装。",
+        "安装完成后请重启 ComfyUI 服务器。",
+    ],
+}
+
+
+def _check_startup_dependencies():
+    """启动时检查依赖，只跳过当前节点，不影响其他节点。"""
+    global _DESCRIPTION
+
+    import platform
+
+    # 定义必需依赖及其描述（基于 vendor/wanvideo_wrapper/requirements.txt + PyTorch 运行时组件）
+    required_deps = [
+        ("accelerate", "WanVideo 采样需要 accelerate 库做权重分配和模型加载。"),
+        ("einops", "WanVideo 模型结构需要 einops 做张量维度重排。"),
+        ("diffusers", "WanVideo 采样需要 diffusers 库提供调度器和工具函数。"),
+        ("ftfy", "WanVideo 文本处理需要 ftfy 修复文本编码问题。"),
+    ]
+
+    # Triton 依赖检查（根据平台选择正确的包名）
+    system = platform.system()
+    if system == "Windows":
+        # Windows 使用 triton-windows 包
+        try:
+            __import__("triton")
+        except ImportError:
+            required_deps.append(
+                ("triton-windows", "PyTorch 编译加速需要 triton-windows 库（用于 torch.compile/torch._inductor）。")
+            )
+    elif system in ["Linux", "Darwin"]:  # Darwin = macOS
+        required_deps.append(
+            ("triton", "PyTorch 编译加速需要 triton 库（用于 torch.compile/torch._inductor）。")
+        )
+
+    # 检查缺失的依赖
+    missing_deps = []
+    for module_name, description in required_deps:
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing_deps.append({
+                "module_name": module_name,
+                "package_name": module_name,
+                "display_name": module_name,
+                "description": description,
+            })
+
+    if missing_deps:
+        # 使用公共函数生成报告
+        report = build_dependency_model_report(
+            node_name=NODE_DISPLAY_NAME,
+            missing_dependencies=missing_deps,
+            install_packages=[m["package_name"] for m in missing_deps],
+        )
+        
+        _DESCRIPTION = report.get("warning_message", _DESCRIPTION)
+        _GJJ_HELP["description"] = report.get("panel_message", _GJJ_HELP["description"])
+        _GJJ_HELP["install_cmd"] = report.get("install_cmd", "")
+        _GJJ_HELP["warning_message"] = report.get("warning_message", "")
+
+        # 打印控制台报告
+        try:
+            print_dependency_model_report(
+                report,
+                title="GJJ WanVideo Sampler v2 启动时依赖缺失！",
+            )
+        except Exception:
+            pass
+    else:
+        _DESCRIPTION = f"✅ {_DESCRIPTION}"
+
+
+# 启动时检查依赖
+_check_startup_dependencies()
+
 
 WANVIDEO_SAMPLER_SCHEDULER_CHOICES = [
     "unipc",
@@ -33,10 +167,16 @@ def _load_sampler_runtime():
     try:
         from ..vendor.wanvideo_wrapper import nodes_sampler as sampler_runtime
     except ImportError as error:
+        # 使用公共函数处理运行时依赖错误（不传 unique_id，因为这是模块级加载）
+        print_runtime_dependency_error(
+            node_name=NODE_DISPLAY_NAME,
+            dependency_name="accelerate/einops/diffusers/ftfy",
+            description=str(error),
+        )
         raise RuntimeError(
             "GJJ 内置 WanVideo 采样 runtime 加载失败。\n"
             f"错误信息: {error}\n"
-            "说明: 本节点不依赖 ComfyUI-WanVideoWrapper 插件本体；如果缺少 accelerate、tqdm、matplotlib、sageattention 等 pip 库，请按 GJJ SKILL 的运行时依赖方案安装。"
+            "说明: 本节点不依赖 ComfyUI-WanVideoWrapper 插件本体；如果缺少 accelerate、einops、diffusers、ftfy 等 pip 库，请按 GJJ SKILL 的运行时依赖方案安装。"
         ) from error
     return sampler_runtime
 
@@ -73,6 +213,59 @@ def _source_wanvideo_sampler_if_loaded(model):
         return sampler_cls()
     except Exception:
         return None
+
+
+def _unwrap_compiled_module(module):
+    while hasattr(module, "_orig_mod"):
+        module = module._orig_mod
+    return module
+
+
+def _disable_model_compile_runtime(patcher):
+    """在当前已加载模型上禁用 compile，并尽量解包已包装的模块。"""
+    try:
+        model = getattr(patcher, "model", None)
+        if model is None:
+            return False
+
+        changed = False
+
+        try:
+            if model["compile_args"] is not None:
+                model["compile_args"] = None
+                changed = True
+        except Exception:
+            pass
+
+        transformer = getattr(model, "diffusion_model", None)
+        if transformer is None:
+            return changed
+
+        unwrapped_transformer = _unwrap_compiled_module(transformer)
+        if unwrapped_transformer is not transformer:
+            try:
+                model.diffusion_model = unwrapped_transformer
+                transformer = unwrapped_transformer
+                changed = True
+            except Exception:
+                transformer = unwrapped_transformer
+
+        for attr_name in ("blocks", "vace_blocks"):
+            blocks = getattr(transformer, attr_name, None)
+            if blocks is None:
+                continue
+            try:
+                for index, block in enumerate(blocks):
+                    unwrapped_block = _unwrap_compiled_module(block)
+                    if unwrapped_block is not block:
+                        blocks[index] = unwrapped_block
+                        changed = True
+            except Exception:
+                continue
+
+        return changed
+    except Exception:
+        return False
 
 
 def _scheduler_choices():
@@ -677,13 +870,8 @@ class GJJ_WanVideoSamplerV2:
     OUTPUT_TOOLTIPS = ("采样结果 latent。", "去噪后的 latent，供预览或调试使用。")
     FUNCTION = "process"
     CATEGORY = "GJJ/视频模型/WanVideo"
-    DESCRIPTION = "GJJ WanVideo 视频采样器 v2：固定经典插槽版，调用 GJJ 内置 vendored WanVideoWrapper 核心 runtime。"
-    GJJ_HELP = {
-        "title": "WanVideo Sampler v2",
-        "description": "复刻 WanVideoWrapper 的 Sampler 调用层。此版使用固定经典插槽，避免前端动态重排导致类型错位。",
-        "🌏模型下载": "复用本机 ComfyUI models/diffusion_models、models/unet_gguf、models/vae 等 WanVideo 模型目录。",
-        "runtime": "无需安装 ComfyUI-WanVideoWrapper 插件本体；pip 依赖仍按 GJJ SKILL 的 WanVideo 运行时依赖方案安装。",
-    }
+    DESCRIPTION = _DESCRIPTION
+    GJJ_HELP = _GJJ_HELP
 
     def process(
         self,
@@ -784,8 +972,113 @@ class GJJ_WanVideoSamplerV2:
         if node is None:
             runtime = _load_sampler_runtime()
             node = runtime.WanVideoSampler()
-        return node.process(**args)
+        
+        # 尝试执行,如果因 Triton 编译失败则自动降级
+        import platform
+        system = platform.system()
+        max_retries = 2 if system == "Windows" else 1  # Windows 允许重试一次
+        
+        for attempt in range(max_retries):
+            try:
+                return node.process(**args)
+            except Exception as e:
+                error_str = str(e).lower()
+                
+                # 检测 Triton 编译失败错误（包括 InductorError 包装的情况）
+                # 支持多种错误格式:
+                # 1. torch._inductor.exc.TritonMissing
+                # 2. torch._inductor.exc.InductorError (包装 CalledProcessError)
+                # 3. subprocess.CalledProcessError (直接抛出)
+                is_triton_compile_error = (
+                    system == "Windows" and 
+                    attempt == 0 and
+                    (
+                        # 原始 Triton 错误
+                        ("triton" in error_str and ("not installed" in error_str or "too old" in error_str or "cannot find" in error_str)) or
+                        # TCC 编译失败 (可能被 InductorError 包装)
+                        ("tcc.exe" in error_str and "returned non-zero exit status" in error_str) or
+                        # InductorError 包含编译相关错误
+                        ("inductorerror" in error_str and ("compile" in error_str or "tcc" in error_str or "cuda_utils" in error_str))
+                    )
+                )
+                
+                if is_triton_compile_error:
+                    # 首次遇到编译失败,尝试禁用 torch.compile 后重试
+                    print(f"\n{'='*80}")
+                    print(f"⚠️ 检测到 Triton 编译失败，尝试自动降级运行...")
+                    print(f"{'='*80}\n")
+                    
+                    # 临时禁用 torch.compile
+                    import os
+                    original_torch_compile = os.environ.get("TORCH_COMPILE", "")
+                    os.environ["TORCH_COMPILE"] = "0"
+                    
+                    # 清除 PyTorch 编译缓存
+                    try:
+                        import torch._dynamo as dynamo
+                        dynamo.reset()
+                    except Exception:
+                        pass
 
+                    runtime_compile_disabled = _disable_model_compile_runtime(args["model"])
+                    if runtime_compile_disabled:
+                        print("🔧 已从当前模型移除 compile_args，并解包已包装的编译模块。")
+                    
+                    print(f"🔄 已禁用 torch.compile，正在重新执行...\n")
+                    
+                    # 重新加载节点以应用新配置
+                    if hasattr(node, '__class__'):
+                        node = node.__class__()
+                    
+                    continue  # 重试
+                
+                # 非编译错误或已达到最大重试次数,按原逻辑处理
+                # 检测 Triton 缺失错误
+                if "triton" in error_str and ("not installed" in error_str or "too old" in error_str or "cannot find" in error_str):
+                    if system == "Windows":
+                        # Windows 使用 triton-windows 包
+                        print_runtime_dependency_error(
+                            node_name=NODE_DISPLAY_NAME,
+                            dependency_name="triton-windows",
+                            description=str(e),
+                            unique_id=None,
+                        )
+                        raise RuntimeError(
+                            f"GJJ WanVideo Sampler v2 运行时组件缺失：缺少 triton-windows（PyTorch 编译加速库）\n"
+                            f"错误详情: {e}\n"
+                            f"解决方案: pip install triton-windows -i https://pypi.tuna.tsinghua.edu.cn/simple"
+                        ) from e
+                    else:
+                        # Linux/macOS 使用标准 triton 包
+                        print_runtime_dependency_error(
+                            node_name=NODE_DISPLAY_NAME,
+                            dependency_name="triton",
+                            description=str(e),
+                            unique_id=None,
+                        )
+                        raise RuntimeError(
+                            f"GJJ WanVideo Sampler v2 运行时组件缺失：缺少 triton（PyTorch 编译加速库）\n"
+                            f"错误详情: {e}\n"
+                            f"解决方案: pip install triton -i https://pypi.tuna.tsinghua.edu.cn/simple"
+                        ) from e
+                
+                # 检测真正的 CUDA/cuDNN 缺失错误（非编译错误）
+                elif ("cuda" in error_str or "cudnn" in error_str) and ("tcc.exe" not in error_str and "compile" not in error_str and "inductorerror" not in error_str):
+                    print_runtime_dependency_error(
+                        node_name=NODE_DISPLAY_NAME,
+                        dependency_name="CUDA/cuDNN",
+                        description=str(e),
+                        unique_id=None,
+                    )
+                    raise RuntimeError(
+                        f"GJJ WanVideo Sampler v2 运行时环境配置问题：CUDA/cuDNN 不可用\n"
+                        f"错误详情: {e}\n"
+                        f"解决方案: 请检查 NVIDIA 驱动和 CUDA Toolkit 是否正确安装"
+                    ) from e
+                
+                # 其他未知错误，直接抛出
+                else:
+                    raise
 
 NODE_CLASS_MAPPINGS = {
     "GJJ_WanVideoSchedulerV2": GJJ_WanVideoSchedulerV2,
