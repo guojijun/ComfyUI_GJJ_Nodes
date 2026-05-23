@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import hashlib
 import os
+import sys
 import torch
 
 import folder_paths
@@ -11,6 +12,259 @@ from comfy.utils import ProgressBar
 
 
 NODE_NAME = "GJJ_WanVideoTextEncodeCached"
+NODE_DISPLAY_NAME = "📝 WanVideo 文本编码（缓存版）"
+
+# ============================================================================
+# 启动时依赖检查
+# ============================================================================
+_DEPENDENCY_CHECKER = None
+_DEPENDENCIES_AVAILABLE = False
+_MODELS_AVAILABLE = True
+_MISSING_DEPENDENCIES = []
+_MISSING_MODELS = []
+_DESCRIPTION = "编码文本提示词为文本嵌入，支持磁盘缓存加速。加载 T5 编码器后自动卸载，不占用显存。"
+_GJJ_HELP = {
+    "title": "WanVideo 文本编码（缓存版）",
+    "description": "把正向和负向提示词编码为 WanVideo 可读取的文本嵌入，支持磁盘缓存避免重复编码。",
+    "usage": [
+        "模型选择：从 models/text_encoders/ 目录及其子目录中自动扫描可用模型。",
+        "精度：bf16 推荐用于现代 GPU，fp32 精度最高但显存占用大。",
+        "量化：disabled 为不量化，fp8_e4m3fn 可减少显存使用。",
+        "使用磁盘缓存：开启后将嵌入结果缓存到磁盘，下次使用相同提示词时直接加载。",
+    ],
+    "dependencies": [
+        "ftfy：WanVideo 文本编码需要 ftfy 修复文本编码问题。",
+        "transformers：加载 T5 文本编码器模型。",
+    ],
+    "notes": [
+        "本节点使用 GJJ vendor/wanvideo_wrapper 内置运行时，不依赖外部 ComfyUI-WanVideoWrapper 插件。",
+        "缺失依赖时，节点面板会显示复制安装命令按钮，点击后可在 PowerShell 中直接执行安装。",
+        "安装完成后请重启 ComfyUI 服务器。",
+    ],
+}
+
+
+def _load_dependency_checker():
+    """懒加载 GJJ 公共依赖检查工具。"""
+    global _DEPENDENCY_CHECKER
+    if _DEPENDENCY_CHECKER is not None:
+        return _DEPENDENCY_CHECKER
+    try:
+        try:
+            from .common_utils import dependency_checker as checker
+        except Exception:
+            from common_utils.dependency_checker import (
+                build_dependency_model_report,
+                print_dependency_model_report,
+                get_pip_install_command_text,
+                send_dependency_model_notice,
+                _generate_warning_message,
+            )
+            _DEPENDENCY_CHECKER = {
+                "build_dependency_model_report": build_dependency_model_report,
+                "print_dependency_model_report": print_dependency_model_report,
+                "get_pip_install_command_text": get_pip_install_command_text,
+                "send_dependency_model_notice": send_dependency_model_notice,
+                "_generate_warning_message": _generate_warning_message,
+            }
+            return _DEPENDENCY_CHECKER
+    except Exception:
+        pass
+    return None
+
+
+def _check_startup_dependencies():
+    """启动时检查依赖，只跳过当前节点，不影响其他节点。"""
+    global _DEPENDENCIES_AVAILABLE, _MISSING_DEPENDENCIES, _DESCRIPTION
+
+    checker = _load_dependency_checker()
+    required_modules = [
+        ("ftfy", "ftfy", "WanVideo 文本编码需要 ftfy 修复文本编码问题。"),
+        ("transformers", "transformers", "加载 T5 文本编码器模型。"),
+    ]
+
+    missing = []
+    for module_name, package_name, description in required_modules:
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing.append({
+                "module_name": module_name,
+                "package_name": package_name,
+                "display_name": module_name,
+                "description": description,
+            })
+
+    if missing:
+        _DEPENDENCIES_AVAILABLE = False
+        _MISSING_DEPENDENCIES = missing
+
+        if checker is not None:
+            report = checker["build_dependency_model_report"](
+                node_name=NODE_DISPLAY_NAME,
+                missing_dependencies=missing,
+                install_packages=[m["package_name"] for m in missing],
+            )
+            report["node_name"] = NODE_DISPLAY_NAME
+            _DESCRIPTION = report.get("description_message") or report.get("warning_message")
+            _GJJ_HELP["description"] = report.get("help_message") or _GJJ_HELP["description"]
+            _GJJ_HELP["install_cmd"] = report.get("install_cmd", "")
+            _GJJ_HELP["warning_message"] = report.get("warning_message", "")
+
+            try:
+                checker["print_dependency_model_report"](
+                    report,
+                    title="GJJ WanVideo 文本编码 启动时依赖缺失！",
+                )
+            except Exception:
+                pass
+        else:
+            install_cmd = _build_fallback_install_cmd([m["package_name"] for m in missing])
+            _DESCRIPTION = (
+                f"⚠️缺失运行依赖，点击❓按钮了解详情。\n\n"
+                f"📦 必需依赖：{', '.join(m['package_name'] for m in missing)}\n\n"
+                f"🔧 快速安装命令：\n{install_cmd}\n\n"
+                f"提示：安装后请重启 ComfyUI 服务器。"
+            )
+
+            red = "\033[91m"
+            yellow = "\033[93m"
+            cyan = "\033[96m"
+            green = "\033[92m"
+            reset = "\033[0m"
+            line = "=" * 90
+            print(f"\n{red}{line}{reset}")
+            print(f"{red}  GJJ WanVideo 文本编码 启动时依赖缺失！{reset}")
+            print(f"{red}{line}{reset}")
+            print(f"{yellow}[GJJ] {reset}节点: {cyan}{NODE_DISPLAY_NAME}{reset}")
+            for m in missing:
+                print(f"{yellow}[GJJ] {reset}缺失依赖: {red}{m['module_name']}{reset}")
+                if m.get("description"):
+                    print(f"{yellow}[GJJ] {reset}{m['description']}")
+            print(f"\n{yellow}[GJJ] {reset}快速安装命令:")
+            print(f"{green}{install_cmd}{reset}")
+            print(f"\n{yellow}[GJJ] {reset}提示: 安装后请重启 ComfyUI 服务器")
+            print(f"{red}{line}{reset}\n")
+    else:
+        _DEPENDENCIES_AVAILABLE = True
+
+
+def _build_fallback_install_cmd(packages):
+    """兜底安装命令生成。"""
+    import os
+    python_path = sys.executable
+    site_packages = os.path.join(os.path.dirname(python_path), "Lib", "site-packages")
+    pkgs = " ".join(packages)
+    return f'& "{python_path}" -m pip install {pkgs} -i https://pypi.tuna.tsinghua.edu.cn/simple --ignore-installed --target "{site_packages}"'
+
+
+def _handle_runtime_dependency_error(error, unique_id=None):
+    """运行时依赖缺失处理：控制台彩色输出 + 前端事件推送。"""
+    checker = _load_dependency_checker()
+
+    missing_modules = []
+    error_str = str(error)
+    if "ftfy" in error_str.lower():
+        missing_modules.append({
+            "module_name": "ftfy",
+            "package_name": "ftfy",
+            "display_name": "ftfy",
+            "description": "WanVideo 文本编码需要 ftfy 修复文本编码问题。",
+        })
+    if "transformers" in error_str.lower():
+        missing_modules.append({
+            "module_name": "transformers",
+            "package_name": "transformers",
+            "display_name": "transformers",
+            "description": "加载 T5 文本编码器模型。",
+        })
+
+    if not missing_modules:
+        missing_modules.append({
+            "module_name": "ftfy",
+            "package_name": "ftfy",
+            "display_name": "ftfy",
+            "description": "WanVideo 运行时依赖 ftfy 库。",
+        })
+
+    packages = [m["package_name"] for m in missing_modules]
+
+    if checker is not None:
+        report = checker["build_dependency_model_report"](
+            node_name=NODE_DISPLAY_NAME,
+            missing_dependencies=missing_modules,
+            install_packages=packages,
+            original_error=error_str,
+        )
+        report["node_name"] = NODE_DISPLAY_NAME
+
+        try:
+            checker["print_dependency_model_report"](
+                report,
+                title="GJJ 节点运行时依赖缺失！",
+            )
+        except Exception:
+            pass
+
+        if unique_id is not None:
+            try:
+                checker["send_dependency_model_notice"](
+                    report,
+                    unique_id=unique_id,
+                )
+            except Exception:
+                pass
+
+        return report.get("install_cmd", "") or _build_fallback_install_cmd(packages)
+    else:
+        install_cmd = _build_fallback_install_cmd(packages)
+
+        red = "\033[91m"
+        yellow = "\033[93m"
+        cyan = "\033[96m"
+        green = "\033[92m"
+        reset = "\033[0m"
+        line = "=" * 90
+        print(f"\n{red}{line}{reset}")
+        print(f"{red}  GJJ 节点运行时依赖缺失！{reset}")
+        print(f"{red}{line}{reset}")
+        print(f"{yellow}[GJJ] {reset}节点: {cyan}{NODE_DISPLAY_NAME}{reset}")
+        for m in missing_modules:
+            print(f"{yellow}[GJJ] {reset}缺失依赖: {red}{m['module_name']}{reset}")
+            if m.get("description"):
+                print(f"{yellow}[GJJ] {reset}{m['description']}")
+        print(f"\n{yellow}[GJJ] {reset}快速安装命令:")
+        print(f"{green}{install_cmd}{reset}")
+        print(f"\n{yellow}[GJJ] {reset}原始错误: {error_str}")
+        print(f"\n{yellow}[GJJ] {reset}提示: 安装后请重启 ComfyUI 服务器")
+        print(f"{red}{line}{reset}\n")
+
+        if unique_id is not None:
+            try:
+                from server import PromptServer
+                PromptServer.instance.send_sync("gjj_dependency_model_notice", {
+                    "node": str(unique_id),
+                    "warning_message": f"⚠️缺失运行依赖，点击❓按钮了解详情。",
+                    "panel_message": (
+                        f"⚠️缺失运行依赖，点击❓按钮了解详情。\n\n"
+                        f"📦 必需依赖（请安装）：\n"
+                        + "\n".join(f"• {m['package_name']}（{m['description']}）" for m in missing_modules)
+                        + f"\n\n🔧 快速安装命令：\n{install_cmd}\n\n"
+                        f"原始错误：{error_str}\n\n"
+                        f"提示：安装后请重启 ComfyUI 服务器。"
+                    ),
+                    "install_command": install_cmd,
+                    "copy_text": install_cmd,
+                    "copy_label": "📋 复制安装命令",
+                })
+            except Exception:
+                pass
+
+        return install_cmd
+
+
+# 启动时检查依赖
+_check_startup_dependencies()
 
 
 def _scan_text_encoders(keyword="umt5-xxl-enc"):
@@ -131,7 +385,7 @@ def _save_text_embeds(positive_prompt, negative_prompt, context, context_null):
 class GJJ_WanVideoTextEncodeCached:
     CATEGORY = "GJJ/视频生成"
     FUNCTION = "process"
-    DESCRIPTION = "编码文本提示词为文本嵌入，支持磁盘缓存加速。加载 T5 编码器后自动卸载，不占用显存。"
+    DESCRIPTION = _DESCRIPTION
     SEARCH_ALIASES = [
         "WanVideo Text Encode",
         "Wan T5 文本编码",
@@ -145,6 +399,8 @@ class GJJ_WanVideoTextEncodeCached:
         "仅负向提示词的嵌入（用于 NAG）",
         "处理后的正向提示词",
     )
+
+    GJJ_HELP = _GJJ_HELP
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -236,8 +492,21 @@ class GJJ_WanVideoTextEncodeCached:
         print(f"[GJJ WanVideoTextEncode] 设备: {device}")
         print(f"[GJJ WanVideoTextEncode] 使用磁盘缓存: {use_disk_cache}")
 
-        wan_nodes = _load_wanvideo_nodes()
-        wan_model_loading = _load_wanvideo_model_loading()
+        # 运行时依赖检查
+        try:
+            wan_nodes = _load_wanvideo_nodes()
+            wan_model_loading = _load_wanvideo_model_loading()
+        except RuntimeError as e:
+            _handle_runtime_dependency_error(e, unique_id=unique_id)
+            raise
+        except Exception as e:
+            _handle_runtime_dependency_error(e, unique_id=unique_id)
+            raise RuntimeError(
+                f"GJJ 内置 WanVideo 文本编码加载失败。\n"
+                f"错误信息: {e}\n"
+                f"说明: 本节点使用 GJJ vendor/wanvideo_wrapper 内置运行时，不依赖外部 ComfyUI-WanVideoWrapper 插件。"
+            ) from e
+
         LoadWanVideoT5TextEncoder = getattr(wan_model_loading, "LoadWanVideoT5TextEncoder")
         WanVideoTextEncode = getattr(wan_nodes, "WanVideoTextEncode")
 
@@ -310,4 +579,4 @@ class GJJ_WanVideoTextEncodeCached:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_WanVideoTextEncodeCached}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "📝 WanVideo 文本编码（缓存版）"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: NODE_DISPLAY_NAME}
