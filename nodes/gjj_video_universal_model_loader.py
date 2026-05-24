@@ -1230,6 +1230,12 @@ def _is_lora_slot(slot: dict[str, Any]) -> bool:
     return str(slot.get("folder", "")).strip() == "loras"
 
 
+def _is_visible_output_slot(slot: dict[str, Any]) -> bool:
+    if _is_lora_slot(slot):
+        return False
+    return str(slot.get("kind", "")).strip() not in {"name", "name_any"}
+
+
 def _slot_branch(slot_id: str, label: str = "") -> str:
     text = f"{slot_id} {label}".lower()
     if "high" in text or "高" in text:
@@ -1264,8 +1270,8 @@ def _config_payload() -> dict[str, Any]:
             "label": cfg.get("label", key),
             "clip_type": cfg.get("clip_type", "wan"),
             "uses_lora": any(_is_lora_slot(slot) for slot in cfg.get("slots", [])),
-            # 输出槽只包含真正要给下游使用的对象；LoRA 槽只在节点内部串联，不暴露 STRING 输出。
-            "output_slots": [slot for slot in cfg.get("slots", []) if not _is_lora_slot(slot)],
+            # 输出槽只包含真正要给下游使用的对象；LoRA/名称槽只在节点内部使用，不暴露 STRING 输出。
+            "output_slots": [slot for slot in cfg.get("slots", []) if _is_visible_output_slot(slot)],
             "slots": cfg.get("slots", []),
         }
         for key, cfg in VIDEO_MODEL_CONFIGS.items()

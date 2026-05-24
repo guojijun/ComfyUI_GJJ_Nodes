@@ -359,6 +359,7 @@ function effectiveUseLora(node) {
 }
 
 function isLoraSlot(slot) { return String(slot?.folder || "") === "loras"; }
+function isNameOnlySlot(slot) { return ["name", "name_any"].includes(String(slot?.kind || "")); }
 function isDualClipSlot(slot) { return String(slot?.loader || "") === "dual_clip"; }
 function isModelOutputSlot(slot) {
 	return ["diffusion", "checkpoint_model"].includes(String(slot?.kind || ""));
@@ -373,7 +374,7 @@ function visibleOutputSlots(cfg) {
 	// 后端也下发 output_slots；这里优先使用它，保证前端输出顺序与后端返回 tuple 一致。
 	// V20 开始不再插入占位、不再动态增删输出口，只按配置顺序修正 output1-output12 的标签和类型。
 	const source = Array.isArray(cfg?.output_slots) ? cfg.output_slots : (cfg?.slots || []);
-	return source.slice(0, MAX_SLOTS).filter((slot) => !isLoraSlot(slot));
+	return source.slice(0, MAX_SLOTS).filter((slot) => !isLoraSlot(slot) && !isNameOnlySlot(slot));
 }
 function hasLoraSlots(cfg) { return (cfg?.slots || []).some(isLoraSlot); }
 function slotKey(slot, idx = 0) {
