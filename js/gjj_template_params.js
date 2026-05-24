@@ -25,7 +25,7 @@ function detectMediaType(value) {
 	return null;
 }
 
-function updatePreview(preview, value, isImage, isAudio, isVideo) {
+function updatePreview(preview, value, isImage, isAudio, isVideo, directUrl = null) {
 	if (!preview) return;
 
 	if (!value || value.trim() === "") {
@@ -39,7 +39,7 @@ function updatePreview(preview, value, isImage, isAudio, isVideo) {
 		return;
 	}
 
-	const apiUrl = mediaRefToViewUrl(value);
+	const apiUrl = directUrl || mediaRefToViewUrl(value);
 
 	if (isImage) {
 		preview.innerHTML =
@@ -53,6 +53,10 @@ function updatePreview(preview, value, isImage, isAudio, isVideo) {
 		preview.innerHTML =
 			'<audio controls src="' + apiUrl + '" style="width:100%;"></audio>';
 	}
+}
+
+function selectedFilePath(file) {
+	return String(file?.path || file?.webkitRelativePath || file?.name || "").trim();
 }
 
 function mediaRefToViewUrl(value) {
@@ -103,8 +107,9 @@ function openFileDialog(node, field, input, values, isImage, isAudio, isVideo) {
 
 		if (!file) return;
 
-		input.value = file.name;
-		values[field.key] = file.name;
+		const chosenPath = selectedFilePath(file);
+		input.value = chosenPath;
+		values[field.key] = chosenPath;
 
 		const template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
 		const fields = parseTemplate(template);
@@ -119,7 +124,10 @@ function openFileDialog(node, field, input, values, isImage, isAudio, isVideo) {
 				".gjj-template-param-preview-image, .gjj-template-param-preview-audio, .gjj-template-param-preview-video"
 			);
 
-			if (preview) updatePreview(preview, file.name, isImage, isAudio, isVideo);
+			if (preview) {
+				const objectUrl = URL.createObjectURL(file);
+				updatePreview(preview, chosenPath, isImage, isAudio, isVideo, objectUrl);
+			}
 		}
 	});
 

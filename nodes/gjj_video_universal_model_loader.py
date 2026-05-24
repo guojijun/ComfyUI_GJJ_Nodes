@@ -266,11 +266,11 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         ],
     },
     "wan21_vace": {
-        "label": "Wan2.1 VACE 14B",
+        "label": "Wan2.1 VACE 14B 可控生成",
         "clip_type": "wan",
         "slots": [
-            S("model", "VACE模型", "diffusion_models", "diffusion", ["wan", "vace"]),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
+            S("model", "模型", "diffusion_models", "diffusion", ["wan2.1", "vace"]),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1","vae"]),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
         ],
     },

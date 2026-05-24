@@ -122,48 +122,89 @@ def _load_video_from_path(file_path: str):
         return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
 
 
-def _resolve_media_file(filename: str) -> str | None:
-    """解析媒体文件路径，支持 input/output/temp 目录"""
-    if not filename or not filename.strip():
+def _configured_media_roots() -> dict[str, str]:
+    return {
+        "input": folder_paths.get_input_directory(),
+        "output": folder_paths.get_output_directory(),
+        "temp": folder_paths.get_temp_directory(),
+    }
+
+
+def _path_exists(path: str | os.PathLike[str]) -> str | None:
+    try:
+        resolved = Path(path).expanduser()
+        if resolved.exists():
+            return str(resolved)
+    except Exception:
         return None
-    
-    filename = filename.strip()
-    parsed = urlparse(filename)
+    return None
+
+
+def _clean_media_reference(filename: str) -> tuple[str, str]:
+    media_type_hint = ""
+    text = str(filename or "").strip()
+    parsed = urlparse(text)
+
+    if parsed.scheme == "file":
+        path = unquote(parsed.path or "")
+        if os.name == "nt" and re.match(r"^/[A-Za-z]:/", path):
+            path = path[1:]
+        if parsed.netloc and not path.startswith(("\\", "/")):
+            path = f"//{parsed.netloc}/{path}"
+        return path, media_type_hint
+
     if parsed.path.endswith("/view") and parsed.query:
         query = parse_qs(parsed.query)
         name = query.get("filename", [""])[0]
         subfolder = query.get("subfolder", [""])[0]
-        filename = os.path.join(subfolder, name) if subfolder else name
+        media_type_hint = query.get("type", [""])[0].strip().lower()
+        text = os.path.join(subfolder, name) if subfolder else name
 
-    filename = unquote(filename).strip().replace("\\", os.sep).replace("/", os.sep)
+    text = unquote(text).strip().strip('"').strip("'")
+    if os.name == "nt" and re.match(r"^/[A-Za-z]:[/\\]", text):
+        text = text[1:]
+    return text.replace("\\", os.sep).replace("/", os.sep), media_type_hint
+
+
+def _resolve_media_file(filename: str) -> str | None:
+    """解析媒体文件路径：支持 input/output/temp、其它相对路径和绝对路径。"""
+    if not filename or not str(filename).strip():
+        return None
+
+    filename, media_type_hint = _clean_media_reference(filename)
+    roots = _configured_media_roots()
     lowered = filename.lower()
-    for prefix in ("input" + os.sep, "output" + os.sep, "temp" + os.sep):
+
+    if media_type_hint in roots:
+        stripped = filename
+        prefix = media_type_hint + os.sep
         if lowered.startswith(prefix):
-            filename = filename[len(prefix):]
+            stripped = filename[len(prefix):]
+        found = _path_exists(Path(roots[media_type_hint]) / stripped)
+        if found:
+            return found
+
+    if os.path.isabs(filename):
+        return _path_exists(filename)
+
+    for root_key, root_path in roots.items():
+        prefix = root_key + os.sep
+        if lowered.startswith(prefix):
+            found = _path_exists(Path(root_path) / filename[len(prefix):])
+            if found:
+                return found
             break
-    
-    # 尝试在 input 目录查找
-    input_dir = folder_paths.get_input_directory()
-    candidate = os.path.join(input_dir, filename)
-    if os.path.exists(candidate):
-        return candidate
-    
-    # 尝试在 output 目录查找
-    output_dir = folder_paths.get_output_directory()
-    candidate = os.path.join(output_dir, filename)
-    if os.path.exists(candidate):
-        return candidate
-    
-    # 尝试在 temp 目录查找
-    temp_dir = folder_paths.get_temp_directory()
-    candidate = os.path.join(temp_dir, filename)
-    if os.path.exists(candidate):
-        return candidate
-    
-    # 如果是绝对路径且存在
-    if os.path.isabs(filename) and os.path.exists(filename):
-        return filename
-    
+
+    for base in (Path.cwd(), Path(roots["input"])):
+        found = _path_exists(base / filename)
+        if found:
+            return found
+
+    for root_path in roots.values():
+        found = _path_exists(Path(root_path) / filename)
+        if found:
+            return found
+
     return None
 
 
@@ -172,7 +213,9 @@ def _load_media_object(filename: str, media_type: str) -> Any:
     file_path = _resolve_media_file(filename)
     if not file_path:
         if media_type == "IMAGE":
-            raise FileNotFoundError(f"找不到图片文件：{filename}。请确认文件在当前 ComfyUI 的 input 目录，或填写 input 子目录相对路径。")
+            raise FileNotFoundError(
+                f"找不到图片文件：{filename}。支持 input/output/temp 相对路径、ComfyUI 当前目录相对路径和绝对路径。"
+            )
         elif media_type == "AUDIO":
             return {"waveform": torch.zeros((1, 1, 44100)), "sample_rate": 44100}
         elif media_type == "VIDEO":
