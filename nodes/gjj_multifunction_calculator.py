@@ -224,7 +224,7 @@ class GJJ_MultifunctionCalculator:
                 "formula": (
                     "STRING",
                     {
-                        "default": "x1 + x2",
+                        "default": "x1 * x2 +1",
                         "multiline": False,
                         "display_name": "计算公式",
                         "tooltip": "在这里填写公式；动态输入按 x1、x2、x3 引用。支持 + - * / % // ** 和 abs、round、floor、ceil、min、max、sum、avg、mean、any、pow、mod。",

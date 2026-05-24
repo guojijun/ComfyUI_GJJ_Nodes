@@ -5,8 +5,7 @@ const LIST_API = "/gjj/video_universal_loader_lists";
 const MAX_SLOTS = 12;
 const SAVED_VALUES_PROPERTY = "gjj_video_universal_loader_values";
 const FILTER_PROPERTY = "gjj_video_universal_loader_filters";
-const MIN_NODE_WIDTH = 500;
-const OUTPUT_HIT_LANE = 96;
+const OUTPUT_HIT_LANE = 34;
 
 const OUTPUT_TYPE_BY_KIND = {
 	diffusion: "MODEL",
@@ -552,8 +551,8 @@ function ensureDom(node) {
 	const domWidget = node.addDOMWidget?.("gjj_video_universal_loader_dom", "HTML", container, { serialize: false, hideOnZoom: false });
 	if (domWidget) {
 		domWidget.computeSize = (width) => {
-			const nodeWidth = Math.max(MIN_NODE_WIDTH, Number(width || node.size?.[0] || MIN_NODE_WIDTH));
-			return [nodeWidth, estimateNodeHeight(node)];
+			const nodeWidth = Math.max(430, Number(width || node.size?.[0] || 470));
+			return [Math.max(400, nodeWidth), estimateNodeHeight(node)];
 		};
 		node.__gjjVUWidget = domWidget;
 		forceDomPassThrough(node);
@@ -858,18 +857,16 @@ function hardRefreshOutputs(node) {
 function ensureActiveOutputCount(node, count) {
 	if (!Array.isArray(node.outputs)) node.outputs = [];
 	const target = Math.max(0, Math.min(MAX_SLOTS, Number(count) || 0));
-	// 后端保持 output1-output12 / *，但前端只显示当前配置真正用到的前 N 个输出口。
+	// 后端固定 output1-output12 / *，但前端只显示当前配置真正用到的前 N 个输出口。
 	// 不再用 hidden 留空，因为 LiteGraph 仍会画圆点，占用视觉空间。
 	removeExtraOutputLinks(node, target);
-	while (node.outputs.length > target) {
-		try { node.removeOutput?.(node.outputs.length - 1); }
-		catch (_) { node.outputs.pop(); }
-	}
+	if (node.outputs.length > target) node.outputs.splice(target);
 	while (node.outputs.length < target) {
 		try { node.addOutput?.("*", "*"); }
 		catch (_) { node.outputs.push({ name: "*", type: "*", links: [] }); }
 	}
 }
+
 function repairFixedOutput(node, out, slot, index) {
 	const used = !!slot;
 	const label = used ? outputLabelFor(slot) : "";
@@ -1116,7 +1113,7 @@ function applyConfig(node, opts = {}) {
 
 function refreshNode(node) {
 	if (!node) return;
-	const width = Math.max(MIN_NODE_WIDTH, Number(node.size?.[0] || MIN_NODE_WIDTH));
+	const width = Math.max(430, Math.min(Number(node.size?.[0] || 470), 500));
 	const height = estimateNodeHeight(node);
 	if (!node.__gjjVUSizing && (Math.abs(Number(node.size?.[0] || 0) - width) > 1 || Math.abs(Number(node.size?.[1] || 0) - height) > 1)) {
 		node.__gjjVUSizing = true;
