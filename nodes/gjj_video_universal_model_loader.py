@@ -282,17 +282,25 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
             S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip", "vision"]),
+        ],},
+    "wan21_fun_inp": {
+        "label": "Wan2.1 Fun Inp 1.3B",
+        "clip_type": "wan",
+        "slots": [
+            S("model", "Fun Inp", "diffusion_models", "diffusion", ["wan", "fun", "inp"]),
+            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip", "vision"]),
         ],
     },
     "wan21_fun_control": {
         "label": "Wan2.1 Fun Control 1.3B",
         "clip_type": "wan",
         "slots": [
-            S("model", "Fun Control", "diffusion_models", "diffusion", ["wan", "fun", "control"]),
+            S("model", "Fun Control", "diffusion_models", "diffusion", ["wan2.1", "fun", "control"]),
             S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
             S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip", "vision"]),
-            S("dwpose", "DWPose名称", "controlnet", "name_any", ["dw", "ucoco"]),
         ],
     },
     "wan21_ati_i2v": {

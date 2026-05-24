@@ -575,6 +575,43 @@ GJJ_TEACACHE_WAN_COEFFICIENTS = {
 }
 
 
+def _gjj_teacache_resolve_cache_device(cache_device):
+    if mm is None:
+        raise RuntimeError("缺少 ComfyUI model_management，无法判断缓存设备。")
+    return mm.get_torch_device() if cache_device == "主设备" else mm.unet_offload_device()
+
+
+def _gjj_teacache_resolve_mode(mode, source_type):
+    if mode == "自动":
+        return "e0" if str(source_type).endswith("_ret_mode") else "e"
+    return "e0" if mode == "e0" else "e"
+
+
+def _gjj_teacache_coefficient_key(source_type, mode):
+    source_type = str(source_type)
+    if mode == "e0" and not source_type.endswith("_ret_mode"):
+        candidate = f"{source_type}_ret_mode"
+        if candidate in GJJ_TEACACHE_WAN_COEFFICIENTS:
+            return candidate
+    if mode == "e" and source_type.endswith("_ret_mode"):
+        candidate = source_type[: -len("_ret_mode")]
+        if candidate in GJJ_TEACACHE_WAN_COEFFICIENTS:
+            return candidate
+    return source_type
+
+
+def _gjj_teacache_build_cache_args(rel_l1_thresh, start_step, end_step, cache_device, use_coefficients, mode):
+    return {
+        "cache_type": "TeaCache",
+        "rel_l1_thresh": float(rel_l1_thresh),
+        "start_step": int(start_step),
+        "end_step": int(end_step),
+        "cache_device": _gjj_teacache_resolve_cache_device(cache_device),
+        "use_coefficients": bool(use_coefficients),
+        "mode": mode,
+    }
+
+
 def _gjj_teacache_poly1d(coefficients, x):
     result = torch.zeros_like(x)
     degree = len(coefficients) - 1
@@ -598,6 +635,8 @@ def _gjj_teacache_wan_forward(self, x, t, context, clip_fea=None, freqs=None, tr
     model_type = transformer_options.get("model_type", "")
     enable_teacache = transformer_options.get("enable_teacache", True)
     cache_device = transformer_options.get("cache_device") or x.device
+    use_coefficients = bool(transformer_options.get("use_coefficients", True))
+    teacache_mode = transformer_options.get("teacache_mode") or _gjj_teacache_resolve_mode("自动", model_type)
 
     x = self.patch_embedding(x.float()).to(x.dtype)
     grid_sizes = x.shape[2:]
@@ -616,7 +655,7 @@ def _gjj_teacache_wan_forward(self, x, t, context, clip_fea=None, freqs=None, tr
         context_img_len = clip_fea.shape[-2]
 
     blocks_replace = patches_replace.get("dit", {})
-    modulated_input = e0.to(cache_device) if "ret_mode" in model_type else e.to(cache_device)
+    modulated_input = e.to(cache_device) if use_coefficients and teacache_mode == "e" else e0.to(cache_device)
     if not hasattr(self, "teacache_state"):
         self.teacache_state = {
             0: {"should_calc": True, "accumulated_rel_l1_distance": 0, "previous_modulated_input": None, "previous_residual": None},
@@ -627,7 +666,10 @@ def _gjj_teacache_wan_forward(self, x, t, context, clip_fea=None, freqs=None, tr
         if cache["previous_modulated_input"] is not None:
             try:
                 delta = (current_input - cache["previous_modulated_input"]).abs().mean() / cache["previous_modulated_input"].abs().mean()
-                cache["accumulated_rel_l1_distance"] += _gjj_teacache_poly1d(coefficients, delta)
+                if use_coefficients:
+                    cache["accumulated_rel_l1_distance"] += _gjj_teacache_poly1d(coefficients, delta)
+                else:
+                    cache["accumulated_rel_l1_distance"] += delta
                 if cache["accumulated_rel_l1_distance"] < rel_l1_thresh:
                     cache["should_calc"] = False
                 else:
@@ -688,13 +730,6 @@ class GJJ_TeaCacheWanVideo:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": (
-                    "MODEL",
-                    {
-                        "display_name": "模型",
-                        "tooltip": "WanVideo 扩散模型。节点会在模型上挂载 TeaCache 加速逻辑。",
-                    },
-                ),
                 "rel_l1_thresh": (
                     "FLOAT",
                     {
@@ -744,57 +779,122 @@ class GJJ_TeaCacheWanVideo:
                         "tooltip": "选择与当前 WanVideo 模型对应的 TeaCache 系数。旧工作流中的 1.3B/14B/图生视频480p/720p 会自动兼容。",
                     },
                 ),
+                "start_step": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 0,
+                        "max": 9999,
+                        "step": 1,
+                        "display_name": "开始步数",
+                        "tooltip": "输出缓存参数时使用：从第几步开始启用 TeaCache，连接到采样器 cache_args/teacache_args 时生效。",
+                    },
+                ),
+                "end_step": (
+                    "INT",
+                    {
+                        "default": -1,
+                        "min": -1,
+                        "max": 9999,
+                        "step": 1,
+                        "display_name": "结束步数",
+                        "tooltip": "输出缓存参数时使用：-1 表示采样器自动使用最后一步。",
+                    },
+                ),
+                "use_coefficients": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "display_name": "使用系数",
+                        "tooltip": "对齐原 WanVideo TeaCache 的 use_coefficients。关闭时阈值通常需要约缩小 10 倍。",
+                    },
+                ),
+                "mode": (
+                    ["自动", "e", "e0"],
+                    {
+                        "default": "自动",
+                        "display_name": "嵌入模式",
+                        "tooltip": "输出缓存参数时会转成原版 mode=e/e0；自动会按模型类型是否为 ret_mode 判断。",
+                    },
+                ),
+            },
+            "optional": {
+                "model": (
+                    "MODEL",
+                    {
+                        "display_name": "模型",
+                        "tooltip": "可选。连接后输出挂载 TeaCache 的模型；不连接时仍可单独输出原 WanVideo TeaCache 的缓存参数。",
+                    },
+                ),
             }
         }
 
-    RETURN_TYPES = ("MODEL",)
-    RETURN_NAMES = ("模型",)
-    OUTPUT_TOOLTIPS = ("已挂载 WanVideo TeaCache 的模型。",)
+    RETURN_TYPES = ("MODEL", "CACHEARGS")
+    RETURN_NAMES = ("模型", "缓存参数")
+    OUTPUT_TOOLTIPS = (
+        "已挂载 WanVideo TeaCache 的模型；用于 GJJ/ComfyUI 标准模型线。",
+        "原 WanVideo TeaCache 兼容参数；连接到 WanVideo 采样器的 cache_args 或 teacache_args。",
+    )
     FUNCTION = "patch"
     CATEGORY = "GJJ/模型优化"
-    DESCRIPTION = "GJJ · 🍵 GJJ TeaCache (WanVideo)：为 Wan2.1 视频模型挂载 TeaCache，加速采样推理。"
+    DESCRIPTION = "GJJ · 🍵 GJJ TeaCache (WanVideo)：支持模型直连 TeaCache，也可输出原 WanVideoWrapper 兼容的 CACHEARGS。"
     GJJ_HELP = {
         "title": "WanVideo TeaCache",
-        "description": "按新版 ComfyUI-TeaCache 的 Wan2.1 路径迁移，只使用 ComfyUI 官方 WanVideo 模型接口和 GJJ 本地代码。",
+        "description": "同一个 GJJ 节点兼容两条链路：模型输出用于 GJJ/ComfyUI 标准模型线，缓存参数输出用于 WanVideoWrapper 风格采样器。",
         "🌏模型下载": "无需额外模型；复用已加载的 WanVideo 模型。",
         "requirements": [
-            "需要当前 ComfyUI 内置 `comfy.ldm.wan.model.sinusoidal_embedding_1d`。",
-            "需要输入模型本身是 Wan2.1/WanVideo 结构，否则模型没有对应 forward_orig 可挂载。",
-            "不需要安装 ComfyUI-TeaCache 插件；本节点已迁移 WanVideo 必要逻辑。",
+            "模型直连模式需要当前 ComfyUI 内置 `comfy.ldm.wan.model.sinusoidal_embedding_1d`。",
+            "模型直连模式需要输入模型本身是 Wan2.1/WanVideo 结构，否则模型没有对应 forward_orig 可挂载。",
+            "缓存参数模式只生成本地 CACHEARGS 字典，不需要安装外部 WanVideoWrapper 节点包。",
         ],
         "usage": [
-            "模型类型必须与实际 WanVideo 模型匹配。",
+            "接第一个输出时，节点会在模型线路上挂载 TeaCache。",
+            "接第二个输出时，把缓存参数连到 WanVideo 采样器的 cache_args 或 teacache_args。",
             "缓存阈值越大越快，但可能带来更多画面差异。",
-            "若画面变化明显，先降低缓存阈值或缩小启用区间。",
+            "开始比例/结束比例用于模型输出；开始步数/结束步数用于缓存参数输出。",
         ],
-        "source": "D:/AI/MOD/custom_nodes/ComfyUI-TeaCache/nodes.py",
+        "source": "GJJ 本地实现 + vendor/wanvideo_wrapper/cache_methods/nodes_cache.py",
     }
 
     def patch(
         self,
-        model,
         rel_l1_thresh=0.4,
         start_percent=0.0,
         end_percent=1.0,
+        start_step=1,
+        end_step=-1,
         cache_device="主设备",
+        use_coefficients=True,
+        mode="自动",
         model_type="Wan2.1 图生视频 480p 14B",
+        model=None,
         unique_id=None,
         **kwargs,
     ):
-        if rel_l1_thresh == 0:
-            return (model,)
-
+        cache_args = None
         try:
+            source_type = GJJ_TEACACHE_WAN_MODEL_TYPES.get(model_type, str(model_type))
+            resolved_mode = _gjj_teacache_resolve_mode(mode, source_type)
+            cache_args = _gjj_teacache_build_cache_args(
+                rel_l1_thresh,
+                start_step,
+                end_step,
+                cache_device,
+                use_coefficients,
+                resolved_mode,
+            )
+
+            if model is None or rel_l1_thresh == 0:
+                return (model, cache_args)
+
             if torch is None:
                 raise RuntimeError("缺少 torch，无法启用 TeaCache。")
-            if mm is None:
-                raise RuntimeError("缺少 ComfyUI model_management，无法判断缓存设备。")
 
-            source_type = GJJ_TEACACHE_WAN_MODEL_TYPES.get(model_type, str(model_type))
-            coeffs = GJJ_TEACACHE_WAN_COEFFICIENTS.get(source_type)
-            if not coeffs:
+            coefficient_key = _gjj_teacache_coefficient_key(source_type, resolved_mode)
+            coeffs = GJJ_TEACACHE_WAN_COEFFICIENTS.get(coefficient_key)
+            if use_coefficients and not coeffs:
                 raise RuntimeError(f"未找到模型类型 `{model_type}` 对应的 TeaCache 系数。")
-            teacache_device = mm.get_torch_device() if cache_device == "主设备" else mm.unet_offload_device()
+            teacache_device = cache_args["cache_device"]
 
             model_clone = model.clone()
             if "transformer_options" not in model_clone.model_options:
@@ -802,7 +902,9 @@ class GJJ_TeaCacheWanVideo:
             model_clone.model_options["transformer_options"]["rel_l1_thresh"] = float(rel_l1_thresh)
             model_clone.model_options["transformer_options"]["cache_device"] = teacache_device
             model_clone.model_options["transformer_options"]["coefficients"] = coeffs
-            model_clone.model_options["transformer_options"]["model_type"] = source_type
+            model_clone.model_options["transformer_options"]["model_type"] = coefficient_key
+            model_clone.model_options["transformer_options"]["use_coefficients"] = bool(use_coefficients)
+            model_clone.model_options["transformer_options"]["teacache_mode"] = resolved_mode
             diffusion_model = model_clone.get_model_object("diffusion_model")
             if not hasattr(diffusion_model, "forward_orig"):
                 raise RuntimeError("输入模型不是可识别的 WanVideo 模型：未找到 forward_orig。")
@@ -844,13 +946,13 @@ class GJJ_TeaCacheWanVideo:
                     diffusion_model.forward_orig = original_forward_orig
 
             model_clone.set_model_unet_function_wrapper(unet_wrapper_function)
-            logging.info("GJJ TeaCache(WanVideo) 已应用：%s", source_type)
-            return (model_clone,)
+            logging.info("GJJ TeaCache(WanVideo) 已应用：%s/%s", coefficient_key, resolved_mode)
+            return (model_clone, cache_args)
         except Exception as e:
             logging.error(f"TeaCache 应用失败: {e}")
             traceback.print_exc()
             send_error_to_frontend(unique_id, "TeaCache 失败", f"{e}", None)
-            return (model,)
+            return (model, cache_args)
 
 
 NODE_CLASS_MAPPINGS["GJJ_TeaCacheWanVideo"] = GJJ_TeaCacheWanVideo

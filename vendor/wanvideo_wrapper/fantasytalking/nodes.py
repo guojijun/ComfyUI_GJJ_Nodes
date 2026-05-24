@@ -146,9 +146,18 @@ class FantasyTalkingWav2VecEmbeds:
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
+        if not isinstance(wav2vec_model, dict):
+            raise ValueError("FantasyTalking 需要连接 Wav2Vec 模型加载器输出。")
+        wav2vec_processor = wav2vec_model.get("processor")
+        if wav2vec_processor is None:
+            model_type = wav2vec_model.get("model_type", "未知")
+            raise ValueError(
+                "FantasyTalking 需要带 processor 的 facebook/wav2vec2-base-960h。"
+                "请使用 FantasyTalking 的 (Down)load Wav2Vec Model 节点，"
+                f"并选择 facebook/wav2vec2-base-960h；当前连接的 Wav2Vec 类型是：{model_type}。"
+            )
         dtype = wav2vec_model["dtype"]
         wav2vec = wav2vec_model["model"]
-        wav2vec_processor = wav2vec_model["processor"]
         audio_proj_model = fantasytalking_model["proj_model"]
 
         sr = 16000
