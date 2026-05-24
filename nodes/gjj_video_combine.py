@@ -28,7 +28,7 @@ class MultiInput(str):
 
 
 image_or_latent = MultiInput(
-    "IMAGE", ["IMAGE", "LATENT", GJJ_BATCH_IMAGE_TYPE, "VIDEO"]
+    f"{GJJ_BATCH_IMAGE_TYPE},IMAGE", [GJJ_BATCH_IMAGE_TYPE, "IMAGE", "LATENT", "VIDEO"]
 )
 float_or_int = MultiInput("FLOAT", ["FLOAT", "INT"])
 
@@ -76,7 +76,7 @@ class GJJ_VideoCombine:
                     image_or_latent,
                     {
                         "display_name": "图像",
-                        "tooltip": "支持 IMAGE batch、LATENT、GJJ_BATCH_IMAGE、官方 VIDEO 或 VIDEO 序列；接 VIDEO 时自动走视频合并。",
+                        "tooltip": "支持 GJJ_BATCH_IMAGE、IMAGE batch、LATENT、官方 VIDEO 或 VIDEO 序列；接 VIDEO 时自动走视频合并。",
                     },
                 ),
                 "frame_rate": (
@@ -120,6 +120,8 @@ class GJJ_VideoCombine:
                     "BOOLEAN",
                     {
                         "default": False,
+                        "display": "hidden",
+                        "hidden": True,
                         "display_name": "往返播放",
                         "tooltip": "正放后再倒放一遍中间帧，适合短动画闭环。",
                     },
@@ -128,6 +130,8 @@ class GJJ_VideoCombine:
                     "BOOLEAN",
                     {
                         "default": True,
+                        "display": "hidden",
+                        "hidden": True,
                         "display_name": "保存到输出目录",
                         "tooltip": "关闭后改写到 ComfyUI 的 temp 目录。",
                     },
@@ -136,6 +140,8 @@ class GJJ_VideoCombine:
                     "BOOLEAN",
                     {
                         "default": True,
+                        "display": "hidden",
+                        "hidden": True,
                         "display_name": "使用源视频帧率",
                         "tooltip": "接入合并视频时，开启后使用第一段视频的帧率；未接视频或关闭时使用上方帧率。",
                     },
@@ -145,6 +151,7 @@ class GJJ_VideoCombine:
                 "audio": (
                     "AUDIO",
                     {
+                        "advanced": True,
                         "display_name": "音频",
                         "tooltip": "可选。接入后会在支持的格式里封入音轨，VIDEO 输出也会保留音频。",
                     },
@@ -152,6 +159,7 @@ class GJJ_VideoCombine:
                 "vae": (
                     "VAE",
                     {
+                        "advanced": True,
                         "display_name": "VAE 解码器",
                         "tooltip": "仅当上方输入 LATENT 时需要连接。",
                     },

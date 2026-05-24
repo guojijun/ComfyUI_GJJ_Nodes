@@ -3,10 +3,28 @@ import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set(["GJJ_VideoCombine"]);
+const TOOLBAR_WIDGET_NAME = "gjj_video_combine_toolbar";
 const STATUS_WIDGET_NAME = "gjj_video_combine_status";
 const MIN_WIDTH = 340;
+const TOOLBAR_HEIGHT = 36;
 const PANEL_HEIGHT = 318;
 const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "mkv", "avi", "m4v"]);
+const PRIMARY_INPUT_NAME = "images";
+const PRIMARY_INPUT_ALIASES = new Set(["images", "图像"]);
+const OPTIONAL_INPUTS = [
+	{ name: "audio", type: "AUDIO", label: "音频", localized_name: "音频" },
+	{ name: "vae", type: "VAE", label: "VAE 解码器", localized_name: "VAE 解码器" },
+];
+const OUTPUTS = [
+	{ name: "视频", type: "VIDEO", label: "视频", localized_name: "视频" },
+	{ name: "主输出文件", type: "STRING", label: "主输出文件", localized_name: "主输出文件" },
+	{ name: "输出文件列表JSON", type: "STRING", label: "输出文件列表JSON", localized_name: "输出文件列表JSON" },
+];
+const BOOL_WIDGETS = [
+	{ name: "pingpong", label: "往返", on: "往返 开", off: "往返 关" },
+	{ name: "save_output", label: "保存", on: "保存 开", off: "保存 关" },
+	{ name: "use_source_fps", label: "源帧率", on: "源帧率 开", off: "源帧率 关" },
+];
 
 function refreshNode(node) {
 	GJJ_Utils.refreshNode(node);
@@ -26,6 +44,326 @@ function removeLegacyVideoInputs(node) {
 		}
 		node.removeInput?.(index);
 	}
+}
+
+function injectToolbarStyle() {
+	if (document.getElementById("gjj-video-combine-style")) {
+		return;
+	}
+	const style = document.createElement("style");
+	style.id = "gjj-video-combine-style";
+	style.textContent = `
+		.gjj-video-combine-toolbar {
+			display: flex;
+			gap: 6px;
+			padding: 4px 2px 2px;
+			box-sizing: border-box;
+			width: 100%;
+		}
+		.gjj-video-combine-toolbar button {
+			flex: 1 1 0;
+			min-width: 0;
+			height: 28px;
+			border: 1px solid #41535b;
+			border-radius: 6px;
+			background: #172026;
+			color: #dce7e2;
+			font-size: 12px;
+			font-weight: 700;
+			cursor: pointer;
+			white-space: nowrap;
+			overflow: hidden;
+			text-overflow: ellipsis;
+		}
+		.gjj-video-combine-toolbar button:hover {
+			background: #20313a;
+			border-color: #55707d;
+		}
+		.gjj-video-combine-toolbar button.on {
+			background: #1f4b37;
+			border-color: #57a773;
+			color: #ffffff;
+		}
+		.gjj-video-combine-toolbar button.more-on {
+			background: #274665;
+			border-color: #5fa8ff;
+			color: #ffffff;
+		}
+	`;
+	document.head.appendChild(style);
+}
+
+function getWidget(node, name) {
+	return (node?.widgets || []).find((widget) => String(widget?.name || "") === name) || null;
+}
+
+function isBoolControlWidgetName(name) {
+	return BOOL_WIDGETS.some((config) => config.name === String(name || ""));
+}
+
+function isPrimaryInputName(name) {
+	return PRIMARY_INPUT_ALIASES.has(String(name || ""));
+}
+
+function cloneSlot(slot) {
+	const copy = {};
+	for (const [key, value] of Object.entries(slot || {})) {
+		if (key === "_node" || key === "node" || key === "graph") {
+			continue;
+		}
+		if (key === "widget") {
+			copy.widget = value?.name ? { name: value.name } : value;
+			continue;
+		}
+		if (key === "links") {
+			copy.links = Array.isArray(value) ? [...value] : (value ?? null);
+			continue;
+		}
+		copy[key] = value;
+	}
+	return copy;
+}
+
+function readBoolWidget(node, name) {
+	const widget = getWidget(node, name);
+	return Boolean(widget?.value);
+}
+
+function writeBoolWidget(node, name, value) {
+	const widget = getWidget(node, name);
+	if (!widget) {
+		return;
+	}
+	widget.value = Boolean(value);
+	widget.callback?.(widget.value, app.canvas, node, app.canvas?.graph_mouse);
+	refreshNode(node);
+}
+
+function getMoreOpen(node) {
+	return Boolean(node?.properties?.gjj_video_combine_show_more);
+}
+
+function setMoreOpen(node, value) {
+	node.properties ||= {};
+	node.properties.gjj_video_combine_show_more = Boolean(value);
+	updateToolbar(node);
+	applySlotVisibility(node);
+	refreshNode(node);
+}
+
+function makeToolbarButton(label, title, onClick) {
+	const button = document.createElement("button");
+	button.type = "button";
+	button.textContent = label;
+	button.title = title;
+	button.addEventListener("pointerdown", (event) => event.stopPropagation());
+	button.addEventListener("mousedown", (event) => event.stopPropagation());
+	button.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		onClick?.();
+	});
+	return button;
+}
+
+function ensureToolbarWidget(node) {
+	if (node.__gjjVideoCombineToolbar) {
+		return node.__gjjVideoCombineToolbar;
+	}
+	injectToolbarStyle();
+	const wrap = document.createElement("div");
+	wrap.className = "gjj-video-combine-toolbar";
+
+	const buttons = {};
+	for (const config of BOOL_WIDGETS) {
+		buttons[config.name] = makeToolbarButton(config.off, config.label, () => {
+			writeBoolWidget(node, config.name, !readBoolWidget(node, config.name));
+			updateToolbar(node);
+		});
+		wrap.appendChild(buttons[config.name]);
+	}
+
+	buttons.more = makeToolbarButton("接口", "显示/隐藏其它输入输出口；默认只保留【图像】输入口。", () => {
+		setMoreOpen(node, !getMoreOpen(node));
+	});
+	wrap.appendChild(buttons.more);
+
+	const widget = node.addDOMWidget?.(TOOLBAR_WIDGET_NAME, TOOLBAR_WIDGET_NAME, wrap, {
+		hideOnZoom: false,
+		getHeight: () => TOOLBAR_HEIGHT,
+	});
+	node.__gjjVideoCombineToolbar = { widget, wrap, buttons };
+	updateToolbar(node);
+	return node.__gjjVideoCombineToolbar;
+}
+
+function updateToolbar(node) {
+	const toolbar = node?.__gjjVideoCombineToolbar;
+	if (!toolbar) {
+		return;
+	}
+	for (const config of BOOL_WIDGETS) {
+		const button = toolbar.buttons[config.name];
+		const on = readBoolWidget(node, config.name);
+		if (!button) {
+			continue;
+		}
+		button.textContent = on ? config.on : config.off;
+		button.classList.toggle("on", on);
+		button.title = `${config.label}：${on ? "开启" : "关闭"}`;
+	}
+	const moreOpen = getMoreOpen(node);
+	toolbar.buttons.more.textContent = moreOpen ? "接口 开" : "接口 关";
+	toolbar.buttons.more.classList.toggle("more-on", moreOpen);
+	toolbar.buttons.more.title = moreOpen
+		? "当前显示其它输入输出口；点击后只保留【图像】输入口。"
+		: "当前隐藏其它输入输出口；点击后显示音频、VAE 和输出口。";
+}
+
+function hideNativeBooleanWidgets(node) {
+	for (const config of BOOL_WIDGETS) {
+		const widget = getWidget(node, config.name);
+		if (!widget) {
+			continue;
+		}
+		GJJ_Utils.hideWidget(widget);
+		if (widget.options && typeof widget.options === "object") {
+			widget.options.hidden = true;
+			widget.options.display = "hidden";
+		}
+	}
+}
+
+function slotHasLink(slot, isOutput) {
+	if (!slot) {
+		return false;
+	}
+	if (isOutput) {
+		return Array.isArray(slot.links) ? slot.links.length > 0 : slot.links != null;
+	}
+	return slot.link != null;
+}
+
+function applySlotVisibility(node) {
+	const moreOpen = getMoreOpen(node);
+	captureFullSlots(node);
+	if (Array.isArray(node?.inputs)) {
+		const fullInputs = getFullInputs(node);
+		const visibleInputs = [];
+		for (const input of fullInputs) {
+			const name = String(input?.name || "");
+			const isPrimary = isPrimaryInputName(name);
+			const isWidgetInput = !!input?.widget && !isBoolControlWidgetName(input?.widget?.name || name);
+			if (isPrimary) {
+				const primary = cloneSlot(input);
+				primary.name = PRIMARY_INPUT_NAME;
+				primary.type = "GJJ_BATCH_IMAGE,IMAGE";
+				primary.label = "图像";
+				primary.localized_name = "图像";
+				visibleInputs.push(primary);
+			} else if (isWidgetInput || moreOpen || slotHasLink(input, false)) {
+				visibleInputs.push(cloneSlot(input));
+			}
+		}
+		node.inputs = visibleInputs;
+	}
+	if (Array.isArray(node?.outputs)) {
+		const fullOutputs = getFullOutputs(node);
+		const visibleOutputs = [];
+		for (const output of fullOutputs) {
+			if (moreOpen || slotHasLink(output, true)) {
+				visibleOutputs.push(cloneSlot(output));
+			}
+		}
+		node.outputs = visibleOutputs;
+	}
+	refreshNode(node);
+}
+
+function captureFullSlots(node) {
+	if (!node) {
+		return;
+	}
+	if (!node.__gjjVideoCombineFullInputs && Array.isArray(node.inputs)) {
+		node.__gjjVideoCombineFullInputs = node.inputs.map(cloneSlot);
+	}
+	if (!node.__gjjVideoCombineFullOutputs && Array.isArray(node.outputs)) {
+		node.__gjjVideoCombineFullOutputs = node.outputs.map(cloneSlot);
+	}
+}
+
+function getFullInputs(node) {
+	const current = Array.isArray(node?.inputs) ? node.inputs : [];
+	const base = Array.isArray(node?.__gjjVideoCombineFullInputs)
+		? node.__gjjVideoCombineFullInputs
+		: current;
+	const byName = new Map();
+	for (const slot of base) {
+		const key = isPrimaryInputName(slot?.name) ? PRIMARY_INPUT_NAME : String(slot?.name || "");
+		byName.set(key, cloneSlot(slot));
+	}
+	for (const slot of current) {
+		const name = isPrimaryInputName(slot?.name) ? PRIMARY_INPUT_NAME : String(slot?.name || "");
+		if (!name) {
+			continue;
+		}
+		const saved = byName.get(name) || {};
+		byName.set(name, { ...saved, ...cloneSlot(slot) });
+	}
+	if (!byName.has(PRIMARY_INPUT_NAME)) {
+		byName.set(PRIMARY_INPUT_NAME, {
+			name: PRIMARY_INPUT_NAME,
+			type: "GJJ_BATCH_IMAGE,IMAGE",
+			label: "图像",
+			localized_name: "图像",
+			link: null,
+		});
+	}
+	for (const fallback of OPTIONAL_INPUTS) {
+		if (!byName.has(fallback.name)) {
+			byName.set(fallback.name, { ...fallback, link: null });
+		}
+	}
+	const ordered = [
+		byName.get(PRIMARY_INPUT_NAME),
+		...Array.from(byName.values()).filter((slot) => {
+			const name = String(slot?.name || "");
+			return !isPrimaryInputName(name)
+				&& !OPTIONAL_INPUTS.some((optional) => optional.name === name)
+				&& !!slot?.widget
+				&& !isBoolControlWidgetName(slot?.widget?.name || name);
+		}),
+		...OPTIONAL_INPUTS.map((slot) => byName.get(slot.name)),
+	].filter(Boolean);
+	node.__gjjVideoCombineFullInputs = ordered.map(cloneSlot);
+	return ordered;
+}
+
+function getFullOutputs(node) {
+	const current = Array.isArray(node?.outputs) ? node.outputs : [];
+	const base = Array.isArray(node?.__gjjVideoCombineFullOutputs)
+		? node.__gjjVideoCombineFullOutputs
+		: current;
+	const byName = new Map();
+	for (const slot of base) {
+		byName.set(String(slot?.name || ""), cloneSlot(slot));
+	}
+	for (const slot of current) {
+		const name = String(slot?.name || "");
+		if (!name) {
+			continue;
+		}
+		const saved = byName.get(name) || {};
+		byName.set(name, { ...saved, ...cloneSlot(slot) });
+	}
+	for (const fallback of OUTPUTS) {
+		if (!byName.has(fallback.name)) {
+			byName.set(fallback.name, { ...fallback, links: null });
+		}
+	}
+	const ordered = OUTPUTS.map((slot) => byName.get(slot.name)).filter(Boolean);
+	node.__gjjVideoCombineFullOutputs = ordered.map(cloneSlot);
+	return ordered;
 }
 
 function ensurePanelWidget(node) {
@@ -248,21 +586,24 @@ function setPreview(node, detail = {}) {
 }
 
 function patchNode(node) {
-	if (!node || node.__gjjVideoCombinePatched) {
+	if (!node) {
 		return;
 	}
 	node.__gjjVideoCombinePatched = true;
 	removeLegacyVideoInputs(node);
+	hideNativeBooleanWidgets(node);
+	ensureToolbarWidget(node);
 	ensurePanelWidget(node);
+	applySlotVisibility(node);
 	clearNativePreview(node);
 	setStatus(node, { text: "等待执行", progress: 0 });
 	setPreview(node, {});
 	if (!Array.isArray(node.size) || node.size.length < 2) {
-		node.setSize?.([MIN_WIDTH, PANEL_HEIGHT + 8]);
+		node.setSize?.([MIN_WIDTH, PANEL_HEIGHT + TOOLBAR_HEIGHT + 8]);
 	} else {
 		node.setSize?.([
 			Math.max(MIN_WIDTH, Number(node.size[0] || MIN_WIDTH)),
-			Math.max(PANEL_HEIGHT + 8, Number(node.size[1] || 0)),
+			Math.max(PANEL_HEIGHT + TOOLBAR_HEIGHT + 8, Number(node.size[1] || 0)),
 		]);
 	}
 }
@@ -284,6 +625,15 @@ app.registerExtension({
 			return;
 		}
 
+		const originalAddWidget = nodeType.prototype.addWidget;
+		nodeType.prototype.addWidget = function (type, name, value, callback, options, ...rest) {
+			const widget = originalAddWidget?.apply(this, [type, name, value, callback, options, ...rest]);
+			if (isBoolControlWidgetName(name)) {
+				GJJ_Utils.hideWidget(widget);
+			}
+			return widget;
+		};
+
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
 			const result = originalOnNodeCreated?.apply(this, args);
@@ -296,6 +646,16 @@ app.registerExtension({
 			const result = originalOnConfigure?.apply(this, args);
 			patchNode(this);
 			clearNativePreview(this);
+			return result;
+		};
+
+		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+		nodeType.prototype.onConnectionsChange = function (...args) {
+			const result = originalOnConnectionsChange?.apply(this, args);
+			requestAnimationFrame(() => {
+				applySlotVisibility(this);
+				updateToolbar(this);
+			});
 			return result;
 		};
 
