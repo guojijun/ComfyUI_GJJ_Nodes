@@ -7,10 +7,10 @@ def _import_ok(pkg):
 	except:return False
 def _norm(v):
 	if not v:return []
-	if isinstance(v, str):v = v.split()
+	if isinstance(v, str):v = re.split(r"[\s,/]+", v)
 	r, seen = [], set()
 	for x in v:
-		for i in str(x).split():
+		for i in re.split(r"[\s,/]+", str(x)):
 			if i and i not in seen:seen.add(i);r.append(i)
 	return r
 

@@ -11,6 +11,26 @@ const TYPE_COLORS = {
 		on: "#F4B740",
 		off: "#A77418",
 	},
+	EXTRA_MODEL_CHAIN: {
+		link: "#73D13D",
+		on: "#73D13D",
+		off: "#3D7A20",
+	},
+	WANCOMPILEARGS: {
+		link: "#7C9CFF",
+		on: "#7C9CFF",
+		off: "#415C9A",
+	},
+	BLOCKSWAPARGS: {
+		link: "#F59E0B",
+		on: "#F59E0B",
+		off: "#8A5A08",
+	},
+	VRAM_MANAGEMENTARGS: {
+		link: "#22C55E",
+		on: "#22C55E",
+		off: "#16723B",
+	},
 };
 
 function getTypePalette(type) {

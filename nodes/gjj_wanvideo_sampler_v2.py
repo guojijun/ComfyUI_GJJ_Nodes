@@ -170,7 +170,7 @@ def _load_sampler_runtime():
         # 使用公共函数处理运行时依赖错误（不传 unique_id，因为这是模块级加载）
         print_runtime_dependency_error(
             node_name=NODE_DISPLAY_NAME,
-            dependency_name="accelerate/einops/diffusers/ftfy",
+            dependency_name="accelerate einops diffusers ftfy",
             description=str(error),
         )
         raise RuntimeError(

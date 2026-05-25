@@ -16,6 +16,9 @@ const OUTPUT_TYPE_BY_KIND = {
 	ltx_audio_vae: "VAE",
 	clip: "CLIP",
 	clip_vision: "CLIP_VISION",
+	wanvideo_model: "WANVIDEOMODEL",
+	wan_t5_encoder: "WANTEXTENCODER",
+	wan_vae: "WANVAE",
 	audio_encoder: "AUDIO_ENCODER",
 	empty: "*",
 	latent_upscale_model: "LATENT_UPSCALE_MODEL",
@@ -604,8 +607,9 @@ function officialIconFor(slot) {
 	const kind = String(slot?.kind || "");
 	// 与官方插口颜色对齐：MODEL 紫、VAE 红、CLIP 黄。
 	if (["diffusion", "checkpoint_model"].includes(kind)) return "🟣";
-	if (["vae", "checkpoint_vae", "ltx_audio_vae"].includes(kind)) return "🔴";
-	if (["clip", "checkpoint_clip"].includes(kind)) return "🟡";
+	if (["wanvideo_model"].includes(kind)) return "🟣";
+	if (["vae", "checkpoint_vae", "ltx_audio_vae", "wan_vae"].includes(kind)) return "🔴";
+	if (["clip", "checkpoint_clip", "wan_t5_encoder"].includes(kind)) return "🟡";
 	if (["clip_vision", "audio_encoder"].includes(kind)) return "🔵";
 	if (kind === "empty") return "";
 	if (["latent_upscale_model", "name_any"].includes(kind)) return "🟤";
@@ -973,9 +977,23 @@ function isAccelLoraInput(input) {
 	const text = [input?.name, input?.display_name, input?.displayName, input?.localized_name, input?.label].map((v) => String(v || "")).join(" ");
 	return text.includes("use_accel_lora_in") || text.includes("🚕");
 }
+function isExtraModelChainInput(input) {
+	const text = [input?.name, input?.display_name, input?.displayName, input?.localized_name, input?.label].map((v) => String(v || "")).join(" ");
+	return text.includes("extra_model_chain") || text.includes("EXTRA_MODEL_CHAIN") || text.includes("🧩 额外模型");
+}
+function isWanRuntimeArgsInput(input) {
+	const text = [input?.name, input?.type, input?.display_name, input?.displayName, input?.localized_name, input?.label].map((v) => String(v || "")).join(" ");
+	return text.includes("wan_runtime_args")
+		|| text.includes("WANCOMPILEARGS")
+		|| text.includes("BLOCKSWAPARGS")
+		|| text.includes("VRAM_MANAGEMENTARGS")
+		|| text.includes("⚙️ Wan运行参数");
+}
 function captureBackendInputs(node) {
 	if (node.__gjjVUBackendInputsCaptured) return;
 	node.__gjjVUBackendInputsCaptured = true;
+	node.__gjjVUWanRuntimeInput = (node.inputs || []).find(isWanRuntimeArgsInput) || null;
+	node.__gjjVUExtraModelInput = (node.inputs || []).find(isExtraModelChainInput) || null;
 	node.__gjjVULoraConfigInput = (node.inputs || []).find(isLoraConfigInput) || null;
 	node.__gjjVUAccelLoraInput = (node.inputs || []).find(isAccelLoraInput) || null;
 }
@@ -993,13 +1011,15 @@ function updateInputs(node, cfg) {
 	if (!Array.isArray(node.inputs)) node.inputs = [];
 	captureBackendInputs(node);
 	const old = node.inputs || [];
+	const wanArgsInput = old.find(isWanRuntimeArgsInput) || node.__gjjVUWanRuntimeInput || fallbackBackendInput("wan_runtime_args", "WANCOMPILEARGS,BLOCKSWAPARGS,VRAM_MANAGEMENTARGS", "⚙️ Wan运行参数");
+	const extraInput = old.find(isExtraModelChainInput) || node.__gjjVUExtraModelInput || fallbackBackendInput("extra_model_chain", "EXTRA_MODEL_CHAIN", "🧩 额外模型配置");
 	const cfgInput = old.find(isLoraConfigInput) || node.__gjjVULoraConfigInput || fallbackBackendInput("lora_chain_config", "LORA_CHAIN_CONFIG", "🧬 LoRA配置");
 	const boolInput = old.find(isAccelLoraInput) || node.__gjjVUAccelLoraInput || fallbackBackendInput("use_accel_lora_in", "BOOLEAN", "🚕 加速LoRA");
 
-	// 关键：前后端顺序保持一致：LoRA 配置在前，加速 LoRA BOOL 在后。
+	// 关键：前后端顺序保持一致：Wan 运行参数在前，额外模型配置次之，LoRA 配置和加速 LoRA BOOL 在后。
 	// 不再新建/强改 label/localized_name/displayName，避免破坏 ComfyUI 根据后端 display_name 绘制输入文字。
-	const rest = old.filter((input) => !isLoraConfigInput(input) && !isAccelLoraInput(input));
-	const nextInputs = [cfgInput];
+	const rest = old.filter((input) => !isWanRuntimeArgsInput(input) && !isExtraModelChainInput(input) && !isLoraConfigInput(input) && !isAccelLoraInput(input));
+	const nextInputs = [wanArgsInput, extraInput, cfgInput];
 	if (hasLoraSlots(cfg)) nextInputs.push(boolInput);
 	node.inputs = [...nextInputs, ...rest];
 }

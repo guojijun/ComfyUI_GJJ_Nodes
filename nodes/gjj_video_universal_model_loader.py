@@ -22,9 +22,15 @@ try:
 except Exception:
     PromptServer = None
 
+try:
+    from .gjj_extra_model_chain import parse_extra_model_chain_data
+except Exception:  # pragma: no cover - allows standalone syntax checks
+    parse_extra_model_chain_data = None
+
 NODE_NAME = "GJJ_VideoUniversalModelLoader"
 LIST_API = "/gjj/video_universal_loader_lists"
 MAX_SLOTS = 12
+WAN_RUNTIME_ARGS_TYPE = "WANCOMPILEARGS,BLOCKSWAPARGS,VRAM_MANAGEMENTARGS"
 
 DTYPES = ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"]
 CLIP_TYPES = ["auto", "wan", "ltxv", "hunyuan_video", "flux", "stable_diffusion"]
@@ -39,6 +45,9 @@ KIND_OUTPUT_TYPE = {
     "ltx_audio_vae": "VAE",
     "clip": "CLIP",
     "clip_vision": "CLIP_VISION",
+    "wanvideo_model": "WANVIDEOMODEL",
+    "wan_t5_encoder": "WANTEXTENCODER",
+    "wan_vae": "WANVAE",
     "audio_encoder": "AUDIO_ENCODER",
     "empty": "*",
     "latent_upscale_model": "LATENT_UPSCALE_MODEL",
@@ -57,6 +66,9 @@ ICON_BY_KIND = {
     "ltx_audio_vae": "🔴",
     "clip": "🟡",
     "clip_vision": "🔵",
+    "wanvideo_model": "🟣",
+    "wan_t5_encoder": "🟡",
+    "wan_vae": "🔴",
     "audio_encoder": "🔵",
     "empty": "⚫",
     "latent_upscale_model": "🟤",
@@ -143,7 +155,7 @@ _ensure_model_folder("sam2")
 # 根据官方工作流整理出的配置：关键词已按“去量化、去版本号、去扩展名后取核心小写词”的思路手工固化。
 VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "wan22_t2v_dual": {
-        "label": "Wan2.2 T2V 官方流 14B",
+        "label": "Wan2.2 T2V 文生视频官方流",
         "clip_type": "wan",
         "slots": [
             S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "t2v", "high", "noise"]),
@@ -155,7 +167,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         ],
     },
     "wan22_i2v_dual": {
-        "label": "Wan2.2 I2V 官方流 14B",
+        "label": "Wan2.2 I2V 图生视频官方流",
         "clip_type": "wan",
         "slots": [
             S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "i2v", "high", "noise"]),
@@ -167,7 +179,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         ],
     },
     "wan22_s2v_14b": {
-        "label": "Wan2.2 S2V 14B 音频驱动",
+        "label": "Wan2.2 S2V 音频驱动官方流",
         "clip_type": "wan",
         "slots": [
             S("model", "S2V模型", "diffusion_models", "diffusion", ["wan", "s2v"]),
@@ -179,7 +191,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         ],
     },
     "wan22_ti2v_5b": {
-        "label": "Wan2.2 TI2V 官方流 5B",
+        "label": "Wan2.2 TI2V 5B图文官方流",
         "clip_type": "wan",
         "slots": [
             S("model", "TI2V模型", "diffusion_models", "diffusion", ["wan", "ti2v"]),
@@ -189,7 +201,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         ],
     },
     "wan22_flf2v_dual": {
-        "label": "Wan2.2 首尾帧 FLF2V 官方流 14B",
+        "label": "Wan2.2 FLF2V 首尾帧官方流",
         "clip_type": "wan",
         "slots": [
             S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "i2v", "high", "noise"]),
@@ -201,7 +213,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         ],
     },
     "wan22_fun_camera_dual": {
-        "label": "Wan2.2 Fun Camera 官方流 14B",
+        "label": "Wan2.2 Fun Camera 相机控制官方流",
         "clip_type": "wan",
         "slots": [
             S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "fun", "camera", "high", "noise"]),
@@ -213,7 +225,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         ],
     },
     "wan22_fun_control_dual": {
-        "label": "Wan2.2 Fun Control 双模型 14B",
+        "label": "Wan2.2 Fun Control 双模型",
         "clip_type": "wan",
         "slots": [
             S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "fun", "control", "high", "noise"]),
@@ -253,6 +265,56 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
             S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip", "vision"]),
+        ],
+    },
+    "wan21_i2v_wanvideo_wrapper": {
+        "label": "Wan2.1 I2V 720P WanVideoWrapper集成",
+        "clip_type": "wan",
+        "uses_extra_model_chain": True,
+        "slots": [
+            S(
+                "wanvideo_model",
+                "WanVideo模型",
+                "diffusion_models",
+                "wanvideo_model",
+                ["i2v", "720p", "14b"],
+                preferred_name="wan2.1_i2v_720p_14B_fp8_e4m3fn.safetensors",
+                base_precision="bf16",
+                quantization="fp8_e4m3fn",
+                load_device="offload_device",
+                attention_mode="sdpa",
+                rms_norm_function="default",
+            ),
+            S(
+                "wan_t5",
+                "Wan T5编码器",
+                "text_encoders",
+                "wan_t5_encoder",
+                ["umt5", "xxl"],
+                preferred_name="umt5-xxl-enc-bf16.safetensors",
+                precision="bf16",
+                load_device="offload_device",
+                quantization="disabled",
+            ),
+            S(
+                "clip_vision",
+                "CLIP视觉",
+                "clip_vision",
+                "clip_vision",
+                ["clip", "vision"],
+                preferred_name="clip_vision_h.safetensors",
+            ),
+            S(
+                "wan_vae",
+                "WanVideo VAE",
+                "vae",
+                "wan_vae",
+                ["wan", "vae"],
+                preferred_name="Wan2.1_VAE_bf16.safetensors",
+                precision="bf16",
+                use_cpu_cache=False,
+                verbose=False,
+            ),
         ],
     },
     "wan21_flf2v_720p": {
@@ -460,6 +522,12 @@ def _slot_call_hint(slot: dict[str, Any]) -> str:
         device = str(slot.get("device", "main_device") or "main_device")
         weight_dtype = str(slot.get("weight_dtype", "bf16") or "bf16")
         return f"调用方法：走 GJJ 兼容 VAE 加载，device={device}，weight_dtype={weight_dtype}；缺失时会回退到 comfy.sd.VAE。"
+    if kind == "wanvideo_model":
+        return "调用方法：走 GJJ 内置 WanVideoModelLoader，可接额外模型串联配置后在加载主模型时合并 VACE / Talking / Portrait 模块。"
+    if kind == "wan_t5_encoder":
+        return "调用方法：走 GJJ 内置 LoadWanVideoT5TextEncoder，输出 WANTEXTENCODER。"
+    if kind == "wan_vae":
+        return "调用方法：走 GJJ 内置 WanVideoVAELoader，输出 WANVAE。"
     if kind == "latent_upscale_model":
         return "调用方法：空间放大模型槽会先走官方加载器，再走兼容回退；这是官方流和 KJ 流共用的辅助模型。"
     return ""
@@ -816,6 +884,344 @@ def _load_clip_vision(name: str):
         raise RuntimeError("当前 ComfyUI 环境无法导入 comfy.clip_vision，不能加载 CLIP视觉模型。")
     path = folder_paths.get_full_path_or_raise("clip_vision", name)
     return comfy_clip_vision.load(path)
+
+
+_WANVIDEO_RUNTIME: dict[str, Any] | None = None
+
+
+def _load_wanvideo_runtime() -> dict[str, Any]:
+    global _WANVIDEO_RUNTIME
+    if _WANVIDEO_RUNTIME is not None:
+        return _WANVIDEO_RUNTIME
+    try:
+        from ..vendor.wanvideo_wrapper import nodes_model_loading
+    except Exception as error:
+        raise RuntimeError(
+            "GJJ 内置 WanVideo runtime 加载失败。无需安装 ComfyUI-WanVideoWrapper 插件本体；"
+            f"如果是 pip 运行库缺失，请按 GJJ 的 WanVideo 运行时依赖方案安装。\n错误信息：{error}"
+        ) from error
+    _WANVIDEO_RUNTIME = {
+        "model_loading": nodes_model_loading,
+    }
+    return _WANVIDEO_RUNTIME
+
+
+def _parse_extra_model_chain_config(config: Any) -> list[dict[str, Any]]:
+    if config is None:
+        return []
+    if callable(parse_extra_model_chain_data):
+        try:
+            return parse_extra_model_chain_data(config, enabled_only=True)
+        except Exception:
+            return []
+    if isinstance(config, list):
+        raw = config
+    else:
+        try:
+            raw = json.loads(str(config or "[]"))
+        except Exception:
+            return []
+    if not isinstance(raw, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict) or item.get("enabled", True) is False:
+            continue
+        name = str(item.get("name") or item.get("model") or item.get("file") or "").strip()
+        if not name:
+            continue
+        kind = str(item.get("kind") or "vace").strip().lower().replace("-", "_").replace(" ", "_")
+        kind = {
+            "fantasy_talking": "fantasytalking",
+            "multi_talk": "multitalk",
+            "infinite_talk": "multitalk",
+            "infinitetalk": "multitalk",
+            "fantasy_portrait": "fantasyportrait",
+        }.get(kind, kind)
+        if kind not in {"vace", "fantasytalking", "multitalk", "fantasyportrait"}:
+            kind = "vace"
+        branch = str(item.get("branch") or "both").strip().lower()
+        if branch in {"all", "全部"}:
+            branch = "both"
+        if branch not in {"both", "high", "low"}:
+            branch = "both"
+        precision = str(item.get("base_precision") or item.get("precision") or "fp16").strip().lower()
+        if precision not in {"fp16", "bf16", "fp32"}:
+            precision = "fp16"
+        items.append({"enabled": True, "kind": kind, "name": name, "branch": branch, "base_precision": precision})
+    return items
+
+
+def _extra_branch_matches(item_branch: str, model_branch: str) -> bool:
+    item_branch = str(item_branch or "both").lower()
+    model_branch = str(model_branch or "").lower()
+    if item_branch in {"", "both", "all"}:
+        return True
+    if not model_branch:
+        return True
+    return item_branch == model_branch
+
+
+def _get_full_path_any(categories: tuple[str, ...], model_name: str) -> str:
+    last_error: Exception | None = None
+    for category in categories:
+        try:
+            path = folder_paths.get_full_path(category, model_name)
+            if path:
+                return path
+        except Exception as error:
+            last_error = error
+        try:
+            return folder_paths.get_full_path_or_raise(category, model_name)
+        except Exception as error:
+            last_error = error
+    raise RuntimeError(f"未找到模型文件：{model_name}") from last_error
+
+
+def _load_fantasytalking_extra_model(model_name: str, base_precision: str):
+    try:
+        from ..vendor.wanvideo_wrapper.fantasytalking import nodes as fantasytalking_nodes
+    except Exception as error:
+        raise RuntimeError(f"GJJ 内置 FantasyTalking runtime 加载失败：{error}") from error
+    loader = fantasytalking_nodes.FantasyTalkingModelLoader()
+    return _unwrap_loader_output(loader.loadmodel(model=model_name, base_precision=base_precision))
+
+
+def _load_multitalk_extra_model(model_name: str):
+    try:
+        from ..vendor.wanvideo_wrapper.multitalk import nodes as multitalk_nodes
+    except Exception as error:
+        raise RuntimeError(f"GJJ 内置 MultiTalk runtime 加载失败：{error}") from error
+    loader = multitalk_nodes.MultiTalkModelLoader()
+    return _unwrap_loader_output(loader.loadmodel(model=model_name))
+
+
+def _load_fantasyportrait_extra_model(model_name: str, base_precision: str):
+    try:
+        from ..vendor.wanvideo_wrapper.FantasyPortrait import nodes as fantasyportrait_nodes
+    except Exception as error:
+        raise RuntimeError(f"GJJ 内置 FantasyPortrait runtime 加载失败：{error}") from error
+    loader = fantasyportrait_nodes.FantasyPortraitModelLoader()
+    return _unwrap_loader_output(loader.loadmodel(model=model_name, base_precision=base_precision))
+
+
+def _build_wanvideo_extra_model_kwargs(extra_chain: list[dict[str, Any]], model_branch: str) -> dict[str, Any]:
+    vace_paths: list[dict[str, str]] = []
+    fantasytalking_model = None
+    multitalk_model = None
+    fantasyportrait_model = None
+
+    for item in extra_chain:
+        if item.get("enabled", True) is False:
+            continue
+        if not _extra_branch_matches(str(item.get("branch", "both")), model_branch):
+            continue
+        kind = str(item.get("kind", "vace") or "vace")
+        name = str(item.get("name", "") or "").strip()
+        if not name:
+            continue
+        try:
+            if kind == "vace":
+                vace_paths.append({"path": _get_full_path_any(("diffusion_models", "unet_gguf"), name)})
+            elif kind == "fantasytalking":
+                fantasytalking_model = _load_fantasytalking_extra_model(
+                    name,
+                    str(item.get("base_precision", "fp16") or "fp16"),
+                )
+            elif kind == "multitalk":
+                multitalk_model = _load_multitalk_extra_model(name)
+            elif kind == "fantasyportrait":
+                fantasyportrait_model = _load_fantasyportrait_extra_model(
+                    name,
+                    str(item.get("base_precision", "fp16") or "fp16"),
+                )
+        except Exception as error:
+            raise RuntimeError(f"WanVideo 额外模型加载失败：{name}\n类型：{kind}\n错误信息：{error}") from error
+
+    return {
+        "extra_model": vace_paths or None,
+        "fantasytalking_model": fantasytalking_model,
+        "multitalk_model": multitalk_model,
+        "fantasyportrait_model": fantasyportrait_model,
+    }
+
+
+def _choice(value: Any, allowed: set[str], default: str) -> str:
+    text = str(value or default).strip()
+    return text if text in allowed else default
+
+
+_WAN_COMPILE_KEYS = {
+    "backend",
+    "fullgraph",
+    "mode",
+    "dynamic",
+    "dynamo_cache_size_limit",
+    "dynamo_recompile_limit",
+    "compile_transformer_blocks_only",
+    "force_parameter_static_shapes",
+    "allow_unmerged_lora_compile",
+}
+_WAN_BLOCK_SWAP_KEYS = {
+    "blocks_to_swap",
+    "offload_img_emb",
+    "offload_txt_emb",
+    "use_non_blocking",
+    "vace_blocks_to_swap",
+    "prefetch_blocks",
+    "block_swap_debug",
+}
+_WAN_VRAM_KEYS = {"offload_percent"}
+
+
+def _assign_wan_runtime_arg(current: Any, value: Any, label: str) -> Any:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return current
+    if current is not None and current != value:
+        raise RuntimeError(f"Wan 运行参数输入中包含重复的 {label}，请只保留一个。")
+    return value
+
+
+def _parse_wan_runtime_args(config: Any) -> tuple[Any, Any, Any]:
+    compile_args = None
+    block_swap_args = None
+    vram_management_args = None
+
+    def typed_payload(item: dict[str, Any]) -> Any:
+        for payload_key in ("value", "args", "data", "payload"):
+            if payload_key in item:
+                return item.get(payload_key)
+        return item
+
+    def consume(item: Any) -> None:
+        nonlocal compile_args, block_swap_args, vram_management_args
+        if item is None or (isinstance(item, str) and not item.strip()):
+            return
+        if isinstance(item, str):
+            text = item.strip()
+            try:
+                item = json.loads(text)
+            except Exception as error:
+                raise RuntimeError("Wan 运行参数输入不是可识别的 JSON 或参数字典。") from error
+        if isinstance(item, (list, tuple)):
+            for sub_item in item:
+                consume(sub_item)
+            return
+        if not isinstance(item, dict):
+            raise RuntimeError(f"Wan 运行参数输入类型无效：{type(item).__name__}。")
+
+        nested = False
+        for key in ("compile_args", "torch_compile_args", "wan_compile_args"):
+            if key in item:
+                compile_args = _assign_wan_runtime_arg(compile_args, item.get(key), "编译参数")
+                nested = True
+        for key in ("block_swap_args", "blockswap_args"):
+            if key in item:
+                block_swap_args = _assign_wan_runtime_arg(block_swap_args, item.get(key), "分块交换参数")
+                nested = True
+        for key in ("vram_management_args", "vram_args"):
+            if key in item:
+                vram_management_args = _assign_wan_runtime_arg(vram_management_args, item.get(key), "显存管理参数")
+                nested = True
+        if nested:
+            return
+
+        keys = set(item.keys())
+        type_hint = str(item.get("type") or item.get("kind") or item.get("_type") or item.get("return_type") or "").upper()
+        if type_hint == "WANCOMPILEARGS":
+            compile_args = _assign_wan_runtime_arg(compile_args, typed_payload(item), "编译参数")
+            return
+        if type_hint == "BLOCKSWAPARGS":
+            block_swap_args = _assign_wan_runtime_arg(block_swap_args, typed_payload(item), "分块交换参数")
+            return
+        if type_hint == "VRAM_MANAGEMENTARGS":
+            vram_management_args = _assign_wan_runtime_arg(vram_management_args, typed_payload(item), "显存管理参数")
+            return
+        if keys.intersection(_WAN_COMPILE_KEYS):
+            compile_args = _assign_wan_runtime_arg(compile_args, item, "编译参数")
+            return
+        if keys.intersection(_WAN_BLOCK_SWAP_KEYS):
+            block_swap_args = _assign_wan_runtime_arg(block_swap_args, item, "分块交换参数")
+            return
+        if keys.intersection(_WAN_VRAM_KEYS):
+            vram_management_args = _assign_wan_runtime_arg(vram_management_args, item, "显存管理参数")
+            return
+
+        preview = "、".join(str(key) for key in list(keys)[:8]) or "空字典"
+        raise RuntimeError(f"Wan 运行参数输入无法识别字段：{preview}。")
+
+    consume(config)
+    if block_swap_args is not None and vram_management_args is not None:
+        raise RuntimeError("WanVideo 模型加载不能同时使用分块交换参数和显存管理参数，请二选一。")
+    return compile_args, block_swap_args, vram_management_args
+
+
+def _load_wanvideo_model(
+    model_name: str,
+    slot: dict[str, Any],
+    extra_chain: list[dict[str, Any]],
+    model_branch: str,
+    compile_args: Any = None,
+    block_swap_args: Any = None,
+    vram_management_args: Any = None,
+):
+    runtime = _load_wanvideo_runtime()
+    loader = runtime["model_loading"].WanVideoModelLoader()
+    extra_kwargs = _build_wanvideo_extra_model_kwargs(extra_chain, model_branch)
+    return _unwrap_loader_output(
+        loader.loadmodel(
+            model=model_name,
+            base_precision=_choice(slot.get("base_precision"), {"fp32", "bf16", "fp16", "fp16_fast"}, "bf16"),
+            load_device=_choice(slot.get("load_device"), {"main_device", "offload_device"}, "offload_device"),
+            quantization=_choice(
+                slot.get("quantization"),
+                {
+                    "disabled",
+                    "fp8_e4m3fn",
+                    "fp8_e4m3fn_fast",
+                    "fp8_e4m3fn_scaled",
+                    "fp8_e4m3fn_scaled_fast",
+                    "fp8_e5m2",
+                    "fp8_e5m2_fast",
+                    "fp8_e5m2_scaled",
+                    "fp8_e5m2_scaled_fast",
+                },
+                "disabled",
+            ),
+            attention_mode=str(slot.get("attention_mode", "sdpa") or "sdpa"),
+            rms_norm_function=_choice(slot.get("rms_norm_function"), {"default", "pytorch"}, "default"),
+            compile_args=compile_args,
+            block_swap_args=block_swap_args,
+            vram_management_args=vram_management_args,
+            **extra_kwargs,
+        )
+    )
+
+
+def _load_wan_t5_encoder(model_name: str, slot: dict[str, Any]):
+    runtime = _load_wanvideo_runtime()
+    loader = runtime["model_loading"].LoadWanVideoT5TextEncoder()
+    return _unwrap_loader_output(
+        loader.loadmodel(
+            model_name=model_name,
+            precision=_choice(slot.get("precision"), {"bf16", "fp32"}, "bf16"),
+            load_device=_choice(slot.get("load_device"), {"main_device", "offload_device"}, "offload_device"),
+            quantization=_choice(slot.get("quantization"), {"disabled", "fp8_e4m3fn"}, "disabled"),
+        )
+    )
+
+
+def _load_wan_vae(model_name: str, slot: dict[str, Any]):
+    runtime = _load_wanvideo_runtime()
+    loader = runtime["model_loading"].WanVideoVAELoader()
+    return _unwrap_loader_output(
+        loader.loadmodel(
+            model_name=model_name,
+            precision=_choice(slot.get("precision"), {"bf16", "fp16", "fp32"}, "bf16"),
+            use_cpu_cache=bool(slot.get("use_cpu_cache", False)),
+            verbose=bool(slot.get("verbose", False)),
+        )
+    )
 
 
 def _unwrap_loader_output(out: Any):
@@ -1278,6 +1684,8 @@ def _config_payload() -> dict[str, Any]:
             "label": cfg.get("label", key),
             "clip_type": cfg.get("clip_type", "wan"),
             "uses_lora": any(_is_lora_slot(slot) for slot in cfg.get("slots", [])),
+            "uses_extra_model_chain": bool(cfg.get("uses_extra_model_chain", False))
+            or any(str(slot.get("kind", "")) == "wanvideo_model" for slot in cfg.get("slots", [])),
             # 输出槽只包含真正要给下游使用的对象；LoRA/名称槽只在节点内部使用，不暴露 STRING 输出。
             "output_slots": [slot for slot in cfg.get("slots", []) if _is_visible_output_slot(slot)],
             "slots": cfg.get("slots", []),
@@ -1363,10 +1771,20 @@ class GJJ_VideoUniversalModelLoader:
         return {
             "required": inputs,
             "optional": {
+                "wan_runtime_args": (WAN_RUNTIME_ARGS_TYPE, {
+                    "forceInput": True,
+                    "display_name": "⚙️ Wan运行参数",
+                    "tooltip": "一个入口兼容 WANCOMPILEARGS / BLOCKSWAPARGS / VRAM_MANAGEMENTARGS。WanVideoWrapper 集成预设会自动识别并传入模型加载器。",
+                }),
+                "extra_model_chain": ("EXTRA_MODEL_CHAIN", {
+                    "forceInput": True,
+                    "display_name": "🧩 额外模型配置",
+                    "tooltip": "对齐 GJJ · 🧩 额外模型串联配置。WanVideoWrapper 集成预设会在加载主模型时合并这些额外模块。",
+                }),
                 # 注意顺序：LoRA 配置常态放前面；加速 LoRA BOOL 放后面，并由前端在无内置 LoRA 配置时隐藏。
                 "lora_chain_config": ("LORA_CHAIN_CONFIG", {
                     "forceInput": True,
-                    "display_name": "🧬 LoRA配置",
+                    "display_name": "🧬 额外LoRA配置",
                     "tooltip": "对齐 GJJ · 🧬 LoRA串联配置 的输出口。开启加速 LoRA 时会额外叠加到 MODEL 输出。",
                 }),
                 "use_accel_lora_in": ("BOOLEAN", {
@@ -1379,7 +1797,19 @@ class GJJ_VideoUniversalModelLoader:
 
     @classmethod
     def IS_CHANGED(cls, *args, **kwargs):
-        keys = ["config", "clip_type_override", "use_accel_lora", "use_accel_lora_in", "🚕 加速LoRA", "lora_chain_config", "🧬 LoRA配置"]
+        keys = [
+            "config",
+            "clip_type_override",
+            "use_accel_lora",
+            "use_accel_lora_in",
+            "🚕 加速LoRA",
+            "lora_chain_config",
+            "🧬 LoRA配置",
+            "extra_model_chain",
+            "🧩 额外模型配置",
+            "wan_runtime_args",
+            "⚙️ Wan运行参数",
+        ]
         for i in range(1, MAX_SLOTS + 1):
             keys += [f"file_{i}", f"secondary_file_{i}", f"dtype_{i}"]
         return "|".join(str(kwargs.get(k, "")) for k in keys)
@@ -1399,6 +1829,12 @@ class GJJ_VideoUniversalModelLoader:
         if lora_bool_in is not None:
             use_accel_lora = bool(lora_bool_in)
         external_loras = _parse_lora_chain_config(kwargs.get("🧬 LoRA配置", kwargs.get("lora_chain_config", None)))
+        extra_model_chain = _parse_extra_model_chain_config(
+            kwargs.get("🧩 额外模型配置", kwargs.get("extra_model_chain", None))
+        )
+        wan_compile_args, wan_block_swap_args, wan_vram_management_args = _parse_wan_runtime_args(
+            kwargs.get("⚙️ Wan运行参数", kwargs.get("wan_runtime_args", None))
+        )
 
         values: list[Any] = []
         output_records: list[dict[str, Any]] = []
@@ -1466,6 +1902,16 @@ class GJJ_VideoUniversalModelLoader:
                         value = _load_unet_model(name, dtype)
                     else:
                         value = _load_diffusion_model(name, dtype)
+                elif kind == "wanvideo_model":
+                    value = _load_wanvideo_model(
+                        name,
+                        slot,
+                        extra_model_chain,
+                        _slot_branch(str(slot.get("id", "")), str(slot.get("label", ""))),
+                        compile_args=wan_compile_args,
+                        block_swap_args=wan_block_swap_args,
+                        vram_management_args=wan_vram_management_args,
+                    )
                 elif kind == "checkpoint_model":
                     value = _load_checkpoint_parts(name, ckpt_cache)[0]
                 elif kind == "checkpoint_clip":
@@ -1532,6 +1978,10 @@ class GJJ_VideoUniversalModelLoader:
                         value = _load_clip(name, clip_type, dtype)
                 elif kind == "clip_vision":
                     value = _load_clip_vision(name)
+                elif kind == "wan_t5_encoder":
+                    value = _load_wan_t5_encoder(name, slot)
+                elif kind == "wan_vae":
+                    value = _load_wan_vae(name, slot)
                 elif kind == "audio_encoder":
                     value = _load_audio_encoder(name)
                 elif kind == "latent_upscale_model":

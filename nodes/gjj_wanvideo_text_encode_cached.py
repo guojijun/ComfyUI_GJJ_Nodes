@@ -346,7 +346,7 @@ class GJJ_WanVideoTextEncodeCached:
             # 使用公共函数处理运行时依赖错误（传递 unique_id 以支持前端通知）
             print_runtime_dependency_error(
                 node_name=NODE_DISPLAY_NAME,
-                dependency_name="ftfy/transformers",
+                dependency_name="ftfy transformers",
                 description=str(e),
                 unique_id=unique_id,
             )
@@ -355,7 +355,7 @@ class GJJ_WanVideoTextEncodeCached:
             # 使用公共函数处理运行时依赖错误（传递 unique_id 以支持前端通知）
             print_runtime_dependency_error(
                 node_name=NODE_DISPLAY_NAME,
-                dependency_name="ftfy/transformers",
+                dependency_name="ftfy transformers",
                 description=str(e),
                 unique_id=unique_id,
             )

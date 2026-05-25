@@ -455,5 +455,5 @@ NODE_CLASS_MAPPINGS = {
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     NODE_NAME: "GJJ · 🧬 多LoRA串联器",
-    CONFIG_NODE_NAME: "GJJ · 🧬 LoRA串联配置",
+    CONFIG_NODE_NAME: "GJJ · 🧬 额外LoRA串联配置",
 }

@@ -102,14 +102,37 @@ class GJJ_TextRandomLine:
 
     def pick(self, texts: str, fixed_prefix: str, seed: int, strip_empty: bool):
         items = parse_text_blob(texts, strip_empty=bool(strip_empty))
+        current_value = max(1, int(seed))
         if not items:
-            return ("", 0, "")
+            return {
+                "ui": {
+                    "gjj_text_random_line": [
+                        {
+                            "current_value": current_value,
+                            "total_count": 0,
+                            "status": "没有可选择的文本",
+                        }
+                    ]
+                },
+                "result": ("", 0, ""),
+            }
 
         total = len(items)
-        index = (max(1, int(seed)) - 1) % total
+        index = (current_value - 1) % total
         chosen = str(items[index]).strip()
         result = f"{fixed_prefix} {chosen}".strip()
-        return (result, total, chosen)
+        return {
+            "ui": {
+                "gjj_text_random_line": [
+                    {
+                        "current_value": current_value,
+                        "total_count": total,
+                        "status": f"当前第 {index + 1} 行 / 共 {total} 行",
+                    }
+                ]
+            },
+            "result": (result, total, chosen),
+        }
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_TextRandomLine}
