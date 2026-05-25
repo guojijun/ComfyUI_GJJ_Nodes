@@ -3,6 +3,14 @@ import { api } from "../../scripts/api.js";
 
 const NODE_CLASS = "GJJ_ImageResizeKJv2";
 const CONFIG_WIDGET = "config_json";
+const PARAM_INPUTS = [
+  { name: "target_width", cfgKey: "width", label: "📐 目标宽度", mode: "宽高", type: "INT", min: 1, max: 16384, step: 8, defaultValue: 1024 },
+  { name: "target_height", cfgKey: "height", label: "📐 目标高度", mode: "宽高", type: "INT", min: 1, max: 16384, step: 8, defaultValue: 1024 },
+  { name: "scale_percent", cfgKey: "scale_percent", label: "📊 缩放百分比", mode: "等比", type: "FLOAT", min: 0.1, max: 10000, step: 1, defaultValue: 100 },
+  { name: "long_side_length", cfgKey: "long_side_length", label: "📏 长边长度", mode: "长边", type: "INT", min: 1, max: 16384, step: 8, defaultValue: 1024 },
+  { name: "total_pixel_k", cfgKey: "total_pixel_k", label: "🧮 总像素/K", mode: "像素", type: "INT", min: 1, max: 1000000, step: 1, defaultValue: 260 },
+  { name: "aspect_ratio", cfgKey: "aspect_ratio", label: "🖼️ 输出比例", mode: "像素", type: "STRING", widgetType: "combo", values: ["原始比例", "自定义", "1:1", "3:2", "4:3", "16:9", "2:3", "3:4", "9:16"], defaultValue: "1:1" },
+];
 
 const DEFAULT_CONFIG = {
   mode: "等比",
@@ -46,6 +54,211 @@ const OUTPUTS = [
 const PANEL_WIDGET_NAME = "gjj_multifunction_resize_panel";
 
 const CONFIG_INPUT_RE = /(config_json|隐藏配置|前端面板写入|Internal JSON config)/i;
+
+function getParamInputDef(name) {
+  return PARAM_INPUTS.find((item) => item.name === String(name || "")) || null;
+}
+
+function isParamInputName(name) {
+  return !!getParamInputDef(name);
+}
+
+function findWidget(node, name) {
+  const key = String(name || "");
+  return (node?.widgets || []).find((widget) => {
+    if (!widget) return false;
+    return String(widget.name || "") === key
+      || String(widget.options?.name || "") === key
+      || String(widget.options?.display_name || "") === key
+      || String(widget.label || "") === key
+      || String(widget.localized_name || "") === key;
+  }) || null;
+}
+
+function findInputSlot(node, name) {
+  return (node?.inputs || []).find((input) => String(input?.name || "") === name) || null;
+}
+
+function setWidgetVisible(widget, visible) {
+  if (!widget) return;
+  if (!widget.__gjjMfNativeSaved) {
+    widget.__gjjMfNativeSaved = {
+      type: widget.type,
+      computeSize: widget.computeSize,
+      draw: widget.draw,
+      mouse: widget.mouse,
+      label: widget.label,
+      size: Array.isArray(widget.size) ? [...widget.size] : widget.size,
+    };
+  }
+  if (visible) {
+    const saved = widget.__gjjMfNativeSaved || {};
+    widget.hidden = false;
+    widget.disabled = false;
+    if (saved.type !== undefined) widget.type = String(saved.type || "").startsWith("converted-widget:") ? "number" : saved.type;
+    if (saved.computeSize !== undefined) widget.computeSize = saved.computeSize;
+    if (saved.draw !== undefined) widget.draw = saved.draw;
+    if (saved.mouse !== undefined) widget.mouse = saved.mouse;
+    if (saved.label !== undefined) widget.label = saved.label;
+    if (saved.size !== undefined) widget.size = Array.isArray(saved.size) ? [...saved.size] : saved.size;
+    widget.computedHeight = undefined;
+    widget.margin_top = undefined;
+    if (widget.options && typeof widget.options === "object") {
+      widget.options.hidden = false;
+      delete widget.options.display;
+    }
+    for (const el of [widget.inputEl, widget.element, widget.widget]) {
+      if (!el?.style) continue;
+      el.style.display = "";
+      el.style.height = "";
+      el.style.minHeight = "";
+      el.style.margin = "";
+      el.style.padding = "";
+      el.style.border = "";
+      el.style.overflow = "";
+    }
+    return;
+  }
+  widget.hidden = true;
+  widget.disabled = true;
+  if (widget.options && typeof widget.options === "object") {
+    widget.options.hidden = true;
+    widget.options.display = "hidden";
+  }
+  widget.type = `converted-widget:${widget.name || "hidden"}`;
+  widget.computeSize = () => [0, 0];
+  widget.getHeight = () => 0;
+  widget.draw = () => {};
+  widget.mouse = () => false;
+  widget.label = "";
+  widget.size = [0, 0];
+  widget.last_y = 0;
+  widget.computedHeight = 0;
+  widget.margin_top = 0;
+  for (const el of [widget.inputEl, widget.element, widget.widget]) {
+    if (!el?.style) continue;
+    el.style.display = "none";
+    el.style.height = "0";
+    el.style.minHeight = "0";
+    el.style.margin = "0";
+    el.style.padding = "0";
+    el.style.border = "0";
+    el.style.overflow = "hidden";
+  }
+}
+
+function createNativeParamWidget(node, def, cfg = readConfig(node)) {
+  if (!node || typeof node.addWidget !== "function") return null;
+  const value = cfg[def.cfgKey] ?? def.defaultValue;
+  const callback = (nextValue) => {
+    const next = def.type === "STRING" ? String(nextValue ?? "") : Number(nextValue);
+    writeConfig(node, { [def.cfgKey]: next });
+    redraw(node);
+  };
+  const options = {
+    min: def.min,
+    max: def.max,
+    step: def.step,
+    values: def.values,
+    display_name: def.label,
+    tooltip: `${def.label}：可手填，也可连接外部 ${def.type}。`,
+    hidden: true,
+    display: "hidden",
+  };
+  let widget = null;
+  try {
+    widget = node.addWidget(def.widgetType || "number", def.name, value, callback, options);
+  } catch (_) {
+    try { widget = node.addWidget("number", def.name, value, callback, options); } catch (_) {}
+  }
+  if (widget) {
+    widget.name = def.name;
+    widget.label = def.label;
+    widget.localized_name = def.label;
+    widget.options ||= {};
+    Object.assign(widget.options, options);
+  }
+  return widget;
+}
+function setupNativeParamWidget(node, def) {
+  const cfg = readConfig(node);
+  const widget = findWidget(node, def.name) || createNativeParamWidget(node, def, cfg);
+  if (!widget) return null;
+  widget.name = def.name;
+  widget.label = def.label;
+  widget.localized_name = def.label;
+  widget.options ||= {};
+  widget.options.display_name = def.label;
+  widget.options.tooltip = `${def.label}：可手填，也可连接外部 ${def.type}。`;
+  widget.callback = (value) => {
+    const next = def.type === "STRING" ? String(value ?? "") : Number(value);
+    writeConfig(node, { [def.cfgKey]: next });
+    redraw(node);
+  };
+  if (def.type === "STRING") {
+    const next = String(cfg[def.cfgKey] ?? "");
+    if (widget.value !== next) widget.value = next;
+  } else if (Number.isFinite(Number(cfg[def.cfgKey])) && widget.value !== Number(cfg[def.cfgKey])) {
+    widget.value = Number(cfg[def.cfgKey]);
+  }
+  return widget;
+}
+
+function ensureNativeParamInputSlot(node, def) {
+  let input = findInputSlot(node, def.name);
+  if (!input) {
+    try { node.addInput?.(def.name, def.type); } catch (_) {}
+    input = findInputSlot(node, def.name);
+  }
+  if (!input) return null;
+  input.name = def.name;
+  input.type = def.type;
+  input.label = def.label;
+  input.localized_name = def.label;
+  input.tooltip = `${def.label}：连接外部 ${def.type} 后会覆盖当前控件值。`;
+  input.widget = { name: def.name };
+  return input;
+}
+
+function ensureNativeParamWidgets(node) {
+  if (!node) return;
+  const cfg = readConfig(node);
+  const visibleDefs = PARAM_INPUTS.filter((def) => def.mode === cfg.mode);
+  const widgetsByName = new Map();
+  for (const def of PARAM_INPUTS) {
+    const widget = setupNativeParamWidget(node, def);
+    widgetsByName.set(def.name, widget);
+    setWidgetVisible(widget, def.mode === cfg.mode);
+  }
+
+  const panelIndex = node.widgets?.indexOf(node.__gjjMfDomWidget) ?? -1;
+  if (panelIndex >= 0) {
+    for (const def of PARAM_INPUTS) {
+      const widget = widgetsByName.get(def.name);
+      if (!widget) continue;
+      const current = node.widgets.indexOf(widget);
+      if (current >= 0) node.widgets.splice(current, 1);
+    }
+    let insertAt = node.widgets.indexOf(node.__gjjMfDomWidget) + 1;
+    for (const def of visibleDefs) {
+      const widget = widgetsByName.get(def.name);
+      if (widget) node.widgets.splice(insertAt++, 0, widget);
+    }
+  }
+
+  for (const def of visibleDefs) ensureNativeParamInputSlot(node, def);
+}
+
+function syncNativeParamInputSlots(node) {
+  const cfg = readConfig(node);
+  if (!Array.isArray(node?.inputs)) return;
+  for (let i = node.inputs.length - 1; i >= 0; i--) {
+    const def = getParamInputDef(node.inputs[i]?.name);
+    if (!def || def.mode === cfg.mode) continue;
+    try { node.disconnectInput?.(i); } catch (_) {}
+    try { node.removeInput?.(i); } catch (_) { node.inputs.splice(i, 1); }
+  }
+}
 
 function isConfigInputSlot(input) {
   if (!input) return false;
@@ -210,6 +423,10 @@ function hideWidgetCompletely(widget) {
   widget.type = "hidden";
   widget.hidden = true;
   widget.disabled = true;
+  if (widget.options && typeof widget.options === "object") {
+    widget.options.hidden = true;
+    widget.options.display = "hidden";
+  }
   widget.serialize = true;
   widget.computeSize = () => [0, 0];
   widget.draw = () => {};
@@ -351,6 +568,7 @@ function redraw(node) {
 function numberField(root, node, cfg, key, label, title, opts = {}) {
   const row = document.createElement("label");
   row.className = "gjj-mf-field";
+  if (PARAM_INPUTS.some((def) => def.cfgKey === key)) row.dataset.gjjParamInput = key;
   row.title = title;
   const span = document.createElement("span");
   span.className = "gjj-mf-label";
@@ -471,20 +689,11 @@ function buildPanel(node) {
   section.className = "gjj-mf-section";
   dom.panel.appendChild(section);
 
-  if (cfg.mode === "宽高") {
-    numberField(section, node, cfg, "width", "📐 目标宽度", "宽高模式使用。Target width.", { min: 1, max: 16384, step: 8 });
-    numberField(section, node, cfg, "height", "📐 目标高度", "宽高模式使用。Target height.", { min: 1, max: 16384, step: 8 });
-  } else if (cfg.mode === "长边") {
-    numberField(section, node, cfg, "long_side_length", "📏 长边长度", "把最长边缩放到该长度，短边自动等比计算。Longest side length.", { min: 1, max: 16384, step: 8 });
-  } else if (cfg.mode === "像素") {
-    numberField(section, node, cfg, "total_pixel_k", "🧮 总像素/K", "单位 K pixels；1024 表示约 102.4 万像素。Total kilo pixels.", { min: 1, max: 1000000, step: 1 });
-    selectField(section, node, cfg, "aspect_ratio", "🖼️ 输出比例", "像素模式使用的输出画幅比例。Aspect ratio.", OPTIONS.aspect_ratio);
-    if (cfg.aspect_ratio === "自定义") {
-      numberField(section, node, cfg, "proportional_width", "↔️ 比例宽", "自定义比例宽。Custom ratio width.", { min: 1, max: 100000, step: 1 });
-      numberField(section, node, cfg, "proportional_height", "↕️ 比例高", "自定义比例高。Custom ratio height.", { min: 1, max: 100000, step: 1 });
-    }
-  } else {
-    numberField(section, node, cfg, "scale_percent", "📊 缩放百分比", "100 为原始尺寸，50 为缩小一半，200 为放大两倍。Scale percent.", { min: 0.1, max: 10000, step: 1 });
+  ensureNativeParamWidgets(node);
+  syncNativeParamInputSlots(node);
+  if (cfg.mode === "像素" && cfg.aspect_ratio === "自定义") {
+    numberField(section, node, cfg, "proportional_width", "↔️ 比例宽", "自定义比例宽。Custom ratio width.", { min: 1, max: 100000, step: 1 });
+    numberField(section, node, cfg, "proportional_height", "↕️ 比例高", "自定义比例高。Custom ratio height.", { min: 1, max: 100000, step: 1 });
   }
 
   updateDomState(node);
@@ -702,6 +911,8 @@ function initNode(node) {
   removeConfigInputSlots(node);
   writeConfig(node, readConfig(node));
   buildPanel(node);
+  ensureNativeParamWidgets(node);
+  syncNativeParamInputSlots(node);
   updateOutputs(node);
   hideStatus(node); // 默认隐藏，不占位。
   setTimeout(() => {
@@ -710,9 +921,16 @@ function initNode(node) {
     removeConfigInputSlots(node);
     purgeLegacyStatusAndPanels(node, node.__gjjMfDomWidget);
     buildPanel(node);
+    ensureNativeParamWidgets(node);
+    syncNativeParamInputSlots(node);
     updateOutputs(node);
     hideStatus(node);
   }, 50);
+  setTimeout(() => {
+    ensureNativeParamWidgets(node);
+    syncNativeParamInputSlots(node);
+    redraw(node);
+  }, 300);
 }
 
 app.registerExtension({
@@ -759,6 +977,7 @@ app.registerExtension({
       this.__gjjMfStart = performance.now();
       purgeLegacyStatusAndPanels(this, this.__gjjMfDomWidget);
       writeConfig(this, readConfig(this));
+      ensureNativeParamWidgets(this);
       showStatus(this, "开始执行：正在按前台参数处理图片 Batch Resize...", "running", 0);
       return originalOnExecutionStart?.apply(this, arguments);
     };

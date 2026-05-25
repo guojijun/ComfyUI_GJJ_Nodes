@@ -1,7 +1,17 @@
 import torch
 import torch.nn as nn
 from accelerate import init_empty_weights
-from .gguf.gguf_utils import GGUFParameter, dequantize_gguf_tensor
+try:
+    from .gguf.gguf_utils import GGUFParameter, dequantize_gguf_tensor
+except ModuleNotFoundError as error:
+    if getattr(error, "name", "") != "gguf":
+        raise
+
+    class GGUFParameter:
+        pass
+
+    def dequantize_gguf_tensor(_tensor):
+        raise RuntimeError("当前模型使用 GGUF 权重，需要先安装 gguf；普通 safetensors/fp16 模型不需要此依赖。") from error
 
 @torch.library.custom_op("wanvideo::apply_lora", mutates_args=())
 def apply_lora(weight: torch.Tensor, lora_diff_0: torch.Tensor, lora_diff_1: torch.Tensor, lora_diff_2: float, lora_strength: torch.Tensor) -> torch.Tensor:

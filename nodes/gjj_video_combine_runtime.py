@@ -240,6 +240,13 @@ def _create_video_output(frames: torch.Tensor, fps: float, audio: dict[str, Any]
 
 
 def _normalize_fps(value: Any, fallback: float = DEFAULT_FRAME_RATE) -> float:
+    if isinstance(value, dict):
+        for key in ("fps", "frame_rate", "frameRate", "source_fps", "source_video_fps"):
+            if key in value and value[key] is not None:
+                return _normalize_fps(value[key], fallback)
+        return float(fallback)
+    if isinstance(value, (list, tuple)) and value:
+        return _normalize_fps(value[0], fallback)
     try:
         if isinstance(value, Fraction):
             return float(value)
@@ -247,6 +254,21 @@ def _normalize_fps(value: Any, fallback: float = DEFAULT_FRAME_RATE) -> float:
     except Exception:
         return float(fallback)
 
+
+
+def _is_prompt_input_linked(prompt: Any, unique_id: Any, input_name: str) -> bool:
+    if prompt is None or unique_id is None:
+        return False
+    node_data = None
+    if isinstance(prompt, dict):
+        node_data = prompt.get(str(unique_id)) or prompt.get(unique_id)
+    if not isinstance(node_data, dict):
+        return False
+    inputs = node_data.get("inputs")
+    if not isinstance(inputs, dict):
+        return False
+    value = inputs.get(input_name)
+    return isinstance(value, (list, tuple)) and len(value) >= 2
 
 def _ensure_image_batch(images: torch.Tensor) -> torch.Tensor:
     if images is None:
@@ -994,7 +1016,9 @@ def combine_video(
     if not has_image_input and not has_video_input:
         raise RuntimeError("请连接“图像/视频/Latent”。")
 
-    fps = max(0.01, float(source_video_fps if (bool(use_source_fps) and source_video_fps) else frame_rate))
+    frame_rate_is_linked = _is_prompt_input_linked(prompt, unique_id, "frame_rate")
+    fps_source = source_video_fps if (bool(use_source_fps) and source_video_fps and not frame_rate_is_linked) else frame_rate
+    fps = max(0.01, _normalize_fps(fps_source, DEFAULT_FRAME_RATE))
     loop_count = max(0, int(loop_count))
     prefix = str(filename_prefix or "").strip() or DEFAULT_FILENAME_PREFIX
 
@@ -1128,3 +1152,4 @@ def combine_video(
         "ui": ui_payload,
         "result": (video_output, main_path, output_files_json),
     }
+

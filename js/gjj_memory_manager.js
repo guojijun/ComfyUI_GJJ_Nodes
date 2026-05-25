@@ -225,6 +225,43 @@ function ensureProps(node) {
     return node.properties;
 }
 
+function asBool(value, fallback = false) {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") return value !== 0;
+    if (typeof value === "string") {
+        const text = value.trim().toLowerCase();
+        if (["true", "1", "yes", "on", "enabled", "开启", "是"].includes(text)) return true;
+        if (["false", "0", "no", "off", "disabled", "关闭", "否"].includes(text)) return false;
+    }
+    return fallback;
+}
+
+function syncPersistedProps(node) {
+    const props = ensureProps(node);
+    props[ACTION_PROP] = ACTION_REFRESH;
+    props[AUTO_CLEAN_MEMORY_PROP] = asBool(props[AUTO_CLEAN_MEMORY_PROP], false);
+    props[AUTO_CLEAN_GPU_PROP] = asBool(props[AUTO_CLEAN_GPU_PROP], false);
+    node.properties = props;
+    return props;
+}
+
+function restorePersistedProps(node, data) {
+    const saved = data?.properties || {};
+    node.properties = node.properties || {};
+
+    if (Object.prototype.hasOwnProperty.call(saved, ACTION_PROP)) {
+        node.properties[ACTION_PROP] = saved[ACTION_PROP] || ACTION_REFRESH;
+    }
+    if (Object.prototype.hasOwnProperty.call(saved, AUTO_CLEAN_MEMORY_PROP)) {
+        node.properties[AUTO_CLEAN_MEMORY_PROP] = asBool(saved[AUTO_CLEAN_MEMORY_PROP], false);
+    }
+    if (Object.prototype.hasOwnProperty.call(saved, AUTO_CLEAN_GPU_PROP)) {
+        node.properties[AUTO_CLEAN_GPU_PROP] = asBool(saved[AUTO_CLEAN_GPU_PROP], false);
+    }
+
+    return syncPersistedProps(node);
+}
+
 function markDirty(node) {
     try {
         node.setDirtyCanvas?.(true, true);
@@ -291,9 +328,9 @@ function makeTopToggleButton(node, label, propName, icon, className) {
         event.preventDefault();
         event.stopPropagation();
 
-        const props = ensureProps(node);
+        const props = syncPersistedProps(node);
         props[propName] = !props[propName];
-        props[ACTION_PROP] = ACTION_REFRESH;
+        syncPersistedProps(node);
         sync();
         markDirty(node);
     });
@@ -307,7 +344,7 @@ function makeActionButton(node, label, action, icon, className, statusEl) {
     btn.type = "button";
     btn.className = `gjj-memory-btn gjj-memory-action-btn ${className}`;
     btn.textContent = `${icon}${label}`;
-    btn.title = `只执行本节点后端动作：${label}。不会提交整个工作流。`;
+    btn.title = `只执行本节点后端动作：${label}。不会提交整个工作流；清理动作会卸载 ComfyUI 已加载模型，下次生成会重新加载。`;
 
     btn.addEventListener("click", async (event) => {
         event.preventDefault();
@@ -367,17 +404,21 @@ function makeErrorHtml(text) {
 function renderStatsHtml(detail) {
     const parts = [];
     const memory = detail?.memory;
+    const processMemory = detail?.process_memory;
 
     if (!memory) {
         parts.push(makeErrorHtml("内存：暂无数据"));
     } else if (memory.error) {
         parts.push(makeErrorHtml(`内存：${memory.error}`));
     } else {
+        const processText = processMemory && !processMemory.error
+            ? ` · ComfyUI进程 ${processMemory.private ?? processMemory.rss}${processMemory.unit}`
+            : "";
         parts.push(makeMeterHtml(
             "memory",
             "内存 RAM",
             memory.percent,
-            `已用 ${memory.used}/${memory.total}${memory.unit} · 可用 ${memory.available}${memory.unit}`
+            `整机已用 ${memory.used}/${memory.total}${memory.unit} · 可用 ${memory.available}${memory.unit}${processText}`
         ));
     }
 
@@ -409,7 +450,7 @@ function setStatusMessage(element, text) {
 
 function createPanel(node) {
     ensureStyles();
-    ensureProps(node);
+    syncPersistedProps(node);
 
     const panel = document.createElement("div");
     panel.className = "gjj-memory-panel";
@@ -442,9 +483,9 @@ function createPanel(node) {
     const actionRow = document.createElement("div");
     actionRow.className = "gjj-memory-action-row";
     actionRow.appendChild(makeActionButton(node, "刷新", ACTION_REFRESH, "🔄", "gjj-memory-action-refresh", message));
-    actionRow.appendChild(makeActionButton(node, "清理内存", ACTION_CLEAN_MEMORY, "🧹", "gjj-memory-action-ram", message));
-    actionRow.appendChild(makeActionButton(node, "清理显存", ACTION_CLEAN_GPU, "🎮", "gjj-memory-action-gpu", message));
-    actionRow.appendChild(makeActionButton(node, "一键清理", ACTION_CLEAN_ALL, "🧨", "gjj-memory-action-all", message));
+    actionRow.appendChild(makeActionButton(node, "强清内存", ACTION_CLEAN_MEMORY, "🧹", "gjj-memory-action-ram", message));
+    actionRow.appendChild(makeActionButton(node, "强清显存", ACTION_CLEAN_GPU, "🎮", "gjj-memory-action-gpu", message));
+    actionRow.appendChild(makeActionButton(node, "强力清理", ACTION_CLEAN_ALL, "🧨", "gjj-memory-action-all", message));
     panel.appendChild(actionRow);
 
     node.__gjjMemoryPanel = panel;
@@ -545,6 +586,7 @@ app.registerExtension({
         const onNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function (...args) {
             const result = onNodeCreated?.apply(this, args);
+            syncPersistedProps(this);
             installPanel(this);
             return result;
         };
@@ -552,8 +594,21 @@ app.registerExtension({
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (...args) {
             const result = onConfigure?.apply(this, args);
-            ensureProps(this);
+            restorePersistedProps(this, args[0]);
             requestAnimationFrame(() => installPanel(this));
+            return result;
+        };
+
+        const onSerialize = nodeType.prototype.onSerialize;
+        nodeType.prototype.onSerialize = function (serializedNode, ...args) {
+            const result = onSerialize?.apply(this, [serializedNode, ...args]);
+            const props = syncPersistedProps(this);
+            if (serializedNode) {
+                serializedNode.properties = serializedNode.properties || {};
+                serializedNode.properties[ACTION_PROP] = ACTION_REFRESH;
+                serializedNode.properties[AUTO_CLEAN_MEMORY_PROP] = !!props[AUTO_CLEAN_MEMORY_PROP];
+                serializedNode.properties[AUTO_CLEAN_GPU_PROP] = !!props[AUTO_CLEAN_GPU_PROP];
+            }
             return result;
         };
     },

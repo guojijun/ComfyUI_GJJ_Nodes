@@ -708,6 +708,69 @@ class GJJ_ImageResizeKJv2:
                 }),
             },
             "optional": {
+                "target_width": ("INT", {
+                    "default": 1024,
+                    "min": 1,
+                    "max": MAX_RESOLUTION,
+                    "step": 8,
+                    "display_name": "📐 目标宽度",
+                    "tooltip": "目标宽度。宽高模式下显示；其它模式隐藏。可手填，也可连接外部 INT。",
+                    "hidden": True,
+                    "display": "hidden",
+                    "forceInput": False,
+                }),
+                "target_height": ("INT", {
+                    "default": 1024,
+                    "min": 1,
+                    "max": MAX_RESOLUTION,
+                    "step": 8,
+                    "display_name": "📐 目标高度",
+                    "tooltip": "目标高度。宽高模式下显示；其它模式隐藏。可手填，也可连接外部 INT。",
+                    "hidden": True,
+                    "display": "hidden",
+                    "forceInput": False,
+                }),
+                "scale_percent": ("FLOAT", {
+                    "default": 100.0,
+                    "min": 0.1,
+                    "max": 10000.0,
+                    "step": 1.0,
+                    "display_name": "📊 缩放百分比",
+                    "tooltip": "缩放百分比。等比模式下显示；其它模式隐藏。可手填，也可连接外部 FLOAT。",
+                    "hidden": True,
+                    "display": "hidden",
+                    "forceInput": False,
+                }),
+                "long_side_length": ("INT", {
+                    "default": 1024,
+                    "min": 1,
+                    "max": MAX_RESOLUTION,
+                    "step": 8,
+                    "display_name": "📏 长边长度",
+                    "tooltip": "长边长度。长边模式下显示；其它模式隐藏。可手填，也可连接外部 INT。",
+                    "hidden": True,
+                    "display": "hidden",
+                    "forceInput": False,
+                }),
+                "total_pixel_k": ("INT", {
+                    "default": 260,
+                    "min": 1,
+                    "max": 1000000,
+                    "step": 1,
+                    "display_name": "🧮 总像素/K",
+                    "tooltip": "总像素，单位 K。像素模式下显示；其它模式隐藏。可手填，也可连接外部 INT。",
+                    "hidden": True,
+                    "display": "hidden",
+                    "forceInput": False,
+                }),
+                "aspect_ratio": (["原始比例", "自定义", "1:1", "3:2", "4:3", "16:9", "2:3", "3:4", "9:16"], {
+                    "default": "1:1",
+                    "display_name": "🖼️ 输出比例",
+                    "tooltip": "输出比例。像素模式下显示；保留原生下拉选项，也可连接外部 STRING。",
+                    "hidden": True,
+                    "display": "hidden",
+                    "forceInput": False,
+                }),
                 "mask": ("MASK", {"display_name": "🎭 遮罩", "tooltip": "可选遮罩，会与图片同步缩放。Optional mask."}),
             },
             "hidden": {
@@ -748,13 +811,31 @@ GJJ · 🔍 多功能图片缩放
 - 如果缺失依赖或输入异常，节点会在控制台打印错误原因，并尽量返回原图，避免中断整个流程。
 """
 
-    def resize(self, image, config_json, unique_id=None, mask=None):
+    def resize(self, image, config_json, unique_id=None, target_width=None, target_height=None, scale_percent=None, long_side_length=None, total_pixel_k=None, aspect_ratio=None, mask=None):
         start = time.time()
         try:
             config_json = _unwrap_list_param(config_json)
             unique_id = _unwrap_list_param(unique_id)
 
             cfg = _load_config(config_json)
+            target_width = _unwrap_list_param(target_width)
+            target_height = _unwrap_list_param(target_height)
+            scale_percent = _unwrap_list_param(scale_percent)
+            long_side_length = _unwrap_list_param(long_side_length)
+            total_pixel_k = _unwrap_list_param(total_pixel_k)
+            aspect_ratio = _unwrap_list_param(aspect_ratio)
+            if target_width is not None:
+                cfg["width"] = max(1, _to_int(target_width, cfg.get("width", 1024)))
+            if target_height is not None:
+                cfg["height"] = max(1, _to_int(target_height, cfg.get("height", 1024)))
+            if scale_percent is not None:
+                cfg["scale_percent"] = max(0.001, _to_float(scale_percent, cfg.get("scale_percent", 100.0)))
+            if long_side_length is not None:
+                cfg["long_side_length"] = max(1, _to_int(long_side_length, cfg.get("long_side_length", 1024)))
+            if total_pixel_k is not None:
+                cfg["total_pixel_k"] = max(1, _to_int(total_pixel_k, cfg.get("total_pixel_k", 260)))
+            if aspect_ratio is not None:
+                cfg["aspect_ratio"] = str(aspect_ratio)
 
             # INPUT_IS_LIST=True 或某些批量节点会把端口值包一层 list。
             # 统计只看输入源；输出逻辑保持 v29，不额外复杂化。

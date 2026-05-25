@@ -10,7 +10,7 @@ const FIXED_INPUT_SPECS = [
 	["force_offload", "BOOLEAN", "force_offload", "采样后卸载"],
 	["scheduler", "COMBO", "scheduler", "调度器"],
 	["riflex_freq_index", "INT", "riflex_freq_index", "RIFLEX 频率索引"],
-	["text_embeds", "WANVIDEOTEXTEMBEDS", null, "文本条件"],
+	["text_embeds", "WANVIDEOTEXTEMBEDS,CONDITIONING", null, "文本条件"],
 	["samples", "LATENT", null, "初始 latent"],
 	["denoise_strength", "FLOAT", "denoise_strength", "降噪强度"],
 	["feta_args", "FETAARGS", null, "FETA 参数"],

@@ -23,8 +23,12 @@ offload_device = mm.unet_offload_device()
 
 try:
     from .gguf.gguf import GGUFParameter
-except:
-    pass
+except ModuleNotFoundError as error:
+    if getattr(error, "name", "") != "gguf":
+        raise
+
+    class GGUFParameter:
+        pass
 
 COLOR_CODES = {
     "reset": "\033[0m",

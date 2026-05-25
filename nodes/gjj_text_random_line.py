@@ -136,4 +136,4 @@ class GJJ_TextRandomLine:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_TextRandomLine}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🎲 文本分行随机选择器"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🎲 批量文本分行执行器"}

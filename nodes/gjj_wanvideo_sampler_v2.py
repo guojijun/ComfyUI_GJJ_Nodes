@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import sys
 from typing import Any
 
@@ -54,7 +55,7 @@ _GJJ_HELP = {
         "peft：LoRA 支持需要 peft 库。",
         "sentencepiece：分词器需要 sentencepiece 库。",
         "protobuf：模型序列化需要 protobuf 库。",
-        "gguf：GGUF 格式模型支持需要 gguf 库。",
+        "gguf：仅使用 GGUF 量化模型时才需要；普通 safetensors/fp16 模型不需要。",
         "opencv-python：图像处理功能需要 opencv-python 库。",
         "scipy：科学计算需要 scipy 库。",
     ],
@@ -197,6 +198,8 @@ def _is_gjj_vendored_model(model):
 
 
 def _source_wanvideo_sampler_if_loaded(model):
+    if getattr(model, "__gjj_native_wan_adapter__", False):
+        return None
     if _is_gjj_vendored_model(model):
         return None
     comfy_nodes = sys.modules.get("nodes")
@@ -214,6 +217,52 @@ def _source_wanvideo_sampler_if_loaded(model):
     except Exception:
         return None
 
+
+def _model_input_type_label(model):
+    outer_name = type(model).__name__
+    try:
+        inner = getattr(model, "model", None)
+    except Exception:
+        inner = None
+    inner_name = type(inner).__name__ if inner is not None else ""
+    if inner_name and inner_name != outer_name:
+        return f"{outer_name}/{inner_name}"
+    return outer_name
+
+
+def _has_wanvideo_wrapper_metadata(model):
+    try:
+        inner = getattr(model, "model", None)
+        if inner is None:
+            return False
+        for key in ("base_dtype", "weight_dtype", "fp8_matmul", "gguf_reader", "control_lora"):
+            inner[key]
+        transformer_options = getattr(model, "model_options", {}).get("transformer_options", None)
+        return isinstance(transformer_options, dict)
+    except Exception:
+        return False
+
+
+def _is_native_wan_model(model):
+    try:
+        inner = getattr(model, "model", None)
+        transformer = getattr(inner, "diffusion_model", None)
+        module_name = str(getattr(transformer.__class__, "__module__", "") or "")
+        inner_name = type(inner).__name__
+        return module_name.startswith("comfy.ldm.wan") or inner_name.startswith("WAN21") or inner_name.startswith("WAN22")
+    except Exception:
+        return False
+
+def _validate_wanvideo_model_input(model):
+    if _has_wanvideo_wrapper_metadata(model):
+        return
+    received = _model_input_type_label(model)
+    raise RuntimeError(
+        "GJJ WanVideo 视频采样器 v2 使用的是 WanVideoWrapper 包装格式，模型输入必须是 WANVIDEOMODEL。\n"
+        f"当前收到的是 {received}，看起来是 ComfyUI 原生 MODEL/WAN 模型，不能走这个采样器。\n"
+        "原生 MODEL 请改用「GJJ · 🎞️ Wan原生视频采样器」；"
+        "WanVideoWrapper 流程请改接「GJJ · 🎬 WanVideo 模型加载器」输出的 WANVIDEOMODEL。"
+    )
 
 def _unwrap_compiled_module(module):
     while hasattr(module, "_orig_mod"):
@@ -345,6 +394,42 @@ def _as_choice(value, choices, default):
     return default
 
 
+def _is_conditioning(value: Any) -> bool:
+    if not isinstance(value, (list, tuple)) or not value:
+        return False
+    first = value[0]
+    return isinstance(first, (list, tuple)) and len(first) >= 1 and hasattr(first[0], "shape")
+
+
+def _conditioning_tensor(conditioning: Any):
+    if not _is_conditioning(conditioning):
+        raise RuntimeError("文本条件转换失败：输入不是有效的 CONDITIONING 结构。")
+    tensor = conditioning[0][0]
+    try:
+        import comfy.model_management as mm
+
+        return tensor.to(mm.get_torch_device()) if hasattr(tensor, "to") else tensor
+    except Exception:
+        return tensor
+
+
+def _normalize_text_embeds_input(text_embeds: Any) -> Any:
+    if text_embeds is None:
+        return None
+    if isinstance(text_embeds, dict):
+        if "prompt_embeds" in text_embeds:
+            return text_embeds
+        raise RuntimeError("文本条件转换失败：字典输入缺少 prompt_embeds 字段。")
+    if _is_conditioning(text_embeds):
+        return {
+            "prompt_embeds": _conditioning_tensor(text_embeds),
+            "negative_prompt_embeds": None,
+        }
+    raise RuntimeError(
+        "文本条件类型不兼容：请连接 WANVIDEOTEXTEMBEDS，或连接 CLIP 编码节点输出的 CONDITIONING。"
+    )
+
+
 def _merge_extra_args(args: dict[str, Any], extra_args: Any) -> None:
     if extra_args is None:
         return
@@ -353,6 +438,50 @@ def _merge_extra_args(args: dict[str, Any], extra_args: Any) -> None:
     for key, value in extra_args.items():
         if value is not None:
             args[key] = value
+
+
+def _cleanup_after_sampler(model: Any, force_offload: bool) -> None:
+    """采样段之间主动释放临时显存，避免双模型工作流连续运行时显存逐轮抬高。"""
+    try:
+        import torch
+        import comfy.model_management as mm
+
+        if force_offload:
+            offload_device = mm.unet_offload_device()
+            candidates = [
+                model,
+                getattr(model, "model", None),
+                getattr(getattr(model, "model", None), "diffusion_model", None),
+            ]
+            seen = set()
+            for item in candidates:
+                if item is None:
+                    continue
+                key = id(item)
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    if hasattr(item, "to"):
+                        item.to(offload_device)
+                except Exception:
+                    pass
+
+        gc.collect()
+        try:
+            mm.soft_empty_cache()
+        except TypeError:
+            mm.soft_empty_cache(force=True)
+        except Exception:
+            pass
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 class GJJ_WanVideoSchedulerV2:
@@ -677,10 +806,10 @@ class GJJ_WanVideoSamplerV2:
             },
             "optional": {
                 "text_embeds": (
-                    "WANVIDEOTEXTEMBEDS",
+                    "WANVIDEOTEXTEMBEDS,CONDITIONING",
                     {
                         "display_name": "文本条件",
-                        "tooltip": "可选 WanVideo 文本编码输出；不连接时使用空文本条件。",
+                        "tooltip": "可选 WanVideo 文本编码输出；也可直接连接 CONDITIONING，节点内部会包装为 WANVIDEOTEXTEMBEDS 格式。",
                     },
                 ),
                 "samples": (
@@ -942,6 +1071,7 @@ class GJJ_WanVideoSamplerV2:
             "add_noise_to_samples": add_noise_to_samples,
         }
         _merge_extra_args(args, extra_args)
+        args["text_embeds"] = _normalize_text_embeds_input(args.get("text_embeds"))
 
         scheduler_choices = _scheduler_choices()
         rope_choices = _rope_choices()
@@ -968,6 +1098,8 @@ class GJJ_WanVideoSamplerV2:
         args["end_step"] = _as_int(args["end_step"], -1, min_value=-1, max_value=10000)
         args["add_noise_to_samples"] = _as_bool(args["add_noise_to_samples"], False)
 
+        _validate_wanvideo_model_input(args["model"])
+
         node = _source_wanvideo_sampler_if_loaded(model)
         if node is None:
             runtime = _load_sampler_runtime()
@@ -980,8 +1112,11 @@ class GJJ_WanVideoSamplerV2:
         
         for attempt in range(max_retries):
             try:
-                return node.process(**args)
+                result = node.process(**args)
+                _cleanup_after_sampler(args["model"], args["force_offload"])
+                return result
             except Exception as e:
+                _cleanup_after_sampler(args["model"], args["force_offload"])
                 error_str = str(e).lower()
                 
                 # 检测 Triton 编译失败错误（包括 InductorError 包装的情况）
@@ -1080,14 +1215,143 @@ class GJJ_WanVideoSamplerV2:
                 else:
                     raise
 
+
+
+def _native_sampler_choices():
+    try:
+        import comfy.samplers
+        return list(comfy.samplers.KSampler.SAMPLERS)
+    except Exception:
+        return ["euler", "dpmpp_2m", "uni_pc"]
+
+
+def _native_scheduler_choices():
+    try:
+        import comfy.samplers
+        return list(comfy.samplers.KSampler.SCHEDULERS)
+    except Exception:
+        return ["simple", "normal", "karras", "beta"]
+
+
+def _native_choice(value, choices, default):
+    value = str(value or "")
+    if value in choices:
+        return value
+    return default if default in choices else (choices[0] if choices else default)
+
+
+class GJJ_NativeWanVideoSampler:
+    @classmethod
+    def INPUT_TYPES(cls):
+        samplers = _native_sampler_choices()
+        schedulers = _native_scheduler_choices()
+        return {
+            "required": {
+                "model": (
+                    "MODEL",
+                    {
+                        "display_name": "原生Wan模型",
+                        "tooltip": "连接 ComfyUI 原生 Wan MODEL，例如视频通用模型加载节点的 High模型/Low模型。",
+                    },
+                ),
+                "positive": (
+                    "CONDITIONING",
+                    {
+                        "display_name": "正向条件",
+                        "tooltip": "连接 CLIP 正向提示词编码输出。",
+                    },
+                ),
+                "negative": (
+                    "CONDITIONING",
+                    {
+                        "display_name": "负向条件",
+                        "tooltip": "连接 CLIP 负向提示词编码输出。",
+                    },
+                ),
+                "latent_image": (
+                    "LATENT",
+                    {
+                        "display_name": "视频latent",
+                        "tooltip": "连接原生 Wan 空 latent 或图生视频条件节点产生的 LATENT。",
+                    },
+                ),
+                "steps": (
+                    "INT",
+                    {"default": 6, "min": 1, "max": 10000, "step": 1, "display_name": "采样步数", "tooltip": "原生采样步数。"},
+                ),
+                "cfg": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 30.0, "step": 0.01, "display_name": "CFG", "tooltip": "原生 CFG 引导强度。"},
+                ),
+                "sampler_name": (
+                    samplers,
+                    {"default": _native_choice("euler", samplers, "euler"), "display_name": "采样器", "tooltip": "ComfyUI 原生采样器。"},
+                ),
+                "scheduler": (
+                    schedulers,
+                    {"default": _native_choice("simple", schedulers, "simple"), "display_name": "调度器", "tooltip": "ComfyUI 原生调度器。"},
+                ),
+                "denoise": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "display_name": "降噪强度", "tooltip": "1.0 表示完整采样。"},
+                ),
+                "seed": (
+                    "INT",
+                    {"default": 0, "min": 0, "max": 0xffffffffffffffff, "display_name": "种子", "tooltip": "采样随机种子。"},
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("采样latent",)
+    OUTPUT_TOOLTIPS = ("ComfyUI 原生 Wan 采样结果 latent。",)
+    FUNCTION = "sample"
+    CATEGORY = "GJJ/视频模型/WanVideo"
+    DESCRIPTION = "GJJ Wan 原生视频采样器：用于视频通用模型加载节点输出的 ComfyUI 原生 MODEL。"
+    GJJ_HELP = {
+        "title": "Wan 原生视频采样器",
+        "description": "使用 ComfyUI 原生采样链处理 Wan MODEL，与 WanVideoWrapper 的 WANVIDEOMODEL 采样器分开。",
+        "usage": [
+            "模型接视频通用模型加载节点输出的 High模型/Low模型等 MODEL。",
+            "正向/负向条件接 GJJ · 🧾 CLIP正负提示词编码 的 CONDITIONING 输出。",
+            "视频 latent 接原生空 latent 或原生图生视频条件节点输出。",
+        ],
+    }
+
+    def sample(self, model, positive, negative, latent_image, steps, cfg, sampler_name, scheduler, denoise, seed):
+        if not _is_native_wan_model(model):
+            received = _model_input_type_label(model)
+            raise RuntimeError(
+                "Wan 原生视频采样器只接 ComfyUI 原生 Wan MODEL。\n"
+                f"当前收到的是 {received}。如果你接的是 WANVIDEOMODEL，请使用「GJJ · 🎞️ WanVideo 视频采样器 v2」。"
+            )
+        try:
+            from nodes import common_ksampler
+        except Exception as error:
+            raise RuntimeError(f"原生采样器加载 ComfyUI common_ksampler 失败：{error}") from error
+        return common_ksampler(
+            model,
+            _as_int(seed, 0, min_value=0, max_value=0xffffffffffffffff),
+            _as_int(steps, 6, min_value=1),
+            _as_float(cfg, 1.0, min_value=0.0, max_value=30.0),
+            str(sampler_name),
+            str(scheduler),
+            positive,
+            negative,
+            latent_image,
+            denoise=_as_float(denoise, 1.0, min_value=0.0, max_value=1.0),
+        )
+
 NODE_CLASS_MAPPINGS = {
     "GJJ_WanVideoSchedulerV2": GJJ_WanVideoSchedulerV2,
     "GJJ_WanVideoSamplerV2ExtraArgs": GJJ_WanVideoSamplerV2ExtraArgs,
     "GJJ_WanVideoSamplerV2": GJJ_WanVideoSamplerV2,
+    "GJJ_NativeWanVideoSampler": GJJ_NativeWanVideoSampler,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "GJJ_WanVideoSchedulerV2": "GJJ · 🗓️ WanVideo 调度器 v2",
     "GJJ_WanVideoSamplerV2ExtraArgs": "GJJ · 🧰 WanVideo 采样扩展参数",
     "GJJ_WanVideoSamplerV2": "GJJ · 🎞️ WanVideo 视频采样器 v2",
+    "GJJ_NativeWanVideoSampler": "GJJ · 🎞️ Wan原生视频采样器",
 }

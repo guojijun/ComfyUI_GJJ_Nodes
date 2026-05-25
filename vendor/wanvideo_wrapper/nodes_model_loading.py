@@ -23,8 +23,14 @@ from comfy.sd import load_lora_for_models
 try:
     from .gguf.gguf import _replace_with_gguf_linear, GGUFParameter
     from gguf import GGMLQuantizationType
-except:
-    pass
+except ModuleNotFoundError as error:
+    if getattr(error, "name", "") != "gguf":
+        raise
+    _replace_with_gguf_linear = None
+    GGMLQuantizationType = None
+
+    class GGUFParameter:
+        pass
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -813,6 +819,8 @@ def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None,
     block_idx = vace_block_idx = None
 
     if gguf:
+        if GGMLQuantizationType is None or _replace_with_gguf_linear is None:
+            raise RuntimeError("当前模型使用 GGUF 权重，需要先安装 gguf；普通 safetensors/fp16 模型不需要此依赖。")
         log.info("Using GGUF to load and assign model weights to device...")
 
         # Prepare sd from GGUF readers

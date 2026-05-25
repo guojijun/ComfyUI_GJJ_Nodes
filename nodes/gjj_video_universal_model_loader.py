@@ -421,7 +421,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         ],
     },
     "ltx23_i2v_t2v": {
-        "label": "LTX 2.3 I2V / T2V 双VAE",
+        "label": "LTX23 T2V / I2V官方流",
         "clip_type": "ltxv",
         "slots": [
             S("ckpt_model", "LTX Checkpoint模型", "checkpoints", "checkpoint_model", ["ltx", "dev"]),

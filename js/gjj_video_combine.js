@@ -8,6 +8,8 @@ const STATUS_WIDGET_NAME = "gjj_video_combine_status";
 const MIN_WIDTH = 340;
 const TOOLBAR_HEIGHT = 36;
 const PANEL_HEIGHT = 318;
+const STATUS_PANEL_HEIGHT = 70;
+const HIDDEN_PANEL_HEIGHT = 0;
 const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "mkv", "avi", "m4v"]);
 const PRIMARY_INPUT_NAME = "images";
 const PRIMARY_INPUT_ALIASES = new Set(["images", "图像"]);
@@ -372,7 +374,7 @@ function ensurePanelWidget(node) {
 	}
 	const wrap = document.createElement("div");
 	wrap.style.cssText = [
-		"display:flex",
+		"display:none",
 		"flex-direction:column",
 		"gap:6px",
 		"min-height:42px",
@@ -471,10 +473,55 @@ function ensurePanelWidget(node) {
 
 	const widget = node.addDOMWidget?.(STATUS_WIDGET_NAME, STATUS_WIDGET_NAME, wrap, {
 		hideOnZoom: false,
-		getHeight: () => PANEL_HEIGHT,
+		getHeight: () => getPanelHeight(node),
 	});
 	node.__gjjVideoCombineStatus = { widget, wrap, text, progressInner, previewCard, empty, video, image };
+	setPanelMode(node, node.__gjjVideoCombinePanelMode || "hidden");
 	return node.__gjjVideoCombineStatus;
+}
+
+function getPanelHeight(node) {
+	const mode = String(node?.__gjjVideoCombinePanelMode || "hidden");
+	if (mode === "preview") {
+		return PANEL_HEIGHT;
+	}
+	if (mode === "status") {
+		return STATUS_PANEL_HEIGHT;
+	}
+	return HIDDEN_PANEL_HEIGHT;
+}
+
+function resizeNodeToContent(node) {
+	if (!node) {
+		return;
+	}
+	requestAnimationFrame(() => {
+		const width = Math.max(MIN_WIDTH, Number(node.size?.[0] || MIN_WIDTH));
+		const computed = typeof node.computeSize === "function" ? node.computeSize() : node.size;
+		const height = Math.max(80, Number(computed?.[1] || node.size?.[1] || 80));
+		node.setSize?.([width, height]);
+		refreshNode(node);
+	});
+}
+
+function setPanelMode(node, mode) {
+	const state = node?.__gjjVideoCombineStatus;
+	if (!state) {
+		return;
+	}
+	const nextMode = ["hidden", "status", "preview"].includes(mode) ? mode : "hidden";
+	if (node.__gjjVideoCombinePanelMode === nextMode) {
+		return;
+	}
+	node.__gjjVideoCombinePanelMode = nextMode;
+	state.wrap.style.display = nextMode === "hidden" ? "none" : "flex";
+	state.previewCard.style.display = nextMode === "preview" ? "flex" : "none";
+	if (state.widget) {
+		state.widget.getHeight = () => getPanelHeight(node);
+		state.widget.computedHeight = getPanelHeight(node);
+	}
+	refreshNode(node);
+	resizeNodeToContent(node);
 }
 
 function buildViewUrl(item) {
@@ -512,6 +559,9 @@ function setStatus(node, detail = {}) {
 	state.text.textContent = String(detail.text || "等待执行");
 	const progress = parseProgress(detail);
 	state.progressInner.style.width = `${progress == null ? 0 : progress}%`;
+	if (node.__gjjVideoCombinePanelMode !== "preview") {
+		setPanelMode(node, "status");
+	}
 	refreshNode(node);
 }
 function clearNativePreview(node) {
@@ -562,10 +612,12 @@ function setPreview(node, detail = {}) {
 		state.video.style.display = "none";
 		state.image.style.display = "none";
 		state.empty.textContent = "执行后在这里预览视频或动图";
+		setPanelMode(node, "hidden");
 		refreshNode(node);
 		return;
 	}
 
+	setPanelMode(node, "preview");
 	if (shouldUseVideo) {
 		state.empty.style.display = "none";
 		state.image.style.display = "none";
@@ -596,15 +648,16 @@ function patchNode(node) {
 	ensurePanelWidget(node);
 	applySlotVisibility(node);
 	clearNativePreview(node);
-	setStatus(node, { text: "等待执行", progress: 0 });
-	setPreview(node, {});
 	if (!Array.isArray(node.size) || node.size.length < 2) {
-		node.setSize?.([MIN_WIDTH, PANEL_HEIGHT + TOOLBAR_HEIGHT + 8]);
+		node.setSize?.([MIN_WIDTH, Math.max(80, getPanelHeight(node) + TOOLBAR_HEIGHT + 8)]);
 	} else {
 		node.setSize?.([
 			Math.max(MIN_WIDTH, Number(node.size[0] || MIN_WIDTH)),
-			Math.max(PANEL_HEIGHT + TOOLBAR_HEIGHT + 8, Number(node.size[1] || 0)),
+			Number(node.size[1] || 80),
 		]);
+	}
+	if (!node.__gjjVideoCombinePanelMode) {
+		setPanelMode(node, "hidden");
 	}
 }
 

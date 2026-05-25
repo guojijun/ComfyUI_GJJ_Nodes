@@ -6,7 +6,14 @@ import inspect
 from .wanvideo.modules.model import rope_params
 from .custom_linear import remove_lora_from_module, set_lora_params, _replace_linear
 from .wanvideo.schedulers import get_scheduler, scheduler_list
-from .gguf.gguf import set_lora_params_gguf
+def _set_lora_params_gguf(module, patches):
+    try:
+        from .gguf.gguf import set_lora_params_gguf
+    except ModuleNotFoundError as error:
+        if getattr(error, "name", "") == "gguf":
+            raise RuntimeError("当前模型使用 GGUF 权重，需要先安装 gguf；普通 safetensors/fp16 模型不需要此依赖。") from error
+        raise
+    return set_lora_params_gguf(module, patches)
 from .multitalk.multitalk import add_noise
 from .utils import(log, print_memory, apply_lora, fourier_filter, optimized_scale, setup_radial_attention,
                    compile_model, dict_to_device, tangential_projection, get_raag_guidance, temporal_score_rescaling, offload_transformer, init_blockswap)
@@ -128,7 +135,7 @@ class WanVideoSampler:
         if gguf_reader is not None: #handle GGUF
             load_weights(transformer, patcher.model["sd"], base_dtype=dtype, transformer_load_device=device, patcher=patcher, gguf=True,
                          reader=gguf_reader, block_swap_args=block_swap_args, compile_args=model["compile_args"])
-            set_lora_params_gguf(transformer, patcher.patches)
+            _set_lora_params_gguf(transformer, patcher.patches)
             transformer.patched_linear = True
         elif len(patcher.patches) != 0: #handle patched linear layers (unmerged loras, fp8 scaled)
             log.info(f"Using {len(patcher.patches)} LoRA weight patches for WanVideo model")

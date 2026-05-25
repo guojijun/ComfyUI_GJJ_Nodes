@@ -19,6 +19,13 @@ const DEFAULT_BRANCHES = [
 ];
 const DEFAULT_PRECISIONS = ["fp16", "bf16", "fp32"];
 const PRECISION_KINDS = new Set(["fantasytalking", "fantasyportrait"]);
+const OUTPUT_DEFS = [
+	{ name: "额外模型串联配置", type: "EXTRA_MODEL_CHAIN", tooltip: "额外模型链配置，可接 GJJ 视频通用模型加载器。" },
+	{ name: "VACE模型", type: "VACEPATH", kind: "vace", tooltip: "启用 VACE 后输出 VACEPATH。" },
+	{ name: "FantasyTalking模型", type: "FANTASYTALKINGMODEL", kind: "fantasytalking", tooltip: "启用 FantasyTalking 后输出对应模型对象。" },
+	{ name: "MultiTalk模型", type: "MULTITALKMODEL", kind: "multitalk", tooltip: "启用 MultiTalk / InfiniteTalk 后输出对应模型对象。" },
+	{ name: "FantasyPortrait模型", type: "FANTASYPORTRAITMODEL", kind: "fantasyportrait", tooltip: "启用 FantasyPortrait 后输出对应模型对象。" },
+];
 
 function normalizeKind(value) {
 	const text = String(value || "vace").trim().toLowerCase().replaceAll("-", "_").replaceAll(" ", "_");
@@ -199,12 +206,148 @@ function updateDataWidget(node) {
 		node.widgets_values = Array.isArray(node.widgets_values) ? node.widgets_values : [];
 		node.widgets_values[widgetIndex] = serialized;
 	}
+	updateOutputSockets(node);
 }
 
 function updateNodeHeight(node) {
 	const state = ensureNodeState(node);
 	const rowCount = Math.max(0, state.rows.length);
 	node.size = [Math.max(node.size?.[0] || 480, 480), 52 + rowCount * 46];
+	node.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function enabledOutputKinds(node) {
+	const state = ensureNodeState(node);
+	return new Set((state.rows || [])
+		.filter((row) => row?.enabled !== false && String(row?.name || "").trim())
+		.map((row) => normalizeKind(row.kind)));
+}
+
+function visibleOutputDefs(node) {
+	const enabledKinds = enabledOutputKinds(node);
+	return OUTPUT_DEFS.filter((def, index) => index === 0 || enabledKinds.has(normalizeKind(def.kind)));
+}
+
+function outputKindKey(output, index) {
+	return String(output?.__gjjExtraModelKind || (index === 0 ? "chain" : ""));
+}
+
+function collectOutputLinksByKind(node) {
+	const saved = [];
+	const outputs = Array.isArray(node.outputs) ? node.outputs : [];
+	for (let index = 0; index < outputs.length; index += 1) {
+		const output = outputs[index];
+		const links = Array.isArray(output?.links) ? output.links.slice() : [];
+		for (const linkId of links) {
+			const link = app.graph?.links?.[linkId];
+			if (!link) continue;
+			saved.push({
+				linkId,
+				link,
+				kind: outputKindKey(output, index),
+				target_id: link.target_id,
+				target_slot: link.target_slot,
+			});
+		}
+	}
+	return saved;
+}
+
+function detachAllOutputLinks(node) {
+	for (const output of node.outputs || []) {
+		if (output) output.links = [];
+	}
+}
+
+function removeUnrestoredLinks(saved, restored) {
+	for (const item of saved || []) {
+		if (restored.has(item.linkId)) continue;
+		const targetNode = app.graph?.getNodeById?.(item.target_id) || app.graph?._nodes_by_id?.[item.target_id];
+		const targetInput = targetNode?.inputs?.[item.target_slot];
+		if (targetInput?.link === item.linkId) targetInput.link = null;
+		try { app.graph?.removeLink?.(item.linkId); } catch (_) {}
+		try { if (app.graph?.links?.[item.linkId]) delete app.graph.links[item.linkId]; } catch (_) {}
+	}
+}
+
+function restoreOutputLinksByKind(node, saved) {
+	const restored = new Set();
+	const usedTargets = new Set();
+	for (let index = 0; index < (node.outputs || []).length; index += 1) {
+		const output = node.outputs[index];
+		if (!output) continue;
+		output.links = Array.isArray(output.links) ? output.links : [];
+		const kind = outputKindKey(output, index);
+		for (const item of saved || []) {
+			if (item.kind !== kind || restored.has(item.linkId)) continue;
+			const targetKey = `${item.target_id}:${item.target_slot}`;
+			if (usedTargets.has(targetKey)) continue;
+			const link = item.link;
+			if (!link) continue;
+			link.origin_id = node.id;
+			link.origin_slot = index;
+			link.type = output.type;
+			app.graph.links = app.graph.links || {};
+			app.graph.links[item.linkId] = link;
+			if (!output.links.includes(item.linkId)) output.links.push(item.linkId);
+			const targetNode = app.graph?.getNodeById?.(item.target_id) || app.graph?._nodes_by_id?.[item.target_id];
+			const targetInput = targetNode?.inputs?.[item.target_slot];
+			if (targetInput) targetInput.link = item.linkId;
+			restored.add(item.linkId);
+			usedTargets.add(targetKey);
+		}
+	}
+	removeUnrestoredLinks(saved, restored);
+}
+
+function repairVisibleOutput(output, def, index) {
+	output.name = def.name;
+	output.label = def.name;
+	output.localized_name = def.name;
+	output.type = def.type;
+	output.tooltip = def.tooltip || "";
+	output.__gjjExtraModelKind = def.kind || "chain";
+	output.__gjjExtraModelOutput = true;
+	output.slot_index = index;
+	delete output.hidden;
+	delete output.disabled;
+	delete output.not_show;
+	delete output.__gjj_hidden;
+	if (Object.prototype.hasOwnProperty.call(output, "pos")) {
+		try { delete output.pos; } catch (_) { output.pos = undefined; }
+	}
+	output.visible = true;
+	if (!Array.isArray(output.links)) output.links = [];
+	for (const linkId of output.links.slice()) {
+		const link = app.graph?.links?.[linkId];
+		if (!link) continue;
+		link.origin_id = app.graph?.getNodeById?.(link.origin_id)?.id || link.origin_id;
+		link.origin_slot = index;
+		link.type = def.type;
+	}
+}
+
+function updateOutputSockets(node) {
+	if (!node) return;
+	if (!Array.isArray(node.outputs)) node.outputs = [];
+	const defs = visibleOutputDefs(node);
+	const savedLinks = collectOutputLinksByKind(node);
+	detachAllOutputLinks(node);
+	while (node.outputs.length > defs.length) {
+		try { node.removeOutput(node.outputs.length - 1); }
+		catch (_) { node.outputs.splice(node.outputs.length - 1, 1); }
+	}
+	while (node.outputs.length < defs.length) {
+		try { node.addOutput?.("*", "*"); }
+		catch (_) { node.outputs.push({ name: "*", type: "*", links: [] }); }
+	}
+	defs.forEach((def, index) => {
+		const output = node.outputs[index];
+		if (output) repairVisibleOutput(output, def, index);
+	});
+	restoreOutputLinksByKind(node, savedLinks);
+	node.__gjjExtraModelOutputSignature = defs.map((def) => `${def.name}:${def.type}:${def.kind || "chain"}`).join("|");
 	node.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
 }
@@ -581,6 +724,7 @@ function renderUi(node) {
 	rowsContainer.replaceChildren();
 	state.rows.forEach((row, index) => buildRow(node, row, index, rowsContainer));
 	updateDataWidget(node);
+	updateOutputSockets(node);
 	updateNodeHeight(node);
 }
 
@@ -628,6 +772,7 @@ function setupUi(node) {
 	};
 
 	node.addDOMWidget("额外模型串联", "HTML", container, { serialize: false });
+	updateOutputSockets(node);
 	refreshOptions(node, false).then(() => renderUi(node));
 }
 
