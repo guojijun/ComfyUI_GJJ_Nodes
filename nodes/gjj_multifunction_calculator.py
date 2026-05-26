@@ -70,6 +70,8 @@ SAFE_FUNCS = {
     "avg": None,
     "ceil": math.ceil,
     "floor": math.floor,
+    "float": float,
+    "int": int,
     "max": max,
     "mean": None,
     "min": min,
@@ -189,7 +191,7 @@ def _eval_ast(node: ast.AST, values: dict[str, Any]) -> Any:
     if isinstance(node, ast.Call):
         if not isinstance(node.func, ast.Name) or node.func.id not in SAFE_FUNCS:
             raise ValueError(
-                "公式只允许 abs、round、floor、ceil、min、max、sum、avg、mean、any、pow、mod 函数。"
+                "公式只允许 abs、round、floor、ceil、int、float、min、max、sum、avg、mean、any、pow、mod 函数。"
             )
         if node.keywords:
             raise ValueError("公式函数不支持关键字参数。")
@@ -211,6 +213,13 @@ def _eval_ast(node: ast.AST, values: dict[str, Any]) -> Any:
             return _guard_number(values[first_key])
         if node.func.id == "mod" and len(args) == 2 and args[1] == 0:
             raise ValueError("mod 函数的第二个参数不能为 0。")
+        if node.func.id in ("int", "float"):
+            if len(args) != 1:
+                raise ValueError(f"{node.func.id} 函数只接受 1 个参数。")
+            try:
+                return SAFE_FUNCS[node.func.id](args[0])
+            except Exception as exc:
+                raise ValueError(f"{node.func.id} 函数无法转换当前结果。") from exc
         try:
             return _guard_number(SAFE_FUNCS[node.func.id](*args))
         except TypeError as exc:
@@ -225,11 +234,19 @@ def _calculate_formula(formula: Any, values: dict[str, Any]) -> Any:
     try:
         tree = ast.parse(text, mode="eval")
     except SyntaxError as exc:
-        raise ValueError("公式语法不完整，请检查括号、运算符和变量。") from exc
+        return _render_template_formula(text, values)
     result = _eval_ast(tree, values)
     if _is_number(result):
         _guard_number(result)
     return result
+
+
+def _render_template_formula(text: str, values: dict[str, Any]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(0)
+        return str(values.get(name, name))
+
+    return re.sub(r"\bx\d+\b", replace, str(text or ""))
 
 
 def _converted_pair_value(value: Any) -> Any:
@@ -239,7 +256,17 @@ def _converted_pair_value(value: Any) -> Any:
         return float(value)
     if isinstance(value, float):
         return int(round(value))
-    return ""
+    return _punctuation_to_lines(value)
+
+
+def _punctuation_to_lines(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    # 保留标点本身，在常见中英文标点后断行，便于提示词/文案分段。
+    text = re.sub(r"([。！？!?；;，,、：:])\s*", r"\1\n", text)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return "\n".join(lines)
 
 
 def _converted_pair_type(value: Any) -> str:
@@ -268,10 +295,10 @@ class GJJ_MultifunctionCalculator:
     ]
     # 前端会按按钮动态显示输出口；后端按同一顺序动态返回，避免隐藏槽位错位。
     RETURN_TYPES = (any_type, any_type, any_type)
-    RETURN_NAMES = ("自动结果", "互转结果", "输出公式")
+    RETURN_NAMES = ("自动结果", "互转/断行结果", "输出公式")
     OUTPUT_TOOLTIPS = (
         "公式计算后的自动类型结果：整数为 INT，小数为 FLOAT，文本为 STRING。",
-        "自动结果为 FLOAT 时输出取整 INT；自动结果为 INT/帧数时输出 FLOAT；文本结果时输出空字符串。",
+        "自动结果为 FLOAT 时输出取整 INT；自动结果为 INT/帧数时输出 FLOAT；文本结果时按标点符号换行。",
         "实际参与计算的公式文本，便于传给其他文本节点记录。",
     )
 
@@ -334,24 +361,40 @@ class GJJ_MultifunctionCalculator:
 
     def calculate(self, formula, **kwargs):
         values = _collect_values(kwargs)
-        result = _calculate_formula(formula, values)
         formula_text = _normalize_formula(formula)
-        outputs: list[Any] = [result]
-        if bool(kwargs.get(SHOW_INT_OUTPUT_NAME, False)):
-            outputs.append(_converted_pair_value(result))
-        if bool(kwargs.get(SHOW_FORMULA_OUTPUT_NAME, False)):
-            outputs.append(formula_text)
-        return {
-            "ui": {
-                "calculator_result": [result],
-                "calculator_result_type": [_infer_output_type(result)],
-                "calculator_pair_type": [_converted_pair_type(result)],
-                "calculator_pair_value": [_converted_pair_value(result)],
-                "calculator_formula": [formula_text],
-                "calculator_inputs": [len(values)],
-            },
-            "result": tuple(outputs),
-        }
+        try:
+            result = _calculate_formula(formula, values)
+            outputs: list[Any] = [result]
+            if bool(kwargs.get(SHOW_INT_OUTPUT_NAME, False)):
+                outputs.append(_converted_pair_value(result))
+            if bool(kwargs.get(SHOW_FORMULA_OUTPUT_NAME, False)):
+                outputs.append(formula_text)
+            return {
+                "ui": {
+                    "calculator_result": [result],
+                    "calculator_result_type": [_infer_output_type(result)],
+                    "calculator_pair_type": [_converted_pair_type(result)],
+                    "calculator_pair_value": [_converted_pair_value(result)],
+                    "calculator_formula": [formula_text],
+                    "calculator_inputs": [len(values)],
+                },
+                "result": tuple(outputs),
+            }
+        except Exception as exc:
+            empty_result = ""
+            outputs = [empty_result]
+            if bool(kwargs.get(SHOW_INT_OUTPUT_NAME, False)):
+                outputs.append("")
+            if bool(kwargs.get(SHOW_FORMULA_OUTPUT_NAME, False)):
+                outputs.append(formula_text)
+            return {
+                "ui": {
+                    "calculator_error": [str(exc)],
+                    "calculator_formula": [formula_text],
+                    "calculator_inputs": [len(values)],
+                },
+                "result": tuple(outputs),
+            }
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_MultifunctionCalculator}

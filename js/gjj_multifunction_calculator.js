@@ -15,7 +15,7 @@ const MIN_VISIBLE_INPUTS = 1;
 const PANEL_MIN_HEIGHT = 28;
 const OUTPUT_DEFS = [
 	{ index: 0, type: "*", name: "自动结果", tooltip: "公式计算后的自动类型结果：整数为 INT，小数为 FLOAT，文本为 STRING。", always: true },
-	{ index: 1, type: "*", name: "互转结果", tooltip: "自动结果为 FLOAT 时输出取整 INT；自动结果为 INT/帧数时输出 FLOAT；文本结果时输出空字符串。", property: SHOW_INT_OUTPUT_PROPERTY },
+	{ index: 1, type: "*", name: "互转/断行结果", tooltip: "自动结果为 FLOAT 时输出取整 INT；自动结果为 INT/帧数时输出 FLOAT；文本结果时按标点符号换行。", property: SHOW_INT_OUTPUT_PROPERTY },
 	{ index: 2, type: "STRING", name: "输出公式", tooltip: "实际参与计算的公式文本，便于传给其他文本节点记录。", property: SHOW_FORMULA_OUTPUT_PROPERTY },
 ];
 const OPERATORS = [
@@ -31,17 +31,19 @@ const OPERATORS = [
 	{ label: ",", insert: ", ", title: "函数参数分隔" },
 ];
 const FUNCTIONS = [
-	{ label: "最大(max)", insert: "max(", title: "最大值 max(x1, x2)" },
-	{ label: "最小(min)", insert: "min(", title: "最小值 min(x1, x2)" },
-	{ label: "平均(avg)", insert: "avg(", title: "平均值 avg(x1, x2)" },
-	{ label: "求和(sum)", insert: "sum(", title: "求和 sum(x1, x2)" },
-	{ label: "任意(any)", insert: "any(", title: "任意值 any(x1, x2)；不填参数时返回第一个已连接输入" },
-	{ label: "绝对(abs)", insert: "abs(", title: "绝对值 abs(x)" },
-	{ label: "四舍五入(round)", insert: "round(", title: "四舍五入 round(x)" },
-	{ label: "向下(floor)", insert: "floor(", title: "向下取整 floor(x)" },
-	{ label: "向上(ceil)", insert: "ceil(", title: "向上取整 ceil(x)" },
-	{ label: "取模(mod)", insert: "mod(", title: "取模函数 mod(x1, x2)" },
-	{ label: "幂(pow)", insert: "pow(", title: "幂函数 pow(x1, 2)" },
+	{ label: "🔺 最大", insert: "max(", title: "最大值 max(x1, x2)" },
+	{ label: "🔻 最小", insert: "min(", title: "最小值 min(x1, x2)" },
+	{ label: "⚖️ 平均", insert: "avg(", title: "平均值 avg(x1, x2)" },
+	{ label: "➕ 求和", insert: "sum(", title: "求和 sum(x1, x2)" },
+	{ label: "🎯 任意", insert: "any(", title: "任意值 any(x1, x2)；不填参数时返回第一个已连接输入" },
+	{ label: "🧲 绝对", insert: "abs(", title: "绝对值 abs(x)" },
+	{ label: "🔘 四舍", insert: "round(", title: "四舍五入 round(x)" },
+	{ label: "🔢 取整", insert: "int(", title: "强制输出整数 int(x)" },
+	{ label: "🔣 浮点", insert: "float(", title: "强制输出浮点 float(x)" },
+	{ label: "⬇️ 向下", insert: "floor(", title: "向下取整 floor(x)" },
+	{ label: "⬆️ 向上", insert: "ceil(", title: "向上取整 ceil(x)" },
+	{ label: "🔁 取模", insert: "mod(", title: "取模函数 mod(x1, x2)" },
+	{ label: "✴️ 幂", insert: "pow(", title: "幂函数 pow(x1, 2)" },
 ];
 const COMMON_FORMULAS = [
 	{ label: "🎞️ 总帧", formula: "(x1*x2)+1", title: "总帧数：(帧率 x 时长) + 1" },
@@ -361,6 +363,7 @@ function ensureOutputSlots(node) {
 		if (!output) return;
 		output.name = def.name;
 		output.label = def.name;
+		output.display_name = def.name;
 		output.localized_name = def.name;
 		output.type = def.type;
 		output.tooltip = def.tooltip;
@@ -379,6 +382,7 @@ function applyResultOutputTypes(node) {
 		output.type = resultType;
 		output.name = `自动结果 ${resultType}`;
 		output.label = output.name;
+		output.display_name = output.name;
 		output.localized_name = output.name;
 	}
 	const visibleDefs = getVisibleOutputDefs(node);
@@ -386,10 +390,36 @@ function applyResultOutputTypes(node) {
 	if (pairSlot >= 0 && node?.outputs?.[pairSlot] && ["INT", "FLOAT", "STRING"].includes(pairType)) {
 		const output = node.outputs[pairSlot];
 		output.type = pairType;
-		output.name = pairType === "INT" ? "互转结果 INT" : (pairType === "FLOAT" ? "互转结果 FLOAT" : "互转结果");
+		output.name = pairType === "INT" ? "互转结果 INT" : (pairType === "FLOAT" ? "互转结果 FLOAT" : "断行结果 STRING");
 		output.label = output.name;
+		output.display_name = output.name;
 		output.localized_name = output.name;
 	}
+}
+
+function normalizeLegacyOutputLabels(node) {
+	if (!node?.outputs?.length) {
+		return;
+	}
+	const first = node.outputs[0];
+	if (first && (first.name === "浮点结果" || first.label === "浮点结果" || first.display_name === "浮点结果")) {
+		first.name = "自动结果";
+		first.label = "自动结果";
+		first.display_name = "自动结果";
+		first.localized_name = "自动结果";
+		first.type = "*";
+	}
+	for (const output of node.outputs) {
+		if (!output) continue;
+		if (output.name === "整数结果" || output.label === "整数结果" || output.display_name === "整数结果") {
+			output.name = "互转/断行结果";
+			output.label = output.name;
+			output.display_name = output.name;
+			output.localized_name = output.name;
+			output.type = "*";
+		}
+	}
+	applyResultOutputTypes(node);
 }
 
 function toggleOutput(node, property) {
@@ -495,6 +525,12 @@ function applyFunctionFormula(node, text) {
 		setFormula(node, `${before}${wrapped}${after}`, caret, caret, true);
 		return;
 	}
+	if (functionName) {
+		const args = connectedVariableExpression(node);
+		const next = `${functionName}(${args})`;
+		setFormula(node, next, next.length, next.length, true);
+		return;
+	}
 	appendFormula(node, text);
 }
 
@@ -517,6 +553,32 @@ function getConnectedVariableNames(node) {
 	return getValueInputs(node)
 		.filter((input) => inputHasLink(input))
 		.map((input) => `x${getInputIndex(input.name)}`);
+}
+
+function upstreamOutputLabel(input) {
+	if (!input?.link || !app.graph?.links) {
+		return "";
+	}
+	const link = app.graph.links[input.link];
+	const sourceNode = link?.origin_id != null ? app.graph.getNodeById?.(link.origin_id) : null;
+	const output = sourceNode?.outputs?.[Number(link?.origin_slot || 0)];
+	return String(output?.localized_name || output?.label || output?.name || "").trim();
+}
+
+function buildLabelValueTemplate(node) {
+	const parts = getValueInputs(node)
+		.filter((input) => inputHasLink(input))
+		.map((input) => {
+			const index = getInputIndex(input.name);
+			const label = upstreamOutputLabel(input) || `x${index}`;
+			return `${label}：x${index}`;
+		});
+	return parts.length ? parts.join("； ") : "x1";
+}
+
+function connectedVariableExpression(node, fallback = "x1") {
+	const names = getConnectedVariableNames(node);
+	return names.length ? names.join(", ") : fallback;
 }
 
 function validateFormulaText(node) {
@@ -558,7 +620,12 @@ function updateHint(node, result = null) {
 	}
 	const resolved = result || validateFormulaText(node);
 	hint.textContent = resolved.text;
-	hint.style.color = resolved.ok ? "#9dd7b2" : "#f0c674";
+	hint.style.color = resolved.error ? "#fecaca" : (resolved.ok ? "#9dd7b2" : "#f0c674");
+	hint.style.fontWeight = resolved.error ? "700" : "400";
+	hint.style.padding = resolved.error ? "6px 8px" : "0";
+	hint.style.border = resolved.error ? "1px solid rgba(248,113,113,.75)" : "0";
+	hint.style.borderRadius = resolved.error ? "7px" : "0";
+	hint.style.background = resolved.error ? "rgba(127,29,29,.35)" : "transparent";
 }
 
 function scheduleValidate(node, ms = 220) {
@@ -578,6 +645,23 @@ function updateResultPreview(node, value = null) {
 	}
 	target.textContent = String(value);
 	target.style.color = "#e6f0ec";
+	target.style.borderColor = "#3f5057";
+	target.style.background = "#10171b";
+}
+
+function showCalculatorError(node, message) {
+	const text = String(message || "公式计算失败，请检查输入。");
+	node.__gjjCalculatorLastResult = null;
+	updateResultPreview(node);
+	const target = node.__gjjCalculatorResultText || node.__gjjCalculatorFormulaText;
+	if (target) {
+		target.textContent = `⚠️ ${text}`;
+		target.style.color = "#fecaca";
+		target.style.borderColor = "rgba(248,113,113,.85)";
+		target.style.background = "rgba(127,29,29,.35)";
+	}
+	updateHint(node, { ok: false, error: true, text: `⚠️ 公式没有执行：${text}` });
+	measurePanel(node);
 }
 
 function invalidateResultPreview(node) {
@@ -599,7 +683,7 @@ function rebuildInputButtons(node) {
 	for (const input of inputs) {
 		const index = getInputIndex(input.name);
 		const variable = `x${index}`;
-		const button = createButton(variable, `插入变量 ${variable}`, () => appendFormula(node, variable));
+		const button = createButton(`🔹 ${variable}`, `插入变量 ${variable}`, () => appendFormula(node, variable));
 		button.style.borderColor = inputHasLink(input) ? "#6a8b97" : "#39484e";
 		button.style.opacity = inputHasLink(input) ? "1" : "0.62";
 		if (advancedInputRow) {
@@ -613,7 +697,7 @@ function rebuildInputButtons(node) {
 		node.__gjjCalculatorAdvancedButton = advancedButton;
 	}
 	if (!node.__gjjCalculatorIntOutputButton) {
-		const button = createButton("🔁 互转", "显示/隐藏“互转结果”输出口：FLOAT 转 INT，INT/帧数转 FLOAT。", () => toggleOutput(node, SHOW_INT_OUTPUT_PROPERTY));
+		const button = createButton("🔁 互转", "显示/隐藏“互转/断行结果”输出口：FLOAT 转 INT，INT/帧数转 FLOAT，STRING 按标点换行。", () => toggleOutput(node, SHOW_INT_OUTPUT_PROPERTY));
 		node.__gjjCalculatorIntOutputButton = button;
 	}
 	if (!node.__gjjCalculatorFormulaOutputButton) {
@@ -684,6 +768,10 @@ function ensureCalculatorPanel(node) {
 	advancedWrap.appendChild(operatorRow);
 
 	const commonRow = createRow();
+	commonRow.appendChild(createButton("🧷 文本拼接", "按已连接上游输出标签生成：标签：x1；标签：x2。执行时会替换成实际值。", () => {
+		const next = buildLabelValueTemplate(node);
+		setFormula(node, next, next.length, next.length, true);
+	}));
 	for (const item of COMMON_FORMULAS) {
 		commonRow.appendChild(createButton(item.label, item.title, () => setFormula(node, item.formula, item.formula.length, item.formula.length, true)));
 	}
@@ -771,6 +859,10 @@ function patchExecution(node) {
 	const originalExecuted = node.onExecuted;
 	node.onExecuted = function (message) {
 		const result = typeof originalExecuted === "function" ? originalExecuted.call(this, message) : undefined;
+		if (message?.calculator_error?.[0]) {
+			showCalculatorError(this, message.calculator_error[0]);
+			return result;
+		}
 		if (message?.calculator_result?.[0] != null) {
 			this.__gjjCalculatorLastResult = message.calculator_result[0];
 			this.__gjjCalculatorResultType = String(message?.calculator_result_type?.[0] || "");
@@ -801,6 +893,7 @@ function stabilizeNode(node) {
 	hideInternalControlWidgets(node);
 	syncOutputStateFromWidgets(node);
 	ensureOutputSlots(node);
+	normalizeLegacyOutputLabels(node);
 	patchFormulaWidget(node);
 	patchExecution(node);
 	ensureCalculatorPanel(node);
@@ -851,6 +944,7 @@ app.registerExtension({
 
 		const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
 		nodeType.prototype.onDrawBackground = function (...args) {
+			normalizeLegacyOutputLabels(this);
 			const signature = getLinkSignature(this);
 			if (signature !== this.__gjjCalculatorLinkSignature) {
 				scheduleStabilize(this, 0);
