@@ -161,6 +161,32 @@ def _send_status(unique_id: Any, text: str, progress: float | None = None) -> No
         pass
 
 
+def _is_cuda_runtime_error(message: Any) -> bool:
+    text = str(message or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "cuda error",
+            "cuda",
+            "cublas",
+            "cublas64_12.dll",
+            "cudnn",
+            "cudart",
+            "ctranslate2",
+        )
+    )
+
+
+def _cuda_fallback_hint(error_message: str) -> str:
+    if "cublas64_12.dll" in str(error_message).lower() or "cublas" in str(error_message).lower():
+        return (
+            "检测到 CUDA 12 的 cuBLAS DLL 缺失或无法加载。节点已尝试自动降级到 CPU + int8。\n"
+            "如果你想继续使用 CUDA，请安装/修复匹配的 NVIDIA CUDA 12 运行时，"
+            "并确保包含 cublas64_12.dll 的目录在 PATH 中；或者在节点里把设备固定为 cpu。"
+        )
+    return "检测到 CUDA 推理错误。节点已尝试自动降级到 CPU + int8；也可以在节点里把设备固定为 cpu。"
+
+
 def _audio_to_numpy(audio: Any) -> tuple[np.ndarray, int]:
     """将 ComfyUI 音频对象转换为 numpy 数组"""
     if audio is None:
@@ -320,8 +346,8 @@ class GJJ_FasterWhisperASR:
     CATEGORY = CATEGORY
     FUNCTION = "transcribe"
     OUTPUT_NODE = True
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
-    RETURN_NAMES = ("时间戳JSON", "分段文本", "开始时间列表", "结束时间列表")
+    RETURN_TYPES = ("WHISPER_OUTPUT", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("Whisper输出", "时间戳JSON", "分段文本", "开始时间列表", "结束时间列表")
     GJJ_HELP = {
         "title": "🎤 语音识别多语言场景 (Faster Whisper)",
         "description": _DESCRIPTION_READY,
@@ -513,12 +539,7 @@ class GJJ_FasterWhisperASR:
                 error_msg = str(exc)
 
                 # 检测是否为 CUDA 相关错误（包括 cublas64_12.dll 缺失）
-                is_cuda_error = (
-                    "CUDA error" in error_msg or
-                    "cuda" in error_msg.lower() or
-                    "cublas64_12.dll" in error_msg or
-                    "cudnn" in error_msg.lower()
-                )
+                is_cuda_error = _is_cuda_runtime_error(error_msg)
 
                 if is_cuda_error and device != "cpu":
                     _send_status(unique_id, "⚠️ 检测到 CUDA 错误，正在自动切换到 CPU 模式...", 0.55)
@@ -534,12 +555,40 @@ class GJJ_FasterWhisperASR:
             # 步骤 5：执行识别
             _send_status(unique_id, "正在执行语音识别...", 0.6)
 
-            segments, info = model.transcribe(
-                waveform_np,
-                language=language if language != "auto" else None,
-                beam_size=beam_size,
-                vad_filter=True,
-            )
+            try:
+                segments, info = model.transcribe(
+                    waveform_np,
+                    language=language if language != "auto" else None,
+                    beam_size=beam_size,
+                    vad_filter=True,
+                )
+            except Exception as exc:
+                error_msg = str(exc)
+                if device != "cpu" and _is_cuda_runtime_error(error_msg):
+                    _send_status(unique_id, "⚠️ CUDA 推理失败，正在改用 CPU + int8 重试...", 0.62)
+                    print(f"\n⚠️ [GJJ] Faster Whisper CUDA 推理失败，自动降级到 CPU + int8")
+                    print(f"   原始错误：{error_msg[:300]}")
+                    try:
+                        del model
+                    except Exception:
+                        pass
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                    device = "cpu"
+                    compute_type = "int8"
+                    model = WhisperModel(model_path, device=device, compute_type=compute_type)
+                    _send_status(unique_id, "已切换 CPU + int8，正在重新执行语音识别...", 0.66)
+                    segments, info = model.transcribe(
+                        waveform_np,
+                        language=language if language != "auto" else None,
+                        beam_size=beam_size,
+                        vad_filter=True,
+                    )
+                    _send_status(unique_id, _cuda_fallback_hint(error_msg), 0.72)
+                else:
+                    raise
 
             # 步骤 6：处理结果
             _send_status(unique_id, "正在处理识别结果...", 0.8)
@@ -548,6 +597,7 @@ class GJJ_FasterWhisperASR:
             timestamps = []
             start_times = []
             end_times = []
+            mtb_tokens = []
 
             for segment in segments:
                 text = segment.text.strip()
@@ -555,6 +605,9 @@ class GJJ_FasterWhisperASR:
                     text_parts.append(text)
                     start_times.append(segment.start)
                     end_times.append(segment.end)
+                    mtb_tokens.append(f"<|{float(segment.start):.2f}|>")
+                    mtb_tokens.append(text)
+                    mtb_tokens.append(f"<|{float(segment.end):.2f}|>")
                     timestamps.append({
                         "start": segment.start,
                         "end": segment.end,
@@ -565,6 +618,25 @@ class GJJ_FasterWhisperASR:
             timestamps_json = json.dumps(timestamps, ensure_ascii=False, indent=2)
             start_times_str = ", ".join(f"{t:.2f}" for t in start_times)
             end_times_str = ", ".join(f"{t:.2f}" for t in end_times)
+            whisper_output = {
+                "text": full_text,
+                "language": getattr(info, "language", language if language != "auto" else ""),
+                "tokens": mtb_tokens,
+                "audio": audio,
+                "chunk_offsets": [0.0],
+                "segments": timestamps,
+                "language_probability": float(getattr(info, "language_probability", 0.0) or 0.0),
+                "duration": float(getattr(info, "duration", 0.0) or (len(waveform_np) / max(1, sample_rate))),
+                "model": model_name,
+                "backend": "faster-whisper",
+                "device": device,
+                "compute_type": compute_type,
+                "timestamps_json": timestamps_json,
+                "start_times": start_times,
+                "end_times": end_times,
+                "start_times_text": start_times_str,
+                "end_times_text": end_times_str,
+            }
 
             elapsed = time.time() - start_time
             _send_status(unique_id, f"识别完成！用时 {elapsed:.1f}s | {len(text_parts)} 个片段", 1.0)
@@ -579,7 +651,7 @@ class GJJ_FasterWhisperASR:
             except Exception:
                 pass
 
-            return (timestamps_json, full_text, start_times_str, end_times_str)
+            return (whisper_output, timestamps_json, full_text, start_times_str, end_times_str)
 
         except Exception as exc:
             report = get_report_from_exception(exc)
@@ -592,16 +664,16 @@ class GJJ_FasterWhisperASR:
             error_msg = str(exc)
 
             # 检测是否为 CUDA 错误
-            if ("CUDA error" in error_msg or "cuda" in error_msg.lower()) and torch.cuda.is_available():
+            if _is_cuda_runtime_error(error_msg) and torch.cuda.is_available():
                 cuda_error = (
                     "🎤 Faster Whisper ASR 执行失败（CUDA 错误）\n"
                     f"模型：{model_name}\n\n"
-                    "❌ CUDA 兼容性错误：您的 GPU 架构与当前 PyTorch/CUDA 版本不兼容。\n\n"
+                    "❌ CUDA 运行时错误：当前环境无法完成 Faster Whisper 的 CUDA 推理。\n\n"
                     "💡 解决方案：\n"
-                    "1. 检查 GPU 型号和 CUDA 版本是否匹配\n"
-                    "2. 尝试使用 CPU 模式（在节点设置中切换设备为 cpu）\n"
-                    "3. 更新 PyTorch 到最新版本以支持您的 GPU\n"
-                    "4. 使用兼容 CUDA 架构的 PyTorch 版本\n\n"
+                    "1. 最稳妥：在节点设置中把设备改为 cpu，计算精度改为 int8\n"
+                    "2. 如果要用 CUDA，请安装/修复 CUDA 12 运行时，并确认 cublas64_12.dll 所在目录已加入 PATH\n"
+                    "3. 检查 faster-whisper / ctranslate2 / PyTorch 的 CUDA 版本是否匹配\n"
+                    "4. 修复后重启 ComfyUI\n\n"
                     f"原始错误：{error_msg}"
                 )
                 _send_error_to_frontend(unique_id, cuda_error)

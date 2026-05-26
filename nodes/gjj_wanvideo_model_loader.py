@@ -12,6 +12,7 @@ from comfy.utils import load_torch_file
 
 
 NODE_NAME = "GJJ_WanVideoModelLoader"
+LONGCAT_AVATAR_MODEL = "LongCat-Avatar-15_bf16.safetensors"
 
 
 def _load_wanvideo_model_loading():
@@ -64,7 +65,8 @@ def _scan_diffusion_models(keywords=("wan", "longcat")):
     ]
     
     if matched:
-        return matched, matched[0]
+        preferred = next((name for name in matched if str(name).replace("\\", "/").endswith(LONGCAT_AVATAR_MODEL)), None)
+        return matched, preferred or matched[0]
     
     return all_models, all_models[0]
 
@@ -149,9 +151,9 @@ class GJJ_WanVideoModelLoader:
                 "attention_mode": (
                     attention_modes,
                     {
-                        "default": "sdpa",
+                        "default": "comfy",
                         "display_name": "注意力模式",
-                        "tooltip": "注意力计算模式，sdpa 为 PyTorch 内置。",
+                        "tooltip": "注意力计算模式。LongCat Avatar 1.5 成功工作流使用 comfy。",
                     },
                 ),
                 "compile_args": (

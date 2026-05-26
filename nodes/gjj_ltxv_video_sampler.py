@@ -40,7 +40,7 @@ def _as_float(value: Any, default: float, min_value: float, max_value: float) ->
     return max(min_value, min(max_value, result))
 
 
-def _parse_sigmas(sigmas: str) -> torch.Tensor:
+def _parse_sigmas_text(sigmas: str) -> torch.Tensor:
     values = re.findall(r"[-+]?(?:\d*\.*\d+)", str(sigmas or ""))
     if not values:
         raise RuntimeError("LTX视频采样器：Sigmas 不能为空，例如 0.85, 0.7250, 0.4219, 0.0。")
@@ -48,6 +48,31 @@ def _parse_sigmas(sigmas: str) -> torch.Tensor:
     if len(parsed) < 2:
         raise RuntimeError("LTX视频采样器：Sigmas 至少需要两个数值。")
     return torch.FloatTensor(parsed)
+
+
+def _normalize_sigmas(sigmas) -> torch.Tensor:
+    if sigmas is not None:
+        if isinstance(sigmas, torch.Tensor):
+            tensor = sigmas.detach().to(dtype=torch.float32).flatten().cpu()
+        elif isinstance(sigmas, str):
+            return _parse_sigmas_text(sigmas)
+        elif isinstance(sigmas, (list, tuple)):
+            tensor = torch.tensor([float(item) for item in sigmas], dtype=torch.float32).flatten()
+        else:
+            tensor = torch.as_tensor(sigmas, dtype=torch.float32).flatten().cpu()
+        if int(tensor.numel()) < 2:
+            raise RuntimeError("LTX视频采样器：外接 SIGMAS 至少需要两个数值。")
+        return tensor
+    return _parse_sigmas_text("")
+
+
+def _resolve_noise(noise_seed, latent: dict[str, Any]):
+    if hasattr(noise_seed, "generate_noise"):
+        return noise_seed.generate_noise(latent)
+    if isinstance(noise_seed, dict) and callable(noise_seed.get("generate_noise")):
+        return noise_seed["generate_noise"](latent)
+    seed = _as_int(noise_seed, 42, 0, 0xffffffffffffffff)
+    return _RandomNoise(seed).generate_noise(latent)
 
 
 class _RandomNoise:
@@ -145,14 +170,14 @@ class GJJ_LTXVVideoSampler:
                     },
                 ),
                 "noise_seed": (
-                    "INT",
+                    "INT,NOISE",
                     {
                         "default": 42,
                         "min": 0,
                         "max": 0xffffffffffffffff,
                         "control_after_generate": True,
                         "display_name": "噪波种子",
-                        "tooltip": "等同原 RandomNoise 的 noise_seed。",
+                        "tooltip": "可直接输入种子，也可连接 RandomNoise 输出的 NOISE；外接 NOISE 时优先使用外部噪波对象。",
                     },
                 ),
                 "cfg": (
@@ -176,12 +201,12 @@ class GJJ_LTXVVideoSampler:
                     },
                 ),
                 "sigmas": (
-                    "STRING",
+                    "SIGMAS,STRING",
                     {
                         "default": "0.85, 0.7250, 0.4219, 0.0",
                         "multiline": False,
                         "display_name": "Sigmas",
-                        "tooltip": "等同原 ManualSigmas，支持逗号或空格分隔，例如 0.85, 0.7250, 0.4219, 0.0。",
+                        "tooltip": "可手填逗号/空格分隔的 Sigmas，也可连接基本调度器/BasicScheduler 输出的 SIGMAS。",
                     },
                 ),
             },
@@ -198,15 +223,15 @@ class GJJ_LTXVVideoSampler:
         "description": "零依赖 GJJ 单节点，内部复刻六个原生节点串联：随机噪波、CFG 引导器、K 采样器选择、自定义 Sigmas、LTXV 音视频 latent 合并和高级自定义采样。",
         "usage": [
             "输入模型、正负条件、视频 latent、音频 latent。",
-            "面板中的 seed、CFG、采样器、Sigmas 对应原来四个控制节点。",
+            "噪波支持 INT 种子或外接 NOISE；Sigmas 支持手填 STRING 或外接基本调度器 SIGMAS。",
             "输出与 SamplerCustomAdvanced 一致：采样 Latent 和降噪 Latent。",
         ],
     }
 
     def sample(self, model, positive, negative, video_latent, audio_latent, noise_seed, cfg, sampler_name, sigmas):
-        noise_seed = _as_int(noise_seed, 42, 0, 0xffffffffffffffff)
+        seed = _as_int(noise_seed, 42, 0, 0xffffffffffffffff)
         cfg = _as_float(cfg, 1.0, 0.0, 100.0)
-        sigmas_tensor = _parse_sigmas(sigmas)
+        sigmas_tensor = _normalize_sigmas(sigmas)
         sampler = comfy.samplers.sampler_object(str(sampler_name))
 
         guider = comfy.samplers.CFGGuider(model)
@@ -228,7 +253,7 @@ class GJJ_LTXVVideoSampler:
         disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
 
         try:
-            noise = _RandomNoise(noise_seed).generate_noise(latent)
+            noise = _resolve_noise(noise_seed, latent)
             samples = guider.sample(
                 noise,
                 latent_image,
@@ -237,7 +262,7 @@ class GJJ_LTXVVideoSampler:
                 denoise_mask=noise_mask,
                 callback=callback,
                 disable_pbar=disable_pbar,
-                seed=noise_seed,
+                seed=seed,
             )
             samples = samples.to(comfy.model_management.intermediate_device())
 

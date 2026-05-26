@@ -8,6 +8,7 @@ import comfy.model_management as mm
 
 NODE_NAME = "GJJ_WanVideoT5TextEncode"
 NODE_DISPLAY_NAME = "📝 Wan T5文本编码"
+LONGCAT_T5_MODEL = "umt5-xxl-enc-bf16.safetensors"
 
 PRECISION_VALUES = ["bf16", "fp32"]
 QUANTIZATION_VALUES = ["disabled", "fp8_e4m3fn"]
@@ -30,6 +31,9 @@ def _scan_text_encoders(keyword: str = "umt5") -> tuple[list[str], str]:
     preferred = None
     for name in values:
         lower = str(name).replace("\\", "/").lower()
+        if lower.endswith(LONGCAT_T5_MODEL.lower()):
+            preferred = name
+            break
         if "umt5" in lower and ("xxl" in lower or "t5" in lower):
             preferred = name
             break

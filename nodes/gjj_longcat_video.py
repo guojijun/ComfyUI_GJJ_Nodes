@@ -389,10 +389,15 @@ class GJJ_LongCatVideoLoader:
     RETURN_TYPES = ("GJJ_LONGCAT_VIDEO_PIPELINE", "STRING")
     RETURN_NAMES = ("LongCat管线", "加载状态")
     OUTPUT_TOOLTIPS = ("已加载的 LongCat-Video 图文生视频管线。", "加载路径、精度和依赖状态。")
-    DESCRIPTION = _STARTUP_REPORT["warning_message"] if not _STARTUP_REPORT.get("available") else "加载 LongCat-Video 官方图文生视频推理管线。"
+    DESCRIPTION = _STARTUP_REPORT["warning_message"] if not _STARTUP_REPORT.get("available") else "加载 LongCat-Video 官方图文生视频推理管线。LongCat Avatar 1.5 数字人推荐使用 WanVideo 成功工作流模型。"
     GJJ_HELP = {
-        "description": _STARTUP_REPORT["panel_message"] if not _STARTUP_REPORT.get("available") else "加载 LongCat-Video：优先按目录关键词自动匹配 DiT、LoRA、UMT5 和 VAE，仍兼容完整 HuggingFace 目录。",
+        "description": _STARTUP_REPORT["panel_message"] if not _STARTUP_REPORT.get("available") else "加载 LongCat-Video：旧版官方 LongCat-Video pipeline 加载器。LongCat Avatar 1.5 数字人请优先使用已验证的 WanVideo 工作流模型。",
         "models": [
+            "数字人成功工作流模型：models/Diffusion_models/LongCat-Avatar-15_bf16.safetensors",
+            "数字人成功工作流LoRA：models/loras/LongCat-Avatar-15_dmd_distill_lora_rank128_bf16.safetensors",
+            "数字人成功工作流Whisper：models/audio_encoders/whisper_large_v3_encoder_fp16.safetensors",
+            "数字人成功工作流T5：models/text_encoders/umt5-xxl-enc-bf16.safetensors",
+            "数字人成功工作流VAE：models/vae/Wan2_1_VAE_bf16.safetensors",
             "models/tokenizers/LongCat-Video/tokenizer",
             "models/text_encoders/*umt5-xxl-enc*",
             "models/vae/*Wan2_1_VAE_*",

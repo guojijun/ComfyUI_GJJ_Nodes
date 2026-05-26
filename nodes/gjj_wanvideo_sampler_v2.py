@@ -819,11 +819,11 @@ class GJJ_WanVideoSamplerV2:
                 "steps": (
                     "INT",
                     {
-                        "default": 6,
+                        "default": 8,
                         "min": 1,
                         "step": 1,
                         "display_name": "采样步数",
-                        "tooltip": "采样总步数。",
+                        "tooltip": "采样总步数。LongCat Avatar 1.5 成功工作流使用 8 步。",
                     },
                 ),
                 "cfg": (
@@ -840,18 +840,18 @@ class GJJ_WanVideoSamplerV2:
                 "shift": (
                     "FLOAT",
                     {
-                        "default": 8.0,
+                        "default": 12.0,
                         "min": 0.0,
                         "max": 1000.0,
                         "step": 0.01,
                         "display_name": "Shift",
-                        "tooltip": "WanVideo flow shift 参数。Wan2.2 常见工作流会使用 8.0。",
+                        "tooltip": "WanVideo flow shift 参数。LongCat Avatar 1.5 成功工作流使用 12.0。",
                     },
                 ),
                 "force_offload": (
                     "BOOLEAN",
                     {
-                        "default": True,
+                        "default": False,
                         "display_name": "采样后卸载",
                         "tooltip": "采样后把模型移回卸载设备，减少显存占用。",
                     },
@@ -859,9 +859,9 @@ class GJJ_WanVideoSamplerV2:
                 "scheduler": (
                     _scheduler_choices(),
                     {
-                        "default": _scheduler_default("dpm++_sde"),
+                        "default": _scheduler_default("longcat_distill_euler"),
                         "display_name": "调度器",
-                        "tooltip": "采样调度器，直接在节点面板选择。",
+                        "tooltip": "采样调度器。LongCat Avatar 1.5 成功工作流使用 longcat_distill_euler。",
                     },
                 ),
                 "riflex_freq_index": (

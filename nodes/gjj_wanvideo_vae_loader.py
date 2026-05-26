@@ -29,6 +29,7 @@ except ImportError:
 
 NODE_NAME = "GJJ_WanVideoVAELoader"
 NODE_DISPLAY_NAME = "🎬 WanVideo VAE 加载器"
+LONGCAT_VAE_MODEL = "Wan2_1_VAE_bf16.safetensors"
 
 # ============================================================================
 # 启动时依赖检查
@@ -119,7 +120,11 @@ def _filter_vae_models(keyword: str = "wan"):
     if not needle:
         return models
     filtered = [name for name in models if needle in str(name).lower()]
-    return filtered or models
+    values = filtered or models
+    preferred = next((name for name in values if str(name).replace("\\", "/").endswith(LONGCAT_VAE_MODEL)), None)
+    if preferred:
+        return [preferred] + [name for name in values if name != preferred]
+    return values
 
 
 def _load_wan_video_vae():

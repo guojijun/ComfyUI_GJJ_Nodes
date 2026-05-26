@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import importlib.util
+import json
 import math
 import os
 import random
@@ -48,6 +49,11 @@ DISPLAY_GENERATOR = "GJJ · 🎭 LongCat数字人生成"
 GJJ_ROOT = Path(__file__).resolve().parents[1]
 VENDOR_ROOT = GJJ_ROOT / "vendor" / "longcat_video_runtime"
 AUTO = "自动检测"
+LONGCAT_AVATAR_MODEL = "LongCat-Avatar-15_bf16.safetensors"
+LONGCAT_DMD_LORA = "LongCat-Avatar-15_dmd_distill_lora_rank128_bf16.safetensors"
+LONGCAT_WHISPER_MODEL = "whisper_large_v3_encoder_fp16.safetensors"
+LONGCAT_T5_MODEL = "umt5-xxl-enc-bf16.safetensors"
+LONGCAT_VAE_MODEL = "Wan2_1_VAE_bf16.safetensors"
 MODEL_HINTS = {
     "dit": ("Diffusion_models", "LongCat-Avatar"),
     "text_encoder": ("text_encoders", "umt5-xxl-enc"),
@@ -213,6 +219,42 @@ def _default_choice(choices: list[str]) -> str:
     return AUTO
 
 
+def _file_choices(category: str, preferred: str, keywords: tuple[str, ...]) -> list[str]:
+    names: list[str] = []
+    if folder_paths is not None:
+        try:
+            names = list(folder_paths.get_filename_list(category) or [])
+        except Exception:
+            names = []
+    if not names:
+        return [AUTO]
+    lower_keywords = [k.lower() for k in keywords if k]
+    filtered = [
+        name for name in names
+        if not lower_keywords or any(k in str(name).replace("\\", "/").lower() for k in lower_keywords)
+    ] or names
+    preferred_match = next((name for name in filtered if str(name).replace("\\", "/").lower().endswith(preferred.lower())), None)
+    if preferred_match:
+        return [preferred_match] + [name for name in filtered if name != preferred_match]
+    return filtered
+
+
+def _selected_file(category: str, selected: str, preferred: str, label: str, unique_id=None) -> str:
+    value = str(selected or "").strip()
+    if value and value != AUTO:
+        return value
+    choices = _file_choices(category, preferred, (Path(preferred).stem,))
+    if choices and choices[0] != AUTO:
+        return choices[0]
+    raise_dependency_model_error(
+        node_name=DISPLAY_LOADER,
+        missing_models=[make_missing_model_spec(label=label, subdir=category, filename=preferred, description="LongCat Avatar 1.5 成功工作流使用的单文件权重。")],
+        description="LongCat 数字人加载器现在只使用成功工作流中的 safetensors 单文件权重，不再检测官方目录结构。",
+        unique_id=unique_id,
+        model_download_url="https://huggingface.co/meituan-longcat/LongCat-Video-Avatar-1.5",
+    )
+
+
 def _preferred_dir(category: str, selected: str, required_file: str, fallbacks: tuple[str, ...], keywords: tuple[str, ...]) -> Path:
     if selected and selected != AUTO:
         selected_path = Path(str(selected).strip().strip('"'))
@@ -284,56 +326,30 @@ def _missing_dependency_specs() -> list[dict[str, str]]:
 def _startup_missing_models() -> list[dict[str, str]]:
     specs: list[dict[str, str]] = []
     required = [
-        ("DiT INT8", f"models/{MODEL_HINTS['dit'][0]}/{MODEL_HINTS['dit'][1]}", "quantized_model.safetensors.index.json", "Avatar 1.5 官方 INT8 DiT。"),
-        ("DMD LoRA", f"models/{MODEL_HINTS['lora'][0]}/{MODEL_HINTS['lora'][1]}", "*.safetensors", "Avatar 1.5 蒸馏 LoRA，8 步推理需要。"),
-        ("Whisper Large v3", f"models/{MODEL_HINTS['audio_encoder'][0]}/{MODEL_HINTS['audio_encoder'][1]}", "config.json", "Avatar 1.5 音频编码器。"),
-        ("Vocal Separator", "models/audio_encoders/LongCat-Video-Avatar-1.5/vocal_separator", "Kim_Vocal_2.onnx", "可选人声分离模型。"),
-        ("Scheduler", "models/configs/LongCat-Video-Avatar-1.5/scheduler", "scheduler_config.json", "Avatar 1.5 调度器配置。"),
-        ("LongCat Tokenizer", "models/tokenizers/LongCat-Video/tokenizer", "tokenizer.json", "LongCat 基础文本 tokenizer。"),
-        ("LongCat Text Encoder", f"models/{MODEL_HINTS['text_encoder'][0]}/{MODEL_HINTS['text_encoder'][1]}", "config.json", "LongCat 基础 UMT5 文本编码器。"),
-        ("LongCat VAE", f"models/{MODEL_HINTS['vae'][0]}/{MODEL_HINTS['vae'][1]}", "config.json", "LongCat 基础视频 VAE。"),
+        ("LongCat Avatar DiT", "diffusion_models", LONGCAT_AVATAR_MODEL, "成功工作流使用的 LongCat Avatar 1.5 单文件 DiT。"),
+        ("DMD Distill LoRA", "loras", LONGCAT_DMD_LORA, "成功工作流使用的 DMD 蒸馏 LoRA。"),
+        ("Whisper Encoder", "audio_encoders", LONGCAT_WHISPER_MODEL, "成功工作流使用的 Whisper encoder 单文件。"),
+        ("UMT5 Text Encoder", "text_encoders", LONGCAT_T5_MODEL, "成功工作流使用的 T5 文本编码器单文件。"),
+        ("Wan VAE", "vae", LONGCAT_VAE_MODEL, "成功工作流使用的 Wan VAE 单文件。"),
     ]
-    for label, subdir, filename, desc in required:
-        rel = Path(subdir.replace("models/", "", 1))
+    for label, category, filename, desc in required:
         found = False
-        for root in _models_roots():
-            candidate_dir = root / rel
-            found = bool(list(candidate_dir.glob(filename))) if "*" in filename else (candidate_dir / filename).exists()
-            if found and label in {"LongCat Text Encoder", "LongCat VAE"}:
-                found = _dir_has_safetensors(candidate_dir)
-            if found:
-                break
+        if folder_paths is not None:
+            try:
+                found = any(str(name).replace("\\", "/").lower().endswith(filename.lower()) for name in folder_paths.get_filename_list(category))
+            except Exception:
+                found = False
         if not found:
-            if label == "DiT INT8":
-                found = bool(_candidate_dirs("diffusion_models", "quantized_model.safetensors.index.json", (MODEL_HINTS["dit"][1],)) != [AUTO])
-            elif label == "DMD LoRA":
-                found = any(root.exists() and any(MODEL_HINTS["lora"][1].lower() in _norm_rel(p).lower() for p in root.rglob("*.safetensors")) for root in _category_roots("loras"))
-            elif label == "Whisper Large v3":
-                found = bool(_candidate_dirs("audio_encoders", "config.json", (MODEL_HINTS["audio_encoder"][1],)) != [AUTO])
-                if not found:
-                    found = bool(_candidate_dirs("faster-whisper", "model.safetensors", ("whisper", "large", "v3")) != [AUTO])
-            elif label == "LongCat Text Encoder":
-                found = bool(_candidate_dirs("text_encoders", "config.json", (MODEL_HINTS["text_encoder"][1],)) != [AUTO])
-            elif label == "LongCat VAE":
-                found = bool(_candidate_dirs("vae", "config.json", (MODEL_HINTS["vae"][1],)) != [AUTO])
-        full_base = _full_longcat_video_dir()
-        if not found and full_base and subdir.startswith("models/") and "LongCat-Video/" in subdir:
-            suffix = subdir.split("LongCat-Video/", 1)[1]
-            candidate_dir = full_base / suffix
-            found = (candidate_dir / filename).exists()
-            if found and label in {"LongCat Text Encoder", "LongCat VAE"}:
-                found = _dir_has_safetensors(candidate_dir)
-        if not found:
-            specs.append(make_missing_model_spec(label=label, subdir=subdir, filename=filename, description=desc))
+            specs.append(make_missing_model_spec(label=label, subdir=f"models/{category}", filename=filename, description=desc))
     return specs
 
 
 _STARTUP_REPORT = build_dependency_model_report(
     node_name=DISPLAY_LOADER,
-    missing_dependencies=_missing_dependency_specs(),
+    missing_dependencies=[],
     missing_models=_startup_missing_models(),
-    install_packages=[spec["package_name"] for spec in _missing_dependency_specs()],
-    description="LongCat Avatar 1.5 需要 Avatar 权重以及 LongCat-Video 基础 tokenizer/text_encoder/vae。",
+    install_packages=[],
+    description="LongCat Avatar 1.5 数字人加载器已对齐成功工作流，只检查 safetensors 单文件权重。",
     model_download_url="https://huggingface.co/meituan-longcat/LongCat-Video-Avatar-1.5",
 )
 
@@ -494,21 +510,25 @@ def _segment_audio_emb(full_audio_emb, start_idx, num_frames, audio_stride, devi
 class GJJ_LongCatAvatarLoader:
     CATEGORY = "GJJ/视频生成"
     FUNCTION = "load"
-    RETURN_TYPES = ("GJJ_LONGCAT_AVATAR_PIPELINE", "STRING")
-    RETURN_NAMES = ("LongCat管线", "加载状态")
-    OUTPUT_TOOLTIPS = ("已加载的 LongCat Avatar 1.5 管线，供生成节点使用。", "加载路径、精度和依赖状态。")
-    DESCRIPTION = _STARTUP_REPORT["warning_message"] if not _STARTUP_REPORT.get("available") else "加载 LongCat Avatar 1.5 官方 INT8 数字人推理管线。"
+    RETURN_TYPES = ("WANVIDEOMODEL", "LORA_CHAIN_CONFIG", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("LongCat模型", "DMD LoRA配置", "Whisper模型", "T5模型", "VAE模型", "加载状态")
+    OUTPUT_TOOLTIPS = (
+        "按成功工作流加载好的 WanVideo LongCat Avatar 模型，可接 GJJ WanVideo Sampler v2。",
+        "成功工作流使用的 DMD LoRA 配置 JSON。",
+        "成功工作流使用的 Whisper encoder 文件名，可用于 LongCat数字人Whisper嵌入。",
+        "成功工作流使用的 T5 文件名，可用于 Wan T5 文本编码。",
+        "成功工作流使用的 VAE 文件名，可用于 WanVideo VAE 加载器。",
+        "加载路径、精度和对齐状态。",
+    )
+    DESCRIPTION = _STARTUP_REPORT["warning_message"] if not _STARTUP_REPORT.get("available") else "加载 LongCat Avatar 1.5 成功工作流单文件 safetensors 模型，不再使用官方目录结构权重。"
     GJJ_HELP = {
-        "description": _STARTUP_REPORT["panel_message"] if not _STARTUP_REPORT.get("available") else "加载 LongCat Avatar 1.5：优先按目录关键词自动匹配 DiT、DMD LoRA、Whisper、UMT5 和 VAE。",
+        "description": _STARTUP_REPORT["panel_message"] if not _STARTUP_REPORT.get("available") else "完全对齐 examples/GJJ_ViDEO/longcatAvatar1.5美团龙猫对口型数字人.json：只使用单文件 safetensors 权重，不再检测 scheduler/tokenizer/text_encoder/vae 官方目录。",
         "models": [
-            "models/Diffusion_models/*LongCat-Avatar*",
-            "models/loras/*LongCat-Avatar-15*",
-            "models/audio_encoders/*whisper_large_v3_encoder*",
-            "models/audio_encoders/LongCat-Video-Avatar-1.5/vocal_separator",
-            "models/configs/LongCat-Video-Avatar-1.5/scheduler",
-            "models/tokenizers/LongCat-Video/tokenizer",
-            "models/text_encoders/*umt5-xxl-enc*",
-            "models/vae/*Wan2_1_VAE_*",
+            f"models/diffusion_models/{LONGCAT_AVATAR_MODEL}",
+            f"models/loras/{LONGCAT_DMD_LORA}",
+            f"models/audio_encoders/{LONGCAT_WHISPER_MODEL}",
+            f"models/text_encoders/{LONGCAT_T5_MODEL}",
+            f"models/vae/{LONGCAT_VAE_MODEL}",
         ],
         "copy_text": _STARTUP_REPORT.get("copy_text", ""),
         "copy_label": _STARTUP_REPORT.get("copy_label", ""),
@@ -516,41 +536,18 @@ class GJJ_LongCatAvatarLoader:
 
     @classmethod
     def INPUT_TYPES(cls):
-        dit_choices = _candidate_dirs("diffusion_models", "quantized_model.safetensors.index.json", (MODEL_HINTS["dit"][1],))
-        if dit_choices == [AUTO]:
-            dit_choices = _candidate_dirs("diffusion_models", "quantized_model.safetensors.index.json", ("longcat", "base_model_int8"))
-        lora_choices = _lora_choices()
-        whisper_choices = _candidate_dirs("audio_encoders", "config.json", (MODEL_HINTS["audio_encoder"][1],))
-        if whisper_choices == [AUTO]:
-            whisper_choices = _candidate_dirs("faster-whisper", "model.safetensors", ("whisper", "large", "v3"))
-        scheduler_choices = _candidate_dirs("configs", "scheduler_config.json", ("longcat", "scheduler"))
-        tokenizer_choices = _candidate_dirs(
-            "tokenizers",
-            "tokenizer.json",
-            ("longcat",),
-            (_longcat_component_dir("tokenizer", "tokenizer.json"),),
-        )
-        text_encoder_choices = _candidate_dirs(
-            "text_encoders",
-            "config.json",
-            (MODEL_HINTS["text_encoder"][1],),
-            (_longcat_component_dir("text_encoder", "config.json", need_safetensors=True),),
-        )
-        vae_choices = _candidate_dirs(
-            "vae",
-            "config.json",
-            (MODEL_HINTS["vae"][1],),
-            (_longcat_component_dir("vae", "config.json", need_safetensors=True),),
-        )
+        dit_choices = _file_choices("diffusion_models", LONGCAT_AVATAR_MODEL, ("longcat", "avatar"))
+        lora_choices = _file_choices("loras", LONGCAT_DMD_LORA, ("longcat", "dmd", "distill"))
+        whisper_choices = _file_choices("audio_encoders", LONGCAT_WHISPER_MODEL, ("whisper", "large", "v3"))
+        text_encoder_choices = _file_choices("text_encoders", LONGCAT_T5_MODEL, ("umt5", "xxl"))
+        vae_choices = _file_choices("vae", LONGCAT_VAE_MODEL, ("wan", "vae"))
         return {
             "required": {
-                "dit目录": (dit_choices, {"default": _default_choice(dit_choices), "display_name": "DiT目录", "tooltip": "默认在 models/Diffusion_models 中搜索包含 LongCat-Avatar 的目录。"}),
-                "dmd_lora": (lora_choices, {"default": _default_choice(lora_choices), "display_name": "DMD LoRA", "tooltip": "默认在 models/loras 中搜索包含 LongCat-Avatar-15 的 LoRA。"}),
-                "whisper目录": (whisper_choices, {"default": _default_choice(whisper_choices), "display_name": "Whisper目录", "tooltip": "默认在 models/audio_encoders 中搜索包含 whisper_large_v3_encoder 的目录。"}),
-                "scheduler目录": (scheduler_choices, {"default": _default_choice(scheduler_choices), "display_name": "调度器目录", "tooltip": "默认搜索 models/configs/LongCat-Video-Avatar-1.5/scheduler。"}),
-                "tokenizer目录": (tokenizer_choices, {"default": _default_choice(tokenizer_choices), "display_name": "Tokenizer目录", "tooltip": "默认搜索 models/tokenizers/LongCat-Video/tokenizer。"}),
-                "text_encoder目录": (text_encoder_choices, {"default": _default_choice(text_encoder_choices), "display_name": "文本编码器目录", "tooltip": "默认在 models/text_encoders 中搜索包含 umt5-xxl-enc 的目录。"}),
-                "vae目录": (vae_choices, {"default": _default_choice(vae_choices), "display_name": "VAE目录", "tooltip": "默认在 models/vae 中搜索包含 Wan2_1_VAE_ 的目录。"}),
+                "dit单文件": (dit_choices, {"default": _default_choice(dit_choices), "display_name": "DiT单文件", "tooltip": f"成功工作流使用 {LONGCAT_AVATAR_MODEL}，从 models/diffusion_models 选择。"}),
+                "dmd_lora": (lora_choices, {"default": _default_choice(lora_choices), "display_name": "DMD LoRA", "tooltip": f"成功工作流使用 {LONGCAT_DMD_LORA}，从 models/loras 选择。"}),
+                "whisper单文件": (whisper_choices, {"default": _default_choice(whisper_choices), "display_name": "Whisper单文件", "tooltip": f"成功工作流使用 {LONGCAT_WHISPER_MODEL}，从 models/audio_encoders 选择。"}),
+                "t5单文件": (text_encoder_choices, {"default": _default_choice(text_encoder_choices), "display_name": "T5单文件", "tooltip": f"成功工作流使用 {LONGCAT_T5_MODEL}，从 models/text_encoders 选择。"}),
+                "vae单文件": (vae_choices, {"default": _default_choice(vae_choices), "display_name": "VAE单文件", "tooltip": f"成功工作流使用 {LONGCAT_VAE_MODEL}，从 models/vae 选择。"}),
             },
             "optional": {
                 "保持缓存": ("BOOLEAN", {"default": True, "display_name": "保持缓存", "tooltip": "开启后重复执行会复用已加载管线，减少重复加载时间。"}),
@@ -558,90 +555,48 @@ class GJJ_LongCatAvatarLoader:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    def load(self, dit目录=AUTO, dmd_lora=AUTO, whisper目录=AUTO, scheduler目录=AUTO, tokenizer目录=AUTO, text_encoder目录=AUTO, vae目录=AUTO, 保持缓存=True, unique_id=None):
-        _ensure_runtime(unique_id=unique_id)
+    def load(self, dit单文件=AUTO, dmd_lora=AUTO, whisper单文件=AUTO, t5单文件=AUTO, vae单文件=AUTO, 保持缓存=True, unique_id=None):
         missing_models = _startup_missing_models()
         if missing_models:
             raise_dependency_model_error(
                 node_name=DISPLAY_LOADER,
                 missing_models=missing_models,
-                description="LongCat Avatar 1.5 缺少必需模型。请按 models 分类目录补齐后重启或刷新模型列表。",
+                description="LongCat Avatar 1.5 缺少成功工作流所需 safetensors 单文件权重。请放入对应 models 分类目录。",
                 unique_id=unique_id,
                 model_download_url="https://huggingface.co/meituan-longcat/LongCat-Video-Avatar-1.5",
             )
 
-        dit_dir = _preferred_dir("diffusion_models", dit目录, "quantized_model.safetensors.index.json", (MODEL_HINTS["dit"][1], "LongCat-Video-Avatar-1.5/base_model_int8"), (MODEL_HINTS["dit"][1],))
-        lora_path = _resolve_lora(dmd_lora)
-        try:
-            whisper_dir = _preferred_dir("audio_encoders", whisper目录, "config.json", (MODEL_HINTS["audio_encoder"][1],), (MODEL_HINTS["audio_encoder"][1],))
-        except FileNotFoundError:
-            whisper_dir = _preferred_dir("faster-whisper", whisper目录, "model.safetensors", ("whisper-large-v3",), ("whisper", "large", "v3"))
-        scheduler_dir = _preferred_dir("configs", scheduler目录, "scheduler_config.json", ("LongCat-Video-Avatar-1.5/scheduler",), ("longcat", "scheduler"))
-        tokenizer_dir = _preferred_dir("tokenizers", tokenizer目录, "tokenizer.json", ("LongCat-Video/tokenizer",), ("longcat",))
-        text_encoder_dir = _preferred_dir("text_encoders", text_encoder目录, "config.json", (MODEL_HINTS["text_encoder"][1], "LongCat-Video/text_encoder"), (MODEL_HINTS["text_encoder"][1],))
-        vae_dir = _preferred_dir("vae", vae目录, "config.json", (MODEL_HINTS["vae"][1], "LongCat-Video/vae"), (MODEL_HINTS["vae"][1],))
-        separator_dir = _existing_category_dir("audio_encoders", "LongCat-Video-Avatar-1.5/vocal_separator") or Path()
-        key = tuple(str(p.resolve()) for p in (dit_dir, lora_path, whisper_dir, scheduler_dir, tokenizer_dir, text_encoder_dir, vae_dir))
+        dit_file = _selected_file("diffusion_models", dit单文件, LONGCAT_AVATAR_MODEL, "LongCat Avatar DiT", unique_id)
+        lora_file = _selected_file("loras", dmd_lora, LONGCAT_DMD_LORA, "DMD Distill LoRA", unique_id)
+        whisper_file = _selected_file("audio_encoders", whisper单文件, LONGCAT_WHISPER_MODEL, "Whisper Encoder", unique_id)
+        t5_file = _selected_file("text_encoders", t5单文件, LONGCAT_T5_MODEL, "UMT5 Text Encoder", unique_id)
+        vae_file = _selected_file("vae", vae单文件, LONGCAT_VAE_MODEL, "Wan VAE", unique_id)
+        lora_config = json.dumps([{"enabled": True, "name": lora_file, "strength": 1.0}], ensure_ascii=False)
+        key = (dit_file, lora_file, whisper_file, t5_file, vae_file)
         if 保持缓存 and key in _PIPE_CACHE:
-            return (_PIPE_CACHE[key], "✅ 已复用 LongCat Avatar 1.5 缓存管线")
+            model = _PIPE_CACHE[key]
+            return (model, lora_config, whisper_file, t5_file, vae_file, "✅ 已复用 LongCat Avatar 1.5 WanVideo 单文件模型缓存")
 
-        import torch
-        from transformers import AutoTokenizer, UMT5EncoderModel
-        from longcat_video.audio_process import get_audio_encoder, get_audio_feature_extractor
-        from longcat_video.modules.autoencoder_kl_wan import AutoencoderKLWan
-        from longcat_video.modules.quantization import load_quantized_dit
-        from longcat_video.modules.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
-        from longcat_video.pipeline_longcat_video_avatar import LongCatVideoAvatarPipeline
+        from .gjj_wanvideo_model_loader import GJJ_WanVideoModelLoader
 
-        device = _device()
-        cp_split_hw = [1, 1]
-        tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir), local_files_only=True, torch_dtype=torch.bfloat16)
-        text_encoder = UMT5EncoderModel.from_pretrained(str(text_encoder_dir), local_files_only=True, torch_dtype=torch.bfloat16).eval()
-        text_encoder.requires_grad_(False)
-        vae = AutoencoderKLWan.from_pretrained(str(vae_dir), local_files_only=True, torch_dtype=torch.bfloat16).eval()
-        vae.requires_grad_(False)
-        scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(str(scheduler_dir), local_files_only=True, torch_dtype=torch.bfloat16)
-        dit = load_quantized_dit(
-            str(dit_dir.parent),
-            subfolder=dit_dir.name,
-            cp_split_hw=cp_split_hw,
-            enable_flashattn3=False,
-            enable_flashattn2=False,
-            enable_xformers=False,
-            enable_bsa=False,
+        model, = GJJ_WanVideoModelLoader().loadmodel(
+            model=dit_file,
+            base_precision="bf16",
+            load_device="offload_device",
+            quantization="disabled",
+            attention_mode="comfy",
+            lora=lora_config,
+            rms_norm_function="default",
         )
-        dit.load_lora(str(lora_path), "dmd", multiplier=1.0, lora_network_dim=128, lora_network_alpha=64)
-        dit.enable_loras(["dmd"])
-        audio_encoder = get_audio_encoder(str(whisper_dir), "avatar-v1.5").eval().to(device)
-        audio_encoder.requires_grad_(False)
-        audio_feature_extractor = get_audio_feature_extractor(str(whisper_dir), "avatar-v1.5")
-        pipe = LongCatVideoAvatarPipeline(
-            tokenizer=tokenizer,
-            text_encoder=text_encoder,
-            vae=vae,
-            scheduler=scheduler,
-            dit=dit,
-            audio_encoder=audio_encoder,
-            audio_feature_extractor=audio_feature_extractor,
-            model_type="avatar-v1.5",
-        )
-        pipe.to(device)
-        payload = {
-            "pipe": pipe,
-            "device": device,
-            "separator_dir": separator_dir,
-            "precision": "INT8 DiT + BF16 VAE/T5 + Whisper",
-            "paths": {
-                "dit": _display_category_path("diffusion_models", dit_dir),
-                "lora": _display_category_path("loras", lora_path),
-                "whisper": _display_category_path("faster-whisper", whisper_dir),
-            },
-        }
         if 保持缓存:
             _PIPE_CACHE.clear()
-            _PIPE_CACHE[key] = payload
-        status = "✅ LongCat Avatar 1.5 已加载：官方 INT8 DiT + DMD LoRA + Whisper-large-v3。"
-        return (payload, status)
+            _PIPE_CACHE[key] = model
+        status = (
+            "✅ 已对齐成功工作流加载 LongCat Avatar 1.5 单文件模型：\n"
+            f"DiT：{dit_file}\nLoRA：{lora_file}\nWhisper：{whisper_file}\nT5：{t5_file}\nVAE：{vae_file}\n"
+            "采样建议：8步 / CFG 1 / Shift 12 / longcat_distill_euler。"
+        )
+        return (model, lora_config, whisper_file, t5_file, vae_file, status)
 
 
 class GJJ_LongCatAvatarGenerator:

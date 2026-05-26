@@ -17,6 +17,7 @@ except Exception:
 
 NODE_NAME = "GJJ_LongCatAvatarWhisperEmbeds"
 NODE_DISPLAY_NAME = "🎙️ LongCat数字人Whisper嵌入"
+LONGCAT_WHISPER_MODEL = "whisper_large_v3_encoder_fp16.safetensors"
 _WHISPER_MODEL_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
 
 
@@ -26,7 +27,11 @@ def _audio_encoder_models(keyword: str = "whisper"):
     if not needle:
         return models
     filtered = [name for name in models if needle in str(name).lower()]
-    return filtered or models
+    values = filtered or models
+    preferred = next((name for name in values if str(name).replace("\\", "/").endswith(LONGCAT_WHISPER_MODEL)), None)
+    if preferred:
+        return [preferred] + [name for name in values if name != preferred]
+    return values
 
 
 def _device():
