@@ -23,9 +23,10 @@ const OUTPUTS = [
 	{ name: "输出文件列表JSON", type: "STRING", label: "输出文件列表JSON", localized_name: "输出文件列表JSON" },
 ];
 const BOOL_WIDGETS = [
-	{ name: "pingpong", label: "往返", on: "往返 开", off: "往返 关" },
-	{ name: "save_output", label: "保存", on: "保存 开", off: "保存 关" },
-	{ name: "use_source_fps", label: "源帧率", on: "源帧率 开", off: "源帧率 关" },
+	{ name: "pingpong", label: "往返播放", icon: "🔁", tooltip: "往返播放：正放后再倒放一遍中间帧，适合短动画闭环。" },
+	{ name: "save_output", label: "保存到输出目录", icon: "💾", tooltip: "保存到输出目录：关闭时写入 ComfyUI temp 目录。" },
+	{ name: "use_source_fps", label: "使用源视频帧率", icon: "🎚️", tooltip: "使用源视频帧率：接入 VIDEO 时优先使用第一段视频的帧率。" },
+	{ name: "delete_tail_frame", label: "删除尾帧", icon: "🧹", tooltip: "删除尾帧：合成前移除最后一帧，适合去掉重复尾帧或循环衔接帧。" },
 ];
 
 function refreshNode(node) {
@@ -63,19 +64,21 @@ function injectToolbarStyle() {
 			width: 100%;
 		}
 		.gjj-video-combine-toolbar button {
-			flex: 1 1 0;
-			min-width: 0;
+			flex: 0 0 34px;
+			width: 34px;
+			min-width: 34px;
 			height: 28px;
 			border: 1px solid #41535b;
 			border-radius: 6px;
 			background: #172026;
 			color: #dce7e2;
-			font-size: 12px;
+			font-size: 15px;
 			font-weight: 700;
 			cursor: pointer;
 			white-space: nowrap;
 			overflow: hidden;
-			text-overflow: ellipsis;
+			text-align: center;
+			line-height: 1;
 		}
 		.gjj-video-combine-toolbar button:hover {
 			background: #20313a;
@@ -210,16 +213,20 @@ function updateToolbar(node) {
 		if (!button) {
 			continue;
 		}
-		button.textContent = on ? config.on : config.off;
+		button.textContent = config.icon || "⚙️";
 		button.classList.toggle("on", on);
-		button.title = `${config.label}：${on ? "开启" : "关闭"}`;
+		button.title = `${config.tooltip || config.label}\n当前：${on ? "开启" : "关闭"}`;
+		button.setAttribute("aria-label", config.label);
+		button.setAttribute("aria-pressed", on ? "true" : "false");
 	}
 	const moreOpen = getMoreOpen(node);
-	toolbar.buttons.more.textContent = moreOpen ? "接口 开" : "接口 关";
+	toolbar.buttons.more.textContent = "🔌";
 	toolbar.buttons.more.classList.toggle("more-on", moreOpen);
 	toolbar.buttons.more.title = moreOpen
 		? "当前显示其它输入输出口；点击后只保留【图像】输入口。"
 		: "当前隐藏其它输入输出口；点击后显示音频、VAE 和输出口。";
+	toolbar.buttons.more.setAttribute("aria-label", "显示/隐藏接口");
+	toolbar.buttons.more.setAttribute("aria-pressed", moreOpen ? "true" : "false");
 }
 
 function hideNativeBooleanWidgets(node) {

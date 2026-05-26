@@ -662,15 +662,11 @@ def _ceil_to_multiple(value: int, multiple: int = 8) -> int:
 def _largest_pair_canvas_size(
     pairs: list[dict[str, Any]], fallback_width: int = 1024, fallback_height: int = 1024
 ) -> tuple[int, int]:
-    width = max(8, int(fallback_width))
-    height = max(8, int(fallback_height))
-    for pair in pairs or []:
-        image = pair.get("image") if isinstance(pair, dict) else None
-        if not isinstance(image, torch.Tensor) or image.ndim < 3:
-            continue
-        width = max(width, int(image.shape[2]))
-        height = max(height, int(image.shape[1]))
-    return _ceil_to_multiple(width, 8), _ceil_to_multiple(height, 8)
+    # 外部连接或面板宽高是输出画布的最高优先级。
+    # 参考图尺寸只应该影响图片如何适配画布，不能反向把 256 目标尺寸顶回原图 2048。
+    return _ceil_to_multiple(max(8, int(fallback_width)), 8), _ceil_to_multiple(
+        max(8, int(fallback_height)), 8
+    )
 
 
 def _uses_equal_reference_canvas(preset: dict[str, Any], unet_name: str = "") -> bool:
@@ -1343,23 +1339,17 @@ class GJJ_LazyImageStudio:
         resolved_width = max(16, int(width))
         resolved_height = max(16, int(height))
         for ordered_index, pair in enumerate(ordered_pairs):
-            # 完全仿照 ComfyUI 官方工作流：只用 ImageScaleToTotalPixels 等比例缩放
-            # 不添加白边填充，FLUX2 ReferenceLatent 节点会自动处理不同尺寸
+            # 输出尺寸必须服从面板/外部连接。参考图只适配到目标画布，
+            # 不再用 1MP 参考缩放结果反向覆盖输出尺寸。
             image = pair["image"]
-            samples = image.movedim(-1, 1)
-            total_pixels = 1.0 * 1024.0 * 1024.0  # 1 百万像素
-            current_total = max(1, int(samples.shape[2]) * int(samples.shape[3]))
-            scale_by = math.sqrt(total_pixels / float(current_total))
-            target_width = max(1, int(round(samples.shape[3] * scale_by)))
-            target_height = max(1, int(round(samples.shape[2] * scale_by)))
-            scaled_samples = comfy.utils.common_upscale(
-                samples, target_width, target_height, "nearest-exact", "disabled"
+            scaled_image, _ignore_mask, _ignore_outpaint = (
+                _prepare_primary_image_for_target(
+                    image,
+                    int(resolved_width),
+                    int(resolved_height),
+                    None,
+                )
             )
-            scaled_image = scaled_samples.movedim(1, -1)
-
-            if ordered_index == 0:
-                resolved_width = max(16, int(scaled_image.shape[2]))
-                resolved_height = max(16, int(scaled_image.shape[1]))
 
             # FLUX2 多图参考使用标准 VAE 编码（128 通道）
             reference_latent = VAEEncode().encode(vae, scaled_image)[0]["samples"]
@@ -1650,8 +1640,35 @@ class GJJ_LazyImageStudio:
             )
             preview_images = preview_ui.get("ui", {}).get("images", [])
 
+            effective_params = {
+                "prompt": str(prompt or ""),
+                "negative_prompt": str(negative_prompt or ""),
+                "main_image_index": int(main_image_index),
+                "width": int(width),
+                "height": int(height),
+                "batch_size": int(batch_size),
+                "unet_name": str(unet_name or ""),
+                "unet_dtype": str(unet_dtype or ""),
+                "clip_name1": str(clip_name1 or ""),
+                "vae_name": str(vae_name or ""),
+                "seed": int(seed),
+                "steps": int(steps),
+                "cfg": float(cfg),
+                "sampler_name": str(sampler_name or ""),
+                "scheduler": str(scheduler or ""),
+                "denoise": float(denoise),
+                "grow_mask_by": int(grow_mask_by),
+            }
+
             # 准备返回值（在清理资源之前）
-            result_data = {"ui": {"images": preview_images, "elapsed_time": [elapsed_time]}, "result": (image,)}
+            result_data = {
+                "ui": {
+                    "images": preview_images,
+                    "elapsed_time": [elapsed_time],
+                    "effective_params": [effective_params],
+                },
+                "result": (image,),
+            }
 
             # 及时清理 GPU/CPU 缓存，释放显存供下次调用
             del model, clip, vae, positive, negative, sampled_latent, image

@@ -146,6 +146,16 @@ class GJJ_VideoCombine:
                         "tooltip": "接入合并视频时，开启后使用第一段视频的帧率；未接视频或关闭时使用上方帧率。",
                     },
                 ),
+                "delete_tail_frame": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "删除尾帧",
+                        "tooltip": "开启后在合成前删除时间线最后一帧，适合去掉重复尾帧或循环衔接帧。",
+                    },
+                ),
             },
             "optional": {
                 "audio": (
@@ -182,6 +192,7 @@ class GJJ_VideoCombine:
         pingpong,
         save_output,
         use_source_fps,
+        delete_tail_frame=False,
         audio=None,
         vae=None,
         format_overrides_json="",
@@ -205,6 +216,7 @@ class GJJ_VideoCombine:
             pingpong=pingpong,
             save_output=save_output,
             use_source_fps=use_source_fps,
+            delete_tail_frame=delete_tail_frame,
             audio=audio,
             vae=vae,
             format_overrides_json=format_overrides_json,

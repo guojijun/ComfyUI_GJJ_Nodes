@@ -313,6 +313,15 @@ class GJJ_WanVideoTextEncodeCached:
                     },
                 ),
             },
+            "optional": {
+                "extender_args": (
+                    "WANVIDEOPROMPTEXTENDER_ARGS",
+                    {
+                        "display_name": "提示词扩展参数",
+                        "tooltip": "可选。连接 WanVideo/GJJ 的提示词扩展器参数后，会先用 Qwen 扩展正向提示词，再编码和缓存。",
+                    },
+                ),
+            },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
                 "extra_pnginfo": "EXTRA_PNGINFO",
@@ -328,6 +337,7 @@ class GJJ_WanVideoTextEncodeCached:
         quantization="disabled",
         use_disk_cache=True,
         device="gpu",
+        extender_args=None,
         unique_id=None,
         extra_pnginfo=None,
     ):
@@ -367,6 +377,26 @@ class GJJ_WanVideoTextEncodeCached:
 
         LoadWanVideoT5TextEncoder = getattr(wan_model_loading, "LoadWanVideoT5TextEncoder")
         WanVideoTextEncode = getattr(wan_nodes, "WanVideoTextEncode")
+
+        if extender_args is not None:
+            try:
+                WanVideoTextEncodeCached = getattr(wan_nodes, "WanVideoTextEncodeCached")
+                return WanVideoTextEncodeCached().process(
+                    model_name=model_name,
+                    precision=precision,
+                    positive_prompt=positive_prompt,
+                    negative_prompt=negative_prompt,
+                    quantization=quantization,
+                    use_disk_cache=use_disk_cache,
+                    device=device,
+                    extender_args=extender_args,
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    "提示词扩展失败。\n"
+                    "请确认已连接有效的提示词扩展参数，并且 Qwen 提示词扩展模型位于 models/LLM 或对应模型目录。\n"
+                    f"原始错误: {e}"
+                ) from e
 
         pbar = ProgressBar(3)
 

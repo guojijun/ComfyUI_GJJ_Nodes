@@ -1207,6 +1207,7 @@ class WanVideoAnimateEmbeds:
                 "face_images": ("IMAGE", {"tooltip": "end frame"}),
                 "bg_images": ("IMAGE", {"tooltip": "background images"}),
                 "mask": ("MASK", {"tooltip": "mask"}),
+                "start_ref_image": ("IMAGE", {"tooltip": "start ref image"}),
                 "tiled_vae": ("BOOLEAN", {"default": False, "tooltip": "Use tiled VAE encoding for reduced memory use"}),
             }
         }
@@ -1217,7 +1218,7 @@ class WanVideoAnimateEmbeds:
     CATEGORY = "WanVideoWrapper"
 
     def process(self, vae, width, height, num_frames, force_offload, frame_window_size, colormatch, pose_strength, face_strength,
-                ref_images=None, pose_images=None, face_images=None, clip_embeds=None, tiled_vae=False, bg_images=None, mask=None):
+                ref_images=None, pose_images=None, face_images=None, clip_embeds=None, tiled_vae=False, bg_images=None, mask=None, start_ref_image=None):
         
         W = (width // 16) * 16
         H = (height // 16) * 16
@@ -1228,7 +1229,7 @@ class WanVideoAnimateEmbeds:
         num_refs = ref_images.shape[0] if ref_images is not None else 0
         num_frames = ((num_frames - 1) // 4) * 4 + 1
 
-        looping = num_frames > frame_window_size
+        looping = num_frames > frame_window_size or start_ref_image is not None
 
         if num_frames < frame_window_size:
             frame_window_size = num_frames
@@ -1326,6 +1327,12 @@ class WanVideoAnimateEmbeds:
             resized_face_images = (resized_face_images * 2 - 1).unsqueeze(0)
             resized_face_images = resized_face_images.to(offload_device, dtype=vae.dtype)
 
+        if start_ref_image is not None:
+            if start_ref_image.shape[1] != H or start_ref_image.shape[2] != W:
+                resized_start_ref_image = common_upscale(start_ref_image.movedim(-1, 1), W, H, "lanczos", "disabled").movedim(0, 1)
+            else:
+                resized_start_ref_image = start_ref_image.permute(3, 0, 1, 2) # C, T, H, W
+            resized_start_ref_image = resized_start_ref_image[:3] * 2 - 1
 
         seq_len = math.ceil((target_shape[2] * target_shape[3]) / 4 * target_shape[1])
         
@@ -1345,6 +1352,7 @@ class WanVideoAnimateEmbeds:
             "is_masked": mask is not None,
             "ref_latent": ref_latent,
             "ref_image": resized_ref_images if ref_images is not None else None,
+            "start_ref_image": resized_start_ref_image if start_ref_image is not None else None,
             "face_pixels": resized_face_images if face_images is not None else None,
             "num_frames": num_frames,
             "target_shape": target_shape,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import math
 import operator
+import re
 from typing import Any
 
 NODE_NAME = "GJJ_MultifunctionCalculator"
@@ -93,8 +94,23 @@ def _normalize_formula(formula: Any) -> str:
     return text.replace("×", "*").replace("÷", "/").replace("％", "%")
 
 
-def _collect_values(kwargs: dict[str, Any]) -> dict[str, float]:
-    values: dict[str, float] = {}
+def _coerce_value(value: Any) -> Any:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value
+    text = str(value).strip()
+    if re.fullmatch(r"[+-]?\d+", text):
+        return int(text)
+    if re.fullmatch(r"[+-]?(?:\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?", text) or re.fullmatch(r"[+-]?\d+[eE][+-]?\d+", text):
+        return float(text)
+    return str(value)
+
+
+def _collect_values(kwargs: dict[str, Any]) -> dict[str, Any]:
+    values: dict[str, Any] = {}
     for key, value in kwargs.items():
         text = str(key or "")
         if not text.startswith(INPUT_PREFIX):
@@ -104,41 +120,62 @@ def _collect_values(kwargs: dict[str, Any]) -> dict[str, float]:
             continue
         if value is None:
             continue
-        try:
-            resolved = float(value)
-        except Exception as exc:
-            raise ValueError(f"数值 {index} 不是可计算数字。") from exc
-        values[f"x{index}"] = resolved
+        values[f"x{index}"] = _coerce_value(value)
     return values
 
 
-def _guard_number(value: Any) -> float:
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _guard_number(value: Any) -> int | float:
     try:
-        resolved = float(value)
+        resolved = value if _is_number(value) else float(value)
     except Exception as exc:
         raise ValueError("公式结果不是可计算数字。") from exc
-    if not math.isfinite(resolved):
+    if isinstance(resolved, float) and not math.isfinite(resolved):
         raise ValueError("公式结果不是有限数字，请检查除数或幂运算。")
     return resolved
 
 
-def _eval_ast(node: ast.AST, values: dict[str, float]) -> float:
+def _infer_output_type(value: Any) -> str:
+    if isinstance(value, bool):
+        return "INT"
+    if isinstance(value, int):
+        return "INT"
+    if isinstance(value, float):
+        return "FLOAT"
+    return "STRING"
+
+
+def _eval_ast(node: ast.AST, values: dict[str, Any]) -> Any:
     if isinstance(node, ast.Expression):
         return _eval_ast(node.body, values)
     if isinstance(node, ast.Constant):
-        if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
-            raise ValueError("公式只允许数字、变量、运算符和白名单函数。")
-        return _guard_number(node.value)
+        if isinstance(node.value, bool):
+            return int(node.value)
+        if isinstance(node.value, (int, float, str)):
+            return node.value
+        raise ValueError("公式只允许数字、字符串、变量、运算符和白名单函数。")
     if isinstance(node, ast.Name):
-        if node.id not in values:
-            raise ValueError(f"公式引用了未连接的输入 {node.id}。")
-        return _guard_number(values[node.id])
+        if node.id in values:
+            return values[node.id]
+        # 让纯文本如 hello 也能作为字符串结果使用。
+        return node.id
     if isinstance(node, ast.BinOp):
         op_type = type(node.op)
         if op_type not in BIN_OPS:
             raise ValueError("公式包含不支持的二元运算。")
         left = _eval_ast(node.left, values)
         right = _eval_ast(node.right, values)
+        if op_type is ast.Add and (isinstance(left, str) or isinstance(right, str)):
+            return f"{left}{right}"
+        if op_type is ast.Mult and isinstance(left, str) and isinstance(right, int):
+            return left * right
+        if op_type is ast.Mult and isinstance(right, str) and isinstance(left, int):
+            return right * left
+        left = _guard_number(left)
+        right = _guard_number(right)
         if op_type in (ast.Div, ast.FloorDiv, ast.Mod) and right == 0:
             raise ValueError("除法、整除或取余的右侧不能为 0。")
         if op_type is ast.Pow and abs(right) > 12:
@@ -181,7 +218,7 @@ def _eval_ast(node: ast.AST, values: dict[str, float]) -> float:
     raise ValueError("公式包含不支持的语法。")
 
 
-def _calculate_formula(formula: Any, values: dict[str, float]) -> float:
+def _calculate_formula(formula: Any, values: dict[str, Any]) -> Any:
     text = _normalize_formula(formula)
     if len(text) > 512:
         raise ValueError("公式过长，请控制在 512 个字符以内。")
@@ -189,13 +226,34 @@ def _calculate_formula(formula: Any, values: dict[str, float]) -> float:
         tree = ast.parse(text, mode="eval")
     except SyntaxError as exc:
         raise ValueError("公式语法不完整，请检查括号、运算符和变量。") from exc
-    return _guard_number(_eval_ast(tree, values))
+    result = _eval_ast(tree, values)
+    if _is_number(result):
+        _guard_number(result)
+    return result
+
+
+def _converted_pair_value(value: Any) -> Any:
+    if isinstance(value, bool):
+        return float(int(value))
+    if isinstance(value, int):
+        return float(value)
+    if isinstance(value, float):
+        return int(round(value))
+    return ""
+
+
+def _converted_pair_type(value: Any) -> str:
+    if isinstance(value, float):
+        return "INT"
+    if isinstance(value, (int, bool)):
+        return "FLOAT"
+    return "STRING"
 
 
 class GJJ_MultifunctionCalculator:
     CATEGORY = "GJJ"
     FUNCTION = "calculate"
-    DESCRIPTION = "动态扩展数值输入，通过计算器按钮编辑公式，支持加减乘除、取余、整除、幂、括号和常用数学函数。"
+    DESCRIPTION = "动态扩展输入，通过计算器按钮编辑公式，支持数字计算、字符串拼接和自动结果类型。"
     SEARCH_ALIASES = [
         "calculator",
         "math",
@@ -209,11 +267,11 @@ class GJJ_MultifunctionCalculator:
         "模数",
     ]
     # 前端会按按钮动态显示输出口；后端按同一顺序动态返回，避免隐藏槽位错位。
-    RETURN_TYPES = ("FLOAT", any_type, any_type)
-    RETURN_NAMES = ("浮点结果", "整数结果", "输出公式")
+    RETURN_TYPES = (any_type, any_type, any_type)
+    RETURN_NAMES = ("自动结果", "互转结果", "输出公式")
     OUTPUT_TOOLTIPS = (
-        "公式计算后的浮点结果。",
-        "公式计算后四舍五入得到的整数结果。",
+        "公式计算后的自动类型结果：整数为 INT，小数为 FLOAT，文本为 STRING。",
+        "自动结果为 FLOAT 时输出取整 INT；自动结果为 INT/帧数时输出 FLOAT；文本结果时输出空字符串。",
         "实际参与计算的公式文本，便于传给其他文本节点记录。",
     )
 
@@ -227,7 +285,7 @@ class GJJ_MultifunctionCalculator:
                         "default": "(x1 * x2)//4*4 +1",
                         "multiline": False,
                         "display_name": "计算公式",
-                        "tooltip": "在这里填写公式；动态输入按 x1、x2、x3 引用。支持 + - * / % // ** 和 abs、round、floor、ceil、min、max、sum、avg、mean、any、pow、mod。",
+                        "tooltip": "在这里填写公式；动态输入按 x1、x2、x3 引用。支持数字计算，也支持字符串常量、变量文本和 + 拼接。",
                     },
                 ),
             },
@@ -246,7 +304,7 @@ class GJJ_MultifunctionCalculator:
                         {
                             "default": False,
                             "display_name": "",
-                            "tooltip": "内部状态：是否显示整数结果输出口。前端按钮控制，默认隐藏。",
+                            "tooltip": "内部状态：是否显示互转结果输出口。前端按钮控制，默认隐藏。",
                             "display": "hidden",
                             "hidden": True,
                         },
@@ -280,12 +338,15 @@ class GJJ_MultifunctionCalculator:
         formula_text = _normalize_formula(formula)
         outputs: list[Any] = [result]
         if bool(kwargs.get(SHOW_INT_OUTPUT_NAME, False)):
-            outputs.append(int(round(result)))
+            outputs.append(_converted_pair_value(result))
         if bool(kwargs.get(SHOW_FORMULA_OUTPUT_NAME, False)):
             outputs.append(formula_text)
         return {
             "ui": {
                 "calculator_result": [result],
+                "calculator_result_type": [_infer_output_type(result)],
+                "calculator_pair_type": [_converted_pair_type(result)],
+                "calculator_pair_value": [_converted_pair_value(result)],
                 "calculator_formula": [formula_text],
                 "calculator_inputs": [len(values)],
             },

@@ -14,8 +14,8 @@ const INTERNAL_CONTROL_WIDGETS = new Set([SHOW_INT_WIDGET, SHOW_FORMULA_WIDGET])
 const MIN_VISIBLE_INPUTS = 1;
 const PANEL_MIN_HEIGHT = 28;
 const OUTPUT_DEFS = [
-	{ index: 0, type: "FLOAT", name: "浮点结果", tooltip: "公式计算后的浮点结果。", always: true },
-	{ index: 1, type: "INT", name: "整数结果", tooltip: "公式计算后四舍五入得到的整数结果。", property: SHOW_INT_OUTPUT_PROPERTY },
+	{ index: 0, type: "*", name: "自动结果", tooltip: "公式计算后的自动类型结果：整数为 INT，小数为 FLOAT，文本为 STRING。", always: true },
+	{ index: 1, type: "*", name: "互转结果", tooltip: "自动结果为 FLOAT 时输出取整 INT；自动结果为 INT/帧数时输出 FLOAT；文本结果时输出空字符串。", property: SHOW_INT_OUTPUT_PROPERTY },
 	{ index: 2, type: "STRING", name: "输出公式", tooltip: "实际参与计算的公式文本，便于传给其他文本节点记录。", property: SHOW_FORMULA_OUTPUT_PROPERTY },
 ];
 const OPERATORS = [
@@ -42,6 +42,15 @@ const FUNCTIONS = [
 	{ label: "向上(ceil)", insert: "ceil(", title: "向上取整 ceil(x)" },
 	{ label: "取模(mod)", insert: "mod(", title: "取模函数 mod(x1, x2)" },
 	{ label: "幂(pow)", insert: "pow(", title: "幂函数 pow(x1, 2)" },
+];
+const COMMON_FORMULAS = [
+	{ label: "🎞️ 总帧", formula: "(x1*x2)+1", title: "总帧数：(帧率 x 时长) + 1" },
+	{ label: "🔢 对齐8", formula: "(x1//8)*8", title: "分辨率向下对齐到 8 的倍数。" },
+	{ label: "🔢 对齐16", formula: "(x1//16)*16", title: "分辨率向下对齐到 16 的倍数。" },
+	{ label: "🔼 上8", formula: "ceil(x1/8)*8", title: "分辨率向上对齐到 8 的倍数。" },
+	{ label: "🔼 上16", formula: "ceil(x1/16)*16", title: "分辨率向上对齐到 16 的倍数。" },
+	{ label: "🧩 宽高积", formula: "x1*x2", title: "宽 x 高，常用于像素面积。" },
+	{ label: "📝 拼接", formula: "x1 + x2", title: "字符串拼接或数字相加。" },
 ];
 
 function getWidget(node, name) {
@@ -358,7 +367,29 @@ function ensureOutputSlots(node) {
 		delete output.hidden;
 		delete output.__gjjCalculatorHidden;
 	});
+	applyResultOutputTypes(node);
 	updateOutputButtons(node);
+}
+
+function applyResultOutputTypes(node) {
+	const resultType = String(node?.__gjjCalculatorResultType || "");
+	const pairType = String(node?.__gjjCalculatorPairType || "");
+	if (node?.outputs?.[0] && ["INT", "FLOAT", "STRING"].includes(resultType)) {
+		const output = node.outputs[0];
+		output.type = resultType;
+		output.name = `自动结果 ${resultType}`;
+		output.label = output.name;
+		output.localized_name = output.name;
+	}
+	const visibleDefs = getVisibleOutputDefs(node);
+	const pairSlot = visibleDefs.findIndex((def) => def.property === SHOW_INT_OUTPUT_PROPERTY);
+	if (pairSlot >= 0 && node?.outputs?.[pairSlot] && ["INT", "FLOAT", "STRING"].includes(pairType)) {
+		const output = node.outputs[pairSlot];
+		output.type = pairType;
+		output.name = pairType === "INT" ? "互转结果 INT" : (pairType === "FLOAT" ? "互转结果 FLOAT" : "互转结果");
+		output.label = output.name;
+		output.localized_name = output.name;
+	}
 }
 
 function toggleOutput(node, property) {
@@ -379,7 +410,7 @@ function updateAdvancedVisibility(node) {
 		node.__gjjCalculatorAdvancedWrap.style.display = open ? "flex" : "none";
 	}
 	if (node.__gjjCalculatorAdvancedButton) {
-		node.__gjjCalculatorAdvancedButton.textContent = open ? "收起" : "高级";
+		node.__gjjCalculatorAdvancedButton.textContent = open ? "⏮️ 收起" : "⚙️ 更多";
 		node.__gjjCalculatorAdvancedButton.title = open ? "隐藏高级计算按钮" : "显示高级计算按钮";
 		node.__gjjCalculatorAdvancedButton.style.borderColor = open ? "#7fa7b3" : "#465960";
 		node.__gjjCalculatorAdvancedButton.style.background = open ? "#20333b" : "#172026";
@@ -517,7 +548,7 @@ function validateFormulaText(node) {
 	if (depth !== 0) {
 		return { ok: false, text: "规则提示：括号还没有闭合。" };
 	}
-	return { ok: true, text: "规则提示：公式格式通过前端检查，执行时会再次安全校验。" };
+	return { ok: true, text: "规则提示：执行时自动判断 INT / FLOAT / STRING，互转结果会随类型变化。" };
 }
 
 function updateHint(node, result = null) {
@@ -578,15 +609,15 @@ function rebuildInputButtons(node) {
 		}
 	}
 	if (!node.__gjjCalculatorAdvancedButton) {
-		const advancedButton = createButton("高级", "显示高级计算按钮", () => setAdvancedOpen(node, !isAdvancedOpen(node)));
+		const advancedButton = createButton("⚙️ 更多", "显示高级计算按钮和常用公式", () => setAdvancedOpen(node, !isAdvancedOpen(node)));
 		node.__gjjCalculatorAdvancedButton = advancedButton;
 	}
 	if (!node.__gjjCalculatorIntOutputButton) {
-		const button = createButton("整数结果", "显示/隐藏“整数结果”输出口", () => toggleOutput(node, SHOW_INT_OUTPUT_PROPERTY));
+		const button = createButton("🔁 互转", "显示/隐藏“互转结果”输出口：FLOAT 转 INT，INT/帧数转 FLOAT。", () => toggleOutput(node, SHOW_INT_OUTPUT_PROPERTY));
 		node.__gjjCalculatorIntOutputButton = button;
 	}
 	if (!node.__gjjCalculatorFormulaOutputButton) {
-		const button = createButton("输出公式", "显示/隐藏“公式文本”输出口", () => toggleOutput(node, SHOW_FORMULA_OUTPUT_PROPERTY));
+		const button = createButton("🧾 公式", "显示/隐藏“公式文本”输出口", () => toggleOutput(node, SHOW_FORMULA_OUTPUT_PROPERTY));
 		node.__gjjCalculatorFormulaOutputButton = button;
 	}
 	row.appendChild(node.__gjjCalculatorAdvancedButton);
@@ -652,12 +683,18 @@ function ensureCalculatorPanel(node) {
 	}
 	advancedWrap.appendChild(operatorRow);
 
+	const commonRow = createRow();
+	for (const item of COMMON_FORMULAS) {
+		commonRow.appendChild(createButton(item.label, item.title, () => setFormula(node, item.formula, item.formula.length, item.formula.length, true)));
+	}
+	advancedWrap.appendChild(commonRow);
+
 	const functionRow = createRow();
 	for (const item of FUNCTIONS) {
 		functionRow.appendChild(createButton(item.label, item.title, () => applyFunctionFormula(node, item.insert)));
 	}
-	functionRow.appendChild(createButton("退格", "删除最后一个字符", () => backspaceFormula(node)));
-	functionRow.appendChild(createButton("清空", "清空当前公式", () => clearFormula(node)));
+	functionRow.appendChild(createButton("⌫ 退格", "删除最后一个字符", () => backspaceFormula(node)));
+	functionRow.appendChild(createButton("🧹 清空", "清空当前公式", () => clearFormula(node)));
 	advancedWrap.appendChild(functionRow);
 
 	container.appendChild(advancedWrap);
@@ -736,8 +773,13 @@ function patchExecution(node) {
 		const result = typeof originalExecuted === "function" ? originalExecuted.call(this, message) : undefined;
 		if (message?.calculator_result?.[0] != null) {
 			this.__gjjCalculatorLastResult = message.calculator_result[0];
+			this.__gjjCalculatorResultType = String(message?.calculator_result_type?.[0] || "");
+			this.__gjjCalculatorPairType = String(message?.calculator_pair_type?.[0] || "");
+			applyResultOutputTypes(this);
 			updateResultPreview(this, message.calculator_result[0]);
-			updateHint(this, { ok: true, text: `计算结果：${message.calculator_result[0]}` });
+			const typeText = this.__gjjCalculatorResultType || "AUTO";
+			const pairText = this.__gjjCalculatorPairType ? `，互转：${this.__gjjCalculatorPairType}` : "";
+			updateHint(this, { ok: true, text: `计算结果（${typeText}${pairText}）：${message.calculator_result[0]}` });
 		}
 		if (message?.calculator_formula?.[0] != null) {
 			updateResultPreview(this, this.__gjjCalculatorLastResult);
@@ -779,10 +821,10 @@ app.registerExtension({
 			return;
 		}
 
-		// 新建节点时默认只显示“浮点结果”，另外两个输出由按钮真正添加。
-		nodeData.output = ["FLOAT"];
-		nodeData.output_name = ["浮点结果"];
-		nodeData.output_tooltips = ["公式计算后的浮点结果。"];
+		// 新建节点时默认只显示“自动结果”，另外两个输出由按钮真正添加。
+		nodeData.output = ["*"];
+		nodeData.output_name = ["自动结果"];
+		nodeData.output_tooltips = ["公式计算后的自动类型结果：整数为 INT，小数为 FLOAT，文本为 STRING。"];
 
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {

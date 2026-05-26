@@ -6,7 +6,6 @@ import torch
 
 
 NODE_NAME = "GJJ_LTXVSetAudioRefTokens"
-COMPAT_NODE_NAME = "LTXVSetAudioRefTokens"
 NODE_DISPLAY_NAME = "GJJ · 🎧 LTXV音频参考Token"
 
 
@@ -89,10 +88,10 @@ class GJJ_LTXVSetAudioRefTokens:
     )
     FUNCTION = "set_audio_ref_tokens"
     CATEGORY = "GJJ/视频模型/LTX"
-    DESCRIPTION = "为 LTXV 音频/口型流程把 audio_latent 转成 ref_audio tokens 写入 conditioning，并输出冻结音频 latent。兼容原 LTXVSetAudioRefTokens 工作流节点名。"
+    DESCRIPTION = "为 LTXV 音频/口型流程把 audio_latent 转成 ref_audio tokens 写入 conditioning，并输出冻结音频 latent。"
     GJJ_HELP = {
         "title": "LTXV音频参考Token",
-        "description": "GJJ 本地实现 LTXVSetAudioRefTokens，解决工作流提示未知包的问题。",
+        "description": "GJJ 本地实现 LTXV 音频参考 token 写入，解决工作流缺少对应节点的问题。",
         "usage": [
             "输入 positive/negative 和音频 latent，输出可继续接 CFGGuider 的条件。",
             "音频 latent 会按 [B, C, T, F] 转成 [B, T, C*F] 的 ref_audio tokens。",
@@ -110,9 +109,7 @@ class GJJ_LTXVSetAudioRefTokens:
 
 NODE_CLASS_MAPPINGS = {
     NODE_NAME: GJJ_LTXVSetAudioRefTokens,
-    COMPAT_NODE_NAME: GJJ_LTXVSetAudioRefTokens,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     NODE_NAME: NODE_DISPLAY_NAME,
-    COMPAT_NODE_NAME: NODE_DISPLAY_NAME,
 }

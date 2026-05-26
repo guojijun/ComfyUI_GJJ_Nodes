@@ -20,6 +20,13 @@ const MAX_THUMB_SIZE = 220;
 const THUMB_STEP = 16;
 const MAX_PREVIEW_HEIGHT = 560;
 const RANGE_PLACEHOLDER = "例如：[1,3,5] 或 [1:8]";
+const SLIDE_START_INPUT_NAME = "slide_start_index";
+const SLIDE_START_INPUT_LABEL = "滑动起始序号";
+const SLIDE_QUEUE_DELAY_MS = 180;
+
+let activeSlideRun = null;
+let slideQueueTimer = null;
+let lastPromptId = null;
 
 function getDataWidget(node) {
 	return node.widgets?.find((widget) => widget?.name === DATA_WIDGET_NAME);
@@ -219,6 +226,9 @@ function ensureState(node) {
 		executedImages: [],
 		mergedCount: 0,
 		showIndividualOutputs: Boolean(node?.properties?.show_individual_outputs),
+		slideOutputEnabled: Boolean(node?.properties?.slide_output_enabled),
+		slideOutputIndex: Math.max(1, Number.parseInt(node?.properties?.slide_output_index || "1", 10) || 1),
+		slideOutputSize: Math.max(1, Math.min(3, Number.parseInt(node?.properties?.slide_output_size || "2", 10) || 2)),
 		thumbSize: Number(node?.properties?.thumb_size || DEFAULT_THUMB_SIZE),
 		rangeExpanded: Boolean(node?.properties?.sequence_range_expanded),
 		dragIndex: null,
@@ -332,9 +342,166 @@ function syncSequenceRange(node, value) {
 	markGraphChanged(node);
 }
 
+function formatSlidingRange(index, count, size = 2) {
+	const total = Math.max(0, Number(count || 0));
+	if (total <= 0) {
+		return "";
+	}
+	const first = ((Math.max(1, Number(index || 1)) - 1) % total) + 1;
+	const span = Math.max(1, Math.min(3, Number(size || 1)));
+	const values = [];
+	for (let offset = 0; offset < span; offset++) {
+		values.push(((first - 1 + offset) % total) + 1);
+	}
+	return `[${values.join(",")}]`;
+}
+
+function applySlidingRange(node) {
+	const state = ensureState(node);
+	const count = slidingSourceCount(node);
+	if (!state.slideOutputEnabled || count <= 0) {
+		return;
+	}
+	state.slideOutputIndex = ((Math.max(1, Number(state.slideOutputIndex || 1)) - 1) % count) + 1;
+	node.properties = node.properties || {};
+	node.properties.slide_output_enabled = true;
+	node.properties.slide_output_index = state.slideOutputIndex;
+	node.properties.slide_output_size = state.slideOutputSize;
+	const nextRange = formatSlidingRange(state.slideOutputIndex, count, state.slideOutputSize);
+	node.properties[SEQUENCE_RANGE_WIDGET_NAME] = nextRange;
+	if (getSequenceRange(node) !== nextRange) {
+		syncSequenceRange(node, nextRange);
+	}
+	if (node.__gjjMultiImageRangeInput) {
+		node.__gjjMultiImageRangeInput.value = getSequenceRange(node);
+	}
+	updateSummary(node);
+}
+
+function advanceSlidingRange(node) {
+	const state = ensureState(node);
+	if (!state.slideOutputEnabled) {
+		return;
+	}
+	if (hasSlideStartIndexLink(node)) {
+		updateSlideOutputButtonsState(node);
+		return;
+	}
+	const count = slidingSourceCount(node);
+	if (count <= 0) {
+		return;
+	}
+	state.slideOutputIndex = (Math.max(1, Number(state.slideOutputIndex || 1)) % count) + 1;
+	node.properties = node.properties || {};
+	node.properties.slide_output_index = state.slideOutputIndex;
+	applySlidingRange(node);
+	updateSlideOutputButtonsState(node);
+	queueSlidingOutput(node, "continue");
+}
+
+function hasSlideStartIndexLink(node) {
+	return Boolean((node.inputs || []).find((input) => input?.name === SLIDE_START_INPUT_NAME && input.link != null));
+}
+
+function ensureSlideStartInput(node) {
+	let input = (node.inputs || []).find((item) => item?.name === SLIDE_START_INPUT_NAME);
+	if (!input) {
+		node.addInput?.(SLIDE_START_INPUT_NAME, "INT");
+		input = (node.inputs || []).find((item) => item?.name === SLIDE_START_INPUT_NAME);
+	}
+	if (input) {
+		input.name = SLIDE_START_INPUT_NAME;
+		input.label = SLIDE_START_INPUT_LABEL;
+		input.localized_name = SLIDE_START_INPUT_LABEL;
+		input.type = "INT";
+		input.tooltip = "可选：接入整数后，按 x mod 图片总数决定滑动输出起始序号。";
+	}
+	return input;
+}
+
+function removeSlideStartInputIfUnused(node) {
+	const index = (node.inputs || []).findIndex((input) => input?.name === SLIDE_START_INPUT_NAME);
+	if (index < 0) return;
+	if (node.inputs[index]?.link != null) return;
+	node.removeInput?.(index);
+}
+
+function syncSlideStartInput(node) {
+	const state = ensureState(node);
+	if (state.extraToolsExpanded) ensureSlideStartInput(node);
+	else removeSlideStartInputIfUnused(node);
+}
+
+function resetSlidingRange(node) {
+	const state = ensureState(node);
+	state.slideOutputIndex = 1;
+	node.properties = node.properties || {};
+	node.properties.slide_output_index = 1;
+	applySlidingRange(node);
+	updateSlideOutputButtonsState(node);
+	updateSummary(node);
+}
+
+function queueSlidingOutput(node, reason = "start") {
+	const state = ensureState(node);
+	if (!state.slideOutputEnabled || state.__slideQueuePending) {
+		return;
+	}
+	if (typeof app.queuePrompt !== "function") {
+		console.warn("[GJJ] app.queuePrompt 不存在，无法自动执行滑动输出。");
+		return;
+	}
+	state.__slideQueuePending = true;
+	activeSlideRun = { node, reason };
+	clearTimeout(slideQueueTimer);
+	slideQueueTimer = setTimeout(async () => {
+		slideQueueTimer = null;
+		state.__slideQueuePending = false;
+		if (!ensureState(node).slideOutputEnabled) {
+			return;
+		}
+		try {
+			activeSlideRun = { node, reason };
+			await app.queuePrompt(0);
+		} catch (error) {
+			ensureState(node).slideOutputEnabled = false;
+			node.properties = node.properties || {};
+			node.properties.slide_output_enabled = false;
+			updateSlideOutputButtonsState(node);
+			activeSlideRun = null;
+			console.warn("[GJJ] 滑动输出自动执行失败：", error);
+		}
+	}, SLIDE_QUEUE_DELAY_MS);
+}
+
+function stopSlidingOutput(node) {
+	const state = ensureState(node);
+	state.slideOutputEnabled = false;
+	state.__slideQueuePending = false;
+	node.properties = node.properties || {};
+	node.properties.slide_output_enabled = false;
+	clearTimeout(slideQueueTimer);
+	slideQueueTimer = null;
+	if (activeSlideRun?.node === node) activeSlideRun = null;
+	updateSlideOutputButtonsState(node);
+	updateSummary(node);
+	requestRedraw(node);
+}
+
 function totalImageCount(node) {
 	const state = ensureState(node);
 	return Math.max(0, Number(state.mergedCount || 0) || (Number(state.selection?.length || 0) + Number(state.externalCount || 0)));
+}
+
+function slidingSourceCount(node) {
+	const state = ensureState(node);
+	const selectedCount = Number(state.selection?.length || 0);
+	const externalCount = Number(state.externalCount || 0);
+	const sourceCount = selectedCount + externalCount;
+	if (sourceCount > 0) {
+		return sourceCount;
+	}
+	return Math.max(0, Number(state.mergedCount || 0));
 }
 
 function updateOutputButtonState(node) {
@@ -344,11 +511,52 @@ function updateOutputButtonState(node) {
 		return;
 	}
 	const count = totalImageCount(node);
-	button.textContent = state.showIndividualOutputs ? "🔌" : "➕";
+	button.textContent = "🔌";
 	button.title = state.showIndividualOutputs
 		? `当前已展开 ${Math.min(count, MAX_OUTPUT_IMAGES)} 个单图输出口。点击后收起未连接的单图输出口。`
 		: `单图片输出口默认隐藏。点击后按当前图片数量展开，最多 ${MAX_OUTPUT_IMAGES} 个。`;
+	button.style.background = state.showIndividualOutputs ? "#2b4250" : "#1a2328";
+	button.style.borderColor = state.showIndividualOutputs ? "#5ca6d6" : "#465761";
+	button.style.boxShadow = state.showIndividualOutputs ? "0 0 0 1px rgba(92,166,214,.3) inset" : "none";
+	button.__gjjStyleRefresh = () => {
+		button.style.background = state.showIndividualOutputs ? "#2b4250" : "#1a2328";
+		button.style.borderColor = state.showIndividualOutputs ? "#5ca6d6" : "#465761";
+		button.style.boxShadow = state.showIndividualOutputs ? "0 0 0 1px rgba(92,166,214,.3) inset" : "none";
+	};
 	button.style.opacity = count > 0 ? "1" : "0.55";
+}
+
+function updateSlideOutputButtonsState(node) {
+	const state = ensureState(node);
+	const count = slidingSourceCount(node);
+	const buttons = node.__gjjMultiImageSlideButtons || {};
+	for (const [sizeText, button] of Object.entries(buttons)) {
+		if (!button) continue;
+		const size = Number(sizeText);
+		const active = state.slideOutputEnabled && Number(state.slideOutputSize || 1) === size;
+		const rangeText = active ? formatSlidingRange(state.slideOutputIndex, count, size) : "";
+		button.textContent = active ? ["１", "２", "３"][size - 1] : ["1️⃣", "2️⃣", "3️⃣"][size - 1];
+		button.style.background = active ? "#1f6f55" : "#1a2328";
+		button.style.borderColor = active ? "#33c48d" : "#465761";
+		button.style.boxShadow = active ? "0 0 0 1px rgba(51,196,141,.55) inset, 0 0 10px rgba(51,196,141,.32)" : "none";
+		button.__gjjStyleRefresh = () => {
+			button.style.background = active ? "#1f6f55" : "#1a2328";
+			button.style.borderColor = active ? "#33c48d" : "#465761";
+			button.style.boxShadow = active ? "0 0 0 1px rgba(51,196,141,.55) inset, 0 0 10px rgba(51,196,141,.32)" : "none";
+		};
+		button.style.opacity = count > 0 ? "1" : "0.55";
+		button.title = active
+			? `滑动输出 ${size} 张已开启：当前 ${rangeText || "等待图片"}。再次点击停止。`
+			: `滑动输出 ${size} 张：点击后自动执行并循环推进。`;
+	}
+	const initButton = node.__gjjMultiImageSlideInitButton;
+	if (initButton) {
+		initButton.style.opacity = count > 0 ? "1" : "0.55";
+		initButton.title = "初始化滑动输出：重置为从第 1 张开始。";
+	}
+	if (node.__gjjMultiImageRangeInput) {
+		node.__gjjMultiImageRangeInput.value = getSequenceRange(node);
+	}
 }
 
 function hasExternalImageLink(node) {
@@ -400,6 +608,7 @@ function ensureOutputs(node, count) {
 	node.properties = node.properties || {};
 	node.properties.show_individual_outputs = Boolean(state.showIndividualOutputs);
 	updateOutputButtonState(node);
+	updateSlideOutputButtonsState(node);
 	globalThis.GJJApplyTypeColorsToNode?.(node);
 }
 
@@ -418,6 +627,9 @@ function toggleSelection(node, item) {
 	}
 	syncDataWidget(node);
 	ensureOutputs(node, totalImageCount(node));
+	if (state.slideOutputEnabled) {
+		applySlidingRange(node);
+	}
 	renderBrowser(node);
 	renderPreview(node);
 	updateSummary(node);
@@ -459,6 +671,13 @@ function applyThumbnailSize(node) {
 	}
 	if (node.__gjjMultiImageThumbLabel) {
 		node.__gjjMultiImageThumbLabel.textContent = `${size}px`;
+		node.__gjjMultiImageThumbLabel.title = `当前缩略图尺寸：${size}px`;
+	}
+	if (node.__gjjMultiImageZoomOutButton) {
+		node.__gjjMultiImageZoomOutButton.title = `缩小缩略图：当前 ${size}px`;
+	}
+	if (node.__gjjMultiImageZoomInButton) {
+		node.__gjjMultiImageZoomInButton.title = `放大缩略图：当前 ${size}px`;
 	}
 }
 
@@ -702,6 +921,8 @@ function updateSummary(node) {
 	const selectedCount = Number(state.selection?.length || 0);
 	const externalCount = Number(state.externalCount || 0);
 	const mergedCount = Number(state.mergedCount || 0);
+	const slideSourceCount = slidingSourceCount(node);
+	const slideText = state.slideOutputEnabled ? ` · 滑动 ${formatSlidingRange(state.slideOutputIndex, slideSourceCount, state.slideOutputSize) || "等待图片"}` : "";
 	if (node.__gjjMultiImageSummary) {
 		if (externalCount > 0 || selectedCount > 0) {
 			const parts = [];
@@ -712,12 +933,13 @@ function updateSummary(node) {
 				parts.push(`已选 ${selectedCount} 张`);
 			}
 			// 当超过20张时，显示实际总数，不再限制为MAX_OUTPUT_IMAGES
-			const total = mergedCount > 0 ? mergedCount : (externalCount + selectedCount);
+			const sourceTotal = externalCount + selectedCount;
+			const total = sourceTotal > 0 ? sourceTotal : mergedCount;
 			if (total > MAX_OUTPUT_IMAGES) {
-				node.__gjjMultiImageSummary.textContent = `${parts.join(" + ")}，共 ${total} 张（批量队列输出）`;
+				node.__gjjMultiImageSummary.textContent = `${parts.join(" + ")}，共 ${total} 张（批量队列输出）${slideText}`;
 			} else {
 				const outputText = ensureState(node).showIndividualOutputs ? "单图口已展开" : "单图口隐藏";
-			node.__gjjMultiImageSummary.textContent = `${parts.join(" + ")}，共 ${total} / ${MAX_OUTPUT_IMAGES} 张 · ${outputText}`;
+				node.__gjjMultiImageSummary.textContent = `${parts.join(" + ")}，共 ${total} / ${MAX_OUTPUT_IMAGES} 张 · ${outputText}${slideText}`;
 			}
 			return;
 		}
@@ -761,7 +983,8 @@ function getLayoutSignature(node) {
 	const rangeExpanded = state.rangeExpanded ? 1 : 0;
 	const extraExpanded = state.extraToolsExpanded ? 1 : 0;
 	const outputs = state.showIndividualOutputs ? Math.min(totalImageCount(node), MAX_OUTPUT_IMAGES) : 0;
-	return [count, Number(state.thumbSize || DEFAULT_THUMB_SIZE), widthBucket, compact, ultraCompact, rangeExpanded, extraExpanded, outputs].join("|");
+	const slide = `${state.slideOutputEnabled ? 1 : 0}:${state.slideOutputIndex || 1}:${state.slideOutputSize || 1}:${getSequenceRange(node)}`;
+	return [count, Number(state.thumbSize || DEFAULT_THUMB_SIZE), widthBucket, compact, ultraCompact, rangeExpanded, extraExpanded, outputs, slide].join("|");
 }
 
 function computePreviewNaturalHeight(node) {
@@ -818,12 +1041,18 @@ function scheduleLayout(node, force = false) {
 
 async function refreshOptions(node) {
 	const state = ensureState(node);
+	if (node.__gjjMultiImageSummary) {
+		node.__gjjMultiImageSummary.textContent = "正在刷新图片列表...";
+	}
 	state.options = await fetchOptions();
 	enrichSelectionWithOptions(state);
+	syncDataWidget(node);
+	ensureOutputs(node, totalImageCount(node));
 	renderBrowser(node);
 	renderPreview(node);
 	updateSummary(node);
-	scheduleLayout(node);
+	scheduleLayout(node, true);
+	requestRedraw(node);
 }
 
 function makeIconButton(icon, tooltip) {
@@ -852,6 +1081,10 @@ function makeIconButton(icon, tooltip) {
 		button.style.borderColor = "#5f7b8d";
 	});
 	button.addEventListener("mouseleave", () => {
+		if (typeof button.__gjjStyleRefresh === "function") {
+			button.__gjjStyleRefresh();
+			return;
+		}
 		button.style.background = "#1a2328";
 		button.style.borderColor = "#465761";
 	});
@@ -867,22 +1100,39 @@ function updateToolbarCompact(node) {
 	const extraTools = node.__gjjMultiImageExtraTools || [];
 	const summary = node.__gjjMultiImageSummary;
 	const thumbLabel = node.__gjjMultiImageThumbLabel;
+	const moreButton = node.__gjjMultiImageMoreButton;
+	const state = ensureState(node);
 	const compact = width < 520;
 	const ultraCompact = width < 390;
-	const expanded = Boolean(ensureState(node).extraToolsExpanded);
+	const expanded = Boolean(state.extraToolsExpanded);
+	const extraSet = new Set(extraTools);
+	for (const child of Array.from(toolbar.children || [])) {
+		if (extraSet.has(child)) child.style.order = "20";
+	}
 	for (const item of extraTools) {
-		item.style.display = compact && !expanded ? "none" : "inline-flex";
+		item.style.display = expanded ? "inline-flex" : "none";
 	}
 	if (thumbLabel) {
-		thumbLabel.style.display = compact && !expanded ? "none" : "inline-flex";
+		thumbLabel.style.display = "none";
 	}
 	if (summary) {
 		summary.style.display = ultraCompact ? "none" : "block";
 		summary.style.flexBasis = compact ? "100%" : "80px";
 		summary.style.order = compact ? "99" : "0";
 	}
-	if (node.__gjjMultiImageMoreButton) {
-		node.__gjjMultiImageMoreButton.style.display = compact ? "inline-flex" : "none";
+	if (moreButton) {
+		moreButton.style.display = "inline-flex";
+		moreButton.style.order = "30";
+		moreButton.textContent = state.extraToolsExpanded ? "⏮️" : "⏯️";
+		moreButton.title = state.extraToolsExpanded
+			? "折叠更多工具。"
+			: "展开更多工具。";
+		moreButton.style.background = state.extraToolsExpanded ? "#2b4250" : "#1a2328";
+		moreButton.style.borderColor = state.extraToolsExpanded ? "#5ca6d6" : "#465761";
+		moreButton.__gjjStyleRefresh = () => {
+			moreButton.style.background = state.extraToolsExpanded ? "#2b4250" : "#1a2328";
+			moreButton.style.borderColor = state.extraToolsExpanded ? "#5ca6d6" : "#465761";
+		};
 	}
 }
 
@@ -934,15 +1184,19 @@ function buildDom(node) {
 	const clearErrorButton = makeIconButton("🧹", "清理错误：移除当前列表里加载失败或损坏的图片。");
 	const clearAllButton = makeIconButton("🗑️", "清空：清空所有已选图片，保留外部输入连接。");
 	const rangeButton = makeIconButton("#️⃣", "序列范围：点击展开/收起设置栏。支持 [1,3,5] 和 [1:8]。");
-	const outputButton = makeIconButton("➕", `单图片输出口：默认隐藏。点击后按当前图片数量展开，最多 ${MAX_OUTPUT_IMAGES} 个。`);
+	const outputButton = makeIconButton("🔌", `单图片输出口：默认隐藏。点击后按当前图片数量展开，最多 ${MAX_OUTPUT_IMAGES} 个。`);
+	const slideButton1 = makeIconButton("1️⃣", "滑动输出 1 张：点击后自动执行并循环推进。");
+	const slideButton2 = makeIconButton("2️⃣", "滑动输出 2 张：点击后自动执行并循环推进。");
+	const slideButton3 = makeIconButton("3️⃣", "滑动输出 3 张：点击后自动执行并循环推进。");
+	const slideInitButton = makeIconButton("🏁", "初始化滑动输出：重置为从第 1 张开始。");
 	const zoomOutButton = makeIconButton("🔎−", "缩小缩略图：减少每张预览图尺寸，节点高度会自动重算。");
 	const zoomInButton = makeIconButton("🔍+", "放大缩略图：增加每张预览图尺寸，节点高度会自动重算。");
-	const moreButton = makeIconButton("⋯", "更多工具：当前节点宽度较窄时，清理、清空、缩略图缩放会自动折叠到这里。点击临时展开/收起。");
+	const moreButton = makeIconButton("⏯️", "展开更多工具。");
 	zoomOutButton.style.width = "36px";
 	zoomInButton.style.width = "36px";
 
 	const thumbLabel = document.createElement("span");
-	thumbLabel.style.cssText = "font-size:10px;color:#8ea0a8;min-width:34px;text-align:center;user-select:none";
+	thumbLabel.style.cssText = "display:none;font-size:10px;color:#8ea0a8;min-width:34px;text-align:center;user-select:none";
 
 	refreshButton.addEventListener("click", (event) => {
 		event.preventDefault();
@@ -981,6 +1235,48 @@ function buildDom(node) {
 		updateSummary(node);
 		requestRedraw(node);
 	});
+	const toggleSlideMode = (size) => {
+		const sameActive = state.slideOutputEnabled && Number(state.slideOutputSize || 1) === size;
+		if (sameActive) {
+			stopSlidingOutput(node);
+			return;
+		}
+		state.slideOutputEnabled = true;
+		state.slideOutputSize = size;
+		node.properties = node.properties || {};
+		node.properties.slide_output_enabled = state.slideOutputEnabled;
+		node.properties.slide_output_size = size;
+		if (state.slideOutputEnabled) {
+			state.slideOutputIndex = Math.max(1, Number(state.slideOutputIndex || 1));
+			state.rangeExpanded = true;
+			node.properties.sequence_range_expanded = true;
+			applySlidingRange(node);
+			if (node.__gjjMultiImageRangeRow) {
+				node.__gjjMultiImageRangeRow.style.display = "flex";
+			}
+			if (!hasSlideStartIndexLink(node)) {
+				queueSlidingOutput(node, "start");
+			}
+		}
+		updateSlideOutputButtonsState(node);
+		updateSummary(node);
+		scheduleLayout(node, true);
+		requestRedraw(node);
+	};
+	for (const [button, size] of [[slideButton1, 1], [slideButton2, 2], [slideButton3, 3]]) {
+		button.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			toggleSlideMode(size);
+		});
+	}
+	slideInitButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		resetSlidingRange(node);
+		scheduleLayout(node, true);
+		requestRedraw(node);
+	});
 	zoomOutButton.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
@@ -1001,14 +1297,24 @@ function buildDom(node) {
 		event.preventDefault();
 		event.stopPropagation();
 		state.extraToolsExpanded = !state.extraToolsExpanded;
-		const extraTools = node.__gjjMultiImageExtraTools || [clearErrorButton, clearAllButton, zoomOutButton, zoomInButton];
+		const extraTools = node.__gjjMultiImageExtraTools || [slideButton1, slideButton2, slideButton3, slideInitButton, clearErrorButton, clearAllButton, zoomOutButton, zoomInButton];
 		for (const item of extraTools) {
 			item.style.display = state.extraToolsExpanded ? "inline-flex" : "none";
 		}
 		if (thumbLabel) {
-			thumbLabel.style.display = state.extraToolsExpanded ? "inline-flex" : "none";
+			thumbLabel.style.display = "none";
 		}
+		syncSlideStartInput(node);
+		moreButton.textContent = state.extraToolsExpanded ? "⏮️" : "⏯️";
+		moreButton.title = state.extraToolsExpanded
+			? "折叠更多工具。"
+			: "展开更多工具。";
 		moreButton.style.background = state.extraToolsExpanded ? "#2b4250" : "#1a2328";
+		moreButton.style.borderColor = state.extraToolsExpanded ? "#5ca6d6" : "#465761";
+		moreButton.__gjjStyleRefresh = () => {
+			moreButton.style.background = state.extraToolsExpanded ? "#2b4250" : "#1a2328";
+			moreButton.style.borderColor = state.extraToolsExpanded ? "#5ca6d6" : "#465761";
+		};
 		scheduleLayout(node);
 	});
 
@@ -1058,12 +1364,16 @@ function buildDom(node) {
 	toolbar.appendChild(refreshButton);
 	toolbar.appendChild(rangeButton);
 	toolbar.appendChild(outputButton);
-	toolbar.appendChild(moreButton);
+	toolbar.appendChild(slideButton1);
+	toolbar.appendChild(slideButton2);
+	toolbar.appendChild(slideButton3);
+	toolbar.appendChild(slideInitButton);
 	toolbar.appendChild(clearErrorButton);
 	toolbar.appendChild(clearAllButton);
 	toolbar.appendChild(zoomOutButton);
 	toolbar.appendChild(thumbLabel);
 	toolbar.appendChild(zoomInButton);
+	toolbar.appendChild(moreButton);
 	toolbar.appendChild(summary);
 
 	const rangeRow = document.createElement("div");
@@ -1146,10 +1456,14 @@ function buildDom(node) {
 
 	node.__gjjMultiImageContainer = container;
 	node.__gjjMultiImageToolbar = toolbar;
-	node.__gjjMultiImageExtraTools = [clearErrorButton, clearAllButton, zoomOutButton, zoomInButton];
+	node.__gjjMultiImageExtraTools = [slideButton1, slideButton2, slideButton3, slideInitButton, clearErrorButton, clearAllButton, zoomOutButton, zoomInButton];
 	node.__gjjMultiImageMoreButton = moreButton;
 	node.__gjjMultiImageBrowseButton = browseButton;
 	node.__gjjMultiImageOutputButton = outputButton;
+	node.__gjjMultiImageSlideButtons = { 1: slideButton1, 2: slideButton2, 3: slideButton3 };
+	node.__gjjMultiImageSlideInitButton = slideInitButton;
+	node.__gjjMultiImageZoomOutButton = zoomOutButton;
+	node.__gjjMultiImageZoomInButton = zoomInButton;
 	node.__gjjMultiImageThumbLabel = thumbLabel;
 	node.__gjjMultiImageRangeButton = rangeButton;
 	node.__gjjMultiImageRangeRow = rangeRow;
@@ -1190,7 +1504,9 @@ function stabilizeNode(node) {
 	ensureDomWidget(node);
 	reorderWidgets(node);
 	const state = ensureState(node);
+	syncSlideStartInput(node);
 	syncDataWidget(node);
+	applySlidingRange(node);
 	ensureOutputs(node, totalImageCount(node));
 	renderBrowser(node);
 	renderPreview(node);
@@ -1205,6 +1521,51 @@ function scheduleStabilize(node, ms = 32) {
 	clearTimeout(node.__gjjMultiImageStabilizeTimer);
 	node.__gjjMultiImageStabilizeTimer = setTimeout(() => stabilizeNode(node), ms);
 }
+
+function eventPromptId(event) {
+	return event?.detail?.prompt_id || null;
+}
+
+function samePrompt(event) {
+	const promptId = eventPromptId(event);
+	return !(promptId && lastPromptId && promptId !== lastPromptId);
+}
+
+api.addEventListener("execution_start", (event) => {
+	lastPromptId = eventPromptId(event);
+	clearTimeout(slideQueueTimer);
+	slideQueueTimer = null;
+});
+
+api.addEventListener("execution_success", (event) => {
+	if (!samePrompt(event) || !activeSlideRun?.node) {
+		activeSlideRun = null;
+		return;
+	}
+	const node = activeSlideRun.node;
+	activeSlideRun = null;
+	if (ensureState(node).slideOutputEnabled) {
+		advanceSlidingRange(node);
+	}
+});
+
+api.addEventListener("execution_error", () => {
+	clearTimeout(slideQueueTimer);
+	slideQueueTimer = null;
+	if (activeSlideRun?.node) {
+		stopSlidingOutput(activeSlideRun.node);
+	}
+	activeSlideRun = null;
+});
+
+api.addEventListener("execution_interrupted", () => {
+	clearTimeout(slideQueueTimer);
+	slideQueueTimer = null;
+	if (activeSlideRun?.node) {
+		stopSlidingOutput(activeSlideRun.node);
+	}
+	activeSlideRun = null;
+});
 
 app.registerExtension({
 	name: "Comfy.GJJ.MultiImageLoader",
@@ -1228,6 +1589,9 @@ app.registerExtension({
 			const state = ensureState(this);
 			state.selection = parseSelection(serializedSelectionFromNode(this, args[0]));
 			state.showIndividualOutputs = Boolean(this.properties?.show_individual_outputs);
+			state.slideOutputEnabled = Boolean(this.properties?.slide_output_enabled);
+			state.slideOutputIndex = Math.max(1, Number.parseInt(this.properties?.slide_output_index || "1", 10) || 1);
+			state.slideOutputSize = Math.max(1, Math.min(3, Number.parseInt(this.properties?.slide_output_size || "2", 10) || 2));
 			state.thumbSize = Number(this.properties?.thumb_size || DEFAULT_THUMB_SIZE);
 			state.rangeExpanded = Boolean(this.properties?.sequence_range_expanded);
 			state.externalCount = 0;
@@ -1249,6 +1613,9 @@ app.registerExtension({
 				serializedNode.properties[DATA_WIDGET_NAME] = serialized;
 				serializedNode.properties[SEQUENCE_RANGE_WIDGET_NAME] = getSequenceRange(this);
 				serializedNode.properties.show_individual_outputs = Boolean(ensureState(this).showIndividualOutputs);
+				serializedNode.properties.slide_output_enabled = Boolean(ensureState(this).slideOutputEnabled);
+				serializedNode.properties.slide_output_index = Math.max(1, Number(ensureState(this).slideOutputIndex || 1));
+				serializedNode.properties.slide_output_size = Math.max(1, Math.min(3, Number(ensureState(this).slideOutputSize || 1)));
 				serializedNode.properties.thumb_size = Number(ensureState(this).thumbSize || DEFAULT_THUMB_SIZE);
 				serializedNode.properties.sequence_range_expanded = Boolean(ensureState(this).rangeExpanded);
 				if (Array.isArray(serializedNode.widgets_values) && Array.isArray(this.widgets)) {

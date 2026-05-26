@@ -1520,12 +1520,24 @@ class WanVideoModelLoader:
                     block.cross_attn.ip_adapter_single_stream_v_proj = nn.Linear(context_dim, dim, bias=False)
 
         # LongCat Avatar
-        if "multitalk_audio_proj.proj1.weight" in sd and "blocks.0.audio_cross_attn.q_norm.weight" in sd:
+        proj1_key = "multitalk_audio_proj.proj1.weight" if "multitalk_audio_proj.proj1.weight" in sd \
+                    else "multitalk_audio_proj.proj1.weight_int8" if "multitalk_audio_proj.proj1.weight_int8" in sd \
+                    else None
+        if proj1_key is not None and ("blocks.0.audio_cross_attn.q_norm.weight" in sd or "blocks.0.audio_cross_attn.q_norm.weight_int8" in sd):
             log.info("MultiTalk/InfiniteTalk model detected, patching model...")
             from .multitalk.multitalk import AudioProjModel
             from .wanvideo.modules.model import WanLayerNorm
             from .LongCat.layers import SingleStreamAttention
 
+            # Detect LongCat-Avatar audio encoder variant from proj1 input dim:
+            #   v1.0 (wav2vec2): seq_len * blocks * channels = 5 * 12 * 768 = 46080
+            #   v1.5 (whisper):  seq_len * blocks * channels = 5 *  5 * 1280 = 32000
+            proj1_in = sd[proj1_key].shape[1]
+            if proj1_in == 32000:
+                audio_proj_blocks, audio_proj_channels = 5, 1280
+                log.info("LongCat-Avatar-1.5 (Whisper) audio proj detected")
+            else:
+                audio_proj_blocks, audio_proj_channels = 12, 768
 
             for block in transformer.blocks:
                 with init_empty_weights():
@@ -1542,7 +1554,7 @@ class WanVideoModelLoader:
                         class_interval=4,
                         attention_mode=attention_mode,
                     )
-                    multitalk_proj_model = AudioProjModel()
+                    multitalk_proj_model = AudioProjModel(blocks=audio_proj_blocks, channels=audio_proj_channels)
             transformer.multitalk_audio_proj = multitalk_proj_model
         # SkyreelsV3
         elif "blocks.1.audio_cross_attn.kv_linear.weight" in sd and "audio_proj.proj1.weight" in sd:
@@ -1803,10 +1815,14 @@ class WanVideoModelLoader:
             )
 
         if merge_loras and lora is not None:
-            log.info(f"Moving diffusion model from {patcher.model.diffusion_model.device} to {offload_device}")
-            patcher.model.diffusion_model.to(offload_device)
-            gc.collect()
-            mm.soft_empty_cache()
+            # Skip offloading if load_device is main_device (for unified memory systems like AMD Strix Halo)
+            if load_device != "main_device":
+                log.info(f"Moving diffusion model from {patcher.model.diffusion_model.device} to {offload_device}")
+                patcher.model.diffusion_model.to(offload_device)
+                gc.collect()
+                mm.soft_empty_cache()
+            else:
+                log.info(f"Skipping offload (load_device=main_device, keeping model on {patcher.model.diffusion_model.device})")
 
         patcher.model["base_dtype"] = base_dtype
         patcher.model["weight_dtype"] = weight_dtype

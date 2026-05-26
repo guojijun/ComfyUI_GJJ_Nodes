@@ -13,15 +13,15 @@ const MAX_SELECTED_VIDEOS = 20;
 const MIN_WIDTH = 320;
 const MIN_HEIGHT = 220;
 const DOM_WIDGET_NAME = "gjj_multi_video_loader_dom";
-const DOM_VERSION = 10;
+const DOM_VERSION = 11;
 const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const OPTIONAL_INPUT_NAME = "input_frames";
 const OPTIONAL_INPUT_DISPLAY_NAME = "视频帧队列";
 const OPTIONAL_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
 const FILE_NAME_COLLATOR = new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "base" });
 
-const PARAM_WIDGET_NAMES = new Set(["frame_rate", "width", "height", "video_format", "start_frame", "end_frame", "frame_stride", "max_frames"]);
-const PARAM_WIDGET_LABELS = new Set(["帧率", "宽度", "高度", "视频格式", "起始帧", "结束帧", "抽帧间隔", "最大帧数"]);
+const PARAM_WIDGET_NAMES = new Set(["frame_rate", "width", "height", "video_format", "start_frame", "end_frame", "frame_stride", "max_frames", "filter_keyword", "filter_directory", "refresh_interval", "auto_refresh"]);
+const PARAM_WIDGET_LABELS = new Set(["帧率", "宽度", "高度", "视频格式", "起始帧", "结束帧", "抽帧间隔", "最大帧数", "过滤关键词", "过滤目录", "刷新时间", "定时刷新"]);
 const PARAM_WIDGET_ALIASES = new Map([
 	["帧率", "frame_rate"],
 	["宽度", "width"],
@@ -31,6 +31,10 @@ const PARAM_WIDGET_ALIASES = new Map([
 	["结束帧", "end_frame"],
 	["抽帧间隔", "frame_stride"],
 	["最大帧数", "max_frames"],
+	["过滤关键词", "filter_keyword"],
+	["过滤目录", "filter_directory"],
+	["刷新时间", "refresh_interval"],
+	["定时刷新", "auto_refresh"],
 ]);
 const PARAM_DEFS = [
 	{ name: "frame_rate", label: "帧率", kind: "number", step: "0.01", min: "1", max: "240", default: 24.0, tip: "最终输出帧率。" },
@@ -41,6 +45,9 @@ const PARAM_DEFS = [
 	{ name: "end_frame", label: "结束帧", kind: "number", step: "1", min: "0", max: "999999", default: 0, tip: "0 表示读取到末尾或达到最大帧数。" },
 	{ name: "frame_stride", label: "抽帧间隔", kind: "number", step: "1", min: "1", max: "1000", default: 1, tip: "每隔多少帧取一帧。" },
 	{ name: "max_frames", label: "最大帧数", kind: "number", step: "1", min: "1", max: "100000", default: 240, tip: "每个视频最多解码多少帧。" },
+	{ name: "filter_keyword", label: "过滤关键词", kind: "text", default: "", tip: "只显示文件名或目录包含该关键词的视频；留空不过滤。" },
+	{ name: "filter_directory", label: "过滤目录", kind: "text", default: "", tip: "只显示 input 下相对目录包含该文本的视频；留空不过滤。" },
+	{ name: "refresh_interval", label: "刷新时间", kind: "number", step: "0.5", min: "1", max: "3600", default: 5.0, tip: "定时刷新开启时，每隔多少秒重新扫描视频列表。" },
 ];
 const FALLBACK_FORMATS = ["video/h264-mp4", "video/webm", "image/gif", "image/webp"];
 const TAB_DEFS = [
@@ -200,6 +207,7 @@ function ensureState(node) {
 	node.properties = node.properties || {};
 	node.__gjjMultiVideoState = node.__gjjMultiVideoState || {
 		options: [],
+		allOptions: [],
 		formats: [],
 		selection: parseSelection(selectedFromNode(node)),
 		enabledOutputs: parseEnabledOutputs(outputsFromNode(node)),
@@ -210,6 +218,7 @@ function ensureState(node) {
 		outputHeight: 0,
 		videoFormat: "",
 		activeTab: String(node.properties?.[TAB_PROPERTY] || "video"),
+		autoRefreshTimer: null,
 	};
 	return node.__gjjMultiVideoState;
 }
@@ -347,7 +356,7 @@ function setWidgetValue(node, name, value, force = false) {
 			if (!/^-?\d+(\.\d+)?$/.test(value.trim())) {
 				console.warn(`[GJJ] Invalid numeric value "${value}" for ${name}, using default ${paramDef.default}`);
 				value = paramDef.default ?? 0;
-			} else if (paramDef.step === "0.01") {
+			} else if (String(paramDef.step || "").includes(".")) {
 				value = Number.parseFloat(value) || (paramDef.default ?? 0);
 			} else {
 				value = Number.parseInt(value, 10) || (paramDef.default ?? 0);
@@ -685,6 +694,101 @@ function getWidgetValue(node, name) {
 	return findWidget(node, name)?.value;
 }
 
+function getAutoRefreshEnabled(node) {
+	const value = getWidgetValue(node, "auto_refresh");
+	return value === true || value === "true" || value === 1 || value === "1";
+}
+
+function getRefreshIntervalSeconds(node) {
+	const value = Number(getWidgetValue(node, "refresh_interval") || 5);
+	if (!Number.isFinite(value)) return 5;
+	return Math.max(1, Math.min(3600, value));
+}
+
+function getFilterKeyword(node) {
+	return String(getWidgetValue(node, "filter_keyword") || "").trim().toLowerCase();
+}
+
+function getFilterDirectory(node) {
+	return String(getWidgetValue(node, "filter_directory") || "").trim().replace(/\\/g, "/").toLowerCase();
+}
+
+function applyVideoFilters(node) {
+	const state = ensureState(node);
+	const keyword = getFilterKeyword(node);
+	const directory = getFilterDirectory(node);
+	const source = Array.isArray(state.allOptions) ? state.allOptions : (state.options || []);
+	state.options = source.filter((item) => {
+		const filename = String(item?.filename || "").toLowerCase();
+		const subfolder = String(item?.subfolder || "").replace(/\\/g, "/").toLowerCase();
+		const label = String(item?.label || "").toLowerCase();
+		if (keyword && !filename.includes(keyword) && !subfolder.includes(keyword) && !label.includes(keyword)) {
+			return false;
+		}
+		if (directory && !subfolder.includes(directory)) {
+			return false;
+		}
+		return true;
+	});
+}
+
+function setFilterWidgetValue(node, name, value) {
+	setWidgetValue(node, name, String(value ?? ""), true);
+	applyVideoFilters(node);
+	renderVideoDropdown(node);
+	renderFilterControls(node);
+	updateSummary(node);
+	scheduleLayout(node);
+}
+
+function setAutoRefreshEnabled(node, enabled) {
+	setWidgetValue(node, "auto_refresh", Boolean(enabled), true);
+	updateAutoRefresh(node);
+	renderParamControls(node);
+}
+
+function syncAutoRefreshButton(node) {
+	const button = node.__gjjMultiVideoAutoRefreshButton;
+	if (!button) return;
+	const enabled = getAutoRefreshEnabled(node);
+	const seconds = getRefreshIntervalSeconds(node);
+	button.style.cssText = buttonStyle(enabled);
+	button.setAttribute("aria-pressed", enabled ? "true" : "false");
+	setIconButton(
+		button,
+		"⏱️",
+		"定时刷新",
+		enabled ? `已开启，每 ${seconds} 秒重新扫描 input 视频。` : "已关闭；点击后按参数里的刷新时间自动扫描。"
+	);
+}
+
+function updateAutoRefresh(node) {
+	const state = ensureState(node);
+	if (state.autoRefreshTimer) {
+		clearInterval(state.autoRefreshTimer);
+		state.autoRefreshTimer = null;
+	}
+	syncAutoRefreshButton(node);
+	if (!getAutoRefreshEnabled(node)) return;
+	const intervalMs = getRefreshIntervalSeconds(node) * 1000;
+	state.autoRefreshTimer = setInterval(() => {
+		if (!node.__gjjMultiVideoContainer?.isConnected) {
+			clearInterval(state.autoRefreshTimer);
+			state.autoRefreshTimer = null;
+			return;
+		}
+		refreshOptions(node);
+	}, intervalMs);
+}
+
+function renderFilterControls(node) {
+	const keywordInput = node.__gjjMultiVideoKeywordFilter;
+	const directoryInput = node.__gjjMultiVideoDirectoryFilter;
+	if (keywordInput) keywordInput.value = String(getWidgetValue(node, "filter_keyword") || "");
+	if (directoryInput) directoryInput.value = String(getWidgetValue(node, "filter_directory") || "");
+	syncAutoRefreshButton(node);
+}
+
 function makeParamControl(node, def) {
 	const row = document.createElement("label");
 	row.style.cssText = "display:grid;grid-template-columns:72px minmax(0,1fr);gap:8px;align-items:center;font-size:11px;color:#dce7e2;";
@@ -696,6 +800,11 @@ function makeParamControl(node, def) {
 	if (def.kind === "select") {
 		input = document.createElement("select");
 		input.style.cssText = "width:100%;min-width:0;height:26px;border:1px solid #465761;border-radius:7px;background:#11181c;color:#dce7e2;font-size:11px;padding:0 6px;box-sizing:border-box;";
+	} else if (def.kind === "text") {
+		input = document.createElement("input");
+		input.type = "text";
+		input.placeholder = def.label;
+		input.style.cssText = "width:100%;min-width:0;height:26px;border:1px solid #465761;border-radius:7px;background:#11181c;color:#dce7e2;font-size:11px;padding:0 7px;box-sizing:border-box;";
 	} else {
 		input = document.createElement("input");
 		input.type = "number";
@@ -708,9 +817,14 @@ function makeParamControl(node, def) {
 	input.addEventListener("change", (event) => {
 		event.stopPropagation();
 		let value = input.value;
-		if (def.kind !== "select") value = def.step === "0.01" ? Number.parseFloat(value || "0") : Number.parseInt(value || "0", 10);
+		if (def.kind === "number") value = def.step === "0.01" || def.step === "0.5" ? Number.parseFloat(value || "0") : Number.parseInt(value || "0", 10);
 		setWidgetValue(node, def.name, Number.isNaN(value) ? 0 : value);
+		if (def.name === "filter_keyword" || def.name === "filter_directory") applyVideoFilters(node);
+		if (def.name === "refresh_interval") updateAutoRefresh(node);
 		renderParamControls(node);
+		renderFilterControls(node);
+		renderVideoDropdown(node);
+		updateSummary(node);
 	});
 	row.appendChild(label);
 	row.appendChild(input);
@@ -748,6 +862,8 @@ function renderParamControls(node) {
 				input.appendChild(option);
 			}
 			input.value = current;
+		} else if (def.kind === "text") {
+			input.value = String(currentValue ?? "");
 		} else {
 			if (typeof currentValue === "string" && !/^-?\d+(\.\d+)?$/.test(currentValue.trim())) {
 				console.warn(`[GJJ] Invalid numeric value "${currentValue}" for ${def.name}, correcting to default`);
@@ -1130,9 +1246,12 @@ function updateSummary(node) {
 		node.__gjjMultiVideoSummary.textContent = `已选 ${selectedCount} 个，输出 ${frameCount} 帧${wh}${fps > 0 ? `，源帧率 ${fps.toFixed(2)}` : ""}`;
 		return;
 	}
+	const totalCount = Array.isArray(state.allOptions) ? state.allOptions.length : 0;
+	const filteredCount = Array.isArray(state.options) ? state.options.length : 0;
+	const filteredLabel = totalCount > 0 && filteredCount !== totalCount ? `，筛出 ${filteredCount}/${totalCount}` : "";
 	node.__gjjMultiVideoSummary.textContent = selectedCount > 0
-		? `已选 ${selectedCount} / ${MAX_SELECTED_VIDEOS} 个视频`
-		: "从下拉框选择 input 视频，或点击导入视频";
+		? `已选 ${selectedCount} / ${MAX_SELECTED_VIDEOS} 个视频${filteredLabel}`
+		: `从下拉框选择 input 视频，或点击导入视频${filteredLabel}`;
 }
 
 function visibleChildrenHeight(element) {
@@ -1178,6 +1297,7 @@ function scheduleLayout(node) {
 function renderAll(node) {
 	renderTabs(node);
 	applyWidgetTabVisibility(node);
+	renderFilterControls(node);
 	renderVideoDropdown(node);
 	renderSelected(node);
 	renderExecutedPreview(node);
@@ -1189,8 +1309,9 @@ function renderAll(node) {
 async function refreshOptions(node) {
 	const state = ensureState(node);
 	const payload = await fetchOptions();
-	state.options = payload.videos;
+	state.allOptions = payload.videos;
 	state.formats = payload.formats;
+	applyVideoFilters(node);
 	renderAll(node);
 }
 
@@ -1213,7 +1334,7 @@ async function uploadFiles(node, files) {
 	}
 
 	await refreshOptions(node);
-	const optionByKey = new Map((state.options || []).map((item) => [itemKey(item), item]));
+	const optionByKey = new Map((state.allOptions || state.options || []).map((item) => [itemKey(item), item]));
 	for (const item of uploaded) {
 		if (state.selection.length >= MAX_SELECTED_VIDEOS) break;
 		const full = optionByKey.get(itemKey(item)) || item;
@@ -1294,6 +1415,16 @@ function buildDom(node) {
 		refreshOptions(node);
 	});
 
+	const autoRefreshButton = document.createElement("button");
+	autoRefreshButton.type = "button";
+	setIconButton(autoRefreshButton, "⏱️", "定时刷新", "按参数里的刷新时间自动重新扫描 input 视频。");
+	autoRefreshButton.style.cssText = buttonStyle(false);
+	autoRefreshButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		setAutoRefreshEnabled(node, !getAutoRefreshEnabled(node));
+	});
+
 	const extractInfoButton = document.createElement("button");
 	extractInfoButton.type = "button";
 	setIconButton(extractInfoButton, "🧾", "提取信息到面板", "读取当前下拉或首个已选视频的帧率、宽度、高度和格式，并覆盖面板参数。优先使用后端扫描到的媒体信息。");
@@ -1347,9 +1478,35 @@ function buildDom(node) {
 	const summary = document.createElement("div");
 	summary.style.cssText = "font-size:11px;color:#dce7e2;flex:1 1 100%;";
 
+	const filterWrap = document.createElement("div");
+	filterWrap.style.cssText = "display:grid;grid-template-columns:repeat(2, minmax(0, 1fr));gap:6px;width:100%;box-sizing:border-box;";
+	const keywordInput = document.createElement("input");
+	keywordInput.type = "text";
+	keywordInput.placeholder = "🔎 关键词过滤";
+	keywordInput.title = "按文件名、目录或显示标签过滤视频。";
+	keywordInput.style.cssText = "width:100%;min-width:0;height:24px;border:1px solid #465761;border-radius:6px;background:#11181c;color:#dce7e2;font-size:11px;padding:0 8px;box-sizing:border-box;";
+	keywordInput.addEventListener("pointerdown", (event) => event.stopPropagation());
+	keywordInput.addEventListener("input", (event) => {
+		event.stopPropagation();
+		setFilterWidgetValue(node, "filter_keyword", keywordInput.value);
+	});
+	const directoryInput = document.createElement("input");
+	directoryInput.type = "text";
+	directoryInput.placeholder = "📂 目录过滤";
+	directoryInput.title = "按 input 下的相对目录过滤视频。";
+	directoryInput.style.cssText = keywordInput.style.cssText;
+	directoryInput.addEventListener("pointerdown", (event) => event.stopPropagation());
+	directoryInput.addEventListener("input", (event) => {
+		event.stopPropagation();
+		setFilterWidgetValue(node, "filter_directory", directoryInput.value);
+	});
+	filterWrap.appendChild(keywordInput);
+	filterWrap.appendChild(directoryInput);
+
 	toolbar.appendChild(select);
 	toolbar.appendChild(uploadButton);
 	toolbar.appendChild(refreshButton);
+	toolbar.appendChild(autoRefreshButton);
 	toolbar.appendChild(extractInfoButton);
 	toolbar.appendChild(clearButton);
 	toolbar.appendChild(summary);
@@ -1365,6 +1522,7 @@ function buildDom(node) {
 	outputWrap.appendChild(outputButtons);
 
 	videoPanel.appendChild(toolbar);
+	videoPanel.appendChild(filterWrap);
 	outputPanel.appendChild(outputWrap);
 	container.appendChild(tabs);
 	container.appendChild(videoPanel);
@@ -1378,6 +1536,9 @@ function buildDom(node) {
 	node.__gjjMultiVideoParamPanel = paramPanel;
 	node.__gjjMultiVideoOutputPanel = outputPanel;
 	node.__gjjMultiVideoSelect = select;
+	node.__gjjMultiVideoKeywordFilter = keywordInput;
+	node.__gjjMultiVideoDirectoryFilter = directoryInput;
+	node.__gjjMultiVideoAutoRefreshButton = autoRefreshButton;
 	node.__gjjMultiVideoSummary = summary;
 	node.__gjjMultiVideoOutputButtons = outputButtons;
 	node.__gjjMultiVideoParamControls = paramControls;
@@ -1391,6 +1552,11 @@ function buildDom(node) {
 
 function destroyDomWidget(node) {
 	if (!node) return;
+	const state = node.__gjjMultiVideoState;
+	if (state?.autoRefreshTimer) {
+		clearInterval(state.autoRefreshTimer);
+		state.autoRefreshTimer = null;
+	}
 	const widget = node.__gjjMultiVideoWidget;
 	if (widget && Array.isArray(node.widgets)) {
 		const index = node.widgets.indexOf(widget);
@@ -1404,6 +1570,9 @@ function destroyDomWidget(node) {
 	node.__gjjMultiVideoParamPanel = null;
 	node.__gjjMultiVideoOutputPanel = null;
 	node.__gjjMultiVideoSelect = null;
+	node.__gjjMultiVideoKeywordFilter = null;
+	node.__gjjMultiVideoDirectoryFilter = null;
+	node.__gjjMultiVideoAutoRefreshButton = null;
 	node.__gjjMultiVideoSummary = null;
 	node.__gjjMultiVideoOutputButtons = null;
 	node.__gjjMultiVideoParamControls = null;
@@ -1995,6 +2164,7 @@ function stabilizeNode(node) {
 	syncProperties(node);
 	applyDynamicOutputs(node);
 	renderAll(node);
+	updateAutoRefresh(node);
 	forceHideNativeParamWidgets(node);
 }
 

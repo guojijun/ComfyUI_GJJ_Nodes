@@ -27,11 +27,11 @@ def _load_wanvideo_model_loading():
     return nodes_model_loading
 
 
-def _scan_diffusion_models(keyword="wan"):
+def _scan_diffusion_models(keywords=("wan", "longcat")):
     """扫描 diffusion_models 目录，按关键词过滤并返回模型列表。
     
     Args:
-        keyword: 过滤关键词，默认 "wan"
+        keywords: 过滤关键词，默认同时兼容 "wan" 和 "longcat"
     
     Returns:
         (model_list, default_model) 元组
@@ -53,10 +53,14 @@ def _scan_diffusion_models(keyword="wan"):
     if not all_models:
         return ["[未找到模型]"], "[未找到模型]"
     
-    keyword_lower = keyword.lower()
+    if isinstance(keywords, str):
+        keyword_list = [keywords]
+    else:
+        keyword_list = list(keywords or [])
+    keyword_lowers = [str(keyword).strip().lower() for keyword in keyword_list if str(keyword).strip()]
     matched = [
         name for name in all_models
-        if keyword_lower in name.lower()
+        if any(keyword in name.lower() for keyword in keyword_lowers)
     ]
     
     if matched:
@@ -73,6 +77,8 @@ class GJJ_WanVideoModelLoader:
         "WanVideo Model Loader",
         "WanVideo 模型加载",
         "Wan2.1 模型",
+        "LongCat 模型",
+        "LongCat Avatar",
     ]
     RETURN_TYPES = ("WANVIDEOMODEL",)
     RETURN_NAMES = ("模型",)
@@ -80,7 +86,7 @@ class GJJ_WanVideoModelLoader:
 
     @classmethod
     def INPUT_TYPES(cls):
-        diffusion_models, default_model = _scan_diffusion_models("wan")
+        diffusion_models, default_model = _scan_diffusion_models(("wan", "longcat"))
         
         attention_modes = [
             "sdpa",
@@ -101,7 +107,7 @@ class GJJ_WanVideoModelLoader:
                     {
                         "default": default_model,
                         "display_name": "模型选择",
-                        "tooltip": "自动搜索 diffusion_models 和 unet_gguf 目录，默认优先显示包含 wan 的模型。",
+                        "tooltip": "自动搜索 diffusion_models 和 unet_gguf 目录，默认优先显示包含 wan 或 longcat 的模型。",
                     },
                 ),
                 "base_precision": (

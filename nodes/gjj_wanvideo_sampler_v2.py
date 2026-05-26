@@ -317,6 +317,78 @@ def _disable_model_compile_runtime(patcher):
         return False
 
 
+def _force_sdpa_attention_runtime(patcher):
+    """将当前 WanVideoWrapper 模型里的 Sage/Flash 注意力临时降级为 PyTorch SDPA。"""
+    try:
+        model = getattr(patcher, "model", None)
+        if model is None:
+            return False
+
+        transformer = getattr(model, "diffusion_model", None)
+        if transformer is None:
+            return False
+
+        changed = False
+
+        def set_if_present(obj, attr_name):
+            nonlocal changed
+            try:
+                value = getattr(obj, attr_name, None)
+            except Exception:
+                return
+            if isinstance(value, str) and value != "sdpa":
+                try:
+                    setattr(obj, attr_name, "sdpa")
+                    changed = True
+                except Exception:
+                    pass
+
+        set_if_present(transformer, "attention_mode")
+        set_if_present(transformer, "dense_attention_mode")
+
+        try:
+            modules = transformer.modules()
+        except Exception:
+            modules = []
+        for module in modules:
+            set_if_present(module, "attention_mode")
+            set_if_present(module, "dense_attention_mode")
+
+        try:
+            transformer_options = patcher.model_options.setdefault("transformer_options", {})
+            attention_override = transformer_options.get("attention_mode_override")
+            if isinstance(attention_override, dict) and attention_override.get("mode") != "sdpa":
+                attention_override["mode"] = "sdpa"
+                changed = True
+            if transformer_options.get("dense_attention_mode") != "sdpa":
+                transformer_options["dense_attention_mode"] = "sdpa"
+                changed = True
+        except Exception:
+            pass
+
+        return changed
+    except Exception:
+        return False
+
+
+def _looks_like_triton_attention_compile_error(error_text: str) -> bool:
+    text = error_text.lower()
+    if not any(token in text for token in ("triton", "sageatt", "tcc.exe", "cuda_utils", "quant_per_block")):
+        return False
+    return any(
+        token in text
+        for token in (
+            "returned non-zero exit status",
+            "compile_module_from_src",
+            "compile",
+            "cuda_utils",
+            "quant_per_block",
+            "active_drivers",
+            "get_current_device",
+        )
+    )
+
+
 def _scheduler_choices():
     try:
         runtime = _load_sampler_runtime()
@@ -1133,14 +1205,16 @@ class GJJ_WanVideoSamplerV2:
                         # TCC 编译失败 (可能被 InductorError 包装)
                         ("tcc.exe" in error_str and "returned non-zero exit status" in error_str) or
                         # InductorError 包含编译相关错误
-                        ("inductorerror" in error_str and ("compile" in error_str or "tcc" in error_str or "cuda_utils" in error_str))
+                        ("inductorerror" in error_str and ("compile" in error_str or "tcc" in error_str or "cuda_utils" in error_str)) or
+                        # SageAttention 调用 Triton/TCC 编译失败
+                        _looks_like_triton_attention_compile_error(error_str)
                     )
                 )
                 
                 if is_triton_compile_error:
-                    # 首次遇到编译失败,尝试禁用 torch.compile 后重试
+                    # 首次遇到编译失败,禁用 torch.compile 并将 Sage/Flash 注意力降级到 SDPA 后重试
                     print(f"\n{'='*80}")
-                    print(f"⚠️ 检测到 Triton 编译失败，尝试自动降级运行...")
+                    print(f"⚠️ 检测到 Triton/SageAttention 编译失败，尝试自动降级运行...")
                     print(f"{'='*80}\n")
                     
                     # 临时禁用 torch.compile
@@ -1158,8 +1232,12 @@ class GJJ_WanVideoSamplerV2:
                     runtime_compile_disabled = _disable_model_compile_runtime(args["model"])
                     if runtime_compile_disabled:
                         print("🔧 已从当前模型移除 compile_args，并解包已包装的编译模块。")
+
+                    attention_downgraded = _force_sdpa_attention_runtime(args["model"])
+                    if attention_downgraded:
+                        print("🔧 已将当前 WanVideo 模型注意力模式临时切换为 sdpa。")
                     
-                    print(f"🔄 已禁用 torch.compile，正在重新执行...\n")
+                    print(f"🔄 已禁用 torch.compile / SageAttention，正在重新执行...\n")
                     
                     # 重新加载节点以应用新配置
                     if hasattr(node, '__class__'):

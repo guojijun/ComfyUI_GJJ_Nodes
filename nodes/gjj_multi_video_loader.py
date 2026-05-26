@@ -862,6 +862,41 @@ class GJJ_MultiVideoLoader:
                         "tooltip": "每个视频最多解码多少帧，防止超长视频一次占用过多内存。",
                     }),
                 ),
+                "filter_keyword": (
+                    "STRING",
+                    _hidden_panel_widget({
+                        "default": "",
+                        "display_name": "过滤关键词",
+                        "tooltip": "只在【视频】下拉列表中显示文件名或目录包含该关键词的视频；留空不过滤。",
+                    }),
+                ),
+                "filter_directory": (
+                    "STRING",
+                    _hidden_panel_widget({
+                        "default": "",
+                        "display_name": "过滤目录",
+                        "tooltip": "只在【视频】下拉列表中显示 input 下相对目录包含该文本的视频；留空不过滤。",
+                    }),
+                ),
+                "refresh_interval": (
+                    "FLOAT",
+                    _hidden_panel_widget({
+                        "default": 5.0,
+                        "min": 1.0,
+                        "max": 3600.0,
+                        "step": 0.5,
+                        "display_name": "刷新时间",
+                        "tooltip": "开启定时刷新后，每隔多少秒重新扫描视频列表。",
+                    }),
+                ),
+                "auto_refresh": (
+                    "BOOLEAN",
+                    _hidden_panel_widget({
+                        "default": False,
+                        "display_name": "定时刷新",
+                        "tooltip": "开启后前端按刷新时间自动重新扫描视频列表，适合监控分段生成的视频。",
+                    }),
+                ),
             },
             "optional": {
                 "input_frames": ("GJJ_BATCH_IMAGE,IMAGE,VIDEO", {"display_name": "视频帧队列", "tooltip": "非必选：可直接输入上游帧队列。接入后优先使用输入帧，未接入时读取下拉选择的视频。"}),
@@ -1074,6 +1109,10 @@ class GJJ_MultiVideoLoader:
         end_frame=None,
         frame_stride=None,
         max_frames=None,
+        filter_keyword=None,
+        filter_directory=None,
+        refresh_interval=None,
+        auto_refresh=False,
         input_frames=None,
         prompt=None,
         extra_pnginfo=None,
@@ -1104,6 +1143,7 @@ class GJJ_MultiVideoLoader:
         end_frame_val = _safe_int(end_frame, 0, 0, 999999)
         frame_stride_val = _safe_int(frame_stride, 1, 1, 1000)
         max_frames_val = _safe_int(max_frames, 240, 1, 100000)
+        _ = (filter_keyword, filter_directory, refresh_interval, auto_refresh)
 
         external_video = self._coerce_external_video(input_frames)
         if external_video is not None:

@@ -843,14 +843,10 @@ function refreshGjjNodesAfterHelpLoad() {
 }
 
 function moveHelpWidgetToFront(node, widget) {
-	if (!node?.widgets || !widget) {
-		return;
-	}
-	const index = node.widgets.indexOf(widget);
-	if (index > 0) {
-		node.widgets.splice(index, 1);
-		node.widgets.unshift(widget);
-	}
+	// Keep the help DOM widget out of the serialized widget prefix.
+	// ComfyUI restores widgets_values by widget index; moving this serialize:false
+	// decoration to index 0 shifts saved workflow parameters on reload.
+	if (!node?.widgets || !widget) return;
 }
 
 function removeLegacyHelpWidget(node) {

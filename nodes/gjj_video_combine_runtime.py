@@ -446,6 +446,13 @@ def _repeat_frames(frames: torch.Tensor, repeat_count: int) -> torch.Tensor:
     return torch.cat([frames] * int(repeat_count), dim=0).contiguous()
 
 
+def _delete_tail_frame(frames: torch.Tensor) -> torch.Tensor:
+    frames = _ensure_image_batch(frames)
+    if int(frames.shape[0]) <= 1:
+        raise RuntimeError("删除尾帧需要至少 2 帧输入；当前只有 1 帧。")
+    return frames[:-1].contiguous()
+
+
 def tensor_to_int(tensor: torch.Tensor, bits: int) -> np.ndarray:
     array = tensor.detach().cpu().numpy() * (2**bits - 1) + 0.5
     return np.clip(array, 0, (2**bits - 1))
@@ -997,6 +1004,7 @@ def combine_video(
     pingpong,
     save_output,
     use_source_fps=False,
+    delete_tail_frame=False,
     audio=None,
     vae=None,
     format_overrides_json="",
@@ -1031,6 +1039,8 @@ def combine_video(
             frame_segments.append(_ensure_image_batch(images))
     frame_segments.extend(segment["images"] for segment in video_segments)
     frames = _combine_frame_segments(frame_segments)
+    if bool(delete_tail_frame):
+        frames = _delete_tail_frame(frames)
     effective_audio = audio
     if effective_audio is None and not has_image_input and has_video_input:
         effective_audio = _concat_video_audios(video_segments)

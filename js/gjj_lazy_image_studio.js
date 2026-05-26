@@ -28,6 +28,25 @@ const LORA_DATA_WIDGET_NAME = "lora_data";
 const DEFAULT_EMPTY_OPTION = { value: "", label: "未选择" };
 const DEFAULT_ROW = { enabled: true, name: "", strength: 1.0 };
 const DEFAULT_FIRST_SEARCH_TERMS = "";
+const PANEL_SYNC_WIDGETS = [
+	"prompt",
+	"negative_prompt",
+	"main_image_index",
+	"width",
+	"height",
+	"batch_size",
+	"unet_name",
+	"unet_dtype",
+	"clip_name1",
+	"vae_name",
+	"seed",
+	"steps",
+	"cfg",
+	"sampler_name",
+	"scheduler",
+	"denoise",
+	"grow_mask_by",
+];
 
 let MODEL_PRESETS = getCachedModelFamilyPresets();
 
@@ -260,6 +279,114 @@ function roundToEight(value) {
 	return Math.max(8, Math.round(Number(value || 0) / 8) * 8);
 }
 
+function getLinkedWidgetInput(node, widgetName) {
+	return (node.inputs || []).find((input) => (
+		input?.link != null &&
+		(String(input?.widget?.name || "") === widgetName || String(input?.name || "") === widgetName)
+	)) || null;
+}
+
+function readResizeNodeConfig(sourceNode) {
+	const cfg = sourceNode?.properties?.gjj_mf_resize_config;
+	if (cfg && typeof cfg === "object") {
+		return cfg;
+	}
+	const widget = getWidget(sourceNode, "config_json");
+	try {
+		const parsed = JSON.parse(String(widget?.value || "{}"));
+		return parsed && typeof parsed === "object" ? parsed : null;
+	} catch {
+		return null;
+	}
+}
+
+function inferExternalOutputValue(link, targetWidgetName = "") {
+	if (!link || !app.graph) {
+		return undefined;
+	}
+	const sourceNode = link.origin_id != null ? app.graph.getNodeById?.(link.origin_id) : null;
+	const output = sourceNode?.outputs?.[Number(link.origin_slot || 0)];
+	const outputName = String(output?.name || output?.label || "").trim();
+	if (!sourceNode || !outputName) {
+		return undefined;
+	}
+	if (sourceNode.comfyClass === "GJJ_ImageResizeKJv2") {
+		const cfg = readResizeNodeConfig(sourceNode);
+		if (cfg) {
+			const slotKey = Array.isArray(cfg.extra_outputs)
+				? cfg.extra_outputs[Number(link.origin_slot || 0) - 2]
+				: "";
+			if (targetWidgetName === "width") return Number(cfg.width || 0) || undefined;
+			if (targetWidgetName === "height") return Number(cfg.height || 0) || undefined;
+			if (slotKey === "output_width" || outputName.includes("宽度")) return Number(cfg.width || 0) || undefined;
+			if (slotKey === "output_height" || outputName.includes("高度")) return Number(cfg.height || 0) || undefined;
+		}
+	}
+	const candidateWidgetNames = [
+		outputName,
+		"value",
+		"int",
+		"float",
+		"number",
+		"text",
+		"string",
+		"seed",
+	];
+	for (const name of candidateWidgetNames) {
+		const widget = getWidget(sourceNode, name);
+		if (widget?.value !== undefined && widget?.value !== null && String(widget.value) !== "") {
+			return widget.value;
+		}
+	}
+	return sourceNode.__gjjLastOutputValues?.[Number(link.origin_slot || 0)];
+}
+
+function externalPanelSignature(node) {
+	const parts = [];
+	for (const widgetName of PANEL_SYNC_WIDGETS) {
+		const input = getLinkedWidgetInput(node, widgetName);
+		if (!input?.link || !app.graph?.links) {
+			continue;
+		}
+		const link = app.graph.links[input.link];
+		const sourceNode = link?.origin_id != null ? app.graph.getNodeById?.(link.origin_id) : null;
+		const resizeCfg = sourceNode?.comfyClass === "GJJ_ImageResizeKJv2" ? readResizeNodeConfig(sourceNode) : null;
+		const widgetValues = (sourceNode?.widgets || []).map((widget) => [widget?.name, widget?.value]);
+		parts.push([widgetName, link?.origin_id, link?.origin_slot, resizeCfg, widgetValues]);
+	}
+	return JSON.stringify(parts);
+}
+
+function applyEffectiveParamsToPanel(node, params, onlyLinked = false) {
+	if (!params || typeof params !== "object") {
+		return;
+	}
+	for (const widgetName of PANEL_SYNC_WIDGETS) {
+		if (onlyLinked && !getLinkedWidgetInput(node, widgetName)) {
+			continue;
+		}
+		if (!Object.prototype.hasOwnProperty.call(params, widgetName)) {
+			continue;
+		}
+		setWidgetValue(getWidget(node, widgetName), params[widgetName]);
+	}
+}
+
+function syncPanelFromLinkedSources(node) {
+	const values = {};
+	for (const widgetName of PANEL_SYNC_WIDGETS) {
+		const input = getLinkedWidgetInput(node, widgetName);
+		if (!input?.link || !app.graph?.links) {
+			continue;
+		}
+		const value = inferExternalOutputValue(app.graph.links[input.link], widgetName);
+		if (value !== undefined && value !== null && String(value) !== "") {
+			values[widgetName] = value;
+		}
+	}
+	applyEffectiveParamsToPanel(node, values, true);
+}
+
 async function largestMultiImageLoaderSize(sourceNode) {
 	const widget = getWidget(sourceNode, "selected_images");
 	let items = [];
@@ -295,6 +422,9 @@ async function largestMultiImageLoaderSize(sourceNode) {
 }
 
 async function syncSizeFromPrimaryInput(node) {
+	if (getLinkedWidgetInput(node, "width") || getLinkedWidgetInput(node, "height")) {
+		return;
+	}
 	const primary = getInput(node, PRIMARY_IMAGE_INPUT);
 	const linkId = primary?.link;
 	if (!linkId || !app.graph?.links) {
@@ -1703,6 +1833,7 @@ function stabilizeNode(node, forcePreset = false) {
 	}
 
 	applyPreset(node, forcePreset);
+	syncPanelFromLinkedSources(node);
 	GJJ_Utils.refreshNode(node);
 }
 
@@ -1928,6 +2059,7 @@ app.registerExtension({
 				syncBatchSourceWidget(this);
 				void syncSizeFromPrimaryInput(this);
 				stabilizeNode(this, true);
+				syncPanelFromLinkedSources(this);
 
 				// 隐藏默认预览元素
 				hideDefaultPreviewElements(this);
@@ -1952,6 +2084,7 @@ app.registerExtension({
 				syncBatchSourceWidget(this);
 				void syncSizeFromPrimaryInput(this);
 				stabilizeNode(this, false);
+				syncPanelFromLinkedSources(this);
 
 				// 隐藏默认预览元素
 				hideDefaultPreviewElements(this);
@@ -1967,7 +2100,19 @@ app.registerExtension({
 				syncBatchSourceWidget(this);
 				void syncSizeFromPrimaryInput(this);
 				stabilizeNode(this, false);
+				syncPanelFromLinkedSources(this);
 			}, 0);
+			return result;
+		};
+
+		const originalDrawBackground = nodeType.prototype.onDrawBackground;
+		nodeType.prototype.onDrawBackground = function (...args) {
+			const result = originalDrawBackground?.apply(this, args);
+			const signature = externalPanelSignature(this);
+			if (signature !== this.__gjjLazyExternalPanelSignature) {
+				this.__gjjLazyExternalPanelSignature = signature;
+				syncPanelFromLinkedSources(this);
+			}
 			return result;
 		};
 
@@ -2004,6 +2149,11 @@ app.registerExtension({
 				updateImagePreview(this, images);
 			}
 
+			const effectiveParams = Array.isArray(message?.effective_params)
+				? message.effective_params[0]
+				: (Array.isArray(message?.ui?.effective_params) ? message.ui.effective_params[0] : null);
+			applyEffectiveParamsToPanel(this, effectiveParams, true);
+
 			// 按照文档：不管怎样都执行一次隐藏，确保之前的被隐藏
 			setTimeout(() => hideDefaultPreviewElements(this), 0);
 			setTimeout(() => hideDefaultPreviewElements(this), 50);
@@ -2024,6 +2174,7 @@ app.registerExtension({
 					setStatus(node, "等待执行");
 				}
 				stabilizeNode(node, false);
+				syncPanelFromLinkedSources(node);
 			}
 		});
 	},

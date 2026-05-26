@@ -1,0 +1,127 @@
+{
+  "id": "gjj-longcat-ti2v-1-5",
+  "revision": 0,
+  "last_node_id": 4,
+  "last_link_id": 4,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "GJJ_LongCatVideoLoader",
+      "pos": [120, 120],
+      "size": [360, 130],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {"name": "LongCat管线", "type": "GJJ_LONGCAT_VIDEO_PIPELINE", "links": [1]},
+        {"name": "加载状态", "type": "STRING", "links": null}
+      ],
+      "properties": {"Node name for S&R": "GJJ_LongCatVideoLoader"},
+      "widgets_values": ["自动检测", "自动", true]
+    },
+    {
+      "id": 2,
+      "type": "LoadImage",
+      "pos": [120, 330],
+      "size": [315, 314],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {"name": "IMAGE", "type": "IMAGE", "links": [2]},
+        {"name": "MASK", "type": "MASK", "links": null}
+      ],
+      "properties": {"Node name for S&R": "LoadImage", "cnr_id": "comfy-core"},
+      "widgets_values": ["girl.png", "image"]
+    },
+    {
+      "id": 3,
+      "type": "GJJ_LongCatVideoGenerator",
+      "pos": [560, 120],
+      "size": [520, 520],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {"name": "LongCat管线", "type": "GJJ_LONGCAT_VIDEO_PIPELINE", "link": 1},
+        {"name": "生成模式", "type": "COMBO", "widget": {"name": "生成模式"}, "link": null},
+        {"name": "提示词", "type": "STRING", "widget": {"name": "提示词"}, "link": null},
+        {"name": "随机种", "type": "INT", "widget": {"name": "随机种"}, "link": null},
+        {"name": "参考图像", "shape": 7, "type": "IMAGE", "link": 2},
+        {"name": "负面提示词", "shape": 7, "type": "STRING", "widget": {"name": "负面提示词"}, "link": null},
+        {"name": "宽度", "shape": 7, "type": "INT", "widget": {"name": "宽度"}, "link": null},
+        {"name": "高度", "shape": 7, "type": "INT", "widget": {"name": "高度"}, "link": null},
+        {"name": "图生分辨率", "shape": 7, "type": "COMBO", "widget": {"name": "图生分辨率"}, "link": null},
+        {"name": "帧数", "shape": 7, "type": "INT", "widget": {"name": "帧数"}, "link": null},
+        {"name": "蒸馏模式", "shape": 7, "type": "BOOLEAN", "widget": {"name": "蒸馏模式"}, "link": null},
+        {"name": "采样步数", "shape": 7, "type": "INT", "widget": {"name": "采样步数"}, "link": null},
+        {"name": "引导强度", "shape": 7, "type": "FLOAT", "widget": {"name": "引导强度"}, "link": null},
+        {"name": "完成后清理缓存", "shape": 7, "type": "BOOLEAN", "widget": {"name": "完成后清理缓存"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "视频帧", "type": "IMAGE", "links": [3]},
+        {"name": "帧率", "type": "FLOAT", "links": [4]},
+        {"name": "生成状态", "type": "STRING", "links": null}
+      ],
+      "properties": {"Node name for S&R": "GJJ_LongCatVideoGenerator"},
+      "widgets_values": [
+        "自动",
+        "A woman sits at a wooden table by the window in a cozy cafe. She reaches out with her right hand, picks up the white coffee cup from the saucer, and gently brings it to her lips to take a sip. After drinking, she places the cup back on the table and looks out the window, enjoying the peaceful atmosphere.",
+        42,
+        "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality",
+        832,
+        480,
+        "480p",
+        93,
+        true,
+        50,
+        4.0,
+        true
+      ]
+    },
+    {
+      "id": 4,
+      "type": "GJJ_VideoCombine",
+      "pos": [1160, 120],
+      "size": [360, 310],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {"name": "图像", "type": "GJJ_BATCH_IMAGE,IMAGE", "link": 3},
+        {"name": "帧率", "type": "FLOAT", "widget": {"name": "frame_rate"}, "link": 4},
+        {"name": "循环次数", "type": "INT", "widget": {"name": "loop_count"}, "link": null},
+        {"name": "文件名前缀", "type": "STRING", "widget": {"name": "filename_prefix"}, "link": null},
+        {"name": "输出格式", "type": "COMBO", "widget": {"name": "format_name"}, "link": null},
+        {"name": "往返播放", "type": "BOOLEAN", "widget": {"name": "pingpong"}, "link": null},
+        {"name": "保存到输出目录", "type": "BOOLEAN", "widget": {"name": "save_output"}, "link": null},
+        {"name": "使用源视频帧率", "type": "BOOLEAN", "widget": {"name": "use_source_fps"}, "link": null},
+        {"name": "音频", "shape": 7, "type": "AUDIO", "link": null},
+        {"name": "VAE 解码器", "shape": 7, "type": "VAE", "link": null}
+      ],
+      "outputs": [
+        {"name": "视频", "type": "VIDEO", "links": null},
+        {"name": "主输出文件", "type": "STRING", "links": null},
+        {"name": "输出文件列表JSON", "type": "STRING", "links": null}
+      ],
+      "properties": {"Node name for S&R": "GJJ_VideoCombine"},
+      "widgets_values": [15, 0, "GJJ_LongCat_TI2V_1_5", "video/h264-mp4", false, true, true]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 3, 0, "GJJ_LONGCAT_VIDEO_PIPELINE"],
+    [2, 2, 0, 3, 4, "IMAGE"],
+    [3, 3, 0, 4, 0, "IMAGE"],
+    [4, 3, 1, 4, 1, "FLOAT"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "frontendVersion": "1.41.21",
+    "workflowRendererVersion": "LG",
+    "ds": {"scale": 1.0, "offset": [0, 0]}
+  },
+  "version": 0.4
+}

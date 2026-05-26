@@ -113,6 +113,15 @@ def _check_startup_dependencies():
 _check_startup_dependencies()
 
 
+def _filter_vae_models(keyword: str = "wan"):
+    models = list(folder_paths.get_filename_list("vae") or [])
+    needle = str(keyword or "").strip().lower()
+    if not needle:
+        return models
+    filtered = [name for name in models if needle in str(name).lower()]
+    return filtered or models
+
+
 def _load_wan_video_vae():
     """懒加载 WanVideoVAE 依赖"""
     # 为可选依赖 gguf 创建占位模块，避免 vendor 导入链中断
@@ -178,13 +187,15 @@ class GJJ_WanVideoVAELoader:
 
     @classmethod
     def INPUT_TYPES(cls):
+        vae_models = _filter_vae_models("wan")
         return {
             "required": {
                 "model_name": (
-                    folder_paths.get_filename_list("vae"),
+                    vae_models,
                     {
+                        "default": vae_models[0] if vae_models else None,
                         "display_name": "模型选择",
-                        "tooltip": "自动搜索 ComfyUI/models/vae/ 及其子目录。",
+                        "tooltip": "自动搜索 ComfyUI/models/vae/ 及其子目录，默认按关键词 wan 过滤；若无匹配则显示全部。",
                     },
                 ),
             },
@@ -195,6 +206,13 @@ class GJJ_WanVideoVAELoader:
                         "default": "bf16",
                         "display_name": "精度",
                         "tooltip": "模型计算精度，bf16 推荐用于现代 GPU。",
+                    },
+                ),
+                "compile_args": (
+                    "WANCOMPILEARGS",
+                    {
+                        "display_name": "编译参数",
+                        "tooltip": "可选。连接 GJJ · ⚙️ WanVideo编译设置 后，对 VAE decoder 使用 torch.compile。",
                     },
                 ),
                 "use_cpu_cache": (
@@ -224,6 +242,7 @@ class GJJ_WanVideoVAELoader:
         self,
         model_name,
         precision="bf16",
+        compile_args=None,
         use_cpu_cache=False,
         verbose=False,
         unique_id=None,
@@ -331,6 +350,24 @@ class GJJ_WanVideoVAELoader:
         # 将模型移动到设备
         print(f"[GJJ WanVideoVAE] 正在将模型移动到 {offload_device}...")
         vae.to(device=offload_device, dtype=dtype)
+
+        if compile_args is not None:
+            try:
+                print("[GJJ WanVideoVAE] 正在编译 VAE decoder...")
+                vae.model.decoder = torch.compile(
+                    vae.model.decoder,
+                    fullgraph=compile_args["fullgraph"],
+                    dynamic=compile_args["dynamic"],
+                    backend=compile_args["backend"],
+                    mode=compile_args["mode"],
+                )
+                print("[GJJ WanVideoVAE] VAE decoder 编译完成")
+            except Exception as e:
+                raise RuntimeError(
+                    "VAE decoder 编译失败。\n"
+                    "建议先断开“编译参数”输入确认模型可正常加载，再调整 torch.compile 设置。\n"
+                    f"原始错误: {e}"
+                ) from e
         
         print(f"[GJJ WanVideoVAE] ========== VAE 加载完成 ==========")
         

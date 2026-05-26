@@ -31,6 +31,16 @@ INPUT_IMAGE_TYPES = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
 _IMAGE_META_CACHE: dict[str, tuple[int, int, int, int]] = {}
 
 
+class AnyType(str):
+    """ComfyUI socket type that accepts upstream values without pre-conversion."""
+
+    def __ne__(self, __value: object) -> bool:
+        return False
+
+
+any_type = AnyType("*")
+
+
 def list_input_images() -> list[dict[str, Any]]:
     input_dir = Path(folder_paths.get_input_directory()).resolve()
     items: list[dict[str, Any]] = []
@@ -598,6 +608,13 @@ class GJJ_MultiImageLoader:
                         "tooltip": "可接入 GJJ 专用批量图片队列或普通 IMAGE batch；会与当前已选图片合并预览并一起输出。",
                     },
                 ),
+                "slide_start_index": (
+                    any_type,
+                    {
+                        "display_name": "滑动起始序号",
+                        "tooltip": "更多工具展开时可连接：按 x mod 图片总数决定滑动输出起始序号，0 会映射到最后一张。",
+                    },
+                ),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -610,7 +627,7 @@ class GJJ_MultiImageLoader:
         self.preview_image = PreviewImage()
 
     @classmethod
-    def IS_CHANGED(cls, selected_images="[]", sequence_range="", input_images=None, prompt=None, extra_pnginfo=None, unique_id=None):
+    def IS_CHANGED(cls, selected_images="[]", sequence_range="", input_images=None, slide_start_index=None, prompt=None, extra_pnginfo=None, unique_id=None):
         selected = recover_selected_images(selected_images, extra_pnginfo, unique_id)
         resolved_sequence_range = recover_sequence_range(sequence_range, extra_pnginfo, unique_id)
         input_shape = tuple(input_images.shape) if isinstance(input_images, torch.Tensor) else ()
@@ -618,13 +635,14 @@ class GJJ_MultiImageLoader:
             {
                 "selected": selected_images_signature(selected),
                 "sequence_range": resolved_sequence_range,
+                "slide_start_index": slide_start_index,
                 "input_shape": input_shape,
             },
             ensure_ascii=False,
             sort_keys=True,
         )
 
-    def load_images(self, selected_images="[]", sequence_range="", input_images=None, prompt=None, extra_pnginfo=None, unique_id=None):
+    def load_images(self, selected_images="[]", sequence_range="", input_images=None, slide_start_index=None, prompt=None, extra_pnginfo=None, unique_id=None):
         selected = recover_selected_images(selected_images, extra_pnginfo, unique_id)
         sequence_range = recover_sequence_range(sequence_range, extra_pnginfo, unique_id)
         collected: list[dict[str, Any]] = []
@@ -677,6 +695,19 @@ class GJJ_MultiImageLoader:
 
         if skipped_errors and not collected:
             raise RuntimeError("所有已选图片都无法读取：" + "；".join(skipped_errors[:5]))
+
+        if slide_start_index is not None and len(collected) > 0:
+            try:
+                x = int(slide_start_index)
+                r = x % len(collected)
+                r = len(collected) if r == 0 else r
+                text = str(sequence_range or "").strip()
+                output_count = 1
+                if text.startswith("[") and text.endswith("]"):
+                    output_count = max(1, len([part for part in text[1:-1].replace("，", ",").split(",") if part.strip()]))
+                sequence_range = "[" + ",".join(str(((r - 1 + offset) % len(collected)) + 1) for offset in range(output_count)) + "]"
+            except Exception:
+                pass
 
         indices = parse_sequence_range(sequence_range, len(collected))
         if indices is not None:
