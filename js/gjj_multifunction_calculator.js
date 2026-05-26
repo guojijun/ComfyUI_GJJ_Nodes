@@ -45,6 +45,7 @@ const FUNCTIONS = [
 	{ label: "🔁 取模", insert: "mod(", title: "取模函数 mod(x1, x2)" },
 	{ label: "✴️ 幂", insert: "pow(", title: "幂函数 pow(x1, 2)" },
 ];
+const WRAP_CURRENT_FORMULA_FUNCTIONS = new Set(["abs", "round", "int", "float", "floor", "ceil"]);
 const COMMON_FORMULAS = [
 	{ label: "🎞️ 总帧", formula: "(x1*x2)+1", title: "总帧数：(帧率 x 时长) + 1" },
 	{ label: "🔢 对齐8", formula: "(x1//8)*8", title: "分辨率向下对齐到 8 的倍数。" },
@@ -200,7 +201,10 @@ function createButton(label, title, onClick) {
 		"white-space:nowrap",
 		"flex:0 0 auto",
 	].join(";");
-	button.addEventListener("mousedown", (event) => event.stopPropagation());
+	button.addEventListener("mousedown", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+	});
 	button.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
@@ -475,18 +479,25 @@ function setFormula(node, formula, selectionStart = null, selectionEnd = null, v
 function getFormulaSelection(node) {
 	const formula = getFormula(node);
 	const input = getFormulaElement(node);
+	const saved = node.__gjjCalculatorSelection;
+	const normalizedSaved = saved && Number.isInteger(saved.start) && Number.isInteger(saved.end)
+		? {
+			start: Math.max(0, Math.min(saved.start, formula.length)),
+			end: Math.max(0, Math.min(saved.end, formula.length)),
+		}
+		: null;
 	if (input && Number.isInteger(input.selectionStart) && Number.isInteger(input.selectionEnd)) {
-		return {
+		const live = {
 			start: Math.max(0, Math.min(input.selectionStart, formula.length)),
 			end: Math.max(0, Math.min(input.selectionEnd, formula.length)),
 		};
+		if (document.activeElement !== input && normalizedSaved && normalizedSaved.start !== normalizedSaved.end) {
+			return normalizedSaved;
+		}
+		return live;
 	}
-	const saved = node.__gjjCalculatorSelection;
-	if (saved && Number.isInteger(saved.start) && Number.isInteger(saved.end)) {
-		return {
-			start: Math.max(0, Math.min(saved.start, formula.length)),
-			end: Math.max(0, Math.min(saved.end, formula.length)),
-		};
+	if (normalizedSaved) {
+		return normalizedSaved;
 	}
 	return { start: formula.length, end: formula.length };
 }
@@ -523,6 +534,11 @@ function applyFunctionFormula(node, text) {
 		const wrapped = `${functionName}(${selected})`;
 		const caret = before.length + wrapped.length;
 		setFormula(node, `${before}${wrapped}${after}`, caret, caret, true);
+		return;
+	}
+	if (functionName && WRAP_CURRENT_FORMULA_FUNCTIONS.has(functionName) && current.trim()) {
+		const next = `${functionName}(${current})`;
+		setFormula(node, next, next.length, next.length, true);
 		return;
 	}
 	if (functionName) {
