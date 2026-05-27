@@ -190,5 +190,6 @@ class GJJ_Translation:
         return (content,)
 
 
-NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_Translation}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🌐 本机Ollama翻译器"}
+# 翻译能力已并入 GJJ_OllamaAssistant，旧节点不再出现在新增节点菜单。
+NODE_CLASS_MAPPINGS = {}
+NODE_DISPLAY_NAME_MAPPINGS = {}

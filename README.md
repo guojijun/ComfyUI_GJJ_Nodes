@@ -74,7 +74,7 @@ pip install -r requirements-accelerate.txt -i https://pypi.tuna.tsinghua.edu.cn/
 # 人脸分析 / 换脸
 pip install onnx onnxruntime-gpu -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# Ollama 相关（提示词生成、图片分析等）
+# Ollama 相关（统一助手、目录图片打标等）
 pip install ollama -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 翻译
@@ -197,7 +197,6 @@ pip install -r requirements-accelerate.txt # 推理加速
 | GJJ · Ultimate Architecture Upscaler | 超分、建筑细节增强、分块重绘与接缝修复整合 |
 | GJJ · Model Upscaler | 使用 upscale_models 中的单图超分模型放大图像 |
 | GJJ · Seed VR2 Image Upscaler | 将 SeedVR2 的图像/视频放大整合成单节点 |
-| GJJ · Image Analysis | 调用本地 Ollama 多模态模型分析图片内容 |
 
 ### 🎬 视频处理
 
@@ -240,7 +239,7 @@ pip install -r requirements-accelerate.txt # 推理加速
 
 | 节点名称 | 功能描述 |
 | -------- | -------- |
-| GJJ · Prompt Generation | 调用本地 Ollama 模型生成提示词 |
+| GJJ · 🤖 本机Ollama助手 | 通过模板按钮统一完成文本生成、翻译与可选图片反推 |
 | GJJ · Prompt Preset Studio | 整合风格、证件照、主体与多角度提示词 |
 | GJJ · Prompt Size Preset | 整合提示词输入、尺寸预设与空 Latent 生成 |
 | GJJ · Prompt Weight | 给提示词片段添加常见权重语法 |
@@ -248,7 +247,6 @@ pip install -r requirements-accelerate.txt # 推理加速
 | GJJ · 提示词分组切换 | 在同一工作流里维护多组提示词文本 |
 | GJJ · Embedding Prompt | 生成 embedding 提示词片段并可附加权重 |
 | GJJ · Csv Tsv Row Iterator | 读取 CSV/TSV 文本按行分列输出 |
-| GJJ · Translation | 调用本地 Ollama 进行中英提示词翻译 |
 | GJJ · Ollama Directory Captioner | 通过浏览器选择目录，调用 Ollama 生成打标文件 |
 | GJJ · Prompt Relay Timeline | 带可视化时间轴编辑器的 Prompt Relay 编码节点 |
 | GJJ · Prompt Relay Encode | 将全局提示词和局部提示词编码为视频时序控制条件 |

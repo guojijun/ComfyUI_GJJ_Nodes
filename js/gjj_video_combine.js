@@ -4,11 +4,10 @@ import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set(["GJJ_VideoCombine"]);
 const TOOLBAR_WIDGET_NAME = "gjj_video_combine_toolbar";
-const STATUS_WIDGET_NAME = "gjj_video_combine_status";
+const PREVIEW_WIDGET_NAME = "gjj_video_combine_preview";
 const MIN_WIDTH = 340;
 const TOOLBAR_HEIGHT = 36;
 const PANEL_HEIGHT = 318;
-const STATUS_PANEL_HEIGHT = 70;
 const HIDDEN_PANEL_HEIGHT = 0;
 const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "mkv", "avi", "m4v"]);
 const PRIMARY_INPUT_NAME = "images";
@@ -391,42 +390,6 @@ function ensurePanelWidget(node) {
 		"background:#121a1f",
 	].join(";");
 
-	const statusCard = document.createElement("div");
-	statusCard.style.cssText = [
-		"display:flex",
-		"flex-direction:column",
-		"gap:6px",
-		"padding:0",
-	].join(";");
-
-	const text = document.createElement("div");
-	text.textContent = "等待执行";
-	text.style.cssText = [
-		"color:#dce7e2",
-		"font-size:12px",
-		"line-height:1.35",
-		"white-space:pre-wrap",
-		"word-break:break-word",
-	].join(";");
-
-	const progressOuter = document.createElement("div");
-	progressOuter.style.cssText = [
-		"height:6px",
-		"border-radius:999px",
-		"overflow:hidden",
-		"background:#223038",
-	].join(";");
-
-	const progressInner = document.createElement("div");
-	progressInner.style.cssText = [
-		"height:100%",
-		"width:0%",
-		"background:linear-gradient(90deg,#5fa8ff,#7ed6a7)",
-		"transition:width 120ms ease",
-	].join(";");
-	progressOuter.appendChild(progressInner);
-	statusCard.append(text, progressOuter);
-
 	const previewCard = document.createElement("div");
 	previewCard.style.cssText = [
 		"display:flex",
@@ -476,13 +439,13 @@ function ensurePanelWidget(node) {
 	].join(";");
 
 	previewCard.append(empty, video, image);
-	wrap.append(statusCard, previewCard);
+	wrap.append(previewCard);
 
-	const widget = node.addDOMWidget?.(STATUS_WIDGET_NAME, STATUS_WIDGET_NAME, wrap, {
+	const widget = node.addDOMWidget?.(PREVIEW_WIDGET_NAME, PREVIEW_WIDGET_NAME, wrap, {
 		hideOnZoom: false,
 		getHeight: () => getPanelHeight(node),
 	});
-	node.__gjjVideoCombineStatus = { widget, wrap, text, progressInner, previewCard, empty, video, image };
+	node.__gjjVideoCombineStatus = { widget, wrap, previewCard, empty, video, image };
 	setPanelMode(node, node.__gjjVideoCombinePanelMode || "hidden");
 	return node.__gjjVideoCombineStatus;
 }
@@ -491,9 +454,6 @@ function getPanelHeight(node) {
 	const mode = String(node?.__gjjVideoCombinePanelMode || "hidden");
 	if (mode === "preview") {
 		return PANEL_HEIGHT;
-	}
-	if (mode === "status") {
-		return STATUS_PANEL_HEIGHT;
 	}
 	return HIDDEN_PANEL_HEIGHT;
 }
@@ -516,7 +476,7 @@ function setPanelMode(node, mode) {
 	if (!state) {
 		return;
 	}
-	const nextMode = ["hidden", "status", "preview"].includes(mode) ? mode : "hidden";
+	const nextMode = ["hidden", "preview"].includes(mode) ? mode : "hidden";
 	if (node.__gjjVideoCombinePanelMode === nextMode) {
 		return;
 	}
@@ -551,26 +511,6 @@ function isVideoPreview(item, detail = {}) {
 	return VIDEO_EXTENSIONS.has(ext);
 }
 
-function parseProgress(detail = {}) {
-	if (Number.isFinite(detail.progress)) {
-		return Math.max(0, Math.min(100, Number(detail.progress) * 100));
-	}
-	return null;
-}
-
-function setStatus(node, detail = {}) {
-	const state = node?.__gjjVideoCombineStatus;
-	if (!state) {
-		return;
-	}
-	state.text.textContent = String(detail.text || "等待执行");
-	const progress = parseProgress(detail);
-	state.progressInner.style.width = `${progress == null ? 0 : progress}%`;
-	if (node.__gjjVideoCombinePanelMode !== "preview") {
-		setPanelMode(node, "status");
-	}
-	refreshNode(node);
-}
 function clearNativePreview(node) {
 	if (!node) {
 		return;
@@ -667,16 +607,6 @@ function patchNode(node) {
 		setPanelMode(node, "hidden");
 	}
 }
-
-api.addEventListener("gjj_node_progress", (event) => {
-	const detail = event?.detail || {};
-	const targetNode = app.graph?._nodes?.find((node) => String(node?.id) === String(detail.node));
-	if (!targetNode || !TARGET_NODES.has(String(targetNode.comfyClass || targetNode.type || ""))) {
-		return;
-	}
-	ensurePanelWidget(targetNode);
-	setStatus(targetNode, detail);
-});
 
 app.registerExtension({
 	name: "GJJ.VideoCombine",

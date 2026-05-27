@@ -14,6 +14,7 @@ from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .gjj_multi_image_loader import build_uniform_batch_by_longest_edge
 
 NODE_NAME = "GJJ_AnyPreview"
+ANY_PREVIEW_INPUT_TYPE = "GJJ_BATCH_IMAGE, IMAGE, MASK,STRING,AUDIO,VIDEO,*"
 
 
 class AnyType(str):
@@ -43,6 +44,15 @@ class FlexibleOptionalInputType(dict):
 
 
 any_type = AnyType("*")
+PREVIEW_KIND_LABELS = {
+    "image": "图片",
+    "mask": "遮罩",
+    "text": "文本",
+    "audio": "音频",
+    "video": "视频",
+    "other": "对象",
+    "mixed": "混合对象",
+}
 
 
 def extract_input_index(name: str) -> int:
@@ -144,6 +154,23 @@ def serialize_preview(value: Any) -> str:
             return str(value)
         except Exception:
             return "对象存在，但无法序列化为可预览文本。"
+
+
+def flatten_preview_values(values: list[Any]) -> list[Any]:
+    flattened: list[Any] = []
+
+    def walk(value: Any) -> None:
+        if is_none(value):
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+            return
+        flattened.append(value)
+
+    for value in values:
+        walk(value)
+    return flattened
 
 
 def is_audio_object(value: Any) -> bool:
@@ -297,9 +324,131 @@ def serialize_video_preview(value: Any) -> str:
         return "视频对象"
 
 
+def detect_preview_kind(value: Any) -> str:
+    if is_image_tensor(value):
+        return "image"
+    if is_mask_tensor(value):
+        return "mask"
+    if isinstance(value, str):
+        return "text"
+    if is_audio_object(value):
+        return "audio"
+    if is_video_object(value):
+        return "video"
+    return "other"
+
+
+def save_video_preview(
+    value: Any,
+    prompt: Any = None,
+    extra_pnginfo: Any = None,
+) -> list[dict[str, Any]]:
+    try:
+        components = value.get_components() if hasattr(value, "get_components") else None
+        if components is None and isinstance(value, dict):
+            components = value
+
+        images = None
+        audio = None
+        frame_rate = 24.0
+        video_path = None
+
+        if isinstance(components, dict):
+            images = components.get("images")
+            audio = components.get("audio")
+            frame_rate = float(
+                components.get("frame_rate")
+                or components.get("fps")
+                or components.get("frameRate")
+                or 24.0
+            )
+            video_path = components.get("path") or components.get("video_path")
+        else:
+            images = getattr(components, "images", None)
+            audio = getattr(components, "audio", None)
+            frame_rate = float(getattr(components, "frame_rate", 24.0) or 24.0)
+            video_path = getattr(components, "path", None) or getattr(
+                components, "video_path", None
+            )
+
+        if video_path and isinstance(video_path, str) and os.path.exists(video_path):
+            filename = os.path.basename(video_path)
+            subfolder = ""
+            input_dir = folder_paths.get_input_directory()
+            if video_path.startswith(input_dir):
+                subfolder = os.path.relpath(os.path.dirname(video_path), input_dir)
+            return [
+                {
+                    "filename": filename,
+                    "subfolder": subfolder,
+                    "type": "input",
+                    "frame_rate": frame_rate,
+                }
+            ]
+
+        if images is not None and isinstance(images, torch.Tensor):
+            from .gjj_video_combine_runtime import combine_video
+
+            format_overrides_json = json.dumps(
+                {
+                    "main_pass": [
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "ultrafast",
+                        "-crf",
+                        "28",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-vf",
+                        "scale=out_color_matrix=bt709",
+                        "-color_range",
+                        "tv",
+                        "-colorspace",
+                        "bt709",
+                        "-color_primaries",
+                        "bt709",
+                        "-color_trc",
+                        "bt709",
+                    ],
+                    "extension": "mp4",
+                }
+            )
+            video_result = combine_video(
+                images=images,
+                audio=audio,
+                frame_rate=frame_rate,
+                loop_count=0,
+                filename_prefix="GJJ_AnyPreview",
+                format_name="video/h264-mp4",
+                pingpong=False,
+                save_output=False,
+                use_source_fps=False,
+                vae=None,
+                format_overrides_json=format_overrides_json,
+                prompt=prompt,
+                extra_pnginfo=extra_pnginfo,
+                unique_id=None,
+            )
+
+            if isinstance(video_result, dict):
+                video_ui = video_result.get("ui", {})
+                return video_ui.get("preview_media") or video_ui.get("images") or []
+    except Exception as error:
+        print(f"[GJJ] 视频预览失败: {error}")
+        import traceback
+
+        traceback.print_exc()
+    return []
+
+
 def merge_values(values: list[Any]) -> tuple[str, Any, str]:
     if not values:
         return "other", None, "无可预览内容"
+
+    preview_kinds = {detect_preview_kind(value) for value in values}
+    if len(values) > 1 and len(preview_kinds) > 1:
+        return "mixed", values, f"已展开 {len(values)} 个混合预览项目"
 
     if all(is_image_tensor(value) for value in values):
         merged = merge_images(
@@ -418,15 +567,15 @@ class GJJ_AnyPreview:
             },
         ],
         "inputs": {
-            "batch_image": {
-                "type": "GJJ_BATCH_IMAGE,IMAGE,MASK,STRING,VIDEO",
+            "any_01": {
+                "type": ANY_PREVIEW_INPUT_TYPE,
                 "required": False,
-                "description": "GJJ 专用批量图片接口，优先作为图片批次预览（兼容标准 IMAGE；MASK 会转灰度图预览）",
+                "description": "第一个入口显示为“任意对象”，可连接 GJJ_BATCH_IMAGE、IMAGE、MASK、STRING、AUDIO、VIDEO 或任意对象；列表会展开预览。",
             },
             "any_XX": {
-                "type": "*",
+                "type": ANY_PREVIEW_INPUT_TYPE,
                 "required": False,
-                "description": "动态插槽，可连接任意类型数据（自动编号 XX；MASK 会转灰度图预览）",
+                "description": "动态插槽，可连接任意类型数据；列表/元组会展开为多个预览项，支持混合类型同时显示。",
             },
         },
         "outputs": {
@@ -538,31 +687,97 @@ class GJJ_AnyPreview:
 
     @classmethod
     def INPUT_TYPES(cls):
-        # 将 batch_image 定义传给 FlexibleOptionalInputType
-        batch_image_data = {
-            "batch_image": (
-                "GJJ_BATCH_IMAGE,IMAGE,MASK",
+        first_input_data = {
+            "any_01": (
+                ANY_PREVIEW_INPUT_TYPE,
                 {
-                    "display_name": "GJJ 批量图片",
-                    "tooltip": "GJJ 专用批量图片接口，优先作为图片批次预览（兼容标准 IMAGE；MASK 会自动转为黑白图预览）",
+                    "display_name": "任意对象",
+                    "tooltip": "可连接 GJJ_BATCH_IMAGE、IMAGE、MASK、STRING、AUDIO、VIDEO 或任意对象；列表会展开预览。",
                 },
             ),
         }
         return {
             "required": {},
-            "optional": FlexibleOptionalInputType(any_type, batch_image_data),
+            "optional": FlexibleOptionalInputType(any_type, first_input_data),
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
     def __init__(self):
         self.preview_image = PreviewImage()
 
+    def _save_image_preview(
+        self,
+        value: torch.Tensor,
+        prompt: Any = None,
+        extra_pnginfo: Any = None,
+        is_mask: bool = False,
+    ) -> list[dict[str, Any]]:
+        preview_tensor = mask_to_preview_image(value) if is_mask else normalize_image_tensor(value)
+        image_ui = self.preview_image.save_images(
+            preview_tensor,
+            filename_prefix="GJJ_AnyPreview",
+            prompt=prompt,
+            extra_pnginfo=extra_pnginfo,
+        )
+        return image_ui.get("ui", {}).get("images", [])
+
+    def _build_preview_items(
+        self,
+        values: list[Any],
+        prompt: Any = None,
+        extra_pnginfo: Any = None,
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for index, value in enumerate(values, start=1):
+            kind = detect_preview_kind(value)
+            label = PREVIEW_KIND_LABELS.get(kind, "对象")
+            item: dict[str, Any] = {
+                "kind": "image" if kind == "mask" else kind,
+                "source_kind": kind,
+                "title": f"项目 {index} · {label}",
+            }
+
+            if kind == "image" and isinstance(value, torch.Tensor):
+                item["images"] = self._save_image_preview(
+                    value,
+                    prompt=prompt,
+                    extra_pnginfo=extra_pnginfo,
+                )
+                item["text"] = serialize_preview(value)
+            elif kind == "mask" and isinstance(value, torch.Tensor):
+                item["images"] = self._save_image_preview(
+                    value,
+                    prompt=prompt,
+                    extra_pnginfo=extra_pnginfo,
+                    is_mask=True,
+                )
+                item["text"] = serialize_preview(value)
+            elif kind == "audio" and is_audio_object(value):
+                normalized_audio = normalize_audio_object(value)
+                if normalized_audio is None:
+                    item["text"] = "音频对象无有效 waveform，无法生成播放器。"
+                else:
+                    item["audio"] = save_audio_preview(normalized_audio)
+                    item["text"] = serialize_audio_preview(normalized_audio)
+            elif kind == "video" and is_video_object(value):
+                item["video"] = save_video_preview(
+                    value,
+                    prompt=prompt,
+                    extra_pnginfo=extra_pnginfo,
+                )
+                item["text"] = serialize_video_preview(value)
+            else:
+                item["text"] = serialize_preview(value)
+
+            items.append(item)
+        return items
+
     def preview(self, batch_image=None, prompt=None, extra_pnginfo=None, **kwargs):
-        values = []
+        raw_values = []
 
         # 优先处理 batch_image 参数
         if batch_image is not None and not is_none(batch_image):
-            values.append(batch_image)
+            raw_values.append(batch_image)
 
         for key in sorted(kwargs.keys(), key=extract_input_index):
             if not key.startswith("any_"):
@@ -570,19 +785,34 @@ class GJJ_AnyPreview:
             value = kwargs.get(key)
             if is_none(value):
                 continue
-            values.append(value)
+            raw_values.append(value)
 
-        preview_kind, merged, preview_text = merge_values(values)
+        preview_values = flatten_preview_values(raw_values)
+        preview_kind, merged, preview_text = merge_values(preview_values)
         ui: dict[str, Any] = {
             "preview_text": (preview_text,),
             "preview_kind": (preview_kind,),
-            "preview_item_count": (len(values),),
+            "preview_item_count": (len(preview_values),),
         }
+        if len(preview_values) > 1:
+            ui["preview_items"] = (
+                self._build_preview_items(
+                    preview_values,
+                    prompt=prompt,
+                    extra_pnginfo=extra_pnginfo,
+                ),
+            )
 
         # 添加调试日志
         print(f"[GJJ] 开始构建ui数据 - preview_kind: {preview_kind}")
 
-        if preview_kind in {"image", "mask"} and isinstance(merged, torch.Tensor):
+        has_expanded_items = "preview_items" in ui
+
+        if (
+            not has_expanded_items
+            and preview_kind in {"image", "mask"}
+            and isinstance(merged, torch.Tensor)
+        ):
             image_ui = self.preview_image.save_images(
                 merged,
                 filename_prefix="GJJ_AnyPreview",
@@ -595,7 +825,7 @@ class GJJ_AnyPreview:
             print(f"[GJJ] 图片ui数据: {ui['preview_images']}")
 
         # 新增：音频预览
-        elif preview_kind == "audio" and is_audio_object(merged):
+        elif not has_expanded_items and preview_kind == "audio" and is_audio_object(merged):
             normalized_audio = normalize_audio_object(merged)
             if normalized_audio is None:
                 ui["preview_text"] = ("音频对象无有效 waveform，无法生成播放器。",)
@@ -614,106 +844,15 @@ class GJJ_AnyPreview:
                     ui["preview_text"] = ("音频临时文件生成失败，无法显示播放器。",)
 
         # 新增：视频预览
-        elif preview_kind == "video" and is_video_object(merged):
-            try:
-                # 获取视频组件
-                components = merged.get_components()
-                images = getattr(components, "images", None)
-                audio = getattr(components, "audio", None)
-                frame_rate = float(getattr(components, "frame_rate", 24.0) or 24.0)
-
-                # 优先使用原始视频文件作为预览（快速，毫秒级）
-                video_path = getattr(components, "path", None) or getattr(
-                    components, "video_path", None
-                )
-                if (
-                    video_path
-                    and isinstance(video_path, str)
-                    and os.path.exists(video_path)
-                ):
-                    # 直接使用原始视频文件作为预览
-                    filename = os.path.basename(video_path)
-                    subfolder = ""
-                    input_dir = folder_paths.get_input_directory()
-                    if video_path.startswith(input_dir):
-                        subfolder = os.path.relpath(
-                            os.path.dirname(video_path), input_dir
-                        )
-                    ui["preview_video"] = (
-                        [
-                            {
-                                "filename": filename,
-                                "subfolder": subfolder,
-                                "type": "input",
-                                "frame_rate": frame_rate,
-                            }
-                        ],
-                    )
-                    print(f"[GJJ] 视频预览 - 使用原始视频文件: {filename}")
-                elif images is not None and isinstance(images, torch.Tensor):
-                    # 如果没有原始文件路径，才进行重新编码
-                    from .gjj_video_combine_runtime import combine_video
-
-                    # 使用更快的编码参数用于预览
-                    format_overrides_json = json.dumps(
-                        {
-                            "main_pass": [
-                                "-c:v",
-                                "libx264",
-                                "-preset",
-                                "ultrafast",
-                                "-crf",
-                                "28",
-                                "-pix_fmt",
-                                "yuv420p",
-                                "-vf",
-                                "scale=out_color_matrix=bt709",
-                                "-color_range",
-                                "tv",
-                                "-colorspace",
-                                "bt709",
-                                "-color_primaries",
-                                "bt709",
-                                "-color_trc",
-                                "bt709",
-                            ],
-                            "extension": "mp4",
-                        }
-                    )
-                    video_result = combine_video(
-                        images=images,
-                        audio=audio,
-                        frame_rate=frame_rate,
-                        loop_count=0,
-                        filename_prefix="GJJ_AnyPreview",
-                        format_name="video/h264-mp4",
-                        pingpong=False,
-                        save_output=False,
-                        use_source_fps=False,
-                        vae=None,
-                        format_overrides_json=format_overrides_json,
-                        prompt=prompt,
-                        extra_pnginfo=extra_pnginfo,
-                        unique_id=None,
-                    )
-
-                    # 提取预览媒体数据
-                    if isinstance(video_result, dict):
-                        video_ui = video_result.get("ui", {})
-                        preview_media = (
-                            video_ui.get("preview_media")
-                            or video_ui.get("images")
-                            or []
-                        )
-                        if preview_media:
-                            ui["preview_video"] = (preview_media,)
-                            print(f"[GJJ] 视频预览数据: {preview_media}")
-            except Exception as e:
-                print(f"[GJJ] 视频预览失败: {e}")
-                import traceback
-
-                traceback.print_exc()
-                pass
+        elif not has_expanded_items and preview_kind == "video" and is_video_object(merged):
+            preview_media = save_video_preview(
+                merged,
+                prompt=prompt,
+                extra_pnginfo=extra_pnginfo,
+            )
+            if preview_media:
+                ui["preview_video"] = (preview_media,)
+                print(f"[GJJ] 视频预览数据: {preview_media}")
 
         # 添加最终调试日志
         print(f"[GJJ] 最终返回的ui数据: {ui}")
@@ -727,9 +866,9 @@ class GJJ_AnyPreview:
         if preview_kind == "image" and isinstance(merged, torch.Tensor):
             result_output = merged
         elif preview_kind == "mask":
-            result_output = values[0] if len(values) == 1 else merged
+            result_output = raw_values[0] if len(raw_values) == 1 else merged
         else:
-            result_output = values[0] if len(values) == 1 else merged
+            result_output = raw_values[0] if len(raw_values) == 1 else merged
 
         return {
             "ui": ui,

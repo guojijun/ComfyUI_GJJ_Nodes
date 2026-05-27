@@ -129,19 +129,31 @@ def analyze_import_error(error_message, dependency_name=""):
 		"suggestion": f"请检查 {dependency_name} 是否正确安装且版本兼容"
 	}
 
-def build_dependency_model_report(node_name="",missing_dependencies=None,missing_models=None,install_packages=None,description="",original_error="",model_download_url=None):
+def build_dependency_model_report(node_name="",missing_dependencies=None,missing_models=None,install_packages=None,description="",original_error="",model_download_url=None,optional_dependencies=None,optional_install_packages=None):
 	deps = [x if isinstance(x,dict) else {"module_name":x,"package_name":x,"display_name":x,"description":""} for x in (missing_dependencies or [])]
+	optional_deps = [x if isinstance(x,dict) else {"module_name":x,"package_name":x,"display_name":x,"description":""} for x in (optional_dependencies or [])]
 	models = missing_models or []
-	cmd = get_pip_install_command_text(packages=install_packages or [x.get("package_name") or x.get("module_name") for x in deps if (x.get("package_name") or x.get("module_name"))]) if deps else ""
+	cmd_packages = install_packages or [x.get("package_name") or x.get("module_name") for x in deps if (x.get("package_name") or x.get("module_name"))]
+	optional_cmd_packages = optional_install_packages or [x.get("package_name") or x.get("module_name") for x in optional_deps if (x.get("package_name") or x.get("module_name"))]
+	cmd = get_pip_install_command_text(packages=cmd_packages) if deps else ""
+	optional_cmd = get_pip_install_command_text(packages=optional_cmd_packages) if optional_deps else ""
 	default_download_url = str(model_download_url or DEFAULT_MODEL_URL or "").strip()
-	warning = "⚠️缺失"
-	if deps and models:
-		warning += "运行依赖、模型"
-	elif deps:
-		warning += "运行依赖"
-	elif models:
-		warning += "模型"
-	warning += "，点击❓按钮了解详情。"
+	if deps or models:
+		notice_level = "error"
+		warning = "⚠️缺失"
+		if deps and models:
+			warning += "运行依赖、模型"
+		elif deps:
+			warning += "运行依赖"
+		elif models:
+			warning += "模型"
+		warning += "，点击❓按钮了解详情。"
+	elif optional_deps:
+		notice_level = "optional"
+		warning = "⚠️可选依赖缺失，基础功能可用；点击❓按钮了解详情。"
+	else:
+		notice_level = "ok"
+		warning = ""
 	msg = [warning]
 	if description: msg += ["", description]
 	if deps:
@@ -152,6 +164,14 @@ def build_dependency_model_report(node_name="",missing_dependencies=None,missing
 			msg.append(f"• {label}" + (f"：{desc}" if desc else ""))
 		if cmd:
 			msg += ["", "🔧 快速安装命令：", "", cmd]
+	if optional_deps:
+		msg += ["", "🟡 可选依赖："]
+		for d in optional_deps:
+			label = d.get("display_name") or d.get("package_name") or d.get("module_name") or "unknown"
+			desc = d.get("description") or ""
+			msg.append(f"• {label}" + (f"：{desc}" if desc else ""))
+		if optional_cmd:
+			msg += ["", "🔧 可选安装命令：", "", optional_cmd]
 	if models:
 		msg += ["", "🌏 模型："]
 		for m in models:
@@ -162,20 +182,29 @@ def build_dependency_model_report(node_name="",missing_dependencies=None,missing
 			if desc: line += f" ({desc})"
 			msg.append(line)
 	if original_error: msg += ["", f"原始错误:{original_error}"]
-	msg += ["", "🧡 提示：安装后重启 ComfyUI 🧡"]
+	if deps or models or optional_deps:
+		msg += ["", "🧡 提示：安装后重启 ComfyUI 🧡"]
 	panel_message = "\n".join(msg)
-	copy_text = cmd or default_download_url
-	copy_label = "📋 复制安装命令" if cmd else "📋 复制下载地址"
+	copy_text = cmd or optional_cmd or default_download_url
+	copy_label = "📋 复制安装命令" if cmd else ("📋 复制可选安装命令" if optional_cmd else "📋 复制下载地址")
+	dependencies_available = not deps
+	models_available = not models
 	return {
-		"available": not deps and not models,
+		"available": dependencies_available and models_available,
+		"dependencies_available": dependencies_available,
+		"models_available": models_available,
 		"missing_dependencies": deps,
+		"optional_dependencies": optional_deps,
+		"optional_dependencies_available": not optional_deps,
 		"missing_models": models,
+		"notice_level": notice_level,
 		"warning_message": warning,
 		"description_message": warning,
 		"panel_message": panel_message,
 		"help_message": panel_message,
 		"console_message": panel_message,
 		"install_cmd": cmd,
+		"optional_install_cmd": optional_cmd,
 		"copy_text": copy_text,
 		"copy_label": copy_label,
 		"model_download_url": default_download_url if models else "",
@@ -204,9 +233,12 @@ def send_dependency_model_notice(report, unique_id=None):
 			"warning_message": report.get("warning_message", "⚠️缺失运行依赖，点击❓按钮了解详情。"),
 			"panel_message": report.get("panel_message", ""),
 			"install_command": report.get("install_cmd", ""),
+			"optional_install_command": report.get("optional_install_cmd", ""),
 			"copy_text": report.get("copy_text", ""),
 			"copy_label": report.get("copy_label", "📋 复制安装命令"),
 			"model_download_url": report.get("model_download_url", ""),
+			"notice_level": report.get("notice_level", "error"),
+			"optional_dependencies": report.get("optional_dependencies", []),
 		})
 	except Exception:
 		pass

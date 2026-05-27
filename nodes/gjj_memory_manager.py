@@ -672,8 +672,8 @@ class GJJ_MemoryManager:
         props = _find_node_properties(unique_id, extra_pnginfo)
 
         action = str(props.get(ACTION_PROP, ACTION_REFRESH) or ACTION_REFRESH)
-        auto_clean_memory = _as_bool(props.get(AUTO_CLEAN_MEMORY_PROP, False), False)
-        auto_clean_gpu = _as_bool(props.get(AUTO_CLEAN_GPU_PROP, False), False)
+        auto_clean_memory = _as_bool(props.get(AUTO_CLEAN_MEMORY_PROP, True), True)
+        auto_clean_gpu = _as_bool(props.get(AUTO_CLEAN_GPU_PROP, True), True)
 
         messages = []
 

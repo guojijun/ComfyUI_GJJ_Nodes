@@ -178,5 +178,6 @@ class GJJ_PromptGeneration:
         return (content,)
 
 
-NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_PromptGeneration}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 💬 本机Ollama提示词生成器"}
+# 文本生成能力已并入 GJJ_OllamaAssistant，旧节点不再出现在新增节点菜单。
+NODE_CLASS_MAPPINGS = {}
+NODE_DISPLAY_NAME_MAPPINGS = {}

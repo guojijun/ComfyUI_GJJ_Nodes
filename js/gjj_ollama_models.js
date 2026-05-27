@@ -3,9 +3,7 @@ import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set([
-	"GJJ_Translation",
-	"GJJ_PromptGeneration",
-	"GJJ_ImageAnalysis",
+	"GJJ_OllamaAssistant",
 ]);
 const DEFAULT_SYSTEM_PROMPT = "请根据输入图片或文字反推出适合 AI 绘图的高质量提示词，只输出正面提示词正文。";
 
@@ -17,7 +15,7 @@ const STATUS_WIDGET_NAME = "gjj_ollama_llm_status";
 const DEFAULT_IMAGE_ANALYSIS_USER_PROMPT = "请提炼图片中的主体、环境、风格、镜头、构图、光线、材质与细节，并整理成适合文生图模型直接使用的高质量提示词。";
 
 const NODE_WIDGET_LABELS = {
-	GJJ_ImageAnalysis: {
+	GJJ_OllamaAssistant: {
 		ollama_host: "Ollama 完整地址",
 		model: "Ollama 模型",
 		model_keep_alive: "模型处理",
@@ -25,25 +23,7 @@ const NODE_WIDGET_LABELS = {
 		temperature: "温度",
 		max_tokens: "最大生成长度",
 		system_prompt: "系统提示词",
-		user_prompt: "用户提示词",
-	},
-	GJJ_PromptGeneration: {
-		model: "Ollama 模型",
-		model_keep_alive: "模型处理",
-		thinking_mode: "思考模式",
-		seed: "固定种子",
-		temperature: "温度",
-		max_tokens: "最大生成长度",
-		system_prompt: "系统提示词",
-		user_prompt: "用户提示词",
-		ollama_host: "Ollama 完整地址",
-	},
-	GJJ_Translation: {
-		text: "原文",
-		model: "Ollama 模型",
-		target_language: "目标语言",
-		model_keep_alive: "模型处理",
-		ollama_host: "Ollama 完整地址",
+		user_prompt: "指令 / 原文",
 	},
 };
 
@@ -116,7 +96,7 @@ function migrateLegacyImageAnalysisNode(node) {
 		setWidgetLabel(getWidget(node, name), label);
 	}
 
-	if (node.comfyClass !== "GJJ_ImageAnalysis") {
+	if (node.comfyClass !== "GJJ_OllamaAssistant") {
 		return;
 	}
 
@@ -172,13 +152,15 @@ function migrateLegacyImageAnalysisNode(node) {
 	}
 
 	const systemPromptWidget = getWidget(node, "system_prompt");
-	if (systemPromptWidget && (!String(systemPromptWidget.value || "").trim() || Number.isFinite(Number(systemPromptWidget.value)))) {
+	const systemPromptText = String(systemPromptWidget?.value || "").trim();
+	if (systemPromptWidget && systemPromptText && Number.isFinite(Number(systemPromptText))) {
 		systemPromptWidget.value = DEFAULT_SYSTEM_PROMPT;
 		systemPromptWidget.callback?.(systemPromptWidget.value);
 	}
 
 	const userPromptWidget = getWidget(node, "user_prompt");
-	if (userPromptWidget && Number.isFinite(Number(userPromptWidget.value))) {
+	const userPromptText = String(userPromptWidget?.value || "").trim();
+	if (userPromptWidget && userPromptText && Number.isFinite(Number(userPromptText))) {
 		userPromptWidget.value = DEFAULT_IMAGE_ANALYSIS_USER_PROMPT;
 		userPromptWidget.callback?.(userPromptWidget.value);
 	}
@@ -362,6 +344,9 @@ async function refreshNodeModels(node) {
 }
 
 function applyDefaultSystemPrompt(node) {
+	if (node?.comfyClass === "GJJ_OllamaAssistant") {
+		return;
+	}
 	const widget = getSystemPromptWidget(node);
 	if (!widget) {
 		return;

@@ -1,7 +1,9 @@
 import { app } from "/scripts/app.js";
+import { api } from "/scripts/api.js";
 
 const TARGET_NODES = new Set(["GJJ_CLIPPromptEncodePanel"]);
 const TRANSLATE_API = "/gjj/clip_prompt_translate";
+const TRANSLATED_EVENT = "gjj_clip_prompt_translated";
 
 const FIELD = {
 	positive: "positive_text",
@@ -9,6 +11,7 @@ const FIELD = {
 	zero: "zero_conditioning",
 	device: "translation_device",
 	unload: "translation_unload_after_use",
+	translate: "translation_enabled",
 };
 const POSITIVE_PROMPT_INPUT = "positive_prompt_input";
 
@@ -33,6 +36,13 @@ function setValue(node, name, value) {
 	if (w.inputEl && "value" in w.inputEl) w.inputEl.value = value;
 	if (w.element && "value" in w.element) w.element.value = value;
 	saveValues(node);
+}
+
+function toBool(value) {
+	if (typeof value === "boolean") return value;
+	if (typeof value === "number") return value !== 0;
+	const text = String(value ?? "").trim().toLowerCase();
+	return ["1", "true", "yes", "on", "开", "开启", "启用"].includes(text);
 }
 
 function collectValues(node) {
@@ -221,6 +231,140 @@ function isPositivePromptConnected(node) {
 	return index >= 0 && inputHasLink(node.inputs?.[index]);
 }
 
+function getLinkedPositiveInfo(node) {
+	moveLegacyPositiveLink(node);
+	cleanupLegacyPositiveInputs(node);
+	const index = getPositivePromptInputIndex(node);
+	const input = node.inputs?.[index];
+	if (!inputHasLink(input)) return null;
+	const link = app.graph?.links?.[input.link];
+	const source = app.graph?.getNodeById?.(link?.origin_id) || app.graph?._nodes?.find((item) => String(item?.id) === String(link?.origin_id));
+	const output = source?.outputs?.[link?.origin_slot];
+	const text = readLinkedStringValue(source, output);
+	return {
+		text,
+		sourceId: link?.origin_id,
+		sourceSlot: link?.origin_slot,
+		linkId: input.link,
+	};
+}
+
+function normalizeKey(text) {
+	return String(text || "").trim().toLowerCase();
+}
+
+function readLinkedStringValue(source, output) {
+	if (!source) return "";
+	const candidateNames = [
+		output?.widget?.name,
+		output?.name,
+		output?.label,
+		output?.localized_name,
+		output?.display_name,
+		"text",
+		"文本",
+		"prompt",
+		"提示词",
+		"positive",
+		"positive_prompt",
+		"positive_text",
+		"string",
+		"STRING",
+	].filter(Boolean);
+	const widgets = Array.isArray(source.widgets) ? source.widgets : [];
+	for (const name of candidateNames) {
+		const target = normalizeKey(name);
+		const widget = widgets.find((w) => normalizeKey(w?.name) === target || normalizeKey(w?.label) === target);
+		if (widget && typeof widget.value === "string") return widget.value;
+	}
+	for (const name of candidateNames) {
+		const target = normalizeKey(name);
+		const widget = widgets.find((w) => {
+			const nameText = normalizeKey(w?.name);
+			const labelText = normalizeKey(w?.label);
+			return (
+				(nameText && (nameText.includes(target) || target.includes(nameText)))
+				|| (labelText && (labelText.includes(target) || target.includes(labelText)))
+			);
+		});
+		if (widget && typeof widget.value === "string") return widget.value;
+	}
+	for (const widget of widgets) {
+		if (typeof widget?.value === "string" && widget.value.trim()) return widget.value;
+	}
+	const props = source.properties || {};
+	for (const name of candidateNames) {
+		if (typeof props[name] === "string") return props[name];
+	}
+	return "";
+}
+
+function isTranslationEnabled(node) {
+	return toBool(getValue(node, FIELD.translate, false));
+}
+
+function setTranslationEnabled(node, enabled) {
+	setValue(node, FIELD.translate, Boolean(enabled));
+}
+
+function applyDependencyNotice(node, report) {
+	if (!report || !globalThis.GJJ_CommonDependencyModelNotice?.applyNotice) return;
+	globalThis.GJJ_CommonDependencyModelNotice.applyNotice(node, {
+		warning_message: report.warning_message || "⚠️缺失运行依赖，点击❓按钮了解详情。",
+		panel_message: report.panel_message || report.help_message || report.warning_message || "",
+		install_command: report.install_cmd || "",
+		optional_install_command: report.optional_install_cmd || "",
+		copy_text: report.copy_text || report.install_cmd || report.optional_install_cmd || report.model_download_url || "",
+		copy_label: report.copy_label || "",
+		model_download_url: report.model_download_url || "",
+		notice_level: report.notice_level || "error",
+	}, { detailed: true });
+}
+
+function updateTranslateButton(node) {
+	const button = node.__gjjClipTranslateButton;
+	if (!button) return;
+	const enabled = isTranslationEnabled(node);
+	button.dataset.value = enabled ? "true" : "false";
+	button.textContent = enabled ? "✅ 翻译开" : "⬜ 翻译关";
+	button.title = enabled
+		? "翻译已开启：连接上游正向提示词时，本面板显示译文；再次点击关闭。中文引号“”内不翻译。"
+		: "点击开启翻译，并立即翻译当前面板文本；中文引号“”内不翻译。";
+	button.disabled = Boolean(node.__gjjClipTranslating);
+}
+
+function updateExternalWatcher(node, active) {
+	if (!active) {
+		clearInterval(node.__gjjClipExternalWatchTimer);
+		node.__gjjClipExternalWatchTimer = null;
+		node.__gjjClipPendingExternalSourceText = "";
+		return;
+	}
+	if (node.__gjjClipExternalWatchTimer) return;
+	node.__gjjClipExternalWatchTimer = setInterval(() => {
+		const exists = app.graph?._nodes?.includes(node);
+		if (!exists || !isPositivePromptConnected(node) || !isTranslationEnabled(node)) {
+			updateExternalWatcher(node, false);
+			return;
+		}
+		queueExternalTranslationIfChanged(node, 80);
+	}, 900);
+}
+
+function queueExternalTranslationIfChanged(node, ms = 180) {
+	const linked = getLinkedPositiveInfo(node);
+	const text = String(linked?.text || "");
+	if (
+		text.trim()
+		&& text !== node.__gjjClipLastExternalSourceText
+		&& text !== node.__gjjClipPendingExternalSourceText
+		&& !node.__gjjClipTranslating
+	) {
+		node.__gjjClipPendingExternalSourceText = text;
+		scheduleTranslate(node, ms, { includeNegative: false, externalOnly: true });
+	}
+}
+
 function refreshNode(node) {
 	if (!node) return;
 	const width = Math.max(360, Number(node.size?.[0] || 460));
@@ -236,25 +380,30 @@ function refreshNode(node) {
 
 function syncDomFromWidgets(node) {
 	const positiveConnected = isPositivePromptConnected(node);
-	if (positiveConnected && String(getValue(node, FIELD.positive, "") || "")) {
+	const translationEnabled = isTranslationEnabled(node);
+	const linkedPositive = positiveConnected ? getLinkedPositiveInfo(node) : null;
+	if (positiveConnected && !translationEnabled && String(getValue(node, FIELD.positive, "") || "")) {
 		setValue(node, FIELD.positive, "");
 	}
 	if (node.__gjjClipPositive) {
-		const nextPositive = positiveConnected ? "" : String(getValue(node, FIELD.positive, ""));
+		const nextPositive = positiveConnected
+			? (translationEnabled ? String(getValue(node, FIELD.positive, "") || "") : "")
+			: String(getValue(node, FIELD.positive, ""));
 		if (node.__gjjClipPositive.value !== nextPositive) node.__gjjClipPositive.value = nextPositive;
-		node.__gjjClipPositive.disabled = positiveConnected;
+		node.__gjjClipPositive.disabled = false;
+		node.__gjjClipPositive.readOnly = positiveConnected;
 		node.__gjjClipPositive.placeholder = positiveConnected
-			? "已连接外部正向提示词，面板正向提示词已清空"
-			: "输入正面提示词，可写中文后点击翻译";
+			? (translationEnabled ? "翻译开关已开启：这里显示上游正向提示词的译文" : "已连接外部正向提示词，开启翻译后这里显示译文")
+			: "输入正面提示词，可写中文后开启翻译";
 		node.__gjjClipPositive.title = positiveConnected
-			? "当前使用左侧“正向提示词”输入口的外部文本。"
-			: "";
+			? (translationEnabled ? "当前使用左侧“正向提示词”输入口；此处只显示翻译后的文本。" : "当前使用左侧“正向提示词”输入口的外部文本。")
+			: "中文引号“”内的内容会保持原文。";
 		node.__gjjClipPositive.classList.toggle("external", positiveConnected);
 	}
 	if (node.__gjjClipNegative && node.__gjjClipNegative.value !== String(getValue(node, FIELD.negative, ""))) {
 		node.__gjjClipNegative.value = String(getValue(node, FIELD.negative, ""));
 	}
-	const zero = Boolean(getValue(node, FIELD.zero, false));
+	const zero = toBool(getValue(node, FIELD.zero, false));
 	if (node.__gjjClipZeroButton) {
 		node.__gjjClipZeroButton.dataset.value = zero ? "true" : "false";
 		node.__gjjClipZeroButton.textContent = zero ? "✅ 条件零化" : "⬜ 条件零化";
@@ -266,31 +415,51 @@ function syncDomFromWidgets(node) {
 	if (node.__gjjClipNegative) node.__gjjClipNegative.style.display = zero ? "none" : "";
 	if (node.__gjjClipDevice) node.__gjjClipDevice.value = String(getValue(node, FIELD.device, "auto") || "auto");
 	if (node.__gjjClipUnload) {
-		const unload = Boolean(getValue(node, FIELD.unload, false));
+		const unload = toBool(getValue(node, FIELD.unload, false));
 		node.__gjjClipUnload.dataset.value = unload ? "true" : "false";
 		node.__gjjClipUnload.textContent = unload ? "✅ 卸载" : "⬜ 卸载";
 	}
+	updateTranslateButton(node);
+	updateExternalWatcher(node, positiveConnected && translationEnabled);
+
+	if (positiveConnected && translationEnabled && linkedPositive?.text?.trim()) queueExternalTranslationIfChanged(node, 180);
 }
 
-async function translatePrompts(node) {
-	const positive = String(node.__gjjClipPositive?.value ?? "");
-	const negative = String(node.__gjjClipNegative?.value ?? "");
+function scheduleTranslate(node, ms = 0, options = {}) {
+	clearTimeout(node.__gjjClipTranslateTimer);
+	node.__gjjClipTranslateTimer = setTimeout(() => translatePrompts(node, options), ms);
+}
+
+async function translatePrompts(node, options = {}) {
+	if (node.__gjjClipTranslating) return;
+	clearTimeout(node.__gjjClipTranslateTimer);
+	const positiveConnected = isPositivePromptConnected(node);
+	const translationEnabled = isTranslationEnabled(node);
+	const linkedPositive = positiveConnected ? getLinkedPositiveInfo(node) : null;
+	const useExternalPositive = Boolean(positiveConnected && translationEnabled && linkedPositive?.text?.trim());
+	const positive = useExternalPositive
+		? String(linkedPositive.text || "")
+		: (positiveConnected ? "" : String(node.__gjjClipPositive?.value ?? ""));
+	const includeNegative = options.includeNegative !== false;
+	const negative = includeNegative ? String(node.__gjjClipNegative?.value ?? "") : "";
 	const device = String(getValue(node, FIELD.device, "auto") || "auto");
-	const unload = Boolean(getValue(node, FIELD.unload, false));
+	const unload = toBool(getValue(node, FIELD.unload, false));
 
 	if (!positive.trim() && !negative.trim()) {
-		setStatus(node, "没有需要翻译的内容");
+		setStatus(node, positiveConnected && translationEnabled ? "未读取到上游文本，执行时会翻译回填" : "没有需要翻译的内容");
 		return;
 	}
 
 	setStatus(node, "正在翻译...");
-	if (node.__gjjClipTranslateButton) node.__gjjClipTranslateButton.disabled = true;
+	node.__gjjClipTranslating = true;
+	updateTranslateButton(node);
 
 	try {
 		const response = await fetch(TRANSLATE_API, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
+				node: String(node?.id ?? ""),
 				positive,
 				negative,
 				device,
@@ -300,20 +469,35 @@ async function translatePrompts(node) {
 			}),
 		});
 		const data = await response.json();
+		if (data?.report) applyDependencyNotice(node, data.report);
 		if (!response.ok || !data?.ok) {
 			throw new Error(data?.error || `HTTP ${response.status}`);
 		}
-		node.__gjjClipPositive.value = String(data.positive ?? "");
-		node.__gjjClipNegative.value = String(data.negative ?? "");
-		setValue(node, FIELD.positive, node.__gjjClipPositive.value);
-		setValue(node, FIELD.negative, node.__gjjClipNegative.value);
-		setStatus(node, "翻译完成");
+		if (useExternalPositive) {
+			const translatedPositive = String(data.positive ?? "");
+			node.__gjjClipLastExternalSourceText = String(linkedPositive?.text || "");
+			node.__gjjClipPendingExternalSourceText = "";
+			if (node.__gjjClipPositive) node.__gjjClipPositive.value = translatedPositive;
+			setValue(node, FIELD.positive, translatedPositive);
+		} else if (!positiveConnected) {
+			const translatedPositive = String(data.positive ?? "");
+			if (node.__gjjClipPositive) node.__gjjClipPositive.value = translatedPositive;
+			setValue(node, FIELD.positive, translatedPositive);
+		}
+		if (includeNegative) {
+			const translatedNegative = String(data.negative ?? "");
+			if (node.__gjjClipNegative) node.__gjjClipNegative.value = translatedNegative;
+			setValue(node, FIELD.negative, translatedNegative);
+		}
+		setStatus(node, useExternalPositive ? "上游正向提示词已翻译" : "翻译完成");
+		syncDomFromWidgets(node);
 		refreshNode(node);
 	} catch (error) {
 		console.error("[GJJ CLIP Prompt Encode] 翻译失败", error);
 		setStatus(node, `翻译失败：${error?.message || error}`);
 	} finally {
-		if (node.__gjjClipTranslateButton) node.__gjjClipTranslateButton.disabled = false;
+		node.__gjjClipTranslating = false;
+		updateTranslateButton(node);
 	}
 }
 
@@ -337,9 +521,14 @@ function createTextarea(node, name, placeholder) {
 	protect(area);
 	area.addEventListener("input", () => {
 		if (name === FIELD.positive && isPositivePromptConnected(node)) {
-			area.value = "";
-			setValue(node, FIELD.positive, "");
-			setStatus(node, "已连接外部正向提示词，面板正向提示词保持清空");
+			if (isTranslationEnabled(node)) {
+				area.value = String(getValue(node, FIELD.positive, "") || "");
+				setStatus(node, "已连接上游正向提示词，此处只显示译文");
+			} else {
+				area.value = "";
+				setValue(node, FIELD.positive, "");
+				setStatus(node, "已连接外部正向提示词，面板正向提示词保持清空");
+			}
 			return;
 		}
 		setValue(node, name, area.value);
@@ -388,7 +577,7 @@ function buildDom(node) {
 	zero.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
-		setValue(node, FIELD.zero, !Boolean(getValue(node, FIELD.zero, false)));
+		setValue(node, FIELD.zero, !toBool(getValue(node, FIELD.zero, false)));
 		syncDomFromWidgets(node);
 		refreshNode(node);
 	});
@@ -397,12 +586,25 @@ function buildDom(node) {
 	const translate = document.createElement("button");
 	translate.type = "button";
 	translate.className = "gjj-clip-prompt-btn";
-	translate.textContent = "🌐 翻译";
-	translate.title = "使用 GJJ_OpusMTZhEnTranslation / Opus-MT zh-en 接口把正负提示词翻译为英文";
+	translate.textContent = "⬜ 翻译关";
+	translate.title = "点击开启翻译，并立即翻译当前面板文本；中文引号“”内不翻译";
 	translate.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
-		translatePrompts(node);
+		const nextEnabled = !isTranslationEnabled(node);
+		setTranslationEnabled(node, nextEnabled);
+		syncDomFromWidgets(node);
+		if (nextEnabled) {
+			translatePrompts(node, { includeNegative: true });
+		} else {
+			if (isPositivePromptConnected(node)) {
+				node.__gjjClipLastExternalSourceText = "";
+				setValue(node, FIELD.positive, "");
+			}
+			setStatus(node, "翻译已关闭");
+			syncDomFromWidgets(node);
+			refreshNode(node);
+		}
 	});
 	protect(translate);
 
@@ -428,7 +630,7 @@ function buildDom(node) {
 	unload.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
-		setValue(node, FIELD.unload, !Boolean(getValue(node, FIELD.unload, false)));
+		setValue(node, FIELD.unload, !toBool(getValue(node, FIELD.unload, false)));
 		syncDomFromWidgets(node);
 	});
 	protect(unload);
@@ -441,12 +643,12 @@ function buildDom(node) {
 	const positiveLabel = document.createElement("div");
 	positiveLabel.className = "gjj-clip-prompt-label";
 	positiveLabel.textContent = "正面提示词";
-	const positive = createTextarea(node, FIELD.positive, "输入正面提示词，可写中文后点击翻译");
+	const positive = createTextarea(node, FIELD.positive, "输入正面提示词，可写中文后开启翻译");
 
 	const negativeLabel = document.createElement("div");
 	negativeLabel.className = "gjj-clip-prompt-label";
 	negativeLabel.textContent = "负面提示词";
-	const negative = createTextarea(node, FIELD.negative, "输入负面提示词，可写中文后点击翻译");
+	const negative = createTextarea(node, FIELD.negative, "输入负面提示词，可写中文后开启翻译");
 
 	container.append(style, toolbar, positiveLabel, positive, negativeLabel, negative);
 	container.addEventListener("pointerdown", (event) => event.stopPropagation());
@@ -501,6 +703,22 @@ function schedule(node, ms = 0) {
 	clearTimeout(node.__gjjClipPromptTimer);
 	node.__gjjClipPromptTimer = setTimeout(() => stabilize(node), ms);
 }
+
+function applyBackendTranslation(detail) {
+	const node = app.graph?._nodes?.find((item) => String(item?.id) === String(detail?.node));
+	if (!node || !TARGET_NODES.has(String(node.comfyClass || node.type || "")) || !isTranslationEnabled(node)) return;
+	if (typeof detail?.positive !== "string") return;
+	const linked = getLinkedPositiveInfo(node);
+	if (linked?.text) node.__gjjClipLastExternalSourceText = linked.text;
+	node.__gjjClipPendingExternalSourceText = "";
+	if (node.__gjjClipPositive) node.__gjjClipPositive.value = detail.positive;
+	setValue(node, FIELD.positive, detail.positive);
+	setStatus(node, "上游正向提示词已翻译回填");
+	syncDomFromWidgets(node);
+	refreshNode(node);
+}
+
+api.addEventListener(TRANSLATED_EVENT, (event) => applyBackendTranslation(event?.detail || {}));
 
 app.registerExtension({
 	name: "Comfy.GJJ.CLIPPromptEncodePanel",

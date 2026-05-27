@@ -11,7 +11,6 @@ const IMAGE_PREFIX = "image_";
 const PRIMARY_IMAGE_INPUT = "image_01";
 const BATCH_SOURCE_WIDGET = "batch_source_images";
 const MAIN_MASK_INPUT = "mask";
-const STATUS_WIDGET = "gjj_lazy_image_status";
 const LAST_PRESET_KEY = "gjj_lazy_last_preset_unet";
 const MIN_VISIBLE_IMAGES = 1;
 const MAX_IMAGES = Number.POSITIVE_INFINITY;
@@ -455,81 +454,6 @@ async function syncSizeFromPrimaryInput(node) {
 	setWidgetValue(getWidget(node, "height"), roundToEight(size.height));
 }
 
-function parseProgress(text) {
-	const value = String(text || "");
-	const match = value.match(/(\d+)\s*\/\s*(\d+)/);
-	if (match) {
-		const current = Math.max(0, Number(match[1] || 0));
-		const total = Math.max(1, Number(match[2] || 1));
-		return Math.max(0, Math.min(100, (current / total) * 100));
-	}
-	if (value.includes("完成") || value.includes("失败")) {
-		return 100;
-	}
-	return 8;
-}
-
-function ensureStatusWidget(node) {
-	if (node.__gjjLazyStatus) {
-		return node.__gjjLazyStatus;
-	}
-	// 使用 DOM widget 而不是 canvas 绘制
-	const container = document.createElement("div");
-	container.style.cssText = [
-		"width:100%",
-		"box-sizing:border-box",
-		"position:relative",
-		"z-index:999",
-	].join(";");
-
-	const statusBox = document.createElement("div");
-	statusBox.style.cssText = [
-		"padding:8px 12px",
-		"border:1px solid #31464f",
-		"border-radius:10px",
-		"background:#0f1a1f",
-		"color:#dce7e2",
-		"font-size:12px",
-		"line-height:1.4",
-		"white-space:nowrap",
-		"overflow:hidden",
-		"text-overflow:ellipsis",
-	].join(";");
-
-	const label = document.createElement("div");
-	label.textContent = "等待执行";
-	label.style.cssText = "margin-bottom:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
-
-	const track = document.createElement("div");
-	track.style.cssText = [
-		"height:7px",
-		"overflow:hidden",
-		"border-radius:999px",
-		"background:#1a262c",
-	].join(";");
-
-	const bar = document.createElement("div");
-	bar.style.cssText = [
-		"width:8%",
-		"height:100%",
-		"border-radius:999px",
-		"background:#34d399",
-		"transition:width 160ms ease",
-	].join(";");
-
-	track.appendChild(bar);
-	statusBox.append(label, track);
-	container.appendChild(statusBox);
-
-	// 创建 DOM widget
-	const widget = node.addDOMWidget(STATUS_WIDGET, "HTML", container, {
-		serialize: false,
-	});
-
-	node.__gjjLazyStatus = { widget, label, bar };
-	return node.__gjjLazyStatus;
-}
-
 function createButtons(node) {
 	const container = document.createElement("div");
 	container.style.cssText = [
@@ -863,20 +787,6 @@ function updateImagePreview(node, images) {
 	node.__gjjPreviewImage.style.opacity = "";
 	node.__gjjPreviewImage.style.position = "";
 	node.__gjjPreviewImage.style.left = "";
-
-	// 刷新节点尺寸
-	GJJ_Utils.refreshNode(node);
-}
-
-function setStatus(node, text) {
-	const state = ensureStatusWidget(node);
-	const statusText = String(text || "等待执行");
-	console.log("[GJJ] setStatus updated to:", statusText, "node.id:", node?.id);
-
-	// 更新 DOM 元素
-	state.label.textContent = statusText;
-	const progress = parseProgress(statusText);
-	state.bar.style.width = `${Math.max(4, progress)}%`;
 
 	// 刷新节点尺寸
 	GJJ_Utils.refreshNode(node);
@@ -1788,7 +1698,6 @@ function stabilizeNode(node, forcePreset = false) {
 	if (!node) {
 		return;
 	}
-	ensureStatusWidget(node);
 	trimUnusedImageInputs(node);
 	ensureTrailingImageInput(node);
 	renameImageInputs(node);
@@ -1993,22 +1902,6 @@ function scheduleStabilize(node, forcePreset = false) {
 	}, 16);
 }
 
-api.addEventListener("gjj_node_progress", (event) => {
-	const detail = event?.detail || {};
-	console.log("[GJJ] Received gjj_node_progress event:", detail);
-	const targetNode = app.graph?._nodes?.find((node) => String(node?.id) === String(detail.node));
-	if (!targetNode) {
-		console.log("[GJJ] Target node not found for id:", detail.node);
-		return;
-	}
-	if (!TARGET_NODES.has(String(targetNode.comfyClass || targetNode.type || ""))) {
-		console.log("[GJJ] Node class not in TARGET_NODES:", targetNode.comfyClass);
-		return;
-	}
-	console.log("[GJJ] Setting status for node", targetNode.id, "to:", detail.text);
-	setStatus(targetNode, detail.text || "处理中...");
-});
-
 globalThis.GJJLazyImageStudioSyncBatchSources = function (sourceNode) {
 	if (!sourceNode) {
 		return;
@@ -2049,7 +1942,6 @@ app.registerExtension({
 		const originalCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
 			const result = originalCreated?.apply(this, args);
-			setStatus(this, "等待执行");
 
 			// 创建观察器，确保任何时候添加的预览都会被隐藏
 			this.__gjjPreviewObserver = null;
@@ -2169,9 +2061,6 @@ app.registerExtension({
 			for (const node of app.graph?._nodes || []) {
 				if (!TARGET_NODES.has(node?.comfyClass)) {
 					continue;
-				}
-				if (!node.__gjjLazyStatus?.widget?.value) {
-					setStatus(node, "等待执行");
 				}
 				stabilizeNode(node, false);
 				syncPanelFromLinkedSources(node);

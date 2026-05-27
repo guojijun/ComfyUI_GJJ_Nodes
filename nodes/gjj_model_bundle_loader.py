@@ -5,6 +5,12 @@ import torch
 import comfy.sd
 import comfy.utils
 
+try:
+    from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
+except Exception:  # pragma: no cover - 允许单文件语法检查
+    apply_lora_chain_config = None
+    normalize_lora_chain_data = None
+
 
 UNET_DTYPE_OPTIONS = ["default", "float16", "bfloat16", "float32", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"]
 CLIP_TYPE_OPTIONS = [
@@ -60,7 +66,60 @@ def _normalize_text(value: str | None) -> str:
     return str(value or "").strip().lower()
 
 
+def _model_stem(name: str) -> str:
+    text = str(name or "").replace("\\", "/").rsplit("/", 1)[-1].strip().lower()
+    for suffix in (".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".sft"):
+        if text.endswith(suffix):
+            return text[: -len(suffix)]
+    return text
+
+
+def _pick_short_model_name(requested: str, available: list[str], fallback: str = "") -> str:
+    query = _normalize_text(requested).replace("\\", "/")
+    if not query:
+        return fallback
+    if query in available:
+        return query
+
+    query_base = query.rsplit("/", 1)[-1]
+    query_stem = _model_stem(query_base)
+
+    def rank(name: str) -> tuple[int, int, int, str]:
+        text = str(name or "").replace("\\", "/").lower()
+        filename = text.rsplit("/", 1)[-1]
+        stem = _model_stem(filename)
+        if filename == f"{query_stem}.safetensors":
+            bucket = 0
+        elif stem == query_stem:
+            bucket = 1
+        elif filename.startswith(f"{query_stem}."):
+            bucket = 2
+        elif stem.startswith(query_stem):
+            bucket = 3
+        elif query_stem in stem:
+            bucket = 4
+        elif query_stem in text:
+            bucket = 5
+        else:
+            bucket = 999
+        return (bucket, len(filename), len(text), text)
+
+    candidates = [name for name in available if rank(name)[0] < 999]
+    return sorted(candidates, key=rank)[0] if candidates else fallback
+
+
+def _resolve_model_name(categories: tuple[str, ...], filename: str) -> str:
+    available: list[str] = []
+    for category in categories:
+        available.extend(_safe_filename_list(category))
+    resolved = _pick_short_model_name(filename, _dedupe_keep_order(available), str(filename or "").strip())
+    if not str(resolved or "").strip():
+        raise RuntimeError("模型文件名不能为空。")
+    return resolved
+
+
 def _resolve_full_path(categories: tuple[str, ...], filename: str) -> str:
+    filename = _resolve_model_name(categories, filename)
     if not str(filename or "").strip():
         raise RuntimeError("模型文件名不能为空。")
 
@@ -143,6 +202,9 @@ class GJJ_ModelBundleLoader:
         "可直接连接到 KSampler 的 cfg 输入。",
         "可直接连接到 KSampler 的 denoise 输入。",
     )
+
+    def __init__(self):
+        self.loaded_lora: tuple[str, object] | None = None
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -239,7 +301,17 @@ class GJJ_ModelBundleLoader:
                         "tooltip": "默认降噪强度，可直接输出给 KSampler 的 denoise。",
                     },
                 ),
-            }
+            },
+            "optional": {
+                "lora_chain_config": (
+                    "LORA_CHAIN_CONFIG",
+                    {
+                        "forceInput": True,
+                        "display_name": "🧬 额外LoRA串联配置",
+                        "tooltip": "可选接入 GJJ · 🧬 额外LoRA串联配置；会在模型加载完成后按顺序叠加到 MODEL 与 CLIP。",
+                    },
+                ),
+            },
         }
 
     @classmethod
@@ -255,6 +327,7 @@ class GJJ_ModelBundleLoader:
         steps,
         cfg,
         denoise,
+        lora_chain_config="",
     ):
         return "|".join(
             [
@@ -268,6 +341,7 @@ class GJJ_ModelBundleLoader:
                 str(steps),
                 str(cfg),
                 str(denoise),
+                str(lora_chain_config),
             ]
         )
 
@@ -291,6 +365,7 @@ class GJJ_ModelBundleLoader:
         steps,
         cfg,
         denoise,
+        lora_chain_config="",
     ):
         if not str(unet_name or "").strip():
             raise RuntimeError("UNET 模型不能为空。")
@@ -298,6 +373,10 @@ class GJJ_ModelBundleLoader:
             raise RuntimeError("CLIP 模型不能为空。")
         if not str(vae_name or "").strip():
             raise RuntimeError("VAE 模型不能为空。")
+
+        unet_name = _resolve_model_name(("diffusion_models",), unet_name)
+        clip_name = _resolve_model_name(("text_encoders", "clip"), clip_name)
+        vae_name = _resolve_model_name(("vae",), vae_name)
 
         unet_path = _resolve_full_path(("diffusion_models",), unet_name)
         unet = comfy.sd.load_diffusion_model(unet_path, model_options=_build_unet_model_options(unet_dtype))
@@ -312,6 +391,16 @@ class GJJ_ModelBundleLoader:
         )
 
         vae = self._load_vae(vae_name, vae_dtype)
+
+        if str(lora_chain_config or "").strip():
+            if apply_lora_chain_config is None or normalize_lora_chain_data is None:
+                raise RuntimeError("当前环境未能加载 GJJ LoRA 串联工具，无法应用额外LoRA串联配置。")
+            unet, clip, self.loaded_lora = apply_lora_chain_config(
+                unet,
+                clip,
+                lora_data=normalize_lora_chain_data(lora_chain_config),
+                loaded_lora_cache=self.loaded_lora,
+            )
 
         return (unet, clip, vae, int(steps), float(cfg), float(denoise))
 

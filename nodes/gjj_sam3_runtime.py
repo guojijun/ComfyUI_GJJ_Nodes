@@ -17,11 +17,69 @@ from PIL import Image, ImageDraw
 import comfy.model_management
 import comfy.utils
 from comfy.model_patcher import ModelPatcher
+from .common_utils.dependency_checker import (
+	build_dependency_model_report,
+	get_pip_install_command_text,
+	make_missing_model_spec,
+	print_dependency_model_report,
+)
 
 
 # 延迟导入：运行时依赖检查
 _sam3_loaded = False
 _sam3_module = None
+SAM3_NODE_NAME = "GJJ · ✂️批量文本分割器抠图(SAM3)"
+SAM3_REQUIRED_PACKAGES = ["timm", "torchvision", "opencv-python"]
+SAM3_REQUIRED_MODULES = [
+	{"module_name": "timm", "package_name": "timm", "display_name": "timm", "description": "SAM3 视觉骨干和模型结构依赖。"},
+	{"module_name": "torchvision", "package_name": "torchvision", "display_name": "torchvision", "description": "SAM3 图像预处理与模型算子依赖。"},
+	{"module_name": "cv2", "package_name": "opencv-python", "display_name": "OpenCV(cv2)", "description": "SAM3 图像处理运行依赖。"},
+]
+
+
+def _vendor_root() -> str:
+	return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "vendor"))
+
+
+def _missing_sam3_dependencies() -> list[dict[str, str]]:
+	missing: list[dict[str, str]] = []
+	vendor_sam3 = os.path.join(_vendor_root(), "sam3")
+	required_files = ["__init__.py", "predictor.py", "utils.py"]
+	if not os.path.isdir(vendor_sam3) or any(not os.path.isfile(os.path.join(vendor_sam3, name)) for name in required_files):
+		missing.append({
+			"module_name": "sam3",
+			"package_name": "",
+			"display_name": "GJJ/vendor/sam3",
+			"description": "SAM3 内置运行库目录不完整，需要包含 __init__.py、predictor.py、utils.py 等文件。",
+		})
+	for spec in SAM3_REQUIRED_MODULES:
+		try:
+			__import__(spec["module_name"])
+		except Exception:
+			missing.append(spec)
+	return missing
+
+
+def build_sam3_environment_report(model_name: str = "sam3.safetensors", original_error: str = "") -> dict[str, Any]:
+	missing_models = []
+	if not list_sam3_models():
+		missing_models.append(make_missing_model_spec(
+			label="SAM3 模型",
+			subdir="sam3",
+			filename=model_name or "sam3.safetensors",
+			description="SAM3 文本分割需要的本地权重文件。",
+		))
+	return build_dependency_model_report(
+		node_name=SAM3_NODE_NAME,
+		missing_dependencies=_missing_sam3_dependencies(),
+		missing_models=missing_models,
+		install_packages=SAM3_REQUIRED_PACKAGES,
+		description=(
+			"这个 GJJ 节点需要完整的 GJJ/vendor/sam3 内置运行库，并需要当前 ComfyUI Python "
+			"可导入 timm、torchvision、opencv-python。"
+		),
+		original_error=original_error,
+	)
 
 def _load_sam3_runtime():
 	"""运行时加载 sam3，失败时提供友好提示"""
@@ -31,7 +89,7 @@ def _load_sam3_runtime():
 		return _sam3_module
 
 	try:
-		VENDOR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "vendor"))
+		VENDOR_ROOT = _vendor_root()
 		if VENDOR_ROOT not in sys.path:
 			sys.path.insert(0, VENDOR_ROOT)
 
@@ -62,8 +120,6 @@ def _load_sam3_runtime():
 		return _sam3_module
 
 	except Exception as exc:
-		python_executable = sys.executable
-
 		# ANSI 颜色代码（用于控制台彩色输出）
 		RED = '\033[91m'
 		YELLOW = '\033[93m'
@@ -72,9 +128,8 @@ def _load_sam3_runtime():
 		RESET = '\033[0m'
 		BOLD = '\033[1m'
 
-		# 构建安装命令
-		from .common_utils.dependency_checker import get_pip_install_command_text
-		install_cmd = get_pip_install_command_text("torchvision opencv-python")
+		report = build_sam3_environment_report(original_error=str(exc))
+		install_cmd = report.get("install_cmd") or get_pip_install_command_text(packages=SAM3_REQUIRED_PACKAGES)
 
 		# 在控制台打印美观的错误提示
 		print(f"\n{RED}{'=' * 80}{RESET}")
@@ -90,25 +145,11 @@ def _load_sam3_runtime():
 		print(f"{GREEN}{BOLD}  {install_cmd}{RESET}\n")
 		print(f"{YELLOW}{BOLD} 提示:{RESET} 修复后请重启 ComfyUI 服务器")
 		print(f"{RED}{'=' * 80}{RESET}\n")
+		print_dependency_model_report(report, "GJJ 节点运行时依赖缺失！")
 
-		raise RuntimeError(
-			"\n 未找到 SAM3 运行库。\n"
-			"\n"
-			"这个 GJJ 节点需要 GJJ/vendor/sam3 模块才能运行。\n"
-			"\n"
-			" 必需检查：\n"
-			"  • 确认 vendor/sam3 目录存在且包含完整代码\n"
-			"  • 确认包含 __init__.py、predictor.py、utils.py 等文件\n"
-			"  • 如果需要额外依赖，请安装：\n"
-			"    torchvision, opencv-python\n"
-			"\n"
-			"🔧 快速安装命令（使用实际 Python 路径）：\n"
-			f"{install_cmd}\n"
-			"\n"
-			f"原始导入错误：{exc}\n"
-			"\n"
-			" 提示：修复后请重启 ComfyUI 服务器。"
-		) from exc
+		err = RuntimeError(report.get("panel_message") or report.get("warning_message") or "SAM3 运行环境缺失。")
+		setattr(err, "gjj_report", report)
+		raise err from exc
 
 from .gjj_model_name_resolver import pick_available_model_name  # noqa: E402
 

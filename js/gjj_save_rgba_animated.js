@@ -3,7 +3,7 @@ import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set(["GJJ_SaveRGBAAnimated"]);
-const STATUS_WIDGET_NAME = "gjj_save_rgba_animated_status";
+const PREVIEW_WIDGET_NAME = "gjj_save_rgba_animated_preview";
 const MIN_WIDTH = 340;
 const PANEL_HEIGHT = 318;
 const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "mkv", "avi", "m4v"]);
@@ -28,42 +28,6 @@ function ensurePanelWidget(node) {
 		"border-radius:10px",
 		"background:#121a1f",
 	].join(";");
-
-	const statusCard = document.createElement("div");
-	statusCard.style.cssText = [
-		"display:flex",
-		"flex-direction:column",
-		"gap:6px",
-		"padding:0",
-	].join(";");
-
-	const text = document.createElement("div");
-	text.textContent = "等待执行";
-	text.style.cssText = [
-		"color:#dce7e2",
-		"font-size:12px",
-		"line-height:1.35",
-		"white-space:pre-wrap",
-		"word-break:break-word",
-	].join(";");
-
-	const progressOuter = document.createElement("div");
-	progressOuter.style.cssText = [
-		"height:6px",
-		"border-radius:999px",
-		"overflow:hidden",
-		"background:#223038",
-	].join(";");
-
-	const progressInner = document.createElement("div");
-	progressInner.style.cssText = [
-		"height:100%",
-		"width:0%",
-		"background:linear-gradient(90deg,#5fa8ff,#7ed6a7)",
-		"transition:width 120ms ease",
-	].join(";");
-	progressOuter.appendChild(progressInner);
-	statusCard.append(text, progressOuter);
 
 	const previewCard = document.createElement("div");
 	previewCard.style.cssText = [
@@ -122,13 +86,13 @@ function ensurePanelWidget(node) {
 	].join(";");
 
 	previewCard.append(empty, video, image);
-	wrap.append(statusCard, previewCard);
+	wrap.append(previewCard);
 
-	const widget = node.addDOMWidget?.(STATUS_WIDGET_NAME, STATUS_WIDGET_NAME, wrap, {
+	const widget = node.addDOMWidget?.(PREVIEW_WIDGET_NAME, PREVIEW_WIDGET_NAME, wrap, {
 		hideOnZoom: false,
 		getHeight: () => PANEL_HEIGHT,
 	});
-	node.__gjjSaveRgbaAnimatedStatus = { widget, wrap, text, progressInner, previewCard, empty, video, image };
+	node.__gjjSaveRgbaAnimatedStatus = { widget, wrap, previewCard, empty, video, image };
 	return node.__gjjSaveRgbaAnimatedStatus;
 }
 
@@ -150,22 +114,6 @@ function isVideoPreview(item, detail = {}) {
 	const filename = String(item?.filename || "");
 	const ext = filename.includes(".") ? filename.split(".").pop().toLowerCase() : "";
 	return VIDEO_EXTENSIONS.has(ext);
-}
-
-function parseProgress(detail = {}) {
-	if (Number.isFinite(detail.progress)) {
-		return Math.max(0, Math.min(100, Number(detail.progress) * 100));
-	}
-	return null;
-}
-
-function setStatus(node, detail = {}) {
-	const state = node?.__gjjSaveRgbaAnimatedStatus;
-	if (!state) return;
-	state.text.textContent = String(detail.text || "等待执行");
-	const progress = parseProgress(detail);
-	state.progressInner.style.width = `${progress == null ? 0 : progress}%`;
-	refreshNode(node);
 }
 
 function clearNativePreview(node) {
@@ -271,7 +219,6 @@ function patchNode(node) {
 	node.__gjjSaveRgbaAnimatedPatched = true;
 	ensurePanelWidget(node);
 	clearNativePreview(node);
-	setStatus(node, { text: "等待执行", progress: 0 });
 	setPreview(node, {});
 	if (!Array.isArray(node.size) || node.size.length < 2) {
 		node.setSize?.([MIN_WIDTH, PANEL_HEIGHT + 8]);
@@ -282,16 +229,6 @@ function patchNode(node) {
 		]);
 	}
 }
-
-api.addEventListener("gjj_node_progress", (event) => {
-	const detail = event?.detail || {};
-	const targetNode = app.graph?._nodes?.find((node) => String(node?.id) === String(detail.node));
-	if (!targetNode || !TARGET_NODES.has(String(targetNode.comfyClass || targetNode.type || ""))) {
-		return;
-	}
-	ensurePanelWidget(targetNode);
-	setStatus(targetNode, detail);
-});
 
 app.registerExtension({
 	name: "GJJ.SaveRGBAAnimated",

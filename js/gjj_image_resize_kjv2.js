@@ -19,6 +19,7 @@ const DEFAULT_CONFIG = {
   round_to_multiple: "8",
   pad_color: "#000000",
   pad_feather: 0,
+  crop_position: "中",
   device: "CPU",
   width: 1024,
   height: 1024,
@@ -42,6 +43,13 @@ const FIT_BUTTONS = {
   "拉伸": { icon: "拉伸", title: "拉伸：直接变成目标尺寸。" },
   "留边填充": { icon: "留边", title: "留边填充：等比缩放后补边；未接入遮罩时会输出补边遮罩。" },
   "裁剪填满": { icon: "裁剪", title: "裁剪填满：等比缩放后居中裁剪。" },
+};
+const POSITION_BUTTONS = {
+  "上": { icon: "上", title: "上：留边时贴上，裁剪时保留上方内容。" },
+  "下": { icon: "下", title: "下：留边时贴下，裁剪时保留下方内容。" },
+  "左": { icon: "左", title: "左：留边时贴左，裁剪时保留左侧内容。" },
+  "右": { icon: "右", title: "右：留边时贴右，裁剪时保留右侧内容。" },
+  "中": { icon: "中", title: "中：居中留边或居中裁剪。" },
 };
 const OUTPUTS = [
   { key: "original_size", icon: "📦", label: "📦 原始尺寸", outName: "原始尺寸", type: "*", title: "更多输出：原始尺寸 [宽度, 高度]。单击单选，Ctrl/Shift 可复选。" },
@@ -326,6 +334,7 @@ function purgeLegacyStatusAndPanels(node, keepWidget = null) {
 
 const OPTIONS = {
   fit_mode: ["拉伸", "留边填充", "裁剪填满"],
+  crop_position: ["上", "下", "左", "右", "中"],
   upscale_method: ["兰索斯", "双三次", "双线性", "区域", "最近邻"],
   round_to_multiple: ["1", "2", "4", "8", "16", "32", "64", "128", "256", "512"],
   device: ["CPU", "GPU"],
@@ -385,6 +394,7 @@ function readConfig(node) {
     cfg = { ...cfg, ...node.properties.gjj_mf_resize_config };
   }
   if (!MODES.includes(cfg.mode)) cfg.mode = "等比";
+  if (!OPTIONS.crop_position.includes(cfg.crop_position)) cfg.crop_position = "中";
   if (!Array.isArray(cfg.extra_outputs)) cfg.extra_outputs = [];
   return cfg;
 }
@@ -392,6 +402,7 @@ function readConfig(node) {
 function writeConfig(node, patch = {}) {
   const cfg = { ...readConfig(node), ...patch };
   if (!MODES.includes(cfg.mode)) cfg.mode = "等比";
+  if (!OPTIONS.crop_position.includes(cfg.crop_position)) cfg.crop_position = "中";
   if (!Array.isArray(cfg.extra_outputs)) cfg.extra_outputs = [];
   node.properties ||= {};
   node.properties.gjj_mf_resize_config = cfg;
@@ -626,7 +637,7 @@ function choiceField(root, node, cfg, key, label, title, values) {
   const group = document.createElement("div");
   group.className = "gjj-mf-button-row";
   for (const v of values) {
-    const meta = key === "fit_mode" ? FIT_BUTTONS[v] : key === "mode" ? MODE_BUTTONS[v] : null;
+    const meta = key === "fit_mode" ? FIT_BUTTONS[v] : key === "mode" ? MODE_BUTTONS[v] : key === "crop_position" ? POSITION_BUTTONS[v] : null;
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "gjj-mf-choice";
@@ -676,6 +687,7 @@ function buildPanel(node) {
     const commonSection = document.createElement("div");
     commonSection.className = "gjj-mf-section";
     dom.panel.appendChild(commonSection);
+    choiceField(commonSection, node, cfg, "crop_position", "📍", "留边填充时决定图片贴边位置；裁剪填满时决定保留方向。默认居中。", OPTIONS.crop_position);
     selectField(commonSection, node, cfg, "upscale_method", "🔄 缩放算法", "缩放采样算法。Lanczos 高质量；Bicubic/Bilinear 更快。Resampling method.", OPTIONS.upscale_method);
     selectField(commonSection, node, cfg, "round_to_multiple", "🔢 尺寸对齐", "输出宽高向上对齐到指定倍数。Round output size to multiple.", OPTIONS.round_to_multiple);
     if (cfg.fit_mode === "留边填充") {

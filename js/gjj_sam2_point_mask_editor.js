@@ -343,7 +343,6 @@ function ensureEditor(node) {
 		"text-overflow:ellipsis",
 		"white-space:nowrap",
 	].join(";");
-	root.appendChild(status);
 
 	const image = new Image();
 	image.crossOrigin = "anonymous";
@@ -1059,13 +1058,6 @@ app.registerExtension({
 	name: "GJJ.SAM2PointMaskEditor",
 	setup() {
 		patchQueuePrompt();
-		api.addEventListener?.("gjj_node_progress", (event) => {
-			const detail = event?.detail || {};
-			const node = app.graph?.getNodeById?.(Number(detail.node));
-			if (node && TARGET_NODES.has(String(node.comfyClass || node.type || ""))) {
-				ensureEditor(node).setStatus?.(String(detail.text || ""));
-			}
-		});
 		for (const node of app.graph?._nodes || []) {
 			if (TARGET_NODES.has(String(node.comfyClass || node.type || ""))) {
 				afterNodeReady(node);

@@ -6,7 +6,6 @@ const CONFIG_KEY = "gjj_ltx23_config";
 const SCENE_COUNT_PROP = "__gjj_ltx_scene_count";
 const SCENE_LINKS_PROP = "__gjj_ltx_scene_links";
 const PANEL_WIDGET = "gjj_ltx23_clean_panel";
-const STATUS_EVENT = "gjj_node_progress";
 const SCENE_RE = /^(?:scene_0*(\d+)|场景\s*(\d+)|(?:🖼️\s*)?(\d+))$/i;
 const FIRST_SCENE_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const SCENE_TYPE = "IMAGE";
@@ -554,12 +553,6 @@ function buildPanel(node) {
   segmentPanel.appendChild(openDirBtn);
   root.append(segmentPanel);
 
-  const status = document.createElement("div");
-  status.className = "gjj-ltx-status";
-  status.style.display = "none";
-  status.innerHTML = `<div class="gjj-ltx-status-text"></div><div class="gjj-ltx-bar"><div></div></div>`;
-  root.appendChild(status);
-  node.__gjjLtxCleanStatus = status;
   updateButtons();
   requestAnimationFrame(() => resizeNodeToFit(node));
   return root;
@@ -592,25 +585,6 @@ function resizeNodeToFit(node) {
   });
 }
 
-function updateStatus(node, detail) {
-  ensurePanel(node);
-  const status = node.__gjjLtxCleanStatus;
-  if (!status) return;
-  const text = status.querySelector(".gjj-ltx-status-text");
-  const bar = status.querySelector(".gjj-ltx-bar > div");
-  status.style.display = "block";
-  text.textContent = detail.text || detail.message || "正在执行...";
-  const p = Number(detail.progress);
-  if (Number.isFinite(p) && bar) bar.style.width = `${Math.max(0, Math.min(100, p * 100))}%`;
-  resizeNodeToFit(node);
-}
-
-function findNodeById(id) {
-  const graph = app.graph;
-  if (!graph) return null;
-  return graph._nodes?.find(n => String(n.id) === String(id)) || null;
-}
-
 function injectStyles() {
   if (document.getElementById("gjj-ltx-clean-style")) return;
   const style = document.createElement("style");
@@ -630,10 +604,6 @@ function injectStyles() {
     .gjj-ltx-subpanel{border:1px solid rgba(125,245,255,.18);border-radius:10px;padding:5px 7px;margin:6px 0;background:rgba(10,25,30,.35);}
     .gjj-ltx-open-dir{width:100%;margin:6px 0 2px;border:1px solid rgba(125,245,255,.45);border-radius:8px;background:#12313a;color:#dffcff;padding:6px 8px;font-weight:700;cursor:pointer;}
     .gjj-ltx-open-dir:hover{background:#0b756d;border-color:#5dfff1;}
-    .gjj-ltx-status{margin-top:8px;border:1px solid rgba(100,220,255,.35);border-radius:8px;padding:6px;background:#0b2028;color:#d8fbff;}
-    .gjj-ltx-status-text{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:4px;}
-    .gjj-ltx-bar{height:5px;background:rgba(255,255,255,.12);border-radius:99px;overflow:hidden;}
-    .gjj-ltx-bar>div{height:100%;width:0%;background:#23d18b;transition:width .2s ease;}
   `;
   document.head.appendChild(style);
 }
@@ -647,12 +617,6 @@ function stabilize(node) {
   ensurePanel(node);
   repairLinks(node);
 }
-
-api.addEventListener(STATUS_EVENT, (event) => {
-  const detail = event.detail || {};
-  const node = findNodeById(detail.node || detail.node_id);
-  if (node && isTarget(node)) updateStatus(node, detail);
-});
 
 app.registerExtension({
   name: "GJJ.LTX23.CleanV40",

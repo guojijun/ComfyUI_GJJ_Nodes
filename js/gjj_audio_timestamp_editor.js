@@ -1501,6 +1501,9 @@ app.registerExtension({
 				const installCommand = data.copy_text || data.install_command || data.model_download_url || "";
 				const copyLabel = data.copy_label || "";
 				if (!nodeId || !errorMessage) return;
+				if (data.warning_message || installCommand) {
+					return;
+				}
 				for (const node of app.graph?._nodes || []) {
 					if (String(node.id) !== String(nodeId)) continue;
 					if (node._editor) {

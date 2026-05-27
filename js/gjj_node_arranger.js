@@ -20,8 +20,6 @@ const MOVE_UNIT = 1;
 let DEFAULT_SPACING = 26;
 
 const LAYOUT_GAP_STEP = 8;
-const MIN_LAYOUT_GAP = 0;
-const MAX_LAYOUT_GAP = 240;
 let LAST_ARRANGE_MODE = "auto";
 
 const MIN_NODE_WIDTH = 80; // 仅保留兼容旧配置；普通排列不再强制修改真实宽度。
@@ -34,7 +32,7 @@ const COLLAPSED_NODE_HEIGHT = 30;
 const MIN_LAYOUT_NODE_WIDTH = 168;
 const MAX_LAYOUT_NODE_WIDTH = 1200;
 let HORIZONTAL_SAFE_GAP = 28;
-let VERTICAL_SAFE_GAP = 18;
+let VERTICAL_SAFE_GAP = DEFAULT_SPACING;
 
 // 间距调节：想更松只改上面 3 个值：DEFAULT_SPACING / HORIZONTAL_SAFE_GAP / VERTICAL_SAFE_GAP。
 // 节点真实宽度仍保持最小，布局计算会按 MIN_LAYOUT_NODE_WIDTH 预留视觉空间，避免互相覆盖。
@@ -248,28 +246,29 @@ function getSmartScopeLabel() {
 	return shouldUseSelectedOnly() ? "部分选择：仅作用所选节点" : "未选择或全选：作用全部节点";
 }
 
-function clampInteger(value, min, max) {
-	return Math.max(min, Math.min(max, Math.round(Number(value) || 0)));
+function roundLayoutGap(value) {
+	const gap = Number(value);
+	return Number.isFinite(gap) ? Math.round(gap) : 0;
 }
 
 function getColumnGap(spacing = DEFAULT_SPACING) {
-	return clampInteger(Math.max(HORIZONTAL_SAFE_GAP, spacing), MIN_LAYOUT_GAP, MAX_LAYOUT_GAP);
+	return roundLayoutGap(Math.max(HORIZONTAL_SAFE_GAP, spacing));
 }
 
-function getRowGap(spacing = DEFAULT_SPACING) {
-	return clampInteger(Math.max(VERTICAL_SAFE_GAP, spacing), MIN_LAYOUT_GAP, MAX_LAYOUT_GAP);
+function getRowGap(_spacing = DEFAULT_SPACING) {
+	return roundLayoutGap(VERTICAL_SAFE_GAP);
 }
 
 function adjustLayoutGap(axis, delta) {
 	const d = Math.round(Number(delta) || 0);
 	if (axis === "column") {
-		DEFAULT_SPACING = clampInteger(DEFAULT_SPACING + d, MIN_LAYOUT_GAP, MAX_LAYOUT_GAP);
-		HORIZONTAL_SAFE_GAP = clampInteger(HORIZONTAL_SAFE_GAP + d, MIN_LAYOUT_GAP, MAX_LAYOUT_GAP);
+		DEFAULT_SPACING = roundLayoutGap(DEFAULT_SPACING + d);
+		HORIZONTAL_SAFE_GAP = roundLayoutGap(HORIZONTAL_SAFE_GAP + d);
 		console.log(`[GJJ_NodeArranger] 列宽/横向间距: ${getColumnGap()}px`);
 		return;
 	}
 
-	VERTICAL_SAFE_GAP = clampInteger(VERTICAL_SAFE_GAP + d, MIN_LAYOUT_GAP, MAX_LAYOUT_GAP);
+	VERTICAL_SAFE_GAP = roundLayoutGap(VERTICAL_SAFE_GAP + d);
 	console.log(`[GJJ_NodeArranger] 行高/纵向间距: ${getRowGap()}px`);
 }
 
@@ -377,6 +376,86 @@ function getTopoModeConfig(sortMode) {
 	};
 
 	return configs[mode] || configs[TOPO_SORT_MODES.TOPO_MAIN_PATH];
+}
+
+const ARRANGE_MODE_LABELS = {
+	auto: "🧭 智能中心扩散",
+	horizontal: "➡️ 水平排列",
+	vertical: "⬇️ 垂直排列",
+	grid: "⊞ 网格排列",
+	topological: "🔢 拓扑：主链路",
+};
+
+let __gjjArrangeModeToastTimer = null;
+
+function getArrangeModeLabel(mode) {
+	const key = String(mode || "auto");
+	const topoItem = TOPO_SORT_MODE_LIST.find((item) => item.key === key);
+	const topoName = Object.values(TOPO_SORT_MODES).includes(key) ? getTopoModeConfig(key).name : null;
+	return topoItem?.label || ARRANGE_MODE_LABELS[key] || topoName || key;
+}
+
+function getIsolatedBlockHint(mode) {
+	return String(mode || "") === "vertical" ? "孤立节点最后排在左上列" : "孤立节点最后排在左上角";
+}
+
+function showArrangeModeToast(mode, selectedOnly = false) {
+	try {
+		if (typeof document === "undefined" || !document.body) return;
+
+		let toast = document.querySelector("[data-gjj-node-arranger-toast='1']");
+		if (!toast) {
+			toast = document.createElement("div");
+			toast.dataset.gjjNodeArrangerToast = "1";
+			toast.style.cssText = [
+				"position: fixed",
+				"top: 22px",
+				"left: 50%",
+				"transform: translateX(-50%)",
+				"z-index: 999999",
+				"max-width: min(720px, calc(100vw - 48px))",
+				"padding: 10px 16px",
+				"border-radius: 999px",
+				"border: 1px solid rgba(113, 203, 255, 0.55)",
+				"background: rgba(18, 28, 34, 0.94)",
+				"box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35)",
+				"color: #e8f6ff",
+				"font-size: 13px",
+				"font-weight: 600",
+				"letter-spacing: 0.02em",
+				"line-height: 1.35",
+				"pointer-events: none",
+				"opacity: 0",
+				"transition: opacity 0.22s ease, transform 0.22s ease",
+				"white-space: nowrap",
+				"text-align: center",
+			].join(";");
+			document.body.appendChild(toast);
+		}
+
+		const scopeText = selectedOnly ? "仅所选节点" : "全部节点";
+		toast.textContent = `📐 当前排列：${getArrangeModeLabel(mode)} · ${scopeText} · ${getIsolatedBlockHint(mode)}`;
+		toast.style.opacity = "0";
+		toast.style.transform = "translateX(-50%) translateY(-6px)";
+
+		clearTimeout(__gjjArrangeModeToastTimer);
+		requestAnimationFrame(() => {
+			toast.style.opacity = "1";
+			toast.style.transform = "translateX(-50%) translateY(0)";
+		});
+
+		__gjjArrangeModeToastTimer = setTimeout(() => {
+			toast.style.opacity = "0";
+			toast.style.transform = "translateX(-50%) translateY(-6px)";
+			setTimeout(() => {
+				if (toast.parentNode && toast.style.opacity === "0") {
+					toast.remove();
+				}
+			}, 260);
+		}, 10000);
+	} catch (error) {
+		console.warn("[GJJ_NodeArranger] show arrange toast failed:", error);
+	}
 }
 
 function safeArray(value) {
@@ -1002,27 +1081,34 @@ function avoidCollisions(nodes, distance = 30, power = 0.5, onlyY = false) {
 }
 
 function arrangeHorizontal(nodes, spacing = DEFAULT_SPACING) {
+	const { connectedNodes, isolatedNodes } = splitNodesByIsolation(nodes);
 	let currentX = 0;
 	const startY = 0;
 
-	const sorted = [...nodes].sort((a, b) => getNodeX(a) - getNodeX(b));
+	const sorted = [...connectedNodes].sort((a, b) => getNodeX(a) - getNodeX(b));
 
 	for (const node of sorted) {
 		setNodePosition(node, currentX, startY);
 		currentX += getNodeWidth(node) + spacing;
 	}
+
+	placeStandaloneIsolatedNodes(isolatedNodes, sorted, "row", spacing);
 }
 
 function arrangeVertical(nodes, spacing = DEFAULT_SPACING) {
+	const { connectedNodes, isolatedNodes } = splitNodesByIsolation(nodes);
 	const startX = 0;
+	const rowGap = getRowGap(spacing);
 	let currentY = 0;
 
-	const sorted = [...nodes].sort((a, b) => getNodeY(a) - getNodeY(b));
+	const sorted = [...connectedNodes].sort((a, b) => getNodeY(a) - getNodeY(b));
 
 	for (const node of sorted) {
 		setNodePosition(node, startX, currentY);
-		currentY += getNodeHeight(node) + spacing;
+		currentY += getNodeHeight(node) + rowGap;
 	}
+
+	placeStandaloneIsolatedNodes(isolatedNodes, sorted, "column", spacing);
 }
 
 function getWorkflowSortedNodesForGrid(nodes) {
@@ -1084,8 +1170,12 @@ function getWorkflowSortedNodesForGrid(nodes) {
 function arrangeGrid(nodes, spacing = DEFAULT_SPACING) {
 	if (nodes.length === 0) return;
 
-	const sorted = getWorkflowSortedNodesForGrid(nodes);
-	if (sorted.length === 0) return;
+	const { connectedNodes, isolatedNodes } = splitNodesByIsolation(nodes);
+	const sorted = getWorkflowSortedNodesForGrid(connectedNodes);
+	if (sorted.length === 0) {
+		placeStandaloneIsolatedNodes(isolatedNodes, [], "row", spacing);
+		return;
+	}
 
 	const colGap = getColumnGap(spacing);
 	const rowGap = getRowGap(spacing);
@@ -1110,7 +1200,10 @@ function arrangeGrid(nodes, spacing = DEFAULT_SPACING) {
 		}
 	}
 
-	resolveNodeOverlaps(sorted, Math.max(colGap, rowGap));
+	if (colGap >= 0 && rowGap >= 0) {
+		resolveNodeOverlaps(sorted, Math.max(colGap, rowGap));
+	}
+	placeStandaloneIsolatedNodes(isolatedNodes, sorted, "row", spacing);
 }
 
 function traceRealSource(nodeId, validSet, visited = new Set()) {
@@ -1492,6 +1585,97 @@ function separateIsolatedNodes(normalNodes, inDegree, outDegree) {
 	return normalNodes.filter((node) => {
 		return (inDegree.get(node) || 0) === 0 && (outDegree.get(node) || 0) === 0;
 	});
+}
+
+function hasDirectLinkWithinNodeSet(node, idSet) {
+	if (!node || !idSet?.size) return false;
+
+	for (const input of safeArray(node.inputs)) {
+		if (!input?.link) continue;
+		const link = getLinkById(input.link);
+		if (link?.origin_id != null && String(link.origin_id) !== String(node.id) && idSet.has(String(link.origin_id))) {
+			return true;
+		}
+	}
+
+	for (const output of safeArray(node.outputs)) {
+		for (const linkId of safeArray(output?.links)) {
+			const link = getLinkById(linkId);
+			if (link?.target_id != null && String(link.target_id) !== String(node.id) && idSet.has(String(link.target_id))) {
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+function splitNodesByIsolation(nodes) {
+	const validNodes = filterValidNodes(nodes, false);
+	if (validNodes.length === 0) {
+		return { connectedNodes: [], isolatedNodes: [] };
+	}
+
+	const {
+		normalNodes,
+		rerouteNodes,
+		inDegree,
+		outDegree,
+	} = buildConnectionGraph(validNodes);
+
+	const isolatedSet = new Set(separateIsolatedNodes(normalNodes, inDegree, outDegree));
+	const nodeIdSet = new Set(validNodes.map((node) => node?.id).filter((id) => id != null).map(String));
+
+	for (const reroute of rerouteNodes) {
+		if (!hasDirectLinkWithinNodeSet(reroute, nodeIdSet)) {
+			isolatedSet.add(reroute);
+		}
+	}
+
+	return {
+		connectedNodes: validNodes.filter((node) => !isolatedSet.has(node)),
+		isolatedNodes: validNodes.filter((node) => isolatedSet.has(node)),
+	};
+}
+
+function sortStandaloneIsolatedNodes(nodes) {
+	return [...nodes].sort((a, b) => {
+		const ay = getNodeY(a);
+		const by = getNodeY(b);
+		if (Math.abs(ay - by) > 8) return ay - by;
+		return getNodeX(a) - getNodeX(b);
+	});
+}
+
+function placeStandaloneIsolatedNodes(isolatedNodes, anchorNodes, orientation = "row", spacing = DEFAULT_SPACING) {
+	const isolated = sortStandaloneIsolatedNodes(filterValidNodes(isolatedNodes, false));
+	if (!isolated.length) return;
+
+	const anchors = filterValidNodes(anchorNodes, false);
+	const colGap = getColumnGap(spacing);
+	const rowGap = getRowGap(spacing);
+	const mainBounds = getBoundsForNodes(anchors, 0);
+
+	if (orientation === "column") {
+		const maxWidth = Math.max(1, ...isolated.map(getNodeWidth));
+		const startX = mainBounds ? mainBounds.x - Math.max(0, colGap * 3) - maxWidth : 0;
+		let currentY = mainBounds ? mainBounds.y : 0;
+
+		for (const node of isolated) {
+			setNodePosition(node, startX, currentY);
+			currentY += getNodeHeight(node) + rowGap;
+		}
+		return;
+	}
+
+	let currentX = mainBounds ? mainBounds.x : 0;
+	const maxHeight = Math.max(1, ...isolated.map(getNodeHeight));
+	const startY = mainBounds ? mainBounds.y - Math.max(0, rowGap * 3) - maxHeight : 0;
+
+	for (const node of isolated) {
+		setNodePosition(node, currentX, startY);
+		currentX += getNodeWidth(node) + colGap;
+	}
 }
 
 function placeIsolatedNodes(isolatedNodes, layerGroups, config) {
@@ -2291,22 +2475,30 @@ function placeCenteredLayer(nodes, x, centerY, rowGap = DEFAULT_SPACING) {
 
 function getAnchorInputOrder(parentNode, childNode) {
 	let best = 999999;
+	const childSet = new Set([childNode]);
 	for (let i = 0; i < safeArray(parentNode?.inputs).length; i++) {
 		const input = parentNode.inputs[i];
 		if (!input?.link) continue;
 		const link = getLinkById(input.link);
-		if (link?.origin_id === childNode?.id) best = Math.min(best, i);
+		if (!link) continue;
+		const source = traceRealSource(link.origin_id, childSet);
+		if (source === childNode) best = Math.min(best, i);
 	}
 	return best;
 }
 
 function getAnchorOutputOrder(parentNode, childNode) {
 	let best = 999999;
+	const childSet = new Set([childNode]);
 	for (let i = 0; i < safeArray(parentNode?.outputs).length; i++) {
 		const output = parentNode.outputs[i];
 		for (const linkId of safeArray(output?.links)) {
 			const link = getLinkById(linkId);
-			if (link?.target_id === childNode?.id) best = Math.min(best, i * 1000 + Number(link?.target_slot || 0));
+			if (!link) continue;
+			const targets = traceRealTargets(link.target_id, childSet);
+			if (targets.includes(childNode)) {
+				best = Math.min(best, i * 1000 + Number(link?.target_slot || 0));
+			}
 		}
 	}
 	return best;
@@ -2395,9 +2587,13 @@ function buildDirectionalRadialPositions(anchor, normalNodes, forward, backward,
 
 	const maxWidth = Math.max(MIN_LAYOUT_NODE_WIDTH, ...normalNodes.map((node) => Math.max(getNodeWidth(node), getVisualNodeWidth(node))));
 	const maxHeight = Math.max(80, ...normalNodes.map(getNodeHeight));
-	const colStepBase = Math.max(380, maxWidth + getColumnGap(spacing) * 8);
-	const branchGapBase = Math.max(190, maxHeight + getRowGap(spacing) * 5);
-	const levelMinGap = Math.max(120, getRowGap(spacing) * 3);
+	const columnGap = getColumnGap(spacing);
+	const rowGap = getRowGap(spacing);
+	const columnGapMagnitude = Math.max(16, Math.abs(columnGap));
+	const rowGapMagnitude = Math.max(16, Math.abs(rowGap));
+	const colStepBase = Math.round(maxWidth + columnGapMagnitude * 1.5);
+	const branchGapBase = Math.round(maxHeight + rowGapMagnitude * 1.5);
+	const levelMinGap = Math.round(rowGapMagnitude * 1.2);
 
 	// 一个节点可能通过交叉线同时能从两边到达。保留离锚点更近的那次，避免被远层覆盖。
 	const assigned = new Map([[anchor, { depth: 0, direction: 0 }]]);
@@ -2448,8 +2644,7 @@ function buildDirectionalRadialPositions(anchor, normalNodes, forward, backward,
 			if (!children.length) continue;
 			sortNodesByInterfaceFromParent(parent, children, direction);
 
-			// 深层适当再拉开一点，线会更清楚。
-			const depthScale = 1 + Math.min(0.45, depth * 0.08);
+			const depthScale = 1 + Math.min(0.18, depth * 0.04);
 			const branchGap = Math.round(branchGapBase * depthScale);
 			const offsets = getRadialChildOffsets(children.length, branchGap);
 
@@ -2459,7 +2654,7 @@ function buildDirectionalRadialPositions(anchor, normalNodes, forward, backward,
 				const visualChildHalf = Math.max(getNodeWidth(child), getVisualNodeWidth(child)) / 2;
 				const stepX = Math.max(
 					Math.round(colStepBase * depthScale),
-					Math.round(visualParentHalf + visualChildHalf + getColumnGap(spacing) * 7)
+					Math.round(visualParentHalf + visualChildHalf + columnGapMagnitude)
 				);
 
 				const childCenter = {
@@ -2511,7 +2706,7 @@ function buildDirectionalRadialPositions(anchor, normalNodes, forward, backward,
 					sortNodesByInterfaceFromParent(parent, children, direction);
 
 					const nextDepth = parentDepth + 1;
-					const depthScale = 1 + Math.min(0.65, nextDepth * 0.08);
+					const depthScale = 1 + Math.min(0.22, nextDepth * 0.04);
 					const branchGap = Math.round(branchGapBase * depthScale);
 					const offsets = getRadialChildOffsets(children.length, branchGap);
 
@@ -2521,7 +2716,7 @@ function buildDirectionalRadialPositions(anchor, normalNodes, forward, backward,
 						const visualChildHalf = Math.max(getNodeWidth(child), getVisualNodeWidth(child)) / 2;
 						const stepX = Math.max(
 							Math.round(colStepBase * depthScale),
-							Math.round(visualParentHalf + visualChildHalf + getColumnGap(spacing) * 8)
+							Math.round(visualParentHalf + visualChildHalf + columnGapMagnitude)
 						);
 
 						const x = parentPos.x + direction * stepX;
@@ -2568,21 +2763,39 @@ function buildDirectionalRadialPositions(anchor, normalNodes, forward, backward,
 
 	return positions;
 }
-function placeDisconnectedNodesAroundAnchor(anchor, floatingNodes, positions, spacing = DEFAULT_SPACING) {
+
+function getBoundsForPositionMap(positions, gap = 0) {
+	const entries = Array.from(positions?.entries?.() || []).filter(([node, center]) => {
+		return isRealNode(node) && center && Number.isFinite(Number(center.x)) && Number.isFinite(Number(center.y));
+	});
+	if (!entries.length) return null;
+
+	const g = Math.max(0, Math.round(gap));
+	const minX = Math.min(...entries.map(([node, center]) => center.x - getNodeWidth(node) / 2));
+	const minY = Math.min(...entries.map(([node, center]) => center.y - getNodeHeight(node) / 2));
+	const maxX = Math.max(...entries.map(([node, center]) => center.x + getNodeWidth(node) / 2 + g));
+	const maxY = Math.max(...entries.map(([node, center]) => center.y + getNodeHeight(node) / 2 + g));
+
+	return {
+		x: Math.round(minX),
+		y: Math.round(minY),
+		width: Math.round(maxX - minX),
+		height: Math.round(maxY - minY),
+		right: Math.round(maxX),
+		bottom: Math.round(maxY),
+	};
+}
+
+function placeDisconnectedNodesAroundAnchor(anchor, floatingNodes, positions, spacing = DEFAULT_SPACING, mode = "auto") {
 	if (!floatingNodes.length) return;
 
 	const center = positions.get(anchor) || {
 		x: getNodeX(anchor) + getNodeWidth(anchor) / 2,
 		y: getNodeY(anchor) + getNodeHeight(anchor) / 2,
 	};
-	const bounds = getBoundsForNodes(Array.from(positions.keys()), Math.max(getColumnGap(spacing), getRowGap(spacing)));
-	const startY = Math.round((bounds?.bottom || center.y) + getRowGap(spacing) * 3 + 120);
-	const cols = Math.max(1, Math.ceil(Math.sqrt(floatingNodes.length)));
-	const maxWidth = Math.max(MIN_LAYOUT_NODE_WIDTH, ...floatingNodes.map(getNodeWidth));
-	const maxHeight = Math.max(80, ...floatingNodes.map(getNodeHeight));
-	const colStep = maxWidth + getColumnGap(spacing) * 2;
-	const rowStep = maxHeight + getRowGap(spacing) * 2;
-	const startX = Math.round(center.x - ((cols - 1) * colStep) / 2);
+	const bounds = getBoundsForPositionMap(positions, Math.max(getColumnGap(spacing), getRowGap(spacing)));
+	const colGap = getColumnGap(spacing);
+	const rowGap = getRowGap(spacing);
 
 	floatingNodes.sort((a, b) => {
 		const ta = String(a?.type || a?.comfyClass || "");
@@ -2594,14 +2807,35 @@ function placeDisconnectedNodesAroundAnchor(anchor, floatingNodes, positions, sp
 		return getNodeX(a) - getNodeX(b);
 	});
 
-	for (let i = 0; i < floatingNodes.length; i++) {
-		const node = floatingNodes[i];
-		const col = i % cols;
-		const row = Math.floor(i / cols);
+	if (String(mode || "") === "vertical") {
+		const maxWidth = Math.max(MIN_LAYOUT_NODE_WIDTH, ...floatingNodes.map(getNodeWidth));
+		const startX = Math.round((bounds ? bounds.x : center.x) - Math.max(colGap * 3, 120) - maxWidth / 2);
+		let currentTop = bounds ? bounds.y : Math.round(center.y);
+
+		for (const node of floatingNodes) {
+			const height = getNodeHeight(node);
+			positions.set(node, {
+				x: startX,
+				y: currentTop + height / 2,
+			});
+			currentTop += height + rowGap;
+		}
+		return;
+	}
+
+	const totalWidth = floatingNodes.reduce((sum, node) => sum + getNodeWidth(node), 0) + Math.max(0, floatingNodes.length - 1) * colGap;
+	const baseCenterX = bounds ? bounds.x + bounds.width / 2 : center.x;
+	let currentLeft = Math.round(baseCenterX - totalWidth / 2);
+	const maxHeight = Math.max(1, ...floatingNodes.map(getNodeHeight));
+	const startY = Math.round((bounds ? bounds.y : center.y) - Math.max(rowGap * 3, 120) - maxHeight);
+
+	for (const node of floatingNodes) {
+		const width = getNodeWidth(node);
 		positions.set(node, {
-			x: startX + col * colStep,
-			y: startY + row * rowStep,
+			x: currentLeft + width / 2,
+			y: startY + getNodeHeight(node) / 2,
 		});
+		currentLeft += width + colGap;
 	}
 }
 
@@ -2639,7 +2873,7 @@ function arrangeCenteredAroundAnchor(anchor, spacing = DEFAULT_SPACING, mode = "
 	const positions = buildDirectionalRadialPositions(realAnchor, normalNodes, forward, backward, levels, spacing);
 	const positionedSet = new Set(positions.keys());
 	const floatingNodes = normalNodes.filter((node) => !positionedSet.has(node));
-	placeDisconnectedNodesAroundAnchor(realAnchor, floatingNodes, positions, spacing);
+	placeDisconnectedNodesAroundAnchor(realAnchor, floatingNodes, positions, spacing, mode);
 
 	for (const [node, center] of positions.entries()) {
 		setNodePosition(
@@ -2706,29 +2940,30 @@ async function arrangeTopological(nodes, spacing = DEFAULT_SPACING, sortMode = T
 		return;
 	}
 
-	if (sortMode === TOPO_SORT_MODES.TOPO_MAIN_PATH) {
+	const isolatedNodes = separateIsolatedNodes(normalNodes, inDegree, outDegree);
+	const isolatedSet = new Set(isolatedNodes);
+	const connectedNormalNodes = normalNodes.filter((node) => !isolatedSet.has(node));
+
+	if (connectedNormalNodes.length > 0 && sortMode === TOPO_SORT_MODES.TOPO_MAIN_PATH) {
 		// 1. 主链路：以输出锚定为蓝本，按接口顺序计算 Y 轴顺序，
 		//    上游/下游尽量按连接节点中心对齐。
-		arrangeInterfaceAligned(normalNodes, forward, backward, colGap, rowGap);
-	} else if (sortMode === TOPO_SORT_MODES.TOPO_COMPACT) {
+		arrangeInterfaceAligned(connectedNormalNodes, forward, backward, colGap, rowGap);
+	} else if (connectedNormalNodes.length > 0 && sortMode === TOPO_SORT_MODES.TOPO_COMPACT) {
 		// 2. 紧凑层级：输入、输出和其它节点按类型分块，整体尽量形成方形区域。
-		arrangeTypeBlocksSquare(normalNodes, inDegree, outDegree, colGap, rowGap);
-	} else if (sortMode === TOPO_SORT_MODES.TOPO_BRANCH) {
+		arrangeTypeBlocksSquare(connectedNormalNodes, inDegree, outDegree, colGap, rowGap);
+	} else if (connectedNormalNodes.length > 0 && sortMode === TOPO_SORT_MODES.TOPO_BRANCH) {
 		// 3. 分支优先：输入放第一行，下游放下方并尽量与输入中心对齐。
-		arrangeInputTopBranches(normalNodes, forward, backward, inDegree, outDegree, colGap, rowGap);
-	} else {
-		const isolatedNodes = separateIsolatedNodes(normalNodes, inDegree, outDegree);
-		const connectedNodes = normalNodes.filter((node) => !isolatedNodes.includes(node));
-
+		arrangeInputTopBranches(connectedNormalNodes, forward, backward, inDegree, outDegree, colGap, rowGap);
+	} else if (connectedNormalNodes.length > 0) {
 		let levels;
 
 		if (config.levelStrategy === "sinkLongest") {
-			levels = calculateSinkLongestLevels(connectedNodes, forward);
+			levels = calculateSinkLongestLevels(connectedNormalNodes, forward);
 		} else {
-			levels = calculateSourceLongestLevels(connectedNodes, backward);
+			levels = calculateSourceLongestLevels(connectedNormalNodes, backward);
 		}
 
-		const layerGroups = groupByLevel(connectedNodes, levels);
+		const layerGroups = groupByLevel(connectedNormalNodes, levels);
 		sortLayerGroups(layerGroups, levels, forward, backward, config.sortStrategy);
 
 		const xByLevel = calculateLevelXPositions(layerGroups, {
@@ -2740,15 +2975,12 @@ async function arrangeTopological(nodes, spacing = DEFAULT_SPACING, sortMode = T
 			...config,
 			rowGap: Math.max(VERTICAL_SAFE_GAP, config.rowGap + rowGap),
 		});
-
-		placeIsolatedNodes(isolatedNodes, layerGroups, {
-			...config,
-			colWidth: Math.max(HORIZONTAL_SAFE_GAP, config.colWidth + colGap),
-			rowGap: Math.max(VERTICAL_SAFE_GAP, config.rowGap + rowGap),
-		});
 	}
 
-	resolveNodeOverlaps(normalNodes, gap);
+	if (colGap >= 0 && rowGap >= 0) {
+		resolveNodeOverlaps(connectedNormalNodes, gap);
+	}
+	placeStandaloneIsolatedNodes(isolatedNodes, connectedNormalNodes, "row", spacing);
 	placeRerouteNodes(rerouteNodes, normalNodes);
 	finalizeArrangementPosition(validNodes, beforeBounds, colGap, rowGap);
 	refreshAfterArrange(validNodes);
@@ -2786,18 +3018,527 @@ async function applyRelax(nodes, iterations = 10, relaxPower = 0.5, spacing = DE
 	refreshAfterArrange(validNodes);
 }
 
+function getSmartFocusNodes(normalNodes, inDegree, outDegree) {
+	const connectedNodes = normalNodes.filter((node) => {
+		return (inDegree.get(node) || 0) > 0 || (outDegree.get(node) || 0) > 0;
+	});
+	if (!connectedNodes.length) return [];
+
+	const outputs = connectedNodes
+		.filter((node) => (outDegree.get(node) || 0) === 0 && (inDegree.get(node) || 0) > 0)
+		.sort((a, b) => {
+			const dy = getNodeY(a) - getNodeY(b);
+			if (Math.abs(dy) > 8) return dy;
+			return getNodeX(a) - getNodeX(b);
+		});
+
+	const maxOut = Math.max(0, ...connectedNodes.map((node) => outDegree.get(node) || 0));
+	const hubs = maxOut > 0
+		? connectedNodes
+			.filter((node) => (outDegree.get(node) || 0) === maxOut)
+			.sort((a, b) => {
+				const bd = (outDegree.get(b) || 0) - (outDegree.get(a) || 0);
+				if (bd !== 0) return bd;
+				const bi = (inDegree.get(b) || 0) - (inDegree.get(a) || 0);
+				if (bi !== 0) return bi;
+				const dy = getNodeY(a) - getNodeY(b);
+				if (Math.abs(dy) > 8) return dy;
+				return getNodeX(a) - getNodeX(b);
+			})
+		: [];
+
+	const result = [];
+	const seen = new Set();
+	for (const node of [...outputs, ...hubs]) {
+		if (!node || seen.has(node)) continue;
+		seen.add(node);
+		result.push(node);
+	}
+
+	return result.length ? result : [connectedNodes[0]];
+}
+
+function calculateSmartFocusData(normalNodes, focusNodes, forward, backward) {
+	const normalSet = new Set(normalNodes);
+	const distance = new Map();
+	const owner = new Map();
+	const queue = [];
+
+	for (let i = 0; i < focusNodes.length; i++) {
+		const node = focusNodes[i];
+		if (!normalSet.has(node)) continue;
+		distance.set(node, 0);
+		owner.set(node, i);
+		queue.push(node);
+	}
+
+	while (queue.length > 0) {
+		const node = queue.shift();
+		const d = distance.get(node) || 0;
+		const neighbors = [
+			...Array.from(backward.get(node) || []),
+			...Array.from(forward.get(node) || []),
+		].filter((item) => normalSet.has(item));
+
+		neighbors.sort((a, b) => {
+			const ai = getFirstLinkedSlotIndex(a, backward, forward);
+			const bi = getFirstLinkedSlotIndex(b, backward, forward);
+			if (ai !== bi) return ai - bi;
+			const ay = getNodeY(a);
+			const by = getNodeY(b);
+			if (ay !== by) return ay - by;
+			return getNodeX(a) - getNodeX(b);
+		});
+
+		for (const next of neighbors) {
+			if (distance.has(next)) continue;
+			distance.set(next, d + 1);
+			owner.set(next, owner.get(node) || 0);
+			queue.push(next);
+		}
+	}
+
+	return { distance, owner };
+}
+
+function calculateSmartYHints(normalNodes, focusNodes, forward, backward, spacing = DEFAULT_SPACING) {
+	const { distance, owner } = calculateSmartFocusData(normalNodes, focusNodes, forward, backward);
+	const rowGapMagnitude = Math.abs(getRowGap(spacing));
+	const focusGap = roundLayoutGap(rowGapMagnitude * 7);
+	const yHints = new Map();
+	const focusIndex = new Map();
+
+	for (let i = 0; i < focusNodes.length; i++) {
+		focusIndex.set(focusNodes[i], i);
+	}
+
+	const avgOriginalY = normalNodes.reduce((sum, node) => sum + getNodeY(node), 0) / Math.max(1, normalNodes.length);
+	const focusCount = Math.max(1, focusNodes.length);
+
+	for (const node of normalNodes) {
+		const ownerIndex = owner.has(node) ? owner.get(node) : Math.floor(focusCount / 2);
+		const baseY = (ownerIndex - (focusCount - 1) / 2) * focusGap;
+		const dist = distance.has(node) ? distance.get(node) : focusCount;
+		const originalBias = Math.max(-focusGap * 0.45, Math.min(focusGap * 0.45, (getNodeY(node) - avgOriginalY) * 0.18));
+		const focusBias = focusIndex.has(node) ? 0 : Math.min(focusGap * 0.5, dist * rowGapMagnitude * 0.35);
+		yHints.set(node, baseY + originalBias + focusBias);
+	}
+
+	for (let iter = 0; iter < 5; iter++) {
+		const nextHints = new Map(yHints);
+
+		for (const node of normalNodes) {
+			if (focusIndex.has(node)) continue;
+			const neighbors = [
+				...Array.from(backward.get(node) || []),
+				...Array.from(forward.get(node) || []),
+			].filter((item) => yHints.has(item));
+			if (!neighbors.length) continue;
+
+			const avg = neighbors.reduce((sum, item) => sum + (yHints.get(item) || 0), 0) / neighbors.length;
+			const old = yHints.get(node) || 0;
+			nextHints.set(node, old * 0.35 + avg * 0.65);
+		}
+
+		for (const [node, value] of nextHints.entries()) {
+			yHints.set(node, value);
+		}
+	}
+
+	return yHints;
+}
+
+function sortSmartPortSiblings(anchor, nodes, direction, forward, backward) {
+	return [...nodes].sort((a, b) => {
+		const ao = getInterfaceOrder(anchor, a, direction);
+		const bo = getInterfaceOrder(anchor, b, direction);
+		if (ao !== bo) return ao - bo;
+
+		const ay = Number(getNodeY(a) || 0);
+		const by = Number(getNodeY(b) || 0);
+		if (ay !== by) return ay - by;
+
+		const ai = getFirstLinkedSlotIndex(a, backward, forward);
+		const bi = getFirstLinkedSlotIndex(b, backward, forward);
+		if (ai !== bi) return ai - bi;
+
+		return getNodeX(a) - getNodeX(b);
+	});
+}
+
+function getSmartPortOrderHint(node, yHints, forward, backward, spacing = DEFAULT_SPACING) {
+	const branchStep = Math.max(24, Math.abs(getRowGap(spacing)) * 2);
+	const signals = [];
+
+	for (const parent of Array.from(backward.get(node) || [])) {
+		const siblings = sortSmartPortSiblings(parent, Array.from(forward.get(parent) || []), 1, forward, backward);
+		if (siblings.length <= 1) continue;
+
+		const index = siblings.indexOf(node);
+		if (index < 0) continue;
+
+		const baseY = Number(yHints.get(parent) ?? getNodeY(parent) ?? 0);
+		signals.push(baseY + (index - (siblings.length - 1) / 2) * branchStep);
+	}
+
+	for (const child of Array.from(forward.get(node) || [])) {
+		const siblings = sortSmartPortSiblings(child, Array.from(backward.get(child) || []), -1, forward, backward);
+		if (siblings.length <= 1) continue;
+
+		const index = siblings.indexOf(node);
+		if (index < 0) continue;
+
+		const baseY = Number(yHints.get(child) ?? getNodeY(child) ?? 0);
+		signals.push(baseY + (index - (siblings.length - 1) / 2) * branchStep);
+	}
+
+	if (!signals.length) return null;
+	return signals.reduce((sum, value) => sum + value, 0) / signals.length;
+}
+
+function getSmartPortSortKey(node, forward, backward) {
+	const signals = [];
+
+	for (const child of Array.from(forward.get(node) || [])) {
+		const siblings = sortSmartPortSiblings(child, Array.from(backward.get(child) || []), -1, forward, backward);
+		const index = siblings.indexOf(node);
+		if (siblings.length > 1 && index >= 0) {
+			signals.push(index * 1000 + getInterfaceOrder(child, node, -1));
+		}
+	}
+
+	for (const parent of Array.from(backward.get(node) || [])) {
+		const siblings = sortSmartPortSiblings(parent, Array.from(forward.get(parent) || []), 1, forward, backward);
+		const index = siblings.indexOf(node);
+		if (siblings.length > 1 && index >= 0) {
+			signals.push(index * 1000 + getInterfaceOrder(parent, node, 1));
+		}
+	}
+
+	if (!signals.length) return null;
+	return signals.reduce((sum, value) => sum + value, 0) / signals.length;
+}
+
+function applySmartPortOrderHints(normalNodes, yHints, forward, backward, spacing = DEFAULT_SPACING) {
+	for (let iter = 0; iter < 6; iter++) {
+		const nextHints = new Map(yHints);
+
+		for (const node of normalNodes) {
+			const portHint = getSmartPortOrderHint(node, yHints, forward, backward, spacing);
+			if (portHint == null) continue;
+
+			const old = Number(yHints.get(node) ?? getNodeY(node) ?? 0);
+			nextHints.set(node, old * 0.06 + portHint * 0.94);
+		}
+
+		for (const [node, value] of nextHints.entries()) {
+			yHints.set(node, value);
+		}
+	}
+
+	return yHints;
+}
+
+function getSmartColumnGap(spacing = DEFAULT_SPACING) {
+	return roundLayoutGap(getColumnGap(spacing) * 1.75);
+}
+
+function calculateSmartXPositions(layerGroups, spacing = DEFAULT_SPACING) {
+	const levels = Array.from(layerGroups.keys()).sort((a, b) => a - b);
+	const maxWidthByLevel = getMaxNodeWidthByLevel(layerGroups);
+	const xByLevel = new Map();
+	const colGap = getSmartColumnGap(spacing);
+	let currentX = 0;
+
+	for (const level of levels) {
+		xByLevel.set(level, currentX);
+		currentX += (maxWidthByLevel.get(level) || MIN_LAYOUT_NODE_WIDTH) + colGap;
+	}
+
+	return xByLevel;
+}
+
+function sortSmartLayer(nodes, yHints, forward, backward, inDegree, outDegree) {
+	nodes.sort((a, b) => {
+		const pa = getSmartPortSortKey(a, forward, backward);
+		const pb = getSmartPortSortKey(b, forward, backward);
+		if (pa != null && pb != null && Math.abs(pa - pb) > 1) return pa - pb;
+		if (pa != null && pb == null) return -1;
+		if (pa == null && pb != null) return 1;
+
+		const ay = Number(yHints.get(a) ?? getNodeY(a));
+		const by = Number(yHints.get(b) ?? getNodeY(b));
+		if (Math.abs(ay - by) > 1) return ay - by;
+
+		const degreeA = (inDegree.get(a) || 0) + (outDegree.get(a) || 0);
+		const degreeB = (inDegree.get(b) || 0) + (outDegree.get(b) || 0);
+		if (degreeA !== degreeB) return degreeB - degreeA;
+
+		const ai = getFirstLinkedSlotIndex(a, backward, forward);
+		const bi = getFirstLinkedSlotIndex(b, backward, forward);
+		if (ai !== bi) return ai - bi;
+
+		const oy = getNodeY(a) - getNodeY(b);
+		if (Math.abs(oy) > 8) return oy;
+		return getNodeX(a) - getNodeX(b);
+	});
+}
+
+function placeSmartLayeredNodes(layerGroups, xByLevel, yHints, forward, backward, inDegree, outDegree, spacing = DEFAULT_SPACING) {
+	const levels = Array.from(layerGroups.keys()).sort((a, b) => a - b);
+	const rowGap = roundLayoutGap(getRowGap(spacing) * 4);
+
+	for (const level of levels) {
+		const layer = layerGroups.get(level) || [];
+		if (!layer.length) continue;
+
+		sortSmartLayer(layer, yHints, forward, backward, inDegree, outDegree);
+		const x = xByLevel.get(level) || 0;
+		let lastBottom = -Infinity;
+
+		for (const node of layer) {
+			const preferredTop = Math.round((yHints.get(node) || 0) - getNodeHeight(node) / 2);
+			const y = Math.max(preferredTop, lastBottom + rowGap);
+			setNodePosition(node, x, y);
+			lastBottom = y + getNodeHeight(node);
+		}
+
+		const bounds = getBoundsForNodes(layer, 0);
+		if (bounds) {
+			const centerOffset = Math.round(bounds.y + bounds.height / 2);
+			moveNodesBy(layer, 0, -centerOffset);
+		}
+	}
+}
+
+function getPureSerialOrder(normalNodes, forward, inDegree, outDegree) {
+	if (normalNodes.length <= 1) return normalNodes.length ? [...normalNodes] : null;
+
+	for (const node of normalNodes) {
+		if ((inDegree.get(node) || 0) > 1 || (outDegree.get(node) || 0) > 1) {
+			return null;
+		}
+	}
+
+	const sources = normalNodes.filter((node) => (inDegree.get(node) || 0) === 0);
+	const sinks = normalNodes.filter((node) => (outDegree.get(node) || 0) === 0);
+	if (sources.length !== 1 || sinks.length !== 1) return null;
+
+	const order = [];
+	const visited = new Set();
+	let current = sources[0];
+
+	while (current && !visited.has(current)) {
+		order.push(current);
+		visited.add(current);
+		const nextNodes = Array.from(forward.get(current) || []).filter((node) => !visited.has(node));
+		current = nextNodes[0] || null;
+	}
+
+	return order.length === normalNodes.length ? order : null;
+}
+
+function arrangeSmartSerialChain(order, spacing = DEFAULT_SPACING) {
+	const rowGap = roundLayoutGap(getRowGap(spacing) * 5);
+	const xDrift = roundLayoutGap(getColumnGap(spacing) * 2);
+	let x = 0;
+	let y = 0;
+
+	for (const node of order) {
+		setNodePosition(node, x, y);
+		x += xDrift;
+		y += getNodeHeight(node) + rowGap;
+	}
+}
+
+function enforceUpstreamLeftOfDownstream(normalNodes, forward, spacing = DEFAULT_SPACING, compact = false) {
+	const nodes = filterValidNodes(normalNodes, false);
+	if (!nodes.length) return;
+
+	const minGap = compact ? getColumnGap(spacing) : getSmartColumnGap(spacing);
+	for (let iter = 0; iter < nodes.length + 4; iter++) {
+		let changed = false;
+
+		for (const upstream of nodes) {
+			for (const downstream of Array.from(forward.get(upstream) || [])) {
+				if (!downstream) continue;
+				const requestedX = compact
+					? getNodeX(upstream) + minGap
+					: getNodeX(upstream) + getNodeWidth(upstream) + minGap;
+				const minX = Math.max(getNodeX(upstream) + 1, requestedX);
+				if (getNodeX(downstream) < minX) {
+					setNodePosition(downstream, minX, getNodeY(downstream));
+					changed = true;
+				}
+			}
+		}
+
+		if (!changed) break;
+	}
+}
+
+function collectSmartConnectedComponents(normalNodes, forward, backward, inDegree, outDegree) {
+	const normalSet = new Set(normalNodes);
+	const visited = new Set();
+	const components = [];
+
+	for (const start of normalNodes) {
+		if (!start || visited.has(start)) continue;
+
+		const component = [];
+		const queue = [start];
+		visited.add(start);
+
+		while (queue.length > 0) {
+			const node = queue.shift();
+			component.push(node);
+
+			const neighbors = [
+				...Array.from(forward.get(node) || []),
+				...Array.from(backward.get(node) || []),
+			].filter((item) => normalSet.has(item));
+
+			for (const next of neighbors) {
+				if (visited.has(next)) continue;
+				visited.add(next);
+				queue.push(next);
+			}
+		}
+
+		components.push(component);
+	}
+
+	components.sort((a, b) => {
+		const aMaxOut = Math.max(0, ...a.map((node) => outDegree.get(node) || 0));
+		const bMaxOut = Math.max(0, ...b.map((node) => outDegree.get(node) || 0));
+		if (aMaxOut !== bMaxOut) return bMaxOut - aMaxOut;
+
+		const aOutputs = a.filter((node) => (outDegree.get(node) || 0) === 0 && (inDegree.get(node) || 0) > 0).length;
+		const bOutputs = b.filter((node) => (outDegree.get(node) || 0) === 0 && (inDegree.get(node) || 0) > 0).length;
+		if (aOutputs !== bOutputs) return bOutputs - aOutputs;
+
+		const aEdges = a.reduce((sum, node) => sum + (outDegree.get(node) || 0), 0);
+		const bEdges = b.reduce((sum, node) => sum + (outDegree.get(node) || 0), 0);
+		if (aEdges !== bEdges) return bEdges - aEdges;
+		if (a.length !== b.length) return b.length - a.length;
+
+		return Math.min(...a.map(getNodeY)) - Math.min(...b.map(getNodeY));
+	});
+
+	return components;
+}
+
+function moveSmartComponentTo(component, x, y) {
+	const bounds = getBoundsForNodes(component, 0);
+	if (!bounds) return;
+	moveNodesBy(component, Math.round(x - bounds.x), Math.round(y - bounds.y));
+}
+
+function placeSmartComponentsAroundCenter(components, spacing = DEFAULT_SPACING) {
+	if (!components.length) return;
+
+	const horizontalGap = Math.max(0, roundLayoutGap(getColumnGap(spacing) * 10));
+	const verticalGap = Math.max(0, roundLayoutGap(getRowGap(spacing) * 10));
+	moveSmartComponentTo(components[0], 0, 0);
+
+	const sides = ["left", "right", "top", "bottom"];
+	for (let i = 1; i < components.length; i++) {
+		const component = components[i];
+		const componentBounds = getBoundsForNodes(component, 0);
+		const placedBounds = getBoundsForNodes(components.slice(0, i).flat(), 0);
+		if (!componentBounds || !placedBounds) continue;
+
+		const side = sides[(i - 1) % sides.length];
+		const centerX = placedBounds.x + placedBounds.width / 2;
+		const centerY = placedBounds.y + placedBounds.height / 2;
+		let x = componentBounds.x;
+		let y = componentBounds.y;
+
+		if (side === "left") {
+			x = placedBounds.x - horizontalGap - componentBounds.width;
+			y = centerY - componentBounds.height / 2;
+		} else if (side === "right") {
+			x = placedBounds.right + horizontalGap;
+			y = centerY - componentBounds.height / 2;
+		} else if (side === "top") {
+			x = centerX - componentBounds.width / 2;
+			y = placedBounds.y - verticalGap - componentBounds.height;
+		} else {
+			x = centerX - componentBounds.width / 2;
+			y = placedBounds.bottom + verticalGap;
+		}
+
+		moveSmartComponentTo(component, x, y);
+	}
+}
+
+function arrangeSmartCentered(normalNodes, forward, backward, inDegree, outDegree, spacing = DEFAULT_SPACING) {
+	const serialOrder = getPureSerialOrder(normalNodes, forward, inDegree, outDegree);
+	if (serialOrder) {
+		arrangeSmartSerialChain(serialOrder, spacing);
+		return "serial";
+	}
+
+	const levels = calculateSourceLongestLevels(normalNodes, backward);
+	const layerGroups = groupByLevel(normalNodes, levels);
+	const focusNodes = getSmartFocusNodes(normalNodes, inDegree, outDegree);
+	const yHints = calculateSmartYHints(normalNodes, focusNodes, forward, backward, spacing);
+	applySmartPortOrderHints(normalNodes, yHints, forward, backward, spacing);
+	const xByLevel = calculateSmartXPositions(layerGroups, spacing);
+
+	placeSmartLayeredNodes(layerGroups, xByLevel, yHints, forward, backward, inDegree, outDegree, spacing);
+	return "radial";
+}
+
 async function arrangeAuto(nodes, spacing = DEFAULT_SPACING, iterations = 10, relaxPower = 0.5, collisionAvoidance = true, respectConnections = true) {
 	console.log("[GJJ_NodeArranger] Starting auto arrangement");
 
-	if (respectConnections) {
-		await arrangeTopological(nodes, spacing, TOPO_SORT_MODES.TOPO_MAIN_PATH);
-		await applyRelax(nodes, Math.max(2, Math.floor(iterations / 2)), relaxPower * 0.35, spacing, collisionAvoidance);
-	} else {
+	const validNodes = filterValidNodes(nodes, false);
+	const beforeBounds = getBoundsForNodes(validNodes, Math.max(getColumnGap(spacing), getRowGap(spacing)));
+
+	if (!respectConnections) {
 		await applyRelax(nodes, iterations, relaxPower, spacing, collisionAvoidance);
+		refreshAfterArrange(nodes);
+		fitView(nodes);
+		console.log("[GJJ_NodeArranger] Auto arrangement completed");
+		return;
 	}
 
-	refreshAfterArrange(nodes);
-	fitView(nodes);
+	shrinkNodeWidths(validNodes);
+
+	const { connectedNodes, isolatedNodes } = splitNodesByIsolation(validNodes);
+	const {
+		normalNodes,
+		rerouteNodes,
+		forward,
+		backward,
+		inDegree,
+		outDegree,
+	} = buildConnectionGraph(connectedNodes);
+
+	if (normalNodes.length > 0) {
+		const components = collectSmartConnectedComponents(normalNodes, forward, backward, inDegree, outDegree);
+
+		for (const component of components) {
+			const smartMode = arrangeSmartCentered(component, forward, backward, inDegree, outDegree, spacing);
+			enforceUpstreamLeftOfDownstream(component, forward, spacing, smartMode === "serial");
+
+			if (collisionAvoidance && smartMode !== "serial" && getColumnGap(spacing) >= 0 && getRowGap(spacing) >= 0) {
+				resolveNodeOverlaps(component, Math.max(getColumnGap(spacing), getRowGap(spacing)));
+				enforceUpstreamLeftOfDownstream(component, forward, spacing);
+			}
+		}
+
+		placeSmartComponentsAroundCenter(components, spacing);
+		placeRerouteNodes(rerouteNodes, normalNodes);
+	}
+
+	placeStandaloneIsolatedNodes(isolatedNodes, normalNodes, "row", spacing);
+	finalizeArrangementPosition(validNodes, beforeBounds, getColumnGap(spacing), getRowGap(spacing));
+	refreshAfterArrange(validNodes);
+	fitView(validNodes);
+
+	await new Promise((resolve) => setTimeout(resolve, 0));
 
 	console.log("[GJJ_NodeArranger] Auto arrangement completed");
 }
@@ -2815,6 +3556,7 @@ async function arrangeNodes(
 	if (validNodes.length === 0) return;
 
 	LAST_ARRANGE_MODE = mode;
+	showArrangeModeToast(mode, selectedOnly);
 	const selectedNodes = getSelectedGraphNodes();
 	const anchorNode = selectedOnly && selectedNodes.length === 1
 		? selectedNodes[0]
@@ -2873,6 +3615,7 @@ function arrangeTopologicalFromGraph(sortMode = TOPO_SORT_MODES.TOPO_MAIN_PATH, 
 	const validNodes = getGraphNodesForArrange(selectedOnly);
 	if (validNodes.length === 0) return;
 	LAST_ARRANGE_MODE = sortMode;
+	showArrangeModeToast(sortMode, selectedOnly);
 	const selectedNodes = getSelectedGraphNodes();
 	const anchorNode = selectedOnly && selectedNodes.length === 1
 		? selectedNodes[0]

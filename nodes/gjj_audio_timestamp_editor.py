@@ -812,19 +812,6 @@ class GJJ_AudioSegmentEditor:
 		except Exception as exc:
 			report = getattr(exc, "gjj_report", None)
 			if report is not None:
-				try:
-					from server import PromptServer
-					PromptServer.instance.send_sync("gjj_audio_timestamp_error", {
-						"node": str(unique_id),
-						"warning_message": report.get("warning_message", ""),
-						"panel_message": report.get("panel_message", ""),
-						"error": report.get("panel_message", ""),
-						"install_command": report.get("install_cmd", ""),
-						"copy_text": report.get("copy_text", ""),
-						"copy_label": report.get("copy_label", ""),
-					})
-				except Exception:
-					pass
 				send_dependency_model_notice(report, unique_id=unique_id)
 				raise RuntimeError(report.get("warning_message") or "运行时依赖缺失。") from exc
 			# 其他错误使用标准格式

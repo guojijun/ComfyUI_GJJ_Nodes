@@ -4,9 +4,9 @@ import { api } from "/scripts/api.js";
 const TARGET_NODES = new Set(["GJJ_AnyPreview"]);
 const INPUT_PREFIX = "any_";
 const MIN_VISIBLE_INPUTS = 1;
-const ANY_INPUT_TYPE = "*";
-const INPUT_DISPLAY_PREFIX = "输入 ";
-const INPUT_TOOLTIP = "可连接任意类型；同类数据会自动合并后预览和输出。";
+const ANY_INPUT_TYPE = "GJJ_BATCH_IMAGE, IMAGE, MASK,STRING,AUDIO,VIDEO,*";
+const FIRST_INPUT_LABEL = "任意对象";
+const INPUT_TOOLTIP = "可连接 GJJ_BATCH_IMAGE、IMAGE、MASK、STRING、AUDIO、VIDEO 或任意对象；列表会展开预览。";
 const PREVIEW_WIDGET_NAME = "gjj_any_preview_text";
 const EMPTY_PREVIEW = "执行后在这里预览文本、对象或调试信息";
 const MIN_PREVIEW_HEIGHT = 96;
@@ -86,6 +86,18 @@ function firstMediaPayload(...payloads) {
 	return [];
 }
 
+function normalizePreviewItemsPayload(payload) {
+	if (!payload) {
+		return [];
+	}
+	if (!Array.isArray(payload)) {
+		return [];
+	}
+	const items =
+		payload.length === 1 && Array.isArray(payload[0]) ? payload[0] : payload;
+	return items.filter((item) => item && typeof item === "object");
+}
+
 function formatInputName(index) {
 	return `${INPUT_PREFIX}${String(index).padStart(2, "0")}`;
 }
@@ -107,6 +119,14 @@ function getInputs(node) {
 				.filter((input) => String(input?.name || "").startsWith(INPUT_PREFIX))
 				.sort((a, b) => getInputIndex(a?.name) - getInputIndex(b?.name))
 		: [];
+}
+
+function migrateLegacyInputs(node) {
+	for (const input of node?.inputs || []) {
+		if (String(input?.name || "") === "batch_image") {
+			input.name = formatInputName(1);
+		}
+	}
 }
 
 function getLinkedOutputInfo(input) {
@@ -305,7 +325,7 @@ function removeUnusedInputsFromEnd(node, minInputs = MIN_VISIBLE_INPUTS) {
 function renameInputsSequentially(node) {
 	getInputs(node).forEach((input, index) => {
 		input.name = formatInputName(index + 1);
-		input.label = `${INPUT_DISPLAY_PREFIX}${index + 1}`;
+		input.label = index === 0 ? FIRST_INPUT_LABEL : `${FIRST_INPUT_LABEL} ${index + 1}`;
 		input.localized_name = input.label;
 		input.tooltip = INPUT_TOOLTIP;
 	});
@@ -547,6 +567,229 @@ function hideLegacyPreviewWidgets(node) {
 	});
 }
 
+function appendImagePreviewCards(node, parent, images) {
+	const imageGrid = document.createElement("div");
+	imageGrid.style.cssText = [
+		"display:grid",
+		"grid-template-columns:repeat(auto-fill, minmax(110px, 1fr))",
+		"gap:8px",
+		"width:100%",
+	].join(";");
+
+	for (const [index, item] of images.entries()) {
+		const card = document.createElement("div");
+		card.style.cssText = [
+			"position:relative",
+			"aspect-ratio:1/1",
+			"overflow:hidden",
+			"border-radius:7px",
+			"background:#0c1114",
+			"cursor:pointer",
+		].join(";");
+
+		const image = document.createElement("img");
+		image.src = imageDataToUrl(item);
+		image.draggable = false;
+		image.style.cssText = [
+			"width:100%",
+			"height:100%",
+			"object-fit:cover",
+			"display:block",
+		].join(";");
+		image.onload = () => scheduleLayout(node);
+		image.onerror = () => scheduleLayout(node);
+
+		const badge = document.createElement("div");
+		badge.textContent = `${index + 1}`;
+		badge.style.cssText = [
+			"position:absolute",
+			"top:5px",
+			"left:5px",
+			"min-width:20px",
+			"height:20px",
+			"padding:0 5px",
+			"border-radius:10px",
+			"background:rgba(0, 0, 0, 0.55)",
+			"color:#fff",
+			"font-size:10px",
+			"display:flex",
+			"align-items:center",
+			"justify-content:center",
+			"pointer-events:none",
+		].join(";");
+
+		card.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+
+			const overlay = document.createElement("div");
+			overlay.style.cssText = [
+				"position:fixed",
+				"inset:0",
+				"background:rgba(0, 0, 0, 0.9)",
+				"z-index:10000",
+				"display:flex",
+				"align-items:center",
+				"justify-content:center",
+				"cursor:zoom-out",
+			].join(";");
+
+			const previewImg = document.createElement("img");
+			previewImg.src = imageDataToUrl(item);
+			previewImg.style.cssText = [
+				"max-width:90%",
+				"max-height:90%",
+				"object-fit:contain",
+				"border-radius:8px",
+			].join(";");
+
+			overlay.appendChild(previewImg);
+			overlay.addEventListener("click", () => overlay.remove());
+			document.body.appendChild(overlay);
+		});
+
+		card.appendChild(image);
+		card.appendChild(badge);
+		imageGrid.appendChild(card);
+	}
+
+	parent.appendChild(imageGrid);
+}
+
+function appendMediaPlayers(node, parent, tagName, mediaItems) {
+	for (const item of mediaItems) {
+		const mediaCard = document.createElement("div");
+		mediaCard.style.cssText = [
+			"display:flex",
+			"flex-direction:column",
+			"gap:8px",
+			"width:100%",
+		].join(";");
+
+		const player = document.createElement(tagName);
+		player.controls = true;
+		player.src = imageDataToUrl(item);
+		player.preload = "metadata";
+		player.style.cssText =
+			tagName === "video"
+				? [
+						"width:100%",
+						"max-height:320px",
+						"object-fit:contain",
+						"background:#0c1114",
+						"border-radius:6px",
+				  ].join(";")
+				: [
+						"width:100%",
+						"height:40px",
+				  ].join(";");
+		player.addEventListener("loadedmetadata", () => scheduleLayout(node));
+
+		const label = document.createElement("div");
+		label.textContent = item.filename || (tagName === "video" ? "视频" : "音频");
+		label.style.cssText = [
+			"font-size:12px",
+			"color:#dce7e2",
+			"overflow:hidden",
+			"text-overflow:ellipsis",
+			"white-space:nowrap",
+		].join(";");
+
+		mediaCard.appendChild(player);
+		mediaCard.appendChild(label);
+		parent.appendChild(mediaCard);
+	}
+}
+
+function renderPreviewItems(node, items) {
+	const container = node.__gjjAnyPreviewContainer;
+	const body = node.__gjjAnyPreviewBody;
+	const grid = node.__gjjAnyPreviewGrid;
+	const empty = node.__gjjAnyPreviewEmpty;
+	const previewWrap = node.__gjjAnyPreviewWrap;
+	const editor = node.__gjjAnyPreviewEditor;
+	if (!container || !body || !grid || !empty) {
+		return;
+	}
+
+	body.style.display = "none";
+	if (editor) editor.style.display = "none";
+	empty.style.display = "none";
+	container.style.height = "auto";
+	container.style.minHeight = `${MIN_PREVIEW_HEIGHT}px`;
+	if (previewWrap) {
+		previewWrap.style.overflow = "visible";
+		previewWrap.style.height = "auto";
+		previewWrap.style.minHeight = "96px";
+	}
+
+	grid.style.display = "flex";
+	grid.style.flexDirection = "column";
+	grid.style.gridTemplateColumns = "1fr";
+	grid.style.gap = "8px";
+	grid.style.height = "auto";
+	grid.style.alignItems = "stretch";
+	grid.replaceChildren();
+
+	for (const [index, item] of items.entries()) {
+		const card = document.createElement("div");
+		card.style.cssText = [
+			"display:flex",
+			"flex-direction:column",
+			"gap:8px",
+			"padding:10px",
+			"border:1px solid #33434a",
+			"border-radius:8px",
+			"background:#12191d",
+			"box-sizing:border-box",
+		].join(";");
+
+		const title = document.createElement("div");
+		title.textContent = item.title || `项目 ${index + 1}`;
+		title.style.cssText = [
+			"font-size:12px",
+			"font-weight:700",
+			"color:#e7f3ef",
+			"line-height:1.3",
+		].join(";");
+		card.appendChild(title);
+
+		const images = normalizeMediaPayload(item.images);
+		const audio = normalizeMediaPayload(item.audio);
+		const video = normalizeMediaPayload(item.video);
+		if (images.length) {
+			appendImagePreviewCards(node, card, images);
+		}
+		if (audio.length) {
+			appendMediaPlayers(node, card, "audio", audio);
+		}
+		if (video.length) {
+			appendMediaPlayers(node, card, "video", video);
+		}
+
+		const text = String(item.text || "").trim();
+		if (text) {
+			const textBlock = document.createElement("div");
+			textBlock.className = "gjj-text-input-markdown-body";
+			textBlock.innerHTML = renderMarkdown(text);
+			textBlock.style.cssText = [
+				"background:transparent",
+				"color:#d9e4df",
+				"font-size:12px",
+				"line-height:1.45",
+				"white-space:normal",
+				"overflow:visible",
+				"user-select:text",
+				"-webkit-user-select:text",
+			].join(";");
+			clampTextPreviewLines(textBlock);
+			card.appendChild(textBlock);
+		}
+
+		grid.appendChild(card);
+	}
+}
+
 function applyPreviewContent(node) {
 	const container = node.__gjjAnyPreviewContainer;
 	const body = node.__gjjAnyPreviewBody;
@@ -569,6 +812,9 @@ function applyPreviewContent(node) {
 	const video = Array.isArray(node.__gjjAnyPreviewVideo)
 		? node.__gjjAnyPreviewVideo
 		: [];
+	const previewItems = Array.isArray(node.__gjjAnyPreviewItems)
+		? node.__gjjAnyPreviewItems
+		: [];
 	const showImage = kind === "image" && images.length > 0;
 	const showAudio = kind === "audio" && audio.length > 0;
 	const showVideo = kind === "video" && video.length > 0;
@@ -581,6 +827,26 @@ function applyPreviewContent(node) {
 	const isMediaPreview = showImage || showAudio || showVideo;
 
 	grid.style.display = isMediaPreview ? (showImage ? "grid" : "flex") : "none";
+	grid.style.flexDirection = "";
+
+	if (previewItems.length > 0) {
+		renderPreviewItems(node, previewItems);
+		requestAnimationFrame(() => {
+			const height = Math.max(
+				MIN_PREVIEW_HEIGHT,
+				Math.ceil(
+					container.scrollHeight ||
+						container.offsetHeight ||
+						MIN_PREVIEW_HEIGHT,
+				),
+			);
+			if (node.__gjjAnyPreviewHeight !== height) {
+				node.__gjjAnyPreviewHeight = height;
+			}
+			scheduleLayout(node);
+		});
+		return;
+	}
 
 	if (showImage) {
 		body.style.display = "none";
@@ -1255,6 +1521,7 @@ function stabilizeNode(node) {
 		return;
 	}
 
+	migrateLegacyInputs(node);
 	ensureOutput(node);
 	removeUnusedInputsFromEnd(node, MIN_VISIBLE_INPUTS);
 	ensureTrailingEmptyInput(node);
@@ -1349,6 +1616,8 @@ app.registerExtension({
 				liveText !== null ? "text" : message?.preview_kind?.[0] || "";
 			this.__gjjAnyPreviewText =
 				liveText !== null ? liveText : message?.preview_text?.[0] || "";
+			this.__gjjAnyPreviewItems =
+				liveText !== null ? [] : normalizePreviewItemsPayload(message?.preview_items);
 			this.__gjjAnyPreviewImages =
 				liveText !== null
 					? []

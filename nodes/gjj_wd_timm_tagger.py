@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import fnmatch
+import importlib.util
 import json
 import os
 from typing import Any, NamedTuple
@@ -44,6 +45,20 @@ DEFAULT_MODEL_ORDER = (
 )
 DTYPE_MAP = {"自动": None, "bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
 TAGGER_REQUIRED_FILES = ("config.json", "model.safetensors", "selected_tags.csv")
+DEPENDENCY_SPECS = (
+    {
+        "module_name": "timm",
+        "package_name": "timm",
+        "display_name": "timm",
+        "description": "用于创建 WD Tagger 的本地模型结构。",
+    },
+    {
+        "module_name": "safetensors.torch",
+        "package_name": "safetensors",
+        "display_name": "safetensors",
+        "description": "用于读取 WD Tagger 的 model.safetensors 权重文件。",
+    },
+)
 
 try:
     WD_TAGGER_DIR = os.path.join(folder_paths.models_dir, "wd_taggers")
@@ -155,27 +170,59 @@ def _dtype_value(dtype_name: str):
     return DTYPE_MAP.get(dtype_name, None)
 
 
+def _module_available(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except Exception:
+        return False
+
+
+def _missing_dependency_specs() -> list[dict[str, str]]:
+    return [spec for spec in DEPENDENCY_SPECS if not _module_available(spec["module_name"])]
+
+
+def _missing_model_specs() -> list[dict[str, str]]:
+    models = _scan_model_dirs()
+    if models and models[0] != PLACEHOLDER_MODEL:
+        return []
+    return [
+        make_missing_model_spec(
+            label="WD Tagger 模型目录",
+            subdir=MODEL_SUBDIR,
+            filename="<模型名>/config.json + model.safetensors + selected_tags.csv",
+            description="默认使用本地已有模型，不会联网下载。",
+        )
+    ]
+
+
+def _build_environment_report() -> dict[str, Any]:
+    return build_dependency_model_report(
+        node_name=NODE_NAME,
+        missing_dependencies=_missing_dependency_specs(),
+        missing_models=_missing_model_specs(),
+        install_packages=[spec["package_name"] for spec in DEPENDENCY_SPECS],
+        description="WD 图片标签器需要本地模型目录，并需要当前 ComfyUI Python 能导入 timm 与 safetensors。",
+        model_download_url="",
+    )
+
+
 def _build_missing_model_report() -> dict[str, Any]:
     return build_dependency_model_report(
         node_name=NODE_NAME,
-        missing_models=[
-            make_missing_model_spec(
-                label="WD Tagger 模型目录",
-                subdir=MODEL_SUBDIR,
-                filename="<模型名>/config.json + model.safetensors + selected_tags.csv",
-                description="默认使用本地已有模型，不会联网下载。",
-            )
-        ],
+        missing_models=_missing_model_specs(),
         description="WD 图片标签器只扫描本地模型目录。",
         model_download_url="",
     )
 
 
 def _description() -> str:
-    models = _scan_model_dirs()
-    if models and models[0] != PLACEHOLDER_MODEL:
+    report = _build_environment_report()
+    if report.get("available", False):
         return "本地 WD Timm 图片标签器：扫描 models/wd_taggers 下已有模型，输出 Danbooru 风格标签和原始置信度字典。"
-    return _build_missing_model_report()["warning_message"]
+    return report["warning_message"]
+
+
+_ENV_REPORT = _build_environment_report()
 
 
 class GJJWDTimmTagger:
@@ -191,6 +238,11 @@ class GJJWDTimmTagger:
     FUNCTION = "tag"
     GJJ_HELP = {
         "description": DESCRIPTION,
+        "notice": _ENV_REPORT["help_message"] if not _ENV_REPORT.get("available", True) else "",
+        "install_cmd": _ENV_REPORT["install_cmd"] if not _ENV_REPORT.get("available", True) else "",
+        "copy_text": _ENV_REPORT["copy_text"] if not _ENV_REPORT.get("available", True) else "",
+        "copy_label": _ENV_REPORT["copy_label"] if not _ENV_REPORT.get("available", True) else "",
+        "warning_message": _ENV_REPORT["warning_message"] if not _ENV_REPORT.get("available", True) else "",
         "models": [
             {
                 "label": "WD Tagger 模型",
@@ -237,6 +289,18 @@ class GJJWDTimmTagger:
 
         if model_name == PLACEHOLDER_MODEL:
             report = _build_missing_model_report()
+            send_dependency_model_notice(report, unique_id=unique_id)
+            raise RuntimeError(report["warning_message"])
+
+        missing_deps = _missing_dependency_specs()
+        if missing_deps:
+            report = build_dependency_model_report(
+                node_name=NODE_NAME,
+                missing_dependencies=missing_deps,
+                install_packages=[spec["package_name"] for spec in DEPENDENCY_SPECS],
+                description="WD Timm Tagger 需要 timm 与 safetensors 才能加载本地模型。",
+                model_download_url="",
+            )
             send_dependency_model_notice(report, unique_id=unique_id)
             raise RuntimeError(report["warning_message"])
 

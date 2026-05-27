@@ -18,63 +18,24 @@ from .gjj_ollama_common import (
     unload_model,
 )
 
-DEFAULT_IMAGE_ANALYSIS_MODEL = "fredrezones55/Qwen3.5-Uncensored-HauhauCS-Aggressive:4b"
-DEFAULT_IMAGE_ANALYSIS_SYSTEM_PROMPT = """
-你是一名影视分镜与图生图提示词设计师，请根据输入图片生成连续分镜提示词，用于Qwen2.5图生图。
-
-【核心目标】
-在保持人物一致性的前提下，生成具有明显镜头变化、动作变化和画面差异的分镜，避免画面重复和同质化。
-
-【强制输出规则】
-
-1. 每个分镜仅一行
-2. 分镜之间不得有空行
-3. 不输出任何解释或多余内容
-4. 严格按时间顺序
-5. 每行必须使用格式：
-   【分镜简介】：详细介绍：含人物、景别、视角、构图、背景、服装、动作、表情
-
-【一致性要求（弱化版）】
-以下必须保持一致：
-
-* 人物身份与外貌
-* 核心服装（允许细微变化，如褶皱、被风吹动）
-* 基础场景（同一条路/同一辆车）
-
-【变化驱动（关键）】
-每个分镜必须至少变化2项：
-
-* 视角变化（正面 / 侧面 / 背面 / 俯拍 / 仰拍）
-* 构图变化（特写 / 过肩 / 主观视角 / 双人构图）
-* 动作变化（转头 / 加速 / 停车 / 手部动作）
-* 表情变化（微笑→兴奋→紧张等）
-* 环境变化（光线、背景运动、风、速度感）
-
-【强制要求（避免同质化）】
-
-* 不允许连续两个分镜使用相同视角和构图
-* 不允许连续静态镜头（必须有动作推进）
-* 必须包含至少3种不同镜头类型（如：特写 / 侧面 / 主观视角 / 远景）
-
-【图生图优化】
-
-* 增加“动态细节”：风吹头发、背景运动模糊、光影变化
-* 增加“空间变化”：车内→车外→远景
-* 描述可视化，不抽象
-
-【字段要求】
-
-* 视角：如“侧面视角”“俯拍视角”“主观视角”
-* 构图：如“过肩构图”“双人构图”“驾驶位构图”
-* 动作必须具体
-
-仅输出分镜内容，每行一个，前面用【】总结10个字左右分镜简介，后面跟详细分镜拆解，不要任何其它额外信息。
-""".strip()
-DEFAULT_USER_PROMPT = "请提炼图片中的主体、环境、风格、镜头、构图、光线、材质与细节，并整理成适合文生图模型直接使用的高质量提示词。"
-NODE_NAME = "GJJ_ImageAnalysis"
+DEFAULT_OLLAMA_ASSISTANT_MODEL = "fredrezones55/Qwen3.5-Uncensored-HauhauCS-Aggressive:4b"
+DEFAULT_USER_PROMPT = ""
+NODE_NAME = "GJJ_OllamaAssistant"
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_MAX_TOKENS = 1024
-IMAGE_ANALYSIS_TIMEOUT = 300
+OLLAMA_ASSISTANT_TIMEOUT = 300
+IMAGE_INPUT_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
+DEFAULT_SYSTEM_PROMPT_TEMPLATES = "\n\n".join([
+    "【🧡图片反推】准确识别参考图片中的主体、人物外貌、服装、动作、场景结构、镜头构图、光线、色调、材质和关键细节，整理为可直接用于图像或视频生成的连贯画面描述。",
+    "【🎬分镜延展】基于参考图片或输入描述生成连续分镜内容，保持人物身份、核心服装、场景和整体色调一致，同时推动镜头、构图、动作、表情与环境变化，使相邻画面自然衔接且具有叙事进展。",
+    "【🌏中译英】将输入内容精准翻译为英文，保持原有语序结构、提示词权重符号、专有名词和画面语义；使用适合 AI 图像与视频生成的自然英文表达。",
+])
+DEFAULT_SYSTEM_PROMPT_OUTPUT_RULE = "只输出结果文字，不输出解释、分析过程、标题、Markdown 代码块或提示性前缀。"
+DEFAULT_OLLAMA_ASSISTANT_SYSTEM_PROMPT = (
+    "准确识别参考图片中的主体、人物外貌、服装、动作、场景结构、镜头构图、光线、色调、材质和关键细节，"
+    "整理为可直接用于图像或视频生成的连贯画面描述。\n"
+    f"{DEFAULT_SYSTEM_PROMPT_OUTPUT_RULE}"
+)
 
 
 def _coerce_choice(value, allowed: tuple[str, ...], fallback: str) -> str:
@@ -102,36 +63,39 @@ def _coerce_int(value, fallback: int, minimum: int = 1, maximum: int = 8192) -> 
     return result
 
 
-def _image_analysis_model_options() -> list[str]:
+def _ollama_assistant_model_options() -> list[str]:
     models = [
         str(item or "").strip()
         for item in model_options_with_fallback()
         if str(item or "").strip()
     ]
-    ordered = [DEFAULT_IMAGE_ANALYSIS_MODEL]
+    ordered = [DEFAULT_OLLAMA_ASSISTANT_MODEL]
     for name in models:
         if name not in ordered:
             ordered.append(name)
-    return ordered
+    return ordered or [""]
 
 
-def build_messages(system_prompt: str, user_prompt: str, image_b64: str):
+def build_messages(system_prompt: str, user_prompt: str, image_b64: str | None = None):
     messages = []
     system_prompt = (system_prompt or "").strip()
-    user_prompt = (user_prompt or "").strip() or DEFAULT_USER_PROMPT
+    user_prompt = (user_prompt or "").strip()
 
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
-    messages.append({
-        "role": "user",
-        "content": user_prompt,
-        "images": [image_b64],
-    })
+    if not user_prompt and image_b64:
+        user_prompt = "请根据提供的参考图片完成所选任务。"
+    if not user_prompt:
+        raise RuntimeError("请填写指令或原文；视觉任务也可以接入图片后直接执行。")
+    user_message = {"role": "user", "content": user_prompt}
+    if image_b64:
+        user_message["images"] = [image_b64]
+    messages.append(user_message)
     return messages
 
 
-def _collect_images(image=None, batch_image=None) -> list[torch.Tensor]:
-    source = batch_image if isinstance(batch_image, torch.Tensor) else image
+def _collect_images(image=None) -> list[torch.Tensor]:
+    source = image
     if not isinstance(source, torch.Tensor):
         return []
     tensor = source.detach()
@@ -153,18 +117,19 @@ def _format_batch_content(results: list[str]) -> str:
     return "\n\n".join(sections)
 
 
-class GJJ_ImageAnalysis:
+class GJJ_OllamaAssistant:
     CATEGORY = "GJJ/LLM"
-    FUNCTION = "analyze"
-    DESCRIPTION = "调用本地 Ollama 多模态模型分析图片内容，并整理成适合文生图使用的反推提示词。"
-    SEARCH_ALIASES = ["image analysis", "image prompt", "图片", "反推", "提示词", "分析"]
+    FUNCTION = "run"
+    DESCRIPTION = "统一调用本机 Ollama 完成文本生成、提示词翻译与可选图片理解任务；通过模板按钮快速切换系统提示词。"
+    SEARCH_ALIASES = ["ollama", "assistant", "提示词", "翻译", "图片反推", "文本生成"]
     RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("图像分析提示",)
-    OUTPUT_TOOLTIPS = ("根据输入图片反推出的提示词结果。",)
+    RETURN_NAMES = ("生成文本",)
+    OUTPUT_TOOLTIPS = ("Ollama 根据当前模板、指令与可选图片生成的文本结果。",)
 
     @classmethod
     def INPUT_TYPES(cls):
-        model_options = _image_analysis_model_options()
+        model_options = _ollama_assistant_model_options()
+        default_model = model_options[0] if model_options else ""
         return {
             "required": {
                 "ollama_host": ("STRING", {
@@ -174,9 +139,9 @@ class GJJ_ImageAnalysis:
                     "tooltip": "整体填写完整地址，格式为 http://127.0.0.1:端口 。示例：http://127.0.0.1:11434",
                 }),
                 "model": (model_options, {
-                    "default": DEFAULT_IMAGE_ANALYSIS_MODEL,
+                    "default": default_model,
                     "display_name": "Ollama 模型",
-                    "tooltip": "从本地 Ollama 已安装模型中选择一个支持图像理解的模型。",
+                    "tooltip": "从本地 Ollama 已安装模型中选择一个模型；接入图片时需要模型支持视觉理解。",
                 }),
                 "model_keep_alive": (["保持模型", "卸载模型"], {
                     "default": "保持模型",
@@ -205,26 +170,38 @@ class GJJ_ImageAnalysis:
                     "tooltip": "限制模型最多生成多少 token。",
                 }),
                 "system_prompt": ("STRING", {
-                    "default": DEFAULT_IMAGE_ANALYSIS_SYSTEM_PROMPT,
+                    "default": DEFAULT_OLLAMA_ASSISTANT_SYSTEM_PROMPT,
                     "multiline": True,
                     "display_name": "系统提示词",
-                    "tooltip": "用于规定图片反推任务的角色、约束和输出目标。",
+                    "tooltip": "由模板按钮快速填入，也可以自定义任务规则与输出目标。",
+                }),
+                "system_prompt_templates": ("STRING", {
+                    "default": DEFAULT_SYSTEM_PROMPT_TEMPLATES,
+                    "multiline": True,
+                    "display_name": "系统提示词模板",
+                    "tooltip": "格式为【按钮标题】系统提示词正文；用空行或单独一行 --- 分隔不同模板，增删块即可增删前台按钮。",
+                    "hidden": True,
+                    "display": "hidden",
+                }),
+                "system_prompt_output_rule": ("STRING", {
+                    "default": DEFAULT_SYSTEM_PROMPT_OUTPUT_RULE,
+                    "multiline": True,
+                    "display_name": "输出约束",
+                    "tooltip": "点击模板按钮时，会把这段文字追加到系统提示词正文之后；可按需要修改或留空。",
+                    "hidden": True,
+                    "display": "hidden",
                 }),
                 "user_prompt": ("STRING", {
                     "default": DEFAULT_USER_PROMPT,
                     "multiline": True,
-                    "display_name": "用户提示词",
-                    "tooltip": "补充你希望模型重点关注的分析方向或输出要求。",
+                    "display_name": "指令 / 原文",
+                    "tooltip": "输入需要生成、翻译或结合图片处理的内容；只接图片时可以留空。",
                 }),
             },
             "optional": {
-                "image": ("IMAGE", {
-                    "display_name": "图片",
-                    "tooltip": "输入单张或普通 IMAGE batch 图片；未接入批量图片入口时使用这里。",
-                }),
-                "batch_image": (GJJ_BATCH_IMAGE_TYPE, {
-                    "display_name": "GJJ 批量图片",
-                    "tooltip": "接入 GJJ 批量图片队列后，会逐张调用本机 Ollama 图片反推，并把每张结果按图片序号合并成一个文本输出。",
+                "image": (IMAGE_INPUT_TYPE, {
+                    "display_name": "可选图片 / 批量图片",
+                    "tooltip": "可选。兼容普通 IMAGE 与 GJJ 批量图片；多张输入会逐张处理并按图片序号合并文本。",
                 }),
             },
             "hidden": {
@@ -232,7 +209,7 @@ class GJJ_ImageAnalysis:
             },
         }
 
-    def analyze(
+    def run(
         self,
         ollama_host,
         model,
@@ -241,27 +218,28 @@ class GJJ_ImageAnalysis:
         temperature,
         max_tokens,
         system_prompt,
+        system_prompt_templates,
+        system_prompt_output_rule,
         user_prompt,
         image=None,
-        batch_image=None,
         unique_id=None,
         **_kwargs,
     ):
-        send_ollama_status(unique_id, "1/3 检查地址、参数与模型...", 0.08)
+        send_ollama_status(unique_id, "1/3 检查 Ollama 参数与任务...", 0.08)
         configured_host = normalize_ollama_host(ollama_host or DEFAULT_OLLAMA_HOST)
         model_keep_alive = _coerce_choice(model_keep_alive, ("保持模型", "卸载模型"), "保持模型")
         thinking_mode = _coerce_choice(thinking_mode, ("关闭思考", "开启思考"), "关闭思考")
         temperature = _coerce_float(temperature, DEFAULT_TEMPERATURE)
         max_tokens = _coerce_int(max_tokens, DEFAULT_MAX_TOKENS, minimum=16, maximum=8192)
         chosen_model = resolve_model(model, host=configured_host)
-        images = _collect_images(image=image, batch_image=batch_image)
-        if not images:
-            raise RuntimeError("请接入单张图片或 GJJ 批量图片。")
+        images = _collect_images(image=image)
+        task_items: list[torch.Tensor | None] = images if images else [None]
 
         results: list[str] = []
-        total = len(images)
-        for index, item in enumerate(images, start=1):
-            image_b64 = tensor_to_png_base64(item)
+        total = len(task_items)
+        has_images = bool(images)
+        for index, item in enumerate(task_items, start=1):
+            image_b64 = tensor_to_png_base64(item) if isinstance(item, torch.Tensor) else None
             payload = {
                 "model": chosen_model,
                 "messages": build_messages(system_prompt, user_prompt, image_b64),
@@ -274,24 +252,25 @@ class GJJ_ImageAnalysis:
             }
 
             progress = 0.12 + 0.76 * ((index - 1) / max(1, total))
-            send_ollama_status(unique_id, f"2/3 正在反推图片 {index}/{total}...", progress)
+            task_label = f"图片 {index}/{total}" if has_images else "文本任务"
+            send_ollama_status(unique_id, f"2/3 正在处理{task_label}...", progress)
             response = request_chat(
                 payload,
-                error_label=f"Ollama 图片 {index} 反推请求",
+                error_label=f"Ollama {task_label}请求",
                 host=configured_host,
-                timeout=IMAGE_ANALYSIS_TIMEOUT,
+                timeout=OLLAMA_ASSISTANT_TIMEOUT,
             )
             content = extract_final_answer(response).strip()
 
             if not content and thinking_mode == "开启思考":
                 fallback_payload = dict(payload)
                 fallback_payload["think"] = False
-                send_ollama_status(unique_id, f"2/3 图片 {index}/{total} 思考结果为空，正在回退为直出模式...", progress + 0.03)
+                send_ollama_status(unique_id, f"2/3 {task_label}思考结果为空，正在回退为直出模式...", progress + 0.03)
                 fallback_response = request_chat(
                     fallback_payload,
-                    error_label=f"Ollama 图片 {index} 反推回退请求",
+                    error_label=f"Ollama {task_label}回退请求",
                     host=configured_host,
-                    timeout=IMAGE_ANALYSIS_TIMEOUT,
+                    timeout=OLLAMA_ASSISTANT_TIMEOUT,
                 )
                 content = extract_final_answer(fallback_response).strip()
 
@@ -306,11 +285,12 @@ class GJJ_ImageAnalysis:
                 send_ollama_status(unique_id, "3/3 正在卸载本次模型...", 0.9)
                 unload_model(chosen_model, host=configured_host)
             except Exception as exc:
-                raise RuntimeError(f"图片反推已完成，但卸载模型失败：{exc}") from exc
+                raise RuntimeError(f"Ollama 任务已完成，但卸载模型失败：{exc}") from exc
 
-        send_ollama_status(unique_id, f"3/3 图片反推完成：{len(results)} 张", 1.0)
+        completion = f"图片任务完成：{len(results)} 张" if has_images else "文本任务完成"
+        send_ollama_status(unique_id, f"3/3 {completion}", 1.0)
         return (content,)
 
 
-NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_ImageAnalysis}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🔎 本机Ollama图片反推"}
+NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_OllamaAssistant}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🤖 本机Ollama助手"}

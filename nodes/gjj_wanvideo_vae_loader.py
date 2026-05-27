@@ -15,6 +15,7 @@ try:
         print_runtime_dependency_error,
         build_dependency_model_report,
         print_dependency_model_report,
+        send_dependency_model_notice,
         get_pip_install_command_text,
     )
 except ImportError:
@@ -24,6 +25,7 @@ except ImportError:
         print_runtime_dependency_error,
         build_dependency_model_report,
         print_dependency_model_report,
+        send_dependency_model_notice,
         get_pip_install_command_text,
     )
 
@@ -35,6 +37,8 @@ LONGCAT_VAE_MODEL = "Wan2_1_VAE_bf16.safetensors"
 # 启动时依赖检查
 # ============================================================================
 _DEPENDENCIES_AVAILABLE = False
+_MISSING_DEPENDENCIES = []
+_DEPENDENCY_REPORT = None
 _DESCRIPTION = "加载 WanVideo VAE 模型，支持自动检测模型类型（标准/38层/轻量）"
 _GJJ_HELP = {
     "title": "WanVideo VAE 加载器",
@@ -61,7 +65,7 @@ _GJJ_HELP = {
 
 def _check_startup_dependencies():
     """启动时检查依赖，只跳过当前节点，不影响其他节点。"""
-    global _DEPENDENCIES_AVAILABLE, _DESCRIPTION
+    global _DEPENDENCIES_AVAILABLE, _MISSING_DEPENDENCIES, _DEPENDENCY_REPORT, _DESCRIPTION
 
     # 定义必需依赖及其描述
     required_deps = [
@@ -84,29 +88,35 @@ def _check_startup_dependencies():
 
     if missing_deps:
         _DEPENDENCIES_AVAILABLE = False
+        _MISSING_DEPENDENCIES = missing_deps
         
         # 使用公共函数生成报告
-        report = build_dependency_model_report(
+        _DEPENDENCY_REPORT = build_dependency_model_report(
             node_name=NODE_DISPLAY_NAME,
             missing_dependencies=missing_deps,
             install_packages=[m["package_name"] for m in missing_deps],
         )
         
-        _DESCRIPTION = report.get("warning_message", _DESCRIPTION)
-        _GJJ_HELP["description"] = report.get("panel_message", _GJJ_HELP["description"])
-        _GJJ_HELP["install_cmd"] = report.get("install_cmd", "")
-        _GJJ_HELP["warning_message"] = report.get("warning_message", "")
+        _DESCRIPTION = _DEPENDENCY_REPORT.get("warning_message", _DESCRIPTION)
+        _GJJ_HELP["description"] = _DEPENDENCY_REPORT.get("panel_message", _GJJ_HELP["description"])
+        _GJJ_HELP["notice"] = _DEPENDENCY_REPORT.get("help_message", "")
+        _GJJ_HELP["install_cmd"] = _DEPENDENCY_REPORT.get("install_cmd", "")
+        _GJJ_HELP["copy_text"] = _DEPENDENCY_REPORT.get("copy_text", "")
+        _GJJ_HELP["copy_label"] = _DEPENDENCY_REPORT.get("copy_label", "")
+        _GJJ_HELP["warning_message"] = _DEPENDENCY_REPORT.get("warning_message", "")
 
         # 打印控制台报告
         try:
             print_dependency_model_report(
-                report,
+                _DEPENDENCY_REPORT,
                 title="GJJ WanVideo VAE 加载器 启动时依赖缺失！",
             )
         except Exception:
             pass
     else:
         _DEPENDENCIES_AVAILABLE = True
+        _MISSING_DEPENDENCIES = []
+        _DEPENDENCY_REPORT = build_dependency_model_report(node_name=NODE_DISPLAY_NAME)
         _DESCRIPTION = f"✅ {_DESCRIPTION}"
 
 
@@ -164,6 +174,19 @@ def _load_wan_video_vae():
     WanVideoVAE38 = getattr(vae_module, "WanVideoVAE38")
     
     return WanVideoVAE, WanVideoVAE38
+
+
+def _raise_startup_dependency_notice(unique_id=None):
+    report = _DEPENDENCY_REPORT or build_dependency_model_report(
+        node_name=NODE_DISPLAY_NAME,
+        missing_dependencies=_MISSING_DEPENDENCIES,
+        install_packages=[
+            dependency.get("package_name") or dependency.get("module_name")
+            for dependency in _MISSING_DEPENDENCIES
+        ],
+    )
+    send_dependency_model_notice(report, unique_id=unique_id)
+    raise RuntimeError(report.get("warning_message") or "⚠️缺失运行依赖，点击❓按钮了解详情。")
 
 
 def _get_offload_device():
@@ -257,6 +280,9 @@ class GJJ_WanVideoVAELoader:
         print(f"[GJJ WanVideoVAE] 模型名称: {model_name}")
         print(f"[GJJ WanVideoVAE] 精度: {precision}")
         print(f"[GJJ WanVideoVAE] 使用 CPU 缓存: {use_cpu_cache}")
+
+        if not _DEPENDENCIES_AVAILABLE:
+            _raise_startup_dependency_notice(unique_id=unique_id)
         
         # 运行时依赖检查
         try:
@@ -266,7 +292,8 @@ class GJJ_WanVideoVAELoader:
             print_runtime_dependency_error(
                 node_name=NODE_DISPLAY_NAME,
                 dependency_name="accelerate einops",
-                description=str(e),
+                description="WanVideo VAE 运行时依赖导入失败。",
+                extra_info=str(e),
                 unique_id=unique_id,
             )
             raise
@@ -275,7 +302,8 @@ class GJJ_WanVideoVAELoader:
             print_runtime_dependency_error(
                 node_name=NODE_DISPLAY_NAME,
                 dependency_name="accelerate einops",
-                description=str(e),
+                description="WanVideo VAE 运行时依赖导入失败。",
+                extra_info=str(e),
                 unique_id=unique_id,
             )
             raise RuntimeError(

@@ -282,6 +282,34 @@ def _fit(value: Any) -> str:
     return "stretch"
 
 
+def _position(value: Any) -> str:
+    text = str(value or "中").strip().lower()
+    if text in ("上", "top", "up"):
+        return "top"
+    if text in ("下", "bottom", "down"):
+        return "bottom"
+    if text in ("左", "left"):
+        return "left"
+    if text in ("右", "right"):
+        return "right"
+    return "center"
+
+
+def _axis_offset(extra: int, position: str, axis: str) -> int:
+    extra = max(0, int(extra))
+    if axis == "x":
+        if position == "left":
+            return 0
+        if position == "right":
+            return extra
+    else:
+        if position == "top":
+            return 0
+        if position == "bottom":
+            return extra
+    return extra // 2
+
+
 def _aspect_ratio(aspect_ratio: Any, w: int, h: int, proportional_width: Any, proportional_height: Any) -> float:
     text = str(aspect_ratio or "原始比例")
     if text in ("原始比例", "original"):
@@ -302,6 +330,7 @@ def _default_config() -> Dict[str, Any]:
         "round_to_multiple": "8",
         "pad_color": "#000000",
         "pad_feather": 0,
+        "crop_position": "中",
         "device": "CPU",
         "width": 1024,
         "height": 1024,
@@ -586,6 +615,7 @@ def _resize_one(image: torch.Tensor, mask: torch.Tensor | None, cfg: Dict[str, A
     mode = _mode(cfg.get("mode"))
     fit = _fit(cfg.get("fit_mode"))
     method = _method(cfg.get("upscale_method"))
+    position = _position(cfg.get("crop_position"))
     multiple = cfg.get("round_to_multiple", "8")
 
     if cfg.get("device") == "GPU" and method != "lanczos":
@@ -656,8 +686,8 @@ def _resize_one(image: torch.Tensor, mask: torch.Tensor | None, cfg: Dict[str, A
     resized_mask = None if msk is None else upscale_mask(msk, inner_w, inner_h)
 
     if fit == "crop":
-        x = max(0, (inner_w - target_w) // 2)
-        y = max(0, (inner_h - target_h) // 2)
+        x = _axis_offset(inner_w - target_w, position, "x")
+        y = _axis_offset(inner_h - target_h, position, "y")
         out = resized[:, y:y + target_h, x:x + target_w, :]
         out_mask = None if resized_mask is None else resized_mask[:, y:y + target_h, x:x + target_w]
         return out.cpu(), None if out_mask is None else out_mask.cpu(), w0, h0, target_w, target_h
@@ -671,8 +701,8 @@ def _resize_one(image: torch.Tensor, mask: torch.Tensor | None, cfg: Dict[str, A
             out[..., 3:4] = 1.0
     else:
         out[..., 0:1] = rgb[0].view(1, 1, 1, 1)
-    x = max(0, (target_w - inner_w) // 2)
-    y = max(0, (target_h - inner_h) // 2)
+    x = _axis_offset(target_w - inner_w, position, "x")
+    y = _axis_offset(target_h - inner_h, position, "y")
     out[:, y:y + inner_h, x:x + inner_w, :] = resized
 
     if resized_mask is not None:

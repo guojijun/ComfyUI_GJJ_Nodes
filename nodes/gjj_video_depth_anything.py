@@ -31,6 +31,7 @@ try:
         build_dependency_model_report,
         load_dependency_at_runtime,
         make_missing_model_spec,
+        print_dependency_model_report,
         raise_dependency_model_error,
     )
 except ImportError:
@@ -38,6 +39,7 @@ except ImportError:
         build_dependency_model_report,
         load_dependency_at_runtime,
         make_missing_model_spec,
+        print_dependency_model_report,
         raise_dependency_model_error,
     )
 
@@ -253,10 +255,16 @@ def _build_environment_report() -> dict[str, Any]:
 
 
 _ENVIRONMENT_REPORT = _build_environment_report()
+_DEPENDENCIES_AVAILABLE = bool(_ENVIRONMENT_REPORT.get("dependencies_available", True))
+_MODELS_AVAILABLE = bool(_ENVIRONMENT_REPORT.get("models_available", True))
+_MISSING_DEPENDENCIES = list(_ENVIRONMENT_REPORT.get("missing_dependencies", []) or [])
+_MISSING_MODELS = list(_ENVIRONMENT_REPORT.get("missing_models", []) or [])
+if not _ENVIRONMENT_REPORT.get("available", True):
+    print_dependency_model_report(_ENVIRONMENT_REPORT, title="GJJ 视频深度估计运行环境缺失！")
 _DESCRIPTION = (
     _DESCRIPTION_INTRO
-    if _ENVIRONMENT_REPORT.get("available", True)
-    else f"{_ENVIRONMENT_REPORT.get('warning_message', '')}\n\n{_DESCRIPTION_INTRO}"
+    if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
+    else _ENVIRONMENT_REPORT.get("warning_message", "⚠️缺失运行依赖，点击❓按钮了解详情。")
 )
 
 

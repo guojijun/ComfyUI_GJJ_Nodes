@@ -62,6 +62,36 @@ def _patch_sd3_sampling(model: Any, shift: float):
         raise RuntimeError(f"SD3 采样算法补丁失败：shift={shift}\n{exc}") from exc
 
 
+def _latent_details(latent_image: Any) -> str:
+    samples = latent_image.get("samples") if isinstance(latent_image, dict) else None
+    shape = getattr(samples, "shape", None)
+    if shape is None:
+        return "Latent 张量形状无法读取。"
+
+    try:
+        dimensions = tuple(int(value) for value in shape)
+    except Exception:
+        return f"Latent 张量形状：{shape}。"
+
+    if len(dimensions) >= 5:
+        return f"当前输入为视频 Latent，张量形状为 {dimensions}，时间维长度为 {dimensions[2]}。"
+    return f"当前 Latent 张量形状为 {dimensions}。"
+
+
+def _is_memory_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    markers = (
+        "out of memory",
+        "not enough memory",
+        "can't allocate memory",
+        "cannot allocate memory",
+        "defaultcpuallocator",
+        "内存不足",
+        "显存不足",
+    )
+    return any(marker in message for marker in markers)
+
+
 def _advanced_ksampler(
     model: Any,
     positive: Any,
@@ -71,6 +101,7 @@ def _advanced_ksampler(
     noise_seed: int,
     steps: int,
     cfg: float,
+    denoise: float,
     sampler_name: str,
     scheduler: str,
     start_at_step: int,
@@ -94,14 +125,26 @@ def _advanced_ksampler(
             int(start_at_step),
             int(end_at_step),
             "enable" if return_with_leftover_noise else "disable",
+            float(denoise),
         )[0]
     except Exception as exc:
-        raise RuntimeError(
+        context = (
             "K采样器（高级）执行失败：\n"
             f"add_noise={add_noise}, seed={noise_seed}, steps={steps}, cfg={cfg}, "
+            f"denoise={denoise}, "
             f"sampler={sampler_name}, scheduler={scheduler}, start={start_at_step}, end={end_at_step}, "
-            f"return_leftover={return_with_leftover_noise}\n{exc}"
-        ) from exc
+            f"return_leftover={return_with_leftover_noise}\n"
+        )
+        if _is_memory_error(exc):
+            context += (
+                "\n检测到采样内存/显存溢出。\n"
+                f"{_latent_details(latent_image)}\n"
+                "本节点只封装 SD3 ModelSampling 与 ComfyUI 原生 KSamplerAdvanced，"
+                "会把整段 Latent 一次送入模型，不提供长视频上下文窗口采样。\n"
+                "长视频请改用支持 context_options 的「GJJ · 🎞️ WanVideo 视频采样器 v2」，"
+                "或减少帧数/分辨率。系统内存容量不能替代 GPU 采样所需显存。\n"
+            )
+        raise RuntimeError(f"{context}原始错误：{exc}") from exc
 
 
 class GJJ_SD3SamplingAlgorithmPanel:
@@ -338,6 +381,7 @@ class GJJ_SD3SamplingAlgorithmPanel:
         noise_seed = int(kwargs.get("noise_seed", 0))
         steps = int(kwargs.get("steps", 4))
         cfg = float(kwargs.get("cfg", 1.0))
+        denoise = max(0.0, min(1.0, float(kwargs.get("denoise", 1.0))))
         sampler_name = str(kwargs.get("sampler_name", "euler") or "euler")
         scheduler = str(kwargs.get("scheduler", "simple") or "simple")
         start_at_step = int(kwargs.get("start_at_step", 0))
@@ -361,6 +405,7 @@ class GJJ_SD3SamplingAlgorithmPanel:
             noise_seed,
             steps,
             cfg,
+            denoise,
             sampler_name,
             scheduler,
             start_at_step,
@@ -371,4 +416,4 @@ class GJJ_SD3SamplingAlgorithmPanel:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_SD3SamplingAlgorithmPanel}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · ⚙ SD3采样算法"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · ⚙ SD3采样算法(Wan)"}

@@ -217,10 +217,10 @@ function ensureProps(node) {
         node.properties[ACTION_PROP] = ACTION_REFRESH;
     }
     if (!Object.prototype.hasOwnProperty.call(node.properties, AUTO_CLEAN_MEMORY_PROP)) {
-        node.properties[AUTO_CLEAN_MEMORY_PROP] = false;
+        node.properties[AUTO_CLEAN_MEMORY_PROP] = true;
     }
     if (!Object.prototype.hasOwnProperty.call(node.properties, AUTO_CLEAN_GPU_PROP)) {
-        node.properties[AUTO_CLEAN_GPU_PROP] = false;
+        node.properties[AUTO_CLEAN_GPU_PROP] = true;
     }
     return node.properties;
 }
@@ -239,8 +239,8 @@ function asBool(value, fallback = false) {
 function syncPersistedProps(node) {
     const props = ensureProps(node);
     props[ACTION_PROP] = ACTION_REFRESH;
-    props[AUTO_CLEAN_MEMORY_PROP] = asBool(props[AUTO_CLEAN_MEMORY_PROP], false);
-    props[AUTO_CLEAN_GPU_PROP] = asBool(props[AUTO_CLEAN_GPU_PROP], false);
+    props[AUTO_CLEAN_MEMORY_PROP] = asBool(props[AUTO_CLEAN_MEMORY_PROP], true);
+    props[AUTO_CLEAN_GPU_PROP] = asBool(props[AUTO_CLEAN_GPU_PROP], true);
     node.properties = props;
     return props;
 }
@@ -253,10 +253,10 @@ function restorePersistedProps(node, data) {
         node.properties[ACTION_PROP] = saved[ACTION_PROP] || ACTION_REFRESH;
     }
     if (Object.prototype.hasOwnProperty.call(saved, AUTO_CLEAN_MEMORY_PROP)) {
-        node.properties[AUTO_CLEAN_MEMORY_PROP] = asBool(saved[AUTO_CLEAN_MEMORY_PROP], false);
+        node.properties[AUTO_CLEAN_MEMORY_PROP] = asBool(saved[AUTO_CLEAN_MEMORY_PROP], true);
     }
     if (Object.prototype.hasOwnProperty.call(saved, AUTO_CLEAN_GPU_PROP)) {
-        node.properties[AUTO_CLEAN_GPU_PROP] = asBool(saved[AUTO_CLEAN_GPU_PROP], false);
+        node.properties[AUTO_CLEAN_GPU_PROP] = asBool(saved[AUTO_CLEAN_GPU_PROP], true);
     }
 
     return syncPersistedProps(node);

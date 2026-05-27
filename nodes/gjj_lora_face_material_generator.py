@@ -62,7 +62,10 @@ def _send_status(unique_id, text: str) -> None:
 		PromptServer = None
 	try:
 		if PromptServer is not None:
-			PromptServer.instance.send_progress_text(message, unique_id)
+			PromptServer.instance.send_sync(
+				"gjj_node_progress",
+				{"node": str(unique_id), "text": message},
+			)
 	except Exception:
 		pass
 

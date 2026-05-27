@@ -1,5 +1,4 @@
 import { app } from "/scripts/app.js";
-import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set(["GJJ_AdvancedPassthroughRouter"]);
 const SLOT_PREFIX = "any_";
@@ -7,8 +6,19 @@ const OUTPUT_PREFIX = "out_";
 const MIN_PAIRS = 1;
 const MAX_PAIRS = 64;
 const DEFAULT_TYPE = "*";
+const HELP_WIDGET_NAME = "gjj_help_button";
+const COMPACT_MIN_WIDTH = 40;
+const COMPACT_DEFAULT_WIDTH = 140;
 const INPUT_TOOLTIP = "透传任意类型数据；连接后会自动追加下一组输入/输出。";
 const OUTPUT_TOOLTIP = "输出同序号输入口的数据，类型和标签会跟随输入来源。";
+
+function getNoTitleMode() {
+	return globalThis.LiteGraph?.TitleMode?.NO_TITLE ?? 1;
+}
+
+function getSlotHeight() {
+	return Number(globalThis.LiteGraph?.NODE_SLOT_HEIGHT || 20);
+}
 
 function formatInputName(index) {
 	return `${SLOT_PREFIX}${String(index).padStart(2, "0")}`;
@@ -30,8 +40,56 @@ function orderedOutputs(node) {
 	return Array.isArray(node?.outputs) ? node.outputs : [];
 }
 
+function compactRowCount(node) {
+	return Math.max(MIN_PAIRS, orderedInputs(node).length, orderedOutputs(node).length);
+}
+
+function computeCompactSize(node, out = [0, 0]) {
+	const rowCount = compactRowCount(node);
+	out[0] = COMPACT_MIN_WIDTH;
+	out[1] = rowCount * getSlotHeight() + 6;
+	return out;
+}
+
+function currentWidth(node) {
+	const width = Number(node?.size?.[0]);
+	return Number.isFinite(width) && width > 0 ? width : COMPACT_DEFAULT_WIDTH;
+}
+
+function suppressHelpWidget(node) {
+	if (!Array.isArray(node?.widgets)) {
+		return;
+	}
+	for (let index = node.widgets.length - 1; index >= 0; index -= 1) {
+		if (String(node.widgets[index]?.name || "") === HELP_WIDGET_NAME) {
+			node.widgets.splice(index, 1);
+		}
+	}
+	delete node.__gjjHelpWidget;
+	delete node.__gjjHelpWidgetState;
+}
+
+function applyCompactChrome(node) {
+	if (!node) {
+		return;
+	}
+	if (node.constructor) {
+		node.constructor.title_mode = getNoTitleMode();
+	}
+	node.badges = [];
+	node.drawBadges = function () {};
+	suppressHelpWidget(node);
+}
+
 function setDirty(node) {
-	GJJ_Utils.refreshNode(node);
+	if (!node) {
+		return;
+	}
+	applyCompactChrome(node);
+	const height = computeCompactSize(node)[1];
+	node.setSize?.([currentWidth(node), height]);
+	node.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
 }
 
 function isLinkedInput(input) {
@@ -232,9 +290,16 @@ app.registerExtension({
 			return;
 		}
 
+		nodeType.title_mode = getNoTitleMode();
+		nodeType.prototype.computeSize = function (out) {
+			return computeCompactSize(this, out);
+		};
+		nodeType.prototype.drawBadges = function () {};
+
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
 			const result = originalOnNodeCreated?.apply(this, args);
+			applyCompactChrome(this);
 			setTimeout(() => stabilizeNode(this), 0);
 			return result;
 		};
@@ -242,6 +307,7 @@ app.registerExtension({
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalOnConfigure?.apply(this, args);
+			applyCompactChrome(this);
 			setTimeout(() => stabilizeNode(this), 0);
 			return result;
 		};
@@ -249,12 +315,14 @@ app.registerExtension({
 		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalOnConnectionsChange?.apply(this, args);
+			applyCompactChrome(this);
 			scheduleStabilize(this);
 			return result;
 		};
 
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode, ...args) {
+			applyCompactChrome(this);
 			stabilizeNode(this);
 			originalOnSerialize?.apply(this, [serializedNode, ...args]);
 			if (Array.isArray(serializedNode?.inputs)) {
@@ -271,6 +339,7 @@ app.registerExtension({
 
 		const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
 		nodeType.prototype.onDrawBackground = function (...args) {
+			applyCompactChrome(this);
 			const result = originalOnDrawBackground?.apply(this, args);
 			const signature = linkSignature(this);
 			if (signature !== this.__gjjAdvancedPassthroughRouterSignature) {
@@ -284,6 +353,7 @@ app.registerExtension({
 	setup() {
 		for (const node of app.graph?._nodes || []) {
 			if (TARGET_NODES.has(node?.comfyClass)) {
+				applyCompactChrome(node);
 				stabilizeNode(node);
 			}
 		}

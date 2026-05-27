@@ -2173,26 +2173,6 @@ class GJJ_AudioSeparator:
                 install_packages=[spec["package_name"] for spec in REQUIRED_DEPENDENCIES],
                 original_error=str(e),
             )
-            try:
-                from server import PromptServer
-
-                PromptServer.instance.send_sync(
-                    "gjj_audio_separator_error",
-                    {
-                        "node": str(unique_id) if unique_id else None,
-                        "warning_message": report.get("warning_message", ""),
-                        "panel_message": report.get("panel_message", ""),
-                        "help_message": report.get("help_message", ""),
-                        "install_command": report.get("install_cmd", ""),
-                        "copy_text": report.get("copy_text", ""),
-                        "copy_label": report.get("copy_label", ""),
-                        "model_download_url": MODEL_DOWNLOAD_URL,
-                        "missing_dependencies": report.get("missing_dependencies", []),
-                        "missing_models": report.get("missing_models", []),
-                    },
-                )
-            except Exception:
-                pass
             send_dependency_model_notice(report, unique_id=unique_id)
             _log_error("运行时依赖缺失，详情已显示在节点面板。")
             raise RuntimeError(report.get("warning_message") or "运行时依赖缺失。") from e
@@ -2204,26 +2184,6 @@ class GJJ_AudioSeparator:
                 install_packages=[],
                 original_error="",
             )
-            try:
-                from server import PromptServer
-
-                PromptServer.instance.send_sync(
-                    "gjj_audio_separator_error",
-                    {
-                        "node": str(unique_id) if unique_id else None,
-                        "warning_message": report.get("warning_message", ""),
-                        "panel_message": report.get("panel_message", ""),
-                        "help_message": report.get("help_message", ""),
-                        "install_command": "",
-                        "copy_text": report.get("copy_text", ""),
-                        "copy_label": report.get("copy_label", ""),
-                        "model_download_url": MODEL_DOWNLOAD_URL,
-                        "missing_dependencies": [],
-                        "missing_models": report.get("missing_models", []),
-                    },
-                )
-            except Exception:
-                pass
             send_dependency_model_notice(report, unique_id=unique_id)
             _log_error("模型缺失，详情已显示在节点面板。")
             raise RuntimeError(report.get("warning_message") or "未找到 MelBandRoformer 模型。") from None

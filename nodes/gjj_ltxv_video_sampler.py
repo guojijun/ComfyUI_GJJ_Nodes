@@ -16,6 +16,22 @@ import torch
 NODE_NAME = "GJJ_LTXVVideoSampler"
 
 
+class _WidgetCompatibleInput(str):
+    def __new__(cls, display_type: str, allowed_types: tuple[str, ...]):
+        instance = super().__new__(cls, display_type)
+        instance.allowed_types = set(allowed_types)
+        return instance
+
+    def __ne__(self, other):
+        if "*" in self.allowed_types or other == "*":
+            return False
+        return str(other) not in self.allowed_types
+
+
+noise_seed_input = _WidgetCompatibleInput("INT", ("INT", "NOISE"))
+sigmas_input = _WidgetCompatibleInput("STRING", ("STRING", "SIGMAS"))
+
+
 def _sampler_names() -> list[str]:
     names = list(getattr(comfy.samplers, "SAMPLER_NAMES", []) or [])
     if names:
@@ -38,6 +54,20 @@ def _as_float(value: Any, default: float, min_value: float, max_value: float) ->
     except Exception:
         result = default
     return max(min_value, min(max_value, result))
+
+
+def _send_status(unique_id: Any, text: str, progress: float | None = None) -> None:
+    if not unique_id:
+        return
+    try:
+        from server import PromptServer
+
+        payload: dict[str, Any] = {"node": str(unique_id), "text": str(text or "")}
+        if progress is not None:
+            payload["progress"] = max(0.0, min(1.0, float(progress)))
+        PromptServer.instance.send_sync("gjj_node_progress", payload)
+    except Exception:
+        pass
 
 
 def _parse_sigmas_text(sigmas: str) -> torch.Tensor:
@@ -127,6 +157,35 @@ def _cleanup_cuda() -> None:
         pass
 
 
+def _offload_model(model: Any) -> None:
+    try:
+        offload_device = comfy.model_management.unet_offload_device()
+    except Exception:
+        offload_device = None
+    if offload_device is None:
+        return
+
+    candidates = [
+        model,
+        getattr(model, "model", None),
+        getattr(getattr(model, "model", None), "diffusion_model", None),
+        getattr(model, "diffusion_model", None),
+    ]
+    seen: set[int] = set()
+    for item in candidates:
+        if item is None:
+            continue
+        key = id(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if hasattr(item, "to"):
+                item.to(offload_device)
+        except Exception:
+            pass
+
+
 class GJJ_LTXVVideoSampler:
     @classmethod
     def INPUT_TYPES(cls):
@@ -170,7 +229,7 @@ class GJJ_LTXVVideoSampler:
                     },
                 ),
                 "noise_seed": (
-                    "INT,NOISE",
+                    noise_seed_input,
                     {
                         "default": 42,
                         "min": 0,
@@ -201,7 +260,7 @@ class GJJ_LTXVVideoSampler:
                     },
                 ),
                 "sigmas": (
-                    "SIGMAS,STRING",
+                    sigmas_input,
                     {
                         "default": "0.85, 0.7250, 0.4219, 0.0",
                         "multiline": False,
@@ -209,6 +268,25 @@ class GJJ_LTXVVideoSampler:
                         "tooltip": "可手填逗号/空格分隔的 Sigmas，也可连接基本调度器/BasicScheduler 输出的 SIGMAS。",
                     },
                 ),
+                "auto_clean_memory": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "display_name": "采样后清内存",
+                        "tooltip": "采样完成后主动断开中间引用、卸载采样模型并清理 Comfy/PyTorch 缓存。关闭后连续采样会更快，但内存会保留更多。",
+                    },
+                ),
+                "output_denoised": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display_name": "输出降噪Latent",
+                        "tooltip": "开启后额外保存 x0 并生成第二个降噪 Latent 输出，会明显增加视频任务的系统内存占用；关闭时第二输出复用采样 Latent。",
+                    },
+                ),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
             },
         }
 
@@ -224,20 +302,50 @@ class GJJ_LTXVVideoSampler:
         "usage": [
             "输入模型、正负条件、视频 latent、音频 latent。",
             "噪波支持 INT 种子或外接 NOISE；Sigmas 支持手填 STRING 或外接基本调度器 SIGMAS。",
+            "默认不额外生成降噪 Latent，以减少视频采样后的系统内存占用；需要第二输出时可打开「输出降噪Latent」。",
             "输出与 SamplerCustomAdvanced 一致：采样 Latent 和降噪 Latent。",
         ],
     }
 
-    def sample(self, model, positive, negative, video_latent, audio_latent, noise_seed, cfg, sampler_name, sigmas):
+    def sample(
+        self,
+        model,
+        positive,
+        negative,
+        video_latent,
+        audio_latent,
+        noise_seed,
+        cfg,
+        sampler_name,
+        sigmas,
+        auto_clean_memory,
+        output_denoised,
+        unique_id=None,
+    ):
+        guider = None
+        latent = None
+        latent_image = None
+        noise_mask = None
+        x0_output = None
+        callback = None
+        resolved_noise = None
+        samples = None
+        x0_out = None
+        out = None
+        out_denoised = None
+
+        _send_status(unique_id, "1/5 准备 LTXV 采样参数...", 0.08)
         seed = _as_int(noise_seed, 42, 0, 0xffffffffffffffff)
         cfg = _as_float(cfg, 1.0, 0.0, 100.0)
         sigmas_tensor = _normalize_sigmas(sigmas)
         sampler = comfy.samplers.sampler_object(str(sampler_name))
 
+        _send_status(unique_id, "2/5 构建 CFG 引导器...", 0.18)
         guider = comfy.samplers.CFGGuider(model)
         guider.set_conds(positive, negative)
         guider.set_cfg(cfg)
 
+        _send_status(unique_id, "3/5 合并音视频 Latent...", 0.32)
         latent = _concat_av_latent(video_latent, audio_latent)
         latent_image = comfy.sample.fix_empty_latent_channels(
             guider.model_patcher,
@@ -248,14 +356,16 @@ class GJJ_LTXVVideoSampler:
         latent["samples"] = latent_image
         noise_mask = latent.get("noise_mask", None)
 
-        x0_output: dict[str, Any] = {}
+        output_denoised = bool(output_denoised)
+        x0_output = {} if output_denoised else None
         callback = latent_preview.prepare_callback(guider.model_patcher, sigmas_tensor.shape[-1] - 1, x0_output)
         disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
 
         try:
-            noise = _resolve_noise(noise_seed, latent)
+            _send_status(unique_id, "4/5 采样生成 LTXV Latent...", 0.48)
+            resolved_noise = _resolve_noise(noise_seed, latent)
             samples = guider.sample(
-                noise,
+                resolved_noise,
                 latent_image,
                 sampler,
                 sigmas_tensor,
@@ -270,7 +380,7 @@ class GJJ_LTXVVideoSampler:
             out.pop("downscale_ratio_spacial", None)
             out["samples"] = samples
 
-            if "x0" in x0_output:
+            if output_denoised and isinstance(x0_output, dict) and "x0" in x0_output:
                 x0_out = guider.model_patcher.model.process_latent_out(x0_output["x0"].cpu())
                 if samples.is_nested:
                     latent_shapes = [x.shape for x in samples.unbind()]
@@ -281,9 +391,32 @@ class GJJ_LTXVVideoSampler:
             else:
                 out_denoised = out
 
+            _send_status(unique_id, "5/5 LTXV 采样完成", 1.0)
             return (out, out_denoised)
         finally:
-            _cleanup_cuda()
+            try:
+                if isinstance(x0_output, dict):
+                    x0_output.clear()
+            except Exception:
+                pass
+            callback = None
+            resolved_noise = None
+            samples = None
+            x0_out = None
+            latent_image = None
+            noise_mask = None
+            latent = None
+            out = None
+            out_denoised = None
+            if bool(auto_clean_memory):
+                _send_status(unique_id, "正在清理采样缓存...", 0.98)
+                try:
+                    model_patcher = getattr(guider, "model_patcher", None)
+                    _offload_model(model_patcher)
+                except Exception:
+                    pass
+                guider = None
+                _cleanup_cuda()
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_LTXVVideoSampler}

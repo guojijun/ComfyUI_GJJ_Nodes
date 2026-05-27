@@ -35,10 +35,54 @@ const COMPILE_MODES = [
 ];
 
 const TABS = [
-    { id: "torch", label: "Torch编译", tip: "单击只显示 Torch 编译参数；Ctrl 或 Shift 单击可与其它分组合并显示。" },
-    { id: "sage", label: "Sage注意力", tip: "单击只显示 SageAttention 参数；Ctrl 或 Shift 单击可多选。" },
-    { id: "fp16", label: "FP16累积", tip: "单击只启用 FP16 累积；Ctrl 或 Shift 单击可多选。" },
+    { id: "torch", label: "Torch编译", tip: "独立开关：启用或关闭 Torch 编译参数。" },
+    { id: "sage", label: "Sage注意力", tip: "独立开关：启用或关闭 SageAttention 参数。" },
+    { id: "fp16", label: "FP16累积", tip: "独立开关：启用或关闭 FP16 累积。" },
 ];
+
+function ensureStyles() {
+    if (document.getElementById("gjj-model-optimizer-style-v15")) return;
+    const style = document.createElement("style");
+    style.id = "gjj-model-optimizer-style-v15";
+    style.textContent = `
+.gjj-model-opt-tabs {
+    box-sizing: border-box;
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
+    padding: 5px 9px 7px;
+    pointer-events: auto;
+    user-select: none;
+}
+.gjj-model-opt-tab {
+    height: 30px;
+    min-width: 0;
+    border: 1px solid #536171;
+    border-radius: 9px;
+    background: #252a30;
+    color: #c7d0dc;
+    font: 700 12px/28px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    box-sizing: border-box;
+}
+.gjj-model-opt-tab:hover {
+    border-color: #8bd8ff;
+    color: #ffffff;
+    background: #303845;
+}
+.gjj-model-opt-tab.active {
+    border-color: #b8f2ff;
+    background: #1684e8;
+    color: #ffffff;
+    box-shadow: 0 0 0 1px rgba(184, 242, 255, 0.6) inset, 0 0 10px rgba(77, 184, 255, 0.55);
+}
+`;
+    document.head.appendChild(style);
+}
 
 function normalizeConfig(raw = {}) {
     const cfg = { ...DEFAULT_CONFIG, ...(raw || {}) };
@@ -90,15 +134,10 @@ function applyActiveIds(node, ids) {
     saveConfig(node, cfg);
 }
 
-function setSingleOrMulti(node, id, event) {
+function toggleFeature(node, id) {
     const cfg = getConfig(node);
     let ids = activeIdsFromConfig(cfg);
-    const multi = !!(event?.ctrlKey || event?.shiftKey || event?.metaKey);
-    if (multi) {
-        ids.has(id) ? ids.delete(id) : ids.add(id);
-    } else {
-        ids = new Set([id]);
-    }
+    ids.has(id) ? ids.delete(id) : ids.add(id);
     applyActiveIds(node, ids);
 }
 
@@ -170,6 +209,7 @@ function ensureTabWidget(node) {
     tab.hidden = false;
     tab.serialize = false;
     tab.computeSize = tab.computeSize || ((width) => [width || node.size?.[0] || 330, 44]);
+    updateTabWidgetState(node);
     return tab;
 }
 
@@ -210,13 +250,54 @@ function roundedRect(ctx, x, y, w, h, r) {
 }
 
 function createTabWidget(node) {
+    ensureStyles();
+    if (typeof node.addDOMWidget === "function") {
+        const root = document.createElement("div");
+        root.className = "gjj-model-opt-tabs";
+        node.__gjj_model_optimizer_tab_rects = [];
+        for (const ev of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "wheel"]) {
+            root.addEventListener(ev, (event) => event.stopPropagation());
+        }
+        for (const tab of TABS) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "gjj-model-opt-tab";
+            button.dataset.id = tab.id;
+            button.title = tab.tip;
+            button.addEventListener("click", (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                toggleFeature(node, tab.id);
+                updateTabWidgetState(node);
+                rebuild(node);
+            });
+            for (const ev of ["pointerdown", "mousedown", "mouseup", "dblclick", "keydown", "keyup", "wheel"]) {
+                button.addEventListener(ev, (event) => event.stopPropagation());
+            }
+            root.appendChild(button);
+        }
+        const widget = node.addDOMWidget("参数分组", "DOM", root, {
+            serialize: false,
+            hideOnZoom: false,
+        });
+        widget.__gjj_model_optimizer_tabs = true;
+        widget.__gjj_model_optimizer_ui = true;
+        widget.serialize = false;
+        widget.tooltip = "三个功能是独立开关，可同时启用；启用项会同时高亮显示。";
+        widget.computeSize = (width) => [width || node.size?.[0] || 330, 44];
+        widget.getHeight = () => 44;
+        widget.element = root;
+        updateTabWidgetState(node);
+        return widget;
+    }
+
     const widget = {
         name: "参数分组",
         type: "custom",
         __gjj_model_optimizer_tabs: true,
         __gjj_model_optimizer_ui: true,
         serialize: false,
-        tooltip: "单击为单选；按住 Ctrl 或 Shift 单击为多选。选中项会高亮显示。",
+        tooltip: "三个功能是独立开关，可同时启用；启用项会同时高亮显示。",
         computeSize(width) {
             return [width || node.size?.[0] || 330, 44];
         },
@@ -281,7 +362,7 @@ function createTabWidget(node) {
             const y = p[1];
             for (const r of node.__gjj_model_optimizer_tab_rects || []) {
                 if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
-                    setSingleOrMulti(node, r.id, event);
+                    toggleFeature(node, r.id);
                     event?.preventDefault?.();
                     event?.stopPropagation?.();
                     rebuild(node);
@@ -297,6 +378,20 @@ function createTabWidget(node) {
         Object.assign(w, widget);
     }
     return widget;
+}
+
+function updateTabWidgetState(node) {
+    const cfg = getConfig(node);
+    const ids = activeIdsFromConfig(cfg);
+    const tab = node.widgets?.find((w) => w?.__gjj_model_optimizer_tabs);
+    const root = tab?.element;
+    if (!root?.querySelectorAll) return;
+    for (const button of root.querySelectorAll(".gjj-model-opt-tab")) {
+        const active = ids.has(button.dataset.id);
+        button.classList.toggle("active", active);
+        const meta = TABS.find((item) => item.id === button.dataset.id);
+        button.textContent = `${active ? "✓" : "+"} ${meta?.label || button.dataset.id}`;
+    }
 }
 
 function addBool(node, label, key, tooltip) {
@@ -439,7 +534,7 @@ app.registerExtension({
             for (const r of this.__gjj_model_optimizer_tab_rects || []) {
                 const p = getLocalPos(this, pos, event);
                 if (p[0] >= r.x && p[0] <= r.x + r.w && p[1] >= r.y && p[1] <= r.y + r.h) {
-                    setSingleOrMulti(this, r.id, event);
+                    toggleFeature(this, r.id);
                     event?.preventDefault?.();
                     event?.stopPropagation?.();
                     rebuild(this);

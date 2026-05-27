@@ -61,13 +61,24 @@ DEPENDENCY_SPECS = [
     {"module_name": "soundfile", "package_name": "soundfile", "display_name": "soundfile", "description": "LongCat AudioDiT 音频读写依赖。"},
     {"module_name": "huggingface_hub", "package_name": "huggingface_hub", "display_name": "huggingface_hub", "description": "自动下载 LongCat 模型与 tokenizer 依赖。"},
     {"module_name": "librosa", "package_name": "librosa", "display_name": "librosa", "description": "LongCat AudioDiT 音频重采样依赖。"},
-    {"module_name": "av", "package_name": "av", "display_name": "PyAV", "description": "LongCat AudioDiT 回退音频解码依赖。"},
+]
+OPTIONAL_DEPENDENCY_SPECS = [
+    {"module_name": "av", "package_name": "av", "display_name": "PyAV", "description": "可选：当 soundfile 无法读取某些音频/视频格式时，用 PyAV 回退解码。缺失不影响已支持格式的合成。"},
 ]
 
 
 def _collect_dependency_state() -> tuple[bool, list[dict[str, str]]]:
     missing_dependencies: list[dict[str, str]] = []
     for spec in DEPENDENCY_SPECS:
+        available, _ = check_dependencies([spec["module_name"]], NODE_DISPLAY_NAME)
+        if not available:
+            missing_dependencies.append(spec)
+    return (not missing_dependencies), missing_dependencies
+
+
+def _collect_optional_dependency_state() -> tuple[bool, list[dict[str, str]]]:
+    missing_dependencies: list[dict[str, str]] = []
+    for spec in OPTIONAL_DEPENDENCY_SPECS:
         available, _ = check_dependencies([spec["module_name"]], NODE_DISPLAY_NAME)
         if not available:
             missing_dependencies.append(spec)
@@ -89,17 +100,20 @@ def _collect_model_state() -> tuple[bool, list[dict[str, str]]]:
 
 
 _DEPENDENCIES_AVAILABLE, _MISSING_DEPENDENCIES = _collect_dependency_state()
+_OPTIONAL_DEPENDENCIES_AVAILABLE, _MISSING_OPTIONAL_DEPENDENCIES = _collect_optional_dependency_state()
 _MODELS_AVAILABLE, _MISSING_MODELS = _collect_model_state()
 _ENV_REPORT = build_dependency_model_report(
     node_name=NODE_DISPLAY_NAME,
     missing_dependencies=_MISSING_DEPENDENCIES,
+    optional_dependencies=_MISSING_OPTIONAL_DEPENDENCIES,
     missing_models=_MISSING_MODELS,
-    install_packages=RUNTIME_INSTALL_PACKAGES + ["av"],
+    install_packages=RUNTIME_INSTALL_PACKAGES,
+    optional_install_packages=["av"],
     description="LongCat AudioDiT 一体式语音克隆与多说话人 TTS 节点。",
 )
 _HELP_NOTICE = (
     f"{_ENV_REPORT['warning_message']}\n请参考下方依赖、模型说明和安装命令。"
-    if not _ENV_REPORT.get("available", True)
+    if _ENV_REPORT.get("notice_level") in {"error", "optional"}
     else ""
 )
 _DESCRIPTION_READY = """
@@ -486,16 +500,19 @@ class GJJ_LongCatAudioDiTTTS:
         "title": NODE_DISPLAY_NAME,
         "description": _DESCRIPTION_READY,
         "notice": _HELP_NOTICE,
-        "warning_message": _ENV_REPORT["warning_message"] if not _ENV_REPORT.get("available", True) else "",
-        "install_cmd": _ENV_REPORT["install_cmd"] if not _ENV_REPORT.get("available", True) else "",
-        "copy_text": _ENV_REPORT["copy_text"] if not _ENV_REPORT.get("available", True) else "",
-        "copy_label": _ENV_REPORT["copy_label"] if not _ENV_REPORT.get("available", True) else "",
+        "warning_message": _ENV_REPORT["warning_message"] if _ENV_REPORT.get("notice_level") in {"error", "optional"} else "",
+        "install_cmd": _ENV_REPORT["install_cmd"] if _ENV_REPORT.get("notice_level") == "error" else "",
+        "optional_install_cmd": _ENV_REPORT.get("optional_install_cmd", "") if _ENV_REPORT.get("notice_level") == "optional" else "",
+        "copy_text": _ENV_REPORT["copy_text"] if _ENV_REPORT.get("notice_level") in {"error", "optional"} else "",
+        "copy_label": _ENV_REPORT["copy_label"] if _ENV_REPORT.get("notice_level") in {"error", "optional"} else "",
+        "notice_level": _ENV_REPORT.get("notice_level", "ok"),
         "model_download_url": MODEL_DOWNLOAD_URL,
         "missing_dependencies": _MISSING_DEPENDENCIES,
+        "optional_dependencies": _MISSING_OPTIONAL_DEPENDENCIES,
         "missing_models": _MISSING_MODELS,
         "dependencies": [
             "需要 transformers、soundfile、huggingface_hub、librosa 等 Python 依赖。",
-            "本地参考音频回退解码会使用 PyAV。",
+            "可选：本地参考音频回退解码会使用 PyAV；缺失时，soundfile 能读取的格式仍可正常运行。",
             "Tokenizer 会在首次执行时按需自动下载。",
         ],
         "models": _MISSING_MODELS or [

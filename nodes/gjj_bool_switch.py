@@ -13,7 +13,7 @@ class AnyType(str):
         return False
 
 
-any_input_type = AnyType("STRING")  # 必须用 STRING 触发文本框渲染；前端 gjj_node_standardizer.js 会把插槽 type 改成 * 以支持任意类型连接
+any_input_type = AnyType("STRING")  # 必须用 STRING 触发文本框渲染；前端 gjj_common_node_standardizer.js 会把插槽 type 改成 * 以支持任意类型连接
 any_output_type = AnyType("*")
 _FORCE_RE = re.compile(r"^(int|float|str|string|bool|boolean|json|list|tuple|none|null)\((.*)\)$", re.I | re.S)
 
