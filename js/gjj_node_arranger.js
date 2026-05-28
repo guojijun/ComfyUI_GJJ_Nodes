@@ -14,6 +14,7 @@
 import { app } from "/scripts/app.js";
 
 const NODE_NAME = "GJJ_NodeArranger";
+const SETTING_CONTEXT_MENU_ENABLED = "GJJ.NodeArranger.Menu.Enabled";
 
 const MOVE_UNIT = 1;
 
@@ -44,6 +45,23 @@ let VERTICAL_SAFE_GAP = DEFAULT_SPACING;
 // 兼容新版/旧版 ComfyUI：有的版本 node.selected 不可靠，需要同时读 canvas.selected_nodes。
 
 let LAST_CLICKED_NODE_FOR_GJJ_ARRANGE = null;
+
+function gjjSettingValue(id, fallback = undefined) {
+	try {
+		const viaGjj = globalThis.GJJ_Settings?.get?.(id, undefined);
+		if (viaGjj !== undefined) return viaGjj;
+	} catch (_) {}
+	try {
+		const viaComfy = app?.ui?.settings?.getSettingValue?.(id);
+		return viaComfy === undefined ? fallback : viaComfy;
+	} catch (_) {
+		return fallback;
+	}
+}
+
+function gjjSettingEnabled(id, fallback = true) {
+	return Boolean(gjjSettingValue(id, fallback));
+}
 
 function rememberFocusedNodeForArrange(node) {
 	LAST_CLICKED_NODE_FOR_GJJ_ARRANGE = isRealNode(node) ? node : null;
@@ -287,6 +305,9 @@ const REROUTE_TYPES = new Set([
 	"Reroute (rgthree)",
 	"ReroutePrimitive",
 ]);
+
+const SET_NODE_TYPES = new Set(["GJJ_SetNode", "SetNode", "Set"]);
+const GET_NODE_TYPES = new Set(["GJJ_GetNode", "GetNode", "Get"]);
 
 const TOPO_SORT_MODES = {
 	TOPO_MAIN_PATH: "topo_main_path",
@@ -724,11 +745,19 @@ async function executeComfyCommand(commandId) {
 				return true;
 			}
 		} catch (error) {
+			if (isComfyCommandMissingError(error)) {
+				continue;
+			}
 			console.warn(`[GJJ_NodeArranger] command ${commandId} failed:`, error);
 		}
 	}
 
 	return false;
+}
+
+function isComfyCommandMissingError(error) {
+	const text = String(error?.message || error || "");
+	return /command\s+.+\s+not\s+found/i.test(text) || /not\s+found/i.test(text);
 }
 
 function dispatchFitViewKey(target) {
@@ -803,6 +832,12 @@ function runDirectCanvasFit() {
 
 let __gjjFitViewTimer = null;
 let __gjjFitViewRunning = false;
+let __gjjFitViewCommandAvailable = true;
+
+function cancelPendingFitView() {
+	clearTimeout(__gjjFitViewTimer);
+	__gjjFitViewTimer = null;
+}
 
 function fitView(nodes = null) {
 	try {
@@ -811,7 +846,7 @@ function fitView(nodes = null) {
 
 		// 以前连续 50/180/360ms 多次执行会造成视图来回抖动。
 		// 这里改成“防抖 + 等画布稳定后只执行一次”。
-		clearTimeout(__gjjFitViewTimer);
+		cancelPendingFitView();
 
 		__gjjFitViewTimer = setTimeout(() => {
 			requestAnimationFrame(() => {
@@ -823,10 +858,19 @@ function fitView(nodes = null) {
 						let ok = false;
 
 						// 优先使用 ComfyUI 自带命令：适应视图到选中节点
-						try {
-							ok = await executeComfyCommand("Comfy_Canvas_FitView");
-						} catch (error) {
-							console.warn("[GJJ_NodeArranger] Comfy_Canvas_FitView failed:", error);
+						if (__gjjFitViewCommandAvailable) {
+							try {
+								ok = await executeComfyCommand("Comfy_Canvas_FitView");
+								if (!ok) {
+									__gjjFitViewCommandAvailable = false;
+								}
+							} catch (error) {
+								if (isComfyCommandMissingError(error)) {
+									__gjjFitViewCommandAvailable = false;
+								} else {
+									console.warn("[GJJ_NodeArranger] Comfy_Canvas_FitView failed:", error);
+								}
+							}
 						}
 
 						// 命令入口不可用时，再走直接 canvas 方法。
@@ -849,7 +893,7 @@ function fitView(nodes = null) {
 		}, 180);
 	} catch (error) {
 		console.warn("[GJJ_NodeArranger] fit view failed:", error);
-		clearTimeout(__gjjFitViewTimer);
+		cancelPendingFitView();
 		__gjjFitViewTimer = setTimeout(() => pressFitViewShortcut(), 180);
 	}
 }
@@ -1773,6 +1817,457 @@ function placeRerouteNodes(rerouteNodes, normalNodes) {
 			);
 		}
 	}
+}
+
+function getNodeIdentityValues(node) {
+	return [
+		node?.type,
+		node?.comfyClass,
+		node?.properties?.["Node name for S&R"],
+		node?.constructor?.title,
+		node?.title,
+		node?.name,
+	].filter((value) => value != null && value !== "").map((value) => String(value));
+}
+
+function hasExactSetGetType(node, typeSet) {
+	for (const value of getNodeIdentityValues(node).slice(0, 3)) {
+		if (typeSet.has(value)) return true;
+	}
+	return false;
+}
+
+function hasSetGetTitlePrefix(node, prefix) {
+	const pattern = new RegExp(`^${prefix}(?:[_:：-]|$)`, "i");
+	for (const value of getNodeIdentityValues(node)) {
+		if (pattern.test(String(value || "").trim())) return true;
+	}
+	return false;
+}
+
+function hasSetGetVariableWidget(node) {
+	for (const widget of safeArray(node?.widgets)) {
+		const label = String(widget?.name || widget?.label || "").toLowerCase();
+		if (/constant|variable|变量|名称|name/.test(label)) return true;
+	}
+	return false;
+}
+
+function normalizeSetGetName(value) {
+	const text = String(value ?? "").trim();
+	if (!text || text === "*" || text === "undefined" || text === "null") return "";
+	return text;
+}
+
+function getSetGetWidgetName(node) {
+	const widgets = safeArray(node?.widgets);
+	const preferred = widgets.find((widget) => {
+		const label = String(widget?.name || widget?.label || "").toLowerCase();
+		return /constant|variable|变量|名称|name/.test(label);
+	});
+
+	const ordered = preferred ? [preferred, ...widgets.filter((widget) => widget !== preferred)] : widgets;
+	for (const widget of ordered) {
+		const value = normalizeSetGetName(widget?.value);
+		if (value) return value;
+	}
+	return "";
+}
+
+function parseSetGetNameFromTitle(node) {
+	for (const value of getNodeIdentityValues(node)) {
+		const match = String(value || "").trim().match(/^(?:set|get)[_:：-]+(.+)$/i);
+		const name = normalizeSetGetName(match?.[1]);
+		if (name) return name;
+	}
+	return "";
+}
+
+function isSetNodeForArrangement(node) {
+	if (hasExactSetGetType(node, SET_NODE_TYPES)) return true;
+	return hasSetGetTitlePrefix(node, "Set") && (node?.isVirtualNode || hasSetGetVariableWidget(node));
+}
+
+function isGetNodeForArrangement(node) {
+	if (hasExactSetGetType(node, GET_NODE_TYPES)) return true;
+	return hasSetGetTitlePrefix(node, "Get") && (node?.isVirtualNode || hasSetGetVariableWidget(node));
+}
+
+function isSetGetNodeForArrangement(node) {
+	return isSetNodeForArrangement(node) || isGetNodeForArrangement(node);
+}
+
+function getSetGetVariableName(node) {
+	return getSetGetWidgetName(node) || parseSetGetNameFromTitle(node);
+}
+
+function getSetGetFamilyKey(node) {
+	const type = String(node?.type || node?.comfyClass || node?.properties?.["Node name for S&R"] || "").trim();
+	if (type === "GJJ_SetNode" || type === "GJJ_GetNode") return "gjj";
+	if (type === "SetNode" || type === "GetNode") return "kjnodes";
+	if (type === "Set" || type === "Get") return "generic:set-get";
+
+	const aux = String(node?.properties?.aux_id || node?.constructor?.name || type || "generic").trim().toLowerCase();
+	return `generic:${aux || "set-get"}`;
+}
+
+function getSetGetPairKey(node) {
+	const name = getSetGetVariableName(node);
+	return name ? `${getSetGetFamilyKey(node)}\n${name}` : "";
+}
+
+function sortByOriginalPosition(nodes) {
+	return [...safeArray(nodes)].sort((a, b) => {
+		const ay = getNodeY(a);
+		const by = getNodeY(b);
+		if (Math.abs(ay - by) > 8) return ay - by;
+		const ax = getNodeX(a);
+		const bx = getNodeX(b);
+		if (Math.abs(ax - bx) > 8) return ax - bx;
+		return String(a?.id || "").localeCompare(String(b?.id || ""));
+	});
+}
+
+function pushUniqueNode(list, seen, node) {
+	if (!node || seen.has(node)) return;
+	seen.add(node);
+	list.push(node);
+}
+
+function collectSetGetRows(selectedNodes) {
+	const selected = sortByOriginalPosition(selectedNodes).filter(isSetGetNodeForArrangement);
+	if (!selected.length) return [];
+
+	const allNodes = filterValidNodes(getAllGraphNodes(), false);
+	const settersByName = new Map();
+	const gettersByName = new Map();
+
+	for (const node of allNodes) {
+		const name = getSetGetVariableName(node);
+		if (!name) continue;
+		const key = getSetGetPairKey(node);
+		if (isSetNodeForArrangement(node)) {
+			if (!settersByName.has(key)) settersByName.set(key, []);
+			settersByName.get(key).push(node);
+		} else if (isGetNodeForArrangement(node)) {
+			if (!gettersByName.has(key)) gettersByName.set(key, []);
+			gettersByName.get(key).push(node);
+		}
+	}
+
+	for (const list of settersByName.values()) list.sort((a, b) => getNodeY(a) - getNodeY(b));
+	for (const list of gettersByName.values()) list.sort((a, b) => getNodeY(a) - getNodeY(b));
+
+	const rows = [];
+	const usedKeys = new Set();
+
+	for (const node of selected) {
+		const name = getSetGetVariableName(node);
+		const key = getSetGetPairKey(node) || `node:${node.id}`;
+		if (usedKeys.has(key)) continue;
+		usedKeys.add(key);
+
+		const selectedSameName = name
+			? selected.filter((item) => getSetGetPairKey(item) === key)
+			: [node];
+		const selectedSetters = selectedSameName.filter(isSetNodeForArrangement);
+		const selectedGetters = selectedSameName.filter(isGetNodeForArrangement);
+		const allSetters = name ? settersByName.get(key) || [] : [];
+		const allGetters = name ? gettersByName.get(key) || [] : [];
+
+		const setter = selectedSetters[0] || allSetters[0] || (isSetNodeForArrangement(node) ? node : null);
+		let getters = name ? allGetters : selectedGetters;
+
+		if (!name && isGetNodeForArrangement(node)) getters = [node];
+		const uniqueGetters = [];
+		const seenGetters = new Set();
+		for (const getter of sortByOriginalPosition(getters)) {
+			pushUniqueNode(uniqueGetters, seenGetters, getter);
+		}
+
+		if (!setter && uniqueGetters.length === 0) continue;
+		rows.push({
+			name,
+			setter,
+			getters: uniqueGetters,
+			selectedNodes: selectedSameName,
+		});
+	}
+
+	rows.sort((a, b) => {
+		const aNodes = [a.setter, ...a.getters, ...a.selectedNodes].filter(Boolean);
+		const bNodes = [b.setter, ...b.getters, ...b.selectedNodes].filter(Boolean);
+		const ay = Math.min(...aNodes.map(getNodeY));
+		const by = Math.min(...bNodes.map(getNodeY));
+		if (Math.abs(ay - by) > 8) return ay - by;
+		return Math.min(...aNodes.map(getNodeX)) - Math.min(...bNodes.map(getNodeX));
+	});
+
+	return rows;
+}
+
+function getSelectedSetGetOnlyNodesForBranch(selectedOnly = false) {
+	const explicit = Array.from(getExplicitSelectedNodeSetForScope()).filter(isRealNode);
+	if (!explicit.length) return [];
+	if (!explicit.every(isSetGetNodeForArrangement)) return [];
+	if (!selectedOnly) {
+		const allNodes = filterValidNodes(getAllGraphNodes(), false);
+		if (explicit.length < allNodes.length) return [];
+	}
+	return explicit;
+}
+
+function getLinkedSourceNodes(node) {
+	const result = [];
+	for (const input of safeArray(node?.inputs)) {
+		if (!input?.link) continue;
+		const link = getLinkById(input.link);
+		const source = link?.origin_id != null ? getNodeById(link.origin_id) : null;
+		if (source) result.push(source);
+	}
+	return result;
+}
+
+function getLinkedTargetNodes(node) {
+	const result = [];
+	for (const output of safeArray(node?.outputs)) {
+		for (const linkId of safeArray(output?.links)) {
+			const link = getLinkById(linkId);
+			const target = link?.target_id != null ? getNodeById(link.target_id) : null;
+			if (target) result.push(target);
+		}
+	}
+	return result;
+}
+
+function collectDirectionalSetGetLevels(seeds, direction, blockedNodes, claimedNodes) {
+	const levels = new Map();
+	const queue = [];
+	const blocked = blockedNodes || new Set();
+	const claimed = claimedNodes || new Set();
+
+	function enqueue(node, level) {
+		if (!isRealNode(node)) return;
+		if (blocked.has(node) || claimed.has(node)) return;
+		if (isSetGetNodeForArrangement(node)) return;
+
+		const oldLevel = levels.get(node);
+		if (oldLevel != null && oldLevel <= level) return;
+		levels.set(node, level);
+		queue.push({ node, level });
+	}
+
+	for (const seed of safeArray(seeds)) {
+		const nextNodes = direction < 0 ? getLinkedSourceNodes(seed) : getLinkedTargetNodes(seed);
+		for (const node of nextNodes) enqueue(node, 1);
+	}
+
+	while (queue.length > 0) {
+		const { node, level } = queue.shift();
+		const nextNodes = direction < 0 ? getLinkedSourceNodes(node) : getLinkedTargetNodes(node);
+		for (const next of nextNodes) enqueue(next, level + 1);
+	}
+
+	return levels;
+}
+
+function claimLevelNodes(levels, claimedNodes) {
+	const result = new Map();
+	for (const [node, level] of levels.entries()) {
+		if (claimedNodes.has(node)) continue;
+		claimedNodes.add(node);
+		result.set(node, level);
+	}
+	return result;
+}
+
+function groupNodesByDistance(levels) {
+	const groups = new Map();
+	for (const [node, level] of levels.entries()) {
+		if (!groups.has(level)) groups.set(level, []);
+		groups.get(level).push(node);
+	}
+	for (const list of groups.values()) {
+		const sorted = sortByOriginalPosition(list);
+		list.splice(0, list.length, ...sorted);
+	}
+	return groups;
+}
+
+function getStackHeight(nodes, rowGap = DEFAULT_SPACING) {
+	const validNodes = filterValidNodes(nodes, false);
+	if (!validNodes.length) return 0;
+	const gap = Math.max(0, Math.round(rowGap));
+	return validNodes.reduce((sum, node) => sum + getNodeHeight(node), 0) + Math.max(0, validNodes.length - 1) * gap;
+}
+
+function getStackWidth(nodes) {
+	const validNodes = filterValidNodes(nodes, false);
+	if (!validNodes.length) return 0;
+	return Math.max(...validNodes.map(getNodeWidth));
+}
+
+function getMaxGroupedStackHeight(groups, rowGap = DEFAULT_SPACING) {
+	let maxHeight = 0;
+	for (const nodes of groups.values()) {
+		maxHeight = Math.max(maxHeight, getStackHeight(nodes, rowGap));
+	}
+	return maxHeight;
+}
+
+function placeNodeStack(nodes, x, centerY, rowGap = DEFAULT_SPACING) {
+	const validNodes = sortByOriginalPosition(filterValidNodes(nodes, false));
+	if (!validNodes.length) return;
+
+	const gap = Math.max(0, Math.round(rowGap));
+	const totalHeight = getStackHeight(validNodes, gap);
+	let y = Math.round(centerY - totalHeight / 2);
+
+	for (const node of validNodes) {
+		setNodePosition(node, x, y);
+		y += getNodeHeight(node) + gap;
+	}
+}
+
+function placeGroupedColumnsLeft(groups, anchorX, centerY, columnGap, rowGap) {
+	let right = Math.round(anchorX - columnGap);
+	const levels = Array.from(groups.keys()).sort((a, b) => a - b);
+
+	for (const level of levels) {
+		const nodes = groups.get(level) || [];
+		if (!nodes.length) continue;
+		const width = getStackWidth(nodes);
+		const x = right - width;
+		placeNodeStack(nodes, x, centerY, rowGap);
+		right = x - columnGap;
+	}
+}
+
+function placeGroupedColumnsRight(groups, anchorRight, centerY, columnGap, rowGap) {
+	let left = Math.round(anchorRight + columnGap);
+	const levels = Array.from(groups.keys()).sort((a, b) => a - b);
+
+	for (const level of levels) {
+		const nodes = groups.get(level) || [];
+		if (!nodes.length) continue;
+		placeNodeStack(nodes, left, centerY, rowGap);
+		left += getStackWidth(nodes) + columnGap;
+	}
+}
+
+function arrangeSetGetRows(rows, spacing = DEFAULT_SPACING) {
+	const validRows = safeArray(rows).filter((row) => row?.setter || row?.getters?.length);
+	if (!validRows.length) return [];
+
+	const rowGap = Math.max(20, getRowGap(spacing));
+	const betweenRows = Math.max(96, rowGap * 4);
+	const columnGap = Math.max(96, getColumnGap(spacing) * 4);
+	const pairGap = Math.max(80, getColumnGap(spacing) * 3);
+	const pairNodes = new Set();
+	for (const row of validRows) {
+		if (row.setter) pairNodes.add(row.setter);
+		for (const getter of safeArray(row.getters)) pairNodes.add(getter);
+	}
+
+	const claimedBranchNodes = new Set();
+	const layoutRows = [];
+
+	for (const row of validRows) {
+		const upstreamSeeds = row.setter ? [row.setter] : [];
+		const downstreamSeeds = [row.setter, ...safeArray(row.getters)].filter(Boolean);
+		const upstreamLevels = claimLevelNodes(
+			collectDirectionalSetGetLevels(upstreamSeeds, -1, pairNodes, claimedBranchNodes),
+			claimedBranchNodes
+		);
+		const downstreamLevels = claimLevelNodes(
+			collectDirectionalSetGetLevels(downstreamSeeds, 1, pairNodes, claimedBranchNodes),
+			claimedBranchNodes
+		);
+		const upstreamGroups = groupNodesByDistance(upstreamLevels);
+		const downstreamGroups = groupNodesByDistance(downstreamLevels);
+		const getterHeight = getStackHeight(row.getters, rowGap);
+		const pairHeight = Math.max(row.setter ? getNodeHeight(row.setter) : 0, getterHeight);
+		const height = Math.max(
+			80,
+			pairHeight,
+			getMaxGroupedStackHeight(upstreamGroups, rowGap),
+			getMaxGroupedStackHeight(downstreamGroups, rowGap)
+		);
+
+		layoutRows.push({
+			...row,
+			upstreamGroups,
+			downstreamGroups,
+			height,
+		});
+	}
+
+	let currentY = 0;
+	const movedNodes = new Set(pairNodes);
+	for (const row of layoutRows) {
+		const centerY = currentY + row.height / 2;
+		const setterWidth = row.setter ? getNodeWidth(row.setter) : 0;
+		const getterWidth = getStackWidth(row.getters);
+		const setX = 0;
+		const getX = row.setter ? setterWidth + pairGap : 0;
+		const leftAnchorX = row.setter ? setX : getX;
+		const rightAnchor = row.getters?.length
+			? getX + getterWidth
+			: (row.setter ? setX + setterWidth : getX + getterWidth);
+
+		if (row.setter) {
+			setNodePosition(row.setter, setX, centerY - getNodeHeight(row.setter) / 2);
+		}
+		placeNodeStack(row.getters, getX, centerY, rowGap);
+		placeGroupedColumnsLeft(row.upstreamGroups, leftAnchorX, centerY, columnGap, rowGap);
+		placeGroupedColumnsRight(row.downstreamGroups, rightAnchor, centerY, columnGap, rowGap);
+
+		for (const nodes of row.upstreamGroups.values()) {
+			for (const node of nodes) movedNodes.add(node);
+		}
+		for (const nodes of row.downstreamGroups.values()) {
+			for (const node of nodes) movedNodes.add(node);
+		}
+
+		currentY += row.height + betweenRows;
+	}
+
+	return Array.from(movedNodes);
+}
+
+function finalizeSetGetArrangementPosition(movedNodes, anchorNodes, beforeAnchorBounds, spacing = DEFAULT_SPACING) {
+	const moved = filterValidNodes(movedNodes, false);
+	if (!moved.length) return;
+
+	const anchors = filterValidNodes(anchorNodes, false).filter((node) => moved.includes(node));
+	const gap = Math.max(getColumnGap(spacing), getRowGap(spacing));
+	const currentAnchorBounds = getBoundsForNodes(anchors.length ? anchors : moved, gap);
+	if (!currentAnchorBounds || !beforeAnchorBounds) return;
+
+	moveNodesBy(
+		moved,
+		beforeAnchorBounds.x - currentAnchorBounds.x,
+		beforeAnchorBounds.y - currentAnchorBounds.y
+	);
+}
+
+function tryArrangeSelectedSetGetBranch(mode, spacing = DEFAULT_SPACING, selectedOnly = false) {
+	const selectedSetGetNodes = getSelectedSetGetOnlyNodesForBranch(selectedOnly);
+	if (!selectedSetGetNodes.length) return false;
+
+	const rows = collectSetGetRows(selectedSetGetNodes);
+	if (!rows.length) return false;
+
+	const pairedCount = rows.filter((row) => row.setter && row.getters?.length).length;
+	const beforeBounds = getBoundsForNodes(selectedSetGetNodes, Math.max(getColumnGap(spacing), getRowGap(spacing)));
+	const movedNodes = arrangeSetGetRows(rows, spacing);
+	if (!movedNodes.length) return false;
+
+	finalizeSetGetArrangementPosition(movedNodes, selectedSetGetNodes, beforeBounds, spacing);
+	refreshAfterArrange(movedNodes);
+	cancelPendingFitView();
+	console.log(`[GJJ_NodeArranger] Set/Get 变量分支排列完成: rows=${rows.length}, pairs=${pairedCount}, mode=${mode}`);
+	return true;
 }
 
 
@@ -3557,6 +4052,9 @@ async function arrangeNodes(
 
 	LAST_ARRANGE_MODE = mode;
 	showArrangeModeToast(mode, selectedOnly);
+	if (tryArrangeSelectedSetGetBranch(mode, spacing, selectedOnly)) {
+		return;
+	}
 	const selectedNodes = getSelectedGraphNodes();
 	const anchorNode = selectedOnly && selectedNodes.length === 1
 		? selectedNodes[0]
@@ -3616,6 +4114,9 @@ function arrangeTopologicalFromGraph(sortMode = TOPO_SORT_MODES.TOPO_MAIN_PATH, 
 	if (validNodes.length === 0) return;
 	LAST_ARRANGE_MODE = sortMode;
 	showArrangeModeToast(sortMode, selectedOnly);
+	if (tryArrangeSelectedSetGetBranch(sortMode, spacing, selectedOnly)) {
+		return true;
+	}
 	const selectedNodes = getSelectedGraphNodes();
 	const anchorNode = selectedOnly && selectedNodes.length === 1
 		? selectedNodes[0]
@@ -3643,6 +4144,10 @@ function addContextMenuItems() {
 		const options = originalGetCanvasMenuOptions
 			? originalGetCanvasMenuOptions.apply(this, args)
 			: [];
+
+		if (!gjjSettingEnabled(SETTING_CONTEXT_MENU_ENABLED, true)) {
+			return options;
+		}
 
 		options.push(null);
 

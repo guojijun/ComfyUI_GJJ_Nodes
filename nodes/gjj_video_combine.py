@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
@@ -156,6 +157,56 @@ class GJJ_VideoCombine:
                         "tooltip": "开启后在合成前删除时间线最后一帧，适合去掉重复尾帧或循环衔接帧。",
                     },
                 ),
+                "save_metadata": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "保存元数据",
+                        "tooltip": "写入 ComfyUI 工作流元数据；不支持元数据的格式会自动忽略。",
+                    },
+                ),
+                "trim_to_audio": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "按音频裁切",
+                        "tooltip": "封入音频时，开启后按音频长度裁切；关闭时会补足音频到视频时长。",
+                    },
+                ),
+                "pix_fmt": (
+                    [
+                        "auto",
+                        "yuv420p",
+                        "yuv420p10le",
+                        "yuva420p",
+                        "p010le",
+                        "rgba64le",
+                        "bgra",
+                        "yuv444p",
+                        "yuv444p10le",
+                    ],
+                    {
+                        "default": "auto",
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "像素格式",
+                        "tooltip": "默认 auto 使用当前输出格式预设；手动选择后覆盖 VHS pix_fmt。",
+                    },
+                ),
+                "crf": (
+                    "STRING",
+                    {
+                        "default": "-1",
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "CRF 画质",
+                        "tooltip": "-1 表示使用当前输出格式预设；0-100 会覆盖 VHS crf，数值越低质量越高。",
+                    },
+                ),
             },
             "optional": {
                 "audio": (
@@ -193,6 +244,10 @@ class GJJ_VideoCombine:
         save_output,
         use_source_fps,
         delete_tail_frame=False,
+        save_metadata=True,
+        trim_to_audio=False,
+        pix_fmt="auto",
+        crf="-1",
         audio=None,
         vae=None,
         format_overrides_json="",
@@ -206,6 +261,28 @@ class GJJ_VideoCombine:
             for key, value in kwargs.items()
             if str(key or "").startswith("video_") and value is not None
         }
+        format_overrides: dict[str, Any] = {}
+        raw_overrides = str(format_overrides_json or "").strip()
+        if raw_overrides:
+            try:
+                parsed_overrides = json.loads(raw_overrides)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"格式高级参数(JSON) 解析失败：{exc}") from exc
+            if not isinstance(parsed_overrides, dict):
+                raise RuntimeError("格式高级参数(JSON) 必须是 JSON 对象。")
+            format_overrides.update(parsed_overrides)
+        format_overrides["save_metadata"] = bool(save_metadata)
+        format_overrides["trim_to_audio"] = bool(trim_to_audio)
+        if str(pix_fmt or "auto") != "auto":
+            format_overrides["pix_fmt"] = str(pix_fmt)
+        try:
+            crf_text = str(crf if crf is not None else "").strip()
+            crf_value = int(float(crf_text)) if crf_text else -1
+        except Exception:
+            crf_value = -1
+        if crf_value >= 0:
+            format_overrides["crf"] = crf_value
+
         return combine_video(
             images=images,
             video_inputs=legacy_video_inputs,
@@ -219,7 +296,7 @@ class GJJ_VideoCombine:
             delete_tail_frame=delete_tail_frame,
             audio=audio,
             vae=vae,
-            format_overrides_json=format_overrides_json,
+            format_overrides_json=json.dumps(format_overrides, ensure_ascii=False),
             prompt=prompt,
             extra_pnginfo=extra_pnginfo,
             unique_id=unique_id,

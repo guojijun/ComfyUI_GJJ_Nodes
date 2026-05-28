@@ -21,12 +21,36 @@ const OUTPUTS = [
 	{ name: "主输出文件", type: "STRING", label: "主输出文件", localized_name: "主输出文件" },
 	{ name: "输出文件列表JSON", type: "STRING", label: "输出文件列表JSON", localized_name: "输出文件列表JSON" },
 ];
-const BOOL_WIDGETS = [
-	{ name: "pingpong", label: "往返播放", icon: "🔁", tooltip: "往返播放：正放后再倒放一遍中间帧，适合短动画闭环。" },
-	{ name: "save_output", label: "保存到输出目录", icon: "💾", tooltip: "保存到输出目录：关闭时写入 ComfyUI temp 目录。" },
-	{ name: "use_source_fps", label: "使用源视频帧率", icon: "🎚️", tooltip: "使用源视频帧率：接入 VIDEO 时优先使用第一段视频的帧率。" },
-	{ name: "delete_tail_frame", label: "删除尾帧", icon: "🧹", tooltip: "删除尾帧：合成前移除最后一帧，适合去掉重复尾帧或循环衔接帧。" },
+const BOOLEAN_WIDGETS = [
+	{ name: "pingpong", label: "往返播放", icon: "🔁", defaultValue: false, tooltip: "往返播放：正放后再倒放一遍中间帧，适合短动画闭环。" },
+	{ name: "save_output", label: "保存到输出目录", icon: "💾", defaultValue: true, tooltip: "保存到输出目录：关闭时写入 ComfyUI temp 目录。" },
+	{ name: "use_source_fps", label: "使用源视频帧率", icon: "🎞️", defaultValue: true, tooltip: "使用源视频帧率：接入 VIDEO 时优先使用第一段视频的帧率。" },
+	{ name: "delete_tail_frame", label: "删除尾帧", icon: "🧹", defaultValue: false, tooltip: "删除尾帧：合成前移除最后一帧，适合去掉重复尾帧或循环衔接帧。" },
+	{ name: "save_metadata", label: "保存元数据", icon: "🧾", defaultValue: true, tooltip: "保存元数据：写入 ComfyUI 工作流元数据；不支持的格式会自动忽略。" },
+	{ name: "trim_to_audio", label: "按音频裁切", icon: "✂️", defaultValue: false, tooltip: "按音频裁切：封入音频时按音频长度裁切；关闭时补足音频到视频时长。" },
 ];
+const VALUE_WIDGETS = [
+	{
+		name: "pix_fmt",
+		label: "像素格式",
+		icon: "🎨",
+		kind: "cycle",
+		defaultValue: "auto",
+		values: ["auto", "yuv420p", "yuv420p10le", "yuva420p", "p010le", "rgba64le", "bgra", "yuv444p", "yuv444p10le"],
+		tooltip: "像素格式：auto 使用当前输出格式预设；点击循环切换常用 pix_fmt。",
+	},
+	{
+		name: "crf",
+		label: "CRF 画质",
+		icon: "📉",
+		kind: "number",
+		defaultValue: "-1",
+		min: -1,
+		max: 100,
+		tooltip: "CRF 画质：-1 使用当前格式预设；0-100 覆盖 VHS crf，数值越低质量越高。",
+	},
+];
+const TOOLBAR_WIDGETS = [...BOOLEAN_WIDGETS, ...VALUE_WIDGETS];
 
 function refreshNode(node) {
 	GJJ_Utils.refreshNode(node);
@@ -57,15 +81,15 @@ function injectToolbarStyle() {
 	style.textContent = `
 		.gjj-video-combine-toolbar {
 			display: flex;
-			gap: 6px;
+			gap: 5px;
 			padding: 4px 2px 2px;
 			box-sizing: border-box;
 			width: 100%;
 		}
 		.gjj-video-combine-toolbar button {
-			flex: 0 0 34px;
-			width: 34px;
-			min-width: 34px;
+			flex: 0 0 30px;
+			width: 30px;
+			min-width: 30px;
 			height: 28px;
 			border: 1px solid #41535b;
 			border-radius: 6px;
@@ -101,8 +125,8 @@ function getWidget(node, name) {
 	return (node?.widgets || []).find((widget) => String(widget?.name || "") === name) || null;
 }
 
-function isBoolControlWidgetName(name) {
-	return BOOL_WIDGETS.some((config) => config.name === String(name || ""));
+function isToolbarControlWidgetName(name) {
+	return TOOLBAR_WIDGETS.some((config) => config.name === String(name || ""));
 }
 
 function isPrimaryInputName(name) {
@@ -133,14 +157,85 @@ function readBoolWidget(node, name) {
 	return Boolean(widget?.value);
 }
 
-function writeBoolWidget(node, name, value) {
+function writeWidgetValue(node, name, value) {
 	const widget = getWidget(node, name);
 	if (!widget) {
 		return;
 	}
-	widget.value = Boolean(value);
+	widget.value = value;
+	const index = Array.isArray(node?.widgets) ? node.widgets.indexOf(widget) : -1;
+	if (index >= 0) {
+		node.widgets_values ||= [];
+		node.widgets_values[index] = value;
+	}
+	node.properties ||= {};
+	node.properties[name] = value;
 	widget.callback?.(widget.value, app.canvas, node, app.canvas?.graph_mouse);
+	node.onWidgetChanged?.(name, value, widget, node);
 	refreshNode(node);
+}
+
+function writeBoolWidget(node, name, value) {
+	writeWidgetValue(node, name, Boolean(value));
+}
+
+function isEmptyWidgetValue(value) {
+	return value == null || String(value).trim() === "";
+}
+
+function repairToolbarWidgetDefaults(node) {
+	for (const config of TOOLBAR_WIDGETS) {
+		const widget = getWidget(node, config.name);
+		if (!widget || !isEmptyWidgetValue(widget.value)) {
+			continue;
+		}
+		writeWidgetValue(node, config.name, config.defaultValue);
+	}
+}
+
+function comboValues(widget) {
+	const raw = widget?.options?.values || widget?.options?.comboValues || widget?.values;
+	if (!Array.isArray(raw)) {
+		return [];
+	}
+	return raw.map((item) => String(item?.value ?? item?.name ?? item?.label ?? item ?? "")).filter(Boolean);
+}
+
+function cycleValueWidget(node, config) {
+	const widget = getWidget(node, config.name);
+	if (!widget) {
+		return;
+	}
+	const values = comboValues(widget).length ? comboValues(widget) : config.values;
+	if (!values.length) {
+		return;
+	}
+	const current = String(widget.value ?? config.defaultValue ?? values[0]);
+	const index = values.indexOf(current);
+	const next = values[(index + 1) % values.length] || values[0];
+	writeWidgetValue(node, config.name, next);
+	updateToolbar(node);
+}
+
+function promptNumberWidget(node, config) {
+	const widget = getWidget(node, config.name);
+	if (!widget) {
+		return;
+	}
+	const current = Number(widget.value ?? config.defaultValue ?? 0);
+	const raw = window.prompt(`${config.label}\n${config.tooltip || ""}`, Number.isFinite(current) ? String(current) : String(config.defaultValue ?? 0));
+	if (raw == null) {
+		return;
+	}
+	const next = Math.round(Number(raw));
+	if (!Number.isFinite(next)) {
+		return;
+	}
+	const min = Number.isFinite(Number(config.min)) ? Number(config.min) : next;
+	const max = Number.isFinite(Number(config.max)) ? Number(config.max) : next;
+	const clamped = Math.min(max, Math.max(min, next));
+	writeWidgetValue(node, config.name, String(clamped));
+	updateToolbar(node);
 }
 
 function getMoreOpen(node) {
@@ -179,10 +274,20 @@ function ensureToolbarWidget(node) {
 	wrap.className = "gjj-video-combine-toolbar";
 
 	const buttons = {};
-	for (const config of BOOL_WIDGETS) {
-		buttons[config.name] = makeToolbarButton(config.off, config.label, () => {
+	for (const config of BOOLEAN_WIDGETS) {
+		buttons[config.name] = makeToolbarButton(config.icon, config.label, () => {
 			writeBoolWidget(node, config.name, !readBoolWidget(node, config.name));
 			updateToolbar(node);
+		});
+		wrap.appendChild(buttons[config.name]);
+	}
+	for (const config of VALUE_WIDGETS) {
+		buttons[config.name] = makeToolbarButton(config.icon, config.label, () => {
+			if (config.kind === "cycle") {
+				cycleValueWidget(node, config);
+			} else if (config.kind === "number") {
+				promptNumberWidget(node, config);
+			}
 		});
 		wrap.appendChild(buttons[config.name]);
 	}
@@ -206,7 +311,7 @@ function updateToolbar(node) {
 	if (!toolbar) {
 		return;
 	}
-	for (const config of BOOL_WIDGETS) {
+	for (const config of BOOLEAN_WIDGETS) {
 		const button = toolbar.buttons[config.name];
 		const on = readBoolWidget(node, config.name);
 		if (!button) {
@@ -218,6 +323,20 @@ function updateToolbar(node) {
 		button.setAttribute("aria-label", config.label);
 		button.setAttribute("aria-pressed", on ? "true" : "false");
 	}
+	for (const config of VALUE_WIDGETS) {
+		const button = toolbar.buttons[config.name];
+		const widget = getWidget(node, config.name);
+		if (!button || !widget) {
+			continue;
+		}
+		const value = widget.value ?? config.defaultValue;
+		const isDefault = String(value) === String(config.defaultValue);
+		button.textContent = config.icon || "⚙️";
+		button.classList.toggle("on", !isDefault);
+		button.title = `${config.tooltip || config.label}\n当前：${String(value)}`;
+		button.setAttribute("aria-label", config.label);
+		button.setAttribute("aria-pressed", !isDefault ? "true" : "false");
+	}
 	const moreOpen = getMoreOpen(node);
 	toolbar.buttons.more.textContent = "🔌";
 	toolbar.buttons.more.classList.toggle("more-on", moreOpen);
@@ -228,8 +347,8 @@ function updateToolbar(node) {
 	toolbar.buttons.more.setAttribute("aria-pressed", moreOpen ? "true" : "false");
 }
 
-function hideNativeBooleanWidgets(node) {
-	for (const config of BOOL_WIDGETS) {
+function hideNativeToolbarWidgets(node) {
+	for (const config of TOOLBAR_WIDGETS) {
 		const widget = getWidget(node, config.name);
 		if (!widget) {
 			continue;
@@ -261,7 +380,7 @@ function applySlotVisibility(node) {
 		for (const input of fullInputs) {
 			const name = String(input?.name || "");
 			const isPrimary = isPrimaryInputName(name);
-			const isWidgetInput = !!input?.widget && !isBoolControlWidgetName(input?.widget?.name || name);
+			const isWidgetInput = !!input?.widget && !isToolbarControlWidgetName(input?.widget?.name || name);
 			if (isPrimary) {
 				const primary = cloneSlot(input);
 				primary.name = PRIMARY_INPUT_NAME;
@@ -339,7 +458,7 @@ function getFullInputs(node) {
 			return !isPrimaryInputName(name)
 				&& !OPTIONAL_INPUTS.some((optional) => optional.name === name)
 				&& !!slot?.widget
-				&& !isBoolControlWidgetName(slot?.widget?.name || name);
+				&& !isToolbarControlWidgetName(slot?.widget?.name || name);
 		}),
 		...OPTIONAL_INPUTS.map((slot) => byName.get(slot.name)),
 	].filter(Boolean);
@@ -590,7 +709,8 @@ function patchNode(node) {
 	}
 	node.__gjjVideoCombinePatched = true;
 	removeLegacyVideoInputs(node);
-	hideNativeBooleanWidgets(node);
+	repairToolbarWidgetDefaults(node);
+	hideNativeToolbarWidgets(node);
 	ensureToolbarWidget(node);
 	ensurePanelWidget(node);
 	applySlotVisibility(node);
@@ -618,7 +738,7 @@ app.registerExtension({
 		const originalAddWidget = nodeType.prototype.addWidget;
 		nodeType.prototype.addWidget = function (type, name, value, callback, options, ...rest) {
 			const widget = originalAddWidget?.apply(this, [type, name, value, callback, options, ...rest]);
-			if (isBoolControlWidgetName(name)) {
+			if (isToolbarControlWidgetName(name)) {
 				GJJ_Utils.hideWidget(widget);
 			}
 			return widget;
