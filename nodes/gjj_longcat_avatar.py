@@ -32,6 +32,7 @@ try:
         raise_dependency_model_error,
         send_dependency_model_notice,
     )
+    from .common_utils.progress import send_node_progress
 except ImportError:
     from common_utils.dependency_checker import (
         build_dependency_model_report,
@@ -40,6 +41,7 @@ except ImportError:
         raise_dependency_model_error,
         send_dependency_model_notice,
     )
+    from common_utils.progress import send_node_progress
 
 
 NODE_LOADER = "GJJ_LongCatAvatarLoader"
@@ -49,6 +51,7 @@ DISPLAY_GENERATOR = "GJJ · 🎭 LongCat数字人生成"
 GJJ_ROOT = Path(__file__).resolve().parents[1]
 VENDOR_ROOT = GJJ_ROOT / "vendor" / "longcat_video_runtime"
 AUTO = "自动检测"
+MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
 LONGCAT_AVATAR_MODEL = "LongCat-Avatar-15_bf16.safetensors"
 LONGCAT_DMD_LORA = "LongCat-Avatar-15_dmd_distill_lora_rank128_bf16.safetensors"
 LONGCAT_WHISPER_MODEL = "whisper_large_v3_encoder_fp16.safetensors"
@@ -75,19 +78,25 @@ NEGATIVE_PROMPT = (
     "extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused "
     "fingers, still picture, messy background, three legs, many people in the background, walking backwards"
 )
+LONGCAT_PROMPT = "一个人物正在自然地说话，面部清晰，对口型准确，动作稳定，光线自然"
+LONGCAT_SCHEDULERS = [
+    "longcat_distill_euler",
+    "euler",
+    "dpm++_sde",
+    "dpm++",
+    "unipc",
+    "multitalk",
+]
 
 _PIPE_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _DEPENDENCY_SPECS = [
     {"module_name": "torch", "package_name": "torch", "display_name": "PyTorch", "description": "LongCat 推理需要 PyTorch/CUDA。"},
-    {"module_name": "diffusers", "package_name": "diffusers", "display_name": "diffusers", "description": "加载 LongCat VAE 和调度器。"},
+    {"module_name": "numpy", "package_name": "numpy", "display_name": "numpy", "description": "处理音频波形和视频帧数组。"},
+    {"module_name": "accelerate", "package_name": "accelerate", "display_name": "accelerate", "description": "按 safetensors 单文件加载 Whisper/T5/WanVideo 权重。"},
     {"module_name": "transformers", "package_name": "transformers", "display_name": "transformers", "description": "加载 UMT5 文本编码器和 Whisper 音频编码器。"},
-    {"module_name": "einops", "package_name": "einops", "display_name": "einops", "description": "LongCat 张量维度重排。"},
-    {"module_name": "ftfy", "package_name": "ftfy", "display_name": "ftfy", "description": "提示词清洗。"},
-    {"module_name": "regex", "package_name": "regex", "display_name": "regex", "description": "提示词清洗。"},
-    {"module_name": "scipy", "package_name": "scipy", "display_name": "scipy", "description": "音频处理。"},
-    {"module_name": "pyloudnorm", "package_name": "pyloudnorm", "display_name": "pyloudnorm", "description": "LongCat 音频归一化。"},
-    {"module_name": "librosa", "package_name": "librosa", "display_name": "librosa", "description": "读取和重采样音频。"},
-    {"module_name": "soundfile", "package_name": "soundfile", "display_name": "soundfile", "description": "临时音频文件写入。"},
+    {"module_name": "einops", "package_name": "einops", "display_name": "einops", "description": "WanVideo/LongCat 张量维度重排。"},
+    {"module_name": "torchaudio", "package_name": "torchaudio", "display_name": "torchaudio", "description": "重采样 AUDIO 输入并生成 Whisper 音频嵌入。"},
+    {"module_name": "pyloudnorm", "package_name": "pyloudnorm", "display_name": "pyloudnorm", "description": "LongCat 参考工作流的音频响度归一化。"},
     {"module_name": "safetensors", "package_name": "safetensors", "display_name": "safetensors", "description": "读取 DiT/LoRA 权重。"},
 ]
 
@@ -247,11 +256,11 @@ def _selected_file(category: str, selected: str, preferred: str, label: str, uni
     if choices and choices[0] != AUTO:
         return choices[0]
     raise_dependency_model_error(
-        node_name=DISPLAY_LOADER,
-        missing_models=[make_missing_model_spec(label=label, subdir=category, filename=preferred, description="LongCat Avatar 1.5 成功工作流使用的单文件权重。")],
-        description="LongCat 数字人加载器现在只使用成功工作流中的 safetensors 单文件权重，不再检测官方目录结构。",
+        node_name=DISPLAY_GENERATOR,
+        missing_models=[make_missing_model_spec(label=label, subdir=f"models/{category}", filename=preferred, description="LongCat Avatar 1.5 成功工作流使用的单文件权重。")],
+        description="LongCat 数字人生成节点内部加载成功工作流所需 safetensors 单文件权重。",
         unique_id=unique_id,
-        model_download_url="https://huggingface.co/meituan-longcat/LongCat-Video-Avatar-1.5",
+        model_download_url=MODEL_DOWNLOAD_URL,
     )
 
 
@@ -344,21 +353,23 @@ def _startup_missing_models() -> list[dict[str, str]]:
     return specs
 
 
+_STARTUP_MISSING_DEPENDENCIES = _missing_dependency_specs()
+_STARTUP_MISSING_MODELS = _startup_missing_models()
 _STARTUP_REPORT = build_dependency_model_report(
-    node_name=DISPLAY_LOADER,
-    missing_dependencies=[],
-    missing_models=_startup_missing_models(),
-    install_packages=[],
-    description="LongCat Avatar 1.5 数字人加载器已对齐成功工作流，只检查 safetensors 单文件权重。",
-    model_download_url="https://huggingface.co/meituan-longcat/LongCat-Video-Avatar-1.5",
+    node_name=DISPLAY_GENERATOR,
+    missing_dependencies=_STARTUP_MISSING_DEPENDENCIES,
+    missing_models=_STARTUP_MISSING_MODELS,
+    install_packages=[spec["package_name"] for spec in _STARTUP_MISSING_DEPENDENCIES],
+    description="LongCat Avatar 1.5 数字人生成节点已对齐成功工作流，内部加载 WanVideo/Whisper/T5/VAE/LoRA。",
+    model_download_url=MODEL_DOWNLOAD_URL,
 )
 
 
-def _ensure_runtime(unique_id=None):
+def _ensure_runtime(unique_id=None, node_name=DISPLAY_GENERATOR):
     missing = _missing_dependency_specs()
     if missing:
         raise_dependency_model_error(
-            node_name=DISPLAY_LOADER,
+            node_name=node_name,
             missing_dependencies=missing,
             install_packages=[spec["package_name"] for spec in missing],
             description="LongCat 数字人推理运行依赖不完整。",
@@ -366,6 +377,45 @@ def _ensure_runtime(unique_id=None):
         )
     if str(VENDOR_ROOT) not in sys.path:
         sys.path.insert(0, str(VENDOR_ROOT))
+
+
+def _send_status(unique_id: Any, text: str, progress: float | None = None) -> None:
+    send_node_progress(unique_id, text, progress)
+
+
+def _safe_int(value: Any, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
+    try:
+        result = int(float(value))
+    except Exception:
+        result = int(default)
+    if min_value is not None:
+        result = max(int(min_value), result)
+    if max_value is not None:
+        result = min(int(max_value), result)
+    return result
+
+
+def _safe_float(value: Any, default: float, min_value: float | None = None, max_value: float | None = None) -> float:
+    try:
+        result = float(value)
+    except Exception:
+        result = float(default)
+    if min_value is not None:
+        result = max(float(min_value), result)
+    if max_value is not None:
+        result = min(float(max_value), result)
+    return result
+
+
+def _safe_choice(value: Any, choices: list[str], default: str) -> str:
+    text = str(value or "").strip()
+    return text if text in choices else default
+
+
+def _node_result(value: Any) -> Any:
+    if isinstance(value, dict) and "result" in value:
+        return value["result"]
+    return value
 
 
 def _device():
@@ -507,6 +557,123 @@ def _segment_audio_emb(full_audio_emb, start_idx, num_frames, audio_stride, devi
     return full_audio_emb[center][None, ...].to(device)
 
 
+def _raise_startup_model_notice(unique_id=None):
+    missing_models = _startup_missing_models()
+    if missing_models:
+        raise_dependency_model_error(
+            node_name=DISPLAY_GENERATOR,
+            missing_models=missing_models,
+            description="LongCat 数字人生成节点缺少参考工作流所需的 safetensors 单文件权重。",
+            unique_id=unique_id,
+            model_download_url=MODEL_DOWNLOAD_URL,
+        )
+
+
+def _longcat_workflow_files(unique_id=None) -> dict[str, str]:
+    _raise_startup_model_notice(unique_id=unique_id)
+    return {
+        "dit": _selected_file("diffusion_models", AUTO, LONGCAT_AVATAR_MODEL, "LongCat Avatar DiT", unique_id),
+        "lora": _selected_file("loras", AUTO, LONGCAT_DMD_LORA, "DMD Distill LoRA", unique_id),
+        "whisper": _selected_file("audio_encoders", AUTO, LONGCAT_WHISPER_MODEL, "Whisper Encoder", unique_id),
+        "t5": _selected_file("text_encoders", AUTO, LONGCAT_T5_MODEL, "UMT5 Text Encoder", unique_id),
+        "vae": _selected_file("vae", AUTO, LONGCAT_VAE_MODEL, "Wan VAE", unique_id),
+    }
+
+
+def _audio_frame_count(audio: Any, fps: float) -> int:
+    if not isinstance(audio, dict) or "waveform" not in audio or "sample_rate" not in audio:
+        raise RuntimeError("音频输入格式无效：请连接 ComfyUI AUDIO。")
+    waveform = audio["waveform"]
+    sample_rate = int(audio.get("sample_rate") or 0)
+    if sample_rate <= 0 or not hasattr(waveform, "shape") or int(waveform.shape[-1]) <= 0:
+        raise RuntimeError("音频输入为空或采样率无效。")
+    duration = float(waveform.shape[-1]) / float(sample_rate)
+    frames = int((duration * float(fps)) // 4 * 4 + 1)
+    return max(17, frames)
+
+
+def _resize_reference_image(image: Any, width: int = 512, height: int = 512):
+    load_dependency_at_runtime("torch", DISPLAY_GENERATOR, package_name="torch")
+    import torch
+    from comfy.utils import common_upscale
+
+    if not isinstance(image, torch.Tensor):
+        raise RuntimeError("图片输入格式无效：请连接 IMAGE 或 GJJ_BATCH_IMAGE。")
+    pixels = image
+    if pixels.ndim == 3:
+        pixels = pixels.unsqueeze(0)
+    if pixels.ndim != 4:
+        raise RuntimeError(f"图片输入维度无效，应为 [B,H,W,C]，实际为 {tuple(pixels.shape)}。")
+    pixels = pixels[:1].detach().float().cpu()
+    if int(pixels.shape[-1]) > 3:
+        pixels = pixels[..., :3]
+    src_h = max(1, int(pixels.shape[1]))
+    src_w = max(1, int(pixels.shape[2]))
+    scale = max(float(width) / float(src_w), float(height) / float(src_h))
+    scaled_w = max(width, int(round(src_w * scale)))
+    scaled_h = max(height, int(round(src_h * scale)))
+    nchw = pixels.movedim(-1, 1)
+    resized = common_upscale(nchw, scaled_w, scaled_h, "nearest-exact", "disabled")
+    left = max(0, (scaled_w - width) // 2)
+    top = max(0, (scaled_h - height) // 2)
+    cropped = resized[:, :, top:top + height, left:left + width]
+    if int(cropped.shape[-2]) != height or int(cropped.shape[-1]) != width:
+        cropped = common_upscale(cropped, width, height, "nearest-exact", "disabled")
+    return cropped.movedim(1, -1).clamp(0.0, 1.0).contiguous()
+
+
+def _load_reference_workflow_assets(unique_id=None, blocks_to_swap=40, lora_strength=1.0) -> dict[str, Any]:
+    _ensure_runtime(unique_id=unique_id, node_name=DISPLAY_GENERATOR)
+    files = _longcat_workflow_files(unique_id=unique_id)
+    swap_blocks = _safe_int(blocks_to_swap, 40, min_value=0, max_value=80)
+    lora_value = round(_safe_float(lora_strength, 1.0, min_value=-10.0, max_value=10.0), 4)
+    cache_key = ("longcat_avatar_workflow", files["dit"], files["lora"], files["whisper"], files["t5"], files["vae"], swap_blocks, lora_value)
+    cached = _PIPE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    from .gjj_wan_video_block_swap import GJJ_WanVideoBlockSwap, GJJ_WanVideoSetBlockSwap
+    from .gjj_wanvideo_model_loader import GJJ_WanVideoModelLoader
+    from .gjj_wanvideo_vae_loader import GJJ_WanVideoVAELoader
+
+    lora_config = json.dumps([{"enabled": True, "name": files["lora"], "strength": lora_value}], ensure_ascii=False)
+    block_swap_args, = GJJ_WanVideoBlockSwap().setargs(
+        blocks_to_swap=swap_blocks,
+        offload_img_emb=False,
+        offload_txt_emb=False,
+        use_non_blocking=False,
+        vace_blocks_to_swap=0,
+        prefetch_blocks=0,
+        block_swap_debug=False,
+    )
+    model, = GJJ_WanVideoModelLoader().loadmodel(
+        model=files["dit"],
+        base_precision="bf16",
+        load_device="offload_device",
+        quantization="disabled",
+        attention_mode="sdpa",
+        lora=lora_config,
+        rms_norm_function="default",
+    )
+    model, = GJJ_WanVideoSetBlockSwap().loadmodel(model=model, block_swap_args=block_swap_args)
+    vae, = GJJ_WanVideoVAELoader().loadmodel(
+        model_name=files["vae"],
+        precision="bf16",
+        use_cpu_cache=False,
+        verbose=False,
+        unique_id=unique_id,
+    )
+    assets = {
+        "model": model,
+        "vae": vae,
+        "files": files,
+        "lora_config": lora_config,
+    }
+    _PIPE_CACHE.clear()
+    _PIPE_CACHE[cache_key] = assets
+    return assets
+
+
 class GJJ_LongCatAvatarLoader:
     CATEGORY = "GJJ/视频生成"
     FUNCTION = "load"
@@ -530,8 +697,14 @@ class GJJ_LongCatAvatarLoader:
             f"models/text_encoders/{LONGCAT_T5_MODEL}",
             f"models/vae/{LONGCAT_VAE_MODEL}",
         ],
+        "notice": _STARTUP_REPORT.get("help_message", "") if not _STARTUP_REPORT.get("available", True) else "",
         "copy_text": _STARTUP_REPORT.get("copy_text", ""),
         "copy_label": _STARTUP_REPORT.get("copy_label", ""),
+        "warning_message": _STARTUP_REPORT.get("warning_message", "") if not _STARTUP_REPORT.get("available", True) else "",
+        "install_cmd": _STARTUP_REPORT.get("install_cmd", "") if not _STARTUP_REPORT.get("available", True) else "",
+        "optional_install_cmd": _STARTUP_REPORT.get("optional_install_cmd", ""),
+        "model_download_url": _STARTUP_REPORT.get("model_download_url", MODEL_DOWNLOAD_URL),
+        "notice_level": _STARTUP_REPORT.get("notice_level", ""),
     }
 
     @classmethod
@@ -563,7 +736,7 @@ class GJJ_LongCatAvatarLoader:
                 missing_models=missing_models,
                 description="LongCat Avatar 1.5 缺少成功工作流所需 safetensors 单文件权重。请放入对应 models 分类目录。",
                 unique_id=unique_id,
-                model_download_url="https://huggingface.co/meituan-longcat/LongCat-Video-Avatar-1.5",
+                model_download_url=MODEL_DOWNLOAD_URL,
             )
 
         dit_file = _selected_file("diffusion_models", dit单文件, LONGCAT_AVATAR_MODEL, "LongCat Avatar DiT", unique_id)
@@ -602,168 +775,353 @@ class GJJ_LongCatAvatarLoader:
 class GJJ_LongCatAvatarGenerator:
     CATEGORY = "GJJ/视频生成"
     FUNCTION = "generate"
-    RETURN_TYPES = ("IMAGE", "FLOAT", "STRING")
-    RETURN_NAMES = ("视频帧", "帧率", "生成状态")
-    OUTPUT_TOOLTIPS = ("生成的视频帧批次，可接入 VHS 或预览节点。", "输出视频帧率，Avatar 1.5 默认 25fps。", "本次生成参数和状态。")
-    DESCRIPTION = "使用已加载的 LongCat Avatar 1.5 管线生成单人音频驱动视频。"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("VIDEO",)
+    RETURN_NAMES = ("视频",)
+    OUTPUT_TOOLTIPS = ("LongCat Avatar 1.5 数字人口型视频，已封入输入音频。",)
+    DESCRIPTION = _STARTUP_REPORT["warning_message"] if not _STARTUP_REPORT.get("available") else "输入图片和音频，节点内部按参考工作流加载 LongCat Avatar 1.5 模型并输出视频。"
     GJJ_HELP = {
-        "description": "接 LongCat 数字人加载器输出，输入音频和可选参考图，生成图片帧批次。连接参考图时使用 AI2V，不连接参考图时使用 AT2V。",
-        "notes": ["Avatar 1.5 官方蒸馏模式固定 8 步、CFG=1。", "未安装 audio-separator 时，人声分离会自动降级为原始音频。"],
+        "description": _STARTUP_REPORT["panel_message"] if not _STARTUP_REPORT.get("available") else "完全内置 examples/GJJ_ViDEO/longcatAvatar1.5美团龙猫对口型数字人.json 的核心链路：图片缩放、VAE 编码、Whisper 音频嵌入、LongCat 条件、WanVideo 采样、VAE 解码和视频合成。",
+        "models": [
+            f"models/diffusion_models/{LONGCAT_AVATAR_MODEL}",
+            f"models/loras/{LONGCAT_DMD_LORA}",
+            f"models/audio_encoders/{LONGCAT_WHISPER_MODEL}",
+            f"models/text_encoders/{LONGCAT_T5_MODEL}",
+            f"models/vae/{LONGCAT_VAE_MODEL}",
+        ],
+        "notice": _STARTUP_REPORT.get("help_message", "") if not _STARTUP_REPORT.get("available", True) else "",
+        "warning_message": _STARTUP_REPORT.get("warning_message", "") if not _STARTUP_REPORT.get("available", True) else "",
+        "install_cmd": _STARTUP_REPORT.get("install_cmd", "") if not _STARTUP_REPORT.get("available", True) else "",
+        "optional_install_cmd": _STARTUP_REPORT.get("optional_install_cmd", ""),
+        "copy_text": _STARTUP_REPORT.get("copy_text", ""),
+        "copy_label": _STARTUP_REPORT.get("copy_label", ""),
+        "model_download_url": _STARTUP_REPORT.get("model_download_url", MODEL_DOWNLOAD_URL),
+        "notice_level": _STARTUP_REPORT.get("notice_level", ""),
     }
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "longcat管线": ("GJJ_LONGCAT_AVATAR_PIPELINE", {"display_name": "LongCat管线", "tooltip": "连接 LongCat 数字人加载器输出。"}),
-                "提示词": ("STRING", {"default": "A person is speaking naturally, clear face, stable body motion, realistic lighting", "multiline": True, "display_name": "提示词", "tooltip": "描述人物、场景、动作和画面风格。"}),
-                "分辨率": (["480p", "720p"], {"default": "480p", "display_name": "分辨率", "tooltip": "官方支持 480p 和 720p。720p 更慢且更吃显存。"}),
-                "生成模式": (["自动", "音频文本生视频", "音频图像生视频"], {"default": "自动", "display_name": "生成模式", "tooltip": "自动模式：有参考图用音频图像生视频，否则用音频文本生视频。"}),
-                "随机种": ("INT", {"default": 42, "min": 0, "max": 0xFFFFFFFF, "display_name": "随机种", "tooltip": "生成随机种。"}),
+                "image": (
+                    "GJJ_BATCH_IMAGE,IMAGE",
+                    {
+                        "display_name": "图片",
+                        "tooltip": "数字人参考图。节点内部会按参考工作流裁剪填满到 512x512。",
+                    },
+                ),
+                "audio": (
+                    "AUDIO",
+                    {
+                        "display_name": "音频",
+                        "tooltip": "驱动口型的音频。节点会按音频长度自动计算帧数并封入输出视频。",
+                    },
+                ),
+                "positive_prompt": (
+                    "STRING",
+                    {
+                        "default": LONGCAT_PROMPT,
+                        "multiline": False,
+                        "dynamicPrompts": True,
+                        "display_name": "正向提示词",
+                        "tooltip": "描述数字人口型视频的画面内容。默认值来自内置参考工作流，可直接编辑或外接 STRING。",
+                    },
+                ),
+                "negative_prompt": (
+                    "STRING",
+                    {
+                        "default": NEGATIVE_PROMPT,
+                        "multiline": False,
+                        "dynamicPrompts": True,
+                        "display_name": "负向提示词",
+                        "tooltip": "描述不希望出现在视频中的内容。默认使用参考工作流的通用负向词。",
+                    },
+                ),
+                "seed": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 0xffffffffffffffff,
+                        "control_after_generate": True,
+                        "display_name": "随机种子",
+                        "tooltip": "0 表示每次随机；大于 0 时固定结果。可在生成后自动变化。",
+                    },
+                ),
+                "steps": (
+                    "INT",
+                    {
+                        "default": 8,
+                        "min": 1,
+                        "max": 80,
+                        "step": 1,
+                        "display_name": "采样步数",
+                        "tooltip": "参考工作流为 8 步。步数越高越慢，蒸馏 LongCat 通常不需要很高。",
+                    },
+                ),
+                "cfg": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 30.0,
+                        "step": 0.05,
+                        "display_name": "CFG",
+                        "tooltip": "提示词引导强度。参考工作流为 1。",
+                    },
+                ),
+                "shift": (
+                    "FLOAT",
+                    {
+                        "default": 12.0,
+                        "min": 0.0,
+                        "max": 1000.0,
+                        "step": 0.1,
+                        "display_name": "Shift",
+                        "tooltip": "WanVideo 采样 Shift。参考工作流为 12。",
+                    },
+                ),
+                "scheduler": (
+                    LONGCAT_SCHEDULERS,
+                    {
+                        "default": "longcat_distill_euler",
+                        "display_name": "调度器",
+                        "tooltip": "参考工作流使用 longcat_distill_euler。",
+                    },
+                ),
+                "lora_strength": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": -10.0,
+                        "max": 10.0,
+                        "step": 0.05,
+                        "display_name": "DMD LoRA强度",
+                        "tooltip": "内置 DMD 蒸馏 LoRA 的强度。改动后会按新强度重新加载模型缓存。",
+                    },
+                ),
+                "blocks_to_swap": (
+                    "INT",
+                    {
+                        "default": 40,
+                        "min": 0,
+                        "max": 80,
+                        "step": 1,
+                        "display_name": "Block Swap",
+                        "tooltip": "分块交换数量，用于降低显存占用。参考工作流为 40。",
+                    },
+                ),
+                "audio_fps": (
+                    "FLOAT",
+                    {
+                        "default": 25.0,
+                        "min": 1.0,
+                        "max": 120.0,
+                        "step": 0.5,
+                        "display_name": "音频嵌入FPS",
+                        "tooltip": "Whisper 音频嵌入按此帧率计算。参考工作流为 25。",
+                    },
+                ),
+                "output_fps": (
+                    "FLOAT",
+                    {
+                        "default": 24.0,
+                        "min": 1.0,
+                        "max": 120.0,
+                        "step": 0.5,
+                        "display_name": "输出FPS",
+                        "tooltip": "最终 MP4 视频帧率。参考工作流的视频合成为 24。",
+                    },
+                ),
+                "normalize_loudness": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "display_name": "响度归一化",
+                        "tooltip": "开启后按参考工作流对音频做响度归一化，口型驱动更稳定。",
+                    },
+                ),
+                "keep_model_cache": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "display_name": "保留模型缓存",
+                        "tooltip": "开启后复用已加载的 LongCat/Wan/VAE 模型；关闭后本次结束会清空节点模型缓存。",
+                    },
+                ),
             },
-            "optional": {
-                "音频": ("AUDIO", {"display_name": "音频", "tooltip": "ComfyUI AUDIO 输入。优先级高于音频文件路径。"}),
-                "参考图像": ("IMAGE", {"display_name": "参考图像", "tooltip": "连接后使用 AI2V 数字人模式。"}),
-                "音频文件路径": ("STRING", {"default": "", "display_name": "音频文件路径", "tooltip": "未连接 AUDIO 时，可填写本地音频文件路径。"}),
-                "负面提示词": ("STRING", {"default": NEGATIVE_PROMPT, "multiline": True, "display_name": "负面提示词", "tooltip": "不希望出现在视频中的内容。"}),
-                "视频段数": ("INT", {"default": 1, "min": 1, "max": 20, "display_name": "视频段数", "tooltip": "大于 1 时使用官方 Video Continuation 续写长视频。"}),
-                "帧数": ("INT", {"default": 93, "min": 17, "max": 201, "step": 4, "display_name": "帧数", "tooltip": "单段帧数；LongCat 会修正为符合 VAE 时间步的帧数。"}),
-                "参考帧索引": ("INT", {"default": 10, "min": 0, "max": 92, "display_name": "参考帧索引", "tooltip": "长视频续写时插入参考帧的位置。"}),
-                "遮罩帧范围": ("INT", {"default": 3, "min": 0, "max": 24, "display_name": "遮罩帧范围", "tooltip": "长视频续写时降低重复动作的参考帧屏蔽范围。"}),
-                "启用人声分离": ("BOOLEAN", {"default": False, "display_name": "启用人声分离", "tooltip": "仅对音频文件路径生效；缺少 audio-separator 时会自动使用原始音频。"}),
-                "完成后清理缓存": ("BOOLEAN", {"default": False, "display_name": "完成后清理缓存", "tooltip": "完成后释放 PyTorch 缓存；不会卸载加载器缓存中的模型对象。"}),
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
             },
-            "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
     def generate(
         self,
-        longcat管线,
-        提示词,
-        分辨率,
-        生成模式,
-        随机种,
-        音频=None,
-        参考图像=None,
-        音频文件路径="",
-        负面提示词=NEGATIVE_PROMPT,
-        视频段数=1,
-        帧数=93,
-        参考帧索引=10,
-        遮罩帧范围=3,
-        启用人声分离=False,
-        完成后清理缓存=False,
+        image,
+        audio,
+        positive_prompt=LONGCAT_PROMPT,
+        negative_prompt=NEGATIVE_PROMPT,
+        seed=0,
+        steps=8,
+        cfg=1.0,
+        shift=12.0,
+        scheduler="longcat_distill_euler",
+        lora_strength=1.0,
+        blocks_to_swap=40,
+        audio_fps=25.0,
+        output_fps=24.0,
+        normalize_loudness=True,
+        keep_model_cache=True,
         unique_id=None,
+        prompt=None,
+        extra_pnginfo=None,
     ):
-        _ensure_runtime(unique_id=unique_id)
-        load_dependency_at_runtime("torch", DISPLAY_GENERATOR, package_name="torch", unique_id=unique_id)
-        import torch
-
-        pipe = longcat管线["pipe"]
-        device = longcat管线.get("device") or _device()
-        save_fps = 25.0
-        audio_stride = 1
-        num_cond_frames = 13
-        num_segments = max(1, int(视频段数))
-        num_frames = max(17, int(帧数))
-        if (num_frames - 1) % 4 != 0:
-            num_frames = ((num_frames - 1) // 4) * 4 + 1
-        use_image = 参考图像 is not None and 生成模式 != "音频文本生视频"
-        if 生成模式 == "音频图像生视频" and 参考图像 is None:
-            raise RuntimeError("选择“音频图像生视频”时必须连接参考图像。")
-
-        audio_file = _maybe_extract_vocal(str(音频文件路径 or ""), longcat管线.get("separator_dir") or Path(), bool(启用人声分离), unique_id=unique_id)
-        speech_array, sr = _audio_array(音频, audio_file, unique_id=unique_id)
-        full_audio_emb = _audio_embedding(pipe, speech_array, sr, num_frames, num_segments, save_fps, audio_stride, device)
-        audio_start_idx = 0
-        audio_emb = _segment_audio_emb(full_audio_emb, audio_start_idx, num_frames, audio_stride, device)
-
-        generator = torch.Generator(device=device)
-        generator.manual_seed(int(随机种) & 0xFFFFFFFF)
-        use_distill = True
-        steps = 8
-        text_cfg = 1.0
-        audio_cfg = 1.0
-        prompt = str(提示词 or "").strip()
-        negative = str(负面提示词 or "").strip()
         start = time.time()
-        all_frames = []
-        height, width = (480, 832) if 分辨率 == "480p" else (768, 1280)
-        with torch.inference_mode():
-            if use_image:
-                pil_image = _pil_from_image(参考图像)
-                output, latent = pipe.generate_ai2v(
-                    image=pil_image,
-                    prompt=prompt,
-                    negative_prompt=negative,
-                    resolution=分辨率,
-                    num_frames=num_frames,
-                    num_inference_steps=steps,
-                    text_guidance_scale=text_cfg,
-                    audio_guidance_scale=audio_cfg,
-                    output_type="both",
-                    generator=generator,
-                    audio_emb=audio_emb,
-                    use_distill=use_distill,
-                )
-            else:
-                output, latent = pipe.generate_at2v(
-                    prompt=prompt,
-                    negative_prompt=negative,
-                    height=height,
-                    width=width,
-                    num_frames=num_frames,
-                    num_inference_steps=steps,
-                    text_guidance_scale=text_cfg,
-                    audio_guidance_scale=audio_cfg,
-                    output_type="both",
-                    generator=generator,
-                    audio_emb=audio_emb,
-                    use_distill=use_distill,
-                )
-            output = output[0]
-            from PIL import Image
+        audio_fps = _safe_float(audio_fps, 25.0, min_value=1.0, max_value=120.0)
+        output_fps = _safe_float(output_fps, 24.0, min_value=1.0, max_value=120.0)
+        steps = _safe_int(steps, 8, min_value=1, max_value=80)
+        cfg = _safe_float(cfg, 1.0, min_value=0.0, max_value=30.0)
+        shift = _safe_float(shift, 12.0, min_value=0.0, max_value=1000.0)
+        scheduler = _safe_choice(scheduler, LONGCAT_SCHEDULERS, "longcat_distill_euler")
+        lora_strength = _safe_float(lora_strength, 1.0, min_value=-10.0, max_value=10.0)
+        blocks_to_swap = _safe_int(blocks_to_swap, 40, min_value=0, max_value=80)
+        seed = _safe_int(seed, 0, min_value=0, max_value=0xffffffffffffffff)
+        if seed <= 0:
+            seed = random.randrange(1, 0xffffffffffffffff)
+        positive_prompt = str(positive_prompt or LONGCAT_PROMPT).strip() or LONGCAT_PROMPT
+        negative_prompt = str(negative_prompt or "").strip()
 
-            current_video = [Image.fromarray((np.clip(output[i], 0, 1) * 255).astype(np.uint8)) for i in range(output.shape[0])]
-            all_frames.extend(current_video)
-            ref_latent = latent[:, :, :1].clone()
-            for segment_idx in range(1, num_segments):
-                audio_start_idx += audio_stride * (num_frames - num_cond_frames)
-                audio_emb = _segment_audio_emb(full_audio_emb, audio_start_idx, num_frames, audio_stride, device)
-                output, latent = pipe.generate_avc(
-                    video=current_video,
-                    video_latent=latent,
-                    prompt=prompt,
-                    negative_prompt=negative,
-                    height=height,
-                    width=width,
-                    num_frames=num_frames,
-                    num_cond_frames=num_cond_frames,
-                    num_inference_steps=steps,
-                    text_guidance_scale=text_cfg,
-                    audio_guidance_scale=audio_cfg,
-                    generator=generator,
-                    output_type="both",
-                    use_kv_cache=True,
-                    offload_kv_cache=False,
-                    enhance_hf=False,
-                    audio_emb=audio_emb,
-                    ref_latent=ref_latent,
-                    ref_img_index=int(参考帧索引),
-                    mask_frame_range=int(遮罩帧范围),
-                    use_distill=use_distill,
-                )
-                output = output[0]
-                current_video = [Image.fromarray((np.clip(output[i], 0, 1) * 255).astype(np.uint8)) for i in range(output.shape[0])]
-                all_frames.extend(current_video[num_cond_frames:])
-                _clear_cache()
+        _send_status(unique_id, "1/8 检查输入并准备 LongCat 模型...", 0.04)
+        num_frames = _audio_frame_count(audio, audio_fps)
+        assets = _load_reference_workflow_assets(
+            unique_id=unique_id,
+            blocks_to_swap=blocks_to_swap,
+            lora_strength=lora_strength,
+        )
+        files = assets["files"]
+        _send_status(unique_id, "2/8 裁剪参考图并加载子节点...", 0.12)
+        ref_image = _resize_reference_image(image, 512, 512)
 
-        result = _frames_to_tensor(all_frames)
-        if 完成后清理缓存:
+        from .gjj_longcat_avatar_extend_embeds import GJJ_LongCatAvatarExtendEmbeds
+        from .gjj_longcat_avatar_whisper_embeds import GJJ_LongCatAvatarWhisperEmbeds
+        from .gjj_video_combine import GJJ_VideoCombine
+        from .gjj_wanvideo_decode import GJJ_WanVideoDecode
+        from .gjj_wanvideo_encode import GJJ_WanVideoEncode
+        from .gjj_wanvideo_sampler_v2 import GJJ_WanVideoSamplerV2
+        from .gjj_wanvideo_t5_text_encode import GJJ_WanVideoT5TextEncode
+
+        _send_status(unique_id, f"3/8 提取 Whisper 音频嵌入：{int(num_frames)} 帧...", 0.2)
+        audio_embeds, trimmed_audio, effective_frames = _node_result(GJJ_LongCatAvatarWhisperEmbeds().process(
+            model_name=files["whisper"],
+            base_precision="fp16",
+            load_device="offload_device",
+            normalize_loudness=bool(normalize_loudness),
+            num_frames=num_frames,
+            fps=audio_fps,
+            audio_scale=1.0,
+            audio_cfg_scale=1.0,
+            multi_audio_type="para",
+            audio_1=audio,
+        ))
+        _send_status(unique_id, "4/8 VAE 编码参考图...", 0.34)
+        ref_latent, = _node_result(GJJ_WanVideoEncode().encode(
+            vae=assets["vae"],
+            image=ref_image,
+            enable_vae_tiling=False,
+            tile_x=272,
+            tile_y=272,
+            tile_stride_x=144,
+            tile_stride_y=128,
+            noise_aug_strength=0.0,
+            latent_strength=1.0,
+        ))
+        _send_status(unique_id, "5/8 构建 LongCat 图像/音频条件...", 0.44)
+        image_embeds, sample_slice = _node_result(GJJ_LongCatAvatarExtendEmbeds().process(
+            prev_latents=ref_latent,
+            audio_embeds=audio_embeds,
+            num_frames=effective_frames,
+            overlap=13,
+            frames_processed=0,
+            if_not_enough_audio="pad_with_start",
+            ref_frame_index=10,
+            ref_mask_frame_range=3,
+            ref_latent=ref_latent,
+        ))
+        _send_status(unique_id, "6/8 编码 T5 提示词...", 0.54)
+        text_embeds, _negative_text_embeds, _prompt_text = _node_result(GJJ_WanVideoT5TextEncode().process(
+            model_name=files["t5"],
+            precision="bf16",
+            positive_prompt=positive_prompt,
+            negative_prompt=negative_prompt,
+            quantization="disabled",
+            load_device="offload_device",
+            compute_device="gpu",
+            force_offload=True,
+            use_disk_cache=False,
+        ))
+        _send_status(unique_id, f"7/8 WanVideo 采样：{steps}步 / CFG {cfg:g} / Shift {shift:g}...", 0.64)
+        latent, _denoised = _node_result(GJJ_WanVideoSamplerV2().process(
+            model=assets["model"],
+            image_embeds=image_embeds,
+            steps=steps,
+            cfg=cfg,
+            shift=shift,
+            force_offload=False,
+            scheduler=scheduler,
+            riflex_freq_index=0,
+            text_embeds=text_embeds,
+            samples=sample_slice,
+            denoise_strength=1.0,
+            batched_cfg=False,
+            rope_function="comfy",
+            start_step=0,
+            end_step=-1,
+            add_noise_to_samples=False,
+            seed=seed,
+        ))
+        _send_status(unique_id, "8/8 VAE 解码并封装视频...", 0.84)
+        frames, = _node_result(GJJ_WanVideoDecode().decode(
+            vae=assets["vae"],
+            samples=latent,
+            enable_vae_tiling=False,
+            tile_x=272,
+            tile_y=272,
+            tile_stride_x=144,
+            tile_stride_y=128,
+            normalization="default",
+        ))
+        combine_result = GJJ_VideoCombine().combine(
+            images=frames,
+            frame_rate=output_fps,
+            loop_count=0,
+            filename_prefix="video/GJJ/LongCat数字人",
+            format_name="video/h264-mp4",
+            pingpong=False,
+            save_output=True,
+            use_source_fps=True,
+            delete_tail_frame=False,
+            save_metadata=True,
+            trim_to_audio=False,
+            pix_fmt="auto",
+            crf="-1",
+            audio=trimmed_audio,
+            prompt=prompt,
+            extra_pnginfo=extra_pnginfo,
+            unique_id=unique_id,
+        )
+        video, _main_file, _files_json = _node_result(combine_result)
+        if not bool(keep_model_cache):
+            _PIPE_CACHE.clear()
+        if model_management is not None:
             _clear_cache()
         elapsed = time.time() - start
-        status = f"✅ LongCat 生成完成：{result.shape[0]} 帧，{save_fps:.0f}fps，{分辨率}，耗时 {elapsed:.1f}s。"
-        return (result, float(save_fps), status)
+        _send_status(unique_id, f"完成：{int(effective_frames)} 帧，视频 {output_fps:g}fps，耗时 {elapsed:.1f}s", 1.0)
+        print(f"[GJJ LongCat数字人生成] 完成：{int(effective_frames)} 帧，视频 {output_fps:g}fps，音频嵌入 {audio_fps:g}fps，seed={seed}，耗时 {elapsed:.1f}s")
+        if isinstance(combine_result, dict):
+            return {"ui": combine_result.get("ui", {}), "result": (video,)}
+        return (video,)
 
 
 NODE_CLASS_MAPPINGS = {

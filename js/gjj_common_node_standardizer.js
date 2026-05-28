@@ -48,6 +48,7 @@ const STATUS_ENABLED_CLASSES = new Set([
 	"GJJ_LazyImageStudio",
 	"GJJ_LTX23ImageToVideoMultiRef",
 	"GJJ_LongCatAudioDiTTTS",
+	"GJJ_LongCatAvatarGenerator",
 	"GJJ_LoraFaceMaterialGenerator",
 	"GJJ_OldPhotoRestorer",
 	"GJJ_Qwen3ASRTextFormats",
@@ -60,6 +61,9 @@ const STATUS_ENABLED_CLASSES = new Set([
 	"GJJ_Wan22FirstLastVideo",
 	"GJJ_Wan22RapidAIOMega",
 	"GJJ_WanVideoVAELoader",
+]);
+const PRESERVE_DETAILED_COMPLETION_CLASSES = new Set([
+	"GJJ_OldPhotoRestorer",
 ]);
 const LEGACY_STATUS_WIDGET_POLICIES = new Map([
 	["batch_text_status", "hide"],
@@ -1424,6 +1428,16 @@ function patchNode(node) {
 			const startedAt = Number(this.__gjjStandardStartedAt || 0);
 			const elapsedText = startedAt > 0 ? `，耗时 ${formatElapsed(performance.now() - startedAt)}` : "";
 			this.__gjjStandardStartedAt = 0;
+			const className = String(this?.comfyClass || this?.type || "");
+			const currentStatus = String(this.__gjjStandardStatus?.text?.textContent || "");
+			if (
+				PRESERVE_DETAILED_COMPLETION_CLASSES.has(className)
+				&& currentStatus.includes("总步骤")
+				&& currentStatus.includes("总图片")
+			) {
+				updateStatus(this, { text: currentStatus, progress: 1 }, { visible: true });
+				return result;
+			}
 			updateStatus(this, { text: `执行完成${elapsedText}`, progress: 1 }, { visible: true });
 		}
 		return result;

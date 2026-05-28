@@ -1,95 +1,59 @@
 import { app } from "/scripts/app.js";
-import { api } from "/scripts/api.js";
-import { GJJ_Utils } from "./gjj_utils.js";
+import "./gjj_common_dependency_model_notice.js";
+import { GJJ_STANDARDIZE_NODE } from "./gjj_common_node_standardizer.js";
 
-const TARGET_NODES = new Set(["GJJ_OldPhotoRestorer"]);
-const STATUS_WIDGET_NAME = "gjj_old_photo_status";
+const NODE_CLASS = "GJJ_OldPhotoRestorer";
+const COMPAT_BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 
-function refreshNode(node) {
-	GJJ_Utils.refreshNode(node);
-}
-
-function ensureStatusWidget(node) {
-	if (node.__gjjOldPhotoStatus) {
-		return node.__gjjOldPhotoStatus;
-	}
-	const box = document.createElement("div");
-	box.textContent = "等待执行";
-	box.style.cssText = [
-		"min-height:24px",
-		"padding:6px 10px",
-		"border:1px solid #41535b",
-		"border-radius:10px",
-		"background:#121a1f",
-		"color:#dce7e2",
-		"font-size:12px",
-		"line-height:1.35",
-		"white-space:pre-wrap",
-		"word-break:break-word",
-	].join(";");
-	const widget = node.addDOMWidget?.(STATUS_WIDGET_NAME, STATUS_WIDGET_NAME, box, {
-		hideOnZoom: false,
-		getHeight: () => 42,
-	});
-	node.__gjjOldPhotoStatus = { widget, box };
-	return node.__gjjOldPhotoStatus;
-}
-
-function setStatus(node, text) {
-	const box = node?.__gjjOldPhotoStatus?.box;
-	if (!box) {
-		return;
-	}
-	box.textContent = String(text || "等待执行");
-	refreshNode(node);
-}
-
-function patchNode(node) {
-	if (!node || node.__gjjOldPhotoPatched) {
-		return;
-	}
-	node.__gjjOldPhotoPatched = true;
-	ensureStatusWidget(node);
-	setStatus(node, "等待执行");
-
-	const originalOnNodeCreated = node.onNodeCreated;
-	node.onNodeCreated = function () {
-		const result = originalOnNodeCreated?.apply(this, arguments);
-		ensureStatusWidget(this);
-		setStatus(this, "等待执行");
-		return result;
-	};
-
-	const originalOnConfigure = node.onConfigure;
-	node.onConfigure = function () {
-		const result = originalOnConfigure?.apply(this, arguments);
-		ensureStatusWidget(this);
-		setStatus(this, "等待执行");
-		return result;
-	};
-}
-
-api.addEventListener("gjj_node_progress", (event) => {
-	const detail = event?.detail || {};
-	const targetNode = app.graph?._nodes?.find((node) => String(node?.id) === String(detail.node));
-	if (!targetNode || !TARGET_NODES.has(String(targetNode.comfyClass || targetNode.type || ""))) {
-		return;
-	}
-	ensureStatusWidget(targetNode);
-	setStatus(targetNode, detail.text || "处理中...");
+GJJ_STANDARDIZE_NODE({
+	nodeClass: NODE_CLASS,
+	displayName: "GJJ · 🕰️ 一键批量修复老照片",
+	category: "GJJ",
+	description: "将 qwen_image_edit_2511 老照片修复工作流封装为单节点，并通过公共状态栏显示进度。",
+	enableStatus: true,
+	inputSpec: {
+		required: {
+			image: [COMPAT_BATCH_IMAGE_TYPE, {
+				display_name: "🖼️ 输入图像",
+				tooltip: "需要修复或增强的老照片图像。支持普通 IMAGE 或 GJJ_BATCH_IMAGE 批量图像。",
+			}],
+			prompt: ["STRING", {
+				display_name: "📝 修复提示词",
+				tooltip: "用于指导老照片修复增强的提示词。",
+			}],
+			unet_name: ["COMBO", {
+				display_name: "🟣 UNET 主模型",
+				tooltip: "主修复模型。默认使用 qwen_image_edit_2511 老照片工作流同款底模。",
+			}],
+			seed: ["INT", {
+				display_name: "🎲 种子",
+				tooltip: "控制采样随机性的种子值。",
+			}],
+			enable_upscale: ["BOOLEAN", {
+				display_name: "🔍 启用放大",
+				tooltip: "开启后会在生成完成后接着用超分模型做一次图像增强。",
+			}],
+			upscale_model_name: ["COMBO", {
+				display_name: "🔎 放大模型",
+				tooltip: "用于结果图像增强的放大模型。",
+			}],
+		},
+	},
+	outputSpec: {
+		outputNames: ["🕰️ 修复增强图像"],
+		outputTooltips: ["老照片修复增强后的图像结果，兼容 GJJ_BATCH_IMAGE 和 IMAGE 连接。"],
+	},
 });
 
 app.registerExtension({
-	name: "GJJ.OldPhotoRestorer",
-	beforeRegisterNodeDef(nodeType, nodeData) {
-		if (!TARGET_NODES.has(String(nodeData?.name || ""))) {
+	name: "GJJ.OldPhotoRestorer.CommonPanel",
+	nodeCreated(node) {
+		if (String(node?.comfyClass || node?.type || "") !== NODE_CLASS) {
 			return;
 		}
-		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
-		nodeType.prototype.onNodeCreated = function () {
-			const result = originalOnNodeCreated?.apply(this, arguments);
-			patchNode(this);
-			return result;
-		};
+		globalThis.GJJ_CommonNodeStandardizer?.registerStatusClass?.(NODE_CLASS);
+		globalThis.GJJ_CommonNodeStandardizer?.patchNode?.(node);
+		globalThis.GJJ_CommonDependencyModelNotice?.initializeNodePanel?.(node);
+		globalThis.GJJApplyTypeColorsToNode?.(node);
 	},
 });

@@ -3,18 +3,22 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from pathlib import Path
 from typing import Any
 
 import comfy.utils
 import folder_paths
 import torch
 from nodes import PreviewImage
+from PIL import Image
 
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .gjj_multi_image_loader import build_uniform_batch_by_longest_edge
 
 NODE_NAME = "GJJ_AnyPreview"
 ANY_PREVIEW_INPUT_TYPE = "GJJ_BATCH_IMAGE, IMAGE, MASK,STRING,AUDIO,VIDEO,*"
+VIDEO_SEQUENCE_MIN_FRAMES = 16
+VIDEO_SEQUENCE_PREVIEW_FPS = 16.0
 
 
 class AnyType(str):
@@ -121,6 +125,21 @@ def normalize_image_tensor(value: torch.Tensor) -> torch.Tensor:
     if value.ndim == 3:
         return value.unsqueeze(0)
     return value
+
+
+def image_frame_count(value: Any) -> int:
+    if not is_image_tensor(value) or not isinstance(value, torch.Tensor):
+        return 0
+    return int(normalize_image_tensor(value).shape[0])
+
+
+def mask_frame_count(value: Any) -> int:
+    if not is_mask_tensor(value) or not isinstance(value, torch.Tensor):
+        return 0
+    try:
+        return int(normalize_mask_tensor(value).shape[0])
+    except Exception:
+        return 0
 
 
 def resize_image_batch(images: torch.Tensor, width: int, height: int) -> torch.Tensor:
@@ -324,6 +343,22 @@ def serialize_video_preview(value: Any) -> str:
         return "视频对象"
 
 
+def serialize_video_sequence_preview(frames: torch.Tensor, source_kind: str) -> str:
+    try:
+        frame_count = int(frames.shape[0])
+        height = int(frames.shape[1])
+        width = int(frames.shape[2])
+        duration = frame_count / float(VIDEO_SEQUENCE_PREVIEW_FPS)
+        source_label = "遮罩序列" if source_kind == "mask" else "图片序列"
+        return (
+            f"{source_label}已包装为动态预览"
+            f"(帧数: {frame_count}, 预览帧率: {VIDEO_SEQUENCE_PREVIEW_FPS:g}fps, "
+            f"时长: {duration:.2f}秒, 尺寸: {width} x {height})"
+        )
+    except Exception:
+        return "视频序列已包装为动态预览"
+
+
 def detect_preview_kind(value: Any) -> str:
     if is_image_tensor(value):
         return "image"
@@ -440,6 +475,88 @@ def save_video_preview(
 
         traceback.print_exc()
     return []
+
+
+def save_image_sequence_webp_preview(
+    frames: torch.Tensor,
+    prompt: Any = None,
+    extra_pnginfo: Any = None,
+) -> list[dict[str, Any]]:
+    try:
+        frames = frames.detach().cpu().float().clamp(0.0, 1.0).contiguous()
+        if int(frames.shape[0]) <= 0:
+            return []
+
+        target_dir = Path(folder_paths.get_temp_directory()) / "GJJ" / "any_preview"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"GJJ_AnyPreview_sequence_{uuid.uuid4().hex[:12]}.webp"
+        filepath = target_dir / filename
+
+        pil_frames: list[Image.Image] = []
+        arrays = torch.round(frames * 255.0).to(torch.uint8).numpy()
+        for array in arrays:
+            if array.ndim == 2:
+                pil_frames.append(Image.fromarray(array, mode="L").convert("RGB"))
+                continue
+            channels = int(array.shape[-1]) if array.ndim == 3 else 0
+            if channels == 1:
+                pil_frames.append(Image.fromarray(array[..., 0], mode="L").convert("RGB"))
+            elif channels == 4:
+                pil_frames.append(Image.fromarray(array, mode="RGBA"))
+            else:
+                pil_frames.append(Image.fromarray(array[..., :3], mode="RGB"))
+
+        duration_ms = max(1, round(1000.0 / max(0.01, float(VIDEO_SEQUENCE_PREVIEW_FPS))))
+        pil_frames[0].save(
+            filepath,
+            format="WEBP",
+            save_all=True,
+            append_images=pil_frames[1:],
+            duration=duration_ms,
+            loop=0,
+            lossless=False,
+            quality=88,
+            method=4,
+        )
+        return [
+            {
+                "filename": filename,
+                "subfolder": "GJJ/any_preview",
+                "type": "temp",
+                "format": "image/webp",
+                "media_type": "image",
+                "is_sequence": True,
+                "autoplay": True,
+                "loop": True,
+                "frame_rate": VIDEO_SEQUENCE_PREVIEW_FPS,
+                "frame_count": int(frames.shape[0]),
+                "width": int(frames.shape[2]),
+                "height": int(frames.shape[1]),
+            }
+        ]
+    except Exception as error:
+        print(f"[GJJ] WebP 序列预览失败: {error}")
+        import traceback
+
+        traceback.print_exc()
+        return []
+
+
+def detect_video_sequence_preview(values: list[Any]) -> tuple[str, torch.Tensor] | None:
+    if not values:
+        return None
+
+    if len(values) == 1:
+        value = values[0]
+        if is_image_tensor(value) and image_frame_count(value) >= VIDEO_SEQUENCE_MIN_FRAMES:
+            frames = normalize_image_tensor(value).detach().cpu().float().clamp(0.0, 1.0).contiguous()
+            return "image", frames
+        if is_mask_tensor(value) and mask_frame_count(value) >= VIDEO_SEQUENCE_MIN_FRAMES:
+            frames = mask_to_preview_image(value).detach().cpu().float().clamp(0.0, 1.0).contiguous()
+            return "mask", frames
+        return None
+
+    return None
 
 
 def merge_values(values: list[Any]) -> tuple[str, Any, str]:
@@ -737,37 +854,54 @@ class GJJ_AnyPreview:
                 "title": f"项目 {index} · {label}",
             }
 
-            if kind == "image" and isinstance(value, torch.Tensor):
-                item["images"] = self._save_image_preview(
-                    value,
+            sequence_info = detect_video_sequence_preview([value])
+            sequence_handled = False
+            if sequence_info is not None:
+                source_kind, frames = sequence_info
+                sequence_media = save_image_sequence_webp_preview(
+                    frames,
                     prompt=prompt,
                     extra_pnginfo=extra_pnginfo,
                 )
-                item["text"] = serialize_preview(value)
-            elif kind == "mask" and isinstance(value, torch.Tensor):
-                item["images"] = self._save_image_preview(
-                    value,
-                    prompt=prompt,
-                    extra_pnginfo=extra_pnginfo,
-                    is_mask=True,
-                )
-                item["text"] = serialize_preview(value)
-            elif kind == "audio" and is_audio_object(value):
-                normalized_audio = normalize_audio_object(value)
-                if normalized_audio is None:
-                    item["text"] = "音频对象无有效 waveform，无法生成播放器。"
+                if sequence_media:
+                    item["kind"] = "image"
+                    item["source_kind"] = source_kind
+                    item["title"] = f"项目 {index} · 动态序列"
+                    item["images"] = sequence_media
+                    item["text"] = serialize_video_sequence_preview(frames, source_kind)
+                    sequence_handled = True
+            if not sequence_handled:
+                if kind == "image" and isinstance(value, torch.Tensor):
+                    item["images"] = self._save_image_preview(
+                        value,
+                        prompt=prompt,
+                        extra_pnginfo=extra_pnginfo,
+                    )
+                    item["text"] = serialize_preview(value)
+                elif kind == "mask" and isinstance(value, torch.Tensor):
+                    item["images"] = self._save_image_preview(
+                        value,
+                        prompt=prompt,
+                        extra_pnginfo=extra_pnginfo,
+                        is_mask=True,
+                    )
+                    item["text"] = serialize_preview(value)
+                elif kind == "audio" and is_audio_object(value):
+                    normalized_audio = normalize_audio_object(value)
+                    if normalized_audio is None:
+                        item["text"] = "音频对象无有效 waveform，无法生成播放器。"
+                    else:
+                        item["audio"] = save_audio_preview(normalized_audio)
+                        item["text"] = serialize_audio_preview(normalized_audio)
+                elif kind == "video" and is_video_object(value):
+                    item["video"] = save_video_preview(
+                        value,
+                        prompt=prompt,
+                        extra_pnginfo=extra_pnginfo,
+                    )
+                    item["text"] = serialize_video_preview(value)
                 else:
-                    item["audio"] = save_audio_preview(normalized_audio)
-                    item["text"] = serialize_audio_preview(normalized_audio)
-            elif kind == "video" and is_video_object(value):
-                item["video"] = save_video_preview(
-                    value,
-                    prompt=prompt,
-                    extra_pnginfo=extra_pnginfo,
-                )
-                item["text"] = serialize_video_preview(value)
-            else:
-                item["text"] = serialize_preview(value)
+                    item["text"] = serialize_preview(value)
 
             items.append(item)
         return items
@@ -789,12 +923,29 @@ class GJJ_AnyPreview:
 
         preview_values = flatten_preview_values(raw_values)
         preview_kind, merged, preview_text = merge_values(preview_values)
+        result_kind = preview_kind
+        sequence_media: list[dict[str, Any]] = []
+        sequence_info = detect_video_sequence_preview(preview_values)
+        if sequence_info is not None:
+            sequence_source_kind, sequence_frames = sequence_info
+            sequence_media = save_image_sequence_webp_preview(
+                sequence_frames,
+                prompt=prompt,
+                extra_pnginfo=extra_pnginfo,
+            )
+            if sequence_media:
+                preview_kind = "image"
+                preview_text = serialize_video_sequence_preview(
+                    sequence_frames,
+                    sequence_source_kind,
+                )
+
         ui: dict[str, Any] = {
             "preview_text": (preview_text,),
             "preview_kind": (preview_kind,),
             "preview_item_count": (len(preview_values),),
         }
-        if len(preview_values) > 1:
+        if len(preview_values) > 1 and not sequence_media:
             ui["preview_items"] = (
                 self._build_preview_items(
                     preview_values,
@@ -808,7 +959,11 @@ class GJJ_AnyPreview:
 
         has_expanded_items = "preview_items" in ui
 
-        if (
+        if sequence_media:
+            ui["preview_images"] = sequence_media
+            print(f"[GJJ] WebP 序列预览数据: {sequence_media}")
+
+        elif (
             not has_expanded_items
             and preview_kind in {"image", "mask"}
             and isinstance(merged, torch.Tensor)
@@ -863,9 +1018,9 @@ class GJJ_AnyPreview:
         #   否则单个 GJJ_BATCH_IMAGE / IMAGE 批次输入会因为 len(values)==1 被原样返回，
         #   下游节点可能只识别成 1 张图；预览能显示多张，但数据流只传 1 张。
         # - 非图片对象保持旧逻辑：单输入返回原对象，多输入返回合并对象。
-        if preview_kind == "image" and isinstance(merged, torch.Tensor):
+        if result_kind == "image" and isinstance(merged, torch.Tensor):
             result_output = merged
-        elif preview_kind == "mask":
+        elif result_kind == "mask":
             result_output = raw_values[0] if len(raw_values) == 1 else merged
         else:
             result_output = raw_values[0] if len(raw_values) == 1 else merged
@@ -878,3 +1033,45 @@ class GJJ_AnyPreview:
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_AnyPreview}
 NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: " GJJ·👀 任意对象预览器"}
+
+
+try:
+    import subprocess
+    import sys
+
+    from aiohttp import web
+    from server import PromptServer
+
+    def _media_root(media_type: str) -> Path:
+        media_type = str(media_type or "temp").strip().lower()
+        if media_type == "output":
+            return Path(folder_paths.get_output_directory()).resolve()
+        if media_type == "input":
+            return Path(folder_paths.get_input_directory()).resolve()
+        return Path(folder_paths.get_temp_directory()).resolve()
+
+    @PromptServer.instance.routes.post("/gjj/any_preview/open_media_folder")
+    async def gjj_any_preview_open_media_folder(request):
+        try:
+            media_type = request.query.get("type", "temp")
+            subfolder = str(request.query.get("subfolder", "") or "").strip("/\\")
+            root = _media_root(media_type)
+            folder = (root / subfolder).resolve() if subfolder else root
+            try:
+                folder.relative_to(root)
+            except ValueError:
+                return web.json_response({"error": "路径越界"}, status=400)
+            if not folder.exists():
+                return web.json_response({"error": "目录不存在"}, status=404)
+            if os.name == "nt":
+                subprocess.Popen(["explorer", str(folder)])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(folder)])
+            else:
+                subprocess.Popen(["xdg-open", str(folder)])
+            return web.json_response({"status": "ok", "path": str(folder)})
+        except Exception as error:
+            return web.json_response({"error": str(error)}, status=500)
+
+except Exception:
+    pass

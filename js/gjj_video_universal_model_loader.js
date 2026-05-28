@@ -6,6 +6,9 @@ const MAX_SLOTS = 12;
 const SAVED_VALUES_PROPERTY = "gjj_video_universal_loader_values";
 const FILTER_PROPERTY = "gjj_video_universal_loader_filters";
 const OUTPUT_HIT_LANE = 34;
+const WIDTH_PROPERTY = "gjj_video_universal_loader_width";
+const MIN_NODE_WIDTH = 300;
+const DEFAULT_NODE_WIDTH = 470;
 
 const OUTPUT_TYPE_BY_KIND = {
 	diffusion: "MODEL",
@@ -33,6 +36,22 @@ function getWidget(node, name) { return node.widgets?.find((w) => w?.name === na
 function valueOf(node, name, fallback = "") { return String(getWidget(node, name)?.value ?? fallback ?? ""); }
 function safeAssign(obj, key, value) { try { obj[key] = value; } catch (_) {} }
 function lower(text) { return String(text || "").replaceAll("\\", "/").toLowerCase(); }
+
+function currentNodeWidth(node) {
+	const current = Number(node?.size?.[0] || 0);
+	const saved = Number(node?.properties?.[WIDTH_PROPERTY] || 0);
+	return Math.max(MIN_NODE_WIDTH, current || saved || DEFAULT_NODE_WIDTH);
+}
+
+function rememberNodeWidth(node) {
+	if (!node) return MIN_NODE_WIDTH;
+	node.properties = node.properties || {};
+	const width = currentNodeWidth(node);
+	node.properties[WIDTH_PROPERTY] = width;
+	node.min_width = MIN_NODE_WIDTH;
+	node.minWidth = MIN_NODE_WIDTH;
+	return width;
+}
 
 function collapseElement(el) {
 	if (!el?.style) return;
@@ -555,9 +574,10 @@ function ensureDom(node) {
 	const domWidget = node.addDOMWidget?.("gjj_video_universal_loader_dom", "HTML", container, { serialize: false, hideOnZoom: false });
 	if (domWidget) {
 		domWidget.computeSize = (width) => {
-			const nodeWidth = Math.max(430, Number(width || node.size?.[0] || 470));
-			return [Math.max(400, nodeWidth), estimateNodeHeight(node)];
+			const nodeWidth = Math.max(MIN_NODE_WIDTH, Number(width || currentNodeWidth(node)));
+			return [nodeWidth, estimateNodeHeight(node)];
 		};
+		domWidget.getHeight = () => estimateNodeHeight(node);
 		node.__gjjVUWidget = domWidget;
 		forceDomPassThrough(node);
 		requestAnimationFrame(() => forceDomPassThrough(node));
@@ -1134,7 +1154,7 @@ function applyConfig(node, opts = {}) {
 
 function refreshNode(node) {
 	if (!node) return;
-	const width = Math.max(430, Math.min(Number(node.size?.[0] || 470), 500));
+	const width = rememberNodeWidth(node);
 	const height = estimateNodeHeight(node);
 	if (!node.__gjjVUSizing && (Math.abs(Number(node.size?.[0] || 0) - width) > 1 || Math.abs(Number(node.size?.[1] || 0) - height) > 1)) {
 		node.__gjjVUSizing = true;
@@ -1148,6 +1168,7 @@ function refreshNode(node) {
 
 function stabilize(node) {
 	if (!node) return;
+	rememberNodeWidth(node);
 	restoreWidgetValues(node);
 	ensureDom(node);
 	hideNativeWidgets(node);
@@ -1172,12 +1193,25 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (serializedNode, ...args) { const result = originalOnConfigure?.apply(this, [serializedNode, ...args]); restoreWidgetValues(this, serializedNode); schedule(this, 0); return result; };
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode) {
+			rememberNodeWidth(this);
 			saveWidgetValues(this, serializedNode);
 			originalOnSerialize?.apply(this, [serializedNode]);
+			if (serializedNode) {
+				serializedNode.properties = serializedNode.properties || {};
+				serializedNode.properties[WIDTH_PROPERTY] = this.properties?.[WIDTH_PROPERTY] || currentNodeWidth(this);
+			}
 			saveWidgetValues(this, serializedNode);
 		};
 		const originalOnResize = nodeType.prototype.onResize;
-		nodeType.prototype.onResize = function (...args) { const result = originalOnResize?.apply(this, args); if (!this.__gjjVUSizing) refreshNode(this); return result; };
+		nodeType.prototype.onResize = function (...args) {
+			const result = originalOnResize?.apply(this, args);
+			if (!this.__gjjVUSizing) {
+				rememberNodeWidth(this);
+				refreshNode(this);
+				scheduleLayoutRefresh(this, [0, 80]);
+			}
+			return result;
+		};
 		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
 		nodeType.prototype.onConnectionsChange = function (...args) { const result = originalOnConnectionsChange?.apply(this, args); schedule(this, 0); return result; };
 	},

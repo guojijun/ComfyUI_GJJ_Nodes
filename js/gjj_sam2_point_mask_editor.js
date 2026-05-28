@@ -15,6 +15,41 @@ const TOOLBAR_HEIGHT = 34;
 const STATUS_HEIGHT = 24;
 const NODE_FRAME_EXTRA = 12;
 const HIDDEN_WIDGETS = new Set(["coordinates", "neg_coordinates", "bboxes", "editor_state", "image_store"]);
+const SERIALIZED_WIDGETS = [
+	"sam2_model",
+	"segmentor",
+	"device",
+	"precision",
+	"expand",
+	"tapered_corners",
+	"block_size",
+	"color",
+	"keep_model_loaded",
+	"coordinates",
+	"neg_coordinates",
+	"bboxes",
+	"editor_state",
+	"image_store",
+];
+const SEGMENTOR_VALUES = new Set(["video", "single_image"]);
+const DEVICE_VALUES = new Set(["auto", "cuda", "cpu", "mps"]);
+const PRECISION_VALUES = new Set(["fp16", "bf16", "fp32"]);
+const DEFAULT_WIDGET_VALUES = {
+	sam2_model: "sam2_hiera_base_plus.safetensors",
+	segmentor: "video",
+	device: "auto",
+	precision: "fp16",
+	expand: 10,
+	tapered_corners: true,
+	block_size: 32,
+	color: "0, 0, 0",
+	keep_model_loaded: true,
+	coordinates: "[]",
+	neg_coordinates: "[]",
+	bboxes: "[]",
+	editor_state: "{}",
+	image_store: "",
+};
 const OUTPUT_DEFS = [
 	{ name: "遮罩队列", type: "MASK", tooltip: "输出单张遮罩或按输入帧数排列的遮罩队列。" },
 	{ name: "遮罩覆盖图像队列", type: "GJJ_BATCH_IMAGE,IMAGE", tooltip: "输出被遮罩颜色覆盖后的图片或图片队列。" },
@@ -28,6 +63,195 @@ function graphDirty() {
 
 function getWidget(node, name) {
 	return node.widgets?.find((widget) => widget?.name === name) || null;
+}
+
+function stringValue(value) {
+	return String(value ?? "").trim();
+}
+
+function boolValue(value, fallback = false) {
+	if (typeof value === "boolean") {
+		return value;
+	}
+	if (typeof value === "number") {
+		return value !== 0;
+	}
+	const text = stringValue(value).toLowerCase();
+	if (["true", "1", "yes", "on"].includes(text)) {
+		return true;
+	}
+	if (["false", "0", "no", "off", ""].includes(text)) {
+		return false;
+	}
+	return fallback;
+}
+
+function intValue(value, fallback) {
+	if (typeof value === "boolean") {
+		return fallback;
+	}
+	const text = stringValue(value);
+	if (!/^-?\d+$/.test(text)) {
+		return fallback;
+	}
+	const numeric = Number.parseInt(text, 10);
+	return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function isBoolLike(value) {
+	if (typeof value === "boolean") {
+		return true;
+	}
+	const text = stringValue(value).toLowerCase();
+	return ["true", "false", "yes", "no", "on", "off"].includes(text);
+}
+
+function isIntLike(value) {
+	return typeof value !== "boolean" && /^-?\d+$/.test(stringValue(value));
+}
+
+function isColorLike(value) {
+	const text = stringValue(value);
+	return /^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(text) || /^-?\d+\s*,\s*-?\d+\s*,\s*-?\d+(\s*,\s*-?\d+)?$/.test(text);
+}
+
+function modelOptions(node) {
+	const values = getWidget(node, "sam2_model")?.options?.values;
+	return Array.isArray(values) ? values.map((value) => String(value)) : [];
+}
+
+function isModelValue(value, node) {
+	const text = stringValue(value);
+	if (!text) {
+		return false;
+	}
+	const options = modelOptions(node);
+	return options.includes(text) || /\.(safetensors|pt|pth|ckpt|bin)$/i.test(text) || /^sam2(\.|_|-)?/i.test(text);
+}
+
+function findValueIndex(values, predicate, start = 0) {
+	for (let index = Math.max(0, start); index < values.length; index += 1) {
+		if (predicate(values[index], index)) {
+			return index;
+		}
+	}
+	return -1;
+}
+
+function fallbackWidgetValue(name, node) {
+	if (name === "sam2_model") {
+		return modelOptions(node)[0] || DEFAULT_WIDGET_VALUES.sam2_model;
+	}
+	if (name === "editor_state") {
+		return stringValue(node?.properties?.[STATE_PROPERTY] || DEFAULT_WIDGET_VALUES.editor_state);
+	}
+	if (name === "image_store") {
+		return stringValue(node?.properties?.[IMAGE_STORE_PROPERTY] || DEFAULT_WIDGET_VALUES.image_store);
+	}
+	return DEFAULT_WIDGET_VALUES[name];
+}
+
+function validJsonString(value, fallback) {
+	const text = stringValue(value);
+	if (!text) {
+		return fallback;
+	}
+	try {
+		JSON.parse(text);
+		return text;
+	} catch {
+		return fallback;
+	}
+}
+
+function semanticWidgetValues(values, node) {
+	const rawValues = Array.isArray(values) ? values.slice() : [];
+	const modelIndex = findValueIndex(rawValues, (value) => isModelValue(value, node));
+	const segmentorIndex = findValueIndex(rawValues, (value) => SEGMENTOR_VALUES.has(stringValue(value)), modelIndex >= 0 ? modelIndex + 1 : 0);
+	const deviceIndex = findValueIndex(rawValues, (value) => DEVICE_VALUES.has(stringValue(value)), segmentorIndex >= 0 ? segmentorIndex + 1 : 0);
+	const precisionIndex = findValueIndex(rawValues, (value) => PRECISION_VALUES.has(stringValue(value)), deviceIndex >= 0 ? deviceIndex + 1 : 0);
+	const tailStart = Math.max(modelIndex, segmentorIndex, deviceIndex, precisionIndex, 3) + 1;
+
+	const expandIndex = findValueIndex(rawValues, isIntLike, tailStart);
+	const blockSizeIndex = findValueIndex(rawValues, isIntLike, expandIndex >= 0 ? expandIndex + 1 : tailStart);
+	const taperedIndex = findValueIndex(rawValues, isBoolLike, tailStart);
+	const keepModelIndex = findValueIndex(rawValues, isBoolLike, taperedIndex >= 0 ? taperedIndex + 1 : tailStart);
+	const colorIndex = findValueIndex(rawValues, isColorLike, blockSizeIndex >= 0 ? blockSizeIndex + 1 : tailStart);
+
+	const currentState = getWidget(node, "editor_state")?.value || node?.properties?.[STATE_PROPERTY];
+	const currentStore = getWidget(node, "image_store")?.value || node?.properties?.[IMAGE_STORE_PROPERTY];
+
+	return [
+		modelIndex >= 0 ? stringValue(rawValues[modelIndex]) : fallbackWidgetValue("sam2_model", node),
+		segmentorIndex >= 0 ? stringValue(rawValues[segmentorIndex]) : fallbackWidgetValue("segmentor", node),
+		deviceIndex >= 0 ? stringValue(rawValues[deviceIndex]) : fallbackWidgetValue("device", node),
+		precisionIndex >= 0 ? stringValue(rawValues[precisionIndex]) : fallbackWidgetValue("precision", node),
+		intValue(expandIndex >= 0 ? rawValues[expandIndex] : undefined, fallbackWidgetValue("expand", node)),
+		boolValue(taperedIndex >= 0 ? rawValues[taperedIndex] : undefined, fallbackWidgetValue("tapered_corners", node)),
+		intValue(blockSizeIndex >= 0 ? rawValues[blockSizeIndex] : undefined, fallbackWidgetValue("block_size", node)),
+		colorIndex >= 0 ? stringValue(rawValues[colorIndex]) : fallbackWidgetValue("color", node),
+		boolValue(keepModelIndex >= 0 ? rawValues[keepModelIndex] : undefined, fallbackWidgetValue("keep_model_loaded", node)),
+		validJsonString(getWidget(node, "coordinates")?.value, fallbackWidgetValue("coordinates", node)),
+		validJsonString(getWidget(node, "neg_coordinates")?.value, fallbackWidgetValue("neg_coordinates", node)),
+		validJsonString(getWidget(node, "bboxes")?.value, fallbackWidgetValue("bboxes", node)),
+		validJsonString(currentState, fallbackWidgetValue("editor_state", node)),
+		stringValue(currentStore || fallbackWidgetValue("image_store", node)),
+	];
+}
+
+function currentSerializableValues(node) {
+	return SERIALIZED_WIDGETS.map((name) => getWidget(node, name)?.value);
+}
+
+function sameWidgetValues(left, right) {
+	if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+		return false;
+	}
+	return left.every((value, index) => value === right[index]);
+}
+
+function applySerializableValues(node, values) {
+	SERIALIZED_WIDGETS.forEach((name, index) => {
+		const widget = getWidget(node, name);
+		if (!widget) {
+			return;
+		}
+		setWidgetValue(widget, values[index], false);
+	});
+}
+
+function repairLiveWidgetValues(node, sourceValues = null) {
+	const current = currentSerializableValues(node);
+	const values = Array.isArray(sourceValues) && sourceValues.length ? sourceValues : current;
+	const fixed = semanticWidgetValues(values, node);
+	if (sameWidgetValues(current, fixed)) {
+		return false;
+	}
+	applySerializableValues(node, fixed);
+	node.widgets_values = fixed.slice();
+	graphDirty();
+	return true;
+}
+
+function sanitizeSerializedNodeWidgets(serializedNode, node = null) {
+	if (!serializedNode || !Array.isArray(serializedNode.widgets_values)) {
+		return false;
+	}
+	const fixed = semanticWidgetValues(serializedNode.widgets_values, node);
+	const changed = !sameWidgetValues(serializedNode.widgets_values, fixed);
+	if (changed) {
+		serializedNode.widgets_values = fixed;
+	}
+	return changed;
+}
+
+function writeSerializedWidgetValues(node, serializedNode) {
+	if (!serializedNode) {
+		return;
+	}
+	const fixed = semanticWidgetValues(currentSerializableValues(node), node);
+	serializedNode.widgets_values = fixed;
+	node.widgets_values = fixed.slice();
 }
 
 function hideWidget(widget) {
@@ -177,29 +401,117 @@ function imageSourceSignature(src) {
 	}
 }
 
-function getInputSourceNode(node) {
-	const input = node.inputs?.find((slot) => slot?.name === "image");
-	if (!input?.link || !app.graph?.links) {
+function sourceNodeFromLinkId(linkId) {
+	if (!linkId || !app.graph?.links) {
 		return null;
 	}
-	const link = app.graph.links[input.link];
+	const link = app.graph.links[linkId];
 	const sourceId = link?.origin_id ?? link?.source_id ?? link?.from_id;
 	return sourceId != null ? app.graph.getNodeById?.(sourceId) : null;
 }
 
-function buildLinkedImageUrl(node) {
-	const sourceNode = getInputSourceNode(node);
+function getInputSourceNode(node, inputName = "image") {
+	const input = node.inputs?.find((slot) => slot?.name === inputName);
+	return input?.link ? sourceNodeFromLinkId(input.link) : null;
+}
+
+function linkedSourceNodes(node) {
+	const inputs = Array.isArray(node?.inputs) ? node.inputs : [];
+	const priority = (input) => /image|img|video|mask|ref|reference|pixel|latent|图|视频|遮罩|参考/i.test(String(input?.name || "")) ? 0 : 1;
+	return inputs
+		.filter((input) => input?.link)
+		.slice()
+		.sort((left, right) => priority(left) - priority(right))
+		.map((input) => sourceNodeFromLinkId(input.link))
+		.filter(Boolean);
+}
+
+function buildWidgetImageUrl(sourceNode) {
 	if (!sourceNode) {
 		return "";
 	}
-	const fileWidget = sourceNode.widgets?.find((widget) => widget?.name === "image" || widget?.name === "file" || widget?.name === "filename");
-	const filename = fileWidget?.value;
+	const widgets = Array.isArray(sourceNode.widgets) ? sourceNode.widgets : [];
+	const fileWidget = widgets.find((widget) => {
+		const name = String(widget?.name || "").toLowerCase();
+		const value = stringValue(widget?.value);
+		return (
+			["image", "file", "filename", "reference_image", "input_image"].includes(name) ||
+			(/image|img|file|filename|ref|reference|图|文件|参考/.test(name) && /\.(png|jpe?g|webp|bmp)$/i.test(value)) ||
+			/\.(png|jpe?g|webp|bmp)$/i.test(value)
+		);
+	});
+	const filename = stringValue(fileWidget?.value);
 	if (!filename) {
-		const src = sourceNode.imgs?.[0]?.src || sourceNode.image?.src || sourceNode.preview?.src;
-		return src || "";
+		return "";
+	}
+	const { filename: baseName, subfolder } = splitAnnotatedPath(filename);
+	if (!baseName) {
+		return "";
 	}
 	const viewType = sourceNode.comfyClass === "LoadImageOutput" ? "output" : "input";
-	return api.apiURL(`/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(viewType)}&subfolder=&rand=${Date.now()}`);
+	return api.apiURL(`/view?filename=${encodeURIComponent(baseName)}&type=${encodeURIComponent(viewType)}&subfolder=${encodeURIComponent(subfolder)}&rand=${Date.now()}`);
+}
+
+function buildPreviewImageUrl(sourceNode) {
+	if (!sourceNode) {
+		return "";
+	}
+	const imageElements = [
+		...(Array.isArray(sourceNode.imgs) ? sourceNode.imgs : []),
+		sourceNode.image,
+		sourceNode.preview,
+	];
+	for (const item of imageElements) {
+		const src = item?.src || item?.currentSrc || "";
+		if (src) {
+			return src;
+		}
+	}
+	for (const widget of sourceNode.widgets || []) {
+		const element = widget?.element;
+		const image = element?.querySelector?.("img");
+		if (image?.src) {
+			return image.src;
+		}
+		const video = element?.querySelector?.("video");
+		if (video?.poster) {
+			return video.poster;
+		}
+	}
+	return "";
+}
+
+function buildNodeImageUrl(sourceNode) {
+	return buildWidgetImageUrl(sourceNode) || buildPreviewImageUrl(sourceNode);
+}
+
+function buildLinkedImageUrl(node) {
+	const firstSource = getInputSourceNode(node);
+	if (!firstSource) {
+		return "";
+	}
+	const queue = [firstSource];
+	const visited = new Set();
+	let depthGuard = 0;
+	while (queue.length && depthGuard < 80) {
+		depthGuard += 1;
+		const current = queue.shift();
+		const id = String(current?.id ?? "");
+		if (!current || visited.has(id)) {
+			continue;
+		}
+		visited.add(id);
+		const url = buildNodeImageUrl(current);
+		if (url) {
+			return url;
+		}
+		for (const upstream of linkedSourceNodes(current)) {
+			if (!visited.has(String(upstream?.id ?? ""))) {
+				queue.push(upstream);
+			}
+		}
+	}
+	return "";
 }
 
 function uploadFile(file) {
@@ -266,7 +578,7 @@ function ensureEditor(node) {
 	root.appendChild(toolbar);
 
 	const buttonStyle = [
-		"width:28px",
+		"width:60px",
 		"height:28px",
 		"min-width:28px",
 		"padding:0",
@@ -284,19 +596,25 @@ function ensureEditor(node) {
 	].join(";");
 
 	const loadButton = document.createElement("button");
-	loadButton.textContent = "📁";
+	loadButton.textContent = "📁载入";
 	loadButton.title = "载入图片。选择本地图片后会上传到 ComfyUI input 目录，并作为当前编辑画布。";
 	loadButton.style.cssText = buttonStyle;
 	toolbar.appendChild(loadButton);
 
+	const upstreamButton = document.createElement("button");
+	upstreamButton.textContent = "⬆️获取";
+	upstreamButton.title = "获取上游图片。连接“输入图片/视频”后，点击从上游节点刷新当前编辑画布。";
+	upstreamButton.style.cssText = buttonStyle;
+	toolbar.appendChild(upstreamButton);
+
 	const clearButton = document.createElement("button");
-	clearButton.textContent = "🗑";
+	clearButton.textContent = "🗑️删除";
 	clearButton.title = "清理图片。清除当前本地载入的图片预览，但保留点位与框选数据。";
 	clearButton.style.cssText = buttonStyle;
 	toolbar.appendChild(clearButton);
 
 	const newCanvasButton = document.createElement("button");
-	newCanvasButton.textContent = "🆕";
+	newCanvasButton.textContent = "☸️新层";
 	newCanvasButton.title = "新建画布。重置为中心正点、左上负点，并清空框选。";
 	newCanvasButton.style.cssText = buttonStyle;
 	toolbar.appendChild(newCanvasButton);
@@ -343,6 +661,7 @@ function ensureEditor(node) {
 		"text-overflow:ellipsis",
 		"white-space:nowrap",
 	].join(";");
+	root.appendChild(status);
 
 	const image = new Image();
 	image.crossOrigin = "anonymous";
@@ -376,18 +695,24 @@ function ensureEditor(node) {
 		dragPoint: null,
 		activePoint: null,
 		usingDefaultPoints: false,
-		setImageSource(src) {
-			if (!src || src === this.imageSource) {
+		pendingLoadStatus: "",
+		setImageSource(src, force = false, loadStatus = "") {
+			if (!src || (!force && src === this.imageSource)) {
 				return;
+			}
+			if (force && src === this.imageSource) {
+				image.removeAttribute("src");
 			}
 			this.imageSource = src;
 			this.imageLoaded = false;
+			this.pendingLoadStatus = loadStatus;
 			image.src = src;
 			scheduleDraw();
 		},
 		clearImage() {
 			this.imageSource = "";
 			this.imageLoaded = false;
+			this.pendingLoadStatus = "";
 			image.removeAttribute("src");
 			scheduleDraw();
 		},
@@ -715,18 +1040,31 @@ function ensureEditor(node) {
 		drawHandle = window.requestAnimationFrame(draw);
 	}
 
-	function loadCurrentPreview() {
+	function loadCurrentPreview(force = false, announce = false) {
 		const linkedUrl = buildLinkedImageUrl(node);
 		if (linkedUrl) {
-			editor.setImageSource(linkedUrl);
-			return;
+			editor.setImageSource(linkedUrl, force, announce ? "已获取上游图片" : "");
+			return "linked";
 		}
 		const storedValue = String(imageStoreWidget?.value || node.properties?.[IMAGE_STORE_PROPERTY] || "").trim();
 		if (storedValue) {
-			editor.setImageSource(buildUploadedImageUrl(storedValue));
-			return;
+			editor.setImageSource(buildUploadedImageUrl(storedValue), force, announce ? "已刷新本地图片" : "");
+			return "stored";
 		}
 		editor.clearImage();
+		return "empty";
+	}
+
+	function refreshUpstreamImage() {
+		const source = loadCurrentPreview(true, true);
+		if (source === "linked") {
+			status.textContent = "正在获取上游图片...";
+		} else if (source === "stored") {
+			status.textContent = "未连接上游，已刷新本地图片";
+		} else {
+			status.textContent = "未检测到上游图片";
+		}
+		scheduleDraw();
 	}
 
 	async function loadLocalImageFromButton() {
@@ -785,6 +1123,7 @@ function ensureEditor(node) {
 	}
 
 	loadButton.onclick = loadLocalImageFromButton;
+	upstreamButton.onclick = refreshUpstreamImage;
 	clearButton.onclick = clearLocalImage;
 	newCanvasButton.onclick = newCanvas;
 
@@ -919,6 +1258,10 @@ function ensureEditor(node) {
 		editor.imageLoaded = true;
 		editor.modelWidth = Math.max(1, Math.round(image.naturalWidth || editor.modelWidth || 512));
 		editor.modelHeight = Math.max(1, Math.round(image.naturalHeight || editor.modelHeight || 512));
+		if (editor.pendingLoadStatus) {
+			status.textContent = `${editor.pendingLoadStatus}：${editor.modelWidth} x ${editor.modelHeight}`;
+			editor.pendingLoadStatus = "";
+		}
 		const signature = imageSourceSignature(editor.imageSource);
 		node.properties ||= {};
 		node.properties[SOURCE_PROPERTY] = signature;
@@ -931,16 +1274,25 @@ function ensureEditor(node) {
 	};
 	image.onerror = () => {
 		editor.imageLoaded = false;
+		if (editor.pendingLoadStatus) {
+			status.textContent = "图片加载失败";
+			editor.pendingLoadStatus = "";
+		}
 		syncLayout();
 		scheduleDraw();
 	};
 
 	const widget = node.addDOMWidget("gjj_sam2_mask_editor", "gjj_sam2_mask_editor", root, {
+		serialize: false,
 		hideOnZoom: false,
 		getHeight: () => getStoredHeight(node),
 		getMinHeight: () => DEFAULT_NODE_HEIGHT,
 		getMaxHeight: () => getStoredHeight(node),
 	});
+	widget.serialize = false;
+	widget.options ||= {};
+	widget.options.serialize = false;
+	widget.serializeValue = () => undefined;
 	widget.computeSize = (width) => [Math.max(MIN_NODE_WIDTH, Number(width || getStoredWidth(node))), getStoredHeight(node)];
 
 	node.__gjjSAM2MaskEditor = {
@@ -970,6 +1322,7 @@ function patchNode(node) {
 	}
 	node.__gjjSAM2MaskPatched = true;
 	node.properties ||= {};
+	repairLiveWidgetValues(node);
 	if (!node.properties[WIDTH_PROPERTY]) {
 		node.properties[WIDTH_PROPERTY] = Math.max(MIN_NODE_WIDTH, DEFAULT_NODE_WIDTH, Number(node.size?.[0] || 0));
 	}
@@ -986,6 +1339,7 @@ function patchNode(node) {
 
 function afterNodeReady(node) {
 	patchNode(node);
+	repairLiveWidgetValues(node);
 	const view = ensureEditor(node);
 	compactNode(node);
 	normalizeOutputs(node);
@@ -1082,8 +1436,10 @@ app.registerExtension({
 		};
 
 		const originalOnConfigure = nodeType.prototype.onConfigure;
-		nodeType.prototype.onConfigure = function (...args) {
-			const result = originalOnConfigure?.apply(this, args);
+		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
+			sanitizeSerializedNodeWidgets(serializedNode, this);
+			const result = originalOnConfigure?.apply(this, [serializedNode, ...args]);
+			repairLiveWidgetValues(this, serializedNode?.widgets_values);
 			ensureNodeSize(this);
 			afterNodeReady(this);
 			return result;
@@ -1132,6 +1488,7 @@ app.registerExtension({
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (data) {
 			const result = originalOnSerialize?.apply(this, arguments);
+			repairLiveWidgetValues(this);
 			const view = ensureEditor(this);
 			view.writeBack?.();
 			if (data) {
@@ -1140,6 +1497,7 @@ app.registerExtension({
 				data.properties[HEIGHT_PROPERTY] = this.properties?.[HEIGHT_PROPERTY];
 				data.properties[IMAGE_STORE_PROPERTY] = this.properties?.[IMAGE_STORE_PROPERTY] || "";
 				data.properties[STATE_PROPERTY] = this.properties?.[STATE_PROPERTY] || "";
+				writeSerializedWidgetValues(this, data);
 			}
 			return result;
 		};

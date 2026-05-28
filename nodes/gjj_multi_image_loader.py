@@ -628,19 +628,9 @@ class GJJ_MultiImageLoader:
 
     @classmethod
     def IS_CHANGED(cls, selected_images="[]", sequence_range="", input_images=None, slide_start_index=None, prompt=None, extra_pnginfo=None, unique_id=None):
-        selected = recover_selected_images(selected_images, extra_pnginfo, unique_id)
-        resolved_sequence_range = recover_sequence_range(sequence_range, extra_pnginfo, unique_id)
-        input_shape = tuple(input_images.shape) if isinstance(input_images, torch.Tensor) else ()
-        return json.dumps(
-            {
-                "selected": selected_images_signature(selected),
-                "sequence_range": resolved_sequence_range,
-                "slide_start_index": slide_start_index,
-                "input_shape": input_shape,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
+        # 这个节点的图片选择主要由前端面板属性维护。始终重新执行可确保上游面板换图后，
+        # 下游节点拿到的是当前选择的真实图片张量，而不是上一轮缓存。
+        return float("NaN")
 
     def load_images(self, selected_images="[]", sequence_range="", input_images=None, slide_start_index=None, prompt=None, extra_pnginfo=None, unique_id=None):
         selected = recover_selected_images(selected_images, extra_pnginfo, unique_id)
