@@ -33,7 +33,7 @@ except ImportError:
 
 NODE_NAME = "GJJ_AudioTimestampEditor"
 NODE_DISPLAY_NAME = "GJJ · ✂️ 可视化音频分段编辑器"
-BACKEND_VERSION = "V22_MATCH_VISIBLE_AUDIO_SOURCE"
+BACKEND_VERSION = "V23_DURATION_INPUT_SYNC"
 MAX_SEGMENTS = 99  # 最大分段数量
 MIN_OUTPUTS = 1  # 最小输出数量
 DEPENDENCY_SPECS = [
@@ -642,7 +642,9 @@ class GJJ_AudioSegmentEditor:
 		# V19：稳定缓存 key。不要再 time_ns 强制重跑；否则前端刷新波形/下游预览时会不断请求上游。
 		property_segments = _segments_from_workflow_properties(extra_pnginfo, unique_id)
 		prompt_segments = _segments_from_prompt_inputs(prompt, unique_id)
-		segments = property_segments or prompt_segments
+		# V23：本次执行 prompt 里的 widget 值通常比 workflow properties 更新得更早；
+		# properties 继续作为旧前端/旧工作流的兜底，避免旧 properties 把新分段盖掉。
+		segments = prompt_segments or property_segments
 		seg_text = _segments_cache_text(segments) if segments else str(segments_json or "[]")
 		if audio_file and audio_file != "[不加载]":
 			source_sig = _file_fingerprint(audio_file)
@@ -688,11 +690,11 @@ class GJJ_AudioSegmentEditor:
 			audio_np, sample_rate = audio_to_waveform_data(current_audio)
 			duration = len(audio_np) / sample_rate if sample_rate > 0 else 0
 
-			# 3. 解析或生成分段列表。优先使用前端拖动后写入 workflow properties 的最新分段，
-			#    再使用隐藏 widget 传入的 segments_json，最后才自动生成默认单段。
+			# 3. 解析或生成分段列表。优先使用本次执行 prompt 里的隐藏 widget；
+			#    workflow properties 作为旧前端/旧工作流兜底，最后才自动生成默认单段。
 			property_segments = _segments_from_workflow_properties(extra_pnginfo, unique_id)
 			prompt_segments = _segments_from_prompt_inputs(prompt, unique_id)
-			segments = property_segments or prompt_segments or parse_segments_list(segments_json)
+			segments = prompt_segments or property_segments or parse_segments_list(segments_json)
 			if not segments:
 				# 默认只生成 1 段，按“单段时长”截取；前端可拖动高亮区域调整位置。
 				segments = generate_auto_segments(duration, 1, segment_duration)

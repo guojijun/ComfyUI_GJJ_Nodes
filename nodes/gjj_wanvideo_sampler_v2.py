@@ -264,6 +264,58 @@ def _validate_wanvideo_model_input(model):
         "WanVideoWrapper 流程请改接「GJJ · 🎬 WanVideo 模型加载器」输出的 WANVIDEOMODEL。"
     )
 
+
+def _wanvideo_transformer_details(model):
+    try:
+        inner = getattr(model, "model", None)
+        transformer = getattr(inner, "diffusion_model", None)
+        return {
+            "in_dim": getattr(transformer, "in_dim", None),
+            "control_adapter": getattr(transformer, "control_adapter", None),
+            "control_lora": bool(inner["control_lora"]) if inner is not None else False,
+            "class_name": type(transformer).__name__ if transformer is not None else "未知模型",
+        }
+    except Exception:
+        return {
+            "in_dim": None,
+            "control_adapter": None,
+            "control_lora": False,
+            "class_name": "未知模型",
+        }
+
+
+def _validate_fun_control_input(model, image_embeds):
+    if not isinstance(image_embeds, dict):
+        return
+    control_embeds = image_embeds.get("control_embeds", None)
+    if control_embeds is None:
+        return
+
+    details = _wanvideo_transformer_details(model)
+    in_dim = details["in_dim"]
+    control_lora = details["control_lora"]
+    is_i2v_embeds = image_embeds.get("image_embeds", None) is not None
+    fun_control_dims = {148, 52, 48, 36, 32}
+
+    if is_i2v_embeds or not control_lora:
+        if in_dim not in fun_control_dims:
+            raise RuntimeError(
+                "WanVideo 控制条件与当前模型不匹配。\n"
+                "当前图像条件里带有 control_embeds（控制信号），但采样模型不是 Fun-Control / Fun-Camera / 对应控制结构。\n"
+                f"检测到模型结构：{details['class_name']}，in_dim={in_dim}，control_lora={control_lora}。\n"
+                "处理方式：如果你只是普通 T2V/I2V/首尾帧生成，请断开「控制条件 / control_embeds / WanVideo Control Embeds / Add Control Embeds」这一路；"
+                "如果确实要用姿态、深度、轨迹或控制视频，请换成 Wan Fun-Control 模型，或加载匹配的 Wan Control LoRA。"
+            )
+
+    if isinstance(control_embeds, dict) and control_embeds.get("control_camera_latents", None) is not None:
+        if details["control_adapter"] is None:
+            raise RuntimeError(
+                "WanVideo 相机控制条件与当前模型不匹配。\n"
+                "当前连接了 control_camera_latents，但模型没有 Fun-Control-Camera 的 control_adapter。\n"
+                "请换用 Fun-Camera 模型，或断开相机控制条件。"
+            )
+
+
 def _unwrap_compiled_module(module):
     while hasattr(module, "_orig_mod"):
         module = module._orig_mod
@@ -1171,6 +1223,7 @@ class GJJ_WanVideoSamplerV2:
         args["add_noise_to_samples"] = _as_bool(args["add_noise_to_samples"], False)
 
         _validate_wanvideo_model_input(args["model"])
+        _validate_fun_control_input(args["model"], args["image_embeds"])
 
         node = _source_wanvideo_sampler_if_loaded(model)
         if node is None:
@@ -1291,6 +1344,13 @@ class GJJ_WanVideoSamplerV2:
                 
                 # 其他未知错误，直接抛出
                 else:
+                    if "control signal only works with fun-control model" in error_str:
+                        raise RuntimeError(
+                            "WanVideo 控制条件与当前模型不匹配。\n"
+                            "采样器收到了 control_embeds，但当前 Wan 模型不是 Fun-Control 类型。\n"
+                            "普通 T2V/I2V/首尾帧生成请断开「控制条件 / control_embeds / WanVideo Control Embeds / Add Control Embeds」；"
+                            "需要控制视频时请换用 Wan Fun-Control 模型或匹配的 Control LoRA。"
+                        ) from e
                     raise
 
 

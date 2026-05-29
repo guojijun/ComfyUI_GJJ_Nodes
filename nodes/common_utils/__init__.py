@@ -192,6 +192,23 @@ from .tsv_translation import (
 	translate_to_english,
 )
 
+from .prompt_translation import (
+	# 提示词中英翻译公共工具
+	COMMON_PROMPT_TRANSLATE_API_PATH,
+	DEFAULT_TRANSLATION_NODE_NAME,
+	LEGACY_CLIP_PROMPT_TRANSLATE_API_PATH,
+	TRANSLATION_DEPENDENCY_SPECS,
+	TRANSLATION_MODEL_DOWNLOAD_URL,
+	TRANSLATION_MODEL_NAME,
+	TRANSLATION_MODEL_SUBDIR,
+	build_translation_environment_report,
+	register_prompt_translation_api,
+	send_translated_prompt,
+	translate_prompt_pair,
+	translate_zh_to_en,
+	unload_translation_model,
+)
+
 from . import rmbg2_model
 
 __all__ = [
@@ -308,4 +325,18 @@ __all__ = [
 	"translate_text_to_english",
 	"translate_to_chinese",
 	"translate_to_english",
+	# prompt_translation
+	"COMMON_PROMPT_TRANSLATE_API_PATH",
+	"DEFAULT_TRANSLATION_NODE_NAME",
+	"LEGACY_CLIP_PROMPT_TRANSLATE_API_PATH",
+	"TRANSLATION_DEPENDENCY_SPECS",
+	"TRANSLATION_MODEL_DOWNLOAD_URL",
+	"TRANSLATION_MODEL_NAME",
+	"TRANSLATION_MODEL_SUBDIR",
+	"build_translation_environment_report",
+	"register_prompt_translation_api",
+	"send_translated_prompt",
+	"translate_prompt_pair",
+	"translate_zh_to_en",
+	"unload_translation_model",
 ]

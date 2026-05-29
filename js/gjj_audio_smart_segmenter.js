@@ -159,6 +159,7 @@ function updateVisibility(node) {
 		node.__gjjAudioSegAutoBtn.disabled = externalIndex;
 		node.__gjjAudioSegAutoBtn.style.opacity = externalIndex ? "0.58" : "1";
 	}
+	clearDependencyWarning(node);
 	measurePanel(node);
 	app.graph?.setDirtyCanvas?.(true, true);
 }
@@ -166,6 +167,92 @@ function updateVisibility(node) {
 function setStatus(node, text) {
 	if (node.__gjjAudioSegStatus) {
 		node.__gjjAudioSegStatus.textContent = text || "等待执行";
+	}
+}
+
+function isWhisperAlignActive(node) {
+	const mode = getWidget(node, "mode")?.value || MODE_SILENCE;
+	const align = getWidget(node, "paragraph_align")?.value || ALIGN_COMPAT;
+	return mode === MODE_PARAGRAPH && align === ALIGN_WHISPER;
+}
+
+function clearNodeErrorContainer(container, node) {
+	if (!container || !node) return;
+	const keys = [node.id, String(node.id)];
+	if (container instanceof Map) {
+		for (const key of keys) container.delete(key);
+		return;
+	}
+	if (container instanceof Set) {
+		for (const key of keys) container.delete(key);
+		container.delete(node);
+		return;
+	}
+	if (Array.isArray(container)) {
+		for (let index = container.length - 1; index >= 0; index -= 1) {
+			const item = container[index];
+			if (item === node || keys.includes(item) || keys.includes(item?.node_id) || keys.includes(item?.node)) {
+				container.splice(index, 1);
+			}
+		}
+		return;
+	}
+	if (typeof container === "object") {
+		for (const key of keys) {
+			try { delete container[key]; } catch (_) {}
+		}
+	}
+}
+
+function clearCachedNodeErrors(node) {
+	const holders = [app, app?.graph, app?.canvas, app?.ui];
+	const names = [
+		"node_errors",
+		"nodeErrors",
+		"last_node_errors",
+		"lastNodeErrors",
+		"execution_errors",
+		"executionErrors",
+		"lastExecutionErrors",
+		"validation_errors",
+		"validationErrors",
+		"invalid_nodes",
+		"invalidNodes",
+		"error_nodes",
+		"errorNodes",
+	];
+	for (const holder of holders) {
+		if (!holder) continue;
+		for (const name of names) clearNodeErrorContainer(holder[name], node);
+	}
+}
+
+function clearDependencyWarning(node, { clearExecutionError = true } = {}) {
+	if (!node || isWhisperAlignActive(node)) return;
+	try {
+		globalThis.GJJ_CommonDependencyModelNotice?.applyNotice?.(node, {
+			warning_message: "",
+			panel_message: "",
+			copy_text: "",
+			copy_label: "",
+			notice_level: "",
+		});
+	} catch (_) {}
+	const notice = node.__gjjDependencyNotice;
+	if (notice?.root) notice.root.style.display = "none";
+	if (notice?.message) notice.message.textContent = "";
+	if (notice?.button) notice.button.style.display = "none";
+	if (clearExecutionError) {
+		for (const key of ["last_error", "execution_error", "error_message", "error", "errors"]) {
+			try {
+				if (key in node) node[key] = null;
+			} catch (_) {}
+		}
+		if (node.flags) {
+			delete node.flags.error;
+			delete node.flags.has_errors;
+		}
+		clearCachedNodeErrors(node);
 	}
 }
 
@@ -332,6 +419,7 @@ function patchNode(node) {
 	const originalExecuted = node.onExecuted;
 	node.onExecuted = function (message) {
 		const result = originalExecuted?.apply(this, arguments);
+		clearDependencyWarning(this);
 		const count = Number(message?.segment_count?.[0] || 0);
 		const index = Number(message?.segment_index?.[0] || getWidget(this, "index")?.value || 1);
 		const cacheText = message?.segment_cache_hit?.[0] ? "复用缓存" : "刷新缓存";
@@ -362,6 +450,27 @@ function patchNode(node) {
 	}
 	ensurePanel(node);
 }
+
+function noticeTargetNodes(data) {
+	const nodes = Array.isArray(app.graph?._nodes) ? app.graph._nodes.filter(Boolean) : [];
+	const nodeId = String(data?.node || "");
+	if (nodeId) {
+		const node = app.graph?.getNodeById?.(nodeId) || nodes.find((item) => String(item?.id) === nodeId);
+		return node?.comfyClass === TARGET ? [node] : [];
+	}
+	const targetType = String(data?.node_type || data?.class_name || "");
+	if (targetType) return targetType === TARGET ? nodes.filter((node) => node?.comfyClass === TARGET) : [];
+	return nodes.filter((node) => node?.comfyClass === TARGET);
+}
+
+api?.addEventListener?.("gjj_dependency_model_notice", (event) => {
+	const data = event.detail || {};
+	setTimeout(() => {
+		for (const node of noticeTargetNodes(data)) {
+			clearDependencyWarning(node);
+		}
+	}, 0);
+});
 
 app.registerExtension({
 	name: "GJJ.AudioSmartSegmenter",

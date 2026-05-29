@@ -12,6 +12,8 @@ const HIDDEN_PANEL_HEIGHT = 0;
 const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "mkv", "avi", "m4v"]);
 const PRIMARY_INPUT_NAME = "images";
 const PRIMARY_INPUT_ALIASES = new Set(["images", "图像"]);
+const FRAME_RATE_WIDGET_NAME = "frame_rate";
+const FRAME_RATE_SOCKET_TYPE = "INT,FLOAT";
 const OPTIONAL_INPUTS = [
 	{ name: "audio", type: "AUDIO", label: "音频", localized_name: "音频" },
 	{ name: "vae", type: "VAE", label: "VAE 解码器", localized_name: "VAE 解码器" },
@@ -133,6 +135,21 @@ function isPrimaryInputName(name) {
 	return PRIMARY_INPUT_ALIASES.has(String(name || ""));
 }
 
+function isFrameRateSlot(slot) {
+	const name = String(slot?.name || "");
+	const widgetName = String(slot?.widget?.name || "");
+	return name === FRAME_RATE_WIDGET_NAME || widgetName === FRAME_RATE_WIDGET_NAME;
+}
+
+function normalizeSlotCopy(copy) {
+	if (isFrameRateSlot(copy)) {
+		copy.type = FRAME_RATE_SOCKET_TYPE;
+		copy.label ||= "帧率";
+		copy.localized_name ||= "帧率";
+	}
+	return copy;
+}
+
 function cloneSlot(slot) {
 	const copy = {};
 	for (const [key, value] of Object.entries(slot || {})) {
@@ -149,7 +166,7 @@ function cloneSlot(slot) {
 		}
 		copy[key] = value;
 	}
-	return copy;
+	return normalizeSlotCopy(copy);
 }
 
 function readBoolWidget(node, name) {

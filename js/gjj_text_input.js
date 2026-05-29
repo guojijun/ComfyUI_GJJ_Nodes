@@ -9,7 +9,6 @@ const WIDTH_PROPERTY = "gjj_text_input_width";
 const MODE_EDIT = "edit";
 const MODE_PREVIEW = "preview";
 const DEFAULT_WIDTH = 320;
-const MIN_WIDTH = 120;
 const EMPTY_TEXT = "空文本";
 const DOUBLE_CLICK_MS = 420;
 
@@ -30,13 +29,12 @@ function setMode(node, mode) {
 function getCurrentWidth(node) {
 	const sizeWidth = Number(node?.size?.[0] || 0);
 	const savedWidth = Number(node?.properties?.[WIDTH_PROPERTY] || 0);
-	const width = sizeWidth || savedWidth || DEFAULT_WIDTH;
-	return Math.max(MIN_WIDTH, width);
+	return sizeWidth || savedWidth || DEFAULT_WIDTH;
 }
 
 function rememberWidth(node) {
 	if (!node) {
-		return MIN_WIDTH;
+		return DEFAULT_WIDTH;
 	}
 	const width = getCurrentWidth(node);
 	node.properties = node.properties || {};
@@ -483,7 +481,7 @@ function applyMode(node) {
 	}
 	if (node.__gjjTextInputWidget) {
 		node.__gjjTextInputWidget.computeSize = (width) => [
-			Math.max(MIN_WIDTH, Number(width || getCurrentWidth(node))),
+			Number(width || getCurrentWidth(node)) || DEFAULT_WIDTH,
 			Math.max(24, Math.ceil(node.__gjjTextInputContainer?.scrollHeight || 24)),
 		];
 	}
@@ -838,7 +836,7 @@ function ensureDom(node) {
 	});
 	if (widget) {
 		widget.value = getTextValue(node);
-		widget.computeSize = (width) => [Math.max(MIN_WIDTH, Number(width || getCurrentWidth(node))), 24];
+		widget.computeSize = (width) => [Number(width || getCurrentWidth(node)) || DEFAULT_WIDTH, 24];
 		node.__gjjTextInputWidget = widget;
 	}
 	if (Array.isArray(node.widgets)) {
@@ -897,12 +895,14 @@ app.registerExtension({
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
 			const result = originalOnConfigure?.apply(this, [serializedNode, ...args]);
+			const serializedWidth = Number(serializedNode?.size?.[0] || 0);
 			const savedWidth = Number(serializedNode?.properties?.[WIDTH_PROPERTY] || this.properties?.[WIDTH_PROPERTY] || 0);
-			if (savedWidth > 0) {
+			const width = serializedWidth || savedWidth;
+			if (width > 0) {
 				this.properties = this.properties || {};
-				this.properties[WIDTH_PROPERTY] = Math.max(MIN_WIDTH, savedWidth);
-				if (Array.isArray(this.size)) {
-					this.size[0] = Math.max(MIN_WIDTH, savedWidth);
+				this.properties[WIDTH_PROPERTY] = width;
+				if (Array.isArray(this.size) && !Number(this.size[0] || 0)) {
+					this.size[0] = width;
 				}
 			}
 			restoreSavedValue(this, serializedNode);

@@ -23,7 +23,6 @@ from .common_utils.dependency_checker import (
 from .gjj_fish_audio_s2_loader import (
     HF_MODELS,
     LOCAL_MODEL_PLACEHOLDER,
-    RUNTIME_INSTALL_PACKAGES,
     _register_folder,
     _strip_auto_download_suffix,
     audio_bytes_from_comfy,
@@ -49,6 +48,7 @@ AUDIO_PREFIX = "speaker_"
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac"}
 MISSING_AUDIO_CHOICE = "[未找到models/mp3音频]"
 DEFAULT_REFERENCE_TEXT = "人生不如意十有八九。要么看得开，要么就认栽！"
+DEFAULT_MAX_NEW_TOKENS = 1024
 MP3_QUALITY_OPTIONS = ["320k", "128k", "V0"]
 MODES = ["单人克隆", "普通TTS", "多说话人克隆"]
 LANGUAGES = [
@@ -69,32 +69,40 @@ DEPENDENCY_SPECS = [
     {"module_name": "hydra", "package_name": "hydra-core", "display_name": "hydra-core", "description": "Fish Audio S2 配置系统依赖。"},
     {"module_name": "pyrootutils", "package_name": "pyrootutils", "display_name": "pyrootutils", "description": "Fish Audio S2 项目路径依赖。"},
     {"module_name": "omegaconf", "package_name": "omegaconf", "display_name": "omegaconf", "description": "Fish Audio S2 配置解析依赖。"},
-    {"module_name": "descript_audio_codec", "package_name": "descript-audio-codec", "display_name": "descript-audio-codec", "description": "Fish Audio S2 DAC 编解码依赖。"},
+    {"module_name": "dac", "package_name": "descript-audio-codec", "display_name": "descript-audio-codec", "description": "Fish Audio S2 DAC 编解码依赖。"},
     {"module_name": "audiotools", "package_name": "descript-audiotools", "display_name": "descript-audiotools", "description": "Fish Audio S2 音频工具依赖。"},
     {"module_name": "soundfile", "package_name": "soundfile", "display_name": "soundfile", "description": "Fish Audio S2 音频读写依赖。"},
     {"module_name": "librosa", "package_name": "librosa", "display_name": "librosa", "description": "Fish Audio S2 音频处理依赖。"},
-    {"module_name": "huggingface_hub", "package_name": "huggingface_hub", "display_name": "huggingface_hub", "description": "自动下载 Fish S2 模型依赖。"},
     {"module_name": "torchvision", "package_name": "torchvision", "display_name": "torchvision", "description": "Fish Audio S2 运行时依赖。"},
     {"module_name": "datasets", "package_name": "datasets", "display_name": "datasets", "description": "Fish Audio S2 数据处理依赖。"},
     {"module_name": "pyarrow", "package_name": "pyarrow", "display_name": "pyarrow", "description": "Fish Audio S2 数据缓存依赖。"},
     {"module_name": "google.protobuf", "package_name": "protobuf", "display_name": "protobuf", "description": "Fish Audio S2 模型序列化依赖。"},
     {"module_name": "natsort", "package_name": "natsort", "display_name": "natsort", "description": "Fish Audio S2 文件排序依赖。"},
     {"module_name": "loralib", "package_name": "loralib", "display_name": "loralib", "description": "Fish Audio S2 LoRA 运行依赖。"},
-    {"module_name": "imageio_ffmpeg", "package_name": "imageio-ffmpeg", "display_name": "imageio-ffmpeg", "description": "Fish Audio S2 音频回退解码依赖。"},
-    {"module_name": "av", "package_name": "av", "display_name": "av", "description": "Fish Audio S2 本地音频回退解码依赖。"},
+]
+OPTIONAL_DEPENDENCY_SPECS = [
+    {"module_name": "huggingface_hub", "package_name": "huggingface_hub", "display_name": "huggingface_hub", "description": "仅自动下载模型时需要；使用本地模型不需要。"},
+    {"module_name": "imageio_ffmpeg", "package_name": "imageio-ffmpeg", "display_name": "imageio-ffmpeg", "description": "音频/MP3 回退处理依赖；基础 AUDIO 输出不依赖它。"},
+    {"module_name": "av", "package_name": "av", "display_name": "PyAV", "description": "soundfile 无法读取本地参考音频时的回退解码依赖。"},
 ]
 
 
 _register_folder()
 
 
-def _collect_dependency_state() -> tuple[bool, list[dict[str, str]]]:
+def _collect_missing_dependencies(specs: list[dict[str, str]]) -> list[dict[str, str]]:
     missing_dependencies: list[dict[str, str]] = []
-    for spec in DEPENDENCY_SPECS:
+    for spec in specs:
         available, _ = check_dependencies([spec["module_name"]], NODE_DISPLAY_NAME)
         if not available:
             missing_dependencies.append(spec)
-    return (not missing_dependencies), missing_dependencies
+    return missing_dependencies
+
+
+def _collect_dependency_state() -> tuple[bool, list[dict[str, str]], list[dict[str, str]]]:
+    missing_dependencies = _collect_missing_dependencies(DEPENDENCY_SPECS)
+    optional_missing_dependencies = _collect_missing_dependencies(OPTIONAL_DEPENDENCY_SPECS)
+    return (not missing_dependencies), missing_dependencies, optional_missing_dependencies
 
 
 def _collect_model_state() -> tuple[bool, list[dict[str, str]]]:
@@ -112,13 +120,17 @@ def _collect_model_state() -> tuple[bool, list[dict[str, str]]]:
     ]
 
 
-_DEPENDENCIES_AVAILABLE, _MISSING_DEPENDENCIES = _collect_dependency_state()
+_DEPENDENCIES_AVAILABLE, _MISSING_DEPENDENCIES, _OPTIONAL_MISSING_DEPENDENCIES = _collect_dependency_state()
 _MODELS_AVAILABLE, _MISSING_MODELS = _collect_model_state()
+_REQUIRED_INSTALL_PACKAGES = [spec["package_name"] for spec in DEPENDENCY_SPECS]
+_OPTIONAL_INSTALL_PACKAGES = [spec["package_name"] for spec in OPTIONAL_DEPENDENCY_SPECS]
 _ENV_REPORT = build_dependency_model_report(
     node_name=NODE_DISPLAY_NAME,
     missing_dependencies=_MISSING_DEPENDENCIES,
     missing_models=_MISSING_MODELS,
-    install_packages=RUNTIME_INSTALL_PACKAGES + ["av"],
+    install_packages=_REQUIRED_INSTALL_PACKAGES,
+    optional_dependencies=_OPTIONAL_MISSING_DEPENDENCIES,
+    optional_install_packages=_OPTIONAL_INSTALL_PACKAGES,
     description="Fish Audio S2 一体式 TTS、单人语音克隆和多说话人语音克隆节点。",
 )
 _HELP_NOTICE = (
@@ -147,6 +159,16 @@ DESCRIPTION = (
     if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
     else f"{_ENV_REPORT['warning_message']}\n\n{_DESCRIPTION_READY}"
 )
+
+
+def _resolve_max_new_tokens(value: Any) -> int:
+    try:
+        resolved = int(float(value))
+    except Exception:
+        resolved = DEFAULT_MAX_NEW_TOKENS
+    if resolved <= 0:
+        return DEFAULT_MAX_NEW_TOKENS
+    return max(64, min(4096, resolved))
 
 
 def _send_status(unique_id: Any, text: str, progress: float | None = None) -> None:
@@ -471,13 +493,16 @@ class GJJ_FishAudioS2Generator:
         "install_cmd": _ENV_REPORT["install_cmd"] if not _ENV_REPORT.get("available", True) else "",
         "copy_text": _ENV_REPORT["copy_text"] if not _ENV_REPORT.get("available", True) else "",
         "copy_label": _ENV_REPORT["copy_label"] if not _ENV_REPORT.get("available", True) else "",
+        "notice_level": _ENV_REPORT.get("notice_level", "ok"),
+        "optional_install_cmd": _ENV_REPORT.get("optional_install_cmd", ""),
         "model_download_url": MODEL_DOWNLOAD_URL,
         "missing_dependencies": _MISSING_DEPENDENCIES,
+        "optional_dependencies": _OPTIONAL_MISSING_DEPENDENCIES,
         "missing_models": _MISSING_MODELS,
         "dependencies": [
             "Fish Speech vendor 运行时源码由 GJJ 内置，不需要额外安装 fish-speech。",
-            "需要补齐 transformers、hydra-core、descript-audio-codec、soundfile、huggingface_hub 等 Python 依赖。",
-            "本地参考音频回退解码会用到 av 和 imageio-ffmpeg。",
+            "核心推理需要 transformers、hydra-core、descript-audio-codec、soundfile 等 Python 依赖。",
+            "huggingface_hub、av、imageio-ffmpeg 只用于自动下载或回退音频处理；本地模型和常规音频路径可不依赖它们。",
         ],
         "models": _MISSING_MODELS or [
             {
@@ -553,12 +578,12 @@ class GJJ_FishAudioS2Generator:
                     "tooltip": "默认 auto。sage_attention 或 flash_attention 需要当前环境已安装对应加速库；BNB 模型会强制使用 sdpa。",
                 }),
                 "max_new_tokens": ("INT", {
-                    "default": 0,
+                    "default": DEFAULT_MAX_NEW_TOKENS,
                     "min": 0,
                     "max": 4096,
                     "step": 64,
                     "display_name": "最大音频Token",
-                    "tooltip": "0 表示由模型自动决定；文本很长时可提高上限。",
+                    "tooltip": "默认 1024。旧工作流里的 0 会按 1024 处理，避免底层使用 3 万级超大上限卡住。",
                 }),
                 "chunk_length": ("INT", {
                     "default": 200,
@@ -680,7 +705,7 @@ class GJJ_FishAudioS2Generator:
             text=request_text,
             references=list(references or []),
             reference_id=None,
-            max_new_tokens=int(max_new_tokens) if int(max_new_tokens) > 0 else 0,
+            max_new_tokens=_resolve_max_new_tokens(max_new_tokens),
             chunk_length=int(chunk_length),
             top_p=float(top_p),
             repetition_penalty=float(repetition_penalty),

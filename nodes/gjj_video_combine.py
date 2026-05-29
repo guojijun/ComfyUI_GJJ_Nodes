@@ -22,16 +22,28 @@ class MultiInput(str):
         instance.allowed_types = allowed_types
         return instance
 
+    @staticmethod
+    def _type_set(value):
+        if isinstance(value, (list, tuple, set)):
+            parts = []
+            for item in value:
+                parts.extend(str(item).split(","))
+        else:
+            parts = str(value).split(",")
+        return {part.strip() for part in parts if part.strip()}
+
     def __ne__(self, other):
         if self.allowed_types == "*" or other == "*":
             return False
-        return other not in self.allowed_types
+        allowed = self._type_set(self.allowed_types)
+        incoming = self._type_set(other)
+        return not (incoming.issubset(allowed) or allowed.issubset(incoming))
 
 
 image_or_latent = MultiInput(
     f"{GJJ_BATCH_IMAGE_TYPE},IMAGE", [GJJ_BATCH_IMAGE_TYPE, "IMAGE", "LATENT", "VIDEO"]
 )
-float_or_int = MultiInput("FLOAT", ["FLOAT", "INT"])
+float_or_int = MultiInput("FLOAT", ["INT", "FLOAT"])
 
 
 class GJJ_VideoCombine:
@@ -87,7 +99,7 @@ class GJJ_VideoCombine:
                         "min": 1,
                         "step": 1,
                         "display_name": "帧率",
-                        "tooltip": "输出动画或视频的帧率。",
+                        "tooltip": "输出动画或视频的帧率。可连接 INT 或 FLOAT，执行时会统一按浮点数计算。",
                     },
                 ),
                 "loop_count": (
@@ -261,6 +273,10 @@ class GJJ_VideoCombine:
             for key, value in kwargs.items()
             if str(key or "").startswith("video_") and value is not None
         }
+        try:
+            resolved_frame_rate = float(frame_rate)
+        except Exception as exc:
+            raise RuntimeError(f"帧率必须是可转换为数字的 INT/FLOAT：{frame_rate!r}") from exc
         format_overrides: dict[str, Any] = {}
         raw_overrides = str(format_overrides_json or "").strip()
         if raw_overrides:
@@ -286,7 +302,7 @@ class GJJ_VideoCombine:
         return combine_video(
             images=images,
             video_inputs=legacy_video_inputs,
-            frame_rate=frame_rate,
+            frame_rate=resolved_frame_rate,
             loop_count=loop_count,
             filename_prefix=filename_prefix,
             format_name=format_name,

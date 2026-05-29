@@ -240,7 +240,7 @@ class GJJ_LongCatAvatarWhisperEmbeds:
                         "max": 60.0,
                         "step": 0.1,
                         "display_name": "帧率",
-                        "tooltip": "目标视频帧率；LongCat-Avatar 1.5 默认 25fps。",
+                        "tooltip": "目标视频帧率；LongCat-Avatar 1.5 默认 25fps。前方接口支持连接 INT 或 FLOAT。",
                     },
                 ),
                 "audio_scale": (
@@ -307,6 +307,13 @@ class GJJ_LongCatAvatarWhisperEmbeds:
         except Exception as error:
             raise RuntimeError("LongCat Whisper 嵌入需要 numpy 和 torchaudio。请确认 ComfyUI Python 环境已安装。") from error
 
+        try:
+            fps_value = float(fps)
+        except Exception as error:
+            raise RuntimeError(f"帧率必须是可转换为数字的 INT/FLOAT：{fps!r}") from error
+        if fps_value <= 0:
+            raise RuntimeError("帧率必须大于 0。")
+
         whisper_model = _load_whisper_model(model_name, base_precision, load_device)
         model, feature_extractor, dtype = _validate_whisper_model(whisper_model)
 
@@ -327,7 +334,7 @@ class GJJ_LongCatAvatarWhisperEmbeds:
         audio_features_list = []
         seq_lengths = []
         audio_outputs = []
-        end_sample = int((int(num_frames) / float(fps)) * sample_rate_target)
+        end_sample = int((int(num_frames) / fps_value) * sample_rate_target)
 
         for audio_index, audio in enumerate(audio_inputs, start=1):
             if not isinstance(audio, dict) or "waveform" not in audio or "sample_rate" not in audio:
@@ -348,7 +355,7 @@ class GJJ_LongCatAvatarWhisperEmbeds:
                 audio_segment = _loudness_norm(audio_segment, sr=sample_rate_target).astype(np.float32)
 
             audio_duration = len(audio_segment) / sample_rate_target
-            video_length = int(audio_duration * float(fps))
+            video_length = int(audio_duration * fps_value)
             if video_length < 1:
                 continue
 

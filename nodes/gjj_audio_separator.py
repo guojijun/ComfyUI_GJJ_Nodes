@@ -7,6 +7,8 @@
 4. 增加兼容模式：原版 pack/unpack、显式维度修复、自动兼容。
 5. V13：IS_CHANGED / execute 改为纯 **kwargs 读取，避免 ComfyUI 将 audio 命名参数从 kwargs 中提前消费后导致外接输入误判为空；外部输入类型改为 *，提高 AUDIO/VIDEO 兼容性。
 6. V14：增加“节点最后一次成功输出”兜底缓存；当下游节点刷新导致本节点被二次请求、但本次请求没有携带上游 AUDIO 时，直接复用上一次成功输出，避免重复报“没有收到输入”。
+7. V15：合并 Mel-Band RoFormer Model Loader / Sampler / Normalize Audio Loudness，注册为 GJJ_MelBandRoFormerSampler。
+8. V16：GJJ_MelBandRoFormerSampler 独立为整段音频 LUFS 归一化节点，不再复用 AudioSeparator 的分离界面。
 """
 
 from __future__ import annotations
@@ -34,8 +36,9 @@ _COMPAT_ORIGINAL = "原版 pack/unpack"
 _COMPAT_EXPLICIT = "显式维度修复"
 _COMPAT_VALUES = [_COMPAT_AUTO, _COMPAT_ORIGINAL, _COMPAT_EXPLICIT]
 
-NODE_NAME = "GJJ · 音频/视频音轨分离器"
-NODE_DISPLAY_NAME = "GJJ · 🎵 音视频人声、背景音分离(Mel-Band RoFormer)"
+NODE_NAME = "GJJ · Mel-Band RoFormer采样器"
+NODE_DISPLAY_NAME = "GJJ · 🎵 Mel-Band RoFormer人声分离采样器"
+SAMPLER_NODE_DISPLAY_NAME = "GJJ · 🎚️ Mel-Band RoFormer整段音频响度"
 MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
 REQUIRED_DEPENDENCIES = (
     {
@@ -58,6 +61,11 @@ REQUIRED_DEPENDENCIES = (
         "package_name": "einops",
         "description": "Mel-Band RoFormer 模型结构需要 einops 做张量维度重排。",
     },
+    {
+        "module_name": "pyloudnorm",
+        "package_name": "pyloudnorm",
+        "description": "合并 Normalize Audio Loudness 功能时需要 pyloudnorm 计算并归一化 LUFS 响度。",
+    },
 )
 REQUIRED_MODEL = {
     "label": "MelBandRoformer 模型",
@@ -65,6 +73,12 @@ REQUIRED_MODEL = {
     "filename": "MelBandRoformer_fp16.safetensors",
     "download_url": MODEL_DOWNLOAD_URL,
     "description": "Mel-Band RoFormer 人声分离模型。",
+}
+LUFS_DEPENDENCY_SPEC = {
+    "module_name": "pyloudnorm",
+    "package_name": "pyloudnorm",
+    "display_name": "pyloudnorm",
+    "description": "Normalize Audio Loudness / LUFS 响度归一化需要 pyloudnorm。",
 }
 _RUNTIME_DEP_CACHE = {}
 
@@ -161,7 +175,7 @@ _ENV_REPORT = build_dependency_model_report(
     missing_models=_MISSING_MODELS,
     install_packages=[spec["package_name"] for spec in _MISSING_DEPENDENCIES],
     description=(
-        "使用 Mel-Band RoFormer 模型进行高质量人声/背景音分离，支持外部音频输入和节点内文件加载"
+        "合并 Mel-Band RoFormer 模型加载、采样和 Normalize Audio Loudness，输出已按 LUFS 归一化的人声"
         if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
         else ""
     ),
@@ -170,19 +184,21 @@ _ENV_REPORT = build_dependency_model_report(
 
 def _build_audio_separator_description():
     intro = """
-🟢 GJJ · 🎵 音频/视频音轨分离器（Mel-Band RoFormer 原版流程）
+🟢 GJJ · 🎵 Mel-Band RoFormer人声分离采样器
 
 【核心功能】
+• 单节点合并 - 内置模型选择、Mel-Band RoFormer 采样和 LUFS 响度归一化
 • 人声/背景音分离 - 使用 Mel-Band RoFormer 模型进行高质量音频分离
 • 多输入支持 - 支持外部 AUDIO 输入，也支持节点内直接加载音视频文件
 • 视频音轨提取 - 自动从视频文件中提取音轨进行分离
-• 批量处理友好 - 输出人声、背景声、时长和标签，便于后续处理
+• 批量处理友好 - 默认输出已归一化人声，也可展开背景声、时长和标签
 
 📦 运行时依赖：
   • numpy（数值计算，生成 Mel 滤波器）
   • torchaudio（音频重采样）
   • rotary-embedding-torch（模型结构需要）
   • einops（张量维度重排）
+  • pyloudnorm（Normalize Audio Loudness / LUFS 响度归一化）
 
 📁 模型要求：
   • MelBandRoformer 模型，请放置在 models/diffusion_models/ 目录
@@ -197,6 +213,33 @@ def _build_audio_separator_description():
 
 # 步骤3: 配置动态 DESCRIPTION
 DESCRIPTION = _build_audio_separator_description()
+
+
+def _collect_lufs_dependency_state():
+    available, message = check_dependencies(
+        [LUFS_DEPENDENCY_SPEC["module_name"]],
+        SAMPLER_NODE_DISPLAY_NAME,
+    )
+    missing = [] if available else [LUFS_DEPENDENCY_SPEC]
+    return available, missing, message if not available else ""
+
+
+_LUFS_DEPENDENCIES_AVAILABLE, _LUFS_MISSING_DEPENDENCIES, _LUFS_IMPORT_ERROR = _collect_lufs_dependency_state()
+_LUFS_ENV_REPORT = build_dependency_model_report(
+    node_name=SAMPLER_NODE_DISPLAY_NAME,
+    missing_dependencies=_LUFS_MISSING_DEPENDENCIES,
+    missing_models=[],
+    install_packages=[spec["package_name"] for spec in _LUFS_MISSING_DEPENDENCIES],
+    description="对输入的整段 AUDIO 执行 Normalize Audio Loudness，只调整目标 LUFS，不做人声/背景声分离。",
+    original_error=_LUFS_IMPORT_ERROR or "",
+)
+
+
+def _build_sampler_description():
+    intro = "整段音频 LUFS 响度归一化：输入 AUDIO，设置 lufs，输出归一化后的完整音频；不做人声/背景声分离。"
+    if _LUFS_ENV_REPORT.get("available", True):
+        return intro
+    return _LUFS_ENV_REPORT.get("warning_message", "") or intro
 
 # 控制台彩色输出：只输出具体错误和模型调用情况，不再打印 INPUT_TYPES / IS_CHANGED 等调试噪声。
 _ANSI_RESET = "[0m"
@@ -241,16 +284,17 @@ def _diag(msg):
 
 
 def _runtime_import(
-    module_name, *, package_name=None, description="", extra_packages=None
+    module_name, *, package_name=None, description="", extra_packages=None, node_name=None
 ):
     """运行时按需导入依赖；节点启动时不检查、不导入重型包。"""
     cache_key = module_name
     if cache_key in _RUNTIME_DEP_CACHE:
         return _RUNTIME_DEP_CACHE[cache_key]
+    report_node_name = node_name or NODE_DISPLAY_NAME
     try:
         mod = load_dependency_at_runtime(
             module_name,
-            NODE_DISPLAY_NAME,
+            report_node_name,
             package_name=package_name or module_name.split(".")[0],
             description=description,
             extra_packages=extra_packages,
@@ -261,7 +305,7 @@ def _runtime_import(
         report = getattr(import_error, "gjj_report", None)
         if report is None:
             report = build_dependency_model_report(
-                node_name=NODE_DISPLAY_NAME,
+                node_name=report_node_name,
                 missing_dependencies=[
                     {
                         "module_name": module_name,
@@ -1378,15 +1422,28 @@ def _last_output_get(key):
     except ValueError:
         pass
     _SEPARATOR_LAST_OUTPUT_ORDER.append(key)
-    (
-        vocals,
-        instruments,
-        duration,
-        tag_text,
-        source_desc,
-        model_name,
-        compatibility_mode,
-    ) = cached
+    if len(cached) >= 8:
+        (
+            vocals,
+            instruments,
+            duration,
+            tag_text,
+            source_desc,
+            model_name,
+            compatibility_mode,
+            target_lufs,
+        ) = cached
+    else:
+        (
+            vocals,
+            instruments,
+            duration,
+            tag_text,
+            source_desc,
+            model_name,
+            compatibility_mode,
+        ) = cached
+        target_lufs = -23.0
     return (
         _clone_audio_for_cache(vocals),
         _clone_audio_for_cache(instruments),
@@ -1395,6 +1452,7 @@ def _last_output_get(key):
         source_desc,
         model_name,
         compatibility_mode,
+        float(target_lufs),
     )
 
 
@@ -1407,6 +1465,7 @@ def _last_output_put(
     source_desc,
     model_name,
     compatibility_mode,
+    target_lufs=-23.0,
 ):
     _SEPARATOR_LAST_OUTPUT_CACHE[key] = (
         _clone_audio_for_cache(vocals),
@@ -1416,6 +1475,7 @@ def _last_output_put(
         str(source_desc),
         str(model_name),
         str(compatibility_mode),
+        float(target_lufs),
     )
     try:
         _SEPARATOR_LAST_OUTPUT_ORDER.remove(key)
@@ -1428,13 +1488,24 @@ def _last_output_put(
 
 
 def _build_debug_text(
-    prefix, model_name, source_desc, compatibility_mode, duration, vocals, instruments
+    prefix,
+    model_name,
+    source_desc,
+    compatibility_mode,
+    duration,
+    vocals,
+    instruments,
+    target_lufs=None,
 ):
+    lufs_line = (
+        f"LUFS目标：{float(target_lufs):.1f}\n" if target_lufs is not None else ""
+    )
     return (
         f"{prefix}\n"
         f"模型：{model_name}\n"
         f"来源：{source_desc}\n"
         f"兼容模式：{compatibility_mode}\n"
+        f"{lufs_line}"
         f"时长：{duration:.3f}s\n"
         f"人声：{tuple(vocals['waveform'].shape)}，采样率 {vocals['sample_rate']}Hz\n"
         f"背景声：{tuple(instruments['waveform'].shape)}，采样率 {instruments['sample_rate']}Hz"
@@ -1819,6 +1890,51 @@ def _process_with_real_melroformer(
     return vocals_out, instruments_out, duration
 
 
+def _get_pyloudnorm_module(node_name=NODE_DISPLAY_NAME):
+    return _runtime_import(
+        "pyloudnorm",
+        package_name="pyloudnorm",
+        description="合并 Normalize Audio Loudness 功能时需要 pyloudnorm 计算并归一化 LUFS 响度。",
+        node_name=node_name,
+    )
+
+
+def _normalize_audio_loudness(audio, target_lufs=-23.0, debug_log=False, node_name=NODE_DISPLAY_NAME):
+    """按 WanVideoWrapper NormalizeAudioLoudness 的逻辑归一化 ComfyUI AUDIO。"""
+    audio = _normalize_comfy_audio(audio)
+    if audio is None:
+        raise RuntimeError("响度归一化失败：收到的音频格式不正确。")
+
+    pyloudnorm = _get_pyloudnorm_module(node_name=node_name)
+    waveform = audio["waveform"].detach().cpu()
+    sample_rate = int(audio["sample_rate"])
+    target_lufs = max(-100.0, min(0.0, float(target_lufs)))
+
+    normalized_batches = []
+    for batch in waveform:
+        audio_np = batch.transpose(0, 1).numpy().astype(np.float32)
+        audio_np = np.ascontiguousarray(audio_np)
+        meter = pyloudnorm.Meter(sample_rate)
+        loudness = meter.integrated_loudness(audio_np)
+        if abs(loudness) > 100:
+            normalized_np = audio_np
+            if debug_log:
+                _log_warn("响度值异常或静音，已跳过 LUFS 归一化")
+        else:
+            normalized_np = pyloudnorm.normalize.loudness(
+                audio_np, loudness, target_lufs
+            )
+            if debug_log:
+                _log_model(f"响度归一化：{loudness:.2f} LUFS → {target_lufs:.1f} LUFS")
+        normalized_np = np.ascontiguousarray(normalized_np)
+        normalized_batches.append(torch.from_numpy(normalized_np).transpose(0, 1))
+
+    return {
+        "waveform": torch.stack(normalized_batches, dim=0).float().contiguous(),
+        "sample_rate": sample_rate,
+    }
+
+
 def _check_runtime_dependencies():
     """在执行开头集中检查运行时依赖，缺失时给出友好提示。"""
     for spec in REQUIRED_DEPENDENCIES:
@@ -1848,22 +1964,25 @@ def _pick_input_value(kwargs, current, *names, default=None):
 
 
 class GJJ_AudioSeparator:
-    """GJJ · 🎵 音频/视频音轨分离器（Mel-Band RoFormer 原版流程）"""
+    """GJJ · 🎵 Mel-Band RoFormer人声分离采样器"""
 
     DESCRIPTION = DESCRIPTION  # 引用模块级别的动态 DESCRIPTION
 
     GJJ_HELP = {
-        "title": "GJJ · 🎵 音频/视频音轨分离器",
-        "version": "V14",
+        "title": "GJJ · 🎵 Mel-Band RoFormer人声分离采样器",
+        "version": "V15",
         "author": "GJJ Custom Nodes Team",
         "description": (
-            "使用 Mel-Band RoFormer 模型进行高质量人声/背景音分离，支持外部音频输入和节点内文件加载"
+            "合并 Mel-Band RoFormer 模型加载、采样和 Normalize Audio Loudness，输出已按 LUFS 归一化的人声"
             if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
             else _ENV_REPORT["warning_message"]
         ),
         "warning_message": _ENV_REPORT["warning_message"] if _ENV_REPORT is not None and not _ENV_REPORT.get("available", True) else "",
         "notice": _ENV_REPORT["warning_message"] if _ENV_REPORT is not None and not _ENV_REPORT.get("available", True) else "",
+        "notice_level": _ENV_REPORT["notice_level"] if _ENV_REPORT is not None else "ok",
+        "panel_message": _ENV_REPORT["panel_message"] if _ENV_REPORT is not None else "",
         "install_cmd": _ENV_REPORT["install_cmd"] if _ENV_REPORT is not None else "",
+        "optional_install_cmd": _ENV_REPORT.get("optional_install_cmd", "") if _ENV_REPORT is not None else "",
         "copy_text": _ENV_REPORT["copy_text"] if _ENV_REPORT is not None else "",
         "copy_label": _ENV_REPORT["copy_label"] if _ENV_REPORT is not None else "",
         "model_download_url": MODEL_DOWNLOAD_URL,
@@ -1881,8 +2000,13 @@ class GJJ_AudioSeparator:
             "torchaudio（音频重采样到 44100Hz）",
             "rotary-embedding-torch（模型结构需要）",
             "einops（张量维度重排）",
+            "pyloudnorm（Normalize Audio Loudness / LUFS 响度归一化）",
         ],
         "features": [
+            {
+                "name": "三节点合并",
+                "description": "合并 Mel-Band RoFormer Model Loader、Sampler 和 Normalize Audio Loudness",
+            },
             {
                 "name": "人声/背景音分离",
                 "description": "使用 Mel-Band RoFormer 模型进行高质量音频分离",
@@ -1902,6 +2026,10 @@ class GJJ_AudioSeparator:
             {
                 "name": "维度兼容模式",
                 "description": "支持自动兼容、原版 pack/unpack、显式维度修复三种模式",
+            },
+            {
+                "name": "LUFS 归一化",
+                "description": "人声输出按目标 LUFS 做响度归一化，默认 -23.0",
             },
         ],
         "inputs": {
@@ -1932,11 +2060,17 @@ class GJJ_AudioSeparator:
                 "default": "显式维度修复",
                 "description": "维度修复模式，解决 einops pack/unpack 维度问题",
             },
+            "lufs": {
+                "type": "FLOAT",
+                "required": False,
+                "default": -23.0,
+                "description": "Normalize Audio Loudness 的目标 LUFS，默认 -23.0",
+            },
         },
         "outputs": {
             "人声": {
                 "type": "AUDIO",
-                "description": "分离出的人声音频",
+                "description": "分离出并按目标 LUFS 归一化的人声音频",
             },
             "背景声": {
                 "type": "AUDIO",
@@ -1971,6 +2105,7 @@ class GJJ_AudioSeparator:
         "technical_notes": [
             "基于原版 Mel-Band RoFormer 推理流程",
             "音频自动重采样到 44100Hz",
+            "人声输出会按目标 LUFS 做 Normalize Audio Loudness，默认 -23.0",
             "支持 mono 和 stereo 音频",
             "包含结果缓存机制，避免重复计算",
         ],
@@ -2046,6 +2181,17 @@ class GJJ_AudioSeparator:
                         "tooltip": "控制台日志开关。默认关闭；开启后输出模型加载、音频读取、重采样、分块推理等详细中文日志。可在顶部 🧾 按钮切换。",
                     },
                 ),
+                "🎚️ LUFS目标响度": (
+                    "FLOAT",
+                    {
+                        "default": -23.0,
+                        "min": -100.0,
+                        "max": 0.0,
+                        "step": 0.1,
+                        "display_name": "🎚️ LUFS目标响度",
+                        "tooltip": "Normalize Audio Loudness 的目标响度。默认 -23.0 LUFS；数值越接近 0 越响，越负越安静。",
+                    },
+                ),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -2056,7 +2202,7 @@ class GJJ_AudioSeparator:
     RETURN_TYPES = ("AUDIO", "AUDIO", "FLOAT", "STRING")
     RETURN_NAMES = ("人声", "背景声", "音频时长", "音频标签")
     OUTPUT_TOOLTIPS = (
-        "分离出的人声音频。",
+        "分离出并按目标 LUFS 归一化的人声音频。",
         "分离出的背景声/伴奏/乐器音频。",
         "输入音频或视频音轨的原始时长，单位秒。",
         "音频标签字符串，可用于后续节点识别当前音频来源。",
@@ -2064,6 +2210,14 @@ class GJJ_AudioSeparator:
     FUNCTION = "execute"
     CATEGORY = CATEGORY
     OUTPUT_NODE = True
+    SEARCH_ALIASES = [
+        "MelBandRoFormerSampler",
+        "Mel-Band RoFormer Sampler",
+        "Mel-Band RoFormer Model Loader",
+        "Normalize Audio Loudness",
+        "音频人声分离",
+        "响度归一化",
+    ]
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
@@ -2103,6 +2257,17 @@ class GJJ_AudioSeparator:
             _pick_input_value(kwargs, False, "force_rerun", default=False)
         )
         debug_nonce = _pick_input_value(kwargs, "0", "debug_nonce", default="0")
+        target_lufs = _pick_input_value(
+            kwargs,
+            -23.0,
+            "🎚️ LUFS目标响度",
+            "lufs",
+            default=-23.0,
+        )
+        try:
+            target_lufs = max(-100.0, min(0.0, float(target_lufs)))
+        except Exception:
+            target_lufs = -23.0
 
         if force_rerun:
             return float("nan")
@@ -2117,7 +2282,7 @@ class GJJ_AudioSeparator:
         except Exception as e:
             source_sig = ("sig_error", str(e), str(media_file))
 
-        return f"model={model_name}|source={source_sig}|tag={audio_tag}|mode={compatibility_mode}|nonce={debug_nonce}"
+        return f"model={model_name}|source={source_sig}|tag={audio_tag}|mode={compatibility_mode}|lufs={target_lufs:.1f}|nonce={debug_nonce}"
 
     def execute(self, **kwargs):
         model_name = _pick_input_value(
@@ -2152,6 +2317,17 @@ class GJJ_AudioSeparator:
         debug_log = bool(
             _pick_input_value(kwargs, False, "🧾 日志输出", "debug_log", default=False)
         )
+        target_lufs = _pick_input_value(
+            kwargs,
+            -23.0,
+            "🎚️ LUFS目标响度",
+            "lufs",
+            default=-23.0,
+        )
+        try:
+            target_lufs = max(-100.0, min(0.0, float(target_lufs)))
+        except Exception:
+            target_lufs = -23.0
         last_output_key = _make_last_output_key(self, kwargs)
 
         # 在 execute 开头进行运行时依赖检查；启动 ComfyUI 时不会检查这些依赖。
@@ -2192,7 +2368,7 @@ class GJJ_AudioSeparator:
 
         if debug_log:
             _log_model(
-                f"调用节点：模型={model_name}，外接输入={type(media_input).__name__ if media_input is not None else '无'}，文件={media_file}，标签={tag_text}，兼容模式={compatibility_mode}"
+                f"调用节点：模型={model_name}，外接输入={type(media_input).__name__ if media_input is not None else '无'}，文件={media_file}，标签={tag_text}，兼容模式={compatibility_mode}，LUFS目标={target_lufs:.1f}"
             )
 
         try:
@@ -2212,6 +2388,7 @@ class GJJ_AudioSeparator:
                             cached_source,
                             cached_model,
                             cached_mode,
+                            cached_lufs,
                         ) = last_cached
                         # V14：下游刷新/预览可能触发二次 prompt，但这次 prompt 没带上游 AUDIO。
                         # 这里复用本节点上一次成功输出，让下游拿到稳定音频，不再重复报错或重算。
@@ -2224,6 +2401,7 @@ class GJJ_AudioSeparator:
                             duration,
                             vocals,
                             instruments,
+                            cached_lufs if cached_lufs is not None else target_lufs,
                         )
                         return {
                             "ui": {"text": [debug_text]},
@@ -2266,6 +2444,9 @@ class GJJ_AudioSeparator:
         cached = _cache_get(cache_key)
         if cached is not None:
             vocals, instruments, duration = cached
+            vocals = _normalize_audio_loudness(
+                vocals, target_lufs=target_lufs, debug_log=debug_log
+            )
             _log_ok("命中缓存：输入音频未改变，跳过模型推理")
             _last_output_put(
                 last_output_key,
@@ -2276,6 +2457,7 @@ class GJJ_AudioSeparator:
                 source_desc,
                 model_name,
                 compatibility_mode,
+                target_lufs,
             )
             debug_text = _build_debug_text(
                 "GJJ 音频分离完成（缓存命中）",
@@ -2285,6 +2467,7 @@ class GJJ_AudioSeparator:
                 duration,
                 vocals,
                 instruments,
+                target_lufs,
             )
             return {
                 "ui": {"text": [debug_text]},
@@ -2311,6 +2494,13 @@ class GJJ_AudioSeparator:
             _log_error(f"模型推理失败：{e}")
             raise
         _cache_put(cache_key, vocals, instruments, duration)
+        try:
+            vocals = _normalize_audio_loudness(
+                vocals, target_lufs=target_lufs, debug_log=debug_log
+            )
+        except Exception as e:
+            _log_error(f"响度归一化失败：{e}")
+            raise
         _last_output_put(
             last_output_key,
             vocals,
@@ -2320,6 +2510,7 @@ class GJJ_AudioSeparator:
             source_desc,
             model_name,
             compatibility_mode,
+            target_lufs,
         )
         mm.soft_empty_cache()
         debug_text = _build_debug_text(
@@ -2330,6 +2521,7 @@ class GJJ_AudioSeparator:
             duration,
             vocals,
             instruments,
+            target_lufs,
         )
         return {
             "ui": {"text": [debug_text]},
@@ -2337,10 +2529,141 @@ class GJJ_AudioSeparator:
         }
 
 
+class GJJ_MelBandRoFormerSampler:
+    """GJJ · 🎚️ Mel-Band RoFormer整段音频响度"""
+
+    DESCRIPTION = _build_sampler_description()
+    GJJ_HELP = {
+        "title": "GJJ · 🎚️ Mel-Band RoFormer整段音频响度",
+        "version": "V16",
+        "author": "GJJ Custom Nodes Team",
+        "description": _build_sampler_description(),
+        "warning_message": _LUFS_ENV_REPORT.get("warning_message", "") if not _LUFS_ENV_REPORT.get("available", True) else "",
+        "notice": _LUFS_ENV_REPORT.get("help_message", "") if not _LUFS_ENV_REPORT.get("available", True) else "",
+        "notice_level": _LUFS_ENV_REPORT.get("notice_level", "ok"),
+        "panel_message": _LUFS_ENV_REPORT.get("panel_message", ""),
+        "install_cmd": _LUFS_ENV_REPORT.get("install_cmd", ""),
+        "optional_install_cmd": _LUFS_ENV_REPORT.get("optional_install_cmd", ""),
+        "copy_text": _LUFS_ENV_REPORT.get("copy_text", ""),
+        "copy_label": _LUFS_ENV_REPORT.get("copy_label", ""),
+        "dependencies": [
+            "pyloudnorm（Normalize Audio Loudness / LUFS 响度归一化）",
+        ],
+        "inputs": {
+            "audio": {
+                "type": "AUDIO",
+                "required": True,
+                "description": "输入完整音频；本节点只做 LUFS 响度归一化，不做人声/背景声分离。",
+            },
+            "lufs": {
+                "type": "FLOAT",
+                "required": True,
+                "default": -23.0,
+                "description": "目标 LUFS，默认 -23.0；数值越接近 0 越响。",
+            },
+        },
+        "outputs": {
+            "音频": {
+                "type": "AUDIO",
+                "description": "按目标 LUFS 归一化后的完整输入音频。",
+            },
+        },
+        "technical_notes": [
+            "等价于 Normalize Audio Loudness 的整段音频处理逻辑。",
+            "不会调用 Mel-Band RoFormer 模型，也不会输出 vocals/instruments 两路分离结果。",
+            "保留 GJJ_MelBandRoFormerSampler 类名，方便替换旧工作流中的合并节点。",
+        ],
+    }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": (
+                    "AUDIO",
+                    {
+                        "display_name": "音频",
+                        "tooltip": "输入完整 AUDIO；本节点只做 LUFS 响度归一化，不做人声/背景声分离。",
+                    },
+                ),
+                "lufs": (
+                    "FLOAT",
+                    {
+                        "default": -23.0,
+                        "min": -100.0,
+                        "max": 0.0,
+                        "step": 0.1,
+                        "display_name": "LUFS目标响度",
+                        "tooltip": "Normalize Audio Loudness 的目标响度。默认 -23.0 LUFS；数值越接近 0 越响，越负越安静。",
+                    },
+                ),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            },
+        }
+
+    RETURN_TYPES = ("AUDIO",)
+    RETURN_NAMES = ("音频",)
+    OUTPUT_TOOLTIPS = ("按目标 LUFS 归一化后的完整输入音频。",)
+    FUNCTION = "normalize"
+    CATEGORY = CATEGORY
+    SEARCH_ALIASES = [
+        "MelBandRoFormerSampler",
+        "Normalize Audio Loudness",
+        "lufs",
+        "响度归一化",
+        "整段音频",
+    ]
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        audio = _pick_input_value(kwargs, None, "audio", "音频", "🎵 外部音频", default=None)
+        target_lufs = _pick_input_value(kwargs, -23.0, "lufs", "🎚️ LUFS目标响度", default=-23.0)
+        try:
+            target_lufs = max(-100.0, min(0.0, float(target_lufs)))
+        except Exception:
+            target_lufs = -23.0
+        try:
+            source_sig = _audio_signature_for_cache(audio, fallback_source="audio")
+        except Exception:
+            source_sig = "audio"
+        return f"source={source_sig}|lufs={target_lufs:.1f}"
+
+    def normalize(self, audio=None, lufs=-23.0, unique_id=None, **kwargs):
+        audio_input = _pick_input_value(kwargs, audio, "audio", "音频", "🎵 外部音频", default=audio)
+        if audio_input is None:
+            raise RuntimeError("请连接音频输入。")
+
+        target_lufs = _pick_input_value(kwargs, lufs, "lufs", "🎚️ LUFS目标响度", default=-23.0)
+        try:
+            target_lufs = max(-100.0, min(0.0, float(target_lufs)))
+        except Exception:
+            target_lufs = -23.0
+
+        try:
+            normalized = _normalize_audio_loudness(
+                audio_input,
+                target_lufs=target_lufs,
+                debug_log=False,
+                node_name=SAMPLER_NODE_DISPLAY_NAME,
+            )
+        except Exception as e:
+            report = getattr(e, "gjj_report", None)
+            if report is not None:
+                send_dependency_model_notice(report, unique_id=unique_id)
+                raise RuntimeError(report.get("warning_message") or "响度归一化运行环境缺失。") from e
+            raise
+
+        return (normalized,)
+
+
 NODE_CLASS_MAPPINGS = {
+    "GJJ_MelBandRoFormerSampler": GJJ_MelBandRoFormerSampler,
     "GJJ_AudioSeparator": GJJ_AudioSeparator,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "GJJ_MelBandRoFormerSampler": "🎚️ Mel-Band RoFormer整段音频响度",
     "GJJ_AudioSeparator": "🎵 音视频人声、背景音分离(Mel-Band RoFormer)",
 }

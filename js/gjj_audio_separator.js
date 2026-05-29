@@ -3,6 +3,8 @@ import { api } from "../../scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET = "GJJ_AudioSeparator";
+const TARGETS = new Set([TARGET]);
+const SIMPLE_SAMPLER_TARGET = "GJJ_MelBandRoFormerSampler";
 const PROP_MORE_OUTPUTS = "gjj_audio_separator_more_outputs";
 const PROP_TOOLBAR_READY = "gjj_audio_separator_toolbar_ready";
 const MIN_NODE_WIDTH_FOR_NATIVE_LABELS = 460;
@@ -25,6 +27,14 @@ const ACCEPT_MEDIA = [
 ].join(",");
 
 // 标签显示全部交给 ComfyUI 原生 display_name/name，不再用 JS 额外改名或画文字。
+
+function isTargetName(name) {
+  return TARGETS.has(String(name || ""));
+}
+
+function isSimpleSamplerName(name) {
+  return String(name || "") === SIMPLE_SAMPLER_TARGET;
+}
 
 function ensureStyles() {
   if (document.getElementById("gjj-audio-separator-toolbar-style")) return;
@@ -197,6 +207,10 @@ function getDebugWidget(node) {
   return findWidgetAny(node, ["🧾 日志输出", "debug_log"]);
 }
 
+function getLufsWidget(node) {
+  return findWidgetAny(node, ["🎚️ LUFS目标响度", "lufs"]);
+}
+
 const MEDIA_INPUT_ALIASES = new Set([
   "🎵 外部音频",
   "外部音频",
@@ -342,6 +356,7 @@ function repairShiftedWidgetValues(node) {
   const tagWidget = getAudioTagWidget(node);
   const compatWidget = getCompatWidget(node);
   const debugWidget = getDebugWidget(node);
+  const lufsWidget = getLufsWidget(node);
 
   const modelValue = String(modelWidget?.value || "");
   const mediaValue = String(mediaWidget?.value || "");
@@ -368,6 +383,12 @@ function repairShiftedWidgetValues(node) {
   }
   if (debugWidget && typeof debugWidget.value !== "boolean") {
     setWidgetValue(debugWidget, false);
+  }
+  if (lufsWidget) {
+    const value = Number(lufsWidget.value);
+    if (!Number.isFinite(value) || value < -100 || value > 0) {
+      setWidgetValue(lufsWidget, -23.0);
+    }
   }
 }
 
@@ -480,7 +501,8 @@ let audioHelpByClass = null;
 let audioHelpPromise = null;
 
 function currentHelpPayload(nodeData = null) {
-  const backend = audioHelpByClass?.[TARGET] || {};
+  const className = String(nodeData?.name || TARGET);
+  const backend = audioHelpByClass?.[className] || audioHelpByClass?.[TARGET] || {};
   const inlineHelp = nodeData?.help || nodeData?.GJJ_HELP || null;
   const inlineHasNotice = !!(
     inlineHelp?.warning_message
@@ -855,10 +877,91 @@ function setupNode(node, nodeData = null) {
   }, 0);
 }
 
+function getSimpleSamplerLufsWidget(node) {
+  return findWidgetAny(node, ["lufs", "LUFS目标响度", "🎚️ LUFS目标响度"]);
+}
+
+function setupSimpleSamplerNode(node) {
+  if (!node) return;
+  node.properties = node.properties || {};
+  delete node.properties[PROP_MORE_OUTPUTS];
+  delete node.properties[PROP_TOOLBAR_READY];
+
+  if (Array.isArray(node.widgets) && node.__gjjAudioToolbarWidget) {
+    const index = node.widgets.indexOf(node.__gjjAudioToolbarWidget);
+    if (index >= 0) node.widgets.splice(index, 1);
+  }
+  node.__gjjAudioToolbarWidget = null;
+  node.__gjjToolbarButtons = null;
+  removeLegacyStatusWidgets(node);
+
+  const lufsWidget = getSimpleSamplerLufsWidget(node);
+  if (lufsWidget) {
+    lufsWidget.name = "lufs";
+    lufsWidget.label = "LUFS目标响度";
+    lufsWidget.localized_name = "LUFS目标响度";
+    lufsWidget.options = lufsWidget.options || {};
+    lufsWidget.options.display_name = "LUFS目标响度";
+    lufsWidget.options.tooltip = "Normalize Audio Loudness 的目标响度。默认 -23.0 LUFS；数值越接近 0 越响，越负越安静。";
+    const value = Number(lufsWidget.value);
+    if (!Number.isFinite(value) || value < -100 || value > 0) setWidgetValue(lufsWidget, -23.0);
+  }
+
+  if (Array.isArray(node.inputs) && node.inputs.length) {
+    const input = node.inputs.find((item) => String(item?.type || "").toUpperCase().includes("AUDIO")) || node.inputs[0];
+    input.name = "audio";
+    input.label = "音频";
+    input.localized_name = "音频";
+    input.type = "AUDIO";
+    node.inputs = [input];
+  }
+
+  const first = cloneSlot((node.outputs || [])[0] || {});
+  node.outputs = [{
+    ...first,
+    name: "音频",
+    type: "AUDIO",
+    links: first.links || null,
+  }];
+  refreshAudioNode(node);
+  markCanvasDirty(node);
+}
+
+function sanitizeSimpleSamplerSerializedValues(node, data) {
+  setupSimpleSamplerNode(node);
+  if (!data || !Array.isArray(node?.widgets)) return;
+  const lufsWidget = getSimpleSamplerLufsWidget(node);
+  data.widgets_values = lufsWidget ? [lufsWidget.value] : [];
+}
+
 app.registerExtension({
-  name: "GJJ.AudioSeparator.UI.V12",
+  name: "GJJ.AudioSeparator.UI.V15",
   async beforeRegisterNodeDef(nodeType, nodeData) {
-    if (nodeData?.name !== TARGET) return;
+    if (isSimpleSamplerName(nodeData?.name)) {
+      const onNodeCreated = nodeType.prototype.onNodeCreated;
+      nodeType.prototype.onNodeCreated = function (...args) {
+        const r = onNodeCreated?.apply(this, args);
+        setupSimpleSamplerNode(this);
+        return r;
+      };
+
+      const onConfigure = nodeType.prototype.onConfigure;
+      nodeType.prototype.onConfigure = function (...args) {
+        const r = onConfigure?.apply(this, args);
+        setupSimpleSamplerNode(this);
+        return r;
+      };
+
+      const onSerialize = nodeType.prototype.onSerialize;
+      nodeType.prototype.onSerialize = function (data) {
+        const r = onSerialize?.apply(this, arguments);
+        sanitizeSimpleSamplerSerializedValues(this, data);
+        return r;
+      };
+      return;
+    }
+
+    if (!isTargetName(nodeData?.name)) return;
 
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function (...args) {
@@ -908,7 +1011,9 @@ app.registerExtension({
   async setup() {
     loadAudioHelpData().then(() => {
       for (const node of app.graph?._nodes || []) {
-        if (String(node?.comfyClass || node?.type || "") === TARGET) {
+        if (isSimpleSamplerName(node?.comfyClass || node?.type)) {
+          setupSimpleSamplerNode(node);
+        } else if (isTargetName(node?.comfyClass || node?.type)) {
           setupNode(node, {});
         }
       }

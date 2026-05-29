@@ -248,7 +248,7 @@ class GJJ_WanVideoImageToVideoEncode:
                     "WANVIDIMAGE_EMBEDS",
                     {
                         "display_name": "控制条件",
-                        "tooltip": "可选。Fun 模型或控制模型使用的控制条件。",
+                        "tooltip": "仅 Fun-Control / Fun-Camera / 匹配 Control LoRA 模型可用。普通 T2V/I2V/首尾帧模型不要连接，否则采样器会报控制信号模型不匹配。",
                     },
                 ),
                 "fun_or_fl2v_model": (

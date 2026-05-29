@@ -177,6 +177,7 @@ function syncNodeWidgetValues(node) {
 function syncEditorStateToNode(node) {
 	if (!node?._editor) return false;
 	try {
+		node._editor.applyPendingDurationInput?.(false);
 		node._editor.segments.forEach(s => node._editor.normalizeSegment(s));
 		const segmentsText = JSON.stringify(node._editor.segments || []);
 		setWidgetValue(node, "segments_json", segmentsText);
@@ -343,6 +344,7 @@ class AudioSegmentEditorWidget {
 		this.showAllOutputs = Boolean(node.properties?.gjj_show_all_audio_outputs);
 		this.segmentDuration = Number(node.properties?.segment_duration || getWidgetValue(node, "segment_duration", DEFAULT_SEGMENT_DURATION)) || DEFAULT_SEGMENT_DURATION;
 		this._heightTimer = null;
+		this._durationInputTimer = null;
 		this.buildDOM();
 		this.bindEvents();
 		this.resizeCanvas();
@@ -522,8 +524,20 @@ class AudioSegmentEditorWidget {
 			this.loopSelection = !this.loopSelection;
 			this.setButtonActive(this.loopBtn, this.loopSelection);
 		});
+		this.durationInput.addEventListener("input", () => {
+			clearTimeout(this._durationInputTimer);
+			this._durationInputTimer = setTimeout(() => this.applyPendingDurationInput(true), 120);
+		});
 		this.durationInput.addEventListener("change", () => this.applySegmentDuration(true));
-		this.durationInput.addEventListener("keydown", e => e.stopPropagation());
+		this.durationInput.addEventListener("blur", () => this.applyPendingDurationInput(true));
+		this.durationInput.addEventListener("keydown", e => {
+			e.stopPropagation();
+			if (e.key === "Enter") {
+				e.preventDefault();
+				this.applySegmentDuration(true);
+				this.durationInput.blur?.();
+			}
+		});
 
 		this.audioPlayer.addEventListener("timeupdate", () => this.onAudioTimeUpdate());
 		this.audioPlayer.addEventListener("play", () => { this.seekToSelectedStart(); this.setButtonActive(this.playBtn, true); });
@@ -646,9 +660,24 @@ class AudioSegmentEditorWidget {
 		seg.end = parseFloat(clamp(Number(seg.end || seg.start + MIN_DURATION), seg.start + MIN_DURATION, max).toFixed(3));
 	}
 
+	parseDurationInput() {
+		const value = Number(this.durationInput?.value);
+		if (!Number.isFinite(value)) return Math.max(MIN_DURATION, Number(this.segmentDuration || DEFAULT_SEGMENT_DURATION));
+		return Math.max(MIN_DURATION, value);
+	}
+
+	applyPendingDurationInput(commit = true) {
+		const value = this.parseDurationInput();
+		if (Math.abs(value - Number(this.segmentDuration || 0)) < 0.000001) return false;
+		this.applySegmentDuration(commit);
+		return true;
+	}
+
 	applySegmentDuration(commit = true) {
-		const value = Math.max(MIN_DURATION, Number(this.durationInput.value || DEFAULT_SEGMENT_DURATION));
+		clearTimeout(this._durationInputTimer);
+		const value = this.parseDurationInput();
 		this.segmentDuration = value;
+		if (this.durationInput) this.durationInput.value = String(value);
 		setWidgetValue(this.node, "segment_duration", value);
 		this.node.properties = this.node.properties || {};
 		this.node.properties.segment_duration = value;
@@ -994,6 +1023,7 @@ class AudioSegmentEditorWidget {
 		try {
 			this.folderBtn.disabled = true;
 			this.folderBtn.textContent = "⏳";
+			this.applyPendingDurationInput(false);
 			this.commit(false);
 			this.setStatus(statusText);
 			return await queueOnlyCurrentNode(this.node);
@@ -1123,6 +1153,7 @@ class AudioSegmentEditorWidget {
 	destroy() {
 		this.resizeObserver?.disconnect();
 		clearTimeout(this._heightTimer);
+		clearTimeout(this._durationInputTimer);
 	}
 }
 
@@ -1342,7 +1373,7 @@ function scheduleExternalAudioRefresh(node, reason = "外部音频已更新，�
 
 
 app.registerExtension({
-	name: "GJJ.AudioSegmentEditor.V22MatchVisibleAudioSource",
+	name: "GJJ.AudioSegmentEditor.V23DurationInputSync",
 	async beforeRegisterNodeDef(nodeType, nodeData) {
 		if (nodeData?.name !== NODE_NAME) return;
 

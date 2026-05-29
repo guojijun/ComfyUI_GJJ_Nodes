@@ -19,6 +19,8 @@ const LORA_EFFECT_LIVE_TEXT_MAP_KEY = "__gjjLoraEffectTesterLiveTextByNodeId";
 const LIVE_PREVIEW_STATE_KEY = "__gjjAnyPreviewLiveState";
 const IMAGE_SEQUENCE_MIN_FRAMES = 16;
 const IMAGE_SEQUENCE_PREVIEW_FPS = 12;
+const AUDIO_PLAYER_HEIGHT = 24;
+const AUDIO_WAVEFORM_HEIGHT = 72;
 const MODE_EDIT = "edit";
 const MODE_PREVIEW = "preview";
 const DOUBLE_CLICK_MS = 420;
@@ -33,6 +35,9 @@ const LIVE_KIND_LABELS = {
 	mixed: "混合对象",
 };
 let lastPromptId = null;
+let audioWaveformContext = null;
+const audioWaveformCache = new Map();
+const audioWaveformPeaks = new WeakMap();
 
 function getMode(node) {
 	const mode = String(node?.properties?.[MODE_PROPERTY] || MODE_PREVIEW);
@@ -1144,6 +1149,233 @@ function appendCompactMediaInfo(node, parent, tagName, item, description = "") {
 	parent.appendChild(row);
 }
 
+function styleCompactAudioPlayer(player) {
+	if (!player) return;
+	player.style.cssText = [
+		"width:100%",
+		`height:${AUDIO_PLAYER_HEIGHT}px`,
+		`min-height:${AUDIO_PLAYER_HEIGHT}px`,
+		`max-height:${AUDIO_PLAYER_HEIGHT}px`,
+		"display:block",
+		"border-radius:5px",
+		"overflow:hidden",
+	].join(";");
+}
+
+function getAudioWaveformContext() {
+	if (audioWaveformContext) return audioWaveformContext;
+	const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+	if (!AudioContextClass) return null;
+	audioWaveformContext = new AudioContextClass();
+	return audioWaveformContext;
+}
+
+function decodeAudioForWaveform(audioUrl) {
+	const key = String(audioUrl || "");
+	if (!key) return Promise.reject(new Error("音频地址为空"));
+	if (audioWaveformCache.has(key)) return audioWaveformCache.get(key);
+	const promise = fetch(key)
+		.then((response) => {
+			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			return response.arrayBuffer();
+		})
+		.then((buffer) => {
+			const context = getAudioWaveformContext();
+			if (!context) throw new Error("当前浏览器不支持 AudioContext");
+			return context.decodeAudioData(buffer.slice(0));
+		})
+		.catch((error) => {
+			audioWaveformCache.delete(key);
+			throw error;
+		});
+	audioWaveformCache.set(key, promise);
+	if (audioWaveformCache.size > 24) {
+		const firstKey = audioWaveformCache.keys().next().value;
+		audioWaveformCache.delete(firstKey);
+	}
+	return promise;
+}
+
+function resizeWaveformCanvas(canvas) {
+	const ratio = Math.max(1, window.devicePixelRatio || 1);
+	const width = Math.max(240, Math.floor(canvas.clientWidth || canvas.parentElement?.clientWidth || 300));
+	const height = Math.max(40, Math.floor(canvas.clientHeight || AUDIO_WAVEFORM_HEIGHT));
+	const pixelWidth = Math.floor(width * ratio);
+	const pixelHeight = Math.floor(height * ratio);
+	if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+		canvas.width = pixelWidth;
+		canvas.height = pixelHeight;
+	}
+	const ctx = canvas.getContext("2d");
+	if (ctx) ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+	return { width, height, ctx };
+}
+
+function drawWaveformPlaceholder(canvas, text = "正在读取波形...") {
+	const { width, height, ctx } = resizeWaveformCanvas(canvas);
+	if (!ctx) return;
+	ctx.clearRect(0, 0, width, height);
+	ctx.fillStyle = "#0a1115";
+	ctx.fillRect(0, 0, width, height);
+	ctx.strokeStyle = "rgba(255,255,255,0.07)";
+	ctx.beginPath();
+	ctx.moveTo(0, height / 2);
+	ctx.lineTo(width, height / 2);
+	ctx.stroke();
+	ctx.fillStyle = "#8ea0a8";
+	ctx.font = "12px ui-sans-serif, system-ui, sans-serif";
+	ctx.textBaseline = "middle";
+	ctx.fillText(text, 12, height / 2);
+}
+
+function getWaveformPeaks(audioBuffer, columns) {
+	const key = Math.max(1, Math.floor(columns || 1));
+	let byWidth = audioWaveformPeaks.get(audioBuffer);
+	if (!byWidth) {
+		byWidth = new Map();
+		audioWaveformPeaks.set(audioBuffer, byWidth);
+	}
+	if (byWidth.has(key)) return byWidth.get(key);
+
+	const channelCount = Math.max(1, Math.min(2, audioBuffer.numberOfChannels || 1));
+	const length = audioBuffer.length || 0;
+	const samplesPerColumn = Math.max(1, Math.floor(length / key));
+	const peaks = new Float32Array(key);
+	for (let x = 0; x < key; x += 1) {
+		const start = x * samplesPerColumn;
+		const end = Math.min(length, start + samplesPerColumn);
+		let peak = 0;
+		for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+			const data = audioBuffer.getChannelData(channelIndex);
+			for (let i = start; i < end; i += 1) {
+				const value = Math.abs(data[i] || 0);
+				if (value > peak) peak = value;
+			}
+		}
+		peaks[x] = peak;
+	}
+	byWidth.set(key, peaks);
+	if (byWidth.size > 8) {
+		const firstKey = byWidth.keys().next().value;
+		byWidth.delete(firstKey);
+	}
+	return peaks;
+}
+
+function drawDecodedWaveform(canvas, audioBuffer, player = null) {
+	const { width, height, ctx } = resizeWaveformCanvas(canvas);
+	if (!ctx || !audioBuffer) return;
+	const center = Math.round(height / 2);
+	const usableHeight = Math.max(16, height - 18);
+	const amp = usableHeight / 2;
+	const columns = Math.max(1, Math.floor(width));
+	const peaks = getWaveformPeaks(audioBuffer, columns);
+
+	ctx.clearRect(0, 0, width, height);
+	ctx.fillStyle = "#081015";
+	ctx.fillRect(0, 0, width, height);
+
+	ctx.strokeStyle = "rgba(255,255,255,0.06)";
+	ctx.lineWidth = 1;
+	for (let i = 1; i < 4; i += 1) {
+		const y = Math.round((height * i) / 4);
+		ctx.beginPath();
+		ctx.moveTo(0, y);
+		ctx.lineTo(width, y);
+		ctx.stroke();
+	}
+
+	const gradient = ctx.createLinearGradient(0, 0, width, 0);
+	gradient.addColorStop(0, "#77d4c4");
+	gradient.addColorStop(0.55, "#b7e28b");
+	gradient.addColorStop(1, "#f1ca73");
+	ctx.strokeStyle = gradient;
+	ctx.lineWidth = 1;
+
+	for (let x = 0; x < columns; x += 1) {
+		const peak = peaks[x] || 0;
+		const bar = Math.max(1, Math.min(amp, peak * amp));
+		ctx.beginPath();
+		ctx.moveTo(x + 0.5, center - bar);
+		ctx.lineTo(x + 0.5, center + bar);
+		ctx.stroke();
+	}
+
+	if (player && Number.isFinite(player.duration) && player.duration > 0) {
+		const progress = Math.max(0, Math.min(1, Number(player.currentTime || 0) / player.duration));
+		const cursorX = Math.round(progress * width) + 0.5;
+		ctx.strokeStyle = "#ffffff";
+		ctx.lineWidth = 1;
+		ctx.beginPath();
+		ctx.moveTo(cursorX, 5);
+		ctx.lineTo(cursorX, height - 5);
+		ctx.stroke();
+	}
+}
+
+function appendAudioWaveform(node, parent, audioUrl, player) {
+	const wrap = document.createElement("div");
+	wrap.style.cssText = [
+		"position:relative",
+		"width:100%",
+		`height:${AUDIO_WAVEFORM_HEIGHT}px`,
+		"border:1px solid #263a42",
+		"border-radius:7px",
+		"background:#081015",
+		"overflow:hidden",
+		"box-sizing:border-box",
+		"cursor:pointer",
+	].join(";");
+
+	const canvas = document.createElement("canvas");
+	canvas.style.cssText = [
+		"width:100%",
+		`height:${AUDIO_WAVEFORM_HEIGHT}px`,
+		"display:block",
+	].join(";");
+	wrap.appendChild(canvas);
+	parent.appendChild(wrap);
+
+	let decodedBuffer = null;
+	const redraw = () => {
+		if (decodedBuffer) drawDecodedWaveform(canvas, decodedBuffer, player);
+		else drawWaveformPlaceholder(canvas);
+	};
+
+	drawWaveformPlaceholder(canvas);
+	decodeAudioForWaveform(audioUrl)
+		.then((audioBuffer) => {
+			decodedBuffer = audioBuffer;
+			drawDecodedWaveform(canvas, decodedBuffer, player);
+			scheduleLayout(node);
+		})
+		.catch((error) => {
+			console.warn("[GJJ AnyPreview] 绘制音频波形失败:", error);
+			drawWaveformPlaceholder(canvas, "波形解码失败，仍可使用下方播放条");
+			scheduleLayout(node);
+		});
+
+	if (player) {
+		player.addEventListener("timeupdate", redraw);
+		player.addEventListener("seeked", redraw);
+		player.addEventListener("loadedmetadata", redraw);
+	}
+	wrap.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		if (!player || !decodedBuffer || !Number.isFinite(player.duration) || player.duration <= 0) return;
+		const rect = wrap.getBoundingClientRect();
+		const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
+		player.currentTime = ratio * player.duration;
+		drawDecodedWaveform(canvas, decodedBuffer, player);
+	});
+	if (window.ResizeObserver) {
+		const observer = new ResizeObserver(redraw);
+		observer.observe(wrap);
+	}
+	requestAnimationFrame(redraw);
+}
+
 function appendAnimatedSequenceImage(node, parent, item, description = "") {
 	if (!item) {
 		return;
@@ -1332,10 +1564,10 @@ function appendMediaPlayers(node, parent, tagName, mediaItems, description = "")
 						"background:#0c1114",
 						"border-radius:6px",
 				  ].join(";")
-				: [
-						"width:100%",
-						"height:40px",
-				  ].join(";");
+				: "";
+		if (tagName === "audio") {
+			styleCompactAudioPlayer(player);
+		}
 		player.addEventListener("loadedmetadata", () => scheduleLayout(node));
 		if (shouldAutoLoop) {
 			player.addEventListener("canplay", () => {
@@ -1346,6 +1578,9 @@ function appendMediaPlayers(node, parent, tagName, mediaItems, description = "")
 			}, { once: true });
 		}
 
+		if (tagName === "audio") {
+			appendAudioWaveform(node, mediaCard, player.src, player);
+		}
 		mediaCard.appendChild(player);
 		appendCompactMediaInfo(node, mediaCard, tagName, item, description);
 		parent.appendChild(mediaCard);
@@ -1769,11 +2004,9 @@ function applyPreviewContent(node) {
 		audioPlayer.controls = true;
 		audioPlayer.src = audioUrl;
 		audioPlayer.preload = "metadata";
-		audioPlayer.style.cssText = [
-			"width:100%",
-			"height:40px",
-		].join(";");
+		styleCompactAudioPlayer(audioPlayer);
 
+		appendAudioWaveform(node, audioCard, audioUrl, audioPlayer);
 		audioCard.appendChild(audioPlayer);
 		appendCompactMediaInfo(node, audioCard, "audio", audioItem, hasText ? text : "");
 		grid.appendChild(audioCard);

@@ -6,6 +6,8 @@ const AUDIO_TYPE = "AUDIO";
 const MASK_NAME = "ref_target_masks";
 const MASK_TYPE = "MASK";
 const LEGACY_WHISPER_INPUT = "whisper_model";
+const FPS_NAME = "fps";
+const FPS_SOCKET_TYPE = "INT,FLOAT";
 
 function audioIndex(input) {
 	const match = String(input?.name || "").match(/^audio_(\d+)$/);
@@ -103,6 +105,18 @@ function removeLegacyInputs(node) {
 	}
 }
 
+function normalizeFpsInput(node) {
+	for (const input of node.inputs || []) {
+		const name = String(input?.name || "");
+		const widgetName = String(input?.widget?.name || "");
+		if (name !== FPS_NAME && widgetName !== FPS_NAME) continue;
+		input.type = FPS_SOCKET_TYPE;
+		input.label = "帧率";
+		input.localized_name = "帧率";
+		input.tooltip = "目标视频帧率；前方接口支持连接 INT 或 FLOAT。";
+	}
+}
+
 function setDirty(node) {
 	node?.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
@@ -116,6 +130,7 @@ function stabilizeNode(node) {
 	ensureTrailingAudioInput(node);
 	renameAudioInputs(node);
 	reorderInputs(node);
+	normalizeFpsInput(node);
 	setDirty(node);
 }
 

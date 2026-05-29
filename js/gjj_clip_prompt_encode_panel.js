@@ -1,9 +1,10 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
+import { requestPromptTranslation } from "./gjj_common_prompt_translation.js";
 
 const TARGET_NODES = new Set(["GJJ_CLIPPromptEncodePanel"]);
-const TRANSLATE_API = "/gjj/clip_prompt_translate";
 const TRANSLATED_EVENT = "gjj_clip_prompt_translated";
+const NODE_DISPLAY_NAME = "GJJ · 🧾 CLIP正负提示词编码";
 
 const FIELD = {
 	positive: "positive_text",
@@ -307,20 +308,6 @@ function setTranslationEnabled(node, enabled) {
 	setValue(node, FIELD.translate, Boolean(enabled));
 }
 
-function applyDependencyNotice(node, report) {
-	if (!report || !globalThis.GJJ_CommonDependencyModelNotice?.applyNotice) return;
-	globalThis.GJJ_CommonDependencyModelNotice.applyNotice(node, {
-		warning_message: report.warning_message || "⚠️缺失运行依赖，点击❓按钮了解详情。",
-		panel_message: report.panel_message || report.help_message || report.warning_message || "",
-		install_command: report.install_cmd || "",
-		optional_install_command: report.optional_install_cmd || "",
-		copy_text: report.copy_text || report.install_cmd || report.optional_install_cmd || report.model_download_url || "",
-		copy_label: report.copy_label || "",
-		model_download_url: report.model_download_url || "",
-		notice_level: report.notice_level || "error",
-	}, { detailed: true });
-}
-
 function updateTranslateButton(node) {
 	const button = node.__gjjClipTranslateButton;
 	if (!button) return;
@@ -455,24 +442,16 @@ async function translatePrompts(node, options = {}) {
 	updateTranslateButton(node);
 
 	try {
-		const response = await fetch(TRANSLATE_API, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				node: String(node?.id ?? ""),
-				positive,
-				negative,
-				device,
-				max_length: 512,
-				batch_size: 8,
-				unload_after_use: unload,
-			}),
+		const data = await requestPromptTranslation({
+			node,
+			positive,
+			negative,
+			device,
+			maxLength: 512,
+			batchSize: 8,
+			unloadAfterUse: unload,
+			nodeName: NODE_DISPLAY_NAME,
 		});
-		const data = await response.json();
-		if (data?.report) applyDependencyNotice(node, data.report);
-		if (!response.ok || !data?.ok) {
-			throw new Error(data?.error || `HTTP ${response.status}`);
-		}
 		if (useExternalPositive) {
 			const translatedPositive = String(data.positive ?? "");
 			node.__gjjClipLastExternalSourceText = String(linkedPositive?.text || "");

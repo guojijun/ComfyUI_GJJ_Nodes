@@ -4,10 +4,11 @@
    ========================= */
 
 import { app } from "/scripts/app.js";
+import { api } from "/scripts/api.js";
 
 const IMAGE_EXTS = new Set(["png","jpg","jpeg","webp","bmp","gif","avif","tiff"]);
-const AUDIO_EXTS = new Set(["mp3","wav","flac","ogg","m4a","aac","wma"]);
-const VIDEO_EXTS = new Set(["mp4","mov","mkv","webm","avi","flv","mpeg","m4v"]);
+const AUDIO_EXTS = new Set(["mp3","wav","flac","ogg","m4a","aac","wma","opus","aiff","aif"]);
+const VIDEO_EXTS = new Set(["mp4","mov","mkv","webm","avi","flv","mpeg","mpg","m4v","wmv"]);
 
 function detectMediaType(value) {
 	if (typeof value !== "string") return null;
@@ -27,6 +28,9 @@ function detectMediaType(value) {
 
 function updatePreview(preview, value, isImage, isAudio, isVideo, directUrl = null) {
 	if (!preview) return;
+	preview.style.color = "";
+	preview.style.fontSize = "";
+	preview.style.justifyContent = "center";
 
 	if (!value || value.trim() === "") {
 		let tip = "无媒体";
@@ -55,40 +59,82 @@ function updatePreview(preview, value, isImage, isAudio, isVideo, directUrl = nu
 	}
 }
 
+function setPreviewMessage(preview, text, isError = false) {
+	if (!preview) return;
+	preview.textContent = String(text || "");
+	preview.style.color = isError ? "#ffb4a8" : "#8ea0a8";
+	preview.style.fontSize = "11px";
+	preview.style.justifyContent = "flex-start";
+}
+
 function selectedFilePath(file) {
 	return String(file?.path || file?.webkitRelativePath || file?.name || "").trim();
 }
 
 function mediaRefToViewUrl(value) {
-	const text = String(value || "").trim().replace(/\\/g, "/");
+	let text = String(value || "").trim().replace(/\\/g, "/");
+	if (/^(?:blob:|data:|https?:\/\/)/i.test(text)) return text;
+	const annotated = text.match(/\s+\[(input|output|temp)\]$/i);
+	let mediaRoot = "input";
+	if (annotated) {
+		mediaRoot = annotated[1].toLowerCase();
+		text = text.slice(0, annotated.index).trim();
+	}
 	const parts = text.split("/").filter(Boolean);
+	if (["input", "output", "temp"].includes(String(parts[0] || "").toLowerCase())) {
+		mediaRoot = parts.shift().toLowerCase();
+	}
 	const filename = parts.pop() || text;
 	const subfolder = parts.join("/");
-	let url = "/view?filename=" + encodeURIComponent(filename) + "&type=input";
+	let url = "/view?filename=" + encodeURIComponent(filename) + "&type=" + encodeURIComponent(mediaRoot);
 	if (subfolder) url += "&subfolder=" + encodeURIComponent(subfolder);
 	return url;
 }
 
-// 从后端获取媒体对象的预览 URL
-async function getMediaPreviewUrl(mediaObj, mediaType) {
-	if (!mediaObj) return null;
-	
+function uploadUrl(path) {
 	try {
-		// 如果是字符串路径，直接返回
-		if (typeof mediaObj === 'string') {
-			const fileName = mediaObj.trim().split(/[\\/]/).pop();
-			return "/view?filename=" + encodeURIComponent(fileName) + "&type=input";
+		if (api?.apiURL) return api.apiURL(path);
+	} catch (_) {}
+	return path;
+}
+
+function normalizeUploadFilename(data, file) {
+	const filename = data?.name || data?.filename || data?.file || file?.name;
+	const subfolder = data?.subfolder || "";
+	return subfolder ? `${subfolder}/${filename}` : filename;
+}
+
+async function uploadMediaToInput(file) {
+	const endpoints = ["/upload/image", "/api/upload/image"];
+	let lastError = null;
+
+	for (const endpoint of endpoints) {
+		const form = new FormData();
+		// ComfyUI 的上传接口字段名叫 image，但可作为通用 input 文件上传使用。
+		form.append("image", file, file.name);
+		form.append("type", "input");
+		form.append("overwrite", "true");
+
+		try {
+			const response = api?.fetchApi && endpoint === "/upload/image"
+				? await api.fetchApi(endpoint, { method: "POST", body: form })
+				: await fetch(uploadUrl(endpoint), { method: "POST", body: form });
+			if (!response?.ok) {
+				let detail = "";
+				try { detail = await response.text(); } catch (_) {}
+				lastError = new Error(`上传失败：HTTP ${response?.status || "?"}${detail ? ` ${detail}` : ""}`);
+				continue;
+			}
+			const data = await response.json().catch(() => ({}));
+			const filename = normalizeUploadFilename(data, file);
+			if (!filename) throw new Error("上传成功但没有返回文件名");
+			return filename;
+		} catch (err) {
+			lastError = err;
 		}
-		
-		// 如果是 IMAGE tensor，需要通过后端 API 转换
-		// 如果是 AUDIO/VIDEO 对象，也需要通过后端保存为临时文件
-		
-		// 目前简单处理：如果对象不是字符串，显示提示
-		return null;
-	} catch (e) {
-		console.error("[GJJ_TemplateParams] 获取媒体预览失败:", e);
-		return null;
 	}
+
+	throw lastError || new Error("上传失败：未知错误");
 }
 
 function openFileDialog(node, field, input, values, isImage, isAudio, isVideo) {
@@ -99,34 +145,47 @@ function openFileDialog(node, field, input, values, isImage, isAudio, isVideo) {
 	inputElement.accept = isImage
 		? "image/*"
 		: isVideo
-			? "video/*"
-			: "audio/*";
+			? "video/*,.mp4,.mov,.mkv,.webm,.avi,.flv,.mpeg,.mpg,.m4v,.wmv"
+			: "audio/*,.wav,.mp3,.flac,.ogg,.m4a,.aac,.opus,.wma,.aiff,.aif";
 
-	inputElement.addEventListener("change", (event) => {
+	inputElement.addEventListener("change", async (event) => {
 		const file = event.target.files?.[0];
 
 		if (!file) return;
 
-		const chosenPath = selectedFilePath(file);
-		input.value = chosenPath;
-		values[field.key] = chosenPath;
-
-		const template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
-		const fields = parseTemplate(template);
-
-		saveState(node, template, fields, values);
-		updateOutputs(node, fields, values);
-
 		const row = input.closest(".gjj-template-param-row");
+		const preview = row?.querySelector(
+			".gjj-template-param-preview-image, .gjj-template-param-preview-audio, .gjj-template-param-preview-video"
+		);
+		const button = row?.querySelector(".gjj-template-param-file-button");
+		const oldButtonText = button?.textContent || "📁";
+		setPreviewMessage(preview, `正在复制到 ComfyUI input：${file.name}`);
+		if (button) {
+			button.disabled = true;
+			button.textContent = "⏳";
+			button.style.cursor = "wait";
+		}
 
-		if (row) {
-			const preview = row.querySelector(
-				".gjj-template-param-preview-image, .gjj-template-param-preview-audio, .gjj-template-param-preview-video"
-			);
+		try {
+			const uploadedName = await uploadMediaToInput(file);
+			input.value = uploadedName;
+			values[field.key] = uploadedName;
 
-			if (preview) {
-				const objectUrl = URL.createObjectURL(file);
-				updatePreview(preview, chosenPath, isImage, isAudio, isVideo, objectUrl);
+			const template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
+			const fields = parseTemplate(template);
+
+			saveState(node, template, fields, values);
+			updateOutputs(node, fields, values);
+
+			updatePreview(preview, uploadedName, isImage, isAudio, isVideo);
+		} catch (err) {
+			console.error("[GJJ_TemplateParams] 打开媒体文件失败:", err);
+			setPreviewMessage(preview, `打开失败：${err?.message || err}`, true);
+		} finally {
+			if (button) {
+				button.disabled = false;
+				button.textContent = oldButtonText;
+				button.style.cursor = "pointer";
 			}
 		}
 	});

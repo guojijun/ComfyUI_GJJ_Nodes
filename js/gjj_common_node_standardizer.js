@@ -44,6 +44,7 @@ const STATUS_ENABLED_CLASSES = new Set([
 	"GJJ_FasterWhisperASR",
 	"GJJ_FishAudioS2Generator",
 	"GJJ_FlashVSRVideoUpscaler",
+	"GJJ_HuMoWhisperEmbeds",
 	"GJJ_OllamaAssistant",
 	"GJJ_LazyImageStudio",
 	"GJJ_LTX23ImageToVideoMultiRef",

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import os
+import ast
+import hashlib
+import json
+import re
+import shutil
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -15,8 +20,9 @@ from PIL import Image, ImageFile, ImageOps, UnidentifiedImageError
 # =========================
 
 IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "bmp", "gif", "avif", "tiff"}
-AUDIO_EXTS = {"mp3", "wav", "flac", "ogg", "m4a", "aac", "wma"}
-VIDEO_EXTS = {"mp4", "mov", "mkv", "webm", "avi", "flv", "mpeg", "m4v"}
+AUDIO_EXTS = {"mp3", "wav", "flac", "ogg", "m4a", "aac", "wma", "opus", "aiff", "aif"}
+VIDEO_EXTS = {"mp4", "mov", "mkv", "webm", "avi", "flv", "mpeg", "mpg", "m4v", "wmv"}
+MEDIA_COPY_SUBDIR = "GJJ_TemplateParams"
 
 
 def _detect_media_type(value: Any) -> str | None:
@@ -68,14 +74,24 @@ def _load_image_from_path(file_path: str) -> torch.Tensor:
 
 
 def _load_audio_object(file_path: str) -> dict[str, Any]:
-    """从文件路径加载音频为 AUDIO 对象（兼容旧版 API）"""
+    """从文件路径加载音频为 ComfyUI 标准 AUDIO 对象。"""
+    primary_error: Exception | None = None
+    try:
+        from comfy_extras.nodes_audio import load as load_audio
+
+        waveform, sample_rate = load_audio(file_path)
+        return {"waveform": waveform.unsqueeze(0).contiguous(), "sample_rate": int(sample_rate)}
+    except Exception as e:
+        primary_error = e
+
     try:
         import av
+
         with av.open(file_path) as container:
             if not container.streams.audio:
                 raise ValueError("No audio stream found")
             stream = container.streams.audio[0]
-            sample_rate = stream.codec_context.sample_rate
+            sample_rate = int(stream.codec_context.sample_rate)
             frames = []
             for frame in container.decode(streams=stream.index):
                 buf = torch.from_numpy(frame.to_ndarray())
@@ -85,25 +101,30 @@ def _load_audio_object(file_path: str) -> dict[str, Any]:
             if not frames:
                 raise ValueError("No audio frames decoded")
             waveform = torch.cat(frames, dim=1)
-            # 转换为 float32
             if waveform.dtype != torch.float32:
                 if waveform.dtype == torch.int16:
                     waveform = waveform.float() / 32768.0
                 elif waveform.dtype == torch.int32:
                     waveform = waveform.float() / 2147483648.0
-            return {"waveform": waveform.unsqueeze(0), "sample_rate": sample_rate}
-    except Exception as e:
-        print(f"[GJJ_TemplateParams] 加载音频失败: {file_path}, 错误: {e}")
-        # 加载失败时返回默认空音频对象，避免中断执行
-        return {"waveform": torch.zeros((1, 1, 44100)), "sample_rate": 44100}
+                elif waveform.is_floating_point():
+                    waveform = waveform.float()
+                else:
+                    raise ValueError(f"Unsupported audio dtype: {waveform.dtype}")
+            return {"waveform": waveform.unsqueeze(0).contiguous(), "sample_rate": sample_rate}
+    except Exception as fallback_error:
+        raise RuntimeError(
+            f"加载音频失败：{file_path}，ComfyUI加载器错误：{primary_error}；PyAV回退错误：{fallback_error}"
+        ) from fallback_error
 
 
 def _load_video_from_path(file_path: str):
     """从文件路径加载视频为 Video 对象"""
+    first_error: Exception | None = None
     try:
         from comfy_api.latest import InputImpl
         return InputImpl.VideoFromFile(file_path)
     except Exception as e:
+        first_error = e
         print(f"[GJJ_TemplateParams] 加载视频失败: {file_path}, 错误: {e}")
         # 回退到 Tensor 格式（兼容旧版）
         try:
@@ -117,9 +138,11 @@ def _load_video_from_path(file_path: str):
             container.close()
             if frames:
                 return torch.stack(frames)
-        except Exception:
-            pass
-        return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+        except Exception as fallback_error:
+            raise RuntimeError(
+                f"加载视频失败：{file_path}，错误：{fallback_error}"
+            ) from fallback_error
+        raise RuntimeError(f"加载视频失败：{file_path}，未读取到视频帧。原始错误：{first_error}")
 
 
 def _configured_media_roots() -> dict[str, str]:
@@ -138,6 +161,52 @@ def _path_exists(path: str | os.PathLike[str]) -> str | None:
     except Exception:
         return None
     return None
+
+
+def _is_inside_configured_root(file_path: str, roots: dict[str, str]) -> bool:
+    try:
+        abs_file = os.path.normcase(os.path.abspath(file_path))
+    except Exception:
+        return False
+    for root_path in roots.values():
+        if not root_path:
+            continue
+        try:
+            abs_root = os.path.normcase(os.path.abspath(root_path))
+            if os.path.commonpath([abs_file, abs_root]) == abs_root:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _safe_copy_name(file_path: str) -> str:
+    path = Path(file_path)
+    safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", path.name).strip(" ._") or "media"
+    safe_path = Path(safe_name)
+    stem = safe_path.stem or "media"
+    suffix = safe_path.suffix
+    try:
+        stat = path.stat()
+        fingerprint = f"{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
+    except Exception:
+        fingerprint = str(path.resolve())
+    digest = hashlib.sha1(fingerprint.encode("utf-8", "ignore")).hexdigest()[:10]
+    return f"{stem}_{digest}{suffix}"
+
+
+def _copy_external_media_to_input(file_path: str) -> str:
+    roots = _configured_media_roots()
+    if _is_inside_configured_root(file_path, roots):
+        return file_path
+
+    src = Path(file_path)
+    dest_dir = Path(roots["input"]) / MEDIA_COPY_SUBDIR
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / _safe_copy_name(file_path)
+    if not dest.exists():
+        shutil.copy2(src, dest)
+    return str(dest)
 
 
 def _clean_media_reference(filename: str) -> tuple[str, str]:
@@ -212,16 +281,15 @@ def _load_media_object(filename: str, media_type: str) -> Any:
     """根据类型加载媒体对象"""
     file_path = _resolve_media_file(filename)
     if not file_path:
-        if media_type == "IMAGE":
+        if media_type in {"IMAGE", "AUDIO", "VIDEO"}:
+            label = {"IMAGE": "图片", "AUDIO": "音频", "VIDEO": "视频"}.get(media_type, "媒体")
             raise FileNotFoundError(
-                f"找不到图片文件：{filename}。支持 input/output/temp 相对路径、ComfyUI 当前目录相对路径和绝对路径。"
+                f"找不到{label}文件：{filename}。请用 📁 重新选择，节点会先复制到 ComfyUI input 后再解析。"
             )
-        elif media_type == "AUDIO":
-            return {"waveform": torch.zeros((1, 1, 44100)), "sample_rate": 44100}
-        elif media_type == "VIDEO":
-            return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
         raise ValueError(f"不支持的媒体类型: {media_type}")
-    
+
+    file_path = _copy_external_media_to_input(file_path)
+
     try:
         if media_type == "IMAGE":
             return _load_image_from_path(file_path)
@@ -233,18 +301,11 @@ def _load_media_object(filename: str, media_type: str) -> Any:
         if media_type == "IMAGE":
             raise
         elif media_type == "AUDIO":
-            print(f"[GJJ_TemplateParams] 加载音频失败: {filename}, 错误: {e}")
-            return {"waveform": torch.zeros((1, 1, 44100)), "sample_rate": 44100}
+            raise RuntimeError(f"加载音频失败：{filename}，错误：{e}") from e
         elif media_type == "VIDEO":
-            print(f"[GJJ_TemplateParams] 加载视频失败: {filename}, 错误: {e}")
-            return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+            raise RuntimeError(f"加载视频失败：{filename}，错误：{e}") from e
         raise
 
-
-import ast
-import json
-import re
-from typing import Any
 
 NODE_NAME = "GJJ_TemplateParams"
 MAX_OUTPUTS = 64
