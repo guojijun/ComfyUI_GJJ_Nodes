@@ -1148,12 +1148,17 @@ def combine_video(
             "type": "output" if bool(save_output) else "temp",
             "format": resolved_format,
             "frame_rate": fps,
+            "width": int(video_output_frames.shape[2]),
+            "height": int(video_output_frames.shape[1]),
+            "frame_count": int(video_output_frames.shape[0]),
         }
     _send_status(unique_id, f"完成：{int(video_output_frames.shape[0])} 帧，输出 {len(output_files)} 个文件", 1.0)
     ui_payload = {
         "preview_main_path": (main_path,),
         "preview_format": (resolved_format,),
         "preview_is_video": (resolved_format.startswith("video/"),),
+        "preview_width": (int(video_output_frames.shape[2]),),
+        "preview_height": (int(video_output_frames.shape[1]),),
     }
     if preview_item is not None:
         # 只给前端自定义 DOM 预览使用，避免 ComfyUI 原生图片/动图预览再画一次。

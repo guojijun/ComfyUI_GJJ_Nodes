@@ -67,6 +67,51 @@ function setPreviewMessage(preview, text, isError = false) {
 	preview.style.justifyContent = "flex-start";
 }
 
+function eventNodeId(event) {
+	return String(
+		event?.detail?.node_id
+			?? event?.detail?.node
+			?? event?.detail?.display_node
+			?? event?.detail?.nodeId
+			?? "",
+	);
+}
+
+function findTemplateParamsNode(nodeId) {
+	if (!nodeId) return null;
+	return app.graph?.getNodeById?.(Number(nodeId))
+		|| app.graph?._nodes?.find((node) => String(node?.id || "") === String(nodeId))
+		|| null;
+}
+
+function normalizeWarningList(payload) {
+	const raw = payload?.[WARNINGS_UI_KEY];
+	if (Array.isArray(raw)) {
+		return raw.flatMap((item) => Array.isArray(item) ? item : [item])
+			.map((item) => String(item || "").trim())
+			.filter(Boolean);
+	}
+	const text = String(raw || "").trim();
+	return text ? [text] : [];
+}
+
+function setWarningMessages(node, warnings = []) {
+	const notice = node?.__gjjTemplateParamsWarning;
+	if (!notice) return;
+	const list = Array.isArray(warnings)
+		? warnings.map((item) => String(item || "").trim()).filter(Boolean)
+		: [];
+	if (!list.length) {
+		notice.textContent = "";
+		notice.style.display = "none";
+		refreshNode(node);
+		return;
+	}
+	notice.textContent = `⚠ ${list.join("\n")}`;
+	notice.style.display = "block";
+	refreshNode(node);
+}
+
 function selectedFilePath(file) {
 	return String(file?.path || file?.webkitRelativePath || file?.name || "").trim();
 }
@@ -198,6 +243,7 @@ const TEMPLATE_WIDGET = "template_text";
 const VALUES_WIDGET = "values_json";
 const SCHEMA_WIDGET = "schema_json";
 const DOM_WIDGET = "gjj_template_params_dom";
+const WARNINGS_UI_KEY = "gjj_template_params_warnings";
 const SAVED_TEMPLATE = "gjj_template_params_template";
 const SAVED_VALUES = "gjj_template_params_values";
 const SAVED_SCHEMA = "gjj_template_params_schema";
@@ -881,6 +927,7 @@ function buildInputForField(node, field, values) {
 	input.addEventListener("mousedown", (event) => event.stopPropagation());
 	input.addEventListener("input", () => {
 		values[field.key] = input.value;
+		if (isMedia) setWarningMessages(node, []);
 		if (multiline) autoresizeTextarea(input, node);
 		const template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
 		const fields = parseTemplate(template);
@@ -1000,6 +1047,7 @@ function buildDom(node) {
 		.gjj-template-param-template { width:100%; min-height:108px; resize:vertical; padding:7px 8px; border:1px solid #44565f; border-radius:7px; outline:none; background:#070f12; color:#dce7e2; font:12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
 		.gjj-template-param-help { color:#8ea0a8; font-size:11px; line-height:1.45; white-space:pre-wrap; }
 		.gjj-template-param-actions { display:flex; gap:6px; justify-content:flex-end; }
+		.gjj-template-param-warning { display:none; padding:6px 8px; border:1px solid #8a5a08; border-radius:8px; background:#2a2111; color:#ffcf86; font-size:11px; line-height:1.45; white-space:pre-wrap; }
 		.gjj-template-param-rows { display:flex; flex-direction:column; gap:6px; }
 		.gjj-template-param-row { display:grid; grid-template-columns:74px minmax(0,1fr); gap:7px; align-items:center; }
 		.gjj-template-param-row-full { grid-template-columns:1fr; gap:4px; align-items:stretch; }
@@ -1068,6 +1116,8 @@ function buildDom(node) {
 
 	const rows = document.createElement("div");
 	rows.className = "gjj-template-param-rows";
+	const warning = document.createElement("div");
+	warning.className = "gjj-template-param-warning";
 
 	const stop = (event) => event.stopPropagation();
 	for (const el of [container, gear, refresh, panel, template, ok, cancel]) {
@@ -1113,9 +1163,10 @@ function buildDom(node) {
 		template.addEventListener(eventName, stop);
 	}
 
-	container.append(style, toolbar, panel, rows);
+	container.append(style, toolbar, panel, warning, rows);
 	node.__gjjTemplateParamsContainer = container;
 	node.__gjjTemplateParamsRowsWrap = rows;
+	node.__gjjTemplateParamsWarning = warning;
 	node.__gjjTemplateParamsCount = count;
 	const updateCount = () => {
 		const fields = parseTemplate(getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE));
@@ -1261,4 +1312,16 @@ app.registerExtension({
 			if (TARGET_NODES.has(node?.comfyClass)) stabilize(node);
 		}
 	},
+});
+
+api.addEventListener("executing", (event) => {
+	const node = findTemplateParamsNode(eventNodeId(event));
+	if (TARGET_NODES.has(node?.comfyClass)) setWarningMessages(node, []);
+});
+
+api.addEventListener("executed", (event) => {
+	const node = findTemplateParamsNode(eventNodeId(event));
+	if (!TARGET_NODES.has(node?.comfyClass)) return;
+	const payload = event?.detail?.output || event?.detail || {};
+	setWarningMessages(node, normalizeWarningList(payload));
 });

@@ -68,6 +68,20 @@ _GJJ_HELP = {
 }
 
 
+def _send_status(unique_id: Any, text: str, progress: float | None = None) -> None:
+    if unique_id is None:
+        return
+    try:
+        from server import PromptServer
+
+        payload = {"node": str(unique_id), "text": str(text)}
+        if progress is not None:
+            payload["progress"] = max(0.0, min(1.0, float(progress)))
+        PromptServer.instance.send_sync("gjj_node_progress", payload)
+    except Exception:
+        pass
+
+
 def _check_startup_dependencies():
     """启动时检查依赖，只跳过当前节点，不影响其他节点。"""
     global _DESCRIPTION
@@ -1116,6 +1130,9 @@ class GJJ_WanVideoSamplerV2:
                     },
                 ),
             },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            },
         }
 
     RETURN_TYPES = ("LATENT", "LATENT")
@@ -1160,7 +1177,9 @@ class GJJ_WanVideoSamplerV2:
         add_noise_to_samples=False,
         extra_args=None,
         seed=0,
+        unique_id=None,
     ):
+        _send_status(unique_id, "校验输入...", 0.04)
         args = {
             "model": model,
             "image_embeds": image_embeds,
@@ -1225,6 +1244,13 @@ class GJJ_WanVideoSamplerV2:
         _validate_wanvideo_model_input(args["model"])
         _validate_fun_control_input(args["model"], args["image_embeds"])
 
+        _send_status(unique_id, "准备调度器...", 0.10)
+        if isinstance(args["scheduler"], dict):
+            scheduler_name = str(args["scheduler"].get("scheduler", "自定义调度器"))
+        else:
+            scheduler_name = str(args["scheduler"])
+
+        _send_status(unique_id, f"加载采样 runtime... ({scheduler_name}, {args['steps']} 步)", 0.16)
         node = _source_wanvideo_sampler_if_loaded(model)
         if node is None:
             runtime = _load_sampler_runtime()
@@ -1237,6 +1263,7 @@ class GJJ_WanVideoSamplerV2:
         
         for attempt in range(max_retries):
             try:
+                _send_status(unique_id, "进入采样循环...", 0.22)
                 result = node.process(**args)
                 _cleanup_after_sampler(args["model"], args["force_offload"])
                 return result

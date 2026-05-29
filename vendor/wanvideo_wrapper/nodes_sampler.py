@@ -1517,6 +1517,8 @@ class WanVideoSampler:
                         negative_embeds = negative_embeds * len(positive_embeds)
 
                 try:
+                    noise_pred_ovi = None
+                    noise_pred_ovi_uncond = None
                     if not batched_cfg:
                         #conditional (positive) pass
                         if pos_latent is not None: # for humo
@@ -1661,16 +1663,21 @@ class WanVideoSampler:
 
                     #batched
                     else:
-                        base_params['z'] = [z] * 2
+                        # WanModel.forward accepts the latent batch through x.
+                        base_params['x'] = [z] * 2
+                        if latent_model_input_ovi is not None:
+                            base_params['x_ovi'] = [latent_model_input_ovi.to(z)] * 2
                         base_params['y'] = [image_cond_input] * 2 if image_cond_input is not None else None
                         base_params['clip_fea'] = torch.cat([clip_fea, clip_fea], dim=0)
                         base_params['is_uncond'] = False
                         cache_state_uncond = None
-                        [noise_pred_cond, noise_pred_uncond_text], _, cache_state_cond = transformer(
+                        [noise_pred_cond, noise_pred_uncond_text], noise_pred_ovi_batched, cache_state_cond = transformer(
                             context=positive_embeds + negative_embeds,
                             pred_id=cache_state[0] if cache_state else None,
                             **base_params
                         )
+                        if noise_pred_ovi_batched is not None:
+                            noise_pred_ovi, noise_pred_ovi_uncond = noise_pred_ovi_batched
                 except Exception as e:
                     log.error(f"Error during model prediction: {e}")
                     if force_offload:

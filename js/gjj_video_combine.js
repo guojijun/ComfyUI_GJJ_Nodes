@@ -7,8 +7,11 @@ const TOOLBAR_WIDGET_NAME = "gjj_video_combine_toolbar";
 const PREVIEW_WIDGET_NAME = "gjj_video_combine_preview";
 const MIN_WIDTH = 340;
 const TOOLBAR_HEIGHT = 36;
-const PANEL_HEIGHT = 318;
 const HIDDEN_PANEL_HEIGHT = 0;
+const PREVIEW_MIN_HEIGHT = 120;
+const PREVIEW_DEFAULT_ASPECT = 16 / 9;
+const PREVIEW_WIDGET_GUTTER = 34;
+const PREVIEW_PANEL_VERTICAL_PADDING = 12;
 const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "mkv", "avi", "m4v"]);
 const PRIMARY_INPUT_NAME = "images";
 const PRIMARY_INPUT_ALIASES = new Set(["images", "图像"]);
@@ -519,6 +522,9 @@ function ensurePanelWidget(node) {
 		"display:none",
 		"flex-direction:column",
 		"gap:6px",
+		"width:100%",
+		"max-width:100%",
+		"box-sizing:border-box",
 		"min-height:42px",
 		"padding:6px 10px",
 		"border:1px solid #41535b",
@@ -531,7 +537,8 @@ function ensurePanelWidget(node) {
 		"display:flex",
 		"align-items:center",
 		"justify-content:center",
-		"height:230px",
+		"width:100%",
+		"box-sizing:border-box",
 		"border:1px solid #25333b",
 		"border-radius:10px",
 		"overflow:hidden",
@@ -581,15 +588,74 @@ function ensurePanelWidget(node) {
 		hideOnZoom: false,
 		getHeight: () => getPanelHeight(node),
 	});
+	if (widget) {
+		widget.computeSize = (width) => [
+			Math.max(MIN_WIDTH, Number(width || node.size?.[0] || MIN_WIDTH)),
+			getPanelHeight(node, width),
+		];
+	}
 	node.__gjjVideoCombineStatus = { widget, wrap, previewCard, empty, video, image };
+	const updateLoadedAspect = (width, height) => {
+		if (setPreviewAspect(node, width, height)) {
+			updatePreviewLayout(node);
+			resizeNodeToContent(node);
+		}
+	};
+	video.addEventListener("loadedmetadata", () => updateLoadedAspect(video.videoWidth, video.videoHeight));
+	image.addEventListener("load", () => updateLoadedAspect(image.naturalWidth, image.naturalHeight));
+	updatePreviewLayout(node);
 	setPanelMode(node, node.__gjjVideoCombinePanelMode || "hidden");
 	return node.__gjjVideoCombineStatus;
 }
 
-function getPanelHeight(node) {
+function getPreviewAspect(node) {
+	const aspect = Number(node?.__gjjVideoCombinePreviewAspect || node?.properties?.gjj_video_combine_preview_aspect || PREVIEW_DEFAULT_ASPECT);
+	return Number.isFinite(aspect) && aspect > 0 ? aspect : PREVIEW_DEFAULT_ASPECT;
+}
+
+function setPreviewAspect(node, width, height) {
+	const w = Number(width);
+	const h = Number(height);
+	if (!node || !Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+		return false;
+	}
+	const next = Math.max(0.05, Math.min(20, w / h));
+	if (Math.abs(Number(node.__gjjVideoCombinePreviewAspect || 0) - next) < 0.001) {
+		return false;
+	}
+	node.__gjjVideoCombinePreviewAspect = next;
+	node.properties ||= {};
+	node.properties.gjj_video_combine_preview_aspect = next;
+	return true;
+}
+
+function getPreviewContentWidth(node, nodeWidth = null) {
+	const width = Number(nodeWidth || node?.size?.[0] || MIN_WIDTH);
+	return Math.max(160, Math.max(MIN_WIDTH, width) - PREVIEW_WIDGET_GUTTER);
+}
+
+function getPreviewCardHeight(node, nodeWidth = null) {
+	return Math.max(PREVIEW_MIN_HEIGHT, Math.round(getPreviewContentWidth(node, nodeWidth) / getPreviewAspect(node)));
+}
+
+function updatePreviewLayout(node, nodeWidth = null) {
+	const state = node?.__gjjVideoCombineStatus;
+	if (!state) {
+		return;
+	}
+	const height = getPreviewCardHeight(node, nodeWidth);
+	state.previewCard.style.height = `${height}px`;
+	state.previewCard.style.aspectRatio = String(getPreviewAspect(node));
+	if (state.widget) {
+		state.widget.getHeight = () => getPanelHeight(node);
+		state.widget.computedHeight = getPanelHeight(node);
+	}
+}
+
+function getPanelHeight(node, nodeWidth = null) {
 	const mode = String(node?.__gjjVideoCombinePanelMode || "hidden");
 	if (mode === "preview") {
-		return PANEL_HEIGHT;
+		return getPreviewCardHeight(node, nodeWidth) + PREVIEW_PANEL_VERTICAL_PADDING;
 	}
 	return HIDDEN_PANEL_HEIGHT;
 }
@@ -598,11 +664,19 @@ function resizeNodeToContent(node) {
 	if (!node) {
 		return;
 	}
+	if (node.__gjjVideoCombineResizePending) {
+		return;
+	}
+	node.__gjjVideoCombineResizePending = true;
 	requestAnimationFrame(() => {
+		node.__gjjVideoCombineResizePending = false;
+		updatePreviewLayout(node);
 		const width = Math.max(MIN_WIDTH, Number(node.size?.[0] || MIN_WIDTH));
 		const computed = typeof node.computeSize === "function" ? node.computeSize() : node.size;
 		const height = Math.max(80, Number(computed?.[1] || node.size?.[1] || 80));
-		node.setSize?.([width, height]);
+		if (Math.abs(Number(node.size?.[0] || 0) - width) > 1 || Math.abs(Number(node.size?.[1] || 0) - height) > 1) {
+			node.setSize?.([width, height]);
+		}
 		refreshNode(node);
 	});
 }
@@ -613,9 +687,7 @@ function setPanelMode(node, mode) {
 		return;
 	}
 	const nextMode = ["hidden", "preview"].includes(mode) ? mode : "hidden";
-	if (node.__gjjVideoCombinePanelMode === nextMode) {
-		return;
-	}
+	const sameMode = node.__gjjVideoCombinePanelMode === nextMode;
 	node.__gjjVideoCombinePanelMode = nextMode;
 	state.wrap.style.display = nextMode === "hidden" ? "none" : "flex";
 	state.previewCard.style.display = nextMode === "preview" ? "flex" : "none";
@@ -623,7 +695,10 @@ function setPanelMode(node, mode) {
 		state.widget.getHeight = () => getPanelHeight(node);
 		state.widget.computedHeight = getPanelHeight(node);
 	}
-	refreshNode(node);
+	updatePreviewLayout(node);
+	if (!sameMode) {
+		refreshNode(node);
+	}
 	resizeNodeToContent(node);
 }
 
@@ -684,6 +759,8 @@ function setPreview(node, detail = {}) {
 	const item = Array.isArray(detail?.preview_media) ? detail.preview_media[0] : null;
 	const url = buildViewUrl(item);
 	const shouldUseVideo = !!url && isVideoPreview(item, detail);
+	const detailWidth = Array.isArray(detail?.preview_width) ? detail.preview_width[0] : detail?.preview_width;
+	const detailHeight = Array.isArray(detail?.preview_height) ? detail.preview_height[0] : detail?.preview_height;
 
 	state.video.pause?.();
 	state.video.removeAttribute("src");
@@ -700,6 +777,8 @@ function setPreview(node, detail = {}) {
 		return;
 	}
 
+	setPreviewAspect(node, item?.width ?? detailWidth, item?.height ?? detailHeight);
+	updatePreviewLayout(node);
 	setPanelMode(node, "preview");
 	if (shouldUseVideo) {
 		state.empty.style.display = "none";
@@ -732,6 +811,7 @@ function patchNode(node) {
 	ensurePanelWidget(node);
 	applySlotVisibility(node);
 	clearNativePreview(node);
+	updatePreviewLayout(node);
 	if (!Array.isArray(node.size) || node.size.length < 2) {
 		node.setSize?.([MIN_WIDTH, Math.max(80, getPanelHeight(node) + TOOLBAR_HEIGHT + 8)]);
 	} else {
@@ -783,6 +863,16 @@ app.registerExtension({
 				applySlotVisibility(this);
 				updateToolbar(this);
 			});
+			return result;
+		};
+
+		const originalOnResize = nodeType.prototype.onResize;
+		nodeType.prototype.onResize = function (...args) {
+			const result = originalOnResize?.apply(this, args);
+			updatePreviewLayout(this);
+			if (this.__gjjVideoCombinePanelMode === "preview") {
+				resizeNodeToContent(this);
+			}
 			return result;
 		};
 

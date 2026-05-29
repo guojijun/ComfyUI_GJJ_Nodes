@@ -406,4 +406,4 @@ class GJJ_ModelBundleLoader:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_ModelBundleLoader}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 📦 简易模型加载器"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 📦 图像模型加载器"}

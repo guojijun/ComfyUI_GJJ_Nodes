@@ -307,6 +307,36 @@ def _load_media_object(filename: str, media_type: str) -> Any:
         raise
 
 
+def _media_label(media_type: str) -> str:
+    return {"IMAGE": "图片", "AUDIO": "音频", "VIDEO": "视频"}.get(media_type, "媒体")
+
+
+def _display_media_reference(value: Any) -> str:
+    text = _normalize_text(value).strip()
+    if not text:
+        return "空路径"
+    cleaned, _hint = _clean_media_reference(text)
+    cleaned = cleaned.replace("\\", "/").strip()
+    for root_name in ("input", "output", "temp"):
+        prefix = f"{root_name}/"
+        if cleaned.lower().startswith(prefix):
+            cleaned = cleaned[len(prefix):]
+            break
+    name = cleaned.rsplit("/", 1)[-1] or cleaned
+    return name if len(name) <= 80 else f"{name[:36]}...{name[-36:]}"
+
+
+def _build_media_warning(label: str, media_type: str, raw_value: Any, exc: Exception) -> str:
+    media_label = _media_label(media_type)
+    ref = _display_media_reference(raw_value)
+    if isinstance(exc, FileNotFoundError):
+        reason = "文件不存在"
+    else:
+        reason = "加载失败"
+    field = label or "未命名参数"
+    return f"{field}：{reason}，已跳过{media_label}输出，不中断工作流。文件：{ref}"
+
+
 NODE_NAME = "GJJ_TemplateParams"
 MAX_OUTPUTS = 64
 
@@ -656,6 +686,7 @@ class GJJ_TemplateParams:
         fields = parse_template(template_text)
         value_map = values_from_json(values_json)
         outputs: list[Any] = []
+        warnings: list[str] = []
         
         for field in fields:
             key = str(field.get("key") or "")
@@ -669,16 +700,38 @@ class GJJ_TemplateParams:
             media_type = _detect_media_type(str(raw_value))
             
             if media_type and isinstance(raw_value, str):
-                # 直接加载为媒体对象（失败时返回默认值）
-                media_obj = _load_media_object(raw_value, media_type)
-                outputs.append(media_obj)
+                # 媒体参数常用于模板占位或可选引用。资源缺失时只提示并跳过，
+                # 避免未使用的图片/音频/视频文件打断整个工作流。
+                try:
+                    media_obj = _load_media_object(raw_value, media_type)
+                    outputs.append(media_obj)
+                except Exception as exc:
+                    warning = _build_media_warning(label, media_type, raw_value, exc)
+                    warnings.append(warning)
+                    print(f"[GJJ_TemplateParams] {warning} 详细错误：{exc}")
+                    outputs.append(None)
             else:
                 # 非媒体类型：正常解析
                 outputs.append(parse_value(raw_value))
         
         while len(outputs) < MAX_OUTPUTS:
             outputs.append(None)
-        return tuple(outputs[:MAX_OUTPUTS])
+        result = tuple(outputs[:MAX_OUTPUTS])
+        if warnings:
+            warning_text = "\n".join(warnings)
+            return {
+                "ui": {
+                    "text": (warning_text,),
+                    "gjj_template_params_warnings": warnings,
+                },
+                "result": result,
+            }
+        return {
+            "ui": {
+                "gjj_template_params_warnings": [],
+            },
+            "result": result,
+        }
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_TemplateParams}

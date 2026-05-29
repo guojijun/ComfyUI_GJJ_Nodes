@@ -61,10 +61,14 @@ const STATUS_ENABLED_CLASSES = new Set([
 	"GJJ_VideoCombine",
 	"GJJ_Wan22FirstLastVideo",
 	"GJJ_Wan22RapidAIOMega",
+	"GJJ_WanVideoSamplerV2",
 	"GJJ_WanVideoVAELoader",
 ]);
 const PRESERVE_DETAILED_COMPLETION_CLASSES = new Set([
 	"GJJ_OldPhotoRestorer",
+]);
+const CORE_PROGRESS_STATUS_CLASSES = new Set([
+	"GJJ_WanVideoSamplerV2",
 ]);
 const LEGACY_STATUS_WIDGET_POLICIES = new Map([
 	["batch_text_status", "hide"],
@@ -102,6 +106,8 @@ const LEGACY_ERROR_EVENTS = [
 	"gjj_qwen3_error",
 	"gjj_sense_voice_error",
 ];
+
+let ACTIVE_STATUS_NODE_ID = "";
 
 function isBoolSwitchNode(node) {
 	return String(node?.comfyClass || node?.type || "") === BOOL_SWITCH_CLASS;
@@ -1294,6 +1300,48 @@ function parseProgress(detail = {}, fallback = 0) {
 	return Math.max(0, Math.min(1, Number(fallback) || 0));
 }
 
+function nodeIdFromDetail(detail) {
+	if (detail === null || detail === undefined || detail === false) {
+		return "";
+	}
+	if (typeof detail === "string" || typeof detail === "number") {
+		return String(detail);
+	}
+	return String(
+		detail?.node_id
+		?? detail?.display_node
+		?? detail?.node
+		?? detail?.nodeId
+		?? detail?.id
+		?? "",
+	);
+}
+
+function classNameOf(node) {
+	return String(node?.comfyClass || node?.type || "");
+}
+
+function shouldUseCoreProgress(node) {
+	return shouldAttachStatus(node) && CORE_PROGRESS_STATUS_CLASSES.has(classNameOf(node));
+}
+
+function formatCoreProgress(detail = {}) {
+	const current = Number(detail?.value ?? detail?.current ?? 0);
+	const total = Number(detail?.max ?? detail?.total ?? 0);
+	if (!Number.isFinite(current) || !Number.isFinite(total) || total <= 0) {
+		return null;
+	}
+	const safeCurrent = Math.max(0, Math.min(total, current));
+	const progress = Math.max(0, Math.min(1, safeCurrent / total));
+	const roundedCurrent = Math.round(safeCurrent);
+	const roundedTotal = Math.round(total);
+	const percent = Math.round(progress * 100);
+	return {
+		text: `采样进度 ${roundedCurrent}/${roundedTotal} (${percent}%)`,
+		progress,
+	};
+}
+
 function formatElapsed(ms) {
 	const seconds = Math.max(0, Number(ms || 0)) / 1000;
 	if (seconds < 10) {
@@ -1557,7 +1605,8 @@ app.registerExtension({
 			loadBackendHelpMetadata().then(() => refreshGjjNodesAfterHelpLoad());
 
 		api.addEventListener("executing", ({ detail }) => {
-			const targetId = String(detail ?? "");
+			const targetId = nodeIdFromDetail(detail);
+			ACTIVE_STATUS_NODE_ID = targetId || "";
 			for (const node of app.graph?._nodes || []) {
 				if (!isGjjNode(node)) {
 					continue;
@@ -1572,9 +1621,29 @@ app.registerExtension({
 			}
 		});
 
+		api.addEventListener("progress", ({ detail }) => {
+			const progressDetail = formatCoreProgress(detail || {});
+			if (!progressDetail) {
+				return;
+			}
+			const targetId = nodeIdFromDetail(detail) || ACTIVE_STATUS_NODE_ID;
+			if (!targetId) {
+				return;
+			}
+			for (const node of app.graph?._nodes || []) {
+				if (!isGjjNode(node)) {
+					continue;
+				}
+				if (String(node.id) === targetId && shouldUseCoreProgress(node)) {
+					patchNode(node);
+					updateStatus(node, progressDetail, { visible: true });
+				}
+			}
+		});
+
 		api.addEventListener("gjj_node_progress", (event) => {
 			const detail = event?.detail || {};
-			const targetId = String(detail?.node || "");
+			const targetId = nodeIdFromDetail(detail);
 			for (const node of app.graph?._nodes || []) {
 				if (!isGjjNode(node)) {
 					continue;

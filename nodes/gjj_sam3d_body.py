@@ -251,13 +251,14 @@ def _save_smpl_sequence(path: str, vertices: np.ndarray, faces: np.ndarray, fps:
 
 
 class GJJ_LoadSAM3DBodyModel:
-    CATEGORY = "GJJ/3D"
+    CATEGORY = "guojijun/内部引用"
+    DEPRECATED = True
     FUNCTION = "load_model"
     RETURN_TYPES = ("SAM3D_MODEL",)
     RETURN_NAMES = ("SAM3D模型",)
     OUTPUT_TOOLTIPS = ("GJJ 内部 SAM 3D Body 模型配置；模型在处理节点中懒加载并缓存。",)
     DESCRIPTION = "GJJ 内置 SAM 3D Body 模型加载器，不依赖 ComfyUI-SAM3DBody 自定义节点包。"
-    SEARCH_ALIASES = ["SAM3D Body", "LoadSAM3DBodyModel", "人体3D", "3D人体"]
+    SEARCH_ALIASES = []
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -282,19 +283,20 @@ class GJJ_LoadSAM3DBodyModel:
 
 
 class GJJ_SAM3DBodyProcess:
-    CATEGORY = "GJJ/3D"
+    CATEGORY = "guojijun/内部引用"
+    DEPRECATED = True
     FUNCTION = "process"
     RETURN_TYPES = ("SAM3D_OUTPUT", "SKELETON", "IMAGE")
     RETURN_NAMES = ("网格数据", "骨架数据", "调试图")
     OUTPUT_TOOLTIPS = ("SAM3D Body 输出的顶点、面和相机数据。", "人体骨架和姿态参数。", "调试预览图。")
     DESCRIPTION = "GJJ 内置 SAM 3D Body 单图人体网格恢复节点。"
-    SEARCH_ALIASES = ["SAM3DBodyProcess", "人体网格", "body mesh"]
+    SEARCH_ALIASES = []
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("SAM3D_MODEL", {"display_name": "SAM3D模型", "tooltip": "连接 GJJ · 🧍 SAM3D人体模型加载。"}),
+                "model": ("SAM3D_MODEL", {"display_name": "SAM3D模型", "tooltip": "内部 SAM3D Body 模型配置。"}),
                 "image": ("IMAGE", {"display_name": "输入图像", "tooltip": "包含人体主体的图像。"}),
                 "bbox_threshold": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.05, "display_name": "人体检测阈值", "tooltip": "没有遮罩时用于人体检测；接入遮罩时主要作为兜底阈值。"}),
                 "inference_type": (["full", "body", "hand"], {"default": "full", "display_name": "推理类型", "tooltip": "full 为身体+手部，body 仅身体，hand 仅手部。"}),
@@ -338,20 +340,21 @@ class GJJ_SAM3DBodyProcess:
 
 
 class GJJ_SAM3DMeshSequenceFromVideo:
-    CATEGORY = "GJJ/3D"
+    CATEGORY = "guojijun/内部引用"
+    DEPRECATED = True
     FUNCTION = "generate_from_video_frames"
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("SMPL序列文件",)
     OUTPUT_TOOLTIPS = ("保存到 output/Adv3DViewer_JK_tmp 的 SMPL 二进制序列路径，可接 3D 查看器。",)
     OUTPUT_NODE = True
     DESCRIPTION = "GJJ 内置 SAM3D Body 视频帧转人体网格序列节点，兼容 SAM3D From Video JK 的输出格式。"
-    SEARCH_ALIASES = ["SAM3D From Video JK", "视频人体网格", "SMPL序列", "mesh sequence"]
+    SEARCH_ALIASES = []
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("SAM3D_MODEL", {"display_name": "SAM3D模型", "tooltip": "连接 GJJ · 🧍 SAM3D人体模型加载。"}),
+                "model": ("SAM3D_MODEL", {"display_name": "SAM3D模型", "tooltip": "内部 SAM3D Body 模型配置。"}),
                 "image": ("IMAGE", {"display_name": "视频帧序列", "tooltip": "IMAGE batch，每张图作为一帧处理。"}),
                 "output_filename": ("STRING", {"default": "mesh_sequence", "multiline": False, "display_name": "输出文件名", "tooltip": "不需要扩展名；会自动保存为 .bin。"}),
                 "bbox_threshold": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.05, "display_name": "人体检测阈值", "tooltip": "检测人体框的置信度阈值。"}),
@@ -429,18 +432,6 @@ class GJJ_SAM3DMeshSequenceFromVideo:
         return (str(output_path),)
 
 
-NODE_CLASS_MAPPINGS = {
-    "GJJ_LoadSAM3DBodyModel": GJJ_LoadSAM3DBodyModel,
-    "GJJ_SAM3DBodyProcess": GJJ_SAM3DBodyProcess,
-    "GJJ_SAM3DMeshSequenceFromVideo": GJJ_SAM3DMeshSequenceFromVideo,
-    "LoadSAM3DBodyModel": GJJ_LoadSAM3DBodyModel,
-    "SAM3DBodyProcess": GJJ_SAM3DBodyProcess,
-}
+NODE_CLASS_MAPPINGS = {}
 
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "GJJ_LoadSAM3DBodyModel": "guojijun·SAM3D人体模型加载",
-    "GJJ_SAM3DBodyProcess": "guojijun·SAM3D人体单图恢复",
-    "GJJ_SAM3DMeshSequenceFromVideo": "guojijun·SAM3D视频人体网格",
-    "LoadSAM3DBodyModel": "guojijun·SAM3D人体模型加载",
-    "SAM3DBodyProcess": "guojijun·SAM3D人体单图恢复",
-}
+NODE_DISPLAY_NAME_MAPPINGS = {}

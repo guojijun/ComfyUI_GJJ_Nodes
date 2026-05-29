@@ -646,7 +646,7 @@ def _load_reference_workflow_assets(unique_id=None, blocks_to_swap=40, lora_stre
         prefetch_blocks=0,
         block_swap_debug=False,
     )
-    model, = GJJ_WanVideoModelLoader().loadmodel(
+    model = GJJ_WanVideoModelLoader().loadmodel(
         model=files["dit"],
         base_precision="bf16",
         load_device="offload_device",
@@ -654,7 +654,7 @@ def _load_reference_workflow_assets(unique_id=None, blocks_to_swap=40, lora_stre
         attention_mode="sdpa",
         lora=lora_config,
         rms_norm_function="default",
-    )
+    )[0]
     model, = GJJ_WanVideoSetBlockSwap().loadmodel(model=model, block_swap_args=block_swap_args)
     vae, = GJJ_WanVideoVAELoader().loadmodel(
         model_name=files["vae"],
@@ -752,7 +752,7 @@ class GJJ_LongCatAvatarLoader:
 
         from .gjj_wanvideo_model_loader import GJJ_WanVideoModelLoader
 
-        model, = GJJ_WanVideoModelLoader().loadmodel(
+        model = GJJ_WanVideoModelLoader().loadmodel(
             model=dit_file,
             base_precision="bf16",
             load_device="offload_device",
@@ -760,7 +760,7 @@ class GJJ_LongCatAvatarLoader:
             attention_mode="comfy",
             lora=lora_config,
             rms_norm_function="default",
-        )
+        )[0]
         if 保持缓存:
             _PIPE_CACHE.clear()
             _PIPE_CACHE[key] = model

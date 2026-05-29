@@ -4,10 +4,12 @@ import gc
 
 import folder_paths
 import comfy.model_management as mm
+from .common_utils.model_manager import gjjutils_find_model_list
 
 
 NODE_NAME = "GJJ_WanVideoT5TextEncode"
 NODE_DISPLAY_NAME = "📝 Wan T5文本编码"
+MISSING_MODEL_CHOICE = "[未找到模型]"
 LONGCAT_T5_MODEL = "umt5-xxl-enc-bf16.safetensors"
 
 PRECISION_VALUES = ["bf16", "fp32"]
@@ -16,28 +18,75 @@ LOAD_DEVICE_VALUES = ["main_device", "offload_device"]
 COMPUTE_DEVICE_VALUES = ["gpu", "cpu"]
 
 
-def _scan_text_encoders(keyword: str = "umt5") -> tuple[list[str], str]:
+def _compact_model_text(value: str) -> str:
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def _looks_like_t5_enc_name(value: str) -> bool:
+    filename = str(value or "").replace("\\", "/").rsplit("/", 1)[-1]
+    return "umt5xxlenc" in _compact_model_text(filename)
+
+
+def _rank_t5_enc_name(value: str) -> tuple[int, int, str]:
+    normalized = str(value or "").replace("\\", "/")
+    filename = normalized.rsplit("/", 1)[-1]
+    text = _compact_model_text(filename)
+    folder_depth = normalized.count("/")
+    if filename.lower() == LONGCAT_T5_MODEL.lower():
+        bucket = 0
+    elif "bf16" in text:
+        bucket = 1
+    elif "fp8" in text:
+        bucket = 2
+    else:
+        bucket = 3
+    return (bucket, folder_depth, normalized.lower())
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _scan_text_encoders(keyword: str = "umt5-xxl-enc") -> tuple[list[str], str]:
     try:
         names = list(folder_paths.get_filename_list("text_encoders"))
     except Exception:
         names = []
-    if not names:
-        return ["[未找到模型]"], "[未找到模型]"
+    try:
+        matches = gjjutils_find_model_list(keyword, "text_encoders", "AND")
+    except Exception:
+        matches = []
 
-    lower_keyword = str(keyword or "").lower()
-    matched = [name for name in names if lower_keyword in str(name).lower()]
-    values = matched or names
+    values = sorted(
+        [name for name in _dedupe_preserve_order(list(matches or []) + list(names or [])) if _looks_like_t5_enc_name(name)],
+        key=_rank_t5_enc_name,
+    )
+    if not values:
+        return [MISSING_MODEL_CHOICE], MISSING_MODEL_CHOICE
+    return values, values[0]
 
-    preferred = None
-    for name in values:
-        lower = str(name).replace("\\", "/").lower()
-        if lower.endswith(LONGCAT_T5_MODEL.lower()):
-            preferred = name
-            break
-        if "umt5" in lower and ("xxl" in lower or "t5" in lower):
-            preferred = name
-            break
-    return values, preferred or values[0]
+
+def _resolve_t5_enc_choice(value: str) -> str:
+    resolved = str(value or "").strip()
+    if resolved and resolved != MISSING_MODEL_CHOICE and _looks_like_t5_enc_name(resolved):
+        return resolved
+    _, fallback = _scan_text_encoders("umt5-xxl-enc")
+    if fallback != MISSING_MODEL_CHOICE:
+        if resolved and resolved != MISSING_MODEL_CHOICE:
+            print(
+                "[GJJ WanVideoT5TextEncode] 当前 T5 模型不是 umt5-xxl-enc 裁剪版，"
+                f"已自动改用: {fallback} (原选择: {resolved})"
+            )
+        return fallback
+    return MISSING_MODEL_CHOICE
 
 
 def _load_wanvideo_runtime():
@@ -79,7 +128,7 @@ class GJJ_WanVideoT5TextEncode:
         "title": "Wan T5 文本编码",
         "description": "把 T5 文本编码器加载和 WanVideo 文本编码合成一个节点。",
         "usage": [
-            "模型从 models/text_encoders 中选择，通常使用 umt5-xxl 编码器。",
+            "模型从 models/text_encoders 中选择，只显示 umt5-xxl-enc 裁剪版。",
             "正向/负向提示词会直接编码为 WANVIDEOTEXTEMBEDS。",
             "输出的文本条件连接到 GJJ WanVideo Sampler 的文本条件输入。",
         ],
@@ -91,7 +140,7 @@ class GJJ_WanVideoT5TextEncode:
 
     @classmethod
     def INPUT_TYPES(cls):
-        text_encoders, default_encoder = _scan_text_encoders("umt5")
+        text_encoders, default_encoder = _scan_text_encoders("umt5-xxl-enc")
         return {
             "required": {
                 "model_name": (
@@ -99,7 +148,7 @@ class GJJ_WanVideoT5TextEncode:
                     {
                         "default": default_encoder,
                         "display_name": "T5模型",
-                        "tooltip": "从 models/text_encoders 读取。WanVideo 通常使用 umt5-xxl 文本编码器。",
+                        "tooltip": "从 models/text_encoders 读取，只显示 umt5-xxl-enc 过滤结果；该裁剪版适合 WanVideoT5TextEncode。",
                     },
                 ),
                 "precision": (
@@ -193,8 +242,9 @@ class GJJ_WanVideoT5TextEncode:
         use_disk_cache=False,
         model_to_offload=None,
     ):
-        if str(model_name or "").strip() == "[未找到模型]":
-            raise RuntimeError("未找到 T5 文本编码器。请把 umt5-xxl 模型放到 models/text_encoders。")
+        model_name = _resolve_t5_enc_choice(model_name)
+        if str(model_name or "").strip() == MISSING_MODEL_CHOICE:
+            raise RuntimeError("未找到 T5 文本编码器。请把 umt5-xxl-enc 模型放到 models/text_encoders。")
 
         nodes_model_loading, wan_nodes = _load_wanvideo_runtime()
         loader = nodes_model_loading.LoadWanVideoT5TextEncoder()
