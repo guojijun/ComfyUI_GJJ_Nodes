@@ -16,6 +16,7 @@ from .common_utils.model_manager import gjjutils_find_model_list
 NODE_NAME = "GJJ_WanVideoModelLoader"
 LONGCAT_AVATAR_MODEL = "LongCat-Avatar-15_bf16.safetensors"
 MISSING_MODEL_CHOICE = "[未找到模型]"
+NO_SELECTION_CHOICE = "未选择"
 DISABLE_LORA_CHOICE = "不使用"
 WAN_VAE_KEYWORD = ["wan2", "1", "vae"]
 WAN_CLIP_KEYWORD = "umt5_xxl_fp"
@@ -166,9 +167,10 @@ def _fuzzy_model_choices(category: str, keyword: str | list[str], *, allow_disab
     else:
         ordered = _dedupe_preserve_order(list(matches or []) + list(all_models or []))
     if allow_disable:
+        choices = [NO_SELECTION_CHOICE, *[value for value in ordered if value != NO_SELECTION_CHOICE]]
         if ordered:
-            return ordered + [DISABLE_LORA_CHOICE], ordered[0]
-        return [DISABLE_LORA_CHOICE], DISABLE_LORA_CHOICE
+            return choices, ordered[0]
+        return [NO_SELECTION_CHOICE], NO_SELECTION_CHOICE
     if ordered:
         return ordered, ordered[0]
     return [MISSING_MODEL_CHOICE], MISSING_MODEL_CHOICE
@@ -180,13 +182,25 @@ def _default_fuzzy_choice(category: str, keyword: str | list[str], *, allow_disa
 
 def _is_missing_or_disabled(value: str) -> bool:
     text = str(value or "").strip()
-    return not text or text in {MISSING_MODEL_CHOICE, DISABLE_LORA_CHOICE}
+    lowered = text.lower()
+    return (
+        not text
+        or text in {MISSING_MODEL_CHOICE, NO_SELECTION_CHOICE, DISABLE_LORA_CHOICE}
+        or lowered in {"none", "null", "disabled", "false"}
+    )
 
 
 def _resolve_missing_choice(value: str, category: str, keyword: str | list[str], *, allow_disable: bool = False) -> str:
     if not _is_missing_or_disabled(value):
         return str(value).strip()
     return _default_fuzzy_choice(category, keyword, allow_disable=allow_disable)
+
+
+def _resolve_optional_choice(value: str, category: str, keyword: str | list[str]) -> str | None:
+    if _is_missing_or_disabled(value):
+        return None
+    resolved = _resolve_missing_choice(value, category, keyword)
+    return None if _is_missing_or_disabled(resolved) else resolved
 
 
 def _resolve_wan_clip_choice(value: str) -> str:
@@ -231,7 +245,7 @@ def _load_clip_with_official_loader(clip_name: str, clip_type: str = "wan", devi
 
 def _load_clip_vision_with_official_loader(clip_name: str):
     if _is_missing_or_disabled(clip_name):
-        raise RuntimeError("未选择 CLIP视觉模型。请将 clip_vision_h 模型放入 models/clip_vision。")
+        return None
     try:
         nodes_mod = importlib.import_module("nodes")
         loader_cls = getattr(nodes_mod, "CLIPVisionLoader")
@@ -269,7 +283,11 @@ class GJJ_WanVideoModelLoader:
         diffusion_models, default_model = _scan_diffusion_models(("wan", "longcat"))
         vae_models, default_vae = _fuzzy_model_choices("vae", WAN_VAE_KEYWORD)
         clip_models, default_clip = _fuzzy_model_choices("text_encoders", WAN_CLIP_KEYWORD)
-        clip_vision_models, default_clip_vision = _fuzzy_model_choices("clip_vision", WAN_CLIP_VISION_KEYWORD)
+        clip_vision_models, default_clip_vision = _fuzzy_model_choices(
+            "clip_vision",
+            WAN_CLIP_VISION_KEYWORD,
+            allow_disable=True,
+        )
         accel_loras, default_accel_lora = _fuzzy_model_choices("loras", WAN_ACCEL_LORA_KEYWORD, allow_disable=True)
         
         attention_modes = [
@@ -349,7 +367,7 @@ class GJJ_WanVideoModelLoader:
                     {
                         "default": default_clip_vision,
                         "display_name": "🔵 CLIP视觉",
-                        "tooltip": "使用公共模糊搜索 models/clip_vision 下的 clip_vision_h；按 ComfyUI CLIPVisionLoader 加载。",
+                        "tooltip": "使用公共模糊搜索 models/clip_vision 下的 clip_vision_h；不需要图像 CLIP 条件时可选择“未选择”。",
                     },
                 ),
                 "accel_lora_name": (
@@ -357,7 +375,7 @@ class GJJ_WanVideoModelLoader:
                     {
                         "default": default_accel_lora,
                         "display_name": "🟠 加速LoRA",
-                        "tooltip": "使用公共模糊搜索 models/loras 下的 lightx2v_cfg_step_distill_lora，默认强度 1.2；可选“不使用”。",
+                        "tooltip": "使用公共模糊搜索 models/loras 下的 lightx2v_cfg_step_distill_lora；不需要加速 LoRA 时可选择“未选择”。",
                     },
                 ),
                 "accel_lora_strength": (
@@ -522,8 +540,8 @@ class GJJ_WanVideoModelLoader:
             clip_name = _resolve_wan_clip_choice(clip_name)
         else:
             clip_name = _resolve_missing_choice(clip_name, "text_encoders", WAN_CLIP_KEYWORD)
-        clip_vision_name = _resolve_missing_choice(clip_vision_name, "clip_vision", WAN_CLIP_VISION_KEYWORD)
-        accel_lora_name = _resolve_missing_choice(accel_lora_name, "loras", WAN_ACCEL_LORA_KEYWORD, allow_disable=True)
+        clip_vision_name = _resolve_optional_choice(clip_vision_name, "clip_vision", WAN_CLIP_VISION_KEYWORD)
+        accel_lora_name = _resolve_optional_choice(accel_lora_name, "loras", WAN_ACCEL_LORA_KEYWORD)
 
         print(f"[GJJ WanVideoModelLoader] ========== 开始加载模型 ==========")
         print(f"[GJJ WanVideoModelLoader] 模型: {model}")
@@ -534,8 +552,8 @@ class GJJ_WanVideoModelLoader:
         print(f"[GJJ WanVideoModelLoader] RMSNorm: {rms_norm_function}")
         print(f"[GJJ WanVideoModelLoader] VAE: {vae_name} ({vae_precision})")
         print(f"[GJJ WanVideoModelLoader] CLIP: {clip_name} / type={clip_type} / device={clip_device}")
-        print(f"[GJJ WanVideoModelLoader] CLIP视觉: {clip_vision_name}")
-        print(f"[GJJ WanVideoModelLoader] 加速LoRA: {accel_lora_name} / 强度={accel_lora_strength}")
+        print(f"[GJJ WanVideoModelLoader] CLIP视觉: {clip_vision_name or NO_SELECTION_CHOICE}")
+        print(f"[GJJ WanVideoModelLoader] 加速LoRA: {accel_lora_name or NO_SELECTION_CHOICE} / 强度={accel_lora_strength}")
 
         # 处理 LoRA 输入，根据数据类型选择相应处理方式
         final_lora = self._normalize_lora_input(lora)
@@ -578,7 +596,9 @@ class GJJ_WanVideoModelLoader:
             verbose=False,
         )[0]
         clip = _load_clip_with_official_loader(clip_name, clip_type, clip_device)
-        clip_vision = _load_clip_vision_with_official_loader(clip_vision_name)
+        clip_vision = _load_clip_vision_with_official_loader(clip_vision_name) if clip_vision_name else None
+        if clip_vision is None:
+            print("[GJJ WanVideoModelLoader] CLIP视觉未选择，已跳过加载。")
 
         print(f"[GJJ WanVideoModelLoader] 模型加载完成")
         print(f"[GJJ WanVideoModelLoader] ========== 加载完成 ==========")

@@ -187,6 +187,10 @@ function isGjjNode(node) {
 		|| String(node?.comfyClass || node?.type || "").startsWith("GJJ");
 }
 
+function nodeClassName(node) {
+	return String(node?.comfyClass || node?.type || "");
+}
+
 function shouldAttachStatus(node) {
 	return STATUS_ENABLED_CLASSES.has(String(node?.comfyClass || node?.type || ""));
 }
@@ -923,7 +927,7 @@ function ensureHelpStyles() {
 }
 
 function showHelpDialog(node) {
-	const meta = META_BY_CLASS.get(String(node?.comfyClass || "")) || {};
+	const meta = META_BY_CLASS.get(nodeClassName(node)) || {};
 	ensureHelpStyles();
 	document.querySelector(".gjj-help-overlay")?.remove();
 
@@ -1153,7 +1157,7 @@ function ensureHelpWidget(node) {
 }
 
 function applyWidgetMetadata(node) {
-	const meta = META_BY_CLASS.get(String(node?.comfyClass || ""));
+	const meta = META_BY_CLASS.get(nodeClassName(node));
 	for (const widget of node?.widgets || []) {
 		if (!widget || String(widget.name || "") === STATUS_WIDGET_NAME || String(widget.name || "").startsWith("gjj_")) {
 			continue;
@@ -1173,7 +1177,7 @@ function applyWidgetMetadata(node) {
 }
 
 function applySlotMetadata(node) {
-	const meta = META_BY_CLASS.get(String(node?.comfyClass || ""));
+	const meta = META_BY_CLASS.get(nodeClassName(node));
 	for (const input of node?.inputs || []) {
 		const inputMeta = meta?.inputs?.get(String(input?.name || ""));
 		const label = inputMeta?.label || localizeLabel(input?.localized_name || input?.label || "", String(input?.name || ""));

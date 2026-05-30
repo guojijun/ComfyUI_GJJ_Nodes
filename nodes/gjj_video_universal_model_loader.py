@@ -1647,7 +1647,7 @@ def _is_lora_slot(slot: dict[str, Any]) -> bool:
 def _is_visible_output_slot(slot: dict[str, Any]) -> bool:
     if _is_lora_slot(slot):
         return False
-    return str(slot.get("kind", "")).strip() not in {"name", "name_any"}
+    return str(slot.get("kind", "")).strip() not in {"empty", "name", "name_any"}
 
 
 def _slot_branch(slot_id: str, label: str = "") -> str:
@@ -1678,6 +1678,77 @@ def _branches_match(lora_branch: str, model_branch: str) -> bool:
     return lora_branch == model_branch
 
 
+def _output_class_for_slot(slot: dict[str, Any]) -> str:
+    kind = str(slot.get("kind", "") or "")
+    slot_id = str(slot.get("id", "") or "")
+    label = str(slot.get("label", "") or "")
+    text = f"{slot_id} {label}".lower()
+
+    if kind in {"diffusion", "checkpoint_model", "wanvideo_model"}:
+        if "low" in text or "低" in text:
+            return "universal_low_model"
+        if "high" in text or "高" in text:
+            return "universal_high_model"
+        return "universal_main_model"
+    if slot_id == "audio_vae" or kind == "ltx_audio_vae" or "音频vae" in label.lower():
+        return "universal_audio_vae"
+    if slot_id in {"video_vae", "vae", "wan_vae"} or kind in {"vae", "checkpoint_vae", "wan_vae"}:
+        if slot_id == "alpha_vae" or "alpha" in text:
+            return "universal_alpha_vae"
+        if slot_id == "rgb_vae" or "rgb" in text:
+            return "universal_rgb_vae"
+        return "universal_video_vae"
+    if kind in {"clip", "checkpoint_clip", "wan_t5_encoder"}:
+        return "universal_text_encoder"
+    if kind == "clip_vision":
+        return "universal_clip_vision"
+    if kind == "audio_encoder":
+        return "universal_audio_encoder"
+    if kind == "latent_upscale_model":
+        return "universal_latent_upscale_model"
+    if kind == "ltx_audio_vae":
+        return "universal_audio_vae"
+    return f"universal_{slot_id or kind or 'aux'}"
+
+
+def _preferred_output_index(slot: dict[str, Any]) -> int:
+    output_class = _output_class_for_slot(slot)
+    if output_class in {"universal_high_model", "universal_main_model"}:
+        return 0
+    if output_class == "universal_low_model":
+        return 1
+    if output_class in {"universal_video_vae", "universal_rgb_vae", "universal_alpha_vae"}:
+        return 2
+    if output_class == "universal_audio_vae":
+        return 3
+    if output_class == "universal_text_encoder":
+        return 4
+    if output_class == "universal_clip_vision":
+        return 5
+    if output_class == "universal_audio_encoder":
+        return 6
+    if output_class == "universal_latent_upscale_model":
+        return 7
+    return 8
+
+
+def _output_slots_for_config(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    records: list[tuple[int, int, dict[str, Any]]] = []
+    for source_index, source_slot in enumerate(cfg.get("slots", [])):
+        if not _is_visible_output_slot(source_slot):
+            continue
+        slot = dict(source_slot)
+        slot["output_class"] = _output_class_for_slot(slot)
+        records.append((_preferred_output_index(slot), source_index, slot))
+    records.sort(key=lambda item: (item[0], item[1]))
+
+    result: list[dict[str, Any]] = []
+    for output_index, (_, _, slot) in enumerate(records[:MAX_SLOTS]):
+        slot["output_index"] = output_index
+        result.append(slot)
+    return result
+
+
 def _config_payload() -> dict[str, Any]:
     return {
         key: {
@@ -1687,7 +1758,7 @@ def _config_payload() -> dict[str, Any]:
             "uses_extra_model_chain": bool(cfg.get("uses_extra_model_chain", False))
             or any(str(slot.get("kind", "")) == "wanvideo_model" for slot in cfg.get("slots", [])),
             # 输出槽只包含真正要给下游使用的对象；LoRA/名称槽只在节点内部使用，不暴露 STRING 输出。
-            "output_slots": [slot for slot in cfg.get("slots", []) if _is_visible_output_slot(slot)],
+            "output_slots": _output_slots_for_config(cfg),
             "slots": cfg.get("slots", []),
         }
         for key, cfg in VIDEO_MODEL_CONFIGS.items()
@@ -1723,8 +1794,8 @@ class GJJ_VideoUniversalModelLoader:
         ],
     }
 
-    # 关键稳定方案：Python 端固定 12 个 ANYTYPE 输出口。
-    # 前端只按配置修改 node.outputs[i].name/type/label，不再 addOutput/removeOutput，避免动态输出口数量变化导致 LiteGraph 命中区域和连线序号错位。
+    # 后端仍保留 12 个 ANYTYPE 返回位以兼容旧工作流；前端按 output_slots 结构化增删真实可见输出口。
+    # 每个可见口带 output_class/output_index，切换预设时按语义恢复连线，避免 high/low/VAE/CLIP 类型偏移。
     RETURN_TYPES = ("*",) * MAX_SLOTS
     RETURN_NAMES = tuple(f"output{i}" for i in range(1, MAX_SLOTS + 1))
 
@@ -1835,14 +1906,25 @@ class GJJ_VideoUniversalModelLoader:
         wan_compile_args, wan_block_swap_args, wan_vram_management_args = _parse_wan_runtime_args(
             kwargs.get("⚙️ Wan运行参数", kwargs.get("wan_runtime_args", None))
         )
+        slots = []
+        for index, slot in enumerate(cfg.get("slots", []), start=1):
+            current_slot = dict(slot)
+            current_slot["_source_index"] = index
+            slots.append(current_slot)
+        output_layout = _output_slots_for_config({"slots": slots})
+        output_index_by_source = {
+            int(slot["_source_index"]): int(slot["output_index"])
+            for slot in output_layout
+            if "_source_index" in slot and "output_index" in slot
+        }
 
-        values: list[Any] = []
+        values: list[Any] = [None] * MAX_SLOTS
         output_records: list[dict[str, Any]] = []
         lora_items: list[dict[str, Any]] = []
         ckpt_cache: dict[str, tuple[Any, Any, Any]] = {}
         resolved_names: dict[str, str] = {}
 
-        for index, slot in enumerate(cfg.get("slots", []), start=1):
+        for index, slot in enumerate(slots, start=1):
             if index > MAX_SLOTS:
                 break
             folder = str(slot.get("folder", "") or "")
@@ -1852,19 +1934,7 @@ class GJJ_VideoUniversalModelLoader:
             selected = str(kwargs.get(f"file_{index}", "") or "")
             dtype = str(kwargs.get(f"dtype_{index}", "default") or "default")
 
-            # empty 是前端/后端共同保留的稳定占位输出：用于让单模型配置也保持 MODEL/VAE/CLIP 的固定位置。
-            # 它不需要模型文件，不参与 LoRA，也不报错。
             if kind == "empty":
-                values.append(None)
-                output_records.append({
-                    "value_index": len(values) - 1,
-                    "value": None,
-                    "slot": slot,
-                    "kind": kind,
-                    "folder": folder,
-                    "name": "",
-                    "branch": "",
-                })
                 continue
 
             allow_any = kind in {"name_any"}
@@ -1895,6 +1965,9 @@ class GJJ_VideoUniversalModelLoader:
                     "slot": slot,
                 })
                 continue
+
+            output_index = output_index_by_source.get(index)
+            is_visible_output = output_index is not None and 0 <= output_index < MAX_SLOTS
 
             try:
                 if kind == "diffusion":
@@ -1999,16 +2072,17 @@ class GJJ_VideoUniversalModelLoader:
                     selected_name=name,
                 ) from exc
 
-            output_records.append({
-                "value_index": len(values),
-                "value": value,
-                "slot": slot,
-                "kind": kind,
-                "folder": folder,
-                "name": name,
-                "branch": _slot_branch(str(slot.get("id", "")), str(slot.get("label", ""))),
-            })
-            values.append(value)
+            if is_visible_output:
+                output_records.append({
+                    "value_index": output_index,
+                    "value": value,
+                    "slot": slot,
+                    "kind": kind,
+                    "folder": folder,
+                    "name": name,
+                    "branch": _slot_branch(str(slot.get("id", "")), str(slot.get("label", ""))),
+                })
+                values[output_index] = value
 
         if use_accel_lora:
             # 内部 LoRA：high/low 关键词会优先叠到同分支；无分支词则作为通用 LoRA。

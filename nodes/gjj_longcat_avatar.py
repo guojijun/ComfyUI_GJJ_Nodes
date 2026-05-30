@@ -632,20 +632,12 @@ def _load_reference_workflow_assets(unique_id=None, blocks_to_swap=40, lora_stre
     if cached is not None:
         return cached
 
-    from .gjj_wan_video_block_swap import GJJ_WanVideoBlockSwap, GJJ_WanVideoSetBlockSwap
+    from .gjj_wan_video_block_swap import GJJ_WanVideoBlockSwap
     from .gjj_wanvideo_model_loader import GJJ_WanVideoModelLoader
     from .gjj_wanvideo_vae_loader import GJJ_WanVideoVAELoader
 
     lora_config = json.dumps([{"enabled": True, "name": files["lora"], "strength": lora_value}], ensure_ascii=False)
-    block_swap_args, = GJJ_WanVideoBlockSwap().setargs(
-        blocks_to_swap=swap_blocks,
-        offload_img_emb=False,
-        offload_txt_emb=False,
-        use_non_blocking=False,
-        vace_blocks_to_swap=0,
-        prefetch_blocks=0,
-        block_swap_debug=False,
-    )
+    block_swap_node = GJJ_WanVideoBlockSwap()
     model = GJJ_WanVideoModelLoader().loadmodel(
         model=files["dit"],
         base_precision="bf16",
@@ -655,7 +647,16 @@ def _load_reference_workflow_assets(unique_id=None, blocks_to_swap=40, lora_stre
         lora=lora_config,
         rms_norm_function="default",
     )[0]
-    model, = GJJ_WanVideoSetBlockSwap().loadmodel(model=model, block_swap_args=block_swap_args)
+    _block_swap_args, model = block_swap_node.setargs(
+        blocks_to_swap=swap_blocks,
+        offload_img_emb=False,
+        offload_txt_emb=False,
+        model=model,
+        use_non_blocking=False,
+        vace_blocks_to_swap=0,
+        prefetch_blocks=0,
+        block_swap_debug=False,
+    )
     vae, = GJJ_WanVideoVAELoader().loadmodel(
         model_name=files["vae"],
         precision="bf16",

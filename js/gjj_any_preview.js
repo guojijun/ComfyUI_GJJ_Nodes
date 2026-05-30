@@ -4,9 +4,10 @@ import { api } from "/scripts/api.js";
 const TARGET_NODES = new Set(["GJJ_AnyPreview"]);
 const INPUT_PREFIX = "any_";
 const MIN_VISIBLE_INPUTS = 1;
-const ANY_INPUT_TYPE = "GJJ_BATCH_IMAGE, IMAGE, MASK,STRING,AUDIO,VIDEO,*";
+const ANY_INPUT_TYPE = "*";
+const FAST_INPUT_TYPES = "GJJ_BATCH_IMAGE、IMAGE、MASK、STRING、AUDIO、VIDEO";
 const FIRST_INPUT_LABEL = "任意对象";
-const INPUT_TOOLTIP = "可连接 GJJ_BATCH_IMAGE、IMAGE、MASK、STRING、AUDIO、VIDEO 或任意对象；列表会展开预览。";
+const INPUT_TOOLTIP = `可连接任意类型；${FAST_INPUT_TYPES} 会走专用预览，其它对象会像官方 PreviewAny 一样显示可读值。`;
 const PREVIEW_WIDGET_NAME = "gjj_any_preview_text";
 const EMPTY_PREVIEW = "执行后在这里预览文本、对象或调试信息";
 const MIN_PREVIEW_HEIGHT = 96;
@@ -687,7 +688,7 @@ function ensureOutput(node) {
 	}
 }
 
-function addDynamicInput(node, type = "*") {
+function addDynamicInput(node) {
 	const nextIndex = getInputs(node).length + 1;
 	node.addInput(formatInputName(nextIndex), ANY_INPUT_TYPE);
 }
@@ -700,7 +701,7 @@ function ensureTrailingEmptyInput(node) {
 	}
 	const lastInput = inputs[inputs.length - 1];
 	if (lastInput?.link) {
-		addDynamicInput(node, lastInput.type || "*");
+		addDynamicInput(node);
 	}
 }
 

@@ -9,7 +9,7 @@ GJJ_STANDARDIZE_NODE({
 	nodeClass: NODE_CLASS,
 	displayName: "GJJ · 🕰️ 一键批量修复老照片",
 	category: "GJJ",
-	description: "将 qwen_image_edit_2511 老照片修复工作流封装为单节点，并通过公共状态栏显示进度。",
+	description: "将 FireRed Image Edit 老照片修复工作流封装为单节点，并通过公共状态栏显示进度。",
 	enableStatus: true,
 	inputSpec: {
 		required: {
@@ -23,7 +23,7 @@ GJJ_STANDARDIZE_NODE({
 			}],
 			unet_name: ["COMBO", {
 				display_name: "🟣 UNET 主模型",
-				tooltip: "主修复模型。默认使用 qwen_image_edit_2511 老照片工作流同款底模。",
+				tooltip: "主修复模型。此节点只支持 FireRed Image Edit；面板只显示 diffusion_models 下匹配 FireRed 的模型，搜索不要求版本号。",
 			}],
 			seed: ["INT", {
 				display_name: "🎲 种子",
@@ -35,7 +35,7 @@ GJJ_STANDARDIZE_NODE({
 			}],
 			upscale_model_name: ["COMBO", {
 				display_name: "🔎 放大模型",
-				tooltip: "用于结果图像增强的放大模型。",
+				tooltip: "用于结果图像增强的放大模型。保留 upscale_models 下全部模型选项，默认按 1xSkinContrast 关键词模糊匹配。",
 			}],
 		},
 	},

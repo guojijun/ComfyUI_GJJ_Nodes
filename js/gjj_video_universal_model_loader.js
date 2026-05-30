@@ -1,10 +1,16 @@
 import { app } from "/scripts/app.js";
 
-const TARGET_NODES = new Set(["GJJ_VideoUniversalModelLoader"]);
+const TARGET_NODE_APIS = {
+	GJJ_VideoUniversalModelLoader: "/gjj/video_universal_loader_lists",
+	GJJ_VideoKijaiModelLoader: "/gjj/video_kijai_loader_lists",
+};
+const TARGET_NODES = new Set(Object.keys(TARGET_NODE_APIS));
 const LIST_API = "/gjj/video_universal_loader_lists";
 const MAX_SLOTS = 12;
 const SAVED_VALUES_PROPERTY = "gjj_video_universal_loader_values";
 const FILTER_PROPERTY = "gjj_video_universal_loader_filters";
+const SETTINGS_OPEN_PROPERTY = "gjj_video_kijai_open_settings";
+const SETTINGS_CONFIG_PROPERTY = "gjj_video_kijai_settings_config";
 const OUTPUT_HIT_LANE = 34;
 const WIDTH_PROPERTY = "gjj_video_universal_loader_width";
 const MIN_NODE_WIDTH = 300;
@@ -22,6 +28,12 @@ const OUTPUT_TYPE_BY_KIND = {
 	wanvideo_model: "WANVIDEOMODEL",
 	wan_t5_encoder: "WANTEXTENCODER",
 	wan_vae: "WANVAE",
+	vace_model: "VACEPATH",
+	extra_model: "VACEPATH",
+	fantasytalking_model: "FANTASYTALKINGMODEL",
+	multitalk_model: "MULTITALKMODEL",
+	fantasyportrait_model: "FANTASYPORTRAITMODEL",
+	wan_lora: "WANVIDLORA",
 	audio_encoder: "AUDIO_ENCODER",
 	empty: "*",
 	latent_upscale_model: "LATENT_UPSCALE_MODEL",
@@ -29,13 +41,44 @@ const OUTPUT_TYPE_BY_KIND = {
 	name_any: "STRING",
 };
 
+const SETTING_FIELD_SUFFIXES = [
+	"base_precision",
+	"quantization",
+	"load_device",
+	"attention_mode",
+	"rms_norm_function",
+	"vae_precision",
+	"vae_use_cpu_cache",
+	"t5_precision",
+	"t5_quantization",
+	"t5_load_device",
+	"extra_base_precision",
+	"lora_strength",
+	"lora_merge_loras",
+	"lora_low_mem_load",
+];
+const WAN_BASE_PRECISIONS = ["fp32", "bf16", "fp16", "fp16_fast"];
+const WAN_QUANTIZATIONS = ["disabled", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e4m3fn_scaled", "fp8_e4m3fn_scaled_fast", "fp8_e5m2", "fp8_e5m2_fast", "fp8_e5m2_scaled", "fp8_e5m2_scaled_fast"];
+const WAN_LOAD_DEVICES = ["main_device", "offload_device"];
+const WAN_ATTENTION_MODES = ["sdpa", "flash_attn_2", "flash_attn_3", "sageattn", "sageattn_3", "radial_sage_attention", "sageattn_compiled", "sageattn_ultravico", "comfy"];
+const WAN_RMS_NORM_FUNCTIONS = ["default", "pytorch"];
+const WAN_VAE_PRECISIONS = ["bf16", "fp16", "fp32"];
+const WAN_T5_PRECISIONS = ["bf16", "fp32"];
+const WAN_T5_QUANTIZATIONS = ["disabled", "fp8_e4m3fn"];
+const EXTRA_BASE_PRECISIONS = ["fp16", "bf16", "fp32"];
+const KIJAI_NODE_CLASS = "GJJ_VideoKijaiModelLoader";
+
 const ALL_FIELDS = ["config", "use_accel_lora", "clip_type_override"];
-for (let i = 1; i <= MAX_SLOTS; i++) ALL_FIELDS.push(`file_${i}`, `secondary_file_${i}`, `dtype_${i}`);
+for (let i = 1; i <= MAX_SLOTS; i++) {
+	ALL_FIELDS.push(`file_${i}`, `secondary_file_${i}`, `dtype_${i}`);
+	for (const suffix of SETTING_FIELD_SUFFIXES) ALL_FIELDS.push(`${suffix}_${i}`);
+}
 
 function getWidget(node, name) { return node.widgets?.find((w) => w?.name === name); }
 function valueOf(node, name, fallback = "") { return String(getWidget(node, name)?.value ?? fallback ?? ""); }
 function safeAssign(obj, key, value) { try { obj[key] = value; } catch (_) {} }
 function lower(text) { return String(text || "").replaceAll("\\", "/").toLowerCase(); }
+function isKijaiNode(node) { return node?.comfyClass === KIJAI_NODE_CLASS; }
 
 function currentNodeWidth(node) {
 	const current = Number(node?.size?.[0] || 0);
@@ -117,8 +160,8 @@ function selectFirstIfInvalid(node, name, values, preferred = "") {
 function isUsable(name, allowAny = false) {
 	const v = lower(name).trim();
 	if (!v || v.endsWith(".metadata.json")) return false;
-	if (allowAny) return /\.(safetensors|sft|ckpt|pt|pth|bin|torchscript\.pt)$/i.test(v);
-	return /\.(safetensors|sft|ckpt|pt|pth)$/i.test(v);
+	if (allowAny) return /\.(safetensors|sft|ckpt|pt|pth|bin|gguf|torchscript\.pt)$/i.test(v);
+	return /\.(safetensors|sft|ckpt|pt|pth|gguf)$/i.test(v);
 }
 
 function splitWords(text) { return String(text || "").trim().toLowerCase().split(/[\s,，;；|]+/).filter(Boolean); }
@@ -135,10 +178,20 @@ function scoreName(name, keywords = []) {
 	return score;
 }
 
-function filterList(list, keywords = [], allowAny = false) {
-	const words = (keywords || []).map((v) => String(v || "").trim().toLowerCase()).filter(Boolean);
+function normalizeKeywords(keywords = []) {
+	return (keywords || []).map((v) => String(v || "").trim().toLowerCase()).filter(Boolean);
+}
+function filterList(list, keywords = [], allowAny = false, fallbackKeywords = []) {
+	const words = normalizeKeywords(keywords);
 	const source = Array.isArray(list) ? list.filter((name) => isUsable(name, allowAny)) : [];
-	const matched = words.length ? source.filter((name) => words.every((word) => lower(name).includes(word))) : source;
+	const findMatches = (group) => group.length ? source.filter((name) => group.every((word) => lower(name).includes(word))) : source;
+	let matched = findMatches(words);
+	const groups = Array.isArray(fallbackKeywords) ? fallbackKeywords : [];
+	for (const group of groups) {
+		if (matched.length) break;
+		if (!Array.isArray(group)) continue;
+		matched = findMatches(normalizeKeywords(group));
+	}
 	return matched.slice().sort((a, b) => {
 		const diff = scoreName(b, words) - scoreName(a, words);
 		if (diff !== 0) return diff;
@@ -157,12 +210,16 @@ function ensureState(node) {
 	return node.__gjjVUState;
 }
 
+function listApiFor(node) {
+	return TARGET_NODE_APIS[node?.comfyClass] || LIST_API;
+}
+
 async function refreshBackendLists(node, rerender = true) {
 	const state = ensureState(node);
 	if (state.loading) return;
 	state.loading = true;
 	try {
-		const response = await fetch(LIST_API);
+		const response = await fetch(listApiFor(node));
 		if (response?.ok) {
 			const payload = await response.json();
 			state.configs = payload?.configs || state.configs;
@@ -392,15 +449,32 @@ function isVaeOutputSlot(slot) {
 function isClipOutputSlot(slot) {
 	return ["clip", "checkpoint_clip"].includes(String(slot?.kind || ""));
 }
-function visibleOutputSlots(cfg) {
+function visibleOutputSlots(node, cfg) {
 	// 后端也下发 output_slots；这里优先使用它，保证前端输出顺序与后端返回 tuple 一致。
-	// V20 开始不再插入占位、不再动态增删输出口，只按配置顺序修正 output1-output12 的标签和类型。
+	// Universal/Kijai 都按语义输出类压紧可见口，空占位/name/LoRA 只留在面板参数区，不画成右侧输出圆点。
 	const source = Array.isArray(cfg?.output_slots) ? cfg.output_slots : (cfg?.slots || []);
-	return source.slice(0, MAX_SLOTS).filter((slot) => !isLoraSlot(slot) && !isNameOnlySlot(slot));
+	return source.slice(0, MAX_SLOTS).filter((slot) => !isLoraSlot(slot) && !isNameOnlySlot(slot) && !isUnusedOutputSlot(slot));
 }
 function hasLoraSlots(cfg) { return (cfg?.slots || []).some(isLoraSlot); }
+function outputClassFor(slot, idx = 0) {
+	const explicit = String(slot?.output_class || "").trim();
+	if (explicit) return explicit;
+	const id = String(slot?.id || "");
+	const kind = String(slot?.kind || "");
+	const label = String(slot?.label || "");
+	const text = `${id} ${kind} ${label}`.toLowerCase();
+	if (text.includes("high") || text.includes("高模")) return "high_model";
+	if (text.includes("low") || text.includes("低模")) return "low_model";
+	if (id === "video_vae" || label.includes("视频VAE")) return "video_vae";
+	if (id === "audio_vae" || label.includes("音频VAE")) return "audio_vae";
+	if (id) return id;
+	return `${kind || "slot"}_${idx}`;
+}
+function semanticIdForSlot(slot, idx = 0) {
+	return outputClassFor(slot, idx);
+}
 function slotKey(slot, idx = 0) {
-	return `${String(slot?.id || `slot_${idx}`)}::${String(slot?.kind || "") }::${String(slot?.folder || "")}`;
+	return `${outputClassFor(slot, idx)}::${String(slot?.id || `slot_${idx}`)}::${String(slot?.kind || "") }::${String(slot?.folder || "")}::${outputTypeFor(slot)}`;
 }
 function isGjjLoraInput(input) {
 	const text = [input?.name, input?.localized_name, input?.label].map((v) => String(v || "")).join(" ");
@@ -419,10 +493,11 @@ function createLoraBar(node, cfg) {
 	}
 	bar.style.display = "grid";
 
+	const loraLabelText = String(cfg?.lora_label || "🚕 加速LoRA");
 	const label = document.createElement("span");
 	label.className = "gjj-vu-small-label";
-	label.textContent = "🚕 加速LoRA";
-	label.title = "控制当前配置的内置加速 LoRA；没有内置加速 LoRA 的配置不显示此按钮。";
+	label.textContent = loraLabelText;
+	label.title = "控制当前配置的内置/预设 LoRA；没有内置 LoRA 的配置不显示此按钮。";
 
 	const button = document.createElement("button");
 	button.type = "button";
@@ -431,9 +506,9 @@ function createLoraBar(node, cfg) {
 		const external = hasExternalLoraBool(node);
 		const on = effectiveUseLora(node);
 		button.dataset.value = external ? "external" : (on ? "true" : "false");
-		button.textContent = external ? "🚕 外接" : (on ? "✅ 开" : "⬜ 关");
+		button.textContent = external ? "🧬 外接" : (on ? "✅ 开" : "⬜ 关");
 		button.disabled = external;
-		button.title = external ? "加速 LoRA 开关由外部 BOOLEAN 输入控制。" : "点击开关内部/外接 LoRA 叠加。";
+		button.title = external ? "LoRA 开关由外部 BOOLEAN 输入控制。" : "点击开关内部/外接 LoRA 叠加。";
 	};
 	button.addEventListener("click", (event) => {
 		event.preventDefault(); event.stopPropagation();
@@ -493,11 +568,33 @@ function buildDom(node) {
 		.gjj-vu-top { display:grid; grid-template-columns:minmax(0,1fr) 34px; gap:6px; align-items:center; min-width:0; }
 		.gjj-vu-row { display:grid; grid-template-columns:96px minmax(0,1fr) 72px; gap:6px; align-items:center; min-width:0; margin-bottom:4px; }
 		.gjj-vu-row.no-dtype { grid-template-columns:108px minmax(0,1fr); }
+		.gjj-vu-row.has-gear.no-dtype { grid-template-columns:108px minmax(0,1fr) 30px; }
+		.gjj-vu-row.has-gear:not(.no-dtype) { grid-template-columns:88px minmax(0,1fr) 68px 30px; }
 		.gjj-vu-label, .gjj-vu-small-label { color:#b9c8cc; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 		.gjj-vu-refresh, .gjj-vu-toggle, .gjj-vu-combo-button {
 			width:100%; height:28px; min-width:0; padding:3px 7px; border:1px solid #33464e; border-radius:7px;
 			background:#2b2d30; color:#f1f5f5; outline:none; font-size:12px;
 		}
+		.gjj-vu-gear {
+			width:30px; height:28px; padding:0; border:1px solid #33464e; border-radius:7px;
+			background:#24282b; color:#d7e3e6; cursor:pointer; font-size:14px; line-height:1;
+		}
+		.gjj-vu-gear.on { border-color:#4f8f7a; background:#20362f; color:#dff8ea; }
+		.gjj-vu-param-panel {
+			display:grid; grid-template-columns:repeat(auto-fit, minmax(142px, 1fr)); gap:5px 6px; margin:-1px 0 5px 0;
+			padding:6px; border:1px solid #2d424a; border-radius:7px; background:#111b20; min-width:0;
+		}
+		.gjj-vu-param-field { display:grid; grid-template-columns:58px minmax(0,1fr); gap:5px; align-items:center; min-width:0; }
+		.gjj-vu-param-label { color:#9fb0b7; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+		.gjj-vu-param-panel .gjj-vu-combo-button,
+		.gjj-vu-param-number,
+		.gjj-vu-param-toggle { height:24px; border-radius:6px; font-size:11px; }
+		.gjj-vu-param-number {
+			width:100%; min-width:0; padding:2px 6px; border:1px solid #33464e; background:#0b1418;
+			color:#edf4f4; outline:none;
+		}
+		.gjj-vu-param-toggle { width:100%; padding:0 5px; border:1px solid #33464e; background:#24282b; color:#cdd5d8; cursor:pointer; }
+		.gjj-vu-param-toggle.on { border-color:#4f8f7a; background:#20362f; color:#dff8ea; }
 		.gjj-vu-combo { min-width:0; width:100%; position:relative; }
 		.gjj-vu-combo-button { display:flex; align-items:center; justify-content:space-between; gap:6px; cursor:pointer; text-align:left; }
 		.gjj-vu-combo-text { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
@@ -631,6 +728,11 @@ function officialIconFor(slot) {
 	if (["vae", "checkpoint_vae", "ltx_audio_vae", "wan_vae"].includes(kind)) return "🔴";
 	if (["clip", "checkpoint_clip", "wan_t5_encoder"].includes(kind)) return "🟡";
 	if (["clip_vision", "audio_encoder"].includes(kind)) return "🔵";
+	if (["vace_model", "extra_model"].includes(kind)) return "🧩";
+	if (["fantasytalking_model"].includes(kind)) return "🗣";
+	if (["multitalk_model"].includes(kind)) return "🎤";
+	if (["fantasyportrait_model"].includes(kind)) return "🧑";
+	if (["wan_lora"].includes(kind)) return "🟠";
 	if (kind === "empty") return "";
 	if (["latent_upscale_model", "name_any"].includes(kind)) return "🟤";
 	if (["name"].includes(kind)) return "🟠";
@@ -640,6 +742,188 @@ function outputTypeFor(slot) { return String(slot?.output_type || OUTPUT_TYPE_BY
 function outputLabelFor(slot) {
 	if (String(slot?.kind || "") === "empty") return "";
 	return `${officialIconFor(slot)} ${String(slot?.label || slot?.id || "输出")}`;
+}
+function isUnusedOutputSlot(slot) {
+	return !slot || String(slot?.kind || "") === "empty" || slot?.unused === true;
+}
+function boolText(value) {
+	return value === true || String(value).toLowerCase() === "true" ? "true" : "false";
+}
+function settingName(suffix, index) {
+	return `${suffix}_${index}`;
+}
+function extraKindFor(slot) {
+	const kind = String(slot?.kind || "").replaceAll("-", "_").toLowerCase();
+	if (kind === "vace_model" || kind === "extra_model") return "vace";
+	if (kind === "fantasytalking_model" || kind === "fantasy_talking") return "fantasytalking";
+	if (kind === "multitalk_model" || kind === "multi_talk" || kind === "infinitetalk" || kind === "infinite_talk") return "multitalk";
+	if (kind === "fantasyportrait_model" || kind === "fantasy_portrait") return "fantasyportrait";
+	return kind;
+}
+function paramDefsForSlot(node, slot) {
+	if (!isKijaiNode(node)) return [];
+	const kind = String(slot?.kind || "");
+	const extraKind = extraKindFor(slot);
+	if (kind === "wanvideo_model") {
+		return [
+			{ suffix: "base_precision", label: "精度", type: "select", values: WAN_BASE_PRECISIONS, defaultValue: slot?.base_precision || "bf16" },
+			{ suffix: "quantization", label: "量化", type: "select", values: WAN_QUANTIZATIONS, defaultValue: slot?.quantization || "disabled" },
+			{ suffix: "load_device", label: "设备", type: "select", values: WAN_LOAD_DEVICES, defaultValue: slot?.load_device || "offload_device" },
+			{ suffix: "attention_mode", label: "注意力", type: "select", values: WAN_ATTENTION_MODES, defaultValue: slot?.attention_mode || "sdpa" },
+			{ suffix: "rms_norm_function", label: "RMS", type: "select", values: WAN_RMS_NORM_FUNCTIONS, defaultValue: slot?.rms_norm_function || "default" },
+		];
+	}
+	if (kind === "wan_vae") {
+		return [
+			{ suffix: "vae_precision", label: "VAE精度", type: "select", values: WAN_VAE_PRECISIONS, defaultValue: slot?.precision || "bf16" },
+			{ suffix: "vae_use_cpu_cache", label: "CPU缓存", type: "toggle", defaultValue: boolText(slot?.use_cpu_cache || false) },
+		];
+	}
+	if (kind === "wan_t5_encoder") {
+		return [
+			{ suffix: "t5_precision", label: "T5精度", type: "select", values: WAN_T5_PRECISIONS, defaultValue: slot?.precision || "bf16" },
+			{ suffix: "t5_quantization", label: "T5量化", type: "select", values: WAN_T5_QUANTIZATIONS, defaultValue: slot?.quantization || "disabled" },
+			{ suffix: "t5_load_device", label: "设备", type: "select", values: WAN_LOAD_DEVICES, defaultValue: slot?.load_device || "offload_device" },
+		];
+	}
+	if (extraKind === "fantasytalking" || extraKind === "fantasyportrait") {
+		return [
+			{ suffix: "extra_base_precision", label: "扩展精度", type: "select", values: EXTRA_BASE_PRECISIONS, defaultValue: slot?.base_precision || "fp16" },
+		];
+	}
+	if (isLoraSlot(slot)) {
+		return [
+			{ suffix: "lora_strength", label: "强度", type: "number", defaultValue: String(slot?.strength ?? 1), min: -1000, max: 1000, step: 0.0001 },
+			{ suffix: "lora_merge_loras", label: "合并", type: "toggle", defaultValue: boolText(slot?.merge_loras || false) },
+			{ suffix: "lora_low_mem_load", label: "低显存", type: "toggle", defaultValue: boolText(slot?.low_mem_load || false) },
+		];
+	}
+	return [];
+}
+function ensureSettingDefaults(node, slot, index, reset = false) {
+	for (const def of paramDefsForSlot(node, slot)) {
+		const name = settingName(def.suffix, index);
+		const w = getWidget(node, name);
+		if (!w) continue;
+		const cur = String(w.value ?? "").trim();
+		if (reset || !cur || cur === "preset" || (def.values && !def.values.includes(cur))) {
+			w.value = String(def.defaultValue ?? "");
+			w.callback?.(w.value);
+		}
+		if (w.__gjjVUInput && "value" in w.__gjjVUInput) w.__gjjVUInput.value = String(w.value ?? "");
+		if (typeof w.__gjjVUSetValue === "function") w.__gjjVUSetValue(String(w.value ?? ""), false);
+	}
+}
+function openSettingsMap(node) {
+	node.properties = node.properties || {};
+	node.properties[SETTINGS_OPEN_PROPERTY] = node.properties[SETTINGS_OPEN_PROPERTY] || {};
+	return node.properties[SETTINGS_OPEN_PROPERTY];
+}
+function settingsSlotKey(slot, index) {
+	return `${index}:${String(slot?.id || "")}:${String(slot?.kind || "")}`;
+}
+function isSettingsOpen(node, slot, index) {
+	return !!openSettingsMap(node)[settingsSlotKey(slot, index)];
+}
+function createSettingsGear(node, slot, index) {
+	const button = document.createElement("button");
+	button.type = "button";
+	button.className = `gjj-vu-gear ${isSettingsOpen(node, slot, index) ? "on" : ""}`;
+	button.textContent = "⚙️";
+	button.title = "展开/收起该模型的加载参数";
+	button.addEventListener("click", (event) => {
+		event.preventDefault(); event.stopPropagation();
+		const map = openSettingsMap(node);
+		const key = settingsSlotKey(slot, index);
+		if (map[key]) delete map[key];
+		else map[key] = true;
+		applyConfig(node);
+	});
+	protect(button);
+	return button;
+}
+function settingValue(node, name, fallback = "") {
+	const raw = String(getWidget(node, name)?.value ?? "").trim();
+	return raw || String(fallback ?? "");
+}
+function createNumberSetting(node, name, def) {
+	const input = document.createElement("input");
+	input.className = "gjj-vu-param-number";
+	input.type = "number";
+	input.step = String(def.step ?? 0.01);
+	if (def.min !== undefined) input.min = String(def.min);
+	if (def.max !== undefined) input.max = String(def.max);
+	input.value = settingValue(node, name, def.defaultValue);
+	input.title = "此值会覆盖当前预设的默认参数。";
+	input.addEventListener("input", () => {
+		syncWidget(node, name, input.value);
+	});
+	protect(input);
+	return input;
+}
+function createToggleSetting(node, name, def) {
+	const button = document.createElement("button");
+	button.type = "button";
+	button.className = "gjj-vu-param-toggle";
+	const sync = () => {
+		const on = settingValue(node, name, def.defaultValue) === "true";
+		button.classList.toggle("on", on);
+		button.textContent = on ? "开" : "关";
+	};
+	button.addEventListener("click", (event) => {
+		event.preventDefault(); event.stopPropagation();
+		const next = settingValue(node, name, def.defaultValue) === "true" ? "false" : "true";
+		syncWidget(node, name, next);
+		sync();
+	});
+	button.title = "此开关会覆盖当前预设的默认参数。";
+	protect(button);
+	sync();
+	return button;
+}
+function createParamPanel(node, slot, index) {
+	const defs = paramDefsForSlot(node, slot);
+	const panel = document.createElement("div");
+	panel.className = "gjj-vu-param-panel";
+	for (const def of defs) {
+		const name = settingName(def.suffix, index);
+		const field = document.createElement("div");
+		field.className = "gjj-vu-param-field";
+		const label = document.createElement("div");
+		label.className = "gjj-vu-param-label";
+		label.textContent = def.label;
+		label.title = `${def.label}\n默认值: ${String(def.defaultValue ?? "")}`;
+		let control;
+		if (def.type === "number") control = createNumberSetting(node, name, def);
+		else if (def.type === "toggle") control = createToggleSetting(node, name, def);
+		else control = createSearchableSelect(node, name, def.values || [], () => saveWidgetValues(node), null, { placeholder: "过滤参数" });
+		field.append(label, control);
+		panel.appendChild(field);
+	}
+	return panel;
+}
+function slotTitle(slot, folder) {
+	const lines = [
+		`目录: models/${folder}`,
+		`类型: ${String(slot?.kind || "")}`,
+		`关键词: ${(slot?.keywords || []).join(", ")}`,
+	];
+	const fields = [
+		["base_precision", "base_precision"],
+		["precision", "precision"],
+		["quantization", "quantization"],
+		["load_device", "load_device"],
+		["attention_mode", "attention"],
+		["rms_norm_function", "rms_norm"],
+		["strength", "strength"],
+		["target", "target"],
+		["merge_loras", "merge_loras"],
+		["low_mem_load", "low_mem_load"],
+	];
+	for (const [key, label] of fields) {
+		if (slot?.[key] !== undefined && slot?.[key] !== null && String(slot[key]) !== "") lines.push(`${label}: ${String(slot[key])}`);
+	}
+	return lines.join("\n");
 }
 function makeOutput(slot, oldOut = null, idx = 0) {
 	const label = outputLabelFor(slot);
@@ -652,15 +936,17 @@ function makeOutput(slot, oldOut = null, idx = 0) {
 		gjj_dynamic: true,
 		gjj_slot_key: slotKey(slot, idx),
 		gjj_slot_id: String(slot?.id || ""),
+		gjj_slot_class: semanticIdForSlot(slot, idx),
 	};
 }
 function sameOutputShape(node, slots) {
 	if (!Array.isArray(node.outputs) || node.outputs.length !== slots.length) return false;
 	for (let i = 0; i < slots.length; i++) {
 		const out = node.outputs[i];
-		const label = outputLabelFor(slots[i]);
-		const type = outputTypeFor(slots[i]);
-		const expectedKey = slotKey(slots[i], i);
+		const unused = isUnusedOutputSlot(slots[i]);
+		const label = unused ? "" : outputLabelFor(slots[i]);
+		const type = unused ? "*" : outputTypeFor(slots[i]);
+		const expectedKey = unused ? `unused_${i}` : slotKey(slots[i], i);
 		const actualKey = String(out?.gjj_slot_key || "");
 		if (actualKey && actualKey !== expectedKey) return false;
 		if (String(out?.name || out?.label || "") !== label) return false;
@@ -766,6 +1052,7 @@ function repairOutputSlot(node, out, slot, index) {
 	out.gjj_dynamic = true;
 	out.gjj_slot_key = slotKey(slot, index);
 	out.gjj_slot_id = String(slot?.id || "");
+	out.gjj_slot_class = semanticIdForSlot(slot, index);
 	out.slot_index = index;
 	out.gjj_arg_name = `file_${index + 1}`;
 	out.gjj_output_kind = String(slot?.kind || "");
@@ -790,7 +1077,7 @@ function collectSemanticOutputLinks(node) {
 	const outputs = Array.isArray(node.outputs) ? node.outputs : [];
 	for (let i = 0; i < outputs.length; i++) {
 		const out = outputs[i];
-		const slotId = String(out?.gjj_slot_id || "");
+		const slotId = String(out?.gjj_slot_class || out?.gjj_slot_id || "");
 		if (!slotId) continue;
 		const links = Array.isArray(out?.links) ? out.links.slice() : [];
 		for (const linkId of links) {
@@ -830,7 +1117,7 @@ function restoreSemanticOutputLinks(node, savedLinks, slots) {
 		bySlotId.get(item.slotId).push(item);
 	}
 	for (let i = 0; i < slots.length; i++) {
-		const slotId = String(slots[i]?.id || "");
+		const slotId = semanticIdForSlot(slots[i], i);
 		if (!slotId || !bySlotId.has(slotId)) continue;
 		const out = node.outputs?.[i];
 		if (!out) continue;
@@ -882,10 +1169,13 @@ function hardRefreshOutputs(node) {
 function ensureActiveOutputCount(node, count) {
 	if (!Array.isArray(node.outputs)) node.outputs = [];
 	const target = Math.max(0, Math.min(MAX_SLOTS, Number(count) || 0));
-	// 后端固定 output1-output12 / *，但前端只显示当前配置真正用到的前 N 个输出口。
-	// 不再用 hidden 留空，因为 LiteGraph 仍会画圆点，占用视觉空间。
-	removeExtraOutputLinks(node, target);
-	if (node.outputs.length > target) node.outputs.splice(target);
+	// 后端固定 output1-output12 / *；前端结构变更必须走 LiteGraph API，
+	// 不能直接 splice node.outputs，否则输出命中区和连线序号容易错位。
+	for (let i = node.outputs.length - 1; i >= target; i--) {
+		removeExtraOutputLinks(node, i);
+		try { node.removeOutput?.(i); }
+		catch (_) { node.outputs.splice(i, 1); }
+	}
 	while (node.outputs.length < target) {
 		try { node.addOutput?.("*", "*"); }
 		catch (_) { node.outputs.push({ name: "*", type: "*", links: [] }); }
@@ -893,7 +1183,8 @@ function ensureActiveOutputCount(node, count) {
 }
 
 function repairFixedOutput(node, out, slot, index) {
-	const used = !!slot;
+	const kind = String(slot?.kind || "");
+	const used = !isUnusedOutputSlot(slot);
 	const label = used ? outputLabelFor(slot) : "";
 	const type = used ? outputTypeFor(slot) : "*";
 	out.name = label;
@@ -905,18 +1196,11 @@ function repairFixedOutput(node, out, slot, index) {
 	out.gjj_used_output = used;
 	out.gjj_slot_key = used ? slotKey(slot, index) : `unused_${index}`;
 	out.gjj_slot_id = used ? String(slot?.id || "") : "";
+	out.gjj_slot_class = used ? semanticIdForSlot(slot, index) : `unused_${index}`;
 	out.slot_index = index;
 	out.gjj_arg_name = `file_${index + 1}`;
-	out.gjj_output_kind = used ? String(slot?.kind || "") : "unused";
+	out.gjj_output_kind = used ? kind : "unused";
 	out.gjj_output_type = type;
-	if (used && String(slot?.kind || "") === "empty") {
-		out.name = "";
-		out.label = "";
-		out.localized_name = "";
-		out.type = "*";
-		out.color_on = "rgba(90,96,118,0.28)";
-		out.color_off = "rgba(90,96,118,0.18)";
-	}
 	// 未使用口不删除，只尽量隐藏显示。这样既不破坏固定 output1-output12 的序号，也避免面板出现一串 output5-output12。
 	out.hidden = !used;
 	out.gjj_hidden_unused = !used;
@@ -948,7 +1232,7 @@ function repairFixedOutput(node, out, slot, index) {
 }
 
 function updateOutputs(node, cfg, opts = {}) {
-	const slots = visibleOutputSlots(cfg);
+	const slots = visibleOutputSlots(node, cfg);
 	const nextConfigKey = currentConfigKey(node);
 	const previousConfigKey = String(node.__gjjVUAppliedConfigKey || node.properties?.gjj_vu_applied_config_key || "");
 	const layoutChanged = !sameOutputShape(node, slots);
@@ -963,12 +1247,10 @@ function updateOutputs(node, cfg, opts = {}) {
 	ensureActiveOutputCount(node, slots.length);
 
 	// 只保留当前配置真正用到的输出口数量；每个输出口仍按 output1/output2... 的顺序承载语义。
-	for (let i = 0; i < slots.length; i++) {
+	for (let i = 0; i < Math.min(slots.length, node.outputs?.length || 0); i++) {
 		const out = node.outputs?.[i];
 		if (!out) continue;
 		repairFixedOutput(node, out, slots[i] || null, i);
-		out.hidden = false;
-		out.gjj_hidden_unused = false;
 	}
 
 	if (configChanged) {
@@ -1084,6 +1366,11 @@ function applyConfig(node, opts = {}) {
 		const empty = document.createElement("div"); empty.className = "gjj-vu-empty"; empty.textContent = "未读取到模型配置。"; rows.appendChild(empty); node.__gjjVUVisibleRowCount = 1; scheduleLayoutRefresh(node, [0, 48, 160]); return;
 	}
 	const loraEnabled = effectiveUseLora(node);
+	const configKey = currentConfigKey(node);
+	node.properties = node.properties || {};
+	const previousSettingsConfig = String(node.properties[SETTINGS_CONFIG_PROPERTY] || "");
+	const resetSlotSettings = isKijaiNode(node) && previousSettingsConfig && previousSettingsConfig !== configKey;
+	if (resetSlotSettings) node.properties[SETTINGS_OPEN_PROPERTY] = {};
 	(cfg.slots || []).slice(0, MAX_SLOTS).forEach((slot, index) => {
 		const i = index + 1;
 		if (String(slot?.kind || "") === "empty") {
@@ -1095,7 +1382,7 @@ function applyConfig(node, opts = {}) {
 		const folder = String(slot.folder || "");
 		const list = state.folders?.[folder] || [];
 		const allowAny = String(slot.kind || "") === "name_any";
-		const values = filterList(list, slot.keywords || [], allowAny);
+		const values = filterList(list, slot.keywords || [], allowAny, slot.fallback_keywords || []);
 		const secondaryValues = Array.isArray(list) ? list.map(String) : [];
 		const fileName = `file_${i}`;
 		const secondaryFileName = `secondary_file_${i}`;
@@ -1112,15 +1399,18 @@ function applyConfig(node, opts = {}) {
 		}
 		setComboOptions(getWidget(node, dtypeName), state.dtypes || ["default"]);
 		selectFirstIfInvalid(node, dtypeName, state.dtypes || ["default"]);
+		ensureSettingDefaults(node, slot, i, resetSlotSettings);
 
 		const row = document.createElement("div");
-		row.className = `gjj-vu-row ${slotNeedsDtype(slot) ? "" : "no-dtype"}`;
+		const params = paramDefsForSlot(node, slot);
+		const hasParams = params.length > 0;
+		row.className = `gjj-vu-row ${slotNeedsDtype(slot) ? "" : "no-dtype"} ${hasParams ? "has-gear" : ""}`;
 		if (isLoraSlot(slot) && !loraEnabled) row.style.display = "none";
 		const label = document.createElement("div");
 		label.className = "gjj-vu-label";
 		const icon = isLoraSlot(slot) ? "🟠" : officialIconFor(slot);
 		label.textContent = `${icon} ${String(slot.label || slot.id || `模型${i}`)}`;
-		label.title = `目录: models/${folder}\n类型: ${String(slot.kind || "")}\n关键词: ${(slot.keywords || []).join(", ")}`;
+		label.title = slotTitle(slot, folder);
 		const select = createSearchableSelect(node, fileName, values, () => saveWidgetValues(node), null, { placeholder: "输入关键词实时过滤", title: label.title });
 		row.append(label, select);
 		if (slotNeedsDtype(slot)) {
@@ -1128,8 +1418,13 @@ function applyConfig(node, opts = {}) {
 			dtype.title = "加载 dtype；default 使用 ComfyUI 默认策略。";
 			row.append(dtype);
 		}
+		if (hasParams) row.append(createSettingsGear(node, slot, i));
 		rows.appendChild(row);
 		node.__gjjVUVisibleRowCount += 1;
+		if (hasParams && !(isLoraSlot(slot) && !loraEnabled) && isSettingsOpen(node, slot, i)) {
+			rows.appendChild(createParamPanel(node, slot, i));
+			node.__gjjVUVisibleRowCount += Math.max(1, Math.ceil(params.length / 2));
+		}
 		if (isDualClipSlot(slot)) {
 			const secondaryRow = document.createElement("div");
 			secondaryRow.className = "gjj-vu-row no-dtype";
@@ -1146,6 +1441,7 @@ function applyConfig(node, opts = {}) {
 		}
 	});
 	for (let i = (cfg.slots || []).length + 1; i <= MAX_SLOTS; i++) { syncWidget(node, `file_${i}`, ""); syncWidget(node, `secondary_file_${i}`, ""); syncWidget(node, `dtype_${i}`, "default"); }
+	if (isKijaiNode(node)) node.properties[SETTINGS_CONFIG_PROPERTY] = configKey;
 	updateOutputs(node, cfg, opts);
 	node.__gjjVULoraToggleSync?.();
 	saveWidgetValues(node);

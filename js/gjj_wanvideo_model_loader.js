@@ -24,6 +24,8 @@ const SEARCHABLE_WIDGETS = new Set([
 	"clip_vision_name",
 	"accel_lora_name",
 ]);
+const OPTIONAL_SEARCHABLE_WIDGETS = new Set(["clip_vision_name", "accel_lora_name"]);
+const UNSELECTED_LABEL = "未选择";
 let ACTIVE_GJJ_WANMODEL_POPUP = null;
 
 function getWidget(node, name) {
@@ -117,6 +119,17 @@ function splitWords(text) {
 	return String(text || "").trim().toLowerCase().split(/[\s,，;；|]+/).filter(Boolean);
 }
 
+function isUnsetChoice(value) {
+	const text = String(value ?? "").trim();
+	if (!text) return true;
+	if (text === UNSELECTED_LABEL || text === "不使用") return true;
+	return ["none", "null", "disabled", "false"].includes(text.toLowerCase());
+}
+
+function supportsUnselected(widgetName) {
+	return OPTIONAL_SEARCHABLE_WIDGETS.has(widgetName);
+}
+
 function makeNativeSelect(node, widgetName, title = "") {
 	const widget = getWidget(node, widgetName);
 	const select = document.createElement("select");
@@ -133,6 +146,7 @@ function makeNativeSelect(node, widgetName, title = "") {
 	select.addEventListener("change", () => {
 		setWidgetValue(widget, select.value);
 		select.title = select.value;
+		shrinkNodeToContent(node);
 	});
 	protect(select);
 	return select;
@@ -158,11 +172,13 @@ function makeSearchableSelect(node, widgetName, title = "") {
 	let searchText = "";
 	const setVisualValue = (value) => {
 		const raw = String(value ?? "");
-		text.textContent = raw || "未选择";
-		button.title = title || raw || "未选择";
+		const display = supportsUnselected(widgetName) && isUnsetChoice(raw) ? UNSELECTED_LABEL : raw || UNSELECTED_LABEL;
+		text.textContent = display;
+		button.title = title || display;
+		shrinkNodeToContent(node);
 	};
 	const setValue = (value) => {
-		const next = String(value ?? "");
+		const next = supportsUnselected(widgetName) && isUnsetChoice(value) ? UNSELECTED_LABEL : String(value ?? "");
 		setWidgetValue(widget, next);
 		setVisualValue(next);
 	};
@@ -187,12 +203,33 @@ function makeSearchableSelect(node, widgetName, title = "") {
 			searchText = input.value || "";
 			const words = splitWords(searchText);
 			const current = String(widget?.value ?? "");
+			const canUnset = supportsUnselected(widgetName);
+			const currentIsUnset = canUnset && isUnsetChoice(current);
 			const shown = optionValues.filter((value) => {
+				if (canUnset && isUnsetChoice(value)) return false;
 				const hay = String(value || "").toLowerCase().replaceAll("\\", "/");
 				return words.every((word) => hay.includes(word));
 			}).slice(0, 180);
 			listWrap.replaceChildren();
+
+			if (canUnset) {
+				const unsetItem = document.createElement("button");
+				unsetItem.type = "button";
+				unsetItem.className = "gjj-wanmodel-popup-item";
+				if (currentIsUnset) unsetItem.classList.add("active");
+				unsetItem.textContent = `${currentIsUnset ? "✓ " : ""}${UNSELECTED_LABEL}`;
+				unsetItem.title = UNSELECTED_LABEL;
+				unsetItem.addEventListener("click", (event) => {
+					event.preventDefault();
+					event.stopPropagation();
+					setValue(UNSELECTED_LABEL);
+					closeSearchPopup();
+				});
+				listWrap.appendChild(unsetItem);
+			}
+
 			if (!shown.length) {
+				if (canUnset) return;
 				const empty = document.createElement("div");
 				empty.className = "gjj-wanmodel-popup-empty";
 				empty.textContent = "没有匹配项";
@@ -253,7 +290,10 @@ function makeNumber(node, widgetName) {
 	input.max = String(widget?.options?.max ?? 20);
 	input.step = String(widget?.options?.step ?? 0.05);
 	input.title = "加速 LoRA 强度";
-	input.addEventListener("input", () => setWidgetValue(widget, input.value));
+	input.addEventListener("input", () => {
+		setWidgetValue(widget, input.value);
+		shrinkNodeToContent(node);
+	});
 	protect(input);
 	return input;
 }
@@ -265,7 +305,10 @@ function makeCheckbox(node, widgetName, labelText) {
 	const input = document.createElement("input");
 	input.type = "checkbox";
 	input.checked = !!widget?.value;
-	input.addEventListener("change", () => setWidgetValue(widget, input.checked));
+	input.addEventListener("change", () => {
+		setWidgetValue(widget, input.checked);
+		shrinkNodeToContent(node);
+	});
 	const span = document.createElement("span");
 	span.textContent = labelText;
 	label.append(input, span);
@@ -279,12 +322,17 @@ function row(labelText, className, ...controls) {
 	const label = document.createElement("div");
 	label.className = "gjj-wanmodel-label";
 	label.textContent = labelText;
-	item.append(label, ...controls);
+	const controlWrap = document.createElement("div");
+	controlWrap.className = "gjj-wanmodel-controls";
+	controlWrap.append(...controls);
+	item.append(label, controlWrap);
 	return item;
 }
 
-function panelHeight() {
-	return 162;
+function panelHeight(node) {
+	const panel = node?.__gjjWanModelPanel;
+	if (!panel) return 210;
+	return Math.max(178, Math.ceil(panel.scrollHeight || panel.offsetHeight || 178) + 8);
 }
 
 function buildPanel(node) {
@@ -292,31 +340,33 @@ function buildPanel(node) {
 	wrap.className = "gjj-wanmodel-panel";
 	const style = document.createElement("style");
 	style.textContent = `
-		.gjj-wanmodel-panel { box-sizing:border-box; display:flex; flex-direction:column; gap:4px; padding:0 16px 0 0; margin-left:-10px; }
+		.gjj-wanmodel-panel { box-sizing:border-box; width:100%; max-width:100%; display:flex; flex-direction:column; gap:6px; padding:0 6px 0 0; margin-left:-10px; }
 		.gjj-wanmodel-panel * { box-sizing:border-box; }
-		.gjj-wanmodel-row { display:grid; gap:6px; align-items:center; min-width:0; }
-		.gjj-wanmodel-row.model { grid-template-columns:96px minmax(180px,1fr) 78px 138px 118px; }
-		.gjj-wanmodel-row.vae { grid-template-columns:96px minmax(180px,1fr) 78px 96px; }
-		.gjj-wanmodel-row.clip { grid-template-columns:96px minmax(180px,1fr) 118px 92px; }
-		.gjj-wanmodel-row.vision { grid-template-columns:96px minmax(180px,1fr); }
-		.gjj-wanmodel-row.lora { grid-template-columns:96px minmax(180px,1fr) 86px; }
-		.gjj-wanmodel-label { color:#c4d0d3; font-size:12px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+		.gjj-wanmodel-row { display:grid; grid-template-columns:86px minmax(0,1fr); gap:6px; align-items:start; min-width:0; }
+		.gjj-wanmodel-controls { min-width:0; display:flex; flex-wrap:wrap; gap:6px; align-items:flex-start; }
+		.gjj-wanmodel-label { min-width:0; min-height:28px; display:flex; align-items:center; color:#c4d0d3; font-size:12px; line-height:1.18; overflow-wrap:anywhere; word-break:break-word; }
 		.gjj-wanmodel-control {
-			width:100%; min-width:0; height:28px; padding:3px 8px; border:1px solid #344b54; border-radius:7px;
-			background:#263036; color:#f2f5f5; outline:none; font-size:12px;
+			flex:0 1 96px; width:100%; min-width:54px; height:28px; padding:3px 8px; border:1px solid #344b54; border-radius:7px;
+			background:#263036; color:#f2f5f5; outline:none; font-size:12px; overflow:hidden; text-overflow:ellipsis;
 		}
 		.gjj-wanmodel-control:focus { border-color:#5b8d9a; background:#1d2b31; }
-		.gjj-wanmodel-combo { width:100%; min-width:0; position:relative; }
+		.gjj-wanmodel-combo { flex:999 1 220px; width:100%; min-width:150px; position:relative; }
 		.gjj-wanmodel-combo-button {
-			width:100%; min-width:0; height:28px; display:flex; align-items:center; justify-content:space-between; gap:8px;
+			width:100%; min-width:0; min-height:28px; height:auto; display:flex; align-items:flex-start; justify-content:space-between; gap:8px;
 			padding:3px 8px; border:1px solid #344b54; border-radius:7px; background:#263036; color:#f2f5f5;
-			outline:none; font-size:12px; text-align:left; cursor:pointer;
+			outline:none; font-size:12px; line-height:1.2; text-align:left; cursor:pointer;
 		}
 		.gjj-wanmodel-combo-button:focus { border-color:#5b8d9a; background:#1d2b31; }
-		.gjj-wanmodel-combo-text { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
-		.gjj-wanmodel-combo-arrow { flex:0 0 auto; color:#9fb4ba; font-size:12px; }
-		.gjj-wanmodel-check { width:100%; min-width:0; height:28px; display:flex; align-items:center; gap:5px; padding:3px 8px; border:1px solid #344b54; border-radius:7px; background:#263036; color:#f2f5f5; font-size:12px; white-space:nowrap; }
+		.gjj-wanmodel-combo-text { min-width:0; overflow:visible; white-space:normal; overflow-wrap:anywhere; word-break:break-word; text-overflow:clip; }
+		.gjj-wanmodel-combo-arrow { flex:0 0 auto; color:#9fb4ba; font-size:12px; line-height:1.2; }
+		.gjj-wanmodel-check { flex:0 1 96px; width:100%; min-width:64px; min-height:28px; display:flex; align-items:center; gap:5px; padding:3px 8px; border:1px solid #344b54; border-radius:7px; background:#263036; color:#f2f5f5; font-size:12px; line-height:1.2; white-space:normal; overflow-wrap:anywhere; }
 		.gjj-wanmodel-check input { width:14px; height:14px; margin:0; accent-color:#6ac7d8; }
+		.gjj-wanmodel-row.model .gjj-wanmodel-combo { flex-basis:260px; }
+		.gjj-wanmodel-row.model .gjj-wanmodel-control { flex-basis:100px; }
+		.gjj-wanmodel-row.vae .gjj-wanmodel-combo,
+		.gjj-wanmodel-row.clip .gjj-wanmodel-combo,
+		.gjj-wanmodel-row.lora .gjj-wanmodel-combo { flex-basis:240px; }
+		.gjj-wanmodel-row.lora input.gjj-wanmodel-control { flex-basis:76px; min-width:64px; }
 		.gjj-wanmodel-popup {
 			position:fixed; z-index:100000; max-height:340px; padding:6px; border:1px solid #42626c; border-radius:8px;
 			background:#11181c; box-shadow:0 12px 28px rgba(0,0,0,.42); display:flex; flex-direction:column; gap:6px;
@@ -329,7 +379,7 @@ function buildPanel(node) {
 		.gjj-wanmodel-popup-list { max-height:286px; overflow:auto; display:flex; flex-direction:column; gap:2px; }
 		.gjj-wanmodel-popup-item {
 			width:100%; min-height:28px; padding:5px 8px; border:0; border-radius:5px; background:transparent; color:#dce8eb;
-			text-align:left; font-size:12px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; cursor:pointer;
+			text-align:left; font-size:12px; line-height:1.25; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; cursor:pointer;
 		}
 		.gjj-wanmodel-popup-item:hover, .gjj-wanmodel-popup-item.active { background:#26364d; color:#ffffff; }
 		.gjj-wanmodel-popup-empty { padding:8px; color:#9fb4ba; font-size:12px; }
@@ -351,8 +401,11 @@ function ensurePanel(node) {
 		const panel = buildPanel(node);
 		node.__gjjWanModelPanel = panel;
 		const widget = node.addDOMWidget(PANEL_WIDGET, "HTML", panel, { serialize: false, hideOnZoom: false });
-		widget.computeSize = (width) => [Math.max(720, Number(width || node.size?.[0] || 720)), panelHeight()];
-		widget.getHeight = () => panelHeight();
+		widget.computeSize = (width) => [
+			Math.max(280, Number(width || node.size?.[0] || 320)),
+			panelHeight(node),
+		];
+		widget.getHeight = () => panelHeight(node);
 		node.__gjjWanModelPanelWidget = widget;
 		const index = node.widgets?.indexOf(widget);
 		if (index > 0) {
@@ -367,9 +420,9 @@ function ensurePanel(node) {
 
 function shrinkNodeToContent(node) {
 	requestAnimationFrame(() => {
-		const computed = node.computeSize?.() || node.size || [720, 240];
-		const width = Math.max(720, Number(node.size?.[0] || computed[0] || 720));
-		const height = Math.max(230, Number(computed[1] || 230));
+		const computed = node.computeSize?.() || node.size || [320, 260];
+		const width = Math.max(280, Number(node.size?.[0] || computed[0] || 320));
+		const height = Math.max(panelHeight(node) + 58, Number(computed[1] || 230));
 		node.setSize?.([width, height]);
 		node.setDirtyCanvas?.(true, true);
 		app.graph?.setDirtyCanvas?.(true, true);

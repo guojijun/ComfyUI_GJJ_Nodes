@@ -47,7 +47,7 @@ const FUNCTIONS = [
 ];
 const WRAP_CURRENT_FORMULA_FUNCTIONS = new Set(["abs", "round", "int", "float", "floor", "ceil"]);
 const COMMON_FORMULAS = [
-	{ label: "🎞️ 总帧", formula: "(x1*x2)+1", title: "总帧数：(帧率 x 时长) + 1" },
+	{ label: "🎞️ 总帧", formula: "int((x1*x2)+1)", title: "总帧数：(帧率 x 时长) + 1" },
 	{ label: "🔢 对齐8", formula: "(x1//8)*8", title: "分辨率向下对齐到 8 的倍数。" },
 	{ label: "🔢 对齐16", formula: "(x1//16)*16", title: "分辨率向下对齐到 16 的倍数。" },
 	{ label: "🔼 上8", formula: "ceil(x1/8)*8", title: "分辨率向上对齐到 8 的倍数。" },

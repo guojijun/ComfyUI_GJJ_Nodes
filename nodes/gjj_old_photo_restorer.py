@@ -15,7 +15,6 @@ from nodes import VAEDecode, common_ksampler
 
 from .common_utils.text_tools import (
 	gjjutils_normalize_text as _normalize_text,
-	gjjutils_pick_available_name as _pick_available_name,
 )
 from .common_utils.model_loader import (
 	DEFAULT_UNET_DTYPE,
@@ -27,10 +26,9 @@ from .common_utils.model_loader import (
 )
 from .common_utils.model_family import (
 	gjjutils_model_family_match_preset as match_model_family,
+	gjjutils_pick_available_model_name as _pick_available_model_name,
 	gjjutils_model_family_resolve_clip_type as resolve_clip_type,
 	gjjutils_model_family_resolve_clip_names as resolve_clip_names_for_preset,
-	MODEL_FAMILY_PRESETS,
-	DEFAULT_VAE_NAME as MODEL_DEFAULT_VAE,
 )
 from .gjj_model_bundle_loader import (
 	list_clip_models,
@@ -52,11 +50,12 @@ from .common_utils.progress import send_node_progress
 NODE_NAME = "GJJ_OldPhotoRestorer"
 NODE_DISPLAY_NAME = "GJJ · 🕰️ 一键批量修复老照片"
 DEFAULT_PROMPT = "Enhance image details for more realism."
-DEFAULT_UNET = "qwen_image_edit_2511_fp8mixed.safetensors"
+DEFAULT_UNET = "FireRed-Image-Edit-1.1_fp8mixed_comfy.safetensors"
 DEFAULT_CLIP = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
 DEFAULT_VAE = "qwen_image_vae.safetensors"
 DEFAULT_LORA_1 = "QWEN\\lighting\\Qwen-Image-Edit-Lightning-4steps-V1.0.safetensors"
 DEFAULT_LORA_2 = "QWEN\\lighting\\Qwen-Image-Edit-2509-Lightning-8steps-V1.0-bf16.safetensors"
+FIRERED_UNET_KEYWORDS = ("fireredimageedit", "firered", "realfire")
 DEFAULT_STEPS = 8
 DEFAULT_CFG = 1.0
 DEFAULT_SAMPLER = "euler"
@@ -69,45 +68,45 @@ DEFAULT_UPSCALE_MODEL = "1xSkinContrast-SuperUltraCompact.pth"
 MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
 COMPAT_BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
 _DESCRIPTION_READY = (
-	"将 qwen_image_edit_2511 老照片修复工作流封装为单节点。"
-	"前台暴露输入图像、修复提示词、UNET、种子和放大开关，后台自动匹配 CLIP、VAE、双加速 LoRA，并通过公共状态栏显示中文进度。"
+	"将 FireRed Image Edit 老照片修复工作流封装为单节点。"
+	"前台暴露输入图像、修复提示词、FireRed UNET、种子和放大开关，后台自动匹配 CLIP、VAE、双加速 LoRA，并通过公共状态栏显示中文进度。"
 )
 REQUIRED_OLD_PHOTO_MODELS = [
 	make_missing_model_spec(
-		label="Qwen Image Edit 2511 UNET",
+		label="FireRed Image Edit UNET",
 		subdir="models/diffusion_models",
 		filename=DEFAULT_UNET,
-		description="老照片修复主模型；同系列 qwen_image_edit_2511 变体也可使用。",
+		description="老照片修复主模型；只支持 FireRed Image Edit。关键词：FireRed-Image-Edit、fireredimageedit、realfire。版本号和中文备注不影响模糊匹配。",
 	),
 	make_missing_model_spec(
 		label="Qwen 2.5 VL CLIP",
 		subdir="models/text_encoders",
 		filename=DEFAULT_CLIP,
-		description="Qwen Image Edit 图像编辑编码器。",
+		description="Qwen Image Edit 图像编辑编码器；关键词：qwen_2.5_vl_7b_fp8_scaled、qwen 2.5 vl、qwen vl。",
 	),
 	make_missing_model_spec(
 		label="Qwen Image VAE",
 		subdir="models/vae",
 		filename=DEFAULT_VAE,
-		description="Qwen Image Edit 解码器。",
+		description="Qwen Image Edit 解码器；关键词：qwen_image_vae、qwen image vae。",
 	),
 	make_missing_model_spec(
 		label="4步 Lightning LoRA",
 		subdir="models/loras/QWEN/lighting",
 		filename="Qwen-Image-Edit-Lightning-4steps-V1.0.safetensors",
-		description="老照片工作流默认加速 LoRA。",
+		description="老照片工作流默认加速 LoRA；关键词：Qwen-Image-Edit-Lightning-4steps、4steps、lightning。",
 	),
 	make_missing_model_spec(
 		label="8步 Lightning LoRA",
 		subdir="models/loras/QWEN/lighting",
 		filename="Qwen-Image-Edit-2509-Lightning-8steps-V1.0-bf16.safetensors",
-		description="老照片工作流默认增强 LoRA。",
+		description="老照片工作流默认增强 LoRA；关键词：Qwen-Image-Edit-2509-Lightning-8steps、8steps、lightning。",
 	),
 	make_missing_model_spec(
 		label="默认放大模型",
 		subdir="models/upscale_models",
 		filename=DEFAULT_UPSCALE_MODEL,
-		description="默认结果增强模型；关闭“启用放大”可跳过。",
+		description="默认结果增强模型；关键词：1xSkinContrast、SuperUltraCompact。关闭“启用放大”可跳过。",
 	),
 ]
 
@@ -393,30 +392,36 @@ def _zero_out_conditioning(conditioning):
 	return result
 
 
-def _qwen_edit_unets() -> list[str]:
+def _firered_unets() -> list[str]:
 	models = list_unet_models() or []
-	allowed_keywords = (
-		"qwen_image_edit_2511",
-		"qwen_image_edit",
-		"fireredimageedit",
-		"realfire",
-	)
 	filtered = [
 		name
 		for name in models
-		if any(keyword in _normalize_text(name) for keyword in allowed_keywords)
+		if any(keyword in _normalize_text(name) for keyword in FIRERED_UNET_KEYWORDS)
 	]
 	return filtered
 
 
-def _allowed_unets() -> list[str]:
-	models = list_unet_models() or []
-	filtered = _qwen_edit_unets()
-	return filtered or models or [DEFAULT_UNET]
+def _choices_with_default(available: list[str], default_name: str) -> list[str]:
+	"""保留传入的模型选项，同时确保默认模型 seed 可显示在面板上。"""
+	choices: list[str] = []
+	default_name = str(default_name or "").strip()
+	if default_name:
+		choices.append(default_name)
+	for item in available or []:
+		value = str(item or "").strip()
+		if value and value not in choices:
+			choices.append(value)
+	return choices or ([default_name] if default_name else [])
 
 
 def _resolve_basename_match(requested: str, available: list[str], fallback: str = "") -> str:
-	return _pick_available_name(str(requested or "").strip(), available, str(fallback or "").strip())
+	return _pick_available_model_name(
+		str(requested or "").strip(),
+		list(available or []),
+		str(fallback or "").strip(),
+		allow_first=False,
+	)
 
 
 def _has_any_model(candidates: tuple[str, ...], available: list[str]) -> bool:
@@ -447,7 +452,7 @@ def _missing_old_photo_models() -> list[dict[str, str]]:
 	upscale_models = _list_upscale_models()
 	missing: list[dict[str, str]] = []
 
-	if not _qwen_edit_unets() and not _has_any_model((DEFAULT_UNET,), unet_models):
+	if not _firered_unets() and not _has_any_model((DEFAULT_UNET,), unet_models):
 		missing.append(REQUIRED_OLD_PHOTO_MODELS[0])
 	if not _has_any_model((DEFAULT_CLIP,), clip_models):
 		missing.append(REQUIRED_OLD_PHOTO_MODELS[1])
@@ -480,7 +485,7 @@ def _raise_missing_model(
 				description=description,
 			)
 		],
-		description="一键批量修复老照片需要本地 Qwen Image Edit 2511 模型链。请补齐模型后重启 ComfyUI。",
+		description="一键批量修复老照片需要本地 FireRed Image Edit 模型链。请补齐模型后重启 ComfyUI。",
 		original_error=original_error,
 		unique_id=unique_id,
 		title="GJJ 一键批量修复老照片模型缺失！",
@@ -489,13 +494,14 @@ def _raise_missing_model(
 
 
 def _require_lora_name(preferred: str, available: list[str], label: str, unique_id: Any = None) -> str:
-	resolved = _resolve_basename_match(preferred, available, preferred)
+	resolved = _resolve_basename_match(preferred, available, "")
 	if not resolved:
+		preferred_keyword = preferred.replace("\\", "/").split("/")[-1].rsplit(".", 1)[0]
 		_raise_missing_model(
 			f"{label} LoRA",
 			"models/loras/QWEN/lighting",
 			preferred.replace("\\", "/").split("/")[-1],
-			f"一键批量修复老照片默认使用的{label} LoRA。",
+			f"一键批量修复老照片默认使用的{label} LoRA。关键词：{preferred_keyword}。",
 			unique_id=unique_id,
 		)
 	full_path = folder_paths.get_full_path("loras", resolved)
@@ -518,7 +524,7 @@ _ENVIRONMENT_REPORT = build_dependency_model_report(
 	optional_dependencies=_MISSING_OPTIONAL_DEPENDENCIES,
 	optional_install_packages=["spandrel"] if _MISSING_OPTIONAL_DEPENDENCIES else [],
 	missing_models=_MISSING_MODELS,
-	description="一键批量修复老照片需要本地 Qwen Image Edit 2511 模型链；放大功能额外需要 Spandrel 与默认放大模型。",
+	description="一键批量修复老照片需要本地 FireRed Image Edit 模型链；放大功能额外需要 Spandrel 与默认放大模型。",
 	model_download_url=MODEL_DOWNLOAD_URL,
 )
 _DEPENDENCIES_AVAILABLE = bool(_ENVIRONMENT_REPORT.get("dependencies_available", True))
@@ -681,10 +687,12 @@ class GJJ_OldPhotoRestorer:
 
 	@classmethod
 	def INPUT_TYPES(cls):
-		unet_models = _allowed_unets()
-		upscale_models = _list_upscale_models()
-		default_unet = _resolve_basename_match(DEFAULT_UNET, unet_models, "") or (unet_models[0] if unet_models else DEFAULT_UNET)
-		default_upscale = _resolve_basename_match(DEFAULT_UPSCALE_MODEL, upscale_models, "") or (upscale_models[0] if upscale_models else DEFAULT_UPSCALE_MODEL)
+		available_unets = _firered_unets()
+		available_upscale_models = _list_upscale_models()
+		default_unet = _resolve_basename_match(DEFAULT_UNET, available_unets, "") or DEFAULT_UNET
+		default_upscale = _resolve_basename_match(DEFAULT_UPSCALE_MODEL, available_upscale_models, "") or DEFAULT_UPSCALE_MODEL
+		unet_models = _choices_with_default(available_unets, default_unet)
+		upscale_models = _choices_with_default(available_upscale_models, default_upscale)
 		return {
 			"required": {
 				"image": (COMPAT_BATCH_IMAGE_TYPE, {
@@ -700,7 +708,7 @@ class GJJ_OldPhotoRestorer:
 				"unet_name": (unet_models, {
 					"default": default_unet,
 					"display_name": "🟣 UNET 主模型",
-					"tooltip": "主修复模型。默认使用 qwen_image_edit_2511 老照片工作流同款底模。",
+					"tooltip": "主修复模型。此节点只支持 FireRed Image Edit；面板只显示 models/diffusion_models 下匹配 FireRed 的模型，搜索不要求版本号。",
 				}),
 				"seed": ("INT", {
 					"default": 1091911236774418,
@@ -714,10 +722,10 @@ class GJJ_OldPhotoRestorer:
 					"display_name": "🔍 启用放大",
 					"tooltip": "开启后会在生成完成后接着用超分模型做一次图像增强。",
 				}),
-				"upscale_model_name": (upscale_models or [DEFAULT_UPSCALE_MODEL], {
+				"upscale_model_name": (upscale_models, {
 					"default": default_upscale,
 					"display_name": "🔎 放大模型",
-					"tooltip": "用于结果图像增强的放大模型，默认使用 1xSkinContrast-SuperUltraCompact。",
+					"tooltip": "用于结果图像增强的放大模型。面板保留 models/upscale_models 下的全部模型选项，默认按 1xSkinContrast 关键词模糊匹配。",
 				}),
 			},
 			"hidden": {
@@ -768,7 +776,7 @@ class GJJ_OldPhotoRestorer:
 					unique_id=unique_id,
 					title="GJJ 一键批量修复老照片可选增强依赖缺失！",
 				)
-			unet_models = _allowed_unets()
+			unet_models = _firered_unets()
 			clip_models = list_clip_models() or []
 			vae_models = list_vae_models() or []
 			lora_models = _safe_filename_list("loras")
@@ -777,10 +785,10 @@ class GJJ_OldPhotoRestorer:
 			resolved_unet = _resolve_basename_match(unet_name, unet_models, "") or _resolve_basename_match(DEFAULT_UNET, unet_models, "")
 			if not resolved_unet:
 				_raise_missing_model(
-					"Qwen Image Edit 2511 UNET",
+					"FireRed Image Edit UNET",
 					"models/diffusion_models",
 					str(unet_name or DEFAULT_UNET),
-					"一键批量修复老照片需要 qwen_image_edit_2511 或同系列图像编辑 UNET。",
+					"一键批量修复老照片只支持 FireRed Image Edit。请放入 models/diffusion_models，关键词：FireRed-Image-Edit、fireredimageedit、realfire；版本号可省略。",
 					unique_id=unique_id,
 				)
 
@@ -800,7 +808,7 @@ class GJJ_OldPhotoRestorer:
 			resolved_clip_names = [name for name in resolved_clip_names if str(name or "").strip()]
 			if not resolved_clip_names:
 				# 如果预设匹配失败，回退到默认配置
-				fallback_clip = _pick_available_name(DEFAULT_CLIP, clip_models, "")
+				fallback_clip = _resolve_basename_match(DEFAULT_CLIP, clip_models, "")
 				resolved_clip_names = [fallback_clip] if fallback_clip else []
 			if not resolved_clip_names:
 				_raise_missing_model(
@@ -811,7 +819,7 @@ class GJJ_OldPhotoRestorer:
 					unique_id=unique_id,
 				)
 
-			resolved_vae_name = _pick_available_name(
+			resolved_vae_name = _resolve_basename_match(
 				preset.get("vae_name", DEFAULT_VAE),
 				vae_models,
 				""

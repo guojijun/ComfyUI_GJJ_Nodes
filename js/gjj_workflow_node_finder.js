@@ -8,6 +8,8 @@ import { app } from "/scripts/app.js";
 	const RECENT_KEY = "gjj_workflow_node_finder_recent";
 	const REPLACE_TARGET_KEY = "gjj_workflow_node_finder_replace_target";
 	const STYLE_ID = "gjj-workflow-node-finder-style";
+	const OVERLAY_ID = "gjj-workflow-node-finder-overlay";
+	const GLOBAL_STATE_KEY = "__gjjWorkflowNodeFinder";
 	const SORT_OPTIONS = [
 		["score", "相关度"],
 		["name-asc", "名称↑"],
@@ -53,6 +55,14 @@ import { app } from "/scripts/app.js";
 		} catch (_) {}
 	}
 
+	function removeStaleOverlays() {
+		for (const item of document.querySelectorAll(`#${OVERLAY_ID}, .gjj-node-finder-overlay`)) {
+			if (item !== overlay) {
+				item.remove();
+			}
+		}
+	}
+
 	function loadReplaceTarget() {
 		try {
 			return String(localStorage.getItem(REPLACE_TARGET_KEY) || "").trim();
@@ -78,6 +88,16 @@ import { app } from "/scripts/app.js";
 
 	function normalizeText(value) {
 		return String(value ?? "").toLowerCase().trim();
+	}
+
+	function splitSearchTokens(value) {
+		return String(value || "")
+			.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+			.replace(/([A-Za-z])(\d)/g, "$1 $2")
+			.replace(/(\d)([A-Za-z])/g, "$1 $2")
+			.split(/[\s,，;；|_/\\:.\-·]+/)
+			.map((item) => normalizeText(item))
+			.filter((item) => item.length > 1);
 	}
 
 	function collectWidgetText(node) {
@@ -108,6 +128,28 @@ import { app } from "/scripts/app.js";
 		return `${type} | ID: ${id}`;
 	}
 
+	function nodeReplacementType(node) {
+		return String(
+			node?.type ||
+			node?.constructor?.nodeData?.name ||
+			node?.constructor?.title ||
+			""
+		).trim();
+	}
+
+	function fillReplaceTargetFromNode(node) {
+		const type = nodeReplacementType(node);
+		if (!type || !replaceInput) {
+			return;
+		}
+		replaceInput.value = type;
+		saveReplaceTarget(type);
+		hideReplaceSuggestions();
+		if (resultList) {
+			renderResults();
+		}
+	}
+
 	function nodeSortName(node) {
 		return normalizeText(nodeDisplayTitle(node) || node?.type || node?.id);
 	}
@@ -131,6 +173,40 @@ import { app } from "/scripts/app.js";
 	function getNodeById(id) {
 		const text = String(id ?? "");
 		return getWorkflowNodes().find((node) => String(node?.id ?? "") === text) || null;
+	}
+
+	function currentCanvasSelection() {
+		const canvas = app.canvas;
+		const selected = [];
+		const pushNode = (node) => {
+			if (!node) {
+				return;
+			}
+			const id = String(node?.id ?? "");
+			if (!id || selected.some((item) => String(item?.id ?? "") === id)) {
+				return;
+			}
+			selected.push(node);
+		};
+
+		const selectedNodes = canvas?.selected_nodes;
+		if (Array.isArray(selectedNodes)) {
+			selectedNodes.forEach(pushNode);
+		} else if (selectedNodes && typeof selectedNodes === "object") {
+			Object.values(selectedNodes).forEach(pushNode);
+		}
+		pushNode(canvas?.selected_node);
+		for (const node of getWorkflowNodes()) {
+			if (node?.selected) {
+				pushNode(node);
+			}
+		}
+		return selected;
+	}
+
+	function currentSingleSelectedNode() {
+		const selected = currentCanvasSelection();
+		return selected.length === 1 ? selected[0] : null;
 	}
 
 	function scoreNode(node, query) {
@@ -217,33 +293,142 @@ import { app } from "/scripts/app.js";
 
 	function appendHighlightedText(parent, text, query) {
 		const source = String(text ?? "");
-		const kw = String(query || "").trim();
-		if (!kw) {
+		const terms = highlightTerms(query);
+		if (!terms.length) {
 			parent.textContent = source;
 			return;
 		}
-		const lowerSource = source.toLowerCase();
-		const lowerKw = kw.toLowerCase();
+		const ranges = mergedHighlightRanges(source, terms);
+		if (!ranges.length) {
+			parent.textContent = source;
+			return;
+		}
 		let cursor = 0;
-		let found = lowerSource.indexOf(lowerKw, cursor);
-		if (found < 0) {
-			parent.textContent = source;
-			return;
-		}
-		while (found >= 0) {
-			if (found > cursor) {
-				parent.appendChild(document.createTextNode(source.slice(cursor, found)));
+		for (const [start, end] of ranges) {
+			if (start > cursor) {
+				parent.appendChild(document.createTextNode(source.slice(cursor, start)));
 			}
 			const mark = document.createElement("mark");
 			mark.className = "gjj-node-finder-highlight";
-			mark.textContent = source.slice(found, found + kw.length);
+			mark.textContent = source.slice(start, end);
 			parent.appendChild(mark);
-			cursor = found + kw.length;
-			found = lowerSource.indexOf(lowerKw, cursor);
+			cursor = end;
 		}
 		if (cursor < source.length) {
 			parent.appendChild(document.createTextNode(source.slice(cursor)));
 		}
+	}
+
+	function highlightTerms(query) {
+		const raw = Array.isArray(query) ? query : [query];
+		const seen = new Set();
+		const terms = [];
+		for (const item of raw) {
+			const whole = String(item || "").trim();
+			const candidates = [whole, ...splitSearchTokens(whole)];
+			for (const term of candidates) {
+				const key = normalizeText(term);
+				if (!key || seen.has(key)) {
+					continue;
+				}
+				seen.add(key);
+				terms.push(term);
+			}
+		}
+		return terms;
+	}
+
+	function compactTextWithMap(value) {
+		const source = String(value || "");
+		const chars = [];
+		const map = [];
+		for (let i = 0; i < source.length;) {
+			const code = source.codePointAt(i);
+			const char = String.fromCodePoint(code);
+			const next = i + char.length;
+			if (!/[\s_\-.:/\\|·]+/.test(char)) {
+				chars.push(char.toLowerCase());
+				map.push([i, next]);
+			}
+			i = next;
+		}
+		return { text: chars.join(""), map };
+	}
+
+	function pushRange(ranges, start, end) {
+		if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+			ranges.push([start, end]);
+		}
+	}
+
+	function mergedHighlightRanges(source, terms) {
+		const ranges = [];
+		const lowerSource = source.toLowerCase();
+		const compactSource = compactTextWithMap(source);
+		for (const term of terms) {
+			const lowerTerm = term.toLowerCase();
+			let found = lowerSource.indexOf(lowerTerm, 0);
+			while (found >= 0) {
+				pushRange(ranges, found, found + term.length);
+				found = lowerSource.indexOf(lowerTerm, found + term.length);
+			}
+
+			const compactTerm = compactTextWithMap(term).text;
+			if (compactTerm.length < 2) {
+				continue;
+			}
+			found = compactSource.text.indexOf(compactTerm, 0);
+			while (found >= 0) {
+				const start = compactSource.map[found]?.[0];
+				const end = compactSource.map[found + compactTerm.length - 1]?.[1];
+				pushRange(ranges, start, end);
+				found = compactSource.text.indexOf(compactTerm, found + compactTerm.length);
+			}
+		}
+		ranges.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+		const merged = [];
+		for (const range of ranges) {
+			const last = merged[merged.length - 1];
+			if (!last || range[0] > last[1]) {
+				merged.push(range.slice());
+			} else {
+				last[1] = Math.max(last[1], range[1]);
+			}
+		}
+		return merged;
+	}
+
+	function nodeAliasInfo(node) {
+		return [
+			nodeDisplayTitle(node),
+			nodeSubtitle(node),
+			node?.type,
+			node?.constructor?.title,
+			node?.constructor?.nodeData?.name,
+		].map((item) => {
+			const text = String(item || "");
+			return {
+				text,
+				normalized: normalizeText(text),
+				compact: compactTextWithMap(text).text,
+			};
+		});
+	}
+
+	function nodeMatchesQueryAnd(node, query) {
+		if (!String(query || "").trim()) {
+			return false;
+		}
+		return scoreFuzzyNodeType(nodeAliasInfo(node), query) > 0;
+	}
+
+	function resultHighlightTerms(node) {
+		const terms = [searchInput?.value || ""];
+		const replaceQuery = replaceInput?.value || "";
+		if (nodeMatchesQueryAnd(node, replaceQuery)) {
+			terms.push(replaceQuery);
+		}
+		return terms;
 	}
 
 	function ensureStyles() {
@@ -351,7 +536,7 @@ import { app } from "/scripts/app.js";
 }
 .gjj-node-finder-row {
 	display: grid;
-	grid-template-columns: 28px 32px minmax(0, 1fr) auto;
+	grid-template-columns: 28px 32px minmax(0, 1fr) auto 32px;
 	gap: 10px;
 	align-items: center;
 	min-height: 48px;
@@ -410,6 +595,24 @@ import { app } from "/scripts/app.js";
 	color: #7f8da0;
 	font-size: 11px;
 	white-space: nowrap;
+}
+.gjj-node-finder-fill-button {
+	width: 28px;
+	height: 28px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border: 1px solid rgba(137, 162, 188, 0.25);
+	border-radius: 7px;
+	background: #202936;
+	color: #e8edf4;
+	cursor: pointer;
+	font-size: 14px;
+	line-height: 1;
+}
+.gjj-node-finder-fill-button:hover {
+	border-color: #5d93c4;
+	background: #28405a;
 }
 .gjj-node-finder-empty {
 	padding: 30px 16px 34px;
@@ -525,6 +728,7 @@ import { app } from "/scripts/app.js";
 		ensureStyles();
 
 		const root = document.createElement("div");
+		root.id = OVERLAY_ID;
 		root.className = "gjj-node-finder-overlay";
 		root.style.display = "none";
 
@@ -642,6 +846,7 @@ import { app } from "/scripts/app.js";
 		replaceInput.addEventListener("input", () => {
 			saveReplaceTarget(replaceInput.value || "");
 			renderReplaceSuggestions();
+			renderResults();
 			updateSelectionState();
 		});
 		replaceInput.addEventListener("focus", () => renderReplaceSuggestions());
@@ -679,11 +884,26 @@ import { app } from "/scripts/app.js";
 	}
 
 	function openFinder() {
-		if (!overlay) {
+		removeStaleOverlays();
+		if (!overlay || !overlay.isConnected) {
 			overlay = createOverlay();
 		}
+		if (overlay.style.display !== "none") {
+			hideReplaceSuggestions();
+			requestAnimationFrame(() => {
+				searchInput.focus();
+				searchInput.select();
+			});
+			return;
+		}
+		selectedNodeIds.clear();
+		const selectedType = nodeReplacementType(currentSingleSelectedNode());
+		const nextQuery = selectedType || lastQuery;
+		if (selectedType) {
+			lastQuery = selectedType;
+		}
 		overlay.style.display = "flex";
-		searchInput.value = lastQuery;
+		searchInput.value = nextQuery;
 		activeIndex = 0;
 		renderResults();
 		requestAnimationFrame(() => {
@@ -743,34 +963,67 @@ import { app } from "/scripts/app.js";
 		return String(nodeCtor?.nodeData?.category || nodeCtor?.category || "");
 	}
 
+	function nodeTypeAliasInfo(type, display, category, nodeCtor) {
+		return [
+			type,
+			display,
+			category,
+			nodeCtor?.nodeData?.name,
+			nodeCtor?.nodeData?.title,
+			nodeCtor?.comfyClass,
+		].map((item) => {
+			const text = String(item || "");
+			return {
+				text,
+				normalized: normalizeText(text),
+				compact: compactTextWithMap(text).text,
+			};
+		});
+	}
+
+	function scoreAliasToken(alias, token) {
+		const compactToken = compactTextWithMap(token).text;
+		if (!token && !compactToken) return 0;
+		if (alias.normalized === token || alias.compact === compactToken) return 80;
+		if (alias.normalized.startsWith(token) || alias.compact.startsWith(compactToken)) return 64;
+		if (alias.normalized.includes(token) || alias.compact.includes(compactToken)) return 48;
+		return 0;
+	}
+
+	function scoreFuzzyNodeType(aliases, query) {
+		const kw = normalizeText(query);
+		if (!kw) return 1;
+		const compactKw = compactTextWithMap(query).text;
+
+		let score = 0;
+		for (const alias of aliases) {
+			if (alias.normalized === kw) score = Math.max(score, 220);
+			if (compactKw && alias.compact === compactKw) score = Math.max(score, 210);
+			if (alias.normalized.startsWith(kw)) score = Math.max(score, 180);
+			if (compactKw && alias.compact.startsWith(compactKw)) score = Math.max(score, 170);
+			if (alias.normalized.includes(kw)) score = Math.max(score, 140);
+			if (compactKw && alias.compact.includes(compactKw)) score = Math.max(score, 130);
+		}
+
+		const tokens = splitSearchTokens(query);
+		if (!tokens.length) return score;
+		let tokenScore = 0;
+		for (const token of tokens) {
+			const best = Math.max(...aliases.map((alias) => scoreAliasToken(alias, token)));
+			if (!best) return score;
+			tokenScore += best;
+		}
+		return Math.max(score, 70 + tokenScore + tokens.length * 3);
+	}
+
 	function collectNodeTypeCandidates(query) {
 		const registry = globalThis.LiteGraph?.registered_node_types || {};
-		const kw = normalizeText(query);
 		const items = [];
 		for (const [type, nodeCtor] of Object.entries(registry)) {
 			const display = nodeTypeDisplayName(type, nodeCtor);
 			const category = nodeTypeCategory(nodeCtor);
-			const aliases = [
-				type,
-				display,
-				category,
-				nodeCtor?.nodeData?.name,
-				nodeCtor?.nodeData?.title,
-				nodeCtor?.comfyClass,
-			].map((item) => String(item || ""));
-			const haystack = normalizeText(aliases.join(" "));
-			let score = 1;
-			if (kw) {
-				score = 0;
-				if (normalizeText(type) === kw) score = Math.max(score, 220);
-				if (normalizeText(display) === kw) score = Math.max(score, 210);
-				if (normalizeText(type).startsWith(kw)) score = Math.max(score, 180);
-				if (normalizeText(display).startsWith(kw)) score = Math.max(score, 170);
-				if (normalizeText(type).includes(kw)) score = Math.max(score, 140);
-				if (normalizeText(display).includes(kw)) score = Math.max(score, 130);
-				if (normalizeText(category).includes(kw)) score = Math.max(score, 80);
-				if (!score && haystack.includes(kw)) score = 50;
-			}
+			const aliases = nodeTypeAliasInfo(type, display, category, nodeCtor);
+			const score = scoreFuzzyNodeType(aliases, query);
 			if (score > 0) {
 				items.push({ type, display, category, score });
 			}
@@ -826,6 +1079,7 @@ import { app } from "/scripts/app.js";
 		saveReplaceTarget(candidate.type);
 		hideReplaceSuggestions();
 		updateSelectionState();
+		renderResults();
 		replaceInput.focus();
 	}
 
@@ -921,6 +1175,7 @@ import { app } from "/scripts/app.js";
 		}
 		if (checked) {
 			selectedNodeIds.add(id);
+			fillReplaceTargetFromNode(node);
 		} else {
 			selectedNodeIds.delete(id);
 		}
@@ -940,6 +1195,7 @@ import { app } from "/scripts/app.js";
 		emptyLabel.textContent = totalNodes ? "没有匹配的节点" : "当前工作流没有可显示的节点";
 
 		currentResults.forEach((node, index) => {
+			const highlight = resultHighlightTerms(node);
 			const row = document.createElement("div");
 			row.className = "gjj-node-finder-row";
 			row.dataset.index = String(index);
@@ -960,11 +1216,11 @@ import { app } from "/scripts/app.js";
 
 			const title = document.createElement("div");
 			title.className = "gjj-node-finder-title";
-			appendHighlightedText(title, nodeDisplayTitle(node), query);
+			appendHighlightedText(title, nodeDisplayTitle(node), highlight);
 
 			const subtitle = document.createElement("div");
 			subtitle.className = "gjj-node-finder-subtitle";
-			appendHighlightedText(subtitle, nodeSubtitle(node), query);
+			appendHighlightedText(subtitle, nodeSubtitle(node), highlight);
 
 			const pos = document.createElement("div");
 			pos.className = "gjj-node-finder-pos";
@@ -972,12 +1228,25 @@ import { app } from "/scripts/app.js";
 			const y = Math.round(Number(node?.pos?.[1] || 0));
 			pos.textContent = `${x}, ${y}`;
 
+			const fillButton = document.createElement("button");
+			fillButton.type = "button";
+			fillButton.className = "gjj-node-finder-fill-button";
+			fillButton.textContent = "👇";
+			fillButton.title = "填入下方替换搜索框";
+
 			main.append(title, subtitle);
-			row.append(checkbox, icon, main, pos);
+			row.append(checkbox, icon, main, pos, fillButton);
 
 			checkbox.addEventListener("click", (event) => {
 				event.stopPropagation();
 				toggleNodeSelection(node, checkbox.checked);
+			});
+
+			fillButton.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				fillReplaceTargetFromNode(node);
+				updateSelectionState();
 			});
 
 			row.addEventListener("mouseenter", () => {
@@ -1396,7 +1665,12 @@ import { app } from "/scripts/app.js";
 	app.registerExtension({
 		name: EXTENSION_NAME,
 		setup() {
-			document.addEventListener("keydown", (event) => {
+			const previousState = globalThis[GLOBAL_STATE_KEY];
+			if (typeof previousState?.cleanup === "function") {
+				try { previousState.cleanup(); } catch (_) {}
+			}
+			removeStaleOverlays();
+			const keydownHandler = (event) => {
 				const key = String(event.key || "").toLowerCase();
 				if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey || key !== "f") {
 					return;
@@ -1404,7 +1678,19 @@ import { app } from "/scripts/app.js";
 				event.preventDefault();
 				event.stopImmediatePropagation();
 				openFinder();
-			}, true);
+			};
+			document.addEventListener("keydown", keydownHandler, true);
+			globalThis[GLOBAL_STATE_KEY] = {
+				openFinder,
+				closeFinder,
+				cleanup() {
+					document.removeEventListener("keydown", keydownHandler, true);
+					if (overlay?.isConnected) {
+						overlay.remove();
+					}
+					overlay = null;
+				},
+			};
 		},
 	});
 })();

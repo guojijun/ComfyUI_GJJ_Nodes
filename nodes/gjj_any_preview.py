@@ -16,7 +16,8 @@ from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .gjj_multi_image_loader import build_uniform_batch_by_longest_edge
 
 NODE_NAME = "GJJ_AnyPreview"
-ANY_PREVIEW_INPUT_TYPE = "GJJ_BATCH_IMAGE, IMAGE, MASK,STRING,AUDIO,VIDEO,*"
+ANY_PREVIEW_INPUT_TYPE = "*"
+ANY_PREVIEW_FAST_TYPES = "GJJ_BATCH_IMAGE、IMAGE、MASK、STRING、AUDIO、VIDEO"
 VIDEO_SEQUENCE_MIN_FRAMES = 16
 VIDEO_SEQUENCE_PREVIEW_FPS = 16.0
 
@@ -651,7 +652,7 @@ class GJJ_AnyPreview:
         "title": "GJJ · 👀 任意对象预览器",
         "version": "2.0.0",
         "author": "GJJ Custom Nodes Team",
-        "description": "万能预览节点，支持图片、文本、音频、视频等多种数据类型的可视化",
+        "description": "万能预览节点，支持图片、文本、音频、视频等专用预览，也可像官方 PreviewAny 一样查看任意对象的值",
         "features": [
             {
                 "name": "图片预览",
@@ -687,7 +688,7 @@ class GJJ_AnyPreview:
             "any_01": {
                 "type": ANY_PREVIEW_INPUT_TYPE,
                 "required": False,
-                "description": "第一个入口显示为“任意对象”，可连接 GJJ_BATCH_IMAGE、IMAGE、MASK、STRING、AUDIO、VIDEO 或任意对象；列表会展开预览。",
+                "description": f"第一个入口显示为“任意对象”，端口为真实任意类型；{ANY_PREVIEW_FAST_TYPES} 会走专用预览，其它对象会序列化为可读文本。",
             },
             "any_XX": {
                 "type": ANY_PREVIEW_INPUT_TYPE,
@@ -806,10 +807,10 @@ class GJJ_AnyPreview:
     def INPUT_TYPES(cls):
         first_input_data = {
             "any_01": (
-                ANY_PREVIEW_INPUT_TYPE,
+                any_type,
                 {
                     "display_name": "任意对象",
-                    "tooltip": "可连接 GJJ_BATCH_IMAGE、IMAGE、MASK、STRING、AUDIO、VIDEO 或任意对象；列表会展开预览。",
+                    "tooltip": f"可连接任意类型；{ANY_PREVIEW_FAST_TYPES} 会走专用预览，其它对象会像官方 PreviewAny 一样显示可读值。",
                 },
             ),
         }

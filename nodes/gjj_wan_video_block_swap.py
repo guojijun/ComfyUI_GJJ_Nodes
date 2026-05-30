@@ -3,12 +3,33 @@ from __future__ import annotations
 from typing import Any
 
 
+def _apply_block_swap_to_model(model: Any, block_swap_args: dict[str, Any] | None):
+    if model is None:
+        return None
+    if block_swap_args is None:
+        return model
+    if not hasattr(model, "clone"):
+        raise TypeError("WanVideo 分块交换需要可 clone 的 WANVIDEOMODEL 模型对象。")
+
+    patcher = model.clone()
+    if not hasattr(patcher, "model_options") or patcher.model_options is None:
+        patcher.model_options = {}
+    if not isinstance(patcher.model_options, dict):
+        raise TypeError("WanVideo 模型的 model_options 不是可写字典，无法写入 block_swap_args。")
+    transformer_options = patcher.model_options.setdefault("transformer_options", {})
+    if not isinstance(transformer_options, dict):
+        transformer_options = {}
+        patcher.model_options["transformer_options"] = transformer_options
+    transformer_options["block_swap_args"] = block_swap_args
+    return patcher
+
+
 class GJJ_WanVideoBlockSwap:
     CATEGORY = "GJJ/视频"
     FUNCTION = "setargs"
     DESCRIPTION = (
         "WanVideo Block Swap 参数的 GJJ 零依赖复刻版。"
-        "输出 BLOCKSWAPARGS 字典，用于让支持 WanVideo block_swap_args 的模型加载器或采样器降低显存占用。"
+        "输出 BLOCKSWAPARGS 字典；可选接入 WANVIDEOMODEL 时，会在节点内复刻 WanVideoSetBlockSwap 逻辑并输出已写入参数的模型。"
     )
     SEARCH_ALIASES = [
         "wan block swap",
@@ -20,9 +41,12 @@ class GJJ_WanVideoBlockSwap:
         "分块卸载",
     ]
 
-    RETURN_TYPES = ("BLOCKSWAPARGS",)
-    RETURN_NAMES = ("分块交换参数",)
-    OUTPUT_TOOLTIPS = ("WanVideo 分块换入/卸载参数，可连接到支持 BLOCKSWAPARGS 的 WanVideo 模型加载或设置节点。",)
+    RETURN_TYPES = ("BLOCKSWAPARGS", "WANVIDEOMODEL")
+    RETURN_NAMES = ("分块交换参数", "WanVideo模型")
+    OUTPUT_TOOLTIPS = (
+        "WanVideo 分块换入/卸载参数，可连接到支持 BLOCKSWAPARGS 的 WanVideo 模型加载器或采样器。",
+        "当左侧 model 接入 WANVIDEOMODEL 时，输出已写入 block_swap_args 的克隆模型；未接入时为空。",
+    )
 
     GJJ_HELP = {
         "title": "WanVideo 分块交换",
@@ -32,9 +56,10 @@ class GJJ_WanVideoBlockSwap:
             "14B 常见为 40 个块，1.3B/5B 常见为 30 个块，LongCat-video 常见为 48 个块。",
             "VACE 模型可额外设置 vace_blocks_to_swap，VACE 通常有 15 个块。",
             "prefetch_blocks 可提前换入后续块，可能提速但会增加内存占用。",
+            "如果接入可选 model 输入，节点会直接输出已写入分块交换参数的 WANVIDEOMODEL。",
         ],
         "notes": [
-            "该节点只生成参数，不导入 ComfyUI-WanVideoWrapper。",
+            "该节点不导入 ComfyUI-WanVideoWrapper；model 接入时仅复刻 WanVideoSetBlockSwap 的 clone + model_options 写入逻辑。",
             "字段名保持与 WanVideoWrapper 原始采样器一致：blocks_to_swap、offload_img_emb、offload_txt_emb、use_non_blocking、vace_blocks_to_swap、prefetch_blocks、block_swap_debug。",
         ],
     }
@@ -72,6 +97,13 @@ class GJJ_WanVideoBlockSwap:
                 ),
             },
             "optional": {
+                "model": (
+                    "WANVIDEOMODEL",
+                    {
+                        "display_name": "WanVideo模型",
+                        "tooltip": "可选接入 WANVIDEOMODEL。接入后节点会 clone 模型并写入 transformer_options.block_swap_args，等同 WanVideoSetBlockSwap。",
+                    },
+                ),
                 "use_non_blocking": (
                     "BOOLEAN",
                     {
@@ -118,11 +150,12 @@ class GJJ_WanVideoBlockSwap:
         blocks_to_swap: int,
         offload_img_emb: bool,
         offload_txt_emb: bool,
+        model=None,
         use_non_blocking: bool = False,
         vace_blocks_to_swap: int = 0,
         prefetch_blocks: int = 0,
         block_swap_debug: bool = False,
-    ) -> tuple[dict[str, Any]]:
+    ) -> tuple[dict[str, Any], Any]:
         args = {
             "blocks_to_swap": max(0, min(48, int(blocks_to_swap))),
             "offload_img_emb": bool(offload_img_emb),
@@ -132,7 +165,7 @@ class GJJ_WanVideoBlockSwap:
             "prefetch_blocks": max(0, min(40, int(prefetch_blocks))),
             "block_swap_debug": bool(block_swap_debug),
         }
-        return (args,)
+        return (args, _apply_block_swap_to_model(model, args) if model is not None else None)
 
 
 class GJJ_WanVideoSetBlockSwap:
@@ -182,14 +215,7 @@ class GJJ_WanVideoSetBlockSwap:
     }
 
     def loadmodel(self, model, block_swap_args=None):
-        if block_swap_args is None:
-            return (model,)
-        patcher = model.clone()
-        if not hasattr(patcher, "model_options") or patcher.model_options is None:
-            patcher.model_options = {}
-        transformer_options = patcher.model_options.setdefault("transformer_options", {})
-        transformer_options["block_swap_args"] = block_swap_args
-        return (patcher,)
+        return (_apply_block_swap_to_model(model, block_swap_args),)
 
 
 NODE_CLASS_MAPPINGS = {
