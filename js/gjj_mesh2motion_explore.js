@@ -589,7 +589,6 @@ function hookSerialization(node) {
 	const captureData = async () => {
 		let captureState = null;
 		try {
-			console.log("[GJJ Mesh2Motion] ⚡ 开始捕获数据...");
 			captureState = {
 				image: null,
 				video: null,
@@ -599,9 +598,7 @@ function hookSerialization(node) {
 			// 捕获截图
 			setStatus(node, "正在捕获截图...", "busy");
 			const dataUrl = await captureFromIframe(node._gjjMesh2MotionIframe);
-			console.log("[GJJ Mesh2Motion] 截图 dataUrl 长度:", dataUrl?.length);
 			const imageResult = await uploadTempImage(dataUrl);
-			console.log("[GJJ Mesh2Motion] 上传结果:", imageResult);
 			
 			node.properties = node.properties || {};
 			captureState.image = {
@@ -634,8 +631,6 @@ function hookSerialization(node) {
 				}
 			}
 			await syncCaptureStateToBackend(node, captureState);
-			console.log("[GJJ Mesh2Motion] ✅ 数据捕获完成，已保存到 properties 与 Python 缓存");
-			console.log("[GJJ Mesh2Motion] properties 内容:", JSON.stringify(node.properties));
 			return true;
 		} catch (error) {
 			console.error("[GJJ Mesh2Motion] 捕获失败：", error);
@@ -851,7 +846,6 @@ app.registerExtension({
 	name: "GJJ.Mesh2MotionExplore",
 
 	setup() {
-		console.log("[GJJ Mesh2Motion] 🚀 扩展已注册");
 		ensureStyle();
 	},
 
@@ -883,13 +877,11 @@ app.registerExtension({
 
 	nodeCreated(node) {
 		const nodeClass = String(node?.constructor?.comfyClass || node?.comfyClass || "");
-		console.log(`[GJJ Mesh2Motion] nodeCreated 触发，节点类: ${nodeClass}`);
 		
 		if (nodeClass !== NODE_CLASS) {
 			return;
 		}
 		
-		console.log(`[GJJ Mesh2Motion] ✅ 匹配到目标节点，开始创建面板`);
 		ensureStyle();
 
 		// 检查 mesh2motion 资源是否存在

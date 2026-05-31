@@ -158,24 +158,24 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "label": "Wan2.2 T2V 文生视频官方流",
         "clip_type": "wan",
         "slots": [
-            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "t2v", "high", "noise"]),
-            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "t2v", "low", "noise"]),
+            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "t2v", "high"]),
+            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "t2v", "low"]),
             S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "t2v", "lightx2v", "high", "noise"]),
-            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "t2v", "lightx2v", "low", "noise"]),
+            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "t2v", "lightx2v", "high"]),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "t2v", "lightx2v", "low"]),
         ],
     },
     "wan22_i2v_dual": {
         "label": "Wan2.2 I2V 图生视频官方流",
         "clip_type": "wan",
         "slots": [
-            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "i2v", "high", "noise"]),
-            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "i2v", "low", "noise"]),
+            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "i2v", "high"]),
+            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "i2v", "low"]),
             S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "high", "noise"]),
-            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "low", "noise"]),
+            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "high"]),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "low"]),
         ],
     },
     "wan22_s2v_14b": {
@@ -187,7 +187,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
             S("audio_encoder", "音频编码器", "audio_encoders", "audio_encoder", ["wav2vec2"]),
-            S("lightx2v_lora", "S2V LoRA名称", "loras", "name", ["wan", "t2v", "lightx2v", "high", "noise"]),
+            S("lightx2v_lora", "S2V LoRA名称", "loras", "name", ["wan", "t2v", "lightx2v", "high"]),
         ],
     },
     "wan22_ti2v_5b": {
@@ -204,48 +204,48 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "label": "Wan2.2 FLF2V 首尾帧官方流",
         "clip_type": "wan",
         "slots": [
-            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "i2v", "high", "noise"]),
-            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "i2v", "low", "noise"]),
+            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "i2v", "high"]),
+            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "i2v", "low"]),
             S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "high", "noise"]),
-            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "low", "noise"]),
+            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "high"]),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "low"]),
         ],
     },
     "wan22_fun_camera_dual": {
         "label": "Wan2.2 Fun Camera 相机控制官方流",
         "clip_type": "wan",
         "slots": [
-            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "fun", "camera", "high", "noise"]),
-            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "fun", "camera", "low", "noise"]),
+            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "fun", "camera", "high"]),
+            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "fun", "camera", "low"]),
             S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "t2v", "lightx2v", "high", "noise"]),
-            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "t2v", "lightx2v", "low", "noise"]),
+            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "t2v", "lightx2v", "high"]),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "t2v", "lightx2v", "low"]),
         ],
     },
     "wan22_fun_control_dual": {
         "label": "Wan2.2 Fun Control 双模型",
         "clip_type": "wan",
         "slots": [
-            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "fun", "control", "high", "noise"]),
-            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "fun", "control", "low", "noise"]),
+            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "fun", "control", "high"]),
+            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "fun", "control", "low"]),
             S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "high", "noise"]),
-            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "low", "noise"]),
+            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "high"]),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "low"]),
         ],
     },
     "wan22_fun_inpaint_dual": {
         "label": "Wan2.2 Fun Inpaint 双模型 14B",
         "clip_type": "wan",
         "slots": [
-            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "fun", "inpaint", "high", "noise"]),
-            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "fun", "inpaint", "low", "noise"]),
+            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "fun", "inpaint", "high"]),
+            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "fun", "inpaint", "low"]),
             S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "high", "noise"]),
-            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "low", "noise"]),
+            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "high"]),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "low"]),
         ],
     },
     "wan21_t2v_13b": {
@@ -656,23 +656,28 @@ def _is_usable_file(name: str, allow_any: bool = False) -> bool:
 
 
 def _filter_names(names: list[str], keywords: list[str] | tuple[str, ...], allow_any: bool = False) -> list[str]:
-    words = [str(x or "").strip().lower() for x in keywords if str(x or "").strip()]
+    words = [_match_text(x) for x in keywords if str(x or "").strip()]
     source = [n for n in names if _is_usable_file(n, allow_any=allow_any)]
     if not words:
         return source
     result: list[str] = []
     for name in source:
-        lower = str(name or "").replace("\\", "/").lower()
-        if all(w in lower for w in words):
+        text = _match_text(name)
+        if all(w in text for w in words):
             result.append(name)
     return result
 
 
+def _match_text(value: Any) -> str:
+    text = str(value or "").replace("\\", "/").lower()
+    return re.sub(r"wan[\s._-]*2[\s._-]*2", "wan22", text)
+
+
 def _score_name(name: str, keywords: list[str]) -> tuple[int, str]:
-    text = str(name or "").replace("\\", "/").lower()
+    text = _match_text(name)
     score = 0
     for i, kw in enumerate(keywords):
-        kw = str(kw).lower()
+        kw = _match_text(kw)
         if not kw:
             continue
         if kw in text:
@@ -692,10 +697,10 @@ def _sort_matches(values: list[str], keywords: list[str]) -> list[str]:
 def _name_matches_keywords(name: str, keywords: list[str], allow_any: bool = False) -> bool:
     if allow_any:
         return True
-    active = [str(k or "").strip().lower() for k in keywords if str(k or "").strip()]
+    active = [_match_text(k) for k in keywords if str(k or "").strip()]
     if not active:
         return True
-    text = str(name or "").replace("\\", "/").lower()
+    text = _match_text(name)
     return all(k in text for k in active)
 
 

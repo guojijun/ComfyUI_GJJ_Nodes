@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import gc
-import sys
+import inspect
 from typing import Any
 
 # ============================================================================
@@ -196,42 +196,6 @@ def _load_sampler_runtime():
     return sampler_runtime
 
 
-def _model_runtime_module_name(model):
-    try:
-        transformer = model.model.diffusion_model
-        return str(transformer.__class__.__module__ or "")
-    except Exception:
-        return ""
-
-
-def _is_gjj_vendored_model(model):
-    module_name = _model_runtime_module_name(model)
-    return ".vendor.wanvideo_wrapper." in module_name or module_name.startswith(
-        "ComfyUI_GJJ_Nodes.vendor.wanvideo_wrapper"
-    )
-
-
-def _source_wanvideo_sampler_if_loaded(model):
-    if getattr(model, "__gjj_native_wan_adapter__", False):
-        return None
-    if _is_gjj_vendored_model(model):
-        return None
-    comfy_nodes = sys.modules.get("nodes")
-    mappings = getattr(comfy_nodes, "NODE_CLASS_MAPPINGS", {}) if comfy_nodes is not None else {}
-    sampler_cls = mappings.get("WanVideoSampler")
-    if sampler_cls is None:
-        return None
-    module_name = str(getattr(sampler_cls, "__module__", "") or "")
-    if ".vendor.wanvideo_wrapper." in module_name or module_name.startswith(
-        "ComfyUI_GJJ_Nodes.vendor.wanvideo_wrapper"
-    ):
-        return None
-    try:
-        return sampler_cls()
-    except Exception:
-        return None
-
-
 def _model_input_type_label(model):
     outer_name = type(model).__name__
     try:
@@ -328,6 +292,70 @@ def _validate_fun_control_input(model, image_embeds):
                 "当前连接了 control_camera_latents，但模型没有 Fun-Control-Camera 的 control_adapter。\n"
                 "请换用 Fun-Camera 模型，或断开相机控制条件。"
             )
+
+
+def _tensor_shape(value: Any) -> tuple[int, ...] | None:
+    shape = getattr(value, "shape", None)
+    if shape is None:
+        return None
+    try:
+        return tuple(int(item) for item in shape)
+    except Exception:
+        return None
+
+
+def _latent_spatial_shape(shape: tuple[int, ...] | None) -> tuple[int, int] | None:
+    if shape is None or len(shape) < 2:
+        return None
+    try:
+        return int(shape[-2]), int(shape[-1])
+    except Exception:
+        return None
+
+
+def _iter_extra_latent_entries(extra_latents: Any):
+    if extra_latents is None:
+        return []
+    if isinstance(extra_latents, list):
+        return extra_latents
+    if isinstance(extra_latents, tuple):
+        return list(extra_latents)
+    return [extra_latents]
+
+
+def _validate_image_embed_latent_shapes(image_embeds: Any) -> None:
+    if not isinstance(image_embeds, dict):
+        return
+    target_shape = image_embeds.get("target_shape", None)
+    if not isinstance(target_shape, (list, tuple)) or len(target_shape) < 4:
+        return
+    try:
+        target_latent_h = int(target_shape[-2])
+        target_latent_w = int(target_shape[-1])
+    except Exception:
+        return
+    if target_latent_h <= 0 or target_latent_w <= 0:
+        return
+
+    expected = (target_latent_h, target_latent_w)
+    extra_latents = image_embeds.get("extra_latents", None)
+    for index, entry in enumerate(_iter_extra_latent_entries(extra_latents), start=1):
+        if not isinstance(entry, dict):
+            continue
+        samples = entry.get("samples", None)
+        actual = _latent_spatial_shape(_tensor_shape(samples))
+        if actual is None or actual == expected:
+            continue
+        target_pixels = f"{target_latent_w * 8}x{target_latent_h * 8}"
+        actual_pixels = f"{actual[1] * 8}x{actual[0] * 8}"
+        raise RuntimeError(
+            "WanVideo 额外 latent 尺寸与当前采样目标不一致。\n"
+            f"当前图像条件目标 latent 尺寸为 {target_latent_w}x{target_latent_h}（约 {target_pixels} 像素），"
+            f"但第 {index} 个额外 latent 尺寸为 {actual[1]}x{actual[0]}（约 {actual_pixels} 像素）。\n"
+            "这通常是把上一段 1024x1024 等不同分辨率的 latent 接到了当前 640x608 等目标尺寸的采样器。\n"
+            "处理方式：请让生成条件节点的宽度/高度与额外 latent 的来源保持一致，或先用同一分辨率重新编码/重新生成额外 latent；"
+            "不要把不同分辨率的 LATENT 直接作为 extra_latents 接入。"
+        )
 
 
 def _unwrap_compiled_module(module):
@@ -622,6 +650,48 @@ def _cleanup_after_sampler(model: Any, force_offload: bool) -> None:
         pass
 
 
+def _normalize_sigmas_preview(value: Any) -> list[float]:
+    if value is None:
+        return []
+    try:
+        import torch
+
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu().flatten().tolist()
+    except Exception:
+        pass
+    if not isinstance(value, (list, tuple)):
+        try:
+            value = list(value)
+        except Exception:
+            return []
+    sigmas: list[float] = []
+    for item in value:
+        try:
+            sigmas.append(float(item))
+        except Exception:
+            continue
+    if len(sigmas) >= 2 and abs(sigmas[-1]) > 1e-6:
+        sigmas.append(0.0)
+    return sigmas
+
+
+def _scheduler_result_sigmas_preview(result: Any) -> list[float]:
+    scheduler_dict = None
+    if isinstance(result, tuple) and result:
+        scheduler_dict = result[0]
+    elif isinstance(result, dict):
+        scheduler_dict = result.get("sample_scheduler") or result
+    if not isinstance(scheduler_dict, dict):
+        return []
+    sample_scheduler = scheduler_dict.get("sample_scheduler")
+    for attr in ("full_sigmas", "sigmas"):
+        sigmas = _normalize_sigmas_preview(getattr(sample_scheduler, attr, None))
+        if len(sigmas) >= 2:
+            return sigmas
+    return []
+
+
 class GJJ_WanVideoSchedulerV2:
     @classmethod
     def INPUT_TYPES(cls):
@@ -699,9 +769,17 @@ class GJJ_WanVideoSchedulerV2:
             },
         }
 
-    RETURN_TYPES = ("WANVIDEOSCHEDULER",)
-    RETURN_NAMES = ("调度器",)
-    OUTPUT_TOOLTIPS = ("WanVideo Sampler v2 使用的调度器配置。",)
+    RETURN_TYPES = ("WANVIDEOSCHEDULER", "SIGMAS", "INT", "FLOAT", _scheduler_choices(), "INT", "INT")
+    RETURN_NAMES = ("调度器", "Sigmas", "步数", "Shift", "调度器名称", "起始步", "结束步")
+    OUTPUT_TOOLTIPS = (
+        "WanVideo Sampler v2 使用的调度器配置。",
+        "与原版 WanVideoScheduler 第 1 个输出对齐的 SIGMAS；未连接自定义 sigmas 时通常为空。",
+        "与原版 WanVideoScheduler 第 2 个输出对齐的采样步数。",
+        "与原版 WanVideoScheduler 第 3 个输出对齐的 Shift 参数。",
+        "与原版 WanVideoScheduler 第 4 个输出对齐的 COMBO 调度器名称，可接需要 COMBO 调度器的输入口。",
+        "与原版 WanVideoScheduler 第 5 个输出对齐的起始步。",
+        "与原版 WanVideoScheduler 第 6 个输出对齐的结束步。",
+    )
     FUNCTION = "process"
     CATEGORY = "GJJ/视频模型/WanVideo"
     DESCRIPTION = "GJJ WanVideo 调度器 v2：调用 GJJ 内置 vendored WanVideo runtime。"
@@ -713,17 +791,31 @@ class GJJ_WanVideoSchedulerV2:
 
     def process(self, scheduler, steps, shift, start_step, end_step, unique_id=None, sigmas=None, enhance_hf=False):
         runtime = _load_sampler_runtime()
-        node = runtime.WanVideoSchedulerv2()
-        return node.process(
+        node = runtime.WanVideoScheduler()
+        sigmas_out, steps_out, shift_out, scheduler_dict, start_step_out, end_step_out = node.process(
             scheduler=scheduler,
             steps=_as_int(steps, 30, min_value=1),
             shift=_as_float(shift, 5.0, min_value=0.0, max_value=1000.0),
             start_step=_as_int(start_step, 0, min_value=0),
             end_step=_as_int(end_step, -1, min_value=-1),
-            unique_id=unique_id,
+            # GJJ 前端已经根据 ui.sigmas 绘制预览；不传 unique_id 避免原版 matplotlib 预览重复显示。
+            unique_id=None,
             sigmas=sigmas,
             enhance_hf=_as_bool(enhance_hf, False),
         )
+        result = (
+            scheduler_dict,
+            sigmas_out,
+            steps_out,
+            shift_out,
+            str(scheduler),
+            start_step_out,
+            end_step_out,
+        )
+        preview_sigmas = _scheduler_result_sigmas_preview(result)
+        if len(preview_sigmas) >= 2:
+            return {"ui": {"sigmas": [preview_sigmas]}, "result": result}
+        return result
 
 
 class GJJ_WanVideoSamplerV2ExtraArgs:
@@ -1243,6 +1335,7 @@ class GJJ_WanVideoSamplerV2:
 
         _validate_wanvideo_model_input(args["model"])
         _validate_fun_control_input(args["model"], args["image_embeds"])
+        _validate_image_embed_latent_shapes(args["image_embeds"])
 
         _send_status(unique_id, "准备调度器...", 0.10)
         if isinstance(args["scheduler"], dict):
@@ -1251,10 +1344,8 @@ class GJJ_WanVideoSamplerV2:
             scheduler_name = str(args["scheduler"])
 
         _send_status(unique_id, f"加载采样 runtime... ({scheduler_name}, {args['steps']} 步)", 0.16)
-        node = _source_wanvideo_sampler_if_loaded(model)
-        if node is None:
-            runtime = _load_sampler_runtime()
-            node = runtime.WanVideoSampler()
+        runtime = _load_sampler_runtime()
+        node = runtime.WanVideoSampler()
         
         # 尝试执行,如果因 Triton 编译失败则自动降级
         import platform
@@ -1380,6 +1471,182 @@ class GJJ_WanVideoSamplerV2:
                         ) from e
                     raise
 
+
+
+class GJJ_WanVideoSamplerSettings(GJJ_WanVideoSamplerV2):
+    DESCRIPTION = "GJJ WanVideo 采样参数：按 WanVideoSamplerSettings 复刻，只打包采样器输入为 SAMPLER_ARGS，不执行采样。"
+    RETURN_TYPES = ("SAMPLER_ARGS",)
+    RETURN_NAMES = ("sampler_inputs",)
+    OUTPUT_TOOLTIPS = ("与原版 WanVideoSamplerSettings 对齐的采样器参数字典，可连接到接受 SAMPLER_ARGS 的采样节点。",)
+    FUNCTION = "process"
+    CATEGORY = "GJJ/视频模型/WanVideo"
+    GJJ_HELP = {
+        "title": "WanVideo 采样参数",
+        "description": "复刻原版 WanVideoSamplerSettings：保留采样器完整输入面板，只把当前输入打包为 SAMPLER_ARGS，不加载模型、不执行采样。",
+        "usage": [
+            "用于把复杂采样器参数整理到单独节点中，再交给支持 SAMPLER_ARGS 的采样节点。",
+            "输出内容保持原版键名，例如 model、image_embeds、steps、cfg、scheduler、sigmas 等。",
+        ],
+    }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        try:
+            data = _load_sampler_runtime().WanVideoSampler.INPUT_TYPES()
+        except Exception:
+            data = cls._fallback_original_input_types()
+        return cls._localized_copy(data)
+
+    @staticmethod
+    def _fallback_original_input_types():
+        return {
+            "required": {
+                "model": ("WANVIDEOMODEL",),
+                "image_embeds": ("WANVIDIMAGE_EMBEDS",),
+                "steps": ("INT", {"default": 30, "min": 1}),
+                "cfg": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 30.0, "step": 0.01}),
+                "shift": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "force_offload": ("BOOLEAN", {"default": True, "tooltip": "Moves the model to the offload device after sampling"}),
+                "scheduler": (WANVIDEO_SAMPLER_SCHEDULER_CHOICES, {"default": "unipc"}),
+                "riflex_freq_index": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "tooltip": "Frequency index for RIFLEX, disabled when 0, default 6. Allows for new frames to be generated after without looping"}),
+            },
+            "optional": {
+                "text_embeds": ("WANVIDEOTEXTEMBEDS",),
+                "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"}),
+                "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "feta_args": ("FETAARGS",),
+                "context_options": ("WANVIDCONTEXT",),
+                "cache_args": ("CACHEARGS",),
+                "flowedit_args": ("FLOWEDITARGS", {"tooltip": "FlowEdit support has been deprecated"}),
+                "batched_cfg": ("BOOLEAN", {"default": False, "tooltip": "Batch cond and uncond for faster sampling, possibly faster on some hardware, uses more memory"}),
+                "slg_args": ("SLGARGS",),
+                "rope_function": (["default", "comfy", "comfy_chunked"], {"default": "comfy", "tooltip": "Comfy's RoPE implementation doesn't use complex numbers and can thus be compiled, that should be a lot faster when using torch.compile. Chunked version has reduced peak VRAM usage when not using torch.compile"}),
+                "loop_args": ("LOOPARGS",),
+                "experimental_args": ("EXPERIMENTALARGS",),
+                "sigmas": ("SIGMAS",),
+                "unianimate_poses": ("UNIANIMATE_POSE",),
+                "fantasytalking_embeds": ("FANTASYTALKING_EMBEDS",),
+                "uni3c_embeds": ("UNI3C_EMBEDS",),
+                "multitalk_embeds": ("MULTITALK_EMBEDS",),
+                "freeinit_args": ("FREEINITARGS",),
+                "start_step": ("INT", {"default": 0, "min": 0, "max": 10000, "step": 1, "tooltip": "Start step for the sampling, 0 means full sampling, otherwise samples only from this step"}),
+                "end_step": ("INT", {"default": -1, "min": -1, "max": 10000, "step": 1, "tooltip": "End step for the sampling, -1 means full sampling, otherwise samples only until this step"}),
+                "add_noise_to_samples": ("BOOLEAN", {"default": False, "tooltip": "Add noise to the samples before sampling, needed for video2video sampling when starting from clean video"}),
+            },
+        }
+
+    @classmethod
+    def _localized_copy(cls, data):
+        labels = {
+            "model": ("WanVideo 模型", "连接 GJJ WanVideo 模型加载器输出的 WANVIDEOMODEL。"),
+            "image_embeds": ("图像条件", "连接 WanVideo 图像条件、空 latent 条件或视频条件编码输出。"),
+            "steps": ("采样步数", "采样总步数；默认值与原版 WanVideoSampler 一致。"),
+            "cfg": ("CFG", "提示词引导强度；默认值与原版 WanVideoSampler 一致。"),
+            "shift": ("Shift", "WanVideo flow shift 参数；默认值与原版 WanVideoSampler 一致。"),
+            "seed": ("种子", "随机种子；按原版参数原样传递。"),
+            "force_offload": ("采样后卸载", "采样后把模型移回卸载设备，行为与原版一致。"),
+            "scheduler": ("调度器", "WanVideo 采样调度器；默认 unipc 与原版一致。"),
+            "riflex_freq_index": ("RIFLEX 频率索引", "0 表示关闭；用于减少续帧循环感。"),
+            "text_embeds": ("文本条件", "可选 WanVideo 文本编码输出。"),
+            "samples": ("初始 latent", "视频转视频或续采样时使用的初始 latent。"),
+            "denoise_strength": ("降噪强度", "视频转视频或续采样时的降噪强度。"),
+            "feta_args": ("FETA 参数", "可选 FETA 增强参数。"),
+            "context_options": ("上下文窗口", "可选长视频上下文窗口配置。"),
+            "cache_args": ("缓存参数", "可选 TeaCache/MagCache/EasyCache 等缓存配置。"),
+            "flowedit_args": ("FlowEdit 参数", "原版保留的旧接口；当前 runtime 已废弃。"),
+            "batched_cfg": ("批量 CFG", "将正负条件合批运行，可能更快但会占用更多显存。"),
+            "slg_args": ("SLG 参数", "可选 Skip Layer Guidance 参数。"),
+            "rope_function": ("RoPE 函数", "comfy 通常更快；comfy_chunked 峰值显存更低；特殊模型可用 default。"),
+            "loop_args": ("循环参数", "可选循环视频参数。"),
+            "experimental_args": ("实验参数", "可选 WanVideoWrapper 实验参数。"),
+            "sigmas": ("Sigmas", "可选自定义 sigmas；连接后会改变采样时间步。"),
+            "unianimate_poses": ("UniAnimate 姿态", "可选 UniAnimate 姿态控制。"),
+            "fantasytalking_embeds": ("FantasyTalking 条件", "可选 FantasyTalking 条件。"),
+            "uni3c_embeds": ("Uni3C 条件", "可选 Uni3C 条件。"),
+            "multitalk_embeds": ("MultiTalk 条件", "可选 MultiTalk/InfiniteTalk 音频条件。"),
+            "freeinit_args": ("FreeInit 参数", "可选 FreeInit 参数；连接后会改变初始噪声和迭代采样。"),
+            "start_step": ("起始步", "从指定步开始采样；0 表示完整采样。"),
+            "end_step": ("结束步", "-1 表示完整采样；其它值表示采样到指定步结束。"),
+            "add_noise_to_samples": ("给 latent 加噪", "视频转视频从干净 latent 开始时可启用。"),
+        }
+        copied = {}
+        for section, values in data.items():
+            if not isinstance(values, dict):
+                copied[section] = values
+                continue
+            copied[section] = {}
+            for key, spec in values.items():
+                if section == "hidden":
+                    copied[section][key] = spec
+                    continue
+                label = labels.get(key)
+                if label is None or not isinstance(spec, tuple):
+                    copied[section][key] = spec
+                    continue
+                meta = dict(spec[1]) if len(spec) >= 2 and isinstance(spec[1], dict) else {}
+                meta["display_name"] = label[0]
+                meta["tooltip"] = label[1]
+                if len(spec) >= 2 and isinstance(spec[1], dict):
+                    copied[section][key] = (spec[0], meta, *spec[2:])
+                else:
+                    copied[section][key] = (spec[0], meta, *spec[1:])
+        return copied
+
+    def process(self, **kwargs):
+        params = inspect.signature(_load_sampler_runtime().WanVideoSampler.process).parameters
+        args_dict = {}
+        for name, param in params.items():
+            if name in {"self", "unique_id", "extra_args"}:
+                continue
+            if name in kwargs:
+                args_dict[name] = kwargs[name]
+            elif param.default is not inspect.Parameter.empty:
+                args_dict[name] = param.default
+            else:
+                args_dict[name] = None
+        return (args_dict,)
+
+
+class GJJ_WanVideoSamplerFromSettings(GJJ_WanVideoSamplerV2):
+    DESCRIPTION = "GJJ WanVideo 从采样参数执行：复刻 WanVideoSamplerFromSettings，只接收 SAMPLER_ARGS 并执行采样。"
+    RETURN_TYPES = ("LATENT", "LATENT")
+    RETURN_NAMES = ("采样 latent", "去噪 latent")
+    OUTPUT_TOOLTIPS = ("按采样参数包执行后的 latent。", "去噪后的 latent，供预览或调试使用。")
+    FUNCTION = "process"
+    CATEGORY = "GJJ/视频模型/WanVideo"
+    GJJ_HELP = {
+        "title": "WanVideo 从采样参数执行",
+        "description": "复刻原版 WanVideoSamplerFromSettings：只接收 SAMPLER_ARGS，并把参数原样转交给 WanVideoSampler.process 执行。",
+        "usage": [
+            "上游连接 GJJ · ⚙️ WanVideo 采样参数 的 sampler_inputs 输出。",
+            "适合把复杂采样参数折叠到单独节点里，让真正执行采样的节点保持简洁。",
+            "此节点不再改写 seed、scheduler、steps、cfg、shift 等字段；行为与原版 FromSettings 的透明转发一致。",
+        ],
+    }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "sampler_inputs": (
+                    "SAMPLER_ARGS",
+                    {
+                        "display_name": "采样参数",
+                        "tooltip": "连接 GJJ · ⚙️ WanVideo 采样参数 输出的 SAMPLER_ARGS；内部字段保持原版 WanVideoSamplerSettings 键名。",
+                    },
+                ),
+            },
+        }
+
+    def process(self, sampler_inputs):
+        if not isinstance(sampler_inputs, dict):
+            raise RuntimeError("WanVideo 采样参数必须是 SAMPLER_ARGS 字典，请连接「GJJ · ⚙️ WanVideo 采样参数」。")
+
+        args = dict(sampler_inputs)
+        runtime = _load_sampler_runtime()
+        node = runtime.WanVideoSampler()
+        return node.process(**args)
 
 
 def _native_sampler_choices():
@@ -1510,6 +1777,8 @@ class GJJ_NativeWanVideoSampler:
 NODE_CLASS_MAPPINGS = {
     "GJJ_WanVideoSchedulerV2": GJJ_WanVideoSchedulerV2,
     "GJJ_WanVideoSamplerV2ExtraArgs": GJJ_WanVideoSamplerV2ExtraArgs,
+    "GJJ_WanVideoSamplerSettings": GJJ_WanVideoSamplerSettings,
+    "GJJ_WanVideoSamplerFromSettings": GJJ_WanVideoSamplerFromSettings,
     "GJJ_WanVideoSamplerV2": GJJ_WanVideoSamplerV2,
     "GJJ_NativeWanVideoSampler": GJJ_NativeWanVideoSampler,
 }
@@ -1517,6 +1786,8 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "GJJ_WanVideoSchedulerV2": "GJJ · 🗓️ WanVideo 调度器 v2",
     "GJJ_WanVideoSamplerV2ExtraArgs": "GJJ · 🧰 WanVideo 采样扩展参数",
+    "GJJ_WanVideoSamplerSettings": "GJJ · ⚙️ WanVideo 采样参数",
+    "GJJ_WanVideoSamplerFromSettings": "GJJ · ▶️ WanVideo 参数采样器",
     "GJJ_WanVideoSamplerV2": "GJJ · 🎞️ WanVideo 视频采样器 v2",
     "GJJ_NativeWanVideoSampler": "GJJ · 🎞️ Wan原生视频采样器",
 }

@@ -274,7 +274,7 @@ class GJJ_DetailerForEach:
             },
         }
 
-    def detail(self, image, segs, model, clip, vae, positive, negative, guide_size, guide_size_for, max_size, seed, steps, cfg, sampler_name, scheduler, denoise, feather, noise_mask, force_inpaint, wildcard, cycle, detailer_hook=None, inpaint_model=False, noise_mask_feather=20, scheduler_func_opt=None, tiled_encode=False, tiled_decode=False):
+    def detail(self, image, segs, model, clip, vae, positive, negative, guide_size, guide_size_for, max_size, seed, steps, cfg, sampler_name, scheduler, denoise, feather, noise_mask, force_inpaint, wildcard, cycle, detailer_hook=None, inpaint_model=False, noise_mask_feather=0, scheduler_func_opt=None, tiled_encode=False, tiled_decode=False):
         enhanced_img, cropped_list, enhanced_list, _enhanced_alpha_list, cnet_pil_list, new_segs = detailer_for_each_do_detail(
             image,
             segs,

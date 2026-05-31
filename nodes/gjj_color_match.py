@@ -7,6 +7,8 @@ import torch
 
 NODE_NAME = "GJJ_ColorMatch"
 METHODS = ["mkl", "hm", "reinhard", "mvgd", "hm-mvgd-hm", "hm-mkl-hm"]
+MATRIX_EPS = 1e-6
+MATRIX_JITTERS = (0.0, 1e-8, 1e-6, 1e-4, 1e-3)
 
 
 def _to_float(value: Any, default: float = 1.0) -> float:
@@ -26,11 +28,35 @@ def _check_image(name: str, value: Any) -> torch.Tensor:
     return value.detach().float().cpu()
 
 
+def _diagonal_matrix_sqrt(matrix: torch.Tensor, inverse: bool = False) -> torch.Tensor:
+    diag = torch.diagonal(matrix).clamp_min(MATRIX_EPS)
+    scale = torch.rsqrt(diag) if inverse else torch.sqrt(diag)
+    return torch.diag(scale)
+
+
 def _matrix_sqrt(matrix: torch.Tensor, inverse: bool = False) -> torch.Tensor:
-    eigvals, eigvecs = torch.linalg.eigh(matrix)
-    eigvals = eigvals.clamp_min(1e-6)
-    scale = torch.rsqrt(eigvals) if inverse else torch.sqrt(eigvals)
-    return eigvecs @ torch.diag(scale) @ eigvecs.T
+    original_dtype = matrix.dtype
+    work = torch.nan_to_num(matrix, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float64)
+    work = (work + work.T) * 0.5
+    eye = torch.eye(work.shape[0], dtype=work.dtype, device=work.device)
+    diag_scale = float(torch.diagonal(work).abs().mean().clamp_min(1.0).item())
+
+    for jitter in MATRIX_JITTERS:
+        try:
+            stable = work + eye * (jitter * diag_scale)
+            eigvals, eigvecs = torch.linalg.eigh(stable)
+            eigvals = torch.nan_to_num(eigvals, nan=MATRIX_EPS, posinf=1.0, neginf=MATRIX_EPS).clamp_min(MATRIX_EPS)
+            scale = torch.rsqrt(eigvals) if inverse else torch.sqrt(eigvals)
+            result = eigvecs @ torch.diag(scale) @ eigvecs.T
+            if torch.isfinite(result).all():
+                return result.to(original_dtype)
+        except torch._C._LinAlgError:
+            continue
+        except RuntimeError:
+            continue
+
+    # 极端退化帧兜底：只保留每个通道自身方差，避免 linalg.eigh 中断整条工作流。
+    return _diagonal_matrix_sqrt(work, inverse=inverse).to(original_dtype)
 
 
 def _covariance_transfer(target: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
@@ -46,6 +72,8 @@ def _covariance_transfer(target: torch.Tensor, reference: torch.Tensor) -> torch
     ref_cov = (ref_centered.T @ ref_centered) / denom_ref
     transform = _matrix_sqrt(src_cov, inverse=True) @ _matrix_sqrt(ref_cov, inverse=False)
     out = src_centered @ transform + ref_mean
+    if not torch.isfinite(out).all():
+        return _reinhard_transfer(target, reference)
     return out.reshape_as(target)
 
 

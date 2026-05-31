@@ -26,6 +26,18 @@ def _extract_latent_samples(extra_latents: Any) -> Any:
     return extra_latents["samples"]
 
 
+def _latent_spatial_shape(samples: Any) -> tuple[int, int] | None:
+    shape = getattr(samples, "shape", None)
+    if shape is None:
+        return None
+    try:
+        if len(shape) < 2:
+            return None
+        return int(shape[-2]), int(shape[-1])
+    except Exception:
+        return None
+
+
 class GJJ_WanVideoEmptyEmbeds:
     CATEGORY = "GJJ/视频生成"
     FUNCTION = "process"
@@ -145,6 +157,15 @@ class GJJ_WanVideoEmptyEmbeds:
 
         latent_samples = _extract_latent_samples(extra_latents)
         if latent_samples is not None:
+            latent_spatial = _latent_spatial_shape(latent_samples)
+            target_spatial = (target_shape[-2], target_shape[-1])
+            if latent_spatial is not None and latent_spatial != target_spatial:
+                raise RuntimeError(
+                    "Wan 空图像条件的额外 latent 尺寸与目标宽高不一致。\n"
+                    f"当前目标为 {width}x{height}，对应 latent {target_spatial[1]}x{target_spatial[0]}；"
+                    f"额外 latent 为约 {latent_spatial[1] * 8}x{latent_spatial[0] * 8}，对应 latent {latent_spatial[1]}x{latent_spatial[0]}。\n"
+                    "请把本节点的宽度/高度改成额外 latent 的来源分辨率，或用当前目标分辨率重新生成/重新编码额外 latent。"
+                )
             embeds["extra_latents"] = [
                 {
                     "samples": latent_samples,

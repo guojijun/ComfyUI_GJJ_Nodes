@@ -258,6 +258,43 @@ function getWidget(node, name) {
 	return node.widgets?.find((widget) => widget?.name === name);
 }
 
+function outputHasLinks(output) {
+	if (!output) return false;
+	if (Array.isArray(output.links)) return output.links.length > 0;
+	return output.link != null;
+}
+
+function getGraphLink(node, linkId) {
+	if (linkId == null) return null;
+	const links = node?.graph?.links || app.graph?.links;
+	if (!links) return null;
+	if (Array.isArray(links)) return links.find((link) => String(link?.id ?? link?.[0]) === String(linkId)) || null;
+	return links[linkId] || links[String(linkId)] || null;
+}
+
+function setOutputLinkSlot(link, nodeId, slot, type) {
+	if (!link) return;
+	if (Array.isArray(link)) {
+		link[1] = nodeId;
+		link[2] = slot;
+		if (type) link[5] = type;
+		return;
+	}
+	link.origin_id = nodeId;
+	link.origin_slot = slot;
+	if (type) link.type = type;
+}
+
+function repairOutputLinkSlots(node) {
+	if (!Array.isArray(node?.outputs)) return;
+	for (let index = 0; index < node.outputs.length; index += 1) {
+		const output = node.outputs[index];
+		for (const linkId of output?.links || []) {
+			setOutputLinkSlot(getGraphLink(node, linkId), node.id, index, output.type);
+		}
+	}
+}
+
 function getWidgetValue(node, name, fallback = "") {
 	const widget = getWidget(node, name);
 	return String(widget?.value ?? fallback ?? "");
@@ -760,9 +797,10 @@ function updateOutputs(node, fields, values) {
 	}
 	for (let i = node.outputs.length - 1; i >= fields.length; i -= 1) {
 		const output = node.outputs[i];
-		if (output?.links?.length) break;
+		if (outputHasLinks(output)) break;
 		node.outputs.splice(i, 1);
 	}
+	repairOutputLinkSlots(node);
 	refreshNode(node);
 }
 

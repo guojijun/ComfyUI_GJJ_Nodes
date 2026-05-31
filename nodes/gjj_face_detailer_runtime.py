@@ -16,20 +16,38 @@ from nodes import InpaintModelConditioning, MAX_RESOLUTION, VAEEncode, VAEEncode
 
 from .gjj_ultralytics_runtime import SEG, available_ultralytics_bbox_models, ensure_ultralytics_model_paths, load_ultralytics_bbox_detector
 
+
+_cv2 = None
+_SamPredictor = None
+_sam_model_registry = None
+
+
 # 延迟导入：运行时依赖检查
-def _load_dependencies():
-	"""运行时加载 cv2 和 segment_anything，失败时提供友好提示"""
+def _load_cv2():
+	"""运行时加载 cv2，失败时提供友好提示"""
+	global _cv2
+	if _cv2 is not None:
+		return _cv2
+
 	from .common_utils.dependency_checker import load_dependency_at_runtime
 
-	cv2 = load_dependency_at_runtime(
+	_cv2 = load_dependency_at_runtime(
 		module_name="cv2",
 		node_name="GJJ · 人脸细节增强器",
 		package_name="opencv-python",
 		description="该节点需要 OpenCV 进行图像处理"
 	)
+	return _cv2
+
+
+def _load_segment_anything():
+	"""运行时加载 segment_anything，失败时提供友好提示"""
+	global _SamPredictor, _sam_model_registry
+	if _SamPredictor is not None and _sam_model_registry is not None:
+		return _SamPredictor, _sam_model_registry
 
 	try:
-		from segment_anything import SamPredictor, sam_model_registry
+		from segment_anything import SamPredictor as _predictor, sam_model_registry as _registry
 	except ImportError as exc:
 		raise RuntimeError(
 			f"\n 未找到 segment_anything 运行库。\n"
@@ -44,7 +62,16 @@ def _load_dependencies():
 			f"💡 提示：安装后请重启 ComfyUI 服务器。"
 		) from exc
 
-	return cv2, SamPredictor, sam_model_registry
+	_SamPredictor = _predictor
+	_sam_model_registry = _registry
+	return _SamPredictor, _sam_model_registry
+
+
+def _load_dependencies():
+	"""兼容旧调用：一次性加载 cv2 和 segment_anything。"""
+	cv2_mod = _load_cv2()
+	SamPredictor, sam_model_registry = _load_segment_anything()
+	return cv2_mod, SamPredictor, sam_model_registry
 
 
 SAM2_CONFIG_TABLE = {
@@ -251,11 +278,12 @@ def center_of_bbox(bbox):
 def combine_masks2(masks):
     if len(masks) == 0:
         return None
+    cv2_mod = _load_cv2()
     combined = np.array(masks[0]).astype(np.uint8)
     for mask in masks[1:]:
         cv2_mask = np.array(mask).astype(np.uint8)
         if combined.shape == cv2_mask.shape:
-            combined = cv2.bitwise_or(combined, cv2_mask)
+            combined = cv2_mod.bitwise_or(combined, cv2_mask)
     return torch.from_numpy(combined)
 
 
@@ -269,10 +297,11 @@ def dilate_mask(mask, dilation_factor, iterations=1):
     mask = make_2d_mask(mask)
     if dilation_factor == 0:
         return mask
+    cv2_mod = _load_cv2()
     kernel = np.ones((abs(dilation_factor), abs(dilation_factor)), np.uint8)
     if dilation_factor > 0:
-        return cv2.dilate(mask, kernel, iterations)
-    return cv2.erode(mask, kernel, iterations)
+        return cv2_mod.dilate(mask, kernel, iterations)
+    return cv2_mod.erode(mask, kernel, iterations)
 
 
 def tensor_gaussian_blur_mask(mask, kernel_size, sigma=10.0):
@@ -295,10 +324,11 @@ def tensor_gaussian_blur_mask(mask, kernel_size, sigma=10.0):
         if kernel_size < 3:
             return mask
 
+    cv2_mod = _load_cv2()
     blurred_batch = []
     for item in mask:
         mask_np = item[..., 0].cpu().numpy().astype(np.float32)
-        blurred = cv2.GaussianBlur(mask_np, (kernel_size, kernel_size), sigmaX=sigma)
+        blurred = cv2_mod.GaussianBlur(mask_np, (kernel_size, kernel_size), sigmaX=sigma)
         blurred_batch.append(torch.from_numpy(blurred).unsqueeze(-1))
     return torch.stack(blurred_batch, dim=0).to(mask.dtype)
 
@@ -430,6 +460,7 @@ class SAMWrapper:
             self.model.to(device="cpu")
 
     def predict(self, image, points, plabs, bbox, threshold):
+        SamPredictor, _sam_registry = _load_segment_anything()
         predictor = SamPredictor(self.model)
         predictor.set_image(image, "RGB")
         return sam_predict(predictor, points, plabs, bbox, threshold)
@@ -490,6 +521,7 @@ def load_sam_model(model_name: str | None, device_mode: str = "AUTO"):
     else:
         model_kind = "vit_b"
 
+    _SamPredictor, sam_model_registry = _load_segment_anything()
     sam = sam_model_registry[model_kind](checkpoint=model_path)
     if device_mode == "Prefer GPU":
         device = comfy.model_management.get_torch_device()

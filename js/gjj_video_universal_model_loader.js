@@ -1,4 +1,5 @@
 import { app } from "/scripts/app.js";
+import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODE_APIS = {
 	GJJ_VideoUniversalModelLoader: "/gjj/video_universal_loader_lists",
@@ -11,10 +12,12 @@ const SAVED_VALUES_PROPERTY = "gjj_video_universal_loader_values";
 const FILTER_PROPERTY = "gjj_video_universal_loader_filters";
 const SETTINGS_OPEN_PROPERTY = "gjj_video_kijai_open_settings";
 const SETTINGS_CONFIG_PROPERTY = "gjj_video_kijai_settings_config";
-const OUTPUT_HIT_LANE = 34;
+const BROADCAST_PROPERTY = "gjj_variable_broadcast_enabled";
+const OUTPUT_HIT_LANE = 20;
 const WIDTH_PROPERTY = "gjj_video_universal_loader_width";
 const MIN_NODE_WIDTH = 300;
 const DEFAULT_NODE_WIDTH = 470;
+const DEFAULT_DTYPES = ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"];
 
 const OUTPUT_TYPE_BY_KIND = {
 	diffusion: "MODEL",
@@ -164,12 +167,16 @@ function isUsable(name, allowAny = false) {
 	return /\.(safetensors|sft|ckpt|pt|pth|gguf)$/i.test(v);
 }
 
-function splitWords(text) { return String(text || "").trim().toLowerCase().split(/[\s,，;；|]+/).filter(Boolean); }
+function matchText(text) {
+	return lower(text).replace(/wan[\s._-]*2[\s._-]*2/g, "wan22");
+}
+
+function splitWords(text) { return matchText(text).trim().split(/[\s,，;；|]+/).filter(Boolean); }
 
 function scoreName(name, keywords = []) {
-	const text = lower(name); let score = 0;
+	const text = matchText(name); let score = 0;
 	keywords.forEach((kw, idx) => {
-		const word = String(kw || "").toLowerCase(); if (!word) return;
+		const word = matchText(kw); if (!word) return;
 		if (text.includes(word)) score += 100 - idx;
 		if (text.includes(`_${word}`) || text.includes(`-${word}`)) score += 10;
 	});
@@ -179,12 +186,15 @@ function scoreName(name, keywords = []) {
 }
 
 function normalizeKeywords(keywords = []) {
-	return (keywords || []).map((v) => String(v || "").trim().toLowerCase()).filter(Boolean);
+	return (keywords || []).map((v) => matchText(v).trim()).filter(Boolean);
 }
 function filterList(list, keywords = [], allowAny = false, fallbackKeywords = []) {
 	const words = normalizeKeywords(keywords);
 	const source = Array.isArray(list) ? list.filter((name) => isUsable(name, allowAny)) : [];
-	const findMatches = (group) => group.length ? source.filter((name) => group.every((word) => lower(name).includes(word))) : source;
+	const findMatches = (group) => group.length ? source.filter((name) => {
+		const text = matchText(name);
+		return group.every((word) => text.includes(word));
+	}) : source;
 	let matched = findMatches(words);
 	const groups = Array.isArray(fallbackKeywords) ? fallbackKeywords : [];
 	for (const group of groups) {
@@ -203,7 +213,7 @@ function ensureState(node) {
 	node.__gjjVUState = node.__gjjVUState || {
 		configs: null,
 		folders: null,
-		dtypes: ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"],
+		dtypes: DEFAULT_DTYPES,
 		clipTypes: ["auto", "wan", "ltxv", "hunyuan_video", "flux", "stable_diffusion"],
 		loading: false,
 	};
@@ -243,6 +253,58 @@ function protect(el) {
 	}
 }
 
+function broadcastEnabled(node) {
+	return Boolean(node?.properties?.[BROADCAST_PROPERTY]);
+}
+
+function notifyBroadcastChanged(node) {
+	try { app.canvas?.setDirty?.(true, true); } catch (_) {}
+	try { app.graph?.setDirtyCanvas?.(true, true); } catch (_) {}
+	try {
+		window.dispatchEvent(new CustomEvent("gjj-variable-broadcast-updated", {
+			detail: { nodeId: node?.id, enabled: broadcastEnabled(node) },
+		}));
+	} catch (_) {}
+}
+
+function updateBroadcastButton(node) {
+	const button = node?.__gjjVUBroadcastButton;
+	if (!button) return;
+	const enabled = broadcastEnabled(node);
+	button.dataset.value = enabled ? "true" : "false";
+	button.classList.toggle("on", enabled);
+	button.setAttribute("aria-pressed", String(enabled));
+	button.title = enabled
+		? "🔍 已开启：当前 Loader 的每个可见输出口会按接口名称/类型广播到未连接的同名输入。"
+		: "🔍 已关闭：只通过真实连线传递模型对象。";
+}
+
+function setBroadcastEnabled(node, enabled) {
+	if (!node) return;
+	node.properties = node.properties || {};
+	node.properties[BROADCAST_PROPERTY] = Boolean(enabled);
+	updateBroadcastButton(node);
+	saveWidgetValues(node);
+	notifyBroadcastChanged(node);
+}
+
+function createBroadcastButton(node) {
+	const button = document.createElement("button");
+	button.type = "button";
+	button.className = "gjj-vu-broadcast";
+	button.textContent = "🔍";
+	button.setAttribute("aria-label", "切换输出广播");
+	protect(button);
+	button.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		setBroadcastEnabled(node, !broadcastEnabled(node));
+	});
+	node.__gjjVUBroadcastButton = button;
+	updateBroadcastButton(node);
+	return button;
+}
+
 if (!window.__gjjVUClosePopupBound) {
 	window.__gjjVUClosePopupBound = true;
 	document.addEventListener("pointerdown", () => closeSearchPopup?.());
@@ -277,6 +339,218 @@ function displayNameForValue(value, labels = null) {
 	return labels?.[value] || String(value || "");
 }
 
+function modelBaseName(value) {
+	return String(value || "")
+		.replaceAll("\\", "/")
+		.split("/")
+		.pop()
+		.replace(/\.(safetensors|sft|ckpt|pt|pth|bin|gguf|torchscript\.pt)$/i, "");
+}
+
+function modelMatchKey(value) {
+	return matchText(modelBaseName(value))
+		.replace(/[^0-9a-z\u4e00-\u9fff]+/g, "");
+}
+
+function modelPrefixBeforeMarker(value, marker) {
+	const raw = matchText(modelBaseName(value));
+	const index = raw.indexOf(String(marker || "").toLowerCase());
+	if (index < 0) return "";
+	return modelMatchKey(raw.slice(0, index));
+}
+
+function modelSuffixAfterMarker(value, marker) {
+	const word = String(marker || "").toLowerCase();
+	const raw = matchText(modelBaseName(value));
+	const index = raw.indexOf(word);
+	if (index < 0) return "";
+	return modelMatchKey(raw.slice(index + word.length));
+}
+
+function slotPairText(slot) {
+	return [
+		slot?.id,
+		slot?.label,
+		slot?.kind,
+		slot?.target,
+		...(Array.isArray(slot?.keywords) ? slot.keywords : []),
+	].map((item) => String(item || "")).join(" ").toLowerCase();
+}
+
+function isPairableModelSlot(slot) {
+	if (isLoraSlot(slot)) return false;
+	const kind = String(slot?.kind || "");
+	return ["diffusion", "checkpoint_model", "wanvideo_model"].includes(kind);
+}
+
+function isHighModelSlot(slot) {
+	const text = slotPairText(slot);
+	return isPairableModelSlot(slot) && (text.includes("high") || text.includes("高"));
+}
+
+function isLowModelSlot(slot) {
+	const text = slotPairText(slot);
+	return isPairableModelSlot(slot) && (text.includes("low") || text.includes("低"));
+}
+
+function pairKeywordSet(slot) {
+	return new Set((Array.isArray(slot?.keywords) ? slot.keywords : [])
+		.map((item) => matchText(item).trim())
+		.filter((item) => item && !["high", "low", "高", "低"].includes(item)));
+}
+
+function findPairedLowSlot(cfg, highSlot, highIndex) {
+	const slots = (cfg?.slots || []).slice(0, MAX_SLOTS);
+	const highKeywords = pairKeywordSet(highSlot);
+	let best = null;
+	let bestScore = -1;
+	slots.forEach((slot, index) => {
+		if (index === highIndex || !isLowModelSlot(slot)) return;
+		let score = 0;
+		if (String(slot?.folder || "") === String(highSlot?.folder || "")) score += 20;
+		if (index === highIndex + 1) score += 12;
+		if (index > highIndex) score += 4;
+		for (const keyword of pairKeywordSet(slot)) {
+			if (highKeywords.has(keyword)) score += 3;
+		}
+		if (score > bestScore) {
+			bestScore = score;
+			best = { slot, index };
+		}
+	});
+	return best;
+}
+
+function scoreLowModelCandidate(highValue, lowValue) {
+	const highPrefixRaw = modelPrefixBeforeMarker(highValue, "high");
+	const highPrefix = highPrefixRaw.length >= 4 ? highPrefixRaw : "";
+	const highToLowKey = highPrefix
+		? `${highPrefix}low${modelSuffixAfterMarker(highValue, "high")}`
+		: "";
+	const lowKey = modelMatchKey(lowValue);
+	const lowPrefix = modelPrefixBeforeMarker(lowValue, "low");
+	if (!lowKey) return -Infinity;
+
+	let score = -Infinity;
+	if (highToLowKey && lowKey === highToLowKey) score = Math.max(score, 50000);
+	if (highPrefix && lowPrefix && lowPrefix === highPrefix) score = Math.max(score, 40000 + Math.min(highPrefix.length, 200));
+	if (highPrefix && lowKey.startsWith(highPrefix)) score = Math.max(score, 30000 + Math.min(highPrefix.length, 200));
+	if (highPrefix && lowKey.includes(highPrefix)) score = Math.max(score, 20000 + Math.min(highPrefix.length, 200));
+	if (!Number.isFinite(score)) return -Infinity;
+	if (matchText(lowValue).includes("low") || String(lowValue || "").includes("低")) score += 500;
+	return score;
+}
+
+function matchingLowModelForHigh(highValue, lowValues) {
+	let best = "";
+	let bestScore = -Infinity;
+	(lowValues || []).forEach((value, index) => {
+		const score = scoreLowModelCandidate(highValue, value);
+		if (score > bestScore || (score === bestScore && index === 0)) {
+			best = String(value || "");
+			bestScore = score;
+		}
+	});
+	return Number.isFinite(bestScore) ? best : "";
+}
+
+function syncPairedLowModelFromHigh(node, cfg, highSlot, highIndex, highValue, state) {
+	if (!isHighModelSlot(highSlot) || !String(highValue || "").trim()) return;
+	const pair = findPairedLowSlot(cfg, highSlot, highIndex);
+	if (!pair) return;
+	const lowSlot = pair.slot;
+	const lowWidgetName = `file_${pair.index + 1}`;
+	const lowWidget = getWidget(node, lowWidgetName);
+	if (!lowWidget) return;
+	const folder = String(lowSlot.folder || "");
+	const sourceList = state?.folders?.[folder] || comboValues(lowWidget);
+	const lowValues = filterList(
+		sourceList,
+		lowSlot.keywords || [],
+		String(lowSlot.kind || "") === "name_any",
+		lowSlot.fallback_keywords || []
+	);
+	const matched = matchingLowModelForHigh(highValue, lowValues);
+	if (!matched || String(lowWidget.value ?? "") === matched) return;
+	if (typeof lowWidget.__gjjVUSetValue === "function") {
+		lowWidget.__gjjVUSetValue(matched, false);
+	} else {
+		lowWidget.value = matched;
+		lowWidget.callback?.(matched);
+	}
+	saveWidgetValues(node);
+}
+
+function expectedModelName(slot) {
+	const preferred = String(slot?.required_name || slot?.preferred_name || slot?.secondary_name || "").trim();
+	if (preferred) return preferred;
+	const words = Array.isArray(slot?.keywords) ? slot.keywords.map(String).filter(Boolean) : [];
+	if (words.length) return words.join(" ");
+	return String(slot?.label || slot?.id || "模型").trim();
+}
+
+function modelRelPath(folder, filename) {
+	const cleanFolder = String(folder || "").replace(/^models[\\/]/i, "").replace(/^[/\\]+|[/\\]+$/g, "");
+	const cleanName = String(filename || "").replace(/^[/\\]+|[/\\]+$/g, "");
+	return cleanFolder ? `models/${cleanFolder}/${cleanName}` : `models/${cleanName}`;
+}
+
+function downloadUrlForSlot(slot, expectedName) {
+	const explicit = String(slot?.download_url || "").trim();
+	if (explicit) return explicit;
+	const filename = String(expectedName || "").trim();
+	return filename ? `https://huggingface.co/models?search=${encodeURIComponent(filename)}` : "";
+}
+
+async function copyAndFlash(button, text, restoreLabel) {
+	const oldText = button.textContent;
+	const ok = await GJJ_Utils.copyTextToClipboard(text);
+	button.textContent = ok ? "✅ 已复制" : "复制失败";
+	button.classList.toggle("copied", ok);
+	clearTimeout(button.__gjjVUMissingTimer);
+	button.__gjjVUMissingTimer = setTimeout(() => {
+		button.textContent = restoreLabel || oldText;
+		button.classList.remove("copied");
+	}, 1100);
+}
+
+function createMissingModelHint(node, slot, folder, expectedName) {
+	const url = downloadUrlForSlot(slot, expectedName);
+	const row = document.createElement("div");
+	row.className = "gjj-vu-missing-row";
+	const message = document.createElement("div");
+	message.className = "gjj-vu-missing-text";
+	message.textContent = `缺失：${expectedName}`;
+	message.title = `请放到 ${modelRelPath(folder, expectedName)}`;
+
+	const copyName = document.createElement("button");
+	copyName.type = "button";
+	copyName.className = "gjj-vu-missing-btn";
+	copyName.textContent = "📋 名称";
+	copyName.title = `复制模型文件名\n${expectedName}`;
+	copyName.addEventListener("click", (event) => {
+		event.preventDefault(); event.stopPropagation();
+		copyAndFlash(copyName, expectedName, "📋 名称");
+	});
+	protect(copyName);
+
+	const download = document.createElement("button");
+	download.type = "button";
+	download.className = "gjj-vu-missing-btn";
+	download.textContent = "🌏 地址";
+	download.title = url ? `打开模型下载/搜索地址\n${url}` : "当前预设没有提供下载地址";
+	download.disabled = !url;
+	download.addEventListener("click", (event) => {
+		event.preventDefault(); event.stopPropagation();
+		if (!url) return;
+		window.open(url, "_blank", "noopener,noreferrer");
+	});
+	protect(download);
+
+	row.append(message, copyName, download);
+	return row;
+}
+
 function createSearchableSelect(node, name, values, onChange, labels = null, opts = {}) {
 	const w = getWidget(node, name);
 	const list = Array.isArray(values) && values.length ? values.map(String) : comboValues(w);
@@ -301,7 +575,9 @@ function createSearchableSelect(node, name, values, onChange, labels = null, opt
 
 	const setVisualValue = (value) => {
 		const raw = String(value ?? "");
-		text.textContent = displayNameForValue(raw, optionLabels) || "未选择";
+		const missingText = String(opts.missingText || "").trim();
+		button.classList.toggle("missing", !!missingText);
+		text.textContent = missingText || displayNameForValue(raw, optionLabels) || "未选择";
 		button.title = opts.title || raw || "未选择";
 	};
 
@@ -345,7 +621,7 @@ function createSearchableSelect(node, name, values, onChange, labels = null, opt
 			const words = splitWords(searchText);
 			let shown = optionValues.filter((value) => {
 				const label = displayNameForValue(value, optionLabels);
-				const hay = `${value} ${label}`.toLowerCase().replaceAll("\\", "/");
+				const hay = matchText(`${value} ${label}`);
 				return words.every((word) => hay.includes(word));
 			});
 			shown = shown.slice(0, 160);
@@ -561,17 +837,18 @@ function buildDom(node) {
 		.gjj-vu-loader .gjj-vu-small-label { pointer-events:none; }
 		.gjj-vu-loader .gjj-vu-combo-button,
 		.gjj-vu-loader .gjj-vu-refresh,
+		.gjj-vu-loader .gjj-vu-broadcast,
 		.gjj-vu-loader .gjj-vu-toggle,
 		.gjj-vu-loader input,
 		.gjj-vu-loader button,
 		.gjj-vu-loader select { pointer-events:auto; }
-		.gjj-vu-top { display:grid; grid-template-columns:minmax(0,1fr) 34px; gap:6px; align-items:center; min-width:0; }
+		.gjj-vu-top { display:grid; grid-template-columns:minmax(0,1fr) 34px 34px; gap:6px; align-items:center; min-width:0; }
 		.gjj-vu-row { display:grid; grid-template-columns:96px minmax(0,1fr) 72px; gap:6px; align-items:center; min-width:0; margin-bottom:4px; }
 		.gjj-vu-row.no-dtype { grid-template-columns:108px minmax(0,1fr); }
 		.gjj-vu-row.has-gear.no-dtype { grid-template-columns:108px minmax(0,1fr) 30px; }
 		.gjj-vu-row.has-gear:not(.no-dtype) { grid-template-columns:88px minmax(0,1fr) 68px 30px; }
 		.gjj-vu-label, .gjj-vu-small-label { color:#b9c8cc; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-		.gjj-vu-refresh, .gjj-vu-toggle, .gjj-vu-combo-button {
+		.gjj-vu-refresh, .gjj-vu-broadcast, .gjj-vu-toggle, .gjj-vu-combo-button {
 			width:100%; height:28px; min-width:0; padding:3px 7px; border:1px solid #33464e; border-radius:7px;
 			background:#2b2d30; color:#f1f5f5; outline:none; font-size:12px;
 		}
@@ -599,7 +876,26 @@ function buildDom(node) {
 		.gjj-vu-combo-button { display:flex; align-items:center; justify-content:space-between; gap:6px; cursor:pointer; text-align:left; }
 		.gjj-vu-combo-text { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
 		.gjj-vu-combo-arrow { color:#9fb0b7; flex:0 0 auto; }
-		.gjj-vu-refresh, .gjj-vu-toggle { background:#24282b; color:#cdd5d8; cursor:pointer; padding:0; text-align:center; }
+		.gjj-vu-combo-button.missing { border-color:#ef4444; background:#3a1518; color:#fecaca; }
+		.gjj-vu-combo-button.missing .gjj-vu-combo-text { color:#fecaca; font-weight:800; }
+		.gjj-vu-row.missing .gjj-vu-label { color:#fecaca; font-weight:700; }
+		.gjj-vu-missing-row {
+			display:grid; grid-template-columns:minmax(0,1fr) 64px 64px; gap:6px; align-items:center; min-width:0;
+			margin:-1px 0 6px 0; padding:5px 6px; border:1px solid rgba(239,68,68,.52); border-radius:7px;
+			background:rgba(127,29,29,.22); color:#fecaca; pointer-events:auto;
+		}
+		.gjj-vu-missing-text { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; font-weight:700; }
+		.gjj-vu-missing-btn {
+			height:24px; min-width:0; padding:0 5px; border:1px solid rgba(248,113,113,.5); border-radius:6px;
+			background:#3a1518; color:#ffe4e6; font-size:11px; font-weight:700; cursor:pointer; white-space:nowrap;
+		}
+		.gjj-vu-missing-btn:hover { background:#4a1d21; }
+		.gjj-vu-missing-btn.copied { border-color:rgba(74,222,128,.7); background:#14532d; color:#dcfce7; }
+		.gjj-vu-missing-btn:disabled { opacity:.42; cursor:not-allowed; }
+		.gjj-vu-refresh, .gjj-vu-broadcast, .gjj-vu-toggle { background:#24282b; color:#cdd5d8; cursor:pointer; padding:0; text-align:center; }
+		.gjj-vu-broadcast.on,
+		.gjj-vu-broadcast[data-value="true"] { border-color:#69b980; background:#20362f; color:#ecfff1; }
+		.gjj-vu-broadcast:hover { border-color:#6aa6b8; background:#2c3b43; }
 		.gjj-vu-toggle[data-value="true"] { border-color:#4f8f7a; background:#20362f; color:#dff8ea; }
 		.gjj-vu-toggle[data-value="external"] { border-color:#4b5860; background:#1d2327; color:#9caab0; cursor:default; }
 		.gjj-vu-lora-bar { display:grid; grid-template-columns:74px 82px minmax(0,1fr); gap:6px; align-items:center; min-width:0; }
@@ -630,7 +926,7 @@ function buildDom(node) {
 	refresh.title = "重新读取 models 目录和配置";
 	protect(refresh);
 	refresh.addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); refreshBackendLists(node, true); });
-	top.append(configBox, refresh);
+	top.append(configBox, refresh, createBroadcastButton(node));
 	wrap.appendChild(top);
 
 	const sep = document.createElement("div"); sep.className = "gjj-vu-sep"; wrap.appendChild(sep);
@@ -752,6 +1048,9 @@ function boolText(value) {
 function settingName(suffix, index) {
 	return `${suffix}_${index}`;
 }
+function settingFieldName(def, index) {
+	return def?.name || settingName(def?.suffix || "", index);
+}
 function extraKindFor(slot) {
 	const kind = String(slot?.kind || "").replaceAll("-", "_").toLowerCase();
 	if (kind === "vace_model" || kind === "extra_model") return "vace";
@@ -761,8 +1060,29 @@ function extraKindFor(slot) {
 	return kind;
 }
 function paramDefsForSlot(node, slot) {
-	if (!isKijaiNode(node)) return [];
 	const kind = String(slot?.kind || "");
+	if (!isKijaiNode(node)) {
+		const params = [];
+		if (slotNeedsDtype(slot)) {
+			params.push({
+				suffix: "dtype",
+				label: "dtype",
+				type: "select",
+				values: ensureState(node).dtypes || DEFAULT_DTYPES,
+				defaultValue: "default",
+			});
+		}
+		if (kind === "clip" && String(slot?.loader || "") !== "dual_clip") {
+			params.push({
+				name: "clip_type_override",
+				label: "CLIP类型",
+				type: "select",
+				values: ensureState(node).clipTypes || ["auto"],
+				defaultValue: "auto",
+			});
+		}
+		return params;
+	}
 	const extraKind = extraKindFor(slot);
 	if (kind === "wanvideo_model") {
 		return [
@@ -802,7 +1122,7 @@ function paramDefsForSlot(node, slot) {
 }
 function ensureSettingDefaults(node, slot, index, reset = false) {
 	for (const def of paramDefsForSlot(node, slot)) {
-		const name = settingName(def.suffix, index);
+		const name = settingFieldName(def, index);
 		const w = getWidget(node, name);
 		if (!w) continue;
 		const cur = String(w.value ?? "").trim();
@@ -886,7 +1206,7 @@ function createParamPanel(node, slot, index) {
 	const panel = document.createElement("div");
 	panel.className = "gjj-vu-param-panel";
 	for (const def of defs) {
-		const name = settingName(def.suffix, index);
+		const name = settingFieldName(def, index);
 		const field = document.createElement("div");
 		field.className = "gjj-vu-param-field";
 		const label = document.createElement("div");
@@ -1166,6 +1486,25 @@ function hardRefreshOutputs(node) {
 	try { app.graph?.setDirtyCanvas?.(true, true); } catch (_) {}
 	scheduleLayoutRefresh(node, [0, 48, 160]);
 }
+
+function scheduleAutoReloadAfterPresetChange(node) {
+	if (!node || !node.graph) return;
+	clearTimeout(node.__gjjVUAutoReloadTimer);
+	node.__gjjVUAutoReloadTimer = setTimeout(() => {
+		const reload = window.GJJ_ReloadNode?.reloadNode;
+		if (typeof reload === "function" && node.graph) {
+			try {
+				reload(node);
+				return;
+			} catch (error) {
+				console.warn("[GJJ Video Loader] 预设切换后自动重新加载节点失败，改用软刷新。", error);
+			}
+		}
+		hardRefreshOutputs(node);
+		scheduleLayoutRefresh(node, [0, 80, 220, 420]);
+	}, 120);
+}
+
 function ensureActiveOutputCount(node, count) {
 	if (!Array.isArray(node.outputs)) node.outputs = [];
 	const target = Math.max(0, Math.min(MAX_SLOTS, Number(count) || 0));
@@ -1384,6 +1723,8 @@ function applyConfig(node, opts = {}) {
 		const allowAny = String(slot.kind || "") === "name_any";
 		const values = filterList(list, slot.keywords || [], allowAny, slot.fallback_keywords || []);
 		const secondaryValues = Array.isArray(list) ? list.map(String) : [];
+		const expectedName = expectedModelName(slot);
+		const missingModel = isKijaiNode(node) && !values.length && !!expectedName;
 		const fileName = `file_${i}`;
 		const secondaryFileName = `secondary_file_${i}`;
 		const dtypeName = `dtype_${i}`;
@@ -1404,16 +1745,27 @@ function applyConfig(node, opts = {}) {
 		const row = document.createElement("div");
 		const params = paramDefsForSlot(node, slot);
 		const hasParams = params.length > 0;
-		row.className = `gjj-vu-row ${slotNeedsDtype(slot) ? "" : "no-dtype"} ${hasParams ? "has-gear" : ""}`;
+		const showInlineDtype = slotNeedsDtype(slot) && !params.some((def) => def.suffix === "dtype");
+		row.className = `gjj-vu-row ${showInlineDtype ? "" : "no-dtype"} ${hasParams ? "has-gear" : ""}`;
+		row.classList.toggle("missing", missingModel);
 		if (isLoraSlot(slot) && !loraEnabled) row.style.display = "none";
 		const label = document.createElement("div");
 		label.className = "gjj-vu-label";
 		const icon = isLoraSlot(slot) ? "🟠" : officialIconFor(slot);
 		label.textContent = `${icon} ${String(slot.label || slot.id || `模型${i}`)}`;
 		label.title = slotTitle(slot, folder);
-		const select = createSearchableSelect(node, fileName, values, () => saveWidgetValues(node), null, { placeholder: "输入关键词实时过滤", title: label.title });
+		const select = createSearchableSelect(node, fileName, values, (value) => {
+			saveWidgetValues(node);
+			syncPairedLowModelFromHigh(node, cfg, slot, index, value, state);
+		}, null, {
+			placeholder: "输入关键词实时过滤",
+			title: missingModel
+				? `${label.title}\n缺失：${expectedName}\n请放到 ${modelRelPath(folder, expectedName)}`
+				: label.title,
+			missingText: missingModel ? `缺失：${expectedName}` : "",
+		});
 		row.append(label, select);
-		if (slotNeedsDtype(slot)) {
+		if (showInlineDtype) {
 			const dtype = createSelect(node, dtypeName, state.dtypes || ["default"], () => saveWidgetValues(node));
 			dtype.title = "加载 dtype；default 使用 ComfyUI 默认策略。";
 			row.append(dtype);
@@ -1421,6 +1773,10 @@ function applyConfig(node, opts = {}) {
 		if (hasParams) row.append(createSettingsGear(node, slot, i));
 		rows.appendChild(row);
 		node.__gjjVUVisibleRowCount += 1;
+		if (missingModel && !(isLoraSlot(slot) && !loraEnabled)) {
+			rows.appendChild(createMissingModelHint(node, slot, folder, expectedName));
+			node.__gjjVUVisibleRowCount += 1;
+		}
 		if (hasParams && !(isLoraSlot(slot) && !loraEnabled) && isSettingsOpen(node, slot, i)) {
 			rows.appendChild(createParamPanel(node, slot, i));
 			node.__gjjVUVisibleRowCount += Math.max(1, Math.ceil(params.length / 2));
@@ -1446,6 +1802,7 @@ function applyConfig(node, opts = {}) {
 	node.__gjjVULoraToggleSync?.();
 	saveWidgetValues(node);
 	scheduleLayoutRefresh(node, [0, 48, 160]);
+	if (opts?.userConfigChanged) scheduleAutoReloadAfterPresetChange(node);
 }
 
 function refreshNode(node) {
@@ -1467,6 +1824,7 @@ function stabilize(node) {
 	rememberNodeWidth(node);
 	restoreWidgetValues(node);
 	ensureDom(node);
+	updateBroadcastButton(node);
 	hideNativeWidgets(node);
 	applyConfig(node);
 	refreshBackendLists(node, true);
@@ -1495,6 +1853,7 @@ app.registerExtension({
 			if (serializedNode) {
 				serializedNode.properties = serializedNode.properties || {};
 				serializedNode.properties[WIDTH_PROPERTY] = this.properties?.[WIDTH_PROPERTY] || currentNodeWidth(this);
+				serializedNode.properties[BROADCAST_PROPERTY] = broadcastEnabled(this);
 			}
 			saveWidgetValues(this, serializedNode);
 		};

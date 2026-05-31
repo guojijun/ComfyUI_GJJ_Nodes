@@ -8,6 +8,7 @@ const DEFAULT_TEMPLATE = "采样帧数（SampleFrames）[INT]：93\n宽度（Wid
 const MAX_VARIABLES = 32;
 const INTERNAL_WIDGETS = new Set([TEMPLATE_WIDGET, VALUES_WIDGET]);
 const OUTPUTS_VISIBLE_PROPERTY = "gjj_template_set_variables_outputs_visible";
+const BROADCAST_PROPERTY = "gjj_variable_broadcast_enabled";
 const SAVED_SIZE = "gjj_template_set_variables_size";
 const MIN_WIDTH = 240;
 const DEFAULT_WIDTH = 300;
@@ -106,6 +107,13 @@ function parseValue(text) {
 	return text;
 }
 
+function numericLiteralType(rawText) {
+	const raw = String(rawText ?? "").trim();
+	if (/^[-+]?(?:\d+\.\d*|\.\d+)(?:[eE][-+]?\d+)?$/.test(raw) || /^[-+]?\d+[eE][-+]?\d+$/.test(raw)) return "FLOAT";
+	if (/^[-+]?\d+$/.test(raw)) return "INT";
+	return "";
+}
+
 function inferType(rawText, parsedValue) {
 	const raw = String(rawText ?? "").trim();
 	const forced = raw.match(/^\s*(int|float|str|string|bool|boolean|json)\s*\(/i);
@@ -117,6 +125,8 @@ function inferType(rawText, parsedValue) {
 		if (kind === "json") return "*";
 		return "STRING";
 	}
+	const numericType = numericLiteralType(raw);
+	if (numericType) return numericType;
 	if (typeof parsedValue === "boolean") return "BOOLEAN";
 	if (Number.isInteger(parsedValue)) return "INT";
 	if (typeof parsedValue === "number" && Number.isFinite(parsedValue)) return "FLOAT";
@@ -288,10 +298,83 @@ function outputsVisible(node) {
 	return Boolean(node?.__gjjTemplateSetOutputsVisible);
 }
 
+function outputHasLinks(output) {
+	if (!output) return false;
+	if (Array.isArray(output.links)) return output.links.length > 0;
+	return output.link != null;
+}
+
+function inputHasRealLink(input) {
+	return input?.link != null;
+}
+
+function getGraphLink(node, linkId) {
+	if (linkId == null) return null;
+	const links = node?.graph?.links || app.graph?.links;
+	if (!links) return null;
+	if (Array.isArray(links)) return links.find((link) => String(link?.id ?? link?.[0]) === String(linkId)) || null;
+	return links[linkId] || links[String(linkId)] || null;
+}
+
+function setLinkSlot(link, side, nodeId, slot, type) {
+	if (!link) return;
+	if (Array.isArray(link)) {
+		if (side === "input") {
+			link[3] = nodeId;
+			link[4] = slot;
+		} else {
+			link[1] = nodeId;
+			link[2] = slot;
+		}
+		if (type) link[5] = type;
+		return;
+	}
+	if (side === "input") {
+		link.target_id = nodeId;
+		link.target_slot = slot;
+	} else {
+		link.origin_id = nodeId;
+		link.origin_slot = slot;
+	}
+	if (type) link.type = type;
+}
+
+function repairInputLinkSlots(node) {
+	if (!Array.isArray(node?.inputs)) return;
+	for (let index = 0; index < node.inputs.length; index += 1) {
+		const input = node.inputs[index];
+		if (!inputHasRealLink(input)) continue;
+		setLinkSlot(getGraphLink(node, input.link), "input", node.id, index, input.type);
+	}
+}
+
+function repairOutputLinkSlots(node) {
+	if (!Array.isArray(node?.outputs)) return;
+	for (let index = 0; index < node.outputs.length; index += 1) {
+		const output = node.outputs[index];
+		for (const linkId of output?.links || []) {
+			setLinkSlot(getGraphLink(node, linkId), "output", node.id, index, output.type);
+		}
+	}
+}
+
+function hasLinkedOutputs(node) {
+	return Array.isArray(node?.outputs) && node.outputs.some((output) => outputHasLinks(output));
+}
+
+function highestLinkedOutputIndex(node) {
+	if (!Array.isArray(node?.outputs)) return -1;
+	let highest = -1;
+	for (let index = 0; index < node.outputs.length; index += 1) {
+		if (outputHasLinks(node.outputs[index])) highest = index;
+	}
+	return highest;
+}
+
 function setOutputsVisible(node, visible) {
 	if (!node) return false;
 	node.properties = node.properties || {};
-	const next = Boolean(visible);
+	const next = Boolean(visible) || hasLinkedOutputs(node);
 	node.properties[OUTPUTS_VISIBLE_PROPERTY] = next;
 	node.__gjjTemplateSetOutputsVisible = next;
 	updateOutputToggle(node);
@@ -304,14 +387,50 @@ function ensureOutputVisibilityState(node) {
 	if (!hasOwn(node.properties, OUTPUTS_VISIBLE_PROPERTY)) {
 		node.properties[OUTPUTS_VISIBLE_PROPERTY] = Boolean(node.__gjjTemplateSetOutputsVisible);
 	}
+	if (broadcastEnabled(node) || hasLinkedOutputs(node)) {
+		node.properties[OUTPUTS_VISIBLE_PROPERTY] = true;
+	}
 	node.__gjjTemplateSetOutputsVisible = Boolean(node.properties[OUTPUTS_VISIBLE_PROPERTY]);
 	updateOutputToggle(node);
 	return node.__gjjTemplateSetOutputsVisible;
 }
 
+function outputDisplayName(field, index) {
+	const label = String(field?.label || "").trim();
+	const key = String(field?.key || "").trim();
+	if (!label && !key) return `变量 ${index + 1}`;
+	if (!key || key === label || /^var_\d+$/i.test(key)) return label || key;
+	return `${label} · ${key}`;
+}
+
+function outputTooltip(field, displayName) {
+	const label = field?.displayLabel || displayName;
+	const type = field?.type || "*";
+	const hint = field?.tooltip ? `\n说明：${field.tooltip}` : "";
+	return `${label}\n变量Key：${field?.key || displayName}\n接口类型：${type}${hint}`;
+}
+
+function applyOutputMetadata(out, field, index, visible) {
+	if (!out) return;
+	const displayName = outputDisplayName(field, index);
+	out.name = displayName;
+	out.label = displayName;
+	out.localized_name = displayName;
+	out.type = field?.type || "*";
+	out.tooltip = outputTooltip(field, displayName);
+	out.gjj_template_set_key = field?.key || "";
+	out.gjj_template_set_label = field?.label || "";
+	out.hidden = !visible;
+	out.visible = visible;
+	out.disabled = !visible;
+	out.not_show = !visible;
+	out.__gjj_template_set_hidden = !visible;
+}
+
 function updateOutputToggle(node) {
 	const button = node?.__gjjTemplateSetOutputToggle;
 	const visible = outputsVisible(node);
+	const fields = parseTemplate(getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE));
 	for (let index = 0; index < (node?.outputs?.length || 0); index += 1) {
 		const output = node.outputs[index];
 		if (!output) continue;
@@ -323,14 +442,55 @@ function updateOutputToggle(node) {
 		if (typeof node.hideOutput === "function") {
 			try { node.hideOutput(index, !visible); } catch (_) {}
 		}
+		if (fields[index]) applyOutputMetadata(output, fields[index], index, visible);
 	}
 	if (button) {
 		button.classList.toggle("active", visible);
 		button.setAttribute("aria-pressed", String(visible));
 		button.title = visible
-			? "隐藏右侧输出插口；仍保留全局变量给 GJJ 变量读取节点使用。"
+			? (broadcastEnabled(node)
+				? "广播开启时保持右侧接口显示，隐藏线会从真实接口位置出发。"
+				: "隐藏右侧输出插口；仍保留全局变量给 GJJ 变量读取节点使用。")
 			: "显示右侧输出插口，便于直接连线取值。";
 	}
+}
+
+function broadcastEnabled(node) {
+	return Boolean(node?.properties?.[BROADCAST_PROPERTY]);
+}
+
+function notifyBroadcastChanged(node) {
+	try {
+		window.dispatchEvent(new CustomEvent("gjj-variable-broadcast-updated", {
+			detail: { nodeId: node?.id, enabled: broadcastEnabled(node) },
+		}));
+	} catch (_) {}
+}
+
+function updateBroadcastToggle(node) {
+	const button = node?.__gjjTemplateSetBroadcastToggle;
+	const enabled = broadcastEnabled(node);
+	if (!button) return;
+	button.classList.toggle("active", enabled);
+	button.setAttribute("aria-pressed", String(enabled));
+	button.title = enabled
+		? "已开启：广播到同类型、同名称且没有真实连线的输入口；右侧接口会保持显示以校准隐藏线位置。"
+		: "开启广播：把模板变量作为隐藏连线发送到同类型、同名称的空输入口，并自动打开右侧接口。";
+}
+
+function setBroadcastEnabled(node, enabled) {
+	if (!node) return false;
+	node.properties = node.properties || {};
+	const next = Boolean(enabled);
+	node.properties[BROADCAST_PROPERTY] = next;
+	if (next) {
+		setOutputsVisible(node, true);
+	}
+	updateBroadcastToggle(node);
+	if (next) stabilizeNode(node);
+	else setDirty(node);
+	notifyBroadcastChanged(node);
+	return next;
 }
 
 function setDirty(node) {
@@ -516,6 +676,52 @@ function setupVariableInput(node, field) {
 	return input;
 }
 
+function inputMatchesField(input, field) {
+	if (!input || !field) return false;
+	const aliases = new Set(inputAliasesForField(field));
+	return (
+		aliases.has(String(input?.name || ""))
+		|| aliases.has(inputWidgetName(input))
+		|| aliases.has(String(input?.label || ""))
+		|| aliases.has(String(input?.localized_name || ""))
+	);
+}
+
+function reorderVariableInputs(node, fields) {
+	if (!Array.isArray(node?.inputs)) return;
+	const chosen = [];
+	const used = new Set();
+	const linkedExtras = [];
+	for (const field of fields) {
+		const matches = node.inputs
+			.map((input, index) => ({ input, index }))
+			.filter(({ input }) => !used.has(input) && inputMatchesField(input, field));
+		const picked = matches.find(({ input }) => inputHasRealLink(input)) || matches[0];
+		if (!picked) continue;
+		chosen.push(picked.input);
+		used.add(picked.input);
+		for (const { input } of matches) {
+			if (input === picked.input || used.has(input)) continue;
+			if (inputHasRealLink(input)) {
+				linkedExtras.push(input);
+				used.add(input);
+			}
+		}
+	}
+	const extras = node.inputs.filter((input) => !used.has(input));
+	const next = [...chosen, ...linkedExtras, ...extras];
+	if (next.length !== node.inputs.length) return;
+	let changed = false;
+	for (let index = 0; index < next.length; index += 1) {
+		if (next[index] !== node.inputs[index]) {
+			changed = true;
+			break;
+		}
+	}
+	if (changed) node.inputs = next;
+	repairInputLinkSlots(node);
+}
+
 function inputWidgetName(input) {
 	const widgetName = String(input?.widget?.name || "");
 	if (widgetName) return widgetName;
@@ -538,6 +744,7 @@ function cleanupVariableInputs(node, fieldNames, fieldAliases = new Set()) {
 			|| fieldAliases.has(label)
 			|| fieldAliases.has(localizedName)
 		) continue;
+		if (inputHasRealLink(input)) continue;
 		removeInputByIndex(node, i);
 	}
 }
@@ -570,32 +777,29 @@ function repairOutput(node, field, index) {
 	const out = node.outputs?.[index];
 	if (!out) return;
 	const visible = outputsVisible(node);
-	out.name = field.displayLabel || field.label;
-	out.label = field.displayLabel || field.label;
-	out.localized_name = field.displayLabel || field.label;
-	out.type = field.type || "*";
-	out.tooltip = field.tooltip || `${field.label}（变量名：${field.key}）`;
-	out.gjj_template_set_key = field.key;
-	out.hidden = !visible;
-	out.visible = visible;
-	out.disabled = !visible;
-	out.not_show = !visible;
-	out.__gjj_template_set_hidden = !visible;
 	if (typeof node.hideOutput === "function") {
 		try { node.hideOutput(index, !visible); } catch (_) {}
 	}
+	applyOutputMetadata(out, field, index, visible);
 }
 
 function updateOutputs(node, fields) {
 	if (!Array.isArray(node.outputs)) node.outputs = [];
-	const target = outputsVisible(node) ? Math.max(0, Math.min(MAX_VARIABLES, fields.length)) : 0;
-	for (let i = node.outputs.length - 1; i >= target; i -= 1) {
+	const visibleTarget = outputsVisible(node) ? Math.max(0, Math.min(MAX_VARIABLES, fields.length)) : 0;
+	const preserveTarget = Math.max(visibleTarget, highestLinkedOutputIndex(node) + 1);
+	for (let i = node.outputs.length - 1; i >= preserveTarget; i -= 1) {
+		if (outputHasLinks(node.outputs[i])) continue;
 		try { node.removeOutput?.(i); } catch (_) { node.outputs.splice(i, 1); }
 	}
-	while (node.outputs.length < target) {
+	while (node.outputs.length < visibleTarget) {
 		try { node.addOutput?.("变量", "*"); } catch (_) { node.outputs.push({ name: "变量", type: "*", links: [] }); }
 	}
-	for (let i = 0; i < target; i += 1) repairOutput(node, fields[i], i);
+	for (let i = 0; i < visibleTarget; i += 1) repairOutput(node, fields[i], i);
+	for (let i = visibleTarget; i < node.outputs.length; i += 1) {
+		if (!outputHasLinks(node.outputs[i]) || !fields[i]) continue;
+		applyOutputMetadata(node.outputs[i], fields[i], i, true);
+	}
+	repairOutputLinkSlots(node);
 }
 
 function ensureStyles() {
@@ -736,6 +940,10 @@ function buildDom(node) {
 	outputToggle.type = "button";
 	outputToggle.className = "gjj-template-set-button";
 	outputToggle.textContent = "🔌";
+	const broadcastToggle = document.createElement("button");
+	broadcastToggle.type = "button";
+	broadcastToggle.className = "gjj-template-set-button";
+	broadcastToggle.textContent = "🔍";
 	const refresh = document.createElement("button");
 	refresh.type = "button";
 	refresh.className = "gjj-template-set-button";
@@ -743,7 +951,7 @@ function buildDom(node) {
 	refresh.title = "重新解析模板并刷新输入 / 输出口。";
 	const count = document.createElement("span");
 	count.className = "gjj-template-set-count";
-	toolbar.append(gear, outputToggle, refresh, count);
+	toolbar.append(gear, outputToggle, broadcastToggle, refresh, count);
 
 	const panel = document.createElement("div");
 	panel.className = "gjj-template-set-panel";
@@ -762,7 +970,7 @@ function buildDom(node) {
 		"示例：批量图（BATCH_IMAGE）[GJJ_BATCH_IMAGE,IMAGE]：",
 		"未写 [接口类型] 时，会根据默认值智能判断。",
 		"支持 int(1)、float(1)、true / false、string(text)、json({})。",
-		"默认隐藏右侧插口；变量读取节点提交前会解析到真实变量来源。点 🔌 可显示同名输出口。",
+		"默认隐藏右侧插口；变量读取节点提交前会解析到真实变量来源。点 🔌 可显示同名输出口；开启 🔍 广播时会自动打开接口以校准隐藏线位置。",
 	].join("\n");
 	const actions = document.createElement("div");
 	actions.className = "gjj-template-set-actions";
@@ -779,7 +987,7 @@ function buildDom(node) {
 	root.append(toolbar, panel);
 
 	const stop = (event) => event.stopPropagation();
-	for (const el of [root, gear, outputToggle, refresh, panel, textarea, cancel, ok]) {
+	for (const el of [root, gear, outputToggle, broadcastToggle, refresh, panel, textarea, cancel, ok]) {
 		for (const eventName of ["pointerdown", "mousedown", "click", "keydown", "keyup", "wheel", "dblclick", "contextmenu"]) {
 			el.addEventListener(eventName, stop);
 		}
@@ -789,12 +997,17 @@ function buildDom(node) {
 		const fields = parseTemplate(getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE));
 		count.textContent = `${fields.length} 个变量 · ${outputsVisible(node) ? "输出开启" : "全局变量"}`;
 		updateOutputToggle(node);
+		updateBroadcastToggle(node);
 	};
 	outputToggle.addEventListener("click", (event) => {
 		event.preventDefault();
 		setOutputsVisible(node, !outputsVisible(node));
 		stabilizeNode(node);
 		refreshNode(node, { force: true });
+	});
+	broadcastToggle.addEventListener("click", (event) => {
+		event.preventDefault();
+		setBroadcastEnabled(node, !broadcastEnabled(node));
 	});
 	gear.addEventListener("click", (event) => {
 		event.preventDefault();
@@ -827,7 +1040,9 @@ function buildDom(node) {
 	node.__gjjTemplateSetUpdateCount = updateCount;
 	node.__gjjTemplateSetContainer = root;
 	node.__gjjTemplateSetOutputToggle = outputToggle;
+	node.__gjjTemplateSetBroadcastToggle = broadcastToggle;
 	updateOutputToggle(node);
+	updateBroadcastToggle(node);
 	updateCount();
 	return root;
 }
@@ -867,6 +1082,7 @@ function stabilizeNode(node) {
 			setupVariableWidget(node, field, values);
 			setupVariableInput(node, field);
 		}
+		reorderVariableInputs(node, fields);
 		reorderVariableWidgets(node, fields);
 		updateOutputs(node, fields);
 		saveValues(node, fields);
@@ -874,6 +1090,7 @@ function stabilizeNode(node) {
 		node.properties.gjj_template_set_variables_template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
 		saveFieldSchema(node, fields);
 		node.__gjjTemplateSetUpdateCount?.();
+		updateBroadcastToggle(node);
 		notifySetGetNodes(node);
 		refreshNode(node);
 	} finally {
@@ -887,6 +1104,21 @@ function scheduleStabilize(node, ms = 32) {
 		stabilizeNode(node);
 		setTimeout(() => compactNodeSize(node), 80);
 		setTimeout(() => compactNodeSize(node), 240);
+	}, ms);
+}
+
+function scheduleConnectionRepair(node, ms = 0) {
+	clearTimeout(node.__gjjTemplateSetConnectionTimer);
+	node.__gjjTemplateSetConnectionTimer = setTimeout(() => {
+		if (!node || node.__gjjTemplateSetStabilizing) return;
+		const fields = parseTemplate(getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE));
+		reorderVariableInputs(node, fields);
+		repairInputLinkSlots(node);
+		repairOutputLinkSlots(node);
+		saveValues(node, fields);
+		node.__gjjTemplateSetUpdateCount?.();
+		notifySetGetNodes(node);
+		refreshNode(node, { resize: false });
 	}, ms);
 }
 
@@ -924,6 +1156,13 @@ app.registerExtension({
 				: false;
 			this.properties = this.properties || {};
 			this.properties[OUTPUTS_VISIBLE_PROPERTY] = this.__gjjTemplateSetOutputsVisible;
+			this.properties[BROADCAST_PROPERTY] = hasOwn(props, BROADCAST_PROPERTY)
+				? Boolean(props[BROADCAST_PROPERTY])
+				: Boolean(this.properties[BROADCAST_PROPERTY]);
+			if (this.properties[BROADCAST_PROPERTY]) {
+				this.__gjjTemplateSetOutputsVisible = true;
+				this.properties[OUTPUTS_VISIBLE_PROPERTY] = true;
+			}
 			if (Array.isArray(props[SAVED_SIZE])) {
 				this.__gjjTemplateSetSavedSize = props[SAVED_SIZE].map(Number);
 				this.__gjjTemplateSetPreferSavedSize = true;
@@ -950,6 +1189,8 @@ app.registerExtension({
 				serializedNode.properties.gjj_template_set_variables_setnode = true;
 				serializedNode.properties[OUTPUTS_VISIBLE_PROPERTY] = outputsVisible(this);
 				this.properties[OUTPUTS_VISIBLE_PROPERTY] = serializedNode.properties[OUTPUTS_VISIBLE_PROPERTY];
+				serializedNode.properties[BROADCAST_PROPERTY] = broadcastEnabled(this);
+				this.properties[BROADCAST_PROPERTY] = serializedNode.properties[BROADCAST_PROPERTY];
 				const naturalHeight = naturalNodeHeight(this);
 				const currentHeight = Number(this.size?.[1] || MIN_HEIGHT);
 				const saveHeight = currentHeight > naturalHeight + MAX_EXTRA_IDLE_HEIGHT ? naturalHeight : currentHeight;
@@ -975,7 +1216,7 @@ app.registerExtension({
 		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalOnConnectionsChange?.apply(this, args);
-			scheduleStabilize(this);
+			scheduleConnectionRepair(this);
 			return result;
 		};
 	},

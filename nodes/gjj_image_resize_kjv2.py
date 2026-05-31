@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
 import math
 import re
@@ -11,7 +13,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Tuple
 
 import torch
 import torch.nn.functional as F
-from PIL import ImageColor
+from PIL import Image, ImageColor
 
 from nodes import MAX_RESOLUTION
 from comfy.utils import common_upscale
@@ -275,7 +277,9 @@ def _mode(value: Any) -> str:
 
 def _fit(value: Any) -> str:
     text = str(value or "拉伸")
-    if text in ("留边填充", "letterbox", "pad", "padding"):
+    if text in ("补边", "add_border", "border", "border_pad", "pad_only"):
+        return "border"
+    if text in ("留边填充", "留边", "letterbox", "pad", "padding"):
         return "letterbox"
     if text in ("裁剪填满", "crop"):
         return "crop"
@@ -327,13 +331,17 @@ def _default_config() -> Dict[str, Any]:
         "mode": "等比",
         "fit_mode": "留边填充",
         "upscale_method": "兰索斯",
-        "round_to_multiple": "8",
+        "round_to_multiple": "16",
         "pad_color": "#000000",
         "pad_feather": 0,
         "crop_position": "中",
         "device": "CPU",
         "width": 1024,
         "height": 1024,
+        "border_left": 0,
+        "border_top": 0,
+        "border_right": 0,
+        "border_bottom": 0,
         "scale_percent": 100.0,
         "long_side_length": 1024,
         "total_pixel_k": 260,
@@ -603,6 +611,56 @@ def _pack_image_batch(processed: List[torch.Tensor]) -> torch.Tensor:
     return torch.cat(packed, dim=0)
 
 
+def _make_preview_payload(image: Any, max_edge: int = 512, original_width: int = 0, original_height: int = 0) -> Dict[str, Any] | None:
+    """把输出 batch 的第一张图转成前端 canvas 预览用的小 PNG data URL。"""
+    try:
+        if isinstance(image, (list, tuple)) and image:
+            image = image[0]
+        if isinstance(image, dict):
+            image = next((v for v in image.values() if torch.is_tensor(v)), None)
+        if not torch.is_tensor(image):
+            return None
+
+        tensor = image[0] if image.ndim == 4 else image
+        if tensor.ndim != 3:
+            return None
+
+        tensor = tensor.detach().cpu().float()
+        if int(tensor.shape[-1]) == 1:
+            tensor = tensor.repeat(1, 1, 3)
+        elif int(tensor.shape[-1]) > 4:
+            tensor = tensor[..., :4]
+
+        tensor = tensor.clamp(0.0, 1.0)
+        height = int(tensor.shape[0])
+        width = int(tensor.shape[1])
+        channels = int(tensor.shape[2])
+        mode = "RGBA" if channels == 4 else "RGB"
+        if channels < 3:
+            return None
+
+        array = tensor.mul(255.0).round().to(torch.uint8).numpy()
+        pil_image = Image.fromarray(array, mode=mode)
+        if max(pil_image.width, pil_image.height) > int(max_edge):
+            pil_image.thumbnail((int(max_edge), int(max_edge)), Image.Resampling.LANCZOS)
+
+        buffer = io.BytesIO()
+        pil_image.save(buffer, format="PNG", optimize=True)
+        data_url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+        return {
+            "src": data_url,
+            "width": width,
+            "height": height,
+            "original_width": int(original_width or 0),
+            "original_height": int(original_height or 0),
+            "preview_width": int(pil_image.width),
+            "preview_height": int(pil_image.height),
+            "count": int(image.shape[0]) if getattr(image, "ndim", 0) == 4 else 1,
+        }
+    except Exception:
+        return None
+
+
 # ============================================================
 # 图像缩放核心
 # ============================================================
@@ -616,7 +674,7 @@ def _resize_one(image: torch.Tensor, mask: torch.Tensor | None, cfg: Dict[str, A
     fit = _fit(cfg.get("fit_mode"))
     method = _method(cfg.get("upscale_method"))
     position = _position(cfg.get("crop_position"))
-    multiple = cfg.get("round_to_multiple", "8")
+    multiple = cfg.get("round_to_multiple", "16")
 
     if cfg.get("device") == "GPU" and method != "lanczos":
         work_device = model_management.get_torch_device()
@@ -641,8 +699,17 @@ def _resize_one(image: torch.Tensor, mask: torch.Tensor | None, cfg: Dict[str, A
         target_w = max(1, int(round(w0 * scale)))
         target_h = max(1, int(round(h0 * scale)))
 
-    target_w = _ceil_to_multiple(target_w, multiple)
-    target_h = _ceil_to_multiple(target_h, multiple)
+    if fit == "border":
+        border_left = max(0, _to_int(cfg.get("border_left", 0), 0))
+        border_top = max(0, _to_int(cfg.get("border_top", 0), 0))
+        border_right = max(0, _to_int(cfg.get("border_right", 0), 0))
+        border_bottom = max(0, _to_int(cfg.get("border_bottom", 0), 0))
+        target_w = max(1, w0 + border_left + border_right)
+        target_h = max(1, h0 + border_top + border_bottom)
+    else:
+        border_left = border_top = border_right = border_bottom = 0
+        target_w = _ceil_to_multiple(target_w, multiple)
+        target_h = _ceil_to_multiple(target_h, multiple)
 
     img = image.to(work_device)
     msk = None if mask is None else mask
@@ -673,13 +740,20 @@ def _resize_one(image: torch.Tensor, mask: torch.Tensor | None, cfg: Dict[str, A
             value = F.avg_pool2d(value, kernel_size=kernel, stride=1, padding=kernel // 2)
         return value.squeeze(1).clamp(0.0, 1.0).to(dtype=x.dtype)
 
-    # 等比/长边模式本身已经按比例算目标尺寸；fit_mode 不再额外裁剪/补边。
+    # 等比/长边模式本身已经按比例算目标尺寸；适配方式不再额外裁剪/补边。
     if fit == "stretch" or mode in ("等比", "长边"):
         out = upscale_image(img, target_w, target_h)
         out_mask = None if msk is None else upscale_mask(msk, target_w, target_h)
         return out.cpu(), None if out_mask is None else out_mask.cpu(), w0, h0, target_w, target_h
 
-    scale = min(target_w / max(1, w0), target_h / max(1, h0)) if fit == "letterbox" else max(target_w / max(1, w0), target_h / max(1, h0))
+    if fit == "border":
+        fit_w = w0
+        fit_h = h0
+        scale = 1.0
+    else:
+        fit_w = target_w
+        fit_h = target_h
+        scale = min(target_w / max(1, w0), target_h / max(1, h0)) if fit == "letterbox" else max(target_w / max(1, w0), target_h / max(1, h0))
     inner_w = max(1, int(round(w0 * scale)))
     inner_h = max(1, int(round(h0 * scale)))
     resized = upscale_image(img, inner_w, inner_h)
@@ -692,7 +766,7 @@ def _resize_one(image: torch.Tensor, mask: torch.Tensor | None, cfg: Dict[str, A
         out_mask = None if resized_mask is None else resized_mask[:, y:y + target_h, x:x + target_w]
         return out.cpu(), None if out_mask is None else out_mask.cpu(), w0, h0, target_w, target_h
 
-    # Letterbox / Padding：补边颜色只在这里生效。
+    # Letterbox / Border padding：补边颜色只在这里生效。
     rgb = torch.tensor(_parse_color(cfg.get("pad_color")), dtype=resized.dtype, device=resized.device)
     out = torch.zeros((resized.shape[0], target_h, target_w, resized.shape[-1]), dtype=resized.dtype, device=resized.device)
     if resized.shape[-1] >= 3:
@@ -701,8 +775,12 @@ def _resize_one(image: torch.Tensor, mask: torch.Tensor | None, cfg: Dict[str, A
             out[..., 3:4] = 1.0
     else:
         out[..., 0:1] = rgb[0].view(1, 1, 1, 1)
-    x = _axis_offset(target_w - inner_w, position, "x")
-    y = _axis_offset(target_h - inner_h, position, "y")
+    if fit == "border":
+        x = border_left + _axis_offset(fit_w - inner_w, position, "x")
+        y = border_top + _axis_offset(fit_h - inner_h, position, "y")
+    else:
+        x = _axis_offset(target_w - inner_w, position, "x")
+        y = _axis_offset(target_h - inner_h, position, "y")
     out[:, y:y + inner_h, x:x + inner_w, :] = resized
 
     if resized_mask is not None:
@@ -756,6 +834,50 @@ class GJJ_ImageResizeKJv2:
                     "step": 8,
                     "display_name": "📐 目标高度",
                     "tooltip": "目标高度。宽高模式下显示；其它模式隐藏。可手填，也可连接外部 INT。",
+                    "hidden": True,
+                    "display": "hidden",
+                    "forceInput": False,
+                }),
+                "border_left": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": MAX_RESOLUTION,
+                    "step": 8,
+                    "display_name": "⬅️ 左",
+                    "tooltip": "补边模式下左侧预留的补边宽度。会在目标宽度内计算，不会改变目标宽度。",
+                    "hidden": True,
+                    "display": "hidden",
+                    "forceInput": False,
+                }),
+                "border_top": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": MAX_RESOLUTION,
+                    "step": 8,
+                    "display_name": "⬆️ 上",
+                    "tooltip": "补边模式下上侧预留的补边高度。会在目标高度内计算，不会改变目标高度。",
+                    "hidden": True,
+                    "display": "hidden",
+                    "forceInput": False,
+                }),
+                "border_right": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": MAX_RESOLUTION,
+                    "step": 8,
+                    "display_name": "➡️ 右",
+                    "tooltip": "补边模式下右侧预留的补边宽度。会在目标宽度内计算，不会改变目标宽度。",
+                    "hidden": True,
+                    "display": "hidden",
+                    "forceInput": False,
+                }),
+                "border_bottom": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": MAX_RESOLUTION,
+                    "step": 8,
+                    "display_name": "⬇️ 下",
+                    "tooltip": "补边模式下下侧预留的补边高度。会在目标高度内计算，不会改变目标高度。",
                     "hidden": True,
                     "display": "hidden",
                     "forceInput": False,
@@ -818,17 +940,18 @@ GJJ · 🔍 多功能图片缩放
 用途：
 - 单图或 GJJ_BATCH_IMAGE 批量图片缩放。
 - 支持【宽高】【等比】【长边】【像素】四种模式。
-- 支持拉伸 Stretch、留边填充 Letterbox/Padding、裁剪填满 Crop Fill。
+- 支持拉伸 Stretch、补边 Add Border、留边填充 Letterbox/Padding、裁剪填满 Crop Fill。
+- 补边模式按外补画板逻辑使用左/上/右/下扩展画布，并复用边缘羽化参数。
 - 支持动态扩展输出：原始尺寸、输出高度、输出宽度。
 
 输入：
 - 图片：GJJ_BATCH_IMAGE,IMAGE。
 - 遮罩：MASK，可选。
-  - 留边填充且未接入遮罩时，会自动把补边填充区域输出为遮罩。
+  - 补边 / 留边填充且未接入遮罩时，会自动把补边填充区域输出为遮罩。
 
 输出：
 - 图片：GJJ_BATCH_IMAGE,IMAGE，尽量保持输入批量容器结构。
-- 遮罩：MASK。接入遮罩时同步缩放/裁剪；无遮罩留边填充时输出补边区域。
+- 遮罩：MASK。接入遮罩时同步缩放/裁剪；无遮罩补边或留边填充时输出补边区域。
 - 扩展输出 1-3：由前端按钮动态决定。
 
 依赖：
@@ -841,7 +964,7 @@ GJJ · 🔍 多功能图片缩放
 - 如果缺失依赖或输入异常，节点会在控制台打印错误原因，并尽量返回原图，避免中断整个流程。
 """
 
-    def resize(self, image, config_json, unique_id=None, target_width=None, target_height=None, scale_percent=None, long_side_length=None, total_pixel_k=None, aspect_ratio=None, mask=None):
+    def resize(self, image, config_json, unique_id=None, target_width=None, target_height=None, border_left=None, border_top=None, border_right=None, border_bottom=None, scale_percent=None, long_side_length=None, total_pixel_k=None, aspect_ratio=None, mask=None):
         start = time.time()
         try:
             config_json = _unwrap_list_param(config_json)
@@ -850,6 +973,10 @@ GJJ · 🔍 多功能图片缩放
             cfg = _load_config(config_json)
             target_width = _unwrap_list_param(target_width)
             target_height = _unwrap_list_param(target_height)
+            border_left = _unwrap_list_param(border_left)
+            border_top = _unwrap_list_param(border_top)
+            border_right = _unwrap_list_param(border_right)
+            border_bottom = _unwrap_list_param(border_bottom)
             scale_percent = _unwrap_list_param(scale_percent)
             long_side_length = _unwrap_list_param(long_side_length)
             total_pixel_k = _unwrap_list_param(total_pixel_k)
@@ -858,6 +985,14 @@ GJJ · 🔍 多功能图片缩放
                 cfg["width"] = max(1, _to_int(target_width, cfg.get("width", 1024)))
             if target_height is not None:
                 cfg["height"] = max(1, _to_int(target_height, cfg.get("height", 1024)))
+            if border_left is not None:
+                cfg["border_left"] = max(0, _to_int(border_left, cfg.get("border_left", 0)))
+            if border_top is not None:
+                cfg["border_top"] = max(0, _to_int(border_top, cfg.get("border_top", 0)))
+            if border_right is not None:
+                cfg["border_right"] = max(0, _to_int(border_right, cfg.get("border_right", 0)))
+            if border_bottom is not None:
+                cfg["border_bottom"] = max(0, _to_int(border_bottom, cfg.get("border_bottom", 0)))
             if scale_percent is not None:
                 cfg["scale_percent"] = max(0.001, _to_float(scale_percent, cfg.get("scale_percent", 100.0)))
             if long_side_length is not None:
@@ -934,7 +1069,16 @@ GJJ · 🔍 多功能图片缩放
             elapsed = _run_elapsed(stat)
             print(f"[GJJ 多功能图片缩放] 进度：{done_total}/{total} 张，当前首图 {first_orig_w}x{first_orig_h} -> {first_out_w}x{first_out_h}，累计耗时 {elapsed:.2f}s")
             _send_status(unique_id, "running", f"已处理 {done_total}/{total} 张，累计耗时 {elapsed:.2f} 秒", progress=done_total / max(1, total), total=total, index=done_total, elapsed=elapsed)
-            return (out_image, out_mask, extras[0], extras[1], extras[2])
+            result = (out_image, out_mask, extras[0], extras[1], extras[2])
+            preview = _make_preview_payload(out_image, original_width=first_orig_w, original_height=first_orig_h)
+            if preview:
+                return {
+                    "ui": {
+                        "gjj_image_resize_kjv2_preview": [preview],
+                    },
+                    "result": result,
+                }
+            return result
 
         except Exception as e:
             key = _run_key(unique_id)
@@ -948,5 +1092,5 @@ GJJ · 🔍 多功能图片缩放
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_ImageResizeKJv2}
-print("[GJJ 多功能图片缩放] 当前版本: V39_GLOBAL_DEBOUNCE_STATS_FIX_UNWRAP", __file__)
+print("[GJJ 多功能图片缩放] 当前版本: V44_BORDER_BOARD_SLIDERS_LINK_RESTORE", __file__)
 NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🔍 多功能图片缩放"}

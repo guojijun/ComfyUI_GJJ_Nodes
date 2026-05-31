@@ -222,5 +222,5 @@ class GJJ_Flux1DualCLIPLoader:
         return (model, clip, vae)
 
 
-NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_Flux1DualCLIPLoader}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🧠 Flux1双CLIP加载器"}
+#NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_Flux1DualCLIPLoader}
+#NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🧠 Flux1双CLIP加载器"}

@@ -6,14 +6,7 @@ import inspect
 from .wanvideo.modules.model import rope_params
 from .custom_linear import remove_lora_from_module, set_lora_params, _replace_linear
 from .wanvideo.schedulers import get_scheduler, scheduler_list
-def _set_lora_params_gguf(module, patches):
-    try:
-        from .gguf.gguf import set_lora_params_gguf
-    except ModuleNotFoundError as error:
-        if getattr(error, "name", "") == "gguf":
-            raise RuntimeError("当前模型使用 GGUF 权重，需要先安装 gguf；普通 safetensors/fp16 模型不需要此依赖。") from error
-        raise
-    return set_lora_params_gguf(module, patches)
+from .gguf.gguf import set_lora_params_gguf
 from .multitalk.multitalk import add_noise
 from .utils import(log, print_memory, apply_lora, fourier_filter, optimized_scale, setup_radial_attention,
                    compile_model, dict_to_device, tangential_projection, get_raag_guidance, temporal_score_rescaling, offload_transformer, init_blockswap)
@@ -135,7 +128,7 @@ class WanVideoSampler:
         if gguf_reader is not None: #handle GGUF
             load_weights(transformer, patcher.model["sd"], base_dtype=dtype, transformer_load_device=device, patcher=patcher, gguf=True,
                          reader=gguf_reader, block_swap_args=block_swap_args, compile_args=model["compile_args"])
-            _set_lora_params_gguf(transformer, patcher.patches)
+            set_lora_params_gguf(transformer, patcher.patches)
             transformer.patched_linear = True
         elif len(patcher.patches) != 0: #handle patched linear layers (unmerged loras, fp8 scaled)
             log.info(f"Using {len(patcher.patches)} LoRA weight patches for WanVideo model")
@@ -1403,7 +1396,7 @@ class WanVideoSampler:
                     z = z * c_in
                     timestep = c_noise
 
-                if image_cond is not None:
+                if image_cond_input is not None:
                     self.noise_front_pad_num = image_cond_input.shape[1] - z.shape[1]
                     if self.noise_front_pad_num > 0:
                         pad = torch.zeros((z.shape[0], self.noise_front_pad_num, z.shape[2], z.shape[3]), dtype=z.dtype, device=z.device)
@@ -1424,7 +1417,7 @@ class WanVideoSampler:
                     else:
                         scail_data_in = scail_data
 
-                if wanmove_embeds is not None and context_window is not None:
+                if wanmove_embeds is not None and context_window is not None and image_cond_input is not None:
                     image_cond_input = replace_feature(image_cond_input.unsqueeze(0), track_pos[:, context_window].unsqueeze(0), wanmove_embeds.get("strength", 1.0))[0]
 
                 dual_control_in = None
@@ -1517,8 +1510,6 @@ class WanVideoSampler:
                         negative_embeds = negative_embeds * len(positive_embeds)
 
                 try:
-                    noise_pred_ovi = None
-                    noise_pred_ovi_uncond = None
                     if not batched_cfg:
                         #conditional (positive) pass
                         if pos_latent is not None: # for humo
@@ -1663,21 +1654,15 @@ class WanVideoSampler:
 
                     #batched
                     else:
-                        # WanModel.forward accepts the latent batch through x.
-                        base_params['x'] = [z] * 2
-                        if latent_model_input_ovi is not None:
-                            base_params['x_ovi'] = [latent_model_input_ovi.to(z)] * 2
+                        base_params['z'] = [z] * 2
                         base_params['y'] = [image_cond_input] * 2 if image_cond_input is not None else None
                         base_params['clip_fea'] = torch.cat([clip_fea, clip_fea], dim=0)
-                        base_params['is_uncond'] = False
                         cache_state_uncond = None
-                        [noise_pred_cond, noise_pred_uncond_text], noise_pred_ovi_batched, cache_state_cond = transformer(
-                            context=positive_embeds + negative_embeds,
+                        [noise_pred_cond, noise_pred_uncond_text], _, cache_state_cond = transformer(
+                            context=positive_embeds + negative_embeds, is_uncond=False,
                             pred_id=cache_state[0] if cache_state else None,
                             **base_params
                         )
-                        if noise_pred_ovi_batched is not None:
-                            noise_pred_ovi, noise_pred_ovi_uncond = noise_pred_ovi_batched
                 except Exception as e:
                     log.error(f"Error during model prediction: {e}")
                     if force_offload:
@@ -1751,7 +1736,7 @@ class WanVideoSampler:
         gc.collect()
         try:
             torch.cuda.reset_peak_memory_stats(device)
-        except:
+        except Exception:
             pass
 
         # Main sampling loop with FreeInit iterations
@@ -2203,7 +2188,7 @@ class WanVideoSampler:
                         try:
                             print_memory(device)
                             torch.cuda.reset_peak_memory_stats(device)
-                        except:
+                        except Exception:
                             pass
                         return {"video": gen_video_samples},
                     # region wananimate loop
@@ -2504,7 +2489,7 @@ class WanVideoSampler:
                         try:
                             print_memory(device)
                             torch.cuda.reset_peak_memory_stats(device)
-                        except:
+                        except Exception:
                             pass
                         return {"video": gen_video_samples.permute(1, 2, 3, 0), "output_path": output_path},
 
@@ -2788,7 +2773,7 @@ class WanVideoScheduler:
             import io
             import base64
             import matplotlib.pyplot as plt
-        except:
+        except Exception:
             PromptServer = None
         if unique_id and PromptServer is not None:
             try:

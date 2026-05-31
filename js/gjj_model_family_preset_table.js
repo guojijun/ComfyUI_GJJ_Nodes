@@ -6,6 +6,11 @@ const LIST_FIELDS = new Set(["keywords", "clip_names"]);
 const INT_FIELDS = new Set(["steps", "base_steps", "main_long_edge", "vl_long_edge", "width", "height"]);
 const FLOAT_FIELDS = new Set(["lora_1_strength", "lora_2_strength", "cfg", "denoise", "model_shift", "cfg_norm_strength"]);
 const BOOL_FIELDS = new Set(["supports_multi_image_edit"]);
+const IGNORED_MODEL_TOKENS = new Set([
+	"fp8", "fp16", "fp32", "bf16", "float8", "float16", "float32",
+	"e4m3fn", "e5m2", "scaled", "fast", "mixed", "nvfp4", "mxfp4",
+	"q2", "q3", "q4", "q5", "q6", "q8", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1",
+]);
 
 let presetCache = [];
 let presetPromise = null;
@@ -13,7 +18,10 @@ let presetPromise = null;
 function normalizeLookupText(value) {
 	return String(value || "")
 		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "");
+		.replace(/\.(safetensors|ckpt|pt|pth|bin|sft|gguf)$/i, "")
+		.split(/[^a-z0-9]+/i)
+		.filter((token) => token && !IGNORED_MODEL_TOKENS.has(token) && !/^v\d+(?:\d+|\.\d+)*$/.test(token))
+		.join("");
 }
 
 function parseScalar(key, value) {
@@ -37,7 +45,9 @@ function toJsPreset(row) {
 	const preset = {};
 	for (const [key, raw] of Object.entries(row)) {
 		if (LIST_FIELDS.has(key)) {
-			preset[key] = String(raw || "").split("|").filter(Boolean);
+			preset[key] = Array.isArray(raw)
+				? raw.map(String).map((item) => item.trim()).filter(Boolean)
+				: String(raw || "").split("|").map((item) => item.trim()).filter(Boolean);
 			continue;
 		}
 		const value = parseScalar(key, raw);
@@ -48,9 +58,13 @@ function toJsPreset(row) {
 	return {
 		id: preset.id || "",
 		keywords: preset.keywords || [],
+		modelName: preset.model_name || "",
+		modelCategory: preset.model_category || "",
 		clipType: preset.clip_type || "stable_diffusion",
 		clipNames: preset.clip_names || [],
 		vaeName: preset.vae_name || "",
+		modelPatchName: preset.model_patch_name || "",
+		clipVisionName: preset.clip_vision_name || "",
 		lora1: preset.lora_1_name || "",
 		lora1Strength: preset.lora_1_strength ?? 0.0,
 		lora2: preset.lora_2_name || "",

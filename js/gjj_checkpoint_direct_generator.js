@@ -3,8 +3,6 @@ import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { queueOnlyCurrentNode } from "./gjj_utils.js";
 
-console.log("[GJJ Checkpoint] ⚡ JavaScript 文件已加载");
-
 const TARGET_NODE = "GJJ_CheckpointDirectGenerator";
 const STATUS_WIDGET = "gjj_checkpoint_status";
 const EXECUTE_BUTTON_NAME = "gjj_execute_button";
@@ -68,7 +66,6 @@ function ensureStatusWidget(node) {
 	});
 
 	node.__gjjCheckpointStatus = { widget, label, bar };
-	console.log("[GJJ Checkpoint] 状态 widget 已初始化");
 	return node.__gjjCheckpointStatus;
 }
 
@@ -89,7 +86,6 @@ function parseProgress(text) {
 function setStatus(node, text) {
 	const state = ensureStatusWidget(node);
 	const statusText = String(text || "等待执行");
-	console.log("[GJJ Checkpoint] setStatus updated to:", statusText, "node.id:", node?.id);
 
 	// 更新 DOM 元素
 	state.label.textContent = statusText;
@@ -368,24 +364,20 @@ function imageDataToUrl(imageData) {
 
 function updateImagePreview(node, images) {
 	if (!node.__gjjPreviewImage) {
-		console.log("[GJJ Checkpoint] ⚠️ 预览图片元素不存在");
 		return;
 	}
 
 	if (!images || !images.length) {
-		console.log("[GJJ Checkpoint] ⚠️ 没有图片数据");
 		node.__gjjPreviewImage.style.display = "none";
 		return;
 	}
 
 	const imageUrl = imageDataToUrl(images);
 	if (!imageUrl) {
-		console.log("[GJJ Checkpoint] ⚠️ 无法转换为 URL:", images);
 		node.__gjjPreviewImage.style.display = "none";
 		return;
 	}
 
-	console.log("[GJJ Checkpoint] 🖼️ 图片预览 URL:", imageUrl);
 	node.__gjjPreviewImage.src = imageUrl;
 	node.__gjjPreviewImage.style.display = "block";
 	node.__gjjPreviewImage.style.visibility = "visible";
@@ -398,10 +390,8 @@ function updateImagePreview(node, images) {
 	node.__gjjPreviewImage.style.left = "";
 
 	node.__gjjPreviewImage.onload = () => {
-		console.log("[GJJ Checkpoint] ✅ 图片加载成功");
 	};
 	node.__gjjPreviewImage.onerror = () => {
-		console.log("[GJJ Checkpoint] ❌ 图片加载失败:", imageUrl);
 	};
 
 	node.setDirtyCanvas?.(true, true);
@@ -432,7 +422,6 @@ function hideDefaultPreviewElements(node) {
 			}
 		}
 	} catch (e) {
-		console.log("[GJJ Checkpoint] Error finding node element:", e);
 	}
 
 	if (nodeElement) {
@@ -554,7 +543,7 @@ function setupPreviewObserver(node) {
 				attributeFilter: ['style', 'class', 'src'],
 			});
 		} catch (e) {
-			console.log("[GJJ Checkpoint] Error setting up MutationObserver:", e);
+			// Error setting up MutationObserver
 		}
 	}
 }
@@ -562,10 +551,7 @@ function setupPreviewObserver(node) {
 function stabilizeNode(node) {
 	if (!node) return;
 
-	console.log("[GJJ Checkpoint] stabilizeNode 被调用");
-
 	if (node.__gjjStabilized) {
-		console.log("[GJJ Checkpoint] 已经初始化过，跳过重复初始化");
 		return;
 	}
 	node.__gjjStabilized = true;
@@ -589,26 +575,20 @@ function stabilizeNode(node) {
 	app.graph?.setDirtyCanvas?.(true, true);
 }
 
-console.log("[GJJ Checkpoint] 📡 正在注册 gjj_node_progress 事件监听器...");
 api.addEventListener("gjj_node_progress", (event) => {
 	const detail = event?.detail || {};
-	console.log("[GJJ Checkpoint] 收到进度事件:", detail);
 
 	const targetNode = app.graph?._nodes?.find((node) => String(node?.id) === String(detail.node));
 	if (!targetNode) {
-		console.log("[GJJ Checkpoint] 未找到目标节点:", detail.node);
 		return;
 	}
 
 	const nodeClass = String(targetNode.comfyClass || targetNode.type || "");
-	console.log("[GJJ Checkpoint] 节点类型:", nodeClass, "目标类型:", TARGET_NODE);
 
 	if (nodeClass !== TARGET_NODE) {
-		console.log("[GJJ Checkpoint] 节点类型不匹配，跳过更新");
 		return;
 	}
 
-	console.log("[GJJ Checkpoint] 更新状态为:", detail.text);
 	setStatus(targetNode, detail.text || "处理中...");
 });
 
@@ -616,12 +596,9 @@ app.registerExtension({
 	name: "Comfy.GJJ.CheckpointDirectGenerator",
 
 	async beforeRegisterNodeDef(nodeType, nodeData) {
-		console.log("[GJJ Checkpoint] 🔍 beforeRegisterNodeDef 被调用，节点名:", nodeData?.name);
 		if (nodeData?.name !== TARGET_NODE) {
 			return;
 		}
-
-		console.log("[GJJ Checkpoint] ✅ 匹配到目标节点，正在注册扩展...");
 
 		nodeData.output_preview = false;
 
@@ -660,7 +637,6 @@ app.registerExtension({
 
 		const originalExecuted = nodeType.prototype.onExecuted;
 		nodeType.prototype.onExecuted = function (message) {
-			console.log("[GJJ Checkpoint] onExecuted message:", message);
 
 			let images = null;
 
@@ -682,7 +658,6 @@ app.registerExtension({
 			}
 
 			if (images) {
-				console.log("[GJJ Checkpoint] Updating image preview with images:", images);
 				updateImagePreview(this, images);
 			}
 

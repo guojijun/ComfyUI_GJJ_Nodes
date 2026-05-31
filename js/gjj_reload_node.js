@@ -8,6 +8,22 @@ import { app } from "/scripts/app.js";
 (function () {
     const GJJ_PREFIX = "GJJ";
 
+    function isDebugEnabled() {
+        try {
+            return window?.GJJ_DEBUG === true ||
+                window?.localStorage?.getItem("gjj_debug") === "1" ||
+                window?.localStorage?.getItem("GJJ_DEBUG") === "1";
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function debugLog(...args) {
+        if (isDebugEnabled()) {
+            console.log(...args);
+        }
+    }
+
     /**
      * 检查节点是否为 GJJ 节点
      */
@@ -240,7 +256,7 @@ import { app } from "/scripts/app.js";
         if (!node || !node.graph) return;
 
         try {
-            console.log(`[GJJ_ReloadNode] 重新加载节点: ${node.comfyClass || node.type} (ID: ${node.id})`);
+            debugLog(`[GJJ_ReloadNode] 重新加载节点: ${node.comfyClass || node.type} (ID: ${node.id})`);
 
             // 保存当前节点的位置、参数、动态插槽和完整连接端点。
             const nodeData = node.serialize();
@@ -315,11 +331,14 @@ import { app } from "/scripts/app.js";
             app.canvas?.setDirty?.(true, true);
             graph.setDirtyCanvas?.(true, true);
 
-            console.log(`[GJJ_ReloadNode] 节点重新加载完成: ${newNode.comfyClass || newNode.type} (ID: ${newNode.id})`);
+            debugLog(`[GJJ_ReloadNode] 节点重新加载完成: ${newNode.comfyClass || newNode.type} (ID: ${newNode.id})`);
         } catch (error) {
             console.error(`[GJJ_ReloadNode] 重新加载节点失败:`, error);
         }
     }
+
+    window.GJJ_ReloadNode = window.GJJ_ReloadNode || {};
+    window.GJJ_ReloadNode.reloadNode = reloadNode;
 
     /**
      * 为 GJJ 节点添加右键菜单选项
@@ -365,7 +384,7 @@ import { app } from "/scripts/app.js";
         },
 
         async setup() {
-            console.log("[GJJ_ReloadNodeMenu] ✅ GJJ 节点右键重新加载功能已启用");
+            debugLog("[GJJ_ReloadNodeMenu] ✅ GJJ 节点右键重新加载功能已启用");
         },
     });
 })();

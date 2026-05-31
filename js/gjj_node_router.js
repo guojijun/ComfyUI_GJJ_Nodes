@@ -22,6 +22,22 @@ const EMPTY_STATE_LABEL = "节点状态提示";
 const EMPTY_STATE_TEXT = "当前没有节点，或没有匹配到包含该关键词的节点。";
 const EMPTY_STATE_TOOLTIP = "没有可切换的节点时，会在这里显示中文状态提示。";
 
+function isDebugEnabled() {
+	try {
+		return window?.GJJ_DEBUG === true ||
+			window?.localStorage?.getItem("gjj_debug") === "1" ||
+			window?.localStorage?.getItem("GJJ_DEBUG") === "1";
+	} catch (_) {
+		return false;
+	}
+}
+
+function debugLog(...args) {
+	if (isDebugEnabled()) {
+		console.log(...args);
+	}
+}
+
 function getNodes() {
 	return Array.isArray(app.graph?._nodes) ? [...app.graph._nodes] : [];
 }
@@ -107,7 +123,7 @@ function pruneMissingActiveNodeIds(node) {
 	const nextIds = activeIds.filter(id => existingIds.has(id));
 
 	if (nextIds.length !== activeIds.length) {
-		console.log(
+		debugLog(
 			`[NodeRouter] pruneMissingActiveNodeIds - node ${node.id}, before:`,
 			activeIds,
 			"after:",
@@ -143,14 +159,14 @@ function setActiveNodeRefs(node, nodes) {
 	const nodeList = Array.isArray(nodes) ? nodes.filter(Boolean) : [...(nodes || [])].filter(Boolean);
 	const activeIds = nodeList.map(n => n.id).filter(id => id !== undefined);
 
-	console.log(`[NodeRouter] setActiveNodeRefs - BEFORE save - node ${node.id}, node.properties:`, node.properties);
-	console.log(`[NodeRouter] setActiveNodeRefs - saving - node ${node.id}, activeIds:`, activeIds);
+	debugLog(`[NodeRouter] setActiveNodeRefs - BEFORE save - node ${node.id}, node.properties:`, node.properties);
+	debugLog(`[NodeRouter] setActiveNodeRefs - saving - node ${node.id}, activeIds:`, activeIds);
 
 	// 总是保存，不检查变化（因为删除节点时会触发重建）
 	node.properties.__activeNodeIds = activeIds;
 
-	console.log(`[NodeRouter] setActiveNodeRefs - AFTER save - node ${node.id}, node.properties:`, node.properties);
-	console.log(`[NodeRouter] setActiveNodeRefs - node ${node.id}, count:`, activeIds.length, 'IDs:', activeIds);
+	debugLog(`[NodeRouter] setActiveNodeRefs - AFTER save - node ${node.id}, node.properties:`, node.properties);
+	debugLog(`[NodeRouter] setActiveNodeRefs - node ${node.id}, count:`, activeIds.length, 'IDs:', activeIds);
 
 	// 通知 ComfyUI 节点已更改（确保 properties 被序列化）
 	node.setDirtyCanvas?.(true, true);
@@ -570,7 +586,7 @@ function hideOriginalPythonWidgets(node) {
 function rebuildUI(node, options = {}) {
 	const force = Boolean(options.force);
 
-	console.log(`[NodeRouter] rebuildUI called for node ${node.id}, force=${force}`);
+	debugLog(`[NodeRouter] rebuildUI called for node ${node.id}, force=${force}`);
 
 	if (!node.properties) node.properties = {};
 
@@ -586,7 +602,7 @@ function rebuildUI(node, options = {}) {
 
 	// 非强制刷新时才允许跳过
 	if (!force && node.__gjjNodeSignature === fullSignature && node.__gjjRouterPanelWidget?.element instanceof HTMLElement) {
-		console.log(`[NodeRouter] rebuildUI skipped - signature unchanged for node ${node.id}`);
+		debugLog(`[NodeRouter] rebuildUI skipped - signature unchanged for node ${node.id}`);
 		return;
 	}
 
@@ -603,7 +619,7 @@ function rebuildUI(node, options = {}) {
 }
 
 function refreshAllNodeRouters(force = false) {
-	console.log(`[NodeRouter] refreshAllNodeRouters called, force=${force}`);
+	debugLog(`[NodeRouter] refreshAllNodeRouters called, force=${force}`);
 
 	const routers = (app.graph?._nodes || []).filter((node) => {
 		return TARGET_NODES.has(node?.comfyClass);
@@ -615,7 +631,7 @@ function refreshAllNodeRouters(force = false) {
 	});
 
 	routers.forEach((node) => {
-		console.log(`[NodeRouter] refreshAllNodeRouters - rebuilding node ${node.id}`);
+		debugLog(`[NodeRouter] refreshAllNodeRouters - rebuilding node ${node.id}`);
 		node.__gjjNodeSignature = null;
 		rebuildUI(node, { force });
 	});
@@ -649,7 +665,7 @@ app.registerExtension({
 		// onSerialize：选择模式、过滤关键词和激活节点状态存到 properties
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function(serializedNode) {
-			console.log(`[NodeRouter] onSerialize - START - node ${this.id}, this.properties:`, this.properties);
+			debugLog(`[NodeRouter] onSerialize - START - node ${this.id}, this.properties:`, this.properties);
 
 			if (originalOnSerialize) {
 				// 不要捕获返回值，onSerialize 不应该返回任何东西
@@ -658,8 +674,8 @@ app.registerExtension({
 
 			serializedNode.properties = serializedNode.properties || {};
 
-			console.log(`[NodeRouter] onSerialize - AFTER originalOnSerialize - node ${this.id}, this.properties:`, this.properties);
-			console.log(`[NodeRouter] onSerialize - AFTER originalOnSerialize - node ${this.id}, serializedNode.properties:`, serializedNode.properties);
+			debugLog(`[NodeRouter] onSerialize - AFTER originalOnSerialize - node ${this.id}, this.properties:`, this.properties);
+			debugLog(`[NodeRouter] onSerialize - AFTER originalOnSerialize - node ${this.id}, serializedNode.properties:`, serializedNode.properties);
 
 			// 保存当前状态到 properties（直接覆盖，不使用条件判断）
 			serializedNode.properties[MODE_NAME] = this.properties?.[MODE_NAME] || MODE_SINGLE;
@@ -668,14 +684,14 @@ app.registerExtension({
 			// 保存激活的节点 ID 列表（即使为空也要保存）
 			serializedNode.properties.__activeNodeIds = this.properties?.__activeNodeIds || [];
 
-			console.log(`[NodeRouter] onSerialize - FINAL - node ${this.id}, serializedNode.properties:`, serializedNode.properties);
+			debugLog(`[NodeRouter] onSerialize - FINAL - node ${this.id}, serializedNode.properties:`, serializedNode.properties);
 			// 明确不返回任何东西
 			return;
 		};
 
 		nodeType.prototype.onConfigure = function(serialized) {
-			console.log(`[NodeRouter] onConfigure called for node ${this.id}`);
-			console.log(`[NodeRouter] onConfigure - serialized.properties:`, serialized?.properties);
+			debugLog(`[NodeRouter] onConfigure called for node ${this.id}`);
+			debugLog(`[NodeRouter] onConfigure - serialized.properties:`, serialized?.properties);
 
 			if (originalOnConfigure) {
 				originalOnConfigure.call(this, serialized);
@@ -687,7 +703,7 @@ app.registerExtension({
 				Object.assign(this.properties, serialized.properties);
 			}
 
-			console.log(`[NodeRouter] onConfigure - node ${this.id}, properties after restore:`, this.properties);
+			debugLog(`[NodeRouter] onConfigure - node ${this.id}, properties after restore:`, this.properties);
 
 			// 取消 nodeCreated 的定时器，避免重复重建
 			clearTimeout(this.__nodeCreatedTimer);
@@ -699,7 +715,7 @@ app.registerExtension({
 			// 从工作流加载时也需要隐藏
 			hideOriginalPythonWidgets(this);
 
-			console.log(`[NodeRouter] onConfigure - node ${this.id}, scheduling rebuildUI in 300ms`);
+			debugLog(`[NodeRouter] onConfigure - node ${this.id}, scheduling rebuildUI in 300ms`);
 			// 从工作流加载时，延迟重建 UI
 			setTimeout(() => {
 				rebuildUI(this, { force: true });
@@ -818,5 +834,4 @@ function clearNodeWidgets(node) {
 	// 单 DOMWidget 方案下，不再暴力删除 widgets。
 	// 保留函数，避免其它地方调用时报错。
 }
-
 

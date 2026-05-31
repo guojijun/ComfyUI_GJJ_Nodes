@@ -81,7 +81,7 @@ class GJJ_WanVideoEncode:
                 "vae": (
                     "WANVAE",
                     {
-                        "display_name": "Wan VAE",
+                        "display_name": "WANVAE",
                         "tooltip": "GJJ WanVideo VAE 加载器输出的 WANVAE。",
                     },
                 ),

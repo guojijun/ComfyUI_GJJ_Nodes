@@ -511,7 +511,7 @@ class GJJ_FaceDetailer:
         cycle,
         detailer_hook=None,
         inpaint_model=False,
-        noise_mask_feather=20,
+        noise_mask_feather=0,
         scheduler_func_opt=None,
         tiled_encode=False,
         tiled_decode=False,

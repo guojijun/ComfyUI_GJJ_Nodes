@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,33 @@ FLOAT_FIELDS = {
     "cfg_norm_strength",
 }
 BOOL_FIELDS = {"supports_multi_image_edit"}
+IGNORED_MODEL_TOKENS = {
+    "fp8",
+    "fp16",
+    "fp32",
+    "bf16",
+    "float8",
+    "float16",
+    "float32",
+    "e4m3fn",
+    "e5m2",
+    "scaled",
+    "fast",
+    "mixed",
+    "nvfp4",
+    "mxfp4",
+    "q2",
+    "q3",
+    "q4",
+    "q5",
+    "q6",
+    "q8",
+    "q8_0",
+    "q4_0",
+    "q4_1",
+    "q5_0",
+    "q5_1",
+}
 
 # 查找预设文件路径：从当前文件向上查找，直到找到包含 presets 目录的位置
 def _find_preset_root() -> Path:
@@ -50,7 +78,19 @@ PRESET_TABLE_API_PATH = "/gjj/model_family_presets"
 
 
 def _normalize_lookup_text(value: str) -> str:
-    return "".join(ch for ch in str(value or "").strip().lower() if ch.isalnum())
+    text = str(value or "").replace("\\", "/").rsplit("/", 1)[-1].strip().lower()
+    for suffix in (".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".sft", ".gguf"):
+        if text.endswith(suffix):
+            text = text[: -len(suffix)]
+            break
+    tokens = []
+    for token in re.split(r"[^a-zA-Z0-9]+", text):
+        if not token or token in IGNORED_MODEL_TOKENS:
+            continue
+        if re.fullmatch(r"v\d+(?:\d+|\.\d+)*", token):
+            continue
+        tokens.append(token)
+    return "".join(tokens)
 
 
 def _parse_bool(value: str) -> bool:

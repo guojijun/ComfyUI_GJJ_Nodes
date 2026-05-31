@@ -63,7 +63,6 @@ def _list_supported_checkpoints() -> list[str]:
 
 def _send_status(unique_id: Any, text: str) -> None:
     if not unique_id:
-        print(f"[GJJ Checkpoint] ️ _send_status 跳过：unique_id 为空，文本={text}")
         return
     try:
         from server import PromptServer
@@ -72,14 +71,12 @@ def _send_status(unique_id: Any, text: str) -> None:
         if not status_text:
             status_text = "处理中..."
 
-        print(f"[GJJ Checkpoint]  发送状态：node_id={unique_id}, text={status_text}")
-
         PromptServer.instance.send_sync(
             "gjj_node_progress",
             {"node": str(unique_id), "text": status_text},
         )
-    except Exception as e:
-        print(f"[GJJ Checkpoint] ❌ _send_status 失败：{str(e)}")
+    except Exception:
+        pass
 
 
 def _send_lora_applied(unique_id: Any, payload: dict[str, Any]) -> None:

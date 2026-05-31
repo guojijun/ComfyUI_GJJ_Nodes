@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 import json
 import os
+from urllib.parse import quote_plus
 
 import folder_paths
 from aiohttp import web
@@ -203,8 +204,34 @@ def _sort_matches(names: list[str], keywords: list[str]) -> list[str]:
     return sorted(names, key=lambda item: _score_name(item, keywords))
 
 
+def _matches_keywords(name: str, keywords: list[str], allow_any: bool = False) -> bool:
+    return bool(_filter_names([name], keywords, allow_any=allow_any))
+
+
 def _path_key(value: str) -> str:
     return str(value or "").replace("\\", "/").strip().lower()
+
+
+def _model_download_search_url(filename: str) -> str:
+    text = str(filename or "").strip()
+    if not text:
+        return ""
+    return f"https://huggingface.co/models?search={quote_plus(text)}"
+
+
+def _find_named_file(names: list[str], value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    normalized = {_path_key(name): name for name in names}
+    key = _path_key(text)
+    if key in normalized:
+        return normalized[key]
+    base = os.path.basename(key)
+    for name_key, original in normalized.items():
+        if name_key.endswith("/" + key) or name_key.endswith("/" + base) or os.path.basename(name_key) == base:
+            return original
+    return ""
 
 
 def _resolve_selected(
@@ -217,19 +244,20 @@ def _resolve_selected(
     fallback_keywords: list[list[str]] | None = None,
 ) -> str:
     names = _filename_list(folder)
-    normalized = {_path_key(name): name for name in names}
-
-    for raw in (selected, preferred):
-        text = str(raw or "").strip()
-        if not text:
-            continue
-        key = _path_key(text)
-        if key in normalized:
-            return normalized[key]
-        base = os.path.basename(key)
-        for name_key, original in normalized.items():
-            if name_key.endswith("/" + key) or name_key.endswith("/" + base) or os.path.basename(name_key) == base:
-                return original
+    selected_match = _find_named_file(names, selected)
+    preferred_match = _find_named_file(names, preferred)
+    if selected_match:
+        if (
+            preferred_match
+            and selected_match != preferred_match
+            and keywords
+            and not _matches_keywords(selected_match, keywords, allow_any=allow_any)
+            and _matches_keywords(preferred_match, keywords, allow_any=allow_any)
+        ):
+            return preferred_match
+        return selected_match
+    if preferred_match:
+        return preferred_match
 
     keyword_groups = [keywords]
     keyword_groups.extend(group for group in (fallback_keywords or []) if isinstance(group, list))
@@ -253,7 +281,7 @@ def S(
     required_name: str = "",
     **extra: Any,
 ) -> dict[str, Any]:
-    return {
+    data = {
         "id": id,
         "label": label,
         "folder": folder,
@@ -266,6 +294,9 @@ def S(
         "required_name": required_name or preferred_name,
         **extra,
     }
+    if not str(data.get("download_url", "") or "").strip():
+        data["download_url"] = _model_download_search_url(str(data.get("required_name", "") or data.get("preferred_name", "") or ""))
+    return data
 
 
 def WM(
@@ -415,7 +446,7 @@ LIGHTX_T2V_14B = L(
     "lightx2v_t2v",
     "LightX2V T2V LoRA",
     ["lightx2v", "t2v", "14b"],
-    preferred_name="WanVideo/Lightx2v/lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64_bf16_.safetensors",
+    preferred_name="lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64_bf16_.safetensors",
     strength=1.0,
     merge_loras=False,
 )
@@ -423,7 +454,7 @@ LIGHTX_I2V_14B = L(
     "lightx2v_i2v",
     "LightX2V I2V LoRA",
     ["lightx2v", "i2v", "14b"],
-    preferred_name="WanVideo/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
+    preferred_name="lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
     strength=1.0,
     merge_loras=False,
 )
@@ -433,31 +464,31 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "wan22_t2v_a14b_pusa_dual": {
         "label": "Wan2.2 A14B T2V Pusa 双模型",
         "slots": [
-            WM("high_model", "High模型", ["wan2_2", "t2v", "a14b", "high"], preferred_name="WanVideo/2_2/Wan2_2-T2V-A14B-HIGH_fp8_e4m3fn_scaled_KJ.safetensors", target="high", quantization="fp8_e4m3fn_scaled"),
-            WM("low_model", "Low模型", ["wan2_2", "t2v", "a14b", "low"], preferred_name="WanVideo/2_2/Wan2_2-T2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors", target="low", quantization="fp8_e4m3fn_scaled"),
+            WM("high_model", "High模型", ["wan2_2", "t2v", "a14b", "high"], preferred_name="Wan2_2-T2V-A14B-HIGH_fp8_e4m3fn_scaled_KJ.safetensors", target="high", quantization="fp8_e4m3fn_scaled"),
+            WM("low_model", "Low模型", ["wan2_2", "t2v", "a14b", "low"], preferred_name="Wan2_2-T2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors", target="low", quantization="fp8_e4m3fn_scaled"),
             WAN21_VAE,
             WAN_T5,
-            L("high_pusa_lora", "High Pusa LoRA", ["pusa", "high"], preferred_name="WanVideo/Pusa/Wan22_PusaV1_lora_HIGH_resized_dynamic_avg_rank_98_bf16.safetensors", target="high", strength=1.5, merge_loras=True),
-            L("low_pusa_lora", "Low Pusa LoRA", ["pusa", "low"], preferred_name="WanVideo/Pusa/Wan22_PusaV1_lora_LOW_resized_dynamic_avg_rank_98_bf16.safetensors", target="low", strength=1.4, merge_loras=True),
+            L("high_pusa_lora", "High Pusa LoRA", ["pusa", "high"], preferred_name="Wan22_PusaV1_lora_HIGH_resized_dynamic_avg_rank_98_bf16.safetensors", target="high", strength=1.5, merge_loras=True),
+            L("low_pusa_lora", "Low Pusa LoRA", ["pusa", "low"], preferred_name="Wan22_PusaV1_lora_LOW_resized_dynamic_avg_rank_98_bf16.safetensors", target="low", strength=1.4, merge_loras=True),
             LIGHTX_T2V_14B,
         ],
     },
     "wan22_i2v_a14b_dual": {
         "label": "Wan2.2 A14B I2V 双模型",
         "slots": [
-            WM("high_model", "High模型", ["wan2_2", "i2v", "a14b", "high"], preferred_name="WanVideo/2_2/Wan2_2-I2V-A14B-HIGH_fp8_e4m3fn_scaled_KJ.safetensors", target="high", quantization="fp8_e4m3fn_scaled"),
-            WM("low_model", "Low模型", ["wan2_2", "i2v", "a14b", "low"], preferred_name="WanVideo/2_2/Wan2_2-I2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors", target="low", quantization="fp8_e4m3fn_scaled"),
+            WM("high_model", "High模型", ["wan2_2", "i2v", "a14b", "high"], preferred_name="Wan2_2-I2V-A14B-HIGH_fp8_e4m3fn_scaled_KJ.safetensors", target="high", quantization="fp8_e4m3fn_scaled"),
+            WM("low_model", "Low模型", ["wan2_2", "i2v", "a14b", "low"], preferred_name="Wan2_2-I2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors", target="low", quantization="fp8_e4m3fn_scaled"),
             WAN21_VAE,
             WAN_T5,
             LIGHTX_I2V_14B,
-            L("lightx2v_i2v_low", "Low增强 LoRA", ["lightx2v", "i2v", "14b"], preferred_name="WanVideo/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", target="low", strength=3.0, merge_loras=False),
+            L("lightx2v_i2v_low", "Low增强 LoRA", ["lightx2v", "i2v", "14b"], preferred_name="lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", target="low", strength=3.0, merge_loras=False),
         ],
     },
     "wan22_fun_control_dual": {
         "label": "Wan2.2 Fun Control 双模型",
         "slots": [
-            WM("high_model", "High Fun Control", ["wan2_2", "fun", "control", "high"], preferred_name="WanVideo/2_2/Fun/Wan2_2-Fun-Control-A14B-HIGH_fp8_e4m3fn_scaled_KJ_fixed.safetensors", target="high", quantization="fp8_e4m3fn_scaled"),
-            WM("low_model", "Low Fun Control", ["wan2_2", "fun", "control", "low"], preferred_name="WanVideo/2_2/Fun/Wan2_2-Fun-Control-A14B-LOW_fp8_e4m3fn_scaled_KJ_fixed.safetensors", target="low", quantization="fp8_e4m3fn_scaled"),
+            WM("high_model", "High Fun Control", ["wan2_2", "fun", "control", "high"], preferred_name="Wan2_2-Fun-Control-A14B-HIGH_fp8_e4m3fn_scaled_KJ_fixed.safetensors", target="high", quantization="fp8_e4m3fn_scaled"),
+            WM("low_model", "Low Fun Control", ["wan2_2", "fun", "control", "low"], preferred_name="Wan2_2-Fun-Control-A14B-LOW_fp8_e4m3fn_scaled_KJ_fixed.safetensors", target="low", quantization="fp8_e4m3fn_scaled"),
             WAN21_VAE,
             WAN_T5,
             LIGHTX_T2V_14B,
@@ -466,8 +497,8 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "wan22_fun_camera_dual": {
         "label": "Wan2.2 Fun Camera 双模型",
         "slots": [
-            WM("high_model", "High Fun Camera", ["wan2_2", "fun", "camera", "high"], preferred_name="WanVideo/2_2/Fun/Wan2_2-Fun-Control-Camera-A14B-HIGH_fp8_e4m3fn_scaled_KJ.safetensors", target="high", quantization="fp8_e4m3fn_scaled"),
-            WM("low_model", "Low I2V模型", ["wan2_2", "i2v", "a14b", "low"], preferred_name="WanVideo/2_2/Wan2_2-I2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors", target="low", quantization="fp8_e4m3fn_scaled"),
+            WM("high_model", "High Fun Camera", ["wan2_2", "fun", "camera", "high"], preferred_name="Wan2_2-Fun-Control-Camera-A14B-HIGH_fp8_e4m3fn_scaled_KJ.safetensors", target="high", quantization="fp8_e4m3fn_scaled"),
+            WM("low_model", "Low I2V模型", ["wan2_2", "i2v", "a14b", "low"], preferred_name="Wan2_2-I2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors", target="low", quantization="fp8_e4m3fn_scaled"),
             WAN21_VAE,
             WAN_T5,
             LIGHTX_I2V_14B,
@@ -476,7 +507,7 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "wan22_ti2v_5b": {
         "label": "Wan2.2 TI2V 5B 单模型",
         "slots": [
-            WM("model", "TI2V 5B模型", ["wan2_2", "ti2v", "5b"], preferred_name="WanVideo/2_2/wan2.2_ti2v_5B_fp16.safetensors", base_precision="fp16_fast", attention_mode="sageattn"),
+            WM("model", "TI2V 5B模型", ["wan2_2", "ti2v", "5b"], preferred_name="wan2.2_ti2v_5B_fp16.safetensors", base_precision="fp16_fast", attention_mode="sageattn"),
             WAN22_VAE,
             WAN_T5,
         ],
@@ -484,33 +515,35 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "wan22_ovi_audio": {
         "label": "Wan2.2 Ovi 图像音频驱动",
         "slots": [
-            WM("model", "Ovi视频模型", ["ovi", "video"], preferred_name="WanVideo/Ovi/Wan_2_1_Ovi_video_model_bf16.safetensors", base_precision="bf16", attention_mode="sageattn"),
+            WM("model", "Ovi视频模型", ["ovi", "video"], preferred_name="Wan_2_1_Ovi_video_model_bf16.safetensors", base_precision="bf16", attention_mode="sageattn"),
             WAN22_VAE,
-            EXTRA("ovi_audio_extra", "Ovi音频额外模型", ["ovi", "audio"], preferred_name="WanVideo/Ovi/Wan_2_1_Ovi_audio_model_bf16.safetensors"),
+            WAN_T5,
+            EXTRA("ovi_audio_extra", "Ovi音频额外模型", ["ovi", "audio"], preferred_name="Wan_2_1_Ovi_audio_model_bf16.safetensors"),
         ],
     },
     "wan22_wananimate": {
         "label": "WanAnimate 14B 人物动画",
         "slots": [
-            WM("model", "WanAnimate模型", ["wan2_2", "animate", "14b"], preferred_name="WanVideo/2_2/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors", quantization="fp8_e4m3fn_scaled"),
+            WM("model", "WanAnimate模型", ["wan2_2", "animate", "14b"], preferred_name="Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors", quantization="fp8_e4m3fn_scaled"),
             WAN21_VAE,
-            L("wananimate_relight_lora", "WanAnimate Relight LoRA", ["wananimate", "relight"], preferred_name="WanVideo/WanAnimate_relight_lora_fp16.safetensors", strength=1.0, merge_loras=False),
-            L("wananimate_lightx_lora", "LightX2V I2V LoRA", ["lightx2v", "i2v", "14b"], preferred_name="WanVideo/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", strength=1.2, merge_loras=False),
+            WAN_T5,
+            L("wananimate_relight_lora", "WanAnimate Relight LoRA", ["wananimate", "relight"], preferred_name="WanAnimate_relight_lora_fp16.safetensors", strength=1.0, merge_loras=False),
+            L("wananimate_lightx_lora", "LightX2V I2V LoRA", ["lightx2v", "i2v", "14b"], preferred_name="lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", strength=1.2, merge_loras=False),
         ],
     },
     "wan21_t2v_14b": {
-        "label": "Wan2.1 T2V 14B KJ",
+        "label": "Wan2.1 T2V 文生视频 KJ流",
         "slots": [
-            WM("model", "T2V 14B模型", ["wan2_1", "t2v", "14b"], preferred_name="WanVideo/fp8_scaled_kj/T2V/Wan2_1-T2V-14B_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="fp8_e4m3fn_scaled"),
+            WM("model", "T2V 14B模型", ["wan2_1", "t2v","kj"], preferred_name="Wan2_1-T2V-14B_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="fp8_e4m3fn_scaled"),
             WAN21_VAE,
             WAN_T5,
             LIGHTX_T2V_14B,
         ],
     },
     "wan21_i2v_14b_720p": {
-        "label": "Wan2.1 I2V 14B 720P KJ",
+        "label": "Wan2.1 I2V 14B 720P KJ流",
         "slots": [
-            WM("model", "I2V 14B模型", ["wan2_1", "i2v", "14b", "720"], preferred_name="WanVideo/fp8_scaled_kj/I2V/Wan2_1-I2V-14B-720p_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="fp8_e4m3fn_scaled"),
+            WM("model", "I2V 14B模型", ["wan2_1", "i2v", "14b", "720"], preferred_name="Wan2_1-I2V-14B-720p_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="fp8_e4m3fn_scaled"),
             WAN21_VAE,
             WAN_T5,
             LIGHTX_I2V_14B,
@@ -519,15 +552,16 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "wan21_i2v_14b_480p_gguf": {
         "label": "Wan2.1 I2V 14B GGUF / InfiniteTalk底模",
         "slots": [
-            WM("model", "I2V 14B GGUF模型", ["wan2.1", "i2v", "14b", "gguf"], preferred_name="WanVideo/wan2.1-i2v-14b-480p-Q8_0.gguf", base_precision="fp16_fast", quantization="disabled"),
+            WM("model", "I2V 14B GGUF模型", ["wan2.1", "i2v", "14b", "gguf"], preferred_name="wan2.1-i2v-14b-480p-Q8_0.gguf", base_precision="fp16_fast", quantization="disabled"),
             WAN21_VAE,
+            WAN_T5,
             LIGHTX_I2V_14B,
         ],
     },
     "wan21_flf2v_14b": {
         "label": "Wan2.1 FLF2V 首尾帧 14B",
         "slots": [
-            WM("model", "FLF2V 720P模型", ["flf2v", "14b", "720"], preferred_name="WanVideo/Wan2_1-FLF2V-14B-720P_fp8_e4m3fn.safetensors", base_precision="fp16_fast", quantization="fp8_e4m3fn", attention_mode="sageattn"),
+            WM("model", "FLF2V 720P模型", ["flf2v", "14b", "720"], preferred_name="Wan2_1-FLF2V-14B-720P_fp8_e4m3fn.safetensors", base_precision="fp16_fast", quantization="fp8_e4m3fn", attention_mode="sageattn"),
             WAN21_VAE,
             WAN_T5,
             L("flf2v_lightx_lora", "FLF2V LightX LoRA", ["lightx2v", "14b", "rank32"], preferred_name="Wan21_T2V_14B_lightx2v_cfg_step_distill_lora_rank32.safetensors", strength=1.2, merge_loras=True),
@@ -536,106 +570,112 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "wan21_vace_13b": {
         "label": "Wan2.1 VACE 1.3B",
         "slots": [
-            WM("model", "T2V 1.3B底模", ["wan2.1", "t2v", "1.3b"], preferred_name="WanVideo/wan2.1_t2v_1.3B_fp16.safetensors", base_precision="fp16", attention_mode="sdpa"),
+            WM("model", "T2V 1.3B底模", ["wan2.1", "t2v", "1.3b"], preferred_name="wan2.1_t2v_1.3B_fp16.safetensors", base_precision="fp16", attention_mode="sdpa"),
             WAN21_VAE,
             WAN_T5,
-            VACE("vace_model", "VACE 1.3B模块", ["vace", "1_3b"], preferred_name="WanVideo/Wan2_1-VACE_module_1_3B_bf16.safetensors", base_precision="bf16"),
+            VACE("vace_model", "VACE 1.3B模块", ["vace", "1_3b"], preferred_name="Wan2_1-VACE_module_1_3B_bf16.safetensors", base_precision="bf16"),
         ],
     },
     "wan21_i2v_fantasytalking": {
         "label": "Wan2.1 I2V FantasyTalking",
         "slots": [
-            WM("model", "I2V 14B底模", ["wan2_1", "i2v", "14b", "720"], preferred_name="WanVideo/Wan2_1-I2V-14B-720P_fp8_e4m3fn.safetensors", base_precision="fp16", quantization="fp8_e4m3fn", attention_mode="sdpa"),
+            WM("model", "I2V 14B底模", ["wan2_1", "i2v", "14b", "720"], preferred_name="Wan2_1-I2V-14B-720P_fp8_e4m3fn.safetensors", base_precision="fp16", quantization="fp8_e4m3fn", attention_mode="sdpa"),
             WAN21_VAE,
             WAN_T5,
-            FT("fantasytalking_model", "FantasyTalking模型", ["fantasytalking"], preferred_name="WanVideo/fantasytalking_fp16.safetensors", base_precision="fp16"),
+            FT("fantasytalking_model", "FantasyTalking模型", ["fantasytalking"], preferred_name="fantasytalking_fp16.safetensors", base_precision="fp16"),
         ],
     },
     "wan21_i2v_infinitetalk": {
         "label": "Wan2.1 I2V InfiniteTalk / MultiTalk",
         "slots": [
-            WM("model", "I2V 14B GGUF底模", ["wan2.1", "i2v", "14b", "gguf"], preferred_name="WanVideo/wan2.1-i2v-14b-480p-Q8_0.gguf", base_precision="fp16_fast", quantization="disabled"),
+            WM("model", "I2V 14B GGUF底模", ["wan2.1", "i2v", "14b", "gguf"], preferred_name="wan2.1-i2v-14b-480p-Q8_0.gguf", base_precision="fp16_fast", quantization="disabled"),
             WAN21_VAE,
-            MT("multitalk_model", "InfiniteTalk模型", ["infinitetalk"], preferred_name="WanVideo/InfiniteTalk/Wan2_1-InfiniteTalk_Single_Q8.gguf"),
+            WAN_T5,
+            MT("multitalk_model", "InfiniteTalk模型", ["infinitetalk"], preferred_name="Wan2_1-InfiniteTalk_Single_Q8.gguf"),
             LIGHTX_I2V_14B,
         ],
     },
     "wan21_i2v_fantasyportrait": {
         "label": "Wan2.1 I2V FantasyPortrait",
         "slots": [
-            WM("model", "I2V 14B底模", ["wan2_1", "i2v", "14b", "720"], preferred_name="WanVideo/fp8_scaled_kj/I2V/Wan2_1-I2V-14B-720p_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="fp8_e4m3fn_scaled"),
+            WM("model", "I2V 14B底模", ["wan2_1", "i2v", "14b", "720"], preferred_name="Wan2_1-I2V-14B-720p_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="fp8_e4m3fn_scaled"),
             WAN21_VAE,
-            FP("fantasyportrait_model", "FantasyPortrait模型", ["fantasyportrait"], preferred_name="WanVideo/FantasyPortrait/Wan2_1_FantasyPortrait_fp16.safetensors", base_precision="fp16"),
+            WAN_T5,
+            FP("fantasyportrait_model", "FantasyPortrait模型", ["fantasyportrait"], preferred_name="Wan2_1_FantasyPortrait_fp16.safetensors", base_precision="fp16"),
             LIGHTX_I2V_14B,
         ],
     },
     "wan21_t2v_lynx": {
         "label": "Wan2.1 T2V Lynx 参考层",
         "slots": [
-            WM("model", "T2V 14B底模", ["wan2_1", "t2v", "14b"], preferred_name="WanVideo/fp8_scaled_kj/T2V/Wan2_1-T2V-14B_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="fp8_e4m3fn_scaled"),
+            WM("model", "T2V 14B底模", ["wan2_1", "t2v", "14b"], preferred_name="Wan2_1-T2V-14B_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="fp8_e4m3fn_scaled"),
             WAN21_VAE,
-            EXTRA("lynx_full_ref", "Lynx Full Ref层", ["lynx", "full", "ref"], preferred_name="WanVideo/lynx/Wan2_1-T2V-Lynx_full_ref_layers_fp16.safetensors"),
+            WAN_T5,
+            EXTRA("lynx_full_ref", "Lynx Full Ref层", ["lynx", "full", "ref"], preferred_name="Wan2_1-T2V-Lynx_full_ref_layers_fp16.safetensors"),
             LIGHTX_T2V_14B,
         ],
     },
     "wan21_i2v_mtv_crafter": {
         "label": "Wan2.1 MTV-Crafter 动作适配",
         "slots": [
-            WM("model", "MAGREF I2V底模", ["magref", "i2v", "14b"], preferred_name="WanVideo/fp8_scaled_kj/I2V/Wan2_1-I2V-14B-MAGREF_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="fp8_e4m3fn_scaled"),
+            WM("model", "MAGREF I2V底模", ["magref", "i2v", "14b"], preferred_name="Wan2_1-I2V-14B-MAGREF_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="fp8_e4m3fn_scaled"),
             WAN21_VAE,
-            EXTRA("mtv_motion_adapter", "MTV-Crafter运动适配器", ["mtv", "crafter", "motion"], preferred_name="WanVideo/MTVCrafter/Wan2_1_MTV-Crafter_motion_adapter_bf16.safetensors", base_precision="bf16"),
+            WAN_T5,
+            EXTRA("mtv_motion_adapter", "MTV-Crafter运动适配器", ["mtv", "crafter", "motion"], preferred_name="Wan2_1_MTV-Crafter_motion_adapter_bf16.safetensors", base_precision="bf16"),
             L("mtv_lightx_lora", "MTV LightX LoRA", ["lightx2v", "i2v", "rank"], preferred_name="lightx2v_I2V_not_clamped_rank_64_fp16_00001_.safetensors", strength=1.0),
         ],
     },
     "longcat_ti2v": {
-        "label": "LongCat TI2V",
+        "label": "LongCat TI2V 美团龙猫",
         "slots": [
-            WM("model", "LongCat TI2V模型", ["longcat", "ti2v"], preferred_name="LongCat/LongCat_TI2V_comfy_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="bf16", quantization="disabled", attention_mode="sageattn_compiled"),
+            WM("model", "LongCat TI2V模型", ["longcat", "ti2v"], preferred_name="LongCat_TI2V_comfy_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="bf16", quantization="disabled", attention_mode="sageattn_compiled"),
             WAN21_VAE,
-            L("longcat_distill_lora", "LongCat Distill LoRA", ["longcat", "distill"], preferred_name="LongCat_distill_lora_rank128_bf16.safetensors", strength=1.0),
+            WAN_T5,
+            L("longcat_distill_lora", "LongCat Distill LoRA", ["longcat"], preferred_name="LongCat_distill_lora_rank128_bf16.safetensors", strength=1.0),
         ],
     },
     "longcat_avatar": {
         "label": "LongCat Avatar 音频图生视频",
         "slots": [
-            WM("model", "LongCat Avatar模型", ["longcat", "avatar", "15"], preferred_name="LongCat/LongCat-Avatar-15_fp8_e4m3fn_wancompatible.safetensors", base_precision="bf16", quantization="disabled", attention_mode="sageattn", fallback_keywords=[["longcat", "avatar"]]),
+            WM("model", "LongCat Avatar模型", ["longcat", "avatar", "15"], preferred_name="LongCat-Avatar-15_fp8_e4m3fn_wancompatible.safetensors", base_precision="bf16", quantization="disabled", attention_mode="sageattn", fallback_keywords=[["longcat", "avatar"]]),
             WAN21_VAE,
+            WAN_T5,
             L("longcat_distill_lora", "LongCat Avatar DMD Distill LoRA", ["longcat", "avatar", "dmd", "distill"], preferred_name="LongCat-Avatar-15_dmd_distillLoRA.safetensors", strength=0.9, fallback_keywords=[["longcat", "distill"]]),
         ],
     },
     "wan21_13b_control_lora": {
         "label": "Wan2.1 1.3B Control LoRA",
         "slots": [
-            WM("model", "T2V 1.3B模型", ["wan2.1", "t2v", "1.3b"], preferred_name="WanVideo/wan2.1_t2v_1.3B_fp16.safetensors", base_precision="fp16", attention_mode="sdpa"),
+            WM("model", "T2V 1.3B模型", ["wan2.1", "t2v", "1.3b"], preferred_name="wan2.1_t2v_1.3B_fp16.safetensors", base_precision="fp16", attention_mode="sdpa"),
             WAN21_VAE,
             WAN_T5,
-            L("control_tile_lora", "Control Tile LoRA", ["control", "lora", "tile"], preferred_name="WanVid/wan2.1-1.3b-control-lora-tile-v0.1_comfy.safetensors", strength=1.0),
+            L("control_tile_lora", "Control Tile LoRA", ["control", "lora", "tile"], preferred_name="wan2.1-1.3b-control-lora-tile-v0.1_comfy.safetensors", strength=1.0),
         ],
     },
     "wan21_13b_echoshot": {
         "label": "Wan2.1 1.3B EchoShot",
         "slots": [
-            WM("model", "EchoShot 1.3B模型", ["echoshot", "1", "3b"], preferred_name="WanVideo/EchoShot/Wan2_1-T2V-1-3B-EchoShot_fp16.safetensors", base_precision="fp16_fast", attention_mode="sageattn"),
+            WM("model", "EchoShot 1.3B模型", ["echoshot", "1", "3b"], preferred_name="Wan2_1-T2V-1-3B-EchoShot_fp16.safetensors", base_precision="fp16_fast", attention_mode="sageattn"),
             WAN21_VAE,
             WAN_T5,
             L("echoshot_causvid_lora", "CausVid LoRA", ["causvid", "1_3b"], preferred_name="Wan21_CausVid_bidirect2_T2V_1_3B_lora_rank32.safetensors", strength=0.6, merge_loras=True),
             L("echoshot_self_forcing_lora", "Self Forcing LoRA", ["self", "forcing", "1_3b"], preferred_name="Wan2_1_self_forcing_dmd_1_3B_lora_rank_32_fp16.safetensors", strength=0.4, merge_loras=True),
-            L("echoshot_funreward_lora", "FunReward LoRA", ["funreward", "1.3b"], preferred_name="WanVid/funreward/Wan2.1-Fun-1.3B-InP-MPS_reward_lora_comfy.safetensors", strength=0.4, merge_loras=True),
+            L("echoshot_funreward_lora", "FunReward LoRA", ["funreward", "1.3b"], preferred_name="Wan2.1-Fun-1.3B-InP-MPS_reward_lora_comfy.safetensors", strength=0.4, merge_loras=True),
         ],
     },
     "wan21_13b_flashvsr": {
         "label": "Wan2.1 1.3B FlashVSR",
         "slots": [
-            WM("model", "FlashVSR 1.3B模型", ["flashvsr", "1_3b"], preferred_name="WanVideo/FlashVSR/Wan2_1-T2V-1_3B_FlashVSR_fp32.safetensors", base_precision="fp16", attention_mode="sdpa"),
+            WM("model", "FlashVSR 1.3B模型", ["flashvsr", "1_3b"], preferred_name="Wan2_1-T2V-1_3B_FlashVSR_fp32.safetensors", base_precision="fp16", attention_mode="sdpa"),
             WAN21_VAE,
             WAN_T5,
-            EXTRA("flashvsr_lq_proj", "FlashVSR LQ投影模型", ["flashvsr", "lq", "proj"], preferred_name="WanVideo/FlashVSR/Wan2_1_FlashVSR_LQ_proj_model_bf16.safetensors", base_precision="bf16"),
+            EXTRA("flashvsr_lq_proj", "FlashVSR LQ投影模型", ["flashvsr", "lq", "proj"], preferred_name="Wan2_1_FlashVSR_LQ_proj_model_bf16.safetensors", base_precision="bf16"),
         ],
     },
     "wan21_13b_recammaster": {
         "label": "Wan2.1 1.3B ReCamMaster",
         "slots": [
-            WM("model", "ReCamMaster 1.3B模型", ["recammaster", "1_3b"], preferred_name="WanVideo/Wan2_1_kwai_recammaster_1_3B_step20000_bf16.safetensors", base_precision="bf16", attention_mode="sdpa"),
+            WM("model", "ReCamMaster 1.3B模型", ["recammaster", "1_3b"], preferred_name="Wan2_1_kwai_recammaster_1_3B_step20000_bf16.safetensors", base_precision="bf16", attention_mode="sdpa"),
             WAN21_VAE,
             WAN_T5,
         ],
@@ -643,7 +683,7 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "wan21_13b_unilumos": {
         "label": "Wan2.1 1.3B UniLumos Relight",
         "slots": [
-            WM("model", "UniLumos 1.3B模型", ["unilumos", "1_3b"], preferred_name="WanVideo/UniLumos/Wan2_1_UniLumos_1_3B_bf16.safetensors", base_precision="bf16", attention_mode="sdpa"),
+            WM("model", "UniLumos 1.3B模型", ["unilumos", "1_3b"], preferred_name="Wan2_1_UniLumos_1_3B_bf16.safetensors", base_precision="bf16", attention_mode="sdpa"),
             WAN21_VAE,
             WAN_T5,
             L("causvid_lora", "CausVid LoRA", ["causvid", "1_3b"], preferred_name="Wan21_CausVid_bidirect2_T2V_1_3B_lora_rank32.safetensors", strength=1.0),
@@ -652,57 +692,62 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "wan21_14b_phantom": {
         "label": "Wan2.1 Phantom Subject2Vid",
         "slots": [
-            WM("model", "Phantom T2V 14B模型", ["phantom", "14b"], preferred_name="WanVideo/Wan2_1-T2V-14B-Phantom_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="fp8_e4m3fn_scaled"),
+            WM("model", "Phantom T2V 14B模型", ["phantom", "14b"], preferred_name="Wan2_1-T2V-14B-Phantom_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="fp8_e4m3fn_scaled"),
             WAN21_VAE,
             WAN_T5,
-            L("phantom_lightx_lora", "Phantom LightX LoRA", ["lightx2v", "t2v", "14b"], preferred_name="WanVideo/Lightx2v/lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64_bf16_.safetensors", strength=0.8),
+            L("phantom_lightx_lora", "Phantom LightX LoRA", ["lightx2v", "t2v", "14b"], preferred_name="lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64_bf16_.safetensors", strength=0.8),
         ],
     },
     "wan21_14b_standin": {
         "label": "Wan2.1 Stand-In 参考角色",
         "slots": [
-            WM("model", "T2V 14B底模", ["wan2_1", "t2v", "14b"], preferred_name="WanVideo/fp8_scaled_kj/T2V/Wan2_1-T2V-14B_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16", quantization="fp8_e4m3fn_scaled"),
+            WM("model", "T2V 14B底模", ["wan2_1", "t2v", "14b"], preferred_name="Wan2_1-T2V-14B_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16", quantization="fp8_e4m3fn_scaled"),
             WAN21_VAE,
-            L("standin_lora", "Stand-In LoRA", ["stand", "in"], preferred_name="WanVideo/Stand-In/Stand-In_wan2.1_T2V_14B_ver1.0.safetensors", strength=1.0),
+            WAN_T5,
+            L("standin_lora", "Stand-In LoRA", ["stand", "in"], preferred_name="Stand-In_wan2.1_T2V_14B_ver1.0.safetensors", strength=1.0),
             LIGHTX_T2V_14B,
         ],
     },
     "wan21_14b_humo": {
         "label": "Wan2.1 HuMo 14B",
         "slots": [
-            WM("model", "HuMo 14B模型", ["humo", "14b"], preferred_name="WanVideo/HuMo/Wan2_1-HuMo-14B_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="disabled"),
+            WM("model", "HuMo 14B模型", ["humo", "14b"], preferred_name="Wan2_1-HuMo-14B_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="disabled"),
             WAN21_VAE,
+            WAN_T5,
             LIGHTX_I2V_14B,
         ],
     },
     "wan21_14b_mocha": {
         "label": "Wan2.1 MoCha Subject Replace",
         "slots": [
-            WM("model", "MoCha 14B模型", ["mocha", "14b"], preferred_name="WanVideo/mocha/MoCha/Wan2_1_mocha-14B-preview_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="disabled"),
+            WM("model", "MoCha 14B模型", ["mocha", "14b"], preferred_name="Wan2_1_mocha-14B-preview_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="disabled"),
             WAN21_VAE,
-            L("mocha_lightx_lora", "MoCha LightX LoRA", ["lightx2v", "t2v", "14b"], preferred_name="WanVideo/Lightx2v/lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64_bf16_.safetensors", strength=1.0, merge_loras=True),
+            WAN_T5,
+            L("mocha_lightx_lora", "MoCha LightX LoRA", ["lightx2v", "t2v", "14b"], preferred_name="lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64_bf16_.safetensors", strength=1.0, merge_loras=True),
         ],
     },
     "wan21_14b_scail": {
         "label": "Wan2.1 SCAIL Pose Control",
         "slots": [
-            WM("model", "SCAIL 14B模型", ["scail", "14b"], preferred_name="WanVideo/SCAIL/Wan21-14B-SCAIL-preview_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="disabled"),
+            WM("model", "SCAIL 14B模型", ["scail", "14b"], preferred_name="Wan21-14B-SCAIL-preview_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="disabled"),
             WAN21_VAE,
+            WAN_T5,
             LIGHTX_I2V_14B,
         ],
     },
     "wan21_14b_steadydancer": {
         "label": "Wan2.1 SteadyDancer Pose Control",
         "slots": [
-            WM("model", "SteadyDancer模型", ["steadydancer"], preferred_name="WanVideo/SteadyDancer/Wan2.1-SteadyDancer_fp8_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="disabled"),
+            WM("model", "SteadyDancer模型", ["steadydancer"], preferred_name="Wan2.1-SteadyDancer_fp8_scaled_KJ.safetensors", base_precision="fp16_fast", quantization="disabled"),
             WAN21_VAE,
+            WAN_T5,
             LIGHTX_I2V_14B,
         ],
     },
     "wan21_14b_wanmove": {
         "label": "Wan2.1 WanMove I2V",
         "slots": [
-            WM("model", "WanMove模型", ["wanmove"], preferred_name="WanVideo/WanMove/Wan21-WanMove_fp8_scaled_e4m3fn_KJ.safetensors", base_precision="fp16", quantization="disabled"),
+            WM("model", "WanMove模型", ["wanmove"], preferred_name="Wan21-WanMove_fp8_scaled_e4m3fn_KJ.safetensors", base_precision="fp16", quantization="disabled"),
             WAN21_VAE,
             WAN_T5,
             LIGHTX_I2V_14B,
@@ -711,8 +756,9 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "wan21_skyreels_a2v": {
         "label": "Wan2.1 SkyReels A2V",
         "slots": [
-            WM("model", "SkyReels A2V模型", ["skyreels", "a2v"], preferred_name="WanVideo/SkyreelsV3/Wan21_SkyReelsV3-A2V_fp8_scaled_mixed.safetensors", base_precision="fp16_fast", quantization="disabled"),
+            WM("model", "SkyReels A2V模型", ["skyreels", "a2v"], preferred_name="Wan21_SkyReelsV3-A2V_fp8_scaled_mixed.safetensors", base_precision="fp16_fast", quantization="disabled"),
             WAN21_VAE,
+            WAN_T5,
         ],
     },
 }

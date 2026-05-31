@@ -7,6 +7,7 @@ import { app } from "/scripts/app.js";
 	const MAX_RESULTS = 80;
 	const RECENT_KEY = "gjj_workflow_node_finder_recent";
 	const REPLACE_TARGET_KEY = "gjj_workflow_node_finder_replace_target";
+	const REPLACE_TITLE_KEY = "gjj_workflow_node_finder_replace_title";
 	const STYLE_ID = "gjj-workflow-node-finder-style";
 	const OVERLAY_ID = "gjj-workflow-node-finder-overlay";
 	const GLOBAL_STATE_KEY = "__gjjWorkflowNodeFinder";
@@ -29,6 +30,7 @@ import { app } from "/scripts/app.js";
 	let replaceInput = null;
 	let replaceSuggest = null;
 	let replaceButton = null;
+	let replaceTitleCheckbox = null;
 	let selectionLabel = null;
 	let activeIndex = 0;
 	let replaceActiveIndex = 0;
@@ -37,6 +39,7 @@ import { app } from "/scripts/app.js";
 	let lastQuery = "";
 	let sortMode = "score";
 	let selectedNodeIds = new Set();
+	let autoSelectedFromQuery = false;
 	let recentNodeIds = loadRecentIds();
 
 	function loadRecentIds() {
@@ -75,6 +78,24 @@ import { app } from "/scripts/app.js";
 		try {
 			localStorage.setItem(REPLACE_TARGET_KEY, String(value || "").trim());
 		} catch (_) {}
+	}
+
+	function loadReplaceTitle() {
+		try {
+			return localStorage.getItem(REPLACE_TITLE_KEY) !== "0";
+		} catch (_) {
+			return true;
+		}
+	}
+
+	function saveReplaceTitle(value) {
+		try {
+			localStorage.setItem(REPLACE_TITLE_KEY, value ? "1" : "0");
+		} catch (_) {}
+	}
+
+	function shouldReplaceTitle() {
+		return replaceTitleCheckbox?.checked !== false;
 	}
 
 	function rememberNode(node) {
@@ -402,6 +423,7 @@ import { app } from "/scripts/app.js";
 		return [
 			nodeDisplayTitle(node),
 			nodeSubtitle(node),
+			node?.id,
 			node?.type,
 			node?.constructor?.title,
 			node?.constructor?.nodeData?.name,
@@ -413,6 +435,32 @@ import { app } from "/scripts/app.js";
 				compact: compactTextWithMap(text).text,
 			};
 		});
+	}
+
+	function exactMatchVariants(value) {
+		const normalized = normalizeText(value);
+		const compact = compactTextWithMap(value).text;
+		const values = [normalized, compact].filter(Boolean);
+		for (const item of [normalized, compact]) {
+			if (!item) continue;
+			values.push(item.replace(/^gjj[_\s·:/-]*/, ""));
+			values.push(item.replace(/^guojijun[_\s·:/-]*/, ""));
+		}
+		return new Set(values.filter(Boolean));
+	}
+
+	function nodeExactlyMatchesQuery(node, query) {
+		const text = String(query || "").trim();
+		if (!text) return false;
+		const queryVariants = exactMatchVariants(text);
+		for (const alias of nodeAliasInfo(node)) {
+			for (const value of exactMatchVariants(alias.text)) {
+				if (queryVariants.has(value)) {
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	function nodeMatchesQueryAnd(node, query) {
@@ -623,12 +671,38 @@ import { app } from "/scripts/app.js";
 .gjj-node-finder-actions {
 	position: relative;
 	display: grid;
-	grid-template-columns: minmax(0, 1fr) auto auto;
+	grid-template-columns: minmax(0, 1fr) auto auto auto;
 	gap: 8px;
 	align-items: center;
 	padding: 10px 12px;
 	border-top: 1px solid rgba(255, 255, 255, 0.1);
 	background: #1d222b;
+}
+.gjj-node-finder-toggle {
+	height: 32px;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 0 9px;
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	border-radius: 6px;
+	background: #242b35;
+	color: #dce4ed;
+	font-size: 12px;
+	font-weight: 650;
+	white-space: nowrap;
+	cursor: pointer;
+	box-sizing: border-box;
+}
+.gjj-node-finder-toggle:hover {
+	background: #303949;
+}
+.gjj-node-finder-toggle input {
+	width: 15px;
+	height: 15px;
+	margin: 0;
+	accent-color: #5fb3ff;
+	cursor: pointer;
 }
 .gjj-node-finder-replace-input {
 	min-width: 0;
@@ -796,10 +870,21 @@ import { app } from "/scripts/app.js";
 		replaceButton.className = "gjj-node-finder-action-button";
 		replaceButton.textContent = "替换所选";
 
+		const replaceTitleToggle = document.createElement("label");
+		replaceTitleToggle.className = "gjj-node-finder-toggle";
+		replaceTitleToggle.title = "开启后，替换节点时使用新节点的中文标题；关闭后保留原节点标题。";
+		replaceTitleCheckbox = document.createElement("input");
+		replaceTitleCheckbox.type = "checkbox";
+		replaceTitleCheckbox.checked = loadReplaceTitle();
+		replaceTitleCheckbox.addEventListener("change", () => saveReplaceTitle(replaceTitleCheckbox.checked));
+		const replaceTitleText = document.createElement("span");
+		replaceTitleText.textContent = "替换标题";
+		replaceTitleToggle.append(replaceTitleCheckbox, replaceTitleText);
+
 		selectionLabel = document.createElement("div");
 		selectionLabel.className = "gjj-node-finder-selection";
 
-		actions.append(replaceInput, replaceSuggest, replaceButton, selectionLabel);
+		actions.append(replaceInput, replaceSuggest, replaceTitleToggle, replaceButton, selectionLabel);
 		top.append(mark, searchInput, sortButtons, countLabel);
 		panel.append(top, resultList, emptyLabel, actions);
 		root.appendChild(panel);
@@ -957,6 +1042,12 @@ import { app } from "/scripts/app.js";
 			type ||
 			""
 		);
+	}
+
+	function replacementTitleForNode(node) {
+		const type = String(node?.type || node?.comfyClass || node?.constructor?.nodeData?.name || "");
+		const nodeCtor = node?.constructor || globalThis.LiteGraph?.registered_node_types?.[type];
+		return String(nodeTypeDisplayName(type, nodeCtor) || node?.title || type).trim();
 	}
 
 	function nodeTypeCategory(nodeCtor) {
@@ -1182,10 +1273,32 @@ import { app } from "/scripts/app.js";
 		updateSelectionState();
 	}
 
-	function renderResults() {
+	function selectMatchedResults(query) {
+		const text = String(query || "").trim();
+		if (!text) {
+			if (autoSelectedFromQuery) {
+				selectedNodeIds.clear();
+				autoSelectedFromQuery = false;
+			}
+			return;
+		}
+		selectedNodeIds.clear();
+		for (const node of currentResults) {
+			const id = String(node?.id ?? "");
+			if (id && nodeExactlyMatchesQuery(node, text)) {
+				selectedNodeIds.add(id);
+			}
+		}
+		autoSelectedFromQuery = true;
+	}
+
+	function renderResults(options = {}) {
 		const query = searchInput?.value || "";
 		updateSortButtons();
 		currentResults = searchNodes(query);
+		if (!options.preserveSelection) {
+			selectMatchedResults(query);
+		}
 		activeIndex = Math.min(activeIndex, Math.max(0, currentResults.length - 1));
 		resultList.replaceChildren();
 
@@ -1533,12 +1646,14 @@ import { app } from "/scripts/app.js";
 		}
 	}
 
-	function copyBasicNodeState(source, target) {
+	function copyBasicNodeState(source, target, options = {}) {
+		const replaceTitle = options.replaceTitle !== false;
+		const replacementTitle = replacementTitleForNode(target);
 		target.pos = [Number(source?.pos?.[0] || 0), Number(source?.pos?.[1] || 0)];
 		if (Array.isArray(source?.size)) {
 			target.size = [Number(source.size[0] || target.size?.[0] || 180), Number(source.size[1] || target.size?.[1] || 80)];
 		}
-		if (source?.title && source.title !== source.type) {
+		if (!replaceTitle && source?.title && source.title !== source.type) {
 			target.title = source.title;
 		}
 		for (const key of ["color", "bgcolor", "boxcolor"]) {
@@ -1549,8 +1664,17 @@ import { app } from "/scripts/app.js";
 		if (source?.properties) {
 			target.properties = { ...(target.properties || {}), ...source.properties };
 			target.properties["Node name for S&R"] = target.type || target.comfyClass || target.properties["Node name for S&R"];
+			if (replaceTitle) {
+				delete target.properties.title;
+				delete target.properties.Title;
+				delete target.properties.label;
+				delete target.properties.display_name;
+			}
 		}
 		copyWidgetValues(source, target);
+		if (replaceTitle && replacementTitle) {
+			target.title = replacementTitle;
+		}
 	}
 
 	function restoreConnections(source, target, saved, nodeMap = new Map()) {
@@ -1588,7 +1712,7 @@ import { app } from "/scripts/app.js";
 	function replaceOneNode(source, targetType) {
 		const saved = collectNodeConnections(source);
 		const target = createReplacementNode(targetType);
-		copyBasicNodeState(source, target);
+		copyBasicNodeState(source, target, { replaceTitle: shouldReplaceTitle() });
 		app.graph?.add?.(target);
 		try {
 			app.graph?.remove?.(source);
@@ -1614,7 +1738,7 @@ import { app } from "/scripts/app.js";
 		for (const node of nodes) {
 			try {
 				const target = createReplacementNode(targetType);
-				copyBasicNodeState(node, target);
+				copyBasicNodeState(node, target, { replaceTitle: shouldReplaceTitle() });
 				jobs.push({ source: node, target, saved: collectNodeConnections(node) });
 			} catch (error) {
 				failures.push(`${nodeDisplayTitle(node)}：${error?.message || error}`);
@@ -1650,7 +1774,7 @@ import { app } from "/scripts/app.js";
 
 		const created = jobs.map((job) => job.target);
 		selectedNodeIds = new Set(created.map((node) => String(node?.id ?? "")).filter(Boolean));
-		renderResults();
+		renderResults({ preserveSelection: true });
 		if (created[0]) {
 			focusNode(created[0]);
 		}

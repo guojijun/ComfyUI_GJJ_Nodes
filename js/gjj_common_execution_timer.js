@@ -74,6 +74,29 @@ function getNodeById(id) {
 	return node || (app.graph?._nodes || []).find((item) => String(item?.id) === value) || null;
 }
 
+function focusNode(id) {
+	const node = getNodeById(id);
+	const canvas = app.canvas;
+	if (!node || !canvas) return false;
+	try { canvas.deselectAllNodes?.(); } catch (_) {}
+	try { canvas.deselectAll?.(); } catch (_) {}
+	try {
+		for (const item of app.graph?._nodes || []) item.selected = false;
+	} catch (_) {}
+	node.selected = true;
+	try { canvas.selectNode?.(node, false); } catch (_) {}
+	try {
+		canvas.selected_nodes = {};
+		canvas.selected_nodes[node.id] = node;
+		canvas.setSelectedNodes?.(canvas.selected_nodes);
+	} catch (_) {}
+	try { canvas.centerOnNode?.(node); } catch (_) {}
+	try { canvas.focusOnNode?.(node); } catch (_) {}
+	try { canvas.scrollToNode?.(node); } catch (_) {}
+	try { app.graph?.setDirtyCanvas?.(true, true); } catch (_) {}
+	return true;
+}
+
 function nodeLabel(id) {
 	const node = getNodeById(id);
 	const raw = (
@@ -85,6 +108,18 @@ function nodeLabel(id) {
 		|| `节点 ${id}`
 	);
 	return String(raw || `节点 ${id}`).replace(/\s+/g, " ").trim();
+}
+
+function detailText(detail) {
+	if (!detail || typeof detail !== "object") return "";
+	return String(
+		detail?.exception_message
+		?? detail?.message
+		?? detail?.error
+		?? detail?.details
+		?? detail?.traceback
+		?? "",
+	).trim();
 }
 
 function ensureStyles() {
@@ -109,6 +144,19 @@ function ensureStyles() {
 			font: 12px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 			overflow: hidden;
 			user-select: none;
+		}
+		#${PANEL_ID}.gjj-run-error {
+			border-color: rgba(255, 84, 84, 0.88);
+			box-shadow: 0 0 0 1px rgba(255, 84, 84, 0.42), 0 16px 44px rgba(255, 40, 40, 0.22), 0 12px 36px rgba(0, 0, 0, 0.32);
+		}
+		#${PANEL_ID}.gjj-run-error .gjj-exec-header {
+			background: linear-gradient(90deg, rgba(120, 20, 28, 0.88), rgba(32, 20, 24, 0.94));
+			border-bottom-color: rgba(255, 120, 120, 0.42);
+		}
+		#${PANEL_ID}.gjj-run-error .gjj-exec-title,
+		#${PANEL_ID}.gjj-run-error .gjj-exec-summary {
+			color: #fff4f4;
+			font-weight: 800;
 		}
 		#${PANEL_ID}.gjj-collapsed .gjj-exec-body { display: none; }
 		#${PANEL_ID} .gjj-exec-header {
@@ -140,7 +188,8 @@ function ensureStyles() {
 			color: #e7eef0;
 			cursor: pointer;
 			padding: 0;
-			font-size: 12px;
+			font-size: 14px;
+			line-height: 22px;
 		}
 		#${PANEL_ID} button:hover { background: rgba(255, 255, 255, 0.16); }
 		#${PANEL_ID} .gjj-exec-body {
@@ -163,20 +212,47 @@ function ensureStyles() {
 		}
 		#${PANEL_ID} .gjj-exec-row {
 			display: grid;
-			grid-template-columns: minmax(0, 1fr) 72px 48px;
-			gap: 8px;
-			padding: 6px 9px;
+			grid-template-columns: minmax(0, 1fr) 22px 70px 56px;
+			align-items: center;
+			gap: 7px;
+			padding: 5px 9px;
 			border-bottom: 1px solid rgba(132, 164, 176, 0.10);
 		}
 		#${PANEL_ID} .gjj-exec-row:last-child { border-bottom: 0; }
 		#${PANEL_ID} .gjj-exec-row.gjj-running { background: rgba(94, 160, 255, 0.12); }
-		#${PANEL_ID} .gjj-exec-row.gjj-error { background: rgba(255, 90, 90, 0.13); }
+		#${PANEL_ID} .gjj-exec-row.gjj-error {
+			background: linear-gradient(90deg, rgba(142, 24, 36, 0.58), rgba(64, 25, 29, 0.54));
+			border-left: 4px solid #ff4d5a;
+			box-shadow: inset 0 0 0 1px rgba(255, 105, 116, 0.28);
+		}
 		#${PANEL_ID} .gjj-exec-row.gjj-cached { opacity: 0.72; }
 		#${PANEL_ID} .gjj-exec-name {
 			min-width: 0;
 			overflow: hidden;
 			text-overflow: ellipsis;
 			white-space: nowrap;
+		}
+		#${PANEL_ID} .gjj-exec-row.gjj-error .gjj-exec-name,
+		#${PANEL_ID} .gjj-exec-row.gjj-error .gjj-exec-time,
+		#${PANEL_ID} .gjj-exec-row.gjj-error .gjj-exec-state {
+			color: #ffe8e8;
+			font-weight: 700;
+		}
+		#${PANEL_ID} .gjj-exec-locate {
+			width: 22px;
+			height: 22px;
+			border-color: rgba(100, 196, 255, 0.32);
+			background: rgba(53, 95, 128, 0.28);
+			font-size: 13px;
+			line-height: 20px;
+		}
+		#${PANEL_ID} .gjj-exec-locate:hover {
+			border-color: rgba(113, 214, 255, 0.72);
+			background: rgba(44, 122, 170, 0.46);
+		}
+		#${PANEL_ID} .gjj-exec-row.gjj-error .gjj-exec-locate {
+			border-color: rgba(255, 190, 100, 0.58);
+			background: rgba(130, 48, 35, 0.46);
 		}
 		#${PANEL_ID} .gjj-exec-time {
 			text-align: right;
@@ -219,19 +295,19 @@ function ensurePanel() {
 
 	const title = document.createElement("div");
 	title.className = "gjj-exec-title";
-	title.textContent = "⏱ GJJ计时器";
+	title.textContent = "⏱️ GJJ计时器";
 
 	const summary = document.createElement("div");
 	summary.className = "gjj-exec-summary";
 	summary.textContent = "等待执行";
 
-	const collapse = button("－", "收起/展开计时器", () => {
+	const collapse = button("🔼", "收起/展开计时器", () => {
 		root.classList.toggle("gjj-collapsed");
 		localStorage.setItem(COLLAPSED_KEY, root.classList.contains("gjj-collapsed") ? "1" : "0");
-		collapse.textContent = root.classList.contains("gjj-collapsed") ? "＋" : "－";
+		collapse.textContent = root.classList.contains("gjj-collapsed") ? "🔽" : "🔼";
 	});
-	const copy = button("⧉", "复制本次耗时统计", () => copySummary());
-	const clear = button("×", "清除本次计时结果", () => {
+	const copy = button("📋", "复制本次耗时统计", () => copySummary());
+	const clear = button("🧹", "清除本次计时结果", () => {
 		stopRefresh();
 		currentRun = null;
 		root.style.display = "none";
@@ -244,7 +320,7 @@ function ensurePanel() {
 	const total = document.createElement("div");
 	total.className = "gjj-exec-total";
 	const totalLabel = document.createElement("div");
-	totalLabel.textContent = "总耗时";
+	totalLabel.textContent = "⏱️ 总耗时";
 	const totalTime = document.createElement("div");
 	totalTime.className = "gjj-exec-time";
 	totalTime.textContent = "0ms";
@@ -258,7 +334,7 @@ function ensurePanel() {
 	root.__gjjTimer = { summary, totalTime, list, collapse };
 	if (localStorage.getItem(COLLAPSED_KEY) === "1") {
 		root.classList.add("gjj-collapsed");
-		collapse.textContent = "＋";
+		collapse.textContent = "🔽";
 	}
 
 	document.body.appendChild(root);
@@ -267,18 +343,18 @@ function ensurePanel() {
 }
 
 function statusLabel(status) {
-	if (status === "running") return "运行中";
-	if (status === "cached") return "缓存";
-	if (status === "error") return "错误";
-	if (status === "interrupted") return "中断";
-	return "完成";
+	if (status === "running") return "🔵 运行中";
+	if (status === "cached") return "💾 缓存";
+	if (status === "error") return "🚨 错误";
+	if (status === "interrupted") return "⛔ 中断";
+	return "✅ 完成";
 }
 
 function runLabel(status) {
-	if (status === "running") return "运行中";
-	if (status === "error") return "执行出错";
-	if (status === "interrupted") return "已中断";
-	return "执行完成";
+	if (status === "running") return "🔵 运行中";
+	if (status === "error") return "🚨 执行出错";
+	if (status === "interrupted") return "⛔ 已中断";
+	return "✅ 执行完成";
 }
 
 function rowDuration(row, now = nowMs()) {
@@ -297,11 +373,13 @@ function render() {
 	const root = ensurePanel();
 	const state = root.__gjjTimer;
 	if (!currentRun) {
+		root.classList.remove("gjj-run-error");
 		root.style.display = "none";
 		return;
 	}
 
 	root.style.display = "flex";
+	root.classList.toggle("gjj-run-error", currentRun.status === "error");
 	const now = nowMs();
 	const total = (currentRun.finishedAt || now) - currentRun.startedAt;
 	const rows = visibleRows();
@@ -315,14 +393,17 @@ function render() {
 		const name = document.createElement("div");
 		name.className = "gjj-exec-name";
 		name.textContent = `${row.label} #${row.id}`;
-		name.title = name.textContent;
+		name.title = row.errorText ? `${name.textContent}\n${row.errorText}` : name.textContent;
+		const locate = button("📍", `定位到节点：${row.label} #${row.id}`, () => focusNode(row.id));
+		locate.className = "gjj-exec-locate";
 		const time = document.createElement("div");
 		time.className = "gjj-exec-time";
 		time.textContent = formatElapsed(rowDuration(row, now));
 		const status = document.createElement("div");
 		status.className = "gjj-exec-state";
 		status.textContent = statusLabel(row.status);
-		item.append(name, time, status);
+		status.title = row.errorText || status.textContent;
+		item.append(name, locate, time, status);
 		state.list.appendChild(item);
 	}
 }
@@ -349,19 +430,20 @@ function ensureRow(id) {
 			duration: 0,
 			startedAt: 0,
 			status: "done",
+			errorText: "",
 		};
 		currentRun.rows.set(key, row);
 	}
 	return row;
 }
 
-function finishActive(status = "done", at = nowMs()) {
+function finishActive(status = "done", at = nowMs(), errorText = "") {
 	if (!currentRun?.activeId) return;
-	finishNode(currentRun.activeId, status, at);
+	finishNode(currentRun.activeId, status, at, errorText);
 	currentRun.activeId = "";
 }
 
-function finishNode(id, status = "done", at = nowMs()) {
+function finishNode(id, status = "done", at = nowMs(), errorText = "") {
 	const row = ensureRow(id);
 	if (!row) return;
 	if (row.startedAt) {
@@ -369,6 +451,11 @@ function finishNode(id, status = "done", at = nowMs()) {
 		row.startedAt = 0;
 	}
 	row.status = status;
+	if (status === "error") {
+		row.errorText = errorText || row.errorText || "执行出错";
+	} else if (status === "running") {
+		row.errorText = "";
+	}
 	render();
 }
 
@@ -387,6 +474,7 @@ function startNode(id, at = nowMs()) {
 	if (!row) return;
 	row.label = nodeLabel(key);
 	row.status = "running";
+	row.errorText = "";
 	if (!row.startedAt) row.startedAt = at;
 	currentRun.activeId = key;
 	render();
@@ -412,10 +500,11 @@ function finishRun(status, event) {
 	if (!currentRun || !samePrompt(event)) return;
 	const at = nowMs();
 	const errorNode = eventNodeId(event);
+	const errorText = status === "error" ? detailText(event?.detail) : "";
 	if (errorNode) {
-		finishNode(errorNode, status === "error" ? "error" : "done", at);
+		finishNode(errorNode, status === "error" ? "error" : "done", at, errorText);
 	}
-	finishActive(status === "interrupted" ? "interrupted" : status === "error" ? "error" : "done", at);
+	finishActive(status === "interrupted" ? "interrupted" : status === "error" ? "error" : "done", at, errorText);
 	currentRun.status = status;
 	currentRun.finishedAt = at;
 	stopRefresh();
@@ -429,6 +518,7 @@ function markCached(event) {
 		if (!row || row.startedAt) continue;
 		row.label = nodeLabel(id);
 		row.status = "cached";
+		row.errorText = "";
 		row.duration = 0;
 	}
 	render();
