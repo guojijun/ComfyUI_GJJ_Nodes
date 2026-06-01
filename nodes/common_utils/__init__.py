@@ -209,6 +209,13 @@ from .prompt_translation import (
 	unload_translation_model,
 )
 
+from .media_preview import (
+	# 公共媒体预览/浏览接口
+	COMMON_MEDIA_OPEN_FOLDER_API,
+	gjjutils_media_root,
+	register_common_media_preview_api,
+)
+
 from . import rmbg2_model
 
 __all__ = [
@@ -339,4 +346,8 @@ __all__ = [
 	"translate_prompt_pair",
 	"translate_zh_to_en",
 	"unload_translation_model",
+	# media_preview
+	"COMMON_MEDIA_OPEN_FOLDER_API",
+	"gjjutils_media_root",
+	"register_common_media_preview_api",
 ]

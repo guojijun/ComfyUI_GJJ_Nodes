@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 
 import folder_paths
 import torch
 import comfy.clip_vision
+import comfy.controlnet
 import comfy.sd
 import comfy.utils
 from aiohttp import web
@@ -59,6 +59,9 @@ VAE_DTYPE_OPTIONS = ["default", "float16", "bfloat16", "float32"]
 NODE_NAME = "GJJ_ModelBundleLoader"
 LIST_API = "/gjj/model_bundle_loader_lists"
 PRESET_LORA_SLOTS = (1, 2)
+CHECKPOINT_COMMON_TEMPLATE_ID = "checkpoint_common"
+CONTROL_NET_NONE = "不选择"
+MAX_CONTROL_NET_SLOTS = 8
 MODEL_EXTENSIONS = (".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".sft", ".gguf")
 MODEL_IGNORED_TOKENS = {
     "fp8",
@@ -124,6 +127,13 @@ def _default_value(values: list[str]) -> str:
     return values[0] if values else ""
 
 
+def _default_vae_value(values: list[str]) -> str:
+    for name in values:
+        if "vae-ft-mse" in str(name or "").lower():
+            return name
+    return _default_value(values)
+
+
 def _normalize_text(value: str | None) -> str:
     return str(value or "").strip().lower()
 
@@ -134,6 +144,14 @@ def _model_stem(name: str) -> str:
         if text.endswith(suffix):
             return text[: -len(suffix)]
     return text
+
+
+def _model_basename(name: str) -> str:
+    return str(name or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+
+
+def _model_has_subdir(name: str) -> bool:
+    return "/" in str(name or "") or "\\" in str(name or "")
 
 
 def _model_match_tokens(value: str) -> list[str]:
@@ -221,7 +239,25 @@ def _resolve_model_name(categories: tuple[str, ...], filename: str) -> str:
     available: list[str] = []
     for category in categories:
         available.extend(_safe_filename_list(category))
-    resolved = _pick_short_model_name(filename, _dedupe_keep_order(available), str(filename or "").strip())
+    available = _dedupe_keep_order(available)
+    raw = str(filename or "").strip()
+    if raw:
+        normalized_raw = raw.replace("\\", "/").lower()
+        has_exact_full_match = any(str(name or "").replace("\\", "/").lower() == normalized_raw for name in available)
+        exact_basename_matches = [
+            name for name in available
+            if _model_basename(name).lower() == _model_basename(raw).lower()
+        ]
+        if len(exact_basename_matches) > 1 and (not _model_has_subdir(raw) or not has_exact_full_match):
+            preview = "\n".join(f"- {name}" for name in exact_basename_matches[:12])
+            remaining = len(exact_basename_matches) - 12
+            suffix = f"\n... 另有 {remaining} 个同名文件" if remaining > 0 else ""
+            raise RuntimeError(
+                f"模型文件路径不明确，存在多个同名候选：{raw}\n"
+                f"{preview}{suffix}\n"
+                "请在预设或节点里保存带子目录的相对路径。"
+            )
+    resolved = _pick_short_model_name(raw, available, raw)
     if not str(resolved or "").strip():
         raise RuntimeError("模型文件名不能为空。")
     return resolved
@@ -232,7 +268,23 @@ def _resolve_model_name_and_category(categories: tuple[str, ...], filename: str)
     if not raw:
         raise RuntimeError("模型文件名不能为空。")
     for category in categories:
-        resolved = _pick_short_model_name(raw, _safe_filename_list(category), "")
+        available = _safe_filename_list(category)
+        normalized_raw = raw.replace("\\", "/").lower()
+        has_exact_full_match = any(str(name or "").replace("\\", "/").lower() == normalized_raw for name in available)
+        exact_basename_matches = [
+            name for name in available
+            if _model_basename(name).lower() == _model_basename(raw).lower()
+        ]
+        if len(exact_basename_matches) > 1 and (not _model_has_subdir(raw) or not has_exact_full_match):
+            preview = "\n".join(f"- {name}" for name in exact_basename_matches[:12])
+            remaining = len(exact_basename_matches) - 12
+            suffix = f"\n... 另有 {remaining} 个同名文件" if remaining > 0 else ""
+            raise RuntimeError(
+                f"模型文件路径不明确，存在多个同名候选：{raw}\n"
+                f"{preview}{suffix}\n"
+                "请在预设或节点里保存带子目录的相对路径。"
+            )
+        resolved = _pick_short_model_name(raw, available, "")
         if resolved:
             return category, resolved
     return (categories[0] if categories else "", raw)
@@ -284,6 +336,10 @@ def list_clip_vision_models() -> list[str]:
     return _safe_filename_list("clip_vision")
 
 
+def list_controlnet_models() -> list[str]:
+    return _safe_filename_list("controlnet")
+
+
 async def get_gjj_model_bundle_loader_lists(request):
     presets = load_model_family_presets() if load_model_family_presets is not None else []
     return web.json_response(
@@ -297,6 +353,7 @@ async def get_gjj_model_bundle_loader_lists(request):
                 "model_patches": list_model_patch_models(),
                 "clip_vision": list_clip_vision_models(),
                 "clip_visions": list_clip_vision_models(),
+                "controlnet": list_controlnet_models(),
             },
             "unet_dtypes": UNET_DTYPE_OPTIONS,
             "clip_dtypes": CLIP_DTYPE_OPTIONS,
@@ -412,6 +469,19 @@ def _preset_text(preset: dict, key: str) -> str:
     return str((preset or {}).get(key, "") or "").strip()
 
 
+def _is_checkpoint_common_preset(preset: dict) -> bool:
+    return _preset_text(preset, "id") == CHECKPOINT_COMMON_TEMPLATE_ID
+
+
+def _optional_model_text(value) -> str:
+    text = str(value or "").strip()
+    if text.lower() in {"true", "false", "1", "0", "yes", "no", "on", "off", "default", "none", "null", "undefined"}:
+        return ""
+    if text in {CONTROL_NET_NONE, "未选择", "无", "不使用"}:
+        return ""
+    return text
+
+
 def _preset_clip_names(preset: dict) -> list[str]:
     value = (preset or {}).get("clip_names", [])
     if isinstance(value, str):
@@ -469,7 +539,44 @@ def _preset_lora_default(preset: dict, index: int) -> tuple[str, float]:
     return name, strength
 
 
-def _preset_lora_chain_config(
+def _preset_lora_auto_enabled(preset: dict, index: int) -> bool:
+    text = _preset_text(preset, f"lora_{index}_auto_enabled")
+    return _bool_value(text, True) if text else True
+
+
+def _has_model_subdir(name: str) -> bool:
+    return _model_has_subdir(name)
+
+
+def _same_model_basename(left: str, right: str) -> bool:
+    left_base = _model_basename(left).lower()
+    right_base = _model_basename(right).lower()
+    return bool(left_base and right_base and left_base == right_base)
+
+
+def _prefer_preset_model_path(runtime_name: str, preset_name: str) -> str:
+    """Keep subdirectory-qualified preset paths when old saved widgets only store basename."""
+    text = str(runtime_name or "").strip()
+    preset_text = str(preset_name or "").strip()
+    if not text:
+        return preset_text
+    if (
+        preset_text
+        and _has_model_subdir(preset_text)
+        and not _has_model_subdir(text)
+        and _same_model_basename(text, preset_text)
+    ):
+        return preset_text
+    return text
+
+
+def _prefer_preset_lora_path(preset: dict, index: int, name: str) -> str:
+    text = str(name or "").strip()
+    default_name, _ = _preset_lora_default(preset, index)
+    return _prefer_preset_model_path(text, default_name)
+
+
+def _preset_lora_items(
     preset: dict,
     lora_1_enabled=True,
     lora_1_name="",
@@ -477,7 +584,7 @@ def _preset_lora_chain_config(
     lora_2_enabled=True,
     lora_2_name="",
     lora_2_strength="",
-) -> str:
+) -> list[dict]:
     items: list[dict] = []
     runtime_values = {
         1: (lora_1_enabled, lora_1_name, lora_1_strength),
@@ -488,35 +595,45 @@ def _preset_lora_chain_config(
         if not default_name:
             continue
         enabled, runtime_name, runtime_strength = runtime_values.get(index, (True, "", ""))
-        if not _bool_value(enabled, bool(default_name and abs(default_strength) >= 1e-5)):
+        default_enabled = bool(default_name and abs(default_strength) >= 1e-5 and _preset_lora_auto_enabled(preset, index))
+        if not _bool_value(enabled, default_enabled):
             continue
-        name = str(runtime_name or default_name or "").strip()
+        name = _prefer_preset_lora_path(preset, index, str(runtime_name or default_name or "").strip())
         if not name:
             continue
         strength = _float_value(runtime_strength, default_strength)
         if abs(strength) < 1e-5:
             continue
-        items.append({"enabled": True, "name": name, "strength": strength})
-    return json.dumps(items, ensure_ascii=False) if items else ""
+        items.append({"enabled": True, "index": index, "name": name, "strength": strength})
+    return items
 
 
 class GJJ_ModelBundleLoader:
     CATEGORY = "GJJ"
     FUNCTION = "load_models"
-    DESCRIPTION = "一次性加载模型族模板中的扩散模型、CLIP、VAE、模型补丁、CLIP视觉模型，并附带常用采样参数输出。"
-    SEARCH_ALIASES = ["简易加载器", "model loader", "easy loader", "UNET", "Checkpoint", "CLIP", "VAE", "MODEL_PATCH", "CLIP_VISION", "KSampler", "采样参数"]
-    RETURN_TYPES = ("MODEL", "CLIP", "VAE", "MODEL_PATCH", "CLIP_VISION", "INT", "FLOAT", "FLOAT")
-    RETURN_NAMES = ("扩散模型（model）", "文本编码（clip）", "图像解码（vae）", "模型补丁（model_patch）", "CLIP视觉（clip_vision）", "步数（steps）", "CFG", "降噪（denoise）")
+    DESCRIPTION = "一次性加载模型族模板中的扩散模型、CLIP、VAE、模型补丁、CLIP视觉模型、ControlNet，并附带常用采样参数输出。"
+    SEARCH_ALIASES = ["MMM", "简易加载器", "model loader", "easy loader", "UNET", "Checkpoint", "CLIP", "VAE", "MODEL_PATCH", "CLIP_VISION", "CONTROL_NET", "ControlNet", "KSampler", "采样参数"]
+    GJJ_HELP = {
+        "model_tree": True,
+        "model_download_url": "https://pan.quark.cn/s/6ec846f1f58d",
+        "notice": "按当前模型族模板显示需要放入 ComfyUI/models 下的模型文件；刷新按钮会重新读取本地模型列表。",
+        "dependencies": ["ComfyUI 基础模型加载器", "ControlNet 仅在当前模板声明时加载"],
+    }
+    RETURN_TYPES = (
+        "MODEL",
+        "CLIP",
+        "VAE",
+    ) + ("*",) * (MAX_CONTROL_NET_SLOTS + 5)
+    RETURN_NAMES = (
+        "扩散模型（model）",
+        "文本编码（clip）",
+        "图像解码（vae）",
+    ) + tuple(f"动态输出 {index}" for index in range(1, MAX_CONTROL_NET_SLOTS + 6))
     OUTPUT_TOOLTIPS = (
         "当前节点加载完成后的 UNET / 扩散模型输出。",
         "当前节点加载完成后的 CLIP / 文本编码器输出。",
         "当前节点加载完成后的 VAE 模型输出。",
-        "当前模板需要的 MODEL_PATCH 输出，例如 bytedance-uso 的 projector。",
-        "当前模板需要的 CLIP_VISION 输出，例如 bytedance-uso 的 SigCLIP 视觉编码器。",
-        "可直接连接到 KSampler 的 steps 输入。",
-        "可直接连接到 KSampler 的 cfg 输入。",
-        "可直接连接到 KSampler 的 denoise 输入。",
-    )
+    ) + tuple("按当前预设动态映射为 ControlNet、模型补丁、CLIP视觉或采样参数输出。" for _ in range(MAX_CONTROL_NET_SLOTS + 5))
 
     def __init__(self):
         self.loaded_lora: tuple[str, object] | None = None
@@ -526,6 +643,29 @@ class GJJ_ModelBundleLoader:
         unet_models = list_unet_models() or [""]
         clip_models = list_clip_models() or [""]
         vae_models = list_vae_models() or [""]
+        control_net_inputs = {
+            "control_net_name": (
+                "STRING",
+                {
+                    "default": "",
+                    "display": "hidden",
+                    "hidden": True,
+                    "display_name": "ControlNet 1",
+                    "tooltip": "Checkpoint 通用预设可选的第 1 个 ControlNet；留空或不选择时不加载。",
+                },
+            )
+        }
+        for index in range(2, MAX_CONTROL_NET_SLOTS + 1):
+            control_net_inputs[f"control_net_{index}_name"] = (
+                "STRING",
+                {
+                    "default": "",
+                    "display": "hidden",
+                    "hidden": True,
+                    "display_name": f"ControlNet {index}",
+                    "tooltip": f"Checkpoint 通用预设可选的第 {index} 个 ControlNet；前一个已选择时前端自动显示。",
+                },
+            )
         return {
             "required": {
                 "unet_name": (
@@ -581,7 +721,7 @@ class GJJ_ModelBundleLoader:
                 "vae_name": (
                     "STRING",
                     {
-                        "default": _default_value(vae_models),
+                        "default": _default_vae_value(vae_models),
                         "display": "hidden",
                         "hidden": True,
                         "display_name": "❤️ VAE 模型",
@@ -596,6 +736,16 @@ class GJJ_ModelBundleLoader:
                         "hidden": True,
                         "display_name": "❤️ VAE 精度",
                         "tooltip": "设置 VAE 的加载精度；default 表示交给 ComfyUI 自动处理。",
+                    },
+                ),
+                "use_separate_vae": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "使用独立VAE",
+                        "tooltip": "仅 Checkpoint 通用预设使用。关闭时使用 checkpoint 自带 VAE；开启时加载下方选择的独立 VAE。",
                     },
                 ),
                 "steps": (
@@ -654,6 +804,16 @@ class GJJ_ModelBundleLoader:
                         "hidden": True,
                         "display_name": "模型补丁",
                         "tooltip": "由模板写入；需要时加载 models/model_patches 下的 MODEL_PATCH 文件。",
+                    },
+                ),
+                "model_patch_enabled": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "启用模型补丁",
+                        "tooltip": "控制是否加载并输出 MODEL_PATCH；关闭后保留补丁名称但输出为空。",
                     },
                 ),
                 "clip_vision_name": (
@@ -748,6 +908,7 @@ class GJJ_ModelBundleLoader:
                 ),
             },
             "optional": {
+                **control_net_inputs,
                 "use_lora": (
                     "BOOLEAN",
                     {
@@ -781,12 +942,15 @@ class GJJ_ModelBundleLoader:
         clip_dtype,
         vae_name,
         vae_dtype,
+        use_separate_vae,
         steps,
         cfg,
         denoise,
         template_id="",
         model_patch_name="",
+        model_patch_enabled=True,
         clip_vision_name="",
+        control_net_name="",
         preset_lora_1_enabled=True,
         preset_lora_1_name="",
         preset_lora_1_strength="",
@@ -797,7 +961,12 @@ class GJJ_ModelBundleLoader:
         clip_device="default",
         use_lora=None,
         lora_chain_config="",
+        **kwargs,
     ):
+        control_net_values = [control_net_name] + [
+            kwargs.get(f"control_net_{index}_name", "")
+            for index in range(2, MAX_CONTROL_NET_SLOTS + 1)
+        ]
         return "|".join(
             [
                 str(unet_name),
@@ -807,12 +976,15 @@ class GJJ_ModelBundleLoader:
                 str(clip_dtype),
                 str(vae_name),
                 str(vae_dtype),
+                str(use_separate_vae),
                 str(steps),
                 str(cfg),
                 str(denoise),
                 str(template_id),
                 str(model_patch_name),
+                str(model_patch_enabled),
                 str(clip_vision_name),
+                str(control_net_name),
                 str(preset_lora_1_enabled),
                 str(preset_lora_1_name),
                 str(preset_lora_1_strength),
@@ -823,6 +995,7 @@ class GJJ_ModelBundleLoader:
                 str(clip_device),
                 str(use_lora),
                 str(lora_chain_config),
+                *[str(value) for value in control_net_values],
             ]
         )
 
@@ -830,12 +1003,48 @@ class GJJ_ModelBundleLoader:
         vae_path = _resolve_full_path(("vae",), vae_name)
         sd, metadata = comfy.utils.load_torch_file(vae_path, return_metadata=True)
         dtype = _torch_dtype_from_name(vae_dtype)
-        vae = comfy.sd.VAE(sd=sd, metadata=metadata, dtype=dtype)
-        vae.throw_exception_if_invalid()
-        return vae
+        try:
+            vae = comfy.sd.VAE(sd=sd, metadata=metadata, dtype=dtype)
+            vae.throw_exception_if_invalid()
+            return vae
+        except Exception as exc:
+            requested_key = _model_match_key(vae_name)
+            old_flux2_dev_key = _model_match_key("full_encoder_small_decoder.safetensors")
+            if requested_key == old_flux2_dev_key:
+                for fallback_name in ("flux2-vae.safetensors", "Flux2-DEV-ae.safetensors"):
+                    try:
+                        fallback_path = _resolve_full_path(("vae",), fallback_name)
+                        fallback_sd, fallback_metadata = comfy.utils.load_torch_file(fallback_path, return_metadata=True)
+                        fallback_vae = comfy.sd.VAE(sd=fallback_sd, metadata=fallback_metadata, dtype=dtype)
+                        fallback_vae.throw_exception_if_invalid()
+                        print(
+                            f"[GJJ ModelBundleLoader] Flux2 Dev 旧 VAE {vae_name} 与当前 ComfyUI 不匹配，"
+                            f"已自动改用 {fallback_name}。"
+                        )
+                        return fallback_vae
+                    except Exception:
+                        continue
+                raise RuntimeError(
+                    "Flux2 Dev 旧 VAE full_encoder_small_decoder.safetensors 与当前 ComfyUI 的 VAE 结构不匹配。"
+                    "请改用 flux2-vae.safetensors 或 Flux2-DEV-ae.safetensors。"
+                ) from exc
+            raise RuntimeError(f"加载 VAE 失败：{vae_name}\n详细错误：{exc}") from exc
 
     def _load_checkpoint(self, ckpt_name: str, unet_dtype: str, clip_dtype: str, clip_device: str):
-        ckpt_path = _resolve_full_path(("checkpoints",), ckpt_name)
+        resolved = _resolve_model_name(("checkpoints",), ckpt_name)
+        if (
+            _normalize_text(unet_dtype) == "default"
+            and _normalize_text(clip_dtype) == "default"
+            and _normalize_text(clip_device) == "default"
+        ):
+            try:
+                from nodes import CheckpointLoaderSimple
+            except Exception:
+                pass
+            else:
+                return CheckpointLoaderSimple().load_checkpoint(resolved)
+
+        ckpt_path = _resolve_full_path(("checkpoints",), resolved)
         out = comfy.sd.load_checkpoint_guess_config(
             ckpt_path,
             output_vae=True,
@@ -890,7 +1099,7 @@ class GJJ_ModelBundleLoader:
         return model, clip, vae
 
     def _load_model_patch(self, model_patch_name: str):
-        name = str(model_patch_name or "").strip()
+        name = _optional_model_text(model_patch_name)
         if not name:
             return None
         resolved = _resolve_model_name(("model_patches",), name)
@@ -901,7 +1110,7 @@ class GJJ_ModelBundleLoader:
         return ModelPatchLoader().load_model_patch(resolved)[0]
 
     def _load_clip_vision(self, clip_vision_name: str):
-        name = str(clip_vision_name or "").strip()
+        name = _optional_model_text(clip_vision_name)
         if not name:
             return None
         clip_path = _resolve_full_path(("clip_vision",), name)
@@ -909,6 +1118,65 @@ class GJJ_ModelBundleLoader:
         if clip_vision is None:
             raise RuntimeError(f"加载 CLIP视觉模型失败：{name}")
         return clip_vision
+
+    def _load_controlnet(self, control_net_name: str):
+        name = _optional_model_text(control_net_name)
+        if not name:
+            return None
+        controlnet_path = _resolve_full_path(("controlnet",), name)
+        controlnet = comfy.controlnet.load_controlnet(controlnet_path)
+        if controlnet is None:
+            raise RuntimeError(f"加载 ControlNet 模型失败：{name}")
+        return controlnet
+
+    def _apply_preset_model_only_loras(self, model, lora_items: list[dict]):
+        current_model = model
+        try:
+            from nodes import LoraLoaderModelOnly
+        except Exception:
+            LoraLoaderModelOnly = None
+        for item in lora_items:
+            name = str((item or {}).get("name", "") or "").strip()
+            if not name:
+                continue
+            strength = _float_value((item or {}).get("strength", 1.0), 1.0)
+            if abs(strength) < 1e-5:
+                continue
+            resolved = _resolve_model_name(("loras",), name)
+            if LoraLoaderModelOnly is not None:
+                loader = LoraLoaderModelOnly()
+                loader.loaded_lora = self.loaded_lora
+                current_model = loader.load_lora_model_only(current_model, resolved, strength)[0]
+                self.loaded_lora = loader.loaded_lora
+                continue
+
+            lora_path = folder_paths.get_full_path_or_raise("loras", resolved)
+            lora = None
+            if self.loaded_lora is not None and self.loaded_lora[0] == lora_path:
+                lora = self.loaded_lora[1]
+            if lora is None:
+                lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
+                self.loaded_lora = (lora_path, lora)
+            current_model, _ = comfy.sd.load_lora_for_models(current_model, None, lora, strength, 0.0)
+        return current_model
+
+    def _load_controlnets(self, names: list[str]) -> tuple:
+        values = []
+        seen: set[str] = set()
+        for raw_name in names[:MAX_CONTROL_NET_SLOTS]:
+            name = _optional_model_text(raw_name)
+            if not name:
+                values.append(None)
+                continue
+            resolved = _resolve_model_name(("controlnet",), name)
+            if resolved in seen:
+                values.append(None)
+                continue
+            seen.add(resolved)
+            values.append(self._load_controlnet(resolved))
+        while len(values) < MAX_CONTROL_NET_SLOTS:
+            values.append(None)
+        return tuple(values)
 
     def load_models(
         self,
@@ -919,12 +1187,15 @@ class GJJ_ModelBundleLoader:
         clip_dtype,
         vae_name,
         vae_dtype,
+        use_separate_vae,
         steps,
         cfg,
         denoise,
         template_id="",
         model_patch_name="",
+        model_patch_enabled=True,
         clip_vision_name="",
+        control_net_name="",
         preset_lora_1_enabled=True,
         preset_lora_1_name="",
         preset_lora_1_strength="",
@@ -935,6 +1206,7 @@ class GJJ_ModelBundleLoader:
         clip_device="default",
         use_lora=None,
         lora_chain_config="",
+        **kwargs,
     ):
         preset = _find_preset(template_id)
         unet_dtype = _option_value(unet_dtype, UNET_DTYPE_OPTIONS, "default")
@@ -948,8 +1220,16 @@ class GJJ_ModelBundleLoader:
         preset_clip_names = _preset_clip_names(preset)
         preset_vae_name = _preset_text(preset, "vae_name")
         preset_clip_type = _preset_text(preset, "clip_type")
+        checkpoint_common = _is_checkpoint_common_preset(preset)
+        if preset_is_checkpoint:
+            unet_dtype = "default"
+            clip_dtype = "default"
+            clip_device = "default"
+            vae_dtype = "default"
         if preset_model_name and str(unet_name or "").strip() in {"", "0"}:
             unet_name = preset_model_name
+        if checkpoint_common and str(unet_name or "").strip() in {"", "0"}:
+            unet_name = _default_value(list_checkpoint_models())
         if not preset_is_checkpoint and preset_clip_names and not str(clip_name or "").strip():
             clip_name = "|".join(preset_clip_names)
         if not preset_is_checkpoint and preset_vae_name and not str(vae_name or "").strip():
@@ -996,11 +1276,18 @@ class GJJ_ModelBundleLoader:
                 vae_dtype,
                 (main_category,),
             )
+        if checkpoint_common and _bool_value(use_separate_vae, False):
+            selected_vae_name = str(vae_name or "").strip()
+            if not selected_vae_name:
+                selected_vae_name = _default_vae_value(list_vae_models())
+            if not selected_vae_name:
+                raise RuntimeError("独立 VAE 已开启，但没有找到可用的 VAE 模型。请把 VAE 放到 models/vae 后刷新。")
+            vae = self._load_vae(selected_vae_name, vae_dtype)
 
         external_use_lora = use_lora if use_lora is not None else None
         lora_1_enabled = external_use_lora if external_use_lora is not None else preset_lora_1_enabled
         lora_2_enabled = external_use_lora if external_use_lora is not None else preset_lora_2_enabled
-        preset_lora_config = _preset_lora_chain_config(
+        preset_lora_items = _preset_lora_items(
             preset,
             lora_1_enabled,
             preset_lora_1_name,
@@ -1009,15 +1296,8 @@ class GJJ_ModelBundleLoader:
             preset_lora_2_name,
             preset_lora_2_strength,
         )
-        if preset_lora_config:
-            if apply_lora_chain_config is None or normalize_lora_chain_data is None:
-                raise RuntimeError("当前环境未能加载 GJJ LoRA 串联工具，无法应用模板默认LoRA。")
-            unet, _, self.loaded_lora = apply_lora_chain_config(
-                unet,
-                None,
-                lora_data=normalize_lora_chain_data(preset_lora_config),
-                loaded_lora_cache=self.loaded_lora,
-            )
+        if preset_lora_items:
+            unet = self._apply_preset_model_only_loras(unet, preset_lora_items)
 
         if str(lora_chain_config or "").strip():
             if apply_lora_chain_config is None or normalize_lora_chain_data is None:
@@ -1029,11 +1309,32 @@ class GJJ_ModelBundleLoader:
                 loaded_lora_cache=self.loaded_lora,
             )
 
-        model_patch = self._load_model_patch(model_patch_name or _preset_text(preset, "model_patch_name"))
-        clip_vision = self._load_clip_vision(clip_vision_name or _preset_text(preset, "clip_vision_name"))
+        effective_model_patch_name = _optional_model_text(model_patch_name) or _preset_text(preset, "model_patch_name")
+        model_patch = self._load_model_patch(effective_model_patch_name) if _bool_value(model_patch_enabled, True) else None
+        clip_vision = self._load_clip_vision(_optional_model_text(clip_vision_name) or _preset_text(preset, "clip_vision_name"))
+        control_net_values = [control_net_name] + [
+            kwargs.get(f"control_net_{index}_name", "")
+            for index in range(2, MAX_CONTROL_NET_SLOTS + 1)
+        ]
+        if checkpoint_common:
+            control_net_values = [""] * MAX_CONTROL_NET_SLOTS
+        elif not _optional_model_text(control_net_values[0]):
+            control_net_values[0] = _preset_text(preset, "control_net_name")
+        if not checkpoint_common:
+            control_net_values = [control_net_values[0]] + [""] * (MAX_CONTROL_NET_SLOTS - 1)
+        controlnets = self._load_controlnets(control_net_values)
 
-        return (unet, clip, vae, model_patch, clip_vision, int(steps), float(cfg), float(denoise))
+        dynamic_outputs: list = [item for item in controlnets if item is not None]
+        if model_patch is not None:
+            dynamic_outputs.append(model_patch)
+        if clip_vision is not None:
+            dynamic_outputs.append(clip_vision)
+        dynamic_outputs.extend([int(steps), float(cfg), float(denoise)])
+        while len(dynamic_outputs) < MAX_CONTROL_NET_SLOTS + 5:
+            dynamic_outputs.append(None)
+
+        return (unet, clip, vae, *dynamic_outputs[: MAX_CONTROL_NET_SLOTS + 5])
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_ModelBundleLoader}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 📦 图像模型加载器"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ·🟡🟠🔴智能批量模型加载🧡图像版"}

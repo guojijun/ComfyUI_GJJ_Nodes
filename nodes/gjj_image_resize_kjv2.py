@@ -1092,5 +1092,5 @@ GJJ · 🔍 多功能图片缩放
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_ImageResizeKJv2}
-print("[GJJ 多功能图片缩放] 当前版本: V44_BORDER_BOARD_SLIDERS_LINK_RESTORE", __file__)
+print("[GJJ 多功能图片缩放] 当前版本: V46_SEMANTIC_PARAM_LINK_REPAIR", __file__)
 NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🔍 多功能图片缩放"}

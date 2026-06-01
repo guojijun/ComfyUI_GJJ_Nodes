@@ -5,66 +5,124 @@
 
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
-
-const IMAGE_EXTS = new Set(["png","jpg","jpeg","webp","bmp","gif","avif","tiff"]);
-const AUDIO_EXTS = new Set(["mp3","wav","flac","ogg","m4a","aac","wma","opus","aiff","aif"]);
-const VIDEO_EXTS = new Set(["mp4","mov","mkv","webm","avi","flv","mpeg","mpg","m4v","wmv"]);
+import {
+	gjjDetectMediaKind,
+	gjjMediaRefToItem,
+	gjjRenderMediaPreview,
+	gjjSetMediaPreviewMessage,
+} from "./gjj_common_media_preview.js";
 
 function detectMediaType(value) {
-	if (typeof value !== "string") return null;
-
-	const text = value.trim().toLowerCase();
-
-	if (!text.includes(".")) return null;
-
-	const ext = text.split(".").pop();
-
-	if (IMAGE_EXTS.has(ext)) return "IMAGE";
-	if (AUDIO_EXTS.has(ext)) return "AUDIO";
-	if (VIDEO_EXTS.has(ext)) return "VIDEO";
-
-	return null;
+	const kind = gjjDetectMediaKind(value);
+	return kind ? kind.toUpperCase() : null;
 }
 
-function updatePreview(preview, value, isImage, isAudio, isVideo, directUrl = null) {
+function updatePreview(preview, value, isImage, isAudio, isVideo, directUrl = null, options = {}) {
 	if (!preview) return;
-	preview.style.color = "";
-	preview.style.fontSize = "";
-	preview.style.justifyContent = "center";
-
-	if (!value || value.trim() === "") {
-		let tip = "无媒体";
-
-		if (isImage) tip = "无图片";
-		else if (isVideo) tip = "无视频";
-		else if (isAudio) tip = "无音频";
-
-		preview.innerHTML = "<span style='color:#777;font-size:11px;'>" + tip + "</span>";
-		return;
-	}
-
-	const apiUrl = directUrl || mediaRefToViewUrl(value);
-
-	if (isImage) {
-		preview.innerHTML =
-			'<img src="' + apiUrl + '" style="max-width:100%;max-height:160px;object-fit:contain;border-radius:6px;">';
-	}
-	else if (isVideo) {
-		preview.innerHTML =
-			'<video controls src="' + apiUrl + '" style="width:100%;max-height:220px;object-fit:contain;border-radius:6px;"></video>';
-	}
-	else if (isAudio) {
-		preview.innerHTML =
-			'<audio controls src="' + apiUrl + '" style="width:100%;"></audio>';
-	}
+	const kind = isImage ? "image" : isAudio ? "audio" : isVideo ? "video" : gjjDetectMediaKind(value);
+	const item = gjjMediaRefToItem(value, {
+		kind,
+		title: options.title || "媒体预览",
+		description: options.description || "",
+		emptyText: kind === "image" ? "无图片" : kind === "video" ? "无视频" : kind === "audio" ? "无音频" : "无媒体",
+	});
+	if (directUrl) item.url = directUrl;
+	gjjRenderMediaPreview(preview, [item], {
+		singleMinHeight: kind === "audio" ? 78 : 168,
+		singleMaxHeight: kind === "video" ? 300 : 360,
+		tileMinHeight: 108,
+		onLayout: options.onLayout,
+	});
 }
 
 function setPreviewMessage(preview, text, isError = false) {
 	if (!preview) return;
-	preview.textContent = String(text || "");
-	preview.style.color = isError ? "#ffb4a8" : "#8ea0a8";
-	preview.style.fontSize = "11px";
-	preview.style.justifyContent = "flex-start";
+	gjjSetMediaPreviewMessage(preview, text, { isError });
+}
+
+function isMediaType(type) {
+	return type === "IMAGE" || type === "AUDIO" || type === "VIDEO";
+}
+
+function mediaTypeFromField(field, value = null) {
+	const detected = detectMediaType(String(value ?? ""));
+	if (detected) return detected;
+	return isMediaType(field?.type) ? field.type : null;
+}
+
+function mediaFlags(mediaType) {
+	return {
+		isImage: mediaType === "IMAGE",
+		isAudio: mediaType === "AUDIO",
+		isVideo: mediaType === "VIDEO",
+	};
+}
+
+function mediaPreviewClass(mediaType) {
+	if (mediaType === "VIDEO") return "gjj-template-param-preview-video";
+	if (mediaType === "AUDIO") return "gjj-template-param-preview-audio";
+	return "gjj-template-param-preview-image";
+}
+
+function getPreviewForField(node, key, row = null) {
+	const preview = node?.__gjjTemplateParamsPreviewMap?.get(String(key || ""));
+	if (preview) return preview;
+	return row?.querySelector?.(
+		".gjj-template-param-preview-image, .gjj-template-param-preview-audio, .gjj-template-param-preview-video"
+	) || null;
+}
+
+function mediaItemForField(field, values) {
+	const value = String(values?.[field.key] ?? field.default ?? "");
+	const mediaType = mediaTypeFromField(field, value) || field.type;
+	const kind = String(mediaType || "").toLowerCase();
+	return gjjMediaRefToItem(value, {
+		kind,
+		title: field.label || "媒体",
+		description: field.tooltip || "",
+		emptyText: kind === "image" ? "无图片" : kind === "video" ? "无视频" : kind === "audio" ? "无音频" : "无媒体",
+	});
+}
+
+function renderGroupedMediaPreview(node, fields = null, values = null) {
+	const group = node?.__gjjTemplateParamsMediaGroup;
+	if (!group) return false;
+	const state = fields && values ? { fields, values } : normalizeState(node);
+	const mediaFields = state.fields.filter((field) => isMediaType(field?.type));
+	const items = mediaFields.map((field) => mediaItemForField(field, state.values));
+	gjjRenderMediaPreview(group, items, {
+		singleMinHeight: 168,
+		singleMaxHeight: 360,
+		tileMinWidth: 118,
+		tileMinHeight: 112,
+		onLayout: () => refreshNode(node),
+	});
+	refreshNode(node);
+	return true;
+}
+
+function updatePreviewForField(node, field, value, row = null, directUrl = null) {
+	const mediaType = mediaTypeFromField(field, value);
+	if (!mediaType) return;
+	if (node?.__gjjTemplateParamsMediaGroup) {
+		renderGroupedMediaPreview(node);
+		return;
+	}
+	const preview = getPreviewForField(node, field?.key, row);
+	if (!preview) return;
+	const flags = mediaFlags(mediaType);
+	preview.classList.remove(
+		"gjj-template-param-preview-image",
+		"gjj-template-param-preview-audio",
+		"gjj-template-param-preview-video",
+	);
+	preview.classList.add(mediaPreviewClass(mediaType));
+	updatePreview(preview, String(value ?? ""), flags.isImage, flags.isAudio, flags.isVideo, directUrl, {
+		title: field?.label || "媒体",
+		description: field?.tooltip || "",
+		onLayout: () => refreshNode(node),
+	});
+	refreshNode(node);
 }
 
 function eventNodeId(event) {
@@ -95,12 +153,20 @@ function normalizeWarningList(payload) {
 	return text ? [text] : [];
 }
 
-function setWarningMessages(node, warnings = []) {
-	const notice = node?.__gjjTemplateParamsWarning;
-	if (!notice) return;
-	const list = Array.isArray(warnings)
+function normalizeWarningMessages(warnings = []) {
+	return Array.isArray(warnings)
 		? warnings.map((item) => String(item || "").trim()).filter(Boolean)
 		: [];
+}
+
+function renderWarningMessages(node) {
+	const notice = node?.__gjjTemplateParamsWarning;
+	if (!notice) return;
+	const backendWarnings = normalizeWarningMessages(node.__gjjTemplateParamsBackendWarnings || []);
+	const networkWarnings = Array.from(node.__gjjTemplateParamsNetworkWarnings?.values?.() || [])
+		.map((item) => String(item || "").trim())
+		.filter(Boolean);
+	const list = [...backendWarnings, ...networkWarnings];
 	if (!list.length) {
 		notice.textContent = "";
 		notice.style.display = "none";
@@ -110,6 +176,22 @@ function setWarningMessages(node, warnings = []) {
 	notice.textContent = `⚠ ${list.join("\n")}`;
 	notice.style.display = "block";
 	refreshNode(node);
+}
+
+function setWarningMessages(node, warnings = []) {
+	if (!node) return;
+	node.__gjjTemplateParamsBackendWarnings = normalizeWarningMessages(warnings);
+	renderWarningMessages(node);
+}
+
+function setNetworkWarningMessage(node, field, message = "") {
+	if (!node) return;
+	node.__gjjTemplateParamsNetworkWarnings = node.__gjjTemplateParamsNetworkWarnings || new Map();
+	const key = String(field?.key || field?.label || "media");
+	const text = String(message || "").trim();
+	if (text) node.__gjjTemplateParamsNetworkWarnings.set(key, text);
+	else node.__gjjTemplateParamsNetworkWarnings.delete(key);
+	renderWarningMessages(node);
 }
 
 function selectedFilePath(file) {
@@ -182,6 +264,172 @@ async function uploadMediaToInput(file) {
 	throw lastError || new Error("上传失败：未知错误");
 }
 
+function isNetworkMediaUrl(value) {
+	return /^https?:\/\//i.test(String(value || "").trim());
+}
+
+function safeMediaFilename(name, mediaType = "") {
+	let text = String(name || "").replace(/\\/g, "/").split("/").pop() || "";
+	try { text = decodeURIComponent(text); } catch (_) {}
+	text = text.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").trim().replace(/^[ ._]+|[ ._]+$/g, "");
+	if (!text) text = "downloaded_media";
+	if (!/\.[A-Za-z0-9]{2,8}$/.test(text)) {
+		const ext = mediaType === "IMAGE" ? ".png" : mediaType === "VIDEO" ? ".mp4" : mediaType === "AUDIO" ? ".wav" : "";
+		text += ext;
+	}
+	return text;
+}
+
+function filenameFromNetworkUrl(url, mediaType = "") {
+	try {
+		const parsed = new URL(String(url || "").trim(), window.location.href);
+		return safeMediaFilename(parsed.pathname.split("/").pop() || "", mediaType);
+	} catch (_) {
+		return safeMediaFilename(String(url || "").split("?")[0], mediaType);
+	}
+}
+
+function inputViewUrlForFilename(filename) {
+	return "/view?filename=" + encodeURIComponent(filename) + "&type=input";
+}
+
+async function inputFileExists(filename) {
+	const url = uploadUrl(inputViewUrlForFilename(filename));
+	try {
+		let response = await fetch(url, { method: "HEAD", cache: "no-store" });
+		if (response?.ok) return true;
+		if (response?.status && response.status !== 405) return false;
+		response = await fetch(url, { method: "GET", cache: "no-store" });
+		return Boolean(response?.ok);
+	} catch (_) {
+		return false;
+	}
+}
+
+function currentInputForField(node, field, fallback = null) {
+	const current = node?.__gjjTemplateParamsRows?.get?.(String(field?.key || ""));
+	if (current && "value" in current) return current;
+	return fallback;
+}
+
+async function downloadNetworkMediaViaBackend(originalUrl, mediaType) {
+	const endpoint = "/gjj/template_params/download_media";
+	const body = JSON.stringify({ url: originalUrl, media_type: mediaType });
+	const options = {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body,
+	};
+	const response = api?.fetchApi
+		? await api.fetchApi(endpoint, options)
+		: await fetch(uploadUrl(endpoint), options);
+	if (!response?.ok) {
+		let detail = "";
+		try {
+			const data = await response.json();
+			detail = data?.error || JSON.stringify(data);
+		} catch (_) {
+			try { detail = await response.text(); } catch (_) {}
+		}
+		throw new Error(detail || `后端下载接口 HTTP ${response?.status || "?"}`);
+	}
+	const data = await response.json().catch(() => ({}));
+	const filename = String(data?.filename || data?.name || "").trim();
+	if (!filename) throw new Error("后端下载成功但没有返回文件名");
+	return filename;
+}
+
+function mimeForMediaType(mediaType) {
+	if (mediaType === "IMAGE") return "image/png";
+	if (mediaType === "VIDEO") return "video/mp4";
+	if (mediaType === "AUDIO") return "audio/wav";
+	return "application/octet-stream";
+}
+
+async function downloadNetworkMediaInBrowser(originalUrl, mediaType, filename) {
+	const response = await fetch(originalUrl, { cache: "no-store" });
+	if (!response?.ok) {
+		throw new Error(`浏览器下载 HTTP ${response?.status || "?"}`);
+	}
+	const blob = await response.blob();
+	const file = new File([blob], filename, { type: blob.type || mimeForMediaType(mediaType) });
+	return uploadMediaToInput(file);
+}
+
+function saveFieldValue(node, field, values, nextValue) {
+	if (values && typeof values === "object") values[field.key] = nextValue;
+	const state = normalizeState(node);
+	state.values[field.key] = nextValue;
+	saveState(node, state.template, state.fields, state.values);
+	updateOutputs(node, state.fields, state.values);
+}
+
+async function ensureNetworkMediaInInput(node, field, input, values, wrap = null) {
+	input = currentInputForField(node, field, input);
+	const originalUrl = String(input?.value || "").trim();
+	if (!isNetworkMediaUrl(originalUrl)) return;
+	const mediaType = mediaTypeFromField(field, originalUrl);
+	if (!mediaType) return;
+
+	node.__gjjTemplateParamsNetworkJobs = node.__gjjTemplateParamsNetworkJobs || new Map();
+	const jobKey = `${field.key}\n${originalUrl}`;
+	if (node.__gjjTemplateParamsNetworkJobs.has(jobKey)) return node.__gjjTemplateParamsNetworkJobs.get(jobKey);
+
+	const job = (async () => {
+		const filename = filenameFromNetworkUrl(originalUrl, mediaType);
+		const row = wrap || input.closest?.(".gjj-template-param-row");
+		const preview = getPreviewForField(node, field.key, row);
+		try {
+			if (await inputFileExists(filename)) {
+				const activeInput = currentInputForField(node, field, input);
+				if (String(activeInput?.value || "").trim() !== originalUrl) return;
+				activeInput.value = filename;
+				saveFieldValue(node, field, values, filename);
+				updatePreviewForField(node, field, filename, row);
+				setNetworkWarningMessage(node, field, "");
+				return;
+			}
+
+			setPreviewMessage(preview, `正在下载到 ComfyUI input：${filename}`);
+			let uploadedName = "";
+			try {
+				uploadedName = await downloadNetworkMediaViaBackend(originalUrl, mediaType);
+			} catch (backendErr) {
+				console.warn("[GJJ_TemplateParams] 后端下载网络媒体失败，改用浏览器上传:", backendErr);
+				uploadedName = await downloadNetworkMediaInBrowser(originalUrl, mediaType, filename);
+			}
+			const activeInput = currentInputForField(node, field, input);
+			if (String(activeInput?.value || "").trim() !== originalUrl) return;
+			activeInput.value = uploadedName;
+			saveFieldValue(node, field, values, uploadedName);
+			updatePreviewForField(node, field, uploadedName, row);
+			setNetworkWarningMessage(node, field, "");
+		} catch (err) {
+			console.warn("[GJJ_TemplateParams] 网络媒体下载到 input 失败:", err);
+			setNetworkWarningMessage(node, field, `${field?.label || "媒体"}：下载到 input 失败：${err?.message || err}`);
+			setPreviewMessage(preview, `下载到 input 失败：${err?.message || err}`, true);
+		}
+	})();
+
+	node.__gjjTemplateParamsNetworkJobs.set(jobKey, job);
+	try {
+		await job;
+	} finally {
+		node.__gjjTemplateParamsNetworkJobs?.delete(jobKey);
+	}
+}
+
+function scheduleNetworkMediaToInput(node, field, input, values, wrap = null, delay = 450) {
+	if (!isNetworkMediaUrl(input?.value)) return;
+	node.__gjjTemplateParamsNetworkTimers = node.__gjjTemplateParamsNetworkTimers || new Map();
+	const key = String(field?.key || "");
+	clearTimeout(node.__gjjTemplateParamsNetworkTimers.get(key));
+	const timer = setTimeout(() => {
+		ensureNetworkMediaInInput(node, field, input, values, wrap);
+	}, Math.max(0, Number(delay) || 0));
+	node.__gjjTemplateParamsNetworkTimers.set(key, timer);
+}
+
 function openFileDialog(node, field, input, values, isImage, isAudio, isVideo) {
 	const inputElement = document.createElement("input");
 
@@ -199,9 +447,7 @@ function openFileDialog(node, field, input, values, isImage, isAudio, isVideo) {
 		if (!file) return;
 
 		const row = input.closest(".gjj-template-param-row");
-		const preview = row?.querySelector(
-			".gjj-template-param-preview-image, .gjj-template-param-preview-audio, .gjj-template-param-preview-video"
-		);
+		const preview = getPreviewForField(node, field.key, row);
 		const button = row?.querySelector(".gjj-template-param-file-button");
 		const oldButtonText = button?.textContent || "📁";
 		setPreviewMessage(preview, `正在复制到 ComfyUI input：${file.name}`);
@@ -222,7 +468,7 @@ function openFileDialog(node, field, input, values, isImage, isAudio, isVideo) {
 			saveState(node, template, fields, values);
 			updateOutputs(node, fields, values);
 
-			updatePreview(preview, uploadedName, isImage, isAudio, isVideo);
+			updatePreviewForField(node, field, uploadedName, row);
 		} catch (err) {
 			console.error("[GJJ_TemplateParams] 打开媒体文件失败:", err);
 			setPreviewMessage(preview, `打开失败：${err?.message || err}`, true);
@@ -249,8 +495,7 @@ const SAVED_VALUES = "gjj_template_params_values";
 const SAVED_SCHEMA = "gjj_template_params_schema";
 const SAVED_SIZE = "gjj_template_params_size";
 const MAX_OUTPUTS = 64;
-const DEFAULT_TEMPLATE = "帧率：24.0 # 浮点\n时长：5 # 整数\nLora加速：true # 布尔\n是否启用：[enable,disable] # 枚举";
-const MIN_WIDTH = 210;
+const DEFAULT_TEMPLATE = "帧率：24.0 # 浮点\n时长：5 # 整数\nLora加速：true{开启加速|关闭加速} # 布尔按钮\n是否启用：[启用=enable, 禁用=disable] # 枚举按钮";
 const DEFAULT_WIDTH = 300;
 const MAX_EXTRA_IDLE_HEIGHT = 72;
 
@@ -308,6 +553,11 @@ function setWidgetValue(node, name, value) {
 	if (widget.inputEl) widget.inputEl.value = next;
 	if (widget.element && "value" in widget.element) widget.element.value = next;
 	widget.callback?.(next);
+}
+
+function currentNodeWidth(node) {
+	const width = Number(node?.size?.[0]);
+	return Number.isFinite(width) && width > 0 ? width : DEFAULT_WIDTH;
 }
 
 function safeJsonParse(text, fallback) {
@@ -477,6 +727,43 @@ function splitEnumOptions(inner) {
 	return options;
 }
 
+function splitPipePair(text) {
+	const parts = splitEnumOptions(text);
+	if (!parts.length) return ["", ""];
+	if (parts.length === 1) return [parts[0], parts[0]];
+	return [parts[0], parts[1]];
+}
+
+function parseOptionItem(item) {
+	if (item && typeof item === "object" && !Array.isArray(item)) {
+		const label = String(item.label ?? item.name ?? item.text ?? item.value ?? "").trim();
+		const value = String(item.value ?? item.id ?? label).trim();
+		return { label: label || value, value: value || label };
+	}
+	const raw = stripQuotes(item).trim();
+	const assign = raw.match(/^(.+?)\s*(?:=>|=|:|：)\s*(.+)$/);
+	if (assign) {
+		const label = assign[1].trim();
+		const value = assign[2].trim();
+		return { label: label || value, value: value || label };
+	}
+	const paren = raw.match(/^(.+?)[（(]\s*([^（）()]+?)\s*[）)]$/);
+	if (paren) {
+		const label = paren[1].trim();
+		const value = paren[2].trim();
+		return { label: label || value, value: value || label };
+	}
+	return { label: raw, value: raw };
+}
+
+function optionLabel(option) {
+	return String((option && typeof option === "object" ? option.label ?? option.value : option) ?? "").trim();
+}
+
+function optionValue(option) {
+	return String((option && typeof option === "object" ? option.value ?? option.label : option) ?? "").trim();
+}
+
 function parseEnumOptions(defaultText, tooltip = "") {
 	const raw = String(defaultText || "").trim();
 	if (!raw.startsWith("[") || !raw.endsWith("]")) return [];
@@ -486,12 +773,50 @@ function parseEnumOptions(defaultText, tooltip = "") {
 	try {
 		const parsed = JSON.parse(raw);
 		if (Array.isArray(parsed) && (tooltipText.includes("枚举") || tooltipText.includes("enum"))) {
-			return parsed.map((item) => String(item));
+			return parsed.map((item) => parseOptionItem(item));
 		}
 		return [];
 	} catch (_) {
-		return splitEnumOptions(inner);
+		return splitEnumOptions(inner).map((item) => parseOptionItem(item));
 	}
+}
+
+function parseBoolSpec(defaultText) {
+	const raw = String(defaultText || "").trim();
+	const brace = raw.match(/^\s*(true|false|yes|no|on|off|1|0|是|否|开|关)?\s*[{｛]\s*([\s\S]*?)\s*[}｝]\s*$/i);
+	if (brace) {
+		const defaultRaw = brace[1] || "true";
+		const [trueLabel, falseLabel] = splitPipePair(brace[2]);
+		return {
+			defaultValue: parseValue(defaultRaw) === true,
+			labels: {
+				true_label: trueLabel || "开启",
+				false_label: falseLabel || "关闭",
+			},
+		};
+	}
+	const boolCall = raw.match(/^\s*(?:bool|boolean)\s*\(([\s\S]*)\)\s*$/i);
+	if (!boolCall) return null;
+	const parts = splitEnumOptions(boolCall[1]);
+	if (parts.length < 2) return null;
+	let defaultValue = true;
+	let trueLabel = "";
+	let falseLabel = "";
+	if (parts.length >= 3 && typeof parseValue(parts[0]) === "boolean") {
+		defaultValue = parseValue(parts[0]) === true;
+		trueLabel = parts[1];
+		falseLabel = parts[2];
+	} else {
+		[trueLabel, falseLabel] = splitPipePair(boolCall[1]);
+	}
+	if (!trueLabel && !falseLabel) return null;
+	return {
+		defaultValue,
+		labels: {
+			true_label: trueLabel || "开启",
+			false_label: falseLabel || "关闭",
+		},
+	};
 }
 
 function parseTemplate(template) {
@@ -506,16 +831,19 @@ function parseTemplate(template) {
 		const label = match[1].trim();
 		const { value: defaultText, tooltip } = splitValueAndTooltip(match[2].trim());
 		if (!label) continue;
-		const enumOptions = parseEnumOptions(defaultText, tooltip);
-		const value = parseValue(defaultText);
-		fields.push({
+		const boolSpec = parseBoolSpec(defaultText);
+		const enumOptions = boolSpec ? [] : parseEnumOptions(defaultText, tooltip);
+		const value = boolSpec ? boolSpec.defaultValue : (enumOptions.length ? optionValue(enumOptions[0]) : parseValue(defaultText));
+		const field = {
 			key: slugKey(label, fields.length, seen),
 			label,
-			default: enumOptions.length ? enumOptions[0] : defaultText,
+			default: boolSpec ? (boolSpec.defaultValue ? "true" : "false") : (enumOptions.length ? optionValue(enumOptions[0]) : defaultText),
 			tooltip,
-			type: enumOptions.length ? "ENUM" : inferType(value),
+			type: boolSpec ? "BOOLEAN" : (enumOptions.length ? "ENUM" : inferType(value)),
 			options: enumOptions,
-		});
+		};
+		if (boolSpec) field.bool_labels = boolSpec.labels;
+		fields.push(field);
 		if (fields.length >= MAX_OUTPUTS) break;
 	}
 	return fields;
@@ -544,7 +872,7 @@ function refreshNode(node, options = {}) {
 		return;
 	}
 
-	const width = Math.max(MIN_WIDTH, Number(node?.size?.[0] || DEFAULT_WIDTH));
+	const width = currentNodeWidth(node);
 	const height = Math.max(80, Math.ceil(node.__gjjTemplateParamsContainer?.scrollHeight || node.size?.[1] || 80) + 12);
 	const currentWidth = Number(node?.size?.[0] || width);
 	const currentHeight = Number(node?.size?.[1] || height);
@@ -593,7 +921,7 @@ function clampBrokenHeight(node, reason = "") {
 	if (currentHeight > naturalHeight + MAX_EXTRA_IDLE_HEIGHT) {
 		node.__gjjTemplateParamsSizing = true;
 		try {
-			const width = Math.max(MIN_WIDTH, Number(node.size?.[0] || DEFAULT_WIDTH));
+			const width = currentNodeWidth(node);
 			node.setSize?.([width, naturalHeight]);
 			node.properties = node.properties || {};
 			node.properties[SAVED_SIZE] = [width, naturalHeight];
@@ -684,6 +1012,7 @@ function makeFieldSignature(field) {
 		String(field?.default ?? ""),
 		String(field?.type ?? ""),
 		JSON.stringify(Array.isArray(field?.options) ? field.options : []),
+		JSON.stringify(field?.bool_labels || {}),
 		String(field?.tooltip ?? ""),
 	].join("\u0001");
 }
@@ -791,7 +1120,7 @@ function updateOutputs(node, fields, values) {
 		output.tooltip = [
 			`模板参数：${field.label}`,
 			field.tooltip ? `说明：${field.tooltip}` : "",
-			`当前值：${String(values[field.key] ?? field.default ?? "")}`,
+			`当前值：${displayValueForField(field, values[field.key] ?? field.default ?? "")}`,
 		].filter(Boolean).join("\n");
 		node.outputs[i] = output;
 	}
@@ -802,6 +1131,22 @@ function updateOutputs(node, fields, values) {
 	}
 	repairOutputLinkSlots(node);
 	refreshNode(node);
+}
+
+function displayValueForField(field, rawValue) {
+	if (field?.type === "ENUM") {
+		const text = String(rawValue ?? "").trim();
+		const option = (Array.isArray(field.options) ? field.options : []).find((item) => {
+			return text === optionValue(item) || text === optionLabel(item);
+		});
+		return option ? `${optionLabel(option)} (${optionValue(option)})` : text;
+	}
+	if (field?.type === "BOOLEAN") {
+		const enabled = parseValue(rawValue) === true;
+		const labels = field?.bool_labels || {};
+		return enabled ? (labels.true_label || "true") : (labels.false_label || "false");
+	}
+	return String(rawValue ?? "");
 }
 
 function isBooleanField(field, values) {
@@ -826,12 +1171,15 @@ function buildBoolButtonForField(node, field, values) {
 	const button = document.createElement("button");
 	button.type = "button";
 	button.className = "gjj-template-param-bool-button";
-	button.title = field.tooltip || "布尔参数：点击切换 true / false";
+	const labels = field?.bool_labels || {};
+	const trueLabel = String(labels.true_label || "true");
+	const falseLabel = String(labels.false_label || "false");
+	button.title = field.tooltip || `布尔参数：点击切换 ${trueLabel} / ${falseLabel}`;
 
 	const sync = () => {
 		const enabled = parseValue(values[field.key] ?? field.default ?? "false") === true;
 		button.dataset.value = enabled ? "true" : "false";
-		button.textContent = enabled ? "✅ true" : "⬜ false";
+		button.textContent = enabled ? `✅ ${trueLabel}` : `⬜ ${falseLabel}`;
 	};
 
 	const commit = (nextBool) => {
@@ -862,8 +1210,8 @@ function buildBoolButtonForField(node, field, values) {
 }
 
 function buildEnumSelectForField(node, field, values) {
-	const options = Array.isArray(field.options) ? field.options.map((item) => String(item)) : [];
-	const fallback = options[0] || "";
+	const options = Array.isArray(field.options) ? field.options : [];
+	const fallback = optionValue(options[0] || "");
 	if (!options.length) return null;
 
 	const wrap = document.createElement("div");
@@ -874,33 +1222,59 @@ function buildEnumSelectForField(node, field, values) {
 	label.textContent = field.label;
 	label.title = field.tooltip || "ENUM";
 
-	const select = document.createElement("select");
-	select.className = "gjj-template-param-input gjj-template-param-select";
-	select.title = field.tooltip || "枚举参数";
-	select.style.flex = "1";
-	for (const optionText of options) {
-		const option = document.createElement("option");
-		option.value = optionText;
-		option.textContent = optionText;
-		select.appendChild(option);
-	}
+	const box = document.createElement("div");
+	box.className = "gjj-template-param-enum";
+	box.title = field.tooltip || "枚举参数：点击选择输出值";
 
-	const current = String(values[field.key] ?? field.default ?? fallback);
-	select.value = options.includes(current) ? current : fallback;
-	values[field.key] = select.value;
+	const normalizeCurrent = (value) => {
+		const text = String(value ?? "").trim();
+		const matched = options.find((item) => text === optionValue(item) || text === optionLabel(item));
+		return matched ? optionValue(matched) : fallback;
+	};
+	values[field.key] = normalizeCurrent(values[field.key] ?? field.default ?? fallback);
 
-	select.addEventListener("pointerdown", (event) => event.stopPropagation());
-	select.addEventListener("mousedown", (event) => event.stopPropagation());
-	select.addEventListener("change", () => {
-		values[field.key] = select.value;
+	const buttons = [];
+	const sync = () => {
+		const current = normalizeCurrent(values[field.key]);
+		values[field.key] = current;
+		for (const button of buttons) {
+			button.dataset.value = button.dataset.optionValue === current ? "true" : "false";
+			button.classList.toggle("active", button.dataset.optionValue === current);
+		}
+	};
+	const commit = (nextValue) => {
+		values[field.key] = normalizeCurrent(nextValue);
+		sync();
 		const template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
 		const fields = parseTemplate(template);
 		saveState(node, template, fields, values);
 		updateOutputs(node, fields, values);
-	});
+	};
 
-	wrap.append(label, select);
-	node.__gjjTemplateParamsRows.set(field.key, select);
+	for (const option of options) {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.className = "gjj-template-param-enum-button";
+		button.textContent = optionLabel(option);
+		button.dataset.optionValue = optionValue(option);
+		button.title = `${optionLabel(option)} → ${optionValue(option)}`;
+		button.addEventListener("pointerdown", (event) => event.stopPropagation());
+		button.addEventListener("mousedown", (event) => event.stopPropagation());
+		button.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			commit(button.dataset.optionValue || "");
+		});
+		buttons.push(button);
+		box.appendChild(button);
+	}
+
+	wrap.append(label, box);
+	sync();
+	node.__gjjTemplateParamsRows.set(field.key, {
+		get value() { return normalizeCurrent(values[field.key]); },
+		set value(next) { values[field.key] = normalizeCurrent(next); sync(); },
+	});
 	return wrap;
 }
 
@@ -920,7 +1294,7 @@ function autoresizeTextarea(textarea, node = null) {
 	if (node) refreshNode(node);
 }
 
-function buildInputForField(node, field, values) {
+function buildInputForField(node, field, values, options = {}) {
 	if (isBooleanField(field, values)) {
 		return buildBoolButtonForField(node, field, values);
 	}
@@ -933,6 +1307,7 @@ function buildInputForField(node, field, values) {
 	const isAudio = field.type === "AUDIO";
 	const isVideo = field.type === "VIDEO";
 	const isMedia = isImage || isAudio || isVideo;
+	const groupedMediaPreview = Boolean(options.groupedMediaPreview);
 	const currentValue = String(values[field.key] ?? field.default ?? "");
 	const multiline = shouldUseMultilineText(field, currentValue, isMedia);
 
@@ -965,26 +1340,23 @@ function buildInputForField(node, field, values) {
 	input.addEventListener("mousedown", (event) => event.stopPropagation());
 	input.addEventListener("input", () => {
 		values[field.key] = input.value;
-		if (isMedia) setWarningMessages(node, []);
-		if (multiline) autoresizeTextarea(input, node);
-		const template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
-		const fields = parseTemplate(template);
-		saveState(node, template, fields, values);
-		updateOutputs(node, fields, values);
-
-		// 更新预览
 		if (isMedia) {
-			const previewClass = isImage
-				? ".gjj-template-param-preview-image"
-				: isVideo
-					? ".gjj-template-param-preview-video"
-					: ".gjj-template-param-preview-audio";
-			const preview = wrap.querySelector(previewClass);
-			if (preview) {
-				updatePreview(preview, input.value, isImage, isAudio, isVideo);
-			}
+			setWarningMessages(node, []);
+			setNetworkWarningMessage(node, field, "");
+		}
+		if (multiline) autoresizeTextarea(input, node);
+		saveFieldValue(node, field, values, input.value);
+
+		if (isMedia) {
+			updatePreviewForField(node, field, input.value, wrap);
+			scheduleNetworkMediaToInput(node, field, input, values, wrap, 650);
 		}
 	});
+	if (isMedia) {
+		for (const eventName of ["change", "blur"]) {
+			input.addEventListener(eventName, () => scheduleNetworkMediaToInput(node, field, input, values, wrap, 0));
+		}
+	}
 	if (multiline) {
 		setTimeout(() => autoresizeTextarea(input, node), 0);
 	}
@@ -1027,13 +1399,10 @@ function buildInputForField(node, field, values) {
 	wrap.append(label, inputWrap);
 
 	// 添加预览区域（仅媒体类型）
-	if (isMedia) {
+	if (isMedia && !groupedMediaPreview) {
 		const preview = document.createElement("div");
-		preview.className = isImage
-			? "gjj-template-param-preview-image"
-			: isVideo
-				? "gjj-template-param-preview-video"
-				: "gjj-template-param-preview-audio";
+		preview.className = mediaPreviewClass(field.type);
+		preview.dataset.fieldKey = field.key;
 		preview.style.cssText = [
 			"grid-column: 1 / -1",
 			"margin-top: 4px",
@@ -1043,12 +1412,32 @@ function buildInputForField(node, field, values) {
 			"justify-content:center",
 		].join(";");
 
-		updatePreview(preview, input.value, isImage, isAudio, isVideo);
+		updatePreview(preview, input.value, isImage, isAudio, isVideo, null, {
+			title: field.label || "媒体",
+			description: field.tooltip || "",
+			onLayout: () => refreshNode(node),
+		});
+		node.__gjjTemplateParamsPreviewMap?.set(String(field.key), preview);
 		wrap.appendChild(preview);
 	}
 
 	node.__gjjTemplateParamsRows.set(field.key, input);
+	if (isMedia) {
+		setTimeout(() => scheduleNetworkMediaToInput(node, field, input, values, wrap, 0), 0);
+	}
 	return wrap;
+}
+
+function buildGroupedMediaPreview(node, fields, values) {
+	const mediaFields = fields.filter((field) => isMediaType(field?.type));
+	if (mediaFields.length < 2) return null;
+
+	const group = document.createElement("div");
+	group.className = "gjj-template-param-media-preview-group";
+	node.__gjjTemplateParamsMediaGroup = group;
+	node.__gjjTemplateParamsMediaFieldKeys = mediaFields.map((field) => String(field.key || ""));
+	renderGroupedMediaPreview(node, fields, values);
+	return group;
 }
 
 function renderRows(node) {
@@ -1058,13 +1447,29 @@ function renderRows(node) {
 	if (!rows) return;
 	rows.innerHTML = "";
 	node.__gjjTemplateParamsRows = new Map();
+	node.__gjjTemplateParamsPreviewMap = new Map();
+	node.__gjjTemplateParamsMediaGroup = null;
+	node.__gjjTemplateParamsMediaFieldKeys = [];
 	if (!state.fields.length) {
 		const empty = document.createElement("div");
 		empty.className = "gjj-template-param-empty";
 		empty.textContent = "点击 ⚙ 设置，按“名称：默认值 # 说明”填写模板。";
 		rows.appendChild(empty);
 	} else {
-		for (const field of state.fields) rows.appendChild(buildInputForField(node, field, state.values));
+		const mediaFields = state.fields.filter((field) => isMediaType(field?.type));
+		const useGroupedMediaPreview = mediaFields.length > 1;
+		const lastMediaIndex = useGroupedMediaPreview
+			? state.fields.reduce((last, field, index) => isMediaType(field?.type) ? index : last, -1)
+			: -1;
+
+		for (let i = 0; i < state.fields.length; i += 1) {
+			const field = state.fields[i];
+			rows.appendChild(buildInputForField(node, field, state.values, { groupedMediaPreview: useGroupedMediaPreview }));
+			if (useGroupedMediaPreview && i === lastMediaIndex) {
+				const mediaGroup = buildGroupedMediaPreview(node, state.fields, state.values);
+				if (mediaGroup) rows.appendChild(mediaGroup);
+			}
+		}
 	}
 	updateOutputs(node, state.fields, state.values);
 	refreshNode(node);
@@ -1082,7 +1487,7 @@ function buildDom(node) {
 		.gjj-template-param-gear:hover, .gjj-template-param-refresh:hover, .gjj-template-param-ok:hover, .gjj-template-param-cancel:hover { background:#2c3b43; }
 		.gjj-template-param-count { color:#8ea0a8; font-size:11px; }
 		.gjj-template-param-panel { display:none; flex-direction:column; gap:6px; padding:6px; border:1px solid #33464e; border-radius:9px; background:#0d1519; }
-		.gjj-template-param-template { width:100%; min-height:108px; resize:vertical; padding:7px 8px; border:1px solid #44565f; border-radius:7px; outline:none; background:#070f12; color:#dce7e2; font:12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
+		.gjj-template-param-template { width:100%; min-height:108px; height:118px; resize:vertical; overflow:auto; padding:7px 8px; border:1px solid #33464e; border-radius:8px; outline:none; background:#2b2d30; color:#f1f5f5; font:12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space:pre-wrap; }
 		.gjj-template-param-help { color:#8ea0a8; font-size:11px; line-height:1.45; white-space:pre-wrap; }
 		.gjj-template-param-actions { display:flex; gap:6px; justify-content:flex-end; }
 		.gjj-template-param-warning { display:none; padding:6px 8px; border:1px solid #8a5a08; border-radius:8px; background:#2a2111; color:#ffcf86; font-size:11px; line-height:1.45; white-space:pre-wrap; }
@@ -1093,16 +1498,30 @@ function buildDom(node) {
 		.gjj-template-param-row-full > div { width:100%; }
 		.gjj-template-param-label { color:#b9c8cc; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 		.gjj-template-param-input { width:100%; height:30px; padding:4px 8px; border:1px solid #33464e; border-radius:8px; outline:none; background:#2b2d30; color:#f1f5f5; font-size:13px; }
-		.gjj-template-param-textarea { min-height:58px; height:auto; resize:vertical; line-height:1.45; white-space:pre-wrap; overflow:hidden; }
+		.gjj-template-param-textarea { min-height:58px; height:auto; resize:vertical; line-height:1.45; white-space:pre-wrap; overflow:auto; }
+		.gjj-template-param-template.gjj-template-param-textarea { min-height:108px; height:118px; font:12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
 		.gjj-template-param-input:focus { border-color:#6aa6b8; background:#22282c; }
 		.gjj-template-param-file-button { height:30px; width:36px; padding:0; border:1px solid #33464e; border-radius:8px; background:#2b2d30; color:#f1f5f5; cursor:pointer; font-size:14px; display:flex; align-items:center; justify-content:center; }
 		.gjj-template-param-file-button:hover { background:#3a3d40; border-color:#6aa6b8; }
-		.gjj-template-param-preview-image, .gjj-template-param-preview-video, .gjj-template-param-preview-audio { grid-column: 1 / -1; margin-top: 4px; min-height: 40px; display:flex; align-items:center; justify-content:center; }
+		.gjj-template-param-preview-image, .gjj-template-param-preview-video, .gjj-template-param-preview-audio { grid-column: 1 / -1; margin-top: 4px; min-height: 40px; display:block; width:100%; }
+		.gjj-template-param-media-preview-group { display:block; width:100%; min-width:0; padding:6px; border:1px solid #253841; border-radius:8px; background:#0a1418; }
+		.gjj-template-param-media-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(78px, 1fr)); gap:6px; }
+		.gjj-template-param-media-item { min-width:0; display:flex; flex-direction:column; gap:4px; }
+		.gjj-template-param-media-label { color:#8ea0a8; font-size:11px; line-height:1.2; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+		.gjj-template-param-media-item .gjj-template-param-preview-image,
+		.gjj-template-param-media-item .gjj-template-param-preview-video,
+		.gjj-template-param-media-item .gjj-template-param-preview-audio { grid-column:auto; margin-top:0; min-height:74px; height:96px; padding:4px; border:1px solid #253841; border-radius:7px; background:#071013; overflow:hidden; --gjj-template-preview-max-height:88px; --gjj-template-preview-video-max-height:88px; }
+		.gjj-template-param-media-item .gjj-template-param-preview-audio { min-height:48px; height:54px; }
+		.gjj-template-param-media-item audio { height:30px; }
 		.gjj-template-param-bool { display:flex; align-items:center; min-width:0; }
 		.gjj-template-param-bool-button { width:100%; height:30px; padding:4px 8px; border:1px solid #33464e; border-radius:8px; outline:none; background:#2b2d30; color:#f1f5f5; font-size:13px; cursor:pointer; text-align:left; }
 		.gjj-template-param-bool-button[data-value="true"] { border-color:#4f8f7a; background:#20362f; color:#dff8ea; }
 		.gjj-template-param-bool-button[data-value="false"] { border-color:#46535a; background:#24282b; color:#cdd5d8; }
 		.gjj-template-param-bool-button:hover { filter:brightness(1.12); }
+		.gjj-template-param-enum { display:flex; align-items:center; gap:5px; min-width:0; width:100%; flex-wrap:wrap; }
+		.gjj-template-param-enum-button { min-width:0; flex:1 1 72px; height:30px; padding:4px 8px; border:1px solid #33464e; border-radius:8px; outline:none; background:#24282b; color:#cdd5d8; font-size:13px; cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+		.gjj-template-param-enum-button.active, .gjj-template-param-enum-button[data-value="true"] { border-color:#4f8f7a; background:#20362f; color:#dff8ea; font-weight:700; }
+		.gjj-template-param-enum-button:hover { filter:brightness(1.12); border-color:#6aa6b8; }
 		.gjj-template-param-empty { color:#8ea0a8; font-size:12px; padding:4px 0; }
 	`;
 
@@ -1111,7 +1530,7 @@ function buildDom(node) {
 	const gear = document.createElement("button");
 	gear.type = "button";
 	gear.className = "gjj-template-param-gear";
-	gear.textContent = "⚙ 设置";
+	gear.textContent = "⚙️ 设置";
 	gear.title = "编辑隐藏模板，确定后自动生成输入框和输出口";
 
 	const refresh = document.createElement("button");
@@ -1127,16 +1546,19 @@ function buildDom(node) {
 	const panel = document.createElement("div");
 	panel.className = "gjj-template-param-panel";
 	const template = document.createElement("textarea");
-	template.className = "gjj-template-param-template";
+	template.className = "gjj-template-param-input gjj-template-param-textarea gjj-template-param-template";
 	template.value = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE) || DEFAULT_TEMPLATE;
 	template.placeholder = DEFAULT_TEMPLATE;
+	template.rows = 4;
+	template.wrap = "soft";
 	const help = document.createElement("div");
 	help.className = "gjj-template-param-help";
 	help.textContent = [
 		"每行一个参数：名称：默认值 # 说明",
 		"示例：帧率：24.0 # 每秒帧数",
-		"支持 int(1)、float(1)、true / false、bool(1)、json([1,2])、[enable,disable] # 枚举。",
-		"布尔值会显示为按钮；枚举值会显示为下拉框。",
+		"支持 int(1)、float(1)、true / false、json([1,2])、图片/音频/视频路径。",
+		"布尔按钮：true{开启文案|关闭文案}；简写 {开启文案|关闭文案} 默认开启。",
+		"枚举按钮：[显示=输出值, 显示2=输出值2]；兼容 [显示(输出值), ...]。",
 		"空行、整行 # 注释、.... 会被忽略；如果值里要写 #，请用 \\#。",
 	].join("\n");
 	const actions = document.createElement("div");
@@ -1200,6 +1622,14 @@ function buildDom(node) {
 	for (const eventName of ["input", "change", "keydown", "keyup", "wheel", "dblclick", "contextmenu"]) {
 		template.addEventListener(eventName, stop);
 	}
+	if (typeof ResizeObserver !== "undefined") {
+		const observer = new ResizeObserver(() => refreshNode(node));
+		observer.observe(template);
+		node.__gjjTemplateParamsTemplateResizeObserver = observer;
+	}
+	for (const eventName of ["pointerup", "mouseup", "blur"]) {
+		template.addEventListener(eventName, () => refreshNode(node));
+	}
 
 	container.append(style, toolbar, panel, warning, rows);
 	node.__gjjTemplateParamsContainer = container;
@@ -1223,7 +1653,10 @@ function ensureDom(node) {
 		hideOnZoom: false,
 	});
 	if (widget) {
-		widget.computeSize = (width) => [Math.max(MIN_WIDTH, Number(width || node.size?.[0] || DEFAULT_WIDTH)), Math.max(40, Math.ceil(container.scrollHeight || 40))];
+		widget.computeSize = (width) => [
+			Number(width || currentNodeWidth(node)),
+			Math.max(40, Math.ceil(container.scrollHeight || 40)),
+		];
 		node.__gjjTemplateParamsWidget = widget;
 	}
 }

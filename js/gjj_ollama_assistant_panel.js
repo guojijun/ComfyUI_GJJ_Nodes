@@ -262,7 +262,7 @@ function syncPanel(node) {
 	state.thinking.classList.toggle("active", thinking);
 	state.keepAlive.textContent = unload ? "🧹 用后卸载" : "🧠 模型常驻";
 	state.keepAlive.classList.toggle("active", !unload);
-	state.settingsButton.textContent = state.expanded ? "⚙ 收起" : "⚙ 设置";
+	state.settingsButton.textContent = state.expanded ? "⚙️ 收起" : "⚙️ 设置";
 	state.settingsButton.classList.toggle("active", state.expanded);
 	state.settings.style.display = state.expanded ? "flex" : "none";
 

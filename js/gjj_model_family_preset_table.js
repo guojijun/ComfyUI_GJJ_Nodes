@@ -20,6 +20,7 @@ function normalizeLookupText(value) {
 		.toLowerCase()
 		.replace(/\.(safetensors|ckpt|pt|pth|bin|sft|gguf)$/i, "")
 		.split(/[^a-z0-9]+/i)
+		.map((token) => (/^fp\d+$/.test(token) ? "fp" : token))
 		.filter((token) => token && !IGNORED_MODEL_TOKENS.has(token) && !/^v\d+(?:\d+|\.\d+)*$/.test(token))
 		.join("");
 }
@@ -41,6 +42,14 @@ function parseScalar(key, value) {
 	return text;
 }
 
+function parseBooleanish(value, fallback = true) {
+	const text = String(value ?? "").trim().toLowerCase();
+	if (!text) return fallback;
+	if (["1", "true", "yes", "on", "enable", "enabled", "启用", "开"].includes(text)) return true;
+	if (["0", "false", "no", "off", "disable", "disabled", "关闭", "关"].includes(text)) return false;
+	return fallback;
+}
+
 function toJsPreset(row) {
 	const preset = {};
 	for (const [key, raw] of Object.entries(row)) {
@@ -57,6 +66,8 @@ function toJsPreset(row) {
 	}
 	return {
 		id: preset.id || "",
+		displayName: preset.display_name || preset.zh_name || preset.label || preset.title || "",
+		description: preset.description || preset.note || "",
 		keywords: preset.keywords || [],
 		modelName: preset.model_name || "",
 		modelCategory: preset.model_category || "",
@@ -65,8 +76,10 @@ function toJsPreset(row) {
 		vaeName: preset.vae_name || "",
 		modelPatchName: preset.model_patch_name || "",
 		clipVisionName: preset.clip_vision_name || "",
+		controlNetName: preset.control_net_name || "",
 		lora1: preset.lora_1_name || "",
 		lora1Strength: preset.lora_1_strength ?? 0.0,
+		lora1AutoEnabled: parseBooleanish(preset.lora_1_auto_enabled, true),
 		lora2: preset.lora_2_name || "",
 		lora2Strength: preset.lora_2_strength ?? 0.0,
 		steps: preset.steps ?? 20,

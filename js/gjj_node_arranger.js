@@ -308,6 +308,21 @@ const REROUTE_TYPES = new Set([
 
 const SET_NODE_TYPES = new Set(["GJJ_SetNode", "SetNode", "Set"]);
 const GET_NODE_TYPES = new Set(["GJJ_GetNode", "GetNode", "Get"]);
+const BROADCAST_PROPERTY = "gjj_variable_broadcast_enabled";
+const PRIORITY_ARRANGE_NODE_TYPES = [
+	"GJJ_TemplateParams",
+	"GJJ_ModelBundleLoader",
+	"GJJ_VideoKijaiModelLoader",
+	"GJJ_VideoUniversalModelLoader",
+];
+const PRIORITY_ARRANGE_NODE_TYPE_SET = new Set(PRIORITY_ARRANGE_NODE_TYPES);
+const PRIORITY_ARRANGE_NODE_RANKS = new Map(PRIORITY_ARRANGE_NODE_TYPES.map((type, index) => [type, index]));
+const PRIORITY_ARRANGE_NODE_PATTERNS = [
+	/GJJ_TemplateParams|TemplateParams|模板参数输入器|模板参数/i,
+	/GJJ_ModelBundleLoader|ModelBundleLoader|智能批量模型加载|模型包加载/i,
+	/GJJ_VideoKijaiModelLoader|VideoKijaiModelLoader|Kijai.*模型|视频Kijai模型/i,
+	/GJJ_VideoUniversalModelLoader|VideoUniversalModelLoader|视频通用模型|通用模型加载/i,
+];
 
 const TOPO_SORT_MODES = {
 	TOPO_MAIN_PATH: "topo_main_path",
@@ -557,6 +572,94 @@ function getNodeX(node) {
 
 function getNodeY(node) {
 	return Number(node?.pos?.[1] || 0);
+}
+
+function isPriorityArrangeNode(node) {
+	return getPriorityArrangeRank(node) < PRIORITY_ARRANGE_NODE_TYPES.length;
+}
+
+function getPriorityRankFromText(value) {
+	const text = String(value || "").trim();
+	if (!text) return PRIORITY_ARRANGE_NODE_TYPES.length;
+	if (PRIORITY_ARRANGE_NODE_TYPE_SET.has(text)) {
+		return PRIORITY_ARRANGE_NODE_RANKS.get(text) ?? PRIORITY_ARRANGE_NODE_TYPES.length;
+	}
+	for (let index = 0; index < PRIORITY_ARRANGE_NODE_TYPES.length; index++) {
+		if (text.includes(PRIORITY_ARRANGE_NODE_TYPES[index])) {
+			return index;
+		}
+		const pattern = PRIORITY_ARRANGE_NODE_PATTERNS[index];
+		if (pattern?.test(text)) {
+			return index;
+		}
+	}
+	return PRIORITY_ARRANGE_NODE_TYPES.length;
+}
+
+function getPriorityArrangeRank(node) {
+	const values = [
+		node?.type,
+		node?.comfyClass,
+		node?.properties?.["Node name for S&R"],
+		node?.properties?.aux_id,
+		node?.nodeData?.name,
+		node?.constructor?.nodeData?.name,
+		node?.constructor?.comfyClass,
+		node?.constructor?.type,
+		node?.constructor?.title,
+		node?.title,
+		node?.name,
+	].filter((value) => value != null && value !== "").map((value) => String(value).trim());
+
+	let rank = PRIORITY_ARRANGE_NODE_TYPES.length;
+	for (const value of values) {
+		rank = Math.min(rank, getPriorityRankFromText(value));
+	}
+	return rank;
+}
+
+function compareNodeArrangePriority(a, b) {
+	return getPriorityArrangeRank(a) - getPriorityArrangeRank(b);
+}
+
+function compareNodePositionOnly(a, b, primary = "y", threshold = 8) {
+	const ax = getNodeX(a);
+	const bx = getNodeX(b);
+	const ay = getNodeY(a);
+	const by = getNodeY(b);
+
+	if (primary === "x") {
+		if (Math.abs(ax - bx) > threshold) return ax - bx;
+		if (Math.abs(ay - by) > threshold) return ay - by;
+	} else {
+		if (Math.abs(ay - by) > threshold) return ay - by;
+		if (Math.abs(ax - bx) > threshold) return ax - bx;
+	}
+
+	return String(a?.id || "").localeCompare(String(b?.id || ""));
+}
+
+function compareNodesForArrange(a, b, primary = "y", threshold = 8) {
+	return compareNodeArrangePriority(a, b) || compareNodePositionOnly(a, b, primary, threshold);
+}
+
+function forcePriorityNodesToLeadingLevel(levels, normalNodes, leading = "min") {
+	const priorityNodes = filterValidNodes(normalNodes, false).filter(isPriorityArrangeNode);
+	if (!priorityNodes.length || !levels?.size) return levels;
+
+	const values = Array.from(levels.values())
+		.map((value) => Number(value))
+		.filter((value) => Number.isFinite(value));
+	if (!values.length) return levels;
+
+	const minLevel = Math.min(...values);
+	const maxLevel = Math.max(...values);
+	const leadingLevel = leading === "max" ? maxLevel + 1 : minLevel - 1;
+
+	for (const node of priorityNodes) {
+		levels.set(node, leadingLevel);
+	}
+	return levels;
 }
 
 function isRerouteNode(node) {
@@ -907,6 +1010,40 @@ function getLinkById(linkId) {
 	return app.graph.links[linkId] || null;
 }
 
+function getLinkFlag(link, key) {
+	if (!link || !key) return undefined;
+	if (Array.isArray(link)) return undefined;
+	return link[key] ?? link.flags?.[key] ?? link.properties?.[key] ?? link.data?.[key];
+}
+
+function isBroadcastArrangeLink(link) {
+	if (!link) return false;
+	return Boolean(
+		getLinkFlag(link, "gjj_broadcast")
+		|| getLinkFlag(link, "__gjjBroadcast")
+		|| getLinkFlag(link, "is_broadcast")
+		|| getLinkFlag(link, "isBroadcast")
+		|| getLinkFlag(link, "broadcast")
+		|| getLinkFlag(link, "virtual")
+		|| getLinkFlag(link, "is_virtual")
+		|| getLinkFlag(link, "isVirtual")
+		|| getLinkFlag(link, BROADCAST_PROPERTY)
+	);
+}
+
+function isExternalArrangeLink(link) {
+	return Boolean(link) && !isBroadcastArrangeLink(link);
+}
+
+function hasExternalInputLink(input) {
+	if (input?.link == null) return false;
+	return isExternalArrangeLink(getLinkById(input.link));
+}
+
+function externalOutputLinkIds(output) {
+	return safeArray(output?.links).filter((linkId) => isExternalArrangeLink(getLinkById(linkId)));
+}
+
 function getNodeById(id) {
 	try {
 		return app.graph?.getNodeById?.(id) || null;
@@ -1003,10 +1140,9 @@ function calculateRelaxPosition(node, nodes, relaxPower, distance, clampedPull =
 	let hasOutput = false;
 
 	for (const input of safeArray(node.inputs)) {
-		if (!input?.link) continue;
+		if (!hasExternalInputLink(input)) continue;
 
 		const link = getLinkById(input.link);
-		if (!link) continue;
 
 		const otherNode = getNodeById(link.origin_id);
 		if (!otherNode) continue;
@@ -1033,11 +1169,11 @@ function calculateRelaxPosition(node, nodes, relaxPower, distance, clampedPull =
 
 	for (let i = 0; i < safeArray(node.outputs).length; i++) {
 		const output = node.outputs[i];
-		if (!Array.isArray(output?.links) || output.links.length === 0) continue;
+		const linkIds = externalOutputLinkIds(output);
+		if (linkIds.length === 0) continue;
 
-		for (const linkId of output.links) {
+		for (const linkId of linkIds) {
 			const link = getLinkById(linkId);
-			if (!link) continue;
 
 			const otherNode = getNodeById(link.target_id);
 			if (!otherNode) continue;
@@ -1129,7 +1265,7 @@ function arrangeHorizontal(nodes, spacing = DEFAULT_SPACING) {
 	let currentX = 0;
 	const startY = 0;
 
-	const sorted = [...connectedNodes].sort((a, b) => getNodeX(a) - getNodeX(b));
+	const sorted = [...connectedNodes].sort((a, b) => compareNodesForArrange(a, b, "x"));
 
 	for (const node of sorted) {
 		setNodePosition(node, currentX, startY);
@@ -1145,7 +1281,7 @@ function arrangeVertical(nodes, spacing = DEFAULT_SPACING) {
 	const rowGap = getRowGap(spacing);
 	let currentY = 0;
 
-	const sorted = [...connectedNodes].sort((a, b) => getNodeY(a) - getNodeY(b));
+	const sorted = [...connectedNodes].sort((a, b) => compareNodesForArrange(a, b, "y"));
 
 	for (const node of sorted) {
 		setNodePosition(node, startX, currentY);
@@ -1174,6 +1310,7 @@ function getWorkflowSortedNodesForGrid(nodes) {
 
 	if (connectedNodes.length > 0) {
 		const levels = calculateSourceLongestLevels(connectedNodes, backward);
+		forcePriorityNodesToLeadingLevel(levels, connectedNodes, "min");
 		const layerGroups = groupByLevel(connectedNodes, levels);
 		sortLayerGroups(layerGroups, levels, forward, backward, "barycenter");
 
@@ -1184,28 +1321,16 @@ function getWorkflowSortedNodesForGrid(nodes) {
 	}
 
 	// 没有连线的节点放在后面，仍按原来的视觉位置排序，避免突然乱跳。
-	isolatedNodes.sort((a, b) => {
-		const dy = getNodeY(a) - getNodeY(b);
-		if (Math.abs(dy) > 8) return dy;
-		return getNodeX(a) - getNodeX(b);
-	});
+	isolatedNodes.sort((a, b) => compareNodesForArrange(a, b));
 	ordered.push(...isolatedNodes);
 
 	// Reroute 节点通常只是连线辅助，网格模式放到最后，避免打乱主工作流顺序。
-	rerouteNodes.sort((a, b) => {
-		const dy = getNodeY(a) - getNodeY(b);
-		if (Math.abs(dy) > 8) return dy;
-		return getNodeX(a) - getNodeX(b);
-	});
+	rerouteNodes.sort((a, b) => compareNodesForArrange(a, b));
 	ordered.push(...rerouteNodes);
 
 	// 兜底：如果图里全是特殊节点，仍然保持原始位置顺序。
 	if (ordered.length === 0) {
-		return [...validNodes].sort((a, b) => {
-			const dy = getNodeY(a) - getNodeY(b);
-			if (Math.abs(dy) > 8) return dy;
-			return getNodeX(a) - getNodeX(b);
-		});
+		return [...validNodes].sort((a, b) => compareNodesForArrange(a, b));
 	}
 
 	return ordered;
@@ -1262,9 +1387,8 @@ function traceRealSource(nodeId, validSet, visited = new Set()) {
 	}
 
 	for (const input of safeArray(node.inputs)) {
-		if (!input?.link) continue;
+		if (!hasExternalInputLink(input)) continue;
 		const link = getLinkById(input.link);
-		if (!link) continue;
 
 		const result = traceRealSource(link.origin_id, validSet, visited);
 		if (result) return result;
@@ -1287,11 +1411,8 @@ function traceRealTargets(nodeId, validSet, visited = new Set()) {
 	const targets = [];
 
 	for (const output of safeArray(node.outputs)) {
-		if (!Array.isArray(output?.links)) continue;
-
-		for (const linkId of output.links) {
+		for (const linkId of externalOutputLinkIds(output)) {
 			const link = getLinkById(linkId);
-			if (!link) continue;
 
 			targets.push(...traceRealTargets(link.target_id, validSet, new Set(visited)));
 		}
@@ -1301,8 +1422,8 @@ function traceRealTargets(nodeId, validSet, visited = new Set()) {
 }
 
 function buildConnectionGraph(nodes) {
-	const normalNodes = nodes.filter((node) => !isRerouteNode(node));
-	const rerouteNodes = nodes.filter((node) => isRerouteNode(node));
+	const normalNodes = nodes.filter((node) => !isRerouteNode(node)).sort((a, b) => compareNodesForArrange(a, b));
+	const rerouteNodes = nodes.filter((node) => isRerouteNode(node)).sort((a, b) => compareNodesForArrange(a, b));
 	const validSet = new Set(normalNodes);
 
 	const forward = new Map();
@@ -1319,11 +1440,11 @@ function buildConnectionGraph(nodes) {
 
 	for (const node of normalNodes) {
 		for (const output of safeArray(node.outputs)) {
-			if (!Array.isArray(output?.links) || output.links.length === 0) continue;
+			const linkIds = externalOutputLinkIds(output);
+			if (linkIds.length === 0) continue;
 
-			for (const linkId of output.links) {
+			for (const linkId of linkIds) {
 				const link = getLinkById(linkId);
-				if (!link) continue;
 
 				const targets = traceRealTargets(link.target_id, validSet);
 
@@ -1442,17 +1563,16 @@ function groupByLevel(normalNodes, levels) {
 
 function sortLayersByOriginalY(layerGroups) {
 	for (const nodes of layerGroups.values()) {
-		nodes.sort((a, b) => {
-			const dy = getNodeY(a) - getNodeY(b);
-			if (Math.abs(dy) > 1) return dy;
-			return getNodeX(a) - getNodeX(b);
-		});
+		nodes.sort((a, b) => compareNodesForArrange(a, b, "y", 1));
 	}
 }
 
 function sortLayersByBranch(layerGroups, forward, backward) {
 	for (const nodes of layerGroups.values()) {
 		nodes.sort((a, b) => {
+			const priority = compareNodeArrangePriority(a, b);
+			if (priority) return priority;
+
 			const aOut = (forward.get(a)?.size || 0);
 			const bOut = (forward.get(b)?.size || 0);
 			if (aOut !== bOut) return bOut - aOut;
@@ -1461,7 +1581,7 @@ function sortLayersByBranch(layerGroups, forward, backward) {
 			const bIn = (backward.get(b)?.size || 0);
 			if (aIn !== bIn) return bIn - aIn;
 
-			return getNodeY(a) - getNodeY(b);
+			return compareNodePositionOnly(a, b);
 		});
 	}
 }
@@ -1505,7 +1625,7 @@ function sortLayersByBarycenter(layerGroups, levels, forward, backward) {
 				bary.set(node, count > 0 ? sum / count : getNodeY(node) / 10000);
 			}
 
-			nodes.sort((a, b) => bary.get(a) - bary.get(b));
+			nodes.sort((a, b) => compareNodeArrangePriority(a, b) || (bary.get(a) - bary.get(b)) || compareNodePositionOnly(a, b));
 		}
 
 		for (let i = sortedLevels.length - 2; i >= 0; i--) {
@@ -1541,7 +1661,7 @@ function sortLayersByBarycenter(layerGroups, levels, forward, backward) {
 				bary.set(node, count > 0 ? sum / count : getNodeY(node) / 10000);
 			}
 
-			nodes.sort((a, b) => bary.get(a) - bary.get(b));
+			nodes.sort((a, b) => compareNodeArrangePriority(a, b) || (bary.get(a) - bary.get(b)) || compareNodePositionOnly(a, b));
 		}
 	}
 }
@@ -1635,7 +1755,7 @@ function hasDirectLinkWithinNodeSet(node, idSet) {
 	if (!node || !idSet?.size) return false;
 
 	for (const input of safeArray(node.inputs)) {
-		if (!input?.link) continue;
+		if (!hasExternalInputLink(input)) continue;
 		const link = getLinkById(input.link);
 		if (link?.origin_id != null && String(link.origin_id) !== String(node.id) && idSet.has(String(link.origin_id))) {
 			return true;
@@ -1643,7 +1763,7 @@ function hasDirectLinkWithinNodeSet(node, idSet) {
 	}
 
 	for (const output of safeArray(node.outputs)) {
-		for (const linkId of safeArray(output?.links)) {
+		for (const linkId of externalOutputLinkIds(output)) {
 			const link = getLinkById(linkId);
 			if (link?.target_id != null && String(link.target_id) !== String(node.id) && idSet.has(String(link.target_id))) {
 				return true;
@@ -1677,18 +1797,13 @@ function splitNodesByIsolation(nodes) {
 	}
 
 	return {
-		connectedNodes: validNodes.filter((node) => !isolatedSet.has(node)),
-		isolatedNodes: validNodes.filter((node) => isolatedSet.has(node)),
+		connectedNodes: validNodes.filter((node) => !isolatedSet.has(node)).sort((a, b) => compareNodesForArrange(a, b)),
+		isolatedNodes: validNodes.filter((node) => isolatedSet.has(node)).sort((a, b) => compareNodesForArrange(a, b)),
 	};
 }
 
 function sortStandaloneIsolatedNodes(nodes) {
-	return [...nodes].sort((a, b) => {
-		const ay = getNodeY(a);
-		const by = getNodeY(b);
-		if (Math.abs(ay - by) > 8) return ay - by;
-		return getNodeX(a) - getNodeX(b);
-	});
+	return [...nodes].sort((a, b) => compareNodesForArrange(a, b));
 }
 
 function placeStandaloneIsolatedNodes(isolatedNodes, anchorNodes, orientation = "row", spacing = DEFAULT_SPACING) {
@@ -1746,7 +1861,7 @@ function placeIsolatedNodes(isolatedNodes, layerGroups, config) {
 
 	let currentY = 0;
 
-	isolatedNodes.sort((a, b) => getNodeY(a) - getNodeY(b));
+	isolatedNodes.sort((a, b) => compareNodesForArrange(a, b));
 
 	for (const node of isolatedNodes) {
 		setNodePosition(node, isolatedX, currentY);
@@ -1771,21 +1886,17 @@ function placeRerouteNodes(rerouteNodes, normalNodes) {
 		let targetNode = null;
 
 		for (const input of safeArray(reroute.inputs)) {
-			if (!input?.link) continue;
+			if (!hasExternalInputLink(input)) continue;
 
 			const link = getLinkById(input.link);
-			if (!link) continue;
 
 			sourceNode = traceRealSource(link.origin_id, validSet);
 			if (sourceNode) break;
 		}
 
 		for (const output of safeArray(reroute.outputs)) {
-			if (!Array.isArray(output?.links)) continue;
-
-			for (const linkId of output.links) {
+			for (const linkId of externalOutputLinkIds(output)) {
 				const link = getLinkById(linkId);
-				if (!link) continue;
 
 				const targets = traceRealTargets(link.target_id, validSet);
 				targetNode = targets[0] || null;
@@ -1917,15 +2028,7 @@ function getSetGetPairKey(node) {
 }
 
 function sortByOriginalPosition(nodes) {
-	return [...safeArray(nodes)].sort((a, b) => {
-		const ay = getNodeY(a);
-		const by = getNodeY(b);
-		if (Math.abs(ay - by) > 8) return ay - by;
-		const ax = getNodeX(a);
-		const bx = getNodeX(b);
-		if (Math.abs(ax - bx) > 8) return ax - bx;
-		return String(a?.id || "").localeCompare(String(b?.id || ""));
-	});
+	return [...safeArray(nodes)].sort((a, b) => compareNodesForArrange(a, b));
 }
 
 function pushUniqueNode(list, seen, node) {
@@ -2020,7 +2123,7 @@ function getSelectedSetGetOnlyNodesForBranch(selectedOnly = false) {
 function getLinkedSourceNodes(node) {
 	const result = [];
 	for (const input of safeArray(node?.inputs)) {
-		if (!input?.link) continue;
+		if (!hasExternalInputLink(input)) continue;
 		const link = getLinkById(input.link);
 		const source = link?.origin_id != null ? getNodeById(link.origin_id) : null;
 		if (source) result.push(source);
@@ -2031,7 +2134,7 @@ function getLinkedSourceNodes(node) {
 function getLinkedTargetNodes(node) {
 	const result = [];
 	for (const output of safeArray(node?.outputs)) {
-		for (const linkId of safeArray(output?.links)) {
+		for (const linkId of externalOutputLinkIds(output)) {
 			const link = getLinkById(linkId);
 			const target = link?.target_id != null ? getNodeById(link.target_id) : null;
 			if (target) result.push(target);
@@ -2278,13 +2381,13 @@ function getNodeTypeName(node) {
 function getConnectedInputSlots(node) {
 	return safeArray(node.inputs)
 		.map((input, index) => ({ input, index }))
-		.filter((item) => !!item.input?.link);
+		.filter((item) => hasExternalInputLink(item.input));
 }
 
 function getConnectedOutputSlots(node) {
 	return safeArray(node.outputs)
 		.map((output, index) => ({ output, index }))
-		.filter((item) => Array.isArray(item.output?.links) && item.output.links.length > 0);
+		.filter((item) => externalOutputLinkIds(item.output).length > 0);
 }
 
 function getFirstLinkedSlotIndex(node, backward, forward) {
@@ -2304,15 +2407,14 @@ function getFirstLinkedSlotIndex(node, backward, forward) {
 
 function sortLayerByInterfaceOrder(nodes, backward, forward) {
 	nodes.sort((a, b) => {
+		const priority = compareNodeArrangePriority(a, b);
+		if (priority) return priority;
+
 		const ai = getFirstLinkedSlotIndex(a, backward, forward);
 		const bi = getFirstLinkedSlotIndex(b, backward, forward);
 		if (ai !== bi) return ai - bi;
 
-		const ay = getNodeY(a);
-		const by = getNodeY(b);
-		if (ay !== by) return ay - by;
-
-		return getNodeX(a) - getNodeX(b);
+		return compareNodePositionOnly(a, b);
 	});
 }
 
@@ -2342,10 +2444,18 @@ function calculateCompactXPositions(layerGroups, spacing = 0, reverse = false) {
 function packLayerY(nodes, preferredY, spacing = 0) {
 	const gap = Math.max(0, Math.round(spacing));
 	const sorted = [...nodes].sort((a, b) => {
+		const priority = compareNodeArrangePriority(a, b);
+		if (priority) return priority;
+
 		const ay = Number(preferredY.get(a) ?? getNodeY(a));
 		const by = Number(preferredY.get(b) ?? getNodeY(b));
 		if (ay !== by) return ay - by;
-		return getFirstLinkedSlotIndex(a, new Map(), new Map()) - getFirstLinkedSlotIndex(b, new Map(), new Map());
+
+		const ai = getFirstLinkedSlotIndex(a, new Map(), new Map());
+		const bi = getFirstLinkedSlotIndex(b, new Map(), new Map());
+		if (ai !== bi) return ai - bi;
+
+		return compareNodePositionOnly(a, b);
 	});
 
 	let currentY = 0;
@@ -2369,6 +2479,7 @@ function getConnectedCenterY(node, connectedNodes) {
 
 function arrangeInterfaceAligned(normalNodes, forward, backward, columnGap = 0, rowGap = columnGap) {
 	const levels = calculateSinkLongestLevels(normalNodes, forward);
+	forcePriorityNodesToLeadingLevel(levels, normalNodes, "max");
 	const layerGroups = groupByLevel(normalNodes, levels);
 
 	for (const layer of layerGroups.values()) {
@@ -2408,6 +2519,7 @@ function arrangeInterfaceAligned(normalNodes, forward, backward, columnGap = 0, 
 function classifyNodeBlock(node, inDegree, outDegree) {
 	const t = getNodeTypeName(node);
 
+	if (isPriorityArrangeNode(node)) return "00 优先";
 	if ((inDegree.get(node) || 0) === 0 && (outDegree.get(node) || 0) > 0) return "01 输入";
 	if ((outDegree.get(node) || 0) === 0 && (inDegree.get(node) || 0) > 0) return "02 输出";
 	if (/loader|checkpoint|unet|vae|clip|lora|model/.test(t)) return "03 模型";
@@ -2432,11 +2544,7 @@ function arrangeNodesInSquareBlock(nodes, x, y, columnGap = 0, rowGap = columnGa
 	let maxRight = x;
 	let maxBottom = y;
 
-	nodes.sort((a, b) => {
-		const dy = getNodeY(a) - getNodeY(b);
-		if (dy !== 0) return dy;
-		return getNodeX(a) - getNodeX(b);
-	});
+	nodes.sort((a, b) => compareNodesForArrange(a, b, "y", 0));
 
 	for (let i = 0; i < nodes.length; i++) {
 		const col = i % cols;
@@ -2514,8 +2622,10 @@ function arrangeInputTopBranches(normalNodes, forward, backward, inDegree, outDe
 	const colGap = Math.max(0, Math.round(columnGap));
 	const rGap = Math.max(0, Math.round(rowGap));
 	const roots = normalNodes
-		.filter((node) => (inDegree.get(node) || 0) === 0)
-		.sort((a, b) => getFirstLinkedSlotIndex(a, backward, forward) - getFirstLinkedSlotIndex(b, backward, forward));
+		.filter((node) => isPriorityArrangeNode(node) || (inDegree.get(node) || 0) === 0)
+		.sort((a, b) => compareNodeArrangePriority(a, b)
+			|| (getFirstLinkedSlotIndex(a, backward, forward) - getFirstLinkedSlotIndex(b, backward, forward))
+			|| compareNodePositionOnly(a, b));
 
 	if (roots.length === 0) {
 		arrangeInterfaceAligned(normalNodes, forward, backward, columnGap, rowGap);
@@ -2599,11 +2709,7 @@ function resolveNodeOverlaps(nodes, spacing = DEFAULT_SPACING) {
 
 	for (let iter = 0; iter < 12; iter++) {
 		changed = false;
-		validNodes.sort((a, b) => {
-			const dy = getNodeY(a) - getNodeY(b);
-			if (dy !== 0) return dy;
-			return getNodeX(a) - getNodeX(b);
-		});
+		validNodes.sort((a, b) => compareNodesForArrange(a, b, "y", 0));
 
 		for (let i = 0; i < validNodes.length; i++) {
 			const a = validNodes[i];
@@ -2694,7 +2800,7 @@ function getPartialScopeBaseline(targetNodes, fixedNodes, fallbackBounds, gap = 
 
 	for (const node of targetSet) {
 		for (const input of safeArray(node.inputs)) {
-			if (!input?.link) continue;
+			if (!hasExternalInputLink(input)) continue;
 			const link = getLinkById(input.link);
 			const source = link?.origin_id != null ? getNodeById(link.origin_id) : null;
 			if (!source || !fixedSet.has(source)) continue;
@@ -2704,7 +2810,7 @@ function getPartialScopeBaseline(targetNodes, fixedNodes, fallbackBounds, gap = 
 		}
 
 		for (const output of safeArray(node.outputs)) {
-			for (const linkId of safeArray(output?.links)) {
+			for (const linkId of externalOutputLinkIds(output)) {
 				const link = getLinkById(linkId);
 				const target = link?.target_id != null ? getNodeById(link.target_id) : null;
 				if (!target || !fixedSet.has(target)) continue;
@@ -2801,7 +2907,7 @@ function collectAnchorNeighborhood(anchor) {
 		addNode(node);
 
 		for (const input of safeArray(node.inputs)) {
-			if (!input?.link) continue;
+			if (!hasExternalInputLink(input)) continue;
 			const link = getLinkById(input.link);
 			const source = link?.origin_id != null ? getNodeById(link.origin_id) : null;
 			if (!source || !allSet.has(source)) continue;
@@ -2815,7 +2921,7 @@ function collectAnchorNeighborhood(anchor) {
 		addNode(node);
 
 		for (const output of safeArray(node.outputs)) {
-			for (const linkId of safeArray(output?.links)) {
+			for (const linkId of externalOutputLinkIds(output)) {
 				const link = getLinkById(linkId);
 				const target = link?.target_id != null ? getNodeById(link.target_id) : null;
 				if (!target || !allSet.has(target)) continue;
@@ -2853,14 +2959,14 @@ function getRealAnchorForCenteredLayout(anchor, normalNodes, forward, backward) 
 		}
 
 		for (const input of safeArray(node.inputs)) {
-			if (!input?.link) continue;
+			if (!hasExternalInputLink(input)) continue;
 			const link = getLinkById(input.link);
 			const source = link?.origin_id != null ? getNodeById(link.origin_id) : null;
 			if (source) queue.push({ node: source, distance: distance + 1 });
 		}
 
 		for (const output of safeArray(node.outputs)) {
-			for (const linkId of safeArray(output?.links)) {
+			for (const linkId of externalOutputLinkIds(output)) {
 				const link = getLinkById(linkId);
 				const target = link?.target_id != null ? getNodeById(link.target_id) : null;
 				if (target) queue.push({ node: target, distance: distance + 1 });
@@ -2926,7 +3032,7 @@ function getSlotOrderRelativeToAnchor(node, anchor, forward, backward) {
 
 	for (let i = 0; i < safeArray(anchor?.inputs).length; i++) {
 		const input = anchor.inputs[i];
-		if (!input?.link) continue;
+		if (!hasExternalInputLink(input)) continue;
 		const link = getLinkById(input.link);
 		const source = link?.origin_id != null ? getNodeById(link.origin_id) : null;
 		if (source === node || backward.get(anchor)?.has(node)) best = Math.min(best, i);
@@ -2934,7 +3040,7 @@ function getSlotOrderRelativeToAnchor(node, anchor, forward, backward) {
 
 	for (let i = 0; i < safeArray(anchor?.outputs).length; i++) {
 		const output = anchor.outputs[i];
-		for (const linkId of safeArray(output?.links)) {
+		for (const linkId of externalOutputLinkIds(output)) {
 			const link = getLinkById(linkId);
 			const target = link?.target_id != null ? getNodeById(link.target_id) : null;
 			if (target === node || forward.get(anchor)?.has(node)) best = Math.min(best, i);
@@ -2946,14 +3052,14 @@ function getSlotOrderRelativeToAnchor(node, anchor, forward, backward) {
 
 function sortCenteredLayer(nodes, level, anchor, forward, backward) {
 	nodes.sort((a, b) => {
+		const priority = compareNodeArrangePriority(a, b);
+		if (priority) return priority;
+
 		const ao = Math.abs(level) === 1 ? getSlotOrderRelativeToAnchor(a, anchor, forward, backward) : getFirstLinkedSlotIndex(a, backward, forward);
 		const bo = Math.abs(level) === 1 ? getSlotOrderRelativeToAnchor(b, anchor, forward, backward) : getFirstLinkedSlotIndex(b, backward, forward);
 		if (ao !== bo) return ao - bo;
 
-		const ay = getNodeY(a);
-		const by = getNodeY(b);
-		if (ay !== by) return ay - by;
-		return getNodeX(a) - getNodeX(b);
+		return compareNodePositionOnly(a, b);
 	});
 }
 
@@ -2973,9 +3079,8 @@ function getAnchorInputOrder(parentNode, childNode) {
 	const childSet = new Set([childNode]);
 	for (let i = 0; i < safeArray(parentNode?.inputs).length; i++) {
 		const input = parentNode.inputs[i];
-		if (!input?.link) continue;
+		if (!hasExternalInputLink(input)) continue;
 		const link = getLinkById(input.link);
-		if (!link) continue;
 		const source = traceRealSource(link.origin_id, childSet);
 		if (source === childNode) best = Math.min(best, i);
 	}
@@ -2987,9 +3092,8 @@ function getAnchorOutputOrder(parentNode, childNode) {
 	const childSet = new Set([childNode]);
 	for (let i = 0; i < safeArray(parentNode?.outputs).length; i++) {
 		const output = parentNode.outputs[i];
-		for (const linkId of safeArray(output?.links)) {
+		for (const linkId of externalOutputLinkIds(output)) {
 			const link = getLinkById(linkId);
-			if (!link) continue;
 			const targets = traceRealTargets(link.target_id, childSet);
 			if (targets.includes(childNode)) {
 				best = Math.min(best, i * 1000 + Number(link?.target_slot || 0));
@@ -3007,6 +3111,9 @@ function getInterfaceOrder(parentNode, childNode, direction) {
 
 function sortNodesByInterfaceFromParent(parentNode, nodes, direction) {
 	nodes.sort((a, b) => {
+		const priority = compareNodeArrangePriority(a, b);
+		if (priority) return priority;
+
 		const ao = getInterfaceOrder(parentNode, a, direction);
 		const bo = getInterfaceOrder(parentNode, b, direction);
 		if (ao !== bo) return ao - bo;
@@ -3015,10 +3122,7 @@ function sortNodesByInterfaceFromParent(parentNode, nodes, direction) {
 		const bi = getFirstLinkedSlotIndex(b, new Map(), new Map());
 		if (ai !== bi) return ai - bi;
 
-		const ay = getNodeY(a);
-		const by = getNodeY(b);
-		if (ay !== by) return ay - by;
-		return getNodeX(a) - getNodeX(b);
+		return compareNodePositionOnly(a, b);
 	});
 }
 
@@ -3048,10 +3152,13 @@ function getLevelNodesByDepth(levels, depth, direction) {
 
 function separateLevelNodes(nodes, positions, minGap) {
 	const sorted = [...nodes].sort((a, b) => {
+		const priority = compareNodeArrangePriority(a, b);
+		if (priority) return priority;
+
 		const ay = positions.get(a)?.y ?? getNodeY(a);
 		const by = positions.get(b)?.y ?? getNodeY(b);
 		if (ay !== by) return ay - by;
-		return getNodeX(a) - getNodeX(b);
+		return compareNodePositionOnly(a, b);
 	});
 
 	let lastBottom = -Infinity;
@@ -3293,13 +3400,13 @@ function placeDisconnectedNodesAroundAnchor(anchor, floatingNodes, positions, sp
 	const rowGap = getRowGap(spacing);
 
 	floatingNodes.sort((a, b) => {
+		const priority = compareNodeArrangePriority(a, b);
+		if (priority) return priority;
+
 		const ta = String(a?.type || a?.comfyClass || "");
 		const tb = String(b?.type || b?.comfyClass || "");
 		if (ta !== tb) return ta.localeCompare(tb, "zh-Hans-CN");
-		const ay = getNodeY(a);
-		const by = getNodeY(b);
-		if (ay !== by) return ay - by;
-		return getNodeX(a) - getNodeX(b);
+		return compareNodePositionOnly(a, b);
 	});
 
 	if (String(mode || "") === "vertical") {
@@ -3454,8 +3561,10 @@ async function arrangeTopological(nodes, spacing = DEFAULT_SPACING, sortMode = T
 
 		if (config.levelStrategy === "sinkLongest") {
 			levels = calculateSinkLongestLevels(connectedNormalNodes, forward);
+			forcePriorityNodesToLeadingLevel(levels, connectedNormalNodes, "max");
 		} else {
 			levels = calculateSourceLongestLevels(connectedNormalNodes, backward);
+			forcePriorityNodesToLeadingLevel(levels, connectedNormalNodes, "min");
 		}
 
 		const layerGroups = groupByLevel(connectedNormalNodes, levels);
@@ -3522,9 +3631,7 @@ function getSmartFocusNodes(normalNodes, inDegree, outDegree) {
 	const outputs = connectedNodes
 		.filter((node) => (outDegree.get(node) || 0) === 0 && (inDegree.get(node) || 0) > 0)
 		.sort((a, b) => {
-			const dy = getNodeY(a) - getNodeY(b);
-			if (Math.abs(dy) > 8) return dy;
-			return getNodeX(a) - getNodeX(b);
+			return compareNodesForArrange(a, b);
 		});
 
 	const maxOut = Math.max(0, ...connectedNodes.map((node) => outDegree.get(node) || 0));
@@ -3532,13 +3639,14 @@ function getSmartFocusNodes(normalNodes, inDegree, outDegree) {
 		? connectedNodes
 			.filter((node) => (outDegree.get(node) || 0) === maxOut)
 			.sort((a, b) => {
+				const priority = compareNodeArrangePriority(a, b);
+				if (priority) return priority;
+
 				const bd = (outDegree.get(b) || 0) - (outDegree.get(a) || 0);
 				if (bd !== 0) return bd;
 				const bi = (inDegree.get(b) || 0) - (inDegree.get(a) || 0);
 				if (bi !== 0) return bi;
-				const dy = getNodeY(a) - getNodeY(b);
-				if (Math.abs(dy) > 8) return dy;
-				return getNodeX(a) - getNodeX(b);
+				return compareNodePositionOnly(a, b);
 			})
 		: [];
 
@@ -3576,13 +3684,16 @@ function calculateSmartFocusData(normalNodes, focusNodes, forward, backward) {
 		].filter((item) => normalSet.has(item));
 
 		neighbors.sort((a, b) => {
+			const priority = compareNodeArrangePriority(a, b);
+			if (priority) return priority;
+
 			const ai = getFirstLinkedSlotIndex(a, backward, forward);
 			const bi = getFirstLinkedSlotIndex(b, backward, forward);
 			if (ai !== bi) return ai - bi;
 			const ay = getNodeY(a);
 			const by = getNodeY(b);
 			if (ay !== by) return ay - by;
-			return getNodeX(a) - getNodeX(b);
+			return compareNodePositionOnly(a, b);
 		});
 
 		for (const next of neighbors) {
@@ -3645,6 +3756,9 @@ function calculateSmartYHints(normalNodes, focusNodes, forward, backward, spacin
 
 function sortSmartPortSiblings(anchor, nodes, direction, forward, backward) {
 	return [...nodes].sort((a, b) => {
+		const priority = compareNodeArrangePriority(a, b);
+		if (priority) return priority;
+
 		const ao = getInterfaceOrder(anchor, a, direction);
 		const bo = getInterfaceOrder(anchor, b, direction);
 		if (ao !== bo) return ao - bo;
@@ -3657,7 +3771,7 @@ function sortSmartPortSiblings(anchor, nodes, direction, forward, backward) {
 		const bi = getFirstLinkedSlotIndex(b, backward, forward);
 		if (ai !== bi) return ai - bi;
 
-		return getNodeX(a) - getNodeX(b);
+		return compareNodePositionOnly(a, b);
 	});
 }
 
@@ -3755,6 +3869,9 @@ function calculateSmartXPositions(layerGroups, spacing = DEFAULT_SPACING) {
 
 function sortSmartLayer(nodes, yHints, forward, backward, inDegree, outDegree) {
 	nodes.sort((a, b) => {
+		const priority = compareNodeArrangePriority(a, b);
+		if (priority) return priority;
+
 		const pa = getSmartPortSortKey(a, forward, backward);
 		const pb = getSmartPortSortKey(b, forward, backward);
 		if (pa != null && pb != null && Math.abs(pa - pb) > 1) return pa - pb;
@@ -3775,7 +3892,7 @@ function sortSmartLayer(nodes, yHints, forward, backward, inDegree, outDegree) {
 
 		const oy = getNodeY(a) - getNodeY(b);
 		if (Math.abs(oy) > 8) return oy;
-		return getNodeX(a) - getNodeX(b);
+		return compareNodePositionOnly(a, b);
 	});
 }
 
@@ -3857,6 +3974,7 @@ function enforceUpstreamLeftOfDownstream(normalNodes, forward, spacing = DEFAULT
 		for (const upstream of nodes) {
 			for (const downstream of Array.from(forward.get(upstream) || [])) {
 				if (!downstream) continue;
+				if (isPriorityArrangeNode(downstream)) continue;
 				const requestedX = compact
 					? getNodeX(upstream) + minGap
 					: getNodeX(upstream) + getNodeWidth(upstream) + minGap;
@@ -3904,6 +4022,10 @@ function collectSmartConnectedComponents(normalNodes, forward, backward, inDegre
 	}
 
 	components.sort((a, b) => {
+		const aPriority = a.some(isPriorityArrangeNode) ? 0 : 1;
+		const bPriority = b.some(isPriorityArrangeNode) ? 0 : 1;
+		if (aPriority !== bPriority) return aPriority - bPriority;
+
 		const aMaxOut = Math.max(0, ...a.map((node) => outDegree.get(node) || 0));
 		const bMaxOut = Math.max(0, ...b.map((node) => outDegree.get(node) || 0));
 		if (aMaxOut !== bMaxOut) return bMaxOut - aMaxOut;
@@ -3969,12 +4091,13 @@ function placeSmartComponentsAroundCenter(components, spacing = DEFAULT_SPACING)
 
 function arrangeSmartCentered(normalNodes, forward, backward, inDegree, outDegree, spacing = DEFAULT_SPACING) {
 	const serialOrder = getPureSerialOrder(normalNodes, forward, inDegree, outDegree);
-	if (serialOrder) {
+	if (serialOrder && !serialOrder.some(isPriorityArrangeNode)) {
 		arrangeSmartSerialChain(serialOrder, spacing);
 		return "serial";
 	}
 
 	const levels = calculateSourceLongestLevels(normalNodes, backward);
+	forcePriorityNodesToLeadingLevel(levels, normalNodes, "min");
 	const layerGroups = groupByLevel(normalNodes, levels);
 	const focusNodes = getSmartFocusNodes(normalNodes, inDegree, outDegree);
 	const yHints = calculateSmartYHints(normalNodes, focusNodes, forward, backward, spacing);

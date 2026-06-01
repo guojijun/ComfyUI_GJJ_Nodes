@@ -12,9 +12,6 @@ import torch
 from nodes import PreviewImage
 from PIL import Image
 
-from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
-from .gjj_multi_image_loader import build_uniform_batch_by_longest_edge
-
 NODE_NAME = "GJJ_AnyPreview"
 ANY_PREVIEW_INPUT_TYPE = "*"
 ANY_PREVIEW_FAST_TYPES = "GJJ_BATCH_IMAGE、IMAGE、MASK、STRING、AUDIO、VIDEO"
@@ -79,42 +76,100 @@ def is_none(value: Any) -> bool:
 
 
 def is_image_tensor(value: Any) -> bool:
-    if not isinstance(value, torch.Tensor):
+    if is_mask_tensor(value):
         return False
-    shape = tuple(value.shape)
-    if len(shape) == 4 and shape[-1] in (1, 3, 4):
-        return True
-    if len(shape) == 3 and shape[-1] in (1, 3, 4):
-        return True
-    return False
+    return _coerce_image_tensor(value) is not None
+
+
+def _scale_tensor_if_needed(value: torch.Tensor) -> torch.Tensor:
+    value = value.float()
+    if value.numel() <= 0:
+        return value
+    if not torch.is_floating_point(value):
+        return value / 255.0
+    try:
+        max_value = float(value.detach().amax().item())
+    except Exception:
+        max_value = 1.0
+    if max_value > 2.0:
+        return value / 255.0
+    return value
+
+
+def _coerce_image_tensor(value: Any) -> torch.Tensor | None:
+    """把常见 HWC/BHWC/CHW/BCHW/BT-HWC/BCTHW 图像张量统一成 BHWC。"""
+    if not isinstance(value, torch.Tensor):
+        return None
+    tensor = value.detach().cpu()
+    if tensor.ndim == 3:
+        if int(tensor.shape[-1]) in (1, 3, 4):
+            image = tensor.unsqueeze(0)
+        elif int(tensor.shape[0]) in (1, 3, 4):
+            image = tensor.movedim(0, -1).unsqueeze(0)
+        else:
+            return None
+    elif tensor.ndim == 4:
+        if int(tensor.shape[-1]) in (1, 3, 4):
+            image = tensor
+        elif int(tensor.shape[1]) in (1, 3, 4):
+            image = tensor.movedim(1, -1)
+        else:
+            return None
+    elif tensor.ndim == 5:
+        if int(tensor.shape[-1]) in (1, 3, 4):
+            image = tensor.reshape(-1, int(tensor.shape[-3]), int(tensor.shape[-2]), int(tensor.shape[-1]))
+        elif int(tensor.shape[1]) in (1, 3, 4):
+            moved = tensor.movedim(1, -1)
+            image = moved.reshape(-1, int(moved.shape[-3]), int(moved.shape[-2]), int(moved.shape[-1]))
+        else:
+            return None
+    else:
+        return None
+    if image.ndim != 4 or min(int(image.shape[0]), int(image.shape[1]), int(image.shape[2]), int(image.shape[3])) <= 0:
+        return None
+    image = torch.nan_to_num(_scale_tensor_if_needed(image), nan=0.0, posinf=1.0, neginf=0.0)
+    return image.clamp(0.0, 1.0).contiguous()
 
 
 def is_mask_tensor(value: Any) -> bool:
     if not isinstance(value, torch.Tensor):
         return False
-    if is_image_tensor(value):
-        return False
     if value.ndim == 2:
         return True
     if value.ndim == 3:
+        if value.shape[-1] in (3, 4) or value.shape[0] in (3, 4):
+            return False
         return True
-    if value.ndim == 4 and value.shape[-1] == 1:
-        return True
-    if value.ndim == 4 and value.shape[1] == 1:
-        return True
+    if value.ndim == 4:
+        if value.shape[-1] in (3, 4) or value.shape[1] in (3, 4):
+            return False
+        if value.shape[-1] == 1 or value.shape[1] == 1:
+            return True
+    if value.ndim == 5:
+        if value.shape[-1] in (3, 4) or value.shape[1] in (3, 4):
+            return False
+        if value.shape[-1] == 1 or value.shape[1] == 1:
+            return True
     return False
 
 
 def normalize_mask_tensor(value: torch.Tensor) -> torch.Tensor:
     if value.ndim == 2:
         value = value.unsqueeze(0)
+    elif value.ndim == 3 and value.shape[-1] == 1:
+        value = value[..., 0].unsqueeze(0)
     elif value.ndim == 4 and value.shape[-1] == 1:
         value = value[..., 0]
     elif value.ndim == 4 and value.shape[1] == 1:
         value = value[:, 0]
+    elif value.ndim == 5 and value.shape[-1] == 1:
+        value = value[..., 0].reshape(-1, int(value.shape[-3]), int(value.shape[-2]))
+    elif value.ndim == 5 and value.shape[1] == 1:
+        value = value[:, 0].reshape(-1, int(value.shape[-2]), int(value.shape[-1]))
     elif value.ndim != 3:
         raise ValueError(f"不支持的 MASK 维度: {tuple(value.shape)}")
-    return value.detach().cpu().float().clamp(0.0, 1.0).contiguous()
+    value = torch.nan_to_num(_scale_tensor_if_needed(value.detach().cpu()), nan=0.0, posinf=1.0, neginf=0.0)
+    return value.clamp(0.0, 1.0).contiguous()
 
 
 def mask_to_preview_image(value: torch.Tensor) -> torch.Tensor:
@@ -123,9 +178,10 @@ def mask_to_preview_image(value: torch.Tensor) -> torch.Tensor:
 
 
 def normalize_image_tensor(value: torch.Tensor) -> torch.Tensor:
-    if value.ndim == 3:
-        return value.unsqueeze(0)
-    return value
+    image = _coerce_image_tensor(value)
+    if image is None:
+        raise ValueError(f"不支持的 IMAGE 维度: {tuple(value.shape)}")
+    return image
 
 
 def image_frame_count(value: Any) -> int:
@@ -153,9 +209,7 @@ def resize_image_batch(images: torch.Tensor, width: int, height: int) -> torch.T
 
 def merge_images(values: list[torch.Tensor]) -> torch.Tensor:
     batches = [normalize_image_tensor(value) for value in values]
-    # 使用长边缩放统一尺寸，而不是最大尺寸缩放
-    # 这样可以避免小图被放大产生黑边
-    return build_uniform_batch_by_longest_edge(batches, method="lanczos")
+    return batches[0] if len(batches) == 1 else batches
 
 
 def serialize_preview(value: Any) -> str:
@@ -291,6 +345,38 @@ def normalize_preview_media_items(items: Any) -> list[dict[str, Any]]:
     return result
 
 
+def annotate_preview_image_dimensions(
+    items: list[dict[str, Any]],
+    images: torch.Tensor,
+) -> list[dict[str, Any]]:
+    """给 PreviewImage 返回项补上宽高，前端可据此算出无滚动条的单图高度。"""
+    if not items or not isinstance(images, torch.Tensor):
+        return items
+    try:
+        normalized = normalize_image_tensor(images)
+        height = int(normalized.shape[1])
+        width = int(normalized.shape[2])
+        for item in items:
+            item.setdefault("height", height)
+            item.setdefault("width", width)
+    except Exception:
+        pass
+    return items
+
+
+def collect_queue_preview_images(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """从自定义预览项目中抽出标准 images，供 ComfyUI 队列/历史预览使用。"""
+    queue_images: list[dict[str, Any]] = []
+    for item in items:
+        images = item.get("images") if isinstance(item, dict) else None
+        if not isinstance(images, (list, tuple)):
+            continue
+        for image in images:
+            if isinstance(image, dict) and image.get("filename"):
+                queue_images.append(dict(image))
+    return queue_images
+
+
 def save_audio_with_native_preview(audio: dict[str, Any]) -> list[dict[str, Any]]:
     """优先复用 ComfyUI 原生音频预览保存逻辑。"""
     try:
@@ -361,10 +447,10 @@ def serialize_video_sequence_preview(frames: torch.Tensor, source_kind: str) -> 
 
 
 def detect_preview_kind(value: Any) -> str:
-    if is_image_tensor(value):
-        return "image"
     if is_mask_tensor(value):
         return "mask"
+    if is_image_tensor(value):
+        return "image"
     if isinstance(value, str):
         return "text"
     if is_audio_object(value):
@@ -565,8 +651,9 @@ def merge_values(values: list[Any]) -> tuple[str, Any, str]:
         return "other", None, "无可预览内容"
 
     preview_kinds = {detect_preview_kind(value) for value in values}
-    if len(values) > 1 and len(preview_kinds) > 1:
-        return "mixed", values, f"已展开 {len(values)} 个混合预览项目"
+    if len(values) > 1:
+        kind_text = "混合" if len(preview_kinds) > 1 else PREVIEW_KIND_LABELS.get(next(iter(preview_kinds), "other"), "对象")
+        return "mixed", values, f"已平铺 {len(values)} 个{kind_text}预览项目"
 
     if all(is_image_tensor(value) for value in values):
         merged = merge_images(
@@ -615,7 +702,7 @@ class GJJ_AnyPreview:
     DESCRIPTION = """动态接收任意类型输入的统一预览节点。
 
 【核心功能】
-• 图片预览：自动合并多张图片为批次，显示缩略图网格
+• 图片预览：按来路平铺浏览图片，不强制合并尺寸或维度
 • 文本预览：支持 Markdown 格式渲染，显示格式化文本
 • 音频预览：内置播放器，支持 WAV/MP3 格式，显示波形控制条
 • 视频预览：内置播放器，支持 MP4/H.264 格式，显示播放控件
@@ -624,7 +711,7 @@ class GJJ_AnyPreview:
 【使用场景】
 • 作为工作流最终输出的默认预览节点
 • 调试时查看中间结果（图片、文本、音频、视频）
-• 批量图片的可视化检查
+• 多路对象和批量图片的可视化检查
 • 音频/视频生成结果的即时预览
 
 【交互功能】
@@ -656,7 +743,7 @@ class GJJ_AnyPreview:
         "features": [
             {
                 "name": "图片预览",
-                "description": "自动合并并显示图片批次，支持缩略图网格、悬停详情、点击放大",
+                "description": "按来路平铺显示图片，支持缩略图、悬停详情、点击放大",
                 "supported_formats": ["PNG", "JPEG", "WEBP"],
                 "max_batch_size": 100,
             },
@@ -697,15 +784,15 @@ class GJJ_AnyPreview:
             },
         },
         "outputs": {
-            "统一预览结果": {
+            "透传输出": {
                 "type": "*",
-                "description": "合并后的结果；图片输出 IMAGE 批次，单个 MASK 保持原 MASK，文本输出 STRING，其他输出原对象",
+                "description": "透传第一个有效输入；多路输入只用于浏览平铺，不会被强行合并或改尺寸。",
             },
         },
         "usage_examples": [
             {
                 "title": "基础图片预览",
-                "description": "连接单张或多张图片进行预览",
+                "description": "连接单张、多张或多路图片进行预览",
                 "workflow": "[Load Image] → [GJJ Any Preview]",
             },
             {
@@ -798,10 +885,11 @@ class GJJ_AnyPreview:
         "audio preview",
         "video preview",
         "媒体预览",
+        "AAA",
     ]
     RETURN_TYPES = (any_type,)
-    RETURN_NAMES = ("预览结果",)
-    OUTPUT_TOOLTIPS = ("按输入类型输出图片、文本、音频、视频或原始对象。",)
+    RETURN_NAMES = ("透传输出",)
+    OUTPUT_TOOLTIPS = ("透传第一个有效输入；多路输入只用于浏览平铺。",)
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -837,7 +925,10 @@ class GJJ_AnyPreview:
             prompt=prompt,
             extra_pnginfo=extra_pnginfo,
         )
-        return image_ui.get("ui", {}).get("images", [])
+        return annotate_preview_image_dimensions(
+            image_ui.get("ui", {}).get("images", []),
+            preview_tensor,
+        )
 
     def _build_preview_items(
         self,
@@ -924,7 +1015,6 @@ class GJJ_AnyPreview:
 
         preview_values = flatten_preview_values(raw_values)
         preview_kind, merged, preview_text = merge_values(preview_values)
-        result_kind = preview_kind
         sequence_media: list[dict[str, Any]] = []
         sequence_info = detect_video_sequence_preview(preview_values)
         if sequence_info is not None:
@@ -947,13 +1037,15 @@ class GJJ_AnyPreview:
             "preview_item_count": (len(preview_values),),
         }
         if len(preview_values) > 1 and not sequence_media:
-            ui["preview_items"] = (
-                self._build_preview_items(
-                    preview_values,
-                    prompt=prompt,
-                    extra_pnginfo=extra_pnginfo,
-                ),
+            preview_items = self._build_preview_items(
+                preview_values,
+                prompt=prompt,
+                extra_pnginfo=extra_pnginfo,
             )
+            ui["preview_items"] = (preview_items,)
+            queue_images = collect_queue_preview_images(preview_items)
+            if queue_images:
+                ui["images"] = queue_images
 
         # 添加调试日志
         print(f"[GJJ] 开始构建ui数据 - preview_kind: {preview_kind}")
@@ -962,6 +1054,7 @@ class GJJ_AnyPreview:
 
         if sequence_media:
             ui["preview_images"] = sequence_media
+            ui["images"] = [dict(item) for item in sequence_media]
             print(f"[GJJ] WebP 序列预览数据: {sequence_media}")
 
         elif (
@@ -969,13 +1062,13 @@ class GJJ_AnyPreview:
             and preview_kind in {"image", "mask"}
             and isinstance(merged, torch.Tensor)
         ):
-            image_ui = self.preview_image.save_images(
+            preview_images = self._save_image_preview(
                 merged,
-                filename_prefix="GJJ_AnyPreview",
                 prompt=prompt,
                 extra_pnginfo=extra_pnginfo,
             )
-            ui["preview_images"] = image_ui.get("ui", {}).get("images", [])
+            ui["preview_images"] = preview_images
+            ui["images"] = [dict(item) for item in preview_images]
             if preview_kind == "mask":
                 ui["preview_kind"] = ("image",)
             print(f"[GJJ] 图片ui数据: {ui['preview_images']}")
@@ -1010,21 +1103,16 @@ class GJJ_AnyPreview:
                 ui["preview_video"] = (preview_media,)
                 print(f"[GJJ] 视频预览数据: {preview_media}")
 
+        # 同时返回标准 ui.images 给 ComfyUI 队列/历史预览；前端会屏蔽本节点原生底部图片，
+        # 避免与 GJJ 自定义 DOM 预览重复。
+
         # 添加最终调试日志
         print(f"[GJJ] 最终返回的ui数据: {ui}")
         print(f"[GJJ] ui.keys: {list(ui.keys())}")
 
-        # 输出规则：
-        # - 图片预览时必须返回 merged 批量张量。
-        #   否则单个 GJJ_BATCH_IMAGE / IMAGE 批次输入会因为 len(values)==1 被原样返回，
-        #   下游节点可能只识别成 1 张图；预览能显示多张，但数据流只传 1 张。
-        # - 非图片对象保持旧逻辑：单输入返回原对象，多输入返回合并对象。
-        if result_kind == "image" and isinstance(merged, torch.Tensor):
-            result_output = merged
-        elif result_kind == "mask":
-            result_output = raw_values[0] if len(raw_values) == 1 else merged
-        else:
-            result_output = raw_values[0] if len(raw_values) == 1 else merged
+        # 预览节点只做浏览，不改变数据形态。多路输入时输出第一个有效来路，
+        # 避免不同尺寸/维度/类型被误合并后影响下游。
+        result_output = raw_values[0] if raw_values else merged
 
         return {
             "ui": ui,

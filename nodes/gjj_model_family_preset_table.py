@@ -85,6 +85,8 @@ def _normalize_lookup_text(value: str) -> str:
             break
     tokens = []
     for token in re.split(r"[^a-zA-Z0-9]+", text):
+        if re.fullmatch(r"fp\d+", token):
+            token = "fp"
         if not token or token in IGNORED_MODEL_TOKENS:
             continue
         if re.fullmatch(r"v\d+(?:\d+|\.\d+)*", token):

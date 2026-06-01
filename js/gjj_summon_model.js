@@ -9,7 +9,7 @@ import { app } from "/scripts/app.js";
 	const SETTING_CONFIRM_SECOND_TIER = "GJJ.SummonModel.SecondTierConfirm.Enabled";
 	const MODEL_EXT_RE = /\.(safetensors|ckpt|pt2?|pth|bin|gguf|sft|pkl|onnx|engine)$/i;
 	const MISSING_RE = /缺失模型|模型缺失|未找到模型|找不到.*模型|缺少.*模型|missing\s+model|model\s+missing/i;
-	const SKIP_VALUE_RE = /^(|none|null|undefined|nan|auto|自动|disable|disabled|禁用|\[未启用\]|\[未找到模型\]|\[none\])$/i;
+	const SKIP_VALUE_RE = /^(|none|null|undefined|nan|auto|自动|false|true|0|1|no|yes|off|on|disable|disabled|enable|enabled|禁用|关闭|关|启用|开启|开|不选择|未选择|不使用|\[未启用\]|\[未找到模型\]|\[none\])$/i;
 	const MODEL_FIELD_RE = /模型|(^|[_\s-])(model(?:[_\s-]?name)?|ckpt|checkpoint|unet|diffusion|vae|clip|encoder|text[_\s-]*encoder|t5|bert|lora|controlnet|upscale|sam|yolo|bbox|gguf)($|[_\s-])/i;
 	const NON_MODEL_WIDGET_RE = /(^|[_\s-])(strength|weight|scale|ratio|factor|alpha|beta|sigma|cfg|steps?|seed|width|height|size|batch|fps|frame|frames|start|end|count|percent|denoise|noise|guidance|shift|eta|temperature|top[_\s-]?[kp]|precision|dtype|quant(?:ization|ize)?|device|attention|norm|function|compile|backend|provider|algorithm|scheduler|sampler|format|mode|preset|cache|offload)($|[_\s-])/i;
 	const STRENGTH_WIDGET_RE = /(^|[_\s-])(strength|weight|scale|ratio|factor|alpha|beta)($|[_\s-])/i;
@@ -115,6 +115,31 @@ import { app } from "/scripts/app.js";
 		return !!value && !SKIP_VALUE_RE.test(value);
 	}
 
+	function boolWidgetValue(widget, fallback = true) {
+		const value = widget?.value;
+		if (value === undefined || value === null || value === "") return fallback;
+		if (typeof value === "boolean") return value;
+		const text = String(value).trim().toLowerCase();
+		if (["1", "true", "yes", "on", "enable", "enabled", "启用", "开启", "开"].includes(text)) return true;
+		if (["0", "false", "no", "off", "disable", "disabled", "禁用", "关闭", "关"].includes(text)) return false;
+		return fallback;
+	}
+
+	function optionalToggleNameFor(widget) {
+		const name = widgetName(widget);
+		if (/^model_patch_name$/i.test(name)) return "model_patch_enabled";
+		const presetLora = name.match(/^(preset_lora_\d+)_name$/i);
+		if (presetLora) return `${presetLora[1]}_enabled`;
+		return "";
+	}
+
+	function isDisabledOptionalModelWidget(node, widget) {
+		const toggleName = optionalToggleNameFor(widget);
+		if (!toggleName) return false;
+		const toggle = safeArray(node?.widgets).find((candidate) => widgetName(candidate) === toggleName);
+		return toggle ? !boolWidgetValue(toggle, true) : false;
+	}
+
 	function widgetType(widget) {
 		return String(widget?.type || widget?.options?.type || "").toLowerCase();
 	}
@@ -137,6 +162,7 @@ import { app } from "/scripts/app.js";
 
 	function isModelLikeWidget(node, widget) {
 		if (!widget) return false;
+		if (isDisabledOptionalModelWidget(node, widget)) return false;
 		if (isNonModelControl(widget)) return false;
 		const values = comboValues(widget);
 		const value = currentWidgetValue(widget);
@@ -169,6 +195,7 @@ import { app } from "/scripts/app.js";
 	function widgetLooksMissing(node, widget) {
 		const value = currentWidgetValue(widget);
 		const values = comboValues(widget);
+		if (!hasUsableModelValue(widget)) return false;
 		if (MISSING_RE.test(value)) return true;
 		if (values.length > 0 && values.every((item) => MISSING_RE.test(item) || SKIP_VALUE_RE.test(item))) return true;
 		if (hasUsableModelValue(widget) && values.length > 0 && !values.includes(value) && isModelLikeWidget(node, widget)) return true;

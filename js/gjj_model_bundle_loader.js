@@ -17,8 +17,11 @@ const VAE_NAME_WIDGET = "vae_name";
 const UNET_DTYPE_WIDGET = "unet_dtype";
 const CLIP_DTYPE_WIDGET = "clip_dtype";
 const VAE_DTYPE_WIDGET = "vae_dtype";
+const USE_SEPARATE_VAE_WIDGET = "use_separate_vae";
 const MODEL_PATCH_WIDGET = "model_patch_name";
+const MODEL_PATCH_ENABLED_WIDGET = "model_patch_enabled";
 const CLIP_VISION_WIDGET = "clip_vision_name";
+const CONTROL_NET_WIDGET = "control_net_name";
 const USE_LORA_INPUT = "use_lora";
 const PRESET_LORA_1_ENABLED_WIDGET = "preset_lora_1_enabled";
 const PRESET_LORA_1_NAME_WIDGET = "preset_lora_1_name";
@@ -39,9 +42,15 @@ const PRESET_TEMPLATE_PROPERTY = "gjj_model_bundle_loader_preset_template";
 const SAMPLING_OUTPUTS_OPEN_PROPERTY = "gjj_model_bundle_loader_sampling_outputs_open";
 const WIDTH_PROPERTY = "gjj_model_bundle_loader_width";
 const BROADCAST_PROPERTY = "gjj_variable_broadcast_enabled";
+const CHECKPOINT_COMMON_TEMPLATE_ID = "checkpoint_common";
+const CONTROL_NET_NONE = "不选择";
+const MAX_CONTROL_NET_SLOTS = 8;
 const OUTPUT_HIT_LANE = 20;
 const MIN_NODE_WIDTH = 300;
 const DEFAULT_NODE_WIDTH = 470;
+const CONTROL_NET_WIDGETS = Array.from({ length: MAX_CONTROL_NET_SLOTS }, (_, index) =>
+	index === 0 ? CONTROL_NET_WIDGET : `control_net_${index + 1}_name`
+);
 const PRESET_LORA_SLOTS = [
 	{ index: 1, enabled: PRESET_LORA_1_ENABLED_WIDGET, name: PRESET_LORA_1_NAME_WIDGET, strength: PRESET_LORA_1_STRENGTH_WIDGET },
 	{ index: 2, enabled: PRESET_LORA_2_ENABLED_WIDGET, name: PRESET_LORA_2_NAME_WIDGET, strength: PRESET_LORA_2_STRENGTH_WIDGET },
@@ -54,11 +63,13 @@ const BACKEND_WIDGETS = [
 	CLIP_DTYPE_WIDGET,
 	VAE_NAME_WIDGET,
 	VAE_DTYPE_WIDGET,
+	USE_SEPARATE_VAE_WIDGET,
 	STEPS_WIDGET,
 	CFG_WIDGET,
 	DENOISE_WIDGET,
 	TEMPLATE_WIDGET,
 	MODEL_PATCH_WIDGET,
+	MODEL_PATCH_ENABLED_WIDGET,
 	CLIP_VISION_WIDGET,
 	PRESET_LORA_1_ENABLED_WIDGET,
 	PRESET_LORA_1_NAME_WIDGET,
@@ -68,6 +79,7 @@ const BACKEND_WIDGETS = [
 	PRESET_LORA_2_STRENGTH_WIDGET,
 	FLUX_CLIP_L_WIDGET,
 	CLIP_DEVICE_WIDGET,
+	...CONTROL_NET_WIDGETS,
 ];
 const UNET_DTYPE_VALUES = new Set(["default", "float16", "bfloat16", "float32", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"]);
 const CLIP_DTYPE_VALUES = new Set(["default", "float16", "bfloat16", "float32"]);
@@ -112,10 +124,12 @@ const ALL_WIDGETS = [
 	CLIP_DTYPE_WIDGET,
 	VAE_NAME_WIDGET,
 	VAE_DTYPE_WIDGET,
+	USE_SEPARATE_VAE_WIDGET,
 	STEPS_WIDGET,
 	CFG_WIDGET,
 	DENOISE_WIDGET,
 	MODEL_PATCH_WIDGET,
+	MODEL_PATCH_ENABLED_WIDGET,
 	CLIP_VISION_WIDGET,
 	PRESET_LORA_1_ENABLED_WIDGET,
 	PRESET_LORA_1_NAME_WIDGET,
@@ -125,6 +139,7 @@ const ALL_WIDGETS = [
 	PRESET_LORA_2_STRENGTH_WIDGET,
 	FLUX_CLIP_L_WIDGET,
 	CLIP_DEVICE_WIDGET,
+	...CONTROL_NET_WIDGETS,
 ];
 
 const CORE_OUTPUT_META = [
@@ -144,7 +159,36 @@ const SAMPLING_OUTPUT_META = [
 	{ id: "denoise", kind: "denoise", type: "FLOAT", label: "🌫 降噪（denoise）" },
 ];
 
-const OUTPUT_META = [...CORE_OUTPUT_META, ...EXTRA_OUTPUT_META, ...SAMPLING_OUTPUT_META];
+const CONTROL_OUTPUT_META = Array.from({ length: MAX_CONTROL_NET_SLOTS }, (_, index) => ({
+	id: `control_net_${index + 1}`,
+	kind: "control_net",
+	type: "CONTROL_NET",
+	label: `🟦 ControlNet ${index + 1}`,
+}));
+
+const OUTPUT_META = [...CORE_OUTPUT_META, ...CONTROL_OUTPUT_META, ...EXTRA_OUTPUT_META, ...SAMPLING_OUTPUT_META];
+const OUTPUT_META_BY_ID = new Map(OUTPUT_META.map((meta) => [meta.id, meta]));
+const EXTRA_CONTROL_NET_WIDGETS = CONTROL_NET_WIDGETS.slice(1);
+const PRE_SEPARATE_VAE_BACKEND_WIDGETS = BACKEND_WIDGETS.filter((name) => name !== USE_SEPARATE_VAE_WIDGET);
+const PRE_SEPARATE_VAE_ALL_WIDGETS = ALL_WIDGETS.filter((name) => name !== USE_SEPARATE_VAE_WIDGET);
+const PRE_MULTI_CONTROL_BACKEND_WIDGETS = BACKEND_WIDGETS.filter((name) => !EXTRA_CONTROL_NET_WIDGETS.includes(name));
+const PRE_MULTI_CONTROL_ALL_WIDGETS = ALL_WIDGETS.filter((name) => !EXTRA_CONTROL_NET_WIDGETS.includes(name));
+const PRE_COMMON_BACKEND_WIDGETS = PRE_SEPARATE_VAE_BACKEND_WIDGETS.filter((name) => !EXTRA_CONTROL_NET_WIDGETS.includes(name));
+const PRE_COMMON_ALL_WIDGETS = PRE_SEPARATE_VAE_ALL_WIDGETS.filter((name) => !EXTRA_CONTROL_NET_WIDGETS.includes(name));
+const PRE_MODEL_PATCH_TOGGLE_BACKEND_WIDGETS = BACKEND_WIDGETS.filter((name) => name !== MODEL_PATCH_ENABLED_WIDGET);
+const PRE_MODEL_PATCH_TOGGLE_ALL_WIDGETS = ALL_WIDGETS.filter((name) => name !== MODEL_PATCH_ENABLED_WIDGET);
+const LEGACY_BACKEND_WIDGETS = PRE_MODEL_PATCH_TOGGLE_BACKEND_WIDGETS.filter((name) => !CONTROL_NET_WIDGETS.includes(name));
+const LEGACY_ALL_WIDGETS = PRE_MODEL_PATCH_TOGGLE_ALL_WIDGETS.filter((name) => !CONTROL_NET_WIDGETS.includes(name));
+const MIDDLE_CONTROL_BACKEND_WIDGETS = [
+	...LEGACY_BACKEND_WIDGETS.slice(0, LEGACY_BACKEND_WIDGETS.indexOf(PRESET_LORA_1_ENABLED_WIDGET)),
+	CONTROL_NET_WIDGET,
+	...LEGACY_BACKEND_WIDGETS.slice(LEGACY_BACKEND_WIDGETS.indexOf(PRESET_LORA_1_ENABLED_WIDGET)),
+];
+const MIDDLE_CONTROL_ALL_WIDGETS = [
+	...LEGACY_ALL_WIDGETS.slice(0, LEGACY_ALL_WIDGETS.indexOf(PRESET_LORA_1_ENABLED_WIDGET)),
+	CONTROL_NET_WIDGET,
+	...LEGACY_ALL_WIDGETS.slice(LEGACY_ALL_WIDGETS.indexOf(PRESET_LORA_1_ENABLED_WIDGET)),
+];
 
 function getWidget(node, name) { return node.widgets?.find((w) => w?.name === name); }
 function valueOf(node, name, fallback = "") { return String(getWidget(node, name)?.value ?? fallback ?? ""); }
@@ -184,9 +228,60 @@ function uniqueValues(...lists) {
 }
 function normalizeLookupText(value) { return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, ""); }
 function presetKeywords(preset) { return [preset?.id, ...(preset?.keywords || [])].map(String).filter(Boolean); }
-function templateLabel(preset) { return String(preset?.id || "未命名模板"); }
+const TEMPLATE_CHINESE_DESCRIPTIONS = {
+	checkpoint_common: "Checkpoint 通用预设",
+	"FireRed-Image-Edit-1.1": "FireRed 图像编辑 1.1",
+	qwen_image_edit_2511: "Qwen 图像编辑 2511",
+	qwen_image_edit: "Qwen 图像编辑",
+	qwen_image_2512: "Qwen 文生图 2512",
+	qwen_image: "Qwen 文生图通用",
+	qwen_image_layered: "Qwen 分层图像",
+	lotus_depth: "Lotus 深度图",
+	architecturerealmix_v11_depth: "建筑写实 SD1.5 + 深度 ControlNet",
+	flux2_klein_9b: "Flux2 Klein 9B 快速",
+	flux2_klein_4b: "Flux2 Klein 4B 轻量",
+	flux2_dev_nvfp4: "Flux2 Dev NVFP4 量化",
+	flux2_dev: "Flux2 Dev 标准",
+	flux1_krea_dev: "Flux1 Krea 质感模型",
+	flux1_dev_kontext: "Flux1 Kontext 图像编辑",
+	flux1_fill_dev: "Flux1 Fill 局部重绘",
+	flux1_canny_dev: "Flux1 Canny 边缘控制",
+	flux1_dev: "Flux1 Dev 基础模型",
+	flux1_schnell: "Flux1 Schnell 快速模型",
+	z_image_turbo: "Z-Image Turbo 快速",
+	z_image: "Z-Image 标准",
+	zimage_turbo_nsfw: "Z-Image Turbo NSFW",
+	zimage_nsfw: "Z-Image NSFW",
+	newbie: "Newbie Image 实验模型",
+	ovis: "Ovis Image 多模态",
+	hidream_i1_full: "HiDream I1 Full 高质量",
+	hidream_i1_dev: "HiDream I1 Dev 平衡版",
+	hidream_i1_fast: "HiDream I1 Fast 快速版",
+	hidream_e1: "HiDream E1 编辑模型",
+	omnigen2: "OmniGen2 多图编辑",
+	wan22_i2v_high_noise: "Wan2.2 图生视频高噪阶段",
+	wan22_i2v_low_noise: "Wan2.2 图生视频低噪阶段",
+	wan22_fun_camera: "Wan2.2 Fun Camera 相机控制",
+	wan22_fun_control: "Wan2.2 Fun Control 控制视频",
+	wan22_fun_inpaint: "Wan2.2 Fun Inpaint 视频补绘",
+	wan22_t2v: "Wan2.2 文生视频",
+	wan22_s2v: "Wan2.2 声音生视频",
+	wan22_ti2v: "Wan2.2 图文生视频",
+	wan22_animate: "Wan2.2 动画驱动",
+	wan22_remix: "Wan2.2 Remix 重混",
+	wan21_t2v: "Wan2.1 文生视频",
+	wan21_i2v: "Wan2.1 图生视频",
+	ltx23_dev: "LTX 2.3 Dev 视频",
+	ltx23: "LTX 2.3 视频",
+	"bytedance-uso": "ByteDance USO 角色/主体一致性",
+};
+function templateLabel(preset) {
+	const id = String(preset?.id || "未命名模板");
+	const desc = String(preset?.displayName || preset?.description || TEMPLATE_CHINESE_DESCRIPTIONS[id] || "").trim();
+	return desc ? `${id} · ${desc}` : id;
+}
 function modelRelPath(folder, filename) {
-	const name = basename(filename) || filename;
+	const name = String(filename || "").replaceAll("\\", "/").replace(/^\/+/, "") || basename(filename) || filename;
 	const normalized = String(folder || "models").replaceAll("\\", "/");
 	if (normalized === "clip_vision") return `models/clip_vision/${name} 或 models/clip_visions/${name}`;
 	return `models/${normalized}/${name}`;
@@ -236,6 +331,12 @@ function shortMatch(query, values, fallback = "") {
 	const allowStemFuzzy = q.length >= 4;
 	const list = Array.isArray(values) ? values.map(String) : [];
 	if (!q) return fallback || list[0] || "";
+	const queryHasSubdir = /[\\/]/.test(String(query || ""));
+	const normalizedQuery = lower(query);
+	const queryFilename = normalizedQuery.split("/").pop();
+	const hasExactFullMatch = list.some((value) => lower(value) === normalizedQuery);
+	const exactBasenameMatches = list.filter((value) => lower(value).split("/").pop() === queryFilename);
+	if (exactBasenameMatches.length > 1 && (!queryHasSubdir || !hasExactFullMatch)) return fallback || String(query || "");
 	const ranked = list.map((value) => {
 		const text = lower(value);
 		const filename = text.split("/").pop();
@@ -263,13 +364,13 @@ function shortMatch(query, values, fallback = "") {
 		|| a.textLength - b.textLength
 		|| a.text.localeCompare(b.text, "zh-Hans-CN")
 	);
-	return ranked[0]?.value || fallback || list[0] || "";
+	return ranked[0]?.value || fallback || "";
 }
 
 function formatModelValue(value) {
 	const parts = splitClipNames(value);
-	if (parts.length > 1) return parts.map(basename).join(" + ");
-	return basename(value) || "未选择";
+	if (parts.length > 1) return parts.map((part) => String(part || "").replaceAll("/", "\\")).join(" + ");
+	return String(value || "").replaceAll("/", "\\") || "未选择";
 }
 
 function coerceWidgetValue(widget, value) {
@@ -394,33 +495,38 @@ function ensureState(node) {
 		clipTypes: ["stable_diffusion", "flux", "flux2", "qwen_image", "wan", "ltx", "ltxv", "hidream", "lumina2"],
 		presets: [],
 		loading: false,
+		loadingPromise: null,
 	};
 	return node.__gjjMBState;
 }
 
 async function refreshBackendLists(node, rerender = true) {
 	const state = ensureState(node);
-	if (state.loading) return;
+	if (state.loading) return state.loadingPromise || Promise.resolve();
 	state.loading = true;
-	try {
-		const presets = await getModelFamilyPresets();
-		state.presets = Array.isArray(presets) ? presets : [];
-		const response = await api.fetchApi(LIST_API);
-		if (response?.ok) {
-			const payload = await response.json();
-			state.folders = payload?.folders || state.folders;
-			state.unetDtypes = Array.isArray(payload?.unet_dtypes) ? payload.unet_dtypes.map(String) : state.unetDtypes;
-			state.clipDtypes = Array.isArray(payload?.clip_dtypes) ? payload.clip_dtypes.map(String) : state.clipDtypes;
-			state.clipDevices = Array.isArray(payload?.clip_devices) ? payload.clip_devices.map(String) : state.clipDevices;
-			state.vaeDtypes = Array.isArray(payload?.vae_dtypes) ? payload.vae_dtypes.map(String) : state.vaeDtypes;
-			state.clipTypes = Array.isArray(payload?.clip_types) ? payload.clip_types.map(String) : state.clipTypes;
+	state.loadingPromise = (async () => {
+		try {
+			const presets = await getModelFamilyPresets();
+			state.presets = Array.isArray(presets) ? presets : [];
+			const response = await api.fetchApi(LIST_API);
+			if (response?.ok) {
+				const payload = await response.json();
+				state.folders = payload?.folders || state.folders;
+				state.unetDtypes = Array.isArray(payload?.unet_dtypes) ? payload.unet_dtypes.map(String) : state.unetDtypes;
+				state.clipDtypes = Array.isArray(payload?.clip_dtypes) ? payload.clip_dtypes.map(String) : state.clipDtypes;
+				state.clipDevices = Array.isArray(payload?.clip_devices) ? payload.clip_devices.map(String) : state.clipDevices;
+				state.vaeDtypes = Array.isArray(payload?.vae_dtypes) ? payload.vae_dtypes.map(String) : state.vaeDtypes;
+				state.clipTypes = Array.isArray(payload?.clip_types) ? payload.clip_types.map(String) : state.clipTypes;
+			}
+		} catch (error) {
+			console.warn("[GJJ Model Bundle] 模型列表读取失败", error);
+			state.folders = state.folders || { diffusion_models: [], checkpoints: [], clip: [], vae: [], loras: [], model_patches: [], clip_vision: [], controlnet: [] };
+		} finally {
+			state.loading = false;
+			state.loadingPromise = null;
 		}
-	} catch (error) {
-		console.warn("[GJJ Model Bundle] 模型列表读取失败", error);
-		state.folders = state.folders || { diffusion_models: [], checkpoints: [], clip: [], vae: [], loras: [], model_patches: [], clip_vision: [] };
-	} finally {
-		state.loading = false;
-	}
+	})();
+	await state.loadingPromise;
 	if (rerender) renderPanel(node);
 }
 
@@ -430,7 +536,38 @@ function collectWidgetValues(node) {
 		const widget = getWidget(node, name);
 		if (widget) values[name] = widget.value;
 	}
+	sanitizeOptionalModelValues(values);
 	return values;
+}
+
+function sanitizeOptionalModelValue(value) {
+	const text = String(value ?? "").trim();
+	if (!text) return "";
+	const normalized = text.toLowerCase();
+	if (["true", "false", "1", "0", "yes", "no", "on", "off", "default", "none", "null", "undefined"].includes(normalized)) return "";
+	if ([CONTROL_NET_NONE, "未选择", "无", "不使用"].includes(text)) return "";
+	return text;
+}
+
+function sanitizeOptionalModelValues(values) {
+	if (!values || typeof values !== "object") return values;
+	values[MODEL_PATCH_WIDGET] = sanitizeOptionalModelValue(values[MODEL_PATCH_WIDGET]);
+	values[CLIP_VISION_WIDGET] = sanitizeOptionalModelValue(values[CLIP_VISION_WIDGET]);
+	for (const name of CONTROL_NET_WIDGETS) values[name] = sanitizeOptionalModelValue(values[name]);
+	return values;
+}
+
+function sanitizeControlNetValue(value) {
+	return sanitizeOptionalModelValue(value);
+}
+
+function controlNetOutputCount(node, preset) {
+	if (isCheckpointCommonPreset(preset)) return 0;
+	return controlNetOutputNeeded(node) ? 1 : 0;
+}
+
+function clearControlNetWidgets(node) {
+	for (const name of CONTROL_NET_WIDGETS) setWidgetValue(getWidget(node, name), "", false);
 }
 
 function backendWidgetValues(values) {
@@ -472,7 +609,22 @@ function valuesFromSerializedWidgets(serializedNode) {
 	const rawValues = Array.isArray(serializedNode?.widgets_values) ? serializedNode.widgets_values : [];
 	if (!rawValues.length) return {};
 	const candidates = [];
-	for (const order of [BACKEND_WIDGETS, ALL_WIDGETS]) {
+	for (const order of [
+		BACKEND_WIDGETS,
+		PRE_MULTI_CONTROL_BACKEND_WIDGETS,
+		PRE_SEPARATE_VAE_BACKEND_WIDGETS,
+		PRE_COMMON_BACKEND_WIDGETS,
+		PRE_MODEL_PATCH_TOGGLE_BACKEND_WIDGETS,
+		LEGACY_BACKEND_WIDGETS,
+		MIDDLE_CONTROL_BACKEND_WIDGETS,
+		ALL_WIDGETS,
+		PRE_MULTI_CONTROL_ALL_WIDGETS,
+		PRE_SEPARATE_VAE_ALL_WIDGETS,
+		PRE_COMMON_ALL_WIDGETS,
+		PRE_MODEL_PATCH_TOGGLE_ALL_WIDGETS,
+		LEGACY_ALL_WIDGETS,
+		MIDDLE_CONTROL_ALL_WIDGETS,
+	]) {
 		for (const offset of [0, 1]) {
 			const values = serializedValuesForOrder(rawValues, order, offset);
 			if (values) candidates.push({ values, score: scoreSerializedCandidate(values) });
@@ -490,7 +642,7 @@ function valuesFromProperties(props) {
 		if (value === undefined) value = props?.[`gjj_mb_value_${name}`];
 		if (value !== undefined) values[name] = value;
 	}
-	return values;
+	return sanitizeOptionalModelValues(values);
 }
 
 function rememberRestoredValues(node) {
@@ -539,6 +691,7 @@ function restoreWidgetValues(node, serializedNode = null) {
 		if (!widget) continue;
 		let value = preferSerialized ? serializedValues[name] : propertyValues[name];
 		if (value === undefined) value = preferSerialized ? propertyValues[name] : serializedValues[name];
+		if ([MODEL_PATCH_WIDGET, CLIP_VISION_WIDGET, ...CONTROL_NET_WIDGETS].includes(name)) value = sanitizeOptionalModelValue(value);
 		if (value !== undefined && value !== null) widget.value = coerceWidgetValue(widget, value);
 	}
 	node.properties = node.properties || {};
@@ -609,6 +762,7 @@ function createSearchableSelect(node, name, values, onChange, opts = {}) {
 		text.textContent = missingText || (opts.format ? opts.format(raw) : formatModelValue(raw));
 		button.title = opts.title ? opts.title(raw) : raw || "未选择";
 	};
+	const optionLabel = (value) => String(opts.format ? opts.format(value) : formatModelValue(value));
 
 	const setValue = (value, trigger = true) => {
 		const next = String(value ?? "");
@@ -651,7 +805,7 @@ function createSearchableSelect(node, name, values, onChange, opts = {}) {
 			setFilter(node, name, searchText);
 			const words = splitWords(searchText);
 			const shown = optionValues.filter((value) => {
-				const hay = lower(value);
+				const hay = lower(`${value} ${optionLabel(value)}`);
 				return words.every((word) => hay.includes(word));
 			}).slice(0, 180);
 			listWrap.replaceChildren();
@@ -668,8 +822,9 @@ function createSearchableSelect(node, name, values, onChange, opts = {}) {
 				item.className = "gjj-mb-popup-item";
 				const active = currentSelectValue() === value;
 				if (active) item.classList.add("active");
-				item.textContent = `${active ? "✓ " : ""}${value}`;
-				item.title = value;
+				const label = optionLabel(value);
+				item.textContent = `${active ? "✓ " : ""}${label}`;
+				item.title = label === value ? value : `${value}\n${label}`;
 				item.addEventListener("click", (event) => {
 					event.preventDefault();
 					event.stopPropagation();
@@ -807,16 +962,18 @@ function updateBroadcastButton(node) {
 function setBroadcastEnabled(node, enabled) {
 	node.properties = node.properties || {};
 	node.properties[BROADCAST_PROPERTY] = Boolean(enabled);
+	repairOutputs(node);
 	updateBroadcastButton(node);
 	saveWidgetValues(node);
 	notifyBroadcastChanged(node);
+	refreshNode(node);
 }
 
 function createBroadcastButton(node) {
 	const button = document.createElement("button");
 	button.type = "button";
 	button.className = "gjj-mb-broadcast";
-	button.textContent = "🔍";
+	button.textContent = "⚡";
 	button.setAttribute("aria-label", "切换输出广播");
 	button.addEventListener("click", (event) => {
 		event.preventDefault();
@@ -878,6 +1035,10 @@ function isSplitBundlePreset(preset) {
 
 function isCheckpointPreset(preset) {
 	return lower(preset?.modelCategory) === "checkpoints" && !isSplitBundlePreset(preset);
+}
+
+function isCheckpointCommonPreset(preset) {
+	return String(preset?.id || "") === CHECKPOINT_COMMON_TEMPLATE_ID;
 }
 
 function activePreset(node) {
@@ -949,25 +1110,48 @@ function fluxT5Candidates(clips, expectedName) {
 	return uniqueValues(matchedPreferred, availableT5, [expectedName].filter(Boolean));
 }
 
+function defaultVaeValue(vaes) {
+	const list = Array.isArray(vaes) ? vaes.map(String).filter(Boolean) : [];
+	return list.find((name) => lower(name).includes("vae-ft-mse")) || list[0] || "";
+}
+
 function fluxClipWidgetValue(fixedClip, t5Clip) {
 	return joinClipNames([fixedClip || "clip_l.safetensors", t5Clip || "t5xxl_fp16.safetensors"]);
 }
 
 function formatFluxClipValue(value, fixedClip, fallbackT5) {
 	const t5 = fluxT5ClipNameFromValue(value) || fallbackT5 || value;
-	return basename(t5) || "选择 T5";
+	return String(t5 || "").replaceAll("/", "\\") || "选择 T5";
 }
 
 function presetLoraDefaults(preset, slot, loras = []) {
 	const rawName = String(slot.index === 1 ? preset?.lora1 || "" : preset?.lora2 || "");
 	const rawStrength = Number(slot.index === 1 ? preset?.lora1Strength ?? 1 : preset?.lora2Strength ?? 1);
+	const autoEnabled = slot.index === 1 ? preset?.lora1AutoEnabled !== false : true;
 	const strength = Number.isFinite(rawStrength) ? rawStrength : 1;
 	const name = rawName ? shortMatch(rawName, loras, rawName) : "";
 	return {
 		name,
 		strength,
-		enabled: Boolean(name) && Math.abs(strength) > 1e-5,
+		enabled: autoEnabled && Boolean(name) && Math.abs(strength) > 1e-5,
+		autoEnabled,
 	};
+}
+
+function sameModelBasename(left, right) {
+	return Boolean(left && right) && basename(left).toLowerCase() === basename(right).toLowerCase();
+}
+
+function hasModelSubdir(value) {
+	return /[\\/]/.test(String(value || ""));
+}
+
+function preferCanonicalModelPath(current, canonical) {
+	const value = String(current || "").trim();
+	const preferred = String(canonical || "").trim();
+	if (!value) return preferred;
+	if (preferred && sameModelBasename(value, preferred) && !hasModelSubdir(value) && hasModelSubdir(preferred)) return preferred;
+	return value;
 }
 
 function setPresetLoraWidgets(node, preset, loras = []) {
@@ -979,11 +1163,30 @@ function setPresetLoraWidgets(node, preset, loras = []) {
 	}
 }
 
+function modelPatchDefaultEnabled(preset) {
+	return Boolean(String(preset?.modelPatchName || "").trim());
+}
+
+function modelPatchEnabled(node, preset) {
+	return boolOf(node, MODEL_PATCH_ENABLED_WIDGET, modelPatchDefaultEnabled(preset));
+}
+
+function ensureModelPatchWidgetDefault(node, preset, modelPatches = []) {
+	const expected = String(preset?.modelPatchName || "").trim();
+	if (!expected) return;
+	const current = valueOf(node, MODEL_PATCH_WIDGET).trim();
+	if (!current) {
+		setWidgetValue(getWidget(node, MODEL_PATCH_WIDGET), shortMatch(expected, modelPatches, expected), false);
+	}
+}
+
 function ensurePresetLoraWidgetDefaults(node, preset, loras = []) {
 	for (const slot of PRESET_LORA_SLOTS) {
 		const defaults = presetLoraDefaults(preset, slot, loras);
 		if (!defaults.name) continue;
-		if (!valueOf(node, slot.name).trim()) setWidgetValue(getWidget(node, slot.name), defaults.name, false);
+		const currentName = valueOf(node, slot.name).trim();
+		const nextName = preferCanonicalModelPath(currentName, defaults.name);
+		if (nextName !== currentName) setWidgetValue(getWidget(node, slot.name), nextName, false);
 		if (!valueOf(node, slot.strength).trim()) setWidgetValue(getWidget(node, slot.strength), String(defaults.strength), false);
 	}
 }
@@ -992,7 +1195,7 @@ function readPresetLoraSlots(node, preset, loras = []) {
 	const externalControlled = presetLoraExternallyControlled(node);
 	return PRESET_LORA_SLOTS.map((slot) => {
 		const defaults = presetLoraDefaults(preset, slot, loras);
-		const name = valueOf(node, slot.name, defaults.name).trim() || defaults.name;
+		const name = preferCanonicalModelPath(valueOf(node, slot.name, defaults.name).trim(), defaults.name);
 		const strength = numberOf(node, slot.strength, defaults.strength);
 		const enabled = boolOf(node, slot.enabled, defaults.enabled);
 		const missing = enabled && name ? missingModel(name, loras) : "";
@@ -1004,11 +1207,69 @@ function readPresetLoraSlots(node, preset, loras = []) {
 			name,
 			strength,
 			enabled,
+			autoEnabled: defaults.autoEnabled,
 			missing,
 			hasDefault: Boolean(defaults.name),
 			externalControlled,
 		};
 	}).filter((item) => item.hasDefault);
+}
+
+function addHelpModelEntry(entries, label, folder, kind, value, icon = "") {
+	const text = String(value || "").trim();
+	if (!text) return;
+	entries.push({ label, folder, kind, value: text, icon });
+}
+
+function modelBundleHelpEntries(node) {
+	const state = ensureState(node);
+	const preset = activePreset(node) || {};
+	const entries = [];
+	const checkpointPreset = isCheckpointPreset(preset);
+	const checkpointCommon = isCheckpointCommonPreset(preset);
+	const fluxPreset = !checkpointPreset && isFlux1Preset(preset);
+	const mainFolder = lower(preset?.modelCategory) === "checkpoints" ? "checkpoints" : "diffusion_models";
+	addHelpModelEntry(
+		entries,
+		checkpointPreset ? "Checkpoint" : "扩散模型",
+		mainFolder,
+		checkpointPreset ? "checkpoint_model" : "diffusion",
+		valueOf(node, UNET_WIDGET) || expectedMainModelName(preset)
+	);
+	if (!checkpointPreset) {
+		const clips = state.folders?.clip || [];
+		const clipNames = fluxPreset
+			? [
+				valueOf(node, FLUX_CLIP_L_WIDGET) || fluxFixedClipName(clips, preset),
+				fluxT5ClipNameFromValue(valueOf(node, CLIP_NAME_WIDGET)) || valueOf(node, CLIP_NAME_WIDGET) || fluxT5ExpectedName(preset),
+			]
+			: (splitClipNames(valueOf(node, CLIP_NAME_WIDGET)).length ? splitClipNames(valueOf(node, CLIP_NAME_WIDGET)) : (preset?.clipNames || []));
+		clipNames.filter(Boolean).forEach((name, index) => {
+			addHelpModelEntry(entries, index ? `CLIP ${index + 1}` : "CLIP", "text_encoders", "clip", name);
+		});
+		addHelpModelEntry(entries, "VAE", "vae", "vae", valueOf(node, VAE_NAME_WIDGET) || preset?.vaeName || "");
+	}
+	if (checkpointCommon && boolOf(node, USE_SEPARATE_VAE_WIDGET, false)) {
+		addHelpModelEntry(entries, "独立VAE", "vae", "vae", valueOf(node, VAE_NAME_WIDGET), "🔴");
+	}
+	const loras = state.folders?.loras || [];
+	for (const item of readPresetLoraSlots(node, preset, loras)) {
+		if (!item.enabled) continue;
+		addHelpModelEntry(entries, `LoRA ${item.index}`, "loras", "loras", item.name);
+	}
+	if (modelPatchEnabled(node, preset)) {
+		addHelpModelEntry(entries, "模型补丁", "model_patches", "model_patch", valueOf(node, MODEL_PATCH_WIDGET) || preset?.modelPatchName || "", "🟢");
+	}
+	addHelpModelEntry(entries, "CLIP视觉", "clip_vision", "clip_vision", valueOf(node, CLIP_VISION_WIDGET) || preset?.clipVisionName || "");
+	if (!checkpointCommon) {
+		addHelpModelEntry(entries, "ControlNet", "controlnet", "controlnet", sanitizeControlNetValue(valueOf(node, CONTROL_NET_WIDGET) || preset?.controlNetName || ""), "🟦");
+	}
+	return entries;
+}
+
+function attachHelpModelProvider(node) {
+	node.__gjjHelpModelEntries = () => modelBundleHelpEntries(node);
+	node.__gjjHelpModelTreeEntries = node.__gjjHelpModelEntries;
 }
 
 function formatLoraStrength(value) {
@@ -1093,16 +1354,25 @@ function applyPreset(node, force = false) {
 	const loraList = state.folders?.loras || [];
 	const modelPatchList = state.folders?.model_patches || [];
 	const clipVisionList = uniqueValues(state.folders?.clip_vision || [], state.folders?.clip_visions || []);
+	const controlNetList = state.folders?.controlnet || [];
 	const mainExpected = expectedMainModelName(preset);
 	const preferredMainList = lower(preset?.modelCategory) === "checkpoints" ? checkpointList : unetList;
-	const unetName = isCheckpointPreset(preset)
+	const checkpointCommon = isCheckpointCommonPreset(preset);
+	const unetName = checkpointCommon
+		? (checkpointList[0] || "")
+		: isCheckpointPreset(preset)
 		? shortMatch(mainExpected, checkpointList, mainExpected)
 		: (shortMatch(preset.modelName || mainExpected, preferredMainList, "") || matchUnetForPreset(preset, preferredMainList) || mainExpected);
 	if (unetName) setWidgetValue(getWidget(node, UNET_WIDGET), unetName);
 	if (isCheckpointPreset(preset)) {
 		setWidgetValue(getWidget(node, CLIP_NAME_WIDGET), "");
 		setWidgetValue(getWidget(node, FLUX_CLIP_L_WIDGET), "");
-		setWidgetValue(getWidget(node, VAE_NAME_WIDGET), "");
+		setWidgetValue(getWidget(node, VAE_NAME_WIDGET), checkpointCommon ? defaultVaeValue(vaeList) : "");
+		setWidgetValue(getWidget(node, USE_SEPARATE_VAE_WIDGET), false, false);
+		setWidgetValue(getWidget(node, UNET_DTYPE_WIDGET), "default", false);
+		setWidgetValue(getWidget(node, CLIP_DTYPE_WIDGET), "default", false);
+		setWidgetValue(getWidget(node, CLIP_DEVICE_WIDGET), "default", false);
+		setWidgetValue(getWidget(node, VAE_DTYPE_WIDGET), "default", false);
 	} else {
 		if (isFlux1Preset(preset)) {
 			const fixedClip = fluxFixedClipName(clipList, preset);
@@ -1119,8 +1389,17 @@ function applyPreset(node, force = false) {
 	if (preset.clipType) setWidgetValue(getWidget(node, CLIP_TYPE_WIDGET), preset.clipType);
 	if (preset.modelPatchName) setWidgetValue(getWidget(node, MODEL_PATCH_WIDGET), shortMatch(preset.modelPatchName, modelPatchList, preset.modelPatchName));
 	else setWidgetValue(getWidget(node, MODEL_PATCH_WIDGET), "");
+	setWidgetValue(getWidget(node, MODEL_PATCH_ENABLED_WIDGET), modelPatchDefaultEnabled(preset), false);
 	if (preset.clipVisionName) setWidgetValue(getWidget(node, CLIP_VISION_WIDGET), shortMatch(preset.clipVisionName, clipVisionList, preset.clipVisionName));
 	else setWidgetValue(getWidget(node, CLIP_VISION_WIDGET), "");
+	if (checkpointCommon) {
+		for (const name of CONTROL_NET_WIDGETS) setWidgetValue(getWidget(node, name), "", false);
+	} else if (preset.controlNetName) {
+		setWidgetValue(getWidget(node, CONTROL_NET_WIDGET), shortMatch(preset.controlNetName, controlNetList, preset.controlNetName));
+		for (const name of EXTRA_CONTROL_NET_WIDGETS) setWidgetValue(getWidget(node, name), "", false);
+	} else {
+		for (const name of CONTROL_NET_WIDGETS) setWidgetValue(getWidget(node, name), "", false);
+	}
 	if (preset.steps != null) setWidgetValue(getWidget(node, STEPS_WIDGET), preset.steps);
 	if (preset.cfg != null) setWidgetValue(getWidget(node, CFG_WIDGET), preset.cfg);
 	if (preset.denoise != null) setWidgetValue(getWidget(node, DENOISE_WIDGET), preset.denoise);
@@ -1143,43 +1422,298 @@ function samplingOutputsOpen(node) {
 	return Boolean(node?.properties?.[SAMPLING_OUTPUTS_OPEN_PROPERTY]);
 }
 
+function outputHasLinks(output) {
+	return Array.isArray(output?.links) && output.links.length > 0;
+}
+
 function extraOutputsNeeded(node) {
 	const preset = activePreset(node);
-	return Boolean(
-		preset?.modelPatchName
-		|| preset?.clipVisionName
-		|| valueOf(node, MODEL_PATCH_WIDGET).trim()
-		|| valueOf(node, CLIP_VISION_WIDGET).trim()
-	);
+	const checkpointPreset = isCheckpointPreset(preset);
+	const manualExtraAllowed = !checkpointPreset;
+	const modelPatchValue = sanitizeOptionalModelValue(valueOf(node, MODEL_PATCH_WIDGET));
+	const clipVisionValue = sanitizeOptionalModelValue(valueOf(node, CLIP_VISION_WIDGET));
+	const needsModelPatch = modelPatchEnabled(node, preset)
+		&& Boolean(preset?.modelPatchName || (manualExtraAllowed && modelPatchValue));
+	const needsClipVision = Boolean(preset?.clipVisionName || (manualExtraAllowed && clipVisionValue));
+	return needsModelPatch || needsClipVision;
+}
+
+function pruneInactiveOptionalOutputs(node, preset) {
+	if (!node || !preset) return;
+	const checkpointPreset = isCheckpointPreset(preset);
+	if (checkpointPreset && !preset?.modelPatchName) {
+		setWidgetValue(getWidget(node, MODEL_PATCH_WIDGET), "", false);
+		setWidgetValue(getWidget(node, MODEL_PATCH_ENABLED_WIDGET), false, false);
+	}
+	if (checkpointPreset && !preset?.clipVisionName) {
+		setWidgetValue(getWidget(node, CLIP_VISION_WIDGET), "", false);
+	}
+	if (isCheckpointCommonPreset(preset)) {
+		clearControlNetWidgets(node);
+		return;
+	}
+	if (!isCheckpointCommonPreset(preset)) {
+		if (!preset?.controlNetName) setWidgetValue(getWidget(node, CONTROL_NET_WIDGET), "", false);
+		for (const name of EXTRA_CONTROL_NET_WIDGETS) setWidgetValue(getWidget(node, name), "", false);
+	}
+}
+
+function controlNetOutputNeeded(node) {
+	const preset = activePreset(node);
+	if (isCheckpointCommonPreset(preset)) return false;
+	return Boolean(preset?.controlNetName || sanitizeControlNetValue(valueOf(node, CONTROL_NET_WIDGET)).trim());
 }
 
 function activeOutputMeta(node) {
 	const meta = [...CORE_OUTPUT_META];
-	if (extraOutputsNeeded(node) || samplingOutputsOpen(node)) meta.push(...EXTRA_OUTPUT_META);
+	const preset = activePreset(node);
+	const controlCount = controlNetOutputCount(node, preset);
+	const checkpointPreset = isCheckpointPreset(preset);
+	const modelPatchVisible = extraOutputsNeeded(node)
+		&& modelPatchEnabled(node, preset)
+		&& Boolean(preset?.modelPatchName || (!checkpointPreset && sanitizeOptionalModelValue(valueOf(node, MODEL_PATCH_WIDGET))));
+	const clipVisionVisible = extraOutputsNeeded(node)
+		&& Boolean(preset?.clipVisionName || (!checkpointPreset && sanitizeOptionalModelValue(valueOf(node, CLIP_VISION_WIDGET))));
+	if (controlCount > 0) meta.push(...CONTROL_OUTPUT_META.slice(0, controlCount));
+	if (modelPatchVisible) meta.push(EXTRA_OUTPUT_META[0]);
+	if (clipVisionVisible) meta.push(EXTRA_OUTPUT_META[1]);
 	if (samplingOutputsOpen(node)) meta.push(...SAMPLING_OUTPUT_META);
 	return meta;
 }
 
 function samplingOutputsHaveLinks(node) {
-	return (node?.outputs || []).slice(CORE_OUTPUT_META.length + EXTRA_OUTPUT_META.length).some((output) => Array.isArray(output?.links) && output.links.length > 0);
+	const samplingIds = new Set(SAMPLING_OUTPUT_META.map((meta) => meta.id));
+	return (node?.outputs || []).some((output, index) => samplingIds.has(inferOutputSlotId(node, output, index)) && outputHasLinks(output));
+}
+
+function removeGraphLink(linkId) {
+	const link = app.graph?.links?.[linkId];
+	const targetId = graphLinkTargetId(link);
+	const targetSlot = graphLinkTargetSlot(link);
+	const targetNode = link && (app.graph?.getNodeById?.(targetId) || app.graph?._nodes_by_id?.[targetId]);
+	const targetInput = targetNode?.inputs?.[targetSlot];
+	if (targetInput?.link === linkId) targetInput.link = null;
+	if (targetInput && String(targetInput.link) === String(linkId)) targetInput.link = null;
+	try { app.graph?.removeLink?.(linkId); } catch (_) {}
+	try { if (app.graph?.links?.[linkId]) delete app.graph.links[linkId]; } catch (_) {}
 }
 
 function disconnectOutputLinks(node, index) {
 	const output = node?.outputs?.[index];
 	const links = Array.isArray(output?.links) ? [...output.links] : [];
 	for (const linkId of links) {
-		try { app.graph?.removeLink?.(linkId); } catch (_) {}
+		removeGraphLink(linkId);
 	}
 	if (output) output.links = null;
 }
 
+function outputSlotId(output) {
+	return String(output?.gjj_slot_id || output?.gjj_slot_class || "");
+}
+
+function inferOutputSlotId(node, output, index, metaList = null) {
+	const existing = outputSlotId(output);
+	if (existing) return existing;
+	const type = String(output?.type || "").toUpperCase();
+	const text = [
+		output?.name,
+		output?.label,
+		output?.localized_name,
+		output?.display_name,
+	].map((item) => String(item || "")).join(" ").toLowerCase();
+	const sameIndexMeta = Array.isArray(metaList) ? metaList[index] : null;
+	if (sameIndexMeta && String(sameIndexMeta.type || "").toUpperCase() === type) return sameIndexMeta.id;
+	if (index === 0 && type === "MODEL") return "model";
+	if (index === 1 && type === "CLIP") return "clip";
+	if (index === 2 && type === "VAE") return "vae";
+	if (type === "MODEL_PATCH" || text.includes("model_patch") || text.includes("模型补丁")) return "model_patch";
+	if (type === "CLIP_VISION" || text.includes("clip视觉") || text.includes("clip_vision")) return "clip_vision";
+	if (type === "INT" || text.includes("steps") || text.includes("步数")) return "steps";
+	if (type === "FLOAT" && (text.includes("cfg") || text.includes("引导"))) return "cfg";
+	if (type === "FLOAT" && (text.includes("denoise") || text.includes("降噪"))) return "denoise";
+	if (type === "CONTROL_NET" || text.includes("controlnet") || text.includes("control_net")) {
+		const match = text.match(/(?:controlnet|control_net)\s*(\d+)/i);
+		const number = match ? Number(match[1]) : Math.max(1, index - CORE_OUTPUT_META.length + 1);
+		return `control_net_${Math.max(1, Math.min(MAX_CONTROL_NET_SLOTS, number))}`;
+	}
+	const sameTypeMeta = Array.isArray(metaList)
+		? metaList.find((meta) => String(meta?.type || "").toUpperCase() === type)
+		: null;
+	return sameTypeMeta?.id || "";
+}
+
+function linkedOutputIds(node, metaList = null) {
+	const ids = new Set();
+	for (let index = 0; index < (node?.outputs?.length || 0); index += 1) {
+		const output = node.outputs[index];
+		if (!outputHasLinks(output)) continue;
+		const slotId = inferOutputSlotId(node, output, index, metaList);
+		if (slotId) ids.add(slotId);
+	}
+	return ids;
+}
+
+function expandOutputMetaForLinks(node, metaList) {
+	const linkedIds = linkedOutputIds(node, metaList);
+	if (!linkedIds.size) return metaList;
+	const wanted = new Set((metaList || []).map((meta) => meta.id));
+	for (const id of linkedIds) {
+		if (OUTPUT_META_BY_ID.has(id)) wanted.add(id);
+	}
+	const hasLinkedSampling = SAMPLING_OUTPUT_META.some((meta) => linkedIds.has(meta.id));
+	if (hasLinkedSampling) {
+		for (const meta of SAMPLING_OUTPUT_META) wanted.add(meta.id);
+	}
+	const result = [...CORE_OUTPUT_META];
+	for (const meta of CONTROL_OUTPUT_META) if (wanted.has(meta.id)) result.push(meta);
+	for (const meta of EXTRA_OUTPUT_META) if (wanted.has(meta.id)) result.push(meta);
+	for (const meta of SAMPLING_OUTPUT_META) if (wanted.has(meta.id)) result.push(meta);
+	return result;
+}
+
+function graphLinkOriginId(link) {
+	return Array.isArray(link) ? link[1] : link?.origin_id;
+}
+
+function graphLinkOriginSlot(link) {
+	return Number(Array.isArray(link) ? link[2] : link?.origin_slot);
+}
+
+function graphLinkTargetId(link) {
+	return Array.isArray(link) ? link[3] : link?.target_id;
+}
+
+function graphLinkTargetSlot(link) {
+	return Number(Array.isArray(link) ? link[4] : link?.target_slot);
+}
+
+function setGraphLinkOrigin(link, nodeId, slotIndex, type) {
+	if (!link) return;
+	if (Array.isArray(link)) {
+		link[1] = nodeId;
+		link[2] = slotIndex;
+		link[5] = type;
+		return;
+	}
+	link.origin_id = nodeId;
+	link.origin_slot = slotIndex;
+	link.type = type;
+}
+
+function cleanupDanglingOutputLinks(node) {
+	if (!node || !app.graph?.links) return;
+	for (const output of node.outputs || []) {
+		if (!Array.isArray(output.links)) output.links = [];
+		output.links = output.links.filter((linkId) => {
+			const link = app.graph?.links?.[linkId];
+			if (!link || Number(graphLinkOriginId(link)) !== Number(node.id)) return false;
+			const slot = graphLinkOriginSlot(link);
+			return Number.isInteger(slot) && node.outputs?.[slot] === output;
+		});
+	}
+	for (const [key, link] of Object.entries(app.graph.links || {})) {
+		if (!link || Number(graphLinkOriginId(link)) !== Number(node.id)) continue;
+		const linkId = link.id ?? key;
+		const slot = graphLinkOriginSlot(link);
+		const output = Number.isInteger(slot) ? node.outputs?.[slot] : null;
+		if (!output) {
+			removeGraphLink(linkId);
+			continue;
+		}
+		if (!Array.isArray(output.links)) output.links = [];
+		if (!output.links.some((id) => String(id) === String(linkId))) output.links.push(linkId);
+	}
+}
+
+function sameOutputShape(node, metaList) {
+	if (!Array.isArray(node?.outputs) || node.outputs.length !== metaList.length) return false;
+	for (let index = 0; index < metaList.length; index += 1) {
+		const output = node.outputs[index];
+		const meta = metaList[index];
+		if (String(output?.type || "") !== String(meta.type || "")) return false;
+		const slotId = outputSlotId(output);
+		if (slotId && slotId !== meta.id) return false;
+	}
+	return true;
+}
+
+function collectSemanticOutputLinks(node, metaList = null) {
+	const saved = [];
+	for (let index = 0; index < (node?.outputs?.length || 0); index += 1) {
+		const output = node.outputs[index];
+		const slotId = inferOutputSlotId(node, output, index, metaList);
+		for (const linkId of output?.links || []) {
+			const link = app.graph?.links?.[linkId];
+			if (!link) {
+				saved.push({ linkId, link: null, slotId, sourceIndex: index, sourceType: output?.type || "", targetId: null, targetSlot: null });
+				continue;
+			}
+			saved.push({
+				linkId,
+				link,
+				slotId,
+				sourceIndex: index,
+				sourceType: output?.type || link?.type || "",
+				targetId: graphLinkTargetId(link),
+				targetSlot: graphLinkTargetSlot(link),
+			});
+		}
+	}
+	return saved;
+}
+
+function detachSemanticOutputLinks(node, savedLinks) {
+	const ids = new Set((savedLinks || []).map((item) => item.linkId));
+	for (const output of node?.outputs || []) {
+		if (Array.isArray(output?.links)) output.links = output.links.filter((linkId) => !ids.has(linkId));
+	}
+	for (const item of savedLinks || []) {
+		const targetNode = app.graph?.getNodeById?.(item.targetId) || app.graph?._nodes_by_id?.[item.targetId];
+		const targetInput = targetNode?.inputs?.[item.targetSlot];
+		if (targetInput?.link === item.linkId) targetInput.link = null;
+	}
+}
+
+function restoreSemanticOutputLinks(node, savedLinks) {
+	const bySlotId = new Map();
+	for (let index = 0; index < (node?.outputs?.length || 0); index += 1) {
+		const slotId = inferOutputSlotId(node, node.outputs[index], index);
+		if (slotId) bySlotId.set(slotId, index);
+	}
+	for (const item of savedLinks || []) {
+		let index = bySlotId.get(item.slotId);
+		if (!Number.isInteger(index) && Number.isInteger(item.sourceIndex)) {
+			const fallback = node.outputs?.[item.sourceIndex];
+			if (fallback && String(fallback.type || "").toUpperCase() === String(item.sourceType || "").toUpperCase()) {
+				index = item.sourceIndex;
+			}
+		}
+		const output = Number.isInteger(index) ? node.outputs[index] : null;
+		if (!output || !item.link) {
+			removeGraphLink(item.linkId);
+			continue;
+		}
+		const type = String(output.type || item.link.type || "*");
+		setGraphLinkOrigin(item.link, node.id, index, type);
+		app.graph.links = app.graph.links || {};
+		app.graph.links[item.linkId] = item.link;
+		if (!Array.isArray(output.links)) output.links = [];
+		if (!output.links.includes(item.linkId)) output.links.push(item.linkId);
+		const targetNode = app.graph?.getNodeById?.(item.targetId) || app.graph?._nodes_by_id?.[item.targetId];
+		const targetInput = targetNode?.inputs?.[item.targetSlot];
+		if (targetInput) targetInput.link = item.linkId;
+	}
+}
+
 function outputFromMeta(meta) {
+	const visible = meta.visible !== false;
+	const label = visible ? meta.label : "";
 	return {
-		name: meta.label,
+		name: label,
 		type: meta.type,
 		links: null,
-		localized_name: meta.label,
-		label: meta.label,
+		localized_name: label,
+		label,
 		gjj_slot_id: meta.id,
 		gjj_slot_class: meta.id,
 		gjj_output_kind: meta.kind,
@@ -1213,16 +1747,18 @@ function migrateLegacySamplingOutputs(node) {
 	node.__gjjMBExtraOutputMigrationDone = true;
 }
 
-function ensureOutputCount(node, count) {
+function ensureOutputCount(node, metaList) {
 	if (!Array.isArray(node?.outputs)) return;
+	const count = metaList.length;
 	while (node.outputs.length > count) {
 		const index = node.outputs.length - 1;
+		if (outputHasLinks(node.outputs[index])) break;
 		disconnectOutputLinks(node, index);
 		if (typeof node.removeOutput === "function") node.removeOutput(index);
 		else node.outputs.splice(index, 1);
 	}
 	while (node.outputs.length < count) {
-		const meta = OUTPUT_META[node.outputs.length] || CORE_OUTPUT_META[0];
+		const meta = metaList[node.outputs.length] || OUTPUT_META[node.outputs.length] || CORE_OUTPUT_META[0];
 		if (typeof node.addOutput === "function") node.addOutput(meta.label, meta.type);
 		else node.outputs.push(outputFromMeta(meta));
 	}
@@ -1232,11 +1768,19 @@ function repairOutputs(node) {
 	if (!Array.isArray(node?.outputs)) return;
 	node.properties = node.properties || {};
 	migrateLegacySamplingOutputs(node);
-	if (node.properties[SAMPLING_OUTPUTS_OPEN_PROPERTY] === undefined && samplingOutputsHaveLinks(node)) {
+	const preset = activePreset(node);
+	pruneInactiveOptionalOutputs(node, preset);
+	if (
+		node.properties[SAMPLING_OUTPUTS_OPEN_PROPERTY] === undefined
+		&& samplingOutputsHaveLinks(node)
+	) {
 		node.properties[SAMPLING_OUTPUTS_OPEN_PROPERTY] = true;
 	}
-	const metaList = activeOutputMeta(node);
-	ensureOutputCount(node, metaList.length);
+	const metaList = expandOutputMetaForLinks(node, activeOutputMeta(node));
+	const needsRemap = !sameOutputShape(node, metaList);
+	const semanticLinks = needsRemap ? collectSemanticOutputLinks(node, metaList) : [];
+	if (needsRemap) detachSemanticOutputLinks(node, semanticLinks);
+	ensureOutputCount(node, metaList);
 	for (let index = 0; index < Math.min(metaList.length, node.outputs.length); index += 1) {
 		const meta = metaList[index];
 		const output = node.outputs[index];
@@ -1245,12 +1789,20 @@ function repairOutputs(node) {
 		output.localized_name = meta.label;
 		output.label = meta.label;
 		output.type = meta.type;
+		output.hidden = false;
+		output.visible = true;
+		output.disabled = false;
+		output.not_show = false;
 		output.gjj_slot_id = meta.id;
 		output.gjj_slot_class = meta.id;
 		output.gjj_output_kind = meta.kind;
 		output.gjj_output_type = meta.type;
+		output.gjj_hidden_output = false;
 		output.slot_index = index;
+		if (output.options && typeof output.options === "object") output.options.hidden = false;
 	}
+	if (needsRemap) restoreSemanticOutputLinks(node, semanticLinks);
+	cleanupDanglingOutputLinks(node);
 }
 
 function updateSamplingOutputButton(node) {
@@ -1260,9 +1812,10 @@ function updateSamplingOutputButton(node) {
 	button.dataset.value = open ? "true" : "false";
 	button.classList.toggle("on", open);
 	button.setAttribute("aria-pressed", String(open));
+	button.disabled = false;
 	button.title = open
-		? "采样参数输出口已打开：显示模型补丁、CLIP视觉、步数、CFG、降噪输出。"
-		: "采样参数输出口已关闭：默认只显示模型、CLIP、VAE；模板需要时会显示模型补丁和CLIP视觉。";
+		? "采样参数输出口已打开：显示步数、CFG、降噪输出。"
+		: "采样参数输出口已关闭：默认只显示模型、CLIP、VAE；点开后显示步数、CFG、降噪。";
 }
 
 function setSamplingOutputsOpen(node, open) {
@@ -1337,6 +1890,8 @@ function buildDom(node) {
 		}
 		.gjj-mb-lora-row { grid-template-columns:88px minmax(0,1fr) 0; }
 		.gjj-mb-lora-controls { display:grid; grid-template-columns:34px minmax(0,1fr) 62px; gap:6px; min-width:0; pointer-events:none; }
+		.gjj-mb-patch-row { grid-template-columns:88px minmax(0,1fr) 0; }
+		.gjj-mb-patch-controls { display:grid; grid-template-columns:34px minmax(0,1fr); gap:6px; min-width:0; pointer-events:none; }
 		.gjj-mb-lora-toggle,
 		.gjj-mb-lora-strength {
 			width:100%; height:28px; min-width:0; border:1px solid #33464e; border-radius:7px;
@@ -1351,7 +1906,8 @@ function buildDom(node) {
 		}
 		.gjj-mb-lora-strength { padding:3px 5px; background:#0b1418; color:#edf4f4; }
 		.gjj-mb-lora-row.off .gjj-mb-combo-button,
-		.gjj-mb-lora-row.off .gjj-mb-lora-strength { opacity:.48; }
+		.gjj-mb-lora-row.off .gjj-mb-lora-strength,
+		.gjj-mb-patch-row.off .gjj-mb-combo-button { opacity:.48; }
 		.gjj-mb-info-row.missing .gjj-mb-info { border-color:#ef4444; background:#3a1518; color:#fecaca; font-weight:800; }
 		.gjj-mb-refresh:hover, .gjj-mb-broadcast:hover, .gjj-mb-output-toggle:hover, .gjj-mb-gear:hover, .gjj-mb-combo-button:hover, .gjj-mb-lora-toggle:hover { border-color:#6aa6b8; background:#2c3b43; }
 		.gjj-mb-combo-button.missing { border-color:#ef4444; background:#3a1518; color:#fecaca; }
@@ -1466,6 +2022,98 @@ function makeModelRow(node, labelText, widgetName, values, settingsKey, settings
 	return [row, hasSettings && isSettingsOpen(node, settingsKey) ? createParamPanel(settingsChildren) : null];
 }
 
+function makeModelPatchRow(node, enabled, values, opts = {}) {
+	const row = document.createElement("div");
+	row.className = "gjj-mb-row gjj-mb-patch-row";
+	row.classList.toggle("missing", enabled && !!opts.missing);
+	row.classList.toggle("off", !enabled);
+
+	const label = document.createElement("div");
+	label.className = "gjj-mb-label";
+	label.textContent = "🟢 模型补丁";
+	label.title = enabled
+		? "启用后加载 MODEL_PATCH，并从模型补丁输出口输出。"
+		: "关闭后不加载补丁，模型补丁输出为空。";
+
+	const controls = document.createElement("div");
+	controls.className = "gjj-mb-patch-controls";
+
+	const toggle = document.createElement("button");
+	toggle.type = "button";
+	toggle.className = `gjj-mb-lora-toggle ${enabled ? "on" : ""}`;
+	toggle.textContent = enabled ? "开" : "关";
+	toggle.title = enabled ? "点击关闭模型补丁" : "点击启用模型补丁";
+	toggle.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		setWidgetValue(getWidget(node, MODEL_PATCH_ENABLED_WIDGET), !enabled);
+		saveWidgetValues(node);
+		renderPanel(node);
+	});
+	protect(toggle);
+
+	const select = createSearchableSelect(
+		node,
+		MODEL_PATCH_WIDGET,
+		values,
+		() => {
+			saveWidgetValues(node);
+			renderPanel(node);
+		},
+		opts.select || {}
+	);
+
+	controls.append(toggle, select);
+	const spacer = Object.assign(document.createElement("div"), { className: "gjj-mb-spacer" });
+	row.append(label, controls, spacer);
+	return row;
+}
+
+function makeToggleModelRow(node, labelText, toggleWidget, modelWidget, enabled, values, opts = {}) {
+	const row = document.createElement("div");
+	row.className = "gjj-mb-row gjj-mb-patch-row";
+	row.classList.toggle("missing", enabled && !!opts.missing);
+	row.classList.toggle("off", !enabled);
+
+	const label = document.createElement("div");
+	label.className = "gjj-mb-label";
+	label.textContent = labelText;
+	label.title = opts.title || labelText;
+
+	const controls = document.createElement("div");
+	controls.className = "gjj-mb-patch-controls";
+
+	const toggle = document.createElement("button");
+	toggle.type = "button";
+	toggle.className = `gjj-mb-lora-toggle ${enabled ? "on" : ""}`;
+	toggle.textContent = enabled ? "开" : "关";
+	toggle.title = enabled ? "当前使用独立 VAE；点击改用 checkpoint 自带 VAE。" : "当前使用 checkpoint 自带 VAE；点击改用独立 VAE。";
+	toggle.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		setWidgetValue(getWidget(node, toggleWidget), !enabled);
+		saveWidgetValues(node);
+		renderPanel(node);
+	});
+	protect(toggle);
+
+	const select = createSearchableSelect(
+		node,
+		modelWidget,
+		values,
+		() => {
+			saveWidgetValues(node);
+			renderPanel(node);
+		},
+		opts.select || {}
+	);
+
+	controls.append(toggle, select);
+	const spacer = Object.assign(document.createElement("div"), { className: "gjj-mb-spacer" });
+	row.append(label, controls, spacer);
+	return row;
+}
+
 function makeInfoRow(labelText, text, opts = {}) {
 	const row = document.createElement("div");
 	row.className = "gjj-mb-row gjj-mb-info-row";
@@ -1494,7 +2142,9 @@ function makePresetLoraRow(node, item, loras) {
 	label.textContent = PRESET_LORA_SLOTS.length > 1 ? `🟠 LoRA ${item.index}` : "🟠 预设LoRA";
 	label.title = item.externalControlled
 		? "已接入「使用LoRA」输入，模板 LoRA 是否启用由外部布尔值控制。"
-		: (item.enabled ? "模板自带 LoRA，会在模型加载后自动叠加。" : "该模板 LoRA 已关闭。");
+		: (!item.autoEnabled && !item.enabled
+			? "该模板建议把 LoRA 外接到 MODEL 后再使用，加载器内部默认不叠加。"
+			: (item.enabled ? "模板自带 LoRA，会在模型加载后自动叠加。" : "该模板 LoRA 已关闭。"));
 
 	const controls = document.createElement("div");
 	controls.className = "gjj-mb-lora-controls";
@@ -1528,7 +2178,7 @@ function makePresetLoraRow(node, item, loras) {
 		{
 			placeholder: "过滤 LoRA",
 			format: formatModelValue,
-			missingText: item.missing ? `缺失：${basename(item.missing)}` : "",
+			missingText: item.missing ? `缺失：${formatModelValue(item.missing)}` : "",
 			title: (value) => item.missing
 				? `模板期望：${value || item.name}\n请放到 ${modelRelPath("loras", item.missing)}`
 				: value,
@@ -1558,9 +2208,12 @@ function makePresetLoraRow(node, item, loras) {
 function renderPanel(node) {
 	const state = ensureState(node);
 	if (!state.folders) {
-		refreshBackendLists(node, false).finally(() => renderPanel(node));
+		if (!state.loading) refreshBackendLists(node, true);
 		return;
 	}
+	if (node.__gjjMBRendering) return;
+	node.__gjjMBRendering = true;
+	try {
 	const content = node.__gjjMBContent;
 	if (!content) return;
 
@@ -1577,6 +2230,7 @@ function renderPanel(node) {
 	const loras = state.folders?.loras || [];
 	const modelPatches = state.folders?.model_patches || [];
 	const clipVisions = uniqueValues(state.folders?.clip_vision || [], state.folders?.clip_visions || []);
+	const controlnets = state.folders?.controlnet || [];
 	for (const [name, values] of [
 		[UNET_DTYPE_WIDGET, state.unetDtypes],
 		[CLIP_DTYPE_WIDGET, state.clipDtypes],
@@ -1596,13 +2250,27 @@ function renderPanel(node) {
 	sanitizeChoiceValue(node, VAE_DTYPE_WIDGET, state.vaeDtypes, "default");
 	sanitizeChoiceValue(node, CLIP_TYPE_WIDGET, state.clipTypes, preset?.clipType || "stable_diffusion");
 	const checkpointPreset = isCheckpointPreset(preset);
+	const checkpointCommon = isCheckpointCommonPreset(preset);
 	const fluxPreset = !checkpointPreset && isFlux1Preset(preset);
 	const presetMainCategory = lower(preset?.modelCategory);
 	const mainValues = checkpointPreset || presetMainCategory === "checkpoints" ? checkpoints : unets;
 	const mainFolder = lower(preset?.modelCategory) === "checkpoints" ? "checkpoints" : "diffusion_models";
-	const unetExpected = preset ? expectedMainModelName(preset) : "";
-	const unetMissing = preset ? missingModel(unetExpected, mainValues) : "";
+	for (const name of [MODEL_PATCH_WIDGET, CLIP_VISION_WIDGET, ...CONTROL_NET_WIDGETS]) {
+		const current = valueOf(node, name);
+		const cleaned = sanitizeOptionalModelValue(current);
+		if (current !== cleaned) setWidgetValue(getWidget(node, name), cleaned, false);
+	}
+	if (checkpointCommon) {
+		const currentCheckpoint = valueOf(node, UNET_WIDGET).trim();
+		if (checkpoints.length && (!currentCheckpoint || !checkpoints.includes(currentCheckpoint))) setWidgetValue(getWidget(node, UNET_WIDGET), checkpoints[0], false);
+		if (!valueOf(node, VAE_NAME_WIDGET).trim() && vaes.length) setWidgetValue(getWidget(node, VAE_NAME_WIDGET), defaultVaeValue(vaes), false);
+		clearControlNetWidgets(node);
+	}
+	pruneInactiveOptionalOutputs(node, preset);
+	const unetExpected = preset && !checkpointCommon ? expectedMainModelName(preset) : "";
+	const unetMissing = preset && !checkpointCommon ? missingModel(unetExpected, mainValues) : "";
 	if (preset) ensurePresetLoraWidgetDefaults(node, preset, loras);
+	if (preset) ensureModelPatchWidgetDefault(node, preset, modelPatches);
 	if (fluxPreset) {
 		const defaultFixedClip = fluxFixedClipName(clips, preset);
 		if (!valueOf(node, FLUX_CLIP_L_WIDGET).trim()) setWidgetValue(getWidget(node, FLUX_CLIP_L_WIDGET), defaultFixedClip, false);
@@ -1620,13 +2288,23 @@ function renderPanel(node) {
 	const clipValues = fluxPreset ? uniqueValues([fluxT5Current].filter(Boolean), fluxT5Candidates(clips, fluxT5Expected)) : clips;
 	const clipMissing = checkpointPreset ? [] : clipExpected.map((name) => missingModel(name, clips)).filter(Boolean);
 	const vaeExpected = preset?.vaeName || "";
-	const vaeMissing = !checkpointPreset && vaeExpected ? missingModel(vaeExpected, vaes) : "";
+	const separateVaeOn = checkpointCommon && boolOf(node, USE_SEPARATE_VAE_WIDGET, false);
+	const separateVaeCurrent = valueOf(node, VAE_NAME_WIDGET) || defaultVaeValue(vaes);
+	const vaeMissing = checkpointCommon
+		? (separateVaeOn && separateVaeCurrent ? missingModel(separateVaeCurrent, vaes) : "")
+		: (!checkpointPreset && vaeExpected ? missingModel(vaeExpected, vaes) : "");
 	const presetLoras = readPresetLoraSlots(node, preset, loras);
 	const loraMissing = presetLoras.map((item) => item.missing).filter(Boolean);
 	const modelPatchExpected = preset?.modelPatchName || "";
-	const modelPatchMissing = modelPatchExpected ? missingModel(modelPatchExpected, modelPatches) : "";
+	const modelPatchOn = modelPatchEnabled(node, preset);
+	const modelPatchCurrent = sanitizeOptionalModelValue(valueOf(node, MODEL_PATCH_WIDGET)) || modelPatchExpected;
+	const modelPatchMissing = modelPatchOn && modelPatchCurrent ? missingModel(modelPatchCurrent, modelPatches) : "";
 	const clipVisionExpected = preset?.clipVisionName || "";
-	const clipVisionMissing = clipVisionExpected ? missingModel(clipVisionExpected, clipVisions) : "";
+	const clipVisionCurrent = sanitizeOptionalModelValue(valueOf(node, CLIP_VISION_WIDGET));
+	const clipVisionMissing = (clipVisionExpected || clipVisionCurrent) ? missingModel(clipVisionCurrent || clipVisionExpected, clipVisions) : "";
+	const controlNetExpected = preset?.controlNetName || "";
+	const controlNetCurrent = sanitizeOptionalModelValue(valueOf(node, CONTROL_NET_WIDGET));
+	const controlNetMissing = (controlNetExpected || controlNetCurrent) ? missingModel(controlNetCurrent || controlNetExpected, controlnets) : "";
 	const clipMissingText = clipMissing.length ? `缺失：${clipMissing.map(basename).join(" + ")}` : "";
 
 	content.replaceChildren();
@@ -1668,6 +2346,11 @@ function renderPanel(node) {
 			createSelectSetting(node, UNET_DTYPE_WIDGET, "UNET精度", state.unetDtypes),
 		],
 		(value) => {
+			if (checkpointCommon) {
+				saveWidgetValues(node);
+				renderPanel(node);
+				return;
+			}
 			const matched = matchModelFamilyPreset(value, allPresets(node));
 			if (matched?.id) {
 				setTemplateId(node, matched.id);
@@ -1697,9 +2380,40 @@ function renderPanel(node) {
 	}
 
 	if (checkpointPreset) {
-		content.appendChild(makeInfoRow("🟡 CLIP/VAE", "由 checkpoint 一并输出", {
-			title: "当前模板使用 CheckpointLoaderSimple 等效路径，CLIP 与 VAE 跟随 checkpoint 输出。",
+		content.appendChild(makeInfoRow("🟡 CLIP", "由 checkpoint 输出", {
+			title: "Checkpoint 预设固定使用 checkpoint 自带 CLIP，不单独加载 CLIP 模型。",
 		}));
+		if (checkpointCommon) {
+			const currentVae = separateVaeCurrent || defaultVaeValue(vaes);
+			if (currentVae && valueOf(node, VAE_NAME_WIDGET) !== currentVae) setWidgetValue(getWidget(node, VAE_NAME_WIDGET), currentVae, false);
+			content.appendChild(makeToggleModelRow(
+				node,
+				"🔴 独立VAE",
+				USE_SEPARATE_VAE_WIDGET,
+				VAE_NAME_WIDGET,
+				separateVaeOn,
+				uniqueValues([currentVae].filter(Boolean), vaes),
+				{
+					missing: !!vaeMissing,
+					title: separateVaeOn
+						? "开：加载下拉选择的独立 VAE，替换 checkpoint 自带 VAE。"
+						: "关：使用 checkpoint 自带 VAE；下拉值会保留，方便随时切换。",
+					select: {
+						placeholder: "过滤 VAE",
+						format: formatModelValue,
+						missingText: vaeMissing ? `缺失：${formatModelValue(vaeMissing)}` : "",
+						title: (value) => vaeMissing
+							? `独立 VAE：${value || currentVae}\n请放到 ${modelRelPath("vae", vaeMissing)}`
+							: (separateVaeOn ? value : `当前未启用，实际使用 checkpoint 自带 VAE。\n候选：${value}`),
+					},
+				}
+			));
+			if (vaeMissing) content.appendChild(createMissingModelHint("vae", vaeMissing));
+		} else {
+			content.appendChild(makeInfoRow("🔴 VAE", "由 checkpoint 输出", {
+				title: "当前模板使用 CheckpointLoaderSimple 等效路径，VAE 跟随 checkpoint 输出。",
+			}));
+		}
 	}
 
 	if (!checkpointPreset) {
@@ -1752,7 +2466,7 @@ function renderPanel(node) {
 		for (const missing of clipMissing) content.appendChild(createMissingModelHint("clip", missing));
 
 		if (fluxPreset) {
-			content.appendChild(makeInfoRow("🔴 VAE", basename(valueOf(node, VAE_NAME_WIDGET) || vaeExpected || "ae.safetensors"), {
+			content.appendChild(makeInfoRow("🔴 VAE", formatModelValue(valueOf(node, VAE_NAME_WIDGET) || vaeExpected || "ae.safetensors"), {
 				missing: !!vaeMissing,
 				title: vaeMissing
 					? `Flux1 VAE 固定为 ${vaeExpected || "ae.safetensors"}，请放到 ${modelRelPath("vae", vaeMissing)}`
@@ -1774,12 +2488,12 @@ function renderPanel(node) {
 					missing: !!vaeMissing,
 					title: "按模板从 model_family_presets.tsv 配对。",
 					select: {
-						placeholder: "过滤 VAE",
-						format: formatModelValue,
-						missingText: vaeMissing ? `缺失：${basename(vaeMissing)}` : "",
-						title: (value) => vaeMissing
-							? `模板期望：${vaeExpected}\n请放到 ${modelRelPath("vae", vaeMissing)}`
-							: value,
+					placeholder: "过滤 VAE",
+					format: formatModelValue,
+					missingText: vaeMissing ? `缺失：${formatModelValue(vaeMissing)}` : "",
+					title: (value) => vaeMissing
+						? `模板期望：${vaeExpected}\n请放到 ${modelRelPath("vae", vaeMissing)}`
+						: value,
 					},
 				}
 			);
@@ -1789,32 +2503,28 @@ function renderPanel(node) {
 	}
 
 	if (modelPatchExpected || valueOf(node, MODEL_PATCH_WIDGET)) {
-		const patchRow = makeModelRow(
-			node,
-			"🟢 模型补丁",
-			MODEL_PATCH_WIDGET,
-			modelPatches,
-			"model_patch",
-			[],
-			null,
-			{
-				missing: !!modelPatchMissing,
-				title: "模板自动匹配 MODEL_PATCH，例如 USO 的 projector。",
-				select: {
-					placeholder: "过滤模型补丁",
-					format: formatModelValue,
-					missingText: modelPatchMissing ? `缺失：${basename(modelPatchMissing)}` : "",
-					title: (value) => modelPatchMissing
-						? `模板期望：${modelPatchExpected}\n请放到 ${modelRelPath("model_patches", modelPatchMissing)}`
-						: value,
-				},
-			}
+		content.appendChild(
+			makeModelPatchRow(
+				node,
+				modelPatchOn,
+				uniqueValues([modelPatchCurrent].filter(Boolean), modelPatches),
+				{
+					missing: !!modelPatchMissing,
+					select: {
+						placeholder: "过滤模型补丁",
+						format: formatModelValue,
+						missingText: modelPatchMissing ? `缺失：${formatModelValue(modelPatchMissing)}` : "",
+						title: (value) => modelPatchMissing
+							? `模板期望：${value || modelPatchCurrent || modelPatchExpected}\n请放到 ${modelRelPath("model_patches", modelPatchMissing)}`
+							: value,
+					},
+				}
+			)
 		);
-		for (const item of patchRow) if (item) content.appendChild(item);
 		if (modelPatchMissing) content.appendChild(createMissingModelHint("model_patches", modelPatchMissing));
 	}
 
-	if (clipVisionExpected || valueOf(node, CLIP_VISION_WIDGET)) {
+	if (clipVisionExpected || clipVisionCurrent) {
 		const visionRow = makeModelRow(
 			node,
 			"🔵 CLIP视觉",
@@ -1829,15 +2539,43 @@ function renderPanel(node) {
 				select: {
 					placeholder: "过滤 CLIP视觉",
 					format: formatModelValue,
-					missingText: clipVisionMissing ? `缺失：${basename(clipVisionMissing)}` : "",
+					missingText: clipVisionMissing ? `缺失：${formatModelValue(clipVisionMissing)}` : "",
 					title: (value) => clipVisionMissing
-						? `模板期望：${clipVisionExpected}\n请放到 ${modelRelPath("clip_vision", clipVisionMissing)}`
+						? `模板期望：${clipVisionCurrent || clipVisionExpected}\n请放到 ${modelRelPath("clip_vision", clipVisionMissing)}`
 						: value,
 				},
 			}
 		);
 		for (const item of visionRow) if (item) content.appendChild(item);
 		if (clipVisionMissing) content.appendChild(createMissingModelHint("clip_vision", clipVisionMissing));
+	}
+
+	if (checkpointCommon) {
+		clearControlNetWidgets(node);
+	} else if (controlNetExpected || controlNetCurrent) {
+		const controlNetRow = makeModelRow(
+			node,
+			"🟦 ControlNet",
+			CONTROL_NET_WIDGET,
+			controlnets,
+			"controlnet",
+			[],
+			null,
+			{
+				missing: !!controlNetMissing,
+				title: "模板自动匹配 CONTROL_NET，可连接到 ControlNet Apply 节点。",
+				select: {
+					placeholder: "过滤 ControlNet",
+					format: formatModelValue,
+					missingText: controlNetMissing ? `缺失：${formatModelValue(controlNetMissing)}` : "",
+					title: (value) => controlNetMissing
+						? `模板期望：${controlNetCurrent || controlNetExpected}\n请放到 ${modelRelPath("controlnet", controlNetMissing)}`
+						: value,
+				},
+			}
+		);
+		for (const item of controlNetRow) if (item) content.appendChild(item);
+		if (controlNetMissing) content.appendChild(createMissingModelHint("controlnet", controlNetMissing));
 	}
 
 	const sampling = document.createElement("div");
@@ -1870,6 +2608,9 @@ function renderPanel(node) {
 	updateSamplingOutputButton(node);
 	saveWidgetValues(node);
 	refreshNode(node);
+	} finally {
+		node.__gjjMBRendering = false;
+	}
 }
 
 function refreshNode(node) {
@@ -1889,12 +2630,14 @@ function refreshNode(node) {
 function stabilize(node) {
 	if (!node) return;
 	rememberNodeWidth(node);
+	attachHelpModelProvider(node);
 	restoreWidgetValues(node);
 	ensureDom(node);
 	keepPanelWidgetOutOfSerializedPrefix(node);
 	hideNativeWidgets(node);
 	repairOutputs(node);
 	refreshBackendLists(node, false).finally(() => {
+		if (!ensureState(node).folders) return;
 		applyPreset(node, false);
 		renderPanel(node);
 	});
@@ -1944,6 +2687,7 @@ app.registerExtension({
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode) {
 			rememberNodeWidth(this);
+			repairOutputs(this);
 			saveWidgetValues(this, serializedNode);
 			originalOnSerialize?.apply(this, [serializedNode]);
 			if (serializedNode) {

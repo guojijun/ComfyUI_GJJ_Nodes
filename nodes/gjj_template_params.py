@@ -9,6 +9,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
+from urllib.request import Request, urlopen
 
 import folder_paths
 import numpy as np
@@ -23,18 +24,34 @@ IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "bmp", "gif", "avif", "tiff"}
 AUDIO_EXTS = {"mp3", "wav", "flac", "ogg", "m4a", "aac", "wma", "opus", "aiff", "aif"}
 VIDEO_EXTS = {"mp4", "mov", "mkv", "webm", "avi", "flv", "mpeg", "mpg", "m4v", "wmv"}
 MEDIA_COPY_SUBDIR = "GJJ_TemplateParams"
+MEDIA_DOWNLOAD_TIMEOUT = 45
+
+DEFAULT_MEDIA_EXT = {
+    "IMAGE": ".png",
+    "AUDIO": ".wav",
+    "VIDEO": ".mp4",
+}
 
 
 def _detect_media_type(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
 
-    text = value.strip().lower()
+    text = value.strip()
 
     if "." not in text:
         return None
 
-    ext = text.rsplit(".", 1)[-1]
+    parsed = urlparse(text)
+    path_text = unquote(parsed.path or text).strip().lower()
+    if parsed.path.endswith("/view") and parsed.query:
+        query = parse_qs(parsed.query)
+        query_name = query.get("filename", [""])[0]
+        if query_name:
+            path_text = unquote(query_name).strip().lower()
+    ext = Path(path_text).suffix.lower().lstrip(".")
+    if not ext and "." in path_text:
+        ext = path_text.rsplit(".", 1)[-1]
 
     if ext in IMAGE_EXTS:
         return "IMAGE"
@@ -46,6 +63,153 @@ def _detect_media_type(value: Any) -> str | None:
         return "VIDEO"
 
     return None
+
+
+def _is_network_url(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    parsed = urlparse(value.strip())
+    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
+
+
+def _safe_media_basename(name: str, media_type: str | None = None) -> str:
+    raw_name = unquote(str(name or "")).replace("\\", "/").rsplit("/", 1)[-1]
+    safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", raw_name).strip(" ._")
+    if not safe_name:
+        safe_name = "downloaded_media"
+    suffix = Path(safe_name).suffix
+    if not suffix and media_type in DEFAULT_MEDIA_EXT:
+        safe_name = f"{safe_name}{DEFAULT_MEDIA_EXT[media_type]}"
+    return safe_name
+
+
+def _url_media_basename(url: str, media_type: str | None = None) -> str:
+    parsed = urlparse(str(url or "").strip())
+    name = Path(unquote(parsed.path or "")).name
+    if not name:
+        digest = hashlib.sha1(str(url).encode("utf-8", "ignore")).hexdigest()[:10]
+        name = f"network_media_{digest}"
+    return _safe_media_basename(name, media_type)
+
+
+def _find_input_media_by_name(filename: str) -> str | None:
+    safe_name = _safe_media_basename(filename)
+    if not safe_name:
+        return None
+
+    try:
+        input_root = Path(folder_paths.get_input_directory())
+    except Exception:
+        return None
+
+    direct = input_root / safe_name
+    if direct.is_file():
+        return str(direct)
+
+    try:
+        matches = [path for path in input_root.rglob(safe_name) if path.is_file()]
+    except Exception:
+        matches = []
+    if not matches:
+        return None
+
+    matches.sort(key=lambda path: (len(path.relative_to(input_root).parts), str(path).lower()))
+    return str(matches[0])
+
+
+def _download_network_media_to_input(url: str, media_type: str) -> str:
+    filename = _url_media_basename(url, media_type)
+    existing = _find_input_media_by_name(filename)
+    if existing:
+        return existing
+
+    input_root = Path(folder_paths.get_input_directory())
+    input_root.mkdir(parents=True, exist_ok=True)
+    dest = input_root / filename
+    tmp = dest.with_name(f"{dest.name}.download")
+
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "ComfyUI-GJJ-TemplateParams/1.0",
+            "Accept": "*/*",
+        },
+    )
+
+    try:
+        with urlopen(request, timeout=MEDIA_DOWNLOAD_TIMEOUT) as response:
+            status = int(getattr(response, "status", 200) or 200)
+            if status >= 400:
+                raise RuntimeError(f"HTTP {status}")
+            with open(tmp, "wb") as handle:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+        os.replace(tmp, dest)
+    except Exception:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+        raise
+
+    return str(dest)
+
+
+def _input_relative_media_path(file_path: str) -> str:
+    try:
+        input_root = Path(folder_paths.get_input_directory()).resolve()
+        path = Path(file_path).resolve()
+        return path.relative_to(input_root).as_posix()
+    except Exception:
+        return Path(file_path).name
+
+
+def _register_template_params_routes() -> None:
+    try:
+        from aiohttp import web
+        from server import PromptServer
+    except Exception:
+        return
+
+    server = getattr(PromptServer, "instance", None)
+    routes = getattr(server, "routes", None)
+    if server is None or routes is None:
+        return
+    if getattr(server, "_gjj_template_params_routes_registered", False):
+        return
+    setattr(server, "_gjj_template_params_routes_registered", True)
+
+    @routes.post("/gjj/template_params/download_media")
+    async def download_media(request):
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+
+        url = str(data.get("url") or "").strip()
+        media_type = str(data.get("media_type") or _detect_media_type(url) or "").upper()
+        if not _is_network_url(url):
+            return web.json_response({"error": "只支持 http/https 网络媒体地址。"}, status=400)
+        if media_type not in {"IMAGE", "AUDIO", "VIDEO"}:
+            return web.json_response({"error": "无法识别媒体类型。"}, status=400)
+
+        try:
+            file_path = _download_network_media_to_input(url, media_type)
+        except Exception as exc:
+            return web.json_response({"error": f"下载失败：{exc}"}, status=500)
+
+        return web.json_response({
+            "filename": _input_relative_media_path(file_path),
+            "name": Path(file_path).name,
+            "media_type": media_type,
+        })
+
+
+_register_template_params_routes()
 
 
 def _load_image_from_path(file_path: str) -> torch.Tensor:
@@ -214,6 +378,9 @@ def _clean_media_reference(filename: str) -> tuple[str, str]:
     text = str(filename or "").strip()
     parsed = urlparse(text)
 
+    if parsed.scheme.lower() in {"http", "https"}:
+        return text, media_type_hint
+
     if parsed.scheme == "file":
         path = unquote(parsed.path or "")
         if os.name == "nt" and re.match(r"^/[A-Za-z]:/", path):
@@ -235,10 +402,17 @@ def _clean_media_reference(filename: str) -> tuple[str, str]:
     return text.replace("\\", os.sep).replace("/", os.sep), media_type_hint
 
 
-def _resolve_media_file(filename: str) -> str | None:
+def _resolve_media_file(filename: str, media_type: str | None = None) -> str | None:
     """解析媒体文件路径：支持 input/output/temp、其它相对路径和绝对路径。"""
     if not filename or not str(filename).strip():
         return None
+
+    raw_filename = str(filename).strip()
+    if _is_network_url(raw_filename):
+        inferred_type = media_type or _detect_media_type(raw_filename)
+        if not inferred_type:
+            return None
+        return _download_network_media_to_input(raw_filename, inferred_type)
 
     filename, media_type_hint = _clean_media_reference(filename)
     roots = _configured_media_roots()
@@ -279,7 +453,7 @@ def _resolve_media_file(filename: str) -> str | None:
 
 def _load_media_object(filename: str, media_type: str) -> Any:
     """根据类型加载媒体对象"""
-    file_path = _resolve_media_file(filename)
+    file_path = _resolve_media_file(filename, media_type)
     if not file_path:
         if media_type in {"IMAGE", "AUDIO", "VIDEO"}:
             label = {"IMAGE": "图片", "AUDIO": "音频", "VIDEO": "视频"}.get(media_type, "媒体")
@@ -431,7 +605,35 @@ def _split_enum_options(inner: str) -> list[str]:
     return options
 
 
-def _parse_enum_options(default_text: Any, tooltip: str = "") -> list[str]:
+def _split_pipe_pair(text: str) -> tuple[str, str]:
+    parts = _split_enum_options(text)
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], parts[0]
+    return parts[0], parts[1]
+
+
+def _parse_option_item(value: Any) -> dict[str, str]:
+    if isinstance(value, dict):
+        label = _normalize_text(value.get("label") or value.get("name") or value.get("text") or value.get("value")).strip()
+        option_value = _normalize_text(value.get("value") or value.get("id") or label).strip()
+        return {"label": label or option_value, "value": option_value or label}
+    raw = _strip_quotes(_normalize_text(value)).strip()
+    assign_match = re.fullmatch(r"(.+?)\s*(?:=>|=|:|：)\s*(.+)", raw)
+    if assign_match:
+        label = assign_match.group(1).strip()
+        option_value = assign_match.group(2).strip()
+        return {"label": label or option_value, "value": option_value or label}
+    match = re.fullmatch(r"(.+?)[（(]\s*([^（）()]+?)\s*[）)]", raw)
+    if match:
+        label = match.group(1).strip()
+        option_value = match.group(2).strip()
+        return {"label": label or option_value, "value": option_value or label}
+    return {"label": raw, "value": raw}
+
+
+def _parse_enum_options(default_text: Any, tooltip: str = "") -> list[dict[str, str]]:
     raw = str(default_text or "").strip()
     if not (raw.startswith("[") and raw.endswith("]")):
         return []
@@ -442,23 +644,83 @@ def _parse_enum_options(default_text: Any, tooltip: str = "") -> list[str]:
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, list) and ("枚举" in tooltip_lower or "enum" in tooltip_lower):
-            return [str(item) for item in parsed]
+            return [_parse_option_item(item) for item in parsed]
         return []
     except Exception:
         pass
-    return _split_enum_options(inner)
+    return [_parse_option_item(item) for item in _split_enum_options(inner)]
 
 
-def _coerce_enum_value(raw_value: Any, options: list[str]) -> str:
+def _option_value(option: Any) -> str:
+    if isinstance(option, dict):
+        return _normalize_text(option.get("value") or option.get("label")).strip()
+    return _normalize_text(option).strip()
+
+
+def _option_label(option: Any) -> str:
+    if isinstance(option, dict):
+        return _normalize_text(option.get("label") or option.get("value")).strip()
+    return _normalize_text(option).strip()
+
+
+def _coerce_enum_value(raw_value: Any, options: list[Any]) -> str:
     if not options:
         return _normalize_text(raw_value)
     text = _normalize_text(raw_value).strip()
-    if text in options:
-        return text
+    for option in options:
+        if text in {_option_value(option), _option_label(option)}:
+            return _option_value(option)
     nested_options = _parse_enum_options(text, "枚举")
     if nested_options:
-        return nested_options[0]
-    return options[0]
+        return _option_value(nested_options[0])
+    return _option_value(options[0])
+
+
+def _coerce_bool_value(raw_value: Any, bool_labels: dict[str, str] | None = None) -> bool:
+    if isinstance(raw_value, bool):
+        return raw_value
+    labels = bool_labels or {}
+    text = _normalize_text(raw_value).strip()
+    if text and text == _normalize_text(labels.get("true_label")).strip():
+        return True
+    if text and text == _normalize_text(labels.get("false_label")).strip():
+        return False
+    parsed = parse_value(raw_value)
+    if isinstance(parsed, bool):
+        return parsed
+    return bool(parsed)
+
+
+def _parse_bool_spec(default_text: Any) -> tuple[bool | None, dict[str, str] | None]:
+    raw = str(default_text or "").strip()
+    brace_match = re.fullmatch(r"(?is)\s*(true|false|yes|no|on|off|1|0|是|否|开|关)?\s*[{｛]\s*(.*?)\s*[}｝]\s*", raw)
+    if brace_match:
+        default_raw = (brace_match.group(1) or "true").strip()
+        true_label, false_label = _split_pipe_pair(brace_match.group(2).strip())
+        return parse_value(default_raw) is True, {
+            "true_label": true_label or "开启",
+            "false_label": false_label or "关闭",
+        }
+
+    match = re.fullmatch(r"(?is)\s*(?:bool|boolean)\s*\((.*)\)\s*", raw)
+    if not match:
+        return None, None
+    inner = match.group(1).strip()
+    parts = _split_enum_options(inner)
+    if len(parts) < 2:
+        return None, None
+    default_value = True
+    if len(parts) >= 3 and isinstance(parse_value(parts[0]), bool):
+        default_value = parse_value(parts[0]) is True
+        true_label, false_label = parts[1], parts[2]
+    else:
+        true_label, false_label = _split_pipe_pair(inner)
+    if not true_label and not false_label:
+        return None, None
+    return default_value, {
+        "true_label": true_label or "开启",
+        "false_label": false_label or "关闭",
+    }
 
 
 def parse_value(value: Any) -> Any:
@@ -603,17 +865,21 @@ def parse_template(template_text: Any) -> list[dict[str, Any]]:
         seen[key] = count + 1
         if count:
             key = f"{key}_{count + 1}"
-        enum_options = _parse_enum_options(default_text, tooltip)
-        value = enum_options[0] if enum_options else parse_value(default_text)
-        fields.append({
+        bool_default, bool_labels = _parse_bool_spec(default_text)
+        enum_options = [] if bool_labels else _parse_enum_options(default_text, tooltip)
+        value = bool_default if bool_labels else (_option_value(enum_options[0]) if enum_options else parse_value(default_text))
+        field = {
             "key": key,
             "label": label,
-            "default": enum_options[0] if enum_options else default_text,
+            "default": ("true" if bool_default else "false") if bool_labels else (_option_value(enum_options[0]) if enum_options else default_text),
             "value": value,
-            "type": "ENUM" if enum_options else _infer_type(value),
+            "type": "BOOLEAN" if bool_labels else ("ENUM" if enum_options else _infer_type(value)),
             "options": enum_options,
             "tooltip": tooltip,
-        })
+        }
+        if bool_labels:
+            field["bool_labels"] = bool_labels
+        fields.append(field)
         if len(fields) >= MAX_OUTPUTS:
             break
     return fields
@@ -642,7 +908,7 @@ class GJJ_TemplateParams:
 
     @classmethod
     def INPUT_TYPES(cls):
-        default_template = "帧率：24.0 # 浮点\n时长：5 # 整数\nLora加速：true # 布尔\n是否启用：[enable,disable] # 枚举"
+        default_template = "帧率：24.0 # 浮点\n时长：5 # 整数\nLora加速：true{开启加速|关闭加速} # 布尔按钮\n是否启用：[启用=enable, 禁用=disable] # 枚举按钮"
         return {
             "required": {
                 "template_text": (
@@ -692,8 +958,11 @@ class GJJ_TemplateParams:
             key = str(field.get("key") or "")
             label = str(field.get("label") or "")
             raw_value = value_map.get(key, value_map.get(label, field.get("default", "")))
+            if field.get("type") == "BOOLEAN" and field.get("bool_labels"):
+                outputs.append(_coerce_bool_value(raw_value, field.get("bool_labels") or {}))
+                continue
             if field.get("type") == "ENUM":
-                outputs.append(_coerce_enum_value(raw_value, [str(item) for item in field.get("options", [])]))
+                outputs.append(_coerce_enum_value(raw_value, list(field.get("options", []))))
                 continue
             
             # 检测是否为媒体文件

@@ -292,7 +292,7 @@ function createBroadcastButton(node) {
 	const button = document.createElement("button");
 	button.type = "button";
 	button.className = "gjj-vu-broadcast";
-	button.textContent = "🔍";
+	button.textContent = "⚡";
 	button.setAttribute("aria-label", "切换输出广播");
 	protect(button);
 	button.addEventListener("click", (event) => {
@@ -500,6 +500,46 @@ function downloadUrlForSlot(slot, expectedName) {
 	if (explicit) return explicit;
 	const filename = String(expectedName || "").trim();
 	return filename ? `https://huggingface.co/models?search=${encodeURIComponent(filename)}` : "";
+}
+
+function addVideoHelpModelEntry(entries, slot, index, filename, labelOverride = "") {
+	const name = String(filename || "").trim();
+	if (!name || String(slot?.kind || "") === "empty") return;
+	entries.push({
+		label: labelOverride || String(slot?.label || slot?.id || `模型${index + 1}`),
+		folder: String(slot?.folder || ""),
+		kind: String(slot?.kind || ""),
+		value: name,
+		icon: isLoraSlot(slot) ? "🟠" : officialIconFor(slot),
+	});
+}
+
+function videoLoaderHelpEntries(node) {
+	const state = ensureState(node);
+	const configKeys = Object.keys(state.configs || {});
+	const key = valueOf(node, "config", configKeys[0] || "");
+	const cfg = state.configs?.[key] || state.configs?.[configKeys[0]] || null;
+	if (!cfg) return [];
+	const entries = [];
+	const loraEnabled = effectiveUseLora(node);
+	(cfg.slots || []).slice(0, MAX_SLOTS).forEach((slot, index) => {
+		if (!slot || String(slot.kind || "") === "empty") return;
+		if (isLoraSlot(slot) && !loraEnabled) return;
+		const fileName = valueOf(node, `file_${index + 1}`)
+			|| String(slot.required_name || slot.preferred_name || "").trim();
+		addVideoHelpModelEntry(entries, slot, index, fileName);
+		if (isDualClipSlot(slot)) {
+			const secondaryName = valueOf(node, `secondary_file_${index + 1}`)
+				|| String(slot.secondary_name || "").trim();
+			addVideoHelpModelEntry(entries, slot, index, secondaryName, String(slot.secondary_label || "另一个模型"));
+		}
+	});
+	return entries;
+}
+
+function attachHelpModelProvider(node) {
+	node.__gjjHelpModelEntries = () => videoLoaderHelpEntries(node);
+	node.__gjjHelpModelTreeEntries = node.__gjjHelpModelEntries;
 }
 
 async function copyAndFlash(button, text, restoreLabel) {
@@ -1822,6 +1862,7 @@ function refreshNode(node) {
 function stabilize(node) {
 	if (!node) return;
 	rememberNodeWidth(node);
+	attachHelpModelProvider(node);
 	restoreWidgetValues(node);
 	ensureDom(node);
 	updateBroadcastButton(node);

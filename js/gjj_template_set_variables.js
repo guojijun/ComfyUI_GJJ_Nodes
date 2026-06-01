@@ -934,7 +934,7 @@ function buildDom(node) {
 	const gear = document.createElement("button");
 	gear.type = "button";
 	gear.className = "gjj-template-set-button";
-	gear.textContent = "⚙ 模板";
+	gear.textContent = "⚙️ 模板";
 	gear.title = "编辑模板设置：每行一个变量。";
 	const outputToggle = document.createElement("button");
 	outputToggle.type = "button";
@@ -943,11 +943,11 @@ function buildDom(node) {
 	const broadcastToggle = document.createElement("button");
 	broadcastToggle.type = "button";
 	broadcastToggle.className = "gjj-template-set-button";
-	broadcastToggle.textContent = "🔍";
+	broadcastToggle.textContent = "⚡";
 	const refresh = document.createElement("button");
 	refresh.type = "button";
 	refresh.className = "gjj-template-set-button";
-	refresh.textContent = "↻";
+	refresh.textContent = "♻️";
 	refresh.title = "重新解析模板并刷新输入 / 输出口。";
 	const count = document.createElement("span");
 	count.className = "gjj-template-set-count";

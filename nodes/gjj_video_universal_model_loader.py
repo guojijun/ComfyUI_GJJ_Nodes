@@ -1790,8 +1790,11 @@ class GJJ_VideoUniversalModelLoader:
         "视频通用模型加载器：按官方工作流配置扫描 models 子目录，动态显示模型下拉与输出槽。"
         "官方流保留原有加载方式；KJ 流改为 UNET 主模型 + 双 CLIP + LTX23 视频/音频 VAE。"
     )
+    SEARCH_ALIASES = ["MMV"]
     REQUIRED_MODELS = _build_ltx23_kj_required_models()
     GJJ_HELP = {
+        "model_tree": True,
+        "model_download_url": "https://pan.quark.cn/s/6ec846f1f58d",
         "models": _build_ltx23_kj_help_models(),
         "dependencies": [
             "ComfyUI 官方节点：UNETLoader / DualCLIPLoader / LTXAVTextEncoderLoader",
@@ -2135,4 +2138,4 @@ class GJJ_VideoUniversalModelLoader:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_VideoUniversalModelLoader}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ ·🎬 视频通用模型加载"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ·🔵🟡🔴 智能视频模型加载🎞️官方流"}

@@ -16,6 +16,9 @@ const SINGLE_IMAGE_PREVIEW_HEIGHT = 360;
 const MIN_NODE_HEIGHT = 40;
 const MIN_WIDTH = 300;
 const NODE_BOTTOM_PADDING = 10;
+const NATIVE_CANVAS_PREVIEW_WIDGET = "$$canvas-image-preview";
+const NATIVE_PREVIEW_CLEANUP_DELAYS = [0, 16, 60, 150, 300, 800, 1600, 3200];
+const NATIVE_PREVIEW_WIDGET_PATTERN = /(?:preview|image|images|img|图像|图片|预览)/i;
 const LORA_EFFECT_LIVE_TEXT_MAP_KEY = "__gjjLoraEffectTesterLiveTextByNodeId";
 const LIVE_PREVIEW_STATE_KEY = "__gjjAnyPreviewLiveState";
 const IMAGE_SEQUENCE_MIN_FRAMES = 16;
@@ -73,6 +76,69 @@ function imageDataToUrl(data) {
 	return api.apiURL(
 		`/view?filename=${encodeURIComponent(data.filename)}&type=${encodeURIComponent(data.type || "temp")}&subfolder=${encodeURIComponent(data.subfolder || "")}${previewFormat}${randParam}`,
 	);
+}
+
+function withoutNativeImagePreview(message = {}) {
+	const clean = { ...(message || {}) };
+	delete clean.images;
+	delete clean.preview_images;
+	return clean;
+}
+
+function targetNodeFromExecutedEvent(event) {
+	const nodeId = eventNodeId(event);
+	if (nodeId == null || nodeId === "") {
+		return null;
+	}
+	const node =
+		app.graph?.getNodeById?.(nodeId) ||
+		app.graph?.getNodeById?.(Number(nodeId)) ||
+		null;
+	return TARGET_NODES.has(node?.comfyClass || node?.type) ? node : null;
+}
+
+function suppressNativeExecutedImages(event) {
+	if (event?.type !== "executed" || !event?.detail) {
+		return;
+	}
+	const node = targetNodeFromExecutedEvent(event);
+	if (!node) {
+		return;
+	}
+	clearNativeImagePreviewState(node);
+	const output = event.detail.output || event.detail;
+	if (!output || typeof output !== "object") {
+		return;
+	}
+	// 保留标准 output.images 给 ComfyUI 队列/历史面板使用；节点底部的
+	// Vue 原生输出图由 node.hideOutputImages 屏蔽，避免和 GJJ DOM 预览重复。
+	if (Array.isArray(output.images) && output.images.length) {
+		output.__gjj_queue_images = output.images;
+	}
+}
+
+function installNativePreviewEventFilter() {
+	if (api.__gjjAnyPreviewEventFilterInstalled || typeof api.dispatchEvent !== "function") {
+		return;
+	}
+	const originalDispatchEvent = api.dispatchEvent.bind(api);
+	try {
+		api.dispatchEvent = function (event) {
+			const node = targetNodeFromExecutedEvent(event);
+			if (node) {
+				clearNativeImagePreviewState(node);
+			}
+			suppressNativeExecutedImages(event);
+			const result = originalDispatchEvent(event);
+			if (node) {
+				scheduleNativePreviewCleanup(node);
+			}
+			return result;
+		};
+		api.__gjjAnyPreviewEventFilterInstalled = true;
+	} catch (error) {
+		console.warn("[GJJ AnyPreview] 无法安装原生预览事件拦截，改用节点级清理。", error);
+	}
 }
 
 function compactPreviewText(text) {
@@ -449,9 +515,7 @@ function applyLivePreviewItems(node, input, inputOrder, items) {
 	node.__gjjAnyPreviewImages = [];
 	node.__gjjAnyPreviewAudio = [];
 	node.__gjjAnyPreviewVideo = [];
-	node.imgs = [];
-	node.images = [];
-	node.preview = null;
+	clearNativeImagePreviewState(node);
 	ensurePreviewWidget(node);
 	applyPreviewContent(node);
 	updateLayout(node);
@@ -558,6 +622,28 @@ function refreshLayout(node) {
 	setDirty(node);
 }
 
+function mediaItemDimensions(item) {
+	const width = Number(item?.width || item?.preview_width || item?.w);
+	const height = Number(item?.height || item?.preview_height || item?.h);
+	return {
+		width: Number.isFinite(width) && width > 0 ? width : 0,
+		height: Number.isFinite(height) && height > 0 ? height : 0,
+	};
+}
+
+function mediaItemAspectRatio(item, fallback = 1) {
+	const { width, height } = mediaItemDimensions(item);
+	if (width > 0 && height > 0) {
+		return Math.max(0.1, Math.min(10, width / height));
+	}
+	return fallback;
+}
+
+function mediaItemAspectRatioCss(item, fallback = "1 / 1") {
+	const { width, height } = mediaItemDimensions(item);
+	return width > 0 && height > 0 ? `${width} / ${height}` : fallback;
+}
+
 function estimateImagePreviewHeight(node) {
 	const images = Array.isArray(node?.__gjjAnyPreviewImages)
 		? node.__gjjAnyPreviewImages
@@ -569,11 +655,10 @@ function estimateImagePreviewHeight(node) {
 	const contentWidth = Math.max(220, nodeWidth - 36);
 
 	if (count === 1) {
-		// 单图模式：根据宽度动态计算高度，保持图片比例
-		// 使用默认宽高比 4:3
-		const aspectRatio = 4 / 3;
+		// 单图模式：根据真实宽高比动态计算高度，避免 DOM 内部再出现纵向滚动条。
+		const aspectRatio = mediaItemAspectRatio(images[0], 1);
 		const imageHeight = contentWidth / aspectRatio;
-		return Math.max(MIN_PREVIEW_HEIGHT, imageHeight + 18);
+		return Math.max(IMAGE_PREVIEW_MIN_HEIGHT, imageHeight + 24);
 	}
 
 	// 多图模式：动态计算列数
@@ -660,10 +745,12 @@ function updateLayout(node) {
 			if (useEstimatedImageLayout) {
 				container.style.height = `${Math.max(MIN_PREVIEW_HEIGHT, availableHeight)}px`;
 				previewWrap.style.height = `${Math.max(MIN_PREVIEW_HEIGHT, availableHeight)}px`;
+				previewWrap.style.overflow = "visible";
 			} else {
 				container.style.height = "auto";
 				previewWrap.style.height = "auto";
 				previewWrap.style.minHeight = "96px";
+				previewWrap.style.overflow = "visible";
 			}
 		}
 
@@ -684,7 +771,7 @@ function scheduleLayout(node) {
 
 function ensureOutput(node) {
 	if (!Array.isArray(node.outputs) || node.outputs.length === 0) {
-		node.addOutput?.("预览结果", "*");
+		node.addOutput?.("透传输出", "*");
 	}
 }
 
@@ -729,54 +816,12 @@ function renameInputsSequentially(node) {
 }
 
 function resolveOutputMode(node) {
-	const infos = getInputs(node)
-		.filter((input) => input?.link)
-		.map((input) => getLinkedOutputInfo(input))
-		.filter(Boolean);
-
-	if (!infos.length) {
-		const kind = String(node?.__gjjAnyPreviewKind || "").trim();
-		if (kind === "image") {
-			return {
-				type: "IMAGE",
-				name: "图片输出",
-				tooltip: "合并后的图片批次输出。",
-			};
-		}
-		if (kind === "text") {
-			return {
-				type: "STRING",
-				name: "文本输出",
-				tooltip: "合并后的文本输出。",
-			};
-		}
-		return { type: "*", name: "预览结果", tooltip: "合并后的任意对象输出。" };
-	}
-
-	const types = [...new Set(infos.map((info) => String(info.type || "*")))];
-	if (types.length === 1) {
-		const type = types[0];
-		if (type === "IMAGE") {
-			return {
-				type: "IMAGE",
-				name: "图片输出",
-				tooltip: "合并后的图片批次输出。",
-			};
-		}
-		if (type === "STRING") {
-			return {
-				type: "STRING",
-				name: "文本输出",
-				tooltip: "合并后的文本输出。",
-			};
-		}
-		return { type, name: "对象输出", tooltip: "合并后的对象输出。" };
-	}
-
+	const firstLinked = getInputs(node).find((input) => input?.link);
+	const info = firstLinked ? getLinkedOutputInfo(firstLinked) : null;
 	return {
-		type: "*",
-		name: "预览结果",
-		tooltip: "混合类型输入会输出合并后的任意对象。",
+		type: info?.type || "*",
+		name: "透传输出",
+		tooltip: "透传第一个有效输入；预览区会照常浏览所有输入对象。",
 	};
 }
 
@@ -946,22 +991,180 @@ function hideWidget(widget) {
 	}
 }
 
-function hideLegacyPreviewWidgets(node) {
-	(node.widgets || []).forEach((widget) => {
-		if (widget === node.__gjjAnyPreviewWidget) {
-			return;
+function suppressNativePreviewWidget(widget) {
+	hideWidget(widget);
+	widget.serialize = false;
+	widget.serializeValue = () => undefined;
+	widget.computeLayoutSize = () => ({ minHeight: 0, minWidth: 0 });
+	widget.computeSize = () => [0, 0];
+	widget.drawWidget = () => {};
+	widget.draw = () => {};
+	return widget;
+}
+
+function detachWidgetElement(widget) {
+	for (const key of ["element", "inputEl", "container", "dom", "root"]) {
+		const element = widget?.[key];
+		if (element?.style) {
+			element.style.display = "none";
 		}
-		const name = String(widget?.name || "");
-		const label = String(widget?.label || "");
+		if (typeof element?.remove === "function") {
+			element.remove();
+		}
+	}
+}
+
+function isNativePreviewWidget(node, widget) {
+	if (!widget || widget === node?.__gjjAnyPreviewWidget) {
+		return false;
+	}
+	const name = String(widget?.name || "");
+	if (name === PREVIEW_WIDGET_NAME) {
+		return false;
+	}
+	if (name === NATIVE_CANVAS_PREVIEW_WIDGET) {
+		return true;
+	}
+	const label = String(widget?.label || "");
+	const type = String(widget?.type || "");
+	const optionsType = String(widget?.options?.type || "");
+	const optionsName = String(widget?.options?.name || "");
+	const constructorName = String(widget?.constructor?.name || "");
+	const text = `${name} ${label} ${type} ${optionsType} ${optionsName} ${constructorName}`;
+	if (NATIVE_PREVIEW_WIDGET_PATTERN.test(text)) {
+		return true;
+	}
+	for (const key of ["element", "inputEl", "container", "dom", "root"]) {
+		const element = widget?.[key];
 		if (
-			name === PREVIEW_WIDGET_NAME ||
-			name.includes("preview") ||
-			label.includes("预览") ||
-			label.includes("Preview")
+			typeof element?.querySelector === "function" &&
+			element.querySelector("img, canvas, video")
 		) {
-			hideWidget(widget);
+			return true;
+		}
+	}
+	return false;
+}
+
+function hideLegacyPreviewWidgets(node) {
+	const widgets = node?.widgets;
+	if (!Array.isArray(widgets)) {
+		return false;
+	}
+	let changed = false;
+	for (let index = widgets.length - 1; index >= 0; index--) {
+		const widget = widgets[index];
+		if (!isNativePreviewWidget(node, widget)) {
+			continue;
+		}
+		hideWidget(widget);
+		detachWidgetElement(widget);
+		widgets.splice(index, 1);
+		changed = true;
+	}
+	return changed;
+}
+
+function nativePreviewEmptyArray(node, key) {
+	if (!node.__gjjAnyPreviewNativeEmptyArrays) {
+		Object.defineProperty(node, "__gjjAnyPreviewNativeEmptyArrays", {
+			configurable: true,
+			enumerable: false,
+			writable: true,
+			value: Object.create(null),
+		});
+	}
+	if (!Array.isArray(node.__gjjAnyPreviewNativeEmptyArrays[key])) {
+		node.__gjjAnyPreviewNativeEmptyArrays[key] = [];
+	}
+	node.__gjjAnyPreviewNativeEmptyArrays[key].length = 0;
+	return node.__gjjAnyPreviewNativeEmptyArrays[key];
+}
+
+function defineSuppressedNativePreviewProperty(node, key, emptyValue) {
+	const descriptor = Object.getOwnPropertyDescriptor(node, key);
+	if (descriptor?.get?.__gjjSuppressNativePreview) {
+		return;
+	}
+	const getter = function () {
+		return Array.isArray(emptyValue)
+			? nativePreviewEmptyArray(this, key)
+			: emptyValue;
+	};
+	getter.__gjjSuppressNativePreview = true;
+	try {
+		Object.defineProperty(node, key, {
+			configurable: true,
+			enumerable: false,
+			get: getter,
+			set() {
+				if (Array.isArray(emptyValue)) {
+					nativePreviewEmptyArray(this, key);
+				}
+			},
+		});
+	} catch (_error) {
+		try {
+			node[key] = Array.isArray(emptyValue) ? [] : emptyValue;
+		} catch (_fallbackError) {
+			// 忽略不可写属性，后续绘制阶段还会再次清理。
+		}
+	}
+}
+
+function suppressNativePreviewProperties(node) {
+	if (!node) {
+		return;
+	}
+	defineSuppressedNativePreviewProperty(node, "hideOutputImages", true);
+	defineSuppressedNativePreviewProperty(node, "imgs", []);
+	defineSuppressedNativePreviewProperty(node, "images", []);
+	defineSuppressedNativePreviewProperty(node, "imageRects", []);
+	defineSuppressedNativePreviewProperty(node, "preview", null);
+	defineSuppressedNativePreviewProperty(node, "imageIndex", null);
+	defineSuppressedNativePreviewProperty(node, "overIndex", null);
+}
+
+function clearNativeImagePreviewState(node) {
+	if (!node) {
+		return;
+	}
+	suppressNativePreviewProperties(node);
+	node.imgs = [];
+	node.images = [];
+	node.preview = null;
+	node.imageRects = [];
+	node.imageIndex = null;
+	node.overIndex = null;
+	if (node.properties) {
+		delete node.properties.image;
+		delete node.properties.images;
+	}
+	if (node.constructor?.nodeData) {
+		node.constructor.nodeData.output_preview = false;
+	}
+	node.hideOutputImages = true;
+	hideLegacyPreviewWidgets(node);
+}
+
+function scheduleNativePreviewCleanup(node) {
+	requestAnimationFrame(() => {
+		clearNativeImagePreviewState(node);
+		updateLayout(node);
+		setDirty(node);
+		for (const delay of NATIVE_PREVIEW_CLEANUP_DELAYS) {
+			setTimeout(() => {
+				clearNativeImagePreviewState(node);
+				updateLayout(node);
+				setDirty(node);
+			}, delay);
 		}
 	});
+}
+
+function shouldSuppressNativePreview(node) {
+	const kind = String(node?.__gjjAnyPreviewKind || "");
+	return kind === "image" || Array.isArray(node?.__gjjAnyPreviewImages);
 }
 
 function appendImagePreviewCards(node, parent, images) {
@@ -1051,6 +1254,362 @@ function appendImagePreviewCards(node, parent, images) {
 	}
 
 	parent.appendChild(imageGrid);
+}
+
+function appendPreviewOverlay(parent, title = "", detail = "") {
+	const parts = [title, compactPreviewText(detail)].filter((part) => String(part || "").trim());
+	if (!parts.length) return;
+	const overlay = document.createElement("div");
+	overlay.textContent = parts.join(" · ");
+	overlay.title = parts.join("\n");
+	overlay.style.cssText = [
+		"position:absolute",
+		"left:5px",
+		"right:5px",
+		"top:5px",
+		"z-index:5",
+		"padding:3px 6px",
+		"border-radius:6px",
+		"background:rgba(0,0,0,.45)",
+		"backdrop-filter:blur(4px)",
+		"color:#fff",
+		"font-size:10px",
+		"line-height:1.25",
+		"font-weight:650",
+		"pointer-events:none",
+		"overflow:hidden",
+		"display:-webkit-box",
+		"-webkit-line-clamp:2",
+		"-webkit-box-orient:vertical",
+	].join(";");
+	parent.appendChild(overlay);
+}
+
+function pixelTextFromMediaItem(item) {
+	const width = Number(item?.width || item?.preview_width || item?.w);
+	const height = Number(item?.height || item?.preview_height || item?.h);
+	if (Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0) {
+		return `${Math.round(width)}×${Math.round(height)}`;
+	}
+	return "";
+}
+
+function pixelTextFromText(text) {
+	const source = String(text || "");
+	const sizeMatch = source.match(/(?:尺寸|size|分辨率)[:：]?\s*(\d+)\s*[x×]\s*(\d+)/i);
+	if (sizeMatch) return `${sizeMatch[1]}×${sizeMatch[2]}`;
+	const shapeMatch = source.match(/shape=\(([^)]*)\)/i);
+	if (!shapeMatch) return "";
+	const nums = shapeMatch[1]
+		.split(",")
+		.map((part) => Number.parseInt(part.trim(), 10))
+		.filter((value) => Number.isFinite(value) && value > 0);
+	if (nums.length >= 4 && [1, 3, 4].includes(nums[1])) return `${nums[3]}×${nums[2]}`;
+	if (nums.length >= 4 && [1, 3, 4].includes(nums[3])) return `${nums[2]}×${nums[1]}`;
+	if (nums.length >= 3 && [1, 3, 4].includes(nums[2])) return `${nums[1]}×${nums[0]}`;
+	if (nums.length >= 3) return `${nums[2]}×${nums[1]}`;
+	if (nums.length >= 2) return `${nums[1]}×${nums[0]}`;
+	return "";
+}
+
+function previewItemOverlayTitle(item, images, audio, video, text) {
+	if (images.length) {
+		const sourceKind = String(item?.source_kind || item?.kind || "").toLowerCase();
+		const emoji = sourceKind === "mask" ? "🎭" : "🖼️";
+		const pixels = pixelTextFromMediaItem(images[0]) || pixelTextFromText(text) || pixelTextFromText(item?.title);
+		return pixels ? `${emoji} ${pixels}` : emoji;
+	}
+	if (video.length) {
+		const pixels = pixelTextFromMediaItem(video[0]) || pixelTextFromText(text) || pixelTextFromText(item?.title);
+		return pixels ? `🎬 ${pixels}` : "🎬 视频";
+	}
+	if (audio.length) return "🎧 音频";
+	return item?.title || "";
+}
+
+function makeTilePageButton(label, title, side) {
+	const button = document.createElement("button");
+	button.type = "button";
+	button.textContent = label;
+	button.title = title;
+	button.style.cssText = [
+		"position:absolute",
+		`${side}:6px`,
+		"top:50%",
+		"z-index:8",
+		"width:24px",
+		"height:32px",
+		"transform:translateY(-50%)",
+		"border:1px solid rgba(255,255,255,.24)",
+		"border-radius:999px",
+		"background:rgba(0,0,0,.48)",
+		"backdrop-filter:blur(4px)",
+		"color:#fff",
+		"font-size:18px",
+		"line-height:1",
+		"font-weight:800",
+		"cursor:pointer",
+		"display:flex",
+		"align-items:center",
+		"justify-content:center",
+		"padding:0",
+	].join(";");
+	const stop = (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+	};
+	for (const eventName of ["pointerdown", "mousedown", "dblclick", "wheel", "contextmenu"]) {
+		button.addEventListener(eventName, stop);
+	}
+	return button;
+}
+
+function appendPreviewTileImage(node, parent, item, badgeText = "", imageItems = null) {
+	if (!item) return;
+	const frames = normalizeMediaPayload(imageItems);
+	const pageItems = frames.length ? frames : [item];
+	let currentIndex = 0;
+	const currentItem = () => pageItems[Math.max(0, Math.min(pageItems.length - 1, currentIndex))] || item;
+	const image = document.createElement("img");
+	image.draggable = false;
+	image.style.cssText = [
+		"width:100%",
+		"height:100%",
+		"object-fit:cover",
+		"display:block",
+	].join(";");
+	image.onload = () => scheduleLayout(node);
+	image.onerror = () => scheduleLayout(node);
+	parent.appendChild(image);
+
+	const badge = document.createElement("div");
+	badge.style.cssText = [
+		"position:absolute",
+		"right:5px",
+		"bottom:5px",
+		"z-index:6",
+		"padding:2px 6px",
+		"border-radius:999px",
+		"background:rgba(0,0,0,.56)",
+		"color:#fff",
+		"font-size:10px",
+		"font-weight:700",
+		"pointer-events:none",
+	].join(";");
+	if (badgeText || pageItems.length > 1) parent.appendChild(badge);
+
+	const renderPage = () => {
+		const activeItem = currentItem();
+		image.src = imageDataToUrl(activeItem);
+		if (badge.parentElement) {
+			badge.textContent = pageItems.length > 1 ? `${currentIndex + 1}/${pageItems.length}` : badgeText;
+		}
+	};
+
+	if (pageItems.length > 1) {
+		const prev = makeTilePageButton("‹", "上一张图片", "left");
+		const next = makeTilePageButton("›", "下一张图片", "right");
+		const turnPage = (delta) => {
+			currentIndex = (currentIndex + delta + pageItems.length) % pageItems.length;
+			renderPage();
+		};
+		prev.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			turnPage(-1);
+		});
+		next.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			turnPage(1);
+		});
+		parent.append(prev, next);
+	}
+	renderPage();
+
+	parent.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		let overlayIndex = currentIndex;
+		const overlay = document.createElement("div");
+		overlay.style.cssText = [
+			"position:fixed",
+			"inset:0",
+			"background:rgba(0,0,0,.9)",
+			"z-index:10000",
+			"display:flex",
+			"align-items:center",
+			"justify-content:center",
+			"cursor:zoom-out",
+		].join(";");
+		const previewImg = document.createElement("img");
+		previewImg.style.cssText = [
+			"max-width:92%",
+			"max-height:92%",
+			"object-fit:contain",
+			"border-radius:8px",
+		].join(";");
+		const renderOverlayPage = () => {
+			previewImg.src = imageDataToUrl(pageItems[overlayIndex] || currentItem());
+		};
+		renderOverlayPage();
+		overlay.appendChild(previewImg);
+		if (pageItems.length > 1) {
+			const prev = makeTilePageButton("‹", "上一张图片", "left");
+			const next = makeTilePageButton("›", "下一张图片", "right");
+			prev.style.left = "22px";
+			prev.style.width = "36px";
+			prev.style.height = "48px";
+			prev.style.fontSize = "28px";
+			next.style.right = "22px";
+			next.style.width = "36px";
+			next.style.height = "48px";
+			next.style.fontSize = "28px";
+			const pageHint = document.createElement("div");
+			pageHint.style.cssText = [
+				"position:absolute",
+				"right:22px",
+				"bottom:18px",
+				"z-index:8",
+				"padding:4px 8px",
+				"border-radius:999px",
+				"background:rgba(0,0,0,.52)",
+				"color:#fff",
+				"font-size:12px",
+				"font-weight:700",
+				"pointer-events:none",
+			].join(";");
+			const setOverlayPage = (delta) => {
+				overlayIndex = (overlayIndex + delta + pageItems.length) % pageItems.length;
+				renderOverlayPage();
+				pageHint.textContent = `${overlayIndex + 1}/${pageItems.length}`;
+			};
+			pageHint.textContent = `${overlayIndex + 1}/${pageItems.length}`;
+			prev.addEventListener("click", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				setOverlayPage(-1);
+			});
+			next.addEventListener("click", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				setOverlayPage(1);
+			});
+			overlay.append(prev, next, pageHint);
+		}
+		overlay.addEventListener("click", () => overlay.remove());
+		document.body.appendChild(overlay);
+	});
+}
+
+function protectTextareaEvents(textarea) {
+	const stop = (event) => event.stopPropagation();
+	for (const eventName of ["pointerdown", "mousedown", "click", "dblclick", "wheel", "keydown", "keyup", "contextmenu"]) {
+		textarea.addEventListener(eventName, stop);
+	}
+}
+
+function createPreviewTextarea(text, compact = false) {
+	const textarea = document.createElement("textarea");
+	textarea.value = String(text || "");
+	textarea.readOnly = true;
+	textarea.spellcheck = false;
+	textarea.wrap = "soft";
+	textarea.style.cssText = [
+		"width:100%",
+		compact ? "height:100%" : "height:160px",
+		compact ? "min-height:100%" : "min-height:120px",
+		"box-sizing:border-box",
+		compact ? "padding:28px 8px 8px" : "padding:8px 9px",
+		"border:1px solid #2d434b",
+		"border-radius:7px",
+		"outline:none",
+		"background:#0d1519",
+		"color:#d9e4df",
+		`font:${compact ? "11px" : "12px"}/1.4 ui-monospace,SFMono-Regular,Consolas,monospace`,
+		"overflow:auto",
+		"white-space:pre-wrap",
+		"resize:both",
+		"user-select:text",
+		"-webkit-user-select:text",
+		"cursor:text",
+	].join(";");
+	protectTextareaEvents(textarea);
+	return textarea;
+}
+
+function appendPreviewTileText(parent, text) {
+	parent.appendChild(createPreviewTextarea(text, true));
+}
+
+function renderStandaloneTextarea(node, body, text) {
+	if (body.__gjjDblClickHandler) {
+		body.removeEventListener("dblclick", body.__gjjDblClickHandler);
+		body.removeEventListener("pointerdown", body.__gjjPointerHandler);
+		body.removeEventListener("mousedown", body.__gjjPointerHandler);
+		delete body.__gjjDblClickHandler;
+		delete body.__gjjPointerHandler;
+	}
+	body.replaceChildren();
+	body.style.display = "block";
+	body.style.cursor = "text";
+	body.style.overflow = "visible";
+	body.style.userSelect = "text";
+	body.style.webkitUserSelect = "text";
+	const textarea = createPreviewTextarea(text, false);
+	const lineCount = String(text || "").split("\n").length;
+	textarea.style.height = `${Math.max(130, Math.min(360, lineCount * 18 + 28))}px`;
+	textarea.addEventListener("mouseup", () => scheduleLayout(node));
+	body.appendChild(textarea);
+}
+
+function appendPreviewTileMedia(node, parent, tagName, item) {
+	if (!item) return;
+	const player = document.createElement(tagName);
+	player.controls = tagName !== "video";
+	player.src = imageDataToUrl(item);
+	player.preload = "metadata";
+	if (tagName === "video") {
+		player.muted = true;
+		player.loop = true;
+		player.playsInline = true;
+		player.autoplay = Boolean(item?.is_sequence || item?.loop || item?.autoplay);
+		player.style.cssText = [
+			"width:100%",
+			"height:100%",
+			"object-fit:cover",
+			"display:block",
+			"background:#0c1114",
+		].join(";");
+		player.addEventListener("canplay", () => {
+			const promise = player.play?.();
+			if (promise?.catch) promise.catch(() => {});
+		}, { once: true });
+	} else {
+		const icon = document.createElement("div");
+		icon.textContent = "🎧";
+		icon.style.cssText = [
+			"position:absolute",
+			"inset:0",
+			"display:flex",
+			"align-items:center",
+			"justify-content:center",
+			"font-size:36px",
+			"background:#0d1519",
+		].join(";");
+		parent.appendChild(icon);
+		player.style.cssText = [
+			"position:absolute",
+			"left:7px",
+			"right:7px",
+			"bottom:7px",
+			"z-index:4",
+			"width:calc(100% - 14px)",
+			`height:${AUDIO_PLAYER_HEIGHT}px`,
+		].join(";");
+	}
+	player.addEventListener("loadedmetadata", () => scheduleLayout(node));
+	parent.appendChild(player);
 }
 
 function clearImageSequenceTimers(node) {
@@ -1610,76 +2169,56 @@ function renderPreviewItems(node, items) {
 		previewWrap.style.minHeight = "96px";
 	}
 
-	grid.style.display = "flex";
-	grid.style.flexDirection = "column";
-	grid.style.gridTemplateColumns = "1fr";
-	grid.style.gap = "8px";
+	grid.style.display = "grid";
+	grid.style.flexDirection = "";
+	grid.style.gridTemplateColumns = "repeat(auto-fill, minmax(132px, 1fr))";
+	grid.style.gap = "6px";
 	grid.style.height = "auto";
-	grid.style.alignItems = "stretch";
+	grid.style.alignItems = "start";
 	clearImageSequenceTimers(node);
 	grid.replaceChildren();
 
 	for (const [index, item] of items.entries()) {
 		const card = document.createElement("div");
 		card.style.cssText = [
-			"display:flex",
-			"flex-direction:column",
-			"gap:8px",
-			"padding:10px",
+			"position:relative",
+			"aspect-ratio:1/1",
+			"min-height:124px",
+			"overflow:hidden",
 			"border:1px solid #33434a",
-			"border-radius:8px",
-			"background:#12191d",
+			"border-radius:7px",
+			"background:#0c1114",
 			"box-sizing:border-box",
+			"cursor:pointer",
 		].join(";");
-
-		const title = document.createElement("div");
-		title.textContent = item.title || `项目 ${index + 1}`;
-		title.style.cssText = [
-			"font-size:12px",
-			"font-weight:700",
-			"color:#e7f3ef",
-			"line-height:1.3",
-		].join(";");
-		card.appendChild(title);
 
 		const images = normalizeMediaPayload(item.images);
 		const audio = normalizeMediaPayload(item.audio);
 		const video = normalizeMediaPayload(item.video);
 		const text = String(item.text || "").trim();
 		const sequenceImage = images.find(isSequenceMediaItem);
-		let renderedEmojiSummary = false;
 		if (sequenceImage && !audio.length && !video.length) {
-			appendAnimatedSequenceImage(node, card, sequenceImage, text);
-			renderedEmojiSummary = true;
+			appendPreviewTileImage(node, card, sequenceImage, "序列");
 		} else if (images.length >= IMAGE_SEQUENCE_MIN_FRAMES && !audio.length && !video.length) {
-			appendImageSequencePlayer(node, card, images, text);
-			renderedEmojiSummary = true;
+			appendPreviewTileImage(node, card, images[0], `${images.length}帧`, images);
 		} else if (images.length) {
-			appendImagePreviewCards(node, card, images);
+			appendPreviewTileImage(node, card, images[0], images.length > 1 ? `1/${images.length}` : "", images);
 		}
 		if (audio.length) {
-			appendMediaPlayers(node, card, "audio", audio, text);
+			appendPreviewTileMedia(node, card, "audio", audio[0]);
 		}
 		if (video.length) {
-			appendMediaPlayers(node, card, "video", video, text);
+			appendPreviewTileMedia(node, card, "video", video[0]);
 		}
 
-		if (text && !audio.length && !video.length && images.length < IMAGE_SEQUENCE_MIN_FRAMES && !renderedEmojiSummary) {
-			const textBlock = document.createElement("div");
-			textBlock.className = "gjj-text-input-markdown-body";
-			textBlock.innerHTML = renderMarkdown(text);
-			textBlock.style.cssText = [
-				"background:transparent",
-				"color:#d9e4df",
-				"font-size:12px",
-				"line-height:1.45",
-				"white-space:normal",
-				"overflow:visible",
-				"user-select:text",
-				"-webkit-user-select:text",
-			].join(";");
-			clampTextPreviewLines(textBlock);
-			card.appendChild(textBlock);
+		if (!images.length && !audio.length && !video.length) {
+			card.style.cursor = "text";
+			appendPreviewTileText(card, text || item.title || `项目 ${index + 1}`);
+		}
+		if (images.length || audio.length || video.length) {
+			appendPreviewOverlay(card, previewItemOverlayTitle(item, images, audio, video, text), "");
+		} else {
+			appendPreviewOverlay(card, item.title || `项目 ${index + 1}`, "");
 		}
 
 		grid.appendChild(card);
@@ -1765,7 +2304,7 @@ function applyPreviewContent(node) {
 	container.style.minHeight = `${MIN_PREVIEW_HEIGHT}px`;
 
 	if (previewWrap) {
-		previewWrap.style.overflow = useEstimatedImageLayout ? "auto" : "visible";
+		previewWrap.style.overflow = "visible";
 		previewWrap.style.height = useEstimatedImageLayout ? `${availableHeight}px` : "auto";
 		previewWrap.style.minHeight = useEstimatedImageLayout ? `${availableHeight}px` : "96px";
 	}
@@ -1810,7 +2349,7 @@ function applyPreviewContent(node) {
 			card.style.cssText = [
 				"position:relative",
 				"width:100%",
-				"aspect-ratio:1/1",
+				`aspect-ratio:${isSingleImage ? mediaItemAspectRatioCss(item) : "1 / 1"}`,
 				"overflow:hidden",
 				"border-radius:6px",
 				"cursor:pointer",
@@ -1826,14 +2365,14 @@ function applyPreviewContent(node) {
 				card.style.transform = "scale(1)";
 			});
 
-			// 图片元素 - 使用object-fit:cover撑满画布
+			// 单图保持完整宽高比，多图缩略卡片继续铺满画布。
 			const image = document.createElement("img");
 			image.src = imageDataToUrl(item);
 			image.draggable = false;
 			image.style.cssText = [
 				"width:100%",
 				"height:100%",
-				"object-fit:cover",
+				`object-fit:${isSingleImage ? "contain" : "cover"}`,
 				"display:block",
 			].join(";");
 
@@ -1841,6 +2380,11 @@ function applyPreviewContent(node) {
 			image.onload = () => {
 				if (sizeBadge) {
 					sizeBadge.textContent = `${image.naturalWidth}×${image.naturalHeight}`;
+				}
+				if (isSingleImage && image.naturalWidth > 0 && image.naturalHeight > 0) {
+					item.width = item.width || image.naturalWidth;
+					item.height = item.height || image.naturalHeight;
+					card.style.aspectRatio = `${item.width} / ${item.height}`;
 				}
 				scheduleLayout(node);
 			};
@@ -2057,61 +2601,7 @@ function applyPreviewContent(node) {
 		grid.style.alignItems = "";
 
 		if (!showImage && !showAudio && !showVideo && hasText) {
-			body.innerHTML = renderMarkdown(text);
-			clampTextPreviewLines(body);
-			body.title = "双击复制";
-
-			const handleDblClick = (e) => {
-				if (e.target.closest("a, img, pre, code")) {
-					return;
-				}
-				navigator.clipboard
-					.writeText(String(node.__gjjAnyPreviewText || ""))
-					.then(() => {
-						const originalBackgroundColor = body.style.backgroundColor;
-						body.style.backgroundColor = "#4a7a4a";
-						setTimeout(() => {
-							body.style.backgroundColor = originalBackgroundColor || "transparent";
-						}, 200);
-					})
-					.catch((err) => {
-						console.error("无法复制到剪贴板:", err);
-						try {
-							const textArea = document.createElement("textarea");
-							textArea.value = String(node.__gjjAnyPreviewText || "");
-							textArea.style.position = "fixed";
-							textArea.style.left = "-999999px";
-							textArea.style.top = "-999999px";
-							document.body.appendChild(textArea);
-							textArea.focus();
-							textArea.select();
-							const successful = document.execCommand("copy");
-							document.body.removeChild(textArea);
-							if (successful) {
-								const originalBackgroundColor = body.style.backgroundColor;
-								body.style.backgroundColor = "#4a7a4a";
-								setTimeout(() => {
-									body.style.backgroundColor = originalBackgroundColor || "transparent";
-								}, 200);
-							}
-						} catch (error) {
-							console.error("降级复制方法失败:", error);
-						}
-					});
-			};
-
-			if (body.__gjjDblClickHandler) {
-				body.removeEventListener("dblclick", body.__gjjDblClickHandler);
-				body.removeEventListener("pointerdown", body.__gjjPointerHandler);
-				body.removeEventListener("mousedown", body.__gjjPointerHandler);
-			}
-			body.__gjjDblClickHandler = handleDblClick;
-			const pointerHandler = (e) => handlePreviewPointer(node, e);
-			body.__gjjPointerHandler = pointerHandler;
-			body.addEventListener("dblclick", handleDblClick);
-			body.addEventListener("pointerdown", pointerHandler);
-			body.addEventListener("mousedown", pointerHandler);
-			body.style.cursor = "pointer";
+			renderStandaloneTextarea(node, body, node.__gjjAnyPreviewText || text);
 		} else {
 			body.innerHTML = renderMarkdown(text);
 			clampTextPreviewLines(body);
@@ -2192,7 +2682,7 @@ function getLoraEffectLiveText(node) {
 }
 
 function ensurePreviewWidget(node) {
-	hideLegacyPreviewWidgets(node);
+	clearNativeImagePreviewState(node);
 	if (node.__gjjAnyPreviewContainer) {
 		applyPreviewContent(node);
 		scheduleLayout(node);
@@ -2434,6 +2924,8 @@ function scheduleStabilize(node, ms = 32) {
 	node.__gjjAnyPreviewTimer = setTimeout(() => stabilizeNode(node), ms);
 }
 
+installNativePreviewEventFilter();
+
 app.registerExtension({
 	name: "Comfy.GJJ.AnyPreview",
 
@@ -2442,9 +2934,28 @@ app.registerExtension({
 			return;
 		}
 
+		nodeData.output_preview = false;
+		nodeType.prototype.hideOutputImages = true;
+		if (Array.isArray(nodeData.outputs)) {
+			for (const output of nodeData.outputs) {
+				output.preview = false;
+			}
+		}
+
+		const originalAddCustomWidget = nodeType.prototype.addCustomWidget;
+		nodeType.prototype.addCustomWidget = function (widget, ...args) {
+			if (isNativePreviewWidget(this, widget)) {
+				return suppressNativePreviewWidget(widget);
+			}
+			return typeof originalAddCustomWidget === "function"
+				? originalAddCustomWidget.call(this, widget, ...args)
+				: widget;
+		};
+
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
 			const result = originalOnNodeCreated?.apply(this, args);
+			clearNativeImagePreviewState(this);
 			resetLivePreviewState(this);
 			setTimeout(() => stabilizeNode(this), 0);
 			return result;
@@ -2453,6 +2964,7 @@ app.registerExtension({
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalOnConfigure?.apply(this, args);
+			clearNativeImagePreviewState(this);
 			resetLivePreviewState(this);
 			setTimeout(() => stabilizeNode(this), 0);
 			return result;
@@ -2468,10 +2980,8 @@ app.registerExtension({
 
 		const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
 		nodeType.prototype.onDrawBackground = function (...args) {
-			if (String(this.__gjjAnyPreviewKind || "") === "image") {
-				this.imgs = [];
-				this.images = [];
-				this.preview = null;
+			if (shouldSuppressNativePreview(this)) {
+				clearNativeImagePreviewState(this);
 				const sizeSignature = `${Math.round(this.size?.[0] || 0)}x${Math.round(this.size?.[1] || 0)}`;
 				if (this.__gjjAnyPreviewSizeSignature !== sizeSignature) {
 					this.__gjjAnyPreviewSizeSignature = sizeSignature;
@@ -2479,9 +2989,27 @@ app.registerExtension({
 					updateLayout(this);
 				}
 			}
-			return typeof originalOnDrawBackground === "function"
+			const result = typeof originalOnDrawBackground === "function"
 				? originalOnDrawBackground.apply(this, args)
 				: undefined;
+			if (shouldSuppressNativePreview(this)) {
+				clearNativeImagePreviewState(this);
+			}
+			return result;
+		};
+
+		const originalOnDrawForeground = nodeType.prototype.onDrawForeground;
+		nodeType.prototype.onDrawForeground = function (...args) {
+			if (shouldSuppressNativePreview(this)) {
+				clearNativeImagePreviewState(this);
+			}
+			const result = typeof originalOnDrawForeground === "function"
+				? originalOnDrawForeground.apply(this, args)
+				: undefined;
+			if (shouldSuppressNativePreview(this)) {
+				clearNativeImagePreviewState(this);
+			}
+			return result;
 		};
 
 		const originalOnResize = nodeType.prototype.onResize;
@@ -2496,10 +3024,12 @@ app.registerExtension({
 
 		const originalOnExecuted = nodeType.prototype.onExecuted;
 		nodeType.prototype.onExecuted = function (message) {
+			clearNativeImagePreviewState(this);
 			const result =
 				typeof originalOnExecuted === "function"
-					? originalOnExecuted.call(this, message)
+					? originalOnExecuted.call(this, withoutNativeImagePreview(message || {}))
 					: undefined;
+			clearNativeImagePreviewState(this);
 			const liveText = getLoraEffectLiveText(this);
 			this.__gjjAnyPreviewKind =
 				liveText !== null ? "text" : message?.preview_kind?.[0] || "";
@@ -2530,9 +3060,7 @@ app.registerExtension({
 						? message.preview_video[0]
 						: [];
 			resetLivePreviewState(this);
-			this.imgs = [];
-			this.images = [];
-			this.preview = null;
+			clearNativeImagePreviewState(this);
 			this.__gjjAnyPreviewHeight = Math.min(
 				280,
 				Math.max(
@@ -2541,12 +3069,24 @@ app.registerExtension({
 				),
 			);
 			requestAnimationFrame(() => {
+				clearNativeImagePreviewState(this);
 				applyPreviewContent(this);
+				clearNativeImagePreviewState(this);
 				updateLayout(this);
+				scheduleNativePreviewCleanup(this);
 				scheduleStabilize(this, 0);
 			});
 			return result;
 		};
+	},
+
+	onNodeOutputsUpdated() {
+		for (const node of app.graph?._nodes || []) {
+			if (TARGET_NODES.has(node?.comfyClass)) {
+				clearNativeImagePreviewState(node);
+				scheduleNativePreviewCleanup(node);
+			}
+		}
 	},
 
 	setup() {

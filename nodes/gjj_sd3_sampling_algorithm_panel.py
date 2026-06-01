@@ -416,4 +416,4 @@ class GJJ_SD3SamplingAlgorithmPanel:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_SD3SamplingAlgorithmPanel}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · ⚙ SD3采样算法(Wan)"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · ⚙️ SD3采样算法(Wan)"}

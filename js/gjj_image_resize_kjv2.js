@@ -157,6 +157,18 @@ function findInputSlot(node, name) {
   return (node?.inputs || []).find((input) => getParamInputDefFromInput(input)?.name === def.name) || null;
 }
 
+function disconnectAndRemoveInput(node, index) {
+  if (!node || !Array.isArray(node.inputs) || index < 0 || index >= node.inputs.length) return false;
+  try { node.disconnectInput?.(index); } catch (_) {}
+  try {
+    node.removeInput?.(index);
+  } catch (_) {
+    node.inputs.splice(index, 1);
+  }
+  repairInputLinkSlots(node);
+  return true;
+}
+
 function getGraphLinks(node) {
   const links = node?.graph?.links || app.graph?.links;
   if (!links) return [];
@@ -175,12 +187,45 @@ function getGraphLinkTargetSlot(link) {
   return Array.isArray(link) ? link[4] : link?.target_slot;
 }
 
+function getGraphLinkOriginId(link) {
+  return Array.isArray(link) ? link[1] : (link?.origin_id ?? link?.source_id);
+}
+
+function getGraphLinkOriginSlot(link) {
+  return Array.isArray(link) ? link[2] : (link?.origin_slot ?? link?.source_slot);
+}
+
 function getGraphLink(node, linkId) {
   if (linkId == null) return null;
   const links = node?.graph?.links || app.graph?.links;
   if (!links) return null;
   if (!Array.isArray(links)) return links[linkId] || links[String(linkId)] || null;
   return links.find((link) => String(getGraphLinkId(link)) === String(linkId)) || null;
+}
+
+function getGraphNodeById(graph, id) {
+  if (id == null) return null;
+  try {
+    const numeric = Number(id);
+    if (Number.isFinite(numeric)) {
+      const node = graph?.getNodeById?.(numeric) || app.graph?.getNodeById?.(numeric);
+      if (node) return node;
+    }
+  } catch (_) {}
+  return (graph?._nodes || app.graph?._nodes || []).find((node) => String(node?.id) === String(id)) || null;
+}
+
+function getParamInputDefFromLinkSource(node, link) {
+  const sourceNode = getGraphNodeById(node?.graph || app.graph, getGraphLinkOriginId(link));
+  const output = sourceNode?.outputs?.[Number(getGraphLinkOriginSlot(link))];
+  if (!output) return null;
+  return getParamInputDef([
+    output.name,
+    output.label,
+    output.localized_name,
+    output.display_name,
+    output.tooltip,
+  ].filter(Boolean).join(" "));
 }
 
 function findGraphLinkForInput(node, index) {
@@ -252,6 +297,51 @@ function getSerializedLinkedParamNames(node) {
   return new Set(getSerializedParamLinks(node).map((item) => item.name));
 }
 
+function collectParamLinksByName(node) {
+  const byName = new Map();
+  for (const item of getSerializedParamLinks(node)) {
+    const def = getParamInputDef(item?.name);
+    if (def && item?.link != null) byName.set(def.name, item.link);
+  }
+  if (Array.isArray(node?.inputs)) {
+    for (let index = 0; index < node.inputs.length; index++) {
+      const input = node.inputs[index];
+      const def = getParamInputDefFromInput(input);
+      if (!def) continue;
+      const link = input?.link ?? getInputLinkId(input, null, -1);
+      if (link != null && !byName.has(def.name)) byName.set(def.name, link);
+    }
+  }
+  for (const link of getGraphLinks(node)) {
+    if (String(getGraphLinkTargetId(link)) !== String(node?.id)) continue;
+    const sourceDef = getParamInputDefFromLinkSource(node, link);
+    const linkId = getGraphLinkId(link);
+    if (sourceDef && linkId != null) byName.set(sourceDef.name, linkId);
+  }
+  return byName;
+}
+
+function applyParamLinksByName(node, linksByName) {
+  if (!Array.isArray(node?.inputs) || !(linksByName instanceof Map)) return;
+  const activeLinkIds = new Set([...linksByName.values()].map((link) => String(link)));
+  for (const input of node.inputs) {
+    const def = getParamInputDefFromInput(input);
+    if (def && input?.link != null && activeLinkIds.has(String(input.link)) && String(linksByName.get(def.name)) !== String(input.link)) {
+      input.link = null;
+    }
+  }
+  for (const [name, linkId] of linksByName.entries()) {
+    const def = getParamInputDef(name);
+    if (!def || linkId == null) continue;
+    const slot = node.inputs.findIndex((input) => getParamInputDefFromInput(input)?.name === def.name);
+    if (slot < 0) continue;
+    const input = node.inputs[slot];
+    input.link = linkId;
+    setInputLinkSlot(getGraphLink(node, linkId), node.id, slot, input.type);
+  }
+  repairInputLinkSlots(node);
+}
+
 function rememberSerializedParamLinks(node, data = {}) {
   node.properties ||= {};
   const links = [];
@@ -273,15 +363,7 @@ function rememberSerializedParamLinks(node, data = {}) {
 
 function saveCurrentParamLinks(node, data = null) {
   node.properties ||= {};
-  const links = [];
-  if (Array.isArray(node?.inputs)) {
-    for (let index = 0; index < node.inputs.length; index++) {
-      const input = node.inputs[index];
-      const def = getParamInputDefFromInput(input);
-      const link = getInputLinkId(input, node, index);
-      if (def && link != null) links.push({ name: def.name, link });
-    }
-  }
+  const links = [...collectParamLinksByName(node).entries()].map(([name, link]) => ({ name, link }));
   node.__gjjMfSerializedParamLinks = links;
   node.properties[PARAM_LINKS_PROPERTY] = links;
   if (data) {
@@ -293,15 +375,7 @@ function saveCurrentParamLinks(node, data = null) {
 
 function repairSerializedParamLinks(node) {
   if (!Array.isArray(node?.inputs)) return;
-  for (const item of getSerializedParamLinks(node)) {
-    const def = getParamInputDef(item.name);
-    if (!def || item.link == null) continue;
-    const slot = node.inputs.findIndex((input) => getParamInputDefFromInput(input)?.name === def.name);
-    if (slot < 0) continue;
-    node.inputs[slot].link = item.link;
-    setInputLinkSlot(getGraphLink(node, item.link), node.id, slot, node.inputs[slot].type);
-  }
-  repairInputLinkSlots(node);
+  applyParamLinksByName(node, collectParamLinksByName(node));
 }
 
 function setWidgetVisible(widget, visible) {
@@ -321,7 +395,12 @@ function setWidgetVisible(widget, visible) {
     const saved = widget.__gjjMfNativeSaved || {};
     widget.hidden = false;
     widget.disabled = false;
-    if (saved.type !== undefined) widget.type = String(saved.type || "").startsWith("converted-widget:") ? "number" : saved.type;
+    if (saved.type !== undefined) {
+      const savedType = String(saved.type || "");
+      widget.type = savedType.startsWith("converted-widget:")
+        ? (widget.__gjjMfParamDef?.widgetType || (Array.isArray(widget.options?.values) ? "combo" : "number"))
+        : saved.type;
+    }
     if (saved.computeSize !== undefined) widget.computeSize = saved.computeSize;
     else delete widget.computeSize;
     if (saved.getHeight !== undefined) widget.getHeight = saved.getHeight;
@@ -415,16 +494,22 @@ function setupNativeParamWidget(node, def) {
   const cfg = readConfig(node);
   const widget = findWidget(node, def.name) || createNativeParamWidget(node, def, cfg);
   if (!widget) return null;
+  widget.__gjjMfParamDef = def;
   widget.name = def.name;
   widget.label = def.label;
   widget.localized_name = def.label;
   widget.options ||= {};
+  if (def.widgetType === "combo" && Array.isArray(def.values)) {
+    widget.options.values = def.values;
+    widget.options.values_list = def.values;
+  }
   widget.options.display_name = def.label;
   widget.options.tooltip = `${def.label}：可手填，也可连接外部 ${def.type}。`;
   widget.callback = (value) => {
     const next = def.type === "STRING" ? String(value ?? "") : Number(value);
     writeConfig(node, { [def.cfgKey]: next });
-    redraw(node);
+    if (def.name === "aspect_ratio") buildPanel(node);
+    else redraw(node);
   };
   if (def.type === "STRING") {
     const next = String(cfg[def.cfgKey] ?? "");
@@ -455,39 +540,43 @@ function ensureNativeParamInputSlot(node, def) {
   input.label = def.label;
   input.localized_name = def.label;
   input.tooltip = `${def.label}：连接外部 ${def.type} 后会覆盖当前控件值。`;
-  delete input.widget;
+  input.widget = { name: def.name };
   return input;
 }
 
 function reorderNativeParamInputs(node, visibleDefs) {
   if (!Array.isArray(node?.inputs)) return;
+  const semanticLinks = collectParamLinksByName(node);
   repairSerializedParamLinks(node);
   refreshInputLinksFromGraph(node);
   const visibleNames = new Set((visibleDefs || []).map((def) => def.name));
-  const used = new Set();
-  const fixed = [];
-  for (const input of node.inputs) {
-    if (!getParamInputDefFromInput(input)) fixed.push(input);
+  for (let index = node.inputs.length - 1; index >= 0; index--) {
+    const def = getParamInputDefFromInput(node.inputs[index]);
+    if (def && !visibleNames.has(def.name)) disconnectAndRemoveInput(node, index);
   }
-  const orderedParams = [];
-  const linkedExtras = [];
+  refreshInputLinksFromGraph(node);
   for (const def of PARAM_INPUTS) {
-    if (!visibleNames.has(def.name)) continue;
-    const matches = node.inputs.filter((input) => !used.has(input) && getParamInputDefFromInput(input)?.name === def.name);
+    const matches = node.inputs.filter((input) => getParamInputDefFromInput(input)?.name === def.name);
+    if (matches.length <= 1) continue;
     const picked = matches.find((input) => inputHasRealLink(input, node, node.inputs.indexOf(input))) || matches[0];
-    if (!picked) continue;
-    orderedParams.push(picked);
-    used.add(picked);
-    for (const input of matches) {
-      if (input === picked || used.has(input)) continue;
-      if (inputHasRealLink(input, node, node.inputs.indexOf(input))) {
-        linkedExtras.push(input);
-        used.add(input);
-      }
+    for (let index = node.inputs.length - 1; index >= 0; index--) {
+      const input = node.inputs[index];
+      if (input === picked || getParamInputDefFromInput(input)?.name !== def.name) continue;
+      disconnectAndRemoveInput(node, index);
     }
   }
-  const extras = node.inputs.filter((input) => !fixed.includes(input) && !used.has(input));
-  const next = [...fixed, ...orderedParams, ...linkedExtras, ...extras];
+  refreshInputLinksFromGraph(node);
+  const fixed = node.inputs.filter((input) => !getParamInputDefFromInput(input));
+  const orderedParams = [];
+  for (const def of PARAM_INPUTS) {
+    if (!visibleNames.has(def.name)) continue;
+    const matches = node.inputs.filter((input) => getParamInputDefFromInput(input)?.name === def.name);
+    const picked = matches.find((input) => inputHasRealLink(input, node, node.inputs.indexOf(input))) || matches[0];
+    if (!picked) continue;
+    ensureNativeParamInputSlot(node, def);
+    orderedParams.push(picked);
+  }
+  const next = [...fixed, ...orderedParams];
   if (next.length !== node.inputs.length) return;
   let changed = false;
   for (let index = 0; index < next.length; index++) {
@@ -498,7 +587,8 @@ function reorderNativeParamInputs(node, visibleDefs) {
   }
   if (changed) node.inputs = next;
   repairInputLinkSlots(node);
-  repairSerializedParamLinks(node);
+  applyParamLinksByName(node, semanticLinks);
+  saveCurrentParamLinks(node);
 }
 
 function ensureNativeParamWidgets(node) {
@@ -506,12 +596,7 @@ function ensureNativeParamWidgets(node) {
   repairSerializedParamLinks(node);
   repairInputLinkSlots(node);
   const cfg = readConfig(node);
-  const linkedParamNames = new Set((node.inputs || [])
-    .filter((input, index) => inputHasRealLink(input, node, index))
-    .map((input) => getParamInputDefFromInput(input)?.name)
-    .filter(Boolean));
-  for (const name of getSerializedLinkedParamNames(node)) linkedParamNames.add(name);
-  const visibleDefs = PARAM_INPUTS.filter((def) => isParamDefActive(def, cfg) || linkedParamNames.has(def.name));
+  const visibleDefs = PARAM_INPUTS.filter((def) => isParamDefActive(def, cfg));
   const widgetsByName = new Map();
   for (const def of PARAM_INPUTS) {
     const widget = setupNativeParamWidget(node, def);
@@ -534,7 +619,11 @@ function ensureNativeParamWidgets(node) {
     }
   }
 
-  for (const def of visibleDefs) ensureNativeParamInputSlot(node, def);
+  for (const def of visibleDefs) {
+    const widget = widgetsByName.get(def.name);
+    setWidgetVisible(widget, true);
+    ensureNativeParamInputSlot(node, def);
+  }
   reorderNativeParamInputs(node, visibleDefs);
   repairSerializedParamLinks(node);
   saveCurrentParamLinks(node);
@@ -546,21 +635,11 @@ function syncNativeParamInputSlots(node) {
   if (!Array.isArray(node?.inputs)) return;
   repairSerializedParamLinks(node);
   repairInputLinkSlots(node);
-  const serializedLinked = getSerializedLinkedParamNames(node);
   for (let i = node.inputs.length - 1; i >= 0; i--) {
     const input = node.inputs[i];
     const def = getParamInputDefFromInput(input);
     if (!def || isParamDefActive(def, cfg)) continue;
-    if (inputHasRealLink(input, node, i) || serializedLinked.has(def.name)) {
-      input.name = def.name;
-      input.type = def.type;
-      input.label = def.label;
-      input.localized_name = def.label;
-      input.tooltip = `${def.label}：当前已有外部连接，刷新时会保留此接口。`;
-      delete input.widget;
-      continue;
-    }
-    node.inputs.splice(i, 1);
+    disconnectAndRemoveInput(node, i);
   }
   repairSerializedParamLinks(node);
   repairInputLinkSlots(node);
@@ -578,7 +657,7 @@ function removeConfigInputSlots(node) {
   let removed = false;
   for (let i = node.inputs.length - 1; i >= 0; i--) {
     if (!isConfigInputSlot(node.inputs[i])) continue;
-    node.inputs.splice(i, 1);
+    disconnectAndRemoveInput(node, i);
     removed = true;
   }
   if (removed) {
@@ -1176,24 +1255,11 @@ function buildPanel(node) {
 
   ensureNativeParamWidgets(node);
   syncNativeParamInputSlots(node);
-  for (const def of PARAM_INPUTS.filter((item) => isParamDefActive(item, cfg))) {
-    if (def.widgetType === "combo") {
-      selectField(section, node, cfg, def.cfgKey, def.label, def.options?.tooltip || `${def.label}：选择或连接外部 ${def.type}。`, def.values || []);
-    } else {
-      numberField(section, node, cfg, def.cfgKey, def.label, def.options?.tooltip || `${def.label}：拖动滑块或输入数字。`, {
-        min: def.min,
-        max: def.max,
-        sliderMax: def.sliderMax,
-        step: def.step,
-        type: def.type,
-        defaultValue: def.defaultValue,
-      });
-    }
-  }
   if (cfg.mode === "像素" && cfg.aspect_ratio === "自定义") {
     numberField(section, node, cfg, "proportional_width", "↔️ 比例宽", "自定义比例宽。Custom ratio width.", { min: 1, max: 100000, sliderMax: 100, step: 1, type: "FLOAT" });
     numberField(section, node, cfg, "proportional_height", "↕️ 比例高", "自定义比例高。Custom ratio height.", { min: 1, max: 100000, sliderMax: 100, step: 1, type: "FLOAT" });
   }
+  if (!section.children.length) section.remove();
 
   updateDomState(node);
   writeConfig(node);
@@ -1210,7 +1276,7 @@ function updateDomState(node) {
   if (dom.settingsBtn) {
     const showSettings = getShowSettings(node);
     dom.settingsBtn.classList.toggle("active", showSettings);
-    dom.settingsBtn.textContent = showSettings ? "⚙更多设置 收起" : "⚙更多设置";
+    dom.settingsBtn.textContent = showSettings ? "⚙️更多设置 收起" : "⚙️更多设置";
   }
 }
 

@@ -18,7 +18,20 @@ const POSITIVE_PROMPT_INPUT = "positive_prompt_input";
 
 const DOM_WIDGET = "gjj_clip_prompt_encode_panel";
 const SAVED_VALUES_PROPERTY = "gjj_clip_prompt_encode_panel_values";
+const TEXTAREA_HEIGHTS_PROPERTY = "gjj_clip_prompt_encode_panel_textarea_heights";
 const ALL_FIELDS = Object.values(FIELD);
+const TEXTAREA_MIN_ROWS = 1;
+const TEXTAREA_FONT_SIZE = 12;
+const TEXTAREA_LINE_HEIGHT = 1.45;
+const TEXTAREA_VERTICAL_CHROME = 16;
+const TEXTAREA_MIN_HEIGHT = Math.ceil(TEXTAREA_FONT_SIZE * TEXTAREA_LINE_HEIGHT * TEXTAREA_MIN_ROWS + TEXTAREA_VERTICAL_CHROME);
+const TEXTAREA_AUTO_MAX_HEIGHT = 190;
+const MIN_NODE_WIDTH = 360;
+const MIN_NODE_HEIGHT = 180;
+const PANEL_MIN_HEIGHT = 120;
+const PANEL_GAP = 7;
+const NODE_BOTTOM_PADDING = 12;
+const SIZE_EPSILON = 8;
 
 function getWidget(node, name) {
 	return node.widgets?.find((w) => w?.name === name);
@@ -55,6 +68,73 @@ function collectValues(node) {
 	return values;
 }
 
+function normalizeTextareaHeight(value) {
+	const height = Number(value);
+	if (!Number.isFinite(height)) return 0;
+	return Math.max(TEXTAREA_MIN_HEIGHT, Math.round(height));
+}
+
+function textareaHeights(node) {
+	node.properties = node.properties || {};
+	const saved = node.properties[TEXTAREA_HEIGHTS_PROPERTY];
+	if (saved && typeof saved === "object") return saved;
+	node.properties[TEXTAREA_HEIGHTS_PROPERTY] = {};
+	return node.properties[TEXTAREA_HEIGHTS_PROPERTY];
+}
+
+function savedTextareaHeight(node, name) {
+	const direct = textareaHeights(node)[name];
+	const legacy = node.properties?.[`gjj_clip_prompt_textarea_height_${name}`];
+	return normalizeTextareaHeight(direct ?? legacy);
+}
+
+function setTextareaHeight(node, name, height) {
+	const normalized = normalizeTextareaHeight(height);
+	if (!normalized) return;
+	const heights = textareaHeights(node);
+	heights[name] = normalized;
+	node.properties[`gjj_clip_prompt_textarea_height_${name}`] = normalized;
+}
+
+function clearTextareaHeight(node, name) {
+	const heights = textareaHeights(node);
+	delete heights[name];
+	delete node.properties[`gjj_clip_prompt_textarea_height_${name}`];
+}
+
+function saveTextareaHeights(node, serializedNode = null) {
+	node.properties = node.properties || {};
+	const heights = {};
+	for (const name of [FIELD.positive, FIELD.negative]) {
+		const height = savedTextareaHeight(node, name);
+		if (height) heights[name] = height;
+	}
+	node.properties[TEXTAREA_HEIGHTS_PROPERTY] = { ...heights };
+	if (serializedNode) {
+		serializedNode.properties = serializedNode.properties || {};
+		serializedNode.properties[TEXTAREA_HEIGHTS_PROPERTY] = { ...heights };
+		for (const [name, height] of Object.entries(heights)) {
+			serializedNode.properties[`gjj_clip_prompt_textarea_height_${name}`] = height;
+		}
+	}
+	return heights;
+}
+
+function restoreTextareaHeights(node, serializedNode = null) {
+	const props = serializedNode?.properties || node.properties || {};
+	const saved = props?.[TEXTAREA_HEIGHTS_PROPERTY] || {};
+	node.properties = node.properties || {};
+	const heights = {};
+	for (const name of [FIELD.positive, FIELD.negative]) {
+		const height = normalizeTextareaHeight(saved[name] ?? props[`gjj_clip_prompt_textarea_height_${name}`]);
+		if (height) {
+			heights[name] = height;
+			node.properties[`gjj_clip_prompt_textarea_height_${name}`] = height;
+		}
+	}
+	node.properties[TEXTAREA_HEIGHTS_PROPERTY] = heights;
+}
+
 function saveValues(node, serializedNode = null) {
 	node.properties = node.properties || {};
 	const values = collectValues(node);
@@ -80,10 +160,12 @@ function saveValues(node, serializedNode = null) {
 			}
 		}
 	}
+	saveTextareaHeights(node, serializedNode);
 	return values;
 }
 
 function restoreValues(node, serializedNode = null) {
+	restoreTextareaHeights(node, serializedNode);
 	const props = serializedNode?.properties || node.properties || {};
 	const saved = props?.[SAVED_VALUES_PROPERTY] || {};
 	for (const name of ALL_FIELDS) {
@@ -120,13 +202,11 @@ function hideWidget(w) {
 	safeAssign(w, "hidden", true);
 	safeAssign(w, "type", `converted-widget:${w.name || "hidden"}`);
 	safeAssign(w, "label", "");
-	w.computeSize = () => [0, -4];
-	w.getHeight = () => -4;
+	w.computeSize = () => [0, 0];
+	w.getHeight = () => 0;
 	w.draw = () => {};
-	safeAssign(w, "y", 0);
-	safeAssign(w, "last_y", 0);
-	safeAssign(w, "size", [0, -4]);
-	safeAssign(w, "height", -4);
+	safeAssign(w, "size", [0, 0]);
+	safeAssign(w, "height", 0);
 	safeAssign(w, "serialize", true);
 	if (w.options && typeof w.options === "object") {
 		w.options.hidden = true;
@@ -352,17 +432,81 @@ function queueExternalTranslationIfChanged(node, ms = 180) {
 	}
 }
 
+function measurePanelHeight(node) {
+	const container = node?.__gjjClipPromptContainer;
+	if (!container) return PANEL_MIN_HEIGHT;
+	const children = Array.from(container.children || []).filter((child) => {
+		if (!child || String(child.tagName || "").toLowerCase() === "style") return false;
+		const style = getComputedStyle(child);
+		return style.display !== "none" && style.visibility !== "hidden";
+	});
+	const childrenHeight = children.reduce((total, child) => {
+		const rectHeight = Number(child.getBoundingClientRect?.().height || 0);
+		const height = Math.ceil(rectHeight || child.offsetHeight || 0);
+		return total + height;
+	}, 0);
+	const gapHeight = Math.max(0, children.length - 1) * PANEL_GAP;
+	const height = Math.ceil(childrenHeight + gapHeight || container.offsetHeight || node?.__gjjClipPromptPanelHeight || PANEL_MIN_HEIGHT);
+	const normalized = Math.max(PANEL_MIN_HEIGHT, height);
+	if (node) node.__gjjClipPromptPanelHeight = normalized;
+	return normalized;
+}
+
+function estimateWidgetTop(node) {
+	const visibleInputs = (node?.inputs || []).filter((input) => input && input.type !== "hidden").length;
+	const visibleRows = Math.max(1, visibleInputs);
+	return 32 + visibleRows * 20 + 10;
+}
+
+function getPanelWidgetTop(node) {
+	const widget = node?.__gjjClipPromptWidget;
+	const candidates = [
+		Number(widget?.last_y),
+		Number(widget?.y),
+		Number(node?.__gjjClipPromptLastWidgetTop),
+	];
+	for (const value of candidates) {
+		if (Number.isFinite(value) && value > 0) {
+			node.__gjjClipPromptLastWidgetTop = value;
+			return value;
+		}
+	}
+	const fallback = estimateWidgetTop(node);
+	node.__gjjClipPromptLastWidgetTop = fallback;
+	return fallback;
+}
+
+function desiredNodeSize(node) {
+	const width = Math.max(1, Number(node?.size?.[0] || MIN_NODE_WIDTH));
+	const height = Math.max(
+		MIN_NODE_HEIGHT,
+		Math.ceil(getPanelWidgetTop(node) + measurePanelHeight(node) + NODE_BOTTOM_PADDING),
+	);
+	return [width, height];
+}
+
 function refreshNode(node) {
 	if (!node) return;
-	const width = Math.max(360, Number(node.size?.[0] || 460));
-	const height = Math.max(180, Math.ceil(node.__gjjClipPromptContainer?.scrollHeight || node.size?.[1] || 180) + 10);
-	if (!node.__gjjClipPromptSizing && (Math.abs(Number(node.size?.[1] || 0) - height) > 1 || Math.abs(Number(node.size?.[0] || 0) - width) > 1)) {
+	const [width, height] = desiredNodeSize(node);
+	const currentWidth = Number(node.size?.[0] || 0);
+	const currentHeight = Number(node.size?.[1] || 0);
+	const widthChanged = currentWidth <= 0 && Math.abs(currentWidth - width) > SIZE_EPSILON;
+	const heightChanged = Math.abs(currentHeight - height) > SIZE_EPSILON;
+	if (!node.__gjjClipPromptSizing && (widthChanged || heightChanged)) {
 		node.__gjjClipPromptSizing = true;
 		try { node.setSize?.([width, height]); }
 		finally { requestAnimationFrame(() => { node.__gjjClipPromptSizing = false; }); }
 	}
 	node.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function scheduleRefreshNode(node, ms = 0) {
+	if (!node) return;
+	clearTimeout(node.__gjjClipPromptRefreshTimer);
+	node.__gjjClipPromptRefreshTimer = setTimeout(() => {
+		requestAnimationFrame(() => refreshNode(node));
+	}, ms);
 }
 
 function syncDomFromWidgets(node) {
@@ -386,6 +530,7 @@ function syncDomFromWidgets(node) {
 			? (translationEnabled ? "当前使用左侧“正向提示词”输入口；此处只显示翻译后的文本。" : "当前使用左侧“正向提示词”输入口的外部文本。")
 			: "中文引号“”内的内容会保持原文。";
 		node.__gjjClipPositive.classList.toggle("external", positiveConnected);
+		resizeTextarea(node.__gjjClipPositive, node, FIELD.positive);
 	}
 	if (node.__gjjClipNegative && node.__gjjClipNegative.value !== String(getValue(node, FIELD.negative, ""))) {
 		node.__gjjClipNegative.value = String(getValue(node, FIELD.negative, ""));
@@ -400,6 +545,7 @@ function syncDomFromWidgets(node) {
 	}
 	if (node.__gjjClipNegativeLabel) node.__gjjClipNegativeLabel.style.display = zero ? "none" : "";
 	if (node.__gjjClipNegative) node.__gjjClipNegative.style.display = zero ? "none" : "";
+	if (node.__gjjClipNegative) resizeTextarea(node.__gjjClipNegative, node, FIELD.negative);
 	if (node.__gjjClipDevice) node.__gjjClipDevice.value = String(getValue(node, FIELD.device, "auto") || "auto");
 	if (node.__gjjClipUnload) {
 		const unload = toBool(getValue(node, FIELD.unload, false));
@@ -470,7 +616,7 @@ async function translatePrompts(node, options = {}) {
 		}
 		setStatus(node, useExternalPositive ? "上游正向提示词已翻译" : "翻译完成");
 		syncDomFromWidgets(node);
-		refreshNode(node);
+		scheduleRefreshNode(node);
 	} catch (error) {
 		console.error("[GJJ CLIP Prompt Encode] 翻译失败", error);
 		setStatus(node, `翻译失败：${error?.message || error}`);
@@ -483,12 +629,73 @@ async function translatePrompts(node, options = {}) {
 function setStatus(node, text) {
 	if (!node.__gjjClipStatus) return;
 	node.__gjjClipStatus.textContent = String(text || "");
+	node.__gjjClipStatus.style.display = text ? "block" : "none";
 	clearTimeout(node.__gjjClipStatusTimer);
 	if (text) {
 		node.__gjjClipStatusTimer = setTimeout(() => {
-			if (node.__gjjClipStatus) node.__gjjClipStatus.textContent = "";
+			if (node.__gjjClipStatus) {
+				node.__gjjClipStatus.textContent = "";
+				node.__gjjClipStatus.style.display = "none";
+			}
 		}, 3500);
 	}
+}
+
+function textareaAutoHeight(area) {
+	const raw = Math.ceil(area?.scrollHeight || TEXTAREA_MIN_HEIGHT);
+	return Math.max(TEXTAREA_MIN_HEIGHT, Math.min(TEXTAREA_AUTO_MAX_HEIGHT, raw));
+}
+
+function currentTextareaHeight(area) {
+	return Math.round(Number(area?.getBoundingClientRect?.().height || 0));
+}
+
+function resizeTextarea(area, node = null, name = "") {
+	if (!area?.style) return;
+	const manualHeight = node && name ? savedTextareaHeight(node, name) : 0;
+	area.__gjjClipLastAutoHeight = textareaAutoHeight(area);
+	if (manualHeight) {
+		area.style.height = `${manualHeight}px`;
+		return;
+	}
+	area.style.height = "auto";
+	const nextHeight = textareaAutoHeight(area);
+	area.__gjjClipLastAutoHeight = nextHeight;
+	area.style.height = `${nextHeight}px`;
+}
+
+function commitManualTextareaHeight(node, area, name, startHeight = 0) {
+	const height = normalizeTextareaHeight(currentTextareaHeight(area));
+	if (!height) return;
+	const autoHeight = textareaAutoHeight(area);
+	const changedByUser = Math.abs(height - startHeight) > 1;
+	if (!changedByUser) return;
+	if (Math.abs(height - autoHeight) <= 2) {
+		clearTextareaHeight(node, name);
+	} else {
+		setTextareaHeight(node, name, height);
+	}
+	saveValues(node);
+	scheduleRefreshNode(node);
+}
+
+function watchTextareaManualHeight(node, area, name) {
+	if (!area || area.__gjjClipHeightWatcher) return;
+	area.__gjjClipHeightWatcher = true;
+	const begin = () => {
+		area.__gjjClipResizeStartHeight = currentTextareaHeight(area);
+	};
+	const commit = () => {
+		const startHeight = Number(area.__gjjClipResizeStartHeight || 0);
+		if (!startHeight) return;
+		area.__gjjClipResizeStartHeight = 0;
+		requestAnimationFrame(() => commitManualTextareaHeight(node, area, name, startHeight));
+	};
+	area.addEventListener("pointerdown", begin);
+	area.addEventListener("pointerup", commit);
+	area.addEventListener("mouseup", commit);
+	area.addEventListener("blur", commit);
+	window.addEventListener("pointerup", commit, true);
 }
 
 function createTextarea(node, name, placeholder) {
@@ -496,6 +703,7 @@ function createTextarea(node, name, placeholder) {
 	area.className = "gjj-clip-prompt-textarea";
 	area.value = String(getValue(node, name, ""));
 	area.placeholder = placeholder;
+	area.rows = TEXTAREA_MIN_ROWS;
 	area.spellcheck = false;
 	protect(area);
 	area.addEventListener("input", () => {
@@ -511,9 +719,13 @@ function createTextarea(node, name, placeholder) {
 			return;
 		}
 		setValue(node, name, area.value);
-		area.style.height = "auto";
-		area.style.height = `${Math.max(78, area.scrollHeight || 78)}px`;
-		refreshNode(node);
+		resizeTextarea(area, node, name);
+		scheduleRefreshNode(node);
+	});
+	watchTextareaManualHeight(node, area, name);
+	requestAnimationFrame(() => {
+		resizeTextarea(area, node, name);
+		scheduleRefreshNode(node);
 	});
 	return area;
 }
@@ -526,10 +738,10 @@ function buildDom(node) {
 	const style = document.createElement("style");
 	style.textContent = `
 		.gjj-clip-prompt-panel * { box-sizing:border-box; }
-		.gjj-clip-prompt-toolbar { display:flex; align-items:center; gap:6px; }
+		.gjj-clip-prompt-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:6px; width:100%; min-width:0; overflow:visible; }
 		.gjj-clip-prompt-btn, .gjj-clip-prompt-select {
 			height:28px; border:1px solid #3d515a; border-radius:7px; background:#202a30; color:#dce7e2;
-			padding:3px 8px; font-size:12px; cursor:pointer; white-space:nowrap;
+			flex:0 0 auto; max-width:100%; padding:3px 8px; font-size:12px; cursor:pointer; white-space:nowrap;
 		}
 		.gjj-clip-prompt-btn:hover { background:#2a3941; }
 		.gjj-clip-prompt-btn[data-value="true"] { border-color:#4f8f7a; background:#20362f; color:#dff8ea; }
@@ -537,13 +749,13 @@ function buildDom(node) {
 		.gjj-clip-prompt-select { min-width:74px; cursor:pointer; }
 		.gjj-clip-prompt-label { color:#b9c8cc; font-size:12px; display:flex; align-items:center; justify-content:space-between; }
 		.gjj-clip-prompt-textarea {
-			width:100%; min-height:78px; resize:vertical; padding:7px 8px; border:1px solid #33464e;
+			width:100%; min-height:${TEXTAREA_MIN_HEIGHT}px; resize:vertical; padding:7px 8px; border:1px solid #33464e;
 			border-radius:8px; outline:none; background:#10181c; color:#f1f5f5;
 			font:12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
 		}
 		.gjj-clip-prompt-textarea:focus { border-color:#6aa6b8; background:#111d22; }
 		.gjj-clip-prompt-textarea.external { border-color:#4b5860; background:#101417; color:#8ea0a8; opacity:.78; }
-		.gjj-clip-prompt-status { flex:1; min-width:0; color:#8ea0a8; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+		.gjj-clip-prompt-status { display:none; flex:1 1 0; min-width:0; color:#8ea0a8; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 	`;
 
 	const toolbar = document.createElement("div");
@@ -558,7 +770,7 @@ function buildDom(node) {
 		event.stopPropagation();
 		setValue(node, FIELD.zero, !toBool(getValue(node, FIELD.zero, false)));
 		syncDomFromWidgets(node);
-		refreshNode(node);
+		scheduleRefreshNode(node);
 	});
 	protect(zero);
 
@@ -582,7 +794,7 @@ function buildDom(node) {
 			}
 			setStatus(node, "翻译已关闭");
 			syncDomFromWidgets(node);
-			refreshNode(node);
+			scheduleRefreshNode(node);
 		}
 	});
 	protect(translate);
@@ -657,7 +869,10 @@ function ensureDom(node) {
 		hideOnZoom: false,
 	});
 	if (domWidget) {
-		domWidget.computeSize = (width) => [Math.max(360, Number(width || node.size?.[0] || 460)), Math.max(120, Math.ceil(container.scrollHeight || 120))];
+		domWidget.computeSize = (width) => [
+			Math.max(1, Number(width || node.size?.[0] || MIN_NODE_WIDTH)),
+			measurePanelHeight(node),
+		];
 		node.__gjjClipPromptWidget = domWidget;
 		if (Array.isArray(node.widgets)) {
 			const index = node.widgets.indexOf(domWidget);
@@ -675,7 +890,7 @@ function stabilize(node) {
 	ensureDom(node);
 	hideNativeWidgets(node);
 	syncDomFromWidgets(node);
-	refreshNode(node);
+	scheduleRefreshNode(node);
 }
 
 function schedule(node, ms = 0) {
@@ -694,7 +909,7 @@ function applyBackendTranslation(detail) {
 	setValue(node, FIELD.positive, detail.positive);
 	setStatus(node, "上游正向提示词已翻译回填");
 	syncDomFromWidgets(node);
-	refreshNode(node);
+	scheduleRefreshNode(node);
 }
 
 api.addEventListener(TRANSLATED_EVENT, (event) => applyBackendTranslation(event?.detail || {}));
@@ -737,8 +952,22 @@ app.registerExtension({
 		const originalOnResize = nodeType.prototype.onResize;
 		nodeType.prototype.onResize = function (...args) {
 			const result = originalOnResize?.apply(this, args);
-			if (!this.__gjjClipPromptSizing) refreshNode(this);
+			if (!this.__gjjClipPromptSizing) scheduleRefreshNode(this, 120);
 			return result;
+		};
+
+		const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
+		nodeType.prototype.onDrawBackground = function (...args) {
+			const widgetTop = Math.max(
+				0,
+				Number(this.__gjjClipPromptWidget?.last_y || 0),
+				Number(this.__gjjClipPromptWidget?.y || 0),
+			);
+			if (widgetTop > 0 && Math.abs(widgetTop - Number(this.__gjjClipPromptLastWidgetTop || 0)) > 1) {
+				this.__gjjClipPromptLastWidgetTop = widgetTop;
+				scheduleRefreshNode(this);
+			}
+			return originalOnDrawBackground?.apply(this, args);
 		};
 
 		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;

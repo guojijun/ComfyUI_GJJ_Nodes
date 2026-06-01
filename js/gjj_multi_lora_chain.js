@@ -4,11 +4,17 @@ const TARGET_NODES = new Set([
 	"GJJ_MultiLoraChainLoader",
 	"GJJ_LoraChainConfig",
 ]);
+const LOADER_NODE_NAME = "GJJ_MultiLoraChainLoader";
 const DATA_WIDGET_NAME = "lora_data";
 const SEARCH_BY_ROW_PROPERTY = "gjj_lora_search_by_row";
 const GLOBAL_SEARCH_PROPERTY = "gjj_lora_global_search";
 const GROUP_RULES_PROPERTY = "gjj_lora_group_rules";
 const ADVANCED_OPEN_PROPERTY = "gjj_lora_advanced_open";
+const CLIP_PORTS_OPEN_PROPERTY = "gjj_lora_clip_ports_open";
+const MODEL_OUTPUT_NAME = "叠加模型输出";
+const CLIP_INPUT_NAME = "clip";
+const CLIP_INPUT_LABEL = "CLIP 输入";
+const CLIP_OUTPUT_NAME = "叠加编码输出";
 const DEFAULT_EMPTY_OPTION = { value: "", label: "未选择" };
 const DEFAULT_ROW = { enabled: false, name: "", strength: 1.0 };
 const DEFAULT_GROUP_RULES = [
@@ -41,6 +47,14 @@ function isPartialNumericInput(value) {
 
 function formatStrength(value, fallback = 1.0) {
 	return normalizeStrength(value, fallback).toFixed(2);
+}
+
+function normalizeBoolean(value) {
+	return value === true || value === 1 || value === "1" || String(value).toLowerCase() === "true";
+}
+
+function isLoaderNode(node) {
+	return node?.comfyClass === LOADER_NODE_NAME || node?.type === LOADER_NODE_NAME;
 }
 
 function normalizeRows(value) {
@@ -184,6 +198,7 @@ function ensureNodeState(node) {
 		globalSearch: String(node.properties[GLOBAL_SEARCH_PROPERTY] || ""),
 		groupRulesText: String(node.properties[GROUP_RULES_PROPERTY] || DEFAULT_GROUP_RULES),
 		advancedOpen: Boolean(node.properties[ADVANCED_OPEN_PROPERTY]),
+		clipPortsOpen: normalizeBoolean(node.properties[CLIP_PORTS_OPEN_PROPERTY]),
 	};
 	return node.__gjjLoraState;
 }
@@ -202,6 +217,168 @@ function updateNodeHeight(node, rowCount) {
 	node.size = [Math.max(node.size?.[0] || 420, 420), targetHeight];
 	node.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function markNodeDirty(node) {
+	node?.setDirtyCanvas?.(true, true);
+	node?.graph?.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function findClipInputIndex(node) {
+	return (node.inputs || []).findIndex((input) => {
+		const name = String(input?.name || "");
+		const label = String(input?.label || input?.localized_name || "");
+		const type = String(input?.type || "").toUpperCase();
+		return name === CLIP_INPUT_NAME || type === "CLIP" || /clip/i.test(`${name} ${label}`);
+	});
+}
+
+function findClipOutputIndex(node) {
+	return (node.outputs || []).findIndex((output, index) => {
+		if (index === 0 && String(output?.type || "").toUpperCase() === "MODEL") {
+			return false;
+		}
+		const name = String(output?.name || "");
+		const label = String(output?.label || output?.localized_name || "");
+		const type = String(output?.type || "").toUpperCase();
+		return type === "CLIP" || /clip|编码/.test(`${name} ${label}`);
+	});
+}
+
+function normalizeClipInput(input) {
+	if (!input) {
+		return;
+	}
+	input.name = CLIP_INPUT_NAME;
+	input.label = CLIP_INPUT_LABEL;
+	input.localized_name = CLIP_INPUT_LABEL;
+	input.type = "CLIP";
+	input.tooltip = "可选接入 CLIP；开启此端口后 LoRA 会同时作用到模型和 CLIP。";
+}
+
+function normalizeClipOutput(output) {
+	if (!output) {
+		return;
+	}
+	output.name = CLIP_OUTPUT_NAME;
+	output.label = CLIP_OUTPUT_NAME;
+	output.localized_name = CLIP_OUTPUT_NAME;
+	output.type = "CLIP";
+	output.tooltip = "开启 CLIP 端口后输出叠加 LoRA 后的 CLIP；未接入 CLIP 时这里会返回空值。";
+}
+
+function normalizeModelOutput(node) {
+	const output = node.outputs?.[0];
+	if (!output || String(output?.type || "").toUpperCase() !== "MODEL") {
+		return;
+	}
+	output.name = MODEL_OUTPUT_NAME;
+	output.label = MODEL_OUTPUT_NAME;
+	output.localized_name = MODEL_OUTPUT_NAME;
+}
+
+function clipPortsHaveLinks(node) {
+	const input = (node.inputs || [])[findClipInputIndex(node)];
+	const output = (node.outputs || [])[findClipOutputIndex(node)];
+	return Boolean(input?.link != null || (Array.isArray(output?.links) && output.links.length > 0));
+}
+
+function removeInputAt(node, index) {
+	if (index < 0) {
+		return false;
+	}
+	const input = node.inputs?.[index];
+	if (input?.link != null) {
+		return false;
+	}
+	if (typeof node.removeInput === "function") {
+		node.removeInput(index);
+	} else {
+		node.inputs.splice(index, 1);
+	}
+	return true;
+}
+
+function removeOutputAt(node, index) {
+	if (index < 0) {
+		return false;
+	}
+	const output = node.outputs?.[index];
+	if (Array.isArray(output?.links) && output.links.length > 0) {
+		return false;
+	}
+	if (typeof node.removeOutput === "function") {
+		node.removeOutput(index);
+	} else {
+		node.outputs.splice(index, 1);
+	}
+	return true;
+}
+
+function ensureClipInput(node) {
+	let index = findClipInputIndex(node);
+	if (index < 0) {
+		node.addInput?.(CLIP_INPUT_NAME, "CLIP");
+		index = findClipInputIndex(node);
+	}
+	normalizeClipInput(node.inputs?.[index]);
+}
+
+function ensureClipOutput(node) {
+	normalizeModelOutput(node);
+	let index = findClipOutputIndex(node);
+	if (index < 0) {
+		node.addOutput?.(CLIP_OUTPUT_NAME, "CLIP");
+		index = findClipOutputIndex(node);
+	}
+	normalizeClipOutput(node.outputs?.[index]);
+}
+
+function updateClipPortsButton(node) {
+	const button = node.__gjjLoraClipPortsButton;
+	if (!button) {
+		return;
+	}
+	const open = Boolean(ensureNodeState(node).clipPortsOpen);
+	button.textContent = open ? "CLIP已开" : "⚙设置";
+	button.classList.toggle("on", open);
+	button.title = open
+		? "点击关闭 CLIP 输入/输出端口；已有连线时会保持开启。"
+		: "点击开启 CLIP 输入/输出端口。默认关闭，只串联加载 MODEL。";
+}
+
+function applyClipPortVisibility(node) {
+	if (!isLoaderNode(node)) {
+		return;
+	}
+	const state = ensureNodeState(node);
+	if (clipPortsHaveLinks(node)) {
+		state.clipPortsOpen = true;
+		node.properties[CLIP_PORTS_OPEN_PROPERTY] = true;
+	}
+
+	if (state.clipPortsOpen) {
+		ensureClipInput(node);
+		ensureClipOutput(node);
+	} else {
+		removeInputAt(node, findClipInputIndex(node));
+		removeOutputAt(node, findClipOutputIndex(node));
+		normalizeModelOutput(node);
+	}
+
+	updateClipPortsButton(node);
+	markNodeDirty(node);
+}
+
+function setClipPortsOpen(node, value) {
+	if (!isLoaderNode(node)) {
+		return;
+	}
+	const state = ensureNodeState(node);
+	state.clipPortsOpen = Boolean(value) || clipPortsHaveLinks(node);
+	node.properties[CLIP_PORTS_OPEN_PROPERTY] = state.clipPortsOpen;
+	applyClipPortVisibility(node);
 }
 
 function updateDataWidget(node) {
@@ -486,6 +663,8 @@ function createStyleTag(container) {
 		.gjj-lora-global-search { flex:1; min-width:0; background:#11181c; color:#dce7e2; border:1px solid #41535b; border-radius:6px; padding:4px 8px; font-size:11px; }
 		.gjj-lora-refresh { padding:2px 8px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:11px; }
 		.gjj-lora-advanced-btn { padding:2px 8px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:11px; }
+		.gjj-lora-clip-btn { padding:2px 8px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:11px; white-space:nowrap; }
+		.gjj-lora-clip-btn.on { border-color:#3b8d6c; background:#1b3a31; color:#dfffee; }
 		.gjj-lora-advanced-panel { display:none; }
 		.gjj-lora-advanced-panel.open { display:block; width:100%; }
 		.gjj-lora-rules-input { display:block; width:100%; min-height:38px; resize:vertical; background:#11181c; color:#dce7e2; border:1px solid #41535b; border-radius:6px; padding:6px 8px; font-size:11px; box-sizing:border-box; }
@@ -859,6 +1038,7 @@ function renderUi(node) {
 	if (node.__gjjLoraAdvancedButton) {
 		node.__gjjLoraAdvancedButton.textContent = state.advancedOpen ? "收起" : "高级";
 	}
+	applyClipPortVisibility(node);
 	if (globalThis.__gjjLoraPopup?.state?.node === node) {
 		globalThis.__gjjLoraPopup.close();
 	}
@@ -936,9 +1116,24 @@ function setupUi(node) {
 		renderUi(node);
 	});
 
+	let clipPortsButton = null;
+	if (isLoaderNode(node)) {
+		clipPortsButton = document.createElement("button");
+		clipPortsButton.className = "gjj-lora-clip-btn";
+		clipPortsButton.type = "button";
+		clipPortsButton.addEventListener("click", () => {
+			const state = ensureNodeState(node);
+			setClipPortsOpen(node, !state.clipPortsOpen);
+			renderUi(node);
+		});
+	}
+
 	toolbarMain.appendChild(globalSearch);
 	toolbarMain.appendChild(refreshButton);
 	toolbarMain.appendChild(advancedButton);
+	if (clipPortsButton) {
+		toolbarMain.appendChild(clipPortsButton);
+	}
 	toolbar.appendChild(toolbarMain);
 
 	const advancedPanel = document.createElement("div");
@@ -973,6 +1168,7 @@ function setupUi(node) {
 	node.__gjjLoraRulesInput = rulesInput;
 	node.__gjjLoraAdvancedPanel = advancedPanel;
 	node.__gjjLoraAdvancedButton = advancedButton;
+	node.__gjjLoraClipPortsButton = clipPortsButton;
 	const originalOnSerialize = node.onSerialize;
 	node.onSerialize = function (serializedNode) {
 		updateDataWidget(this);
@@ -995,9 +1191,13 @@ function setupUi(node) {
 		serializedNode.properties[GLOBAL_SEARCH_PROPERTY] = String(ensureNodeState(this).globalSearch || "");
 		serializedNode.properties[GROUP_RULES_PROPERTY] = ensureNodeState(this).groupRulesText;
 		serializedNode.properties[ADVANCED_OPEN_PROPERTY] = ensureNodeState(this).advancedOpen;
+		if (isLoaderNode(this)) {
+			serializedNode.properties[CLIP_PORTS_OPEN_PROPERTY] = Boolean(ensureNodeState(this).clipPortsOpen);
+		}
 	};
 	node.addDOMWidget("LoRA 串联", "HTML", container, { serialize: false });
 
+	applyClipPortVisibility(node);
 	refreshOptions(node, false).then(() => {
 		renderUi(node);
 	});
@@ -1029,6 +1229,11 @@ app.registerExtension({
 				state.globalSearch = String(this.properties?.[GLOBAL_SEARCH_PROPERTY] || "");
 				state.groupRulesText = String(this.properties?.[GROUP_RULES_PROPERTY] || DEFAULT_GROUP_RULES);
 				state.advancedOpen = Boolean(this.properties?.[ADVANCED_OPEN_PROPERTY]);
+				state.clipPortsOpen = normalizeBoolean(this.properties?.[CLIP_PORTS_OPEN_PROPERTY]);
+				if (clipPortsHaveLinks(this)) {
+					state.clipPortsOpen = true;
+					this.properties[CLIP_PORTS_OPEN_PROPERTY] = true;
+				}
 				setupUi(this);
 				renderUi(this);
 			}, 0);

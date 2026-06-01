@@ -1217,6 +1217,7 @@ class GJJ_VideoKijaiModelLoader:
         "节点使用 GJJ 内置 vendor/wanvideo_wrapper 运行层，不依赖外部 ComfyUI-WanVideoWrapper 节点包。"
     )
     SEARCH_ALIASES = [
+        "MMKJ",
         "Kijai Model Loader",
         "WanVideoWrapper loader",
         "WANVIDEOMODEL",
@@ -1226,6 +1227,8 @@ class GJJ_VideoKijaiModelLoader:
         "VACE",
     ]
     GJJ_HELP = {
+        "model_tree": True,
+        "model_download_url": "https://pan.quark.cn/s/6ec846f1f58d",
         "models": [
             {"label": "主模型", "value": "models/diffusion_models/...", "tooltip": "按当前预设从 Kijai/WanVideoWrapper 工作流模型族中自动匹配。"},
             {"label": "VAE", "value": "models/vae/Wan2_1_VAE_bf16.safetensors 或 Wan2_2_VAE_bf16.safetensors", "tooltip": "输出 WANVAE，可直连 KJ 系 WanVideo 节点。"},
@@ -1478,4 +1481,4 @@ class GJJ_VideoKijaiModelLoader:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_VideoKijaiModelLoader}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ ·🎞️ Kijai视频模型加载"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ·🔴🟡🔵智能视频模型加载🎞️Kijai版"}

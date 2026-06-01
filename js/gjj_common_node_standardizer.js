@@ -4,9 +4,6 @@ import { GJJ_Utils } from "./gjj_utils.js";
 
 const STATUS_WIDGET_NAME = "gjj_standard_status";
 const HELP_WIDGET_NAME = "gjj_help_button";
-const HELP_WIDGET_TOP = -28;
-const HELP_BUTTON_RIGHT = 14;
-const HELP_WIDGET_WIDTH = 24;
 const DEFAULT_MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d";
 const HELP_MODEL_KEYWORDS = [
 	"模型",
@@ -26,10 +23,65 @@ const HELP_MODEL_KEYWORDS = [
 	"Qwen",
 	"ACE",
 ];
+const MODEL_TREE_ICON_BY_KIND = {
+	diffusion: "🟣",
+	checkpoint_model: "🟣",
+	wanvideo_model: "🟣",
+	checkpoint_clip: "🟡",
+	clip: "🟡",
+	wan_t5_encoder: "🟡",
+	vae: "🔴",
+	ltx_audio_vae: "🔴",
+	checkpoint_vae: "🔴",
+	wan_vae: "🔴",
+	clip_vision: "🔵",
+	audio_encoder: "🔵",
+	loras: "🟠",
+	wan_lora: "🟠",
+	latent_upscale_model: "🟤",
+	name_any: "🟤",
+	controlnet: "🟦",
+	control_net: "🟦",
+	model_patch: "🟢",
+	vace_model: "🟣",
+	extra_model: "🟣",
+	fantasytalking_model: "🟣",
+	multitalk_model: "🟣",
+	fantasyportrait_model: "🟣",
+	empty: "⚫",
+};
+const MODEL_TREE_FOLDER_BY_KIND = {
+	diffusion: "diffusion_models",
+	checkpoint_model: "checkpoints",
+	wanvideo_model: "diffusion_models",
+	vace_model: "diffusion_models",
+	extra_model: "diffusion_models",
+	fantasytalking_model: "diffusion_models",
+	multitalk_model: "diffusion_models",
+	fantasyportrait_model: "diffusion_models",
+	checkpoint_clip: "text_encoders",
+	clip: "text_encoders",
+	wan_t5_encoder: "text_encoders",
+	vae: "vae",
+	ltx_audio_vae: "vae",
+	checkpoint_vae: "vae",
+	wan_vae: "vae",
+	clip_vision: "clip_vision",
+	audio_encoder: "audio_encoders",
+	loras: "loras",
+	wan_lora: "loras",
+	latent_upscale_model: "latent_upscale_models",
+	name_any: "latent_upscale_models",
+	controlnet: "controlnet",
+	control_net: "controlnet",
+	model_patch: "model_patches",
+};
+const MODEL_TREE_EXTERNAL_VALUES = new Set(["已连接外部输入", "外部输入口", "未声明"]);
 const META_BY_CLASS = new Map();
 const FULLY_BYPASS_CLASSES = new Set([
 	"GJJ_AdvancedPassthroughRouter",
 	"GJJ_AnyPreview",
+	"GJJ_CLIPPromptEncodePanel",
 ]);
 // Nodes migrated from individual execution bars to the shared status panel.
 const STATUS_ENABLED_CLASSES = new Set([
@@ -608,7 +660,16 @@ function declaredModelEntries(meta) {
 		const label = escapeText(item.label || item.name || item.title || fallbackLabel, fallbackLabel);
 		const value = escapeText(item.value || item.path || item.filename || item.file || item.model || "");
 		const tooltip = escapeText(item.tooltip || item.description || item.note || "");
-		return value ? { label, value, tooltip } : null;
+		return value ? {
+			label,
+			value,
+			tooltip,
+			name: escapeText(item.input || item.widget || item.name || ""),
+			type: escapeText(item.type || item.output_type || ""),
+			kind: escapeText(item.kind || item.model_kind || ""),
+			folder: escapeText(item.folder || item.category || item.dest || item.directory || ""),
+			icon: escapeText(item.icon || ""),
+		} : null;
 	};
 	if (Array.isArray(declared)) {
 		return declared.map((item) => normalizeItem(item)).filter(Boolean);
@@ -661,6 +722,8 @@ function currentModelEntries(node, meta) {
 			label: escapeText(inputMeta.label || widgetLabel, widgetName),
 			value: widgetValue,
 			tooltip: escapeText(inputMeta.tooltip || tooltip, ""),
+			name: widgetName,
+			type: escapeText(inputMeta.type || widget?.type || ""),
 		});
 		metaByName.delete(widgetName);
 	}
@@ -674,6 +737,8 @@ function currentModelEntries(node, meta) {
 			label: inputMeta.label,
 			value: input?.link ? "已连接外部输入" : "外部输入口",
 			tooltip: inputMeta.tooltip,
+			name: inputName,
+			type: inputMeta.type,
 		});
 		metaByName.delete(inputName);
 	}
@@ -682,6 +747,8 @@ function currentModelEntries(node, meta) {
 			label: inputMeta.label,
 			value: inputMeta.type || "未声明",
 			tooltip: inputMeta.tooltip,
+			name: inputMeta.name,
+			type: inputMeta.type,
 		});
 	}
 	return entries;
@@ -781,11 +848,216 @@ function createModelDownloadLink(url = DEFAULT_MODEL_DOWNLOAD_URL) {
 	return link;
 }
 
+function dynamicModelEntries(node, meta) {
+	const providers = [
+		node?.__gjjHelpModelTreeEntries,
+		node?.__gjjHelpModelEntries,
+		node?.__gjjModelHelpEntries,
+	];
+	for (const provider of providers) {
+		if (typeof provider !== "function") {
+			continue;
+		}
+		try {
+			const entries = provider.call(node, meta);
+			if (Array.isArray(entries) && entries.length) {
+				return entries.filter(Boolean);
+			}
+		} catch (error) {
+			console.warn("[GJJ] 读取节点模型帮助失败", error);
+		}
+	}
+	return [];
+}
+
+function currentHelpModelEntries(node, meta) {
+	const dynamic = dynamicModelEntries(node, meta);
+	return dynamic.length ? dynamic : currentModelEntries(node, meta);
+}
+
+function normalizeModelFolder(folder) {
+	let text = String(folder || "").replaceAll("\\", "/").trim();
+	text = text.replace(/^models\//i, "").replace(/^\/+|\/+$/g, "");
+	if (!text) {
+		return "";
+	}
+	if (text.endsWith("/")) {
+		text = text.slice(0, -1);
+	}
+	return text;
+}
+
+function inferModelKind(entry = {}) {
+	const explicit = String(entry.kind || entry.model_kind || "").trim();
+	if (explicit) {
+		return explicit.replaceAll("-", "_").toLowerCase();
+	}
+	const text = [
+		entry.name,
+		entry.label,
+		entry.type,
+		entry.folder,
+		entry.tooltip,
+		entry.value,
+	].map((item) => String(item || "")).join(" ").replaceAll("-", "_").toLowerCase();
+	if (text.includes("control_net") || text.includes("controlnet") || text.includes("控制网")) return "controlnet";
+	if (text.includes("model_patch") || text.includes("模型补丁") || text.includes("projector")) return "model_patch";
+	if (text.includes("clip_vision") || text.includes("clip视觉") || text.includes("vision")) return "clip_vision";
+	if (text.includes("latent_upscale")) return "latent_upscale_model";
+	if (text.includes("wan_t5") || text.includes("want5")) return "wan_t5_encoder";
+	if (text.includes("wan_vae") || text.includes("wanvae")) return "wan_vae";
+	if (text.includes("wanvideo") || text.includes("wan_video")) return "wanvideo_model";
+	if (text.includes("audio_encoder") || text.includes("音频编码")) return "audio_encoder";
+	if (text.includes("lora") || text.includes("loras") || text.includes("洛拉")) return "loras";
+	if (text.includes("checkpoint") && text.includes("clip")) return "checkpoint_clip";
+	if (text.includes("checkpoint") && text.includes("vae")) return "checkpoint_vae";
+	if (text.includes("checkpoint") || text.includes("ckpt")) return "checkpoint_model";
+	if (text.includes("text_encoder") || text.includes("text encoders") || text.includes("clip") || text.includes("t5")) return "clip";
+	if (text.includes("vae")) return "vae";
+	if (text.includes("unet") || text.includes("diffusion") || text.includes("扩散") || text.includes("模型")) return "diffusion";
+	return "empty";
+}
+
+function inferModelFolder(entry = {}, kind = "") {
+	const explicit = normalizeModelFolder(entry.folder || entry.dest || entry.directory || "");
+	if (explicit) {
+		const folder = explicit.split("/")[0] || explicit;
+		return folder;
+	}
+	const mapped = MODEL_TREE_FOLDER_BY_KIND[kind] || "";
+	if (mapped) {
+		return mapped;
+	}
+	const text = [
+		entry.name,
+		entry.label,
+		entry.type,
+		entry.tooltip,
+		entry.value,
+	].map((item) => String(item || "")).join(" ").replaceAll("-", "_").toLowerCase();
+	if (text.includes("controlnet") || text.includes("control_net")) return "controlnet";
+	if (text.includes("model_patches") || text.includes("model_patch")) return "model_patches";
+	if (text.includes("clip_vision")) return "clip_vision";
+	if (text.includes("latent_upscale")) return "latent_upscale_models";
+	if (text.includes("audio_encoder")) return "audio_encoders";
+	if (text.includes("lora")) return "loras";
+	if (text.includes("checkpoint")) return "checkpoints";
+	if (text.includes("vae")) return "vae";
+	if (text.includes("clip") || text.includes("t5")) return "text_encoders";
+	if (text.includes("diffusion") || text.includes("unet") || text.includes("模型")) return "diffusion_models";
+	return "其他";
+}
+
+function splitModelValueParts(value) {
+	const text = formatHelpText(value, "")
+		.replace(/[ \t]+(?:或|或者|or)[ \t]+/gi, "\n")
+		.replace(/[ \t]*[+＋][ \t]*/g, "\n")
+		.replace(/[，,；;]/g, "\n");
+	return text.split(/\r?\n/)
+		.map((part) => part
+			.replace(/^[\s\-*•]+/, "")
+			.replace(/^.*?(?:需要文件|模型文件|文件|路径|存放目录|目录)[:：]\s*/u, "")
+			.trim())
+		.filter(Boolean);
+}
+
+function parseModelTreeItem(entry, part, fallbackFolder = "") {
+	const externalText = String(part || "").trim();
+	if (!externalText || MODEL_TREE_EXTERNAL_VALUES.has(externalText)) {
+		return null;
+	}
+	const kind = inferModelKind(entry);
+	let folder = normalizeModelFolder(fallbackFolder) || inferModelFolder(entry, kind);
+	let filename = externalText.replaceAll("\\", "/").trim();
+	const modelMatch = filename.match(/models\/(.+)$/i);
+	if (modelMatch) {
+		const rel = modelMatch[1].replace(/^\/+/, "");
+		const slashIndex = rel.indexOf("/");
+		if (slashIndex >= 0) {
+			folder = rel.slice(0, slashIndex);
+			filename = rel.slice(slashIndex + 1);
+		} else {
+			filename = rel;
+		}
+	}
+	filename = filename.replace(/^\/+/, "").trim();
+	if (!filename || filename === folder || filename.endsWith("/")) {
+		return null;
+	}
+	const icon = String(entry.icon || MODEL_TREE_ICON_BY_KIND[kind] || MODEL_TREE_ICON_BY_KIND.empty);
+	return {
+		folder: normalizeModelFolder(folder) || "其他",
+		filename,
+		icon,
+		kind,
+		label: String(entry.label || "模型"),
+	};
+}
+
+function modelTreeItems(items) {
+	const result = [];
+	const seen = new Set();
+	for (const entry of Array.isArray(items) ? items : []) {
+		const parts = splitModelValueParts(entry?.value ?? entry?.filename ?? entry?.file ?? "");
+		let lastFolder = normalizeModelFolder(entry?.folder || "");
+		for (const part of parts) {
+			const item = parseModelTreeItem(entry, part, lastFolder);
+			if (!item) {
+				continue;
+			}
+			lastFolder = item.folder || lastFolder;
+			const key = `${item.folder}\n${item.filename}\n${item.icon}`;
+			if (seen.has(key)) {
+				continue;
+			}
+			seen.add(key);
+			result.push(item);
+		}
+	}
+	return result;
+}
+
+function createModelTreeDownloadLink(url = DEFAULT_MODEL_DOWNLOAD_URL) {
+	const link = createModelDownloadLink(url);
+	link.className = "gjj-help-model-tree-link";
+	link.textContent = `## [🌏 模型下载](${link.href})`;
+	return link;
+}
+
+function modelTreeText(items, emptyText) {
+	const folders = new Map();
+	for (const item of items) {
+		const folder = normalizeModelFolder(item.folder || "其他") || "其他";
+		if (!folders.has(folder)) {
+			folders.set(folder, []);
+		}
+		folders.get(folder).push(item);
+	}
+	const lines = ["ComfyUI/", "├──📁 models/"];
+	if (!folders.size) {
+		lines.push(`│   └──⚫ ${emptyText}`);
+		return lines.join("\n");
+	}
+	const folderEntries = Array.from(folders.entries());
+	folderEntries.forEach(([folder, files], folderIndex) => {
+		const folderLast = folderIndex === folderEntries.length - 1;
+		lines.push(`│   ${folderLast ? "└" : "├"}──📁 ${folder}/`);
+		files.forEach((file, fileIndex) => {
+			const fileLast = fileIndex === files.length - 1;
+			lines.push(`│   ${folderLast ? "    " : "│   "}${fileLast ? "└" : "├"}──${file.icon || "⚫"} ${file.filename}`);
+		});
+	});
+	return lines.join("\n");
+}
+
 function createModelHelpContent(items, emptyText, downloadUrl = DEFAULT_MODEL_DOWNLOAD_URL) {
 	const wrap = document.createElement("div");
-	wrap.className = "gjj-help-model-content";
-	wrap.appendChild(createHelpList(items, emptyText));
-	wrap.appendChild(createModelDownloadLink(downloadUrl));
+	wrap.className = "gjj-help-model-content gjj-help-model-tree";
+	wrap.appendChild(createModelTreeDownloadLink(downloadUrl));
+	const pre = document.createElement("pre");
+	pre.className = "gjj-help-model-tree-pre";
+	pre.textContent = modelTreeText(modelTreeItems(items), emptyText);
+	wrap.appendChild(pre);
 	return wrap;
 }
 
@@ -904,6 +1176,36 @@ function ensureHelpStyles() {
 			flex-direction: column;
 			gap: 9px;
 		}
+		.gjj-help-model-tree-link {
+			display: inline-flex;
+			align-items: center;
+			width: fit-content;
+			max-width: 100%;
+			color: #a8f0cf;
+			font-size: 13px;
+			font-weight: 750;
+			line-height: 1.45;
+			text-decoration: none;
+			word-break: break-all;
+		}
+		.gjj-help-model-tree-link:hover {
+			color: #d5ffe9;
+			text-decoration: underline;
+		}
+		.gjj-help-model-tree-pre {
+			margin: 0;
+			padding: 10px 11px;
+			border: 1px solid rgba(113, 137, 148, 0.28);
+			border-radius: 8px;
+			background: rgba(255, 255, 255, 0.035);
+			color: #d7e3e6;
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+			font-size: 12.5px;
+			line-height: 1.62;
+			white-space: pre-wrap;
+			word-break: break-word;
+			overflow-x: auto;
+		}
 		.gjj-help-model-download {
 			display: block;
 			padding: 9px 10px;
@@ -960,7 +1262,7 @@ function showHelpDialog(node) {
 	}
 
 	// 创建用到的模型内容
-	const modelEntries = currentModelEntries(node, meta);
+	const modelEntries = currentHelpModelEntries(node, meta);
 	const modelContent = createModelHelpContent(
 		Array.isArray(modelEntries) ? modelEntries : [],
 		"未从当前节点面板识别到模型选择项或模型输入口。",
@@ -1036,124 +1338,36 @@ function refreshGjjNodesAfterHelpLoad() {
 	}
 }
 
-function moveHelpWidgetToFront(node, widget) {
-	// Keep the help DOM widget out of the serialized widget prefix.
-	// ComfyUI restores widgets_values by widget index; moving this serialize:false
-	// decoration to index 0 shifts saved workflow parameters on reload.
-	if (!node?.widgets || !widget) return;
-}
-
 function removeLegacyHelpWidget(node) {
 	if (!Array.isArray(node?.widgets)) {
-		return;
+		delete node?.__gjjHelpWidget;
+		delete node?.__gjjHelpWidgetState;
+		return false;
 	}
+	let removed = false;
 	for (let index = node.widgets.length - 1; index >= 0; index -= 1) {
 		if (String(node.widgets[index]?.name || "") === HELP_WIDGET_NAME) {
 			node.widgets.splice(index, 1);
+			removed = true;
 		}
 	}
-}
-
-function updateHelpWidgetPosition(node) {
-	const state = node?.__gjjHelpWidgetState;
-	if (!state?.button) {
-		return;
+	if (node?.__gjjHelpWidget || node?.__gjjHelpWidgetState) {
+		delete node.__gjjHelpWidget;
+		delete node.__gjjHelpWidgetState;
+		removed = true;
 	}
-	const width = Math.max(160, Number(node?.size?.[0] || 160));
-	const x = Math.max(34, width - HELP_WIDGET_WIDTH - HELP_BUTTON_RIGHT);
-	const lastY = Number(state.widget?.last_y);
-	const y = Number(state.widget?.y);
-	const widgetY = Number.isFinite(lastY) && lastY !== 0
-		? lastY
-		: (Number.isFinite(y) ? y : 0);
-	state.button.style.left = `${Math.round(x)}px`;
-	// 锚定在标题栏区域，避免正文面板高度变化时跟着下移。
-	state.button.style.top = `${Math.round(HELP_WIDGET_TOP - widgetY)}px`;
-	state.button.style.transform = "none";
+	return removed;
 }
 
 function scheduleHelpWidgetPositionUpdate(node) {
-	updateHelpWidgetPosition(node);
-	requestAnimationFrame(() => updateHelpWidgetPosition(node));
-	setTimeout(() => updateHelpWidgetPosition(node), 40);
-	setTimeout(() => updateHelpWidgetPosition(node), 120);
-}
-
-function isHelpButtonGloballyEnabled() {
-	return window.__gjjSettings?.["GJJ_HelpButton"] !== false;
+	removeLegacyHelpWidget(node);
 }
 
 function ensureHelpWidget(node) {
-		if (!isHelpButtonGloballyEnabled()) return;
-	if (node?.__gjjHelpWidget) {
-		moveHelpWidgetToFront(node, node.__gjjHelpWidget);
-		scheduleHelpWidgetPositionUpdate(node);
-		return node.__gjjHelpWidget;
+	if (removeLegacyHelpWidget(node)) {
+		refreshNode(node);
 	}
-
-	const wrap = document.createElement("div");
-	wrap.style.cssText = [
-		"position:relative",
-		"width:100%",
-		"height:0",
-		"overflow:visible",
-		"pointer-events:none",
-		"box-sizing:border-box",
-	].join(";");
-
-	const button = document.createElement("button");
-	button.type = "button";
-	button.textContent = "❓";
-	button.title = "查看这个节点的功能、模型和依赖";
-	button.style.cssText = [
-		"position:absolute",
-		"left:calc(100% - 38px)",
-		`top:${HELP_WIDGET_TOP}px`,
-		"transform:none",
-		`width:${HELP_WIDGET_WIDTH}px`,
-		"height:18px",
-		"padding:0",
-		"border:1px solid rgba(152,214,209,0.45)",
-		"border-radius:5px",
-		"background:#26343b",
-		"color:#e6f0eb",
-		"font-size:12px",
-		"line-height:16px",
-		"cursor:pointer",
-		"pointer-events:auto",
-		"box-sizing:border-box",
-	].join(";");
-	button.addEventListener("pointerdown", (event) => event.stopPropagation());
-	button.addEventListener("mousedown", (event) => event.stopPropagation());
-	button.addEventListener("click", (event) => {
-		event.preventDefault();
-		event.stopPropagation();
-		showHelpDialog(node);
-	});
-	wrap.appendChild(button);
-
-	let widget = node.addDOMWidget?.(HELP_WIDGET_NAME, HELP_WIDGET_NAME, wrap, {
-		serialize: false,
-		hideOnZoom: false,
-		getHeight: () => 0,
-	});
-	if (widget) {
-		widget.computeSize = () => [0, -4];
-	}
-
-	if (!widget && typeof node.addWidget === "function") {
-		widget = node.addWidget("button", "❓", "", () => showHelpDialog(node), {
-			serialize: false,
-		});
-		widget.computeSize = () => [32, 18];
-	}
-
-	node.__gjjHelpWidget = widget || { element: wrap };
-	node.__gjjHelpWidgetState = { wrap, button, widget };
-	moveHelpWidgetToFront(node, widget);
-	scheduleHelpWidgetPositionUpdate(node);
-	refreshNode(node);
-	return node.__gjjHelpWidget;
+	return null;
 }
 
 function applyWidgetMetadata(node) {
@@ -1419,7 +1633,7 @@ function applyNodeMetadata(node) {
 	patchBoolSwitchWildcardInputs(node);
 	protectDomWidgets(node);
 	scheduleLegacyStatusSuppression(node);
-	scheduleHelpWidgetPositionUpdate(node);
+	removeLegacyHelpWidget(node);
 }
 
 function patchNode(node) {
@@ -1432,7 +1646,7 @@ function patchNode(node) {
 		disableStatusWidget(node);
 	}
 	applyNodeMetadata(node);
-	// FULLY_BYPASS_CLASSES 中的节点跳过 DOM widget 帮助按钮，使用 getTitleButtons API
+	// 帮助按钮由 gjj_help_button_manager.js 统一挂到标题栏；这里仅清理旧版浮动按钮。
 	if (!bypass) {
 		ensureHelpWidget(node);
 	}
@@ -1547,6 +1761,7 @@ globalThis.GJJ_CommonNodeStandardizer = {
 	isGjjNode,
 	patchNode,
 	applyNodeMetadata,
+	showHelpDialog,
 	ensureStatusWidget,
 	updateStatus: (node, detail = {}, options = {}) => {
 		if (!shouldAttachStatus(node)) {

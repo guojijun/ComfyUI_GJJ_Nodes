@@ -23,6 +23,7 @@ class GJJ_TextInput:
         "markdown",
         "Markdown 预览",
         "文本预览",
+        "TTT",
     ]
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("》",)

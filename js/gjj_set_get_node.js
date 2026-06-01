@@ -1841,7 +1841,7 @@ function ensureSetNameDomWidget(node) {
 	const button = document.createElement("button");
 	button.className = "gjj-setnode-broadcast";
 	button.type = "button";
-	button.textContent = "🔍";
+	button.textContent = "⚡";
 	button.setAttribute("aria-label", "切换变量广播");
 	shieldSetNameDomEvents(button);
 
