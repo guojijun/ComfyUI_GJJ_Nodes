@@ -111,10 +111,14 @@ def _register_gjj_summon_model_api():
 		"audio_encoders": ("audio_encoders",),
 		"detection": ("detection", "onnx", "ultralytics_bbox"),
 		"onnx": ("onnx", "detection"),
-		"yolo": ("ultralytics_bbox", "detection", "onnx"),
-		"ultralytics": ("ultralytics_bbox",),
+		"yolo": ("ultralytics_bbox", "ultralytics_segm", "detection", "onnx"),
+		"ultralytics": ("ultralytics_bbox", "ultralytics_segm"),
 		"ultralytics_bbox": ("ultralytics_bbox", "detection", "onnx"),
-		"bbox": ("ultralytics_bbox", "detection", "onnx"),
+		"ultralytics_segm": ("ultralytics_segm", "ultralytics_bbox", "detection", "onnx"),
+		"bbox": ("ultralytics_bbox", "ultralytics_segm", "detection", "onnx"),
+		"segm": ("ultralytics_segm", "ultralytics_bbox", "detection", "onnx"),
+		"segment": ("ultralytics_segm", "ultralytics_bbox", "detection", "onnx"),
+		"segmentation": ("ultralytics_segm", "ultralytics_bbox", "detection", "onnx"),
 	}
 	SKIP_FOLDERS = {"custom_nodes", "input", "output", "temp", "configs"}
 

@@ -952,10 +952,12 @@ import { app } from "/scripts/app.js";
 			showToast("已取消替换。");
 			return;
 		}
-		if (!api.setWidgetValue(target.node, target.widget, String(match.name))) {
+		if (!api.setWidgetValue(target.node, target.widget, String(match.name), match)) {
 			showToast("替换失败：候选模型不能写入这个控件。");
 			return;
 		}
+		api.clearSummonedModelWarningIfResolved?.(target.node);
+		api.scheduleWorkflowRepairRescan?.();
 		showToast(`已替换：${compactText(match.name)}`, "ok");
 		clearTimeout(rescanTimer);
 		rescanTimer = setTimeout(() => renderNotice(lastPlan), 260);

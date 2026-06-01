@@ -12,6 +12,8 @@ import {
 	gjjSetMediaPreviewMessage,
 } from "./gjj_common_media_preview.js";
 
+const MEDIA_COPY_SUBDIR = "GJJ_TemplateParams";
+
 function detectMediaType(value) {
 	const kind = gjjDetectMediaKind(value);
 	return kind ? kind.toUpperCase() : null;
@@ -225,15 +227,18 @@ function uploadUrl(path) {
 	return path;
 }
 
-function normalizeUploadFilename(data, file) {
-	const filename = data?.name || data?.filename || data?.file || file?.name;
-	const subfolder = data?.subfolder || "";
+function normalizeUploadFilename(data, file, requestedSubfolder = "") {
+	const filename = String(data?.name || data?.filename || data?.file || file?.name || "").replace(/\\/g, "/");
+	if (!filename) return "";
+	if (filename.includes("/")) return filename;
+	const subfolder = String(data?.subfolder ?? requestedSubfolder ?? "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
 	return subfolder ? `${subfolder}/${filename}` : filename;
 }
 
-async function uploadMediaToInput(file) {
+async function uploadMediaToInput(file, subfolder = "") {
 	const endpoints = ["/upload/image", "/api/upload/image"];
 	let lastError = null;
+	const cleanSubfolder = String(subfolder || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
 
 	for (const endpoint of endpoints) {
 		const form = new FormData();
@@ -241,6 +246,7 @@ async function uploadMediaToInput(file) {
 		form.append("image", file, file.name);
 		form.append("type", "input");
 		form.append("overwrite", "true");
+		if (cleanSubfolder) form.append("subfolder", cleanSubfolder);
 
 		try {
 			const response = api?.fetchApi && endpoint === "/upload/image"
@@ -253,7 +259,7 @@ async function uploadMediaToInput(file) {
 				continue;
 			}
 			const data = await response.json().catch(() => ({}));
-			const filename = normalizeUploadFilename(data, file);
+			const filename = normalizeUploadFilename(data, file, cleanSubfolder);
 			if (!filename) throw new Error("上传成功但没有返回文件名");
 			return filename;
 		} catch (err) {
@@ -280,6 +286,13 @@ function safeMediaFilename(name, mediaType = "") {
 	return text;
 }
 
+function safeMediaSubdirPart(name) {
+	let text = String(name || "");
+	try { text = decodeURIComponent(text); } catch (_) {}
+	text = text.replace(/[<>:"/\\|?*\x00-\x1f\s]+/g, "_").trim().replace(/^[ ._]+|[ ._]+$/g, "");
+	return (text || "network").slice(0, 72).replace(/[ ._]+$/g, "") || "network";
+}
+
 function filenameFromNetworkUrl(url, mediaType = "") {
 	try {
 		const parsed = new URL(String(url || "").trim(), window.location.href);
@@ -289,8 +302,67 @@ function filenameFromNetworkUrl(url, mediaType = "") {
 	}
 }
 
+async function shortSha1(text) {
+	try {
+		const subtle = globalThis.crypto?.subtle;
+		if (subtle && globalThis.TextEncoder) {
+			const digest = await subtle.digest("SHA-1", new TextEncoder().encode(String(text || "")));
+			return Array.from(new Uint8Array(digest))
+				.slice(0, 5)
+				.map((value) => value.toString(16).padStart(2, "0"))
+				.join("");
+		}
+	} catch (_) {}
+
+	let hash = 2166136261;
+	const source = String(text || "");
+	for (let index = 0; index < source.length; index++) {
+		hash ^= source.charCodeAt(index);
+		hash = Math.imul(hash, 16777619);
+	}
+	return (hash >>> 0).toString(16).padStart(8, "0").slice(0, 10);
+}
+
+async function networkMediaCachePath(url, mediaType = "") {
+	const filename = filenameFromNetworkUrl(url, mediaType);
+	try {
+		const parsed = new URL(String(url || "").trim(), window.location.href);
+		const pathParts = parsed.pathname
+			.split("/")
+			.map((part) => {
+				try { return decodeURIComponent(part); } catch (_) { return part; }
+			})
+			.filter(Boolean);
+		const sourceName = pathParts.length >= 2 ? pathParts[pathParts.length - 2] : (parsed.host || "network");
+		const sourceDir = pathParts.slice(0, -1).join("/");
+		let sourceKey = `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}/${sourceDir}`;
+		if (parsed.search) sourceKey += parsed.search;
+		const digest = await shortSha1(sourceKey);
+		const subfolder = `${MEDIA_COPY_SUBDIR}/${safeMediaSubdirPart(sourceName)}_${digest}`;
+		return { filename, subfolder, relativePath: `${subfolder}/${filename}` };
+	} catch (_) {
+		const digest = await shortSha1(String(url || ""));
+		const subfolder = `${MEDIA_COPY_SUBDIR}/network_${digest}`;
+		return { filename, subfolder, relativePath: `${subfolder}/${filename}` };
+	}
+}
+
+function splitInputRelativePath(filename) {
+	let text = String(filename || "").trim().replace(/\\/g, "/");
+	if (!text) return { filename: "", subfolder: "" };
+	const annotated = text.match(/\s+\[(input|output|temp)\]$/i);
+	if (annotated) text = text.slice(0, annotated.index).trim();
+	const parts = text.split("/").filter(Boolean);
+	if (["input", "output", "temp"].includes(String(parts[0] || "").toLowerCase())) parts.shift();
+	const name = parts.pop() || "";
+	return { filename: name, subfolder: parts.join("/") };
+}
+
 function inputViewUrlForFilename(filename) {
-	return "/view?filename=" + encodeURIComponent(filename) + "&type=input";
+	const parts = splitInputRelativePath(filename);
+	let url = "/view?filename=" + encodeURIComponent(parts.filename) + "&type=input";
+	if (parts.subfolder) url += "&subfolder=" + encodeURIComponent(parts.subfolder);
+	return url;
 }
 
 async function inputFileExists(filename) {
@@ -346,14 +418,15 @@ function mimeForMediaType(mediaType) {
 	return "application/octet-stream";
 }
 
-async function downloadNetworkMediaInBrowser(originalUrl, mediaType, filename) {
+async function downloadNetworkMediaInBrowser(originalUrl, mediaType, cacheInfo) {
 	const response = await fetch(originalUrl, { cache: "no-store" });
 	if (!response?.ok) {
 		throw new Error(`浏览器下载 HTTP ${response?.status || "?"}`);
 	}
 	const blob = await response.blob();
+	const filename = cacheInfo?.filename || filenameFromNetworkUrl(originalUrl, mediaType);
 	const file = new File([blob], filename, { type: blob.type || mimeForMediaType(mediaType) });
-	return uploadMediaToInput(file);
+	return uploadMediaToInput(file, cacheInfo?.subfolder || "");
 }
 
 function saveFieldValue(node, field, values, nextValue) {
@@ -376,7 +449,8 @@ async function ensureNetworkMediaInInput(node, field, input, values, wrap = null
 	if (node.__gjjTemplateParamsNetworkJobs.has(jobKey)) return node.__gjjTemplateParamsNetworkJobs.get(jobKey);
 
 	const job = (async () => {
-		const filename = filenameFromNetworkUrl(originalUrl, mediaType);
+		const cacheInfo = await networkMediaCachePath(originalUrl, mediaType);
+		const filename = cacheInfo.relativePath;
 		const row = wrap || input.closest?.(".gjj-template-param-row");
 		const preview = getPreviewForField(node, field.key, row);
 		try {
@@ -396,7 +470,7 @@ async function ensureNetworkMediaInInput(node, field, input, values, wrap = null
 				uploadedName = await downloadNetworkMediaViaBackend(originalUrl, mediaType);
 			} catch (backendErr) {
 				console.warn("[GJJ_TemplateParams] 后端下载网络媒体失败，改用浏览器上传:", backendErr);
-				uploadedName = await downloadNetworkMediaInBrowser(originalUrl, mediaType, filename);
+				uploadedName = await downloadNetworkMediaInBrowser(originalUrl, mediaType, cacheInfo);
 			}
 			const activeInput = currentInputForField(node, field, input);
 			if (String(activeInput?.value || "").trim() !== originalUrl) return;

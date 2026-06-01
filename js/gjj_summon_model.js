@@ -14,6 +14,9 @@ import { app } from "/scripts/app.js";
 	const NON_MODEL_WIDGET_RE = /(^|[_\s-])(strength|weight|scale|ratio|factor|alpha|beta|sigma|cfg|steps?|seed|width|height|size|batch|fps|frame|frames|start|end|count|percent|denoise|noise|guidance|shift|eta|temperature|top[_\s-]?[kp]|precision|dtype|quant(?:ization|ize)?|device|attention|norm|function|compile|backend|provider|algorithm|scheduler|sampler|format|mode|preset|cache|offload)($|[_\s-])/i;
 	const STRENGTH_WIDGET_RE = /(^|[_\s-])(strength|weight|scale|ratio|factor|alpha|beta)($|[_\s-])/i;
 	const NUMERIC_VALUE_RE = /^[-+]?(?:(?:\d+\.?\d*)|(?:\.\d+))(?:e[-+]?\d+)?$/i;
+	const ULTRALYTICS_PROVIDER_RE = /UltralyticsDetectorProvider/i;
+	const ULTRALYTICS_PREFIX_RE = /^(bbox|segm)\//i;
+	const ULTRALYTICS_SEGM_NAME_RE = /(^|[/_.-])seg(?:m|ment|mentation)?($|[/_.-])|[-_]seg(?=\.|$)/i;
 
 	function safeArray(value) {
 		return Array.isArray(value) ? value : [];
@@ -110,6 +113,24 @@ import { app } from "/scripts/app.js";
 		return String(widget?.value ?? "").trim();
 	}
 
+	function isUltralyticsProvider(node) {
+		return ULTRALYTICS_PROVIDER_RE.test(nodeName(node));
+	}
+
+	function stripUltralyticsPrefix(value) {
+		return String(value || "").trim().replace(ULTRALYTICS_PREFIX_RE, "");
+	}
+
+	function sameUltralyticsModel(left, right) {
+		const leftName = stripUltralyticsPrefix(left).replace(/\\/g, "/").toLowerCase();
+		const rightName = stripUltralyticsPrefix(right).replace(/\\/g, "/").toLowerCase();
+		return !!leftName && leftName === rightName;
+	}
+
+	function looksLikeSegmModelName(value) {
+		return ULTRALYTICS_SEGM_NAME_RE.test(String(value || ""));
+	}
+
 	function hasUsableModelValue(widget) {
 		const value = currentWidgetValue(widget);
 		return !!value && !SKIP_VALUE_RE.test(value);
@@ -199,6 +220,10 @@ import { app } from "/scripts/app.js";
 		if (MISSING_RE.test(value)) return true;
 		if (values.length > 0 && values.every((item) => MISSING_RE.test(item) || SKIP_VALUE_RE.test(item))) return true;
 		if (hasUsableModelValue(widget) && values.length > 0 && !values.includes(value) && isModelLikeWidget(node, widget)) return true;
+		if (isUltralyticsProvider(node)) {
+			if (!values.includes(value) && values.some((item) => item !== value && sameUltralyticsModel(item, value))) return true;
+			if (/^bbox\//i.test(value) && looksLikeSegmModelName(value)) return true;
+		}
 		return false;
 	}
 
@@ -236,7 +261,14 @@ import { app } from "/scripts/app.js";
 		if (/audio[_\s-]*encoder|音频编码/.test(text)) add("audio_encoders");
 		if (/sam3?|segment/.test(text)) add("sam3", "sam2", "checkpoints");
 		if (/onnx|vitpose|detection|检测/.test(text)) add("detection", "onnx");
-		if (/bbox|yolo|ultralytics/.test(text)) add("ultralytics_bbox", "detection", "onnx");
+		if (/bbox|segm|segment|yolo|ultralytics/.test(text)) {
+			const segmFirst = /^segm\//i.test(value) || looksLikeSegmModelName(value);
+			if (segmFirst) {
+				add("ultralytics_segm", "ultralytics_bbox", "detection", "onnx");
+			} else {
+				add("ultralytics_bbox", "ultralytics_segm", "detection", "onnx");
+			}
+		}
 		if (isGguf && !categories.length) add("unet_gguf", "clip_gguf");
 
 		if (!categories.length) {
@@ -528,6 +560,20 @@ import { app } from "/scripts/app.js";
 		}
 	}
 
+	function clearStandardStatus(node) {
+		const state = node?.__gjjStandardStatus;
+		if (!state) return;
+		try { state.visible = false; } catch (_) {}
+		if (state.wrap) state.wrap.style.display = "none";
+		if (state.text) state.text.textContent = "";
+		if (state.progressInner) state.progressInner.style.width = "0%";
+		if (state.copyBtn) {
+			state.copyBtn.style.display = "none";
+			state.copyBtn.__gjj_copy_text = "";
+			state.copyBtn.__gjj_install_cmd = "";
+		}
+	}
+
 	function clearSummonedModelWarning(node) {
 		if (!node) return;
 		try {
@@ -544,6 +590,7 @@ import { app } from "/scripts/app.js";
 		if (notice?.root) notice.root.style.display = "none";
 		if (notice?.message) notice.message.textContent = "";
 		if (notice?.button) notice.button.style.display = "none";
+		clearStandardStatus(node);
 
 		for (const key of ["last_error", "execution_error", "error_message", "error", "errors"]) {
 			try {
@@ -556,6 +603,26 @@ import { app } from "/scripts/app.js";
 		}
 		clearCachedNodeErrors(node);
 		refreshNode(node);
+	}
+
+	function modelWidgetsStillMissing(node) {
+		return findModelWidgets(node).some((widget) => widgetLooksMissing(node, widget));
+	}
+
+	function clearSummonedModelWarningIfResolved(node) {
+		if (!node || modelWidgetsStillMissing(node)) {
+			return false;
+		}
+		clearSummonedModelWarning(node);
+		return true;
+	}
+
+	function scheduleWorkflowRepairRescan() {
+		for (const delay of [0, 120, 360]) {
+			setTimeout(() => {
+				try { globalThis.GJJ_WorkflowRepairNotice?.rescan?.(); } catch (_) {}
+			}, delay);
+		}
 	}
 
 	function repairInvalidNumericControls(node) {
@@ -611,19 +678,42 @@ import { app } from "/scripts/app.js";
 		refreshNode(node);
 	}
 
-	function setWidgetValue(node, widget, value) {
+	function normalizeMatchedModelValue(node, widget, value, match = {}) {
+		let nextValue = String(value || "").trim();
+		if (!isUltralyticsProvider(node) || !nextValue || ULTRALYTICS_PREFIX_RE.test(nextValue)) {
+			return nextValue;
+		}
+		const category = String(match?.category || "").toLowerCase();
+		if (category === "ultralytics_segm") {
+			return `segm/${nextValue}`;
+		}
+		if (category === "ultralytics_bbox") {
+			return `bbox/${nextValue}`;
+		}
+		const current = currentWidgetValue(widget);
+		if (/^segm\//i.test(current) || looksLikeSegmModelName(nextValue)) {
+			return `segm/${nextValue}`;
+		}
+		if (/^bbox\//i.test(current)) {
+			return `bbox/${nextValue}`;
+		}
+		return nextValue;
+	}
+
+	function setWidgetValue(node, widget, value, match = {}) {
 		if (!isModelLikeWidget(node, widget)) {
 			console.warn(`[GJJ] 召唤模型跳过非模型控件：${nodeName(node)} / ${widgetName(widget)}`);
 			return false;
 		}
-		if (!MODEL_EXT_RE.test(String(value || ""))) {
-			console.warn(`[GJJ] 召唤模型跳过异常匹配值：${nodeName(node)} / ${widgetName(widget)} => ${value}`);
+		const nextValue = normalizeMatchedModelValue(node, widget, value, match);
+		if (!MODEL_EXT_RE.test(String(nextValue || ""))) {
+			console.warn(`[GJJ] 召唤模型跳过异常匹配值：${nodeName(node)} / ${widgetName(widget)} => ${nextValue}`);
 			return false;
 		}
-		ensureComboValue(widget, value);
-		const alternate = allowedModelValues(widget).find((item) => item !== value);
+		ensureComboValue(widget, nextValue);
+		const alternate = allowedModelValues(widget).find((item) => item !== nextValue);
 		if (alternate) commitWidgetValue(node, widget, alternate);
-		commitWidgetValue(node, widget, value);
+		commitWidgetValue(node, widget, nextValue);
 		return true;
 	}
 
@@ -717,7 +807,7 @@ import { app } from "/scripts/app.js";
 				declined += 1;
 				continue;
 			}
-			if (!setWidgetValue(ref.node, ref.widget, String(match.name))) {
+			if (!setWidgetValue(ref.node, ref.widget, String(match.name), match)) {
 				missed += 1;
 				continue;
 			}
@@ -728,11 +818,11 @@ import { app } from "/scripts/app.js";
 
 		for (const node of changedNodes) {
 			repaired += repairInvalidNumericControls(node);
-			const stillMissing = findModelWidgets(node).some((widget) => widgetLooksMissing(node, widget));
-			if (!stillMissing) clearSummonedModelWarning(node);
+			clearSummonedModelWarningIfResolved(node);
 		}
 		if (changedNodes.size > 0) {
 			forceSelectionValidationRefresh(Array.from(changedNodes));
+			scheduleWorkflowRepairRescan();
 		}
 
 		if (changed > 0) {
@@ -769,8 +859,12 @@ import { app } from "/scripts/app.js";
 			fetchSummonMatches,
 			findModelWidgets,
 			inferCategories,
+			clearSummonedModelWarning,
+			clearSummonedModelWarningIfResolved,
+			modelWidgetsStillMissing,
 			nodeHasMissingModelSignal,
 			nodeName,
+			scheduleWorkflowRepairRescan,
 			setWidgetValue,
 			showToast,
 			summonModelsForNodes,

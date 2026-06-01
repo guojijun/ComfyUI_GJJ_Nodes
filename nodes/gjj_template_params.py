@@ -92,9 +92,30 @@ def _url_media_basename(url: str, media_type: str | None = None) -> str:
     return _safe_media_basename(name, media_type)
 
 
-def _find_input_media_by_name(filename: str) -> str | None:
-    safe_name = _safe_media_basename(filename)
-    if not safe_name:
+def _safe_media_subdir_part(name: str) -> str:
+    safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f\s]+', "_", unquote(str(name or ""))).strip(" ._")
+    return (safe_name or "network")[:72].strip(" ._") or "network"
+
+
+def _url_media_source_subdir(url: str) -> str:
+    parsed = urlparse(str(url or "").strip())
+    path_parts = [part for part in unquote(parsed.path or "").replace("\\", "/").split("/") if part]
+    source_name = path_parts[-2] if len(path_parts) >= 2 else (parsed.netloc or "network")
+    source_dir = "/".join(path_parts[:-1])
+    source_key = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}/{source_dir}"
+    if parsed.query:
+        source_key = f"{source_key}?{parsed.query}"
+    digest = hashlib.sha1(source_key.encode("utf-8", "ignore")).hexdigest()[:10]
+    return f"{_safe_media_subdir_part(source_name)}_{digest}"
+
+
+def _url_media_relative_path(url: str, media_type: str | None = None) -> Path:
+    return Path(MEDIA_COPY_SUBDIR) / _url_media_source_subdir(url) / _url_media_basename(url, media_type)
+
+
+def _find_input_media_by_relative_path(relative_path: str | os.PathLike[str]) -> str | None:
+    parts = [part for part in Path(relative_path).parts if part not in {"", ".", ".."}]
+    if not parts:
         return None
 
     try:
@@ -102,30 +123,21 @@ def _find_input_media_by_name(filename: str) -> str | None:
     except Exception:
         return None
 
-    direct = input_root / safe_name
+    direct = input_root.joinpath(*parts)
     if direct.is_file():
         return str(direct)
-
-    try:
-        matches = [path for path in input_root.rglob(safe_name) if path.is_file()]
-    except Exception:
-        matches = []
-    if not matches:
-        return None
-
-    matches.sort(key=lambda path: (len(path.relative_to(input_root).parts), str(path).lower()))
-    return str(matches[0])
+    return None
 
 
 def _download_network_media_to_input(url: str, media_type: str) -> str:
-    filename = _url_media_basename(url, media_type)
-    existing = _find_input_media_by_name(filename)
+    relative_path = _url_media_relative_path(url, media_type)
+    existing = _find_input_media_by_relative_path(relative_path)
     if existing:
         return existing
 
     input_root = Path(folder_paths.get_input_directory())
-    input_root.mkdir(parents=True, exist_ok=True)
-    dest = input_root / filename
+    dest = input_root / relative_path
+    dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(f"{dest.name}.download")
 
     request = Request(
