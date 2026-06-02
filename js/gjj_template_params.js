@@ -78,12 +78,17 @@ function mediaItemForField(field, values) {
 	const value = String(values?.[field.key] ?? field.default ?? "");
 	const mediaType = mediaTypeFromField(field, value) || field.type;
 	const kind = String(mediaType || "").toLowerCase();
-	return gjjMediaRefToItem(value, {
+	const item = gjjMediaRefToItem(value, {
 		kind,
 		title: field.label || "媒体",
 		description: field.tooltip || "",
 		emptyText: kind === "image" ? "无图片" : kind === "video" ? "无视频" : kind === "audio" ? "无音频" : "无媒体",
 	});
+	item.templateFieldKey = String(field.key || "");
+	item.templateFieldLabel = String(field.label || "");
+	item.templateFieldTooltip = String(field.tooltip || "");
+	item.templateMediaType = mediaType;
+	return item;
 }
 
 function renderGroupedMediaPreview(node, fields = null, values = null) {
@@ -93,10 +98,14 @@ function renderGroupedMediaPreview(node, fields = null, values = null) {
 	const mediaFields = state.fields.filter((field) => isMediaType(field?.type));
 	const items = mediaFields.map((field) => mediaItemForField(field, state.values));
 	gjjRenderMediaPreview(group, items, {
+		forceGrid: true,
 		singleMinHeight: 168,
 		singleMaxHeight: 360,
 		tileMinWidth: 118,
 		tileMinHeight: 112,
+		showGridKindBadge: false,
+		gridCaption: (item) => templateMediaCaption(item),
+		renderGridAction: (item) => makeMediaReplaceButton(node, item),
 		onLayout: () => refreshNode(node),
 	});
 	refreshNode(node);
@@ -504,7 +513,60 @@ function scheduleNetworkMediaToInput(node, field, input, values, wrap = null, de
 	node.__gjjTemplateParamsNetworkTimers.set(key, timer);
 }
 
-function openFileDialog(node, field, input, values, isImage, isAudio, isVideo) {
+function compactMediaPathName(value = "") {
+	const text = String(value || "").trim();
+	if (!text) return "";
+	try {
+		const url = new URL(text, window.location.origin);
+		if (url.pathname.endsWith("/view")) {
+			return url.searchParams.get("filename") || "";
+		}
+		if (/^(?:https?:|blob:|data:)/i.test(text)) {
+			return decodeURIComponent(url.pathname.split("/").pop() || text);
+		}
+	} catch (_) {}
+	const cleaned = text
+		.replace(/\s+\[(input|output|temp)\]$/i, "")
+		.split(/[?#]/, 1)[0]
+		.replace(/\\/g, "/");
+	return cleaned.split("/").pop() || cleaned;
+}
+
+function templateMediaCaption(item) {
+	const label = String(item?.templateFieldLabel || item?.title || "").trim();
+	const name = compactMediaPathName(item?.filename || item?.url || item?.unservedPath || "");
+	return [label, name].filter(Boolean).join(" · ") || "媒体";
+}
+
+function fieldByKey(node, key) {
+	const state = normalizeState(node);
+	const text = String(key || "");
+	return state.fields.find((field) => String(field?.key || "") === text) || null;
+}
+
+function makeMediaReplaceButton(node, item) {
+	const field = fieldByKey(node, item?.templateFieldKey);
+	if (!field) return null;
+	const state = normalizeState(node);
+	const input = currentInputForField(node, field, null);
+	if (!input) return null;
+	const mediaType = mediaTypeFromField(field, input.value) || item?.templateMediaType || field.type;
+	const flags = mediaFlags(mediaType);
+	const button = document.createElement("button");
+	button.type = "button";
+	button.textContent = "📁";
+	button.title = `更换${field.label || "媒体"}：选择新的${flags.isImage ? "图片" : flags.isVideo ? "视频" : "音频"}`;
+	button.addEventListener("pointerdown", (event) => event.stopPropagation());
+	button.addEventListener("mousedown", (event) => event.stopPropagation());
+	button.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		openFileDialog(node, field, input, state.values, flags.isImage, flags.isAudio, flags.isVideo, button);
+	});
+	return button;
+}
+
+function openFileDialog(node, field, input, values, isImage, isAudio, isVideo, triggerButton = null) {
 	const inputElement = document.createElement("input");
 
 	inputElement.type = "file";
@@ -520,9 +582,9 @@ function openFileDialog(node, field, input, values, isImage, isAudio, isVideo) {
 
 		if (!file) return;
 
-		const row = input.closest(".gjj-template-param-row");
+		const row = input.closest?.(".gjj-template-param-row") || null;
 		const preview = getPreviewForField(node, field.key, row);
-		const button = row?.querySelector(".gjj-template-param-file-button");
+		const button = triggerButton || row?.querySelector(".gjj-template-param-file-button");
 		const oldButtonText = button?.textContent || "📁";
 		setPreviewMessage(preview, `正在复制到 ComfyUI input：${file.name}`);
 		if (button) {
@@ -1368,6 +1430,26 @@ function autoresizeTextarea(textarea, node = null) {
 	if (node) refreshNode(node);
 }
 
+function registerHiddenMediaField(node, field, values) {
+	const key = String(field?.key || "");
+	if (!key) return null;
+	if (values[key] === undefined) values[key] = String(field?.default ?? "");
+	const input = {
+		get value() {
+			return String(values[key] ?? field?.default ?? "");
+		},
+		set value(next) {
+			values[key] = String(next ?? "");
+		},
+		closest() {
+			return null;
+		},
+	};
+	node.__gjjTemplateParamsRows.set(key, input);
+	setTimeout(() => scheduleNetworkMediaToInput(node, field, input, values, null, 0), 0);
+	return input;
+}
+
 function buildInputForField(node, field, values, options = {}) {
 	if (isBooleanField(field, values)) {
 		return buildBoolButtonForField(node, field, values);
@@ -1384,6 +1466,11 @@ function buildInputForField(node, field, values, options = {}) {
 	const groupedMediaPreview = Boolean(options.groupedMediaPreview);
 	const currentValue = String(values[field.key] ?? field.default ?? "");
 	const multiline = shouldUseMultilineText(field, currentValue, isMedia);
+
+	if (isMedia && groupedMediaPreview) {
+		registerHiddenMediaField(node, field, values);
+		return null;
+	}
 
 	const wrap = document.createElement("div");
 	wrap.className = multiline ? "gjj-template-param-row gjj-template-param-row-full gjj-template-param-row-multiline" : "gjj-template-param-row";
@@ -1504,7 +1591,7 @@ function buildInputForField(node, field, values, options = {}) {
 
 function buildGroupedMediaPreview(node, fields, values) {
 	const mediaFields = fields.filter((field) => isMediaType(field?.type));
-	if (mediaFields.length < 2) return null;
+	if (mediaFields.length < 1) return null;
 
 	const group = document.createElement("div");
 	group.className = "gjj-template-param-media-preview-group";
@@ -1531,14 +1618,15 @@ function renderRows(node) {
 		rows.appendChild(empty);
 	} else {
 		const mediaFields = state.fields.filter((field) => isMediaType(field?.type));
-		const useGroupedMediaPreview = mediaFields.length > 1;
+		const useGroupedMediaPreview = mediaFields.length > 0;
 		const lastMediaIndex = useGroupedMediaPreview
 			? state.fields.reduce((last, field, index) => isMediaType(field?.type) ? index : last, -1)
 			: -1;
 
 		for (let i = 0; i < state.fields.length; i += 1) {
 			const field = state.fields[i];
-			rows.appendChild(buildInputForField(node, field, state.values, { groupedMediaPreview: useGroupedMediaPreview }));
+			const row = buildInputForField(node, field, state.values, { groupedMediaPreview: useGroupedMediaPreview });
+			if (row) rows.appendChild(row);
 			if (useGroupedMediaPreview && i === lastMediaIndex) {
 				const mediaGroup = buildGroupedMediaPreview(node, state.fields, state.values);
 				if (mediaGroup) rows.appendChild(mediaGroup);
@@ -1579,14 +1667,6 @@ function buildDom(node) {
 		.gjj-template-param-file-button:hover { background:#3a3d40; border-color:#6aa6b8; }
 		.gjj-template-param-preview-image, .gjj-template-param-preview-video, .gjj-template-param-preview-audio { grid-column: 1 / -1; margin-top: 4px; min-height: 40px; display:block; width:100%; }
 		.gjj-template-param-media-preview-group { display:block; width:100%; min-width:0; padding:6px; border:1px solid #253841; border-radius:8px; background:#0a1418; }
-		.gjj-template-param-media-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(78px, 1fr)); gap:6px; }
-		.gjj-template-param-media-item { min-width:0; display:flex; flex-direction:column; gap:4px; }
-		.gjj-template-param-media-label { color:#8ea0a8; font-size:11px; line-height:1.2; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-		.gjj-template-param-media-item .gjj-template-param-preview-image,
-		.gjj-template-param-media-item .gjj-template-param-preview-video,
-		.gjj-template-param-media-item .gjj-template-param-preview-audio { grid-column:auto; margin-top:0; min-height:74px; height:96px; padding:4px; border:1px solid #253841; border-radius:7px; background:#071013; overflow:hidden; --gjj-template-preview-max-height:88px; --gjj-template-preview-video-max-height:88px; }
-		.gjj-template-param-media-item .gjj-template-param-preview-audio { min-height:48px; height:54px; }
-		.gjj-template-param-media-item audio { height:30px; }
 		.gjj-template-param-bool { display:flex; align-items:center; min-width:0; }
 		.gjj-template-param-bool-button { width:100%; height:30px; padding:4px 8px; border:1px solid #33464e; border-radius:8px; outline:none; background:#2b2d30; color:#f1f5f5; font-size:13px; cursor:pointer; text-align:left; }
 		.gjj-template-param-bool-button[data-value="true"] { border-color:#4f8f7a; background:#20362f; color:#dff8ea; }

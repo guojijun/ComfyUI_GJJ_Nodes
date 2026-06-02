@@ -93,6 +93,15 @@ import { api } from "/scripts/api.js";
 		}
 	}
 
+	function moveNoticeWidgetToEnd(node) {
+		const widget = node?.__gjjDependencyNoticeWidget;
+		if (!widget || !Array.isArray(node?.widgets)) return;
+		const index = node.widgets.indexOf(widget);
+		if (index < 0 || index === node.widgets.length - 1) return;
+		node.widgets.splice(index, 1);
+		node.widgets.push(widget);
+	}
+
 	function cleanTransientWidgets(node) {
 		if (!Array.isArray(node?.widgets)) return;
 		for (let index = node.widgets.length - 1; index >= 0; index -= 1) {
@@ -121,7 +130,10 @@ import { api } from "/scripts/api.js";
 	function ensurePanel(node) {
 		if (!isGJJNode(node)) return null;
 		removeLegacyWidgets(node);
-		if (node.__gjjDependencyNotice) return node.__gjjDependencyNotice;
+		if (node.__gjjDependencyNotice) {
+			moveNoticeWidgetToEnd(node);
+			return node.__gjjDependencyNotice;
+		}
 		if (typeof node.addDOMWidget !== "function") return null;
 
 		const root = document.createElement("div");
@@ -199,6 +211,7 @@ import { api } from "/scripts/api.js";
 		};
 		node.__gjjDependencyNoticeWidget = widget;
 		node.__gjjDependencyNotice = state;
+		moveNoticeWidgetToEnd(node);
 		return state;
 	}
 

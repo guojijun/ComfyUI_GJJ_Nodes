@@ -1187,7 +1187,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
     CATEGORY = "GJJ"
     FUNCTION = "generate"
     DESCRIPTION = "LTX-2.3 清爽版图文/音频视频节点：Python 只保留真实输入口，复杂 UI 全部由前端 DOM 面板写入 config_json / node.properties。无输入=T2V；一张图片=I2V；有音频=S2V；音频+图片=数字人；两张图片=首尾帧；多张图片=多图参考。"
-    SEARCH_ALIASES = ["ltx 图生视频", "ltx 文生视频", "ltx 图文生视频", "ltx 多图参考", "ltx i2v multiref", "ltx t2v", "图生视频多图参考", "动态场景视频", "ltx 数字人", "talking head"]
+    SEARCH_ALIASES = ["SSL","ltx 图生视频", "ltx 文生视频", "ltx 图文生视频", "ltx 多图参考", "ltx i2v multiref", "ltx t2v", "图生视频多图参考", "动态场景视频", "ltx 数字人", "talking head"]
     RETURN_TYPES = ("VIDEO",)
     RETURN_NAMES = ("视频生成结果",)
     OUTPUT_TOOLTIPS = ("自动识别：无输入=T2V；一张图片=I2V；有音频=S2V；音频+图片=数字人；两张图片=首尾帧（严格复刻最新工作流）；多张图片=多图参考。",)
@@ -1526,4 +1526,4 @@ class GJJ_LTX23ImageToVideoMultiRef:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_LTX23ImageToVideoMultiRef}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ·🎬多功能LTX视频生成器 🧡"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ·🎬多功能视频生成器(LTX2.3) 🧡"}

@@ -2,6 +2,8 @@ import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
 export const GJJ_COMMON_MEDIA_OPEN_FOLDER_API = "/gjj/common/open_media_folder";
+export const GJJ_AUDIO_PLAYER_HEIGHT = 24;
+export const GJJ_AUDIO_WAVEFORM_HEIGHT = 72;
 
 const STYLE_ID = "gjj-common-media-preview-style";
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "webp", "bmp", "gif", "avif", "tiff"]);
@@ -14,6 +16,10 @@ const KIND_LABELS = {
 	video: "视频",
 };
 
+let audioWaveformContext = null;
+const audioWaveformCache = new Map();
+const audioWaveformPeaks = new WeakMap();
+
 function ensureStyle() {
 	if (document.getElementById(STYLE_ID)) return;
 	const style = document.createElement("style");
@@ -25,16 +31,20 @@ function ensureStyle() {
 		.gjj-common-media-card { position:relative; min-width:0; overflow:hidden; border:1px solid #263a42; border-radius:8px; background:#0b1317; color:#dce7e2; }
 		.gjj-common-media-card-single { width:100%; display:flex; flex-direction:column; gap:7px; padding:8px; }
 		.gjj-common-media-card-grid { aspect-ratio:1 / 1; min-height:var(--gjj-media-tile-height, 108px); cursor:pointer; }
+		.gjj-common-media-card-grid-caption { aspect-ratio:auto; min-height:0; display:flex; flex-direction:column; }
 		.gjj-common-media-stage { position:relative; width:100%; min-width:0; overflow:hidden; border-radius:6px; background:#081015; display:flex; align-items:center; justify-content:center; }
 		.gjj-common-media-card-single .gjj-common-media-stage { min-height:var(--gjj-media-single-min, 168px); max-height:var(--gjj-media-single-max, 360px); }
 		.gjj-common-media-card-grid .gjj-common-media-stage { position:absolute; inset:0; border-radius:0; }
+		.gjj-common-media-card-grid-caption .gjj-common-media-stage { position:relative; inset:auto; aspect-ratio:1 / 1; min-height:var(--gjj-media-tile-height, 108px); flex:0 0 auto; }
 		.gjj-common-media-card img, .gjj-common-media-card video { width:100%; height:100%; display:block; background:#081015; }
 		.gjj-common-media-card-single img, .gjj-common-media-card-single video { object-fit:contain; max-height:var(--gjj-media-single-max, 360px); }
 		.gjj-common-media-card-grid img, .gjj-common-media-card-grid video { object-fit:cover; }
 		.gjj-common-media-card-grid video { pointer-events:none; }
 		.gjj-common-media-audio-stage { min-height:78px; background:linear-gradient(135deg, #101b20, #0b1216); }
 		.gjj-common-media-card-single .gjj-common-media-audio-stage { flex-direction:column; gap:8px; padding:10px; }
-		.gjj-common-media-audio-icon { font-size:34px; opacity:.9; }
+		.gjj-common-audio-waveform { position:relative; width:100%; height:var(--gjj-audio-waveform-height, 72px); border:1px solid #263a42; border-radius:7px; background:#081015; overflow:hidden; box-sizing:border-box; cursor:pointer; }
+		.gjj-common-audio-waveform canvas { width:100%; height:100%; display:block; }
+		.gjj-common-media-card-grid .gjj-common-audio-waveform { position:absolute; inset:0; width:100%; height:100%; border:0; border-radius:0; }
 		.gjj-common-media-card-single audio { width:100%; height:28px; display:block; }
 		.gjj-common-media-card-grid audio { position:absolute; left:7px; right:7px; bottom:7px; z-index:4; width:calc(100% - 14px); height:24px; }
 		.gjj-common-media-info { display:grid; grid-template-columns:auto minmax(0, 1fr) auto; align-items:start; gap:6px; width:100%; min-width:0; font:12px/1.35 ui-sans-serif, system-ui, sans-serif; color:#cfe0dc; }
@@ -45,6 +55,9 @@ function ensureStyle() {
 		.gjj-common-media-folder:hover { background:#223139; border-color:#56707a; }
 		.gjj-common-media-badge { position:absolute; z-index:5; top:6px; left:6px; max-width:calc(100% - 12px); padding:2px 7px; border-radius:999px; background:rgba(0,0,0,.52); color:#fff; font-size:10px; line-height:1.3; font-weight:700; pointer-events:none; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 		.gjj-common-media-size { position:absolute; z-index:5; right:6px; top:6px; padding:2px 6px; border-radius:5px; background:rgba(0,0,0,.48); color:#fff; font-size:10px; line-height:1.3; pointer-events:none; white-space:nowrap; }
+		.gjj-common-media-grid-action { position:absolute; z-index:6; right:6px; top:6px; width:24px; height:22px; padding:0; border:1px solid rgba(120,148,158,.78); border-radius:6px; background:rgba(12,19,23,.78); color:#f4fbff; font-size:12px; line-height:1; display:flex; align-items:center; justify-content:center; cursor:pointer; }
+		.gjj-common-media-grid-action:hover { background:rgba(36,50,57,.92); border-color:#7db0c4; }
+		.gjj-common-media-grid-caption-text { min-width:0; padding:4px 5px 5px; color:#c9d8dc; font-size:10px; line-height:1.2; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; background:#0b1317; }
 		.gjj-common-media-empty, .gjj-common-media-message { width:100%; min-height:54px; display:flex; align-items:center; justify-content:center; padding:10px; border:1px dashed #30434b; border-radius:8px; background:#0a1216; color:#7f9298; font-size:12px; text-align:center; white-space:pre-wrap; }
 		.gjj-common-media-message-error { border-color:#765048; background:#211413; color:#ffb4a8; }
 		.gjj-common-media-browser { position:fixed; inset:0; z-index:10000; background:rgba(0,0,0,.9); backdrop-filter:blur(8px); display:flex; flex-direction:column; align-items:stretch; justify-content:center; padding:18px; cursor:zoom-out; }
@@ -246,6 +259,226 @@ function compactText(text) {
 	return String(text || "").replace(/\s+/g, " ").trim();
 }
 
+export function gjjStyleCompactAudioPlayer(player, height = GJJ_AUDIO_PLAYER_HEIGHT) {
+	if (!player) return;
+	const safeHeight = Math.max(20, Number(height) || GJJ_AUDIO_PLAYER_HEIGHT);
+	player.style.cssText = [
+		"width:100%",
+		`height:${safeHeight}px`,
+		`min-height:${safeHeight}px`,
+		`max-height:${safeHeight}px`,
+		"display:block",
+		"border-radius:5px",
+		"overflow:hidden",
+	].join(";");
+}
+
+function getAudioWaveformContext() {
+	if (audioWaveformContext) return audioWaveformContext;
+	const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+	if (!AudioContextClass) return null;
+	audioWaveformContext = new AudioContextClass();
+	return audioWaveformContext;
+}
+
+function decodeAudioForWaveform(audioUrl) {
+	const key = String(audioUrl || "");
+	if (!key) return Promise.reject(new Error("音频地址为空"));
+	if (audioWaveformCache.has(key)) return audioWaveformCache.get(key);
+	const promise = fetch(key)
+		.then((response) => {
+			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			return response.arrayBuffer();
+		})
+		.then((buffer) => {
+			const context = getAudioWaveformContext();
+			if (!context) throw new Error("当前浏览器不支持 AudioContext");
+			return context.decodeAudioData(buffer.slice(0));
+		})
+		.catch((error) => {
+			audioWaveformCache.delete(key);
+			throw error;
+		});
+	audioWaveformCache.set(key, promise);
+	if (audioWaveformCache.size > 24) {
+		const firstKey = audioWaveformCache.keys().next().value;
+		audioWaveformCache.delete(firstKey);
+	}
+	return promise;
+}
+
+function resizeWaveformCanvas(canvas, fallbackHeight = GJJ_AUDIO_WAVEFORM_HEIGHT) {
+	const ratio = Math.max(1, window.devicePixelRatio || 1);
+	const width = Math.max(180, Math.floor(canvas.clientWidth || canvas.parentElement?.clientWidth || 300));
+	const height = Math.max(40, Math.floor(canvas.clientHeight || canvas.parentElement?.clientHeight || fallbackHeight));
+	const pixelWidth = Math.floor(width * ratio);
+	const pixelHeight = Math.floor(height * ratio);
+	if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+		canvas.width = pixelWidth;
+		canvas.height = pixelHeight;
+	}
+	const ctx = canvas.getContext("2d");
+	if (ctx) ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+	return { width, height, ctx };
+}
+
+function drawWaveformPlaceholder(canvas, text = "正在读取波形...", options = {}) {
+	const { width, height, ctx } = resizeWaveformCanvas(canvas, options.height);
+	if (!ctx) return;
+	ctx.clearRect(0, 0, width, height);
+	ctx.fillStyle = "#081015";
+	ctx.fillRect(0, 0, width, height);
+	ctx.strokeStyle = "rgba(255,255,255,0.07)";
+	ctx.beginPath();
+	ctx.moveTo(0, height / 2);
+	ctx.lineTo(width, height / 2);
+	ctx.stroke();
+	ctx.fillStyle = "#8ea0a8";
+	ctx.font = "12px ui-sans-serif, system-ui, sans-serif";
+	ctx.textBaseline = "middle";
+	ctx.fillText(text, 12, height / 2);
+}
+
+function getWaveformPeaks(audioBuffer, columns) {
+	const key = Math.max(1, Math.floor(columns || 1));
+	let byWidth = audioWaveformPeaks.get(audioBuffer);
+	if (!byWidth) {
+		byWidth = new Map();
+		audioWaveformPeaks.set(audioBuffer, byWidth);
+	}
+	if (byWidth.has(key)) return byWidth.get(key);
+
+	const channelCount = Math.max(1, Math.min(2, audioBuffer.numberOfChannels || 1));
+	const length = audioBuffer.length || 0;
+	const samplesPerColumn = Math.max(1, Math.floor(length / key));
+	const peaks = new Float32Array(key);
+	for (let x = 0; x < key; x += 1) {
+		const start = x * samplesPerColumn;
+		const end = Math.min(length, start + samplesPerColumn);
+		let peak = 0;
+		for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+			const data = audioBuffer.getChannelData(channelIndex);
+			for (let i = start; i < end; i += 1) {
+				const value = Math.abs(data[i] || 0);
+				if (value > peak) peak = value;
+			}
+		}
+		peaks[x] = peak;
+	}
+	byWidth.set(key, peaks);
+	if (byWidth.size > 8) {
+		const firstKey = byWidth.keys().next().value;
+		byWidth.delete(firstKey);
+	}
+	return peaks;
+}
+
+function drawDecodedWaveform(canvas, audioBuffer, player = null, options = {}) {
+	const { width, height, ctx } = resizeWaveformCanvas(canvas, options.height);
+	if (!ctx || !audioBuffer) return;
+	const center = Math.round(height / 2);
+	const usableHeight = Math.max(16, height - 18);
+	const amp = usableHeight / 2;
+	const columns = Math.max(1, Math.floor(width));
+	const peaks = getWaveformPeaks(audioBuffer, columns);
+
+	ctx.clearRect(0, 0, width, height);
+	ctx.fillStyle = "#081015";
+	ctx.fillRect(0, 0, width, height);
+
+	ctx.strokeStyle = "rgba(255,255,255,0.06)";
+	ctx.lineWidth = 1;
+	for (let i = 1; i < 4; i += 1) {
+		const y = Math.round((height * i) / 4);
+		ctx.beginPath();
+		ctx.moveTo(0, y);
+		ctx.lineTo(width, y);
+		ctx.stroke();
+	}
+
+	const gradient = ctx.createLinearGradient(0, 0, width, 0);
+	gradient.addColorStop(0, "#77d4c4");
+	gradient.addColorStop(0.55, "#b7e28b");
+	gradient.addColorStop(1, "#f1ca73");
+	ctx.strokeStyle = gradient;
+	ctx.lineWidth = 1;
+
+	for (let x = 0; x < columns; x += 1) {
+		const peak = peaks[x] || 0;
+		const bar = Math.max(1, Math.min(amp, peak * amp));
+		ctx.beginPath();
+		ctx.moveTo(x + 0.5, center - bar);
+		ctx.lineTo(x + 0.5, center + bar);
+		ctx.stroke();
+	}
+
+	if (player && Number.isFinite(player.duration) && player.duration > 0) {
+		const progress = Math.max(0, Math.min(1, Number(player.currentTime || 0) / player.duration));
+		const cursorX = Math.round(progress * width) + 0.5;
+		ctx.strokeStyle = "#ffffff";
+		ctx.lineWidth = 1;
+		ctx.beginPath();
+		ctx.moveTo(cursorX, 5);
+		ctx.lineTo(cursorX, height - 5);
+		ctx.stroke();
+	}
+}
+
+export function gjjRenderAudioWaveformPreview(parent, audioUrl, player = null, options = {}) {
+	ensureStyle();
+	if (!parent) return null;
+	const height = Math.max(40, Number(options.height || GJJ_AUDIO_WAVEFORM_HEIGHT) || GJJ_AUDIO_WAVEFORM_HEIGHT);
+	const wrap = document.createElement("div");
+	wrap.className = ["gjj-common-audio-waveform", options.className || ""].filter(Boolean).join(" ");
+	wrap.style.setProperty("--gjj-audio-waveform-height", `${height}px`);
+	wrap.title = options.title || "点击波形可跳转播放位置";
+	protectElement(wrap);
+
+	const canvas = document.createElement("canvas");
+	wrap.appendChild(canvas);
+	parent.appendChild(wrap);
+
+	let decodedBuffer = null;
+	const redraw = () => {
+		if (decodedBuffer) drawDecodedWaveform(canvas, decodedBuffer, player, { height });
+		else drawWaveformPlaceholder(canvas, options.loadingText || "正在读取波形...", { height });
+	};
+
+	drawWaveformPlaceholder(canvas, options.loadingText || "正在读取波形...", { height });
+	decodeAudioForWaveform(audioUrl)
+		.then((audioBuffer) => {
+			decodedBuffer = audioBuffer;
+			drawDecodedWaveform(canvas, decodedBuffer, player, { height });
+			options.onLayout?.();
+		})
+		.catch((error) => {
+			console.warn(options.loggerPrefix || "[GJJ CommonMedia]", "绘制音频波形失败:", error);
+			drawWaveformPlaceholder(canvas, options.errorText || "波形解码失败，仍可使用播放条", { height });
+			options.onLayout?.();
+		});
+
+	if (player) {
+		player.addEventListener("timeupdate", redraw);
+		player.addEventListener("seeked", redraw);
+		player.addEventListener("loadedmetadata", redraw);
+	}
+	wrap.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		if (!player || !decodedBuffer || !Number.isFinite(player.duration) || player.duration <= 0) return;
+		const rect = wrap.getBoundingClientRect();
+		const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
+		player.currentTime = ratio * player.duration;
+		drawDecodedWaveform(canvas, decodedBuffer, player, { height });
+	});
+	if (window.ResizeObserver) {
+		const observer = new ResizeObserver(redraw);
+		observer.observe(wrap);
+	}
+	requestAnimationFrame(redraw);
+	return { wrap, canvas, redraw };
+}
+
 async function openMediaFolder(item, button) {
 	if (!item?.filename && !item?.subfolder) return;
 	const params = new URLSearchParams();
@@ -371,10 +604,19 @@ export function gjjOpenMediaBrowser(item) {
 		element.autoplay = true;
 		element.src = url;
 	} else if (item.kind === "audio") {
+		const audioWrap = document.createElement("div");
+		audioWrap.style.cssText = "width:min(720px,86vw);display:flex;flex-direction:column;gap:10px;";
 		element = document.createElement("audio");
 		element.controls = true;
 		element.autoplay = true;
 		element.src = url;
+		gjjStyleCompactAudioPlayer(element, 28);
+		gjjRenderAudioWaveformPreview(audioWrap, url, element, {
+			height: 96,
+			loggerPrefix: "[GJJ CommonMedia]",
+		});
+		audioWrap.appendChild(element);
+		content.appendChild(audioWrap);
 	} else {
 		element = document.createElement("img");
 		element.src = url;
@@ -393,15 +635,18 @@ export function gjjOpenMediaBrowser(item) {
 		});
 	}
 	protectElement(element);
-	content.appendChild(element);
+	if (item.kind !== "audio") {
+		content.appendChild(element);
+	}
 
 	const hint = document.createElement("div");
 	hint.className = "gjj-common-media-browser-hint";
-	hint.textContent = item.kind === "image" ? "滚轮缩放 · 双击重置 · 点击空白关闭" : "点击空白关闭";
+	hint.textContent = item.kind === "image" ? "滚轮缩放 · 点击任意位置关闭" : "点击任意位置关闭";
 
 	overlay.append(bar, content, hint);
 	overlay.addEventListener("click", (event) => {
-		if (event.target === overlay || event.target === content) overlay.remove();
+		if (event.target?.closest?.(".gjj-common-media-browser-actions button")) return;
+		overlay.remove();
 	});
 	document.body.appendChild(overlay);
 }
@@ -439,14 +684,14 @@ function createMediaElement(item, isSingle, onLayout) {
 		return stage;
 	}
 	if (item.kind === "audio") {
-		const icon = document.createElement("div");
-		icon.className = "gjj-common-media-audio-icon";
-		icon.textContent = "🎧";
-		stage.appendChild(icon);
 		const audio = document.createElement("audio");
 		audio.controls = true;
 		audio.src = url;
 		audio.preload = "metadata";
+		gjjRenderAudioWaveformPreview(stage, url, audio, {
+			onLayout,
+			loggerPrefix: "[GJJ CommonMedia]",
+		});
 		audio.addEventListener("loadedmetadata", () => onLayout?.());
 		stage.appendChild(audio);
 		return stage;
@@ -461,11 +706,15 @@ function createMediaElement(item, isSingle, onLayout) {
 }
 
 function createMediaCard(item, index, total, options) {
-	const isSingle = total <= 1;
+	const isSingle = !options.forceGrid && total <= 1;
+	const gridCaptionText = !isSingle && typeof options.gridCaption === "function"
+		? compactText(options.gridCaption(item, index, total))
+		: "";
 	const card = document.createElement("div");
-	card.className = `gjj-common-media-card ${isSingle ? "gjj-common-media-card-single" : "gjj-common-media-card-grid"}`;
+	card.className = `gjj-common-media-card ${isSingle ? "gjj-common-media-card-single" : "gjj-common-media-card-grid"}${gridCaptionText ? " gjj-common-media-card-grid-caption" : ""}`;
 	protectElement(card);
-	if (item.empty) {
+	const decoratedEmpty = item.empty && (options.forceGrid || typeof options.renderGridAction === "function" || typeof options.gridCaption === "function");
+	if (item.empty && !decoratedEmpty) {
 		const empty = document.createElement("div");
 		empty.className = "gjj-common-media-empty";
 		empty.textContent = item.emptyText || "无媒体";
@@ -477,7 +726,23 @@ function createMediaCard(item, index, total, options) {
 	card.appendChild(stage);
 	if (!isSingle) {
 		addBadge(card, total > 1 ? `${index + 1}` : "");
-		addBadge(card, KIND_LABELS[item.kind] || "媒体", "gjj-common-media-size");
+		if (typeof options.renderGridAction === "function") {
+			const action = options.renderGridAction(item, index, total);
+			if (action) {
+				action.classList.add("gjj-common-media-grid-action");
+				protectElement(action);
+				card.appendChild(action);
+			}
+		} else if (options.showGridKindBadge !== false) {
+			addBadge(card, KIND_LABELS[item.kind] || "媒体", "gjj-common-media-size");
+		}
+		if (gridCaptionText) {
+			const caption = document.createElement("div");
+			caption.className = "gjj-common-media-grid-caption-text";
+			caption.textContent = gridCaptionText;
+			caption.title = gridCaptionText;
+			card.appendChild(caption);
+		}
 	} else {
 		card.appendChild(createInfoRow(item));
 	}
@@ -507,9 +772,10 @@ export function gjjRenderMediaPreview(container, items, options = {}) {
 	ensureStyle();
 	if (!container) return;
 	const normalized = gjjNormalizeMediaItems(items, options);
+	const useGrid = Boolean(options.forceGrid) || normalized.length > 1;
 	container.classList.add("gjj-common-media-preview");
-	container.classList.toggle("gjj-common-media-grid", normalized.length > 1);
-	container.style.display = normalized.length > 1 ? "grid" : "block";
+	container.classList.toggle("gjj-common-media-grid", useGrid);
+	container.style.display = useGrid ? "grid" : "block";
 	container.style.width = "100%";
 	container.style.minWidth = "0";
 	container.style.setProperty("--gjj-media-single-min", `${Number(options.singleMinHeight || 168)}px`);

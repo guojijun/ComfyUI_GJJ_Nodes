@@ -1,48 +1,71 @@
 from __future__ import annotations
 
-from fractions import Fraction
 from typing import Any
 
-import comfy.model_management
 import comfy.model_sampling
-import comfy.sd
-import comfy.utils
 import folder_paths
 import torch
-from comfy_api.latest import InputImpl, Types
-from nodes import VAEDecode, common_ksampler
+from nodes import CheckpointLoaderSimple, CLIPTextEncode, VAEDecode, common_ksampler
 from server import PromptServer
+
+from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
+from .gjj_multi_lora_chain import (
+    apply_lora_chain_config,
+    normalize_lora_chain_data,
+)
+from .gjj_video_combine_runtime import DEFAULT_FILENAME_PREFIX, DEFAULT_FORMAT, combine_video, list_supported_formats
+from .gjj_wan22_rapid_aio_mega import _build_vace_control_frames, _build_vace_latent
 
 
 NODE_NAME = "GJJ_Wan22FirstLastVideo"
-DEFAULT_UNET = "Wan2.2_Remix_NSFW_i2v_14b_low_lighting_fp8_e4m3fn_v2.1.safetensors"
-DEFAULT_CLIP = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
-DEFAULT_VAE = "wan_2.1_vae.safetensors"
-DEFAULT_HIGH_LORA = "WAN\\wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors"
-DEFAULT_LOW_LORA = "WAN\\wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"
+DEFAULT_CHECKPOINT = "wan2.2-rapid-mega-aio-nsfw-v12.2.safetensors"
 DEFAULT_POSITIVE = "美女"
 DEFAULT_NEGATIVE = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
-DEFAULT_SHIFT = 5.0
+DEFAULT_SHIFT = 8.0
 DEFAULT_STEPS = 4
 DEFAULT_CFG = 1.0
-DEFAULT_SAMPLER = "euler"
-DEFAULT_SCHEDULER = "simple"
-DEFAULT_WIDTH = 832
-DEFAULT_HEIGHT = 480
-DEFAULT_LENGTH = 81
+DEFAULT_SAMPLER = "ipndm"
+DEFAULT_SCHEDULER = "beta"
+DEFAULT_DENOISE = 1.0
+DEFAULT_WIDTH = 768
+DEFAULT_HEIGHT = 768
+DEFAULT_LENGTH = 65
 DEFAULT_FPS = 16.0
+DEFAULT_EMPTY_FRAME_LEVEL = 0.5
+DEFAULT_FILENAME = f"{DEFAULT_FILENAME_PREFIX}/Wan22FirstLastVideo"
+DEFAULT_AUDIO_MODE = "循环补足到视频长度"
+MIXED_IMAGE_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
 
 
-def _send_status(unique_id: Any, text: str) -> None:
+def _send_status(unique_id: Any, text: str, progress: float | None = None, **extra: Any) -> None:
     if not unique_id:
         return
     try:
+        payload = {"node": str(unique_id), "text": str(text or "")}
+        if progress is not None:
+            payload["progress"] = max(0.0, min(1.0, float(progress)))
+        payload.update({key: value for key, value in extra.items() if value is not None})
         PromptServer.instance.send_sync(
             "gjj_node_progress",
-            {"node": str(unique_id), "text": str(text or "")},
+            payload,
         )
     except Exception:
         pass
+
+
+def _send_preview_status(unique_id: Any, text: str, progress: float | None, ui_payload: dict[str, Any]) -> None:
+    if not isinstance(ui_payload, dict):
+        _send_status(unique_id, text, progress)
+        return
+    _send_status(
+        unique_id,
+        text,
+        progress,
+        preview_media=ui_payload.get("preview_media"),
+        preview_is_video=ui_payload.get("preview_is_video"),
+        preview_width=ui_payload.get("preview_width"),
+        preview_height=ui_payload.get("preview_height"),
+    )
 
 
 def _normalize_text(text: str) -> str:
@@ -76,85 +99,37 @@ def _pick_available_name(preferred: str, available: list[str], fallback: str = "
     return available[0] if available else ""
 
 
-def _require_model_name(category: str, preferred: str, label: str, fallback: str = "") -> str:
-    available = _safe_filename_list(category)
-    resolved = _pick_available_name(preferred, available, fallback)
+def _list_aio_checkpoints() -> list[str]:
+    checkpoints = _safe_filename_list("checkpoints")
+    filtered = []
+    for name in checkpoints:
+        normalized = _normalize_text(name)
+        if "wan22" in normalized and ("aio" in normalized or "rapid" in normalized or "mega" in normalized):
+            filtered.append(name)
+    return filtered or checkpoints or [DEFAULT_CHECKPOINT]
+
+
+def _require_checkpoint_name(preferred: str) -> str:
+    available = _list_aio_checkpoints()
+    resolved = _pick_available_name(preferred, available, DEFAULT_CHECKPOINT)
     if not resolved:
-        raise RuntimeError(f"未找到{label}：{preferred or fallback}")
-    full_path = folder_paths.get_full_path(category, resolved)
+        raise RuntimeError(f"未找到 Wan2.2 AIO Checkpoint：{preferred or DEFAULT_CHECKPOINT}")
+    full_path = folder_paths.get_full_path("checkpoints", resolved)
     if not full_path:
-        raise RuntimeError(f"未找到{label}：{resolved}")
+        raise RuntimeError(f"未找到 Wan2.2 AIO Checkpoint：models/checkpoints/{resolved}")
     return resolved
 
 
-def _conditioning_set_values(conditioning, values: dict[str, Any], append: bool = False):
-    updated = []
-    for item in conditioning:
-        if not isinstance(item, (list, tuple)) or len(item) < 2:
-            updated.append(item)
-            continue
-        new_item = list(item)
-        metadata = dict(new_item[1] or {})
-        for key, value in values.items():
-            if append and key in metadata:
-                existing = metadata.get(key)
-                if isinstance(existing, list):
-                    metadata[key] = existing + (value if isinstance(value, list) else [value])
-                else:
-                    metadata[key] = ([existing] if existing is not None else []) + (
-                        value if isinstance(value, list) else [value]
-                    )
-            else:
-                metadata[key] = value
-        new_item[1] = metadata
-        updated.append(new_item)
-    return updated
-
-
-def _load_vae(vae_name: str):
-    vae_path = folder_paths.get_full_path("vae", vae_name)
-    if not vae_path:
-        raise RuntimeError(f"未找到 VAE：{vae_name}")
-    sd, metadata = comfy.utils.load_torch_file(vae_path, return_metadata=True)
-    vae = comfy.sd.VAE(sd=sd, metadata=metadata, dtype=None)
-    vae.throw_exception_if_invalid()
-    return vae
-
-
-def _load_wan_clip(clip_name: str):
-    clip_path = folder_paths.get_full_path("text_encoders", clip_name)
-    if not clip_path:
-        raise RuntimeError(f"未找到 CLIP：{clip_name}")
-    try:
-        embedding_directory = folder_paths.get_folder_paths("embeddings")
-    except Exception:
-        embedding_directory = []
-    return comfy.sd.load_clip(
-        ckpt_paths=[clip_path],
-        embedding_directory=embedding_directory,
-        clip_type=getattr(comfy.sd.CLIPType, "WAN", comfy.sd.CLIPType.STABLE_DIFFUSION),
-        model_options={},
+def _apply_chain_loras(model, clip, lora_chain_config: Any = "", loaded_lora_cache: tuple[str, Any] | None = None):
+    if not str(lora_chain_config or "").strip():
+        return model, clip, loaded_lora_cache
+    current_model, current_clip, cache_entry = apply_lora_chain_config(
+        model,
+        clip,
+        lora_data=normalize_lora_chain_data(lora_chain_config),
+        loaded_lora_cache=loaded_lora_cache,
     )
-
-
-def _apply_model_only_lora(model, lora_name: str, strength: float):
-    if not str(lora_name or "").strip() or abs(float(strength)) <= 1e-6:
-        return model
-    full_path = folder_paths.get_full_path("loras", lora_name)
-    if not full_path:
-        raise RuntimeError(f"未找到 LoRA 文件：{lora_name}")
-    lora_state = comfy.utils.load_torch_file(full_path, safe_load=True)
-    patched_model, _ = comfy.sd.load_lora_for_models(model, None, lora_state, float(strength), 0.0)
-    if patched_model is None:
-        raise RuntimeError(f"LoRA 已读取但未成功应用：{lora_name}")
-    return patched_model
-
-
-def _load_unet(unet_name: str):
-    model_path = folder_paths.get_full_path("diffusion_models", unet_name)
-    if not model_path:
-        raise RuntimeError(f"未找到 UNET：{unet_name}")
-    return comfy.sd.load_diffusion_model(model_path, model_options={})
+    return current_model, current_clip, cache_entry
 
 
 def _apply_sd3_shift(model, shift: float):
@@ -169,57 +144,136 @@ def _apply_sd3_shift(model, shift: float):
     return patched
 
 
-def _encode_text(clip, text: str):
-    tokens = clip.tokenize(str(text or ""))
-    return clip.encode_from_tokens_scheduled(tokens)
+def _is_empty_loader_placeholder(images: torch.Tensor) -> bool:
+    if images is None or not isinstance(images, torch.Tensor) or images.ndim != 4:
+        return False
+    if tuple(int(x) for x in images.shape) != (1, 64, 64, 3):
+        return False
+    return bool(torch.count_nonzero(images).item() == 0)
 
 
-def _build_first_last_latent(positive, negative, vae, start_image, end_image, width, height, length, batch_size):
-    spacial_scale = vae.spacial_compression_encode()
-    latent = torch.zeros(
-        [batch_size, vae.latent_channels, ((length - 1) // 4) + 1, height // spacial_scale, width // spacial_scale],
-        device=comfy.model_management.intermediate_device(),
-    )
-    if start_image is not None:
-        start_image = comfy.utils.common_upscale(start_image[:length].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
-    if end_image is not None:
-        end_image = comfy.utils.common_upscale(end_image[-length:].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+def _extract_image_frames(images: Any) -> list[torch.Tensor]:
+    if images is None:
+        return []
+    if isinstance(images, dict):
+        for key in ("images", "frames", "image", "samples"):
+            if key in images:
+                return _extract_image_frames(images.get(key))
+        raise RuntimeError(f"不支持的图片输入字典：{sorted(images.keys())}")
+    if isinstance(images, (list, tuple)):
+        frames: list[torch.Tensor] = []
+        for item in images:
+            frames.extend(_extract_image_frames(item))
+        return frames
+    if not isinstance(images, torch.Tensor):
+        raise RuntimeError(f"不支持的图片输入类型：{type(images)!r}")
 
-    image = torch.ones((length, height, width, 3), dtype=start_image.dtype if start_image is not None else (end_image.dtype if end_image is not None else torch.float32)) * 0.5
-    mask = torch.ones((1, 1, latent.shape[2] * 4, latent.shape[-2], latent.shape[-1]))
+    batch = images
+    if batch.ndim == 3:
+        batch = batch.unsqueeze(0)
+    if batch.ndim != 4:
+        raise RuntimeError(f"图片输入维度无效：{tuple(batch.shape)}")
+    if _is_empty_loader_placeholder(batch):
+        return []
+    if int(batch.shape[-1]) < 3:
+        raise RuntimeError(f"图片输入通道数不足：{tuple(batch.shape)}")
 
-    if start_image is not None:
-        image[: start_image.shape[0]] = start_image
-        mask[:, :, : start_image.shape[0] + 3] = 0.0
+    batch = batch[..., :3].detach().float().cpu().clamp(0.0, 1.0).contiguous()
+    return [batch[index:index + 1].contiguous() for index in range(int(batch.shape[0]))]
 
-    if end_image is not None:
-        image[-end_image.shape[0] :] = end_image
-        mask[:, :, -end_image.shape[0] :] = 0.0
 
-    concat_latent_image = vae.encode(image[:, :, :, :3])
-    mask = mask.view(1, mask.shape[2] // 4, 4, mask.shape[3], mask.shape[4]).transpose(1, 2)
-    positive = _conditioning_set_values(positive, {"concat_latent_image": concat_latent_image, "concat_mask": mask})
-    negative = _conditioning_set_values(negative, {"concat_latent_image": concat_latent_image, "concat_mask": mask})
-    return positive, negative, {"samples": latent}
+def _build_route_name(image_count: int) -> str:
+    if image_count <= 0:
+        return "Wan 文生视频"
+    if image_count == 1:
+        return "Wan 图生视频"
+    if image_count == 2:
+        return "Wan 首尾帧"
+    return "Wan 多图循环首尾帧"
+
+
+def _segment_pairs(image_frames: list[torch.Tensor]) -> list[tuple[torch.Tensor | None, torch.Tensor | None]]:
+    image_count = len(image_frames)
+    if image_count <= 0:
+        return [(None, None)]
+    if image_count == 1:
+        return [(image_frames[0], None)]
+    return [(image_frames[index], image_frames[index + 1]) for index in range(image_count - 1)]
+
+
+def _concat_segments(segments: list[torch.Tensor]) -> torch.Tensor:
+    if not segments:
+        return torch.zeros((0, 64, 64, 3), dtype=torch.float32)
+    return torch.cat(segments, dim=0).detach().float().cpu().contiguous()
+
+
+def _fit_audio_to_video(audio: Any, frame_count: int, fps: float, mode: str) -> dict[str, Any] | None:
+    if audio is None:
+        return None
+    if not isinstance(audio, dict) or not isinstance(audio.get("waveform"), torch.Tensor):
+        raise RuntimeError("音频输入必须是 ComfyUI AUDIO 对象。")
+
+    waveform = audio["waveform"].detach().float().cpu()
+    if waveform.ndim == 2:
+        waveform = waveform.unsqueeze(0)
+    if waveform.ndim != 3:
+        raise RuntimeError(f"音频张量维度无效：{tuple(waveform.shape)}")
+
+    sample_rate = int(audio.get("sample_rate") or 44100)
+    target_samples = max(1, int(round(float(frame_count) / max(0.01, float(fps)) * sample_rate)))
+    current_samples = int(waveform.shape[-1])
+    if current_samples <= 0:
+        return None
+
+    mode_text = str(mode or DEFAULT_AUDIO_MODE)
+    if current_samples >= target_samples:
+        waveform = waveform[..., :target_samples].contiguous()
+    elif "循环" in mode_text:
+        repeats = (target_samples + current_samples - 1) // current_samples
+        waveform = waveform.repeat(1, 1, repeats)[..., :target_samples].contiguous()
+    else:
+        padding = torch.zeros(
+            waveform.shape[0],
+            waveform.shape[1],
+            target_samples - current_samples,
+            dtype=waveform.dtype,
+            device=waveform.device,
+        )
+        waveform = torch.cat([waveform, padding], dim=-1).contiguous()
+
+    fitted = dict(audio)
+    fitted["waveform"] = waveform
+    fitted["sample_rate"] = sample_rate
+    return fitted
 
 
 class GJJ_Wan22FirstLastVideo:
     CATEGORY = "GJJ"
     FUNCTION = "generate"
-    DESCRIPTION = "将 Wan2.2 首尾帧生视频工作流封装成零外部依赖单节点，内部完成双阶段 4 步采样、解码与创建视频。"
-    SEARCH_ALIASES = ["wan flf2v", "wan first last", "首尾帧", "首尾帧生视频", "wan 视频"]
-    RETURN_TYPES = ("VIDEO",)
-    RETURN_NAMES = ("视频生成结果",)
-    OUTPUT_TOOLTIPS = ("按工作流默认参数生成的视频结果。",)
+    OUTPUT_NODE = True
+    DESCRIPTION = (
+        "将 Wan2.2 视频工作流封装成零外部依赖单节点：未接图走文生视频，"
+        "1 张图走图生视频，2 张图走首尾帧，多张图按相邻图片循环首尾帧分段生成。"
+    )
+    SEARCH_ALIASES = ["SSW","wan flf2v", "wan first last", "首尾帧", "首尾帧生视频", "wan 视频"]
+    RETURN_TYPES = ("VIDEO", MIXED_IMAGE_TYPE)
+    RETURN_NAMES = ("视频生成结果", "视频帧序列")
+    OUTPUT_TOOLTIPS = (
+        "按节点参数生成并合成后的官方 VIDEO 输出，可继续接视频处理节点。",
+        "解码后的完整帧序列，类型兼容 GJJ_BATCH_IMAGE 与 IMAGE。",
+    )
+
+    def __init__(self):
+        self.loaded_lora: tuple[str, Any] | None = None
 
     @classmethod
     def INPUT_TYPES(cls):
-        unet_models = _safe_filename_list("diffusion_models") or [DEFAULT_UNET]
-        filtered_unets = [name for name in unet_models if "wan" in _normalize_text(name)] or unet_models
+        checkpoints = _list_aio_checkpoints()
+        default_checkpoint = _pick_available_name(DEFAULT_CHECKPOINT, checkpoints, DEFAULT_CHECKPOINT)
+        supported_formats = list_supported_formats()
+        default_format = DEFAULT_FORMAT if DEFAULT_FORMAT in supported_formats else supported_formats[0]
         return {
             "required": {
-                "start_image": ("IMAGE", {"display_name": "首帧图像", "tooltip": "视频的起始帧。"}),
-                "end_image": ("IMAGE", {"display_name": "尾帧图像", "tooltip": "视频的结束帧。"}),
                 "positive_prompt": (
                     "STRING",
                     {
@@ -227,7 +281,7 @@ class GJJ_Wan22FirstLastVideo:
                         "multiline": True,
                         "dynamicPrompts": True,
                         "display_name": "正向提示词",
-                        "tooltip": "默认值来自工作流当前启用的首尾帧生视频模板。",
+                        "tooltip": "Wan2.2 AIO 视频生成正向提示词。",
                     },
                 ),
                 "negative_prompt": (
@@ -237,21 +291,61 @@ class GJJ_Wan22FirstLastVideo:
                         "multiline": True,
                         "dynamicPrompts": True,
                         "display_name": "反向提示词",
-                        "tooltip": "默认值来自工作流当前启用的首尾帧生视频模板。",
+                        "tooltip": "Wan2.2 AIO 视频生成反向提示词。",
                     },
                 ),
-                "unet_name": (
-                    filtered_unets,
+                "checkpoint_name": (
+                    checkpoints,
                     {
-                        "default": DEFAULT_UNET if DEFAULT_UNET in filtered_unets else filtered_unets[0],
-                        "display_name": "主模型（UNET）",
-                        "tooltip": "Wan2.2 首尾帧生视频的主模型；节点内部会自动配对 CLIP、VAE 和 4 步 LoRA。",
+                        "default": default_checkpoint,
+                        "display_name": "AIO模型（Checkpoint）",
+                        "tooltip": "从 models/checkpoints 选择 Wan2.2 Rapid / Mega / AIO checkpoint，例如 wan2.2-rapid-mega-aio-nsfw-v12.2.safetensors。",
                     },
                 ),
                 "width": ("INT", {"default": DEFAULT_WIDTH, "min": 16, "max": 8192, "step": 16, "display_name": "宽度", "tooltip": "最终视频帧宽度。"}),
                 "height": ("INT", {"default": DEFAULT_HEIGHT, "min": 16, "max": 8192, "step": 16, "display_name": "高度", "tooltip": "最终视频帧高度。"}),
-                "length": ("INT", {"default": DEFAULT_LENGTH, "min": 1, "max": 4096, "step": 4, "display_name": "时长帧数", "tooltip": "视频总帧数。"}),
+                "length": ("INT", {"default": DEFAULT_LENGTH, "min": 1, "max": 4096, "step": 4, "display_name": "每段帧数", "tooltip": "单段生成帧数；多图输入时每一对相邻图片生成一段。"}),
                 "fps": ("FLOAT", {"default": DEFAULT_FPS, "min": 1.0, "max": 120.0, "step": 1.0, "display_name": "帧率", "tooltip": "输出视频的帧率。"}),
+                "filename_prefix": (
+                    "STRING",
+                    {
+                        "default": DEFAULT_FILENAME,
+                        "display_name": "文件名前缀",
+                        "tooltip": "节点内合成/预览视频的保存前缀，支持子目录，例如 video/GJJ/Wan22。",
+                    },
+                ),
+                "format_name": (
+                    supported_formats,
+                    {
+                        "default": default_format,
+                        "display_name": "输出格式",
+                        "tooltip": "节点内合成与预览使用的格式；默认 video/h264-mp4。",
+                    },
+                ),
+                "save_output": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "display_name": "保存最终视频",
+                        "tooltip": "开启后写入 output 目录；关闭后写入 temp 目录用于节点内预览。",
+                    },
+                ),
+                "save_segments": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display_name": "分段保存",
+                        "tooltip": "多图循环首尾帧时，把每个分段也单独写出，便于检查转场。",
+                    },
+                ),
+                "audio_fit_mode": (
+                    [DEFAULT_AUDIO_MODE, "静音补足到视频长度"],
+                    {
+                        "default": DEFAULT_AUDIO_MODE,
+                        "display_name": "音频适配",
+                        "tooltip": "音频长于视频会截断；音频短于视频时可循环补足或静音补足。",
+                    },
+                ),
                 "seed": (
                     "INT",
                     {
@@ -264,113 +358,217 @@ class GJJ_Wan22FirstLastVideo:
                     },
                 ),
             },
+            "optional": {
+                "images": (
+                    MIXED_IMAGE_TYPE,
+                    {
+                        "display_name": "图片/帧序列",
+                        "tooltip": "可选。未接图走文生视频，1 张走图生视频，2 张走首尾帧，多张按相邻图片循环首尾帧分段生成。",
+                    },
+                ),
+                "lora_chain_config": (
+                    "LORA_CHAIN_CONFIG",
+                    {
+                        "display_name": "LoRA串联配置",
+                        "tooltip": "可选。接入后会在加载 models/checkpoints 里的 AIO checkpoint 后，按配置顺序应用到模型与 CLIP。",
+                    },
+                ),
+                "audio": (
+                    "AUDIO",
+                    {
+                        "display_name": "音频",
+                        "tooltip": "可选。最终视频合成时会按视频长度截断或循环/补静音后封入音轨。",
+                    },
+                ),
+            },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
             },
         }
 
     def generate(
         self,
-        start_image,
-        end_image,
         positive_prompt,
         negative_prompt,
-        unet_name,
+        checkpoint_name,
         width,
         height,
         length,
         fps,
+        filename_prefix,
+        format_name,
+        save_output,
+        save_segments,
+        audio_fit_mode,
         seed,
+        images=None,
+        lora_chain_config="",
+        audio=None,
         unique_id=None,
+        prompt=None,
+        extra_pnginfo=None,
+        **kwargs,
     ):
-        _send_status(unique_id, "1/7 检查并加载 Wan 模型...")
-        try:
-            resolved_unet = _require_model_name("diffusion_models", unet_name, "UNET", DEFAULT_UNET)
-            resolved_clip = _require_model_name("text_encoders", DEFAULT_CLIP, "CLIP", DEFAULT_CLIP)
-            resolved_vae = _require_model_name("vae", DEFAULT_VAE, "VAE", DEFAULT_VAE)
-            resolved_high_lora = _require_model_name("loras", DEFAULT_HIGH_LORA, "高噪 LoRA", DEFAULT_HIGH_LORA)
-            resolved_low_lora = _require_model_name("loras", DEFAULT_LOW_LORA, "低噪 LoRA", DEFAULT_LOW_LORA)
+        image_frames = _extract_image_frames(images)
+        if not image_frames and (kwargs.get("start_image") is not None or kwargs.get("end_image") is not None):
+            legacy_frames = []
+            if kwargs.get("start_image") is not None:
+                legacy_frames.extend(_extract_image_frames(kwargs.get("start_image"))[:1])
+            if kwargs.get("end_image") is not None:
+                legacy_frames.extend(_extract_image_frames(kwargs.get("end_image"))[:1])
+            image_frames = legacy_frames
 
-            clip = _load_wan_clip(resolved_clip)
-            vae = _load_vae(resolved_vae)
-            model_high = _apply_sd3_shift(_apply_model_only_lora(_load_unet(resolved_unet), resolved_high_lora, 1.0), DEFAULT_SHIFT)
-            model_low = _apply_sd3_shift(_apply_model_only_lora(_load_unet(resolved_unet), resolved_low_lora, 1.0), DEFAULT_SHIFT)
+        image_count = len(image_frames)
+        route_name = _build_route_name(image_count)
+        segment_pairs = _segment_pairs(image_frames)
+        segment_count = len(segment_pairs)
+
+        checkpoint_name = checkpoint_name or kwargs.get("unet_name") or DEFAULT_CHECKPOINT
+
+        _send_status(unique_id, f"1/8 检查并加载 Wan2.2 AIO Checkpoint：{route_name}...", 0.04)
+        try:
+            resolved_checkpoint = _require_checkpoint_name(checkpoint_name)
+            model, clip, vae = CheckpointLoaderSimple().load_checkpoint(resolved_checkpoint)
+            model = _apply_sd3_shift(model, DEFAULT_SHIFT)
+            model, clip, self.loaded_lora = _apply_chain_loras(
+                model,
+                clip,
+                lora_chain_config=lora_chain_config,
+                loaded_lora_cache=self.loaded_lora,
+            )
         except Exception as exc:
             raise RuntimeError(
-                "首尾帧生视频节点加载模型失败。\n"
-                f"UNET：{unet_name}\n"
-                f"CLIP：{DEFAULT_CLIP}\n"
-                f"VAE：{DEFAULT_VAE}\n"
+                "Wan2.2 AIO 节点加载 Checkpoint 失败。\n"
+                f"Checkpoint：models/checkpoints/{checkpoint_name}\n"
                 f"详细错误：{exc}"
             ) from exc
 
-        _send_status(unique_id, "2/7 编码提示词...")
-        positive = _encode_text(clip, str(positive_prompt or "").strip() or DEFAULT_POSITIVE)
-        negative = _encode_text(clip, str(negative_prompt or "").strip() or DEFAULT_NEGATIVE)
+        _send_status(unique_id, "2/8 编码提示词...", 0.14)
+        positive = CLIPTextEncode().encode(clip, str(positive_prompt or "").strip() or DEFAULT_POSITIVE)[0]
+        negative = CLIPTextEncode().encode(clip, str(negative_prompt or "").strip() or DEFAULT_NEGATIVE)[0]
 
-        _send_status(unique_id, "3/7 构建首尾帧视频 latent...")
-        positive, negative, latent = _build_first_last_latent(
-            positive,
-            negative,
-            vae,
-            start_image,
-            end_image,
-            int(width),
-            int(height),
-            int(length),
-            1,
-        )
+        collected_segments: list[torch.Tensor] = []
+        for segment_index, (segment_start, segment_end) in enumerate(segment_pairs):
+            progress_base = 0.18 + 0.58 * (segment_index / max(1, segment_count))
+            segment_label = f"第 {segment_index + 1}/{segment_count} 段"
+            if image_count <= 0:
+                mode_label = "文生视频"
+            elif segment_end is None:
+                mode_label = "图生视频"
+            else:
+                mode_label = "首尾帧"
 
-        _send_status(unique_id, "4/7 第一阶段高噪采样...")
-        stage1 = common_ksampler(
-            model_high,
-            int(seed),
-            DEFAULT_STEPS,
-            DEFAULT_CFG,
-            DEFAULT_SAMPLER,
-            DEFAULT_SCHEDULER,
-            positive,
-            negative,
-            latent,
-            denoise=1.0,
-            disable_noise=False,
-            start_step=0,
-            last_step=2,
-            force_full_denoise=False,
-        )[0]
-
-        _send_status(unique_id, "5/7 第二阶段低噪细化...")
-        stage2 = common_ksampler(
-            model_low,
-            0,
-            DEFAULT_STEPS,
-            DEFAULT_CFG,
-            DEFAULT_SAMPLER,
-            DEFAULT_SCHEDULER,
-            positive,
-            negative,
-            stage1,
-            denoise=1.0,
-            disable_noise=True,
-            start_step=2,
-            last_step=10000,
-            force_full_denoise=True,
-        )[0]
-
-        _send_status(unique_id, "6/7 解码视频帧...")
-        frames = VAEDecode().decode(vae, stage2)[0]
-
-        _send_status(unique_id, "7/7 创建视频...")
-        video = InputImpl.VideoFromComponents(
-            Types.VideoComponents(
-                images=frames,
-                audio=None,
-                frame_rate=Fraction(float(fps)),
+            _send_status(unique_id, f"3/8 {segment_label}：构建 AIO/VACE {mode_label} 条件...", progress_base)
+            strength = 0.0 if image_count <= 0 else 1.0
+            control_images, control_masks = _build_vace_control_frames(
+                num_frames=int(length),
+                empty_frame_level=DEFAULT_EMPTY_FRAME_LEVEL,
+                start_image=segment_start,
+                end_image=segment_end,
             )
+            segment_positive, segment_negative, latent, _ = _build_vace_latent(
+                positive,
+                negative,
+                vae,
+                int(width),
+                int(height),
+                int(length),
+                1,
+                strength,
+                control_video=control_images,
+                control_masks=control_masks,
+                reference_image=None,
+            )
+
+            _send_status(unique_id, f"4/8 {segment_label}：AIO 采样中...", progress_base + 0.18)
+            sampled = common_ksampler(
+                model,
+                int(seed),
+                DEFAULT_STEPS,
+                DEFAULT_CFG,
+                DEFAULT_SAMPLER,
+                DEFAULT_SCHEDULER,
+                segment_positive,
+                segment_negative,
+                latent,
+                denoise=DEFAULT_DENOISE,
+            )[0]
+
+            _send_status(unique_id, f"5/8 {segment_label}：VAE 解码视频帧...", progress_base + 0.38)
+            decoded = VAEDecode().decode(vae, sampled)[0].detach().float().cpu().contiguous()
+            if segment_index > 0 and int(decoded.shape[0]) > 1:
+                decoded = decoded[1:].contiguous()
+            collected_segments.append(decoded)
+
+            if bool(save_segments):
+                _send_status(unique_id, f"6/8 {segment_label}：保存分段预览...", progress_base + 0.48)
+                segment_combined = combine_video(
+                    images=decoded,
+                    video_inputs=None,
+                    frame_rate=float(fps),
+                    loop_count=0,
+                    filename_prefix=f"{str(filename_prefix or DEFAULT_FILENAME).strip()}_segment_{segment_index + 1:02d}",
+                    format_name=format_name,
+                    pingpong=False,
+                    save_output=save_output,
+                    use_source_fps=False,
+                    delete_tail_frame=False,
+                    audio=None,
+                    vae=None,
+                    prompt=prompt,
+                    extra_pnginfo=extra_pnginfo,
+                    unique_id=unique_id,
+                )
+                _send_preview_status(
+                    unique_id,
+                    f"{segment_label} 预览已更新",
+                    progress_base + 0.5,
+                    dict(segment_combined.get("ui") or {}),
+                )
+
+        _send_status(unique_id, "7/8 合并帧序列并处理音频...", 0.82)
+        frames = _concat_segments(collected_segments)
+        fitted_audio = _fit_audio_to_video(audio, int(frames.shape[0]), float(fps), str(audio_fit_mode))
+
+        _send_status(unique_id, "8/8 合成最终视频并生成节点内预览...", 0.9)
+        combined = combine_video(
+            images=frames,
+            video_inputs=None,
+            frame_rate=float(fps),
+            loop_count=0,
+            filename_prefix=str(filename_prefix or DEFAULT_FILENAME).strip() or DEFAULT_FILENAME,
+            format_name=format_name,
+            pingpong=False,
+            save_output=save_output,
+            use_source_fps=False,
+            delete_tail_frame=False,
+            audio=fitted_audio,
+            vae=None,
+            prompt=prompt,
+            extra_pnginfo=extra_pnginfo,
+            unique_id=unique_id,
         )
-        _send_status(unique_id, f"完成：视频 {int(width)} × {int(height)} / {int(length)} 帧")
-        return (video,)
+        ui_payload = dict(combined.get("ui") or {})
+        _send_preview_status(unique_id, "最终视频预览已更新", 0.96, ui_payload)
+        ui_payload.update(
+            {
+                "mode_summary": [route_name],
+                "frame_count": [int(frames.shape[0])],
+                "frame_size": [f"{int(width)}x{int(height)}"],
+                "source_image_count": [image_count],
+                "segment_count": [segment_count],
+                "has_audio": [fitted_audio is not None],
+            }
+        )
+        video = combined.get("result", (None,))[0]
+        _send_status(unique_id, f"完成：{route_name}，{segment_count} 段 / {int(frames.shape[0])} 帧", 1.0)
+        return {
+            "ui": ui_payload,
+            "result": (video, frames),
+        }
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_Wan22FirstLastVideo}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🎬 首尾帧生视频器"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ·🎬多功能视频生成器(WAN2.2) 🧡"}

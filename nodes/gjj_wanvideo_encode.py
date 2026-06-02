@@ -41,6 +41,14 @@ def _safe_vae_to(vae: Any, device: Any) -> None:
         model.to(device)
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "开", "开启", "启用"}
+
+
 class GJJ_WanVideoEncode:
     CATEGORY = "GJJ/视频生成"
     FUNCTION = "encode"
@@ -179,7 +187,9 @@ class GJJ_WanVideoEncode:
         }
 
     @staticmethod
-    def VALIDATE_INPUTS(tile_x, tile_y, tile_stride_x, tile_stride_y, **_kwargs):
+    def VALIDATE_INPUTS(enable_vae_tiling=False, tile_x=272, tile_y=272, tile_stride_x=144, tile_stride_y=128, **_kwargs):
+        if not _as_bool(enable_vae_tiling):
+            return True
         if int(tile_x) <= int(tile_stride_x):
             return "分块宽度必须大于横向步长。"
         if int(tile_y) <= int(tile_stride_y):
@@ -235,7 +245,7 @@ class GJJ_WanVideoEncode:
             latents = vae.encode(
                 video * 2.0 - 1.0,
                 device=device,
-                tiled=bool(enable_vae_tiling),
+                tiled=_as_bool(enable_vae_tiling),
                 tile_size=(int(tile_x) // upsampling_factor, int(tile_y) // upsampling_factor),
                 tile_stride=(int(tile_stride_x) // upsampling_factor, int(tile_stride_y) // upsampling_factor),
             )

@@ -315,9 +315,41 @@ function syncWidget(node, name, value) {
 	let next = value;
 	if (typeof w.value === "boolean") next = Boolean(value);
 	else if (typeof w.value === "number") next = Number.parseFloat(value);
-	w.value = next;
-	w.callback?.(next);
+	if (typeof w.__gjjVUSetValue === "function") {
+		w.__gjjVUSetValue(String(next ?? ""), false);
+	} else {
+		w.value = next;
+		w.callback?.(next);
+		if (w.__gjjVUInput && "value" in w.__gjjVUInput) w.__gjjVUInput.value = String(w.value ?? "");
+	}
 	saveWidgetValues(node);
+}
+
+function quantizationFromModelName(value) {
+	const raw = String(value || "").replaceAll("\\", "/").toLowerCase();
+	if (!raw) return "";
+	if (/\.gguf(?:$|[?#])/.test(raw)) return "disabled";
+	const text = raw.replace(/[\s.\-]+/g, "_");
+	const markers = [
+		"fp8_e4m3fn_scaled_fast",
+		"fp8_e4m3fn_scaled",
+		"fp8_e4m3fn_fast",
+		"fp8_e4m3fn",
+		"fp8_e5m2_scaled_fast",
+		"fp8_e5m2_scaled",
+		"fp8_e5m2_fast",
+		"fp8_e5m2",
+	];
+	return markers.find((marker) => text.includes(marker)) || "";
+}
+
+function syncQuantizationFromModelName(node, slot, index, fileValue) {
+	if (!isKijaiNode(node) || String(slot?.kind || "") !== "wanvideo_model") return;
+	const quantization = quantizationFromModelName(fileValue);
+	if (!quantization || !WAN_QUANTIZATIONS.includes(quantization)) return;
+	const name = settingName("quantization", index);
+	if (String(getWidget(node, name)?.value ?? "") === quantization) return;
+	syncWidget(node, name, quantization);
 }
 
 function getFilters(node) {
@@ -478,6 +510,7 @@ function syncPairedLowModelFromHigh(node, cfg, highSlot, highIndex, highValue, s
 		lowWidget.value = matched;
 		lowWidget.callback?.(matched);
 	}
+	syncQuantizationFromModelName(node, lowSlot, pair.index + 1, matched);
 	saveWidgetValues(node);
 }
 
@@ -1781,6 +1814,7 @@ function applyConfig(node, opts = {}) {
 		setComboOptions(getWidget(node, dtypeName), state.dtypes || ["default"]);
 		selectFirstIfInvalid(node, dtypeName, state.dtypes || ["default"]);
 		ensureSettingDefaults(node, slot, i, resetSlotSettings);
+		syncQuantizationFromModelName(node, slot, i, valueOf(node, fileName));
 
 		const row = document.createElement("div");
 		const params = paramDefsForSlot(node, slot);
@@ -1795,6 +1829,7 @@ function applyConfig(node, opts = {}) {
 		label.textContent = `${icon} ${String(slot.label || slot.id || `模型${i}`)}`;
 		label.title = slotTitle(slot, folder);
 		const select = createSearchableSelect(node, fileName, values, (value) => {
+			syncQuantizationFromModelName(node, slot, i, value);
 			saveWidgetValues(node);
 			syncPairedLowModelFromHigh(node, cfg, slot, index, value, state);
 		}, null, {

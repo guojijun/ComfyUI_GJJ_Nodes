@@ -41,11 +41,14 @@ except ImportError:
 
 
 NODE_NAME = "GJJ_WanVideoTextEncodeCached"
-NODE_DISPLAY_NAME = "📝 WanVideo 文本编码（缓存版）"
+NODE_DISPLAY_NAME = "📝CLIP文本编码(Kijai版WanVideo专用)"
 TRANSLATED_EVENT = "gjj_wanvideo_text_prompt_translated"
 
 USE_DISK_CACHE = True
 ENCODE_DEVICE = "gpu"
+ENCODE_DEVICE_OPTIONS = ("gpu", "cpu", "disabled")
+TRANSLATION_DEVICE = "auto"
+TRANSLATION_DEVICE_OPTIONS = ("auto", "cpu", "gpu", False, True, "false", "true", "disabled")
 FORCE_OFFLOAD_AFTER_ENCODE = False
 NEGATIVE_PROMPT = ""
 
@@ -167,12 +170,12 @@ def _get_cache_path(prompt):
     return os.path.join(_get_cache_dir(), f"{cache_hash}.pt")
 
 
-def _get_cached_text_embeds(positive_prompt):
+def _get_cached_text_embeds(positive_prompt, negative_prompt=NEGATIVE_PROMPT):
     context = None
     context_null = None
 
     pos_cache_path = _get_cache_path(positive_prompt)
-    neg_cache_path = _get_cache_path(NEGATIVE_PROMPT)
+    neg_cache_path = _get_cache_path(negative_prompt)
 
     if os.path.exists(pos_cache_path):
         try:
@@ -191,10 +194,10 @@ def _get_cached_text_embeds(positive_prompt):
     return context, context_null
 
 
-def _save_text_embeds(positive_prompt, prompt_embeds, negative_prompt_embeds):
+def _save_text_embeds(positive_prompt, prompt_embeds, negative_prompt_embeds, negative_prompt=NEGATIVE_PROMPT):
     try:
         pos_cache_path = _get_cache_path(positive_prompt)
-        neg_cache_path = _get_cache_path(NEGATIVE_PROMPT)
+        neg_cache_path = _get_cache_path(negative_prompt)
 
         torch.save(prompt_embeds, pos_cache_path)
         print(f"[GJJ WanVideoTextEncode] 正向提示词嵌入已缓存: {pos_cache_path}")
@@ -225,6 +228,22 @@ def _zero_like_text_embeds(value):
     except Exception:
         pass
     return value
+
+
+def _normalize_encode_device(value):
+    device = str(value or ENCODE_DEVICE).strip().lower()
+    if device == "cpu":
+        return "cpu"
+    # 兼容旧工作流里保存的 disabled；这里按默认 GPU 编码处理。
+    return ENCODE_DEVICE
+
+
+def _normalize_translation_device(value):
+    device = str(value or TRANSLATION_DEVICE).strip().lower()
+    if device in {"cpu", "gpu"}:
+        return device
+    # 兼容旧工作流里保存的 False / disabled；翻译设备回到默认自动选择。
+    return TRANSLATION_DEVICE
 
 
 class GJJ_WanVideoTextEncodeCached:
@@ -288,13 +307,13 @@ class GJJ_WanVideoTextEncodeCached:
                     },
                 ),
                 "device": (
-                    ["gpu", "cpu"],
+                    list(ENCODE_DEVICE_OPTIONS),
                     {
                         "default": ENCODE_DEVICE,
                         "display": "hidden",
                         "hidden": True,
                         "display_name": "编码设备",
-                        "tooltip": "按钮状态。文本编码计算设备。",
+                        "tooltip": "按钮状态。文本编码计算设备。旧工作流里的 disabled 会自动按 gpu 处理。",
                     },
                 ),
                 "zero_conditioning": (
@@ -308,13 +327,13 @@ class GJJ_WanVideoTextEncodeCached:
                     },
                 ),
                 "translation_device": (
-                    ["auto", "cpu", "gpu"],
+                    list(TRANSLATION_DEVICE_OPTIONS),
                     {
-                        "default": "auto",
+                        "default": TRANSLATION_DEVICE,
                         "display": "hidden",
                         "hidden": True,
                         "display_name": "翻译设备",
-                        "tooltip": "翻译按钮使用的设备。auto 会自动选择 GPU 或 CPU。",
+                        "tooltip": "翻译按钮使用的设备。auto 会自动选择 GPU 或 CPU。旧工作流里的 False / disabled 会自动按 auto 处理。",
                     },
                 ),
                 "translation_unload_after_use": (
@@ -338,6 +357,15 @@ class GJJ_WanVideoTextEncodeCached:
                     },
                 ),
             },
+            "optional": {
+                "model_to_offload": (
+                    "WANVIDEOMODEL",
+                    {
+                        "display_name": "临时卸载模型",
+                        "tooltip": "可选。编码前先把视频模型移到卸载设备，为 T5 文本编码腾出显存；兼容旧版 Kijai WanVideo 工作流。",
+                    },
+                ),
+            },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
                 "extra_pnginfo": "EXTRA_PNGINFO",
@@ -348,6 +376,9 @@ class GJJ_WanVideoTextEncodeCached:
     def IS_CHANGED(cls, *args, **kwargs):
         keys = [
             "positive_prompt",
+            "positive_prompt_input",
+            "negative_prompt",
+            "negative_prompt_input",
             "force_offload",
             "use_disk_cache",
             "device",
@@ -360,8 +391,8 @@ class GJJ_WanVideoTextEncodeCached:
 
     def process(
         self,
-        text_encoder,
-        positive_prompt,
+        text_encoder=None,
+        positive_prompt="",
         force_offload=FORCE_OFFLOAD_AFTER_ENCODE,
         use_disk_cache=USE_DISK_CACHE,
         device=ENCODE_DEVICE,
@@ -369,22 +400,35 @@ class GJJ_WanVideoTextEncodeCached:
         translation_device="auto",
         translation_unload_after_use=False,
         translation_enabled=False,
+        model_to_offload=None,
+        positive_prompt_input=None,
+        negative_prompt_input=None,
+        extender_args=None,
         unique_id=None,
         extra_pnginfo=None,
+        **kwargs,
     ):
+        if text_encoder is None:
+            text_encoder = kwargs.get("t5", None)
+        if positive_prompt_input is not None:
+            positive_prompt = positive_prompt_input
+        if negative_prompt_input is None:
+            negative_prompt_input = kwargs.get("negative_prompt", None)
+        negative_prompt = NEGATIVE_PROMPT if negative_prompt_input is None else str(negative_prompt_input or "")
         positive_prompt = str(positive_prompt or "")
         force_offload = as_bool(force_offload)
         use_disk_cache = as_bool(use_disk_cache)
-        device = str(device or ENCODE_DEVICE)
+        device = _normalize_encode_device(device)
         zero_conditioning = as_bool(zero_conditioning)
         translation_enabled = as_bool(translation_enabled)
         translation_unload_after_use = as_bool(translation_unload_after_use)
+        translation_device = _normalize_translation_device(translation_device)
 
         if translation_enabled:
             translated = translate_prompt_pair(
                 positive=positive_prompt,
                 negative="",
-                device=str(translation_device or "auto"),
+                device=translation_device,
                 max_length=512,
                 batch_size=8,
                 unload_after_use=translation_unload_after_use,
@@ -399,7 +443,7 @@ class GJJ_WanVideoTextEncodeCached:
         if isinstance(text_encoder, dict):
             encoder_name = str(text_encoder.get("name", "") or "")
         print(f"[GJJ WanVideoTextEncode] T5编码器: {encoder_name or 'WANTEXTENCODER'}")
-        print(f"[GJJ WanVideoTextEncode] 使用空负向提示词")
+        print("[GJJ WanVideoTextEncode] 使用空负向提示词" if not negative_prompt else "[GJJ WanVideoTextEncode] 使用外部负向提示词")
         print(f"[GJJ WanVideoTextEncode] 设备: {device}")
         print(f"[GJJ WanVideoTextEncode] 编码后卸载T5: {force_offload}")
         print(f"[GJJ WanVideoTextEncode] 使用磁盘缓存: {use_disk_cache}")
@@ -438,7 +482,7 @@ class GJJ_WanVideoTextEncodeCached:
         echoshot = "[1]" in positive_prompt
 
         if use_disk_cache:
-            context, context_null = _get_cached_text_embeds(positive_prompt)
+            context, context_null = _get_cached_text_embeds(positive_prompt, negative_prompt)
             if context is not None and (context_null is not None or zero_conditioning):
                 if zero_conditioning:
                     context_null = _zero_like_text_embeds(context)
@@ -452,10 +496,10 @@ class GJJ_WanVideoTextEncodeCached:
         print("[GJJ WanVideoTextEncode] 正在编码文本提示词...")
         prompt_embeds_dict, = wan_nodes.WanVideoTextEncode().process(
             positive_prompt=positive_prompt,
-            negative_prompt=NEGATIVE_PROMPT,
+            negative_prompt=negative_prompt,
             t5=text_encoder,
             force_offload=force_offload,
-            model_to_offload=None,
+            model_to_offload=model_to_offload,
             use_disk_cache=False,
             device=device,
         )
@@ -471,6 +515,7 @@ class GJJ_WanVideoTextEncodeCached:
                 positive_prompt,
                 prompt_embeds_dict.get("prompt_embeds"),
                 None if zero_conditioning else prompt_embeds_dict.get("negative_prompt_embeds"),
+                negative_prompt,
             )
 
         print("[GJJ WanVideoTextEncode] ========== 编码完成 ==========")

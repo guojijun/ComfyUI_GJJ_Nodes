@@ -516,14 +516,7 @@ function buildPanel(node) {
   const root = document.createElement("div");
   root.className = "gjj-ltx-clean";
   stopCanvasEvents(root);
-  const title = document.createElement("div");
-  title.className = "gjj-ltx-title";
-  title.textContent = "LTX 2.3 高级面板 · Clean v40";
-  root.appendChild(title);
-  const tip = document.createElement("div");
-  tip.className = "gjj-ltx-tip";
-  tip.textContent = "主模型、提示词、宽高、帧率、种子、降噪已改回原生字段；接入口会显示在字段前面。多图分段里可用“转场LoRA序列”控制每段是否启用转场，例如 1,0,1。";
-  root.appendChild(tip);
+
   const buttons = document.createElement("div");
   buttons.className = "gjj-ltx-tab-buttons";
   const segmentBtn = document.createElement("button");

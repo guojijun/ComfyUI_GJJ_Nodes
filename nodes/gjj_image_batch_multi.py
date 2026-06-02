@@ -8,6 +8,22 @@ import torch.nn.functional as F
 
 NODE_NAME = "GJJ_ImageBatchMulti"
 COMPAT_BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
+SIZE_PRESET_OPTIONS = ("320", "480", "720", "1024", "2K", "4K")
+ORIENTATION_OPTIONS = ("横屏", "竖屏", "正方形")
+PREPEND_FRAME_OPTIONS = ("无", "黑帧", "白帧")
+DEFAULT_SIZE_PRESET = "720"
+DEFAULT_ORIENTATION = "横屏"
+DEFAULT_PREPEND_FRAME = "无"
+DEFAULT_CUSTOM_SIZE = 0
+DEFAULT_CUSTOM_RATIO = "16:9"
+SIZE_PRESET_DIMENSIONS = {
+    "320": {"横屏": (576, 320), "竖屏": (320, 576), "正方形": (320, 320)},
+    "480": {"横屏": (864, 480), "竖屏": (480, 864), "正方形": (480, 480)},
+    "720": {"横屏": (1280, 720), "竖屏": (720, 1280), "正方形": (720, 720)},
+    "1024": {"横屏": (1824, 1024), "竖屏": (1024, 1824), "正方形": (1024, 1024)},
+    "2K": {"横屏": (2048, 1152), "竖屏": (1152, 2048), "正方形": (2048, 2048)},
+    "4K": {"横屏": (3840, 2160), "竖屏": (2160, 3840), "正方形": (3840, 3840)},
+}
 
 
 class FlexibleImageInputs(dict):
@@ -59,13 +75,161 @@ def _normalize_image_tensor(value: Any) -> torch.Tensor | None:
     return tensor.float().contiguous()
 
 
-def _first_scalar(value: Any, default: int) -> int:
+def _first_value(value: Any, default: Any = None) -> Any:
     if isinstance(value, (list, tuple)):
-        return _first_scalar(value[0], default) if value else default
+        return _first_value(value[0], default) if value else default
+    return default if value is None else value
+
+
+def _first_scalar(value: Any, default: int) -> int:
+    value = _first_value(value, default)
     try:
         return int(value)
     except Exception:
         return default
+
+
+def _align_to_16(value: Any) -> int:
+    try:
+        number = float(_first_value(value, 16))
+    except Exception:
+        number = 16
+    return max(16, int(round(max(1.0, number) / 16.0)) * 16)
+
+
+def _normalize_size_preset(value: Any) -> str:
+    text = str(_first_value(value, DEFAULT_SIZE_PRESET) or "").strip()
+    normalized = text.lower().replace(" ", "")
+    aliases = {
+        "3": "320",
+        "3️⃣": "320",
+        "320": "320",
+        "4": "480",
+        "4️⃣": "480",
+        "480": "480",
+        "7": "720",
+        "7️⃣": "720",
+        "720": "720",
+        "1": "1024",
+        "1️⃣": "1024",
+        "1024": "1024",
+        "2": "2K",
+        "2️⃣": "2K",
+        "2k": "2K",
+        "#": "4K",
+        "#️⃣": "4K",
+        "4k": "4K",
+    }
+    return aliases.get(normalized, text if text in SIZE_PRESET_DIMENSIONS else DEFAULT_SIZE_PRESET)
+
+
+def _normalize_orientation(value: Any) -> str:
+    text = str(_first_value(value, DEFAULT_ORIENTATION) or "").strip()
+    normalized = text.lower().replace(" ", "")
+    if normalized in {"横", "横屏", "landscape", "horizontal", "wide", "⏩"}:
+        return "横屏"
+    if normalized in {"竖", "竖屏", "portrait", "vertical", "tall", "⏫"}:
+        return "竖屏"
+    if normalized in {"方", "正方形", "square", "1:1", "🟦"}:
+        return "正方形"
+    return DEFAULT_ORIENTATION
+
+
+def _normalize_prepend_frame(value: Any) -> str:
+    text = str(_first_value(value, DEFAULT_PREPEND_FRAME) or "").strip()
+    normalized = text.lower().replace(" ", "")
+    if normalized in {"黑", "黑帧", "前置黑帧", "black", "blackframe", "◼", "◼️"}:
+        return "黑帧"
+    if normalized in {"白", "白帧", "前置白帧", "white", "whiteframe", "⬜", "⬜️"}:
+        return "白帧"
+    return "无"
+
+
+def _legacy_width_height(width_value: Any, height_value: Any) -> tuple[int, int] | None:
+    try:
+        width = int(_first_value(width_value))
+        height = int(_first_value(height_value))
+    except Exception:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return _align_to_16(width), _align_to_16(height)
+
+
+def _parse_ratio_pair(value: Any) -> tuple[float, float] | None:
+    text = str(_first_value(value, DEFAULT_CUSTOM_RATIO) or "").strip().lower()
+    if not text:
+        text = DEFAULT_CUSTOM_RATIO
+    aliases = {
+        "横": "16:9",
+        "横屏": "16:9",
+        "landscape": "16:9",
+        "horizontal": "16:9",
+        "wide": "16:9",
+        "⏩": "16:9",
+        "竖": "9:16",
+        "竖屏": "9:16",
+        "portrait": "9:16",
+        "vertical": "9:16",
+        "tall": "9:16",
+        "⏫": "9:16",
+        "方": "1:1",
+        "正方形": "1:1",
+        "square": "1:1",
+        "🟦": "1:1",
+    }
+    text = aliases.get(text, text)
+    match = re.match(r"^\s*(\d+(?:\.\d+)?)\s*[:/x×,，]\s*(\d+(?:\.\d+)?)\s*$", text)
+    if match:
+        left = float(match.group(1))
+        right = float(match.group(2))
+        if left > 0 and right > 0:
+            return left, right
+        return None
+    try:
+        ratio = float(text)
+    except Exception:
+        return None
+    return (ratio, 1.0) if ratio > 0 else None
+
+
+def _custom_size_ratio(custom_size: Any, custom_ratio: Any) -> tuple[int, int] | None:
+    try:
+        size = int(round(float(_first_value(custom_size, DEFAULT_CUSTOM_SIZE) or 0)))
+    except Exception:
+        size = 0
+    if size <= 0:
+        return None
+    ratio = _parse_ratio_pair(custom_ratio)
+    if ratio is None:
+        raise RuntimeError("图片批量打包的自定义比例格式不正确，请填写类似 16:9、9:16、1:1 或 1.777。")
+    ratio_width, ratio_height = ratio
+    if ratio_width >= ratio_height:
+        height = size
+        width = size * ratio_width / ratio_height
+    else:
+        width = size
+        height = size * ratio_height / ratio_width
+    return _align_to_16(width), _align_to_16(height)
+
+
+def _resolve_canvas_size(size_preset: Any, orientation: Any, kwargs: dict[str, Any]) -> tuple[int, int]:
+    legacy_size = _legacy_width_height(kwargs.get("width"), kwargs.get("height"))
+    if legacy_size is not None:
+        return legacy_size
+
+    custom_size = _custom_size_ratio(kwargs.get("custom_size"), kwargs.get("custom_ratio"))
+    if custom_size is not None:
+        return custom_size
+
+    legacy_size = _legacy_width_height(size_preset, orientation)
+    if legacy_size is not None:
+        return legacy_size
+
+    preset = _normalize_size_preset(size_preset)
+    direction = _normalize_orientation(orientation)
+    width, height = SIZE_PRESET_DIMENSIONS[preset][direction]
+    return _align_to_16(width), _align_to_16(height)
 
 
 def _iter_image_frames(value: Any) -> list[torch.Tensor]:
@@ -130,6 +294,14 @@ def _collect_images(kwargs: dict[str, Any]) -> list[torch.Tensor]:
     return images
 
 
+def _make_prepend_frame(mode: str, width: int, height: int, channels: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor | None:
+    if mode == "黑帧":
+        return torch.zeros((1, height, width, channels), dtype=dtype, device=device)
+    if mode == "白帧":
+        return torch.ones((1, height, width, channels), dtype=dtype, device=device)
+    return None
+
+
 class GJJ_ImageBatchMulti:
     CATEGORY = "GJJ/图像"
     FUNCTION = "combine"
@@ -137,9 +309,9 @@ class GJJ_ImageBatchMulti:
     RETURN_TYPES = (COMPAT_BATCH_IMAGE_TYPE,)
     RETURN_NAMES = ("批量图像",)
     OUTPUT_TOOLTIPS = (
-        "输出兼容 GJJ 批量图片和普通 IMAGE batch。第一帧为按宽高生成并反转得到的白色空图，后面依次追加已连接图片。",
+        "输出兼容 GJJ 批量图片和普通 IMAGE batch。可选择前置黑帧或白帧；未选择时只输出已连接图片。",
     )
-    DESCRIPTION = "零依赖图片批量打包：内部按宽高生成空图像并反转为白图，再与所有动态输入图片一起打包输出。"
+    DESCRIPTION = "零依赖图片批量打包：用预设尺寸和画幅方向统一缩放图片，也可通过前端 ⚙️ 自定义尺寸 / 比例；可选前置黑帧或白帧。"
     SEARCH_ALIASES = [
         "image batch multi",
         "ImageBatchMulti",
@@ -153,26 +325,77 @@ class GJJ_ImageBatchMulti:
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "size_preset": (
+                    list(SIZE_PRESET_OPTIONS),
+                    {
+                        "default": DEFAULT_SIZE_PRESET,
+                        "display_name": "尺寸档位",
+                        "tooltip": "由前端图标按钮控制：320、480、720、1024、2K、4K；最终宽高会自动按 16 对齐。",
+                    },
+                ),
+                "orientation": (
+                    list(ORIENTATION_OPTIONS),
+                    {
+                        "default": DEFAULT_ORIENTATION,
+                        "display_name": "画幅方向",
+                        "tooltip": "由前端图标按钮控制：横屏、竖屏、正方形；与尺寸档位互相组合得到最终尺寸。",
+                    },
+                ),
+                "prepend_frame": (
+                    list(PREPEND_FRAME_OPTIONS),
+                    {
+                        "default": DEFAULT_PREPEND_FRAME,
+                        "display_name": "前置帧",
+                        "tooltip": "由前端图标按钮控制。黑帧和白帧互斥；再次点击当前按钮可取消，不添加前置帧。",
+                    },
+                ),
                 "width": (
                     "INT",
                     {
-                        "default": 1280,
-                        "min": 1,
-                        "max": 16384,
-                        "step": 1,
-                        "display_name": "宽度",
-                        "tooltip": "内部空图像和输出批次统一使用的宽度，默认 1280。",
+                        "default": 0,
+                        "min": 0,
+                        "max": 8192,
+                        "step": 16,
+                        "display_name": "自定义宽度",
+                        "tooltip": "由前端 ⚙️ 自定义面板写入。0 表示使用尺寸档位和画幅方向。",
+                        "hidden": True,
+                        "display": "hidden",
                     },
                 ),
                 "height": (
                     "INT",
                     {
-                        "default": 720,
-                        "min": 1,
-                        "max": 16384,
-                        "step": 1,
-                        "display_name": "高度",
-                        "tooltip": "内部空图像和输出批次统一使用的高度，默认 720。",
+                        "default": 0,
+                        "min": 0,
+                        "max": 8192,
+                        "step": 16,
+                        "display_name": "自定义高度",
+                        "tooltip": "由前端 ⚙️ 自定义面板写入。0 表示使用尺寸档位和画幅方向。",
+                        "hidden": True,
+                        "display": "hidden",
+                    },
+                ),
+                "custom_size": (
+                    "INT",
+                    {
+                        "default": DEFAULT_CUSTOM_SIZE,
+                        "min": 0,
+                        "max": 8192,
+                        "step": 16,
+                        "display_name": "自定义尺寸",
+                        "tooltip": "由前端 ⚙️ 自定义面板保存的短边 / 方图边长；0 表示关闭自定义尺寸。",
+                        "hidden": True,
+                        "display": "hidden",
+                    },
+                ),
+                "custom_ratio": (
+                    "STRING",
+                    {
+                        "default": DEFAULT_CUSTOM_RATIO,
+                        "display_name": "自定义比例",
+                        "tooltip": "由前端 ⚙️ 自定义面板保存，格式例如 16:9、9:16、1:1。",
+                        "hidden": True,
+                        "display": "hidden",
                     },
                 ),
             },
@@ -183,26 +406,36 @@ class GJJ_ImageBatchMulti:
     def VALIDATE_INPUTS(cls, **kwargs):
         return True
 
-    def combine(self, width: int = 1280, height: int = 720, **kwargs):
-        width = max(1, _first_scalar(width, 1280))
-        height = max(1, _first_scalar(height, 720))
+    def combine(
+        self,
+        size_preset: str = DEFAULT_SIZE_PRESET,
+        orientation: str = DEFAULT_ORIENTATION,
+        prepend_frame: str = DEFAULT_PREPEND_FRAME,
+        **kwargs,
+    ):
+        width, height = _resolve_canvas_size(size_preset, orientation, kwargs)
+        prepend_mode = _normalize_prepend_frame(prepend_frame)
 
         images = _collect_images(kwargs)
         device = images[0].device if images else torch.device("cpu")
         dtype = images[0].dtype if images else torch.float32
         max_channels = max([3] + [int(image.shape[-1]) for image in images])
 
-        empty = torch.zeros((1, height, width, max_channels), dtype=dtype, device=device)
-        inverted_empty = 1.0 - empty
-        batches = [inverted_empty]
+        batches: list[torch.Tensor] = []
+        prepend = _make_prepend_frame(prepend_mode, width, height, max_channels, dtype, device)
+        if prepend is not None:
+            batches.append(prepend)
 
         for image in images:
             normalized = _resize_image_batch(image.to(device=device, dtype=dtype), width, height)
             normalized = _match_channels(normalized, max_channels)
             batches.append(normalized.clamp(0.0, 1.0))
 
+        if not batches:
+            raise RuntimeError("图片批量打包没有可输出内容：请连接至少一张图片，或选择前置黑帧/白帧。")
+
         return (torch.cat(batches, dim=0).contiguous().cpu(),)
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_ImageBatchMulti}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🧺 图片批量打包"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🧺 图片批量打包到序列"}

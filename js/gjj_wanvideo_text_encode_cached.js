@@ -38,6 +38,21 @@ function toBool(value) {
 	return ["1", "true", "yes", "on", "开", "开启", "启用"].includes(String(value ?? "").trim().toLowerCase());
 }
 
+function normalizeEncodeDevice(value) {
+	return String(value || "gpu").trim().toLowerCase() === "cpu" ? "cpu" : "gpu";
+}
+
+function normalizeTranslationDevice(value) {
+	const device = String(value || "auto").trim().toLowerCase();
+	return device === "cpu" || device === "gpu" ? device : "auto";
+}
+
+function normalizedValue(name, value) {
+	if (name === FIELD.device) return normalizeEncodeDevice(value);
+	if (name === FIELD.translationDevice) return normalizeTranslationDevice(value);
+	return value;
+}
+
 function getValue(node, name, fallback = "") {
 	const widget = getWidget(node, name);
 	return widget ? widget.value : fallback;
@@ -46,8 +61,10 @@ function getValue(node, name, fallback = "") {
 function setValue(node, name, value) {
 	const widget = getWidget(node, name);
 	if (!widget) return;
-	let next = value;
-	if (typeof widget.value === "boolean") next = toBool(value);
+	let next = normalizedValue(name, value);
+	if (name !== FIELD.device && name !== FIELD.translationDevice && typeof widget.value === "boolean") {
+		next = toBool(value);
+	}
 	widget.value = next;
 	widget.callback?.(next);
 	if (widget.inputEl && "value" in widget.inputEl) widget.inputEl.value = next;
@@ -94,6 +111,14 @@ function hideControlWidgets(node) {
 	for (const name of HIDDEN_FIELDS) hideWidget(getWidget(node, name));
 }
 
+function normalizeHiddenWidgetValues(node) {
+	for (const name of [FIELD.device, FIELD.translationDevice]) {
+		const widget = getWidget(node, name);
+		if (!widget) continue;
+		setValue(node, name, normalizedValue(name, widget.value));
+	}
+}
+
 function protect(element) {
 	if (!element || element.__gjjWanTextProtected) return;
 	element.__gjjWanTextProtected = true;
@@ -138,7 +163,7 @@ function updateButtons(node) {
 		node.__gjjWanTextTranslateButton.disabled = Boolean(node.__gjjWanTextTranslating);
 	}
 	if (node.__gjjWanTextTranslationDevice) {
-		node.__gjjWanTextTranslationDevice.value = String(getValue(node, FIELD.translationDevice, "auto") || "auto");
+		node.__gjjWanTextTranslationDevice.value = normalizeTranslationDevice(getValue(node, FIELD.translationDevice, "auto"));
 	}
 	if (node.__gjjWanTextTranslationUnload) {
 		const unload = toBool(getValue(node, FIELD.translationUnload, false));
@@ -146,7 +171,7 @@ function updateButtons(node) {
 		node.__gjjWanTextTranslationUnload.textContent = unload ? "✅ 译后卸载" : "⬜ 译后卸载";
 	}
 	if (node.__gjjWanTextDeviceButton) {
-		const device = String(getValue(node, FIELD.device, "gpu") || "gpu");
+		const device = normalizeEncodeDevice(getValue(node, FIELD.device, "gpu"));
 		node.__gjjWanTextDeviceButton.dataset.value = device;
 		node.__gjjWanTextDeviceButton.textContent = device === "cpu" ? "🧮 编码CPU" : "🖥️ 编码GPU";
 	}
@@ -177,7 +202,7 @@ async function translatePositive(node) {
 			node,
 			positive,
 			negative: "",
-			device: String(getValue(node, FIELD.translationDevice, "auto") || "auto"),
+			device: normalizeTranslationDevice(getValue(node, FIELD.translationDevice, "auto")),
 			maxLength: 512,
 			batchSize: 8,
 			unloadAfterUse: toBool(getValue(node, FIELD.translationUnload, false)),
@@ -265,7 +290,7 @@ function buildDom(node) {
 	const encodeRow = document.createElement("div");
 	encodeRow.className = "gjj-wan-text-row";
 	const deviceButton = createButton("🖥️ 编码GPU", "切换文本编码设备：GPU 更快，CPU 更省显存。", () => {
-		const next = String(getValue(node, FIELD.device, "gpu")) === "gpu" ? "cpu" : "gpu";
+		const next = normalizeEncodeDevice(getValue(node, FIELD.device, "gpu")) === "gpu" ? "cpu" : "gpu";
 		setValue(node, FIELD.device, next);
 		updateButtons(node);
 	});
@@ -323,13 +348,14 @@ function restoreValues(node, serializedNode = null) {
 	const props = serializedNode?.properties || node.properties || {};
 	for (const name of HIDDEN_FIELDS) {
 		const value = props[`gjj_wan_text_value_${name}`];
-		if (value !== undefined) setValue(node, name, value);
+		if (value !== undefined) setValue(node, name, normalizedValue(name, value));
 	}
 }
 
 function stabilize(node) {
 	if (!node) return;
 	restoreValues(node);
+	normalizeHiddenWidgetValues(node);
 	ensureDom(node);
 	hideControlWidgets(node);
 	updateButtons(node);
@@ -384,14 +410,16 @@ app.registerExtension({
 
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode) {
+			normalizeHiddenWidgetValues(this);
 			serializedNode.properties = serializedNode.properties || {};
 			for (const name of HIDDEN_FIELDS) {
-				serializedNode.properties[`gjj_wan_text_value_${name}`] = getValue(this, name, "");
+				serializedNode.properties[`gjj_wan_text_value_${name}`] = normalizedValue(name, getValue(this, name, ""));
 			}
 			originalOnSerialize?.apply(this, [serializedNode]);
+			normalizeHiddenWidgetValues(this);
 			serializedNode.properties = serializedNode.properties || {};
 			for (const name of HIDDEN_FIELDS) {
-				serializedNode.properties[`gjj_wan_text_value_${name}`] = getValue(this, name, "");
+				serializedNode.properties[`gjj_wan_text_value_${name}`] = normalizedValue(name, getValue(this, name, ""));
 			}
 		};
 	},

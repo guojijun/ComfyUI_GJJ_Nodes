@@ -179,6 +179,7 @@ WANVIDEO_SAMPLER_SCHEDULER_CHOICES = [
 
 
 def _load_sampler_runtime():
+    _ensure_optional_gguf_stub()
     try:
         from ..vendor.wanvideo_wrapper import nodes_sampler as sampler_runtime
     except ImportError as error:
@@ -194,6 +195,46 @@ def _load_sampler_runtime():
             "说明: 本节点不依赖 ComfyUI-WanVideoWrapper 插件本体；如果缺少 accelerate、einops、diffusers、ftfy 等 pip 库，请按 GJJ SKILL 的运行时依赖方案安装。"
         ) from error
     return sampler_runtime
+
+
+def _ensure_optional_gguf_stub():
+    """Keep safetensors WanVideo sampling usable when optional gguf is not installed."""
+    try:
+        __import__("gguf")
+        return
+    except ImportError:
+        pass
+
+    import sys
+    import types
+
+    existing = sys.modules.get("gguf")
+    if existing is not None:
+        return
+
+    class _MissingGGUFReader:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("当前模型使用 GGUF 权重，需要先安装 gguf；普通 safetensors/fp16 模型不需要此依赖。")
+
+    gguf_stub = types.ModuleType("gguf")
+    gguf_stub.GGUFReader = _MissingGGUFReader
+    gguf_stub.GGML_QUANT_SIZES = {}
+    gguf_stub.GGMLQuantizationType = type("GGMLQuantizationType", (), {
+        "F32": 0,
+        "F16": 1,
+        "BF16": 2,
+        "Q8_0": 3,
+        "Q5_1": 4,
+        "Q5_0": 5,
+        "Q4_1": 6,
+        "Q4_0": 7,
+        "Q6_K": 8,
+        "Q5_K": 9,
+        "Q4_K": 10,
+        "Q3_K": 11,
+        "Q2_K": 12,
+    })
+    sys.modules["gguf"] = gguf_stub
 
 
 def _model_input_type_label(model):

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 import json
 import os
+import re
 from urllib.parse import quote_plus
 
 import folder_paths
@@ -37,6 +38,30 @@ LORA_CONFIG_TYPE = "WANVIDLORA,LORA_CHAIN_CONFIG"
 DTYPES = ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"]
 CLIP_TYPES = ["auto", "wan"]
 MODEL_EXTENSIONS = {".ckpt", ".pt", ".pt2", ".bin", ".pth", ".safetensors", ".pkl", ".sft", ".gguf"}
+MODEL_NAME_ALIASES = (
+    ("wancompatible", "wancompat"),
+)
+IMPORTANT_FILENAME_FRAGMENTS = (
+    "fp8_e4m3fn_scaled",
+    "fp8_e4m3fn",
+    "fp8_e5m2_scaled",
+    "fp8_e5m2",
+    "wancompat",
+    "wancompatible",
+    "torchscript",
+    "safetensors",
+    "gguf",
+    "bf16",
+    "fp16",
+    "fp32",
+    "i2v",
+    "t2v",
+    "ti2v",
+    "s2v",
+    "14b",
+    "13b",
+    "5b",
+)
 WAN_BASE_PRECISIONS = ["fp32", "bf16", "fp16", "fp16_fast"]
 WAN_QUANTIZATIONS = [
     "disabled",
@@ -208,8 +233,135 @@ def _matches_keywords(name: str, keywords: list[str], allow_any: bool = False) -
     return bool(_filter_names([name], keywords, allow_any=allow_any))
 
 
+def _alias_model_text(value: str) -> str:
+    text = str(value or "").replace("\\", "/").strip().lower()
+    for source, target in MODEL_NAME_ALIASES:
+        text = text.replace(source, target)
+    return text
+
+
 def _path_key(value: str) -> str:
-    return str(value or "").replace("\\", "/").strip().lower()
+    return _alias_model_text(value)
+
+
+def _basename_key(value: str) -> str:
+    text = _path_key(value)
+    return text.rsplit("/", 1)[-1]
+
+
+def _stem_key(value: str) -> str:
+    base = _basename_key(value)
+    for ext in sorted(MODEL_EXTENSIONS | {".torchscript.pt"}, key=len, reverse=True):
+        if base.endswith(ext):
+            return base[: -len(ext)]
+    return os.path.splitext(base)[0]
+
+
+def _compact_stem(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", _stem_key(value)).strip("-")
+
+
+def _filename_tokens(value: str) -> set[str]:
+    text = _alias_model_text(_stem_key(value))
+    tokens = {token for token in re.findall(r"[a-z0-9]+", text) if len(token) >= 3 or token.isdigit()}
+    for fragment in IMPORTANT_FILENAME_FRAGMENTS:
+        normalized = _alias_model_text(fragment)
+        if normalized and normalized in text:
+            tokens.add(normalized)
+    return tokens
+
+
+def _longest_common_fragment(left: str, right: str) -> int:
+    if not left or not right:
+        return 0
+    previous = [0] * (len(right) + 1)
+    best = 0
+    for left_char in left:
+        current = [0] * (len(right) + 1)
+        for index, right_char in enumerate(right, start=1):
+            if left_char == right_char:
+                current[index] = previous[index - 1] + 1
+                if current[index] > best:
+                    best = current[index]
+        previous = current
+    return best
+
+
+def _preferred_filename_score(
+    candidate: str,
+    preferred: str,
+    keywords: list[str],
+    *,
+    allow_any: bool = False,
+) -> int:
+    if not preferred or not _is_usable_file(candidate, allow_any=allow_any):
+        return 0
+
+    candidate_stem = _stem_key(candidate)
+    preferred_stem = _stem_key(preferred)
+    if not candidate_stem or not preferred_stem:
+        return 0
+
+    candidate_text = _path_key(candidate)
+    preferred_tokens = _filename_tokens(preferred)
+    candidate_tokens = _filename_tokens(candidate)
+    matched_tokens = preferred_tokens & candidate_tokens
+    keyword_hits = sum(1 for kw in keywords if str(kw or "").strip().lower() in candidate_text)
+    keyword_ok = not keywords or _matches_keywords(candidate, keywords, allow_any=allow_any)
+
+    score = 0
+    strong_stem = False
+    if candidate_stem == preferred_stem:
+        score += 10000
+        strong_stem = True
+    elif candidate_stem in preferred_stem or preferred_stem in candidate_stem:
+        score += 7000
+        strong_stem = True
+    else:
+        common = _longest_common_fragment(_compact_stem(candidate), _compact_stem(preferred))
+        if common >= 12:
+            score += common * 8
+            strong_stem = common >= 18
+
+    if matched_tokens:
+        score += len(matched_tokens) * 70
+    important_hits = {
+        _alias_model_text(token)
+        for token in ("fp8_e4m3fn", "fp8_e5m2", "bf16", "fp16", "fp32", "gguf", "wancompat")
+        if _alias_model_text(token) in matched_tokens
+    }
+    score += len(important_hits) * 140
+    score += keyword_hits * 90
+    if candidate_text.endswith(".safetensors"):
+        score += 20
+    if candidate_text.endswith(".gguf"):
+        score += 12
+    score -= candidate_text.count("/")
+
+    token_ok = len(matched_tokens) >= 3 and bool(important_hits)
+    if not (strong_stem or keyword_ok or token_ok):
+        return 0
+    if keywords and not keyword_ok and not token_ok:
+        return 0
+    return max(score, 0)
+
+
+def _find_preferred_fuzzy_file(
+    names: list[str],
+    preferred: str,
+    keywords: list[str],
+    *,
+    allow_any: bool = False,
+) -> str:
+    scored: list[tuple[int, str, str]] = []
+    for name in names:
+        score = _preferred_filename_score(name, preferred, keywords, allow_any=allow_any)
+        if score > 0:
+            scored.append((-score, _path_key(name), name))
+    if not scored:
+        return ""
+    scored.sort()
+    return scored[0][2]
 
 
 def _model_download_search_url(filename: str) -> str:
@@ -217,6 +369,46 @@ def _model_download_search_url(filename: str) -> str:
     if not text:
         return ""
     return f"https://huggingface.co/models?search={quote_plus(text)}"
+
+
+def _is_sageattention_mode(value: str) -> bool:
+    return "sage" in str(value or "").strip().lower()
+
+
+def _is_sageattention_import_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return "sageattention" in text and (
+        "no module named" in text
+        or "can't import" in text
+        or "cannot import" in text
+        or "not found" in text
+        or "not installed" in text
+        or "missing" in text
+    )
+
+
+def _send_kijai_optional_notice(
+    unique_id: Any,
+    *,
+    warning_message: str = "",
+    panel_message: str = "",
+) -> None:
+    if unique_id is None or PromptServer is None or getattr(PromptServer, "instance", None) is None:
+        return
+    try:
+        PromptServer.instance.send_sync("gjj_dependency_model_notice", {
+            "node": str(unique_id),
+            "node_type": NODE_NAME,
+            "class_name": NODE_NAME,
+            "warning_message": warning_message,
+            "panel_message": panel_message,
+            "copy_text": "",
+            "copy_label": "",
+            "notice_level": "optional" if warning_message or panel_message else "",
+            "optional_dependencies": ["sageattention"] if warning_message or panel_message else [],
+        })
+    except Exception:
+        pass
 
 
 def _find_named_file(names: list[str], value: str) -> str:
@@ -258,6 +450,15 @@ def _resolve_selected(
         return selected_match
     if preferred_match:
         return preferred_match
+
+    preferred_fuzzy_match = _find_preferred_fuzzy_file(
+        names,
+        preferred,
+        keywords,
+        allow_any=allow_any,
+    )
+    if preferred_fuzzy_match:
+        return preferred_fuzzy_match
 
     keyword_groups = [keywords]
     keyword_groups.extend(group for group in (fallback_keywords or []) if isinstance(group, list))
@@ -637,7 +838,7 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "longcat_avatar": {
         "label": "LongCat Avatar 音频图生视频",
         "slots": [
-            WM("model", "LongCat Avatar模型", ["longcat", "avatar", "15"], preferred_name="LongCat-Avatar-15_fp8_e4m3fn_wancompatible.safetensors", base_precision="bf16", quantization="disabled", attention_mode="sageattn", fallback_keywords=[["longcat", "avatar"]]),
+            WM("model", "LongCat Avatar模型", ["longcat", "avatar", "15"], preferred_name="LongCat-Avatar-15_fp8_e4m3fn_wancompatible.safetensors", base_precision="bf16", quantization="disabled", attention_mode="sageattn", fallback_keywords=[["longcat", "avatar", "fp8_e4m3fn"], ["longcat", "avatar"]]),
             WAN21_VAE,
             WAN_T5,
             L("longcat_distill_lora", "LongCat Avatar DMD Distill LoRA", ["longcat", "avatar", "dmd", "distill"], preferred_name="LongCat-Avatar-15_dmd_distillLoRA.safetensors", strength=0.9, fallback_keywords=[["longcat", "distill"]]),
@@ -1046,6 +1247,8 @@ def _load_wanvideo_model(
     loras: list[dict[str, Any]],
     extra_items: list[dict[str, Any]],
     *,
+    cfg_label: str = "",
+    unique_id: Any = None,
     compile_args: Any = None,
     block_swap_args: Any = None,
     vram_management_args: Any = None,
@@ -1060,35 +1263,52 @@ def _load_wanvideo_model(
     # merge_loras=False 时要在模型加载后走 SetLoRAs 的 WanVideo 专用 patch 逻辑，不能塞进 ModelLoader。
     loader_loras = [item for item in branch_loras if bool(item.get("merge_loras", False))]
     set_loras = [item for item in branch_loras if not bool(item.get("merge_loras", False))]
-    model = _unwrap_loader_output(
-        loader.loadmodel(
-            model=model_name,
-            base_precision=_choice(slot.get("base_precision"), {"fp32", "bf16", "fp16", "fp16_fast"}, "bf16"),
-            load_device=_choice(slot.get("load_device"), {"main_device", "offload_device"}, "offload_device"),
-            quantization=_choice(
-                slot.get("quantization"),
-                {
-                    "disabled",
-                    "fp8_e4m3fn",
-                    "fp8_e4m3fn_fast",
-                    "fp8_e4m3fn_scaled",
-                    "fp8_e4m3fn_scaled_fast",
-                    "fp8_e5m2",
-                    "fp8_e5m2_fast",
-                    "fp8_e5m2_scaled",
-                    "fp8_e5m2_scaled_fast",
-                },
+    attention_mode = str(slot.get("attention_mode", "sdpa") or "sdpa")
+    load_kwargs = {
+        "model": model_name,
+        "base_precision": _choice(slot.get("base_precision"), {"fp32", "bf16", "fp16", "fp16_fast"}, "bf16"),
+        "load_device": _choice(slot.get("load_device"), {"main_device", "offload_device"}, "offload_device"),
+        "quantization": _choice(
+            slot.get("quantization"),
+            {
                 "disabled",
-            ),
-            attention_mode=str(slot.get("attention_mode", "sdpa") or "sdpa"),
-            rms_norm_function=_choice(slot.get("rms_norm_function"), {"default", "pytorch"}, "default"),
-            compile_args=compile_args,
-            block_swap_args=block_swap_args,
-            vram_management_args=vram_management_args,
-            lora=loader_loras or None,
-            **_extra_kwargs_for_branch(extra_items, model_target),
-        )
-    )
+                "fp8_e4m3fn",
+                "fp8_e4m3fn_fast",
+                "fp8_e4m3fn_scaled",
+                "fp8_e4m3fn_scaled_fast",
+                "fp8_e5m2",
+                "fp8_e5m2_fast",
+                "fp8_e5m2_scaled",
+                "fp8_e5m2_scaled_fast",
+            },
+            "disabled",
+        ),
+        "attention_mode": attention_mode,
+        "rms_norm_function": _choice(slot.get("rms_norm_function"), {"default", "pytorch"}, "default"),
+        "compile_args": compile_args,
+        "block_swap_args": block_swap_args,
+        "vram_management_args": vram_management_args,
+        "lora": loader_loras or None,
+        **_extra_kwargs_for_branch(extra_items, model_target),
+    }
+    try:
+        model = _unwrap_loader_output(loader.loadmodel(**load_kwargs))
+    except Exception as exc:
+        if not (_is_sageattention_mode(attention_mode) and _is_sageattention_import_error(exc)):
+            raise
+        fallback_kwargs = dict(load_kwargs)
+        fallback_kwargs["attention_mode"] = "sdpa"
+        model = _unwrap_loader_output(loader.loadmodel(**fallback_kwargs))
+        label = str(slot.get("label", "") or "WanVideo模型")
+        warning = "⚠️ SageAttention 未安装，已自动改用 SDPA，流程继续运行。"
+        panel = "\n".join([
+            warning,
+            f"节点预设：{cfg_label or 'Kijai模型加载'}",
+            f"模型：{model_name}",
+            f"{label} 注意力模式：{attention_mode} → sdpa",
+            "说明：SDPA 是 ComfyUI/PyTorch 可用的稳定注意力实现，速度可能比 SageAttention 慢一点，但不会打断当前工作流。",
+        ])
+        _send_kijai_optional_notice(unique_id, warning_message=warning, panel_message=panel)
     if set_loras:
         model = _unwrap_loader_output(runtime["model_loading"].WanVideoSetLoRAs().setlora(model, set_loras))
     return model
@@ -1112,6 +1332,35 @@ def _setting_choice(
     if not value or value == "preset":
         return default_value
     return _choice(value, allowed_set, default_value)
+
+
+def _quantization_from_model_name(value: str) -> str:
+    raw = str(value or "").replace("\\", "/").strip().lower()
+    if not raw:
+        return ""
+    if raw.endswith(".gguf"):
+        return "disabled"
+    text = re.sub(r"[\s.\-]+", "_", raw)
+    for marker in (
+        "fp8_e4m3fn_scaled_fast",
+        "fp8_e4m3fn_scaled",
+        "fp8_e4m3fn_fast",
+        "fp8_e4m3fn",
+        "fp8_e5m2_scaled_fast",
+        "fp8_e5m2_scaled",
+        "fp8_e5m2_fast",
+        "fp8_e5m2",
+    ):
+        if marker in text:
+            return marker
+    return ""
+
+
+def _setting_quantization_choice(kwargs: dict[str, Any], index: int, default: Any) -> str:
+    inferred = _quantization_from_model_name(str(kwargs.get(f"file_{index}", "") or ""))
+    if inferred:
+        return _choice(inferred, WAN_QUANTIZATIONS, "disabled")
+    return _setting_choice(kwargs, index, "quantization", WAN_QUANTIZATIONS, default, "disabled")
 
 
 def _setting_bool(kwargs: dict[str, Any], index: int, field: str, default: Any) -> bool:
@@ -1141,9 +1390,7 @@ def _slot_with_overrides(slot: dict[str, Any], index: int, kwargs: dict[str, Any
         current["base_precision"] = _setting_choice(
             kwargs, index, "base_precision", WAN_BASE_PRECISIONS, current.get("base_precision", "bf16"), "bf16"
         )
-        current["quantization"] = _setting_choice(
-            kwargs, index, "quantization", WAN_QUANTIZATIONS, current.get("quantization", "disabled"), "disabled"
-        )
+        current["quantization"] = _setting_quantization_choice(kwargs, index, current.get("quantization", "disabled"))
         current["load_device"] = _setting_choice(
             kwargs, index, "load_device", WAN_LOAD_DEVICES, current.get("load_device", "offload_device"), "offload_device"
         )
@@ -1312,6 +1559,9 @@ class GJJ_VideoKijaiModelLoader:
                     "tooltip": "外部布尔控制 LoRA 注入开关；连接后优先使用外部值。",
                 }),
             },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            },
         }
 
     @classmethod
@@ -1334,6 +1584,9 @@ class GJJ_VideoKijaiModelLoader:
         return "|".join(str(kwargs.get(key, "")) for key in keys)
 
     def load_models(self, *args, **kwargs):
+        unique_id = kwargs.get("unique_id", None)
+        _send_kijai_optional_notice(unique_id)
+
         config_key = str(kwargs.get("config", "") or "")
         if config_key not in KIJAI_MODEL_CONFIGS:
             config_key = next(iter(KIJAI_MODEL_CONFIGS.keys()))
@@ -1455,6 +1708,8 @@ class GJJ_VideoKijaiModelLoader:
                         slot,
                         loras,
                         extra_items,
+                        cfg_label=str(cfg.get("label", config_key) or config_key),
+                        unique_id=unique_id,
                         compile_args=wan_compile_args,
                         block_swap_args=wan_block_swap_args,
                         vram_management_args=wan_vram_management_args,
