@@ -167,8 +167,20 @@ def _model_match_tokens(value: str) -> list[str]:
     return tokens
 
 
+def _relaxed_model_match_tokens(value: str) -> list[str]:
+    tokens = _model_match_tokens(value)
+    token_set = set(tokens)
+    if "base" in token_set and "klein" in token_set and ("flux" in token_set or "flux2" in token_set):
+        return [token for token in tokens if token != "base"]
+    return tokens
+
+
 def _model_match_key(value: str) -> str:
     return "".join(_model_match_tokens(value))
+
+
+def _relaxed_model_match_key(value: str) -> str:
+    return "".join(_relaxed_model_match_tokens(value))
 
 
 def _shared_prefix_len(left: str, right: str) -> int:
@@ -189,6 +201,8 @@ def _pick_short_model_name(requested: str, available: list[str], fallback: str =
     query_stem = _model_stem(query_base)
     query_key = _model_match_key(query_base)
     query_tokens = _model_match_tokens(query_base)
+    query_relaxed_key = _relaxed_model_match_key(query_base)
+    query_relaxed_tokens = _relaxed_model_match_tokens(query_base)
     available_by_lower = {str(name or "").replace("\\", "/").lower(): name for name in available}
     if query in available_by_lower:
         return available_by_lower[query]
@@ -204,8 +218,11 @@ def _pick_short_model_name(requested: str, available: list[str], fallback: str =
         stem = _model_stem(filename)
         key = _model_match_key(filename)
         tokens = _model_match_tokens(filename)
+        relaxed_key = _relaxed_model_match_key(filename)
+        relaxed_tokens = _relaxed_model_match_tokens(filename)
         allow_fuzzy = len(query_key) >= 4
         allow_stem_fuzzy = len(query_stem) >= 4
+        allow_relaxed_fuzzy = query_relaxed_key != query_key and len(query_relaxed_key) >= 4
         if filename == f"{query_stem}.safetensors":
             bucket = 0
         elif stem == query_stem:
@@ -220,12 +237,20 @@ def _pick_short_model_name(requested: str, available: list[str], fallback: str =
             bucket = 5
         elif allow_fuzzy and query_tokens and all(token in tokens for token in query_tokens):
             bucket = 6
-        elif allow_stem_fuzzy and stem.startswith(query_stem):
+        elif allow_relaxed_fuzzy and relaxed_key == query_relaxed_key:
             bucket = 7
-        elif allow_stem_fuzzy and query_stem in stem:
+        elif allow_relaxed_fuzzy and relaxed_key.startswith(query_relaxed_key):
             bucket = 8
-        elif allow_stem_fuzzy and query_stem in text:
+        elif allow_relaxed_fuzzy and query_relaxed_key in relaxed_key:
             bucket = 9
+        elif allow_relaxed_fuzzy and query_relaxed_tokens and all(token in relaxed_tokens for token in query_relaxed_tokens):
+            bucket = 10
+        elif allow_stem_fuzzy and stem.startswith(query_stem):
+            bucket = 11
+        elif allow_stem_fuzzy and query_stem in stem:
+            bucket = 12
+        elif allow_stem_fuzzy and query_stem in text:
+            bucket = 13
         else:
             bucket = 999
         prefix_bonus = -_shared_prefix_len(query_key, key) if query_key and key else 0

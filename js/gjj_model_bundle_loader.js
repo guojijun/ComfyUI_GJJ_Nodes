@@ -42,6 +42,7 @@ const PRESET_TEMPLATE_PROPERTY = "gjj_model_bundle_loader_preset_template";
 const SAMPLING_OUTPUTS_OPEN_PROPERTY = "gjj_model_bundle_loader_sampling_outputs_open";
 const WIDTH_PROPERTY = "gjj_model_bundle_loader_width";
 const BROADCAST_PROPERTY = "gjj_variable_broadcast_enabled";
+const BROADCAST_USER_SET_PROPERTY = "gjj_variable_broadcast_user_set";
 const CHECKPOINT_COMMON_TEMPLATE_ID = "checkpoint_common";
 const CONTROL_NET_NONE = "不选择";
 const MAX_CONTROL_NET_SLOTS = 8;
@@ -317,6 +318,17 @@ function modelMatchTokens(value) {
 
 function modelMatchKey(value) { return modelMatchTokens(value).join(""); }
 
+function relaxedModelMatchTokens(value) {
+	const tokens = modelMatchTokens(value);
+	const set = new Set(tokens);
+	if (set.has("base") && set.has("klein") && (set.has("flux") || set.has("flux2"))) {
+		return tokens.filter((token) => token !== "base");
+	}
+	return tokens;
+}
+
+function relaxedModelMatchKey(value) { return relaxedModelMatchTokens(value).join(""); }
+
 function sharedPrefixLength(left, right) {
 	let index = 0;
 	while (index < left.length && index < right.length && left[index] === right[index]) index++;
@@ -327,8 +339,11 @@ function shortMatch(query, values, fallback = "") {
 	const q = stemOf(query);
 	const qKey = modelMatchKey(query);
 	const qTokens = modelMatchTokens(query);
+	const qRelaxedKey = relaxedModelMatchKey(query);
+	const qRelaxedTokens = relaxedModelMatchTokens(query);
 	const allowFuzzy = qKey.length >= 4;
 	const allowStemFuzzy = q.length >= 4;
+	const allowRelaxedFuzzy = qRelaxedKey !== qKey && qRelaxedKey.length >= 4;
 	const list = Array.isArray(values) ? values.map(String) : [];
 	if (!q) return fallback || list[0] || "";
 	const queryHasSubdir = /[\\/]/.test(String(query || ""));
@@ -343,6 +358,8 @@ function shortMatch(query, values, fallback = "") {
 		const stem = stemOf(filename);
 		const key = modelMatchKey(filename);
 		const tokens = modelMatchTokens(filename);
+		const relaxedKey = relaxedModelMatchKey(filename);
+		const relaxedTokens = relaxedModelMatchTokens(filename);
 		let bucket = 999;
 		if (text === lower(query)) bucket = 0;
 		else if (filename === lower(query).split("/").pop()) bucket = 1;
@@ -352,9 +369,13 @@ function shortMatch(query, values, fallback = "") {
 		else if (allowFuzzy && key.startsWith(qKey)) bucket = 5;
 		else if (allowFuzzy && key.includes(qKey)) bucket = 6;
 		else if (allowFuzzy && qTokens.length && qTokens.every((token) => tokens.includes(token))) bucket = 7;
-		else if (allowStemFuzzy && stem.startsWith(q)) bucket = 8;
-		else if (allowStemFuzzy && stem.includes(q)) bucket = 9;
-		else if (allowStemFuzzy && text.includes(q)) bucket = 10;
+		else if (allowRelaxedFuzzy && relaxedKey === qRelaxedKey) bucket = 8;
+		else if (allowRelaxedFuzzy && relaxedKey.startsWith(qRelaxedKey)) bucket = 9;
+		else if (allowRelaxedFuzzy && relaxedKey.includes(qRelaxedKey)) bucket = 10;
+		else if (allowRelaxedFuzzy && qRelaxedTokens.length && qRelaxedTokens.every((token) => relaxedTokens.includes(token))) bucket = 11;
+		else if (allowStemFuzzy && stem.startsWith(q)) bucket = 12;
+		else if (allowStemFuzzy && stem.includes(q)) bucket = 13;
+		else if (allowStemFuzzy && text.includes(q)) bucket = 14;
 		return { value, bucket, prefixBonus: qKey && key ? -sharedPrefixLength(qKey, key) : 0, filenameLength: filename.length, textLength: text.length, text };
 	}).filter((item) => item.bucket < 999);
 	ranked.sort((a, b) =>
@@ -937,6 +958,14 @@ function broadcastEnabled(node) {
 	return Boolean(node?.properties?.[BROADCAST_PROPERTY]);
 }
 
+function ensureDefaultBroadcastEnabled(node) {
+	if (!node) return;
+	node.properties = node.properties || {};
+	if (node.properties[BROADCAST_USER_SET_PROPERTY] !== true) {
+		node.properties[BROADCAST_PROPERTY] = true;
+	}
+}
+
 function notifyBroadcastChanged(node) {
 	try { app.canvas?.setDirty?.(true, true); } catch (_) {}
 	try { app.graph?.setDirtyCanvas?.(true, true); } catch (_) {}
@@ -959,8 +988,9 @@ function updateBroadcastButton(node) {
 		: "🔍 已关闭：只通过真实连线传递模型与采样参数。";
 }
 
-function setBroadcastEnabled(node, enabled) {
+function setBroadcastEnabled(node, enabled, userSet = true) {
 	node.properties = node.properties || {};
+	if (userSet) node.properties[BROADCAST_USER_SET_PROPERTY] = true;
 	node.properties[BROADCAST_PROPERTY] = Boolean(enabled);
 	repairOutputs(node);
 	updateBroadcastButton(node);
@@ -2632,6 +2662,7 @@ function stabilize(node) {
 	rememberNodeWidth(node);
 	attachHelpModelProvider(node);
 	restoreWidgetValues(node);
+	ensureDefaultBroadcastEnabled(node);
 	ensureDom(node);
 	keepPanelWidgetOutOfSerializedPrefix(node);
 	hideNativeWidgets(node);
@@ -2694,6 +2725,7 @@ app.registerExtension({
 				serializedNode.properties = serializedNode.properties || {};
 				serializedNode.properties[WIDTH_PROPERTY] = this.properties?.[WIDTH_PROPERTY] || currentNodeWidth(this);
 				serializedNode.properties[BROADCAST_PROPERTY] = broadcastEnabled(this);
+				serializedNode.properties[BROADCAST_USER_SET_PROPERTY] = this.properties?.[BROADCAST_USER_SET_PROPERTY] === true;
 				serializedNode.properties[SAMPLING_OUTPUTS_OPEN_PROPERTY] = samplingOutputsOpen(this);
 				serializedNode.properties[PRESET_INIT_PROPERTY] = Boolean(this.properties?.[PRESET_INIT_PROPERTY]);
 				serializedNode.properties[PRESET_UNET_PROPERTY] = String(this.properties?.[PRESET_UNET_PROPERTY] || "");

@@ -73,6 +73,14 @@ def _metadata_downscale_factor(metadata: dict[str, Any], lora_name: str) -> floa
     return factor
 
 
+def _latent_downscale_pixel_multiple(latent_downscale_factor: Any) -> int:
+    try:
+        value = float(latent_downscale_factor)
+    except (TypeError, ValueError):
+        value = 1.0
+    return max(1, int(round(value * 32.0)))
+
+
 class GJJ_LTXVICLoRALoaderModelOnly:
     @classmethod
     def INPUT_TYPES(cls):
@@ -108,15 +116,16 @@ class GJJ_LTXVICLoRALoaderModelOnly:
             }
         }
 
-    RETURN_TYPES = ("MODEL", "FLOAT")
-    RETURN_NAMES = ("模型", "Latent缩放因子")
+    RETURN_TYPES = ("MODEL", "FLOAT", "INT")
+    RETURN_NAMES = ("模型", "Latent缩放因子", "IC-LoRA像素倍数")
     OUTPUT_TOOLTIPS = (
         "应用 IC-LoRA 后的模型。",
         "从 safetensors metadata 的 reference_downscale_factor 读取；缺失时为 1.0。",
+        "Latent缩放因子 * 32 后的整数倍数，可直接用于参考图预处理到对应像素整倍数。",
     )
     FUNCTION = "load_lora"
     CATEGORY = "GJJ/视频模型/LTXV"
-    DESCRIPTION = "零依赖移植 LTXICLoRALoaderModelOnly：只给模型加载 IC-LoRA，并输出 latent_downscale_factor。"
+    DESCRIPTION = "零依赖移植 LTXICLoRALoaderModelOnly：只给模型加载 IC-LoRA，并输出 latent_downscale_factor 与 factor*32 像素倍数。"
     GJJ_HELP = {
         "title": "LTXV IC-LoRA 模型加载",
         "description": "从 ComfyUI-LTXVideo 的 IC-LoRA Loader Model Only 移植为 GJJ 单节点；不导入源插件，只依赖 ComfyUI 自带 LoRA 加载能力。",
@@ -124,6 +133,7 @@ class GJJ_LTXVICLoRALoaderModelOnly:
             "输入模型，选择 IC-LoRA，设置模型强度。",
             "下拉列表只显示路径或文件名包含 ic-lora 的 LoRA。",
             "输出模型接采样流程，Latent缩放因子接 IC-LoRA Guide 的 latent_downscale_factor。",
+            "IC-LoRA像素倍数输出等于 round(latent_downscale_factor * 32)，可接图片预处理/整倍数缩放节点。",
             "如果 LoRA metadata 没有 reference_downscale_factor，会自动使用 1.0。",
         ],
     }
@@ -143,17 +153,18 @@ class GJJ_LTXVICLoRALoaderModelOnly:
             raise RuntimeError(f"IC-LoRA 模型加载失败：无法读取 LoRA：{lora_name}") from exc
 
         latent_downscale_factor = _metadata_downscale_factor(metadata, str(lora_name))
+        pixel_multiple = _latent_downscale_pixel_multiple(latent_downscale_factor)
         strength = float(strength_model)
 
         if strength == 0:
-            return (model, latent_downscale_factor)
+            return (model, latent_downscale_factor, pixel_multiple)
 
         try:
             model_lora, _ = comfy.sd.load_lora_for_models(model, None, lora, strength, 0)
         except Exception as exc:
             raise RuntimeError(f"IC-LoRA 模型加载失败：LoRA 与当前模型不匹配或无法应用：{lora_name}") from exc
 
-        return (model_lora, latent_downscale_factor)
+        return (model_lora, latent_downscale_factor, pixel_multiple)
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_LTXVICLoRALoaderModelOnly}

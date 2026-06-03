@@ -18,6 +18,10 @@ const PARAM_INPUTS = [
   { name: "total_pixel_k", cfgKey: "total_pixel_k", label: "🧮 总像素/K", mode: "像素", type: "INT", min: 1, max: 1000000, sliderMax: 4096, step: 1, defaultValue: 260 },
   { name: "aspect_ratio", cfgKey: "aspect_ratio", label: "🖼️ 输出比例", mode: "像素", type: "STRING", widgetType: "combo", values: ["原始比例", "自定义", "1:1", "3:2", "4:3", "16:9", "2:3", "3:4", "9:16"], defaultValue: "1:1" },
 ];
+const EXTERNAL_PARAM_INPUTS = [
+  { name: "external_param_1", label: "🔌 外接参数1", type: "*", title: "固定外接参数 1：按当前模式写入第一个可见参数。" },
+  { name: "external_param_2", label: "🔌 外接参数2", type: "*", title: "固定外接参数 2：按当前模式写入第二个可见参数。" },
+];
 
 const DEFAULT_CONFIG = {
   mode: "等比",
@@ -111,9 +115,26 @@ function paramAliasSet(def) {
 }
 
 function getParamInputDef(name) {
-  const token = normalizeParamToken(name);
-  if (!token) return null;
-  return PARAM_INPUTS.find((item) => paramAliasSet(item).has(token)) || null;
+  const raw = String(name || "");
+  const tokens = [
+    raw,
+    ...raw.split(/[\s,，;；|/\\()[\]{}<>]+/g),
+  ].map(normalizeParamToken).filter(Boolean);
+  if (!tokens.length) return null;
+  for (const token of tokens) {
+    const exact = PARAM_INPUTS.find((item) => paramAliasSet(item).has(token));
+    if (exact) return exact;
+  }
+  for (const token of tokens) {
+    const fuzzy = PARAM_INPUTS.find((item) => {
+      for (const alias of paramAliasSet(item)) {
+        if (alias.length >= 2 && token.includes(alias)) return true;
+      }
+      return false;
+    });
+    if (fuzzy) return fuzzy;
+  }
+  return null;
 }
 
 function getParamInputDefFromInput(input) {
@@ -157,6 +178,18 @@ function findInputSlot(node, name) {
   return (node?.inputs || []).find((input) => getParamInputDefFromInput(input)?.name === def.name) || null;
 }
 
+function retargetInputLinksByObject(node) {
+  if (!Array.isArray(node?.inputs)) return;
+  for (let index = 0; index < node.inputs.length; index++) {
+    const input = node.inputs[index];
+    const linkId = input?.link;
+    if (linkId == null) continue;
+    const link = getGraphLink(node, linkId);
+    if (!link || !graphLinkTargetsNode(link, node)) continue;
+    setInputLinkSlot(link, node.id, index, input.type);
+  }
+}
+
 function disconnectAndRemoveInput(node, index) {
   if (!node || !Array.isArray(node.inputs) || index < 0 || index >= node.inputs.length) return false;
   try { node.disconnectInput?.(index); } catch (_) {}
@@ -165,6 +198,7 @@ function disconnectAndRemoveInput(node, index) {
   } catch (_) {
     node.inputs.splice(index, 1);
   }
+  retargetInputLinksByObject(node);
   repairInputLinkSlots(node);
   return true;
 }
@@ -195,12 +229,130 @@ function getGraphLinkOriginSlot(link) {
   return Array.isArray(link) ? link[2] : (link?.origin_slot ?? link?.source_slot);
 }
 
+function graphLinkTargetsNode(link, node) {
+  return !!link && !!node && String(getGraphLinkTargetId(link)) === String(node.id);
+}
+
+function graphLinkTargetsInput(link, node, index) {
+  return graphLinkTargetsNode(link, node) && Number(getGraphLinkTargetSlot(link)) === Number(index);
+}
+
 function getGraphLink(node, linkId) {
   if (linkId == null) return null;
   const links = node?.graph?.links || app.graph?.links;
   if (!links) return null;
   if (!Array.isArray(links)) return links[linkId] || links[String(linkId)] || null;
   return links.find((link) => String(getGraphLinkId(link)) === String(linkId)) || null;
+}
+
+function graphLinkMatchesEndpoint(link, item) {
+  if (!link || !item) return false;
+  const originId = item.origin_id ?? item.source_id;
+  const originSlot = item.origin_slot ?? item.source_slot;
+  if (originId != null && String(getGraphLinkOriginId(link)) !== String(originId)) return false;
+  if (originSlot != null && Number(getGraphLinkOriginSlot(link)) !== Number(originSlot)) return false;
+  return originId != null || originSlot != null;
+}
+
+function findGraphLinkForSerializedItem(node, item) {
+  const direct = getGraphLink(node, item?.link);
+  if (direct) return direct;
+  return getGraphLinks(node).find((link) => graphLinkMatchesEndpoint(link, item)) || null;
+}
+
+function makeSerializedParamLinkItem(node, name, linkId, targetSlot = null) {
+  const def = getParamInputDef(name);
+  if (!def || linkId == null) return null;
+  const link = getGraphLink(node, linkId);
+  const item = { name: def.name, link: linkId };
+  if (link) {
+    item.origin_id = getGraphLinkOriginId(link);
+    item.origin_slot = getGraphLinkOriginSlot(link);
+    item.target_slot = targetSlot ?? getGraphLinkTargetSlot(link);
+  } else if (targetSlot != null) {
+    item.target_slot = targetSlot;
+  }
+  return item;
+}
+
+function mergeSerializedParamLinkItems(items) {
+  const byName = new Map();
+  for (const item of items || []) {
+    const def = getParamInputDef(item?.name);
+    if (!def || item?.link == null) continue;
+    byName.set(def.name, {
+      ...item,
+      name: def.name,
+      link: item.link,
+    });
+  }
+  return [...byName.values()];
+}
+
+function setSerializedParamLink(node, name, linkId, targetSlot = null) {
+  const item = makeSerializedParamLinkItem(node, name, linkId, targetSlot);
+  if (!item) return;
+  node.properties ||= {};
+  const current = mergeSerializedParamLinkItems([
+    ...(Array.isArray(node.properties[PARAM_LINKS_PROPERTY]) ? node.properties[PARAM_LINKS_PROPERTY] : []),
+    ...(Array.isArray(node.__gjjMfSerializedParamLinks) ? node.__gjjMfSerializedParamLinks : []),
+    item,
+  ]);
+  node.__gjjMfSerializedParamLinks = current;
+  node.properties[PARAM_LINKS_PROPERTY] = current;
+}
+
+function removeSerializedParamLink(node, name, linkId = null) {
+  const def = getParamInputDef(name);
+  if (!def) return;
+  node.properties ||= {};
+  const current = mergeSerializedParamLinkItems([
+    ...(Array.isArray(node.properties[PARAM_LINKS_PROPERTY]) ? node.properties[PARAM_LINKS_PROPERTY] : []),
+    ...(Array.isArray(node.__gjjMfSerializedParamLinks) ? node.__gjjMfSerializedParamLinks : []),
+  ]).filter((item) => (
+    item.name !== def.name
+    || (linkId != null && String(item.link) !== String(linkId))
+  ));
+  node.__gjjMfSerializedParamLinks = current;
+  node.properties[PARAM_LINKS_PROPERTY] = current;
+}
+
+function getConnectionChangeInfo(node, args = []) {
+  const values = Array.from(args || []);
+  const connected = values.find((value) => typeof value === "boolean");
+  const linkInfo = values.find((value) => value && (Array.isArray(value) || typeof value === "object") && getGraphLinkId(value) != null);
+  const linkId = getGraphLinkId(linkInfo);
+  if (linkInfo) {
+    if (!graphLinkTargetsNode(linkInfo, node)) return { connected, linkInfo, linkId, slot: -1 };
+    const slot = Number(getGraphLinkTargetSlot(linkInfo));
+    if (Number.isInteger(slot) && slot >= 0) return { connected, linkInfo, linkId, slot };
+  }
+  for (const value of values) {
+    if (!Number.isInteger(value) || value < 0 || value >= (node?.inputs?.length || 0)) continue;
+    const input = node.inputs[value];
+    if (getParamInputDefFromInput(input)) {
+      return { connected, linkInfo, linkId, slot: value };
+    }
+  }
+  return { connected, linkInfo, linkId, slot: -1 };
+}
+
+function rememberConnectionChangeParamLink(node, args = []) {
+  if (!Array.isArray(node?.inputs)) return;
+  const { connected, linkInfo, linkId, slot } = getConnectionChangeInfo(node, args);
+  if (!Number.isInteger(slot) || slot < 0 || slot >= node.inputs.length) return;
+  const input = node.inputs[slot];
+  const def = getParamInputDefFromInput(input);
+  if (!def) return;
+  const resolvedLinkId = linkId ?? getInputLinkId(input, node, slot);
+  if (connected === false) {
+    removeSerializedParamLink(node, def.name, resolvedLinkId);
+    return;
+  }
+  if (resolvedLinkId == null) return;
+  input.link = resolvedLinkId;
+  if (linkInfo) setInputLinkSlot(linkInfo, node.id, slot, input.type);
+  setSerializedParamLink(node, def.name, resolvedLinkId, slot);
 }
 
 function getGraphNodeById(graph, id) {
@@ -228,25 +380,51 @@ function getParamInputDefFromLinkSource(node, link) {
   ].filter(Boolean).join(" "));
 }
 
-function findGraphLinkForInput(node, index) {
+function findGraphLinkForInput(node, index, input = null) {
   if (!node || index == null || index < 0) return null;
   const nodeId = node.id;
-  return getGraphLinks(node).find((link) => (
-    String(getGraphLinkTargetId(link)) === String(nodeId)
-    && Number(getGraphLinkTargetSlot(link)) === Number(index)
-  )) || null;
+  const candidates = getGraphLinks(node).filter((link) => String(getGraphLinkTargetId(link)) === String(nodeId));
+  const def = getParamInputDefFromInput(input);
+  if (def) {
+    const semantic = candidates.find((link) => getParamInputDefFromLinkSource(node, link)?.name === def.name);
+    if (semantic) return semantic;
+  }
+  return candidates.find((link) => Number(getGraphLinkTargetSlot(link)) === Number(index)) || null;
 }
 
 function getInputLinkId(input, node = null, index = -1) {
-  if (input?.link != null) return input.link;
-  const link = node ? findGraphLinkForInput(node, index) : null;
+  if (input?.link != null) {
+    if (!node) return input.link;
+    const currentLink = getGraphLink(node, input.link);
+    if (currentLink && graphLinkTargetsInput(currentLink, node, index)) return input.link;
+    const def = getParamInputDefFromInput(input);
+    const sourceDef = currentLink ? getParamInputDefFromLinkSource(node, currentLink) : null;
+    if (currentLink && def && sourceDef?.name === def.name && graphLinkTargetsNode(currentLink, node)) {
+      setInputLinkSlot(currentLink, node.id, index, input.type);
+      return input.link;
+    }
+    const graphLink = findGraphLinkForInput(node, index, input);
+    const graphLinkId = getGraphLinkId(graphLink);
+    if (graphLinkId != null) {
+      input.link = graphLinkId;
+      setInputLinkSlot(graphLink, node.id, index, input.type);
+      return graphLinkId;
+    }
+    input.link = null;
+    return null;
+  }
+  const link = node ? findGraphLinkForInput(node, index, input) : null;
   const linkId = getGraphLinkId(link);
-  if (linkId != null && input) input.link = linkId;
+  if (linkId != null && input) {
+    input.link = linkId;
+    setInputLinkSlot(link, node.id, index, input.type);
+  }
   return linkId ?? null;
 }
 
 function inputHasRealLink(input, node = null, index = -1) {
-  return getInputLinkId(input, node, index) != null;
+  const linkId = getInputLinkId(input, node, index);
+  return linkId != null && (!node || !!getGraphLink(node, linkId));
 }
 
 function refreshInputLinksFromGraph(node) {
@@ -283,12 +461,23 @@ function repairInputLinkSlots(node) {
 function getSerializedParamLinks(node) {
   const stored = Array.isArray(node?.__gjjMfSerializedParamLinks) ? node.__gjjMfSerializedParamLinks : [];
   const props = Array.isArray(node?.properties?.[PARAM_LINKS_PROPERTY]) ? node.properties[PARAM_LINKS_PROPERTY] : [];
+  const graphLinksReady = getGraphLinks(node).length > 0;
   const byName = new Map();
   for (const item of [...props, ...stored]) {
     const def = getParamInputDef(item?.name);
-    const link = item?.link;
+    let link = item?.link;
     if (!def || link == null) continue;
-    byName.set(def.name, { name: def.name, link });
+    const graphLink = findGraphLinkForSerializedItem(node, item);
+    if (graphLinksReady && !graphLink) continue;
+    if (graphLink) link = getGraphLinkId(graphLink);
+    byName.set(def.name, {
+      ...item,
+      name: def.name,
+      link,
+      origin_id: graphLink ? getGraphLinkOriginId(graphLink) : item.origin_id,
+      origin_slot: graphLink ? getGraphLinkOriginSlot(graphLink) : item.origin_slot,
+      target_slot: graphLink ? getGraphLinkTargetSlot(graphLink) : item.target_slot,
+    });
   }
   return [...byName.values()];
 }
@@ -301,14 +490,16 @@ function collectParamLinksByName(node) {
   const byName = new Map();
   for (const item of getSerializedParamLinks(node)) {
     const def = getParamInputDef(item?.name);
-    if (def && item?.link != null) byName.set(def.name, item.link);
+    const link = findGraphLinkForSerializedItem(node, item);
+    const linkId = getGraphLinkId(link) ?? item?.link;
+    if (def && linkId != null) byName.set(def.name, linkId);
   }
   if (Array.isArray(node?.inputs)) {
     for (let index = 0; index < node.inputs.length; index++) {
       const input = node.inputs[index];
       const def = getParamInputDefFromInput(input);
       if (!def) continue;
-      const link = input?.link ?? getInputLinkId(input, null, -1);
+      const link = getInputLinkId(input, node, index);
       if (link != null && !byName.has(def.name)) byName.set(def.name, link);
     }
   }
@@ -317,6 +508,30 @@ function collectParamLinksByName(node) {
     const sourceDef = getParamInputDefFromLinkSource(node, link);
     const linkId = getGraphLinkId(link);
     if (sourceDef && linkId != null) byName.set(sourceDef.name, linkId);
+  }
+  return byName;
+}
+
+function collectLiveParamLinksByName(node) {
+  const byName = new Map();
+  if (!node) return byName;
+  refreshInputLinksFromGraph(node);
+  if (Array.isArray(node.inputs)) {
+    for (let index = 0; index < node.inputs.length; index++) {
+      const input = node.inputs[index];
+      const def = getParamInputDefFromInput(input);
+      if (!def) continue;
+      const linkId = getInputLinkId(input, node, index);
+      if (linkId != null && getGraphLink(node, linkId)) byName.set(def.name, linkId);
+    }
+  }
+  for (const link of getGraphLinks(node)) {
+    if (String(getGraphLinkTargetId(link)) !== String(node?.id)) continue;
+    const targetSlot = Number(getGraphLinkTargetSlot(link));
+    const targetInput = Array.isArray(node.inputs) ? node.inputs[targetSlot] : null;
+    const targetDef = getParamInputDefFromLinkSource(node, link) || getParamInputDefFromInput(targetInput);
+    const linkId = getGraphLinkId(link);
+    if (targetDef && linkId != null) byName.set(targetDef.name, linkId);
   }
   return byName;
 }
@@ -333,11 +548,13 @@ function applyParamLinksByName(node, linksByName) {
   for (const [name, linkId] of linksByName.entries()) {
     const def = getParamInputDef(name);
     if (!def || linkId == null) continue;
+    const link = getGraphLink(node, linkId);
+    if (!link) continue;
     const slot = node.inputs.findIndex((input) => getParamInputDefFromInput(input)?.name === def.name);
     if (slot < 0) continue;
     const input = node.inputs[slot];
     input.link = linkId;
-    setInputLinkSlot(getGraphLink(node, linkId), node.id, slot, input.type);
+    setInputLinkSlot(link, node.id, slot, input.type);
   }
   repairInputLinkSlots(node);
 }
@@ -345,25 +562,45 @@ function applyParamLinksByName(node, linksByName) {
 function rememberSerializedParamLinks(node, data = {}) {
   node.properties ||= {};
   const links = [];
-  for (const input of (data?.inputs || data?.inputs_values || [])) {
+  for (const [index, input] of (data?.inputs || data?.inputs_values || []).entries()) {
     const def = getParamInputDefFromInput(input);
     const link = input?.link;
-    if (def && link != null) links.push({ name: def.name, link });
+    const item = makeSerializedParamLinkItem(node, def?.name, link, index);
+    if (item) links.push(item);
   }
   const propLinks = Array.isArray(data?.properties?.[PARAM_LINKS_PROPERTY]) ? data.properties[PARAM_LINKS_PROPERTY] : [];
   for (const item of propLinks) {
     const def = getParamInputDef(item?.name);
     if (def && item?.link != null && !links.some((x) => x.name === def.name)) {
-      links.push({ name: def.name, link: item.link });
+      links.push(item);
     }
   }
-  node.__gjjMfSerializedParamLinks = links;
-  if (links.length) node.properties[PARAM_LINKS_PROPERTY] = links;
+  node.__gjjMfSerializedParamLinks = mergeSerializedParamLinkItems(links);
+  if (node.__gjjMfSerializedParamLinks.length) node.properties[PARAM_LINKS_PROPERTY] = node.__gjjMfSerializedParamLinks;
 }
 
 function saveCurrentParamLinks(node, data = null) {
   node.properties ||= {};
-  const links = [...collectParamLinksByName(node).entries()].map(([name, link]) => ({ name, link }));
+  const semanticLinks = collectParamLinksByName(node);
+  const graphLinksReady = getGraphLinks(node).length > 0;
+  if (!graphLinksReady && semanticLinks.size) {
+    const preserved = getSerializedParamLinks(node);
+    node.__gjjMfSerializedParamLinks = preserved;
+    node.properties[PARAM_LINKS_PROPERTY] = preserved;
+    if (data) {
+      data.properties ||= {};
+      data.properties[PARAM_LINKS_PROPERTY] = preserved;
+    }
+    return preserved;
+  }
+  applyParamLinksByName(node, semanticLinks);
+  const liveLinks = collectLiveParamLinksByName(node);
+  for (const [name, link] of semanticLinks.entries()) {
+    if (!liveLinks.has(name) && getGraphLink(node, link)) liveLinks.set(name, link);
+  }
+  const links = [...liveLinks.entries()]
+    .map(([name, link]) => makeSerializedParamLinkItem(node, name, link))
+    .filter(Boolean);
   node.__gjjMfSerializedParamLinks = links;
   node.properties[PARAM_LINKS_PROPERTY] = links;
   if (data) {
@@ -376,6 +613,44 @@ function saveCurrentParamLinks(node, data = null) {
 function repairSerializedParamLinks(node) {
   if (!Array.isArray(node?.inputs)) return;
   applyParamLinksByName(node, collectParamLinksByName(node));
+}
+
+function currentParamLinkSignature(node) {
+  const inputParts = Array.isArray(node?.inputs)
+    ? node.inputs.map((input, index) => {
+        const def = getParamInputDefFromInput(input);
+        if (!def) return "";
+        const linkId = input?.link ?? "";
+        return `${index}:${def.name}:${linkId}`;
+      }).filter(Boolean)
+    : [];
+  const graphParts = getGraphLinks(node)
+    .filter((link) => graphLinkTargetsNode(link, node))
+    .map((link) => [
+      getGraphLinkId(link),
+      getGraphLinkOriginId(link),
+      getGraphLinkOriginSlot(link),
+      getGraphLinkTargetSlot(link),
+      getGraphLink(node, getGraphLinkId(link)) ? "live" : "missing",
+    ].join(":"))
+    .sort();
+  const storedParts = getSerializedParamLinks(node)
+    .map((item) => `${item.name}:${item.link}:${item.origin_id ?? ""}:${item.origin_slot ?? ""}:${item.target_slot ?? ""}`)
+    .sort();
+  return [...inputParts, "|", ...graphParts, "|", ...storedParts].join(";");
+}
+
+function scheduleParamLinkRepair(node) {
+  if (!node) return;
+  clearTimeout(node.__gjjMfParamLinkRepairTimer);
+  node.__gjjMfParamLinkRepairTimer = setTimeout(() => {
+    repairSerializedParamLinks(node);
+    ensureNativeParamWidgets(node);
+    syncNativeParamInputSlots(node);
+    moveTailWidgetAfterParams(node);
+    node.__gjjMfParamLinkSignature = currentParamLinkSignature(node);
+    redraw(node);
+  }, 0);
 }
 
 function setWidgetVisible(widget, visible) {
@@ -471,7 +746,7 @@ function createNativeParamWidget(node, def, cfg = readConfig(node)) {
     step: def.step,
     values: def.values,
     display_name: def.label,
-    tooltip: `${def.label}：可手填，也可连接外部 ${def.type}。`,
+    tooltip: `${def.label}：可手填；需要外接时使用顶部“外接参数1/外接参数2”。`,
     hidden: true,
     display: "hidden",
   };
@@ -504,7 +779,7 @@ function setupNativeParamWidget(node, def) {
     widget.options.values_list = def.values;
   }
   widget.options.display_name = def.label;
-  widget.options.tooltip = `${def.label}：可手填，也可连接外部 ${def.type}。`;
+  widget.options.tooltip = `${def.label}：可手填；需要外接时使用顶部“外接参数1/外接参数2”。`;
   widget.callback = (value) => {
     const next = def.type === "STRING" ? String(value ?? "") : Number(value);
     writeConfig(node, { [def.cfgKey]: next });
@@ -526,6 +801,127 @@ function isParamDefActive(def, cfg) {
   if (def.fitMode && normalizeFitMode(def.fitMode) !== normalizeFitMode(cfg.fit_mode)) return false;
   if (def.excludeFitMode && normalizeFitMode(def.excludeFitMode) === normalizeFitMode(cfg.fit_mode)) return false;
   return true;
+}
+
+function getActiveParamDefs(cfg) {
+  return PARAM_INPUTS.filter((def) => isParamDefActive(def, cfg));
+}
+
+function cleanParamLabel(label) {
+  return String(label || "")
+    .replace(/^[^\u4e00-\u9fffA-Za-z0-9]+/u, "")
+    .trim();
+}
+
+function externalParamMappingText(cfg) {
+  const defs = getActiveParamDefs(cfg).slice(0, 2);
+  if (!defs.length) return "外接：当前模式无需外接参数";
+  const parts = defs.map((def, index) => `参数${index + 1}→${cleanParamLabel(def.label) || def.cfgKey || def.name}`);
+  return `外接：${parts.join(" / ")}`;
+}
+
+function getExternalParamDefFromInput(input) {
+  const fields = [
+    input?.name,
+    input?.label,
+    input?.localized_name,
+    input?.display_name,
+    input?.tooltip,
+  ].map((item) => String(item || ""));
+  return EXTERNAL_PARAM_INPUTS.find((def, index) => {
+    const n = index + 1;
+    return fields.some((text) => text === def.name || text === def.label || text.includes(`外接参数${n}`));
+  }) || null;
+}
+
+function applyExternalParamInput(input, def) {
+  if (!input || !def) return;
+  input.name = def.name;
+  input.type = def.type;
+  input.label = def.label;
+  input.localized_name = def.label;
+  input.display_name = def.label;
+  input.tooltip = def.title;
+  if (input.widget) delete input.widget;
+}
+
+function reorderFixedTopInputs(node) {
+  if (!Array.isArray(node?.inputs)) return;
+  const orderOf = (input, index) => {
+    const name = String(input?.name || "");
+    const type = String(input?.type || "");
+    const label = String(input?.label || input?.localized_name || "");
+    const externalDef = getExternalParamDefFromInput(input);
+    if (name === "image" || (type.includes("IMAGE") && /图片|image/i.test(label || name))) return 0;
+    if (name === "mask" || (type === "MASK" && /遮罩|mask/i.test(label || name))) return 1;
+    if (externalDef?.name === "external_param_1") return 2;
+    if (externalDef?.name === "external_param_2") return 3;
+    return 20 + index;
+  };
+  const next = node.inputs
+    .map((input, index) => ({ input, index }))
+    .sort((a, b) => orderOf(a.input, a.index) - orderOf(b.input, b.index) || a.index - b.index)
+    .map((item) => item.input);
+  let changed = false;
+  for (let index = 0; index < next.length; index++) {
+    if (next[index] !== node.inputs[index]) {
+      changed = true;
+      break;
+    }
+  }
+  if (changed) {
+    node.inputs = next;
+    retargetInputLinksByObject(node);
+    repairInputLinkSlots(node);
+  }
+}
+
+function clearLegacyParamLinkMemory(node) {
+  if (!node) return;
+  node.__gjjMfSerializedParamLinks = [];
+  node.__gjjMfParamLinkSignature = "";
+  if (node.properties && PARAM_LINKS_PROPERTY in node.properties) delete node.properties[PARAM_LINKS_PROPERTY];
+}
+
+function removeNativeParamInputSlots(node) {
+  if (!Array.isArray(node?.inputs)) return false;
+  let removed = false;
+  for (let index = node.inputs.length - 1; index >= 0; index--) {
+    if (!getParamInputDefFromInput(node.inputs[index])) continue;
+    disconnectAndRemoveInput(node, index);
+    removed = true;
+  }
+  if (removed) {
+    clearLegacyParamLinkMemory(node);
+    repairInputLinkSlots(node);
+  }
+  return removed;
+}
+
+function ensureExternalParamInputs(node) {
+  if (!Array.isArray(node?.inputs)) return;
+  removeNativeParamInputSlots(node);
+  let changed = false;
+  for (const def of EXTERNAL_PARAM_INPUTS) {
+    const matches = node.inputs.filter((input) => getExternalParamDefFromInput(input)?.name === def.name);
+    let picked = matches.find((input) => inputHasRealLink(input, node, node.inputs.indexOf(input))) || matches[0] || null;
+    if (!picked) {
+      try { node.addInput?.(def.name, def.type); } catch (_) {}
+      picked = node.inputs.find((input) => String(input?.name || "") === def.name) || null;
+      changed = true;
+    }
+    if (!picked) continue;
+    applyExternalParamInput(picked, def);
+    for (let index = node.inputs.length - 1; index >= 0; index--) {
+      const input = node.inputs[index];
+      if (input === picked || getExternalParamDefFromInput(input)?.name !== def.name) continue;
+      disconnectAndRemoveInput(node, index);
+      changed = true;
+    }
+  }
+  reorderFixedTopInputs(node);
+  repairInputLinkSlots(node);
+  if (changed) redraw(node);
 }
 
 function ensureNativeParamInputSlot(node, def) {
@@ -550,9 +946,11 @@ function reorderNativeParamInputs(node, visibleDefs) {
   repairSerializedParamLinks(node);
   refreshInputLinksFromGraph(node);
   const visibleNames = new Set((visibleDefs || []).map((def) => def.name));
+  for (const name of semanticLinks.keys()) visibleNames.add(name);
   for (let index = node.inputs.length - 1; index >= 0; index--) {
     const def = getParamInputDefFromInput(node.inputs[index]);
-    if (def && !visibleNames.has(def.name)) disconnectAndRemoveInput(node, index);
+    const hasLink = def && inputHasRealLink(node.inputs[index], node, index);
+    if (def && !visibleNames.has(def.name) && !hasLink) disconnectAndRemoveInput(node, index);
   }
   refreshInputLinksFromGraph(node);
   for (const def of PARAM_INPUTS) {
@@ -570,10 +968,10 @@ function reorderNativeParamInputs(node, visibleDefs) {
   const orderedParams = [];
   for (const def of PARAM_INPUTS) {
     if (!visibleNames.has(def.name)) continue;
+    ensureNativeParamInputSlot(node, def);
     const matches = node.inputs.filter((input) => getParamInputDefFromInput(input)?.name === def.name);
     const picked = matches.find((input) => inputHasRealLink(input, node, node.inputs.indexOf(input))) || matches[0];
     if (!picked) continue;
-    ensureNativeParamInputSlot(node, def);
     orderedParams.push(picked);
   }
   const next = [...fixed, ...orderedParams];
@@ -593,10 +991,10 @@ function reorderNativeParamInputs(node, visibleDefs) {
 
 function ensureNativeParamWidgets(node) {
   if (!node) return;
-  repairSerializedParamLinks(node);
-  repairInputLinkSlots(node);
+  removeNativeParamInputSlots(node);
+  ensureExternalParamInputs(node);
   const cfg = readConfig(node);
-  const visibleDefs = PARAM_INPUTS.filter((def) => isParamDefActive(def, cfg));
+  const visibleDefs = getActiveParamDefs(cfg);
   const widgetsByName = new Map();
   for (const def of PARAM_INPUTS) {
     const widget = setupNativeParamWidget(node, def);
@@ -622,28 +1020,16 @@ function ensureNativeParamWidgets(node) {
   for (const def of visibleDefs) {
     const widget = widgetsByName.get(def.name);
     setWidgetVisible(widget, true);
-    ensureNativeParamInputSlot(node, def);
   }
-  reorderNativeParamInputs(node, visibleDefs);
-  repairSerializedParamLinks(node);
-  saveCurrentParamLinks(node);
+  removeNativeParamInputSlots(node);
+  ensureExternalParamInputs(node);
   moveTailWidgetAfterParams(node);
 }
 
 function syncNativeParamInputSlots(node) {
-  const cfg = readConfig(node);
   if (!Array.isArray(node?.inputs)) return;
-  repairSerializedParamLinks(node);
-  repairInputLinkSlots(node);
-  for (let i = node.inputs.length - 1; i >= 0; i--) {
-    const input = node.inputs[i];
-    const def = getParamInputDefFromInput(input);
-    if (!def || isParamDefActive(def, cfg)) continue;
-    disconnectAndRemoveInput(node, i);
-  }
-  repairSerializedParamLinks(node);
-  repairInputLinkSlots(node);
-  saveCurrentParamLinks(node);
+  removeNativeParamInputSlots(node);
+  ensureExternalParamInputs(node);
 }
 
 function isConfigInputSlot(input) {
@@ -812,6 +1198,7 @@ function ensureStyles() {
 .gjj-mf-tail-root{box-sizing:border-box;width:100%;padding:0 0 7px 0;font-family:system-ui,"Microsoft YaHei",sans-serif;color:#dbeafe;pointer-events:auto;user-select:none;}
 .gjj-mf-output-row{display:flex;align-items:center;gap:5px;margin:0 0 6px 0;min-width:0;}
 .gjj-mf-mini-label{flex:0 0 auto;color:#93c5fd;font-size:11px;white-space:nowrap;}
+.gjj-mf-external-map{margin:-2px 0 5px 0;color:#93c5fd;font-size:11px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .gjj-mf-panel{display:flex;flex-direction:column;gap:7px;}
 .gjj-mf-button-row{display:flex;gap:6px;min-width:0;flex:1;}
 .gjj-mf-choice{flex:1;min-width:0;height:28px;border:1px solid rgba(148,163,184,.36);background:rgba(15,23,42,.55);color:#dbeafe;border-radius:8px;padding:0 6px;font-size:15px;font-weight:700;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center;}
@@ -1278,6 +1665,11 @@ function updateDomState(node) {
     dom.settingsBtn.classList.toggle("active", showSettings);
     dom.settingsBtn.textContent = showSettings ? "⚙️更多设置 收起" : "⚙️更多设置";
   }
+  if (dom.externalMap) {
+    const text = externalParamMappingText(cfg);
+    dom.externalMap.textContent = text;
+    dom.externalMap.title = `${text}。顶部固定接口会覆盖面板内对应参数。`;
+  }
 }
 
 function createDom(node) {
@@ -1335,15 +1727,19 @@ function createDom(node) {
     outputs.appendChild(btn);
   }
 
+  const externalMap = document.createElement("div");
+  externalMap.className = "gjj-mf-external-map";
+
   const panel = document.createElement("div");
   panel.className = "gjj-mf-panel";
 
-  root.append(outputs, panel);
+  root.append(outputs, externalMap, panel);
   node.__gjjMfDom = {
     ...(node.__gjjMfDom || {}),
     root,
     outputs,
     settingsBtn,
+    externalMap,
     panel,
   };
   return root;
@@ -1697,6 +2093,33 @@ app.registerExtension({
         moveTailWidgetAfterParams(this);
         redraw(this);
       }, 1500);
+      return ret;
+    };
+
+    const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+    nodeType.prototype.onConnectionsChange = function (...args) {
+      rememberConnectionChangeParamLink(this, args);
+      const ret = originalOnConnectionsChange?.apply(this, args);
+      rememberConnectionChangeParamLink(this, args);
+      setTimeout(() => {
+        rememberConnectionChangeParamLink(this, args);
+        saveCurrentParamLinks(this);
+        ensureNativeParamWidgets(this);
+        syncNativeParamInputSlots(this);
+        moveTailWidgetAfterParams(this);
+        redraw(this);
+      }, 0);
+      return ret;
+    };
+
+    const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
+    nodeType.prototype.onDrawBackground = function (...args) {
+      const ret = originalOnDrawBackground?.apply(this, args);
+      const signature = currentParamLinkSignature(this);
+      if (signature && signature !== this.__gjjMfParamLinkSignature) {
+        this.__gjjMfParamLinkSignature = signature;
+        scheduleParamLinkRepair(this);
+      }
       return ret;
     };
 

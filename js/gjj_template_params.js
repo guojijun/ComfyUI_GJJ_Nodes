@@ -630,10 +630,14 @@ const SAVED_TEMPLATE = "gjj_template_params_template";
 const SAVED_VALUES = "gjj_template_params_values";
 const SAVED_SCHEMA = "gjj_template_params_schema";
 const SAVED_SIZE = "gjj_template_params_size";
+const SAVED_TEXTAREA_HEIGHTS = "gjj_template_params_textarea_heights";
+const BROADCAST_PROPERTY = "gjj_variable_broadcast_enabled";
 const MAX_OUTPUTS = 64;
-const DEFAULT_TEMPLATE = "帧率：24.0 # 浮点\n时长：5 # 整数\nLora加速：true{开启加速|关闭加速} # 布尔按钮\n是否启用：[启用=enable, 禁用=disable] # 枚举按钮";
+const DEFAULT_TEMPLATE = "帧率 (frame_rate) [INT,FLOAT]：24.0 # 每秒帧数\n时长 (duration) [INT,FLOAT]：5 # 秒数或帧数\nLora加速：true{开启加速|关闭加速} # 布尔按钮\n是否启用：[启用=enable, 禁用=disable] # 枚举按钮";
 const DEFAULT_WIDTH = 300;
 const MAX_EXTRA_IDLE_HEIGHT = 72;
+const TEXTAREA_MIN_HEIGHT = 58;
+const TEXTAREA_MAX_HEIGHT = 2400;
 
 function getWidget(node, name) {
 	return node.widgets?.find((widget) => widget?.name === name);
@@ -705,6 +709,121 @@ function safeJsonParse(text, fallback) {
 	}
 }
 
+function normalizeTextareaHeight(value) {
+	const height = Number.parseFloat(value);
+	if (!Number.isFinite(height)) return 0;
+	return Math.min(TEXTAREA_MAX_HEIGHT, Math.max(TEXTAREA_MIN_HEIGHT, Math.round(height)));
+}
+
+function sanitizeTextareaHeights(raw) {
+	let data = raw;
+	if (typeof data === "string") data = safeJsonParse(data, {});
+	if (!data || typeof data !== "object" || Array.isArray(data)) return {};
+	const result = {};
+	for (const [key, value] of Object.entries(data)) {
+		const height = normalizeTextareaHeight(value);
+		if (key && height) result[String(key)] = height;
+	}
+	return result;
+}
+
+function textareaHeightKeys(field) {
+	const keys = [];
+	const key = String(field?.key || "");
+	const label = String(field?.label || "");
+	if (key) keys.push(key);
+	if (label) keys.push(`label:${label}`);
+	return keys;
+}
+
+function ensureTextareaHeights(node) {
+	node.properties = node.properties || {};
+	const data = sanitizeTextareaHeights(node.properties[SAVED_TEXTAREA_HEIGHTS]);
+	node.properties[SAVED_TEXTAREA_HEIGHTS] = data;
+	return data;
+}
+
+function getSavedTextareaHeight(node, field) {
+	const data = ensureTextareaHeights(node);
+	for (const key of textareaHeightKeys(field)) {
+		const height = normalizeTextareaHeight(data[key]);
+		if (height) return height;
+	}
+	return 0;
+}
+
+function measureTextareaHeight(textarea) {
+	if (!textarea) return 0;
+	const rectHeight = Number(textarea.getBoundingClientRect?.().height || 0);
+	return normalizeTextareaHeight(
+		rectHeight
+		|| Number(textarea.offsetHeight || 0)
+		|| Number.parseFloat(textarea.style?.height || "0")
+	);
+}
+
+function rememberTextareaHeight(node, field, textarea) {
+	const height = measureTextareaHeight(textarea);
+	if (!node || !field || !height) return;
+	const data = ensureTextareaHeights(node);
+	for (const key of textareaHeightKeys(field)) data[key] = height;
+	node.properties[SAVED_TEXTAREA_HEIGHTS] = data;
+}
+
+function syncTextareaHeightsFromDom(node) {
+	if (!node?.__gjjTemplateParamsRows) return;
+	const data = ensureTextareaHeights(node);
+	for (const [key, input] of node.__gjjTemplateParamsRows.entries()) {
+		if (input?.tagName !== "TEXTAREA") continue;
+		const height = measureTextareaHeight(input);
+		if (!height) continue;
+		data[String(key)] = height;
+		const label = String(input.dataset?.gjjTemplateParamLabel || "");
+		if (label) data[`label:${label}`] = height;
+	}
+	node.properties[SAVED_TEXTAREA_HEIGHTS] = sanitizeTextareaHeights(data);
+}
+
+function disconnectTextareaHeightObservers(node) {
+	const observers = Array.isArray(node?.__gjjTemplateParamsTextareaObservers)
+		? node.__gjjTemplateParamsTextareaObservers
+		: [];
+	for (const observer of observers) {
+		try { observer.disconnect?.(); } catch (_) {}
+	}
+	if (node) node.__gjjTemplateParamsTextareaObservers = [];
+}
+
+function observeTextareaHeight(node, field, textarea) {
+	if (!node || !field || !textarea) return;
+	let pointerStartHeight = 0;
+	textarea.addEventListener("pointerdown", () => {
+		pointerStartHeight = measureTextareaHeight(textarea);
+	});
+	if (typeof ResizeObserver !== "undefined") {
+		const observer = new ResizeObserver(() => {
+			rememberTextareaHeight(node, field, textarea);
+			refreshNode(node, { resize: false });
+		});
+		observer.observe(textarea);
+		node.__gjjTemplateParamsTextareaObservers = node.__gjjTemplateParamsTextareaObservers || [];
+		node.__gjjTemplateParamsTextareaObservers.push(observer);
+	}
+	for (const eventName of ["pointerup", "mouseup", "blur", "change"]) {
+		textarea.addEventListener(eventName, () => {
+			setTimeout(() => {
+				const currentHeight = measureTextareaHeight(textarea);
+				if (!pointerStartHeight || Math.abs(currentHeight - pointerStartHeight) > 1) {
+					node.__gjjTemplateParamsPreferSavedSize = false;
+				}
+				rememberTextareaHeight(node, field, textarea);
+				refreshNode(node);
+				pointerStartHeight = currentHeight;
+			}, 0);
+		});
+	}
+}
+
 function parseValue(text) {
 	if (typeof text !== "string") return text;
 	const raw = text.trim();
@@ -712,10 +831,7 @@ function parseValue(text) {
 	const forced = raw.match(/^\s*(int|float|str|string|bool|boolean|json)\s*\(([\s\S]*)\)\s*$/i);
 	if (forced) {
 		const kind = forced[1].toLowerCase();
-		let inner = forced[2].trim();
-		if ((inner.startsWith('"') && inner.endsWith('"')) || (inner.startsWith("'") && inner.endsWith("'"))) {
-			inner = inner.slice(1, -1);
-		}
+		let inner = stripQuotes(forced[2].trim());
 		if (kind === "int") return Number.parseInt(Number.parseFloat(inner), 10);
 		if (kind === "float") return Number.parseFloat(inner);
 		if (kind === "str" || kind === "string") return inner;
@@ -724,6 +840,7 @@ function parseValue(text) {
 			try { return JSON.parse(forced[2].trim()); } catch (_) { return inner; }
 		}
 	}
+	if (isStringLiteralText(raw)) return stripQuotes(raw);
 	if (/^(true|yes|on|是|真)$/i.test(raw)) return true;
 	if (/^(false|no|off|否|假)$/i.test(raw)) return false;
 	if (/^(none|null|nil)$/i.test(raw)) return null;
@@ -776,8 +893,38 @@ function inferTypeFromRaw(rawText, parsedValue) {
 	return inferType(parsedValue);
 }
 
-function slugKey(label, index, seen) {
-	let key = String(label || "")
+function normalizeSocketType(value) {
+	let text = String(value || "").trim();
+	if (!text) return "";
+	text = text.replace(/，/g, ",").replace(/\s+/g, "");
+	if (/^(any|\*)$/i.test(text)) return "*";
+	return text.toUpperCase();
+}
+
+function splitLabelAndType(rawLabel) {
+	const label = String(rawLabel || "").trim();
+	const match = label.match(/\s*(?:\[\s*([^\]]+?)\s*\]|【\s*([^】]+?)\s*】)\s*$/);
+	if (!match) return { label, socketType: "" };
+	return {
+		label: label.slice(0, match.index).trim(),
+		socketType: normalizeSocketType(match[1] || match[2] || ""),
+	};
+}
+
+function splitLabelAndBroadcastKey(rawLabel, index) {
+	let label = String(rawLabel || "").trim() || `参数 ${index + 1}`;
+	const explicit = label.match(/^(.+?)[（(]\s*([^（）()]+?)\s*[）)]$/);
+	if (!explicit) return { label, keySource: label, broadcastKeys: [] };
+	label = explicit[1].trim() || label;
+	const firstKey = String(explicit[2] || "").split(/\s*(?:\||,|，|；|;|\bor\b|或)\s*/i)[0] || "";
+	const broadcastKey = firstKey.trim()
+		.replace(/[^0-9A-Za-z_\u4e00-\u9fff-]+/g, "_")
+		.replace(/^_+|_+$/g, "") || `param_${index + 1}`;
+	return { label, keySource: broadcastKey, broadcastKeys: [broadcastKey] };
+}
+
+function makeUniqueKey(source, index, seen) {
+	let key = String(source || "")
 		.trim()
 		.replace(/\s+/g, "_")
 		.replace(/[^0-9A-Za-z_\u4e00-\u9fff-]/g, "_")
@@ -791,20 +938,38 @@ function slugKey(label, index, seen) {
 function splitValueAndTooltip(text) {
 	const raw = String(text || "");
 	let escaped = false;
+	let tripleQuote = "";
 	let quote = "";
-	for (let i = 0; i < raw.length; i += 1) {
+	for (let i = 0; i < raw.length;) {
 		const ch = raw[i];
 		if (escaped) {
 			escaped = false;
+			i += 1;
 			continue;
 		}
 		if (ch === "\\") {
 			escaped = true;
+			i += 1;
+			continue;
+		}
+		if (tripleQuote) {
+			if (raw.startsWith(tripleQuote, i)) {
+				tripleQuote = "";
+				i += 3;
+				continue;
+			}
+			i += 1;
+			continue;
+		}
+		if (!quote && (raw.startsWith('"""', i) || raw.startsWith("'''", i))) {
+			tripleQuote = raw.slice(i, i + 3);
+			i += 3;
 			continue;
 		}
 		if (ch === '"' || ch === "'") {
 			if (quote === ch) quote = "";
 			else if (!quote) quote = ch;
+			i += 1;
 			continue;
 		}
 		if (ch === "#" && !quote) {
@@ -813,16 +978,138 @@ function splitValueAndTooltip(text) {
 				tooltip: raw.slice(i + 1).trim(),
 			};
 		}
+		i += 1;
 	}
 	return { value: raw.replace(/\\#/g, "#").trim(), tooltip: "" };
 }
 
 function stripQuotes(text) {
 	const raw = String(text ?? "").trim();
+	if (raw.length >= 6 && (raw.startsWith('"""') || raw.startsWith("'''")) && raw.endsWith(raw.slice(0, 3))) {
+		let inner = raw.slice(3, -3);
+		if (inner.startsWith("\n")) inner = inner.slice(1);
+		if (inner.endsWith("\n")) inner = inner.slice(0, -1);
+		return inner;
+	}
 	if (raw.length >= 2 && ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'")))) {
 		return raw.slice(1, -1);
 	}
 	return raw;
+}
+
+function isStringLiteralText(text) {
+	const raw = String(text ?? "").trim();
+	return (raw.length >= 6 && (raw.startsWith('"""') || raw.startsWith("'''")) && raw.endsWith(raw.slice(0, 3)))
+		|| (raw.length >= 2 && ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))));
+}
+
+function scanTripleQuoteState(text, quote = "") {
+	const raw = String(text || "");
+	let escaped = false;
+	for (let i = 0; i < raw.length;) {
+		const ch = raw[i];
+		if (escaped) {
+			escaped = false;
+			i += 1;
+			continue;
+		}
+		if (ch === "\\") {
+			escaped = true;
+			i += 1;
+			continue;
+		}
+		if (quote) {
+			if (raw.startsWith(quote, i)) {
+				quote = "";
+				i += 3;
+				continue;
+			}
+			i += 1;
+			continue;
+		}
+		if (raw.startsWith('"""', i) || raw.startsWith("'''", i)) {
+			quote = raw.slice(i, i + 3);
+			i += 3;
+			continue;
+		}
+		i += 1;
+	}
+	return quote;
+}
+
+function isEmptyAssignmentLine(line) {
+	return /^([^:=：=]+?)\s*[:：=]\s*$/.test(String(line || "").trim());
+}
+
+function lineStartsTripleQuote(line) {
+	const raw = String(line || "").trimStart();
+	return raw.startsWith('"""') || raw.startsWith("'''");
+}
+
+function templateLogicalLines(template) {
+	const lines = String(template || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+	const result = [];
+	let current = [];
+	let quote = "";
+	let pendingEmptyValue = false;
+
+	const flushCurrent = () => {
+		const logical = current.join("\n").trim();
+		if (logical) result.push(logical);
+		current = [];
+		pendingEmptyValue = false;
+	};
+
+	for (let index = 0; index < lines.length;) {
+		const line = lines[index];
+		const raw = line.trim();
+		if (quote) {
+			current.push(line);
+			quote = scanTripleQuoteState(line, quote);
+			if (!quote) flushCurrent();
+			index += 1;
+			continue;
+		}
+		if (pendingEmptyValue) {
+			if (!raw) {
+				current.push(line);
+				index += 1;
+				continue;
+			}
+			if (raw.startsWith("#") || raw.startsWith("//") || raw.startsWith(";") || ["...", "....", "……", "…"].includes(raw)) {
+				index += 1;
+				continue;
+			}
+			if (lineStartsTripleQuote(line)) {
+				current.push(line);
+				quote = scanTripleQuoteState(line, quote);
+				if (!quote) flushCurrent();
+				index += 1;
+				continue;
+			}
+			flushCurrent();
+			continue;
+		}
+		if (!current.length && (!raw || raw.startsWith("#") || raw.startsWith("//") || raw.startsWith(";") || ["...", "....", "……", "…"].includes(raw))) {
+			index += 1;
+			continue;
+		}
+		current.push(line);
+		quote = scanTripleQuoteState(line, quote);
+		if (quote) {
+			index += 1;
+			continue;
+		}
+		if (isEmptyAssignmentLine(line)) {
+			pendingEmptyValue = true;
+			index += 1;
+			continue;
+		}
+		flushCurrent();
+		index += 1;
+	}
+	if (current.length) flushCurrent();
+	return result;
 }
 
 function splitEnumOptions(inner) {
@@ -958,24 +1245,28 @@ function parseBoolSpec(defaultText) {
 function parseTemplate(template) {
 	const seen = new Map();
 	const fields = [];
-	for (const line of String(template || "").replace(/\r\n/g, "\n").split("\n")) {
-		const raw = line.trim();
-		if (!raw || raw.startsWith("#") || raw.startsWith("//") || raw.startsWith(";")) continue;
-		if (["...", "....", "……", "…"].includes(raw)) continue;
+	for (const raw of templateLogicalLines(template)) {
 		const match = raw.match(/^([^:=：=]+?)\s*[:：=]\s*([\s\S]*)$/);
 		if (!match) continue;
-		const label = match[1].trim();
+		const { label: typedLabel, socketType } = splitLabelAndType(match[1].trim());
+		const { label, keySource, broadcastKeys } = splitLabelAndBroadcastKey(typedLabel, fields.length);
 		const { value: defaultText, tooltip } = splitValueAndTooltip(match[2].trim());
 		if (!label) continue;
 		const boolSpec = parseBoolSpec(defaultText);
 		const enumOptions = boolSpec ? [] : parseEnumOptions(defaultText, tooltip);
 		const value = boolSpec ? boolSpec.defaultValue : (enumOptions.length ? optionValue(enumOptions[0]) : parseValue(defaultText));
+		const defaultValue = boolSpec
+			? (boolSpec.defaultValue ? "true" : "false")
+			: (enumOptions.length ? optionValue(enumOptions[0]) : (typeof value === "string" && isStringLiteralText(defaultText) ? value : defaultText));
 		const field = {
-			key: slugKey(label, fields.length, seen),
+			key: makeUniqueKey(keySource, fields.length, seen),
 			label,
-			default: boolSpec ? (boolSpec.defaultValue ? "true" : "false") : (enumOptions.length ? optionValue(enumOptions[0]) : defaultText),
+			broadcast_key: broadcastKeys[0] || "",
+			broadcast_keys: broadcastKeys,
+			default: defaultValue,
 			tooltip,
-			type: boolSpec ? "BOOLEAN" : (enumOptions.length ? "ENUM" : inferType(value)),
+			socket_type: socketType,
+			type: boolSpec ? "BOOLEAN" : (enumOptions.length ? "ENUM" : (socketType || inferType(value))),
 			options: enumOptions,
 		};
 		if (boolSpec) field.bool_labels = boolSpec.labels;
@@ -1024,6 +1315,48 @@ function refreshNode(node, options = {}) {
 	}
 	node.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function broadcastEnabled(node) {
+	return Boolean(node?.properties?.[BROADCAST_PROPERTY]);
+}
+
+function notifyBroadcastChanged(node) {
+	try {
+		window.dispatchEvent(new CustomEvent("gjj-variable-broadcast-updated", {
+			detail: { nodeId: node?.id, enabled: broadcastEnabled(node) },
+		}));
+	} catch (_) {}
+}
+
+function notifyTemplateParamsUpdated(node) {
+	try {
+		window.dispatchEvent(new CustomEvent("gjj-template-params-updated", {
+			detail: { nodeId: node?.id },
+		}));
+	} catch (_) {}
+}
+
+function updateBroadcastButton(node) {
+	const button = node?.__gjjTemplateParamsBroadcastButton;
+	if (!button) return;
+	const enabled = broadcastEnabled(node);
+	button.classList.toggle("active", enabled);
+	button.setAttribute("aria-pressed", String(enabled));
+	button.dataset.value = enabled ? "true" : "false";
+	button.title = enabled
+		? "⚡ 已开启：只广播模板中用 (变量名) 明确声明的字段，按单一变量名和类型匹配空输入口。"
+		: "⚡ 默认关闭：开启后仅广播写了 (变量名) 的字段，例如 帧率 (frame_rate) [INT,FLOAT]：24.0。";
+}
+
+function setBroadcastEnabled(node, enabled) {
+	if (!node) return false;
+	node.properties = node.properties || {};
+	node.properties[BROADCAST_PROPERTY] = Boolean(enabled);
+	updateBroadcastButton(node);
+	notifyBroadcastChanged(node);
+	refreshNode(node, { resize: false });
+	return node.properties[BROADCAST_PROPERTY];
 }
 
 
@@ -1218,6 +1551,8 @@ function saveState(node, template, fields, values) {
 	node.properties[SAVED_TEMPLATE] = template;
 	node.properties[SAVED_VALUES] = valuesText;
 	node.properties[SAVED_SCHEMA] = schemaText;
+	notifyTemplateParamsUpdated(node);
+	if (broadcastEnabled(node)) notifyBroadcastChanged(node);
 }
 
 function syncValuesFromDom(node) {
@@ -1226,6 +1561,7 @@ function syncValuesFromDom(node) {
 	for (const [key, input] of node.__gjjTemplateParamsRows.entries()) {
 		values[key] = input.value;
 	}
+	syncTextareaHeightsFromDom(node);
 	saveState(node, template, fields, values);
 	updateOutputs(node, fields, values);
 }
@@ -1243,11 +1579,13 @@ function updateOutputs(node, fields, values) {
 		const value = parseValue(rawValue);
 		// 输出类型必须按“当前输入文本”实时推断。
 		// JS 的 Number.isInteger(5.0) 会返回 true，所以 5.0 不能只看 parsed number。
-		const nextType = field.type === "ENUM" ? "COMBO" : inferTypeFromRaw(rawValue, value);
+		const nextType = field.type === "ENUM" ? "COMBO" : (field.socket_type ? normalizeSocketType(field.socket_type) : inferTypeFromRaw(rawValue, value));
 		output.name = field.label || `输出${i + 1}`;
 		output.label = output.name;
 		output.localized_name = output.name;
 		output.type = nextType;
+		output.gjj_broadcast_names = Array.isArray(field.broadcast_keys) ? [...field.broadcast_keys] : [];
+		output.gjj_broadcast_key = field.broadcast_key || output.gjj_broadcast_names[0] || "";
 		// 已连接的旧 link 也同步类型，否则画布上可能还显示旧类型。
 		for (const linkId of output.links || []) {
 			const link = app.graph?.links?.[linkId];
@@ -1255,6 +1593,7 @@ function updateOutputs(node, fields, values) {
 		}
 		output.tooltip = [
 			`模板参数：${field.label}`,
+			output.gjj_broadcast_key ? `广播变量：${output.gjj_broadcast_key}` : "",
 			field.tooltip ? `说明：${field.tooltip}` : "",
 			`当前值：${displayValueForField(field, values[field.key] ?? field.default ?? "")}`,
 		].filter(Boolean).join("\n");
@@ -1423,10 +1762,13 @@ function shouldUseMultilineText(field, value, isMedia) {
 		|| /(文本|内容|描述|提示词|正向|反向|prompt|text|description|caption)/i.test(hint);
 }
 
-function autoresizeTextarea(textarea, node = null) {
+function autoresizeTextarea(textarea, node = null, options = {}) {
 	if (!textarea) return;
+	const savedHeight = normalizeTextareaHeight(options.savedHeight);
+	const currentHeight = measureTextareaHeight(textarea);
 	textarea.style.height = "auto";
-	textarea.style.height = `${Math.max(58, textarea.scrollHeight || 58)}px`;
+	const naturalHeight = normalizeTextareaHeight(textarea.scrollHeight || TEXTAREA_MIN_HEIGHT);
+	textarea.style.height = `${Math.max(TEXTAREA_MIN_HEIGHT, savedHeight, currentHeight, naturalHeight)}px`;
 	if (node) refreshNode(node);
 }
 
@@ -1492,9 +1834,14 @@ function buildInputForField(node, field, values, options = {}) {
 	input.spellcheck = false;
 	input.title = field.tooltip || field.type || "STRING";
 	input.style.flex = "1";
+	let savedTextareaHeight = 0;
 	if (multiline) {
+		savedTextareaHeight = getSavedTextareaHeight(node, field);
+		input.dataset.gjjTemplateParamKey = String(field.key || "");
+		input.dataset.gjjTemplateParamLabel = String(field.label || "");
 		input.rows = 2;
 		input.wrap = "soft";
+		if (savedTextareaHeight) input.style.height = `${savedTextareaHeight}px`;
 	}
 
 	input.addEventListener("pointerdown", (event) => event.stopPropagation());
@@ -1505,7 +1852,11 @@ function buildInputForField(node, field, values, options = {}) {
 			setWarningMessages(node, []);
 			setNetworkWarningMessage(node, field, "");
 		}
-		if (multiline) autoresizeTextarea(input, node);
+		if (multiline) {
+			node.__gjjTemplateParamsPreferSavedSize = false;
+			autoresizeTextarea(input, node, { savedHeight: savedTextareaHeight });
+			rememberTextareaHeight(node, field, input);
+		}
 		saveFieldValue(node, field, values, input.value);
 
 		if (isMedia) {
@@ -1519,7 +1870,11 @@ function buildInputForField(node, field, values, options = {}) {
 		}
 	}
 	if (multiline) {
-		setTimeout(() => autoresizeTextarea(input, node), 0);
+		observeTextareaHeight(node, field, input);
+		setTimeout(() => {
+			autoresizeTextarea(input, node, { savedHeight: savedTextareaHeight });
+			rememberTextareaHeight(node, field, input);
+		}, 0);
 	}
 
 	inputWrap.appendChild(input);
@@ -1606,6 +1961,7 @@ function renderRows(node) {
 	saveState(node, state.template, state.fields, state.values);
 	const rows = node.__gjjTemplateParamsRowsWrap;
 	if (!rows) return;
+	disconnectTextareaHeightObservers(node);
 	rows.innerHTML = "";
 	node.__gjjTemplateParamsRows = new Map();
 	node.__gjjTemplateParamsPreviewMap = new Map();
@@ -1645,8 +2001,10 @@ function buildDom(node) {
 	style.textContent = `
 		.gjj-template-params * { box-sizing: border-box; }
 		.gjj-template-param-toolbar { display:flex; align-items:center; gap:6px; }
-		.gjj-template-param-gear, .gjj-template-param-refresh, .gjj-template-param-ok, .gjj-template-param-cancel { border:1px solid #44565f; border-radius:7px; background:#202b31; color:#dce7e2; cursor:pointer; height:24px; padding:0 8px; font-size:12px; }
-		.gjj-template-param-gear:hover, .gjj-template-param-refresh:hover, .gjj-template-param-ok:hover, .gjj-template-param-cancel:hover { background:#2c3b43; }
+		.gjj-template-param-gear, .gjj-template-param-refresh, .gjj-template-param-broadcast, .gjj-template-param-ok, .gjj-template-param-cancel { border:1px solid #44565f; border-radius:7px; background:#202b31; color:#dce7e2; cursor:pointer; height:24px; padding:0 8px; font-size:12px; }
+		.gjj-template-param-broadcast { width:26px; flex:0 0 26px; padding:0; font-size:14px; line-height:20px; }
+		.gjj-template-param-gear:hover, .gjj-template-param-refresh:hover, .gjj-template-param-broadcast:hover, .gjj-template-param-ok:hover, .gjj-template-param-cancel:hover { background:#2c3b43; }
+		.gjj-template-param-broadcast.active, .gjj-template-param-broadcast[data-value="true"] { border-color:#69b980; background:#20362f; color:#ecfff1; }
 		.gjj-template-param-count { color:#8ea0a8; font-size:11px; }
 		.gjj-template-param-panel { display:none; flex-direction:column; gap:6px; padding:6px; border:1px solid #33464e; border-radius:9px; background:#0d1519; }
 		.gjj-template-param-template { width:100%; min-height:108px; height:118px; resize:vertical; overflow:auto; padding:7px 8px; border:1px solid #33464e; border-radius:8px; outline:none; background:#2b2d30; color:#f1f5f5; font:12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space:pre-wrap; }
@@ -1693,9 +2051,15 @@ function buildDom(node) {
 	refresh.textContent = "↻";
 	refresh.title = "刷新：重新解析模板、重建面板，并同步输出口名称 / 类型 / tooltip";
 
+	const broadcast = document.createElement("button");
+	broadcast.type = "button";
+	broadcast.className = "gjj-template-param-broadcast";
+	broadcast.textContent = "⚡";
+	broadcast.setAttribute("aria-label", "切换模板参数广播");
+
 	const count = document.createElement("span");
 	count.className = "gjj-template-param-count";
-	toolbar.append(gear, refresh, count);
+	toolbar.append(gear, broadcast, refresh, count);
 
 	const panel = document.createElement("div");
 	panel.className = "gjj-template-param-panel";
@@ -1709,11 +2073,13 @@ function buildDom(node) {
 	help.className = "gjj-template-param-help";
 	help.textContent = [
 		"每行一个参数：名称：默认值 # 说明",
-		"示例：帧率：24.0 # 每秒帧数",
+		"广播示例：帧率 (frame_rate) [INT,FLOAT]：24.0 # 每秒帧数",
+		"多段提示词：提示词：'''第一段\\n第二段''' 或 提示词：\"\"\"多段文本\"\"\"。",
 		"支持 int(1)、float(1)、true / false、json([1,2])、图片/音频/视频路径。",
+		"⚡ 默认关闭；开启后只广播写了 (变量名) 的字段，括号内只使用一个严格变量名。",
 		"布尔按钮：true{开启文案|关闭文案}；简写 {开启文案|关闭文案} 默认开启。",
 		"枚举按钮：[显示=输出值, 显示2=输出值2]；兼容 [显示(输出值), ...]。",
-		"空行、整行 # 注释、.... 会被忽略；如果值里要写 #，请用 \\#。",
+		"空行、整行 # 注释、.... 会被忽略；如果值里要写 #，请用 \\#，三引号内部可直接写 #。",
 	].join("\n");
 	const actions = document.createElement("div");
 	actions.className = "gjj-template-param-actions";
@@ -1726,7 +2092,7 @@ function buildDom(node) {
 	ok.className = "gjj-template-param-ok";
 	ok.textContent = "确定";
 	actions.append(cancel, ok);
-	panel.append(template, help, actions);
+	panel.append(template, actions, help);
 
 	const rows = document.createElement("div");
 	rows.className = "gjj-template-param-rows";
@@ -1734,7 +2100,7 @@ function buildDom(node) {
 	warning.className = "gjj-template-param-warning";
 
 	const stop = (event) => event.stopPropagation();
-	for (const el of [container, gear, refresh, panel, template, ok, cancel]) {
+	for (const el of [container, gear, refresh, broadcast, panel, template, ok, cancel]) {
 		el.addEventListener("pointerdown", stop);
 		el.addEventListener("mousedown", stop);
 	}
@@ -1752,6 +2118,11 @@ function buildDom(node) {
 		event.preventDefault();
 		event.stopPropagation();
 		forceRefreshTemplate(node);
+	});
+	broadcast.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		setBroadcastEnabled(node, !broadcastEnabled(node));
 	});
 	cancel.addEventListener("click", (event) => {
 		event.preventDefault();
@@ -1790,12 +2161,14 @@ function buildDom(node) {
 	node.__gjjTemplateParamsRowsWrap = rows;
 	node.__gjjTemplateParamsWarning = warning;
 	node.__gjjTemplateParamsCount = count;
+	node.__gjjTemplateParamsBroadcastButton = broadcast;
 	const updateCount = () => {
 		const fields = parseTemplate(getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE));
 		count.textContent = `${fields.length} 个参数`;
 	};
 	node.__gjjTemplateParamsUpdateCount = updateCount;
 	updateCount();
+	updateBroadcastButton(node);
 	return container;
 }
 
@@ -1820,6 +2193,7 @@ function stabilize(node) {
 	ensureDom(node);
 	collapseNativeWidgets(node);
 	disableStandardStatus(node);
+	updateBroadcastButton(node);
 	if (!getWidgetValue(node, TEMPLATE_WIDGET, "")) {
 		setWidgetValue(node, TEMPLATE_WIDGET, node?.properties?.[SAVED_TEMPLATE] || DEFAULT_TEMPLATE);
 	}
@@ -1882,9 +2256,15 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
 			const result = originalOnConfigure?.apply(this, [serializedNode, ...args]);
 			const props = serializedNode?.properties || this.properties || {};
+			this.properties = this.properties || {};
 			if (props[SAVED_TEMPLATE]) setWidgetValue(this, TEMPLATE_WIDGET, props[SAVED_TEMPLATE]);
 			if (props[SAVED_VALUES]) setWidgetValue(this, VALUES_WIDGET, props[SAVED_VALUES]);
 			if (props[SAVED_SCHEMA]) setWidgetValue(this, SCHEMA_WIDGET, props[SAVED_SCHEMA]);
+			if (props[SAVED_TEXTAREA_HEIGHTS]) {
+				this.properties[SAVED_TEXTAREA_HEIGHTS] = sanitizeTextareaHeights(props[SAVED_TEXTAREA_HEIGHTS]);
+			}
+			this.properties[BROADCAST_PROPERTY] = Boolean(props[BROADCAST_PROPERTY]);
+			updateBroadcastButton(this);
 			if (Array.isArray(props[SAVED_SIZE])) {
 				this.__gjjTemplateParamsSavedSize = props[SAVED_SIZE].map(Number);
 				this.__gjjTemplateParamsPreferSavedSize = true;
@@ -1900,12 +2280,15 @@ app.registerExtension({
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode) {
 			syncValuesFromDom(this);
+			syncTextareaHeightsFromDom(this);
 			const result = originalOnSerialize?.apply(this, [serializedNode]);
 			if (serializedNode) {
 				serializedNode.properties = serializedNode.properties || {};
 				serializedNode.properties[SAVED_TEMPLATE] = getWidgetValue(this, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
 				serializedNode.properties[SAVED_VALUES] = getWidgetValue(this, VALUES_WIDGET, "{}");
 				serializedNode.properties[SAVED_SCHEMA] = getWidgetValue(this, SCHEMA_WIDGET, "[]");
+				serializedNode.properties[SAVED_TEXTAREA_HEIGHTS] = sanitizeTextareaHeights(this.properties?.[SAVED_TEXTAREA_HEIGHTS]);
+				serializedNode.properties[BROADCAST_PROPERTY] = broadcastEnabled(this);
 				const naturalHeight = getNaturalCompactHeight(this);
 				const currentHeight = Number(this.size?.[1] || 80);
 				const saveHeight = currentHeight > naturalHeight + MAX_EXTRA_IDLE_HEIGHT ? naturalHeight : currentHeight;

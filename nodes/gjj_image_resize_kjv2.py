@@ -26,6 +26,15 @@ except Exception:
 
 NODE_NAME = "GJJ_ImageResizeKJv2"
 
+
+class AnyType(str):
+    def __ne__(self, __value: object) -> bool:
+        return False
+
+
+any_type = AnyType("*")
+
+
 # 全局统计：ComfyUI 可能会把批量图片拆成多次单张调用。
 # 因此 total / elapsed 不能只用 resize() 内部局部变量，否则每张都会清零。
 _GJJ_RESIZE_RUN_STATS: Dict[str, Dict[str, Any]] = {}
@@ -366,6 +375,69 @@ def _load_config(config_json: Any) -> Dict[str, Any]:
     except Exception:
         pass
     return cfg
+
+
+_EXTERNAL_PARAM_TARGETS = (
+    {"cfg_key": "width", "mode": "宽高", "exclude_fit": "border", "kind": "int", "min": 1, "max": MAX_RESOLUTION},
+    {"cfg_key": "height", "mode": "宽高", "exclude_fit": "border", "kind": "int", "min": 1, "max": MAX_RESOLUTION},
+    {"cfg_key": "border_left", "mode": "宽高", "fit": "border", "kind": "int", "min": 0, "max": MAX_RESOLUTION},
+    {"cfg_key": "border_top", "mode": "宽高", "fit": "border", "kind": "int", "min": 0, "max": MAX_RESOLUTION},
+    {"cfg_key": "border_right", "mode": "宽高", "fit": "border", "kind": "int", "min": 0, "max": MAX_RESOLUTION},
+    {"cfg_key": "border_bottom", "mode": "宽高", "fit": "border", "kind": "int", "min": 0, "max": MAX_RESOLUTION},
+    {"cfg_key": "scale_percent", "mode": "等比", "kind": "float", "min": 0.001, "max": 10000.0},
+    {"cfg_key": "long_side_length", "mode": "长边", "kind": "int", "min": 1, "max": MAX_RESOLUTION},
+    {"cfg_key": "total_pixel_k", "mode": "像素", "kind": "int", "min": 1, "max": 1000000},
+    {"cfg_key": "aspect_ratio", "mode": "像素", "kind": "string"},
+)
+
+
+def _active_external_param_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    mode = _mode(cfg.get("mode"))
+    fit = _fit(cfg.get("fit_mode"))
+    if fit == "border":
+        mode = "宽高"
+    targets = []
+    for item in _EXTERNAL_PARAM_TARGETS:
+        if item.get("mode") != mode:
+            continue
+        if item.get("fit") and item.get("fit") != fit:
+            continue
+        if item.get("exclude_fit") and item.get("exclude_fit") == fit:
+            continue
+        targets.append(dict(item))
+    return targets
+
+
+def _apply_external_param(cfg: Dict[str, Any], target: Dict[str, Any], value: Any) -> None:
+    value = _unwrap_list_param(value)
+    if value is None:
+        return
+    if isinstance(value, str) and value.strip() == "":
+        return
+    key = str(target.get("cfg_key") or "")
+    if not key:
+        return
+    kind = str(target.get("kind") or "int")
+    if kind == "string":
+        cfg[key] = str(value).strip()
+        return
+    min_value = target.get("min")
+    max_value = target.get("max")
+    if kind == "float":
+        next_value = _to_float(value, cfg.get(key, 0.0))
+    else:
+        next_value = _to_int(value, cfg.get(key, 0))
+    if min_value is not None:
+        next_value = max(float(min_value) if kind == "float" else int(min_value), next_value)
+    if max_value is not None:
+        next_value = min(float(max_value) if kind == "float" else int(max_value), next_value)
+    cfg[key] = next_value
+
+
+def _apply_external_params(cfg: Dict[str, Any], external_param_1: Any = None, external_param_2: Any = None) -> None:
+    targets = _active_external_param_targets(cfg)
+    for value, target in zip((external_param_1, external_param_2), targets[:2]):
+        _apply_external_param(cfg, target, value)
 
 
 
@@ -816,6 +888,14 @@ class GJJ_ImageResizeKJv2:
                 }),
             },
             "optional": {
+                "external_param_1": (any_type, {
+                    "display_name": "🔌 外接参数1",
+                    "tooltip": "固定外接参数 1。按当前尺寸模式写入第一个可见参数：宽高=目标宽度，补边=左，等比=缩放百分比，长边=长边长度，像素=总像素/K。",
+                }),
+                "external_param_2": (any_type, {
+                    "display_name": "🔌 外接参数2",
+                    "tooltip": "固定外接参数 2。按当前尺寸模式写入第二个可见参数：宽高=目标高度，补边=上，像素=输出比例；只有一个参数的模式会忽略它。",
+                }),
                 "target_width": ("INT", {
                     "default": 1024,
                     "min": 1,
@@ -948,6 +1028,7 @@ GJJ · 🔍 多功能图片缩放
 - 图片：GJJ_BATCH_IMAGE,IMAGE。
 - 遮罩：MASK，可选。
   - 补边 / 留边填充且未接入遮罩时，会自动把补边填充区域输出为遮罩。
+- 外接参数1 / 外接参数2：固定顶部接口，会按当前尺寸模式覆盖面板里的前两个可见数值/选项参数。
 
 输出：
 - 图片：GJJ_BATCH_IMAGE,IMAGE，尽量保持输入批量容器结构。
@@ -964,13 +1045,15 @@ GJJ · 🔍 多功能图片缩放
 - 如果缺失依赖或输入异常，节点会在控制台打印错误原因，并尽量返回原图，避免中断整个流程。
 """
 
-    def resize(self, image, config_json, unique_id=None, target_width=None, target_height=None, border_left=None, border_top=None, border_right=None, border_bottom=None, scale_percent=None, long_side_length=None, total_pixel_k=None, aspect_ratio=None, mask=None):
+    def resize(self, image, config_json, unique_id=None, external_param_1=None, external_param_2=None, target_width=None, target_height=None, border_left=None, border_top=None, border_right=None, border_bottom=None, scale_percent=None, long_side_length=None, total_pixel_k=None, aspect_ratio=None, mask=None):
         start = time.time()
         try:
             config_json = _unwrap_list_param(config_json)
             unique_id = _unwrap_list_param(unique_id)
 
             cfg = _load_config(config_json)
+            external_param_1 = _unwrap_list_param(external_param_1)
+            external_param_2 = _unwrap_list_param(external_param_2)
             target_width = _unwrap_list_param(target_width)
             target_height = _unwrap_list_param(target_height)
             border_left = _unwrap_list_param(border_left)
@@ -1001,6 +1084,7 @@ GJJ · 🔍 多功能图片缩放
                 cfg["total_pixel_k"] = max(1, _to_int(total_pixel_k, cfg.get("total_pixel_k", 260)))
             if aspect_ratio is not None:
                 cfg["aspect_ratio"] = str(aspect_ratio)
+            _apply_external_params(cfg, external_param_1, external_param_2)
 
             # INPUT_IS_LIST=True 或某些批量节点会把端口值包一层 list。
             # 统计只看输入源；输出逻辑保持 v29，不额外复杂化。

@@ -309,12 +309,7 @@ const REROUTE_TYPES = new Set([
 const SET_NODE_TYPES = new Set(["GJJ_SetNode", "SetNode", "Set"]);
 const GET_NODE_TYPES = new Set(["GJJ_GetNode", "GetNode", "Get"]);
 const BROADCAST_PROPERTY = "gjj_variable_broadcast_enabled";
-const PRIORITY_ARRANGE_NODE_TYPES = [
-	"GJJ_TemplateParams",
-	"GJJ_ModelBundleLoader",
-	"GJJ_VideoKijaiModelLoader",
-	"GJJ_VideoUniversalModelLoader",
-];
+const PRIORITY_ARRANGE_NODE_TYPES = ["GJJ_MemoryManager","GJJ_TextInput","GJJ_TemplateParams","LoraChainConfig",	"GJJ_ModelBundleLoader","GJJ_VideoKijaiModelLoader","GJJ_VideoUniversalModelLoader",];
 const PRIORITY_ARRANGE_NODE_TYPE_SET = new Set(PRIORITY_ARRANGE_NODE_TYPES);
 const PRIORITY_ARRANGE_NODE_RANKS = new Map(PRIORITY_ARRANGE_NODE_TYPES.map((type, index) => [type, index]));
 const PRIORITY_ARRANGE_NODE_PATTERNS = [
@@ -1336,43 +1331,220 @@ function getWorkflowSortedNodesForGrid(nodes) {
 	return ordered;
 }
 
+function getGridCompactColumnGap(spacing = DEFAULT_SPACING) {
+	return Math.max(10, Math.round(getColumnGap(spacing) * 0.45));
+}
+
+function getGridCompactRowGap(spacing = DEFAULT_SPACING) {
+	return Math.max(8, Math.round(getRowGap(spacing) * 0.45));
+}
+
+function getGridNodeSearchText(node) {
+	return [
+		getNodeTypeName(node),
+		node?.type,
+		node?.comfyClass,
+		node?.title,
+		node?.name,
+		node?.properties?.["Node name for S&R"],
+		node?.properties?.aux_id,
+		node?.nodeData?.name,
+		node?.constructor?.nodeData?.name,
+		node?.constructor?.title,
+	].filter(Boolean).join(" ").toLowerCase();
+}
+
+function isGridTemplateParamsNode(node) {
+	const text = getGridNodeSearchText(node);
+	return /gjj_templateparams|templateparams|模板参数输入器|模板参数/.test(text);
+}
+
+function isGridModelNode(node) {
+	const text = getGridNodeSearchText(node);
+	return /model.?bundle|model.?loader|checkpoint|unet|clip|vae|lora.?loader|lora.?chain|lorachainconfig|controlnet|ipadapter|memory.?manager|模型包|模型加载|检查点|文本编码|lora串联|lora配置|显存|内存/.test(text);
+}
+
+function isGridInputOrModelNode(node, inDegree, outDegree) {
+	return isGridTemplateParamsNode(node) || isGridModelNode(node);
+}
+
+function isGridOutputNode(node, inDegree, outDegree) {
+	const incoming = inDegree.get(node) || 0;
+	const outgoing = outDegree.get(node) || 0;
+	const text = getGridNodeSearchText(node);
+	return (outgoing === 0 && incoming > 0)
+		|| /preview|save|output|viewer|display|compare|collage|any.?preview|预览|保存|输出|显示|查看|对比|拼图|结果/.test(text);
+}
+
+function isGridLocalInputNode(node, inDegree) {
+	return (inDegree.get(node) || 0) === 0 && !isGridTemplateParamsNode(node) && !isGridModelNode(node);
+}
+
+function compareByGridWorkflowOrder(orderIndex) {
+	return (a, b) => {
+		const ai = orderIndex.get(a) ?? 999999;
+		const bi = orderIndex.get(b) ?? 999999;
+		if (ai !== bi) return ai - bi;
+		return compareNodesForArrange(a, b);
+	};
+}
+
+function getClosestDownstreamOrder(node, forward, orderIndex, visited = new Set()) {
+	if (!node || visited.has(node)) return null;
+	visited.add(node);
+
+	let best = null;
+	for (const child of forward.get(node) || []) {
+		const childOrder = orderIndex.get(child);
+		if (Number.isFinite(childOrder)) {
+			best = best == null ? childOrder : Math.min(best, childOrder);
+		}
+		const nested = getClosestDownstreamOrder(child, forward, orderIndex, new Set(visited));
+		if (nested != null) {
+			best = best == null ? nested : Math.min(best, nested);
+		}
+	}
+	return best;
+}
+
+function getGridLocalityOrder(node, orderIndex, forward, inDegree) {
+	const own = orderIndex.get(node) ?? 999999;
+	if (isGridLocalInputNode(node, inDegree)) {
+		const downstream = getClosestDownstreamOrder(node, forward, orderIndex);
+		if (downstream != null) return downstream - 0.35;
+	}
+	return own;
+}
+
+function compareByGridLocalityOrder(orderIndex, forward, inDegree) {
+	return (a, b) => {
+		const ak = getGridLocalityOrder(a, orderIndex, forward, inDegree);
+		const bk = getGridLocalityOrder(b, orderIndex, forward, inDegree);
+		if (ak !== bk) return ak - bk;
+		return compareByGridWorkflowOrder(orderIndex)(a, b);
+	};
+}
+
+function compareGridTopLeftNodes(orderIndex) {
+	const byWorkflow = compareByGridWorkflowOrder(orderIndex);
+	return (a, b) => {
+		const aTemplate = isGridTemplateParamsNode(a);
+		const bTemplate = isGridTemplateParamsNode(b);
+		if (aTemplate !== bTemplate) return aTemplate ? -1 : 1;
+		return compareNodeArrangePriority(a, b) || byWorkflow(a, b);
+	};
+}
+
+function getCompactGridColumnCount(nodeCount) {
+	const count = Math.max(1, Number(nodeCount) || 1);
+	return Math.max(1, Math.ceil(Math.sqrt(count)));
+}
+
+function buildCompactGridCells(inputModelNodes, middleNodes, outputNodes, cols) {
+	const cells = [...inputModelNodes, ...middleNodes];
+	if (!outputNodes.length) return cells;
+
+	while (cells.length % cols !== 0) cells.push(null);
+
+	for (let start = 0; start < outputNodes.length; start += cols) {
+		const row = outputNodes.slice(start, start + cols);
+		const leadingBlanks = Math.max(0, cols - row.length);
+		for (let i = 0; i < leadingBlanks; i++) cells.push(null);
+		cells.push(...row);
+	}
+
+	return cells;
+}
+
+function arrangeVariableGridCells(cells, cols, x, y, columnGap, rowGap) {
+	const colCount = Math.max(1, Math.round(cols));
+	const rowCount = Math.max(1, Math.ceil(cells.length / colCount));
+	const colWidths = Array(colCount).fill(0);
+	const rowHeights = Array(rowCount).fill(0);
+
+	for (let i = 0; i < cells.length; i++) {
+		const node = cells[i];
+		if (!node) continue;
+		const col = i % colCount;
+		const row = Math.floor(i / colCount);
+		colWidths[col] = Math.max(colWidths[col], Math.round(getNodeWidth(node)));
+		rowHeights[row] = Math.max(rowHeights[row], Math.round(getNodeHeight(node)));
+	}
+
+	const xByCol = [];
+	const yByRow = [];
+	let currentX = Math.round(x);
+	let currentY = Math.round(y);
+	for (let col = 0; col < colCount; col++) {
+		xByCol[col] = currentX;
+		currentX += colWidths[col] + columnGap;
+	}
+	for (let row = 0; row < rowCount; row++) {
+		yByRow[row] = currentY;
+		currentY += rowHeights[row] + rowGap;
+	}
+
+	for (let i = 0; i < cells.length; i++) {
+		const node = cells[i];
+		if (!node) continue;
+		const col = i % colCount;
+		const row = Math.floor(i / colCount);
+		setNodePosition(node, xByCol[col], yByRow[row]);
+	}
+}
+
 function arrangeGrid(nodes, spacing = DEFAULT_SPACING) {
 	if (nodes.length === 0) return;
 
 	const { connectedNodes, isolatedNodes } = splitNodesByIsolation(nodes);
-	const sorted = getWorkflowSortedNodesForGrid(connectedNodes);
-	if (sorted.length === 0) {
+	const workflowOrder = getWorkflowSortedNodesForGrid(connectedNodes);
+	if (workflowOrder.length === 0) {
 		placeStandaloneIsolatedNodes(isolatedNodes, [], "row", spacing);
 		return;
 	}
 
-	const colGap = getColumnGap(spacing);
-	const rowGap = getRowGap(spacing);
+	const {
+		normalNodes,
+		rerouteNodes,
+		inDegree,
+		outDegree,
+	} = buildConnectionGraph(connectedNodes);
+	const connectedSet = new Set(connectedNodes);
+	const orderIndex = new Map(workflowOrder.map((node, index) => [node, index]));
+	const byWorkflow = compareByGridWorkflowOrder(orderIndex);
+	const byLocality = compareByGridLocalityOrder(orderIndex, forward, inDegree);
+	const inputModelNodes = [];
+	const middleNodes = [];
+	const outputNodes = [];
 
-	// 网格仍然保持方正，但排序改为工作流方向：上游在前，下游在后。
-	const cols = Math.max(1, Math.ceil(Math.sqrt(sorted.length)));
-	const maxWidth = Math.max(...sorted.map(getNodeWidth));
-	const maxHeight = Math.max(...sorted.map(getNodeHeight));
-	const colStep = Math.round(maxWidth + colGap);
-	const rowStep = Math.round(maxHeight + rowGap);
-
-	let col = 0;
-	let row = 0;
-
-	for (const node of sorted) {
-		setNodePosition(node, col * colStep, row * rowStep);
-
-		col++;
-		if (col >= cols) {
-			col = 0;
-			row++;
+	for (const node of normalNodes.filter((item) => connectedSet.has(item))) {
+		if (isGridInputOrModelNode(node, inDegree, outDegree)) {
+			inputModelNodes.push(node);
+		} else if (isGridOutputNode(node, inDegree, outDegree)) {
+			outputNodes.push(node);
+		} else {
+			middleNodes.push(node);
 		}
 	}
 
-	if (colGap >= 0 && rowGap >= 0) {
-		resolveNodeOverlaps(sorted, Math.max(colGap, rowGap));
+	inputModelNodes.sort(compareGridTopLeftNodes(orderIndex));
+	middleNodes.sort(byLocality);
+	outputNodes.sort(byWorkflow);
+	const arrangedReroutes = rerouteNodes.filter((node) => connectedSet.has(node)).sort(byLocality);
+
+	for (const node of middleNodes) {
+		if (!isGridLocalInputNode(node, inDegree)) collapseNode(node);
 	}
-	placeStandaloneIsolatedNodes(isolatedNodes, sorted, "row", spacing);
+
+	const arrangedNodes = [...inputModelNodes, ...middleNodes, ...arrangedReroutes, ...outputNodes];
+	const cols = getCompactGridColumnCount(arrangedNodes.length);
+	const colGap = getGridCompactColumnGap(spacing);
+	const rowGap = getGridCompactRowGap(spacing);
+	const cells = buildCompactGridCells(inputModelNodes, [...middleNodes, ...arrangedReroutes], outputNodes, cols);
+
+	arrangeVariableGridCells(cells, cols, 0, 0, colGap, rowGap);
+	resolveNodeOverlaps(arrangedNodes, Math.max(colGap, rowGap));
+	placeStandaloneIsolatedNodes(isolatedNodes, arrangedNodes, "row", spacing);
 }
 
 function traceRealSource(nodeId, validSet, visited = new Set()) {
@@ -4481,10 +4653,51 @@ function registerKeyboardShortcuts() {
 		"网格排列",
 	];
 
+	const activeShortcutKeys = new Set();
+
+	const shortcutSignature = (event, key) => [
+		event.ctrlKey ? "ctrl" : "",
+		event.altKey ? "alt" : "",
+		event.shiftKey ? "shift" : "",
+		key,
+	].filter(Boolean).join("+");
+
+	const isEditableShortcutTarget = (target) => {
+		const element = target instanceof Element ? target : null;
+		if (!element) return false;
+		return Boolean(element.closest("input, textarea, select, [contenteditable='true'], [contenteditable=''], [contenteditable='plaintext-only']"));
+	};
+
+	const beginSingleFireShortcut = (event, key) => {
+		if (event.repeat || isEditableShortcutTarget(event.target)) return false;
+		const signature = shortcutSignature(event, key);
+		if (activeShortcutKeys.has(signature)) return false;
+		activeShortcutKeys.add(signature);
+		return true;
+	};
+
+	const releaseShortcutKey = (key) => {
+		for (const signature of [...activeShortcutKeys]) {
+			if (signature.endsWith(`+${key}`) || signature === key) {
+				activeShortcutKeys.delete(signature);
+			}
+		}
+	};
+
+	document.addEventListener("keyup", (event) => {
+		releaseShortcutKey(String(event.key || "").toLowerCase());
+	}, true);
+
+	window.addEventListener("blur", () => activeShortcutKeys.clear());
+	document.addEventListener("visibilitychange", () => {
+		if (document.hidden) activeShortcutKeys.clear();
+	});
+
 	document.addEventListener("keydown", (event) => {
 		const key = String(event.key || "").toLowerCase();
 
 		if (event.altKey && !event.ctrlKey && !event.shiftKey && ["arrowleft", "arrowright", "arrowup", "arrowdown"].includes(key)) {
+			if (isEditableShortcutTarget(event.target)) return;
 			event.preventDefault();
 			event.stopPropagation();
 
@@ -4498,12 +4711,14 @@ function registerKeyboardShortcuts() {
 		}
 
 		if (event.ctrlKey && event.altKey && key === "a") {
+			if (!beginSingleFireShortcut(event, key)) return;
 			event.preventDefault();
 			toggleAllNodesCollapsed(shouldUseSelectedOnly());
 			return;
 		}
 
 		if (event.ctrlKey && event.shiftKey && !event.altKey && key === "a") {
+			if (!beginSingleFireShortcut(event, key)) return;
 			event.preventDefault();
 			event.stopPropagation();
 
@@ -4519,24 +4734,28 @@ function registerKeyboardShortcuts() {
 		}
 
 		if (event.ctrlKey && event.shiftKey && key === "t") {
+			if (!beginSingleFireShortcut(event, key)) return;
 			event.preventDefault();
 			arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_MAIN_PATH, shouldUseSelectedOnly(), DEFAULT_SPACING);
 			return;
 		}
 
 		if (event.ctrlKey && event.shiftKey && key === "h") {
+			if (!beginSingleFireShortcut(event, key)) return;
 			event.preventDefault();
 			arrangeNodes("horizontal", DEFAULT_SPACING, 10, 0.5, true, true, shouldUseSelectedOnly());
 			return;
 		}
 
 		if (event.ctrlKey && event.shiftKey && key === "v") {
+			if (!beginSingleFireShortcut(event, key)) return;
 			event.preventDefault();
 			arrangeNodes("vertical", DEFAULT_SPACING, 10, 0.5, true, true, shouldUseSelectedOnly());
 			return;
 		}
 
 		if (event.ctrlKey && event.shiftKey && key === "g") {
+			if (!beginSingleFireShortcut(event, key)) return;
 			event.preventDefault();
 			arrangeNodes("grid", DEFAULT_SPACING, 10, 0.5, true, true, shouldUseSelectedOnly());
 		}

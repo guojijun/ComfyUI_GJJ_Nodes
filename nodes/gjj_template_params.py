@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 import folder_paths
 import numpy as np
 import torch
-from PIL import Image, ImageFile, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageFile, ImageOps, ImageSequence, UnidentifiedImageError
 
 # =========================
 # GJJ MEDIA V2 PATCH
@@ -224,27 +224,52 @@ def _register_template_params_routes() -> None:
 _register_template_params_routes()
 
 
+def _image_to_rgb_array(image: Image.Image, target_size: tuple[int, int] | None = None) -> np.ndarray:
+    """把单帧 PIL 图像转成 RGB float array；多帧 WebP/GIF 也走同一套。"""
+    frame = ImageOps.exif_transpose(image)
+    if frame.mode in {"RGBA", "LA"} or ("transparency" in getattr(frame, "info", {})):
+        frame = frame.convert("RGBA")
+        background = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+        background.alpha_composite(frame)
+        frame = background.convert("RGB")
+    else:
+        frame = frame.convert("RGB")
+    if target_size and frame.size != target_size:
+        frame = frame.resize(target_size, Image.Resampling.LANCZOS)
+    return np.asarray(frame).astype(np.float32) / 255.0
+
+
+def _load_image_arrays_from_path(file_path: str) -> list[np.ndarray]:
+    with Image.open(file_path) as img:
+        frame_count = max(1, int(getattr(img, "n_frames", 1) or 1))
+        if frame_count <= 1:
+            img.load()
+            return [_image_to_rgb_array(img)]
+
+        arrays: list[np.ndarray] = []
+        target_size: tuple[int, int] | None = None
+        for frame in ImageSequence.Iterator(img):
+            frame_copy = frame.copy()
+            frame_copy.load()
+            if target_size is None:
+                target_size = frame_copy.size
+            arrays.append(_image_to_rgb_array(frame_copy, target_size))
+        return arrays or [_image_to_rgb_array(img)]
+
+
 def _load_image_from_path(file_path: str) -> torch.Tensor:
-    """从文件路径加载图片为 ComfyUI 标准 IMAGE tensor: [B, H, W, 3] RGB float32。"""
+    """从文件路径加载图片为 ComfyUI 标准 IMAGE tensor: [B, H, W, 3] RGB float32；WebP/GIF 多帧会作为 batch 输出。"""
     try:
         try:
-            with Image.open(file_path) as img:
-                img.load()
-                img = ImageOps.exif_transpose(img)
-                img = img.convert("RGB")
-                array = np.asarray(img).astype(np.float32) / 255.0
+            arrays = _load_image_arrays_from_path(file_path)
         except UnidentifiedImageError:
             old_load_truncated = ImageFile.LOAD_TRUNCATED_IMAGES
             ImageFile.LOAD_TRUNCATED_IMAGES = True
             try:
-                with Image.open(file_path) as img:
-                    img.load()
-                    img = ImageOps.exif_transpose(img)
-                    img = img.convert("RGB")
-                    array = np.asarray(img).astype(np.float32) / 255.0
+                arrays = _load_image_arrays_from_path(file_path)
             finally:
                 ImageFile.LOAD_TRUNCATED_IMAGES = old_load_truncated
-        return torch.from_numpy(array)[None, ...]
+        return torch.from_numpy(np.stack(arrays, axis=0)).contiguous()
     except Exception as e:
         raise ValueError(f"加载图片失败：{file_path}，错误：{e}") from e
 
@@ -554,33 +579,172 @@ def _safe_json_loads(value: Any, fallback: Any) -> Any:
 
 def _strip_quotes(text: str) -> str:
     raw = text.strip()
+    if len(raw) >= 6 and raw[:3] == raw[-3:] and raw[:3] in {'"""', "'''"}:
+        inner = raw[3:-3]
+        if inner.startswith("\n"):
+            inner = inner[1:]
+        if inner.endswith("\n"):
+            inner = inner[:-1]
+        return inner
     if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
         return raw[1:-1]
     return raw
+
+
+def _is_string_literal_text(text: Any) -> bool:
+    raw = _normalize_text(text).strip()
+    return (
+        len(raw) >= 6 and raw[:3] == raw[-3:] and raw[:3] in {'"""', "'''"}
+    ) or (
+        len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}
+    )
+
+
+def _scan_triple_quote_state(text: str, quote: str | None = None) -> str | None:
+    escaped = False
+    index = 0
+    raw = str(text or "")
+    while index < len(raw):
+        ch = raw[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if ch == "\\":
+            escaped = True
+            index += 1
+            continue
+        if quote:
+            if raw.startswith(quote, index):
+                quote = None
+                index += 3
+                continue
+            index += 1
+            continue
+        if raw.startswith('"""', index) or raw.startswith("'''", index):
+            quote = raw[index : index + 3]
+            index += 3
+            continue
+        index += 1
+    return quote
+
+
+def _is_empty_assignment_line(line: str) -> bool:
+    return re.match(r"^([^:=：=]+?)\s*[:：=]\s*$", str(line or "").strip()) is not None
+
+
+def _line_starts_triple_quote(line: str) -> bool:
+    return str(line or "").lstrip().startswith(('"""', "'''"))
+
+
+def _template_logical_lines(template_text: Any) -> list[str]:
+    text = _normalize_text(template_text).replace("\r\n", "\n").replace("\r", "\n")
+    result: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    pending_empty_value = False
+    lines = text.split("\n")
+    index = 0
+
+    def flush_current() -> None:
+        nonlocal current, pending_empty_value
+        logical = "\n".join(current).strip()
+        if logical:
+            result.append(logical)
+        current = []
+        pending_empty_value = False
+
+    while index < len(lines):
+        line = lines[index]
+        raw = line.strip()
+
+        if quote is not None:
+            current.append(line)
+            quote = _scan_triple_quote_state(line, quote)
+            if quote is None:
+                flush_current()
+            index += 1
+            continue
+
+        if pending_empty_value:
+            if not raw:
+                current.append(line)
+                index += 1
+                continue
+            if raw.startswith(("#", "//", ";")) or raw in {"...", "....", "……", "…"}:
+                index += 1
+                continue
+            if _line_starts_triple_quote(line):
+                current.append(line)
+                quote = _scan_triple_quote_state(line, quote)
+                if quote is None:
+                    flush_current()
+                index += 1
+                continue
+            flush_current()
+            continue
+
+        if not current and (not raw or raw.startswith(("#", "//", ";")) or raw in {"...", "....", "……", "…"}):
+            index += 1
+            continue
+
+        current.append(line)
+        quote = _scan_triple_quote_state(line, quote)
+        if quote is not None:
+            index += 1
+            continue
+        if _is_empty_assignment_line(line):
+            pending_empty_value = True
+            index += 1
+            continue
+        flush_current()
+        index += 1
+
+    if current:
+        flush_current()
+    return result
 
 
 def _split_value_and_tooltip(text: str) -> tuple[str, str]:
     r"""Split `值 # 提示` into (值, 提示). Supports escaping literal # with \#."""
     raw = str(text or "")
     escaped = False
+    triple_quote: str | None = None
     quote: str | None = None
-    for index, ch in enumerate(raw):
+    index = 0
+    while index < len(raw):
+        ch = raw[index]
         if escaped:
             escaped = False
+            index += 1
             continue
         if ch == "\\":
             escaped = True
+            index += 1
+            continue
+        if triple_quote:
+            if raw.startswith(triple_quote, index):
+                triple_quote = None
+                index += 3
+                continue
+            index += 1
+            continue
+        if quote is None and (raw.startswith('"""', index) or raw.startswith("'''", index)):
+            triple_quote = raw[index : index + 3]
+            index += 3
             continue
         if ch in {'"', "'"}:
             if quote == ch:
                 quote = None
             elif quote is None:
                 quote = ch
+            index += 1
             continue
         if ch == "#" and quote is None:
             value = raw[:index].replace("\\#", "#").strip()
             tooltip = raw[index + 1 :].strip()
             return value, tooltip
+        index += 1
     return raw.replace("\\#", "#").strip(), ""
 
 
@@ -767,6 +931,9 @@ def parse_value(value: Any) -> Any:
         if kind == "json":
             return json.loads(inner)
 
+    if _is_string_literal_text(raw):
+        return _strip_quotes(raw)
+
     lowered = raw.lower()
     if lowered in {"true", "yes", "on", "是", "真"}:
         return True
@@ -851,41 +1018,84 @@ def _infer_type_from_raw(raw_text: str, parsed_value: Any) -> str:
     return _infer_type(parsed_value)
 
 
+def _normalize_socket_type(value: Any) -> str:
+    text = _normalize_text(value).strip()
+    if not text:
+        return ""
+    text = text.replace("，", ",")
+    text = re.sub(r"\s+", "", text)
+    if text.lower() in {"any", "*"}:
+        return "*"
+    return text.upper()
+
+
+def _split_label_and_type(raw_label: Any) -> tuple[str, str]:
+    label = _normalize_text(raw_label).strip()
+    match = re.search(r"\s*(?:\[\s*([^\]]+?)\s*\]|【\s*([^】]+?)\s*】)\s*$", label)
+    if not match:
+        return label, ""
+    socket_type = _normalize_socket_type(match.group(1) or match.group(2) or "")
+    return label[: match.start()].strip(), socket_type
+
+
+def _sanitize_template_key(value: Any) -> str:
+    key = re.sub(r"[^0-9A-Za-z_\u4e00-\u9fff-]+", "_", _normalize_text(value).strip())
+    return key.strip("_")
+
+
+def _split_label_and_broadcast_keys(raw_label: Any, index: int) -> tuple[str, str, list[str]]:
+    label = _normalize_text(raw_label).strip() or f"参数 {index + 1}"
+    match = re.fullmatch(r"(?s)(.+?)[（(]\s*([^（）()]+?)\s*[）)]", label)
+    if not match:
+        return label, label, []
+    label = match.group(1).strip() or label
+    # 只取括号里的第一个严格变量名；不把 | / , / or 当别名展开，避免大工作流误匹配。
+    first_key = re.split(r"\s*(?:\||,|，|；|;|\bor\b|或)\s*", match.group(2), maxsplit=1, flags=re.I)[0]
+    broadcast_key = _sanitize_template_key(first_key) or f"param_{index + 1}"
+    return label, broadcast_key, [broadcast_key]
+
+
+def _make_unique_template_key(source: Any, index: int, seen: dict[str, int]) -> str:
+    key = re.sub(r"\s+", "_", _normalize_text(source).strip())
+    key = _sanitize_template_key(key) or f"param_{index + 1}"
+    count = seen.get(key, 0)
+    seen[key] = count + 1
+    if count:
+        key = f"{key}_{count + 1}"
+    return key
+
+
 def parse_template(template_text: Any) -> list[dict[str, Any]]:
-    text = _normalize_text(template_text).replace("\r\n", "\n")
     fields: list[dict[str, Any]] = []
     seen: dict[str, int] = {}
-    for line in text.split("\n"):
-        raw = line.strip()
-        if not raw:
-            continue
-        if raw.startswith(("#", "//", ";")):
-            continue
-        if raw in {"...", "....", "……", "…"}:
-            continue
-        match = re.match(r"^([^:=：=]+?)\s*[:：=]\s*(.*)$", raw)
+    for raw in _template_logical_lines(template_text):
+        match = re.match(r"(?s)^([^:=：=]+?)\s*[:：=]\s*(.*)$", raw)
         if not match:
             continue
-        label = match.group(1).strip()
+        typed_label, socket_type = _split_label_and_type(match.group(1).strip())
+        label, key_source, broadcast_keys = _split_label_and_broadcast_keys(typed_label, len(fields))
         right = match.group(2).strip()
         if not label:
             continue
         default_text, tooltip = _split_value_and_tooltip(right)
-        key = re.sub(r"\s+", "_", label)
-        key = re.sub(r"[^0-9A-Za-z_\u4e00-\u9fff-]", "_", key).strip("_") or f"param_{len(fields)+1}"
-        count = seen.get(key, 0)
-        seen[key] = count + 1
-        if count:
-            key = f"{key}_{count + 1}"
+        key = _make_unique_template_key(key_source, len(fields), seen)
         bool_default, bool_labels = _parse_bool_spec(default_text)
         enum_options = [] if bool_labels else _parse_enum_options(default_text, tooltip)
         value = bool_default if bool_labels else (_option_value(enum_options[0]) if enum_options else parse_value(default_text))
+        default_value = (
+            ("true" if bool_default else "false")
+            if bool_labels
+            else (_option_value(enum_options[0]) if enum_options else (value if isinstance(value, str) and _is_string_literal_text(default_text) else default_text))
+        )
         field = {
             "key": key,
             "label": label,
-            "default": ("true" if bool_default else "false") if bool_labels else (_option_value(enum_options[0]) if enum_options else default_text),
+            "broadcast_key": broadcast_keys[0] if broadcast_keys else "",
+            "broadcast_keys": broadcast_keys,
+            "default": default_value,
             "value": value,
-            "type": "BOOLEAN" if bool_labels else ("ENUM" if enum_options else _infer_type(value)),
+            "socket_type": socket_type,
+            "type": "BOOLEAN" if bool_labels else ("ENUM" if enum_options else (socket_type or _infer_type(value))),
             "options": enum_options,
             "tooltip": tooltip,
         }
@@ -905,7 +1115,7 @@ def values_from_json(values_json: Any) -> dict[str, Any]:
 class GJJ_TemplateParams:
     CATEGORY = "GJJ/逻辑控制"
     FUNCTION = "output_params"
-    DESCRIPTION = "通过模板文本自动生成参数输入框和输出口。支持格式：帧率：24.0 # 浮点\n是否启用：[enable,disable] # 枚举\n媒体文件会自动加载为 IMAGE/AUDIO/VIDEO 对象。"
+    DESCRIPTION = "通过模板文本自动生成参数输入框和输出口。支持格式：帧率 (frame_rate) [INT,FLOAT]：24.0 # 浮点\n提示词：'''多段文本''' # 字符串\n是否启用：[enable,disable] # 枚举\n媒体文件会自动加载为 IMAGE/AUDIO/VIDEO 对象。⚡ 广播默认关闭，开启后只广播写了 (变量名) 的字段。"
     SEARCH_ALIASES = [
         "template params",
         "params",
@@ -920,7 +1130,7 @@ class GJJ_TemplateParams:
 
     @classmethod
     def INPUT_TYPES(cls):
-        default_template = "帧率：24.0 # 浮点\n时长：5 # 整数\nLora加速：true{开启加速|关闭加速} # 布尔按钮\n是否启用：[启用=enable, 禁用=disable] # 枚举按钮"
+        default_template = "帧率 (frame_rate) [INT,FLOAT]：24.0 # 每秒帧数\n时长 (duration) [INT,FLOAT]：5 # 秒数或帧数\nLora加速：true{开启加速|关闭加速} # 布尔按钮\n是否启用：[启用=enable, 禁用=disable] # 枚举按钮"
         return {
             "required": {
                 "template_text": (
@@ -930,7 +1140,7 @@ class GJJ_TemplateParams:
                         "multiline": True,
                         "display": "hidden",
                         "display_name": "隐藏模板",
-                        "tooltip": "由前端 ⚙️ 设置按钮维护。每行一个参数，支持格式：名称：默认值 # 说明",
+                        "tooltip": "由前端 ⚙️ 设置按钮维护。每行一个参数，支持格式：显示名 (严格变量名) [类型1,类型2]：默认值 # 说明；提示词可用 ''' 或 \"\"\" 包裹多段文本。",
                     },
                 ),
                 "values_json": (

@@ -1446,6 +1446,8 @@ def _apply_real_gjj_ltx_first_last_frame(
 			guide_config_json=config,
 			image_names_json="",
 		)
+		if isinstance(result, dict) and "result" in result:
+			result = result.get("result")
 		if not isinstance(result, (tuple, list)):
 			result = (result,)
 		out_positive = positive

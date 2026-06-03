@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 import torch
 from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 
 try:
     from .gjj_video_combine_runtime import DEFAULT_FRAME_RATE, DEFAULT_FORMAT, combine_video
@@ -25,10 +26,19 @@ try:
 except Exception:
     folder_paths = None
 
+try:
+    from comfy.cli_args import args
+except Exception:
+    class _ComfyArgsFallback:
+        disable_metadata = False
+
+    args = _ComfyArgsFallback()
+
 
 NODE_NAME = "GJJ_SaveAnyObject"
 INPUT_PREFIX = "any_"
-DEFAULT_FILENAME_PREFIX = "GJJ/任意对象"
+DEFAULT_FILENAME_PREFIX = "GJJ/工作流"
+LEGACY_FILENAME_PREFIX = "GJJ/任意对象"
 
 
 class AnyType(str):
@@ -137,9 +147,67 @@ def _normalize_default_prefix(value: str) -> str:
     return _sanitize_part(value).replace("\\", "/").strip("/")
 
 
-def _should_use_source_prefix(filename_prefix: str) -> bool:
+def _should_use_workflow_prefix(filename_prefix: str) -> bool:
     normalized = _normalize_default_prefix(filename_prefix or "")
-    return normalized in {"", _normalize_default_prefix(DEFAULT_FILENAME_PREFIX), "任意对象"}
+    return normalized in {
+        "",
+        _normalize_default_prefix(DEFAULT_FILENAME_PREFIX),
+        _normalize_default_prefix(LEGACY_FILENAME_PREFIX),
+        "工作流",
+        "任意对象",
+    }
+
+
+def _clean_workflow_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = text.replace("\\", "/").rsplit("/", 1)[-1]
+    text = re.sub(r"\.(json|workflow)$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^ComfyUI\s*[-|–—]\s*", "", text, flags=re.IGNORECASE)
+    clean = _sanitize_part(text)
+    return "" if clean.lower() in {"comfyui", "untitled", "未命名"} else clean
+
+
+def _workflow_name_from_value(value: Any, depth: int = 0) -> str:
+    if depth > 4 or value is None:
+        return ""
+    if isinstance(value, str):
+        return _clean_workflow_name(value)
+    if not isinstance(value, dict):
+        return ""
+
+    name_keys = (
+        "workflow_name",
+        "workflowName",
+        "name",
+        "title",
+        "filename",
+        "file",
+        "path",
+        "workflow_path",
+        "workflowPath",
+    )
+    for key in name_keys:
+        if key not in value:
+            continue
+        name = _workflow_name_from_value(value.get(key), depth + 1)
+        if name:
+            return name
+
+    nested_keys = ("workflow", "extra", "metadata", "config", "app", "info")
+    for key in nested_keys:
+        nested = value.get(key)
+        if isinstance(nested, dict):
+            name = _workflow_name_from_value(nested, depth + 1)
+            if name:
+                return name
+    return ""
+
+
+def _workflow_prefix(extra_pnginfo: Any) -> str:
+    name = _workflow_name_from_value(extra_pnginfo)
+    return f"GJJ/{name}" if name else DEFAULT_FILENAME_PREFIX
 
 
 def _source_prefix(source_name: str) -> str:
@@ -228,6 +296,21 @@ def _write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
 
 
+def _png_metadata(prompt: Any = None, extra_pnginfo: Any = None) -> PngInfo | None:
+    if getattr(args, "disable_metadata", False):
+        return None
+    metadata = PngInfo()
+    has_metadata = False
+    if prompt is not None:
+        metadata.add_text("prompt", json.dumps(prompt, ensure_ascii=False, default=_json_default))
+        has_metadata = True
+    if isinstance(extra_pnginfo, dict):
+        for key, value in extra_pnginfo.items():
+            metadata.add_text(str(key), json.dumps(value, ensure_ascii=False, default=_json_default))
+            has_metadata = True
+    return metadata if has_metadata else None
+
+
 def _tensor_to_uint8_image(tensor: torch.Tensor) -> np.ndarray:
     value = tensor.detach().cpu().float()
     if value.ndim == 2:
@@ -265,17 +348,32 @@ def _split_image_tensor(value: torch.Tensor) -> list[torch.Tensor]:
     return [tensor]
 
 
-def _save_image_tensor(value: torch.Tensor, directory: Path, base_name: str, input_index: int) -> list[str]:
+def _save_image_tensor(
+    value: torch.Tensor,
+    directory: Path,
+    base_name: str,
+    input_index: int,
+    prompt: Any = None,
+    extra_pnginfo: Any = None,
+) -> list[str]:
     paths: list[str] = []
     frames = _split_image_tensor(value)
+    metadata = _png_metadata(prompt, extra_pnginfo)
     for frame_index, frame in enumerate(frames, start=1):
         path = _indexed_path(directory, base_name, input_index, ".png", frame_index if len(frames) > 1 else None)
-        Image.fromarray(_tensor_to_uint8_image(frame)).save(path)
+        Image.fromarray(_tensor_to_uint8_image(frame)).save(path, pnginfo=metadata)
         paths.append(str(path))
     return paths
 
 
-def _save_mask_tensor(value: torch.Tensor, directory: Path, base_name: str, input_index: int) -> list[str]:
+def _save_mask_tensor(
+    value: torch.Tensor,
+    directory: Path,
+    base_name: str,
+    input_index: int,
+    prompt: Any = None,
+    extra_pnginfo: Any = None,
+) -> list[str]:
     tensor = value.detach().cpu().float()
     if tensor.ndim == 2:
         frames = [tensor]
@@ -284,9 +382,10 @@ def _save_mask_tensor(value: torch.Tensor, directory: Path, base_name: str, inpu
     else:
         return _save_tensor(value, directory, base_name, input_index)
     paths: list[str] = []
+    metadata = _png_metadata(prompt, extra_pnginfo)
     for frame_index, frame in enumerate(frames, start=1):
         path = _indexed_path(directory, base_name, input_index, ".png", frame_index if len(frames) > 1 else None)
-        Image.fromarray(np.clip(frame.numpy() * 255.0, 0, 255).astype(np.uint8), mode="L").save(path)
+        Image.fromarray(np.clip(frame.numpy() * 255.0, 0, 255).astype(np.uint8), mode="L").save(path, pnginfo=metadata)
         paths.append(str(path))
     return paths
 
@@ -352,7 +451,15 @@ def _is_video_object(value: Any) -> bool:
     return isinstance(getattr(components, "images", None), torch.Tensor)
 
 
-def _save_video_object(value: Any, directory: Path, base_name: str, input_index: int) -> list[str]:
+def _save_video_object(
+    value: Any,
+    directory: Path,
+    base_name: str,
+    input_index: int,
+    prompt: Any = None,
+    extra_pnginfo: Any = None,
+    unique_id: Any = None,
+) -> list[str]:
     if combine_video is None:
         raise RuntimeError("当前环境无法导入 GJJ 视频合成运行时，不能直接保存 VIDEO。")
     prefix = _relative_output_prefix(directory, base_name, input_index)
@@ -370,9 +477,9 @@ def _save_video_object(value: Any, directory: Path, base_name: str, input_index:
             audio=None,
             vae=None,
             format_overrides_json="",
-            prompt=None,
-            extra_pnginfo=None,
-            unique_id=None,
+            prompt=prompt,
+            extra_pnginfo=extra_pnginfo,
+            unique_id=unique_id,
         )
     except Exception as exc:
         raise RuntimeError(f"直接保存 VIDEO 失败：{exc}") from exc
@@ -390,7 +497,15 @@ def _save_video_object(value: Any, directory: Path, base_name: str, input_index:
     return cleaned
 
 
-def _save_video_components(value: Any, directory: Path, base_name: str, input_index: int) -> list[str]:
+def _save_video_components(
+    value: Any,
+    directory: Path,
+    base_name: str,
+    input_index: int,
+    prompt: Any = None,
+    extra_pnginfo: Any = None,
+    unique_id: Any = None,
+) -> list[str]:
     if not hasattr(value, "get_components"):
         return []
     components = value.get_components()
@@ -399,9 +514,26 @@ def _save_video_components(value: Any, directory: Path, base_name: str, input_in
     audio = getattr(components, "audio", None)
     frame_rate = getattr(components, "frame_rate", None)
     if isinstance(images, torch.Tensor):
-        paths.extend(_save_image_tensor(images, directory, f"{base_name}_{input_index:02d}_video_frames", input_index))
+        paths.extend(
+            _save_image_tensor(
+                images,
+                directory,
+                f"{base_name}_{input_index:02d}_video_frames",
+                input_index,
+                prompt,
+                extra_pnginfo,
+            )
+        )
     if audio is not None:
-        audio_paths = _save_any_value(audio, directory, f"{base_name}_{input_index:02d}_video_audio", input_index)
+        audio_paths = _save_any_value(
+            audio,
+            directory,
+            f"{base_name}_{input_index:02d}_video_audio",
+            input_index,
+            prompt,
+            extra_pnginfo,
+            unique_id,
+        )
         paths.extend(audio_paths)
     info_path = _indexed_path(directory, base_name, input_index, ".video.json")
     _write_json(
@@ -417,12 +549,20 @@ def _save_video_components(value: Any, directory: Path, base_name: str, input_in
     return paths
 
 
-def _save_any_value(value: Any, directory: Path, base_name: str, input_index: int) -> list[str]:
+def _save_any_value(
+    value: Any,
+    directory: Path,
+    base_name: str,
+    input_index: int,
+    prompt: Any = None,
+    extra_pnginfo: Any = None,
+    unique_id: Any = None,
+) -> list[str]:
     if _is_none(value):
         return []
     if _is_video_object(value):
-        return _save_video_object(value, directory, base_name, input_index)
-    video_paths = _save_video_components(value, directory, base_name, input_index)
+        return _save_video_object(value, directory, base_name, input_index, prompt, extra_pnginfo, unique_id)
+    video_paths = _save_video_components(value, directory, base_name, input_index, prompt, extra_pnginfo, unique_id)
     if video_paths:
         return video_paths
     if isinstance(value, str):
@@ -440,9 +580,9 @@ def _save_any_value(value: Any, directory: Path, base_name: str, input_index: in
     if isinstance(value, dict) and isinstance(value.get("waveform"), torch.Tensor):
         return _save_audio(value, directory, base_name, input_index)
     if _is_image_tensor(value):
-        return _save_image_tensor(value, directory, base_name, input_index)
+        return _save_image_tensor(value, directory, base_name, input_index, prompt, extra_pnginfo)
     if _is_mask_tensor(value):
-        return _save_mask_tensor(value, directory, base_name, input_index)
+        return _save_mask_tensor(value, directory, base_name, input_index, prompt, extra_pnginfo)
     if isinstance(value, torch.Tensor):
         return _save_tensor(value, directory, base_name, input_index)
     if isinstance(value, np.ndarray):
@@ -628,9 +768,9 @@ class GJJ_SaveAnyObject:
                 "filename_prefix": (
                     "STRING",
                     {
-                        "default": "GJJ/任意对象",
+                        "default": DEFAULT_FILENAME_PREFIX,
                         "display_name": "文件名前缀",
-                        "tooltip": "保存到 output 目录下，支持子目录。保持默认值时会自动改用第一个来源节点名称。",
+                        "tooltip": "保存到 output 目录下，支持子目录。保持默认值时会自动改用当前工作流名称。",
                     },
                 ),
             },
@@ -655,8 +795,14 @@ class GJJ_SaveAnyObject:
 
     def save(self, filename_prefix=DEFAULT_FILENAME_PREFIX, prompt=None, extra_pnginfo=None, unique_id=None, **kwargs):
         source_names = _resolve_input_source_names(prompt, extra_pnginfo, unique_id)
-        use_source_prefix = _should_use_source_prefix(filename_prefix) and bool(source_names)
-        directory, base_name = _resolve_prefix(filename_prefix)
+        normalized_prefix = _normalize_default_prefix(filename_prefix or "")
+        old_source_prefixes = {_normalize_default_prefix(_source_prefix(name)) for name in source_names.values() if name}
+        effective_prefix = (
+            _workflow_prefix(extra_pnginfo)
+            if _should_use_workflow_prefix(filename_prefix) or normalized_prefix in old_source_prefixes
+            else filename_prefix
+        )
+        directory, base_name = _resolve_prefix(effective_prefix)
         saved_paths: list[str] = []
         for key in sorted(kwargs.keys(), key=_extract_input_index):
             if not str(key).startswith(INPUT_PREFIX):
@@ -665,10 +811,7 @@ class GJJ_SaveAnyObject:
             if _is_none(value):
                 continue
             input_index = _extract_input_index(key)
-            target_directory, target_base_name = directory, base_name
-            if use_source_prefix:
-                target_directory, target_base_name = _resolve_prefix(_source_prefix(source_names.get(str(key), "")))
-            saved_paths.extend(_save_any_value(value, target_directory, target_base_name, input_index))
+            saved_paths.extend(_save_any_value(value, directory, base_name, input_index, prompt, extra_pnginfo, unique_id))
 
         paths_json = json.dumps(saved_paths, ensure_ascii=False, indent=2)
         first_path = saved_paths[0] if saved_paths else ""

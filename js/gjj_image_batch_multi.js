@@ -6,6 +6,13 @@ const COMPAT_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const MIN_INPUTS = 1;
 const CONTROL_WIDGET = "gjj_image_batch_multi_controls";
 const SAVED_INPUT_COUNT_PROPERTY = "gjj_image_batch_multi_input_count";
+const EXTRA_OUTPUTS_PROPERTY = "gjj_image_batch_multi_show_extra_outputs";
+const OUTPUT_DEFS = [
+	{ name: "批量图像", type: COMPAT_TYPE, tooltip: "兼容 GJJ 批量图片和普通 IMAGE batch 的输出。" },
+	{ name: "宽度", type: "INT", tooltip: "最终输出图像的宽度。点击 🔌 可显示或收起。" },
+	{ name: "高度", type: "INT", tooltip: "最终输出图像的高度。点击 🔌 可显示或收起。" },
+	{ name: "数量", type: "INT", tooltip: "最终输出序列的张数，包含可选前置黑帧或白帧。点击 🔌 可显示或收起。" },
+];
 const INTERNAL_WIDGET_INPUTS = new Set([
 	"width",
 	"height",
@@ -24,13 +31,13 @@ const INTERNAL_WIDGET_INPUTS = new Set([
 ]);
 const HIDDEN_WIDGETS = new Set(["width", "height", "size_preset", "orientation", "prepend_frame", "custom_size", "custom_ratio"]);
 const DEFAULT_VALUES = {
-	size_preset: "720",
-	orientation: "横屏",
+	size_preset: "320",
+	orientation: "原始比例",
 	prepend_frame: "无",
 	width: 0,
 	height: 0,
 	custom_size: 0,
-	custom_ratio: "16:9",
+	custom_ratio: "1:1",
 };
 
 const SIZE_DIMENSIONS = {
@@ -50,6 +57,7 @@ const SIZE_OPTIONS = [
 	{ value: "4K", emoji: "#️⃣", tooltip: "4K 档位。横屏 3840 x 2160，竖屏 2160 x 3840，正方形 3840 x 3840；最终尺寸按 16 对齐。" },
 ];
 const ORIENTATION_OPTIONS = [
+	{ value: "原始比例", emoji: "🟧", tooltip: "原始比例。按第一张输入图的宽高比输出；没有输入图时按当前尺寸档位输出正方形。" },
 	{ value: "横屏", emoji: "⏩", tooltip: "横屏。按当前尺寸档位输出 16:9 横向画幅。" },
 	{ value: "竖屏", emoji: "⏫", tooltip: "竖屏。按当前尺寸档位输出 9:16 竖向画幅。" },
 	{ value: "正方形", emoji: "🟦", tooltip: "正方形。按当前尺寸档位输出 1:1 方图。" },
@@ -75,14 +83,14 @@ function injectStyles() {
 		.gjj-ibm-btn.on{background:#1f6b43;border-color:#48ad73;color:#fff}
 		.gjj-ibm-sep{display:inline-flex;align-items:center;height:24px;color:#6f8790;font-size:12px;font-weight:700;padding:0 1px;user-select:none}
 		.gjj-ibm-summary{display:inline-flex;align-items:center;min-height:24px;color:#b9d7df;font-size:12px;line-height:1.2;padding:0 2px;white-space:nowrap}
-		.gjj-ibm-custom-panel{flex:1 0 100%;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px;width:100%;padding:6px;margin-top:2px;border:1px solid #2d4753;border-radius:7px;background:#0b151a;box-sizing:border-box}
+		.gjj-ibm-custom-panel{flex:1 0 100%;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,92px),1fr));gap:5px;width:100%;padding:6px;margin-top:2px;border:1px solid #2d4753;border-radius:7px;background:#0b151a;box-sizing:border-box}
 		.gjj-ibm-custom-panel[hidden]{display:none}
 		.gjj-ibm-custom-field{display:flex;align-items:center;gap:4px;min-width:0}
 		.gjj-ibm-custom-field span{flex:0 0 auto;color:#9fb4bc;font-size:11px;line-height:1;white-space:nowrap}
 		.gjj-ibm-custom-input{min-width:0;width:100%;height:24px;padding:2px 6px;border:1px solid #344b55;border-radius:6px;background:#1d2529;color:#e7f3f6;font-size:12px;outline:none;box-sizing:border-box}
 		.gjj-ibm-custom-input:focus{border-color:#6aa6b8;background:#202d33}
-		.gjj-ibm-custom-actions{display:flex;gap:4px;grid-column:1/-1;align-items:center;justify-content:flex-end;min-width:0}
-		.gjj-ibm-mini{height:23px;padding:0 7px;border:1px solid #3b5360;border-radius:6px;background:#17252c;color:#dce7e2;font:12px/1 "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif;font-variant-emoji:emoji;cursor:pointer}
+		.gjj-ibm-custom-actions{display:flex;flex-wrap:wrap;gap:4px;grid-column:1/-1;align-items:center;justify-content:flex-end;min-width:0}
+		.gjj-ibm-mini{height:23px;padding:0 7px;border:1px solid #3b5360;border-radius:6px;background:#17252c;color:#dce7e2;font:12px/1 "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif;font-variant-emoji:emoji;white-space:nowrap;cursor:pointer}
 		.gjj-ibm-mini:hover{background:#24343d;border-color:#5d7c8e}
 		.gjj-ibm-mini.primary{background:#1f6b43;border-color:#48ad73;color:#fff}
 	`;
@@ -150,22 +158,34 @@ function hideWidget(widget) {
 	if (!widget) return;
 	widget.__gjjImageBatchMultiHidden = true;
 	widget.hidden = true;
+	widget.disabled = true;
 	widget.serialize = true;
 	widget.type = `converted-widget:${widget.name || "hidden"}`;
 	widget.computeSize = () => [0, 0];
 	widget.getHeight = () => 0;
 	widget.draw = () => {};
+	widget.mouse = () => false;
 	widget.label = "";
 	widget.localized_name = "";
-	widget.last_y = 0;
+	widget.y = -10000;
+	widget.last_y = -10000;
 	widget.computedHeight = 0;
 	widget.margin_top = 0;
 	widget.size = [0, 0];
 	widget.options = widget.options || {};
 	widget.options.display_name = "";
-	if (widget.element) widget.element.style.display = "none";
-	if (widget.inputEl) widget.inputEl.style.display = "none";
-	if (widget.widget) widget.widget.style.display = "none";
+	widget.options.hidden = true;
+	widget.options.display = "hidden";
+	for (const element of [widget.element, widget.inputEl, widget.widget]) {
+		if (!element?.style) continue;
+		element.style.display = "none";
+		element.style.height = "0";
+		element.style.minHeight = "0";
+		element.style.margin = "0";
+		element.style.padding = "0";
+		element.style.border = "0";
+		element.style.overflow = "hidden";
+	}
 }
 
 function hideNativeWidgets(node) {
@@ -289,7 +309,10 @@ function dimensionsFromSizeRatio(sizeValue, ratioValue) {
 function presetDimensions(sizePreset, orientation) {
 	const size = normalizeSize(sizePreset);
 	const direction = normalizeOrientation(orientation);
-	return SIZE_DIMENSIONS[size]?.[direction] || SIZE_DIMENSIONS[DEFAULT_VALUES.size_preset][DEFAULT_VALUES.orientation];
+	if (direction === "原始比例") {
+		return SIZE_DIMENSIONS[size]?.["正方形"] || SIZE_DIMENSIONS[DEFAULT_VALUES.size_preset]["正方形"];
+	}
+	return SIZE_DIMENSIONS[size]?.[direction] || SIZE_DIMENSIONS[DEFAULT_VALUES.size_preset]["正方形"];
 }
 
 function customDimensions(node) {
@@ -311,10 +334,13 @@ function refreshControlSize(node) {
 	if (!node || !state?.widget) return;
 	state.widget.computedHeight = state.widget.getHeight?.();
 	requestAnimationFrame(() => {
+		hideNativeWidgets(node);
 		const currentWidth = Math.max(220, Number(node.size?.[0] || 260));
 		const computed = node.computeSize?.();
 		const nextHeight = Math.max(80, Number(computed?.[1] || node.size?.[1] || 80));
-		node.setSize?.([currentWidth, nextHeight]);
+		if (Math.abs(Number(node.size?.[1] || 0) - nextHeight) > 1) {
+			node.setSize?.([currentWidth, nextHeight]);
+		}
 		setDirty(node);
 	});
 }
@@ -332,6 +358,7 @@ function normalizeSize(value) {
 
 function normalizeOrientation(value) {
 	const text = String(value || "").trim().toLowerCase();
+	if (["原始", "原始比例", "原图比例", "原比例", "original", "originalratio", "source", "sourceratio", "🟧"].includes(text)) return "原始比例";
 	if (["横屏", "landscape", "horizontal", "⏩"].includes(text)) return "横屏";
 	if (["竖屏", "portrait", "vertical", "⏫"].includes(text)) return "竖屏";
 	if (["正方形", "square", "1:1", "🟦"].includes(text)) return "正方形";
@@ -459,14 +486,70 @@ function restoreSerializedInputCount(node, serializedNode = null) {
 	ensureImageInputCount(node, count);
 }
 
-function applyOutputMeta(node) {
-	const output = node?.outputs?.[0];
-	if (!output) return;
-	output.name = "批量图像";
-	output.label = "批量图像";
-	output.localized_name = "批量图像";
-	output.type = COMPAT_TYPE;
-	output.tooltip = "兼容 GJJ 批量图片和普通 IMAGE batch 的输出。";
+function outputHasLinks(output) {
+	return Array.isArray(output?.links) && output.links.some((link) => link != null);
+}
+
+function applyOutputSlot(output, def) {
+	if (!output || !def) return;
+	output.name = def.name;
+	output.label = def.name;
+	output.localized_name = def.name;
+	output.type = def.type;
+	output.tooltip = def.tooltip;
+}
+
+function showExtraOutputs(node) {
+	return node?.properties?.[EXTRA_OUTPUTS_PROPERTY] === true;
+}
+
+function setExtraOutputsVisible(node, visible) {
+	node.properties = node.properties || {};
+	node.properties[EXTRA_OUTPUTS_PROPERTY] = Boolean(visible);
+}
+
+function restoreExtraOutputState(node, serializedNode = null) {
+	node.properties = node.properties || {};
+	const serializedOutputs = Array.isArray(serializedNode?.outputs) ? serializedNode.outputs : [];
+	const hasSerializedLinkedExtra = serializedOutputs.slice(1).some(outputHasLinks);
+	if (hasSerializedLinkedExtra) {
+		node.properties[EXTRA_OUTPUTS_PROPERTY] = true;
+		return;
+	}
+	const saved = serializedNode?.properties?.[EXTRA_OUTPUTS_PROPERTY] ?? node.properties[EXTRA_OUTPUTS_PROPERTY];
+	if (saved === true || saved === false) {
+		node.properties[EXTRA_OUTPUTS_PROPERTY] = saved === true;
+		return;
+	}
+	const hasSerializedExtra = serializedOutputs.slice(1).some((output) => outputHasLinks(output) || OUTPUT_DEFS.slice(1).some((def) => output?.name === def.name));
+	node.properties[EXTRA_OUTPUTS_PROPERTY] = hasSerializedExtra;
+}
+
+function applyOutputMeta(node, { fromUser = false } = {}) {
+	if (!Array.isArray(node?.outputs)) return;
+	if (!showExtraOutputs(node) && !fromUser && node.outputs.slice(1).some(outputHasLinks)) {
+		setExtraOutputsVisible(node, true);
+	}
+	const target = showExtraOutputs(node) ? OUTPUT_DEFS : [OUTPUT_DEFS[0]];
+	for (let index = node.outputs.length - 1; index >= target.length; index -= 1) {
+		try { node.disconnectOutput?.(index); } catch (_) {}
+		if (typeof node.removeOutput === "function") {
+			node.removeOutput(index);
+		} else {
+			node.outputs.splice(index, 1);
+		}
+	}
+	while (node.outputs.length < target.length) {
+		const def = target[node.outputs.length];
+		const previousLength = node.outputs.length;
+		if (typeof node.addOutput === "function") {
+			node.addOutput(def.name, def.type);
+		}
+		if (node.outputs.length === previousLength) {
+			node.outputs.push({ name: def.name, type: def.type, links: [] });
+		}
+	}
+	target.forEach((def, index) => applyOutputSlot(node.outputs[index], def));
 }
 
 function setDirty(node) {
@@ -612,6 +695,7 @@ function syncControlButtons(node) {
 		item.button.classList.toggle("on", active);
 	}
 	state.customButton?.classList.toggle("on", selectedCustom);
+	state.extraButton?.classList.toggle("on", showExtraOutputs(node));
 	if (state.summary) {
 		const frameText = selectedPrepend === "无" ? "无帧" : selectedPrepend;
 		if (selectedCustom) {
@@ -734,16 +818,16 @@ function buildCustomPanel(node, state) {
 	const actions = document.createElement("div");
 	actions.className = "gjj-ibm-custom-actions";
 	actions.append(
-		makeMiniButton("应用", "应用自定义尺寸和比例", "primary", () => applyCustomSettings(node)),
-		makeMiniButton("清除", "清除自定义尺寸，恢复图标档位和方向", "", () => clearCustomSettings(node)),
-		makeMiniButton("收起", "只收起设置面板，不改当前配置", "", () => setCustomPanelOpen(node, false)),
+		makeMiniButton("✅ 应用", "应用自定义尺寸和比例", "primary", () => applyCustomSettings(node)),
+		makeMiniButton("🧹 清除", "清除自定义尺寸，恢复图标档位和方向", "", () => clearCustomSettings(node)),
+		makeMiniButton("🔼 收起", "只收起设置面板，不改当前配置", "", () => setCustomPanelOpen(node, false)),
 	);
 
 	panel.append(
-		makeCustomField("尺寸", sizeInput),
-		makeCustomField("比例", ratioInput),
-		makeCustomField("宽", widthInput),
-		makeCustomField("高", heightInput),
+		makeCustomField("📏 尺寸", sizeInput),
+		makeCustomField("🔢 比例", ratioInput),
+		makeCustomField("↔️ 宽", widthInput),
+		makeCustomField("↕️ 高", heightInput),
 		actions,
 	);
 	return panel;
@@ -780,6 +864,25 @@ function ensureControls(node) {
 	});
 	wrap.appendChild(customButton);
 	state.customButton = customButton;
+	const extraButton = document.createElement("button");
+	extraButton.type = "button";
+	extraButton.className = "gjj-ibm-btn";
+	const extraIcon = document.createElement("span");
+	extraIcon.className = "gjj-ibm-icon";
+	extraIcon.textContent = "🔌";
+	extraButton.appendChild(extraIcon);
+	extraButton.title = "显示 / 收起宽度、高度、数量输出口。";
+	shieldControlEvents(extraButton);
+	extraButton.addEventListener("click", (event) => {
+		stopCanvasEvent(event);
+		setExtraOutputsVisible(node, !showExtraOutputs(node));
+		applyOutputMeta(node, { fromUser: true });
+		syncControlButtons(node);
+		refreshControlSize(node);
+		setDirty(node);
+	});
+	wrap.appendChild(extraButton);
+	state.extraButton = extraButton;
 	const summary = document.createElement("span");
 	summary.className = "gjj-ibm-summary";
 	summary.textContent = "";
@@ -794,10 +897,12 @@ function ensureControls(node) {
 		hideOnZoom: false,
 		getHeight: () => Math.max(30, Math.ceil(wrap.scrollHeight || wrap.offsetHeight || 28) + 4),
 	});
+	widget.computeSize = () => [Math.max(200, Number(node.size?.[0] || 260) - 20), widget.getHeight?.() || 30];
 	state.widget = widget;
 	state.wrap = wrap;
 	node.__gjjImageBatchMultiControls = state;
 	syncControlButtons(node);
+	refreshControlSize(node);
 }
 
 function stabilize(node) {
@@ -814,6 +919,7 @@ function stabilize(node) {
 	applyOutputMeta(node);
 	persistInputCount(node);
 	node.__gjjImageBatchMultiSignature = currentSignature(node);
+	refreshControlSize(node);
 	setDirty(node);
 }
 
@@ -829,6 +935,7 @@ function currentSignature(node) {
 		`size:${normalizeSize(readWidget(node, "size_preset"))}`,
 		`orient:${normalizeOrientation(readWidget(node, "orientation"))}`,
 		`prepend:${normalizePrepend(readWidget(node, "prepend_frame"))}`,
+		`extra:${showExtraOutputs(node) ? 1 : 0}`,
 		`custom:${readNumberWidget(node, "width", 0)}x${readNumberWidget(node, "height", 0)}:${readNumberWidget(node, "custom_size", 0)}:${readWidget(node, "custom_ratio")}`,
 	].join("|");
 }
@@ -841,6 +948,9 @@ app.registerExtension({
 		const originalCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
 			const result = originalCreated?.apply(this, args);
+			if (this.properties?.[EXTRA_OUTPUTS_PROPERTY] !== true) {
+				setExtraOutputsVisible(this, false);
+			}
 			scheduleStabilize(this, 0);
 			scheduleStabilize(this, 80);
 			return result;
@@ -849,6 +959,7 @@ app.registerExtension({
 		const originalConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
 			const result = originalConfigure?.apply(this, [serializedNode, ...args]);
+			restoreExtraOutputState(this, serializedNode);
 			restoreSerializedInputCount(this, serializedNode);
 			scheduleStabilize(this, 0);
 			scheduleStabilize(this, 80);

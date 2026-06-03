@@ -55,6 +55,59 @@ PREVIEW_KIND_LABELS = {
     "other": "对象",
     "mixed": "混合对象",
 }
+PREVIEW_KIND_TYPE_LABELS = {
+    "image": "IMAGE",
+    "mask": "MASK",
+    "text": "STRING",
+    "audio": "AUDIO",
+    "video": "VIDEO",
+    "mixed": "MIXED",
+}
+PREVIEW_KIND_EMOJIS = {
+    "image": "🖼️",
+    "mask": "🎭",
+    "text": "📝",
+    "audio": "🎧",
+    "video": "🎬",
+    "mixed": "🧩",
+    "other": "🧩",
+}
+ORDINAL_EMOJIS = {
+    1: "1️⃣",
+    2: "2️⃣",
+    3: "3️⃣",
+    4: "4️⃣",
+    5: "5️⃣",
+    6: "6️⃣",
+    7: "7️⃣",
+    8: "8️⃣",
+    9: "9️⃣",
+    10: "🔟",
+}
+
+
+def ordinal_emoji(index: int) -> str:
+    return ORDINAL_EMOJIS.get(int(index), f"{int(index)}.")
+
+
+def concrete_preview_type_label(value: Any, kind: str) -> str:
+    kind = str(kind or "other").lower()
+    if kind in PREVIEW_KIND_TYPE_LABELS:
+        return PREVIEW_KIND_TYPE_LABELS[kind]
+    if isinstance(value, torch.Tensor):
+        return "TENSOR"
+    if value is None:
+        return "NONE"
+    value_type = type(value).__name__
+    return value_type or "UNKNOWN"
+
+
+def preview_kind_emoji(kind: str) -> str:
+    return PREVIEW_KIND_EMOJIS.get(str(kind or "other").lower(), PREVIEW_KIND_EMOJIS["other"])
+
+
+def format_preview_item_title(index: int, value: Any, kind: str) -> str:
+    return f"{ordinal_emoji(index)} {preview_kind_emoji(kind)} {concrete_preview_type_label(value, kind)}"
 
 
 def extract_input_index(name: str) -> int:
@@ -939,11 +992,15 @@ class GJJ_AnyPreview:
         items: list[dict[str, Any]] = []
         for index, value in enumerate(values, start=1):
             kind = detect_preview_kind(value)
-            label = PREVIEW_KIND_LABELS.get(kind, "对象")
+            type_label = concrete_preview_type_label(value, kind)
             item: dict[str, Any] = {
                 "kind": "image" if kind == "mask" else kind,
                 "source_kind": kind,
-                "title": f"项目 {index} · {label}",
+                "title": format_preview_item_title(index, value, kind),
+                "ordinal": index,
+                "ordinal_emoji": ordinal_emoji(index),
+                "type_emoji": preview_kind_emoji(kind),
+                "type_label": type_label,
             }
 
             sequence_info = detect_video_sequence_preview([value])
@@ -956,9 +1013,12 @@ class GJJ_AnyPreview:
                     extra_pnginfo=extra_pnginfo,
                 )
                 if sequence_media:
+                    sequence_label = "MASK_SEQUENCE" if source_kind == "mask" else "IMAGE_SEQUENCE"
                     item["kind"] = "image"
                     item["source_kind"] = source_kind
-                    item["title"] = f"项目 {index} · 动态序列"
+                    item["title"] = f"{ordinal_emoji(index)} 🎬 {sequence_label}"
+                    item["type_emoji"] = "🎬"
+                    item["type_label"] = sequence_label
                     item["images"] = sequence_media
                     item["text"] = serialize_video_sequence_preview(frames, source_kind)
                     sequence_handled = True

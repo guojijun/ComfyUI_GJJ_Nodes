@@ -11,6 +11,10 @@ INPUT_PREFIX = "value_"
 MAX_INPUTS = 24
 SHOW_INT_OUTPUT_NAME = "show_int_output"
 SHOW_FORMULA_OUTPUT_NAME = "show_formula_output"
+PRESET_MODE_NAME = "calculator_preset_mode"
+INPUT_NAMES_NAME = "input_names_json"
+LEGACY_INPUT_NAMES_NAME = "input_aliases_json"
+PRESET_CONVERT = "convert"
 
 
 class AnyType(str):
@@ -38,7 +42,7 @@ class FlexibleCalculatorInputType(dict):
                 any_type,
                 {
                     "display_name": f"x{index}",
-                    "tooltip": "动态输入；可接入数字或可转换为数字的字符串，在公式里用 x1、x2、x3 引用。",
+                    "tooltip": "可选动态输入；可手动连线，也可由同名 GJJ 变量广播自动填入，在公式里用 x1、x2、x3 或 {变量名} 引用。",
                     "forceInput": True,
                 },
             )
@@ -111,6 +115,36 @@ def _coerce_value(value: Any) -> Any:
     return str(value)
 
 
+def _safe_json_loads(value: Any, fallback: Any) -> Any:
+    if not isinstance(value, str) or not value.strip():
+        return fallback
+    try:
+        import json
+
+        return json.loads(value)
+    except Exception:
+        return fallback
+
+
+def _collect_input_names(raw: Any) -> dict[str, str]:
+    data = _safe_json_loads(raw, {})
+    if not isinstance(data, dict):
+        return {}
+    result: dict[str, str] = {}
+    for key, raw_name in data.items():
+        input_name = str(key or "").strip()
+        if not input_name:
+            continue
+        # 旧工作流可能保存为列表；这里仅取第一个明确名称，不展开多个名称。
+        candidates = raw_name if isinstance(raw_name, list) else [raw_name]
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if text:
+                result[input_name] = text
+                break
+    return result
+
+
 def _collect_values(kwargs: dict[str, Any]) -> dict[str, Any]:
     values: dict[str, Any] = {}
     for key, value in kwargs.items():
@@ -123,6 +157,13 @@ def _collect_values(kwargs: dict[str, Any]) -> dict[str, Any]:
         if value is None:
             continue
         values[f"x{index}"] = _coerce_value(value)
+    input_names = _collect_input_names(kwargs.get(INPUT_NAMES_NAME))
+    if not input_names:
+        input_names = _collect_input_names(kwargs.get(LEGACY_INPUT_NAMES_NAME))
+    for input_name, name in input_names.items():
+        if input_name not in values:
+            continue
+        values.setdefault(name, values[input_name])
     return values
 
 
@@ -209,7 +250,10 @@ def _eval_ast(node: ast.AST, values: dict[str, Any]) -> Any:
                 return _guard_number(args[0])
             if not values:
                 raise ValueError("any 函数没有可用的已连接输入。")
-            first_key = sorted(values.keys(), key=lambda name: int(name[1:]))[0]
+            x_keys = [name for name in values if re.fullmatch(r"x\d+", name)]
+            if not x_keys:
+                raise ValueError("any 函数没有可用的 x 输入。")
+            first_key = sorted(x_keys, key=lambda name: int(name[1:]))[0]
             return _guard_number(values[first_key])
         if node.func.id == "mod" and len(args) == 2 and args[1] == 0:
             raise ValueError("mod 函数的第二个参数不能为 0。")
@@ -231,14 +275,36 @@ def _calculate_formula(formula: Any, values: dict[str, Any]) -> Any:
     text = _normalize_formula(formula)
     if len(text) > 512:
         raise ValueError("公式过长，请控制在 512 个字符以内。")
+    text, placeholder_values = _replace_placeholder_variables(text, values)
+    eval_values = {**values, **placeholder_values}
     try:
         tree = ast.parse(text, mode="eval")
     except SyntaxError as exc:
-        return _render_template_formula(text, values)
-    result = _eval_ast(tree, values)
+        return _render_template_formula(_normalize_formula(formula), values)
+    result = _eval_ast(tree, eval_values)
     if _is_number(result):
         _guard_number(result)
     return result
+
+
+def _replace_placeholder_variables(text: str, values: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    placeholder_values: dict[str, Any] = {}
+    used_names: dict[str, str] = {}
+
+    def replace(match: re.Match[str]) -> str:
+        name = str(match.group(1) or "").strip()
+        if not name:
+            raise ValueError("公式里的 {} 变量名不能为空。")
+        if name not in values:
+            raise ValueError(f"公式变量 {{{name}}} 没有连接到可用输入。")
+        safe_name = used_names.get(name)
+        if not safe_name:
+            safe_name = f"__gjj_var_{len(used_names) + 1}"
+            used_names[name] = safe_name
+        placeholder_values[safe_name] = values[name]
+        return safe_name
+
+    return re.sub(r"\{([^{}]+)\}", replace, text), placeholder_values
 
 
 def _render_template_formula(text: str, values: dict[str, Any]) -> str:
@@ -246,7 +312,8 @@ def _render_template_formula(text: str, values: dict[str, Any]) -> str:
         name = match.group(0)
         return str(values.get(name, name))
 
-    return re.sub(r"\bx\d+\b", replace, str(text or ""))
+    rendered = re.sub(r"\bx\d+\b", replace, str(text or ""))
+    return re.sub(r"\{([^{}]+)\}", lambda match: str(values.get(match.group(1).strip(), match.group(0))), rendered)
 
 
 def _converted_pair_value(value: Any) -> Any:
@@ -277,11 +344,34 @@ def _converted_pair_type(value: Any) -> str:
     return "STRING"
 
 
+def _coerce_float_for_conversion(value: Any) -> float:
+    if isinstance(value, bool):
+        return float(int(value))
+    if isinstance(value, (int, float)):
+        resolved = float(value)
+    else:
+        text = str(value).strip()
+        if not text:
+            raise ValueError("数据转换需要 x1 输入一个可转为数字的值。")
+        resolved = float(text)
+    if not math.isfinite(resolved):
+        raise ValueError("数据转换结果不是有限数字。")
+    return resolved
+
+
+def _convert_int_float_pair(values: dict[str, Any]) -> tuple[int, float]:
+    if "x1" not in values:
+        raise ValueError("数据转换需要连接 x1 输入。")
+    float_value = _coerce_float_for_conversion(values["x1"])
+    return int(float_value), float_value
+
+
 class GJJ_MultifunctionCalculator:
     CATEGORY = "GJJ"
     FUNCTION = "calculate"
-    DESCRIPTION = "动态扩展输入，通过计算器按钮编辑公式，支持数字计算、字符串拼接和自动结果类型。"
+    DESCRIPTION = "动态扩展输入，通过计算器按钮编辑公式，支持数字计算、字符串拼接、自动结果类型，以及用 {输入显示名} 引用已连接输入。"
     SEARCH_ALIASES = [
+        "JSQ",
         "calculator",
         "math",
         "formula",
@@ -308,13 +398,13 @@ class GJJ_MultifunctionCalculator:
             "required": {
                 "formula": (
                     "STRING",
-                    {
-                        "default": "int((x1 * x2)//4*4 +1)",
-                        "multiline": False,
-                        "display_name": "计算公式",
-                        "tooltip": "在这里填写公式；动态输入按 x1、x2、x3 引用。支持数字计算，也支持字符串常量、变量文本和 + 拼接。",
-                    },
-                ),
+                        {
+                            "default": "int((x1 * x2)//4*4 +1)",
+                            "multiline": False,
+                            "display_name": "计算公式",
+                            "tooltip": "在这里填写公式；动态输入可按 x1、x2、x3 引用，也可按前端显示名写成 {帧率}。支持数字计算、字符串常量和 + 拼接。",
+                        },
+                    ),
             },
             "optional": FlexibleCalculatorInputType(
                 {
@@ -322,7 +412,7 @@ class GJJ_MultifunctionCalculator:
                         any_type,
                         {
                             "display_name": "x1",
-                            "tooltip": "第一路动态输入；可接入数字或可转换为数字的字符串，在公式中使用 x1 引用。",
+                            "tooltip": "第一路可选动态输入；可手动连线，也可由同名 GJJ 变量广播自动填入，在公式中使用 x1 或 {变量名} 引用。",
                             "forceInput": True,
                         },
                     ),
@@ -346,6 +436,36 @@ class GJJ_MultifunctionCalculator:
                             "hidden": True,
                         },
                     ),
+                    PRESET_MODE_NAME: (
+                        "STRING",
+                        {
+                            "default": "",
+                            "display_name": "",
+                            "tooltip": "内部状态：常用预设模式。前端按钮控制，默认隐藏。",
+                            "display": "hidden",
+                            "hidden": True,
+                        },
+                    ),
+                    INPUT_NAMES_NAME: (
+                        "STRING",
+                        {
+                            "default": "{}",
+                            "display_name": "",
+                            "tooltip": "内部状态：前端记录连接输入的显示名，用于 {变量名} 公式。",
+                            "display": "hidden",
+                            "hidden": True,
+                        },
+                    ),
+                    LEGACY_INPUT_NAMES_NAME: (
+                        "STRING",
+                        {
+                            "default": "{}",
+                            "display_name": "",
+                            "tooltip": "内部兼容：旧版输入名称缓存。",
+                            "display": "hidden",
+                            "hidden": True,
+                        },
+                    ),
                 }
             ),
         }
@@ -356,25 +476,33 @@ class GJJ_MultifunctionCalculator:
         parts = [str(_normalize_formula(formula))]
         parts.append(f"int:{bool(kwargs.get(SHOW_INT_OUTPUT_NAME, False))}")
         parts.append(f"formula:{bool(kwargs.get(SHOW_FORMULA_OUTPUT_NAME, False))}")
+        parts.append(f"preset:{str(kwargs.get(PRESET_MODE_NAME, '') or '')}")
+        parts.append(f"names:{str(kwargs.get(INPUT_NAMES_NAME, '') or '')}")
+        parts.append(f"legacy_names:{str(kwargs.get(LEGACY_INPUT_NAMES_NAME, '') or '')}")
         parts.extend(f"{key}:{values[key]}" for key in sorted(values))
         return "|".join(parts)
 
     def calculate(self, formula, **kwargs):
         values = _collect_values(kwargs)
         formula_text = _normalize_formula(formula)
+        preset_mode = str(kwargs.get(PRESET_MODE_NAME, "") or "").strip()
         try:
-            result = _calculate_formula(formula, values)
+            if preset_mode == PRESET_CONVERT:
+                result, converted = _convert_int_float_pair(values)
+            else:
+                result = _calculate_formula(formula, values)
+                converted = _converted_pair_value(result)
             outputs: list[Any] = [result]
             if bool(kwargs.get(SHOW_INT_OUTPUT_NAME, False)):
-                outputs.append(_converted_pair_value(result))
+                outputs.append(converted)
             if bool(kwargs.get(SHOW_FORMULA_OUTPUT_NAME, False)):
                 outputs.append(formula_text)
             return {
                 "ui": {
                     "calculator_result": [result],
                     "calculator_result_type": [_infer_output_type(result)],
-                    "calculator_pair_type": [_converted_pair_type(result)],
-                    "calculator_pair_value": [_converted_pair_value(result)],
+                    "calculator_pair_type": ["FLOAT" if preset_mode == PRESET_CONVERT else _converted_pair_type(result)],
+                    "calculator_pair_value": [converted],
                     "calculator_formula": [formula_text],
                     "calculator_inputs": [len(values)],
                 },

@@ -27,6 +27,7 @@ LOGGER = logging.getLogger(__name__)
 STATUS_MARK_RE = re.compile(r"^\s*[✅✔✓❌✖✕×]\s*")
 STRENGTH_PREFIX_RE = re.compile(r"^\s*\([-+]?\d+(?:\.\d+)?\)\s*")
 LORA_NOT_LOADED_PREFIX = "lora key not loaded: "
+ICLORA_METADATA_KEYS = ("reference_downscale_factor", "latent_downscale_factor")
 
 
 def hidden_lora_data_input() -> tuple[str, dict[str, Any]]:
@@ -126,6 +127,52 @@ def resolve_lora_name_fuzzy(lora_name: str) -> str:
 
     available = list(folder_paths.get_filename_list("loras"))
     return pick_available_model_name(requested, available, allow_first=False) or model_stem(requested)
+
+
+def lora_name_looks_like_iclora(lora_name: Any) -> bool:
+    text = model_basename(str(lora_name or "")).lower()
+    return "ic-lora" in text or "ic_lora" in text or "iclora" in text
+
+
+def load_lora_file_with_metadata(lora_path: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        loaded = comfy.utils.load_torch_file(lora_path, safe_load=True, return_metadata=True)
+    except TypeError:
+        return comfy.utils.load_torch_file(lora_path, safe_load=True), {}
+
+    if isinstance(loaded, tuple) and len(loaded) == 2:
+        lora_state, metadata = loaded
+        return lora_state, metadata or {}
+    return loaded, {}
+
+
+def iclora_latent_downscale_from_metadata(metadata: dict[str, Any]) -> float | None:
+    if not isinstance(metadata, dict):
+        return None
+    value = None
+    for key in ICLORA_METADATA_KEYS:
+        if key in metadata:
+            value = metadata.get(key)
+            break
+    if value is None:
+        return None
+    try:
+        factor = float(value)
+    except (TypeError, ValueError):
+        LOGGER.warning("IC-LoRA metadata latent_downscale_factor invalid: %r", value)
+        return None
+    if factor <= 0:
+        LOGGER.warning("IC-LoRA metadata latent_downscale_factor must be positive: %r", value)
+        return None
+    return factor
+
+
+def latent_downscale_pixel_multiple(latent_downscale_factor: Any) -> int:
+    try:
+        value = float(latent_downscale_factor)
+    except (TypeError, ValueError):
+        value = 1.0
+    return max(1, int(round(value * 32.0)))
 
 
 def detect_nunchaku_model_kind(model: Any) -> str | None:
@@ -240,7 +287,7 @@ def apply_lora_chain_config(
     model: Any,
     clip: Any,
     lora_data="[]",
-    loaded_lora_cache: tuple[str, Any] | None = None,
+    loaded_lora_cache: tuple[str, Any] | tuple[str, Any, dict[str, Any]] | None = None,
     on_lora_applied: Any = None,
     on_lora_failed: Any = None,
 ):
@@ -275,6 +322,9 @@ def apply_lora_chain_config(
         if not lora_path:
             raise RuntimeError(f"未找到 LoRA 文件：{lora_name}。已按子目录、文件名和关键词做模糊搜索。")
 
+        is_iclora = lora_name_looks_like_iclora(resolved_lora_name)
+        latent_downscale_factor: float | None = None
+
         try:
             if nunchaku_model_kind == "flux":
                 current_model = nunchaku_load_flux_lora(current_model, lora_path, strength)
@@ -287,15 +337,22 @@ def apply_lora_chain_config(
                     loaded=0,
                     model=0,
                     clip=0,
+                    is_iclora=is_iclora,
+                    latent_downscale_factor=1.0 if is_iclora else None,
                 )
                 continue
 
             lora = None
+            metadata: dict[str, Any] = {}
             if cache_entry is not None and cache_entry[0] == lora_path:
                 lora = cache_entry[1]
+                if len(cache_entry) >= 3 and isinstance(cache_entry[2], dict):
+                    metadata = cache_entry[2]
             if lora is None:
-                lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
-                cache_entry = (lora_path, lora)
+                lora, metadata = load_lora_file_with_metadata(lora_path)
+                cache_entry = (lora_path, lora, metadata)
+            latent_downscale_factor = iclora_latent_downscale_from_metadata(metadata)
+            is_iclora = is_iclora or latent_downscale_factor is not None
 
             current_model, patched_clip, model_patch_count, clip_patch_count, loaded_patch_count = apply_standard_lora(
                 current_model,
@@ -322,6 +379,11 @@ def apply_lora_chain_config(
                 loaded=loaded_patch_count,
                 model=model_patch_count,
                 clip=clip_patch_count,
+                is_iclora=is_iclora,
+                latent_downscale_factor=(
+                    latent_downscale_factor if latent_downscale_factor is not None
+                    else (1.0 if is_iclora else None)
+                ),
             )
         except Exception as exc:
             _notify_lora_applied(
@@ -343,6 +405,7 @@ class GJJ_MultiLoraChain:
 用途：
 - 在一个节点内按列表顺序连续加载多组 LoRA。
 - 接入 CLIP 时，LoRA 同时作用于 MODEL 与 CLIP；不接 CLIP 时，只作用于 MODEL。
+- 载入 LTX IC-LoRA 时，会读取 safetensors metadata，并输出 latent_downscale_factor 与 factor*32 像素倍数。
 - 前端面板负责选择、启用、强度、搜索、互斥分组；后台只读取隐藏的 LoRA 配置 JSON。
 
 界面说明：
@@ -367,18 +430,21 @@ class GJJ_MultiLoraChain:
 
 兼容说明：
 - 标准 ComfyUI LoRA 会检查未加载 key，避免底模不匹配时静默失败。
+- IC-LoRA 的 latent_downscale_factor 来自 reference_downscale_factor / latent_downscale_factor；缺失时为 1.0；像素倍数为 round(factor * 32)。
 - 检测到 Nunchaku Flux 模型时，会走 Nunchaku Flux LoRA 加载逻辑。
 """
     SEARCH_ALIASES = ["multi lora", "lora chain", "lora loader", "LoRA", "串联", "加载器"]
-    RETURN_TYPES = ("MODEL", "CLIP")
-    RETURN_NAMES = ("叠加模型输出", "叠加编码输出")
+    RETURN_TYPES = ("MODEL", "CLIP", "FLOAT", "INT")
+    RETURN_NAMES = ("叠加模型输出", "叠加编码输出", "IC-LoRA Latent缩放因子", "IC-LoRA像素倍数")
     OUTPUT_TOOLTIPS = (
         "按当前节点中的 LoRA 顺序串联加载后的模型输出。",
         "按当前节点中的 LoRA 顺序串联加载后的 CLIP 输出；未接入 CLIP 时这里返回空值。",
+        "链中最后一个 IC-LoRA 的 latent_downscale_factor；没有 IC-LoRA 或 metadata 缺失时为 1.0，可接 IC-LoRA Guide。",
+        "链中最后一个 IC-LoRA 的 round(latent_downscale_factor * 32)；可直接用于参考图预处理到对应像素整倍数。",
     )
 
     def __init__(self):
-        self.loaded_lora: tuple[str, Any] | None = None
+        self.loaded_lora: tuple[str, Any] | tuple[str, Any, dict[str, Any]] | None = None
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -399,13 +465,30 @@ class GJJ_MultiLoraChain:
         }
 
     def apply_loras(self, model, lora_data="[]", clip=None):
+        iclora_latent_downscale_factor = 1.0
+
+        def remember_iclora_metadata(payload: dict[str, Any]) -> None:
+            nonlocal iclora_latent_downscale_factor
+            if not payload.get("is_iclora"):
+                return
+            try:
+                iclora_latent_downscale_factor = float(payload.get("latent_downscale_factor", 1.0) or 1.0)
+            except (TypeError, ValueError):
+                iclora_latent_downscale_factor = 1.0
+
         current_model, current_clip, self.loaded_lora = apply_lora_chain_config(
             model,
             clip,
             lora_data=lora_data,
             loaded_lora_cache=self.loaded_lora,
+            on_lora_applied=remember_iclora_metadata,
         )
-        return (current_model, current_clip)
+        return (
+            current_model,
+            current_clip,
+            iclora_latent_downscale_factor,
+            latent_downscale_pixel_multiple(iclora_latent_downscale_factor),
+        )
 
 
 class GJJ_LoraChainConfig:

@@ -149,13 +149,20 @@ import { app } from "/scripts/app.js";
 		return `${type} | ID: ${id}`;
 	}
 
-	function nodeReplacementType(node) {
+	function nodeRegisteredName(node) {
 		return String(
-			node?.type ||
+			node?.comfyClass ||
+			node?.constructor?.comfyClass ||
 			node?.constructor?.nodeData?.name ||
+			node?.properties?.["Node name for S&R"] ||
+			node?.type ||
 			node?.constructor?.title ||
 			""
 		).trim();
+	}
+
+	function nodeReplacementType(node) {
+		return nodeRegisteredName(node);
 	}
 
 	function fillReplaceTargetFromNode(node) {
@@ -198,31 +205,70 @@ import { app } from "/scripts/app.js";
 
 	function currentCanvasSelection() {
 		const canvas = app.canvas;
-		const selected = [];
+		const explicit = [];
+		const fallback = [];
+		const flagged = [];
 		const pushNode = (node) => {
 			if (!node) {
 				return;
 			}
 			const id = String(node?.id ?? "");
-			if (!id || selected.some((item) => String(item?.id ?? "") === id)) {
+			if (!id || explicit.some((item) => String(item?.id ?? "") === id)) {
 				return;
 			}
-			selected.push(node);
+			explicit.push(node);
+		};
+		const pushFallback = (node) => {
+			if (!node) {
+				return;
+			}
+			const id = String(node?.id ?? "");
+			if (!id || fallback.some((item) => String(item?.id ?? "") === id)) {
+				return;
+			}
+			fallback.push(node);
+		};
+		const collectSelectedValue = (value) => {
+			if (!value) return;
+			if (Array.isArray(value)) {
+				value.forEach(pushNode);
+			} else if (value instanceof Set) {
+				for (const item of value) pushNode(item);
+			} else if (value instanceof Map) {
+				for (const item of value.values()) pushNode(item);
+			} else if (typeof value === "object") {
+				Object.values(value).forEach(pushNode);
+			}
 		};
 
-		const selectedNodes = canvas?.selected_nodes;
-		if (Array.isArray(selectedNodes)) {
-			selectedNodes.forEach(pushNode);
-		} else if (selectedNodes && typeof selectedNodes === "object") {
-			Object.values(selectedNodes).forEach(pushNode);
-		}
-		pushNode(canvas?.selected_node);
+		collectSelectedValue(canvas?.selected_nodes);
+		collectSelectedValue(canvas?.selectedNodes);
+		collectSelectedValue(canvas?._selected_nodes);
+		collectSelectedValue(canvas?.selected_items);
+		collectSelectedValue(canvas?.selectedItems);
 		for (const node of getWorkflowNodes()) {
-			if (node?.selected) {
+			if (node?.selected || node?.flags?.selected || node?.__selected || node?.is_selected) {
 				pushNode(node);
+				if (!flagged.some((item) => String(item?.id ?? "") === String(node?.id ?? ""))) {
+					flagged.push(node);
+				}
 			}
 		}
-		return selected;
+		if (flagged.length > 0) {
+			return flagged;
+		}
+		if (explicit.length > 0) {
+			return explicit;
+		}
+
+		pushFallback(canvas?.current_node);
+		pushFallback(canvas?.selected_node);
+		pushFallback(canvas?.selectedNode);
+		pushFallback(canvas?._selected_node);
+		pushFallback(canvas?.node_over);
+		pushFallback(canvas?.nodeOver);
+		pushFallback(window?.LiteGraph?.active_canvas?.current_node);
+		return fallback.length ? [fallback[0]] : [];
 	}
 
 	function currentSingleSelectedNode() {
@@ -240,15 +286,19 @@ import { app } from "/scripts/app.js";
 		const id = normalizeText(node?.id);
 		const title = normalizeText(nodeDisplayTitle(node));
 		const type = normalizeText(node?.type);
+		const registered = normalizeText(nodeRegisteredName(node));
 		const widgetText = normalizeText(collectWidgetText(node));
-		const haystack = `${title} ${type} ${id} ${widgetText}`;
+		const haystack = `${title} ${registered} ${type} ${id} ${widgetText}`;
 		let score = 0;
 
 		if (id === kw) score = Math.max(score, 200);
+		if (registered === kw) score = Math.max(score, 190);
 		if (title === kw) score = Math.max(score, 180);
 		if (type === kw) score = Math.max(score, 170);
+		if (registered.startsWith(kw)) score = Math.max(score, 160);
 		if (title.startsWith(kw)) score = Math.max(score, 150);
 		if (type.startsWith(kw)) score = Math.max(score, 140);
+		if (registered.includes(kw)) score = Math.max(score, 120);
 		if (title.includes(kw)) score = Math.max(score, 110);
 		if (type.includes(kw)) score = Math.max(score, 100);
 		if (id.includes(kw)) score = Math.max(score, 90);
@@ -494,8 +544,8 @@ import { app } from "/scripts/app.js";
 	align-items: flex-start;
 	justify-content: center;
 	padding: 10vh 18px 18px;
-	background: rgba(8, 10, 14, 0.42);
-	backdrop-filter: blur(3px);
+	background: rgba(8, 10, 14, 0.28);
+	backdrop-filter: blur(1px);
 	box-sizing: border-box;
 }
 .gjj-node-finder-panel {
@@ -973,8 +1023,16 @@ import { app } from "/scripts/app.js";
 		if (!overlay || !overlay.isConnected) {
 			overlay = createOverlay();
 		}
+		const selectedType = nodeReplacementType(currentSingleSelectedNode());
+		const nextQuery = selectedType || lastQuery;
+		if (selectedType) {
+			lastQuery = selectedType;
+		}
 		if (overlay.style.display !== "none") {
 			hideReplaceSuggestions();
+			searchInput.value = nextQuery;
+			activeIndex = 0;
+			renderResults();
 			requestAnimationFrame(() => {
 				searchInput.focus();
 				searchInput.select();
@@ -982,11 +1040,6 @@ import { app } from "/scripts/app.js";
 			return;
 		}
 		selectedNodeIds.clear();
-		const selectedType = nodeReplacementType(currentSingleSelectedNode());
-		const nextQuery = selectedType || lastQuery;
-		if (selectedType) {
-			lastQuery = selectedType;
-		}
 		overlay.style.display = "flex";
 		searchInput.value = nextQuery;
 		activeIndex = 0;

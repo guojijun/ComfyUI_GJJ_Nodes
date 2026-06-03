@@ -5,16 +5,21 @@ const TARGET_NODES = new Set([
 	"GJJ_LoraChainConfig",
 ]);
 const LOADER_NODE_NAME = "GJJ_MultiLoraChainLoader";
+const CONFIG_NODE_NAME = "GJJ_LoraChainConfig";
 const DATA_WIDGET_NAME = "lora_data";
 const SEARCH_BY_ROW_PROPERTY = "gjj_lora_search_by_row";
 const GLOBAL_SEARCH_PROPERTY = "gjj_lora_global_search";
 const GROUP_RULES_PROPERTY = "gjj_lora_group_rules";
 const ADVANCED_OPEN_PROPERTY = "gjj_lora_advanced_open";
 const CLIP_PORTS_OPEN_PROPERTY = "gjj_lora_clip_ports_open";
+const BROADCAST_PROPERTY = "gjj_variable_broadcast_enabled";
+const BROADCAST_USER_SET_PROPERTY = "gjj_variable_broadcast_user_set";
 const MODEL_OUTPUT_NAME = "叠加模型输出";
 const CLIP_INPUT_NAME = "clip";
 const CLIP_INPUT_LABEL = "CLIP 输入";
 const CLIP_OUTPUT_NAME = "叠加编码输出";
+const ICLORA_FACTOR_OUTPUT_NAME = "IC-LoRA Latent缩放因子";
+const ICLORA_MULTIPLE_OUTPUT_NAME = "IC-LoRA像素倍数";
 const DEFAULT_EMPTY_OPTION = { value: "", label: "未选择" };
 const DEFAULT_ROW = { enabled: false, name: "", strength: 1.0 };
 const DEFAULT_GROUP_RULES = [
@@ -55,6 +60,73 @@ function normalizeBoolean(value) {
 
 function isLoaderNode(node) {
 	return node?.comfyClass === LOADER_NODE_NAME || node?.type === LOADER_NODE_NAME;
+}
+
+function isConfigNode(node) {
+	return node?.comfyClass === CONFIG_NODE_NAME || node?.type === CONFIG_NODE_NAME;
+}
+
+function hasOutputLinks(node) {
+	return (node?.outputs || []).some((output) => Array.isArray(output?.links) && output.links.length > 0);
+}
+
+function broadcastEnabled(node) {
+	return Boolean(node?.properties?.[BROADCAST_PROPERTY]);
+}
+
+function ensureAutoBroadcastForConfig(node) {
+	if (!isConfigNode(node)) return;
+	node.properties = node.properties || {};
+	if (node.properties[BROADCAST_USER_SET_PROPERTY] === true) return;
+	if (!hasOutputLinks(node)) {
+		node.properties[BROADCAST_PROPERTY] = true;
+	}
+}
+
+function notifyBroadcastChanged(node) {
+	markNodeDirty(node);
+	try {
+		window.dispatchEvent(new CustomEvent("gjj-variable-broadcast-updated", {
+			detail: { nodeId: node?.id, enabled: broadcastEnabled(node) },
+		}));
+	} catch (_) {}
+}
+
+function updateBroadcastButton(node) {
+	const button = node?.__gjjLoraBroadcastButton;
+	if (!button) return;
+	const enabled = broadcastEnabled(node);
+	button.dataset.value = enabled ? "true" : "false";
+	button.classList.toggle("on", enabled);
+	button.setAttribute("aria-pressed", String(enabled));
+	button.title = enabled
+		? "⚡ 已开启：未接真实连线时会广播到 LORA_CHAIN_CONFIG 类型的空输入口。"
+		: "⚡ 已关闭：只通过真实连线传递 LoRA 串联配置。";
+}
+
+function setBroadcastEnabled(node, enabled, userSet = true) {
+	if (!isConfigNode(node)) return;
+	node.properties = node.properties || {};
+	if (userSet) node.properties[BROADCAST_USER_SET_PROPERTY] = true;
+	node.properties[BROADCAST_PROPERTY] = Boolean(enabled);
+	updateBroadcastButton(node);
+	notifyBroadcastChanged(node);
+}
+
+function createBroadcastButton(node) {
+	const button = document.createElement("button");
+	button.className = "gjj-lora-broadcast";
+	button.type = "button";
+	button.textContent = "⚡";
+	button.setAttribute("aria-label", "切换 LoRA 配置广播");
+	button.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		setBroadcastEnabled(node, !broadcastEnabled(node), true);
+	});
+	node.__gjjLoraBroadcastButton = button;
+	updateBroadcastButton(node);
+	return button;
 }
 
 function normalizeRows(value) {
@@ -268,14 +340,38 @@ function normalizeClipOutput(output) {
 	output.tooltip = "开启 CLIP 端口后输出叠加 LoRA 后的 CLIP；未接入 CLIP 时这里会返回空值。";
 }
 
-function normalizeModelOutput(node) {
-	const output = node.outputs?.[0];
-	if (!output || String(output?.type || "").toUpperCase() !== "MODEL") {
+function normalizeOutputSlot(output, name, type, tooltip = "") {
+	if (!output) {
 		return;
 	}
-	output.name = MODEL_OUTPUT_NAME;
-	output.label = MODEL_OUTPUT_NAME;
-	output.localized_name = MODEL_OUTPUT_NAME;
+	output.name = name;
+	output.label = name;
+	output.localized_name = name;
+	output.type = type;
+	if (tooltip) output.tooltip = tooltip;
+}
+
+function ensureOutputAt(node, index, name, type, tooltip = "") {
+	while ((node.outputs || []).length <= index) {
+		node.addOutput?.(name, type);
+		if (!node.addOutput) {
+			node.outputs = node.outputs || [];
+			node.outputs.push({ name, type, links: null });
+		}
+	}
+	normalizeOutputSlot(node.outputs?.[index], name, type, tooltip);
+}
+
+function normalizeModelOutput(node) {
+	ensureOutputAt(node, 0, MODEL_OUTPUT_NAME, "MODEL", "按当前节点中的 LoRA 顺序串联加载后的模型输出。");
+}
+
+function ensureLoaderOutputs(node) {
+	if (!isLoaderNode(node)) return;
+	ensureOutputAt(node, 0, MODEL_OUTPUT_NAME, "MODEL", "按当前节点中的 LoRA 顺序串联加载后的模型输出。");
+	ensureOutputAt(node, 1, CLIP_OUTPUT_NAME, "CLIP", "输出叠加 LoRA 后的 CLIP；未接入 CLIP 时这里会返回空值。");
+	ensureOutputAt(node, 2, ICLORA_FACTOR_OUTPUT_NAME, "FLOAT", "链中最后一个 IC-LoRA 的 latent_downscale_factor；没有 IC-LoRA 或 metadata 缺失时为 1.0。");
+	ensureOutputAt(node, 3, ICLORA_MULTIPLE_OUTPUT_NAME, "INT", "round(latent_downscale_factor * 32)，可直接用于参考图预处理到像素整倍数。");
 }
 
 function clipPortsHaveLinks(node) {
@@ -344,8 +440,8 @@ function updateClipPortsButton(node) {
 	button.textContent = open ? "CLIP已开" : "⚙设置";
 	button.classList.toggle("on", open);
 	button.title = open
-		? "点击关闭 CLIP 输入/输出端口；已有连线时会保持开启。"
-		: "点击开启 CLIP 输入/输出端口。默认关闭，只串联加载 MODEL。";
+		? "点击关闭 CLIP 输入端口；已有 CLIP 连线时会保持开启。"
+		: "点击开启 CLIP 输入端口。输出口保持固定，默认只串联加载 MODEL。";
 }
 
 function applyClipPortVisibility(node) {
@@ -360,12 +456,10 @@ function applyClipPortVisibility(node) {
 
 	if (state.clipPortsOpen) {
 		ensureClipInput(node);
-		ensureClipOutput(node);
 	} else {
 		removeInputAt(node, findClipInputIndex(node));
-		removeOutputAt(node, findClipOutputIndex(node));
-		normalizeModelOutput(node);
 	}
+	ensureLoaderOutputs(node);
 
 	updateClipPortsButton(node);
 	markNodeDirty(node);
@@ -661,6 +755,9 @@ function createStyleTag(container) {
 		.gjj-lora-toolbar { display:flex; flex-direction:column; gap:6px; }
 		.gjj-lora-toolbar-main { display:flex; align-items:center; gap:6px; }
 		.gjj-lora-global-search { flex:1; min-width:0; background:#11181c; color:#dce7e2; border:1px solid #41535b; border-radius:6px; padding:4px 8px; font-size:11px; }
+		.gjj-lora-broadcast { width:26px; height:24px; flex:0 0 26px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:14px; line-height:20px; padding:0; text-align:center; }
+		.gjj-lora-broadcast.on, .gjj-lora-broadcast[data-value="true"] { border-color:#69b980; background:#20362f; color:#ecfff1; }
+		.gjj-lora-broadcast:hover { border-color:#6aa6b8; background:#2c3b43; }
 		.gjj-lora-refresh { padding:2px 8px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:11px; }
 		.gjj-lora-advanced-btn { padding:2px 8px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:11px; }
 		.gjj-lora-clip-btn { padding:2px 8px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:11px; white-space:nowrap; }
@@ -1038,6 +1135,8 @@ function renderUi(node) {
 	if (node.__gjjLoraAdvancedButton) {
 		node.__gjjLoraAdvancedButton.textContent = state.advancedOpen ? "收起" : "高级";
 	}
+	ensureAutoBroadcastForConfig(node);
+	updateBroadcastButton(node);
 	applyClipPortVisibility(node);
 	if (globalThis.__gjjLoraPopup?.state?.node === node) {
 		globalThis.__gjjLoraPopup.close();
@@ -1116,6 +1215,12 @@ function setupUi(node) {
 		renderUi(node);
 	});
 
+	let broadcastButton = null;
+	if (isConfigNode(node)) {
+		ensureAutoBroadcastForConfig(node);
+		broadcastButton = createBroadcastButton(node);
+	}
+
 	let clipPortsButton = null;
 	if (isLoaderNode(node)) {
 		clipPortsButton = document.createElement("button");
@@ -1129,6 +1234,9 @@ function setupUi(node) {
 	}
 
 	toolbarMain.appendChild(globalSearch);
+	if (broadcastButton) {
+		toolbarMain.appendChild(broadcastButton);
+	}
 	toolbarMain.appendChild(refreshButton);
 	toolbarMain.appendChild(advancedButton);
 	if (clipPortsButton) {
@@ -1168,6 +1276,7 @@ function setupUi(node) {
 	node.__gjjLoraRulesInput = rulesInput;
 	node.__gjjLoraAdvancedPanel = advancedPanel;
 	node.__gjjLoraAdvancedButton = advancedButton;
+	node.__gjjLoraBroadcastButton = broadcastButton;
 	node.__gjjLoraClipPortsButton = clipPortsButton;
 	const originalOnSerialize = node.onSerialize;
 	node.onSerialize = function (serializedNode) {
@@ -1191,6 +1300,10 @@ function setupUi(node) {
 		serializedNode.properties[GLOBAL_SEARCH_PROPERTY] = String(ensureNodeState(this).globalSearch || "");
 		serializedNode.properties[GROUP_RULES_PROPERTY] = ensureNodeState(this).groupRulesText;
 		serializedNode.properties[ADVANCED_OPEN_PROPERTY] = ensureNodeState(this).advancedOpen;
+		if (isConfigNode(this)) {
+			serializedNode.properties[BROADCAST_PROPERTY] = broadcastEnabled(this);
+			serializedNode.properties[BROADCAST_USER_SET_PROPERTY] = this.properties?.[BROADCAST_USER_SET_PROPERTY] === true;
+		}
 		if (isLoaderNode(this)) {
 			serializedNode.properties[CLIP_PORTS_OPEN_PROPERTY] = Boolean(ensureNodeState(this).clipPortsOpen);
 		}
@@ -1209,6 +1322,21 @@ app.registerExtension({
 	async beforeRegisterNodeDef(nodeType, nodeData) {
 		if (!TARGET_NODES.has(nodeData?.name)) {
 			return;
+		}
+		if (nodeData?.name === LOADER_NODE_NAME) {
+			nodeData.output = ["MODEL", "CLIP", "FLOAT", "INT"];
+			nodeData.output_name = [
+				MODEL_OUTPUT_NAME,
+				CLIP_OUTPUT_NAME,
+				ICLORA_FACTOR_OUTPUT_NAME,
+				ICLORA_MULTIPLE_OUTPUT_NAME,
+			];
+			nodeData.output_tooltips = [
+				"按当前节点中的 LoRA 顺序串联加载后的模型输出。",
+				"输出叠加 LoRA 后的 CLIP；未接入 CLIP 时这里会返回空值。",
+				"链中最后一个 IC-LoRA 的 latent_downscale_factor；没有 IC-LoRA 或 metadata 缺失时为 1.0。",
+				"round(latent_downscale_factor * 32)，可直接用于参考图预处理到像素整倍数。",
+			];
 		}
 
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
@@ -1234,8 +1362,20 @@ app.registerExtension({
 					state.clipPortsOpen = true;
 					this.properties[CLIP_PORTS_OPEN_PROPERTY] = true;
 				}
+				ensureAutoBroadcastForConfig(this);
 				setupUi(this);
 				renderUi(this);
+			}, 0);
+			return result;
+		};
+
+		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+		nodeType.prototype.onConnectionsChange = function (...args) {
+			const result = originalOnConnectionsChange?.apply(this, args);
+			setTimeout(() => {
+				ensureAutoBroadcastForConfig(this);
+				updateBroadcastButton(this);
+				markNodeDirty(this);
 			}, 0);
 			return result;
 		};

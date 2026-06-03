@@ -41,7 +41,61 @@ const LIVE_KIND_LABELS = {
 	other: "对象",
 	mixed: "混合对象",
 };
+const KIND_TYPE_LABELS = {
+	image: "IMAGE",
+	mask: "MASK",
+	text: "STRING",
+	audio: "AUDIO",
+	video: "VIDEO",
+	mixed: "MIXED",
+	other: "OBJECT",
+};
+const KIND_EMOJIS = {
+	image: "🖼️",
+	mask: "🎭",
+	text: "📝",
+	audio: "🎧",
+	video: "🎬",
+	mixed: "🧩",
+	other: "🧩",
+};
+const ORDINAL_EMOJIS = ["", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"];
 let lastPromptId = null;
+
+function ordinalEmoji(index) {
+	const value = Number(index);
+	if (Number.isInteger(value) && value > 0 && value < ORDINAL_EMOJIS.length) {
+		return ORDINAL_EMOJIS[value];
+	}
+	return `${Number.isFinite(value) && value > 0 ? Math.floor(value) : 1}.`;
+}
+
+function normalizePreviewTypeLabel(value, fallback = "OBJECT") {
+	const text = String(value || "").trim();
+	if (!text || text === "*") return fallback;
+	const first = text.split(",").map((part) => part.trim()).find((part) => part && part !== "*") || text;
+	return first.replace(/^converted-widget:/i, "").trim().toUpperCase() || fallback;
+}
+
+function previewItemKind(item) {
+	return String(item?.source_kind || item?.kind || "").toLowerCase() || "other";
+}
+
+function previewItemTypeLabel(item, fallbackKind = "") {
+	const kind = previewItemKind(item) || fallbackKind || "other";
+	const explicit = item?.type_label || item?.data_type || item?.source_type || item?.type;
+	return normalizePreviewTypeLabel(explicit, KIND_TYPE_LABELS[kind] || KIND_TYPE_LABELS.other);
+}
+
+function previewItemTypeEmoji(item, fallbackKind = "") {
+	const kind = previewItemKind(item) || fallbackKind || "other";
+	return String(item?.type_emoji || KIND_EMOJIS[kind] || KIND_EMOJIS.other);
+}
+
+function previewItemDisplayTitle(item, index = 0) {
+	const ordinal = String(item?.ordinal_emoji || ordinalEmoji(Number(item?.ordinal || index + 1))).trim();
+	return `${ordinal} ${previewItemTypeEmoji(item)} ${previewItemTypeLabel(item)}`.trim();
+}
 
 function getMode(node) {
 	const mode = String(node?.properties?.[MODE_PROPERTY] || MODE_PREVIEW);
@@ -422,14 +476,17 @@ function buildLivePreviewItems(event, input, inputOrder, sourceInfo) {
 	const output = detail.output || detail || {};
 	const previewItems = normalizePreviewItemsPayload(output.preview_items);
 	if (previewItems.length) {
-		return previewItems.map((item, index) => ({
-			...item,
-			title:
-				item.title ||
-				`项目 ${inputOrder + 1}.${index + 1} · ${
-					LIVE_KIND_LABELS[item.kind] || "对象"
-				}`,
-		}));
+		return previewItems.map((item, index) => {
+			const normalized = {
+				...item,
+				ordinal: item.ordinal || inputOrder + index + 1,
+				source_type: item.source_type || sourceInfo?.type || item.type_label,
+			};
+			return {
+				...normalized,
+				title: previewItemDisplayTitle(normalized, inputOrder + index),
+			};
+		});
 	}
 
 	const previewMedia = firstMediaPayload(
@@ -472,15 +529,19 @@ function buildLivePreviewItems(event, input, inputOrder, sourceInfo) {
 		return [];
 	}
 
-	const sourceLabel = String(sourceInfo?.label || input?.label || input?.name || "").trim();
-	const label = LIVE_KIND_LABELS[kind] || sourceLabel || "对象";
-	const title = `项目 ${inputOrder + 1} · ${label}`;
+	const sourceType = normalizePreviewTypeLabel(sourceInfo?.type, KIND_TYPE_LABELS[kind] || KIND_TYPE_LABELS.other);
 	const item = {
 		kind,
 		source_kind: kind,
-		title,
+		source_type: sourceType,
+		type_label: sourceType,
+		type_emoji: KIND_EMOJIS[kind] || KIND_EMOJIS.other,
+		ordinal: inputOrder + 1,
+		ordinal_emoji: ordinalEmoji(inputOrder + 1),
+		title: "",
 		text,
 	};
+	item.title = previewItemDisplayTitle(item, inputOrder);
 	if (images.length) item.images = images;
 	if (audio.length) item.audio = audio;
 	if (video.length) item.video = video;
@@ -1312,19 +1373,18 @@ function pixelTextFromText(text) {
 	return "";
 }
 
-function previewItemOverlayTitle(item, images, audio, video, text) {
+function previewItemOverlayTitle(item, images, audio, video, text, index = 0) {
+	const title = previewItemDisplayTitle(item, index);
 	if (images.length) {
-		const sourceKind = String(item?.source_kind || item?.kind || "").toLowerCase();
-		const emoji = sourceKind === "mask" ? "🎭" : "🖼️";
 		const pixels = pixelTextFromMediaItem(images[0]) || pixelTextFromText(text) || pixelTextFromText(item?.title);
-		return pixels ? `${emoji} ${pixels}` : emoji;
+		return pixels ? `${title} · ${pixels}` : title;
 	}
 	if (video.length) {
 		const pixels = pixelTextFromMediaItem(video[0]) || pixelTextFromText(text) || pixelTextFromText(item?.title);
-		return pixels ? `🎬 ${pixels}` : "🎬 视频";
+		return pixels ? `${title} · ${pixels}` : title;
 	}
-	if (audio.length) return "🎧 音频";
-	return item?.title || "";
+	if (audio.length) return title;
+	return title;
 }
 
 function makeTilePageButton(label, title, side) {
@@ -1983,6 +2043,7 @@ function renderPreviewItems(node, items) {
 		const audio = normalizeMediaPayload(item.audio);
 		const video = normalizeMediaPayload(item.video);
 		const text = String(item.text || "").trim();
+		const title = previewItemDisplayTitle(item, index);
 		const sequenceImage = images.find(isSequenceMediaItem);
 		if (sequenceImage && !audio.length && !video.length) {
 			appendPreviewTileImage(node, card, sequenceImage, "序列");
@@ -2000,12 +2061,12 @@ function renderPreviewItems(node, items) {
 
 		if (!images.length && !audio.length && !video.length) {
 			card.style.cursor = "text";
-			appendPreviewTileText(card, text || item.title || `项目 ${index + 1}`);
+			appendPreviewTileText(card, text || title);
 		}
 		if (images.length || audio.length || video.length) {
-			appendPreviewOverlay(card, previewItemOverlayTitle(item, images, audio, video, text), "");
+			appendPreviewOverlay(card, previewItemOverlayTitle(item, images, audio, video, text, index), "");
 		} else {
-			appendPreviewOverlay(card, item.title || `项目 ${index + 1}`, "");
+			appendPreviewOverlay(card, title, "");
 		}
 
 		grid.appendChild(card);

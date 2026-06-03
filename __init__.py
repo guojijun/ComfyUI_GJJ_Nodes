@@ -44,6 +44,347 @@ def _register_gjj_help_api():
 	server._gjj_node_help_api_registered = True
 _register_gjj_help_api()
 
+def _gjj_package_root():
+	from pathlib import Path
+	return Path(__file__).resolve().parent
+
+def _gjj_package_workflows_directory() -> str:
+	import os
+	return os.path.abspath(str(_gjj_package_root() / "workflows"))
+
+def _gjj_user_settings_path():
+	return _gjj_package_root() / "presets" / "gjj_user_settings.json"
+
+def _gjj_default_user_settings() -> dict:
+	return {
+		"version": 1,
+		"workflow_screenshot": {
+			"directory": "workflows",
+			"filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
+		},
+		"nodes": {},
+		"user": {},
+	}
+
+def _gjj_merge_dict(defaults: dict, value) -> dict:
+	if not isinstance(value, dict):
+		value = {}
+	result = {}
+	for key, default_value in defaults.items():
+		if isinstance(default_value, dict):
+			result[key] = _gjj_merge_dict(default_value, value.get(key))
+		else:
+			result[key] = value.get(key, default_value)
+	for key, item in value.items():
+		if key not in result:
+			result[key] = item
+	return result
+
+def _gjj_read_user_settings() -> dict:
+	import json
+	path = _gjj_user_settings_path()
+	data = {}
+	if path.is_file():
+		try:
+			data = json.loads(path.read_text(encoding="utf-8"))
+		except Exception:
+			data = {}
+	return _gjj_merge_dict(_gjj_default_user_settings(), data)
+
+def _gjj_write_user_settings(data: dict) -> dict:
+	import json
+	import os
+	settings = _gjj_merge_dict(_gjj_default_user_settings(), data)
+	path = _gjj_user_settings_path()
+	path.parent.mkdir(parents=True, exist_ok=True)
+	tmp = path.with_suffix(path.suffix + ".tmp")
+	tmp.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+	os.replace(str(tmp), str(path))
+	return settings
+
+def _gjj_expand_setting_path(value: str, fallback: str) -> str:
+	import os
+	raw = str(value or "").strip()
+	if not raw:
+		return os.path.abspath(fallback)
+	expanded = os.path.expanduser(os.path.expandvars(raw))
+	if not os.path.isabs(expanded):
+		expanded = str(_gjj_package_root() / expanded)
+	return os.path.abspath(expanded)
+
+def _gjj_workflow_screenshot_settings() -> dict:
+	settings = _gjj_read_user_settings()
+	section = settings.get("workflow_screenshot") if isinstance(settings, dict) else {}
+	if not isinstance(section, dict):
+		section = {}
+	return {
+		"directory": str(section.get("directory") or ""),
+		"filename_template": str(section.get("filename_template") or "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png"),
+	}
+
+def _register_gjj_user_settings_api():
+	try:
+		from aiohttp import web
+		from server import PromptServer
+	except Exception as exc:
+		print(f"[GJJ] 用户参数存储接口注册失败：{exc}")
+		return
+
+	server = getattr(PromptServer, "instance", None)
+	if server is None or getattr(server, "_gjj_user_settings_api_registered", False):
+		return
+
+	@server.routes.get("/gjj/user_settings")
+	async def gjj_user_settings_get(_request):
+		settings = _gjj_write_user_settings(_gjj_read_user_settings())
+		return web.json_response({
+			"ok": True,
+			"path": str(_gjj_user_settings_path()),
+			"settings": settings,
+		})
+
+	@server.routes.post("/gjj/user_settings")
+	async def gjj_user_settings_post(request):
+		try:
+			data = await request.json()
+			settings = _gjj_read_user_settings()
+			if isinstance(data.get("settings"), dict):
+				settings = _gjj_merge_dict(settings, data.get("settings"))
+			else:
+				section = str(data.get("section") or "").strip()
+				values = data.get("values")
+				if not section or not isinstance(values, dict):
+					raise ValueError("缺少 section 或 values。")
+				current = settings.get(section)
+				if not isinstance(current, dict):
+					current = {}
+				current.update(values)
+				settings[section] = current
+			settings = _gjj_write_user_settings(settings)
+			return web.json_response({
+				"ok": True,
+				"path": str(_gjj_user_settings_path()),
+				"settings": settings,
+			})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	server._gjj_user_settings_api_registered = True
+_register_gjj_user_settings_api()
+
+def _register_gjj_workflow_screenshot_api():
+	try:
+		import base64
+		import os
+		import re
+		import subprocess
+		import sys
+		from pathlib import Path
+		from urllib.parse import urlencode
+		import folder_paths
+		from aiohttp import web
+		from server import PromptServer
+	except Exception as exc:
+		print(f"[GJJ] 工作流截图接口注册失败：{exc}")
+		return
+
+	server = getattr(PromptServer, "instance", None)
+	if server is None or getattr(server, "_gjj_workflow_screenshot_api_registered", False):
+		return
+
+	SAFE_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1F]+')
+	LEGACY_DEFAULT_SUBDIR = os.path.join("GJJ", "workflow_screenshots")
+
+	def default_directory() -> str:
+		config = _gjj_workflow_screenshot_settings()
+		return _gjj_expand_setting_path(config.get("directory") or "", _gjj_package_workflows_directory())
+
+	def filename_template() -> str:
+		return _gjj_workflow_screenshot_settings().get("filename_template") or "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png"
+
+	def legacy_default_directory() -> str:
+		return os.path.abspath(os.path.join(folder_paths.get_output_directory(), LEGACY_DEFAULT_SUBDIR))
+
+	def clean_filename(value: str) -> str:
+		name = os.path.basename(str(value or "").strip()) or "GJJ_workflow.png"
+		name = SAFE_FILENAME_RE.sub("_", name).strip(" .")
+		if not name:
+			name = "GJJ_workflow.png"
+		if not name.lower().endswith(".png"):
+			name += ".png"
+		return name[:180]
+
+	def resolve_directory(value: str | None) -> str:
+		raw = str(value or "").strip()
+		if not raw:
+			path = default_directory()
+		else:
+			path = os.path.abspath(os.path.expanduser(os.path.expandvars(raw)))
+		os.makedirs(path, exist_ok=True)
+		return path
+
+	def png_path(directory: str, filename: str) -> str:
+		base = resolve_directory(directory)
+		name = clean_filename(filename)
+		path = os.path.abspath(os.path.join(base, name))
+		if os.path.dirname(path) != base:
+			raise ValueError("文件名不安全。")
+		return path
+
+	def newest_png_path(directory: str) -> str:
+		base = resolve_directory(directory)
+		newest = ""
+		newest_mtime = -1.0
+		for entry in Path(base).glob("*.png"):
+			try:
+				mtime = entry.stat().st_mtime
+			except OSError:
+				continue
+			if mtime > newest_mtime:
+				newest = str(entry)
+				newest_mtime = mtime
+		return os.path.abspath(newest) if newest else ""
+
+	def item_url(directory: str, filename: str, mtime: float) -> str:
+		query = urlencode({
+			"directory": directory,
+			"filename": filename,
+			"mtime": int(mtime),
+		})
+		return f"/gjj/workflow_screenshot/file?{query}"
+
+	def decode_png_data(value: str) -> bytes:
+		text = str(value or "")
+		if "," in text and text.lower().startswith("data:"):
+			text = text.split(",", 1)[1]
+		data = base64.b64decode(text, validate=False)
+		if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+			raise ValueError("只支持 PNG 工作流截图。")
+		return data
+
+	@server.routes.get("/gjj/workflow_screenshot/info")
+	async def gjj_workflow_screenshot_info(_request):
+		directory = default_directory()
+		os.makedirs(directory, exist_ok=True)
+		return web.json_response({
+			"default_directory": directory,
+			"package_default_directory": _gjj_package_workflows_directory(),
+			"legacy_default_directory": legacy_default_directory(),
+			"directory": directory,
+			"settings_path": str(_gjj_user_settings_path()),
+			"workflow_screenshot": {
+				"directory": directory,
+				"raw_directory": _gjj_workflow_screenshot_settings().get("directory") or "",
+				"filename_template": filename_template(),
+			},
+		})
+
+	@server.routes.post("/gjj/workflow_screenshot/save")
+	async def gjj_workflow_screenshot_save(request):
+		try:
+			data = await request.json()
+			directory = resolve_directory(data.get("directory"))
+			filename = clean_filename(data.get("filename"))
+			path = png_path(directory, filename)
+			raw = decode_png_data(data.get("image") or data.get("png") or "")
+			with open(path, "wb") as handle:
+				handle.write(raw)
+			stat = os.stat(path)
+			server._gjj_workflow_screenshot_last_path = path
+			return web.json_response({
+				"ok": True,
+				"filename": filename,
+				"path": path,
+				"directory": directory,
+				"size": stat.st_size,
+				"mtime": stat.st_mtime,
+				"url": item_url(directory, filename, stat.st_mtime),
+			})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.get("/gjj/workflow_screenshot/list")
+	async def gjj_workflow_screenshot_list(request):
+		try:
+			directory = resolve_directory(request.query.get("directory"))
+			items = []
+			for entry in sorted(Path(directory).glob("*.png"), key=lambda item: item.stat().st_mtime, reverse=True):
+				try:
+					stat = entry.stat()
+				except OSError:
+					continue
+				items.append({
+					"filename": entry.name,
+					"path": str(entry),
+					"directory": directory,
+					"size": stat.st_size,
+					"mtime": stat.st_mtime,
+					"url": item_url(directory, entry.name, stat.st_mtime),
+				})
+			return web.json_response({
+				"ok": True,
+				"directory": directory,
+				"default_directory": default_directory(),
+				"package_default_directory": _gjj_package_workflows_directory(),
+				"legacy_default_directory": legacy_default_directory(),
+				"settings_path": str(_gjj_user_settings_path()),
+				"workflow_screenshot": {
+					"directory": default_directory(),
+					"raw_directory": _gjj_workflow_screenshot_settings().get("directory") or "",
+					"filename_template": filename_template(),
+				},
+				"items": items,
+			})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc), "items": []}, status=400)
+
+	@server.routes.get("/gjj/workflow_screenshot/file")
+	async def gjj_workflow_screenshot_file(request):
+		try:
+			path = png_path(request.query.get("directory"), request.query.get("filename"))
+			if not os.path.exists(path):
+				return web.Response(status=404, text="not found")
+			return web.FileResponse(path, headers={"Cache-Control": "no-store"})
+		except Exception as exc:
+			return web.Response(status=400, text=str(exc))
+
+	@server.routes.post("/gjj/workflow_screenshot/open_dir")
+	async def gjj_workflow_screenshot_open_dir(request):
+		try:
+			data = await request.json()
+			directory = resolve_directory(data.get("directory"))
+			select_path = ""
+			filename = str(data.get("filename") or "").strip()
+			if filename:
+				try:
+					candidate = png_path(directory, filename)
+					if os.path.exists(candidate):
+						select_path = candidate
+				except Exception:
+					select_path = ""
+			if not select_path:
+				last_path = os.path.abspath(str(getattr(server, "_gjj_workflow_screenshot_last_path", "") or ""))
+				if os.path.exists(last_path) and os.path.dirname(last_path) == directory:
+					select_path = last_path
+			if not select_path:
+				select_path = newest_png_path(directory)
+
+			if sys.platform.startswith("win"):
+				if select_path and os.path.exists(select_path):
+					subprocess.Popen(["explorer.exe", f"/select,{select_path}"])
+				else:
+					subprocess.Popen(["explorer.exe", directory])
+			elif sys.platform == "darwin":
+				subprocess.Popen(["open", directory])
+			else:
+				subprocess.Popen(["xdg-open", directory])
+			return web.json_response({"ok": True, "directory": directory, "selected": select_path})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	server._gjj_workflow_screenshot_api_registered = True
+_register_gjj_workflow_screenshot_api()
+
 def _register_gjj_summon_model_api():
 	try:
 		import os

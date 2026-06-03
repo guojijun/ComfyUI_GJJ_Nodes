@@ -572,6 +572,59 @@ function escapeText(text, fallback = "") {
 	return raw || fallback;
 }
 
+function hasHelpValue(help, keys) {
+	for (const key of keys) {
+		const value = help?.[key];
+		if (Array.isArray(value) && value.filter(Boolean).length) {
+			return true;
+		}
+		if (typeof value === "string" && value.trim()) {
+			return true;
+		}
+		if (value && typeof value === "object" && Object.keys(value).length) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function hasDeclaredModelInfo(meta) {
+	return hasHelpValue(meta?.help, [
+		"models",
+		"model",
+		"required_models",
+		"requiredModels",
+		"missing_models",
+		"missingModels",
+		"model_download_url",
+		"modelDownloadUrl",
+		"🌏模型下载",
+		"🌏模型下载：",
+	]);
+}
+
+function hasDeclaredDependencyInfo(meta) {
+	return hasHelpValue(meta?.help, [
+		"dependencies",
+		"depends",
+		"dependency",
+		"missing_dependencies",
+		"missingDependencies",
+		"optional_dependencies",
+		"optionalDependencies",
+		"runtime",
+		"requirements",
+	]);
+}
+
+function dynamicModelTreeOnly(meta) {
+	const help = meta?.help || {};
+	return help.dynamic_model_tree_only === true
+		|| help.dynamicModelTreeOnly === true
+		|| help.model_tree_dynamic_only === true
+		|| help.modelTreeDynamicOnly === true;
+}
+
 function firstWarningLine(text) {
 	const line = String(text || "").split(/\r?\n/).map((item) => item.trim()).find(Boolean) || "";
 	return line.startsWith("⚠️") ? line : "";
@@ -598,6 +651,10 @@ function formatHelpText(text, fallback = "") {
 		}
 	}
 	return normalized;
+}
+
+function isHttpUrl(text) {
+	return /^https?:\/\//i.test(String(text || "").trim());
 }
 
 function normalizeComparableHelpText(text) {
@@ -755,34 +812,52 @@ function currentModelEntries(node, meta) {
 }
 
 function dependencyEntries(meta) {
-	const declared = meta?.help?.dependencies || meta?.help?.depends || meta?.help?.dependency;
-	if (Array.isArray(declared) && declared.length) {
-		return declared.map((item) => String(item || "").trim()).filter(Boolean);
-	}
-	if (typeof declared === "string" && declared.trim()) {
-		return declared.split(/\r?\n|[,，]/).map((item) => item.trim()).filter(Boolean);
-	}
-
-	const text = [
-		meta?.name,
-		meta?.displayName,
-		meta?.description,
-		...[...(meta?.inputs?.values?.() || [])].map((input) => `${input?.label || ""} ${input?.tooltip || ""}`),
-	].join(" ");
-	const inferred = [];
-	const patterns = [
-		["Ollama", /ollama/i],
-		["huggingface_hub（自动下载模型时需要）", /hugging\s*face|huggingface|自动下载/i],
-		["transformers / tokenizers（大语言、语音或 ASR 模型常用）", /qwen|asr|tokenizer|transformer/i],
-		["vendored 运行时（随 GJJ/vendor 打包）", /vendored|内置|零依赖|迁移/i],
-		["ffmpeg（视频/音频封装时需要）", /视频|音频|fps|mp4|webm|ffmpeg/i],
-	];
-	for (const [label, pattern] of patterns) {
-		if (pattern.test(text)) {
-			inferred.push(label);
+	const normalizeItem = (item) => {
+		if (typeof item === "string") {
+			return item.trim();
 		}
+		if (!item || typeof item !== "object") {
+			return "";
+		}
+		const label = escapeText(
+			item.display_name || item.displayName || item.label || item.name || item.package_name || item.packageName || item.module_name || item.moduleName || "",
+			"依赖"
+		);
+		const description = escapeText(item.description || item.tooltip || item.note || "");
+		return description ? `${label}：${description}` : label;
+	};
+	const entries = [];
+	const addEntries = (value) => {
+		if (Array.isArray(value)) {
+			entries.push(...value.map(normalizeItem).filter(Boolean));
+			return;
+		}
+		if (typeof value === "string" && value.trim()) {
+			entries.push(...value.split(/\r?\n|[,，]/).map((item) => item.trim()).filter(Boolean));
+			return;
+		}
+		if (value && typeof value === "object") {
+			entries.push(...Object.entries(value).map(([label, detail]) => {
+				if (typeof detail === "string") {
+					return detail.trim() ? `${label}：${detail.trim()}` : label;
+				}
+				return normalizeItem({ label, ...(detail || {}) });
+			}).filter(Boolean));
+		}
+	};
+	addEntries(meta?.help?.dependencies);
+	addEntries(meta?.help?.depends);
+	addEntries(meta?.help?.dependency);
+	addEntries(meta?.help?.missing_dependencies);
+	addEntries(meta?.help?.missingDependencies);
+	addEntries(meta?.help?.optional_dependencies);
+	addEntries(meta?.help?.optionalDependencies);
+	addEntries(meta?.help?.runtime);
+	addEntries(meta?.help?.requirements);
+	if (entries.length) {
+		return [...new Set(entries)];
 	}
-	return inferred;
+	return [];
 }
 
 function createHelpSection(title, content) {
@@ -1261,19 +1336,33 @@ function showHelpDialog(node) {
 		body.appendChild(createHelpSection("安装命令", formatHelpText(meta.help.install_cmd)));
 	}
 
-	// 创建用到的模型内容
-	const modelEntries = currentHelpModelEntries(node, meta);
-	const modelContent = createModelHelpContent(
-		Array.isArray(modelEntries) ? modelEntries : [],
-		"未从当前节点面板识别到模型选择项或模型输入口。",
-		meta?.help?.model_download_url || DEFAULT_MODEL_DOWNLOAD_URL
-	);
+	const dynamicModels = dynamicModelEntries(node, meta);
+	const modelEntries = dynamicModels.length
+		? dynamicModels
+		: (dynamicModelTreeOnly(meta) ? [] : (hasDeclaredModelInfo(meta) ? currentModelEntries(node, meta) : []));
+	const modelDownloadInfo = String(
+		meta?.help?.model_download_url
+		|| meta?.help?.modelDownloadUrl
+		|| meta?.help?.["🌏模型下载"]
+		|| meta?.help?.["🌏模型下载："]
+		|| ""
+	).trim();
+	const modelDownloadUrl = isHttpUrl(modelDownloadInfo) ? modelDownloadInfo : "";
+	if (modelEntries.length) {
+		body.appendChild(createHelpSection(
+			"用到的模型",
+			createModelHelpContent(modelEntries, "", modelDownloadUrl || DEFAULT_MODEL_DOWNLOAD_URL)
+		));
+	} else if (modelDownloadUrl) {
+		body.appendChild(createHelpSection("用到的模型", createModelDownloadLink(modelDownloadUrl)));
+	} else if (modelDownloadInfo) {
+		body.appendChild(createHelpSection("用到的模型", formatHelpText(modelDownloadInfo)));
+	}
 
-	body.appendChild(createHelpSection("用到的模型", modelContent));
-	body.appendChild(createHelpSection("依赖", createHelpList(
-		dependencyEntries(meta),
-		"未声明额外依赖；按 GJJ 与 ComfyUI 基础环境运行。"
-	)));
+	const dependencies = hasDeclaredDependencyInfo(meta) ? dependencyEntries(meta) : [];
+	if (dependencies.length) {
+		body.appendChild(createHelpSection("依赖", createHelpList(dependencies, "")));
+	}
 
 	dialog.append(header, body);
 	overlay.appendChild(dialog);

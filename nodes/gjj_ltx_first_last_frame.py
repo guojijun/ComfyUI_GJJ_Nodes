@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from typing import Any
 
 NODE_NAME = "GJJ_LTX_FirstLastFrame"
 WEB_DIRECTORY = "./web"
 MAX_DYNAMIC_IMAGES = 64
+COMPAT_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
+DEFAULT_IMAGE_COMPRESSION = 18
 
 
 class AnyType(str):
@@ -22,7 +25,7 @@ class FlexibleOptionalInputType(dict):
     """允许 JS 前端动态创建 image_02 / image_03 ... 输入口。
 
     注意：前端显示的动态参考图全部按 image_xx 命名。
-    这里对 image_xx 明确返回 IMAGE，而不是 *，避免前端出现 UNKNOWN/空插槽。
+    这里对 image_xx 明确返回 GJJ_BATCH_IMAGE,IMAGE，兼容普通 IMAGE 和 GJJ 批量图片。
     """
 
     def __init__(self, data: dict[str, Any] | None = None):
@@ -35,7 +38,7 @@ class FlexibleOptionalInputType(dict):
         if key in self.data:
             return self.data[key]
         if str(key).startswith("image_"):
-            return ("IMAGE", {"forceInput": True})
+            return (COMPAT_IMAGE_TYPE, {"forceInput": True})
         return (any_type, {"forceInput": True})
 
     def __contains__(self, key: object) -> bool:
@@ -59,6 +62,16 @@ def _runtime_import_torch():
         import torch
 
         return torch, None
+    except Exception as exc:  # pragma: no cover
+        return None, exc
+
+
+def _runtime_import_av():
+    """运行时加载 PyAV；缺失时跳过 LTXVPreprocess 压缩而不是阻断节点。"""
+    try:
+        import av
+
+        return av, None
     except Exception as exc:  # pragma: no cover
         return None, exc
 
@@ -108,11 +121,11 @@ class GJJ_LTX_FirstLastFrame:
                     },
                 ),
                 "image_01": (
-                    "IMAGE",
+                    COMPAT_IMAGE_TYPE,
                     {
                         "forceInput": True,
                         "display_name": "🖼️ 01",
-                        "tooltip": "参考图 1。连接图片后自动增加下一个参考图输入。",
+                        "tooltip": "参考图 1。支持普通 IMAGE 和 GJJ 批量图片；连接图片后自动增加下一个来源输入。",
                     },
                 ),
             },
@@ -330,18 +343,31 @@ class GJJ_LTX_FirstLastFrame:
 
     @classmethod
     def _config_for_index(
-        cls, configs: list[dict[str, Any]], zero_index: int, auto_frame: int
-    ) -> tuple[int, float]:
+        cls,
+        configs: list[dict[str, Any]],
+        zero_index: int,
+        auto_frame: int,
+        default_strength: float = 0.7,
+    ) -> tuple[int, float, int]:
         cfg = configs[zero_index] if zero_index < len(configs) else {}
         try:
             frame = int(cfg.get("frame", auto_frame))
         except Exception:
             frame = int(auto_frame)
         try:
-            strength = float(cfg.get("strength", 0.7))
+            strength = float(cfg.get("strength", default_strength))
         except Exception:
-            strength = 0.7
-        return frame, max(0.0, min(1.0, strength))
+            strength = float(default_strength)
+        try:
+            compression = int(
+                cfg.get(
+                    "img_compression",
+                    cfg.get("compression", cfg.get("crf", DEFAULT_IMAGE_COMPRESSION)),
+                )
+            )
+        except Exception:
+            compression = DEFAULT_IMAGE_COMPRESSION
+        return frame, max(0.0, min(1.0, strength)), max(0, min(100, compression))
 
     @classmethod
     def _split_batch_images(cls, images: Any) -> list[Any]:
@@ -362,6 +388,102 @@ class GJJ_LTX_FirstLastFrame:
                 cls._log(f"批次第 {i + 1} 张图片为空/全黑，已忽略。")
         return out
 
+    @classmethod
+    def _flatten_image_source(
+        cls, value: Any, source: str, default_strength: float = 0.7
+    ) -> list[dict[str, Any]]:
+        if cls._is_empty_loader_placeholder(value):
+            cls._log(f"{source} 是 64x64 空占位图，已忽略。")
+            return []
+        frames = cls._split_batch_images(value)
+        if not frames:
+            return []
+        total = len(frames)
+        items: list[dict[str, Any]] = []
+        for index, image in enumerate(frames, start=1):
+            label = source if total == 1 else f"{source} 第 {index}/{total} 张"
+            items.append(
+                {
+                    "image": image,
+                    "source": label,
+                    "default_strength": float(default_strength),
+                }
+            )
+        return items
+
+    @classmethod
+    def _ltxv_preprocess_image(cls, image: Any, compression: int) -> Any:
+        compression = int(max(0, min(100, compression)))
+        if compression <= 0 or not cls._is_valid_image(image):
+            return image
+
+        torch, torch_exc = _runtime_import_torch()
+        if torch is None:
+            cls._warn(f"无法加载 torch，已跳过 LTXVPreprocess 压缩：{torch_exc}")
+            return image
+        av, av_exc = _runtime_import_av()
+        if av is None:
+            cls._warn(f"当前环境缺少 PyAV，已跳过 LTXVPreprocess 压缩：{av_exc}")
+            return image
+
+        processed = []
+        try:
+            batch = int(image.shape[0])
+        except Exception:
+            batch = 1
+
+        for batch_index in range(batch):
+            frame = image[batch_index]
+            try:
+                height = (int(frame.shape[0]) // 2) * 2
+                width = (int(frame.shape[1]) // 2) * 2
+                if height <= 0 or width <= 0:
+                    processed.append(frame[..., :3])
+                    continue
+                image_array = (
+                    frame[:height, :width, :3].clamp(0.0, 1.0) * 255.0
+                ).byte().cpu().numpy()
+
+                buffer = BytesIO()
+                container = av.open(buffer, mode="w", format="mp4")
+                try:
+                    stream = container.add_stream("libx264", rate=1)
+                    stream.width = width
+                    stream.height = height
+                    stream.pix_fmt = "yuv420p"
+                    stream.options = {"crf": str(compression), "preset": "ultrafast"}
+                    av_frame = av.VideoFrame.from_ndarray(image_array, format="rgb24")
+                    for packet in stream.encode(av_frame):
+                        container.mux(packet)
+                    for packet in stream.encode(None):
+                        container.mux(packet)
+                finally:
+                    container.close()
+
+                buffer.seek(0)
+                reader = av.open(buffer, mode="r")
+                try:
+                    decoded = None
+                    for decoded_frame in reader.decode(video=0):
+                        decoded = decoded_frame.to_ndarray(format="rgb24")
+                        break
+                finally:
+                    reader.close()
+                if decoded is None:
+                    processed.append(frame[:height, :width, :3])
+                    continue
+                processed.append(
+                    torch.tensor(decoded, dtype=image.dtype, device=image.device) / 255.0
+                )
+            except Exception as exc:
+                cls._warn(f"LTXVPreprocess 压缩第 {batch_index + 1} 张失败，已使用原图：{exc}")
+                processed.append(frame[..., :3])
+
+        try:
+            return torch.stack(processed, dim=0).contiguous()
+        except Exception:
+            return image
+
     @staticmethod
     def _dynamic_image_sort_key(name: str) -> tuple[int, int]:
         # 支持 image_01 / image_1，避免旧工作流失效。
@@ -374,17 +496,15 @@ class GJJ_LTX_FirstLastFrame:
             return (1, 999999)
 
     @classmethod
-    def _collect_dynamic_images(cls, kwargs: dict[str, Any]) -> list[tuple[str, Any]]:
+    def _collect_dynamic_images(cls, kwargs: dict[str, Any]) -> list[dict[str, Any]]:
         items = []
-        for key, value in kwargs.items():
+        for key, value in sorted(kwargs.items(), key=lambda item: cls._dynamic_image_sort_key(item[0])):
             if not str(key).startswith("image_"):
                 continue
-            if cls._is_empty_loader_placeholder(value):
-                cls._log(f"{key} 是 64x64 空占位图，已忽略。")
-                continue
-            if cls._is_valid_image(value):
-                items.append((key, value))
-        return sorted(items, key=lambda item: cls._dynamic_image_sort_key(item[0]))
+            source_index = cls._dynamic_image_sort_key(key)[1]
+            source = f"参考图来源 {source_index:02d}"
+            items.extend(cls._flatten_image_source(value, source))
+        return items
 
     @classmethod
     def _collect_guides(
@@ -408,61 +528,43 @@ class GJJ_LTX_FirstLastFrame:
             else cls._parse_config_json(guide_config_json)
         )
 
-        dynamic_images = cls._collect_dynamic_images(kwargs)
-        if dynamic_images:
-            auto_frames = cls._auto_frame_indices(len(dynamic_images), latent)
-            for idx, (name, img) in enumerate(dynamic_images):
-                frame, strength = cls._config_for_index(configs, idx, auto_frames[idx])
-                guides.append(
-                    {
-                        "image": img,
-                        "frame_idx": frame,
-                        "strength": strength,
-                        "source": f"参考图 {idx + 1:02d}",
-                    }
-                )
+        image_items: list[dict[str, Any]] = []
+        image_items.extend(cls._collect_dynamic_images(kwargs))
 
-        # 兼容批次输入；如果新版动态输入已接入，则批次输入排在后面继续参与。
-        batch_images = cls._split_batch_images(images)
-        if batch_images:
-            auto_frames = cls._auto_frame_indices(len(batch_images), latent)
-            user_frames = cls._parse_number_list(frame_indices, int, auto_frames)
-            user_strengths = cls._parse_number_list(strengths, float, [0.7])
-            frames = cls._expand_list(user_frames, len(batch_images), 0)
-            strength_values = cls._expand_list(user_strengths, len(batch_images), 0.7)
-            for img, f_idx, strength in zip(batch_images, frames, strength_values):
-                guides.append(
-                    {
-                        "image": img,
-                        "frame_idx": int(f_idx),
-                        "strength": float(strength),
-                        "source": "参考图片批次",
-                    }
-                )
+        # 兼容旧工作流参数；所有来源统一解包后一起统计数量和分配配置行。
+        image_items.extend(cls._flatten_image_source(images, "参考图片批次"))
+        image_items.extend(cls._flatten_image_source(first_image, "首帧图片", first_strength))
+        image_items.extend(cls._flatten_image_source(last_image, "尾帧图片", last_strength))
 
-        if cls._is_valid_image(first_image):
+        if not image_items:
+            return guides
+
+        auto_frames = cls._auto_frame_indices(len(image_items), latent)
+        legacy_frames = cls._parse_number_list(frame_indices, int, auto_frames)
+        legacy_strengths = cls._parse_number_list(strengths, float, [0.7])
+        fallback_frames = cls._expand_list(legacy_frames, len(image_items), 0)
+        fallback_strengths = cls._expand_list(legacy_strengths, len(image_items), 0.7)
+
+        for idx, item in enumerate(image_items):
+            fallback_frame = fallback_frames[idx] if frame_indices is not None else auto_frames[idx]
+            fallback_strength = (
+                fallback_strengths[idx]
+                if strengths is not None
+                else float(item.get("default_strength", 0.7))
+            )
+            frame, strength, compression = cls._config_for_index(
+                configs, idx, fallback_frame, fallback_strength
+            )
+            image = cls._ltxv_preprocess_image(item["image"], compression)
             guides.append(
                 {
-                    "image": first_image,
-                    "frame_idx": 0,
-                    "strength": float(first_strength),
-                    "source": "首帧图片",
+                    "image": image,
+                    "frame_idx": frame,
+                    "strength": strength,
+                    "img_compression": compression,
+                    "source": f"参考图 {idx + 1:02d}（{item['source']}）",
                 }
             )
-        elif cls._is_empty_loader_placeholder(first_image):
-            cls._log("首帧图片是 64x64 空占位图，已忽略。")
-
-        if cls._is_valid_image(last_image):
-            guides.append(
-                {
-                    "image": last_image,
-                    "frame_idx": -1,
-                    "strength": float(last_strength),
-                    "source": "尾帧图片",
-                }
-            )
-        elif cls._is_empty_loader_placeholder(last_image):
-            cls._log("尾帧图片是 64x64 空占位图，已忽略。")
 
         return guides
 
@@ -606,6 +708,13 @@ class GJJ_LTX_FirstLastFrame:
         # 前端会动态增加 image_02 / image_03 ...，这里直接放行，避免后端验证拦截动态输入。
         return True
 
+    @staticmethod
+    def _result_payload(positive: Any, negative: Any, latent: Any, guide_count: int = 0):
+        return {
+            "ui": {"guide_count": [int(max(0, guide_count))]},
+            "result": (positive, negative, latent),
+        }
+
     def execute(
         self,
         vae: Any,
@@ -631,17 +740,17 @@ class GJJ_LTX_FirstLastFrame:
 
         if not isinstance(latent_out, dict) or "samples" not in latent_out:
             self._warn("视频潜空间无效或缺少 samples，节点直接透传。")
-            return (positive_out, negative_out, latent)
+            return self._result_payload(positive_out, negative_out, latent, 0)
 
         torch, torch_exc = _runtime_import_torch()
         if torch is None:
             self._warn(f"无法加载 torch，节点直接透传：{torch_exc}")
-            return (positive_out, negative_out, latent_out)
+            return self._result_payload(positive_out, negative_out, latent_out, 0)
 
         LTXVAddGuide, get_noise_mask, ltx_exc = _runtime_import_ltx_tools()
         if LTXVAddGuide is None or get_noise_mask is None:
             self._warn(f"无法加载 LTX 引导依赖，节点直接透传：{ltx_exc}")
-            return (positive_out, negative_out, latent_out)
+            return self._result_payload(positive_out, negative_out, latent_out, 0)
 
         try:
             guides = self._collect_guides(
@@ -662,17 +771,17 @@ class GJJ_LTX_FirstLastFrame:
             )
         except Exception as exc:
             self._warn(f"收集参考图片失败，节点直接透传：{exc}")
-            return (positive_out, negative_out, latent_out)
+            return self._result_payload(positive_out, negative_out, latent_out, 0)
 
         if not guides:
             self._log("未检测到有效参考图片，直接透传。")
-            return (positive_out, negative_out, latent_out)
+            return self._result_payload(positive_out, negative_out, latent_out, 0)
 
         self._log(f"检测到 {len(guides)} 张有效参考图片，开始写入 LTX 引导。")
         for index, guide in enumerate(guides, start=1):
             try:
                 self._log(
-                    f"写入第 {index}/{len(guides)} 张：{guide['source']}，作用帧={guide['frame_idx']}，强度={guide['strength']:.3f}。"
+                    f"写入第 {index}/{len(guides)} 张：{guide['source']}，作用帧={guide['frame_idx']}，强度={guide['strength']:.3f}，LTXVPreprocess CRF={guide.get('img_compression', 0)}。"
                 )
                 positive_out, negative_out, latent_out = self._apply_one_guide(
                     LTXVAddGuide,
@@ -687,7 +796,7 @@ class GJJ_LTX_FirstLastFrame:
                 self._warn(f"第 {index} 张参考图处理失败，已跳过并继续：{exc}")
                 continue
 
-        return (positive_out, negative_out, latent_out)
+        return self._result_payload(positive_out, negative_out, latent_out, len(guides))
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_LTX_FirstLastFrame}

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "workflow_screenshot": {
+    "directory": "workflows",
+    "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png"
+  },
+  "nodes": {},
+  "user": {}
+}

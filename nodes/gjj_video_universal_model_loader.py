@@ -33,6 +33,8 @@ MAX_SLOTS = 12
 WAN_RUNTIME_ARGS_TYPE = "WANCOMPILEARGS,BLOCKSWAPARGS,VRAM_MANAGEMENTARGS"
 
 DTYPES = ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"]
+WEIGHT_DTYPES = ["bf16", "fp16", "fp32"]
+WEIGHT_DTYPE_CHOICES = ["default", *WEIGHT_DTYPES]
 CLIP_TYPES = ["auto", "wan", "ltxv", "hunyuan_video", "flux", "stable_diffusion"]
 MODEL_EXTENSIONS = {".ckpt", ".pt", ".pt2", ".bin", ".pth", ".safetensors", ".pkl", ".sft"}
 
@@ -150,6 +152,41 @@ def _ensure_model_folder(folder_name: str) -> None:
 
 
 _ensure_model_folder("sam2")
+
+
+def _unique_folders(values: list[Any] | tuple[Any, ...]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        folder = str(value or "").strip().strip("/\\")
+        if not folder:
+            continue
+        key = folder.lower()
+        if key not in seen:
+            result.append(folder)
+            seen.add(key)
+    return result
+
+
+def _slot_search_folders(slot: dict[str, Any], folder: str = "") -> list[str]:
+    values: list[Any] = [folder or slot.get("folder", "")]
+    extra = slot.get("search_folders", [])
+    if isinstance(extra, str):
+        values.append(extra)
+    elif isinstance(extra, (list, tuple)):
+        values.extend(extra)
+    if str(slot.get("kind", "") or "").lower() == "latent_upscale_model":
+        values.extend(["latent_upscale_models", "upscale_models"])
+    return _unique_folders(values)
+
+
+def _folder_search_hint(folders: list[str] | tuple[str, ...]) -> str:
+    clean = _unique_folders(list(folders))
+    if not clean:
+        return "ComfyUI 已配置的模型目录"
+    if len(clean) == 1:
+        return f"ComfyUI 已配置的 {clean[0]} 模型分类目录"
+    return "ComfyUI 已配置的模型分类目录：" + " / ".join(clean)
 
 
 # 根据官方工作流整理出的配置：关键词已按“去量化、去版本号、去扩展名后取核心小写词”的思路手工固化。
@@ -442,7 +479,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 "UNET主模型",
                 "diffusion_models",
                 "diffusion",
-                ["ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v2"],
+                ["ltx","22b","distilled"],
                 loader="unet",
                 required_name="ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v2.safetensors",
                 download_url="https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/diffusion_models/ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v2.safetensors",
@@ -452,7 +489,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 "双CLIP编码器",
                 "text_encoders",
                 "clip",
-                ["gemma_3_12B_it_fp8_e4m3fn"],
+                ["gemma_3_12B_it"],
                 loader="dual_clip",
                 required_name="gemma_3_12B_it_fp8_e4m3fn.safetensors",
                 download_url="https://huggingface.co/GitMylo/LTX-2-comfy_gemma_fp8_e4m3fn/resolve/main/gemma_3_12B_it_fp8_e4m3fn.safetensors",
@@ -466,7 +503,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 "视频VAE",
                 "vae",
                 "vae",
-                ["LTX23_video_vae_bf16"],
+                ["LTX23_video_vae"],
                 loader="gjj_vae",
                 device="main_device",
                 weight_dtype="bf16",
@@ -478,7 +515,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 "音频VAE",
                 "vae",
                 "vae",
-                ["LTX23_audio_vae_bf16"],
+                ["LTX23_audio_vae"],
                 loader="gjj_vae",
                 device="main_device",
                 weight_dtype="bf16",
@@ -491,6 +528,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 "latent_upscale_models",
                 "latent_upscale_model",
                 ["ltx-2.3-spatial-upscaler-x2-1.0"],
+                search_folders=["upscale_models"],
                 required_name="ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
                 download_url="https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
             ),
@@ -498,17 +536,21 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     },
 }
 
-FOLDERS = sorted({slot["folder"] for cfg in VIDEO_MODEL_CONFIGS.values() for slot in cfg["slots"] if slot.get("folder")} | {"diffusion_models", "checkpoints", "loras", "vae", "text_encoders", "clip_vision", "controlnet", "audio_encoders", "latent_upscale_models"})
+_CONFIG_FOLDERS: list[str] = []
+for _cfg in VIDEO_MODEL_CONFIGS.values():
+    for _slot in _cfg.get("slots", []):
+        _CONFIG_FOLDERS.extend(_slot_search_folders(_slot, str(_slot.get("folder", "") or "")))
+FOLDERS = sorted(set(_CONFIG_FOLDERS) | {"diffusion_models", "checkpoints", "loras", "vae", "text_encoders", "clip_vision", "controlnet", "audio_encoders", "latent_upscale_models", "upscale_models"})
 
 
 def _model_rel_path(folder: str, filename: str) -> str:
     folder = str(folder or "").strip("/\\")
     filename = str(filename or "").strip("/\\")
     if not folder:
-        return f"models/{filename}" if filename else "models"
+        return filename or "模型文件"
     if not filename:
-        return f"models/{folder}/"
-    return f"models/{folder}/{filename}"
+        return folder
+    return f"{folder}/{filename}"
 
 
 def _slot_call_hint(slot: dict[str, Any]) -> str:
@@ -561,7 +603,7 @@ def _build_ltx23_kj_help_models() -> list[dict[str, str]]:
             value_lines.append(_model_rel_path(folder, secondary_name))
             if secondary_download_url:
                 tooltip_lines.append(f"🌏模型下载：{secondary_download_url}")
-        tooltip_lines.append(f"📁存放目录：models/{folder}/")
+        tooltip_lines.append(f"📁搜索目录：{_folder_search_hint(_slot_search_folders(slot, folder))}")
         call_hint = _slot_call_hint(slot)
         if call_hint:
             tooltip_lines.append(call_hint)
@@ -585,7 +627,7 @@ def _build_ltx23_kj_required_models() -> list[dict[str, str]]:
         items.append({
             "filename": required_name,
             "url": download_url,
-            "dest": f"models/{folder}/",
+            "dest": _folder_search_hint(_slot_search_folders(slot, folder)),
         })
         secondary_name = str(slot.get("secondary_name", "") or "").strip()
         secondary_download_url = str(slot.get("secondary_download_url", "") or "").strip()
@@ -593,7 +635,7 @@ def _build_ltx23_kj_required_models() -> list[dict[str, str]]:
             items.append({
                 "filename": secondary_name,
                 "url": secondary_download_url,
-                "dest": f"models/{folder}/",
+                "dest": _folder_search_hint(_slot_search_folders(slot, folder)),
             })
     return items
 
@@ -617,8 +659,8 @@ def _format_slot_runtime_error(
     download_url = str(slot.get("secondary_download_url" if secondary else "download_url", "") or "").strip()
     lines = [
         f"[{cfg_label}] {label} 加载失败。",
-        f"需要文件：{_model_rel_path(folder, required_name)}",
-        f"存放目录：models/{folder}/",
+        f"需要文件：{required_name}",
+        f"搜索目录：{_folder_search_hint(_slot_search_folders(slot, folder))}",
     ]
     if selected_name:
         lines.append(f"当前选择：{selected_name}")
@@ -647,6 +689,20 @@ def _filename_list(kind: str) -> list[str]:
         return []
 
 
+def _filename_list_for_folders(folders: list[str] | tuple[str, ...] | str) -> list[str]:
+    if isinstance(folders, str):
+        folders = [folders]
+    result: list[str] = []
+    seen: set[str] = set()
+    for folder in _unique_folders(list(folders)):
+        for name in _filename_list(folder):
+            key = str(name).replace("\\", "/").lower()
+            if key not in seen:
+                result.append(name)
+                seen.add(key)
+    return result
+
+
 def _is_usable_file(name: str, allow_any: bool = False) -> bool:
     lower = str(name or "").replace("\\", "/").lower().strip()
     if lower.endswith(".metadata.json"):
@@ -655,8 +711,116 @@ def _is_usable_file(name: str, allow_any: bool = False) -> bool:
     return lower.endswith(exts)
 
 
+_SEARCH_DROP_TOKENS = {
+    "fp", "fp8", "fp16", "fp32", "bf16", "int8", "int4", "nf4", "nvfp4", "mxfp4",
+    "e4m3", "e4m3fn", "e5m2", "gguf", "bnb4bit", "bitsandbytes", "quant", "quantized",
+    "input", "scaled", "scale", "fast", "dtype", "weight", "weights", "only",
+}
+
+
+def _strip_model_extension(value: Any) -> str:
+    text = str(value or "").replace("\\", "/").strip()
+    lower = text.lower()
+    for suffix in (".torchscript.pt", ".safetensors", ".ckpt", ".pt2", ".pth", ".pt", ".bin", ".gguf", ".sft", ".pkl"):
+        if lower.endswith(suffix):
+            return text[:-len(suffix)]
+    return text
+
+
+def _clean_search_token(token: str) -> str:
+    value = str(token or "").strip().lower()
+    if not value:
+        return ""
+    if value in {"t2v", "i2v", "s2v", "ti2v", "flf2v", "f2v", "vace", "x2"}:
+        return value
+    if re.fullmatch(r"wan(?:2[12]|21|22)", value):
+        return "wan"
+    if re.fullmatch(r"ltx(?:2(?:3)?|23)", value):
+        return "ltx"
+    if re.fullmatch(r"gemma\d+", value):
+        return "gemma"
+    if value in _SEARCH_DROP_TOKENS:
+        return ""
+    if re.fullmatch(r"v?\d+(?:\.\d+)*", value):
+        return ""
+    if re.fullmatch(r"\d+(?:\.\d+)?b", value):
+        return ""
+    if re.fullmatch(r"(?:rank|dim|r)\d+", value):
+        return ""
+    if re.fullmatch(r"q\d(?:[_a-z0-9]*)?", value):
+        return ""
+    if re.fullmatch(r"(?:fp|bf|int)\d+(?:[_a-z0-9]*)?", value):
+        return ""
+    if re.fullmatch(r"e[45]m[23]fn?", value):
+        return ""
+    return value
+
+
+def _search_tokens(value: Any) -> list[str]:
+    text = _strip_model_extension(value).lower()
+    text = re.sub(r"wan[\s._-]*2[\s._-]*[12]\b", " wan ", text)
+    text = re.sub(r"\bwan[\s._-]*(?:21|22)\b", " wan ", text)
+    text = re.sub(r"\bltx[\s._-]*2[\s._-]*3\b", " ltx ", text)
+    text = re.sub(r"\bltx23\b", " ltx ", text)
+    text = re.sub(r"\bgemma[\s._-]*3\b", " gemma ", text)
+    parts = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", " ", text).split()
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        token = _clean_search_token(part)
+        if token and token not in seen:
+            tokens.append(token)
+            seen.add(token)
+    return tokens
+
+
+def _normalize_search_keywords(keywords: list[str] | tuple[str, ...]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for keyword in keywords or []:
+        for token in _search_tokens(keyword):
+            if token and token not in seen:
+                result.append(token)
+                seen.add(token)
+    return result
+
+
+def _normalize_fallback_keywords(value: Any) -> Any:
+    if not isinstance(value, list):
+        return value
+    result: list[Any] = []
+    for item in value:
+        if isinstance(item, (list, tuple)):
+            result.append(_normalize_search_keywords(list(item)))
+        else:
+            result.append(item)
+    return result
+
+
+def _slot_payload(slot: dict[str, Any]) -> dict[str, Any]:
+    result = dict(slot)
+    result["keywords"] = _normalize_search_keywords(list(slot.get("keywords", []) or []))
+    if "fallback_keywords" in result:
+        result["fallback_keywords"] = _normalize_fallback_keywords(result.get("fallback_keywords"))
+    return result
+
+
+def _infer_weight_dtype_from_model_name(name: Any) -> str:
+    text = _strip_model_extension(name).lower()
+    text = re.sub(r"[^0-9a-z]+", "_", text)
+    for dtype in ("bf16", "fp16", "fp32"):
+        if re.search(rf"(?:^|_){dtype}(?:_|$)", text):
+            return dtype
+    return ""
+
+
+def _normalize_weight_dtype(value: Any, default: str = "bf16") -> str:
+    text = str(value or default).strip().lower()
+    return text if text in set(WEIGHT_DTYPES) else default
+
+
 def _filter_names(names: list[str], keywords: list[str] | tuple[str, ...], allow_any: bool = False) -> list[str]:
-    words = [_match_text(x) for x in keywords if str(x or "").strip()]
+    words = _normalize_search_keywords(keywords)
     source = [n for n in names if _is_usable_file(n, allow_any=allow_any)]
     if not words:
         return source
@@ -669,15 +833,13 @@ def _filter_names(names: list[str], keywords: list[str] | tuple[str, ...], allow
 
 
 def _match_text(value: Any) -> str:
-    text = str(value or "").replace("\\", "/").lower()
-    return re.sub(r"wan[\s._-]*2[\s._-]*2", "wan22", text)
+    return " ".join(_search_tokens(value))
 
 
 def _score_name(name: str, keywords: list[str]) -> tuple[int, str]:
     text = _match_text(name)
     score = 0
-    for i, kw in enumerate(keywords):
-        kw = _match_text(kw)
+    for i, kw in enumerate(_normalize_search_keywords(keywords)):
         if not kw:
             continue
         if kw in text:
@@ -697,7 +859,7 @@ def _sort_matches(values: list[str], keywords: list[str]) -> list[str]:
 def _name_matches_keywords(name: str, keywords: list[str], allow_any: bool = False) -> bool:
     if allow_any:
         return True
-    active = [_match_text(k) for k in keywords if str(k or "").strip()]
+    active = _normalize_search_keywords(keywords)
     if not active:
         return True
     text = _match_text(name)
@@ -706,13 +868,13 @@ def _name_matches_keywords(name: str, keywords: list[str], allow_any: bool = Fal
 
 def _resolve_selected(
     selected: str,
-    folder: str,
+    folder: str | list[str] | tuple[str, ...],
     keywords: list[str],
     allow_any: bool = False,
     strict: bool = False,
     preferred: str = "",
 ) -> str:
-    names = _filename_list(folder)
+    names = _filename_list_for_folders(folder)
     selected = str(selected or "").strip()
     if selected and selected in names and (not strict or _name_matches_keywords(selected, keywords, allow_any=allow_any)):
         return selected
@@ -863,8 +1025,9 @@ def _load_dual_clip(clip_name1: str, clip_name2: str, clip_type: str = "ltxv", d
     except Exception as fallback_error:
         raise RuntimeError(
             "双CLIP加载失败。当前环境可能缺少官方 DualCLIPLoader，"
-            "或对应的 text_encoders 模型文件未放在 models/text_encoders/。\n"
-            f"需要文件：models/text_encoders/{clip_name1} + models/text_encoders/{clip_name2}\n"
+            "或对应模型文件不在 ComfyUI 已配置的 text_encoders 模型分类目录中。\n"
+            f"需要文件：{clip_name1} + {clip_name2}\n"
+            f"搜索目录：{_folder_search_hint(['text_encoders'])}\n"
             f"原始错误：{fallback_error}"
         ) from fallback_error
 
@@ -1501,8 +1664,8 @@ def _load_latent_upscale_model(model_name: str):
         except Exception as fallback_error:
             raise RuntimeError(
                 "空间放大模型加载失败。\n"
-                f"需要文件：models/latent_upscale_models/{model_name}\n"
-                "存放目录：models/latent_upscale_models/\n"
+                f"需要文件：{model_name}\n"
+                f"搜索目录：{_folder_search_hint(['latent_upscale_models', 'upscale_models'])}\n"
                 "如果官方 latent upscale loader 不可用，先更新或启用 ComfyUI 官方节点，再重试。\n"
                 + "官方加载器尝试结果："
                 + _join_error_lines(errors)
@@ -1764,7 +1927,7 @@ def _config_payload() -> dict[str, Any]:
             or any(str(slot.get("kind", "")) == "wanvideo_model" for slot in cfg.get("slots", [])),
             # 输出槽只包含真正要给下游使用的对象；LoRA/名称槽只在节点内部使用，不暴露 STRING 输出。
             "output_slots": _output_slots_for_config(cfg),
-            "slots": cfg.get("slots", []),
+            "slots": [_slot_payload(slot) for slot in cfg.get("slots", [])],
         }
         for key, cfg in VIDEO_MODEL_CONFIGS.items()
     }
@@ -1791,11 +1954,13 @@ class GJJ_VideoUniversalModelLoader:
         "官方流保留原有加载方式；KJ 流改为 UNET 主模型 + 双 CLIP + LTX23 视频/音频 VAE。"
     )
     SEARCH_ALIASES = ["MMV"]
-    REQUIRED_MODELS = _build_ltx23_kj_required_models()
+    # 模型槽会随“官方流”预设动态变化；固定 REQUIRED_MODELS 会让帮助窗串到别的预设。
+    REQUIRED_MODELS = []
     GJJ_HELP = {
         "model_tree": True,
+        "dynamic_model_tree_only": True,
         "model_download_url": "https://pan.quark.cn/s/6ec846f1f58d",
-        "models": _build_ltx23_kj_help_models(),
+        "notice": "模型树按当前选择的官方流和面板下拉动态生成；若刚刷新页面还没读取到模型列表，请先点一次节点或刷新模型列表。",
         "dependencies": [
             "ComfyUI 官方节点：UNETLoader / DualCLIPLoader / LTXAVTextEncoderLoader",
             "torch（ComfyUI 运行时基础依赖）",
@@ -1842,6 +2007,13 @@ class GJJ_VideoUniversalModelLoader:
                 "tooltip": "仅在双 CLIP 配置下使用；前端会显示为“另一个模型”。",
             })
             inputs[f"dtype_{i}"] = (DTYPES, {"default": "default", "display_name": f"⚙{i}", "tooltip": "加载 dtype；default 使用 ComfyUI 默认策略。"})
+            inputs[f"weight_dtype_{i}"] = (WEIGHT_DTYPE_CHOICES, {
+                "default": "bf16",
+                "display": "hidden",
+                "hidden": True,
+                "display_name": f"权重精度{i}",
+                "tooltip": "根据模型文件名中的 bf16/fp16/fp32 后缀自动同步，主要用于 GJJ 兼容 VAE 加载。",
+            })
         inputs["clip_type_override"] = (CLIP_TYPES, {
             "default": "auto",
             "display_name": "CLIP类型",
@@ -1890,7 +2062,7 @@ class GJJ_VideoUniversalModelLoader:
             "⚙️ Wan运行参数",
         ]
         for i in range(1, MAX_SLOTS + 1):
-            keys += [f"file_{i}", f"secondary_file_{i}", f"dtype_{i}"]
+            keys += [f"file_{i}", f"secondary_file_{i}", f"dtype_{i}", f"weight_dtype_{i}"]
         return "|".join(str(kwargs.get(k, "")) for k in keys)
 
     def load_models(self, *args, **kwargs):
@@ -1936,9 +2108,10 @@ class GJJ_VideoUniversalModelLoader:
             if index > MAX_SLOTS:
                 break
             folder = str(slot.get("folder", "") or "")
+            search_folders = _slot_search_folders(slot, folder)
             kind = str(slot.get("kind", "name") or "name")
             loader_kind = str(slot.get("loader", "") or "").lower()
-            keywords = list(slot.get("keywords", []) or [])
+            keywords = _normalize_search_keywords(list(slot.get("keywords", []) or []))
             selected = str(kwargs.get(f"file_{index}", "") or "")
             dtype = str(kwargs.get(f"dtype_{index}", "default") or "default")
 
@@ -1948,7 +2121,7 @@ class GJJ_VideoUniversalModelLoader:
             allow_any = kind in {"name_any"}
             name = _resolve_selected(
                 selected,
-                folder,
+                search_folders,
                 keywords,
                 allow_any=allow_any,
                 strict=bool(slot.get("strict", False)),
@@ -2002,10 +2175,16 @@ class GJJ_VideoUniversalModelLoader:
                 elif kind == "vae":
                     loader_kind = str(slot.get("loader", "") or "").lower()
                     if loader_kind == "gjj_vae":
+                        weight_dtype = _normalize_weight_dtype(
+                            _infer_weight_dtype_from_model_name(name)
+                            or kwargs.get(f"weight_dtype_{index}", "")
+                            or slot.get("weight_dtype", "bf16"),
+                            str(slot.get("weight_dtype", "bf16") or "bf16"),
+                        )
                         value = _load_gjj_vae(
                             name,
                             str(slot.get("device", "main_device") or "main_device"),
-                            str(slot.get("weight_dtype", "bf16") or "bf16"),
+                            weight_dtype,
                         )
                     else:
                         value = _load_vae(name)
@@ -2040,10 +2219,11 @@ class GJJ_VideoUniversalModelLoader:
                                     prev_index = cfg.get("slots", []).index(prev_slot) + 1
                                     ckpt_name = str(kwargs.get(f"file_{prev_index}", "") or "")
                                     if not ckpt_name:
+                                        prev_search_folders = _slot_search_folders(prev_slot, str(prev_slot.get("folder", "checkpoints")))
                                         ckpt_name = _resolve_selected(
                                             "",
-                                            str(prev_slot.get("folder", "checkpoints")),
-                                            list(prev_slot.get("keywords", []) or []),
+                                            prev_search_folders,
+                                            _normalize_search_keywords(list(prev_slot.get("keywords", []) or [])),
                                             preferred=str(prev_slot.get("preferred_name", "") or prev_slot.get("required_name", "") or ""),
                                         )
                                     break

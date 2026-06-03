@@ -6,13 +6,17 @@ import { GJJ_STANDARDIZE_NODE } from "./gjj_common_node_standardizer.js";
 const SET_TYPE = "GJJ_SetNode";
 const GET_TYPE = "GJJ_GetNode";
 const TEMPLATE_SET_TYPE = "GJJ_TemplateSetVariables";
+const TEMPLATE_PARAMS_TYPE = "GJJ_TemplateParams";
 const BROADCAST_OUTPUT_SOURCE_TYPES = new Set([
 	"GJJ_VideoUniversalModelLoader",
 	"GJJ_VideoKijaiModelLoader",
 	"GJJ_ModelBundleLoader",
+	"GJJ_LoraChainConfig",
 ]);
 const TEMPLATE_FIELD_SCHEMA = "gjj_template_set_variables_fields";
 const TEMPLATE_SAVED_TEMPLATE = "gjj_template_set_variables_template";
+const TEMPLATE_PARAMS_SCHEMA = "gjj_template_params_schema";
+const TEMPLATE_PARAMS_SAVED_TEMPLATE = "gjj_template_params_template";
 const TEMPLATE_WIDGET = "template_text";
 const SET_NAME_WIDGET = "变量名";
 const SET_NAME_DOM_WIDGET = "gjj_setnode_name_dom";
@@ -34,9 +38,9 @@ const GET_TITLE = "GJJ · 📍 变量读取";
 const SET_CATEGORY = "GJJ/工具";
 const GET_CATEGORY = "GJJ/工具";
 const SET_DESCRIPTION = "把连接到本节点的每个输入登记为 GJJ 变量；变量名可用逗号分隔，连接新输入时会按上游输出名自动补齐并保持唯一。";
-const GET_DESCRIPTION = "从同一工作流作用域内的 GJJ 变量设置或模板变量设置节点读取已选择变量；支持一次选择多个变量，并按变量来源动态生成输出口。";
+const GET_DESCRIPTION = "从同一工作流作用域内的 GJJ 变量设置、模板变量设置或模板参数输入器读取已选择变量；支持一次选择多个变量，并按变量来源动态生成输出口。";
 const GET_SELECTOR_TOOLTIP = "选择要读取的 GJJ 变量；支持多选，输出口会按选择内容和变量来源自动刷新。";
-const GET_OUTPUT_TOOLTIP = "输出已选择变量的真实值；提交工作流时会解析到对应变量设置或模板变量设置节点。";
+const GET_OUTPUT_TOOLTIP = "输出已选择变量的真实值；提交工作流时会解析到对应变量设置、模板变量设置或模板参数输入器。";
 const DEFAULT_COLOR = "#1B252B";
 const DEFAULT_BG = "#141B1F";
 
@@ -153,6 +157,14 @@ function nodeType(node) {
 
 function isTemplateSetNode(node) {
 	return nodeType(node) === TEMPLATE_SET_TYPE || node?.comfyClass === TEMPLATE_SET_TYPE;
+}
+
+function isTemplateParamsNode(node) {
+	return nodeType(node) === TEMPLATE_PARAMS_TYPE || node?.comfyClass === TEMPLATE_PARAMS_TYPE;
+}
+
+function isTemplateVariableNode(node) {
+	return isTemplateSetNode(node) || isTemplateParamsNode(node);
 }
 
 function isOutputBroadcastSourceNode(node) {
@@ -605,11 +617,11 @@ function collectNodesOfType(graphs, type) {
 	return results;
 }
 
-function collectTemplateSetNodes(graphs) {
+function collectTemplateSetNodes(graphs, includeTemplateParams = false) {
 	const results = [];
 	for (const graph of graphs) {
 		for (const node of graph?._nodes || []) {
-			if (isTemplateSetNode(node)) {
+			if (isTemplateSetNode(node) || (includeTemplateParams && isTemplateParamsNode(node))) {
 				results.push({ node, graph });
 			}
 		}
@@ -634,29 +646,79 @@ function getWidgetValue(node, name, fallback = "") {
 	return String(widget?.value ?? fallback ?? "");
 }
 
+function safeJsonParse(value, fallback) {
+	if (Array.isArray(value) || (value && typeof value === "object")) return value;
+	if (typeof value !== "string" || !value.trim()) return fallback;
+	try {
+		return JSON.parse(value);
+	} catch (_) {
+		return fallback;
+	}
+}
+
+function templateFieldSchemaForNode(node) {
+	if (isTemplateParamsNode(node)) return TEMPLATE_PARAMS_SCHEMA;
+	return TEMPLATE_FIELD_SCHEMA;
+}
+
+function templateSavedTemplateForNode(node) {
+	if (isTemplateParamsNode(node)) return TEMPLATE_PARAMS_SAVED_TEMPLATE;
+	return TEMPLATE_SAVED_TEMPLATE;
+}
+
+function strictTemplateParamBroadcastKey(field) {
+	const legacyKeys = Array.isArray(field?.broadcast_keys)
+		? field.broadcast_keys
+		: (Array.isArray(field?.broadcastKeys) ? field.broadcastKeys : []);
+	const firstLegacyKey = legacyKeys.map((item) => String(item || "").trim()).find(Boolean) || "";
+	return String(field?.broadcast_key || field?.broadcastKey || firstLegacyKey || "").trim();
+}
+
+function templateFieldIsBroadcastable(node, field) {
+	if (!isTemplateParamsNode(node)) return true;
+	return Boolean(strictTemplateParamBroadcastKey(field));
+}
+
 function templateFieldsForNode(node) {
-	const schema = node?.properties?.[TEMPLATE_FIELD_SCHEMA];
+	const schema = safeJsonParse(node?.properties?.[templateFieldSchemaForNode(node)], node?.properties?.[templateFieldSchemaForNode(node)]);
 	if (Array.isArray(schema) && schema.length) {
 		return schema.map((field, index) => {
 			const key = String(field?.key || field?.name || `var_${index + 1}`).trim();
 			const label = String(field?.label || key).trim();
+			const outputIndex = Number.isFinite(Number(field?.outputIndex)) ? Number(field.outputIndex) : index;
+			const broadcastKey = isTemplateParamsNode(node)
+				? strictTemplateParamBroadcastKey(field)
+				: String(field?.broadcast_key || field?.broadcastKey || "").trim();
+			const broadcastKeys = broadcastKey ? [broadcastKey] : [];
+			const outputType = node?.outputs?.[outputIndex]?.type || "";
+			const type = normalizeTemplateSocketType(
+				field?.socket_type
+				|| field?.output_type
+				|| (String(field?.type || "").toUpperCase() === "ENUM" ? "COMBO" : "")
+				|| outputType
+				|| field?.type
+				|| "*"
+			) || "*";
 			return {
 				key,
 				label,
 				displayLabel: String(field?.displayLabel || (label === key ? label : `${label}（${key}）`)),
-				type: normalizeTemplateSocketType(field?.type || "*") || "*",
+				type,
+				broadcastKey,
+				broadcastKeys,
 				inputName: String(field?.inputName || `var_${key}`),
-				outputIndex: Number.isFinite(Number(field?.outputIndex)) ? Number(field.outputIndex) : index,
+				outputIndex,
 			};
-		}).filter((field) => field.key);
+		}).filter((field) => field.key && templateFieldIsBroadcastable(node, field));
 	}
-	const template = getWidgetValue(node, TEMPLATE_WIDGET, node?.properties?.[TEMPLATE_SAVED_TEMPLATE] || "");
+	if (isTemplateParamsNode(node)) return [];
+	const template = getWidgetValue(node, TEMPLATE_WIDGET, node?.properties?.[templateSavedTemplateForNode(node)] || "");
 	return parseTemplateSetFields(template);
 }
 
-function collectTemplateSetFields(graphs) {
+function collectTemplateSetFields(graphs, includeTemplateParams = false) {
 	const results = [];
-	for (const entry of collectTemplateSetNodes(graphs)) {
+	for (const entry of collectTemplateSetNodes(graphs, includeTemplateParams)) {
 		for (const field of templateFieldsForNode(entry.node)) {
 			results.push({ ...entry, field, kind: "template" });
 		}
@@ -712,8 +774,11 @@ function findSetterByName(graph, name) {
 			}
 		}
 	}
-	for (const entry of collectTemplateSetFields(getGraphAncestors(graph))) {
-		if (entry.field.key === name || entry.field.label === name || entry.field.displayLabel === name) {
+	for (const entry of collectTemplateSetFields(getGraphAncestors(graph), true)) {
+		const names = isTemplateParamsNode(entry.node)
+			? [entry.field.broadcastKey || entry.field.key].filter(Boolean)
+			: [entry.field.key, entry.field.label, entry.field.displayLabel].filter(Boolean);
+		if (names.includes(name)) {
 			return entry;
 		}
 	}
@@ -741,13 +806,20 @@ function getVisibleSetNames(graph) {
 			sourceMap.set(name, entry.graph === graph ? "local" : "parent");
 		}
 	}
-	for (const entry of collectTemplateSetFields(getGraphAncestors(graph))) {
-		const name = entry.field.key;
-		if (!name || sourceMap.has(name)) {
-			continue;
+	for (const entry of collectTemplateSetFields(getGraphAncestors(graph), true)) {
+		const names = isTemplateParamsNode(entry.node)
+			? [entry.field.broadcastKey || entry.field.key].filter(Boolean)
+			: [entry.field.key].filter(Boolean);
+		const uniqueNames = [...new Set(names)];
+		for (const name of uniqueNames) {
+			if (!name || sourceMap.has(name)) {
+				continue;
+			}
+			const prefix = isTemplateParamsNode(entry.node)
+				? (entry.graph === graph ? "模板参数" : "parent 模板参数")
+				: (entry.graph === graph ? "模板" : "parent 模板");
+			sourceMap.set(name, `${prefix} · ${entry.field.label}`);
 		}
-		const prefix = entry.graph === graph ? "模板" : "parent 模板";
-		sourceMap.set(name, `${prefix} · ${entry.field.label}`);
 	}
 	setNameSourceMap = sourceMap;
 	return [...sourceMap.keys()].sort((a, b) => a.localeCompare(b));
@@ -1328,6 +1400,9 @@ function outputBroadcastAliases(output) {
 	const label = String(output?.label || output?.localized_name || output?.name || "").trim();
 	const text = `${slotId} ${semanticClass} ${kind} ${label}`.toLowerCase();
 	const aliases = [slotId, semanticClass, kind];
+	if (broadcastTypeParts(output?.type).includes("LORA_CHAIN_CONFIG") || text.includes("lora")) {
+		aliases.push("lora_chain_config", "LoRA串联配置", "额外LoRA串联配置");
+	}
 
 	const isHigh = /(^|[_\s-])high([_\s-]|$)/i.test(text) || text.includes("高");
 	const isLow = /(^|[_\s-])low([_\s-]|$)/i.test(text) || text.includes("低");
@@ -1443,21 +1518,26 @@ function collectTemplateBroadcastEntries(entry) {
 	const graph = entry?.graph || node?.graph;
 	if (!broadcastEnabled(node)) return [];
 	const fields = templateFieldsForNode(node);
-	return fields.map((field) => ({
-		kind: "template",
-		node,
-		graph,
-		sourceSlot: Number(field.outputIndex || 0),
-		inputName: field.inputName,
-		type: field.type || "*",
-		names: broadcastNameCandidates(field.key, field.label, field.displayLabel, field.inputName, broadcastNameTypeCandidate(field.type)),
-		resolve: () => resolveTemplatePromptSource({
-			entry: { node, graph, kind: "template" },
-			field,
+	return fields.map((field) => {
+		const strictNames = isTemplateParamsNode(node)
+			? broadcastNameCandidates(field.broadcastKey || field.key)
+			: broadcastNameCandidates(field.key, field.label, field.displayLabel, field.inputName, broadcastNameTypeCandidate(field.type));
+		return {
+			kind: "template",
+			node,
+			graph,
 			sourceSlot: Number(field.outputIndex || 0),
 			inputName: field.inputName,
-		}),
-	})).filter((item) => item.names.length);
+			type: field.type || "*",
+			names: strictNames,
+			resolve: () => resolveTemplatePromptSource({
+				entry: { node, graph, kind: "template" },
+				field,
+				sourceSlot: Number(field.outputIndex || 0),
+				inputName: field.inputName,
+			}),
+		};
+	}).filter((item) => item.names.length);
 }
 
 function collectBroadcastEntriesForGraph(graph) {
@@ -1466,7 +1546,7 @@ function collectBroadcastEntriesForGraph(graph) {
 	for (const entry of collectNodesOfType(scopeGraphs, SET_TYPE)) {
 		entries.push(...collectSetBroadcastEntries(entry.node, entry.graph));
 	}
-	for (const entry of collectTemplateSetNodes(scopeGraphs)) {
+	for (const entry of collectTemplateSetNodes(scopeGraphs, true)) {
 		entries.push(...collectTemplateBroadcastEntries(entry));
 	}
 	for (const entry of collectOutputBroadcastSourceNodes(scopeGraphs)) {
@@ -1729,7 +1809,7 @@ function stabilizeGetNode(node) {
 		output.label = displayName;
 		output.localized_name = displayName;
 		output.tooltip = source?.entry?.kind === "template"
-			? "从 GJJ 模板变量设置节点读取对应变量；会优先使用模板变量行左侧小圆点的外部连接。"
+			? "从 GJJ 模板变量或模板参数节点读取对应变量；模板变量会优先使用行左侧小圆点的外部连接。"
 			: GET_OUTPUT_TOOLTIP;
 	}
 	const names = getSelectedNames(node);
@@ -2603,7 +2683,7 @@ function collectBroadcastVisualLinks(sourceNode) {
 	const sourceEntry = { node: sourceNode, graph };
 	const entries = sourceNode.type === SET_TYPE
 		? collectSetBroadcastEntries(sourceNode, graph)
-		: isTemplateSetNode(sourceNode)
+		: isTemplateVariableNode(sourceNode)
 			? collectTemplateBroadcastEntries(sourceEntry)
 			: isOutputBroadcastSourceNode(sourceNode)
 				? collectOutputBroadcastEntries(sourceNode, graph)
@@ -2671,7 +2751,7 @@ function drawBroadcastLinksForNode(node, ctx) {
 function drawBroadcastLinksOnCanvas(ctx, graph) {
 	if (!ctx || !graph) return;
 	for (const node of graph._nodes || []) {
-		if (!broadcastEnabled(node) || (node.type !== SET_TYPE && !isTemplateSetNode(node) && !isOutputBroadcastSourceNode(node))) {
+		if (!broadcastEnabled(node) || (node.type !== SET_TYPE && !isTemplateVariableNode(node) && !isOutputBroadcastSourceNode(node))) {
 			continue;
 		}
 		const links = collectBroadcastVisualLinks(node);
@@ -2713,7 +2793,7 @@ app.registerExtension({
 	name: "Comfy.GJJ.SetGetNode",
 
 	beforeRegisterNodeDef(nodeType, nodeData) {
-		if (nodeData?.name !== TEMPLATE_SET_TYPE) return;
+		if (![TEMPLATE_SET_TYPE, TEMPLATE_PARAMS_TYPE].includes(nodeData?.name)) return;
 		const originalOnDrawForeground = nodeType.prototype.onDrawForeground;
 		nodeType.prototype.onDrawForeground = function (ctx, ...args) {
 			const result = originalOnDrawForeground?.apply(this, [ctx, ...args]);
@@ -2897,7 +2977,7 @@ app.registerExtension({
 				this.validateLinks();
 				for (const name of getSelectedNames(this)) {
 					const setter = findSetterByName(this.graph, name)?.node;
-					if (setter) {
+					if (setter?.type === SET_TYPE) {
 						scheduleSetStabilize(setter);
 					}
 				}
@@ -2985,6 +3065,7 @@ app.registerExtension({
 		if (!window.__gjjTemplateSetVariablesGetNodeListener) {
 			window.__gjjTemplateSetVariablesGetNodeListener = true;
 			window.addEventListener("gjj-template-set-variables-updated", () => scheduleAllGetStabilize(0));
+			window.addEventListener("gjj-template-params-updated", () => scheduleAllGetStabilize(0));
 		}
 		if (!window.__gjjVariableBroadcastListener) {
 			window.__gjjVariableBroadcastListener = true;

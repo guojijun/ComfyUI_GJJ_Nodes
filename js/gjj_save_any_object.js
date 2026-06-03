@@ -8,15 +8,13 @@ const MIN_VISIBLE_INPUTS = 1;
 const INPUT_TOOLTIP = "可接任意类型；连接后会自动扩展下一个输入口，执行时按顺序保存。";
 const OUTPUT_NAMES = ["保存路径JSON", "首个保存路径", "保存文件数"];
 const OUTPUT_TYPES = ["STRING", "STRING", "INT"];
-const DEFAULT_PREFIX = "GJJ/任意对象";
+const DEFAULT_PREFIX = "GJJ/工作流";
+const LEGACY_DEFAULT_PREFIX = "GJJ/任意对象";
 const PREVIEW_WIDGET_NAME = "gjj_save_any_object_preview";
 const EMPTY_PREVIEW = "执行后在这里显示保存结果";
-const MIN_PREVIEW_HEIGHT = 116;
+const MIN_PREVIEW_HEIGHT = 96;
 const MIN_WIDTH = 320;
-const MULTI_IMAGE_HEIGHT = 108;
-const SINGLE_IMAGE_MIN_HEIGHT = 220;
-const SINGLE_IMAGE_MAX_HEIGHT = 620;
-const MEDIA_PREVIEW_HEIGHT = 220;
+const MULTI_IMAGE_MIN_WIDTH = 104;
 const BUTTON_WIDGET_NAME = "gjj_save_any_object_output_button";
 const FOLDER_WIDGET_NAME = "gjj_save_any_object_folder_button";
 
@@ -154,6 +152,88 @@ function sanitizePathPart(value) {
 		.replace(/^[\s/.]+|[\s/.]+$/g, "");
 }
 
+function normalizePrefix(value) {
+	return sanitizePathPart(value).replace(/^\/+|\/+$/g, "");
+}
+
+function cleanWorkflowName(value) {
+	let text = String(value || "").trim();
+	if (!text) {
+		return "";
+	}
+	text = text.replace(/^ComfyUI\s*[-|–—]\s*/i, "");
+	text = text.replace(/\\/g, "/").split("/").filter(Boolean).pop() || text;
+	text = text.replace(/\.(json|workflow)$/i, "");
+	const clean = sanitizePathPart(text);
+	return /^(comfyui|untitled|未命名)$/i.test(clean) ? "" : clean;
+}
+
+function workflowNameFromValue(value, depth = 0) {
+	if (depth > 4 || value == null) {
+		return "";
+	}
+	if (typeof value === "string") {
+		return cleanWorkflowName(value);
+	}
+	if (typeof value !== "object") {
+		return "";
+	}
+	const nameKeys = ["workflow_name", "workflowName", "name", "title", "filename", "file", "path", "workflow_path", "workflowPath"];
+	for (const key of nameKeys) {
+		if (!(key in value)) {
+			continue;
+		}
+		const name = workflowNameFromValue(value[key], depth + 1);
+		if (name) {
+			return name;
+		}
+	}
+	const nestedKeys = ["workflow", "extra", "metadata", "config", "app", "info", "activeWorkflow"];
+	for (const key of nestedKeys) {
+		const nested = value[key];
+		if (nested && typeof nested === "object") {
+			const name = workflowNameFromValue(nested, depth + 1);
+			if (name) {
+				return name;
+			}
+		}
+	}
+	return "";
+}
+
+function currentWorkflowName(node) {
+	const graph = node?.graph || app.graph;
+	const candidates = [
+		graph,
+		graph?.extra,
+		graph?._extra,
+		graph?.config,
+		graph?._config,
+		app.workflowManager?.activeWorkflow,
+		app.workflowManager?.activeWorkflowInfo,
+		app.workflowManager?.currentWorkflow,
+		app.workflowManager?.workflow,
+		app.workflowManager?.filename,
+		app.workflowManager?.path,
+		app.ui?.lastWorkflowName,
+		app.ui?.workflowName,
+		app.ui?.currentWorkflowName,
+		document?.title,
+	];
+	for (const candidate of candidates) {
+		const name = workflowNameFromValue(candidate);
+		if (name) {
+			return name;
+		}
+	}
+	return "";
+}
+
+function workflowPrefix(node) {
+	const name = currentWorkflowName(node);
+	return name ? `GJJ/${name}` : DEFAULT_PREFIX;
+}
+
 function getWidget(node, name) {
 	return Array.isArray(node?.widgets)
 		? node.widgets.find((widget) => String(widget?.name || "") === name)
@@ -189,17 +269,27 @@ function maybeUpdateFilenamePrefix(node) {
 	if (!widget) {
 		return;
 	}
+	const nextPrefix = workflowPrefix(node);
 	const sourcePrefix = firstSourcePrefix(node);
-	if (!sourcePrefix) {
-		return;
-	}
 	const current = String(widget.value || "").trim();
-	const canAutoUpdate = !current || current === DEFAULT_PREFIX || current === node.__gjjSaveAnyObjectAutoPrefix;
+	const autoPrefixes = new Set([
+		"",
+		normalizePrefix(DEFAULT_PREFIX),
+		normalizePrefix(LEGACY_DEFAULT_PREFIX),
+		"工作流",
+		"任意对象",
+		normalizePrefix(node.__gjjSaveAnyObjectAutoPrefix || ""),
+		normalizePrefix(sourcePrefix || ""),
+	]);
+	const canAutoUpdate = autoPrefixes.has(normalizePrefix(current));
 	if (!canAutoUpdate) {
 		return;
 	}
-	widget.value = sourcePrefix;
-	node.__gjjSaveAnyObjectAutoPrefix = sourcePrefix;
+	if (current !== nextPrefix) {
+		widget.value = nextPrefix;
+		widget.callback?.(nextPrefix, app.canvas, node, app.canvas?.graph_mouse);
+	}
+	node.__gjjSaveAnyObjectAutoPrefix = nextPrefix;
 }
 
 function buildPreviewText(text) {
@@ -229,56 +319,33 @@ function applyPreviewContent(node) {
 	mediaGrid.style.display = hasMedia ? "grid" : "none";
 	textBlock.style.display = hasText ? "block" : "none";
 	empty.style.display = hasImages || hasMedia || hasText ? "none" : "flex";
-	imageGrid.style.gridTemplateColumns = singleImage ? "minmax(0, 1fr)" : "repeat(auto-fill, minmax(120px, 1fr))";
+	imageGrid.style.gridTemplateColumns = singleImage ? "minmax(0, 1fr)" : `repeat(auto-fill, minmax(${MULTI_IMAGE_MIN_WIDTH}px, 1fr))`;
 	imageGrid.replaceChildren();
 	mediaGrid.replaceChildren();
 
 	for (const [index, item] of images.entries()) {
 		const imageWidth = Math.max(1, Number(item?.width || 0));
 		const imageHeight = Math.max(1, Number(item?.height || 0));
-		const aspect = imageWidth > 0 && imageHeight > 0 ? imageHeight / imageWidth : 1;
-		const nodeWidth = Math.max(MIN_WIDTH, Number(node.size?.[0] || MIN_WIDTH));
-		const previewWidth = Math.max(220, nodeWidth - 42);
-		const previewHeight = singleImage
-			? Math.min(SINGLE_IMAGE_MAX_HEIGHT, Math.max(SINGLE_IMAGE_MIN_HEIGHT, Math.round(previewWidth * aspect)))
-			: MULTI_IMAGE_HEIGHT;
-		const card = document.createElement("div");
-		card.style.cssText = [
-			"display:flex",
-			"flex-direction:column",
-			"gap:6px",
-			"padding:6px",
-			"border:1px solid #33434a",
-			"border-radius:8px",
-			"background:#12191d",
-			"min-width:0",
-			"box-sizing:border-box",
-			"overflow:hidden",
-			singleImage ? "width:100%" : "",
-		].filter(Boolean).join(";");
-
 		const image = document.createElement("img");
 		image.src = previewDataToUrl(item);
 		image.draggable = false;
-		image.title = String(item.path || item.filename || "");
+		image.alt = `图片 ${index + 1}`;
+		image.title = String(item.path || item.filename || `图片 ${index + 1}`);
 		image.style.cssText = [
 			"width:100%",
-			`height:${previewHeight}px`,
+			"height:auto",
+			`aspect-ratio:${imageWidth} / ${imageHeight}`,
 			"object-fit:contain",
 			"background:#0c1114",
+			"border:1px solid #2b3940",
 			"border-radius:6px",
 			"display:block",
+			"box-sizing:border-box",
+			"min-width:0",
 		].join(";");
 		image.onload = () => scheduleLayout(node);
 		image.onerror = () => scheduleLayout(node);
-
-		const caption = document.createElement("div");
-		caption.textContent = `图片 ${index + 1}`;
-		caption.style.cssText = "font-size:11px;color:#dce7e2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-
-		card.appendChild(image);
-		card.appendChild(caption);
-		imageGrid.appendChild(card);
+		imageGrid.appendChild(image);
 	}
 
 	for (const [index, item] of media.entries()) {
@@ -287,54 +354,53 @@ function applyPreviewContent(node) {
 		if (!url) {
 			continue;
 		}
-		const card = document.createElement("div");
-		card.style.cssText = [
-			"display:flex",
-			"flex-direction:column",
-			"gap:6px",
-			"padding:6px",
-			"border:1px solid #33434a",
-			"border-radius:8px",
-			"background:#12191d",
-			"min-width:0",
-			"box-sizing:border-box",
-			"overflow:hidden",
-		].join(";");
-
 		const control = mediaType === "audio" ? document.createElement("audio") : document.createElement("video");
 		control.controls = true;
-		control.preload = "metadata";
+		control.preload = mediaType === "audio" ? "metadata" : "auto";
 		control.src = url;
-		control.title = String(item.path || item.filename || "");
+		control.title = String(item.path || item.filename || `${mediaType === "audio" ? "音频" : "视频"} ${index + 1}`);
 		if (control.tagName === "VIDEO") {
+			control.autoplay = true;
 			control.muted = true;
+			control.defaultMuted = true;
 			control.loop = true;
 			control.playsInline = true;
+			control.setAttribute("muted", "");
+			control.setAttribute("playsinline", "");
 			control.style.cssText = [
 				"width:100%",
-				`height:${MEDIA_PREVIEW_HEIGHT}px`,
+				"height:auto",
+				"aspect-ratio:16 / 9",
 				"object-fit:contain",
 				"background:#050708",
+				"border:1px solid #2b3940",
 				"border-radius:6px",
 				"display:block",
+				"box-sizing:border-box",
+				"min-width:0",
 			].join(";");
-			control.onloadedmetadata = () => scheduleLayout(node);
+			const playVideo = () => control.play?.().catch(() => {});
+			control.onloadedmetadata = () => {
+				const width = Math.max(1, Number(control.videoWidth || 0));
+				const height = Math.max(1, Number(control.videoHeight || 0));
+				if (width && height) {
+					control.style.aspectRatio = `${width} / ${height}`;
+				}
+				scheduleLayout(node);
+				playVideo();
+			};
+			control.oncanplay = playVideo;
+			setTimeout(playVideo, 0);
 			control.onerror = () => scheduleLayout(node);
 		} else {
 			control.style.cssText = [
 				"width:100%",
 				"height:36px",
 				"display:block",
+				"box-sizing:border-box",
 			].join(";");
 		}
-
-		const caption = document.createElement("div");
-		caption.textContent = `${mediaType === "audio" ? "音频" : "视频"} ${index + 1}`;
-		caption.style.cssText = "font-size:11px;color:#dce7e2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-
-		card.appendChild(control);
-		card.appendChild(caption);
-		mediaGrid.appendChild(card);
+		mediaGrid.appendChild(control);
 	}
 
 	textBlock.textContent = text;
@@ -496,14 +562,11 @@ function ensurePreviewWidget(node) {
 	container.style.cssText = [
 		"display:flex",
 		"flex-direction:column",
-		"gap:8px",
+		"gap:4px",
 		"width:100%",
 		"box-sizing:border-box",
-		"margin-top:4px",
-		"border:1px solid #33434a",
-		"border-radius:8px",
-		"background:#0f1418",
-		"padding:8px",
+		"margin-top:2px",
+		"padding:0",
 		"color:#d9e4df",
 		"font-size:12px",
 		"line-height:1.45",
@@ -514,23 +577,29 @@ function ensurePreviewWidget(node) {
 	const imageGrid = document.createElement("div");
 	imageGrid.style.cssText = [
 		"display:none",
-		"grid-template-columns:repeat(auto-fill, minmax(120px, 1fr))",
-		"gap:8px",
+		`grid-template-columns:repeat(auto-fill, minmax(${MULTI_IMAGE_MIN_WIDTH}px, 1fr))`,
+		"gap:4px",
 		"width:100%",
+		"align-items:start",
 	].join(";");
 
 	const mediaGrid = document.createElement("div");
 	mediaGrid.style.cssText = [
 		"display:none",
 		"grid-template-columns:minmax(0, 1fr)",
-		"gap:8px",
+		"gap:4px",
 		"width:100%",
+		"align-items:start",
 	].join(";");
 
 	const textBlock = document.createElement("pre");
 	textBlock.style.cssText = [
 		"display:none",
 		"margin:0",
+		"padding:6px",
+		"border:1px solid #2b3940",
+		"border-radius:6px",
+		"background:#0f1418",
 		"white-space:pre-wrap",
 		"overflow-wrap:anywhere",
 		"font:12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace",
@@ -542,7 +611,7 @@ function ensurePreviewWidget(node) {
 	empty.style.cssText = [
 		"display:flex",
 		"align-items:center",
-		"min-height:64px",
+		"min-height:40px",
 		"color:#8ea0a8",
 	].join(";");
 
@@ -644,7 +713,7 @@ app.registerExtension({
 		const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
 		nodeType.prototype.onDrawBackground = function (...args) {
 			const result = originalOnDrawBackground?.apply(this, args);
-			const signature = inputSignature(this);
+			const signature = `${inputSignature(this)}|${workflowPrefix(this)}`;
 			if (signature !== this.__gjjSaveAnyObjectInputSignature) {
 				this.__gjjSaveAnyObjectInputSignature = signature;
 				scheduleStabilize(this);
