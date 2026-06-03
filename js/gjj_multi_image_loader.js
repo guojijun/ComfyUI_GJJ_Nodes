@@ -11,6 +11,7 @@ const MIN_HEIGHT = 220;
 const DOM_WIDGET_NAME = "gjj_multi_image_loader_dom";
 const IMAGE_API_PATH = "/gjj/input_images";
 const THUMB_API_PATH = "/gjj/input_image_thumb";
+const DEFAULT_NETWORK_IMAGE_API_PATH = "/gjj/multi_image_loader/default_image";
 const UPLOAD_SUBFOLDER = "gjj_multi_image_loader";
 const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE";
 const FILE_NAME_COLLATOR = new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "base" });
@@ -311,6 +312,202 @@ async function uploadFiles(node, files) {
 	renderPreview(node);
 	updateSummary(node);
 	scheduleLayout(node);
+}
+
+function parseNetworkImageUrls(text) {
+	const matches = String(text || "").match(/https?:\/\/[^\s,，]+/gi) || [];
+	const seen = new Set();
+	const urls = [];
+	for (const raw of matches) {
+		const url = String(raw || "").trim();
+		if (!url || seen.has(url)) continue;
+		seen.add(url);
+		urls.push(url);
+	}
+	return urls;
+}
+
+function askNetworkImageUrls(initialText = "") {
+	return new Promise((resolve) => {
+		const overlay = document.createElement("div");
+		overlay.style.cssText = [
+			"position:fixed",
+			"inset:0",
+			"z-index:10050",
+			"background:rgba(0,0,0,.58)",
+			"display:flex",
+			"align-items:center",
+			"justify-content:center",
+			"padding:24px",
+			"box-sizing:border-box",
+		].join(";");
+		const panel = document.createElement("div");
+		panel.style.cssText = [
+			"width:min(560px, calc(100vw - 48px))",
+			"border:1px solid #41535b",
+			"border-radius:9px",
+			"background:#10181d",
+			"box-shadow:0 18px 50px rgba(0,0,0,.42)",
+			"padding:12px",
+			"box-sizing:border-box",
+			"color:#dce7e2",
+			"display:flex",
+			"flex-direction:column",
+			"gap:9px",
+		].join(";");
+		const title = document.createElement("div");
+		title.textContent = "设置默认网络图片";
+		title.style.cssText = "font:700 14px/20px sans-serif;color:#f1f7f4";
+		const hint = document.createElement("div");
+		hint.textContent = "可粘贴多条 http/https 图片地址，一行一个，也可用空格或逗号分隔。";
+		hint.style.cssText = "font:12px/18px sans-serif;color:#9fb0b7";
+		const input = document.createElement("textarea");
+		input.value = String(initialText || "");
+		input.placeholder = "https://example.com/a.png\nhttps://example.com/b.jpg";
+		input.spellcheck = false;
+		input.style.cssText = [
+			"width:100%",
+			"min-height:138px",
+			"resize:vertical",
+			"border:1px solid #33464e",
+			"border-radius:8px",
+			"background:#0a1115",
+			"color:#edf5f2",
+			"outline:none",
+			"padding:8px",
+			"box-sizing:border-box",
+			"font:12px/1.45 Consolas, ui-monospace, monospace",
+		].join(";");
+		const actions = document.createElement("div");
+		actions.style.cssText = "display:flex;justify-content:flex-end;gap:7px";
+		const cancel = document.createElement("button");
+		cancel.type = "button";
+		cancel.textContent = "取消";
+		const ok = document.createElement("button");
+		ok.type = "button";
+		ok.textContent = "确定";
+		for (const button of [cancel, ok]) {
+			button.style.cssText = "height:28px;padding:0 12px;border:1px solid #44565f;border-radius:7px;background:#202b31;color:#dce7e2;cursor:pointer;font:12px/26px sans-serif";
+		}
+		ok.style.background = "#20362f";
+		ok.style.borderColor = "#4f8f7a";
+		const done = (value) => {
+			overlay.remove();
+			resolve(value);
+		};
+		cancel.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			done(null);
+		});
+		ok.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			done(input.value);
+		});
+		input.addEventListener("keydown", (event) => {
+			event.stopPropagation();
+			if (event.key === "Escape") {
+				event.preventDefault();
+				done(null);
+			} else if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+				event.preventDefault();
+				done(input.value);
+			}
+		});
+		for (const eventName of ["pointerdown", "mousedown", "click", "dblclick", "wheel", "contextmenu"]) {
+			overlay.addEventListener(eventName, (event) => event.stopPropagation());
+		}
+		actions.append(cancel, ok);
+		panel.append(title, hint, input, actions);
+		overlay.appendChild(panel);
+		document.body.appendChild(overlay);
+		setTimeout(() => {
+			input.focus();
+			input.select();
+		}, 0);
+	});
+}
+
+async function setDefaultNetworkImage(node) {
+	const state = ensureState(node);
+	const currentText = Array.isArray(node?.properties?.default_network_image_urls)
+		? node.properties.default_network_image_urls.join("\n")
+		: String(node?.properties?.default_network_image_url || "");
+	const text = await askNetworkImageUrls(currentText);
+	if (text == null) {
+		return;
+	}
+	const urls = parseNetworkImageUrls(text);
+	if (!urls.length) {
+		if (node.__gjjMultiImageSummary) {
+			node.__gjjMultiImageSummary.textContent = "请输入至少一条 http/https 网络图片地址";
+		}
+		requestRedraw(node);
+		return;
+	}
+
+	if (node.__gjjMultiImageSummary) {
+		node.__gjjMultiImageSummary.textContent = `正在下载 ${urls.length} 张网络图片并设置默认图片...`;
+	}
+	try {
+		const request = {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ urls }),
+		};
+		const response = api?.fetchApi
+			? await api.fetchApi(DEFAULT_NETWORK_IMAGE_API_PATH, request)
+			: await fetch(DEFAULT_NETWORK_IMAGE_API_PATH, request);
+		const data = await response.json().catch(() => ({}));
+		if (!response.ok || data?.ok === false) {
+			throw new Error(data?.error || `HTTP ${response.status || "?"}`);
+		}
+		const items = Array.isArray(data?.items) && data.items.length ? data.items : (data?.item ? [data.item] : []);
+		if (!items.length || !items.some((item) => item?.filename)) {
+			throw new Error("后端没有返回图片文件名。");
+		}
+
+		node.properties = node.properties || {};
+		node.properties.default_network_image_url = urls[0] || "";
+		node.properties.default_network_image_urls = urls;
+		state.selection = items.filter((item) => item?.filename).map((item) => ({
+			filename: String(item.filename || ""),
+			subfolder: String(item.subfolder || ""),
+			width: Number(item.width || 0),
+			height: Number(item.height || 0),
+			mtime_ns: Number(item.mtime_ns || 0),
+			size_bytes: Number(item.size_bytes || 0),
+		}));
+		state.executedImages = [];
+		state.externalCount = 0;
+		state.mergedCount = state.selection.length;
+		if (state.slideOutputEnabled) {
+			applySlidingRange(node);
+		} else {
+			syncSequenceRange(node, "");
+			if (node.__gjjMultiImageRangeInput) {
+				node.__gjjMultiImageRangeInput.value = "";
+			}
+		}
+		syncDataWidget(node);
+		ensureOutputs(node, totalImageCount(node));
+		await refreshOptions(node);
+		renderPreview(node);
+		updateSummary(node);
+		if (node.__gjjMultiImageSummary && Array.isArray(data?.errors) && data.errors.length) {
+			node.__gjjMultiImageSummary.textContent = `已设置 ${state.selection.length} 张，${data.errors.length} 条失败`;
+			node.__gjjMultiImageSummary.title = data.errors.join("\n");
+		} else if (node.__gjjMultiImageSummary) {
+			node.__gjjMultiImageSummary.title = "";
+		}
+		scheduleLayout(node, true);
+	} catch (error) {
+		if (node.__gjjMultiImageSummary) {
+			node.__gjjMultiImageSummary.textContent = error?.message || "设置默认图片失败";
+		}
+		requestRedraw(node);
+	}
 }
 
 function syncDataWidget(node) {
@@ -924,6 +1121,7 @@ function updateSummary(node) {
 	const slideSourceCount = slidingSourceCount(node);
 	const slideText = state.slideOutputEnabled ? ` · 滑动 ${formatSlidingRange(state.slideOutputIndex, slideSourceCount, state.slideOutputSize) || "等待图片"}` : "";
 	if (node.__gjjMultiImageSummary) {
+		node.__gjjMultiImageSummary.title = "";
 		if (externalCount > 0 || selectedCount > 0) {
 			const parts = [];
 			if (externalCount > 0) {
@@ -1183,6 +1381,7 @@ function buildDom(node) {
 	const refreshButton = makeIconButton("🔄", "刷新：重新扫描 ComfyUI input 目录中的图片列表，并刷新当前预览。");
 	const clearErrorButton = makeIconButton("🧹", "清理错误：移除当前列表里加载失败或损坏的图片。");
 	const clearAllButton = makeIconButton("🗑️", "清空：清空所有已选图片，保留外部输入连接。");
+	const defaultImageButton = makeIconButton("🌐", "设置默认图片：输入一条或多条 http/https 网络图片地址，下载到 ComfyUI input 后作为当前默认已选图片。");
 	const rangeButton = makeIconButton("#️⃣", "序列范围：点击展开/收起设置栏。支持 [1,3,5] 和 [1:8]。");
 	const outputButton = makeIconButton("🔌", `单图片输出口：默认隐藏。点击后按当前图片数量展开，最多 ${MAX_OUTPUT_IMAGES} 个。`);
 	const slideButton1 = makeIconButton("1️⃣", "滑动输出 1 张：点击后自动执行并循环推进。");
@@ -1212,6 +1411,11 @@ function buildDom(node) {
 		event.preventDefault();
 		event.stopPropagation();
 		clearAllImages(node);
+	});
+	defaultImageButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		setDefaultNetworkImage(node);
 	});
 	rangeButton.addEventListener("click", (event) => {
 		event.preventDefault();
@@ -1297,7 +1501,7 @@ function buildDom(node) {
 		event.preventDefault();
 		event.stopPropagation();
 		state.extraToolsExpanded = !state.extraToolsExpanded;
-		const extraTools = node.__gjjMultiImageExtraTools || [slideButton1, slideButton2, slideButton3, slideInitButton, clearErrorButton, clearAllButton, zoomOutButton, zoomInButton];
+		const extraTools = node.__gjjMultiImageExtraTools || [slideButton1, slideButton2, slideButton3, slideInitButton, defaultImageButton, clearErrorButton, clearAllButton, zoomOutButton, zoomInButton];
 		for (const item of extraTools) {
 			item.style.display = state.extraToolsExpanded ? "inline-flex" : "none";
 		}
@@ -1368,6 +1572,7 @@ function buildDom(node) {
 	toolbar.appendChild(slideButton2);
 	toolbar.appendChild(slideButton3);
 	toolbar.appendChild(slideInitButton);
+	toolbar.appendChild(defaultImageButton);
 	toolbar.appendChild(clearErrorButton);
 	toolbar.appendChild(clearAllButton);
 	toolbar.appendChild(zoomOutButton);
@@ -1456,7 +1661,7 @@ function buildDom(node) {
 
 	node.__gjjMultiImageContainer = container;
 	node.__gjjMultiImageToolbar = toolbar;
-	node.__gjjMultiImageExtraTools = [slideButton1, slideButton2, slideButton3, slideInitButton, clearErrorButton, clearAllButton, zoomOutButton, zoomInButton];
+	node.__gjjMultiImageExtraTools = [slideButton1, slideButton2, slideButton3, slideInitButton, defaultImageButton, clearErrorButton, clearAllButton, zoomOutButton, zoomInButton];
 	node.__gjjMultiImageMoreButton = moreButton;
 	node.__gjjMultiImageBrowseButton = browseButton;
 	node.__gjjMultiImageOutputButton = outputButton;
@@ -1568,7 +1773,7 @@ api.addEventListener("execution_interrupted", () => {
 });
 
 app.registerExtension({
-	name: "Comfy.GJJ.MultiImageLoader",
+	name: "Comfy.GJJ.MultiImageLoader.NetworkBatchRangeFix",
 
 	async beforeRegisterNodeDef(nodeType, nodeData) {
 		if (!TARGET_NODES.has(nodeData?.name)) {

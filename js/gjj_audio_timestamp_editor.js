@@ -18,7 +18,7 @@ const HIDDEN_WIDGET_NAMES = [
 	"preview_text", "preview_kind", "preview_audio", "preview_sample_rate",
 	"preview_duration", "preview_segments", "preview_segment_count",
 	"segment_count",
-	"segment_duration", "单段时长",
+	"segment_duration", "单段时长", "当前片段长度",
 ];
 
 function isHiddenWidget(w) {
@@ -185,6 +185,7 @@ function syncEditorStateToNode(node) {
 		node.properties = node.properties || {};
 		node.properties.segments = segmentsText;
 		node.properties.segment_duration = node._editor.segmentDuration;
+		node.__gjjAudioLastSubmittedSegmentsText = segmentsText;
 		syncNodeWidgetValues(node);
 		refreshNodeCanvas(node);
 		return true;
@@ -307,6 +308,7 @@ async function queueOnlyCurrentNode(node) {
 			app.canvas.selected_nodes[node.id] = node;
 			app.canvas.selected_node = node;
 		}
+		syncEditorStateToNode(node);
 		syncNodeWidgetValues(node);
 		refreshNodeCanvas(node);
 		if (typeof app.queuePrompt === "function") {
@@ -422,29 +424,39 @@ class AudioSegmentEditorWidget {
 		this.outputBtn = this.makeEmojiButton("🔌", "显示/收起全部音频分段输出口；默认只显示音频片段1");
 		this.loopBtn = this.makeEmojiButton("🔁", "循环播放当前选中的分段");
 
-		const durationWrap = document.createElement("label");
-		durationWrap.title = "单段时长：默认按这个时长从音频中截取一段；波形中的高亮区域可拖动、左右边缘可拉长拉短";
-		durationWrap.style.cssText = `
+		const rangeWrap = document.createElement("label");
+		rangeWrap.title = "选中片段的开始 / 结束时间；修改后会同步调整波形面板，拖动面板也会实时更新这里";
+		rangeWrap.style.cssText = `
 			display:inline-flex; align-items:center; gap:3px; height:26px; margin-left:auto;
 			background:#252a2f; border:1px solid #444; border-radius:7px; padding:0 5px;
 		`;
 		const clock = document.createElement("span");
 		clock.textContent = "⏱";
-		this.durationInput = document.createElement("input");
-		this.durationInput.type = "number";
-		this.durationInput.min = String(MIN_DURATION);
-		this.durationInput.step = "0.1";
-		this.durationInput.value = String(this.segmentDuration);
-		this.durationInput.style.cssText = `width:48px; background:transparent; color:#eee; border:0; outline:0; font-size:11px;`;
-		this.durationInput.title = durationWrap.title;
-		durationWrap.append(clock, this.durationInput);
+		this.startInput = document.createElement("input");
+		this.startInput.type = "number";
+		this.startInput.min = "0";
+		this.startInput.step = "0.1";
+		this.startInput.value = "0";
+		this.startInput.style.cssText = `width:42px; background:transparent; color:#eee; border:0; outline:0; font-size:11px; text-align:right;`;
+		this.startInput.title = rangeWrap.title;
+		const dash = document.createElement("span");
+		dash.textContent = "–";
+		dash.style.cssText = "color:#9aa5ad;";
+		this.endInput = document.createElement("input");
+		this.endInput.type = "number";
+		this.endInput.min = String(MIN_DURATION);
+		this.endInput.step = "0.1";
+		this.endInput.value = String(this.segmentDuration);
+		this.endInput.style.cssText = `width:42px; background:transparent; color:#eee; border:0; outline:0; font-size:11px;`;
+		this.endInput.title = rangeWrap.title;
+		rangeWrap.append(clock, this.startInput, dash, this.endInput);
 
 		this.playTimeLabel = document.createElement("span");
-		this.playTimeLabel.textContent = "0.0 / 0.0";
-		this.playTimeLabel.title = "当前播放时间 / 当前分段结束时间";
-		this.playTimeLabel.style.cssText = "color:#aaa; font-size:10px; min-width:54px; white-space:nowrap;";
+		this.playTimeLabel.textContent = "▶ 0.0";
+		this.playTimeLabel.title = "当前播放时间";
+		this.playTimeLabel.style.cssText = "color:#aaa; font-size:10px; min-width:38px; white-space:nowrap;";
 
-		toolbar.append(this.folderBtn, this.addBtn, this.distributeBtn, this.deleteBtn, this.playBtn, this.listBtn, this.outputBtn, this.loopBtn, this.playTimeLabel, durationWrap);
+		toolbar.append(this.folderBtn, this.addBtn, this.distributeBtn, this.deleteBtn, this.playBtn, this.listBtn, this.outputBtn, this.loopBtn, this.playTimeLabel, rangeWrap);
 		this.container.appendChild(toolbar);
 
 		this.audioPlayer = document.createElement("audio");
@@ -496,7 +508,7 @@ class AudioSegmentEditorWidget {
 	}
 
 	bindEvents() {
-		for (const el of [this.container, this.canvas, this.durationInput]) {
+		for (const el of [this.container, this.canvas, this.startInput, this.endInput]) {
 			el.addEventListener("pointerdown", stop);
 			el.addEventListener("wheel", stop, { passive: true });
 		}
@@ -524,20 +536,28 @@ class AudioSegmentEditorWidget {
 			this.loopSelection = !this.loopSelection;
 			this.setButtonActive(this.loopBtn, this.loopSelection);
 		});
-		this.durationInput.addEventListener("input", () => {
-			clearTimeout(this._durationInputTimer);
-			this._durationInputTimer = setTimeout(() => this.applyPendingDurationInput(true), 120);
-		});
-		this.durationInput.addEventListener("change", () => this.applySegmentDuration(true));
-		this.durationInput.addEventListener("blur", () => this.applyPendingDurationInput(true));
-		this.durationInput.addEventListener("keydown", e => {
-			e.stopPropagation();
-			if (e.key === "Enter") {
-				e.preventDefault();
-				this.applySegmentDuration(true);
-				this.durationInput.blur?.();
-			}
-		});
+		const bindRangeInput = (input, field) => {
+			input.addEventListener("input", () => {
+				this._lastRangeInputField = field;
+				clearTimeout(this._durationInputTimer);
+				this._durationInputTimer = setTimeout(() => this.applyPendingRangeInput(true), 120);
+			});
+			input.addEventListener("change", () => this.applyRangeInput(true, field));
+			input.addEventListener("blur", () => {
+				this._lastRangeInputField = field;
+				this.applyPendingRangeInput(true);
+			});
+			input.addEventListener("keydown", e => {
+				e.stopPropagation();
+				if (e.key === "Enter") {
+					e.preventDefault();
+					this.applyRangeInput(true, field);
+					input.blur?.();
+				}
+			});
+		};
+		bindRangeInput(this.startInput, "start");
+		bindRangeInput(this.endInput, "end");
 
 		this.audioPlayer.addEventListener("timeupdate", () => this.onAudioTimeUpdate());
 		this.audioPlayer.addEventListener("play", () => { this.seekToSelectedStart(); this.setButtonActive(this.playBtn, true); });
@@ -660,35 +680,77 @@ class AudioSegmentEditorWidget {
 		seg.end = parseFloat(clamp(Number(seg.end || seg.start + MIN_DURATION), seg.start + MIN_DURATION, max).toFixed(3));
 	}
 
-	parseDurationInput() {
-		const value = Number(this.durationInput?.value);
-		if (!Number.isFinite(value)) return Math.max(MIN_DURATION, Number(this.segmentDuration || DEFAULT_SEGMENT_DURATION));
-		return Math.max(MIN_DURATION, value);
+	getSelectedSegment() {
+		return this.segments[this.selectedIndex >= 0 ? this.selectedIndex : 0] || this.segments[0];
 	}
 
-	applyPendingDurationInput(commit = true) {
-		const value = this.parseDurationInput();
-		if (Math.abs(value - Number(this.segmentDuration || 0)) < 0.000001) return false;
-		this.applySegmentDuration(commit);
+	formatInputSecond(value) {
+		return String(parseFloat((Number(value || 0)).toFixed(3)));
+	}
+
+	syncSelectedRangeControls(updateInputs = true, updateWidget = false) {
+		const seg = this.getSelectedSegment();
+		if (!seg) return;
+		const start = Number(seg.start || 0);
+		const end = Number(seg.end || start + MIN_DURATION);
+		const length = Math.max(MIN_DURATION, end - start);
+		this.segmentDuration = parseFloat(length.toFixed(3));
+		if (updateInputs) {
+			if (this.startInput && document.activeElement !== this.startInput) this.startInput.value = this.formatInputSecond(start);
+			if (this.endInput && document.activeElement !== this.endInput) this.endInput.value = this.formatInputSecond(end);
+		}
+		if (updateWidget) {
+			setWidgetValue(this.node, "segment_duration", this.segmentDuration);
+			this.node.properties = this.node.properties || {};
+			this.node.properties.segment_duration = this.segmentDuration;
+		}
+	}
+
+	parseRangeInputs() {
+		const seg = this.getSelectedSegment() || { start: 0, end: Math.min(this.getMaxDuration(), this.segmentDuration || DEFAULT_SEGMENT_DURATION) };
+		let start = Number(this.startInput?.value);
+		let end = Number(this.endInput?.value);
+		if (!Number.isFinite(start)) start = Number(seg.start || 0);
+		if (!Number.isFinite(end)) end = Number(seg.end || start + MIN_DURATION);
+		return { start, end };
+	}
+
+	applyPendingRangeInput(commit = true) {
+		return this.applyRangeInput(commit, this._lastRangeInputField || "end");
+	}
+
+	applyRangeInput(commit = true, changedField = "end") {
+		clearTimeout(this._durationInputTimer);
+		let { start, end } = this.parseRangeInputs();
+		const max = this.getMaxDuration();
+		start = clamp(start, 0, Math.max(0, max - MIN_DURATION));
+		end = clamp(end, MIN_DURATION, max);
+		if (end - start < MIN_DURATION) {
+			if (changedField === "start") {
+				start = clamp(end - MIN_DURATION, 0, Math.max(0, max - MIN_DURATION));
+			} else {
+				end = clamp(start + MIN_DURATION, MIN_DURATION, max);
+				if (end - start < MIN_DURATION) start = clamp(end - MIN_DURATION, 0, Math.max(0, max - MIN_DURATION));
+			}
+		}
+		const seg = this.getSelectedSegment();
+		if (seg) {
+			seg.start = parseFloat(start.toFixed(3));
+			seg.end = parseFloat(end.toFixed(3));
+			this.normalizeSegment(seg);
+		}
+		this.syncSelectedRangeControls(true, true);
+		if (commit) this.commit(true);
+		this.render();
 		return true;
 	}
 
+	applyPendingDurationInput(commit = true) {
+		return this.applyPendingRangeInput(commit);
+	}
+
 	applySegmentDuration(commit = true) {
-		clearTimeout(this._durationInputTimer);
-		const value = this.parseDurationInput();
-		this.segmentDuration = value;
-		if (this.durationInput) this.durationInput.value = String(value);
-		setWidgetValue(this.node, "segment_duration", value);
-		this.node.properties = this.node.properties || {};
-		this.node.properties.segment_duration = value;
-		const seg = this.segments[this.selectedIndex >= 0 ? this.selectedIndex : 0];
-		if (seg) {
-			seg.end = Math.min(this.getMaxDuration(), Number(seg.start || 0) + value);
-			if (seg.end - seg.start < MIN_DURATION) seg.start = Math.max(0, seg.end - MIN_DURATION);
-			this.normalizeSegment(seg);
-		}
-		if (commit) this.commit(true);
-		this.render();
+		return this.applyRangeInput(commit, this._lastRangeInputField || "end");
 	}
 
 	makeDefaultSegment() {
@@ -787,11 +849,13 @@ class AudioSegmentEditorWidget {
 
 	commit(updateHeight = true) {
 		this.segments.forEach(s => this.normalizeSegment(s));
+		this.syncSelectedRangeControls(true, false);
 		setWidgetValue(this.node, "segments_json", JSON.stringify(this.segments));
 		setWidgetValue(this.node, "segment_duration", this.segmentDuration);
 		this.node.properties = this.node.properties || {};
 		this.node.properties.segments = JSON.stringify(this.segments);
 		this.node.properties.segment_duration = this.segmentDuration;
+		this.node.__gjjAudioLastLocalSegmentsText = this.node.properties.segments;
 		syncNodeWidgetValues(this.node);
 		this.updateLabels();
 		if (updateHeight) stabilizeNode(this.node, this.segments.length, this.showListOutput, this.showAllOutputs);
@@ -801,8 +865,9 @@ class AudioSegmentEditorWidget {
 	updateLabels() {
 		const seg = this.segments[this.selectedIndex] || this.segments[0];
 		if (seg) {
+			this.syncSelectedRangeControls(true, false);
 			const len = Math.max(0, Number(seg.end || 0) - Number(seg.start || 0));
-			this.rangeLabel.textContent = `片段${this.selectedIndex + 1}: ${this.formatTime(seg.start)}–${this.formatTime(seg.end)} (${len.toFixed(1)}s)`;
+			this.rangeLabel.textContent = `片段${this.selectedIndex + 1}: ${len.toFixed(1)}s`;
 		} else {
 			this.rangeLabel.textContent = "--";
 		}
@@ -883,9 +948,7 @@ class AudioSegmentEditorWidget {
 
 	updatePlayTimeLabel() {
 		if (!this.playTimeLabel) return;
-		const seg = this.segments[this.selectedIndex] || this.segments[0];
-		const end = seg ? Number(seg.end || 0) : Number(this.duration || 0);
-		this.playTimeLabel.textContent = `${this.formatTime(this.audioPlayer?.currentTime || 0)} / ${this.formatTime(end)}`;
+		this.playTimeLabel.textContent = `▶ ${this.formatTime(this.audioPlayer?.currentTime || 0)}`;
 	}
 
 	toggleSelectedPlayback() {
@@ -1373,7 +1436,7 @@ function scheduleExternalAudioRefresh(node, reason = "外部音频已更新，�
 
 
 app.registerExtension({
-	name: "GJJ.AudioSegmentEditor.V23DurationInputSync",
+	name: "GJJ.AudioSegmentEditor.V27PanelRangeSource",
 	async beforeRegisterNodeDef(nodeType, nodeData) {
 		if (nodeData?.name !== NODE_NAME) return;
 
@@ -1475,8 +1538,12 @@ app.registerExtension({
 			this._editor.sampleRate = sampleRate;
 			const propertySegments = parseSegments(this.properties?.segments || "[]");
 			const segments = parseSegments(segmentsJson);
-			// 执行完成后以“后端实际裁剪分段”为准，避免界面显示新分段但下游保存的是旧分段。
-			this._editor.setSegments(segments.length ? segments : (propertySegments.length ? propertySegments : this._editor.makeDefaultSegment()));
+			const backendSegmentsText = JSON.stringify(segments);
+			const propertySegmentsText = JSON.stringify(propertySegments);
+			const submittedSegmentsText = this.__gjjAudioLastSubmittedSegmentsText || "";
+			// 面板是裁剪时间源；后端结果只有在匹配本次提交时才覆盖面板，防止旧执行结果把起止时间拉回默认 3 秒。
+			const useBackendSegments = segments.length && (!propertySegments.length || backendSegmentsText === propertySegmentsText || backendSegmentsText === submittedSegmentsText);
+			this._editor.setSegments(useBackendSegments ? segments : (propertySegments.length ? propertySegments : this._editor.makeDefaultSegment()));
 			const audioUrl = audioDataToUrl(previewAudio);
 			if (audioUrl) this._editor.loadAudio(audioUrl); else this._editor.render();
 			this.properties = this.properties || {};

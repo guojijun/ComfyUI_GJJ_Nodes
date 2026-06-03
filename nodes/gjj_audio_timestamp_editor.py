@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -21,6 +22,11 @@ try:
 		print_dependency_model_report,
 		send_dependency_model_notice,
 	)
+	from .common_utils.network_media import (
+		gjjutils_detect_media_type,
+		gjjutils_download_network_media_to_input,
+		gjjutils_is_network_url,
+	)
 except ImportError:
 	from common_utils.dependency_checker import (
 		build_dependency_model_report,
@@ -29,13 +35,21 @@ except ImportError:
 		print_dependency_model_report,
 		send_dependency_model_notice,
 	)
+	from common_utils.network_media import (
+		gjjutils_detect_media_type,
+		gjjutils_download_network_media_to_input,
+		gjjutils_is_network_url,
+	)
 
 
 NODE_NAME = "GJJ_AudioTimestampEditor"
 NODE_DISPLAY_NAME = "GJJ · ✂️ 可视化音频分段编辑器"
-BACKEND_VERSION = "V23_DURATION_INPUT_SYNC"
+BACKEND_VERSION = "V28_SILENT_VIDEO_NO_AUDIO_TRACK"
 MAX_SEGMENTS = 99  # 最大分段数量
 MIN_OUTPUTS = 1  # 最小输出数量
+DEFAULT_AUDIO_URL = "https://raw.githubusercontent.com/Comfy-Org/example_workflows/refs/heads/main/video/wan/wan2.2_s2v/input_audio.MP3"
+AUDIO_MEDIA_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".aiff", ".aif", ".opus"}
+VIDEO_MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv", ".wmv", ".mpeg", ".mpg"}
 DEPENDENCY_SPECS = [
 	{
 		"module_name": "soundfile",
@@ -119,20 +133,205 @@ def _audio_fingerprint(audio: Any) -> str:
 		return f"audio-fingerprint-error:{type(exc).__name__}:{id(audio)}"
 
 
-def _find_media_path(filename: str) -> str | None:
+def _configured_media_dirs() -> tuple[str, ...]:
+	return (
+		folder_paths.get_input_directory(),
+		folder_paths.get_output_directory(),
+		folder_paths.get_temp_directory(),
+	)
+
+
+def _resolve_media_path(filename: str, *, allow_download: bool = True) -> str | None:
 	if not filename or filename == "[不加载]":
 		return None
-	for search_dir in (folder_paths.get_input_directory(), folder_paths.get_output_directory()):
+
+	raw = str(filename or "").strip()
+	if gjjutils_is_network_url(raw):
+		if not allow_download:
+			return None
+		media_type = gjjutils_detect_media_type(raw) or "AUDIO"
+		if media_type not in {"AUDIO", "VIDEO"}:
+			media_type = "AUDIO"
+		return gjjutils_download_network_media_to_input(raw, media_type)
+
+	path = Path(raw).expanduser()
+	if path.is_file():
+		return str(path)
+
+	for search_dir in _configured_media_dirs():
 		if not search_dir:
 			continue
-		path = os.path.join(search_dir, filename)
-		if os.path.exists(path):
-			return path
+		candidate = Path(search_dir) / raw
+		if candidate.is_file():
+			return str(candidate)
 	return None
 
 
+def _is_video_media_value(value: Any) -> bool:
+	text = str(value or "").strip()
+	if not text:
+		return False
+	if gjjutils_detect_media_type(text) == "VIDEO":
+		return True
+	try:
+		return Path(text.split("?", 1)[0]).suffix.lower() in VIDEO_MEDIA_EXTENSIONS
+	except Exception:
+		return False
+
+
+def _audio_data_to_comfy(audio_data: Any, sample_rate: Any) -> dict[str, Any]:
+	if audio_data.ndim == 1:
+		audio_data = audio_data.reshape(1, -1)
+	elif audio_data.ndim == 2:
+		audio_data = audio_data.T
+	waveform = torch.from_numpy(audio_data).float().unsqueeze(0)
+	return {
+		"waveform": waveform,
+		"sample_rate": int(sample_rate),
+	}
+
+
+def _get_ffmpeg_executable() -> str:
+	try:
+		from .gjj_video_combine_runtime import get_ffmpeg_path
+	except Exception:
+		try:
+			from gjj_video_combine_runtime import get_ffmpeg_path
+		except Exception:
+			get_ffmpeg_path = None
+
+	if get_ffmpeg_path is not None:
+		try:
+			ffmpeg_path = get_ffmpeg_path()
+			if ffmpeg_path:
+				return str(ffmpeg_path)
+		except Exception:
+			pass
+
+	try:
+		from imageio_ffmpeg import get_ffmpeg_exe
+
+		ffmpeg_path = get_ffmpeg_exe()
+		if ffmpeg_path:
+			return str(ffmpeg_path)
+	except Exception:
+		pass
+
+	try:
+		import shutil
+
+		ffmpeg_path = shutil.which("ffmpeg")
+		if ffmpeg_path:
+			return str(ffmpeg_path)
+	except Exception:
+		pass
+
+	for local_name in ("ffmpeg.exe", "ffmpeg"):
+		local_path = Path(local_name).resolve()
+		if local_path.is_file():
+			return str(local_path)
+
+	raise RuntimeError("当前环境未找到 ffmpeg，无法从视频文件中抽取音频轨道。请安装 ffmpeg，或安装 imageio-ffmpeg 后重启 ComfyUI。")
+
+
+def _get_ffprobe_executable(ffmpeg_path: str | None = None) -> str | None:
+	try:
+		if ffmpeg_path:
+			path = Path(ffmpeg_path)
+			probe_name = "ffprobe.exe" if path.suffix.lower() == ".exe" else "ffprobe"
+			candidate = path.with_name(probe_name)
+			if candidate.is_file():
+				return str(candidate)
+	except Exception:
+		pass
+	try:
+		import shutil
+
+		ffprobe_path = shutil.which("ffprobe")
+		if ffprobe_path:
+			return str(ffprobe_path)
+	except Exception:
+		pass
+	return None
+
+
+def _probe_media_duration_seconds(filepath: str, ffmpeg_path: str | None = None) -> float:
+	import subprocess
+
+	ffprobe_path = _get_ffprobe_executable(ffmpeg_path)
+	if ffprobe_path:
+		try:
+			proc = subprocess.run(
+				[
+					ffprobe_path,
+					"-v", "error",
+					"-show_entries", "format=duration",
+					"-of", "default=noprint_wrappers=1:nokey=1",
+					filepath,
+				],
+				capture_output=True,
+				text=True,
+				check=False,
+			)
+			value = float(str(proc.stdout or "").strip())
+			if value > 0:
+				return value
+		except Exception:
+			pass
+
+	try:
+		ffmpeg_path = ffmpeg_path or _get_ffmpeg_executable()
+		proc = subprocess.run(
+			[ffmpeg_path, "-hide_banner", "-i", filepath],
+			capture_output=True,
+			text=True,
+			check=False,
+		)
+		text = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+		match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
+		if match:
+			hours = int(match.group(1))
+			minutes = int(match.group(2))
+			seconds = float(match.group(3))
+			value = hours * 3600 + minutes * 60 + seconds
+			if value > 0:
+				return value
+	except Exception:
+		pass
+	return 0.0
+
+
+def _make_silent_audio(duration_seconds: float, sample_rate: int = 44100) -> dict[str, Any]:
+	duration_seconds = max(0.05, _safe_float(duration_seconds, 3.0))
+	sample_rate = max(1, int(sample_rate or 44100))
+	samples = max(1, int(round(duration_seconds * sample_rate)))
+	return {
+		"waveform": torch.zeros((1, 2, samples), dtype=torch.float32),
+		"sample_rate": sample_rate,
+		"_gjj_silent_video_audio": True,
+		"_gjj_silent_duration": float(samples) / float(sample_rate),
+	}
+
+
+def _looks_like_missing_audio_stream_error(text: str) -> bool:
+	lower = str(text or "").lower()
+	return any(
+		pattern in lower
+		for pattern in (
+			"output file does not contain any stream",
+			"matches no streams",
+			"stream specifier",
+			"no audio",
+			"audio: none",
+		)
+	)
+
+
 def _file_fingerprint(filename: str) -> str:
-	path = _find_media_path(filename)
+	try:
+		path = _resolve_media_path(filename, allow_download=True)
+	except Exception as exc:
+		return f"file-resolve-error:{filename}:{type(exc).__name__}:{exc}"
 	if not path:
 		return f"file-missing:{filename}"
 	try:
@@ -176,6 +375,7 @@ _DESCRIPTION_INTRO = """
 
 【核心功能】
 • 节点内加载音频 - 支持从下拉列表选择音频/视频文件
+• 视频静默取音频 - 选择视频文件时自动抽取音频轨道；没有音轨的视频会生成同长度静音
 • 自动生成分段 - 根据音频时长自动创建等分时间段
 • 可视化编辑 - Canvas波形显示，拖拽调整起止时间标记
 • 动态输出 - 根据分段数量自动扩展输出接口
@@ -272,6 +472,44 @@ def _segments_from_prompt_inputs(prompt: Any, unique_id: Any) -> list[dict[str, 
 			if segments:
 				return segments
 	return []
+
+
+def _prompt_input_is_linked(prompt: Any, unique_id: Any, key_names: tuple[str, ...]) -> bool:
+	if unique_id is None or not isinstance(prompt, dict):
+		return False
+	node = prompt.get(str(unique_id)) or prompt.get(unique_id)
+	if not isinstance(node, dict):
+		return False
+	inputs = node.get("inputs") or {}
+	if not isinstance(inputs, dict):
+		return False
+	for key in key_names:
+		value = inputs.get(key)
+		if isinstance(value, (list, tuple)) and value:
+			return True
+	return False
+
+
+def _segments_for_execution(prompt: Any, extra_pnginfo: Any, unique_id: Any, segments_json: str) -> list[dict[str, Any]]:
+	"""选择本次执行要使用的分段。
+
+	如果 segments_json 接了外部输入，优先使用真正执行时解析到的参数。
+	否则优先使用 workflow properties：前端每次拖拽/改时长都会同步写入这里，
+	可避免隐藏 widget 的旧 prompt 值把分段拉回默认 3 秒。
+	"""
+	widget_segments = parse_segments_list(segments_json)
+	if _prompt_input_is_linked(prompt, unique_id, ("segments_json", "分段列表JSON", "segments")) and widget_segments:
+		return widget_segments
+
+	property_segments = _segments_from_workflow_properties(extra_pnginfo, unique_id)
+	if property_segments:
+		return property_segments
+
+	prompt_segments = _segments_from_prompt_inputs(prompt, unique_id)
+	if prompt_segments:
+		return prompt_segments
+
+	return widget_segments
 
 
 def _load_numpy_runtime():
@@ -426,7 +664,7 @@ class GJJ_AudioSegmentEditor:
 
 	GJJ_HELP = {
 		"title": "GJJ · ✂️ 音频分段编辑器",
-		"version": "2.1.0",
+		"version": "2.1.2",
 		"author": "GJJ Custom Nodes Team",
 		"description": DESCRIPTION,
 		"notice": _DEPENDENCY_REPORT["help_message"] if not _DEPENDENCY_REPORT["available"] else "",
@@ -445,12 +683,12 @@ class GJJ_AudioSegmentEditor:
 		"features": [
 			{
 				"name": "节点内音频加载",
-				"description": "内置音频/视频文件选择器，无需外部节点连接",
-				"supported_formats": ["WAV", "MP3", "FLAC"],
+				"description": "内置音频/视频文件选择器；默认可用网络音频，选择视频时会静默抽取音频轨道；无音轨视频会生成静音",
+				"supported_formats": ["WAV", "MP3", "FLAC", "MP4", "MOV", "MKV", "WEBM"],
 			},
 			{
 				"name": "自动分段生成",
-				"description": "默认创建 1 个按单段时长截取的时间段，也可手动添加多段",
+				"description": "默认创建 1 个时间段；后续裁剪始终以面板中的开始/结束时间为准",
 				"default_segments": 1,
 				"customizable": True,
 			},
@@ -480,7 +718,7 @@ class GJJ_AudioSegmentEditor:
 			"audio_file": {
 				"type": "COMBO",
 				"required": False,
-				"description": "节点内音频/视频文件选择器；视频会自动只提取音频",
+				"description": "节点内音频/视频文件选择器；默认使用 Comfy 官方 Wan2.2 S2V 示例音频 URL。网络资源会通过公共函数下载解析；选择视频时会静默抽取音频轨道。",
 			},
 			"segments_json": {
 				"type": "STRING",
@@ -528,6 +766,8 @@ class GJJ_AudioSegmentEditor:
 
 		"technical_notes": [
 			"音频裁剪使用 torch.Tensor 切片，保持原始采样率",
+			"实际裁剪以面板写入的 start/end 分段列表为准；当前片段长度只用于调整面板",
+			"视频文件通过 ffmpeg -vn 静默抽取音频轨道后再进入分段流程；没有音轨时按视频时长生成静音 AUDIO",
 			"动态输出接口通过IS_CHANGED机制实现，前端根据分段数量动态调整",
 			"时间段精度为毫秒级（小数点后3位）",
 			"输出顺序与分段列表顺序一致",
@@ -542,9 +782,28 @@ class GJJ_AudioSegmentEditor:
 				"problem": "音频片段时长不正确",
 				"solution": "检查起止时间是否重叠或超出音频总时长",
 			},
+			{
+				"problem": "视频无法生成音频片段",
+				"solution": "确认运行环境可调用 ffmpeg；如果视频本身没有音轨，节点会自动生成同长度静音。",
+			},
 		],
 
 		"changelog": [
+			{
+				"version": "2.1.2",
+				"date": "2026-06-03",
+				"changes": [
+					"🔇 无音轨视频自动生成同长度静音 AUDIO",
+				],
+			},
+			{
+				"version": "2.1.1",
+				"date": "2026-06-03",
+				"changes": [
+					"✨ 默认音频支持网络 URL 并复用 GJJ_TemplateParams 公共下载逻辑",
+					"🔧 选择视频文件时静默抽取音频轨道",
+				],
+			},
 			{
 				"version": "2.1.0",
 				"date": "2026-05-04",
@@ -587,7 +846,7 @@ class GJJ_AudioSegmentEditor:
 			"required": {
 				"audio_file": (audio_files, {
 					"display_name": "音频/视频文件",
-					"tooltip": "节点内音频/视频文件选择器；视频会自动只提取音频",
+					"tooltip": "节点内音频/视频文件选择器；默认是 Comfy 官方 Wan2.2 S2V 示例音频 URL。支持 http/https 网络音频；选择视频时后端会静默抽取音频轨道。",
 				}),
 			},
 			"optional": {
@@ -606,8 +865,8 @@ class GJJ_AudioSegmentEditor:
 					"min": 0.05,
 					"max": 3600.0,
 					"step": 0.1,
-					"display_name": "单段时长",
-					"tooltip": "默认只生成 1 段，并按这个时长截取；前端可在波形区拖动位置或拉长拉短。",
+					"display_name": "当前片段长度",
+					"tooltip": "内部同步值：右上角数字只调整当前面板片段长度；实际输出始终以面板中的开始/结束时间为准。",
 				}),
 			},
 			"hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO", "unique_id": "UNIQUE_ID"},
@@ -616,7 +875,8 @@ class GJJ_AudioSegmentEditor:
 	@classmethod
 	def _get_audio_files(cls) -> list[str]:
 		"""获取可用的音频/视频文件列表"""
-		files = ["[不加载]"]
+		files = [DEFAULT_AUDIO_URL, "[不加载]"]
+		seen = set(files)
 
 		# 从多个目录查找音频/视频文件
 		search_dirs = [
@@ -624,7 +884,7 @@ class GJJ_AudioSegmentEditor:
 			folder_paths.get_output_directory(),
 		]
 
-		audio_extensions = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".aiff", ".aif", ".opus", ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv", ".wmv", ".mpeg", ".mpg"}
+		media_extensions = AUDIO_MEDIA_EXTENSIONS | VIDEO_MEDIA_EXTENSIONS
 
 		for search_dir in search_dirs:
 			if not search_dir or not os.path.exists(search_dir):
@@ -632,19 +892,21 @@ class GJJ_AudioSegmentEditor:
 
 			for root, dirs, filenames in os.walk(search_dir):
 				for filename in filenames:
-					if Path(filename).suffix.lower() in audio_extensions:
-						files.append(filename)
+					if Path(filename).suffix.lower() in media_extensions:
+						try:
+							display_name = Path(root, filename).relative_to(search_dir).as_posix()
+						except Exception:
+							display_name = filename
+						if display_name not in seen:
+							seen.add(display_name)
+							files.append(display_name)
 
 		return files
 
 	@classmethod
 	def IS_CHANGED(cls, audio_file="[不加载]", audio=None, segments_json: str = "[]", segment_duration: float = 3.0, prompt=None, extra_pnginfo=None, unique_id=None, **kwargs):
 		# V19：稳定缓存 key。不要再 time_ns 强制重跑；否则前端刷新波形/下游预览时会不断请求上游。
-		property_segments = _segments_from_workflow_properties(extra_pnginfo, unique_id)
-		prompt_segments = _segments_from_prompt_inputs(prompt, unique_id)
-		# V23：本次执行 prompt 里的 widget 值通常比 workflow properties 更新得更早；
-		# properties 继续作为旧前端/旧工作流的兜底，避免旧 properties 把新分段盖掉。
-		segments = prompt_segments or property_segments
+		segments = _segments_for_execution(prompt, extra_pnginfo, unique_id, segments_json)
 		seg_text = _segments_cache_text(segments) if segments else str(segments_json or "[]")
 		if audio_file and audio_file != "[不加载]":
 			source_sig = _file_fingerprint(audio_file)
@@ -672,9 +934,12 @@ class GJJ_AudioSegmentEditor:
 			# 1. 加载音频。这里必须与前端可见波形一致：
 			#    只要下拉框选择了文件，就裁剪该文件；文件为[不加载]时才使用外部 AUDIO。
 			if audio_file != "[不加载]":
-				current_audio = self._load_audio_from_file(audio_file)
+				current_audio = self._load_audio_from_file(audio_file, fallback_duration=segment_duration)
 				source_sig = _file_fingerprint(audio_file)
-				source_label = f"文件:{audio_file}"
+				if isinstance(current_audio, dict) and current_audio.get("_gjj_silent_video_audio"):
+					source_label = f"视频无音轨，已生成静音:{audio_file}"
+				else:
+					source_label = f"网络音频:{audio_file}" if gjjutils_is_network_url(str(audio_file or "")) else f"文件:{audio_file}"
 			elif audio is not None and is_audio_object(audio):
 				current_audio = audio
 				source_sig = _audio_fingerprint(audio)
@@ -690,11 +955,9 @@ class GJJ_AudioSegmentEditor:
 			audio_np, sample_rate = audio_to_waveform_data(current_audio)
 			duration = len(audio_np) / sample_rate if sample_rate > 0 else 0
 
-			# 3. 解析或生成分段列表。优先使用本次执行 prompt 里的隐藏 widget；
-			#    workflow properties 作为旧前端/旧工作流兜底，最后才自动生成默认单段。
-			property_segments = _segments_from_workflow_properties(extra_pnginfo, unique_id)
-			prompt_segments = _segments_from_prompt_inputs(prompt, unique_id)
-			segments = prompt_segments or property_segments or parse_segments_list(segments_json)
+			# 3. 解析或生成分段列表。实际裁剪以面板 start/end 为准；
+			#    只有 segments_json 真正外部连线时，才让外部输入覆盖面板。
+			segments = _segments_for_execution(prompt, extra_pnginfo, unique_id, segments_json)
 			if not segments:
 				# 默认只生成 1 段，按“单段时长”截取；前端可拖动高亮区域调整位置。
 				segments = generate_auto_segments(duration, 1, segment_duration)
@@ -823,90 +1086,70 @@ class GJJ_AudioSegmentEditor:
 				f"详细错误：{exc}"
 			) from exc
 
-	def _load_audio_from_file(self, filename: str) -> dict[str, Any]:
+	def _load_audio_from_file(self, filename: str, fallback_duration: float = 3.0) -> dict[str, Any]:
 		"""从音频/视频文件加载音频；视频文件通过 ffmpeg 只提取音频"""
 		import subprocess
 		import tempfile
 
 		sf = _load_soundfile_runtime()
+		filepath = _resolve_media_path(filename, allow_download=True)
+		if not filepath or not os.path.exists(filepath):
+			raise RuntimeError(f"找不到音频/视频文件: {filename}")
 
-		# 在多个目录中查找文件
-		search_dirs = [
-			folder_paths.get_input_directory(),
-			folder_paths.get_output_directory(),
-		]
+		is_video = _is_video_media_value(filename) or _is_video_media_value(filepath)
+		soundfile_error = None
 
-		for search_dir in search_dirs:
-			if not search_dir or not os.path.exists(search_dir):
-				continue
+		if not is_video:
+			try:
+				audio_data, sample_rate = sf.read(filepath)
+				return _audio_data_to_comfy(audio_data, sample_rate)
+			except Exception as exc:
+				soundfile_error = exc
+				print(f"[GJJ] soundfile 无法直接加载 {filename}，尝试 ffmpeg 解码音频... ({exc})")
 
-			filepath = os.path.join(search_dir, filename)
-			if os.path.exists(filepath):
-				# 尝试直接加载
+		# ffmpeg 回退：转换成临时 WAV
+		tmp_path = None
+		try:
+			with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+				tmp_path = tmp.name
+
+			ffmpeg_path = _get_ffmpeg_executable()
+			cmd = [
+				ffmpeg_path, "-y", "-v", "error",
+				"-i", filepath,
+				"-vn",
+				"-acodec", "pcm_s16le",
+				"-ar", "44100",
+				"-ac", "2",
+				tmp_path,
+			]
+			subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+			audio_data, sample_rate = sf.read(tmp_path)
+			if not is_video:
+				print(f"[GJJ] ffmpeg 解码音频成功: {filename}")
+			return _audio_data_to_comfy(audio_data, sample_rate)
+		except Exception as exc:
+			stderr_text = str(getattr(exc, "stderr", "") or getattr(exc, "output", "") or "").strip()
+			if len(stderr_text) > 500:
+				stderr_text = f"{stderr_text[:500]}..."
+			detail = stderr_text or str(exc)
+			if is_video:
+				if _looks_like_missing_audio_stream_error(detail):
+					duration = _probe_media_duration_seconds(filepath, ffmpeg_path if "ffmpeg_path" in locals() else None)
+					if duration <= 0:
+						duration = _safe_float(fallback_duration, 3.0)
+					print(f"[GJJ] 视频没有音频轨道，已生成 {duration:.3f}s 静音音频: {filename}")
+					return _make_silent_audio(duration, 44100)
+				raise RuntimeError(f"视频中没有可解析的音频轨道，或 ffmpeg 无法读取音频轨道: {filename}；{detail}") from exc
+			soundfile_detail = str(soundfile_error) if soundfile_error is not None else "未尝试"
+			raise RuntimeError(f"加载音频/视频文件失败 {filename}: soundfile={soundfile_detail}; ffmpeg={detail}") from exc
+		finally:
+			if tmp_path:
 				try:
-					audio_data, sample_rate = sf.read(filepath)
-
-					# 转换为torch tensor
-					if audio_data.ndim == 1:
-						audio_data = audio_data.reshape(1, -1)
-					elif audio_data.ndim == 2:
-						audio_data = audio_data.T
-
-					waveform = torch.from_numpy(audio_data).float().unsqueeze(0)
-
-					return {
-						"waveform": waveform,
-						"sample_rate": sample_rate,
-					}
-				except Exception as e:
-					# soundfile 不支持时尝试 ffmpeg 解码
-					print(f"[GJJ] soundfile 无法直接加载 {filename}，尝试 ffmpeg 提取/解码音频... ({e})")
-
-				# ffmpeg 回退：转换成临时 WAV
-				try:
-					with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-						tmp_path = tmp.name
-
-					cmd = [
-						"ffmpeg", "-y", "-v", "error",
-						"-i", filepath,
-						"-acodec", "pcm_s16le",
-						"-ar", "44100",
-						"-ac", "2",
-						tmp_path,
-					]
-					subprocess.run(cmd, capture_output=True, text=True, check=True)
-
-					audio_data, sample_rate = sf.read(tmp_path)
-
-					# 清理临时文件
-					try:
-						os.unlink(tmp_path)
-					except OSError:
-						pass
-
-					# 转换为torch tensor
-					if audio_data.ndim == 1:
-						audio_data = audio_data.reshape(1, -1)
-					elif audio_data.ndim == 2:
-						audio_data = audio_data.T
-
-					waveform = torch.from_numpy(audio_data).float().unsqueeze(0)
-
-					print(f"[GJJ] ffmpeg 提取音频成功: {filename}")
-					return {
-						"waveform": waveform,
-						"sample_rate": sample_rate,
-					}
-				except Exception as e2:
-					# 清理临时文件
-					try:
-						os.unlink(tmp_path)
-					except (OSError, NameError):
-						pass
-					raise RuntimeError(f"加载音频/视频文件失败 {filename}: soundfile={e}, ffmpeg={e2}")
-
-		raise RuntimeError(f"找不到音频/视频文件: {filename}")
+					os.unlink(tmp_path)
+				except OSError:
+					pass
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_AudioSegmentEditor}

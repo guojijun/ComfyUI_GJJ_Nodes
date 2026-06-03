@@ -109,6 +109,8 @@ class GJJ_VideoCombine:
                         "min": 0,
                         "max": 100,
                         "step": 1,
+                        "display": "hidden",
+                        "hidden": True,
                         "display_name": "循环次数",
                         "tooltip": "GIF/WEBP 写入循环次数；video/* 格式会实际重复内容。",
                     },
@@ -117,6 +119,8 @@ class GJJ_VideoCombine:
                     "STRING",
                     {
                         "default": DEFAULT_FILENAME_PREFIX,
+                        "display": "hidden",
+                        "hidden": True,
                         "display_name": "文件名前缀",
                         "tooltip": "支持子目录，例如 video/MyJob。",
                     },
@@ -125,6 +129,8 @@ class GJJ_VideoCombine:
                     supported_formats,
                     {
                         "default": default_format,
+                        "display": "hidden",
+                        "hidden": True,
                         "display_name": "输出格式",
                         "tooltip": "image/* 使用 Pillow；video/* 使用 GJJ 包内本地格式预设。",
                     },
@@ -221,10 +227,10 @@ class GJJ_VideoCombine:
                 ),
             },
             "optional": {
+
                 "audio": (
                     "AUDIO",
                     {
-                        "advanced": True,
                         "display_name": "音频",
                         "tooltip": "可选。接入后会在支持的格式里封入音轨，VIDEO 输出也会保留音频。",
                     },
@@ -260,8 +266,8 @@ class GJJ_VideoCombine:
         trim_to_audio=False,
         pix_fmt="auto",
         crf="-1",
-        audio=None,
         vae=None,
+        audio=None,
         format_overrides_json="",
         prompt=None,
         extra_pnginfo=None,
@@ -310,8 +316,8 @@ class GJJ_VideoCombine:
             save_output=save_output,
             use_source_fps=use_source_fps,
             delete_tail_frame=delete_tail_frame,
-            audio=audio,
             vae=vae,
+            audio=audio,
             format_overrides_json=json.dumps(format_overrides, ensure_ascii=False),
             prompt=prompt,
             extra_pnginfo=extra_pnginfo,

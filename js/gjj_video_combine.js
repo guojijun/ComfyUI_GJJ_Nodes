@@ -5,8 +5,16 @@ import { GJJ_Utils } from "./gjj_utils.js";
 const TARGET_NODES = new Set(["GJJ_VideoCombine"]);
 const TOOLBAR_WIDGET_NAME = "gjj_video_combine_toolbar";
 const PREVIEW_WIDGET_NAME = "gjj_video_combine_preview";
+const USER_WIDTH_PROPERTY = "gjj_video_combine_user_width";
+const BASIC_SETTINGS_PROPERTY = "gjj_video_combine_show_basic_settings";
 const MIN_WIDTH = 340;
-const TOOLBAR_HEIGHT = 36;
+const TOOLBAR_BUTTON_WIDTH = 30;
+const TOOLBAR_BUTTON_HEIGHT = 28;
+const TOOLBAR_GAP = 5;
+const TOOLBAR_PADDING_X = 4;
+const TOOLBAR_PADDING_Y = 6;
+const TOOLBAR_NODE_GUTTER = 34;
+const TOOLBAR_HEIGHT = TOOLBAR_PADDING_Y + TOOLBAR_BUTTON_HEIGHT;
 const HIDDEN_PANEL_HEIGHT = 0;
 const PREVIEW_MIN_HEIGHT = 120;
 const PREVIEW_DEFAULT_ASPECT = 16 / 9;
@@ -20,7 +28,9 @@ const FRAME_RATE_SOCKET_TYPE = "INT,FLOAT";
 const OPTIONAL_INPUTS = [
 	{ name: "audio", type: "AUDIO", label: "音频", localized_name: "音频" },
 	{ name: "vae", type: "VAE", label: "VAE 解码器", localized_name: "VAE 解码器" },
+
 ];
+const DEFAULT_VISIBLE_INPUTS = new Set(["audio"]);
 const OUTPUTS = [
 	{ name: "视频", type: "VIDEO", label: "视频", localized_name: "视频" },
 	{ name: "主输出文件", type: "STRING", label: "主输出文件", localized_name: "主输出文件" },
@@ -56,9 +66,86 @@ const VALUE_WIDGETS = [
 	},
 ];
 const TOOLBAR_WIDGETS = [...BOOLEAN_WIDGETS, ...VALUE_WIDGETS];
+const BASIC_SETTING_WIDGETS = [
+	{ name: "loop_count", label: "循环次数", type: "number" },
+	{ name: "filename_prefix", label: "文件名前缀", type: "text" },
+	{ name: "format_name", label: "输出格式", type: "combo" },
+];
+const BASIC_SETTING_TYPES = new Map(BASIC_SETTING_WIDGETS.map((config) => [config.name, config.type]));
 
 function refreshNode(node) {
 	GJJ_Utils.refreshNode(node);
+}
+
+function validNodeWidth(value) {
+	const width = Number(value);
+	return Number.isFinite(width) && width > 80 ? width : null;
+}
+
+function rememberNodeWidth(node, value = null) {
+	if (!node) {
+		return null;
+	}
+	const width = validNodeWidth(value ?? node.size?.[0]);
+	if (width == null) {
+		return null;
+	}
+	node.properties ||= {};
+	node.properties[USER_WIDTH_PROPERTY] = Math.round(width * 100) / 100;
+	return node.properties[USER_WIDTH_PROPERTY];
+}
+
+function storedNodeWidth(node) {
+	return validNodeWidth(node?.properties?.[USER_WIDTH_PROPERTY]);
+}
+
+function preferredNodeWidth(node, explicit = null) {
+	return validNodeWidth(explicit)
+		?? storedNodeWidth(node)
+		?? validNodeWidth(node?.size?.[0])
+		?? MIN_WIDTH;
+}
+
+function toolbarButtonCount() {
+	return BOOLEAN_WIDGETS.length + VALUE_WIDGETS.length + 2;
+}
+
+function getToolbarHeight(node, explicitWidth = null) {
+	const width = Math.max(MIN_WIDTH, preferredNodeWidth(node, explicitWidth));
+	const availableWidth = Math.max(
+		TOOLBAR_BUTTON_WIDTH,
+		width - TOOLBAR_NODE_GUTTER - TOOLBAR_PADDING_X,
+	);
+	const buttonsPerRow = Math.max(
+		1,
+		Math.floor((availableWidth + TOOLBAR_GAP) / (TOOLBAR_BUTTON_WIDTH + TOOLBAR_GAP)),
+	);
+	const rows = Math.max(1, Math.ceil(toolbarButtonCount() / buttonsPerRow));
+	return TOOLBAR_PADDING_Y + (rows * TOOLBAR_BUTTON_HEIGHT) + ((rows - 1) * TOOLBAR_GAP);
+}
+
+function initializeNodeWidth(node) {
+	if (!storedNodeWidth(node)) {
+		rememberNodeWidth(node, node?.size?.[0]);
+	}
+	return preferredNodeWidth(node);
+}
+
+function setNodeHeightPreservingUserWidth(node, height) {
+	if (!node) {
+		return;
+	}
+	const width = preferredNodeWidth(node);
+	const nextHeight = Math.max(80, Number(height || node.size?.[1] || 80));
+	if (Math.abs(Number(node.size?.[0] || 0) - width) <= 1 && Math.abs(Number(node.size?.[1] || 0) - nextHeight) <= 1) {
+		return;
+	}
+	node.__gjjVideoCombineInternalResize = true;
+	try {
+		node.setSize?.([width, nextHeight]);
+	} finally {
+		node.__gjjVideoCombineInternalResize = false;
+	}
 }
 
 function removeLegacyVideoInputs(node) {
@@ -86,10 +173,14 @@ function injectToolbarStyle() {
 	style.textContent = `
 		.gjj-video-combine-toolbar {
 			display: flex;
+			flex-wrap: wrap;
+			align-content: flex-start;
+			align-items: center;
 			gap: 5px;
 			padding: 4px 2px 2px;
 			box-sizing: border-box;
 			width: 100%;
+			overflow: visible;
 		}
 		.gjj-video-combine-toolbar button {
 			flex: 0 0 30px;
@@ -258,6 +349,19 @@ function promptNumberWidget(node, config) {
 	updateToolbar(node);
 }
 
+function getBasicSettingsOpen(node) {
+	return Boolean(node?.properties?.[BASIC_SETTINGS_PROPERTY]);
+}
+
+function setBasicSettingsOpen(node, value) {
+	node.properties ||= {};
+	node.properties[BASIC_SETTINGS_PROPERTY] = Boolean(value);
+	updateToolbar(node);
+	applyBasicSettingsVisibility(node);
+	resizeNodeToContent(node);
+	refreshNode(node);
+}
+
 function getMoreOpen(node) {
 	return Boolean(node?.properties?.gjj_video_combine_show_more);
 }
@@ -312,15 +416,24 @@ function ensureToolbarWidget(node) {
 		wrap.appendChild(buttons[config.name]);
 	}
 
-	buttons.more = makeToolbarButton("接口", "显示/隐藏其它输入输出口；默认只保留【图像】输入口。", () => {
+	buttons.basic = makeToolbarButton("⚙️", "显示/隐藏循环次数、文件名前缀、输出格式。", () => {
+		setBasicSettingsOpen(node, !getBasicSettingsOpen(node));
+	});
+	wrap.appendChild(buttons.basic);
+
+	buttons.more = makeToolbarButton("接口", "显示/隐藏其它输入输出口；默认保留【图像】和【音频】输入口。", () => {
 		setMoreOpen(node, !getMoreOpen(node));
 	});
 	wrap.appendChild(buttons.more);
 
 	const widget = node.addDOMWidget?.(TOOLBAR_WIDGET_NAME, TOOLBAR_WIDGET_NAME, wrap, {
 		hideOnZoom: false,
-		getHeight: () => TOOLBAR_HEIGHT,
+		getHeight: () => getToolbarHeight(node),
 	});
+	if (widget) {
+		widget.getHeight = () => getToolbarHeight(node);
+		widget.computeSize = (width) => [preferredNodeWidth(node, width), getToolbarHeight(node, width)];
+	}
 	node.__gjjVideoCombineToolbar = { widget, wrap, buttons };
 	updateToolbar(node);
 	return node.__gjjVideoCombineToolbar;
@@ -357,12 +470,22 @@ function updateToolbar(node) {
 		button.setAttribute("aria-label", config.label);
 		button.setAttribute("aria-pressed", !isDefault ? "true" : "false");
 	}
+	const basicOpen = getBasicSettingsOpen(node);
+	if (toolbar.buttons.basic) {
+		toolbar.buttons.basic.textContent = "⚙️";
+		toolbar.buttons.basic.classList.toggle("on", basicOpen);
+		toolbar.buttons.basic.title = basicOpen
+			? "当前显示循环次数、文件名前缀、输出格式；点击后隐藏。"
+			: "当前隐藏循环次数、文件名前缀、输出格式；点击后显示。";
+		toolbar.buttons.basic.setAttribute("aria-label", "显示/隐藏基础设置");
+		toolbar.buttons.basic.setAttribute("aria-pressed", basicOpen ? "true" : "false");
+	}
 	const moreOpen = getMoreOpen(node);
 	toolbar.buttons.more.textContent = "🔌";
 	toolbar.buttons.more.classList.toggle("more-on", moreOpen);
 	toolbar.buttons.more.title = moreOpen
-		? "当前显示其它输入输出口；点击后只保留【图像】输入口。"
-		: "当前隐藏其它输入输出口；点击后显示音频、VAE 和输出口。";
+		? "当前显示 VAE 和输出口；点击后只保留【图像】和【音频】输入口。"
+		: "当前隐藏 VAE 和输出口；点击后显示 VAE 和输出口。";
 	toolbar.buttons.more.setAttribute("aria-label", "显示/隐藏接口");
 	toolbar.buttons.more.setAttribute("aria-pressed", moreOpen ? "true" : "false");
 }
@@ -381,6 +504,82 @@ function hideNativeToolbarWidgets(node) {
 	}
 }
 
+function rememberBasicWidgetOriginal(widget) {
+	if (!widget || widget.__gjjVideoCombineBasicOriginal) {
+		return;
+	}
+	widget.__gjjVideoCombineBasicOriginal = {
+		type: widget.type,
+		computeSize: widget.computeSize,
+		getHeight: widget.getHeight,
+		draw: widget.draw,
+		mouse: widget.mouse,
+		hidden: widget.hidden,
+		disabled: widget.disabled,
+		y: widget.y,
+		last_y: widget.last_y,
+		optionsHidden: widget.options?.hidden,
+		optionsDisplay: widget.options?.display,
+		elementDisplay: widget.element?.style?.display,
+		inputDisplay: widget.inputEl?.style?.display,
+	};
+}
+
+function setBasicWidgetVisible(widget, visible) {
+	if (!widget) {
+		return;
+	}
+	rememberBasicWidgetOriginal(widget);
+	const original = widget.__gjjVideoCombineBasicOriginal || {};
+	const originalWasHidden = original.hidden === true
+		|| original.optionsHidden === true
+		|| original.optionsDisplay === "hidden";
+	widget.__gjjVideoCombineBasicHidden = !visible;
+	widget.options ||= {};
+	if (visible) {
+		const fallbackType = BASIC_SETTING_TYPES.get(String(widget.name || ""));
+		if (fallbackType) {
+			widget.type = fallbackType;
+		} else if (original.type && !String(original.type).startsWith("converted-widget:")) {
+			widget.type = original.type;
+		}
+		widget.hidden = false;
+		widget.disabled = false;
+		if (!originalWasHidden && original.computeSize !== undefined) widget.computeSize = original.computeSize; else delete widget.computeSize;
+		if (!originalWasHidden && original.getHeight !== undefined) widget.getHeight = original.getHeight; else delete widget.getHeight;
+		if (!originalWasHidden && original.draw !== undefined) widget.draw = original.draw; else delete widget.draw;
+		if (!originalWasHidden && original.mouse !== undefined) widget.mouse = original.mouse; else delete widget.mouse;
+		widget.y = Number.isFinite(Number(original.y)) && Number(original.y) > -1000 ? original.y : 0;
+		widget.last_y = Number.isFinite(Number(original.last_y)) && Number(original.last_y) > -1000 ? original.last_y : 0;
+		delete widget.computedHeight;
+		widget.options.hidden = false;
+		delete widget.options.display;
+		if (widget.element) widget.element.style.display = originalWasHidden ? "" : (original.elementDisplay ?? "");
+		if (widget.inputEl) widget.inputEl.style.display = originalWasHidden ? "" : (original.inputDisplay ?? "");
+	} else {
+		widget.hidden = true;
+		widget.disabled = true;
+		widget.computeSize = () => [0, 0];
+		widget.getHeight = () => 0;
+		widget.draw = () => {};
+		widget.mouse = () => false;
+		widget.computedHeight = 0;
+		widget.y = -100000;
+		widget.last_y = -100000;
+		widget.options.hidden = true;
+		widget.options.display = "hidden";
+		if (widget.element) widget.element.style.display = "none";
+		if (widget.inputEl) widget.inputEl.style.display = "none";
+	}
+}
+
+function applyBasicSettingsVisibility(node) {
+	const visible = getBasicSettingsOpen(node);
+	for (const config of BASIC_SETTING_WIDGETS) {
+		setBasicWidgetVisible(getWidget(node, config.name), visible);
+	}
+}
+
 function slotHasLink(slot, isOutput) {
 	if (!slot) {
 		return false;
@@ -389,6 +588,30 @@ function slotHasLink(slot, isOutput) {
 		return Array.isArray(slot.links) ? slot.links.length > 0 : slot.links != null;
 	}
 	return slot.link != null;
+}
+
+function syncVisibleSlotLinks(node) {
+	const graphLinks = node?.graph?.links || app.graph?.links || {};
+	for (const [index, input] of (node?.inputs || []).entries()) {
+		const linkId = input?.link;
+		if (linkId == null) {
+			continue;
+		}
+		const link = graphLinks?.[linkId];
+		if (link) {
+			link.target_id = node.id;
+			link.target_slot = index;
+		}
+	}
+	for (const [index, output] of (node?.outputs || []).entries()) {
+		for (const linkId of output?.links || []) {
+			const link = graphLinks?.[linkId];
+			if (link) {
+				link.origin_id = node.id;
+				link.origin_slot = index;
+			}
+		}
+	}
 }
 
 function applySlotVisibility(node) {
@@ -408,11 +631,11 @@ function applySlotVisibility(node) {
 				primary.label = "图像";
 				primary.localized_name = "图像";
 				visibleInputs.push(primary);
-			} else if (isWidgetInput || moreOpen || slotHasLink(input, false)) {
+			} else if (isWidgetInput || DEFAULT_VISIBLE_INPUTS.has(name) || moreOpen || slotHasLink(input, false)) {
 				visibleInputs.push(cloneSlot(input));
 			}
 		}
-		node.inputs = visibleInputs;
+		node.inputs = visibleInputs.map((slot, index) => ({ ...slot, slot_index: index }));
 	}
 	if (Array.isArray(node?.outputs)) {
 		const fullOutputs = getFullOutputs(node);
@@ -422,8 +645,9 @@ function applySlotVisibility(node) {
 				visibleOutputs.push(cloneSlot(output));
 			}
 		}
-		node.outputs = visibleOutputs;
+		node.outputs = visibleOutputs.map((slot, index) => ({ ...slot, slot_index: index }));
 	}
+	syncVisibleSlotLinks(node);
 	refreshNode(node);
 }
 
@@ -482,7 +706,7 @@ function getFullInputs(node) {
 		}),
 		...OPTIONAL_INPUTS.map((slot) => byName.get(slot.name)),
 	].filter(Boolean);
-	node.__gjjVideoCombineFullInputs = ordered.map(cloneSlot);
+	node.__gjjVideoCombineFullInputs = ordered.map((slot, index) => ({ ...cloneSlot(slot), slot_index: index }));
 	return ordered;
 }
 
@@ -509,7 +733,7 @@ function getFullOutputs(node) {
 		}
 	}
 	const ordered = OUTPUTS.map((slot) => byName.get(slot.name)).filter(Boolean);
-	node.__gjjVideoCombineFullOutputs = ordered.map(cloneSlot);
+	node.__gjjVideoCombineFullOutputs = ordered.map((slot, index) => ({ ...cloneSlot(slot), slot_index: index }));
 	return ordered;
 }
 
@@ -590,7 +814,7 @@ function ensurePanelWidget(node) {
 	});
 	if (widget) {
 		widget.computeSize = (width) => [
-			Math.max(MIN_WIDTH, Number(width || node.size?.[0] || MIN_WIDTH)),
+			preferredNodeWidth(node, width),
 			getPanelHeight(node, width),
 		];
 	}
@@ -630,7 +854,7 @@ function setPreviewAspect(node, width, height) {
 }
 
 function getPreviewContentWidth(node, nodeWidth = null) {
-	const width = Number(nodeWidth || node?.size?.[0] || MIN_WIDTH);
+	const width = preferredNodeWidth(node, nodeWidth);
 	return Math.max(160, Math.max(MIN_WIDTH, width) - PREVIEW_WIDGET_GUTTER);
 }
 
@@ -671,12 +895,9 @@ function resizeNodeToContent(node) {
 	requestAnimationFrame(() => {
 		node.__gjjVideoCombineResizePending = false;
 		updatePreviewLayout(node);
-		const width = Math.max(MIN_WIDTH, Number(node.size?.[0] || MIN_WIDTH));
 		const computed = typeof node.computeSize === "function" ? node.computeSize() : node.size;
 		const height = Math.max(80, Number(computed?.[1] || node.size?.[1] || 80));
-		if (Math.abs(Number(node.size?.[0] || 0) - width) > 1 || Math.abs(Number(node.size?.[1] || 0) - height) > 1) {
-			node.setSize?.([width, height]);
-		}
+		setNodeHeightPreservingUserWidth(node, height);
 		refreshNode(node);
 	});
 }
@@ -804,21 +1025,20 @@ function patchNode(node) {
 		return;
 	}
 	node.__gjjVideoCombinePatched = true;
+	initializeNodeWidth(node);
 	removeLegacyVideoInputs(node);
 	repairToolbarWidgetDefaults(node);
 	hideNativeToolbarWidgets(node);
 	ensureToolbarWidget(node);
+	applyBasicSettingsVisibility(node);
 	ensurePanelWidget(node);
 	applySlotVisibility(node);
 	clearNativePreview(node);
 	updatePreviewLayout(node);
 	if (!Array.isArray(node.size) || node.size.length < 2) {
-		node.setSize?.([MIN_WIDTH, Math.max(80, getPanelHeight(node) + TOOLBAR_HEIGHT + 8)]);
+		setNodeHeightPreservingUserWidth(node, Math.max(80, getPanelHeight(node) + getToolbarHeight(node) + 8));
 	} else {
-		node.setSize?.([
-			Math.max(MIN_WIDTH, Number(node.size[0] || MIN_WIDTH)),
-			Number(node.size[1] || 80),
-		]);
+		setNodeHeightPreservingUserWidth(node, Number(node.size[1] || 80));
 	}
 	if (!node.__gjjVideoCombinePanelMode) {
 		setPanelMode(node, "hidden");
@@ -869,9 +1089,23 @@ app.registerExtension({
 		const originalOnResize = nodeType.prototype.onResize;
 		nodeType.prototype.onResize = function (...args) {
 			const result = originalOnResize?.apply(this, args);
+			if (!this.__gjjVideoCombineInternalResize) {
+				rememberNodeWidth(this, this.size?.[0]);
+			}
 			updatePreviewLayout(this);
-			if (this.__gjjVideoCombinePanelMode === "preview") {
+			if (!this.__gjjVideoCombineInternalResize || this.__gjjVideoCombinePanelMode === "preview") {
 				resizeNodeToContent(this);
+			}
+			return result;
+		};
+
+		const originalOnSerialize = nodeType.prototype.onSerialize;
+		nodeType.prototype.onSerialize = function (serializedNode, ...args) {
+			const result = originalOnSerialize?.apply(this, [serializedNode, ...args]);
+			rememberNodeWidth(this, this.size?.[0]);
+			if (serializedNode && typeof serializedNode === "object") {
+				serializedNode.properties ||= {};
+				serializedNode.properties[USER_WIDTH_PROPERTY] = this.properties?.[USER_WIDTH_PROPERTY] ?? preferredNodeWidth(this);
 			}
 			return result;
 		};

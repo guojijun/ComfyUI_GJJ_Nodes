@@ -3,7 +3,7 @@ from typing import List, Optional
 DEFAULT_PYPI = "https://pypi.tuna.tsinghua.edu.cn/simple"
 DEFAULT_MODEL_URL = "https://pan.quark.cn/s/6ec846f1f58d"
 def _import_ok(pkg):
-	try: __import__(pkg);return True
+	try: return importlib.util.find_spec(str(pkg or "").strip()) is not None
 	except:return False
 def _norm(v):
 	if not v:return []

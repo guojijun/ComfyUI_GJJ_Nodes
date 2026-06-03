@@ -216,6 +216,23 @@ from .media_preview import (
 	register_common_media_preview_api,
 )
 
+from .network_media import (
+	# 公共网络媒体下载/缓存
+	AUDIO_EXTS,
+	IMAGE_EXTS,
+	MEDIA_COPY_SUBDIR,
+	MEDIA_DOWNLOAD_TIMEOUT,
+	VIDEO_EXTS,
+	gjjutils_detect_media_type,
+	gjjutils_download_network_media_to_input,
+	gjjutils_find_input_media_by_relative_path,
+	gjjutils_input_relative_media_path,
+	gjjutils_is_network_url,
+	gjjutils_safe_media_basename,
+	gjjutils_url_media_basename,
+	gjjutils_url_media_relative_path,
+)
+
 from . import rmbg2_model
 
 __all__ = [
@@ -350,4 +367,18 @@ __all__ = [
 	"COMMON_MEDIA_OPEN_FOLDER_API",
 	"gjjutils_media_root",
 	"register_common_media_preview_api",
+	# network_media
+	"AUDIO_EXTS",
+	"IMAGE_EXTS",
+	"MEDIA_COPY_SUBDIR",
+	"MEDIA_DOWNLOAD_TIMEOUT",
+	"VIDEO_EXTS",
+	"gjjutils_detect_media_type",
+	"gjjutils_download_network_media_to_input",
+	"gjjutils_find_input_media_by_relative_path",
+	"gjjutils_input_relative_media_path",
+	"gjjutils_is_network_url",
+	"gjjutils_safe_media_basename",
+	"gjjutils_url_media_basename",
+	"gjjutils_url_media_relative_path",
 ]

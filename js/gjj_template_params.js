@@ -98,7 +98,7 @@ function renderGroupedMediaPreview(node, fields = null, values = null) {
 	const mediaFields = state.fields.filter((field) => isMediaType(field?.type));
 	const items = mediaFields.map((field) => mediaItemForField(field, state.values));
 	gjjRenderMediaPreview(group, items, {
-		forceGrid: true,
+		forceGrid: items.length > 1,
 		singleMinHeight: 168,
 		singleMaxHeight: 360,
 		tileMinWidth: 118,

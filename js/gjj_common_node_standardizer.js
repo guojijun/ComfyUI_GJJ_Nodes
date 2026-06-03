@@ -82,6 +82,7 @@ const FULLY_BYPASS_CLASSES = new Set([
 	"GJJ_AdvancedPassthroughRouter",
 	"GJJ_AnyPreview",
 	"GJJ_CLIPPromptEncodePanel",
+	"GJJ_WorkflowTitle",
 ]);
 // Nodes migrated from individual execution bars to the shared status panel.
 const STATUS_ENABLED_CLASSES = new Set([
@@ -307,6 +308,10 @@ function scheduleLegacyStatusSuppression(node) {
 
 function shouldBypassNode(node) {
 	return FULLY_BYPASS_CLASSES.has(String(node?.comfyClass || node?.type || ""));
+}
+
+function shouldSkipStandardizer(node) {
+	return String(node?.comfyClass || node?.type || "") === "GJJ_WorkflowTitle";
 }
 
 function disableStatusWidget(node) {
@@ -1727,6 +1732,11 @@ function applyNodeMetadata(node) {
 
 function patchNode(node) {
 	if (!isGjjNode(node)) {
+		return;
+	}
+	if (shouldSkipStandardizer(node)) {
+		removeLegacyHelpWidget(node);
+		disableStatusWidget(node);
 		return;
 	}
 	patchAddDomWidget(node);

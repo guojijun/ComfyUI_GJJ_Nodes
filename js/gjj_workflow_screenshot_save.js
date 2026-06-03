@@ -21,6 +21,21 @@ import { api } from "/scripts/api.js";
 	const SETTINGS_KEY = "gjj_workflow_screenshot_settings";
 	const LEGACY_FILENAME_TEMPLATE = "GJJ_workflow_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png";
 	const DEFAULT_FILENAME_TEMPLATE = "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png";
+	const DEFAULT_SORT_MODE = "mtime_desc";
+	const DEFAULT_FILTER_MODE = "all";
+	const SORT_MODE_LABELS = {
+		mtime_desc: "最新优先",
+		mtime_asc: "最旧优先",
+		name_asc: "文件名 A-Z",
+		name_desc: "文件名 Z-A",
+		title_asc: "标题 A-Z",
+		openable_first: "可打开优先",
+	};
+	const FILTER_MODE_LABELS = {
+		all: "全部",
+		openable: "可打开",
+		missing: "无元数据",
+	};
 
 	let crcTable = null;
 	let busy = false;
@@ -34,6 +49,7 @@ import { api } from "/scripts/api.js";
 	let backendSettingsDirty = false;
 	let settings = loadSettings();
 	let lastWorkflowObject = null;
+	let keyboardShortcutsInstalled = false;
 
 	function graphNodes() {
 		return Array.isArray(app?.graph?._nodes) ? app.graph._nodes.filter(Boolean) : [];
@@ -179,15 +195,27 @@ import { api } from "/scripts/api.js";
 		};
 	}
 
+	function choice(value, options, fallback) {
+		const key = String(value || "").trim();
+		return Object.prototype.hasOwnProperty.call(options, key) ? key : fallback;
+	}
+
+	function normalizeSettings(value = {}) {
+		return {
+			filenameTemplate: String(value?.filenameTemplate || value?.filename_template || DEFAULT_FILENAME_TEMPLATE),
+			directoryPath: String(value?.directoryPath || value?.directory || ""),
+			sortMode: choice(value?.sortMode || value?.sort_mode, SORT_MODE_LABELS, DEFAULT_SORT_MODE),
+			filterMode: choice(value?.filterMode || value?.filter_mode, FILTER_MODE_LABELS, DEFAULT_FILTER_MODE),
+			searchText: String(value?.searchText || value?.search_text || "").slice(0, 160),
+		};
+	}
+
 	function loadSettings() {
 		try {
 			const parsed = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
-			return {
-				filenameTemplate: String(parsed?.filenameTemplate || DEFAULT_FILENAME_TEMPLATE),
-				directoryPath: String(parsed?.directoryPath || ""),
-			};
+			return normalizeSettings(parsed);
 		} catch (_) {
-			return { filenameTemplate: DEFAULT_FILENAME_TEMPLATE, directoryPath: "" };
+			return normalizeSettings();
 		}
 	}
 
@@ -197,10 +225,21 @@ import { api } from "/scripts/api.js";
 		} catch (_) {}
 	}
 
+	function directoryPathForBackendSettings() {
+		const directory = String(settings.directoryPath || "").trim();
+		if (directory && packageDefaultDirectory && canonicalPathText(directory) === canonicalPathText(packageDefaultDirectory)) {
+			return "workflows";
+		}
+		return directory;
+	}
+
 	function backendWorkflowSettingsPayload() {
 		return {
-			directory: String(settings.directoryPath || "").trim(),
+			directory: directoryPathForBackendSettings(),
 			filename_template: String(settings.filenameTemplate || DEFAULT_FILENAME_TEMPLATE),
+			sort_mode: choice(settings.sortMode, SORT_MODE_LABELS, DEFAULT_SORT_MODE),
+			filter_mode: choice(settings.filterMode, FILTER_MODE_LABELS, DEFAULT_FILTER_MODE),
+			search_text: String(settings.searchText || "").slice(0, 160),
 		};
 	}
 
@@ -285,6 +324,11 @@ import { api } from "/scripts/api.js";
 		if (workflowSettings.filename_template) {
 			settings.filenameTemplate = String(workflowSettings.filename_template || DEFAULT_FILENAME_TEMPLATE);
 		}
+		settings.sortMode = choice(workflowSettings.sort_mode || workflowSettings.sortMode || settings.sortMode, SORT_MODE_LABELS, DEFAULT_SORT_MODE);
+		settings.filterMode = choice(workflowSettings.filter_mode || workflowSettings.filterMode || settings.filterMode, FILTER_MODE_LABELS, DEFAULT_FILTER_MODE);
+		if (workflowSettings.search_text != null || workflowSettings.searchText != null) {
+			settings.searchText = String(workflowSettings.search_text ?? workflowSettings.searchText ?? "").slice(0, 160);
+		}
 		const current = canonicalPathText(settings.directoryPath);
 		const legacy = canonicalPathText(backendLegacyDefaultDirectory);
 		if (backendDefaultDirectory && (!current || (legacy && current === legacy) || looksLikeLegacyDefaultDirectory(settings.directoryPath) || workflowSettings.directory)) {
@@ -334,8 +378,135 @@ import { api } from "/scripts/api.js";
 			.trim();
 	}
 
+	function cleanSourceWorkflowName(value) {
+		let text = String(value || "").trim();
+		if (!text) return "";
+		text = text.replace(/^ComfyUI\s*[-|–—]\s*/i, "");
+		text = text.replace(/\s*[-|–—]\s*ComfyUI$/i, "");
+		text = text.replace(/\\/g, "/").split("/").filter(Boolean).pop() || text;
+		text = text.replace(/\.(json|workflow)$/i, "");
+		text = text.replace(/[<>:"/\\|?*\x00-\x1F]+/g, "_").replace(/\s+/g, " ").trim();
+		text = text.replace(/[. ]+$/g, "");
+		return /^(comfyui|untitled|未命名)$/i.test(text) ? "" : text;
+	}
+
+	function workflowNameFromValue(value, depth = 0) {
+		if (depth > 4 || value == null) return "";
+		if (typeof value === "string") return cleanSourceWorkflowName(value);
+		if (typeof value !== "object") return "";
+		const nameKeys = ["workflow_name", "workflowName", "name", "title", "filename", "file", "path", "workflow_path", "workflowPath"];
+		for (const key of nameKeys) {
+			if (!(key in value)) continue;
+			const name = workflowNameFromValue(value[key], depth + 1);
+			if (name) return name;
+		}
+		const nestedKeys = ["workflow", "extra", "metadata", "config", "app", "info", "activeWorkflow"];
+		for (const key of nestedKeys) {
+			const nested = value[key];
+			if (nested && typeof nested === "object") {
+				const name = workflowNameFromValue(nested, depth + 1);
+				if (name) return name;
+			}
+		}
+		return "";
+	}
+
+	function currentSourceWorkflowName(workflow = null) {
+		const graph = app?.graph;
+		const candidates = [
+			workflow,
+			lastWorkflowObject,
+			graph,
+			graph?.extra,
+			graph?._extra,
+			graph?.config,
+			graph?._config,
+			app?.workflowManager?.activeWorkflow,
+			app?.workflowManager?.activeWorkflowInfo,
+			app?.workflowManager?.currentWorkflow,
+			app?.workflowManager?.workflow,
+			app?.workflowManager?.filename,
+			app?.workflowManager?.path,
+			app?.ui?.lastWorkflowName,
+			app?.ui?.workflowName,
+			app?.ui?.currentWorkflowName,
+			document?.title,
+		];
+		for (const candidate of candidates) {
+			const name = workflowNameFromValue(candidate);
+			if (name) return name;
+		}
+		return "";
+	}
+
+	function workflowTitleFontFamily(name) {
+		const text = String(name || "").replace(/["']/g, "").replace(/\\/g, "/").split("/").pop()?.replace(/\.(ttf|otf|ttc|otc)$/i, "") || "";
+		return text || "Microsoft YaHei";
+	}
+
+	function workflowTitleFont(state, fontSize = null) {
+		const size = Math.max(1, number(fontSize ?? state?.fontSize, 72));
+		return `800 ${size}px "${workflowTitleFontFamily(state?.font)}", "Microsoft YaHei", "SimHei", sans-serif`;
+	}
+
+	function workflowTitleLineWidth(ctx, line, spacing) {
+		const chars = Array.from(String(line || ""));
+		if (!chars.length) return 0;
+		return chars.reduce((total, char) => total + ctx.measureText(char).width, 0) + Math.max(0, chars.length - 1) * spacing;
+	}
+
+	function workflowTitleLayout(ctx, state) {
+		const fontSize = Math.max(1, number(state?.fontSize, 72));
+		const letterSpacing = clamp(number(state?.letterSpacing, 0), -50, 200);
+		const lineSpacing = clamp(number(state?.lineSpacing, 12), -80, 300);
+		ctx.save();
+		ctx.font = workflowTitleFont(state, fontSize);
+		const lines = String(state?.text || "工作流标题").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+		if (!lines.some((line) => line.trim())) lines.splice(0, lines.length, "工作流标题");
+		const widths = lines.map((line) => workflowTitleLineWidth(ctx, line, letterSpacing));
+		ctx.restore();
+		const lineHeight = Math.max(1, fontSize * 1.18);
+		const textWidth = Math.max(1, ...widths);
+		const textHeight = lines.length * lineHeight + Math.max(0, lines.length - 1) * lineSpacing;
+		const shadowEnabled = state?.shadowEnabled !== false;
+		const shadowBlur = shadowEnabled ? Math.max(0, number(state?.shadowBlur, 8)) : 0;
+		const shadowOffset = shadowEnabled ? Math.max(Math.abs(number(state?.shadowX, 2)), Math.abs(number(state?.shadowY, 4))) : 0;
+		const margin = Math.ceil(Math.max(0, number(state?.strokeWidth, 2)) * 2 + shadowBlur * 2 + shadowOffset + 4);
+		const paddingX = Math.max(0, number(state?.paddingX, 0));
+		const paddingY = Math.max(0, number(state?.paddingY, 0));
+		const imageWidth = Math.max(1, Math.ceil(textWidth + paddingX * 2 + margin * 2));
+		const imageHeight = Math.max(1, Math.ceil(textHeight + paddingY * 2 + margin * 2));
+		return { lines, widths, fontSize, letterSpacing, lineSpacing, lineHeight, textWidth, textHeight, margin, paddingX, paddingY, imageWidth, imageHeight };
+	}
+
+	function workflowTitleGraphSize(node, state, fallbackWidth = 512) {
+		const probe = document.createElement("canvas").getContext("2d");
+		const layout = workflowTitleLayout(probe, state || {});
+		const width = Math.max(120, fallbackWidth, number(state?.width, fallbackWidth));
+		const displayScale = Math.max(0.001, width / Math.max(1, layout.imageWidth));
+		return {
+			width,
+			height: Math.max(24, layout.imageHeight * displayScale),
+			displayScale,
+			layout,
+		};
+	}
+
 	function workflowTitleTextFromSnapshot(snapshot = null) {
 		const nodes = Array.isArray(snapshot?.nodes) ? snapshot.nodes : buildGraphSnapshot(lastWorkflowObject).nodes;
+		const titles = nodes
+			.filter(isWorkflowTitleNode)
+			.map((node) => ({
+				text: cleanWorkflowTitleText(workflowTitleState(node)?.text),
+				area: Math.max(1, nodeBounds(node).right - nodeBounds(node).left) * Math.max(1, nodeBounds(node).bottom - nodeBounds(node).top),
+			}))
+			.filter((item) => item.text);
+		titles.sort((a, b) => b.area - a.area);
+		return titles[0]?.text || "";
+	}
+
+	function workflowTitleTextFromWorkflow(workflow = null) {
+		const nodes = graphDataNodes(workflow);
 		const titles = nodes
 			.filter(isWorkflowTitleNode)
 			.map((node) => ({
@@ -352,7 +523,8 @@ import { api } from "/scripts/api.js";
 		const date = `${parts.yyyy}${parts.MM}${parts.dd}`;
 		const time = `${parts.HH}${parts.mm}${parts.ss}`;
 		const workflowTitle = workflowTitleTextFromSnapshot(snapshot);
-		const filenameTitle = workflowTitle || "GJJ_workflow";
+		const sourceWorkflowName = currentSourceWorkflowName(lastWorkflowObject);
+		const filenameTitle = workflowTitle || sourceWorkflowName || "GJJ_workflow";
 		const replacements = {
 			...parts,
 			date,
@@ -363,9 +535,13 @@ import { api } from "/scripts/api.js";
 			workflow_title: filenameTitle,
 			workflowTitle: filenameTitle,
 			raw_title: workflowTitle,
+			source_workflow: sourceWorkflowName,
+			sourceWorkflow: sourceWorkflowName,
+			workflow_name: sourceWorkflowName,
+			workflowName: sourceWorkflowName,
 		};
 		const template = String(settings.filenameTemplate || DEFAULT_FILENAME_TEMPLATE);
-		const effectiveTemplate = template === LEGACY_FILENAME_TEMPLATE && workflowTitle ? DEFAULT_FILENAME_TEMPLATE : template;
+		const effectiveTemplate = template === LEGACY_FILENAME_TEMPLATE && (workflowTitle || sourceWorkflowName) ? DEFAULT_FILENAME_TEMPLATE : template;
 		return sanitizeFilename(effectiveTemplate.replace(/\{([A-Za-z0-9_]+)\}/g, (_match, key) => replacements[key] ?? ""), "GJJ_workflow.png");
 	}
 
@@ -405,6 +581,18 @@ import { api } from "/scripts/api.js";
 		const y = number(pos[1]);
 		const width = Math.max(20, number(size[0], 180));
 		const height = Math.max(20, number(size[1], 90));
+		if (isWorkflowTitleNode(node)) {
+			const state = workflowTitleState(node);
+			if (state) {
+				const titleSize = workflowTitleGraphSize(node, state, width);
+				return {
+					left: x,
+					top: y,
+					right: x + Math.max(width, titleSize.width),
+					bottom: y + Math.max(height, titleSize.height),
+				};
+			}
+		}
 		return { left: x, top: y, right: x + width, bottom: y + height };
 	}
 
@@ -1157,74 +1345,73 @@ import { api } from "/scripts/api.js";
 	function drawWorkflowTitleText(ctx, state, x, y, width, height, scale) {
 		const text = String(state?.text || "工作流标题").trim();
 		if (!text) return false;
-		const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-		if (!lines.length) return false;
-		const fontFamily = String(state?.font || "Microsoft YaHei, Segoe UI, sans-serif").replace(/["']/g, "");
-		const baseFontSize = clamp(number(state?.fontSize, 72) * scale, 18, Math.max(22, height * 0.68));
-		const lineGap = Math.max(0, number(state?.lineSpacing, 8) * scale);
-		const letterSpacing = Math.max(0, number(state?.letterSpacing, 0) * scale);
-		let fontSize = baseFontSize;
-
-		const measureLines = () => {
-			ctx.font = `800 ${fontSize}px "${fontFamily}", "Microsoft YaHei", sans-serif`;
-			const widths = lines.map((line) => ctx.measureText(line).width + Math.max(0, line.length - 1) * letterSpacing);
-			return {
-				width: Math.max(...widths, 1),
-				height: lines.length * fontSize * 1.18 + Math.max(0, lines.length - 1) * lineGap,
-			};
-		};
-
-		let measured = measureLines();
-		const maxTextWidth = Math.max(1, width - 24);
-		const maxTextHeight = Math.max(1, height - 16);
-		const fit = Math.min(maxTextWidth / measured.width, maxTextHeight / measured.height, 1);
-		if (fit < 1) {
-			fontSize = Math.max(12, fontSize * fit);
-			measured = measureLines();
-		}
-
+		const layout = workflowTitleLayout(ctx, state);
+		if (!layout.lines.length) return false;
+		const fallbackGraphWidth = Math.max(1, width / Math.max(0.001, scale));
+		const titleGraphWidth = Math.max(120, fallbackGraphWidth, number(state?.width, fallbackGraphWidth));
+		const titleScale = Math.max(0.001, titleGraphWidth / Math.max(1, layout.imageWidth));
+		const renderScale = Math.max(0.001, titleScale * Math.max(0.001, scale));
+		const drawWidth = layout.imageWidth * renderScale;
+		const drawHeight = layout.imageHeight * renderScale;
+		const drawX = x + (width - drawWidth) / 2;
+		const drawY = y + (height - drawHeight) / 2;
 		const align = String(state?.align || "居中");
-		const startY = y + (height - measured.height) / 2 + fontSize;
-		const gradient = ctx.createLinearGradient(x, y, x + width, y);
-		gradient.addColorStop(0, String(state?.colorA || "#F8FFF7"));
-		gradient.addColorStop(1, String(state?.colorB || "#55C685"));
-		const fill = state?.gradient === false ? String(state?.colorA || "#F8FFF7") : gradient;
 		const opacity = clamp(number(state?.opacity, 1), 0.05, 1);
-		const shadowEnabled = state?.shadowEnabled !== false;
-		const strokeWidth = Math.max(0, number(state?.strokeWidth, 0) * scale);
+		const strokeMode = String(state?.strokeMode || "自定义");
+		const strokeWidth = Math.max(0, number(state?.strokeWidth, 0));
+		const strokeColor = strokeMode === "透明"
+			? "rgba(0,0,0,0)"
+			: strokeMode === "背景色"
+				? String(state?.backgroundColor || "#1E5A48")
+				: String(state?.strokeColor || "#2E7D62");
+		const strokeOpacity = clamp(number(state?.strokeOpacity, 1), 0, 1);
 
 		ctx.save();
+		ctx.translate(drawX, drawY);
+		ctx.scale(renderScale, renderScale);
 		ctx.globalAlpha = opacity;
-		ctx.font = `800 ${fontSize}px "${fontFamily}", "Microsoft YaHei", sans-serif`;
-		ctx.textBaseline = "alphabetic";
+		ctx.font = workflowTitleFont(state, layout.fontSize);
+		ctx.textBaseline = "top";
 		ctx.lineJoin = "round";
-		if (shadowEnabled) {
+		ctx.lineCap = "round";
+		if (state?.shadowEnabled !== false) {
 			ctx.shadowColor = String(state?.shadowColor || "#2B5568");
-			ctx.shadowBlur = Math.max(0, number(state?.shadowBlur, 6) * scale);
-			ctx.shadowOffsetX = number(state?.shadowX, 2) * scale;
-			ctx.shadowOffsetY = number(state?.shadowY, 4) * scale;
+			ctx.shadowBlur = Math.max(0, number(state?.shadowBlur, 8));
+			ctx.shadowOffsetX = number(state?.shadowX, 2);
+			ctx.shadowOffsetY = number(state?.shadowY, 4);
 		}
-		lines.forEach((line, index) => {
-			const lineWidth = ctx.measureText(line).width + Math.max(0, line.length - 1) * letterSpacing;
-			const textX = align.includes("左")
-				? x + 12
-				: align.includes("右")
-					? x + width - 12 - lineWidth
-					: x + (width - lineWidth) / 2;
-			const textY = startY + index * (fontSize * 1.18 + lineGap);
+
+		const fill = (() => {
+			if (state?.gradient === false) return String(state?.colorA || "#F8FFF7");
+			const gradient = String(state?.gradientDirection || "水平") === "垂直"
+				? ctx.createLinearGradient(0, 0, 0, layout.imageHeight)
+				: String(state?.gradientDirection || "水平") === "对角"
+					? ctx.createLinearGradient(0, 0, layout.imageWidth, layout.imageHeight)
+					: ctx.createLinearGradient(0, 0, layout.imageWidth, 0);
+			gradient.addColorStop(0, String(state?.colorA || "#F8FFF7"));
+			gradient.addColorStop(1, String(state?.colorB || "#55C685"));
+			return gradient;
+		})();
+
+		const baseX = layout.margin + layout.paddingX;
+		let textY = layout.margin + layout.paddingY;
+		layout.lines.forEach((line, index) => {
+			const lineWidth = layout.widths[index] || workflowTitleLineWidth(ctx, line, layout.letterSpacing);
+			const textX = align.includes("左") ? baseX : align.includes("右") ? baseX + layout.textWidth - lineWidth : baseX + (layout.textWidth - lineWidth) / 2;
 			let cursor = textX;
 			for (const char of Array.from(line)) {
 				if (strokeWidth > 0) {
-					ctx.lineWidth = strokeWidth;
-					ctx.strokeStyle = String(state?.strokeColor || "#2E7D62");
-					ctx.globalAlpha = opacity * clamp(number(state?.strokeOpacity, 1), 0, 1);
+					ctx.lineWidth = strokeWidth * 2;
+					ctx.strokeStyle = strokeColor;
+					ctx.globalAlpha = opacity * strokeOpacity;
 					ctx.strokeText(char, cursor, textY);
 					ctx.globalAlpha = opacity;
 				}
 				ctx.fillStyle = fill;
 				ctx.fillText(char, cursor, textY);
-				cursor += ctx.measureText(char).width + letterSpacing;
+				cursor += ctx.measureText(char).width + layout.letterSpacing;
 			}
+			textY += layout.lineHeight + layout.lineSpacing;
 		});
 		ctx.restore();
 		return true;
@@ -1239,7 +1426,7 @@ import { api } from "/scripts/api.js";
 		drawRoundedRect(ctx, x, y, width, height, 8);
 		ctx.stroke();
 		ctx.restore();
-		return drawWorkflowTitleText(ctx, state, x + 12, y + 8, width - 24, height - 16, scale);
+		return drawWorkflowTitleText(ctx, state, x, y, width, height, scale);
 	}
 
 	function makeWorkflowScreenshotCanvas(snapshot) {
@@ -1452,11 +1639,14 @@ import { api } from "/scripts/api.js";
 		const prompt = graphPrompt?.output || graphPrompt?.prompt || {};
 		const snapshot = buildGraphSnapshot(workflow);
 		const workflowTitle = workflowTitleTextFromSnapshot(snapshot);
+		const sourceWorkflowName = currentSourceWorkflowName(workflow);
 		const info = {
 			source: "GJJ workflow screenshot",
 			render_mode: USE_REAL_CANVAS_CAPTURE ? "real_canvas_dom_capture_with_schematic_fallback" : "stable_graph_renderer",
 			created_at: new Date().toISOString(),
 			workflow_title: workflowTitle || undefined,
+			source_workflow: sourceWorkflowName || undefined,
+			workflow_name: sourceWorkflowName || undefined,
 			node_count: snapshot.nodes.length,
 			group_count: snapshot.groups.length,
 			graph_to_prompt_error: graphPromptError || undefined,
@@ -1593,13 +1783,12 @@ import { api } from "/scripts/api.js";
 			await loadBackendInfo();
 		} catch (_) {}
 		try {
-			const latest = previewItems.find((item) => item?.directory === effectiveDirectory()) || previewItems[0] || null;
 			const data = await apiJson("/gjj/workflow_screenshot/open_dir", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
 					directory: effectiveDirectory(),
-					filename: latest?.file?.name || "",
+					select_file: false,
 				}),
 			});
 			settings.directoryPath = String(data.directory || effectiveDirectory());
@@ -1740,6 +1929,20 @@ import { api } from "/scripts/api.js";
 		return null;
 	}
 
+	function workflowTitleFromMetadata(metadata, workflow = null) {
+		const info = parseJsonMaybe(metadata?.gjj_workflow_screenshot || metadata?.GJJ_Workflow_Screenshot);
+		const title = cleanWorkflowTitleText(info?.workflow_title || metadata?.workflow_title || metadata?.title || "");
+		const sourceWorkflowName = cleanSourceWorkflowName(
+			info?.source_workflow ||
+			info?.workflow_name ||
+			metadata?.source_workflow ||
+			metadata?.workflow_name ||
+			metadata?.workflowName ||
+			""
+		);
+		return title || sourceWorkflowName || workflowTitleTextFromWorkflow(workflow) || workflowNameFromValue(workflow);
+	}
+
 	function clearPreviewItems() {
 		for (const item of previewItems) {
 			if (item?.url && String(item.url).startsWith("blob:")) {
@@ -1776,6 +1979,34 @@ import { api } from "/scripts/api.js";
 						<button type="button" data-gjj-action="clear-dir">×</button>
 					</div>
 				</div>
+				<div class="gjj-workflow-filter-options">
+					<div class="gjj-workflow-save-row gjj-workflow-search-row">
+						<label>筛选</label>
+						<input type="text" data-gjj-setting="search-text" spellcheck="false" placeholder="文件名 / 标题">
+						<button type="button" data-gjj-action="refresh-list">↻</button>
+					</div>
+					<div class="gjj-workflow-save-row">
+						<label>排序</label>
+						<select data-gjj-setting="sort-mode">
+							<option value="mtime_desc">最新优先</option>
+							<option value="mtime_asc">最旧优先</option>
+							<option value="name_asc">文件名 A-Z</option>
+							<option value="name_desc">文件名 Z-A</option>
+							<option value="title_asc">标题 A-Z</option>
+							<option value="openable_first">可打开优先</option>
+						</select>
+					</div>
+					<div class="gjj-workflow-save-row">
+						<label>显示</label>
+						<select data-gjj-setting="filter-mode">
+							<option value="all">全部</option>
+							<option value="openable">可打开</option>
+							<option value="missing">无元数据</option>
+						</select>
+						<button type="button" data-gjj-action="shortcut-help">⌨</button>
+					</div>
+				</div>
+				<div class="gjj-workflow-shortcut-help" hidden>Alt+Shift+S 保存截图 · Alt+Shift+O 打开截图库 · Ctrl+F 聚焦筛选 · Alt+R 刷新 · Esc 关闭</div>
 				<div class="gjj-workflow-preview-status"></div>
 				<div class="gjj-workflow-preview-grid"></div>
 			</div>
@@ -1785,10 +2016,15 @@ import { api } from "/scripts/api.js";
 			overlay.addEventListener(eventName, stop);
 		}
 		overlay.querySelector("[data-gjj-action='close']")?.addEventListener("click", () => {
-			overlay.style.display = "none";
+			closePreviewOverlay();
 		});
 		overlay.querySelector("[data-gjj-action='choose-dir']")?.addEventListener("click", () => openBackendDirectory());
 		overlay.querySelector("[data-gjj-action='clear-dir']")?.addEventListener("click", () => resetBackendDirectory());
+		overlay.querySelector("[data-gjj-action='refresh-list']")?.addEventListener("click", () => refreshBackendScreenshotList());
+		overlay.querySelector("[data-gjj-action='shortcut-help']")?.addEventListener("click", () => {
+			const help = overlay.querySelector(".gjj-workflow-shortcut-help");
+			if (help) help.hidden = !help.hidden;
+		});
 		overlay.querySelector("[data-gjj-action='reset-name']")?.addEventListener("click", () => {
 			settings.filenameTemplate = DEFAULT_FILENAME_TEMPLATE;
 			saveSettings();
@@ -1801,6 +2037,32 @@ import { api } from "/scripts/api.js";
 			saveSettings();
 			scheduleBackendWorkflowSettingsSave();
 			updateSaveSettingsUI(false);
+		});
+		const searchInput = overlay.querySelector("[data-gjj-setting='search-text']");
+		searchInput?.addEventListener("input", () => {
+			settings.searchText = String(searchInput.value || "").slice(0, 160);
+			saveSettings();
+			scheduleBackendWorkflowSettingsSave();
+			renderPreviewItems();
+			updatePreviewSummary();
+		});
+		const sortSelect = overlay.querySelector("[data-gjj-setting='sort-mode']");
+		sortSelect?.addEventListener("change", () => {
+			settings.sortMode = choice(sortSelect.value, SORT_MODE_LABELS, DEFAULT_SORT_MODE);
+			saveSettings();
+			scheduleBackendWorkflowSettingsSave();
+			updateSaveSettingsUI(false);
+			renderPreviewItems();
+			updatePreviewSummary();
+		});
+		const filterSelect = overlay.querySelector("[data-gjj-setting='filter-mode']");
+		filterSelect?.addEventListener("change", () => {
+			settings.filterMode = choice(filterSelect.value, FILTER_MODE_LABELS, DEFAULT_FILTER_MODE);
+			saveSettings();
+			scheduleBackendWorkflowSettingsSave();
+			updateSaveSettingsUI(false);
+			renderPreviewItems();
+			updatePreviewSummary();
 		});
 		const directoryInput = overlay.querySelector("[data-gjj-setting='directory-path']");
 		directoryInput?.addEventListener("input", () => {
@@ -1830,6 +2092,16 @@ import { api } from "/scripts/api.js";
 		if (choose) choose.title = "打开当前保存目录";
 		const clear = overlay.querySelector("[data-gjj-action='clear-dir']");
 		if (clear) clear.title = "恢复包内 workflows 默认目录";
+		const search = overlay.querySelector("[data-gjj-setting='search-text']");
+		if (search && updateInput) search.value = String(settings.searchText || "");
+		const sort = overlay.querySelector("[data-gjj-setting='sort-mode']");
+		if (sort) sort.value = choice(settings.sortMode, SORT_MODE_LABELS, DEFAULT_SORT_MODE);
+		const filter = overlay.querySelector("[data-gjj-setting='filter-mode']");
+		if (filter) filter.value = choice(settings.filterMode, FILTER_MODE_LABELS, DEFAULT_FILTER_MODE);
+		const refresh = overlay.querySelector("[data-gjj-action='refresh-list']");
+		if (refresh) refresh.title = "刷新当前保存目录";
+		const shortcut = overlay.querySelector("[data-gjj-action='shortcut-help']");
+		if (shortcut) shortcut.title = "显示快捷键";
 	}
 
 	function setPreviewStatus(text, tone = "") {
@@ -1840,13 +2112,78 @@ import { api } from "/scripts/api.js";
 		status.dataset.tone = tone || "";
 	}
 
+	function previewItemName(item) {
+		return String(item?.file?.name || item?.filename || "workflow.png");
+	}
+
+	function previewItemTitle(item) {
+		return cleanWorkflowTitleText(item?.title || item?.metadataTitle || "");
+	}
+
+	function previewItemMtime(item) {
+		const explicit = Number(item?.mtime);
+		if (Number.isFinite(explicit) && explicit > 0) return explicit;
+		const modified = Number(item?.file?.lastModified);
+		return Number.isFinite(modified) && modified > 0 ? modified / 1000 : 0;
+	}
+
+	function compareText(a, b) {
+		return String(a || "").localeCompare(String(b || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
+	}
+
+	function previewSearchText(item) {
+		return [
+			previewItemName(item),
+			previewItemTitle(item),
+			item?.error || "",
+			item?.directory || "",
+		].join(" ").toLowerCase();
+	}
+
+	function sortedFilteredPreviewItems() {
+		const filterMode = choice(settings.filterMode, FILTER_MODE_LABELS, DEFAULT_FILTER_MODE);
+		const query = String(settings.searchText || "").trim().toLowerCase();
+		const items = previewItems.filter((item) => {
+			if (filterMode === "openable" && !item.workflow) return false;
+			if (filterMode === "missing" && item.workflow) return false;
+			return !query || previewSearchText(item).includes(query);
+		});
+		const sortMode = choice(settings.sortMode, SORT_MODE_LABELS, DEFAULT_SORT_MODE);
+		items.sort((a, b) => {
+			if (sortMode === "mtime_asc") return previewItemMtime(a) - previewItemMtime(b) || compareText(previewItemName(a), previewItemName(b));
+			if (sortMode === "name_asc") return compareText(previewItemName(a), previewItemName(b)) || (previewItemMtime(b) - previewItemMtime(a));
+			if (sortMode === "name_desc") return compareText(previewItemName(b), previewItemName(a)) || (previewItemMtime(b) - previewItemMtime(a));
+			if (sortMode === "title_asc") return compareText(previewItemTitle(a) || previewItemName(a), previewItemTitle(b) || previewItemName(b)) || (previewItemMtime(b) - previewItemMtime(a));
+			if (sortMode === "openable_first") return Number(!!b.workflow) - Number(!!a.workflow) || (previewItemMtime(b) - previewItemMtime(a));
+			return previewItemMtime(b) - previewItemMtime(a) || compareText(previewItemName(a), previewItemName(b));
+		});
+		return items;
+	}
+
+	function updatePreviewSummary() {
+		const total = previewItems.length;
+		const usable = previewItems.filter((item) => item.workflow).length;
+		const visible = sortedFilteredPreviewItems().length;
+		const suffix = total === visible ? "" : `，当前显示 ${visible} 张`;
+		setPreviewStatus(`保存目录：${effectiveDirectory()}；已读取 ${total} 张，${usable} 张可打开${suffix}。`, usable ? "ok" : "warn");
+	}
+
 	function renderPreviewItems() {
 		const overlay = previewOverlay();
 		const grid = overlay.querySelector(".gjj-workflow-preview-grid");
 		if (!grid) return;
 		grid.textContent = "";
 
-		for (const item of previewItems) {
+		const items = sortedFilteredPreviewItems();
+		if (!items.length) {
+			const empty = document.createElement("div");
+			empty.className = "gjj-workflow-preview-empty";
+			empty.textContent = previewItems.length ? "没有符合筛选条件的截图。" : "当前目录没有工作流截图。";
+			grid.appendChild(empty);
+			return;
+		}
+
+		for (const item of items) {
 			const card = document.createElement("button");
 			card.type = "button";
 			card.className = "gjj-workflow-preview-card";
@@ -1861,7 +2198,7 @@ import { api } from "/scripts/api.js";
 
 			const label = document.createElement("div");
 			label.className = "gjj-workflow-preview-name";
-			label.textContent = item.file?.name || "workflow.png";
+			label.textContent = previewItemTitle(item) || previewItemName(item);
 
 			const mark = document.createElement("div");
 			mark.className = "gjj-workflow-preview-mark";
@@ -1897,16 +2234,33 @@ import { api } from "/scripts/api.js";
 		return workflowFromMetadata(parsePngTextMetadata(bytes));
 	}
 
+	async function previewDataFromImageUrl(url) {
+		const response = await fetch(url, { cache: "no-store" });
+		if (!response.ok) throw new Error(`读取截图失败：HTTP ${response.status}`);
+		const bytes = new Uint8Array(await response.arrayBuffer());
+		const metadata = parsePngTextMetadata(bytes);
+		const workflow = workflowFromMetadata(metadata);
+		return {
+			workflow,
+			metadata,
+			title: workflowTitleFromMetadata(metadata, workflow),
+		};
+	}
+
 	function rememberSavedScreenshot(bytes, metadata, saved) {
 		const filename = typeof saved === "string" ? saved : (saved?.filename || "GJJ_workflow.png");
 		const blob = new Blob([bytes], { type: "image/png" });
 		const file = typeof File === "function"
 			? new File([blob], filename || "GJJ_workflow.png", { type: "image/png" })
 			: { name: filename || "GJJ_workflow.png", size: blob.size, type: "image/png" };
+		const workflow = workflowFromMetadata(metadata);
 		previewItems.unshift({
 			file,
 			url: saved?.url || URL.createObjectURL(blob),
-			workflow: workflowFromMetadata(metadata),
+			workflow,
+			title: workflowTitleFromMetadata(metadata, workflow),
+			metadata,
+			mtime: Number(saved?.mtime) || Date.now() / 1000,
 			error: "",
 			directory: saved?.directory || effectiveDirectory(),
 		});
@@ -1919,8 +2273,7 @@ import { api } from "/scripts/api.js";
 		const overlay = document.getElementById(PREVIEW_OVERLAY_ID);
 		if (overlay && overlay.style.display === "flex") {
 			renderPreviewItems();
-			const usable = previewItems.filter((item) => item.workflow).length;
-			setPreviewStatus(`保存目录：${effectiveDirectory()}；已读取 ${previewItems.length} 张，${usable} 张可打开。`, usable ? "ok" : "warn");
+			updatePreviewSummary();
 		}
 	}
 
@@ -1943,21 +2296,26 @@ import { api } from "/scripts/api.js";
 			file: { name: item.filename || "workflow.png", size: item.size || 0, type: "image/png" },
 			url: item.url || "",
 			workflow: null,
+			title: "",
+			metadata: null,
+			mtime: Number(item.mtime) || 0,
 			error: "",
 			directory: item.directory || data.directory || effectiveDirectory(),
 		}));
 
 		await Promise.all(previewItems.map(async (item) => {
 			try {
-				item.workflow = item.url ? await workflowFromImageUrl(item.url) : null;
+				const data = item.url ? await previewDataFromImageUrl(item.url) : null;
+				item.workflow = data?.workflow || null;
+				item.metadata = data?.metadata || null;
+				item.title = data?.title || "";
 				if (!item.workflow) item.error = "未找到 workflow";
 			} catch (error) {
 				item.error = String(error?.message || error || "读取失败");
 			}
 		}));
 		renderPreviewItems();
-		const usable = previewItems.filter((item) => item.workflow).length;
-		setPreviewStatus(`保存目录：${effectiveDirectory()}；已读取 ${previewItems.length} 张，${usable} 张可打开。`, usable ? "ok" : "warn");
+		updatePreviewSummary();
 	}
 
 	async function showScreenshotPreview() {
@@ -2005,6 +2363,66 @@ import { api } from "/scripts/api.js";
 			if (button) button.disabled = false;
 			busy = false;
 		}
+	}
+
+	function isPreviewOpen() {
+		const overlay = document.getElementById(PREVIEW_OVERLAY_ID);
+		return !!overlay && overlay.style.display === "flex";
+	}
+
+	function closePreviewOverlay() {
+		const overlay = document.getElementById(PREVIEW_OVERLAY_ID);
+		if (overlay) overlay.style.display = "none";
+	}
+
+	function focusPreviewSearch() {
+		const overlay = previewOverlay();
+		const input = overlay.querySelector("[data-gjj-setting='search-text']");
+		if (input) {
+			input.focus();
+			input.select?.();
+		}
+	}
+
+	function isEditableTarget(target) {
+		const element = target instanceof Element ? target : null;
+		if (!element) return false;
+		const tag = element.tagName?.toLowerCase?.() || "";
+		return element.isContentEditable || tag === "input" || tag === "textarea" || tag === "select";
+	}
+
+	function installKeyboardShortcuts() {
+		if (keyboardShortcutsInstalled) return;
+		keyboardShortcutsInstalled = true;
+		document.addEventListener("keydown", (event) => {
+			const key = String(event.key || "").toLowerCase();
+			const previewOpen = isPreviewOpen();
+			if (previewOpen && key === "escape") {
+				event.preventDefault();
+				closePreviewOverlay();
+				return;
+			}
+			if (previewOpen && event.ctrlKey && !event.altKey && key === "f") {
+				event.preventDefault();
+				focusPreviewSearch();
+				return;
+			}
+			if (previewOpen && event.altKey && !event.ctrlKey && key === "r") {
+				event.preventDefault();
+				refreshBackendScreenshotList();
+				return;
+			}
+			if (isEditableTarget(event.target)) return;
+			if (event.altKey && event.shiftKey && !event.ctrlKey && key === "s") {
+				event.preventDefault();
+				saveWorkflowScreenshot(document.getElementById(SAVE_BUTTON_ID));
+				return;
+			}
+			if (event.altKey && event.shiftKey && !event.ctrlKey && key === "o") {
+				event.preventDefault();
+				showScreenshotPreview();
+			}
+		}, true);
 	}
 
 	function installStyle() {
@@ -2062,7 +2480,7 @@ import { api } from "/scripts/api.js";
 	pointer-events: auto;
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-panel {
-	width: min(920px, calc(100vw - 40px));
+	width: min(1120px, calc(100vw - 40px));
 	max-height: min(720px, calc(100vh - 44px));
 	display: flex;
 	flex-direction: column;
@@ -2108,6 +2526,11 @@ import { api } from "/scripts/api.js";
 	grid-template-columns: minmax(260px, 1fr) minmax(240px, .85fr);
 	gap: 8px;
 }
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-filter-options {
+	display: grid;
+	grid-template-columns: minmax(260px, 1fr) minmax(170px, .44fr) minmax(190px, .48fr);
+	gap: 8px;
+}
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-save-row {
 	min-width: 0;
 	display: flex;
@@ -2124,7 +2547,8 @@ import { api } from "/scripts/api.js";
 	color: #9fb0b7;
 	font: 700 12px/18px sans-serif;
 }
-#${PREVIEW_OVERLAY_ID} .gjj-workflow-save-row input {
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-save-row input,
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-save-row select {
 	min-width: 0;
 	flex: 1 1 auto;
 	height: 28px;
@@ -2135,6 +2559,13 @@ import { api } from "/scripts/api.js";
 	color: #e8f0ec;
 	font: 12px/28px Consolas, "Segoe UI", sans-serif;
 	box-sizing: border-box;
+}
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-save-row select {
+	font-family: "Segoe UI", sans-serif;
+	cursor: pointer;
+}
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-search-row input {
+	font-family: "Segoe UI", sans-serif;
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-save-dir {
 	min-width: 0;
@@ -2172,12 +2603,30 @@ import { api } from "/scripts/api.js";
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-status[data-tone="warn"] {
 	color: #e2c471;
 }
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-shortcut-help {
+	margin-top: -2px;
+	padding: 6px 8px;
+	border: 1px solid rgba(117, 137, 148, .22);
+	border-radius: 6px;
+	background: rgba(15, 23, 28, .88);
+	color: #aebbc1;
+	font: 12px/18px "Segoe UI", sans-serif;
+}
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-grid {
 	display: grid;
 	grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
 	gap: 10px;
 	overflow: auto;
 	padding-right: 2px;
+}
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-empty {
+	grid-column: 1 / -1;
+	padding: 18px 10px;
+	border: 1px dashed rgba(117, 137, 148, .3);
+	border-radius: 8px;
+	color: #98a7ad;
+	text-align: center;
+	font: 12px/18px sans-serif;
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-card {
 	min-width: 0;
@@ -2219,7 +2668,8 @@ import { api } from "/scripts/api.js";
 	font: 11px/14px sans-serif;
 }
 @media (max-width: 760px) {
-	#${PREVIEW_OVERLAY_ID} .gjj-workflow-save-options {
+	#${PREVIEW_OVERLAY_ID} .gjj-workflow-save-options,
+	#${PREVIEW_OVERLAY_ID} .gjj-workflow-filter-options {
 		grid-template-columns: 1fr;
 	}
 }
@@ -2272,8 +2722,8 @@ import { api } from "/scripts/api.js";
 
 		toolbar.textContent = "";
 		toolbar.append(
-			makeToolbarButton(SAVE_BUTTON_ID, "💾", "保存工作流截图", saveWorkflowScreenshot),
-			makeToolbarButton(OPEN_BUTTON_ID, "📁", "预览并打开工作流截图", showScreenshotPreview)
+			makeToolbarButton(SAVE_BUTTON_ID, "💾", "保存工作流截图（Alt+Shift+S）", saveWorkflowScreenshot),
+			makeToolbarButton(OPEN_BUTTON_ID, "📁", "预览并打开工作流截图（Alt+Shift+O）", showScreenshotPreview)
 		);
 		positionToolbar(toolbar);
 		return toolbar;
@@ -2292,8 +2742,9 @@ import { api } from "/scripts/api.js";
 		setup() {
 			ensureToolbar();
 			loadBackendInfo().catch(() => updateSaveSettingsUI());
+			installKeyboardShortcuts();
 			startPositionSync();
-			console.log("[GJJ] 工作流截图保存按钮已启用");
+			console.log("[GJJ] 工作流截图保存按钮与快捷键已启用");
 		},
 	});
 })();

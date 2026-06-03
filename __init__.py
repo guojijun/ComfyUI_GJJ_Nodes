@@ -61,6 +61,37 @@ def _gjj_default_user_settings() -> dict:
 		"workflow_screenshot": {
 			"directory": "workflows",
 			"filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
+			"sort_mode": "mtime_desc",
+			"filter_mode": "all",
+			"search_text": "",
+		},
+		"workflow_title": {
+			"font": "",
+			"fontSize": 72,
+			"colorA": "#F8FFF7",
+			"colorB": "#55C685",
+			"gradient": True,
+			"gradientDirection": "水平",
+			"opacity": 1.0,
+			"letterSpacing": 1.0,
+			"lineSpacing": 12.0,
+			"paddingX": 0.0,
+			"paddingY": 0.0,
+			"strokeWidth": 2.0,
+			"strokeMode": "自定义",
+			"strokeColor": "#2E7D62",
+			"strokeOpacity": 1.0,
+			"backgroundColor": "#1E5A48",
+			"borderMode": "透明",
+			"borderColor": "#55C685",
+			"borderOpacity": 1.0,
+			"shadowEnabled": True,
+			"shadowColor": "#F2FF04",
+			"shadowOpacity": 0.42,
+			"shadowBlur": 8.0,
+			"shadowX": 2.0,
+			"shadowY": 4.0,
+			"align": "居中",
 		},
 		"nodes": {},
 		"user": {},
@@ -120,6 +151,9 @@ def _gjj_workflow_screenshot_settings() -> dict:
 	return {
 		"directory": str(section.get("directory") or ""),
 		"filename_template": str(section.get("filename_template") or "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png"),
+		"sort_mode": str(section.get("sort_mode") or "mtime_desc"),
+		"filter_mode": str(section.get("filter_mode") or "all"),
+		"search_text": str(section.get("search_text") or ""),
 	}
 
 def _register_gjj_user_settings_api():
@@ -216,10 +250,7 @@ def _register_gjj_workflow_screenshot_api():
 
 	def resolve_directory(value: str | None) -> str:
 		raw = str(value or "").strip()
-		if not raw:
-			path = default_directory()
-		else:
-			path = os.path.abspath(os.path.expanduser(os.path.expandvars(raw)))
+		path = _gjj_expand_setting_path(raw, default_directory())
 		os.makedirs(path, exist_ok=True)
 		return path
 
@@ -262,6 +293,61 @@ def _register_gjj_workflow_screenshot_api():
 			raise ValueError("只支持 PNG 工作流截图。")
 		return data
 
+	def activate_windows_explorer_window(directory: str) -> bool:
+		if not sys.platform.startswith("win"):
+			return False
+		try:
+			import ctypes
+			import time
+
+			user32 = ctypes.windll.user32
+			target_name = os.path.basename(os.path.normpath(directory)).lower()
+			target_path = os.path.normcase(os.path.abspath(directory)).lower()
+			enum_proc_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+			classes = {"CabinetWClass", "ExploreWClass"}
+
+			def find_window():
+				matches = []
+
+				@enum_proc_type
+				def callback(hwnd, _lparam):
+					if not user32.IsWindowVisible(hwnd):
+						return True
+					class_buffer = ctypes.create_unicode_buffer(256)
+					user32.GetClassNameW(hwnd, class_buffer, len(class_buffer))
+					if class_buffer.value not in classes:
+						return True
+					length = max(1, user32.GetWindowTextLengthW(hwnd))
+					title_buffer = ctypes.create_unicode_buffer(length + 1)
+					user32.GetWindowTextW(hwnd, title_buffer, len(title_buffer))
+					title = str(title_buffer.value or "").strip().lower()
+					if title and (target_path in os.path.normcase(title).lower() or title == target_name or target_name in title):
+						matches.append(hwnd)
+					return True
+
+				user32.EnumWindows(callback, 0)
+				return matches[0] if matches else None
+
+			for _ in range(10):
+				hwnd = find_window()
+				if hwnd:
+					user32.ShowWindowAsync(hwnd, 3)
+					user32.BringWindowToTop(hwnd)
+					user32.SetForegroundWindow(hwnd)
+					return True
+				time.sleep(0.12)
+		except Exception:
+			return False
+		return False
+
+	def open_windows_explorer(directory: str, select_path: str = "") -> bool:
+		flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+		if select_path and os.path.exists(select_path):
+			subprocess.Popen(["cmd.exe", "/c", "start", "", "/max", "explorer.exe", f"/select,{select_path}"], creationflags=flags)
+			return activate_windows_explorer_window(os.path.dirname(select_path))
+		subprocess.Popen(["cmd.exe", "/c", "start", "", "/max", "explorer.exe", "/n,", directory], creationflags=flags)
+		return activate_windows_explorer_window(directory)
+
 	@server.routes.get("/gjj/workflow_screenshot/info")
 	async def gjj_workflow_screenshot_info(_request):
 		directory = default_directory()
@@ -276,6 +362,9 @@ def _register_gjj_workflow_screenshot_api():
 				"directory": directory,
 				"raw_directory": _gjj_workflow_screenshot_settings().get("directory") or "",
 				"filename_template": filename_template(),
+				"sort_mode": _gjj_workflow_screenshot_settings().get("sort_mode") or "mtime_desc",
+				"filter_mode": _gjj_workflow_screenshot_settings().get("filter_mode") or "all",
+				"search_text": _gjj_workflow_screenshot_settings().get("search_text") or "",
 			},
 		})
 
@@ -332,6 +421,9 @@ def _register_gjj_workflow_screenshot_api():
 					"directory": default_directory(),
 					"raw_directory": _gjj_workflow_screenshot_settings().get("directory") or "",
 					"filename_template": filename_template(),
+					"sort_mode": _gjj_workflow_screenshot_settings().get("sort_mode") or "mtime_desc",
+					"filter_mode": _gjj_workflow_screenshot_settings().get("filter_mode") or "all",
+					"search_text": _gjj_workflow_screenshot_settings().get("search_text") or "",
 				},
 				"items": items,
 			})
@@ -354,31 +446,33 @@ def _register_gjj_workflow_screenshot_api():
 			data = await request.json()
 			directory = resolve_directory(data.get("directory"))
 			select_path = ""
+			select_file = bool(data.get("select_file") or data.get("selectFile") or data.get("select"))
 			filename = str(data.get("filename") or "").strip()
-			if filename:
+			if select_file and filename:
 				try:
 					candidate = png_path(directory, filename)
 					if os.path.exists(candidate):
 						select_path = candidate
 				except Exception:
 					select_path = ""
-			if not select_path:
+			if select_file and not select_path:
 				last_path = os.path.abspath(str(getattr(server, "_gjj_workflow_screenshot_last_path", "") or ""))
 				if os.path.exists(last_path) and os.path.dirname(last_path) == directory:
 					select_path = last_path
-			if not select_path:
+			if select_file and not select_path:
 				select_path = newest_png_path(directory)
 
+			foreground = False
 			if sys.platform.startswith("win"):
 				if select_path and os.path.exists(select_path):
-					subprocess.Popen(["explorer.exe", f"/select,{select_path}"])
+					foreground = open_windows_explorer(directory, select_path)
 				else:
-					subprocess.Popen(["explorer.exe", directory])
+					foreground = open_windows_explorer(directory)
 			elif sys.platform == "darwin":
 				subprocess.Popen(["open", directory])
 			else:
 				subprocess.Popen(["xdg-open", directory])
-			return web.json_response({"ok": True, "directory": directory, "selected": select_path})
+			return web.json_response({"ok": True, "directory": directory, "selected": select_path, "foreground": foreground})
 		except Exception as exc:
 			return web.json_response({"ok": False, "error": str(exc)}, status=400)
 

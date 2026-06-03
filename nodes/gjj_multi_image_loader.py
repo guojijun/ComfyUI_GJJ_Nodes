@@ -4,6 +4,7 @@ import comfy.utils
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -19,13 +20,21 @@ except Exception:
 import folder_paths
 from nodes import PreviewImage
 
+from .common_utils.network_media import (
+    gjjutils_detect_media_type,
+    gjjutils_download_network_media_to_input,
+    gjjutils_input_relative_media_path,
+    gjjutils_is_network_url,
+)
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
 
 NODE_NAME = "GJJ_MultiImageLoader"
 IMAGE_API_PATH = "/gjj/input_images"
 THUMB_API_PATH = "/gjj/input_image_thumb"
+DEFAULT_NETWORK_IMAGE_API_PATH = "/gjj/multi_image_loader/default_image"
 MAX_OUTPUT_IMAGES = 20
+NETWORK_IMAGE_DOWNLOAD_TIMEOUT = 120
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".avif"}
 INPUT_IMAGE_TYPES = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
 _IMAGE_META_CACHE: dict[str, tuple[int, int, int, int]] = {}
@@ -106,6 +115,88 @@ async def get_gjj_input_images(request):
     return web.json_response({"images": list_input_images()})
 
 
+def _input_image_item_from_path(file_path: str | Path) -> dict[str, Any]:
+    path = Path(file_path).resolve()
+    relative = Path(gjjutils_input_relative_media_path(str(path)))
+    filename = relative.name
+    subfolder = str(relative.parent).replace("\\", "/")
+    if subfolder == ".":
+        subfolder = ""
+
+    width = 0
+    height = 0
+    try:
+        with Image.open(path) as image:
+            width, height = image.size
+            image.verify()
+    except Exception as error:
+        raise RuntimeError(f"网络图片已下载，但图片文件无法识别：{relative.as_posix()}。原始错误：{error}") from error
+
+    stat = path.stat()
+    return {
+        "filename": filename,
+        "subfolder": subfolder,
+        "label": f"{subfolder}/{filename}" if subfolder else filename,
+        "width": int(width),
+        "height": int(height),
+        "mtime_ns": int(stat.st_mtime_ns),
+        "size_bytes": int(stat.st_size),
+    }
+
+
+async def post_gjj_default_network_image(request):
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+
+    raw_urls = data.get("urls")
+    if isinstance(raw_urls, list):
+        urls = [str(item or "").strip() for item in raw_urls]
+    else:
+        text = str(data.get("url") or "").strip()
+        urls = [part.strip() for part in re.split(r"[\r\n,，\s]+", text) if part.strip()]
+    urls = [url for url in urls if url]
+    if not urls:
+        return web.json_response({"ok": False, "error": "只支持 http/https 网络图片地址。"}, status=400)
+
+    items: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for index, url in enumerate(urls, start=1):
+        if not gjjutils_is_network_url(url):
+            errors.append(f"第 {index} 条不是 http/https 图片地址：{url}")
+            continue
+        detected_type = gjjutils_detect_media_type(url)
+        if detected_type and detected_type != "IMAGE":
+            errors.append(f"第 {index} 条不是图片地址：{url}")
+            continue
+        try:
+            file_path = gjjutils_download_network_media_to_input(
+                url,
+                "IMAGE",
+                timeout=NETWORK_IMAGE_DOWNLOAD_TIMEOUT,
+                user_agent="ComfyUI-GJJ-MultiImageLoader/1.0",
+            )
+            item = _input_image_item_from_path(file_path)
+            item["source_url"] = url
+            items.append(item)
+        except Exception as error:
+            errors.append(f"第 {index} 条下载失败：{error}")
+
+    if not items:
+        message = "；".join(errors[:5]) if errors else "设置默认网络图片失败。"
+        return web.json_response({"ok": False, "error": message}, status=500)
+
+    return web.json_response({
+        "ok": True,
+        "item": items[0],
+        "items": items,
+        "errors": errors[:20],
+    })
+
+
 def _safe_int(value: Any, default: int, min_value: int, max_value: int) -> int:
     try:
         number = int(value)
@@ -159,6 +250,7 @@ async def get_gjj_input_image_thumb(request):
 if PromptServer is not None and getattr(PromptServer, "instance", None) is not None:
     PromptServer.instance.routes.get(IMAGE_API_PATH)(get_gjj_input_images)
     PromptServer.instance.routes.get(THUMB_API_PATH)(get_gjj_input_image_thumb)
+    PromptServer.instance.routes.post(DEFAULT_NETWORK_IMAGE_API_PATH)(post_gjj_default_network_image)
 
 
 def parse_selected_images(raw_value: Any) -> list[dict[str, str]]:
@@ -558,6 +650,10 @@ class GJJ_MultiImageLoader:
                 "description": "可接入其他节点的 IMAGE batch，与本地图片合并预览和输出",
             },
             {
+                "name": "网络默认图片",
+                "description": "更多工具里可输入一条或多条 http/https 图片地址，统一调用 GJJ 公共网络图片下载函数并设为默认已选图片",
+            },
+            {
                 "name": "超大数量支持",
                 "description": "超过20张图片时自动切换为纯批量模式，不限制图片数量",
             },
@@ -569,13 +665,15 @@ class GJJ_MultiImageLoader:
             "3. 多选图片：在文件浏览器中按住 Ctrl/Shift 多选需要的图片",
             "4. 确认选择：点击确定后，图片会以网格形式在节点内预览",
             "5. （可选）设置序列范围：如需只输出部分图片，在「序列范围」中输入如 [1:5]",
-            "6. （可选）合并外部图片：接入其他节点的 IMAGE 输出，会与本地图片合并",
-            "7. 连接输出：将「批量图片队列」连接到批量处理节点，或使用单图输出",
+            "6. （可选）设置网络默认图：展开更多工具，点击「🌐」并输入一条或多条网络图片地址",
+            "7. （可选）合并外部图片：接入其他节点的 IMAGE 输出，会与本地图片合并",
+            "8. 连接输出：将「批量图片队列」连接到批量处理节点，或使用单图输出",
         ],
 
         "tips": [
             "💡 图片命名建议：使用数字前缀（如 001_xxx.jpg）便于排序和序列筛选",
             "💡 支持的格式：PNG、JPG、JPEG、WEBP、BMP 等常见图片格式",
+            "💡 网络默认图片会先缓存到 ComfyUI input/GJJ_TemplateParams，再按普通 input 图片读取；可一次粘贴多条地址",
             "💡 序列范围语法：[1,3,5] 选择第1、3、5张；[1:5] 选择第1到5张",
             "💡 超过20张图片时，只会输出批量队列，不会创建单图输出口",
             "💡 外部图片和本地图片会合并预览，但会在 UI 中标记来源",

@@ -12,6 +12,7 @@ import { app } from "/scripts/app.js";
 
 // GJJ 节点前缀列表
 const GJJ_NODE_PREFIXES = ["GJJ_"];
+const SKIP_HELP_BUTTON_CLASSES = new Set(["GJJ_WorkflowTitle"]);
 const PATCH_FLAG = "__gjjHeaderHelpButtonPatched";
 const CANVAS_SYNC_FLAG = "__gjjHeaderHelpOverlayDrawPatched";
 const FALLBACK_WIDGET_NAME = "gjj_header_help_button";
@@ -48,6 +49,7 @@ function getNodeHelpUrl(nodeType) {
  */
 function isGJJNode(node) {
 	if (!node?.comfyClass) return false;
+	if (SKIP_HELP_BUTTON_CLASSES.has(String(node.comfyClass || ""))) return false;
 	return GJJ_NODE_PREFIXES.some(prefix => node.comfyClass.startsWith(prefix));
 }
 

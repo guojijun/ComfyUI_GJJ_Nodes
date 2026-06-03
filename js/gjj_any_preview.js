@@ -32,6 +32,7 @@ const MODE_EDIT = "edit";
 const MODE_PREVIEW = "preview";
 const DOUBLE_CLICK_MS = 420;
 const MODE_PROPERTY = "__gjjAnyPreviewMode";
+const WIDTH_PROPERTY = "gjj_any_preview_width";
 const LIVE_KIND_LABELS = {
 	image: "图片",
 	mask: "遮罩",
@@ -306,6 +307,15 @@ function firstMediaPayload(...payloads) {
 	return [];
 }
 
+function sourceLooksAudio(sourceInfo) {
+	const text = `${sourceInfo?.type || ""} ${sourceInfo?.label || ""}`.toUpperCase();
+	return text.includes("AUDIO");
+}
+
+function previewItemHasPlayableAudio(item) {
+	return normalizeMediaPayload(item?.audio).length > 0;
+}
+
 function normalizePreviewItemsPayload(payload) {
 	if (!payload) {
 		return [];
@@ -474,9 +484,10 @@ function resetLivePreviewState(node) {
 function buildLivePreviewItems(event, input, inputOrder, sourceInfo) {
 	const detail = event?.detail || {};
 	const output = detail.output || detail || {};
+	const sourceIsAudio = sourceLooksAudio(sourceInfo);
 	const previewItems = normalizePreviewItemsPayload(output.preview_items);
 	if (previewItems.length) {
-		return previewItems.map((item, index) => {
+		const mapped = previewItems.map((item, index) => {
 			const normalized = {
 				...item,
 				ordinal: item.ordinal || inputOrder + index + 1,
@@ -487,6 +498,7 @@ function buildLivePreviewItems(event, input, inputOrder, sourceInfo) {
 				title: previewItemDisplayTitle(normalized, inputOrder + index),
 			};
 		});
+		return sourceIsAudio ? mapped.filter(previewItemHasPlayableAudio) : mapped;
 	}
 
 	const previewMedia = firstMediaPayload(
@@ -528,6 +540,9 @@ function buildLivePreviewItems(event, input, inputOrder, sourceInfo) {
 	if (!video.length && !audio.length && !images.length && !text) {
 		return [];
 	}
+	if (sourceIsAudio && !audio.length) {
+		return [];
+	}
 
 	const sourceType = normalizePreviewTypeLabel(sourceInfo?.type, KIND_TYPE_LABELS[kind] || KIND_TYPE_LABELS.other);
 	const item = {
@@ -549,16 +564,20 @@ function buildLivePreviewItems(event, input, inputOrder, sourceInfo) {
 }
 
 function applyLivePreviewItems(node, input, inputOrder, items) {
-	if (!node || !items.length) {
+	if (!node) {
 		return;
 	}
 	const state = ensureLivePreviewState(node);
 	const key = String(input?.name || inputOrder);
-	state.itemsByInput[key] = items.map((item, index) => ({
-		...item,
-		__inputOrder: inputOrder,
-		__arrivalOrder: ++state.counter + index / 1000,
-	}));
+	if (!items.length) {
+		delete state.itemsByInput[key];
+	} else {
+		state.itemsByInput[key] = items.map((item, index) => ({
+			...item,
+			__inputOrder: inputOrder,
+			__arrivalOrder: ++state.counter + index / 1000,
+		}));
+	}
 	const previewItems = Object.values(state.itemsByInput)
 		.flat()
 		.sort((a, b) => {
@@ -567,8 +586,22 @@ function applyLivePreviewItems(node, input, inputOrder, items) {
 			return Number(a.__inputOrder || 0) - Number(b.__inputOrder || 0);
 		})
 		.map(itemWithoutLiveFields);
+	if (!previewItems.length) {
+		if (node.__gjjAnyPreviewLiveOnly) {
+			node.__gjjAnyPreviewKind = "";
+			node.__gjjAnyPreviewText = "";
+			node.__gjjAnyPreviewItems = [];
+			ensurePreviewWidget(node);
+			applyPreviewContent(node);
+			updateLayout(node);
+			scheduleLayout(node);
+			setDirty(node);
+		}
+		return;
+	}
 
 	node.__gjjAnyPreviewKind = "mixed";
+	node.__gjjAnyPreviewLiveOnly = true;
 	node.__gjjAnyPreviewText = previewItems.length
 		? `已按进入顺序刷新 ${previewItems.length} 个预览项目`
 		: "";
@@ -651,6 +684,54 @@ function setDirty(node) {
 	app.graph?.setDirtyCanvas?.(true, true);
 }
 
+function currentNodeWidth(node) {
+	const width = Number(node?.size?.[0]);
+	return Number.isFinite(width) && width > 0 ? width : 0;
+}
+
+function rememberNodeWidth(node, width = currentNodeWidth(node)) {
+	if (!node || !Number.isFinite(Number(width)) || Number(width) <= 0) {
+		return;
+	}
+	node.properties = node.properties || {};
+	node.properties[WIDTH_PROPERTY] = Number(width);
+	node.__gjjAnyPreviewUserWidth = Number(width);
+}
+
+function serializedNodeWidth(serializedNode) {
+	const size = serializedNode?.size;
+	if (Array.isArray(size)) {
+		const width = Number(size[0]);
+		if (Number.isFinite(width) && width > 0) return width;
+	}
+	const propertyWidth = Number(serializedNode?.properties?.[WIDTH_PROPERTY]);
+	return Number.isFinite(propertyWidth) && propertyWidth > 0 ? propertyWidth : 0;
+}
+
+function restoreConfiguredWidth(node) {
+	const width = Number(node?.__gjjAnyPreviewConfiguredWidth || node?.properties?.[WIDTH_PROPERTY] || 0);
+	const currentWidth = currentNodeWidth(node);
+	if (!node || !Number.isFinite(width) || width <= 0 || !currentWidth || Math.abs(currentWidth - width) < 0.5) {
+		return;
+	}
+	const height = Math.max(MIN_NODE_HEIGHT, Number(node.size?.[1] || MIN_NODE_HEIGHT));
+	node.setSize?.([width, height]);
+}
+
+function setNodeHeightFromContent(node, height) {
+	const width = currentNodeWidth(node);
+	if (!node || !width || !Number.isFinite(Number(height))) {
+		return false;
+	}
+	const nextHeight = Math.max(MIN_NODE_HEIGHT, Number(height));
+	const currentHeight = Number(node.size?.[1] || MIN_NODE_HEIGHT);
+	if (Math.abs(nextHeight - currentHeight) < 0.5) {
+		return false;
+	}
+	node.setSize?.([width, nextHeight]);
+	return true;
+}
+
 function measureHeight(node) {
 	const container = node?.__gjjAnyPreviewContainer;
 	if (!container) {
@@ -672,14 +753,11 @@ function getWidgetTopOffset(node) {
 }
 
 function refreshLayout(node) {
-	const width = Math.max(MIN_WIDTH, Number(node.size?.[0] || MIN_WIDTH));
 	const height = Math.max(
 		MIN_NODE_HEIGHT,
 		Number(node.size?.[1] || MIN_NODE_HEIGHT),
 	);
-	if ((node.size?.[0] || 0) !== width || (node.size?.[1] || 0) !== height) {
-		node.setSize?.([width, height]);
-	}
+	setNodeHeightFromContent(node, height);
 	setDirty(node);
 }
 
@@ -798,7 +876,7 @@ function updateLayout(node) {
 	// 关键修复：强制更新节点大小，即使高度减少
 	const currentHeight = Number(node.size?.[1] || MIN_NODE_HEIGHT);
 	if (height !== currentHeight) {
-		node.setSize?.([node.size?.[0], height]);
+		setNodeHeightFromContent(node, height);
 
 		// 同步更新 DOM 容器高度
 		if (container && previewWrap) {
@@ -2714,8 +2792,8 @@ function ensurePreviewWidget(node) {
 		},
 	);
 	if (widget) {
-		widget.computeSize = (width) => [
-			Math.max(MIN_WIDTH, Number(width || MIN_WIDTH)),
+		widget.computeSize = () => [
+			0,
 			shouldUseEstimatedImageLayout(node)
 				? estimateImagePreviewHeight(node)
 				: Math.max(MIN_NODE_HEIGHT, measureHeight(node)),
@@ -2775,7 +2853,7 @@ function scheduleStabilize(node, ms = 32) {
 installNativePreviewEventFilter();
 
 app.registerExtension({
-	name: "Comfy.GJJ.AnyPreview",
+	name: "Comfy.GJJ.AnyPreview.AudioLiveMediaGuard",
 
 	async beforeRegisterNodeDef(nodeType, nodeData) {
 		if (!TARGET_NODES.has(nodeData?.name)) {
@@ -2810,11 +2888,34 @@ app.registerExtension({
 		};
 
 		const originalOnConfigure = nodeType.prototype.onConfigure;
-		nodeType.prototype.onConfigure = function (...args) {
-			const result = originalOnConfigure?.apply(this, args);
+		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
+			const configuredWidth = serializedNodeWidth(serializedNode);
+			if (configuredWidth > 0) {
+				this.__gjjAnyPreviewConfiguredWidth = configuredWidth;
+				rememberNodeWidth(this, configuredWidth);
+			}
+			const result = originalOnConfigure?.apply(this, [serializedNode, ...args]);
+			if (configuredWidth > 0) {
+				this.__gjjAnyPreviewConfiguredWidth = configuredWidth;
+				rememberNodeWidth(this, configuredWidth);
+				restoreConfiguredWidth(this);
+			}
 			clearNativeImagePreviewState(this);
 			resetLivePreviewState(this);
-			setTimeout(() => stabilizeNode(this), 0);
+			setTimeout(() => {
+				restoreConfiguredWidth(this);
+				stabilizeNode(this);
+			}, 0);
+			return result;
+		};
+
+		const originalOnSerialize = nodeType.prototype.onSerialize;
+		nodeType.prototype.onSerialize = function (serializedNode, ...args) {
+			serializedNode = serializedNode || {};
+			rememberNodeWidth(this);
+			const result = originalOnSerialize?.apply(this, [serializedNode, ...args]);
+			serializedNode.properties = serializedNode.properties || {};
+			serializedNode.properties[WIDTH_PROPERTY] = currentNodeWidth(this) || this.__gjjAnyPreviewUserWidth || serializedNode.properties[WIDTH_PROPERTY];
 			return result;
 		};
 
@@ -2865,7 +2966,8 @@ app.registerExtension({
 			const result = typeof originalOnResize === "function"
 				? originalOnResize.apply(this, args)
 				: undefined;
-			// 用户手动调整宽度后，立即重新计算高度
+			rememberNodeWidth(this);
+			// 用户手动调整宽度后，只按当前宽度重新计算高度，不反向改宽度。
 			scheduleLayout(this);
 			return result;
 		};
@@ -2881,6 +2983,7 @@ app.registerExtension({
 			const liveText = getLoraEffectLiveText(this);
 			this.__gjjAnyPreviewKind =
 				liveText !== null ? "text" : message?.preview_kind?.[0] || "";
+			this.__gjjAnyPreviewLiveOnly = false;
 			this.__gjjAnyPreviewText =
 				liveText !== null ? liveText : message?.preview_text?.[0] || "";
 			const previewItems =

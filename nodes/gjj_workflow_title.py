@@ -10,7 +10,37 @@ import folder_paths
 
 NODE_NAME = "GJJ_WorkflowTitle"
 CONFIG_WIDGET = "config_json"
+TITLE_INPUT = "title_text"
+DEFAULT_TITLE_TEXT = "工作流标题"
 FONT_EXTENSIONS = {".ttf", ".otf", ".ttc", ".otc"}
+USER_STYLE_KEYS = {
+    "font",
+    "fontSize",
+    "colorA",
+    "colorB",
+    "gradient",
+    "gradientDirection",
+    "opacity",
+    "letterSpacing",
+    "lineSpacing",
+    "paddingX",
+    "paddingY",
+    "strokeWidth",
+    "strokeMode",
+    "strokeColor",
+    "strokeOpacity",
+    "backgroundColor",
+    "borderMode",
+    "borderColor",
+    "borderOpacity",
+    "shadowEnabled",
+    "shadowColor",
+    "shadowOpacity",
+    "shadowBlur",
+    "shadowX",
+    "shadowY",
+    "align",
+}
 
 
 def _register_fonts_folder() -> None:
@@ -116,12 +146,31 @@ def resolve_font_path(font_name: str) -> str | None:
     return None
 
 
+def _user_settings_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "presets" / "gjj_user_settings.json"
+
+
+def _workflow_title_user_style() -> dict[str, Any]:
+    path = _user_settings_path()
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    section = data.get("workflow_title") if isinstance(data, dict) else {}
+    if not isinstance(section, dict):
+        return {}
+    return {key: section[key] for key in USER_STYLE_KEYS if key in section}
+
+
 def _default_config() -> dict[str, Any]:
-    return {
-        "version": 3,
-        "text": "工作流标题",
+    config = {
+        "version": 5,
+        "text": DEFAULT_TITLE_TEXT,
         "font": default_font_name(),
-        "fontSize": 96,
+        "width": 512,
+        "fontSize": 72,
         "colorA": "#F8FFF7",
         "colorB": "#55C685",
         "gradient": True,
@@ -147,6 +196,11 @@ def _default_config() -> dict[str, Any]:
         "shadowY": 4.0,
         "align": "居中",
     }
+    config.update(_workflow_title_user_style())
+    config["version"] = 5
+    config["text"] = DEFAULT_TITLE_TEXT
+    config["width"] = 512
+    return config
 
 
 def _default_config_json() -> str:
@@ -156,7 +210,7 @@ def _default_config_json() -> str:
 class GJJ_WorkflowTitle:
     CATEGORY = "GJJ/Image"
     FUNCTION = "noop"
-    DESCRIPTION = "仅用于画布显示的工作流标题；前端默认隐藏标题栏、背景和边框，只保留标题预览与一个设置按钮。"
+    DESCRIPTION = "仅用于画布显示的工作流标题；保留一个默认标题内容输入口，标题宽度跟随节点面板宽度，样式偏好会保存到 presets/gjj_user_settings.json。"
     SEARCH_ALIASES = ["workflow title", "title", "标题", "工作流标题", "透明标题", "文字标题"]
     RETURN_TYPES = ()
     RETURN_NAMES = ()
@@ -166,6 +220,9 @@ class GJJ_WorkflowTitle:
         "description": "无背景、无边框、无标题栏的工作流标题显示节点。点 ⚙️ 设置文字、字体、渐变、阴影、间距和描边，确认后只在画布上显示透明标题。",
         "features": [
             "默认使用字体库中优先匹配到的中文字体",
+            "默认显示“标题内容”输入口，避免无插槽透明节点在新建放置时无法落点",
+            "标题宽度跟随节点面板宽度，直接拖动节点边缘即可调整显示长度",
+            "颜色、描边、边框、阴影、间距和字体偏好会保存到 presets/gjj_user_settings.json 的 workflow_title 段",
             "支持纯色或渐变文字、描边透明度、背景色描边、节点边框透明/背景色、阴影、字间距、行间距和内边距",
             "仅作为工作流画布标题显示，不生成输出口",
         ],
@@ -187,9 +244,19 @@ class GJJ_WorkflowTitle:
                     },
                 ),
             },
+            "optional": {
+                TITLE_INPUT: (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "display_name": "标题内容",
+                        "tooltip": "可连接外部文本作为标题内容引用；未连接时使用节点设置面板中的标题文字。",
+                    },
+                ),
+            },
         }
 
-    def noop(self, config_json: str = ""):
+    def noop(self, config_json: str = "", title_text: str = ""):
         return ()
 
 
