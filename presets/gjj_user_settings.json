@@ -4,7 +4,7 @@
     "directory": "workflows",
     "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
     "sort_mode": "mtime_desc",
-    "filter_mode": "all",
+    "filter_mode": "openable",
     "search_text": ""
   },
   "workflow_title": {

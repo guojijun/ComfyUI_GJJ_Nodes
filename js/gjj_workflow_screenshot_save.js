@@ -95,12 +95,17 @@ import { api } from "/scripts/api.js";
 			merged.id = liveNode.id ?? merged.id;
 			merged.type = liveNode.type || merged.type;
 			merged.title = liveNode.title || merged.title;
-			merged.pos = merged.pos || liveNode.pos;
-			merged.size = merged.size || liveNode.size;
-			merged.inputs = merged.inputs || liveNode.inputs;
-			merged.outputs = merged.outputs || liveNode.outputs;
+			merged.pos = liveNode.pos || merged.pos;
+			merged.size = liveNode.size || merged.size;
+			if (Array.isArray(liveNode.boundingRect) && liveNode.boundingRect.length >= 4) {
+				merged.boundingRect = liveNode.boundingRect;
+			} else {
+				delete merged.boundingRect;
+			}
+			merged.inputs = liveNode.inputs || merged.inputs;
+			merged.outputs = liveNode.outputs || merged.outputs;
 			merged.widgets = liveNode.widgets || merged.widgets;
-			merged.flags = merged.flags || liveNode.flags;
+			merged.flags = liveNode.flags || merged.flags;
 		}
 		return merged;
 	}
@@ -580,7 +585,11 @@ import { api } from "/scripts/api.js";
 		const x = number(pos[0]);
 		const y = number(pos[1]);
 		const width = Math.max(20, number(size[0], 180));
-		const height = Math.max(20, number(size[1], 90));
+		let height = Math.max(20, number(size[1], 90));
+		try {
+			const computed = typeof live?.computeSize === "function" ? live.computeSize() : null;
+			height = Math.max(height, number(computed?.[1], 0));
+		} catch (_) {}
 		if (isWorkflowTitleNode(node)) {
 			const state = workflowTitleState(node);
 			if (state) {
@@ -1248,7 +1257,92 @@ import { api } from "/scripts/api.js";
 		ctx.drawImage(element, dx, dy, drawWidth, drawHeight);
 	}
 
-	function drawNodePreviewImages(ctx, node, x, y, width, height) {
+	function isVideoCombineNode(node) {
+		const live = node?.__liveNode || node;
+		return String(live?.comfyClass || live?.type || node?.type || node?.class_type || "").includes("GJJ_VideoCombine");
+	}
+
+	function visibleVideoCombineElement(node) {
+		const live = node?.__liveNode || node;
+		const state = live?.__gjjVideoCombineStatus || null;
+		if (state?.wrap?.style?.display === "none" || state?.previewCard?.style?.display === "none") {
+			return null;
+		}
+		const candidates = [state?.video, state?.image];
+		for (const element of candidates) {
+			if (!element || element.style?.display === "none") continue;
+			if (mediaLooksDrawable(element)) return element;
+		}
+		return null;
+	}
+
+	function videoCombineAspect(node, element) {
+		const live = node?.__liveNode || node;
+		const propAspect = number(
+			live?.__gjjVideoCombinePreviewAspect
+				?? live?.properties?.gjj_video_combine_preview_aspect
+				?? node?.properties?.gjj_video_combine_preview_aspect,
+			0,
+		);
+		if (propAspect > 0) return clamp(propAspect, 0.05, 20);
+		const [sourceWidth, sourceHeight] = mediaDimensions(element);
+		return sourceWidth > 0 && sourceHeight > 0 ? clamp(sourceWidth / sourceHeight, 0.05, 20) : 16 / 9;
+	}
+
+	function drawVideoCombinePreview(ctx, node, x, y, width, height, layout = null) {
+		if (!isVideoCombineNode(node) || width < 120 || height < 84) return false;
+		const live = node?.__liveNode || node;
+		const state = live?.__gjjVideoCombineStatus || null;
+		if (state && (state.wrap?.style?.display === "none" || state.previewCard?.style?.display === "none")) {
+			return false;
+		}
+		const element = visibleVideoCombineElement(node) || nodePreviewImages(node)[0];
+		if (!element || !mediaLooksDrawable(element)) return false;
+		const aspect = videoCombineAspect(node, element);
+		const padding = Math.max(4, Math.min(10, width * 0.012));
+		let cardX = x + padding;
+		let cardY = y + padding;
+		let cardW = Math.max(40, width - padding * 2);
+		let cardMaxH = Math.max(48, height - padding * 2);
+		const widgetY = number(state?.widget?.last_y ?? state?.widget?.y, NaN);
+		const widgetHeight = number(
+			typeof state?.widget?.getHeight === "function" ? state.widget.getHeight() : undefined,
+			0,
+		);
+		const hasWidgetLayout = layout && Number.isFinite(widgetY) && widgetY > 0 && widgetHeight > 0;
+		if (hasWidgetLayout) {
+			const scale = Math.max(0.001, number(layout.scale, 1));
+			const nodeX = number(layout.nodeX, x);
+			const nodeY = number(layout.nodeY, y);
+			const nodeW = number(layout.nodeW, width);
+			cardX = nodeX + Math.max(8, 10 * scale);
+			cardY = nodeY + widgetY * scale + Math.max(4, 6 * scale);
+			cardW = Math.max(40, nodeW - Math.max(16, 20 * scale));
+			cardMaxH = Math.max(48, widgetHeight * scale - Math.max(8, 12 * scale));
+		}
+		const desiredCardH = cardW / Math.max(0.05, aspect);
+		const cardH = Math.max(48, Math.min(cardMaxH, desiredCardH));
+		if (!hasWidgetLayout) {
+			cardY = y + Math.max(padding, height - cardH - padding);
+		}
+		const finalCardH = Math.min(cardH, cardMaxH);
+		ctx.save();
+		drawRoundedRect(ctx, cardX, cardY, cardW, finalCardH, 6);
+		ctx.clip();
+		ctx.fillStyle = "#020506";
+		ctx.fillRect(cardX, cardY, cardW, finalCardH);
+		try {
+			drawMediaContain(ctx, element, cardX, cardY, cardW, finalCardH);
+		} catch (_) {}
+		ctx.restore();
+		ctx.strokeStyle = "rgba(255,255,255,.14)";
+		drawRoundedRect(ctx, cardX, cardY, cardW, finalCardH, 6);
+		ctx.stroke();
+		return true;
+	}
+
+	function drawNodePreviewImages(ctx, node, x, y, width, height, layout = null) {
+		if (drawVideoCombinePreview(ctx, node, x, y, width, height, layout)) return true;
 		const images = nodePreviewImages(node);
 		if (!images.length || width < 120 || height < 84) return false;
 		const count = images.length;
@@ -1536,7 +1630,14 @@ import { api } from "/scripts/api.js";
 			const bodyY = y + header + 12;
 			const bodyW = w - 24;
 			const bodyH = h - header - 36;
-			const previewDrawn = drawNodePreviewImages(ctx, node, bodyX, bodyY, bodyW, bodyH);
+			const previewDrawn = drawNodePreviewImages(ctx, node, bodyX, bodyY, bodyW, bodyH, {
+				nodeX: x,
+				nodeY: y,
+				nodeW: w,
+				nodeH: h,
+				header,
+				scale,
+			});
 			const inputs = Array.isArray(node?.inputs) ? node.inputs : [];
 			const outputs = Array.isArray(node?.outputs) ? node.outputs : [];
 			const maxRows = Math.max(0, Math.min(7, Math.floor((h - header - 18) / 17)));
