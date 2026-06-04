@@ -16,7 +16,7 @@ const CURRENT_ROW_WIDGET = "current_row";
 const SOURCE_PATH_WIDGET = "source_path";
 const TIMEOUT_WIDGET = "timeout_seconds";
 const STATE_WIDGET = "csv_state";
-const PICK_BUTTON = "📁 浏览器选择 TSV/CSV";
+const PICK_BUTTON = "📁 浏览器选择 CSV/TSV/TXT";
 const STATUS_WIDGET = "gjj_csv_tsv_status_panel";
 const CONTROL_WIDGET = "gjj_csv_tsv_control_panel";
 
@@ -173,10 +173,19 @@ function migrateOldWidgetValues(node, serialized) {
 	});
 }
 
+function normalizeText(text) {
+	return String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function isTxtFileName(name) {
+	const text = String(name || "").trim();
+	const withoutMarker = text.startsWith(BROWSER_MARKER_PREFIX) ? text.slice(BROWSER_MARKER_PREFIX.length) : text;
+	const clean = withoutMarker.split(/[?#]/, 1)[0].replace(/\\/g, "/").toLowerCase();
+	return clean.endsWith(".txt");
+}
+
 function detectDelimiter(text) {
-	const lines = String(text || "")
-		.replace(/\r\n/g, "\n")
-		.replace(/\r/g, "\n")
+	const lines = normalizeText(text)
 		.split("\n")
 		.filter((line) => line.trim())
 		.slice(0, 20);
@@ -189,9 +198,32 @@ function detectDelimiter(text) {
 	return tabs >= commas ? "\t" : ",";
 }
 
-function parseDelimitedText(text, skipEmptyRows) {
+function splitTxtRecords(text) {
+	const source = normalizeText(text);
+	if (/^[ \t]*-{3,}[ \t]*$/m.test(source)) {
+		return source.split(/^[ \t]*-{3,}[ \t]*$/m);
+	}
+	if (/-{3,}/.test(source)) {
+		return source.split(/-{3,}/g);
+	}
+	if (/\n[ \t]*\n/.test(source)) {
+		return source.split(/\n[ \t]*\n+/g);
+	}
+	return source.split("\n");
+}
+
+function parseTxtText(text, skipEmptyRows) {
+	return splitTxtRecords(text)
+		.map((record) => String(record || "").trim().split("||").map((cell) => cell.trim()))
+		.filter((row) => !skipEmptyRows || row.some((cell) => cell.trim()));
+}
+
+function parseDelimitedText(text, skipEmptyRows, sourceName = "") {
+	if (isTxtFileName(sourceName)) {
+		return parseTxtText(text, skipEmptyRows);
+	}
 	const delimiter = detectDelimiter(text);
-	const source = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+	const source = normalizeText(text);
 
 	if (delimiter === "||") {
 		return source.split("\n").map((line) => line.split("||").map((cell) => cell.trim())).filter((row) => !skipEmptyRows || row.some((cell) => cell.trim()));
@@ -244,7 +276,7 @@ function browserAllRows(node) {
 	if (!data.browser_file_text.trim()) {
 		return [];
 	}
-	return parseDelimitedText(data.browser_file_text, data.skip_empty_rows);
+	return parseDelimitedText(data.browser_file_text, data.skip_empty_rows, data.browser_file_name);
 }
 
 function browserRows(node) {
@@ -303,7 +335,7 @@ function statusText(node, stats) {
 	const data = state(node);
 	if (!stats.totalRows) {
 		return sourceLooksLikeBrowserMarker(node)
-			? "浏览器选择文件内容未保存，请重新点击按钮选择 TSV/CSV 文件"
+			? "浏览器选择文件内容未保存，请重新点击按钮选择 CSV/TSV/TXT 文件"
 			: data.status || "未载入数据";
 	}
 	const row = Math.min(currentRow(node), Math.max(1, stats.totalRows));
@@ -378,13 +410,13 @@ function ensureFixedOutputs(node) {
 		node.addOutput("当前行数", "INT");
 		node.addOutput("总行数", "INT");
 		setFixedOutput(node.outputs[0], "当前行数", "当前实际输出的数据行号；开启首行标题时不包含标题行。");
-		setFixedOutput(node.outputs[1], "总行数", "当前 CSV/TSV 可输出的数据总行数；开启首行标题时不包含标题行。");
+		setFixedOutput(node.outputs[1], "总行数", "当前 CSV/TSV/TXT 可输出的数据总行数；开启首行标题时不包含标题行。");
 		for (const output of columnOutputsList) {
 			node.outputs.push(output);
 		}
 	} else {
 		setFixedOutput(node.outputs[0], "当前行数", "当前实际输出的数据行号；开启首行标题时不包含标题行。");
-		setFixedOutput(node.outputs[1], "总行数", "当前 CSV/TSV 可输出的数据总行数；开启首行标题时不包含标题行。");
+		setFixedOutput(node.outputs[1], "总行数", "当前 CSV/TSV/TXT 可输出的数据总行数；开启首行标题时不包含标题行。");
 	}
 	updateLinkOriginSlots(node);
 }
@@ -483,7 +515,7 @@ function stabilizeOutputs(node) {
 		output.label = label;
 		output.localized_name = label;
 		output.type = "STRING";
-		output.tooltip = names[index] ? `第 ${index + 1} 列：${names[index]}` : "当前行对应列的文本。导入 CSV/TSV 后会按解析到的列数一次性展开。";
+		output.tooltip = names[index] ? `第 ${index + 1} 列：${names[index]}` : "当前行对应列的文本。导入 CSV/TSV/TXT 后会按解析到的列数一次性展开。";
 	});
 }
 
@@ -538,8 +570,8 @@ function hideStateWidget(node) {
 	widget.draw = () => {};
 	widget.y = -10000;
 	widget.last_y = -10000;
-	widget.label = "CSV状态";
-	widget.localized_name = "CSV状态";
+	widget.label = "表格状态";
+	widget.localized_name = "表格状态";
 	if (widget.element) {
 		widget.element.style.display = "none";
 	}
@@ -666,7 +698,7 @@ function renderPanel(node) {
 function createFilePicker(node) {
 	const input = document.createElement("input");
 	input.type = "file";
-	input.accept = ".tsv,.csv,text/tab-separated-values,text/plain";
+	input.accept = ".csv,.tsv,.txt,text/csv,text/tab-separated-values,text/plain";
 	input.style.display = "none";
 	input.addEventListener("click", (event) => event.stopPropagation());
 	input.addEventListener("change", async () => {
@@ -676,8 +708,8 @@ function createFilePicker(node) {
 			return;
 		}
 		const lower = String(file.name || "").toLowerCase();
-		if (!lower.endsWith(".tsv") && !lower.endsWith(".csv")) {
-			alert("请选择 .tsv 或 .csv 文件。");
+		if (!lower.endsWith(".csv") && !lower.endsWith(".tsv") && !lower.endsWith(".txt")) {
+			alert("请选择 .csv、.tsv 或 .txt 文件。");
 			return;
 		}
 		let text = "";
@@ -710,7 +742,7 @@ function setupPickButton(node) {
 	node.__gjjCsvTsvFileInput = input;
 	const widget = node.addWidget?.("button", PICK_BUTTON, "", () => input.click(), { serialize: false });
 	if (widget) {
-		widget.tooltip = "从浏览器文件选择框读取本机 .tsv 或 .csv 内容，并保存到当前节点。";
+		widget.tooltip = "从浏览器文件选择框读取本机 .csv、.tsv 或 .txt 内容，并保存到当前节点。TXT 使用 || 分列，并按 ---、空行、换行的优先级分行。";
 		node.__gjjCsvTsvPickButton = widget;
 	}
 }

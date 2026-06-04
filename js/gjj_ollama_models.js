@@ -5,6 +5,7 @@ import { GJJ_Utils } from "./gjj_utils.js";
 const TARGET_NODES = new Set([
 	"GJJ_OllamaAssistant",
 ]);
+const DEFAULT_OLLAMA_ASSISTANT_MODEL = "fredrezones55/Qwen3.5-Uncensored-HauhauCS-Aggressive:4b";
 const DEFAULT_SYSTEM_PROMPT = "请根据输入图片或文字反推出适合 AI 绘图的高质量提示词，只输出正面提示词正文。";
 
 const OLLAMA_HOSTS = [
@@ -22,6 +23,14 @@ const NODE_WIDGET_LABELS = {
 		thinking_mode: "思考模式",
 		temperature: "温度",
 		max_tokens: "最大生成长度",
+		seed_mode: "种子模式",
+		seed: "固定种子",
+		top_k: "Top K",
+		top_p: "Top P",
+		min_p: "Min P",
+		presence_penalty: "出现惩罚",
+		frequency_penalty: "频率惩罚",
+		repeat_penalty: "重复惩罚",
 		system_prompt: "系统提示词",
 		user_prompt: "指令 / 原文",
 	},
@@ -257,39 +266,36 @@ function setWidgetOptions(widget, values) {
 		return;
 	}
 
+	const merged = sortModels([DEFAULT_OLLAMA_ASSISTANT_MODEL, ...values]);
 	widget.options = widget.options || {};
-	widget.options.values = values;
+	widget.options.values = merged;
 
-	if (!values.includes(widget.value)) {
-		widget.value = values[0];
+	if (!merged.includes(widget.value)) {
+		widget.value = DEFAULT_OLLAMA_ASSISTANT_MODEL;
 		widget.callback?.(widget.value);
 	}
 }
 
-function parseModelSize(modelName) {
-	const name = String(modelName || "").trim().toLowerCase();
-	if (!name) {
-		return Number.POSITIVE_INFINITY;
-	}
-
-	const matches = [...name.matchAll(/(?:^|[:/\-_])(?:e)?(\d+(?:\.\d+)?)b(?:$|[:/\-_])/g)];
-	if (matches.length === 0) {
-		return Number.POSITIVE_INFINITY;
-	}
-
-	const sizes = matches
-		.map((match) => Number.parseFloat(match[1]))
-		.filter((value) => !Number.isNaN(value));
-	return sizes.length > 0 ? Math.min(...sizes) : Number.POSITIVE_INFINITY;
-}
-
 function sortModels(values) {
-	return [...values].sort((a, b) => {
-		const sizeDiff = parseModelSize(a) - parseModelSize(b);
-		if (sizeDiff !== 0) {
-			return sizeDiff;
+	const seen = new Set();
+	const unique = [];
+	for (const value of values || []) {
+		const name = String(value || "").trim();
+		if (!name) {
+			continue;
 		}
-		return String(a).localeCompare(String(b));
+		const key = name.toLowerCase();
+		if (seen.has(key)) {
+			continue;
+		}
+		seen.add(key);
+		unique.push(name);
+	}
+	return unique.sort((a, b) => {
+		const left = String(a || "").trim();
+		const right = String(b || "").trim();
+		const lengthDiff = left.length - right.length;
+		return lengthDiff || left.localeCompare(right);
 	});
 }
 

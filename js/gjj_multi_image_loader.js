@@ -1011,12 +1011,23 @@ function renderPreview(node) {
 			sizeBadge.textContent = "外部输入";
 		} else {
 			sizeBadge.textContent = "加载中...";
-			image.onload = () => {
-				sizeBadge.textContent = `${image.naturalWidth}×${image.naturalHeight}`;
-				requestRedraw(nodeRef);
-			};
 		}
+		image.onload = () => {
+			item._error = false;
+			card.style.opacity = "1";
+			card.style.filter = "";
+			if (!item.width || !item.height || sizeBadge.textContent === "原图预览") {
+				sizeBadge.textContent = `${image.naturalWidth}×${image.naturalHeight}`;
+			}
+			requestRedraw(nodeRef);
+		};
 		image.onerror = () => {
+			if (!image.__gjjFullImageFallbackTried && !item.image) {
+				image.__gjjFullImageFallbackTried = true;
+				sizeBadge.textContent = "原图预览";
+				image.src = imageDataToUrl(item, { noRand: true });
+				return;
+			}
 			sizeBadge.textContent = "加载失败";
 			item._error = true;
 			card.style.opacity = "0.5";

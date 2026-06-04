@@ -37,6 +37,25 @@ WEIGHT_DTYPES = ["bf16", "fp16", "fp32"]
 WEIGHT_DTYPE_CHOICES = ["default", *WEIGHT_DTYPES]
 CLIP_TYPES = ["auto", "wan", "ltxv", "hunyuan_video", "flux", "stable_diffusion"]
 MODEL_EXTENSIONS = {".ckpt", ".pt", ".pt2", ".bin", ".pth", ".safetensors", ".pkl", ".sft"}
+WAN_BASE_PRECISIONS = ["fp32", "bf16", "fp16", "fp16_fast"]
+WAN_QUANTIZATIONS = [
+    "disabled",
+    "fp8_e4m3fn",
+    "fp8_e4m3fn_fast",
+    "fp8_e4m3fn_scaled",
+    "fp8_e4m3fn_scaled_fast",
+    "fp8_e5m2",
+    "fp8_e5m2_fast",
+    "fp8_e5m2_scaled",
+    "fp8_e5m2_scaled_fast",
+]
+WAN_LOAD_DEVICES = ["main_device", "offload_device"]
+WAN_ATTENTION_MODES = ["sdpa", "flash_attn_2", "flash_attn_3", "sageattn", "sageattn_3", "radial_sage_attention", "sageattn_compiled", "sageattn_ultravico", "comfy"]
+WAN_RMS_NORM_FUNCTIONS = ["default", "pytorch"]
+WAN_VAE_PRECISIONS = ["bf16", "fp16", "fp32"]
+WAN_T5_PRECISIONS = ["bf16", "fp32"]
+WAN_T5_QUANTIZATIONS = ["disabled", "fp8_e4m3fn"]
+EXTRA_BASE_PRECISIONS = ["fp16", "bf16", "fp32"]
 
 KIND_OUTPUT_TYPE = {
     "diffusion": "MODEL",
@@ -189,119 +208,144 @@ def _folder_search_hint(folders: list[str] | tuple[str, ...]) -> str:
     return "ComfyUI 已配置的模型分类目录：" + " / ".join(clean)
 
 
-# 根据官方工作流整理出的配置：关键词已按“去量化、去版本号、去扩展名后取核心小写词”的思路手工固化。
+# 官方文件名种子用于默认选择：匹配时会去子目录、扩展名、量化/精度标识后做最长公共片段匹配。
+WAN_T5_NAMES = ["umt5_xxl_fp8_e4m3fn_scaled.safetensors", "umt5_xxl_fp16.safetensors", "umt5-xxl-enc-bf16.safetensors"]
+WAN21_VAE_NAMES = ["wan_2.1_vae.safetensors", "ComfyUI-wan_2.1_vae.safetensors", "Wan2_1_VAE_bf16.safetensors", "Wan2.1_VAE_bf16.safetensors"]
+WAN22_VAE_NAMES = ["wan2.2_vae.safetensors"]
+CLIP_VISION_H_NAMES = ["clip_vision_h.safetensors"]
+SAM2_BASE_PLUS_NAMES = ["sam2_hiera_base_plus.safetensors", "sam2.1_hiera_base_plus-fp16.safetensors"]
+WAN22_T2V_HIGH_NAMES = ["wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors", "Wan2_2-T2V-A14B_HIGH_fp8_e4m3fn_scaled_KJ.safetensors"]
+WAN22_T2V_LOW_NAMES = ["wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors", "Wan2_2-T2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors"]
+WAN22_I2V_HIGH_NAMES = ["wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors", "wan2.2_i2v_high_noise_14B_fp16.safetensors"]
+WAN22_I2V_LOW_NAMES = ["wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors", "wan2.2_i2v_low_noise_14B_fp16.safetensors"]
+WAN22_I2V_LORA_HIGH_NAMES = ["wan/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors", "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors"]
+WAN22_I2V_LORA_LOW_NAMES = ["wan/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors", "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"]
+WAN22_T2V_LORA_HIGH_NAMES = ["wan/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors", "wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors"]
+WAN22_T2V_LORA_LOW_NAMES = ["wan/wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors", "wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors"]
+LTX23_CHECKPOINT_NAMES = ["ltx-2.3-22b-dev-fp8.safetensors", "ltx-2.3-22b-dev.safetensors"]
+LTX23_DISTILL_LORA_NAMES = ["ltx-2.3-22b-distilled-lora-384.safetensors", "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"]
+LTX23_GEMMA_NAMES = ["gemma_3_12B_it_fp4_mixed.safetensors", "comfy_gemma_3_12B_it.safetensors", "gemma_3_12B_it_fp8_e4m3fn.safetensors"]
+LTX23_GEMMA_LORA_NAMES = ["gemma-3-12b-it-abliterated_lora_rank64_bf16.safetensors", "NSFW/gemma3-NSFW/gemma-3-12b-it-abliterated_lora_rank64_bf16.safetensors"]
+LTX23_SPATIAL_UPSCALER_NAMES = ["ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"]
+LTX23_KJ_MODEL_NAMES = ["ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v2.safetensors", "ltx-2.3-22b-distilled-1.1_transformer_only_fp8_scaled.safetensors"]
+LTX23_KJ_GEMMA_NAMES = ["gemma_3_12B_it_fp8_e4m3fn.safetensors"]
+LTX23_TEXT_PROJECTION_NAMES = ["ltx-2.3_text_projection_bf16.safetensors"]
+LTX23_VIDEO_VAE_NAMES = ["LTX23_video_vae_bf16.safetensors"]
+LTX23_AUDIO_VAE_NAMES = ["LTX23_audio_vae_bf16.safetensors"]
+
+
 VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "wan22_t2v_dual": {
         "label": "Wan2.2 T2V 文生视频官方流",
         "clip_type": "wan",
         "slots": [
-            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "t2v", "high"]),
-            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "t2v", "low"]),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "t2v", "lightx2v", "high"]),
-            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "t2v", "lightx2v", "low"]),
+            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan2.2", "t2v", "high"], preferred_name=WAN22_T2V_HIGH_NAMES[0], official_names=WAN22_T2V_HIGH_NAMES),
+            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan2.2", "t2v", "low"], preferred_name=WAN22_T2V_LOW_NAMES[0], official_names=WAN22_T2V_LOW_NAMES),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("high_lora", "High LoRA名称", "loras", "name", ["wan2.2", "t2v", "lightx2v", "high"], preferred_name=WAN22_T2V_LORA_HIGH_NAMES[0], official_names=WAN22_T2V_LORA_HIGH_NAMES),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["wan2.2", "t2v", "lightx2v", "low"], preferred_name=WAN22_T2V_LORA_LOW_NAMES[0], official_names=WAN22_T2V_LORA_LOW_NAMES),
         ],
     },
     "wan22_i2v_dual": {
         "label": "Wan2.2 I2V 图生视频官方流",
         "clip_type": "wan",
         "slots": [
-            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "i2v", "high"]),
-            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "i2v", "low"]),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "high"]),
-            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "low"]),
+            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan2.2", "i2v", "high"], preferred_name=WAN22_I2V_HIGH_NAMES[0], official_names=WAN22_I2V_HIGH_NAMES),
+            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan2.2", "i2v", "low"], preferred_name=WAN22_I2V_LOW_NAMES[0], official_names=WAN22_I2V_LOW_NAMES),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("high_lora", "High LoRA名称", "loras", "name", ["wan2.2", "i2v", "lightx2v", "high"], preferred_name=WAN22_I2V_LORA_HIGH_NAMES[0], official_names=WAN22_I2V_LORA_HIGH_NAMES),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["wan2.2", "i2v", "lightx2v", "low"], preferred_name=WAN22_I2V_LORA_LOW_NAMES[0], official_names=WAN22_I2V_LORA_LOW_NAMES),
         ],
     },
     "wan22_s2v_14b": {
         "label": "Wan2.2 S2V 音频驱动官方流",
         "clip_type": "wan",
         "slots": [
-            S("model", "S2V模型", "diffusion_models", "diffusion", ["wan", "s2v"]),
+            S("model", "S2V模型", "diffusion_models", "diffusion", ["wan2.2", "s2v"], preferred_name="wan2.2_s2v_14B_fp8_scaled.safetensors", official_names=["wan2.2_s2v_14B_fp8_scaled.safetensors", "wan2.2_s2v_14B_bf16.safetensors"]),
             S("model2_empty", "", "", "empty", []),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("audio_encoder", "音频编码器", "audio_encoders", "audio_encoder", ["wav2vec2"]),
-            S("lightx2v_lora", "S2V LoRA名称", "loras", "name", ["wan", "t2v", "lightx2v", "high"]),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("audio_encoder", "音频编码器", "audio_encoders", "audio_encoder", ["wav2vec2"], preferred_name="wav2vec2_large_english_fp16.safetensors", official_names=["wav2vec2_large_english_fp16.safetensors"]),
+            S("lightx2v_lora", "S2V LoRA名称", "loras", "name", ["wan2.2", "t2v", "lightx2v", "high"], preferred_name=WAN22_T2V_LORA_HIGH_NAMES[0], official_names=WAN22_T2V_LORA_HIGH_NAMES),
         ],
     },
     "wan22_ti2v_5b": {
         "label": "Wan2.2 TI2V 5B图文官方流",
         "clip_type": "wan",
         "slots": [
-            S("model", "TI2V模型", "diffusion_models", "diffusion", ["wan", "ti2v"]),
+            S("model", "TI2V模型", "diffusion_models", "diffusion", ["wan2.2", "ti2v"], preferred_name="wan2.2_ti2v_5B_fp16.safetensors", official_names=["wan2.2_ti2v_5B_fp16.safetensors"]),
             S("model2_empty", "", "", "empty", []),
-            S("vae", "Wan2.2 VAE", "vae", "vae", ["wan2.2", "vae"], strict=True),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
+            S("vae", "Wan2.2 VAE", "vae", "vae", ["wan2.2", "vae"], strict=True, preferred_name=WAN22_VAE_NAMES[0], official_names=WAN22_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
         ],
     },
     "wan22_flf2v_dual": {
         "label": "Wan2.2 FLF2V 首尾帧官方流",
         "clip_type": "wan",
         "slots": [
-            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "i2v", "high"]),
-            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "i2v", "low"]),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "high"]),
-            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "low"]),
+            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan2.2", "i2v", "high"], preferred_name=WAN22_I2V_HIGH_NAMES[0], official_names=WAN22_I2V_HIGH_NAMES),
+            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan2.2", "i2v", "low"], preferred_name=WAN22_I2V_LOW_NAMES[0], official_names=WAN22_I2V_LOW_NAMES),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("high_lora", "High LoRA名称", "loras", "name", ["wan2.2", "i2v", "lightx2v", "high"], preferred_name=WAN22_I2V_LORA_HIGH_NAMES[0], official_names=WAN22_I2V_LORA_HIGH_NAMES),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["wan2.2", "i2v", "lightx2v", "low"], preferred_name=WAN22_I2V_LORA_LOW_NAMES[0], official_names=WAN22_I2V_LORA_LOW_NAMES),
         ],
     },
     "wan22_fun_camera_dual": {
         "label": "Wan2.2 Fun Camera 相机控制官方流",
         "clip_type": "wan",
         "slots": [
-            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "fun", "camera", "high"]),
-            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "fun", "camera", "low"]),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "t2v", "lightx2v", "high"]),
-            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "t2v", "lightx2v", "low"]),
+            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan2.2", "fun", "camera", "high"], preferred_name="wan2.2_fun_camera_high_noise_14B_fp8_scaled.safetensors", official_names=["wan2.2_fun_camera_high_noise_14B_fp8_scaled.safetensors"]),
+            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan2.2", "fun", "camera", "low"], preferred_name="wan2.2_fun_camera_low_noise_14B_fp8_scaled.safetensors", official_names=["wan2.2_fun_camera_low_noise_14B_fp8_scaled.safetensors"]),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("high_lora", "High LoRA名称", "loras", "name", ["wan2.2", "i2v", "lightx2v", "high"], preferred_name=WAN22_I2V_LORA_HIGH_NAMES[0], official_names=WAN22_I2V_LORA_HIGH_NAMES),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["wan2.2", "i2v", "lightx2v", "low"], preferred_name=WAN22_I2V_LORA_LOW_NAMES[0], official_names=WAN22_I2V_LORA_LOW_NAMES),
         ],
     },
     "wan22_fun_control_dual": {
         "label": "Wan2.2 Fun Control 双模型",
         "clip_type": "wan",
         "slots": [
-            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "fun", "control", "high"]),
-            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "fun", "control", "low"]),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "high"]),
-            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "low"]),
+            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan2.2", "fun", "control", "high"], preferred_name="wan2.2_fun_control_high_noise_14B_fp8_scaled.safetensors", official_names=["wan2.2_fun_control_high_noise_14B_fp8_scaled.safetensors"]),
+            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan2.2", "fun", "control", "low"], preferred_name="wan2.2_fun_control_low_noise_14B_fp8_scaled.safetensors", official_names=["wan2.2_fun_control_low_noise_14B_fp8_scaled.safetensors"]),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("high_lora", "High LoRA名称", "loras", "name", ["wan2.2", "i2v", "lightx2v", "high"], preferred_name=WAN22_I2V_LORA_HIGH_NAMES[0], official_names=WAN22_I2V_LORA_HIGH_NAMES),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["wan2.2", "i2v", "lightx2v", "low"], preferred_name=WAN22_I2V_LORA_LOW_NAMES[0], official_names=WAN22_I2V_LORA_LOW_NAMES),
         ],
     },
     "wan22_fun_inpaint_dual": {
         "label": "Wan2.2 Fun Inpaint 双模型 14B",
         "clip_type": "wan",
         "slots": [
-            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan", "fun", "inpaint", "high"]),
-            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan", "fun", "inpaint", "low"]),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("high_lora", "High LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "high"]),
-            S("low_lora", "Low LoRA名称", "loras", "name", ["wan", "i2v", "lightx2v", "low"]),
+            S("high_model", "High模型", "diffusion_models", "diffusion", ["wan2.2", "fun", "inpaint", "high"], preferred_name="wan2.2_fun_inpaint_high_noise_14B_fp8_scaled.safetensors", official_names=["wan2.2_fun_inpaint_high_noise_14B_fp8_scaled.safetensors"]),
+            S("low_model", "Low模型", "diffusion_models", "diffusion", ["wan2.2", "fun", "inpaint", "low"], preferred_name="wan2.2_fun_inpaint_low_noise_14B_fp8_scaled.safetensors", official_names=["wan2.2_fun_inpaint_low_noise_14B_fp8_scaled.safetensors"]),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("high_lora", "High LoRA名称", "loras", "name", ["wan2.2", "i2v", "lightx2v", "high"], preferred_name=WAN22_I2V_LORA_HIGH_NAMES[0], official_names=WAN22_I2V_LORA_HIGH_NAMES),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["wan2.2", "i2v", "lightx2v", "low"], preferred_name=WAN22_I2V_LORA_LOW_NAMES[0], official_names=WAN22_I2V_LORA_LOW_NAMES),
         ],
     },
     "wan21_t2v_13b": {
         "label": "Wan2.1 T2V 1.3B",
         "clip_type": "wan",
         "slots": [
-            S("model", "模型", "diffusion_models", "diffusion", ["wan", "t2v"]),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
+            S("model", "模型", "diffusion_models", "diffusion", ["wan2.1", "t2v"], preferred_name="Wan2_1-AccVideo-T2V-14B_fp8_e4m3fn.safetensors", official_names=["Wan2_1-AccVideo-T2V-14B_fp8_e4m3fn.safetensors", "wan2.1_t2v_14B_fp16.safetensors"]),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
         ],
     },
     "wan21_i2v": {
         "label": "Wan2.1 I2V 14B 图生视频",
         "clip_type": "wan",
         "slots": [
-            S("model", "模型", "diffusion_models", "diffusion", ["wan", "i2v"]),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip", "vision"]),
+            S("model", "模型", "diffusion_models", "diffusion", ["wan2.1", "i2v"], preferred_name="wan2.1_i2v_720p_14B_fp8_e4m3fn.safetensors", official_names=["wan2.1_i2v_720p_14B_fp8_e4m3fn.safetensors", "wan2.1_i2v_720p_14B_fp16.safetensors", "wan2.1_i2v_480p_14B_fp16.safetensors"]),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5_xxl_fp"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
         ],
     },
     "wan21_i2v_wanvideo_wrapper": {
@@ -316,6 +360,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 "wanvideo_model",
                 ["i2v", "720p", "14b"],
                 preferred_name="wan2.1_i2v_720p_14B_fp8_e4m3fn.safetensors",
+                official_names=["wan2.1_i2v_720p_14B_fp8_e4m3fn.safetensors", "wan2.1_i2v_720p_14B_fp16.safetensors"],
                 base_precision="bf16",
                 quantization="fp8_e4m3fn",
                 load_device="offload_device",
@@ -329,6 +374,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 "wan_t5_encoder",
                 ["umt5", "xxl"],
                 preferred_name="umt5-xxl-enc-bf16.safetensors",
+                official_names=WAN_T5_NAMES,
                 precision="bf16",
                 load_device="offload_device",
                 quantization="disabled",
@@ -340,6 +386,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 "clip_vision",
                 ["clip", "vision"],
                 preferred_name="clip_vision_h.safetensors",
+                official_names=CLIP_VISION_H_NAMES,
             ),
             S(
                 "wan_vae",
@@ -348,6 +395,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 "wan_vae",
                 ["wan", "vae"],
                 preferred_name="Wan2.1_VAE_bf16.safetensors",
+                official_names=WAN21_VAE_NAMES,
                 precision="bf16",
                 use_cpu_cache=False,
                 verbose=False,
@@ -358,94 +406,94 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "label": "Wan2.1 首尾帧 FLF2V 720P",
         "clip_type": "wan",
         "slots": [
-            S("model", "模型", "diffusion_models", "diffusion", ["wan", "flf2v"]),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip", "vision"]),
+            S("model", "模型", "diffusion_models", "diffusion", ["wan2.1", "flf2v"], preferred_name="Wan2_1-FLF2V-14B-720P_fp8_e4m3fn.safetensors", official_names=["Wan2_1-FLF2V-14B-720P_fp8_e4m3fn.safetensors"]),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
         ],
     },
     "wan21_vace": {
         "label": "Wan2.1 VACE 14B 可控生成",
         "clip_type": "wan",
         "slots": [
-            S("model", "模型", "diffusion_models", "diffusion", ["wan2.1", "vace"]),
-            S("vae", "VAE", "vae", "vae", ["wan_2.1","vae"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
+            S("model", "模型", "diffusion_models", "diffusion", ["wan2.1", "vace"], preferred_name="wan2.1_vace_14B_fp8_e4m3fn.safetensors", official_names=["wan2.1_vace_14B_fp8_e4m3fn.safetensors", "wan2.1_vace_14B_fp16.safetensors"]),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1","vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
         ],
     },
     "wan21_fun_camera": {
         "label": "Wan2.1 Fun Camera 1.3B",
         "clip_type": "wan",
         "slots": [
-            S("model", "Fun Camera", "diffusion_models", "diffusion", ["wan", "fun", "camera"]),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip", "vision"]),
+            S("model", "Fun Camera", "diffusion_models", "diffusion", ["wan2.1", "fun", "camera"], preferred_name="wan2.1_fun_camera_v1.1_1.3B_bf16.safetensors", official_names=["wan2.1_fun_camera_v1.1_1.3B_bf16.safetensors", "wan2.1_fun_camera_v1.1_14B_bf16.safetensors"]),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
         ],},
     "wan21_fun_inp": {
         "label": "Wan2.1 Fun Inp 1.3B",
         "clip_type": "wan",
         "slots": [
-            S("model", "Fun Inp", "diffusion_models", "diffusion", ["wan", "fun", "inp"]),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip", "vision"]),
+            S("model", "Fun Inp", "diffusion_models", "diffusion", ["wan2.1", "fun", "inp"], preferred_name="Wan2.1-Fun-1.3B-InP.safetensors", official_names=["Wan2.1-Fun-1.3B-InP.safetensors"]),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
         ],
     },
     "wan21_fun_control": {
         "label": "Wan2.1 Fun Control 1.3B",
         "clip_type": "wan",
         "slots": [
-            S("model", "Fun Control", "diffusion_models", "diffusion", ["wan2.1", "fun", "control"]),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip", "vision"]),
+            S("model", "Fun Control", "diffusion_models", "diffusion", ["wan2.1", "fun", "control"], preferred_name="wan2.1_fun_control_1.3B_bf16.safetensors", official_names=["wan2.1_fun_control_1.3B_bf16.safetensors"]),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
         ],
     },
     "wan21_ati_i2v": {
         "label": "Wan2.1 ATI I2V 14B",
         "clip_type": "wan",
         "slots": [
-            S("model", "ATI模型", "diffusion_models", "diffusion", ["wan", "ati", "i2v"]),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip", "vision"]),
+            S("model", "ATI模型", "diffusion_models", "diffusion", ["wan2.1", "ati", "i2v"], preferred_name="Wan2_1-I2V-ATI-14B_fp8_e4m3fn.safetensors", official_names=["Wan2_1-I2V-ATI-14B_fp8_e4m3fn.safetensors"]),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
         ],
     },
     "wan21_alpha": {
         "label": "Wan Alpha 透明通道",
         "clip_type": "wan",
         "slots": [
-            S("model", "模型", "diffusion_models", "diffusion", ["wan2_1","t2v"]),
-            S("rgb_vae", "RGB VAE", "vae", "vae", ["wan", "alpha", "rgb"]),
-            S("alpha_vae", "Alpha VAE", "vae", "vae", ["wan", "alpha", "alpha"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("lightx2v_lora", "LightX2V LoRA名称", "loras", "name", ["lightx2v", "rank256"]),
-            S("alpha_lora", "Alpha LoRA名称", "loras", "name", ["epoch", "changed"]),
+            S("model", "模型", "diffusion_models", "diffusion", ["wan2.1","t2v"], preferred_name="Wan2_1-AccVideo-T2V-14B_fp8_e4m3fn.safetensors", official_names=["Wan2_1-AccVideo-T2V-14B_fp8_e4m3fn.safetensors", "wan2.1_t2v_14B_fp16.safetensors"]),
+            S("rgb_vae", "RGB VAE", "vae", "vae", ["wan", "alpha", "rgb"], preferred_name="Wan21Alpha/wan_alpha_2.1_vae_rgb_channel.safetensors.safetensors", official_names=["Wan21Alpha/wan_alpha_2.1_vae_rgb_channel.safetensors.safetensors", "wan_alpha_2.1_vae_rgb_channel.safetensors.safetensors"]),
+            S("alpha_vae", "Alpha VAE", "vae", "vae", ["wan", "alpha", "alpha"], preferred_name="Wan21Alpha/wan_alpha_2.1_vae_alpha_channel.safetensors.safetensors", official_names=["Wan21Alpha/wan_alpha_2.1_vae_alpha_channel.safetensors.safetensors", "wan_alpha_2.1_vae_alpha_channel.safetensors.safetensors"]),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("lightx2v_lora", "LightX2V LoRA名称", "loras", "name", ["lightx2v", "rank256"], preferred_name="wan/WANALPHA_lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank256_bf16.safetensors", official_names=["wan/WANALPHA_lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank256_bf16.safetensors", "lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64_bf16.safetensors"]),
+            S("alpha_lora", "Alpha LoRA名称", "loras", "name", ["epoch", "changed"], preferred_name="wan/epoch-13-1500_changed.safetensors", official_names=["wan/epoch-13-1500_changed.safetensors", "epoch-13-1500_changed.safetensors"]),
         ],
     },
     "wan21_wanmove_480p": {
         "label": "WanMove 480P",
         "clip_type": "wan",
         "slots": [
-            S("model", "WanMove模型", "diffusion_models", "diffusion", ["wan", "move"]),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip", "vision"]),
-            S("lightx2v_lora", "LightX2V LoRA名称", "loras", "name", ["lightx2v", "i2v", "480p"]),
+            S("model", "WanMove模型", "diffusion_models", "diffusion", ["wan21", "wanmove"], preferred_name="Wan21-WanMove_fp8_scaled_e4m3fn_KJ.safetensors", official_names=["Wan21-WanMove_fp8_scaled_e4m3fn_KJ.safetensors"]),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
+            S("lightx2v_lora", "LightX2V LoRA名称", "loras", "name", ["lightx2v", "i2v", "480p"], preferred_name="wan/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", official_names=["wan/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", "lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors"]),
         ],
     },
     "wan22_animate_14b": {
         "label": "Wan2.2 Animate 14B",
         "clip_type": "wan",
         "slots": [
-            S("model", "Animate模型", "diffusion_models", "diffusion", ["wan", "animate"]),
-            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"]),
-            S("vae", "VAE", "vae", "vae", ["wan", "vae"]),
-            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip", "vision"]),
-            S("lightx2v_lora", "LightX2V LoRA名称", "loras", "name", ["lightx2v", "i2v", "480p"]),
-            S("relight_lora", "Relight LoRA名称", "loras", "name", ["wan", "animate", "relight"]),
-            S("dwpose", "DWPose名称", "controlnet", "name_any", ["dw", "ucoco"]),
+            S("model", "Animate模型", "diffusion_models", "diffusion", ["wan2.2", "animate"], preferred_name="wan2.2_animate_14B_fp8_scaled_e4m3fn_KJ_v2.safetensors", official_names=["wan2.2_animate_14B_fp8_scaled_e4m3fn_KJ_v2.safetensors", "Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors", "wan2.2_animate_14B_bf16.safetensors"]),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
+            S("lightx2v_lora", "LightX2V LoRA名称", "loras", "name", ["lightx2v", "i2v", "480p"], preferred_name="wan/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", official_names=["wan/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", "lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors"]),
+            S("relight_lora", "Relight LoRA名称", "loras", "name", ["wan", "animate", "relight"], preferred_name="wan/WanAnimate_relight_lora_fp16.safetensors", official_names=["wan/WanAnimate_relight_lora_fp16.safetensors", "WanAnimate_relight_lora_fp16.safetensors"]),
+            S("dwpose", "DWPose名称", "controlnet", "name_any", ["dw", "ucoco"], preferred_name="DWPose/dw-ll_ucoco_384_bs5.torchscript.pt", official_names=["DWPose/dw-ll_ucoco_384_bs5.torchscript.pt", "dw-ll_ucoco_384_bs5.torchscript.pt"]),
             S(
                 "sam2",
                 "SAM2模型",
@@ -453,6 +501,8 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 "name_any",
                 ["sam2", "hiera", "base", "plus"],
                 required_name="sam2_hiera_base_plus.safetensors",
+                preferred_name=SAM2_BASE_PLUS_NAMES[0],
+                official_names=SAM2_BASE_PLUS_NAMES,
                 download_url="https://huggingface.co/Kijai/sam2-safetensors/resolve/main/sam2_hiera_base_plus.safetensors",
             ),
         ],
@@ -461,13 +511,13 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "label": "LTX23 T2V / I2V官方流",
         "clip_type": "ltxv",
         "slots": [
-            S("ckpt_model", "LTX Checkpoint模型", "checkpoints", "checkpoint_model", ["ltx", "dev"]),
-            S("video_vae", "视频VAE", "checkpoints", "checkpoint_vae", ["ltx", "dev"]),
-            S("audio_vae", "音频VAE", "checkpoints", "ltx_audio_vae", ["ltx", "dev"]),
-            S("text_encoder", "Gemma文本编码器", "text_encoders", "clip", ["gemma", "it"], loader="ltxav_text_encoder"),
-            S("distill_lora", "Distill LoRA名称", "loras", "name", ["ltx", "distilled", "lora"]),
-            S("gemma_lora", "Gemma LoRA名称", "loras", "name", ["gemma", "abliterated", "lora"]),
-            S("spatial_upscaler", "空间放大模型", "latent_upscale_models", "latent_upscale_model", ["ltx", "spatial", "upscaler"]),
+            S("ckpt_model", "LTX Checkpoint模型", "checkpoints", "checkpoint_model", ["ltx2.3", "dev"], preferred_name=LTX23_CHECKPOINT_NAMES[0], official_names=LTX23_CHECKPOINT_NAMES),
+            S("video_vae", "视频VAE", "checkpoints", "checkpoint_vae", ["ltx2.3", "dev"], preferred_name=LTX23_CHECKPOINT_NAMES[0], official_names=LTX23_CHECKPOINT_NAMES),
+            S("audio_vae", "音频VAE", "checkpoints", "ltx_audio_vae", ["ltx2.3", "dev"], preferred_name=LTX23_CHECKPOINT_NAMES[0], official_names=LTX23_CHECKPOINT_NAMES),
+            S("text_encoder", "Gemma文本编码器", "text_encoders", "clip", ["gemma", "it"], loader="ltxav_text_encoder", preferred_name=LTX23_GEMMA_NAMES[0], official_names=LTX23_GEMMA_NAMES),
+            S("distill_lora", "Distill LoRA名称", "loras", "name", ["ltx2.3", "distilled", "lora"], preferred_name=LTX23_DISTILL_LORA_NAMES[0], official_names=LTX23_DISTILL_LORA_NAMES),
+            S("gemma_lora", "Gemma LoRA名称", "loras", "name", ["gemma", "abliterated", "lora"], preferred_name=LTX23_GEMMA_LORA_NAMES[0], official_names=LTX23_GEMMA_LORA_NAMES),
+            S("spatial_upscaler", "空间放大模型", "latent_upscale_models", "latent_upscale_model", ["ltx2.3", "spatial", "upscaler"], preferred_name=LTX23_SPATIAL_UPSCALER_NAMES[0], official_names=LTX23_SPATIAL_UPSCALER_NAMES),
         ],
     },
     "ltx23_i2v_t2v_kj": {
@@ -482,6 +532,8 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 ["ltx","22b","distilled"],
                 loader="unet",
                 required_name="ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v2.safetensors",
+                preferred_name=LTX23_KJ_MODEL_NAMES[0],
+                official_names=LTX23_KJ_MODEL_NAMES,
                 download_url="https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/diffusion_models/ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v2.safetensors",
             ),
             S(
@@ -492,9 +544,12 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 ["gemma_3_12B_it"],
                 loader="dual_clip",
                 required_name="gemma_3_12B_it_fp8_e4m3fn.safetensors",
+                preferred_name=LTX23_KJ_GEMMA_NAMES[0],
+                official_names=LTX23_KJ_GEMMA_NAMES,
                 download_url="https://huggingface.co/GitMylo/LTX-2-comfy_gemma_fp8_e4m3fn/resolve/main/gemma_3_12B_it_fp8_e4m3fn.safetensors",
                 secondary_label="另一个模型",
                 secondary_name="ltx-2.3_text_projection_bf16.safetensors",
+                secondary_official_names=LTX23_TEXT_PROJECTION_NAMES,
                 secondary_download_url="https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/text_encoders/ltx-2.3_text_projection_bf16.safetensors",
                 device="default",
             ),
@@ -508,6 +563,8 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 device="main_device",
                 weight_dtype="bf16",
                 required_name="LTX23_video_vae_bf16.safetensors",
+                preferred_name=LTX23_VIDEO_VAE_NAMES[0],
+                official_names=LTX23_VIDEO_VAE_NAMES,
                 download_url="https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_video_vae_bf16.safetensors",
             ),
             S(
@@ -520,6 +577,8 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 device="main_device",
                 weight_dtype="bf16",
                 required_name="LTX23_audio_vae_bf16.safetensors",
+                preferred_name=LTX23_AUDIO_VAE_NAMES[0],
+                official_names=LTX23_AUDIO_VAE_NAMES,
                 download_url="https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_audio_vae_bf16.safetensors",
             ),
             S(
@@ -530,6 +589,8 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 ["ltx-2.3-spatial-upscaler-x2-1.0"],
                 search_folders=["upscale_models"],
                 required_name="ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+                preferred_name=LTX23_SPATIAL_UPSCALER_NAMES[0],
+                official_names=LTX23_SPATIAL_UPSCALER_NAMES,
                 download_url="https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
             ),
         ],
@@ -733,9 +794,13 @@ def _clean_search_token(token: str) -> str:
         return ""
     if value in {"t2v", "i2v", "s2v", "ti2v", "flf2v", "f2v", "vace", "x2"}:
         return value
-    if re.fullmatch(r"wan(?:2[12]|21|22)", value):
+    if value in {"wan21", "wan22"}:
+        return value
+    if value == "wan2":
         return "wan"
-    if re.fullmatch(r"ltx(?:2(?:3)?|23)", value):
+    if value in {"ltx23"}:
+        return value
+    if re.fullmatch(r"ltx(?:2(?:3)?)", value):
         return "ltx"
     if re.fullmatch(r"gemma\d+", value):
         return "gemma"
@@ -758,10 +823,12 @@ def _clean_search_token(token: str) -> str:
 
 def _search_tokens(value: Any) -> list[str]:
     text = _strip_model_extension(value).lower()
-    text = re.sub(r"wan[\s._-]*2[\s._-]*[12]\b", " wan ", text)
-    text = re.sub(r"\bwan[\s._-]*(?:21|22)\b", " wan ", text)
-    text = re.sub(r"\bltx[\s._-]*2[\s._-]*3\b", " ltx ", text)
-    text = re.sub(r"\bltx23\b", " ltx ", text)
+    text = re.sub(r"wan[\s._-]*2[\s._-]*1(?=$|[\s._-])", " wan21 wan ", text)
+    text = re.sub(r"wan[\s._-]*2[\s._-]*2(?=$|[\s._-])", " wan22 wan ", text)
+    text = re.sub(r"\bwan[\s._-]*21(?=$|[\s._-])", " wan21 wan ", text)
+    text = re.sub(r"\bwan[\s._-]*22(?=$|[\s._-])", " wan22 wan ", text)
+    text = re.sub(r"\bltx[\s._-]*2[\s._-]*3(?=$|[\s._-])", " ltx23 ltx ", text)
+    text = re.sub(r"\bltx23(?=$|[\s._-])", " ltx23 ltx ", text)
     text = re.sub(r"\bgemma[\s._-]*3\b", " gemma ", text)
     parts = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", " ", text).split()
     tokens: list[str] = []
@@ -836,6 +903,114 @@ def _match_text(value: Any) -> str:
     return " ".join(_search_tokens(value))
 
 
+_OFFICIAL_DROP_TOKENS = {
+    "fp", "fp8", "fp16", "f16", "fp32", "bf16", "int8", "int4", "nf4", "nvfp4", "mxfp4",
+    "e4m3", "e4m3fn", "e5m2", "gguf", "bnb4bit", "bitsandbytes", "quant", "quantized",
+    "input", "scaled", "scale", "fast", "dtype", "weight", "weights", "only", "mixed",
+}
+
+
+def _model_basename_stem(value: Any) -> str:
+    return _strip_model_extension(str(value or "").replace("\\", "/").split("/")[-1])
+
+
+def _official_match_key(value: Any) -> str:
+    text = _model_basename_stem(value).lower()
+    text = re.sub(r"wan[\s._-]*2[\s._-]*1(?=$|[\s._-])", " wan21 ", text)
+    text = re.sub(r"wan[\s._-]*2[\s._-]*2(?=$|[\s._-])", " wan22 ", text)
+    text = re.sub(r"\bwan[\s._-]*21(?=$|[\s._-])", " wan21 ", text)
+    text = re.sub(r"\bwan[\s._-]*22(?=$|[\s._-])", " wan22 ", text)
+    text = re.sub(r"\bltx[\s._-]*2[\s._-]*3(?=$|[\s._-])", " ltx23 ", text)
+    parts = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", " ", text).split()
+    kept: list[str] = []
+    for part in parts:
+        token = part.lower()
+        if token in _OFFICIAL_DROP_TOKENS:
+            continue
+        if re.fullmatch(r"(?:fp|bf|int)\d+(?:[_a-z0-9]*)?", token):
+            continue
+        if re.fullmatch(r"e[45]m[23]fn?", token):
+            continue
+        kept.append(token)
+    return "".join(kept)
+
+
+def _longest_common_substring_length(a: str, b: str) -> int:
+    if not a or not b:
+        return 0
+    if len(a) > len(b):
+        a, b = b, a
+    previous = [0] * (len(a) + 1)
+    best = 0
+    for char_b in b:
+        current = [0] * (len(a) + 1)
+        for index, char_a in enumerate(a, start=1):
+            if char_a == char_b:
+                current[index] = previous[index - 1] + 1
+                if current[index] > best:
+                    best = current[index]
+        previous = current
+    return best
+
+
+def _official_name_seeds(*values: Any) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        items = value if isinstance(value, (list, tuple)) else [value]
+        for item in items:
+            text = str(item or "").strip()
+            key = text.replace("\\", "/").lower()
+            if text and key not in seen:
+                seen.add(key)
+                result.append(text)
+    return result
+
+
+def _best_official_name_match(names: list[str], seeds: list[str], keywords: list[str], allow_any: bool = False, strict: bool = False) -> str:
+    usable = [name for name in names if _is_usable_file(name, allow_any=allow_any)]
+    if strict:
+        usable = [name for name in usable if _name_matches_keywords(name, keywords, allow_any=allow_any)]
+    if not usable or not seeds:
+        return ""
+
+    by_full = {str(name).replace("\\", "/").lower(): name for name in usable}
+    by_base: dict[str, str] = {}
+    for name in usable:
+        by_base.setdefault(str(name).replace("\\", "/").split("/")[-1].lower(), name)
+
+    for seed in seeds:
+        full_key = str(seed).replace("\\", "/").strip().lower()
+        base_key = full_key.split("/")[-1]
+        if full_key in by_full:
+            return by_full[full_key]
+        if base_key in by_base:
+            return by_base[base_key]
+
+    best_name = ""
+    best_score: tuple[int, int, int, str] = (0, 0, 0, "")
+    seed_keys = [_official_match_key(seed) for seed in seeds]
+    for name in usable:
+        candidate_key = _official_match_key(name)
+        if not candidate_key:
+            continue
+        for seed_key in seed_keys:
+            if not seed_key:
+                continue
+            if candidate_key == seed_key:
+                score = (100000 + len(seed_key), len(seed_key), -abs(len(candidate_key) - len(seed_key)), name.lower())
+            elif seed_key in candidate_key or candidate_key in seed_key:
+                common = min(len(seed_key), len(candidate_key))
+                score = (50000 + common, common, -abs(len(candidate_key) - len(seed_key)), name.lower())
+            else:
+                common = _longest_common_substring_length(candidate_key, seed_key)
+                score = (common, common, -abs(len(candidate_key) - len(seed_key)), name.lower())
+            if score > best_score:
+                best_score = score
+                best_name = name
+    return best_name if best_score[1] >= 6 else ""
+
+
 def _score_name(name: str, keywords: list[str]) -> tuple[int, str]:
     text = _match_text(name)
     score = 0
@@ -873,14 +1048,27 @@ def _resolve_selected(
     allow_any: bool = False,
     strict: bool = False,
     preferred: str = "",
+    official_names: list[str] | tuple[str, ...] | None = None,
 ) -> str:
     names = _filename_list_for_folders(folder)
     selected = str(selected or "").strip()
     if selected and selected in names and (not strict or _name_matches_keywords(selected, keywords, allow_any=allow_any)):
         return selected
+    if selected:
+        selected_base = selected.replace("\\", "/").split("/")[-1].lower()
+        for name in names:
+            if name.replace("\\", "/").split("/")[-1].lower() == selected_base and (not strict or _name_matches_keywords(name, keywords, allow_any=allow_any)):
+                return name
+        selected_match = _best_official_name_match(names, [selected], keywords, allow_any=allow_any, strict=strict)
+        if selected_match:
+            return selected_match
     preferred = str(preferred or "").strip()
     if preferred and preferred in names and (not strict or _name_matches_keywords(preferred, keywords, allow_any=allow_any)):
         return preferred
+    seeds = _official_name_seeds(preferred, official_names or [])
+    official_match = _best_official_name_match(names, seeds, keywords, allow_any=allow_any, strict=strict)
+    if official_match:
+        return official_match
     matches = _sort_matches(_filter_names(names, keywords, allow_any=allow_any), keywords)
     return matches[0] if matches else ""
 
@@ -1217,6 +1405,105 @@ def _build_wanvideo_extra_model_kwargs(extra_chain: list[dict[str, Any]], model_
 def _choice(value: Any, allowed: set[str], default: str) -> str:
     text = str(value or default).strip()
     return text if text in allowed else default
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value if value is not None else "").strip().lower()
+    if not text:
+        return default
+    if text in {"1", "true", "yes", "on", "启用", "开"}:
+        return True
+    if text in {"0", "false", "no", "off", "禁用", "关"}:
+        return False
+    return default
+
+
+def _as_float(value: Any, default: float = 1.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _infer_quantization_from_model_name(name: Any) -> str:
+    text = _model_basename_stem(name).lower()
+    text = re.sub(r"[^0-9a-z]+", "_", text)
+    if "fp8" not in text:
+        return ""
+    if re.search(r"fp8_(?:e4m3fn_|e5m2_)?scaled_fast|fp8_scaled_(?:e4m3fn_|e5m2_)?fast", text):
+        return "fp8_e5m2_scaled_fast" if "e5m2" in text else "fp8_e4m3fn_scaled_fast"
+    if re.search(r"fp8_(?:e4m3fn_|e5m2_)?scaled|fp8_scaled(?:_(?:e4m3fn|e5m2))?", text):
+        return "fp8_e5m2_scaled" if "e5m2" in text else "fp8_e4m3fn_scaled"
+    if "e5m2" in text:
+        return "fp8_e5m2_fast" if "fast" in text else "fp8_e5m2"
+    return "fp8_e4m3fn_fast" if "fast" in text else "fp8_e4m3fn"
+
+
+def _infer_dtype_from_model_name(name: Any) -> str:
+    text = _model_basename_stem(name).lower()
+    text = re.sub(r"[^0-9a-z]+", "_", text)
+    if "fp8" in text:
+        return "fp8_e5m2" if "e5m2" in text else "fp8_e4m3fn"
+    for dtype in ("fp16", "bf16", "fp32"):
+        if re.search(rf"(?:^|_){dtype}(?:_|$)", text):
+            return dtype
+    return ""
+
+
+def _apply_slot_widget_settings(slot: dict[str, Any], index: int, kwargs: dict[str, Any]) -> dict[str, Any]:
+    result = dict(slot)
+    fields = {
+        "base_precision": (set(WAN_BASE_PRECISIONS), "bf16"),
+        "quantization": (set(WAN_QUANTIZATIONS), "disabled"),
+        "load_device": (set(WAN_LOAD_DEVICES), "offload_device"),
+        "attention_mode": (set(WAN_ATTENTION_MODES), "sdpa"),
+        "rms_norm_function": (set(WAN_RMS_NORM_FUNCTIONS), "default"),
+        "vae_precision": (set(WAN_VAE_PRECISIONS), "bf16"),
+        "t5_precision": (set(WAN_T5_PRECISIONS), "bf16"),
+        "t5_quantization": (set(WAN_T5_QUANTIZATIONS), "disabled"),
+        "t5_load_device": (set(WAN_LOAD_DEVICES), "offload_device"),
+        "extra_base_precision": (set(EXTRA_BASE_PRECISIONS), "fp16"),
+        "weight_dtype": (set(WEIGHT_DTYPE_CHOICES), "bf16"),
+    }
+    for suffix, (allowed, default) in fields.items():
+        raw = kwargs.get(f"{suffix}_{index}", None)
+        if raw is None:
+            continue
+        value = _choice(raw, allowed, default)
+        if suffix == "vae_precision":
+            result["precision"] = value
+        elif suffix == "t5_precision":
+            result["precision"] = value
+        elif suffix == "t5_load_device":
+            result["load_device"] = value
+        elif suffix == "extra_base_precision":
+            result["base_precision"] = value
+        else:
+            result[suffix] = value
+    if f"vae_use_cpu_cache_{index}" in kwargs:
+        result["use_cpu_cache"] = _as_bool(kwargs.get(f"vae_use_cpu_cache_{index}"), bool(result.get("use_cpu_cache", False)))
+    if f"lora_strength_{index}" in kwargs:
+        result["strength"] = _as_float(kwargs.get(f"lora_strength_{index}"), float(result.get("strength", 1.0) or 1.0))
+    if f"lora_merge_loras_{index}" in kwargs:
+        result["merge_loras"] = _as_bool(kwargs.get(f"lora_merge_loras_{index}"), bool(result.get("merge_loras", False)))
+    if f"lora_low_mem_load_{index}" in kwargs:
+        result["low_mem_load"] = _as_bool(kwargs.get(f"lora_low_mem_load_{index}"), bool(result.get("low_mem_load", False)))
+    return result
+
+
+def _apply_name_derived_settings(slot: dict[str, Any], kind: str, name: str, dtype: str) -> tuple[dict[str, Any], str]:
+    result = dict(slot)
+    if kind == "wanvideo_model":
+        quantization = _infer_quantization_from_model_name(name)
+        if quantization in set(WAN_QUANTIZATIONS):
+            result["quantization"] = quantization
+    if kind in {"diffusion", "clip"}:
+        inferred_dtype = _infer_dtype_from_model_name(name)
+        if inferred_dtype in set(DTYPES):
+            dtype = inferred_dtype
+    return result, dtype
 
 
 _WAN_COMPILE_KEYS = {
@@ -2014,6 +2301,20 @@ class GJJ_VideoUniversalModelLoader:
                 "display_name": f"权重精度{i}",
                 "tooltip": "根据模型文件名中的 bf16/fp16/fp32 后缀自动同步，主要用于 GJJ 兼容 VAE 加载。",
             })
+            inputs[f"base_precision_{i}"] = (WAN_BASE_PRECISIONS, {"default": "bf16", "display": "hidden", "hidden": True, "display_name": f"Wan精度{i}", "tooltip": "WanVideoWrapper 主模型基础精度。"})
+            inputs[f"quantization_{i}"] = (WAN_QUANTIZATIONS, {"default": "disabled", "display": "hidden", "hidden": True, "display_name": f"Wan量化{i}", "tooltip": "WanVideoWrapper 主模型量化方式；会从文件名中的 fp8/e4m3fn/scaled 自动同步。"})
+            inputs[f"load_device_{i}"] = (WAN_LOAD_DEVICES, {"default": "offload_device", "display": "hidden", "hidden": True, "display_name": f"Wan设备{i}", "tooltip": "WanVideoWrapper 主模型加载设备。"})
+            inputs[f"attention_mode_{i}"] = (WAN_ATTENTION_MODES, {"default": "sdpa", "display": "hidden", "hidden": True, "display_name": f"Wan注意力{i}", "tooltip": "WanVideoWrapper 主模型注意力实现。"})
+            inputs[f"rms_norm_function_{i}"] = (WAN_RMS_NORM_FUNCTIONS, {"default": "default", "display": "hidden", "hidden": True, "display_name": f"Wan RMS{i}", "tooltip": "WanVideoWrapper RMS Norm 实现。"})
+            inputs[f"vae_precision_{i}"] = (WAN_VAE_PRECISIONS, {"default": "bf16", "display": "hidden", "hidden": True, "display_name": f"Wan VAE精度{i}", "tooltip": "WanVideoWrapper VAE 加载精度。"})
+            inputs[f"vae_use_cpu_cache_{i}"] = ("BOOLEAN", {"default": False, "display": "hidden", "hidden": True, "display_name": f"Wan VAE缓存{i}", "tooltip": "WanVideoWrapper VAE CPU 缓存开关。"})
+            inputs[f"t5_precision_{i}"] = (WAN_T5_PRECISIONS, {"default": "bf16", "display": "hidden", "hidden": True, "display_name": f"Wan T5精度{i}", "tooltip": "WanVideoWrapper T5 编码器精度。"})
+            inputs[f"t5_quantization_{i}"] = (WAN_T5_QUANTIZATIONS, {"default": "disabled", "display": "hidden", "hidden": True, "display_name": f"Wan T5量化{i}", "tooltip": "WanVideoWrapper T5 编码器量化方式。"})
+            inputs[f"t5_load_device_{i}"] = (WAN_LOAD_DEVICES, {"default": "offload_device", "display": "hidden", "hidden": True, "display_name": f"Wan T5设备{i}", "tooltip": "WanVideoWrapper T5 编码器加载设备。"})
+            inputs[f"extra_base_precision_{i}"] = (EXTRA_BASE_PRECISIONS, {"default": "fp16", "display": "hidden", "hidden": True, "display_name": f"扩展模型精度{i}", "tooltip": "FantasyTalking/FantasyPortrait 等扩展模型基础精度。"})
+            inputs[f"lora_strength_{i}"] = ("FLOAT", {"default": 1.0, "display": "hidden", "hidden": True, "display_name": f"LoRA强度{i}", "tooltip": "内置 LoRA 强度。"})
+            inputs[f"lora_merge_loras_{i}"] = ("BOOLEAN", {"default": False, "display": "hidden", "hidden": True, "display_name": f"LoRA合并{i}", "tooltip": "预留给 Wan LoRA 加载器的合并开关。"})
+            inputs[f"lora_low_mem_load_{i}"] = ("BOOLEAN", {"default": False, "display": "hidden", "hidden": True, "display_name": f"LoRA低显存{i}", "tooltip": "预留给 Wan LoRA 加载器的低显存开关。"})
         inputs["clip_type_override"] = (CLIP_TYPES, {
             "default": "auto",
             "display_name": "CLIP类型",
@@ -2062,7 +2363,12 @@ class GJJ_VideoUniversalModelLoader:
             "⚙️ Wan运行参数",
         ]
         for i in range(1, MAX_SLOTS + 1):
-            keys += [f"file_{i}", f"secondary_file_{i}", f"dtype_{i}", f"weight_dtype_{i}"]
+            keys += [
+                f"file_{i}", f"secondary_file_{i}", f"dtype_{i}", f"weight_dtype_{i}",
+                f"base_precision_{i}", f"quantization_{i}", f"load_device_{i}", f"attention_mode_{i}", f"rms_norm_function_{i}",
+                f"vae_precision_{i}", f"vae_use_cpu_cache_{i}", f"t5_precision_{i}", f"t5_quantization_{i}", f"t5_load_device_{i}",
+                f"extra_base_precision_{i}", f"lora_strength_{i}", f"lora_merge_loras_{i}", f"lora_low_mem_load_{i}",
+            ]
         return "|".join(str(kwargs.get(k, "")) for k in keys)
 
     def load_models(self, *args, **kwargs):
@@ -2089,6 +2395,7 @@ class GJJ_VideoUniversalModelLoader:
         slots = []
         for index, slot in enumerate(cfg.get("slots", []), start=1):
             current_slot = dict(slot)
+            current_slot = _apply_slot_widget_settings(current_slot, index, kwargs)
             current_slot["_source_index"] = index
             slots.append(current_slot)
         output_layout = _output_slots_for_config({"slots": slots})
@@ -2126,6 +2433,7 @@ class GJJ_VideoUniversalModelLoader:
                 allow_any=allow_any,
                 strict=bool(slot.get("strict", False)),
                 preferred=str(slot.get("preferred_name", "") or slot.get("required_name", "") or ""),
+                official_names=list(slot.get("official_names", []) or []),
             )
 
             if not name:
@@ -2137,11 +2445,12 @@ class GJJ_VideoUniversalModelLoader:
                 )
 
             resolved_names[str(slot.get("id", f"slot_{index}"))] = name
+            slot, dtype = _apply_name_derived_settings(slot, kind, name, dtype)
 
             if _is_lora_slot(slot):
                 lora_items.append({
                     "name": name,
-                    "strength": 1.0,
+                    "strength": float(slot.get("strength", 1.0) or 1.0),
                     "branch": _slot_branch(str(slot.get("id", "")), str(slot.get("label", ""))),
                     "slot": slot,
                 })
@@ -2194,8 +2503,13 @@ class GJJ_VideoUniversalModelLoader:
                     loader_kind = str(slot.get("loader", "") or "").lower()
                     if loader_kind == "dual_clip":
                         secondary_name = str(kwargs.get(f"secondary_file_{index}", "") or "").strip()
-                        if not secondary_name:
-                            secondary_name = str(slot.get("secondary_name", "") or "").strip()
+                        secondary_name = _resolve_selected(
+                            secondary_name,
+                            search_folders,
+                            _normalize_search_keywords([slot.get("secondary_name", "")] + list(slot.get("secondary_keywords", []) or [])),
+                            preferred=str(slot.get("secondary_name", "") or ""),
+                            official_names=list(slot.get("secondary_official_names", []) or []),
+                        )
                         if not secondary_name:
                             raise _format_slot_runtime_error(
                                 cfg.get("label", config_key),
@@ -2225,6 +2539,7 @@ class GJJ_VideoUniversalModelLoader:
                                             prev_search_folders,
                                             _normalize_search_keywords(list(prev_slot.get("keywords", []) or [])),
                                             preferred=str(prev_slot.get("preferred_name", "") or prev_slot.get("required_name", "") or ""),
+                                            official_names=list(prev_slot.get("official_names", []) or []),
                                         )
                                     break
                         if not ckpt_name:

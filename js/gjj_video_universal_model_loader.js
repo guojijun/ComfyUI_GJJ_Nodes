@@ -130,8 +130,9 @@ function cleanSearchToken(token) {
 	let value = String(token || "").trim().toLowerCase();
 	if (!value) return "";
 	if (SEARCH_KEEP_TOKENS.has(value)) return value;
-	if (/^wan(?:2[12]|21|22)$/.test(value)) return "wan";
-	if (/^ltx(?:2(?:3)?|23)$/.test(value)) return "ltx";
+	if (["wan21", "wan22", "ltx23"].includes(value)) return value;
+	if (value === "wan2") return "wan";
+	if (/^ltx(?:2(?:3)?)$/.test(value)) return "ltx";
 	if (/^gemma\d+$/.test(value)) return "gemma";
 	if (SEARCH_DROP_TOKENS.has(value)) return "";
 	if (/^v?\d+(?:\.\d+)*$/.test(value)) return "";
@@ -146,10 +147,12 @@ function cleanSearchToken(token) {
 function cleanSearchTokens(value) {
 	let text = stripModelExtension(value).toLowerCase();
 	text = text
-		.replace(/wan[\s._-]*2[\s._-]*[12]\b/g, " wan ")
-		.replace(/\bwan[\s._-]*(?:21|22)\b/g, " wan ")
-		.replace(/\bltx[\s._-]*2[\s._-]*3\b/g, " ltx ")
-		.replace(/\bltx23\b/g, " ltx ")
+		.replace(/wan[\s._-]*2[\s._-]*1(?=$|[\s._-])/g, " wan21 wan ")
+		.replace(/wan[\s._-]*2[\s._-]*2(?=$|[\s._-])/g, " wan22 wan ")
+		.replace(/\bwan[\s._-]*21(?=$|[\s._-])/g, " wan21 wan ")
+		.replace(/\bwan[\s._-]*22(?=$|[\s._-])/g, " wan22 wan ")
+		.replace(/\bltx[\s._-]*2[\s._-]*3(?=$|[\s._-])/g, " ltx23 ltx ")
+		.replace(/\bltx23(?=$|[\s._-])/g, " ltx23 ltx ")
 		.replace(/\bgemma[\s._-]*3\b/g, " gemma ");
 	const seen = new Set();
 	const tokens = [];
@@ -225,13 +228,140 @@ function fillSelect(select, values, labels = null) {
 	});
 }
 
+const OFFICIAL_DROP_TOKENS = new Set([
+	...SEARCH_DROP_TOKENS,
+	"f16",
+	"mixed",
+]);
+
+function modelStem(value) {
+	return stripModelExtension(String(value || "").replaceAll("\\", "/").split("/").pop() || "");
+}
+
+function officialMatchKey(value) {
+	let text = modelStem(value).toLowerCase();
+	text = text
+		.replace(/wan[\s._-]*2[\s._-]*1(?=$|[\s._-])/g, " wan21 ")
+		.replace(/wan[\s._-]*2[\s._-]*2(?=$|[\s._-])/g, " wan22 ")
+		.replace(/\bwan[\s._-]*21(?=$|[\s._-])/g, " wan21 ")
+		.replace(/\bwan[\s._-]*22(?=$|[\s._-])/g, " wan22 ")
+		.replace(/\bltx[\s._-]*2[\s._-]*3(?=$|[\s._-])/g, " ltx23 ")
+		.replace(/\bltx23(?=$|[\s._-])/g, " ltx23 ");
+	const kept = [];
+	for (const part of text.replace(/[^0-9a-z\u4e00-\u9fff]+/g, " ").split(/\s+/)) {
+		const token = part.trim().toLowerCase();
+		if (!token || OFFICIAL_DROP_TOKENS.has(token)) continue;
+		if (/^(?:fp|bf|int)\d+(?:[_a-z0-9]*)?$/.test(token)) continue;
+		if (/^e[45]m[23]fn?$/.test(token)) continue;
+		kept.push(token);
+	}
+	return kept.join("");
+}
+
+function longestCommonSubstringLength(a, b) {
+	if (!a || !b) return 0;
+	let shorter = String(a);
+	let longer = String(b);
+	if (shorter.length > longer.length) [shorter, longer] = [longer, shorter];
+	let previous = new Array(shorter.length + 1).fill(0);
+	let best = 0;
+	for (const charB of longer) {
+		const current = new Array(shorter.length + 1).fill(0);
+		for (let i = 1; i <= shorter.length; i++) {
+			if (shorter[i - 1] === charB) {
+				current[i] = previous[i - 1] + 1;
+				if (current[i] > best) best = current[i];
+			}
+		}
+		previous = current;
+	}
+	return best;
+}
+
+function officialNameSeeds(...values) {
+	const result = [];
+	const seen = new Set();
+	for (const value of values || []) {
+		const items = Array.isArray(value) ? value : [value];
+		for (const item of items) {
+			const text = String(item || "").trim();
+			const key = text.replaceAll("\\", "/").toLowerCase();
+			if (text && !seen.has(key)) {
+				seen.add(key);
+				result.push(text);
+			}
+		}
+	}
+	return result;
+}
+
+function bestOfficialNameMatch(names, seeds, allowAny = false) {
+	const usable = (Array.isArray(names) ? names : [])
+		.map(String)
+		.filter((name) => isUsable(name, allowAny));
+	const sourceSeeds = officialNameSeeds(seeds);
+	if (!usable.length || !sourceSeeds.length) return "";
+
+	const byFull = new Map();
+	const byBase = new Map();
+	for (const name of usable) {
+		const full = name.replaceAll("\\", "/").toLowerCase();
+		const base = full.split("/").pop();
+		if (!byFull.has(full)) byFull.set(full, name);
+		if (base && !byBase.has(base)) byBase.set(base, name);
+	}
+	for (const seed of sourceSeeds) {
+		const full = seed.replaceAll("\\", "/").trim().toLowerCase();
+		const base = full.split("/").pop();
+		if (byFull.has(full)) return byFull.get(full);
+		if (base && byBase.has(base)) return byBase.get(base);
+	}
+
+	let best = "";
+	let bestScore = [0, 0, 0, ""];
+	const seedKeys = sourceSeeds.map(officialMatchKey).filter(Boolean);
+	for (const name of usable) {
+		const candidateKey = officialMatchKey(name);
+		if (!candidateKey) continue;
+		for (const seedKey of seedKeys) {
+			let score;
+			if (candidateKey === seedKey) {
+				score = [100000 + seedKey.length, seedKey.length, -Math.abs(candidateKey.length - seedKey.length), name.toLowerCase()];
+			} else if (seedKey.includes(candidateKey) || candidateKey.includes(seedKey)) {
+				const common = Math.min(seedKey.length, candidateKey.length);
+				score = [50000 + common, common, -Math.abs(candidateKey.length - seedKey.length), name.toLowerCase()];
+			} else {
+				const common = longestCommonSubstringLength(candidateKey, seedKey);
+				score = [common, common, -Math.abs(candidateKey.length - seedKey.length), name.toLowerCase()];
+			}
+			for (let i = 0; i < score.length; i++) {
+				if (score[i] === bestScore[i]) continue;
+				if (score[i] > bestScore[i]) {
+					bestScore = score;
+					best = name;
+				}
+				break;
+			}
+		}
+	}
+	return bestScore[1] >= 6 ? best : "";
+}
+
+function preferredNamesForSlot(slot, secondary = false) {
+	if (secondary) {
+		return officialNameSeeds(slot?.secondary_name, slot?.secondary_official_names || [], slot?.secondary_preferred_name);
+	}
+	return officialNameSeeds(slot?.required_name, slot?.preferred_name, slot?.official_names || []);
+}
+
 function selectFirstIfInvalid(node, name, values, preferred = "") {
 	const w = getWidget(node, name); if (!w) return;
 	const list = Array.isArray(values) ? values.map(String) : [];
 	const cur = String(w.value ?? "");
-	const preferredValue = String(preferred ?? "");
+	const preferredSeeds = officialNameSeeds(preferred);
 	if (!cur || !list.includes(cur)) {
-		if (preferredValue && list.includes(preferredValue)) w.value = preferredValue;
+		const matched = bestOfficialNameMatch(list, preferredSeeds, true);
+		if (matched) w.value = matched;
 		else w.value = list[0] || "";
 		w.callback?.(w.value);
 	}
@@ -428,17 +558,25 @@ function quantizationFromModelName(value) {
 	if (!raw) return "";
 	if (/\.gguf(?:$|[?#])/.test(raw)) return "disabled";
 	const text = raw.replace(/[\s.\-]+/g, "_");
-	const markers = [
-		"fp8_e4m3fn_scaled_fast",
-		"fp8_e4m3fn_scaled",
-		"fp8_e4m3fn_fast",
-		"fp8_e4m3fn",
-		"fp8_e5m2_scaled_fast",
-		"fp8_e5m2_scaled",
-		"fp8_e5m2_fast",
-		"fp8_e5m2",
-	];
-	return markers.find((marker) => text.includes(marker)) || "";
+	if (!text.includes("fp8")) return "";
+	const e5 = text.includes("e5m2");
+	if (/fp8_(?:e4m3fn_|e5m2_)?scaled_fast|fp8_scaled_(?:e4m3fn_|e5m2_)?fast/.test(text)) {
+		return e5 ? "fp8_e5m2_scaled_fast" : "fp8_e4m3fn_scaled_fast";
+	}
+	if (/fp8_(?:e4m3fn_|e5m2_)?scaled|fp8_scaled(?:_(?:e4m3fn|e5m2))?/.test(text)) {
+		return e5 ? "fp8_e5m2_scaled" : "fp8_e4m3fn_scaled";
+	}
+	if (e5) return text.includes("fast") ? "fp8_e5m2_fast" : "fp8_e5m2";
+	return text.includes("fast") ? "fp8_e4m3fn_fast" : "fp8_e4m3fn";
+}
+
+function dtypeFromModelName(value) {
+	const raw = modelBaseName(value).toLowerCase().replace(/[^0-9a-z]+/g, "_");
+	if (raw.includes("fp8")) return raw.includes("e5m2") ? "fp8_e5m2" : "fp8_e4m3fn";
+	for (const dtype of ["fp16", "bf16", "fp32"]) {
+		if (new RegExp(`(?:^|_)${dtype}(?:_|$)`).test(raw)) return dtype;
+	}
+	return "";
 }
 
 function weightDtypeFromModelName(value) {
@@ -450,12 +588,22 @@ function weightDtypeFromModelName(value) {
 }
 
 function syncQuantizationFromModelName(node, slot, index, fileValue) {
-	if (!isKijaiNode(node) || String(slot?.kind || "") !== "wanvideo_model") return;
+	if (String(slot?.kind || "") !== "wanvideo_model") return;
 	const quantization = quantizationFromModelName(fileValue);
 	if (!quantization || !WAN_QUANTIZATIONS.includes(quantization)) return;
 	const name = settingName("quantization", index);
 	if (String(getWidget(node, name)?.value ?? "") === quantization) return;
 	syncWidget(node, name, quantization);
+}
+
+function syncDtypeFromModelName(node, slot, index, fileValue) {
+	if (!slotNeedsDtype(slot)) return;
+	const inferred = dtypeFromModelName(fileValue);
+	const allowed = ensureState(node).dtypes || DEFAULT_DTYPES;
+	if (!inferred || !allowed.includes(inferred)) return;
+	const name = `dtype_${index}`;
+	if (String(getWidget(node, name)?.value ?? "") === inferred) return;
+	syncWidget(node, name, inferred);
 }
 
 function syncWeightDtypeFromModelName(node, slot, index, fileValue) {
@@ -469,6 +617,7 @@ function syncWeightDtypeFromModelName(node, slot, index, fileValue) {
 
 function syncDerivedSettingsFromModelName(node, slot, index, fileValue) {
 	syncQuantizationFromModelName(node, slot, index, fileValue);
+	syncDtypeFromModelName(node, slot, index, fileValue);
 	syncWeightDtypeFromModelName(node, slot, index, fileValue);
 }
 
@@ -635,7 +784,7 @@ function syncPairedLowModelFromHigh(node, cfg, highSlot, highIndex, highValue, s
 }
 
 function expectedModelName(slot) {
-	const preferred = String(slot?.required_name || slot?.preferred_name || slot?.secondary_name || "").trim();
+	const preferred = String(slot?.required_name || slot?.preferred_name || preferredNamesForSlot(slot)[0] || slot?.secondary_name || "").trim();
 	if (preferred) return preferred;
 	const words = Array.isArray(slot?.keywords) ? slot.keywords.map(String).filter(Boolean) : [];
 	if (words.length) return words.join(" ");
@@ -730,13 +879,15 @@ function videoLoaderHelpEntries(node) {
 		const fileName = firstHelpModelFile(
 			helpValueOf(node, `file_${index + 1}`),
 			slot.required_name,
-			slot.preferred_name
+			slot.preferred_name,
+			...(Array.isArray(slot.official_names) ? slot.official_names : [])
 		);
 		addVideoHelpModelEntry(entries, slot, index, fileName);
 		if (isDualClipSlot(slot)) {
 			const secondaryName = firstHelpModelFile(
 				helpValueOf(node, `secondary_file_${index + 1}`),
-				slot.secondary_name
+				slot.secondary_name,
+				...(Array.isArray(slot.secondary_official_names) ? slot.secondary_official_names : [])
 			);
 			addVideoHelpModelEntry(entries, slot, index, secondaryName, String(slot.secondary_label || "另一个模型"));
 		}
@@ -1309,37 +1460,6 @@ function extraKindFor(slot) {
 }
 function paramDefsForSlot(node, slot) {
 	const kind = String(slot?.kind || "");
-	if (!isKijaiNode(node)) {
-		const params = [];
-		if (slotNeedsDtype(slot)) {
-			params.push({
-				suffix: "dtype",
-				label: "dtype",
-				type: "select",
-				values: ensureState(node).dtypes || DEFAULT_DTYPES,
-				defaultValue: "default",
-			});
-		}
-		if (kind === "clip" && String(slot?.loader || "") !== "dual_clip") {
-			params.push({
-				name: "clip_type_override",
-				label: "CLIP类型",
-				type: "select",
-				values: ensureState(node).clipTypes || ["auto"],
-				defaultValue: "auto",
-			});
-		}
-		if (kind === "vae" && String(slot?.loader || "") === "gjj_vae") {
-			params.push({
-				suffix: "weight_dtype",
-				label: "权重",
-				type: "select",
-				values: WEIGHT_DTYPE_CHOICES,
-				defaultValue: slot?.weight_dtype || "bf16",
-			});
-		}
-		return params;
-	}
 	const extraKind = extraKindFor(slot);
 	if (kind === "wanvideo_model") {
 		return [
@@ -1374,6 +1494,37 @@ function paramDefsForSlot(node, slot) {
 			{ suffix: "lora_merge_loras", label: "合并", type: "toggle", defaultValue: boolText(slot?.merge_loras || false) },
 			{ suffix: "lora_low_mem_load", label: "低显存", type: "toggle", defaultValue: boolText(slot?.low_mem_load || false) },
 		];
+	}
+	if (!isKijaiNode(node)) {
+		const params = [];
+		if (slotNeedsDtype(slot)) {
+			params.push({
+				suffix: "dtype",
+				label: "dtype",
+				type: "select",
+				values: ensureState(node).dtypes || DEFAULT_DTYPES,
+				defaultValue: "default",
+			});
+		}
+		if (kind === "clip" && String(slot?.loader || "") !== "dual_clip") {
+			params.push({
+				name: "clip_type_override",
+				label: "CLIP类型",
+				type: "select",
+				values: ensureState(node).clipTypes || ["auto"],
+				defaultValue: "auto",
+			});
+		}
+		if (kind === "vae" && String(slot?.loader || "") === "gjj_vae") {
+			params.push({
+				suffix: "weight_dtype",
+				label: "权重",
+				type: "select",
+				values: WEIGHT_DTYPE_CHOICES,
+				defaultValue: slot?.weight_dtype || "bf16",
+			});
+		}
+		return params;
 	}
 	return [];
 }
@@ -1988,11 +2139,11 @@ function applyConfig(node, opts = {}) {
 		const secondaryFileName = `secondary_file_${i}`;
 		const dtypeName = `dtype_${i}`;
 		setComboOptions(getWidget(node, fileName), values);
-		const preferredName = String(slot.preferred_name || slot.required_name || "").trim();
+		const preferredName = preferredNamesForSlot(slot);
 		selectFirstIfInvalid(node, fileName, values, preferredName);
 		if (isDualClipSlot(slot)) {
 			setComboOptions(getWidget(node, secondaryFileName), secondaryValues);
-			const preferredSecondary = String(slot.secondary_name || "").trim();
+			const preferredSecondary = preferredNamesForSlot(slot, true);
 			selectFirstIfInvalid(node, secondaryFileName, secondaryValues, preferredSecondary);
 		} else {
 			syncWidget(node, secondaryFileName, "");

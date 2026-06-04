@@ -240,6 +240,20 @@ function getWidget(node, name) {
 		: null;
 }
 
+function stopCanvasEvent(event) {
+	event?.stopPropagation?.();
+}
+
+function protectButton(button) {
+	if (!button) {
+		return;
+	}
+	button.type = "button";
+	for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu"]) {
+		button.addEventListener(eventName, stopCanvasEvent);
+	}
+}
+
 function getLinkedSourceNode(input) {
 	const linkId = input?.link;
 	if (!linkId || !app.graph?.links) {
@@ -290,6 +304,38 @@ function maybeUpdateFilenamePrefix(node) {
 		widget.callback?.(nextPrefix, app.canvas, node, app.canvas?.graph_mouse);
 	}
 	node.__gjjSaveAnyObjectAutoPrefix = nextPrefix;
+}
+
+async function openOutputFolder(node, button) {
+	const prefixWidget = getWidget(node, "filename_prefix");
+	const prefix = prefixWidget ? String(prefixWidget.value || DEFAULT_PREFIX).trim() : DEFAULT_PREFIX;
+	const parts = prefix.split("/").filter((p) => p && p !== "." && p !== "..");
+	const folderPath = parts.length > 1 ? parts.slice(0, -1).join("/") : "";
+	const oldText = button?.textContent || "📁";
+	try {
+		if (button) {
+			button.disabled = true;
+			button.textContent = "...";
+		}
+		const response = await api.fetchApi(`/gjj/open_folder?path=${encodeURIComponent(folderPath)}`, { method: "POST" });
+		if (!response.ok) {
+			const text = await response.text().catch(() => "");
+			throw new Error(text || `HTTP ${response.status}`);
+		}
+		if (button) {
+			button.title = "已打开保存文件夹";
+		}
+	} catch (error) {
+		console.warn("[GJJ SaveAnyObject] 打开保存文件夹失败:", error);
+		if (button) {
+			button.title = `打开保存文件夹失败：${error?.message || error}`;
+		}
+	} finally {
+		if (button) {
+			button.disabled = false;
+			button.textContent = oldText;
+		}
+	}
 }
 
 function buildPreviewText(text) {
@@ -441,6 +487,9 @@ function ensureButtonWidget(node) {
 		"width:100%",
 		"box-sizing:border-box",
 	].join(";");
+	for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu"]) {
+		container.addEventListener(eventName, stopCanvasEvent);
+	}
 
 	const outputButton = document.createElement("button");
 	outputButton.style.cssText = [
@@ -457,8 +506,10 @@ function ensureButtonWidget(node) {
 	].join(";");
 	outputButton.onmouseover = () => { outputButton.style.background = "#3a4a52"; };
 	outputButton.onmouseout = () => { outputButton.style.background = "#2a3a42"; };
-
-	outputButton.onclick = () => {
+	protectButton(outputButton);
+	outputButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
 		node.__gjjSaveAnyObjectHasOutput = !node.__gjjSaveAnyObjectHasOutput;
 		if (node.__gjjSaveAnyObjectHasOutput) {
 			addAllOutputs(node);
@@ -469,7 +520,7 @@ function ensureButtonWidget(node) {
 		}
 		updateButtonState(node);
 		setDirty(node);
-	};
+	});
 
 	const folderButton = document.createElement("button");
 	folderButton.textContent = "📁";
@@ -486,14 +537,12 @@ function ensureButtonWidget(node) {
 	].join(";");
 	folderButton.onmouseover = () => { folderButton.style.background = "#3a4a52"; };
 	folderButton.onmouseout = () => { folderButton.style.background = "#2a3a42"; };
-
-	folderButton.onclick = () => {
-		const prefixWidget = getWidget(node, "filename_prefix");
-		const prefix = prefixWidget ? String(prefixWidget.value || DEFAULT_PREFIX).trim() : DEFAULT_PREFIX;
-		const parts = prefix.split("/").filter((p) => p && p !== "." && p !== "..");
-		const folderPath = parts.length > 1 ? parts.slice(0, -1).join("/") : "";
-		api.fetchApi(`/gjj/open_folder?path=${encodeURIComponent(folderPath)}`, { method: "POST" }).catch(() => {});
-	};
+	protectButton(folderButton);
+	folderButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		openOutputFolder(node, folderButton);
+	});
 
 	container.appendChild(outputButton);
 	container.appendChild(folderButton);

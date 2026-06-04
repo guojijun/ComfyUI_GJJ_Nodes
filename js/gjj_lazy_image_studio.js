@@ -23,6 +23,10 @@ const EXECUTE_BUTTON_NAME = "__gjj_execute_button";
 const IMAGE_PREVIEW_NAME = "__gjj_image_preview";
 const LORA_CHAIN_CONFIG_INPUT = "lora_chain_config";
 const LORA_DATA_WIDGET_NAME = "lora_data";
+const SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_settings_open";
+const PARAM_VALUES_PROPERTY = "gjj_lazy_image_studio_param_values";
+const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
+const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME]);
 
 const DEFAULT_EMPTY_OPTION = { value: "", label: "未选择" };
 const DEFAULT_ROW = { enabled: true, name: "", strength: 1.0 };
@@ -47,6 +51,71 @@ const PANEL_SYNC_WIDGETS = [
 	"grow_mask_by",
 ];
 
+const RESTORE_WIDGET_TYPES = {
+	prompt: "text",
+	negative_prompt: "text",
+	main_image_index: "number",
+	width: "number",
+	height: "number",
+	batch_size: "number",
+	unet_name: "combo",
+	unet_dtype: "combo",
+	clip_name1: "combo",
+	vae_name: "combo",
+	seed: "number",
+	steps: "number",
+	cfg: "number",
+	sampler_name: "combo",
+	scheduler: "combo",
+	denoise: "number",
+	grow_mask_by: "number",
+};
+const SEED_CONTROL_KEY = "__seed_control_after_generate";
+const SEED_CONTROL_VALUES = new Set(["fixed", "increment", "decrement", "randomize"]);
+const MAX_SEED_VALUE = 0xFFFFFFFFFFFFFFFF;
+const SERIALIZED_PARAM_WIDGETS = [
+	"prompt",
+	"negative_prompt",
+	"main_image_index",
+	"width",
+	"height",
+	"batch_size",
+	"unet_name",
+	"unet_dtype",
+	"clip_name1",
+	"vae_name",
+	"seed",
+	SEED_CONTROL_KEY,
+	"steps",
+	"cfg",
+	"sampler_name",
+	"scheduler",
+	"denoise",
+	"grow_mask_by",
+	BATCH_SOURCE_WIDGET,
+];
+const DEFAULT_PARAM_VALUES = {
+	prompt: "",
+	negative_prompt: "",
+	main_image_index: 1,
+	width: 1024,
+	height: 1024,
+	batch_size: 1,
+	unet_name: "",
+	unet_dtype: "default",
+	clip_name1: "",
+	vae_name: "default",
+	seed: 0,
+	[SEED_CONTROL_KEY]: "randomize",
+	steps: 4,
+	cfg: 1.0,
+	sampler_name: "euler",
+	scheduler: "simple",
+	denoise: 1.0,
+	grow_mask_by: 6,
+	[BATCH_SOURCE_WIDGET]: "[]",
+};
+
 let MODEL_PRESETS = getCachedModelFamilyPresets();
 
 function normalizeText(value) {
@@ -67,6 +136,12 @@ async function ensureModelPresetsLoaded() {
 
 function getWidget(node, name) {
 	return GJJ_Utils.getWidget(node, name);
+}
+
+function getWidgetIndex(node, name) {
+	return Array.isArray(node?.widgets)
+		? node.widgets.findIndex((widget) => widget?.name === name)
+		: -1;
 }
 
 function getInput(node, name) {
@@ -92,6 +167,9 @@ function setWidgetEnabled(widget, enabled) {
 		return;
 	}
 	widget.disabled = !enabled;
+	if (widget.__gjjLazyVisibilityState) {
+		widget.__gjjLazyVisibilityState.disabled = !enabled;
+	}
 	if (widget.options) {
 		widget.options.disabled = !enabled;
 	}
@@ -104,6 +182,493 @@ function setWidgetEnabled(widget, enabled) {
 		widget.element.disabled = !enabled;
 		widget.element.style.opacity = opacity;
 	}
+}
+
+function settingsOpen(node) {
+	return Boolean(node?.properties?.[SETTINGS_OPEN_PROPERTY]);
+}
+
+function rememberWidgetState(widget) {
+	if (!widget || widget.__gjjLazyVisibilityState) {
+		return;
+	}
+	widget.options = widget.options || {};
+	widget.__gjjLazyVisibilityState = {
+		type: widget.type,
+		hidden: widget.hidden,
+		disabled: widget.disabled,
+		computeSize: widget.computeSize,
+		getHeight: widget.getHeight,
+		draw: widget.draw,
+		mouse: widget.mouse,
+		label: widget.label,
+		localized_name: widget.localized_name,
+		optionsHidden: widget.options.hidden,
+		optionsDisplay: widget.options.display,
+		elementDisplay: widget.element?.style?.display || "",
+		inputDisplay: widget.inputEl?.style?.display || "",
+		widgetDisplay: widget.widget?.style?.display || "",
+	};
+}
+
+function setLazyWidgetHidden(widget, hidden) {
+	if (!widget) {
+		return;
+	}
+	rememberWidgetState(widget);
+	widget.options = widget.options || {};
+	const state = widget.__gjjLazyVisibilityState || {};
+	if (hidden) {
+		widget.hidden = true;
+		widget.disabled = true;
+		widget.type = "hidden";
+		widget.options.hidden = true;
+		widget.options.display = "hidden";
+		widget.computeSize = () => [0, -4];
+		widget.getHeight = () => 0;
+		widget.draw = () => {};
+		widget.mouse = () => false;
+		widget.label = "";
+		widget.localized_name = "";
+		widget.last_y = 0;
+		widget.computedHeight = 0;
+		widget.margin_top = 0;
+		if (widget.element) widget.element.style.display = "none";
+		if (widget.inputEl) widget.inputEl.style.display = "none";
+		if (widget.widget) widget.widget.style.display = "none";
+		return;
+	}
+
+	widget.hidden = Boolean(state.hidden);
+	widget.disabled = Boolean(state.disabled);
+	widget.type = state.type && state.type !== "hidden" ? state.type : (RESTORE_WIDGET_TYPES[widget.name] || state.type || "text");
+	if (state.computeSize) widget.computeSize = state.computeSize;
+	else delete widget.computeSize;
+	if (state.getHeight) widget.getHeight = state.getHeight;
+	else delete widget.getHeight;
+	if (state.draw) widget.draw = state.draw;
+	else delete widget.draw;
+	if (state.mouse) widget.mouse = state.mouse;
+	else delete widget.mouse;
+	widget.label = state.label ?? widget.label;
+	widget.localized_name = state.localized_name ?? widget.localized_name;
+	if (state.optionsHidden === undefined) delete widget.options.hidden;
+	else widget.options.hidden = state.optionsHidden;
+	if (state.optionsDisplay === undefined) delete widget.options.display;
+	else widget.options.display = state.optionsDisplay;
+	if (widget.element) widget.element.style.display = state.elementDisplay || "";
+	if (widget.inputEl) widget.inputEl.style.display = state.inputDisplay || "";
+	if (widget.widget) widget.widget.style.display = state.widgetDisplay || "";
+}
+
+function rememberDomWidgetState(widget) {
+	if (!widget || widget.__gjjLazyDomVisibilityState) {
+		return;
+	}
+	widget.__gjjLazyDomVisibilityState = {
+		computeSize: widget.computeSize,
+		getHeight: widget.getHeight,
+		draw: widget.draw,
+		elementDisplay: widget.element?.style?.display || "",
+	};
+}
+
+function setDomWidgetHidden(widget, element, hidden) {
+	if (!widget) {
+		if (element) element.style.display = hidden ? "none" : "";
+		return;
+	}
+	rememberDomWidgetState(widget);
+	const state = widget.__gjjLazyDomVisibilityState || {};
+	widget.hidden = Boolean(hidden);
+	if (hidden) {
+		widget.computeSize = () => [0, -4];
+		widget.getHeight = () => 0;
+		widget.draw = () => {};
+		if (widget.element) widget.element.style.display = "none";
+		if (element) element.style.display = "none";
+		return;
+	}
+	if (state.computeSize) widget.computeSize = state.computeSize;
+	else delete widget.computeSize;
+	if (state.getHeight) widget.getHeight = state.getHeight;
+	else delete widget.getHeight;
+	if (state.draw) widget.draw = state.draw;
+	else delete widget.draw;
+	if (widget.element) widget.element.style.display = state.elementDisplay || "";
+	if (element) element.style.display = "";
+}
+
+function updateSettingsButtonState(node) {
+	const button = node?.__gjjSettingsButton;
+	if (!button) {
+		return;
+	}
+	const open = settingsOpen(node);
+	button.textContent = open ? "⚙️收起" : "⚙️设置";
+	button.title = open ? "收起更多设置，只保留正向提示词。" : "展开更多设置，显示反向提示词、模型、尺寸、采样和 LoRA。";
+	button.classList.toggle("on", open);
+	button.style.background = open ? "linear-gradient(135deg, #4b5563, #64748b)" : "linear-gradient(135deg, #1f2933, #374151)";
+	button.style.borderColor = open ? "#94a3b8" : "#55636f";
+	button.style.color = open ? "#ffffff" : "#e5edf2";
+}
+
+function orderLazyWidgets(node) {
+	if (!Array.isArray(node?.widgets)) {
+		return;
+	}
+	const rank = (widget) => {
+		const name = String(widget?.name || "");
+		if (widget === node.__gjjExecuteButtonWidget || name === EXECUTE_BUTTON_NAME) return 0;
+		if (name === "prompt") return 10;
+		if (widget === node.__gjjImagePreviewWidget || name === IMAGE_PREVIEW_NAME) return 100;
+		if (widget === node.__gjjLoraWidget) return settingsOpen(node) ? 80 : 900;
+		if (ALWAYS_HIDDEN_WIDGETS.has(name) || widget?.hidden) return 900;
+		return 50;
+	};
+	node.widgets = node.widgets
+		.map((widget, index) => ({ widget, index }))
+		.sort((left, right) => rank(left.widget) - rank(right.widget) || left.index - right.index)
+		.map((item) => item.widget);
+}
+
+function applySettingsVisibility(node) {
+	if (!node) {
+		return;
+	}
+	node.properties = node.properties || {};
+	const open = settingsOpen(node);
+	for (const name of PANEL_SYNC_WIDGETS) {
+		const widget = getWidget(node, name);
+		if (!widget || ALWAYS_HIDDEN_WIDGETS.has(name)) {
+			continue;
+		}
+		setLazyWidgetHidden(widget, !open && !ALWAYS_VISIBLE_WIDGETS.has(name));
+	}
+	setDomWidgetHidden(node.__gjjLoraWidget, node.__gjjLoraContainer, !open);
+	updateSettingsButtonState(node);
+	orderLazyWidgets(node);
+	GJJ_Utils.refreshNode(node);
+}
+
+function setSettingsOpen(node, open) {
+	if (!node) {
+		return;
+	}
+	node.properties = node.properties || {};
+	node.properties[SETTINGS_OPEN_PROPERTY] = Boolean(open);
+	applySettingsVisibility(node);
+}
+
+function textValue(value) {
+	return String(value ?? "").trim();
+}
+
+function isSeedControlValue(value) {
+	return SEED_CONTROL_VALUES.has(textValue(value));
+}
+
+function isSeedControlWidget(widget) {
+	const name = textValue(widget?.name).toLowerCase();
+	if (/(control_after_generate|after_generate|seed.*control|randomize)/.test(name)) {
+		return true;
+	}
+	return isSeedControlValue(widget?.value) && (widget?.hidden || String(widget?.type || "").toLowerCase() === "combo");
+}
+
+function findSeedControlWidget(node) {
+	if (!Array.isArray(node?.widgets)) {
+		return null;
+	}
+	const seedIndex = getWidgetIndex(node, "seed");
+	const stepsIndex = getWidgetIndex(node, "steps");
+	if (seedIndex >= 0 && stepsIndex > seedIndex + 1) {
+		for (let index = seedIndex + 1; index < stepsIndex; index += 1) {
+			const widget = node.widgets[index];
+			if (isSeedControlWidget(widget) || isSeedControlValue(widget?.value)) {
+				return widget;
+			}
+		}
+	}
+	return node.widgets.find((widget) => isSeedControlWidget(widget)) || null;
+}
+
+function shouldSerializeSeedControl(node) {
+	return Boolean(findSeedControlWidget(node));
+}
+
+function optionValues(node, name) {
+	const values = getWidget(node, name)?.options?.values;
+	return Array.isArray(values) ? values.map((item) => String(item ?? "")) : [];
+}
+
+function fallbackParamValue(node, name) {
+	if (name === SEED_CONTROL_KEY) {
+		return textValue(findSeedControlWidget(node)?.value) || DEFAULT_PARAM_VALUES[SEED_CONTROL_KEY];
+	}
+	const widget = getWidget(node, name);
+	if (widget?.value !== undefined && widget?.value !== null && String(widget.value) !== "") {
+		return widget.value;
+	}
+	const options = optionValues(node, name);
+	if (options.length) {
+		if (DEFAULT_PARAM_VALUES[name] && options.includes(String(DEFAULT_PARAM_VALUES[name]))) {
+			return DEFAULT_PARAM_VALUES[name];
+		}
+		return options[0];
+	}
+	return DEFAULT_PARAM_VALUES[name];
+}
+
+function isNumericLike(value) {
+	if (typeof value === "boolean") {
+		return false;
+	}
+	const text = textValue(value);
+	return text !== "" && /^-?\d+(\.\d+)?$/.test(text);
+}
+
+function isIntLike(value) {
+	if (!isNumericLike(value)) {
+		return false;
+	}
+	return Number.isInteger(Number(value));
+}
+
+function numberValue(value, fallback, min = Number.NEGATIVE_INFINITY, max = Number.POSITIVE_INFINITY) {
+	const numeric = Number(value);
+	if (!Number.isFinite(numeric)) {
+		return fallback;
+	}
+	return Math.max(min, Math.min(max, numeric));
+}
+
+function intValue(value, fallback, min = Number.MIN_SAFE_INTEGER, max = Number.MAX_SAFE_INTEGER) {
+	return Math.round(numberValue(value, fallback, min, max));
+}
+
+function comboLikeValue(name, value, node) {
+	const text = textValue(value);
+	if (!text) {
+		return false;
+	}
+	const options = optionValues(node, name);
+	if (options.includes(text)) {
+		return true;
+	}
+	if (name === "unet_name" || name === "clip_name1" || name === "vae_name") {
+		return text === "default" || /\.(safetensors|pt|pth|ckpt|bin|gguf)$/i.test(text);
+	}
+	if (name === "unet_dtype") {
+		return ["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2", "fp16", "bf16", "fp32"].includes(text.toLowerCase());
+	}
+	return false;
+}
+
+function coerceParamValue(name, value, node) {
+	if (name === "prompt" || name === "negative_prompt") return String(value ?? "");
+	if (name === "main_image_index") return intValue(value, fallbackParamValue(node, name), 1, 9999);
+	if (name === "width" || name === "height") return intValue(value, fallbackParamValue(node, name), 64, 8192);
+	if (name === "batch_size") return intValue(value, fallbackParamValue(node, name), 1, 64);
+	if (name === "seed") return intValue(value, fallbackParamValue(node, name), 0, MAX_SEED_VALUE);
+	if (name === "steps") return intValue(value, fallbackParamValue(node, name), 1, 10000);
+	if (name === "cfg") return numberValue(value, fallbackParamValue(node, name), 0, 100);
+	if (name === "denoise") return numberValue(value, fallbackParamValue(node, name), 0, 1);
+	if (name === "grow_mask_by") return intValue(value, fallbackParamValue(node, name), 0, 64);
+	if (name === SEED_CONTROL_KEY) return isSeedControlValue(value) ? textValue(value) : fallbackParamValue(node, name);
+	if (name === BATCH_SOURCE_WIDGET) return String(value ?? "[]");
+	return String(value ?? fallbackParamValue(node, name) ?? "");
+}
+
+function snapshotParamValues(source, node) {
+	if (!source || typeof source !== "object") {
+		return null;
+	}
+	const params = {};
+	let found = false;
+	for (const name of SERIALIZED_PARAM_WIDGETS) {
+		if (name === SEED_CONTROL_KEY && !shouldSerializeSeedControl(node)) {
+			continue;
+		}
+		if (Object.prototype.hasOwnProperty.call(source, name)) {
+			params[name] = coerceParamValue(name, source[name], node);
+			found = true;
+		}
+	}
+	return found ? params : null;
+}
+
+function currentParamValues(node) {
+	const params = {};
+	for (const name of SERIALIZED_PARAM_WIDGETS) {
+		if (name === SEED_CONTROL_KEY) {
+			if (shouldSerializeSeedControl(node)) {
+				params[name] = fallbackParamValue(node, name);
+			}
+			continue;
+		}
+		params[name] = coerceParamValue(name, getWidget(node, name)?.value, node);
+	}
+	return params;
+}
+
+function scoreSequentialParams(rawValues, offset, withSeedControl, node) {
+	const raw = Array.isArray(rawValues) ? rawValues : [];
+	const names = SERIALIZED_PARAM_WIDGETS.filter((name) => withSeedControl || name !== SEED_CONTROL_KEY);
+	if (offset < 0 || offset + names.length > raw.length + 1) {
+		return -1;
+	}
+	const valueAt = (name) => raw[offset + names.indexOf(name)];
+	let score = 0;
+	if (typeof valueAt("prompt") === "string") score += 1;
+	if (typeof valueAt("negative_prompt") === "string") score += 1;
+	if (isIntLike(valueAt("main_image_index"))) score += 5;
+	if (isIntLike(valueAt("width"))) score += 6;
+	if (isIntLike(valueAt("height"))) score += 6;
+	if (isIntLike(valueAt("batch_size"))) score += 5;
+	if (comboLikeValue("unet_name", valueAt("unet_name"), node)) score += 8;
+	if (comboLikeValue("unet_dtype", valueAt("unet_dtype"), node)) score += 3;
+	if (comboLikeValue("clip_name1", valueAt("clip_name1"), node)) score += 5;
+	if (comboLikeValue("vae_name", valueAt("vae_name"), node)) score += 4;
+	if (isIntLike(valueAt("seed"))) score += 6;
+	if (!withSeedControl || isSeedControlValue(valueAt(SEED_CONTROL_KEY))) score += 5;
+	if (isIntLike(valueAt("steps"))) score += 6;
+	if (isNumericLike(valueAt("cfg"))) score += 5;
+	if (comboLikeValue("sampler_name", valueAt("sampler_name"), node)) score += 5;
+	if (comboLikeValue("scheduler", valueAt("scheduler"), node)) score += 5;
+	if (isNumericLike(valueAt("denoise"))) score += 4;
+	if (isIntLike(valueAt("grow_mask_by"))) score += 4;
+	if (offset === 0) score += 1;
+	return score;
+}
+
+function buildSequentialParams(rawValues, offset, withSeedControl, node) {
+	const names = SERIALIZED_PARAM_WIDGETS.filter((name) => withSeedControl || name !== SEED_CONTROL_KEY);
+	const params = {};
+	for (const name of names) {
+		params[name] = coerceParamValue(name, rawValues[offset + names.indexOf(name)], node);
+	}
+	if (shouldSerializeSeedControl(node) && !Object.prototype.hasOwnProperty.call(params, SEED_CONTROL_KEY)) {
+		params[SEED_CONTROL_KEY] = fallbackParamValue(node, SEED_CONTROL_KEY);
+	}
+	return params;
+}
+
+function semanticParamValues(rawValues, node, serializedNode = null) {
+	const fromProperties = snapshotParamValues(
+		serializedNode?.properties?.[PARAM_VALUES_PROPERTY] || node?.properties?.[PARAM_VALUES_PROPERTY],
+		node,
+	);
+	if (fromProperties) {
+		return fromProperties;
+	}
+	const raw = Array.isArray(rawValues) ? rawValues : [];
+	let best = { score: -1, offset: 0, withSeedControl: shouldSerializeSeedControl(node) };
+	for (let offset = 0; offset < raw.length; offset += 1) {
+		for (const withSeedControl of [true, false]) {
+			const score = scoreSequentialParams(raw, offset, withSeedControl, node);
+			if (score > best.score) {
+				best = { score, offset, withSeedControl };
+			}
+		}
+	}
+	if (best.score >= 45) {
+		return buildSequentialParams(raw, best.offset, best.withSeedControl, node);
+	}
+	return snapshotParamValues(currentParamValues(node), node) || {};
+}
+
+function serializedParamValues(params, node) {
+	const values = [];
+	for (const name of SERIALIZED_PARAM_WIDGETS) {
+		if (name === SEED_CONTROL_KEY && !shouldSerializeSeedControl(node)) {
+			continue;
+		}
+		const source = Object.prototype.hasOwnProperty.call(params || {}, name)
+			? params[name]
+			: fallbackParamValue(node, name);
+		values.push(coerceParamValue(name, source, node));
+	}
+	return values;
+}
+
+function sameArrayValues(left, right) {
+	if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+		return false;
+	}
+	return left.every((value, index) => value === right[index]);
+}
+
+function applyParamValues(node, params) {
+	if (!node || !params || typeof params !== "object") {
+		return false;
+	}
+	let changed = false;
+	for (const name of PANEL_SYNC_WIDGETS) {
+		if (!Object.prototype.hasOwnProperty.call(params, name)) {
+			continue;
+		}
+		const widget = getWidget(node, name);
+		if (!widget || widget.value === params[name]) {
+			continue;
+		}
+		setWidgetValue(widget, params[name]);
+		changed = true;
+	}
+	const seedControlWidget = findSeedControlWidget(node);
+	if (seedControlWidget && Object.prototype.hasOwnProperty.call(params, SEED_CONTROL_KEY) && seedControlWidget.value !== params[SEED_CONTROL_KEY]) {
+		seedControlWidget.value = params[SEED_CONTROL_KEY];
+		seedControlWidget.callback?.(seedControlWidget.value);
+		changed = true;
+	}
+	return changed;
+}
+
+function saveParamSnapshot(node, params) {
+	if (!node) {
+		return;
+	}
+	node.properties = node.properties || {};
+	node.properties[PARAM_VALUES_PROPERTY] = { ...params };
+}
+
+function sanitizeSerializedNodeWidgets(serializedNode, node) {
+	if (!serializedNode || !Array.isArray(serializedNode.widgets_values)) {
+		return false;
+	}
+	const params = semanticParamValues(serializedNode.widgets_values, node, serializedNode);
+	const fixed = serializedParamValues(params, node);
+	const changed = !sameArrayValues(serializedNode.widgets_values, fixed);
+	serializedNode.widgets_values = fixed;
+	serializedNode.properties = serializedNode.properties || {};
+	serializedNode.properties[PARAM_VALUES_PROPERTY] = { ...params };
+	return changed;
+}
+
+function repairLiveWidgetValues(node, sourceValues = null, serializedNode = null) {
+	const params = semanticParamValues(sourceValues, node, serializedNode);
+	const changed = applyParamValues(node, params);
+	const fixed = serializedParamValues(params, node);
+	node.widgets_values = fixed.slice();
+	saveParamSnapshot(node, params);
+	if (changed) {
+		GJJ_Utils.refreshNode(node);
+		app.graph?.setDirtyCanvas?.(true, true);
+	}
+	return changed;
+}
+
+function writeSerializedWidgetValues(node, serializedNode) {
+	if (!node || !serializedNode) {
+		return;
+	}
+	const params = currentParamValues(node);
+	saveParamSnapshot(node, params);
+	serializedNode.properties = serializedNode.properties || {};
+	serializedNode.properties[PARAM_VALUES_PROPERTY] = { ...params };
+	const fixed = serializedParamValues(params, node);
+	serializedNode.widgets_values = fixed;
+	node.widgets_values = fixed.slice();
 }
 
 function preferredValue(values, desired) {
@@ -467,23 +1032,15 @@ function createButtons(node) {
 		"pointer-events:auto",
 	].join(";");
 
-	// 刷新Lora按钮
-	const refreshButton = document.createElement("button");
-	refreshButton.type = "button";
-	refreshButton.innerHTML = "🔄 刷新LoRA";
-	refreshButton.title = "刷新LoRA选项列表";
-	refreshButton.style.cssText = [
+	const sharedButtonStyle = [
 		"height:32px",
-		"padding:0 12px",
-		"border:1px solid #3b82f6",
+		"padding:0 10px",
 		"border-radius:6px",
-		"background:linear-gradient(135deg, #1e3a5f, #1e40af)",
-		"color:#e0e7ff",
+		"color:#e5edf2",
 		"font-size:12px",
-		"font-weight:500",
+		"font-weight:700",
 		"cursor:pointer",
 		"transition:all 0.15s ease",
-		"flex:1",
 		"box-sizing:border-box",
 		"position:relative",
 		"z-index:1001",
@@ -493,6 +1050,21 @@ function createButtons(node) {
 		"align-items:center",
 		"justify-content:center",
 		"gap:4px",
+		"white-space:nowrap",
+		"min-width:0",
+	];
+
+	// 刷新Lora按钮
+	const refreshButton = document.createElement("button");
+	refreshButton.type = "button";
+	refreshButton.innerHTML = "🔄 刷新LoRA";
+	refreshButton.title = "刷新LoRA选项列表";
+	refreshButton.style.cssText = [
+		...sharedButtonStyle,
+		"border:1px solid #3b82f6",
+		"background:linear-gradient(135deg, #1e3a5f, #1e40af)",
+		"color:#e0e7ff",
+		"flex:1",
 	].join(";");
 
 	// 生成图片按钮
@@ -501,36 +1073,42 @@ function createButtons(node) {
 	generateButton.innerHTML = "✨ 生成图片";
 	generateButton.title = "只执行当前节点，无需连接其他节点";
 	generateButton.style.cssText = [
-		"height:32px",
-		"padding:0 12px",
+		...sharedButtonStyle,
 		"border:1px solid #10b981",
-		"border-radius:6px",
 		"background:linear-gradient(135deg, #064e3b, #059669)",
 		"color:#a7f3d0",
-		"font-size:12px",
-		"font-weight:500",
-		"cursor:pointer",
-		"transition:all 0.15s ease",
 		"flex:1",
-		"box-sizing:border-box",
-		"position:relative",
-		"z-index:1001",
-		"pointer-events:auto",
-		"user-select:none",
-		"display:flex",
-		"align-items:center",
-		"justify-content:center",
-		"gap:4px",
 	].join(";");
+
+	const settingsButton = document.createElement("button");
+	settingsButton.type = "button";
+	settingsButton.textContent = "⚙️设置";
+	settingsButton.title = "展开更多设置";
+	settingsButton.style.cssText = [
+		...sharedButtonStyle,
+		"border:1px solid #55636f",
+		"background:linear-gradient(135deg, #1f2933, #374151)",
+		"color:#e5edf2",
+		"flex:0 0 74px",
+	].join(";");
+	node.__gjjSettingsButton = settingsButton;
 
 	// 按钮悬停效果函数
 	function setupButtonHover(btn, defaultBg, hoverBg) {
 		btn.addEventListener("mouseenter", () => {
+			if (btn === settingsButton && settingsOpen(node)) {
+				return;
+			}
 			btn.style.background = hoverBg;
 			btn.style.transform = "translateY(-1px)";
 		});
 
 		btn.addEventListener("mouseleave", () => {
+			if (btn === settingsButton && settingsOpen(node)) {
+				btn.style.transform = "translateY(0)";
+				updateSettingsButtonState(node);
+				return;
+			}
 			btn.style.background = defaultBg;
 			btn.style.transform = "translateY(0)";
 		});
@@ -550,12 +1128,22 @@ function createButtons(node) {
 	}
 
 	function setupButtonEvents(btn, handler) {
+		let lastHandledAt = 0;
+		const wrappedHandler = (event) => {
+			const now = Date.now();
+			if (now - lastHandledAt < 250) {
+				protectEvent(event);
+				return;
+			}
+			lastHandledAt = now;
+			handler(event);
+		};
 		for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "wheel"]) {
 			btn.addEventListener(eventName, protectEvent, true);
 			container.addEventListener(eventName, protectEvent, true);
 		}
-		btn.addEventListener("pointerup", handler, true);
-		btn.addEventListener("click", handler, true);
+		btn.addEventListener("pointerup", wrappedHandler, true);
+		btn.addEventListener("click", wrappedHandler, true);
 	}
 
 	// 刷新LoRA按钮
@@ -627,13 +1215,22 @@ function createButtons(node) {
 		}
 	}
 
+	function handleSettings(event) {
+		protectEvent(event);
+		setSettingsOpen(node, !settingsOpen(node));
+	}
+
 	setupButtonHover(refreshButton, "linear-gradient(135deg, #1e3a5f, #1e40af)", "linear-gradient(135deg, #1e40af, #3b82f6)");
 	setupButtonHover(generateButton, "linear-gradient(135deg, #064e3b, #059669)", "linear-gradient(135deg, #059669, #10b981)");
+	setupButtonHover(settingsButton, "linear-gradient(135deg, #1f2933, #374151)", "linear-gradient(135deg, #374151, #4b5563)");
 	setupButtonEvents(refreshButton, handleRefresh);
 	setupButtonEvents(generateButton, handleGenerate);
+	setupButtonEvents(settingsButton, handleSettings);
+	updateSettingsButtonState(node);
 
 	container.appendChild(refreshButton);
 	container.appendChild(generateButton);
+	container.appendChild(settingsButton);
 	return container;
 }
 
@@ -1667,10 +2264,11 @@ function setupLoraUi(node) {
 		}
 	};
 
-	node.addDOMWidget("LoRA 串联", "HTML", container, { serialize: false });
+	node.__gjjLoraWidget = node.addDOMWidget("LoRA 串联", "HTML", container, { serialize: false });
 
 	refreshLoraOptions(node, false).then(() => {
 		renderLoraUi(node);
+		applySettingsVisibility(node);
 	});
 }
 
@@ -1743,6 +2341,7 @@ function stabilizeNode(node, forcePreset = false) {
 
 	applyPreset(node, forcePreset);
 	syncPanelFromLinkedSources(node);
+	applySettingsVisibility(node);
 	GJJ_Utils.refreshNode(node);
 }
 
@@ -1964,8 +2563,10 @@ app.registerExtension({
 		};
 
 		const originalConfigure = nodeType.prototype.onConfigure;
-		nodeType.prototype.onConfigure = function (...args) {
-			const result = originalConfigure?.apply(this, args);
+		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
+			sanitizeSerializedNodeWidgets(serializedNode, this);
+			const result = originalConfigure?.apply(this, [serializedNode, ...args]);
+			repairLiveWidgetValues(this, serializedNode?.widgets_values, serializedNode);
 			setTimeout(() => {
 				const state = ensureLoraNodeState(this);
 				const dataWidget = this.widgets?.find((widget) => widget?.name === LORA_DATA_WIDGET_NAME);
@@ -1981,6 +2582,13 @@ app.registerExtension({
 				// 隐藏默认预览元素
 				hideDefaultPreviewElements(this);
 			}, 0);
+			return result;
+		};
+
+		const originalSerialize = nodeType.prototype.onSerialize;
+		nodeType.prototype.onSerialize = function (serializedNode, ...args) {
+			const result = originalSerialize?.apply(this, [serializedNode, ...args]);
+			writeSerializedWidgetValues(this, serializedNode);
 			return result;
 		};
 

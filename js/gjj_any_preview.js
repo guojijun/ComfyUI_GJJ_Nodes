@@ -694,8 +694,9 @@ function rememberNodeWidth(node, width = currentNodeWidth(node)) {
 		return;
 	}
 	node.properties = node.properties || {};
-	node.properties[WIDTH_PROPERTY] = Number(width);
-	node.__gjjAnyPreviewUserWidth = Number(width);
+	const nextWidth = Math.max(MIN_WIDTH, Number(width));
+	node.properties[WIDTH_PROPERTY] = nextWidth;
+	node.__gjjAnyPreviewUserWidth = nextWidth;
 }
 
 function serializedNodeWidth(serializedNode) {
@@ -708,6 +709,39 @@ function serializedNodeWidth(serializedNode) {
 	return Number.isFinite(propertyWidth) && propertyWidth > 0 ? propertyWidth : 0;
 }
 
+function storedNodeWidth(node) {
+	for (const value of [
+		node?.__gjjAnyPreviewUserWidth,
+		node?.properties?.[WIDTH_PROPERTY],
+		node?.__gjjAnyPreviewConfiguredWidth,
+	]) {
+		const width = Number(value);
+		if (Number.isFinite(width) && width > 0) {
+			return Math.max(MIN_WIDTH, width);
+		}
+	}
+	return 0;
+}
+
+function preferredNodeWidth(node) {
+	return Math.max(MIN_WIDTH, currentNodeWidth(node), storedNodeWidth(node));
+}
+
+function setNodeSizeInternal(node, width, height) {
+	if (!node || typeof node.setSize !== "function") {
+		return;
+	}
+	const token = Number(node.__gjjAnyPreviewInternalResizeToken || 0) + 1;
+	node.__gjjAnyPreviewInternalResizeToken = token;
+	node.__gjjAnyPreviewInternalResize = true;
+	node.setSize([width, height]);
+	requestAnimationFrame(() => {
+		if (node.__gjjAnyPreviewInternalResizeToken === token) {
+			node.__gjjAnyPreviewInternalResize = false;
+		}
+	});
+}
+
 function restoreConfiguredWidth(node) {
 	const width = Number(node?.__gjjAnyPreviewConfiguredWidth || node?.properties?.[WIDTH_PROPERTY] || 0);
 	const currentWidth = currentNodeWidth(node);
@@ -715,20 +749,24 @@ function restoreConfiguredWidth(node) {
 		return;
 	}
 	const height = Math.max(MIN_NODE_HEIGHT, Number(node.size?.[1] || MIN_NODE_HEIGHT));
-	node.setSize?.([width, height]);
+	setNodeSizeInternal(node, Math.max(MIN_WIDTH, width), height);
 }
 
 function setNodeHeightFromContent(node, height) {
-	const width = currentNodeWidth(node);
+	const width = preferredNodeWidth(node);
 	if (!node || !width || !Number.isFinite(Number(height))) {
 		return false;
 	}
 	const nextHeight = Math.max(MIN_NODE_HEIGHT, Number(height));
+	const currentWidth = currentNodeWidth(node);
 	const currentHeight = Number(node.size?.[1] || MIN_NODE_HEIGHT);
-	if (Math.abs(nextHeight - currentHeight) < 0.5) {
+	if (
+		Math.abs(nextHeight - currentHeight) < 0.5 &&
+		(!currentWidth || Math.abs(width - currentWidth) < 0.5)
+	) {
 		return false;
 	}
-	node.setSize?.([width, nextHeight]);
+	setNodeSizeInternal(node, width, nextHeight);
 	return true;
 }
 
@@ -789,7 +827,7 @@ function estimateImagePreviewHeight(node) {
 		: [];
 	const count = Math.max(1, images.length || 1);
 
-	const nodeWidth = Math.max(MIN_WIDTH, Number(node?.size?.[0] || MIN_WIDTH));
+	const nodeWidth = preferredNodeWidth(node);
 	// 减去 padding 和 border
 	const contentWidth = Math.max(220, nodeWidth - 36);
 
@@ -873,9 +911,14 @@ function updateLayout(node) {
 		topOffset + previewHeight + NODE_BOTTOM_PADDING,
 	);
 
-	// 关键修复：强制更新节点大小，即使高度减少
+	// 只同步内部计算出的高度；如果宽度发生布局漂移，则恢复到已保存的节点宽度。
+	const currentWidth = currentNodeWidth(node);
+	const nextWidth = preferredNodeWidth(node);
 	const currentHeight = Number(node.size?.[1] || MIN_NODE_HEIGHT);
-	if (height !== currentHeight) {
+	if (
+		Math.abs(height - currentHeight) >= 0.5 ||
+		(currentWidth && Math.abs(nextWidth - currentWidth) >= 0.5)
+	) {
 		setNodeHeightFromContent(node, height);
 
 		// 同步更新 DOM 容器高度
@@ -979,7 +1022,7 @@ function escapeAttribute(text) {
 
 function renderInlineMarkdown(text) {
 	let output = escapeHtml(text);
-	// 转义 || 防止被误解释为表格分隔符或其他特殊语法
+	// 非表格段落里的 || 只按普通文本显示；表格行会在 renderMarkdown 里先拆分。
 	output = output.replace(/\|\|/g, "&#124;&#124;");
 	// 原有规则
 	output = output.replace(/`([^`]+)`/g, "<code>$1</code>");
@@ -1004,6 +1047,64 @@ function renderInlineMarkdown(text) {
 	return output;
 }
 
+function splitDoublePipeTableRow(line) {
+	let text = String(line || "").trim();
+	if (!text.includes("||")) {
+		return [];
+	}
+	if (text.startsWith("||")) {
+		text = text.slice(2);
+	}
+	if (text.endsWith("||")) {
+		text = text.slice(0, -2);
+	}
+	return text.split("||").map((cell) => cell.trim());
+}
+
+function isDoublePipeTableLine(line) {
+	const cells = splitDoublePipeTableRow(line);
+	return cells.length >= 2 && cells.some((cell) => cell.length > 0);
+}
+
+function isMarkdownTableSeparatorRow(cells) {
+	return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(String(cell || "").replace(/\s+/g, "")));
+}
+
+function renderTableCell(tag, value) {
+	return `<${tag}>${renderInlineMarkdown(value)}</${tag}>`;
+}
+
+function renderDoublePipeTable(rows) {
+	const parsedRows = rows
+		.map(splitDoublePipeTableRow)
+		.filter((cells) => cells.length >= 2);
+	if (!parsedRows.length) {
+		return "";
+	}
+
+	const header = parsedRows[0];
+	const bodyRows = parsedRows
+		.slice(1)
+		.filter((cells) => !isMarkdownTableSeparatorRow(cells));
+	const columnCount = Math.max(
+		header.length,
+		...bodyRows.map((cells) => cells.length),
+	);
+	const padCells = (cells) => {
+		const padded = cells.slice(0, columnCount);
+		while (padded.length < columnCount) {
+			padded.push("");
+		}
+		return padded;
+	};
+
+	const headHtml = `<thead><tr>${padCells(header).map((cell) => renderTableCell("th", cell)).join("")}</tr></thead>`;
+	const bodyHtml = bodyRows.length
+		? `<tbody>${bodyRows.map((cells) => `<tr>${padCells(cells).map((cell) => renderTableCell("td", cell)).join("")}</tr>`).join("")}</tbody>`
+		: "";
+	return `<div class="gjj-any-preview-table-scroll"><table>${headHtml}${bodyHtml}</table></div>`;
+}
+
 function renderMarkdown(text) {
 	const source = String(text || "")
 		.replace(/\r\n/g, "\n")
@@ -1016,6 +1117,7 @@ function renderMarkdown(text) {
 	const parts = [];
 	const paragraph = [];
 	const list = { ordered: false, items: [] };
+	const table = { rows: [] };
 
 	const flushParagraph = () => {
 		if (!paragraph.length) {
@@ -1035,6 +1137,14 @@ function renderMarkdown(text) {
 		list.ordered = false;
 	};
 
+	const flushTable = () => {
+		if (!table.rows.length) {
+			return;
+		}
+		parts.push(renderDoublePipeTable(table.rows));
+		table.rows.length = 0;
+	};
+
 	for (const line of lines) {
 		const trimmed = line.trim();
 
@@ -1042,8 +1152,19 @@ function renderMarkdown(text) {
 		if (!trimmed) {
 			flushParagraph();
 			flushList();
+			flushTable();
 			continue;
 		}
+
+		// 处理双竖线表格：序号||生成图片提示词||变装提示词
+		if (isDoublePipeTableLine(trimmed)) {
+			flushParagraph();
+			flushList();
+			table.rows.push(trimmed);
+			continue;
+		}
+
+		flushTable();
 
 		// 处理标题
 		const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
@@ -1095,21 +1216,27 @@ function renderMarkdown(text) {
 	// 刷新所有缓冲区
 	flushParagraph();
 	flushList();
+	flushTable();
 
 	return parts.join("");
 }
 
 function clampTextPreviewLines(body) {
 	for (const element of body.querySelectorAll(
-		"p, li, h1, h2, h3, h4, h5, h6",
+		"p, li, h1, h2, h3, h4, h5, h6, th, td",
 	)) {
 		element.title = element.textContent || "";
 		element.style.maxWidth = "100%";
-		element.style.display = "block";
+		if (!["TH", "TD"].includes(element.tagName)) {
+			element.style.display = "block";
+		}
 	}
 	for (const element of body.querySelectorAll("ul, ol")) {
 		element.style.maxWidth = "100%";
 		element.style.overflow = "hidden";
+	}
+	for (const element of body.querySelectorAll("table")) {
+		element.style.maxWidth = "100%";
 	}
 }
 
@@ -2180,8 +2307,7 @@ function applyPreviewContent(node) {
 	const showAudio = kind === "audio" && audio.length > 0;
 	const showVideo = kind === "video" && video.length > 0;
 	const hasText = Boolean(String(node.__gjjAnyPreviewText || "").trim());
-	const isTextOnly = !showImage && !showAudio && !showVideo && hasText;
-	const mode = isTextOnly ? getMode(node) : MODE_PREVIEW;
+	const mode = MODE_PREVIEW;
 
 	const availableHeight = getWidgetHeight(node, node.__gjjAnyPreviewWidget);
 
@@ -2526,12 +2652,8 @@ function applyPreviewContent(node) {
 		grid.style.height = "";
 		grid.style.alignItems = "";
 
-		if (!showImage && !showAudio && !showVideo && hasText) {
-			renderStandaloneTextarea(node, body, node.__gjjAnyPreviewText || text);
-		} else {
-			body.innerHTML = renderMarkdown(text);
-			clampTextPreviewLines(body);
-		}
+		body.innerHTML = renderMarkdown(node.__gjjAnyPreviewText || text);
+		clampTextPreviewLines(body);
 	}
 
 	requestAnimationFrame(() => {
@@ -2621,6 +2743,8 @@ function ensurePreviewWidget(node) {
 		"flex-direction:column",
 		"gap:6px",
 		"width:100%",
+		"min-width:0",
+		"max-width:100%",
 		"box-sizing:border-box",
 		"margin-top:4px",
 		"user-select:text",
@@ -2636,6 +2760,8 @@ function ensurePreviewWidget(node) {
 		"color:#d9e4df",
 		"font-size:12px",
 		"line-height:1.45",
+		"min-width:0",
+		"max-width:100%",
 		"white-space:normal",
 		"overflow:visible",
 		"user-select:text",
@@ -2650,6 +2776,9 @@ function ensurePreviewWidget(node) {
 		"flex-direction:column",
 		"gap:8px",
 		"position:relative",
+		"width:100%",
+		"min-width:0",
+		"max-width:100%",
 		"border:1px solid #33434a",
 		"border-radius:10px",
 		"background:#0f1418",
@@ -2720,7 +2849,7 @@ function ensurePreviewWidget(node) {
 		.gjj-text-input-markdown-body table {
 			width: 100%;
 			border-collapse: collapse;
-			margin: 0 0 0.75em;
+			margin: 0;
 			font-size: 11px;
 		}
 		.gjj-text-input-markdown-body th,
@@ -2728,8 +2857,17 @@ function ensurePreviewWidget(node) {
 			border: 1px solid #34464e;
 			padding: 5px 7px;
 			text-align: left;
+			vertical-align: top;
+			overflow-wrap: anywhere;
+			word-break: break-word;
 		}
 		.gjj-text-input-markdown-body th { background: #1b2930; }
+		.gjj-text-input-markdown-body .gjj-any-preview-table-scroll {
+			width: 100%;
+			max-width: 100%;
+			overflow-x: auto;
+			margin: 0 0 0.75em;
+		}
 		.gjj-text-input-markdown-body a { color: #7dd3fc; text-decoration: none; }
 		.gjj-text-input-markdown-body a:hover { text-decoration: underline; }
 		.gjj-text-input-markdown-body img {
@@ -2756,6 +2894,8 @@ function ensurePreviewWidget(node) {
 		"grid-template-columns:repeat(auto-fit, minmax(140px, 1fr))",
 		"gap:1px",
 		"width:100%",
+		"min-width:0",
+		"max-width:100%",
 		"order:1",
 	].join(";");
 	previewWrap.appendChild(grid);
@@ -2792,8 +2932,8 @@ function ensurePreviewWidget(node) {
 		},
 	);
 	if (widget) {
-		widget.computeSize = () => [
-			0,
+		widget.computeSize = (width) => [
+			Math.max(MIN_WIDTH, Number(width) || preferredNodeWidth(node)),
 			shouldUseEstimatedImageLayout(node)
 				? estimateImagePreviewHeight(node)
 				: Math.max(MIN_NODE_HEIGHT, measureHeight(node)),
@@ -2912,10 +3052,12 @@ app.registerExtension({
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode, ...args) {
 			serializedNode = serializedNode || {};
-			rememberNodeWidth(this);
+			if (!this.__gjjAnyPreviewInternalResize) {
+				rememberNodeWidth(this);
+			}
 			const result = originalOnSerialize?.apply(this, [serializedNode, ...args]);
 			serializedNode.properties = serializedNode.properties || {};
-			serializedNode.properties[WIDTH_PROPERTY] = currentNodeWidth(this) || this.__gjjAnyPreviewUserWidth || serializedNode.properties[WIDTH_PROPERTY];
+			serializedNode.properties[WIDTH_PROPERTY] = preferredNodeWidth(this) || serializedNode.properties[WIDTH_PROPERTY];
 			return result;
 		};
 
@@ -2966,7 +3108,9 @@ app.registerExtension({
 			const result = typeof originalOnResize === "function"
 				? originalOnResize.apply(this, args)
 				: undefined;
-			rememberNodeWidth(this);
+			if (!this.__gjjAnyPreviewInternalResize) {
+				rememberNodeWidth(this);
+			}
 			// 用户手动调整宽度后，只按当前宽度重新计算高度，不反向改宽度。
 			scheduleLayout(this);
 			return result;

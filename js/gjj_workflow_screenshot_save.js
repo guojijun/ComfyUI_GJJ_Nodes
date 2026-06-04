@@ -22,7 +22,10 @@ import { api } from "/scripts/api.js";
 	const LEGACY_FILENAME_TEMPLATE = "GJJ_workflow_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png";
 	const DEFAULT_FILENAME_TEMPLATE = "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png";
 	const DEFAULT_SORT_MODE = "mtime_desc";
-	const DEFAULT_FILTER_MODE = "all";
+	const DEFAULT_FILTER_MODE = "openable";
+	const DEFAULT_PAGE_SIZE = 12;
+	const MIN_PAGE_SIZE = 1;
+	const MAX_PAGE_SIZE = 100;
 	const SORT_MODE_LABELS = {
 		mtime_desc: "最新优先",
 		mtime_asc: "最旧优先",
@@ -31,12 +34,14 @@ import { api } from "/scripts/api.js";
 		title_asc: "标题 A-Z",
 		openable_first: "可打开优先",
 	};
-	const FILTER_MODE_LABELS = {
-		all: "全部",
-		openable: "可打开",
-		missing: "无元数据",
-	};
-
+	const SORT_MODE_BUTTONS = [
+		{ mode: "mtime_desc", label: "🕒最新", title: "按修改时间从新到旧排序" },
+		{ mode: "mtime_asc", label: "⏳最旧", title: "按修改时间从旧到新排序" },
+		{ mode: "name_asc", label: "🔤A-Z", title: "按文件名 A-Z 排序" },
+		{ mode: "name_desc", label: "🔡Z-A", title: "按文件名 Z-A 排序" },
+		{ mode: "title_asc", label: "🏷️标题", title: "按工作流标题排序" },
+		{ mode: "openable_first", label: "✅可打开", title: "可打开的截图优先显示" },
+	];
 	let crcTable = null;
 	let busy = false;
 	let previewItems = [];
@@ -50,6 +55,7 @@ import { api } from "/scripts/api.js";
 	let settings = loadSettings();
 	let lastWorkflowObject = null;
 	let keyboardShortcutsInstalled = false;
+	let previewPage = 1;
 
 	function graphNodes() {
 		return Array.isArray(app?.graph?._nodes) ? app.graph._nodes.filter(Boolean) : [];
@@ -205,13 +211,24 @@ import { api } from "/scripts/api.js";
 		return Object.prototype.hasOwnProperty.call(options, key) ? key : fallback;
 	}
 
+	function clampInteger(value, fallback, min, max) {
+		const parsed = Number.parseInt(value, 10);
+		if (!Number.isFinite(parsed)) return fallback;
+		return Math.min(max, Math.max(min, parsed));
+	}
+
+	function pageSizeValue(value) {
+		return clampInteger(value, DEFAULT_PAGE_SIZE, MIN_PAGE_SIZE, MAX_PAGE_SIZE);
+	}
+
 	function normalizeSettings(value = {}) {
 		return {
 			filenameTemplate: String(value?.filenameTemplate || value?.filename_template || DEFAULT_FILENAME_TEMPLATE),
 			directoryPath: String(value?.directoryPath || value?.directory || ""),
 			sortMode: choice(value?.sortMode || value?.sort_mode, SORT_MODE_LABELS, DEFAULT_SORT_MODE),
-			filterMode: choice(value?.filterMode || value?.filter_mode, FILTER_MODE_LABELS, DEFAULT_FILTER_MODE),
+			filterMode: DEFAULT_FILTER_MODE,
 			searchText: String(value?.searchText || value?.search_text || "").slice(0, 160),
+			pageSize: pageSizeValue(value?.pageSize ?? value?.page_size),
 		};
 	}
 
@@ -226,6 +243,8 @@ import { api } from "/scripts/api.js";
 
 	function saveSettings() {
 		try {
+			settings.filterMode = DEFAULT_FILTER_MODE;
+			settings.pageSize = pageSizeValue(settings.pageSize);
 			localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 		} catch (_) {}
 	}
@@ -243,8 +262,9 @@ import { api } from "/scripts/api.js";
 			directory: directoryPathForBackendSettings(),
 			filename_template: String(settings.filenameTemplate || DEFAULT_FILENAME_TEMPLATE),
 			sort_mode: choice(settings.sortMode, SORT_MODE_LABELS, DEFAULT_SORT_MODE),
-			filter_mode: choice(settings.filterMode, FILTER_MODE_LABELS, DEFAULT_FILTER_MODE),
+			filter_mode: DEFAULT_FILTER_MODE,
 			search_text: String(settings.searchText || "").slice(0, 160),
+			page_size: pageSizeValue(settings.pageSize),
 		};
 	}
 
@@ -330,10 +350,11 @@ import { api } from "/scripts/api.js";
 			settings.filenameTemplate = String(workflowSettings.filename_template || DEFAULT_FILENAME_TEMPLATE);
 		}
 		settings.sortMode = choice(workflowSettings.sort_mode || workflowSettings.sortMode || settings.sortMode, SORT_MODE_LABELS, DEFAULT_SORT_MODE);
-		settings.filterMode = choice(workflowSettings.filter_mode || workflowSettings.filterMode || settings.filterMode, FILTER_MODE_LABELS, DEFAULT_FILTER_MODE);
+		settings.filterMode = DEFAULT_FILTER_MODE;
 		if (workflowSettings.search_text != null || workflowSettings.searchText != null) {
 			settings.searchText = String(workflowSettings.search_text ?? workflowSettings.searchText ?? "").slice(0, 160);
 		}
+		settings.pageSize = pageSizeValue(workflowSettings.page_size ?? workflowSettings.pageSize ?? settings.pageSize);
 		const current = canonicalPathText(settings.directoryPath);
 		const legacy = canonicalPathText(backendLegacyDefaultDirectory);
 		if (backendDefaultDirectory && (!current || (legacy && current === legacy) || looksLikeLegacyDefaultDirectory(settings.directoryPath) || workflowSettings.directory)) {
@@ -2062,71 +2083,81 @@ import { api } from "/scripts/api.js";
 		overlay.innerHTML = `
 			<div class="gjj-workflow-preview-panel">
 				<div class="gjj-workflow-preview-head">
-					<div class="gjj-workflow-preview-title">工作流截图</div>
+					<div class="gjj-workflow-preview-title">🖼️ 工作流截图</div>
 					<div class="gjj-workflow-preview-actions">
-						<button type="button" data-gjj-action="close">×</button>
+						<button type="button" data-gjj-action="save-current">💾保存</button>
+						<button type="button" data-gjj-action="refresh-list">🔄刷新</button>
+						<button type="button" data-gjj-action="open-dir">📂目录</button>
+						<button type="button" data-gjj-action="settings-toggle" aria-expanded="false">⚙️设置</button>
+						<button type="button" data-gjj-action="shortcut-help">⌨️快捷键</button>
+						<button type="button" data-gjj-action="close">❌关闭</button>
 					</div>
 				</div>
-				<div class="gjj-workflow-save-options">
+				<div class="gjj-workflow-save-options" hidden>
 					<div class="gjj-workflow-save-row">
 						<label>文件名</label>
 						<input type="text" data-gjj-setting="filename-template" spellcheck="false">
-						<button type="button" data-gjj-action="reset-name">↺</button>
+						<button type="button" data-gjj-action="reset-name">🔁</button>
 					</div>
 					<div class="gjj-workflow-save-row">
 						<label>默认目录</label>
 						<input type="text" data-gjj-setting="directory-path" spellcheck="false">
-						<button type="button" data-gjj-action="choose-dir">📁</button>
-						<button type="button" data-gjj-action="clear-dir">×</button>
+						<button type="button" data-gjj-action="open-dir">📂</button>
+						<button type="button" data-gjj-action="clear-dir">♻️</button>
+					</div>
+					<div class="gjj-workflow-save-row">
+						<label>每页数量</label>
+						<input type="number" data-gjj-setting="page-size" min="${MIN_PAGE_SIZE}" max="${MAX_PAGE_SIZE}" step="1">
 					</div>
 				</div>
 				<div class="gjj-workflow-filter-options">
 					<div class="gjj-workflow-save-row gjj-workflow-search-row">
 						<label>筛选</label>
 						<input type="text" data-gjj-setting="search-text" spellcheck="false" placeholder="文件名 / 标题">
-						<button type="button" data-gjj-action="refresh-list">↻</button>
 					</div>
-					<div class="gjj-workflow-save-row">
+					<div class="gjj-workflow-save-row gjj-workflow-sort-row">
 						<label>排序</label>
-						<select data-gjj-setting="sort-mode">
-							<option value="mtime_desc">最新优先</option>
-							<option value="mtime_asc">最旧优先</option>
-							<option value="name_asc">文件名 A-Z</option>
-							<option value="name_desc">文件名 Z-A</option>
-							<option value="title_asc">标题 A-Z</option>
-							<option value="openable_first">可打开优先</option>
-						</select>
-					</div>
-					<div class="gjj-workflow-save-row">
-						<label>显示</label>
-						<select data-gjj-setting="filter-mode">
-							<option value="all">全部</option>
-							<option value="openable">可打开</option>
-							<option value="missing">无元数据</option>
-						</select>
-						<button type="button" data-gjj-action="shortcut-help">⌨</button>
+						<div class="gjj-workflow-sort-buttons">
+							${SORT_MODE_BUTTONS.map((item) => `<button type="button" data-gjj-sort="${item.mode}" title="${item.title}">${item.label}</button>`).join("")}
+						</div>
 					</div>
 				</div>
 				<div class="gjj-workflow-shortcut-help" hidden>Alt+Shift+S 保存截图 · Alt+Shift+O 打开截图库 · Ctrl+F 聚焦筛选 · Alt+R 刷新 · Esc 关闭</div>
 				<div class="gjj-workflow-preview-status"></div>
 				<div class="gjj-workflow-preview-grid"></div>
+				<div class="gjj-workflow-pagination"></div>
 			</div>
 		`;
 		const stop = (event) => event.stopPropagation();
 		for (const eventName of ["pointerdown", "mousedown", "click", "dblclick", "wheel", "contextmenu"]) {
 			overlay.addEventListener(eventName, stop);
 		}
-		overlay.querySelector("[data-gjj-action='close']")?.addEventListener("click", () => {
+		const onAction = (action, handler) => {
+			for (const button of overlay.querySelectorAll(`[data-gjj-action='${action}']`)) {
+				button.addEventListener("click", handler);
+			}
+		};
+		const setSettingsPanelOpen = (open) => {
+			const panel = overlay.querySelector(".gjj-workflow-save-options");
+			if (panel) panel.hidden = !open;
+			updateSaveSettingsUI(false);
+		};
+		onAction("close", () => {
 			closePreviewOverlay();
 		});
-		overlay.querySelector("[data-gjj-action='choose-dir']")?.addEventListener("click", () => openBackendDirectory());
-		overlay.querySelector("[data-gjj-action='clear-dir']")?.addEventListener("click", () => resetBackendDirectory());
-		overlay.querySelector("[data-gjj-action='refresh-list']")?.addEventListener("click", () => refreshBackendScreenshotList());
-		overlay.querySelector("[data-gjj-action='shortcut-help']")?.addEventListener("click", () => {
+		onAction("save-current", (event) => saveWorkflowScreenshot(event.currentTarget));
+		onAction("open-dir", () => openBackendDirectory());
+		onAction("clear-dir", () => resetBackendDirectory());
+		onAction("refresh-list", () => refreshBackendScreenshotList());
+		onAction("settings-toggle", () => {
+			const panel = overlay.querySelector(".gjj-workflow-save-options");
+			setSettingsPanelOpen(!!panel?.hidden);
+		});
+		onAction("shortcut-help", () => {
 			const help = overlay.querySelector(".gjj-workflow-shortcut-help");
 			if (help) help.hidden = !help.hidden;
 		});
-		overlay.querySelector("[data-gjj-action='reset-name']")?.addEventListener("click", () => {
+		onAction("reset-name", () => {
 			settings.filenameTemplate = DEFAULT_FILENAME_TEMPLATE;
 			saveSettings();
 			scheduleBackendWorkflowSettingsSave();
@@ -2142,28 +2173,42 @@ import { api } from "/scripts/api.js";
 		const searchInput = overlay.querySelector("[data-gjj-setting='search-text']");
 		searchInput?.addEventListener("input", () => {
 			settings.searchText = String(searchInput.value || "").slice(0, 160);
+			previewPage = 1;
 			saveSettings();
 			scheduleBackendWorkflowSettingsSave();
 			renderPreviewItems();
 			updatePreviewSummary();
 		});
-		const sortSelect = overlay.querySelector("[data-gjj-setting='sort-mode']");
-		sortSelect?.addEventListener("change", () => {
-			settings.sortMode = choice(sortSelect.value, SORT_MODE_LABELS, DEFAULT_SORT_MODE);
+		for (const button of overlay.querySelectorAll("[data-gjj-sort]")) {
+			button.addEventListener("click", () => {
+				settings.sortMode = choice(button.dataset.gjjSort, SORT_MODE_LABELS, DEFAULT_SORT_MODE);
+				settings.filterMode = DEFAULT_FILTER_MODE;
+				previewPage = 1;
+				saveSettings();
+				scheduleBackendWorkflowSettingsSave();
+				updateSaveSettingsUI(false);
+				renderPreviewItems();
+				updatePreviewSummary();
+			});
+		}
+		const pageSizeInput = overlay.querySelector("[data-gjj-setting='page-size']");
+		const commitPageSize = () => {
+			if (!pageSizeInput) return;
+			settings.pageSize = pageSizeValue(pageSizeInput.value);
+			pageSizeInput.value = String(settings.pageSize);
+			previewPage = 1;
 			saveSettings();
 			scheduleBackendWorkflowSettingsSave();
-			updateSaveSettingsUI(false);
 			renderPreviewItems();
 			updatePreviewSummary();
-		});
-		const filterSelect = overlay.querySelector("[data-gjj-setting='filter-mode']");
-		filterSelect?.addEventListener("change", () => {
-			settings.filterMode = choice(filterSelect.value, FILTER_MODE_LABELS, DEFAULT_FILTER_MODE);
-			saveSettings();
-			scheduleBackendWorkflowSettingsSave();
-			updateSaveSettingsUI(false);
-			renderPreviewItems();
-			updatePreviewSummary();
+		};
+		pageSizeInput?.addEventListener("change", commitPageSize);
+		pageSizeInput?.addEventListener("blur", commitPageSize);
+		pageSizeInput?.addEventListener("keydown", (event) => {
+			if (event.key === "Enter") {
+				event.preventDefault();
+				commitPageSize();
+			}
 		});
 		const directoryInput = overlay.querySelector("[data-gjj-setting='directory-path']");
 		directoryInput?.addEventListener("input", () => {
@@ -2189,20 +2234,39 @@ import { api } from "/scripts/api.js";
 		}
 		const reset = overlay.querySelector("[data-gjj-action='reset-name']");
 		if (reset) reset.title = "恢复默认文件名模板";
-		const choose = overlay.querySelector("[data-gjj-action='choose-dir']");
-		if (choose) choose.title = "打开当前保存目录";
+		for (const choose of overlay.querySelectorAll("[data-gjj-action='open-dir']")) {
+			choose.title = "打开当前保存目录";
+		}
 		const clear = overlay.querySelector("[data-gjj-action='clear-dir']");
 		if (clear) clear.title = "恢复包内 workflows 默认目录";
 		const search = overlay.querySelector("[data-gjj-setting='search-text']");
 		if (search && updateInput) search.value = String(settings.searchText || "");
-		const sort = overlay.querySelector("[data-gjj-setting='sort-mode']");
-		if (sort) sort.value = choice(settings.sortMode, SORT_MODE_LABELS, DEFAULT_SORT_MODE);
-		const filter = overlay.querySelector("[data-gjj-setting='filter-mode']");
-		if (filter) filter.value = choice(settings.filterMode, FILTER_MODE_LABELS, DEFAULT_FILTER_MODE);
-		const refresh = overlay.querySelector("[data-gjj-action='refresh-list']");
-		if (refresh) refresh.title = "刷新当前保存目录";
-		const shortcut = overlay.querySelector("[data-gjj-action='shortcut-help']");
-		if (shortcut) shortcut.title = "显示快捷键";
+		const sortMode = choice(settings.sortMode, SORT_MODE_LABELS, DEFAULT_SORT_MODE);
+		for (const button of overlay.querySelectorAll("[data-gjj-sort]")) {
+			const active = button.dataset.gjjSort === sortMode;
+			button.classList.toggle("gjj-active", active);
+			button.setAttribute("aria-pressed", active ? "true" : "false");
+		}
+		const pageSize = overlay.querySelector("[data-gjj-setting='page-size']");
+		if (pageSize && updateInput) pageSize.value = String(pageSizeValue(settings.pageSize));
+		for (const refresh of overlay.querySelectorAll("[data-gjj-action='refresh-list']")) {
+			refresh.title = "刷新当前保存目录";
+		}
+		for (const shortcut of overlay.querySelectorAll("[data-gjj-action='shortcut-help']")) {
+			shortcut.title = "显示快捷键";
+		}
+		const settingsButton = overlay.querySelector("[data-gjj-action='settings-toggle']");
+		const settingsPanel = overlay.querySelector(".gjj-workflow-save-options");
+		if (settingsButton) {
+			const open = !settingsPanel?.hidden;
+			settingsButton.classList.toggle("gjj-active", open);
+			settingsButton.setAttribute("aria-expanded", open ? "true" : "false");
+			settingsButton.title = open ? "隐藏文件名、目录和分页设置" : "打开文件名、目录和分页设置";
+		}
+		const save = overlay.querySelector("[data-gjj-action='save-current']");
+		if (save) save.title = "保存当前工作流截图";
+		const close = overlay.querySelector("[data-gjj-action='close']");
+		if (close) close.title = "关闭截图预览";
 	}
 
 	function setPreviewStatus(text, tone = "") {
@@ -2242,7 +2306,7 @@ import { api } from "/scripts/api.js";
 	}
 
 	function sortedFilteredPreviewItems() {
-		const filterMode = choice(settings.filterMode, FILTER_MODE_LABELS, DEFAULT_FILTER_MODE);
+		const filterMode = DEFAULT_FILTER_MODE;
 		const query = String(settings.searchText || "").trim().toLowerCase();
 		const items = previewItems.filter((item) => {
 			if (filterMode === "openable" && !item.workflow) return false;
@@ -2261,12 +2325,67 @@ import { api } from "/scripts/api.js";
 		return items;
 	}
 
+	function previewPageInfo(items = sortedFilteredPreviewItems()) {
+		const pageSize = pageSizeValue(settings.pageSize);
+		const totalItems = items.length;
+		const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+		previewPage = clampInteger(previewPage, 1, 1, totalPages);
+		const start = totalItems ? (previewPage - 1) * pageSize : 0;
+		const end = totalItems ? Math.min(totalItems, start + pageSize) : 0;
+		return {
+			page: previewPage,
+			pageSize,
+			totalItems,
+			totalPages,
+			start,
+			end,
+			items: items.slice(start, end),
+		};
+	}
+
+	function renderPagination(page = previewPageInfo()) {
+		const overlay = previewOverlay();
+		const pagination = overlay.querySelector(".gjj-workflow-pagination");
+		if (!pagination) return;
+		pagination.textContent = "";
+		if (!page.totalItems) {
+			pagination.hidden = true;
+			return;
+		}
+		pagination.hidden = false;
+
+		const makeButton = (label, title, disabled, targetPage) => {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.textContent = label;
+			button.title = title;
+			button.disabled = disabled;
+			button.addEventListener("click", () => {
+				previewPage = targetPage;
+				renderPreviewItems();
+				updatePreviewSummary();
+			});
+			return button;
+		};
+		const label = document.createElement("span");
+		label.className = "gjj-workflow-pagination-label";
+		label.textContent = `📄 第 ${page.page}/${page.totalPages} 页 · ${page.start + 1}-${page.end}/${page.totalItems} · 每页 ${page.pageSize} 张`;
+		pagination.append(
+			makeButton("⏮️首页", "跳到第一页", page.page <= 1, 1),
+			makeButton("◀️上一页", "上一页", page.page <= 1, Math.max(1, page.page - 1)),
+			label,
+			makeButton("下一页▶️", "下一页", page.page >= page.totalPages, Math.min(page.totalPages, page.page + 1)),
+			makeButton("末页⏭️", "跳到最后一页", page.page >= page.totalPages, page.totalPages)
+		);
+	}
+
 	function updatePreviewSummary() {
 		const total = previewItems.length;
 		const usable = previewItems.filter((item) => item.workflow).length;
-		const visible = sortedFilteredPreviewItems().length;
-		const suffix = total === visible ? "" : `，当前显示 ${visible} 张`;
-		setPreviewStatus(`保存目录：${effectiveDirectory()}；已读取 ${total} 张，${usable} 张可打开${suffix}。`, usable ? "ok" : "warn");
+		const visibleItems = sortedFilteredPreviewItems();
+		const page = previewPageInfo(visibleItems);
+		const range = visibleItems.length ? `，当前 ${page.start + 1}-${page.end}/${visibleItems.length} 张` : "，当前无匹配";
+		setPreviewStatus(`保存目录：${effectiveDirectory()}；已读取 ${total} 张，${usable} 张可打开${range}。`, usable ? "ok" : "warn");
 	}
 
 	function renderPreviewItems() {
@@ -2276,6 +2395,8 @@ import { api } from "/scripts/api.js";
 		grid.textContent = "";
 
 		const items = sortedFilteredPreviewItems();
+		const page = previewPageInfo(items);
+		renderPagination(page);
 		if (!items.length) {
 			const empty = document.createElement("div");
 			empty.className = "gjj-workflow-preview-empty";
@@ -2284,7 +2405,7 @@ import { api } from "/scripts/api.js";
 			return;
 		}
 
-		for (const item of items) {
+		for (const item of page.items) {
 			const card = document.createElement("button");
 			card.type = "button";
 			card.className = "gjj-workflow-preview-card";
@@ -2365,6 +2486,7 @@ import { api } from "/scripts/api.js";
 			error: "",
 			directory: saved?.directory || effectiveDirectory(),
 		});
+		previewPage = 1;
 		while (previewItems.length > 60) {
 			const old = previewItems.pop();
 			if (old?.url && String(old.url).startsWith("blob:")) {
@@ -2387,6 +2509,7 @@ import { api } from "/scripts/api.js";
 		} catch (_) {
 			updateSaveSettingsUI();
 		}
+		previewPage = 1;
 		setPreviewStatus("正在读取保存目录...", "");
 		const data = await apiJson(`/gjj/workflow_screenshot/list?directory=${encodeURIComponent(effectiveDirectory())}`);
 		settings.directoryPath = String(data.directory || effectiveDirectory());
@@ -2533,25 +2656,42 @@ import { api } from "/scripts/api.js";
 		style.textContent = `
 #${TOOLBAR_ID} {
 	position: fixed;
-	left: 96px;
-	top: 92px;
+	left: 50%;
+	top: 12px;
 	z-index: 12000;
 	display: flex;
+	flex-direction: row;
 	gap: 6px;
 	align-items: center;
-	pointer-events: auto;
+	transform: translateX(-50%);
+	pointer-events: none;
+}
+#${TOOLBAR_ID}.gjj-workflow-toolbar-topbar {
+	position: static;
+	right: auto;
+	bottom: auto;
+	z-index: auto;
+	flex: 0 0 auto;
+	flex-direction: row;
+	margin-left: 8px;
+	align-self: center;
+	transform: none;
+}
+#${TOOLBAR_ID}.gjj-workflow-toolbar-hidden {
+	display: none;
 }
 #${TOOLBAR_ID} .gjj-workflow-screenshot-button {
-	width: 36px;
-	height: 36px;
+	width: 34px;
+	height: 34px;
 	padding: 0;
 	border: 1px solid rgba(117, 137, 148, .5);
 	border-radius: 8px;
 	background: rgba(28, 32, 36, .92);
 	color: #f2f6f4;
-	font: 20px/34px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+	font: 19px/32px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
 	cursor: pointer;
 	box-sizing: border-box;
+	pointer-events: auto;
 	box-shadow: 0 4px 14px rgba(0, 0, 0, .28);
 	transition: border-color .16s ease, background .16s ease, transform .16s ease, opacity .16s ease;
 }
@@ -2596,40 +2736,54 @@ import { api } from "/scripts/api.js";
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-head {
 	display: flex;
-	align-items: center;
+	align-items: flex-start;
 	justify-content: space-between;
 	gap: 12px;
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-title {
+	flex: 0 0 auto;
 	font: 800 14px/20px sans-serif;
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-actions {
 	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
 	gap: 6px;
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-actions button {
-	width: 32px;
+	width: auto;
+	min-width: 68px;
 	height: 30px;
-	padding: 0;
+	padding: 0 9px;
 	border: 1px solid rgba(117, 137, 148, .5);
 	border-radius: 7px;
 	background: #1b242a;
 	color: #edf6f1;
-	font: 700 17px/28px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+	font: 700 12px/28px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "Segoe UI", sans-serif;
 	cursor: pointer;
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-actions button:hover {
 	border-color: rgba(105, 184, 139, .85);
 	background: #24372c;
 }
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-actions button.gjj-active {
+	border-color: rgba(113, 219, 150, .95);
+	background: rgba(36, 86, 56, .96);
+	color: #f4fff7;
+}
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-save-options[hidden],
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-shortcut-help[hidden],
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-pagination[hidden] {
+	display: none !important;
+}
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-save-options {
 	display: grid;
-	grid-template-columns: minmax(260px, 1fr) minmax(240px, .85fr);
+	grid-template-columns: minmax(260px, 1fr) minmax(240px, .85fr) minmax(140px, .35fr);
 	gap: 8px;
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-filter-options {
-	display: grid;
-	grid-template-columns: minmax(260px, 1fr) minmax(170px, .44fr) minmax(190px, .48fr);
+	display: flex;
+	flex-direction: column;
 	gap: 8px;
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-save-row {
@@ -2665,6 +2819,10 @@ import { api } from "/scripts/api.js";
 	font-family: "Segoe UI", sans-serif;
 	cursor: pointer;
 }
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-save-row input[type="number"] {
+	flex: 0 0 92px;
+	font-family: "Segoe UI", sans-serif;
+}
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-search-row input {
 	font-family: "Segoe UI", sans-serif;
 }
@@ -2692,6 +2850,31 @@ import { api } from "/scripts/api.js";
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-save-row button:hover {
 	border-color: rgba(105, 184, 139, .82);
 	background: #24372c;
+}
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-sort-row {
+	align-items: flex-start;
+}
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-sort-row label {
+	line-height: 28px;
+}
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-sort-buttons {
+	min-width: 0;
+	flex: 1 1 auto;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-sort-buttons button {
+	width: auto;
+	min-width: 76px;
+	height: 28px;
+	padding: 0 9px;
+	font: 700 12px/26px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "Segoe UI", sans-serif;
+}
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-sort-buttons button.gjj-active {
+	border-color: rgba(113, 219, 150, .95);
+	background: rgba(36, 86, 56, .96);
+	color: #f4fff7;
 }
 #${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-status {
 	min-height: 18px;
@@ -2768,24 +2951,130 @@ import { api } from "/scripts/api.js";
 	color: #98a7ad;
 	font: 11px/14px sans-serif;
 }
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-pagination {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: center;
+	gap: 7px;
+	padding-top: 2px;
+}
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-pagination button {
+	height: 28px;
+	padding: 0 9px;
+	border: 1px solid rgba(117, 137, 148, .42);
+	border-radius: 6px;
+	background: #1b242a;
+	color: #edf6f1;
+	font: 700 12px/26px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "Segoe UI", sans-serif;
+	cursor: pointer;
+}
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-pagination button:hover:not(:disabled) {
+	border-color: rgba(105, 184, 139, .82);
+	background: #24372c;
+}
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-pagination button:disabled {
+	cursor: not-allowed;
+	opacity: .45;
+}
+#${PREVIEW_OVERLAY_ID} .gjj-workflow-pagination-label {
+	color: #b8c8c0;
+	font: 700 12px/18px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "Segoe UI", sans-serif;
+}
 @media (max-width: 760px) {
 	#${PREVIEW_OVERLAY_ID} .gjj-workflow-save-options,
 	#${PREVIEW_OVERLAY_ID} .gjj-workflow-filter-options {
 		grid-template-columns: 1fr;
+	}
+	#${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-head {
+		flex-direction: column;
+	}
+	#${PREVIEW_OVERLAY_ID} .gjj-workflow-preview-actions {
+		justify-content: flex-start;
 	}
 }
 `;
 		document.head.appendChild(style);
 	}
 
+	function readableElementText(element) {
+		return [
+			element?.textContent,
+			element?.ariaLabel,
+			element?.title,
+			element?.getAttribute?.("aria-label"),
+			element?.getAttribute?.("title"),
+		].join(" ").replace(/\s+/g, " ").trim();
+	}
+
+	function isVisibleElement(element) {
+		if (!element || !(element instanceof Element)) return false;
+		const rect = element.getBoundingClientRect?.();
+		if (!rect || rect.width < 8 || rect.height < 8) return false;
+		const style = window.getComputedStyle?.(element);
+		return style?.display !== "none" && style?.visibility !== "hidden" && Number(style?.opacity ?? 1) > 0;
+	}
+
+	function directChildContaining(parent, child) {
+		let node = child;
+		while (node?.parentElement && node.parentElement !== parent) node = node.parentElement;
+		return node?.parentElement === parent ? node : null;
+	}
+
+	function findTopbarInsertPoint() {
+		const controls = Array.from(document.querySelectorAll("button,[role='button']"));
+		const manager = controls.find((element) => {
+			if (!isVisibleElement(element)) return false;
+			const text = readableElementText(element);
+			const rect = element.getBoundingClientRect();
+			return rect.top < 140 && /管理扩展功能|manage extensions?|extension manager/i.test(text);
+		});
+		if (!manager) return null;
+
+		const managerRect = manager.getBoundingClientRect();
+		let row = null;
+		for (let node = manager.parentElement, depth = 0; node && depth < 7; node = node.parentElement, depth += 1) {
+			if (!isVisibleElement(node)) continue;
+			const rect = node.getBoundingClientRect();
+			if (rect.top > 160 || rect.height > 96 || rect.width < managerRect.width) continue;
+			const style = window.getComputedStyle?.(node);
+			const text = readableElementText(node);
+			const hasTopbarText = /管理扩展功能|运行|活动任务|queue|run/i.test(text);
+			const looksLikeRow = style?.display?.includes("flex") || rect.width > managerRect.width + 80;
+			if (hasTopbarText && looksLikeRow) row = node;
+			if (row && rect.width > managerRect.width + 220) break;
+		}
+		if (!row) return null;
+		return { row, after: directChildContaining(row, manager) || manager };
+	}
+
 	function positionToolbar(toolbar) {
 		if (!toolbar) return;
-		const element = canvasElement();
-		const rect = element?.getBoundingClientRect?.();
-		const left = rect ? Math.max(96, Math.round(rect.left + 12)) : 96;
-		const top = rect ? Math.max(92, Math.round(rect.top + 92)) : 92;
-		toolbar.style.left = `${left}px`;
-		toolbar.style.top = `${top}px`;
+		toolbar.classList.remove("gjj-workflow-toolbar-hidden");
+
+		const insertPoint = findTopbarInsertPoint();
+		if (insertPoint?.row) {
+			const next = insertPoint.after?.nextSibling || null;
+			if (toolbar.parentElement !== insertPoint.row || toolbar.previousSibling !== insertPoint.after) {
+				insertPoint.row.insertBefore(toolbar, next);
+			}
+			toolbar.classList.add("gjj-workflow-toolbar-topbar");
+			toolbar.style.left = "";
+			toolbar.style.top = "";
+			toolbar.style.right = "";
+			toolbar.style.bottom = "";
+			toolbar.style.transform = "";
+			return;
+		}
+
+		if (toolbar.parentElement !== document.body) document.body.appendChild(toolbar);
+		toolbar.classList.remove("gjj-workflow-toolbar-topbar");
+
+		toolbar.style.left = "50%";
+		toolbar.style.top = "12px";
+		toolbar.style.right = "";
+		toolbar.style.bottom = "";
+		toolbar.style.transform = "translateX(-50%)";
 	}
 
 	function makeToolbarButton(id, text, title, onClick) {
@@ -2831,7 +3120,10 @@ import { api } from "/scripts/api.js";
 	}
 
 	function startPositionSync() {
-		const sync = () => positionToolbar(document.getElementById(TOOLBAR_ID));
+		const sync = () => {
+			const toolbar = document.getElementById(TOOLBAR_ID) || ensureToolbar();
+			positionToolbar(toolbar);
+		};
 		window.addEventListener("resize", sync);
 		window.addEventListener("orientationchange", sync);
 		for (const delay of [120, 500, 1200, 2500]) setTimeout(sync, delay);

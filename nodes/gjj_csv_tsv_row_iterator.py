@@ -5,8 +5,10 @@ import hashlib
 import io
 import json
 import os
+import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -60,7 +62,7 @@ def _read_url_text(url: str, timeout: int) -> tuple[str, str]:
 def _read_local_text(path_text: str) -> tuple[str, str]:
     path = os.path.abspath(os.path.expanduser(str(path_text or "").strip().strip('"')))
     if not os.path.isfile(path):
-        raise FileNotFoundError(f"未找到 CSV/TSV 文件：{path}")
+        raise FileNotFoundError(f"未找到 CSV/TSV/TXT 文件：{path}")
 
     stat = os.stat(path)
     with open(path, "rb") as file:
@@ -78,13 +80,27 @@ def _read_browser_text(file_name: str, text: str) -> tuple[str, str]:
     name = os.path.basename(str(file_name or "").strip()) or "浏览器选择文件"
     content = str(text or "")
     if not content.strip():
-        raise ValueError("浏览器选择的 CSV/TSV 内容为空，请重新选择文件。")
+        raise ValueError("浏览器选择的 CSV/TSV/TXT 内容为空，请重新选择文件。")
     digest = hashlib.sha1(content.encode("utf-8", errors="replace")).hexdigest()[:12]
     return content, f"browser:{name}:{len(content)}:{digest}"
 
 
 def _source_is_browser_marker(source: str) -> bool:
     return str(source or "").strip().startswith(BROWSER_MARKER_PREFIX)
+
+
+def _source_basename(source: str) -> str:
+    text = str(source or "").strip()
+    if text.startswith(BROWSER_MARKER_PREFIX):
+        text = text[len(BROWSER_MARKER_PREFIX):]
+    if _is_url(text):
+        text = urllib.parse.urlparse(text).path
+    text = text.replace("\\", "/").rstrip("/")
+    return os.path.basename(text).lower()
+
+
+def _source_is_txt(source: str) -> bool:
+    return _source_basename(source).endswith(".txt")
 
 
 def _detect_delimiter(text: str) -> tuple[str, str]:
@@ -99,9 +115,39 @@ def _detect_delimiter(text: str) -> tuple[str, str]:
     return ",", "逗号"
 
 
-def _parse_rows(text: str, skip_empty_rows: bool) -> tuple[list[list[str]], str]:
+def _normalize_text(text: str) -> str:
+    return str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _split_txt_records(text: str) -> tuple[list[str], str]:
+    source = _normalize_text(text)
+    dash_line = re.compile(r"(?m)^[ \t]*-{3,}[ \t]*$")
+    if dash_line.search(source):
+        return re.split(dash_line, source), "TXT：--- 分行，|| 分列"
+    if re.search(r"-{3,}", source):
+        return re.split(r"-{3,}", source), "TXT：--- 分行，|| 分列"
+    if re.search(r"\n[ \t]*\n", source):
+        return re.split(r"\n[ \t]*\n+", source), "TXT：空行分行，|| 分列"
+    return source.split("\n"), "TXT：换行分行，|| 分列"
+
+
+def _parse_txt_rows(text: str, skip_empty_rows: bool) -> tuple[list[list[str]], str]:
+    records, delimiter_name = _split_txt_records(text)
+    rows: list[list[str]] = []
+    for record in records:
+        cells = [str(cell).strip() for cell in str(record or "").strip().split("||")]
+        if skip_empty_rows and not any(cells):
+            continue
+        rows.append(cells)
+    return rows, delimiter_name
+
+
+def _parse_rows(text: str, skip_empty_rows: bool, source_hint: str = "") -> tuple[list[list[str]], str]:
+    if _source_is_txt(source_hint):
+        return _parse_txt_rows(text, skip_empty_rows)
+
     delimiter, delimiter_name = _detect_delimiter(text)
-    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    lines = _normalize_text(text).split("\n")
     rows: list[list[str]] = []
 
     if delimiter == "||":
@@ -111,7 +157,7 @@ def _parse_rows(text: str, skip_empty_rows: bool) -> tuple[list[list[str]], str]
                 continue
             rows.append(cells)
     else:
-        stream = io.StringIO(text.replace("\r\n", "\n").replace("\r", "\n"))
+        stream = io.StringIO(_normalize_text(text))
         reader = csv.reader(stream, delimiter=delimiter)
         for row in reader:
             cells = [str(cell).strip() for cell in row]
@@ -156,13 +202,13 @@ def _parse_state(raw_value: Any) -> dict[str, Any]:
 class GJJ_CsvTsvRowIterator:
     CATEGORY = "GJJ/Text"
     FUNCTION = "next_row"
-    DESCRIPTION = "读取本地、网络或浏览器选择的 CSV/TSV 文本，按当前行数分列输出，并支持前端自动逐行执行。"
-    SEARCH_ALIASES = ["csv", "tsv", "tab", "表格逐行", "分列文本", "逐行递进", "CSV分列", "TSV分列"]
+    DESCRIPTION = "读取本地、网络或浏览器选择的 CSV/TSV/TXT 文本，按当前行数分列输出，并支持前端自动逐行执行。TXT 使用 || 分列，并按 ---、空行、换行的优先级分行。"
+    SEARCH_ALIASES = ["csv", "tsv", "txt", "tab", "表格逐行", "分列文本", "逐行递进", "CSV分列", "TSV分列", "TXT分列"]
     RETURN_TYPES = ("INT", "INT") + ("STRING",) * MAX_COLUMNS
     RETURN_NAMES = ("当前行数", "总行数") + tuple(f"列{i}" for i in range(1, MAX_COLUMNS + 1))
     OUTPUT_TOOLTIPS = (
         "当前实际输出的数据行号；开启首行标题时不包含标题行。",
-        "当前 CSV/TSV 可输出的数据总行数；开启首行标题时不包含标题行。",
+        "当前 CSV/TSV/TXT 可输出的数据总行数；开启首行标题时不包含标题行。",
     ) + tuple(f"当前行第 {i} 列文本；如果该行没有这一列则为空。" for i in range(1, MAX_COLUMNS + 1))
 
     _cache: dict[str, dict[str, Any]] = {}
@@ -179,7 +225,7 @@ class GJJ_CsvTsvRowIterator:
                         "max": 999999,
                         "step": 1,
                         "display_name": "当前行数",
-                        "tooltip": "1 基行号；前端自动执行会在每次完成后加 1，最大不超过当前 CSV/TSV 数据行数。",
+                        "tooltip": "1 基行号；前端自动执行会在每次完成后加 1，最大不超过当前 CSV/TSV/TXT 数据行数。",
                     },
                 ),
             },
@@ -196,16 +242,16 @@ class GJJ_CsvTsvRowIterator:
                     "STRING",
                     {
                         "default": "",
-                        "display_name": "CSV/TSV路径或URL",
-                        "tooltip": "填写本地 CSV/TSV 文件路径，或 http/https 网络地址。浏览器选择文件时这里会显示文件名占位。",
+                        "display_name": "CSV/TSV/TXT路径或URL",
+                        "tooltip": "填写本地 CSV/TSV/TXT 文件路径，或 http/https 网络地址。TXT 使用 || 分列，并按 ---、空行、换行的优先级分行。浏览器选择文件时这里会显示文件名占位。",
                     },
                 ),
-                "timeout_seconds": ("INT", {"default": 30, "min": 1, "max": 600, "display_name": "超时秒数", "tooltip": "读取网络 CSV/TSV 时的超时时间；本地文件不受影响。"}),
+                "timeout_seconds": ("INT", {"default": 30, "min": 1, "max": 600, "display_name": "超时秒数", "tooltip": "读取网络 CSV/TSV/TXT 时的超时时间；本地文件不受影响。"}),
                 "csv_state": (
                     "STRING",
                     {
                         "default": json.dumps(DEFAULT_STATE, ensure_ascii=False),
-                        "display_name": "CSV状态",
+                        "display_name": "表格状态",
                         "tooltip": "前端面板维护的 JSON 状态；包含按钮开关与浏览器选择文件内容。",
                     },
                 ),
@@ -237,22 +283,26 @@ class GJJ_CsvTsvRowIterator:
             raw_text = text_input_content
             signature = f"text_input:{len(text_input_content)}:{digest}"
             source_key = signature
+            source_hint = source or browser_file_name
         elif browser_text.strip():
             raw_text, signature = _read_browser_text(browser_file_name, browser_text)
             source_key = signature
+            source_hint = browser_file_name
         elif source:
             if _source_is_browser_marker(source):
-                raise ValueError("浏览器选择文件内容未保存，请重新点击按钮选择 CSV/TSV 文件。")
+                raise ValueError("浏览器选择文件内容未保存，请重新点击按钮选择 CSV/TSV/TXT 文件。")
             raw_text, signature = _read_url_text(source, timeout_seconds) if _is_url(source) else _read_local_text(source)
             source_key = source
+            source_hint = source
         else:
-            raise ValueError("请填写 CSV/TSV 文件路径、网络 URL，或点击按钮从浏览器选择 CSV/TSV 文件，或连接外部文本输入。")
+            raise ValueError("请填写 CSV/TSV/TXT 文件路径、网络 URL，或点击按钮从浏览器选择 CSV/TSV/TXT 文件，或连接外部文本输入。")
 
-        delimiter, delimiter_name = _detect_delimiter(raw_text)
-        key = f"{source_key}|delimiter={delimiter_name}|skip_header={bool(skip_header)}|skip_empty={bool(skip_empty_rows)}"
+        is_txt = _source_is_txt(source_hint)
+        delimiter, delimiter_name = ("TXT", "TXT：按规则分行，|| 分列") if is_txt else _detect_delimiter(raw_text)
+        key = f"{source_key}|parser={delimiter_name}|skip_header={bool(skip_header)}|skip_empty={bool(skip_empty_rows)}"
         cache = self._cache.get(key)
         if refresh_file or not cache or cache.get("signature") != signature:
-            rows, delimiter_name = _parse_rows(raw_text, bool(skip_empty_rows))
+            rows, delimiter_name = _parse_rows(raw_text, bool(skip_empty_rows), source_hint)
             header_names = [str(cell).strip() for cell in rows[0]] if skip_header and rows else []
             if skip_header and rows:
                 rows = rows[1:]
@@ -297,7 +347,7 @@ class GJJ_CsvTsvRowIterator:
             )
 
             if not rows:
-                raise ValueError("CSV/TSV 没有可输出的数据行。")
+                raise ValueError("CSV/TSV/TXT 没有可输出的数据行。")
 
             requested_row = max(1, int(current_row or 1))
             effective_row = min(requested_row, len(rows))
@@ -337,7 +387,7 @@ class GJJ_CsvTsvRowIterator:
                 "result": (int(effective_row), int(len(rows))) + columns,
             }
         except Exception as e:
-            print(f"[GJJ CSV/TSV] 执行错误: {e}")
+            print(f"[GJJ CSV/TSV/TXT] 执行错误: {e}")
             columns = tuple("" for _ in range(MAX_COLUMNS))
             return {
                 "ui": {
@@ -362,4 +412,4 @@ class GJJ_CsvTsvRowIterator:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_CsvTsvRowIterator}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🧾 CSV/TSV逐行分列"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🧾 CSV/TSV/TXT逐行分列"}

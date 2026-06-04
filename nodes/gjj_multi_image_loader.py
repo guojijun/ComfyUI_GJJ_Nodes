@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import comfy.utils
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -11,7 +12,7 @@ from typing import Any
 import numpy as np
 import torch
 from aiohttp import web
-from PIL import Image, ImageOps
+from PIL import Image, ImageFile, ImageOps
 try:
     from server import PromptServer
 except Exception:
@@ -38,6 +39,11 @@ NETWORK_IMAGE_DOWNLOAD_TIMEOUT = 120
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".avif"}
 INPUT_IMAGE_TYPES = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
 _IMAGE_META_CACHE: dict[str, tuple[int, int, int, int]] = {}
+_cv2 = None
+
+# Some ComfyUI-generated PNGs contain browser-tolerated metadata CRC issues.
+# Pillow rejects those by default, so keep this loader permissive.
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 class AnyType(str):
@@ -48,6 +54,97 @@ class AnyType(str):
 
 
 any_type = AnyType("*")
+
+
+def _load_cv2_optional():
+    global _cv2
+    if _cv2 is not None:
+        return _cv2
+    if importlib.util.find_spec("cv2") is None:
+        return None
+    try:
+        import cv2
+        _cv2 = cv2
+        return _cv2
+    except Exception:
+        return None
+
+
+def _decode_image_array_cv2(path: Path) -> np.ndarray:
+    cv2 = _load_cv2_optional()
+    if cv2 is None:
+        raise RuntimeError("当前环境没有可用的 OpenCV(cv2) 解码兜底。")
+    data = np.frombuffer(path.read_bytes(), dtype=np.uint8)
+    decoded = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+    if decoded is None:
+        raise RuntimeError("OpenCV 也无法识别该图片。")
+
+    if decoded.ndim == 2:
+        array = decoded[:, :, None]
+    elif decoded.ndim == 3 and decoded.shape[2] == 4:
+        array = cv2.cvtColor(decoded, cv2.COLOR_BGRA2RGBA)
+    elif decoded.ndim == 3 and decoded.shape[2] == 3:
+        array = cv2.cvtColor(decoded, cv2.COLOR_BGR2RGB)
+    elif decoded.ndim == 3 and decoded.shape[2] == 1:
+        array = decoded
+    else:
+        raise RuntimeError(f"OpenCV 解码得到不支持的通道形状：{decoded.shape}")
+
+    if array.dtype == np.uint8:
+        scale = 255.0
+    elif array.dtype == np.uint16:
+        scale = 65535.0
+    else:
+        scale = float(np.max(array)) or 1.0
+    array = array.astype(np.float32) / scale
+    if array.shape[2] == 1:
+        array = np.repeat(array, 3, axis=2)
+    return np.clip(array, 0.0, 1.0)
+
+
+def _load_image_array_pillow(path: Path) -> np.ndarray:
+    with Image.open(path) as opened:
+        opened.load()
+        image = ImageOps.exif_transpose(opened)
+        if image.mode == "RGBA":
+            array = np.asarray(image).astype(np.float32) / 255.0
+        else:
+            image = image.convert("RGB")
+            array = np.asarray(image).astype(np.float32) / 255.0
+    return array
+
+
+def _load_image_array(path: Path) -> np.ndarray:
+    try:
+        return _load_image_array_pillow(path)
+    except Exception as pillow_error:
+        try:
+            return _decode_image_array_cv2(path)
+        except Exception as cv2_error:
+            raise RuntimeError(f"Pillow 读取失败：{pillow_error}；OpenCV 兜底失败：{cv2_error}") from pillow_error
+
+
+def _probe_image_size(path: Path) -> tuple[int, int]:
+    try:
+        with Image.open(path) as image:
+            width, height = image.size
+            image.verify()
+        return int(width), int(height)
+    except Exception:
+        array = _decode_image_array_cv2(path)
+        height, width = array.shape[:2]
+        return int(width), int(height)
+
+
+def _thumbnail_image_from_path(path: Path) -> Image.Image:
+    try:
+        with Image.open(path) as opened:
+            opened.load()
+            return ImageOps.exif_transpose(opened).convert("RGB")
+    except Exception:
+        array = _decode_image_array_cv2(path)
+        rgb = array[:, :, :3]
+        return Image.fromarray((np.clip(rgb, 0.0, 1.0) * 255.0).round().astype(np.uint8))
 
 
 def list_input_images() -> list[dict[str, Any]]:
@@ -86,9 +183,7 @@ def list_input_images() -> list[dict[str, Any]]:
                 width, height = cached[2], cached[3]
             else:
                 # 只读取图片头部尺寸，不完整解码。完整 image.load() 在图片很多/很大时会明显拖慢前端刷新。
-                with Image.open(file_path) as image:
-                    width, height = image.size
-                    image.verify()
+                width, height = _probe_image_size(file_path)
                 _IMAGE_META_CACHE[cache_key] = (mtime_ns, size_bytes, int(width), int(height))
         except Exception as error:
             try:
@@ -126,9 +221,7 @@ def _input_image_item_from_path(file_path: str | Path) -> dict[str, Any]:
     width = 0
     height = 0
     try:
-        with Image.open(path) as image:
-            width, height = image.size
-            image.verify()
+        width, height = _probe_image_size(path)
     except Exception as error:
         raise RuntimeError(f"网络图片已下载，但图片文件无法识别：{relative.as_posix()}。原始错误：{error}") from error
 
@@ -234,13 +327,17 @@ async def get_gjj_input_image_thumb(request):
     cache_path = _thumbnail_cache_path(source, subfolder, filename, size)
     if not cache_path.exists():
         try:
-            with Image.open(source) as opened:
-                opened.load()
-                image = ImageOps.exif_transpose(opened).convert("RGB")
-                image.thumbnail((size, size), Image.Resampling.LANCZOS)
-                image.save(cache_path, "JPEG", quality=82, optimize=True, progressive=True)
+            image = _thumbnail_image_from_path(source)
+            image.thumbnail((size, size), Image.Resampling.LANCZOS)
+            image.save(cache_path, "JPEG", quality=82, optimize=True, progressive=True)
         except Exception as error:
-            raise web.HTTPInternalServerError(text=f"生成缩略图失败：{error}") from error
+            try:
+                print(f"[GJJ_MultiImageLoader] 缩略图生成失败，回退返回原图：{source} ({error})")
+            except Exception:
+                pass
+            response = web.FileResponse(source)
+            response.headers["Cache-Control"] = "no-cache"
+            return response
 
     response = web.FileResponse(cache_path)
     response.headers["Cache-Control"] = "public, max-age=604800, immutable"
@@ -441,17 +538,7 @@ def _display_image_path(path: Path) -> str:
 
 def load_image_tensor(path: Path) -> torch.Tensor:
     try:
-        with Image.open(path) as opened:
-            # 强制解码，提前发现损坏文件或扩展名伪装文件。
-            opened.load()
-            image = ImageOps.exif_transpose(opened)
-
-            # 保留原始通道：如果是 RGBA 则输出 RGBA，否则输出 RGB
-            if image.mode == "RGBA":
-                array = np.asarray(image).astype(np.float32) / 255.0
-            else:
-                image = image.convert("RGB")
-                array = np.asarray(image).astype(np.float32) / 255.0
+        array = _load_image_array(path)
     except Exception as error:
         raise RuntimeError(f"图片文件无法识别或已损坏：{_display_image_path(path)}。请删除、重新导出或换一张图片。原始错误：{error}") from error
 

@@ -56,14 +56,20 @@ def _gjj_user_settings_path():
 	return _gjj_package_root() / "presets" / "gjj_user_settings.json"
 
 def _gjj_default_user_settings() -> dict:
+	try:
+		from .nodes.gjj_ollama_common import ollama_assistant_default_settings
+		ollama_assistant = ollama_assistant_default_settings()
+	except Exception:
+		ollama_assistant = {}
 	return {
 		"version": 1,
 		"workflow_screenshot": {
 			"directory": "workflows",
 			"filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
 			"sort_mode": "mtime_desc",
-			"filter_mode": "all",
+			"filter_mode": "openable",
 			"search_text": "",
+			"page_size": 12,
 		},
 		"workflow_title": {
 			"font": "",
@@ -93,6 +99,7 @@ def _gjj_default_user_settings() -> dict:
 			"shadowY": 4.0,
 			"align": "居中",
 		},
+		"ollama_assistant": ollama_assistant,
 		"nodes": {},
 		"user": {},
 	}
@@ -148,12 +155,18 @@ def _gjj_workflow_screenshot_settings() -> dict:
 	section = settings.get("workflow_screenshot") if isinstance(settings, dict) else {}
 	if not isinstance(section, dict):
 		section = {}
+	try:
+		page_size = int(section.get("page_size") or 12)
+	except Exception:
+		page_size = 12
+	page_size = max(1, min(100, page_size))
 	return {
 		"directory": str(section.get("directory") or ""),
 		"filename_template": str(section.get("filename_template") or "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png"),
 		"sort_mode": str(section.get("sort_mode") or "mtime_desc"),
-		"filter_mode": str(section.get("filter_mode") or "all"),
+		"filter_mode": str(section.get("filter_mode") or "openable"),
 		"search_text": str(section.get("search_text") or ""),
+		"page_size": page_size,
 	}
 
 def _register_gjj_user_settings_api():
@@ -363,8 +376,9 @@ def _register_gjj_workflow_screenshot_api():
 				"raw_directory": _gjj_workflow_screenshot_settings().get("directory") or "",
 				"filename_template": filename_template(),
 				"sort_mode": _gjj_workflow_screenshot_settings().get("sort_mode") or "mtime_desc",
-				"filter_mode": _gjj_workflow_screenshot_settings().get("filter_mode") or "all",
+				"filter_mode": _gjj_workflow_screenshot_settings().get("filter_mode") or "openable",
 				"search_text": _gjj_workflow_screenshot_settings().get("search_text") or "",
+				"page_size": _gjj_workflow_screenshot_settings().get("page_size") or 12,
 			},
 		})
 
@@ -422,8 +436,9 @@ def _register_gjj_workflow_screenshot_api():
 					"raw_directory": _gjj_workflow_screenshot_settings().get("directory") or "",
 					"filename_template": filename_template(),
 					"sort_mode": _gjj_workflow_screenshot_settings().get("sort_mode") or "mtime_desc",
-					"filter_mode": _gjj_workflow_screenshot_settings().get("filter_mode") or "all",
+					"filter_mode": _gjj_workflow_screenshot_settings().get("filter_mode") or "openable",
 					"search_text": _gjj_workflow_screenshot_settings().get("search_text") or "",
+					"page_size": _gjj_workflow_screenshot_settings().get("page_size") or 12,
 				},
 				"items": items,
 			})

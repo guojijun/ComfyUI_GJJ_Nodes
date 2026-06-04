@@ -238,12 +238,17 @@ for node_key, node_cls in NODE_CLASS_MAPPINGS.items():
         str(node_key).startswith("guojijun_")
         or str(getattr(node_cls, "CATEGORY", "")).startswith("guojijun")
     )
+    preserve_display_keys = getattr(node_cls, "GJJ_PRESERVE_DISPLAY_NAME_KEYS", ())
+    preserve_display = str(node_key) in {str(k) for k in preserve_display_keys}
 
-    normalized_display_name = (
-        _normalize_backend_display_name(raw_display_name, node_key)
-        if is_backend_node
-        else _normalize_display_name(raw_display_name)
-    )
+    if preserve_display:
+        normalized_display_name = str(raw_display_name).strip() or _humanize_name(node_key)
+    else:
+        normalized_display_name = (
+            _normalize_backend_display_name(raw_display_name, node_key)
+            if is_backend_node
+            else _normalize_display_name(raw_display_name)
+        )
 
     NODE_DISPLAY_NAME_MAPPINGS[node_key] = normalized_display_name
 

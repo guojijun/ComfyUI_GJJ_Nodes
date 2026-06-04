@@ -837,14 +837,28 @@ NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 💾 保存任意对象"}
 
 try:
     import subprocess
+    import sys
     from aiohttp import web
     from server import PromptServer
+
+    def _open_directory(path: Path) -> None:
+        path_text = str(path)
+        if os.name == "nt":
+            os.startfile(path_text)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path_text])
+        else:
+            subprocess.Popen(["xdg-open", path_text])
 
     @PromptServer.instance.routes.post("/gjj/open_folder")
     async def gjj_open_folder_api(request):
         try:
-            folder_path = request.query.get("path", "output")
-            full_path = Path(_output_root()) / folder_path
+            raw_folder_path = str(request.query.get("path", "") or "").replace("\\", "/").strip("/")
+            parts = [part for part in raw_folder_path.split("/") if part]
+            if Path(raw_folder_path).is_absolute() or any(part in {".", ".."} for part in parts):
+                return web.json_response({"error": "路径越界"}, status=400)
+
+            full_path = Path(_output_root()).joinpath(*parts) if parts else Path(_output_root())
             full_path = full_path.resolve()
 
             root = _output_root()
@@ -854,13 +868,7 @@ try:
                 return web.json_response({"error": "路径越界"}, status=400)
 
             full_path.mkdir(parents=True, exist_ok=True)
-
-            if os.name == "nt":
-                subprocess.Popen(["explorer", str(full_path)])
-            elif os.name == "posix":
-                subprocess.Popen(["xdg-open", str(full_path)])
-            else:
-                subprocess.Popen(["open", str(full_path)])
+            _open_directory(full_path)
 
             return web.json_response({"status": "ok", "path": str(full_path)})
         except Exception as e:

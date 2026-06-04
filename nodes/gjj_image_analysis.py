@@ -2,15 +2,25 @@ from __future__ import annotations
 
 import json
 import math
+import random
 
 import torch
 
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .gjj_ollama_common import (
     DEFAULT_OLLAMA_HOST,
+    DEFAULT_OLLAMA_ASSISTANT_OUTPUT_RULE,
+    DEFAULT_OLLAMA_ASSISTANT_SAMPLING,
+    DEFAULT_OLLAMA_ASSISTANT_SYSTEM_PROMPT,
+    DEFAULT_OLLAMA_ASSISTANT_SYSTEM_PROMPT_TEMPLATES,
     extract_final_answer,
     model_options_with_fallback,
     normalize_ollama_host,
+    normalize_ollama_assistant_sampling,
+    ollama_assistant_output_rule,
+    ollama_assistant_sampling_settings,
+    ollama_assistant_system_prompt,
+    ollama_assistant_system_prompt_templates,
     request_chat,
     resolve_model,
     send_ollama_status,
@@ -25,17 +35,6 @@ DEFAULT_TEMPERATURE = 0.7
 DEFAULT_MAX_TOKENS = 1024
 OLLAMA_ASSISTANT_TIMEOUT = 300
 IMAGE_INPUT_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
-DEFAULT_SYSTEM_PROMPT_TEMPLATES = "\n\n".join([
-    "【🧡图片反推】准确识别参考图片中的主体、人物外貌、服装、动作、场景结构、镜头构图、光线、色调、材质和关键细节，整理为可直接用于图像或视频生成的连贯画面描述。",
-    "【🎬分镜延展】基于参考图片或输入描述生成连续分镜内容，保持人物身份、核心服装、场景和整体色调一致，同时推动镜头、构图、动作、表情与环境变化，使相邻画面自然衔接且具有叙事进展。",
-    "【🌏中译英】将输入内容精准翻译为英文，保持原有语序结构、提示词权重符号、专有名词和画面语义；使用适合 AI 图像与视频生成的自然英文表达。",
-])
-DEFAULT_SYSTEM_PROMPT_OUTPUT_RULE = "只输出结果文字，不输出解释、分析过程、标题、Markdown 代码块或提示性前缀。"
-DEFAULT_OLLAMA_ASSISTANT_SYSTEM_PROMPT = (
-    "准确识别参考图片中的主体、人物外貌、服装、动作、场景结构、镜头构图、光线、色调、材质和关键细节，"
-    "整理为可直接用于图像或视频生成的连贯画面描述。\n"
-    f"{DEFAULT_SYSTEM_PROMPT_OUTPUT_RULE}"
-)
 
 
 def _coerce_choice(value, allowed: tuple[str, ...], fallback: str) -> str:
@@ -70,10 +69,54 @@ def _ollama_assistant_model_options() -> list[str]:
         if str(item or "").strip()
     ]
     ordered = [DEFAULT_OLLAMA_ASSISTANT_MODEL]
-    for name in models:
-        if name not in ordered:
-            ordered.append(name)
+    if models:
+        for name in sorted(dict.fromkeys(models), key=lambda item: (len(item), item.lower())):
+            if name not in ordered:
+                ordered.append(name)
+        return ordered
     return ordered or [""]
+
+
+def _sampling_options(
+    temperature,
+    max_tokens,
+    seed_mode,
+    seed,
+    top_k,
+    top_p,
+    min_p,
+    presence_penalty,
+    frequency_penalty,
+    repeat_penalty,
+) -> dict[str, int | float]:
+    sampling = normalize_ollama_assistant_sampling({
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "seed_mode": seed_mode,
+        "seed": seed,
+        "top_k": top_k,
+        "top_p": top_p,
+        "min_p": min_p,
+        "presence_penalty": presence_penalty,
+        "frequency_penalty": frequency_penalty,
+        "repeat_penalty": repeat_penalty,
+    })
+    effective_seed = (
+        random.randint(1, 2147483647)
+        if sampling["seed_mode"] == "每次随机"
+        else int(sampling["seed"])
+    )
+    return {
+        "temperature": float(sampling["temperature"]),
+        "num_predict": int(sampling["max_tokens"]),
+        "seed": int(effective_seed),
+        "top_k": int(sampling["top_k"]),
+        "top_p": float(sampling["top_p"]),
+        "min_p": float(sampling["min_p"]),
+        "presence_penalty": float(sampling["presence_penalty"]),
+        "frequency_penalty": float(sampling["frequency_penalty"]),
+        "repeat_penalty": float(sampling["repeat_penalty"]),
+    }
 
 
 def build_messages(system_prompt: str, user_prompt: str, image_b64: str | None = None):
@@ -130,6 +173,10 @@ class GJJ_OllamaAssistant:
     def INPUT_TYPES(cls):
         model_options = _ollama_assistant_model_options()
         default_model = model_options[0] if model_options else ""
+        default_system_prompt = ollama_assistant_system_prompt() or DEFAULT_OLLAMA_ASSISTANT_SYSTEM_PROMPT
+        default_templates = ollama_assistant_system_prompt_templates() or DEFAULT_OLLAMA_ASSISTANT_SYSTEM_PROMPT_TEMPLATES
+        default_output_rule = ollama_assistant_output_rule() or DEFAULT_OLLAMA_ASSISTANT_OUTPUT_RULE
+        default_sampling = ollama_assistant_sampling_settings() or dict(DEFAULT_OLLAMA_ASSISTANT_SAMPLING)
         return {
             "required": {
                 "ollama_host": ("STRING", {
@@ -154,29 +201,106 @@ class GJJ_OllamaAssistant:
                     "tooltip": "是否允许支持思考的多模态模型先推理再输出结果。",
                 }),
                 "temperature": ("FLOAT", {
-                    "default": DEFAULT_TEMPERATURE,
+                    "default": float(default_sampling.get("temperature", DEFAULT_TEMPERATURE)),
                     "min": 0.0,
                     "max": 2.0,
                     "step": 0.1,
                     "display_name": "温度",
-                    "tooltip": "数值越高结果越发散，越低越稳定。",
+                    "tooltip": "控制采样随机性。数值越低越稳定、越容易复现；数值越高越发散、同提示词更容易产生不同表达。常用范围 0.7-1.1。",
                 }),
                 "max_tokens": ("INT", {
-                    "default": DEFAULT_MAX_TOKENS,
+                    "default": int(default_sampling.get("max_tokens", DEFAULT_MAX_TOKENS)),
                     "min": 16,
                     "max": 8192,
                     "step": 1,
                     "display_name": "最大生成长度",
                     "tooltip": "限制模型最多生成多少 token。",
                 }),
+                "seed_mode": (["每次随机", "固定种子"], {
+                    "default": str(default_sampling.get("seed_mode", "每次随机")),
+                    "display_name": "种子模式",
+                    "tooltip": "每次随机：执行时自动生成新 seed，同一提示词也会更容易得到不同结果。固定种子：使用下方种子数，方便复现同一输出。",
+                    "hidden": True,
+                    "display": "hidden",
+                }),
+                "seed": ("INT", {
+                    "default": int(default_sampling.get("seed", 0)),
+                    "min": 0,
+                    "max": 2147483647,
+                    "step": 1,
+                    "display_name": "固定种子",
+                    "tooltip": "仅在种子模式为“固定种子”时生效。同模型、同提示词、同采样参数下，固定 seed 会尽量复现相同结果；改动 seed 会改变输出。",
+                    "hidden": True,
+                    "display": "hidden",
+                }),
+                "top_k": ("INT", {
+                    "default": int(default_sampling.get("top_k", 80)),
+                    "min": 1,
+                    "max": 1000,
+                    "step": 1,
+                    "display_name": "Top K",
+                    "tooltip": "每一步只从概率最高的 K 个候选 token 中采样。值越小越稳，值越大候选越多、变化更丰富。常用范围 40-100。",
+                    "hidden": True,
+                    "display": "hidden",
+                }),
+                "top_p": ("FLOAT", {
+                    "default": float(default_sampling.get("top_p", 0.95)),
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "display_name": "Top P",
+                    "tooltip": "核采样阈值。模型从累计概率不超过该比例的候选集中采样；越接近 1，候选越多、结果越开放。常用范围 0.9-0.98。",
+                    "hidden": True,
+                    "display": "hidden",
+                }),
+                "min_p": ("FLOAT", {
+                    "default": float(default_sampling.get("min_p", 0.03)),
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "display_name": "Min P",
+                    "tooltip": "按最高概率 token 的相对比例过滤低概率候选。适当提高可减少离谱词，过高会变保守；想要变化但保持质量可用 0.02-0.08。",
+                    "hidden": True,
+                    "display": "hidden",
+                }),
+                "presence_penalty": ("FLOAT", {
+                    "default": float(default_sampling.get("presence_penalty", 0.3)),
+                    "min": -2.0,
+                    "max": 2.0,
+                    "step": 0.05,
+                    "display_name": "出现惩罚",
+                    "tooltip": "降低已经出现过的内容再次出现的概率，鼓励引入新细节。值越高越不容易重复，但过高会跑题。常用范围 0.2-0.6。",
+                    "hidden": True,
+                    "display": "hidden",
+                }),
+                "frequency_penalty": ("FLOAT", {
+                    "default": float(default_sampling.get("frequency_penalty", 0.2)),
+                    "min": -2.0,
+                    "max": 2.0,
+                    "step": 0.05,
+                    "display_name": "频率惩罚",
+                    "tooltip": "按词语重复次数惩罚高频词，减少同一句式和同一描述反复出现。值越高越少重复，过高会影响格式稳定。常用范围 0.1-0.4。",
+                    "hidden": True,
+                    "display": "hidden",
+                }),
+                "repeat_penalty": ("FLOAT", {
+                    "default": float(default_sampling.get("repeat_penalty", 1.15)),
+                    "min": 0.0,
+                    "max": 3.0,
+                    "step": 0.05,
+                    "display_name": "重复惩罚",
+                    "tooltip": "Ollama 的重复惩罚系数。1.0 基本不惩罚；大于 1 会抑制重复片段。提示词表格任务建议 1.1-1.25，过高可能破坏固定格式。",
+                    "hidden": True,
+                    "display": "hidden",
+                }),
                 "system_prompt": ("STRING", {
-                    "default": DEFAULT_OLLAMA_ASSISTANT_SYSTEM_PROMPT,
+                    "default": default_system_prompt,
                     "multiline": True,
                     "display_name": "系统提示词",
                     "tooltip": "由模板按钮快速填入，也可以自定义任务规则与输出目标。",
                 }),
                 "system_prompt_templates": ("STRING", {
-                    "default": DEFAULT_SYSTEM_PROMPT_TEMPLATES,
+                    "default": default_templates,
                     "multiline": True,
                     "display_name": "系统提示词模板",
                     "tooltip": "格式为【按钮标题】系统提示词正文；用空行或单独一行 --- 分隔不同模板，增删块即可增删前台按钮。",
@@ -184,7 +308,7 @@ class GJJ_OllamaAssistant:
                     "display": "hidden",
                 }),
                 "system_prompt_output_rule": ("STRING", {
-                    "default": DEFAULT_SYSTEM_PROMPT_OUTPUT_RULE,
+                    "default": default_output_rule,
                     "multiline": True,
                     "display_name": "输出约束",
                     "tooltip": "点击模板按钮时，会把这段文字追加到系统提示词正文之后；可按需要修改或留空。",
@@ -221,6 +345,14 @@ class GJJ_OllamaAssistant:
         system_prompt_templates,
         system_prompt_output_rule,
         user_prompt,
+        seed_mode="每次随机",
+        seed=0,
+        top_k=80,
+        top_p=0.95,
+        min_p=0.03,
+        presence_penalty=0.3,
+        frequency_penalty=0.2,
+        repeat_penalty=1.15,
         image=None,
         unique_id=None,
         **_kwargs,
@@ -231,6 +363,18 @@ class GJJ_OllamaAssistant:
         thinking_mode = _coerce_choice(thinking_mode, ("关闭思考", "开启思考"), "关闭思考")
         temperature = _coerce_float(temperature, DEFAULT_TEMPERATURE)
         max_tokens = _coerce_int(max_tokens, DEFAULT_MAX_TOKENS, minimum=16, maximum=8192)
+        ollama_options = _sampling_options(
+            temperature,
+            max_tokens,
+            seed_mode,
+            seed,
+            top_k,
+            top_p,
+            min_p,
+            presence_penalty,
+            frequency_penalty,
+            repeat_penalty,
+        )
         chosen_model = resolve_model(model, host=configured_host)
         images = _collect_images(image=image)
         task_items: list[torch.Tensor | None] = images if images else [None]
@@ -245,10 +389,7 @@ class GJJ_OllamaAssistant:
                 "messages": build_messages(system_prompt, user_prompt, image_b64),
                 "stream": False,
                 "think": thinking_mode == "开启思考",
-                "options": {
-                    "temperature": float(temperature),
-                    "num_predict": int(max_tokens),
-                },
+                "options": dict(ollama_options),
             }
 
             progress = 0.12 + 0.76 * ((index - 1) / max(1, total))
