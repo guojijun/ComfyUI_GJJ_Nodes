@@ -57,6 +57,7 @@ function ensureStyle() {
 		.gjj-common-media-size { position:absolute; z-index:5; right:6px; top:6px; padding:2px 6px; border-radius:5px; background:rgba(0,0,0,.48); color:#fff; font-size:10px; line-height:1.3; pointer-events:none; white-space:nowrap; }
 		.gjj-common-media-grid-action { position:absolute; z-index:6; right:6px; top:6px; width:24px; height:22px; padding:0; border:1px solid rgba(120,148,158,.78); border-radius:6px; background:rgba(12,19,23,.78); color:#f4fbff; font-size:12px; line-height:1; display:flex; align-items:center; justify-content:center; cursor:pointer; }
 		.gjj-common-media-grid-action:hover { background:rgba(36,50,57,.92); border-color:#7db0c4; }
+		.gjj-common-media-single-action { right:8px; top:8px; width:32px; height:30px; border-radius:8px; font-size:16px; background:rgba(12,19,23,.86); }
 		.gjj-common-media-grid-caption-text { min-width:0; padding:4px 5px 5px; color:#c9d8dc; font-size:10px; line-height:1.2; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; background:#0b1317; }
 		.gjj-common-media-empty, .gjj-common-media-message { width:100%; min-height:54px; display:flex; align-items:center; justify-content:center; padding:10px; border:1px dashed #30434b; border-radius:8px; background:#0a1216; color:#7f9298; font-size:12px; text-align:center; white-space:pre-wrap; }
 		.gjj-common-media-message-error { border-color:#765048; background:#211413; color:#ffb4a8; }
@@ -705,6 +706,16 @@ function createMediaElement(item, isSingle, onLayout) {
 	return stage;
 }
 
+function appendMediaAction(card, item, index, total, options) {
+	if (typeof options.renderGridAction !== "function") return false;
+	const action = options.renderGridAction(item, index, total);
+	if (!action) return false;
+	action.classList.add("gjj-common-media-grid-action");
+	protectElement(action);
+	card.appendChild(action);
+	return true;
+}
+
 function createMediaCard(item, index, total, options) {
 	const isSingle = !options.forceGrid && total <= 1;
 	const gridCaptionText = !isSingle && typeof options.gridCaption === "function"
@@ -724,16 +735,14 @@ function createMediaCard(item, index, total, options) {
 
 	const stage = createMediaElement(item, isSingle, options.onLayout);
 	card.appendChild(stage);
+	const hasAction = appendMediaAction(card, item, index, total, options);
+	if (hasAction && isSingle) {
+		const action = card.querySelector(".gjj-common-media-grid-action");
+		action?.classList.add("gjj-common-media-single-action");
+	}
 	if (!isSingle) {
 		addBadge(card, total > 1 ? `${index + 1}` : "");
-		if (typeof options.renderGridAction === "function") {
-			const action = options.renderGridAction(item, index, total);
-			if (action) {
-				action.classList.add("gjj-common-media-grid-action");
-				protectElement(action);
-				card.appendChild(action);
-			}
-		} else if (options.showGridKindBadge !== false) {
+		if (!hasAction && options.showGridKindBadge !== false) {
 			addBadge(card, KIND_LABELS[item.kind] || "媒体", "gjj-common-media-size");
 		}
 		if (gridCaptionText) {

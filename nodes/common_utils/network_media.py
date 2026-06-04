@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -16,10 +18,20 @@ AUDIO_EXTS = {"mp3", "wav", "flac", "ogg", "m4a", "aac", "wma", "opus", "aiff", 
 VIDEO_EXTS = {"mp4", "mov", "mkv", "webm", "avi", "flv", "mpeg", "mpg", "m4v", "wmv"}
 MEDIA_COPY_SUBDIR = "GJJ_TemplateParams"
 MEDIA_DOWNLOAD_TIMEOUT = 45
+DEFAULT_DOWNLOAD_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0 Safari/537.36"
+)
 DEFAULT_MEDIA_EXT = {
     "IMAGE": ".png",
     "AUDIO": ".wav",
     "VIDEO": ".mp4",
+}
+MEDIA_ACCEPT_HEADER = {
+    "IMAGE": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    "AUDIO": "audio/*,*/*;q=0.8",
+    "VIDEO": "video/*,*/*;q=0.8",
 }
 
 
@@ -120,13 +132,69 @@ def gjjutils_find_input_media_by_relative_path(relative_path: str | os.PathLike[
     return None
 
 
+def _network_media_headers(url: str, media_type: str, user_agent: str) -> dict[str, str]:
+    parsed = urlparse(str(url or "").strip())
+    origin = f"{parsed.scheme}://{parsed.netloc}/" if parsed.scheme and parsed.netloc else ""
+    return {
+        "User-Agent": user_agent,
+        "Accept": MEDIA_ACCEPT_HEADER.get(media_type, "*/*"),
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": origin,
+    }
+
+
+def _download_with_urllib(url: str, tmp: Path, headers: dict[str, str], timeout: int) -> None:
+    request = Request(url, headers=headers)
+    with urlopen(request, timeout=max(1, int(timeout))) as response:
+        status = int(getattr(response, "status", 200) or 200)
+        if status >= 400:
+            raise RuntimeError(f"HTTP {status}")
+        with open(tmp, "wb") as handle:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+
+
+def _download_with_curl(url: str, tmp: Path, headers: dict[str, str], timeout: int) -> None:
+    curl = shutil.which("curl.exe") or shutil.which("curl")
+    if not curl:
+        raise RuntimeError("未找到 curl.exe")
+    cmd = [
+        curl,
+        "--location",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--connect-timeout",
+        str(max(1, min(30, int(timeout)))),
+        "--max-time",
+        str(max(1, int(timeout))),
+        "--retry",
+        "2",
+        "--retry-delay",
+        "1",
+        "--output",
+        str(tmp),
+    ]
+    for key, value in headers.items():
+        if value:
+            cmd.extend(["--header", f"{key}: {value}"])
+    cmd.append(url)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=max(5, int(timeout) + 10))
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(f"curl 失败：{detail or result.returncode}")
+
+
 def gjjutils_download_network_media_to_input(
     url: str,
     media_type: str,
     *,
     copy_subdir: str = MEDIA_COPY_SUBDIR,
     timeout: int = MEDIA_DOWNLOAD_TIMEOUT,
-    user_agent: str = "ComfyUI-GJJ/1.0",
+    user_agent: str = DEFAULT_DOWNLOAD_USER_AGENT,
 ) -> str:
     media_type = str(media_type or "").upper()
     if not gjjutils_is_network_url(url):
@@ -144,32 +212,32 @@ def gjjutils_download_network_media_to_input(
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(f"{dest.name}.download")
 
-    request = Request(
-        url,
-        headers={
-            "User-Agent": user_agent,
-            "Accept": "*/*",
-        },
-    )
+    headers = _network_media_headers(url, media_type, user_agent)
+    errors: list[str] = []
 
     try:
-        with urlopen(request, timeout=max(1, int(timeout))) as response:
-            status = int(getattr(response, "status", 200) or 200)
-            if status >= 400:
-                raise RuntimeError(f"HTTP {status}")
-            with open(tmp, "wb") as handle:
-                while True:
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    handle.write(chunk)
+        try:
+            _download_with_urllib(url, tmp, headers, timeout)
+        except Exception as exc:
+            errors.append(f"urllib：{exc}")
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except Exception:
+                pass
+            _download_with_curl(url, tmp, headers, timeout)
+        if not tmp.exists() or tmp.stat().st_size <= 0:
+            raise RuntimeError("下载结果为空")
         os.replace(tmp, dest)
-    except Exception:
+    except Exception as exc:
         try:
             if tmp.exists():
                 tmp.unlink()
         except Exception:
             pass
+        detail = "; ".join(errors)
+        if detail:
+            raise RuntimeError(f"{detail}; 兜底下载：{exc}") from exc
         raise
 
     return str(dest)
@@ -182,4 +250,3 @@ def gjjutils_input_relative_media_path(file_path: str) -> str:
         return path.relative_to(input_root).as_posix()
     except Exception:
         return Path(file_path).name
-

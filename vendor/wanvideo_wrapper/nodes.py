@@ -601,10 +601,21 @@ class WanVideoTextEmbedBridge:
     DESCRIPTION = "Bridge between ComfyUI native text embedding and WanVideoWrapper text embedding"
 
     def process(self, positive, negative=None):
+        positive_metadata = positive[0][1] if len(positive[0]) > 1 and isinstance(positive[0][1], dict) else {}
+        negative_metadata = (
+            negative[0][1]
+            if negative is not None and len(negative[0]) > 1 and isinstance(negative[0][1], dict)
+            else {}
+        )
+        context_latents = positive_metadata.get("context_latents", None)
+        if context_latents is None:
+            context_latents = negative_metadata.get("context_latents", None)
         prompt_embeds_dict = {
                 "prompt_embeds": positive[0][0].to(device),
                 "negative_prompt_embeds": negative[0][0].to(device) if negative is not None else None,
             }
+        if context_latents is not None:
+            prompt_embeds_dict["context_latents"] = context_latents
         return (prompt_embeds_dict,)
     
 #region clip vision

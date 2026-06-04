@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import types
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -19,10 +20,64 @@ import comfy.ldm.modules.attention
 import comfy.model_management
 import comfy.utils
 
+from .common_utils.network_media import (
+    gjjutils_detect_media_type as _detect_media_type,
+    gjjutils_download_network_media_to_input as _download_network_media_to_input,
+    gjjutils_input_relative_media_path as _input_relative_media_path,
+    gjjutils_is_network_url as _is_network_url,
+)
+
 
 log = logging.getLogger(__name__)
 
 GUIDE_DATA_TYPE = "GUIDE_DATA"
+MEDIA_COPY_SUBDIR = "GJJ_LTXDirector"
+
+
+def _register_ltx_director_routes() -> None:
+    try:
+        from aiohttp import web
+        from server import PromptServer
+    except Exception:
+        return
+
+    server = getattr(PromptServer, "instance", None)
+    routes = getattr(server, "routes", None)
+    if server is None or routes is None:
+        return
+    if getattr(server, "_gjj_ltx_director_routes_registered", False):
+        return
+    setattr(server, "_gjj_ltx_director_routes_registered", True)
+
+    @routes.post("/gjj/ltx_director/download_media")
+    async def download_media(request):
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+
+        url = str(data.get("url") or "").strip()
+        media_type = str(data.get("media_type") or _detect_media_type(url) or "").upper()
+        if not _is_network_url(url):
+            return web.json_response({"error": "只支持 http/https 网络媒体地址。"}, status=400)
+        if media_type not in {"IMAGE", "AUDIO"}:
+            return web.json_response({"error": "LTX Director 设置面板只支持网络图片和网络音频。"}, status=400)
+
+        try:
+            file_path = _download_network_media_to_input(url, media_type, copy_subdir=MEDIA_COPY_SUBDIR)
+        except Exception as exc:
+            return web.json_response({"error": f"下载失败：{exc}"}, status=500)
+
+        return web.json_response(
+            {
+                "filename": _input_relative_media_path(file_path),
+                "name": Path(file_path).name,
+                "media_type": media_type,
+            }
+        )
+
+
+_register_ltx_director_routes()
 
 
 def _conditioning_set_values(conditioning, values: dict[str, Any]):

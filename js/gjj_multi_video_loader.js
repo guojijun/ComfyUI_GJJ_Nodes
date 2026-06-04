@@ -4,6 +4,7 @@ import { api } from "/scripts/api.js";
 const TARGET_NODES = new Set(["GJJ_MultiVideoLoader"]);
 const NODE_CLASS_NAME = "GJJ_MultiVideoLoader";
 const DATA_PROPERTY = "selected_videos";
+const INPUTS_PROPERTY = "enabled_inputs";
 const OUTPUTS_PROPERTY = "enabled_outputs";
 const TAB_PROPERTY = "active_tab";
 const VIDEO_API_PATH = "/gjj/input_videos";
@@ -49,11 +50,27 @@ const PARAM_DEFS = [
 	{ name: "filter_directory", label: "过滤目录", kind: "text", default: "", tip: "只显示 input 下相对目录包含该文本的视频；留空不过滤。" },
 	{ name: "refresh_interval", label: "刷新时间", kind: "number", step: "0.5", min: "1", max: "3600", default: 5.0, tip: "定时刷新开启时，每隔多少秒重新扫描视频列表。" },
 ];
+const INPUT_DEFS = [
+	{ key: "input_frames", name: "input_frames", label: "视频帧队列", type: OPTIONAL_INPUT_TYPE },
+	{ key: "frame_rate", name: "frame_rate", label: "帧率", type: "FLOAT" },
+	{ key: "width", name: "width", label: "宽度", type: "INT" },
+	{ key: "height", name: "height", label: "高度", type: "INT" },
+	{ key: "video_format", name: "video_format", label: "视频格式", type: "STRING" },
+	{ key: "start_frame", name: "start_frame", label: "起始帧", type: "INT" },
+	{ key: "end_frame", name: "end_frame", label: "结束帧", type: "INT" },
+	{ key: "frame_stride", name: "frame_stride", label: "抽帧间隔", type: "INT" },
+	{ key: "max_frames", name: "max_frames", label: "最大帧数", type: "INT" },
+	{ key: "filter_keyword", name: "filter_keyword", label: "过滤关键词", type: "STRING" },
+	{ key: "filter_directory", name: "filter_directory", label: "过滤目录", type: "STRING" },
+	{ key: "refresh_interval", name: "refresh_interval", label: "刷新时间", type: "FLOAT" },
+	{ key: "auto_refresh", name: "auto_refresh", label: "定时刷新", type: "BOOLEAN" },
+];
+const INPUT_DEF_BY_KEY = new Map(INPUT_DEFS.map((def) => [def.key, def]));
 const FALLBACK_FORMATS = ["video/h264-mp4", "video/webm", "image/gif", "image/webp"];
 const TAB_DEFS = [
 	{ key: "video", icon: "🎬", label: "视频", tip: "选择、导入、预览视频。" },
 	{ key: "params", icon: "⚙️", label: "参数", tip: "显示帧率、尺寸、起止帧、抽帧间隔和最大帧数。" },
-	{ key: "outputs", icon: "🔌", label: "输出", tip: "按需扩充输出接口，只保留当前需要的输出口。" },
+	{ key: "outputs", icon: "🔌", label: "接口", tip: "按需扩充输入口和输出口，只保留当前需要的接口。" },
 ];
 
 const OUTPUT_DEFS = [
@@ -91,6 +108,26 @@ function parseEnabledOutputs(rawValue) {
 	return normalizeOutputKeys(parseJsonValue(rawValue, []));
 }
 
+function parseEnabledInputs(rawValue) {
+	return normalizeInputKeys(parseJsonValue(rawValue, []));
+}
+
+function normalizeInputKeys(value) {
+	const source = Array.isArray(value)
+		? value
+		: Array.isArray(value?.inputs)
+			? value.inputs
+			: Array.isArray(value?.enabled_inputs)
+				? value.enabled_inputs
+				: [];
+	const result = [];
+	for (const item of source) {
+		const key = String(typeof item === "object" && item ? (item.key || item.name) : item || "");
+		if (INPUT_DEF_BY_KEY.has(key) && !result.includes(key)) result.push(key);
+	}
+	return result;
+}
+
 function normalizeOutputKeys(value) {
 	const source = Array.isArray(value)
 		? value
@@ -109,6 +146,32 @@ function normalizeOutputKeys(value) {
 
 function selectedOutputDefsFromKeys(keys) {
 	return normalizeOutputKeys(keys).map((key) => OUTPUT_DEF_BY_KEY.get(key)).filter(Boolean);
+}
+
+function selectedInputDefsFromKeys(keys) {
+	return normalizeInputKeys(keys).map((key) => INPUT_DEF_BY_KEY.get(key)).filter(Boolean);
+}
+
+function inputSlotKey(input) {
+	const explicit = String(input?.__gjj_key || "");
+	if (INPUT_DEF_BY_KEY.has(explicit)) return explicit;
+	const serializedKey = String(input?.gjj_key || input?.key || input?.name || "");
+	if (INPUT_DEF_BY_KEY.has(serializedKey)) return serializedKey;
+	const label = String(input?.label || input?.localized_name || input?.display_name || "");
+	for (const def of INPUT_DEFS) {
+		if (label === def.label || label === def.name) return def.key;
+	}
+	return "";
+}
+
+function inputKeysFromSlots(inputs) {
+	const result = [];
+	if (!Array.isArray(inputs)) return result;
+	for (const input of inputs) {
+		const key = inputSlotKey(input);
+		if (INPUT_DEF_BY_KEY.has(key) && !result.includes(key)) result.push(key);
+	}
+	return result;
 }
 
 function outputKeysFromSlots(outputs) {
@@ -149,6 +212,17 @@ function serializeOutputs(outputs) {
 	return JSON.stringify({ version: 2, outputs: outputDefs });
 }
 
+function serializeInputs(inputs) {
+	const inputDefs = selectedInputDefsFromKeys(inputs).map((def, index) => ({
+		key: def.key,
+		name: def.name,
+		label: def.label,
+		type: def.type,
+		index,
+	}));
+	return JSON.stringify({ version: 1, inputs: inputDefs });
+}
+
 function itemKey(item) {
 	return `${String(item?.subfolder || "")}/${String(item?.filename || "")}`;
 }
@@ -181,6 +255,18 @@ function outputsFromNode(node, serializedNode = null) {
 	return propertyValue || serializedProperty || "[]";
 }
 
+function inputsFromNode(node, serializedNode = null) {
+	const propertyValue = String(node?.properties?.[INPUTS_PROPERTY] || "");
+	if (propertyValue.trim()) {
+		return propertyValue;
+	}
+	const serializedProperty = String(serializedNode?.properties?.[INPUTS_PROPERTY] || "");
+	if (serializedProperty.trim()) {
+		return serializedProperty;
+	}
+	return serializeInputs([]);
+}
+
 function requestRedraw(node) {
 	node?.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
@@ -210,6 +296,7 @@ function ensureState(node) {
 		allOptions: [],
 		formats: [],
 		selection: parseSelection(selectedFromNode(node)),
+		enabledInputs: parseEnabledInputs(inputsFromNode(node)),
 		enabledOutputs: parseEnabledOutputs(outputsFromNode(node)),
 		executedFrames: [],
 		executedFrameCount: 0,
@@ -227,6 +314,7 @@ function syncProperties(node) {
 	const state = ensureState(node);
 	node.properties = node.properties || {};
 	node.properties[DATA_PROPERTY] = serializeSelection(state.selection);
+	node.properties[INPUTS_PROPERTY] = serializeInputs(state.enabledInputs);
 	node.properties[OUTPUTS_PROPERTY] = serializeOutputs(state.enabledOutputs);
 	node.properties[TAB_PROPERTY] = TAB_DEFS.some((tab) => tab.key === state.activeTab) ? state.activeTab : "video";
 }
@@ -539,19 +627,20 @@ function setSummary(node, text) {
 	requestRedraw(node);
 }
 
-function buttonStyle(active = false) {
+function buttonStyle(active = false, linked = false) {
 	return [
 		"height:32px",
 		"min-width:36px",
 		"padding:0 12px",
 		"box-sizing:border-box",
-		`border:1px solid ${active ? "#2ec4b6" : "#465761"}`,
+		`border:1px solid ${linked ? "#5b666c" : active ? "#2ec4b6" : "#465761"}`,
 		"border-radius:8px",
-		`background:${active ? "#123432" : "#1a2328"}`,
-		`color:${active ? "#eafffb" : "#dce7e2"}`,
+		`background:${linked ? "#252b2f" : active ? "#123432" : "#1a2328"}`,
+		`color:${linked ? "#8d989f" : active ? "#eafffb" : "#dce7e2"}`,
 		"font-size:16px",
 		"line-height:30px",
 		"cursor:pointer",
+		linked ? "opacity:.72" : "",
 		"white-space:nowrap",
 		"display:inline-flex",
 		"align-items:center",
@@ -559,7 +648,7 @@ function buttonStyle(active = false) {
 		"transition:all 0.2s ease",
 		"hover:border-color:#3ddbd9",
 		"hover:background:#234442",
-	].join(";");
+	].filter(Boolean).join(";");
 }
 
 function setIconButton(button, icon, title, description) {
@@ -845,9 +934,19 @@ function renderParamControls(node) {
 	for (const def of PARAM_DEFS) {
 		const input = box.querySelector(`[data-widget-name="${def.name}"]`);
 		if (!input) continue;
+		const row = input.closest("label");
+		const label = row?.querySelector("span");
 		const linked = hasLinkedInput(node, def.name);
 		input.disabled = linked;
 		input.title = linked ? `${def.label} 已连接外部输入，面板内不可覆盖。` : (def.tip || "");
+		input.style.opacity = linked ? "0.46" : "";
+		input.style.filter = linked ? "grayscale(1)" : "";
+		input.style.cursor = linked ? "not-allowed" : "";
+		if (row) {
+			row.style.opacity = linked ? "0.62" : "";
+			row.title = input.title;
+		}
+		if (label) label.style.color = linked ? "#69757c" : "#aebbc2";
 
 		let currentValue = getWidgetValue(node, def.name);
 
@@ -915,6 +1014,19 @@ function toggleOutput(node, key) {
 	syncProperties(node);
 	applyDynamicOutputs(node);
 	renderOutputButtons(node);
+	requestRedraw(node);
+}
+
+function toggleInput(node, key) {
+	const state = ensureState(node);
+	if (state.enabledInputs.includes(key)) {
+		state.enabledInputs = state.enabledInputs.filter((item) => item !== key);
+	} else {
+		state.enabledInputs.push(key);
+	}
+	syncProperties(node);
+	applyDynamicInputs(node);
+	renderInterfaceButtons(node);
 	requestRedraw(node);
 }
 
@@ -1214,25 +1326,41 @@ function renderExecutedPreview(node) {
 	}
 }
 
-function renderOutputButtons(node) {
+function appendInterfaceGroup(wrap, title, defs, activeKeys, onToggle, kind, node = null) {
+	const titleEl = document.createElement("div");
+	titleEl.textContent = title;
+	titleEl.style.cssText = "width:100%;font-size:12px;font-weight:700;color:#c9d3d8;margin:2px 0 0;";
+	wrap.appendChild(titleEl);
+	for (const def of defs) {
+		const active = activeKeys.includes(def.key);
+		const linked = kind === "输入口" && active && node ? hasLinkedInput(node, def.name) : false;
+		const button = document.createElement("button");
+		button.type = "button";
+		button.textContent = linked ? `🔗 ${def.label || def.name}` : active ? `✓ ${def.label || def.name}` : (def.label || def.name);
+		button.title = linked
+			? `${def.label || def.name} 已连接外部线；点击会移除此${kind}并断开连接。`
+			: `点击${active ? "隐藏" : "显示"}${kind}：${def.label || def.name}`;
+		button.style.cssText = buttonStyle(active, linked);
+		button.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			onToggle(def.key);
+		});
+		wrap.appendChild(button);
+	}
+}
+
+function renderInterfaceButtons(node) {
 	const state = ensureState(node);
 	const wrap = node.__gjjMultiVideoOutputButtons;
 	if (!wrap) return;
 	wrap.replaceChildren();
-	for (const def of OUTPUT_DEFS) {
-		const active = state.enabledOutputs.includes(def.key);
-		const button = document.createElement("button");
-		button.type = "button";
-		button.textContent = active ? `✓ ${def.name}` : def.name;
-		button.title = `点击${active ? "隐藏" : "显示"}输出口：${def.name}`;
-		button.style.cssText = buttonStyle(active);
-		button.addEventListener("click", (event) => {
-			event.preventDefault();
-			event.stopPropagation();
-			toggleOutput(node, def.key);
-		});
-		wrap.appendChild(button);
-	}
+	appendInterfaceGroup(wrap, "扩展输入口", INPUT_DEFS, state.enabledInputs, (key) => toggleInput(node, key), "输入口", node);
+	appendInterfaceGroup(wrap, "扩展输出口", OUTPUT_DEFS, state.enabledOutputs, (key) => toggleOutput(node, key), "输出口", node);
+}
+
+function renderOutputButtons(node) {
+	renderInterfaceButtons(node);
 }
 
 function updateSummary(node) {
@@ -1597,18 +1725,125 @@ function ensureDomWidget(node) {
 
 
 function ensureOptionalInput(node) {
+	applyDynamicInputs(node);
+}
+
+function currentInputDefs(node) {
+	const state = ensureState(node);
+	return selectedInputDefsFromKeys(state.enabledInputs || []);
+}
+
+function applyInputSpec(input, def, index) {
+	if (!input || !def) return;
+	input.name = def.name;
+	input.label = def.label;
+	input.localized_name = def.label;
+	input.display_name = def.label;
+	input.type = def.type;
+	input.tooltip = `用户选择输入：${def.label}`;
+	input.__gjj_key = def.key;
+	input.gjj_key = def.key;
+	input.hidden = false;
+	input.visible = true;
+	input.disabled = false;
+	input.slot_index = index;
+}
+
+function inputShapeMatches(node, defs) {
+	if (!Array.isArray(node?.inputs) || node.inputs.length !== defs.length) return false;
+	for (let index = 0; index < defs.length; index++) {
+		const input = node.inputs[index];
+		const def = defs[index];
+		if (!input || inputSlotKey(input) !== def.key) return false;
+		if (String(input.name || "") !== def.name) return false;
+		if (String(input.type || "") !== def.type) return false;
+	}
+	return true;
+}
+
+function collectInputLinksByKey(node) {
+	const saved = [];
+	for (let index = 0; index < (node.inputs || []).length; index++) {
+		const input = node.inputs[index];
+		const key = inputSlotKey(input);
+		if (!key || input?.link == null) continue;
+		const link = app.graph?.links?.[input.link];
+		if (!link) continue;
+		saved.push({
+			id: input.link,
+			key,
+			link,
+			origin_id: link.origin_id,
+			origin_slot: link.origin_slot,
+		});
+		input.link = null;
+	}
+	return saved;
+}
+
+function restoreInputLinksByKey(node, savedLinks, defs) {
+	const byKey = new Map(defs.map((def, index) => [def.key, { def, index }]));
+	const restored = new Set();
+	for (const item of savedLinks || []) {
+		const target = byKey.get(item.key);
+		if (!target) continue;
+		const input = node.inputs?.[target.index];
+		if (!input) continue;
+		const link = app.graph?.links?.[item.id] || item.link;
+		if (!link) continue;
+		link.id = item.id;
+		link.target_id = node.id;
+		link.target_slot = target.index;
+		link.type = target.def.type;
+		app.graph.links = app.graph.links || {};
+		app.graph.links[item.id] = link;
+		input.link = item.id;
+		restored.add(item.id);
+	}
+	return restored;
+}
+
+function deleteUnrestoredInputLinks(savedLinks, restoredIds) {
+	for (const item of savedLinks || []) {
+		if (restoredIds?.has?.(item.id)) continue;
+		const originNode = app.graph?.getNodeById?.(item.origin_id) || app.graph?._nodes_by_id?.[item.origin_id];
+		const originOutput = originNode?.outputs?.[item.origin_slot];
+		if (Array.isArray(originOutput?.links)) {
+			originOutput.links = originOutput.links.filter((id) => id !== item.id);
+		}
+		try { app.graph?.removeLink?.(item.id); } catch (_) {}
+		try { if (app.graph?.links?.[item.id]) delete app.graph.links[item.id]; } catch (_) {}
+	}
+}
+
+function rebuildInputSlots(node, defs) {
+	if (!Array.isArray(node.inputs)) node.inputs = [];
+	const savedLinks = collectInputLinksByKey(node);
+	while (node.inputs.length > 0) {
+		const index = node.inputs.length - 1;
+		try { node.disconnectInput?.(index); } catch (_) {}
+		try { node.removeInput?.(index); }
+		catch (_) { node.inputs.pop(); }
+	}
+	for (const def of defs) {
+		try { node.addInput?.(def.name, def.type); }
+		catch (_) { node.inputs.push({ name: def.name, type: def.type, link: null }); }
+	}
+	defs.forEach((def, index) => applyInputSpec(node.inputs?.[index], def, index));
+	const restored = restoreInputLinksByKey(node, savedLinks, defs);
+	deleteUnrestoredInputLinks(savedLinks, restored);
+}
+
+function applyDynamicInputs(node) {
 	if (!node) return;
-	let input = (node.inputs || []).find((item) => item?.name === OPTIONAL_INPUT_NAME);
-	if (!input) {
-		node.addInput?.(OPTIONAL_INPUT_NAME, OPTIONAL_INPUT_TYPE);
-		input = (node.inputs || []).find((item) => item?.name === OPTIONAL_INPUT_NAME);
+	const defs = currentInputDefs(node);
+	if (!inputShapeMatches(node, defs)) {
+		rebuildInputSlots(node, defs);
+	} else {
+		defs.forEach((def, index) => applyInputSpec(node.inputs?.[index], def, index));
 	}
-	if (input) {
-		input.name = OPTIONAL_INPUT_NAME;
-		input.label = OPTIONAL_INPUT_DISPLAY_NAME;
-		input.localized_name = OPTIONAL_INPUT_DISPLAY_NAME;
-		input.type = OPTIONAL_INPUT_TYPE;
-	}
+	globalThis.GJJApplyTypeColorsToNode?.(node);
+	refreshNodeAfterOutputChange(node);
 }
 
 function moveDomWidgetToTop(node) {
@@ -1768,6 +2003,30 @@ function serializedOutputObject(existing, def, index) {
 		not_show: false,
 		__gjj_hidden: false,
 	};
+}
+
+function serializedInputObject(existing, def, index) {
+	return {
+		...(existing && typeof existing === "object" ? existing : {}),
+		name: def.name,
+		label: def.label,
+		localized_name: def.label,
+		display_name: def.label,
+		type: def.type,
+		link: existing?.link ?? null,
+		slot_index: index,
+		tooltip: `用户选择输入：${def.label}`,
+		gjj_key: def.key,
+		hidden: false,
+		visible: true,
+		disabled: false,
+	};
+}
+
+function writeSerializedInputSlots(serializedNode, defs) {
+	if (!serializedNode) return;
+	const existing = Array.isArray(serializedNode.inputs) ? serializedNode.inputs : [];
+	serializedNode.inputs = defs.map((def, index) => serializedInputObject(existing[index], def, index));
 }
 
 function writeSerializedOutputSlots(serializedNode, defs) {
@@ -2212,6 +2471,7 @@ app.registerExtension({
 			const result = originalOnConfigure?.apply(this, args);
 			const state = ensureState(this);
 			state.selection = parseSelection(selectedFromNode(this, args[0]));
+			state.enabledInputs = parseEnabledInputs(inputsFromNode(this, args[0]));
 			state.enabledOutputs = parseEnabledOutputs(outputsFromNode(this, args[0]));
 			state.activeTab = String(args[0]?.properties?.[TAB_PROPERTY] || this.properties?.[TAB_PROPERTY] || "video");
 			if (!TAB_DEFS.some((tab) => tab.key === state.activeTab)) state.activeTab = "video";
@@ -2219,6 +2479,7 @@ app.registerExtension({
 			state.executedFrameCount = 0;
 			state.sourceFps = 0;
 			syncProperties(this);
+			applyDynamicInputs(this);
 			applyDynamicOutputs(this);
 			scheduleStabilize(this, 0);
 			setTimeout(() => scheduleStabilize(this, 0), 80);
@@ -2230,15 +2491,19 @@ app.registerExtension({
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode) {
 			syncProperties(this);
+			applyDynamicInputs(this);
 			applyDynamicOutputs(this);
 			const result = originalOnSerialize?.apply(this, [serializedNode]);
 			if (serializedNode) {
 				const state = ensureState(this);
+				const inputDefs = currentInputDefs(this);
 				const defs = currentOutputDefs(this);
 				serializedNode.properties = serializedNode.properties || {};
 				serializedNode.properties[DATA_PROPERTY] = serializeSelection(state.selection);
+				serializedNode.properties[INPUTS_PROPERTY] = serializeInputs(state.enabledInputs);
 				serializedNode.properties[OUTPUTS_PROPERTY] = serializeOutputs(state.enabledOutputs);
 				serializedNode.properties[TAB_PROPERTY] = TAB_DEFS.some((tab) => tab.key === state.activeTab) ? state.activeTab : "video";
+				writeSerializedInputSlots(serializedNode, inputDefs);
 				writeSerializedOutputSlots(serializedNode, defs);
 			}
 			return result;
@@ -2261,6 +2526,8 @@ app.registerExtension({
 		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalOnConnectionsChange?.apply(this, args);
+			renderParamControls(this);
+			renderInterfaceButtons(this);
 			scheduleStabilizeAfterConnection(this);
 			return result;
 		};

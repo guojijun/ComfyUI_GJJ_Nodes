@@ -620,6 +620,15 @@ def _conditioning_tensor(conditioning: Any):
         return tensor
 
 
+def _conditioning_metadata(conditioning: Any) -> dict[str, Any]:
+    if not _is_conditioning(conditioning):
+        return {}
+    first = conditioning[0]
+    if len(first) < 2 or not isinstance(first[1], dict):
+        return {}
+    return dict(first[1])
+
+
 def _normalize_text_embeds_input(text_embeds: Any) -> Any:
     if text_embeds is None:
         return None
@@ -628,10 +637,14 @@ def _normalize_text_embeds_input(text_embeds: Any) -> Any:
             return text_embeds
         raise RuntimeError("文本条件转换失败：字典输入缺少 prompt_embeds 字段。")
     if _is_conditioning(text_embeds):
-        return {
+        result = {
             "prompt_embeds": _conditioning_tensor(text_embeds),
             "negative_prompt_embeds": None,
         }
+        metadata = _conditioning_metadata(text_embeds)
+        if metadata.get("context_latents", None) is not None:
+            result["context_latents"] = metadata["context_latents"]
+        return result
     raise RuntimeError(
         "文本条件类型不兼容：请连接 WANVIDEOTEXTEMBEDS，或连接 CLIP 编码节点输出的 CONDITIONING。"
     )
@@ -1798,6 +1811,15 @@ class GJJ_NativeWanVideoSampler:
                 "Wan 原生视频采样器只接 ComfyUI 原生 Wan MODEL。\n"
                 f"当前收到的是 {received}。如果你接的是 WANVIDEOMODEL，请使用「GJJ · 🎞️ WanVideo 视频采样器 v2」。"
             )
+        try:
+            from .gjj_bernini_runtime_patch import apply_gjj_bernini_patches
+        except Exception:
+            try:
+                from gjj_bernini_runtime_patch import apply_gjj_bernini_patches
+            except Exception:
+                apply_gjj_bernini_patches = None
+        if apply_gjj_bernini_patches is not None:
+            apply_gjj_bernini_patches()
         try:
             from nodes import common_ksampler
         except Exception as error:

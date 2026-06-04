@@ -485,6 +485,60 @@ const STYLES = `
     color: #ccc;
     border-color: #555;
   }
+  .pr-settings-media {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 6px 0;
+  }
+  .pr-settings-media-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: #888;
+  }
+  .pr-settings-url-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .pr-settings-url-input {
+    flex: 1;
+    min-width: 150px;
+    background: #222;
+    color: #e0e0e0;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 5px 7px;
+    font-size: 11px;
+    outline: none;
+  }
+  .pr-settings-url-input:focus {
+    border-color: #777;
+  }
+  .pr-settings-media-btn {
+    background: #252525;
+    color: #ddd;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 5px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .pr-settings-media-btn:hover {
+    background: #333;
+    border-color: #666;
+  }
+  .pr-settings-media-status {
+    display: none;
+    color: #aaa;
+    font-size: 11px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+  }
+  .pr-settings-media-status.error {
+    color: #ff9a9a;
+  }
   .pr-settings-close-btn {
     background: transparent;
     color: #888;
@@ -586,6 +640,51 @@ function parseInitial(jsonStr) {
   }
 
   return parsed;
+}
+
+function splitInputRelativePath(filename) {
+  let text = String(filename || "").trim().replace(/\\/g, "/");
+  if (!text) return { filename: "", subfolder: "" };
+  const parts = text.split("/").filter(Boolean);
+  const name = parts.pop() || "";
+  return { filename: name, subfolder: parts.join("/") };
+}
+
+function inputViewUrlForFilename(filename) {
+  const parts = splitInputRelativePath(filename);
+  let url = `/view?filename=${encodeURIComponent(parts.filename)}&type=input`;
+  if (parts.subfolder) url += `&subfolder=${encodeURIComponent(parts.subfolder)}`;
+  return api.apiURL ? api.apiURL(url) : url;
+}
+
+function isNetworkMediaUrl(value) {
+  return /^https?:\/\//i.test(String(value || "").trim());
+}
+
+async function downloadNetworkMediaToInput(url, mediaType) {
+  const endpoint = "/gjj/ltx_director/download_media";
+  const options = {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, media_type: mediaType }),
+  };
+  const response = api?.fetchApi
+    ? await api.fetchApi(endpoint, options)
+    : await fetch(endpoint, options);
+  if (!response?.ok) {
+    let detail = "";
+    try {
+      const data = await response.json();
+      detail = data?.error || JSON.stringify(data);
+    } catch (_) {
+      try { detail = await response.text(); } catch (_) { }
+    }
+    throw new Error(detail || `下载接口 HTTP ${response?.status || "?"}`);
+  }
+  const data = await response.json().catch(() => ({}));
+  const filename = String(data?.filename || data?.name || "").trim();
+  if (!filename) throw new Error("下载成功但没有返回文件名");
+  return filename;
 }
 
 class TimelineEditor {
@@ -1420,6 +1519,164 @@ class TimelineEditor {
     const x = (e.clientX - rect.left) * scaleX;
     const y = (e.clientY - rect.top) * scaleY;
     return { x, y };
+  }
+
+  async addImageFromInputMedia(imageFile, imgUrl, targetFrameStart = null, explicitLength = null) {
+    const frameRate = this.getFrameRate();
+    const newLength = explicitLength !== null ? explicitLength : frameRate * 1;
+
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        let newStart = targetFrameStart;
+        if (newStart === null) {
+          newStart = 0;
+          this.timeline.segments.sort((a, b) => a.start - b.start);
+          for (let i = 0; i < this.timeline.segments.length; i++) {
+            let seg = this.timeline.segments[i];
+            if (newStart + newLength <= seg.start) break;
+            newStart = Math.max(newStart, seg.start + seg.length);
+          }
+        }
+
+        const currentDuration = this.getVisualDurationFrames();
+        if (targetFrameStart !== null) {
+          let tempId = "TEMP_" + Date.now();
+          this.timeline.segments.push({ id: tempId, start: newStart, length: newLength, type: "temp" });
+          let result = this._applyCenterDragPhysics(this.timeline.segments, tempId, newStart, newStart + newLength / 2, currentDuration, currentDuration, 1);
+          for (let shiftedSeg of result) {
+            let original = this.timeline.segments.find(s => s.id === shiftedSeg.id);
+            if (original) {
+              original.start = shiftedSeg.resolvedStart !== undefined ? shiftedSeg.resolvedStart : shiftedSeg.start;
+            }
+          }
+          let tempSeg = this.timeline.segments.find(s => s.id === tempId);
+          newStart = tempSeg.start;
+          this.timeline.segments = this.timeline.segments.filter(s => s.id !== tempId);
+        }
+
+        const seg = {
+          id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
+          start: newStart,
+          length: newLength,
+          prompt: "",
+          type: "image",
+          imageFile,
+          imageB64: imgUrl,
+          imgObj: img,
+        };
+
+        this.timeline.segments.push(seg);
+        this.timeline.segments.sort((a, b) => a.start - b.start);
+        this.selectionType = "image";
+        this.selectedIndex = this.timeline.segments.findIndex(s => s.id === seg.id);
+        this.updateUIFromSelection();
+        this.commitChanges(true);
+        this.render();
+        resolve(seg);
+      };
+      img.onerror = () => resolve(null);
+      img.src = imgUrl;
+    });
+  }
+
+  async addAudioFromInputMedia(audioFile, displayName, arrayBuffer, targetFrameStart = null) {
+    const frameRate = this.getFrameRate();
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+    const clipDurationSecs = audioBuffer.duration;
+    const clipFrames = Math.max(1, Math.ceil(clipDurationSecs * frameRate));
+
+    const channelData = audioBuffer.getChannelData(0);
+    const peaks = [];
+    const numPeaks = 200;
+    const step = Math.max(1, Math.floor(channelData.length / numPeaks));
+    for (let i = 0; i < numPeaks; i++) {
+      let max = 0;
+      for (let j = 0; j < step; j++) {
+        const val = Math.abs(channelData[i * step + j] || 0);
+        if (val > max) max = val;
+      }
+      peaks.push(max);
+    }
+
+    let newLength = clipFrames;
+    let newStart = targetFrameStart;
+    if (newStart === null) {
+      newStart = 0;
+      this.timeline.audioSegments.sort((a, b) => a.start - b.start);
+      for (let i = 0; i < this.timeline.audioSegments.length; i++) {
+        let seg = this.timeline.audioSegments[i];
+        if (newStart + newLength <= seg.start) break;
+        newStart = Math.max(newStart, seg.start + seg.length);
+      }
+    }
+
+    const currentDuration = this.getVisualDurationFrames();
+    if (targetFrameStart !== null) {
+      let tempId = "TEMP_" + Date.now();
+      this.timeline.audioSegments.push({ id: tempId, start: newStart, length: newLength, type: "temp" });
+      let result = this._applyCenterDragPhysics(this.timeline.audioSegments, tempId, newStart, newStart + newLength / 2, currentDuration, currentDuration, 1);
+
+      for (let shiftedSeg of result) {
+        let original = this.timeline.audioSegments.find(s => s.id === shiftedSeg.id);
+        if (original) original.start = shiftedSeg.resolvedStart !== undefined ? shiftedSeg.resolvedStart : shiftedSeg.start;
+      }
+
+      let tempSeg = this.timeline.audioSegments.find(s => s.id === tempId);
+      newStart = tempSeg.start;
+      this.timeline.audioSegments = this.timeline.audioSegments.filter(s => s.id !== tempId);
+    }
+
+    const seg = {
+      id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
+      type: "audio",
+      start: newStart,
+      length: newLength,
+      trimStart: 0,
+      audioDurationFrames: clipFrames,
+      audioFile,
+      fileName: displayName || audioFile,
+      waveformPeaks: peaks
+    };
+
+    this.timeline.audioSegments.push(seg);
+    this.timeline.audioSegments.sort((a, b) => a.start - b.start);
+    this.selectionType = "audio";
+    this.selectedIndex = this.timeline.audioSegments.findIndex(s => s.id === seg.id);
+    this.updateUIFromSelection();
+    this.commitChanges(true);
+    this.render();
+    return seg;
+  }
+
+  async addNetworkMedia(url, mediaType, statusEl = null) {
+    const cleanUrl = String(url || "").trim();
+    if (!isNetworkMediaUrl(cleanUrl)) throw new Error("请输入 http/https 网络地址。");
+    if (statusEl) {
+      statusEl.classList.remove("error");
+      statusEl.style.display = "block";
+      statusEl.textContent = mediaType === "IMAGE" ? "正在下载网络图片到 input..." : "正在下载网络音频到 input...";
+    }
+
+    const filename = await downloadNetworkMediaToInput(cleanUrl, mediaType);
+    const viewUrl = inputViewUrlForFilename(filename);
+    if (mediaType === "IMAGE") {
+      const seg = await this.addImageFromInputMedia(filename, viewUrl);
+      if (!seg) throw new Error("图片已下载，但预览加载失败。");
+    } else if (mediaType === "AUDIO") {
+      const response = await fetch(viewUrl, { cache: "no-store" });
+      if (!response?.ok) throw new Error(`音频已下载，但读取失败：HTTP ${response?.status || "?"}`);
+      await this.addAudioFromInputMedia(filename, splitInputRelativePath(filename).filename, await response.arrayBuffer());
+    } else {
+      throw new Error("只支持网络图片和网络音频。");
+    }
+
+    if (statusEl) {
+      statusEl.classList.remove("error");
+      statusEl.textContent = `已添加：${filename}`;
+    }
+    return filename;
   }
 
   // --- Async Image Upload Logic (Handles multiple images simultaneously) ---
@@ -3499,6 +3756,72 @@ class TimelineEditor {
     if (compWidget) {
       menu.appendChild(this._makeSettingRow("图像压缩", createScrubbableNumberControl(compWidget, 1, 0, 100, false)));
     }
+
+    const mediaDivider = document.createElement("hr");
+    mediaDivider.className = "pr-settings-divider";
+    menu.appendChild(mediaDivider);
+
+    const mediaBox = document.createElement("div");
+    mediaBox.className = "pr-settings-media";
+    const mediaTitle = document.createElement("div");
+    mediaTitle.className = "pr-settings-media-title";
+    mediaTitle.textContent = "网络媒体";
+    mediaBox.appendChild(mediaTitle);
+
+    const mediaStatus = document.createElement("div");
+    mediaStatus.className = "pr-settings-media-status";
+
+    const makeUrlRow = (placeholder, mediaType, buttonText) => {
+      const row = document.createElement("div");
+      row.className = "pr-settings-url-row";
+
+      const input = document.createElement("input");
+      input.type = "url";
+      input.className = "pr-settings-url-input";
+      input.placeholder = placeholder;
+      input.spellcheck = false;
+
+      const btn = document.createElement("button");
+      btn.className = "pr-settings-media-btn";
+      btn.textContent = buttonText;
+
+      const run = async () => {
+        const url = String(input.value || "").trim();
+        btn.disabled = true;
+        btn.textContent = "下载中";
+        try {
+          await this.addNetworkMedia(url, mediaType, mediaStatus);
+          input.value = "";
+        } catch (err) {
+          mediaStatus.classList.add("error");
+          mediaStatus.style.display = "block";
+          mediaStatus.textContent = `下载失败：${err?.message || err}`;
+        } finally {
+          btn.disabled = false;
+          btn.textContent = buttonText;
+        }
+      };
+
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        run();
+      });
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          run();
+        }
+      });
+
+      row.appendChild(input);
+      row.appendChild(btn);
+      return row;
+    };
+
+    mediaBox.appendChild(makeUrlRow("粘贴网络图片 URL", "IMAGE", "添加图片"));
+    mediaBox.appendChild(makeUrlRow("粘贴网络音频 URL", "AUDIO", "添加音频"));
+    mediaBox.appendChild(mediaStatus);
+    menu.appendChild(mediaBox);
 
     // --- Global Prompt Toggle ---
     const globalPromptWidget = this.node.widgets?.find(w => w.name === "global_prompt");

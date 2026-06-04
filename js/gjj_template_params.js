@@ -438,6 +438,60 @@ async function downloadNetworkMediaInBrowser(originalUrl, mediaType, cacheInfo) 
 	return uploadMediaToInput(file, cacheInfo?.subfolder || "");
 }
 
+function canvasExportFilename(filename = "") {
+	const safe = safeMediaFilename(filename || "network_image.png", "IMAGE");
+	return safe.replace(/\.[A-Za-z0-9]{2,8}$/i, ".png");
+}
+
+function imageToCanvasBlob(image) {
+	const width = Number(image?.naturalWidth || image?.width || 0);
+	const height = Number(image?.naturalHeight || image?.height || 0);
+	if (!width || !height) throw new Error("图片尺寸为空，无法导出");
+	const canvas = document.createElement("canvas");
+	canvas.width = width;
+	canvas.height = height;
+	const ctx = canvas.getContext("2d");
+	if (!ctx) throw new Error("当前浏览器无法创建 canvas");
+	ctx.drawImage(image, 0, 0, width, height);
+	return new Promise((resolve, reject) => {
+		try {
+			canvas.toBlob((blob) => {
+				if (blob) resolve(blob);
+				else reject(new Error("canvas 导出为空，可能被跨域保护阻止"));
+			}, "image/png");
+		} catch (err) {
+			reject(err);
+		}
+	});
+}
+
+async function downloadNetworkImageViaCanvas(originalUrl, cacheInfo) {
+	const image = new Image();
+	image.crossOrigin = "anonymous";
+	image.referrerPolicy = "no-referrer";
+	image.decoding = "async";
+	const loaded = new Promise((resolve, reject) => {
+		image.onload = () => resolve();
+		image.onerror = () => reject(new Error("浏览器图片加载成功但跨域导出加载失败"));
+	});
+	image.src = originalUrl;
+	await loaded;
+	const blob = await imageToCanvasBlob(image);
+	const filename = canvasExportFilename(cacheInfo?.filename || filenameFromNetworkUrl(originalUrl, "IMAGE"));
+	const file = new File([blob], filename, { type: "image/png" });
+	return uploadMediaToInput(file, cacheInfo?.subfolder || "");
+}
+
+async function uploadLoadedPreviewImage(image, originalUrl, cacheInfo) {
+	if (!image || !image.complete || !Number(image.naturalWidth || 0) || !Number(image.naturalHeight || 0)) {
+		throw new Error("预览图尚未加载完成");
+	}
+	const blob = await imageToCanvasBlob(image);
+	const filename = canvasExportFilename(cacheInfo?.filename || filenameFromNetworkUrl(originalUrl, "IMAGE"));
+	const file = new File([blob], filename, { type: "image/png" });
+	return uploadMediaToInput(file, cacheInfo?.subfolder || "");
+}
+
 function saveFieldValue(node, field, values, nextValue) {
 	if (values && typeof values === "object") values[field.key] = nextValue;
 	const state = normalizeState(node);
@@ -462,6 +516,7 @@ async function ensureNetworkMediaInInput(node, field, input, values, wrap = null
 		const filename = cacheInfo.relativePath;
 		const row = wrap || input.closest?.(".gjj-template-param-row");
 		const preview = getPreviewForField(node, field.key, row);
+		const loadedPreviewImage = preview?.querySelector?.("img") || null;
 		try {
 			if (await inputFileExists(filename)) {
 				const activeInput = currentInputForField(node, field, input);
@@ -475,11 +530,35 @@ async function ensureNetworkMediaInInput(node, field, input, values, wrap = null
 
 			setPreviewMessage(preview, `正在下载到 ComfyUI input：${filename}`);
 			let uploadedName = "";
+			let backendError = null;
 			try {
 				uploadedName = await downloadNetworkMediaViaBackend(originalUrl, mediaType);
 			} catch (backendErr) {
+				backendError = backendErr;
 				console.warn("[GJJ_TemplateParams] 后端下载网络媒体失败，改用浏览器上传:", backendErr);
-				uploadedName = await downloadNetworkMediaInBrowser(originalUrl, mediaType, cacheInfo);
+				try {
+					uploadedName = await downloadNetworkMediaInBrowser(originalUrl, mediaType, cacheInfo);
+				} catch (browserErr) {
+					if (mediaType === "IMAGE") {
+						try {
+							uploadedName = await uploadLoadedPreviewImage(loadedPreviewImage, originalUrl, cacheInfo);
+						} catch (previewCanvasErr) {
+							try {
+								uploadedName = await downloadNetworkImageViaCanvas(originalUrl, cacheInfo);
+							} catch (canvasErr) {
+								const backendMessage = backendError?.message || backendError || "未知错误";
+								const browserMessage = browserErr?.message || browserErr || "未知错误";
+								const previewCanvasMessage = previewCanvasErr?.message || previewCanvasErr || "未知错误";
+								const canvasMessage = canvasErr?.message || canvasErr || "未知错误";
+								throw new Error(`后端下载失败：${backendMessage}；浏览器下载失败：${browserMessage}；预览图导出失败：${previewCanvasMessage}；画布导出失败：${canvasMessage}`);
+							}
+						}
+					} else {
+						const backendMessage = backendError?.message || backendError || "未知错误";
+						const browserMessage = browserErr?.message || browserErr || "未知错误";
+						throw new Error(`后端下载失败：${backendMessage}；浏览器下载失败：${browserMessage}`);
+					}
+				}
 			}
 			const activeInput = currentInputForField(node, field, input);
 			if (String(activeInput?.value || "").trim() !== originalUrl) return;
@@ -489,6 +568,13 @@ async function ensureNetworkMediaInInput(node, field, input, values, wrap = null
 			setNetworkWarningMessage(node, field, "");
 		} catch (err) {
 			console.warn("[GJJ_TemplateParams] 网络媒体下载到 input 失败:", err);
+			const activeInput = currentInputForField(node, field, input);
+			const activeValue = String(activeInput?.value || "").trim();
+			if (activeValue !== originalUrl || !isNetworkMediaUrl(activeValue)) {
+				setNetworkWarningMessage(node, field, "");
+				updatePreviewForField(node, field, activeValue, row);
+				return;
+			}
 			setNetworkWarningMessage(node, field, `${field?.label || "媒体"}：下载到 input 失败：${err?.message || err}`);
 			setPreviewMessage(preview, `下载到 input 失败：${err?.message || err}`, true);
 		}
@@ -503,7 +589,10 @@ async function ensureNetworkMediaInInput(node, field, input, values, wrap = null
 }
 
 function scheduleNetworkMediaToInput(node, field, input, values, wrap = null, delay = 450) {
-	if (!isNetworkMediaUrl(input?.value)) return;
+	if (!isNetworkMediaUrl(input?.value)) {
+		setNetworkWarningMessage(node, field, "");
+		return;
+	}
 	node.__gjjTemplateParamsNetworkTimers = node.__gjjTemplateParamsNetworkTimers || new Map();
 	const key = String(field?.key || "");
 	clearTimeout(node.__gjjTemplateParamsNetworkTimers.get(key));
@@ -797,13 +886,17 @@ function disconnectTextareaHeightObservers(node) {
 function observeTextareaHeight(node, field, textarea) {
 	if (!node || !field || !textarea) return;
 	let pointerStartHeight = 0;
+	let manualResizeArmed = false;
 	textarea.addEventListener("pointerdown", () => {
 		pointerStartHeight = measureTextareaHeight(textarea);
+		manualResizeArmed = true;
 	});
 	if (typeof ResizeObserver !== "undefined") {
 		const observer = new ResizeObserver(() => {
-			rememberTextareaHeight(node, field, textarea);
-			refreshNode(node, { resize: false });
+			if (manualResizeArmed) {
+				rememberTextareaHeight(node, field, textarea);
+				refreshNode(node, { resize: false });
+			}
 		});
 		observer.observe(textarea);
 		node.__gjjTemplateParamsTextareaObservers = node.__gjjTemplateParamsTextareaObservers || [];
@@ -819,6 +912,7 @@ function observeTextareaHeight(node, field, textarea) {
 				rememberTextareaHeight(node, field, textarea);
 				refreshNode(node);
 				pointerStartHeight = currentHeight;
+				manualResizeArmed = false;
 			}, 0);
 		});
 	}
@@ -1765,11 +1859,10 @@ function shouldUseMultilineText(field, value, isMedia) {
 function autoresizeTextarea(textarea, node = null, options = {}) {
 	if (!textarea) return;
 	const savedHeight = normalizeTextareaHeight(options.savedHeight);
-	const currentHeight = measureTextareaHeight(textarea);
-	textarea.style.height = "auto";
-	const naturalHeight = normalizeTextareaHeight(textarea.scrollHeight || TEXTAREA_MIN_HEIGHT);
-	textarea.style.height = `${Math.max(TEXTAREA_MIN_HEIGHT, savedHeight, currentHeight, naturalHeight)}px`;
-	if (node) refreshNode(node);
+	if (savedHeight) {
+		textarea.style.height = `${savedHeight}px`;
+	}
+	if (node) refreshNode(node, { resize: false });
 }
 
 function registerHiddenMediaField(node, field, values) {
@@ -1853,9 +1946,7 @@ function buildInputForField(node, field, values, options = {}) {
 			setNetworkWarningMessage(node, field, "");
 		}
 		if (multiline) {
-			node.__gjjTemplateParamsPreferSavedSize = false;
-			autoresizeTextarea(input, node, { savedHeight: savedTextareaHeight });
-			rememberTextareaHeight(node, field, input);
+			refreshNode(node, { resize: false });
 		}
 		saveFieldValue(node, field, values, input.value);
 
@@ -1872,8 +1963,7 @@ function buildInputForField(node, field, values, options = {}) {
 	if (multiline) {
 		observeTextareaHeight(node, field, input);
 		setTimeout(() => {
-			autoresizeTextarea(input, node, { savedHeight: savedTextareaHeight });
-			rememberTextareaHeight(node, field, input);
+			if (savedTextareaHeight) autoresizeTextarea(input, node, { savedHeight: savedTextareaHeight });
 		}, 0);
 	}
 

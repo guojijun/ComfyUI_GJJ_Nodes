@@ -6,6 +6,19 @@ from typing import Any
 MAX_TEXT_INPUTS = 32
 TEXT_INPUT_PREFIX = "text_"
 NODE_NAME = "GJJ_TextMerge"
+DEFAULT_TEMPLATE_TEXT = """【默认】You are a helpful assistant. #默认值
+【T2I】You are a helpful assistant specialized in text-to-image generation.#文本到图片
+【T2V】You are a helpful assistant specialized in text-to-video generation.#文本到视频
+【I2I】You are a helpful assistant specialized in image editing.#图片到图片
+【R2I】You are a helpful assistant specialized in subject-to-image generation.#参考主体到图片
+【I2V】You are a helpful assistant specialized in image-to-video generation.#图片到视频
+【V2V】You are a helpful assistant specialized in video editing.#视频到视频
+【R2V】You are a helpful assistant specialized in subject-to-video generation.#参考主体到视频
+【VI2V】You are a helpful assistant specialized in video editing on content propagation.#视频指令到视频
+【RV2V】You are a helpful assistant specialized in video editing with reference.#参考视频到视频
+【ADS2V】You are a helpful assistant specialized in ads insertion.#广告插入到视频
+【VRC2V】You are a helpful assistant for editing. You may need to adjust the subject's action or position.#视频区域控制到视频
+【MV2V】You are a helpful assistant for editing. You might need to adjust the video's style, lighting, colors, textures, and the subject's pose or action.#多维编辑到视频"""
 
 
 def build_text_input_options(index: int) -> tuple[str, dict[str, Any]]:
@@ -37,6 +50,66 @@ def normalize_text(value: Any) -> str:
     return str(value).strip()
 
 
+def parse_template_line(line: Any) -> dict[str, str] | None:
+    text = str(line or "").strip()
+    if not text.startswith("【") or "】" not in text:
+        return None
+
+    label, rest = text[1:].split("】", 1)
+    label = label.strip()
+    if not label:
+        return None
+
+    tooltip = ""
+    if "#" in rest:
+        rest, tooltip = rest.rsplit("#", 1)
+    placement = "suffix" if rest.startswith("⬛") else "prefix"
+    if placement == "suffix":
+        rest = rest[1:]
+    content = rest.strip()
+    if not content:
+        return None
+    return {"label": label, "content": content, "tooltip": tooltip.strip(), "placement": placement}
+
+
+def parse_templates(template_text: Any) -> list[dict[str, str]]:
+    source = normalize_text(template_text) or DEFAULT_TEMPLATE_TEXT
+    templates: list[dict[str, str]] = []
+    for line in source.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        parsed = parse_template_line(line)
+        if parsed:
+            templates.append(parsed)
+    return templates
+
+
+def selected_template_entry(template_text: Any, selected_template: Any) -> dict[str, str] | None:
+    templates = parse_templates(template_text)
+    if not templates:
+        return None
+
+    selected = normalize_text(selected_template)
+    for entry in templates:
+        if entry["label"] == selected:
+            return entry
+    return templates[0]
+
+
+def apply_template(merged_text: str, template_text: Any, selected_template: Any) -> str:
+    entry = selected_template_entry(template_text, selected_template)
+    if not entry:
+        return merged_text
+
+    content = entry["content"].strip()
+    text = normalize_text(merged_text)
+    if not content:
+        return text
+    if not text:
+        return content
+    if entry.get("placement") == "suffix":
+        return f"{text}\n\n{content}"
+    return f"{content}\n\n{text}"
+
+
 class GJJ_TextMerge:
     CATEGORY = "GJJ"
     FUNCTION = "merge"
@@ -54,7 +127,29 @@ class GJJ_TextMerge:
             for index in range(1, MAX_TEXT_INPUTS + 1)
         }
         return {
-            "required": {},
+            "required": {
+                "template_text": (
+                    "STRING",
+                    {
+                        "default": DEFAULT_TEMPLATE_TEXT,
+                        "multiline": True,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "隐藏模板",
+                        "tooltip": "由前端 ⚙️ 设置按钮维护。格式：【按钮文字】模板内容#提示；【按钮文字】⬛模板内容#提示 表示追加到输入文本后面。",
+                    },
+                ),
+                "selected_template": (
+                    "STRING",
+                    {
+                        "default": "默认",
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "当前模板",
+                        "tooltip": "当前选中的模板按钮文字，由前端维护。",
+                    },
+                ),
+            },
             "optional": optional_inputs,
         }
 
@@ -68,10 +163,13 @@ class GJJ_TextMerge:
             if content:
                 texts.append(content)
 
-        merged_text = "".join(texts)
+        base_text = "".join(texts)
+        merged_text = apply_template(base_text, kwargs.get("template_text"), kwargs.get("selected_template"))
         return {
             "ui": {
                 "text": (merged_text,),
+                "base_text": (base_text,),
+                "selected_template": (normalize_text(kwargs.get("selected_template")) or "默认",),
             },
             "result": (merged_text,),
         }

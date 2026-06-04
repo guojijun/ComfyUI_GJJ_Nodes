@@ -38,16 +38,31 @@ def register_common_media_preview_api() -> None:
             subfolder = str(request.query.get("subfolder", "") or "").strip("/\\")
             root = gjjutils_media_root(media_type)
             folder = (root / subfolder).resolve() if subfolder else root
+            filename = str(request.query.get("filename", "") or "").replace("\\", "/").strip("/")
             try:
                 folder.relative_to(root)
             except ValueError:
                 return web.json_response({"error": "路径越界"}, status=400)
             if not folder.exists():
                 return web.json_response({"error": "目录不存在"}, status=404)
+            target_file = (folder / filename).resolve() if filename else None
+            if target_file is not None:
+                try:
+                    target_file.relative_to(root)
+                except ValueError:
+                    target_file = None
+                if target_file is not None and not target_file.exists():
+                    target_file = None
             if os.name == "nt":
-                subprocess.Popen(["explorer", str(folder)])
+                if target_file is not None:
+                    subprocess.Popen(["explorer.exe", f"/select,{target_file}"])
+                else:
+                    subprocess.Popen(["explorer.exe", str(folder)])
             elif sys.platform == "darwin":
-                subprocess.Popen(["open", str(folder)])
+                if target_file is not None:
+                    subprocess.Popen(["open", "-R", str(target_file)])
+                else:
+                    subprocess.Popen(["open", str(folder)])
             else:
                 subprocess.Popen(["xdg-open", str(folder)])
             return web.json_response({"status": "ok", "path": str(folder)})

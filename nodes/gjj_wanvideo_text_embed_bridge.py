@@ -37,6 +37,16 @@ def _conditioning_tensor(conditioning: Any, label: str):
     return tensor
 
 
+def _conditioning_metadata(conditioning: Any) -> dict[str, Any]:
+    if not isinstance(conditioning, (list, tuple)) or not conditioning:
+        return {}
+    first = conditioning[0]
+    if not isinstance(first, (list, tuple)) or len(first) < 2:
+        return {}
+    metadata = first[1]
+    return dict(metadata) if isinstance(metadata, dict) else {}
+
+
 class GJJ_WanVideoTextEmbedBridge:
     CATEGORY = "GJJ/视频生成"
     FUNCTION = "process"
@@ -97,11 +107,19 @@ class GJJ_WanVideoTextEmbedBridge:
             if negative is not None
             else None
         )
+        positive_metadata = _conditioning_metadata(positive)
+        negative_metadata = _conditioning_metadata(negative)
+        context_latents = positive_metadata.get("context_latents", None)
+        if context_latents is None:
+            context_latents = negative_metadata.get("context_latents", None)
+        output = {
+            "prompt_embeds": prompt_embeds,
+            "negative_prompt_embeds": negative_prompt_embeds,
+        }
+        if context_latents is not None:
+            output["context_latents"] = context_latents
         return (
-            {
-                "prompt_embeds": prompt_embeds,
-                "negative_prompt_embeds": negative_prompt_embeds,
-            },
+            output,
         )
 
 

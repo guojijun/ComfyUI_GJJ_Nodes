@@ -2206,7 +2206,8 @@ class WanModel(torch.nn.Module):
 
     def rope_encode_comfy(self, t, h, w, freq_offset=0, t_start=0, ref_frame_shape=None, pose_frame_shape=None,
                           steps_t=None, steps_h=None, steps_w=None, ntk_alphas=[1,1,1], device=None, dtype=None,
-                          ref_frame_index=10, longcat_num_ref_latents=0, num_memory_frames=3, rope_negative_offset=5):
+                          ref_frame_index=10, longcat_num_ref_latents=0, num_memory_frames=3, rope_negative_offset=5,
+                          context_frame_shapes=None, context_window_start=0):
 
         patch_size = self.patch_size
         t_len = ((t + (patch_size[0] // 2)) // patch_size[0])
@@ -2280,6 +2281,40 @@ class WanModel(torch.nn.Module):
 
             segments.append(pose_img_ids.reshape(1, -1, pose_img_ids.shape[-1]))
 
+        # Bernini in-context reference streams. Source IDs are separated in
+        # spatial RoPE so source video, reference video and reference images do
+        # not collapse onto the main content positions.
+        if context_frame_shapes is not None:
+            context_h_offset = h_len + 32
+            context_w_offset = w_len + 32
+            for i, (ctx_t, ctx_h, ctx_w) in enumerate(context_frame_shapes):
+                ctx_t_len = ((ctx_t + (self.patch_size[0] // 2)) // self.patch_size[0])
+                ctx_h_len = ((ctx_h + (self.patch_size[1] // 2)) // self.patch_size[1])
+                ctx_w_len = ((ctx_w + (self.patch_size[2] // 2)) // self.patch_size[2])
+                ctx_ids = torch.zeros((ctx_t_len, ctx_h_len, ctx_w_len, 3), device=device, dtype=dtype)
+                ctx_ids[:, :, :, 0] = ctx_ids[:, :, :, 0] + torch.linspace(
+                    context_window_start,
+                    context_window_start + (ctx_t_len - 1),
+                    steps=ctx_t_len,
+                    device=device,
+                    dtype=dtype,
+                ).reshape(-1, 1, 1)
+                ctx_ids[:, :, :, 1] = ctx_ids[:, :, :, 1] + torch.linspace(
+                    context_h_offset + i * 32,
+                    context_h_offset + i * 32 + ctx_h_len - 1,
+                    steps=ctx_h_len,
+                    device=device,
+                    dtype=dtype,
+                ).reshape(1, -1, 1)
+                ctx_ids[:, :, :, 2] = ctx_ids[:, :, :, 2] + torch.linspace(
+                    context_w_offset + i * 32,
+                    context_w_offset + i * 32 + ctx_w_len - 1,
+                    steps=ctx_w_len,
+                    device=device,
+                    dtype=dtype,
+                ).reshape(1, 1, -1)
+                segments.append(ctx_ids.reshape(1, -1, ctx_ids.shape[-1]))
+
         combined_img_ids = torch.cat(segments, dim=1)
         freqs = self.rope_embedder(combined_img_ids, ntk_alphas).movedim(1, 2)
 
@@ -2350,6 +2385,8 @@ class WanModel(torch.nn.Module):
         transformer_options={},
         rope_negative_offset=0,
         num_memory_frames=0,
+        context_latents=None,
+        context_window_start=0,
     ):
         r"""
         Forward pass through the diffusion model
@@ -2372,6 +2409,8 @@ class WanModel(torch.nn.Module):
             List[Tensor]:
                 List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
         """
+        context_frame_shapes = None
+
         # Stand-In only used on first positive pass, then cached in kv_cache
         if is_uncond or current_step > 0:
             standin_input = None
@@ -2576,6 +2615,27 @@ class WanModel(torch.nn.Module):
         x = [u.flatten(2).transpose(1, 2) for u in x]
         self.original_seq_len = x[0].shape[1]
 
+        if context_latents is not None and len(context_latents) > 0:
+            context_frame_shapes = []
+            context_token_count = 0
+            for lat in context_latents:
+                if lat is None:
+                    continue
+                lat = lat.to(device=x[0].device, dtype=x[0].dtype)
+                p_t, p_h, p_w = self.patch_size
+                pad_t = (p_t - (lat.shape[1] % p_t)) % p_t
+                pad_h = (p_h - (lat.shape[2] % p_h)) % p_h
+                pad_w = (p_w - (lat.shape[3] % p_w)) % p_w
+                if pad_t or pad_h or pad_w:
+                    lat = torch.nn.functional.pad(lat, (0, pad_w, 0, pad_h, 0, pad_t))
+                context_tokens = self.original_patch_embedding(lat.unsqueeze(0).float()).to(x[0].dtype)
+                context_tokens = context_tokens.flatten(2).transpose(1, 2)
+                x = [torch.cat([u, context_tokens], dim=1) for u in x]
+                seq_len = max(seq_len, x[0].shape[1])
+                context_token_count += int(context_tokens.shape[1])
+                context_frame_shapes.append(lat.shape[1:4])
+            log.info(f"GJJ Bernini: model appended {context_token_count} context token(s), frame shapes={context_frame_shapes}")
+
         prev_latent = None
         if dual_control_input is not None:
             prev_latent = dual_control_input.get("prev_latent", None)
@@ -2675,6 +2735,7 @@ class WanModel(torch.nn.Module):
                 longcat_num_ref_latents,
                 rope_negative_offset,
                 num_memory_frames,
+                tuple(tuple(s) for s in context_frame_shapes) if context_frame_shapes is not None else None,
             )
 
             # Check cache using key comparison
@@ -2692,6 +2753,8 @@ class WanModel(torch.nn.Module):
                     longcat_num_ref_latents=longcat_num_ref_latents,
                     rope_negative_offset=rope_negative_offset,
                     num_memory_frames=num_memory_frames,
+                    context_frame_shapes=context_frame_shapes,
+                    context_window_start=context_window_start,
                     device=x.device,
                     dtype=x.dtype
                 )
