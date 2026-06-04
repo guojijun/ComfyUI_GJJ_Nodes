@@ -510,8 +510,111 @@ function ensureTrailingEmptyRow(node) {
 	});
 }
 
+function applyHighLowPairToNextRow(node, rowIndex, selectedName) {
+	const state = ensureNodeState(node);
+	const pairName = findHighLowPairName(selectedName, state.options);
+	if (!pairName) {
+		return false;
+	}
+
+	state.rows = state.rows.map((row) => ({ ...row }));
+	while (state.rows.length <= rowIndex + 1) {
+		state.rows.push({ ...DEFAULT_ROW });
+	}
+
+	const pairRow = {
+		enabled: true,
+		name: pairName,
+		strength: normalizeStrength(state.rows[rowIndex]?.strength, 1.0),
+	};
+	const nextRow = state.rows[rowIndex + 1] || DEFAULT_ROW;
+	if (!String(nextRow.name || "")) {
+		state.rows[rowIndex + 1] = pairRow;
+		return true;
+	}
+	if (areHighLowPairNames(selectedName, nextRow.name, state.options)) {
+		state.rows[rowIndex + 1] = {
+			...nextRow,
+			enabled: true,
+			strength: normalizeStrength(nextRow.strength, pairRow.strength),
+		};
+		return true;
+	}
+
+	const existingPairIndex = state.rows.findIndex((row, index) => {
+		return index !== rowIndex && normalizeKeyword(row?.name) === normalizeKeyword(pairName);
+	});
+	if (existingPairIndex >= 0) {
+		const [existingPair] = state.rows.splice(existingPairIndex, 1);
+		const insertIndex = existingPairIndex < rowIndex + 1 ? rowIndex : rowIndex + 1;
+		state.rows.splice(insertIndex, 0, {
+			...existingPair,
+			enabled: true,
+			strength: normalizeStrength(existingPair.strength, pairRow.strength),
+		});
+		return true;
+	}
+
+	state.rows.splice(rowIndex + 1, 0, pairRow);
+	return true;
+}
+
 function normalizeKeyword(value) {
 	return String(value || "").trim().toLowerCase();
+}
+
+function replaceHighLowToken(value, replacement) {
+	const source = String(value || "");
+	return source.replace(
+		/(^|[^a-z0-9])(high|low)(?=$|[^a-z0-9])/gi,
+		(match, prefix, token) => {
+			const lowerReplacement = String(replacement || "").toLowerCase();
+			let nextToken = lowerReplacement;
+			if (token === token.toUpperCase()) {
+				nextToken = lowerReplacement.toUpperCase();
+			} else if (token[0] === token[0].toUpperCase()) {
+				nextToken = lowerReplacement[0].toUpperCase() + lowerReplacement.slice(1);
+			}
+			return `${prefix}${nextToken}`;
+		},
+	);
+}
+
+function getHighLowToken(value) {
+	const match = String(value || "").match(/(^|[^a-z0-9])(high|low)(?=$|[^a-z0-9])/i);
+	return match ? match[2].toLowerCase() : "";
+}
+
+function findHighLowPairName(loraName, options) {
+	const token = getHighLowToken(loraName);
+	if (!token) {
+		return "";
+	}
+
+	const counterpart = token === "high" ? "low" : "high";
+	const candidate = replaceHighLowToken(loraName, counterpart);
+	const candidateKey = normalizeKeyword(candidate);
+	const byExactValue = (options || []).find((option) => normalizeKeyword(option?.value) === candidateKey);
+	if (byExactValue?.value) {
+		return String(byExactValue.value);
+	}
+
+	const candidateBase = normalizeKeyword(candidate.split(/[\\/]/).pop());
+	const byBasename = (options || []).find((option) => {
+		const valueBase = normalizeKeyword(String(option?.value || "").split(/[\\/]/).pop());
+		return valueBase && valueBase === candidateBase;
+	});
+	return byBasename?.value ? String(byBasename.value) : "";
+}
+
+function areHighLowPairNames(firstName, secondName, options = []) {
+	const first = String(firstName || "");
+	const second = String(secondName || "");
+	if (!first || !second) {
+		return false;
+	}
+	const paired = findHighLowPairName(first, options);
+	return Boolean(paired) && normalizeKeyword(paired) === normalizeKeyword(second);
 }
 
 function getDefaultSearchValue(index) {
@@ -656,7 +759,7 @@ function enforceRowUniqueness(node) {
 	const state = ensureNodeState(node);
 	const rules = parseGroupRules(state.groupRulesText);
 	const usedNames = new Set();
-	const usedGroups = new Set();
+	const usedGroups = new Map();
 
 	state.rows = state.rows.map((row) => ({ ...row }));
 	state.rows.forEach((row) => {
@@ -667,7 +770,11 @@ function enforceRowUniqueness(node) {
 
 		const loweredName = normalizeKeyword(name);
 		const groupName = getGroupNameForLora(name, rules);
-		if (usedNames.has(loweredName) || (groupName && usedGroups.has(groupName))) {
+		const existingGroupName = groupName ? usedGroups.get(groupName) : "";
+		if (
+			usedNames.has(loweredName)
+			|| (existingGroupName && !areHighLowPairNames(existingGroupName, name, state.options))
+		) {
 			row.name = "";
 			row.enabled = false;
 			return;
@@ -675,7 +782,7 @@ function enforceRowUniqueness(node) {
 
 		usedNames.add(loweredName);
 		if (groupName) {
-			usedGroups.add(groupName);
+			usedGroups.set(groupName, name);
 		}
 	});
 }
@@ -738,7 +845,10 @@ function getRowOptions(node, rowIndex, searchText = "") {
 		if (!isCurrent && blockedNames.has(loweredValue)) {
 			return false;
 		}
-		if (!isCurrent && groupName && blockedGroups.has(groupName)) {
+		const isHighLowPairForAnotherRow = state.rows.some((otherRow, otherIndex) => {
+			return otherIndex !== rowIndex && areHighLowPairNames(value, otherRow?.name, state.options);
+		});
+		if (!isCurrent && groupName && blockedGroups.has(groupName) && !isHighLowPairForAnotherRow) {
 			return false;
 		}
 		if (!matchesSearchExpression(loweredValue, expressionGroups)) {
@@ -1058,6 +1168,9 @@ function buildRow(node, row, index, rowsContainer) {
 			onSelect(value) {
 				state.rows[index].name = value;
 				state.rows[index].enabled = Boolean(value);
+				if (value) {
+					applyHighLowPairToNextRow(node, index, value);
+				}
 				enforceRowUniqueness(node);
 				ensureTrailingEmptyRow(node);
 				updateDataWidget(node);
