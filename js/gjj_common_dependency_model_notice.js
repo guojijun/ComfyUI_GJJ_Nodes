@@ -1,5 +1,6 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
+import { GJJ_Utils } from "./gjj_utils.js";
 
 (function () {
 	"use strict";
@@ -21,18 +22,33 @@ import { api } from "/scripts/api.js";
 
 	function refreshNode(node) {
 		if (!node) return;
-		if (globalThis.GJJ_Utils?.scheduleRefreshNode) {
-			globalThis.GJJ_Utils.scheduleRefreshNode(node, { minWidth: 300, minHeight: 120, delay: 20 });
-			return;
-		}
-		requestAnimationFrame(() => {
-			const size = node.computeSize?.();
-			if (Array.isArray(size)) {
-				node.setSize?.([Math.max(Number(node.size?.[0] || size[0] || 300), 300), Math.max(Number(size[1] || 120), 120)]);
-			}
-			node.setDirtyCanvas?.(true, true);
-			app.graph?.setDirtyCanvas?.(true, true);
-		});
+		GJJ_Utils.scheduleFitNodeToContent(node, { minWidth: 300, minHeight: 80, delay: 20 });
+		GJJ_Utils.scheduleFitNodeToContent(node, { minWidth: 300, minHeight: 80, delay: 120 });
+	}
+
+	function noticeHeight(root) {
+		if (!root || root.style.display === "none") return 0;
+		const message = root.children?.[0];
+		const button = root.children?.[1];
+		const style = getComputedStyle(root);
+		const padding = Number.parseFloat(style.paddingTop || "0") + Number.parseFloat(style.paddingBottom || "0");
+		const border = Number.parseFloat(style.borderTopWidth || "0") + Number.parseFloat(style.borderBottomWidth || "0");
+		const messageHeight = Math.ceil(message?.scrollHeight || message?.offsetHeight || 0);
+		const buttonVisible = button && button.style.display !== "none";
+		const buttonStyle = buttonVisible ? getComputedStyle(button) : null;
+		const buttonHeight = buttonVisible
+			? Math.ceil(
+				(button.scrollHeight || button.offsetHeight || 28)
+				+ Number.parseFloat(buttonStyle?.marginTop || "0")
+				+ Number.parseFloat(buttonStyle?.marginBottom || "0")
+			)
+			: 0;
+		const contentHeight = padding + border + messageHeight + buttonHeight;
+		if (contentHeight > 0) return Math.max(42, Math.ceil(contentHeight));
+		return Math.max(
+			42,
+			Math.ceil(root.scrollHeight || root.offsetHeight || root.getBoundingClientRect?.().height || 88)
+		);
 	}
 
 	function copyText(text) {
@@ -198,8 +214,9 @@ import { api } from "/scripts/api.js";
 		const widget = node.addDOMWidget(WIDGET_NAME, "HTML", root, {
 			serialize: false,
 			hideOnZoom: false,
-			getHeight: () => (root.style.display === "none" ? 0 : root.offsetHeight || 88),
+			getHeight: () => noticeHeight(root),
 		});
+		widget.computeSize = (width) => [Math.max(260, Number(width || node.size?.[0] || 300)), noticeHeight(root)];
 		setWidgetNonSerialized(widget);
 		widget.mouse = function (event) {
 			const target = event?.target;
@@ -225,9 +242,46 @@ import { api } from "/scripts/api.js";
 		state.button.style.color = optional ? "#fff8d6" : "#fff4f4";
 	}
 
+	function widgetValue(node, names) {
+		const candidates = Array.isArray(names) ? names : [names];
+		for (const widget of node?.widgets || []) {
+			const searchable = [
+				widget?.name,
+				widget?.label,
+				widget?.localized_name,
+				widget?.options?.display_name,
+			].map((value) => String(value || ""));
+			if (searchable.some((value) => candidates.includes(value))) return widget?.value;
+		}
+		return undefined;
+	}
+
+	function truthyWidgetValue(value) {
+		if (value === true) return true;
+		const text = String(value ?? "").trim().toLowerCase();
+		return ["1", "true", "yes", "on", "enable", "enabled", "开", "是", "真"].includes(text);
+	}
+
+	function compactOptionalNoticeForNode(node, data, options = {}) {
+		if (nodeKey(node) !== "GJJ_ModelPatchBundle" || options?.detailed) return null;
+		const sageEnabled = truthyWidgetValue(widgetValue(node, ["启用SageAttention", "enable_sage_attention"]));
+		if (sageEnabled) return null;
+		const warning = String(data?.warning_message || "");
+		const panel = String(data?.panel_message || "");
+		if (!warning && !panel) return null;
+		return {
+			warning_message: "⚠️ 可选依赖缺失，基础功能可用；启用 SageAttention 时再按需安装。",
+			panel_message: "",
+			copy_text: "",
+			copy_label: "",
+			notice_level: data?.notice_level || "optional",
+		};
+	}
+
 	function applyNotice(node, data, options = {}) {
 		const state = ensurePanel(node);
 		if (!state) return;
+		data = compactOptionalNoticeForNode(node, data, options) || data;
 		const warning = String(data?.warning_message || "");
 		const panel = String(data?.panel_message || "");
 		const copyTextValue = String(data?.copy_text || data?.install_command || data?.optional_install_command || data?.model_download_url || "");
@@ -264,6 +318,30 @@ import { api } from "/scripts/api.js";
 		};
 	}
 
+	function installModelPatchBundleNoticeRefresh(node) {
+		if (nodeKey(node) !== "GJJ_ModelPatchBundle" || node.__gjjModelPatchNoticeRefreshPatched) return;
+		const widget = (node.widgets || []).find((item) => {
+			const searchable = [
+				item?.name,
+				item?.label,
+				item?.localized_name,
+				item?.options?.display_name,
+			].map((value) => String(value || ""));
+			return searchable.includes("启用SageAttention") || searchable.includes("enable_sage_attention");
+		});
+		if (!widget) return;
+		node.__gjjModelPatchNoticeRefreshPatched = true;
+		const originalCallback = widget.callback;
+		widget.callback = function (...args) {
+			const result = originalCallback?.apply(this, args);
+			loadHelp().then(() => {
+				const notice = noticeFromHelp(node);
+				if (notice) applyNotice(node, notice);
+			});
+			return result;
+		};
+	}
+
 	async function loadHelp() {
 		if (helpLoaded) return;
 		helpLoaded = true;
@@ -281,6 +359,7 @@ import { api } from "/scripts/api.js";
 	function initializeNodePanel(node) {
 		if (!isGJJNode(node)) return;
 		ensurePanel(node);
+		installModelPatchBundleNoticeRefresh(node);
 		loadHelp().then(() => {
 			const notice = noticeFromHelp(node);
 			if (notice) applyNotice(node, notice);

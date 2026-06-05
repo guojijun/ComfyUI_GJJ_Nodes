@@ -8,7 +8,7 @@ from typing import Any
 
 NODE_NAME = "GJJ_TemplateBoolParams"
 MAX_OUTPUTS = 32
-DEFAULT_TEMPLATE = "#启用加速Lora\n步数（steps）：4|20\n遵循值（cfg）：1.0|2.5"
+DEFAULT_TEMPLATE = "#启用加速Lora\n步数（steps）：4|20\n遵循值（cfg）：1.0|2.5\n拆分步数(split_step)：2|10"
 
 
 class AnyType(str):

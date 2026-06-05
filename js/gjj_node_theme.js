@@ -16,6 +16,12 @@ const NODE_THEME_OVERRIDES = {
 		outline: "#D6A83F",
 		text: "#FFF4CC",
 	},
+	GJJ_VideoKijaiModelLoader: {
+		header: "#A87818",
+		panel: "#211B10",
+		outline: "#D6A83F",
+		text: "#FFF4CC",
+	},
 	GJJ_ModelBundleLoader: {
 		header: "#A87818",
 		panel: "#211B10",

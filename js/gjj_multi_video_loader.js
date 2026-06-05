@@ -7,6 +7,7 @@ const DATA_PROPERTY = "selected_videos";
 const INPUTS_PROPERTY = "enabled_inputs";
 const OUTPUTS_PROPERTY = "enabled_outputs";
 const TAB_PROPERTY = "active_tab";
+const AUTO_REFRESH_PROPERTY = "auto_refresh_enabled";
 const VIDEO_API_PATH = "/gjj/input_videos";
 const VIDEO_UPLOAD_API_PATH = "/gjj/upload_video";
 const VIDEO_META_API_PATH = "/gjj/video_meta";
@@ -287,6 +288,8 @@ function initParamDefaults(node) {
 			setWidgetValue(node, def.name, max, true);
 		}
 	}
+	const savedAutoRefresh = node?.properties?.[AUTO_REFRESH_PROPERTY];
+	setWidgetValue(node, "auto_refresh", asBoolean(savedAutoRefresh), true);
 }
 
 function ensureState(node) {
@@ -317,6 +320,7 @@ function syncProperties(node) {
 	node.properties[INPUTS_PROPERTY] = serializeInputs(state.enabledInputs);
 	node.properties[OUTPUTS_PROPERTY] = serializeOutputs(state.enabledOutputs);
 	node.properties[TAB_PROPERTY] = TAB_DEFS.some((tab) => tab.key === state.activeTab) ? state.activeTab : "video";
+	node.properties[AUTO_REFRESH_PROPERTY] = getAutoRefreshEnabled(node);
 }
 
 function formatMeta(item) {
@@ -783,9 +787,15 @@ function getWidgetValue(node, name) {
 	return findWidget(node, name)?.value;
 }
 
+function asBoolean(value) {
+	if (value === true) return true;
+	const text = String(value ?? "").trim().toLowerCase();
+	return ["1", "true", "yes", "on", "enable", "enabled", "开", "是", "真"].includes(text);
+}
+
 function getAutoRefreshEnabled(node) {
 	const value = getWidgetValue(node, "auto_refresh");
-	return value === true || value === "true" || value === 1 || value === "1";
+	return asBoolean(value);
 }
 
 function getRefreshIntervalSeconds(node) {
@@ -832,6 +842,8 @@ function setFilterWidgetValue(node, name, value) {
 
 function setAutoRefreshEnabled(node, enabled) {
 	setWidgetValue(node, "auto_refresh", Boolean(enabled), true);
+	node.properties = node.properties || {};
+	node.properties[AUTO_REFRESH_PROPERTY] = Boolean(enabled);
 	updateAutoRefresh(node);
 	renderParamControls(node);
 }
@@ -2469,6 +2481,10 @@ app.registerExtension({
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalOnConfigure?.apply(this, args);
+			this.properties = this.properties || {};
+			const serializedProps = args[0]?.properties || {};
+			this.properties[AUTO_REFRESH_PROPERTY] = asBoolean(serializedProps[AUTO_REFRESH_PROPERTY]);
+			setWidgetValue(this, "auto_refresh", this.properties[AUTO_REFRESH_PROPERTY], true);
 			const state = ensureState(this);
 			state.selection = parseSelection(selectedFromNode(this, args[0]));
 			state.enabledInputs = parseEnabledInputs(inputsFromNode(this, args[0]));
@@ -2503,6 +2519,7 @@ app.registerExtension({
 				serializedNode.properties[INPUTS_PROPERTY] = serializeInputs(state.enabledInputs);
 				serializedNode.properties[OUTPUTS_PROPERTY] = serializeOutputs(state.enabledOutputs);
 				serializedNode.properties[TAB_PROPERTY] = TAB_DEFS.some((tab) => tab.key === state.activeTab) ? state.activeTab : "video";
+				serializedNode.properties[AUTO_REFRESH_PROPERTY] = getAutoRefreshEnabled(this);
 				writeSerializedInputSlots(serializedNode, inputDefs);
 				writeSerializedOutputSlots(serializedNode, defs);
 			}

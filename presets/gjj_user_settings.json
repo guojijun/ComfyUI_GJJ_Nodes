@@ -2,11 +2,13 @@
   "version": 1,
   "workflow_screenshot": {
     "directory": "workflows",
-    "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
+    "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.jpg",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
-    "search_text": "",
-    "page_size": 12
+    "search_text": "水印",
+    "page_size": 12,
+    "image_format": "jpg",
+    "jpeg_quality": 0.86
   },
   "workflow_title": {
     "font": "simhei.ttf",

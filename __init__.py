@@ -247,18 +247,21 @@ def _register_gjj_workflow_screenshot_api():
 		return _gjj_expand_setting_path(config.get("directory") or "", _gjj_package_workflows_directory())
 
 	def filename_template() -> str:
-		return _gjj_workflow_screenshot_settings().get("filename_template") or "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png"
+		value = _gjj_workflow_screenshot_settings().get("filename_template") or ""
+		if not value or value in {"GJJ_workflow_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png", "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png"}:
+			return "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.jpg"
+		return value
 
 	def legacy_default_directory() -> str:
 		return os.path.abspath(os.path.join(folder_paths.get_output_directory(), LEGACY_DEFAULT_SUBDIR))
 
 	def clean_filename(value: str) -> str:
-		name = os.path.basename(str(value or "").strip()) or "GJJ_workflow.png"
+		name = os.path.basename(str(value or "").strip()) or "GJJ_workflow.jpg"
 		name = SAFE_FILENAME_RE.sub("_", name).strip(" .")
 		if not name:
-			name = "GJJ_workflow.png"
-		if not name.lower().endswith(".png"):
-			name += ".png"
+			name = "GJJ_workflow.jpg"
+		if not re.search(r"\.(png|jpe?g)$", name, re.IGNORECASE):
+			name += ".jpg"
 		return name[:180]
 
 	def resolve_directory(value: str | None) -> str:
@@ -267,7 +270,7 @@ def _register_gjj_workflow_screenshot_api():
 		os.makedirs(path, exist_ok=True)
 		return path
 
-	def png_path(directory: str, filename: str) -> str:
+	def image_path(directory: str, filename: str) -> str:
 		base = resolve_directory(directory)
 		name = clean_filename(filename)
 		path = os.path.abspath(os.path.join(base, name))
@@ -275,11 +278,11 @@ def _register_gjj_workflow_screenshot_api():
 			raise ValueError("文件名不安全。")
 		return path
 
-	def newest_png_path(directory: str) -> str:
+	def newest_image_path(directory: str) -> str:
 		base = resolve_directory(directory)
 		newest = ""
 		newest_mtime = -1.0
-		for entry in Path(base).glob("*.png"):
+		for entry in [p for pattern in ("*.jpg", "*.jpeg", "*.png") for p in Path(base).glob(pattern)]:
 			try:
 				mtime = entry.stat().st_mtime
 			except OSError:
@@ -297,13 +300,16 @@ def _register_gjj_workflow_screenshot_api():
 		})
 		return f"/gjj/workflow_screenshot/file?{query}"
 
-	def decode_png_data(value: str) -> bytes:
+	def decode_image_data(value: str, filename: str) -> bytes:
 		text = str(value or "")
 		if "," in text and text.lower().startswith("data:"):
 			text = text.split(",", 1)[1]
 		data = base64.b64decode(text, validate=False)
-		if not data.startswith(b"\x89PNG\r\n\x1a\n"):
-			raise ValueError("只支持 PNG 工作流截图。")
+		lowered = clean_filename(filename).lower()
+		if lowered.endswith(".png") and not data.startswith(b"\x89PNG\r\n\x1a\n"):
+			raise ValueError("PNG 文件数据无效。")
+		if lowered.endswith((".jpg", ".jpeg")) and not data.startswith(b"\xff\xd8"):
+			raise ValueError("JPG 文件数据无效。")
 		return data
 
 	def activate_windows_explorer_window(directory: str) -> bool:
@@ -388,8 +394,8 @@ def _register_gjj_workflow_screenshot_api():
 			data = await request.json()
 			directory = resolve_directory(data.get("directory"))
 			filename = clean_filename(data.get("filename"))
-			path = png_path(directory, filename)
-			raw = decode_png_data(data.get("image") or data.get("png") or "")
+			path = image_path(directory, filename)
+			raw = decode_image_data(data.get("image") or data.get("png") or "", filename)
 			with open(path, "wb") as handle:
 				handle.write(raw)
 			stat = os.stat(path)
@@ -411,7 +417,8 @@ def _register_gjj_workflow_screenshot_api():
 		try:
 			directory = resolve_directory(request.query.get("directory"))
 			items = []
-			for entry in sorted(Path(directory).glob("*.png"), key=lambda item: item.stat().st_mtime, reverse=True):
+			entries = [p for pattern in ("*.jpg", "*.jpeg", "*.png") for p in Path(directory).glob(pattern)]
+			for entry in sorted(entries, key=lambda item: item.stat().st_mtime, reverse=True):
 				try:
 					stat = entry.stat()
 				except OSError:
@@ -448,7 +455,7 @@ def _register_gjj_workflow_screenshot_api():
 	@server.routes.get("/gjj/workflow_screenshot/file")
 	async def gjj_workflow_screenshot_file(request):
 		try:
-			path = png_path(request.query.get("directory"), request.query.get("filename"))
+			path = image_path(request.query.get("directory"), request.query.get("filename"))
 			if not os.path.exists(path):
 				return web.Response(status=404, text="not found")
 			return web.FileResponse(path, headers={"Cache-Control": "no-store"})
@@ -465,7 +472,7 @@ def _register_gjj_workflow_screenshot_api():
 			filename = str(data.get("filename") or "").strip()
 			if select_file and filename:
 				try:
-					candidate = png_path(directory, filename)
+					candidate = image_path(directory, filename)
 					if os.path.exists(candidate):
 						select_path = candidate
 				except Exception:
@@ -475,7 +482,7 @@ def _register_gjj_workflow_screenshot_api():
 				if os.path.exists(last_path) and os.path.dirname(last_path) == directory:
 					select_path = last_path
 			if select_file and not select_path:
-				select_path = newest_png_path(directory)
+				select_path = newest_image_path(directory)
 
 			foreground = False
 			if sys.platform.startswith("win"):

@@ -74,7 +74,13 @@ const BASIC_SETTING_WIDGETS = [
 const BASIC_SETTING_TYPES = new Map(BASIC_SETTING_WIDGETS.map((config) => [config.name, config.type]));
 
 function refreshNode(node) {
-	GJJ_Utils.refreshNode(node);
+	if (!node) return;
+	const currentWidth = validNodeWidth(node.size?.[0]) ?? preferredNodeWidth(node);
+	const computed = typeof node.computeSize === "function" ? node.computeSize() : node.size;
+	const height = Math.max(80, Number(computed?.[1] || node.size?.[1] || 80));
+	node.setSize?.([currentWidth, height]);
+	node.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
 }
 
 function validNodeWidth(value) {
@@ -135,7 +141,7 @@ function setNodeHeightPreservingUserWidth(node, height) {
 	if (!node) {
 		return;
 	}
-	const width = preferredNodeWidth(node);
+	const width = validNodeWidth(node.size?.[0]) ?? preferredNodeWidth(node);
 	const nextHeight = Math.max(80, Number(height || node.size?.[1] || 80));
 	if (Math.abs(Number(node.size?.[0] || 0) - width) <= 1 && Math.abs(Number(node.size?.[1] || 0) - nextHeight) <= 1) {
 		return;
@@ -432,7 +438,7 @@ function ensureToolbarWidget(node) {
 	});
 	if (widget) {
 		widget.getHeight = () => getToolbarHeight(node);
-		widget.computeSize = (width) => [preferredNodeWidth(node, width), getToolbarHeight(node, width)];
+		widget.computeSize = (width) => [Math.max(MIN_WIDTH, Number(width || node.size?.[0] || preferredNodeWidth(node))), getToolbarHeight(node, width)];
 	}
 	node.__gjjVideoCombineToolbar = { widget, wrap, buttons };
 	updateToolbar(node);
@@ -814,7 +820,7 @@ function ensurePanelWidget(node) {
 	});
 	if (widget) {
 		widget.computeSize = (width) => [
-			preferredNodeWidth(node, width),
+			Math.max(MIN_WIDTH, Number(width || node.size?.[0] || preferredNodeWidth(node))),
 			getPanelHeight(node, width),
 		];
 	}

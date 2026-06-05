@@ -1,4 +1,5 @@
 import { app } from "/scripts/app.js";
+import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set(["GJJ_SD3SamplingAlgorithmPanel"]);
 
@@ -267,21 +268,19 @@ function syncDom(node) {
 	}
 }
 
+function panelHeight(node) {
+	const container = node?.__gjjSd3SamplingContainer;
+	if (!container) return 36;
+	return Math.max(
+		36,
+		Math.ceil(container.scrollHeight || container.offsetHeight || container.getBoundingClientRect?.().height || 36)
+	);
+}
+
 function refreshNode(node) {
 	if (!node) return;
-
-	// 只自动调整高度，不再自动放宽节点。
-	// 用户手动把节点调窄后，保持用户宽度。
-	const width = Number(node.size?.[0] || 260);
-	const height = Math.max(90, Math.ceil(node.__gjjSd3SamplingContainer?.scrollHeight || node.size?.[1] || 90) + 10);
-
-	if (!node.__gjjSd3SamplingSizing && Math.abs(Number(node.size?.[1] || 0) - height) > 1) {
-		node.__gjjSd3SamplingSizing = true;
-		try { node.setSize?.([width, height]); }
-		finally { requestAnimationFrame(() => { node.__gjjSd3SamplingSizing = false; }); }
-	}
-	node.setDirtyCanvas?.(true, true);
-	app.graph?.setDirtyCanvas?.(true, true);
+	GJJ_Utils.scheduleFitNodeToContent(node, { minWidth: 260, minHeight: 90, delay: 0 });
+	GJJ_Utils.scheduleFitNodeToContent(node, { minWidth: 260, minHeight: 90, delay: 80 });
 }
 
 function buildDom(node) {
@@ -325,7 +324,8 @@ function ensureDom(node) {
 		hideOnZoom: false,
 	});
 	if (domWidget) {
-		domWidget.computeSize = (width) => [Number(width || node.size?.[0] || 260), Math.max(36, Math.ceil(container.scrollHeight || 36))];
+		domWidget.getHeight = () => panelHeight(node);
+		domWidget.computeSize = (width) => [Math.max(260, Number(width || node.size?.[0] || 260)), panelHeight(node)];
 		node.__gjjSd3SamplingWidget = domWidget;
 		// 按需求：按钮放最后。保留 DOM widget 在原生参数后面，不再移动到第一位。
 		if (Array.isArray(node.widgets)) {

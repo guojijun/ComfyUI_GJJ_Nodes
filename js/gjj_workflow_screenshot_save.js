@@ -18,9 +18,14 @@ import { api } from "/scripts/api.js";
 	const REAL_CAPTURE_TIMEOUT_MS = 2200;
 	const USE_REAL_CANVAS_CAPTURE = false;
 	const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10];
+	const JPEG_METADATA_MARKER = 0xEF;
+	const JPEG_METADATA_SIGNATURE = "GJJMETA\0";
+	const JPEG_METADATA_CHUNK_SIZE = 60000;
 	const SETTINGS_KEY = "gjj_workflow_screenshot_settings";
 	const LEGACY_FILENAME_TEMPLATE = "GJJ_workflow_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png";
-	const DEFAULT_FILENAME_TEMPLATE = "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png";
+	const DEFAULT_FILENAME_TEMPLATE = "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.jpg";
+	const DEFAULT_JPEG_QUALITY = 0.86;
+	const MAX_SAVED_IMAGE_DIMENSION = 1080;
 	const DEFAULT_SORT_MODE = "mtime_desc";
 	const DEFAULT_FILTER_MODE = "openable";
 	const DEFAULT_PAGE_SIZE = 12;
@@ -261,6 +266,8 @@ import { api } from "/scripts/api.js";
 		return {
 			directory: directoryPathForBackendSettings(),
 			filename_template: String(settings.filenameTemplate || DEFAULT_FILENAME_TEMPLATE),
+			image_format: screenshotFormatFromFilename(settings.filenameTemplate || DEFAULT_FILENAME_TEMPLATE),
+			jpeg_quality: DEFAULT_JPEG_QUALITY,
 			sort_mode: choice(settings.sortMode, SORT_MODE_LABELS, DEFAULT_SORT_MODE),
 			filter_mode: DEFAULT_FILTER_MODE,
 			search_text: String(settings.searchText || "").slice(0, 160),
@@ -347,7 +354,9 @@ import { api } from "/scripts/api.js";
 		backendSettingsPath = String(data.settings_path || backendSettingsPath || "").trim();
 		const workflowSettings = data.workflow_screenshot || {};
 		if (workflowSettings.filename_template) {
-			settings.filenameTemplate = String(workflowSettings.filename_template || DEFAULT_FILENAME_TEMPLATE);
+			settings.filenameTemplate = normalizeDefaultFilenameTemplate(workflowSettings.filename_template || DEFAULT_FILENAME_TEMPLATE);
+		} else {
+			settings.filenameTemplate = normalizeDefaultFilenameTemplate(settings.filenameTemplate || DEFAULT_FILENAME_TEMPLATE);
 		}
 		settings.sortMode = choice(workflowSettings.sort_mode || workflowSettings.sortMode || settings.sortMode, SORT_MODE_LABELS, DEFAULT_SORT_MODE);
 		settings.filterMode = DEFAULT_FILTER_MODE;
@@ -375,13 +384,29 @@ import { api } from "/scripts/api.js";
 		return btoa(binary);
 	}
 
-	function sanitizeFilename(value, fallback = "GJJ_workflow.png") {
+	function normalizeDefaultFilenameTemplate(value) {
+		const text = String(value || "").trim();
+		if (!text || text === LEGACY_FILENAME_TEMPLATE || text === "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png") {
+			return DEFAULT_FILENAME_TEMPLATE;
+		}
+		return text;
+	}
+
+	function screenshotFormatFromFilename(value) {
+		return /\.png$/i.test(String(value || "")) ? "png" : "jpg";
+	}
+
+	function mimeTypeForFilename(value) {
+		return screenshotFormatFromFilename(value) === "png" ? "image/png" : "image/jpeg";
+	}
+
+	function sanitizeFilename(value, fallback = "GJJ_workflow.jpg") {
 		let text = String(value || "").trim();
 		if (!text) text = fallback;
 		text = text.replace(/[<>:"/\\|?*\x00-\x1F]+/g, "_").replace(/\s+/g, " ").trim();
 		text = text.replace(/[. ]+$/g, "");
 		if (!text) text = fallback;
-		if (!/\.png$/i.test(text)) text += ".png";
+		if (!/\.(png|jpe?g)$/i.test(text)) text += ".jpg";
 		return text.slice(0, 180);
 	}
 
@@ -566,9 +591,9 @@ import { api } from "/scripts/api.js";
 			workflow_name: sourceWorkflowName,
 			workflowName: sourceWorkflowName,
 		};
-		const template = String(settings.filenameTemplate || DEFAULT_FILENAME_TEMPLATE);
+		const template = normalizeDefaultFilenameTemplate(settings.filenameTemplate || DEFAULT_FILENAME_TEMPLATE);
 		const effectiveTemplate = template === LEGACY_FILENAME_TEMPLATE && (workflowTitle || sourceWorkflowName) ? DEFAULT_FILENAME_TEMPLATE : template;
-		return sanitizeFilename(effectiveTemplate.replace(/\{([A-Za-z0-9_]+)\}/g, (_match, key) => replacements[key] ?? ""), "GJJ_workflow.png");
+		return sanitizeFilename(effectiveTemplate.replace(/\{([A-Za-z0-9_]+)\}/g, (_match, key) => replacements[key] ?? ""), "GJJ_workflow.jpg");
 	}
 
 	function number(value, fallback = 0) {
@@ -1724,6 +1749,39 @@ import { api } from "/scripts/api.js";
 		});
 	}
 
+	function canvasToImageBytes(canvas, filename) {
+		const mimeType = mimeTypeForFilename(filename);
+		if (mimeType === "image/png") return canvasToPngBytes(canvas);
+		return new Promise((resolve, reject) => {
+			canvas.toBlob(async (blob) => {
+				try {
+					if (!blob) throw new Error("JPG blob 为空");
+					resolve(new Uint8Array(await blob.arrayBuffer()));
+				} catch (error) {
+					reject(error);
+				}
+			}, "image/jpeg", DEFAULT_JPEG_QUALITY);
+		});
+	}
+
+	function constrainCanvasDimensions(canvas, maxDimension = MAX_SAVED_IMAGE_DIMENSION) {
+		const width = Number(canvas?.width || 0);
+		const height = Number(canvas?.height || 0);
+		const limit = Math.max(1, Number(maxDimension) || MAX_SAVED_IMAGE_DIMENSION);
+		if (!canvas || width <= 0 || height <= 0 || (width <= limit && height <= limit)) return canvas;
+
+		const scale = Math.min(limit / width, limit / height);
+		const output = document.createElement("canvas");
+		output.width = Math.max(1, Math.round(width * scale));
+		output.height = Math.max(1, Math.round(height * scale));
+		const ctx = output.getContext("2d");
+		if (!ctx) return canvas;
+		ctx.imageSmoothingEnabled = true;
+		ctx.imageSmoothingQuality = "high";
+		ctx.drawImage(canvas, 0, 0, output.width, output.height);
+		return output;
+	}
+
 	function jsonReplacer(_key, value) {
 		if (typeof value === "bigint") return value.toString();
 		if (value instanceof Map) return Object.fromEntries(value.entries());
@@ -1818,6 +1876,10 @@ import { api } from "/scripts/api.js";
 		return bytes;
 	}
 
+	function utf8Bytes(text) {
+		return new TextEncoder().encode(String(text || ""));
+	}
+
 	function chunkBytes(type, data) {
 		const typeBytes = asciiBytes(type).slice(0, 4);
 		const lengthBytes = uint32Bytes(data.length);
@@ -1886,8 +1948,46 @@ import { api } from "/scripts/api.js";
 		return bytes;
 	}
 
-	function downloadPng(bytes, filename = buildFilename()) {
-		const blob = new Blob([bytes], { type: "image/png" });
+	function jpegMetadataSegment(payload, index, total) {
+		const signature = asciiBytes(JPEG_METADATA_SIGNATURE);
+		const header = new Uint8Array(signature.length + 4);
+		header.set(signature, 0);
+		header[signature.length] = (index >>> 8) & 0xFF;
+		header[signature.length + 1] = index & 0xFF;
+		header[signature.length + 2] = (total >>> 8) & 0xFF;
+		header[signature.length + 3] = total & 0xFF;
+		const data = new Uint8Array(header.length + payload.length);
+		data.set(header, 0);
+		data.set(payload, header.length);
+		const length = data.length + 2;
+		const segment = new Uint8Array(data.length + 4);
+		segment[0] = 0xFF;
+		segment[1] = JPEG_METADATA_MARKER;
+		segment[2] = (length >>> 8) & 0xFF;
+		segment[3] = length & 0xFF;
+		segment.set(data, 4);
+		return segment;
+	}
+
+	function injectJpegMetadata(bytes, metadata) {
+		if (!bytes?.length || bytes[0] !== 0xFF || bytes[1] !== 0xD8) return bytes;
+		const payload = utf8Bytes(JSON.stringify(metadata || {}, jsonReplacer));
+		const total = Math.max(1, Math.ceil(payload.length / JPEG_METADATA_CHUNK_SIZE));
+		const segments = [];
+		for (let index = 0; index < total; index += 1) {
+			segments.push(jpegMetadataSegment(payload.slice(index * JPEG_METADATA_CHUNK_SIZE, (index + 1) * JPEG_METADATA_CHUNK_SIZE), index, total));
+		}
+		return concatBytes([bytes.slice(0, 2), ...segments, bytes.slice(2)]);
+	}
+
+	function injectImageMetadata(bytes, metadata, filename) {
+		return mimeTypeForFilename(filename) === "image/png"
+			? injectPngText(bytes, metadata)
+			: injectJpegMetadata(bytes, metadata);
+	}
+
+	function downloadImage(bytes, filename = buildFilename()) {
+		const blob = new Blob([bytes], { type: mimeTypeForFilename(filename) });
 		const url = URL.createObjectURL(blob);
 		const anchor = document.createElement("a");
 		anchor.href = url;
@@ -1938,7 +2038,7 @@ import { api } from "/scripts/api.js";
 		refreshBackendScreenshotList().catch(() => {});
 	}
 
-	async function savePngBytes(bytes, filename) {
+	async function saveImageBytes(bytes, filename) {
 		const directory = effectiveDirectory();
 		try {
 			return await apiJson("/gjj/workflow_screenshot/save", {
@@ -1953,7 +2053,7 @@ import { api } from "/scripts/api.js";
 		} catch (error) {
 			console.warn("[GJJ] 后端保存失败，退回浏览器下载：", error);
 		}
-		return { filename: downloadPng(bytes, filename), directory: "", url: "" };
+		return { filename: downloadImage(bytes, filename), directory: "", url: "" };
 	}
 
 	function decodeLatin1(bytes) {
@@ -2026,6 +2126,47 @@ import { api } from "/scripts/api.js";
 			offset = next;
 		}
 		return metadata;
+	}
+
+	function parseJpegMetadata(bytes) {
+		const metadata = {};
+		if (!bytes?.length || bytes[0] !== 0xFF || bytes[1] !== 0xD8) return metadata;
+		const signature = asciiBytes(JPEG_METADATA_SIGNATURE);
+		const chunks = [];
+		let expectedTotal = 0;
+		let offset = 2;
+		while (offset + 4 <= bytes.length) {
+			if (bytes[offset] !== 0xFF) break;
+			const marker = bytes[offset + 1];
+			if (marker === 0xDA || marker === 0xD9) break;
+			const length = (bytes[offset + 2] << 8) | bytes[offset + 3];
+			if (length < 2 || offset + 2 + length > bytes.length) break;
+			const dataStart = offset + 4;
+			const dataEnd = offset + 2 + length;
+			if (marker === JPEG_METADATA_MARKER) {
+				const data = bytes.slice(dataStart, dataEnd);
+				let matches = data.length >= signature.length + 4;
+				for (let i = 0; matches && i < signature.length; i += 1) matches = data[i] === signature[i];
+				if (matches) {
+					const index = (data[signature.length] << 8) | data[signature.length + 1];
+					const total = (data[signature.length + 2] << 8) | data[signature.length + 3];
+					expectedTotal = Math.max(expectedTotal, total);
+					chunks[index] = data.slice(signature.length + 4);
+				}
+			}
+			offset = dataEnd;
+		}
+		if (!expectedTotal || chunks.filter(Boolean).length < expectedTotal) return metadata;
+		try {
+			return JSON.parse(decodeUtf8(concatBytes(Array.from({ length: expectedTotal }, (_value, index) => chunks[index])))) || {};
+		} catch (_) {
+			return metadata;
+		}
+	}
+
+	function parseImageMetadata(bytes) {
+		if (hasPngSignature(bytes)) return parsePngTextMetadata(bytes);
+		return parseJpegMetadata(bytes);
 	}
 
 	function parseJsonMaybe(value) {
@@ -2278,11 +2419,76 @@ import { api } from "/scripts/api.js";
 	}
 
 	function previewItemName(item) {
-		return String(item?.file?.name || item?.filename || "workflow.png");
+		return String(item?.file?.name || item?.filename || "workflow.jpg");
 	}
 
 	function previewItemTitle(item) {
 		return cleanWorkflowTitleText(item?.title || item?.metadataTitle || "");
+	}
+
+	function cleanWorkflowDisplayTitle(value) {
+		const text = cleanWorkflowTitleText(value);
+		return /^(unsaved workflow|untitled|未命名|未保存工作流)$/i.test(text) ? "" : text;
+	}
+
+	function previewItemDisplayTitle(item) {
+		const imageName = previewItemName(item).replace(/\.(png|webp|jpe?g|bmp|gif)$/i, "");
+		return cleanWorkflowDisplayTitle(previewItemTitle(item)) ||
+			cleanSourceWorkflowName(imageName) ||
+			cleanWorkflowDisplayTitle(workflowTitleTextFromWorkflow(item?.workflow)) ||
+			workflowNameFromValue(item?.workflow);
+	}
+
+	function workflowWithDisplayTitle(workflow, title) {
+		const text = cleanWorkflowDisplayTitle(title);
+		if (!text || !workflow || typeof workflow !== "object") return workflow;
+		const extra = workflow.extra && typeof workflow.extra === "object" ? workflow.extra : {};
+		return {
+			...workflow,
+			name: workflow.name || text,
+			title: workflow.title || text,
+			workflow_name: workflow.workflow_name || text,
+			workflowName: workflow.workflowName || text,
+			extra: {
+				...extra,
+				name: extra.name || text,
+				title: extra.title || text,
+				workflow_name: extra.workflow_name || text,
+				workflowName: extra.workflowName || text,
+			},
+		};
+	}
+
+	function applyLoadedWorkflowTitle(title) {
+		const text = cleanWorkflowDisplayTitle(title);
+		if (!text) return;
+		const graph = app?.graph;
+		if (graph && typeof graph === "object") {
+			graph.name = text;
+			graph.title = text;
+			graph.workflow_name = text;
+			graph.workflowName = text;
+			graph.extra = graph.extra && typeof graph.extra === "object" ? graph.extra : {};
+			graph.extra.name = text;
+			graph.extra.title = text;
+			graph.extra.workflow_name = text;
+			graph.extra.workflowName = text;
+		}
+		const manager = app?.workflowManager;
+		for (const target of [manager?.activeWorkflow, manager?.currentWorkflow, manager?.workflow, app?.ui]) {
+			if (!target || typeof target !== "object") continue;
+			target.name = text;
+			target.title = text;
+			target.workflow_name = text;
+			target.workflowName = text;
+		}
+		for (const method of ["setWorkflowName", "setWorkflowTitle", "setActiveWorkflowName"]) {
+			if (typeof manager?.[method] !== "function") continue;
+			try { manager[method](text); } catch (_) {}
+		}
+		if (typeof document !== "undefined") {
+			document.title = `ComfyUI - ${text}`;
+		}
 	}
 
 	function previewItemMtime(item) {
@@ -2434,13 +2640,14 @@ import { api } from "/scripts/api.js";
 
 	async function loadWorkflowFromPreview(item) {
 		if (!item?.workflow) {
-			alert("这张 PNG 没有找到可加载的 workflow 元数据。");
+			alert("这张截图没有找到可加载的 workflow 元数据。");
 			return;
 		}
 		try {
-			await app.loadGraphData(item.workflow);
-			const overlay = document.getElementById(PREVIEW_OVERLAY_ID);
-			if (overlay) overlay.style.display = "none";
+			const title = previewItemDisplayTitle(item);
+			await app.loadGraphData(workflowWithDisplayTitle(item.workflow, title));
+			applyLoadedWorkflowTitle(title);
+			closePreviewOverlay();
 			app?.canvas?.setDirty?.(true, true);
 			app?.graph?.setDirtyCanvas?.(true, true);
 		} catch (error) {
@@ -2453,14 +2660,14 @@ import { api } from "/scripts/api.js";
 		const response = await fetch(url, { cache: "no-store" });
 		if (!response.ok) throw new Error(`读取截图失败：HTTP ${response.status}`);
 		const bytes = new Uint8Array(await response.arrayBuffer());
-		return workflowFromMetadata(parsePngTextMetadata(bytes));
+		return workflowFromMetadata(parseImageMetadata(bytes));
 	}
 
 	async function previewDataFromImageUrl(url) {
 		const response = await fetch(url, { cache: "no-store" });
 		if (!response.ok) throw new Error(`读取截图失败：HTTP ${response.status}`);
 		const bytes = new Uint8Array(await response.arrayBuffer());
-		const metadata = parsePngTextMetadata(bytes);
+		const metadata = parseImageMetadata(bytes);
 		const workflow = workflowFromMetadata(metadata);
 		return {
 			workflow,
@@ -2470,11 +2677,12 @@ import { api } from "/scripts/api.js";
 	}
 
 	function rememberSavedScreenshot(bytes, metadata, saved) {
-		const filename = typeof saved === "string" ? saved : (saved?.filename || "GJJ_workflow.png");
-		const blob = new Blob([bytes], { type: "image/png" });
+		const filename = typeof saved === "string" ? saved : (saved?.filename || "GJJ_workflow.jpg");
+		const mimeType = mimeTypeForFilename(filename);
+		const blob = new Blob([bytes], { type: mimeType });
 		const file = typeof File === "function"
-			? new File([blob], filename || "GJJ_workflow.png", { type: "image/png" })
-			: { name: filename || "GJJ_workflow.png", size: blob.size, type: "image/png" };
+			? new File([blob], filename || "GJJ_workflow.jpg", { type: mimeType })
+			: { name: filename || "GJJ_workflow.jpg", size: blob.size, type: mimeType };
 		const workflow = workflowFromMetadata(metadata);
 		previewItems.unshift({
 			file,
@@ -2517,7 +2725,7 @@ import { api } from "/scripts/api.js";
 		updateSaveSettingsUI();
 		clearPreviewItems();
 		previewItems = (data.items || []).map((item) => ({
-			file: { name: item.filename || "workflow.png", size: item.size || 0, type: "image/png" },
+			file: { name: item.filename || "workflow.jpg", size: item.size || 0, type: mimeTypeForFilename(item.filename || "workflow.jpg") },
 			url: item.url || "",
 			workflow: null,
 			title: "",
@@ -2575,9 +2783,10 @@ import { api } from "/scripts/api.js";
 			}
 			const cropped = await captureWorkflowCanvas(snapshot);
 			if (!cropped) throw new Error("截图画布创建失败");
-			const pngBytes = await canvasToPngBytes(cropped);
-			const finalBytes = injectPngText(pngBytes, metadata);
-			const saved = await savePngBytes(finalBytes, filename);
+			const exportCanvas = constrainCanvasDimensions(cropped);
+			const imageBytes = await canvasToImageBytes(exportCanvas, filename);
+			const finalBytes = injectImageMetadata(imageBytes, metadata, filename);
+			const saved = await saveImageBytes(finalBytes, filename);
 			rememberSavedScreenshot(finalBytes, metadata, saved);
 			flashSaved(button);
 		} catch (error) {

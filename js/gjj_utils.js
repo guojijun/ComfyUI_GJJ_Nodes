@@ -588,6 +588,36 @@ export class GJJ_Utils {
     }
 
     /**
+     * 按内容自动贴合节点尺寸。用于 DOMWidget 渲染后收起多余空白高度。
+     * 默认保留用户当前拖拽过的宽度，只重新计算高度。
+     * @param {object} node - ComfyUI 节点实例
+     * @param {object} [options={}] - 与 refreshNode 相同的参数
+     */
+    static fitNodeToContent(node, options = {}) {
+        GJJ_Utils.refreshNode(node, {
+            preserveWidth: true,
+            minWidth: 300,
+            minHeight: 80,
+            ...options,
+        });
+    }
+
+    /**
+     * 延迟按内容贴合节点尺寸，适合 DOM 高度需要等一帧才能读准的面板。
+     * @param {object} node - ComfyUI 节点实例
+     * @param {object} [options={}] - 与 scheduleRefreshNode 相同的参数
+     */
+    static scheduleFitNodeToContent(node, options = {}) {
+        GJJ_Utils.scheduleRefreshNode(node, {
+            preserveWidth: true,
+            minWidth: 300,
+            minHeight: 80,
+            delay: 20,
+            ...options,
+        });
+    }
+
+    /**
      * 仅标记画布脏（触发重绘），不改变节点尺寸。
      * @param {object} node - ComfyUI 节点实例
      */
@@ -977,6 +1007,8 @@ export class GJJ_Utils {
         });
     }
 }
+
+globalThis.GJJ_Utils = GJJ_Utils;
 
 export function queueNode(node, reason = "manual") {
 	if (!node || !node.graph) return;

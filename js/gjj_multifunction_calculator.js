@@ -1,4 +1,5 @@
 import { app } from "/scripts/app.js";
+import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set(["GJJ_MultifunctionCalculator"]);
@@ -10,6 +11,8 @@ const SHOW_INT_OUTPUT_PROPERTY = "gjj_calculator_show_int_output";
 const SHOW_FORMULA_OUTPUT_PROPERTY = "gjj_calculator_show_formula_output";
 const PRESET_PROPERTY = "gjj_calculator_preset";
 const FIXED_INPUT_COUNT_PROPERTY = "gjj_calculator_fixed_input_count";
+const VARIABLE_MODE_PROPERTY = "gjj_calculator_variable_mode";
+const SELECTED_VARIABLES_PROPERTY = "gjj_calculator_selected_variables";
 const SHOW_INT_WIDGET = "show_int_output";
 const SHOW_FORMULA_WIDGET = "show_formula_output";
 const PRESET_MODE_WIDGET = "calculator_preset_mode";
@@ -23,7 +26,7 @@ const INTERNAL_CONTROL_WIDGETS = new Set([
 	LEGACY_INPUT_NAMES_WIDGET,
 ]);
 const MIN_VISIBLE_INPUTS = 1;
-const PANEL_MIN_HEIGHT = 28;
+const PANEL_MIN_HEIGHT = 24;
 const OUTPUT_DEFS = [
 	{ index: 0, type: "*", name: "自动结果", tooltip: "公式计算后的自动类型结果：整数为 INT，小数为 FLOAT，文本为 STRING。", always: true },
 	{ index: 1, type: "*", name: "互转/断行结果", tooltip: "自动结果为 FLOAT 时输出取整 INT；自动结果为 INT/帧数时输出 FLOAT；文本结果时按标点符号换行。", property: SHOW_INT_OUTPUT_PROPERTY },
@@ -156,6 +159,67 @@ function normalizeInputName(value) {
 	return String(value ?? "").trim();
 }
 
+function uniqueNames(values) {
+	const result = [];
+	const seen = new Set();
+	for (const value of Array.isArray(values) ? values : String(values || "").split(/[\n,，]+/)) {
+		const text = String(value || "").trim();
+		if (!text || seen.has(text)) continue;
+		seen.add(text);
+		result.push(text);
+	}
+	return result;
+}
+
+function variableModeEnabled(node) {
+	return Boolean(node?.properties?.[VARIABLE_MODE_PROPERTY]);
+}
+
+function selectedVariables(node) {
+	return uniqueNames(node?.properties?.[SELECTED_VARIABLES_PROPERTY] || []);
+}
+
+function setSelectedVariables(node, names) {
+	node.properties = node.properties || {};
+	node.properties[SELECTED_VARIABLES_PROPERTY] = uniqueNames(names).slice(0, MAX_INPUTS);
+	node.properties[VARIABLE_MODE_PROPERTY] = Boolean(node.properties[SELECTED_VARIABLES_PROPERTY].length);
+	scheduleStabilize(node, 0);
+}
+
+function variableOptions(node) {
+	const apiObject = globalThis.GJJ_VariableBroadcast;
+	const graph = node?.graph || app.graph;
+	if (apiObject?.getVisibleSetOptions) {
+		return apiObject.getVisibleSetOptions(graph) || [];
+	}
+	return [];
+}
+
+function variableLabel(node, name) {
+	const option = variableOptions(node).find((item) => item.value === name);
+	return option?.label || name;
+}
+
+function variableOptionForName(node, name) {
+	return variableOptions(node).find((item) => item.value === name) || { value: name, label: name };
+}
+
+function variableDisplayParts(option) {
+	const value = String(option?.value || "").trim();
+	const label = String(option?.label || value).trim();
+	const match = label.match(/^(.*?)\s*[（(]([^（）()]*)[）)]\s*$/);
+	if (match && match[2]?.includes(" · ")) {
+		const source = match[2].trim();
+		const sourceMatch = source.match(/^(.*?)[\s·]+(.+)$/);
+		return {
+			title: (sourceMatch?.[2] || match[1] || value).trim(),
+			source: (sourceMatch?.[1] || source).trim(),
+			value,
+		};
+	}
+	return { title: label || value, source: "", value };
+}
+
 function isGenericInputName(value) {
 	const text = normalizeInputName(value);
 	if (!text) return true;
@@ -261,7 +325,7 @@ function formulaPlaceholderSlotMap(node) {
 function desiredFormulaInputCount(node) {
 	const xIndexes = formulaXIndexes(getFormula(node));
 	const placeholderSlots = formulaPlaceholderSlotMap(node);
-	let count = Math.max(MIN_VISIBLE_INPUTS, getFixedInputCount(node) || 0);
+	let count = Math.max(MIN_VISIBLE_INPUTS, getFixedInputCount(node) || 0, variableModeEnabled(node) ? selectedVariables(node).length : 0);
 	for (const index of xIndexes) {
 		count = Math.max(count, index);
 	}
@@ -273,7 +337,22 @@ function desiredFormulaInputCount(node) {
 
 function inputAliasName(node, input) {
 	const index = getInputIndex(input?.name);
+	if (variableModeEnabled(node)) {
+		const variable = selectedVariables(node)[index - 1];
+		if (variable) return variable;
+	}
 	return inputFormulaName(node, input) || formulaPlaceholderSlotMap(node).get(index) || "";
+}
+
+function inputDisplayName(node, input) {
+	const index = getInputIndex(input?.name);
+	if (variableModeEnabled(node)) {
+		const variable = selectedVariables(node)[index - 1];
+		if (variable) {
+			return variableDisplayParts(variableOptionForName(node, variable)).title || variable;
+		}
+	}
+	return inputAliasName(node, input);
 }
 
 function setDirty(node) {
@@ -360,11 +439,12 @@ function renameInputs(node) {
 	getValueInputs(node).forEach((input, zeroIndex) => {
 		const index = zeroIndex + 1;
 		const formulaName = inputAliasName(node, input);
+		const displayName = inputDisplayName(node, input);
 		const nameTip = formulaName ? ` 或 {${formulaName}}` : "";
 		input.name = formatInputName(index);
-		input.label = formulaName ? `x${index} · ${formulaName}` : `x${index}`;
+		input.label = displayName ? `x${index} · ${displayName}` : `x${index}`;
 		input.localized_name = input.label;
-		input.display_name = formulaName || input.label;
+		input.display_name = displayName || input.label;
 		input.type = "*";
 		input.tooltip = formulaName
 			? `动态输入；公式中可用 x${index}${nameTip} 引用。未真实连接时，会尝试从同名 GJJ 变量自动读取。`
@@ -404,7 +484,7 @@ function getLinkSignature(node) {
 
 function createRow() {
 	const row = document.createElement("div");
-	row.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;align-items:center;overflow:visible;";
+	row.style.cssText = "display:flex;flex-wrap:wrap;gap:4px;align-items:center;overflow:visible;";
 	return row;
 }
 
@@ -418,9 +498,9 @@ function createButton(label, title, onClick) {
 		"background:#172026",
 		"color:#dce7e2",
 		"border-radius:7px",
-		"padding:4px 9px",
+		"padding:3px 7px",
 		"font-size:11px",
-		"line-height:1.2",
+		"line-height:1.15",
 		"cursor:pointer",
 		"white-space:nowrap",
 		"flex:0 0 auto",
@@ -912,6 +992,9 @@ function applyPreset(node, preset) {
 }
 
 function getConnectedVariableNames(node) {
+	if (variableModeEnabled(node)) {
+		return selectedVariables(node).map((_, index) => `x${index + 1}`);
+	}
 	return getValueInputs(node)
 		.filter((input) => inputHasLink(input))
 		.map((input) => `x${getInputIndex(input.name)}`);
@@ -944,6 +1027,11 @@ function upstreamOutputLabel(node, input) {
 }
 
 function buildLabelValueTemplate(node) {
+	if (variableModeEnabled(node) && selectedVariables(node).length) {
+		return selectedVariables(node)
+			.map((name, index) => `${variableLabel(node, name)}：x${index + 1}`)
+			.join("； ");
+	}
 	const parts = getValueInputs(node)
 		.filter((input) => inputHasLink(input))
 		.map((input) => {
@@ -956,6 +1044,9 @@ function buildLabelValueTemplate(node) {
 }
 
 function connectedVariableExpression(node, fallback = "x1") {
+	if (variableModeEnabled(node) && selectedVariables(node).length) {
+		return selectedVariables(node).join(", ");
+	}
 	const names = getValueInputs(node)
 		.filter((input) => inputHasLink(input))
 		.map((input) => inputFormulaName(node, input))
@@ -1061,6 +1152,132 @@ function invalidateResultPreview(node) {
 	updateResultPreview(node);
 }
 
+function closeVariablePicker(node) {
+	node?.__gjjCalculatorVariablePicker?.remove?.();
+	node.__gjjCalculatorVariablePicker = null;
+}
+
+function openVariablePicker(node) {
+	closeVariablePicker(node);
+	const options = variableOptions(node);
+	const selected = new Set(selectedVariables(node));
+	const popup = document.createElement("div");
+	popup.style.cssText = [
+		"position:fixed",
+		"z-index:10050",
+		"width:min(520px,calc(100vw - 28px))",
+		"max-height:min(620px,calc(100vh - 40px))",
+		"overflow:hidden",
+		"display:flex",
+		"flex-direction:column",
+		"gap:8px",
+		"padding:12px",
+		"border:1px solid #486575",
+		"border-radius:8px",
+		"background:#08151a",
+		"box-shadow:0 18px 46px rgba(0,0,0,.55)",
+		"color:#dce7e2",
+		"font:12px system-ui,'Microsoft YaHei',sans-serif",
+	].join(";");
+	const rect = node.__gjjCalculatorVariableButton?.getBoundingClientRect?.() || { left: 24, bottom: 80 };
+	popup.style.left = `${Math.max(12, Math.min(window.innerWidth - 540, rect.left || 24))}px`;
+	popup.style.top = `${Math.max(12, Math.min(window.innerHeight - 620, (rect.bottom || 80) + 6))}px`;
+
+	const header = document.createElement("div");
+	header.style.cssText = "display:flex;align-items:center;gap:8px;";
+	const title = document.createElement("div");
+	title.textContent = `⚡ 选择变量  ✅ 已选 ${selected.size} 个`;
+	title.style.cssText = "font-weight:800;flex:1 1 auto;";
+	const clear = createButton("🧹 清空", "清空变量选择", () => {
+		selected.clear();
+		renderList();
+	});
+	const done = createButton("✅ 完成", "使用当前变量选择", () => {
+		setSelectedVariables(node, [...selected]);
+		closeVariablePicker(node);
+	});
+	const close = createButton("❌", "关闭", () => closeVariablePicker(node));
+	header.append(title, clear, done, close);
+	popup.appendChild(header);
+
+	const search = document.createElement("input");
+	search.placeholder = "搜索变量，点击可多选";
+	search.style.cssText = "height:34px;border:1px solid #3f5b66;border-radius:7px;background:#071015;color:#dce7e2;padding:0 10px;outline:none;";
+	popup.appendChild(search);
+
+	const list = document.createElement("div");
+	list.style.cssText = "overflow:auto;display:flex;flex-direction:column;gap:5px;max-height:440px;padding-right:2px;";
+	popup.appendChild(list);
+
+	function renderList() {
+		title.textContent = `⚡ 选择变量  ✅ 已选 ${selected.size} 个`;
+		const needle = String(search.value || "").trim().toLowerCase();
+		list.textContent = "";
+		for (const option of options) {
+			const value = String(option.value || "").trim();
+			if (!value) continue;
+			const parts = variableDisplayParts(option);
+			if (needle && !`${parts.title} ${parts.source} ${parts.value} ${option.label || ""}`.toLowerCase().includes(needle)) continue;
+			const item = document.createElement("button");
+			item.type = "button";
+			item.style.cssText = [
+				"display:flex",
+				"align-items:center",
+				"gap:10px",
+				"text-align:left",
+				"border:0",
+				"border-radius:7px",
+				"padding:8px 10px",
+				"background:" + (selected.has(value) ? "#234a37" : "transparent"),
+				"color:#dce7e2",
+				"cursor:pointer",
+			].join(";");
+			const mark = document.createElement("span");
+			mark.textContent = selected.has(value) ? "✓" : "";
+			mark.style.cssText = "width:18px;color:#7de39b;font-weight:900;";
+			const text = document.createElement("span");
+			text.innerHTML = `<b>${parts.title}</b><br><span style="color:#8fa3ad">${parts.source ? `${parts.source} · ` : ""}${parts.value}</span>`;
+			item.append(mark, text);
+			item.addEventListener("mousedown", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+			});
+			item.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				if (selected.has(value)) selected.delete(value);
+				else if (selected.size < MAX_INPUTS) selected.add(value);
+				renderList();
+			});
+			list.appendChild(item);
+		}
+		if (!list.children.length) {
+			const empty = document.createElement("div");
+			empty.textContent = options.length ? "没有匹配的变量" : "当前工作流没有可选变量";
+			empty.style.cssText = "padding:16px 10px;color:#9aaab2;text-align:center;";
+			list.appendChild(empty);
+		}
+	}
+	search.addEventListener("input", renderList);
+	popup.addEventListener("pointerdown", (event) => event.stopPropagation());
+	document.body.appendChild(popup);
+	node.__gjjCalculatorVariablePicker = popup;
+	renderList();
+	search.focus?.();
+}
+
+function updateVariableButtons(node) {
+	if (node.__gjjCalculatorVariableButton) {
+		const names = selectedVariables(node);
+		const enabled = variableModeEnabled(node);
+		node.__gjjCalculatorVariableButton.textContent = names.length ? `⚡ 变量 ${names.length}` : "⚡ 变量运算";
+		node.__gjjCalculatorVariableButton.title = names.length
+			? `已选择：${names.map((name) => variableDisplayParts(variableOptionForName(node, name)).title || name).join(", ")}`
+			: "选择 GJJ_TemplateParams 或 GJJ_SetNode 变量参加运算";
+		setButtonActive(node.__gjjCalculatorVariableButton, enabled);
+	}
+}
+
 function rebuildInputButtons(node) {
 	const row = node.__gjjCalculatorInputRow;
 	const advancedInputRow = node.__gjjCalculatorAdvancedInputRow;
@@ -1104,6 +1321,10 @@ function rebuildInputButtons(node) {
 		const advancedButton = createButton("⚙️ 更多", "显示高级计算按钮和常用公式", () => setAdvancedOpen(node, !isAdvancedOpen(node)));
 		node.__gjjCalculatorAdvancedButton = advancedButton;
 	}
+	if (!node.__gjjCalculatorVariableButton) {
+		const button = createButton("⚡ 变量运算", "选择 GJJ_TemplateParams / GJJ_SetNode 变量参加运算", () => openVariablePicker(node));
+		node.__gjjCalculatorVariableButton = button;
+	}
 	if (!node.__gjjCalculatorIntOutputButton) {
 		const button = createButton("🔁 互转", "显示/隐藏“互转/断行结果”输出口：FLOAT 转 INT，INT/帧数转 FLOAT，STRING 按标点换行。", () => toggleOutput(node, SHOW_INT_OUTPUT_PROPERTY));
 		node.__gjjCalculatorIntOutputButton = button;
@@ -1113,10 +1334,12 @@ function rebuildInputButtons(node) {
 		node.__gjjCalculatorFormulaOutputButton = button;
 	}
 	row.appendChild(node.__gjjCalculatorAdvancedButton);
+	row.appendChild(node.__gjjCalculatorVariableButton);
 	row.appendChild(node.__gjjCalculatorIntOutputButton);
 	row.appendChild(node.__gjjCalculatorFormulaOutputButton);
 	updateAdvancedVisibility(node);
 	updateOutputButtons(node);
+	updateVariableButtons(node);
 	measurePanel(node);
 }
 
@@ -1155,14 +1378,14 @@ function ensureCalculatorPanel(node) {
 	}
 
 	const container = document.createElement("div");
-	container.style.cssText = "display:flex;flex-direction:column;gap:6px;padding:2px 0 0;color:#dce7e2;overflow:visible;";
+	container.style.cssText = "display:flex;flex-direction:column;gap:4px;padding:1px 0 0;color:#dce7e2;overflow:visible;";
 
 	const inputRow = createRow();
 	container.appendChild(inputRow);
 	node.__gjjCalculatorInputRow = inputRow;
 
 	const advancedWrap = document.createElement("div");
-	advancedWrap.style.cssText = "display:none;flex-direction:column;gap:7px;overflow:visible;";
+	advancedWrap.style.cssText = "display:none;flex-direction:column;gap:4px;overflow:visible;";
 	node.__gjjCalculatorAdvancedWrap = advancedWrap;
 
 	const advancedInputRow = createRow();
@@ -1197,11 +1420,11 @@ function ensureCalculatorPanel(node) {
 
 	const resultBox = document.createElement("div");
 	resultBox.style.cssText = [
-		"min-height:34px",
+		"min-height:28px",
 		"border:1px solid #3f5057",
 		"background:#10171b",
 		"border-radius:7px",
-		"padding:7px 9px",
+		"padding:5px 7px",
 		"font-size:12px",
 		"line-height:1.45",
 		"white-space:pre-wrap",
@@ -1301,7 +1524,9 @@ function stabilizeNode(node) {
 	syncPresetState(node);
 	const fixedInputCount = getFixedInputCount(node);
 	const desiredInputCount = desiredFormulaInputCount(node);
-	if (fixedInputCount) {
+	if (variableModeEnabled(node) && selectedVariables(node).length) {
+		ensureExactInputCount(node, desiredInputCount);
+	} else if (fixedInputCount) {
 		ensureExactInputCount(node, desiredInputCount);
 	} else {
 		ensureMinimumInputCount(node, desiredInputCount);
@@ -1333,6 +1558,74 @@ function scheduleAllCalculators(ms = 0) {
 		if (TARGET_NODES.has(node?.comfyClass) || TARGET_NODES.has(node?.type)) {
 			scheduleStabilize(node, ms);
 		}
+	}
+}
+
+function findCalculatorNodeForPromptId(graph, promptId) {
+	const id = String(promptId || "");
+	const nodes = graph?._nodes || [];
+	const parts = id.split(":").filter(Boolean);
+	const tail = parts.length ? parts[parts.length - 1] : id;
+	return nodes.find((node) => String(node?.id) === id)
+		|| nodes.find((node) => String(node?.id) === tail);
+}
+
+function resolveCalculatorVariable(node, name) {
+	const resolver = globalThis.GJJ_VariableBroadcast?.resolveVariableBroadcastSource;
+	if (typeof resolver !== "function") {
+		return null;
+	}
+	return resolver(node?.graph || app.graph, name);
+}
+
+function patchCalculatorVariablePrompt(promptResult, graph) {
+	const output = promptResult?.output;
+	if (!output) return promptResult;
+	for (const [nodeId, nodeInfo] of Object.entries(output)) {
+		const node = findCalculatorNodeForPromptId(graph, nodeId);
+		if (!node || !TARGET_NODES.has(node.type || node.comfyClass) || !variableModeEnabled(node)) {
+			continue;
+		}
+		const names = selectedVariables(node);
+		if (!names.length) continue;
+		nodeInfo.inputs = nodeInfo.inputs || {};
+		const inputNames = {};
+		const inputs = new Map(getValueInputs(node).map((input) => [input.name, input]));
+		names.forEach((name, index) => {
+			const inputName = formatInputName(index + 1);
+			inputNames[`x${index + 1}`] = name;
+			if (inputHasLink(inputs.get(inputName))) {
+				return;
+			}
+			const resolved = resolveCalculatorVariable(node, name);
+			if (!Array.isArray(resolved) || resolved.length !== 2 || String(resolved[0]) === String(node.id)) {
+				return;
+			}
+			nodeInfo.inputs[inputName] = [String(resolved[0]), Number(resolved[1] || 0)];
+		});
+		nodeInfo.inputs[INPUT_NAMES_WIDGET] = JSON.stringify(inputNames);
+		nodeInfo.inputs[LEGACY_INPUT_NAMES_WIDGET] = "{}";
+	}
+	return promptResult;
+}
+
+function installCalculatorPromptPatch() {
+	if (!api.__gjjCalculatorVariableQueuePatchInstalled && typeof api.queuePrompt === "function") {
+		api.__gjjCalculatorVariableQueuePatchInstalled = true;
+		const originalQueuePrompt = api.queuePrompt.bind(api);
+		api.queuePrompt = async function (...args) {
+			patchCalculatorVariablePrompt(args[1], app.rootGraph || app.graph);
+			return originalQueuePrompt(...args);
+		};
+	}
+	if (!app.__gjjCalculatorVariableGraphPatchInstalled && typeof app.graphToPrompt === "function") {
+		app.__gjjCalculatorVariableGraphPatchInstalled = true;
+		const originalGraphToPrompt = app.graphToPrompt.bind(app);
+		app.graphToPrompt = async function (...args) {
+			const result = await originalGraphToPrompt(...args);
+			const promptGraph = args[0] || this.rootGraph || this.graph || app.rootGraph || app.graph;
+			return patchCalculatorVariablePrompt(result, promptGraph);
+		};
 	}
 }
 
@@ -1398,9 +1691,12 @@ app.registerExtension({
 	},
 
 	setup() {
+		installCalculatorPromptPatch();
 		if (!window.__gjjCalculatorTemplateParamsListener) {
 			window.__gjjCalculatorTemplateParamsListener = true;
 			window.addEventListener("gjj-template-params-updated", () => scheduleAllCalculators(0));
+			window.addEventListener("gjj-template-set-variables-updated", () => scheduleAllCalculators(0));
+			window.addEventListener("gjj-variable-broadcast-updated", () => scheduleAllCalculators(0));
 		}
 		for (const node of app.graph?._nodes || []) {
 			if (TARGET_NODES.has(node?.comfyClass)) {

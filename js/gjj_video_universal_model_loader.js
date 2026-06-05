@@ -1,4 +1,5 @@
 import { app } from "/scripts/app.js";
+import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODE_APIS = {
@@ -14,6 +15,7 @@ const SETTINGS_OPEN_PROPERTY = "gjj_video_kijai_open_settings";
 const SETTINGS_CONFIG_PROPERTY = "gjj_video_kijai_settings_config";
 const BROADCAST_PROPERTY = "gjj_variable_broadcast_enabled";
 const BROADCAST_USER_SET_PROPERTY = "gjj_variable_broadcast_user_set";
+const LORA_BOOL_VARIABLE_PROPERTY = "gjj_video_universal_lora_bool_variable";
 const OUTPUT_HIT_LANE = 20;
 const WIDTH_PROPERTY = "gjj_video_universal_loader_width";
 const MIN_NODE_WIDTH = 300;
@@ -85,6 +87,34 @@ for (let i = 1; i <= MAX_SLOTS; i++) {
 
 function getWidget(node, name) { return node.widgets?.find((w) => w?.name === name); }
 function valueOf(node, name, fallback = "") { return String(getWidget(node, name)?.value ?? fallback ?? ""); }
+function selectedLoraBoolVariable(node) {
+	return String(node?.properties?.[LORA_BOOL_VARIABLE_PROPERTY] || "").trim();
+}
+function setSelectedLoraBoolVariable(node, name) {
+	if (!node) return;
+	node.properties = node.properties || {};
+	const value = String(name || "").trim();
+	if (value) node.properties[LORA_BOOL_VARIABLE_PROPERTY] = value;
+	else delete node.properties[LORA_BOOL_VARIABLE_PROPERTY];
+	node.__gjjVULoraToggleSync?.();
+	saveWidgetValues(node);
+	applyConfig(node);
+}
+function variableOptions(node) {
+	const apiObject = globalThis.GJJ_VariableBroadcast;
+	const graph = node?.graph || app.graph;
+	return typeof apiObject?.getVisibleSetOptions === "function" ? (apiObject.getVisibleSetOptions(graph) || []) : [];
+}
+function variableOption(node, name) {
+	return variableOptions(node).find((item) => item.value === name) || { value: name, label: name };
+}
+function variableDisplay(option) {
+	const value = String(option?.value || "").trim();
+	const label = String(option?.label || value).trim();
+	const match = label.match(/^[^()（）]+[（(]([^()（）]+?)[\s·]+([^()（）]+?)[）)]$/);
+	if (match) return { title: match[2].trim() || value, source: match[1].trim(), value };
+	return { title: label || value, source: "", value };
+}
 function helpValueOf(node, name, fallback = "") {
 	const widgetValue = String(getWidget(node, name)?.value ?? "").trim();
 	const saved = node?.properties?.[SAVED_VALUES_PROPERTY]?.[name];
@@ -1093,14 +1123,18 @@ function createFilterBox(node, key, placeholder, onInput) {
 
 function getInputSlot(node, name, displayName = "") {
 	return node.inputs?.find((input) => {
-		const values = [input?.name, input?.localized_name, input?.label].map((item) => String(item || ""));
+		const values = [input?.name, input?.display_name, input?.displayName, input?.localized_name, input?.label].map((item) => String(item || ""));
 		return values.includes(name) || (displayName && values.includes(displayName));
 	});
 }
 function inputHasLink(input) { return input?.link !== undefined && input?.link !== null; }
-function hasExternalLoraBool(node) {
+function hasLinkedLoraBool(node) {
 	return inputHasLink(getInputSlot(node, "🚕 加速LoRA", "🚕 加速LoRA"))
 		|| inputHasLink(getInputSlot(node, "use_accel_lora_in", "🚕 加速LoRA"));
+}
+function hasExternalLoraBool(node) {
+	return Boolean(selectedLoraBoolVariable(node))
+		|| hasLinkedLoraBool(node);
 }
 function hasExternalLoraConfig(node) {
 	return inputHasLink(getInputSlot(node, "🧬 LoRA配置", "🧬 LoRA配置"))
@@ -1156,6 +1190,125 @@ function isGjjLoraInput(input) {
 	return text.includes("use_accel_lora_in") || text.includes("lora_chain_config") || text.includes("🚕") || text.includes("🧬");
 }
 
+function closeLoraVariablePicker(node) {
+	node?.__gjjVULoraVariablePicker?.remove?.();
+	node.__gjjVULoraVariablePicker = null;
+}
+
+function openLoraVariablePicker(node) {
+	closeLoraVariablePicker(node);
+	const options = variableOptions(node);
+	const current = selectedLoraBoolVariable(node);
+	const popup = document.createElement("div");
+	popup.className = "gjj-vu-variable-popup";
+	popup.style.cssText = [
+		"position:fixed",
+		"z-index:10050",
+		"width:min(440px,calc(100vw - 28px))",
+		"max-height:min(520px,calc(100vh - 40px))",
+		"overflow:hidden",
+		"display:flex",
+		"flex-direction:column",
+		"gap:8px",
+		"padding:10px",
+		"border:1px solid #486575",
+		"border-radius:8px",
+		"background:#08151a",
+		"box-shadow:0 18px 46px rgba(0,0,0,.55)",
+		"color:#dce7e2",
+		"font:12px system-ui,'Microsoft YaHei',sans-serif",
+	].join(";");
+	const rect = node.__gjjVULoraVariableButton?.getBoundingClientRect?.() || { left: 24, bottom: 80 };
+	popup.style.left = `${Math.max(12, Math.min(window.innerWidth - 460, rect.left || 24))}px`;
+	popup.style.top = `${Math.max(12, Math.min(window.innerHeight - 540, (rect.bottom || 80) + 6))}px`;
+
+	const header = document.createElement("div");
+	header.style.cssText = "display:flex;align-items:center;gap:8px;";
+	const title = document.createElement("div");
+	title.textContent = "⚡ 选择 LoRA 开关变量";
+	title.style.cssText = "font-weight:800;flex:1 1 auto;";
+	const clear = document.createElement("button");
+	clear.type = "button";
+	clear.textContent = "清空";
+	const close = document.createElement("button");
+	close.type = "button";
+	close.textContent = "关闭";
+	for (const button of [clear, close]) {
+		button.style.cssText = "height:28px;border:1px solid #44565f;border-radius:7px;background:#202b31;color:#dce7e2;cursor:pointer;padding:0 8px;font-size:12px;font-weight:650;";
+	}
+	header.append(title, clear, close);
+	popup.appendChild(header);
+
+	const search = document.createElement("input");
+	search.placeholder = "搜索变量，点击选择";
+	search.style.cssText = "height:30px;border:1px solid #3f5b66;border-radius:7px;background:#071015;color:#dce7e2;padding:0 10px;outline:none;";
+	popup.appendChild(search);
+	const list = document.createElement("div");
+	list.style.cssText = "overflow:auto;display:flex;flex-direction:column;gap:5px;max-height:360px;padding-right:2px;";
+	popup.appendChild(list);
+
+	function render() {
+		const needle = String(search.value || "").trim().toLowerCase();
+		list.textContent = "";
+		for (const option of options) {
+			const parts = variableDisplay(option);
+			if (!parts.value) continue;
+			if (needle && !`${parts.title} ${parts.source} ${parts.value} ${option.label || ""}`.toLowerCase().includes(needle)) continue;
+			const item = document.createElement("button");
+			item.type = "button";
+			item.style.cssText = [
+				"display:flex",
+				"align-items:center",
+				"gap:8px",
+				"text-align:left",
+				"border:0",
+				"border-radius:7px",
+				"padding:8px 10px",
+				"background:" + (current === parts.value ? "#234a37" : "transparent"),
+				"color:#dce7e2",
+				"cursor:pointer",
+			].join(";");
+			const mark = document.createElement("span");
+			mark.textContent = current === parts.value ? "✓" : "";
+			mark.style.cssText = "width:16px;color:#7de39b;font-weight:900;";
+			const text = document.createElement("span");
+			text.innerHTML = `<b>${parts.title}</b><br><span style="color:#8fa3ad">${parts.source ? `${parts.source} · ` : ""}${parts.value}</span>`;
+			item.append(mark, text);
+			item.addEventListener("mousedown", (event) => { event.preventDefault(); event.stopPropagation(); });
+			item.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				setSelectedLoraBoolVariable(node, parts.value);
+				closeLoraVariablePicker(node);
+			});
+			list.appendChild(item);
+		}
+		if (!list.children.length) {
+			const empty = document.createElement("div");
+			empty.textContent = options.length ? "没有匹配的变量" : "当前工作流没有可选变量";
+			empty.style.cssText = "padding:14px 10px;color:#9aaab2;text-align:center;";
+			list.appendChild(empty);
+		}
+	}
+	clear.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		setSelectedLoraBoolVariable(node, "");
+		closeLoraVariablePicker(node);
+	});
+	close.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		closeLoraVariablePicker(node);
+	});
+	search.addEventListener("input", render);
+	popup.addEventListener("pointerdown", (event) => event.stopPropagation());
+	document.body.appendChild(popup);
+	node.__gjjVULoraVariablePicker = popup;
+	render();
+	search.focus?.();
+}
+
 function createLoraBar(node, cfg) {
 	const bar = document.createElement("div");
 	bar.className = "gjj-vu-lora-bar";
@@ -1178,12 +1331,30 @@ function createLoraBar(node, cfg) {
 	button.type = "button";
 	button.className = "gjj-vu-toggle";
 	const sync = () => {
+		const linked = hasLinkedLoraBool(node);
+		const selectedVariable = linked ? "" : selectedLoraBoolVariable(node);
 		const external = hasExternalLoraBool(node);
 		const on = effectiveUseLora(node);
 		button.dataset.value = external ? "external" : (on ? "true" : "false");
-		button.textContent = external ? "🧬 外接" : (on ? "✅ 开" : "⬜ 关");
+		button.style.display = selectedVariable ? "none" : "";
+		button.textContent = selectedVariable ? "⚡ 变量" : (external ? "🧬 外接" : (on ? "✅ 开" : "⬜ 关"));
 		button.disabled = external;
-		button.title = external ? "LoRA 开关由外部 BOOLEAN 输入控制。" : "点击开关内部/外接 LoRA 叠加。";
+		button.title = selectedVariable
+			? `LoRA 开关由变量控制：${selectedVariable}`
+			: (external ? "LoRA 开关由外部 BOOLEAN 输入控制。" : "点击开关内部/外接 LoRA 叠加。");
+		const variableButton = node.__gjjVULoraVariableButton;
+		if (variableButton) {
+			if (selectedVariable) {
+				const display = variableDisplay(variableOption(node, selectedVariable));
+				variableButton.textContent = `⚡ ${display.title || selectedVariable}`;
+				variableButton.title = `已选择变量：${display.title || selectedVariable}\n实际变量名：${selectedVariable}`;
+				variableButton.classList.add("on");
+			} else {
+				variableButton.textContent = "⚡ 变量";
+				variableButton.title = "从 GJJ_TemplateParams 或 GJJ_SetNode 选择布尔变量";
+				variableButton.classList.remove("on");
+			}
+		}
 	};
 	button.addEventListener("click", (event) => {
 		event.preventDefault(); event.stopPropagation();
@@ -1195,12 +1366,40 @@ function createLoraBar(node, cfg) {
 	});
 	protect(button);
 
+	const variableButton = document.createElement("button");
+	variableButton.type = "button";
+	variableButton.className = "gjj-vu-variable";
+	variableButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		openLoraVariablePicker(node);
+	});
+	protect(variableButton);
+	node.__gjjVULoraVariableButton = variableButton;
+
 	const hint = document.createElement("div");
 	hint.className = "gjj-vu-lora-hint";
-	hint.textContent = hasExternalLoraConfig(node) ? "🧬 已接入 LoRA配置" : "🧬 可接 LoRA配置";
-	bar.append(label, button, hint);
+	bar.append(label, button, variableButton, hint);
 	node.__gjjVULoraToggleSync = sync;
+	const originalSync = node.__gjjVULoraToggleSync;
+	node.__gjjVULoraToggleSync = () => {
+		originalSync?.();
+		const linked = hasLinkedLoraBool(node);
+		const selectedVariable = linked ? "" : selectedLoraBoolVariable(node);
+		if (selectedVariable) {
+			const display = variableDisplay(variableOption(node, selectedVariable));
+			hint.textContent = `⚡ 变量控制：${display.title || selectedVariable}`;
+			hint.title = `执行时从变量读取 LoRA 开关：${selectedVariable}`;
+		} else if (linked) {
+			hint.textContent = "🔗 外部布尔控制";
+			hint.title = "当前 LoRA 开关由左侧 BOOLEAN 输入控制。";
+		} else {
+			hint.textContent = hasExternalLoraConfig(node) ? "🧬 已接额外LoRA" : "🧬 可接额外LoRA";
+			hint.title = "这里提示的是额外 LoRA 配置输入，不是开关变量。";
+		}
+	};
 	sync();
+	node.__gjjVULoraToggleSync();
 	return bar;
 }
 
@@ -1238,6 +1437,7 @@ function buildDom(node) {
 		.gjj-vu-loader .gjj-vu-refresh,
 		.gjj-vu-loader .gjj-vu-broadcast,
 		.gjj-vu-loader .gjj-vu-toggle,
+		.gjj-vu-loader .gjj-vu-variable,
 		.gjj-vu-loader input,
 		.gjj-vu-loader button,
 		.gjj-vu-loader select { pointer-events:auto; }
@@ -1247,7 +1447,7 @@ function buildDom(node) {
 		.gjj-vu-row.has-gear.no-dtype { grid-template-columns:108px minmax(0,1fr) 30px; }
 		.gjj-vu-row.has-gear:not(.no-dtype) { grid-template-columns:88px minmax(0,1fr) 68px 30px; }
 		.gjj-vu-label, .gjj-vu-small-label { color:#b9c8cc; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-		.gjj-vu-refresh, .gjj-vu-broadcast, .gjj-vu-toggle, .gjj-vu-combo-button {
+		.gjj-vu-refresh, .gjj-vu-broadcast, .gjj-vu-toggle, .gjj-vu-variable, .gjj-vu-combo-button {
 			width:100%; height:28px; min-width:0; padding:3px 7px; border:1px solid #33464e; border-radius:7px;
 			background:#2b2d30; color:#f1f5f5; outline:none; font-size:12px;
 		}
@@ -1291,13 +1491,15 @@ function buildDom(node) {
 		.gjj-vu-missing-btn:hover { background:#4a1d21; }
 		.gjj-vu-missing-btn.copied { border-color:rgba(74,222,128,.7); background:#14532d; color:#dcfce7; }
 		.gjj-vu-missing-btn:disabled { opacity:.42; cursor:not-allowed; }
-		.gjj-vu-refresh, .gjj-vu-broadcast, .gjj-vu-toggle { background:#24282b; color:#cdd5d8; cursor:pointer; padding:0; text-align:center; }
+		.gjj-vu-refresh, .gjj-vu-broadcast, .gjj-vu-toggle, .gjj-vu-variable { background:#24282b; color:#cdd5d8; cursor:pointer; padding:0; text-align:center; }
 		.gjj-vu-broadcast.on,
 		.gjj-vu-broadcast[data-value="true"] { border-color:#69b980; background:#20362f; color:#ecfff1; }
 		.gjj-vu-broadcast:hover { border-color:#6aa6b8; background:#2c3b43; }
 		.gjj-vu-toggle[data-value="true"] { border-color:#4f8f7a; background:#20362f; color:#dff8ea; }
 		.gjj-vu-toggle[data-value="external"] { border-color:#4b5860; background:#1d2327; color:#9caab0; cursor:default; }
-		.gjj-vu-lora-bar { display:grid; grid-template-columns:74px 82px minmax(0,1fr); gap:6px; align-items:center; min-width:0; }
+		.gjj-vu-variable { padding:0 6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+		.gjj-vu-variable.on { border-color:#7fa7b3; background:#20333b; color:#ffffff; }
+		.gjj-vu-lora-bar { display:grid; grid-template-columns:74px 82px 82px minmax(0,1fr); gap:6px; align-items:center; min-width:0; }
 		.gjj-vu-lora-hint { height:28px; padding:5px 2px; border:0; border-radius:0; background:transparent; color:#9caab0; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 		.gjj-vu-popup { position:fixed; z-index:999999; max-height:420px; padding:7px; border:1px solid #47616b; border-radius:9px; background:#10191d; box-shadow:0 10px 32px rgba(0,0,0,.45); }
 		.gjj-vu-popup-search { width:100%; height:28px; margin-bottom:6px; padding:3px 7px; border:1px solid #d7eff5; border-radius:6px; background:#0b1418; color:#f1f5f5; outline:none; font-size:12px; }
@@ -2070,7 +2272,8 @@ function updateInputs(node, cfg) {
 	// 不再新建/强改 label/localized_name/displayName，避免破坏 ComfyUI 根据后端 display_name 绘制输入文字。
 	const rest = old.filter((input) => !isWanRuntimeArgsInput(input) && !isExtraModelChainInput(input) && !isLoraConfigInput(input) && !isAccelLoraInput(input));
 	const nextInputs = [wanArgsInput, extraInput, cfgInput];
-	if (hasLoraSlots(cfg)) nextInputs.push(boolInput);
+	const hideBoolInputForVariable = Boolean(selectedLoraBoolVariable(node)) && !inputHasLink(boolInput);
+	if (hasLoraSlots(cfg) && !hideBoolInputForVariable) nextInputs.push(boolInput);
 	node.inputs = [...nextInputs, ...rest];
 }
 
@@ -2245,6 +2448,58 @@ function stabilize(node) {
 }
 function schedule(node, ms = 0) { clearTimeout(node.__gjjVUTimer); node.__gjjVUTimer = setTimeout(() => stabilize(node), ms); }
 
+function findVideoLoaderNodeForPromptId(graph, promptId) {
+	const id = String(promptId || "");
+	const nodes = graph?._nodes || [];
+	const parts = id.split(":").filter(Boolean);
+	const tail = parts.length ? parts[parts.length - 1] : id;
+	return nodes.find((node) => String(node?.id) === id)
+		|| nodes.find((node) => String(node?.id) === tail);
+}
+
+function resolveSelectedLoraBoolVariable(node) {
+	const name = selectedLoraBoolVariable(node);
+	const resolver = globalThis.GJJ_VariableBroadcast?.resolveVariableBroadcastSource;
+	if (!name || typeof resolver !== "function") return null;
+	return resolver(node?.graph || app.graph, name);
+}
+
+function patchVideoLoaderVariablePrompt(promptResult, graph) {
+	const output = promptResult?.output;
+	if (!output) return promptResult;
+	for (const [nodeId, nodeInfo] of Object.entries(output)) {
+		const node = findVideoLoaderNodeForPromptId(graph, nodeId);
+		if (!node || !TARGET_NODES.has(node?.comfyClass) || !selectedLoraBoolVariable(node)) continue;
+		const input = getInputSlot(node, "use_accel_lora_in", "🚕 加速LoRA");
+		if (input?.link != null) continue;
+		const resolved = resolveSelectedLoraBoolVariable(node);
+		if (!Array.isArray(resolved) || resolved.length !== 2 || String(resolved[0]) === String(node.id)) continue;
+		nodeInfo.inputs = nodeInfo.inputs || {};
+		nodeInfo.inputs.use_accel_lora_in = [String(resolved[0]), Number(resolved[1] || 0)];
+	}
+	return promptResult;
+}
+
+function installVariablePromptPatch() {
+	if (!api.__gjjVideoUniversalLoraVariableQueuePatchInstalled && typeof api.queuePrompt === "function") {
+		api.__gjjVideoUniversalLoraVariableQueuePatchInstalled = true;
+		const originalQueuePrompt = api.queuePrompt.bind(api);
+		api.queuePrompt = async function (...args) {
+			patchVideoLoaderVariablePrompt(args[1], app.rootGraph || app.graph);
+			return originalQueuePrompt(...args);
+		};
+	}
+	if (!app.__gjjVideoUniversalLoraVariableGraphPatchInstalled && typeof app.graphToPrompt === "function") {
+		app.__gjjVideoUniversalLoraVariableGraphPatchInstalled = true;
+		const originalGraphToPrompt = app.graphToPrompt.bind(app);
+		app.graphToPrompt = async function (...args) {
+			const result = await originalGraphToPrompt(...args);
+			const graph = args[0] || this.rootGraph || this.graph || app.rootGraph || app.graph;
+			return patchVideoLoaderVariablePrompt(result, graph);
+		};
+	}
+}
+
 app.registerExtension({
 	name: "Comfy.GJJ.VideoUniversalModelLoader",
 	beforeRegisterNodeDef(nodeType, nodeData) {
@@ -2286,5 +2541,21 @@ app.registerExtension({
 		nodeType.prototype.onConnectionsChange = function (...args) { const result = originalOnConnectionsChange?.apply(this, args); schedule(this, 0); return result; };
 	},
 	nodeCreated(node) { if (TARGET_NODES.has(node?.comfyClass)) schedule(node, 0); },
-	setup() { for (const node of app.graph?._nodes || []) if (TARGET_NODES.has(node?.comfyClass)) stabilize(node); },
+	setup() {
+		installVariablePromptPatch();
+		if (!window.__gjjVideoUniversalVariableListener) {
+			window.__gjjVideoUniversalVariableListener = true;
+			window.addEventListener("gjj-template-params-updated", () => {
+				for (const node of app.graph?._nodes || []) {
+					if (TARGET_NODES.has(node?.comfyClass)) schedule(node, 0);
+				}
+			});
+			window.addEventListener("gjj-template-set-variables-updated", () => {
+				for (const node of app.graph?._nodes || []) {
+					if (TARGET_NODES.has(node?.comfyClass)) schedule(node, 0);
+				}
+			});
+		}
+		for (const node of app.graph?._nodes || []) if (TARGET_NODES.has(node?.comfyClass)) stabilize(node);
+	},
 });

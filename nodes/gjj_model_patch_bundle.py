@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-import sys
+import importlib.util
 import traceback
 import types
 
@@ -10,8 +10,27 @@ try:
 except Exception:
     torch = None
 
+try:
+    from .common_utils.dependency_checker import (
+        build_dependency_model_report,
+        load_dependency_at_runtime,
+        print_dependency_model_report,
+        raise_dependency_model_error,
+        send_dependency_model_notice,
+    )
+except ImportError:
+    from common_utils.dependency_checker import (
+        build_dependency_model_report,
+        load_dependency_at_runtime,
+        print_dependency_model_report,
+        raise_dependency_model_error,
+        send_dependency_model_notice,
+    )
+
 
 NODE_NAME = "GJJ_ModelPatchBundle"
+NODE_DISPLAY_NAME = "GJJ · ⚡ 模型补丁三合一"
+DESCRIPTION_INTRO = "把 SageAttention、FP16 累积设置、LTXV FeedForward 分块合并为一个零 KJ 依赖的 GJJ MODEL 补丁节点。支持高模、低模双通道分别输入输出，第二路可不接。"
 
 SAGE_ATTENTION_MODES = [
     "自动",
@@ -45,6 +64,59 @@ SAGE_MODE_TOOLTIP = (
     "所选模式必须和本机显卡、CUDA、sageattention/sageattn3 包版本匹配。"
 )
 
+SAGE_ATTENTION_DEPENDENCY = {
+    "module_name": "sageattention",
+    "package_name": "sageattention",
+    "display_name": "SageAttention",
+    "description": "启用 SageAttention 的自动/int8/fp8 后端时需要；未启用 SageAttention 时节点仍可正常透传或使用其它补丁。",
+}
+SAGE_ATTN3_DEPENDENCY = {
+    "module_name": "sageattn3",
+    "package_name": "sageattn3",
+    "display_name": "SageAttn3",
+    "description": "选择 sageattn3 或 sageattn3分块均值模式时需要；请安装与显卡、CUDA 匹配的版本。",
+}
+
+
+MISSING_SAGE_HANDLING_MODES = [
+    "自动跳过SageAttention继续运行",
+    "提示安装并停止",
+    "关闭SageAttention继续运行",
+]
+
+
+def _missing_optional_dependency_specs():
+    missing = []
+    if importlib.util.find_spec("sageattention") is None:
+        missing.append(SAGE_ATTENTION_DEPENDENCY)
+    if importlib.util.find_spec("sageattn3") is None:
+        missing.append(SAGE_ATTN3_DEPENDENCY)
+    return missing
+
+
+_ENVIRONMENT_REPORT = build_dependency_model_report(
+    node_name=NODE_DISPLAY_NAME,
+    optional_dependencies=_missing_optional_dependency_specs(),
+    optional_install_packages=[
+        dep["package_name"]
+        for dep in _missing_optional_dependency_specs()
+        if dep.get("package_name")
+    ],
+    description="SageAttention/sageattn3 是按模式启用的可选依赖；不开 SageAttention 时不影响其它补丁和模型透传。",
+)
+_MISSING_OPTIONAL_DEPENDENCIES = list(_ENVIRONMENT_REPORT.get("optional_dependencies", []) or [])
+if _MISSING_OPTIONAL_DEPENDENCIES:
+    print_dependency_model_report(_ENVIRONMENT_REPORT, title="GJJ 模型补丁可选依赖缺失")
+
+
+def _required_sage_module_name(sage_attention: str) -> str:
+    sage_mode = SAGE_ATTENTION_MAP.get(sage_attention, sage_attention)
+    return "sageattn3" if "sageattn3" in sage_mode else "sageattention"
+
+
+def _is_sage_dependency_available(sage_attention: str) -> bool:
+    return importlib.util.find_spec(_required_sage_module_name(sage_attention)) is not None
+
 PATCH_BUNDLE_HELP = {
     "title": "GJJ · ⚡ 模型补丁三合一",
     "description": "把 SageAttention、FP16 累积设置、LTXV FeedForward 分块合并为一个双路 MODEL 补丁节点；高模和低模各自 clone、各走各线。",
@@ -58,19 +130,68 @@ PATCH_BUNDLE_HELP = {
         "不开任何补丁时，节点会原样透传输入 MODEL，不 clone。",
         "启用任一补丁后，对接入的每一路 MODEL 独立 clone 并应用相同设置。",
         "SageAttention 负责替换注意力计算；FP16 累积负责运行前/清理时切换 matmul 累积设置；LTXV 分块负责降低 FeedForward 峰值显存。",
+        "如果启用了 SageAttention 但依赖缺失，会自动跳过 SageAttention 并继续执行其它补丁，同时在面板保留安装命令。",
         "分块数量越大越省显存但越慢；分块阈值越小越容易触发分块，0 表示只要开关打开就尽量分块。",
     ],
     "install": [
-        "SageAttention 缺失时可按当前 ComfyUI Python 环境安装，例如：",
-        f"\"{sys.executable}\" -m pip install sageattention",
+        "SageAttention/sageattn3 缺失时请使用节点面板的一键复制安装命令，命令会按当前 ComfyUI Python 环境生成。",
         "sageattn3 请按该项目官方说明安装与显卡/CUDA 匹配的版本。",
     ],
+    "notice": _ENVIRONMENT_REPORT.get("help_message", "") if _MISSING_OPTIONAL_DEPENDENCIES else "",
+    "install_cmd": "",
+    "optional_install_cmd": _ENVIRONMENT_REPORT.get("optional_install_cmd", ""),
+    "copy_text": _ENVIRONMENT_REPORT.get("copy_text", ""),
+    "copy_label": _ENVIRONMENT_REPORT.get("copy_label", ""),
+    "warning_message": _ENVIRONMENT_REPORT.get("warning_message", ""),
+    "notice_level": _ENVIRONMENT_REPORT.get("notice_level", "ok"),
 }
 
 
-def _get_sage_func(sage_attention: str, allow_compile: bool = False):
+def _load_sage_callable(module_name: str, attr_name: str, package_name: str, description: str, unique_id=None):
+    module = load_dependency_at_runtime(
+        module_name,
+        node_name=NODE_DISPLAY_NAME,
+        package_name=package_name,
+        description=description,
+        unique_id=unique_id,
+    )
+    try:
+        return getattr(module, attr_name)
+    except Exception as exc:
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_dependencies=[
+                {
+                    "module_name": module_name,
+                    "package_name": package_name,
+                    "display_name": package_name,
+                    "description": f"已安装 {package_name}，但当前版本缺少 {attr_name} 接口，请升级或换成匹配版本。",
+                }
+            ],
+            install_packages=[package_name],
+            description=f"{attr_name} 接口缺失，当前 SageAttention 模式无法运行。",
+            original_error=str(exc),
+            unique_id=unique_id,
+            title="GJJ 模型补丁依赖版本不兼容！",
+        )
+
+
+def _get_sage_func(sage_attention: str, allow_compile: bool = False, unique_id=None):
     if torch is None:
-        raise RuntimeError("PyTorch 未加载，无法启用 SageAttention。")
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_dependencies=[
+                {
+                    "module_name": "torch",
+                    "package_name": "torch",
+                    "display_name": "PyTorch",
+                    "description": "启用 SageAttention 或 FP16 累积设置需要 PyTorch 正常加载。",
+                }
+            ],
+            install_packages=["torch"],
+            description="PyTorch 未加载，无法启用 SageAttention。",
+            unique_id=unique_id,
+        )
 
     try:
         from comfy.ldm.modules.attention import attention_pytorch, wrap_attn
@@ -80,23 +201,25 @@ def _get_sage_func(sage_attention: str, allow_compile: bool = False):
     logging.info("[GJJ] 使用 SageAttention 模式：%s", sage_attention)
 
     if sage_attention == "auto":
-        try:
-            from sageattention import sageattn
-        except Exception as exc:
-            raise RuntimeError(
-                f"未找到 sageattention。安装命令：\"{sys.executable}\" -m pip install sageattention"
-            ) from exc
+        sageattn = _load_sage_callable(
+            "sageattention",
+            "sageattn",
+            "sageattention",
+            "自动模式需要 sageattention.sageattn。",
+            unique_id=unique_id,
+        )
 
         def sage_func(q, k, v, is_causal=False, attn_mask=None, tensor_layout="NHD"):
             return sageattn(q, k, v, is_causal=is_causal, attn_mask=attn_mask, tensor_layout=tensor_layout)
 
     elif sage_attention == "sageattn_qk_int8_pv_fp16_cuda":
-        try:
-            from sageattention import sageattn_qk_int8_pv_fp16_cuda
-        except Exception as exc:
-            raise RuntimeError(
-                f"当前环境缺少 sageattn_qk_int8_pv_fp16_cuda。安装命令：\"{sys.executable}\" -m pip install sageattention"
-            ) from exc
+        sageattn_qk_int8_pv_fp16_cuda = _load_sage_callable(
+            "sageattention",
+            "sageattn_qk_int8_pv_fp16_cuda",
+            "sageattention",
+            "int8_fp16_cuda 模式需要 sageattention.sageattn_qk_int8_pv_fp16_cuda。",
+            unique_id=unique_id,
+        )
 
         def sage_func(q, k, v, is_causal=False, attn_mask=None, tensor_layout="NHD"):
             return sageattn_qk_int8_pv_fp16_cuda(
@@ -104,12 +227,13 @@ def _get_sage_func(sage_attention: str, allow_compile: bool = False):
             )
 
     elif sage_attention == "sageattn_qk_int8_pv_fp16_triton":
-        try:
-            from sageattention import sageattn_qk_int8_pv_fp16_triton
-        except Exception as exc:
-            raise RuntimeError(
-                f"当前环境缺少 sageattn_qk_int8_pv_fp16_triton。安装命令：\"{sys.executable}\" -m pip install sageattention"
-            ) from exc
+        sageattn_qk_int8_pv_fp16_triton = _load_sage_callable(
+            "sageattention",
+            "sageattn_qk_int8_pv_fp16_triton",
+            "sageattention",
+            "int8_fp16_triton 模式需要 sageattention.sageattn_qk_int8_pv_fp16_triton。",
+            unique_id=unique_id,
+        )
 
         def sage_func(q, k, v, is_causal=False, attn_mask=None, tensor_layout="NHD"):
             return sageattn_qk_int8_pv_fp16_triton(
@@ -117,12 +241,13 @@ def _get_sage_func(sage_attention: str, allow_compile: bool = False):
             )
 
     elif sage_attention == "sageattn_qk_int8_pv_fp8_cuda":
-        try:
-            from sageattention import sageattn_qk_int8_pv_fp8_cuda
-        except Exception as exc:
-            raise RuntimeError(
-                f"当前环境缺少 sageattn_qk_int8_pv_fp8_cuda。安装命令：\"{sys.executable}\" -m pip install sageattention"
-            ) from exc
+        sageattn_qk_int8_pv_fp8_cuda = _load_sage_callable(
+            "sageattention",
+            "sageattn_qk_int8_pv_fp8_cuda",
+            "sageattention",
+            "int8_fp8_cuda 模式需要 sageattention.sageattn_qk_int8_pv_fp8_cuda。",
+            unique_id=unique_id,
+        )
 
         def sage_func(q, k, v, is_causal=False, attn_mask=None, tensor_layout="NHD"):
             return sageattn_qk_int8_pv_fp8_cuda(
@@ -130,12 +255,13 @@ def _get_sage_func(sage_attention: str, allow_compile: bool = False):
             )
 
     elif sage_attention == "sageattn_qk_int8_pv_fp8_cuda++":
-        try:
-            from sageattention import sageattn_qk_int8_pv_fp8_cuda
-        except Exception as exc:
-            raise RuntimeError(
-                f"当前环境缺少 sageattn_qk_int8_pv_fp8_cuda。安装命令：\"{sys.executable}\" -m pip install sageattention"
-            ) from exc
+        sageattn_qk_int8_pv_fp8_cuda = _load_sage_callable(
+            "sageattention",
+            "sageattn_qk_int8_pv_fp8_cuda",
+            "sageattention",
+            "int8_fp8_cuda_plus 模式需要 sageattention.sageattn_qk_int8_pv_fp8_cuda。",
+            unique_id=unique_id,
+        )
 
         def sage_func(q, k, v, is_causal=False, attn_mask=None, tensor_layout="NHD"):
             return sageattn_qk_int8_pv_fp8_cuda(
@@ -143,12 +269,13 @@ def _get_sage_func(sage_attention: str, allow_compile: bool = False):
             )
 
     elif "sageattn3" in sage_attention:
-        try:
-            from sageattn3 import sageattn3_blackwell
-        except Exception as exc:
-            raise RuntimeError(
-                f"未找到 sageattn3。请先安装与你显卡匹配的 sageattn3 运行库。原始错误：{exc}"
-            ) from exc
+        sageattn3_blackwell = _load_sage_callable(
+            "sageattn3",
+            "sageattn3_blackwell",
+            "sageattn3",
+            "sageattn3 模式需要 sageattn3.sageattn3_blackwell，请安装与显卡/CUDA 匹配的版本。",
+            unique_id=unique_id,
+        )
 
         def sage_func(q, k, v, is_causal=False, attn_mask=None, tensor_layout="NHD", **kwargs):
             q, k, v = [x.transpose(1, 2) if tensor_layout == "NHD" else x for x in (q, k, v)]
@@ -246,9 +373,9 @@ def _ensure_transformer_options(model_clone):
     return model_clone.model_options["transformer_options"]
 
 
-def _apply_sage_attention(model_clone, sage_attention: str, allow_compile: bool):
+def _apply_sage_attention(model_clone, sage_attention: str, allow_compile: bool, unique_id=None):
     sage_mode = SAGE_ATTENTION_MAP.get(sage_attention, sage_attention)
-    new_attention = _get_sage_func(sage_mode, allow_compile=allow_compile)
+    new_attention = _get_sage_func(sage_mode, allow_compile=allow_compile, unique_id=unique_id)
 
     def attention_override_sage(func, *args, **kwargs):
         return new_attention.__wrapped__(*args, **kwargs)
@@ -314,7 +441,7 @@ class GJJ_ModelPatchBundle:
         "应用所选补丁后的高模 MODEL。",
         "应用所选补丁后的低模 MODEL；未连接低模输入时输出为空。",
     )
-    DESCRIPTION = "把 SageAttention、FP16 累积设置、LTXV FeedForward 分块合并为一个零 KJ 依赖的 GJJ MODEL 补丁节点。支持高模、低模双通道分别输入输出，第二路可不接。"
+    DESCRIPTION = DESCRIPTION_INTRO
     GJJ_HELP = PATCH_BUNDLE_HELP
     SEARCH_ALIASES = [
         "model patch",
@@ -407,6 +534,14 @@ class GJJ_ModelPatchBundle:
                         "tooltip": "LTXV 前馈分块触发阈值，只有“启用LTXV前馈分块”打开时生效。序列长度大于该值才分块；0=只要开关打开就尽量分块；4096=默认折中；值越高越少触发分块。",
                     },
                 ),
+                "缺SageAttention处理": (
+                    MISSING_SAGE_HANDLING_MODES,
+                    {
+                        "default": "自动跳过SageAttention继续运行",
+                        "display_name": "缺SageAttention处理",
+                        "tooltip": "启用 SageAttention 但本机缺少所选模式依赖时，会自动跳过 SageAttention，只继续应用 FP16 累积和 LTXV 分块，面板仍保留安装命令供之后复制。“提示安装并停止”为旧工作流兼容值，当前也会自动跳过。",
+                    },
+                ),
             },
             "optional": {
                 "低模": (
@@ -416,6 +551,9 @@ class GJJ_ModelPatchBundle:
                         "tooltip": "可选第二路模型输入。连接后会使用同一组 SageAttention、FP16 累积、LTXV 分块设置独立处理；不连接时第二个输出为空，不影响高模线路。",
                     },
                 ),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
             },
         }
 
@@ -431,33 +569,42 @@ class GJJ_ModelPatchBundle:
         启用LTXV前馈分块=False,
         分块数量=4,
         分块阈值=4096,
+        缺SageAttention处理="自动跳过SageAttention继续运行",
+        unique_id=None,
         **kwargs,
     ):
+        if _MISSING_OPTIONAL_DEPENDENCIES and _as_bool(启用SageAttention):
+            send_dependency_model_notice(_ENVIRONMENT_REPORT, unique_id=unique_id)
+
         high_out = self._patch_one(
             MODEL,
             "高模",
-            启用SageAttention,
-            SageAttention模式,
-            允许Sage编译,
-            启用FP16累积设置,
-            FP16累积,
-            启用LTXV前馈分块,
-            分块数量,
-            分块阈值,
+            启用SageAttention=启用SageAttention,
+            SageAttention模式=SageAttention模式,
+            允许Sage编译=允许Sage编译,
+            启用FP16累积设置=启用FP16累积设置,
+            FP16累积=FP16累积,
+            启用LTXV前馈分块=启用LTXV前馈分块,
+            分块数量=分块数量,
+            分块阈值=分块阈值,
+            缺SageAttention处理=缺SageAttention处理,
+            unique_id=unique_id,
         )
         low_out = None
         if 低模 is not None:
             low_out = self._patch_one(
                 低模,
                 "低模",
-                启用SageAttention,
-                SageAttention模式,
-                允许Sage编译,
-                启用FP16累积设置,
-                FP16累积,
-                启用LTXV前馈分块,
-                分块数量,
-                分块阈值,
+                启用SageAttention=启用SageAttention,
+                SageAttention模式=SageAttention模式,
+                允许Sage编译=允许Sage编译,
+                启用FP16累积设置=启用FP16累积设置,
+                FP16累积=FP16累积,
+                启用LTXV前馈分块=启用LTXV前馈分块,
+                分块数量=分块数量,
+                分块阈值=分块阈值,
+                缺SageAttention处理=缺SageAttention处理,
+                unique_id=unique_id,
             )
         return (high_out, low_out)
 
@@ -473,18 +620,27 @@ class GJJ_ModelPatchBundle:
         启用LTXV前馈分块=False,
         分块数量=4,
         分块阈值=4096,
+        缺SageAttention处理="自动跳过SageAttention继续运行",
+        unique_id=None,
     ):
         if model is None:
             raise RuntimeError(f"未接入{channel_name} MODEL。")
 
-        needs_clone = bool(启用SageAttention or 启用FP16累积设置 or 启用LTXV前馈分块)
+        skip_sage = False
+        if 启用SageAttention and not _is_sage_dependency_available(SageAttention模式):
+            skip_sage = True
+            logging.warning("[GJJ] %s缺少 %s，已自动跳过 SageAttention 并继续运行其它补丁。", channel_name, _required_sage_module_name(SageAttention模式))
+            send_dependency_model_notice(_ENVIRONMENT_REPORT, unique_id=unique_id)
+
+        effective_sage_attention = bool(启用SageAttention and not skip_sage)
+        needs_clone = bool(effective_sage_attention or 启用FP16累积设置 or 启用LTXV前馈分块)
         if not needs_clone:
             return model
 
         model_clone = model.clone()
         try:
-            if 启用SageAttention:
-                _apply_sage_attention(model_clone, SageAttention模式, bool(允许Sage编译))
+            if effective_sage_attention:
+                _apply_sage_attention(model_clone, SageAttention模式, bool(允许Sage编译), unique_id=unique_id)
 
             if 启用FP16累积设置:
                 _apply_fp16_accumulation_callback(model_clone, bool(FP16累积))

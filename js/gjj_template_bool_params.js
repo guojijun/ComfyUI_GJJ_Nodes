@@ -1,4 +1,5 @@
 import { app } from "/scripts/app.js";
+import { api } from "/scripts/api.js";
 
 const TARGET_NODE = "GJJ_TemplateBoolParams";
 const BOOLEAN_WIDGET = "boolean";
@@ -7,6 +8,7 @@ const TEMPLATE_WIDGET = "template_text";
 const DOM_WIDGET = "gjj_template_bool_params_dom";
 const SAVED_TEMPLATE = "gjj_template_bool_params_template";
 const SAVED_SIZE = "gjj_template_bool_params_size";
+const SELECTED_VARIABLE_PROPERTY = "gjj_template_bool_selected_variable";
 const DEFAULT_TEMPLATE = "#启用加速Lora\n步数（steps）：20|4\n遵循值（cfg）：2.5|1.0";
 const DEFAULT_WIDTH = 320;
 const MAX_OUTPUTS = 32;
@@ -17,6 +19,39 @@ function getWidget(node, name) {
 
 function getInput(node, name) {
 	return node?.inputs?.find((input) => input?.name === name);
+}
+
+function selectedVariable(node) {
+	return String(node?.properties?.[SELECTED_VARIABLE_PROPERTY] || "").trim();
+}
+
+function setSelectedVariable(node, name) {
+	node.properties = node.properties || {};
+	const value = String(name || "").trim();
+	if (value) node.properties[SELECTED_VARIABLE_PROPERTY] = value;
+	else delete node.properties[SELECTED_VARIABLE_PROPERTY];
+	syncBooleanInputVisibility(node);
+	updateToggleButton(node);
+	updateVariableButton(node);
+	refreshNode(node);
+}
+
+function variableOptions(node) {
+	const apiObject = globalThis.GJJ_VariableBroadcast;
+	const graph = node?.graph || app.graph;
+	return typeof apiObject?.getVisibleSetOptions === "function" ? (apiObject.getVisibleSetOptions(graph) || []) : [];
+}
+
+function variableOption(node, name) {
+	return variableOptions(node).find((item) => item.value === name) || { value: name, label: name };
+}
+
+function variableDisplay(option) {
+	const value = String(option?.value || "").trim();
+	const label = String(option?.label || value).trim();
+	const match = label.match(/^[^()（）]+[（(]([^()（）]+?)[\s·]+([^()（）]+?)[）)]$/);
+	if (match) return { title: match[2].trim() || value, source: match[1].trim(), value };
+	return { title: label || value, source: "", value };
 }
 
 function boolValue(value, fallback = true) {
@@ -51,21 +86,58 @@ function getGraphLink(node, linkId) {
 	return links[linkId] || links[String(linkId)] || null;
 }
 
+function inputHasLink(input) {
+	if (!input) return false;
+	if (Array.isArray(input.link)) return input.link.length > 0;
+	return input.link != null;
+}
+
+function syncBooleanInputVisibility(node) {
+	if (!node || !Array.isArray(node.inputs)) return;
+	const selected = selectedVariable(node);
+	const index = node.inputs.findIndex((input) => input?.name === BOOLEAN_INPUT);
+	const input = index >= 0 ? node.inputs[index] : null;
+	if (selected && input && !inputHasLink(input)) {
+		try { node.removeInput?.(index); } catch (_) { node.inputs.splice(index, 1); }
+		return;
+	}
+	if (!selected && index < 0) {
+		node.addInput?.(BOOLEAN_INPUT, "BOOLEAN");
+		const restored = getInput(node, BOOLEAN_INPUT);
+		if (restored) {
+			restored.label = "布尔输入";
+			restored.localized_name = "布尔输入";
+			restored.display_name = "布尔输入";
+			restored.tooltip = "可选外部布尔输入。连接后执行时优先使用外部布尔值，面板按钮只显示连接来源。";
+		}
+	}
+}
+
 function linkedBooleanInfo(node) {
 	const input = getInput(node, BOOLEAN_INPUT);
-	if (!input || input.link == null) return null;
-	const link = getGraphLink(node, input.link);
-	const originId = Array.isArray(link) ? link[1] : link?.origin_id;
-	const originSlot = Array.isArray(link) ? link[2] : link?.origin_slot;
-	const source = node?.graph?.getNodeById?.(originId)
-		|| app.graph?.getNodeById?.(originId)
-		|| app.graph?._nodes?.find((item) => String(item?.id) === String(originId))
-		|| null;
-	const output = source?.outputs?.[Number(originSlot)];
-	const outputLabel = String(output?.localized_name || output?.label || output?.name || "").trim();
-	const nodeLabel = String(source?.title || source?.properties?.NodeName || source?.comfyClass || "").trim();
-	const label = outputLabel || nodeLabel || "外部布尔";
-	return { label, nodeLabel, outputLabel };
+	if (input?.link != null) {
+		const link = getGraphLink(node, input.link);
+		const originId = Array.isArray(link) ? link[1] : link?.origin_id;
+		const originSlot = Array.isArray(link) ? link[2] : link?.origin_slot;
+		const source = node?.graph?.getNodeById?.(originId)
+			|| app.graph?.getNodeById?.(originId)
+			|| app.graph?._nodes?.find((item) => String(item?.id) === String(originId))
+			|| null;
+		const output = source?.outputs?.[Number(originSlot)];
+		const outputLabel = String(output?.localized_name || output?.label || output?.name || "").trim();
+		const nodeLabel = String(source?.title || source?.properties?.NodeName || source?.comfyClass || "").trim();
+		const label = outputLabel || nodeLabel || "外部布尔";
+		return { label, nodeLabel, outputLabel };
+	}
+	const selected = selectedVariable(node);
+	if (!selected) return null;
+	const display = variableDisplay(variableOption(node, selected));
+	return {
+		label: display.title || selected,
+		nodeLabel: display.source || "GJJ 变量",
+		outputLabel: display.value || selected,
+		selectedVariable: selected,
+	};
 }
 
 function getWidgetValue(node, name, fallback = "") {
@@ -446,6 +518,11 @@ function updateToggleButton(node) {
 	const enabled = getBool(node);
 	const label = templateButtonLabel(getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE));
 	if (external) {
+		if (external.selectedVariable) {
+			button.style.display = "none";
+			return;
+		}
+		button.style.display = "";
 		button.dataset.value = "external";
 		button.classList.add("external");
 		button.classList.remove("on");
@@ -455,11 +532,151 @@ function updateToggleButton(node) {
 			: `已连接外部布尔：${external.label}\n按钮文字来自模板首行 #${label}。`;
 		return;
 	}
+	button.style.display = "";
 	button.classList.remove("external");
 	button.dataset.value = String(enabled);
 	button.classList.toggle("on", enabled);
 	button.textContent = `${enabled ? "✔" : "❌"} ${label}`;
 	button.title = `点击切换：${label}；若该布尔控件被外接，执行时以外部输入为准。`;
+}
+
+function closeVariablePicker(node) {
+	node?.__gjjTemplateBoolVariablePicker?.remove?.();
+	node.__gjjTemplateBoolVariablePicker = null;
+}
+
+function openVariablePicker(node) {
+	closeVariablePicker(node);
+	const options = variableOptions(node);
+	const current = selectedVariable(node);
+	const popup = document.createElement("div");
+	popup.style.cssText = [
+		"position:fixed",
+		"z-index:10050",
+		"width:min(460px,calc(100vw - 28px))",
+		"max-height:min(560px,calc(100vh - 40px))",
+		"overflow:hidden",
+		"display:flex",
+		"flex-direction:column",
+		"gap:8px",
+		"padding:12px",
+		"border:1px solid #486575",
+		"border-radius:8px",
+		"background:#08151a",
+		"box-shadow:0 18px 46px rgba(0,0,0,.55)",
+		"color:#dce7e2",
+		"font:12px system-ui,'Microsoft YaHei',sans-serif",
+	].join(";");
+	const rect = node.__gjjTemplateBoolVariableButton?.getBoundingClientRect?.() || { left: 24, bottom: 80 };
+	popup.style.left = `${Math.max(12, Math.min(window.innerWidth - 480, rect.left || 24))}px`;
+	popup.style.top = `${Math.max(12, Math.min(window.innerHeight - 560, (rect.bottom || 80) + 6))}px`;
+
+	const header = document.createElement("div");
+	header.style.cssText = "display:flex;align-items:center;gap:8px;";
+	const title = document.createElement("div");
+	title.textContent = "⚡ 选择布尔变量";
+	title.style.cssText = "font-weight:800;flex:1 1 auto;";
+	const clear = document.createElement("button");
+	clear.type = "button";
+	clear.textContent = "🧹 清空";
+	clear.className = "gjj-template-bool-picker-button";
+	const close = document.createElement("button");
+	close.type = "button";
+	close.textContent = "❌";
+	close.className = "gjj-template-bool-picker-button";
+	header.append(title, clear, close);
+	popup.appendChild(header);
+
+	const search = document.createElement("input");
+	search.placeholder = "搜索变量，点击选择";
+	search.style.cssText = "height:32px;border:1px solid #3f5b66;border-radius:7px;background:#071015;color:#dce7e2;padding:0 10px;outline:none;";
+	popup.appendChild(search);
+	const list = document.createElement("div");
+	list.style.cssText = "overflow:auto;display:flex;flex-direction:column;gap:5px;max-height:400px;padding-right:2px;";
+	popup.appendChild(list);
+
+	function render() {
+		const needle = String(search.value || "").trim().toLowerCase();
+		list.textContent = "";
+		for (const option of options) {
+			const parts = variableDisplay(option);
+			if (!parts.value) continue;
+			if (needle && !`${parts.title} ${parts.source} ${parts.value} ${option.label || ""}`.toLowerCase().includes(needle)) continue;
+			const item = document.createElement("button");
+			item.type = "button";
+			item.style.cssText = [
+				"display:flex",
+				"align-items:center",
+				"gap:10px",
+				"text-align:left",
+				"border:0",
+				"border-radius:7px",
+				"padding:8px 10px",
+				"background:" + (current === parts.value ? "#234a37" : "transparent"),
+				"color:#dce7e2",
+				"cursor:pointer",
+			].join(";");
+			const mark = document.createElement("span");
+			mark.textContent = current === parts.value ? "✓" : "";
+			mark.style.cssText = "width:18px;color:#7de39b;font-weight:900;";
+			const text = document.createElement("span");
+			text.innerHTML = `<b>${parts.title}</b><br><span style="color:#8fa3ad">${parts.source ? `${parts.source} · ` : ""}${parts.value}</span>`;
+			item.append(mark, text);
+			item.addEventListener("mousedown", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+			});
+			item.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				setSelectedVariable(node, parts.value);
+				closeVariablePicker(node);
+			});
+			list.appendChild(item);
+		}
+		if (!list.children.length) {
+			const empty = document.createElement("div");
+			empty.textContent = options.length ? "没有匹配的变量" : "当前工作流没有可选变量";
+			empty.style.cssText = "padding:16px 10px;color:#9aaab2;text-align:center;";
+			list.appendChild(empty);
+		}
+	}
+	for (const button of [clear, close]) {
+		button.style.cssText = "height:28px;border:1px solid #44565f;border-radius:7px;background:#202b31;color:#dce7e2;cursor:pointer;padding:0 8px;font-size:12px;font-weight:650;";
+	}
+	clear.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		setSelectedVariable(node, "");
+		closeVariablePicker(node);
+	});
+	close.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		closeVariablePicker(node);
+	});
+	search.addEventListener("input", render);
+	popup.addEventListener("pointerdown", (event) => event.stopPropagation());
+	document.body.appendChild(popup);
+	node.__gjjTemplateBoolVariablePicker = popup;
+	render();
+	search.focus?.();
+}
+
+function updateVariableButton(node) {
+	const button = node.__gjjTemplateBoolVariableButton;
+	if (!button) return;
+	const selected = selectedVariable(node);
+	if (!selected) {
+		button.textContent = "⚡ 变量";
+		button.title = "从 GJJ_TemplateParams 或 GJJ_SetNode 选择布尔变量";
+		button.classList.remove("on");
+		return;
+	}
+	const display = variableDisplay(variableOption(node, selected));
+	button.textContent = `⚡ ${display.title || selected}`;
+	button.title = `已选择变量：${display.title || selected}\n实际变量名：${selected}`;
+	button.classList.add("on");
 }
 
 function buildDom(node) {
@@ -471,11 +688,13 @@ function buildDom(node) {
 	style.textContent = `
 		.gjj-template-bool *{box-sizing:border-box;}
 		.gjj-template-bool-toolbar{display:flex;align-items:center;gap:6px;min-width:0;}
-		.gjj-template-bool-gear,.gjj-template-bool-toggle,.gjj-template-bool-ok,.gjj-template-bool-cancel{height:25px;border:1px solid #44565f;border-radius:7px;background:#202b31;color:#dce7e2;cursor:pointer;padding:0 8px;font-size:12px;font-weight:650;white-space:nowrap;}
-		.gjj-template-bool-gear:hover,.gjj-template-bool-toggle:hover,.gjj-template-bool-ok:hover,.gjj-template-bool-cancel:hover{background:#2c3b43;border-color:#6aa6b8;}
+		.gjj-template-bool-gear,.gjj-template-bool-toggle,.gjj-template-bool-variable,.gjj-template-bool-ok,.gjj-template-bool-cancel{height:25px;border:1px solid #44565f;border-radius:7px;background:#202b31;color:#dce7e2;cursor:pointer;padding:0 8px;font-size:12px;font-weight:650;white-space:nowrap;}
+		.gjj-template-bool-gear:hover,.gjj-template-bool-toggle:hover,.gjj-template-bool-variable:hover,.gjj-template-bool-ok:hover,.gjj-template-bool-cancel:hover{background:#2c3b43;border-color:#6aa6b8;}
 		.gjj-template-bool-toggle{max-width:168px;overflow:hidden;text-overflow:ellipsis;}
 		.gjj-template-bool-toggle.on{background:#20362f;border-color:#69b980;color:#ecfff1;}
 		.gjj-template-bool-toggle.external{background:#2a2417;border-color:#8a7440;color:#fff2c7;}
+		.gjj-template-bool-variable{max-width:124px;overflow:hidden;text-overflow:ellipsis;}
+		.gjj-template-bool-variable.on{background:#20333b;border-color:#7fa7b3;color:#ffffff;}
 		.gjj-template-bool-count{color:#8ea0a8;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 		.gjj-template-bool-panel{display:none;flex-direction:column;gap:6px;padding:6px;border:1px solid #33464e;border-radius:8px;background:#0d1519;}
 		.gjj-template-bool-template{width:100%;min-height:78px;resize:vertical;padding:7px 8px;border:1px solid #44565f;border-radius:7px;outline:none;background:#070f12;color:#dce7e2;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;}
@@ -503,9 +722,12 @@ function buildDom(node) {
 	const toggle = document.createElement("button");
 	toggle.type = "button";
 	toggle.className = "gjj-template-bool-toggle";
+	const variableButton = document.createElement("button");
+	variableButton.type = "button";
+	variableButton.className = "gjj-template-bool-variable";
 	const count = document.createElement("span");
 	count.className = "gjj-template-bool-count";
-	toolbar.append(gear, toggle, count);
+	toolbar.append(gear, toggle, variableButton, count);
 
 	const panel = document.createElement("div");
 	panel.className = "gjj-template-bool-panel";
@@ -539,7 +761,7 @@ function buildDom(node) {
 	rows.className = "gjj-template-bool-rows";
 
 	const stop = (event) => event.stopPropagation();
-	for (const el of [root, gear, toggle, panel, textarea, cancel, ok]) {
+	for (const el of [root, gear, toggle, variableButton, panel, textarea, cancel, ok]) {
 		for (const eventName of ["pointerdown", "mousedown", "click", "keydown", "keyup", "wheel", "dblclick", "contextmenu"]) {
 			el.addEventListener(eventName, stop);
 		}
@@ -560,6 +782,10 @@ function buildDom(node) {
 		updateToggleButton(node);
 		renderRows(node);
 	});
+	variableButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		openVariablePicker(node);
+	});
 	cancel.addEventListener("click", (event) => {
 		event.preventDefault();
 		panel.style.display = "none";
@@ -578,7 +804,9 @@ function buildDom(node) {
 	node.__gjjTemplateBoolRows = rows;
 	node.__gjjTemplateBoolCount = count;
 	node.__gjjTemplateBoolToggle = toggle;
+	node.__gjjTemplateBoolVariableButton = variableButton;
 	updateToggleButton(node);
+	updateVariableButton(node);
 	return root;
 }
 
@@ -604,13 +832,67 @@ function stabilize(node) {
 	ensureDom(node);
 	collapseWidget(getWidget(node, BOOLEAN_WIDGET));
 	collapseWidget(getWidget(node, TEMPLATE_WIDGET));
+	syncBooleanInputVisibility(node);
 	updateToggleButton(node);
+	updateVariableButton(node);
 	renderRows(node);
 }
 
 function scheduleStabilize(node, ms = 0) {
 	clearTimeout(node.__gjjTemplateBoolTimer);
 	node.__gjjTemplateBoolTimer = setTimeout(() => stabilize(node), ms);
+}
+
+function findBoolParamsNodeForPromptId(graph, promptId) {
+	const id = String(promptId || "");
+	const nodes = graph?._nodes || [];
+	const parts = id.split(":").filter(Boolean);
+	const tail = parts.length ? parts[parts.length - 1] : id;
+	return nodes.find((node) => String(node?.id) === id)
+		|| nodes.find((node) => String(node?.id) === tail);
+}
+
+function resolveSelectedVariable(node) {
+	const name = selectedVariable(node);
+	const resolver = globalThis.GJJ_VariableBroadcast?.resolveVariableBroadcastSource;
+	if (!name || typeof resolver !== "function") return null;
+	return resolver(node?.graph || app.graph, name);
+}
+
+function patchTemplateBoolVariablePrompt(promptResult, graph) {
+	const output = promptResult?.output;
+	if (!output) return promptResult;
+	for (const [nodeId, nodeInfo] of Object.entries(output)) {
+		const node = findBoolParamsNodeForPromptId(graph, nodeId);
+		if (!node || ![node.type, node.comfyClass].includes(TARGET_NODE) || !selectedVariable(node)) continue;
+		const input = getInput(node, BOOLEAN_INPUT);
+		if (input?.link != null) continue;
+		const resolved = resolveSelectedVariable(node);
+		if (!Array.isArray(resolved) || resolved.length !== 2 || String(resolved[0]) === String(node.id)) continue;
+		nodeInfo.inputs = nodeInfo.inputs || {};
+		nodeInfo.inputs[BOOLEAN_INPUT] = [String(resolved[0]), Number(resolved[1] || 0)];
+	}
+	return promptResult;
+}
+
+function installPromptPatch() {
+	if (!api.__gjjTemplateBoolVariableQueuePatchInstalled && typeof api.queuePrompt === "function") {
+		api.__gjjTemplateBoolVariableQueuePatchInstalled = true;
+		const originalQueuePrompt = api.queuePrompt.bind(api);
+		api.queuePrompt = async function (...args) {
+			patchTemplateBoolVariablePrompt(args[1], app.rootGraph || app.graph);
+			return originalQueuePrompt(...args);
+		};
+	}
+	if (!app.__gjjTemplateBoolVariableGraphPatchInstalled && typeof app.graphToPrompt === "function") {
+		app.__gjjTemplateBoolVariableGraphPatchInstalled = true;
+		const originalGraphToPrompt = app.graphToPrompt.bind(app);
+		app.graphToPrompt = async function (...args) {
+			const result = await originalGraphToPrompt(...args);
+			const graph = args[0] || this.rootGraph || this.graph || app.rootGraph || app.graph;
+			return patchTemplateBoolVariablePrompt(result, graph);
+		};
+	}
 }
 
 app.registerExtension({
@@ -638,6 +920,10 @@ app.registerExtension({
 			const result = originalOnConfigure?.apply(this, [serializedNode, ...args]);
 			const props = serializedNode?.properties || this.properties || {};
 			if (props[SAVED_TEMPLATE]) setWidgetValue(this, TEMPLATE_WIDGET, props[SAVED_TEMPLATE]);
+			if (props[SELECTED_VARIABLE_PROPERTY]) {
+				this.properties = this.properties || {};
+				this.properties[SELECTED_VARIABLE_PROPERTY] = props[SELECTED_VARIABLE_PROPERTY];
+			}
 			if (Array.isArray(props[SAVED_SIZE])) {
 				this.__gjjTemplateBoolSavedSize = props[SAVED_SIZE].map(Number);
 				this.size = [...this.__gjjTemplateBoolSavedSize];
@@ -656,6 +942,11 @@ app.registerExtension({
 				serializedNode.properties = serializedNode.properties || {};
 				serializedNode.properties[SAVED_TEMPLATE] = this.properties[SAVED_TEMPLATE];
 				serializedNode.properties[SAVED_SIZE] = this.properties[SAVED_SIZE];
+				if (selectedVariable(this)) {
+					serializedNode.properties[SELECTED_VARIABLE_PROPERTY] = selectedVariable(this);
+				} else {
+					delete serializedNode.properties[SELECTED_VARIABLE_PROPERTY];
+				}
 			}
 			return result;
 		};
@@ -671,6 +962,7 @@ app.registerExtension({
 		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalOnConnectionsChange?.apply(this, args);
+			syncBooleanInputVisibility(this);
 			scheduleStabilize(this, 0);
 			return result;
 		};
@@ -681,6 +973,20 @@ app.registerExtension({
 	},
 
 	setup() {
+		installPromptPatch();
+		if (!window.__gjjTemplateBoolVariableListener) {
+			window.__gjjTemplateBoolVariableListener = true;
+			window.addEventListener("gjj-template-params-updated", () => {
+				for (const node of app.graph?._nodes || []) {
+					if (node?.comfyClass === TARGET_NODE || node?.type === TARGET_NODE) scheduleStabilize(node, 0);
+				}
+			});
+			window.addEventListener("gjj-template-set-variables-updated", () => {
+				for (const node of app.graph?._nodes || []) {
+					if (node?.comfyClass === TARGET_NODE || node?.type === TARGET_NODE) scheduleStabilize(node, 0);
+				}
+			});
+		}
 		for (const node of app.graph?._nodes || []) {
 			if (node?.comfyClass === TARGET_NODE) stabilize(node);
 		}

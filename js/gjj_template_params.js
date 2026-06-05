@@ -721,8 +721,9 @@ const SAVED_SCHEMA = "gjj_template_params_schema";
 const SAVED_SIZE = "gjj_template_params_size";
 const SAVED_TEXTAREA_HEIGHTS = "gjj_template_params_textarea_heights";
 const BROADCAST_PROPERTY = "gjj_variable_broadcast_enabled";
+const OUTPUTS_ENABLED_PROPERTY = "gjj_template_params_outputs_enabled";
 const MAX_OUTPUTS = 64;
-const DEFAULT_TEMPLATE = "帧率 (frame_rate) [INT,FLOAT]：24.0 # 每秒帧数\n时长 (duration) [INT,FLOAT]：5 # 秒数或帧数\nLora加速：true{开启加速|关闭加速} # 布尔按钮\n是否启用：[启用=enable, 禁用=disable] # 枚举按钮";
+const DEFAULT_TEMPLATE = "帧率 (frame_rate) [INT,FLOAT]：24.0 # 每秒帧数\n时长 (duration) [INT,FLOAT]：5 # 秒数或帧数\n宽度（width）：640\n高度（height）：640\nLora加速（use_accel_lora）：true{开启加速|关闭加速} # 布尔按钮\n提示词（positive_text_input）:首尾帧\n首帧（start_image）：https://raw.githubusercontent.com/Comfy-Org/example_workflows/refs/heads/main/wan2.1_flf2v/input/start_image.png\n尾帧（end_image）：https://raw.githubusercontent.com/Comfy-Org/example_workflows/refs/heads/main/wan2.1_flf2v/input/end_image.png";
 const DEFAULT_WIDTH = 300;
 const MAX_EXTRA_IDLE_HEIGHT = 72;
 const TEXTAREA_MIN_HEIGHT = 58;
@@ -736,6 +737,15 @@ function outputHasLinks(output) {
 	if (!output) return false;
 	if (Array.isArray(output.links)) return output.links.length > 0;
 	return output.link != null;
+}
+
+function removeOutputLinks(node, output) {
+	const graph = node?.graph || app.graph;
+	for (const linkId of [...(output?.links || [])]) {
+		try { graph?.removeLink?.(linkId); } catch (_) {}
+		if (app.graph?.links && app.graph.links[linkId]) delete app.graph.links[linkId];
+	}
+	if (output) output.links = null;
 }
 
 function getGraphLink(node, linkId) {
@@ -1015,6 +1025,18 @@ function splitLabelAndBroadcastKey(rawLabel, index) {
 		.replace(/[^0-9A-Za-z_\u4e00-\u9fff-]+/g, "_")
 		.replace(/^_+|_+$/g, "") || `param_${index + 1}`;
 	return { label, keySource: broadcastKey, broadcastKeys: [broadcastKey] };
+}
+
+function uniqueBroadcastKeys(values) {
+	const result = [];
+	const seen = new Set();
+	for (const value of values || []) {
+		const key = String(value || "").trim();
+		if (!key || seen.has(key)) continue;
+		seen.add(key);
+		result.push(key);
+	}
+	return result;
 }
 
 function makeUniqueKey(source, index, seen) {
@@ -1352,11 +1374,14 @@ function parseTemplate(template) {
 		const defaultValue = boolSpec
 			? (boolSpec.defaultValue ? "true" : "false")
 			: (enumOptions.length ? optionValue(enumOptions[0]) : (typeof value === "string" && isStringLiteralText(defaultText) ? value : defaultText));
+		const key = makeUniqueKey(keySource, fields.length, seen);
+		const broadcastKeyList = broadcastKeys.length ? uniqueBroadcastKeys([...broadcastKeys, key]) : [];
 		const field = {
-			key: makeUniqueKey(keySource, fields.length, seen),
+			key,
 			label,
-			broadcast_key: broadcastKeys[0] || "",
-			broadcast_keys: broadcastKeys,
+			output_enabled: true,
+			broadcast_key: broadcastKeyList[0] || "",
+			broadcast_keys: broadcastKeyList,
 			default: defaultValue,
 			tooltip,
 			socket_type: socketType,
@@ -1441,6 +1466,18 @@ function updateBroadcastButton(node) {
 	button.title = enabled
 		? "⚡ 已开启：只广播模板中用 (变量名) 明确声明的字段，按单一变量名和类型匹配空输入口。"
 		: "⚡ 默认关闭：开启后仅广播写了 (变量名) 的字段，例如 帧率 (frame_rate) [INT,FLOAT]：24.0。";
+}
+
+function updateTemplateOutputsButton(node) {
+	const button = node?.__gjjTemplateParamsOutputsButton;
+	if (!button) return;
+	const enabled = templateOutputsEnabled(node);
+	button.classList.toggle("active", enabled);
+	button.setAttribute("aria-pressed", String(enabled));
+	button.dataset.value = enabled ? "true" : "false";
+	button.title = enabled
+		? "🔌 输出口已打开：按模板顺序生成所有输出口，避免参数错位。"
+		: "🔌 输出口已关闭：隐藏模板参数输出口；变量读取仍可按变量名获取。";
 }
 
 function setBroadcastEnabled(node, enabled) {
@@ -1560,6 +1597,7 @@ function normalizeState(node) {
 	let fields = parseTemplate(template);
 	const values = safeJsonParse(getWidgetValue(node, VALUES_WIDGET, node?.properties?.[SAVED_VALUES] || "{}"), {});
 	const schema = safeJsonParse(getWidgetValue(node, SCHEMA_WIDGET, node?.properties?.[SAVED_SCHEMA] || "[]"), []);
+	fields = applySavedFieldSettings(fields, schema);
 	if (!fields.length && Array.isArray(schema) && schema.length) fields = schema;
 	for (const field of fields) {
 		if (!(field.key in values)) values[field.key] = field.default ?? "";
@@ -1580,6 +1618,32 @@ function makeFieldSignature(field) {
 	].join("\u0001");
 }
 
+function templateOutputsEnabled(node) {
+	const value = node?.properties?.[OUTPUTS_ENABLED_PROPERTY];
+	return value !== false;
+}
+
+function setTemplateOutputsEnabled(node, enabled) {
+	if (!node) return;
+	node.properties = node.properties || {};
+	node.properties[OUTPUTS_ENABLED_PROPERTY] = Boolean(enabled);
+	updateTemplateOutputsButton(node);
+	const state = normalizeState(node);
+	updateOutputs(node, state.fields, state.values);
+	node.__gjjTemplateParamsUpdateCount?.();
+}
+
+function applySavedFieldSettings(fields, savedFields) {
+	if (!Array.isArray(fields) || !Array.isArray(savedFields) || !savedFields.length) return fields;
+	const savedByKey = new Map(savedFields.map((field) => [String(field?.key || ""), field]));
+	const savedByLabel = new Map(savedFields.map((field) => [String(field?.label || ""), field]));
+	for (const field of fields) {
+		const saved = savedByKey.get(String(field.key || "")) || savedByLabel.get(String(field.label || ""));
+		if (saved && saved.output_enabled === false) field.output_enabled = false;
+	}
+	return fields;
+}
+
 function valuesForNewTemplate(oldState, nextFields) {
 	const oldFields = Array.isArray(oldState?.fields) ? oldState.fields : [];
 	const oldValues = oldState?.values || {};
@@ -1598,6 +1662,7 @@ function valuesForNewTemplate(oldState, nextFields) {
 		} else {
 			nextValues[key] = field.default ?? "";
 		}
+		if (oldField && oldField.output_enabled === false) field.output_enabled = false;
 	}
 	return nextValues;
 }
@@ -1606,7 +1671,7 @@ function forceRefreshTemplate(node, templateText = null) {
 	node.__gjjTemplateParamsPreferSavedSize = false;
 	const old = normalizeState(node);
 	const template = templateText ?? getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE) ?? DEFAULT_TEMPLATE;
-	const fields = parseTemplate(template);
+	const fields = applySavedFieldSettings(parseTemplate(template), old.fields);
 	const values = valuesForNewTemplate(old, fields);
 	saveState(node, template, fields, values);
 	renderRows(node);
@@ -1662,13 +1727,19 @@ function syncValuesFromDom(node) {
 
 function updateOutputs(node, fields, values) {
 	if (!Array.isArray(node.outputs)) node.outputs = [];
-	while (node.outputs.length < fields.length) {
-		node.addOutput?.(`输出${node.outputs.length + 1}`, "*");
-		if (node.outputs.length === 0) node.outputs.push({ name: "输出1", type: "*", links: null });
+	if (!templateOutputsEnabled(node)) {
+		for (const output of node.outputs || []) removeOutputLinks(node, output);
+		node.outputs = [];
+		repairOutputLinkSlots(node);
+		refreshNode(node);
+		return;
 	}
-	for (let i = 0; i < fields.length; i += 1) {
-		const field = fields[i];
-		const output = node.outputs[i] || { name: field.label, type: "*", links: null };
+	const enabledFields = fields;
+	const previousByKey = new Map((node.outputs || []).map((output) => [String(output?.gjj_template_param_key || ""), output]));
+	const nextOutputs = [];
+	for (let i = 0; i < enabledFields.length; i += 1) {
+		const field = enabledFields[i];
+		const output = previousByKey.get(String(field.key || "")) || { name: field.label, type: "*", links: null };
 		const rawValue = values[field.key] ?? field.default ?? "";
 		const value = parseValue(rawValue);
 		// 输出类型必须按“当前输入文本”实时推断。
@@ -1678,6 +1749,7 @@ function updateOutputs(node, fields, values) {
 		output.label = output.name;
 		output.localized_name = output.name;
 		output.type = nextType;
+		output.gjj_template_param_key = field.key || "";
 		output.gjj_broadcast_names = Array.isArray(field.broadcast_keys) ? [...field.broadcast_keys] : [];
 		output.gjj_broadcast_key = field.broadcast_key || output.gjj_broadcast_names[0] || "";
 		// 已连接的旧 link 也同步类型，否则画布上可能还显示旧类型。
@@ -1691,13 +1763,13 @@ function updateOutputs(node, fields, values) {
 			field.tooltip ? `说明：${field.tooltip}` : "",
 			`当前值：${displayValueForField(field, values[field.key] ?? field.default ?? "")}`,
 		].filter(Boolean).join("\n");
-		node.outputs[i] = output;
+		nextOutputs[i] = output;
 	}
-	for (let i = node.outputs.length - 1; i >= fields.length; i -= 1) {
-		const output = node.outputs[i];
-		if (outputHasLinks(output)) break;
-		node.outputs.splice(i, 1);
+	const kept = new Set(nextOutputs);
+	for (const output of node.outputs || []) {
+		if (!kept.has(output)) removeOutputLinks(node, output);
 	}
+	node.outputs = nextOutputs;
 	repairOutputLinkSlots(node);
 	refreshNode(node);
 }
@@ -1718,6 +1790,17 @@ function displayValueForField(field, rawValue) {
 	return String(rawValue ?? "");
 }
 
+function buildFieldLabel(node, field, typeText = "") {
+	const wrap = document.createElement("span");
+	wrap.className = "gjj-template-param-label gjj-template-param-label-wrap";
+	const text = document.createElement("span");
+	text.className = "gjj-template-param-label-text";
+	text.textContent = field.label;
+	text.title = field.tooltip || typeText || field.type || "";
+	wrap.append(text);
+	return wrap;
+}
+
 function isBooleanField(field, values) {
 	const value = parseValue(values?.[field.key] ?? field.default ?? "");
 	return field?.type === "BOOLEAN" || typeof value === "boolean";
@@ -1730,10 +1813,7 @@ function boolToText(value) {
 function buildBoolButtonForField(node, field, values) {
 	const wrap = document.createElement("div");
 	wrap.className = "gjj-template-param-row";
-	const label = document.createElement("span");
-	label.className = "gjj-template-param-label";
-	label.textContent = field.label;
-	label.title = field.tooltip || "BOOLEAN";
+	const label = buildFieldLabel(node, field, "BOOLEAN");
 
 	const box = document.createElement("div");
 	box.className = "gjj-template-param-bool";
@@ -1786,10 +1866,7 @@ function buildEnumSelectForField(node, field, values) {
 	const wrap = document.createElement("div");
 	wrap.className = "gjj-template-param-row";
 
-	const label = document.createElement("span");
-	label.className = "gjj-template-param-label";
-	label.textContent = field.label;
-	label.title = field.tooltip || "ENUM";
+	const label = buildFieldLabel(node, field, "ENUM");
 
 	const box = document.createElement("div");
 	box.className = "gjj-template-param-enum";
@@ -1910,10 +1987,7 @@ function buildInputForField(node, field, values, options = {}) {
 	const wrap = document.createElement("div");
 	wrap.className = multiline ? "gjj-template-param-row gjj-template-param-row-full gjj-template-param-row-multiline" : "gjj-template-param-row";
 
-	const label = document.createElement("span");
-	label.className = "gjj-template-param-label";
-	label.textContent = field.label;
-	label.title = field.tooltip || field.type || "STRING";
+	const label = buildFieldLabel(node, field, field.type || "STRING");
 
 	const inputWrap = document.createElement("div");
 	inputWrap.style.display = "flex";
@@ -2049,6 +2123,7 @@ function buildGroupedMediaPreview(node, fields, values) {
 function renderRows(node) {
 	const state = normalizeState(node);
 	saveState(node, state.template, state.fields, state.values);
+	node.__gjjTemplateParamsUpdateCount?.();
 	const rows = node.__gjjTemplateParamsRowsWrap;
 	if (!rows) return;
 	disconnectTextareaHeightObservers(node);
@@ -2091,10 +2166,11 @@ function buildDom(node) {
 	style.textContent = `
 		.gjj-template-params * { box-sizing: border-box; }
 		.gjj-template-param-toolbar { display:flex; align-items:center; gap:6px; }
-		.gjj-template-param-gear, .gjj-template-param-refresh, .gjj-template-param-broadcast, .gjj-template-param-ok, .gjj-template-param-cancel { border:1px solid #44565f; border-radius:7px; background:#202b31; color:#dce7e2; cursor:pointer; height:24px; padding:0 8px; font-size:12px; }
-		.gjj-template-param-broadcast { width:26px; flex:0 0 26px; padding:0; font-size:14px; line-height:20px; }
-		.gjj-template-param-gear:hover, .gjj-template-param-refresh:hover, .gjj-template-param-broadcast:hover, .gjj-template-param-ok:hover, .gjj-template-param-cancel:hover { background:#2c3b43; }
-		.gjj-template-param-broadcast.active, .gjj-template-param-broadcast[data-value="true"] { border-color:#69b980; background:#20362f; color:#ecfff1; }
+		.gjj-template-param-gear, .gjj-template-param-refresh, .gjj-template-param-broadcast, .gjj-template-param-output-plug, .gjj-template-param-ok, .gjj-template-param-cancel { border:1px solid #44565f; border-radius:7px; background:#202b31; color:#dce7e2; cursor:pointer; height:24px; padding:0 8px; font-size:12px; }
+		.gjj-template-param-broadcast, .gjj-template-param-output-plug { width:26px; flex:0 0 26px; padding:0; font-size:14px; line-height:20px; }
+		.gjj-template-param-gear:hover, .gjj-template-param-refresh:hover, .gjj-template-param-broadcast:hover, .gjj-template-param-output-plug:hover, .gjj-template-param-ok:hover, .gjj-template-param-cancel:hover { background:#2c3b43; }
+		.gjj-template-param-broadcast.active, .gjj-template-param-broadcast[data-value="true"], .gjj-template-param-output-plug.active, .gjj-template-param-output-plug[data-value="true"] { border-color:#69b980; background:#20362f; color:#ecfff1; }
+		.gjj-template-param-output-plug[data-value="false"] { border-color:#46535a; background:#24282b; color:#8ea0a8; opacity:.78; filter:grayscale(.8); }
 		.gjj-template-param-count { color:#8ea0a8; font-size:11px; }
 		.gjj-template-param-panel { display:none; flex-direction:column; gap:6px; padding:6px; border:1px solid #33464e; border-radius:9px; background:#0d1519; }
 		.gjj-template-param-template { width:100%; min-height:108px; height:118px; resize:vertical; overflow:auto; padding:7px 8px; border:1px solid #33464e; border-radius:8px; outline:none; background:#2b2d30; color:#f1f5f5; font:12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space:pre-wrap; }
@@ -2107,6 +2183,8 @@ function buildDom(node) {
 		.gjj-template-param-row-full .gjj-template-param-label { width:100%; }
 		.gjj-template-param-row-full > div { width:100%; }
 		.gjj-template-param-label { color:#b9c8cc; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+		.gjj-template-param-label-wrap { display:flex; align-items:center; gap:4px; min-width:0; }
+		.gjj-template-param-label-text { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 		.gjj-template-param-input { width:100%; height:30px; padding:4px 8px; border:1px solid #33464e; border-radius:8px; outline:none; background:#2b2d30; color:#f1f5f5; font-size:13px; }
 		.gjj-template-param-textarea { min-height:58px; height:auto; resize:vertical; line-height:1.45; white-space:pre-wrap; overflow:auto; }
 		.gjj-template-param-template.gjj-template-param-textarea { min-height:108px; height:118px; font:12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
@@ -2147,9 +2225,15 @@ function buildDom(node) {
 	broadcast.textContent = "⚡";
 	broadcast.setAttribute("aria-label", "切换模板参数广播");
 
+	const outputPlug = document.createElement("button");
+	outputPlug.type = "button";
+	outputPlug.className = "gjj-template-param-output-plug";
+	outputPlug.textContent = "🔌";
+	outputPlug.setAttribute("aria-label", "切换模板参数输出口");
+
 	const count = document.createElement("span");
 	count.className = "gjj-template-param-count";
-	toolbar.append(gear, broadcast, refresh, count);
+	toolbar.append(gear, broadcast, outputPlug, refresh, count);
 
 	const panel = document.createElement("div");
 	panel.className = "gjj-template-param-panel";
@@ -2167,6 +2251,7 @@ function buildDom(node) {
 		"多段提示词：提示词：'''第一段\\n第二段''' 或 提示词：\"\"\"多段文本\"\"\"。",
 		"支持 int(1)、float(1)、true / false、json([1,2])、图片/音频/视频路径。",
 		"⚡ 默认关闭；开启后只广播写了 (变量名) 的字段，括号内只使用一个严格变量名。",
+		"🔌 控制本节点是否显示输出口；变量读取可不依赖输出口和广播开关。",
 		"布尔按钮：true{开启文案|关闭文案}；简写 {开启文案|关闭文案} 默认开启。",
 		"枚举按钮：[显示=输出值, 显示2=输出值2]；兼容 [显示(输出值), ...]。",
 		"空行、整行 # 注释、.... 会被忽略；如果值里要写 #，请用 \\#，三引号内部可直接写 #。",
@@ -2190,7 +2275,7 @@ function buildDom(node) {
 	warning.className = "gjj-template-param-warning";
 
 	const stop = (event) => event.stopPropagation();
-	for (const el of [container, gear, refresh, broadcast, panel, template, ok, cancel]) {
+	for (const el of [container, gear, refresh, broadcast, outputPlug, panel, template, ok, cancel]) {
 		el.addEventListener("pointerdown", stop);
 		el.addEventListener("mousedown", stop);
 	}
@@ -2213,6 +2298,11 @@ function buildDom(node) {
 		event.preventDefault();
 		event.stopPropagation();
 		setBroadcastEnabled(node, !broadcastEnabled(node));
+	});
+	outputPlug.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		setTemplateOutputsEnabled(node, !templateOutputsEnabled(node));
 	});
 	cancel.addEventListener("click", (event) => {
 		event.preventDefault();
@@ -2252,13 +2342,18 @@ function buildDom(node) {
 	node.__gjjTemplateParamsWarning = warning;
 	node.__gjjTemplateParamsCount = count;
 	node.__gjjTemplateParamsBroadcastButton = broadcast;
+	node.__gjjTemplateParamsOutputsButton = outputPlug;
 	const updateCount = () => {
 		const fields = parseTemplate(getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE));
-		count.textContent = `${fields.length} 个参数`;
+		const saved = safeJsonParse(getWidgetValue(node, SCHEMA_WIDGET, node?.properties?.[SAVED_SCHEMA] || "[]"), []);
+		applySavedFieldSettings(fields, saved);
+		const outputCount = templateOutputsEnabled(node) ? fields.length : 0;
+		count.textContent = `${fields.length} 参数 / ${outputCount} 输出`;
 	};
 	node.__gjjTemplateParamsUpdateCount = updateCount;
 	updateCount();
 	updateBroadcastButton(node);
+	updateTemplateOutputsButton(node);
 	return container;
 }
 
@@ -2284,6 +2379,7 @@ function stabilize(node) {
 	collapseNativeWidgets(node);
 	disableStandardStatus(node);
 	updateBroadcastButton(node);
+	updateTemplateOutputsButton(node);
 	if (!getWidgetValue(node, TEMPLATE_WIDGET, "")) {
 		setWidgetValue(node, TEMPLATE_WIDGET, node?.properties?.[SAVED_TEMPLATE] || DEFAULT_TEMPLATE);
 	}
@@ -2354,7 +2450,9 @@ app.registerExtension({
 				this.properties[SAVED_TEXTAREA_HEIGHTS] = sanitizeTextareaHeights(props[SAVED_TEXTAREA_HEIGHTS]);
 			}
 			this.properties[BROADCAST_PROPERTY] = Boolean(props[BROADCAST_PROPERTY]);
+			this.properties[OUTPUTS_ENABLED_PROPERTY] = props[OUTPUTS_ENABLED_PROPERTY] !== false;
 			updateBroadcastButton(this);
+			updateTemplateOutputsButton(this);
 			if (Array.isArray(props[SAVED_SIZE])) {
 				this.__gjjTemplateParamsSavedSize = props[SAVED_SIZE].map(Number);
 				this.__gjjTemplateParamsPreferSavedSize = true;
@@ -2379,6 +2477,7 @@ app.registerExtension({
 				serializedNode.properties[SAVED_SCHEMA] = getWidgetValue(this, SCHEMA_WIDGET, "[]");
 				serializedNode.properties[SAVED_TEXTAREA_HEIGHTS] = sanitizeTextareaHeights(this.properties?.[SAVED_TEXTAREA_HEIGHTS]);
 				serializedNode.properties[BROADCAST_PROPERTY] = broadcastEnabled(this);
+				serializedNode.properties[OUTPUTS_ENABLED_PROPERTY] = templateOutputsEnabled(this);
 				const naturalHeight = getNaturalCompactHeight(this);
 				const currentHeight = Number(this.size?.[1] || 80);
 				const saveHeight = currentHeight > naturalHeight + MAX_EXTRA_IDLE_HEIGHT ? naturalHeight : currentHeight;

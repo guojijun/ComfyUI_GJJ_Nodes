@@ -34,7 +34,7 @@ const GET_STYLE_ID = "gjj-set-get-node-style";
 const SLOT_PREFIX = "value_";
 const MIN_VISIBLE_SLOTS = 1;
 const SET_TITLE = "GJJ · 📌 变量设置";
-const GET_TITLE = "GJJ · 📍 变量读取";
+const GET_TITLE = "GJJ · ⚡ 变量读取";
 const SET_CATEGORY = "GJJ/工具";
 const GET_CATEGORY = "GJJ/工具";
 const SET_DESCRIPTION = "把连接到本节点的每个输入登记为 GJJ 变量；变量名可用逗号分隔，连接新输入时会按上游输出名自动补齐并保持唯一。";
@@ -369,7 +369,7 @@ function setSelectedNames(node, names, stabilize = true) {
 	if (widget) widget.value = selectedValueText(clean);
 	updateGetSelectorWidget(node);
 	if (stabilize && !app.configuringGraph) stabilizeGetNode(node);
-	else setDirty(node);
+	else setGetDirty(node);
 }
 
 function replaceSelectedName(node, oldName, newName) {
@@ -460,6 +460,13 @@ function sortedInputs(node) {
 
 function setDirty(node) {
 	GJJ_Utils.refreshNode(node);
+}
+
+function setGetDirty(node) {
+	node?.setDirtyCanvas?.(true, true);
+	node?.graph?.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+	try { node?.graph?.change?.(); } catch (_) {}
 }
 
 function releaseForcedDefaultColors(node) {
@@ -666,12 +673,33 @@ function templateSavedTemplateForNode(node) {
 	return TEMPLATE_SAVED_TEMPLATE;
 }
 
-function strictTemplateParamBroadcastKey(field) {
+function strictTemplateParamBroadcastNames(field) {
 	const legacyKeys = Array.isArray(field?.broadcast_keys)
 		? field.broadcast_keys
 		: (Array.isArray(field?.broadcastKeys) ? field.broadcastKeys : []);
-	const firstLegacyKey = legacyKeys.map((item) => String(item || "").trim()).find(Boolean) || "";
-	return String(field?.broadcast_key || field?.broadcastKey || firstLegacyKey || "").trim();
+	const explicitNames = [
+		field?.broadcast_key,
+		field?.broadcastKey,
+		...legacyKeys,
+	].map((item) => String(item || "").trim()).filter(Boolean);
+	const names = [...explicitNames];
+	const key = String(field?.key || field?.name || "").trim();
+	const label = String(field?.label || "").trim();
+	if (explicitNames.length && key) {
+		names.push(key);
+	} else if (key && label && key !== label && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+		names.push(key);
+	}
+	const seen = new Set();
+	return names.filter((name) => {
+		if (!name || seen.has(name)) return false;
+		seen.add(name);
+		return true;
+	});
+}
+
+function strictTemplateParamBroadcastKey(field) {
+	return strictTemplateParamBroadcastNames(field)[0] || "";
 }
 
 function templateFieldIsBroadcastable(node, field) {
@@ -686,10 +714,10 @@ function templateFieldsForNode(node) {
 			const key = String(field?.key || field?.name || `var_${index + 1}`).trim();
 			const label = String(field?.label || key).trim();
 			const outputIndex = Number.isFinite(Number(field?.outputIndex)) ? Number(field.outputIndex) : index;
-			const broadcastKey = isTemplateParamsNode(node)
-				? strictTemplateParamBroadcastKey(field)
-				: String(field?.broadcast_key || field?.broadcastKey || "").trim();
-			const broadcastKeys = broadcastKey ? [broadcastKey] : [];
+			const broadcastKeys = isTemplateParamsNode(node)
+				? strictTemplateParamBroadcastNames(field)
+				: [String(field?.broadcast_key || field?.broadcastKey || "").trim()].filter(Boolean);
+			const broadcastKey = broadcastKeys[0] || "";
 			const outputType = node?.outputs?.[outputIndex]?.type || "";
 			const type = normalizeTemplateSocketType(
 				field?.socket_type
@@ -776,7 +804,7 @@ function findSetterByName(graph, name) {
 	}
 	for (const entry of collectTemplateSetFields(getGraphAncestors(graph), true)) {
 		const names = isTemplateParamsNode(entry.node)
-			? [entry.field.broadcastKey || entry.field.key].filter(Boolean)
+			? (entry.field.broadcastKeys?.length ? entry.field.broadcastKeys : [entry.field.broadcastKey || entry.field.key].filter(Boolean))
 			: [entry.field.key, entry.field.label, entry.field.displayLabel].filter(Boolean);
 		if (names.includes(name)) {
 			return entry;
@@ -808,7 +836,7 @@ function getVisibleSetNames(graph) {
 	}
 	for (const entry of collectTemplateSetFields(getGraphAncestors(graph), true)) {
 		const names = isTemplateParamsNode(entry.node)
-			? [entry.field.broadcastKey || entry.field.key].filter(Boolean)
+			? (entry.field.broadcastKeys?.length ? entry.field.broadcastKeys : [entry.field.broadcastKey || entry.field.key].filter(Boolean))
 			: [entry.field.key].filter(Boolean);
 		const uniqueNames = [...new Set(names)];
 		for (const name of uniqueNames) {
@@ -837,9 +865,43 @@ function getVisibleSetOptions(graph) {
 	});
 }
 
+function resolveVariableBroadcastSource(graph, name) {
+	const entry = findSetterByName(graph, name);
+	if (!entry) {
+		return null;
+	}
+	if (entry.kind === "template") {
+		return resolveTemplatePromptSource({
+			entry,
+			field: entry.field,
+			sourceSlot: Number(entry.field?.outputIndex || 0),
+			inputName: entry.field?.inputName,
+		});
+	}
+	return resolveSetPromptSource(entry.node, entry.sourceSlot);
+}
+
+function installVariableBroadcastApi() {
+	globalThis.GJJ_VariableBroadcast = {
+		...(globalThis.GJJ_VariableBroadcast || {}),
+		getVisibleSetNames,
+		getVisibleSetOptions,
+		resolveVariableBroadcastSource,
+	};
+}
+
 function labelForSelectedName(node, name) {
 	const option = getVisibleSetOptions(node?.graph).find((item) => item.value === name);
 	return option?.label || name;
+}
+
+function displayNameForSelectedName(node, name) {
+	const label = labelForSelectedName(node, name);
+	const match = String(label || "").match(/^[^()（）]+[（(]([^()（）]+?)[\s·]+([^()（）]+?)[）)]$/);
+	if (match) {
+		return match[2].trim() || name;
+	}
+	return label || name;
 }
 
 function selectionSummary(node) {
@@ -1207,6 +1269,20 @@ function broadcastNamesMatch(sourceNames, input) {
 	return sourceNames.some((name) => targets.has(name));
 }
 
+function broadcastNameMatchesValue(sourceNames, value) {
+	if (!sourceNames?.length) return false;
+	const targets = new Set(broadcastNameCandidates(value));
+	return sourceNames.some((name) => targets.has(name));
+}
+
+function promptInputNameForBroadcast(entry, targetNode, input) {
+	const widgetName = String(input?.widget?.name || "").trim();
+	if (widgetName && widgetName !== input?.name && broadcastNameMatchesValue(entry?.names, widgetName)) {
+		return widgetName;
+	}
+	return String(input?.name || "").trim();
+}
+
 function normalizeBroadcastType(value) {
 	return normalizeTemplateSocketType(value || "*") || "*";
 }
@@ -1520,7 +1596,7 @@ function collectTemplateBroadcastEntries(entry) {
 	const fields = templateFieldsForNode(node);
 	return fields.map((field) => {
 		const strictNames = isTemplateParamsNode(node)
-			? broadcastNameCandidates(field.broadcastKey || field.key)
+			? broadcastNameCandidates(field.broadcastKeys?.length ? field.broadcastKeys : (field.broadcastKey || field.key))
 			: broadcastNameCandidates(field.key, field.label, field.displayLabel, field.inputName, broadcastNameTypeCandidate(field.type));
 		return {
 			kind: "template",
@@ -1607,7 +1683,9 @@ function patchBroadcastConsumers(promptResult, graph) {
 			if (!Array.isArray(resolved) || resolved.length !== 2 || String(resolved[0]) === String(target.id)) {
 				continue;
 			}
-			nodeInfo.inputs[input.name] = [String(resolved[0]), Number(resolved[1] || 0)];
+			const promptInputName = promptInputNameForBroadcast(entry, target, input);
+			if (!promptInputName) continue;
+			nodeInfo.inputs[promptInputName] = [String(resolved[0]), Number(resolved[1] || 0)];
 		}
 	}
 }
@@ -1813,10 +1891,10 @@ function stabilizeGetNode(node) {
 			: GET_OUTPUT_TOOLTIP;
 	}
 	const names = getSelectedNames(node);
-	node.title = compactVariableTitle("➡️", names, GET_TITLE);
+	node.title = compactVariableTitle("➡️", names.map((name) => displayNameForSelectedName(node, name)), GET_TITLE);
 	applyNodeDescription(node, GET_DESCRIPTION);
 	updateGetSelectorWidget(node);
-	setDirty(node);
+	setGetDirty(node);
 }
 
 function scheduleSetStabilize(node, ms = 32) {
@@ -1984,7 +2062,7 @@ function updateGetSelectorWidget(node) {
 	const widget = node?.__gjjGetMultiSelectorWidget;
 	if (!widget) return;
 	widget.value = selectionSummary(node);
-	setDirty(node);
+	setGetDirty(node);
 }
 
 function openGetSelectPopup(node, event) {
@@ -2017,7 +2095,7 @@ function openGetSelectPopup(node, event) {
 	head.className = "gjj-getnode-head";
 	const title = document.createElement("div");
 	title.className = "gjj-getnode-title";
-	title.textContent = "📍 选择变量";
+	title.textContent = "⚡ 选择变量";
 	const count = document.createElement("span");
 	count.className = "gjj-getnode-count";
 	const actions = document.createElement("div");
@@ -2914,7 +2992,7 @@ app.registerExtension({
 						setSelectedNames(getter, names.length ? names : getSetNames(this), false);
 						stabilizeGetNode(getter);
 						app.canvas?.selectNode?.(getter, false);
-						setDirty(getter);
+						setGetDirty(getter);
 					},
 				});
 			}
@@ -3060,6 +3138,7 @@ app.registerExtension({
 	},
 
 	setup() {
+		installVariableBroadcastApi();
 		installPromptPatch();
 		installBroadcastDrawPatch();
 		if (!window.__gjjTemplateSetVariablesGetNodeListener) {

@@ -902,6 +902,18 @@ def _split_label_and_broadcast_keys(raw_label: Any, index: int) -> tuple[str, st
     return label, broadcast_key, [broadcast_key]
 
 
+def _unique_broadcast_keys(values: Any) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        key = _normalize_text(value).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(key)
+    return result
+
+
 def _make_unique_template_key(source: Any, index: int, seen: dict[str, int]) -> str:
     key = re.sub(r"\s+", "_", _normalize_text(source).strip())
     key = _sanitize_template_key(key) or f"param_{index + 1}"
@@ -926,6 +938,7 @@ def parse_template(template_text: Any) -> list[dict[str, Any]]:
             continue
         default_text, tooltip = _split_value_and_tooltip(right)
         key = _make_unique_template_key(key_source, len(fields), seen)
+        broadcast_key_list = _unique_broadcast_keys([*broadcast_keys, key]) if broadcast_keys else []
         bool_default, bool_labels = _parse_bool_spec(default_text)
         enum_options = [] if bool_labels else _parse_enum_options(default_text, tooltip)
         value = bool_default if bool_labels else (_option_value(enum_options[0]) if enum_options else parse_value(default_text))
@@ -937,8 +950,9 @@ def parse_template(template_text: Any) -> list[dict[str, Any]]:
         field = {
             "key": key,
             "label": label,
-            "broadcast_key": broadcast_keys[0] if broadcast_keys else "",
-            "broadcast_keys": broadcast_keys,
+            "output_enabled": True,
+            "broadcast_key": broadcast_key_list[0] if broadcast_key_list else "",
+            "broadcast_keys": broadcast_key_list,
             "default": default_value,
             "value": value,
             "socket_type": socket_type,
@@ -951,6 +965,19 @@ def parse_template(template_text: Any) -> list[dict[str, Any]]:
         fields.append(field)
         if len(fields) >= MAX_OUTPUTS:
             break
+    return fields
+
+
+def _apply_schema_field_settings(fields: list[dict[str, Any]], schema_json: Any) -> list[dict[str, Any]]:
+    schema = _safe_json_loads(schema_json, [])
+    if not isinstance(schema, list):
+        return fields
+    by_key = {str(item.get("key") or ""): item for item in schema if isinstance(item, dict)}
+    by_label = {str(item.get("label") or ""): item for item in schema if isinstance(item, dict)}
+    for field in fields:
+        saved = by_key.get(str(field.get("key") or "")) or by_label.get(str(field.get("label") or ""))
+        if isinstance(saved, dict) and saved.get("output_enabled") is False:
+            field["output_enabled"] = False
     return fields
 
 
@@ -977,7 +1004,7 @@ class GJJ_TemplateParams:
 
     @classmethod
     def INPUT_TYPES(cls):
-        default_template = "帧率 (frame_rate) [INT,FLOAT]：24.0 # 每秒帧数\n时长 (duration) [INT,FLOAT]：5 # 秒数或帧数\nLora加速：true{开启加速|关闭加速} # 布尔按钮\n是否启用：[启用=enable, 禁用=disable] # 枚举按钮"
+        default_template = "帧率 (frame_rate) [INT,FLOAT]：24.0 # 每秒帧数\n时长 (duration) [INT,FLOAT]：5 # 秒数或帧数\n宽度（width）：640\n高度（height）：640\nLora加速（use_accel_lora）：true{开启加速|关闭加速} # 布尔按钮\n提示词（positive_text_input）:首尾帧\n首帧（start_image）：https://raw.githubusercontent.com/Comfy-Org/example_workflows/refs/heads/main/wan2.1_flf2v/input/start_image.png\n尾帧（end_image）：https://raw.githubusercontent.com/Comfy-Org/example_workflows/refs/heads/main/wan2.1_flf2v/input/end_image.png"
         return {
             "required": {
                 "template_text": (
@@ -1018,7 +1045,7 @@ class GJJ_TemplateParams:
         return "|".join([_normalize_text(template_text), _normalize_text(values_json), _normalize_text(schema_json)])
 
     def output_params(self, template_text: str = "", values_json: str = "{}", schema_json: str = "[]"):
-        fields = parse_template(template_text)
+        fields = _apply_schema_field_settings(parse_template(template_text), schema_json)
         value_map = values_from_json(values_json)
         outputs: list[Any] = []
         warnings: list[str] = []
