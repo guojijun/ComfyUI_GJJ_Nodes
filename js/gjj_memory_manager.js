@@ -6,6 +6,7 @@ const NODE_TYPE = "GJJ_MemoryManager";
 const ACTION_PROP = "action";
 const AUTO_CLEAN_MEMORY_PROP = "auto_clean_memory";
 const AUTO_CLEAN_GPU_PROP = "auto_clean_gpu";
+const PANEL_EXPANDED_PROP = "panel_expanded";
 
 const ACTION_REFRESH = "refresh";
 const ACTION_CLEAN_MEMORY = "clean_memory";
@@ -13,37 +14,54 @@ const ACTION_CLEAN_GPU = "clean_gpu";
 const ACTION_CLEAN_ALL = "clean_all";
 
 const MIN_NODE_WIDTH = 240;
-const MIN_NODE_HEIGHT = 382;
+const MIN_NODE_HEIGHT_EXPANDED = 382;
+const MIN_NODE_HEIGHT_COLLAPSED = 136;
 const PANEL_HEIGHT = 288;
+const PANEL_HEIGHT_COLLAPSED = 42;
 const POLL_INTERVAL_MS = 2000;
 
 function ensureStyles() {
-    if (document.getElementById("gjj-memory-manager-styles-v3")) return;
+    const oldStyle = document.getElementById("gjj-memory-manager-styles-v3");
+    if (oldStyle) oldStyle.remove();
+    if (document.getElementById("gjj-memory-manager-styles-v4")) return;
 
     const style = document.createElement("style");
-    style.id = "gjj-memory-manager-styles-v3";
+    style.id = "gjj-memory-manager-styles-v4";
     style.textContent = `
         .gjj-memory-panel {
             box-sizing: border-box;
             width: 100%;
-            height: ${PANEL_HEIGHT}px;
-            padding: 10px;
+            height: ${PANEL_HEIGHT_COLLAPSED}px;
+            padding: 7px 8px;
             border: 1px solid rgba(137, 165, 190, 0.45);
-            border-radius: 10px;
+            border-radius: 8px;
             background: rgba(13, 26, 31, 0.96);
             color: #e8f2f4;
             font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             user-select: none;
             overflow: hidden;
         }
+        .gjj-memory-panel.is-expanded {
+            height: ${PANEL_HEIGHT}px;
+            padding: 10px;
+        }
         .gjj-memory-top-row,
         .gjj-memory-action-row {
             display: grid;
-            gap: 8px;
+            gap: 6px;
         }
         .gjj-memory-top-row {
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 58px;
+            margin-bottom: 0;
+        }
+        .gjj-memory-panel.is-expanded .gjj-memory-top-row {
             margin-bottom: 10px;
+        }
+        .gjj-memory-body {
+            display: none;
+        }
+        .gjj-memory-panel.is-expanded .gjj-memory-body {
+            display: block;
         }
         .gjj-memory-action-row {
             grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -69,11 +87,11 @@ function ensureStyles() {
             transform: translateY(0px) scale(0.98);
         }
         .gjj-memory-top-btn {
-            min-height: 36px;
-            padding: 6px 8px;
+            min-height: 26px;
+            padding: 3px 5px;
             opacity: 0.46;
             background: #35454e;
-            font-size: 14px;
+            font-size: 12px;
         }
         .gjj-memory-top-btn.active.memory {
             opacity: 1;
@@ -82,6 +100,17 @@ function ensureStyles() {
         .gjj-memory-top-btn.active.gpu {
             opacity: 1;
             background: linear-gradient(135deg, #8d5cff, #7444df);
+        }
+        .gjj-memory-expand-btn {
+            min-height: 26px;
+            padding: 3px 4px;
+            background: #26343d;
+            border: 1px solid rgba(137, 165, 190, 0.36);
+            font-size: 12px;
+        }
+        .gjj-memory-expand-btn.active {
+            background: #304855;
+            border-color: rgba(122, 190, 210, 0.62);
         }
         .gjj-memory-action-btn {
             height: 86px;
@@ -222,6 +251,9 @@ function ensureProps(node) {
     if (!Object.prototype.hasOwnProperty.call(node.properties, AUTO_CLEAN_GPU_PROP)) {
         node.properties[AUTO_CLEAN_GPU_PROP] = true;
     }
+    if (!Object.prototype.hasOwnProperty.call(node.properties, PANEL_EXPANDED_PROP)) {
+        node.properties[PANEL_EXPANDED_PROP] = false;
+    }
     return node.properties;
 }
 
@@ -241,6 +273,7 @@ function syncPersistedProps(node) {
     props[ACTION_PROP] = ACTION_REFRESH;
     props[AUTO_CLEAN_MEMORY_PROP] = asBool(props[AUTO_CLEAN_MEMORY_PROP], true);
     props[AUTO_CLEAN_GPU_PROP] = asBool(props[AUTO_CLEAN_GPU_PROP], true);
+    props[PANEL_EXPANDED_PROP] = asBool(props[PANEL_EXPANDED_PROP], false);
     node.properties = props;
     return props;
 }
@@ -258,6 +291,9 @@ function restorePersistedProps(node, data) {
     if (Object.prototype.hasOwnProperty.call(saved, AUTO_CLEAN_GPU_PROP)) {
         node.properties[AUTO_CLEAN_GPU_PROP] = asBool(saved[AUTO_CLEAN_GPU_PROP], true);
     }
+    if (Object.prototype.hasOwnProperty.call(saved, PANEL_EXPANDED_PROP)) {
+        node.properties[PANEL_EXPANDED_PROP] = asBool(saved[PANEL_EXPANDED_PROP], false);
+    }
 
     return syncPersistedProps(node);
 }
@@ -274,17 +310,98 @@ function markDirty(node) {
 function enforceMinNodeSize(node) {
     if (!node || !Array.isArray(node.size)) return;
 
+    const minHeight = isPanelExpanded(node) ? MIN_NODE_HEIGHT_EXPANDED : MIN_NODE_HEIGHT_COLLAPSED;
     let changed = false;
     if (Number(node.size[0] || 0) < MIN_NODE_WIDTH) {
         node.size[0] = MIN_NODE_WIDTH;
         changed = true;
     }
-    if (Number(node.size[1] || 0) < MIN_NODE_HEIGHT) {
-        node.size[1] = MIN_NODE_HEIGHT;
+    if (Number(node.size[1] || 0) < minHeight) {
+        node.size[1] = minHeight;
         changed = true;
     }
 
     if (changed) markDirty(node);
+}
+
+function isPanelExpanded(node) {
+    return asBool(ensureProps(node)[PANEL_EXPANDED_PROP], false);
+}
+
+function getPanelHeight(node) {
+    return isPanelExpanded(node) ? PANEL_HEIGHT : PANEL_HEIGHT_COLLAPSED;
+}
+
+function getMinNodeHeight(node) {
+    return isPanelExpanded(node) ? MIN_NODE_HEIGHT_EXPANDED : MIN_NODE_HEIGHT_COLLAPSED;
+}
+
+function syncPanelExpandedState(node, expanded = isPanelExpanded(node), resizeNode = false) {
+    const props = ensureProps(node);
+    props[PANEL_EXPANDED_PROP] = !!expanded;
+
+    const panel = node.__gjjMemoryPanel;
+    const button = node.__gjjMemoryExpandButton;
+    const height = getPanelHeight(node);
+    if (panel) {
+        panel.classList.toggle("is-expanded", !!expanded);
+        panel.style.height = `${height}px`;
+        panel.style.padding = expanded ? "10px" : "7px 8px";
+    }
+    if (button) {
+        button.classList.toggle("active", !!expanded);
+        button.textContent = expanded ? "🔽" : "▶️ 展开";
+        button.title = expanded ? "隐藏资源状态和清理按钮" : "展开资源状态和清理按钮";
+        button.setAttribute("aria-expanded", expanded ? "true" : "false");
+    }
+
+    const widget = node.__gjjMemoryWidget;
+    if (widget) {
+        widget.computedHeight = height;
+        widget.getHeight = () => getPanelHeight(node);
+        widget.getMinHeight = () => getPanelHeight(node);
+        widget.getMaxHeight = () => getPanelHeight(node);
+        widget.computeSize = (width) => [Math.max(MIN_NODE_WIDTH, Number(width || node.size?.[0] || MIN_NODE_WIDTH)), getPanelHeight(node)];
+    }
+
+    if (resizeNode) {
+        resizeMemoryNode(node, expanded);
+    }
+    markDirty(node);
+}
+
+function resizeMemoryNode(node, expanded = isPanelExpanded(node)) {
+    if (!node) return;
+    const width = Math.max(MIN_NODE_WIDTH, Number(node.size?.[0] || MIN_NODE_WIDTH));
+    const targetHeight = expanded ? MIN_NODE_HEIGHT_EXPANDED : MIN_NODE_HEIGHT_COLLAPSED;
+    const apply = () => {
+        if (typeof node.setSize === "function") {
+            node.setSize([width, targetHeight]);
+        } else if (Array.isArray(node.size)) {
+            node.size[0] = width;
+            node.size[1] = targetHeight;
+        }
+        markDirty(node);
+    };
+    apply();
+    requestAnimationFrame?.(apply);
+    setTimeout(apply, 80);
+}
+
+function makeExpandButton(node) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "gjj-memory-btn gjj-memory-expand-btn";
+    btn.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        const next = !isPanelExpanded(node);
+        ensureProps(node)[PANEL_EXPANDED_PROP] = next;
+        syncPanelExpandedState(node, next, true);
+    });
+    syncPanelExpandedState(node, isPanelExpanded(node), false);
+    return btn;
 }
 
 async function fetchJson(url, options = {}) {
@@ -459,26 +576,32 @@ function createPanel(node) {
     topRow.className = "gjj-memory-top-row";
     topRow.appendChild(makeTopToggleButton(node, "内存", AUTO_CLEAN_MEMORY_PROP, "🧹", "memory"));
     topRow.appendChild(makeTopToggleButton(node, "显存", AUTO_CLEAN_GPU_PROP, "🎮", "gpu"));
+    const expandButton = makeExpandButton(node);
+    topRow.appendChild(expandButton);
     panel.appendChild(topRow);
+
+    const body = document.createElement("div");
+    body.className = "gjj-memory-body";
+    panel.appendChild(body);
 
     const title = document.createElement("div");
     title.className = "gjj-memory-section-title";
     title.innerHTML = `<span class="gjj-memory-updated">最后更新: --:--:--</span>`;
-    panel.appendChild(title);
+    body.appendChild(title);
 
     const message = document.createElement("div");
     message.className = "gjj-memory-message";
     setStatusMessage(message, "正在获取资源状态...");
-    panel.appendChild(message);
+    body.appendChild(message);
 
     const stats = document.createElement("div");
     stats.className = "gjj-memory-stats";
     stats.innerHTML = renderStatsHtml({});
-    panel.appendChild(stats);
+    body.appendChild(stats);
 
     const sep = document.createElement("div");
     sep.className = "gjj-memory-sep";
-    panel.appendChild(sep);
+    body.appendChild(sep);
 
     const actionRow = document.createElement("div");
     actionRow.className = "gjj-memory-action-row";
@@ -486,12 +609,15 @@ function createPanel(node) {
     actionRow.appendChild(makeActionButton(node, "强清内存", ACTION_CLEAN_MEMORY, "🧹", "gjj-memory-action-ram", message));
     actionRow.appendChild(makeActionButton(node, "强清显存", ACTION_CLEAN_GPU, "🎮", "gjj-memory-action-gpu", message));
     actionRow.appendChild(makeActionButton(node, "强力清理", ACTION_CLEAN_ALL, "🧨", "gjj-memory-action-all", message));
-    panel.appendChild(actionRow);
+    body.appendChild(actionRow);
 
     node.__gjjMemoryPanel = panel;
+    node.__gjjMemoryBody = body;
+    node.__gjjMemoryExpandButton = expandButton;
     node.__gjjMemoryMessage = message;
     node.__gjjMemoryStats = stats;
     node.__gjjMemoryUpdated = title.querySelector(".gjj-memory-updated");
+    syncPanelExpandedState(node, isPanelExpanded(node), false);
 
     return panel;
 }
@@ -522,18 +648,24 @@ function startPolling(node) {
 
 function installPanel(node) {
     if (!isTargetNode(node)) return;
-    if (node.__gjjMemoryPanelInstalled) return;
+    if (node.__gjjMemoryPanelInstalled) {
+        syncPanelExpandedState(node, isPanelExpanded(node), true);
+        return;
+    }
     node.__gjjMemoryPanelInstalled = true;
 
     const panel = createPanel(node);
 
     if (typeof node.addDOMWidget === "function") {
-        node.addDOMWidget("gjj_memory_manager_panel", "div", panel, {
+        const widget = node.addDOMWidget("gjj_memory_manager_panel", "div", panel, {
             serialize: false,
             hideOnZoom: false,
-            getMinHeight: () => PANEL_HEIGHT,
-            getMaxHeight: () => PANEL_HEIGHT,
+            getHeight: () => getPanelHeight(node),
+            getMinHeight: () => getPanelHeight(node),
+            getMaxHeight: () => getPanelHeight(node),
         });
+        node.__gjjMemoryWidget = widget;
+        syncPanelExpandedState(node, isPanelExpanded(node), true);
     } else if (typeof node.addWidget === "function") {
         node.addWidget("text", "GJJ 内存显存管理", "", () => {}, { serialize: false });
     }
@@ -595,7 +727,13 @@ app.registerExtension({
         nodeType.prototype.onConfigure = function (...args) {
             const result = onConfigure?.apply(this, args);
             restorePersistedProps(this, args[0]);
-            requestAnimationFrame(() => installPanel(this));
+            const applyRestoredState = () => {
+                syncPanelExpandedState(this, isPanelExpanded(this), true);
+                installPanel(this);
+            };
+            applyRestoredState();
+            requestAnimationFrame(applyRestoredState);
+            setTimeout(applyRestoredState, 120);
             return result;
         };
 
@@ -608,6 +746,7 @@ app.registerExtension({
                 serializedNode.properties[ACTION_PROP] = ACTION_REFRESH;
                 serializedNode.properties[AUTO_CLEAN_MEMORY_PROP] = !!props[AUTO_CLEAN_MEMORY_PROP];
                 serializedNode.properties[AUTO_CLEAN_GPU_PROP] = !!props[AUTO_CLEAN_GPU_PROP];
+                serializedNode.properties[PANEL_EXPANDED_PROP] = !!props[PANEL_EXPANDED_PROP];
             }
             return result;
         };

@@ -36,6 +36,18 @@ def _normalize_text(value: str | None) -> str:
     return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
 
 
+def _with_pth_extension(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return text
+    parts = text.replace("\\", "/").split("/")
+    base = parts[-1]
+    if "." not in base:
+        parts[-1] = f"{base}.pth"
+        return "/".join(parts)
+    return text
+
+
 def _candidate_model_dirs() -> list[Path]:
     models_dir = Path(folder_paths.models_dir)
     candidates = [
@@ -94,7 +106,7 @@ def list_rife_models() -> list[str]:
 def resolve_rife_model_path(preferred: str) -> tuple[str, str]:
     ensure_rife_model_paths()
     available = list_rife_models()
-    preferred = str(preferred or "").strip() or DEFAULT_CKPT
+    preferred = _with_pth_extension(preferred) or DEFAULT_CKPT
     chosen = ""
 
     if preferred in available:

@@ -781,6 +781,13 @@ function setupNativeParamWidget(node, def) {
   widget.options.display_name = def.label;
   widget.options.tooltip = `${def.label}：可手填；需要外接时使用顶部“外接参数1/外接参数2”。`;
   widget.callback = (value) => {
+    if (isParamExternallyControlled(node, def)) {
+      const currentCfg = readConfig(node);
+      const current = currentCfg[def.cfgKey] ?? def.defaultValue;
+      widget.value = def.type === "STRING" ? String(current ?? "") : Number(current);
+      redraw(node);
+      return;
+    }
     const next = def.type === "STRING" ? String(value ?? "") : Number(value);
     writeConfig(node, { [def.cfgKey]: next });
     if (def.name === "aspect_ratio") buildPanel(node);
@@ -793,6 +800,34 @@ function setupNativeParamWidget(node, def) {
     widget.value = Number(cfg[def.cfgKey]);
   }
   return widget;
+}
+
+function applyExternalControlledWidgetState(node, widget, def, connectionMap = null) {
+  if (!widget || !def) return;
+  const status = (connectionMap || getExternalParamConnectionMap(node)).get(def.name);
+  const controlled = !!status;
+  const baseTooltip = `${def.label}：可手填；需要外接时使用顶部“外接参数1/外接参数2”。`;
+  const externalLabel = status?.label || "外接参数";
+  const displayLabel = controlled ? `${def.label} 🔌外接` : def.label;
+  widget.__gjjMfExternalControlled = controlled;
+  widget.disabled = controlled;
+  widget.label = displayLabel;
+  widget.localized_name = displayLabel;
+  widget.options ||= {};
+  widget.options.disabled = controlled;
+  widget.options.readonly = controlled;
+  widget.options.display_name = displayLabel;
+  widget.options.tooltip = controlled
+    ? `${def.label}：已由顶部「${externalLabel}」外接覆盖，断开连接后可在面板编辑。`
+    : baseTooltip;
+  if (widget.inputEl) {
+    widget.inputEl.disabled = controlled;
+    widget.inputEl.title = widget.options.tooltip;
+    widget.inputEl.style.opacity = controlled ? "0.55" : "";
+  }
+  if (widget.element?.style) {
+    widget.element.style.opacity = controlled ? "0.58" : "";
+  }
 }
 
 function isParamDefActive(def, cfg) {
@@ -813,10 +848,77 @@ function cleanParamLabel(label) {
     .trim();
 }
 
-function externalParamMappingText(cfg) {
+function getExternalParamTargets(cfg) {
+  return getActiveParamDefs(cfg).slice(0, EXTERNAL_PARAM_INPUTS.length);
+}
+
+function getExternalParamLabel(def, targetDef = null) {
+  const targetLabel = cleanParamLabel(targetDef?.label);
+  return targetLabel ? `🔌 ${targetLabel}` : def.label;
+}
+
+function getExternalParamType(def, targetDef = null) {
+  return targetDef?.type || def.type;
+}
+
+function getExternalParamTooltip(def, targetDef = null) {
+  const index = EXTERNAL_PARAM_INPUTS.findIndex((item) => item.name === def?.name) + 1;
+  const targetLabel = cleanParamLabel(targetDef?.label);
+  if (!targetLabel) return def.title;
+  const targetType = getExternalParamType(def, targetDef);
+  return `固定外接参数 ${index || ""}：连接 ${targetType} 后覆盖面板「${targetLabel}」。当前模式变化时会自动切换映射。`;
+}
+
+function findExternalParamInput(node, def) {
+  if (!Array.isArray(node?.inputs) || !def) return null;
+  return node.inputs.find((input) => getExternalParamDefFromInput(input)?.name === def.name) || null;
+}
+
+function getExternalParamInputStatus(node, def) {
+  const input = findExternalParamInput(node, def);
+  if (!input) return null;
+  const index = node.inputs.indexOf(input);
+  const connected = inputHasRealLink(input, node, index);
+  return {
+    input,
+    index,
+    connected,
+    label: input.label || input.localized_name || input.display_name || def.label,
+  };
+}
+
+function getExternalParamConnectionMap(node) {
+  const cfg = readConfig(node);
+  const targets = getExternalParamTargets(cfg);
+  const map = new Map();
+  for (let index = 0; index < EXTERNAL_PARAM_INPUTS.length; index++) {
+    const externalDef = EXTERNAL_PARAM_INPUTS[index];
+    const targetDef = targets[index];
+    if (!targetDef) continue;
+    const status = getExternalParamInputStatus(node, externalDef);
+    if (!status?.connected) continue;
+    map.set(targetDef.name, {
+      externalDef,
+      targetDef,
+      input: status.input,
+      label: status.label,
+    });
+  }
+  return map;
+}
+
+function isParamExternallyControlled(node, def) {
+  return !!getExternalParamConnectionMap(node).get(def?.name);
+}
+
+function externalParamMappingText(cfg, node = null) {
   const defs = getActiveParamDefs(cfg).slice(0, 2);
   if (!defs.length) return "外接：当前模式无需外接参数";
-  const parts = defs.map((def, index) => `参数${index + 1}→${cleanParamLabel(def.label) || def.cfgKey || def.name}`);
+  const parts = defs.map((def, index) => {
+    const status = node ? getExternalParamInputStatus(node, EXTERNAL_PARAM_INPUTS[index]) : null;
+    const suffix = status?.connected ? "（已外接）" : "";
+    return `参数${index + 1}${suffix}→${cleanParamLabel(def.label) || def.cfgKey || def.name}`;
+  });
   return `外接：${parts.join(" / ")}`;
 }
 
@@ -834,15 +936,25 @@ function getExternalParamDefFromInput(input) {
   }) || null;
 }
 
-function applyExternalParamInput(input, def) {
-  if (!input || !def) return;
+function applyExternalParamInput(input, def, targetDef = null) {
+  if (!input || !def) return false;
+  const tooltip = getExternalParamTooltip(def, targetDef);
+  const changed = (
+    input.name !== def.name
+    || input.type !== def.type
+    || input.tooltip !== tooltip
+    || input.__gjjMfDynamicLabel !== getExternalParamLabel(def, targetDef)
+    || input.__gjjMfDynamicType !== getExternalParamType(def, targetDef)
+    || !!input.widget
+  );
   input.name = def.name;
   input.type = def.type;
-  input.label = def.label;
-  input.localized_name = def.label;
-  input.display_name = def.label;
-  input.tooltip = def.title;
+  if (!input.label && !input.localized_name && !input.display_name) input.label = def.label;
+  input.tooltip = tooltip;
+  input.__gjjMfDynamicLabel = getExternalParamLabel(def, targetDef);
+  input.__gjjMfDynamicType = getExternalParamType(def, targetDef);
   if (input.widget) delete input.widget;
+  return changed;
 }
 
 function reorderFixedTopInputs(node) {
@@ -901,8 +1013,10 @@ function removeNativeParamInputSlots(node) {
 function ensureExternalParamInputs(node) {
   if (!Array.isArray(node?.inputs)) return;
   removeNativeParamInputSlots(node);
+  const targets = getExternalParamTargets(readConfig(node));
   let changed = false;
-  for (const def of EXTERNAL_PARAM_INPUTS) {
+  for (let externalIndex = 0; externalIndex < EXTERNAL_PARAM_INPUTS.length; externalIndex++) {
+    const def = EXTERNAL_PARAM_INPUTS[externalIndex];
     const matches = node.inputs.filter((input) => getExternalParamDefFromInput(input)?.name === def.name);
     let picked = matches.find((input) => inputHasRealLink(input, node, node.inputs.indexOf(input))) || matches[0] || null;
     if (!picked) {
@@ -911,7 +1025,7 @@ function ensureExternalParamInputs(node) {
       changed = true;
     }
     if (!picked) continue;
-    applyExternalParamInput(picked, def);
+    if (applyExternalParamInput(picked, def, targets[externalIndex])) changed = true;
     for (let index = node.inputs.length - 1; index >= 0; index--) {
       const input = node.inputs[index];
       if (input === picked || getExternalParamDefFromInput(input)?.name !== def.name) continue;
@@ -1020,6 +1134,10 @@ function ensureNativeParamWidgets(node) {
   for (const def of visibleDefs) {
     const widget = widgetsByName.get(def.name);
     setWidgetVisible(widget, true);
+  }
+  const connectionMap = getExternalParamConnectionMap(node);
+  for (const def of visibleDefs) {
+    applyExternalControlledWidgetState(node, widgetsByName.get(def.name), def, connectionMap);
   }
   removeNativeParamInputSlots(node);
   ensureExternalParamInputs(node);
@@ -1666,7 +1784,7 @@ function updateDomState(node) {
     dom.settingsBtn.textContent = showSettings ? "⚙️更多设置 收起" : "⚙️更多设置";
   }
   if (dom.externalMap) {
-    const text = externalParamMappingText(cfg);
+    const text = externalParamMappingText(cfg, node);
     dom.externalMap.textContent = text;
     dom.externalMap.title = `${text}。顶部固定接口会覆盖面板内对应参数。`;
   }
@@ -2106,6 +2224,7 @@ app.registerExtension({
         saveCurrentParamLinks(this);
         ensureNativeParamWidgets(this);
         syncNativeParamInputSlots(this);
+        updateDomState(this);
         moveTailWidgetAfterParams(this);
         redraw(this);
       }, 0);

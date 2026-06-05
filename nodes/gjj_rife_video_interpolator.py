@@ -28,6 +28,7 @@ class AnyType(str):
 
 
 any_type = AnyType("*")
+MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
 
 
 def _send_status(unique_id: Any, text: str) -> None:
@@ -55,6 +56,94 @@ def _load_rife_model(model_name: str):
     return model, arch_ver
 
 
+def _component_value(value: Any, key: str) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def _float_value(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except Exception:
+        return default
+    return number if number == number else default
+
+
+def _coerce_image_frames(value: Any) -> torch.Tensor | None:
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        tensor = value
+    elif isinstance(value, dict):
+        tensor = None
+        for key in ("images", "frames", "samples"):
+            candidate = value.get(key)
+            if isinstance(candidate, torch.Tensor):
+                tensor = candidate
+                break
+    elif isinstance(value, (list, tuple)) and value and all(isinstance(item, torch.Tensor) for item in value):
+        tensor = torch.cat([item if item.ndim == 4 else item.unsqueeze(0) for item in value], dim=0)
+    else:
+        tensor = None
+        for key in ("images", "frames", "samples"):
+            candidate = getattr(value, key, None)
+            if isinstance(candidate, torch.Tensor):
+                tensor = candidate
+                break
+    if tensor is None:
+        return None
+    if tensor.ndim == 3:
+        tensor = tensor.unsqueeze(0)
+    if tensor.ndim != 4:
+        return None
+    if tensor.shape[-1] not in (1, 3, 4) and tensor.shape[1] in (1, 3, 4):
+        tensor = tensor.permute(0, 2, 3, 1)
+    if tensor.shape[-1] not in (1, 3, 4):
+        return None
+    if tensor.shape[-1] == 1:
+        tensor = tensor.repeat(1, 1, 1, 3)
+    elif tensor.shape[-1] == 4:
+        tensor = tensor[..., :3]
+    return tensor.detach().float().clamp(0.0, 1.0).contiguous()
+
+
+def _coerce_media_to_frames(value: Any) -> tuple[torch.Tensor, Any, float | None, bool]:
+    if value is None:
+        raise RuntimeError("请连接输入媒体：支持 GJJ_BATCH_IMAGE、IMAGE 或 VIDEO。")
+    if hasattr(value, "get_components"):
+        try:
+            components = value.get_components()
+        except Exception as exc:
+            raise RuntimeError(f"输入可识别为 VIDEO，但读取视频帧失败：{exc}") from exc
+        frames = _coerce_image_frames(_component_value(components, "images"))
+        if frames is None:
+            raise RuntimeError("输入 VIDEO 没有解析出有效图片帧。")
+        return (
+            frames,
+            _component_value(components, "audio"),
+            _float_value(_component_value(components, "frame_rate"), 0.0) or None,
+            True,
+        )
+
+    frames = _coerce_image_frames(value)
+    if frames is None:
+        raise RuntimeError(f"输入不是有效的 GJJ_BATCH_IMAGE / IMAGE / VIDEO：{type(value).__name__}")
+    source_audio = None
+    source_fps = None
+    is_video = False
+    if isinstance(value, dict):
+        source_audio = value.get("audio")
+        for key in ("frame_rate", "fps", "source_fps"):
+            if key in value:
+                source_fps = _float_value(value.get(key), 0.0) or None
+                is_video = True
+                break
+    return frames, source_audio, source_fps, is_video
+
+
 class GJJ_RifeVideoInterpolator:
     CATEGORY = "GJJ"
     FUNCTION = "interpolate"
@@ -70,6 +159,13 @@ class GJJ_RifeVideoInterpolator:
         default_model = DEFAULT_CKPT if DEFAULT_CKPT in model_choices else model_choices[0]
         return {
             "required": {
+                "media": (
+                    MEDIA_INPUT_TYPE,
+                    {
+                        "display_name": "输入媒体",
+                        "tooltip": "单输入口兼容 GJJ_BATCH_IMAGE、IMAGE、VIDEO。接 VIDEO 时自动读取视频帧并尽量保留音频/源帧率；接普通图片或 GJJ 批量图片时自动整理为插帧帧序列。",
+                    },
+                ),
                 "model_name": (
                     model_choices,
                     {
@@ -125,22 +221,6 @@ class GJJ_RifeVideoInterpolator:
                     },
                 ),
             },
-            "optional": {
-                "input_video": (
-                    "VIDEO",
-                    {
-                        "display_name": "输入视频",
-                        "tooltip": "可选。接入后会提取帧、插帧，并尽量保留原音轨。",
-                    },
-                ),
-                "input_frames": (
-                    "IMAGE",
-                    {
-                        "display_name": "输入帧序列",
-                        "tooltip": "可选。接入图片队列时直接对图像序列插帧。",
-                    },
-                ),
-            },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
             },
@@ -148,34 +228,22 @@ class GJJ_RifeVideoInterpolator:
 
     def interpolate(
         self,
-        model_name,
-        multiplier,
-        clear_cache_after_n_frames,
-        fast_mode,
-        ensemble,
-        scale_factor,
+        media=None,
+        model_name=None,
+        multiplier=2,
+        clear_cache_after_n_frames=10,
+        fast_mode=True,
+        ensemble=True,
+        scale_factor=1.0,
         input_video=None,
         input_frames=None,
         unique_id=None,
     ):
-        has_video = input_video is not None
-        has_frames = input_frames is not None and getattr(input_frames, "shape", None) is not None and int(input_frames.shape[0]) > 0
-        if not has_video and not has_frames:
-            raise RuntimeError("请至少连接“输入视频”或“输入帧序列”其中之一。")
-
-        source_audio = None
-        source_fps = None
-        output_mode = "image"
-        if has_video:
-            _send_status(unique_id, "1/4 获取视频元素...")
-            try:
-                components = input_video.get_components()
-                input_frames = components.images
-                source_audio = components.audio
-                source_fps = float(components.frame_rate)
-                output_mode = "video"
-            except Exception as exc:
-                raise RuntimeError(f"RIFE 视频插帧节点无法读取输入视频。\n详细错误：{exc}") from exc
+        media = media if media is not None else (input_video if input_video is not None else input_frames)
+        _send_status(unique_id, "1/4 解析输入媒体...")
+        input_frames, source_audio, source_fps, is_video_input = _coerce_media_to_frames(media)
+        if int(input_frames.shape[0]) < 2:
+            raise RuntimeError("RIFE 插帧至少需要 2 帧输入。")
 
         try:
             _send_status(unique_id, "2/4 加载 RIFE 模型...")
@@ -217,7 +285,7 @@ class GJJ_RifeVideoInterpolator:
                 pass
             soft_empty_cache()
 
-        if output_mode == "video":
+        if is_video_input:
             _send_status(unique_id, "4/4 创建视频...")
             new_fps = (source_fps or 24.0) * max(1, int(multiplier))
             try:
@@ -245,4 +313,4 @@ class GJJ_RifeVideoInterpolator:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_RifeVideoInterpolator}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🎞️ RIFE视频插帧器"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🎞️ 视频插帧（RIFE）"}

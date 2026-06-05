@@ -847,7 +847,9 @@ class GJJ_MultiImageLoader:
             try:
                 image_tensor = load_image_tensor(resolve_input_image_path(entry))
             except Exception as error:
-                label = f"{str(entry.get('subfolder') or '').strip().replace('\\', '/')}/{str(entry.get('filename') or '').strip()}".strip("/")
+                subfolder_label = str(entry.get("subfolder") or "").strip().replace("\\", "/")
+                filename_label = str(entry.get("filename") or "").strip()
+                label = f"{subfolder_label}/{filename_label}".strip("/")
                 skipped_errors.append(f"{label}: {error}")
                 try:
                     print(f"[GJJ_MultiImageLoader] 跳过无法读取的图片：{label} ({error})")

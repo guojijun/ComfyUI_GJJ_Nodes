@@ -2,6 +2,14 @@ import { app } from "/scripts/app.js";
 
 const NODE_NAME = "GJJ_ModelOptimizer";
 const PROP_NAME = "gjj_model_optimizer_config";
+const INPUT_SLOTS = [
+    { name: "模型", label: "高模", type: "MODEL", tooltip: "需要应用当前优化设置的主模型 MODEL。" },
+    { name: "低模", label: "低模", type: "MODEL", tooltip: "可选。需要应用同一优化设置的第二路模型 MODEL；未连接时低模输出为空。" },
+];
+const OUTPUT_SLOTS = [
+    { name: "高模", type: "MODEL", tooltip: "应用当前优化设置后的高模 MODEL。" },
+    { name: "低模", type: "MODEL", tooltip: "应用当前优化设置后的低模 MODEL；未连接低模输入时输出为空。" },
+];
 
 const DEFAULT_CONFIG = {
     enable_torch_compile: false,
@@ -35,10 +43,22 @@ const COMPILE_MODES = [
 ];
 
 const TABS = [
-    { id: "torch", label: "Torch编译", tip: "独立开关：启用或关闭 Torch 编译参数。" },
-    { id: "sage", label: "Sage注意力", tip: "独立开关：启用或关闭 SageAttention 参数。" },
-    { id: "fp16", label: "FP16累积", tip: "独立开关：启用或关闭 FP16 累积。" },
+    { id: "torch", label: "Torch编译", tip: "独立开关：启用或关闭 torch.compile。首次运行会编译，可能很慢；形状稳定、重复推理时更可能加速。" },
+    { id: "sage", label: "Sage注意力", tip: "独立开关：启用 SageAttention 注意力覆盖。需要安装 sageattention 或 sageattn3；模式要匹配显卡、CUDA 和包版本。" },
+    { id: "fp16", label: "FP16累积", tip: "独立开关：运行前设置 torch.backends.cuda.matmul.allow_fp16_accumulation。需要较新的 PyTorch；可改善部分 FP16 矩阵乘累计精度/性能路径。" },
 ];
+
+const TOOLTIP = {
+    compile_backend: "TorchCompile 编译后端。选项说明：inductor=PyTorch 默认通用编译器，兼容性最好；cudagraphs=CUDA Graph 后端，适合固定形状、重复推理，动态尺寸或频繁换分辨率时可能不稳。",
+    compile_fullgraph: "完整图编译。开启=要求整段图尽量完整编译，潜在性能更高但更容易因图外操作失败；关闭=允许图断开，通常更稳。",
+    compile_mode: "TorchCompile 编译模式。选项说明：default=默认平衡；reduce-overhead=减少运行开销，适合重复执行；max-autotune=更激进调优，首次编译更慢且更占资源；max-autotune-no-cudagraphs=激进调优但不启用 CUDA Graph，适合 CUDA Graph 不稳定时尝试。",
+    compile_dynamic: "动态形状。选项说明：自动=交给 PyTorch 判断；启用=允许动态尺寸/批次，适合分辨率变化多；关闭=按静态形状优化，适合固定尺寸，通常更快更稳。",
+    compile_transformer_blocks_only: "仅编译 Transformer 块。开启=只编译 double_blocks/single_blocks/layers/transformer_blocks 等主要模块，通常更稳且首次编译更短；关闭=尝试编译整个 diffusion_model，可能收益更大但失败概率更高。",
+    dynamo_cache_size_limit: "Torch Dynamo 缓存上限，范围 0-1024。数值越大可缓存更多编译图，适合多尺寸/多分支工作流，但会占更多内存；0 表示几乎不保留额外缓存，默认 64。",
+    sage_attention: "SageAttention 模式。选项说明：自动=使用 sageattention.sageattn；int8_fp16_cuda=CUDA int8 QK + fp16 PV；int8_fp16_triton=Triton int8 QK + fp16 PV；int8_fp8_cuda=CUDA int8 QK + fp8 PV 累积；int8_fp8_cuda_plus=fp8 后端 plus 累积策略；sageattn3=使用 sageattn3_blackwell；sageattn3分块均值=sageattn3 per_block_mean 模式。需要对应运行库与显卡支持。",
+    allow_sage_compile: "允许 SageAttention 参与 TorchCompile。关闭=对 Sage 函数加 torch.compiler.disable，更稳；开启=允许一起编译，可能更快，但需要 sageattention/sageattn3 与当前 PyTorch 版本兼容。",
+    fp16_info: "FP16 累积已启用。执行时会设置 torch.backends.cuda.matmul.allow_fp16_accumulation=True；如果当前 PyTorch 不支持，会在后端给出警告。",
+};
 
 function ensureStyles() {
     if (document.getElementById("gjj-model-optimizer-style-v15")) return;
@@ -217,6 +237,61 @@ function refresh(node) {
     node.setDirtyCanvas?.(true, true);
     node.graph?.setDirtyCanvas?.(true, true);
     app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function applyInputSlot(input, def) {
+    if (!input || !def) return;
+    input.name = def.name;
+    input.type = def.type;
+    input.label = def.label;
+    input.localized_name = def.label;
+    input.display_name = def.label;
+    input.tooltip = def.tooltip;
+}
+
+function applyOutputSlot(output, def) {
+    if (!output || !def) return;
+    output.name = def.name;
+    output.type = def.type;
+    output.label = def.name;
+    output.localized_name = def.name;
+    output.display_name = def.name;
+    output.tooltip = def.tooltip;
+}
+
+function stabilizeIO(node) {
+    if (!node) return;
+    if (!Array.isArray(node.inputs)) node.inputs = [];
+    if (!Array.isArray(node.outputs)) node.outputs = [];
+
+    let highInput = node.inputs.find((input) => String(input?.name || "") === "模型")
+        || node.inputs.find((input) => String(input?.name || input?.label || input?.localized_name || "") === "高模")
+        || node.inputs[0];
+    if (!highInput) {
+        node.addInput?.(INPUT_SLOTS[0].name, INPUT_SLOTS[0].type);
+        highInput = node.inputs[node.inputs.length - 1];
+    }
+    applyInputSlot(highInput, INPUT_SLOTS[0]);
+
+    let lowInput = node.inputs.find((input) => String(input?.name || input?.label || input?.localized_name || "") === "低模");
+    if (!lowInput) {
+        node.addInput?.(INPUT_SLOTS[1].name, INPUT_SLOTS[1].type);
+        lowInput = node.inputs[node.inputs.length - 1];
+    }
+    applyInputSlot(lowInput, INPUT_SLOTS[1]);
+
+    const orderedInputs = [
+        highInput,
+        lowInput,
+        ...node.inputs.filter((input) => input !== highInput && input !== lowInput),
+    ];
+    node.inputs = orderedInputs;
+
+    for (let index = 0; index < OUTPUT_SLOTS.length; index++) {
+        if (!node.outputs[index]) node.addOutput?.(OUTPUT_SLOTS[index].name, OUTPUT_SLOTS[index].type);
+        applyOutputSlot(node.outputs[index], OUTPUT_SLOTS[index]);
+    }
+    refresh(node);
 }
 
 function getLocalPos(node, pos, event) {
@@ -481,23 +556,23 @@ function rebuild(node) {
         const cfg = getConfig(node);
 
         if (cfg.enable_torch_compile) {
-            addCombo(node, "编译后端", "compile_backend", ["inductor", "cudagraphs"], "TorchCompile 编译后端：inductor 通用；cudagraphs 适合 CUDA 场景。");
-            addBool(node, "完整图编译", "compile_fullgraph", "启用完整图编译。遇到图外操作时可能报错，不稳定时建议关闭。");
-            addCombo(node, "编译模式", "compile_mode", COMPILE_MODES, "编译优化模式：default 平衡；max-autotune 更激进；reduce-overhead 减少运行开销。");
-            addCombo(node, "动态形状", "compile_dynamic", ["自动", "启用", "关闭"], "动态形状模式：自动检测、强制启用或关闭。");
-            addBool(node, "仅编译Transformer块", "compile_transformer_blocks_only", "只编译 Transformer 块，通常更快、更稳，也能减少首次编译时间。");
-            addInt(node, "Dynamo缓存上限", "dynamo_cache_size_limit", "Torch Dynamo 缓存大小上限，数值越大越占内存。默认 64。");
+            addCombo(node, "编译后端", "compile_backend", ["inductor", "cudagraphs"], TOOLTIP.compile_backend);
+            addBool(node, "完整图编译", "compile_fullgraph", TOOLTIP.compile_fullgraph);
+            addCombo(node, "编译模式", "compile_mode", COMPILE_MODES, TOOLTIP.compile_mode);
+            addCombo(node, "动态形状", "compile_dynamic", ["自动", "启用", "关闭"], TOOLTIP.compile_dynamic);
+            addBool(node, "仅编译Transformer块", "compile_transformer_blocks_only", TOOLTIP.compile_transformer_blocks_only);
+            addInt(node, "Dynamo缓存上限", "dynamo_cache_size_limit", TOOLTIP.dynamo_cache_size_limit);
         }
 
         if (getConfig(node).sage_attention !== "关闭") {
-            addCombo(node, "SageAttention模式", "sage_attention", SAGE_MODES.filter((v) => v !== "关闭"), "SageAttention 加速模式，需要安装 sageattention 库。");
-            addBool(node, "允许Sage参与编译", "allow_sage_compile", "允许 SageAttention 参与 TorchCompile。通常需要 sageattention 2.2.0 或更高版本。");
+            addCombo(node, "SageAttention模式", "sage_attention", SAGE_MODES.filter((v) => v !== "关闭"), TOOLTIP.sage_attention);
+            addBool(node, "允许Sage参与编译", "allow_sage_compile", TOOLTIP.allow_sage_compile);
         }
 
         if (getConfig(node).enable_fp16_accumulation) {
             const onlyFp16 = getConfig(node).enable_fp16_accumulation && !getConfig(node).enable_torch_compile && getConfig(node).sage_attention === "关闭";
             if (onlyFp16) {
-                addInfo(node, "FP16累积", "已启用", "顶部 FP16 累积已选中，执行时会启用 PyTorch FP16 累积。这个功能没有额外参数。");
+                addInfo(node, "FP16累积", "已启用", TOOLTIP.fp16_info);
             }
         }
     } finally {
@@ -515,6 +590,7 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             const r = originalOnNodeCreated?.apply(this, arguments);
             this.properties = this.properties || {};
+            stabilizeIO(this);
             getConfig(this);
             setTimeout(() => rebuild(this), 0);
             return r;
@@ -524,8 +600,12 @@ app.registerExtension({
         nodeType.prototype.onConfigure = function () {
             const r = originalOnConfigure?.apply(this, arguments);
             this.properties = this.properties || {};
+            stabilizeIO(this);
             getConfig(this);
-            setTimeout(() => rebuild(this), 0);
+            setTimeout(() => {
+                stabilizeIO(this);
+                rebuild(this);
+            }, 0);
             return r;
         };
 

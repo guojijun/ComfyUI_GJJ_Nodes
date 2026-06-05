@@ -4,9 +4,88 @@ import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set(["GJJ_RifeVideoInterpolator"]);
 const STATUS_WIDGET_NAME = "gjj_rife_vfi_status";
+const MEDIA_INPUT = {
+	name: "media",
+	type: "GJJ_BATCH_IMAGE,IMAGE,VIDEO",
+	label: "输入媒体",
+	tooltip: "单输入口兼容 GJJ_BATCH_IMAGE、IMAGE、VIDEO。接 VIDEO 时自动读取视频帧并尽量保留音频/源帧率；接普通图片或 GJJ 批量图片时自动整理为插帧帧序列。",
+};
 
 function refreshNode(node) {
 	GJJ_Utils.refreshNode(node);
+}
+
+function getLink(node, linkId) {
+	const links = node?.graph?.links || app.graph?.links;
+	if (linkId == null || !links) return null;
+	if (Array.isArray(links)) return links.find((link) => String(Array.isArray(link) ? link[0] : link?.id) === String(linkId)) || null;
+	return links[linkId] || links[String(linkId)] || null;
+}
+
+function inputLinked(node, input) {
+	if (!input) return false;
+	const link = Array.isArray(input.link) ? input.link[0] : input.link;
+	return link != null && !!getLink(node, link);
+}
+
+function setInputSlotOnLink(link, node, slot) {
+	if (!link || !node) return;
+	if (Array.isArray(link)) {
+		link[3] = node.id;
+		link[4] = slot;
+		if (MEDIA_INPUT.type) link[5] = MEDIA_INPUT.type;
+		return;
+	}
+	link.target_id = node.id;
+	link.target_slot = slot;
+	link.type = MEDIA_INPUT.type;
+}
+
+function repairInputLinks(node) {
+	if (!Array.isArray(node?.inputs)) return;
+	for (let index = 0; index < node.inputs.length; index++) {
+		const input = node.inputs[index];
+		const linkId = Array.isArray(input?.link) ? input.link[0] : input?.link;
+		const link = getLink(node, linkId);
+		if (link) setInputSlotOnLink(link, node, index);
+	}
+}
+
+function applyMediaInput(input) {
+	if (!input) return;
+	input.name = MEDIA_INPUT.name;
+	input.type = MEDIA_INPUT.type;
+	input.label = MEDIA_INPUT.label;
+	input.localized_name = MEDIA_INPUT.label;
+	input.display_name = MEDIA_INPUT.label;
+	input.tooltip = MEDIA_INPUT.tooltip;
+}
+
+function stabilizeMediaInput(node) {
+	if (!Array.isArray(node?.inputs)) return;
+	const isMedia = (input) => {
+		const text = [input?.name, input?.label, input?.localized_name, input?.display_name].map((item) => String(item || "")).join(" ");
+		return /\bmedia\b|输入媒体|input_video|输入视频|input_frames|输入帧序列/i.test(text);
+	};
+	const candidates = node.inputs.filter(isMedia);
+	let picked = candidates.find((input) => inputLinked(node, input))
+		|| node.inputs.find((input) => String(input?.name || "") === MEDIA_INPUT.name)
+		|| candidates[0]
+		|| null;
+	if (!picked) {
+		node.addInput?.(MEDIA_INPUT.name, MEDIA_INPUT.type);
+		picked = node.inputs[node.inputs.length - 1];
+	}
+	applyMediaInput(picked);
+	for (let index = node.inputs.length - 1; index >= 0; index--) {
+		const input = node.inputs[index];
+		if (input === picked || !isMedia(input)) continue;
+		try { node.removeInput?.(index); } catch (_) { node.inputs.splice(index, 1); }
+	}
+	const others = node.inputs.filter((input) => input !== picked);
+	node.inputs = [picked, ...others];
+	repairInputLinks(node);
+	refreshNode(node);
 }
 
 function ensureStatusWidget(node) {
@@ -49,6 +128,7 @@ function patchNode(node) {
 		return;
 	}
 	node.__gjjRifeVfiPatched = true;
+	stabilizeMediaInput(node);
 	ensureStatusWidget(node);
 	setStatus(node, "等待执行");
 }
@@ -81,6 +161,7 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalOnConfigure?.apply(this, args);
 			patchNode(this);
+			setTimeout(() => stabilizeMediaInput(this), 0);
 			return result;
 		};
 	},

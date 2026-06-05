@@ -288,7 +288,10 @@ class GJJ_ModelOptimizer:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "模型": ("MODEL",),
+                "模型": ("MODEL", {"display_name": "高模", "tooltip": "主模型输入。节点会按当前面板设置对这一路 MODEL 独立 clone 后应用优化；旧工作流的内部输入名仍保留为 MODEL/模型以尽量避免断线。"}),
+            },
+            "optional": {
+                "低模": ("MODEL", {"display_name": "低模", "tooltip": "可选第二路模型输入。连接后会使用同一组优化设置独立处理；不连接时第二个输出为空，不影响高模线路。"}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -296,21 +299,62 @@ class GJJ_ModelOptimizer:
             },
         }
 
-    RETURN_TYPES = ("MODEL",)
-    RETURN_NAMES = ("模型",)
+    RETURN_TYPES = ("MODEL", "MODEL")
+    RETURN_NAMES = ("高模", "低模")
+    OUTPUT_TOOLTIPS = (
+        "应用当前优化设置后的高模 MODEL。",
+        "应用当前优化设置后的低模 MODEL；未连接低模输入时输出为空。",
+    )
     FUNCTION = "optimize"
     CATEGORY = "GJJ/模型优化"
-    DESCRIPTION = "GJJ 模型综合优化器：TorchCompile + SageAttention + FP16 累积"
+    DESCRIPTION = "GJJ 模型综合优化器：TorchCompile + SageAttention + FP16 累积。支持高模、低模双通道分别输入输出，第二路可不接。"
+    GJJ_HELP = {
+        "title": "GJJ · 🚀 模型综合优化器",
+        "description": "把 TorchCompile、SageAttention、FP16 累积三个模型优化开关合并到一个双路 MODEL 节点里；高模和低模各自 clone、各走各线。",
+        "requirements": [
+            "TorchCompile 需要当前 PyTorch 支持 torch.compile；首次运行会编译，可能明显变慢，之后才体现加速。",
+            "SageAttention 需要安装 sageattention 或 sageattn3，并且所选模式要匹配显卡、CUDA 与包版本。",
+            "FP16 累积需要 PyTorch 支持 torch.backends.cuda.matmul.allow_fp16_accumulation，通常需要较新的 PyTorch。",
+            "低模输入可不接；不接时低模输出为空。高模输入必须接入 MODEL。",
+        ],
+        "usage": [
+            "顶部三个按钮是独立开关：Torch编译、Sage注意力、FP16累积，可以单独启用也可以组合启用。",
+            "编译后端：inductor 为通用默认；cudagraphs 适合形状稳定的 CUDA 推理，但动态尺寸/频繁换形状时可能不稳。",
+            "编译模式：default 平衡；reduce-overhead 降低运行开销；max-autotune 更激进且首次编译更慢；max-autotune-no-cudagraphs 是激进调优但避开 CUDA Graph。",
+            "动态形状：自动让 PyTorch 判断；启用适合尺寸变化较多；关闭适合固定尺寸并追求稳定性能。",
+            "仅编译 Transformer 块通常比整模型编译更稳、更省首次编译时间；关闭后会尝试编译整个 diffusion_model。",
+            "SageAttention 模式：自动使用 sageattention.sageattn；int8_fp16_cuda/triton 使用对应 int8+fp16 后端；int8_fp8_cuda/plus 使用 fp8 后端；sageattn3/sageattn3分块均值面向 sageattn3 运行库。",
+            "Dynamo 缓存上限越大越能缓存更多编译图，但会占用更多内存；默认 64。",
+        ],
+        "install": [
+            "SageAttention 缺失时可按本机 ComfyUI Python 环境安装，例如：",
+            f"\"{sys.executable}\" -m pip install sageattention",
+            "sageattn3 需要按显卡和 CUDA 版本选择对应包，请优先使用该项目官方安装说明。",
+        ],
+    }
 
     def optimize(
         self,
+        高模=None,
+        低模=None,
         模型=None,
         model=None,
+        high_model=None,
+        low_model=None,
         unique_id=None,
         extra_pnginfo=None,
         **kwargs,
     ):
         config = _read_model_optimizer_config(unique_id, extra_pnginfo)
+        high_in = 高模 if 高模 is not None else high_model
+        if high_in is None:
+            high_in = 模型 if 模型 is not None else model
+        low_in = 低模 if 低模 is not None else low_model
+        high_out = self._optimize_one(high_in, config, unique_id, "高模")
+        low_out = self._optimize_one(low_in, config, unique_id, "低模") if low_in is not None else None
+        return (high_out, low_out)
+
+    def _optimize_one(self, model, config, unique_id=None, channel_name="模型"):
         enable_torch_compile = config["enable_torch_compile"]
         compile_backend = config["compile_backend"]
         compile_fullgraph = config["compile_fullgraph"]
@@ -322,12 +366,11 @@ class GJJ_ModelOptimizer:
         enable_fp16_accumulation = config["enable_fp16_accumulation"]
         dynamo_cache_size_limit = config["dynamo_cache_size_limit"]
 
-        model = 模型 if 模型 is not None else model
         try:
             if torch is None:
                 raise RuntimeError("PyTorch 未安装")
             if model is None:
-                raise RuntimeError("未接入模型")
+                raise RuntimeError(f"未接入{channel_name}")
 
             model_clone = model.clone()
 
@@ -357,12 +400,12 @@ class GJJ_ModelOptimizer:
                         model_clone.model_options["transformer_options"][
                             "optimized_attention_override"
                         ] = attention_override_sage
-                        logging.info(f"已应用 SageAttention: {sage_attention}")
+                        logging.info(f"{channel_name}已应用 SageAttention: {sage_attention}")
                 except Exception as e:
-                    logging.warning(f"SageAttention 应用失败: {e}")
+                    logging.warning(f"{channel_name} SageAttention 应用失败: {e}")
                     send_error_to_frontend(
                         unique_id,
-                        "SageAttention 加载失败",
+                        f"{channel_name} SageAttention 加载失败",
                         "请安装 sageattention 库",
                         f'"{sys.executable}" -m pip install sageattention',
                     )
@@ -379,14 +422,14 @@ class GJJ_ModelOptimizer:
                         dynamo_cache_size_limit,
                     )
                 except Exception as e:
-                    logging.warning(f"TorchCompile 应用失败: {e}")
+                    logging.warning(f"{channel_name} TorchCompile 应用失败: {e}")
 
-            return (model_clone,)
+            return model_clone
         except Exception as e:
-            logging.error(f"模型优化失败: {e}")
+            logging.error(f"{channel_name}优化失败: {e}")
             traceback.print_exc()
-            send_error_to_frontend(unique_id, "优化失败", str(e))
-            return (model,)
+            send_error_to_frontend(unique_id, f"{channel_name}优化失败", str(e))
+            return model
 
     def apply_torch_compile(
         self,
