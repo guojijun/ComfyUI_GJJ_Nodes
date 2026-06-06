@@ -2633,7 +2633,11 @@ import { api } from "/scripts/api.js";
 			mark.textContent = item.workflow ? "打开" : "无元数据";
 
 			card.append(image, label, mark);
-			card.addEventListener("click", async () => loadWorkflowFromPreview(item));
+			card.addEventListener("click", () => {
+				card.disabled = true;
+				mark.textContent = "打开中...";
+				loadWorkflowFromPreview(item);
+			});
 			grid.appendChild(card);
 		}
 	}
@@ -2645,9 +2649,9 @@ import { api } from "/scripts/api.js";
 		}
 		try {
 			const title = previewItemDisplayTitle(item);
+			closePreviewOverlay();
 			await app.loadGraphData(workflowWithDisplayTitle(item.workflow, title));
 			applyLoadedWorkflowTitle(title);
-			closePreviewOverlay();
 			app?.canvas?.setDirty?.(true, true);
 			app?.graph?.setDirtyCanvas?.(true, true);
 		} catch (error) {
