@@ -54,6 +54,17 @@ const PERSISTED_WIDGETS = new Set([
 	"watermark_y",
 	"watermark_width",
 ]);
+const TEXT_FIT_SOURCE_WIDGETS = new Set([
+	"texts",
+	"direction",
+	"spacing",
+	"font_path",
+	"color_hex",
+	"stroke_color_hex",
+	"use_stroke",
+	"stroke_width",
+	"text_opacity",
+]);
 
 function widget(node, name) {
 	return node?.widgets?.find((item) => item?.name === name) || null;
@@ -295,6 +306,14 @@ function setWidgetValue(node, name, value) {
 	const item = widget(node, name);
 	if (!item) return;
 	item.value = value;
+	if (TEXT_FIT_SOURCE_WIDGETS.has(name)) {
+		node.__gjjTextOverlayTextFitSignature = "";
+		node.__gjjTextOverlayManualTextResize = false;
+		if (node.properties) {
+			delete node.properties.gjj_text_overlay_text_fit_signature;
+			delete node.properties.gjj_text_overlay_manual_text_resize;
+		}
+	}
 	if (PERSISTED_WIDGETS.has(name)) {
 		node.properties ||= {};
 		node.properties[name] = value;
@@ -717,6 +736,9 @@ function makePanel(node) {
 			const ratio = Math.max(0.1, (resizeStart.width + signedDelta) / resizeStart.width);
 			if (resizingKind === "text") {
 				const nextSize = Math.max(1, Math.min(512, Math.round(resizeStart.fontSize * ratio)));
+				node.__gjjTextOverlayManualTextResize = true;
+				node.properties ||= {};
+				node.properties.gjj_text_overlay_manual_text_resize = true;
 				setWidgetValue(node, "font_size", nextSize);
 			} else {
 				const nextScale = Math.max(0.1, Math.min(10, Number((resizeStart.watermarkWidth * ratio).toFixed(4))));
@@ -917,6 +939,74 @@ function drawTextPreviewImage(node) {
 	return { src: canvas.toDataURL("image/png"), width: canvas.width, height: canvas.height };
 }
 
+function textFitSignature(node) {
+	const bg = node.__gjjTextOverlayBgSize || {};
+	return JSON.stringify([
+		stringValue(node, "texts", "").replace(/\s*\r?\n\s*/g, " ").trim(),
+		stringValue(node, "direction", "横向"),
+		stringValue(node, "font_path", ""),
+		numberValue(node, "spacing", 0),
+		stringValue(node, "color_hex", "#FFD700"),
+		stringValue(node, "stroke_color_hex", "#000000"),
+		boolValue(node, "use_stroke", true),
+		numberValue(node, "stroke_width", 2),
+		numberValue(node, "text_opacity", 1),
+		Math.round(Number(bg.width || 0)),
+		Math.round(Number(bg.height || 0)),
+	]);
+}
+
+function fitInitialTextToStage(node, textImage) {
+	const ui = node.__gjjTextOverlayUI;
+	if (!ui || node.__gjjTextOverlayAutoFitting) return textImage;
+	if (node.__gjjTextOverlayManualTextResize || node.properties?.gjj_text_overlay_manual_text_resize) return textImage;
+	const stageWidth = Math.max(1, Math.round(ui.stage.clientWidth || 0));
+	const stageHeight = Math.max(1, Math.round(ui.stage.clientHeight || 0));
+	if (stageWidth <= 1 || stageHeight <= 1 || !textImage?.width || !textImage?.height) return textImage;
+
+	const signature = textFitSignature(node);
+	const oldSignature = node.__gjjTextOverlayTextFitSignature || node.properties?.gjj_text_overlay_text_fit_signature || "";
+
+	const maxWidth = Math.max(1, stageWidth * 0.92);
+	const maxHeight = Math.max(1, stageHeight * 0.92);
+	if (oldSignature === signature && textImage.width <= maxWidth && textImage.height <= maxHeight) return textImage;
+	const fitScale = Math.min(1, maxWidth / textImage.width, maxHeight / textImage.height);
+	node.properties ||= {};
+	node.__gjjTextOverlayTextFitSignature = signature;
+	node.__gjjTextOverlayTextFitScale = Number(fitScale.toFixed(4));
+	node.properties.gjj_text_overlay_text_fit_signature = signature;
+	node.properties.gjj_text_overlay_text_fit_scale = node.__gjjTextOverlayTextFitScale;
+
+	if (fitScale < 0.999) {
+		const fontSize = Math.max(1, numberValue(node, "font_size", 48));
+		const nextSize = Math.max(1, Math.min(512, Math.floor(fontSize * fitScale)));
+		if (nextSize < fontSize) {
+			try {
+				node.__gjjTextOverlayAutoFitting = true;
+				setWidgetValue(node, "font_size", nextSize);
+			} finally {
+				node.__gjjTextOverlayAutoFitting = false;
+			}
+			textImage = drawTextPreviewImage(node);
+		}
+	}
+
+	const left = positionValue(node, "text_x", "x") * stageWidth;
+	const top = positionValue(node, "text_y", "y") * stageHeight;
+	const nextLeft = Math.max(0, Math.min(left, Math.max(0, stageWidth - textImage.width)));
+	const nextTop = Math.max(0, Math.min(top, Math.max(0, stageHeight - textImage.height)));
+	if (Math.abs(nextLeft - left) > 0.5 || Math.abs(nextTop - top) > 0.5) {
+		try {
+			node.__gjjTextOverlayAutoFitting = true;
+			setWidgetValue(node, "text_x", Number((nextLeft / stageWidth).toFixed(4)));
+			setWidgetValue(node, "text_y", Number((nextTop / stageHeight).toFixed(4)));
+		} finally {
+			node.__gjjTextOverlayAutoFitting = false;
+		}
+	}
+	return textImage;
+}
+
 function refreshBackground(node, force = false) {
 	const src = getUpstreamImageSrc(node);
 	const ui = node.__gjjTextOverlayUI;
@@ -951,7 +1041,8 @@ function renderPanel(node) {
 	ui.text.style.top = `${textY * 100}%`;
 	ui.watermark.style.left = `${wmX * 100}%`;
 	ui.watermark.style.top = `${wmY * 100}%`;
-	const textImage = drawTextPreviewImage(node);
+	let textImage = drawTextPreviewImage(node);
+	textImage = fitInitialTextToStage(node, textImage);
 	ui.textImg.src = textImage.src;
 	ui.text.style.width = `${textImage.width}px`;
 	ui.text.style.height = `${textImage.height}px`;
@@ -1021,6 +1112,49 @@ function restorePersistedWidgets(node) {
 	}
 }
 
+function shouldAcceptBackendFontSize(node) {
+	const props = node?.properties || {};
+	if (node.__gjjTextOverlayAutoFitting) return false;
+	if (node.__gjjTextOverlayManualTextResize || props.gjj_text_overlay_manual_text_resize) return false;
+	if (node.__gjjTextOverlayTextFitSignature || props.gjj_text_overlay_text_fit_signature) return false;
+	return props.font_size == null;
+}
+
+function applyBackendPreviewMeta(node, message) {
+	const meta = Array.isArray(message?.gjj_text_overlay)
+		? message.gjj_text_overlay[0]
+		: (Array.isArray(message?.ui?.gjj_text_overlay) ? message.ui.gjj_text_overlay[0] : null);
+	if (!meta) return;
+	const bgW = Number(meta.background_width || 0);
+	const bgH = Number(meta.background_height || 0);
+	if (bgW > 0 && bgH > 0) {
+		node.__gjjTextOverlayBgSize = { width: bgW, height: bgH };
+		node.__gjjTextOverlayUI?.stage?.style.setProperty("aspect-ratio", `${bgW} / ${bgH}`);
+	}
+	const srcW = Number(meta.watermark_source_width || 0);
+	const srcH = Number(meta.watermark_source_height || 0);
+	const outW = Number(meta.watermark_width || 0);
+	if (srcW > 0 && srcH > 0) {
+		node.__gjjTextOverlayWatermarkSize = { width: srcW, height: srcH };
+		if (outW > 0) setWidgetValue(node, "watermark_width", Number((outW / srcW).toFixed(4)));
+	}
+	if (bgW > 0) {
+		const wx = Number(meta.watermark_x);
+		const tx = Number(meta.text_x);
+		if (Number.isFinite(wx)) setWidgetValue(node, "watermark_x", Number((wx / bgW).toFixed(4)));
+		if (Number.isFinite(tx)) setWidgetValue(node, "text_x", Number((tx / bgW).toFixed(4)));
+	}
+	if (bgH > 0) {
+		const wy = Number(meta.watermark_y);
+		const ty = Number(meta.text_y);
+		if (Number.isFinite(wy)) setWidgetValue(node, "watermark_y", Number((wy / bgH).toFixed(4)));
+		if (Number.isFinite(ty)) setWidgetValue(node, "text_y", Number((ty / bgH).toFixed(4)));
+	}
+	const fontSize = Number(meta.font_size || 0);
+	if (fontSize > 0 && shouldAcceptBackendFontSize(node)) setWidgetValue(node, "font_size", Math.round(fontSize));
+	renderPanel(node);
+}
+
 app.registerExtension({
 	name: "GJJ.TextOverlay",
 	beforeRegisterNodeDef(nodeType, nodeData) {
@@ -1054,6 +1188,12 @@ app.registerExtension({
 		nodeType.prototype.onSerialize = function (...args) {
 			restorePersistedWidgets(this);
 			return originalOnSerialize?.apply(this, args);
+		};
+		const originalOnExecuted = nodeType.prototype.onExecuted;
+		nodeType.prototype.onExecuted = function (message, ...rest) {
+			const result = originalOnExecuted?.apply(this, [message, ...rest]);
+			setTimeout(() => applyBackendPreviewMeta(this, message), 0);
+			return result;
 		};
 	},
 	nodeCreated(node) {

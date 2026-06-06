@@ -1,10 +1,12 @@
 import json
 import math
 import os
+import uuid
 from pathlib import Path
 
 import numpy as np
 import torch
+from PIL import Image
 
 import comfy.model_management as model_management
 import comfy.utils
@@ -80,6 +82,47 @@ _DWPOSE_DESCRIPTION = (
     if _DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE
     else _DEPENDENCY_REPORT["warning_message"]
 )
+
+
+def _save_dwpose_webp_preview(frames: list[torch.Tensor], fps: float = 8.0) -> list[dict]:
+    if not frames:
+        return []
+    try:
+        preview_batch = torch.stack(frames, dim=0).detach().cpu().float().clamp(0.0, 1.0).contiguous()
+        target_dir = Path(folder_paths.get_temp_directory()) / "GJJ" / "dwpose_preview"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"GJJ_DWPosePreview_{uuid.uuid4().hex[:12]}.webp"
+        filepath = target_dir / filename
+        arrays = torch.round(preview_batch * 255.0).to(torch.uint8).numpy()
+        pil_frames = [Image.fromarray(array[..., :3], mode="RGB") for array in arrays]
+        pil_frames[0].save(
+            filepath,
+            format="WEBP",
+            save_all=True,
+            append_images=pil_frames[1:],
+            duration=max(1, round(1000.0 / max(0.01, float(fps)))),
+            loop=0,
+            lossless=False,
+            quality=88,
+            method=4,
+        )
+        return [{
+            "filename": filename,
+            "subfolder": "GJJ/dwpose_preview",
+            "type": "temp",
+            "format": "image/webp",
+            "media_type": "image",
+            "is_sequence": True,
+            "autoplay": True,
+            "loop": True,
+            "frame_rate": float(fps),
+            "frame_count": int(preview_batch.shape[0]),
+            "width": int(preview_batch.shape[2]),
+            "height": int(preview_batch.shape[1]),
+        }]
+    except Exception as error:
+        print(f"[GJJ_DWPoseEstimator] WebP 预览保存失败: {error}")
+        return []
 
 
 def _load_cv2_runtime():
@@ -442,7 +485,8 @@ class GJJ_DWPoseEstimator:
         include_hand = bool(detect_hand)
         include_face = bool(detect_face)
         xinsr = bool(scale_stick_for_xinsr_cn)
-        for tensor_image in image:
+        preview_tensors = []
+        for frame_index, tensor_image in enumerate(image):
             np_image = np.asarray(tensor_image.cpu() * 255.0, dtype=np.uint8)
             np_image, _ = _resize_image_with_pad(np_image, 0)
             with torch.no_grad():
@@ -460,12 +504,18 @@ class GJJ_DWPoseEstimator:
             canvas = _draw_poses(poses, np_image.shape[0], np_image.shape[1], include_body, include_hand, include_face, xinsr)
             canvas, remove_pad = _resize_image_with_pad(canvas, int(resolution))
             canvas = _hwc3(remove_pad(canvas))
+            if frame_index % 8 == 0:
+                preview_tensors.append(torch.from_numpy(canvas.astype(np.float32) / 255.0))
             openpose_dicts.append(_encode_poses(filtered, np_image.shape[0], np_image.shape[1]))
             outputs.append(torch.from_numpy(canvas.astype(np.float32) / 255.0))
             pbar.update(1)
         del runtime
+        preview_images = _save_dwpose_webp_preview(preview_tensors)
         return {
-            "ui": {"openpose_json": [json.dumps(openpose_dicts, ensure_ascii=False, indent=2)]},
+            "ui": {
+                "openpose_json": [json.dumps(openpose_dicts, ensure_ascii=False, indent=2)],
+                "images": preview_images,
+            },
             "result": (torch.stack(outputs, dim=0), openpose_dicts),
         }
 

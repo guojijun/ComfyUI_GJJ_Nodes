@@ -122,16 +122,16 @@ class GJJ_ClownSampler:
                         "max": 100.0,
                         "step": 0.01,
                         "round": False,
-                        "display_name": "eta",
-                        "tooltip": "Calculated noise amount to be added, then removed, after each step.",
+                        "display_name": "η 噪声量",
+                        "tooltip": "每个采样步骤中临时加入再移除的噪声量。数值越大，随机扰动越明显；通常保持默认即可。",
                     },
                 ),
                 "sampler_name": (
                     SAMPLER_NAMES,
                     {
                         "default": "exponential/res_2s",
-                        "display_name": "sampler_name",
-                        "tooltip": "RES4LYF ClownSampler sampler_name. The zero-dependency GJJ version maps it to an available ComfyUI sampler internally.",
+                        "display_name": "采样器名称",
+                        "tooltip": "选择 Clown 采样器兼容名称。GJJ 零依赖版本会在后台自动映射到当前 ComfyUI 可用的采样器。",
                     },
                 ),
                 "seed": (
@@ -141,37 +141,37 @@ class GJJ_ClownSampler:
                         "min": -1,
                         "max": 0xffffffffffffffff,
                         "control_after_generate": True,
-                        "display_name": "seed",
-                        "tooltip": "SDE noise seed compatibility value.",
+                        "display_name": "随机种子",
+                        "tooltip": "用于兼容 SDE 噪声种子的数值。改变后可得到不同采样噪声。",
                     },
                 ),
                 "bongmath": (
                     "BOOLEAN",
                     {
                         "default": True,
-                        "display_name": "bongmath",
-                        "tooltip": "Bongmath compatibility switch. Kept for workflow compatibility.",
+                        "display_name": "Bongmath兼容",
+                        "tooltip": "RES4LYF 工作流兼容开关。GJJ 零依赖版本保留该参数用于旧工作流兼容，通常保持开启。",
                     },
                 ),
             },
             "optional": {
-                "guides": ("GUIDES", {"display_name": "guides", "tooltip": "Optional RES4LYF guides input kept for workflow compatibility."}),
-                "options": ("OPTIONS", {"display_name": "options", "tooltip": "Optional RES4LYF options input kept for workflow compatibility."}),
+                "guides": ("GUIDES", {"display_name": "引导参数", "tooltip": "可选的 RES4LYF 引导参数输入。GJJ 零依赖版本保留该接口用于工作流兼容。"}),
+                "options": ("OPTIONS", {"display_name": "采样选项", "tooltip": "可选的 RES4LYF 采样选项输入。连接后会优先读取其中的噪声量、种子、采样器名称和兼容开关。"}),
             },
         }
 
     RETURN_TYPES = ("SAMPLER",)
-    RETURN_NAMES = ("sampler",)
-    OUTPUT_TOOLTIPS = ("Sampler output for SamplerCustomAdvanced and compatible sampler nodes.",)
+    RETURN_NAMES = ("采样器",)
+    OUTPUT_TOOLTIPS = ("输出可连接到 SamplerCustomAdvanced 以及其它兼容 SAMPLER 输入的采样器对象。",)
     FUNCTION = "main"
     CATEGORY = "GJJ/采样器"
-    DESCRIPTION = "零依赖 ClownSampler：界面和 RES4LYF ClownSampler_Beta 对齐，内部映射到当前 ComfyUI 可用 SAMPLER。"
+    DESCRIPTION = "零依赖 Clown 采样器：界面兼容 RES4LYF ClownSampler_Beta，内部映射到当前 ComfyUI 可用的 SAMPLER。"
     GJJ_HELP = {
         "title": "Clown 采样器",
-        "description": "面板接口对齐 RES4LYF ClownSampler_Beta：guides、options、eta、sampler_name、seed、bongmath 和单个 sampler 输出。",
+        "description": "面板接口兼容 RES4LYF ClownSampler_Beta：引导参数、采样选项、η 噪声量、采样器名称、随机种子、Bongmath 兼容和单个采样器输出。",
         "usage": [
-            "把 sampler 输出连接到需要 SAMPLER 的采样节点。",
-            "零依赖版不导入 RES4LYF 的 RK 求解器，会把 res_2m/res_2s 等名称映射到当前 ComfyUI 可用采样器。",
+            "把采样器输出连接到需要 SAMPLER 的采样节点。",
+            "零依赖版不导入 RES4LYF 的 RK 求解器，会把 res_2m、res_2s 等名称映射到当前 ComfyUI 可用采样器。",
         ],
     }
 

@@ -507,6 +507,19 @@ class GJJ_TextOverlay:
 
         # 批量处理
         composite_outputs = []
+        preview_meta = {
+            "background_width": 0,
+            "background_height": 0,
+            "watermark_source_width": 0,
+            "watermark_source_height": 0,
+            "watermark_width": 0,
+            "watermark_height": 0,
+            "watermark_x": 0,
+            "watermark_y": 0,
+            "text_x": 0,
+            "text_y": 0,
+            "font_size": int(font_size),
+        }
 
         # 预加载字体以避免在循环中重复加载
         try:
@@ -528,6 +541,9 @@ class GJJ_TextOverlay:
         for i, bg_tensor in enumerate(background_images):
             bg_pil = tensor_to_pil(bg_tensor).convert("RGBA")
             canvas_width, canvas_height = bg_pil.size
+            if i == 0:
+                preview_meta["background_width"] = int(canvas_width)
+                preview_meta["background_height"] = int(canvas_height)
 
             # 创建文字图层
             text_layer = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
@@ -581,10 +597,13 @@ class GJJ_TextOverlay:
                 wm_tensor = watermark_images[i]
                 wm_pil = tensor_to_pil(wm_tensor).convert("RGBA")
                 wm_pil = auto_remove_watermark_background(wm_pil)
+                orig_width, orig_height = wm_pil.size
+                if i == 0:
+                    preview_meta["watermark_source_width"] = int(orig_width)
+                    preview_meta["watermark_source_height"] = int(orig_height)
 
                 # 应用水印宽度缩放
                 if watermark_width != 1.0:
-                    orig_width, orig_height = wm_pil.size
                     new_width = max(1, int(orig_width * watermark_width))
                     new_height = max(1, int(orig_height * watermark_width))
                     wm_pil = wm_pil.resize((new_width, new_height), Image.LANCZOS)
@@ -596,6 +615,13 @@ class GJJ_TextOverlay:
                 # 确定水印位置
                 wx = int(resolve_axis_position(watermark_x, canvas_width))
                 wy = int(resolve_axis_position(watermark_y, canvas_height))
+                if i == 0:
+                    preview_meta["watermark_width"] = int(wm_pil.size[0])
+                    preview_meta["watermark_height"] = int(wm_pil.size[1])
+                    preview_meta["watermark_x"] = int(wx)
+                    preview_meta["watermark_y"] = int(wy)
+                    preview_meta["text_x"] = int(resolve_axis_position(text_x, canvas_width))
+                    preview_meta["text_y"] = int(resolve_axis_position(text_y, canvas_height))
 
                 # 创建水印图层以支持位置偏移
                 watermark_layer = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
@@ -618,8 +644,7 @@ class GJJ_TextOverlay:
             # 多张图片：批量输出，保持每张独立
             composite_out = torch.stack(composite_outputs, dim=0)
 
-        # 只返回结果，不包含 UI 数据
-        return (composite_out,)
+        return {"ui": {"gjj_text_overlay": [preview_meta]}, "result": (composite_out,)}
 
 # 注册
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_TextOverlay}

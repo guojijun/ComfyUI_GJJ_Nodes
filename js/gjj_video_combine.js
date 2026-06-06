@@ -27,8 +27,8 @@ const PRIMARY_INPUT_NAME = "images";
 const PRIMARY_INPUT_ALIASES = new Set(["images", "图像"]);
 const FRAME_RATE_WIDGET_NAME = "frame_rate";
 const FRAME_RATE_SOCKET_TYPE = "INT,FLOAT";
-const FINAL_NODE_COLOR = "#b42318";
-const FINAL_NODE_BGCOLOR = "#3a1616";
+const FINAL_NODE_COLOR = "#0a0a5f";
+const FINAL_NODE_BGCOLOR = "#23292b";
 const FINAL_NODE_COLOR_PROPERTY = "gjj_video_combine_final_node_color";
 const OPTIONAL_INPUTS = [
 	{ name: "audio", type: "AUDIO", label: "音频", localized_name: "音频" },

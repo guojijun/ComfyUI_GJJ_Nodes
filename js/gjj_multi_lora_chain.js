@@ -20,6 +20,8 @@ const CLIP_INPUT_LABEL = "CLIP 输入";
 const CLIP_OUTPUT_NAME = "叠加编码输出";
 const ICLORA_FACTOR_OUTPUT_NAME = "IC-LoRA Latent缩放因子";
 const ICLORA_MULTIPLE_OUTPUT_NAME = "IC-LoRA像素倍数";
+const ICLORA_FACTOR_OUTPUT_INDEX = 2;
+const ICLORA_MULTIPLE_OUTPUT_INDEX = 3;
 const DEFAULT_EMPTY_OPTION = { value: "", label: "未选择" };
 const DEFAULT_ROW = { enabled: false, name: "", strength: 1.0 };
 const DEFAULT_GROUP_RULES = [
@@ -56,6 +58,11 @@ function formatStrength(value, fallback = 1.0) {
 
 function normalizeBoolean(value) {
 	return value === true || value === 1 || value === "1" || String(value).toLowerCase() === "true";
+}
+
+function loraNameLooksLikeIclora(value) {
+	const text = String(value || "").toLowerCase();
+	return text.includes("ic-lora") || text.includes("ic_lora") || text.includes("iclora");
 }
 
 function isLoaderNode(node) {
@@ -351,6 +358,16 @@ function normalizeOutputSlot(output, name, type, tooltip = "") {
 	if (tooltip) output.tooltip = tooltip;
 }
 
+function setOutputVisible(output, visible) {
+	if (!output) return;
+	output.hidden = !visible;
+	output.visible = visible;
+	output.disabled = !visible;
+	output.not_show = !visible;
+	output.__gjj_hidden = !visible;
+	if (output.options && typeof output.options === "object") output.options.hidden = !visible;
+}
+
 function ensureOutputAt(node, index, name, type, tooltip = "") {
 	while ((node.outputs || []).length <= index) {
 		node.addOutput?.(name, type);
@@ -366,12 +383,38 @@ function normalizeModelOutput(node) {
 	ensureOutputAt(node, 0, MODEL_OUTPUT_NAME, "MODEL", "按当前节点中的 LoRA 顺序串联加载后的模型输出。");
 }
 
+function outputHasLinks(node, index) {
+	const output = node.outputs?.[index];
+	return Array.isArray(output?.links) && output.links.length > 0;
+}
+
+function loaderHasIcloraSelection(node) {
+	const state = ensureNodeState(node);
+	return state.rows.some((row) => row?.enabled !== false && loraNameLooksLikeIclora(row?.name));
+}
+
+function ensureIcloraOutputs(node) {
+	ensureOutputAt(node, ICLORA_FACTOR_OUTPUT_INDEX, ICLORA_FACTOR_OUTPUT_NAME, "FLOAT", "链中最后一个 IC-LoRA 的 latent_downscale_factor；没有 IC-LoRA 或 metadata 缺失时为 1.0。");
+	ensureOutputAt(node, ICLORA_MULTIPLE_OUTPUT_INDEX, ICLORA_MULTIPLE_OUTPUT_NAME, "INT", "round(latent_downscale_factor * 32)，可直接用于参考图预处理到像素整倍数。");
+}
+
+function applyIcloraOutputVisibility(node) {
+	if (!isLoaderNode(node)) return;
+	const shouldShow = loaderHasIcloraSelection(node)
+		|| outputHasLinks(node, ICLORA_FACTOR_OUTPUT_INDEX)
+		|| outputHasLinks(node, ICLORA_MULTIPLE_OUTPUT_INDEX);
+	ensureIcloraOutputs(node);
+	setOutputVisible(node.outputs?.[ICLORA_FACTOR_OUTPUT_INDEX], shouldShow);
+	setOutputVisible(node.outputs?.[ICLORA_MULTIPLE_OUTPUT_INDEX], shouldShow);
+}
+
 function ensureLoaderOutputs(node) {
 	if (!isLoaderNode(node)) return;
 	ensureOutputAt(node, 0, MODEL_OUTPUT_NAME, "MODEL", "按当前节点中的 LoRA 顺序串联加载后的模型输出。");
 	ensureOutputAt(node, 1, CLIP_OUTPUT_NAME, "CLIP", "输出叠加 LoRA 后的 CLIP；未接入 CLIP 时这里会返回空值。");
-	ensureOutputAt(node, 2, ICLORA_FACTOR_OUTPUT_NAME, "FLOAT", "链中最后一个 IC-LoRA 的 latent_downscale_factor；没有 IC-LoRA 或 metadata 缺失时为 1.0。");
-	ensureOutputAt(node, 3, ICLORA_MULTIPLE_OUTPUT_NAME, "INT", "round(latent_downscale_factor * 32)，可直接用于参考图预处理到像素整倍数。");
+	setOutputVisible(node.outputs?.[0], true);
+	setOutputVisible(node.outputs?.[1], Boolean(ensureNodeState(node).clipPortsOpen));
+	applyIcloraOutputVisibility(node);
 }
 
 function clipPortsHaveLinks(node) {
@@ -397,7 +440,7 @@ function removeInputAt(node, index) {
 }
 
 function removeOutputAt(node, index) {
-	if (index < 0) {
+	if (index < 0 || index >= (node.outputs || []).length) {
 		return false;
 	}
 	const output = node.outputs?.[index];
@@ -410,6 +453,29 @@ function removeOutputAt(node, index) {
 		node.outputs.splice(index, 1);
 	}
 	return true;
+}
+
+function removeGraphLink(linkId) {
+	if (linkId == null) return;
+	try { app.graph?.removeLink?.(linkId); } catch (_) {}
+	try { if (app.graph?.links?.[linkId]) delete app.graph.links[linkId]; } catch (_) {}
+}
+
+function disconnectClipPorts(node) {
+	const input = node.inputs?.[findClipInputIndex(node)];
+	if (input?.link != null) {
+		removeGraphLink(input.link);
+		input.link = null;
+	}
+	const output = node.outputs?.[findClipOutputIndex(node)];
+	for (const linkId of Array.isArray(output?.links) ? output.links.slice() : []) {
+		const link = app.graph?.links?.[linkId];
+		const targetNode = link && (app.graph?.getNodeById?.(link.target_id) || app.graph?._nodes_by_id?.[link.target_id]);
+		const targetInput = targetNode?.inputs?.[link?.target_slot];
+		if (targetInput?.link === linkId) targetInput.link = null;
+		removeGraphLink(linkId);
+	}
+	if (output) output.links = [];
 }
 
 function ensureClipInput(node) {
@@ -437,11 +503,11 @@ function updateClipPortsButton(node) {
 		return;
 	}
 	const open = Boolean(ensureNodeState(node).clipPortsOpen);
-	button.textContent = open ? "CLIP已开" : "⚙设置";
+	button.textContent = "🟡CLIP";
 	button.classList.toggle("on", open);
 	button.title = open
-		? "点击关闭 CLIP 输入端口；已有 CLIP 连线时会保持开启。"
-		: "点击开启 CLIP 输入端口。输出口保持固定，默认只串联加载 MODEL。";
+		? "点击关闭 CLIP 输入与输出端口；关闭时会断开 CLIP 相关连线，采样时不再对 CLIP 加载 LoRA。"
+		: "点击开启 CLIP 输入与输出端口；开启后 LoRA 会同时作用到模型和 CLIP。";
 }
 
 function applyClipPortVisibility(node) {
@@ -457,6 +523,7 @@ function applyClipPortVisibility(node) {
 	if (state.clipPortsOpen) {
 		ensureClipInput(node);
 	} else {
+		disconnectClipPorts(node);
 		removeInputAt(node, findClipInputIndex(node));
 	}
 	ensureLoaderOutputs(node);
@@ -470,7 +537,8 @@ function setClipPortsOpen(node, value) {
 		return;
 	}
 	const state = ensureNodeState(node);
-	state.clipPortsOpen = Boolean(value) || clipPortsHaveLinks(node);
+	if (!value) disconnectClipPorts(node);
+	state.clipPortsOpen = Boolean(value);
 	node.properties[CLIP_PORTS_OPEN_PROPERTY] = state.clipPortsOpen;
 	applyClipPortVisibility(node);
 }
@@ -491,6 +559,7 @@ function updateDataWidget(node) {
 		node.widgets_values = Array.isArray(node.widgets_values) ? node.widgets_values : [];
 		node.widgets_values[widgetIndex] = serialized;
 	}
+	applyIcloraOutputVisibility(node);
 }
 
 function ensureTrailingEmptyRow(node) {
@@ -508,6 +577,7 @@ function ensureTrailingEmptyRow(node) {
 			strength: normalizeStrength(item.strength, 1.0),
 		};
 	});
+	applyIcloraOutputVisibility(node);
 }
 
 function applyHighLowPairToNextRow(node, rowIndex, selectedName) {
@@ -1246,7 +1316,7 @@ function renderUi(node) {
 		node.__gjjLoraAdvancedPanel.classList.toggle("open", state.advancedOpen);
 	}
 	if (node.__gjjLoraAdvancedButton) {
-		node.__gjjLoraAdvancedButton.textContent = state.advancedOpen ? "收起" : "高级";
+		node.__gjjLoraAdvancedButton.textContent = state.advancedOpen ? "收起设置" : "⚙️设置";
 	}
 	ensureAutoBroadcastForConfig(node);
 	updateBroadcastButton(node);
@@ -1321,8 +1391,8 @@ function setupUi(node) {
 	const advancedButton = document.createElement("button");
 	advancedButton.className = "gjj-lora-advanced-btn";
 	advancedButton.type = "button";
-	advancedButton.textContent = "高级";
-	advancedButton.title = "展开或收起互斥分组规则。前端自动维护的 JSON 仍保持隐藏。";
+	advancedButton.textContent = "⚙️设置";
+	advancedButton.title = "展开或收起 LoRA 互斥分组规则设置。";
 	advancedButton.addEventListener("click", () => {
 		updateAdvancedOpen(node, !ensureNodeState(node).advancedOpen);
 		renderUi(node);
@@ -1488,6 +1558,7 @@ app.registerExtension({
 			setTimeout(() => {
 				ensureAutoBroadcastForConfig(this);
 				updateBroadcastButton(this);
+				applyClipPortVisibility(this);
 				markNodeDirty(this);
 			}, 0);
 			return result;

@@ -34,6 +34,7 @@ const MIN_LAYOUT_NODE_WIDTH = 168;
 const MAX_LAYOUT_NODE_WIDTH = 1200;
 let HORIZONTAL_SAFE_GAP = 28;
 let VERTICAL_SAFE_GAP = DEFAULT_SPACING;
+const SINGLE_NODE_CONNECTED_ROW_GAP = 5;
 
 // 间距调节：想更松只改上面 3 个值：DEFAULT_SPACING / HORIZONTAL_SAFE_GAP / VERTICAL_SAFE_GAP。
 // 节点真实宽度仍保持最小，布局计算会按 MIN_LAYOUT_NODE_WIDTH 预留视觉空间，避免互相覆盖。
@@ -3347,7 +3348,7 @@ function separateLevelNodes(nodes, positions, minGap) {
 	}
 }
 
-function buildDirectionalRadialPositions(anchor, normalNodes, forward, backward, levels, spacing = DEFAULT_SPACING) {
+function buildDirectionalRadialPositions(anchor, normalNodes, forward, backward, levels, spacing = DEFAULT_SPACING, rowGapOverride = null) {
 	// 单节点模式：不再依赖“层级一次性分组”，改成从锚点开始沿连线递归展开。
 	// 这样上游的上游、下游的下游会一直排到尽头，不会因为层级判断漏掉而留在原地。
 	const positions = new Map();
@@ -3362,12 +3363,12 @@ function buildDirectionalRadialPositions(anchor, normalNodes, forward, backward,
 	const maxWidth = Math.max(MIN_LAYOUT_NODE_WIDTH, ...normalNodes.map((node) => Math.max(getNodeWidth(node), getVisualNodeWidth(node))));
 	const maxHeight = Math.max(80, ...normalNodes.map(getNodeHeight));
 	const columnGap = getColumnGap(spacing);
-	const rowGap = getRowGap(spacing);
+	const rowGap = rowGapOverride == null ? getRowGap(spacing) : Math.max(0, Math.round(Number(rowGapOverride) || 0));
 	const columnGapMagnitude = Math.max(16, Math.abs(columnGap));
-	const rowGapMagnitude = Math.max(16, Math.abs(rowGap));
+	const rowGapMagnitude = Math.max(1, Math.abs(rowGap));
 	const colStepBase = Math.round(maxWidth + columnGapMagnitude * 1.5);
-	const branchGapBase = Math.round(maxHeight + rowGapMagnitude * 1.5);
-	const levelMinGap = Math.round(rowGapMagnitude * 1.2);
+	const branchGapBase = Math.round(maxHeight + rowGapMagnitude);
+	const levelMinGap = rowGapMagnitude;
 
 	// 一个节点可能通过交叉线同时能从两边到达。保留离锚点更近的那次，避免被远层覆盖。
 	const assigned = new Map([[anchor, { depth: 0, direction: 0 }]]);
@@ -3644,7 +3645,7 @@ function arrangeCenteredAroundAnchor(anchor, spacing = DEFAULT_SPACING, mode = "
 	}
 
 	const levels = calculateSignedLevelsFromAnchor(realAnchor, normalNodes, forward, backward);
-	const positions = buildDirectionalRadialPositions(realAnchor, normalNodes, forward, backward, levels, spacing);
+	const positions = buildDirectionalRadialPositions(realAnchor, normalNodes, forward, backward, levels, spacing, SINGLE_NODE_CONNECTED_ROW_GAP);
 	const positionedSet = new Set(positions.keys());
 	const floatingNodes = normalNodes.filter((node) => !positionedSet.has(node));
 	placeDisconnectedNodesAroundAnchor(realAnchor, floatingNodes, positions, spacing, mode);
@@ -3659,7 +3660,7 @@ function arrangeCenteredAroundAnchor(anchor, spacing = DEFAULT_SPACING, mode = "
 
 	placeRerouteNodes(rerouteNodes, normalNodes);
 
-	const gap = Math.max(getColumnGap(spacing), getRowGap(spacing));
+	const gap = SINGLE_NODE_CONNECTED_ROW_GAP;
 	let newAnchorCenter = {
 		x: getNodeX(anchor) + getNodeWidth(anchor) / 2,
 		y: getNodeY(anchor) + getNodeHeight(anchor) / 2,

@@ -1237,13 +1237,19 @@ function renderExecutedPreview(node) {
 		node.__gjjMultiVideoPreviewGrid = null;
 		return;
 	}
+	const isSequencePreview = items.length === 1 && (items[0]?.is_sequence || String(items[0]?.format || "").includes("webp"));
 	const grid = ensureLazyGrid(
 		node,
 		"__gjjMultiVideoPreviewWrap",
 		"__gjjMultiVideoPreviewGrid",
-		"display:grid;grid-template-columns:repeat(auto-fill, minmax(88px, 1fr));gap:6px;"
+		isSequencePreview
+			? "display:block;"
+			: "display:grid;grid-template-columns:repeat(auto-fill, minmax(88px, 1fr));gap:6px;"
 	);
 	if (!grid) return;
+	grid.style.cssText = isSequencePreview
+		? "display:block;"
+		: "display:grid;grid-template-columns:repeat(auto-fill, minmax(88px, 1fr));gap:6px;";
 	grid.replaceChildren();
 	for (let index = 0; index < items.length; index++) {
 		const item = items[index];
@@ -1263,7 +1269,9 @@ function renderExecutedPreview(node) {
 		const image = document.createElement("img");
 		image.src = imageDataToUrl(item);
 		image.draggable = false;
-		image.style.cssText = "width:100%;height:64px;object-fit:contain;background:#0c1114;border-radius:6px;display:block;";
+		image.style.cssText = isSequencePreview
+			? "width:100%;height:auto;max-height:280px;object-fit:contain;background:#0c1114;border-radius:6px;display:block;"
+			: "width:100%;height:64px;object-fit:contain;background:#0c1114;border-radius:6px;display:block;";
 
 		const deleteButton = document.createElement("button");
 		deleteButton.type = "button";

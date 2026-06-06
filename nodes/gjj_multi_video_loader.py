@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -10,13 +11,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from aiohttp import web
+from PIL import Image
 try:
     from server import PromptServer
 except Exception:
     PromptServer = None
 
 import folder_paths
-from nodes import PreviewImage
 
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
@@ -85,6 +86,47 @@ def _unique_path(directory: Path, filename: str) -> Path:
         candidate = directory / f"{stem}_{index:03d}{suffix}"
         index += 1
     return candidate
+
+
+def _save_sequence_webp_preview(frames: torch.Tensor, fps: float = 8.0) -> list[dict[str, Any]]:
+    try:
+        frames = frames.detach().cpu().float().clamp(0.0, 1.0).contiguous()
+        if int(frames.shape[0]) <= 0:
+            return []
+        target_dir = Path(folder_paths.get_temp_directory()) / "GJJ" / "multi_video_preview"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"GJJ_MultiVideoLoader_{uuid.uuid4().hex[:12]}.webp"
+        filepath = target_dir / filename
+        arrays = torch.round(frames * 255.0).to(torch.uint8).numpy()
+        pil_frames = [Image.fromarray(array[..., :3], mode="RGB") for array in arrays]
+        pil_frames[0].save(
+            filepath,
+            format="WEBP",
+            save_all=True,
+            append_images=pil_frames[1:],
+            duration=max(1, round(1000.0 / max(0.01, float(fps)))),
+            loop=0,
+            lossless=False,
+            quality=88,
+            method=4,
+        )
+        return [{
+            "filename": filename,
+            "subfolder": "GJJ/multi_video_preview",
+            "type": "temp",
+            "format": "image/webp",
+            "media_type": "image",
+            "is_sequence": True,
+            "autoplay": True,
+            "loop": True,
+            "frame_rate": float(fps),
+            "frame_count": int(frames.shape[0]),
+            "width": int(frames.shape[2]),
+            "height": int(frames.shape[1]),
+        }]
+    except Exception as error:
+        print(f"[GJJ_MultiVideoLoader] WebP 预览保存失败: {error}")
+        return []
 
 
 def _video_meta_cv2(path: Path) -> dict[str, Any]:
@@ -908,9 +950,6 @@ class GJJ_MultiVideoLoader:
             },
         }
 
-    def __init__(self):
-        self.preview_image = PreviewImage()
-
     @staticmethod
     def _coerce_external_frames(value: Any) -> torch.Tensor | None:
         if value is None:
@@ -1243,13 +1282,8 @@ class GJJ_MultiVideoLoader:
         if preview_count > 0:
             indices = np.linspace(0, int(batch_output.shape[0]) - 1, preview_count, dtype=int).tolist()
             preview_tensor = torch.cat([batch_output[i:i + 1] for i in indices], dim=0)
-            preview_ui = self.preview_image.save_images(
-                preview_tensor,
-                filename_prefix="GJJ_MultiVideoLoader",
-                prompt=prompt,
-                extra_pnginfo=extra_pnginfo,
-            )
-            preview_entries = preview_ui.get("ui", {}).get("images", [])
+            preview_fps = max(1.0, min(12.0, float(output_fps or source_fps or 8.0)))
+            preview_entries = _save_sequence_webp_preview(preview_tensor, preview_fps)
 
         info = {
             "videos": video_infos,

@@ -163,7 +163,7 @@ class GJJ_CLIPPromptEncodePanel:
                     "STRING",
                     {
                         "default": "",
-                        "multiline": True,
+                        "multiline": False,
                         "display": "hidden",
                         "hidden": True,
                         "display_name": "负面提示词",
