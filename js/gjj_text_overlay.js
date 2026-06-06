@@ -825,7 +825,7 @@ function setWatermarkPreviewImage(node, info) {
 		ui.watermarkImg.style.display = "block";
 		ui.watermark.style.background = "transparent";
 		ui.watermark.style.display = "flex";
-		renderPanel(node);
+		renderPanel(node, { fitText: false });
 	};
 	image.onerror = () => {
 		node.__gjjTextOverlayWatermarkSize = null;
@@ -1030,7 +1030,7 @@ function refreshBackground(node, force = false) {
 	return true;
 }
 
-function renderPanel(node) {
+function renderPanel(node, options = {}) {
 	const ui = node.__gjjTextOverlayUI;
 	if (!ui) return;
 	const textX = positionValue(node, "text_x", "x");
@@ -1042,7 +1042,7 @@ function renderPanel(node) {
 	ui.watermark.style.left = `${wmX * 100}%`;
 	ui.watermark.style.top = `${wmY * 100}%`;
 	let textImage = drawTextPreviewImage(node);
-	textImage = fitInitialTextToStage(node, textImage);
+	if (options.fitText !== false) textImage = fitInitialTextToStage(node, textImage);
 	ui.textImg.src = textImage.src;
 	ui.text.style.width = `${textImage.width}px`;
 	ui.text.style.height = `${textImage.height}px`;
@@ -1112,14 +1112,6 @@ function restorePersistedWidgets(node) {
 	}
 }
 
-function shouldAcceptBackendFontSize(node) {
-	const props = node?.properties || {};
-	if (node.__gjjTextOverlayAutoFitting) return false;
-	if (node.__gjjTextOverlayManualTextResize || props.gjj_text_overlay_manual_text_resize) return false;
-	if (node.__gjjTextOverlayTextFitSignature || props.gjj_text_overlay_text_fit_signature) return false;
-	return props.font_size == null;
-}
-
 function applyBackendPreviewMeta(node, message) {
 	const meta = Array.isArray(message?.gjj_text_overlay)
 		? message.gjj_text_overlay[0]
@@ -1150,8 +1142,6 @@ function applyBackendPreviewMeta(node, message) {
 		if (Number.isFinite(wy)) setWidgetValue(node, "watermark_y", Number((wy / bgH).toFixed(4)));
 		if (Number.isFinite(ty)) setWidgetValue(node, "text_y", Number((ty / bgH).toFixed(4)));
 	}
-	const fontSize = Number(meta.font_size || 0);
-	if (fontSize > 0 && shouldAcceptBackendFontSize(node)) setWidgetValue(node, "font_size", Math.round(fontSize));
 	renderPanel(node);
 }
 
@@ -1178,9 +1168,9 @@ app.registerExtension({
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalOnConnectionsChange?.apply(this, args);
 			setTimeout(() => {
-				refreshBackground(this, true);
+				refreshBackground(this, false);
 				refreshWatermarkPreview(this, true);
-				renderPanel(this);
+				renderPanel(this, { fitText: false });
 			}, 150);
 			return result;
 		};

@@ -465,6 +465,61 @@ def _is_mask_tensor(obj: Any) -> bool:
     return isinstance(obj, torch.Tensor) and obj.ndim in (2, 3)
 
 
+def _video_components(obj: Any) -> Any:
+    if obj is None:
+        return None
+    try:
+        if hasattr(obj, "get_components"):
+            return obj.get_components()
+    except Exception:
+        return None
+    if isinstance(obj, dict) and ("images" in obj or "audio" in obj or "frame_rate" in obj or "fps" in obj):
+        return obj
+    return None
+
+
+def _component_value(components: Any, name: str, default: Any = None) -> Any:
+    if components is None:
+        return default
+    if isinstance(components, dict):
+        return components.get(name, default)
+    return getattr(components, name, default)
+
+
+def _is_audio_object(value: Any) -> bool:
+    return isinstance(value, dict) and "waveform" in value and "sample_rate" in value
+
+
+def _extract_video_audio(obj: Any, _seen: set[int] | None = None) -> Any:
+    if _seen is None:
+        _seen = set()
+    if obj is None:
+        return None
+    oid = id(obj)
+    if oid in _seen:
+        return None
+    _seen.add(oid)
+
+    components = _video_components(obj)
+    if components is not None:
+        audio = _component_value(components, "audio")
+        if _is_audio_object(audio):
+            return audio
+        if audio is not None:
+            nested = _extract_video_audio(audio, _seen)
+            if nested is not None:
+                return nested
+
+    if _is_audio_object(obj):
+        return obj
+
+    for value in _iter_container_values(obj):
+        audio = _extract_video_audio(value, _seen)
+        if audio is not None:
+            return audio
+    return None
+
+
 def _image_unit_count(t: Any) -> int:
     """只用于统计真实图片数量。"""
     try:
@@ -577,6 +632,13 @@ def _collect_images(obj: Any, _seen: set[int] | None = None) -> List[torch.Tenso
     if _is_image_tensor(obj):
         found.extend(_split_image_tensor(obj))
         return found
+
+    components = _video_components(obj)
+    if components is not None:
+        images = _component_value(components, "images")
+        if _is_image_tensor(images):
+            found.extend(_split_image_tensor(images))
+            return found
 
     for value in _iter_container_values(obj):
         found.extend(_collect_images(value, _seen))
@@ -872,9 +934,9 @@ class GJJ_ImageResizeKJv2:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("GJJ_BATCH_IMAGE,IMAGE", {
-                    "display_name": "🖼️ 图片",
-                    "tooltip": "输入图片。支持 IMAGE Tensor、GJJ_BATCH_IMAGE 多图队列、list、dict 批量容器。Input image / batch image container."
+                "image": ("GJJ_BATCH_IMAGE,IMAGE,VIDEO", {
+                    "display_name": "🖼️ 图片/视频",
+                    "tooltip": "输入图片或视频。支持 IMAGE Tensor、GJJ_BATCH_IMAGE 多图队列、ComfyUI VIDEO、list、dict 批量容器；视频会按帧序列缩放。",
                 }),
                 "config_json": ("STRING", {
                     "default": json.dumps(_default_config(), ensure_ascii=False),
@@ -1019,13 +1081,14 @@ GJJ · 🔍 多功能图片缩放
 
 用途：
 - 单图或 GJJ_BATCH_IMAGE 批量图片缩放。
+- 可直接接入 ComfyUI VIDEO，节点会提取视频帧并按图片批次缩放。
 - 支持【宽高】【等比】【长边】【像素】四种模式。
 - 支持拉伸 Stretch、补边 Add Border、留边填充 Letterbox/Padding、裁剪填满 Crop Fill。
 - 补边模式按外补画板逻辑使用左/上/右/下扩展画布，并复用边缘羽化参数。
-- 支持动态扩展输出：原始尺寸、输出高度、输出宽度。
+- 支持动态扩展输出：原始尺寸、输出高度、输出宽度、数量、视频音频透传。
 
 输入：
-- 图片：GJJ_BATCH_IMAGE,IMAGE。
+- 图片/视频：GJJ_BATCH_IMAGE,IMAGE,VIDEO。
 - 遮罩：MASK，可选。
   - 补边 / 留边填充且未接入遮罩时，会自动把补边填充区域输出为遮罩。
 - 外接参数1 / 外接参数2：固定顶部接口，会按当前尺寸模式覆盖面板里的前两个可见数值/选项参数。
@@ -1033,7 +1096,7 @@ GJJ · 🔍 多功能图片缩放
 输出：
 - 图片：GJJ_BATCH_IMAGE,IMAGE，尽量保持输入批量容器结构。
 - 遮罩：MASK。接入遮罩时同步缩放/裁剪；无遮罩补边或留边填充时输出补边区域。
-- 扩展输出 1-3：由前端按钮动态决定。
+- 扩展输出 1-3：由前端按钮动态决定；输入视频带音频时可选择 🎵 音频并透传原音频对象。
 
 依赖：
 - torch：ComfyUI 标准依赖，用于 Tensor 运算。
@@ -1090,11 +1153,12 @@ GJJ · 🔍 多功能图片缩放
             # 统计只看输入源；输出逻辑保持 v29，不额外复杂化。
             image_source = image[0] if isinstance(image, (list, tuple)) and len(image) == 1 else image
             mask_source = mask[0] if isinstance(mask, (list, tuple)) and len(mask) == 1 else mask
+            video_audio = _extract_video_audio(image_source)
 
             images = _collect_images(image_source)
             masks = _collect_masks(mask_source)
             if not images:
-                raise ValueError("没有检测到有效图片。请连接 IMAGE 或 GJJ_BATCH_IMAGE。")
+                raise ValueError("没有检测到有效图片或视频帧。请连接 IMAGE、GJJ_BATCH_IMAGE 或 VIDEO。")
 
             input_total = _count_image_units(images)
             stat = _begin_run_call(unique_id, input_total)
@@ -1139,6 +1203,7 @@ GJJ · 🔍 多功能图片缩放
                 "output_height": int(first_out_h),
                 "output_width": int(first_out_w),
                 "image_count": int(done_units),
+                "audio": video_audio,
             }
             extras = [values.get(k, None) for k in selected[:3]]
             while len(extras) < 3:
@@ -1170,7 +1235,7 @@ GJJ · 🔍 多功能图片缩放
             elapsed = _run_elapsed(stat) if stat else (time.time() - start)
             msg = f"GJJ 多功能图片缩放执行失败：{e}\n{traceback.format_exc()}"
             print(msg)
-            _send_status(unique_id, "error", f"执行错误：{e}。请检查输入图片、尺寸参数和依赖。", progress=1.0, elapsed=elapsed)
+            _send_status(unique_id, "error", f"执行错误：{e}。请检查输入图片/视频、尺寸参数和依赖。", progress=1.0, elapsed=elapsed)
             empty_mask = torch.zeros((1, 64, 64), dtype=torch.float32)
             return (image, empty_mask, msg, None, None)
 

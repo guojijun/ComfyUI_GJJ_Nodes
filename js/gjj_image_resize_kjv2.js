@@ -75,6 +75,7 @@ const OUTPUTS = [
   { key: "output_width", icon: "↔️", label: "↔️ 输出宽度", outName: "输出宽度", type: "*", title: "更多输出：输出处理后的宽度。单击单选，Ctrl/Shift 可复选。" },
   { key: "output_height", icon: "↕️", label: "↕️ 输出高度", outName: "输出高度", type: "*", title: "更多输出：输出处理后的高度。单击单选，Ctrl/Shift 可复选。" },
   { key: "image_count", icon: "🔢", label: "数量", outName: "数量", type: "*", title: "更多输出：本次总共处理的图片数量。单击单选，Ctrl/Shift 可复选。" },
+  { key: "audio", icon: "🎵", label: "🎵 音频", outName: "音频", type: "AUDIO", title: "更多输出：输入 VIDEO 带音频时透传原音频对象。单击单选，Ctrl/Shift 可复选。" },
 ];
 
 
@@ -237,12 +238,32 @@ function graphLinkTargetsInput(link, node, index) {
   return graphLinkTargetsNode(link, node) && Number(getGraphLinkTargetSlot(link)) === Number(index);
 }
 
+function graphNodeById(graph, id) {
+  return graph?.getNodeById?.(id) || graph?._nodes_by_id?.[id] || graph?._nodes?.find?.((node) => String(node?.id) === String(id)) || null;
+}
+
 function getGraphLink(node, linkId) {
   if (linkId == null) return null;
   const links = node?.graph?.links || app.graph?.links;
   if (!links) return null;
   if (!Array.isArray(links)) return links[linkId] || links[String(linkId)] || null;
   return links.find((link) => String(getGraphLinkId(link)) === String(linkId)) || null;
+}
+
+function inputHasVideoSource(node) {
+  const input = (node?.inputs || [])[0];
+  if (!input?.link) return false;
+  const link = getGraphLink(node, input.link);
+  if (!link) return false;
+  const originNode = graphNodeById(node?.graph || app.graph, getGraphLinkOriginId(link));
+  const originOutput = originNode?.outputs?.[Number(getGraphLinkOriginSlot(link))];
+  const text = [
+    originOutput?.type,
+    originOutput?.name,
+    originOutput?.label,
+    originOutput?.localized_name,
+  ].map((value) => String(value || "")).join(" ").toUpperCase();
+  return text.includes("VIDEO");
 }
 
 function graphLinkMatchesEndpoint(link, item) {
@@ -1776,12 +1797,16 @@ function updateDomState(node) {
   if (!dom) return;
   const cfg = readConfig(node);
   dom.outputs.querySelectorAll("button").forEach((btn) => {
-    btn.classList.toggle("active", cfg.extra_outputs.includes(btn.dataset.key));
+    const key = btn.dataset.key;
+    const isAudio = key === "audio";
+    const audioAvailable = inputHasVideoSource(node) || cfg.extra_outputs.includes("audio");
+    btn.classList.toggle("active", cfg.extra_outputs.includes(key));
+    if (isAudio) btn.hidden = !audioAvailable;
   });
   if (dom.settingsBtn) {
     const showSettings = getShowSettings(node);
     dom.settingsBtn.classList.toggle("active", showSettings);
-    dom.settingsBtn.textContent = showSettings ? "⚙️更多设置 收起" : "⚙️更多设置";
+    dom.settingsBtn.textContent = showSettings ? "⚙️收起" : "⚙️设置";
   }
   if (dom.externalMap) {
     const text = externalParamMappingText(cfg, node);
@@ -1803,7 +1828,7 @@ function createDom(node) {
   const settingsBtn = document.createElement("button");
   settingsBtn.type = "button";
   settingsBtn.className = "gjj-mf-settings-btn";
-  settingsBtn.textContent = "⚙更多设置";
+  settingsBtn.textContent = "⚙️设置";
   settingsBtn.title = "显示或隐藏缩放算法、尺寸对齐、补边颜色、边缘羽化和计算设备。";
   settingsBtn.addEventListener("click", (e) => {
     stop(e);
@@ -1816,7 +1841,7 @@ function createDom(node) {
 
   const outputLabel = document.createElement("span");
   outputLabel.className = "gjj-mf-mini-label";
-  outputLabel.textContent = "更多输出:";
+  outputLabel.textContent = "🔌";
   outputLabel.title = "输出扩充口：单击为单选，Ctrl/Shift 可复选。";
   outputs.appendChild(outputLabel);
 
@@ -2118,6 +2143,13 @@ function ensureBackendStatusListener() {
 
 function initNode(node) {
   node.properties ||= {};
+  if (node.inputs?.[0]) {
+    node.inputs[0].type = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
+    node.inputs[0].name = node.inputs[0].name || "image";
+    node.inputs[0].label = "🖼️ 图片/视频";
+    node.inputs[0].localized_name = "🖼️ 图片/视频";
+    node.inputs[0].tooltip = "输入图片或视频；视频会按帧序列缩放，带音频时可在更多输出里选择 🎵 音频透传。";
+  }
   node.__gjjMfShowSettings = !!readConfig(node).show_settings;
   removeConfigInputSlots(node);
   for (const w of node.widgets || []) {
@@ -2164,6 +2196,14 @@ app.registerExtension({
   async beforeRegisterNodeDef(nodeType, nodeData) {
     ensureBackendStatusListener();
     if (nodeData.name !== NODE_CLASS) return;
+    if (Array.isArray(nodeData.input?.required?.image)) {
+      nodeData.input.required.image[0] = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
+      nodeData.input.required.image[1] = {
+        ...(nodeData.input.required.image[1] || {}),
+        display_name: "🖼️ 图片/视频",
+        tooltip: "输入图片或视频；视频会按帧序列缩放，带音频时可在更多输出里选择 🎵 音频透传。",
+      };
+    }
 
     const originalOnResize = nodeType.prototype.onResize;
     nodeType.prototype.onResize = function (...args) {
