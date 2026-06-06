@@ -35,6 +35,8 @@ const SLOT_PREFIX = "value_";
 const MIN_VISIBLE_SLOTS = 1;
 const SET_TITLE = "GJJ · 📌 变量设置";
 const GET_TITLE = "GJJ · ⚡ 变量读取";
+const SET_MENU_TITLE = "变量设置";
+const GET_MENU_TITLE = "变量读取";
 const SET_CATEGORY = "GJJ/工具";
 const GET_CATEGORY = "GJJ/工具";
 const SET_DESCRIPTION = "把连接到本节点的每个输入登记为 GJJ 变量；变量名可用逗号分隔，连接新输入时会按上游输出名自动补齐并保持唯一。";
@@ -66,12 +68,14 @@ GJJ_STANDARDIZE_NODE({
 const SET_NODE_DATA = buildVirtualNodeData(SET_TYPE, SET_TITLE, SET_CATEGORY, SET_DESCRIPTION, {
 	inputs: [{ name: "变量值", type: "*", tooltip: "连接任意值后自动生成对应变量名；多个变量名用逗号分隔。" }],
 	outputs: [{ name: "原值直通", type: "*", tooltip: "与对应输入相同的原值直通输出。" }],
-	tags: ["GJJ_SETNODE", "GJJ SetNode", "变量设置", "设置变量", "set"],
+	tags: ["GJJ_SETNODE", "GJJ SetNode", "变量设置", "设置变量", "设置节点", "中文变量设置", "set"],
+	menuTitle: SET_MENU_TITLE,
 });
 
 const GET_NODE_DATA = buildVirtualNodeData(GET_TYPE, GET_TITLE, GET_CATEGORY, GET_DESCRIPTION, {
 	outputs: [{ name: "变量值", type: "*", tooltip: GET_OUTPUT_TOOLTIP }],
-	tags: ["GJJ_GETNODE", "GJJ GetNode", "变量读取", "读取变量", "get"],
+	tags: ["GJJ_GETNODE", "GJJ GetNode", "变量读取", "读取变量", "获取变量", "中文变量读取", "get"],
+	menuTitle: GET_MENU_TITLE,
 });
 
 function buildVirtualNodeData(type, title, category, description, extra = {}) {
@@ -81,6 +85,10 @@ function buildVirtualNodeData(type, title, category, description, extra = {}) {
 		name: type,
 		display_name: title,
 		displayName: title,
+		display_name_cn: title,
+		title_cn: title,
+		menu_title: extra.menuTitle || title,
+		menuTitle: extra.menuTitle || title,
 		title,
 		category,
 		description,
@@ -524,6 +532,11 @@ function applyRegisteredNodeTypeMetadata(type, title, category, description) {
 		target.desc = description;
 		target.description = description;
 		target.display_name = title;
+		target.displayName = title;
+		target.display_name_cn = title;
+		target.title_cn = title;
+		target.menuTitle = nodeData.menuTitle || title;
+		target.menu_title = nodeData.menu_title || target.menuTitle;
 		target.tooltip = description;
 		target.comfyClass = type;
 		target.nodeData = { ...(target.nodeData || {}), ...nodeData };
@@ -825,16 +838,8 @@ function findGettersByName(graph, name) {
 
 function getVisibleSetNames(graph) {
 	const sourceMap = new Map();
-	for (const entry of collectNodesOfType(getGraphAncestors(graph), SET_TYPE)) {
-		for (const item of setVariableEntriesForNode(entry.node)) {
-			const name = item.name;
-			if (!name || sourceMap.has(name)) {
-				continue;
-			}
-			sourceMap.set(name, entry.graph === graph ? "local" : "parent");
-		}
-	}
 	for (const entry of collectTemplateSetFields(getGraphAncestors(graph), true)) {
+		if (!isTemplateParamsNode(entry.node)) continue;
 		const names = isTemplateParamsNode(entry.node)
 			? (entry.field.broadcastKeys?.length ? entry.field.broadcastKeys : [entry.field.broadcastKey || entry.field.key].filter(Boolean))
 			: [entry.field.key].filter(Boolean);
@@ -1909,7 +1914,7 @@ function scheduleGetStabilize(node, ms = 32) {
 
 function scheduleAllGetStabilize(ms = 32) {
 	for (const node of app.graph?._nodes || []) {
-		if (node?.type === GET_TYPE) {
+		if (node?.type === GET_TYPE && getSelectedNames(node).length) {
 			scheduleGetStabilize(node, ms);
 		}
 	}
@@ -2885,6 +2890,9 @@ app.registerExtension({
 
 		class GJJSetNode extends LGraphNode {
 			static title = SET_TITLE;
+			static display_name = SET_TITLE;
+			static displayName = SET_TITLE;
+			static menuTitle = SET_MENU_TITLE;
 			static category = SET_CATEGORY;
 			static desc = SET_DESCRIPTION;
 			static description = SET_DESCRIPTION;
@@ -3000,6 +3008,9 @@ app.registerExtension({
 
 		class GJJGetNode extends LGraphNode {
 			static title = GET_TITLE;
+			static display_name = GET_TITLE;
+			static displayName = GET_TITLE;
+			static menuTitle = GET_MENU_TITLE;
 			static category = GET_CATEGORY;
 			static desc = GET_DESCRIPTION;
 			static description = GET_DESCRIPTION;
@@ -3143,8 +3154,7 @@ app.registerExtension({
 		installBroadcastDrawPatch();
 		if (!window.__gjjTemplateSetVariablesGetNodeListener) {
 			window.__gjjTemplateSetVariablesGetNodeListener = true;
-			window.addEventListener("gjj-template-set-variables-updated", () => scheduleAllGetStabilize(0));
-			window.addEventListener("gjj-template-params-updated", () => scheduleAllGetStabilize(0));
+			window.addEventListener("gjj-template-params-updated", () => scheduleAllGetStabilize(80));
 		}
 		if (!window.__gjjVariableBroadcastListener) {
 			window.__gjjVariableBroadcastListener = true;

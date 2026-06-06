@@ -48,7 +48,6 @@ const CHECKPOINT_COMMON_TEMPLATE_ID = "checkpoint_common";
 const CONTROL_NET_NONE = "不选择";
 const MAX_CONTROL_NET_SLOTS = 8;
 const OUTPUT_HIT_LANE = 20;
-const MIN_NODE_WIDTH = 300;
 const DEFAULT_NODE_WIDTH = 470;
 const CONTROL_NET_WIDGETS = Array.from({ length: MAX_CONTROL_NET_SLOTS }, (_, index) =>
 	index === 0 ? CONTROL_NET_WIDGET : `control_net_${index + 1}_name`
@@ -322,18 +321,18 @@ function downloadUrlForExpected(expectedName) {
 }
 
 function currentNodeWidth(node) {
-	const current = Number(node?.size?.[0] || 0);
-	const saved = Number(node?.properties?.[WIDTH_PROPERTY] || 0);
-	return Math.max(MIN_NODE_WIDTH, current || saved || DEFAULT_NODE_WIDTH);
+	const current = Math.round(Number(node?.size?.[0] || 0));
+	const saved = Math.round(Number(node?.properties?.[WIDTH_PROPERTY] || 0));
+	return current || saved || DEFAULT_NODE_WIDTH;
 }
 
 function rememberNodeWidth(node) {
-	if (!node) return MIN_NODE_WIDTH;
+	if (!node) return DEFAULT_NODE_WIDTH;
 	node.properties = node.properties || {};
 	const width = currentNodeWidth(node);
 	node.properties[WIDTH_PROPERTY] = width;
-	node.min_width = MIN_NODE_WIDTH;
-	node.minWidth = MIN_NODE_WIDTH;
+	delete node.min_width;
+	delete node.minWidth;
 	return width;
 }
 
@@ -481,6 +480,16 @@ function inputHasLink(input) {
 	return input?.link !== undefined && input?.link !== null;
 }
 
+function pruneLegacyWidgetInputs(node) {
+	if (!node || !Array.isArray(node.inputs)) return;
+	node.inputs = node.inputs.filter((input) => {
+		const name = String(input?.name || input?.widget?.name || "");
+		if ([USE_LORA_INPUT, "lora_chain_config"].includes(name)) return true;
+		const isBackendWidgetInput = ALL_WIDGETS.includes(name) || BACKEND_WIDGETS.includes(name) || Boolean(input?.widget);
+		return !isBackendWidgetInput || inputHasLink(input);
+	});
+}
+
 function presetLoraExternallyControlled(node) {
 	return Boolean(selectedLoraBoolVariable(node)) || inputConnected(node, USE_LORA_INPUT);
 }
@@ -491,6 +500,7 @@ function presetLoraLinkedControlled(node) {
 
 function syncUseLoraInputVisibility(node) {
 	if (!node || !Array.isArray(node.inputs)) return;
+	pruneLegacyWidgetInputs(node);
 	const index = node.inputs.findIndex((input) => input?.name === USE_LORA_INPUT);
 	const input = index >= 0 ? node.inputs[index] : null;
 	if (selectedLoraBoolVariable(node) && input && !inputHasLink(input)) {
@@ -876,7 +886,7 @@ function createSearchableSelect(node, name, values, onChange, opts = {}) {
 		popup.className = "gjj-mb-popup";
 		popup.style.left = `${Math.round(rect.left)}px`;
 		popup.style.top = `${Math.round(rect.bottom + 4)}px`;
-		popup.style.width = `${Math.max(260, Math.round(rect.width))}px`;
+		popup.style.width = `${Math.round(Math.max(260, Math.round(rect.width)))}px`;
 
 		const input = document.createElement("input");
 		input.className = "gjj-mb-popup-search";
@@ -2068,7 +2078,7 @@ function forceDomPassThrough(node) {
 function estimateNodeHeight(node) {
 	const content = node?.__gjjMBContent;
 	const measured = Math.ceil(Number(content?.scrollHeight || 0)) + 10;
-	return Math.max(128, measured);
+	return Math.round(Math.max(128, measured));
 }
 
 function keepPanelWidgetOutOfSerializedPrefix(node) {
@@ -2094,8 +2104,8 @@ function ensureDom(node) {
 	widget.serialize = false;
 	widget.options = widget.options || {};
 	widget.options.serialize = false;
-	widget.computeSize = (width) => [Math.max(MIN_NODE_WIDTH, Number(width || currentNodeWidth(node))), estimateNodeHeight(node)];
-	widget.getHeight = () => estimateNodeHeight(node);
+	widget.computeSize = (width) => [Math.round(Number(width || currentNodeWidth(node))), estimateNodeHeight(node)];
+	widget.getHeight = () => Math.round(estimateNodeHeight(node));
 	node.__gjjMBWidget = widget;
 	forceDomPassThrough(node);
 	setTimeout(() => forceDomPassThrough(node), 80);
@@ -2257,8 +2267,8 @@ function openLoraVariablePicker(node) {
 		"font:12px system-ui,'Microsoft YaHei',sans-serif",
 	].join(";");
 	const rect = node.__gjjMBLoraVariableButton?.getBoundingClientRect?.() || { left: 24, bottom: 80 };
-	popup.style.left = `${Math.max(12, Math.min(window.innerWidth - 460, rect.left || 24))}px`;
-	popup.style.top = `${Math.max(12, Math.min(window.innerHeight - 540, (rect.bottom || 80) + 6))}px`;
+	popup.style.left = `${Math.round(Math.max(12, Math.min(window.innerWidth - 460, rect.left || 24)))}px`;
+	popup.style.top = `${Math.round(Math.max(12, Math.min(window.innerHeight - 540, (rect.bottom || 80) + 6)))}px`;
 
 	const header = document.createElement("div");
 	header.style.cssText = "display:flex;align-items:center;gap:8px;";
@@ -2447,7 +2457,10 @@ function makePresetLoraRow(node, item, loras) {
 function renderPanel(node) {
 	const state = ensureState(node);
 	if (!state.folders) {
-		if (!state.loading) refreshBackendLists(node, true);
+		if (!state.loading && !node.__gjjMBBackendListsRequested) {
+			node.__gjjMBBackendListsRequested = true;
+			refreshBackendLists(node, true);
+		}
 		return;
 	}
 	if (node.__gjjMBRendering) return;
@@ -2855,8 +2868,8 @@ function renderPanel(node) {
 
 function refreshNode(node) {
 	if (!node) return;
-	const width = rememberNodeWidth(node);
-	const height = estimateNodeHeight(node);
+	const width = Math.round(rememberNodeWidth(node));
+	const height = Math.round(estimateNodeHeight(node));
 	if (!node.__gjjMBSizing && (Math.abs(Number(node.size?.[0] || 0) - width) > 1 || Math.abs(Number(node.size?.[1] || 0) - height) > 1)) {
 		node.__gjjMBSizing = true;
 		try { node.setSize?.([width, height]); }
@@ -2878,16 +2891,25 @@ function stabilize(node) {
 	syncUseLoraInputVisibility(node);
 	hideNativeWidgets(node);
 	repairOutputs(node);
-	refreshBackendLists(node, false).finally(() => {
-		if (!ensureState(node).folders) return;
+	const state = ensureState(node);
+	if (!state.folders && !node.__gjjMBBackendListsRequested) {
+		node.__gjjMBBackendListsRequested = true;
+		refreshBackendLists(node, false).finally(() => {
+			if (!ensureState(node).folders) return;
+			applyPreset(node, false);
+			renderPanel(node);
+		});
+		return;
+	}
+	if (state.folders) {
 		applyPreset(node, false);
 		renderPanel(node);
-	});
+	}
 }
 
 function schedule(node, delay = 0) {
 	clearTimeout(node.__gjjMBTimer);
-	node.__gjjMBTimer = setTimeout(() => stabilize(node), delay);
+	node.__gjjMBTimer = setTimeout(() => stabilize(node), Math.round(Number(delay) || 0));
 }
 
 function findModelBundleNodeForPromptId(graph, promptId) {
@@ -3021,16 +3043,12 @@ app.registerExtension({
 		installVariablePromptPatch();
 		if (!window.__gjjModelBundleVariableListener) {
 			window.__gjjModelBundleVariableListener = true;
-			window.addEventListener("gjj-template-params-updated", () => {
+			const refreshVariableUsers = () => {
 				for (const node of app.graph?._nodes || []) {
-					if (node?.comfyClass === TARGET_NODE) schedule(node, 0);
+					if (node?.comfyClass === TARGET_NODE && selectedLoraBoolVariable(node)) schedule(node, 80);
 				}
-			});
-			window.addEventListener("gjj-template-set-variables-updated", () => {
-				for (const node of app.graph?._nodes || []) {
-					if (node?.comfyClass === TARGET_NODE) schedule(node, 0);
-				}
-			});
+			};
+			window.addEventListener("gjj-template-params-updated", refreshVariableUsers);
 		}
 		for (const node of app.graph?._nodes || []) {
 			if (node?.comfyClass === TARGET_NODE) stabilize(node);

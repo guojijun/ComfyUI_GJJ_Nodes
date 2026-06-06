@@ -92,8 +92,19 @@ function inputHasLink(input) {
 	return input.link != null;
 }
 
+function pruneLegacyWidgetInputs(node) {
+	if (!node || !Array.isArray(node.inputs)) return;
+	node.inputs = node.inputs.filter((input) => {
+		const name = String(input?.name || input?.widget?.name || "");
+		if (name === BOOLEAN_INPUT) return true;
+		const isHiddenWidgetInput = [BOOLEAN_WIDGET, TEMPLATE_WIDGET].includes(name) || Boolean(input?.widget);
+		return !isHiddenWidgetInput || inputHasLink(input);
+	});
+}
+
 function syncBooleanInputVisibility(node) {
 	if (!node || !Array.isArray(node.inputs)) return;
+	pruneLegacyWidgetInputs(node);
 	const selected = selectedVariable(node);
 	const index = node.inputs.findIndex((input) => input?.name === BOOLEAN_INPUT);
 	const input = index >= 0 ? node.inputs[index] : null;
@@ -433,25 +444,25 @@ function collapseWidget(widget) {
 
 function currentNodeWidth(node) {
 	const width = Number(node?.size?.[0]);
-	return Number.isFinite(width) && width > 0 ? width : DEFAULT_WIDTH;
+	return Number.isFinite(width) && width > 0 ? Math.round(width) : DEFAULT_WIDTH;
 }
 
 function domHeight(node) {
 	const container = node?.__gjjTemplateBoolContainer;
-	return Math.max(66, Math.ceil(container?.scrollHeight || container?.offsetHeight || 66) + 8);
+	return Math.round(Math.max(66, Math.ceil(container?.scrollHeight || container?.offsetHeight || 66) + 8));
 }
 
 function refreshNode(node, resize = true) {
 	if (!node) return;
 	const widget = node.__gjjTemplateBoolWidget;
 	if (widget) {
-		widget.computeSize = (width) => [Number(width || currentNodeWidth(node)), domHeight(node)];
-		widget.getHeight = () => domHeight(node);
+		widget.computeSize = (width) => [Math.round(Number(width || currentNodeWidth(node))), domHeight(node)];
+		widget.getHeight = () => Math.round(domHeight(node));
 	}
 	if (resize && !node.__gjjTemplateBoolSizing) {
 		node.__gjjTemplateBoolSizing = true;
 		try {
-			node.setSize?.([currentNodeWidth(node), domHeight(node)]);
+			node.setSize?.([Math.round(currentNodeWidth(node)), Math.round(domHeight(node))]);
 		} finally {
 			requestAnimationFrame(() => { node.__gjjTemplateBoolSizing = false; });
 		}
@@ -468,7 +479,7 @@ function saveTemplate(node, template) {
 
 function saveSize(node) {
 	node.properties = node.properties || {};
-	node.properties[SAVED_SIZE] = [Number(node.size?.[0] || DEFAULT_WIDTH), Number(node.size?.[1] || 80)];
+	node.properties[SAVED_SIZE] = [Math.round(Number(node.size?.[0] || DEFAULT_WIDTH)), Math.round(Number(node.size?.[1] || 80))];
 }
 
 function renderRows(node) {
@@ -568,8 +579,8 @@ function openVariablePicker(node) {
 		"font:12px system-ui,'Microsoft YaHei',sans-serif",
 	].join(";");
 	const rect = node.__gjjTemplateBoolVariableButton?.getBoundingClientRect?.() || { left: 24, bottom: 80 };
-	popup.style.left = `${Math.max(12, Math.min(window.innerWidth - 480, rect.left || 24))}px`;
-	popup.style.top = `${Math.max(12, Math.min(window.innerHeight - 560, (rect.bottom || 80) + 6))}px`;
+	popup.style.left = `${Math.round(Math.max(12, Math.min(window.innerWidth - 480, rect.left || 24)))}px`;
+	popup.style.top = `${Math.round(Math.max(12, Math.min(window.innerHeight - 560, (rect.bottom || 80) + 6)))}px`;
 
 	const header = document.createElement("div");
 	header.style.cssText = "display:flex;align-items:center;gap:8px;";
@@ -818,8 +829,8 @@ function ensureDom(node) {
 		hideOnZoom: false,
 	});
 	if (widget) {
-		widget.computeSize = (width) => [Number(width || currentNodeWidth(node)), domHeight(node)];
-		widget.getHeight = () => domHeight(node);
+		widget.computeSize = (width) => [Math.round(Number(width || currentNodeWidth(node))), domHeight(node)];
+		widget.getHeight = () => Math.round(domHeight(node));
 		node.__gjjTemplateBoolWidget = widget;
 	}
 }
@@ -840,7 +851,7 @@ function stabilize(node) {
 
 function scheduleStabilize(node, ms = 0) {
 	clearTimeout(node.__gjjTemplateBoolTimer);
-	node.__gjjTemplateBoolTimer = setTimeout(() => stabilize(node), ms);
+	node.__gjjTemplateBoolTimer = setTimeout(() => stabilize(node), Math.round(Number(ms) || 0));
 }
 
 function findBoolParamsNodeForPromptId(graph, promptId) {
@@ -925,7 +936,7 @@ app.registerExtension({
 				this.properties[SELECTED_VARIABLE_PROPERTY] = props[SELECTED_VARIABLE_PROPERTY];
 			}
 			if (Array.isArray(props[SAVED_SIZE])) {
-				this.__gjjTemplateBoolSavedSize = props[SAVED_SIZE].map(Number);
+				this.__gjjTemplateBoolSavedSize = props[SAVED_SIZE].map((value) => Math.round(Number(value) || 0));
 				this.size = [...this.__gjjTemplateBoolSavedSize];
 			}
 			scheduleStabilize(this, 0);
@@ -976,16 +987,14 @@ app.registerExtension({
 		installPromptPatch();
 		if (!window.__gjjTemplateBoolVariableListener) {
 			window.__gjjTemplateBoolVariableListener = true;
-			window.addEventListener("gjj-template-params-updated", () => {
+			const refreshVariableUsers = () => {
 				for (const node of app.graph?._nodes || []) {
-					if (node?.comfyClass === TARGET_NODE || node?.type === TARGET_NODE) scheduleStabilize(node, 0);
+					if ((node?.comfyClass === TARGET_NODE || node?.type === TARGET_NODE) && selectedVariable(node)) {
+						scheduleStabilize(node, 80);
+					}
 				}
-			});
-			window.addEventListener("gjj-template-set-variables-updated", () => {
-				for (const node of app.graph?._nodes || []) {
-					if (node?.comfyClass === TARGET_NODE || node?.type === TARGET_NODE) scheduleStabilize(node, 0);
-				}
-			});
+			};
+			window.addEventListener("gjj-template-params-updated", refreshVariableUsers);
 		}
 		for (const node of app.graph?._nodes || []) {
 			if (node?.comfyClass === TARGET_NODE) stabilize(node);

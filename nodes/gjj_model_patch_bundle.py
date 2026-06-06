@@ -117,6 +117,22 @@ def _required_sage_module_name(sage_attention: str) -> str:
 def _is_sage_dependency_available(sage_attention: str) -> bool:
     return importlib.util.find_spec(_required_sage_module_name(sage_attention)) is not None
 
+
+def _as_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "enable", "enabled", "是", "真", "开", "开启", "启用"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "disable", "disabled", "否", "假", "关", "关闭", "禁用", ""}:
+        return False
+    return bool(value)
+
+
 PATCH_BUNDLE_HELP = {
     "title": "GJJ · ⚡ 模型补丁三合一",
     "description": "把 SageAttention、FP16 累积设置、LTXV FeedForward 分块合并为一个双路 MODEL 补丁节点；高模和低模各自 clone、各走各线。",
@@ -626,26 +642,32 @@ class GJJ_ModelPatchBundle:
         if model is None:
             raise RuntimeError(f"未接入{channel_name} MODEL。")
 
+        enable_sage = _as_bool(启用SageAttention)
+        allow_compile = _as_bool(允许Sage编译)
+        enable_fp16_accumulation = _as_bool(启用FP16累积设置)
+        fp16_accumulation = _as_bool(FP16累积)
+        enable_ltxv_chunk = _as_bool(启用LTXV前馈分块)
+
         skip_sage = False
-        if 启用SageAttention and not _is_sage_dependency_available(SageAttention模式):
+        if enable_sage and not _is_sage_dependency_available(SageAttention模式):
             skip_sage = True
             logging.warning("[GJJ] %s缺少 %s，已自动跳过 SageAttention 并继续运行其它补丁。", channel_name, _required_sage_module_name(SageAttention模式))
             send_dependency_model_notice(_ENVIRONMENT_REPORT, unique_id=unique_id)
 
-        effective_sage_attention = bool(启用SageAttention and not skip_sage)
-        needs_clone = bool(effective_sage_attention or 启用FP16累积设置 or 启用LTXV前馈分块)
+        effective_sage_attention = bool(enable_sage and not skip_sage)
+        needs_clone = bool(effective_sage_attention or enable_fp16_accumulation or enable_ltxv_chunk)
         if not needs_clone:
             return model
 
         model_clone = model.clone()
         try:
             if effective_sage_attention:
-                _apply_sage_attention(model_clone, SageAttention模式, bool(允许Sage编译), unique_id=unique_id)
+                _apply_sage_attention(model_clone, SageAttention模式, allow_compile, unique_id=unique_id)
 
-            if 启用FP16累积设置:
-                _apply_fp16_accumulation_callback(model_clone, bool(FP16累积))
+            if enable_fp16_accumulation:
+                _apply_fp16_accumulation_callback(model_clone, fp16_accumulation)
 
-            if 启用LTXV前馈分块:
+            if enable_ltxv_chunk:
                 _apply_ltxv_feedforward_chunk(model_clone, int(分块数量), int(分块阈值))
 
             return model_clone

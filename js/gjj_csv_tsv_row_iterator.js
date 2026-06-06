@@ -37,6 +37,33 @@ let activeRun = null;
 let autoQueueTimer = null;
 let queuePatched = false;
 let patchRetryCount = 0;
+let refreshAllCsvNodesTimer = null;
+let refreshingAllCsvNodes = false;
+
+function refreshAllCsvNodes() {
+	if (refreshingAllCsvNodes) {
+		return;
+	}
+	refreshingAllCsvNodes = true;
+	try {
+		for (const node of csvNodes()) {
+			stabilizeOutputs(node);
+			dirty(node);
+		}
+	} finally {
+		refreshingAllCsvNodes = false;
+	}
+}
+
+function scheduleRefreshAllCsvNodes() {
+	if (refreshAllCsvNodesTimer) {
+		clearTimeout(refreshAllCsvNodesTimer);
+	}
+	refreshAllCsvNodesTimer = setTimeout(() => {
+		refreshAllCsvNodesTimer = null;
+		refreshAllCsvNodes();
+	}, 80);
+}
 
 function dirty(node) {
 	node?.setDirtyCanvas?.(true, true);
@@ -1035,11 +1062,8 @@ app.registerExtension({
 			compactNode(node);
 		}
 
-		app.graph.on("change:connections", () => {
-			for (const node of csvNodes()) {
-				stabilizeOutputs(node);
-				dirty(node);
-			}
-		});
+		if (typeof app.graph?.on === "function") {
+			app.graph.on("change:connections", scheduleRefreshAllCsvNodes);
+		}
 	},
 });

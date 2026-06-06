@@ -82,6 +82,52 @@ def apply_opacity(image: Image.Image, opacity: float) -> Image.Image:
     # 合并通道
     return Image.merge('RGBA', (r, g, b, a))
 
+
+def auto_remove_watermark_background(image: Image.Image) -> Image.Image:
+    """自动把白底或黑底水印背景转成透明。"""
+    background_threshold = 3.0
+    rgba = image.convert("RGBA")
+    arr = np.array(rgba).astype(np.float32)
+    rgb = arr[:, :, :3]
+    alpha = arr[:, :, 3]
+    height, width = alpha.shape
+    if height < 2 or width < 2:
+        return rgba
+
+    border = max(1, min(6, height // 12, width // 12))
+    edge_mask = np.zeros((height, width), dtype=bool)
+    edge_mask[:border, :] = True
+    edge_mask[-border:, :] = True
+    edge_mask[:, :border] = True
+    edge_mask[:, -border:] = True
+    visible_edge = edge_mask & (alpha > 8)
+    if not np.any(visible_edge):
+        return rgba
+
+    edge_rgb = rgb[visible_edge]
+    white_dist = np.linalg.norm(edge_rgb - 255.0, axis=1)
+    black_dist = np.linalg.norm(edge_rgb, axis=1)
+    white_score = float(np.mean(white_dist < background_threshold))
+    black_score = float(np.mean(black_dist < background_threshold))
+
+    if max(white_score, black_score) < 0.35:
+        return rgba
+
+    target = 255.0 if white_score >= black_score else 0.0
+    dist = np.linalg.norm(rgb - target, axis=2)
+    hard = 18.0
+    feather = 92.0
+    keep = np.clip((dist - hard) / (feather - hard), 0.0, 1.0)
+    keep = keep * keep * (3.0 - 2.0 * keep)
+    keep[keep < 0.08] = 0.0
+
+    # 白/黑底抗锯齿会把背景色混进边缘 RGB；先反混色再写 alpha，减少白边/黑边。
+    safe_keep = np.maximum(keep[:, :, None], 0.001)
+    arr[:, :, :3] = np.clip((rgb - target * (1.0 - keep[:, :, None])) / safe_keep, 0, 255)
+    arr[:, :, 3] = alpha * keep
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), mode="RGBA")
+
+
 def tensor_to_pil(tensor):
     """Convert torch tensor to PIL Image
 
@@ -133,26 +179,18 @@ def pil_to_tensor(image):
     # 转换为numpy数组
     np_img = np.array(image)
 
-    # 调试：打印 numpy 数组信息
-    print(f"[DEBUG pil_to_tensor] np_img.shape: {np_img.shape}, np_img.ndim: {np_img.ndim}, dtype: {np_img.dtype}")
-
     # 确保是3维数组 [H, W, C]
     if np_img.ndim == 2:
         # 如果是灰度图，扩展为3通道
-        print(f"[WARNING] 检测到2D图像，扩展为3通道")
         np_img = np.stack([np_img] * 3, axis=-1)
     elif np_img.ndim == 3 and np_img.shape[2] == 4:
         # 如果是 RGBA，转换为 RGB
-        print(f"[DEBUG] RGBA 转 RGB")
         np_img = np_img[:, :, :3]
-    elif np_img.ndim == 3 and np_img.shape[2] != 3:
-        print(f"[WARNING] 通道数异常: {np_img.shape[2]}")
 
     # 转换为 float32 并归一化
     np_img = np_img.astype(np.float32) / 255.0
 
     tensor = torch.from_numpy(np_img)
-    print(f"[DEBUG pil_to_tensor] 返回 Tensor shape: {tensor.shape}")
 
     return tensor
 
@@ -175,7 +213,7 @@ class GJJ_TextOverlay:
     NAME = "GJJ_TextOverlay"
     DISPLAY_NAME = "GJJ · 📝 文本图片叠加"
     CATEGORY = "GJJ"
-    DESCRIPTION = "将文本或 RGBA 水印叠加到背景图上，支持批量处理。覆盖文本可设置透明度。"
+    DESCRIPTION = "将文本或水印叠加到背景图上，支持批量处理；水印图会自动探测并去除白底或黑底。"
     SEARCH_ALIASES = ["text overlay", "text image overlay", "水印", "叠加", "图片", "批量", "batch"]
 
     FUNCTION = "run"
@@ -204,11 +242,7 @@ class GJJ_TextOverlay:
                 }),
                 "watermark_image": (MIXED_BATCH_IMAGE_TYPE, {
                     "display_name": "水印图",
-                    "tooltip": "可选，水印图像（RGB 格式）；支持单图/批量输入",
-                }),
-                "watermark_mask": ("MASK", {
-                    "display_name": "水印透明通道",
-                    "tooltip": "可选，水印图像的 Alpha 透明通道（灰度 MASK）；与水印图配合使用实现透明叠加",
+                    "tooltip": "可选，水印图像；未连接透明通道时会自动探测并去除白底或黑底，支持单图/批量输入。",
                 }),
                 "split_char": ("STRING", {
                     "default": "_",
@@ -293,6 +327,42 @@ class GJJ_TextOverlay:
                     "display_name": "Y位置",
                     "tooltip": "位置模式：0.0-1.0=百分比（如0.5=50%位置），>1.0=像素（如100=100像素）",
                 }),
+                "text_x": ("FLOAT", {
+                    "default": -1.0,
+                    "min": -1.0,
+                    "step": 0.01,
+                    "display": "hidden",
+                    "hidden": True,
+                    "display_name": "文字X位置",
+                    "tooltip": "内部使用：文字 X 位置。-1 表示沿用旧版 X位置。",
+                }),
+                "text_y": ("FLOAT", {
+                    "default": -1.0,
+                    "min": -1.0,
+                    "step": 0.01,
+                    "display": "hidden",
+                    "hidden": True,
+                    "display_name": "文字Y位置",
+                    "tooltip": "内部使用：文字 Y 位置。-1 表示沿用旧版 Y位置。",
+                }),
+                "watermark_x": ("FLOAT", {
+                    "default": -1.0,
+                    "min": -1.0,
+                    "step": 0.01,
+                    "display": "hidden",
+                    "hidden": True,
+                    "display_name": "水印X位置",
+                    "tooltip": "内部使用：水印 X 位置。-1 表示沿用旧版 X位置。",
+                }),
+                "watermark_y": ("FLOAT", {
+                    "default": -1.0,
+                    "min": -1.0,
+                    "step": 0.01,
+                    "display": "hidden",
+                    "hidden": True,
+                    "display_name": "水印Y位置",
+                    "tooltip": "内部使用：水印 Y 位置。-1 表示沿用旧版 Y位置。",
+                }),
                 "color_hex": ("STRING", {
                     "default": "#FFD700",
                     "display_name": "文字颜色",
@@ -328,7 +398,6 @@ class GJJ_TextOverlay:
             background_image,
             texts="",
             watermark_image=None,
-            watermark_mask=None,
             split_char="_",
             indexes="1,2",
             text_opacity=1.0,
@@ -342,6 +411,10 @@ class GJJ_TextOverlay:
             font_size=48,
             x=50,
             y=64,
+            text_x=-1.0,
+            text_y=-1.0,
+            watermark_x=-1.0,
+            watermark_y=-1.0,
             color_hex="#FFD700",
             stroke_color_hex="#000000",
             use_stroke=True,
@@ -352,6 +425,10 @@ class GJJ_TextOverlay:
         stroke_width = max(0, int(stroke_width))
         x = float(x)
         y = float(y)
+        text_x = x if float(text_x) < 0 else float(text_x)
+        text_y = y if float(text_y) < 0 else float(text_y)
+        watermark_x = x if float(watermark_x) < 0 else float(watermark_x)
+        watermark_y = y if float(watermark_y) < 0 else float(watermark_y)
         text_opacity = float(text_opacity)
         watermark_opacity = float(watermark_opacity)
 
@@ -399,6 +476,8 @@ class GJJ_TextOverlay:
                 final_text = "\n".join(items)
         else:
             final_text = ""
+
+        final_text = re.sub(r"\s*\n\s*", " ", final_text).strip()
 
         # 文件名
         filename = re.sub(r'[^a-zA-Z0-9\u4e00-\u9fff]', '_', final_text)[:150] or "text"
@@ -450,9 +529,6 @@ class GJJ_TextOverlay:
             bg_pil = tensor_to_pil(bg_tensor).convert("RGBA")
             canvas_width, canvas_height = bg_pil.size
 
-            # 调试：打印输入图像信息
-            print(f"[DEBUG] 输入图像 {i}: PIL mode={bg_pil.mode}, size={bg_pil.size}")
-
             # 创建文字图层
             text_layer = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
             draw = ImageDraw.Draw(text_layer)
@@ -474,8 +550,8 @@ class GJJ_TextOverlay:
                 line_height = ch + spacing + 10  # 10px 额外行间距
 
                 # 解析起始位置
-                start_x = resolve_axis_position(x, canvas_width)
-                start_y = resolve_axis_position(y, canvas_height)
+                start_x = resolve_axis_position(text_x, canvas_width)
+                start_y = resolve_axis_position(text_y, canvas_height)
 
                 # 横竖排版绘制
                 if is_vertical_direction(direction):
@@ -504,37 +580,7 @@ class GJJ_TextOverlay:
             if i < len(watermark_images):
                 wm_tensor = watermark_images[i]
                 wm_pil = tensor_to_pil(wm_tensor).convert("RGBA")
-
-                # 关键修复：如果有 watermark_mask，将其合成到水印的 Alpha 通道
-                if watermark_mask is not None:
-                    # 获取当前图片对应的 mask
-                    mask_tensor = watermark_mask
-
-                    # 处理 mask 的批次维度
-                    if mask_tensor.ndim == 4:
-                        # 批量 mask，取对应的索引
-                        mask_idx = i if mask_tensor.shape[0] > 1 else 0
-                        mask_tensor = mask_tensor[mask_idx]
-
-                    # mask 可能是 [H, W] 或 [H, W, 1]
-                    if mask_tensor.ndim == 3:
-                        mask_tensor = mask_tensor.squeeze(-1)
-
-                    # 转换为 numpy 数组
-                    mask_np = mask_tensor.cpu().numpy()
-
-                    # 归一化到 0-255
-                    if mask_np.max() <= 1.0:
-                        mask_np = (mask_np * 255).astype(np.uint8)
-                    else:
-                        mask_np = mask_np.astype(np.uint8)
-
-                    # 调整 mask 尺寸到水印大小
-                    mask_pil = Image.fromarray(mask_np, mode="L")
-                    mask_pil = mask_pil.resize(wm_pil.size, Image.LANCZOS)
-
-                    # 将 mask 设置为水印的 Alpha 通道
-                    wm_pil.putalpha(mask_pil)
+                wm_pil = auto_remove_watermark_background(wm_pil)
 
                 # 应用水印宽度缩放
                 if watermark_width != 1.0:
@@ -548,8 +594,8 @@ class GJJ_TextOverlay:
                     wm_pil = apply_opacity(wm_pil, watermark_opacity)
 
                 # 确定水印位置
-                wx = int(resolve_axis_position(x, canvas_width))
-                wy = int(resolve_axis_position(y, canvas_height))
+                wx = int(resolve_axis_position(watermark_x, canvas_width))
+                wy = int(resolve_axis_position(watermark_y, canvas_height))
 
                 # 创建水印图层以支持位置偏移
                 watermark_layer = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
@@ -557,14 +603,7 @@ class GJJ_TextOverlay:
 
                 composite = Image.alpha_composite(composite, watermark_layer)
 
-            # 转换为tensor
-            # 调试：打印图像信息
-            print(f"[DEBUG] 合成后图像 {i}: PIL mode={composite.mode}, size={composite.size}")
-
             comp_out = pil_to_tensor(composite.convert("RGB"))
-
-            # 调试：打印 Tensor 形状
-            print(f"[DEBUG] 输出 Tensor {i} shape: {comp_out.shape}, ndim: {comp_out.ndim}")
 
             composite_outputs.append(comp_out)
 

@@ -179,6 +179,10 @@ function selectedVariables(node) {
 	return uniqueNames(node?.properties?.[SELECTED_VARIABLES_PROPERTY] || []);
 }
 
+function variableCompactMode(node) {
+	return variableModeEnabled(node) && selectedVariables(node).length > 0;
+}
+
 function setSelectedVariables(node, names) {
 	node.properties = node.properties || {};
 	node.properties[SELECTED_VARIABLES_PROPERTY] = uniqueNames(names).slice(0, MAX_INPUTS);
@@ -432,6 +436,22 @@ function ensureTrailingEmptyInput(node) {
 	}
 	if (inputHasLink(inputs[inputs.length - 1]) && inputs.length < MAX_INPUTS) {
 		addDynamicInput(node);
+	}
+}
+
+function hideUnlinkedVariableInputs(node) {
+	if (!variableCompactMode(node)) {
+		return;
+	}
+	const inputs = getValueInputs(node);
+	if (inputs.some(inputHasLink)) {
+		return;
+	}
+	for (const input of [...inputs].reverse()) {
+		const slot = node.inputs.indexOf(input);
+		if (slot >= 0) {
+			node.removeInput(slot);
+		}
 	}
 }
 
@@ -840,15 +860,17 @@ function updatePresetButtons(node) {
 }
 
 function updateAdvancedVisibility(node) {
+	const compact = variableCompactMode(node);
 	const open = isAdvancedOpen(node);
 	if (node.__gjjCalculatorAdvancedWrap) {
-		node.__gjjCalculatorAdvancedWrap.style.display = open ? "flex" : "none";
+		node.__gjjCalculatorAdvancedWrap.style.display = compact ? "none" : (open ? "flex" : "none");
 	}
 	if (node.__gjjCalculatorAdvancedButton) {
 		node.__gjjCalculatorAdvancedButton.textContent = open ? "⏮️ 收起" : "⚙️ 更多";
-		node.__gjjCalculatorAdvancedButton.title = open ? "隐藏高级计算按钮" : "显示高级计算按钮";
+		node.__gjjCalculatorAdvancedButton.title = compact ? "变量模式下已自动隐藏高级按钮。" : (open ? "隐藏高级计算按钮" : "显示高级计算按钮");
 		node.__gjjCalculatorAdvancedButton.style.borderColor = open ? "#7fa7b3" : "#465960";
 		node.__gjjCalculatorAdvancedButton.style.background = open ? "#20333b" : "#172026";
+		node.__gjjCalculatorAdvancedButton.style.display = compact ? "none" : "";
 	}
 }
 
@@ -1180,8 +1202,8 @@ function openVariablePicker(node) {
 		"font:12px system-ui,'Microsoft YaHei',sans-serif",
 	].join(";");
 	const rect = node.__gjjCalculatorVariableButton?.getBoundingClientRect?.() || { left: 24, bottom: 80 };
-	popup.style.left = `${Math.max(12, Math.min(window.innerWidth - 540, rect.left || 24))}px`;
-	popup.style.top = `${Math.max(12, Math.min(window.innerHeight - 620, (rect.bottom || 80) + 6))}px`;
+	popup.style.left = `${Math.round(Math.max(12, Math.min(window.innerWidth - 540, rect.left || 24)))}px`;
+	popup.style.top = `${Math.round(Math.max(12, Math.min(window.innerHeight - 620, (rect.bottom || 80) + 6)))}px`;
 
 	const header = document.createElement("div");
 	header.style.cssText = "display:flex;align-items:center;gap:8px;";
@@ -1288,8 +1310,9 @@ function rebuildInputButtons(node) {
 	if (advancedInputRow) {
 		advancedInputRow.textContent = "";
 	}
+	const compact = variableCompactMode(node);
 	const inputs = getValueInputs(node);
-	for (const input of inputs) {
+	for (const input of compact ? inputs.filter(inputHasLink) : inputs) {
 		const index = getInputIndex(input.name);
 		const variable = `x${index}`;
 		const formulaName = inputAliasName(node, input);
@@ -1315,7 +1338,10 @@ function rebuildInputButtons(node) {
 		});
 	}
 	for (const button of node.__gjjCalculatorPresetButtons) {
-		row.appendChild(button);
+		button.style.display = compact ? "none" : "";
+		if (!compact) {
+			row.appendChild(button);
+		}
 	}
 	if (!node.__gjjCalculatorAdvancedButton) {
 		const advancedButton = createButton("⚙️ 更多", "显示高级计算按钮和常用公式", () => setAdvancedOpen(node, !isAdvancedOpen(node)));
@@ -1333,10 +1359,17 @@ function rebuildInputButtons(node) {
 		const button = createButton("🧾 公式", "显示/隐藏“公式文本”输出口", () => toggleOutput(node, SHOW_FORMULA_OUTPUT_PROPERTY));
 		node.__gjjCalculatorFormulaOutputButton = button;
 	}
-	row.appendChild(node.__gjjCalculatorAdvancedButton);
 	row.appendChild(node.__gjjCalculatorVariableButton);
-	row.appendChild(node.__gjjCalculatorIntOutputButton);
-	row.appendChild(node.__gjjCalculatorFormulaOutputButton);
+	if (!compact) {
+		row.appendChild(node.__gjjCalculatorAdvancedButton);
+		row.appendChild(node.__gjjCalculatorIntOutputButton);
+		row.appendChild(node.__gjjCalculatorFormulaOutputButton);
+	}
+	node.__gjjCalculatorIntOutputButton.style.display = compact ? "none" : "";
+	node.__gjjCalculatorFormulaOutputButton.style.display = compact ? "none" : "";
+	if (compact) {
+		node.__gjjCalculatorAdvancedButton.style.display = "none";
+	}
 	updateAdvancedVisibility(node);
 	updateOutputButtons(node);
 	updateVariableButtons(node);
@@ -1447,7 +1480,10 @@ function ensureCalculatorPanel(node) {
 		getHeight: () => Math.max(PANEL_MIN_HEIGHT, node.__gjjCalculatorPanelHeight || PANEL_MIN_HEIGHT),
 	});
 	if (widget) {
-		widget.computeSize = (width) => [Math.max(260, width || 260), Math.max(PANEL_MIN_HEIGHT, node.__gjjCalculatorPanelHeight || PANEL_MIN_HEIGHT)];
+		widget.computeSize = (width) => [
+			Math.round(Number(width || node.size?.[0] || 260)),
+			Math.round(Math.max(PANEL_MIN_HEIGHT, node.__gjjCalculatorPanelHeight || PANEL_MIN_HEIGHT)),
+		];
 		widget.last_y = 0;
 	}
 	node.__gjjCalculatorPanel = widget || { element: container };
@@ -1533,6 +1569,7 @@ function stabilizeNode(node) {
 		trimTrailingUnusedInputs(node, desiredInputCount);
 		ensureTrailingEmptyInput(node);
 	}
+	hideUnlinkedVariableInputs(node);
 	renameInputs(node);
 	syncInputNames(node);
 	hideLegacyValueWidgets(node);
@@ -1555,7 +1592,7 @@ function scheduleStabilize(node, ms = 32) {
 
 function scheduleAllCalculators(ms = 0) {
 	for (const node of app.graph?._nodes || []) {
-		if (TARGET_NODES.has(node?.comfyClass) || TARGET_NODES.has(node?.type)) {
+		if ((TARGET_NODES.has(node?.comfyClass) || TARGET_NODES.has(node?.type)) && variableModeEnabled(node) && selectedVariables(node).length) {
 			scheduleStabilize(node, ms);
 		}
 	}
@@ -1694,9 +1731,8 @@ app.registerExtension({
 		installCalculatorPromptPatch();
 		if (!window.__gjjCalculatorTemplateParamsListener) {
 			window.__gjjCalculatorTemplateParamsListener = true;
-			window.addEventListener("gjj-template-params-updated", () => scheduleAllCalculators(0));
-			window.addEventListener("gjj-template-set-variables-updated", () => scheduleAllCalculators(0));
-			window.addEventListener("gjj-variable-broadcast-updated", () => scheduleAllCalculators(0));
+			window.addEventListener("gjj-template-params-updated", () => scheduleAllCalculators(80));
+			window.addEventListener("gjj-variable-broadcast-updated", () => scheduleAllCalculators(80));
 		}
 		for (const node of app.graph?._nodes || []) {
 			if (TARGET_NODES.has(node?.comfyClass)) {

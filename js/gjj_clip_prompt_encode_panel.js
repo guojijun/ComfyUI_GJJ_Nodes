@@ -19,6 +19,7 @@ const POSITIVE_PROMPT_INPUT = "positive_prompt_input";
 const DOM_WIDGET = "gjj_clip_prompt_encode_panel";
 const SAVED_VALUES_PROPERTY = "gjj_clip_prompt_encode_panel_values";
 const TEXTAREA_HEIGHTS_PROPERTY = "gjj_clip_prompt_encode_panel_textarea_heights";
+const POSITIVE_VARIABLE_PROPERTY = "gjj_clip_prompt_positive_variable";
 const ALL_FIELDS = Object.values(FIELD);
 const TEXTAREA_MIN_ROWS = 1;
 const TEXTAREA_FONT_SIZE = 12;
@@ -26,7 +27,6 @@ const TEXTAREA_LINE_HEIGHT = 1.45;
 const TEXTAREA_VERTICAL_CHROME = 16;
 const TEXTAREA_MIN_HEIGHT = Math.ceil(TEXTAREA_FONT_SIZE * TEXTAREA_LINE_HEIGHT * TEXTAREA_MIN_ROWS + TEXTAREA_VERTICAL_CHROME);
 const TEXTAREA_AUTO_MAX_HEIGHT = 190;
-const MIN_NODE_WIDTH = 360;
 const MIN_NODE_HEIGHT = 180;
 const PANEL_MIN_HEIGHT = 120;
 const PANEL_GAP = 7;
@@ -50,6 +50,35 @@ function setValue(node, name, value) {
 	if (w.inputEl && "value" in w.inputEl) w.inputEl.value = value;
 	if (w.element && "value" in w.element) w.element.value = value;
 	saveValues(node);
+}
+
+function selectedPositiveVariable(node) {
+	return String(node?.properties?.[POSITIVE_VARIABLE_PROPERTY] || "").trim();
+}
+
+function setSelectedPositiveVariable(node, name) {
+	if (!node) return;
+	node.properties = node.properties || {};
+	const value = String(name || "").trim();
+	if (value) node.properties[POSITIVE_VARIABLE_PROPERTY] = value;
+	else delete node.properties[POSITIVE_VARIABLE_PROPERTY];
+	updatePositiveVariableButton(node);
+	syncDomFromWidgets(node);
+	scheduleRefreshNode(node);
+}
+
+function variableOptions(node) {
+	const apiObject = globalThis.GJJ_VariableBroadcast;
+	const graph = node?.graph || app.graph;
+	return typeof apiObject?.getVisibleSetOptions === "function" ? (apiObject.getVisibleSetOptions(graph) || []) : [];
+}
+
+function variableOptionDisplay(option) {
+	const value = String(option?.value || "").trim();
+	const label = String(option?.label || value).trim();
+	const match = label.match(/^[^()（）]+[（(]([^()（）]+?)[\s·]+([^()（）]+?)[）)]$/);
+	if (match) return { title: match[2].trim() || value, source: match[1].trim(), value };
+	return { title: label || value, source: "", value };
 }
 
 function toBool(value) {
@@ -400,6 +429,140 @@ function updateTranslateButton(node) {
 	button.disabled = Boolean(node.__gjjClipTranslating);
 }
 
+function updatePositiveVariableButton(node) {
+	const button = node?.__gjjClipPositiveVariableButton;
+	if (!button) return;
+	const name = selectedPositiveVariable(node);
+	const option = variableOptions(node).find((item) => item.value === name);
+	const display = variableOptionDisplay(option || { value: name, label: name });
+	button.dataset.value = name ? "true" : "false";
+	button.textContent = "⚡";
+	button.title = name
+		? `正向提示词变量：${display.title || name}\n来源：${display.source || "变量"}\n手动连接“正向提示词”输入口时，手动连线优先。`
+		: "从 GJJ_TemplateParams 或 GJJ_SetNode 选择正向提示词变量";
+	button.setAttribute("aria-pressed", name ? "true" : "false");
+}
+
+function closePositiveVariablePicker(node) {
+	node?.__gjjClipPositiveVariablePicker?.remove?.();
+	node.__gjjClipPositiveVariablePicker = null;
+}
+
+function openPositiveVariablePicker(node) {
+	closePositiveVariablePicker(node);
+	const options = variableOptions(node);
+	const current = selectedPositiveVariable(node);
+	const popup = document.createElement("div");
+	popup.style.cssText = [
+		"position:fixed",
+		"z-index:10050",
+		"width:min(440px,calc(100vw - 28px))",
+		"max-height:min(520px,calc(100vh - 40px))",
+		"overflow:hidden",
+		"display:flex",
+		"flex-direction:column",
+		"gap:8px",
+		"padding:10px",
+		"border:1px solid #486575",
+		"border-radius:8px",
+		"background:#08151a",
+		"box-shadow:0 18px 46px rgba(0,0,0,.55)",
+		"color:#dce7e2",
+		"font:12px system-ui,'Microsoft YaHei',sans-serif",
+	].join(";");
+	const rect = node.__gjjClipPositiveVariableButton?.getBoundingClientRect?.() || { left: 24, bottom: 80 };
+	popup.style.left = `${Math.round(Math.max(12, Math.min(window.innerWidth - 460, rect.left || 24)))}px`;
+	popup.style.top = `${Math.round(Math.max(12, Math.min(window.innerHeight - 540, (rect.bottom || 80) + 6)))}px`;
+
+	const header = document.createElement("div");
+	header.style.cssText = "display:flex;align-items:center;gap:8px;";
+	const title = document.createElement("div");
+	title.textContent = "⚡ 选择正向提示词变量";
+	title.style.cssText = "font-weight:800;flex:1 1 auto;";
+	const clear = document.createElement("button");
+	clear.type = "button";
+	clear.textContent = "清空";
+	const close = document.createElement("button");
+	close.type = "button";
+	close.textContent = "关闭";
+	for (const button of [clear, close]) {
+		button.style.cssText = "height:28px;border:1px solid #44565f;border-radius:7px;background:#202b31;color:#dce7e2;cursor:pointer;padding:0 8px;font-size:12px;font-weight:650;";
+		protect(button);
+	}
+	header.append(title, clear, close);
+	popup.appendChild(header);
+
+	const search = document.createElement("input");
+	search.placeholder = "搜索变量，点击选择";
+	search.style.cssText = "height:30px;border:1px solid #3f5b66;border-radius:7px;background:#071015;color:#dce7e2;padding:0 10px;outline:none;";
+	popup.appendChild(search);
+	const list = document.createElement("div");
+	list.style.cssText = "overflow:auto;display:flex;flex-direction:column;gap:5px;max-height:360px;padding-right:2px;";
+	popup.appendChild(list);
+
+	function render() {
+		const needle = String(search.value || "").trim().toLowerCase();
+		list.textContent = "";
+		for (const option of options) {
+			const parts = variableOptionDisplay(option);
+			if (!parts.value) continue;
+			if (needle && !`${parts.title} ${parts.source} ${parts.value} ${option.label || ""}`.toLowerCase().includes(needle)) continue;
+			const item = document.createElement("button");
+			item.type = "button";
+			item.style.cssText = [
+				"display:flex",
+				"align-items:center",
+				"gap:8px",
+				"text-align:left",
+				"border:0",
+				"border-radius:7px",
+				"padding:8px 10px",
+				"background:" + (current === parts.value ? "#234a37" : "transparent"),
+				"color:#dce7e2",
+				"cursor:pointer",
+			].join(";");
+			const mark = document.createElement("span");
+			mark.textContent = current === parts.value ? "✓" : "";
+			mark.style.cssText = "width:16px;color:#7de39b;font-weight:900;";
+			const text = document.createElement("span");
+			text.innerHTML = `<b>${parts.title}</b><br><span style="color:#8fa3ad">${parts.source ? `${parts.source} · ` : ""}${parts.value}</span>`;
+			item.append(mark, text);
+			item.addEventListener("mousedown", (event) => { event.preventDefault(); event.stopPropagation(); });
+			item.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				setSelectedPositiveVariable(node, parts.value);
+				closePositiveVariablePicker(node);
+			});
+			list.appendChild(item);
+		}
+		if (!list.children.length) {
+			const empty = document.createElement("div");
+			empty.textContent = options.length ? "没有匹配的变量" : "当前工作流没有可选变量";
+			empty.style.cssText = "padding:14px 10px;color:#9aaab2;text-align:center;";
+			list.appendChild(empty);
+		}
+	}
+	clear.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		setSelectedPositiveVariable(node, "");
+		closePositiveVariablePicker(node);
+	});
+	close.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		closePositiveVariablePicker(node);
+	});
+	search.addEventListener("input", render);
+	protect(search);
+	protect(popup);
+	document.body.appendChild(popup);
+	node.__gjjClipPositiveVariablePicker = popup;
+	render();
+	setTimeout(() => search.focus(), 0);
+}
+
 function updateExternalWatcher(node, active) {
 	if (!active) {
 		clearInterval(node.__gjjClipExternalWatchTimer);
@@ -447,7 +610,7 @@ function measurePanelHeight(node) {
 	}, 0);
 	const gapHeight = Math.max(0, children.length - 1) * PANEL_GAP;
 	const height = Math.ceil(childrenHeight + gapHeight || container.offsetHeight || node?.__gjjClipPromptPanelHeight || PANEL_MIN_HEIGHT);
-	const normalized = Math.max(PANEL_MIN_HEIGHT, height);
+	const normalized = Math.round(Math.max(PANEL_MIN_HEIGHT, height));
 	if (node) node.__gjjClipPromptPanelHeight = normalized;
 	return normalized;
 }
@@ -477,11 +640,11 @@ function getPanelWidgetTop(node) {
 }
 
 function desiredNodeSize(node) {
-	const width = Math.max(1, Number(node?.size?.[0] || MIN_NODE_WIDTH));
-	const height = Math.max(
+	const width = Math.round(Math.max(1, Number(node?.size?.[0] || 1)));
+	const height = Math.round(Math.max(
 		MIN_NODE_HEIGHT,
 		Math.ceil(getPanelWidgetTop(node) + measurePanelHeight(node) + NODE_BOTTOM_PADDING),
-	);
+	));
 	return [width, height];
 }
 
@@ -494,7 +657,7 @@ function refreshNode(node) {
 	const heightChanged = Math.abs(currentHeight - height) > SIZE_EPSILON;
 	if (!node.__gjjClipPromptSizing && (widthChanged || heightChanged)) {
 		node.__gjjClipPromptSizing = true;
-		try { node.setSize?.([width, height]); }
+		try { node.setSize?.([Math.round(width), Math.round(height)]); }
 		finally { requestAnimationFrame(() => { node.__gjjClipPromptSizing = false; }); }
 	}
 	node.setDirtyCanvas?.(true, true);
@@ -506,30 +669,36 @@ function scheduleRefreshNode(node, ms = 0) {
 	clearTimeout(node.__gjjClipPromptRefreshTimer);
 	node.__gjjClipPromptRefreshTimer = setTimeout(() => {
 		requestAnimationFrame(() => refreshNode(node));
-	}, ms);
+	}, Math.round(Number(ms) || 0));
 }
 
 function syncDomFromWidgets(node) {
 	const positiveConnected = isPositivePromptConnected(node);
+	const positiveVariable = selectedPositiveVariable(node);
+	const positiveExternal = positiveConnected || Boolean(positiveVariable);
 	const translationEnabled = isTranslationEnabled(node);
 	const linkedPositive = positiveConnected ? getLinkedPositiveInfo(node) : null;
-	if (positiveConnected && !translationEnabled && String(getValue(node, FIELD.positive, "") || "")) {
+	if (positiveExternal && !translationEnabled && String(getValue(node, FIELD.positive, "") || "")) {
 		setValue(node, FIELD.positive, "");
 	}
 	if (node.__gjjClipPositive) {
-		const nextPositive = positiveConnected
+		const nextPositive = positiveExternal
 			? (translationEnabled ? String(getValue(node, FIELD.positive, "") || "") : "")
 			: String(getValue(node, FIELD.positive, ""));
 		if (node.__gjjClipPositive.value !== nextPositive) node.__gjjClipPositive.value = nextPositive;
 		node.__gjjClipPositive.disabled = false;
-		node.__gjjClipPositive.readOnly = positiveConnected;
+		node.__gjjClipPositive.readOnly = positiveExternal;
 		node.__gjjClipPositive.placeholder = positiveConnected
 			? (translationEnabled ? "翻译开关已开启：这里显示上游正向提示词的译文" : "已连接外部正向提示词，开启翻译后这里显示译文")
+			: positiveVariable
+				? (translationEnabled ? "已选择正向提示词变量；执行后这里显示译文" : "已选择正向提示词变量，执行时从变量读取")
 			: "输入正面提示词，可写中文后开启翻译";
 		node.__gjjClipPositive.title = positiveConnected
 			? (translationEnabled ? "当前使用左侧“正向提示词”输入口；此处只显示翻译后的文本。" : "当前使用左侧“正向提示词”输入口的外部文本。")
+			: positiveVariable
+				? (translationEnabled ? "当前使用 ⚡ 选择的正向提示词变量；此处只显示翻译后的文本。" : "当前使用 ⚡ 选择的正向提示词变量；手动连接左侧输入口时手动连线优先。")
 			: "中文引号“”内的内容会保持原文。";
-		node.__gjjClipPositive.classList.toggle("external", positiveConnected);
+		node.__gjjClipPositive.classList.toggle("external", positiveExternal);
 		resizeTextarea(node.__gjjClipPositive, node, FIELD.positive);
 	}
 	if (node.__gjjClipNegative && node.__gjjClipNegative.value !== String(getValue(node, FIELD.negative, ""))) {
@@ -553,6 +722,7 @@ function syncDomFromWidgets(node) {
 		node.__gjjClipUnload.textContent = unload ? "✅ 卸载" : "⬜ 卸载";
 	}
 	updateTranslateButton(node);
+	updatePositiveVariableButton(node);
 	updateExternalWatcher(node, positiveConnected && translationEnabled);
 
 	if (positiveConnected && translationEnabled && linkedPositive?.text?.trim()) queueExternalTranslationIfChanged(node, 180);
@@ -799,6 +969,18 @@ function buildDom(node) {
 	});
 	protect(translate);
 
+	const positiveVariable = document.createElement("button");
+	positiveVariable.type = "button";
+	positiveVariable.className = "gjj-clip-prompt-btn";
+	positiveVariable.textContent = "⚡";
+	positiveVariable.title = "从 GJJ_TemplateParams 选择正向提示词变量";
+	positiveVariable.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		openPositiveVariablePicker(node);
+	});
+	protect(positiveVariable);
+
 	const device = document.createElement("select");
 	device.className = "gjj-clip-prompt-select";
 	for (const value of ["auto", "cpu", "gpu"]) {
@@ -829,7 +1011,7 @@ function buildDom(node) {
 	const status = document.createElement("span");
 	status.className = "gjj-clip-prompt-status";
 
-	toolbar.append(zero, translate, device, unload, status);
+	toolbar.append(zero, translate, positiveVariable, device, unload, status);
 
 	const positiveLabel = document.createElement("div");
 	positiveLabel.className = "gjj-clip-prompt-label";
@@ -853,6 +1035,7 @@ function buildDom(node) {
 	node.__gjjClipNegative = negative;
 	node.__gjjClipZeroButton = zero;
 	node.__gjjClipTranslateButton = translate;
+	node.__gjjClipPositiveVariableButton = positiveVariable;
 	node.__gjjClipDevice = device;
 	node.__gjjClipUnload = unload;
 	node.__gjjClipStatus = status;
@@ -870,9 +1053,10 @@ function ensureDom(node) {
 	});
 	if (domWidget) {
 		domWidget.computeSize = (width) => [
-			Math.max(1, Number(width || node.size?.[0] || MIN_NODE_WIDTH)),
-			measurePanelHeight(node),
+			Math.round(Math.max(1, Number(width || node.size?.[0] || 1))),
+			Math.round(measurePanelHeight(node)),
 		];
+		domWidget.getHeight = () => Math.round(measurePanelHeight(node));
 		node.__gjjClipPromptWidget = domWidget;
 		if (Array.isArray(node.widgets)) {
 			const index = node.widgets.indexOf(domWidget);
@@ -895,7 +1079,7 @@ function stabilize(node) {
 
 function schedule(node, ms = 0) {
 	clearTimeout(node.__gjjClipPromptTimer);
-	node.__gjjClipPromptTimer = setTimeout(() => stabilize(node), ms);
+	node.__gjjClipPromptTimer = setTimeout(() => stabilize(node), Math.round(Number(ms) || 0));
 }
 
 function applyBackendTranslation(detail) {
@@ -913,6 +1097,48 @@ function applyBackendTranslation(detail) {
 }
 
 api.addEventListener(TRANSLATED_EVENT, (event) => applyBackendTranslation(event?.detail || {}));
+
+function findClipPromptNodeForPromptId(graph, promptId) {
+	const id = String(promptId || "");
+	const nodes = graph?._nodes || [];
+	const parts = id.split(":").filter(Boolean);
+	const tail = parts.length ? parts[parts.length - 1] : id;
+	return nodes.find((node) => String(node?.id) === id)
+		|| nodes.find((node) => String(node?.id) === tail);
+}
+
+function resolveSelectedPositiveVariable(node) {
+	const name = selectedPositiveVariable(node);
+	const resolver = globalThis.GJJ_VariableBroadcast?.resolveVariableBroadcastSource;
+	if (!name || typeof resolver !== "function") return null;
+	return resolver(node?.graph || app.graph, name);
+}
+
+function patchClipPromptVariablePrompt(promptResult, graph) {
+	const output = promptResult?.output;
+	if (!output) return promptResult;
+	for (const [nodeId, nodeInfo] of Object.entries(output)) {
+		const node = findClipPromptNodeForPromptId(graph, nodeId);
+		if (!node || !TARGET_NODES.has(String(node?.comfyClass || node?.type || ""))) continue;
+		if (!selectedPositiveVariable(node) || isPositivePromptConnected(node)) continue;
+		const resolved = resolveSelectedPositiveVariable(node);
+		if (!Array.isArray(resolved) || resolved.length !== 2 || String(resolved[0]) === String(node.id)) continue;
+		nodeInfo.inputs = nodeInfo.inputs || {};
+		nodeInfo.inputs[POSITIVE_PROMPT_INPUT] = [String(resolved[0]), Number(resolved[1] || 0)];
+	}
+	return promptResult;
+}
+
+function installPositiveVariablePromptPatch() {
+	if (!api.__gjjClipPromptPositiveVariableQueuePatchInstalled && typeof api.queuePrompt === "function") {
+		api.__gjjClipPromptPositiveVariableQueuePatchInstalled = true;
+		const originalQueuePrompt = api.queuePrompt.bind(api);
+		api.queuePrompt = async function (...args) {
+			patchClipPromptVariablePrompt(args[1], app.rootGraph || app.graph);
+			return originalQueuePrompt(...args);
+		};
+	}
+}
 
 app.registerExtension({
 	name: "Comfy.GJJ.CLIPPromptEncodePanel",
@@ -937,6 +1163,13 @@ app.registerExtension({
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
 			const result = originalOnConfigure?.apply(this, [serializedNode, ...args]);
+			const props = serializedNode?.properties || this.properties || {};
+			if (props[POSITIVE_VARIABLE_PROPERTY] !== undefined) {
+				this.properties = this.properties || {};
+				const value = String(props[POSITIVE_VARIABLE_PROPERTY] || "").trim();
+				if (value) this.properties[POSITIVE_VARIABLE_PROPERTY] = value;
+				else delete this.properties[POSITIVE_VARIABLE_PROPERTY];
+			}
 			restoreValues(this, serializedNode);
 			schedule(this, 0);
 			return result;
@@ -946,6 +1179,12 @@ app.registerExtension({
 		nodeType.prototype.onSerialize = function (serializedNode) {
 			saveValues(this, serializedNode);
 			originalOnSerialize?.apply(this, [serializedNode]);
+			if (serializedNode) {
+				serializedNode.properties = serializedNode.properties || {};
+				const selected = selectedPositiveVariable(this);
+				if (selected) serializedNode.properties[POSITIVE_VARIABLE_PROPERTY] = selected;
+				else delete serializedNode.properties[POSITIVE_VARIABLE_PROPERTY];
+			}
 			saveValues(this, serializedNode);
 		};
 
@@ -983,6 +1222,15 @@ app.registerExtension({
 	},
 
 	setup() {
+		installPositiveVariablePromptPatch();
+		if (!window.__gjjClipPromptTemplateParamsListener) {
+			window.__gjjClipPromptTemplateParamsListener = true;
+			window.addEventListener("gjj-template-params-updated", () => {
+				for (const node of app.graph?._nodes || []) {
+					if (TARGET_NODES.has(node?.comfyClass) && selectedPositiveVariable(node)) schedule(node, 80);
+				}
+			});
+		}
 		for (const node of app.graph?._nodes || []) {
 			if (TARGET_NODES.has(node?.comfyClass)) stabilize(node);
 		}

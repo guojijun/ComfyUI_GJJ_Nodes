@@ -25,6 +25,10 @@ GJJ_STANDARDIZE_NODE({
 
 function setTypeColor() {
 	if (!window.LiteGraph) return;
+	window.LiteGraph.default_connection_color_byType ||= {};
+	if (window.LGraphCanvas) {
+		window.LGraphCanvas.link_type_colors ||= {};
+	}
 	if (!window.LiteGraph.default_connection_color_byType[MIXED_BATCH_IMAGE_TYPE]) {
 		window.LiteGraph.default_connection_color_byType[MIXED_BATCH_IMAGE_TYPE] = "#4A90E2";
 	}

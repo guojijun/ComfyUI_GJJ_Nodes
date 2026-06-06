@@ -796,7 +796,22 @@ function setWidgetValue(node, name, value) {
 
 function currentNodeWidth(node) {
 	const width = Number(node?.size?.[0]);
-	return Number.isFinite(width) && width > 0 ? width : DEFAULT_WIDTH;
+	return Number.isFinite(width) && width > 0 ? Math.round(width) : DEFAULT_WIDTH;
+}
+
+function inputHasLink(input) {
+	if (!input) return false;
+	if (Array.isArray(input.link)) return input.link.length > 0;
+	return input.link != null;
+}
+
+function pruneLegacyWidgetInputs(node) {
+	if (!node || !Array.isArray(node.inputs)) return;
+	node.inputs = node.inputs.filter((input) => {
+		const name = String(input?.name || input?.widget?.name || "");
+		const isHiddenWidgetInput = [TEMPLATE_WIDGET, VALUES_WIDGET, SCHEMA_WIDGET].includes(name) || Boolean(input?.widget);
+		return !isHiddenWidgetInput || inputHasLink(input);
+	});
 }
 
 function safeJsonParse(text, fallback) {
@@ -1401,14 +1416,16 @@ function refreshNode(node, options = {}) {
 
 	// 工作流加载后优先尊重保存的节点尺寸，避免 DOM 重建时按 scrollHeight 把节点拉长。
 	if (allowResize && node.__gjjTemplateParamsPreferSavedSize && Array.isArray(node.__gjjTemplateParamsSavedSize)) {
-		const [savedW, savedH] = node.__gjjTemplateParamsSavedSize;
+		const [, savedH] = node.__gjjTemplateParamsSavedSize;
+		const width = currentNodeWidth(node);
+		const height = Math.round(Number(savedH || 0));
 		if (shouldTreatSavedHeightAsBroken(node, savedH)) {
 			node.__gjjTemplateParamsPreferSavedSize = false;
 			clampBrokenHeight(node, "refresh-broken-saved");
-		} else if (!node.__gjjTemplateParamsSizing && savedW > 0 && savedH > 0) {
+		} else if (!node.__gjjTemplateParamsSizing && width > 0 && height > 0) {
 			node.__gjjTemplateParamsSizing = true;
 			try {
-				node.setSize?.([savedW, savedH]);
+				node.setSize?.([width, height]);
 			} finally {
 				requestAnimationFrame(() => { node.__gjjTemplateParamsSizing = false; });
 			}
@@ -1419,7 +1436,7 @@ function refreshNode(node, options = {}) {
 	}
 
 	const width = currentNodeWidth(node);
-	const height = Math.max(80, Math.ceil(node.__gjjTemplateParamsContainer?.scrollHeight || node.size?.[1] || 80) + 12);
+	const height = Math.round(Math.max(80, Math.ceil(node.__gjjTemplateParamsContainer?.scrollHeight || node.size?.[1] || 80) + 12));
 	const currentWidth = Number(node?.size?.[0] || width);
 	const currentHeight = Number(node?.size?.[1] || height);
 	const widthChanged = Math.abs(currentWidth - width) > 1;
@@ -1427,7 +1444,7 @@ function refreshNode(node, options = {}) {
 	if (allowResize && !node.__gjjTemplateParamsSizing && (widthChanged || heightChanged)) {
 		node.__gjjTemplateParamsSizing = true;
 		try {
-			node.setSize?.([width, height]);
+			node.setSize?.([Math.round(width), Math.round(height)]);
 		} finally {
 			requestAnimationFrame(() => { node.__gjjTemplateParamsSizing = false; });
 		}
@@ -1493,15 +1510,15 @@ function setBroadcastEnabled(node, enabled) {
 
 function getNaturalCompactHeight(node) {
 	const container = node.__gjjTemplateParamsContainer;
-	if (!container) return Math.max(80, Number(node?.size?.[1] || 80));
+	if (!container) return Math.round(Math.max(80, Number(node?.size?.[1] || 80)));
 
 	// 设置面板展开时不要收拢，避免正在编辑模板时高度被压回去。
 	const panel = container.querySelector?.(".gjj-template-param-panel");
 	if (panel && panel.style.display === "flex") {
-		return Math.max(80, Math.ceil(container.scrollHeight || 80) + 12);
+		return Math.round(Math.max(80, Math.ceil(container.scrollHeight || 80) + 12));
 	}
 
-	return Math.max(80, Math.ceil(container.scrollHeight || 80) + 12);
+	return Math.round(Math.max(80, Math.ceil(container.scrollHeight || 80) + 12));
 }
 
 function shouldTreatSavedHeightAsBroken(node, savedHeight) {
@@ -1521,11 +1538,12 @@ function clampBrokenHeight(node, reason = "") {
 	if (currentHeight > naturalHeight + MAX_EXTRA_IDLE_HEIGHT) {
 		node.__gjjTemplateParamsSizing = true;
 		try {
-			const width = currentNodeWidth(node);
-			node.setSize?.([width, naturalHeight]);
+			const width = Math.round(currentNodeWidth(node));
+			const height = Math.round(naturalHeight);
+			node.setSize?.([width, height]);
 			node.properties = node.properties || {};
-			node.properties[SAVED_SIZE] = [width, naturalHeight];
-			node.__gjjTemplateParamsSavedSize = [width, naturalHeight];
+			node.properties[SAVED_SIZE] = [width, height];
+			node.__gjjTemplateParamsSavedSize = [width, height];
 			node.__gjjTemplateParamsPreferSavedSize = true;
 		} finally {
 			requestAnimationFrame(() => { node.__gjjTemplateParamsSizing = false; });
@@ -1679,7 +1697,7 @@ function forceRefreshTemplate(node, templateText = null) {
 	if (node.__gjjTemplateParamsPreferSavedSize && Array.isArray(node.__gjjTemplateParamsSavedSize)) {
 		requestAnimationFrame(() => {
 			if (Array.isArray(node.__gjjTemplateParamsSavedSize)) {
-				const [savedW, savedH] = node.__gjjTemplateParamsSavedSize;
+				const [, savedH] = node.__gjjTemplateParamsSavedSize;
 				// 如果保存的是异常长高度，直接丢弃并收拢。
 				if (shouldTreatSavedHeightAsBroken(node, savedH)) {
 					clampBrokenHeight(node, "broken-saved-size");
@@ -1687,7 +1705,7 @@ function forceRefreshTemplate(node, templateText = null) {
 				}
 				node.__gjjTemplateParamsSizing = true;
 				try {
-					node.setSize?.([...node.__gjjTemplateParamsSavedSize]);
+					node.setSize?.([Math.round(currentNodeWidth(node)), Math.round(Number(savedH || 80))]);
 				} finally {
 					requestAnimationFrame(() => { node.__gjjTemplateParamsSizing = false; });
 				}
@@ -1700,18 +1718,24 @@ function forceRefreshTemplate(node, templateText = null) {
 	refreshNode(node);
 }
 
-function saveState(node, template, fields, values) {
+function saveState(node, template, fields, values, options = {}) {
 	node.properties = node.properties || {};
 	const schemaText = JSON.stringify(fields);
 	const valuesText = JSON.stringify(values);
+	const oldTemplate = String(node.properties[SAVED_TEMPLATE] ?? getWidgetValue(node, TEMPLATE_WIDGET, ""));
+	const oldValues = String(node.properties[SAVED_VALUES] ?? getWidgetValue(node, VALUES_WIDGET, ""));
+	const oldSchema = String(node.properties[SAVED_SCHEMA] ?? getWidgetValue(node, SCHEMA_WIDGET, ""));
 	setWidgetValue(node, TEMPLATE_WIDGET, template);
 	setWidgetValue(node, VALUES_WIDGET, valuesText);
 	setWidgetValue(node, SCHEMA_WIDGET, schemaText);
 	node.properties[SAVED_TEMPLATE] = template;
 	node.properties[SAVED_VALUES] = valuesText;
 	node.properties[SAVED_SCHEMA] = schemaText;
-	notifyTemplateParamsUpdated(node);
-	if (broadcastEnabled(node)) notifyBroadcastChanged(node);
+	const changed = oldTemplate !== String(template) || oldValues !== valuesText || oldSchema !== schemaText;
+	if (options.notify !== false && changed) {
+		notifyTemplateParamsUpdated(node);
+		if (broadcastEnabled(node)) notifyBroadcastChanged(node);
+	}
 }
 
 function syncValuesFromDom(node) {
@@ -2122,7 +2146,7 @@ function buildGroupedMediaPreview(node, fields, values) {
 
 function renderRows(node) {
 	const state = normalizeState(node);
-	saveState(node, state.template, state.fields, state.values);
+	saveState(node, state.template, state.fields, state.values, { notify: false });
 	node.__gjjTemplateParamsUpdateCount?.();
 	const rows = node.__gjjTemplateParamsRowsWrap;
 	if (!rows) return;
@@ -2322,7 +2346,7 @@ function buildDom(node) {
 		node.__gjjTemplateParamsPreferSavedSize = false;
 		renderRows(node);
 		node.properties = node.properties || {};
-		node.properties[SAVED_SIZE] = [Number(node.size?.[0] || DEFAULT_WIDTH), Number(node.size?.[1] || 80)];
+		node.properties[SAVED_SIZE] = [Math.round(Number(node.size?.[0] || DEFAULT_WIDTH)), Math.round(Number(node.size?.[1] || 80))];
 	});
 	for (const eventName of ["input", "change", "keydown", "keyup", "wheel", "dblclick", "contextmenu"]) {
 		template.addEventListener(eventName, stop);
@@ -2366,8 +2390,8 @@ function ensureDom(node) {
 	});
 	if (widget) {
 		widget.computeSize = (width) => [
-			Number(width || currentNodeWidth(node)),
-			Math.max(40, Math.ceil(container.scrollHeight || 40)),
+			Math.round(Number(width || currentNodeWidth(node))),
+			Math.round(Math.max(40, Math.ceil(container.scrollHeight || 40))),
 		];
 		node.__gjjTemplateParamsWidget = widget;
 	}
@@ -2376,6 +2400,7 @@ function ensureDom(node) {
 function stabilize(node) {
 	if (!node) return;
 	ensureDom(node);
+	pruneLegacyWidgetInputs(node);
 	collapseNativeWidgets(node);
 	disableStandardStatus(node);
 	updateBroadcastButton(node);
@@ -2390,7 +2415,7 @@ function stabilize(node) {
 	if (node.__gjjTemplateParamsPreferSavedSize && Array.isArray(node.__gjjTemplateParamsSavedSize)) {
 		requestAnimationFrame(() => {
 			if (Array.isArray(node.__gjjTemplateParamsSavedSize)) {
-				const [savedW, savedH] = node.__gjjTemplateParamsSavedSize;
+				const [, savedH] = node.__gjjTemplateParamsSavedSize;
 				// 如果保存的是异常长高度，直接丢弃并收拢。
 				if (shouldTreatSavedHeightAsBroken(node, savedH)) {
 					clampBrokenHeight(node, "broken-saved-size");
@@ -2398,7 +2423,7 @@ function stabilize(node) {
 				}
 				node.__gjjTemplateParamsSizing = true;
 				try {
-					node.setSize?.([...node.__gjjTemplateParamsSavedSize]);
+					node.setSize?.([Math.round(currentNodeWidth(node)), Math.round(Number(savedH || 80))]);
 				} finally {
 					requestAnimationFrame(() => { node.__gjjTemplateParamsSizing = false; });
 				}
@@ -2416,7 +2441,7 @@ function scheduleStabilize(node, ms = 0) {
 		stabilize(node);
 		setTimeout(() => clampBrokenHeight(node, "delayed-1"), 80);
 		setTimeout(() => clampBrokenHeight(node, "delayed-2"), 240);
-	}, ms);
+	}, Math.round(Number(ms) || 0));
 }
 
 app.registerExtension({
@@ -2454,9 +2479,9 @@ app.registerExtension({
 			updateBroadcastButton(this);
 			updateTemplateOutputsButton(this);
 			if (Array.isArray(props[SAVED_SIZE])) {
-				this.__gjjTemplateParamsSavedSize = props[SAVED_SIZE].map(Number);
+				this.__gjjTemplateParamsSavedSize = props[SAVED_SIZE].map((value) => Math.round(Number(value) || 0));
 				this.__gjjTemplateParamsPreferSavedSize = true;
-				this.size = [...this.__gjjTemplateParamsSavedSize];
+				this.size = [Math.round(currentNodeWidth(this)), Math.round(Number(this.__gjjTemplateParamsSavedSize[1] || 80))];
 			} else {
 				// 老工作流没有 gjj_template_params_size，但 serializedNode.size 可能已经被异常高度污染。
 				this.__gjjTemplateParamsPreferSavedSize = false;
@@ -2481,7 +2506,7 @@ app.registerExtension({
 				const naturalHeight = getNaturalCompactHeight(this);
 				const currentHeight = Number(this.size?.[1] || 80);
 				const saveHeight = currentHeight > naturalHeight + MAX_EXTRA_IDLE_HEIGHT ? naturalHeight : currentHeight;
-				serializedNode.properties[SAVED_SIZE] = [Number(this.size?.[0] || DEFAULT_WIDTH), saveHeight];
+				serializedNode.properties[SAVED_SIZE] = [Math.round(Number(this.size?.[0] || DEFAULT_WIDTH)), Math.round(saveHeight)];
 			}
 			return result;
 		};
@@ -2491,7 +2516,7 @@ app.registerExtension({
 			const result = originalOnResize?.apply(this, args);
 			if (!this.__gjjTemplateParamsSizing) {
 				this.properties = this.properties || {};
-				this.properties[SAVED_SIZE] = [Number(this.size?.[0] || DEFAULT_WIDTH), Number(this.size?.[1] || 80)];
+				this.properties[SAVED_SIZE] = [Math.round(Number(this.size?.[0] || DEFAULT_WIDTH)), Math.round(Number(this.size?.[1] || 80))];
 				this.__gjjTemplateParamsSavedSize = [...this.properties[SAVED_SIZE]];
 				this.__gjjTemplateParamsPreferSavedSize = true;
 			}

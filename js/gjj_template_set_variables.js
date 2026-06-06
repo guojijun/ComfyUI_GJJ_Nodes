@@ -10,9 +10,7 @@ const INTERNAL_WIDGETS = new Set([TEMPLATE_WIDGET, VALUES_WIDGET]);
 const OUTPUTS_VISIBLE_PROPERTY = "gjj_template_set_variables_outputs_visible";
 const BROADCAST_PROPERTY = "gjj_variable_broadcast_enabled";
 const SAVED_SIZE = "gjj_template_set_variables_size";
-const MIN_WIDTH = 240;
 const DEFAULT_WIDTH = 300;
-const MAX_AUTO_WIDTH = 340;
 const MIN_HEIGHT = 96;
 const MAX_EXTRA_IDLE_HEIGHT = 72;
 const STYLE_ID = "gjj-template-set-variables-style";
@@ -285,6 +283,26 @@ function notifySetGetNodes(node) {
 			detail: { nodeId: node?.id },
 		}));
 	} catch (_) {}
+}
+
+function currentNodeWidth(node) {
+	const width = Number(node?.size?.[0]);
+	return Number.isFinite(width) && width > 0 ? Math.round(width) : DEFAULT_WIDTH;
+}
+
+function inputHasLink(input) {
+	if (!input) return false;
+	if (Array.isArray(input.link)) return input.link.length > 0;
+	return input.link != null;
+}
+
+function pruneLegacyWidgetInputs(node) {
+	if (!node || !Array.isArray(node.inputs)) return;
+	node.inputs = node.inputs.filter((input) => {
+		const name = String(input?.name || input?.widget?.name || "");
+		const isInternalWidgetInput = INTERNAL_WIDGETS.has(name) || Boolean(input?.widget);
+		return !isInternalWidgetInput || inputHasLink(input);
+	});
 }
 
 function hasOwn(obj, key) {
@@ -836,35 +854,29 @@ function panelIsOpen(node) {
 
 function domWidgetHeight(node) {
 	const container = node?.__gjjTemplateSetContainer;
-	return Math.max(32, Math.ceil(container?.scrollHeight || container?.offsetHeight || 32) + 4);
+	return Math.round(Math.max(32, Math.ceil(container?.scrollHeight || container?.offsetHeight || 32) + 4));
 }
 
 function updateDomWidgetSize(node) {
 	const widget = node.__gjjTemplateSetDomWidget;
 	const container = node.__gjjTemplateSetContainer;
 	if (widget && container) {
-		widget.computeSize = (width) => [Math.max(MIN_WIDTH, Number(width || node.size?.[0] || DEFAULT_WIDTH)), domWidgetHeight(node)];
-		widget.getHeight = () => domWidgetHeight(node);
+		widget.computeSize = (width) => [Math.round(Number(width || currentNodeWidth(node))), domWidgetHeight(node)];
+		widget.getHeight = () => Math.round(domWidgetHeight(node));
 	}
 }
 
 function naturalNodeHeight(node) {
 	updateDomWidgetSize(node);
 	const computed = node?.computeSize?.() || node?.size || [DEFAULT_WIDTH, MIN_HEIGHT];
-	return Math.max(MIN_HEIGHT, Math.ceil(Number(computed?.[1] || MIN_HEIGHT)));
-}
-
-function defaultNodeWidth(currentWidth) {
-	const width = Number(currentWidth || 0);
-	if (!Number.isFinite(width) || width <= 0 || width > MAX_AUTO_WIDTH) return DEFAULT_WIDTH;
-	return Math.max(DEFAULT_WIDTH, width);
+	return Math.round(Math.max(MIN_HEIGHT, Math.ceil(Number(computed?.[1] || MIN_HEIGHT))));
 }
 
 function setNodeSize(node, width, height) {
 	if (!node || node.__gjjTemplateSetSizing) return;
 	node.__gjjTemplateSetSizing = true;
 	try {
-		node.setSize?.([width, height]);
+		node.setSize?.([Math.round(Number(width || currentNodeWidth(node))), Math.round(Number(height || MIN_HEIGHT))]);
 	} finally {
 		defer(() => { node.__gjjTemplateSetSizing = false; });
 	}
@@ -883,8 +895,8 @@ function compactNodeSize(node, force = false) {
 	const savedTooSmall = preferSaved && savedHeight > 0 && savedHeight < naturalHeight - 2;
 
 	if (preferSaved && !savedBroken && !savedTooSmall && !force) {
-		const width = Math.max(MIN_WIDTH, Number(savedSize[0] || DEFAULT_WIDTH));
-		const height = Math.max(MIN_HEIGHT, savedHeight || naturalHeight);
+		const width = currentNodeWidth(node);
+		const height = Math.round(Math.max(MIN_HEIGHT, savedHeight || naturalHeight));
 		if (Math.abs(currentWidth - width) > 1 || Math.abs(currentHeight - height) > 1) {
 			setNodeSize(node, width, height);
 		}
@@ -897,19 +909,18 @@ function compactNodeSize(node, force = false) {
 	}
 
 	const useDefaultSize = !node.__gjjTemplateSetAutoSized && (!preferSaved || savedBroken);
-	const width = useDefaultSize
-		? defaultNodeWidth(currentWidth)
-		: Math.max(MIN_WIDTH, Number(currentWidth || DEFAULT_WIDTH));
+	const width = currentNodeWidth(node);
 	const heightBroken = currentHeight > naturalHeight + MAX_EXTRA_IDLE_HEIGHT;
 	const heightTooSmall = currentHeight > 0 && currentHeight < naturalHeight - 2;
-	const shouldResize = force || useDefaultSize || heightBroken || heightTooSmall || currentWidth < MIN_WIDTH;
+	const shouldResize = force || useDefaultSize || heightBroken || heightTooSmall;
 
 	node.__gjjTemplateSetAutoSized = true;
 	if (shouldResize) {
-		setNodeSize(node, width, naturalHeight);
+		const height = Math.round(naturalHeight);
+		setNodeSize(node, width, height);
 		node.properties = node.properties || {};
-		node.properties[SAVED_SIZE] = [width, naturalHeight];
-		node.__gjjTemplateSetSavedSize = [width, naturalHeight];
+		node.properties[SAVED_SIZE] = [width, height];
+		node.__gjjTemplateSetSavedSize = [width, height];
 	}
 	setDirty(node);
 }
@@ -1055,10 +1066,20 @@ function ensureDom(node) {
 		hideOnZoom: false,
 	});
 	if (widget) {
-		widget.computeSize = (width) => [Math.max(MIN_WIDTH, Number(width || node.size?.[0] || DEFAULT_WIDTH)), domWidgetHeight(node)];
-		widget.getHeight = () => domWidgetHeight(node);
+		widget.computeSize = (width) => [Math.round(Number(width || currentNodeWidth(node))), domWidgetHeight(node)];
+		widget.getHeight = () => Math.round(domWidgetHeight(node));
 		node.__gjjTemplateSetDomWidget = widget;
 	}
+}
+
+function stateSignature(node, fields, values) {
+	return JSON.stringify({
+		template: getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE),
+		fields: fields.map((field) => [field.key, field.inputName, field.label, field.type, field.valueType]),
+		values,
+		outputsVisible: outputsVisible(node),
+		broadcast: broadcastEnabled(node),
+	});
 }
 
 function stabilizeNode(node) {
@@ -1066,6 +1087,7 @@ function stabilizeNode(node) {
 	node.__gjjTemplateSetStabilizing = true;
 	try {
 		ensureDom(node);
+		pruneLegacyWidgetInputs(node);
 		hideInternalWidgets(node);
 		removeInternalInputSockets(node);
 		ensureOutputVisibilityState(node);
@@ -1085,13 +1107,17 @@ function stabilizeNode(node) {
 		reorderVariableInputs(node, fields);
 		reorderVariableWidgets(node, fields);
 		updateOutputs(node, fields);
-		saveValues(node, fields);
+		const savedValues = saveValues(node, fields);
 		node.properties = node.properties || {};
 		node.properties.gjj_template_set_variables_template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
 		saveFieldSchema(node, fields);
 		node.__gjjTemplateSetUpdateCount?.();
 		updateBroadcastToggle(node);
-		notifySetGetNodes(node);
+		const signature = stateSignature(node, fields, savedValues);
+		const changed = node.__gjjTemplateSetInitialized && node.__gjjTemplateSetLastSignature !== signature;
+		node.__gjjTemplateSetLastSignature = signature;
+		node.__gjjTemplateSetInitialized = true;
+		if (changed) notifySetGetNodes(node);
 		refreshNode(node);
 	} finally {
 		node.__gjjTemplateSetStabilizing = false;
@@ -1104,7 +1130,7 @@ function scheduleStabilize(node, ms = 32) {
 		stabilizeNode(node);
 		setTimeout(() => compactNodeSize(node), 80);
 		setTimeout(() => compactNodeSize(node), 240);
-	}, ms);
+	}, Math.round(Number(ms) || 0));
 }
 
 function scheduleConnectionRepair(node, ms = 0) {
@@ -1115,11 +1141,15 @@ function scheduleConnectionRepair(node, ms = 0) {
 		reorderVariableInputs(node, fields);
 		repairInputLinkSlots(node);
 		repairOutputLinkSlots(node);
-		saveValues(node, fields);
+		const savedValues = saveValues(node, fields);
 		node.__gjjTemplateSetUpdateCount?.();
-		notifySetGetNodes(node);
+		const signature = stateSignature(node, fields, savedValues);
+		const changed = node.__gjjTemplateSetInitialized && node.__gjjTemplateSetLastSignature !== signature;
+		node.__gjjTemplateSetLastSignature = signature;
+		node.__gjjTemplateSetInitialized = true;
+		if (changed) notifySetGetNodes(node);
 		refreshNode(node, { resize: false });
-	}, ms);
+	}, Math.round(Number(ms) || 0));
 }
 
 app.registerExtension({
@@ -1164,9 +1194,9 @@ app.registerExtension({
 				this.properties[OUTPUTS_VISIBLE_PROPERTY] = true;
 			}
 			if (Array.isArray(props[SAVED_SIZE])) {
-				this.__gjjTemplateSetSavedSize = props[SAVED_SIZE].map(Number);
+				this.__gjjTemplateSetSavedSize = props[SAVED_SIZE].map((value) => Math.round(Number(value) || 0));
 				this.__gjjTemplateSetPreferSavedSize = true;
-				this.size = [...this.__gjjTemplateSetSavedSize];
+				this.size = [Math.round(currentNodeWidth(this)), Math.round(Number(this.__gjjTemplateSetSavedSize[1] || MIN_HEIGHT))];
 			} else {
 				this.__gjjTemplateSetPreferSavedSize = false;
 			}
@@ -1194,7 +1224,7 @@ app.registerExtension({
 				const naturalHeight = naturalNodeHeight(this);
 				const currentHeight = Number(this.size?.[1] || MIN_HEIGHT);
 				const saveHeight = currentHeight > naturalHeight + MAX_EXTRA_IDLE_HEIGHT ? naturalHeight : currentHeight;
-				serializedNode.properties[SAVED_SIZE] = [Number(this.size?.[0] || DEFAULT_WIDTH), saveHeight];
+				serializedNode.properties[SAVED_SIZE] = [Math.round(Number(this.size?.[0] || DEFAULT_WIDTH)), Math.round(saveHeight)];
 				this.properties[SAVED_SIZE] = serializedNode.properties[SAVED_SIZE];
 			}
 			return result;
@@ -1205,7 +1235,7 @@ app.registerExtension({
 			const result = originalOnResize?.apply(this, args);
 			if (!this.__gjjTemplateSetSizing) {
 				this.properties = this.properties || {};
-				this.properties[SAVED_SIZE] = [Number(this.size?.[0] || DEFAULT_WIDTH), Number(this.size?.[1] || MIN_HEIGHT)];
+				this.properties[SAVED_SIZE] = [Math.round(Number(this.size?.[0] || DEFAULT_WIDTH)), Math.round(Number(this.size?.[1] || MIN_HEIGHT))];
 				this.__gjjTemplateSetSavedSize = [...this.properties[SAVED_SIZE]];
 				this.__gjjTemplateSetPreferSavedSize = true;
 			}

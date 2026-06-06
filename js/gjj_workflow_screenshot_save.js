@@ -3329,6 +3329,8 @@ import { api } from "/scripts/api.js";
 	}
 
 	function startPositionSync() {
+		if (window.__gjjWorkflowScreenshotPositionSyncStarted) return;
+		window.__gjjWorkflowScreenshotPositionSyncStarted = true;
 		const sync = () => {
 			const toolbar = document.getElementById(TOOLBAR_ID) || ensureToolbar();
 			positionToolbar(toolbar);

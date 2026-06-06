@@ -27,6 +27,7 @@ except ImportError:
 NODE_NAME = "GJJ_CannyEdge"
 NODE_DISPLAY_NAME = "GJJ · 🖊️ Canny边缘检测"
 _DESCRIPTION_INTRO = "单节点 Canny 边缘检测：有 OpenCV 时自动走快速 Canny；没有 OpenCV 时走 PyTorch 原生零依赖实现，并支持实时进度与间隔预览。"
+MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
 DEFAULT_LOW_THRESHOLD = 0.18
 DEFAULT_HIGH_THRESHOLD = 0.36
 _cv2 = None
@@ -86,6 +87,71 @@ def _as_int(value: Any, default: int, min_value: int, max_value: int) -> int:
     except Exception:
         result = default
     return max(min_value, min(max_value, result))
+
+
+def _component_value(value: Any, key: str) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def _coerce_media_to_image_batch(value: Any) -> torch.Tensor:
+    if value is None:
+        raise RuntimeError("Canny边缘检测失败：请连接 GJJ_BATCH_IMAGE、IMAGE 或 VIDEO 输入。")
+
+    source = value
+    if hasattr(source, "get_components"):
+        try:
+            components = source.get_components()
+        except Exception as exc:
+            raise RuntimeError(f"Canny边缘检测失败：输入可识别为 VIDEO，但读取视频帧失败：{exc}") from exc
+        source = _component_value(components, "images")
+        if source is None:
+            raise RuntimeError("Canny边缘检测失败：输入 VIDEO 没有解析出可用图片帧。")
+    elif hasattr(source, "images"):
+        source = getattr(source, "images", None)
+
+    if isinstance(source, torch.Tensor):
+        tensor = source
+    elif isinstance(source, dict):
+        tensor = None
+        for key in ("images", "frames", "samples"):
+            candidate = source.get(key)
+            if isinstance(candidate, torch.Tensor):
+                tensor = candidate
+                break
+    elif isinstance(source, (list, tuple)) and source and all(isinstance(item, torch.Tensor) for item in source):
+        tensor = torch.cat([item if item.ndim == 4 else item.unsqueeze(0) for item in source], dim=0)
+    else:
+        tensor = None
+        for key in ("images", "frames", "samples"):
+            candidate = getattr(source, key, None)
+            if isinstance(candidate, torch.Tensor):
+                tensor = candidate
+                break
+
+    if tensor is None:
+        raise RuntimeError(f"Canny边缘检测失败：输入不是有效的 GJJ_BATCH_IMAGE / IMAGE / VIDEO：{type(value).__name__}。")
+    if tensor.ndim == 3:
+        tensor = tensor.unsqueeze(0)
+    if tensor.ndim != 4:
+        raise RuntimeError(f"Canny边缘检测失败：输入图片/视频帧必须是 [B,H,W,C] 或 [B,C,H,W]，实际为 {tuple(tensor.shape)}。")
+    if tensor.shape[-1] not in (1, 3, 4) and tensor.shape[1] in (1, 3, 4):
+        tensor = tensor.permute(0, 2, 3, 1)
+    channels = int(tensor.shape[-1])
+    if channels == 1:
+        tensor = tensor.repeat(1, 1, 1, 3)
+    elif channels == 4:
+        rgb = tensor[..., :3]
+        alpha = tensor[..., 3:4].clamp(0.0, 1.0)
+        tensor = rgb * alpha
+    elif channels > 4:
+        tensor = tensor[..., :3]
+    elif channels != 3:
+        raise RuntimeError(f"Canny边缘检测失败：输入图片/视频帧通道数无效：{tuple(tensor.shape)}。")
+    return tensor.detach().float().clamp(0.0, 1.0).contiguous()
 
 
 def _image_to_gray(image: torch.Tensor) -> torch.Tensor:
@@ -226,10 +292,10 @@ class GJJ_CannyEdge:
         return {
             "required": {
                 "image": (
-                    "IMAGE",
+                    MEDIA_INPUT_TYPE,
                     {
-                        "display_name": "图像",
-                        "tooltip": "输入需要提取 Canny 风格边缘的图像，支持批量。",
+                        "display_name": "输入媒体",
+                        "tooltip": "输入需要提取 Canny 风格边缘的媒体。支持 GJJ_BATCH_IMAGE、普通 IMAGE batch 和官方 VIDEO；接 VIDEO 时会自动读取视频帧。",
                     },
                 ),
                 "low_threshold": (
@@ -283,7 +349,8 @@ class GJJ_CannyEdge:
         "title": "Canny 边缘检测",
         "description": _DESCRIPTION_INTRO,
         "usage": [
-            "输入 IMAGE，调低阈值和高阈值。",
+            "输入 GJJ_BATCH_IMAGE、IMAGE 或 VIDEO，调低阈值和高阈值。",
+            "普通 IMAGE 会直接处理；GJJ_BATCH_IMAGE 会提取其中的图片队列；官方 VIDEO 会自动读取视频帧并输出边缘帧 IMAGE。",
             "低阈值和高阈值统一使用 0.0-1.0；OpenCV 路径映射到 0-255，原生路径使用稳健归一化后的同等强度。",
             "默认 0.18 / 0.36 更适合人物、街景和普通生成图，不容易像 0.4 / 0.8 那样丢掉大量轮廓。",
             "检测到 OpenCV(cv2) 时自动使用快速路径；没有 OpenCV 时使用 PyTorch 原生路径。",
@@ -299,8 +366,7 @@ class GJJ_CannyEdge:
     }
 
     def execute(self, image, low_threshold=DEFAULT_LOW_THRESHOLD, high_threshold=DEFAULT_HIGH_THRESHOLD, preview_every=4, unique_id=None):
-        if not torch.is_tensor(image) or image.ndim != 4:
-            raise RuntimeError("Canny边缘检测失败：输入图像必须是 [B,H,W,C] 的 IMAGE tensor。")
+        image = _coerce_media_to_image_batch(image)
 
         low = _as_float(low_threshold, DEFAULT_LOW_THRESHOLD, 0.0, 1.0)
         high = _as_float(high_threshold, DEFAULT_HIGH_THRESHOLD, 0.0, 1.0)

@@ -18,7 +18,6 @@ const BROADCAST_USER_SET_PROPERTY = "gjj_variable_broadcast_user_set";
 const LORA_BOOL_VARIABLE_PROPERTY = "gjj_video_universal_lora_bool_variable";
 const OUTPUT_HIT_LANE = 20;
 const WIDTH_PROPERTY = "gjj_video_universal_loader_width";
-const MIN_NODE_WIDTH = 300;
 const DEFAULT_NODE_WIDTH = 470;
 const DEFAULT_DTYPES = ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"];
 const WEIGHT_DTYPES = ["bf16", "fp16", "fp32"];
@@ -199,16 +198,17 @@ function cleanSearchTokens(value) {
 function currentNodeWidth(node) {
 	const current = Number(node?.size?.[0] || 0);
 	const saved = Number(node?.properties?.[WIDTH_PROPERTY] || 0);
-	return Math.max(MIN_NODE_WIDTH, current || saved || DEFAULT_NODE_WIDTH);
+	const width = current || saved || DEFAULT_NODE_WIDTH;
+	return Number.isFinite(width) && width > 0 ? Math.round(width) : DEFAULT_NODE_WIDTH;
 }
 
 function rememberNodeWidth(node) {
-	if (!node) return MIN_NODE_WIDTH;
+	if (!node) return DEFAULT_NODE_WIDTH;
 	node.properties = node.properties || {};
 	const width = currentNodeWidth(node);
 	node.properties[WIDTH_PROPERTY] = width;
-	node.min_width = MIN_NODE_WIDTH;
-	node.minWidth = MIN_NODE_WIDTH;
+	delete node.min_width;
+	delete node.minWidth;
 	return width;
 }
 
@@ -1568,10 +1568,10 @@ function ensureDom(node) {
 	const domWidget = node.addDOMWidget?.("gjj_video_universal_loader_dom", "HTML", container, { serialize: false, hideOnZoom: false });
 	if (domWidget) {
 		domWidget.computeSize = (width) => {
-			const nodeWidth = Math.max(MIN_NODE_WIDTH, Number(width || currentNodeWidth(node)));
-			return [nodeWidth, estimateNodeHeight(node)];
+			const nodeWidth = Math.round(Number(width || currentNodeWidth(node)));
+			return [nodeWidth, Math.round(estimateNodeHeight(node))];
 		};
-		domWidget.getHeight = () => estimateNodeHeight(node);
+		domWidget.getHeight = () => Math.round(estimateNodeHeight(node));
 		node.__gjjVUWidget = domWidget;
 		forceDomPassThrough(node);
 		requestAnimationFrame(() => forceDomPassThrough(node));
@@ -2270,7 +2270,14 @@ function updateInputs(node, cfg) {
 
 	// 关键：前后端顺序保持一致：Wan 运行参数在前，额外模型配置次之，LoRA 配置和加速 LoRA BOOL 在后。
 	// 不再新建/强改 label/localized_name/displayName，避免破坏 ComfyUI 根据后端 display_name 绘制输入文字。
-	const rest = old.filter((input) => !isWanRuntimeArgsInput(input) && !isExtraModelChainInput(input) && !isLoraConfigInput(input) && !isAccelLoraInput(input));
+	const rest = old.filter((input) => {
+		if (isWanRuntimeArgsInput(input) || isExtraModelChainInput(input) || isLoraConfigInput(input) || isAccelLoraInput(input)) {
+			return false;
+		}
+		const widgetName = String(input?.widget?.name || input?.name || "");
+		const isLegacyWidgetInput = ALL_FIELDS.includes(widgetName) || Boolean(input?.widget);
+		return !isLegacyWidgetInput || inputHasLink(input);
+	});
 	const nextInputs = [wanArgsInput, extraInput, cfgInput];
 	const hideBoolInputForVariable = Boolean(selectedLoraBoolVariable(node)) && !inputHasLink(boolInput);
 	if (hasLoraSlots(cfg) && !hideBoolInputForVariable) nextInputs.push(boolInput);
@@ -2279,11 +2286,11 @@ function updateInputs(node, cfg) {
 
 function scheduleLayoutRefresh(node, delays = [0, 48, 160]) {
 	if (!node) return;
-	for (const delay of Array.isArray(delays) ? delays : [Number(delays) || 0]) {
-		setTimeout(() => {
-			requestAnimationFrame(() => refreshNode(node));
-		}, Math.max(0, Number(delay) || 0));
-	}
+	clearTimeout(node.__gjjVULayoutRefreshTimer);
+	const firstDelay = Array.isArray(delays) ? delays[0] : delays;
+	node.__gjjVULayoutRefreshTimer = setTimeout(() => {
+		requestAnimationFrame(() => refreshNode(node));
+	}, Math.max(0, Math.round(Number(firstDelay) || 0)));
 }
 
 function currentConfig(node, state) {
@@ -2423,7 +2430,7 @@ function applyConfig(node, opts = {}) {
 function refreshNode(node) {
 	if (!node) return;
 	const width = rememberNodeWidth(node);
-	const height = estimateNodeHeight(node);
+	const height = Math.round(estimateNodeHeight(node));
 	if (!node.__gjjVUSizing && (Math.abs(Number(node.size?.[0] || 0) - width) > 1 || Math.abs(Number(node.size?.[1] || 0) - height) > 1)) {
 		node.__gjjVUSizing = true;
 		try { node.setSize?.([width, height]); }
@@ -2444,7 +2451,10 @@ function stabilize(node) {
 	updateBroadcastButton(node);
 	hideNativeWidgets(node);
 	applyConfig(node);
-	refreshBackendLists(node, true);
+	if (!node.__gjjVUBackendListsRequested) {
+		node.__gjjVUBackendListsRequested = true;
+		refreshBackendLists(node, true);
+	}
 }
 function schedule(node, ms = 0) { clearTimeout(node.__gjjVUTimer); node.__gjjVUTimer = setTimeout(() => stabilize(node), ms); }
 
@@ -2545,16 +2555,12 @@ app.registerExtension({
 		installVariablePromptPatch();
 		if (!window.__gjjVideoUniversalVariableListener) {
 			window.__gjjVideoUniversalVariableListener = true;
-			window.addEventListener("gjj-template-params-updated", () => {
+			const refreshVariableUsers = () => {
 				for (const node of app.graph?._nodes || []) {
-					if (TARGET_NODES.has(node?.comfyClass)) schedule(node, 0);
+					if (TARGET_NODES.has(node?.comfyClass) && selectedLoraBoolVariable(node)) schedule(node, 80);
 				}
-			});
-			window.addEventListener("gjj-template-set-variables-updated", () => {
-				for (const node of app.graph?._nodes || []) {
-					if (TARGET_NODES.has(node?.comfyClass)) schedule(node, 0);
-				}
-			});
+			};
+			window.addEventListener("gjj-template-params-updated", refreshVariableUsers);
 		}
 		for (const node of app.graph?._nodes || []) if (TARGET_NODES.has(node?.comfyClass)) stabilize(node);
 	},

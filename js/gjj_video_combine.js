@@ -7,7 +7,8 @@ const TOOLBAR_WIDGET_NAME = "gjj_video_combine_toolbar";
 const PREVIEW_WIDGET_NAME = "gjj_video_combine_preview";
 const USER_WIDTH_PROPERTY = "gjj_video_combine_user_width";
 const BASIC_SETTINGS_PROPERTY = "gjj_video_combine_show_basic_settings";
-const MIN_WIDTH = 340;
+const FRAME_RATE_VARIABLE_PROPERTY = "gjj_video_combine_frame_rate_variable";
+const DEFAULT_NODE_WIDTH = 340;
 const TOOLBAR_BUTTON_WIDTH = 30;
 const TOOLBAR_BUTTON_HEIGHT = 28;
 const TOOLBAR_GAP = 5;
@@ -16,6 +17,7 @@ const TOOLBAR_PADDING_Y = 6;
 const TOOLBAR_NODE_GUTTER = 34;
 const TOOLBAR_HEIGHT = TOOLBAR_PADDING_Y + TOOLBAR_BUTTON_HEIGHT;
 const HIDDEN_PANEL_HEIGHT = 0;
+const FRAME_RATE_NOTICE_HEIGHT = 22;
 const PREVIEW_MIN_HEIGHT = 120;
 const PREVIEW_DEFAULT_ASPECT = 16 / 9;
 const PREVIEW_WIDGET_GUTTER = 34;
@@ -25,6 +27,9 @@ const PRIMARY_INPUT_NAME = "images";
 const PRIMARY_INPUT_ALIASES = new Set(["images", "图像"]);
 const FRAME_RATE_WIDGET_NAME = "frame_rate";
 const FRAME_RATE_SOCKET_TYPE = "INT,FLOAT";
+const FINAL_NODE_COLOR = "#b42318";
+const FINAL_NODE_BGCOLOR = "#3a1616";
+const FINAL_NODE_COLOR_PROPERTY = "gjj_video_combine_final_node_color";
 const OPTIONAL_INPUTS = [
 	{ name: "audio", type: "AUDIO", label: "音频", localized_name: "音频" },
 	{ name: "vae", type: "VAE", label: "VAE 解码器", localized_name: "VAE 解码器" },
@@ -77,15 +82,23 @@ function refreshNode(node) {
 	if (!node) return;
 	const currentWidth = validNodeWidth(node.size?.[0]) ?? preferredNodeWidth(node);
 	const computed = typeof node.computeSize === "function" ? node.computeSize() : node.size;
-	const height = Math.max(80, Number(computed?.[1] || node.size?.[1] || 80));
-	node.setSize?.([currentWidth, height]);
+	const height = Math.max(80, Math.round(Number(computed?.[1] || node.size?.[1] || 80)));
+	const currentHeight = Math.round(Number(node.size?.[1] || 0));
+	if (Math.round(Number(node.size?.[0] || 0)) !== currentWidth || currentHeight !== height) {
+		node.__gjjVideoCombineInternalResize = true;
+		try {
+			node.setSize?.([currentWidth, height]);
+		} finally {
+			node.__gjjVideoCombineInternalResize = false;
+		}
+	}
 	node.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
 }
 
 function validNodeWidth(value) {
 	const width = Number(value);
-	return Number.isFinite(width) && width > 80 ? width : null;
+	return Number.isFinite(width) && width > 0 ? Math.round(width) : null;
 }
 
 function rememberNodeWidth(node, value = null) {
@@ -109,15 +122,15 @@ function preferredNodeWidth(node, explicit = null) {
 	return validNodeWidth(explicit)
 		?? storedNodeWidth(node)
 		?? validNodeWidth(node?.size?.[0])
-		?? MIN_WIDTH;
+		?? DEFAULT_NODE_WIDTH;
 }
 
 function toolbarButtonCount() {
-	return BOOLEAN_WIDGETS.length + VALUE_WIDGETS.length + 2;
+	return BOOLEAN_WIDGETS.length + VALUE_WIDGETS.length + 3;
 }
 
 function getToolbarHeight(node, explicitWidth = null) {
-	const width = Math.max(MIN_WIDTH, preferredNodeWidth(node, explicitWidth));
+	const width = preferredNodeWidth(node, explicitWidth);
 	const availableWidth = Math.max(
 		TOOLBAR_BUTTON_WIDTH,
 		width - TOOLBAR_NODE_GUTTER - TOOLBAR_PADDING_X,
@@ -142,7 +155,7 @@ function setNodeHeightPreservingUserWidth(node, height) {
 		return;
 	}
 	const width = validNodeWidth(node.size?.[0]) ?? preferredNodeWidth(node);
-	const nextHeight = Math.max(80, Number(height || node.size?.[1] || 80));
+	const nextHeight = Math.max(80, Math.round(Number(height || node.size?.[1] || 80)));
 	if (Math.abs(Number(node.size?.[0] || 0) - width) <= 1 && Math.abs(Number(node.size?.[1] || 0) - nextHeight) <= 1) {
 		return;
 	}
@@ -152,6 +165,8 @@ function setNodeHeightPreservingUserWidth(node, height) {
 	} finally {
 		node.__gjjVideoCombineInternalResize = false;
 	}
+	node.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
 }
 
 function removeLegacyVideoInputs(node) {
@@ -209,6 +224,19 @@ function injectToolbarStyle() {
 			background: #20313a;
 			border-color: #55707d;
 		}
+		.gjj-video-combine-toolbar button:disabled,
+		.gjj-video-combine-toolbar button.disabled {
+			background: #151a1d;
+			border-color: #344047;
+			color: #667780;
+			opacity: .62;
+			cursor: not-allowed;
+		}
+		.gjj-video-combine-toolbar button:disabled:hover,
+		.gjj-video-combine-toolbar button.disabled:hover {
+			background: #151a1d;
+			border-color: #344047;
+		}
 		.gjj-video-combine-toolbar button.on {
 			background: #1f4b37;
 			border-color: #57a773;
@@ -225,6 +253,75 @@ function injectToolbarStyle() {
 
 function getWidget(node, name) {
 	return (node?.widgets || []).find((widget) => String(widget?.name || "") === name) || null;
+}
+
+function selectedFrameRateVariable(node) {
+	return String(node?.properties?.[FRAME_RATE_VARIABLE_PROPERTY] || "").trim();
+}
+
+function setSelectedFrameRateVariable(node, name) {
+	if (!node) return;
+	node.properties ||= {};
+	const value = String(name || "").trim();
+	if (value) node.properties[FRAME_RATE_VARIABLE_PROPERTY] = value;
+	else delete node.properties[FRAME_RATE_VARIABLE_PROPERTY];
+	applySlotVisibility(node);
+	updateToolbar(node);
+	updateFrameRateControlState(node);
+	refreshNode(node);
+}
+
+function variableOptions(node) {
+	const apiObject = globalThis.GJJ_VariableBroadcast;
+	const graph = node?.graph || app.graph;
+	return typeof apiObject?.getVisibleSetOptions === "function" ? (apiObject.getVisibleSetOptions(graph) || []) : [];
+}
+
+function variableOptionDisplay(option) {
+	const value = String(option?.value || "").trim();
+	const label = String(option?.label || value).trim();
+	const match = label.match(/^[^()（）]+[（(]([^()（）]+?)[\s·]+([^()（）]+?)[）)]$/);
+	if (match) return { title: match[2].trim() || value, source: match[1].trim(), value };
+	return { title: label || value, source: "", value };
+}
+
+function selectedFrameRateVariableDisplay(node) {
+	const selectedVariable = selectedFrameRateVariable(node);
+	const option = variableOptions(node).find((item) => item.value === selectedVariable);
+	return variableOptionDisplay(option || { value: selectedVariable, label: selectedVariable });
+}
+
+function getFrameRateSourceState(node) {
+	const external = frameRateInputHasManualLink(node);
+	const variable = selectedFrameRateVariable(node);
+	const display = selectedFrameRateVariableDisplay(node);
+	if (external) {
+		return {
+			active: true,
+			external: true,
+			variable,
+			title: "帧率由外部连接控制",
+			body: variable
+				? `面板帧率已停用；当前 frame_rate 连线优先，已选变量「${display.title || variable}」暂不生效。`
+				: "面板帧率已停用；断开 frame_rate 连接后可恢复手动输入或选择变量。",
+		};
+	}
+	if (variable) {
+		return {
+			active: true,
+			external: false,
+			variable,
+			title: "帧率由变量控制",
+			body: `面板帧率已停用；执行时读取变量「${display.title || variable}」。点击 ⚡ 可清空变量。`,
+		};
+	}
+	return {
+		active: false,
+		external: false,
+		variable: "",
+		title: "",
+		body: "",
+	};
 }
 
 function isToolbarControlWidgetName(name) {
@@ -395,6 +492,127 @@ function makeToolbarButton(label, title, onClick) {
 	return button;
 }
 
+function closeFrameRateVariablePicker(node) {
+	node?.__gjjVideoCombineFrameRatePicker?.remove?.();
+	node.__gjjVideoCombineFrameRatePicker = null;
+}
+
+function openFrameRateVariablePicker(node) {
+	closeFrameRateVariablePicker(node);
+	const options = variableOptions(node);
+	const current = selectedFrameRateVariable(node);
+	const popup = document.createElement("div");
+	popup.style.cssText = [
+		"position:fixed",
+		"z-index:10050",
+		"width:min(420px,calc(100vw - 28px))",
+		"max-height:min(500px,calc(100vh - 40px))",
+		"overflow:hidden",
+		"display:flex",
+		"flex-direction:column",
+		"gap:8px",
+		"padding:10px",
+		"border:1px solid #486575",
+		"border-radius:8px",
+		"background:#08151a",
+		"box-shadow:0 18px 46px rgba(0,0,0,.55)",
+		"color:#dce7e2",
+		"font:12px system-ui,'Microsoft YaHei',sans-serif",
+	].join(";");
+	const rect = node.__gjjVideoCombineToolbar?.buttons?.frameRateVariable?.getBoundingClientRect?.() || { left: 24, bottom: 80 };
+	popup.style.left = `${Math.round(Math.max(12, Math.min(window.innerWidth - 440, rect.left || 24)))}px`;
+	popup.style.top = `${Math.round(Math.max(12, Math.min(window.innerHeight - 520, (rect.bottom || 80) + 6)))}px`;
+
+	const header = document.createElement("div");
+	header.style.cssText = "display:flex;align-items:center;gap:8px;";
+	const title = document.createElement("div");
+	title.textContent = "⚡ 选择帧率变量";
+	title.style.cssText = "font-weight:800;flex:1 1 auto;";
+	const clear = document.createElement("button");
+	clear.type = "button";
+	clear.textContent = "清空";
+	const close = document.createElement("button");
+	close.type = "button";
+	close.textContent = "关闭";
+	for (const button of [clear, close]) {
+		button.style.cssText = "height:28px;border:1px solid #44565f;border-radius:7px;background:#202b31;color:#dce7e2;cursor:pointer;padding:0 8px;font-size:12px;font-weight:650;";
+		button.addEventListener("pointerdown", (event) => event.stopPropagation());
+		button.addEventListener("mousedown", (event) => event.stopPropagation());
+	}
+	header.append(title, clear, close);
+	popup.appendChild(header);
+
+	const search = document.createElement("input");
+	search.placeholder = "搜索变量，建议选择 INT/FLOAT 帧率";
+	search.style.cssText = "height:30px;border:1px solid #3f5b66;border-radius:7px;background:#071015;color:#dce7e2;padding:0 10px;outline:none;";
+	popup.appendChild(search);
+	const list = document.createElement("div");
+	list.style.cssText = "overflow:auto;display:flex;flex-direction:column;gap:5px;max-height:340px;padding-right:2px;";
+	popup.appendChild(list);
+
+	function render() {
+		const needle = String(search.value || "").trim().toLowerCase();
+		list.textContent = "";
+		for (const option of options) {
+			const parts = variableOptionDisplay(option);
+			if (!parts.value) continue;
+			if (needle && !`${parts.title} ${parts.source} ${parts.value} ${option.label || ""}`.toLowerCase().includes(needle)) continue;
+			const item = document.createElement("button");
+			item.type = "button";
+			item.style.cssText = [
+				"display:flex",
+				"align-items:center",
+				"gap:8px",
+				"text-align:left",
+				"border:0",
+				"border-radius:7px",
+				"padding:8px 10px",
+				"background:" + (current === parts.value ? "#234a37" : "transparent"),
+				"color:#dce7e2",
+				"cursor:pointer",
+			].join(";");
+			const mark = document.createElement("span");
+			mark.textContent = current === parts.value ? "✓" : "";
+			mark.style.cssText = "width:16px;color:#7de39b;font-weight:900;";
+			const text = document.createElement("span");
+			text.innerHTML = `<b>${parts.title}</b><br><span style="color:#8fa3ad">${parts.source ? `${parts.source} · ` : ""}${parts.value}</span>`;
+			item.append(mark, text);
+			item.addEventListener("mousedown", (event) => { event.preventDefault(); event.stopPropagation(); });
+			item.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				setSelectedFrameRateVariable(node, parts.value);
+				closeFrameRateVariablePicker(node);
+			});
+			list.appendChild(item);
+		}
+		if (!list.children.length) {
+			const empty = document.createElement("div");
+			empty.textContent = options.length ? "没有匹配的变量" : "当前工作流没有可选变量";
+			empty.style.cssText = "padding:14px 10px;color:#9aaab2;text-align:center;";
+			list.appendChild(empty);
+		}
+	}
+	clear.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		setSelectedFrameRateVariable(node, "");
+		closeFrameRateVariablePicker(node);
+	});
+	close.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		closeFrameRateVariablePicker(node);
+	});
+	search.addEventListener("input", render);
+	search.addEventListener("mousedown", (event) => event.stopPropagation());
+	popup.addEventListener("mousedown", (event) => event.stopPropagation());
+	document.body.appendChild(popup);
+	node.__gjjVideoCombineFrameRatePicker = popup;
+	render();
+	setTimeout(() => search.focus(), 0);
+}
+
 function ensureToolbarWidget(node) {
 	if (node.__gjjVideoCombineToolbar) {
 		return node.__gjjVideoCombineToolbar;
@@ -422,6 +640,11 @@ function ensureToolbarWidget(node) {
 		wrap.appendChild(buttons[config.name]);
 	}
 
+	buttons.frameRateVariable = makeToolbarButton("⚡", "从 GJJ 变量选择帧率；手动连接 frame_rate 口时，手动连线优先。", () => {
+		openFrameRateVariablePicker(node);
+	});
+	wrap.appendChild(buttons.frameRateVariable);
+
 	buttons.basic = makeToolbarButton("⚙️", "显示/隐藏循环次数、文件名前缀、输出格式。", () => {
 		setBasicSettingsOpen(node, !getBasicSettingsOpen(node));
 	});
@@ -438,7 +661,10 @@ function ensureToolbarWidget(node) {
 	});
 	if (widget) {
 		widget.getHeight = () => getToolbarHeight(node);
-		widget.computeSize = (width) => [Math.max(MIN_WIDTH, Number(width || node.size?.[0] || preferredNodeWidth(node))), getToolbarHeight(node, width)];
+		widget.computeSize = (width) => [
+			validNodeWidth(width) ?? validNodeWidth(node.size?.[0]) ?? preferredNodeWidth(node),
+			getToolbarHeight(node, width),
+		];
 	}
 	node.__gjjVideoCombineToolbar = { widget, wrap, buttons };
 	updateToolbar(node);
@@ -476,6 +702,23 @@ function updateToolbar(node) {
 		button.setAttribute("aria-label", config.label);
 		button.setAttribute("aria-pressed", !isDefault ? "true" : "false");
 	}
+	const selectedVariable = selectedFrameRateVariable(node);
+	if (toolbar.buttons.frameRateVariable) {
+		const state = getFrameRateSourceState(node);
+		const display = selectedFrameRateVariableDisplay(node);
+		toolbar.buttons.frameRateVariable.textContent = "⚡";
+		toolbar.buttons.frameRateVariable.classList.toggle("on", Boolean(selectedVariable));
+		toolbar.buttons.frameRateVariable.classList.toggle("disabled", Boolean(state.external));
+		toolbar.buttons.frameRateVariable.disabled = Boolean(state.external);
+		toolbar.buttons.frameRateVariable.title = state.external
+			? "frame_rate 已连接外部输入，外部连接优先；断开连接后可选择帧率变量。"
+			: selectedVariable
+				? `帧率变量：${display.title || selectedVariable}\n来源：${display.source || "变量"}\n当前会覆盖面板帧率；手动连接 frame_rate 口时手动连线优先。`
+			: "从 GJJ_TemplateParams 或 GJJ_SetNode 选择帧率变量。";
+		toolbar.buttons.frameRateVariable.setAttribute("aria-label", "选择帧率变量");
+		toolbar.buttons.frameRateVariable.setAttribute("aria-pressed", selectedVariable ? "true" : "false");
+		toolbar.buttons.frameRateVariable.setAttribute("aria-disabled", state.external ? "true" : "false");
+	}
 	const basicOpen = getBasicSettingsOpen(node);
 	if (toolbar.buttons.basic) {
 		toolbar.buttons.basic.textContent = "⚙️";
@@ -494,6 +737,7 @@ function updateToolbar(node) {
 		: "当前隐藏 VAE 和输出口；点击后显示 VAE 和输出口。";
 	toolbar.buttons.more.setAttribute("aria-label", "显示/隐藏接口");
 	toolbar.buttons.more.setAttribute("aria-pressed", moreOpen ? "true" : "false");
+	updateFrameRateControlState(node);
 }
 
 function hideNativeToolbarWidgets(node) {
@@ -507,6 +751,232 @@ function hideNativeToolbarWidgets(node) {
 			widget.options.hidden = true;
 			widget.options.display = "hidden";
 		}
+	}
+}
+
+function rememberFrameRateWidgetOriginal(widget) {
+	if (!widget || widget.__gjjVideoCombineFrameRateOriginal) {
+		return;
+	}
+	widget.__gjjVideoCombineFrameRateOriginal = {
+		type: widget.type,
+		label: widget.label,
+		hidden: widget.hidden,
+		computeSize: widget.computeSize,
+		getHeight: widget.getHeight,
+		disabled: widget.disabled,
+		readOnly: widget.readOnly,
+		draw: widget.draw,
+		mouse: widget.mouse,
+		last_y: widget.last_y,
+		computedHeight: widget.computedHeight,
+		marginTop: widget.margin_top,
+		size: Array.isArray(widget.size) ? [...widget.size] : widget.size,
+		optionsHidden: widget.options?.hidden,
+		optionsDisplay: widget.options?.display,
+		optionsDisabled: widget.options?.disabled,
+		optionsReadOnly: widget.options?.readOnly,
+		elementDisplay: widget.element?.style?.display,
+		elementHeight: widget.element?.style?.height,
+		elementMargin: widget.element?.style?.margin,
+		elementPadding: widget.element?.style?.padding,
+		elementOpacity: widget.element?.style?.opacity,
+		elementFilter: widget.element?.style?.filter,
+		inputDisplay: widget.inputEl?.style?.display,
+		inputHeight: widget.inputEl?.style?.height,
+		inputMargin: widget.inputEl?.style?.margin,
+		inputPadding: widget.inputEl?.style?.padding,
+		inputDisabled: widget.inputEl?.disabled,
+		inputReadOnly: widget.inputEl?.readOnly,
+		inputOpacity: widget.inputEl?.style?.opacity,
+		inputFilter: widget.inputEl?.style?.filter,
+	};
+}
+
+function restoreFrameRateWidgetOriginal(widget) {
+	if (!widget) {
+		return;
+	}
+	rememberFrameRateWidgetOriginal(widget);
+	const original = widget.__gjjVideoCombineFrameRateOriginal || {};
+	widget.type = original.type || "number";
+	widget.label = original.label ?? widget.label ?? "帧率";
+	widget.hidden = Boolean(original.hidden);
+	if (original.computeSize !== undefined) widget.computeSize = original.computeSize; else delete widget.computeSize;
+	if (original.getHeight !== undefined) widget.getHeight = original.getHeight; else delete widget.getHeight;
+	if (original.draw !== undefined) widget.draw = original.draw; else delete widget.draw;
+	if (original.mouse !== undefined) widget.mouse = original.mouse; else delete widget.mouse;
+	if (original.last_y !== undefined) widget.last_y = original.last_y; else delete widget.last_y;
+	if (original.computedHeight !== undefined) widget.computedHeight = original.computedHeight; else delete widget.computedHeight;
+	if (original.marginTop !== undefined) widget.margin_top = original.marginTop; else delete widget.margin_top;
+	if (original.size !== undefined) widget.size = Array.isArray(original.size) ? [...original.size] : original.size;
+	widget.options ||= {};
+	if (original.optionsHidden !== undefined) widget.options.hidden = original.optionsHidden; else delete widget.options.hidden;
+	if (original.optionsDisplay !== undefined) widget.options.display = original.optionsDisplay; else delete widget.options.display;
+	if (widget.element) {
+		widget.element.style.display = original.elementDisplay ?? "";
+		widget.element.style.height = original.elementHeight ?? "";
+		widget.element.style.margin = original.elementMargin ?? "";
+		widget.element.style.padding = original.elementPadding ?? "";
+	}
+	if (widget.inputEl) {
+		widget.inputEl.style.display = original.inputDisplay ?? "";
+		widget.inputEl.style.height = original.inputHeight ?? "";
+		widget.inputEl.style.margin = original.inputMargin ?? "";
+		widget.inputEl.style.padding = original.inputPadding ?? "";
+	}
+	delete widget.__gjjVideoCombineFrameRateHidden;
+	delete widget.__gjjUtilsHidden;
+}
+
+function setFrameRateWidgetHidden(node, hidden) {
+	const widget = getWidget(node, FRAME_RATE_WIDGET_NAME);
+	if (!widget) {
+		return false;
+	}
+	rememberFrameRateWidgetOriginal(widget);
+	const wasHidden = Boolean(widget.__gjjVideoCombineFrameRateHidden);
+	if (!hidden) {
+		if (wasHidden) {
+			restoreFrameRateWidgetOriginal(widget);
+		}
+		return wasHidden;
+	}
+	if (wasHidden) {
+		return false;
+	}
+	widget.__gjjVideoCombineFrameRateHidden = true;
+	widget.hidden = true;
+	widget.type = `converted-widget:${FRAME_RATE_WIDGET_NAME}`;
+	widget.label = "";
+	widget.computeSize = () => [0, 0];
+	widget.getHeight = () => 0;
+	widget.draw = () => {};
+	widget.mouse = () => false;
+	widget.last_y = 0;
+	widget.computedHeight = 0;
+	widget.margin_top = 0;
+	widget.size = [0, 0];
+	widget.options ||= {};
+	widget.options.hidden = true;
+	widget.options.display = "hidden";
+	if (widget.element) {
+		widget.element.style.display = "none";
+		widget.element.style.height = "0";
+		widget.element.style.margin = "0";
+		widget.element.style.padding = "0";
+	}
+	if (widget.inputEl) {
+		widget.inputEl.style.display = "none";
+		widget.inputEl.style.height = "0";
+		widget.inputEl.style.margin = "0";
+		widget.inputEl.style.padding = "0";
+	}
+	return true;
+}
+
+function setFrameRateWidgetDisabled(node, disabled, title = "") {
+	const widget = getWidget(node, FRAME_RATE_WIDGET_NAME);
+	if (!widget) {
+		return;
+	}
+	rememberFrameRateWidgetOriginal(widget);
+	const original = widget.__gjjVideoCombineFrameRateOriginal || {};
+	widget.options ||= {};
+	if (disabled) {
+		widget.disabled = true;
+		widget.readOnly = true;
+		widget.options.disabled = true;
+		widget.options.readOnly = true;
+		if (widget.__gjjVideoCombineFrameRateHidden) {
+			widget.__gjjVideoCombineFrameRateDisabled = true;
+			widget.__gjjVideoCombineFrameRateDisabledTitle = title;
+			if (widget.element) widget.element.title = title;
+			if (widget.inputEl) widget.inputEl.title = title;
+			return;
+		}
+		if (typeof original.draw === "function") {
+			widget.draw = function (ctx, nodeRef, widgetWidth, widgetY, height) {
+				const previousAlpha = ctx.globalAlpha;
+				ctx.globalAlpha = Math.min(previousAlpha, 0.52);
+				try {
+					return original.draw.call(this, ctx, nodeRef, widgetWidth, widgetY, height);
+				} finally {
+					ctx.globalAlpha = previousAlpha;
+				}
+			};
+		}
+		widget.mouse = () => false;
+		widget.__gjjVideoCombineFrameRateDisabled = true;
+		widget.__gjjVideoCombineFrameRateDisabledTitle = title;
+		if (widget.element) {
+			widget.element.style.opacity = ".58";
+			widget.element.style.filter = "grayscale(1)";
+			widget.element.title = title;
+		}
+		if (widget.inputEl) {
+			widget.inputEl.disabled = true;
+			widget.inputEl.readOnly = true;
+			widget.inputEl.style.opacity = ".58";
+			widget.inputEl.style.filter = "grayscale(1)";
+			widget.inputEl.title = title;
+		}
+		return;
+	}
+
+	widget.disabled = Boolean(original.disabled);
+	widget.readOnly = Boolean(original.readOnly);
+	if (original.draw !== undefined) widget.draw = original.draw; else delete widget.draw;
+	if (original.mouse !== undefined) widget.mouse = original.mouse; else delete widget.mouse;
+	if (original.optionsDisabled !== undefined) widget.options.disabled = original.optionsDisabled; else delete widget.options.disabled;
+	if (original.optionsReadOnly !== undefined) widget.options.readOnly = original.optionsReadOnly; else delete widget.options.readOnly;
+	delete widget.__gjjVideoCombineFrameRateDisabled;
+	delete widget.__gjjVideoCombineFrameRateDisabledTitle;
+	if (widget.element) {
+		widget.element.style.opacity = original.elementOpacity ?? "";
+		widget.element.style.filter = original.elementFilter ?? "";
+		widget.element.title = "";
+	}
+	if (widget.inputEl) {
+		widget.inputEl.disabled = Boolean(original.inputDisabled);
+		widget.inputEl.readOnly = Boolean(original.inputReadOnly);
+		widget.inputEl.style.opacity = original.inputOpacity ?? "";
+		widget.inputEl.style.filter = original.inputFilter ?? "";
+		widget.inputEl.title = "";
+	}
+}
+
+function updateFrameRateNotice(node) {
+	const panel = node?.__gjjVideoCombineStatus;
+	if (!panel?.frameRateNotice) {
+		return false;
+	}
+	const state = getFrameRateSourceState(node);
+	const { wrap, title, body } = panel.frameRateNotice;
+	const wasVisible = Boolean(wrap.__gjjVideoCombineVisible);
+	wrap.__gjjVideoCombineVisible = Boolean(state.active);
+	wrap.style.display = state.active ? "block" : "none";
+	const text = state.title && state.body ? `${state.title}：${state.body}` : (state.title || state.body || "");
+	title.textContent = text;
+	body.textContent = "";
+	wrap.title = state.body;
+	return wasVisible !== Boolean(state.active);
+}
+
+function updateFrameRateControlState(node) {
+	const state = getFrameRateSourceState(node);
+	const title = state.body || "";
+	const hiddenChanged = setFrameRateWidgetHidden(node, Boolean(state.variable && !state.external));
+	setFrameRateWidgetDisabled(node, state.active, title);
+	const noticeChanged = updateFrameRateNotice(node);
+	if (node?.__gjjVideoCombineStatus) {
+		const mode = node.__gjjVideoCombinePanelMode || "hidden";
+		if (noticeChanged || hiddenChanged) {
+			setPanelMode(node, mode);
+		}
+	}
+	if (hiddenChanged) {
+		resizeNodeToContent(node);
 	}
 }
 
@@ -626,6 +1096,7 @@ function applySlotVisibility(node) {
 	if (Array.isArray(node?.inputs)) {
 		const fullInputs = getFullInputs(node);
 		const visibleInputs = [];
+		const hideFrameRateForVariable = Boolean(selectedFrameRateVariable(node)) && !frameRateInputHasManualLink(node);
 		for (const input of fullInputs) {
 			const name = String(input?.name || "");
 			const isPrimary = isPrimaryInputName(name);
@@ -637,6 +1108,8 @@ function applySlotVisibility(node) {
 				primary.label = "图像";
 				primary.localized_name = "图像";
 				visibleInputs.push(primary);
+			} else if (hideFrameRateForVariable && isFrameRateSlot(input)) {
+				continue;
 			} else if (isWidgetInput || DEFAULT_VISIBLE_INPUTS.has(name) || moreOpen || slotHasLink(input, false)) {
 				visibleInputs.push(cloneSlot(input));
 			}
@@ -753,14 +1226,35 @@ function ensurePanelWidget(node) {
 		"flex-direction:column",
 		"gap:6px",
 		"width:100%",
-		"max-width:100%",
 		"box-sizing:border-box",
-		"min-height:42px",
-		"padding:6px 10px",
-		"border:1px solid #41535b",
-		"border-radius:10px",
-		"background:#121a1f",
+		"min-height:0",
+		"padding:0",
 	].join(";");
+
+	const notice = document.createElement("div");
+	notice.style.cssText = [
+		"display:none",
+		"width:100%",
+		"box-sizing:border-box",
+		"padding:0 4px 4px",
+		"color:#8fa0a8",
+		"font:12px system-ui,'Microsoft YaHei',sans-serif",
+		"line-height:18px",
+		"white-space:nowrap",
+		"overflow:hidden",
+		"text-overflow:ellipsis",
+	].join(";");
+	const noticeIcon = document.createElement("div");
+	noticeIcon.textContent = "ℹ";
+	noticeIcon.style.cssText = "display:none;";
+	const noticeText = document.createElement("div");
+	noticeText.style.cssText = "min-width:0;";
+	const noticeTitle = document.createElement("div");
+	noticeTitle.style.cssText = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+	const noticeBody = document.createElement("div");
+	noticeBody.style.cssText = "display:none;";
+	noticeText.append(noticeTitle, noticeBody);
+	notice.append(noticeIcon, noticeText);
 
 	const previewCard = document.createElement("div");
 	previewCard.style.cssText = [
@@ -812,7 +1306,7 @@ function ensurePanelWidget(node) {
 	].join(";");
 
 	previewCard.append(empty, video, image);
-	wrap.append(previewCard);
+	wrap.append(notice, previewCard);
 
 	const widget = node.addDOMWidget?.(PREVIEW_WIDGET_NAME, PREVIEW_WIDGET_NAME, wrap, {
 		hideOnZoom: false,
@@ -820,11 +1314,19 @@ function ensurePanelWidget(node) {
 	});
 	if (widget) {
 		widget.computeSize = (width) => [
-			Math.max(MIN_WIDTH, Number(width || node.size?.[0] || preferredNodeWidth(node))),
-			getPanelHeight(node, width),
+			validNodeWidth(width) ?? validNodeWidth(node.size?.[0]) ?? preferredNodeWidth(node),
+			Math.round(getPanelHeight(node, width)),
 		];
 	}
-	node.__gjjVideoCombineStatus = { widget, wrap, previewCard, empty, video, image };
+	node.__gjjVideoCombineStatus = {
+		widget,
+		wrap,
+		previewCard,
+		empty,
+		video,
+		image,
+		frameRateNotice: { wrap: notice, title: noticeTitle, body: noticeBody },
+	};
 	const updateLoadedAspect = (width, height) => {
 		if (setPreviewAspect(node, width, height)) {
 			updatePreviewLayout(node);
@@ -861,7 +1363,7 @@ function setPreviewAspect(node, width, height) {
 
 function getPreviewContentWidth(node, nodeWidth = null) {
 	const width = preferredNodeWidth(node, nodeWidth);
-	return Math.max(160, Math.max(MIN_WIDTH, width) - PREVIEW_WIDGET_GUTTER);
+	return Math.max(1, width - PREVIEW_WIDGET_GUTTER);
 }
 
 function getPreviewCardHeight(node, nodeWidth = null) {
@@ -884,10 +1386,12 @@ function updatePreviewLayout(node, nodeWidth = null) {
 
 function getPanelHeight(node, nodeWidth = null) {
 	const mode = String(node?.__gjjVideoCombinePanelMode || "hidden");
+	const noticeVisible = Boolean(node?.__gjjVideoCombineStatus?.frameRateNotice?.wrap?.__gjjVideoCombineVisible);
+	const noticeHeight = noticeVisible ? FRAME_RATE_NOTICE_HEIGHT : 0;
 	if (mode === "preview") {
-		return getPreviewCardHeight(node, nodeWidth) + PREVIEW_PANEL_VERTICAL_PADDING;
+		return noticeHeight + getPreviewCardHeight(node, nodeWidth) + PREVIEW_PANEL_VERTICAL_PADDING;
 	}
-	return HIDDEN_PANEL_HEIGHT;
+	return noticeHeight || HIDDEN_PANEL_HEIGHT;
 }
 
 function resizeNodeToContent(node) {
@@ -902,9 +1406,8 @@ function resizeNodeToContent(node) {
 		node.__gjjVideoCombineResizePending = false;
 		updatePreviewLayout(node);
 		const computed = typeof node.computeSize === "function" ? node.computeSize() : node.size;
-		const height = Math.max(80, Number(computed?.[1] || node.size?.[1] || 80));
+		const height = Math.max(80, Math.round(Number(computed?.[1] || node.size?.[1] || 80)));
 		setNodeHeightPreservingUserWidth(node, height);
-		refreshNode(node);
 	});
 }
 
@@ -916,7 +1419,8 @@ function setPanelMode(node, mode) {
 	const nextMode = ["hidden", "preview"].includes(mode) ? mode : "hidden";
 	const sameMode = node.__gjjVideoCombinePanelMode === nextMode;
 	node.__gjjVideoCombinePanelMode = nextMode;
-	state.wrap.style.display = nextMode === "hidden" ? "none" : "flex";
+	const noticeVisible = Boolean(state.frameRateNotice?.wrap?.__gjjVideoCombineVisible);
+	state.wrap.style.display = noticeVisible || nextMode === "preview" ? "flex" : "none";
 	state.previewCard.style.display = nextMode === "preview" ? "flex" : "none";
 	if (state.widget) {
 		state.widget.getHeight = () => getPanelHeight(node);
@@ -1026,11 +1530,24 @@ function setPreview(node, detail = {}) {
 	refreshNode(node);
 }
 
+function applyFinalNodeColor(node) {
+	if (!node) {
+		return;
+	}
+	node.properties ||= {};
+	if (node.properties[FINAL_NODE_COLOR_PROPERTY] !== true) {
+		node.color = FINAL_NODE_COLOR;
+		node.bgcolor = FINAL_NODE_BGCOLOR;
+		node.properties[FINAL_NODE_COLOR_PROPERTY] = true;
+	}
+}
+
 function patchNode(node) {
 	if (!node) {
 		return;
 	}
 	node.__gjjVideoCombinePatched = true;
+	applyFinalNodeColor(node);
 	initializeNodeWidth(node);
 	removeLegacyVideoInputs(node);
 	repairToolbarWidgetDefaults(node);
@@ -1039,6 +1556,7 @@ function patchNode(node) {
 	applyBasicSettingsVisibility(node);
 	ensurePanelWidget(node);
 	applySlotVisibility(node);
+	updateFrameRateControlState(node);
 	clearNativePreview(node);
 	updatePreviewLayout(node);
 	if (!Array.isArray(node.size) || node.size.length < 2) {
@@ -1048,6 +1566,56 @@ function patchNode(node) {
 	}
 	if (!node.__gjjVideoCombinePanelMode) {
 		setPanelMode(node, "hidden");
+	}
+}
+
+function findVideoCombineNodeForPromptId(graph, promptId) {
+	const id = String(promptId || "");
+	const nodes = graph?._nodes || [];
+	const parts = id.split(":").filter(Boolean);
+	const tail = parts.length ? parts[parts.length - 1] : id;
+	return nodes.find((node) => String(node?.id) === id)
+		|| nodes.find((node) => String(node?.id) === tail);
+}
+
+function frameRateInputHasManualLink(node) {
+	const candidates = [
+		...(Array.isArray(node?.inputs) ? node.inputs : []),
+		...(Array.isArray(node?.__gjjVideoCombineFullInputs) ? node.__gjjVideoCombineFullInputs : []),
+	];
+	return candidates.some((input) => isFrameRateSlot(input) && input?.link != null);
+}
+
+function resolveSelectedFrameRateVariable(node) {
+	const name = selectedFrameRateVariable(node);
+	const resolver = globalThis.GJJ_VariableBroadcast?.resolveVariableBroadcastSource;
+	if (!name || typeof resolver !== "function") return null;
+	return resolver(node?.graph || app.graph, name);
+}
+
+function patchVideoCombineFrameRatePrompt(promptResult, graph) {
+	const output = promptResult?.output;
+	if (!output) return promptResult;
+	for (const [nodeId, nodeInfo] of Object.entries(output)) {
+		const node = findVideoCombineNodeForPromptId(graph, nodeId);
+		if (!node || !TARGET_NODES.has(String(node?.comfyClass || node?.type || ""))) continue;
+		if (!selectedFrameRateVariable(node) || frameRateInputHasManualLink(node)) continue;
+		const resolved = resolveSelectedFrameRateVariable(node);
+		if (!Array.isArray(resolved) || resolved.length !== 2 || String(resolved[0]) === String(node.id)) continue;
+		nodeInfo.inputs = nodeInfo.inputs || {};
+		nodeInfo.inputs[FRAME_RATE_WIDGET_NAME] = [String(resolved[0]), Number(resolved[1] || 0)];
+	}
+	return promptResult;
+}
+
+function installFrameRateVariablePromptPatch() {
+	if (!api.__gjjVideoCombineFrameRateVariableQueuePatchInstalled && typeof api.queuePrompt === "function") {
+		api.__gjjVideoCombineFrameRateVariableQueuePatchInstalled = true;
+		const originalQueuePrompt = api.queuePrompt.bind(api);
+		api.queuePrompt = async function (...args) {
+			patchVideoCombineFrameRatePrompt(args[1], app.rootGraph || app.graph);
+			return originalQueuePrompt(...args);
+		};
 	}
 }
 
@@ -1077,6 +1645,12 @@ app.registerExtension({
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalOnConfigure?.apply(this, args);
+			const serializedNode = args?.[0];
+			const props = serializedNode?.properties || this.properties || {};
+			if (props[FRAME_RATE_VARIABLE_PROPERTY] !== undefined) {
+				this.properties ||= {};
+				this.properties[FRAME_RATE_VARIABLE_PROPERTY] = String(props[FRAME_RATE_VARIABLE_PROPERTY] || "");
+			}
 			patchNode(this);
 			clearNativePreview(this);
 			return result;
@@ -1112,6 +1686,11 @@ app.registerExtension({
 			if (serializedNode && typeof serializedNode === "object") {
 				serializedNode.properties ||= {};
 				serializedNode.properties[USER_WIDTH_PROPERTY] = this.properties?.[USER_WIDTH_PROPERTY] ?? preferredNodeWidth(this);
+				if (selectedFrameRateVariable(this)) {
+					serializedNode.properties[FRAME_RATE_VARIABLE_PROPERTY] = selectedFrameRateVariable(this);
+				} else {
+					delete serializedNode.properties[FRAME_RATE_VARIABLE_PROPERTY];
+				}
 			}
 			return result;
 		};
@@ -1133,6 +1712,7 @@ app.registerExtension({
 	},
 
 	setup() {
+		installFrameRateVariablePromptPatch();
 		for (const node of app.graph?._nodes || []) {
 			if (TARGET_NODES.has(String(node?.comfyClass || node?.type || ""))) {
 				patchNode(node);
