@@ -5,37 +5,6 @@ from typing import Any
 
 NODE_NAME = "GJJ_WanVideoTorchCompileSettings"
 
-BACKEND_LABEL_TO_VALUE = {
-    "inductor（Inductor：通用编译后端，需要 Triton）": "inductor",
-    "cudagraphs（CUDA Graphs：低开销后端，不需要 Triton）": "cudagraphs",
-    "inductor": "inductor",
-    "cudagraphs": "cudagraphs",
-}
-
-MODE_LABEL_TO_VALUE = {
-    "default（默认：平衡兼容性与速度）": "default",
-    "max-autotune（最大自动调优：更激进，首次编译更久）": "max-autotune",
-    "max-autotune-no-cudagraphs（最大调优但禁用 CUDA Graphs）": "max-autotune-no-cudagraphs",
-    "reduce-overhead（降低运行开销：适合重复形状）": "reduce-overhead",
-    "default": "default",
-    "max-autotune": "max-autotune",
-    "max-autotune-no-cudagraphs": "max-autotune-no-cudagraphs",
-    "reduce-overhead": "reduce-overhead",
-}
-
-BACKEND_CHOICES = list(BACKEND_LABEL_TO_VALUE.keys())[:2]
-MODE_CHOICES = list(MODE_LABEL_TO_VALUE.keys())[:4]
-
-
-def _choice_value(value: str, mapping: dict[str, str], default: str) -> str:
-    text = str(value or "").strip()
-    if text in mapping:
-        return mapping[text]
-    for raw in set(mapping.values()):
-        if text == raw:
-            return raw
-    return default
-
 
 class GJJ_WanVideoTorchCompileSettings:
     CATEGORY = "GJJ/视频模型/WanVideo"
@@ -62,7 +31,6 @@ class GJJ_WanVideoTorchCompileSettings:
         "title": "WanVideo Torch 编译设置",
         "description": "生成 WanVideoWrapper 同款 WANCOMPILEARGS 配置，可连接到支持 compile_args 的 GJJ/WanVideo 模型加载节点。",
         "usage": [
-            "下拉菜单使用中英对照显示；输出字典仍按原版节点输出英文原值。",
             "backend、fullgraph、mode、dynamic 等字段按原版节点原样输出。",
             "本节点只生成参数，不加载模型，也不执行 torch.compile。",
             "真正编译发生在下游 WanVideo 模型加载器接收到该参数后。",
@@ -72,22 +40,6 @@ class GJJ_WanVideoTorchCompileSettings:
             "不依赖 ComfyUI-WanVideoWrapper 插件本体，也不新增第三方 pip 依赖。",
             "如果下游实际启用 torch.compile，Triton 与 PyTorch 版本要求仍由下游运行环境决定。",
         ],
-        "⚠️ Triton 依赖要求": [
-            "当 backend 选择 'inductor' 时，PyTorch 需要 Triton 编译器支持。",
-            "错误提示: 'Cannot find a working triton installation'",
-            "解决方法:",
-            "1. 安装 Triton: pip install triton",
-            "2. 或切换 backend 为 'cudagraphs' (不需要 Triton)",
-            "3. 或不连接本节点以禁用 torch.compile",
-        ],
-        "📦 依赖安装命令": [
-            "# 安装 Triton (推荐)",
-            "pip install triton",
-            "",
-            "# Windows 用户注意",
-            "# 如果标准安装失败，可尝试预编译版本:",
-            "# pip install https://github.com/woct0rdho/triton-windows/releases/download/v3.5.0-windows.post21/triton-3.5.0.dev20241205-cp310-none-win_amd64.whl",
-        ],
     }
 
     @classmethod
@@ -95,11 +47,11 @@ class GJJ_WanVideoTorchCompileSettings:
         return {
             "required": {
                 "backend": (
-                    BACKEND_CHOICES,
+                    ["inductor", "cudagraphs"],
                     {
-                        "default": BACKEND_CHOICES[0],
+                        "default": "inductor",
                         "display_name": "编译后端",
-                        "tooltip": "torch.compile 使用的 backend。菜单显示中英对照，输出仍会转为英文原值：inductor 或 cudagraphs。",
+                        "tooltip": "torch.compile 使用的 backend。原版可选 inductor 或 cudagraphs。",
                     },
                 ),
                 "fullgraph": (
@@ -111,11 +63,11 @@ class GJJ_WanVideoTorchCompileSettings:
                     },
                 ),
                 "mode": (
-                    MODE_CHOICES,
+                    ["default", "max-autotune", "max-autotune-no-cudagraphs", "reduce-overhead"],
                     {
-                        "default": MODE_CHOICES[0],
+                        "default": "default",
                         "display_name": "编译模式",
-                        "tooltip": "对应 torch.compile 的 mode 参数。菜单显示中英对照，输出仍会转为原版英文值。",
+                        "tooltip": "对应 torch.compile 的 mode 参数，保持原版四个选项。",
                     },
                 ),
                 "dynamic": (
@@ -189,12 +141,10 @@ class GJJ_WanVideoTorchCompileSettings:
         force_parameter_static_shapes: bool = True,
         allow_unmerged_lora_compile: bool = False,
     ) -> tuple[dict[str, Any]]:
-        backend_value = _choice_value(backend, BACKEND_LABEL_TO_VALUE, "inductor")
-        mode_value = _choice_value(mode, MODE_LABEL_TO_VALUE, "default")
         compile_args = {
-            "backend": backend_value,
+            "backend": backend,
             "fullgraph": fullgraph,
-            "mode": mode_value,
+            "mode": mode,
             "dynamic": dynamic,
             "dynamo_cache_size_limit": dynamo_cache_size_limit,
             "dynamo_recompile_limit": dynamo_recompile_limit,

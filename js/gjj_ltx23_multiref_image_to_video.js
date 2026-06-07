@@ -9,6 +9,7 @@ const PANEL_WIDGET = "gjj_ltx23_clean_panel";
 const SCENE_RE = /^(?:scene_0*(\d+)|场景\s*(\d+)|(?:🖼️\s*)?(\d+))$/i;
 const FIRST_SCENE_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const SCENE_TYPE = "IMAGE";
+const FPS_SOCKET_TYPE = "INT,FLOAT";
 const MAX_SCENES = 20;
 
 const DEFAULT_CONFIG = {
@@ -51,7 +52,7 @@ function coerceMainWidgetValue(key, value) {
   if (!NUMERIC_WIDGET_KEYS.has(key)) return value == null ? "" : String(value);
   const n = Number(value);
   if (!Number.isFinite(n)) return value;
-  if (["width", "height", "fps", "seed"].includes(key)) return Math.round(n);
+  if (["width", "height", "seed"].includes(key)) return Math.round(n);
   return n;
 }
 
@@ -140,6 +141,12 @@ function sceneIndex(input) {
 }
 
 function isSceneInput(input) { return sceneIndex(input) > 0; }
+
+function isFpsInput(input) {
+  const name = String(input?.name || "");
+  const widgetName = String(input?.widget?.name || "");
+  return name === "fps" || widgetName === "fps";
+}
 
 function setInputType(input, type) {
   if (!input) return;
@@ -339,68 +346,50 @@ function restoreSceneLinksFromSavedMap(node) {
 
 function normalizeInputs(node) {
   if (!Array.isArray(node.inputs)) node.inputs = [];
-  // Clean v40：修复保存/重开后图片线错位到任意非场景口的问题。
-  // 只要非场景口上挂着 IMAGE/GJJ_BATCH_IMAGE 类型的 link，就自动迁回场景口。
-  moveMisplacedImageLinksToScenes(node);
-  // 清理重复场景口：同编号保留已连线者，否则保留第一个。
-  const kept = [];
-  const byScene = new Map();
-  for (const input of node.inputs) {
-    const idx = sceneIndex(input);
-    if (!idx) { kept.push(input); continue; }
-    const old = byScene.get(idx);
-    if (!old) { byScene.set(idx, input); continue; }
-    if (!old.link && input.link) byScene.set(idx, input);
-  }
-  // 固定口
-  const audio = ensureInput(node, "input_audio", "AUDIO");
-  audio.display_name = "驱动音频";
-  const lora = ensureInput(node, "lora_chain_config", "LORA_CHAIN_CONFIG");
-  lora.display_name = "LoRA串联配置";
-  let s1 = byScene.get(1) || node.inputs.find(i => sceneIndex(i) === 1);
-  if (!s1) {
-    node.addInput("场景1", FIRST_SCENE_TYPE);
-    s1 = node.inputs[node.inputs.length - 1];
-  }
-  s1.name = "场景1";
-  setInputType(s1, FIRST_SCENE_TYPE);
-  byScene.set(1, s1);
+  let image = node.inputs.find(i => String(i?.name || "") === "image_sequence" || /图片\/帧序列|图片|图像|帧序列|image/i.test(`${i?.name || ""} ${i?.label || ""} ${i?.localized_name || ""}`));
+  if (!image) image = ensureInput(node, "image_sequence", FIRST_SCENE_TYPE);
 
-  // 根据连接状态追加一个尾部空场景口。
-  let maxNeeded = 1;
-  for (let i = 1; i <= MAX_SCENES; i++) {
-    const inp = byScene.get(i) || node.inputs.find(x => sceneIndex(x) === i);
-    if (inp?.link) maxNeeded = Math.min(MAX_SCENES, i + 1);
+  const oldSceneWithLink = (node.inputs || [])
+    .filter(i => i !== image && isSceneInput(i) && i.link != null)
+    .sort((a, b) => sceneIndex(a) - sceneIndex(b))[0];
+  if (!image.link && oldSceneWithLink?.link != null) {
+    image.link = oldSceneWithLink.link;
+    oldSceneWithLink.link = null;
   }
-  for (let i = 2; i <= maxNeeded; i++) {
-    let inp = byScene.get(i) || node.inputs.find(x => sceneIndex(x) === i);
-    if (!inp) {
-      node.addInput(`场景${i}`, SCENE_TYPE);
-      inp = node.inputs[node.inputs.length - 1];
-    }
-    inp.name = `场景${i}`;
-    setInputType(inp, SCENE_TYPE);
-    byScene.set(i, inp);
-  }
-  // 只保留到 maxNeeded；超过但有连线则保留。
-  const sceneInputs = [...byScene.entries()]
-    .filter(([i, inp]) => i <= maxNeeded || inp.link)
-    .sort((a, b) => a[0] - b[0])
-    .map(([i, inp]) => {
-      inp.name = `场景${i}`;
-      setInputType(inp, i === 1 ? FIRST_SCENE_TYPE : SCENE_TYPE);
-      return inp;
-    });
-  const fixed = [audio, lora];
-  const known = new Set([...fixed, ...sceneInputs]);
-  // Clean v31：不要再创建/重排主参数 forceInput。
-  // 主参数由 Python 原生 widget 管理，小圆点会显示在字段前面。
+  image.name = "image_sequence";
+  image.label = "🖼️ 图片/帧序列";
+  image.localized_name = "🖼️ 图片/帧序列";
+  image.display_name = "🖼️ 图片/帧序列";
+  setInputType(image, FIRST_SCENE_TYPE);
+
+  const lora = ensureInput(node, "lora_chain_config", "LORA_CHAIN_CONFIG");
+  lora.label = "🧬 LoRA串联配置";
+  lora.localized_name = "🧬 LoRA串联配置";
+  lora.display_name = "🧬 LoRA串联配置";
+  setInputType(lora, "LORA_CHAIN_CONFIG");
+
+  const audio = ensureInput(node, "input_audio", "AUDIO");
+  audio.label = "🔊 驱动音频";
+  audio.localized_name = "🔊 驱动音频";
+  audio.display_name = "🔊 驱动音频";
+  setInputType(audio, "AUDIO");
+
+  const fixed = [image, lora, audio];
+  const known = new Set(fixed);
   const others = node.inputs.filter(i => !known.has(i) && !isSceneInput(i));
-  node.inputs = [...fixed, ...sceneInputs, ...others];
+  node.inputs = [...fixed, ...others];
+  stabilizeNumericWidgetInputs(node);
   repairLinks(node);
-  restoreSceneLinksFromSavedMap(node);
-  repairLinks(node);
-  saveSceneRestoreState(node);
+}
+
+function stabilizeNumericWidgetInputs(node) {
+  for (const input of node.inputs || []) {
+    if (!isFpsInput(input)) continue;
+    input.name = input.name || "fps";
+    input.label = input.label || "🎞️ 帧率";
+    input.localized_name = input.localized_name || "🎞️ 帧率";
+    input.type = FPS_SOCKET_TYPE;
+  }
 }
 
 function repairLinks(node) {
@@ -535,9 +524,9 @@ function buildPanel(node) {
   buttons.append(segmentBtn);
   root.appendChild(buttons);
 
-  segmentPanel.appendChild(makeField(node, { label: "转场LoRA序列", key: "transition_lora_switches", type: "text", placeholder: "例如：1,0,1", tooltip: "🧬 每段是否启用转场 LoRA：1=启用，0=关闭；不填/越界=默认启用。" }));
-  segmentPanel.appendChild(makeField(node, { label: "保存位置", key: "segment_save_preset", type: "text", tooltip: "📁 分段视频保存到 ComfyUI/output 下的相对目录，支持 {date}/{time}/{node}/{segment}/{start}/{end}。" }));
-  segmentPanel.appendChild(makeSelect(node, "视频格式", "segment_video_format", ["video/h264-mp4", "video/h265-mp4", "video/webm"]).row);
+  segmentPanel.appendChild(makeField(node, { label: "🧬 转场LoRA序列", key: "transition_lora_switches", type: "text", placeholder: "例如：1,0,1", tooltip: "🧬 每段是否启用转场 LoRA：1=启用，0=关闭；不填/越界=默认启用。" }));
+  segmentPanel.appendChild(makeField(node, { label: "📁 保存位置", key: "segment_save_preset", type: "text", tooltip: "📁 分段视频保存到 ComfyUI/output 下的相对目录，支持 {date}/{time}/{node}/{segment}/{start}/{end}。" }));
+  segmentPanel.appendChild(makeSelect(node, "🎞️ 视频格式", "segment_video_format", ["video/h264-mp4", "video/h265-mp4", "video/webm"]).row);
   const openDirBtn = document.createElement("button");
   openDirBtn.className = "gjj-ltx-open-dir";
   openDirBtn.textContent = "📁 打开视频所在目录";

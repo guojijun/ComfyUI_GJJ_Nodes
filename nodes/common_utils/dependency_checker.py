@@ -251,6 +251,79 @@ def make_missing_model_spec(label="", subdir="", filename="", description=""):
 		"description": str(description or "").strip(),
 	}
 
+def build_node_help_payload(
+	*,
+	description="",
+	dependencies=None,
+	model_tree=None,
+	models=None,
+	usage=None,
+	runtime=None,
+	model_download_url=None,
+	install_cmd="",
+	copy_text="",
+	copy_label="",
+	notice="",
+	extra=None,
+):
+	"""Build a reusable Chinese GJJ_HELP payload for node help panels."""
+	dependency_items = []
+	for item in dependencies or []:
+		if isinstance(item, dict):
+			dependency_items.append({
+				"name": str(item.get("name") or item.get("display_name") or item.get("module_name") or "").strip(),
+				"type": str(item.get("type") or item.get("kind") or "运行依赖").strip(),
+				"required": bool(item.get("required", True)),
+				"description": str(item.get("description") or "").strip(),
+			})
+		else:
+			dependency_items.append({"name": str(item or "").strip(), "type": "运行依赖", "required": True, "description": ""})
+	dependency_items = [item for item in dependency_items if item.get("name")]
+
+	model_items = [item if isinstance(item, dict) else make_missing_model_spec(filename=str(item or "")) for item in (models or [])]
+	tree_items = []
+	for item in model_tree or []:
+		if isinstance(item, dict):
+			tree_items.append({
+				"label": str(item.get("label") or item.get("name") or "").strip(),
+				"path": str(item.get("path") or "").strip(),
+				"required": bool(item.get("required", True)),
+				"description": str(item.get("description") or "").strip(),
+			})
+		else:
+			tree_items.append({"label": str(item or "").strip(), "path": "", "required": True, "description": ""})
+	tree_items = [item for item in tree_items if item.get("label") or item.get("path")]
+
+	help_lines = []
+	if notice:
+		help_lines.append(str(notice).strip())
+	if dependency_items:
+		help_lines.append("需要的运行环境：" + "；".join(
+			f"{item['name']}{'（可选）' if not item.get('required', True) else ''}" for item in dependency_items
+		))
+	if tree_items:
+		help_lines.append("模型树：" + "；".join(
+			"/".join(x for x in (item.get("path"), item.get("label")) if x) for item in tree_items
+		))
+
+	payload = {
+		"description": str(description or "").strip(),
+		"notice": str(notice or "").strip(),
+		"dependencies": dependency_items,
+		"model_tree": tree_items,
+		"models": model_items,
+		"usage": [str(item).strip() for item in (usage or []) if str(item).strip()],
+		"runtime": [str(item).strip() for item in (runtime or []) if str(item).strip()],
+		"model_download_url": str(model_download_url or DEFAULT_MODEL_URL or "").strip(),
+		"install_cmd": str(install_cmd or "").strip(),
+		"copy_text": str(copy_text or install_cmd or model_download_url or "").strip(),
+		"copy_label": str(copy_label or ("📋 复制安装命令" if install_cmd else "📋 复制下载地址")).strip(),
+		"help_message": "\n".join(line for line in help_lines if line),
+	}
+	if isinstance(extra, dict):
+		payload.update(extra)
+	return payload
+
 def raise_dependency_model_error(
 	node_name="",
 	*,

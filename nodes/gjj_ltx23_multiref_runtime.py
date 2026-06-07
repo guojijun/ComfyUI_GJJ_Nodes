@@ -3186,7 +3186,7 @@ def run_ltx23_multiref_video(
 					"segment_videos": segment_previews,
 					"preview_segments": segment_previews,
 				},
-				"result": (final_video,),
+				"result": (final_video, combined_frames.detach().float().cpu().clamp(0.0, 1.0).contiguous()),
 			}
 
 		resolved_branch_kind = "first_last_workflow" if (mode != MODE_AUDIO_CONDITIONED and visual_scene_count == 2) else "default"
@@ -3214,7 +3214,7 @@ def run_ltx23_multiref_video(
 			audio_label = "静音输出"
 		_send_status(unique_id, f"完成：{route_label} / 有效场景 {visual_scene_count} 张 / {result['output_width']}x{result['output_height']} / {result['output_frame_count']} 帧 / {audio_label}")
 		_send_status(unique_id, f"最终输出尺寸：{result['output_width']}x{result['output_height']}")
-		return (result["video"],)
+		return (result["video"], result["frames"])
 
 	try:
 		return _execute()

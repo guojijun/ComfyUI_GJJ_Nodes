@@ -9,6 +9,7 @@ from nodes import CheckpointLoaderSimple, CLIPTextEncode, VAEDecode, common_ksam
 from server import PromptServer
 
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
+from .common_utils.dependency_checker import build_node_help_payload, make_missing_model_spec
 from .gjj_multi_lora_chain import (
     apply_lora_chain_config,
     normalize_lora_chain_data,
@@ -31,10 +32,126 @@ DEFAULT_WIDTH = 768
 DEFAULT_HEIGHT = 768
 DEFAULT_LENGTH = 65
 DEFAULT_FPS = 16.0
+DEFAULT_DURATION_SECONDS = (DEFAULT_LENGTH - 1) / DEFAULT_FPS
 DEFAULT_EMPTY_FRAME_LEVEL = 0.5
 DEFAULT_FILENAME = f"{DEFAULT_FILENAME_PREFIX}/Wan22FirstLastVideo"
 DEFAULT_AUDIO_MODE = "循环补足到视频长度"
 MIXED_IMAGE_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
+NODE_DESCRIPTION = (
+    "将 Wan2.2 视频工作流封装成零外部依赖单节点：未接图走文生视频，"
+    "1 张图走图生视频，2 张图走首尾帧，多张图按相邻图片循环首尾帧分段生成。"
+)
+
+
+class MultiInput(str):
+    def __new__(cls, string: str, allowed_types="*"):
+        instance = super().__new__(cls, string)
+        instance.allowed_types = allowed_types
+        return instance
+
+    @staticmethod
+    def _type_set(value):
+        if isinstance(value, (list, tuple, set)):
+            parts = []
+            for item in value:
+                parts.extend(str(item).split(","))
+        else:
+            parts = str(value).split(",")
+        return {part.strip() for part in parts if part.strip()}
+
+    def __ne__(self, other):
+        if self.allowed_types == "*" or other == "*":
+            return False
+        allowed = self._type_set(self.allowed_types)
+        incoming = self._type_set(other)
+        return not (incoming.issubset(allowed) or allowed.issubset(incoming))
+
+
+FLOAT_OR_INT = MultiInput("FLOAT", ["INT", "FLOAT"])
+
+WAN22_AIO_MODEL_SPEC = make_missing_model_spec(
+    label="Wan2.2 Rapid/Mega/AIO Checkpoint",
+    subdir="models/checkpoints",
+    filename=DEFAULT_CHECKPOINT,
+    description="AIO 单文件 checkpoint，节点只从 models/checkpoints 读取；不需要在 text_encoders 另放同名文件。",
+)
+WAN22_FIRST_LAST_DEPENDENCIES = [
+    {
+        "name": "ComfyUI 核心节点",
+        "type": "内置运行时",
+        "required": True,
+        "description": "使用 CheckpointLoaderSimple、CLIPTextEncode、common_ksampler、VAEDecode 完成加载、编码、采样和解码。",
+    },
+    {
+        "name": "GJJ Wan2.2 AIO/VACE 工具",
+        "type": "GJJ 内置模块",
+        "required": True,
+        "description": "复用 GJJ_Wan22RapidAioMega 的 VACE 首尾帧控制帧和 latent 构建逻辑。",
+    },
+    {
+        "name": "GJJ 视频合成运行时",
+        "type": "GJJ 内置模块",
+        "required": True,
+        "description": "复用 GJJ video combine runtime 合成最终 VIDEO、写入预览和可选音轨。",
+    },
+    {
+        "name": "LoRA 串联配置",
+        "type": "可选输入",
+        "required": False,
+        "description": "连接 LORA_CHAIN_CONFIG 时，会按顺序加载 models/loras 下的 LoRA 并应用到模型与 CLIP。",
+    },
+    {
+        "name": "AUDIO 音频输入",
+        "type": "可选输入",
+        "required": False,
+        "description": "连接音频时，最终视频会按帧数和 FPS 截断、循环补足或静音补足后封入音轨。",
+    },
+]
+WAN22_FIRST_LAST_MODEL_TREE = [
+    {
+        "label": DEFAULT_CHECKPOINT,
+        "path": "models/checkpoints",
+        "required": True,
+        "description": "默认 AIO checkpoint；实际下拉会读取当前 ComfyUI checkpoints 列表，可使用子目录相对路径。",
+    },
+    {
+        "label": "LoRA 串联配置中的 LoRA 文件",
+        "path": "models/loras",
+        "required": False,
+        "description": "仅在连接 LoRA 串联配置时需要；保留原始子目录相对文件名。",
+    },
+    {
+        "label": "输出视频与分段预览",
+        "path": "output / temp",
+        "required": False,
+        "description": "save_output 开启时写入 output；关闭时写入 temp 供节点内预览。",
+    },
+]
+WAN22_FIRST_LAST_RUNTIME_TREE = [
+    "CheckpointLoaderSimple 读取单个 AIO checkpoint",
+    "可选 LoRA_CHAIN_CONFIG -> 应用到 Model / CLIP",
+    "图片输入数量决定路线：0 文生视频，1 图生视频，2 首尾帧，多图相邻分段",
+    "VACE 控制帧 + latent -> common_ksampler -> VAEDecode",
+    "多段帧序列拼接 -> 可选音频适配 -> combine_video",
+]
+WAN22_FIRST_LAST_USAGE = [
+    "AIO模型（Checkpoint）来自 models/checkpoints，默认优先匹配 Wan2.2 Rapid/Mega/AIO 文件。",
+    "图片/帧序列为空时按文生视频执行；多张图片会按 1-2、2-3、3-4 依次生成分段。",
+    "连接 LoRA 串联配置时，LoRA 文件需位于 models/loras 下。",
+    "分段保存只影响检查用分段视频，最终仍会合成一个完整视频。",
+]
+WAN22_FIRST_LAST_GJJ_HELP = build_node_help_payload(
+    description=NODE_DESCRIPTION,
+    notice="需要本地 Wan2.2 AIO checkpoint；GJJ 内置 VACE 构建、LoRA 串联和视频合成运行时。",
+    dependencies=WAN22_FIRST_LAST_DEPENDENCIES,
+    model_tree=WAN22_FIRST_LAST_MODEL_TREE,
+    models=[WAN22_AIO_MODEL_SPEC],
+    runtime=WAN22_FIRST_LAST_RUNTIME_TREE,
+    usage=WAN22_FIRST_LAST_USAGE,
+    copy_text="models/checkpoints/" + DEFAULT_CHECKPOINT,
+    copy_label="📋 复制默认模型路径",
+    extra={"static_model_tree_only": True},
+)
 
 
 def _send_status(unique_id: Any, text: str, progress: float | None = None, **extra: Any) -> None:
@@ -247,17 +364,22 @@ def _fit_audio_to_video(audio: Any, frame_count: int, fps: float, mode: str) -> 
     return fitted
 
 
+def _duration_to_frame_count(duration_seconds: Any, fps: Any) -> int:
+    duration = max(0.01, float(duration_seconds))
+    frame_rate = max(0.01, float(fps))
+    return max(1, int((duration * frame_rate // 4) * 4 + 1))
+
+
 class GJJ_Wan22FirstLastVideo:
     CATEGORY = "GJJ"
     FUNCTION = "generate"
     OUTPUT_NODE = True
-    DESCRIPTION = (
-        "将 Wan2.2 视频工作流封装成零外部依赖单节点：未接图走文生视频，"
-        "1 张图走图生视频，2 张图走首尾帧，多张图按相邻图片循环首尾帧分段生成。"
-    )
+    DESCRIPTION = NODE_DESCRIPTION
+    REQUIRED_MODELS = [WAN22_AIO_MODEL_SPEC]
+    GJJ_HELP = WAN22_FIRST_LAST_GJJ_HELP
     SEARCH_ALIASES = ["SSW","wan flf2v", "wan first last", "首尾帧", "首尾帧生视频", "wan 视频"]
     RETURN_TYPES = ("VIDEO", MIXED_IMAGE_TYPE)
-    RETURN_NAMES = ("视频生成结果", "视频帧序列")
+    RETURN_NAMES = ("🎬 视频生成结果", "🖼️ 视频帧序列")
     OUTPUT_TOOLTIPS = (
         "按节点参数生成并合成后的官方 VIDEO 输出，可继续接视频处理节点。",
         "解码后的完整帧序列，类型兼容 GJJ_BATCH_IMAGE 与 IMAGE。",
@@ -280,7 +402,7 @@ class GJJ_Wan22FirstLastVideo:
                         "default": DEFAULT_POSITIVE,
                         "multiline": True,
                         "dynamicPrompts": True,
-                        "display_name": "正向提示词",
+                        "display_name": "📝 正向提示词",
                         "tooltip": "Wan2.2 AIO 视频生成正向提示词。",
                     },
                 ),
@@ -290,7 +412,7 @@ class GJJ_Wan22FirstLastVideo:
                         "default": DEFAULT_NEGATIVE,
                         "multiline": True,
                         "dynamicPrompts": True,
-                        "display_name": "反向提示词",
+                        "display_name": "🚫 反向提示词",
                         "tooltip": "Wan2.2 AIO 视频生成反向提示词。",
                     },
                 ),
@@ -298,19 +420,19 @@ class GJJ_Wan22FirstLastVideo:
                     checkpoints,
                     {
                         "default": default_checkpoint,
-                        "display_name": "AIO模型（Checkpoint）",
-                        "tooltip": "从 models/checkpoints 选择 Wan2.2 Rapid / Mega / AIO checkpoint，例如 wan2.2-rapid-mega-aio-nsfw-v12.2.safetensors。",
+                        "display_name": "🧠 Wan2.2 AIO单文件模型",
+                        "tooltip": "从 models/checkpoints 选择 Wan2.2 Rapid / Mega / AIO 单文件 checkpoint；不需要在 text_encoders 另放同名文件。",
                     },
                 ),
-                "width": ("INT", {"default": DEFAULT_WIDTH, "min": 16, "max": 8192, "step": 16, "display_name": "宽度", "tooltip": "最终视频帧宽度。"}),
-                "height": ("INT", {"default": DEFAULT_HEIGHT, "min": 16, "max": 8192, "step": 16, "display_name": "高度", "tooltip": "最终视频帧高度。"}),
-                "length": ("INT", {"default": DEFAULT_LENGTH, "min": 1, "max": 4096, "step": 4, "display_name": "每段帧数", "tooltip": "单段生成帧数；多图输入时每一对相邻图片生成一段。"}),
-                "fps": ("FLOAT", {"default": DEFAULT_FPS, "min": 1.0, "max": 120.0, "step": 1.0, "display_name": "帧率", "tooltip": "输出视频的帧率。"}),
+                "width": ("INT", {"default": DEFAULT_WIDTH, "min": 16, "max": 8192, "step": 16, "display_name": "📐 宽度", "tooltip": "最终视频帧宽度。"}),
+                "height": ("INT", {"default": DEFAULT_HEIGHT, "min": 16, "max": 8192, "step": 16, "display_name": "📏 高度", "tooltip": "最终视频帧高度。"}),
+                "duration_seconds": ("FLOAT", {"default": DEFAULT_DURATION_SECONDS, "min": 0.1, "max": 600.0, "step": 0.1, "display_name": "⏱️ 时长（秒）", "tooltip": "单段生成时长。后台按 int((时长 * 帧率 // 4) * 4 + 1) 计算内部帧数。"}),
+                "fps": (FLOAT_OR_INT, {"default": DEFAULT_FPS, "min": 1.0, "max": 120.0, "step": 1.0, "display_name": "🎞️ 帧率", "tooltip": "输出视频的帧率。参考 GJJ_VideoCombine，支持接入 INT 或 FLOAT，执行时统一按浮点数计算。"}),
                 "filename_prefix": (
                     "STRING",
                     {
                         "default": DEFAULT_FILENAME,
-                        "display_name": "文件名前缀",
+                        "display_name": "📁 文件名前缀",
                         "tooltip": "节点内合成/预览视频的保存前缀，支持子目录，例如 video/GJJ/Wan22。",
                     },
                 ),
@@ -318,7 +440,7 @@ class GJJ_Wan22FirstLastVideo:
                     supported_formats,
                     {
                         "default": default_format,
-                        "display_name": "输出格式",
+                        "display_name": "🎞️ 输出格式",
                         "tooltip": "节点内合成与预览使用的格式；默认 video/h264-mp4。",
                     },
                 ),
@@ -326,7 +448,7 @@ class GJJ_Wan22FirstLastVideo:
                     "BOOLEAN",
                     {
                         "default": True,
-                        "display_name": "保存最终视频",
+                        "display_name": "💾 保存最终视频",
                         "tooltip": "开启后写入 output 目录；关闭后写入 temp 目录用于节点内预览。",
                     },
                 ),
@@ -334,7 +456,7 @@ class GJJ_Wan22FirstLastVideo:
                     "BOOLEAN",
                     {
                         "default": False,
-                        "display_name": "分段保存",
+                        "display_name": "🧩 分段保存",
                         "tooltip": "多图循环首尾帧时，把每个分段也单独写出，便于检查转场。",
                     },
                 ),
@@ -342,7 +464,7 @@ class GJJ_Wan22FirstLastVideo:
                     [DEFAULT_AUDIO_MODE, "静音补足到视频长度"],
                     {
                         "default": DEFAULT_AUDIO_MODE,
-                        "display_name": "音频适配",
+                        "display_name": "🔊 音频适配",
                         "tooltip": "音频长于视频会截断；音频短于视频时可循环补足或静音补足。",
                     },
                 ),
@@ -353,7 +475,7 @@ class GJJ_Wan22FirstLastVideo:
                         "min": 0,
                         "max": 0xFFFFFFFFFFFFFFFF,
                         "control_after_generate": True,
-                        "display_name": "种子",
+                        "display_name": "🎲 种子",
                         "tooltip": "随机种子；改变后会得到不同的视频内容。",
                     },
                 ),
@@ -362,21 +484,21 @@ class GJJ_Wan22FirstLastVideo:
                 "images": (
                     MIXED_IMAGE_TYPE,
                     {
-                        "display_name": "图片/帧序列",
+                        "display_name": "🖼️ 图片/帧序列",
                         "tooltip": "可选。未接图走文生视频，1 张走图生视频，2 张走首尾帧，多张按相邻图片循环首尾帧分段生成。",
                     },
                 ),
                 "lora_chain_config": (
                     "LORA_CHAIN_CONFIG",
                     {
-                        "display_name": "LoRA串联配置",
+                        "display_name": "🧬 LoRA串联配置",
                         "tooltip": "可选。接入后会在加载 models/checkpoints 里的 AIO checkpoint 后，按配置顺序应用到模型与 CLIP。",
                     },
                 ),
                 "audio": (
                     "AUDIO",
                     {
-                        "display_name": "音频",
+                        "display_name": "🔊 音频",
                         "tooltip": "可选。最终视频合成时会按视频长度截断或循环/补静音后封入音轨。",
                     },
                 ),
@@ -395,7 +517,7 @@ class GJJ_Wan22FirstLastVideo:
         checkpoint_name,
         width,
         height,
-        length,
+        duration_seconds,
         fps,
         filename_prefix,
         format_name,
@@ -424,6 +546,8 @@ class GJJ_Wan22FirstLastVideo:
         route_name = _build_route_name(image_count)
         segment_pairs = _segment_pairs(image_frames)
         segment_count = len(segment_pairs)
+        fps = max(0.01, float(fps))
+        length = _duration_to_frame_count(duration_seconds, fps)
 
         checkpoint_name = checkpoint_name or kwargs.get("unet_name") or DEFAULT_CHECKPOINT
 

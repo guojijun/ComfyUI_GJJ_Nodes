@@ -78,6 +78,16 @@ def _is_vram_first(policy: str) -> bool:
     return str(policy or "").strip() != "自动"
 
 
+def _triposplat_compute_device():
+    import comfy.model_management
+
+    if os.environ.get(_VRAM_POLICY_ENV) == "1":
+        device = comfy.model_management.get_torch_device()
+        if not comfy.model_management.is_device_cpu(device):
+            return device
+    return None
+
+
 @contextlib.contextmanager
 def _triposplat_vram_policy(policy: str):
     previous = os.environ.get(_VRAM_POLICY_ENV)
@@ -422,8 +432,9 @@ def _load_triposplat_decoder_vae(vae_name: str, unique_id=None):
     send_node_progress(unique_id, "加载 TripoSplat 高斯解码器...", 0.23)
     state_dict = comfy.utils.load_torch_file(path)
     decoder = vae_mod.OctreeGaussianDecoder().eval()
-    device = comfy.model_management.vae_device()
-    offload_device = comfy.model_management.vae_offload_device()
+    preferred_device = _triposplat_compute_device()
+    device = preferred_device or comfy.model_management.vae_device()
+    offload_device = preferred_device or comfy.model_management.vae_offload_device()
     dtype = comfy.model_management.vae_dtype(device, [torch.float16, torch.bfloat16, torch.float32])
     decoder.to(dtype)
     patcher_cls = getattr(comfy.model_patcher, "CoreModelPatcher", comfy.model_patcher.ModelPatcher)
@@ -461,8 +472,9 @@ def _load_dinov3_clip_vision(clip_name: str, unique_id=None):
     state_dict = comfy.utils.load_torch_file(path)
     if "layer.0.mlp.gate_proj.weight" not in state_dict or "layer.31.norm1.weight" not in state_dict:
         raise RuntimeError("DINOv3 模型权重结构不匹配，请确认使用 models/clip_vision/dino_v3_vit_h.safetensors。")
-    load_device = comfy.model_management.text_encoder_device()
-    offload_device = comfy.model_management.text_encoder_offload_device()
+    preferred_device = _triposplat_compute_device()
+    load_device = preferred_device or comfy.model_management.text_encoder_device()
+    offload_device = preferred_device or comfy.model_management.text_encoder_offload_device()
     dtype = comfy.model_management.text_encoder_dtype(load_device)
     model = dino3.DINOv3ViTModel(dino3.DINOV3_VITH_CONFIG, dtype, offload_device, comfy.ops.manual_cast).eval()
     patcher_cls = getattr(comfy.model_patcher, "CoreModelPatcher", comfy.model_patcher.ModelPatcher)

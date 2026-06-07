@@ -27,6 +27,7 @@ except ImportError as exc:
 # 零依赖导入模式：顶层不导入 torch / ComfyUI / 其它本地运行时模块。
 # ComfyUI 扫描节点时只需要 INPUT_TYPES / NODE_CLASS_MAPPINGS，真正执行时再懒加载运行依赖。
 GJJ_BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
+IMAGE_SEQUENCE_INPUT_TYPE = GJJ_BATCH_IMAGE_TYPE
 DEFAULT_SEGMENT_VIDEO_FORMAT = "video/h264-mp4"
 MODE_GENERATED_AUDIO = "generated_audio"
 MODE_AUDIO_CONDITIONED = "audio_conditioned"
@@ -86,6 +87,33 @@ SEGMENT_SAVE_PRESETS = (
     "video/GJJ_LTX多图分段/{date}/{time}",
     "video/GJJ_LTX多图分段/{date}/任务{node}",
 )
+
+
+class MultiInput(str):
+    def __new__(cls, string: str, allowed_types="*"):
+        instance = super().__new__(cls, string)
+        instance.allowed_types = allowed_types
+        return instance
+
+    @staticmethod
+    def _type_set(value):
+        if isinstance(value, (list, tuple, set)):
+            parts = []
+            for item in value:
+                parts.extend(str(item).split(","))
+        else:
+            parts = str(value).split(",")
+        return {part.strip() for part in parts if part.strip()}
+
+    def __ne__(self, other):
+        if self.allowed_types == "*" or other == "*":
+            return False
+        allowed = self._type_set(self.allowed_types)
+        incoming = self._type_set(other)
+        return not (incoming.issubset(allowed) or allowed.issubset(incoming))
+
+
+FLOAT_OR_INT = MultiInput("FLOAT", ["INT", "FLOAT"])
 
 # Clean v40：保持稳定 UI，增强批量容器解析，并继续修正主参数执行尺寸。
 # 这样 ComfyUI 会像系统节点一样把可连接小圆点画在字段前面，
@@ -771,7 +799,7 @@ def _resolve_auto_route(scene_count: int, has_input_audio: bool) -> tuple[str, s
 def _resolve_prompt_payload(
     positive_prompt: Any,
     negative_prompt: Any,
-    fps: int,
+    fps: float,
     segment_seconds: float,
     scene_count: int,
     has_input_audio: bool,
@@ -781,7 +809,7 @@ def _resolve_prompt_payload(
         return {
             "positive_prompt": str(positive_prompt or "").strip(),
             "negative_prompt": str(negative_prompt or "").strip(),
-            "fps": int(fps),
+            "fps": max(0.01, float(fps)),
             "segment_seconds": float(segment_seconds),
             "total_duration_override": None,
             "decode_generated_audio": True,
@@ -797,14 +825,14 @@ def _resolve_prompt_payload(
         or negative_prompt
         or ""
     ).strip()
-    resolved_fps = int(fps)
+    resolved_fps = float(fps)
     resolved_segment_seconds = float(segment_seconds)
     audio_generation = _safe_bool(parameters.get("audio_generation", True), True)
     decode_generated_audio = audio_generation if not has_input_audio else True
     return {
         "positive_prompt": prompt_text,
         "negative_prompt": resolved_negative,
-        "fps": max(1, int(resolved_fps)),
+        "fps": max(0.01, float(resolved_fps)),
         "segment_seconds": max(0.1, float(resolved_segment_seconds)),
         "total_duration_override": None,
         "decode_generated_audio": decode_generated_audio,
@@ -1112,7 +1140,7 @@ def _resolve_clean_config(config_json: Any = None, extra_pnginfo: Any = None, un
     config["segment_seconds"] = _safe_float(config.get("segment_seconds"), DEFAULT_SEGMENT_SECONDS, 0.1, 3600.0)
     config["width"] = int(_safe_float(config.get("width"), DEFAULT_WIDTH, 64, 8192))
     config["height"] = int(_safe_float(config.get("height"), DEFAULT_HEIGHT, 64, 8192))
-    config["fps"] = int(_safe_float(config.get("fps"), DEFAULT_FPS, 1, 120))
+    config["fps"] = _safe_float(config.get("fps"), DEFAULT_FPS, 1.0, 120.0)
     config["seed"] = int(_safe_float(config.get("seed"), DEFAULT_SEED, 0, 0xFFFFFFFFFFFFFFFF))
     config["denoise_strength"] = _safe_float(config.get("denoise_strength"), DEFAULT_DENOISE_STRENGTH, 0.0, 1.0)
     config["transition_enabled"] = _safe_bool(config.get("transition_enabled"), False)
@@ -1188,9 +1216,12 @@ class GJJ_LTX23ImageToVideoMultiRef:
     FUNCTION = "generate"
     DESCRIPTION = "LTX-2.3 清爽版图文/音频视频节点：Python 只保留真实输入口，复杂 UI 全部由前端 DOM 面板写入 config_json / node.properties。无输入=T2V；一张图片=I2V；有音频=S2V；音频+图片=数字人；两张图片=首尾帧；多张图片=多图参考。"
     SEARCH_ALIASES = ["SSL","ltx 图生视频", "ltx 文生视频", "ltx 图文生视频", "ltx 多图参考", "ltx i2v multiref", "ltx t2v", "图生视频多图参考", "动态场景视频", "ltx 数字人", "talking head"]
-    RETURN_TYPES = ("VIDEO",)
-    RETURN_NAMES = ("视频生成结果",)
-    OUTPUT_TOOLTIPS = ("自动识别：无输入=T2V；一张图片=I2V；有音频=S2V；音频+图片=数字人；两张图片=首尾帧（严格复刻最新工作流）；多张图片=多图参考。",)
+    RETURN_TYPES = ("VIDEO", "IMAGE")
+    RETURN_NAMES = ("🎬 视频生成结果", "🖼️ 视频帧序列")
+    OUTPUT_TOOLTIPS = (
+        "自动识别：无输入=T2V；一张图片=I2V；有音频=S2V；音频+图片=数字人；两张图片=首尾帧（严格复刻最新工作流）；多张图片=多图参考。",
+        "生成后的视频帧 IMAGE 序列，可继续接预览、保存图片、抽帧或其它图像节点。",
+    )
     INPUT_IS_LIST = True
 
     GJJ_HELP = {
@@ -1242,7 +1273,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
                     _ltx_checkpoint_options(),
                     {
                         "default": _default_ltx_checkpoint(),
-                        "display_name": "LTX主模型",
+                        "display_name": "🧠 LTX主模型",
                         "tooltip": "🧠 主模型目录：models/diffusion_models。优先匹配 ltx-2.3-22b，其次匹配 ltx23 / ltx。",
                     },
                 ),
@@ -1251,7 +1282,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
                     {
                         "default": DEFAULT_PROMPT,
                         "multiline": True,
-                        "display_name": "正向提示词",
+                        "display_name": "📝 正向提示词",
                         "tooltip": "📝 正向提示词。启用转场 LoRA 的段会自动在前面补 zhuanchang；也可从字段前接入 STRING 覆盖。",
                     },
                 ),
@@ -1260,7 +1291,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
                     {
                         "default": DEFAULT_NEGATIVE_PROMPT,
                         "multiline": True,
-                        "display_name": "反向提示词",
+                        "display_name": "🚫 反向提示词",
                         "tooltip": "🚫 反向提示词。用于避免水印、文字、画面抖动、畸形等问题；可从字段前接入 STRING 覆盖。",
                     },
                 ),
@@ -1271,7 +1302,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
                         "min": 0.1,
                         "max": 600.0,
                         "step": 0.1,
-                        "display_name": "场景间隔（秒）",
+                        "display_name": "⏱️ 场景间隔（秒）",
                         "tooltip": "每段/场景间隔秒数。可在字段前接入 FLOAT 覆盖。",
                     },
                 ),
@@ -1282,8 +1313,8 @@ class GJJ_LTX23ImageToVideoMultiRef:
                         "min": 64,
                         "max": 8192,
                         "step": 32,
-                        "display_name": "宽度",
-                        "tooltip": "目标宽度。LTX 内部会按画幅等比例适配场景图。",
+                        "display_name": "📐 宽度",
+                        "tooltip": "目标宽度。可使用原生小圆点外接数值，执行时会自动转为整数；LTX 内部会按画幅等比例适配场景图。",
                     },
                 ),
                 "height": (
@@ -1293,19 +1324,19 @@ class GJJ_LTX23ImageToVideoMultiRef:
                         "min": 64,
                         "max": 8192,
                         "step": 32,
-                        "display_name": "高度",
-                        "tooltip": "目标高度。LTX 内部会按画幅等比例适配场景图。",
+                        "display_name": "📏 高度",
+                        "tooltip": "目标高度。可使用原生小圆点外接数值，执行时会自动转为整数；LTX 内部会按画幅等比例适配场景图。",
                     },
                 ),
                 "fps": (
-                    "INT",
+                    FLOAT_OR_INT,
                     {
-                        "default": DEFAULT_FPS,
-                        "min": 1,
-                        "max": 120,
-                        "step": 1,
-                        "display_name": "帧率",
-                        "tooltip": "输出帧率。可在字段前接入 INT 覆盖。",
+                        "default": float(DEFAULT_FPS),
+                        "min": 1.0,
+                        "max": 120.0,
+                        "step": 1.0,
+                        "display_name": "🎞️ 帧率",
+                        "tooltip": "输出帧率。参考 GJJ_VideoCombine，支持接入 INT 或 FLOAT，执行时统一按浮点数计算。",
                     },
                 ),
                 "seed": (
@@ -1315,7 +1346,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
                         "min": 0,
                         "max": 0xffffffffffffffff,
                         "step": 1,
-                        "display_name": "种子",
+                        "display_name": "🎲 种子",
                         "tooltip": "随机种。可在字段前接入 INT 覆盖。",
                     },
                 ),
@@ -1326,30 +1357,34 @@ class GJJ_LTX23ImageToVideoMultiRef:
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.01,
-                        "display_name": "降噪",
+                        "display_name": "🌫️ 降噪",
                         "tooltip": "降噪强度。可在字段前接入 FLOAT 覆盖。",
                     },
                 ),
             },
-            "optional": FlexibleSceneInputType(
-                {
-                    "input_audio": (
-                        "AUDIO",
-                        {
-                            "display_name": "驱动音频",
-                            "tooltip": "🔊 可选驱动音频。接入 AUDIO 后自动切换为 S2V / 数字人流程；音频 VAE 位于 models/vae。",
-                        },
-                    ),
-                    "lora_chain_config": (
-                        "LORA_CHAIN_CONFIG",
-                        {
-                            "display_name": "LoRA串联配置",
-                            "tooltip": "🧬 可选 LoRA 串联配置。转场 LoRA 默认会在 models/loras 中按 ltx2.3-transition 自动搜索并按段启用。",
-                        },
-                    ),
-                    f"{SCENE_PREFIX}01": _scene_input_spec(1),
-                }
-            ),
+            "optional": {
+                "image_sequence": (
+                    IMAGE_SEQUENCE_INPUT_TYPE,
+                    {
+                        "display_name": "🖼️ 图片/帧序列",
+                        "tooltip": "🖼️ 可选图片或帧序列。支持单张 IMAGE、批量 IMAGE 和 GJJ_BATCH_IMAGE。",
+                    },
+                ),
+                "lora_chain_config": (
+                    "LORA_CHAIN_CONFIG",
+                    {
+                        "display_name": "🧬 LoRA串联配置",
+                        "tooltip": "🧬 可选 LoRA 串联配置。转场 LoRA 默认会在 models/loras 中按 ltx2.3-transition 自动搜索并按段启用。",
+                    },
+                ),
+                "input_audio": (
+                    "AUDIO",
+                    {
+                        "display_name": "🔊 驱动音频",
+                        "tooltip": "🔊 可选驱动音频。接入 AUDIO 后自动切换为 S2V / 数字人流程；音频 VAE 位于 models/vae。",
+                    },
+                ),
+            },
             "hidden": {
                 "config_json": ("STRING", {"default": "{}"}),
                 "unique_id": "UNIQUE_ID",
@@ -1368,6 +1403,7 @@ class GJJ_LTX23ImageToVideoMultiRef:
         fps=None,
         seed=None,
         denoise_strength=None,
+        image_sequence=None,
         config_json="{}",
         extra_pnginfo=None,
         unique_id=None,
@@ -1405,7 +1441,9 @@ class GJJ_LTX23ImageToVideoMultiRef:
         config = _resolve_clean_config(config_json=_apply_external_param_overrides(config, _unwrap_main_params(kwargs)), extra_pnginfo=None, unique_id=None)
 
         moved_scene_payloads = _pop_miswired_scene_payloads(kwargs)
-        legacy_batch_scene_images = _split_scene_batch(kwargs.get("batch_scenes", kwargs.get("scene_batch")))
+        image_sequence = _unwrap_single_value(image_sequence if image_sequence is not None else kwargs.get("image_sequence"))
+        legacy_batch_scene_images = _split_scene_batch(image_sequence)
+        legacy_batch_scene_images.extend(_split_scene_batch(kwargs.get("batch_scenes", kwargs.get("scene_batch"))))
         if moved_scene_payloads:
             legacy_batch_scene_images.extend(_flatten_scene_values(moved_scene_payloads))
         scene_items = _collect_scene_items(kwargs)

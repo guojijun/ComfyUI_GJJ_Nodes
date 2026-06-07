@@ -4,8 +4,8 @@ const NODE_TYPE = "GJJ_ImageBatchMulti";
 const IMAGE_PREFIX = "image_";
 const COMPAT_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const MIN_INPUTS = 1;
+const MAX_INPUTS = 16;
 const CONTROL_WIDGET = "gjj_image_batch_multi_controls";
-const SAVED_INPUT_COUNT_PROPERTY = "gjj_image_batch_multi_input_count";
 const EXTRA_OUTPUTS_PROPERTY = "gjj_image_batch_multi_show_extra_outputs";
 const OUTPUT_DEFS = [
 	{ name: "批量图像", type: COMPAT_TYPE, tooltip: "兼容 GJJ 批量图片和普通 IMAGE batch 的输出。" },
@@ -93,6 +93,7 @@ function injectStyles() {
 		.gjj-ibm-mini{height:23px;padding:0 7px;border:1px solid #3b5360;border-radius:6px;background:#17252c;color:#dce7e2;font:12px/1 "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif;font-variant-emoji:emoji;white-space:nowrap;cursor:pointer}
 		.gjj-ibm-mini:hover{background:#24343d;border-color:#5d7c8e}
 		.gjj-ibm-mini.primary{background:#1f6b43;border-color:#48ad73;color:#fff}
+		.gjj-ibm-hidden-input{display:none !important}
 	`;
 	document.head.appendChild(style);
 }
@@ -102,52 +103,19 @@ function imageIndex(input) {
 	return match ? Number.parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER;
 }
 
+function isImageInput(input) {
+	const name = String(input?.name || "");
+	return /^image_\d+$/.test(name);
+}
+
 function imageInputs(node) {
 	return Array.isArray(node?.inputs)
-		? node.inputs.filter((input) => /^image_\d+$/.test(String(input?.name || ""))).sort((a, b) => imageIndex(a) - imageIndex(b))
+		? node.inputs.filter(isImageInput)
 		: [];
 }
 
 function formatImageInputName(index) {
 	return `${IMAGE_PREFIX}${String(index).padStart(2, "0")}`;
-}
-
-function setImageInputMeta(input, index) {
-	const name = formatImageInputName(index);
-	input.name = name;
-	input.type = COMPAT_TYPE;
-	input.label = `图片 ${index}`;
-	input.localized_name = input.label;
-	input.tooltip = `第 ${index} 路图片输入；支持普通 IMAGE 或 GJJ 批量图片。连接最后一个输入口后会自动展开下一路。`;
-}
-
-function removeInput(node, input) {
-	const slot = node.inputs?.indexOf(input) ?? -1;
-	if (slot < 0) return;
-	try { node.disconnectInput?.(slot); } catch (_) {}
-	if (typeof node.removeInput === "function") {
-		node.removeInput(slot);
-	} else {
-		node.inputs.splice(slot, 1);
-	}
-}
-
-function removeInternalWidgetInputs(node) {
-	if (!Array.isArray(node?.inputs)) return;
-	for (let index = node.inputs.length - 1; index >= 0; index -= 1) {
-		const input = node.inputs[index];
-		const name = String(input?.name || "");
-		const widgetName = String(input?.widget?.name || "");
-		if (!INTERNAL_WIDGET_INPUTS.has(name) && !INTERNAL_WIDGET_INPUTS.has(widgetName)) {
-			continue;
-		}
-		try { node.disconnectInput?.(index); } catch (_) {}
-		if (typeof node.removeInput === "function") {
-			node.removeInput(index);
-		} else {
-			node.inputs.splice(index, 1);
-		}
-	}
 }
 
 function findWidget(node, name) {
@@ -372,133 +340,6 @@ function normalizePrepend(value) {
 	return DEFAULT_VALUES.prepend_frame;
 }
 
-function trimUnusedTail(node) {
-	let inputs = imageInputs(node);
-	while (inputs.length > MIN_INPUTS) {
-		const last = inputs[inputs.length - 1];
-		const prev = inputs[inputs.length - 2];
-		if (last?.link != null || prev?.link != null) break;
-		removeInput(node, last);
-		inputs = imageInputs(node);
-	}
-}
-
-function ensureTrailingEmpty(node) {
-	let inputs = imageInputs(node);
-	if (!inputs.length) {
-		node.addInput?.(formatImageInputName(1), COMPAT_TYPE);
-		inputs = imageInputs(node);
-	}
-	const last = inputs[inputs.length - 1];
-	if (last?.link != null) {
-		node.addInput?.(formatImageInputName(inputs.length + 1), COMPAT_TYPE);
-	}
-}
-
-function syncLinkTargetSlots(node) {
-	if (!Array.isArray(node?.inputs) || !app.graph?.links) return;
-	for (let index = 0; index < node.inputs.length; index += 1) {
-		const input = node.inputs[index];
-		const linkId = input?.link;
-		if (linkId == null) continue;
-		const link = app.graph.links[linkId];
-		if (!link) continue;
-		link.target_id = node.id;
-		link.target_slot = index;
-	}
-}
-
-function connectedImageInputCount(node) {
-	let lastLinkedIndex = -1;
-	for (const [index, input] of imageInputs(node).entries()) {
-		if (input?.link != null) lastLinkedIndex = index;
-	}
-	return lastLinkedIndex + 1;
-}
-
-function visibleImageInputCount(node) {
-	return imageInputs(node).length;
-}
-
-function desiredImageInputCount(node) {
-	const savedCount = Number(node?.properties?.[SAVED_INPUT_COUNT_PROPERTY] || 0);
-	return Math.max(MIN_INPUTS, savedCount || 0, connectedImageInputCount(node) + 1);
-}
-
-function ensureImageInputCount(node, count) {
-	if (!node || typeof node.addInput !== "function") return;
-	const target = Math.max(MIN_INPUTS, Number.parseInt(count, 10) || MIN_INPUTS);
-	let inputs = imageInputs(node);
-	while (inputs.length < target) {
-		node.addInput(formatImageInputName(inputs.length + 1), COMPAT_TYPE);
-		inputs = imageInputs(node);
-	}
-	inputs.forEach((input, index) => setImageInputMeta(input, index + 1));
-	syncLinkTargetSlots(node);
-}
-
-function reorderInputs(node) {
-	if (!Array.isArray(node?.inputs)) return;
-	const images = imageInputs(node);
-	const changed = node.inputs.length !== images.length || node.inputs.some((input, index) => input !== images[index]);
-	if (changed) {
-		node.inputs.splice(0, node.inputs.length, ...images);
-	}
-	syncLinkTargetSlots(node);
-}
-
-function persistInputCount(node, serializedNode = null) {
-	const count = Math.max(MIN_INPUTS, visibleImageInputCount(node), connectedImageInputCount(node) + 1);
-	node.properties = node.properties || {};
-	node.properties[SAVED_INPUT_COUNT_PROPERTY] = count;
-	if (serializedNode) {
-		serializedNode.properties = serializedNode.properties || {};
-		serializedNode.properties[SAVED_INPUT_COUNT_PROPERTY] = count;
-	}
-	return count;
-}
-
-function serializeImageInputs(node, serializedNode) {
-	if (!serializedNode) return;
-	const count = persistInputCount(node, serializedNode);
-	ensureImageInputCount(node, count);
-	reorderInputs(node);
-	const liveInputs = imageInputs(node);
-	serializedNode.inputs = liveInputs.map((input, index) => ({
-		name: formatImageInputName(index + 1),
-		type: COMPAT_TYPE,
-		link: input?.link ?? null,
-		label: `图片 ${index + 1}`,
-		localized_name: `图片 ${index + 1}`,
-	}));
-	syncLinkTargetSlots(node);
-}
-
-function restoreSerializedInputCount(node, serializedNode = null) {
-	const serializedInputs = Array.isArray(serializedNode?.inputs)
-		? serializedNode.inputs.filter((input) => /^image_\d+$/.test(String(input?.name || "")))
-		: [];
-	const savedCount = Number(serializedNode?.properties?.[SAVED_INPUT_COUNT_PROPERTY] || node?.properties?.[SAVED_INPUT_COUNT_PROPERTY] || 0);
-	const connectedCount = serializedInputs.filter((input) => input?.link != null).length;
-	const count = Math.max(MIN_INPUTS, savedCount || 0, serializedInputs.length, connectedCount + 1);
-	node.properties = node.properties || {};
-	node.properties[SAVED_INPUT_COUNT_PROPERTY] = count;
-	ensureImageInputCount(node, count);
-}
-
-function outputHasLinks(output) {
-	return Array.isArray(output?.links) && output.links.some((link) => link != null);
-}
-
-function applyOutputSlot(output, def) {
-	if (!output || !def) return;
-	output.name = def.name;
-	output.label = def.name;
-	output.localized_name = def.name;
-	output.type = def.type;
-	output.tooltip = def.tooltip;
-}
-
 function showExtraOutputs(node) {
 	return node?.properties?.[EXTRA_OUTPUTS_PROPERTY] === true;
 }
@@ -511,7 +352,7 @@ function setExtraOutputsVisible(node, visible) {
 function restoreExtraOutputState(node, serializedNode = null) {
 	node.properties = node.properties || {};
 	const serializedOutputs = Array.isArray(serializedNode?.outputs) ? serializedNode.outputs : [];
-	const hasSerializedLinkedExtra = serializedOutputs.slice(1).some(outputHasLinks);
+	const hasSerializedLinkedExtra = serializedOutputs.slice(1).some((output) => Array.isArray(output?.links) && output.links.some((link) => link != null));
 	if (hasSerializedLinkedExtra) {
 		node.properties[EXTRA_OUTPUTS_PROPERTY] = true;
 		return;
@@ -521,13 +362,13 @@ function restoreExtraOutputState(node, serializedNode = null) {
 		node.properties[EXTRA_OUTPUTS_PROPERTY] = saved === true;
 		return;
 	}
-	const hasSerializedExtra = serializedOutputs.slice(1).some((output) => outputHasLinks(output) || OUTPUT_DEFS.slice(1).some((def) => output?.name === def.name));
+	const hasSerializedExtra = serializedOutputs.slice(1).some((output) => OUTPUT_DEFS.slice(1).some((def) => output?.name === def.name));
 	node.properties[EXTRA_OUTPUTS_PROPERTY] = hasSerializedExtra;
 }
 
 function applyOutputMeta(node, { fromUser = false } = {}) {
 	if (!Array.isArray(node?.outputs)) return;
-	if (!showExtraOutputs(node) && !fromUser && node.outputs.slice(1).some(outputHasLinks)) {
+	if (!showExtraOutputs(node) && !fromUser && node.outputs.slice(1).some((output) => Array.isArray(output?.links) && output.links.some((link) => link != null))) {
 		setExtraOutputsVisible(node, true);
 	}
 	const target = showExtraOutputs(node) ? OUTPUT_DEFS : [OUTPUT_DEFS[0]];
@@ -549,7 +390,16 @@ function applyOutputMeta(node, { fromUser = false } = {}) {
 			node.outputs.push({ name: def.name, type: def.type, links: [] });
 		}
 	}
-	target.forEach((def, index) => applyOutputSlot(node.outputs[index], def));
+	target.forEach((def, index) => {
+		const output = node.outputs[index];
+		if (output) {
+			output.name = def.name;
+			output.label = def.name;
+			output.localized_name = def.name;
+			output.type = def.type;
+			output.tooltip = def.tooltip;
+		}
+	});
 }
 
 function setDirty(node) {
@@ -905,19 +755,42 @@ function ensureControls(node) {
 	refreshControlSize(node);
 }
 
+function connectedImageInputCount(node) {
+	let lastLinkedIndex = -1;
+	for (const [index, input] of imageInputs(node).entries()) {
+		if (input?.link != null) lastLinkedIndex = index;
+	}
+	return lastLinkedIndex + 1;
+}
+
+function updateImageInputVisibility(node) {
+	const inputs = imageInputs(node);
+	const connectedCount = connectedImageInputCount(node);
+	const visibleCount = Math.max(MIN_INPUTS, connectedCount + 1, MIN_INPUTS + 1);
+	
+	for (let i = 0; i < inputs.length; i++) {
+		const input = inputs[i];
+		const shouldShow = i < visibleCount && i < MAX_INPUTS;
+		const slotEl = node?.graph?.canvas?.getNodeInputSlotEl?.(node, i);
+		const inputContainer = slotEl?.parentElement || input?.widget?.element?.parentElement;
+		
+		if (inputContainer) {
+			inputContainer.classList.toggle("gjj-ibm-hidden-input", !shouldShow);
+		}
+		if (input) {
+			input.visible = shouldShow;
+			input.hidden = !shouldShow;
+		}
+	}
+}
+
 function stabilize(node) {
 	if (!isTarget(node)) return;
 	ensureBackingWidgets(node);
 	hideNativeWidgets(node);
 	ensureControls(node);
-	removeInternalWidgetInputs(node);
-	ensureImageInputCount(node, desiredImageInputCount(node));
-	trimUnusedTail(node);
-	ensureTrailingEmpty(node);
-	imageInputs(node).forEach((input, index) => setImageInputMeta(input, index + 1));
-	reorderInputs(node);
+	updateImageInputVisibility(node);
 	applyOutputMeta(node);
-	persistInputCount(node);
 	node.__gjjImageBatchMultiSignature = currentSignature(node);
 	refreshControlSize(node);
 	setDirty(node);
@@ -949,7 +822,8 @@ app.registerExtension({
 		nodeType.prototype.onNodeCreated = function (...args) {
 			const result = originalCreated?.apply(this, args);
 			if (this.properties?.[EXTRA_OUTPUTS_PROPERTY] !== true) {
-				setExtraOutputsVisible(this, false);
+				this.properties = this.properties || {};
+				this.properties[EXTRA_OUTPUTS_PROPERTY] = false;
 			}
 			scheduleStabilize(this, 0);
 			scheduleStabilize(this, 80);
@@ -960,7 +834,6 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
 			const result = originalConfigure?.apply(this, [serializedNode, ...args]);
 			restoreExtraOutputState(this, serializedNode);
-			restoreSerializedInputCount(this, serializedNode);
 			scheduleStabilize(this, 0);
 			scheduleStabilize(this, 80);
 			return result;
@@ -970,14 +843,6 @@ app.registerExtension({
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalConnectionsChange?.apply(this, args);
 			scheduleStabilize(this, 0);
-			return result;
-		};
-
-		const originalSerialize = nodeType.prototype.onSerialize;
-		nodeType.prototype.onSerialize = function (serializedNode, ...args) {
-			stabilize(this);
-			const result = originalSerialize?.apply(this, [serializedNode, ...args]);
-			serializeImageInputs(this, serializedNode);
 			return result;
 		};
 
@@ -993,6 +858,7 @@ app.registerExtension({
 		};
 	},
 	setup() {
+		injectStyles();
 		for (const node of app.graph?._nodes || []) {
 			if (isTarget(node)) {
 				scheduleStabilize(node, 0);

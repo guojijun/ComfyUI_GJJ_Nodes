@@ -234,6 +234,10 @@ from .network_media import (
 	gjjutils_url_media_relative_path,
 )
 
+from .dependency_checker import (
+	build_node_help_payload,
+)
+
 from . import rmbg2_model
 
 __all__ = [
@@ -383,4 +387,6 @@ __all__ = [
 	"gjjutils_safe_media_basename",
 	"gjjutils_url_media_basename",
 	"gjjutils_url_media_relative_path",
+	# dependency/help
+	"build_node_help_payload",
 ]

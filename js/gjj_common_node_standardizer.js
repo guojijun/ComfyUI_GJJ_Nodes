@@ -645,6 +645,14 @@ function dynamicModelTreeOnly(meta) {
 		|| help.modelTreeDynamicOnly === true;
 }
 
+function staticModelTreeOnly(meta) {
+	const help = meta?.help || {};
+	return help.static_model_tree_only === true
+		|| help.staticModelTreeOnly === true
+		|| help.model_tree_static_only === true
+		|| help.modelTreeStaticOnly === true;
+}
+
 function firstWarningLine(text) {
 	const line = String(text || "").split(/\r?\n/).map((item) => item.trim()).find(Boolean) || "";
 	return line.startsWith("⚠️") ? line : "";
@@ -767,6 +775,42 @@ function declaredModelEntries(meta) {
 	return [];
 }
 
+function declaredModelTreeEntries(meta) {
+	const declared = meta?.help?.model_tree || meta?.help?.modelTree || meta?.help?.models_tree || meta?.help?.modelsTree;
+	const normalizeItem = (item, fallbackLabel = "模型") => {
+		if (typeof item === "string") {
+			const value = item.trim();
+			return value ? { label: fallbackLabel, value, tooltip: "" } : null;
+		}
+		if (!item || typeof item !== "object") {
+			return null;
+		}
+		const folder = escapeText(item.path || item.folder || item.directory || item.subdir || "").replace(/^models[\\/]+/i, "");
+		const filename = escapeText(item.filename || item.file || item.value || item.label || item.name || "");
+		const label = escapeText(item.label || item.name || fallbackLabel, fallbackLabel);
+		const tooltip = escapeText(item.tooltip || item.description || item.note || "");
+		return filename ? {
+			label,
+			value: filename,
+			tooltip,
+			folder,
+			name: escapeText(item.input || item.widget || item.name || ""),
+			type: escapeText(item.type || ""),
+			kind: escapeText(item.kind || ""),
+			icon: escapeText(item.icon || ""),
+		} : null;
+	};
+	if (Array.isArray(declared)) {
+		return declared.map((item) => normalizeItem(item)).filter(Boolean);
+	}
+	if (declared && typeof declared === "object") {
+		return Object.entries(declared)
+			.map(([label, value]) => (typeof value === "string" ? normalizeItem(value, label) : normalizeItem({ label, ...(value || {}) }, label)))
+			.filter(Boolean);
+	}
+	return [];
+}
+
 function pushUniqueModelEntry(entries, entry) {
 	if (!entry?.value) {
 		return;
@@ -780,7 +824,11 @@ function pushUniqueModelEntry(entries, entry) {
 
 function currentModelEntries(node, meta) {
 	const metaByName = new Map(modelMetaEntries(meta).map((entry) => [String(entry.name), entry]));
-	const entries = declaredModelEntries(meta);
+	const treeEntries = declaredModelTreeEntries(meta);
+	const entries = treeEntries.length ? [...treeEntries] : declaredModelEntries(meta);
+	if (staticModelTreeOnly(meta)) {
+		return entries;
+	}
 	for (const widget of node?.widgets || []) {
 		const widgetName = String(widget?.name || "");
 		const widgetLabel = escapeText(widget?.label || widget?.options?.display_name || "", widgetName);
@@ -1366,7 +1414,7 @@ function showHelpDialog(node) {
 		body.appendChild(createHelpSection("安装命令", formatHelpText(meta.help.install_cmd)));
 	}
 
-	const dynamicModels = dynamicModelEntries(node, meta);
+	const dynamicModels = staticModelTreeOnly(meta) ? [] : dynamicModelEntries(node, meta);
 	const modelEntries = dynamicModels.length
 		? dynamicModels
 		: (dynamicModelTreeOnly(meta) ? [] : (hasDeclaredModelInfo(meta) ? currentModelEntries(node, meta) : []));

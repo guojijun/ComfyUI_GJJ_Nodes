@@ -23,14 +23,8 @@ from comfy.sd import load_lora_for_models
 try:
     from .gguf.gguf import _replace_with_gguf_linear, GGUFParameter
     from gguf import GGMLQuantizationType
-except ModuleNotFoundError as error:
-    if getattr(error, "name", "") != "gguf":
-        raise
-    _replace_with_gguf_linear = None
-    GGMLQuantizationType = None
-
-    class GGUFParameter:
-        pass
+except:
+    pass
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -819,8 +813,6 @@ def load_weights(transformer, sd=None, weight_dtype=None, base_dtype=None,
     block_idx = vace_block_idx = None
 
     if gguf:
-        if GGMLQuantizationType is None or _replace_with_gguf_linear is None:
-            raise RuntimeError("当前模型使用 GGUF 权重，需要先安装 gguf；普通 safetensors/fp16 模型不需要此依赖。")
         log.info("Using GGUF to load and assign model weights to device...")
 
         # Prepare sd from GGUF readers
@@ -1520,24 +1512,12 @@ class WanVideoModelLoader:
                     block.cross_attn.ip_adapter_single_stream_v_proj = nn.Linear(context_dim, dim, bias=False)
 
         # LongCat Avatar
-        proj1_key = "multitalk_audio_proj.proj1.weight" if "multitalk_audio_proj.proj1.weight" in sd \
-                    else "multitalk_audio_proj.proj1.weight_int8" if "multitalk_audio_proj.proj1.weight_int8" in sd \
-                    else None
-        if proj1_key is not None and ("blocks.0.audio_cross_attn.q_norm.weight" in sd or "blocks.0.audio_cross_attn.q_norm.weight_int8" in sd):
+        if "multitalk_audio_proj.proj1.weight" in sd and "blocks.0.audio_cross_attn.q_norm.weight" in sd:
             log.info("MultiTalk/InfiniteTalk model detected, patching model...")
             from .multitalk.multitalk import AudioProjModel
             from .wanvideo.modules.model import WanLayerNorm
             from .LongCat.layers import SingleStreamAttention
 
-            # Detect LongCat-Avatar audio encoder variant from proj1 input dim:
-            #   v1.0 (wav2vec2): seq_len * blocks * channels = 5 * 12 * 768 = 46080
-            #   v1.5 (whisper):  seq_len * blocks * channels = 5 *  5 * 1280 = 32000
-            proj1_in = sd[proj1_key].shape[1]
-            if proj1_in == 32000:
-                audio_proj_blocks, audio_proj_channels = 5, 1280
-                log.info("LongCat-Avatar-1.5 (Whisper) audio proj detected")
-            else:
-                audio_proj_blocks, audio_proj_channels = 12, 768
 
             for block in transformer.blocks:
                 with init_empty_weights():
@@ -1554,7 +1534,7 @@ class WanVideoModelLoader:
                         class_interval=4,
                         attention_mode=attention_mode,
                     )
-                    multitalk_proj_model = AudioProjModel(blocks=audio_proj_blocks, channels=audio_proj_channels)
+                    multitalk_proj_model = AudioProjModel()
             transformer.multitalk_audio_proj = multitalk_proj_model
         # SkyreelsV3
         elif "blocks.1.audio_cross_attn.kv_linear.weight" in sd and "audio_proj.proj1.weight" in sd:
@@ -1815,14 +1795,10 @@ class WanVideoModelLoader:
             )
 
         if merge_loras and lora is not None:
-            # Skip offloading if load_device is main_device (for unified memory systems like AMD Strix Halo)
-            if load_device != "main_device":
-                log.info(f"Moving diffusion model from {patcher.model.diffusion_model.device} to {offload_device}")
-                patcher.model.diffusion_model.to(offload_device)
-                gc.collect()
-                mm.soft_empty_cache()
-            else:
-                log.info(f"Skipping offload (load_device=main_device, keeping model on {patcher.model.diffusion_model.device})")
+            log.info(f"Moving diffusion model from {patcher.model.diffusion_model.device} to {offload_device}")
+            patcher.model.diffusion_model.to(offload_device)
+            gc.collect()
+            mm.soft_empty_cache()
 
         patcher.model["base_dtype"] = base_dtype
         patcher.model["weight_dtype"] = weight_dtype
@@ -1931,26 +1907,7 @@ class WanVideoVAELoader:
         vae.eval()
         vae.to(device=offload_device, dtype=dtype)
         if compile_args is not None:
-            try:
-                vae.model.decoder = torch.compile(vae.model.decoder, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-            except Exception as e:
-                import sys
-                exc_type, exc_value, exc_tb = sys.exc_info()
-                if "TritonMissing" in str(exc_type.__name__) or "triton" in str(e).lower():
-                    log.error(
-                        f"\n{'='*60}\n"
-                        f"GJJ WanVideo VAE torch.compile 错误\n"
-                        f"{'='*60}\n"
-                        f"错误原因: Triton 编译器未安装或版本过旧\n"
-                        f"当前 backend: {compile_args.get('backend', 'inductor')}\n"
-                        f"{'='*60}\n"
-                        f"解决方法:\n"
-                        f"1. 安装 Triton: pip install triton\n"
-                        f"2. 或在 'GJJ · ⚙️ WanVideo编译设置' 节点中选择其他 backend (如 'cudagraphs')\n"
-                        f"3. 或不连接 'GJJ · ⚙️ WanVideo编译设置' 节点以禁用 torch.compile\n"
-                        f"{'='*60}\n"
-                    )
-                raise
+            vae.model.decoder = torch.compile(vae.model.decoder, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
 
         return (vae,)
 
