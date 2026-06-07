@@ -11,7 +11,7 @@ const LEGACY_INPUT_NAME = "json_input";
 const UPSTREAM_DEBOUNCE_MS = 1000;
 const UPSTREAM_CACHE_RETRY_MS = 220;
 const UPSTREAM_CACHE_RETRY_COUNT = 16;
-const MIN_WIDTH = 360;
+const MIN_WIDTH = 260;
 
 function dirty(node) {
 	GJJ_Utils.refreshNode(node);

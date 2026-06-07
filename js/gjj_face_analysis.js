@@ -6,7 +6,7 @@ import { GJJ_STANDARDIZE_NODE } from "./gjj_common_node_standardizer.js";
 const NODE_CLASS = "GJJ_FaceAnalysis";
 const MIXED_BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const PANEL_WIDGET = "gjj_face_analysis_face_picker";
-const MIN_WIDTH = 330;
+const MIN_WIDTH = 260;
 
 const INPUTS = {
 	target: { index: 0, title: "目标脸", widget: "target_faces_index" },

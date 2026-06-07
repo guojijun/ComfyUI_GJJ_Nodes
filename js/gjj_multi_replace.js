@@ -8,7 +8,7 @@ const REPLACE_PREFIX = "replace_";
 const OPTIONS_WIDGET = "options_json";
 const LEGACY_OPTION_WIDGETS = ["case_insensitive", "regex_mode", "replace_all"];
 const TOOLBAR_NAME = "gjj_multi_replace_options";
-const MIN_WIDTH = 240;
+const MIN_WIDTH = 260;
 const DEFAULT_OPTIONS = {
 	case_insensitive: false,
 	regex_mode: false,

@@ -1601,10 +1601,18 @@ function redraw(node) {
         node.__gjjMfTailWidget.computedHeight = h > 0 ? h + 6 : 0;
         node.__gjjMfTailWidget.last_y = 0;
       }
-      const computed = node.computeSize?.();
+      const currentHeight = Number(node.size?.[1] || 0);
+      let computed;
+      if (node.size) node.size[1] = 1;
+      try {
+        computed = node.computeSize?.();
+      } finally {
+        if (node.size && currentHeight > 0) node.size[1] = currentHeight;
+      }
       const nextHeight = Math.ceil(Number(computed?.[1]) || 0);
-      if (node.size && nextHeight > 0 && Math.abs(Number(node.size[1]) - nextHeight) > 2) {
-        node.size[1] = nextHeight;
+      if (node.size && nextHeight > 0 && Math.abs(currentHeight - nextHeight) > 2) {
+        if (typeof node.setSize === "function") node.setSize([Math.round(node.size[0]), nextHeight]);
+        else node.size[1] = nextHeight;
       }
     } catch (_) {}
     node.setDirtyCanvas?.(true, true);

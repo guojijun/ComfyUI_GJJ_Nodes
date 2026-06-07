@@ -3,11 +3,19 @@ import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set(["GJJ_VideoCombine"]);
+const VIDEO_UNIVERSAL_LOADER_NODES = new Set(["GJJ_VideoUniversalModelLoader", "GJJ_VideoKijaiModelLoader"]);
+const TEMPLATE_PARAMS_NODE = "GJJ_TemplateParams";
 const TOOLBAR_WIDGET_NAME = "gjj_video_combine_toolbar";
 const PREVIEW_WIDGET_NAME = "gjj_video_combine_preview";
 const USER_WIDTH_PROPERTY = "gjj_video_combine_user_width";
 const BASIC_SETTINGS_PROPERTY = "gjj_video_combine_show_basic_settings";
 const FRAME_RATE_VARIABLE_PROPERTY = "gjj_video_combine_frame_rate_variable";
+const AUTO_FILENAME_PREFIX_PROPERTY = "gjj_video_combine_auto_filename_prefix";
+const UNIVERSAL_LOADER_METADATA_PROPERTY = "gjj_video_universal_loader_metadata";
+const TEMPLATE_PARAMS_VALUES_PROPERTY = "gjj_template_params_values";
+const TEMPLATE_PARAMS_SCHEMA_PROPERTY = "gjj_template_params_schema";
+const WAN_MODE_PARAM_NAMES = ["wan_mode", "video_mode", "mode", "模式", "视频模式", "生成模式"];
+const DEFAULT_FILENAME_PREFIX = "video/GJJ";
 const DEFAULT_NODE_WIDTH = 340;
 const TOOLBAR_BUTTON_WIDTH = 30;
 const TOOLBAR_BUTTON_HEIGHT = 28;
@@ -1578,6 +1586,164 @@ function findVideoCombineNodeForPromptId(graph, promptId) {
 		|| nodes.find((node) => String(node?.id) === tail);
 }
 
+function nodeClassName(node) {
+	return String(node?.comfyClass || node?.type || "");
+}
+
+function graphNodeById(graph, id) {
+	const text = String(id ?? "");
+	return (graph?._nodes || []).find((node) => String(node?.id) === text) || null;
+}
+
+function graphLinkById(graph, linkId) {
+	const links = graph?.links || app.graph?.links || {};
+	if (links?.[linkId]) return links[linkId];
+	if (Array.isArray(links)) return links.find((link) => String(link?.id) === String(linkId)) || null;
+	return null;
+}
+
+function upstreamNodes(root, graph = app.graph) {
+	const result = [];
+	const queue = [root];
+	const seen = new Set([String(root?.id ?? "")]);
+	while (queue.length) {
+		const node = queue.shift();
+		for (const input of Array.isArray(node?.inputs) ? node.inputs : []) {
+			if (input?.link == null) continue;
+			const link = graphLinkById(graph, input.link);
+			const origin = graphNodeById(graph, link?.origin_id);
+			if (!origin) continue;
+			const key = String(origin.id);
+			if (seen.has(key)) continue;
+			seen.add(key);
+			result.push(origin);
+			queue.push(origin);
+		}
+	}
+	return result;
+}
+
+function findUniversalLoaderForCombine(node, graph = app.graph) {
+	const upstream = upstreamNodes(node, graph);
+	const linked = upstream.find((candidate) => VIDEO_UNIVERSAL_LOADER_NODES.has(nodeClassName(candidate)));
+	if (linked) return linked;
+	const allLoaders = (graph?._nodes || []).filter((candidate) => VIDEO_UNIVERSAL_LOADER_NODES.has(nodeClassName(candidate)));
+	return allLoaders.length === 1 ? allLoaders[0] : null;
+}
+
+function safePrefixPart(value) {
+	const text = String(value || "")
+		.replace(/[^\p{L}\p{N}\u4e00-\u9fff._-]+/gu, "_")
+		.replace(/_{2,}/g, "_")
+		.replace(/^[._-]+|[._-]+$/g, "");
+	return text.slice(0, 72).replace(/[._-]+$/g, "") || "";
+}
+
+function safeJsonParse(text, fallback = null) {
+	try {
+		const parsed = JSON.parse(String(text || ""));
+		return parsed ?? fallback;
+	} catch (_) {
+		return fallback;
+	}
+}
+
+function getNodeWidgetValue(node, name, fallback = "") {
+	const widget = (node?.widgets || []).find((item) => String(item?.name || "") === name);
+	return widget?.value ?? fallback;
+}
+
+function loaderPresetPrefixPart(loader) {
+	const props = loader?.properties || {};
+	const metadata = props[UNIVERSAL_LOADER_METADATA_PROPERTY] || {};
+	const configWidget = getWidget(loader, "config");
+	const preset = String(metadata.config_label || metadata.config_key || configWidget?.value || "").trim();
+	return safePrefixPart(preset);
+}
+
+function templateParamsState(templateNode) {
+	const props = templateNode?.properties || {};
+	const values = safeJsonParse(
+		getNodeWidgetValue(templateNode, "values_json", props[TEMPLATE_PARAMS_VALUES_PROPERTY] || "{}"),
+		{},
+	) || {};
+	const schema = safeJsonParse(
+		getNodeWidgetValue(templateNode, "schema_json", props[TEMPLATE_PARAMS_SCHEMA_PROPERTY] || "[]"),
+		[],
+	) || [];
+	const entries = new Map();
+	const addEntry = (key, value) => {
+		const cleanKey = String(key || "").trim();
+		if (!cleanKey) return;
+		entries.set(cleanKey, value);
+		entries.set(cleanKey.toLowerCase(), value);
+	};
+	if (Array.isArray(schema)) {
+		for (const field of schema) {
+			if (!field || typeof field !== "object") continue;
+			const key = String(field.key || "").trim();
+			const label = String(field.label || "").trim();
+			const value = values[key] ?? values[label] ?? field.default ?? "";
+			addEntry(key, value);
+			addEntry(label, value);
+		}
+	}
+	for (const [key, value] of Object.entries(values || {})) {
+		addEntry(key, value);
+	}
+	return entries;
+}
+
+function findTemplateParamsNode(node, graph = app.graph) {
+	const upstream = upstreamNodes(node, graph);
+	const linked = upstream.find((candidate) => nodeClassName(candidate) === TEMPLATE_PARAMS_NODE);
+	if (linked) return linked;
+	const nodes = (graph?._nodes || []).filter((candidate) => nodeClassName(candidate) === TEMPLATE_PARAMS_NODE);
+	return nodes.length ? nodes[0] : null;
+}
+
+function wanModePrefixPart(node, graph = app.graph) {
+	const templateNode = findTemplateParamsNode(node, graph);
+	if (!templateNode) return "";
+	const entries = templateParamsState(templateNode);
+	for (const name of WAN_MODE_PARAM_NAMES) {
+		const key = String(name || "");
+		const value = entries.get(key) ?? entries.get(key.toLowerCase());
+		const text = String(value ?? "").trim();
+		if (text) return safePrefixPart(text);
+	}
+	return "";
+}
+
+function autoFilenamePrefixForNode(node, graph = app.graph) {
+	const loader = findUniversalLoaderForCombine(node, graph);
+	if (!loader) return "";
+	const preset = loaderPresetPrefixPart(loader);
+	const wanMode = wanModePrefixPart(node, graph);
+	const body = [preset, wanMode].filter(Boolean).join("_");
+	return body ? `video/${body}` : "";
+}
+
+function shouldUseAutoFilenamePrefix(node, nextPrefix) {
+	const widget = getWidget(node, "filename_prefix");
+	const current = String(widget?.value ?? "").trim();
+	const lastAuto = String(node?.properties?.[AUTO_FILENAME_PREFIX_PROPERTY] || "").trim();
+	return Boolean(nextPrefix) && (!current || current === DEFAULT_FILENAME_PREFIX || (!!lastAuto && current === lastAuto));
+}
+
+function applyAutoFilenamePrefix(node, graph = app.graph, promptNodeInfo = null) {
+	const nextPrefix = autoFilenamePrefixForNode(node, graph);
+	if (!shouldUseAutoFilenamePrefix(node, nextPrefix)) return "";
+	node.properties ||= {};
+	node.properties[AUTO_FILENAME_PREFIX_PROPERTY] = nextPrefix;
+	writeWidgetValue(node, "filename_prefix", nextPrefix);
+	if (promptNodeInfo) {
+		promptNodeInfo.inputs ||= {};
+		promptNodeInfo.inputs.filename_prefix = nextPrefix;
+	}
+	return nextPrefix;
+}
+
 function frameRateInputHasManualLink(node) {
 	const candidates = [
 		...(Array.isArray(node?.inputs) ? node.inputs : []),
@@ -1599,6 +1765,7 @@ function patchVideoCombineFrameRatePrompt(promptResult, graph) {
 	for (const [nodeId, nodeInfo] of Object.entries(output)) {
 		const node = findVideoCombineNodeForPromptId(graph, nodeId);
 		if (!node || !TARGET_NODES.has(String(node?.comfyClass || node?.type || ""))) continue;
+		applyAutoFilenamePrefix(node, graph, nodeInfo);
 		if (!selectedFrameRateVariable(node) || frameRateInputHasManualLink(node)) continue;
 		const resolved = resolveSelectedFrameRateVariable(node);
 		if (!Array.isArray(resolved) || resolved.length !== 2 || String(resolved[0]) === String(node.id)) continue;
@@ -1660,6 +1827,7 @@ app.registerExtension({
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalOnConnectionsChange?.apply(this, args);
 			requestAnimationFrame(() => {
+				applyAutoFilenamePrefix(this, app.rootGraph || app.graph);
 				applySlotVisibility(this);
 				updateToolbar(this);
 			});
@@ -1686,6 +1854,9 @@ app.registerExtension({
 			if (serializedNode && typeof serializedNode === "object") {
 				serializedNode.properties ||= {};
 				serializedNode.properties[USER_WIDTH_PROPERTY] = this.properties?.[USER_WIDTH_PROPERTY] ?? preferredNodeWidth(this);
+				if (this.properties?.[AUTO_FILENAME_PREFIX_PROPERTY]) {
+					serializedNode.properties[AUTO_FILENAME_PREFIX_PROPERTY] = this.properties[AUTO_FILENAME_PREFIX_PROPERTY];
+				}
 				if (selectedFrameRateVariable(this)) {
 					serializedNode.properties[FRAME_RATE_VARIABLE_PROPERTY] = selectedFrameRateVariable(this);
 				} else {
@@ -1716,6 +1887,7 @@ app.registerExtension({
 		for (const node of app.graph?._nodes || []) {
 			if (TARGET_NODES.has(String(node?.comfyClass || node?.type || ""))) {
 				patchNode(node);
+				applyAutoFilenamePrefix(node, app.rootGraph || app.graph);
 				clearNativePreview(node);
 			}
 		}

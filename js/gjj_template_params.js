@@ -244,10 +244,22 @@ function normalizeUploadFilename(data, file, requestedSubfolder = "") {
 	return subfolder ? `${subfolder}/${filename}` : filename;
 }
 
+async function firstExistingInputFilename(candidates = []) {
+	const seen = new Set();
+	for (const candidate of candidates) {
+		const filename = String(candidate || "").trim().replace(/\\/g, "/");
+		if (!filename || seen.has(filename)) continue;
+		seen.add(filename);
+		if (await inputFileExists(filename)) return filename;
+	}
+	return "";
+}
+
 async function uploadMediaToInput(file, subfolder = "") {
 	const endpoints = ["/upload/image", "/api/upload/image"];
 	let lastError = null;
 	const cleanSubfolder = String(subfolder || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+	const requestedName = normalizeUploadFilename({ name: file?.name || "", subfolder: cleanSubfolder }, file, cleanSubfolder);
 
 	for (const endpoint of endpoints) {
 		const form = new FormData();
@@ -270,7 +282,9 @@ async function uploadMediaToInput(file, subfolder = "") {
 			const data = await response.json().catch(() => ({}));
 			const filename = normalizeUploadFilename(data, file, cleanSubfolder);
 			if (!filename) throw new Error("上传成功但没有返回文件名");
-			return filename;
+			const existingName = await firstExistingInputFilename([filename, requestedName]);
+			if (existingName) return existingName;
+			lastError = new Error(`上传成功但 /view 无法读取：${filename}`);
 		} catch (err) {
 			lastError = err;
 		}
@@ -415,6 +429,9 @@ async function downloadNetworkMediaViaBackend(originalUrl, mediaType) {
 		throw new Error(detail || `后端下载接口 HTTP ${response?.status || "?"}`);
 	}
 	const data = await response.json().catch(() => ({}));
+	if (data?.ok === false || data?.error) {
+		throw new Error(data?.error || "后端下载失败");
+	}
 	const filename = String(data?.filename || data?.name || "").trim();
 	if (!filename) throw new Error("后端下载成功但没有返回文件名");
 	return filename;

@@ -59,9 +59,10 @@ def _register_template_params_routes() -> None:
         try:
             file_path = _download_network_media_to_input(url, media_type)
         except Exception as exc:
-            return web.json_response({"error": f"下载失败：{exc}"}, status=500)
+            return web.json_response({"ok": False, "error": f"下载失败：{exc}"})
 
         return web.json_response({
+            "ok": True,
             "filename": _input_relative_media_path(file_path),
             "name": Path(file_path).name,
             "media_type": media_type,

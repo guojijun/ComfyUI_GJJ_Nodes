@@ -22,8 +22,8 @@ import { GJJ_Utils } from "./gjj_utils.js";
 
 	function refreshNode(node) {
 		if (!node) return;
-		GJJ_Utils.scheduleFitNodeToContent(node, { minWidth: 300, minHeight: 80, delay: 20 });
-		GJJ_Utils.scheduleFitNodeToContent(node, { minWidth: 300, minHeight: 80, delay: 120 });
+		GJJ_Utils.scheduleFitNodeToContent(node, { minWidth: 260, minHeight: 80, delay: 20 });
+		GJJ_Utils.scheduleFitNodeToContent(node, { minWidth: 260, minHeight: 80, delay: 120 });
 	}
 
 	function noticeHeight(root) {

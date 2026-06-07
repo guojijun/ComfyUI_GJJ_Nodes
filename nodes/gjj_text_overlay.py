@@ -6,6 +6,7 @@ import torch
 from PIL import Image, ImageDraw, ImageFont
 
 import folder_paths
+from nodes import PreviewImage
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
 FONT_EXTENSIONS = {".ttf", ".otf", ".ttc", ".otc"}
@@ -44,24 +45,9 @@ def resolve_font_path(font_name):
     return font_name
 
 
-def resolve_axis_position(value, size):
-    """
-    解析位置值，兼容两种模式：
-    - 0到1之间（含0和1）：按百分比位置处理（浮点数）
-    - 大于1：按像素位置处理（整数）
-
-    示例：
-    - 0.5 → size * 0.5 (50%位置)
-    - 1.0 → size * 1.0 (100%位置)
-    - 50 → 50像素位置
-    - 200 → 200像素位置
-    """
+def clamp_ratio(value):
     value = float(value)
-    # 0到1之间（含边界）：按比例位置处理
-    if 0.0 <= value <= 1.0:
-        return value * size
-    # 大于1：按像素位置处理
-    return value
+    return max(0.0, min(1.0, value))
 
 
 def is_vertical_direction(direction):
@@ -219,10 +205,13 @@ class GJJ_TextOverlay:
     FUNCTION = "run"
     RETURN_TYPES = (MIXED_BATCH_IMAGE_TYPE,)
     RETURN_NAMES = ("叠加后图像",)
-    OUTPUT_TOOLTIPS = ("文本或水印叠加后的合成图像（自动匹配输入类型）。",)
+    OUTPUT_TOOLTIPS = ("文本或水印叠加后的图像队列；不同尺寸图片会保持原尺寸和同一相对位置。",)
 
     INPUT_IS_LIST = False
     OUTPUT_IS_LIST = (True,)
+
+    def __init__(self):
+        self.preview_image = PreviewImage()
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -316,16 +305,18 @@ class GJJ_TextOverlay:
                 "x": ("FLOAT", {
                     "default": 0.5,
                     "min": 0,
+                    "max": 1,
                     "step": 0.01,
                     "display_name": "X位置",
-                    "tooltip": "位置模式：0.0-1.0=百分比（如0.5=50%位置），>1.0=像素（如100=100像素）",
+                    "tooltip": "横向位置比例，0.0=最左，0.5=居中，1.0=最右；批量不同尺寸图片会保持同一相对位置。",
                 }),
                 "y": ("FLOAT", {
                     "default": 0.5,
                     "min": 0,
+                    "max": 1,
                     "step": 0.01,
                     "display_name": "Y位置",
-                    "tooltip": "位置模式：0.0-1.0=百分比（如0.5=50%位置），>1.0=像素（如100=100像素）",
+                    "tooltip": "纵向位置比例，0.0=最上，0.5=居中，1.0=最下；批量不同尺寸图片会保持同一相对位置。",
                 }),
                 "text_x": ("FLOAT", {
                     "default": -1.0,
@@ -409,8 +400,8 @@ class GJJ_TextOverlay:
             strip_empty=True,
             font_path="simhei.ttf",
             font_size=48,
-            x=50,
-            y=64,
+            x=0.5,
+            y=0.5,
             text_x=-1.0,
             text_y=-1.0,
             watermark_x=-1.0,
@@ -425,10 +416,10 @@ class GJJ_TextOverlay:
         stroke_width = max(0, int(stroke_width))
         x = float(x)
         y = float(y)
-        text_x = x if float(text_x) < 0 else float(text_x)
-        text_y = y if float(text_y) < 0 else float(text_y)
-        watermark_x = x if float(watermark_x) < 0 else float(watermark_x)
-        watermark_y = y if float(watermark_y) < 0 else float(watermark_y)
+        text_x = clamp_ratio(x if float(text_x) < 0 else text_x)
+        text_y = clamp_ratio(y if float(text_y) < 0 else text_y)
+        watermark_x = clamp_ratio(x if float(watermark_x) < 0 else watermark_x)
+        watermark_y = clamp_ratio(y if float(watermark_y) < 0 else watermark_y)
         text_opacity = float(text_opacity)
         watermark_opacity = float(watermark_opacity)
 
@@ -521,12 +512,6 @@ class GJJ_TextOverlay:
             "font_size": int(font_size),
         }
 
-        # 预加载字体以避免在循环中重复加载
-        try:
-            font = ImageFont.truetype(resolve_font_path(font_path), font_size)
-        except:
-            font = ImageFont.load_default(size=font_size)
-
         # 颜色转换
         text_col_rgb = hex2rgb(color_hex, (255, 215, 0))
         stroke_col_rgb = hex2rgb(stroke_color_hex, (0, 0, 0))
@@ -536,14 +521,29 @@ class GJJ_TextOverlay:
         text_fill = (*text_col_rgb, text_alpha)
         stroke_fill = (*stroke_col_rgb, text_alpha) if use_stroke else None
 
-        sw = stroke_width if use_stroke else 0
+        reference_height = max(1, int(background_images[0].shape[0]))
+        reference_width = max(1, int(background_images[0].shape[1]))
 
         for i, bg_tensor in enumerate(background_images):
             bg_pil = tensor_to_pil(bg_tensor).convert("RGBA")
             canvas_width, canvas_height = bg_pil.size
+            style_scale = min(
+                canvas_width / reference_width,
+                canvas_height / reference_height,
+            )
+            scaled_font_size = max(1, int(round(font_size * style_scale)))
+            scaled_spacing = float(spacing) * style_scale
+            scaled_stroke_width = max(0, int(round(stroke_width * style_scale))) if use_stroke else 0
+            scaled_line_gap = max(1, int(round(10 * style_scale)))
+            scaled_column_gap = max(1, int(round(5 * style_scale)))
+            try:
+                font = ImageFont.truetype(resolve_font_path(font_path), scaled_font_size)
+            except:
+                font = ImageFont.load_default(size=scaled_font_size)
             if i == 0:
                 preview_meta["background_width"] = int(canvas_width)
                 preview_meta["background_height"] = int(canvas_height)
+                preview_meta["font_size"] = int(scaled_font_size)
 
             # 创建文字图层
             text_layer = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
@@ -563,22 +563,22 @@ class GJJ_TextOverlay:
                 ch = bbox[3] - bbox[1]
 
                 # 计算行高（字体大小 + 额外间距）
-                line_height = ch + spacing + 10  # 10px 额外行间距
+                line_height = ch + scaled_spacing + scaled_line_gap
 
                 # 解析起始位置
-                start_x = resolve_axis_position(text_x, canvas_width)
-                start_y = resolve_axis_position(text_y, canvas_height)
+                start_x = text_x * canvas_width
+                start_y = text_y * canvas_height
 
                 # 横竖排版绘制
                 if is_vertical_direction(direction):
                     # 纵向：每行从上到下，多行从左到右排列
                     for line_idx, line in enumerate(lines):
-                        cx = start_x + line_idx * (cw + spacing + 5)  # 行间距
+                        cx = start_x + line_idx * (cw + scaled_spacing + scaled_column_gap)
                         cy = start_y
                         for c in line:
                             draw.text((cx, cy), c, font=font, fill=text_fill,
-                                      stroke_width=sw, stroke_fill=stroke_fill)
-                            cy += ch + spacing
+                                      stroke_width=scaled_stroke_width, stroke_fill=stroke_fill)
+                            cy += ch + scaled_spacing
                 else:
                     # 横向：每行从左到右，多行从上到下排列
                     for line_idx, line in enumerate(lines):
@@ -586,8 +586,8 @@ class GJJ_TextOverlay:
                         cy = start_y + line_idx * line_height
                         for c in line:
                             draw.text((cx, cy), c, font=font, fill=text_fill,
-                                      stroke_width=sw, stroke_fill=stroke_fill)
-                            cx += cw + spacing
+                                      stroke_width=scaled_stroke_width, stroke_fill=stroke_fill)
+                            cx += cw + scaled_spacing
 
             # 合成文本到背景
             composite = Image.alpha_composite(bg_pil, text_layer)
@@ -602,10 +602,11 @@ class GJJ_TextOverlay:
                     preview_meta["watermark_source_width"] = int(orig_width)
                     preview_meta["watermark_source_height"] = int(orig_height)
 
-                # 应用水印宽度缩放
-                if watermark_width != 1.0:
-                    new_width = max(1, int(orig_width * watermark_width))
-                    new_height = max(1, int(orig_height * watermark_width))
+                # 应用水印宽度缩放；批量不同尺寸背景时，按第一张背景为参考等比协调。
+                effective_watermark_width = float(watermark_width) * style_scale
+                if effective_watermark_width != 1.0:
+                    new_width = max(1, int(round(orig_width * effective_watermark_width)))
+                    new_height = max(1, int(round(orig_height * effective_watermark_width)))
                     wm_pil = wm_pil.resize((new_width, new_height), Image.LANCZOS)
 
                 # 应用水印透明度
@@ -613,15 +614,15 @@ class GJJ_TextOverlay:
                     wm_pil = apply_opacity(wm_pil, watermark_opacity)
 
                 # 确定水印位置
-                wx = int(resolve_axis_position(watermark_x, canvas_width))
-                wy = int(resolve_axis_position(watermark_y, canvas_height))
+                wx = int(round(watermark_x * canvas_width))
+                wy = int(round(watermark_y * canvas_height))
                 if i == 0:
                     preview_meta["watermark_width"] = int(wm_pil.size[0])
                     preview_meta["watermark_height"] = int(wm_pil.size[1])
                     preview_meta["watermark_x"] = int(wx)
                     preview_meta["watermark_y"] = int(wy)
-                    preview_meta["text_x"] = int(resolve_axis_position(text_x, canvas_width))
-                    preview_meta["text_y"] = int(resolve_axis_position(text_y, canvas_height))
+                    preview_meta["text_x"] = int(round(text_x * canvas_width))
+                    preview_meta["text_y"] = int(round(text_y * canvas_height))
 
                 # 创建水印图层以支持位置偏移
                 watermark_layer = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
@@ -629,22 +630,28 @@ class GJJ_TextOverlay:
 
                 composite = Image.alpha_composite(composite, watermark_layer)
 
-            comp_out = pil_to_tensor(composite.convert("RGB"))
-
+            comp_out = pil_to_tensor(composite.convert("RGB")).unsqueeze(0)
             composite_outputs.append(comp_out)
 
-        # 批量输出：直接返回批量图片队列，不拼接
-        # 每张输入图片对应一张输出图片
-        if len(composite_outputs) == 1:
-            # 单张图片：返回 4D Tensor [1, H, W, C]
-            composite_out = composite_outputs[0]
-            if composite_out.ndim == 3:
-                composite_out = composite_out.unsqueeze(0)
-        else:
-            # 多张图片：批量输出，保持每张独立
-            composite_out = torch.stack(composite_outputs, dim=0)
+        preview_entries = []
+        for image_tensor in composite_outputs:
+            try:
+                preview_ui = self.preview_image.save_images(
+                    image_tensor,
+                    filename_prefix="GJJ_TextOverlay",
+                )
+                preview_entries.extend(preview_ui.get("ui", {}).get("images", []))
+            except Exception:
+                pass
 
-        return {"ui": {"gjj_text_overlay": [preview_meta]}, "result": (composite_out,)}
+        return {
+            "ui": {
+                "gjj_text_overlay": [preview_meta],
+                "preview_images": preview_entries,
+                "images": [dict(item) for item in preview_entries],
+            },
+            "result": (composite_outputs,),
+        }
 
 # 注册
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_TextOverlay}

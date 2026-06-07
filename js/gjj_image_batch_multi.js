@@ -755,33 +755,79 @@ function ensureControls(node) {
 	refreshControlSize(node);
 }
 
-function connectedImageInputCount(node) {
-	let lastLinkedIndex = -1;
-	for (const [index, input] of imageInputs(node).entries()) {
-		if (input?.link != null) lastLinkedIndex = index;
-	}
-	return lastLinkedIndex + 1;
+function imageInputAbsoluteIndex(node, input) {
+	return Array.isArray(node?.inputs) ? node.inputs.indexOf(input) : -1;
 }
 
-function updateImageInputVisibility(node) {
-	const inputs = imageInputs(node);
-	const connectedCount = connectedImageInputCount(node);
-	const visibleCount = Math.max(MIN_INPUTS, connectedCount + 1, MIN_INPUTS + 1);
-	
-	for (let i = 0; i < inputs.length; i++) {
-		const input = inputs[i];
-		const shouldShow = i < visibleCount && i < MAX_INPUTS;
-		const slotEl = node?.graph?.canvas?.getNodeInputSlotEl?.(node, i);
-		const inputContainer = slotEl?.parentElement || input?.widget?.element?.parentElement;
-		
-		if (inputContainer) {
-			inputContainer.classList.toggle("gjj-ibm-hidden-input", !shouldShow);
-		}
-		if (input) {
-			input.visible = shouldShow;
-			input.hidden = !shouldShow;
+function imageInputHasLink(input) {
+	return input?.link !== undefined && input?.link !== null;
+}
+
+function applyImageInputMeta(node) {
+	const inputs = imageInputs(node).sort((a, b) => imageIndex(a) - imageIndex(b));
+	for (let index = 0; index < inputs.length; index += 1) {
+		const input = inputs[index];
+		const displayIndex = index + 1;
+		input.name = formatImageInputName(displayIndex);
+		input.label = `图片 ${displayIndex}`;
+		input.localized_name = `图片 ${displayIndex}`;
+		input.type = COMPAT_TYPE;
+		input.tooltip = `第 ${displayIndex} 路图片输入；支持普通 IMAGE 或 GJJ 批量图片。`;
+		input.hidden = false;
+		input.visible = true;
+	}
+}
+
+function syncInputLinkSlots(node) {
+	const links = node?.graph?.links || app.graph?.links || {};
+	if (!Array.isArray(node?.inputs)) return;
+	for (const [slotIndex, input] of node.inputs.entries()) {
+		if (input?.link == null) continue;
+		const link = links?.[input.link] || (Array.isArray(links) ? links.find((item) => String(item?.id) === String(input.link)) : null);
+		if (link) {
+			link.target_id = node.id;
+			link.target_slot = slotIndex;
 		}
 	}
+}
+
+function addImageInput(node, index) {
+	if (typeof node.addInput !== "function") return null;
+	node.addInput(formatImageInputName(index), COMPAT_TYPE);
+	const input = Array.isArray(node.inputs) ? node.inputs[node.inputs.length - 1] : null;
+	if (input) {
+		input.label = `图片 ${index}`;
+		input.localized_name = `图片 ${index}`;
+		input.tooltip = `第 ${index} 路图片输入；支持普通 IMAGE 或 GJJ 批量图片。`;
+	}
+	return input;
+}
+
+function stabilizeImageInputs(node) {
+	if (!Array.isArray(node?.inputs)) node.inputs = [];
+	const sorted = imageInputs(node).sort((a, b) => imageIndex(a) - imageIndex(b));
+	const hasLinkedInput = sorted.some(imageInputHasLink);
+	for (let i = sorted.length - 1; i >= 0; i -= 1) {
+		const input = sorted[i];
+		if (imageInputHasLink(input)) continue;
+		if (!hasLinkedInput && sorted.filter((item) => !imageInputHasLink(item)).length <= 1) continue;
+		const absoluteIndex = imageInputAbsoluteIndex(node, input);
+		if (absoluteIndex >= 0) {
+			node.removeInput?.(absoluteIndex);
+			sorted.splice(i, 1);
+		}
+	}
+
+	let inputs = imageInputs(node).sort((a, b) => imageIndex(a) - imageIndex(b));
+	if (!inputs.some((input) => !imageInputHasLink(input)) && inputs.length < MAX_INPUTS) {
+		addImageInput(node, inputs.length + 1);
+	}
+	inputs = imageInputs(node).sort((a, b) => imageIndex(a) - imageIndex(b));
+	if (!inputs.length) {
+		addImageInput(node, 1);
+	}
+	applyImageInputMeta(node);
+	syncInputLinkSlots(node);
 }
 
 function stabilize(node) {
@@ -789,7 +835,7 @@ function stabilize(node) {
 	ensureBackingWidgets(node);
 	hideNativeWidgets(node);
 	ensureControls(node);
-	updateImageInputVisibility(node);
+	stabilizeImageInputs(node);
 	applyOutputMeta(node);
 	node.__gjjImageBatchMultiSignature = currentSignature(node);
 	refreshControlSize(node);

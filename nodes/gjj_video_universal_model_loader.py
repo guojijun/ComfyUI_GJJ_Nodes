@@ -261,7 +261,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         ],
     },
     "wan22_remix": {
-        "label": "REMIX NSFW",
+        "label": "REMIX NSFW 破限版",
         "clip_type": "wan",
         "slots": [
             S("high_model", "High模型", "diffusion_models", "diffusion", ["remix", "high"], preferred_name=WAN22_T2V_HIGH_NAMES[0], official_names=WAN22_T2V_HIGH_NAMES),
@@ -271,6 +271,32 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
             S("high_lora", "High LoRA名称", "loras", "name", ["wan2.2", "t2v","a14b", "lightx2v", "high"], preferred_name=WAN22_T2V_LORA_HIGH_NAMES[0], official_names=WAN22_T2V_LORA_HIGH_NAMES),
             S("low_lora", "Low LoRA名称", "loras", "name", ["wan2.2", "t2v","a14b", "lightx2v", "low"], preferred_name=WAN22_T2V_LORA_LOW_NAMES[0], official_names=WAN22_T2V_LORA_LOW_NAMES),
+        ],
+    },
+    "wan22_smoothMix": {
+        "label": "SmoothMix NSFW 破限版",
+        "clip_type": "wan",
+        "slots": [
+            S("high_model", "High模型", "diffusion_models", "diffusion", ["smooth","mix","high"], preferred_name=WAN22_T2V_HIGH_NAMES[0], official_names=WAN22_T2V_HIGH_NAMES),
+            S("low_model", "Low模型", "diffusion_models", "diffusion", ["smooth","mix","low"], preferred_name=WAN22_T2V_LOW_NAMES[0], official_names=WAN22_T2V_LOW_NAMES),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
+            S("high_lora", "High LoRA名称", "loras", "name", ["wan2.2", "i2v","a14b", "lightx2v", "high"], preferred_name=WAN22_T2V_LORA_HIGH_NAMES[0], official_names=WAN22_T2V_LORA_HIGH_NAMES),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["wan2.2", "i2v","a14b", "lightx2v", "low"], preferred_name=WAN22_T2V_LORA_LOW_NAMES[0], official_names=WAN22_T2V_LORA_LOW_NAMES),
+        ],
+    },
+    "wan22_dasiwa": {
+        "label": "Dasiwa NSFW 破限版",
+        "clip_type": "wan",
+        "slots": [
+            S("high_model", "High模型", "diffusion_models", "diffusion", ["dasiwa","wan", "high"], preferred_name=WAN22_T2V_HIGH_NAMES[0], official_names=WAN22_T2V_HIGH_NAMES),
+            S("low_model", "Low模型", "diffusion_models", "diffusion", ["dasiwa","wan","low"], preferred_name=WAN22_T2V_LOW_NAMES[0], official_names=WAN22_T2V_LOW_NAMES),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
+            S("high_lora", "High LoRA名称", "loras", "name", ["wan2.2", "i2v","a14b", "lightx2v", "high"], preferred_name=WAN22_T2V_LORA_HIGH_NAMES[0], official_names=WAN22_T2V_LORA_HIGH_NAMES),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["wan2.2", "i2v","a14b", "lightx2v", "low"], preferred_name=WAN22_T2V_LORA_LOW_NAMES[0], official_names=WAN22_T2V_LORA_LOW_NAMES),
         ],
     },
     "wan22_i2v_dual": {

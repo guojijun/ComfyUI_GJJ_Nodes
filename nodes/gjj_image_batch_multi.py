@@ -447,9 +447,11 @@ class GJJ_ImageBatchMulti:
             ),
         }
         
-        # 声明固定数量的输入口
+        optional = {}
+
+        # 图片接口是动态可选输入。前端默认只显示一个尾部空槽，连接后再追加下一路。
         for i in range(1, MAX_INPUTS + 1):
-            required[f"image_{i:02d}"] = (
+            optional[f"image_{i:02d}"] = (
                 COMPAT_BATCH_IMAGE_TYPE,
                 {
                     "display_name": f"图片 {i}",
@@ -457,7 +459,7 @@ class GJJ_ImageBatchMulti:
                 },
             )
 
-        return {"required": required}
+        return {"required": required, "optional": optional}
 
     @classmethod
     def VALIDATE_INPUTS(cls, **kwargs):

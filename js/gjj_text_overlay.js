@@ -54,18 +54,12 @@ const PERSISTED_WIDGETS = new Set([
 	"watermark_y",
 	"watermark_width",
 ]);
-const TEXT_FIT_SOURCE_WIDGETS = new Set([
-	"texts",
-	"direction",
-	"spacing",
-	"font_path",
-	"color_hex",
-	"stroke_color_hex",
-	"use_stroke",
-	"stroke_width",
-	"text_opacity",
-]);
-
+const SIZE_PROPERTIES = {
+	bgWidth: "gjj_text_overlay_bg_width",
+	bgHeight: "gjj_text_overlay_bg_height",
+	watermarkWidth: "gjj_text_overlay_watermark_source_width",
+	watermarkHeight: "gjj_text_overlay_watermark_source_height",
+};
 function widget(node, name) {
 	return node?.widgets?.find((item) => item?.name === name) || null;
 }
@@ -107,6 +101,24 @@ function imageRefToViewInfo(item) {
 		src,
 		width: Number.isFinite(width) && width > 0 ? width : 0,
 		height: Number.isFinite(height) && height > 0 ? height : 0,
+	};
+}
+
+function inferImageInfoFromUrl(src) {
+	if (!src) return null;
+	let filename = "";
+	try {
+		const url = new URL(src, window.location.href);
+		filename = decodeURIComponent(url.searchParams.get("filename") || "");
+	} catch (_) {
+		filename = String(src);
+	}
+	const match = filename.match(/(?:^|[^0-9])(\d{2,5})[xX×](\d{2,5})(?:[^0-9]|$)/);
+	if (!match) return { src, width: 0, height: 0 };
+	return {
+		src,
+		width: Number(match[1]) || 0,
+		height: Number(match[2]) || 0,
 	};
 }
 
@@ -306,14 +318,6 @@ function setWidgetValue(node, name, value) {
 	const item = widget(node, name);
 	if (!item) return;
 	item.value = value;
-	if (TEXT_FIT_SOURCE_WIDGETS.has(name)) {
-		node.__gjjTextOverlayTextFitSignature = "";
-		node.__gjjTextOverlayManualTextResize = false;
-		if (node.properties) {
-			delete node.properties.gjj_text_overlay_text_fit_signature;
-			delete node.properties.gjj_text_overlay_manual_text_resize;
-		}
-	}
 	if (PERSISTED_WIDGETS.has(name)) {
 		node.properties ||= {};
 		node.properties[name] = value;
@@ -341,17 +345,80 @@ function positionValue(node, name, fallbackName) {
 	return clamp01(numberValue(node, fallbackName, 0.5));
 }
 
+function clampStagePoint(x, y) {
+	return {
+		x: Number(clamp01(x).toFixed(4)),
+		y: Number(clamp01(y).toFixed(4)),
+	};
+}
+
+function persistPreviewSize(node, kind, width, height) {
+	width = Math.round(Number(width || 0));
+	height = Math.round(Number(height || 0));
+	if (!node || width <= 0 || height <= 0) return;
+	node.properties ||= {};
+	if (kind === "background") {
+		node.properties[SIZE_PROPERTIES.bgWidth] = width;
+		node.properties[SIZE_PROPERTIES.bgHeight] = height;
+	} else if (kind === "watermark") {
+		node.properties[SIZE_PROPERTIES.watermarkWidth] = width;
+		node.properties[SIZE_PROPERTIES.watermarkHeight] = height;
+	}
+}
+
+function restorePreviewSizes(node) {
+	const props = node?.properties || {};
+	const bgWidth = Number(props[SIZE_PROPERTIES.bgWidth] || 0);
+	const bgHeight = Number(props[SIZE_PROPERTIES.bgHeight] || 0);
+	if (bgWidth > 0 && bgHeight > 0) {
+		node.__gjjTextOverlayBgSize = { width: bgWidth, height: bgHeight };
+		node.__gjjTextOverlayUI?.stage?.style.setProperty("aspect-ratio", `${bgWidth} / ${bgHeight}`);
+	}
+	const wmWidth = Number(props[SIZE_PROPERTIES.watermarkWidth] || 0);
+	const wmHeight = Number(props[SIZE_PROPERTIES.watermarkHeight] || 0);
+	if (wmWidth > 0 && wmHeight > 0) {
+		node.__gjjTextOverlayWatermarkSize = { width: wmWidth, height: wmHeight };
+	}
+}
+
+function syncBackgroundSizeFromImage(node) {
+	const ui = node.__gjjTextOverlayUI;
+	if (node.__gjjTextOverlayBgSize?.width && node.__gjjTextOverlayBgSize?.height) {
+		return true;
+	}
+	const image = ui?.bg;
+	const width = Number(image?.naturalWidth || 0);
+	const height = Number(image?.naturalHeight || 0);
+	if (width > 0 && height > 0) {
+		const old = node.__gjjTextOverlayBgSize || {};
+		if (old.width !== width || old.height !== height) {
+			node.__gjjTextOverlayBgSize = { width, height };
+			ui.stage?.style.setProperty("aspect-ratio", `${width} / ${height}`);
+		}
+		return true;
+	}
+	return Boolean(node.__gjjTextOverlayBgSize?.width && node.__gjjTextOverlayBgSize?.height);
+}
+
 function setPosition(node, target, x, y) {
-	const px = Number(clamp01(x).toFixed(4));
-	const py = Number(clamp01(y).toFixed(4));
+	const pos = clampStagePoint(x, y);
 	if (target === "watermark") {
-		setWidgetValue(node, "watermark_x", px);
-		setWidgetValue(node, "watermark_y", py);
+		setWidgetValue(node, "watermark_x", pos.x);
+		setWidgetValue(node, "watermark_y", pos.y);
 	} else {
-		setWidgetValue(node, "text_x", px);
-		setWidgetValue(node, "text_y", py);
+		setWidgetValue(node, "text_x", pos.x);
+		setWidgetValue(node, "text_y", pos.y);
 	}
 	renderPanel(node);
+}
+
+function scheduleRenderPanel(node, options = {}) {
+	if (!node) return;
+	if (node.__gjjTextOverlayRenderFrame) cancelAnimationFrame(node.__gjjTextOverlayRenderFrame);
+	node.__gjjTextOverlayRenderFrame = requestAnimationFrame(() => {
+		node.__gjjTextOverlayRenderFrame = 0;
+		renderPanel(node, options);
+	});
 }
 
 function hideWidget(item) {
@@ -684,14 +751,20 @@ function makePanel(node) {
 		const target = kind === "watermark" ? watermark : text;
 		const rect = target.getBoundingClientRect();
 		const stageRect = stage.getBoundingClientRect();
+		const left = rect.left - stageRect.left;
+		const top = rect.top - stageRect.top;
+		const width = Math.max(1, rect.width);
+		const height = Math.max(1, rect.height);
 		resizeStart = {
 			x: event.clientX,
 			y: event.clientY,
 			corner,
-			width: Math.max(1, rect.width),
-			height: Math.max(1, rect.height),
-			left: rect.left - stageRect.left,
-			top: rect.top - stageRect.top,
+			width,
+			height,
+			left,
+			top,
+			anchorX: corner === "nw" ? left + width : left,
+			anchorY: corner === "nw" ? top + height : top,
 			stageWidth: Math.max(1, stageRect.width),
 			stageHeight: Math.max(1, stageRect.height),
 			fontSize: Math.max(1, numberValue(node, "font_size", 48)),
@@ -728,28 +801,53 @@ function makePanel(node) {
 	stage.addEventListener("pointermove", (event) => {
 		if (resizingKind && resizeStart) {
 			event.preventDefault();
-			const deltaX = event.clientX - resizeStart.x;
-			const deltaY = event.clientY - resizeStart.y;
-			const signedDelta = resizeStart.corner === "nw"
-				? Math.max(-deltaX, -deltaY)
-				: Math.max(deltaX, deltaY);
-			const ratio = Math.max(0.1, (resizeStart.width + signedDelta) / resizeStart.width);
+			const stageRect = stage.getBoundingClientRect();
+			const pointerX = Math.max(0, Math.min(resizeStart.stageWidth, event.clientX - stageRect.left));
+			const pointerY = Math.max(0, Math.min(resizeStart.stageHeight, event.clientY - stageRect.top));
+			const widthRatio = Math.abs(pointerX - resizeStart.anchorX) / resizeStart.width;
+			const heightRatio = Math.abs(pointerY - resizeStart.anchorY) / resizeStart.height;
+			const rawRatio = Math.max(widthRatio, heightRatio);
+			const maxWidthRatio = resizeStart.corner === "nw"
+				? resizeStart.anchorX / resizeStart.width
+				: (resizeStart.stageWidth - resizeStart.anchorX) / resizeStart.width;
+			const maxHeightRatio = resizeStart.corner === "nw"
+				? resizeStart.anchorY / resizeStart.height
+				: (resizeStart.stageHeight - resizeStart.anchorY) / resizeStart.height;
+			const maxRatio = Math.max(0.01, Math.min(10, maxWidthRatio, maxHeightRatio));
+			const minRatio = Math.min(0.1, maxRatio);
+			const ratio = Math.max(minRatio, Math.min(maxRatio, rawRatio));
+			const nextWidth = resizeStart.width * ratio;
+			const nextHeight = resizeStart.height * ratio;
 			if (resizingKind === "text") {
 				const nextSize = Math.max(1, Math.min(512, Math.round(resizeStart.fontSize * ratio)));
-				node.__gjjTextOverlayManualTextResize = true;
-				node.properties ||= {};
-				node.properties.gjj_text_overlay_manual_text_resize = true;
 				setWidgetValue(node, "font_size", nextSize);
 			} else {
 				const nextScale = Math.max(0.1, Math.min(10, Number((resizeStart.watermarkWidth * ratio).toFixed(4))));
 				setWidgetValue(node, "watermark_width", nextScale);
 			}
 			if (resizeStart.corner === "nw") {
-				const nextWidth = resizeStart.width * ratio;
-				const nextHeight = resizeStart.height * ratio;
 				const nextLeft = (resizeStart.left + resizeStart.width - nextWidth) / resizeStart.stageWidth;
 				const nextTop = (resizeStart.top + resizeStart.height - nextHeight) / resizeStart.stageHeight;
-				setPosition(node, resizingKind, nextLeft, nextTop);
+				const pos = clampStagePoint(nextLeft, nextTop);
+				if (resizingKind === "watermark") {
+					setWidgetValue(node, "watermark_x", pos.x);
+					setWidgetValue(node, "watermark_y", pos.y);
+				} else {
+					setWidgetValue(node, "text_x", pos.x);
+					setWidgetValue(node, "text_y", pos.y);
+				}
+			} else {
+				const pos = clampStagePoint(
+					resizeStart.left / resizeStart.stageWidth,
+					resizeStart.top / resizeStart.stageHeight,
+				);
+				if (resizingKind === "watermark") {
+					setWidgetValue(node, "watermark_x", pos.x);
+					setWidgetValue(node, "watermark_y", pos.y);
+				} else {
+					setWidgetValue(node, "text_x", pos.x);
+					setWidgetValue(node, "text_y", pos.y);
+				}
 			}
 			renderPanel(node);
 			return;
@@ -761,10 +859,22 @@ function makePanel(node) {
 	stage.addEventListener("pointerup", () => { dragging = ""; resizingKind = ""; resizeStart = null; });
 	stage.addEventListener("pointerleave", () => { dragging = ""; resizingKind = ""; resizeStart = null; });
 
-	const resizeObserver = new ResizeObserver(() => updatePanelHeight(node));
+	let observedStageWidth = 0;
+	const resizeObserver = new ResizeObserver(() => {
+		updatePanelHeight(node);
+		const nextStageWidth = Math.round(stage.clientWidth || 0);
+		if (nextStageWidth > 1 && nextStageWidth !== observedStageWidth) {
+			observedStageWidth = nextStageWidth;
+			scheduleRenderPanel(node);
+		}
+	});
 	resizeObserver.observe(root);
 	const originalRemoved = node.onRemoved;
 	node.onRemoved = function (...args) {
+		if (node.__gjjTextOverlayRenderFrame) {
+			cancelAnimationFrame(node.__gjjTextOverlayRenderFrame);
+			node.__gjjTextOverlayRenderFrame = 0;
+		}
 		resizeObserver.disconnect();
 		fileInput.remove();
 		return originalRemoved?.apply(this, args);
@@ -772,6 +882,7 @@ function makePanel(node) {
 
 	node.__gjjTextOverlayUI = { root, toolbar, preview, status, stage, base, bg, text, textImg, textResizeNw, textResizeSe, watermark, watermarkImg, watermarkResizeNw, watermarkResizeSe, activate };
 	activate(node.__gjjTextOverlayActive || "text");
+	scheduleRenderPanel(node);
 	setTimeout(() => refreshBackground(node, false), 300);
 	setTimeout(() => refreshWatermarkPreview(node, true), 450);
 	return root;
@@ -787,15 +898,24 @@ function updatePanelHeight(node) {
 	app.graph?.setDirtyCanvas?.(true, true);
 }
 
-function setBackgroundImage(node, src, label = "") {
+function setBackgroundImage(node, info, label = "") {
 	const ui = node.__gjjTextOverlayUI;
+	const src = typeof info === "string" ? info : info?.src;
 	if (!ui || !src) return;
+	const preferredWidth = Number(info?.width || 0);
+	const preferredHeight = Number(info?.height || 0);
+	if (preferredWidth > 0 && preferredHeight > 0) {
+		node.__gjjTextOverlayBgSize = { width: preferredWidth, height: preferredHeight };
+		persistPreviewSize(node, "background", preferredWidth, preferredHeight);
+		ui.stage.style.aspectRatio = `${preferredWidth} / ${preferredHeight}`;
+	}
 	const image = new Image();
 	image.crossOrigin = "anonymous";
 	image.onload = () => {
-		const width = image.naturalWidth || image.width || 16;
-		const height = image.naturalHeight || image.height || 9;
+		const width = preferredWidth || image.naturalWidth || image.width || 16;
+		const height = preferredHeight || image.naturalHeight || image.height || 9;
 		node.__gjjTextOverlayBgSize = { width, height };
+		persistPreviewSize(node, "background", width, height);
 		ui.bg.src = src;
 		ui.bg.style.display = "block";
 		ui.base.style.opacity = "0";
@@ -803,7 +923,7 @@ function setBackgroundImage(node, src, label = "") {
 		ui.preview.title = label ? `${label} · ${width}×${height}` : `${width}×${height}`;
 		node.__gjjTextOverlayBgSrc = src;
 		updatePanelHeight(node);
-		renderPanel(node);
+		scheduleRenderPanel(node);
 	};
 	image.onerror = () => {
 		if (label) ui.preview.title = `${label} 加载失败`;
@@ -821,11 +941,12 @@ function setWatermarkPreviewImage(node, info) {
 		const width = Number(info?.width || 0) || image.naturalWidth || image.width || 72;
 		const height = Number(info?.height || 0) || image.naturalHeight || image.height || 72;
 		node.__gjjTextOverlayWatermarkSize = { width, height };
+		persistPreviewSize(node, "watermark", width, height);
 		ui.watermarkImg.src = src;
 		ui.watermarkImg.style.display = "block";
 		ui.watermark.style.background = "transparent";
 		ui.watermark.style.display = "flex";
-		renderPanel(node, { fitText: false });
+		scheduleRenderPanel(node, { fitText: false });
 	};
 	image.onerror = () => {
 		node.__gjjTextOverlayWatermarkSize = null;
@@ -858,6 +979,7 @@ function refreshWatermarkPreview(node, force = false) {
 function drawTextPreviewImage(node) {
 	const rawText = stringValue(node, "texts", "文字预览").replace(/\s*\r?\n\s*/g, " ").trim() || "文字预览";
 	const lines = [rawText];
+	syncBackgroundSizeFromImage(node);
 	const stageWidth = Math.max(1, node.__gjjTextOverlayUI?.stage?.clientWidth || 1);
 	const bgWidth = Math.max(1, node.__gjjTextOverlayBgSize?.width || stageWidth);
 	const displayScale = stageWidth / bgWidth;
@@ -939,76 +1061,13 @@ function drawTextPreviewImage(node) {
 	return { src: canvas.toDataURL("image/png"), width: canvas.width, height: canvas.height };
 }
 
-function textFitSignature(node) {
-	const bg = node.__gjjTextOverlayBgSize || {};
-	return JSON.stringify([
-		stringValue(node, "texts", "").replace(/\s*\r?\n\s*/g, " ").trim(),
-		stringValue(node, "direction", "横向"),
-		stringValue(node, "font_path", ""),
-		numberValue(node, "spacing", 0),
-		stringValue(node, "color_hex", "#FFD700"),
-		stringValue(node, "stroke_color_hex", "#000000"),
-		boolValue(node, "use_stroke", true),
-		numberValue(node, "stroke_width", 2),
-		numberValue(node, "text_opacity", 1),
-		Math.round(Number(bg.width || 0)),
-		Math.round(Number(bg.height || 0)),
-	]);
-}
-
-function fitInitialTextToStage(node, textImage) {
-	const ui = node.__gjjTextOverlayUI;
-	if (!ui || node.__gjjTextOverlayAutoFitting) return textImage;
-	if (node.__gjjTextOverlayManualTextResize || node.properties?.gjj_text_overlay_manual_text_resize) return textImage;
-	const stageWidth = Math.max(1, Math.round(ui.stage.clientWidth || 0));
-	const stageHeight = Math.max(1, Math.round(ui.stage.clientHeight || 0));
-	if (stageWidth <= 1 || stageHeight <= 1 || !textImage?.width || !textImage?.height) return textImage;
-
-	const signature = textFitSignature(node);
-	const oldSignature = node.__gjjTextOverlayTextFitSignature || node.properties?.gjj_text_overlay_text_fit_signature || "";
-
-	const maxWidth = Math.max(1, stageWidth * 0.92);
-	const maxHeight = Math.max(1, stageHeight * 0.92);
-	if (oldSignature === signature && textImage.width <= maxWidth && textImage.height <= maxHeight) return textImage;
-	const fitScale = Math.min(1, maxWidth / textImage.width, maxHeight / textImage.height);
-	node.properties ||= {};
-	node.__gjjTextOverlayTextFitSignature = signature;
-	node.__gjjTextOverlayTextFitScale = Number(fitScale.toFixed(4));
-	node.properties.gjj_text_overlay_text_fit_signature = signature;
-	node.properties.gjj_text_overlay_text_fit_scale = node.__gjjTextOverlayTextFitScale;
-
-	if (fitScale < 0.999) {
-		const fontSize = Math.max(1, numberValue(node, "font_size", 48));
-		const nextSize = Math.max(1, Math.min(512, Math.floor(fontSize * fitScale)));
-		if (nextSize < fontSize) {
-			try {
-				node.__gjjTextOverlayAutoFitting = true;
-				setWidgetValue(node, "font_size", nextSize);
-			} finally {
-				node.__gjjTextOverlayAutoFitting = false;
-			}
-			textImage = drawTextPreviewImage(node);
-		}
-	}
-
-	const left = positionValue(node, "text_x", "x") * stageWidth;
-	const top = positionValue(node, "text_y", "y") * stageHeight;
-	const nextLeft = Math.max(0, Math.min(left, Math.max(0, stageWidth - textImage.width)));
-	const nextTop = Math.max(0, Math.min(top, Math.max(0, stageHeight - textImage.height)));
-	if (Math.abs(nextLeft - left) > 0.5 || Math.abs(nextTop - top) > 0.5) {
-		try {
-			node.__gjjTextOverlayAutoFitting = true;
-			setWidgetValue(node, "text_x", Number((nextLeft / stageWidth).toFixed(4)));
-			setWidgetValue(node, "text_y", Number((nextTop / stageHeight).toFixed(4)));
-		} finally {
-			node.__gjjTextOverlayAutoFitting = false;
-		}
-	}
-	return textImage;
-}
-
 function refreshBackground(node, force = false) {
-	const src = getUpstreamImageSrc(node);
+	let info = getUpstreamImageInfo(node);
+	if (info?.src && (!info.width || !info.height)) {
+		const inferred = inferImageInfoFromUrl(info.src);
+		if (inferred?.width && inferred?.height) info = { ...info, width: inferred.width, height: inferred.height };
+	}
+	const src = info?.src || "";
 	const ui = node.__gjjTextOverlayUI;
 	if (!src) {
 		if (force && ui?.status) {
@@ -1020,7 +1079,7 @@ function refreshBackground(node, force = false) {
 		return false;
 	}
 	if (!force && node.__gjjTextOverlayBgSrc === src) return true;
-	setBackgroundImage(node, src, "上游背景图");
+	setBackgroundImage(node, info || src, "上游背景图");
 	if (force && ui?.status) {
 		ui.status.textContent = "已加载上游背景图";
 		ui.status.dataset.show = "true";
@@ -1033,16 +1092,22 @@ function refreshBackground(node, force = false) {
 function renderPanel(node, options = {}) {
 	const ui = node.__gjjTextOverlayUI;
 	if (!ui) return;
+	const hasBgSize = syncBackgroundSizeFromImage(node);
 	const textX = positionValue(node, "text_x", "x");
 	const textY = positionValue(node, "text_y", "y");
 	const wmX = positionValue(node, "watermark_x", "x");
 	const wmY = positionValue(node, "watermark_y", "y");
-	ui.text.style.left = `${textX * 100}%`;
-	ui.text.style.top = `${textY * 100}%`;
-	ui.watermark.style.left = `${wmX * 100}%`;
-	ui.watermark.style.top = `${wmY * 100}%`;
+	if (!hasBgSize && ui.bg.src) {
+		ui.text.style.display = "none";
+		ui.watermark.style.display = "none";
+		updatePanelHeight(node);
+		return;
+	}
+	ui.text.style.display = "block";
 	let textImage = drawTextPreviewImage(node);
-	if (options.fitText !== false) textImage = fitInitialTextToStage(node, textImage);
+	const textPos = clampStagePoint(textX, textY);
+	ui.text.style.left = `${textPos.x * 100}%`;
+	ui.text.style.top = `${textPos.y * 100}%`;
 	ui.textImg.src = textImage.src;
 	ui.text.style.width = `${textImage.width}px`;
 	ui.text.style.height = `${textImage.height}px`;
@@ -1054,8 +1119,13 @@ function renderPanel(node, options = {}) {
 	const stageWidth = Math.max(1, ui.stage.clientWidth || 1);
 	const bgWidth = Math.max(1, node.__gjjTextOverlayBgSize?.width || stageWidth);
 	const displayScale = stageWidth / bgWidth;
-	ui.watermark.style.width = `${Math.round(baseW * scale * displayScale)}px`;
-	ui.watermark.style.height = `${Math.round(baseH * scale * displayScale)}px`;
+	const wmDisplayWidth = Math.round(baseW * scale * displayScale);
+	const wmDisplayHeight = Math.round(baseH * scale * displayScale);
+	const wmPos = clampStagePoint(wmX, wmY);
+	ui.watermark.style.left = `${wmPos.x * 100}%`;
+	ui.watermark.style.top = `${wmPos.y * 100}%`;
+	ui.watermark.style.width = `${wmDisplayWidth}px`;
+	ui.watermark.style.height = `${wmDisplayHeight}px`;
 	ui.watermark.style.display = linkPresent(input(node, "watermark_image")) && ui.watermarkImg.src ? "flex" : "none";
 	if (linkPresent(input(node, "watermark_image"))) refreshWatermarkPreview(node, false);
 	updatePanelHeight(node);
@@ -1090,8 +1160,11 @@ function patchNode(node) {
 		const item = widget(node, name);
 		if (item && node.properties && node.properties[name] != null) item.value = node.properties[name];
 	}
+	restorePreviewSizes(node);
 	hideNativeWidgets(node);
 	ensurePanel(node);
+	restorePreviewSizes(node);
+	renderPanel(node);
 	for (const name of [...TEXT_WIDGETS, ...WATERMARK_WIDGETS]) {
 		const item = widget(node, name);
 		if (!item || item.__gjjTextOverlayCallbackPatched) continue;
@@ -1121,26 +1194,14 @@ function applyBackendPreviewMeta(node, message) {
 	const bgH = Number(meta.background_height || 0);
 	if (bgW > 0 && bgH > 0) {
 		node.__gjjTextOverlayBgSize = { width: bgW, height: bgH };
+		persistPreviewSize(node, "background", bgW, bgH);
 		node.__gjjTextOverlayUI?.stage?.style.setProperty("aspect-ratio", `${bgW} / ${bgH}`);
 	}
 	const srcW = Number(meta.watermark_source_width || 0);
 	const srcH = Number(meta.watermark_source_height || 0);
-	const outW = Number(meta.watermark_width || 0);
 	if (srcW > 0 && srcH > 0) {
 		node.__gjjTextOverlayWatermarkSize = { width: srcW, height: srcH };
-		if (outW > 0) setWidgetValue(node, "watermark_width", Number((outW / srcW).toFixed(4)));
-	}
-	if (bgW > 0) {
-		const wx = Number(meta.watermark_x);
-		const tx = Number(meta.text_x);
-		if (Number.isFinite(wx)) setWidgetValue(node, "watermark_x", Number((wx / bgW).toFixed(4)));
-		if (Number.isFinite(tx)) setWidgetValue(node, "text_x", Number((tx / bgW).toFixed(4)));
-	}
-	if (bgH > 0) {
-		const wy = Number(meta.watermark_y);
-		const ty = Number(meta.text_y);
-		if (Number.isFinite(wy)) setWidgetValue(node, "watermark_y", Number((wy / bgH).toFixed(4)));
-		if (Number.isFinite(ty)) setWidgetValue(node, "text_y", Number((ty / bgH).toFixed(4)));
+		persistPreviewSize(node, "watermark", srcW, srcH);
 	}
 	renderPanel(node);
 }

@@ -3,7 +3,7 @@ import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODE = "GJJ_LotusDepthMap";
 const PANEL_WIDGET = "gjj_lotus_depth_controls_panel";
-const MIN_WIDTH = 340;
+const MIN_WIDTH = 260;
 const SETTINGS_PROP = "gjj_lotus_depth_settings_open";
 const HIDDEN_WIDGETS = [
 	"unet_name",

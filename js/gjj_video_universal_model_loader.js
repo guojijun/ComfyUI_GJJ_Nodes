@@ -10,6 +10,7 @@ const TARGET_NODES = new Set(Object.keys(TARGET_NODE_APIS));
 const LIST_API = "/gjj/video_universal_loader_lists";
 const MAX_SLOTS = 12;
 const SAVED_VALUES_PROPERTY = "gjj_video_universal_loader_values";
+const METADATA_PROPERTY = "gjj_video_universal_loader_metadata";
 const FILTER_PROPERTY = "gjj_video_universal_loader_filters";
 const SETTINGS_OPEN_PROPERTY = "gjj_video_kijai_open_settings";
 const SETTINGS_CONFIG_PROPERTY = "gjj_video_kijai_settings_config";
@@ -1000,7 +1001,8 @@ function createSearchableSelect(node, name, values, onChange, labels = null, opt
 
 	let optionValues = list.slice();
 	let optionLabels = labels || null;
-	let searchText = "";
+	const searchFilterKey = String(opts.filterKey || "").trim();
+	let searchText = searchFilterKey ? getFilter(node, searchFilterKey) : "";
 
 	const setVisualValue = (value) => {
 		const raw = String(value ?? "");
@@ -1047,6 +1049,10 @@ function createSearchableSelect(node, name, values, onChange, labels = null, opt
 
 		const render = () => {
 			searchText = input.value || "";
+			if (searchFilterKey) {
+				setFilter(node, searchFilterKey, searchText);
+				saveWidgetValues(node);
+			}
 			const words = splitWords(searchText);
 			let shown = optionValues.filter((value) => {
 				const label = displayNameForValue(value, optionLabels);
@@ -1517,7 +1523,7 @@ function buildDom(node) {
 	top.className = "gjj-vu-top";
 	const configBox = document.createElement("div");
 	configBox.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr);gap:6px;min-width:0;";
-	const configSelect = createSearchableSelect(node, "config", comboValues(getWidget(node, "config")), () => applyConfig(node, { userConfigChanged: true }), null, { placeholder: "过滤配置" });
+	const configSelect = createSearchableSelect(node, "config", comboValues(getWidget(node, "config")), () => applyConfig(node, { userConfigChanged: true }), null, { placeholder: "过滤配置", filterKey: "__config" });
 	node.__gjjVUConfigSelect = configSelect;
 	configBox.append(configSelect);
 	const refresh = document.createElement("button");
@@ -1596,6 +1602,9 @@ function saveWidgetValues(node, serializedNode = null) {
 	if (serializedNode) {
 		serializedNode.properties = serializedNode.properties || {};
 		serializedNode.properties[SAVED_VALUES_PROPERTY] = { ...values };
+		if (node.properties[METADATA_PROPERTY]) {
+			serializedNode.properties[METADATA_PROPERTY] = { ...node.properties[METADATA_PROPERTY] };
+		}
 		serializedNode.properties[FILTER_PROPERTY] = { ...(node.properties[FILTER_PROPERTY] || {}) };
 		for (const [k, v] of Object.entries(values)) serializedNode.properties[`gjj_vu_value_${k}`] = v;
 	}
@@ -2001,6 +2010,29 @@ function repairOutputSlot(node, out, slot, index) {
 
 function currentConfigKey(node) {
 	return String(getWidget(node, "config")?.value || "");
+}
+
+function isMainModelSlot(slot) {
+	if (isLoraSlot(slot)) return false;
+	const kind = String(slot?.kind || "");
+	return ["diffusion", "checkpoint_model", "wanvideo_model"].includes(kind);
+}
+
+function updateLoaderMetadata(node, cfg = null) {
+	if (!node) return {};
+	const configKey = currentConfigKey(node);
+	const slots = Array.isArray(cfg?.slots) ? cfg.slots : [];
+	const mainIndex = slots.findIndex(isMainModelSlot);
+	const mainModel = mainIndex >= 0 ? valueOf(node, `file_${mainIndex + 1}`) : "";
+	const metadata = {
+		config_key: configKey,
+		config_label: String(cfg?.label || configKey || "").trim(),
+		main_model: String(mainModel || "").trim(),
+		main_model_field: mainIndex >= 0 ? `file_${mainIndex + 1}` : "",
+	};
+	node.properties = node.properties || {};
+	node.properties[METADATA_PROPERTY] = metadata;
+	return metadata;
 }
 
 function collectSemanticOutputLinks(node) {
@@ -2422,6 +2454,7 @@ function applyConfig(node, opts = {}) {
 	if (isKijaiNode(node)) node.properties[SETTINGS_CONFIG_PROPERTY] = configKey;
 	updateOutputs(node, cfg, opts);
 	node.__gjjVULoraToggleSync?.();
+	updateLoaderMetadata(node, cfg);
 	saveWidgetValues(node);
 	scheduleLayoutRefresh(node, [0, 48, 160]);
 	if (opts?.userConfigChanged) scheduleAutoReloadAfterPresetChange(node);
