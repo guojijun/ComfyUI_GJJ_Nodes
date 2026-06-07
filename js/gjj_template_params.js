@@ -779,6 +779,60 @@ function repairOutputLinkSlots(node) {
 	}
 }
 
+function normalizeOutputMatchName(value) {
+	return String(value ?? "").trim();
+}
+
+function takeOutputFromMap(map, key, used) {
+	const list = map?.get?.(key);
+	if (!Array.isArray(list)) return null;
+	while (list.length) {
+		const output = list.shift();
+		if (output && !used.has(output)) {
+			used.add(output);
+			return output;
+		}
+	}
+	return null;
+}
+
+function collectPreviousOutputs(outputs) {
+	const byKey = new Map();
+	const byName = new Map();
+	for (const output of outputs || []) {
+		const key = String(output?.gjj_template_param_key || "");
+		if (key) {
+			if (!byKey.has(key)) byKey.set(key, []);
+			byKey.get(key).push(output);
+		}
+		const name = normalizeOutputMatchName(output?.name || output?.label || output?.localized_name);
+		if (name) {
+			if (!byName.has(name)) byName.set(name, []);
+			byName.get(name).push(output);
+		}
+	}
+	return { byKey, byName };
+}
+
+function resolvePreviousOutput(previous, field, index, used) {
+	const key = String(field?.key || "");
+	if (key) {
+		const output = takeOutputFromMap(previous.byKey, key, used);
+		if (output) return output;
+	}
+	const label = normalizeOutputMatchName(field?.label || "");
+	if (label) {
+		const output = takeOutputFromMap(previous.byName, label, used);
+		if (output) return output;
+	}
+	const indexed = previous.outputs?.[index];
+	if (indexed && !used.has(indexed)) {
+		used.add(indexed);
+		return indexed;
+	}
+	return null;
+}
+
 function getWidgetValue(node, name, fallback = "") {
 	const widget = getWidget(node, name);
 	return String(widget?.value ?? fallback ?? "");
@@ -1759,11 +1813,14 @@ function updateOutputs(node, fields, values) {
 		return;
 	}
 	const enabledFields = fields;
-	const previousByKey = new Map((node.outputs || []).map((output) => [String(output?.gjj_template_param_key || ""), output]));
+	const previousOutputs = Array.isArray(node.outputs) ? [...node.outputs] : [];
+	const previous = { outputs: previousOutputs, ...collectPreviousOutputs(previousOutputs) };
+	const usedPreviousOutputs = new Set();
 	const nextOutputs = [];
 	for (let i = 0; i < enabledFields.length; i += 1) {
 		const field = enabledFields[i];
-		const output = previousByKey.get(String(field.key || "")) || { name: field.label, type: "*", links: null };
+		const output = resolvePreviousOutput(previous, field, i, usedPreviousOutputs)
+			|| { name: field.label, type: "*", links: null };
 		const rawValue = values[field.key] ?? field.default ?? "";
 		const value = parseValue(rawValue);
 		// 输出类型必须按“当前输入文本”实时推断。
@@ -1790,7 +1847,7 @@ function updateOutputs(node, fields, values) {
 		nextOutputs[i] = output;
 	}
 	const kept = new Set(nextOutputs);
-	for (const output of node.outputs || []) {
+	for (const output of previousOutputs) {
 		if (!kept.has(output)) removeOutputLinks(node, output);
 	}
 	node.outputs = nextOutputs;

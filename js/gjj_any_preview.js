@@ -39,6 +39,7 @@ const LIVE_KIND_LABELS = {
 	text: "文本",
 	audio: "音频",
 	video: "视频",
+	"3d": "3D文件",
 	other: "对象",
 	mixed: "混合对象",
 };
@@ -48,6 +49,7 @@ const KIND_TYPE_LABELS = {
 	text: "STRING",
 	audio: "AUDIO",
 	video: "VIDEO",
+	"3d": "FILE_3D",
 	mixed: "MIXED",
 	other: "OBJECT",
 };
@@ -57,6 +59,7 @@ const KIND_EMOJIS = {
 	text: "📝",
 	audio: "🎧",
 	video: "🎬",
+	"3d": "🧊",
 	mixed: "🧩",
 	other: "🧩",
 };
@@ -510,6 +513,7 @@ function buildLivePreviewItems(event, input, inputOrder, sourceInfo) {
 	const previewMediaKind = inferMediaKind(previewMedia, "video");
 	let images = firstMediaPayload(output.preview_images, output.images);
 	let audio = firstMediaPayload(output.preview_audio, output.audio);
+	let files = firstMediaPayload(output.preview_files, output.files);
 	let video = [];
 	if (previewMediaKind === "image") {
 		images = images.length ? images : previewMedia;
@@ -533,11 +537,12 @@ function buildLivePreviewItems(event, input, inputOrder, sourceInfo) {
 	if (!LIVE_KIND_LABELS[kind]) {
 		if (video.length) kind = "video";
 		else if (audio.length) kind = "audio";
+		else if (files.length) kind = "3d";
 		else if (images.length) kind = "image";
 		else if (text) kind = "text";
 		else kind = "other";
 	}
-	if (!video.length && !audio.length && !images.length && !text) {
+	if (!video.length && !audio.length && !images.length && !files.length && !text) {
 		return [];
 	}
 	if (sourceIsAudio && !audio.length) {
@@ -560,6 +565,7 @@ function buildLivePreviewItems(event, input, inputOrder, sourceInfo) {
 	if (images.length) item.images = images;
 	if (audio.length) item.audio = audio;
 	if (video.length) item.video = video;
+	if (files.length) item.files = files;
 	return [item];
 }
 
@@ -2247,6 +2253,7 @@ function renderPreviewItems(node, items) {
 		const images = normalizeMediaPayload(item.images);
 		const audio = normalizeMediaPayload(item.audio);
 		const video = normalizeMediaPayload(item.video);
+		const files = normalizeMediaPayload(item.files);
 		const text = String(item.text || "").trim();
 		const title = previewItemDisplayTitle(item, index);
 		const sequenceImage = images.find(isSequenceMediaItem);
@@ -2263,12 +2270,16 @@ function renderPreviewItems(node, items) {
 		if (video.length) {
 			appendPreviewTileMedia(node, card, "video", video[0]);
 		}
+		if (files.length) {
+			const file = files[0] || {};
+			appendPreviewTileText(card, `🧊 ${file.filename || "3D文件"}\n格式: ${file.format || "3d"}`);
+		}
 
-		if (!images.length && !audio.length && !video.length) {
+		if (!images.length && !audio.length && !video.length && !files.length) {
 			card.style.cursor = "text";
 			appendPreviewTileText(card, text || title);
 		}
-		if (images.length || audio.length || video.length) {
+		if (images.length || audio.length || video.length || files.length) {
 			appendPreviewOverlay(card, previewItemOverlayTitle(item, images, audio, video, text, index), "");
 		} else {
 			appendPreviewOverlay(card, title, "");
@@ -2300,18 +2311,22 @@ function applyPreviewContent(node) {
 	const video = Array.isArray(node.__gjjAnyPreviewVideo)
 		? node.__gjjAnyPreviewVideo
 		: [];
+	const files = Array.isArray(node.__gjjAnyPreviewFiles)
+		? node.__gjjAnyPreviewFiles
+		: [];
 	const previewItems = Array.isArray(node.__gjjAnyPreviewItems)
 		? node.__gjjAnyPreviewItems
 		: [];
 	const showImage = kind === "image" && images.length > 0;
 	const showAudio = kind === "audio" && audio.length > 0;
 	const showVideo = kind === "video" && video.length > 0;
+	const showFiles = kind === "3d" && files.length > 0;
 	const hasText = Boolean(String(node.__gjjAnyPreviewText || "").trim());
 	const mode = MODE_PREVIEW;
 
 	const availableHeight = getWidgetHeight(node, node.__gjjAnyPreviewWidget);
 
-	const isMediaPreview = showImage || showAudio || showVideo;
+	const isMediaPreview = showImage || showAudio || showVideo || showFiles;
 	const useEstimatedImageLayout = showImage && shouldUseEstimatedImageLayout(node);
 
 	grid.style.display = isMediaPreview ? (showImage ? "grid" : "flex") : "none";
@@ -2339,7 +2354,7 @@ function applyPreviewContent(node) {
 	if (showImage) {
 		body.style.display = "none";
 		if (editor) editor.style.display = "none";
-	} else if ((showAudio || showVideo) && hasText) {
+	} else if ((showAudio || showVideo || showFiles) && hasText) {
 		body.style.display = mode === MODE_PREVIEW ? "block" : "none";
 		if (editor) editor.style.display = mode === MODE_EDIT ? "block" : "none";
 	} else if (!isMediaPreview && hasText) {
@@ -2646,6 +2661,31 @@ function applyPreviewContent(node) {
 		videoCard.appendChild(videoPlayer);
 		appendCompactMediaInfo(node, videoCard, "video", videoItem, hasText ? text : "");
 		grid.appendChild(videoCard);
+		body.style.display = "none";
+	} else if (showFiles) {
+		grid.style.gridTemplateColumns = "1fr";
+		grid.style.height = "auto";
+		grid.style.alignItems = "center";
+		grid.replaceChildren();
+
+		const fileItem = files[0] || {};
+		const fileCard = document.createElement("div");
+		fileCard.style.cssText = [
+			"display:flex",
+			"flex-direction:column",
+			"gap:8px",
+			"padding:12px",
+			"border:1px solid #33434a",
+			"border-radius:8px",
+			"background:#12191d",
+			"width:100%",
+			"box-sizing:border-box",
+			"color:#d7e5e7",
+			"font-size:12px",
+		].join(";");
+		appendPreviewTileText(fileCard, `🧊 ${fileItem.filename || "3D文件"}\n格式: ${fileItem.format || "3d"}`);
+		appendCompactMediaInfo(node, fileCard, "3d", fileItem, hasText ? text : "");
+		grid.appendChild(fileCard);
 		body.style.display = "none";
 	} else {
 		grid.style.gridTemplateColumns = "repeat(auto-fit, minmax(140px, 1fr))";
@@ -3154,6 +3194,10 @@ app.registerExtension({
 					: Array.isArray(message?.preview_video?.[0])
 						? message.preview_video[0]
 						: [];
+			this.__gjjAnyPreviewFiles =
+				liveText !== null
+					? []
+					: firstMediaPayload(message?.preview_files, message?.files);
 			resetLivePreviewState(this);
 			clearNativeImagePreviewState(this);
 			this.__gjjAnyPreviewHeight = Math.min(

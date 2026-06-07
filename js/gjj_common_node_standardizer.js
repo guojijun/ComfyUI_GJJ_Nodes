@@ -77,6 +77,21 @@ const MODEL_TREE_FOLDER_BY_KIND = {
 	model_patch: "model_patches",
 };
 const MODEL_TREE_EXTERNAL_VALUES = new Set(["已连接外部输入", "外部输入口", "未声明"]);
+const MODEL_TREE_FILE_EXTENSIONS = new Set([
+	".safetensors",
+	".ckpt",
+	".pt",
+	".pth",
+	".bin",
+	".gguf",
+	".onnx",
+	".torchscript",
+	".engine",
+	".sft",
+	".json",
+	".yaml",
+	".yml",
+]);
 const META_BY_CLASS = new Map();
 const FULLY_BYPASS_CLASSES = new Set([
 	"GJJ_AdvancedPassthroughRouter",
@@ -720,7 +735,7 @@ function declaredModelEntries(meta) {
 			return null;
 		}
 		const label = escapeText(item.label || item.name || item.title || fallbackLabel, fallbackLabel);
-		const value = escapeText(item.value || item.path || item.filename || item.file || item.model || "");
+		const value = escapeText(item.path || item.value || item.filename || item.file || item.model || "");
 		const tooltip = escapeText(item.tooltip || item.description || item.note || "");
 		return value ? {
 			label,
@@ -1064,10 +1079,20 @@ function parseModelTreeItem(entry, part, fallbackFolder = "") {
 	if (!filename || filename === folder || filename.endsWith("/")) {
 		return null;
 	}
+	const cleanFilename = filename.split(/[?#]/, 1)[0].replace(/[。"'”’)}\]]+$/g, "").trim();
+	if (/[{}":]/.test(cleanFilename)) {
+		return null;
+	}
+	const ext = cleanFilename.includes(".")
+		? `.${cleanFilename.split(".").pop().toLowerCase()}`
+		: "";
+	if (!ext || !MODEL_TREE_FILE_EXTENSIONS.has(ext)) {
+		return null;
+	}
 	const icon = String(entry.icon || MODEL_TREE_ICON_BY_KIND[kind] || MODEL_TREE_ICON_BY_KIND.empty);
 	return {
 		folder: normalizeModelFolder(folder) || "其他",
-		filename,
+		filename: cleanFilename,
 		icon,
 		kind,
 		label: String(entry.label || "模型"),

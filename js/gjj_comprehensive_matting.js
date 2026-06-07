@@ -7,9 +7,8 @@ const STATUS_WIDGET = "model_status_json";
 const SELECTED_METHODS_WIDGET = "selected_methods_json";
 const PANEL_WIDGET = "gjj_matting_method_buttons";
 const ADVANCED_PARAMS_PROP = "gjj_matting_params_expanded";
-const BATCH_INPUT = "batch_image";
-const IMAGE_INPUT = "image";
-const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE";
+const MEDIA_INPUT = "media";
+const MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
 const HIDDEN_NAMES = new Set([METHOD_WIDGET, STATUS_WIDGET, SELECTED_METHODS_WIDGET]);
 const COLLAPSIBLE_PARAM_NAMES = [
 	"background",
@@ -39,15 +38,19 @@ const PARAM_HINTS = {
 	invert_output: "反转最终前景遮罩和透明通道。",
 	inspyrenet_jit: "仅 Inspyrenet 使用，首次运行更慢。",
 };
+const HELP_ENDPOINT = "/gjj/node_help";
 
 const METHODS = [
 	{ value: "RMBG1.4", label: "RMBG1.4", suffix: "RMBG1.4", title: "RMBG1.4 默认背景移除" },
 	{ value: "RMBG2", label: "RMBG2", suffix: "RMBG2", title: "RMBG2 通用背景移除" },
+	{ value: "官方背景移除", label: "官方", suffix: "官方背景移除", title: "ComfyUI 官方背景移除模型" },
 	{ value: "BiRefNet 通用", label: "通用", suffix: "BiRef通用", title: "BiRefNet General 通用抠图" },
 	{ value: "BiRefNet 精细", label: "精细", suffix: "BiRef精细", title: "BiRefNet Matting 精细抠图" },
 	{ value: "BEN2", label: "BEN2", suffix: "BEN2", title: "BEN2 抠图" },
 	{ value: "Inspyrenet", label: "Inspyrenet", suffix: "Inspyrenet", title: "Inspyrenet 抠图" },
 ];
+let backendStatusJson = "";
+let helpLoadPromise = null;
 
 function refreshNodeSize(node) {
 	const width = Math.max(300, Number(node?.size?.[0] || 300));
@@ -277,6 +280,40 @@ function syncParamPanel(node) {
 	}
 }
 
+function applyBranchDependencyNotice(node) {
+	const noticeApi = globalThis.GJJ_CommonDependencyModelNotice;
+	if (!noticeApi?.applyNotice) {
+		return;
+	}
+	const selected = parseSelectedMethods(node);
+	const status = parseStatus(node);
+	const reports = [];
+	for (const method of selected) {
+		const info = status?.[method] || {};
+		if (!info.dependency_warning_message && !info.dependency_panel_message) {
+			continue;
+		}
+		reports.push({ method, info });
+	}
+	if (!reports.length) {
+		if (node.__gjjDependencyNotice) {
+			noticeApi.applyNotice(node, { warning_message: "", panel_message: "", copy_text: "" });
+		}
+		return;
+	}
+	const labels = reports.map((item) => item.method).join("、");
+	const first = reports[0].info;
+	const installCommands = Array.from(new Set(reports.map((item) => String(item.info.dependency_install_cmd || item.info.dependency_copy_text || "").trim()).filter(Boolean)));
+	noticeApi.applyNotice(node, {
+		warning_message: `⚠️${labels} 分支缺失运行依赖，点击复制安装命令。`,
+		panel_message: reports.map((item) => item.info.dependency_panel_message || item.info.dependency_warning_message || "").filter(Boolean).join("\n\n"),
+		install_command: installCommands.join("\n"),
+		copy_text: installCommands.join("\n"),
+		copy_label: first.dependency_copy_label || "📋 复制安装命令",
+		notice_level: first.dependency_notice_level || "error",
+	}, { detailed: false });
+}
+
 function applyParamVisibility(node) {
 	for (const name of COLLAPSIBLE_PARAM_NAMES) {
 		const widget = GJJ_Utils.getWidget(node, name);
@@ -293,6 +330,7 @@ function applyParamVisibility(node) {
 	GJJ_Utils.reorderWidgets(node, hiddenNames);
 	syncParamPanel(node);
 	GJJ_Utils.refreshNode(node);
+	applyBranchDependencyNotice(node);
 }
 
 function removeInternalInputs(node) {
@@ -317,30 +355,37 @@ function normalizeInputSlots(node) {
 	}
 	removeInternalInputs(node);
 
-	const batchInput = findInput(node, BATCH_INPUT);
-	if (batchInput) {
-		batchInput.type = BATCH_IMAGE_TYPE;
-		batchInput.name = BATCH_INPUT;
-		batchInput.label = "批量图";
-		batchInput.localized_name = batchInput.label;
-		batchInput.tooltip = "第一路输入。可直接接 GJJ · 批量多图片加载预览器，用同一组抠图参数批量去除背景。";
+	let mediaInput = findInput(node, MEDIA_INPUT);
+	if (!mediaInput) {
+		mediaInput = Array.isArray(node.inputs)
+			? node.inputs.find((input) => ["batch_image", "image"].includes(String(input?.name || "")) && input?.link != null)
+			: null;
 	}
 
-	const imageInput = findInput(node, IMAGE_INPUT);
-	if (imageInput) {
-		imageInput.name = IMAGE_INPUT;
-		imageInput.type = "IMAGE";
-		imageInput.label = "图像";
-		imageInput.localized_name = imageInput.label;
-		imageInput.tooltip = "兼容普通 IMAGE 或 IMAGE batch；若同时连接 GJJ 批量图片，会排在批量图片之后一起处理。";
+	for (let index = node.inputs.length - 1; index >= 0; index -= 1) {
+		const input = node.inputs[index];
+		const name = String(input?.name || "");
+		if ((name === "batch_image" || name === "image") && input !== mediaInput) {
+			if (input?.link != null) {
+				try { node.disconnectInput?.(index); } catch (_) {}
+			}
+			node.removeInput?.(index);
+		}
 	}
 
-	if (batchInput && imageInput) {
-		const batchIndex = node.inputs.indexOf(batchInput);
-		const imageIndex = node.inputs.indexOf(imageInput);
-		if (batchIndex > imageIndex) {
-			node.inputs.splice(batchIndex, 1);
-			node.inputs.splice(imageIndex, 0, batchInput);
+	if (mediaInput) {
+		mediaInput.type = MEDIA_INPUT_TYPE;
+		mediaInput.name = MEDIA_INPUT;
+		mediaInput.label = "图片/视频";
+		mediaInput.localized_name = mediaInput.label;
+		mediaInput.tooltip = "统一输入口，支持 GJJ_BATCH_IMAGE、普通 IMAGE/IMAGE batch 和官方 VIDEO；接 VIDEO 时自动读取视频帧。";
+	}
+
+	if (mediaInput) {
+		const mediaIndex = node.inputs.indexOf(mediaInput);
+		if (mediaIndex > 0) {
+			node.inputs.splice(mediaIndex, 1);
+			node.inputs.unshift(mediaInput);
 		}
 	}
 }
@@ -349,18 +394,27 @@ function normalizeOutputSlots(node) {
 	if (!Array.isArray(node?.outputs)) {
 		return;
 	}
-	while (node.outputs.length > 1) {
+	while (node.outputs.length > 2) {
 		node.removeOutput?.(node.outputs.length - 1);
 	}
 	if (!node.outputs.length) {
 		node.addOutput?.("图像", "IMAGE");
 	}
-	const output = node.outputs[0];
-	output.name = "图像";
-	output.label = "图像";
-	output.localized_name = "图像";
-	output.type = "IMAGE";
-	output.tooltip = "把所有已选路线的结果按路线顺序合并成一个 ComfyUI 原生 IMAGE batch 输出，可直接连接预览、保存和普通 IMAGE 节点。";
+	if (node.outputs.length < 2) {
+		node.addOutput?.("遮罩", "MASK");
+	}
+	const imageOutput = node.outputs[0];
+	imageOutput.name = "图像";
+	imageOutput.label = "图像";
+	imageOutput.localized_name = "图像";
+	imageOutput.type = "IMAGE";
+	imageOutput.tooltip = "把所有已选路线的结果按路线顺序合并成一个 ComfyUI 原生 IMAGE batch 输出，可直接连接预览、保存和普通 IMAGE 节点。";
+	const maskOutput = node.outputs[1];
+	maskOutput.name = "遮罩";
+	maskOutput.label = "遮罩";
+	maskOutput.localized_name = "遮罩";
+	maskOutput.type = "MASK";
+	maskOutput.tooltip = "把所有已选路线生成的前景遮罩按路线顺序合并成 MASK batch 输出。";
 }
 
 function normalizeSlots(node) {
@@ -369,11 +423,76 @@ function normalizeSlots(node) {
 	globalThis.GJJApplyTypeColorsToNode?.(node);
 }
 
+function hideInternalWidget(widget) {
+	if (!widget) {
+		return;
+	}
+	if (!widget.__gjjMattingOriginalWidgetState) {
+		widget.__gjjMattingOriginalWidgetState = {
+			type: widget.type,
+			computeSize: widget.computeSize,
+			getHeight: widget.getHeight,
+			draw: widget.draw,
+			mouse: widget.mouse,
+			y: widget.y,
+			last_y: widget.last_y,
+		};
+	}
+	widget.hidden = true;
+	widget.disabled = true;
+	widget.type = `converted-widget:${widget.name || "hidden"}`;
+	widget.label = "";
+	widget.localized_name = "";
+	widget.computeSize = () => [0, 0];
+	widget.getHeight = () => 0;
+	widget.draw = () => {};
+	widget.mouse = () => false;
+	widget.y = -100000;
+	widget.last_y = -100000;
+	widget.computedHeight = 0;
+	widget.margin_top = 0;
+	widget.size = [0, 0];
+	widget.options = widget.options || {};
+	widget.options.hidden = true;
+	widget.options.display = "hidden";
+	const elements = [
+		widget.element,
+		widget.inputEl,
+		widget.container,
+		widget.domElement,
+	].filter(Boolean);
+	for (const element of elements) {
+		element.style.display = "none";
+		element.style.height = "0";
+		element.style.minHeight = "0";
+		element.style.margin = "0";
+		element.style.padding = "0";
+		element.style.border = "0";
+		element.style.overflow = "hidden";
+	}
+}
+
+function removeLegacyInternalStateWidgets(node) {
+	if (!Array.isArray(node?.widgets)) {
+		return;
+	}
+	const removable = new Set([STATUS_WIDGET, SELECTED_METHODS_WIDGET]);
+	for (let index = node.widgets.length - 1; index >= 0; index -= 1) {
+		const widget = node.widgets[index];
+		if (!removable.has(String(widget?.name || ""))) {
+			continue;
+		}
+		for (const element of [widget.element, widget.inputEl, widget.container, widget.domElement]) {
+			try { element?.remove?.(); } catch (_) {}
+		}
+		node.widgets.splice(index, 1);
+	}
+}
+
 function compactNode(node) {
 	// 标准 GJJ compact 模式：隐藏 → 删除输入槽 → 重排控件 → 刷新尺寸
-	GJJ_Utils.hideWidget(GJJ_Utils.getWidget(node, METHOD_WIDGET));
-	GJJ_Utils.hideWidget(GJJ_Utils.getWidget(node, STATUS_WIDGET));
-	GJJ_Utils.hideWidget(GJJ_Utils.getWidget(node, SELECTED_METHODS_WIDGET));
+	removeLegacyInternalStateWidgets(node);
+	hideInternalWidget(GJJ_Utils.getWidget(node, METHOD_WIDGET));
 	// 核心数据通过 onSerialize → properties → onConfigure 保证序列化往返
 	GJJ_Utils.removeHiddenInputSockets(node, HIDDEN_NAMES);
 	// 重排控件：gjj_ 前缀排前，隐藏控件排后
@@ -381,13 +500,55 @@ function compactNode(node) {
 	GJJ_Utils.refreshNode(node);
 }
 
+function loadBackendStatusFromHelp() {
+	if (helpLoadPromise) {
+		return helpLoadPromise;
+	}
+	helpLoadPromise = fetch(HELP_ENDPOINT)
+		.then((response) => response.json())
+		.then((data) => {
+			const status = data?.[NODE_TYPE]?.help?.model_status;
+			if (status && typeof status === "object") {
+				backendStatusJson = JSON.stringify(status);
+			}
+			return backendStatusJson;
+		})
+		.catch((error) => {
+			console.warn("[GJJ] 综合抠图模型状态读取失败:", error);
+			return backendStatusJson;
+		});
+	return helpLoadPromise;
+}
+
+function refreshStatusWidgetFromBackendDefault(node, statusJson) {
+	const widget = GJJ_Utils.getWidget(node, STATUS_WIDGET);
+	if (widget && statusJson) {
+		widget.value = statusJson;
+	}
+	if (statusJson) {
+		node.__gjjMattingBackendStatusJson = statusJson;
+	}
+	node.properties = node.properties || {};
+	delete node.properties[STATUS_WIDGET];
+}
+
+function refreshStatusFromHelpAndSync(node) {
+	loadBackendStatusFromHelp().then((statusJson) => {
+		refreshStatusWidgetFromBackendDefault(node, statusJson);
+		syncButtons(node);
+		applyBranchDependencyNotice(node);
+		refreshNodeSize(node);
+	});
+}
+
 function parseStatus(node) {
 	const widget = GJJ_Utils.getWidget(node, STATUS_WIDGET);
-	if (!widget?.value) {
+	const raw = String(widget?.value || node?.__gjjMattingBackendStatusJson || backendStatusJson || "");
+	if (!raw) {
 		return {};
 	}
 	try {
-		return JSON.parse(widget.value);
+		return JSON.parse(raw);
 	} catch {
 		return {};
 	}
@@ -508,6 +669,7 @@ function syncButtons(node) {
 		state.toggleButton.style.cssText = toggleButtonStyle(expanded);
 	}
 	syncParamPanel(node);
+	applyBranchDependencyNotice(node);
 }
 
 function setMethod(node, value, append = false) {
@@ -641,7 +803,9 @@ app.registerExtension({
 		const originalCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
 			originalCreated?.apply(this, args);
+			refreshStatusWidgetFromBackendDefault(this, backendStatusJson);
 			stabilizeNode(this);
+			refreshStatusFromHelpAndSync(this);
 			setTimeout(() => stabilizeNode(this), 0);
 			setTimeout(() => stabilizeNode(this), 80);
 		};
@@ -651,6 +815,7 @@ app.registerExtension({
 			originalConfigure?.apply(this, args);
 			// 从 properties 恢复核心数据（不受 widget 重排影响）
 			const props = this.properties || {};
+			refreshStatusWidgetFromBackendDefault(this, backendStatusJson);
 			const selectedWidget = GJJ_Utils.getWidget(this, SELECTED_METHODS_WIDGET);
 			if (selectedWidget && props[SELECTED_METHODS_WIDGET]) {
 				selectedWidget.value = props[SELECTED_METHODS_WIDGET];
@@ -659,16 +824,14 @@ app.registerExtension({
 			if (methodWidget && props[METHOD_WIDGET]) {
 				methodWidget.value = props[METHOD_WIDGET];
 			}
-			const statusWidget = GJJ_Utils.getWidget(this, STATUS_WIDGET);
-			if (statusWidget && props[STATUS_WIDGET]) {
-				statusWidget.value = props[STATUS_WIDGET];
-			}
 			this.properties = this.properties || {};
+			delete this.properties[STATUS_WIDGET];
 			if (props[ADVANCED_PARAMS_PROP] === undefined) {
 				this.properties[ADVANCED_PARAMS_PROP] = false;
 			}
 			restoreParamValues(this, props);
 			stabilizeNode(this);
+			refreshStatusFromHelpAndSync(this);
 			setTimeout(() => stabilizeNode(this), 0);
 			setTimeout(() => stabilizeNode(this), 80);
 		};
@@ -679,18 +842,17 @@ app.registerExtension({
 			// 核心数据全部写入 properties（不受 widget 重排和 serialize:false 影响）
 			const selected = JSON.stringify(parseSelectedMethods(this));
 			const method = GJJ_Utils.getWidget(this, METHOD_WIDGET)?.value || '';
-			const status = GJJ_Utils.getWidget(this, STATUS_WIDGET)?.value || '';
 			this.properties = this.properties || {};
 			this.properties[SELECTED_METHODS_WIDGET] = selected;
 			this.properties[METHOD_WIDGET] = method;
-			this.properties[STATUS_WIDGET] = status;
+			delete this.properties[STATUS_WIDGET];
 			this.properties[ADVANCED_PARAMS_PROP] = isParamsExpanded(this);
 			persistParamValues(this, this.properties);
 			if (serializedNode) {
 				serializedNode.properties = serializedNode.properties || {};
 				serializedNode.properties[SELECTED_METHODS_WIDGET] = selected;
 				serializedNode.properties[METHOD_WIDGET] = method;
-				serializedNode.properties[STATUS_WIDGET] = status;
+				delete serializedNode.properties[STATUS_WIDGET];
 				serializedNode.properties[ADVANCED_PARAMS_PROP] = isParamsExpanded(this);
 				persistParamValues(this, serializedNode.properties);
 			}
@@ -706,6 +868,14 @@ app.registerExtension({
 	},
 
 	setup() {
+		loadBackendStatusFromHelp().then((statusJson) => {
+			for (const node of app.graph?._nodes || []) {
+				if (node?.comfyClass === NODE_TYPE) {
+					refreshStatusWidgetFromBackendDefault(node, statusJson);
+					stabilizeNode(node);
+				}
+			}
+		});
 		// 初始化现有节点
 		for (const node of app.graph?._nodes || []) {
 			if (node?.comfyClass === NODE_TYPE) {

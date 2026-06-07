@@ -7,7 +7,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 import folder_paths
@@ -28,11 +28,42 @@ DEFAULT_MEDIA_EXT = {
     "AUDIO": ".wav",
     "VIDEO": ".mp4",
 }
+MEDIA_TYPE_EXTS = {
+    "IMAGE": IMAGE_EXTS,
+    "AUDIO": AUDIO_EXTS,
+    "VIDEO": VIDEO_EXTS,
+}
 MEDIA_ACCEPT_HEADER = {
     "IMAGE": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
     "AUDIO": "audio/*,*/*;q=0.8",
     "VIDEO": "video/*,*/*;q=0.8",
 }
+
+
+def _normalize_network_media_url(url: str) -> str:
+    text = str(url or "").strip()
+    parsed = urlparse(text)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return text
+
+    path = unquote(parsed.path or "")
+    path_parts = [part for part in path.replace("\\", "/").split("/") if part]
+    netloc = parsed.netloc.lower()
+
+    if netloc == "github.com" and len(path_parts) >= 5 and path_parts[2].lower() in {"blob", "raw"}:
+        owner, repo, _marker = path_parts[:3]
+        rest = path_parts[3:]
+        parsed = parsed._replace(
+            scheme="https",
+            netloc="raw.githubusercontent.com",
+            path="/" + "/".join([owner, repo, *rest]),
+            params="",
+            query="",
+            fragment="",
+        )
+
+    encoded_path = quote(unquote(parsed.path or ""), safe="/:@")
+    return urlunparse(parsed._replace(path=encoded_path))
 
 
 def gjjutils_detect_media_type(value: Any) -> str | None:
@@ -76,8 +107,11 @@ def gjjutils_safe_media_basename(name: str, media_type: str | None = None) -> st
     if not safe_name:
         safe_name = "downloaded_media"
     suffix = Path(safe_name).suffix
-    if not suffix and media_type in DEFAULT_MEDIA_EXT:
-        safe_name = f"{safe_name}{DEFAULT_MEDIA_EXT[media_type]}"
+    suffix_ext = suffix.lower().lstrip(".")
+    media_type_key = str(media_type or "").upper()
+    expected_exts = MEDIA_TYPE_EXTS.get(media_type_key, set())
+    if media_type_key in DEFAULT_MEDIA_EXT and (not suffix or (expected_exts and suffix_ext not in expected_exts)):
+        safe_name = f"{safe_name}{DEFAULT_MEDIA_EXT[media_type_key]}"
     return safe_name
 
 
@@ -157,7 +191,13 @@ def _download_with_urllib(url: str, tmp: Path, headers: dict[str, str], timeout:
                 handle.write(chunk)
 
 
-def _download_with_curl(url: str, tmp: Path, headers: dict[str, str], timeout: int) -> None:
+def _download_with_curl(
+    url: str,
+    tmp: Path,
+    headers: dict[str, str],
+    timeout: int,
+    retries: int = 2,
+) -> None:
     curl = shutil.which("curl.exe") or shutil.which("curl")
     if not curl:
         raise RuntimeError("未找到 curl.exe")
@@ -171,13 +211,12 @@ def _download_with_curl(url: str, tmp: Path, headers: dict[str, str], timeout: i
         str(max(1, min(30, int(timeout)))),
         "--max-time",
         str(max(1, int(timeout))),
-        "--retry",
-        "2",
-        "--retry-delay",
-        "1",
         "--output",
         str(tmp),
     ]
+    retries = max(0, int(retries))
+    if retries > 0:
+        cmd.extend(["--retry", str(retries), "--retry-delay", "1"])
     for key, value in headers.items():
         if value:
             cmd.extend(["--header", f"{key}: {value}"])
@@ -188,6 +227,48 @@ def _download_with_curl(url: str, tmp: Path, headers: dict[str, str], timeout: i
         raise RuntimeError(f"curl 失败：{detail or result.returncode}")
 
 
+def gjjutils_media_file_starts_like_html(path: str | os.PathLike[str]) -> bool:
+    try:
+        with open(Path(path), "rb") as handle:
+            head = handle.read(512).lstrip().lower()
+    except Exception:
+        return False
+    return head.startswith(b"<!doctype html") or head.startswith(b"<html")
+
+
+def _validate_downloaded_media(path: str | os.PathLike[str], media_type: str) -> None:
+    file_path = Path(path)
+    if not file_path.is_file() or file_path.stat().st_size <= 0:
+        raise RuntimeError("下载结果为空。")
+    if gjjutils_media_file_starts_like_html(file_path):
+        raise RuntimeError("下载结果是网页 HTML，不是媒体文件。请使用 raw 直链或 GitHub blob/raw 链接。")
+
+    if media_type == "IMAGE":
+        try:
+            from PIL import Image
+
+            with Image.open(file_path) as image:
+                image.verify()
+        except Exception as exc:
+            raise RuntimeError(f"下载结果不是可识别的图片：{exc}") from exc
+
+
+def _discard_invalid_cached_media(path: str | os.PathLike[str], media_type: str) -> bool:
+    try:
+        _validate_downloaded_media(path, media_type)
+        return False
+    except Exception as error:
+        try:
+            Path(path).unlink()
+        except Exception:
+            pass
+        try:
+            print(f"[GJJ] 已丢弃无效网络媒体缓存：{path} ({error})")
+        except Exception:
+            pass
+        return True
+
+
 def gjjutils_download_network_media_to_input(
     url: str,
     media_type: str,
@@ -195,6 +276,8 @@ def gjjutils_download_network_media_to_input(
     copy_subdir: str = MEDIA_COPY_SUBDIR,
     timeout: int = MEDIA_DOWNLOAD_TIMEOUT,
     user_agent: str = DEFAULT_DOWNLOAD_USER_AGENT,
+    use_curl_fallback: bool = True,
+    curl_retries: int = 2,
 ) -> str:
     media_type = str(media_type or "").upper()
     if not gjjutils_is_network_url(url):
@@ -202,9 +285,10 @@ def gjjutils_download_network_media_to_input(
     if media_type not in DEFAULT_MEDIA_EXT:
         raise ValueError("无法识别媒体类型。")
 
+    url = _normalize_network_media_url(url)
     relative_path = gjjutils_url_media_relative_path(url, media_type, copy_subdir=copy_subdir)
     existing = gjjutils_find_input_media_by_relative_path(relative_path)
-    if existing:
+    if existing and not _discard_invalid_cached_media(existing, media_type):
         return existing
 
     input_root = Path(folder_paths.get_input_directory())
@@ -220,14 +304,15 @@ def gjjutils_download_network_media_to_input(
             _download_with_urllib(url, tmp, headers, timeout)
         except Exception as exc:
             errors.append(f"urllib：{exc}")
+            if not use_curl_fallback:
+                raise
             try:
                 if tmp.exists():
                     tmp.unlink()
             except Exception:
                 pass
-            _download_with_curl(url, tmp, headers, timeout)
-        if not tmp.exists() or tmp.stat().st_size <= 0:
-            raise RuntimeError("下载结果为空")
+            _download_with_curl(url, tmp, headers, timeout, retries=curl_retries)
+        _validate_downloaded_media(tmp, media_type)
         os.replace(tmp, dest)
     except Exception as exc:
         try:
@@ -237,7 +322,9 @@ def gjjutils_download_network_media_to_input(
             pass
         detail = "; ".join(errors)
         if detail:
-            raise RuntimeError(f"{detail}; 兜底下载：{exc}") from exc
+            if use_curl_fallback:
+                raise RuntimeError(f"{detail}; 兜底下载：{exc}") from exc
+            raise RuntimeError(detail) from exc
         raise
 
     return str(dest)

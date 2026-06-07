@@ -396,7 +396,7 @@ def _build_media_warning(label: str, media_type: str, raw_value: Any, exc: Excep
 
 
 NODE_NAME = "GJJ_TemplateParams"
-MAX_OUTPUTS = 64
+MAX_OUTPUTS = 20
 
 
 class AnyType(str):

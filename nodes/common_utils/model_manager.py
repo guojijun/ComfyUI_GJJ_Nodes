@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -330,6 +331,80 @@ def gjjutils_find_model_list(
                 matched.append(filename)
 
     return matched
+
+
+_GJJ_MODEL_EXT_RE = re.compile(r"\.(safetensors|ckpt|pt|pth|bin|gguf|onnx|engine|torchscript)$", re.IGNORECASE)
+_GJJ_QUANT_TOKEN_RE = re.compile(
+    r"(?i)(^|[_\-. ])("
+    r"fp(?:8|16|32)|bf16|f16|f32|q[2-8](?:_[a-z0-9]+)?|int(?:4|8)|"
+    r"e4m3fn(?:_fast)?|e5m2|bnb(?:4|8)bit"
+    r")(?=$|[_\-. ])"
+)
+
+
+def gjjutils_model_stem_without_quant(name: str) -> str:
+    """去掉扩展名和常见量化标记后得到模型匹配 stem。"""
+    text = str(name or "").replace("\\", "/").split("/")[-1].strip()
+    text = _GJJ_MODEL_EXT_RE.sub("", text)
+    text = _GJJ_QUANT_TOKEN_RE.sub(" ", text)
+    text = re.sub(r"[_\-. ]+", " ", text).strip().lower()
+    return text
+
+
+def _gjjutils_longest_common_substring(a: str, b: str) -> int:
+    if not a or not b:
+        return 0
+    prev = [0] * (len(b) + 1)
+    best = 0
+    for ca in a:
+        cur = [0]
+        for j, cb in enumerate(b, 1):
+            value = prev[j - 1] + 1 if ca == cb else 0
+            if value > best:
+                best = value
+            cur.append(value)
+        prev = cur
+    return best
+
+
+def gjjutils_resolve_model_by_extensionless_seed(seed_name: str, folder_type: str, min_fragment: int = 4) -> str | None:
+    """按“去扩展名、去量化标记”的源文件名在 ComfyUI 模型目录里搜索。
+
+    返回值保持 folder_paths 给出的子目录相对路径，方便直接传给原生 loader。
+    """
+    seed = str(seed_name or "").strip()
+    seed_stem = gjjutils_model_stem_without_quant(seed)
+    if not seed_stem:
+        return None
+    try:
+        files = folder_paths.get_filename_list(folder_type)
+    except Exception:
+        return None
+    if not files:
+        return None
+
+    seed_base = _GJJ_MODEL_EXT_RE.sub("", seed.replace("\\", "/").split("/")[-1]).lower()
+    scored: list[tuple[int, int, int, str]] = []
+    for file_name in files:
+        file_base = file_name.replace("\\", "/").split("/")[-1]
+        file_stem = gjjutils_model_stem_without_quant(file_base)
+        file_base_no_ext = _GJJ_MODEL_EXT_RE.sub("", file_base).lower()
+        if not file_stem:
+            continue
+        exact = int(file_name.lower().replace("\\", "/") == seed.lower().replace("\\", "/"))
+        basename_exact = int(file_base.lower() == seed.replace("\\", "/").split("/")[-1].lower())
+        contains = int(seed_stem in file_stem or file_stem in seed_stem)
+        common = _gjjutils_longest_common_substring(seed_stem, file_stem)
+        raw_common = _gjjutils_longest_common_substring(seed_base, file_base_no_ext)
+        best_common = max(common, raw_common)
+        if not (exact or basename_exact or contains or best_common >= min_fragment):
+            continue
+        scored.append((exact * 100000 + basename_exact * 50000 + contains * 10000 + best_common * 100, best_common, -len(file_name), file_name))
+
+    if not scored:
+        return None
+    scored.sort(reverse=True)
+    return scored[0][3]
 
 
 def gjjutils_get_available_models_by_category(

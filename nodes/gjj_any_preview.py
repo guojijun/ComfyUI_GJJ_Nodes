@@ -52,6 +52,7 @@ PREVIEW_KIND_LABELS = {
     "text": "文本",
     "audio": "音频",
     "video": "视频",
+    "3d": "3D文件",
     "other": "对象",
     "mixed": "混合对象",
 }
@@ -61,6 +62,7 @@ PREVIEW_KIND_TYPE_LABELS = {
     "text": "STRING",
     "audio": "AUDIO",
     "video": "VIDEO",
+    "3d": "FILE_3D",
     "mixed": "MIXED",
 }
 PREVIEW_KIND_EMOJIS = {
@@ -69,6 +71,7 @@ PREVIEW_KIND_EMOJIS = {
     "text": "📝",
     "audio": "🎧",
     "video": "🎬",
+    "3d": "🧊",
     "mixed": "🧩",
     "other": "🧩",
 }
@@ -317,6 +320,30 @@ def is_video_object(value: Any) -> bool:
     )
 
 
+def is_3d_file_object(value: Any) -> bool:
+    fmt = str(getattr(value, "format", "") or "").lstrip(".").lower()
+    if fmt not in {"glb", "gltf", "obj", "fbx", "stl", "usdz", "ply", "splat", "spz", "ksplat"}:
+        return False
+    return hasattr(value, "save_to") or hasattr(value, "get_bytes") or hasattr(value, "get_data")
+
+
+def save_3d_file_preview(value: Any) -> list[dict[str, Any]]:
+    fmt = str(getattr(value, "format", "") or "glb").lstrip(".").lower() or "glb"
+    filename = f"GJJ_AnyPreview_3d_{uuid.uuid4().hex[:12]}.{fmt}"
+    path = Path(folder_paths.get_temp_directory()) / "GJJ" / "any_preview" / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if hasattr(value, "save_to"):
+        value.save_to(str(path))
+    elif hasattr(value, "get_bytes"):
+        path.write_bytes(value.get_bytes())
+    elif hasattr(value, "get_data"):
+        data = value.get_data()
+        path.write_bytes(data.getvalue() if hasattr(data, "getvalue") else data.read())
+    else:
+        return []
+    return [{"filename": filename, "subfolder": "GJJ/any_preview", "type": "temp", "format": fmt}]
+
+
 def serialize_audio_preview(value: dict[str, Any]) -> str:
     """序列化音频对象为预览文本"""
     try:
@@ -510,6 +537,8 @@ def detect_preview_kind(value: Any) -> str:
         return "audio"
     if is_video_object(value):
         return "video"
+    if is_3d_file_object(value):
+        return "3d"
     return "other"
 
 
@@ -1052,6 +1081,9 @@ class GJJ_AnyPreview:
                         extra_pnginfo=extra_pnginfo,
                     )
                     item["text"] = serialize_video_preview(value)
+                elif kind == "3d" and is_3d_file_object(value):
+                    item["files"] = save_3d_file_preview(value)
+                    item["text"] = serialize_preview(value)
                 else:
                     item["text"] = serialize_preview(value)
 
@@ -1162,6 +1194,15 @@ class GJJ_AnyPreview:
             if preview_media:
                 ui["preview_video"] = (preview_media,)
                 print(f"[GJJ] 视频预览数据: {preview_media}")
+
+        elif not has_expanded_items and preview_kind == "3d" and is_3d_file_object(merged):
+            preview_files = save_3d_file_preview(merged)
+            if preview_files:
+                ui["preview_files"] = (preview_files,)
+                ui["files"] = preview_files
+                print(f"[GJJ] 3D文件预览数据: {preview_files}")
+            else:
+                ui["preview_text"] = ("3D 文件临时预览生成失败。",)
 
         # 同时返回标准 ui.images 给 ComfyUI 队列/历史预览；前端会屏蔽本节点原生底部图片，
         # 避免与 GJJ 自定义 DOM 预览重复。

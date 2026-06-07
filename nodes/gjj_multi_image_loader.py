@@ -26,6 +26,7 @@ from .common_utils.network_media import (
     gjjutils_download_network_media_to_input,
     gjjutils_input_relative_media_path,
     gjjutils_is_network_url,
+    gjjutils_media_file_starts_like_html,
 )
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
@@ -35,7 +36,7 @@ IMAGE_API_PATH = "/gjj/input_images"
 THUMB_API_PATH = "/gjj/input_image_thumb"
 DEFAULT_NETWORK_IMAGE_API_PATH = "/gjj/multi_image_loader/default_image"
 MAX_OUTPUT_IMAGES = 20
-NETWORK_IMAGE_DOWNLOAD_TIMEOUT = 120
+NETWORK_IMAGE_DOWNLOAD_TIMEOUT = 8
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".avif"}
 INPUT_IMAGE_TYPES = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
 _IMAGE_META_CACHE: dict[str, tuple[int, int, int, int]] = {}
@@ -125,6 +126,8 @@ def _load_image_array(path: Path) -> np.ndarray:
 
 
 def _probe_image_size(path: Path) -> tuple[int, int]:
+    if gjjutils_media_file_starts_like_html(path):
+        raise RuntimeError("缓存内容是网页 HTML，不是图片文件。")
     try:
         with Image.open(path) as image:
             width, height = image.size
@@ -165,6 +168,8 @@ def list_input_images() -> list[dict[str, Any]]:
         if not file_path.is_file():
             continue
         if file_path.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+        if gjjutils_media_file_starts_like_html(file_path):
             continue
         relative = file_path.relative_to(input_dir)
         filename = file_path.name
@@ -230,11 +235,20 @@ def _input_image_item_from_path(file_path: str | Path) -> dict[str, Any]:
         "filename": filename,
         "subfolder": subfolder,
         "label": f"{subfolder}/{filename}" if subfolder else filename,
+        "type": "input",
         "width": int(width),
         "height": int(height),
         "mtime_ns": int(stat.st_mtime_ns),
         "size_bytes": int(stat.st_size),
     }
+
+
+def _clean_network_image_url(value: Any) -> str:
+    return re.sub(
+        r'^[\[\]({【「『]+|[,，;；。.!！?？\]\)}】」』]+$',
+        "",
+        str(value or "").strip().strip('"').strip("'").strip("“”‘’"),
+    ).strip()
 
 
 async def post_gjj_default_network_image(request):
@@ -247,10 +261,11 @@ async def post_gjj_default_network_image(request):
 
     raw_urls = data.get("urls")
     if isinstance(raw_urls, list):
-        urls = [str(item or "").strip() for item in raw_urls]
+        urls = [_clean_network_image_url(item) for item in raw_urls]
     else:
         text = str(data.get("url") or "").strip()
-        urls = [part.strip() for part in re.split(r"[\r\n,，\s]+", text) if part.strip()]
+        matches = re.findall(r'https?://[^\s<>"\'“”‘’]+', text, flags=re.IGNORECASE)
+        urls = [_clean_network_image_url(part) for part in matches]
     urls = [url for url in urls if url]
     if not urls:
         return web.json_response({"ok": False, "error": "只支持 http/https 网络图片地址。"}, status=400)
@@ -270,7 +285,7 @@ async def post_gjj_default_network_image(request):
                 url,
                 "IMAGE",
                 timeout=NETWORK_IMAGE_DOWNLOAD_TIMEOUT,
-                user_agent="ComfyUI-GJJ-MultiImageLoader/1.0",
+                use_curl_fallback=False,
             )
             item = _input_image_item_from_path(file_path)
             item["source_url"] = url
@@ -280,7 +295,12 @@ async def post_gjj_default_network_image(request):
 
     if not items:
         message = "；".join(errors[:5]) if errors else "设置默认网络图片失败。"
-        return web.json_response({"ok": False, "error": message}, status=500)
+        return web.json_response({
+            "ok": False,
+            "error": message,
+            "items": [],
+            "errors": errors[:20],
+        })
 
     return web.json_response({
         "ok": True,
@@ -344,10 +364,20 @@ async def get_gjj_input_image_thumb(request):
     return response
 
 
-if PromptServer is not None and getattr(PromptServer, "instance", None) is not None:
-    PromptServer.instance.routes.get(IMAGE_API_PATH)(get_gjj_input_images)
-    PromptServer.instance.routes.get(THUMB_API_PATH)(get_gjj_input_image_thumb)
-    PromptServer.instance.routes.post(DEFAULT_NETWORK_IMAGE_API_PATH)(post_gjj_default_network_image)
+def _register_multi_image_loader_routes() -> None:
+    server = getattr(PromptServer, "instance", None) if PromptServer is not None else None
+    routes = getattr(server, "routes", None)
+    if server is None or routes is None:
+        return
+    if getattr(server, "_gjj_multi_image_loader_routes_registered", False):
+        return
+    setattr(server, "_gjj_multi_image_loader_routes_registered", True)
+    routes.get(IMAGE_API_PATH)(get_gjj_input_images)
+    routes.get(THUMB_API_PATH)(get_gjj_input_image_thumb)
+    routes.post(DEFAULT_NETWORK_IMAGE_API_PATH)(post_gjj_default_network_image)
+
+
+_register_multi_image_loader_routes()
 
 
 def parse_selected_images(raw_value: Any) -> list[dict[str, str]]:

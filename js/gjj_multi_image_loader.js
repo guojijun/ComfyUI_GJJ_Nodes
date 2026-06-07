@@ -13,6 +13,7 @@ const IMAGE_API_PATH = "/gjj/input_images";
 const THUMB_API_PATH = "/gjj/input_image_thumb";
 const DEFAULT_NETWORK_IMAGE_API_PATH = "/gjj/multi_image_loader/default_image";
 const UPLOAD_SUBFOLDER = "gjj_multi_image_loader";
+const NETWORK_CACHE_SUBFOLDER = "GJJ_TemplateParams";
 const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE";
 const FILE_NAME_COLLATOR = new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "base" });
 const DEFAULT_THUMB_SIZE = 132;
@@ -160,6 +161,11 @@ function serializeSelection(selection) {
 		(selection || []).map((item) => ({
 			filename: String(item?.filename || ""),
 			subfolder: String(item?.subfolder || ""),
+			type: String(item?.type || "input"),
+			width: Number(item?.width || 0),
+			height: Number(item?.height || 0),
+			mtime_ns: Number(item?.mtime_ns || 0),
+			size_bytes: Number(item?.size_bytes || 0),
 		})),
 	);
 }
@@ -167,7 +173,7 @@ function serializeSelection(selection) {
 function parseSelection(rawValue) {
 	try {
 		const parsed = JSON.parse(String(rawValue || "[]"));
-		return Array.isArray(parsed) ? parsed : [];
+		return Array.isArray(parsed) ? parsed.filter((item) => item?.filename).map(normalizeInputImageItem) : [];
 	} catch (error) {
 		return [];
 	}
@@ -193,6 +199,12 @@ function serializedSelectionFromNode(node, serializedNode = null) {
 }
 
 function imageDataToUrl(item, options = {}) {
+	if (item?.url) {
+		const url = String(item.url);
+		if (/^(?:https?:|blob:|data:)/i.test(url)) {
+			return url;
+		}
+	}
 	if (!item?.filename) {
 		return "";
 	}
@@ -239,7 +251,7 @@ function ensureState(node) {
 
 async function fetchOptions() {
 	try {
-		const response = await fetch(IMAGE_API_PATH);
+		const response = await fetch(api.apiURL ? api.apiURL(IMAGE_API_PATH) : IMAGE_API_PATH);
 		if (!response.ok) {
 			return [];
 		}
@@ -248,6 +260,124 @@ async function fetchOptions() {
 	} catch (error) {
 		return [];
 	}
+}
+
+function uploadUrl(path) {
+	try {
+		if (api?.apiURL) return api.apiURL(path);
+	} catch (_) {}
+	return path;
+}
+
+function splitInputRelativePath(filename) {
+	let text = String(filename || "").trim().replace(/\\/g, "/");
+	if (!text) return { filename: "", subfolder: "" };
+	const annotated = text.match(/\s+\[(input|output|temp)\]$/i);
+	if (annotated) text = text.slice(0, annotated.index).trim();
+	const parts = text.split("/").filter(Boolean);
+	if (["input", "output", "temp"].includes(String(parts[0] || "").toLowerCase())) parts.shift();
+	const name = parts.pop() || "";
+	return { filename: name, subfolder: parts.join("/") };
+}
+
+function inputViewUrlForFilename(filename) {
+	const parts = splitInputRelativePath(filename);
+	let url = `/view?filename=${encodeURIComponent(parts.filename)}&type=input`;
+	if (parts.subfolder) url += `&subfolder=${encodeURIComponent(parts.subfolder)}`;
+	return url;
+}
+
+async function inputFileExists(filename) {
+	const url = uploadUrl(inputViewUrlForFilename(filename));
+	try {
+		let response = await fetch(url, { method: "HEAD", cache: "no-store" });
+		if (response?.ok) return true;
+		if (response?.status && response.status !== 405) return false;
+		response = await fetch(url, { method: "GET", cache: "no-store" });
+		return Boolean(response?.ok);
+	} catch (_) {
+		return false;
+	}
+}
+
+function safeMediaFilename(name, mediaType = "IMAGE") {
+	let text = String(name || "").replace(/\\/g, "/").split("/").pop() || "";
+	try { text = decodeURIComponent(text); } catch (_) {}
+	text = text.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").trim().replace(/^[ ._]+|[ ._]+$/g, "");
+	if (!text) text = "downloaded_media";
+	const ext = mediaType === "IMAGE" ? ".png" : "";
+	if (ext && !/\.(?:png|jpe?g|webp|bmp|gif|avif|tiff?)$/i.test(text)) {
+		text += ext;
+	}
+	return text;
+}
+
+function safeMediaSubdirPart(name) {
+	let text = String(name || "");
+	try { text = decodeURIComponent(text); } catch (_) {}
+	text = text.replace(/[<>:"/\\|?*\x00-\x1f\s]+/g, "_").trim().replace(/^[ ._]+|[ ._]+$/g, "");
+	return (text || "network").slice(0, 72).replace(/[ ._]+$/g, "") || "network";
+}
+
+function filenameFromNetworkUrl(url) {
+	try {
+		const parsed = new URL(String(url || "").trim(), window.location.href);
+		return safeMediaFilename(parsed.pathname.split("/").pop() || "", "IMAGE");
+	} catch (_) {
+		return safeMediaFilename(String(url || "").split("?")[0], "IMAGE");
+	}
+}
+
+async function shortSha1(text) {
+	try {
+		const subtle = globalThis.crypto?.subtle;
+		if (subtle && globalThis.TextEncoder) {
+			const digest = await subtle.digest("SHA-1", new TextEncoder().encode(String(text || "")));
+			return Array.from(new Uint8Array(digest)).slice(0, 5).map((value) => value.toString(16).padStart(2, "0")).join("");
+		}
+	} catch (_) {}
+
+	let hash = 2166136261;
+	const source = String(text || "");
+	for (let index = 0; index < source.length; index++) {
+		hash ^= source.charCodeAt(index);
+		hash = Math.imul(hash, 16777619);
+	}
+	return (hash >>> 0).toString(16).padStart(8, "0").slice(0, 10);
+}
+
+async function networkImageCachePath(url) {
+	const filename = filenameFromNetworkUrl(url);
+	try {
+		const parsed = new URL(String(url || "").trim(), window.location.href);
+		const pathParts = parsed.pathname
+			.split("/")
+			.map((part) => {
+				try { return decodeURIComponent(part); } catch (_) { return part; }
+			})
+			.filter(Boolean);
+		const sourceName = pathParts.length >= 2 ? pathParts[pathParts.length - 2] : (parsed.host || "network");
+		const sourceDir = pathParts.slice(0, -1).join("/");
+		let sourceKey = `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}/${sourceDir}`;
+		if (parsed.search) sourceKey += parsed.search;
+		const digest = await shortSha1(sourceKey);
+		const subfolder = `${NETWORK_CACHE_SUBFOLDER}/${safeMediaSubdirPart(sourceName)}_${digest}`;
+		return { filename, subfolder, relativePath: `${subfolder}/${filename}` };
+	} catch (_) {
+		const digest = await shortSha1(String(url || ""));
+		const subfolder = `${NETWORK_CACHE_SUBFOLDER}/network_${digest}`;
+		return { filename, subfolder, relativePath: `${subfolder}/${filename}` };
+	}
+}
+
+function inputItemFromRelativePath(relativePath, extra = {}) {
+	const parts = splitInputRelativePath(relativePath);
+	return normalizeInputImageItem({
+		filename: parts.filename,
+		subfolder: parts.subfolder,
+		type: "input",
+		...extra,
+	});
 }
 
 function enrichSelectionWithOptions(state) {
@@ -314,17 +444,141 @@ async function uploadFiles(node, files) {
 	scheduleLayout(node);
 }
 
+function normalizeUploadFilename(data, file, requestedSubfolder = "") {
+	const filename = String(data?.name || data?.filename || data?.file || file?.name || "").replace(/\\/g, "/");
+	if (!filename) return "";
+	if (filename.includes("/")) return filename;
+	const subfolder = String(data?.subfolder ?? requestedSubfolder ?? "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+	return subfolder ? `${subfolder}/${filename}` : filename;
+}
+
+async function uploadImageFileToInput(file, subfolder = "") {
+	const cleanSubfolder = String(subfolder || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+	const formData = new FormData();
+	formData.append("image", file, file.name);
+	formData.append("type", "input");
+	formData.append("overwrite", "true");
+	if (cleanSubfolder) formData.append("subfolder", cleanSubfolder);
+
+	const response = api?.fetchApi
+		? await api.fetchApi("/upload/image", { method: "POST", body: formData })
+		: await fetch(uploadUrl("/upload/image"), { method: "POST", body: formData });
+	if (!response?.ok) {
+		let detail = "";
+		try { detail = await response.text(); } catch (_) {}
+		throw new Error(`上传到 input 失败：HTTP ${response?.status || "?"}${detail ? ` ${detail}` : ""}`);
+	}
+	const data = await response.json().catch(() => ({}));
+	const filename = normalizeUploadFilename(data, file, cleanSubfolder);
+	if (!filename) throw new Error("上传成功但没有返回 input 文件名");
+	return filename;
+}
+
+async function downloadNetworkImageViaBackend(url) {
+	const request = {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ urls: [url] }),
+	};
+	const response = api?.fetchApi
+		? await api.fetchApi(DEFAULT_NETWORK_IMAGE_API_PATH, request)
+		: await fetch(uploadUrl(DEFAULT_NETWORK_IMAGE_API_PATH), request);
+	const data = await response.json().catch(() => ({}));
+	if (!response?.ok || data?.ok === false) {
+		throw new Error(data?.error || `后端下载 HTTP ${response?.status || "?"}`);
+	}
+	const items = Array.isArray(data?.items) && data.items.length ? data.items : (data?.item ? [data.item] : []);
+	const item = items.find((entry) => entry?.filename);
+	if (!item) throw new Error("后端没有返回 input 图片文件名");
+	return normalizeInputImageItem({ ...item, source_url: url });
+}
+
+async function downloadNetworkImageInBrowser(url, cacheInfo) {
+	const response = await fetch(url, { cache: "no-store" });
+	if (!response?.ok) {
+		throw new Error(`浏览器下载 HTTP ${response?.status || "?"}`);
+	}
+	const blob = await response.blob();
+	if (!blob || blob.size <= 0) {
+		throw new Error("浏览器下载结果为空");
+	}
+	const file = new File([blob], cacheInfo.filename, { type: blob.type || "image/jpeg" });
+	const uploadedName = await uploadImageFileToInput(file, cacheInfo.subfolder);
+	return inputItemFromRelativePath(uploadedName, { source_url: url });
+}
+
+async function ensureNetworkImageInInput(url) {
+	const cacheInfo = await networkImageCachePath(url);
+	if (await inputFileExists(cacheInfo.relativePath)) {
+		return inputItemFromRelativePath(cacheInfo.relativePath, { source_url: url });
+	}
+
+	let backendError = null;
+	try {
+		return await downloadNetworkImageViaBackend(url);
+	} catch (error) {
+		backendError = error;
+	}
+
+	try {
+		return await downloadNetworkImageInBrowser(url, cacheInfo);
+	} catch (browserError) {
+		const backendMessage = backendError?.message || backendError || "未知错误";
+		const browserMessage = browserError?.message || browserError || "未知错误";
+		throw new Error(`后端下载失败：${backendMessage}；浏览器上传到 input 失败：${browserMessage}`);
+	}
+}
+
 function parseNetworkImageUrls(text) {
-	const matches = String(text || "").match(/https?:\/\/[^\s,，]+/gi) || [];
+	const matches = String(text || "").match(/https?:\/\/[^\s<>"'“”‘’]+/gi) || [];
 	const seen = new Set();
 	const urls = [];
 	for (const raw of matches) {
-		const url = String(raw || "").trim();
+		const url = String(raw || "")
+			.trim()
+			.replace(/^[\[\]({【「『]+/g, "")
+			.replace(/[,，;；。.!！?？\]\)}】」』]+$/g, "");
 		if (!url || seen.has(url)) continue;
 		seen.add(url);
 		urls.push(url);
 	}
 	return urls;
+}
+
+function networkUrlsFromProperties(properties) {
+	if (Array.isArray(properties?.default_network_image_urls)) {
+		return properties.default_network_image_urls
+			.flatMap((item) => parseNetworkImageUrls(item))
+			.filter(Boolean);
+	}
+	return parseNetworkImageUrls(properties?.default_network_image_url || "");
+}
+
+function persistNetworkUrls(node, urls, options = {}) {
+	node.properties = node.properties || {};
+	const cleaned = Array.isArray(urls) ? urls.flatMap((item) => parseNetworkImageUrls(item)) : parseNetworkImageUrls(urls);
+	node.properties.default_network_image_urls = cleaned;
+	node.properties.default_network_image_url = cleaned.join("\n");
+	if (options.notify !== false) {
+		markGraphChanged(node);
+	}
+	return cleaned;
+}
+
+function normalizeInputImageItem(item) {
+	const filename = String(item?.filename || "");
+	const subfolder = String(item?.subfolder || "").replace(/\\/g, "/");
+	return {
+		filename,
+		subfolder,
+		type: "input",
+		label: String(item?.label || (subfolder ? `${subfolder}/${filename}` : filename)),
+		width: Number(item?.width || 0),
+		height: Number(item?.height || 0),
+		mtime_ns: Number(item?.mtime_ns || 0),
+		size_bytes: Number(item?.size_bytes || 0),
+		source_url: String(item?.source_url || ""),
+	};
 }
 
 function askNetworkImageUrls(initialText = "") {
@@ -431,9 +685,7 @@ function askNetworkImageUrls(initialText = "") {
 
 async function setDefaultNetworkImage(node) {
 	const state = ensureState(node);
-	const currentText = Array.isArray(node?.properties?.default_network_image_urls)
-		? node.properties.default_network_image_urls.join("\n")
-		: String(node?.properties?.default_network_image_url || "");
+	const currentText = networkUrlsFromProperties(node?.properties || {}).join("\n");
 	const text = await askNetworkImageUrls(currentText);
 	if (text == null) {
 		return;
@@ -450,35 +702,32 @@ async function setDefaultNetworkImage(node) {
 	if (node.__gjjMultiImageSummary) {
 		node.__gjjMultiImageSummary.textContent = `正在下载 ${urls.length} 张网络图片并设置默认图片...`;
 	}
+	persistNetworkUrls(node, urls);
 	try {
-		const request = {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ urls }),
-		};
-		const response = api?.fetchApi
-			? await api.fetchApi(DEFAULT_NETWORK_IMAGE_API_PATH, request)
-			: await fetch(DEFAULT_NETWORK_IMAGE_API_PATH, request);
-		const data = await response.json().catch(() => ({}));
-		if (!response.ok || data?.ok === false) {
-			throw new Error(data?.error || `HTTP ${response.status || "?"}`);
+		const items = [];
+		const errors = [];
+		for (const [index, url] of urls.entries()) {
+			if (node.__gjjMultiImageSummary) {
+				node.__gjjMultiImageSummary.textContent = `正在写入 input：${index + 1}/${urls.length}`;
+			}
+			try {
+				const item = await ensureNetworkImageInInput(url);
+				if (item?.filename) {
+					items.push(normalizeInputImageItem(item));
+				} else {
+					errors.push(`第 ${index + 1} 条没有返回 input 文件名：${url}`);
+				}
+			} catch (error) {
+				errors.push(`第 ${index + 1} 条失败：${error?.message || error}`);
+			}
 		}
-		const items = Array.isArray(data?.items) && data.items.length ? data.items : (data?.item ? [data.item] : []);
-		if (!items.length || !items.some((item) => item?.filename)) {
-			throw new Error("后端没有返回图片文件名。");
+
+		if (!items.length) {
+			throw new Error(errors.slice(0, 5).join("；") || "没有网络图片成功写入 input。");
 		}
 
 		node.properties = node.properties || {};
-		node.properties.default_network_image_url = urls[0] || "";
-		node.properties.default_network_image_urls = urls;
-		state.selection = items.filter((item) => item?.filename).map((item) => ({
-			filename: String(item.filename || ""),
-			subfolder: String(item.subfolder || ""),
-			width: Number(item.width || 0),
-			height: Number(item.height || 0),
-			mtime_ns: Number(item.mtime_ns || 0),
-			size_bytes: Number(item.size_bytes || 0),
-		}));
+		state.selection = items;
 		state.executedImages = [];
 		state.externalCount = 0;
 		state.mergedCount = state.selection.length;
@@ -493,11 +742,12 @@ async function setDefaultNetworkImage(node) {
 		syncDataWidget(node);
 		ensureOutputs(node, totalImageCount(node));
 		await refreshOptions(node);
+		enrichSelectionWithOptions(state);
 		renderPreview(node);
 		updateSummary(node);
-		if (node.__gjjMultiImageSummary && Array.isArray(data?.errors) && data.errors.length) {
-			node.__gjjMultiImageSummary.textContent = `已设置 ${state.selection.length} 张，${data.errors.length} 条失败`;
-			node.__gjjMultiImageSummary.title = data.errors.join("\n");
+		if (node.__gjjMultiImageSummary && errors.length) {
+			node.__gjjMultiImageSummary.textContent = `已设置 ${state.selection.length} 张，${errors.length} 条失败`;
+			node.__gjjMultiImageSummary.title = errors.join("\n");
 		} else if (node.__gjjMultiImageSummary) {
 			node.__gjjMultiImageSummary.title = "";
 		}
@@ -1803,6 +2053,7 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalOnConfigure?.apply(this, args);
 			const state = ensureState(this);
+			persistNetworkUrls(this, networkUrlsFromProperties(this.properties || {}), { notify: false });
 			state.selection = parseSelection(serializedSelectionFromNode(this, args[0]));
 			state.showIndividualOutputs = Boolean(this.properties?.show_individual_outputs);
 			state.slideOutputEnabled = Boolean(this.properties?.slide_output_enabled);
@@ -1834,6 +2085,9 @@ app.registerExtension({
 				serializedNode.properties.slide_output_size = Math.max(1, Math.min(3, Number(ensureState(this).slideOutputSize || 1)));
 				serializedNode.properties.thumb_size = Number(ensureState(this).thumbSize || DEFAULT_THUMB_SIZE);
 				serializedNode.properties.sequence_range_expanded = Boolean(ensureState(this).rangeExpanded);
+				const networkUrls = persistNetworkUrls(this, networkUrlsFromProperties(this.properties || {}), { notify: false });
+				serializedNode.properties.default_network_image_urls = networkUrls;
+				serializedNode.properties.default_network_image_url = networkUrls.join("\n");
 				if (Array.isArray(serializedNode.widgets_values) && Array.isArray(this.widgets)) {
 					const widgetIndex = this.widgets.findIndex((widget) => widget?.name === DATA_WIDGET_NAME);
 					if (widgetIndex >= 0) {

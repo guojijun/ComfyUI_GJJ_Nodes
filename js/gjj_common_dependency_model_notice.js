@@ -279,18 +279,20 @@ import { GJJ_Utils } from "./gjj_utils.js";
 	}
 
 	function applyNotice(node, data, options = {}) {
-		const state = ensurePanel(node);
-		if (!state) return;
 		data = compactOptionalNoticeForNode(node, data, options) || data;
 		const warning = String(data?.warning_message || "");
 		const panel = String(data?.panel_message || "");
 		const copyTextValue = String(data?.copy_text || data?.install_command || data?.optional_install_command || data?.model_download_url || "");
 		const detailed = Boolean(options.detailed);
 		if (!warning && !panel) {
-			state.root.style.display = "none";
+			if (node?.__gjjDependencyNotice) {
+				node.__gjjDependencyNotice.root.style.display = "none";
+			}
 			refreshNode(node);
 			return;
 		}
+		const state = ensurePanel(node);
+		if (!state) return;
 		applyPanelTone(state, data?.notice_level);
 		state.copyText = copyTextValue;
 		state.copyLabel = String(data?.copy_label || (copyTextValue ? "📋 复制安装命令" : ""));
@@ -358,7 +360,6 @@ import { GJJ_Utils } from "./gjj_utils.js";
 
 	function initializeNodePanel(node) {
 		if (!isGJJNode(node)) return;
-		ensurePanel(node);
 		installModelPatchBundleNoticeRefresh(node);
 		loadHelp().then(() => {
 			const notice = noticeFromHelp(node);
