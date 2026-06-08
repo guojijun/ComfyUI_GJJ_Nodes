@@ -3,9 +3,9 @@
   "workflow_screenshot": {
     "directory": "workflows",
     "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.jpg",
-    "sort_mode": "mtime_desc",
+    "sort_mode": "size_desc",
     "filter_mode": "openable",
-    "search_text": "nsf",
+    "search_text": "",
     "page_size": 15,
     "image_format": "jpg",
     "jpeg_quality": 0.86

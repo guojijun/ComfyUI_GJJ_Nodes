@@ -4,7 +4,7 @@ from typing import Any
 
 
 NODE_NAME = "GJJ_AdvancedPassthroughRouter"
-MAX_SLOTS = 64
+MAX_SLOTS = 16
 
 
 class AnyType(str):

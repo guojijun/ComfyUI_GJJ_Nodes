@@ -34,6 +34,8 @@ import { api } from "/scripts/api.js";
 	const SORT_MODE_LABELS = {
 		mtime_desc: "最新优先",
 		mtime_asc: "最旧优先",
+		size_desc: "文件大小 大-小",
+		size_asc: "文件大小 小-大",
 		name_asc: "文件名 A-Z",
 		name_desc: "文件名 Z-A",
 		title_asc: "标题 A-Z",
@@ -42,6 +44,8 @@ import { api } from "/scripts/api.js";
 	const SORT_MODE_BUTTONS = [
 		{ mode: "mtime_desc", label: "🕒最新", title: "按修改时间从新到旧排序" },
 		{ mode: "mtime_asc", label: "⏳最旧", title: "按修改时间从旧到新排序" },
+		{ mode: "size_desc", label: "📦大文件", title: "按文件大小从大到小排序" },
+		{ mode: "size_asc", label: "📦小文件", title: "按文件大小从小到大排序" },
 		{ mode: "name_asc", label: "🔤A-Z", title: "按文件名 A-Z 排序" },
 		{ mode: "name_desc", label: "🔡Z-A", title: "按文件名 Z-A 排序" },
 		{ mode: "title_asc", label: "🏷️标题", title: "按工作流标题排序" },
@@ -2498,6 +2502,13 @@ import { api } from "/scripts/api.js";
 		return Number.isFinite(modified) && modified > 0 ? modified / 1000 : 0;
 	}
 
+	function previewItemSize(item) {
+		const explicit = Number(item?.size ?? item?.size_bytes ?? item?.file_size);
+		if (Number.isFinite(explicit) && explicit >= 0) return explicit;
+		const fileSize = Number(item?.file?.size);
+		return Number.isFinite(fileSize) && fileSize >= 0 ? fileSize : 0;
+	}
+
 	function compareText(a, b) {
 		return String(a || "").localeCompare(String(b || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
 	}
@@ -2522,6 +2533,8 @@ import { api } from "/scripts/api.js";
 		const sortMode = choice(settings.sortMode, SORT_MODE_LABELS, DEFAULT_SORT_MODE);
 		items.sort((a, b) => {
 			if (sortMode === "mtime_asc") return previewItemMtime(a) - previewItemMtime(b) || compareText(previewItemName(a), previewItemName(b));
+			if (sortMode === "size_desc") return previewItemSize(b) - previewItemSize(a) || (previewItemMtime(b) - previewItemMtime(a)) || compareText(previewItemName(a), previewItemName(b));
+			if (sortMode === "size_asc") return previewItemSize(a) - previewItemSize(b) || (previewItemMtime(b) - previewItemMtime(a)) || compareText(previewItemName(a), previewItemName(b));
 			if (sortMode === "name_asc") return compareText(previewItemName(a), previewItemName(b)) || (previewItemMtime(b) - previewItemMtime(a));
 			if (sortMode === "name_desc") return compareText(previewItemName(b), previewItemName(a)) || (previewItemMtime(b) - previewItemMtime(a));
 			if (sortMode === "title_asc") return compareText(previewItemTitle(a) || previewItemName(a), previewItemTitle(b) || previewItemName(b)) || (previewItemMtime(b) - previewItemMtime(a));
@@ -2690,6 +2703,7 @@ import { api } from "/scripts/api.js";
 		const workflow = workflowFromMetadata(metadata);
 		previewItems.unshift({
 			file,
+			size: Number(saved?.size ?? saved?.size_bytes ?? blob.size) || blob.size,
 			url: saved?.url || URL.createObjectURL(blob),
 			workflow,
 			title: workflowTitleFromMetadata(metadata, workflow),
@@ -2730,6 +2744,7 @@ import { api } from "/scripts/api.js";
 		clearPreviewItems();
 		previewItems = (data.items || []).map((item) => ({
 			file: { name: item.filename || "workflow.jpg", size: item.size || 0, type: mimeTypeForFilename(item.filename || "workflow.jpg") },
+			size: Number(item.size ?? item.size_bytes ?? item.file_size) || 0,
 			url: item.url || "",
 			workflow: null,
 			title: "",

@@ -148,6 +148,78 @@ function getInput(node, name) {
 	return GJJ_Utils.getInput(node, name);
 }
 
+function widgetValue(node, name) {
+	return String(getWidget(node, name)?.value || "").trim();
+}
+
+function inputLinked(node, name) {
+	return Boolean(getInput(node, name)?.link != null);
+}
+
+function installModelHelpProvider(node) {
+	if (!node || node.__gjjLazyModelHelpProviderInstalled) {
+		return;
+	}
+	node.__gjjLazyModelHelpProviderInstalled = true;
+	node.__gjjHelpModelTreeEntries = function () {
+		const entries = [];
+		const pushWidgetModel = (name, label, folder, kind, tooltip) => {
+			const value = widgetValue(this, name);
+			if (!value) {
+				return;
+			}
+			entries.push({ label, value, folder, kind, name, tooltip });
+		};
+		pushWidgetModel(
+			"unet_name",
+			"🟣 UNET 主模型",
+			"diffusion_models",
+			"diffusion",
+			"调用方法：节点内部按当前模型族加载 UNET，并自动匹配采样、编码器、VAE 与推荐 LoRA。"
+		);
+		pushWidgetModel(
+			"clip_name1",
+			"🟡 CLIP 编码器",
+			"text_encoders",
+			"clip",
+			"调用方法：作为当前模型族的文本编码器；固定配套模型族会由节点内部自动匹配。"
+		);
+		pushWidgetModel(
+			"vae_name",
+			"🔴 VAE 解码器",
+			"vae",
+			"vae",
+			"调用方法：节点内部加载 VAE，将采样 latent 解码为最终 IMAGE。"
+		);
+		const rows = ensureLoraNodeState(this).rows || [];
+		rows.forEach((row, index) => {
+			const name = String(row?.name || "").trim();
+			if (!name) {
+				return;
+			}
+			entries.push({
+				label: `🧩 内置 LoRA ${index + 1}`,
+				value: name,
+				folder: "loras",
+				kind: "loras",
+				name: `lora_${index + 1}`,
+				tooltip: `调用方法：节点内置 LoRA 行，执行时按当前启用状态应用；强度 ${formatStrength(row.strength, 1.0)}。`,
+			});
+		});
+		if (inputLinked(this, LORA_CHAIN_CONFIG_INPUT)) {
+			entries.push({
+				label: "🔗 外部 LoRA串联配置",
+				value: "已连接外部输入",
+				folder: "loras",
+				kind: "loras",
+				name: LORA_CHAIN_CONFIG_INPUT,
+				tooltip: "调用方法：执行时读取外部 GJJ · LoRA串联配置，并优先/合并到当前 LoRA 应用流程。",
+			});
+		}
+		return entries;
+	};
+}
+
 function setWidgetValue(widget, value) {
 	if (!widget || value === undefined || value === null) {
 		return;
@@ -2296,6 +2368,7 @@ function stabilizeNode(node, forcePreset = false) {
 	if (!node) {
 		return;
 	}
+	installModelHelpProvider(node);
 	trimUnusedImageInputs(node);
 	ensureTrailingImageInput(node);
 	renameImageInputs(node);

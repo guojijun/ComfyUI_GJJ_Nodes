@@ -39,6 +39,7 @@ MAX_OUTPUT_IMAGES = 20
 NETWORK_IMAGE_DOWNLOAD_TIMEOUT = 8
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".avif"}
 INPUT_IMAGE_TYPES = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
+SEQUENCE_RANGE_INPUT_TYPES = "INT,STRING,FLOAT"
 _IMAGE_META_CACHE: dict[str, tuple[int, int, int, int]] = {}
 _cv2 = None
 
@@ -446,48 +447,31 @@ def recover_selected_images(raw_value: Any, extra_pnginfo: Any = None, unique_id
     if unique_id is not None and candidates:
         return candidates[0]
     return candidates[0] if len(candidates) == 1 else []
-
-
-
-
-def recover_sequence_range(raw_value: Any, extra_pnginfo: Any = None, unique_id: Any = None) -> str:
-    text = str(raw_value or "").strip()
-    if text:
-        return text
-    if not isinstance(extra_pnginfo, dict):
+def sequence_range_to_text(raw_value: Any) -> str:
+    if isinstance(raw_value, (list, tuple)) and len(raw_value) == 1:
+        raw_value = raw_value[0]
+    if raw_value is None:
         return ""
-    workflow = extra_pnginfo.get("workflow")
-    if not isinstance(workflow, dict):
-        return ""
-    nodes = workflow.get("nodes")
-    if not isinstance(nodes, list):
-        return ""
+    if isinstance(raw_value, bool):
+        return "1" if raw_value else ""
+    if isinstance(raw_value, int):
+        return str(raw_value)
+    if isinstance(raw_value, float):
+        if not np.isfinite(raw_value):
+            return ""
+        return str(int(raw_value))
+    return str(raw_value or "").strip()
 
-    candidates: list[str] = []
-    for node in nodes:
-        if not isinstance(node, dict) or node.get("type") != NODE_NAME:
-            continue
-        if unique_id is not None and str(node.get("id")) != str(unique_id):
-            continue
-        properties = node.get("properties")
-        if isinstance(properties, dict):
-            value = str(properties.get("sequence_range") or "").strip()
-            if value:
-                candidates.append(value)
-                continue
-        widget_values = node.get("widgets_values")
-        if isinstance(widget_values, list):
-            for value in widget_values:
-                value_text = str(value or "").strip()
-                if value_text.startswith("[") and (":" in value_text or "," in value_text):
-                    candidates.append(value_text)
-                    break
-    if unique_id is not None and candidates:
-        return candidates[0]
-    return candidates[0] if len(candidates) == 1 else ""
+
+def _sequence_range_int(value: str, raw_value: Any) -> int:
+    try:
+        return int(float(str(value).strip()))
+    except ValueError as error:
+        raise RuntimeError(f"序列范围只能包含整数，FLOAT 会先转换为整数：{raw_value}") from error
+
 
 def recover_sequence_range(raw_value: Any = "", extra_pnginfo: Any = None, unique_id: Any = None) -> str:
-    text = str(raw_value or "").strip()
+    text = sequence_range_to_text(raw_value)
     if text:
         return text
     if not isinstance(extra_pnginfo, dict):
@@ -681,7 +665,7 @@ def build_uniform_batch_by_longest_edge(images: list[torch.Tensor], method: str 
 
 
 def parse_sequence_range(raw_value: Any, total: int) -> list[int] | None:
-    text = str(raw_value or "").strip()
+    text = sequence_range_to_text(raw_value)
     if not text:
         return None
 
@@ -690,25 +674,25 @@ def parse_sequence_range(raw_value: Any, total: int) -> list[int] | None:
     if not text:
         return []
 
-    def clamp_index(value: int) -> int | None:
-        if value < 1 or value > total:
+    def wrap_index(value: int) -> int | None:
+        if total <= 0:
             return None
-        return value - 1
+        return (value - 1) % total
 
     if ":" in text:
         parts = [part.strip() for part in text.split(":")]
         if len(parts) not in (2, 3):
             raise RuntimeError(f"序列范围格式错误：{raw_value}")
         try:
-            start = int(parts[0]) if parts[0] else 1
-            end = int(parts[1]) if parts[1] else total
-            step = int(parts[2]) if len(parts) == 3 and parts[2] else (1 if start <= end else -1)
-        except ValueError as error:
-            raise RuntimeError(f"序列范围只能包含整数：{raw_value}") from error
+            start = _sequence_range_int(parts[0], raw_value) if parts[0] else 1
+            end = _sequence_range_int(parts[1], raw_value) if parts[1] else total
+            step = _sequence_range_int(parts[2], raw_value) if len(parts) == 3 and parts[2] else (1 if start <= end else -1)
+        except RuntimeError:
+            raise
         if step == 0:
             raise RuntimeError("序列范围的步长不能为 0。")
         stop = end + (1 if step > 0 else -1)
-        return [index for item in range(start, stop, step) if (index := clamp_index(item)) is not None]
+        return [index for item in range(start, stop, step) if (index := wrap_index(item)) is not None]
 
     items = text.replace("，", ",").split(",")
     indices: list[int] = []
@@ -716,10 +700,7 @@ def parse_sequence_range(raw_value: Any, total: int) -> list[int] | None:
         item = item.strip()
         if not item:
             continue
-        try:
-            index = clamp_index(int(item))
-        except ValueError as error:
-            raise RuntimeError(f"序列范围只能包含整数：{raw_value}") from error
+        index = wrap_index(_sequence_range_int(item, raw_value))
         if index is not None:
             indices.append(index)
     return indices
@@ -809,12 +790,21 @@ class GJJ_MultiImageLoader:
 
     @classmethod
     def INPUT_TYPES(cls):
-        # selected_images 和 sequence_range 改为前端 properties 维护，
-        # 不再作为 required/widget 输入暴露。
-        # 这样既不会挤出隐藏空行，也不会因为前端移除 widget/input 后触发
-        # “Required input is missing: selected_images”。
+        # selected_images 由前端 properties 维护。sequence_range 保留为隐藏原生
+        # 参数，前端在展开序列范围时恢复它并绑定同名外部输入小圆点。
         return {
-            "required": {},
+            "required": {
+                "sequence_range": (
+                    SEQUENCE_RANGE_INPUT_TYPES,
+                    {
+                        "default": "",
+                        "display_name": "序列范围",
+                        "tooltip": "留空输出全部；STRING 支持 [1,3,5] / [1:8]；INT/FLOAT 会转为序号，0 或超出范围时按图片总数取模。",
+                        "hidden": True,
+                        "display": "hidden",
+                    },
+                ),
+            },
             "optional": {
                 "input_images": (
                     INPUT_IMAGE_TYPES,

@@ -7,6 +7,7 @@ const MIN_INPUTS = 1;
 const MAX_INPUTS = 16;
 const CONTROL_WIDGET = "gjj_image_batch_multi_controls";
 const EXTRA_OUTPUTS_PROPERTY = "gjj_image_batch_multi_show_extra_outputs";
+const INPUT_COUNT_PROPERTY = "gjj_image_batch_multi_input_count";
 const OUTPUT_DEFS = [
 	{ name: "批量图像", type: COMPAT_TYPE, tooltip: "兼容 GJJ 批量图片和普通 IMAGE batch 的输出。" },
 	{ name: "宽度", type: "INT", tooltip: "最终输出图像的宽度。点击 🔌 可显示或收起。" },
@@ -404,6 +405,11 @@ function applyOutputMeta(node, { fromUser = false } = {}) {
 
 function setDirty(node) {
 	globalThis.GJJApplyTypeColorsToNode?.(node);
+	try { node?.graph?.change?.(); } catch (_) {}
+	try { app.graph?.change?.(); } catch (_) {}
+	if (node?.graph) {
+		node.graph._version = Number(node.graph._version || 0) + 1;
+	}
 	node?.setDirtyCanvas?.(true, true);
 	node?.graph?.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
@@ -763,6 +769,15 @@ function imageInputHasLink(input) {
 	return input?.link !== undefined && input?.link !== null;
 }
 
+function imageInputCountToKeep(node, serializedNode = null) {
+	const linkedCount = imageInputs(node).reduce((max, input, index) => imageInputHasLink(input) ? Math.max(max, index + 1) : max, 0);
+	const savedCount = Number(serializedNode?.properties?.[INPUT_COUNT_PROPERTY] ?? node?.properties?.[INPUT_COUNT_PROPERTY] ?? 0);
+	const serializedCount = Array.isArray(serializedNode?.inputs)
+		? serializedNode.inputs.filter((input) => /^image_\d+$/.test(String(input?.name || ""))).length
+		: 0;
+	return Math.max(MIN_INPUTS, Math.min(MAX_INPUTS, Math.max(linkedCount + 1, savedCount || 0, serializedCount || 0)));
+}
+
 function applyImageInputMeta(node) {
 	const inputs = imageInputs(node).sort((a, b) => imageIndex(a) - imageIndex(b));
 	for (let index = 0; index < inputs.length; index += 1) {
@@ -772,6 +787,7 @@ function applyImageInputMeta(node) {
 		input.label = `图片 ${displayIndex}`;
 		input.localized_name = `图片 ${displayIndex}`;
 		input.type = COMPAT_TYPE;
+		input.forceInput = true;
 		input.tooltip = `第 ${displayIndex} 路图片输入；支持普通 IMAGE 或 GJJ 批量图片。`;
 		input.hidden = false;
 		input.visible = true;
@@ -783,10 +799,17 @@ function syncInputLinkSlots(node) {
 	if (!Array.isArray(node?.inputs)) return;
 	for (const [slotIndex, input] of node.inputs.entries()) {
 		if (input?.link == null) continue;
-		const link = links?.[input.link] || (Array.isArray(links) ? links.find((item) => String(item?.id) === String(input.link)) : null);
+		const link = links?.[input.link] || (Array.isArray(links)
+			? links.find((item) => String(Array.isArray(item) ? item[0] : item?.id) === String(input.link))
+			: null);
 		if (link) {
-			link.target_id = node.id;
-			link.target_slot = slotIndex;
+			if (Array.isArray(link)) {
+				link[3] = node.id;
+				link[4] = slotIndex;
+			} else {
+				link.target_id = node.id;
+				link.target_slot = slotIndex;
+			}
 		}
 	}
 }
@@ -798,19 +821,41 @@ function addImageInput(node, index) {
 	if (input) {
 		input.label = `图片 ${index}`;
 		input.localized_name = `图片 ${index}`;
+		input.forceInput = true;
 		input.tooltip = `第 ${index} 路图片输入；支持普通 IMAGE 或 GJJ 批量图片。`;
 	}
 	return input;
 }
 
+function ensureImageInputCount(node, count) {
+	const targetCount = Math.max(MIN_INPUTS, Math.min(MAX_INPUTS, Number(count) || MIN_INPUTS));
+	let inputs = imageInputs(node).sort((a, b) => imageIndex(a) - imageIndex(b));
+	while (inputs.length < targetCount) {
+		addImageInput(node, inputs.length + 1);
+		inputs = imageInputs(node).sort((a, b) => imageIndex(a) - imageIndex(b));
+	}
+	applyImageInputMeta(node);
+	syncInputLinkSlots(node);
+}
+
 function stabilizeImageInputs(node) {
 	if (!Array.isArray(node?.inputs)) node.inputs = [];
 	const sorted = imageInputs(node).sort((a, b) => imageIndex(a) - imageIndex(b));
-	const hasLinkedInput = sorted.some(imageInputHasLink);
+	const lastLinkedIndex = sorted.reduce((last, input, index) => imageInputHasLink(input) ? index : last, -1);
+	let keptEmpty = null;
+	for (let index = Math.max(0, lastLinkedIndex + 1); index < sorted.length; index += 1) {
+		if (!imageInputHasLink(sorted[index])) {
+			keptEmpty = sorted[index];
+			break;
+		}
+	}
+	if (!keptEmpty && lastLinkedIndex < 0) {
+		keptEmpty = sorted.find((input) => !imageInputHasLink(input)) || null;
+	}
 	for (let i = sorted.length - 1; i >= 0; i -= 1) {
 		const input = sorted[i];
 		if (imageInputHasLink(input)) continue;
-		if (!hasLinkedInput && sorted.filter((item) => !imageInputHasLink(item)).length <= 1) continue;
+		if (input === keptEmpty) continue;
 		const absoluteIndex = imageInputAbsoluteIndex(node, input);
 		if (absoluteIndex >= 0) {
 			node.removeInput?.(absoluteIndex);
@@ -828,6 +873,9 @@ function stabilizeImageInputs(node) {
 	}
 	applyImageInputMeta(node);
 	syncInputLinkSlots(node);
+	const count = imageInputs(node).length;
+	node.properties = node.properties || {};
+	node.properties[INPUT_COUNT_PROPERTY] = count;
 }
 
 function stabilize(node) {
@@ -863,6 +911,14 @@ app.registerExtension({
 	name: "GJJ.ImageBatchMulti.DynamicInputs",
 	beforeRegisterNodeDef(nodeType, nodeData) {
 		if (nodeData?.name !== NODE_TYPE) return;
+		for (const section of [nodeData?.input?.required, nodeData?.input?.optional]) {
+			if (!section || typeof section !== "object") continue;
+			for (const [name, def] of Object.entries(section)) {
+				if (!/^image_\d+$/.test(String(name || "")) || !Array.isArray(def)) continue;
+				def[0] = COMPAT_TYPE;
+				def[1] = { ...(def[1] || {}), forceInput: true };
+			}
+		}
 
 		const originalCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
@@ -880,6 +936,7 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
 			const result = originalConfigure?.apply(this, [serializedNode, ...args]);
 			restoreExtraOutputState(this, serializedNode);
+			ensureImageInputCount(this, imageInputCountToKeep(this, serializedNode));
 			scheduleStabilize(this, 0);
 			scheduleStabilize(this, 80);
 			return result;
@@ -889,6 +946,35 @@ app.registerExtension({
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalConnectionsChange?.apply(this, args);
 			scheduleStabilize(this, 0);
+			setDirty(this);
+			return result;
+		};
+
+		const originalSerialize = nodeType.prototype.onSerialize;
+		nodeType.prototype.onSerialize = function (serializedNode, ...args) {
+			stabilize(this);
+			const result = originalSerialize?.apply(this, [serializedNode, ...args]);
+			if (serializedNode && Array.isArray(serializedNode.inputs)) {
+				const visibleNames = new Set(imageInputs(this).map((input) => input.name));
+				serializedNode.inputs = serializedNode.inputs.filter((input) => {
+					const name = String(input?.name || "");
+					return !/^image_\d+$/.test(name) || visibleNames.has(name);
+				});
+				serializedNode.inputs
+					.filter((input) => /^image_\d+$/.test(String(input?.name || "")))
+					.sort((a, b) => imageIndex(a) - imageIndex(b))
+					.forEach((input, index) => {
+						const displayIndex = index + 1;
+						input.name = formatImageInputName(displayIndex);
+						input.label = `图片 ${displayIndex}`;
+						input.localized_name = `图片 ${displayIndex}`;
+						input.type = COMPAT_TYPE;
+						input.forceInput = true;
+					});
+			}
+			serializedNode.properties = serializedNode.properties || {};
+			serializedNode.properties[INPUT_COUNT_PROPERTY] = imageInputs(this).length;
+			serializedNode.properties[EXTRA_OUTPUTS_PROPERTY] = showExtraOutputs(this);
 			return result;
 		};
 

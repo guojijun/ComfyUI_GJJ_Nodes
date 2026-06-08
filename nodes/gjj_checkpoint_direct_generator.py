@@ -125,6 +125,16 @@ class GJJ_CheckpointDirectGenerator:
     FUNCTION = "generate"
     OUTPUT_NODE = True  # ✅ 标记为输出节点，允许单节点执行
     DESCRIPTION = "单节点加载底模 checkpoint 直接出图，内部自动完成提示词编码、latent 创建、采样和 VAE 解码。"
+    GJJ_HELP = {
+        "description": DESCRIPTION,
+        "model_tree": True,
+        "dynamic_model_tree_only": True,
+        "model_download_url": "https://pan.quark.cn/s/6ec846f1f58d",
+        "notice": (
+            "模型树会按当前面板选择动态生成：底模来自 models/checkpoints；"
+            "若接入 LoRA串联配置，帮助里会显示该输入口的连接状态。"
+        ),
+    }
     SEARCH_ALIASES = [
         "checkpoint",
         "ckpt",
@@ -158,7 +168,7 @@ class GJJ_CheckpointDirectGenerator:
                         "tooltip": "直接从 ComfyUI 的 checkpoints 列表中选择要加载的主模型，支持子目录条目。",
                     },
                 ),
-                "positive": (
+                "prompt": (
                     "STRING",
                     {
                         "default": DEFAULT_POSITIVE,
@@ -168,7 +178,7 @@ class GJJ_CheckpointDirectGenerator:
                         "tooltip": "描述想要生成内容的正向提示词。",
                     },
                 ),
-                "negative": (
+                "negative_prompt": (
                     "STRING",
                     {
                         "default": DEFAULT_NEGATIVE,
@@ -297,8 +307,8 @@ class GJJ_CheckpointDirectGenerator:
     def IS_CHANGED(
         cls,
         ckpt_name,
-        positive,
-        negative,
+        prompt,
+        negative_prompt,
         width,
         height,
         batch_size,
@@ -311,12 +321,18 @@ class GJJ_CheckpointDirectGenerator:
         denoise=DEFAULT_DENOISE,
         lora_chain_config="",
         unique_id=None,
+        positive=None,
+        negative=None,
     ):
+        if positive is not None and prompt is None:
+            prompt = positive
+        if negative is not None and negative_prompt is None:
+            negative_prompt = negative
         return "|".join(
             [
                 str(ckpt_name),
-                str(positive),
-                str(negative),
+                str(prompt),
+                str(negative_prompt),
                 str(width),
                 str(height),
                 str(batch_size),
@@ -333,8 +349,8 @@ class GJJ_CheckpointDirectGenerator:
     def generate(
         self,
         ckpt_name,
-        positive,
-        negative,
+        prompt,
+        negative_prompt,
         width,
         height,
         batch_size,
@@ -347,7 +363,13 @@ class GJJ_CheckpointDirectGenerator:
         denoise=DEFAULT_DENOISE,
         lora_chain_config="",
         unique_id=None,
+        positive=None,
+        negative=None,
     ):
+        if positive is not None and prompt is None:
+            prompt = positive
+        if negative is not None and negative_prompt is None:
+            negative_prompt = negative
         start_time = time.time()
         checkpoint_name = str(ckpt_name or "").strip()
         if not checkpoint_name:
@@ -446,10 +468,10 @@ class GJJ_CheckpointDirectGenerator:
 
             try:
                 positive_conditioning = CLIPTextEncode().encode(
-                    clip, str(positive or "")
+                    clip, str(prompt or "")
                 )[0]
                 negative_conditioning = CLIPTextEncode().encode(
-                    clip, str(negative or "")
+                    clip, str(negative_prompt or "")
                 )[0]
             except Exception as exc:
                 raise _stage_error("提示词编码", checkpoint_name, exc) from exc

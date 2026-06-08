@@ -1010,12 +1010,86 @@ function dynamicModelEntries(node, meta) {
 			console.warn("[GJJ] 读取节点模型帮助失败", error);
 		}
 	}
+	const checkpointEntries = checkpointDirectModelEntries(node);
+	if (checkpointEntries.length) {
+		return checkpointEntries;
+	}
 	return [];
 }
 
 function currentHelpModelEntries(node, meta) {
 	const dynamic = dynamicModelEntries(node, meta);
 	return dynamic.length ? dynamic : currentModelEntries(node, meta);
+}
+
+function extractModelFilename(value, depth = 0) {
+	if (value == null || depth > 3) {
+		return "";
+	}
+	if (typeof value === "string" || typeof value === "number") {
+		const text = String(value).trim();
+		if (!text || /^\d+$/.test(text)) {
+			return "";
+		}
+		const extPattern = Array.from(MODEL_TREE_FILE_EXTENSIONS)
+			.sort((left, right) => right.length - left.length)
+			.map((ext) => ext.replace(".", "\\."))
+			.join("|");
+		const match = text.match(new RegExp(`[^\\s"'<>|]+(?:${extPattern})`, "i"));
+		return match?.[0]?.trim() || "";
+	}
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			const found = extractModelFilename(item, depth + 1);
+			if (found) {
+				return found;
+			}
+		}
+		return "";
+	}
+	if (typeof value === "object") {
+		const preferredKeys = ["value", "name", "label", "content", "text", "selected", "default"];
+		for (const key of preferredKeys) {
+			const found = extractModelFilename(value[key], depth + 1);
+			if (found) {
+				return found;
+			}
+		}
+		for (const item of Object.values(value)) {
+			const found = extractModelFilename(item, depth + 1);
+			if (found) {
+				return found;
+			}
+		}
+	}
+	return "";
+}
+
+function checkpointDirectModelEntries(node) {
+	if (nodeClassName(node) !== "GJJ_CheckpointDirectGenerator") {
+		return [];
+	}
+	const ckptWidget = (node?.widgets || []).find((widget) => String(widget?.name || "") === "ckpt_name");
+	const values = Array.isArray(ckptWidget?.options?.values) ? ckptWidget.options.values : [];
+	let checkpoint = extractModelFilename(ckptWidget?.value);
+	const indexText = String(ckptWidget?.value ?? "").trim();
+	if (!checkpoint && /^\d+$/.test(indexText) && values[Number(indexText)] != null) {
+		checkpoint = extractModelFilename(values[Number(indexText)]);
+	}
+	if (!checkpoint) {
+		checkpoint = extractModelFilename(ckptWidget?.options);
+	}
+	if (!checkpoint) {
+		return [];
+	}
+	return [{
+		label: "🎨 底模模型",
+		value: checkpoint,
+		folder: "checkpoints",
+		kind: "checkpoint_model",
+		name: "ckpt_name",
+		tooltip: "调用方法：节点内部走 ComfyUI CheckpointLoaderSimple 加载底模，并拆出 MODEL / CLIP / VAE。",
+	}];
 }
 
 function normalizeModelFolder(folder) {
@@ -1106,11 +1180,20 @@ function splitModelValueParts(value) {
 
 function parseModelTreeItem(entry, part, fallbackFolder = "") {
 	const externalText = String(part || "").trim();
-	if (!externalText || MODEL_TREE_EXTERNAL_VALUES.has(externalText)) {
+	if (!externalText) {
 		return null;
 	}
 	const kind = inferModelKind(entry);
 	let folder = normalizeModelFolder(fallbackFolder) || inferModelFolder(entry, kind);
+	if (MODEL_TREE_EXTERNAL_VALUES.has(externalText)) {
+		return {
+			folder: normalizeModelFolder(folder) || "其他",
+			filename: externalText,
+			icon: String(entry.icon || MODEL_TREE_ICON_BY_KIND[kind] || MODEL_TREE_ICON_BY_KIND.empty),
+			kind,
+			label: String(entry.label || "模型"),
+		};
+	}
 	let filename = externalText.replaceAll("\\", "/").trim();
 	const modelMatch = filename.match(/models\/(.+)$/i);
 	if (modelMatch) {
@@ -1209,7 +1292,7 @@ function createModelHelpContent(items, emptyText, downloadUrl = DEFAULT_MODEL_DO
 	wrap.appendChild(createModelTreeDownloadLink(downloadUrl));
 	const pre = document.createElement("pre");
 	pre.className = "gjj-help-model-tree-pre";
-	pre.textContent = modelTreeText(modelTreeItems(items), emptyText);
+	pre.textContent = modelTreeText(modelTreeItems(items), emptyText || "未选择模型文件");
 	wrap.appendChild(pre);
 	return wrap;
 }
@@ -1956,7 +2039,7 @@ globalThis.GJJ_CommonNodeStandardizer = {
 
 async function loadGjjSettings() {
 	try {
-		const resp = await api.fetchApi("/api/settings");
+		const resp = await api.fetchApi("/settings");
 		if (resp?.ok) {
 			window.__gjjSettings = await resp.json();
 		}

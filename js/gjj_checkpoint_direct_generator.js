@@ -1,12 +1,236 @@
 // GJJ Checkpoint Direct Generator - 前端增强
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
-import { queueOnlyCurrentNode } from "./gjj_utils.js";
+import { GJJ_Utils, queueOnlyCurrentNode } from "./gjj_utils.js";
 
 const TARGET_NODE = "GJJ_CheckpointDirectGenerator";
 const STATUS_WIDGET = "gjj_checkpoint_status";
 const EXECUTE_BUTTON_NAME = "gjj_execute_button";
 const IMAGE_PREVIEW_NAME = "gjj_image_preview";
+const SETTINGS_OPEN_PROPERTY = "gjj_checkpoint_settings_open";
+const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt", "positive"]);
+const INTERNAL_WIDGETS = new Set([STATUS_WIDGET, EXECUTE_BUTTON_NAME, IMAGE_PREVIEW_NAME]);
+const PANEL_SYNC_WIDGETS = [
+	"prompt",
+	"positive",
+	"ckpt_name",
+	"negative_prompt",
+	"negative",
+	"width",
+	"height",
+	"batch_size",
+	"seed",
+	"steps",
+	"cfg",
+	"sampler_name",
+	"scheduler",
+	"denoise",
+];
+const RESTORE_WIDGET_TYPES = {
+	prompt: "text",
+	positive: "text",
+	ckpt_name: "combo",
+	negative_prompt: "text",
+	negative: "text",
+	width: "number",
+	height: "number",
+	batch_size: "number",
+	seed: "number",
+	steps: "number",
+	cfg: "number",
+	sampler_name: "combo",
+	scheduler: "combo",
+	denoise: "number",
+};
+
+function getWidget(node, name) {
+	return node?.widgets?.find((widget) => widget?.name === name) || null;
+}
+
+function settingsOpen(node) {
+	return Boolean(node?.properties?.[SETTINGS_OPEN_PROPERTY]);
+}
+
+function rememberWidgetState(widget) {
+	if (!widget || widget.__gjjCheckpointVisibilityState) {
+		return;
+	}
+	widget.options = widget.options || {};
+	widget.__gjjCheckpointVisibilityState = {
+		type: widget.type,
+		hidden: widget.hidden,
+		disabled: widget.disabled,
+		computeSize: widget.computeSize,
+		getHeight: widget.getHeight,
+		draw: widget.draw,
+		mouse: widget.mouse,
+		label: widget.label,
+		localized_name: widget.localized_name,
+		optionsHidden: widget.options.hidden,
+		optionsDisplay: widget.options.display,
+		widgetDisplay: widget.widget?.style?.display || "",
+		elementDisplay: widget.element?.style?.display || "",
+		inputDisplay: widget.inputEl?.style?.display || "",
+	};
+}
+
+function setWidgetHidden(widget, hidden) {
+	if (!widget) {
+		return;
+	}
+	rememberWidgetState(widget);
+	widget.options = widget.options || {};
+	const state = widget.__gjjCheckpointVisibilityState || {};
+	if (hidden) {
+		widget.hidden = true;
+		widget.disabled = true;
+		widget.type = "hidden";
+		widget.options.hidden = true;
+		widget.options.display = "hidden";
+		widget.computeSize = () => [0, -4];
+		widget.getHeight = () => 0;
+		widget.draw = () => {};
+		widget.mouse = () => false;
+		widget.label = "";
+		widget.localized_name = "";
+		widget.last_y = 0;
+		widget.computedHeight = 0;
+		widget.margin_top = 0;
+		if (widget.widget) widget.widget.style.display = "none";
+		if (widget.element) widget.element.style.display = "none";
+		if (widget.inputEl) widget.inputEl.style.display = "none";
+		return;
+	}
+	widget.hidden = Boolean(state.hidden);
+	widget.disabled = Boolean(state.disabled);
+	widget.type = state.type && state.type !== "hidden" ? state.type : (RESTORE_WIDGET_TYPES[widget.name] || state.type || "text");
+	if (state.computeSize) widget.computeSize = state.computeSize;
+	else delete widget.computeSize;
+	if (state.getHeight) widget.getHeight = state.getHeight;
+	else delete widget.getHeight;
+	if (state.draw) widget.draw = state.draw;
+	else delete widget.draw;
+	if (state.mouse) widget.mouse = state.mouse;
+	else delete widget.mouse;
+	widget.label = state.label ?? widget.label;
+	widget.localized_name = state.localized_name ?? widget.localized_name;
+	if (state.optionsHidden === undefined) delete widget.options.hidden;
+	else widget.options.hidden = state.optionsHidden;
+	if (state.optionsDisplay === undefined) delete widget.options.display;
+	else widget.options.display = state.optionsDisplay;
+	if (widget.widget) widget.widget.style.display = state.widgetDisplay || "";
+	if (widget.element) widget.element.style.display = state.elementDisplay || "";
+	if (widget.inputEl) widget.inputEl.style.display = state.inputDisplay || "";
+}
+
+function updateSettingsButtonState(node) {
+	const button = node?.__gjjCheckpointSettingsButton;
+	if (!button) {
+		return;
+	}
+	const open = settingsOpen(node);
+	button.textContent = open ? "⚙️收起" : "⚙️设置";
+	button.title = open ? "收起更多设置，只保留正向提示词。" : "展开更多设置，显示底模、反向提示词、尺寸、采样和图生图参数。";
+	button.classList.toggle("on", open);
+	button.style.background = open ? "linear-gradient(135deg, #4b5563, #64748b)" : "linear-gradient(135deg, #1f2933, #374151)";
+	button.style.borderColor = open ? "#94a3b8" : "#55636f";
+	button.style.color = open ? "#ffffff" : "#e5edf2";
+}
+
+function applySettingsVisibility(node) {
+	if (!node || !Array.isArray(node.widgets)) {
+		return;
+	}
+	node.properties = node.properties || {};
+	const open = settingsOpen(node);
+	for (const name of PANEL_SYNC_WIDGETS) {
+		if (INTERNAL_WIDGETS.has(name)) {
+			continue;
+		}
+		const widget = getWidget(node, name);
+		setWidgetHidden(widget, !open && !ALWAYS_VISIBLE_WIDGETS.has(name));
+	}
+	updateSettingsButtonState(node);
+	GJJ_Utils.refreshNode(node, { minWidth: 300, minHeight: 90 });
+}
+
+function scheduleCheckpointRefresh(node) {
+	GJJ_Utils.scheduleRefreshNode?.(node, { minWidth: 300, minHeight: 90, delay: 0 });
+}
+
+function setSettingsOpen(node, open) {
+	if (!node) {
+		return;
+	}
+	node.properties = node.properties || {};
+	node.properties[SETTINGS_OPEN_PROPERTY] = Boolean(open);
+	applySettingsVisibility(node);
+}
+
+function scheduleSettingsVisibility(node) {
+	for (const delay of [0, 30, 120, 300]) {
+		setTimeout(() => applySettingsVisibility(node), delay);
+	}
+}
+
+function widgetValue(node, name) {
+	const widget = getWidget(node, name);
+	const clean = (value) => {
+		if (value == null) {
+			return "";
+		}
+		if (typeof value === "object") {
+			return String(value.value ?? value.name ?? value.content ?? value.label ?? "").trim();
+		}
+		return String(value).trim();
+	};
+	const values = Array.isArray(widget?.options?.values) ? widget.options.values : [];
+	let value = clean(widget?.value);
+	if (/^\d+$/.test(value) && values[Number(value)] != null) {
+		value = clean(values[Number(value)]);
+	}
+	if (value) {
+		return value;
+	}
+	return clean(values[0]);
+}
+
+function inputLinked(node, name) {
+	const input = node?.inputs?.find((item) => String(item?.name || "") === name);
+	return Boolean(input?.link != null);
+}
+
+function installModelHelpProvider(node) {
+	if (!node || node.__gjjCheckpointModelHelpProviderInstalled) {
+		return;
+	}
+	node.__gjjCheckpointModelHelpProviderInstalled = true;
+	node.__gjjHelpModelTreeEntries = function () {
+		const entries = [];
+		const checkpoint = widgetValue(this, "ckpt_name");
+		if (checkpoint) {
+			entries.push({
+				label: "🎨 底模模型",
+				value: checkpoint,
+				folder: "checkpoints",
+				kind: "checkpoint_model",
+				name: "ckpt_name",
+				tooltip: "调用方法：节点内部走 ComfyUI CheckpointLoaderSimple 加载底模，并拆出 MODEL / CLIP / VAE。",
+			});
+		}
+		if (inputLinked(this, "lora_chain_config")) {
+			entries.push({
+				label: "🔗 LoRA串联配置",
+				value: "已连接外部输入",
+				folder: "loras",
+				kind: "loras",
+				name: "lora_chain_config",
+				tooltip: "调用方法：执行时读取 GJJ · LoRA串联配置，按顺序把 LoRA 应用到底模 MODEL 与 CLIP。",
+			});
+		}
+		return entries;
+	};
+}
 
 function ensureStatusWidget(node) {
 	if (node.__gjjCheckpointStatus) {
@@ -111,22 +335,14 @@ function createExecuteButton(node) {
 		"pointer-events:auto",
 	].join(";");
 
-	const executeButton = document.createElement("button");
-	executeButton.type = "button";
-	executeButton.innerHTML = "🚀 生成图片";
-	executeButton.title = "只执行当前节点，无需连接其他节点";
-	executeButton.style.cssText = [
+	const sharedButtonStyle = [
 		"height:32px",
-		"padding:0 14px",
-		"border:1px solid #10b981",
+		"padding:0 12px",
 		"border-radius:6px",
-		"background:linear-gradient(135deg, #064e3b, #059669)",
-		"color:#a7f3d0",
 		"font-size:12px",
-		"font-weight:500",
+		"font-weight:600",
 		"cursor:pointer",
 		"transition:all 0.15s ease",
-		"flex:1",
 		"box-sizing:border-box",
 		"position:relative",
 		"z-index:1001",
@@ -135,15 +351,50 @@ function createExecuteButton(node) {
 		"display:flex",
 		"align-items:center",
 		"justify-content:center",
-		"gap:6px",
+		"gap:5px",
+		"white-space:nowrap",
+		"min-width:0",
+	];
+
+	const executeButton = document.createElement("button");
+	executeButton.type = "button";
+	executeButton.innerHTML = "🚀 生成图片";
+	executeButton.title = "只执行当前节点，无需连接其他节点";
+	executeButton.style.cssText = [
+		...sharedButtonStyle,
+		"border:1px solid #10b981",
+		"background:linear-gradient(135deg, #064e3b, #059669)",
+		"color:#a7f3d0",
+		"flex:1",
 	].join(";");
+
+	const settingsButton = document.createElement("button");
+	settingsButton.type = "button";
+	settingsButton.textContent = "⚙️设置";
+	settingsButton.title = "展开更多设置";
+	settingsButton.style.cssText = [
+		...sharedButtonStyle,
+		"border:1px solid #55636f",
+		"background:linear-gradient(135deg, #1f2933, #374151)",
+		"color:#e5edf2",
+		"flex:0 0 74px",
+	].join(";");
+	node.__gjjCheckpointSettingsButton = settingsButton;
 
 	function setupButtonHover(btn, defaultBg, hoverBg) {
 		btn.addEventListener("mouseenter", () => {
+			if (btn === settingsButton && settingsOpen(node)) {
+				return;
+			}
 			btn.style.background = hoverBg;
 			btn.style.transform = "translateY(-1px)";
 		});
 		btn.addEventListener("mouseleave", () => {
+			if (btn === settingsButton && settingsOpen(node)) {
+				btn.style.transform = "translateY(0)";
+				updateSettingsButtonState(node);
+				return;
+			}
 			btn.style.background = defaultBg;
 			btn.style.transform = "translateY(0)";
 		});
@@ -161,12 +412,22 @@ function createExecuteButton(node) {
 	}
 
 	function setupButtonEvents(btn, handler) {
+		let lastHandledAt = 0;
+		const wrappedHandler = (event) => {
+			const now = Date.now();
+			if (now - lastHandledAt < 250) {
+				protectEvent(event);
+				return;
+			}
+			lastHandledAt = now;
+			handler(event);
+		};
 		for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "wheel"]) {
 			btn.addEventListener(eventName, protectEvent, true);
 			container.addEventListener(eventName, protectEvent, true);
 		}
-		btn.addEventListener("pointerup", handler, true);
-		btn.addEventListener("click", handler, true);
+		btn.addEventListener("pointerup", wrappedHandler, true);
+		btn.addEventListener("click", wrappedHandler, true);
 	}
 
 	async function handleExecute(event) {
@@ -198,10 +459,19 @@ function createExecuteButton(node) {
 		}
 	}
 
+	function handleSettings(event) {
+		protectEvent(event);
+		setSettingsOpen(node, !settingsOpen(node));
+	}
+
 	setupButtonHover(executeButton, "linear-gradient(135deg, #064e3b, #059669)", "linear-gradient(135deg, #059669, #10b981)");
+	setupButtonHover(settingsButton, "linear-gradient(135deg, #1f2933, #374151)", "linear-gradient(135deg, #374151, #4b5563)");
 	setupButtonEvents(executeButton, handleExecute);
+	setupButtonEvents(settingsButton, handleSettings);
+	updateSettingsButtonState(node);
 
 	container.appendChild(executeButton);
+	container.appendChild(settingsButton);
 	return container;
 }
 
@@ -551,6 +821,8 @@ function setupPreviewObserver(node) {
 function stabilizeNode(node) {
 	if (!node) return;
 
+	installModelHelpProvider(node);
+
 	if (node.__gjjStabilized) {
 		return;
 	}
@@ -568,6 +840,7 @@ function stabilizeNode(node) {
 		node.__gjjImagePreviewWidget = node.addDOMWidget(IMAGE_PREVIEW_NAME, "HTML", previewContainer, { serialize: false });
 	}
 
+	applySettingsVisibility(node);
 	setStatus(node, "等待执行");
 
 	node.setDirtyCanvas?.(true, true);
@@ -619,6 +892,7 @@ app.registerExtension({
 				hideDefaultPreviewElements(this);
 				setupPreviewObserver(this);
 			}, 0);
+			setTimeout(() => scheduleSettingsVisibility(this), 40);
 
 			return result;
 		};
@@ -627,11 +901,27 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalConfigure?.apply(this, args);
 			setTimeout(() => {
+				scheduleSettingsVisibility(this);
 				if (this.__gjjCheckpointStatus) {
 					setStatus(this, "等待执行");
 				}
 				hideDefaultPreviewElements(this);
 			}, 0);
+			return result;
+		};
+
+		const originalResize = nodeType.prototype.onResize;
+		nodeType.prototype.onResize = function (...args) {
+			const result = originalResize?.apply(this, args);
+			updateSettingsButtonState(this);
+			scheduleCheckpointRefresh(this);
+			return result;
+		};
+
+		const originalConnectionsChange = nodeType.prototype.onConnectionsChange;
+		nodeType.prototype.onConnectionsChange = function (...args) {
+			const result = originalConnectionsChange?.apply(this, args);
+			scheduleSettingsVisibility(this);
 			return result;
 		};
 

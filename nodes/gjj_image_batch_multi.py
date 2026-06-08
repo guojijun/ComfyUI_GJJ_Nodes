@@ -456,6 +456,7 @@ class GJJ_ImageBatchMulti:
                 {
                     "display_name": f"图片 {i}",
                     "tooltip": f"第 {i} 路图片输入；支持普通 IMAGE 或 GJJ 批量图片。",
+                    "forceInput": True,
                 },
             )
 

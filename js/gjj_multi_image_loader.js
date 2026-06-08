@@ -15,13 +15,14 @@ const DEFAULT_NETWORK_IMAGE_API_PATH = "/gjj/multi_image_loader/default_image";
 const UPLOAD_SUBFOLDER = "gjj_multi_image_loader";
 const NETWORK_CACHE_SUBFOLDER = "GJJ_TemplateParams";
 const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE";
+const SEQUENCE_RANGE_INPUT_TYPE = "INT,STRING,FLOAT";
 const FILE_NAME_COLLATOR = new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "base" });
 const DEFAULT_THUMB_SIZE = 132;
 const MIN_THUMB_SIZE = 72;
 const MAX_THUMB_SIZE = 220;
 const THUMB_STEP = 16;
 const MAX_PREVIEW_HEIGHT = 560;
-const RANGE_PLACEHOLDER = "例如：[1,3,5] 或 [1:8]";
+const SEQUENCE_RANGE_INPUT_LABEL = "序列范围";
 const SLIDE_START_INPUT_NAME = "slide_start_index";
 const SLIDE_START_INPUT_LABEL = "滑动起始序号";
 const SLIDE_QUEUE_DELAY_MS = 180;
@@ -75,6 +76,57 @@ function hideDataWidget(widget) {
 	}
 }
 
+function rememberWidgetShape(widget) {
+	if (!widget || widget.__gjjNativeShapeSaved) {
+		return;
+	}
+	if (widget.__gjjOriginalType !== undefined || widget.__gjjOriginalComputeSize !== undefined) {
+		widget.__gjjNativeShapeSaved = true;
+		return;
+	}
+	widget.__gjjNativeShapeSaved = true;
+	widget.__gjjOriginalType = widget.type;
+	widget.__gjjOriginalComputeSize = widget.computeSize;
+	widget.__gjjOriginalGetHeight = widget.getHeight;
+	widget.__gjjOriginalDraw = widget.draw;
+	widget.__gjjOriginalMouse = widget.mouse;
+}
+
+function hideNativeWidget(widget) {
+	if (!widget) return;
+	rememberWidgetShape(widget);
+	widget.hidden = true;
+	widget.disabled = true;
+	widget.type = `converted-widget:${widget.name || "hidden"}`;
+	widget.computeSize = () => [0, 0];
+	widget.getHeight = () => 0;
+	widget.draw = () => {};
+	widget.mouse = () => false;
+	widget.y = -10000;
+	widget.last_y = -10000;
+	widget.options = widget.options || {};
+	widget.options.hidden = true;
+	widget.options.display = "hidden";
+}
+
+function restoreNativeWidget(widget, fallbackType = "text") {
+	if (!widget) return;
+	widget.hidden = false;
+	widget.disabled = false;
+	widget.type = widget.__gjjOriginalType || fallbackType;
+	if (widget.__gjjOriginalComputeSize) widget.computeSize = widget.__gjjOriginalComputeSize;
+	else delete widget.computeSize;
+	if (widget.__gjjOriginalGetHeight) widget.getHeight = widget.__gjjOriginalGetHeight;
+	else delete widget.getHeight;
+	if (widget.__gjjOriginalDraw) widget.draw = widget.__gjjOriginalDraw;
+	else delete widget.draw;
+	if (widget.__gjjOriginalMouse) widget.mouse = widget.__gjjOriginalMouse;
+	else delete widget.mouse;
+	widget.options = widget.options || {};
+	delete widget.options.hidden;
+	delete widget.options.display;
+}
+
 function detachWidgetByName(node, name) {
 	if (!Array.isArray(node?.widgets)) {
 		return null;
@@ -92,9 +144,8 @@ function removeInternalDataWidget(node) {
 	if (!Array.isArray(node?.widgets)) {
 		return;
 	}
-	// 这里不只是隐藏，而是从 widgets 布局数组中移除，避免前台 JSON/序列范围 widget 继续挤出空行。
+	// 这里不只是隐藏，而是从 widgets 布局数组中移除，避免前台 JSON widget 继续挤出空行。
 	node.__gjjSelectedImagesWidget = node.__gjjSelectedImagesWidget || detachWidgetByName(node, DATA_WIDGET_NAME);
-	node.__gjjSequenceRangeWidget = node.__gjjSequenceRangeWidget || detachWidgetByName(node, SEQUENCE_RANGE_WIDGET_NAME);
 }
 
 function removeInternalDataInputs(node) {
@@ -115,14 +166,6 @@ function removeInternalDataInputs(node) {
 	}
 }
 
-function normalizeSequenceRangeWidget(node) {
-	const widget = getWidget(node, SEQUENCE_RANGE_WIDGET_NAME) || node.__gjjSequenceRangeWidget;
-	if (widget) {
-		hideDataWidget(widget);
-	}
-	return null;
-}
-
 function reorderWidgets(node) {
 	if (!Array.isArray(node?.widgets)) {
 		return;
@@ -137,8 +180,8 @@ function reorderWidgets(node) {
 		used.add(widget);
 	};
 	pushWidget(getWidget(node, GJJ_HELP_WIDGET_NAME));
-	normalizeSequenceRangeWidget(node);
 	pushWidget(node.__gjjMultiImageWidget);
+	pushWidget(getWidget(node, SEQUENCE_RANGE_WIDGET_NAME) || node.__gjjSequenceRangeWidget);
 	for (const widget of node.widgets) {
 		pushWidget(widget);
 	}
@@ -735,9 +778,7 @@ async function setDefaultNetworkImage(node) {
 			applySlidingRange(node);
 		} else {
 			syncSequenceRange(node, "");
-			if (node.__gjjMultiImageRangeInput) {
-				node.__gjjMultiImageRangeInput.value = "";
-			}
+			syncSequenceRangeInput(node);
 		}
 		syncDataWidget(node);
 		ensureOutputs(node, totalImageCount(node));
@@ -775,18 +816,94 @@ function syncDataWidget(node) {
 }
 
 function getSequenceRange(node) {
-	return String(node?.properties?.[SEQUENCE_RANGE_WIDGET_NAME] ?? (getWidget(node, SEQUENCE_RANGE_WIDGET_NAME) || node.__gjjSequenceRangeWidget)?.value ?? "");
+	const widget = getSequenceRangeWidget(node);
+	if (widget && !widget.hidden && widget.value != null) {
+		return String(widget.value || "");
+	}
+	return String(node?.properties?.[SEQUENCE_RANGE_WIDGET_NAME] ?? widget?.value ?? "");
+}
+
+function getSequenceRangeWidget(node) {
+	let widget = getWidget(node, SEQUENCE_RANGE_WIDGET_NAME) || node.__gjjSequenceRangeWidget;
+	if (!widget && typeof node?.addWidget === "function") {
+		widget = node.addWidget("text", SEQUENCE_RANGE_WIDGET_NAME, String(node?.properties?.[SEQUENCE_RANGE_WIDGET_NAME] || ""), null, {
+			display_name: SEQUENCE_RANGE_INPUT_LABEL,
+			tooltip: "留空输出全部；[1,3,5] 输出指定序号；[1:8] 输出闭区间。",
+		});
+		if (widget) {
+			widget.serialize = true;
+		}
+	}
+	if (widget) {
+		node.__gjjSequenceRangeWidget = widget;
+	}
+	return widget;
+}
+
+function patchSequenceRangeWidgetCallback(node, widget) {
+	if (!widget || widget.__gjjSequenceRangeCallbackPatched) return;
+	const originalCallback = widget.callback;
+	widget.__gjjSequenceRangeCallbackPatched = true;
+	widget.callback = function (value, ...args) {
+		node.properties = node.properties || {};
+		node.properties[SEQUENCE_RANGE_WIDGET_NAME] = String(value || "");
+		const result = originalCallback?.apply(this, [value, ...args]);
+		markGraphChanged(node);
+		updateSummary(node);
+		return result;
+	};
 }
 
 function syncSequenceRange(node, value) {
 	node.properties = node.properties || {};
 	node.properties[SEQUENCE_RANGE_WIDGET_NAME] = String(value || "");
-	const widget = getWidget(node, SEQUENCE_RANGE_WIDGET_NAME) || node.__gjjSequenceRangeWidget;
+	const widget = getSequenceRangeWidget(node);
 	if (widget) {
 		widget.value = String(value || "");
 		widget.callback?.(widget.value, app.canvas, node, undefined, widget);
 	}
 	markGraphChanged(node);
+}
+
+function ensureSequenceRangeInput(node) {
+	let input = (node.inputs || []).find((item) => item?.name === SEQUENCE_RANGE_WIDGET_NAME);
+	if (!input) {
+		node.addInput?.(SEQUENCE_RANGE_WIDGET_NAME, SEQUENCE_RANGE_INPUT_TYPE);
+		input = (node.inputs || []).find((item) => item?.name === SEQUENCE_RANGE_WIDGET_NAME);
+	}
+	if (input) {
+		input.name = SEQUENCE_RANGE_WIDGET_NAME;
+		input.label = SEQUENCE_RANGE_INPUT_LABEL;
+		input.localized_name = SEQUENCE_RANGE_INPUT_LABEL;
+		input.type = SEQUENCE_RANGE_INPUT_TYPE;
+		input.tooltip = "可选：外部输入序列范围。STRING 支持 [1,3,5] / [1:8]；INT/FLOAT 会转成单个序号。";
+		input.widget = { name: SEQUENCE_RANGE_WIDGET_NAME };
+	}
+	return input;
+}
+
+function removeSequenceRangeInput(node) {
+	const index = (node.inputs || []).findIndex((input) => input?.name === SEQUENCE_RANGE_WIDGET_NAME);
+	if (index < 0) return;
+	if (node.inputs[index]?.link != null) {
+		node.disconnectInput?.(index);
+	}
+	node.removeInput?.(index);
+}
+
+function syncSequenceRangeInput(node) {
+	const state = ensureState(node);
+	const widget = getSequenceRangeWidget(node);
+	if (!widget) return;
+	patchSequenceRangeWidgetCallback(node, widget);
+	widget.value = getSequenceRange(node);
+	if (state.rangeExpanded) {
+		restoreNativeWidget(widget, "text");
+		ensureSequenceRangeInput(node);
+	} else {
+		removeSequenceRangeInput(node);
+		hideNativeWidget(widget);
+	}
 }
 
 function formatSlidingRange(index, count, size = 2) {
@@ -819,9 +936,7 @@ function applySlidingRange(node) {
 	if (getSequenceRange(node) !== nextRange) {
 		syncSequenceRange(node, nextRange);
 	}
-	if (node.__gjjMultiImageRangeInput) {
-		node.__gjjMultiImageRangeInput.value = getSequenceRange(node);
-	}
+	syncSequenceRangeInput(node);
 	updateSummary(node);
 }
 
@@ -1001,9 +1116,7 @@ function updateSlideOutputButtonsState(node) {
 		initButton.style.opacity = count > 0 ? "1" : "0.55";
 		initButton.title = "初始化滑动输出：重置为从第 1 张开始。";
 	}
-	if (node.__gjjMultiImageRangeInput) {
-		node.__gjjMultiImageRangeInput.value = getSequenceRange(node);
-	}
+	syncSequenceRangeInput(node);
 }
 
 function hasExternalImageLink(node) {
@@ -1684,11 +1797,10 @@ function buildDom(node) {
 		state.rangeExpanded = !state.rangeExpanded;
 		node.properties = node.properties || {};
 		node.properties.sequence_range_expanded = state.rangeExpanded;
-		if (node.__gjjMultiImageRangeRow) {
-			node.__gjjMultiImageRangeRow.style.display = state.rangeExpanded ? "flex" : "none";
-		}
+		syncSequenceRangeInput(node);
+		reorderWidgets(node);
 		rangeButton.style.background = state.rangeExpanded ? "#2b4250" : "#1a2328";
-		scheduleLayout(node);
+		scheduleLayout(node, true);
 	});
 	outputButton.addEventListener("click", (event) => {
 		event.preventDefault();
@@ -1716,9 +1828,8 @@ function buildDom(node) {
 			state.rangeExpanded = true;
 			node.properties.sequence_range_expanded = true;
 			applySlidingRange(node);
-			if (node.__gjjMultiImageRangeRow) {
-				node.__gjjMultiImageRangeRow.style.display = "flex";
-			}
+			syncSequenceRangeInput(node);
+			reorderWidgets(node);
 			if (!hasSlideStartIndexLink(node)) {
 				queueSlidingOutput(node, "start");
 			}
@@ -1842,39 +1953,6 @@ function buildDom(node) {
 	toolbar.appendChild(moreButton);
 	toolbar.appendChild(summary);
 
-	const rangeRow = document.createElement("div");
-	rangeRow.style.cssText = [
-		"display:flex",
-		"gap:6px",
-		"align-items:center",
-		"padding:0 2px",
-	].join(";");
-	rangeRow.style.display = state.rangeExpanded ? "flex" : "none";
-	const rangeInput = document.createElement("input");
-	rangeInput.type = "text";
-	rangeInput.placeholder = RANGE_PLACEHOLDER;
-	rangeInput.value = getSequenceRange(node);
-	rangeInput.title = "序列范围：留空输出全部；[1,3,5] 输出指定序号；[1:8] 输出闭区间。";
-	rangeInput.style.cssText = [
-		"height:26px",
-		"flex:1",
-		"min-width:0",
-		"box-sizing:border-box",
-		"border:1px solid #465761",
-		"border-radius:7px",
-		"background:#121a1f",
-		"color:#dce7e2",
-		"font-size:11px",
-		"padding:0 8px",
-		"outline:none",
-	].join(";");
-	rangeInput.addEventListener("pointerdown", (event) => event.stopPropagation());
-	rangeInput.addEventListener("keydown", (event) => event.stopPropagation());
-	rangeInput.addEventListener("input", () => {
-		syncSequenceRange(node, rangeInput.value);
-	});
-	rangeRow.appendChild(rangeInput);
-
 	const previewWrap = document.createElement("div");
 	previewWrap.style.cssText = [
 		"position:relative",
@@ -1916,7 +1994,6 @@ function buildDom(node) {
 	previewWrap.appendChild(grid);
 	previewWrap.appendChild(empty);
 	container.appendChild(toolbar);
-	container.appendChild(rangeRow);
 	container.appendChild(previewWrap);
 	container.appendChild(fileInput);
 
@@ -1932,8 +2009,6 @@ function buildDom(node) {
 	node.__gjjMultiImageZoomInButton = zoomInButton;
 	node.__gjjMultiImageThumbLabel = thumbLabel;
 	node.__gjjMultiImageRangeButton = rangeButton;
-	node.__gjjMultiImageRangeRow = rangeRow;
-	node.__gjjMultiImageRangeInput = rangeInput;
 	node.__gjjMultiImageSummary = summary;
 	node.__gjjMultiImagePreviewWrap = previewWrap;
 	node.__gjjMultiImageGrid = grid;
@@ -1969,7 +2044,7 @@ function stabilizeNode(node) {
 	removeInternalDataWidget(node);
 	ensureDomWidget(node);
 	reorderWidgets(node);
-	const state = ensureState(node);
+	syncSequenceRangeInput(node);
 	syncSlideStartInput(node);
 	syncDataWidget(node);
 	applySlidingRange(node);
@@ -2039,6 +2114,12 @@ app.registerExtension({
 	async beforeRegisterNodeDef(nodeType, nodeData) {
 		if (!TARGET_NODES.has(nodeData?.name)) {
 			return;
+		}
+		for (const section of [nodeData?.input?.required, nodeData?.input?.optional]) {
+			const def = section?.[SEQUENCE_RANGE_WIDGET_NAME];
+			if (Array.isArray(def)) {
+				def[0] = SEQUENCE_RANGE_INPUT_TYPE;
+			}
 		}
 
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;

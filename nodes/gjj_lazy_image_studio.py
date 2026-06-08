@@ -788,6 +788,16 @@ class GJJ_LazyImageStudio:
     CATEGORY = "GJJ/Image"
     FUNCTION = "create_image"
     DESCRIPTION = "懒人图文集成一键生图：支持文生图、图生图，以及多图参考编辑。节点会根据所选 UNET 主关键词自动推荐匹配的文本编码器、VAE、加速 LoRA、NSFW LoRA 与常用采样参数。"
+    GJJ_HELP = {
+        "description": DESCRIPTION,
+        "model_tree": True,
+        "dynamic_model_tree_only": True,
+        "model_download_url": "https://pan.quark.cn/s/6ec846f1f58d",
+        "notice": (
+            "模型树会按当前面板选择动态生成：UNET、CLIP、VAE 来自对应模型目录；"
+            "节点内置 LoRA 行和外部 LoRA串联配置也会一并显示。"
+        ),
+    }
     SEARCH_ALIASES = [
         "懒人",
         "一键生图",
