@@ -352,6 +352,7 @@ class GJJ_LTX2SamplingPreviewOverride:
             "optional": {
                 "latent_upscale_model": ("LATENT_UPSCALE_MODEL", {"display_name": "Latent 上采样模型", "tooltip": "用于更高分辨率预览的可选上采样模型"}),
                 "vae": ("VAE", {"display_name": "VAE", "tooltip": "用于为上采样模型归一化 latent 的 VAE 模型"}),
+                "image_01": ("IMAGE", {"forceInput": True, "display_name": "🖼️ 01", "tooltip": "可选图片输入。用于保持图像链路依赖和兼容旧工作流；未连接时不影响采样预览覆盖。"}),
                 "bypass": ("BOOLEAN", {"default": False, "display_name": "跳过处理",
                                         "tooltip": "启用后直接返回原始模型，不添加预览覆盖"}),
             },
@@ -364,7 +365,7 @@ class GJJ_LTX2SamplingPreviewOverride:
     FUNCTION = "generate"
     DESCRIPTION = "LTX2 采样预览覆盖。覆盖 LTX2 模型的采样预览功能，在采样过程中生成实时预览图像。"
 
-    def generate(self, model, preview_rate=8, latent_upscale_model=None, vae=None, bypass=False):
+    def generate(self, model, preview_rate=8, latent_upscale_model=None, vae=None, image_01=None, bypass=False):
         """
         为模型添加采样预览覆盖。
 

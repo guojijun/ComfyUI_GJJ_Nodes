@@ -39,8 +39,8 @@ const FINAL_NODE_COLOR = "#0a0a5f";
 const FINAL_NODE_BGCOLOR = "#23292b";
 const FINAL_NODE_COLOR_PROPERTY = "gjj_video_combine_final_node_color";
 const OPTIONAL_INPUTS = [
-	{ name: "audio", type: "AUDIO", label: "音频", localized_name: "音频" },
-	{ name: "vae", type: "VAE", label: "VAE 解码器", localized_name: "VAE 解码器" },
+	{ name: "audio", type: "AUDIO", label: "音频", localized_name: "音频", tooltip: "可选。接入后会在支持的格式里封入音轨，VIDEO 输出也会保留音频。" },
+	{ name: "vae", type: "VAE", label: "VAE 解码器", localized_name: "VAE 解码器", tooltip: "仅当上方输入 LATENT 时需要连接。" },
 
 ];
 const DEFAULT_VISIBLE_INPUTS = new Set(["audio"]);
@@ -347,10 +347,30 @@ function isFrameRateSlot(slot) {
 }
 
 function normalizeSlotCopy(copy) {
+	if (isPrimaryInputName(copy?.name)) {
+		copy.name = PRIMARY_INPUT_NAME;
+		copy.type = "GJJ_BATCH_IMAGE,IMAGE";
+		copy.label = "图像";
+		copy.localized_name = "图像";
+		copy.tooltip = "支持 GJJ_BATCH_IMAGE、IMAGE batch、LATENT、官方 VIDEO 或 VIDEO 序列；接 VIDEO 时自动走视频合并。";
+		delete copy.widget;
+	}
 	if (isFrameRateSlot(copy)) {
+		copy.name = FRAME_RATE_WIDGET_NAME;
 		copy.type = FRAME_RATE_SOCKET_TYPE;
-		copy.label ||= "帧率";
-		copy.localized_name ||= "帧率";
+		copy.label = "帧率";
+		copy.localized_name = "帧率";
+		copy.tooltip = "输出动画或视频的帧率。可连接 INT 或 FLOAT，执行时会统一按浮点数计算。";
+		copy.widget = { name: FRAME_RATE_WIDGET_NAME };
+	}
+	const optional = OPTIONAL_INPUTS.find((item) => item.name === String(copy?.name || ""));
+	if (optional) {
+		copy.name = optional.name;
+		copy.type = optional.type;
+		copy.label = optional.label;
+		copy.localized_name = optional.localized_name;
+		copy.tooltip = optional.tooltip;
+		delete copy.widget;
 	}
 	return copy;
 }
@@ -1074,6 +1094,14 @@ function slotHasLink(slot, isOutput) {
 	return slot.link != null;
 }
 
+function findGraphLink(graphLinks, linkId) {
+	if (!graphLinks || linkId == null) return null;
+	if (Array.isArray(graphLinks)) {
+		return graphLinks.find((item) => String(Array.isArray(item) ? item[0] : item?.id) === String(linkId)) || null;
+	}
+	return graphLinks[linkId] || null;
+}
+
 function syncVisibleSlotLinks(node) {
 	const graphLinks = node?.graph?.links || app.graph?.links || {};
 	for (const [index, input] of (node?.inputs || []).entries()) {
@@ -1081,18 +1109,28 @@ function syncVisibleSlotLinks(node) {
 		if (linkId == null) {
 			continue;
 		}
-		const link = graphLinks?.[linkId];
+		const link = findGraphLink(graphLinks, linkId);
 		if (link) {
-			link.target_id = node.id;
-			link.target_slot = index;
+			if (Array.isArray(link)) {
+				link[3] = node.id;
+				link[4] = index;
+			} else {
+				link.target_id = node.id;
+				link.target_slot = index;
+			}
 		}
 	}
 	for (const [index, output] of (node?.outputs || []).entries()) {
 		for (const linkId of output?.links || []) {
-			const link = graphLinks?.[linkId];
+			const link = findGraphLink(graphLinks, linkId);
 			if (link) {
-				link.origin_id = node.id;
-				link.origin_slot = index;
+				if (Array.isArray(link)) {
+					link[1] = node.id;
+					link[2] = index;
+				} else {
+					link.origin_id = node.id;
+					link.origin_slot = index;
+				}
 			}
 		}
 	}
@@ -1849,6 +1887,7 @@ app.registerExtension({
 
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode, ...args) {
+			applySlotVisibility(this);
 			const result = originalOnSerialize?.apply(this, [serializedNode, ...args]);
 			rememberNodeWidth(this, this.size?.[0]);
 			if (serializedNode && typeof serializedNode === "object") {

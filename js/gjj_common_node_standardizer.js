@@ -347,7 +347,8 @@ function disableStatusWidget(node) {
 }
 
 function refreshNode(node) {
-	GJJ_Utils.refreshNode(node);
+	const minWidth = String(node?.comfyClass || node?.type || "") === "GJJ_LTXVVideoSampler" ? 0 : 300;
+	GJJ_Utils.refreshNode(node, { minWidth });
 }
 
 function shieldDomWidgetEvents(element) {
@@ -1825,6 +1826,15 @@ function formatElapsed(ms) {
 function updateStatus(node, detail = {}, options = {}) {
 	const state = ensureStatusWidget(node);
 	if (!state) {
+		return;
+	}
+	if (detail?.clear_status) {
+		state.visible = false;
+		state.wrap.style.display = "none";
+		state.text.textContent = "";
+		state.progress = 0;
+		state.progressInner.style.width = "0%";
+		refreshNode(node);
 		return;
 	}
 	const visible = options.visible !== false;

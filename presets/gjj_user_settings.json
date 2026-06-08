@@ -78,5 +78,97 @@
     }
   },
   "nodes": {},
-  "user": {}
+  "user": {},
+  "node_color_theme": {
+    "version": 1,
+    "selected_style_id": "dim",
+    "big_categories": [
+      {
+        "id": "input",
+        "label": "输入",
+        "styleId": "dim",
+        "color": "#244D73"
+      },
+      {
+        "id": "guide",
+        "label": "引导",
+        "styleId": "dim",
+        "color": "#504287"
+      },
+      {
+        "id": "sample",
+        "label": "采样",
+        "styleId": "dim",
+        "color": "#77501E"
+      },
+      {
+        "id": "output",
+        "label": "输出",
+        "styleId": "dim",
+        "color": "#236B4B"
+      },
+      {
+        "id": "decode",
+        "label": "解码",
+        "styleId": "dim",
+        "color": "#28705A"
+      },
+      {
+        "id": "encode",
+        "label": "编码",
+        "styleId": "dim",
+        "color": "#6E3348"
+      },
+      {
+        "id": "model",
+        "label": "模型",
+        "styleId": "dim",
+        "color": "#5B3B78"
+      },
+      {
+        "id": "prompt",
+        "label": "提示",
+        "styleId": "dim",
+        "color": "#693B63"
+      },
+      {
+        "id": "image",
+        "label": "图像",
+        "styleId": "dim",
+        "color": "#255D69"
+      },
+      {
+        "id": "video",
+        "label": "视频",
+        "styleId": "dim",
+        "color": "#735222"
+      },
+      {
+        "id": "audio",
+        "label": "音频",
+        "styleId": "dim",
+        "color": "#75384B"
+      },
+      {
+        "id": "tool",
+        "label": "工具",
+        "styleId": "dim",
+        "color": "#424B52"
+      }
+    ],
+    "custom_palette": [
+      "#B8741A",
+      "#2E8C61",
+      "#38A86B",
+      "#B85670",
+      "#6F5CC4",
+      "#2D78A8",
+      "#9A4F8A",
+      "#2B86A6",
+      "#9B6A22",
+      "#A54E6C",
+      "#59636B",
+      "#343A40"
+    ]
+  }
 }

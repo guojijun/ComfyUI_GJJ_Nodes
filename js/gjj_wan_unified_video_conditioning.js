@@ -491,23 +491,64 @@ function removeInputByName(node, name) {
 	node.removeInput?.(index);
 }
 
+function modeSocketNameFromInput(input) {
+	const candidates = [
+		input?.name,
+		input?.label,
+		input?.localized_name,
+		input?.options?.display_name,
+	].map((value) => String(value || "").trim()).filter(Boolean);
+	for (const [name, info] of Object.entries(SOCKETS)) {
+		if (candidates.includes(name) || candidates.includes(info.label) || candidates.includes(info.localized_name)) {
+			return name;
+		}
+	}
+	return "";
+}
+
+function applySocketInfo(input, name) {
+	const info = SOCKETS[name];
+	if (!input || !info) return;
+	Object.assign(input, info);
+	input.name = name;
+	input.type = info.type;
+	input.label = info.label;
+	input.localized_name = info.localized_name;
+	input.tooltip = info.tooltip;
+	input.options ||= {};
+	input.options.display_name = info.label;
+	input.options.tooltip = info.tooltip;
+	delete input.widget;
+	delete input.widget_slot;
+	delete input.widget_name;
+	delete input.__convertedWidget;
+}
+
+function normalizeModeInputs(node) {
+	for (const input of node.inputs || []) {
+		const name = modeSocketNameFromInput(input);
+		if (name) applySocketInfo(input, name);
+	}
+}
+
 function ensureInput(node, name) {
-	if ((node.inputs || []).some((input) => String(input?.name || "") === name)) return;
 	const info = SOCKETS[name];
 	if (!info) return;
-	node.addInput?.(name, info.type);
-	const input = (node.inputs || []).find((item) => String(item?.name || "") === name);
-	if (input) {
-		Object.assign(input, info);
-		input.name = name;
+	let input = (node.inputs || []).find((item) => String(item?.name || "") === name);
+	if (!input) {
+		input = (node.inputs || []).find((item) => modeSocketNameFromInput(item) === name);
 	}
+	if (!input) {
+		node.addInput?.(name, info.type);
+		input = (node.inputs || []).find((item) => String(item?.name || "") === name);
+	}
+	applySocketInfo(input, name);
 }
 
 function decorateInputs(node) {
 	for (const input of node.inputs || []) {
-		const info = SOCKETS[String(input?.name || "")];
-		if (!info) continue;
-		Object.assign(input, info);
+		const name = modeSocketNameFromInput(input);
+		if (name) applySocketInfo(input, name);
 	}
 }
 
@@ -580,6 +621,7 @@ function applyDisabledSockets(node, visibleNames) {
 function applyMode(node) {
 	if (!isTargetNode(node)) return;
 	hideBackingWidget(node);
+	normalizeModeInputs(node);
 	const mode = getMode(node);
 	const visibleNames = visibleSocketsForMode(mode);
 	const visible = new Set(visibleNames);

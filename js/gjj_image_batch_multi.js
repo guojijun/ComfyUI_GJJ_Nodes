@@ -8,6 +8,7 @@ const MAX_INPUTS = 16;
 const CONTROL_WIDGET = "gjj_image_batch_multi_controls";
 const EXTRA_OUTPUTS_PROPERTY = "gjj_image_batch_multi_show_extra_outputs";
 const INPUT_COUNT_PROPERTY = "gjj_image_batch_multi_input_count";
+const SETTINGS_OPEN_PROPERTY = "gjj_image_batch_multi_settings_open";
 const OUTPUT_DEFS = [
 	{ name: "批量图像", type: COMPAT_TYPE, tooltip: "兼容 GJJ 批量图片和普通 IMAGE batch 的输出。" },
 	{ name: "宽度", type: "INT", tooltip: "最终输出图像的宽度。点击 🔌 可显示或收起。" },
@@ -24,13 +25,17 @@ const INTERNAL_WIDGET_INPUTS = new Set([
 	"prepend_frame",
 	"custom_size",
 	"custom_ratio",
+	"align_multiple",
 	"尺寸档位",
 	"画幅方向",
 	"前置帧",
 	"自定义尺寸",
 	"自定义比例",
+	"对齐倍数",
 ]);
-const HIDDEN_WIDGETS = new Set(["width", "height", "size_preset", "orientation", "prepend_frame", "custom_size", "custom_ratio"]);
+const HIDDEN_WIDGETS = new Set(["size_preset", "orientation", "prepend_frame", "custom_size", "custom_ratio"]);
+const NATIVE_SIZE_WIDGETS = new Set(["width", "height"]);
+const SETTINGS_NATIVE_WIDGETS = new Set(["width", "height", "align_multiple"]);
 const DEFAULT_VALUES = {
 	size_preset: "320",
 	orientation: "原始比例",
@@ -39,6 +44,7 @@ const DEFAULT_VALUES = {
 	height: 0,
 	custom_size: 0,
 	custom_ratio: "1:1",
+	align_multiple: "16",
 };
 
 const SIZE_DIMENSIONS = {
@@ -50,12 +56,12 @@ const SIZE_DIMENSIONS = {
 	"4K": { "横屏": [3840, 2160], "竖屏": [2160, 3840], "正方形": [3840, 3840] },
 };
 const SIZE_OPTIONS = [
-	{ value: "320", emoji: "3️⃣", tooltip: "320 档位。横屏 576 x 320，竖屏 320 x 576，正方形 320 x 320；最终尺寸按 16 对齐。" },
-	{ value: "480", emoji: "4️⃣", tooltip: "480 档位。横屏 864 x 480，竖屏 480 x 864，正方形 480 x 480；最终尺寸按 16 对齐。" },
-	{ value: "720", emoji: "7️⃣", tooltip: "720 档位。横屏 1280 x 720，竖屏 720 x 1280，正方形 720 x 720；最终尺寸按 16 对齐。" },
-	{ value: "1024", emoji: "1️⃣", tooltip: "1024 档位。横屏 1824 x 1024，竖屏 1024 x 1824，正方形 1024 x 1024；最终尺寸按 16 对齐。" },
-	{ value: "2K", emoji: "2️⃣", tooltip: "2K 档位。横屏 2048 x 1152，竖屏 1152 x 2048，正方形 2048 x 2048；最终尺寸按 16 对齐。" },
-	{ value: "4K", emoji: "#️⃣", tooltip: "4K 档位。横屏 3840 x 2160，竖屏 2160 x 3840，正方形 3840 x 3840；最终尺寸按 16 对齐。" },
+	{ value: "320", emoji: "3️⃣", tooltip: "320 档位。横屏 576 x 320，竖屏 320 x 576，正方形 320 x 320；最终尺寸按对齐倍数取整。" },
+	{ value: "480", emoji: "4️⃣", tooltip: "480 档位。横屏 864 x 480，竖屏 480 x 864，正方形 480 x 480；最终尺寸按对齐倍数取整。" },
+	{ value: "720", emoji: "7️⃣", tooltip: "720 档位。横屏 1280 x 720，竖屏 720 x 1280，正方形 720 x 720；最终尺寸按对齐倍数取整。" },
+	{ value: "1024", emoji: "1️⃣", tooltip: "1024 档位。横屏 1824 x 1024，竖屏 1024 x 1824，正方形 1024 x 1024；最终尺寸按对齐倍数取整。" },
+	{ value: "2K", emoji: "2️⃣", tooltip: "2K 档位。横屏 2048 x 1152，竖屏 1152 x 2048，正方形 2048 x 2048；最终尺寸按对齐倍数取整。" },
+	{ value: "4K", emoji: "#️⃣", tooltip: "4K 档位。横屏 3840 x 2160，竖屏 2160 x 3840，正方形 3840 x 3840；最终尺寸按对齐倍数取整。" },
 ];
 const ORIENTATION_OPTIONS = [
 	{ value: "原始比例", emoji: "🟧", tooltip: "原始比例。按第一张输入图的宽高比输出；没有输入图时按当前尺寸档位输出正方形。" },
@@ -78,6 +84,7 @@ function injectStyles() {
 	style.id = "gjj-image-batch-multi-style";
 	style.textContent = `
 		.gjj-ibm-controls{display:flex;flex-wrap:wrap;align-items:center;gap:4px;width:100%;box-sizing:border-box;padding:3px 0 2px}
+		.gjj-ibm-controls.settings-open .gjj-ibm-preset-control{display:none}
 		.gjj-ibm-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:24px;padding:0;border:1px solid #3b5360;border-radius:6px;background:#18242b;color:#dce7e2;font:14px/1 "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif;font-variant-emoji:emoji;cursor:pointer;box-sizing:border-box}
 		.gjj-ibm-icon{display:inline-flex;align-items:center;justify-content:center;font-family:"Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif;font-variant-emoji:emoji;line-height:1}
 		.gjj-ibm-btn:hover{background:#22333d;border-color:#5d7c8e}
@@ -123,8 +130,33 @@ function findWidget(node, name) {
 	return Array.isArray(node?.widgets) ? node.widgets.find((widget) => String(widget?.name || "") === name) : null;
 }
 
+function rememberNativeWidgetState(widget) {
+	if (!widget || widget.__gjjImageBatchMultiNativeState) return;
+	widget.options = widget.options || {};
+	widget.__gjjImageBatchMultiNativeState = {
+		type: widget.type,
+		hidden: widget.hidden,
+		disabled: widget.disabled,
+		computeSize: widget.computeSize,
+		getHeight: widget.getHeight,
+		draw: widget.draw,
+		mouse: widget.mouse,
+		label: widget.label,
+		localized_name: widget.localized_name,
+		y: widget.y,
+		last_y: widget.last_y,
+		optionsHidden: widget.options.hidden,
+		optionsDisplay: widget.options.display,
+		optionsDisplayName: widget.options.display_name,
+		elementDisplay: widget.element?.style?.display || "",
+		inputDisplay: widget.inputEl?.style?.display || "",
+		widgetDisplay: widget.widget?.style?.display || "",
+	};
+}
+
 function hideWidget(widget) {
 	if (!widget) return;
+	rememberNativeWidgetState(widget);
 	widget.__gjjImageBatchMultiHidden = true;
 	widget.hidden = true;
 	widget.disabled = true;
@@ -157,9 +189,54 @@ function hideWidget(widget) {
 	}
 }
 
+function restoreNativeWidget(widget) {
+	if (!widget) return;
+	rememberNativeWidgetState(widget);
+	const state = widget.__gjjImageBatchMultiNativeState || {};
+	widget.__gjjImageBatchMultiHidden = false;
+	widget.hidden = false;
+	widget.disabled = false;
+	widget.type = state.type && !String(state.type).startsWith("converted-widget:") ? state.type : "number";
+	if (state.computeSize) widget.computeSize = state.computeSize;
+	else delete widget.computeSize;
+	if (state.getHeight) widget.getHeight = state.getHeight;
+	else delete widget.getHeight;
+	if (state.draw) widget.draw = state.draw;
+	else delete widget.draw;
+	if (state.mouse) widget.mouse = state.mouse;
+	else delete widget.mouse;
+	widget.label = state.label || widget.name;
+	widget.localized_name = state.localized_name || widget.label || widget.name;
+	widget.y = Number.isFinite(Number(state.y)) ? state.y : 0;
+	widget.last_y = Number.isFinite(Number(state.last_y)) ? state.last_y : 0;
+	widget.options = widget.options || {};
+	if (state.optionsHidden === undefined) delete widget.options.hidden;
+	else widget.options.hidden = false;
+	if (state.optionsDisplay === undefined || state.optionsDisplay === "hidden") delete widget.options.display;
+	else widget.options.display = state.optionsDisplay || "number";
+	if (state.optionsDisplayName !== undefined) widget.options.display_name = state.optionsDisplayName;
+	for (const [element, display] of [
+		[widget.element, state.elementDisplay],
+		[widget.inputEl, state.inputDisplay],
+		[widget.widget, state.widgetDisplay],
+	]) {
+		if (!element?.style) continue;
+		element.style.display = display || "";
+		element.style.height = "";
+		element.style.minHeight = "";
+		element.style.margin = "";
+		element.style.padding = "";
+		element.style.border = "";
+		element.style.overflow = "";
+	}
+}
+
 function hideNativeWidgets(node) {
 	for (const name of HIDDEN_WIDGETS) {
 		hideWidget(findWidget(node, name));
+	}
+	if (!settingsOpen(node)) {
+		for (const name of SETTINGS_NATIVE_WIDGETS) hideWidget(findWidget(node, name));
 	}
 }
 
@@ -195,6 +272,7 @@ function ensureBackingWidgets(node) {
 		{ name: "height", type: "number", value: 0, options: { min: 0, max: 8192, step: 16 } },
 		{ name: "custom_size", type: "number", value: DEFAULT_VALUES.custom_size, options: { min: 0, max: 8192, step: 16 } },
 		{ name: "custom_ratio", type: "text", value: DEFAULT_VALUES.custom_ratio, options: {} },
+		{ name: "align_multiple", type: "combo", value: DEFAULT_VALUES.align_multiple, options: { values: ["2", "4", "8", "16", "32", "64"] } },
 	];
 	for (const def of defs) {
 		if (findWidget(node, def.name)) continue;
@@ -212,10 +290,24 @@ function readNumberWidget(node, name, fallback = 0) {
 	return Number.isFinite(value) ? value : fallback;
 }
 
-function alignTo16(value) {
+function readAlignMultiple(node) {
+	const value = String(readWidget(node, "align_multiple") || DEFAULT_VALUES.align_multiple).trim();
+	return ["2", "4", "8", "16", "32", "64"].includes(value) ? Number(value) : 16;
+}
+
+function alignToMultiple(value, multiple = 16) {
 	const number = Number(value);
-	if (!Number.isFinite(number)) return 16;
-	return Math.max(16, Math.round(Math.max(1, number) / 16) * 16);
+	const step = Math.max(1, Number(multiple) || 16);
+	if (!Number.isFinite(number)) return step;
+	return Math.max(step, Math.round(Math.max(1, number) / step) * step);
+}
+
+function alignNodeSize(node, value) {
+	return alignToMultiple(value, readAlignMultiple(node));
+}
+
+function alignTo16(value) {
+	return alignToMultiple(value, 16);
 }
 
 function gcd(a, b) {
@@ -287,7 +379,7 @@ function presetDimensions(sizePreset, orientation) {
 function customDimensions(node) {
 	const width = readNumberWidget(node, "width", 0);
 	const height = readNumberWidget(node, "height", 0);
-	return width > 0 && height > 0 ? [alignTo16(width), alignTo16(height)] : null;
+	return width > 0 && height > 0 ? [alignNodeSize(node, width), alignNodeSize(node, height)] : null;
 }
 
 function customActive(node) {
@@ -298,12 +390,25 @@ function effectiveDimensions(node) {
 	return customDimensions(node) || presetDimensions(readWidget(node, "size_preset"), readWidget(node, "orientation"));
 }
 
+function writeAlignedNativeSize(node, { fillDefault = false } = {}) {
+	const currentWidth = readNumberWidget(node, "width", 0);
+	const currentHeight = readNumberWidget(node, "height", 0);
+	const fallback = presetDimensions(readWidget(node, "size_preset"), readWidget(node, "orientation"));
+	const nextWidth = alignNodeSize(node, fillDefault && currentWidth <= 0 ? fallback[0] : (currentWidth || fallback[0]));
+	const nextHeight = alignNodeSize(node, fillDefault && currentHeight <= 0 ? fallback[1] : (currentHeight || fallback[1]));
+	writeWidget(node, "width", nextWidth);
+	writeWidget(node, "height", nextHeight);
+	syncControlButtons(node);
+	setDirty(node);
+}
+
 function refreshControlSize(node) {
 	const state = node?.__gjjImageBatchMultiControls;
 	if (!node || !state?.widget) return;
 	state.widget.computedHeight = state.widget.getHeight?.();
 	requestAnimationFrame(() => {
 		hideNativeWidgets(node);
+		syncNativeSizeWidgets(node);
 		const currentWidth = Math.max(220, Number(node.size?.[0] || 260));
 		const computed = node.computeSize?.();
 		const nextHeight = Math.max(80, Number(computed?.[1] || node.size?.[1] || 80));
@@ -345,9 +450,68 @@ function showExtraOutputs(node) {
 	return node?.properties?.[EXTRA_OUTPUTS_PROPERTY] === true;
 }
 
+function settingsOpen(node) {
+	return node?.properties?.[SETTINGS_OPEN_PROPERTY] === true;
+}
+
+function setSettingsOpen(node, open) {
+	node.properties = node.properties || {};
+	node.properties[SETTINGS_OPEN_PROPERTY] = Boolean(open);
+}
+
 function setExtraOutputsVisible(node, visible) {
 	node.properties = node.properties || {};
 	node.properties[EXTRA_OUTPUTS_PROPERTY] = Boolean(visible);
+}
+
+function findInput(node, name) {
+	return Array.isArray(node?.inputs) ? node.inputs.find((input) => String(input?.name || "") === name) : null;
+}
+
+function removeInputByName(node, name) {
+	if (!Array.isArray(node?.inputs)) return;
+	const index = node.inputs.findIndex((input) => String(input?.name || "") === name);
+	if (index < 0) return;
+	try { node.disconnectInput?.(index); } catch (_) {}
+	if (typeof node.removeInput === "function") {
+		node.removeInput(index);
+	} else {
+		node.inputs.splice(index, 1);
+	}
+}
+
+function ensureWidgetInput(node, name, type = "INT") {
+	if (!node || typeof node.addInput !== "function") return null;
+	let input = findInput(node, name);
+	if (!input) {
+		node.addInput(name, type);
+		input = findInput(node, name) || node.inputs?.[node.inputs.length - 1] || null;
+	}
+	if (!input) return null;
+	input.name = name;
+	input.label = name === "width" ? "自定义宽度" : "自定义高度";
+	input.localized_name = input.label;
+	input.type = type;
+	input.forceInput = false;
+	input.hidden = false;
+	input.visible = true;
+	input.widget = { name };
+	input.tooltip = `${input.label}外部输入；连接后覆盖面板中的 ${input.label}。0 表示使用尺寸档位和画幅方向。`;
+	return input;
+}
+
+function syncNativeSizeWidgets(node) {
+	const open = settingsOpen(node);
+	for (const name of SETTINGS_NATIVE_WIDGETS) {
+		const widget = findWidget(node, name);
+		if (open || (NATIVE_SIZE_WIDGETS.has(name) && findInput(node, name)?.link != null)) {
+			restoreNativeWidget(widget);
+			if (NATIVE_SIZE_WIDGETS.has(name)) ensureWidgetInput(node, name, "INT");
+		} else {
+			hideWidget(widget);
+			if (NATIVE_SIZE_WIDGETS.has(name)) removeInputByName(node, name);
+		}
+	}
 }
 
 function restoreExtraOutputState(node, serializedNode = null) {
@@ -488,10 +652,14 @@ function populateCustomPanel(node) {
 
 function setCustomPanelOpen(node, open) {
 	const state = node?.__gjjImageBatchMultiControls;
-	if (!state?.customPanel) return;
-	if (open) populateCustomPanel(node);
-	state.customPanel.hidden = !open;
+	if (!state) return;
+	setSettingsOpen(node, open);
+	if (open) writeAlignedNativeSize(node, { fillDefault: true });
+	if (state.customPanel) state.customPanel.hidden = true;
+	state.wrap?.classList.toggle("settings-open", open);
 	state.customButton?.classList.toggle("open", open);
+	state.customButton?.classList.toggle("on", open || customActive(node));
+	syncNativeSizeWidgets(node);
 	refreshControlSize(node);
 }
 
@@ -504,6 +672,11 @@ function exitCustomMode(node, refreshSize = true) {
 	if (state?.customPanel) {
 		state.customPanel.hidden = true;
 		state.customButton?.classList.remove("open");
+	}
+	if (settingsOpen(node)) {
+		setSettingsOpen(node, false);
+		state?.wrap?.classList.remove("settings-open");
+		syncNativeSizeWidgets(node);
 	}
 	if (refreshSize) refreshControlSize(node);
 }
@@ -550,11 +723,18 @@ function syncControlButtons(node) {
 			(item.group === "prepend_frame" && item.value === selectedPrepend);
 		item.button.classList.toggle("on", active);
 	}
-	state.customButton?.classList.toggle("on", selectedCustom);
+	state.wrap?.classList.toggle("settings-open", settingsOpen(node));
+	state.customButton?.classList.toggle("open", settingsOpen(node));
+	state.customButton?.classList.toggle("on", settingsOpen(node) || selectedCustom);
 	state.extraButton?.classList.toggle("on", showExtraOutputs(node));
 	if (state.summary) {
 		const frameText = selectedPrepend === "无" ? "无帧" : selectedPrepend;
-		if (selectedCustom) {
+		if (settingsOpen(node)) {
+			const [width, height] = effectiveDimensions(node);
+			const align = readAlignMultiple(node);
+			state.summary.textContent = `${frameText} 宽高 ${width}x${height} / ${align}`;
+			state.summary.title = `设置模式：使用原生宽度 / 高度 / 对齐倍数控件；宽高可从左侧输入点外部拉线。执行时宽高会按 ${align} 对齐。`;
+		} else if (selectedCustom) {
 			const [width, height] = customDimensions(node);
 			const ratio = String(readWidget(node, "custom_ratio") || ratioTextFromDimensions(width, height)).trim();
 			state.summary.textContent = `${frameText} 自定 ${width}x${height}`;
@@ -570,6 +750,9 @@ function addButton(node, wrap, state, group, option) {
 	const button = document.createElement("button");
 	button.type = "button";
 	button.className = "gjj-ibm-btn";
+	if (group === "size_preset" || group === "orientation") {
+		button.classList.add("gjj-ibm-preset-control");
+	}
 	const icon = document.createElement("span");
 	icon.className = "gjj-ibm-icon";
 	icon.textContent = option.emoji;
@@ -599,6 +782,7 @@ function addSeparator(wrap) {
 	sep.className = "gjj-ibm-sep";
 	sep.textContent = "|";
 	wrap.appendChild(sep);
+	return sep;
 }
 
 function makeCustomField(label, input) {
@@ -701,9 +885,11 @@ function ensureControls(node) {
 	const state = { buttons: [] };
 
 	for (const option of PREPEND_OPTIONS) addButton(node, wrap, state, "prepend_frame", option);
-	addSeparator(wrap);
+	const sizeSep = addSeparator(wrap);
+	sizeSep.classList.add("gjj-ibm-preset-control");
 	for (const option of SIZE_OPTIONS) addButton(node, wrap, state, "size_preset", option);
-	addSeparator(wrap);
+	const orientationSep = addSeparator(wrap);
+	orientationSep.classList.add("gjj-ibm-preset-control");
 	for (const option of ORIENTATION_OPTIONS) addButton(node, wrap, state, "orientation", option);
 	const customButton = document.createElement("button");
 	customButton.type = "button";
@@ -712,11 +898,11 @@ function ensureControls(node) {
 	customIcon.className = "gjj-ibm-icon";
 	customIcon.textContent = "⚙️";
 	customButton.appendChild(customIcon);
-	customButton.title = "自定义尺寸 / 比例。应用后会覆盖图标档位和方向；清除后恢复档位。";
+	customButton.title = "显示 / 收起原生宽度、高度和对齐倍数；宽高可外部拉线。";
 	shieldControlEvents(customButton);
 	customButton.addEventListener("click", (event) => {
 		stopCanvasEvent(event);
-		setCustomPanelOpen(node, state.customPanel?.hidden !== false);
+		setCustomPanelOpen(node, !settingsOpen(node));
 	});
 	wrap.appendChild(customButton);
 	state.customButton = customButton;
@@ -904,6 +1090,7 @@ function currentSignature(node) {
 		`prepend:${normalizePrepend(readWidget(node, "prepend_frame"))}`,
 		`extra:${showExtraOutputs(node) ? 1 : 0}`,
 		`custom:${readNumberWidget(node, "width", 0)}x${readNumberWidget(node, "height", 0)}:${readNumberWidget(node, "custom_size", 0)}:${readWidget(node, "custom_ratio")}`,
+		`align:${readWidget(node, "align_multiple")}`,
 	].join("|");
 }
 

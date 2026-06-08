@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import gc
+import base64
+import io
 import re
+import time
 from typing import Any
 
 import comfy.model_management
@@ -68,6 +71,97 @@ def _send_status(unique_id: Any, text: str, progress: float | None = None) -> No
         PromptServer.instance.send_sync("gjj_node_progress", payload)
     except Exception:
         pass
+
+
+def _send_clear_status(unique_id: Any) -> None:
+    if not unique_id:
+        return
+    try:
+        from server import PromptServer
+
+        PromptServer.instance.send_sync(
+            "gjj_node_progress",
+            {"node": str(unique_id), "text": "", "progress": 1.0, "clear_status": True},
+        )
+    except Exception:
+        pass
+
+
+def _pil_to_data_url(image: Any, fmt: str = "JPEG", max_edge: int = 512) -> str:
+    if image is None:
+        return ""
+    try:
+        img = image.copy()
+        img.thumbnail((max_edge, max_edge))
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        buffer = io.BytesIO()
+        image_format = "PNG" if str(fmt).upper() == "PNG" else "JPEG"
+        save_kwargs = {"quality": 82} if image_format == "JPEG" else {}
+        img.save(buffer, format=image_format, **save_kwargs)
+        mime = "image/png" if image_format == "PNG" else "image/jpeg"
+        return f"data:{mime};base64,{base64.b64encode(buffer.getvalue()).decode('ascii')}"
+    except Exception:
+        return ""
+
+
+def _send_sampling_preview(
+    unique_id: Any,
+    image_data_url: str,
+    step: int,
+    total_steps: int,
+    progress: float,
+) -> None:
+    if not unique_id or not image_data_url:
+        return
+    try:
+        from server import PromptServer
+
+        PromptServer.instance.send_sync(
+            "gjj_ltxv_sampler_preview",
+            {
+                "node": str(unique_id),
+                "image": image_data_url,
+                "step": int(step),
+                "total": int(total_steps),
+                "progress": max(0.0, min(1.0, float(progress))),
+            },
+        )
+    except Exception:
+        pass
+
+
+def _make_sampling_callback(model_patcher: Any, steps: int, x0_output: dict[str, Any] | None, unique_id: Any):
+    preview_format = "JPEG"
+    previewer = latent_preview.get_previewer(model_patcher.load_device, model_patcher.model.latent_format)
+    pbar = comfy.utils.ProgressBar(steps)
+    last_sent = 0.0
+
+    def callback(step, x0, x, total_steps):
+        nonlocal last_sent
+        if x0_output is not None:
+            x0_output["x0"] = x0
+
+        preview_bytes = None
+        image_data_url = ""
+        if previewer:
+            try:
+                preview_bytes = previewer.decode_latent_to_preview_image(preview_format, x0)
+                now = time.monotonic()
+                is_last = int(step) + 1 >= int(total_steps)
+                if is_last or now - last_sent >= 0.35:
+                    fmt, image, max_edge = preview_bytes
+                    image_data_url = _pil_to_data_url(image, fmt, max_edge)
+                    last_sent = now
+            except Exception:
+                preview_bytes = None
+
+        pbar.update_absolute(step + 1, total_steps, preview_bytes)
+        if image_data_url:
+            progress = (int(step) + 1) / max(1, int(total_steps))
+            _send_sampling_preview(unique_id, image_data_url, int(step) + 1, int(total_steps), progress)
+
+    return callback
 
 
 def _parse_sigmas_text(sigmas: str) -> torch.Tensor:
@@ -333,6 +427,7 @@ class GJJ_LTXVVideoSampler:
         x0_out = None
         out = None
         out_denoised = None
+        completed = False
 
         _send_status(unique_id, "1/5 准备 LTXV 采样参数...", 0.08)
         seed = _as_int(noise_seed, 42, 0, 0xffffffffffffffff)
@@ -358,7 +453,7 @@ class GJJ_LTXVVideoSampler:
 
         output_denoised = bool(output_denoised)
         x0_output = {} if output_denoised else None
-        callback = latent_preview.prepare_callback(guider.model_patcher, sigmas_tensor.shape[-1] - 1, x0_output)
+        callback = _make_sampling_callback(guider.model_patcher, sigmas_tensor.shape[-1] - 1, x0_output, unique_id)
         disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
 
         try:
@@ -392,6 +487,7 @@ class GJJ_LTXVVideoSampler:
                 out_denoised = out
 
             _send_status(unique_id, "5/5 LTXV 采样完成", 1.0)
+            completed = True
             return (out, out_denoised)
         finally:
             try:
@@ -417,6 +513,8 @@ class GJJ_LTXVVideoSampler:
                     pass
                 guider = None
                 _cleanup_cuda()
+            if completed:
+                _send_clear_status(unique_id)
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_LTXVVideoSampler}

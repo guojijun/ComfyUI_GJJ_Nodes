@@ -35,6 +35,7 @@ const NODE_THEME_OVERRIDES = {
 		text: "#FFE6CC",
 	},
 };
+const USER_COLOR_THEME_PROPERTY = "gjj_color_theme";
 
 function isGjjCategory(category) {
 	return typeof category === "string" && category.startsWith(GJJ_THEME.categoryPrefix);
@@ -49,6 +50,14 @@ function themeForNode(node, nodeData = null) {
 }
 
 function applyTheme(node, nodeData = null) {
+	const userTheme = node?.properties?.[USER_COLOR_THEME_PROPERTY];
+	if (userTheme && typeof userTheme === "object") {
+		node.color = userTheme.header || node.color;
+		node.bgcolor = userTheme.panel || node.bgcolor;
+		node.boxcolor = userTheme.outline || node.boxcolor;
+		node.fgcolor = userTheme.text || node.fgcolor;
+		return;
+	}
 	const theme = themeForNode(node, nodeData);
 	node.color = theme.header;
 	node.bgcolor = theme.panel;

@@ -8,8 +8,14 @@ import { api } from "/scripts/api.js";
 	const TOOLBAR_ID = "gjj-workflow-screenshot-toolbar";
 	const SAVE_BUTTON_ID = "gjj-workflow-screenshot-save-button";
 	const OPEN_BUTTON_ID = "gjj-workflow-screenshot-open-button";
+	const COLOR_BUTTON_ID = "gjj-workflow-node-color-button";
+	const COLOR_PANEL_ID = "gjj-workflow-node-color-panel";
 	const PREVIEW_OVERLAY_ID = "gjj-workflow-screenshot-preview-overlay";
 	const STYLE_ID = "gjj-workflow-screenshot-save-style";
+	const COLOR_THEME_PROPERTY = "gjj_color_theme";
+	const USER_SETTINGS_ENDPOINT = "/gjj/user_settings";
+	const NODE_COLOR_SETTINGS_SECTION = "node_color_theme";
+	const CUSTOM_NODE_COLOR_STYLE_ID = "custom";
 	const CROP_MARGIN_PX = 52;
 	const FIT_MARGIN_PX = 112;
 	const MIN_FIT_SCALE = 0.08;
@@ -51,6 +57,35 @@ import { api } from "/scripts/api.js";
 		{ mode: "title_asc", label: "🏷️标题", title: "按工作流标题排序" },
 		{ mode: "openable_first", label: "✅可打开", title: "可打开的截图优先显示" },
 	];
+	const DEFAULT_NODE_COLOR_STYLES = [
+		{ id: "balanced", label: "默认辨识", sample: "默认", header: "#1B252B", panel: "#141B1F", outline: "#3E4D54", text: "#E6F0EB", palette: ["#2D78A8", "#6F5CC4", "#B8741A", "#2E8C61", "#38A86B", "#B85670", "#7D56A8", "#9A4F8A", "#2B86A6", "#9B6A22", "#A54E6C", "#59636B"] },
+		{ id: "contrast", label: "高反差", sample: "高反", header: "#222831", panel: "#101418", outline: "#BFC9D4", text: "#F7FBFF", palette: ["#2563EB", "#A855F7", "#F59E0B", "#22C55E", "#00D1FF", "#FF3B80", "#7C3AED", "#EF4444", "#14B8A6", "#EAB308", "#EC4899", "#94A3B8"] },
+		{ id: "warm_cool", label: "冷暖分区", sample: "冷暖", header: "#243141", panel: "#111923", outline: "#5B84B1", text: "#ECF7FF", palette: ["#2E74B5", "#775FC7", "#D17A22", "#27A064", "#49B487", "#B65072", "#8B5FBF", "#B1538B", "#2D9CB2", "#C98A2B", "#C05A76", "#5D6874"] },
+		{ id: "soft", label: "柔和辨识", sample: "柔和", header: "#34413D", panel: "#17201D", outline: "#7EA89B", text: "#F0FAF5", palette: ["#5D89A8", "#8072B2", "#A98248", "#5A9A77", "#69A98A", "#A76F82", "#8770AA", "#A1719A", "#5C9AA6", "#A48852", "#A67283", "#68757A"] },
+		{ id: "vivid", label: "鲜明标签", sample: "鲜明", header: "#20242C", panel: "#101218", outline: "#94A3B8", text: "#FFFFFF", palette: ["#3B82F6", "#8B5CF6", "#F97316", "#10B981", "#06B6D4", "#F43F5E", "#7C3AED", "#D946EF", "#0EA5E9", "#F59E0B", "#E11D48", "#64748B"] },
+		{ id: "dim", label: "深调低扰", sample: "深调", header: "#252A2F", panel: "#111417", outline: "#4F5963", text: "#E6EEF2", palette: ["#244D73", "#504287", "#77501E", "#236B4B", "#28705A", "#6E3348", "#5B3B78", "#693B63", "#255D69", "#735222", "#75384B", "#424B52"] },
+		{ id: "safe", label: "色盲友好", sample: "友好", header: "#263238", panel: "#11191D", outline: "#78909C", text: "#F1F8FA", palette: ["#0072B2", "#CC79A7", "#D55E00", "#009E73", "#56B4E9", "#E69F00", "#785EF0", "#F0E442", "#00A6A6", "#B5651D", "#A23B72", "#666666"] },
+	];
+	const DEFAULT_NODE_COLOR_BIG_CATEGORIES = [
+		{ id: "input", label: "输入", styleId: "ocean", color: "#1D4F74", pattern: /(?:^|\b)(GJJ_LoraChainConfig|GJJ_MultiLoraChainLoader|GJJ_VideoUniversalModelLoader|GJJ_VideoKijaiModelLoader|GJJ_TemplateParams|GJJ_ModelBundleLoader)(?:\b|$)|输入|加载|读取|上传|load|loader|input|image.*load|video.*load|audio.*load|text.*input|prompt.*relay/i },
+		{ id: "guide", label: "引导", styleId: "violet", color: "#6F5CC4", pattern: /(?:^|\b)(GJJ_LTX2NAG|GJJ_LTX_FirstLastFrame)(?:\b|$)|引导|guide|nag|first.*last|firstlast|首尾帧/i },
+		{ id: "sample", label: "采样", styleId: "amber", color: "#8A5A16", pattern: /采样|sampler|sample|scheduler|cfg|steps|ksampler|wanvideo.*sampler|video.*sampler/i },
+		{ id: "output", label: "输出", styleId: "emerald", color: "#17614A", pattern: /输出|保存|预览|save|preview|viewer|display|export|combine|输出目录|write/i },
+		{ id: "decode", label: "解码", styleId: "emerald", color: "#17614A", pattern: /解码|decode|decoder|vae.*decode|decode.*vae|video.*decode|latent.*decode/i },
+		{ id: "encode", label: "编码", styleId: "rose", color: "#8B3655", pattern: /编码|encode|encoder|vae.*encode|clip.*encode|text.*encode|video.*encode|latent.*encode/i },
+		{ id: "model", label: "模型", styleId: "violet", color: "#5A3E8A", pattern: /模型|调用|检查点|checkpoint|ckpt|unet|clip|vae|lora|controlnet|model|bundle|sam\d?|whisper|ollama|qwen|wan|ltx/i },
+		{ id: "prompt", label: "提示", styleId: "rose", color: "#8B3655", pattern: /提示|文本|翻译|prompt|text|caption|translate|tag|positive|negative/i },
+		{ id: "image", label: "图像", styleId: "ocean", color: "#1D4F74", pattern: /图像|图片|蒙版|遮罩|抠图|裁剪|缩放|拼图|image|mask|matting|crop|resize|collage|grid|rgba/i },
+		{ id: "video", label: "视频", styleId: "amber", color: "#8A5A16", pattern: /视频|帧|轨迹|插帧|video|frame|rife|ltx|wan|trajectory|track/i },
+		{ id: "audio", label: "音频", styleId: "rose", color: "#8B3655", pattern: /音频|语音|说话|分离|audio|voice|tts|asr|whisper|speaker|music|sound/i },
+		{ id: "tool", label: "工具", styleId: "graphite", color: "#343A40", pattern: /工具|计算|路由|开关|合并|拆分|管理|tool|router|switch|merge|split|math|manager|group|bypass/i },
+	];
+	let nodeColorCustomPalette = DEFAULT_NODE_COLOR_STYLES[0].palette.slice();
+	let nodeColorStyles = DEFAULT_NODE_COLOR_STYLES.map((style) => ({ ...style }));
+	let nodeColorBigCategories = DEFAULT_NODE_COLOR_BIG_CATEGORIES.map((category) => ({ ...category }));
+	let nodeColorSelectedStyleId = "balanced";
+	let nodeColorSettingsPromise = null;
+	let nodeColorSettingsSaveTimer = null;
 	let crcTable = null;
 	let busy = false;
 	let previewItems = [];
@@ -68,6 +103,328 @@ import { api } from "/scripts/api.js";
 
 	function graphNodes() {
 		return Array.isArray(app?.graph?._nodes) ? app.graph._nodes.filter(Boolean) : [];
+	}
+
+	function dirtyCanvas() {
+		try { app?.graph?.setDirtyCanvas?.(true, true); } catch (_) {}
+		try { app?.canvas?.setDirty?.(true, true); } catch (_) {}
+	}
+
+	function selectedGraphNodes() {
+		const selected = app?.canvas?.selected_nodes;
+		if (!selected) return [];
+		if (selected instanceof Map) return Array.from(selected.values()).filter(Boolean);
+		if (Array.isArray(selected)) return selected.filter(Boolean);
+		return Object.values(selected).filter(Boolean);
+	}
+
+	function nodeCategoryName(node) {
+		const category = node?.category
+			|| node?.constructor?.category
+			|| node?.constructor?.nodeData?.category
+			|| node?.constructor?.comfyClass?.category
+			|| "";
+		if (category) return String(category);
+		const type = String(node?.comfyClass || node?.type || node?.title || "未分类");
+		if (/^GJJ/i.test(type)) return "GJJ";
+		const head = type.split(/[/:._-]/).filter(Boolean)[0];
+		return head || "未分类";
+	}
+
+	function sortedNodeCategories(nodes = graphNodes()) {
+		const categories = new Set();
+		for (const node of nodes) categories.add(nodeCategoryName(node));
+		return Array.from(categories).sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+	}
+
+	function colorStyleById(styleId) {
+		return nodeColorStyles.find((style) => style.id === styleId) || nodeColorStyles[0];
+	}
+
+	function customNodeColorStyle() {
+		return {
+			id: CUSTOM_NODE_COLOR_STYLE_ID,
+			label: "自定义",
+			sample: "自定",
+			header: "#29323A",
+			panel: "#11171C",
+			outline: "#6C7A86",
+			text: "#F2F8FA",
+			palette: nodeColorCustomPalette.slice(),
+		};
+	}
+
+	function rebuildNodeColorStyles() {
+		nodeColorStyles = [
+			...DEFAULT_NODE_COLOR_STYLES.map((style) => ({ ...style, palette: style.palette.slice() })),
+			customNodeColorStyle(),
+		];
+	}
+
+	function normalizeHexColor(value, fallback = "#343A40") {
+		const text = String(value || "").trim();
+		return /^#[0-9a-fA-F]{6}$/.test(text) ? text.toUpperCase() : fallback;
+	}
+
+	function styleFromHeaderColor(baseStyle, color) {
+		const header = normalizeHexColor(color, baseStyle.header);
+		const panel = mixHex(header, "#05080A", 0.72);
+		const outline = mixHex(header, "#FFFFFF", 0.28);
+		return {
+			...baseStyle,
+			header,
+			panel,
+			outline,
+		};
+	}
+
+	function hexToRgb(hex) {
+		const text = normalizeHexColor(hex).slice(1);
+		return {
+			r: parseInt(text.slice(0, 2), 16),
+			g: parseInt(text.slice(2, 4), 16),
+			b: parseInt(text.slice(4, 6), 16),
+		};
+	}
+
+	function rgbToHex({ r, g, b }) {
+		const part = (value) => Math.round(Math.max(0, Math.min(255, value))).toString(16).padStart(2, "0");
+		return `#${part(r)}${part(g)}${part(b)}`.toUpperCase();
+	}
+
+	function mixHex(a, b, amount = 0.5) {
+		const first = hexToRgb(a);
+		const second = hexToRgb(b);
+		return rgbToHex({
+			r: first.r * (1 - amount) + second.r * amount,
+			g: first.g * (1 - amount) + second.g * amount,
+			b: first.b * (1 - amount) + second.b * amount,
+		});
+	}
+
+	function compactNodeColorSettings() {
+		return {
+			version: 1,
+			selected_style_id: nodeColorSelectedStyleId,
+			custom_palette: nodeColorCustomPalette.map((color) => normalizeHexColor(color)),
+			big_categories: nodeColorBigCategories.map((category) => ({
+				id: category.id,
+				label: category.label,
+				styleId: category.styleId,
+				color: normalizeHexColor(category.color, colorStyleById(category.styleId).header),
+			})),
+		};
+	}
+
+	function applyNodeColorSettings(rawSettings) {
+		const rawCategories = Array.isArray(rawSettings?.big_categories) ? rawSettings.big_categories : [];
+		const rawCustomPalette = Array.isArray(rawSettings?.custom_palette) ? rawSettings.custom_palette : [];
+		if (rawCustomPalette.length) {
+			nodeColorCustomPalette = DEFAULT_NODE_COLOR_BIG_CATEGORIES.map((category, index) => {
+				return normalizeHexColor(rawCustomPalette[index], category.color);
+			});
+		}
+		rebuildNodeColorStyles();
+		const savedStyleId = String(rawSettings?.selected_style_id || "").trim();
+		if (nodeColorStyles.some((style) => style.id === savedStyleId)) {
+			nodeColorSelectedStyleId = savedStyleId;
+		}
+		nodeColorBigCategories = DEFAULT_NODE_COLOR_BIG_CATEGORIES.map((category) => {
+			const saved = rawCategories.find((item) => item?.id === category.id);
+			const color = normalizeHexColor(saved?.color, category.color || colorStyleById(category.styleId).header);
+			return {
+				...category,
+				styleId: saved?.styleId || category.styleId,
+				color,
+			};
+		});
+	}
+
+	async function loadNodeColorSettings() {
+		if (!nodeColorSettingsPromise) {
+			nodeColorSettingsPromise = apiJson(USER_SETTINGS_ENDPOINT)
+				.then((data) => {
+					applyNodeColorSettings(data?.settings?.[NODE_COLOR_SETTINGS_SECTION]);
+					return nodeColorBigCategories;
+				})
+				.catch((error) => {
+					console.warn("[GJJ] 节点配色用户设置读取失败：", error);
+					return nodeColorBigCategories;
+				});
+		}
+		return nodeColorSettingsPromise;
+	}
+
+	function scheduleNodeColorSettingsSave() {
+		clearTimeout(nodeColorSettingsSaveTimer);
+		const values = compactNodeColorSettings();
+		nodeColorSettingsSaveTimer = setTimeout(() => {
+			apiJson(USER_SETTINGS_ENDPOINT, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					section: NODE_COLOR_SETTINGS_SECTION,
+					values,
+				}),
+			}).catch((error) => {
+				console.warn("[GJJ] 节点配色用户设置保存失败：", error);
+			});
+		}, 420);
+	}
+
+	async function saveNodeColorSettingsNow() {
+		clearTimeout(nodeColorSettingsSaveTimer);
+		return apiJson(USER_SETTINGS_ENDPOINT, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				section: NODE_COLOR_SETTINGS_SECTION,
+				values: compactNodeColorSettings(),
+			}),
+		});
+	}
+
+	function nodeSearchText(node) {
+		return [
+			node?.title,
+			node?.type,
+			node?.comfyClass,
+			node?.constructor?.type,
+			node?.constructor?.comfyClass,
+			nodeCategoryName(node),
+		].filter(Boolean).join(" ");
+	}
+
+	function bigCategoryForNode(node) {
+		const text = nodeSearchText(node);
+		return nodeColorBigCategories.find((category) => category.pattern.test(text))
+			|| nodeColorBigCategories[nodeColorBigCategories.length - 1];
+	}
+
+	function applyNodeColor(node, style) {
+		if (!node || !style) return false;
+		node.color = style.header;
+		node.bgcolor = style.panel;
+		node.boxcolor = style.outline;
+		node.fgcolor = style.text;
+		node.properties ||= {};
+		node.properties[COLOR_THEME_PROPERTY] = {
+			id: style.id,
+			label: style.label,
+			header: style.header,
+			panel: style.panel,
+			outline: style.outline,
+			text: style.text,
+		};
+		return true;
+	}
+
+	function clearNodeColor(node) {
+		if (!node) return false;
+		const defaultStyle = {
+			id: "balanced",
+			label: "默认",
+			header: "#1B252B",
+			panel: "#141B1F",
+			outline: "#3E4D54",
+			text: "#E6F0EB",
+		};
+		node.color = defaultStyle.header;
+		node.bgcolor = defaultStyle.panel;
+		node.boxcolor = defaultStyle.outline;
+		node.fgcolor = defaultStyle.text;
+		if (node.properties && Object.prototype.hasOwnProperty.call(node.properties, COLOR_THEME_PROPERTY)) {
+			delete node.properties[COLOR_THEME_PROPERTY];
+		}
+		return true;
+	}
+
+	function nodesForColorScope() {
+		const nodes = graphNodes();
+		const selected = selectedGraphNodes();
+		return selected.length ? selected : nodes;
+	}
+
+	function scopeLabel() {
+		const selected = selectedGraphNodes().length;
+		return selected ? `选中${selected}` : `全部${graphNodes().length}`;
+	}
+
+	function applyBigCategoryColors(nodes) {
+		const summary = new Map();
+		let count = 0;
+		for (const node of nodes) {
+			const category = bigCategoryForNode(node);
+			const style = styleFromHeaderColor(colorStyleById(category.styleId), category.color);
+			if (!applyNodeColor(node, style)) continue;
+			node.properties ||= {};
+			node.properties[COLOR_THEME_PROPERTY].big_category = category.id;
+			node.properties[COLOR_THEME_PROPERTY].big_category_label = category.label;
+			summary.set(category.label, (summary.get(category.label) || 0) + 1);
+			count += 1;
+		}
+		return { count, summary };
+	}
+
+	function colorForCategoryStyle(style, category, index) {
+		const palette = Array.isArray(style.palette) && style.palette.length ? style.palette : [];
+		return normalizeHexColor(palette[index % palette.length], category.color);
+	}
+
+	function applyStyleToBigCategories(panel, style) {
+		nodeColorSelectedStyleId = style.id;
+		nodeColorBigCategories = nodeColorBigCategories.map((category, index) => ({
+			...category,
+			styleId: style.id,
+			color: colorForCategoryStyle(style, category, index),
+		}));
+		scheduleNodeColorSettingsSave();
+		const { count, summary } = applyBigCategoryColors(nodesForColorScope());
+		dirtyCanvas();
+		const button = document.getElementById(COLOR_BUTTON_ID);
+		const openPanel = rebuildNodeColorPanel();
+		openPanel.classList.add("gjj-open");
+		positionNodeColorPanel(button, openPanel);
+		const detail = Array.from(summary.entries()).map(([name, value]) => `${name}${value}`).join(" / ");
+		setNodeColorStatus(openPanel || panel, `${scopeLabel()}：${style.label}已区分 ${count} 个节点：${detail}`, "ok");
+	}
+
+	async function saveCustomNodeColorStyle(panel) {
+		nodeColorCustomPalette = DEFAULT_NODE_COLOR_BIG_CATEGORIES.map((category, index) => {
+			const current = nodeColorBigCategories.find((item) => item.id === category.id);
+			return normalizeHexColor(current?.color, category.color);
+		});
+		nodeColorSelectedStyleId = CUSTOM_NODE_COLOR_STYLE_ID;
+		rebuildNodeColorStyles();
+		nodeColorBigCategories = nodeColorBigCategories.map((category) => ({
+			...category,
+			styleId: CUSTOM_NODE_COLOR_STYLE_ID,
+		}));
+		applyBigCategoryColors(nodesForColorScope());
+		dirtyCanvas();
+		try {
+			await saveNodeColorSettingsNow();
+			const button = document.getElementById(COLOR_BUTTON_ID);
+			const openPanel = rebuildNodeColorPanel();
+			openPanel.classList.add("gjj-open");
+			positionNodeColorPanel(button, openPanel);
+			setNodeColorStatus(openPanel, "已保存为自定方案。", "ok");
+		} catch (error) {
+			console.warn("[GJJ] 保存自定义节点配色失败：", error);
+			setNodeColorStatus(panel, `保存失败：${error?.message || error}`, "warn");
+		}
+	}
+
+	function clearColorScope(panel) {
+		const targets = nodesForColorScope();
+		if (!targets.length) {
+			setNodeColorStatus(panel, "没有可清除的节点。", "warn");
+			return;
+		}
+		let count = 0;
+		for (const node of targets) if (clearNodeColor(node)) count += 1;
+		dirtyCanvas();
+		setNodeColorStatus(panel, `${scopeLabel()}：已恢复 ${count} 个节点的默认颜色。`, "ok");
 	}
 
 	function graphGroups() {
@@ -121,6 +478,11 @@ import { api } from "/scripts/api.js";
 			merged.outputs = liveNode.outputs || merged.outputs;
 			merged.widgets = liveNode.widgets || merged.widgets;
 			merged.flags = liveNode.flags || merged.flags;
+			merged.properties = liveNode.properties || merged.properties;
+			merged.color = liveNode.color || merged.color;
+			merged.bgcolor = liveNode.bgcolor || merged.bgcolor;
+			merged.boxcolor = liveNode.boxcolor || merged.boxcolor;
+			merged.fgcolor = liveNode.fgcolor || merged.fgcolor;
 		}
 		return merged;
 	}
@@ -1169,6 +1531,21 @@ import { api } from "/scripts/api.js";
 		return String(slot?.label || slot?.localized_name || slot?.name || fallback || "").trim();
 	}
 
+	function nodeScreenshotColors(node, isGjj) {
+		const live = node?.__liveNode || null;
+		const properties = live?.properties || node?.properties || {};
+		const theme = properties?.[COLOR_THEME_PROPERTY];
+		const fallback = isGjj
+			? { panel: "#111C1F", header: "#172B2B", outline: "#67BA97", text: "#EDF3EF" }
+			: { panel: "#15191D", header: "#20262B", outline: "#768B94", text: "#EDF3EF" };
+		return {
+			panel: normalizeHexColor(theme?.panel || live?.bgcolor || node?.bgcolor, fallback.panel),
+			header: normalizeHexColor(theme?.header || live?.color || node?.color, fallback.header),
+			outline: normalizeHexColor(theme?.outline || live?.boxcolor || node?.boxcolor, fallback.outline),
+			text: normalizeHexColor(theme?.text || live?.fgcolor || node?.fgcolor, fallback.text),
+		};
+	}
+
 	function widgetSummary(node) {
 		const live = node?.__liveNode || null;
 		const widgets = Array.isArray(live?.widgets) ? live.widgets : (Array.isArray(node?.widgets) ? node.widgets : []);
@@ -1653,9 +2030,10 @@ import { api } from "/scripts/api.js";
 			}
 			const header = Math.min(34, Math.max(26, h * 0.22));
 			const isGjj = /GJJ|guojijun|国纪军/i.test(`${node?.type || ""} ${nodeLabel(node)}`);
-			const fill = isGjj ? "#111c1f" : "#15191d";
-			const headerFill = isGjj ? "#172b2b" : "#20262b";
-			const stroke = isGjj ? "rgba(103,186,151,.72)" : "rgba(118,139,148,.62)";
+			const colors = nodeScreenshotColors(node, isGjj);
+			const fill = colors.panel;
+			const headerFill = colors.header;
+			const stroke = colors.outline;
 
 			ctx.fillStyle = fill;
 			drawRoundedRect(ctx, x, y, w, h, 8);
@@ -1672,7 +2050,7 @@ import { api } from "/scripts/api.js";
 			ctx.fillRect(x, y, w, header);
 			ctx.restore();
 
-			ctx.fillStyle = "#edf3ef";
+			ctx.fillStyle = colors.text;
 			ctx.font = "800 13px sans-serif";
 			ctx.fillText(ellipsizeText(ctx, nodeLabel(node), Math.max(30, w - 22)), x + 11, y + header * 0.65);
 
@@ -2849,6 +3227,11 @@ import { api } from "/scripts/api.js";
 		document.addEventListener("keydown", (event) => {
 			const key = String(event.key || "").toLowerCase();
 			const previewOpen = isPreviewOpen();
+			if (key === "escape" && document.getElementById(COLOR_PANEL_ID)?.classList.contains("gjj-open")) {
+				event.preventDefault();
+				closeNodeColorPanel();
+				return;
+			}
 			if (previewOpen && key === "escape") {
 				event.preventDefault();
 				closePreviewOverlay();
@@ -2874,6 +3257,18 @@ import { api } from "/scripts/api.js";
 				event.preventDefault();
 				showScreenshotPreview();
 			}
+		}, true);
+	}
+
+	function installNodeColorPanelDismiss() {
+		if (window.__gjjNodeColorPanelDismissInstalled) return;
+		window.__gjjNodeColorPanelDismissInstalled = true;
+		document.addEventListener("pointerdown", (event) => {
+			const panel = document.getElementById(COLOR_PANEL_ID);
+			if (!panel?.classList.contains("gjj-open")) return;
+			if (panel.contains(event.target)) return;
+			if (document.getElementById(COLOR_BUTTON_ID)?.contains(event.target)) return;
+			closeNodeColorPanel();
 		}, true);
 	}
 
@@ -2937,6 +3332,189 @@ import { api } from "/scripts/api.js";
 #${TOOLBAR_ID} .gjj-workflow-screenshot-button.gjj-saved {
 	border-color: rgba(113, 219, 150, .95);
 	background: rgba(36, 86, 56, .96);
+}
+#${COLOR_PANEL_ID} {
+	position: fixed;
+	z-index: 13020;
+	display: none;
+	width: min(392px, calc(100vw - 24px));
+	padding: 12px;
+	border: 1px solid rgba(117, 137, 148, .46);
+	border-radius: 8px;
+	background: #101519;
+	color: #e8f0ec;
+	box-shadow: 0 18px 50px rgba(0, 0, 0, .46);
+	box-sizing: border-box;
+}
+#${COLOR_PANEL_ID}.gjj-open {
+	display: block;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	margin-bottom: 10px;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-title {
+	font: 800 14px/20px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "Segoe UI", sans-serif;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-scope {
+	margin-left: auto;
+	padding: 0 7px;
+	border: 1px solid rgba(117, 137, 148, .28);
+	border-radius: 999px;
+	background: #151d22;
+	color: #aebbc1;
+	font: 800 11px/20px "Segoe UI", sans-serif;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-close,
+#${COLOR_PANEL_ID} .gjj-node-color-clear,
+#${COLOR_PANEL_ID} .gjj-node-color-save {
+	width: 26px;
+	height: 26px;
+	padding: 0;
+	border: 1px solid rgba(117, 137, 148, .42);
+	border-radius: 6px;
+	background: #1b242a;
+	color: #edf6f1;
+	font: 700 14px/24px "Segoe UI", sans-serif;
+	cursor: pointer;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-clear,
+#${COLOR_PANEL_ID} .gjj-node-color-save {
+	font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "Segoe UI", sans-serif;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-grid {
+	display: grid;
+	grid-template-columns: repeat(7, minmax(0, 1fr));
+	gap: 6px;
+	margin-bottom: 10px;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-style {
+	min-width: 0;
+	height: 50px;
+	position: relative;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border: 1px solid rgba(117, 137, 148, .34);
+	border-radius: 7px;
+	background: #151d22;
+	color: #e8f0ec;
+	text-align: center;
+	cursor: pointer;
+	box-sizing: border-box;
+	overflow: hidden;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-style:hover,
+#${COLOR_PANEL_ID} .gjj-node-color-style.gjj-active {
+	border-color: rgba(105, 184, 139, .86);
+	background: #1c2a22;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-style.gjj-active::after {
+	content: "";
+	position: absolute;
+	inset: 3px;
+	border: 1px solid rgba(255, 255, 255, .54);
+	border-radius: 5px;
+	pointer-events: none;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-swatch {
+	position: absolute;
+	inset: 0;
+	overflow: hidden;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-swatch div:first-child {
+	height: 17px;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-swatch div:last-child {
+	height: 33px;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-label {
+	position: relative;
+	z-index: 1;
+	width: 32px;
+	height: 22px;
+	border-radius: 5px;
+	background: rgba(0, 0, 0, .30);
+	color: inherit;
+	font: 900 13px/22px "Segoe UI", sans-serif;
+	box-shadow: 0 1px 5px rgba(0, 0, 0, .28);
+}
+#${COLOR_PANEL_ID} .gjj-node-color-section {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	margin: 2px 0 7px;
+	color: #9fb0b7;
+	font: 800 12px/18px "Segoe UI", sans-serif;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-legend {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 5px;
+	margin-bottom: 10px;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-chip {
+	min-width: 0;
+	height: 24px;
+	position: relative;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 5px;
+	padding: 0 6px;
+	border: 1px solid rgba(117, 137, 148, .28);
+	border-radius: 6px;
+	background: #151d22;
+	color: #dce8e2;
+	font: 800 12px/22px "Segoe UI", sans-serif;
+	box-sizing: border-box;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-pick {
+	width: 18px;
+	height: 18px;
+	flex: 0 0 18px;
+	padding: 0;
+	border: 1px solid rgba(255, 255, 255, .24);
+	border-radius: 5px;
+	background: transparent;
+	cursor: pointer;
+	box-sizing: border-box;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-pick::-webkit-color-swatch-wrapper {
+	padding: 0;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-pick::-webkit-color-swatch {
+	border: 0;
+	border-radius: 4px;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-chip span:last-child {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-close:hover,
+#${COLOR_PANEL_ID} .gjj-node-color-clear:hover,
+#${COLOR_PANEL_ID} .gjj-node-color-save:hover {
+	border-color: rgba(105, 184, 139, .82);
+	background: #24372c;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-status {
+	min-height: 18px;
+	margin-top: 8px;
+	color: #aebbc1;
+	font: 12px/18px "Segoe UI", sans-serif;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-status[data-tone="ok"] {
+	color: #90d9a9;
+}
+#${COLOR_PANEL_ID} .gjj-node-color-status[data-tone="warn"] {
+	color: #e2c471;
 }
 #${PREVIEW_OVERLAY_ID} {
 	position: fixed;
@@ -3276,6 +3854,162 @@ import { api } from "/scripts/api.js";
 		return { row, after: directChildContaining(row, manager) || manager };
 	}
 
+	function closeNodeColorPanel() {
+		document.getElementById(COLOR_PANEL_ID)?.classList.remove("gjj-open");
+	}
+
+	function setNodeColorStatus(panel, text, tone = "") {
+		const status = panel?.querySelector?.(".gjj-node-color-status");
+		if (!status) return;
+		status.textContent = text || "";
+		status.dataset.tone = tone || "";
+	}
+
+	function positionNodeColorPanel(button, panel) {
+		if (!button || !panel) return;
+		const rect = button.getBoundingClientRect();
+		const width = Math.min(392, window.innerWidth - 24);
+		const left = Math.max(12, Math.min(window.innerWidth - width - 12, rect.left + rect.width / 2 - width / 2));
+		let top = rect.bottom + 8;
+		if (top + 392 > window.innerHeight) top = Math.max(12, rect.top - 400);
+		panel.style.width = `${Math.round(width)}px`;
+		panel.style.left = `${Math.round(left)}px`;
+		panel.style.top = `${Math.round(top)}px`;
+	}
+
+	function rebuildNodeColorPanel() {
+		document.getElementById(COLOR_PANEL_ID)?.remove();
+		return ensureNodeColorPanel();
+	}
+
+	function ensureNodeColorPanel() {
+		installStyle();
+		let panel = document.getElementById(COLOR_PANEL_ID);
+		if (panel) return panel;
+
+		panel = document.createElement("div");
+		panel.id = COLOR_PANEL_ID;
+		panel.dataset.styleId = nodeColorStyles[0].id;
+		panel.addEventListener("pointerdown", (event) => event.stopPropagation());
+		panel.addEventListener("mousedown", (event) => event.stopPropagation());
+		panel.addEventListener("click", (event) => event.stopPropagation());
+
+		const head = document.createElement("div");
+		head.className = "gjj-node-color-head";
+		const title = document.createElement("div");
+		title.className = "gjj-node-color-title";
+		title.textContent = "🎨 节点颜色";
+		const scope = document.createElement("div");
+		scope.className = "gjj-node-color-scope";
+		scope.textContent = scopeLabel();
+		const saveTop = document.createElement("button");
+		saveTop.className = "gjj-node-color-save";
+		saveTop.type = "button";
+		saveTop.textContent = "💾";
+		saveTop.title = "保存当前大类颜色为自定方案";
+		saveTop.addEventListener("click", () => saveCustomNodeColorStyle(panel));
+		const clearTop = document.createElement("button");
+		clearTop.className = "gjj-node-color-clear";
+		clearTop.type = "button";
+		clearTop.textContent = "🗑";
+		clearTop.title = "清除目标节点颜色";
+		clearTop.addEventListener("click", () => clearColorScope(panel));
+		const close = document.createElement("button");
+		close.className = "gjj-node-color-close";
+		close.type = "button";
+		close.textContent = "×";
+		close.title = "关闭";
+		close.addEventListener("click", closeNodeColorPanel);
+		head.append(title, scope, saveTop, clearTop, close);
+
+		const styleSection = document.createElement("div");
+		styleSection.className = "gjj-node-color-section";
+		styleSection.textContent = "方案";
+		const grid = document.createElement("div");
+		grid.className = "gjj-node-color-grid";
+		for (const style of nodeColorStyles) {
+			const item = document.createElement("button");
+			item.type = "button";
+			item.className = "gjj-node-color-style";
+			item.dataset.styleId = style.id;
+			item.title = `使用 ${style.label} 配色方案`;
+			const swatch = document.createElement("div");
+			swatch.className = "gjj-node-color-swatch";
+			const header = document.createElement("div");
+			header.style.background = style.header;
+			const panelColor = document.createElement("div");
+			panelColor.style.background = style.panel;
+			swatch.append(header, panelColor);
+			const text = document.createElement("div");
+			text.className = "gjj-node-color-label";
+			text.textContent = style.sample || style.label.slice(0, 2);
+			text.style.color = style.text;
+			item.append(swatch, text);
+			item.addEventListener("click", () => {
+				panel.dataset.styleId = style.id;
+				for (const button of grid.querySelectorAll(".gjj-node-color-style")) {
+					button.classList.toggle("gjj-active", button.dataset.styleId === style.id);
+				}
+				applyStyleToBigCategories(panel, style);
+			});
+			grid.appendChild(item);
+		}
+		for (const button of grid.querySelectorAll(".gjj-node-color-style")) {
+			button.classList.toggle("gjj-active", button.dataset.styleId === nodeColorSelectedStyleId);
+		}
+
+		const bigSection = document.createElement("div");
+		bigSection.className = "gjj-node-color-section";
+		bigSection.textContent = "大类";
+		const legend = document.createElement("div");
+		legend.className = "gjj-node-color-legend";
+		for (const category of nodeColorBigCategories) {
+			const style = colorStyleById(category.styleId);
+			const chip = document.createElement("div");
+			chip.className = "gjj-node-color-chip";
+			chip.title = `${category.label}：点击颜色块修改大类颜色`;
+			const picker = document.createElement("input");
+			picker.className = "gjj-node-color-pick";
+			picker.type = "color";
+			picker.value = normalizeHexColor(category.color, style.header);
+			picker.title = `设置${category.label}颜色`;
+			picker.addEventListener("input", () => {
+				const color = normalizeHexColor(picker.value, style.header);
+				category.color = color;
+				category.styleId = nodeColorSelectedStyleId;
+				applyBigCategoryColors(nodesForColorScope());
+				dirtyCanvas();
+				setNodeColorStatus(panel, `已更新${category.label}颜色；点 💾 可保存为自定方案。`, "ok");
+			});
+			const text = document.createElement("span");
+			text.textContent = category.label;
+			chip.append(picker, text);
+			legend.appendChild(chip);
+		}
+
+		const status = document.createElement("div");
+		status.className = "gjj-node-color-status";
+		status.textContent = "点击辨识方案即可按节点类型配色；有选中刷选中，没有选中刷全部。";
+
+		panel.append(head, styleSection, grid, bigSection, legend, status);
+		document.body.appendChild(panel);
+		return panel;
+	}
+
+	async function toggleNodeColorPanel(button) {
+		await loadNodeColorSettings();
+		const wasOpen = document.getElementById(COLOR_PANEL_ID)?.classList.contains("gjj-open");
+		const panel = rebuildNodeColorPanel();
+		const open = !wasOpen;
+		if (!open) {
+			closeNodeColorPanel();
+			return;
+		}
+		setNodeColorStatus(panel, "点击辨识方案即可按节点类型配色；有选中刷选中，没有选中刷全部。");
+		panel.classList.add("gjj-open");
+		positionNodeColorPanel(button, panel);
+	}
+
 	function positionToolbar(toolbar) {
 		if (!toolbar) return;
 		toolbar.classList.remove("gjj-workflow-toolbar-hidden");
@@ -3324,7 +4058,12 @@ import { api } from "/scripts/api.js";
 		button.addEventListener("click", (event) => {
 			event.preventDefault();
 			event.stopPropagation();
-			onClick(button);
+			try {
+				const result = onClick(button);
+				if (result?.catch) result.catch((error) => console.warn("[GJJ] 工具栏按钮执行失败：", error));
+			} catch (error) {
+				console.warn("[GJJ] 工具栏按钮执行失败：", error);
+			}
 		});
 		return button;
 	}
@@ -3341,7 +4080,8 @@ import { api } from "/scripts/api.js";
 		toolbar.textContent = "";
 		toolbar.append(
 			makeToolbarButton(SAVE_BUTTON_ID, "💾", "保存工作流截图（Alt+Shift+S）", saveWorkflowScreenshot),
-			makeToolbarButton(OPEN_BUTTON_ID, "📁", "预览并打开工作流截图（Alt+Shift+O）", showScreenshotPreview)
+			makeToolbarButton(OPEN_BUTTON_ID, "📁", "预览并打开工作流截图（Alt+Shift+O）", showScreenshotPreview),
+			makeToolbarButton(COLOR_BUTTON_ID, "🎨", "按节点类型设置辨识配色", toggleNodeColorPanel)
 		);
 		positionToolbar(toolbar);
 		return toolbar;
@@ -3365,7 +4105,9 @@ import { api } from "/scripts/api.js";
 		setup() {
 			ensureToolbar();
 			loadBackendInfo().catch(() => updateSaveSettingsUI());
+			loadNodeColorSettings();
 			installKeyboardShortcuts();
+			installNodeColorPanelDismiss();
 			startPositionSync();
 			console.log("[GJJ] 工作流截图保存按钮与快捷键已启用");
 		},
