@@ -105,11 +105,35 @@ def missing_translation_models() -> list[dict[str, str]]:
         return []
     return [
         make_missing_model_spec(
-            label="Opus-MT 中英翻译模型",
+            label="配置文件",
             subdir=TRANSLATION_MODEL_SUBDIR,
-            filename="config.json + pytorch_model.bin/model.safetensors + source.spm + target.spm",
-            description="本地 Helsinki-NLP/opus-mt-zh-en 中英翻译模型文件。",
-        )
+            filename="config.json",
+            description="Opus-MT 模型配置。",
+        ),
+        make_missing_model_spec(
+            label="模型权重",
+            subdir=TRANSLATION_MODEL_SUBDIR,
+            filename="pytorch_model.bin",
+            description="和 model.safetensors 二选一即可。",
+        ),
+        make_missing_model_spec(
+            label="模型权重",
+            subdir=TRANSLATION_MODEL_SUBDIR,
+            filename="model.safetensors",
+            description="和 pytorch_model.bin 二选一即可。",
+        ),
+        make_missing_model_spec(
+            label="源语言分词",
+            subdir=TRANSLATION_MODEL_SUBDIR,
+            filename="source.spm",
+            description="中文源语言 SentencePiece 分词模型。",
+        ),
+        make_missing_model_spec(
+            label="目标语言分词",
+            subdir=TRANSLATION_MODEL_SUBDIR,
+            filename="target.spm",
+            description="英文目标语言 SentencePiece 分词模型。",
+        ),
     ]
 
 

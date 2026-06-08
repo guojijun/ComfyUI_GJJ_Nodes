@@ -85,6 +85,13 @@ SAFE_FUNCS = {
     "sum": sum,
 }
 
+RESERVED_NAMES = set(SAFE_FUNCS)
+
+
+def _is_plain_formula_name(name: str) -> bool:
+    text = str(name or "").strip()
+    return bool(text) and text.isidentifier() and text not in RESERVED_NAMES and not re.fullmatch(r"x\d+", text)
+
 
 def _extract_input_index(name: str) -> int:
     try:
@@ -126,22 +133,23 @@ def _safe_json_loads(value: Any, fallback: Any) -> Any:
         return fallback
 
 
-def _collect_input_names(raw: Any) -> dict[str, str]:
+def _collect_input_names(raw: Any) -> dict[str, list[str]]:
     data = _safe_json_loads(raw, {})
     if not isinstance(data, dict):
         return {}
-    result: dict[str, str] = {}
+    result: dict[str, list[str]] = {}
     for key, raw_name in data.items():
         input_name = str(key or "").strip()
         if not input_name:
             continue
-        # 旧工作流可能保存为列表；这里仅取第一个明确名称，不展开多个名称。
         candidates = raw_name if isinstance(raw_name, list) else [raw_name]
+        names: list[str] = []
         for candidate in candidates:
             text = str(candidate or "").strip()
-            if text:
-                result[input_name] = text
-                break
+            if text and text not in names:
+                names.append(text)
+        if names:
+            result[input_name] = names
     return result
 
 
@@ -160,10 +168,11 @@ def _collect_values(kwargs: dict[str, Any]) -> dict[str, Any]:
     input_names = _collect_input_names(kwargs.get(INPUT_NAMES_NAME))
     if not input_names:
         input_names = _collect_input_names(kwargs.get(LEGACY_INPUT_NAMES_NAME))
-    for input_name, name in input_names.items():
+    for input_name, names in input_names.items():
         if input_name not in values:
             continue
-        values.setdefault(name, values[input_name])
+        for name in names:
+            values.setdefault(name, values[input_name])
     return values
 
 
@@ -276,7 +285,8 @@ def _calculate_formula(formula: Any, values: dict[str, Any]) -> Any:
     if len(text) > 512:
         raise ValueError("公式过长，请控制在 512 个字符以内。")
     text, placeholder_values = _replace_placeholder_variables(text, values)
-    eval_values = {**values, **placeholder_values}
+    text, plain_name_values = _replace_plain_name_variables(text, values)
+    eval_values = {**values, **placeholder_values, **plain_name_values}
     try:
         tree = ast.parse(text, mode="eval")
     except SyntaxError as exc:
@@ -285,6 +295,36 @@ def _calculate_formula(formula: Any, values: dict[str, Any]) -> Any:
     if _is_number(result):
         _guard_number(result)
     return result
+
+
+def _replace_plain_name_variables(text: str, values: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    placeholder_values: dict[str, Any] = {}
+    name_map: dict[str, str] = {}
+    plain_names = [name for name in values if _is_plain_formula_name(name)]
+    if not plain_names:
+        return text, placeholder_values
+    plain_names.sort(key=len, reverse=True)
+
+    for token in plain_names:
+        safe_name = f"__gjj_name_{len(name_map) + 1}"
+        name_map[token] = safe_name
+        placeholder_values[safe_name] = values[token]
+
+    try:
+        tree = ast.parse(text, mode="eval")
+    except SyntaxError:
+        return text, placeholder_values
+
+    class PlainNameTransformer(ast.NodeTransformer):
+        def visit_Name(self, node: ast.Name) -> ast.AST:
+            safe_name = name_map.get(node.id)
+            if not safe_name:
+                return node
+            return ast.copy_location(ast.Name(id=safe_name, ctx=node.ctx), node)
+
+    tree = PlainNameTransformer().visit(tree)
+    ast.fix_missing_locations(tree)
+    return ast.unparse(tree), placeholder_values
 
 
 def _replace_placeholder_variables(text: str, values: dict[str, Any]) -> tuple[str, dict[str, Any]]:

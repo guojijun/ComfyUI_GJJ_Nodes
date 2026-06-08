@@ -385,7 +385,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "label": "Wan2.1 T2V 1.3B",
         "clip_type": "wan",
         "slots": [
-            S("model", "模型", "diffusion_models", "diffusion", ["wan2.1", "t2v"], preferred_name="Wan2_1-AccVideo-T2V-14B_fp8_e4m3fn.safetensors", official_names=["Wan2_1-AccVideo-T2V-14B_fp8_e4m3fn.safetensors", "wan2.1_t2v_14B_fp16.safetensors"]),
+            S("model", "模型", "diffusion_models", "diffusion", ["wan2.1","t2v","3B"], preferred_name="wan2.1_t2v_1.3B_fp16.safetensors", official_names=["wan2.1_t2v_1.3B_fp16.safetensors"]),
             S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
         ],
@@ -516,7 +516,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "label": "Wan Alpha 透明通道",
         "clip_type": "wan",
         "slots": [
-            S("model", "模型", "diffusion_models", "diffusion", ["wan2.1","t2v"], preferred_name="Wan2_1-AccVideo-T2V-14B_fp8_e4m3fn.safetensors", official_names=["Wan2_1-AccVideo-T2V-14B_fp8_e4m3fn.safetensors", "wan2.1_t2v_14B_fp16.safetensors"]),
+            S("model", "模型", "diffusion_models", "diffusion", ["wan2.1_t2v_1.3B"], preferred_name="Wan2_1-AccVideo-T2V-14B_fp8_e4m3fn.safetensors", official_names=["wan2.1_t2v_1.3B_fp16.safetensors"]),
             S("rgb_vae", "RGB VAE", "vae", "vae", ["wan", "alpha", "rgb"], preferred_name="Wan21Alpha/wan_alpha_2.1_vae_rgb_channel.safetensors.safetensors", official_names=["Wan21Alpha/wan_alpha_2.1_vae_rgb_channel.safetensors.safetensors", "wan_alpha_2.1_vae_rgb_channel.safetensors.safetensors"]),
             S("alpha_vae", "Alpha VAE", "vae", "vae", ["wan", "alpha", "alpha"], preferred_name="Wan21Alpha/wan_alpha_2.1_vae_alpha_channel.safetensors.safetensors", official_names=["Wan21Alpha/wan_alpha_2.1_vae_alpha_channel.safetensors.safetensors", "wan_alpha_2.1_vae_alpha_channel.safetensors.safetensors"]),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),

@@ -58,16 +58,16 @@ import { api } from "/scripts/api.js";
 		{ mode: "openable_first", label: "✅可打开", title: "可打开的截图优先显示" },
 	];
 	const DEFAULT_NODE_COLOR_STYLES = [
-		{ id: "balanced", label: "默认辨识", sample: "默认", header: "#1B252B", panel: "#141B1F", outline: "#3E4D54", text: "#E6F0EB", palette: ["#2D78A8", "#6F5CC4", "#B8741A", "#2E8C61", "#38A86B", "#B85670", "#7D56A8", "#9A4F8A", "#2B86A6", "#9B6A22", "#A54E6C", "#59636B"] },
-		{ id: "contrast", label: "高反差", sample: "高反", header: "#222831", panel: "#101418", outline: "#BFC9D4", text: "#F7FBFF", palette: ["#2563EB", "#A855F7", "#F59E0B", "#22C55E", "#00D1FF", "#FF3B80", "#7C3AED", "#EF4444", "#14B8A6", "#EAB308", "#EC4899", "#94A3B8"] },
-		{ id: "warm_cool", label: "冷暖分区", sample: "冷暖", header: "#243141", panel: "#111923", outline: "#5B84B1", text: "#ECF7FF", palette: ["#2E74B5", "#775FC7", "#D17A22", "#27A064", "#49B487", "#B65072", "#8B5FBF", "#B1538B", "#2D9CB2", "#C98A2B", "#C05A76", "#5D6874"] },
-		{ id: "soft", label: "柔和辨识", sample: "柔和", header: "#34413D", panel: "#17201D", outline: "#7EA89B", text: "#F0FAF5", palette: ["#5D89A8", "#8072B2", "#A98248", "#5A9A77", "#69A98A", "#A76F82", "#8770AA", "#A1719A", "#5C9AA6", "#A48852", "#A67283", "#68757A"] },
-		{ id: "vivid", label: "鲜明标签", sample: "鲜明", header: "#20242C", panel: "#101218", outline: "#94A3B8", text: "#FFFFFF", palette: ["#3B82F6", "#8B5CF6", "#F97316", "#10B981", "#06B6D4", "#F43F5E", "#7C3AED", "#D946EF", "#0EA5E9", "#F59E0B", "#E11D48", "#64748B"] },
-		{ id: "dim", label: "深调低扰", sample: "深调", header: "#252A2F", panel: "#111417", outline: "#4F5963", text: "#E6EEF2", palette: ["#244D73", "#504287", "#77501E", "#236B4B", "#28705A", "#6E3348", "#5B3B78", "#693B63", "#255D69", "#735222", "#75384B", "#424B52"] },
-		{ id: "safe", label: "色盲友好", sample: "友好", header: "#263238", panel: "#11191D", outline: "#78909C", text: "#F1F8FA", palette: ["#0072B2", "#CC79A7", "#D55E00", "#009E73", "#56B4E9", "#E69F00", "#785EF0", "#F0E442", "#00A6A6", "#B5651D", "#A23B72", "#666666"] },
+		{ id: "balanced", label: "默认辨识", sample: "默认", header: "#1B252B", panel: "#141B1F", outline: "#3E4D54", text: "#E6F0EB", palette: ["#00AEEF", "#6F5CC4", "#B8741A", "#2E8C61", "#38A86B", "#3F8F88", "#7D56A8", "#7A5FA8", "#2B86A6", "#9B6A22", "#6B6FAF", "#59636B"] },
+		{ id: "contrast", label: "高反差", sample: "高反", header: "#222831", panel: "#101418", outline: "#BFC9D4", text: "#F7FBFF", palette: ["#2563EB", "#A855F7", "#F59E0B", "#22C55E", "#00D1FF", "#38BDF8", "#7C3AED", "#10B981", "#14B8A6", "#EAB308", "#A3E635", "#94A3B8"] },
+		{ id: "warm_cool", label: "冷暖分区", sample: "冷暖", header: "#243141", panel: "#111923", outline: "#5B84B1", text: "#ECF7FF", palette: ["#2E74B5", "#775FC7", "#D17A22", "#27A064", "#49B487", "#3F8F88", "#8B5FBF", "#6E70B8", "#2D9CB2", "#C98A2B", "#6F8E56", "#5D6874"] },
+		{ id: "soft", label: "柔和辨识", sample: "柔和", header: "#34413D", panel: "#17201D", outline: "#7EA89B", text: "#F0FAF5", palette: ["#5D89A8", "#8072B2", "#A98248", "#5A9A77", "#69A98A", "#5F9188", "#8770AA", "#7479AA", "#5C9AA6", "#A48852", "#7C8D6A", "#68757A"] },
+		{ id: "vivid", label: "鲜明标签", sample: "鲜明", header: "#20242C", panel: "#101218", outline: "#94A3B8", text: "#FFFFFF", palette: ["#3B82F6", "#8B5CF6", "#F97316", "#10B981", "#06B6D4", "#22D3EE", "#7C3AED", "#D946EF", "#0EA5E9", "#F59E0B", "#84CC16", "#64748B"] },
+		{ id: "dim", label: "深调低扰", sample: "深调", header: "#252A2F", panel: "#111417", outline: "#4F5963", text: "#E6EEF2", palette: ["#244D73", "#504287", "#77501E", "#236B4B", "#28705A", "#315F58", "#5B3B78", "#4E527C", "#255D69", "#735222", "#56693C", "#424B52"] },
+		{ id: "safe", label: "色盲友好", sample: "友好", header: "#263238", panel: "#11191D", outline: "#78909C", text: "#F1F8FA", palette: ["#00AEEF", "#7A5FA8", "#8A6F00", "#009E73", "#56B4E9", "#E69F00", "#785EF0", "#F0E442", "#00A6A6", "#B5651D", "#6B6FAF", "#666666"] },
 	];
 	const DEFAULT_NODE_COLOR_BIG_CATEGORIES = [
-		{ id: "input", label: "输入", styleId: "ocean", color: "#1D4F74", pattern: /(?:^|\b)(GJJ_LoraChainConfig|GJJ_MultiLoraChainLoader|GJJ_VideoUniversalModelLoader|GJJ_VideoKijaiModelLoader|GJJ_TemplateParams|GJJ_ModelBundleLoader)(?:\b|$)|输入|加载|读取|上传|load|loader|input|image.*load|video.*load|audio.*load|text.*input|prompt.*relay/i },
+		{ id: "input", label: "输入", styleId: "ocean", color: "#00AEEF", pattern: /(?:^|\b)(GJJ_LoraChainConfig|GJJ_MultiLoraChainLoader|GJJ_VideoUniversalModelLoader|GJJ_VideoKijaiModelLoader|GJJ_TemplateParams|GJJ_ModelBundleLoader)(?:\b|$)|输入|加载|读取|上传|load|loader|input|image.*load|video.*load|audio.*load|text.*input|prompt.*relay/i },
 		{ id: "guide", label: "引导", styleId: "violet", color: "#6F5CC4", pattern: /(?:^|\b)(GJJ_LTX2NAG|GJJ_LTX_FirstLastFrame)(?:\b|$)|引导|guide|nag|first.*last|firstlast|首尾帧/i },
 		{ id: "sample", label: "采样", styleId: "amber", color: "#8A5A16", pattern: /采样|sampler|sample|scheduler|cfg|steps|ksampler|wanvideo.*sampler|video.*sampler/i },
 		{ id: "output", label: "输出", styleId: "emerald", color: "#17614A", pattern: /输出|保存|预览|save|preview|viewer|display|export|combine|输出目录|write/i },
@@ -131,6 +131,32 @@ import { api } from "/scripts/api.js";
 		return head || "未分类";
 	}
 
+	function nodePackageName(node) {
+		const nodeData = node?.constructor?.nodeData || {};
+		const candidates = [
+			nodeData.python_module,
+			nodeData.pythonModule,
+			nodeData.module,
+			nodeData.package,
+			node?.python_module,
+			node?.pythonModule,
+			node?.package,
+		].map((item) => String(item || "").trim()).filter(Boolean);
+		for (const candidate of candidates) {
+			const parts = candidate.split(/[.\\/]+/).filter(Boolean);
+			const customIndex = parts.findIndex((part) => /^custom_nodes$/i.test(part));
+			if (customIndex >= 0 && parts[customIndex + 1]) return parts[customIndex + 1];
+			const gjjIndex = parts.findIndex((part) => /^ComfyUI_GJJ_Nodes$/i.test(part));
+			if (gjjIndex >= 0) return "ComfyUI_GJJ_Nodes";
+			if (parts[0]) return parts[0];
+		}
+		const category = nodeCategoryName(node);
+		const categoryHead = category.split(/[\\/|>]+/).map((part) => part.trim()).filter(Boolean)[0];
+		if (categoryHead) return categoryHead;
+		const type = String(node?.comfyClass || node?.type || node?.title || "未分类");
+		return type.split(/[._:-]+/).filter(Boolean)[0] || "未分类";
+	}
+
 	function sortedNodeCategories(nodes = graphNodes()) {
 		const categories = new Set();
 		for (const node of nodes) categories.add(nodeCategoryName(node));
@@ -192,6 +218,82 @@ import { api } from "/scripts/api.js";
 		return `#${part(r)}${part(g)}${part(b)}`.toUpperCase();
 	}
 
+	function hslToHex(hue, saturation = 0.68, lightness = 0.48) {
+		const h = (((Number(hue) || 0) % 360) + 360) % 360 / 360;
+		const s = Math.max(0, Math.min(1, Number(saturation) || 0));
+		const l = Math.max(0, Math.min(1, Number(lightness) || 0));
+		if (!s) {
+			const value = Math.round(l * 255);
+			return rgbToHex({ r: value, g: value, b: value });
+		}
+		const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+		const p = 2 * l - q;
+		const channel = (offset) => {
+			let t = h + offset;
+			if (t < 0) t += 1;
+			if (t > 1) t -= 1;
+			if (t < 1 / 6) return p + (q - p) * 6 * t;
+			if (t < 1 / 2) return q;
+			if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+			return p;
+		};
+		return rgbToHex({
+			r: channel(1 / 3) * 255,
+			g: channel(0) * 255,
+			b: channel(-1 / 3) * 255,
+		});
+	}
+
+	function hueFromRgb({ r, g, b }) {
+		const rn = r / 255;
+		const gn = g / 255;
+		const bn = b / 255;
+		const max = Math.max(rn, gn, bn);
+		const min = Math.min(rn, gn, bn);
+		const delta = max - min;
+		if (!delta) return { hue: 0, saturation: 0 };
+		let hue = 0;
+		if (max === rn) hue = ((gn - bn) / delta) % 6;
+		else if (max === gn) hue = (bn - rn) / delta + 2;
+		else hue = (rn - gn) / delta + 4;
+		hue = Math.round(hue * 60);
+		if (hue < 0) hue += 360;
+		const saturation = max === 0 ? 0 : delta / max;
+		return { hue, saturation };
+	}
+
+	function isAlertRedNodeColor(color) {
+		const rgb = hexToRgb(color);
+		const { hue, saturation } = hueFromRgb(rgb);
+		return rgb.r >= 150 && saturation >= 0.34 && (hue <= 32 || hue >= 335);
+	}
+
+	function normalizeNodeThemeColor(value, fallback = "#343A40") {
+		const color = normalizeHexColor(value, fallback);
+		return isAlertRedNodeColor(color) ? normalizeHexColor(fallback, "#343A40") : color;
+	}
+
+	function nonRedHue(hue) {
+		let value = (((Number(hue) || 0) % 360) + 360) % 360;
+		if (value <= 35) value += 42;
+		if (value >= 335) value -= 48;
+		return value;
+	}
+
+	function randomDistinctNodeColors(count) {
+		const total = Math.max(0, Number(count) || 0);
+		const colors = [];
+		const start = Math.random() * 360;
+		const step = 137.508;
+		for (let index = 0; index < total; index += 1) {
+			const hue = nonRedHue(start + index * step);
+			const saturation = 0.62 + ((index % 3) * 0.08);
+			const lightness = 0.42 + ((index % 2) * 0.08);
+			colors.push(normalizeNodeThemeColor(hslToHex(hue, saturation, lightness), "#2D78A8"));
+		}
+		return colors;
+	}
+
 	function mixHex(a, b, amount = 0.5) {
 		const first = hexToRgb(a);
 		const second = hexToRgb(b);
@@ -206,12 +308,12 @@ import { api } from "/scripts/api.js";
 		return {
 			version: 1,
 			selected_style_id: nodeColorSelectedStyleId,
-			custom_palette: nodeColorCustomPalette.map((color) => normalizeHexColor(color)),
+			custom_palette: nodeColorCustomPalette.map((color, index) => normalizeNodeThemeColor(color, DEFAULT_NODE_COLOR_BIG_CATEGORIES[index]?.color || "#343A40")),
 			big_categories: nodeColorBigCategories.map((category) => ({
 				id: category.id,
 				label: category.label,
 				styleId: category.styleId,
-				color: normalizeHexColor(category.color, colorStyleById(category.styleId).header),
+				color: normalizeNodeThemeColor(category.color, colorStyleById(category.styleId).header),
 			})),
 		};
 	}
@@ -221,7 +323,7 @@ import { api } from "/scripts/api.js";
 		const rawCustomPalette = Array.isArray(rawSettings?.custom_palette) ? rawSettings.custom_palette : [];
 		if (rawCustomPalette.length) {
 			nodeColorCustomPalette = DEFAULT_NODE_COLOR_BIG_CATEGORIES.map((category, index) => {
-				return normalizeHexColor(rawCustomPalette[index], category.color);
+				return normalizeNodeThemeColor(rawCustomPalette[index], category.color);
 			});
 		}
 		rebuildNodeColorStyles();
@@ -231,7 +333,7 @@ import { api } from "/scripts/api.js";
 		}
 		nodeColorBigCategories = DEFAULT_NODE_COLOR_BIG_CATEGORIES.map((category) => {
 			const saved = rawCategories.find((item) => item?.id === category.id);
-			const color = normalizeHexColor(saved?.color, category.color || colorStyleById(category.styleId).header);
+			const color = normalizeNodeThemeColor(saved?.color, category.color || colorStyleById(category.styleId).header);
 			return {
 				...category,
 				styleId: saved?.styleId || category.styleId,
@@ -364,6 +466,35 @@ import { api } from "/scripts/api.js";
 			count += 1;
 		}
 		return { count, summary };
+	}
+
+	function applyPackageRandomColors(panel) {
+		const targets = nodesForColorScope();
+		if (!targets.length) {
+			setNodeColorStatus(panel, "没有可配色的节点。", "warn");
+			return;
+		}
+		const packageNames = Array.from(new Set(targets.map(nodePackageName))).sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+		const colors = randomDistinctNodeColors(packageNames.length);
+		const colorByPackage = new Map(packageNames.map((name, index) => [name, colors[index]]));
+		const summary = new Map();
+		let count = 0;
+		for (const node of targets) {
+			const packageName = nodePackageName(node);
+			const header = colorByPackage.get(packageName) || "#2D78A8";
+			const style = styleFromHeaderColor(customNodeColorStyle(), header);
+			style.id = "package_random";
+			style.label = "包名随机";
+			if (!applyNodeColor(node, style)) continue;
+			node.properties ||= {};
+			node.properties[COLOR_THEME_PROPERTY].package_name = packageName;
+			summary.set(packageName, (summary.get(packageName) || 0) + 1);
+			count += 1;
+		}
+		dirtyCanvas();
+		const detail = Array.from(summary.entries()).slice(0, 6).map(([name, value]) => `${name}${value}`).join(" / ");
+		const suffix = summary.size > 6 ? ` / +${summary.size - 6}包` : "";
+		setNodeColorStatus(panel, `${scopeLabel()}：按包名随机 ${summary.size} 包 / ${count} 节点：${detail}${suffix}`, "ok");
 	}
 
 	function colorForCategoryStyle(style, category, index) {
@@ -3370,6 +3501,7 @@ import { api } from "/scripts/api.js";
 }
 #${COLOR_PANEL_ID} .gjj-node-color-close,
 #${COLOR_PANEL_ID} .gjj-node-color-clear,
+#${COLOR_PANEL_ID} .gjj-node-color-random,
 #${COLOR_PANEL_ID} .gjj-node-color-save {
 	width: 26px;
 	height: 26px;
@@ -3382,6 +3514,7 @@ import { api } from "/scripts/api.js";
 	cursor: pointer;
 }
 #${COLOR_PANEL_ID} .gjj-node-color-clear,
+#${COLOR_PANEL_ID} .gjj-node-color-random,
 #${COLOR_PANEL_ID} .gjj-node-color-save {
 	font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "Segoe UI", sans-serif;
 }
@@ -3500,6 +3633,7 @@ import { api } from "/scripts/api.js";
 }
 #${COLOR_PANEL_ID} .gjj-node-color-close:hover,
 #${COLOR_PANEL_ID} .gjj-node-color-clear:hover,
+#${COLOR_PANEL_ID} .gjj-node-color-random:hover,
 #${COLOR_PANEL_ID} .gjj-node-color-save:hover {
 	border-color: rgba(105, 184, 139, .82);
 	background: #24372c;
@@ -3908,6 +4042,12 @@ import { api } from "/scripts/api.js";
 		saveTop.textContent = "💾";
 		saveTop.title = "保存当前大类颜色为自定方案";
 		saveTop.addEventListener("click", () => saveCustomNodeColorStyle(panel));
+		const randomTop = document.createElement("button");
+		randomTop.className = "gjj-node-color-random";
+		randomTop.type = "button";
+		randomTop.textContent = "🎲";
+		randomTop.title = "按包名随机配色；每点一次重新随机，自动避开红色";
+		randomTop.addEventListener("click", () => applyPackageRandomColors(panel));
 		const clearTop = document.createElement("button");
 		clearTop.className = "gjj-node-color-clear";
 		clearTop.type = "button";
@@ -3920,7 +4060,7 @@ import { api } from "/scripts/api.js";
 		close.textContent = "×";
 		close.title = "关闭";
 		close.addEventListener("click", closeNodeColorPanel);
-		head.append(title, scope, saveTop, clearTop, close);
+		head.append(title, scope, saveTop, randomTop, clearTop, close);
 
 		const styleSection = document.createElement("div");
 		styleSection.className = "gjj-node-color-section";

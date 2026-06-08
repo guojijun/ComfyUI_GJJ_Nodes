@@ -5,7 +5,7 @@
  * 2. 多种拓扑排序
  * 3. 水平排列
  * 4. 垂直排列
- * 5. 网格排列
+ * 5. 正方形预览排版
  * 6. 右键菜单
  * 7. 顶部工具栏
  * 8. 快捷键
@@ -414,7 +414,7 @@ const ARRANGE_MODE_LABELS = {
 	auto: "🧭 智能中心扩散",
 	horizontal: "➡️ 水平排列",
 	vertical: "⬇️ 垂直排列",
-	grid: "⊞ 网格排列",
+	grid: "⊞ 正方形预览排版",
 	topological: "🔢 拓扑：主链路",
 };
 
@@ -1377,6 +1377,39 @@ function isGridOutputNode(node, inDegree, outDegree) {
 		|| /preview|save|output|viewer|display|compare|collage|any.?preview|预览|保存|输出|显示|查看|对比|拼图|结果/.test(text);
 }
 
+function isGridPosterTitleNode(node) {
+	return /gjj_workflowtitle|workflowtitle|工作流标题/.test(getGridNodeSearchText(node));
+}
+
+function isGridPosterAnyPreviewNode(node) {
+	return /gjj_anypreview|any.?preview|任意预览/.test(getGridNodeSearchText(node));
+}
+
+function isGridPosterVideoCombineNode(node) {
+	return /gjj_videocombine|video.?combine|视频合成|合成.*vhs|vhs/.test(getGridNodeSearchText(node));
+}
+
+function isGridPosterTextInputNode(node) {
+	return /gjj_textinput|textinput|文本输入|备注|说明|markdown/.test(getGridNodeSearchText(node));
+}
+
+function isGridPosterHeroOutputNode(node, inDegree, outDegree) {
+	if (isGridPosterTextInputNode(node)) return false;
+	return isGridPosterAnyPreviewNode(node)
+		|| isGridPosterVideoCombineNode(node)
+		|| isGridOutputNode(node, inDegree, outDegree);
+}
+
+function isGridPosterFirstColumnNode(node, inDegree) {
+	const text = getGridNodeSearchText(node);
+	return isGridTemplateParamsNode(node)
+		|| /gjj_templateboolparams|templatebool|布尔参数/.test(text)
+		|| /gjj_clippromptencodepanel|clipprompt|prompt.?encode|提示词|文本编码/.test(text)
+		|| /gjj_getnode|\bgetnode\b|取节点|变量读取/.test(text)
+		|| /gjj_setnode|\bsetnode\b|设节点|变量设置/.test(text)
+		|| ((inDegree.get(node) || 0) === 0 && !isGridPosterTitleNode(node));
+}
+
 function isGridLocalInputNode(node, inDegree) {
 	return (inDegree.get(node) || 0) === 0 && !isGridTemplateParamsNode(node) && !isGridModelNode(node);
 }
@@ -1494,8 +1527,294 @@ function arrangeVariableGridCells(cells, cols, x, y, columnGap, rowGap) {
 	}
 }
 
+function clampLayoutValue(value, min, max) {
+	const n = Number(value);
+	if (!Number.isFinite(n)) return min;
+	return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+function setGridPosterCompactWidth(node, maxWidth = 180, height = null) {
+	if (!node || isRerouteNode(node) || isGridPosterTitleNode(node) || isGridPosterAnyPreviewNode(node)) return;
+	node.flags = node.flags || {};
+	node.flags.collapsed = false;
+	const width = clampLayoutValue(Math.min(getStoredNodeWidth(node), maxWidth), 96, maxWidth);
+	setNodeSize(node, width, height);
+}
+
+function syncGridPosterWorkflowTitleSize(node, width, height) {
+	if (!node) return;
+	setNodeSize(node, width, height);
+	const applyConfigWidth = (raw) => {
+		if (typeof raw !== "string" || !raw.trim().startsWith("{")) return raw;
+		try {
+			const config = JSON.parse(raw);
+			config.width = Math.round(width);
+			return JSON.stringify(config);
+		} catch (_) {
+			return raw;
+		}
+	};
+	node.properties = node.properties || {};
+	for (const key of ["config_json", "gjj_workflow_title_config"]) {
+		if (node.properties[key] != null) {
+			node.properties[key] = applyConfigWidth(String(node.properties[key]));
+		}
+	}
+	if (Array.isArray(node.widgets_values) && node.widgets_values.length) {
+		node.widgets_values[0] = applyConfigWidth(String(node.widgets_values[0]));
+	}
+	const widget = safeArray(node.widgets).find((item) => item?.name === "config_json");
+	if (widget?.value != null) {
+		widget.value = applyConfigWidth(String(widget.value));
+	}
+	node.__gjjWorkflowTitleSize = [Math.round(width), Math.round(height)];
+}
+
+function syncGridPosterAnyPreviewSize(node, width, height) {
+	if (!node) return;
+	setNodeSize(node, width, height);
+	node.properties = node.properties || {};
+	node.properties.gjj_any_preview_width = Math.round(width);
+	node.__gjjAnyPreviewConfiguredWidth = Math.round(width);
+	node.__gjjAnyPreviewUserWidth = Math.round(width);
+	node.__gjjAnyPreviewHeight = Math.max(96, Math.round(height));
+}
+
+function arrangeGridPosterColumn(nodes, x, y, rowGap) {
+	let currentY = Math.round(y);
+	let maxRight = Math.round(x);
+	for (const node of nodes) {
+		setNodePosition(node, x, currentY);
+		maxRight = Math.max(maxRight, Math.round(x + getNodeWidth(node)));
+		currentY += Math.round(getNodeHeight(node)) + rowGap;
+	}
+	return { x: Math.round(x), y: Math.round(y), width: Math.round(maxRight - x), height: Math.round(currentY - y - rowGap), bottom: Math.round(currentY - rowGap) };
+}
+
+function arrangeGridPosterStack(nodes, x, y, width, height, columnGap, rowGap) {
+	const list = filterValidNodes(nodes, false);
+	if (!list.length) return { width: 0, height: 0 };
+	const colGap = Math.max(0, Math.round(columnGap));
+	const rGap = Math.max(0, Math.round(rowGap));
+	const maxW = Math.max(96, ...list.map((node) => Math.round(getNodeWidth(node))));
+	const maxCols = Math.max(1, Math.floor((Math.max(1, width) + colGap) / (maxW + colGap)));
+	const cols = Math.max(1, Math.min(maxCols, Math.ceil(Math.sqrt(list.length))));
+
+	const colWidths = Array(cols).fill(maxW);
+	const colBottoms = Array(cols).fill(Math.round(y));
+	const xByCol = [];
+	let currentX = Math.round(x);
+	for (let col = 0; col < cols; col++) {
+		xByCol[col] = currentX;
+		currentX += colWidths[col] + colGap;
+	}
+
+	for (const node of list) {
+		let targetCol = 0;
+		for (let col = 1; col < cols; col++) {
+			if (colBottoms[col] < colBottoms[targetCol]) targetCol = col;
+		}
+		setNodePosition(node, xByCol[targetCol], colBottoms[targetCol]);
+		colBottoms[targetCol] += Math.round(getNodeHeight(node)) + rGap;
+	}
+
+	const bounds = getBoundsForNodes(list, 0);
+	return bounds || { width: 0, height: 0 };
+}
+
+function arrangeGridPosterRows(nodes, x, y, width, columnGap, rowGap, maxCols = 3) {
+	const list = filterValidNodes(nodes, false);
+	if (!list.length) return { width: 0, height: 0, bottom: Math.round(y) };
+	const colGap = Math.max(0, Math.round(columnGap));
+	const rGap = Math.max(0, Math.round(rowGap));
+	const maxW = Math.max(96, ...list.map((node) => Math.round(getNodeWidth(node))));
+	const colsByWidth = Math.max(1, Math.floor((Math.max(1, width) + colGap) / (maxW + colGap)));
+	const cols = Math.max(1, Math.min(maxCols, colsByWidth, Math.ceil(Math.sqrt(list.length))));
+	arrangeVariableGridCells(list, cols, x, y, colGap, rGap);
+	const bounds = getBoundsForNodes(list, 0);
+	return bounds || { width: 0, height: 0, bottom: Math.round(y) };
+}
+
+function arrangeGridPosterHorizontal(nodes, x, y, columnGap) {
+	const list = filterValidNodes(nodes, false);
+	if (!list.length) return { x: Math.round(x), y: Math.round(y), width: 0, height: 0, right: Math.round(x), bottom: Math.round(y) };
+	const gap = Math.max(0, Math.round(columnGap));
+	let currentX = Math.round(x);
+	let maxBottom = Math.round(y);
+	for (const node of list) {
+		setNodePosition(node, currentX, y);
+		currentX += Math.round(getNodeWidth(node)) + gap;
+		maxBottom = Math.max(maxBottom, Math.round(y + getNodeHeight(node)));
+	}
+	return getBoundsForNodes(list, 0) || { x: Math.round(x), y: Math.round(y), width: 0, height: 0, right: currentX, bottom: maxBottom };
+}
+
+function arrangeGridPosterVerticalMasonry(nodes, x, y, preferredColumns, columnGap, rowGap) {
+	const list = filterValidNodes(nodes, false);
+	if (!list.length) return { x: Math.round(x), y: Math.round(y), width: 0, height: 0, right: Math.round(x), bottom: Math.round(y) };
+	const colGap = Math.max(0, Math.round(columnGap));
+	const rGap = Math.max(0, Math.round(rowGap));
+	const cols = Math.max(1, Math.round(preferredColumns || 1));
+	const colWidths = Array(cols).fill(0);
+
+	for (let i = 0; i < list.length; i++) {
+		const col = i % cols;
+		colWidths[col] = Math.max(colWidths[col], Math.round(getNodeWidth(list[i])));
+	}
+
+	const xByCol = [];
+	let currentX = Math.round(x);
+	for (let col = 0; col < cols; col++) {
+		xByCol[col] = currentX;
+		currentX += colWidths[col] + colGap;
+	}
+
+	const colBottoms = Array(cols).fill(Math.round(y));
+	for (let i = 0; i < list.length; i++) {
+		const node = list[i];
+		let targetCol = 0;
+		for (let col = 1; col < cols; col++) {
+			if (colBottoms[col] < colBottoms[targetCol]) targetCol = col;
+		}
+		setNodePosition(node, xByCol[targetCol], colBottoms[targetCol]);
+		colBottoms[targetCol] += Math.round(getNodeHeight(node)) + rGap;
+	}
+
+	return getBoundsForNodes(list, 0) || { x: Math.round(x), y: Math.round(y), width: 0, height: 0, right: currentX, bottom: Math.max(...colBottoms) };
+}
+
+function arrangeGridPosterHeroOutputs(heroOutputs, x, y, width, height, rowGap) {
+	const list = filterValidNodes(heroOutputs, false);
+	if (!list.length) return null;
+	const gap = Math.max(0, Math.round(rowGap));
+	const count = list.length;
+	const availableH = Math.max(240, Math.round(height));
+	const heroSquare = Math.min(Math.round(width), availableH);
+	const singleH = count === 1
+		? heroSquare
+		: Math.max(180, Math.floor((availableH - gap * (count - 1)) / count));
+	let currentY = Math.round(y);
+	for (const node of list) {
+		const nodeH = isGridPosterAnyPreviewNode(node) || isGridPosterVideoCombineNode(node)
+			? singleH
+			: Math.min(singleH, Math.max(120, getNodeHeight(node)));
+		if (isGridPosterAnyPreviewNode(node)) {
+			syncGridPosterAnyPreviewSize(node, width, nodeH);
+		} else {
+			setNodeSize(node, width, nodeH);
+		}
+		setNodePosition(node, x, currentY);
+		currentY += nodeH + gap;
+	}
+	return getBoundsForNodes(list, 0);
+}
+
+function arrangePosterGridLayout(nodes, spacing = DEFAULT_SPACING) {
+	const validNodes = filterValidNodes(nodes, false);
+	if (!validNodes.length) return false;
+
+	const {
+		normalNodes,
+		rerouteNodes,
+		forward,
+		inDegree,
+		outDegree,
+	} = buildConnectionGraph(validNodes);
+	const workflowOrder = getWorkflowSortedNodesForGrid(validNodes);
+	const orderIndex = new Map(workflowOrder.map((node, index) => [node, index]));
+	const byWorkflow = compareByGridWorkflowOrder(orderIndex);
+	const byLocality = compareByGridLocalityOrder(orderIndex, forward, inDegree);
+	const colGap = Math.max(32, getColumnGap(spacing));
+	const rowGap = Math.max(24, getRowGap(spacing));
+	const regionGap = Math.max(54, colGap * 2);
+	const titleNodes = normalNodes.filter(isGridPosterTitleNode).sort(byWorkflow);
+	const title = titleNodes[0] || null;
+
+	const titleSet = new Set(titleNodes);
+	const heroOutputs = normalNodes
+		.filter((node) => !titleSet.has(node) && isGridPosterHeroOutputNode(node, inDegree, outDegree))
+		.sort((a, b) => {
+			const av = isGridPosterAnyPreviewNode(a) || isGridPosterVideoCombineNode(a) ? 0 : 1;
+			const bv = isGridPosterAnyPreviewNode(b) || isGridPosterVideoCombineNode(b) ? 0 : 1;
+			if (av !== bv) return av - bv;
+			return byWorkflow(a, b);
+		});
+	const heroSet = new Set(heroOutputs);
+	const isolatedSet = new Set(separateIsolatedNodes(normalNodes, inDegree, outDegree));
+	const leftCandidates = normalNodes
+		.filter((node) => !titleSet.has(node) && !heroSet.has(node))
+		.sort(byLocality);
+	const isolatedNodes = leftCandidates
+		.filter((node) => isolatedSet.has(node) || isGridPosterTextInputNode(node))
+		.sort(compareGridTopLeftNodes(orderIndex));
+	const isolatedNodeSet = new Set(isolatedNodes);
+	const firstColumnNodes = leftCandidates
+		.filter((node) => !isolatedNodeSet.has(node) && isGridPosterFirstColumnNode(node, inDegree))
+		.sort(compareGridTopLeftNodes(orderIndex));
+	const firstColumnSet = new Set(firstColumnNodes);
+	const middleNodes = leftCandidates
+		.filter((node) => !isolatedNodeSet.has(node) && !firstColumnSet.has(node))
+		.sort(byLocality);
+	const arrangedReroutes = rerouteNodes.sort(byLocality);
+
+	for (const node of firstColumnNodes) {
+		setGridPosterCompactWidth(node, 210);
+	}
+	for (const node of middleNodes) {
+		setGridPosterCompactWidth(node, 180);
+	}
+	for (const node of arrangedReroutes) {
+		node.flags = node.flags || {};
+		node.flags.collapsed = false;
+		setNodeSize(node, MIN_REROUTE_WIDTH, Math.max(COLLAPSED_NODE_HEIGHT, getNodeHeight(node)));
+	}
+
+	const mainNodes = [...firstColumnNodes, ...middleNodes, ...arrangedReroutes];
+	const mainColumns = Math.max(1, Math.min(3, Math.ceil(Math.sqrt(mainNodes.length || 1))));
+	arrangeGridPosterVerticalMasonry(mainNodes, 0, 0, mainColumns, colGap, rowGap);
+	const mainInitialBounds = getBoundsForNodes(mainNodes, 0);
+	const isolatedBounds = arrangeGridPosterHorizontal(isolatedNodes, 0, 0, colGap);
+	const isolatedHeight = isolatedNodes.length ? isolatedBounds.height : 0;
+	const mainHeight = mainInitialBounds?.height || 0;
+	const previewBaseHeight = Math.max(360, isolatedHeight + regionGap + mainHeight);
+	const mainY = isolatedNodes.length
+		? Math.max(isolatedBounds.bottom + regionGap, previewBaseHeight - mainHeight)
+		: 0;
+	moveNodesBy(mainNodes, 0, mainY);
+
+	const leftBounds = getBoundsForNodes([...isolatedNodes, ...mainNodes], 0);
+	const leftWidth = Math.max(240, leftBounds?.width || 0);
+	const leftHeight = Math.max(360, leftBounds?.height || 0);
+	const previewSize = Math.max(360, leftHeight);
+	const previewX = leftWidth + regionGap;
+	const previewY = 0;
+	arrangeGridPosterHeroOutputs(heroOutputs, previewX, previewY, previewSize, previewSize, rowGap);
+
+	const belowNodes = [...isolatedNodes, ...mainNodes, ...heroOutputs];
+	const belowBounds = getBoundsForNodes(belowNodes, 0);
+	const titleWidth = Math.max(720, belowBounds?.width || previewX + previewSize);
+	const titleHeight = title
+		? clampLayoutValue(leftWidth, 160, 340)
+		: 0;
+	const titleGap = title ? regionGap : 0;
+
+	if (title) {
+		syncGridPosterWorkflowTitleSize(title, titleWidth, titleHeight);
+		setNodePosition(title, 0, 0);
+		moveNodesBy(belowNodes, 0, titleHeight + titleGap);
+	}
+
+	const arrangedNodes = [...titleNodes, ...isolatedNodes, ...firstColumnNodes, ...middleNodes, ...arrangedReroutes, ...heroOutputs];
+	refreshAfterArrange(arrangedNodes);
+	return true;
+}
+
 function arrangeGrid(nodes, spacing = DEFAULT_SPACING) {
 	if (nodes.length === 0) return;
+
+	if (arrangePosterGridLayout(nodes, spacing)) {
+		return;
+	}
 
 	const { connectedNodes, isolatedNodes } = splitNodesByIsolation(nodes);
 	const workflowOrder = getWorkflowSortedNodesForGrid(connectedNodes);
@@ -1507,6 +1826,7 @@ function arrangeGrid(nodes, spacing = DEFAULT_SPACING) {
 	const {
 		normalNodes,
 		rerouteNodes,
+		forward,
 		inDegree,
 		outDegree,
 	} = buildConnectionGraph(connectedNodes);
@@ -4491,7 +4811,7 @@ function addContextMenuItems() {
 						callback: createMenuCallback("vertical"),
 					},
 					{
-						content: "⊞ 网格排列",
+						content: "⊞ 正方形预览排版",
 						callback: createMenuCallback("grid"),
 					},
 				],
@@ -4651,7 +4971,7 @@ function registerKeyboardShortcuts() {
 		"拓扑：保持上下",
 		"水平排列",
 		"垂直排列",
-		"网格排列",
+		"正方形预览排版",
 	];
 
 	const activeShortcutKeys = new Set();
@@ -4922,7 +5242,7 @@ app.registerExtension({
 		console.log("  Ctrl+Shift+T: 拓扑主链路");
 		console.log("  Ctrl+Shift+H: 水平排列");
 		console.log("  Ctrl+Shift+V: 垂直排列");
-		console.log("  Ctrl+Shift+G: 网格排列");
+		console.log("  Ctrl+Shift+G: 正方形预览排版");
 		console.log("  Alt+←/→: 减少/增加列宽和横向间距");
 		console.log("  Alt+↑/↓: 减少/增加行高和纵向间距");
 		console.log("  Ctrl+Alt+A: 全部折叠 / 全部打开");

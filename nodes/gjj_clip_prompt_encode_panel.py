@@ -10,6 +10,7 @@ try:
         COMMON_PROMPT_TRANSLATE_API_PATH,
         LEGACY_CLIP_PROMPT_TRANSLATE_API_PATH,
         TRANSLATION_DEPENDENCY_SPECS,
+        TRANSLATION_MODEL_DOWNLOAD_URL,
         TRANSLATION_MODEL_SUBDIR,
         as_bool,
         build_translation_environment_report,
@@ -25,6 +26,7 @@ except ImportError:
         COMMON_PROMPT_TRANSLATE_API_PATH,
         LEGACY_CLIP_PROMPT_TRANSLATE_API_PATH,
         TRANSLATION_DEPENDENCY_SPECS,
+        TRANSLATION_MODEL_DOWNLOAD_URL,
         TRANSLATION_MODEL_SUBDIR,
         as_bool,
         build_translation_environment_report,
@@ -37,12 +39,56 @@ NODE_NAME = "GJJ_CLIPPromptEncodePanel"
 NODE_DISPLAY_NAME = "GJJ · 🧾 CLIP正负提示词编码"
 TRANSLATE_API_PATH = LEGACY_CLIP_PROMPT_TRANSLATE_API_PATH
 COMMON_TRANSLATE_API_PATH = COMMON_PROMPT_TRANSLATE_API_PATH
+TRANSLATE_STATUS_API_PATH = "/gjj/clip_prompt_translate_status"
 TRANSLATED_EVENT = "gjj_clip_prompt_translated"
 _DESCRIPTION_INTRO = (
     "CLIP 编码统一面板：CLIP 输入，正面/负面提示词在一个面板里编辑；"
     "内置条件零化与 Opus-MT 中英翻译开关，翻译时保留中文引号中的原文，输出正负 CONDITIONING。"
 )
 _TRANSLATION_DEPENDENCY_SPECS = TRANSLATION_DEPENDENCY_SPECS
+_TRANSLATION_MODEL_FOLDER = "translation/opus-mt-zh-en"
+_TRANSLATION_MODEL_TREE = [
+    {
+        "label": "配置文件",
+        "folder": _TRANSLATION_MODEL_FOLDER,
+        "filename": "config.json",
+        "value": "models/translation/opus-mt-zh-en/config.json",
+        "description": "Opus-MT 模型配置。",
+        "icon": "📄",
+    },
+    {
+        "label": "模型权重",
+        "folder": _TRANSLATION_MODEL_FOLDER,
+        "filename": "pytorch_model.bin",
+        "value": "models/translation/opus-mt-zh-en/pytorch_model.bin",
+        "description": "Helsinki-NLP/opus-mt-zh-en 权重文件，和 model.safetensors 二选一即可。",
+        "icon": "🧠",
+    },
+    {
+        "label": "模型权重",
+        "folder": _TRANSLATION_MODEL_FOLDER,
+        "filename": "model.safetensors",
+        "value": "models/translation/opus-mt-zh-en/model.safetensors",
+        "description": "Helsinki-NLP/opus-mt-zh-en 权重文件，和 pytorch_model.bin 二选一即可。",
+        "icon": "🧠",
+    },
+    {
+        "label": "源语言分词",
+        "folder": _TRANSLATION_MODEL_FOLDER,
+        "filename": "source.spm",
+        "value": "models/translation/opus-mt-zh-en/source.spm",
+        "description": "中文源语言 SentencePiece 分词模型。",
+        "icon": "🔤",
+    },
+    {
+        "label": "目标语言分词",
+        "folder": _TRANSLATION_MODEL_FOLDER,
+        "filename": "target.spm",
+        "value": "models/translation/opus-mt-zh-en/target.spm",
+        "description": "英文目标语言 SentencePiece 分词模型。",
+        "icon": "🔤",
+    },
+]
 
 
 _ENVIRONMENT_REPORT = build_translation_environment_report(
@@ -61,6 +107,57 @@ if not _ENVIRONMENT_REPORT.get("available", True):
 
 
 register_prompt_translation_api((COMMON_TRANSLATE_API_PATH, TRANSLATE_API_PATH))
+
+
+def _translation_environment_report() -> dict[str, Any]:
+    return build_translation_environment_report(
+        node_name=NODE_DISPLAY_NAME,
+        description=(
+            "CLIP 编码本身可继续使用；只有开启翻译开关时需要这些依赖和本地模型。"
+            f"模型请放到 {TRANSLATION_MODEL_SUBDIR}。"
+        ),
+    )
+
+
+def _translation_available() -> bool:
+    return bool(_translation_environment_report().get("available", True))
+
+
+def _register_clip_prompt_translate_status_api() -> None:
+    try:
+        from aiohttp import web
+        from server import PromptServer
+    except Exception:
+        return
+    server = getattr(PromptServer, "instance", None)
+    if server is None or getattr(server, "_gjj_clip_prompt_translate_status_api", False):
+        return
+
+    async def handler(_request):
+        report = _translation_environment_report()
+        missing_models = list(report.get("missing_models", []) or [])
+        missing_dependencies = list(report.get("missing_dependencies", []) or [])
+        warning = ""
+        if missing_models:
+            warning = "⚠️ 翻译模型缺失，翻译功能已停用；普通 CLIP 编码不受影响。"
+        elif missing_dependencies:
+            warning = "⚠️ 翻译依赖缺失，翻译功能已停用；普通 CLIP 编码不受影响。"
+        return web.json_response(
+            {
+                "ok": True,
+                "available": bool(report.get("available", True)),
+                "warning": warning,
+                "copy_text": report.get("model_download_url") or report.get("copy_text") or "",
+                "copy_label": "复制下载地址" if missing_models else (report.get("copy_label") or "复制修复命令"),
+                "report": report,
+            }
+        )
+
+    server.routes.get(TRANSLATE_STATUS_API_PATH)(handler)
+    setattr(server, "_gjj_clip_prompt_translate_status_api", True)
+
+
+_register_clip_prompt_translate_status_api()
 
 
 def _encode_clip(clip: Any, text: str):
@@ -98,7 +195,7 @@ def _zero_conditioning(conditioning: Any):
 class GJJ_CLIPPromptEncodePanel:
     CATEGORY = "GJJ/条件编码"
     FUNCTION = "encode"
-    DESCRIPTION = _DESCRIPTION_INTRO if _ENVIRONMENT_REPORT.get("available", True) else _ENVIRONMENT_REPORT.get("warning_message", "")
+    DESCRIPTION = _DESCRIPTION_INTRO
     GJJ_HELP = {
         "title": "CLIP正负提示词编码",
         "description": _DESCRIPTION_INTRO,
@@ -108,20 +205,18 @@ class GJJ_CLIPPromptEncodePanel:
             "正向提示词连接上游输入时，翻译开关开启后会在本节点正面文本框显示译文。",
             "翻译环境缺失时，关闭翻译开关仍可继续做普通 CLIP 编码。",
         ],
-        "notice": _ENVIRONMENT_REPORT.get("help_message", "") if not _ENVIRONMENT_REPORT.get("available", True) else "",
+        "notice": "",
         "install_cmd": _ENVIRONMENT_REPORT.get("install_cmd", "") if not _ENVIRONMENT_REPORT.get("available", True) else "",
         "copy_text": _ENVIRONMENT_REPORT.get("copy_text", "") if not _ENVIRONMENT_REPORT.get("available", True) else "",
         "copy_label": _ENVIRONMENT_REPORT.get("copy_label", "") if not _ENVIRONMENT_REPORT.get("available", True) else "",
         "warning_message": _ENVIRONMENT_REPORT.get("warning_message", "") if not _ENVIRONMENT_REPORT.get("available", True) else "",
-        "model_download_url": _ENVIRONMENT_REPORT.get("model_download_url", "") if _MISSING_MODELS else "",
+        "model_download_url": TRANSLATION_MODEL_DOWNLOAD_URL,
         "notice_level": _ENVIRONMENT_REPORT.get("notice_level", "ok"),
-        "models": [
-            {
-                "label": "Opus-MT 中英翻译模型",
-                "value": TRANSLATION_MODEL_SUBDIR,
-                "description": "目录内至少需要 config.json、权重文件、source.spm 和 target.spm。",
-            }
-        ],
+        "static_model_tree_only": True,
+        "model_tree_priority": "static",
+        "model_tree": _TRANSLATION_MODEL_TREE,
+        "missing_models": _MISSING_MODELS,
+        "models": _TRANSLATION_MODEL_TREE,
     }
     SEARCH_ALIASES = [
         "clip encode",
@@ -248,7 +343,7 @@ class GJJ_CLIPPromptEncodePanel:
         translation_unload_after_use = as_bool(kwargs.get("translation_unload_after_use", False))
         unique_id = kwargs.get("unique_id", None)
 
-        if external_positive is not None and translation_enabled:
+        if external_positive is not None and translation_enabled and _translation_available():
             positive_text = translate_zh_to_en(
                 str(external_positive or ""),
                 translation_device,

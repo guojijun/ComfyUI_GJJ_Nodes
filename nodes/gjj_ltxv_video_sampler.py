@@ -199,6 +199,65 @@ def _resolve_noise(noise_seed, latent: dict[str, Any]):
     return _RandomNoise(seed).generate_noise(latent)
 
 
+def _shape_text(value: Any) -> str:
+    try:
+        if isinstance(value, comfy.nested_tensor.NestedTensor):
+            shapes = []
+            for item in value.unbind():
+                shapes.append("x".join(str(int(dim)) for dim in item.shape))
+            return " + ".join(shapes) if shapes else "未知"
+        if hasattr(value, "shape"):
+            return "x".join(str(int(dim)) for dim in value.shape)
+    except Exception:
+        pass
+    return "未知"
+
+
+def _latent_summary(video_latent: dict[str, Any], audio_latent: dict[str, Any], latent_image: Any = None) -> str:
+    video_shape = _shape_text((video_latent or {}).get("samples") if isinstance(video_latent, dict) else None)
+    audio_shape = _shape_text((audio_latent or {}).get("samples") if isinstance(audio_latent, dict) else None)
+    merged_shape = _shape_text(latent_image)
+    parts = [f"视频 latent: {video_shape}", f"音频 latent: {audio_shape}"]
+    if merged_shape != "未知":
+        parts.append(f"合并后 latent: {merged_shape}")
+    return "；".join(parts)
+
+
+def _gpu_memory_summary() -> str:
+    try:
+        if not torch.cuda.is_available():
+            return ""
+        device = torch.cuda.current_device()
+        total = torch.cuda.get_device_properties(device).total_memory / (1024**3)
+        allocated = torch.cuda.memory_allocated(device) / (1024**3)
+        reserved = torch.cuda.memory_reserved(device) / (1024**3)
+        free, _total = torch.cuda.mem_get_info(device)
+        return f"GPU显存：总计 {total:.2f} GiB，已分配 {allocated:.2f} GiB，已保留 {reserved:.2f} GiB，当前空闲 {free / (1024**3):.2f} GiB。"
+    except Exception:
+        return ""
+
+
+def _make_oom_message(exc: BaseException, video_latent: dict[str, Any], audio_latent: dict[str, Any], latent_image: Any) -> str:
+    latent_text = _latent_summary(video_latent, audio_latent, latent_image)
+    memory_text = _gpu_memory_summary()
+    source_text = str(exc).splitlines()[0].strip()
+    tips = [
+        "LTX视频采样器：显存不足，采样已中断并尝试清理缓存。",
+        f"当前输入：{latent_text}。",
+    ]
+    if memory_text:
+        tips.append(memory_text)
+    if source_text:
+        tips.append(f"PyTorch提示：{source_text}")
+    tips.extend(
+        [
+            "建议处理：优先把上游视频 latent 的宽高降一档，或减少帧数/时长；确认 batch_size 为 1；关闭本节点「输出降噪Latent」；如仍不足，换更低分辨率预设或减少参考/控制条件。",
+            "这次报错不是 Sigmas 或采样器名称问题，而是当前 latent 尺寸对应的单步模型前向显存超过了显卡上限。",
+        ]
+    )
+    return "\n".join(tips)
+
+
 class _RandomNoise:
     def __init__(self, seed: int):
         self.seed = seed
@@ -458,6 +517,7 @@ class GJJ_LTXVVideoSampler:
 
         try:
             _send_status(unique_id, "4/5 采样生成 LTXV Latent...", 0.48)
+            _cleanup_cuda()
             resolved_noise = _resolve_noise(noise_seed, latent)
             samples = guider.sample(
                 resolved_noise,
@@ -489,6 +549,15 @@ class GJJ_LTXVVideoSampler:
             _send_status(unique_id, "5/5 LTXV 采样完成", 1.0)
             completed = True
             return (out, out_denoised)
+        except torch.OutOfMemoryError as exc:
+            _send_status(unique_id, "LTXV采样显存不足，正在清理缓存...", 1.0)
+            try:
+                model_patcher = getattr(guider, "model_patcher", None)
+                _offload_model(model_patcher)
+            except Exception:
+                pass
+            _cleanup_cuda()
+            raise RuntimeError(_make_oom_message(exc, video_latent, audio_latent, latent_image)) from exc
         finally:
             try:
                 if isinstance(x0_output, dict):

@@ -643,7 +643,20 @@ function startPolling(node) {
     };
 
     node.__gjjMemoryPollTimer = setInterval(tick, POLL_INTERVAL_MS);
-    setTimeout(tick, 300);
+    clearTimeout(node.__gjjMemoryInitialPollTimer);
+    node.__gjjMemoryInitialPollTimer = setTimeout(tick, 300);
+}
+
+function stopPolling(node) {
+    if (!node) return;
+    if (node.__gjjMemoryPollTimer) {
+        clearInterval(node.__gjjMemoryPollTimer);
+        node.__gjjMemoryPollTimer = null;
+    }
+    if (node.__gjjMemoryInitialPollTimer) {
+        clearTimeout(node.__gjjMemoryInitialPollTimer);
+        node.__gjjMemoryInitialPollTimer = null;
+    }
 }
 
 function installPanel(node) {
@@ -721,6 +734,12 @@ app.registerExtension({
             syncPersistedProps(this);
             installPanel(this);
             return result;
+        };
+
+        const onRemoved = nodeType.prototype.onRemoved;
+        nodeType.prototype.onRemoved = function (...args) {
+            stopPolling(this);
+            return onRemoved?.apply(this, args);
         };
 
         const onConfigure = nodeType.prototype.onConfigure;

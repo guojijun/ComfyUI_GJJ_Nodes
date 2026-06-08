@@ -64,7 +64,7 @@ const PRESETS = [
 	{
 		id: "ltx_frames",
 		label: "✅ LTX",
-		formula: "int((x1*x2//8)*8+1)",
+		formula: "int((时长 * 帧率//8)*8+1)",
 		inputCount: 2,
 		title: "LTX 总帧数：fps x 秒数后按 8n+1 对齐，只保留 x1/x2 和一个 INT 输出口。",
 		resultName: "LTX总帧数 INT",
@@ -74,7 +74,7 @@ const PRESETS = [
 	{
 		id: "wan_frames",
 		label: "☑️ WAN",
-		formula: "int((x1*x2//4)*4+1)",
+		formula: "int((时长 * 帧率 //4)*4+1)",
 		inputCount: 2,
 		title: "WAN 总帧数：WanVideo length 使用 4n+1 对齐，只保留 x1/x2 和一个 INT 输出口。",
 		resultName: "WAN总帧数 INT",
@@ -96,8 +96,8 @@ const PRESETS = [
 ];
 const PRESET_BY_ID = new Map(PRESETS.map((preset) => [preset.id, preset]));
 const COMMON_FORMULAS = [
-	{ label: "🎞️ LTX帧", formula: "int((x1*x2//8)*8+1)", title: "LTX 8n+1 对齐总帧数：(帧率 x 时长) + 1" },
-	{ label: "🎬 WAN帧", formula: "int((x1*x2//4)*4+1)", title: "WAN 4n+1 对齐总帧数：(帧率 x 时长) + 1" },
+	{ label: "🎞️ LTX帧", formula: "int((帧率*时长//8)*8+1)", title: "LTX 8n+1 对齐总帧数：(帧率 x 时长) + 1" },
+	{ label: "🎬 WAN帧", formula: "int((帧率*时长//4)*4+1)", title: "WAN 4n+1 对齐总帧数：(帧率 x 时长) + 1" },
 	{ label: "🔢 对齐8", formula: "(x1//8)*8", title: "分辨率向下对齐到 8 的倍数。" },
 	{ label: "🔢 对齐16", formula: "(x1//16)*16", title: "分辨率向下对齐到 16 的倍数。" },
 	{ label: "🔼 上8", formula: "ceil(x1/8)*8", title: "分辨率向上对齐到 8 的倍数。" },
@@ -224,6 +224,10 @@ function variableDisplayParts(option) {
 	return { title: label || value, source: "", value };
 }
 
+function isDirectFormulaName(value) {
+	return /^[^\s{}()[\]+\-*/%,.:;'"，。；：、]+$/u.test(String(value || "").trim());
+}
+
 function isGenericInputName(value) {
 	const text = normalizeInputName(value);
 	if (!text) return true;
@@ -256,10 +260,10 @@ function inputFormulaName(node, input) {
 function syncInputNames(node) {
 	const data = {};
 	for (const input of getValueInputs(node)) {
-		const name = inputAliasName(node, input);
-		if (!name) continue;
+		const names = inputAliasNames(node, input);
+		if (!names.length) continue;
 		const index = getInputIndex(input.name);
-		data[`x${index}`] = name;
+		data[`x${index}`] = names.length === 1 ? names[0] : names;
 	}
 	setWidgetValue(getWidget(node, INPUT_NAMES_WIDGET), JSON.stringify(data));
 	setWidgetValue(getWidget(node, LEGACY_INPUT_NAMES_WIDGET), "{}");
@@ -346,6 +350,19 @@ function inputAliasName(node, input) {
 		if (variable) return variable;
 	}
 	return inputFormulaName(node, input) || formulaPlaceholderSlotMap(node).get(index) || "";
+}
+
+function inputAliasNames(node, input) {
+	const index = getInputIndex(input?.name);
+	if (variableModeEnabled(node)) {
+		const variable = selectedVariables(node)[index - 1];
+		if (variable) {
+			const title = variableDisplayParts(variableOptionForName(node, variable)).title || "";
+			return uniqueNames([variable, title]).filter((name) => !isGenericInputName(name));
+		}
+	}
+	const name = inputFormulaName(node, input) || formulaPlaceholderSlotMap(node).get(index) || "";
+	return name ? [name] : [];
 }
 
 function inputDisplayName(node, input) {
@@ -1316,8 +1333,10 @@ function rebuildInputButtons(node) {
 		const index = getInputIndex(input.name);
 		const variable = `x${index}`;
 		const formulaName = inputAliasName(node, input);
-		const insert = formulaName ? `{${formulaName}}` : variable;
-		const label = formulaName ? `🔹 {${formulaName}}` : `🔹 ${variable}`;
+		const displayName = inputDisplayName(node, input);
+		const directName = isDirectFormulaName(displayName) ? displayName : formulaName;
+		const insert = directName ? (isDirectFormulaName(directName) ? directName : `{${directName}}`) : variable;
+		const label = directName ? `🔹 ${insert}` : `🔹 ${variable}`;
 		const title = formulaName
 			? `插入 ${insert}；也可使用 ${variable}`
 			: `插入变量 ${variable}`;
@@ -1630,7 +1649,9 @@ function patchCalculatorVariablePrompt(promptResult, graph) {
 		const inputs = new Map(getValueInputs(node).map((input) => [input.name, input]));
 		names.forEach((name, index) => {
 			const inputName = formatInputName(index + 1);
-			inputNames[`x${index + 1}`] = name;
+			const title = variableDisplayParts(variableOptionForName(node, name)).title || "";
+			const aliases = uniqueNames([name, title]).filter((item) => !isGenericInputName(item));
+			inputNames[`x${index + 1}`] = aliases.length > 1 ? aliases : name;
 			if (inputHasLink(inputs.get(inputName))) {
 				return;
 			}

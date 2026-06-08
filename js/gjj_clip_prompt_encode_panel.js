@@ -5,6 +5,7 @@ import { requestPromptTranslation } from "./gjj_common_prompt_translation.js";
 const TARGET_NODES = new Set(["GJJ_CLIPPromptEncodePanel"]);
 const TRANSLATED_EVENT = "gjj_clip_prompt_translated";
 const NODE_DISPLAY_NAME = "GJJ · 🧾 CLIP正负提示词编码";
+const TRANSLATION_STATUS_API = "/gjj/clip_prompt_translate_status";
 
 const FIELD = {
 	positive: "positive_text",
@@ -17,6 +18,7 @@ const FIELD = {
 const POSITIVE_PROMPT_INPUT = "positive_prompt_input";
 
 const DOM_WIDGET = "gjj_clip_prompt_encode_panel";
+const STANDARD_STATUS_WIDGET = "gjj_standard_status";
 const SAVED_VALUES_PROPERTY = "gjj_clip_prompt_encode_panel_values";
 const TEXTAREA_HEIGHTS_PROPERTY = "gjj_clip_prompt_encode_panel_textarea_heights";
 const POSITIVE_VARIABLE_PROPERTY = "gjj_clip_prompt_positive_variable";
@@ -32,9 +34,24 @@ const PANEL_MIN_HEIGHT = 120;
 const PANEL_GAP = 7;
 const NODE_BOTTOM_PADDING = 12;
 const SIZE_EPSILON = 8;
+let translationStatusPromise = null;
 
 function getWidget(node, name) {
 	return node.widgets?.find((w) => w?.name === name);
+}
+
+function removeStandardStatusWidget(node) {
+	if (!Array.isArray(node?.widgets)) return;
+	for (let index = node.widgets.length - 1; index >= 0; index -= 1) {
+		const widget = node.widgets[index];
+		if (String(widget?.name || "") !== STANDARD_STATUS_WIDGET) continue;
+		widget.element?.remove?.();
+		node.widgets.splice(index, 1);
+	}
+	if (node?.__gjjStandardStatus) {
+		node.__gjjStandardStatus.wrap?.remove?.();
+		delete node.__gjjStandardStatus;
+	}
 }
 
 function getValue(node, name, fallback = "") {
@@ -417,16 +434,75 @@ function setTranslationEnabled(node, enabled) {
 	setValue(node, FIELD.translate, Boolean(enabled));
 }
 
+function translationAvailable(node) {
+	return node?.__gjjClipTranslationAvailable !== false;
+}
+
+function translationWarningText(node) {
+	return String(node?.__gjjClipTranslationWarning || "");
+}
+
+function translationCopyText(node) {
+	return String(node?.__gjjClipTranslationCopyText || "");
+}
+
+async function loadTranslationStatus() {
+	if (!translationStatusPromise) {
+		translationStatusPromise = fetch(TRANSLATION_STATUS_API)
+			.then((response) => response.json())
+			.catch((error) => ({
+				ok: false,
+				available: false,
+				warning: `⚠️ 翻译状态读取失败，翻译功能已停用：${error?.message || error}`,
+				copy_text: "",
+			}));
+	}
+	return translationStatusPromise;
+}
+
+function applyTranslationStatus(node, data) {
+	node.__gjjClipTranslationAvailable = data?.available !== false;
+	node.__gjjClipTranslationWarning = node.__gjjClipTranslationAvailable ? "" : String(data?.warning || "⚠️ 翻译环境缺失，翻译功能已停用；普通 CLIP 编码不受影响。");
+	node.__gjjClipTranslationCopyText = String(data?.copy_text || data?.report?.model_download_url || data?.report?.copy_text || "");
+	if (!node.__gjjClipTranslationAvailable && isTranslationEnabled(node)) {
+		setTranslationEnabled(node, false);
+	}
+	updateTranslationAvailabilityUI(node);
+}
+
+function updateTranslationAvailabilityUI(node) {
+	const available = translationAvailable(node);
+	if (node.__gjjClipTranslateButton) updateTranslateButton(node);
+	if (node.__gjjClipDevice) node.__gjjClipDevice.disabled = !available;
+	if (node.__gjjClipUnload) node.__gjjClipUnload.disabled = !available;
+	const warning = node.__gjjClipTranslationWarningBox;
+	if (warning) {
+		const text = translationWarningText(node);
+		warning.style.display = available || !text ? "none" : "flex";
+		const label = warning.querySelector(".gjj-clip-translation-warning-text");
+		if (label) label.textContent = text;
+		const copyButton = warning.querySelector(".gjj-clip-translation-copy");
+		if (copyButton) {
+			copyButton.disabled = !translationCopyText(node);
+			copyButton.style.display = translationCopyText(node) ? "" : "none";
+		}
+	}
+	scheduleRefreshNode(node);
+}
+
 function updateTranslateButton(node) {
 	const button = node.__gjjClipTranslateButton;
 	if (!button) return;
+	const available = translationAvailable(node);
 	const enabled = isTranslationEnabled(node);
 	button.dataset.value = enabled ? "true" : "false";
 	button.textContent = enabled ? "✅ 翻译开" : "⬜ 翻译关";
-	button.title = enabled
+	button.title = !available
+		? (translationWarningText(node) || "翻译环境缺失，翻译功能已停用；普通 CLIP 编码不受影响。")
+		: enabled
 		? "翻译已开启：连接上游正向提示词时，本面板显示译文；再次点击关闭。中文引号“”内不翻译。"
 		: "点击开启翻译，并立即翻译当前面板文本；中文引号“”内不翻译。";
-	button.disabled = Boolean(node.__gjjClipTranslating);
+	button.disabled = !available || Boolean(node.__gjjClipTranslating);
 }
 
 function updatePositiveVariableButton(node) {
@@ -673,6 +749,7 @@ function scheduleRefreshNode(node, ms = 0) {
 }
 
 function syncDomFromWidgets(node) {
+	removeStandardStatusWidget(node);
 	const positiveConnected = isPositivePromptConnected(node);
 	const positiveVariable = selectedPositiveVariable(node);
 	const positiveExternal = positiveConnected || Boolean(positiveVariable);
@@ -736,6 +813,12 @@ function scheduleTranslate(node, ms = 0, options = {}) {
 async function translatePrompts(node, options = {}) {
 	if (node.__gjjClipTranslating) return;
 	clearTimeout(node.__gjjClipTranslateTimer);
+	if (!translationAvailable(node)) {
+		setTranslationEnabled(node, false);
+		updateTranslationAvailabilityUI(node);
+		setStatus(node, "翻译环境缺失，已继续使用原文。");
+		return;
+	}
 	const positiveConnected = isPositivePromptConnected(node);
 	const translationEnabled = isTranslationEnabled(node);
 	const linkedPositive = positiveConnected ? getLinkedPositiveInfo(node) : null;
@@ -926,6 +1009,17 @@ function buildDom(node) {
 		.gjj-clip-prompt-textarea:focus { border-color:#6aa6b8; background:#111d22; }
 		.gjj-clip-prompt-textarea.external { border-color:#4b5860; background:#101417; color:#8ea0a8; opacity:.78; }
 		.gjj-clip-prompt-status { display:none; flex:1 1 0; min-width:0; color:#8ea0a8; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+		.gjj-clip-translation-warning {
+			display:none; align-items:center; gap:6px; width:100%; min-width:0; padding:5px 7px;
+			border:1px solid rgba(226,196,113,.45); border-radius:7px; background:rgba(67,50,17,.45);
+			color:#e2c471; font-size:11px; line-height:16px;
+		}
+		.gjj-clip-translation-warning-text { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+		.gjj-clip-translation-copy {
+			flex:0 0 auto; height:22px; padding:0 7px; border:1px solid rgba(226,196,113,.55);
+			border-radius:6px; background:#2a2418; color:#f3d891; font-size:11px; cursor:pointer; white-space:nowrap;
+		}
+		.gjj-clip-translation-copy:hover { background:#3a2e18; }
 	`;
 
 	const toolbar = document.createElement("div");
@@ -952,6 +1046,12 @@ function buildDom(node) {
 	translate.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
+		if (!translationAvailable(node)) {
+			setTranslationEnabled(node, false);
+			updateTranslationAvailabilityUI(node);
+			setStatus(node, "翻译模型缺失，已继续使用原文。");
+			return;
+		}
 		const nextEnabled = !isTranslationEnabled(node);
 		setTranslationEnabled(node, nextEnabled);
 		syncDomFromWidgets(node);
@@ -1013,6 +1113,30 @@ function buildDom(node) {
 
 	toolbar.append(zero, translate, positiveVariable, device, unload, status);
 
+	const translationWarning = document.createElement("div");
+	translationWarning.className = "gjj-clip-translation-warning";
+	const translationWarningText = document.createElement("span");
+	translationWarningText.className = "gjj-clip-translation-warning-text";
+	const translationCopy = document.createElement("button");
+	translationCopy.type = "button";
+	translationCopy.className = "gjj-clip-translation-copy";
+	translationCopy.textContent = "复制下载地址";
+	translationCopy.title = "复制翻译模型下载地址";
+	translationCopy.addEventListener("click", async (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const text = translationCopyText(node);
+		if (!text) return;
+		try {
+			await navigator.clipboard?.writeText(text);
+			setStatus(node, "已复制下载地址");
+		} catch (_) {
+			setStatus(node, text);
+		}
+	});
+	protect(translationCopy);
+	translationWarning.append(translationWarningText, translationCopy);
+
 	const positiveLabel = document.createElement("div");
 	positiveLabel.className = "gjj-clip-prompt-label";
 	positiveLabel.textContent = "正面提示词";
@@ -1023,7 +1147,7 @@ function buildDom(node) {
 	negativeLabel.textContent = "负面提示词";
 	const negative = createTextarea(node, FIELD.negative, "输入负面提示词，可写中文后开启翻译");
 
-	container.append(style, toolbar, positiveLabel, positive, negativeLabel, negative);
+	container.append(style, toolbar, translationWarning, positiveLabel, positive, negativeLabel, negative);
 	container.addEventListener("pointerdown", (event) => event.stopPropagation());
 	container.addEventListener("mousedown", (event) => event.stopPropagation());
 	container.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true });
@@ -1039,12 +1163,15 @@ function buildDom(node) {
 	node.__gjjClipDevice = device;
 	node.__gjjClipUnload = unload;
 	node.__gjjClipStatus = status;
+	node.__gjjClipTranslationWarningBox = translationWarning;
 
 	syncDomFromWidgets(node);
+	loadTranslationStatus().then((data) => applyTranslationStatus(node, data));
 	return container;
 }
 
 function ensureDom(node) {
+	removeStandardStatusWidget(node);
 	if (node.__gjjClipPromptWidget) return;
 	const container = buildDom(node);
 	const domWidget = node.addDOMWidget?.(DOM_WIDGET, "HTML", container, {

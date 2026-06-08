@@ -33,6 +33,9 @@ const MODE_PREVIEW = "preview";
 const DOUBLE_CLICK_MS = 420;
 const MODE_PROPERTY = "__gjjAnyPreviewMode";
 const WIDTH_PROPERTY = "gjj_any_preview_width";
+const MOTION_GUARD_STYLE_ID = "gjj-any-preview-motion-guard-style";
+const MOTION_CLASS = "gjj-any-preview-motion";
+const MOTION_IDLE_MS = 260;
 const LIVE_KIND_LABELS = {
 	image: "图片",
 	mask: "遮罩",
@@ -65,6 +68,8 @@ const KIND_EMOJIS = {
 };
 const ORDINAL_EMOJIS = ["", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"];
 let lastPromptId = null;
+let motionGuardInstalled = false;
+let motionGuardTimer = null;
 
 function ordinalEmoji(index) {
 	const value = Number(index);
@@ -79,6 +84,75 @@ function normalizePreviewTypeLabel(value, fallback = "OBJECT") {
 	if (!text || text === "*") return fallback;
 	const first = text.split(",").map((part) => part.trim()).find((part) => part && part !== "*") || text;
 	return first.replace(/^converted-widget:/i, "").trim().toUpperCase() || fallback;
+}
+
+function ensureMotionGuardStyle() {
+	if (document.getElementById(MOTION_GUARD_STYLE_ID)) return;
+	const style = document.createElement("style");
+	style.id = MOTION_GUARD_STYLE_ID;
+	style.textContent = `
+.gjj-any-preview-wrap.${MOTION_CLASS} > :not(style) {
+	visibility: hidden !important;
+}
+.gjj-any-preview-wrap.${MOTION_CLASS}::after {
+	content: "拖动画布中，已临时暂停大图绘制";
+	position: absolute;
+	inset: 8px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	box-sizing: border-box;
+	border: 1px dashed rgba(125, 211, 252, .32);
+	border-radius: 8px;
+	background: rgba(9, 15, 18, .82);
+	color: #a8c7d8;
+	font: 700 13px/1.4 system-ui, "Microsoft YaHei", sans-serif;
+	text-align: center;
+	pointer-events: none;
+	z-index: 5;
+}
+`;
+	document.head.appendChild(style);
+}
+
+function setPreviewMotionMode(active) {
+	for (const node of app.graph?._nodes || []) {
+		if (!TARGET_NODES.has(node?.comfyClass || node?.type)) continue;
+		const wrap = node.__gjjAnyPreviewWrap;
+		if (!wrap?.classList) continue;
+		wrap.classList.toggle(MOTION_CLASS, Boolean(active));
+	}
+}
+
+function pulsePreviewMotionMode() {
+	ensureMotionGuardStyle();
+	setPreviewMotionMode(true);
+	clearTimeout(motionGuardTimer);
+	motionGuardTimer = setTimeout(() => setPreviewMotionMode(false), MOTION_IDLE_MS);
+}
+
+function installCanvasMotionGuard() {
+	if (motionGuardInstalled) return;
+	const canvasEl = app.canvas?.canvas_mouse || app.canvas?.canvas || document.querySelector("canvas");
+	if (!canvasEl?.addEventListener) return;
+	motionGuardInstalled = true;
+	let pointerDownOnCanvas = false;
+	const begin = () => {
+		pointerDownOnCanvas = true;
+	};
+	const move = (event) => {
+		if (pointerDownOnCanvas || Number(event?.buttons || 0) !== 0) {
+			pulsePreviewMotionMode();
+		}
+	};
+	const end = () => {
+		pointerDownOnCanvas = false;
+		pulsePreviewMotionMode();
+	};
+	canvasEl.addEventListener("pointerdown", begin, { passive: true });
+	canvasEl.addEventListener("pointermove", move, { passive: true });
+	window.addEventListener("pointerup", end, { passive: true });
+	canvasEl.addEventListener("wheel", pulsePreviewMotionMode, { passive: true });
 }
 
 function previewItemKind(item) {
@@ -2811,6 +2885,7 @@ function ensurePreviewWidget(node) {
 	].join(";");
 
 	const previewWrap = document.createElement("div");
+	previewWrap.className = "gjj-any-preview-wrap";
 	previewWrap.style.cssText = [
 		"display:flex",
 		"flex-direction:column",
@@ -3031,6 +3106,7 @@ function scheduleStabilize(node, ms = 32) {
 }
 
 installNativePreviewEventFilter();
+ensureMotionGuardStyle();
 
 app.registerExtension({
 	name: "Comfy.GJJ.AnyPreview.AudioLiveMediaGuard",
@@ -3229,6 +3305,7 @@ app.registerExtension({
 	},
 
 	setup() {
+		installCanvasMotionGuard();
 		for (const node of app.graph?._nodes || []) {
 			if (TARGET_NODES.has(node?.comfyClass)) {
 				resetLivePreviewState(node);

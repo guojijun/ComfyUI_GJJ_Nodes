@@ -1,6 +1,6 @@
 """
 GJJ Node Arranger - ComfyUI 节点自动排列工具
-支持智能排列、水平/垂直/网格排列、多种拓扑排序方式
+支持智能排列、水平/垂直/正方形预览排版、多种拓扑排序方式
 """
 
 NODE_NAME = "GJJ_NodeArranger"
@@ -52,7 +52,7 @@ class GJJ_NodeArranger:
                         "topo_original_y-拓扑保持上下；"
                         "horizontal-水平排列；"
                         "vertical-垂直排列；"
-                        "grid-网格排列"
+                        "grid-正方形预览排版：标题置顶，输出预览放大到右侧，辅助节点紧凑排列"
                     ),
                 }),
                 "间距": ("INT", {

@@ -12,7 +12,7 @@ from .common_utils.dependency_checker import make_missing_model_spec, raise_depe
 
 
 NODE_NAME = "GJJ_AliMamaControlNetApply"
-NODE_DISPLAY_NAME = "GJJ · 🩹 阿里妈妈ControlNet"
+NODE_DISPLAY_NAME = "GJJ · 🩹 应用ControlNet（阿里妈妈）"
 DESCRIPTION = (
     "合并 ControlNet 模型加载与官方阿里妈妈局部重绘 ControlNet 应用；"
     "VAE 与遮罩为可选输入，接入遮罩时按 inpaint ControlNet 逻辑处理，未接入时按普通 ControlNet 应用。"

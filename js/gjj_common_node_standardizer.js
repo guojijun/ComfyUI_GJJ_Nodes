@@ -91,6 +91,7 @@ const MODEL_TREE_FILE_EXTENSIONS = new Set([
 	".json",
 	".yaml",
 	".yml",
+	".spm",
 ]);
 const META_BY_CLASS = new Map();
 const FULLY_BYPASS_CLASSES = new Set([
@@ -131,6 +132,9 @@ const STATUS_ENABLED_CLASSES = new Set([
 	"GJJ_Wan22RapidAIOMega",
 	"GJJ_WanVideoSamplerV2",
 	"GJJ_WanVideoVAELoader",
+]);
+const STATUS_DISABLED_CLASSES = new Set([
+	"GJJ_CLIPPromptEncodePanel",
 ]);
 const PRESERVE_DETAILED_COMPLETION_CLASSES = new Set([
 	"GJJ_OldPhotoRestorer",
@@ -260,7 +264,8 @@ function nodeClassName(node) {
 }
 
 function shouldAttachStatus(node) {
-	return STATUS_ENABLED_CLASSES.has(String(node?.comfyClass || node?.type || ""));
+	const className = String(node?.comfyClass || node?.type || "");
+	return !STATUS_DISABLED_CLASSES.has(className) && STATUS_ENABLED_CLASSES.has(className);
 }
 
 function suppressLegacyStatusWidget(node, widget) {
@@ -611,6 +616,10 @@ function hasHelpValue(help, keys) {
 
 function hasDeclaredModelInfo(meta) {
 	return hasHelpValue(meta?.help, [
+		"model_tree",
+		"modelTree",
+		"models_tree",
+		"modelsTree",
 		"models",
 		"model",
 		"required_models",
@@ -652,6 +661,24 @@ function staticModelTreeOnly(meta) {
 		|| help.staticModelTreeOnly === true
 		|| help.model_tree_static_only === true
 		|| help.modelTreeStaticOnly === true;
+}
+
+function modelTreePriority(meta) {
+	const help = meta?.help || {};
+	const value = String(
+		help.model_tree_priority
+		|| help.modelTreePriority
+		|| help.model_priority
+		|| help.modelPriority
+		|| ""
+	).trim().toLowerCase();
+	if (staticModelTreeOnly(meta) || ["static", "declared", "backend", "fixed"].includes(value)) {
+		return "static";
+	}
+	if (dynamicModelTreeOnly(meta) || ["dynamic", "runtime", "live", "node"].includes(value)) {
+		return "dynamic";
+	}
+	return "auto";
 }
 
 function firstWarningLine(text) {
@@ -778,6 +805,7 @@ function declaredModelEntries(meta) {
 
 function declaredModelTreeEntries(meta) {
 	const declared = meta?.help?.model_tree || meta?.help?.modelTree || meta?.help?.models_tree || meta?.help?.modelsTree;
+	const missingDeclared = meta?.help?.missing_models || meta?.help?.missingModels;
 	const normalizeItem = (item, fallbackLabel = "模型") => {
 		if (typeof item === "string") {
 			const value = item.trim();
@@ -801,15 +829,29 @@ function declaredModelTreeEntries(meta) {
 			icon: escapeText(item.icon || ""),
 		} : null;
 	};
+	const normalizeMany = (value) => {
+		if (Array.isArray(value)) {
+			return value.map((item) => normalizeItem(item)).filter(Boolean);
+		}
+		if (value && typeof value === "object") {
+			return Object.entries(value)
+				.map(([label, item]) => (typeof item === "string" ? normalizeItem(item, label) : normalizeItem({ label, ...(item || {}) }, label)))
+				.filter(Boolean);
+		}
+		return [];
+	};
 	if (Array.isArray(declared)) {
-		return declared.map((item) => normalizeItem(item)).filter(Boolean);
+		return [...declared.map((item) => normalizeItem(item)).filter(Boolean), ...normalizeMany(missingDeclared)];
 	}
 	if (declared && typeof declared === "object") {
-		return Object.entries(declared)
+		return [
+			...Object.entries(declared)
 			.map(([label, value]) => (typeof value === "string" ? normalizeItem(value, label) : normalizeItem({ label, ...(value || {}) }, label)))
-			.filter(Boolean);
+			.filter(Boolean),
+			...normalizeMany(missingDeclared),
+		];
 	}
-	return [];
+	return normalizeMany(missingDeclared);
 }
 
 function pushUniqueModelEntry(entries, entry) {
@@ -1019,8 +1061,15 @@ function dynamicModelEntries(node, meta) {
 }
 
 function currentHelpModelEntries(node, meta) {
+	const priority = modelTreePriority(meta);
+	if (priority === "static") {
+		return hasDeclaredModelInfo(meta) ? currentModelEntries(node, meta) : [];
+	}
 	const dynamic = dynamicModelEntries(node, meta);
-	return dynamic.length ? dynamic : currentModelEntries(node, meta);
+	if (priority === "dynamic") {
+		return dynamic.length ? dynamic : (hasDeclaredModelInfo(meta) ? currentModelEntries(node, meta) : []);
+	}
+	return dynamic.length ? dynamic : (hasDeclaredModelInfo(meta) ? currentModelEntries(node, meta) : []);
 }
 
 function extractModelFilename(value, depth = 0) {
@@ -1139,8 +1188,7 @@ function inferModelKind(entry = {}) {
 function inferModelFolder(entry = {}, kind = "") {
 	const explicit = normalizeModelFolder(entry.folder || entry.dest || entry.directory || "");
 	if (explicit) {
-		const folder = explicit.split("/")[0] || explicit;
-		return folder;
+		return explicit;
 	}
 	const mapped = MODEL_TREE_FOLDER_BY_KIND[kind] || "";
 	if (mapped) {
@@ -1234,7 +1282,24 @@ function parseModelTreeItem(entry, part, fallbackFolder = "") {
 function modelTreeItems(items) {
 	const result = [];
 	const seen = new Set();
+	const addItem = (item) => {
+		if (!item) {
+			return;
+		}
+		const key = `${item.folder}\n${item.filename}\n${item.icon}`;
+		if (seen.has(key)) {
+			return;
+		}
+		seen.add(key);
+		result.push(item);
+	};
 	for (const entry of Array.isArray(items) ? items : []) {
+		if (isClipPromptTranslateModelEntry(entry)) {
+			for (const fallbackEntry of clipPromptEncodeFallbackModelEntries()) {
+				addItem(parseModelTreeItem(fallbackEntry, fallbackEntry.value, fallbackEntry.folder));
+			}
+			continue;
+		}
 		const parts = splitModelValueParts(entry?.value ?? entry?.filename ?? entry?.file ?? "");
 		let lastFolder = normalizeModelFolder(entry?.folder || "");
 		for (const part of parts) {
@@ -1243,12 +1308,7 @@ function modelTreeItems(items) {
 				continue;
 			}
 			lastFolder = item.folder || lastFolder;
-			const key = `${item.folder}\n${item.filename}\n${item.icon}`;
-			if (seen.has(key)) {
-				continue;
-			}
-			seen.add(key);
-			result.push(item);
+			addItem(item);
 		}
 	}
 	return result;
@@ -1257,7 +1317,8 @@ function modelTreeItems(items) {
 function createModelTreeDownloadLink(url = DEFAULT_MODEL_DOWNLOAD_URL) {
 	const link = createModelDownloadLink(url);
 	link.className = "gjj-help-model-tree-link";
-	link.textContent = `## [🌏 模型下载](${link.href})`;
+	link.textContent = "## [🌏 模型下载](https://pan.quark.cn/s/6ec846f1f58d)";
+	link.title = link.href;
 	return link;
 }
 
@@ -1296,6 +1357,34 @@ function createModelHelpContent(items, emptyText, downloadUrl = DEFAULT_MODEL_DO
 	pre.textContent = modelTreeText(modelTreeItems(items), emptyText || "未选择模型文件");
 	wrap.appendChild(pre);
 	return wrap;
+}
+
+function clipPromptEncodeFallbackDescription() {
+	return "CLIP 编码统一面板：CLIP 输入，正面/负面提示词在一个面板里编辑；翻译只是可选增强，缺少本地翻译模型时仍会用原文正常编码。";
+}
+
+function clipPromptEncodeFallbackModelEntries() {
+	return [
+		{ label: "Opus-MT 配置", value: "config.json", folder: "translation/opus-mt-zh-en", icon: "📄" },
+		{ label: "Opus-MT 权重", value: "pytorch_model.bin", folder: "translation/opus-mt-zh-en", icon: "🧠" },
+		{ label: "Opus-MT 权重", value: "model.safetensors", folder: "translation/opus-mt-zh-en", icon: "🧠" },
+		{ label: "源语言分词", value: "source.spm", folder: "translation/opus-mt-zh-en", icon: "🔤" },
+		{ label: "目标语言分词", value: "target.spm", folder: "translation/opus-mt-zh-en", icon: "🔤" },
+	];
+}
+
+function isClipPromptTranslateModelEntry(entry) {
+	const text = [
+		entry?.value,
+		entry?.filename,
+		entry?.file,
+		entry?.folder,
+		entry?.subdir,
+		entry?.path,
+		entry?.label,
+		entry?.description,
+	].map((item) => String(item || "")).join(" ");
+	return /opus-mt-zh-en|translation[\\/]+opus-mt-zh-en/i.test(text);
 }
 
 function ensureHelpStyles() {
@@ -1467,6 +1556,13 @@ function ensureHelpStyles() {
 
 function showHelpDialog(node) {
 	const meta = META_BY_CLASS.get(nodeClassName(node)) || {};
+	const className = nodeClassName(node);
+	let isClipPromptPanel = /GJJ_CLIPPromptEncodePanel|CLIPPromptEncodePanel|CLIP正负提示词编码/.test([
+		className,
+		node?.title,
+		meta?.name,
+		meta?.displayName,
+	].map((item) => String(item || "")).join(" "));
 	ensureHelpStyles();
 	document.querySelector(".gjj-help-overlay")?.remove();
 
@@ -1488,8 +1584,24 @@ function showHelpDialog(node) {
 
 	const body = document.createElement("div");
 	body.className = "gjj-help-body";
-	const descriptionText = formatHelpText(meta.description, "这个节点暂未提供功能说明。");
-	const noticeText = formatHelpText(meta?.help?.notice || "");
+	let descriptionText = formatHelpText(meta.description, "这个节点暂未提供功能说明。");
+	let noticeText = formatHelpText(meta?.help?.notice || "");
+	const helpBlob = [
+		className,
+		node?.title,
+		meta?.name,
+		meta?.displayName,
+		descriptionText,
+		noticeText,
+		JSON.stringify(meta?.help || {}),
+	].map((item) => String(item || "")).join(" ");
+	isClipPromptPanel = isClipPromptPanel || /GJJ_CLIPPromptEncodePanel|CLIPPromptEncodePanel|CLIP正负提示词编码|opus-mt-zh-en/i.test(helpBlob);
+	if (isClipPromptPanel && /缺失模型|翻译环境缺失/.test(descriptionText)) {
+		descriptionText = clipPromptEncodeFallbackDescription();
+	}
+	if (isClipPromptPanel) {
+		noticeText = "";
+	}
 	body.appendChild(createHelpSection("功能", descriptionText));
 	if (shouldShowNoticeSection(descriptionText, noticeText)) {
 		body.appendChild(createHelpSection("说明", noticeText));
@@ -1498,10 +1610,10 @@ function showHelpDialog(node) {
 		body.appendChild(createHelpSection("安装命令", formatHelpText(meta.help.install_cmd)));
 	}
 
-	const dynamicModels = staticModelTreeOnly(meta) ? [] : dynamicModelEntries(node, meta);
-	const modelEntries = dynamicModels.length
-		? dynamicModels
-		: (dynamicModelTreeOnly(meta) ? [] : (hasDeclaredModelInfo(meta) ? currentModelEntries(node, meta) : []));
+	let modelEntries = currentHelpModelEntries(node, meta);
+	if (isClipPromptPanel) {
+		modelEntries = clipPromptEncodeFallbackModelEntries();
+	}
 	const modelDownloadInfo = String(
 		meta?.help?.model_download_url
 		|| meta?.help?.modelDownloadUrl
@@ -1567,10 +1679,10 @@ async function loadBackendHelpMetadata() {
 				});
 				continue;
 			}
-			if (!meta.description && helpData?.description) {
+			if (helpData?.description) {
 				meta.description = String(helpData.description || "").trim();
 			}
-			if (!meta.help && helpData?.help) {
+			if (helpData?.help) {
 				meta.help = helpData.help;
 			}
 		}
