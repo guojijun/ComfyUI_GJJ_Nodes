@@ -81,79 +81,79 @@
   "user": {},
   "node_color_theme": {
     "version": 1,
-    "selected_style_id": "contrast",
+    "selected_style_id": "soft",
     "big_categories": [
       {
         "id": "input",
         "label": "输入",
-        "styleId": "contrast",
-        "color": "#2563EB"
+        "styleId": "soft",
+        "color": "#5D89A8"
       },
       {
         "id": "guide",
         "label": "引导",
-        "styleId": "contrast",
-        "color": "#A855F7"
+        "styleId": "soft",
+        "color": "#8072B2"
       },
       {
         "id": "sample",
         "label": "采样",
-        "styleId": "contrast",
-        "color": "#F59E0B"
+        "styleId": "soft",
+        "color": "#A98248"
       },
       {
         "id": "output",
         "label": "输出",
-        "styleId": "contrast",
-        "color": "#22C55E"
+        "styleId": "soft",
+        "color": "#5A9A77"
       },
       {
         "id": "decode",
         "label": "解码",
-        "styleId": "contrast",
-        "color": "#00D1FF"
+        "styleId": "soft",
+        "color": "#69A98A"
       },
       {
         "id": "encode",
         "label": "编码",
-        "styleId": "contrast",
-        "color": "#38BDF8"
+        "styleId": "soft",
+        "color": "#5F9188"
       },
       {
         "id": "model",
         "label": "模型",
-        "styleId": "contrast",
-        "color": "#7C3AED"
+        "styleId": "soft",
+        "color": "#8770AA"
       },
       {
         "id": "prompt",
         "label": "提示",
-        "styleId": "contrast",
-        "color": "#10B981"
+        "styleId": "soft",
+        "color": "#7479AA"
       },
       {
         "id": "image",
         "label": "图像",
-        "styleId": "contrast",
-        "color": "#14B8A6"
+        "styleId": "soft",
+        "color": "#5C9AA6"
       },
       {
         "id": "video",
         "label": "视频",
-        "styleId": "contrast",
-        "color": "#EAB308"
+        "styleId": "soft",
+        "color": "#A48852"
       },
       {
         "id": "audio",
         "label": "音频",
-        "styleId": "contrast",
-        "color": "#A3E635"
+        "styleId": "soft",
+        "color": "#7C8D6A"
       },
       {
         "id": "tool",
         "label": "工具",
-        "styleId": "contrast",
-        "color": "#94A3B8"
+        "styleId": "soft",
+        "color": "#68757A"
       }
     ],
     "custom_palette": [

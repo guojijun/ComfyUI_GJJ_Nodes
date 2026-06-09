@@ -512,19 +512,40 @@ import { app } from "/scripts/app.js";
 	function clearNodeErrorContainer(container, node) {
 		if (!container || !node) return;
 		const keys = [node.id, String(node.id)];
+		const matchesNode = (item) => {
+			if (item === node) return true;
+			if (keys.includes(item)) return true;
+			if (keys.includes(item?.node_id) || keys.includes(item?.node)) return true;
+			if (keys.includes(item?.id) || keys.includes(item?.nodeId)) return true;
+			if (keys.includes(item?.node_id != null ? String(item.node_id) : "")) return true;
+			if (keys.includes(item?.node != null ? String(item.node) : "")) return true;
+			if (keys.includes(item?.id != null ? String(item.id) : "")) return true;
+			if (keys.includes(item?.nodeId != null ? String(item.nodeId) : "")) return true;
+			return false;
+		};
 		if (container instanceof Map) {
 			for (const key of keys) container.delete(key);
+			for (const [key, value] of container.entries()) {
+				if (matchesNode(key) || matchesNode(value)) {
+					try { container.delete(key); } catch (_) {}
+				}
+			}
 			return;
 		}
 		if (container instanceof Set) {
 			for (const key of keys) container.delete(key);
 			container.delete(node);
+			for (const item of Array.from(container)) {
+				if (matchesNode(item)) {
+					try { container.delete(item); } catch (_) {}
+				}
+			}
 			return;
 		}
 		if (Array.isArray(container)) {
 			for (let index = container.length - 1; index >= 0; index -= 1) {
 				const item = container[index];
-				if (item === node || keys.includes(item) || keys.includes(item?.node_id) || keys.includes(item?.node)) {
+				if (matchesNode(item)) {
 					container.splice(index, 1);
 				}
 			}
@@ -538,7 +559,17 @@ import { app } from "/scripts/app.js";
 	}
 
 	function clearCachedNodeErrors(node) {
-		const holders = [app, app?.graph, app?.canvas, app?.ui];
+		const holders = [
+			app,
+			app?.graph,
+			app?.canvas,
+			app?.ui,
+			app?.ui?.lastQueuePrompt,
+			app?.ui?.lastQueuePrompt?.outputs,
+			app?.ui?.lastQueuePrompt?.workflow,
+			app?.ui?.lastQueuePrompt?.prompt,
+			globalThis,
+		];
 		const names = [
 			"node_errors",
 			"nodeErrors",
@@ -553,10 +584,50 @@ import { app } from "/scripts/app.js";
 			"invalidNodes",
 			"error_nodes",
 			"errorNodes",
+			"last_error",
+			"lastError",
+			"execution_error",
+			"executionError",
 		];
 		for (const holder of holders) {
 			if (!holder) continue;
 			for (const name of names) clearNodeErrorContainer(holder[name], node);
+		}
+	}
+
+	function clearNodeErrorChrome(node) {
+		if (!node) return;
+		for (const key of [
+			"last_error",
+			"execution_error",
+			"error_message",
+			"error",
+			"errors",
+			"validation_error",
+			"has_errors",
+			"hasErrors",
+			"invalid",
+		]) {
+			try {
+				if (key in node) node[key] = null;
+			} catch (_) {}
+		}
+		if (Array.isArray(node.badges)) {
+			node.badges = node.badges.filter((badge) => {
+				const text = String(badge?.text || badge?.label || badge?.name || badge?.message || badge || "");
+				const cls = String(badge?.className || badge?.class || badge?.type || "");
+				return !/error|错误|报错|invalid|validation/i.test(`${text} ${cls}`);
+			});
+		}
+		for (const key of ["error", "has_errors", "hasErrors", "invalid", "validation_error", "execution_error"]) {
+			try {
+				if (node.flags && key in node.flags) delete node.flags[key];
+			} catch (_) {}
+		}
+		for (const key of ["mode", "status", "state"]) {
+			try {
+				if (/error|错误|invalid/i.test(String(node[key] || ""))) node[key] = null;
+			} catch (_) {}
 		}
 	}
 
@@ -592,15 +663,7 @@ import { app } from "/scripts/app.js";
 		if (notice?.button) notice.button.style.display = "none";
 		clearStandardStatus(node);
 
-		for (const key of ["last_error", "execution_error", "error_message", "error", "errors"]) {
-			try {
-				if (key in node) node[key] = null;
-			} catch (_) {}
-		}
-		if (node.flags) {
-			delete node.flags.error;
-			delete node.flags.has_errors;
-		}
+		clearNodeErrorChrome(node);
 		clearCachedNodeErrors(node);
 		refreshNode(node);
 	}
@@ -667,6 +730,7 @@ import { app } from "/scripts/app.js";
 			console.warn("[GJJ] 召唤模型触发 widget 回调失败:", error);
 		}
 		try { node.onWidgetChanged?.(widgetName(widget), value, widget, node); } catch (_) {}
+		clearSummonedModelWarning(node);
 		const input = widget?.inputEl || widget?.element?.querySelector?.("input,select");
 		if (input && "value" in input) {
 			try {

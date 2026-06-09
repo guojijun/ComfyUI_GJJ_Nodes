@@ -1235,13 +1235,7 @@ function parseModelTreeItem(entry, part, fallbackFolder = "") {
 	const kind = inferModelKind(entry);
 	let folder = normalizeModelFolder(fallbackFolder) || inferModelFolder(entry, kind);
 	if (MODEL_TREE_EXTERNAL_VALUES.has(externalText)) {
-		return {
-			folder: normalizeModelFolder(folder) || "其他",
-			filename: externalText,
-			icon: String(entry.icon || MODEL_TREE_ICON_BY_KIND[kind] || MODEL_TREE_ICON_BY_KIND.empty),
-			kind,
-			label: String(entry.label || "模型"),
-		};
+		return null;
 	}
 	let filename = externalText.replaceAll("\\", "/").trim();
 	const modelMatch = filename.match(/models\/(.+)$/i);
