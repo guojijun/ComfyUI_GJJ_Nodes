@@ -6,6 +6,7 @@ const NODE_TYPE = "GJJ_OllamaAssistant";
 const PANEL_WIDGET = "gjj_ollama_assistant_panel";
 const TEMPLATE_WIDGET = "system_prompt_templates";
 const OUTPUT_RULE_WIDGET = "system_prompt_output_rule";
+const USER_PROMPT_WIDGET = "user_prompt";
 const USER_SETTINGS_ENDPOINT = "/gjj/user_settings";
 const USER_SETTINGS_SECTION = "ollama_assistant";
 const WORKFLOW_VALUES_PROPERTY = "gjj_ollama_assistant_values";
@@ -30,7 +31,7 @@ const BACKEND_WIDGETS = [
 	"system_prompt",
 	TEMPLATE_WIDGET,
 	OUTPUT_RULE_WIDGET,
-	"user_prompt",
+	USER_PROMPT_WIDGET,
 ];
 const LEGACY_WIDGET_ORDERS = [
 	BACKEND_WIDGETS,
@@ -56,7 +57,9 @@ const LEGACY_WIDGET_ORDERS = [
 		"user_prompt",
 	],
 ];
-const HIDDEN_WIDGETS = new Set(BACKEND_WIDGETS);
+const USER_PROMPT_INPUT_TYPE = "STRING";
+const USER_PROMPT_HIDDEN_NAMES = new Set(["user_prompt", "指令 / 原文"]);
+const HIDDEN_WIDGETS = new Set(BACKEND_WIDGETS.filter((name) => name !== USER_PROMPT_WIDGET));
 const DEFAULT_TEMPLATE_TEXT = "";
 const DEFAULT_OUTPUT_RULE = "";
 const DEFAULT_SAMPLING = {
@@ -613,6 +616,116 @@ function hideBackerWidgets(node) {
 	GJJ_Utils.reorderWidgets(node, HIDDEN_WIDGETS);
 }
 
+function restoreUserPromptWidget(node) {
+	const target = widget(node, USER_PROMPT_WIDGET);
+	if (!target) {
+		return null;
+	}
+	target.hidden = false;
+	target.disabled = false;
+	if (String(target.type || "").startsWith("converted-widget:")) {
+		target.type = "customtext";
+	}
+	if (target.__gjjUtilsHidden) {
+		delete target.__gjjUtilsHidden;
+	}
+	target.label = target.label || "指令 / 原文";
+	target.options ||= {};
+	delete target.options.hidden;
+	delete target.options.display;
+	target.options.multiline = true;
+	target.options.tooltip = target.options.tooltip || "输入需要生成、翻译或结合图片处理的内容；可在左侧小圆点外接 STRING。";
+	target.computeSize = undefined;
+	target.getHeight = undefined;
+	target.draw = undefined;
+	target.last_y = 0;
+	target.computedHeight = undefined;
+	target.margin_top = undefined;
+	target.size = undefined;
+	if (target.element?.style) {
+		target.element.style.display = "";
+		target.element.style.height = "";
+		target.element.style.margin = "";
+		target.element.style.padding = "";
+	}
+	if (target.inputEl?.style) {
+		target.inputEl.style.display = "";
+		target.inputEl.style.height = "";
+		target.inputEl.style.margin = "";
+		target.inputEl.style.padding = "";
+	}
+	return target;
+}
+
+function disconnectAndRemoveInput(node, index) {
+	if (!node || index < 0) {
+		return;
+	}
+	try { node.disconnectInput?.(index); } catch (_) {}
+	if (typeof node.removeInput === "function") {
+		node.removeInput(index);
+	} else if (Array.isArray(node.inputs)) {
+		node.inputs.splice(index, 1);
+	}
+}
+
+function ensureUserPromptInput(node) {
+	if (!Array.isArray(node?.inputs)) {
+		node.inputs = [];
+	}
+	let promptInput = null;
+	for (let index = node.inputs.length - 1; index >= 0; index -= 1) {
+		const input = node.inputs[index];
+		const name = String(input?.name || "");
+		const widgetName = String(input?.widget?.name || "");
+		const isPrompt = USER_PROMPT_HIDDEN_NAMES.has(name) || USER_PROMPT_HIDDEN_NAMES.has(widgetName);
+		if (!isPrompt) {
+			continue;
+		}
+		if (!promptInput) {
+			promptInput = input;
+		} else {
+			disconnectAndRemoveInput(node, index);
+		}
+	}
+	if (!promptInput) {
+		node.addInput?.(USER_PROMPT_WIDGET, USER_PROMPT_INPUT_TYPE);
+		promptInput = node.inputs[node.inputs.length - 1];
+	}
+	if (!promptInput) {
+		return;
+	}
+	promptInput.name = USER_PROMPT_WIDGET;
+	promptInput.type = USER_PROMPT_INPUT_TYPE;
+	promptInput.label = "指令 / 原文";
+	promptInput.localized_name = "指令 / 原文";
+	promptInput.tooltip = "外接 STRING 时作为用户提示词；未连接时使用面板里的原生文本框。";
+	promptInput.widget = { name: USER_PROMPT_WIDGET };
+}
+
+function placeUserPromptWidget(node) {
+	if (!Array.isArray(node?.widgets)) {
+		return;
+	}
+	const prompt = widget(node, USER_PROMPT_WIDGET);
+	const panel = widget(node, PANEL_WIDGET);
+	if (!prompt || !panel) {
+		return;
+	}
+	const promptIndex = node.widgets.indexOf(prompt);
+	if (promptIndex >= 0) {
+		node.widgets.splice(promptIndex, 1);
+	}
+	const panelIndex = Math.max(0, node.widgets.indexOf(panel));
+	node.widgets.splice(panelIndex + 1, 0, prompt);
+}
+
+function stabilizeUserPromptInput(node) {
+	restoreUserPromptWidget(node);
+	ensureUserPromptInput(node);
+	placeUserPromptWidget(node);
+}
+
 function button(label, title, handler) {
 	const element = document.createElement("button");
 	element.type = "button";
@@ -796,8 +909,6 @@ function syncPanel(node) {
 	syncInputValue(state.systemPrompt, widgetValue(node, "system_prompt", ""));
 	syncInputValue(state.templateEditor, widgetValue(node, TEMPLATE_WIDGET, state.userSettings?.templateText || DEFAULT_TEMPLATE_TEXT));
 	syncInputValue(state.outputRule, widgetValue(node, OUTPUT_RULE_WIDGET, state.userSettings?.outputRule || DEFAULT_OUTPUT_RULE));
-	syncInputValue(state.userPrompt, widgetValue(node, "user_prompt", ""));
-
 	const templateConfig = readTemplateConfig(node);
 	renderTemplateButtons(node, templateConfig);
 	const currentPrompt = String(widgetValue(node, "system_prompt", ""));
@@ -971,14 +1082,6 @@ function buildSettings(node) {
 		syncPanel(node);
 	});
 
-	const userPrompt = document.createElement("textarea");
-	userPrompt.className = "gjj-ia-textarea small";
-	userPrompt.placeholder = "输入需要生成或翻译的文本；只做图片理解时可留空。";
-	protect(userPrompt);
-	userPrompt.addEventListener("input", () => {
-		setWidgetValue(node, "user_prompt", userPrompt.value);
-	});
-
 	settings.append(
 		labelledField("🔌 Ollama 地址", host),
 		numeric,
@@ -1006,7 +1109,6 @@ function buildSettings(node) {
 		systemPrompt,
 		templateEditor,
 		outputRule,
-		userPrompt,
 	};
 }
 
@@ -1067,8 +1169,7 @@ function createPanel(node) {
 	toolbar.append(templates, thinking, keepAlive, settingsButton);
 
 	const settingsState = buildSettings(node);
-	const instruction = labelledField("📝 指令 / 原文", settingsState.userPrompt);
-	root.append(style, toolbar, instruction, settingsState.settings);
+	root.append(style, toolbar, settingsState.settings);
 
 	const domWidget = node.addDOMWidget(PANEL_WIDGET, "HTML", root, {
 		serialize: false,
@@ -1099,6 +1200,7 @@ function createPanel(node) {
 		node.widgets.splice(index, 1);
 		node.widgets.unshift(domWidget);
 	}
+	stabilizeUserPromptInput(node);
 	syncPanel(node);
 	setTimeout(() => syncPanel(node), 120);
 	setTimeout(() => syncPanel(node), 1200);
@@ -1110,6 +1212,7 @@ function stabilize(node) {
 	}
 	hideBackerWidgets(node);
 	createPanel(node);
+	stabilizeUserPromptInput(node);
 	syncPanel(node);
 }
 
@@ -1146,6 +1249,13 @@ app.registerExtension({
 		nodeType.prototype.onSerialize = function (serializedNode, ...args) {
 			const result = originalOnSerialize?.apply(this, [serializedNode, ...args]);
 			rememberWorkflowValues(this, serializedNode);
+			return result;
+		};
+
+		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+		nodeType.prototype.onConnectionsChange = function (...args) {
+			const result = originalOnConnectionsChange?.apply(this, args);
+			schedule(this);
 			return result;
 		};
 	},

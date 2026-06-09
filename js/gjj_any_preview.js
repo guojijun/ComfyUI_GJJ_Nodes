@@ -16,6 +16,8 @@ const INPUT_TOOLTIP = `可连接任意类型；${FAST_INPUT_TYPES} 会走专用�
 const PREVIEW_WIDGET_NAME = "gjj_any_preview_text";
 const EMPTY_PREVIEW = "执行后在这里预览文本、对象或调试信息";
 const MIN_PREVIEW_HEIGHT = 96;
+const TEXT_PREVIEW_MAX_LINES = 20;
+const TEXT_PREVIEW_LINE_HEIGHT = 1.45;
 const IMAGE_PREVIEW_MIN_HEIGHT = 124;
 const SINGLE_IMAGE_PREVIEW_HEIGHT = 360;
 const MIN_NODE_HEIGHT = 40;
@@ -1301,7 +1303,74 @@ function renderMarkdown(text) {
 	return parts.join("");
 }
 
+async function copyTextToClipboard(text) {
+	const value = String(text || "");
+	if (!value) return false;
+	try {
+		if (navigator.clipboard?.writeText) {
+			await navigator.clipboard.writeText(value);
+			return true;
+		}
+	} catch (_) {
+		// 继续走 textarea 回退方案。
+	}
+	const textarea = document.createElement("textarea");
+	textarea.value = value;
+	textarea.style.cssText = [
+		"position:fixed",
+		"left:-9999px",
+		"top:0",
+		"opacity:0",
+	].join(";");
+	document.body.appendChild(textarea);
+	textarea.focus();
+	textarea.select();
+	let copied = false;
+	try {
+		copied = !!document.execCommand("copy");
+	} catch (_) {
+		copied = false;
+	}
+	textarea.remove();
+	return copied;
+}
+
+function flashCopyButton(button, ok) {
+	if (!button) return;
+	clearTimeout(button.__gjjAnyPreviewCopyTimer);
+	button.textContent = ok ? "✅ 已复制" : "复制失败";
+	button.style.background = ok ? "#246f4b" : "#743232";
+	button.style.borderColor = ok ? "#4aa978" : "#a85a5a";
+	button.__gjjAnyPreviewCopyTimer = setTimeout(() => {
+		button.textContent = "🗗 复制";
+		button.style.background = "#182329";
+		button.style.borderColor = "#3a4d56";
+		button.__gjjAnyPreviewCopyTimer = null;
+	}, 1100);
+}
+
+async function copyPreviewText(node) {
+	const rawText = String(node?.__gjjAnyPreviewText || "").trim();
+	const text = rawText || EMPTY_PREVIEW;
+	const button = node?.__gjjAnyPreviewCopyButton;
+	const ok = await copyTextToClipboard(text);
+	flashCopyButton(button, ok);
+	if (!ok) {
+		window.prompt("复制预览文本", text);
+	}
+}
+
 function clampTextPreviewLines(body) {
+	if (!body) {
+		return;
+	}
+	body.style.lineHeight = String(TEXT_PREVIEW_LINE_HEIGHT);
+	body.style.maxHeight = `${TEXT_PREVIEW_MAX_LINES * TEXT_PREVIEW_LINE_HEIGHT}em`;
+	body.style.overflowY = "auto";
+	body.style.overflowX = "hidden";
+	body.style.paddingRight = "4px";
+	body.style.overscrollBehavior = "contain";
+	body.dataset.gjjMaxVisibleLines = String(TEXT_PREVIEW_MAX_LINES);
 	for (const element of body.querySelectorAll(
 		"p, li, h1, h2, h3, h4, h5, h6, th, td",
 	)) {
@@ -1318,6 +1387,32 @@ function clampTextPreviewLines(body) {
 	for (const element of body.querySelectorAll("table")) {
 		element.style.maxWidth = "100%";
 	}
+}
+
+function resetTextPreviewScroll(body) {
+	if (!body) {
+		return;
+	}
+	body.style.maxHeight = "";
+	body.style.overflowY = "visible";
+	body.style.overflowX = "";
+	body.style.paddingRight = "";
+	body.style.overscrollBehavior = "";
+	delete body.dataset.gjjMaxVisibleLines;
+}
+
+function handleScrollableTextWheel(event) {
+	const element = event.currentTarget;
+	if (!element || element.scrollHeight <= element.clientHeight + 1) {
+		return;
+	}
+	const delta = Number(event.deltaY || 0);
+	const atTop = element.scrollTop <= 0;
+	const atBottom = element.scrollTop + element.clientHeight >= element.scrollHeight - 1;
+	if ((delta < 0 && atTop) || (delta > 0 && atBottom)) {
+		return;
+	}
+	event.stopPropagation();
 }
 
 function hideWidget(widget) {
@@ -2285,12 +2380,14 @@ function renderPreviewItems(node, items) {
 	const grid = node.__gjjAnyPreviewGrid;
 	const empty = node.__gjjAnyPreviewEmpty;
 	const previewWrap = node.__gjjAnyPreviewWrap;
+	const copyBar = node.__gjjAnyPreviewCopyBar;
 	const editor = node.__gjjAnyPreviewEditor;
 	if (!container || !body || !grid || !empty) {
 		return;
 	}
 
 	body.style.display = "none";
+	if (copyBar) copyBar.style.display = "none";
 	if (editor) editor.style.display = "none";
 	empty.style.display = "none";
 	container.style.height = "auto";
@@ -2369,6 +2466,7 @@ function applyPreviewContent(node) {
 	const grid = node.__gjjAnyPreviewGrid;
 	const empty = node.__gjjAnyPreviewEmpty;
 	const previewWrap = node.__gjjAnyPreviewWrap;
+	const copyBar = node.__gjjAnyPreviewCopyBar;
 	const editor = node.__gjjAnyPreviewEditor;
 	if (!container || !body || !grid || !empty) {
 		return;
@@ -2770,6 +2868,10 @@ function applyPreviewContent(node) {
 		clampTextPreviewLines(body);
 	}
 
+	if (copyBar) {
+		copyBar.style.display = body.style.display === "none" ? "none" : "flex";
+	}
+
 	requestAnimationFrame(() => {
 		const height = useEstimatedImageLayout
 			? availableHeight
@@ -2873,7 +2975,7 @@ function ensurePreviewWidget(node) {
 		"background:transparent",
 		"color:#d9e4df",
 		"font-size:12px",
-		"line-height:1.45",
+		`line-height:${TEXT_PREVIEW_LINE_HEIGHT}`,
 		"min-width:0",
 		"max-width:100%",
 		"white-space:normal",
@@ -2883,6 +2985,57 @@ function ensurePreviewWidget(node) {
 		"pointer-events:auto",
 		"cursor:text",
 	].join(";");
+	body.addEventListener("wheel", handleScrollableTextWheel, { passive: false });
+
+	const copyBar = document.createElement("div");
+	copyBar.style.cssText = [
+		"display:none",
+		"align-items:center",
+		"justify-content:flex-end",
+		"width:100%",
+		"min-width:0",
+		"order:1",
+	].join(";");
+	const copyButton = document.createElement("button");
+	copyButton.type = "button";
+	copyButton.textContent = "🗗 复制";
+	copyButton.title = "复制当前文本预览内容";
+	copyButton.style.cssText = [
+		"border:1px solid #3a4d56",
+		"border-radius:6px",
+		"background:#182329",
+		"color:#dbe9e5",
+		"font:700 12px/1.2 system-ui, 'Microsoft YaHei', sans-serif",
+		"padding:4px 9px",
+		"min-height:24px",
+		"cursor:pointer",
+		"white-space:nowrap",
+		"user-select:none",
+		"-webkit-user-select:none",
+		"transition:background .12s ease,border-color .12s ease,filter .12s ease",
+	].join(";");
+	copyButton.addEventListener("pointerdown", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+	});
+	copyButton.addEventListener("mousedown", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+	});
+	copyButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		copyPreviewText(node);
+	});
+	copyButton.addEventListener("mouseenter", () => {
+		if (!copyButton.__gjjAnyPreviewCopyTimer) {
+			copyButton.style.filter = "brightness(1.12)";
+		}
+	});
+	copyButton.addEventListener("mouseleave", () => {
+		copyButton.style.filter = "";
+	});
+	copyBar.appendChild(copyButton);
 
 	const previewWrap = document.createElement("div");
 	previewWrap.className = "gjj-any-preview-wrap";
@@ -2999,8 +3152,13 @@ function ensurePreviewWidget(node) {
 			margin: 10px 0;
 		}
 		.gjj-text-input-empty { color: #8ea0a8; }
+		.gjj-text-input-markdown-body[data-gjj-max-visible-lines] {
+			scrollbar-width: thin;
+			scrollbar-color: #52656d #10181c;
+		}
 	`;
 	previewWrap.appendChild(style);
+	previewWrap.appendChild(copyBar);
 	previewWrap.appendChild(body);
 
 	const grid = document.createElement("div");
@@ -3066,6 +3224,8 @@ function ensurePreviewWidget(node) {
 
 	node.__gjjAnyPreviewContainer = container;
 	node.__gjjAnyPreviewWrap = previewWrap;
+	node.__gjjAnyPreviewCopyBar = copyBar;
+	node.__gjjAnyPreviewCopyButton = copyButton;
 	node.__gjjAnyPreviewBody = body;
 	node.__gjjAnyPreviewGrid = grid;
 	node.__gjjAnyPreviewEmpty = empty;
@@ -3276,12 +3436,11 @@ app.registerExtension({
 					: firstMediaPayload(message?.preview_files, message?.files);
 			resetLivePreviewState(this);
 			clearNativeImagePreviewState(this);
-			this.__gjjAnyPreviewHeight = Math.min(
-				280,
-				Math.max(
-					MIN_PREVIEW_HEIGHT,
-					String(this.__gjjAnyPreviewText || "").split("\n").length * 20,
-				),
+			const textLineCount = String(this.__gjjAnyPreviewText || "").split(/\r?\n/).length;
+			const visibleTextLines = Math.min(TEXT_PREVIEW_MAX_LINES, Math.max(1, textLineCount));
+			this.__gjjAnyPreviewHeight = Math.max(
+				MIN_PREVIEW_HEIGHT,
+				Math.ceil(visibleTextLines * 12 * TEXT_PREVIEW_LINE_HEIGHT + 38),
 			);
 			requestAnimationFrame(() => {
 				clearNativeImagePreviewState(this);

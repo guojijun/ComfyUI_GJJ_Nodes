@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Iterable
 
 
@@ -14,6 +15,33 @@ MODEL_EXTENSIONS = (
     ".onnx",
 )
 
+MODEL_QUANTIZATION_TOKENS = {
+    "fp",
+    "fp4",
+    "fp8",
+    "fp16",
+    "fp32",
+    "bf16",
+    "int4",
+    "int8",
+    "nf4",
+    "nvfp4",
+    "mxfp4",
+    "e4m3",
+    "e4m3fn",
+    "e5m2",
+    "gguf",
+    "bnb4bit",
+    "bitsandbytes",
+    "quant",
+    "quantized",
+    "scaled",
+    "scale",
+    "dtype",
+    "weight",
+    "weights",
+}
+
 
 def model_basename(name: str) -> str:
     return str(name or "").replace("\\", "/").split("/")[-1]
@@ -26,6 +54,27 @@ def model_stem(name: str) -> str:
         if lower_base.endswith(ext):
             return base[: -len(ext)]
     return os.path.splitext(base)[0]
+
+
+def model_lookup_stem(name: str) -> str:
+    """去掉扩展名、量化/精度标记后的模型匹配 stem。"""
+    parts = []
+    for part in re_split_model_tokens(model_stem(name)):
+        token = part.casefold()
+        if not token:
+            continue
+        if token in MODEL_QUANTIZATION_TOKENS:
+            continue
+        if token.startswith(("fp", "bf", "int")) and token[2:].isdigit():
+            continue
+        if token.startswith("e") and token.replace("fn", "") in {"e4m3", "e5m2"}:
+            continue
+        parts.append(part)
+    return " ".join(parts)
+
+
+def re_split_model_tokens(text: str) -> list[str]:
+    return [part for part in re.split(r"[^0-9A-Za-z\u4e00-\u9fff]+", str(text or "")) if part]
 
 
 def normalize_lookup_text(text: str) -> str:
@@ -68,8 +117,8 @@ def _subdir_score(preferred: str, candidate: str) -> int:
 
 
 def _candidate_score(preferred: str, candidate: str) -> int:
-    preferred_stem = model_stem(preferred)
-    candidate_stem = model_stem(candidate)
+    preferred_stem = model_lookup_stem(preferred)
+    candidate_stem = model_lookup_stem(candidate)
     preferred_norm = normalize_lookup_text(preferred_stem)
     candidate_norm = normalize_lookup_text(candidate_stem)
     if not preferred_norm or not candidate_norm:

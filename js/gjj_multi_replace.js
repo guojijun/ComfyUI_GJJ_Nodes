@@ -30,6 +30,36 @@ function textValue(widget) {
 	return String(widget?.value ?? "").trim();
 }
 
+function inputForWidget(node, widgetName) {
+	const target = String(widgetName || "");
+	if (!target) {
+		return null;
+	}
+	return (node?.inputs || []).find((input) => {
+		const inputName = String(input?.name || "");
+		const widgetInputName = String(input?.widget?.name || "");
+		const localized = String(input?.localized_name || input?.label || "");
+		return inputName === target || widgetInputName === target || localized === target;
+	}) || null;
+}
+
+function widgetHasLink(node, widgetName) {
+	const input = inputForWidget(node, widgetName);
+	return Boolean(input?.link != null);
+}
+
+function pairHasContentOrLink(node, index) {
+	const searchName = pairName(SEARCH_PREFIX, index);
+	const replaceName = pairName(REPLACE_PREFIX, index);
+	const widgets = pairWidgets(node, index);
+	return Boolean(
+		textValue(widgets.search) ||
+		textValue(widgets.replace) ||
+		widgetHasLink(node, searchName) ||
+		widgetHasLink(node, replaceName)
+	);
+}
+
 function boolValue(node, name) {
 	return Boolean(readOptions(node)[name]);
 }
@@ -195,8 +225,7 @@ function patchRuleWidget(node, widget) {
 function visiblePairCount(node) {
 	let lastUsed = 0;
 	for (let index = 1; index <= MAX_PAIRS; index += 1) {
-		const widgets = pairWidgets(node, index);
-		if (textValue(widgets.search) || textValue(widgets.replace)) {
+		if (pairHasContentOrLink(node, index)) {
 			lastUsed = index;
 		}
 	}

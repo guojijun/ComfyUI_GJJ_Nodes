@@ -841,6 +841,16 @@ function findGettersByName(graph, name) {
 
 function getVisibleSetNames(graph) {
 	const sourceMap = new Map();
+	for (const entry of collectNodesOfType(getGraphAncestors(graph), SET_TYPE)) {
+		for (const variable of setVariableEntriesForNode(entry.node)) {
+			const name = String(variable?.name || "").trim();
+			if (!name || sourceMap.has(name)) {
+				continue;
+			}
+			const prefix = entry.graph === graph ? "变量设置" : "parent 变量设置";
+			sourceMap.set(name, `${prefix} · ${name}`);
+		}
+	}
 	for (const entry of collectTemplateSetFields(getGraphAncestors(graph), true)) {
 		if (!isTemplateParamsNode(entry.node)) continue;
 		const names = isTemplateParamsNode(entry.node)

@@ -318,8 +318,10 @@ class GJJ_OllamaAssistant:
                 "user_prompt": ("STRING", {
                     "default": DEFAULT_USER_PROMPT,
                     "multiline": True,
+                    "hidden": True,
+                    "display": "hidden",
                     "display_name": "指令 / 原文",
-                    "tooltip": "输入需要生成、翻译或结合图片处理的内容；只接图片时可以留空。",
+                    "tooltip": "输入需要生成、翻译或结合图片处理的内容；可在左侧小圆点外接 STRING，外接时优先使用连接内容。",
                 }),
             },
             "optional": {
