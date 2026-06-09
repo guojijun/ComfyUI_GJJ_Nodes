@@ -74,11 +74,12 @@ function getPreviewForField(node, key, row = null) {
 	) || null;
 }
 
-function mediaItemForField(field, values) {
+function mediaItemForField(node, field, values) {
 	const value = String(values?.[field.key] ?? field.default ?? "");
+	const displayValue = String(node?.__gjjTemplateParamsNetworkDisplay?.get?.(String(field.key || "")) || value);
 	const mediaType = mediaTypeFromField(field, value) || field.type;
 	const kind = String(mediaType || "").toLowerCase();
-	const item = gjjMediaRefToItem(value, {
+	const item = gjjMediaRefToItem(displayValue, {
 		kind,
 		title: field.label || "媒体",
 		description: field.tooltip || "",
@@ -96,7 +97,7 @@ function renderGroupedMediaPreview(node, fields = null, values = null) {
 	if (!group) return false;
 	const state = fields && values ? { fields, values } : normalizeState(node);
 	const mediaFields = state.fields.filter((field) => isMediaType(field?.type));
-	const items = mediaFields.map((field) => mediaItemForField(field, state.values));
+	const items = mediaFields.map((field) => mediaItemForField(node, field, state.values));
 	gjjRenderMediaPreview(group, items, {
 		forceGrid: items.length > 1,
 		singleMinHeight: 168,
@@ -203,6 +204,16 @@ function setNetworkWarningMessage(node, field, message = "") {
 	if (text) node.__gjjTemplateParamsNetworkWarnings.set(key, text);
 	else node.__gjjTemplateParamsNetworkWarnings.delete(key);
 	renderWarningMessages(node);
+}
+
+function setNetworkMediaDisplayPath(node, field, value = "") {
+	if (!node) return;
+	node.__gjjTemplateParamsNetworkDisplay = node.__gjjTemplateParamsNetworkDisplay || new Map();
+	const key = String(field?.key || "");
+	if (!key) return;
+	const text = String(value || "").trim();
+	if (text) node.__gjjTemplateParamsNetworkDisplay.set(key, text);
+	else node.__gjjTemplateParamsNetworkDisplay.delete(key);
 }
 
 function selectedFilePath(file) {
@@ -538,9 +549,8 @@ async function ensureNetworkMediaInInput(node, field, input, values, wrap = null
 			if (await inputFileExists(filename)) {
 				const activeInput = currentInputForField(node, field, input);
 				if (String(activeInput?.value || "").trim() !== originalUrl) return;
-				activeInput.value = filename;
-				saveFieldValue(node, field, values, filename);
-				updatePreviewForField(node, field, filename, row);
+				setNetworkMediaDisplayPath(node, field, filename);
+				updatePreviewForField(node, field, originalUrl, row, inputViewUrlForFilename(filename));
 				setNetworkWarningMessage(node, field, "");
 				return;
 			}
@@ -579,9 +589,8 @@ async function ensureNetworkMediaInInput(node, field, input, values, wrap = null
 			}
 			const activeInput = currentInputForField(node, field, input);
 			if (String(activeInput?.value || "").trim() !== originalUrl) return;
-			activeInput.value = uploadedName;
-			saveFieldValue(node, field, values, uploadedName);
-			updatePreviewForField(node, field, uploadedName, row);
+			setNetworkMediaDisplayPath(node, field, uploadedName);
+			updatePreviewForField(node, field, originalUrl, row, inputViewUrlForFilename(uploadedName));
 			setNetworkWarningMessage(node, field, "");
 		} catch (err) {
 			console.warn("[GJJ_TemplateParams] 网络媒体下载到 input 失败:", err);
@@ -589,6 +598,7 @@ async function ensureNetworkMediaInInput(node, field, input, values, wrap = null
 			const activeValue = String(activeInput?.value || "").trim();
 			if (activeValue !== originalUrl || !isNetworkMediaUrl(activeValue)) {
 				setNetworkWarningMessage(node, field, "");
+				setNetworkMediaDisplayPath(node, field, "");
 				updatePreviewForField(node, field, activeValue, row);
 				return;
 			}
@@ -608,6 +618,7 @@ async function ensureNetworkMediaInInput(node, field, input, values, wrap = null
 function scheduleNetworkMediaToInput(node, field, input, values, wrap = null, delay = 450) {
 	if (!isNetworkMediaUrl(input?.value)) {
 		setNetworkWarningMessage(node, field, "");
+		setNetworkMediaDisplayPath(node, field, "");
 		return;
 	}
 	node.__gjjTemplateParamsNetworkTimers = node.__gjjTemplateParamsNetworkTimers || new Map();
@@ -2177,6 +2188,7 @@ function buildInputForField(node, field, values, options = {}) {
 		if (isMedia) {
 			setWarningMessages(node, []);
 			setNetworkWarningMessage(node, field, "");
+			setNetworkMediaDisplayPath(node, field, "");
 		}
 		if (multiline) {
 			refreshNode(node, { resize: false });
