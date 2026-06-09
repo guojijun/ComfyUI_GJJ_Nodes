@@ -123,12 +123,15 @@ function ensureStyles() {
 .gjj-getnode-close:hover{background:#31424d;}
 .gjj-getnode-search{height:26px;box-sizing:border-box;border:1px solid #3f535b;border-radius:6px;background:#071014;color:#dce7e2;padding:0 8px;font-size:12px;outline:none;}
 .gjj-getnode-list{overflow:auto;flex:1 1 auto;min-height:70px;display:flex;flex-direction:column;gap:2px;padding-right:2px;}
-.gjj-getnode-item{display:flex;align-items:center;gap:7px;width:100%;box-sizing:border-box;border:0;border-radius:6px;background:transparent;color:#dce7e2;text-align:left;padding:5px 6px;cursor:pointer;font-size:12px;}
+.gjj-getnode-item{display:flex;align-items:center;gap:7px;width:100%;box-sizing:border-box;border:0;border-radius:6px;background:transparent;color:#dce7e2;text-align:left;padding:6px 6px;cursor:pointer;font-size:12px;}
 .gjj-getnode-item:hover{background:#1f2c33;}
 .gjj-getnode-item.active{background:#243c32;color:#d9ffe4;}
 .gjj-getnode-check{width:14px;flex:0 0 14px;color:#7bd88f;font-weight:800;text-align:center;}
 .gjj-getnode-main{min-width:0;display:flex;flex-direction:column;gap:1px;}
-.gjj-getnode-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.gjj-getnode-label{min-width:0;display:flex;align-items:baseline;gap:4px;overflow:hidden;white-space:nowrap;}
+.gjj-getnode-icon{flex:0 0 auto;color:#f5c36b;font-size:13px;}
+.gjj-getnode-cn{min-width:0;overflow:hidden;text-overflow:ellipsis;color:#f1fff5;font-size:14px;font-weight:800;}
+.gjj-getnode-en{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;color:#9fc7d0;font-size:11px;font-weight:600;}
 .gjj-getnode-meta{color:#8fa2aa;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .gjj-getnode-actions{display:flex;align-items:center;justify-content:flex-end;gap:5px;margin-left:auto;flex:0 0 auto;}
 .gjj-getnode-action{height:24px;border:1px solid #40535b;border-radius:6px;background:#1b2730;color:#dce7e2;font-size:12px;cursor:pointer;padding:0 8px;white-space:nowrap;}
@@ -868,6 +871,34 @@ function getVisibleSetOptions(graph) {
 			source: source || "local",
 		};
 	});
+}
+
+function popupDisplayForSetOption(option) {
+	const value = String(option?.value || "").trim();
+	const source = String(option?.source || "").trim();
+	let sourceName = "";
+	let chineseName = "";
+	if (source && source !== "local") {
+		const parts = source.split(/\s*[·]\s*/);
+		sourceName = String(parts.shift() || "").trim();
+		chineseName = String(parts.join(" · ") || "").trim();
+	}
+	if (!chineseName) {
+		const label = String(option?.label || value || "").trim();
+		const match = label.match(/^(.+?)\s*[（(]\s*([^()（）]+?)[\s·]+([^()（）]+?)\s*[）)]$/);
+		if (match) {
+			chineseName = match[3].trim();
+			sourceName = match[2].trim();
+		}
+	}
+	chineseName = chineseName || value || "变量";
+	const showEnglish = value && value !== chineseName;
+	return {
+		chineseName,
+		englishName: showEnglish ? value : "",
+		sourceName,
+		title: [chineseName, value && value !== chineseName ? value : "", sourceName].filter(Boolean).join("\n"),
+	};
 }
 
 function resolveVariableBroadcastSource(graph, name) {
@@ -2149,10 +2180,11 @@ function openGetSelectPopup(node, event) {
 		}
 		for (const option of shown) {
 			const active = selected.includes(option.value);
+			const display = popupDisplayForSetOption(option);
 			const item = document.createElement("button");
 			item.type = "button";
 			item.className = `gjj-getnode-item${active ? " active" : ""}`;
-			item.title = option.value;
+			item.title = display.title || option.value;
 			const check = document.createElement("span");
 			check.className = "gjj-getnode-check";
 			check.textContent = active ? "✓" : "";
@@ -2160,11 +2192,26 @@ function openGetSelectPopup(node, event) {
 			main.className = "gjj-getnode-main";
 			const label = document.createElement("span");
 			label.className = "gjj-getnode-label";
-			label.textContent = option.label;
+			const icon = document.createElement("span");
+			icon.className = "gjj-getnode-icon";
+			icon.textContent = "🎚️";
+			const cn = document.createElement("span");
+			cn.className = "gjj-getnode-cn";
+			cn.textContent = display.chineseName;
+			label.append(icon, cn);
+			if (display.englishName) {
+				const en = document.createElement("span");
+				en.className = "gjj-getnode-en";
+				en.textContent = `（${display.englishName}）`;
+				label.appendChild(en);
+			}
 			const meta = document.createElement("span");
 			meta.className = "gjj-getnode-meta";
-			meta.textContent = option.value;
-			main.append(label, meta);
+			meta.textContent = display.sourceName || "";
+			main.appendChild(label);
+			if (display.sourceName) {
+				main.appendChild(meta);
+			}
 			item.append(check, main);
 			item.addEventListener("click", (clickEvent) => {
 				clickEvent.preventDefault();

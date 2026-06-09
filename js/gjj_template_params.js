@@ -1101,10 +1101,71 @@ function splitLabelAndType(rawLabel) {
 	};
 }
 
+const IMPLICIT_TEMPLATE_KEY_ALIASES = new Map(Object.entries({
+	width: "width",
+	宽度: "width",
+	图像宽度: "width",
+	视频宽度: "width",
+	height: "height",
+	高度: "height",
+	图像高度: "height",
+	视频高度: "height",
+	duration: "duration",
+	seconds: "duration",
+	second: "duration",
+	secs: "duration",
+	sec: "duration",
+	time: "duration",
+	时长: "duration",
+	持续时间: "duration",
+	视频时长: "duration",
+	frame_rate: "frame_rate",
+	framerate: "frame_rate",
+	fps: "frame_rate",
+	帧率: "frame_rate",
+	每秒帧数: "frame_rate",
+	帧每秒: "frame_rate",
+	length: "length",
+	frames: "length",
+	frame_count: "length",
+	framecount: "length",
+	帧数: "length",
+	视频帧数: "length",
+	总帧数: "length",
+	wan_mode: "wan_mode",
+	video_mode: "wan_mode",
+	mode: "wan_mode",
+	模式: "wan_mode",
+	视频模式: "wan_mode",
+	生成模式: "wan_mode",
+	wan模式: "wan_mode",
+	start_image: "start_image",
+	first_image: "start_image",
+	首帧: "start_image",
+	首图: "start_image",
+	起始图: "start_image",
+	起始帧: "start_image",
+	end_image: "end_image",
+	last_image: "end_image",
+	尾帧: "end_image",
+	尾图: "end_image",
+	结束图: "end_image",
+	结束帧: "end_image",
+}));
+
+function implicitTemplateKeySource(label) {
+	const text = String(label || "").trim();
+	const compact = text.replace(/[\s_-]+/g, "").toLowerCase();
+	const underscored = text.replace(/[\s-]+/g, "_").toLowerCase();
+	return IMPLICIT_TEMPLATE_KEY_ALIASES.get(compact)
+		|| IMPLICIT_TEMPLATE_KEY_ALIASES.get(underscored)
+		|| text;
+}
+
 function splitLabelAndBroadcastKey(rawLabel, index) {
 	let label = String(rawLabel || "").trim() || `参数 ${index + 1}`;
 	const explicit = label.match(/^(.+?)[（(]\s*([^（）()]+?)\s*[）)]$/);
-	if (!explicit) return { label, keySource: label, broadcastKeys: [] };
+	if (!explicit) return { label, keySource: implicitTemplateKeySource(label), broadcastKeys: [] };
 	label = explicit[1].trim() || label;
 	const firstKey = String(explicit[2] || "").split(/\s*(?:\||,|，|；|;|\bor\b|或)\s*/i)[0] || "";
 	const broadcastKey = firstKey.trim()

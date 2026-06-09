@@ -5,7 +5,7 @@
     "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.jpg",
     "sort_mode": "size_desc",
     "filter_mode": "openable",
-    "search_text": "",
+    "search_text": "音视频人声",
     "page_size": 15,
     "image_format": "jpg",
     "jpeg_quality": 0.86
@@ -81,94 +81,94 @@
   "user": {},
   "node_color_theme": {
     "version": 1,
-    "selected_style_id": "soft",
+    "selected_style_id": "contrast",
     "big_categories": [
       {
         "id": "input",
         "label": "输入",
-        "styleId": "soft",
-        "color": "#5D89A8"
+        "styleId": "contrast",
+        "color": "#2563EB"
       },
       {
         "id": "guide",
         "label": "引导",
-        "styleId": "soft",
-        "color": "#8072B2"
+        "styleId": "contrast",
+        "color": "#A855F7"
       },
       {
         "id": "sample",
         "label": "采样",
-        "styleId": "soft",
-        "color": "#A98248"
+        "styleId": "contrast",
+        "color": "#F59E0B"
       },
       {
         "id": "output",
         "label": "输出",
-        "styleId": "soft",
-        "color": "#5A9A77"
+        "styleId": "contrast",
+        "color": "#22C55E"
       },
       {
         "id": "decode",
         "label": "解码",
-        "styleId": "soft",
-        "color": "#69A98A"
+        "styleId": "contrast",
+        "color": "#00D1FF"
       },
       {
         "id": "encode",
         "label": "编码",
-        "styleId": "soft",
-        "color": "#5F9188"
+        "styleId": "contrast",
+        "color": "#38BDF8"
       },
       {
         "id": "model",
         "label": "模型",
-        "styleId": "soft",
-        "color": "#8770AA"
+        "styleId": "contrast",
+        "color": "#7C3AED"
       },
       {
         "id": "prompt",
         "label": "提示",
-        "styleId": "soft",
-        "color": "#7479AA"
+        "styleId": "contrast",
+        "color": "#10B981"
       },
       {
         "id": "image",
         "label": "图像",
-        "styleId": "soft",
-        "color": "#5C9AA6"
+        "styleId": "contrast",
+        "color": "#14B8A6"
       },
       {
         "id": "video",
         "label": "视频",
-        "styleId": "soft",
-        "color": "#A48852"
+        "styleId": "contrast",
+        "color": "#EAB308"
       },
       {
         "id": "audio",
         "label": "音频",
-        "styleId": "soft",
-        "color": "#7C8D6A"
+        "styleId": "contrast",
+        "color": "#A3E635"
       },
       {
         "id": "tool",
         "label": "工具",
-        "styleId": "soft",
-        "color": "#68757A"
+        "styleId": "contrast",
+        "color": "#94A3B8"
       }
     ],
     "custom_palette": [
-      "#B8741A",
-      "#2E8C61",
-      "#38A86B",
-      "#3F8F88",
-      "#6F5CC4",
-      "#2D78A8",
-      "#9A4F8A",
-      "#2B86A6",
-      "#9B6A22",
-      "#6B6FAF",
-      "#59636B",
-      "#343A40"
+      "#285ED2",
+      "#A855F7",
+      "#F59E0B",
+      "#22C55E",
+      "#00D1FF",
+      "#38BDF8",
+      "#7C3AED",
+      "#10B981",
+      "#14B8A6",
+      "#EAB308",
+      "#A3E635",
+      "#94A3B8"
     ]
   }
 }

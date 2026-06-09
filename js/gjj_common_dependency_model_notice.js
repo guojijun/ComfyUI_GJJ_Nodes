@@ -8,6 +8,7 @@ import { GJJ_Utils } from "./gjj_utils.js";
 	const EXTENSION_NAME = "GJJ.DependencyModelNotice";
 	const WIDGET_NAME = "gjj_dependency_model_notice_panel";
 	const HELP_ENDPOINT = "/gjj/node_help";
+	const DISMISS_STORAGE_PREFIX = "GJJ.DependencyModelNotice.dismissed.";
 	const nodeHelp = new Map();
 	let helpLoaded = false;
 
@@ -143,6 +144,40 @@ import { GJJ_Utils } from "./gjj_utils.js";
 		}
 	}
 
+	function noticeDismissKey(node, data) {
+		const key = nodeKey(node);
+		const text = String(
+			data?.warning_message
+			|| data?.panel_message
+			|| data?.copy_text
+			|| data?.model_download_url
+			|| ""
+		).trim();
+		if (!key || !text) return "";
+		let hash = 0;
+		for (let index = 0; index < text.length; index += 1) {
+			hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+		}
+		return `${DISMISS_STORAGE_PREFIX}${key}.${Math.abs(hash)}`;
+	}
+
+	function isNoticeDismissed(node, data) {
+		const key = noticeDismissKey(node, data);
+		if (!key) return false;
+		try {
+			return localStorage.getItem(key) === "1";
+		} catch (_) {
+			return false;
+		}
+	}
+
+	function dismissNotice(key) {
+		if (!key) return;
+		try {
+			localStorage.setItem(key, "1");
+		} catch (_) {}
+	}
+
 	function ensurePanel(node) {
 		if (!isGJJNode(node)) return null;
 		removeLegacyWidgets(node);
@@ -156,9 +191,10 @@ import { GJJ_Utils } from "./gjj_utils.js";
 		root.className = "gjj-dependency-notice";
 		root.style.cssText = [
 			"display:none",
+			"position:relative",
 			"box-sizing:border-box",
 			"width:100%",
-			"padding:7px 8px",
+			"padding:7px 28px 7px 8px",
 			"border:1px solid #9f6b1e",
 			"border-radius:7px",
 			"background:#21170b",
@@ -168,6 +204,25 @@ import { GJJ_Utils } from "./gjj_utils.js";
 
 		const message = document.createElement("div");
 		message.style.cssText = "white-space:pre-wrap;overflow-wrap:anywhere;";
+		const closeBtn = document.createElement("button");
+		closeBtn.type = "button";
+		closeBtn.title = "关闭此提示";
+		closeBtn.textContent = "×";
+		closeBtn.style.cssText = [
+			"position:absolute",
+			"right:6px",
+			"top:5px",
+			"width:20px",
+			"height:20px",
+			"border:1px solid rgba(255,255,255,.22)",
+			"border-radius:5px",
+			"background:rgba(0,0,0,.22)",
+			"color:inherit",
+			"font-weight:800",
+			"line-height:16px",
+			"cursor:pointer",
+			"padding:0",
+		].join(";");
 		const button = document.createElement("button");
 		button.type = "button";
 		button.style.cssText = [
@@ -182,14 +237,16 @@ import { GJJ_Utils } from "./gjj_utils.js";
 			"font-weight:700",
 			"cursor:pointer",
 		].join(";");
-		root.append(message, button);
+		root.append(message, button, closeBtn);
 
 		const state = {
 			root,
 			message,
 			button,
+			closeBtn,
 			copyText: "",
 			copyLabel: "📋 复制安装命令",
+			dismissKey: "",
 		};
 
 		function doCopy(event) {
@@ -210,6 +267,15 @@ import { GJJ_Utils } from "./gjj_utils.js";
 		button.addEventListener("click", doCopy);
 		button.addEventListener("pointerdown", (event) => event.stopPropagation());
 		button.addEventListener("mousedown", (event) => event.stopPropagation());
+		closeBtn.addEventListener("click", (event) => {
+			event?.preventDefault?.();
+			event?.stopPropagation?.();
+			dismissNotice(state.dismissKey);
+			state.root.style.display = "none";
+			refreshNode(node);
+		});
+		closeBtn.addEventListener("pointerdown", (event) => event.stopPropagation());
+		closeBtn.addEventListener("mousedown", (event) => event.stopPropagation());
 
 		const widget = node.addDOMWidget(WIDGET_NAME, "HTML", root, {
 			serialize: false,
@@ -220,6 +286,12 @@ import { GJJ_Utils } from "./gjj_utils.js";
 		setWidgetNonSerialized(widget);
 		widget.mouse = function (event) {
 			const target = event?.target;
+			if (target === closeBtn || closeBtn.contains?.(target)) {
+				dismissNotice(state.dismissKey);
+				state.root.style.display = "none";
+				refreshNode(node);
+				return true;
+			}
 			if (target === button || button.contains?.(target)) {
 				doCopy(event);
 				return true;
@@ -284,6 +356,14 @@ import { GJJ_Utils } from "./gjj_utils.js";
 		const panel = String(data?.panel_message || "");
 		const copyTextValue = String(data?.copy_text || data?.install_command || data?.optional_install_command || data?.model_download_url || "");
 		const detailed = Boolean(options.detailed);
+		const dismissible = options.dismissible !== false;
+		if (!detailed && dismissible && isNoticeDismissed(node, data)) {
+			if (node?.__gjjDependencyNotice) {
+				node.__gjjDependencyNotice.root.style.display = "none";
+			}
+			refreshNode(node);
+			return;
+		}
 		if (!warning && !panel) {
 			if (node?.__gjjDependencyNotice) {
 				node.__gjjDependencyNotice.root.style.display = "none";
@@ -294,6 +374,7 @@ import { GJJ_Utils } from "./gjj_utils.js";
 		const state = ensurePanel(node);
 		if (!state) return;
 		applyPanelTone(state, data?.notice_level);
+		state.dismissKey = dismissible ? noticeDismissKey(node, data) : "";
 		state.copyText = copyTextValue;
 		state.copyLabel = String(data?.copy_label || (copyTextValue ? "📋 复制安装命令" : ""));
 		state.message.textContent = detailed ? panel || warning : warning || panel.split(/\r?\n/)[0] || "";

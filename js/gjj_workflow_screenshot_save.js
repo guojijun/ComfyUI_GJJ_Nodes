@@ -1820,6 +1820,11 @@ import { api } from "/scripts/api.js";
 		return String(live?.comfyClass || live?.type || node?.type || node?.class_type || "").includes("GJJ_VideoCombine");
 	}
 
+	function isAnyPreviewNode(node) {
+		const live = node?.__liveNode || node;
+		return String(live?.comfyClass || live?.type || node?.type || node?.class_type || "").includes("GJJ_AnyPreview");
+	}
+
 	function visibleVideoCombineElement(node) {
 		const live = node?.__liveNode || node;
 		const state = live?.__gjjVideoCombineStatus || null;
@@ -1904,11 +1909,18 @@ import { api } from "/scripts/api.js";
 		const images = nodePreviewImages(node);
 		if (!images.length || width < 120 || height < 84) return false;
 		const count = images.length;
-		const columns = count > 1 ? 2 : 1;
-		const rows = Math.ceil(count / columns);
 		const gap = 6;
+		const scale = Math.max(0.001, number(layout?.scale, 1));
+		const minCardWidth = isAnyPreviewNode(node) ? 110 * scale : Math.min(140, Math.max(72, width * 0.42));
+		const columns = Math.min(
+			count,
+			Math.max(1, Math.floor((width + gap) / (minCardWidth + gap))),
+		);
+		const rows = Math.ceil(count / columns);
 		const cellWidth = (width - gap * (columns - 1)) / columns;
-		const cellHeight = (height - gap * (rows - 1)) / rows;
+		const cellHeight = isAnyPreviewNode(node)
+			? Math.min(cellWidth, (height - gap * (rows - 1)) / rows)
+			: (height - gap * (rows - 1)) / rows;
 		ctx.save();
 		drawRoundedRect(ctx, x, y, width, height, 6);
 		ctx.clip();

@@ -1400,14 +1400,46 @@ function isGridPosterHeroOutputNode(node, inDegree, outDegree) {
 		|| isGridOutputNode(node, inDegree, outDegree);
 }
 
-function isGridPosterFirstColumnNode(node, inDegree) {
-	const text = getGridNodeSearchText(node);
-	return isGridTemplateParamsNode(node)
-		|| /gjj_templateboolparams|templatebool|布尔参数/.test(text)
-		|| /gjj_clippromptencodepanel|clipprompt|prompt.?encode|提示词|文本编码/.test(text)
-		|| /gjj_getnode|\bgetnode\b|取节点|变量读取/.test(text)
-		|| /gjj_setnode|\bsetnode\b|设节点|变量设置/.test(text)
-		|| ((inDegree.get(node) || 0) === 0 && !isGridPosterTitleNode(node));
+function hasGridRawOutgoingLink(node) {
+	return safeArray(node?.outputs).some((output) => externalOutputLinkIds(output).length > 0);
+}
+
+function getArrangeLinkSourceNode(link) {
+	return link?.origin_id != null ? getNodeById(link.origin_id) : null;
+}
+
+function isGridParameterInputSlot(input) {
+	return Boolean(input?.widget)
+		|| String(input?.type || "").startsWith("converted-widget")
+		|| String(input?.widget?.type || "").startsWith("converted-widget")
+		|| String(input?.widget?.name || "").trim() !== "";
+}
+
+function isGridParameterSourceNode(node) {
+	return isGridTemplateParamsNode(node);
+}
+
+function hasGridRealUpstreamLink(node) {
+	for (const input of safeArray(node?.inputs)) {
+		if (input?.link == null) continue;
+		const link = getLinkById(input.link);
+		if (!isExternalArrangeLink(link)) continue;
+		if (isGridParameterInputSlot(input)) continue;
+		const source = getArrangeLinkSourceNode(link);
+		if (isGridParameterSourceNode(source)) continue;
+		return true;
+	}
+	return false;
+}
+
+function isGridPosterSourceOnlyNode(node) {
+	return !hasGridRealUpstreamLink(node) && hasGridRawOutgoingLink(node);
+}
+
+function isGridPosterFirstColumnNode(node, inDegree, outDegree) {
+	return isGridPosterSourceOnlyNode(node)
+		&& !isGridTemplateParamsNode(node)
+		&& !isGridPosterTitleNode(node);
 }
 
 function isGridLocalInputNode(node, inDegree) {
@@ -1649,13 +1681,80 @@ function arrangeGridPosterHorizontal(nodes, x, y, columnGap) {
 	return getBoundsForNodes(list, 0) || { x: Math.round(x), y: Math.round(y), width: 0, height: 0, right: currentX, bottom: maxBottom };
 }
 
-function arrangeGridPosterVerticalMasonry(nodes, x, y, preferredColumns, columnGap, rowGap) {
+function rowWidthForGridPosterNodes(nodes, columnGap) {
+	const list = filterValidNodes(nodes, false);
+	if (!list.length) return 0;
+	const gap = Math.max(0, Math.round(columnGap));
+	return list.reduce((sum, node) => sum + Math.round(getNodeWidth(node)), 0) + Math.max(0, list.length - 1) * gap;
+}
+
+function arrangeGridPosterBalancedRows(nodes, x, y, targetWidth, columnGap, rowGap) {
+	const list = filterValidNodes(nodes, false);
+	if (!list.length) return { x: Math.round(x), y: Math.round(y), width: 0, height: 0, right: Math.round(x), bottom: Math.round(y) };
+	if (list.length <= 2) return arrangeGridPosterHorizontal(list, x, y, columnGap);
+
+	const singleWidth = rowWidthForGridPosterNodes(list, columnGap);
+	const desiredWidth = Math.max(360, Math.round(Number(targetWidth || 0)));
+	if (singleWidth <= desiredWidth * 1.18) {
+		return arrangeGridPosterHorizontal(list, x, y, columnGap);
+	}
+
+	const gap = Math.max(0, Math.round(columnGap));
+	let bestScore = Infinity;
+	let bestTopIndexes = null;
+	const maxMasks = list.length <= 14 ? (1 << list.length) : 0;
+	for (let mask = 1; mask < maxMasks - 1; mask++) {
+		const topIndexes = [];
+		const bottomIndexes = [];
+		for (let index = 0; index < list.length; index++) {
+			if (mask & (1 << index)) topIndexes.push(index);
+			else bottomIndexes.push(index);
+		}
+		const top = topIndexes.map((index) => list[index]);
+		const bottom = bottomIndexes.map((index) => list[index]);
+		const topWidth = rowWidthForGridPosterNodes(top, columnGap);
+		const bottomWidth = rowWidthForGridPosterNodes(bottom, columnGap);
+		const width = Math.max(topWidth, bottomWidth);
+		const balancePenalty = Math.abs(topWidth - bottomWidth);
+		const targetPenalty = Math.abs(width - desiredWidth);
+		const countPenalty = Math.abs(top.length - bottom.length) * gap * 0.4;
+		const score = balancePenalty + targetPenalty * 0.35 + countPenalty;
+		if (score < bestScore) {
+			bestScore = score;
+			bestTopIndexes = topIndexes;
+		}
+	}
+	if (!bestTopIndexes) {
+		bestTopIndexes = [];
+		const rowWidths = [0, 0];
+		const sortedIndexes = list
+			.map((node, index) => ({ index, width: Math.round(getNodeWidth(node)) }))
+			.sort((a, b) => b.width - a.width || a.index - b.index);
+		for (const item of sortedIndexes) {
+			const row = rowWidths[0] <= rowWidths[1] ? 0 : 1;
+			if (row === 0) bestTopIndexes.push(item.index);
+			rowWidths[row] += item.width + (rowWidths[row] > 0 ? gap : 0);
+		}
+		bestTopIndexes.sort((a, b) => a - b);
+	}
+
+	const topIndexSet = new Set(bestTopIndexes);
+	const top = list.filter((_, index) => topIndexSet.has(index));
+	const bottom = list.filter((_, index) => !topIndexSet.has(index));
+	const topBounds = arrangeGridPosterHorizontal(top, x, y, columnGap);
+	const bottomY = Math.round((topBounds?.bottom || y) + Math.max(0, Math.round(rowGap)));
+	arrangeGridPosterHorizontal(bottom, x, bottomY, columnGap);
+	return getBoundsForNodes(list, 0) || topBounds;
+}
+
+function arrangeGridPosterVerticalMasonry(nodes, x, y, preferredColumns, columnGap, rowGap, alignBottom = false) {
 	const list = filterValidNodes(nodes, false);
 	if (!list.length) return { x: Math.round(x), y: Math.round(y), width: 0, height: 0, right: Math.round(x), bottom: Math.round(y) };
 	const colGap = Math.max(0, Math.round(columnGap));
 	const rGap = Math.max(0, Math.round(rowGap));
 	const cols = Math.max(1, Math.round(preferredColumns || 1));
 	const colWidths = Array(cols).fill(0);
+	const nodesByCol = Array.from({ length: cols }, () => []);
 
 	for (let i = 0; i < list.length; i++) {
 		const col = i % cols;
@@ -1677,7 +1776,18 @@ function arrangeGridPosterVerticalMasonry(nodes, x, y, preferredColumns, columnG
 			if (colBottoms[col] < colBottoms[targetCol]) targetCol = col;
 		}
 		setNodePosition(node, xByCol[targetCol], colBottoms[targetCol]);
+		nodesByCol[targetCol].push(node);
 		colBottoms[targetCol] += Math.round(getNodeHeight(node)) + rGap;
+	}
+
+	if (alignBottom) {
+		const actualBottoms = nodesByCol.map((colNodes, col) => colNodes.length ? colBottoms[col] - rGap : Math.round(y));
+		const maxBottom = Math.max(...actualBottoms);
+		for (let col = 0; col < cols; col++) {
+			const delta = maxBottom - actualBottoms[col];
+			if (delta <= 0 || !nodesByCol[col].length) continue;
+			moveNodesBy(nodesByCol[col], 0, delta);
+		}
 	}
 
 	return getBoundsForNodes(list, 0) || { x: Math.round(x), y: Math.round(y), width: 0, height: 0, right: currentX, bottom: Math.max(...colBottoms) };
@@ -1707,6 +1817,22 @@ function arrangeGridPosterHeroOutputs(heroOutputs, x, y, width, height, rowGap) 
 		currentY += nodeH + gap;
 	}
 	return getBoundsForNodes(list, 0);
+}
+
+function bottomAlignGridPosterGroups(groups) {
+	const validGroups = safeArray(groups)
+		.map((group) => filterValidNodes(group, false))
+		.filter((group) => group.length);
+	if (!validGroups.length) return;
+	const bounds = validGroups
+		.map((group) => ({ group, bounds: getBoundsForNodes(group, 0) }))
+		.filter((item) => item.bounds);
+	if (!bounds.length) return;
+	const maxBottom = Math.max(...bounds.map((item) => item.bounds.bottom));
+	for (const item of bounds) {
+		const delta = Math.round(maxBottom - item.bounds.bottom);
+		if (delta > 0) moveNodesBy(item.group, 0, delta);
+	}
 }
 
 function arrangePosterGridLayout(nodes, spacing = DEFAULT_SPACING) {
@@ -1744,17 +1870,17 @@ function arrangePosterGridLayout(nodes, spacing = DEFAULT_SPACING) {
 	const leftCandidates = normalNodes
 		.filter((node) => !titleSet.has(node) && !heroSet.has(node))
 		.sort(byLocality);
-	const isolatedNodes = leftCandidates
-		.filter((node) => isolatedSet.has(node) || isGridPosterTextInputNode(node))
-		.sort(compareGridTopLeftNodes(orderIndex));
-	const isolatedNodeSet = new Set(isolatedNodes);
 	const firstColumnNodes = leftCandidates
-		.filter((node) => !isolatedNodeSet.has(node) && isGridPosterFirstColumnNode(node, inDegree))
+		.filter((node) => isGridPosterFirstColumnNode(node, inDegree, outDegree))
 		.sort(compareGridTopLeftNodes(orderIndex));
 	const firstColumnSet = new Set(firstColumnNodes);
+	const isolatedNodes = leftCandidates
+		.filter((node) => !firstColumnSet.has(node) && (isGridTemplateParamsNode(node) || isolatedSet.has(node) || isGridPosterTextInputNode(node)))
+		.sort(compareGridTopLeftNodes(orderIndex));
+	const isolatedNodeSet = new Set(isolatedNodes);
 	const middleNodes = leftCandidates
 		.filter((node) => !isolatedNodeSet.has(node) && !firstColumnSet.has(node))
-		.sort(byLocality);
+		.sort(byWorkflow);
 	const arrangedReroutes = rerouteNodes.sort(byLocality);
 
 	for (const node of firstColumnNodes) {
@@ -1770,10 +1896,17 @@ function arrangePosterGridLayout(nodes, spacing = DEFAULT_SPACING) {
 	}
 
 	const mainNodes = [...firstColumnNodes, ...middleNodes, ...arrangedReroutes];
-	const mainColumns = Math.max(1, Math.min(3, Math.ceil(Math.sqrt(mainNodes.length || 1))));
-	arrangeGridPosterVerticalMasonry(mainNodes, 0, 0, mainColumns, colGap, rowGap);
+	const secondaryNodes = [...middleNodes, ...arrangedReroutes];
+	const firstBounds = arrangeGridPosterColumn(firstColumnNodes, 0, 0, rowGap);
+	const secondaryX = firstColumnNodes.length
+		? Math.round((firstBounds?.width || 0) + colGap)
+		: 0;
+	const secondaryColumns = Math.max(1, Math.min(2, Math.ceil(Math.sqrt(secondaryNodes.length || 1))));
+	arrangeGridPosterVerticalMasonry(secondaryNodes, secondaryX, 0, secondaryColumns, colGap, rowGap, true);
+	bottomAlignGridPosterGroups([firstColumnNodes, secondaryNodes]);
 	const mainInitialBounds = getBoundsForNodes(mainNodes, 0);
-	const isolatedBounds = arrangeGridPosterHorizontal(isolatedNodes, 0, 0, colGap);
+	const isolatedTargetWidth = Math.max(360, mainInitialBounds?.width || 0);
+	const isolatedBounds = arrangeGridPosterBalancedRows(isolatedNodes, 0, 0, isolatedTargetWidth, colGap, rowGap);
 	const isolatedHeight = isolatedNodes.length ? isolatedBounds.height : 0;
 	const mainHeight = mainInitialBounds?.height || 0;
 	const previewBaseHeight = Math.max(360, isolatedHeight + regionGap + mainHeight);

@@ -11,6 +11,12 @@ const PARAM_ENABLED_PROPERTY = "gjj_wan_unified_template_params_enabled";
 const PARAM_SOURCE_PROPERTY = "gjj_wan_unified_template_params_source";
 const PARAM_WIDGETS = ["width", "height", "length"];
 const MODE_PARAM_NAMES = ["wan_mode", "video_mode", "mode", "模式", "视频模式", "生成模式"];
+const PARAM_ACTIVE_HELP = [
+	"参数联动已接管本节点：宽度、高度、帧数会从 GJJ_TemplateParams 自动同步。",
+	"模板可填写 width/宽度、height/高度、duration/时长、frame_rate/fps/帧率；帧数按 int((时长*帧率//8)*8+1) 计算。",
+	"模板里的 wan_mode / video_mode / mode / 模式 会自动决定文生、图生或首尾帧；所有输入口都会保留并可连线，方便提前接好三种模式需要的线路。",
+	"需要改模式时，请修改模板参数；需要恢复手动按钮，请点击上方参数按钮并选择关闭参数联动。",
+].join("\n");
 
 const MODES = [
 	{ value: "文生", label: "文生", title: "只输出空视频 latent，隐藏 VAE、图片和 CLIP 视觉接口。" },
@@ -404,6 +410,23 @@ function openParamsMenu(node, anchor) {
 		});
 		menu.appendChild(closeItem);
 	}
+	const header = document.createElement("div");
+	header.textContent = [
+		"选择一个 GJJ_TemplateParams 作为参数来源。",
+		"启用后，本节点会自动读取尺寸、时长、帧率和可选模式字段；手动模式按钮会隐藏，所有输入口都会暴露并保持可连线。",
+		"以后要切换文生/图生/首尾帧，请改模板里的 wan_mode / video_mode / mode / 模式。",
+	].join("\n");
+	header.style.cssText = [
+		"padding:7px 8px",
+		"border:1px solid #2f4f43",
+		"border-radius:6px",
+		"background:#101d18",
+		"color:#cfeee0",
+		"font-size:11px",
+		"line-height:1.45",
+		"white-space:pre-wrap",
+	].join(";");
+	menu.appendChild(header);
 	for (const templateNode of nodes) {
 		const item = document.createElement("button");
 		item.type = "button";
@@ -601,20 +624,17 @@ function setLinkDimmed(node, input, dimmed) {
 	}
 }
 
-function applyDisabledSockets(node, visibleNames) {
-	const visible = new Set(visibleNames);
-	const paramMode = paramsEnabled(node);
+function applyDisabledSockets(node, _visibleNames) {
 	for (const input of node.inputs || []) {
 		const name = String(input?.name || "");
 		if (!(name in SOCKETS)) continue;
-		const disabled = paramMode && !visible.has(name);
-		input.disabled = disabled;
-		input.color_on = disabled ? "#687076" : undefined;
-		input.color_off = disabled ? "#454b50" : undefined;
-		input.gjj_disabled = disabled;
-		input.label = disabled ? `${SOCKETS[name].label}（禁用）` : SOCKETS[name].label;
+		input.disabled = false;
+		input.color_on = undefined;
+		input.color_off = undefined;
+		input.gjj_disabled = false;
+		input.label = SOCKETS[name].label;
 		input.localized_name = input.label;
-		setLinkDimmed(node, input, disabled);
+		setLinkDimmed(node, input, false);
 	}
 }
 
@@ -649,20 +669,29 @@ function refreshButtons(node) {
 	const state = node.__gjjWanUnifiedModePanel;
 	if (!state) return;
 	const mode = getMode(node);
+	const paramActive = paramsEnabled(node);
 	for (const button of state.buttons || []) {
 		const active = button.dataset.mode === mode;
 		button.classList.toggle("active", active);
 		button.setAttribute("aria-pressed", active ? "true" : "false");
+		button.style.display = paramActive ? "none" : "";
 	}
 	if (state.paramsButton) {
-		const active = paramsEnabled(node);
 		const sourceNode = getTemplateParamsSourceNode(node);
-		state.paramsButton.classList.toggle("active", active);
-		state.paramsButton.setAttribute("aria-pressed", active ? "true" : "false");
-		state.paramsButton.textContent = active ? "⚡参" : "⚡参";
-		state.paramsButton.title = active
-			? `已启用参数联动：${sourceNode ? templateNodeLabel(sourceNode) : "来源缺失"}。点击可更换来源或关闭。`
+		state.paramsButton.classList.toggle("active", paramActive);
+		state.paramsButton.setAttribute("aria-pressed", paramActive ? "true" : "false");
+		state.paramsButton.textContent = paramActive ? "⚡ 参数联动中" : "⚡参数";
+		state.paramsButton.style.flex = paramActive ? "1 1 100%" : "0.9 1 0";
+		state.paramsButton.title = paramActive
+			? `已启用参数联动：${sourceNode ? templateNodeLabel(sourceNode) : "来源缺失"}。\n\n${PARAM_ACTIVE_HELP}`
 			: "从 GJJ_TemplateParams 读取 width/宽度、height/高度、duration/时长、frame_rate/fps/帧率，可选读取 wan_mode/video_mode/模式；宽高按原版 16 倍数对齐，帧数按 int((时长*帧率//8)*8+1) 设置。";
+	}
+	if (state.paramHelp) {
+		const sourceNode = getTemplateParamsSourceNode(node);
+		state.paramHelp.style.display = paramActive ? "" : "none";
+		state.paramHelp.textContent = paramActive
+			? `来源：${sourceNode ? templateNodeLabel(sourceNode) : "来源缺失"}\n${PARAM_ACTIVE_HELP}`
+			: "";
 	}
 }
 
@@ -673,6 +702,7 @@ function addModePanel(node) {
 	root.className = "gjj-wan-unified-mode-panel";
 	root.style.cssText = [
 		"display:flex",
+		"flex-wrap:wrap",
 		"gap:4px",
 		"padding:3px 0 2px",
 		"box-sizing:border-box",
@@ -735,6 +765,25 @@ function addModePanel(node) {
 	paramsButton.addEventListener("pointerdown", (event) => event.stopPropagation());
 	root.appendChild(paramsButton);
 
+	const paramHelp = document.createElement("div");
+	paramHelp.className = "gjj-wan-unified-param-help";
+	paramHelp.style.cssText = [
+		"display:none",
+		"flex:1 1 100%",
+		"box-sizing:border-box",
+		"margin-top:2px",
+		"padding:7px 8px",
+		"border:1px solid #2f4f43",
+		"border-radius:6px",
+		"background:#101d18",
+		"color:#cfeee0",
+		"font-size:11px",
+		"line-height:1.45",
+		"white-space:pre-wrap",
+		"overflow-wrap:anywhere",
+	].join(";");
+	root.appendChild(paramHelp);
+
 	const style = document.createElement("style");
 	style.textContent = `
 		.gjj-wan-unified-mode-panel button.active {
@@ -757,9 +806,9 @@ function addModePanel(node) {
 		getValue: () => getMode(node),
 		setValue: (value) => setMode(node, value),
 	});
-	widget.computeSize = (width) => [Math.round(width || node.size?.[0] || 320), 32];
-	widget.getHeight = () => 32;
-	node.__gjjWanUnifiedModePanel = { widget, buttons, paramsButton };
+	widget.computeSize = (width) => [Math.round(width || node.size?.[0] || 320), paramsEnabled(node) ? 126 : 32];
+	widget.getHeight = () => paramsEnabled(node) ? 126 : 32;
+	node.__gjjWanUnifiedModePanel = { widget, buttons, paramsButton, paramHelp };
 }
 
 function patchNode(node) {

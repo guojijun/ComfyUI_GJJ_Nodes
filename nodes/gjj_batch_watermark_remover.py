@@ -31,6 +31,7 @@ from .gjj_multi_image_loader import build_uniform_batch_by_longest_edge
 
 
 NODE_NAME = "GJJ_BatchWatermarkRemover"
+MIXED_BATCH_IMAGE_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
 DEFAULT_UNET = "flux-2-klein-4b-fp8.safetensors"
 DEFAULT_CLIP = "qwen_3_4b.safetensors"
 DEFAULT_VAE = "flux2-vae.safetensors"
@@ -469,16 +470,89 @@ def _process_single_image(
 
 
 class GJJ_BatchWatermarkRemover:
-    DESCRIPTION = "批量去除水印单节点。借鉴 Flux2 Klein 参考图重绘思路，不依赖 Florence、KJ、CropStitch、WAS 等第三方节点；输入和主输出均为 GJJ 专用批量图片。"
+    DESCRIPTION = "批量去除水印单节点。借鉴 Flux2 Klein 参考图重绘思路，不依赖 Florence、KJ、CropStitch、WAS 等第三方节点；输入和主输出兼容 GJJ 批量图片与普通 IMAGE 批量。"
     SEARCH_ALIASES = ["批量去水印", "水印去除", "watermark remover", "klein", "Flux2 Klein", "文字去除", "logo去除"]
-    RETURN_TYPES = (GJJ_BATCH_IMAGE_TYPE,)
+    RETURN_TYPES = (MIXED_BATCH_IMAGE_TYPE,)
     RETURN_NAMES = ("批量图片",)
     OUTPUT_TOOLTIPS = (
-        "全部去水印结果打包成 GJJ 专用批量图片；尺寸不一致时会自动通过长边缩放统一为相同尺寸。需要单图时请接 GJJ 批量图片解包/预览类节点。",
+        "全部去水印结果输出为兼容 GJJ_BATCH_IMAGE 与 IMAGE 的批量图片；尺寸不一致时会自动通过长边缩放统一为相同尺寸。",
     )
     FUNCTION = "remove"
     OUTPUT_NODE = True
     CATEGORY = "GJJ"
+    GJJ_HELP = {
+        "title": "GJJ · 🧼 批量去水印",
+        "description": DESCRIPTION,
+        "model_download_url": "",
+        "models": [
+            {
+                "label": "UNET 主模型",
+                "filename": DEFAULT_UNET,
+                "folder": "diffusion_models",
+                "input": "unet_name",
+                "type": "UNET",
+                "kind": "Flux2 Klein",
+                "tooltip": "默认去水印重绘主模型；节点会从 models/diffusion_models 和可用模型列表中模糊匹配。",
+            },
+            {
+                "label": "CLIP 文本编码器",
+                "filename": DEFAULT_CLIP,
+                "folder": "text_encoders",
+                "input": "clip_name",
+                "type": "CLIP",
+                "kind": "Flux2",
+                "tooltip": "默认 Qwen 文本编码器；节点按 flux2 类型加载。",
+            },
+            {
+                "label": "VAE",
+                "filename": DEFAULT_VAE,
+                "folder": "vae",
+                "input": "vae_name",
+                "type": "VAE",
+                "kind": "Flux2",
+                "tooltip": "Flux2 VAE，用于参考图编码和结果解码。",
+            },
+        ],
+        "models_tree": [
+            {
+                "label": "UNET 主模型",
+                "filename": DEFAULT_UNET,
+                "folder": "models/diffusion_models",
+                "input": "unet_name",
+                "type": "UNET",
+                "kind": "Flux2 Klein",
+                "tooltip": "可放在 diffusion_models 子目录下；下拉框支持子目录相对路径和模糊匹配。",
+            },
+            {
+                "label": "CLIP 文本编码器",
+                "filename": DEFAULT_CLIP,
+                "folder": "models/text_encoders",
+                "input": "clip_name",
+                "type": "CLIP",
+                "kind": "Flux2",
+                "tooltip": "可放在 text_encoders 子目录下；默认按 flux2 文本编码器加载。",
+            },
+            {
+                "label": "VAE",
+                "filename": DEFAULT_VAE,
+                "folder": "models/vae",
+                "input": "vae_name",
+                "type": "VAE",
+                "kind": "Flux2",
+                "tooltip": "可放在 vae 子目录下；用于编码输入参考图并解码去水印结果。",
+            },
+        ],
+        "dependencies": [
+            "ComfyUI 内置 Flux2 采样相关节点：EmptyFlux2LatentImage、Flux2Scheduler、SamplerCustomAdvanced。",
+            "无 Florence、KJ、CropStitch、WAS 等第三方自定义节点依赖。",
+        ],
+        "usage": [
+            "输入兼容 GJJ_BATCH_IMAGE 与普通 IMAGE 批量；可接 GJJ 批量多图片加载预览器、批量图片包装器或普通 IMAGE 输出。",
+            "UNET、CLIP、VAE 下拉框均读取本地模型列表，并按默认文件名做模糊匹配。",
+            "工作像素量越大，去水印细节可能更稳，但显存和耗时也会增加。",
+            "自动保存开启后，会把结果写入 ComfyUI output 下的文件名前缀目录。",
+        ],
+    }
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -488,10 +562,10 @@ class GJJ_BatchWatermarkRemover:
         return {
             "required": {
                 "image": (
-                    GJJ_BATCH_IMAGE_TYPE,
+                    MIXED_BATCH_IMAGE_TYPE,
                     {
                         "display_name": "批量图片",
-                        "tooltip": "接入 GJJ · 批量多图片加载预览器 或 GJJ · 批量图片包装器 输出的 GJJ 批量图片。",
+                        "tooltip": "兼容 GJJ_BATCH_IMAGE 与普通 IMAGE 批量；可接 GJJ 批量多图片加载预览器、批量图片包装器或普通 IMAGE 输出。",
                     },
                 ),
                 "prompt": (

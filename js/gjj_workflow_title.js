@@ -14,6 +14,9 @@ const USER_SETTINGS_ENDPOINT = "/gjj/user_settings";
 const USER_SETTINGS_SECTION = "workflow_title";
 const MIN_WIDTH = 120;
 const SETTINGS_WIDTH = 360;
+const SETTINGS_PREVIEW_HEIGHT = 104;
+const SETTINGS_PREVIEW_PADDING = 8;
+const SETTINGS_TOP_GAP = 30;
 const DEFAULT_FONT_SIZE = 72;
 const DEFAULT_TITLE_WIDTH = 512;
 const USER_STYLE_SAVE_DELAY = 420;
@@ -93,12 +96,14 @@ function ensureStyle() {
 	style.id = STYLE_ID;
 	style.textContent = `
 .gjj-title-root{position:relative;box-sizing:border-box;width:100%;min-width:0;padding:0;background:transparent;color:#dce7e2;font-family:system-ui,"Microsoft YaHei",sans-serif;pointer-events:none;user-select:none;}
+.gjj-title-preview{display:block;box-sizing:border-box;width:fit-content;max-width:100%;background:transparent;pointer-events:none;}
 .gjj-title-canvas{display:block;background:transparent;pointer-events:none;}
 .gjj-title-gear{position:absolute;left:0;top:0;z-index:4;width:24px;height:24px;padding:0;border:0;border-radius:5px;background:rgba(11,16,20,.34);color:#effff8;font-size:14px;line-height:24px;cursor:pointer;opacity:.62;pointer-events:auto;}
 .gjj-title-root:hover .gjj-title-gear,.gjj-title-root.open .gjj-title-gear{opacity:1;background:rgba(20,31,37,.82);box-shadow:0 0 0 1px rgba(85,198,133,.28);}
 .gjj-title-panel{display:none;box-sizing:border-box;width:${SETTINGS_WIDTH}px;margin-top:6px;padding:8px;border:1px solid rgba(85,198,133,.28);border-radius:7px;background:rgba(13,20,24,.96);box-shadow:0 8px 28px rgba(0,0,0,.28);pointer-events:auto;}
 .gjj-title-panel *{pointer-events:auto;}
-.gjj-title-root.open .gjj-title-panel{display:grid;grid-template-columns:1fr 1fr;gap:7px;}
+.gjj-title-root.open .gjj-title-panel{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:${SETTINGS_TOP_GAP}px;}
+.gjj-title-root.open .gjj-title-preview{display:flex;align-items:center;justify-content:center;width:${SETTINGS_WIDTH}px;height:${SETTINGS_PREVIEW_HEIGHT}px;margin-top:7px;padding:${SETTINGS_PREVIEW_PADDING}px;border:1px solid rgba(85,198,133,.2);border-radius:7px;background:rgba(7,12,15,.62);overflow:hidden;}
 .gjj-title-field{display:flex;flex-direction:column;gap:3px;min-width:0;}
 .gjj-title-field.wide{grid-column:1 / -1;}
 .gjj-title-field label{font-size:11px;color:#9fb5bd;font-weight:700;}
@@ -112,8 +117,8 @@ function ensureStyle() {
 .gjj-title-range input{padding:0;}
 .gjj-title-range output{font-size:10px;color:#9fb5bd;text-align:right;font-variant-numeric:tabular-nums;}
 .gjj-title-actions{grid-column:1 / -1;display:flex;justify-content:flex-end;gap:6px;padding-top:2px;}
-.gjj-title-actions button{height:26px;padding:0 10px;border:1px solid #40545d;border-radius:5px;background:#172329;color:#dce7e2;font-size:12px;font-weight:800;cursor:pointer;}
-.gjj-title-actions button.primary{background:#1d563d;border-color:#55c685;color:#fff;}
+.gjj-title-actions button{height:28px;padding:0 12px;border:1px solid #40545d;border-radius:5px;background:#172329;color:#dce7e2;font-size:12px;font-weight:800;cursor:pointer;}
+.gjj-title-actions button.primary{min-width:82px;height:32px;background:#1d563d;border-color:#55c685;color:#fff;font-size:13px;}
 `;
 	document.head.appendChild(style);
 }
@@ -799,6 +804,9 @@ function createPanel(node) {
 
 	const canvas = document.createElement("canvas");
 	canvas.className = "gjj-title-canvas";
+	const preview = document.createElement("div");
+	preview.className = "gjj-title-preview";
+	preview.appendChild(canvas);
 	const gear = makeButton("⚙️", "设置工作流标题样式");
 	gear.className = "gjj-title-gear";
 	const settings = document.createElement("div");
@@ -912,7 +920,7 @@ function createPanel(node) {
 		controls[11].field,
 		controls[12].field,
 	);
-	root.append(canvas, gear, settings);
+	root.append(gear, settings, preview);
 
 	function syncWidthFromNode(persist = true) {
 		const width = currentNodeWidth(node, state.width, true);
@@ -973,6 +981,7 @@ function createPanel(node) {
 		stop(event);
 		panelOpen = !panelOpen;
 		root.classList.toggle("open", panelOpen);
+		renderPreview();
 		resizeNode();
 	});
 	ok.addEventListener("click", (event) => {
@@ -1037,8 +1046,19 @@ function createPanel(node) {
 	function renderPreview() {
 		layout = measureLayout(state);
 		const display = titleDisplaySize(state, layout);
-		const displayW = display.width;
-		const displayH = display.height;
+		let displayW = display.width;
+		let displayH = display.height;
+		if (panelOpen) {
+			const maxW = SETTINGS_WIDTH - SETTINGS_PREVIEW_PADDING * 2;
+			const maxH = SETTINGS_PREVIEW_HEIGHT - SETTINGS_PREVIEW_PADDING * 2;
+			const scale = Math.min(
+				maxW / Math.max(1, displayW),
+				maxH / Math.max(1, displayH),
+				1
+			);
+			displayW = Math.max(1, Math.round(displayW * scale));
+			displayH = Math.max(1, Math.round(displayH * scale));
+		}
 		const dpr = Math.max(1, window.devicePixelRatio || 1);
 		canvas.style.width = `${displayW}px`;
 		canvas.style.height = `${displayH}px`;
@@ -1060,9 +1080,12 @@ function createPanel(node) {
 			}
 			layout = measureLayout(state);
 			const display = titleDisplaySize(state, layout);
-			const panelHeight = panelOpen ? Math.ceil(settings.scrollHeight || settings.offsetHeight || 0) + 6 : 0;
+			const panelHeight = panelOpen
+				? Math.ceil(settings.scrollHeight || settings.offsetHeight || 0) + SETTINGS_TOP_GAP + SETTINGS_PREVIEW_HEIGHT + 13
+				: 0;
 			const width = Math.max(MIN_WIDTH, display.width, frameWidth);
-			const height = Math.max(24, display.height + panelHeight);
+			const previewHeight = panelOpen ? 0 : display.height;
+			const height = Math.max(24, previewHeight + panelHeight);
 			node.__gjjWorkflowTitleSize = [width, height];
 			node.minWidth = MIN_WIDTH;
 			node.min_width = MIN_WIDTH;

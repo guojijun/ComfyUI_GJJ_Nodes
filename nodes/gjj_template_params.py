@@ -891,11 +891,75 @@ def _sanitize_template_key(value: Any) -> str:
     return key.strip("_")
 
 
+_IMPLICIT_TEMPLATE_KEY_ALIASES = {
+    "width": "width",
+    "宽度": "width",
+    "图像宽度": "width",
+    "视频宽度": "width",
+    "height": "height",
+    "高度": "height",
+    "图像高度": "height",
+    "视频高度": "height",
+    "duration": "duration",
+    "seconds": "duration",
+    "second": "duration",
+    "secs": "duration",
+    "sec": "duration",
+    "time": "duration",
+    "时长": "duration",
+    "持续时间": "duration",
+    "视频时长": "duration",
+    "frame_rate": "frame_rate",
+    "framerate": "frame_rate",
+    "fps": "frame_rate",
+    "帧率": "frame_rate",
+    "每秒帧数": "frame_rate",
+    "帧每秒": "frame_rate",
+    "length": "length",
+    "frames": "length",
+    "frame_count": "length",
+    "framecount": "length",
+    "帧数": "length",
+    "视频帧数": "length",
+    "总帧数": "length",
+    "wan_mode": "wan_mode",
+    "video_mode": "wan_mode",
+    "mode": "wan_mode",
+    "模式": "wan_mode",
+    "视频模式": "wan_mode",
+    "生成模式": "wan_mode",
+    "wan模式": "wan_mode",
+    "start_image": "start_image",
+    "first_image": "start_image",
+    "首帧": "start_image",
+    "首图": "start_image",
+    "起始图": "start_image",
+    "起始帧": "start_image",
+    "end_image": "end_image",
+    "last_image": "end_image",
+    "尾帧": "end_image",
+    "尾图": "end_image",
+    "结束图": "end_image",
+    "结束帧": "end_image",
+}
+
+
+def _implicit_template_key_source(label: Any) -> str:
+    text = _normalize_text(label).strip()
+    compact = re.sub(r"[\s_\-]+", "", text).lower()
+    underscored = re.sub(r"[\s\-]+", "_", text).lower()
+    return (
+        _IMPLICIT_TEMPLATE_KEY_ALIASES.get(compact)
+        or _IMPLICIT_TEMPLATE_KEY_ALIASES.get(underscored)
+        or text
+    )
+
+
 def _split_label_and_broadcast_keys(raw_label: Any, index: int) -> tuple[str, str, list[str]]:
     label = _normalize_text(raw_label).strip() or f"参数 {index + 1}"
     match = re.fullmatch(r"(?s)(.+?)[（(]\s*([^（）()]+?)\s*[）)]", label)
     if not match:
-        return label, label, []
+        return label, _implicit_template_key_source(label), []
     label = match.group(1).strip() or label
     # 只取括号里的第一个严格变量名；不把 | / , / or 当别名展开，避免大工作流误匹配。
     first_key = re.split(r"\s*(?:\||,|，|；|;|\bor\b|或)\s*", match.group(2), maxsplit=1, flags=re.I)[0]
@@ -990,7 +1054,7 @@ def values_from_json(values_json: Any) -> dict[str, Any]:
 class GJJ_TemplateParams:
     CATEGORY = "GJJ/逻辑控制"
     FUNCTION = "output_params"
-    DESCRIPTION = "通过模板文本自动生成参数输入框和输出口。支持格式：帧率 (frame_rate) [INT,FLOAT]：24.0 # 浮点\n提示词：'''多段文本''' # 字符串\n是否启用：[enable,disable] # 枚举\n媒体文件会自动加载为 IMAGE/AUDIO/VIDEO 对象。⚡ 广播默认关闭，开启后只广播写了 (变量名) 的字段。"
+    DESCRIPTION = "通过模板文本自动生成参数输入框和输出口。支持格式：帧率 (frame_rate) [INT,FLOAT]：24.0 # 浮点；也兼容 帧率：24、宽度：832、模式：图生 这类未写括号的常用参数。\n提示词：'''多段文本''' # 字符串\n是否启用：[enable,disable] # 枚举\n媒体文件会自动加载为 IMAGE/AUDIO/VIDEO 对象。⚡ 广播默认关闭，开启后只广播写了 (变量名) 的字段。"
     SEARCH_ALIASES = [
         "template params",
         "params",
@@ -1015,7 +1079,7 @@ class GJJ_TemplateParams:
                         "multiline": True,
                         "display": "hidden",
                         "display_name": "隐藏模板",
-                        "tooltip": "由前端 ⚙️ 设置按钮维护。每行一个参数，支持格式：显示名 (严格变量名) [类型1,类型2]：默认值 # 说明；提示词可用 ''' 或 \"\"\" 包裹多段文本。",
+                        "tooltip": "由前端 ⚙️ 设置按钮维护。每行一个参数，支持格式：显示名 (严格变量名) [类型1,类型2]：默认值 # 说明；宽度/高度/时长/帧率/模式等常用参数可省略括号；提示词可用 ''' 或 \"\"\" 包裹多段文本。",
                     },
                 ),
                 "values_json": (

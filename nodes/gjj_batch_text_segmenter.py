@@ -3,7 +3,6 @@ import re,gc,torch
 from dataclasses import dataclass, field
 from typing import Any
 import torch.nn.functional as F
-from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .gjj_sam3_runtime import (
 	build_sam3_environment_report,
 	comfy_image_to_pil,
@@ -18,6 +17,7 @@ except Exception:from nodes.common_utils.tsv_translation import translate_text_t
 
 
 NODE_NAME = "GJJ_BatchTextSegmenter"
+MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
 DEFAULT_PROMPT = "图1：帽子和眼镜；图2：衣服、鞋子"
 DEFAULT_WARNING = "等待执行"
 DEFAULT_SAM3_MODEL = "sam3.safetensors"
@@ -479,10 +479,10 @@ class GJJ_BatchTextSegmenter:
 		return {
 			"required": {
 				"image": (
-					GJJ_BATCH_IMAGE_TYPE,
+					MEDIA_INPUT_TYPE,
 					{
 						"display_name": "批量图片",
-						"tooltip": "接入 GJJ 批量图片。RGB、RGBA、灰度都会自动兼容为 RGBA 内部处理。",
+						"tooltip": "兼容 GJJ_BATCH_IMAGE、普通 IMAGE 批量和 VIDEO。RGB、RGBA、灰度都会自动兼容为 RGBA 内部处理。",
 					},
 				),
 				"text_prompt": (
