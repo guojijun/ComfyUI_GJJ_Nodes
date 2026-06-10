@@ -38,6 +38,8 @@ const WIDTH_PROPERTY = "gjj_any_preview_width";
 const MOTION_GUARD_STYLE_ID = "gjj-any-preview-motion-guard-style";
 const MOTION_CLASS = "gjj-any-preview-motion";
 const MOTION_IDLE_MS = 260;
+const MULTI_OBJECT_TILE_MIN_WIDTH = 132;
+const MULTI_OBJECT_TILE_GAP = 6;
 const LIVE_KIND_LABELS = {
 	image: "图片",
 	mask: "遮罩",
@@ -955,9 +957,66 @@ function shouldUseEstimatedImageLayout(node) {
 	return !images.some(isSequenceMediaItem) && images.length < IMAGE_SEQUENCE_MIN_FRAMES;
 }
 
+function hasPreviewItems(node) {
+	return Array.isArray(node?.__gjjAnyPreviewItems) && node.__gjjAnyPreviewItems.length > 0;
+}
+
+function previewContentWidth(node) {
+	const container = node?.__gjjAnyPreviewContainer;
+	const rawWidth = Number(container?.clientWidth || container?.offsetWidth || currentNodeWidth(node) || preferredNodeWidth(node));
+	return Math.max(1, Math.round(rawWidth - 20));
+}
+
+function estimatePreviewItemsHeight(node) {
+	const count = Array.isArray(node?.__gjjAnyPreviewItems) ? node.__gjjAnyPreviewItems.length : 0;
+	if (!count) {
+		return MIN_PREVIEW_HEIGHT;
+	}
+	const contentWidth = previewContentWidth(node);
+	const columns = Math.min(
+		count,
+		Math.max(1, Math.floor((contentWidth + MULTI_OBJECT_TILE_GAP) / (MULTI_OBJECT_TILE_MIN_WIDTH + MULTI_OBJECT_TILE_GAP))),
+	);
+	const rows = Math.max(1, Math.ceil(count / columns));
+	const tileWidth = Math.max(
+		124,
+		Math.floor((contentWidth - (columns - 1) * MULTI_OBJECT_TILE_GAP) / columns),
+	);
+	return Math.max(
+		MIN_PREVIEW_HEIGHT,
+		rows * tileWidth + (rows - 1) * MULTI_OBJECT_TILE_GAP + 18,
+	);
+}
+
+function measurePreviewItemsHeight(node) {
+	const container = node?.__gjjAnyPreviewContainer;
+	const previewWrap = node?.__gjjAnyPreviewWrap;
+	const grid = node?.__gjjAnyPreviewGrid;
+	if (!container || !grid) {
+		return estimatePreviewItemsHeight(node);
+	}
+	if (previewWrap) {
+		previewWrap.style.height = "auto";
+		previewWrap.style.minHeight = "96px";
+		previewWrap.style.overflow = "visible";
+	}
+	container.style.height = "auto";
+	container.style.minHeight = `${MIN_PREVIEW_HEIGHT}px`;
+	grid.style.height = "auto";
+	const measured = Math.max(
+		Number(grid.scrollHeight || 0),
+		Number(previewWrap?.scrollHeight || 0),
+		Number(container.scrollHeight || 0),
+	);
+	return Math.max(MIN_PREVIEW_HEIGHT, Math.ceil(measured || estimatePreviewItemsHeight(node)));
+}
+
 function getWidgetHeight(node, widget) {
 	if (shouldUseEstimatedImageLayout(node)) {
 		return estimateImagePreviewHeight(node);
+	}
+	if (hasPreviewItems(node)) {
+		return measurePreviewItemsHeight(node);
 	}
 	const nodeHeight = Math.max(
 		MIN_NODE_HEIGHT,
@@ -987,6 +1046,8 @@ function updateLayout(node) {
 	}
 	const previewHeight = useEstimatedImageLayout
 		? estimateImagePreviewHeight(node)
+		: hasPreviewItems(node)
+			? measurePreviewItemsHeight(node)
 		: measureHeight(node);
 	const height = Math.max(
 		MIN_NODE_HEIGHT,
@@ -2400,8 +2461,8 @@ function renderPreviewItems(node, items) {
 
 	grid.style.display = "grid";
 	grid.style.flexDirection = "";
-	grid.style.gridTemplateColumns = "repeat(auto-fill, minmax(132px, 1fr))";
-	grid.style.gap = "6px";
+	grid.style.gridTemplateColumns = `repeat(auto-fill, minmax(${MULTI_OBJECT_TILE_MIN_WIDTH}px, 1fr))`;
+	grid.style.gap = `${MULTI_OBJECT_TILE_GAP}px`;
 	grid.style.height = "auto";
 	grid.style.alignItems = "start";
 	clearImageSequenceTimers(node);
@@ -2458,6 +2519,7 @@ function renderPreviewItems(node, items) {
 
 		grid.appendChild(card);
 	}
+	node.__gjjAnyPreviewHeight = measurePreviewItemsHeight(node);
 }
 
 function applyPreviewContent(node) {
@@ -2509,11 +2571,7 @@ function applyPreviewContent(node) {
 		requestAnimationFrame(() => {
 			const height = Math.max(
 				MIN_PREVIEW_HEIGHT,
-				Math.ceil(
-					container.scrollHeight ||
-						container.offsetHeight ||
-						MIN_PREVIEW_HEIGHT,
-				),
+				measurePreviewItemsHeight(node),
 			);
 			if (node.__gjjAnyPreviewHeight !== height) {
 				node.__gjjAnyPreviewHeight = height;
@@ -3209,6 +3267,8 @@ function ensurePreviewWidget(node) {
 			Math.max(MIN_WIDTH, Number(width) || preferredNodeWidth(node)),
 			shouldUseEstimatedImageLayout(node)
 				? estimateImagePreviewHeight(node)
+				: hasPreviewItems(node)
+					? measurePreviewItemsHeight(node)
 				: Math.max(MIN_NODE_HEIGHT, measureHeight(node)),
 		];
 		widget.draw = () => {};
@@ -3388,7 +3448,14 @@ app.registerExtension({
 				rememberNodeWidth(this);
 			}
 			// 用户手动调整宽度后，只按当前宽度重新计算高度，不反向改宽度。
-			scheduleLayout(this);
+			if (hasPreviewItems(this)) {
+				requestAnimationFrame(() => {
+					applyPreviewContent(this);
+					updateLayout(this);
+				});
+			} else {
+				scheduleLayout(this);
+			}
 			return result;
 		};
 

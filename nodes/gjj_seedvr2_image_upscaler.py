@@ -1,20 +1,26 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import sys
 from fractions import Fraction
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import folder_paths
 import torch
 from comfy_api.latest import InputImpl, Types
-from server import PromptServer
 
 
 NODE_NAME = "GJJ_SeedVR2ImageUpscaler"
+NODE_DISPLAY_NAME = "GJJ · 🔍 SeedVR2图像视频放大器"
 DEFAULT_DIT_MODEL = "seedvr2_ema_3b_fp8_e4m3fn.safetensors"
 DEFAULT_VAE_MODEL = "ema_vae_fp16.safetensors"
+MODEL_CATEGORY = "seedvr2"
+MODEL_SUBDIR = "models/seedvr2"
+MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
+MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
 COMMON_VIDEO_HEIGHT_OPTIONS = [
     "手动输入",
     "480",
@@ -33,6 +39,36 @@ COMMON_VIDEO_HEIGHT_OPTIONS = [
     "2160",
 ]
 
+try:
+    from .common_utils.dependency_checker import (
+        build_dependency_model_report,
+        build_node_help_payload,
+        make_missing_model_spec,
+        print_dependency_model_report,
+        raise_dependency_model_error,
+        send_dependency_model_notice,
+    )
+    from .common_utils.model_manager import gjjutils_resolve_model_by_extensionless_seed
+except ImportError:
+    from common_utils.dependency_checker import (
+        build_dependency_model_report,
+        build_node_help_payload,
+        make_missing_model_spec,
+        print_dependency_model_report,
+        raise_dependency_model_error,
+        send_dependency_model_notice,
+    )
+    from common_utils.model_manager import gjjutils_resolve_model_by_extensionless_seed
+
+
+SEEDVR2_MODEL_TREE = """ComfyUI/
+└── models/
+    └── seedvr2/
+        ├── seedvr2_ema_3b_fp8_e4m3fn.safetensors  或可模糊匹配的 SeedVR2 主模型
+        └── ema_vae_fp16.safetensors                或可模糊匹配的 SeedVR2 VAE
+"""
+_DESCRIPTION_INTRO = "将 SeedVR2 的图像/视频放大整合成单节点；单输入口兼容 GJJ_BATCH_IMAGE、IMAGE、VIDEO，接 VIDEO 时保留原音频与帧率。"
+
 
 class AnyType(str):
     def __ne__(self, __value: object) -> bool:
@@ -40,6 +76,167 @@ class AnyType(str):
 
 
 any_type = AnyType("*")
+
+
+def _seedvr2_runtime_root() -> Path:
+    return Path(__file__).resolve().parents[2] / "seedvr2_videoupscaler"
+
+
+def _missing_runtime_specs() -> list[dict[str, str]]:
+    root = _seedvr2_runtime_root()
+    if root.exists() and (root / "src").exists():
+        return []
+    return [
+        {
+            "module_name": "seedvr2_videoupscaler",
+            "package_name": "seedvr2_videoupscaler",
+            "display_name": "SeedVR2 运行时",
+            "description": "需要本地 custom_nodes/seedvr2_videoupscaler 运行时；GJJ 节点复用它执行 SeedVR2 推理。",
+        }
+    ]
+
+
+def _ensure_seedvr2_model_folder() -> None:
+    try:
+        folder_paths.add_model_folder_path(MODEL_CATEGORY, str(Path(folder_paths.models_dir) / MODEL_CATEGORY))
+    except Exception:
+        pass
+
+
+def _list_seedvr2_folder_models() -> list[str]:
+    _ensure_seedvr2_model_folder()
+    try:
+        names = list(folder_paths.get_filename_list(MODEL_CATEGORY) or [])
+    except Exception:
+        names = []
+    values: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        text = str(name or "").strip()
+        if not text:
+            continue
+        lower = text.lower()
+        if not lower.endswith((".safetensors", ".ckpt", ".pt", ".pth", ".bin")):
+            continue
+        key = lower.replace("\\", "/")
+        if key in seen:
+            continue
+        seen.add(key)
+        values.append(text)
+    values.sort(key=lambda item: item.lower())
+    return values
+
+
+def _ordered_model_choices(seed_name: str, *, want_vae: bool) -> list[str]:
+    folder_models = _list_seedvr2_folder_models()
+    preferred = gjjutils_resolve_model_by_extensionless_seed(seed_name, MODEL_CATEGORY)
+    filtered = []
+    for name in folder_models:
+        is_vae = "vae" in name.replace("\\", "/").lower()
+        if is_vae == want_vae:
+            filtered.append(name)
+    if not filtered:
+        filtered = folder_models
+
+    choices: list[str] = []
+    for value in [preferred, *filtered, seed_name]:
+        text = str(value or "").strip()
+        if text and text not in choices:
+            choices.append(text)
+    return choices or [seed_name]
+
+
+def _default_model_choice(seed_name: str) -> str:
+    return gjjutils_resolve_model_by_extensionless_seed(seed_name, MODEL_CATEGORY) or seed_name
+
+
+_ENVIRONMENT_REPORT = build_dependency_model_report(
+    node_name=NODE_DISPLAY_NAME,
+    missing_dependencies=_missing_runtime_specs(),
+    install_packages=None,
+    description="SeedVR2 运行时用于加载模型并执行图像/视频超分。",
+    model_download_url=MODEL_DOWNLOAD_URL,
+)
+# 不再手动覆盖 install_cmd 和 copy_text，让公共函数自动生成完整安装命令
+_DEPENDENCIES_AVAILABLE = bool(_ENVIRONMENT_REPORT.get("dependencies_available", True))
+_MISSING_DEPENDENCIES = list(_ENVIRONMENT_REPORT.get("missing_dependencies", []) or [])
+if _MISSING_DEPENDENCIES:
+    print_dependency_model_report(_ENVIRONMENT_REPORT, title="GJJ SeedVR2 运行时缺失")
+
+_GJJ_HELP = build_node_help_payload(
+    description=_DESCRIPTION_INTRO,
+    dependencies=[
+        {
+            "name": "SeedVR2 运行时 custom_nodes/seedvr2_videoupscaler",
+            "type": "本地运行时",
+            "required": True,
+            "description": "节点复用该运行时的推理、显存优化和视频组件处理。",
+        }
+    ],
+    model_tree=[
+        {
+            "label": "SeedVR2 主模型",
+            "path": f"{MODEL_SUBDIR}/seedvr2_ema_3b_fp8_e4m3fn.safetensors",
+            "required": True,
+            "description": "下拉列表会去扩展名与量化标记后在 models/seedvr2 深度搜索，优先取匹配项。",
+        },
+        {
+            "label": "SeedVR2 VAE",
+            "path": f"{MODEL_SUBDIR}/ema_vae_fp16.safetensors",
+            "required": True,
+            "description": "同样支持子目录与大小写不敏感模糊匹配。",
+        },
+    ],
+    models=[],
+    usage=[
+        "连接统一媒体口：GJJ_BATCH_IMAGE / IMAGE 直接按图像批次处理，VIDEO 会先提取帧并在输出时保留音频与帧率。",
+        "布尔选项在节点顶部按钮行切换，其余参数默认隐藏，点击 ⚙️设置 展开。",
+    ],
+    runtime=[
+        "执行期如果 SeedVR2 运行时或模型不可用，会通过 GJJ 公共提示面板给出中文说明和可复制内容。",
+    ],
+    model_download_url=MODEL_DOWNLOAD_URL,
+    install_cmd=_ENVIRONMENT_REPORT.get("install_cmd", ""),
+    copy_text=_ENVIRONMENT_REPORT.get("copy_text", ""),
+    copy_label=_ENVIRONMENT_REPORT.get("copy_label", ""),
+    notice=_ENVIRONMENT_REPORT.get("warning_message", ""),
+    extra={
+        "模型放置树": SEEDVR2_MODEL_TREE,
+        "模型树信息": [
+            {
+                "label": "SeedVR2 主模型",
+                "path": f"{MODEL_SUBDIR}/seedvr2_ema_3b_fp8_e4m3fn.safetensors",
+                "folder": MODEL_CATEGORY,
+                "required": True,
+                "match_rule": "去扩展名、去量化标记后在 models/seedvr2 含子目录中大小写不敏感搜索。",
+            },
+            {
+                "label": "SeedVR2 VAE",
+                "path": f"{MODEL_SUBDIR}/ema_vae_fp16.safetensors",
+                "folder": MODEL_CATEGORY,
+                "required": True,
+                "match_rule": "去扩展名、去量化标记后在 models/seedvr2 含子目录中大小写不敏感搜索。",
+            },
+        ],
+        "依赖信息": [
+            {
+                "name": "SeedVR2 运行时",
+                "type": "本地 custom_nodes 运行时",
+                "path": "custom_nodes/seedvr2_videoupscaler",
+                "required": True,
+                "description": "节点复用该运行时的推理、显存优化和 VIDEO 输出构建逻辑。",
+            },
+            {
+                "name": "PyTorch / comfy_api.latest / folder_paths",
+                "type": "ComfyUI 内置运行环境",
+                "required": True,
+                "description": "用于张量处理、官方 VIDEO 对象和模型目录解析。",
+            },
+        ],
+        "warning_message": _ENVIRONMENT_REPORT.get("warning_message", ""),
+        "notice_level": _ENVIRONMENT_REPORT.get("notice_level", "ok"),
+    },
+)
 
 
 def _get_local_device_list(include_none: bool = False, include_cpu: bool = False) -> list[str]:
@@ -79,6 +276,8 @@ def _send_status(unique_id: Any, text: str) -> None:
     if not unique_id:
         return
     try:
+        from server import PromptServer
+
         PromptServer.instance.send_sync(
             "gjj_node_progress",
             {"node": str(unique_id), "text": str(text or "")},
@@ -88,8 +287,8 @@ def _send_status(unique_id: Any, text: str) -> None:
 
 
 def _get_seedvr2_model_options() -> tuple[list[str], list[str]]:
-    dit_models = [DEFAULT_DIT_MODEL]
-    vae_models = [DEFAULT_VAE_MODEL]
+    dit_models = _ordered_model_choices(DEFAULT_DIT_MODEL, want_vae=False)
+    vae_models = _ordered_model_choices(DEFAULT_VAE_MODEL, want_vae=True)
 
     try:
         custom_nodes_root = Path(__file__).resolve().parents[2]
@@ -144,10 +343,9 @@ def _get_seedvr2_api() -> dict[str, Any]:
         generation_utils = importlib.import_module("src.core.generation_utils")
         memory_manager = importlib.import_module("src.optimization.memory_manager")
     except Exception as exc:
-        raise RuntimeError(
-            "无法导入 seedvr2_videoupscaler。"
-            "请确认 D:\\AI\\MOD\\custom_nodes\\seedvr2_videoupscaler 存在且依赖已正确安装。"
-        ) from exc
+        err = RuntimeError("无法导入 seedvr2_videoupscaler 运行时。")
+        setattr(err, "_gjj_original_error", str(exc))
+        raise err from exc
 
     return {
         "DEFAULT_DIT": getattr(model_registry, "DEFAULT_DIT", DEFAULT_DIT_MODEL),
@@ -179,10 +377,135 @@ def _safe_option_list(getter, fallback: list[str]) -> list[str]:
     return values or fallback
 
 
+def _component_value(value: Any, key: str) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def _coerce_media_to_image_batch(value: Any) -> tuple[torch.Tensor, Any, float | None, str]:
+    if value is None:
+        raise RuntimeError("请连接输入媒体：支持 GJJ_BATCH_IMAGE、IMAGE 或 VIDEO。")
+
+    source = value
+    source_audio = None
+    source_fps: float | None = None
+    output_mode = "image"
+    if hasattr(source, "get_components"):
+        try:
+            components = source.get_components()
+        except Exception as exc:
+            raise RuntimeError(f"输入可识别为 VIDEO，但读取视频帧失败：{exc}") from exc
+        source = _component_value(components, "images")
+        source_audio = _component_value(components, "audio")
+        fps = _component_value(components, "frame_rate")
+        try:
+            source_fps = float(fps)
+        except Exception:
+            source_fps = None
+        output_mode = "video"
+    elif hasattr(source, "images"):
+        source = getattr(source, "images", None)
+
+    if isinstance(source, torch.Tensor):
+        tensor = source
+    elif isinstance(source, dict):
+        tensor = None
+        for key in ("images", "frames", "samples"):
+            candidate = source.get(key)
+            if isinstance(candidate, torch.Tensor):
+                tensor = candidate
+                break
+    elif isinstance(source, (list, tuple)) and source and all(isinstance(item, torch.Tensor) for item in source):
+        tensor = torch.cat([item if item.ndim == 4 else item.unsqueeze(0) for item in source], dim=0)
+    else:
+        tensor = None
+        for key in ("images", "frames", "samples"):
+            candidate = getattr(source, key, None)
+            if isinstance(candidate, torch.Tensor):
+                tensor = candidate
+                break
+
+    if tensor is None:
+        raise RuntimeError(f"输入不是有效的 GJJ_BATCH_IMAGE / IMAGE / VIDEO：{type(value).__name__}。")
+    if tensor.ndim == 3:
+        tensor = tensor.unsqueeze(0)
+    if tensor.ndim != 4:
+        raise RuntimeError(f"输入图片/视频帧必须是 [B,H,W,C] 或 [B,C,H,W]，实际为 {tuple(tensor.shape)}。")
+    if tensor.shape[-1] not in (1, 3, 4) and tensor.shape[1] in (1, 3, 4):
+        tensor = tensor.permute(0, 2, 3, 1)
+    channels = int(tensor.shape[-1])
+    if channels == 1:
+        tensor = tensor.repeat(1, 1, 1, 3)
+    elif channels == 4:
+        tensor = tensor[..., :3]
+    elif channels > 4:
+        tensor = tensor[..., :3]
+    elif channels != 3:
+        raise RuntimeError(f"输入图片/视频帧通道数无效：{tuple(tensor.shape)}。")
+    return tensor.detach().float().clamp(0.0, 1.0).contiguous(), source_audio, source_fps, output_mode
+
+
+def _model_category_root_for(model_name: str) -> Path | None:
+    try:
+        full_path = folder_paths.get_full_path(MODEL_CATEGORY, model_name)
+    except Exception:
+        full_path = None
+    if not full_path:
+        return None
+    full = Path(full_path).resolve()
+    try:
+        roots = [Path(path).resolve() for path in folder_paths.get_folder_paths(MODEL_CATEGORY)]
+    except Exception:
+        roots = []
+    for root in roots:
+        try:
+            full.relative_to(root)
+            return root
+        except Exception:
+            continue
+    return full.parent
+
+
+def _seedvr2_model_dir(api: dict[str, Any], dit_model: str, vae_model: str) -> Any:
+    dit_root = _model_category_root_for(dit_model)
+    vae_root = _model_category_root_for(vae_model)
+    if dit_root is not None and vae_root is not None and dit_root == vae_root:
+        return str(dit_root)
+    return api["get_base_cache_dir"]()
+
+
+def _raise_seedvr2_runtime_error(original_error: str, unique_id=None):
+    report = build_dependency_model_report(
+        node_name=NODE_DISPLAY_NAME,
+        missing_dependencies=_missing_runtime_specs() or [
+            {
+                "module_name": "seedvr2_videoupscaler",
+                "package_name": "seedvr2_videoupscaler",
+                "display_name": "SeedVR2 运行时",
+                "description": "运行时导入失败，可能是依赖未安装或版本不兼容。",
+            }
+        ],
+        install_packages=None,
+        description="SeedVR2 图像/视频放大需要本地 seedvr2_videoupscaler 运行时。",
+        original_error=original_error,
+        model_download_url=MODEL_DOWNLOAD_URL,
+    )
+    # 不再手动覆盖 install_cmd 和 copy_text，让公共函数自动生成完整安装命令
+    print_dependency_model_report(report, title="GJJ SeedVR2 运行时缺失")
+    send_dependency_model_notice(report, unique_id=unique_id)
+    err = RuntimeError(report.get("warning_message") or "SeedVR2 运行时缺失")
+    setattr(err, "gjj_report", report)
+    raise err
+
+
 class GJJ_SeedVR2ImageUpscaler:
     CATEGORY = "GJJ"
     FUNCTION = "upscale_image"
-    DESCRIPTION = "将 SeedVR2 的图像/视频放大整合成单节点；接入视频时会自动提取帧、保留原音频与帧率并重建视频。"
+    DESCRIPTION = _DESCRIPTION_INTRO if _DEPENDENCIES_AVAILABLE else _ENVIRONMENT_REPORT.get("warning_message", _DESCRIPTION_INTRO)
+    GJJ_HELP = _GJJ_HELP
 
     SEARCH_ALIASES = [
         "seedvr2 image upscale",
@@ -204,7 +527,7 @@ class GJJ_SeedVR2ImageUpscaler:
         dit_models, vae_models = _get_seedvr2_model_options()
         preferred_device = _preferred_runtime_device()
 
-        return {
+        result = {
             "required": {
                 "common_video_height": (COMMON_VIDEO_HEIGHT_OPTIONS, {
                     "default": "1080",
@@ -231,18 +554,19 @@ class GJJ_SeedVR2ImageUpscaler:
                     "default": 42,
                     "min": 0,
                     "max": 2**32 - 1,
+                    "control_after_generate": True,
                     "display_name": "随机种子",
                     "tooltip": "相同输入和相同参数下，使用同一随机种子可复现结果。",
                 }),
                 "dit_model": (dit_models, {
-                    "default": DEFAULT_DIT_MODEL,
+                    "default": _default_model_choice(DEFAULT_DIT_MODEL),
                     "display_name": "放大主模型",
-                    "tooltip": "SeedVR2 主超分模型。",
+                    "tooltip": "SeedVR2 主超分模型。会按去扩展名、去量化标记后的名称在 models/seedvr2 深度搜索，列表第一项作为默认。",
                 }),
                 "vae_model": (vae_models, {
-                    "default": DEFAULT_VAE_MODEL,
+                    "default": _default_model_choice(DEFAULT_VAE_MODEL),
                     "display_name": "解码模型",
-                    "tooltip": "SeedVR2 编码/解码模型。",
+                    "tooltip": "SeedVR2 编码/解码模型。会按去扩展名、去量化标记后的名称在 models/seedvr2 深度搜索，列表第一项作为默认。",
                 }),
                 "device": (devices, {
                     "default": preferred_device,
@@ -351,19 +675,20 @@ class GJJ_SeedVR2ImageUpscaler:
                 }),
             },
             "optional": {
-                "image": ("IMAGE", {
-                    "display_name": "输入图像",
-                    "tooltip": "输入单张或批量图像进行 SeedVR2 放大。",
-                }),
-                "video": ("VIDEO", {
-                    "display_name": "输入视频",
-                    "tooltip": "输入视频后会自动提取帧，放大后按原视频帧率与音频重建。",
+                "media": (MEDIA_INPUT_TYPE, {
+                    "display_name": "输入媒体",
+                    "tooltip": "统一输入口：支持 GJJ_BATCH_IMAGE、普通 IMAGE 批量和官方 VIDEO。接 VIDEO 时会自动提取帧，放大后按原视频帧率与音频重建。",
                 }),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
             },
         }
+        for _name, (_typ, _options) in result["required"].items():
+            if isinstance(_options, dict):
+                _options["hidden"] = True
+                _options["display"] = "hidden"
+        return result
 
     def upscale_image(
         self,
@@ -390,11 +715,23 @@ class GJJ_SeedVR2ImageUpscaler:
         input_noise_scale,
         latent_noise_scale,
         enable_debug,
-        image=None,
-        video=None,
+        media=None,
         unique_id=None,
+        **kwargs,
     ):
-        api = _get_seedvr2_api()
+        if media is None:
+            media = kwargs.get("media", None)
+        if media is None:
+            media = kwargs.get("image", None)
+        if media is None:
+            media = kwargs.get("video", None)
+
+        try:
+            api = _get_seedvr2_api()
+        except Exception as exc:
+            send_dependency_model_notice(_ENVIRONMENT_REPORT, unique_id=unique_id)
+            original = getattr(exc, "_gjj_original_error", str(exc))
+            _raise_seedvr2_runtime_error(original, unique_id=unique_id)
         Debug = api["Debug"]
         debug = Debug(enabled=enable_debug)
 
@@ -445,23 +782,8 @@ class GJJ_SeedVR2ImageUpscaler:
                 api["cleanup_text_embeddings"](ctx, debug)
                 ctx = None
 
-        if video is not None:
-            try:
-                _send_status(unique_id, "1/6 获取视频元素...")
-                components = video.get_components()
-                image = components.images
-                source_audio = components.audio
-                source_fps = float(components.frame_rate)
-                output_mode = "video"
-            except Exception as exc:
-                raise RuntimeError("无法从输入视频中提取帧、音频或帧率。") from exc
-        else:
-            source_audio = None
-            source_fps = None
-            output_mode = "image"
-
-        if image is None:
-            raise RuntimeError("请至少连接“输入图像”或“输入视频”其中之一。")
+        _send_status(unique_id, "1/6 读取输入媒体...")
+        image, source_audio, source_fps, output_mode = _coerce_media_to_image_batch(media)
 
         model_offload = torch.device(model_offload_device) if model_offload_device != "none" else None
         tensor_offload = torch.device(tensor_offload_device) if tensor_offload_device != "none" else None
@@ -476,8 +798,50 @@ class GJJ_SeedVR2ImageUpscaler:
             if model_offload is not None:
                 block_swap_config["offload_device"] = model_offload
 
-        _send_status(unique_id, "2/6 检查并下载 SeedVR2 模型...")
-        api["download_weight"](dit_model=dit_model, vae_model=vae_model, debug=debug)
+        dit_root = _model_category_root_for(str(dit_model))
+        vae_root = _model_category_root_for(str(vae_model))
+        model_dir = _seedvr2_model_dir(api, str(dit_model), str(vae_model))
+        if (dit_root is None) != (vae_root is None) or (dit_root is not None and vae_root is not None and dit_root != vae_root):
+            missing = []
+            if dit_root is None:
+                missing.append(make_missing_model_spec("SeedVR2 主模型", MODEL_SUBDIR, str(dit_model or DEFAULT_DIT_MODEL), "未在 models/seedvr2 中找到主模型。"))
+            if vae_root is None:
+                missing.append(make_missing_model_spec("SeedVR2 VAE", MODEL_SUBDIR, str(vae_model or DEFAULT_VAE_MODEL), "未在 models/seedvr2 中找到 VAE。"))
+            if not missing:
+                missing = [
+                    make_missing_model_spec("SeedVR2 主模型", MODEL_SUBDIR, str(dit_model or DEFAULT_DIT_MODEL), "主模型与 VAE 不在同一个模型根目录。"),
+                    make_missing_model_spec("SeedVR2 VAE", MODEL_SUBDIR, str(vae_model or DEFAULT_VAE_MODEL), "主模型与 VAE 不在同一个模型根目录。"),
+                ]
+            raise_dependency_model_error(
+                node_name=NODE_DISPLAY_NAME,
+                missing_models=missing,
+                description="本地 SeedVR2 模式要求主模型和 VAE 都能在 models/seedvr2（含子目录）中解析到，并位于同一个模型根目录。",
+                unique_id=unique_id,
+                copy_text=MODEL_SUBDIR,
+                copy_label="📋 复制模型目录",
+                model_download_url=MODEL_DOWNLOAD_URL,
+            )
+        if dit_root is None and vae_root is None:
+            try:
+                _send_status(unique_id, "2/6 检查 SeedVR2 模型...")
+                api["download_weight"](dit_model=dit_model, vae_model=vae_model, debug=debug)
+            except Exception as exc:
+                missing = [
+                    make_missing_model_spec("SeedVR2 主模型", MODEL_SUBDIR, str(dit_model or DEFAULT_DIT_MODEL), "主超分模型不可用。"),
+                    make_missing_model_spec("SeedVR2 VAE", MODEL_SUBDIR, str(vae_model or DEFAULT_VAE_MODEL), "VAE 模型不可用。"),
+                ]
+                raise_dependency_model_error(
+                    node_name=NODE_DISPLAY_NAME,
+                    missing_models=missing,
+                    description="请把 SeedVR2 模型放到 models/seedvr2，可放在子目录中；节点会按去扩展名、去量化信息后的名称做大小写不敏感搜索。",
+                    original_error=str(exc),
+                    unique_id=unique_id,
+                    copy_text=MODEL_SUBDIR,
+                    copy_label="📋 复制模型目录",
+                    model_download_url=MODEL_DOWNLOAD_URL,
+                )
+        else:
+            _send_status(unique_id, "2/6 已找到本地 SeedVR2 模型...")
 
         try:
             try:
@@ -501,7 +865,7 @@ class GJJ_SeedVR2ImageUpscaler:
             runner, cache_context = api["prepare_runner"](
                 dit_model=dit_model,
                 vae_model=vae_model,
-                model_dir=api["get_base_cache_dir"](),
+                model_dir=model_dir,
                 debug=debug,
                 ctx=ctx,
                 dit_cache=False,
@@ -618,4 +982,4 @@ class GJJ_SeedVR2ImageUpscaler:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_SeedVR2ImageUpscaler}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🔍 SeedVR2图像视频放大器"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: NODE_DISPLAY_NAME}
