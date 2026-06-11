@@ -676,31 +676,132 @@ function setNodePosition(node, x, y) {
 	node.pos = [Math.round(x), Math.round(y)];
 }
 
+function markArrangeCanvasDirty(node = null) {
+	try { node?.setDirtyCanvas?.(true, true); } catch (_) {}
+	try { node?.graph?.setDirtyCanvas?.(true, true); } catch (_) {}
+	try { app.graph?.setDirtyCanvas?.(true, true); } catch (_) {}
+	try { app.canvas?.setDirty?.(true, true); } catch (_) {}
+}
+
+function getLinkByIdForGeometry(linkId) {
+	if (linkId == null) return null;
+	return app?.graph?.links?.[linkId] || app?.graph?.links?.[String(linkId)] || null;
+}
+
+function clearLinkGeometryCache(link) {
+	if (!link || typeof link !== "object") return;
+	for (const key of [
+		"_pos",
+		"_path",
+		"_points",
+		"_last_origin_pos",
+		"_last_target_pos",
+		"_last_origin_slot",
+		"_last_target_slot",
+		"_last_origin_id",
+		"_last_target_id",
+		"_last_time",
+		"_lastNodePos",
+		"_lastNodeSize",
+		"_lastLayout",
+	]) {
+		try { delete link[key]; } catch (_) {}
+	}
+}
+
+function clearSlotGeometryCache(slot) {
+	if (!slot || typeof slot !== "object") return;
+	for (const key of [
+		"_pos",
+		"_last_pos",
+		"_last_node_pos",
+		"_last_node_size",
+		"_lastLayout",
+		"_last_y",
+		"_lastY",
+	]) {
+		try { delete slot[key]; } catch (_) {}
+	}
+}
+
+function resetNodeLinkGeometry(node) {
+	if (!node) return;
+	for (const input of safeArray(node?.inputs)) clearSlotGeometryCache(input);
+	for (const output of safeArray(node?.outputs)) clearSlotGeometryCache(output);
+	for (const linkId of [
+		...safeArray(node?.inputs).map((input) => input?.link),
+		...safeArray(node?.outputs).flatMap((output) => safeArray(output?.links)),
+	]) {
+		clearLinkGeometryCache(getLinkByIdForGeometry(linkId));
+	}
+	markArrangeCanvasDirty(node);
+}
+
+function applyManualResizeStep(node, width, height) {
+	if (!node) return;
+	const size = [Math.max(1, Math.round(width)), Math.max(1, Math.round(height))];
+	if (typeof node.setSize === "function") {
+		node.setSize(size);
+	} else if (Array.isArray(node.size)) {
+		node.size[0] = size[0];
+		node.size[1] = size[1];
+	} else {
+		node.size = size;
+	}
+	try { node.onResize?.(size); } catch (_) {}
+	resetNodeLinkGeometry(node);
+}
+
 function setNodeSize(node, width, height = null) {
 	if (!node) return;
 	const w = Math.max(1, Math.round(Number(width || 1)));
 	const currentH = getNodeHeight(node);
 	const h = Math.max(1, Math.round(Number(height == null ? currentH : height)));
+	const oldW = Math.round(Number(node?.size?.[0] || node?.size?.width || 0));
+	const oldH = Math.round(Number(node?.size?.[1] || node?.size?.height || 0));
 
-	if (Array.isArray(node.size)) {
-		node.size[0] = w;
-		node.size[1] = h;
-	} else {
-		node.size = [w, h];
+	if (oldW === w && oldH === h) return;
+
+	applyManualResizeStep(node, w, h);
+}
+
+function simulateManualNodeWidthResize(node, width) {
+	if (!node) return;
+	const w = Math.max(1, Math.round(Number(width || 1)));
+	const h = Math.max(1, Math.round(getNodeHeight(node)));
+	const oldW = Math.round(Number(node?.size?.[0] || node?.size?.width || 0));
+	if (oldW === w) return;
+
+	// LiteGraph 手动拖动尺寸时会连续收到 resize 更新。分两步逼近目标宽度，
+	// 让 DOMWidget、动态插槽和连接点按同一生命周期刷新，避免直接改 size 后错位。
+	const middleW = Math.round(oldW + (w - oldW) / 2);
+	if (middleW !== oldW && middleW !== w) {
+		applyManualResizeStep(node, middleW, h);
 	}
+	applyManualResizeStep(node, w, h);
+	globalThis.requestAnimationFrame?.(() => {
+		resetNodeLinkGeometry(node);
+	});
 }
 
 function shrinkNodeWidth(node) {
-	// 不再强制缩小真实 node.size[0]。
-	// ComfyUI 的连线插口位置依赖真实节点宽度；如果把真实宽度压到 80，
-	// DOM/文字区域会溢出，视觉上就会出现“连接位置错位”。
-	// 现在只在布局计算里使用紧凑视觉宽度，不改用户手动设置的节点宽度。
+	if (!isRealNode(node)) return node;
+	const width = isRerouteNode(node) ? MIN_REROUTE_WIDTH : MIN_NODE_WIDTH;
+	simulateManualNodeWidthResize(node, width);
 	return node;
 }
 
 function shrinkNodeWidths(nodes) {
-	// 保留函数入口，避免其它逻辑调用时报错；实际不再修改节点宽度。
-	return filterValidNodes(nodes, false);
+	const validNodes = filterValidNodes(nodes, false);
+	for (const node of validNodes) {
+		shrinkNodeWidth(node);
+	}
+	return validNodes;
+}
+
+function shrinkConnectedNodeWidths(nodes) {
+	const { connectedNodes } = splitNodesByIsolation(nodes);
+	return shrinkNodeWidths(connectedNodes);
 }
 
 function isNodeCollapsed(node) {
@@ -788,14 +889,19 @@ function showMessage(message) {
 function refreshAfterArrange(nodes = []) {
 	for (const node of nodes) {
 		roundNodePosition(node);
+		resetNodeLinkGeometry(node);
 	}
 
 	try {
-		if (app.graph?.setDirtyCanvas) {
-			app.graph.setDirtyCanvas(true, true);
-		} else if (app.canvas?.setDirty) {
-			app.canvas.setDirty(true, true);
-		}
+		markArrangeCanvasDirty();
+		globalThis.requestAnimationFrame?.(() => {
+			for (const node of nodes) resetNodeLinkGeometry(node);
+			markArrangeCanvasDirty();
+			globalThis.requestAnimationFrame?.(() => {
+				for (const node of nodes) resetNodeLinkGeometry(node);
+				markArrangeCanvasDirty();
+			});
+		});
 	} catch (error) {
 		console.warn("[GJJ_NodeArranger] refresh failed:", error);
 	}
@@ -1857,14 +1963,10 @@ function arrangePosterGridLayout(nodes, spacing = DEFAULT_SPACING) {
 	const title = titleNodes[0] || null;
 
 	const titleSet = new Set(titleNodes);
-	const heroOutputs = normalNodes
+	const allHeroOutputs = normalNodes
 		.filter((node) => !titleSet.has(node) && isGridPosterHeroOutputNode(node, inDegree, outDegree))
-		.sort((a, b) => {
-			const av = isGridPosterAnyPreviewNode(a) || isGridPosterVideoCombineNode(a) ? 0 : 1;
-			const bv = isGridPosterAnyPreviewNode(b) || isGridPosterVideoCombineNode(b) ? 0 : 1;
-			if (av !== bv) return av - bv;
-			return byWorkflow(a, b);
-		});
+		.sort(byWorkflow);
+	const heroOutputs = allHeroOutputs.length ? [allHeroOutputs[allHeroOutputs.length - 1]] : [];
 	const heroSet = new Set(heroOutputs);
 	const isolatedSet = new Set(separateIsolatedNodes(normalNodes, inDegree, outDegree));
 	const leftCandidates = normalNodes
@@ -1984,6 +2086,11 @@ function arrangeGrid(nodes, spacing = DEFAULT_SPACING) {
 	inputModelNodes.sort(compareGridTopLeftNodes(orderIndex));
 	middleNodes.sort(byLocality);
 	outputNodes.sort(byWorkflow);
+	if (outputNodes.length > 1) {
+		const compactOutputs = outputNodes.splice(0, outputNodes.length - 1);
+		middleNodes.push(...compactOutputs);
+		middleNodes.sort(byLocality);
+	}
 	const arrangedReroutes = rerouteNodes.filter((node) => connectedSet.has(node)).sort(byLocality);
 
 	for (const node of middleNodes) {
@@ -3813,13 +3920,11 @@ function buildDirectionalRadialPositions(anchor, normalNodes, forward, backward,
 
 	positions.set(anchor, anchorCenter);
 
-	const maxWidth = Math.max(MIN_LAYOUT_NODE_WIDTH, ...normalNodes.map((node) => Math.max(getNodeWidth(node), getVisualNodeWidth(node))));
 	const maxHeight = Math.max(80, ...normalNodes.map(getNodeHeight));
 	const columnGap = getColumnGap(spacing);
 	const rowGap = rowGapOverride == null ? getRowGap(spacing) : Math.max(0, Math.round(Number(rowGapOverride) || 0));
-	const columnGapMagnitude = Math.max(16, Math.abs(columnGap));
+	const connectedColumnGap = Math.max(6, Math.round(Math.abs(columnGap) * 0.35));
 	const rowGapMagnitude = Math.max(1, Math.abs(rowGap));
-	const colStepBase = Math.round(maxWidth + columnGapMagnitude * 1.5);
 	const branchGapBase = Math.round(maxHeight + rowGapMagnitude);
 	const levelMinGap = rowGapMagnitude;
 
@@ -3847,6 +3952,12 @@ function buildDirectionalRadialPositions(anchor, normalNodes, forward, backward,
 			y: Math.round(center.y),
 		});
 		return true;
+	}
+
+	function getTightConnectedStep(parent, child, depthScale = 1) {
+		const visualParentHalf = Math.max(getNodeWidth(parent), getVisualNodeWidth(parent)) / 2;
+		const visualChildHalf = Math.max(getNodeWidth(child), getVisualNodeWidth(child)) / 2;
+		return Math.round((visualParentHalf + visualChildHalf + connectedColumnGap) * depthScale);
 	}
 
 	function expandDirection(direction) {
@@ -3878,12 +3989,7 @@ function buildDirectionalRadialPositions(anchor, normalNodes, forward, backward,
 
 			for (let i = 0; i < children.length; i++) {
 				const child = children[i];
-				const visualParentHalf = Math.max(getNodeWidth(parent), getVisualNodeWidth(parent)) / 2;
-				const visualChildHalf = Math.max(getNodeWidth(child), getVisualNodeWidth(child)) / 2;
-				const stepX = Math.max(
-					Math.round(colStepBase * depthScale),
-					Math.round(visualParentHalf + visualChildHalf + columnGapMagnitude)
-				);
+				const stepX = getTightConnectedStep(parent, child, depthScale);
 
 				const childCenter = {
 					x: parentPos.x + direction * stepX,
@@ -3940,12 +4046,7 @@ function buildDirectionalRadialPositions(anchor, normalNodes, forward, backward,
 
 					for (let i = 0; i < children.length; i++) {
 						const child = children[i];
-						const visualParentHalf = Math.max(getNodeWidth(parent), getVisualNodeWidth(parent)) / 2;
-						const visualChildHalf = Math.max(getNodeWidth(child), getVisualNodeWidth(child)) / 2;
-						const stepX = Math.max(
-							Math.round(colStepBase * depthScale),
-							Math.round(visualParentHalf + visualChildHalf + columnGapMagnitude)
-						);
+						const stepX = getTightConnectedStep(parent, child, depthScale);
 
 						const x = parentPos.x + direction * stepX;
 						const y = parentPos.y + offsets[i];
@@ -4037,7 +4138,7 @@ function placeDisconnectedNodesAroundAnchor(anchor, floatingNodes, positions, sp
 
 	if (String(mode || "") === "vertical") {
 		const maxWidth = Math.max(MIN_LAYOUT_NODE_WIDTH, ...floatingNodes.map(getNodeWidth));
-		const startX = Math.round((bounds ? bounds.x : center.x) - Math.max(colGap * 3, 120) - maxWidth / 2);
+		const startX = Math.round((bounds ? bounds.x : center.x) - Math.max(Math.abs(colGap) * 8, 280) - maxWidth / 2);
 		let currentTop = bounds ? bounds.y : Math.round(center.y);
 
 		for (const node of floatingNodes) {
@@ -4051,11 +4152,12 @@ function placeDisconnectedNodesAroundAnchor(anchor, floatingNodes, positions, sp
 		return;
 	}
 
-	const totalWidth = floatingNodes.reduce((sum, node) => sum + getNodeWidth(node), 0) + Math.max(0, floatingNodes.length - 1) * colGap;
+	const floatingGap = Math.max(Math.abs(colGap) * 2, 72);
+	const totalWidth = floatingNodes.reduce((sum, node) => sum + getNodeWidth(node), 0) + Math.max(0, floatingNodes.length - 1) * floatingGap;
 	const baseCenterX = bounds ? bounds.x + bounds.width / 2 : center.x;
 	let currentLeft = Math.round(baseCenterX - totalWidth / 2);
 	const maxHeight = Math.max(1, ...floatingNodes.map(getNodeHeight));
-	const startY = Math.round((bounds ? bounds.y : center.y) - Math.max(rowGap * 3, 120) - maxHeight);
+	const startY = Math.round((bounds ? bounds.y : center.y) - Math.max(Math.abs(rowGap) * 10, 320) - maxHeight);
 
 	for (const node of floatingNodes) {
 		const width = getNodeWidth(node);
@@ -4063,7 +4165,7 @@ function placeDisconnectedNodesAroundAnchor(anchor, floatingNodes, positions, sp
 			x: currentLeft + width / 2,
 			y: startY + getNodeHeight(node) / 2,
 		});
-		currentLeft += width + colGap;
+		currentLeft += width + floatingGap;
 	}
 }
 
@@ -4081,7 +4183,9 @@ function arrangeCenteredAroundAnchor(anchor, spacing = DEFAULT_SPACING, mode = "
 		y: getNodeY(anchor) + getNodeHeight(anchor) / 2,
 	};
 
-	shrinkNodeWidths(targetNodes);
+	if (mode !== "grid") {
+		shrinkConnectedNodeWidths(targetNodes);
+	}
 
 	const {
 		normalNodes,
@@ -4139,7 +4243,7 @@ function arrangeCenteredAroundAnchor(anchor, spacing = DEFAULT_SPACING, mode = "
 async function arrangeTopological(nodes, spacing = DEFAULT_SPACING, sortMode = TOPO_SORT_MODES.TOPO_MAIN_PATH) {
 	const validNodes = filterValidNodes(nodes, false);
 	const beforeBounds = getBoundsForNodes(validNodes, Math.max(getColumnGap(spacing), getRowGap(spacing)));
-	shrinkNodeWidths(validNodes);
+	shrinkConnectedNodeWidths(validNodes);
 	const config = getTopoModeConfig(sortMode);
 	const colGap = getColumnGap(spacing);
 	const rowGap = getRowGap(spacing);
@@ -4748,7 +4852,7 @@ async function arrangeAuto(nodes, spacing = DEFAULT_SPACING, iterations = 10, re
 		return;
 	}
 
-	shrinkNodeWidths(validNodes);
+	shrinkConnectedNodeWidths(validNodes);
 
 	const { connectedNodes, isolatedNodes } = splitNodesByIsolation(validNodes);
 	const {
@@ -4816,7 +4920,9 @@ async function arrangeNodes(
 	}
 
 	const beforeBounds = getBoundsForNodes(validNodes, Math.max(getColumnGap(spacing), getRowGap(spacing)));
-	shrinkNodeWidths(validNodes);
+	if (mode !== "grid") {
+		shrinkConnectedNodeWidths(validNodes);
+	}
 	console.log(`[GJJ_NodeArranger] arrangeNodes mode=${mode}, nodes=${validNodes.length}, scope=${selectedOnly ? "selected" : "all"}`);
 
 	switch (mode) {

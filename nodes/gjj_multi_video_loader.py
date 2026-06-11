@@ -29,7 +29,6 @@ VIDEO_UPLOAD_API_PATH = "/gjj/upload_video"
 VIDEO_META_API_PATH = "/gjj/video_meta"
 UPLOAD_SUBFOLDER = "gjj_multi_video_loader"
 MAX_SELECTED_VIDEOS = 20
-MAX_PREVIEW_FRAMES = 16
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".wmv", ".flv", ".gif"}
 ENABLED_OUTPUTS_PROPERTY = "enabled_outputs"
 OPTIONAL_OUTPUT_DEFS = {
@@ -563,6 +562,53 @@ def _audio_window_from_meta(
     return float(start) / fps, max(1.0 / fps, float(last_source_frame - start + 1) / fps)
 
 
+def _selected_frame_indices(
+    total_frames: int,
+    start_frame: int,
+    end_frame: int,
+    frame_stride: int,
+    max_frames: int,
+) -> list[int]:
+    total = max(0, int(total_frames))
+    if total <= 0:
+        return []
+    start = max(0, min(int(start_frame), total - 1))
+    stop = int(end_frame) if int(end_frame) > 0 else total - 1
+    stop = max(start, min(stop, total - 1))
+    stride = max(1, int(frame_stride))
+    limit = max(1, int(max_frames))
+    return list(range(start, stop + 1, stride))[:limit]
+
+
+def _slice_external_frames(
+    frames: torch.Tensor,
+    start_frame: int,
+    end_frame: int,
+    frame_stride: int,
+    max_frames: int,
+) -> torch.Tensor:
+    indices = _selected_frame_indices(int(frames.shape[0]), start_frame, end_frame, frame_stride, max_frames)
+    if not indices:
+        return frames[:1].contiguous()
+    index_tensor = torch.tensor(indices, dtype=torch.long, device=frames.device)
+    return frames.index_select(0, index_tensor).contiguous()
+
+
+def _slice_audio_window(audio: dict[str, Any] | None, start_seconds: float, duration_seconds: float) -> dict[str, Any] | None:
+    if not isinstance(audio, dict):
+        return None
+    waveform = audio.get("waveform")
+    sample_rate = int(audio.get("sample_rate") or 0)
+    if not isinstance(waveform, torch.Tensor) or sample_rate <= 0:
+        return audio
+    start_sample = max(0, int(round(float(start_seconds) * sample_rate)))
+    count = max(1, int(round(float(duration_seconds) * sample_rate)))
+    end_sample = min(int(waveform.shape[-1]), start_sample + count)
+    if end_sample <= start_sample:
+        return empty_audio(0.0, sample_rate, int(waveform.shape[-2]) if waveform.ndim >= 2 else 2)
+    return {"waveform": waveform[..., start_sample:end_sample].contiguous(), "sample_rate": sample_rate}
+
+
 def decode_audio_ffmpeg(
     path: Path,
     start_seconds: float = 0.0,
@@ -836,7 +882,7 @@ class GJJ_MultiVideoLoader:
                         "default": 0,
                         "min": 0,
                         "max": 16384,
-                        "step": 8,
+                        "step": 1,
                         "display_name": "宽度",
                         "tooltip": "最终输出宽度；0 表示跟随源视频；只填宽度会按比例计算高度。",
                     }),
@@ -847,7 +893,7 @@ class GJJ_MultiVideoLoader:
                         "default": 0,
                         "min": 0,
                         "max": 16384,
-                        "step": 8,
+                        "step": 1,
                         "display_name": "高度",
                         "tooltip": "最终输出高度；0 表示跟随源视频；只填高度会按比例计算宽度。",
                     }),
@@ -1186,23 +1232,38 @@ class GJJ_MultiVideoLoader:
 
         external_video = self._coerce_external_video(input_frames)
         if external_video is not None:
-            external_frames = external_video["frames"]
+            raw_external_frames = external_video["frames"]
             source_fps = float(external_video.get("fps") or output_fps)
             if source_fps > 0:
                 output_fps = source_fps
+            source_frame_count = int(external_video.get("frame_count") or raw_external_frames.shape[0])
+            external_frames = _slice_external_frames(
+                raw_external_frames,
+                start_frame_val,
+                end_frame_val,
+                frame_stride_val,
+                max_frames_val,
+            )
             batch_output = _resize_image_tensor(external_frames, target_width, target_height)
-            source_frame_count = int(external_video.get("frame_count") or external_frames.shape[0])
-            total_duration = float(external_video.get("duration") or 0.0)
-            if total_duration <= 0.0:
-                total_duration = float(external_frames.shape[0]) / max(1e-6, source_fps)
+            selected_indices = _selected_frame_indices(
+                int(raw_external_frames.shape[0]),
+                start_frame_val,
+                end_frame_val,
+                frame_stride_val,
+                max_frames_val,
+            )
+            first_selected = selected_indices[0] if selected_indices else 0
+            last_selected = selected_indices[-1] if selected_indices else first_selected
+            total_duration = max(1.0 / max(1e-6, source_fps), float(last_selected - first_selected + 1) / max(1e-6, source_fps))
             external_audio = external_video.get("audio")
+            external_audio = _slice_audio_window(external_audio, float(first_selected) / max(1e-6, source_fps), total_duration)
             source_name = str(external_video.get("source") or "external_input")
             video_infos = [{
                 "filename": source_name,
                 "subfolder": "",
                 "path": "",
-                "source_width": int(external_frames.shape[2]),
-                "source_height": int(external_frames.shape[1]),
+                "source_width": int(raw_external_frames.shape[2]),
+                "source_height": int(raw_external_frames.shape[1]),
                 "output_width": int(batch_output.shape[2]),
                 "output_height": int(batch_output.shape[1]),
                 "source_fps": source_fps,
@@ -1210,6 +1271,10 @@ class GJJ_MultiVideoLoader:
                 "source_frames": source_frame_count,
                 "duration": total_duration,
                 "output_frames": int(batch_output.shape[0]),
+                "start_frame": start_frame_val,
+                "end_frame": last_selected,
+                "frame_stride": frame_stride_val,
+                "max_frames": max_frames_val,
                 "video_format": str(external_video.get("format") or output_format),
             }]
             selected_count = 0
@@ -1278,11 +1343,9 @@ class GJJ_MultiVideoLoader:
         final_height = int(batch_output.shape[1]) if int(batch_output.ndim) == 4 else 0
 
         preview_entries: list[dict[str, Any]] = []
-        preview_count = min(MAX_PREVIEW_FRAMES, int(batch_output.shape[0]))
-        if preview_count > 0:
-            indices = np.linspace(0, int(batch_output.shape[0]) - 1, preview_count, dtype=int).tolist()
-            preview_tensor = torch.cat([batch_output[i:i + 1] for i in indices], dim=0)
-            preview_fps = max(1.0, min(12.0, float(output_fps or source_fps or 8.0)))
+        if int(batch_output.shape[0]) > 0:
+            preview_tensor = batch_output
+            preview_fps = max(1.0, float(source_fps or output_fps or 24.0))
             preview_entries = _save_sequence_webp_preview(preview_tensor, preview_fps)
 
         info = {

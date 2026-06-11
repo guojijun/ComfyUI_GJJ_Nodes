@@ -7,6 +7,7 @@ import { app } from "/scripts/app.js";
 	const STYLE_ID = "gjj-workflow-repair-notice-style";
 	const PANEL_ID = "gjj-workflow-repair-notice";
 	const PATCH_FLAG = "__gjjWorkflowRepairNoticePatched";
+	const GRAPH_PROMPT_PATCH_FLAG = "__gjjWorkflowRepairGraphToPromptPatched";
 	const AUTO_NAME_SCORE = 0.98;
 	const SUGGEST_NAME_SCORE = 0.45;
 	const SYSTEM_SUGGEST_NAME_SCORE = 0.18;
@@ -1487,15 +1488,100 @@ import { app } from "/scripts/app.js";
 		rescanTimer = setTimeout(() => renderNotice(next), 420);
 	}
 
+	function linkIdsFromLinks(links) {
+		const ids = new Set();
+		if (Array.isArray(links)) {
+			for (const link of links) {
+				const id = linkId(link);
+				if (id != null) ids.add(String(id));
+			}
+			return ids;
+		}
+		if (links && typeof links === "object") {
+			for (const [key, link] of Object.entries(links)) {
+				const id = link?.id ?? key;
+				if (id != null) ids.add(String(id));
+			}
+		}
+		return ids;
+	}
+
+	function sanitizeSerializedWorkflowLinks(data) {
+		const root = graphRoot(data);
+		if (!root || !Array.isArray(root.nodes)) return 0;
+		const validLinks = linkIdsFromLinks(root.links);
+		let fixed = 0;
+		for (const node of root.nodes) {
+			for (const input of safeArray(node?.inputs)) {
+				if (input?.link != null && !validLinks.has(String(input.link))) {
+					input.link = null;
+					fixed += 1;
+				}
+			}
+			for (const output of safeArray(node?.outputs)) {
+				if (!Array.isArray(output?.links)) continue;
+				const live = output.links.filter((id) => validLinks.has(String(id)));
+				if (live.length !== output.links.length) {
+					fixed += output.links.length - live.length;
+					output.links = live;
+				}
+			}
+		}
+		return fixed;
+	}
+
+	function sanitizeLiveGraphLinks(graph = app?.graph) {
+		if (!graph) return 0;
+		const validLinks = linkIdsFromLinks(graph.links);
+		let fixed = 0;
+		for (const node of safeArray(graph._nodes || graph.nodes)) {
+			for (const [slot, input] of safeArray(node?.inputs).entries()) {
+				if (input?.link != null && !validLinks.has(String(input.link))) {
+					try {
+						node.disconnectInput?.(slot);
+					} catch (_) {}
+					input.link = null;
+					fixed += 1;
+				}
+			}
+			for (const output of safeArray(node?.outputs)) {
+				if (!Array.isArray(output?.links)) continue;
+				const live = output.links.filter((id) => validLinks.has(String(id)));
+				if (live.length !== output.links.length) {
+					fixed += output.links.length - live.length;
+					output.links = live;
+				}
+			}
+		}
+		if (fixed) {
+			try {
+				graph.setDirtyCanvas?.(true, true);
+			} catch (_) {}
+		}
+		return fixed;
+	}
+
 	function patchLoadGraphData() {
 		if (!app || app[PATCH_FLAG] || typeof app.loadGraphData !== "function") return;
 		app[PATCH_FLAG] = true;
 		const original = app.loadGraphData;
 		originalLoadGraphData = original;
 		app.loadGraphData = function (graphData, ...rest) {
+			const root = graphRoot(graphData);
+			const loadData = root || graphData;
 			let plan = emptyPlan();
+			if (!loadData || typeof loadData !== "object") {
+				const error = new Error("工作流加载失败：没有收到有效的 workflow 数据。");
+				scheduleNotice(plan, error);
+				console.warn("[GJJ] 工作流修复：跳过空 workflow 加载。", graphData);
+				return undefined;
+			}
+			const fixedLinks = sanitizeSerializedWorkflowLinks(loadData);
+			if (fixedLinks) {
+				console.warn(`[GJJ] 工作流修复：已清理 ${fixedLinks} 个悬空链接。`);
+			}
 			try {
-				plan = prepareWorkflowRepair(graphData);
+				plan = prepareWorkflowRepair(loadData);
 				if (plan.repairable.length || plan.unresolved.length) {
 					console.log("[GJJ] 工作流修复：发现缺失节点，等待用户点击修复。", {
 						repairable: plan.repairable,
@@ -1508,7 +1594,7 @@ import { app } from "/scripts/app.js";
 			}
 
 			try {
-				const result = original.call(this, graphData, ...rest);
+				const result = original.call(this, loadData, ...rest);
 				if (result && typeof result.then === "function") {
 					return result.then((value) => {
 						scheduleNotice(plan);
@@ -1524,6 +1610,19 @@ import { app } from "/scripts/app.js";
 				scheduleNotice(plan, error);
 				throw error;
 			}
+		};
+	}
+
+	function patchGraphToPrompt() {
+		if (!app || app[GRAPH_PROMPT_PATCH_FLAG] || typeof app.graphToPrompt !== "function") return;
+		app[GRAPH_PROMPT_PATCH_FLAG] = true;
+		const original = app.graphToPrompt.bind(app);
+		app.graphToPrompt = async function (...args) {
+			const fixedLinks = sanitizeLiveGraphLinks(app.graph);
+			if (fixedLinks) {
+				console.warn(`[GJJ] 工作流修复：提交前已清理 ${fixedLinks} 个悬空链接。`);
+			}
+			return original(...args);
 		};
 	}
 
@@ -1548,6 +1647,11 @@ import { app } from "/scripts/app.js";
 		name: EXTENSION_NAME,
 		setup() {
 			patchLoadGraphData();
+			patchGraphToPrompt();
+			setTimeout(() => {
+				const fixedLinks = sanitizeLiveGraphLinks(app?.graph);
+				if (fixedLinks) console.warn(`[GJJ] 工作流修复：已清理当前画布 ${fixedLinks} 个悬空链接。`);
+			}, 800);
 			console.log("[GJJ] 工作流修复通知已启用");
 		},
 	});

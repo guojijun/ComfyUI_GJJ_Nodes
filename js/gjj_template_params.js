@@ -216,6 +216,22 @@ function setNetworkMediaDisplayPath(node, field, value = "") {
 	else node.__gjjTemplateParamsNetworkDisplay.delete(key);
 }
 
+function setNetworkMediaMapping(node, field, originalUrl = "", localPath = "") {
+	if (!node) return;
+	node.__gjjTemplateParamsNetworkMappings = node.__gjjTemplateParamsNetworkMappings || new Map();
+	const key = String(field?.key || "");
+	if (!key) return;
+	const url = String(originalUrl || "").trim();
+	const path = normalizeMediaPathForCompare(localPath);
+	if (url && path) node.__gjjTemplateParamsNetworkMappings.set(key, { url, path });
+	else node.__gjjTemplateParamsNetworkMappings.delete(key);
+}
+
+function networkMediaMapping(node, field) {
+	const key = String(field?.key || "");
+	return key ? node?.__gjjTemplateParamsNetworkMappings?.get?.(key) || null : null;
+}
+
 function selectedFilePath(file) {
 	return String(file?.path || file?.webkitRelativePath || file?.name || "").trim();
 }
@@ -392,6 +408,16 @@ function splitInputRelativePath(filename) {
 	return { filename: name, subfolder: parts.join("/") };
 }
 
+function normalizeMediaPathForCompare(value = "") {
+	let text = String(value || "").trim().replace(/\\/g, "/");
+	if (!text) return "";
+	const annotated = text.match(/\s+\[(input|output|temp)\]$/i);
+	if (annotated) text = text.slice(0, annotated.index).trim();
+	const parts = text.split("/").filter(Boolean);
+	if (["input", "output", "temp"].includes(String(parts[0] || "").toLowerCase())) parts.shift();
+	return parts.join("/").toLowerCase();
+}
+
 function inputViewUrlForFilename(filename) {
 	const parts = splitInputRelativePath(filename);
 	let url = "/view?filename=" + encodeURIComponent(parts.filename) + "&type=input";
@@ -412,10 +438,79 @@ async function inputFileExists(filename) {
 	}
 }
 
+async function localMediaExists(value, mediaType = "") {
+	const text = String(value || "").trim();
+	if (!text || isNetworkMediaUrl(text)) return false;
+	const endpoint = "/gjj/template_params/media_exists";
+	const options = {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ value: text, media_type: mediaType }),
+	};
+	try {
+		const response = api?.fetchApi
+			? await api.fetchApi(endpoint, options)
+			: await fetch(uploadUrl(endpoint), options);
+		if (!response?.ok) return false;
+		const data = await response.json().catch(() => ({}));
+		return data?.exists === true;
+	} catch (_) {
+		return inputFileExists(text);
+	}
+}
+
 function currentInputForField(node, field, fallback = null) {
 	const current = node?.__gjjTemplateParamsRows?.get?.(String(field?.key || ""));
 	if (current && "value" in current) return current;
 	return fallback;
+}
+
+function currentFieldValue(node, field, values = null, input = null) {
+	const current = currentInputForField(node, field, input);
+	if (current && "value" in current) return String(current.value || "").trim();
+	if (values && Object.prototype.hasOwnProperty.call(values, field?.key)) {
+		return String(values[field.key] || "").trim();
+	}
+	return String(field?.default || "").trim();
+}
+
+async function remoteUrlForFieldIfActive(node, field, values = null, input = null) {
+	const currentValue = currentFieldValue(node, field, values, input);
+	const defaultValue = String(field?.default || "").trim();
+	if (isNetworkMediaUrl(currentValue)) return currentValue;
+	if (!isNetworkMediaUrl(defaultValue)) return "";
+	if (!currentValue) return defaultValue;
+	const cacheInfo = await networkMediaCachePath(defaultValue, mediaTypeFromField(field, defaultValue));
+	const mappedPath = normalizeMediaPathForCompare(cacheInfo.relativePath);
+	const currentPath = normalizeMediaPathForCompare(currentValue);
+	const remembered = networkMediaMapping(node, field);
+	if (currentPath && currentPath === mappedPath) return defaultValue;
+	if (remembered?.url === defaultValue && currentPath && currentPath === remembered.path) return defaultValue;
+	return await localMediaExists(currentValue, mediaTypeFromField(field, currentValue))
+		? ""
+		: defaultValue;
+}
+
+async function syncManualMediaMappingState(node, field, value = "") {
+	const text = String(value || "").trim();
+	const defaultValue = String(field?.default || "").trim();
+	if (!isNetworkMediaUrl(defaultValue)) {
+		setNetworkWarningMessage(node, field, "");
+		setNetworkMediaDisplayPath(node, field, "");
+		setNetworkMediaMapping(node, field, "", "");
+		return "";
+	}
+	const cacheInfo = await networkMediaCachePath(defaultValue, mediaTypeFromField(field, defaultValue));
+	if (normalizeMediaPathForCompare(text) === normalizeMediaPathForCompare(cacheInfo.relativePath)) {
+		setNetworkMediaMapping(node, field, defaultValue, cacheInfo.relativePath);
+		setNetworkMediaDisplayPath(node, field, cacheInfo.relativePath);
+		setNetworkWarningMessage(node, field, "");
+		return defaultValue;
+	}
+	setNetworkWarningMessage(node, field, "");
+	setNetworkMediaDisplayPath(node, field, "");
+	setNetworkMediaMapping(node, field, "", "");
+	return "";
 }
 
 async function downloadNetworkMediaViaBackend(originalUrl, mediaType) {
@@ -530,7 +625,7 @@ function saveFieldValue(node, field, values, nextValue) {
 
 async function ensureNetworkMediaInInput(node, field, input, values, wrap = null) {
 	input = currentInputForField(node, field, input);
-	const originalUrl = String(input?.value || "").trim();
+	const originalUrl = await remoteUrlForFieldIfActive(node, field, values, input);
 	if (!isNetworkMediaUrl(originalUrl)) return;
 	const mediaType = mediaTypeFromField(field, originalUrl);
 	if (!mediaType) return;
@@ -548,7 +643,14 @@ async function ensureNetworkMediaInInput(node, field, input, values, wrap = null
 		try {
 			if (await inputFileExists(filename)) {
 				const activeInput = currentInputForField(node, field, input);
-				if (String(activeInput?.value || "").trim() !== originalUrl) return;
+				const activeUrl = await remoteUrlForFieldIfActive(node, field, values, activeInput);
+				if (activeUrl !== originalUrl) return;
+				const activeValue = String(activeInput?.value || "").trim();
+				if (!isNetworkMediaUrl(activeValue)) {
+					if (activeInput && "value" in activeInput) activeInput.value = filename;
+					saveFieldValue(node, field, values, filename);
+				}
+				setNetworkMediaMapping(node, field, originalUrl, filename);
 				setNetworkMediaDisplayPath(node, field, filename);
 				updatePreviewForField(node, field, originalUrl, row, inputViewUrlForFilename(filename));
 				setNetworkWarningMessage(node, field, "");
@@ -588,7 +690,14 @@ async function ensureNetworkMediaInInput(node, field, input, values, wrap = null
 				}
 			}
 			const activeInput = currentInputForField(node, field, input);
-			if (String(activeInput?.value || "").trim() !== originalUrl) return;
+			const activeUrl = await remoteUrlForFieldIfActive(node, field, values, activeInput);
+			if (activeUrl !== originalUrl) return;
+			const activeValue = String(activeInput?.value || "").trim();
+			if (!isNetworkMediaUrl(activeValue)) {
+				if (activeInput && "value" in activeInput) activeInput.value = uploadedName;
+				saveFieldValue(node, field, values, uploadedName);
+			}
+			setNetworkMediaMapping(node, field, originalUrl, uploadedName);
 			setNetworkMediaDisplayPath(node, field, uploadedName);
 			updatePreviewForField(node, field, originalUrl, row, inputViewUrlForFilename(uploadedName));
 			setNetworkWarningMessage(node, field, "");
@@ -596,7 +705,8 @@ async function ensureNetworkMediaInInput(node, field, input, values, wrap = null
 			console.warn("[GJJ_TemplateParams] 网络媒体下载到 input 失败:", err);
 			const activeInput = currentInputForField(node, field, input);
 			const activeValue = String(activeInput?.value || "").trim();
-			if (activeValue !== originalUrl || !isNetworkMediaUrl(activeValue)) {
+			const activeUrl = await remoteUrlForFieldIfActive(node, field, values, activeInput);
+			if (activeUrl !== originalUrl || (!isNetworkMediaUrl(activeValue) && !activeUrl)) {
 				setNetworkWarningMessage(node, field, "");
 				setNetworkMediaDisplayPath(node, field, "");
 				updatePreviewForField(node, field, activeValue, row);
@@ -616,16 +726,19 @@ async function ensureNetworkMediaInInput(node, field, input, values, wrap = null
 }
 
 function scheduleNetworkMediaToInput(node, field, input, values, wrap = null, delay = 450) {
-	if (!isNetworkMediaUrl(input?.value)) {
-		setNetworkWarningMessage(node, field, "");
-		setNetworkMediaDisplayPath(node, field, "");
-		return;
-	}
 	node.__gjjTemplateParamsNetworkTimers = node.__gjjTemplateParamsNetworkTimers || new Map();
 	const key = String(field?.key || "");
 	clearTimeout(node.__gjjTemplateParamsNetworkTimers.get(key));
 	const timer = setTimeout(() => {
-		ensureNetworkMediaInInput(node, field, input, values, wrap);
+		remoteUrlForFieldIfActive(node, field, values, input).then((url) => {
+			if (!isNetworkMediaUrl(url)) {
+				setNetworkWarningMessage(node, field, "");
+				setNetworkMediaDisplayPath(node, field, "");
+				setNetworkMediaMapping(node, field, "", "");
+				return;
+			}
+			ensureNetworkMediaInInput(node, field, input, values, wrap);
+		});
 	}, Math.max(0, Number(delay) || 0));
 	node.__gjjTemplateParamsNetworkTimers.set(key, timer);
 }
@@ -714,6 +827,7 @@ function openFileDialog(node, field, input, values, isImage, isAudio, isVideo, t
 			const uploadedName = await uploadMediaToInput(file);
 			input.value = uploadedName;
 			values[field.key] = uploadedName;
+			await syncManualMediaMappingState(node, field, uploadedName);
 
 			const template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
 			const fields = parseTemplate(template);
@@ -2189,6 +2303,7 @@ function buildInputForField(node, field, values, options = {}) {
 			setWarningMessages(node, []);
 			setNetworkWarningMessage(node, field, "");
 			setNetworkMediaDisplayPath(node, field, "");
+			setNetworkMediaMapping(node, field, "", "");
 		}
 		if (multiline) {
 			refreshNode(node, { resize: false });

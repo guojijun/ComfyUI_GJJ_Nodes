@@ -16,13 +16,26 @@ import { api } from "../../scripts/api.js";
 // ============================================================================
 
 // 保存加密工作流
-api.addEventListener("workflow_encrypt:save", async ({ detail }) => {
+api.addEventListener("workflow_encrypt:save", async (event = {}) => {
     try {
+        const detail = event?.detail || {};
+        let workflow = detail.workflow;
+        if (!workflow && typeof app.graphToPrompt === "function") {
+            const promptData = await app.graphToPrompt();
+            workflow = promptData?.workflow;
+        }
+        if (!workflow && typeof app.graph?.serialize === "function") {
+            workflow = app.graph.serialize();
+        }
+        if (!workflow) {
+            alert("❌ 加密失败：没有获取到当前工作流数据。请先保存或重新打开工作流后再试。");
+            return;
+        }
         const response = await api.fetchApi("/gjj/workflow_encrypt/save_encrypt_method", {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                workflow: detail.workflow
+                workflow
             })
         });
 

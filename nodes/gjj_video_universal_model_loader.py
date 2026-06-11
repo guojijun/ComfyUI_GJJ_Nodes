@@ -535,6 +535,17 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             S("lightx2v_lora", "LightX2V LoRA名称", "loras", "name", ["lightx2v", "i2v", "480p"], preferred_name="wan/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", official_names=["wan/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", "lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors"]),
         ],
     },
+    "wan21_SCAIL": {
+        "label": "Wan SCAIL2 动作迁移",
+        "clip_type": "wan",
+        "slots": [
+            S("model", "WanMove模型", "diffusion_models", "diffusion", ["wan", "scail"], preferred_name="wan2.1_14B_SCAIL_2_fp8_scaled.safetensors", official_names=["wan2.1_14B_SCAIL_2_fp8_scaled.safetensors"]),
+            S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
+            S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_vit_h"], preferred_name=CLIP_VISION_H_NAMES[0], official_names=CLIP_VISION_H_NAMES),
+            S("lightx2v_lora", "LightX2V LoRA名称", "loras", "name", ["lightx2v", "i2v", "480p"], preferred_name="wan/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", official_names=["wan/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", "lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors"]),
+        ],
+    },
     "wan22_animate_14b": {
         "label": "Wan2.2 Animate 14B",
         "clip_type": "wan",

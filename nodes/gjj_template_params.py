@@ -68,6 +68,25 @@ def _register_template_params_routes() -> None:
             "media_type": media_type,
         })
 
+    @routes.post("/gjj/template_params/media_exists")
+    async def media_exists(request):
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+
+        value = str(data.get("value") or "").strip()
+        media_type = str(data.get("media_type") or _detect_media_type(value) or "").upper()
+        if not value or _is_network_url(value):
+            return web.json_response({"ok": True, "exists": False})
+
+        file_path = _resolve_media_file(value, media_type or None)
+        return web.json_response({
+            "ok": True,
+            "exists": bool(file_path),
+            "filename": _input_relative_media_path(file_path) if file_path else "",
+        })
+
 
 _register_template_params_routes()
 
@@ -364,6 +383,28 @@ def _load_media_object(filename: str, media_type: str) -> Any:
         elif media_type == "VIDEO":
             raise RuntimeError(f"加载视频失败：{filename}，错误：{e}") from e
         raise
+
+
+def _load_media_with_url_fallback(
+    value: Any,
+    fallback_url: Any,
+    media_type: str,
+) -> Any:
+    current = str(value or "").strip()
+    fallback = str(fallback_url or "").strip()
+
+    if current:
+        try:
+            return _load_media_object(current, media_type)
+        except FileNotFoundError:
+            if not _is_network_url(fallback) or current == fallback:
+                raise
+
+    if _is_network_url(fallback):
+        print(f"[GJJ_TemplateParams] 本地资源不存在，改用设置中的 URL：{fallback}")
+        return _load_media_object(fallback, media_type)
+
+    return _load_media_object(current, media_type)
 
 
 def _media_label(media_type: str) -> str:
@@ -1054,7 +1095,7 @@ def values_from_json(values_json: Any) -> dict[str, Any]:
 class GJJ_TemplateParams:
     CATEGORY = "GJJ/逻辑控制"
     FUNCTION = "output_params"
-    DESCRIPTION = "通过模板文本自动生成参数输入框和输出口。支持格式：帧率 (frame_rate) [INT,FLOAT]：24.0 # 浮点；也兼容 帧率：24、宽度：832、模式：图生 这类未写括号的常用参数。\n提示词：'''多段文本''' # 字符串\n是否启用：[enable,disable] # 枚举\n媒体文件会自动加载为 IMAGE/AUDIO/VIDEO 对象。⚡ 广播默认关闭，开启后只广播写了 (变量名) 的字段。"
+    DESCRIPTION = "通过模板文本自动生成参数输入框和输出口。支持格式：帧率 (frame_rate) [INT,FLOAT]：24.0 # 浮点；也兼容 帧率：24、宽度：832、模式：图生 这类未写括号的常用参数。\n提示词：'''多段文本''' # 字符串\n是否启用：[enable,disable] # 枚举\n媒体资源优先读取当前本地文件；本地文件不存在时，自动下载设置模板中的默认 URL。⚡ 广播默认关闭，开启后只广播写了 (变量名) 的字段。"
     SEARCH_ALIASES = [
         "template params",
         "params",
@@ -1119,6 +1160,7 @@ class GJJ_TemplateParams:
             key = str(field.get("key") or "")
             label = str(field.get("label") or "")
             raw_value = value_map.get(key, value_map.get(label, field.get("default", "")))
+            default_value = field.get("default", "")
             if field.get("type") == "BOOLEAN" and field.get("bool_labels"):
                 outputs.append(_coerce_bool_value(raw_value, field.get("bool_labels") or {}))
                 continue
@@ -1127,13 +1169,16 @@ class GJJ_TemplateParams:
                 continue
             
             # 检测是否为媒体文件
-            media_type = _detect_media_type(str(raw_value))
+            declared_type = str(field.get("type") or "").upper()
+            media_type = (
+                declared_type if declared_type in {"IMAGE", "AUDIO", "VIDEO"} else None
+            ) or _detect_media_type(str(raw_value)) or _detect_media_type(str(default_value))
             
-            if media_type and isinstance(raw_value, str):
+            if media_type:
                 # 媒体参数常用于模板占位或可选引用。资源缺失时只提示并跳过，
                 # 避免未使用的图片/音频/视频文件打断整个工作流。
                 try:
-                    media_obj = _load_media_object(raw_value, media_type)
+                    media_obj = _load_media_with_url_fallback(raw_value, default_value, media_type)
                     outputs.append(media_obj)
                 except Exception as exc:
                     warning = _build_media_warning(label, media_type, raw_value, exc)
