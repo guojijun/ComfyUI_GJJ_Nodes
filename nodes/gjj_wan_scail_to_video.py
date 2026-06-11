@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import uuid
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -8,12 +10,16 @@ import torch.nn.functional as F
 
 import comfy.model_management
 import comfy.utils
+import folder_paths
+from PIL import Image
 
 
 log = logging.getLogger(__name__)
 
 NODE_NAME = "GJJ_WanSCAILToVideo"
-NODE_DISPLAY_NAME = "GJJ_WanSCAILToVideo"
+NODE_DISPLAY_NAME = "GJJ · 🎬 Wan SCAIL 视频条件"
+COLORED_MASK_NODE_NAME = "GJJ_SCAIL2ColoredMask"
+COLORED_MASK_NODE_DISPLAY_NAME = "🧩 SCAIL-2 彩色遮罩"
 
 DESCRIPTION = (
     "零依赖复刻官方 WanSCAILToVideo：创建 Wan SCAIL/SCAIL-2 视频 latent，"
@@ -174,6 +180,145 @@ def _extract_mask_to_28ch(rgb_video: torch.Tensor) -> torch.Tensor:
         padded = torch.cat([padded, padded[-1:].repeat(needed - int(padded.shape[0]), 1, 1, 1)], dim=0)
     padded = padded[:needed]
     return padded.view(latent_frames, 28, latent_h, latent_w).unsqueeze(0)
+
+
+def _unpack_sam3_masks(track_data: dict[str, Any]) -> torch.Tensor | None:
+    if not isinstance(track_data, dict):
+        raise RuntimeError("SAM3轨迹数据无效：需要连接 SAM3_TRACK_DATA。")
+    packed = track_data.get("packed_masks")
+    if packed is None or int(getattr(packed, "shape", [0, 0])[1]) == 0:
+        return None
+    return _unpack_sam3_packed_masks(packed)
+
+
+def _unpack_sam3_packed_masks(packed: torch.Tensor) -> torch.Tensor:
+    try:
+        from comfy.ldm.sam3.tracker import unpack_masks
+    except Exception:
+        bits = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], dtype=torch.uint8, device=packed.device)
+        return (packed.to(torch.uint8).unsqueeze(-1) & bits).bool().view(*packed.shape[:-1], -1)
+    return unpack_masks(packed)
+
+
+def _first_frame_cx_area(masks_bool: torch.Tensor) -> tuple[list[float], list[float]]:
+    first = masks_bool[0].float()
+    height, width = int(first.shape[-2]), int(first.shape[-1])
+    n_pixels = max(1, height * width)
+    grid_x = torch.arange(width, device=first.device, dtype=first.dtype).view(1, width)
+    area = first.sum(dim=(-1, -2)).clamp_(min=1)
+    cx = (first * grid_x).sum(dim=(-1, -2)) / area
+    return (cx / max(1, width)).tolist(), (area / n_pixels).tolist()
+
+
+def _subset_track_data(track_data: dict[str, Any], obj_indices: list[int]) -> dict[str, Any]:
+    out = dict(track_data)
+    packed = track_data.get("packed_masks")
+    if packed is None or not obj_indices:
+        out["packed_masks"] = None
+        if "scores" in out:
+            out["scores"] = []
+        return out
+    out["packed_masks"] = packed[:, obj_indices].contiguous()
+    scores = track_data.get("scores")
+    if scores is not None:
+        out["scores"] = [scores[i] for i in obj_indices if i < len(scores)]
+    return out
+
+
+def _parse_object_indices(text: str, count: int) -> list[int] | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    indices: list[int] = []
+    for item in raw.replace("，", ",").split(","):
+        value = item.strip()
+        if not value:
+            continue
+        try:
+            index = int(value)
+        except ValueError as exc:
+            raise RuntimeError(f"对象编号列表包含无效值“{value}”。请使用英文或中文逗号分隔的数字，例如 0,2,3。") from exc
+        if 0 <= index < count:
+            indices.append(index)
+    return indices
+
+
+def _render_colored_masks(track_data: dict[str, Any], background: str = "黑色") -> torch.Tensor:
+    packed = track_data.get("packed_masks")
+    try:
+        height, width = [int(v) for v in track_data["orig_size"]]
+    except Exception as exc:
+        raise RuntimeError("SAM3轨迹数据缺少 orig_size，无法渲染彩色遮罩。") from exc
+
+    device = comfy.model_management.intermediate_device()
+    dtype = comfy.model_management.intermediate_dtype()
+    bg_rgb = (1.0, 1.0, 1.0) if str(background).startswith("白") else (0.0, 0.0, 0.0)
+    if packed is None or int(packed.shape[1]) == 0:
+        frames = int(track_data.get("n_frames", 1)) if packed is None else int(packed.shape[0])
+        out = torch.empty(max(1, frames), height, width, 3, device=device, dtype=dtype)
+        out[..., 0], out[..., 1], out[..., 2] = bg_rgb[0], bg_rgb[1], bg_rgb[2]
+        return out
+
+    frames, object_count = int(packed.shape[0]), int(packed.shape[1])
+    colors = torch.tensor(
+        [DEFAULT_PALETTE[i % len(DEFAULT_PALETTE)] for i in range(object_count)],
+        device=device,
+        dtype=dtype,
+    )
+    masks_full = _unpack_sam3_packed_masks(packed.to(device)).float()
+    mask_h, mask_w = int(masks_full.shape[-2]), int(masks_full.shape[-1])
+    masks_full = F.interpolate(
+        masks_full.view(frames * object_count, 1, mask_h, mask_w),
+        size=(height, width),
+        mode="nearest",
+    ).view(frames, object_count, height, width) > 0.5
+    any_mask = masks_full.any(dim=1)
+    obj_idx_map = masks_full.to(torch.uint8).argmax(dim=1)
+    color_overlay = colors[obj_idx_map]
+    bg_tensor = torch.tensor(bg_rgb, device=device, dtype=color_overlay.dtype).view(1, 1, 1, 3)
+    return torch.where(any_mask.unsqueeze(-1), color_overlay, bg_tensor.expand_as(color_overlay))
+
+
+def _save_mask_webp_preview(tensor: torch.Tensor, prefix: str, title: str, fps: float = 8.0) -> dict[str, Any] | None:
+    if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
+        return None
+    try:
+        preview = tensor.detach().cpu().float().clamp(0.0, 1.0).contiguous()
+        target_dir = Path(folder_paths.get_temp_directory()) / "GJJ" / "scail2_colored_mask"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{prefix}_{uuid.uuid4().hex[:12]}.webp"
+        filepath = target_dir / filename
+        arrays = torch.round(preview[..., :3] * 255.0).to(torch.uint8).numpy()
+        pil_frames = [Image.fromarray(array, mode="RGB") for array in arrays]
+        pil_frames[0].save(
+            filepath,
+            format="WEBP",
+            save_all=len(pil_frames) > 1,
+            append_images=pil_frames[1:],
+            duration=max(1, round(1000.0 / max(0.01, float(fps)))),
+            loop=0,
+            lossless=False,
+            quality=90,
+            method=4,
+        )
+        return {
+            "filename": filename,
+            "subfolder": "GJJ/scail2_colored_mask",
+            "type": "temp",
+            "format": "image/webp",
+            "media_type": "image",
+            "title": title,
+            "is_sequence": len(pil_frames) > 1,
+            "autoplay": len(pil_frames) > 1,
+            "loop": len(pil_frames) > 1,
+            "frame_rate": float(fps),
+            "frame_count": int(preview.shape[0]),
+            "width": int(preview.shape[2]),
+            "height": int(preview.shape[1]),
+        }
+    except Exception as exc:
+        log.warning("SCAIL-2 彩色遮罩预览保存失败：%s", exc)
+        return None
 
 
 class GJJ_WanSCAILToVideo:
@@ -449,10 +594,168 @@ class GJJ_WanSCAILToVideo:
         return (positive, negative, out_latent, video_frame_offset + length)
 
 
+class GJJ_SCAIL2ColoredMask:
+    CATEGORY = "GJJ/视频生成/SCAIL"
+    FUNCTION = "build"
+    DESCRIPTION = (
+        "零依赖复刻官方 SCAIL2ColoredMask：把 SAM3 轨迹数据渲染为 SCAIL-2 需要的彩色身份遮罩，"
+        "并在节点内部预览姿态遮罩和参考图遮罩。"
+    )
+    RETURN_TYPES = ("IMAGE", "IMAGE")
+    RETURN_NAMES = ("姿态彩色遮罩", "参考图彩色遮罩")
+    OUTPUT_TOOLTIPS = (
+        "可连接到 GJJ_WanSCAILToVideo 的“姿态彩色遮罩”。替换模式关闭时为黑底，开启时为白底。",
+        "可连接到 GJJ_WanSCAILToVideo 的“参考图彩色遮罩”。始终使用黑底，未连接参考轨迹时输出一张黑图。",
+    )
+    SEARCH_ALIASES = [
+        "SCAIL2ColoredMask",
+        "Create SCAIL-2 Colored Mask",
+        "SCAIL-2",
+        "SAM3彩色遮罩",
+        "彩色身份遮罩",
+        "节点内部预览",
+    ]
+    GJJ_HELP = {
+        "title": COLORED_MASK_NODE_DISPLAY_NAME,
+        "description": DESCRIPTION,
+        "dependencies": [
+            "只依赖 ComfyUI 自带 PyTorch、folder_paths、Pillow 和 SAM3 tracker 工具。",
+            "不导入 comfy_api.latest、node_helpers，也不依赖 comfy_extras/nodes_scail.py。",
+        ],
+        "usage": [
+            "连接 SAM3 视频轨迹到“驱动视频轨迹”，节点会输出可接入 WanSCAILToVideo 的姿态彩色遮罩。",
+            "可选连接参考图的 SAM3 轨迹到“参考图轨迹”，节点会输出参考图彩色遮罩；未连接时输出黑底空遮罩。",
+            "多人场景建议保持默认“从左到右”排序，让同一身份在驱动视频与参考图两侧使用同一色板颜色。",
+            "执行后节点面板会预览姿态遮罩动图和参考图遮罩单帧。",
+        ],
+        "inputs": {
+            "驱动视频轨迹": "来自 SAM3 追踪节点的 SAM3_TRACK_DATA，通常对应姿态/驱动视频。",
+            "参考图轨迹": "可选。来自 SAM3 追踪节点的 SAM3_TRACK_DATA，通常对应参考图。",
+            "对象编号列表": "可选。逗号分隔的对象编号，例如 0,2,3；留空表示保留全部对象。编号使用 SAM3 内部 0 基序号。",
+            "颜色分配排序": "控制对象映射到固定色板的顺序，并同时作用于驱动和参考轨迹。",
+            "替换模式": "关闭时姿态遮罩黑底，开启时姿态遮罩白底；参考图遮罩始终黑底。",
+        },
+    }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "driving_track_data": (
+                    "SAM3_TRACK_DATA",
+                    {
+                        "display_name": "驱动视频轨迹",
+                        "tooltip": "来自 SAM3 的视频追踪数据。节点会把其中的对象遮罩渲染成姿态彩色遮罩。",
+                    },
+                ),
+                "object_indices": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": False,
+                        "display_name": "对象编号列表",
+                        "tooltip": "可选。用逗号分隔要保留的 SAM3 对象编号，例如 0,2,3；留空表示保留全部对象。",
+                    },
+                ),
+                "sort_by": (
+                    ["从左到右", "面积从大到小", "保持原顺序"],
+                    {
+                        "default": "从左到右",
+                        "display_name": "颜色分配排序",
+                        "tooltip": "决定对象按什么顺序分配蓝、红、绿、洋红、青、黄等固定色板颜色；同一排序会同时应用到驱动和参考轨迹。",
+                    },
+                ),
+                "replacement_mode": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display_name": "替换模式",
+                        "tooltip": "关闭为动画模式，姿态遮罩使用黑底；开启为替换模式，姿态遮罩使用白底。参考图遮罩始终黑底。",
+                    },
+                ),
+            },
+            "optional": {
+                "ref_track_data": (
+                    "SAM3_TRACK_DATA",
+                    {
+                        "display_name": "参考图轨迹",
+                        "tooltip": "可选。参考图对应的 SAM3 轨迹数据；连接后会生成参考图彩色遮罩。",
+                    },
+                ),
+            },
+        }
+
+    def _prepare_track_data(self, track_data: dict[str, Any], object_indices: str, sort_by: str) -> dict[str, Any]:
+        masks_bool = _unpack_sam3_masks(track_data)
+        if masks_bool is not None and sort_by != "保持原顺序":
+            cx, area = _first_frame_cx_area(masks_bool)
+            if sort_by == "从左到右":
+                order = sorted(range(len(cx)), key=lambda i: cx[i])
+            elif sort_by == "面积从大到小":
+                order = sorted(range(len(area)), key=lambda i: -area[i])
+            else:
+                order = list(range(len(cx)))
+            track_data = _subset_track_data(track_data, order)
+
+        packed = track_data.get("packed_masks")
+        object_count = int(packed.shape[1]) if packed is not None else 0
+        indices = _parse_object_indices(object_indices, object_count)
+        if indices is not None:
+            track_data = _subset_track_data(track_data, indices)
+        return track_data
+
+    def build(
+        self,
+        driving_track_data,
+        object_indices: str = "",
+        sort_by: str = "从左到右",
+        replacement_mode: bool = False,
+        ref_track_data=None,
+    ):
+        if not isinstance(driving_track_data, dict):
+            raise RuntimeError("“驱动视频轨迹”未连接或数据格式无效，请连接 SAM3_TRACK_DATA。")
+
+        driving = self._prepare_track_data(driving_track_data, object_indices, sort_by)
+        pose_video_mask = _render_colored_masks(driving, "白色" if bool(replacement_mode) else "黑色")
+
+        if ref_track_data is not None:
+            if not isinstance(ref_track_data, dict):
+                raise RuntimeError("“参考图轨迹”数据格式无效，请连接 SAM3_TRACK_DATA。")
+            reference = self._prepare_track_data(ref_track_data, object_indices, sort_by)
+            reference_image_mask = _render_colored_masks(reference, "黑色")
+        else:
+            height, width = [int(v) for v in driving["orig_size"]]
+            reference_image_mask = torch.zeros(
+                1,
+                height,
+                width,
+                3,
+                device=comfy.model_management.intermediate_device(),
+                dtype=comfy.model_management.intermediate_dtype(),
+            )
+
+        preview_images = [
+            item
+            for item in (
+                _save_mask_webp_preview(pose_video_mask, "GJJ_SCAIL2PoseMask", "姿态彩色遮罩"),
+                _save_mask_webp_preview(reference_image_mask[:1], "GJJ_SCAIL2ReferenceMask", "参考图彩色遮罩"),
+            )
+            if item is not None
+        ]
+        return {
+            "ui": {
+                "images": preview_images,
+            },
+            "result": (pose_video_mask, reference_image_mask),
+        }
+
+
 NODE_CLASS_MAPPINGS = {
     NODE_NAME: GJJ_WanSCAILToVideo,
+    COLORED_MASK_NODE_NAME: GJJ_SCAIL2ColoredMask,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     NODE_NAME: NODE_DISPLAY_NAME,
+    COLORED_MASK_NODE_NAME: COLORED_MASK_NODE_DISPLAY_NAME,
 }

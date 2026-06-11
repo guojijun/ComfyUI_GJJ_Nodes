@@ -44,7 +44,10 @@ function sortedDynamicOutputs(node) {
 }
 
 function linkById(id) {
-	return id != null ? app.graph?.links?.[id] : null;
+	if (id == null) return null;
+	const links = app.graph?.links;
+	if (!links) return null;
+	return links instanceof Map ? links.get(id) || links.get(String(id)) : links[id];
 }
 
 function isLiveLink(id) {
@@ -287,54 +290,88 @@ function totalFromNode(node) {
 }
 
 function panelHeight(root) {
-	return Math.max(52, Math.ceil(root?.scrollHeight || root?.offsetHeight || 52));
+	return Math.max(36, Math.ceil(root?.scrollHeight || root?.offsetHeight || 36));
+}
+
+function formatRoundStatus(detail, fallbackText) {
+	const text = String(fallbackText || detail?.text || "").replace(/\s+/g, " ").trim();
+	const totalNumber = Number.parseInt(detail?.total, 10);
+	const indexNumber = Number.parseInt(detail?.index, 10);
+	if (Number.isFinite(totalNumber) && totalNumber > 0 && Number.isFinite(indexNumber) && indexNumber >= 0) {
+		const round = Math.min(totalNumber, indexNumber + 1);
+		if (/已完成|循环结束/.test(text)) return `已完成：共 ${totalNumber} 轮`;
+		if (/回传中|判断|checking/i.test(String(detail?.state || "") + text)) return `回传中：第 ${round} / ${totalNumber} 轮`;
+		return `运行中：第 ${round} / ${totalNumber} 轮`;
+	}
+	if (Number.isFinite(indexNumber) && indexNumber >= 0) {
+		if (/已完成|循环结束|done/i.test(String(detail?.state || "") + text)) return text || `已完成：当前序号 ${indexNumber}`;
+		if (/回传中|判断|checking/i.test(String(detail?.state || "") + text)) return `回传中：当前序号 ${indexNumber}`;
+		return `运行中：当前序号 ${indexNumber}`;
+	}
+	return text || "等待执行";
+}
+
+function formatStartMirrorStatus(detail, fallbackText) {
+	const text = String(fallbackText || detail?.text || "").replace(/\s+/g, " ").trim();
+	const totalNumber = Number.parseInt(detail?.total, 10);
+	const indexNumber = Number.parseInt(detail?.index, 10);
+	if (Number.isFinite(totalNumber) && totalNumber > 0 && Number.isFinite(indexNumber) && indexNumber >= 0) {
+		const round = Math.min(totalNumber, indexNumber + 1);
+		if (/已完成|循环结束|done/i.test(String(detail?.state || "") + text)) return `已完成：共 ${totalNumber} 轮`;
+		return `运行中：第 ${round} / ${totalNumber} 轮`;
+	}
+	if (Number.isFinite(indexNumber) && indexNumber >= 0) {
+		if (/已完成|循环结束|done/i.test(String(detail?.state || "") + text)) return text || `已完成：当前序号 ${indexNumber}`;
+		return `运行中：当前序号 ${indexNumber}`;
+	}
+	return text || "等待执行";
 }
 
 function refreshStatus(node, message = null) {
-	const state = node?.__gjjForLoopStatus;
-	if (!state) return;
-	const total = totalFromNode(node);
-	const dynamicCount = Math.max(1, sortedDynamicInputs(node).length);
-	const text = message || node.properties?.gjj_for_loop_status || "等待执行";
-	state.title.textContent = isStart(node) ? `For循环开始 · 共 ${total} 轮` : "For循环结束";
-	state.body.textContent = text;
-	state.meta.textContent = `当前显示 ${dynamicCount} 路值`;
+	removeStatusPanel(node);
+}
+
+function removeStatusPanel(node) {
+	if (!node) return;
+	const widgets = Array.isArray(node.widgets) ? node.widgets : [];
+	let removed = Boolean(node.__gjjForLoopStatus || node.properties?.gjj_for_loop_status);
+	for (let index = widgets.length - 1; index >= 0; index -= 1) {
+		const widget = widgets[index];
+		if (widget?.name !== STATUS_WIDGET) continue;
+		try { widget.element?.remove?.(); } catch (_) {}
+		try { widget.inputEl?.remove?.(); } catch (_) {}
+		widgets.splice(index, 1);
+		removed = true;
+	}
+	try { node.__gjjForLoopStatus?.root?.remove?.(); } catch (_) {}
+	node.__gjjForLoopStatus = null;
+	if (node.properties) delete node.properties.gjj_for_loop_status;
+	if (!removed) return;
+	clearTimeout(node.__gjjForLoopStatusResizeTimer);
+	node.__gjjForLoopStatusResizeTimer = setTimeout(() => {
+		const width = Math.round(Number(node.size?.[0] || 320));
+		const computed = node.computeSize?.() || [width, node.size?.[1] || 120];
+		node.setSize?.([width, Math.round(Number(computed?.[1] || 120))]);
+		GJJ_Utils.refreshNode(node);
+	}, 0);
 }
 
 function ensureStatusPanel(node) {
-	if (!node || node.__gjjForLoopStatus || typeof node.addDOMWidget !== "function") return;
-	const root = document.createElement("div");
-	root.style.cssText = [
-		"box-sizing:border-box",
-		"width:100%",
-		"padding:7px 9px",
-		"border:1px solid #3f5057",
-		"border-radius:7px",
-		"background:#10171b",
-		"color:#d8e3e7",
-		"font-size:12px",
-		"line-height:1.35",
-		"display:flex",
-		"flex-direction:column",
-		"gap:3px",
-	].join(";");
+	removeStatusPanel(node);
+}
 
-	const title = document.createElement("div");
-	title.style.cssText = "font-weight:700;color:#e8f2f5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-	const body = document.createElement("div");
-	body.style.cssText = "color:#9fc7d4;white-space:pre-wrap;";
-	const meta = document.createElement("div");
-	meta.style.cssText = "color:#7f9299;font-size:11px;";
-	root.append(title, body, meta);
+function linkedStartNodeForEnd(endNode) {
+	if (!endNode || isStart(endNode)) return null;
+	const flowInput = (endNode.inputs || []).find((input) => input?.name === "flow" || input?.label === "循环控制");
+	const link = linkById(flowInput?.link);
+	if (!link) return null;
+	const startNode = link.origin_id != null ? app.graph?.getNodeById?.(link.origin_id) : null;
+	return isStart(startNode) ? startNode : null;
+}
 
-	const widget = node.addDOMWidget(STATUS_WIDGET, "HTML", root, {
-		serialize: false,
-		hideOnZoom: false,
-		getHeight: () => panelHeight(root),
-	});
-	widget.computeSize = (width) => [Math.round(Number(width || node.size?.[0] || 320)), panelHeight(root)];
-	node.__gjjForLoopStatus = { root, title, body, meta, widget };
-	refreshStatus(node);
+function updateLoopNodeStatus(node, detail, text) {
+	if (!node || !TARGET_NODES.has(node.comfyClass)) return;
+	removeStatusPanel(node);
 }
 
 function setupWidgetCallbacks(node) {
@@ -408,10 +445,8 @@ api.addEventListener("gjj_for_loop_status", (event) => {
 	const detail = event?.detail || {};
 	const node = app.graph?.getNodeById?.(Number(detail.node)) || app.graph?.getNodeById?.(detail.node);
 	if (!node || !TARGET_NODES.has(node.comfyClass)) return;
-	const text = String(detail.text || "循环状态已更新");
-	node.properties ||= {};
-	node.properties.gjj_for_loop_status = text;
-	ensureStatusPanel(node);
-	refreshStatus(node, text);
-	GJJ_Utils.refreshNode(node);
+	const text = formatRoundStatus(detail, detail.text || "循环状态已更新");
+	updateLoopNodeStatus(node, detail, text);
+	const startNode = linkedStartNodeForEnd(node);
+	if (startNode) updateLoopNodeStatus(startNode, detail, formatStartMirrorStatus(detail, text));
 });

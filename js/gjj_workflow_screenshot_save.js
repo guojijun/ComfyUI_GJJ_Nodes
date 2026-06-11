@@ -9,7 +9,9 @@ import { api } from "/scripts/api.js";
 	const SAVE_BUTTON_ID = "gjj-workflow-screenshot-save-button";
 	const OPEN_BUTTON_ID = "gjj-workflow-screenshot-open-button";
 	const COLOR_BUTTON_ID = "gjj-workflow-node-color-button";
+	const ARRANGE_BUTTON_ID = "gjj-workflow-node-arrange-button";
 	const COLOR_PANEL_ID = "gjj-workflow-node-color-panel";
+	const ARRANGE_MENU_ID = "gjj-workflow-node-arrange-menu";
 	const PREVIEW_OVERLAY_ID = "gjj-workflow-screenshot-preview-overlay";
 	const STYLE_ID = "gjj-workflow-screenshot-save-style";
 	const COLOR_THEME_PROPERTY = "gjj_color_theme";
@@ -116,6 +118,39 @@ import { api } from "/scripts/api.js";
 		if (selected instanceof Map) return Array.from(selected.values()).filter(Boolean);
 		if (Array.isArray(selected)) return selected.filter(Boolean);
 		return Object.values(selected).filter(Boolean);
+	}
+
+	function linkList() {
+		const links = app?.graph?.links;
+		if (!links) return [];
+		if (links instanceof Map) return Array.from(links.values()).filter(Boolean);
+		if (Array.isArray(links)) return links.filter(Boolean);
+		return Object.values(links).filter(Boolean);
+	}
+
+	function graphNodeId(node) {
+		const id = node?.id;
+		return id == null ? "" : String(id);
+	}
+
+	function nodeWidth(node) {
+		return Math.max(1, Number(node?.size?.[0] || node?.constructor?.size?.[0] || 180));
+	}
+
+	function nodeHeight(node) {
+		return Math.max(1, Number(node?.size?.[1] || node?.constructor?.size?.[1] || 90));
+	}
+
+	function inputLinkIds(input) {
+		const link = input?.link;
+		if (Array.isArray(link)) return link.filter((id) => id != null).map(String);
+		return link == null ? [] : [String(link)];
+	}
+
+	function nodeIncomingIds(node) {
+		const ids = [];
+		for (const input of node?.inputs || []) ids.push(...inputLinkIds(input));
+		return ids;
 	}
 
 	function nodeCategoryName(node) {
@@ -1828,6 +1863,10 @@ import { api } from "/scripts/api.js";
 	function visibleVideoCombineElement(node) {
 		const live = node?.__liveNode || node;
 		const state = live?.__gjjVideoCombineStatus || null;
+		const cachedFrame = live?.__gjjWorkflowScreenshotVideoFrame;
+		if (mediaLooksDrawable(cachedFrame)) {
+			return cachedFrame;
+		}
 		if (state?.wrap?.style?.display === "none" || state?.previewCard?.style?.display === "none") {
 			return null;
 		}
@@ -1837,6 +1876,73 @@ import { api } from "/scripts/api.js";
 			if (mediaLooksDrawable(element)) return element;
 		}
 		return null;
+	}
+
+	function waitForVideoFrame(video, timeoutMs = 900) {
+		if (!(video instanceof HTMLVideoElement)) return Promise.resolve();
+		if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+			return new Promise((resolve) => {
+				if (typeof video.requestVideoFrameCallback === "function") {
+					let settled = false;
+					const timer = setTimeout(() => {
+						if (!settled) {
+							settled = true;
+							resolve();
+						}
+					}, Math.min(timeoutMs, 180));
+					video.requestVideoFrameCallback(() => {
+						if (settled) return;
+						settled = true;
+						clearTimeout(timer);
+						resolve();
+					});
+					return;
+				}
+				requestAnimationFrame(resolve);
+			});
+		}
+		return new Promise((resolve) => {
+			let settled = false;
+			const finish = () => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				video.removeEventListener("loadeddata", finish);
+				video.removeEventListener("canplay", finish);
+				resolve();
+			};
+			const timer = setTimeout(finish, timeoutMs);
+			video.addEventListener("loadeddata", finish, { once: true });
+			video.addEventListener("canplay", finish, { once: true });
+			video.load?.();
+		});
+	}
+
+	async function cacheVideoCombineFrames(snapshot) {
+		const nodes = Array.isArray(snapshot?.nodes) ? snapshot.nodes : [];
+		await Promise.all(nodes.filter(isVideoCombineNode).map(async (node) => {
+			const live = node?.__liveNode || node;
+			const state = live?.__gjjVideoCombineStatus || null;
+			const video = state?.video;
+			delete live.__gjjWorkflowScreenshotVideoFrame;
+			if (!(video instanceof HTMLVideoElement) || (!video.currentSrc && !video.src)) return;
+			await waitForVideoFrame(video);
+			const width = number(video.videoWidth, 0);
+			const height = number(video.videoHeight, 0);
+			if (width < 36 || height < 36 || video.readyState < 2) return;
+			const frame = document.createElement("canvas");
+			frame.width = width;
+			frame.height = height;
+			const ctx = frame.getContext("2d");
+			if (!ctx) return;
+			try {
+				ctx.drawImage(video, 0, 0, width, height);
+				frame.toDataURL("image/png");
+				live.__gjjWorkflowScreenshotVideoFrame = frame;
+			} catch (error) {
+				console.warn("[GJJ] 视频合成节点当前帧缓存失败：", error);
+			}
+		}));
 	}
 
 	function videoCombineAspect(node, element) {
@@ -3201,16 +3307,19 @@ import { api } from "/scripts/api.js";
 		return workflowFromMetadata(parseImageMetadata(bytes));
 	}
 
-	async function previewDataFromImageUrl(url) {
+	async function previewDataFromImageUrl(url, filename = "") {
 		const response = await fetch(url, { cache: "no-store" });
 		if (!response.ok) throw new Error(`读取截图失败：HTTP ${response.status}`);
 		const bytes = new Uint8Array(await response.arrayBuffer());
 		const metadata = parseImageMetadata(bytes);
 		const workflow = workflowFromMetadata(metadata);
+		const responseType = String(response.headers.get("content-type") || "").split(";", 1)[0].trim();
+		const mimeType = responseType.startsWith("image/") ? responseType : mimeTypeForFilename(filename);
 		return {
 			workflow,
 			metadata,
 			title: workflowTitleFromMetadata(metadata, workflow),
+			previewUrl: URL.createObjectURL(new Blob([bytes], { type: mimeType })),
 		};
 	}
 
@@ -3225,7 +3334,8 @@ import { api } from "/scripts/api.js";
 		previewItems.unshift({
 			file,
 			size: Number(saved?.size ?? saved?.size_bytes ?? blob.size) || blob.size,
-			url: saved?.url || URL.createObjectURL(blob),
+			url: URL.createObjectURL(blob),
+			sourceUrl: saved?.url || "",
 			workflow,
 			title: workflowTitleFromMetadata(metadata, workflow),
 			metadata,
@@ -3267,6 +3377,7 @@ import { api } from "/scripts/api.js";
 			file: { name: item.filename || "workflow.jpg", size: item.size || 0, type: mimeTypeForFilename(item.filename || "workflow.jpg") },
 			size: Number(item.size ?? item.size_bytes ?? item.file_size) || 0,
 			url: item.url || "",
+			sourceUrl: item.url || "",
 			workflow: null,
 			title: "",
 			metadata: null,
@@ -3277,10 +3388,11 @@ import { api } from "/scripts/api.js";
 
 		await Promise.all(previewItems.map(async (item) => {
 			try {
-				const data = item.url ? await previewDataFromImageUrl(item.url) : null;
+				const data = item.sourceUrl ? await previewDataFromImageUrl(item.sourceUrl, item.file?.name) : null;
 				item.workflow = data?.workflow || null;
 				item.metadata = data?.metadata || null;
 				item.title = data?.title || "";
+				if (data?.previewUrl) item.url = data.previewUrl;
 				if (!item.workflow) item.error = "未找到 workflow";
 			} catch (error) {
 				item.error = String(error?.message || error || "读取失败");
@@ -3321,6 +3433,7 @@ import { api } from "/scripts/api.js";
 				alert("当前工作流没有可截图的节点。");
 				return;
 			}
+			await cacheVideoCombineFrames(snapshot);
 			const cropped = await captureWorkflowCanvas(snapshot);
 			if (!cropped) throw new Error("截图画布创建失败");
 			const exportCanvas = constrainCanvasDimensions(cropped);
@@ -3427,7 +3540,7 @@ import { api } from "/scripts/api.js";
 	z-index: 12000;
 	display: flex;
 	flex-direction: row;
-	gap: 6px;
+	gap: 4px;
 	align-items: center;
 	transform: translateX(-50%);
 	pointer-events: none;
@@ -3475,6 +3588,41 @@ import { api } from "/scripts/api.js";
 #${TOOLBAR_ID} .gjj-workflow-screenshot-button.gjj-saved {
 	border-color: rgba(113, 219, 150, .95);
 	background: rgba(36, 86, 56, .96);
+}
+#${ARRANGE_MENU_ID} {
+	position: fixed;
+	z-index: 100000;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	min-width: 176px;
+	padding: 6px;
+	border: 1px solid #40525b;
+	border-radius: 7px;
+	background: #11191d;
+	box-shadow: 0 12px 32px rgba(0, 0, 0, 0.48);
+	color: #e7f2f4;
+}
+#${ARRANGE_MENU_ID} button {
+	width: 100%;
+	height: 30px;
+	padding: 0 10px;
+	border: 0;
+	border-radius: 5px;
+	background: transparent;
+	color: #e7f2f4;
+	text-align: left;
+	font-size: 12px;
+	cursor: pointer;
+	white-space: nowrap;
+}
+#${ARRANGE_MENU_ID} button:hover {
+	background: #26363d;
+}
+#${ARRANGE_MENU_ID} .gjj-arrange-menu-divider {
+	height: 1px;
+	margin: 4px 2px;
+	background: #33444c;
 }
 #${COLOR_PANEL_ID} {
 	position: fixed;
@@ -4162,6 +4310,79 @@ import { api } from "/scripts/api.js";
 		positionNodeColorPanel(button, panel);
 	}
 
+	function arrangeWorkflowNodes(button) {
+		const selected = selectedGraphNodes();
+		const nodes = (selected.length >= 2 ? selected : graphNodes()).filter((node) => Array.isArray(node?.pos));
+		if (nodes.length < 2) return;
+
+		const scopedIds = new Set(nodes.map(graphNodeId).filter(Boolean));
+		const linksById = new Map(linkList().map((link) => [String(link?.id), link]));
+		const parentIdsByNode = new Map();
+		for (const node of nodes) {
+			const parents = new Set();
+			for (const linkId of nodeIncomingIds(node)) {
+				const link = linksById.get(linkId);
+				const parentId = link?.origin_id ?? link?.originId ?? link?.origin;
+				const parentKey = parentId == null ? "" : String(parentId);
+				if (scopedIds.has(parentKey)) parents.add(parentKey);
+			}
+			parentIdsByNode.set(graphNodeId(node), parents);
+		}
+
+		const depthMemo = new Map();
+		const visiting = new Set();
+		const depthOf = (nodeId) => {
+			if (depthMemo.has(nodeId)) return depthMemo.get(nodeId);
+			if (visiting.has(nodeId)) return 0;
+			visiting.add(nodeId);
+			let depth = 0;
+			for (const parentId of parentIdsByNode.get(nodeId) || []) {
+				depth = Math.max(depth, depthOf(parentId) + 1);
+			}
+			visiting.delete(nodeId);
+			depthMemo.set(nodeId, depth);
+			return depth;
+		};
+
+		const columns = new Map();
+		for (const node of nodes) {
+			const depth = depthOf(graphNodeId(node));
+			if (!columns.has(depth)) columns.set(depth, []);
+			columns.get(depth).push(node);
+		}
+
+		const minX = Math.min(...nodes.map((node) => Number(node.pos[0]) || 0));
+		const minY = Math.min(...nodes.map((node) => Number(node.pos[1]) || 0));
+		const horizontalGap = 86;
+		const verticalGap = 34;
+		let x = Math.round(minX);
+
+		for (const depth of Array.from(columns.keys()).sort((a, b) => a - b)) {
+			const column = columns.get(depth).sort((a, b) => {
+				const ay = Number(a?.pos?.[1]) || 0;
+				const by = Number(b?.pos?.[1]) || 0;
+				if (ay !== by) return ay - by;
+				return (Number(a?.pos?.[0]) || 0) - (Number(b?.pos?.[0]) || 0);
+			});
+			let y = Math.round(minY);
+			let columnWidth = 0;
+			for (const node of column) {
+				node.pos[0] = Math.round(x);
+				node.pos[1] = Math.round(y);
+				columnWidth = Math.max(columnWidth, nodeWidth(node));
+				y += Math.round(nodeHeight(node) + verticalGap);
+			}
+			x += Math.round(columnWidth + horizontalGap);
+		}
+
+		dirtyCanvas();
+		try { app?.graph?.afterChange?.(); } catch (_) {}
+		if (button) {
+			button.classList.add("gjj-saved");
+			setTimeout(() => button.classList.remove("gjj-saved"), 520);
+		}
+	}
+
 	function positionToolbar(toolbar) {
 		if (!toolbar) return;
 		toolbar.classList.remove("gjj-workflow-toolbar-hidden");
@@ -4189,6 +4410,82 @@ import { api } from "/scripts/api.js";
 		toolbar.style.right = "";
 		toolbar.style.bottom = "";
 		toolbar.style.transform = "translateX(-50%)";
+	}
+
+	function closeArrangeMenu() {
+		document.getElementById(ARRANGE_MENU_ID)?.remove();
+	}
+
+	function runArrangeCommand(command, anchorButton) {
+		const arranger = window.GJJ_NodeArranger;
+		const action = arranger?.[command];
+		if (typeof action === "function") {
+			const result = action();
+			if (result?.catch) result.catch((error) => console.warn("[GJJ] 节点排列失败：", error));
+		} else if (command === "arrangeAuto") {
+			arrangeWorkflowNodes(anchorButton);
+		} else {
+			console.warn(`[GJJ] 节点排列命令不可用：${command}`);
+		}
+		closeArrangeMenu();
+	}
+
+	function toggleArrangeMenu(anchorButton) {
+		const existing = document.getElementById(ARRANGE_MENU_ID);
+		if (existing) {
+			existing.remove();
+			return;
+		}
+
+		const menu = document.createElement("div");
+		menu.id = ARRANGE_MENU_ID;
+		const items = [
+			["🔄 智能自动排列", "arrangeAuto"],
+			["🔢 拓扑主链路", "arrangeTopoMainPath"],
+			["📦 拓扑紧凑排列", "arrangeTopoCompact"],
+			null,
+			["➡️ 水平排列", "arrangeHorizontal"],
+			["⬇️ 垂直排列", "arrangeVertical"],
+			["▦ 网格排列", "arrangeGrid"],
+		];
+		for (const item of items) {
+			if (!item) {
+				const divider = document.createElement("div");
+				divider.className = "gjj-arrange-menu-divider";
+				menu.appendChild(divider);
+				continue;
+			}
+			const [label, command] = item;
+			const button = document.createElement("button");
+			button.type = "button";
+			button.textContent = label;
+			button.addEventListener("pointerdown", (event) => event.stopPropagation());
+			button.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				runArrangeCommand(command, anchorButton);
+			});
+			menu.appendChild(button);
+		}
+
+		document.body.appendChild(menu);
+		const rect = anchorButton.getBoundingClientRect();
+		const menuWidth = menu.offsetWidth || 176;
+		const menuHeight = menu.offsetHeight || 226;
+		const left = clamp(rect.right - menuWidth, 6, window.innerWidth - menuWidth - 6);
+		let top = rect.bottom + 6;
+		if (top + menuHeight > window.innerHeight - 6) top = rect.top - menuHeight - 6;
+		menu.style.left = `${Math.round(left)}px`;
+		menu.style.top = `${Math.round(Math.max(6, top))}px`;
+
+		setTimeout(() => {
+			const dismiss = (event) => {
+				if (menu.contains(event.target) || anchorButton.contains(event.target)) return;
+				closeArrangeMenu();
+				document.removeEventListener("pointerdown", dismiss, true);
+			};
+			document.addEventListener("pointerdown", dismiss, true);
+		}, 0);
 	}
 
 	function makeToolbarButton(id, text, title, onClick) {
@@ -4233,7 +4530,8 @@ import { api } from "/scripts/api.js";
 		toolbar.append(
 			makeToolbarButton(SAVE_BUTTON_ID, "💾", "保存工作流截图（Alt+Shift+S）", saveWorkflowScreenshot),
 			makeToolbarButton(OPEN_BUTTON_ID, "📁", "预览并打开工作流截图（Alt+Shift+O）", showScreenshotPreview),
-			makeToolbarButton(COLOR_BUTTON_ID, "🎨", "按节点类型设置辨识配色", toggleNodeColorPanel)
+			makeToolbarButton(COLOR_BUTTON_ID, "🎨", "按节点类型设置辨识配色", toggleNodeColorPanel),
+			makeToolbarButton(ARRANGE_BUTTON_ID, "↔", "选择节点排列方式", toggleArrangeMenu)
 		);
 		positionToolbar(toolbar);
 		return toolbar;

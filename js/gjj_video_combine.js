@@ -128,8 +128,8 @@ function storedNodeWidth(node) {
 
 function preferredNodeWidth(node, explicit = null) {
 	return validNodeWidth(explicit)
-		?? storedNodeWidth(node)
 		?? validNodeWidth(node?.size?.[0])
+		?? storedNodeWidth(node)
 		?? DEFAULT_NODE_WIDTH;
 }
 
@@ -1421,12 +1421,16 @@ function updatePreviewLayout(node, nodeWidth = null) {
 	if (!state) {
 		return;
 	}
-	const height = getPreviewCardHeight(node, nodeWidth);
+	const width = preferredNodeWidth(node, nodeWidth);
+	const contentWidth = getPreviewContentWidth(node, width);
+	const height = getPreviewCardHeight(node, width);
+	state.wrap.style.width = `${contentWidth}px`;
 	state.previewCard.style.height = `${height}px`;
 	state.previewCard.style.aspectRatio = String(getPreviewAspect(node));
 	if (state.widget) {
+		const panelHeight = getPanelHeight(node, width);
 		state.widget.getHeight = () => getPanelHeight(node);
-		state.widget.computedHeight = getPanelHeight(node);
+		state.widget.computedHeight = panelHeight;
 	}
 }
 
@@ -1875,12 +1879,43 @@ app.registerExtension({
 		const originalOnResize = nodeType.prototype.onResize;
 		nodeType.prototype.onResize = function (...args) {
 			const result = originalOnResize?.apply(this, args);
+			const resizeValue = args?.[0];
+			const resizeWidth = validNodeWidth(
+				Array.isArray(resizeValue)
+					? resizeValue[0]
+					: resizeValue?.width ?? this.size?.[0],
+			);
 			if (!this.__gjjVideoCombineInternalResize) {
-				rememberNodeWidth(this, this.size?.[0]);
+				rememberNodeWidth(this, resizeWidth ?? this.size?.[0]);
 			}
-			updatePreviewLayout(this);
+			updatePreviewLayout(this, resizeWidth);
 			if (!this.__gjjVideoCombineInternalResize || this.__gjjVideoCombinePanelMode === "preview") {
 				resizeNodeToContent(this);
+			}
+			requestAnimationFrame(() => {
+				const currentWidth = validNodeWidth(this.size?.[0]) ?? resizeWidth;
+				if (!this.__gjjVideoCombineInternalResize) {
+					rememberNodeWidth(this, currentWidth);
+				}
+				updatePreviewLayout(this, currentWidth);
+				if (this.__gjjVideoCombinePanelMode === "preview") {
+					resizeNodeToContent(this);
+				}
+			});
+			return result;
+		};
+
+		const originalOnDrawForeground = nodeType.prototype.onDrawForeground;
+		nodeType.prototype.onDrawForeground = function (...args) {
+			const result = originalOnDrawForeground?.apply(this, args);
+			if (this.__gjjVideoCombinePanelMode === "preview") {
+				const width = validNodeWidth(this.size?.[0]) ?? preferredNodeWidth(this);
+				if (this.__gjjVideoCombinePreviewLayoutWidth !== width) {
+					this.__gjjVideoCombinePreviewLayoutWidth = width;
+					rememberNodeWidth(this, width);
+					updatePreviewLayout(this, width);
+					resizeNodeToContent(this);
+				}
 			}
 			return result;
 		};

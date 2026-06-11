@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
 from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 
@@ -45,6 +48,17 @@ def _pil_to_tensor(image: Image.Image) -> torch.Tensor:
     return torch.from_numpy(array).unsqueeze(0)
 
 
+def _image_preview_data_url(image: torch.Tensor, max_edge: int = 1024) -> str:
+    pil = _tensor_to_pil(image)
+    src_w, src_h = pil.size
+    ratio = min(1.0, float(max_edge) / max(src_w, src_h, 1))
+    if ratio < 1.0:
+        pil = pil.resize((max(1, round(src_w * ratio)), max(1, round(src_h * ratio))), Image.Resampling.LANCZOS)
+    buffer = io.BytesIO()
+    pil.save(buffer, format="PNG", optimize=True)
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
 def _resize_image(image: torch.Tensor, width: int, height: int, mode: str) -> torch.Tensor:
     pil = _tensor_to_pil(image)
     src_w, src_h = pil.size
@@ -70,6 +84,46 @@ def _region_box(region: Any) -> tuple[int, int, int, int]:
     return int(region.get("x", 0)), int(region.get("y", 0)), int(region.get("width", 0)), int(region.get("height", 0))
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _normalize_angle(value: Any) -> float:
+    angle = _safe_float(value, 0.0)
+    return ((angle + 180.0) % 360.0) - 180.0
+
+
+def _region_from_crop_config(config: Any, width: int, height: int) -> dict[str, Any]:
+    if isinstance(config, str) and config.strip():
+        try:
+            data = json.loads(config)
+        except json.JSONDecodeError as exc:
+            raise ValueError("面板框选数据不是有效 JSON。") from exc
+    elif isinstance(config, dict):
+        data = config
+    else:
+        data = {}
+
+    default_w = max(1, width // 2)
+    default_h = max(1, height // 2)
+    x = int(data.get("x", max(0, (width - default_w) // 2)))
+    y = int(data.get("y", max(0, (height - default_h) // 2)))
+    w = int(data.get("width", default_w))
+    h = int(data.get("height", default_h))
+    return {
+        "x": x,
+        "y": y,
+        "width": max(1, w),
+        "height": max(1, h),
+        "angle": _normalize_angle(data.get("angle", 0.0)),
+        "canvas_width": int(data.get("canvas_width", width)),
+        "canvas_height": int(data.get("canvas_height", height)),
+    }
+
+
 def _region_mask(canvas_width: int, canvas_height: int, x: int, y: int, width: int, height: int) -> torch.Tensor:
     mask = torch.zeros((1, canvas_height, canvas_width), dtype=torch.float32)
     left = max(0, x)
@@ -79,6 +133,31 @@ def _region_mask(canvas_width: int, canvas_height: int, x: int, y: int, width: i
     if right > left and bottom > top:
         mask[:, top:bottom, left:right] = 1.0
     return mask
+
+
+def _rotated_crop_tensor(image: torch.Tensor, x: int, y: int, width: int, height: int, angle: float) -> torch.Tensor:
+    batch, source_h, source_w, channels = image.shape
+    crop_w = max(1, int(width))
+    crop_h = max(1, int(height))
+    device = image.device
+    dtype = image.dtype
+    cx = float(x) + float(crop_w) / 2.0
+    cy = float(y) + float(crop_h) / 2.0
+    theta = torch.tensor(float(angle) * np.pi / 180.0, dtype=torch.float32, device=device)
+    cos_t = torch.cos(theta)
+    sin_t = torch.sin(theta)
+
+    ys = torch.arange(crop_h, dtype=torch.float32, device=device) + 0.5 - float(crop_h) / 2.0
+    xs = torch.arange(crop_w, dtype=torch.float32, device=device) + 0.5 - float(crop_w) / 2.0
+    grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+    source_x = cx + grid_x * cos_t - grid_y * sin_t
+    source_y = cy + grid_x * sin_t + grid_y * cos_t
+    norm_x = (source_x / max(1.0, float(source_w - 1))) * 2.0 - 1.0
+    norm_y = (source_y / max(1.0, float(source_h - 1))) * 2.0 - 1.0
+    grid = torch.stack((norm_x, norm_y), dim=-1).unsqueeze(0).repeat(batch, 1, 1, 1)
+    samples = image.permute(0, 3, 1, 2).to(dtype=torch.float32)
+    cropped = F.grid_sample(samples, grid, mode="bilinear", padding_mode="zeros", align_corners=True)
+    return cropped.permute(0, 2, 3, 1).to(device=device, dtype=dtype).contiguous()
 
 
 class GJJ_RegionBox:
@@ -188,24 +267,54 @@ class GJJ_RegionCrop:
         return {
             "required": {
                 "image": ("IMAGE", {"display_name": "输入图像", "tooltip": "需要裁切的图片。"}),
-                "region": (REGION_TYPE, {"display_name": "区域数据", "tooltip": "由区域框或网格区域节点输出的区域数据。"}),
+                "crop_config": ("STRING", {"default": "", "multiline": False, "hidden": True, "display": "hidden", "display_name": "面板框选数据", "tooltip": "内部保存面板框选区域，通常无需手动编辑。"}),
+            },
+            "optional": {
+                "region": (REGION_TYPE, {"display_name": "区域数据", "tooltip": "可选。连接后优先使用外部区域；不连接时使用面板内框选区域。"}),
             }
         }
 
-    def crop(self, image, region):
+    def crop(self, image, crop_config="", region=None):
         image = _normalize_image(image)
-        x, y, w, h = _region_box(region)
         height = int(image.shape[1])
         width = int(image.shape[2])
+        angle = 0.0
+        if region is None:
+            region = _region_from_crop_config(crop_config, width, height)
+            angle = _normalize_angle(region.get("angle", 0.0))
+        x, y, w, h = _region_box(region)
         left = max(0, x)
         top = max(0, y)
         right = min(width, x + w)
         bottom = min(height, y + h)
         if right <= left or bottom <= top:
             raise ValueError("区域不在图片范围内。")
-        cropped = image[:, top:bottom, left:right, :]
+        if abs(angle) > 0.001 and region is not None:
+            crop_width = max(1, int(w))
+            crop_height = max(1, int(h))
+            cropped = _rotated_crop_tensor(image, int(x), int(y), crop_width, crop_height, angle)
+        else:
+            cropped = image[:, top:bottom, left:right, :].contiguous()
+            crop_width = right - left
+            crop_height = bottom - top
         mask = torch.ones((int(cropped.shape[0]), int(cropped.shape[1]), int(cropped.shape[2])), dtype=torch.float32, device=cropped.device)
-        return (cropped, mask)
+        return {
+            "ui": {
+                "preview_image": [_image_preview_data_url(image[0:1])],
+                "source_width": [width],
+                "source_height": [height],
+                "region_x": [int(x)],
+                "region_y": [int(y)],
+                "region_width": [int(w)],
+                "region_height": [int(h)],
+                "crop_angle": [float(angle)],
+                "crop_x": [left],
+                "crop_y": [top],
+                "crop_width": [crop_width],
+                "crop_height": [crop_height],
+            },
+            "result": (cropped, mask.contiguous()),
+        }
 
 
 class GJJ_RegionComposite:

@@ -61,7 +61,7 @@ const DEFAULT_STATE = {
 	gradientDirection: "水平",
 	opacity: 1,
 	letterSpacing: 1,
-	lineSpacing: 12,
+	lineSpacing: 0,
 	paddingX: 0,
 	paddingY: 0,
 	strokeWidth: 2,
@@ -71,7 +71,7 @@ const DEFAULT_STATE = {
 	backgroundColor: "#1E5A48",
 	borderMode: "透明",
 	borderColor: "#55C685",
-	borderOpacity: 1,
+	borderOpacity: 0,
 	shadowEnabled: true,
 	shadowColor: "#2B5568",
 	shadowOpacity: 0.42,
@@ -273,7 +273,10 @@ function applyTransparentChrome(node, sourceState = null) {
 	if (node.constructor) safeSetProperty(node.constructor, "title_mode", getNoTitleMode());
 	safeSetProperty(node, "color", "rgba(0,0,0,0)");
 	safeSetProperty(node, "bgcolor", "rgba(0,0,0,0)");
-	safeSetProperty(node, "boxcolor", borderColorForState(state));
+	safeSetProperty(node, "boxcolor", "rgba(0,0,0,0)");
+	safeSetProperty(node, "box_color", "rgba(0,0,0,0)");
+	safeSetProperty(node, "borderColor", "rgba(0,0,0,0)");
+	safeSetProperty(node, "border_color", "rgba(0,0,0,0)");
 	node.badges = [];
 	node.drawBadges = function () {};
 	removeAllOutputs(node);
@@ -330,17 +333,17 @@ function normalizeState(value) {
 	state.gradientDirection = ["水平", "垂直", "对角"].includes(String(state.gradientDirection)) ? String(state.gradientDirection) : "水平";
 	state.opacity = clamp(finite(state.opacity, 1), 0, 1);
 	state.letterSpacing = clamp(finite(state.letterSpacing, 1), -50, 200);
-	state.lineSpacing = clamp(finite(state.lineSpacing, 12), -80, 300);
-	state.paddingX = clamp(finite(state.paddingX, DEFAULT_STATE.paddingX), 0, 600);
-	state.paddingY = clamp(finite(state.paddingY, DEFAULT_STATE.paddingY), 0, 600);
+	state.lineSpacing = 0;
+	state.paddingX = 0;
+	state.paddingY = 0;
 	state.strokeWidth = clamp(finite(state.strokeWidth, 2), 0, 80);
 	state.strokeMode = ["自定义", "背景色", "透明"].includes(String(state.strokeMode)) ? String(state.strokeMode) : "自定义";
 	state.strokeColor = normalizeColor(state.strokeColor, DEFAULT_STATE.strokeColor);
 	state.strokeOpacity = clamp(finite(state.strokeOpacity, 1), 0, 1);
 	state.backgroundColor = normalizeColor(state.backgroundColor, DEFAULT_STATE.backgroundColor);
-	state.borderMode = ["透明", "背景色", "自定义"].includes(String(state.borderMode)) ? String(state.borderMode) : "透明";
+	state.borderMode = "透明";
 	state.borderColor = normalizeColor(state.borderColor, DEFAULT_STATE.borderColor);
-	state.borderOpacity = clamp(finite(state.borderOpacity, 1), 0, 1);
+	state.borderOpacity = 0;
 	state.shadowEnabled = Boolean(state.shadowEnabled);
 	state.shadowColor = normalizeColor(state.shadowColor, DEFAULT_STATE.shadowColor);
 	state.shadowOpacity = clamp(finite(state.shadowOpacity, 0.42), 0, 1);

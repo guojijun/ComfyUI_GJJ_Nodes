@@ -300,6 +300,11 @@ class GJJ_ForLoopIntAdd:
             else:
                 _send_status(status_start_id, f"已完成：共 {total_value} 轮", 1.0, total=total_value, index=total_value - 1, state="done")
                 _send_status(status_end_id, f"循环结束：共 {total_value} 轮", 1.0, total=total_value, index=total_value - 1, state="done")
+        elif status_start_id or status_end_id:
+            display_index = result
+            total_text = str(status_total or "外部输入")
+            _send_status(status_start_id, f"运行中：当前序号 {display_index}", None, total=total_text, index=display_index, state="running")
+            _send_status(status_end_id, f"回传中：当前序号 {display_index}，准备判断下一轮", None, total=total_text, index=display_index, state="checking")
         return (result,)
 
 

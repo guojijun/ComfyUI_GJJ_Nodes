@@ -8,6 +8,7 @@ const INPUTS_PROPERTY = "enabled_inputs";
 const OUTPUTS_PROPERTY = "enabled_outputs";
 const TAB_PROPERTY = "active_tab";
 const AUTO_REFRESH_PROPERTY = "auto_refresh_enabled";
+const SOURCE_FPS_PROPERTY = "source_fps";
 const VIDEO_API_PATH = "/gjj/input_videos";
 const VIDEO_UPLOAD_API_PATH = "/gjj/upload_video";
 const VIDEO_META_API_PATH = "/gjj/video_meta";
@@ -39,7 +40,7 @@ const PARAM_WIDGET_ALIASES = new Map([
 	["定时刷新", "auto_refresh"],
 ]);
 const PARAM_DEFS = [
-	{ name: "frame_rate", label: "帧率", kind: "number", step: "0.01", min: "1", max: "240", default: 24.0, tip: "最终输出帧率。" },
+	{ name: "frame_rate", label: "帧率", kind: "number", step: "0.01", min: "1", max: "240", default: 24.0, tip: "最终输出帧率；修改抽帧间隔时会同步为源帧率 ÷ 抽帧间隔。" },
 	{ name: "width", label: "宽度", kind: "number", step: "8", min: "0", max: "16384", default: 0, tip: "0 表示跟随源视频；只填宽度会按比例计算高度。" },
 	{ name: "height", label: "高度", kind: "number", step: "8", min: "0", max: "16384", default: 0, tip: "0 表示跟随源视频；只填高度会按比例计算宽度。" },
 	{ name: "video_format", label: "视频格式", kind: "select", default: "video/h264-mp4", tip: "格式参数命名参考 VHS_VideoCombine。" },
@@ -276,6 +277,10 @@ function requestRedraw(node) {
 function initParamDefaults(node) {
 	for (const def of PARAM_DEFS) {
 		const currentValue = getWidgetValue(node, def.name);
+		if (def.kind === "text") {
+			if (currentValue === null || currentValue === undefined) setWidgetValue(node, def.name, def.default ?? "", true);
+			continue;
+		}
 		const min = parseFloat(def.min);
 		const max = parseFloat(def.max);
 		let defaultValue = def.default;
@@ -321,6 +326,18 @@ function syncProperties(node) {
 	node.properties[OUTPUTS_PROPERTY] = serializeOutputs(state.enabledOutputs);
 	node.properties[TAB_PROPERTY] = TAB_DEFS.some((tab) => tab.key === state.activeTab) ? state.activeTab : "video";
 	node.properties[AUTO_REFRESH_PROPERTY] = getAutoRefreshEnabled(node);
+	node.properties.filter_keyword = String(getWidgetValue(node, "filter_keyword") ?? "");
+	node.properties.filter_directory = String(getWidgetValue(node, "filter_directory") ?? "");
+}
+
+function syncFilterTextProperties(node, sourceProps = null) {
+	node.properties = node.properties || {};
+	const props = sourceProps || node.properties || {};
+	for (const name of ["filter_keyword", "filter_directory"]) {
+		const value = String(props[name] ?? node.properties[name] ?? getWidgetValue(node, name) ?? "");
+		setWidgetValue(node, name, value, true);
+		node.properties[name] = value;
+	}
 }
 
 function formatMeta(item) {
@@ -561,6 +578,23 @@ function getPrimarySelectedItem(node) {
 	return state.selection.length ? (optionByKey.get(itemKey(state.selection[0])) || state.selection[0]) : null;
 }
 
+function sourceFpsForNode(node) {
+	const fromProperty = Number(node?.properties?.[SOURCE_FPS_PROPERTY] || 0);
+	if (Number.isFinite(fromProperty) && fromProperty > 0) return fromProperty;
+	const fromSelection = Number(getPrimarySelectedItem(node)?.fps || 0);
+	if (Number.isFinite(fromSelection) && fromSelection > 0) return fromSelection;
+	return 0;
+}
+
+function syncFrameRateToStride(node, force = false) {
+	if (!force && hasLinkedInput(node, "frame_rate")) return;
+	const sourceFps = sourceFpsForNode(node);
+	if (!(sourceFps > 0)) return;
+	const stride = Math.max(1, Number.parseInt(getWidgetValue(node, "frame_stride") || "1", 10) || 1);
+	const outputFps = Math.max(1, Math.min(240, sourceFps / stride));
+	setWidgetValue(node, "frame_rate", Number(outputFps.toFixed(3)), force);
+}
+
 async function applyMediaInfoToPanel(node, force = false, preferredItem = null) {
 	let first = preferredItem || getPrimarySelectedItem(node);
 	if (!first) {
@@ -581,6 +615,10 @@ async function applyMediaInfoToPanel(node, force = false, preferredItem = null) 
 	const frames = Number(first.frames || 0);
 
 	console.debug(`[GJJ] Applying media info: fps=${fps}, width=${width}, height=${height}, frames=${frames}`);
+
+	node.properties = node.properties || {};
+	if (fps > 0) node.properties[SOURCE_FPS_PROPERTY] = fps;
+	else delete node.properties[SOURCE_FPS_PROPERTY];
 
 	if (fps > 0) {
 		setWidgetValue(node, "frame_rate", Number(fps.toFixed(3)), force);
@@ -919,7 +957,8 @@ function makeParamControl(node, def) {
 		event.stopPropagation();
 		let value = input.value;
 		if (def.kind === "number") value = def.step === "0.01" || def.step === "0.5" ? Number.parseFloat(value || "0") : Number.parseInt(value || "0", 10);
-		setWidgetValue(node, def.name, Number.isNaN(value) ? 0 : value);
+		setWidgetValue(node, def.name, def.kind === "text" ? String(value ?? "") : (Number.isNaN(value) ? 0 : value));
+		if (def.name === "frame_stride") syncFrameRateToStride(node);
 		if (def.name === "filter_keyword" || def.name === "filter_directory") applyVideoFilters(node);
 		if (def.name === "refresh_interval") updateAutoRefresh(node);
 		renderParamControls(node);
@@ -2491,6 +2530,7 @@ app.registerExtension({
 			const result = originalOnConfigure?.apply(this, args);
 			this.properties = this.properties || {};
 			const serializedProps = args[0]?.properties || {};
+			syncFilterTextProperties(this, serializedProps);
 			this.properties[AUTO_REFRESH_PROPERTY] = asBoolean(serializedProps[AUTO_REFRESH_PROPERTY]);
 			setWidgetValue(this, "auto_refresh", this.properties[AUTO_REFRESH_PROPERTY], true);
 			const state = ensureState(this);
@@ -2528,6 +2568,8 @@ app.registerExtension({
 				serializedNode.properties[OUTPUTS_PROPERTY] = serializeOutputs(state.enabledOutputs);
 				serializedNode.properties[TAB_PROPERTY] = TAB_DEFS.some((tab) => tab.key === state.activeTab) ? state.activeTab : "video";
 				serializedNode.properties[AUTO_REFRESH_PROPERTY] = getAutoRefreshEnabled(this);
+				serializedNode.properties.filter_keyword = String(getWidgetValue(this, "filter_keyword") ?? "");
+				serializedNode.properties.filter_directory = String(getWidgetValue(this, "filter_directory") ?? "");
 				writeSerializedInputSlots(serializedNode, inputDefs);
 				writeSerializedOutputSlots(serializedNode, defs);
 			}

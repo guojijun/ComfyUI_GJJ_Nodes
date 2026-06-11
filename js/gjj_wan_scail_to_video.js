@@ -4,6 +4,11 @@ import { GJJ_Utils } from "./gjj_utils.js";
 const TARGET_NODES = new Set([
 	"GJJ_WanSCAILToVideo",
 ]);
+const WAN_SCAIL_MIN_WIDTH = 200;
+const COLORED_MASK_NODES = new Set([
+	"GJJ_SCAIL2ColoredMask",
+]);
+const COLORED_MASK_COMPACT_MIN_HEIGHT = 188;
 
 const INPUT_SPECS = [
 	["positive", "CONDITIONING", null, "正向条件", "来自 Wan 文本编码器的正向条件。"],
@@ -27,9 +32,27 @@ const INPUT_SPECS = [
 	["previous_frames", "IMAGE", null, "上一段视频帧", "SCAIL-2 续段可选。上一段完整解码帧队列。"],
 ];
 
+const COLORED_MASK_INPUT_SPECS = [
+	["driving_track_data", "SAM3_TRACK_DATA", null, "驱动视频轨迹", "来自 SAM3 的视频追踪数据。节点会渲染为姿态彩色遮罩。"],
+	["object_indices", "STRING", "object_indices", "对象编号列表", "可选。用逗号分隔要保留的 SAM3 对象编号，例如 0,2,3；留空表示保留全部对象。"],
+	["sort_by", "COMBO", "sort_by", "颜色分配排序", "决定对象按什么顺序分配固定色板颜色，并同时作用于驱动和参考轨迹。"],
+	["replacement_mode", "BOOLEAN", "replacement_mode", "替换模式", "关闭为动画模式黑底；开启为替换模式白底。参考图遮罩始终黑底。"],
+	["ref_track_data", "SAM3_TRACK_DATA", null, "参考图轨迹", "可选。参考图对应的 SAM3 轨迹数据；连接后生成参考图彩色遮罩。"],
+];
+
+const COLORED_MASK_OUTPUT_SPECS = [
+	["pose_video_mask", "IMAGE", "姿态彩色遮罩", "可连接到 WanSCAILToVideo 的“姿态彩色遮罩”。替换模式关闭时黑底，开启时白底。"],
+	["reference_image_mask", "IMAGE", "参考图彩色遮罩", "可连接到 WanSCAILToVideo 的“参考图彩色遮罩”。始终黑底，未连接参考轨迹时输出一张黑图。"],
+];
+
 const SPEC_BY_NAME = new Map(INPUT_SPECS.map((spec, index) => [spec[0], { spec, index }]));
 const SPEC_BY_WIDGET = new Map(INPUT_SPECS.filter((spec) => spec[2]).map((spec, index) => [spec[2], { spec, index }]));
 const SPEC_BY_LABEL = new Map(INPUT_SPECS.map((spec, index) => [spec[3], { spec, index }]));
+const COLORED_MASK_SPEC_BY_NAME = new Map(COLORED_MASK_INPUT_SPECS.map((spec, index) => [spec[0], { spec, index }]));
+const COLORED_MASK_SPEC_BY_WIDGET = new Map(COLORED_MASK_INPUT_SPECS.filter((spec) => spec[2]).map((spec, index) => [spec[2], { spec, index }]));
+const COLORED_MASK_SPEC_BY_LABEL = new Map(COLORED_MASK_INPUT_SPECS.map((spec, index) => [spec[3], { spec, index }]));
+const COLORED_MASK_OUTPUT_BY_NAME = new Map(COLORED_MASK_OUTPUT_SPECS.map((spec, index) => [spec[0], { spec, index }]));
+const COLORED_MASK_OUTPUT_BY_LABEL = new Map(COLORED_MASK_OUTPUT_SPECS.map((spec, index) => [spec[2], { spec, index }]));
 
 function findWidget(node, name) {
 	return Array.isArray(node?.widgets) ? node.widgets.find((widget) => String(widget?.name || "") === name) : null;
@@ -44,6 +67,24 @@ function inputSpecInfo(input) {
 	if (SPEC_BY_WIDGET.has(type)) return SPEC_BY_WIDGET.get(type);
 	const label = String(input?.localized_name || input?.label || "");
 	return SPEC_BY_LABEL.get(label) || null;
+}
+
+function coloredMaskInputSpecInfo(input) {
+	const widgetName = String(input?.widget?.name || input?.widget_name || "");
+	if (COLORED_MASK_SPEC_BY_WIDGET.has(widgetName)) return COLORED_MASK_SPEC_BY_WIDGET.get(widgetName);
+	const name = String(input?.name || "").replace(/^converted-widget:/i, "");
+	if (COLORED_MASK_SPEC_BY_NAME.has(name)) return COLORED_MASK_SPEC_BY_NAME.get(name);
+	const type = String(input?.type || "").replace(/^converted-widget:/i, "");
+	if (COLORED_MASK_SPEC_BY_WIDGET.has(type)) return COLORED_MASK_SPEC_BY_WIDGET.get(type);
+	const label = String(input?.localized_name || input?.label || "");
+	return COLORED_MASK_SPEC_BY_LABEL.get(label) || null;
+}
+
+function coloredMaskOutputSpecInfo(output) {
+	const name = String(output?.name || "").replace(/^converted-widget:/i, "");
+	if (COLORED_MASK_OUTPUT_BY_NAME.has(name)) return COLORED_MASK_OUTPUT_BY_NAME.get(name);
+	const label = String(output?.localized_name || output?.label || output?.display_name || "");
+	return COLORED_MASK_OUTPUT_BY_LABEL.get(label) || null;
 }
 
 function findInput(node, name, widgetName = null) {
@@ -100,9 +141,56 @@ function ensureInput(node, spec) {
 	return input;
 }
 
+function findOutput(node, name, label) {
+	if (!Array.isArray(node?.outputs)) return null;
+	return node.outputs.find((output) => {
+		const outputName = String(output?.name || "").replace(/^converted-widget:/i, "");
+		const outputLabel = String(output?.localized_name || output?.label || output?.display_name || "");
+		return outputName === name || outputLabel === label;
+	});
+}
+
+function applyOutputSpec(output, spec) {
+	if (!output || !spec) return;
+	const [name, type, label, tooltip] = spec;
+	output.name = name;
+	output.type = type;
+	output.label = label;
+	output.localized_name = label;
+	output.display_name = label;
+	output.tooltip = tooltip;
+	output.hidden = false;
+	output.visible = true;
+}
+
+function ensureOutput(node, spec) {
+	const [name, type, label] = spec;
+	let output = findOutput(node, name, label);
+	if (!output) {
+		node.addOutput?.(name, type);
+		output = node.outputs?.[node.outputs.length - 1] || null;
+	}
+	applyOutputSpec(output, spec);
+	return output;
+}
+
 function compareInputs(a, b) {
 	const ai = inputSpecInfo(a)?.index ?? Number.MAX_SAFE_INTEGER;
 	const bi = inputSpecInfo(b)?.index ?? Number.MAX_SAFE_INTEGER;
+	if (ai !== bi) return ai - bi;
+	return 0;
+}
+
+function compareColoredMaskInputs(a, b) {
+	const ai = coloredMaskInputSpecInfo(a)?.index ?? Number.MAX_SAFE_INTEGER;
+	const bi = coloredMaskInputSpecInfo(b)?.index ?? Number.MAX_SAFE_INTEGER;
+	if (ai !== bi) return ai - bi;
+	return 0;
+}
+
+function compareColoredMaskOutputs(a, b) {
+	const ai = coloredMaskOutputSpecInfo(a)?.index ?? Number.MAX_SAFE_INTEGER;
+	const bi = coloredMaskOutputSpecInfo(b)?.index ?? Number.MAX_SAFE_INTEGER;
 	if (ai !== bi) return ai - bi;
 	return 0;
 }
@@ -114,8 +202,41 @@ function refreshNode(node) {
 	});
 }
 
+function hasColoredMaskPreview(node, message = null) {
+	const messageImages = Array.isArray(message?.images) ? message.images : [];
+	if (messageImages.length > 0) return true;
+	if (Array.isArray(node?.imgs) && node.imgs.some((img) => img?.src || img?.currentSrc)) return true;
+	if (node?.image?.src || node?.image?.currentSrc) return true;
+	return false;
+}
+
+function coloredMaskCompactHeight(node) {
+	const inputRows = Array.isArray(node?.inputs) ? node.inputs.filter((input) => input && input.hidden !== true).length : 0;
+	const outputRows = Array.isArray(node?.outputs) ? node.outputs.filter((output) => output && output.hidden !== true).length : 0;
+	const widgetRows = Array.isArray(node?.widgets) ? node.widgets.filter((widget) => widget && widget.hidden !== true && widget.type !== "hidden").length : 0;
+	const socketRows = Math.max(inputRows, outputRows);
+	return Math.round(Math.max(COLORED_MASK_COMPACT_MIN_HEIGHT, 48 + socketRows * 24 + widgetRows * 30 + 22));
+}
+
+function collapseColoredMaskIfNoPreview(node, message = null) {
+	requestAnimationFrame(() => {
+		if (!node || hasColoredMaskPreview(node, message)) return;
+		const width = Math.round(Number(node.size?.[0] || node.computeSize?.()?.[0] || 280));
+		const height = coloredMaskCompactHeight(node);
+		if (!Array.isArray(node.size) || Math.abs(Number(node.size[1] || 0) - height) > 1) {
+			node.setSize?.([width, height]);
+		}
+		app.canvas?.setDirty?.(true, true);
+	});
+}
+
 function stabilizeNode(node) {
 	if (!node || !Array.isArray(node.inputs)) return;
+	node.minWidth = WAN_SCAIL_MIN_WIDTH;
+	node.min_width = WAN_SCAIL_MIN_WIDTH;
+	if (Array.isArray(node.size) && Number(node.size[0]) < WAN_SCAIL_MIN_WIDTH) {
+		node.setSize?.([WAN_SCAIL_MIN_WIDTH, node.size[1]]);
+	}
 	for (const spec of INPUT_SPECS) {
 		decorateWidget(node, spec);
 		ensureInput(node, spec);
@@ -124,44 +245,93 @@ function stabilizeNode(node) {
 	refreshNode(node);
 }
 
+function stabilizeColoredMaskNode(node) {
+	if (!node || !Array.isArray(node.inputs)) return;
+	for (const spec of COLORED_MASK_INPUT_SPECS) {
+		decorateWidget(node, spec);
+		ensureInput(node, spec);
+	}
+	node.inputs.sort(compareColoredMaskInputs);
+	if (Array.isArray(node.outputs)) {
+		for (const spec of COLORED_MASK_OUTPUT_SPECS) {
+			ensureOutput(node, spec);
+		}
+		node.outputs.sort(compareColoredMaskOutputs);
+	}
+	refreshNode(node);
+	collapseColoredMaskIfNoPreview(node);
+}
+
 function scheduleStabilize(node, ms = 32) {
 	clearTimeout(node.__gjjScailToVideoTimer);
 	node.__gjjScailToVideoTimer = setTimeout(() => stabilizeNode(node), ms);
+}
+
+function scheduleColoredMaskStabilize(node, ms = 32) {
+	clearTimeout(node.__gjjScail2ColoredMaskTimer);
+	node.__gjjScail2ColoredMaskTimer = setTimeout(() => stabilizeColoredMaskNode(node), ms);
 }
 
 app.registerExtension({
 	name: "Comfy.GJJ.WanSCAILToVideoLayout",
 
 	beforeRegisterNodeDef(nodeType, nodeData) {
-		if (!TARGET_NODES.has(nodeData?.name)) return;
+		if (!TARGET_NODES.has(nodeData?.name) && !COLORED_MASK_NODES.has(nodeData?.name)) return;
 
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
 			const result = originalOnNodeCreated?.apply(this, args);
-			scheduleStabilize(this, 0);
-			scheduleStabilize(this, 120);
+			if (COLORED_MASK_NODES.has(nodeData?.name)) {
+				scheduleColoredMaskStabilize(this, 0);
+				scheduleColoredMaskStabilize(this, 120);
+			} else {
+				scheduleStabilize(this, 0);
+				scheduleStabilize(this, 120);
+			}
 			return result;
 		};
 
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalOnConfigure?.apply(this, args);
-			scheduleStabilize(this, 0);
-			scheduleStabilize(this, 120);
+			if (COLORED_MASK_NODES.has(nodeData?.name)) {
+				scheduleColoredMaskStabilize(this, 0);
+				scheduleColoredMaskStabilize(this, 120);
+			} else {
+				scheduleStabilize(this, 0);
+				scheduleStabilize(this, 120);
+			}
 			return result;
 		};
 
 		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalOnConnectionsChange?.apply(this, args);
-			scheduleStabilize(this, 16);
+			if (COLORED_MASK_NODES.has(nodeData?.name)) {
+				scheduleColoredMaskStabilize(this, 16);
+			} else {
+				scheduleStabilize(this, 16);
+			}
 			return result;
 		};
 
 		const originalOnResize = nodeType.prototype.onResize;
 		nodeType.prototype.onResize = function (...args) {
 			const result = originalOnResize?.apply(this, args);
-			scheduleStabilize(this, 16);
+			if (COLORED_MASK_NODES.has(nodeData?.name)) {
+				scheduleColoredMaskStabilize(this, 16);
+			} else {
+				scheduleStabilize(this, 16);
+			}
+			return result;
+		};
+
+		const originalOnExecuted = nodeType.prototype.onExecuted;
+		nodeType.prototype.onExecuted = function (message, ...args) {
+			const result = originalOnExecuted?.apply(this, [message, ...args]);
+			if (COLORED_MASK_NODES.has(nodeData?.name)) {
+				collapseColoredMaskIfNoPreview(this, message);
+			}
 			return result;
 		};
 	},
@@ -170,7 +340,10 @@ app.registerExtension({
 		for (const node of app.graph?._nodes || []) {
 			if (TARGET_NODES.has(node?.comfyClass)) {
 				stabilizeNode(node);
+			} else if (COLORED_MASK_NODES.has(node?.comfyClass)) {
+				stabilizeColoredMaskNode(node);
 			}
 		}
+
 	},
 });

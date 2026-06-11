@@ -1,4 +1,5 @@
 import { app } from "/scripts/app.js";
+import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
 
 const NODE_TYPE = "GJJ_ComprehensiveMatting";
@@ -7,6 +8,7 @@ const STATUS_WIDGET = "model_status_json";
 const SELECTED_METHODS_WIDGET = "selected_methods_json";
 const PANEL_WIDGET = "gjj_matting_method_buttons";
 const ADVANCED_PARAMS_PROP = "gjj_matting_params_expanded";
+const PREVIEW_MAX_SIZE = 250;
 const MEDIA_INPUT = "media";
 const MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
 const HIDDEN_NAMES = new Set([METHOD_WIDGET, STATUS_WIDGET, SELECTED_METHODS_WIDGET]);
@@ -57,6 +59,11 @@ function refreshNodeSize(node) {
 	const computed = node.computeSize?.();
 	node.setSize?.([width, Math.max(120, Number(computed?.[1] || 120))]);
 	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function panelHeightFor(node) {
+	const wrap = node?.__gjjMattingButtons?.wrap;
+	return Math.max(62, Math.ceil(Number(wrap?.scrollHeight || wrap?.offsetHeight || 62)) + 4);
 }
 
 function findInput(node, name) {
@@ -664,9 +671,12 @@ function syncButtons(node) {
 	}
 	if (state.toggleButton) {
 		const expanded = isParamsExpanded(node);
-		state.toggleButton.textContent = expanded ? "⏮️ 折叠" : "⏯️ 展开";
-		state.toggleButton.title = expanded ? "折叠下方抠图参数" : "展开下方抠图参数";
+		state.toggleButton.textContent = expanded ? "收起" : "展开";
+		state.toggleButton.title = expanded ? "收起其它抠图方式和参数" : "展开其它抠图方式和参数";
 		state.toggleButton.style.cssText = toggleButtonStyle(expanded);
+	}
+	if (state.advancedMethodsWrap) {
+		state.advancedMethodsWrap.style.display = isParamsExpanded(node) ? "flex" : "none";
 	}
 	syncParamPanel(node);
 	applyBranchDependencyNotice(node);
@@ -706,6 +716,67 @@ function setParamsExpanded(node, expanded) {
 	app.graph?.change?.();
 }
 
+function previewUrl(item) {
+	if (!item?.filename) return "";
+	const previewFormat = typeof app.getPreviewFormatParam === "function" ? app.getPreviewFormatParam() : "";
+	const randParam = typeof app.getRandParam === "function" ? app.getRandParam() : "";
+	return api.apiURL(`/view?filename=${encodeURIComponent(item.filename)}&type=${encodeURIComponent(item.type || "temp")}&subfolder=${encodeURIComponent(item.subfolder || "")}${previewFormat}${randParam}`);
+}
+
+function renderRgbaPreview(node, items) {
+	const state = node.__gjjMattingButtons;
+	if (!state?.wrap) return;
+	const item = Array.isArray(items) ? items[0] : null;
+	if (!item?.filename) {
+		state.previewWrap?.remove?.();
+		state.previewWrap = null;
+		refreshNodeSize(node);
+		return;
+	}
+	let previewWrap = state.previewWrap;
+	if (!previewWrap) {
+		previewWrap = document.createElement("div");
+		previewWrap.style.cssText = [
+			"width:100%",
+			"box-sizing:border-box",
+			"padding-top:4px",
+			"display:flex",
+			"align-items:center",
+			"justify-content:center",
+		].join(";");
+		state.previewWrap = previewWrap;
+		state.wrap.appendChild(previewWrap);
+	}
+	previewWrap.replaceChildren();
+	const frame = document.createElement("div");
+	frame.style.cssText = [
+		"max-width:100%",
+		"padding:6px",
+		"border:1px solid #3f5057",
+		"border-radius:7px",
+		"background-color:#10171b",
+		"background-image:linear-gradient(45deg,#1b252b 25%,transparent 25%),linear-gradient(-45deg,#1b252b 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#1b252b 75%),linear-gradient(-45deg,transparent 75%,#1b252b 75%)",
+		"background-size:16px 16px",
+		"background-position:0 0,0 8px,8px -8px,-8px 0",
+		"box-sizing:border-box",
+	].join(";");
+	const image = document.createElement("img");
+	image.src = previewUrl(item);
+	image.draggable = false;
+	image.style.cssText = [
+		`max-width:${PREVIEW_MAX_SIZE}px`,
+		`max-height:${PREVIEW_MAX_SIZE}px`,
+		"width:auto",
+		"height:auto",
+		"object-fit:contain",
+		"display:block",
+		"border-radius:5px",
+	].join(";");
+	frame.appendChild(image);
+	previewWrap.appendChild(frame);
+	refreshNodeSize(node);
+}
+
 function mountButtons(node) {
 	if (node.__gjjMattingButtons || typeof node.addDOMWidget !== "function") {
 		const state = node.__gjjMattingButtons;
@@ -715,7 +786,7 @@ function mountButtons(node) {
 			if (state.widget) {
 				state.widget.computeSize = (width) => [
 					Math.max(300, Number(width || node.size?.[0] || 300)),
-					isParamsExpanded(node) ? 302 : 62,
+					panelHeightFor(node),
 				];
 			}
 		}
@@ -741,6 +812,7 @@ function mountButtons(node) {
 	].join(";");
 
 	const buttons = new Map();
+	let advancedMethodsWrap = null;
 	for (const item of METHODS) {
 		const button = document.createElement("button");
 		button.type = "button";
@@ -756,7 +828,21 @@ function mountButtons(node) {
 			setMethod(node, item.value, Boolean(event.shiftKey));
 		});
 		buttons.set(item.value, button);
-		wrap.appendChild(button);
+		if (item.value === "RMBG1.4") {
+			wrap.appendChild(button);
+		} else {
+			if (!advancedMethodsWrap) {
+				advancedMethodsWrap = document.createElement("div");
+				advancedMethodsWrap.style.cssText = [
+					"display:none",
+					"flex-wrap:wrap",
+					"gap:6px",
+					"width:100%",
+					"box-sizing:border-box",
+				].join(";");
+			}
+			advancedMethodsWrap.appendChild(button);
+		}
 	}
 
 	const toggleButton = document.createElement("button");
@@ -768,6 +854,7 @@ function mountButtons(node) {
 		setParamsExpanded(node, !isParamsExpanded(node));
 	});
 	wrap.appendChild(toggleButton);
+	if (advancedMethodsWrap) wrap.appendChild(advancedMethodsWrap);
 
 	const paramPanel = createParamPanel(node);
 	wrap.appendChild(paramPanel);
@@ -775,10 +862,10 @@ function mountButtons(node) {
 	const widget = node.addDOMWidget(PANEL_WIDGET, "HTML", wrap, { serialize: false, hideOnZoom: false });
 	widget.computeSize = (width) => [
 		Math.max(300, Number(width || node.size?.[0] || 300)),
-		isParamsExpanded(node) ? 302 : 62,
+		panelHeightFor(node),
 	];
 
-	node.__gjjMattingButtons = { widget, wrap, buttons, toggleButton, paramPanel };
+	node.__gjjMattingButtons = { widget, wrap, buttons, toggleButton, advancedMethodsWrap, paramPanel };
 	syncButtons(node);
 	applyParamVisibility(node);
 	refreshNodeSize(node);
@@ -863,6 +950,14 @@ app.registerExtension({
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalConnectionsChange?.apply(this, args);
 			stabilizeNode(this);
+			return result;
+		};
+
+		const originalExecuted = nodeType.prototype.onExecuted;
+		nodeType.prototype.onExecuted = function (message, ...args) {
+			const result = originalExecuted?.apply(this, [message, ...args]);
+			stabilizeNode(this);
+			renderRgbaPreview(this, message?.rgba_preview);
 			return result;
 		};
 	},

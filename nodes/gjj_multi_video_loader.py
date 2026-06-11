@@ -31,6 +31,8 @@ UPLOAD_SUBFOLDER = "gjj_multi_video_loader"
 MAX_SELECTED_VIDEOS = 20
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".wmv", ".flv", ".gif"}
 ENABLED_OUTPUTS_PROPERTY = "enabled_outputs"
+PREVIEW_MAX_FRAMES = 96
+PREVIEW_MAX_EDGE = 250
 OPTIONAL_OUTPUT_DEFS = {
     "first_frame": {"name": "首帧预览", "type": "IMAGE"},
     "last_frame": {"name": "尾帧预览", "type": "IMAGE"},
@@ -92,6 +94,18 @@ def _save_sequence_webp_preview(frames: torch.Tensor, fps: float = 8.0) -> list[
         frames = frames.detach().cpu().float().clamp(0.0, 1.0).contiguous()
         if int(frames.shape[0]) <= 0:
             return []
+        original_count = int(frames.shape[0])
+        if original_count > PREVIEW_MAX_FRAMES:
+            indices = torch.linspace(0, original_count - 1, steps=PREVIEW_MAX_FRAMES).round().to(torch.long)
+            frames = frames.index_select(0, indices).contiguous()
+        height = int(frames.shape[1])
+        width = int(frames.shape[2])
+        max_edge = max(width, height)
+        if max_edge > PREVIEW_MAX_EDGE:
+            scale = PREVIEW_MAX_EDGE / float(max_edge)
+            preview_width = max(1, int(round(width * scale)))
+            preview_height = max(1, int(round(height * scale)))
+            frames = _resize_image_tensor(frames, preview_width, preview_height)
         target_dir = Path(folder_paths.get_temp_directory()) / "GJJ" / "multi_video_preview"
         target_dir.mkdir(parents=True, exist_ok=True)
         filename = f"GJJ_MultiVideoLoader_{uuid.uuid4().hex[:12]}.webp"
@@ -106,8 +120,8 @@ def _save_sequence_webp_preview(frames: torch.Tensor, fps: float = 8.0) -> list[
             duration=max(1, round(1000.0 / max(0.01, float(fps)))),
             loop=0,
             lossless=False,
-            quality=88,
-            method=4,
+            quality=72,
+            method=1,
         )
         return [{
             "filename": filename,
@@ -119,7 +133,8 @@ def _save_sequence_webp_preview(frames: torch.Tensor, fps: float = 8.0) -> list[
             "autoplay": True,
             "loop": True,
             "frame_rate": float(fps),
-            "frame_count": int(frames.shape[0]),
+            "frame_count": original_count,
+            "preview_frame_count": int(frames.shape[0]),
             "width": int(frames.shape[2]),
             "height": int(frames.shape[1]),
         }]
@@ -514,6 +529,31 @@ def _normalize_target_dimension(value: int) -> int:
     return value
 
 
+def _target_output_size(source_width: int, source_height: int, target_width: int, target_height: int) -> tuple[int, int]:
+    sw = max(1, int(source_width or 1))
+    sh = max(1, int(source_height or 1))
+    tw = int(target_width or 0)
+    th = int(target_height or 0)
+    if tw <= 0 and th <= 0:
+        return sw, sh
+    if tw <= 0:
+        tw = max(1, round(sw * th / max(1, sh)))
+    if th <= 0:
+        th = max(1, round(sh * tw / max(1, sw)))
+    return tw, th
+
+
+def _frames_tensor_from_rgb_bytes(raw_data: bytes, frame_count: int, width: int, height: int) -> torch.Tensor:
+    array = np.frombuffer(raw_data, dtype=np.uint8)
+    expected = int(frame_count) * int(height) * int(width) * 3
+    if int(array.size) < expected:
+        raise RuntimeError("FFmpeg 输出数据不完整")
+    if int(array.size) > expected:
+        array = array[:expected]
+    array = array.reshape(int(frame_count), int(height), int(width), 3)
+    return torch.from_numpy(array.copy()).float().div_(255.0).contiguous()
+
+
 def build_uniform_batch(images: list[torch.Tensor]) -> torch.Tensor:
     if not images:
         return empty_image_tensor()
@@ -578,6 +618,12 @@ def _selected_frame_indices(
     stride = max(1, int(frame_stride))
     limit = max(1, int(max_frames))
     return list(range(start, stop + 1, stride))[:limit]
+
+
+def _effective_output_fps(source_fps: float, frame_stride: int) -> float:
+    fps = float(source_fps or 24.0)
+    stride = max(1, int(frame_stride or 1))
+    return max(1.0, min(240.0, fps / stride))
 
 
 def _slice_external_frames(
@@ -724,14 +770,21 @@ def decode_video_cv2(
     if frames_to_output <= 0:
         frames_to_output = 1
 
+    output_width, output_height = _target_output_size(source_width, source_height, int(width), int(height))
+    filters = [f"select=not(mod(n\\,{stride}))"]
+    if output_width != source_width or output_height != source_height:
+        filters.append(f"scale={output_width}:{output_height}:flags=bicubic")
+
     cmd = [
         ffmpeg,
         "-hide_banner",
         "-loglevel", "error",
         "-ss", str(start / fps),
         "-i", str(path),
+        "-an",
+        "-sn",
         "-frames:v", str(frames_to_output),
-        "-vf", f"select=not(mod(n\\,{stride}))",
+        "-vf", ",".join(filters),
         "-vsync", "vfr",
         "-f", "image2pipe",
         "-pix_fmt", "rgb24",
@@ -757,22 +810,14 @@ def decode_video_cv2(
         if source_width <= 0 or source_height <= 0:
             raise RuntimeError(f"无法确定视频原始尺寸")
 
-        frame_size = source_width * source_height * 3
+        frame_size = output_width * output_height * 3
         if len(raw_data) % frame_size != 0:
             raise RuntimeError(f"FFmpeg 输出数据不完整")
 
         num_frames = len(raw_data) // frame_size
-        frames: list[torch.Tensor] = []
-        
-        for i in range(min(num_frames, limit)):
-            start_idx = i * frame_size
-            end_idx = start_idx + frame_size
-            frame_data = raw_data[start_idx:end_idx]
-            
-            img = np.frombuffer(frame_data, dtype=np.uint8).reshape(source_height, source_width, 3)
-            image = _frame_to_tensor(img)
-            image = _resize_image_tensor(image, int(width), int(height))
-            frames.append(image)
+        num_frames = min(num_frames, limit)
+        batch = _frames_tensor_from_rgb_bytes(raw_data, num_frames, output_width, output_height)
+        frames = [batch[i:i + 1] for i in range(num_frames)]
 
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"FFmpeg 解码超时")
@@ -1234,8 +1279,7 @@ class GJJ_MultiVideoLoader:
         if external_video is not None:
             raw_external_frames = external_video["frames"]
             source_fps = float(external_video.get("fps") or output_fps)
-            if source_fps > 0:
-                output_fps = source_fps
+            output_fps = _effective_output_fps(source_fps, frame_stride_val)
             source_frame_count = int(external_video.get("frame_count") or raw_external_frames.shape[0])
             external_frames = _slice_external_frames(
                 raw_external_frames,
@@ -1314,8 +1358,10 @@ class GJJ_MultiVideoLoader:
                     audio_segments.append(decode_audio_ffmpeg(path, audio_start, audio_duration))
                 if index == 0:
                     source_fps = float(meta.get("fps") or 24.0)
+                    output_fps = _effective_output_fps(source_fps, frame_stride_val)
                 total_duration += float(meta.get("duration") or 0.0)
                 all_frames.extend(frames)
+                video_source_fps = float(meta.get("fps") or 0.0)
                 video_infos.append(
                     {
                         "filename": entry["filename"],
@@ -1325,8 +1371,8 @@ class GJJ_MultiVideoLoader:
                         "source_height": int(meta.get("height") or 0),
                         "output_width": int(meta.get("output_width") or 0),
                         "output_height": int(meta.get("output_height") or 0),
-                        "source_fps": float(meta.get("fps") or 0.0),
-                        "output_fps": output_fps,
+                        "source_fps": video_source_fps,
+                        "output_fps": _effective_output_fps(video_source_fps or source_fps, frame_stride_val),
                         "source_frames": int(meta.get("frames") or 0),
                         "duration": float(meta.get("duration") or 0.0),
                         "output_frames": len(frames),
@@ -1345,7 +1391,7 @@ class GJJ_MultiVideoLoader:
         preview_entries: list[dict[str, Any]] = []
         if int(batch_output.shape[0]) > 0:
             preview_tensor = batch_output
-            preview_fps = max(1.0, float(source_fps or output_fps or 24.0))
+            preview_fps = max(1.0, float(output_fps or _effective_output_fps(source_fps, frame_stride_val)))
             preview_entries = _save_sequence_webp_preview(preview_tensor, preview_fps)
 
         info = {

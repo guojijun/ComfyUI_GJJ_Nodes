@@ -124,6 +124,7 @@ SAM31_HELP = build_node_help_payload(
 	],
 	runtime=[
 		"CheckpointLoaderSimple 加载 SAM3.1 checkpoint。",
+		"需要 ComfyUI 本身支持 SAM3.1 Multiplex checkpoint；旧版无法识别时会显示中文兼容提示。",
 		"CLIPTextEncode 编码跟踪目标文本。",
 		"SAM3_VideoTrack 对每一路视频帧执行目标跟踪。",
 	],
@@ -199,6 +200,19 @@ def _extract_text_prompts(conditioning, device, dtype):
 _CHECKPOINT_CACHE: dict[str, Any] = {"key": None, "model": None, "clip": None}
 
 
+def _raise_sam31_compatibility_error(ckpt_path: str, original_error: Exception):
+	message = str(original_error)
+	if "Could not detect model type" not in message:
+		raise original_error
+	raise RuntimeError(
+		"SAM3.1 Multiplex 模型已找到，当前 ComfyUI 版本无法识别这种 checkpoint。请升级你的comfyui\n"
+		"这个节点使用的是官方 SAM3.1 Multiplex / CheckpointLoaderSimple / CLIPTextEncode / SAM3_VideoTrack 路线，"
+		"不能自动替换成 models/sam3 下的 SAM3 模型，因为 sam3 和 sam3.1 是两套不同结构。\n"
+		f"模型路径：{ckpt_path}\n"
+		"处理方式：请升级到带原生 SAM3.1 支持的 ComfyUI，或在新版 ComfyUI 中使用该节点。"
+	) from original_error
+
+
 def _load_checkpoint(ckpt_name: str, unique_id=None):
 	available = _checkpoint_list()
 	if not any(MODEL_KEYWORD.lower() in str(name).lower() for name in available):
@@ -215,12 +229,15 @@ def _load_checkpoint(ckpt_name: str, unique_id=None):
 	cache_key = hashlib.md5(str(ckpt_path).encode("utf-8")).hexdigest()
 	if _CHECKPOINT_CACHE["key"] == cache_key and _CHECKPOINT_CACHE["model"] is not None:
 		return _CHECKPOINT_CACHE["model"], _CHECKPOINT_CACHE["clip"], resolved
-	model, clip, _vae = comfy.sd.load_checkpoint_guess_config(
-		ckpt_path,
-		output_vae=True,
-		output_clip=True,
-		embedding_directory=folder_paths.get_folder_paths("embeddings"),
-	)[:3]
+	try:
+		model, clip, _vae = comfy.sd.load_checkpoint_guess_config(
+			ckpt_path,
+			output_vae=True,
+			output_clip=True,
+			embedding_directory=folder_paths.get_folder_paths("embeddings"),
+		)[:3]
+	except RuntimeError as exc:
+		_raise_sam31_compatibility_error(ckpt_path, exc)
 	_CHECKPOINT_CACHE.update({"key": cache_key, "model": model, "clip": clip})
 	return model, clip, resolved
 

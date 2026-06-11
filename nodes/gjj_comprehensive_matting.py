@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sys
 import types
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -990,6 +991,30 @@ def _finish_outputs(
     return image_tensor, mask_tensor
 
 
+def _save_rgba_preview(rgba_images: list[Image.Image]) -> list[dict[str, Any]]:
+    if not rgba_images:
+        return []
+    try:
+        target_dir = Path(folder_paths.get_temp_directory()) / "GJJ" / "comprehensive_matting_preview"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"GJJ_ComprehensiveMatting_{uuid.uuid4().hex[:12]}.png"
+        path = target_dir / filename
+        image = rgba_images[0].convert("RGBA")
+        image.save(path, format="PNG")
+        return [{
+            "filename": filename,
+            "subfolder": "GJJ/comprehensive_matting_preview",
+            "type": "temp",
+            "format": "image/png",
+            "media_type": "image",
+            "width": int(image.width),
+            "height": int(image.height),
+        }]
+    except Exception as exc:
+        print(f"[GJJ_ComprehensiveMatting] RGBA 预览保存失败: {exc}")
+        return []
+
+
 def _component_value(value: Any, key: str) -> Any:
     if value is None:
         return None
@@ -1547,6 +1572,7 @@ class GJJ_ComprehensiveMatting:
         pil_images = _collect_input_images(media)
         combined_batches: list[torch.Tensor] = []
         combined_masks: list[torch.Tensor] = []
+        preview_rgba: list[Image.Image] = []
 
         for method in METHODS:
             if method not in selected_methods:
@@ -1635,6 +1661,8 @@ class GJJ_ComprehensiveMatting:
             mask_tensor = mask_tensor.contiguous()
             combined_batches.append(image_tensor)
             combined_masks.append(mask_tensor)
+            if final_rgba and not preview_rgba:
+                preview_rgba.append(final_rgba[0])
 
         if combined_batches:
             combined_batch = torch.cat(combined_batches, dim=0).contiguous()
@@ -1642,7 +1670,10 @@ class GJJ_ComprehensiveMatting:
         else:
             combined_batch, combined_mask = _empty_route_output(pil_images, background)
 
-        return (combined_batch, combined_mask)
+        return {
+            "ui": {"rgba_preview": _save_rgba_preview(preview_rgba)},
+            "result": (combined_batch, combined_mask),
+        }
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_ComprehensiveMatting}
