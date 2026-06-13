@@ -63,7 +63,7 @@ _GJJ_HELP = {
         "把 GJJ · 🎞️ Kijai视频模型加载 的 Wan T5 文本编码器输出接到本节点的 T5模型接口。",
         "在正向提示词中填写希望生成的画面内容；支持原版 WanVideo 的 | 分段和 [1] EchoShot 写法。",
         "翻译按钮会调用本地 Opus-MT 中英翻译模型，并把译文回填到正向提示词。",
-        "节点内部使用空负向提示词，并把正向/负向嵌入打包成单个文本条件输出。",
+        "负向提示词为空时按原版 WanVideo 的空负向编码；开启条件零化时会忽略负向文本并生成全零负向嵌入。",
         "输出的文本条件可直接连接到 GJJ WanVideo 采样器的文本条件输入。",
     ],
     "dependencies": [
@@ -72,7 +72,7 @@ _GJJ_HELP = {
     "notes": [
         "本节点使用 GJJ vendor/wanvideo_wrapper 内置运行时，不依赖外部 ComfyUI-WanVideoWrapper 插件。",
         "本节点不再内部加载 T5 模型；模型加载统一交给 GJJ_VideoKijaiModelLoader 或原版 LoadWanVideoT5TextEncoder。",
-        "磁盘缓存默认开启，相同正向提示词会复用已编码嵌入。",
+        "磁盘缓存默认开启，相同正向/负向提示词会复用已编码嵌入。",
         "缺失依赖时，节点面板会显示复制安装命令按钮，点击后可在 PowerShell 中直接执行安装。",
         "安装完成后请重启 ComfyUI 服务器。",
     ],
@@ -261,7 +261,7 @@ class GJJ_WanVideoTextEncodeCached:
     RETURN_TYPES = ("WANVIDEOTEXTEMBEDS",)
     RETURN_NAMES = ("文本条件",)
     OUTPUT_TOOLTIPS = (
-        "包装好的 WanVideo 文本条件，包含正向提示词嵌入和空负向提示词嵌入，可直接连接 WanVideo 采样器。",
+        "包装好的 WanVideo 文本条件，包含正向提示词嵌入和负向提示词嵌入，可直接连接 WanVideo 采样器。",
     )
 
     GJJ_HELP = _GJJ_HELP
@@ -284,6 +284,15 @@ class GJJ_WanVideoTextEncodeCached:
                         "multiline": True,
                         "display_name": "正向提示词",
                         "tooltip": "描述希望生成的画面内容。支持原版 WanVideo 的 | 分段和 [1] EchoShot 写法。",
+                    },
+                ),
+                "negative_prompt": (
+                    "STRING",
+                    {
+                        "default": NEGATIVE_PROMPT,
+                        "multiline": True,
+                        "display_name": "负向提示词",
+                        "tooltip": "描述希望避免的画面内容。条件零化关闭时会按原版 WanVideo 正常编码；条件零化开启时此输入会被隐藏并忽略。",
                     },
                 ),
                 "force_offload": (
@@ -376,9 +385,7 @@ class GJJ_WanVideoTextEncodeCached:
     def IS_CHANGED(cls, *args, **kwargs):
         keys = [
             "positive_prompt",
-            "positive_prompt_input",
             "negative_prompt",
-            "negative_prompt_input",
             "force_offload",
             "use_disk_cache",
             "device",
@@ -401,8 +408,7 @@ class GJJ_WanVideoTextEncodeCached:
         translation_unload_after_use=False,
         translation_enabled=False,
         model_to_offload=None,
-        positive_prompt_input=None,
-        negative_prompt_input=None,
+        negative_prompt=NEGATIVE_PROMPT,
         extender_args=None,
         unique_id=None,
         extra_pnginfo=None,
@@ -410,11 +416,7 @@ class GJJ_WanVideoTextEncodeCached:
     ):
         if text_encoder is None:
             text_encoder = kwargs.get("t5", None)
-        if positive_prompt_input is not None:
-            positive_prompt = positive_prompt_input
-        if negative_prompt_input is None:
-            negative_prompt_input = kwargs.get("negative_prompt", None)
-        negative_prompt = NEGATIVE_PROMPT if negative_prompt_input is None else str(negative_prompt_input or "")
+        negative_prompt = str(negative_prompt or "")
         positive_prompt = str(positive_prompt or "")
         force_offload = as_bool(force_offload)
         use_disk_cache = as_bool(use_disk_cache)
@@ -427,7 +429,7 @@ class GJJ_WanVideoTextEncodeCached:
         if translation_enabled:
             translated = translate_prompt_pair(
                 positive=positive_prompt,
-                negative="",
+                negative=negative_prompt,
                 device=translation_device,
                 max_length=512,
                 batch_size=8,
@@ -436,7 +438,8 @@ class GJJ_WanVideoTextEncodeCached:
                 node_name=NODE_DISPLAY_NAME,
             )
             positive_prompt = str(translated.get("positive", "") or "")
-            send_translated_prompt(unique_id, event_name=TRANSLATED_EVENT, positive=positive_prompt)
+            negative_prompt = str(translated.get("negative", "") or "")
+            send_translated_prompt(unique_id, event_name=TRANSLATED_EVENT, positive=positive_prompt, negative=negative_prompt)
 
         print("[GJJ WanVideoTextEncode] ========== 开始编码文本 ==========")
         encoder_name = ""

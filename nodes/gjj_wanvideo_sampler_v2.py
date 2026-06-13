@@ -3,6 +3,17 @@ from __future__ import annotations
 import sys
 from typing import Any
 
+try:
+    from .gjj_wanvideo_runtime_shims import (
+        ensure_huggingface_hub_cached_download,
+        ensure_optional_gguf_module,
+    )
+except ImportError:
+    from gjj_wanvideo_runtime_shims import (
+        ensure_huggingface_hub_cached_download,
+        ensure_optional_gguf_module,
+    )
+
 
 WANVIDEO_SAMPLER_SCHEDULER_CHOICES = [
     "unipc",
@@ -30,50 +41,8 @@ WANVIDEO_SAMPLER_SCHEDULER_CHOICES = [
 
 
 def _load_sampler_runtime():
-    # 为可选依赖 gguf 创建占位模块，避免 vendor 导入链中断
-    if "gguf" not in sys.modules:
-        import types
-        gguf_stub = types.ModuleType("gguf")
-        gguf_stub.GGML_QUANT_SIZES = {}
-        gguf_stub.GGMLQuantizationType = type("GGMLQuantizationType", (), {
-            "F32": 0,
-            "F16": 1,
-            "BF16": 2,
-            "Q8_0": 3,
-            "Q5_1": 4,
-            "Q5_0": 5,
-            "Q4_1": 6,
-            "Q4_0": 7,
-            "Q6_K": 8,
-            "Q5_K": 9,
-            "Q4_K": 10,
-            "Q3_K": 11,
-            "Q2_K": 12,
-        })
-        sys.modules["gguf"] = gguf_stub
-
-    # 修复 huggingface_hub 缺失的 cached_download 属性
-    # gguf 包内部会导入 huggingface_hub.cached_download，但新版本已移除此函数
-    if "huggingface_hub" in sys.modules:
-        hub_module = sys.modules["huggingface_hub"]
-        if not hasattr(hub_module, "cached_download"):
-            def _stub_cached_download(*args, **kwargs):
-                raise NotImplementedError(
-                    "huggingface_hub.cached_download 已弃用。\n"
-                    "请使用 huggingface_hub.hf_hub_download 替代。"
-                )
-            hub_module.cached_download = _stub_cached_download
-    else:
-        import types
-        hub_stub = types.ModuleType("huggingface_hub")
-        def _stub_func(*args, **kwargs):
-            raise NotImplementedError("huggingface_hub 占位模块不支持此函数，请安装完整的 huggingface_hub 包。")
-        hub_stub.cached_download = _stub_func
-        hub_stub.snapshot_download = _stub_func
-        hub_stub.hf_hub_download = _stub_func
-        hub_stub.HfApi = type("HfApi", (), {})
-        hub_stub.HfFolder = type("HfFolder", (), {"get_token": staticmethod(lambda: None)})
-        sys.modules["huggingface_hub"] = hub_stub
+    ensure_optional_gguf_module()
+    ensure_huggingface_hub_cached_download()
 
     try:
         from ..vendor.wanvideo_wrapper import nodes_sampler as sampler_runtime
@@ -96,17 +65,21 @@ def _model_runtime_module_name(model):
 
 def _is_gjj_vendored_model(model):
     module_name = _model_runtime_module_name(model)
-    return ".vendor.wanvideo_wrapper." in module_name or module_name.startswith(
-        "ComfyUI_GJJ_Nodes.vendor.wanvideo_wrapper"
+    return (
+        ".vendor.wanvideo_wrapper." in module_name
+        or module_name.startswith("vendor.wanvideo_wrapper")
+        or module_name.startswith("ComfyUI_GJJ_Nodes.vendor.wanvideo_wrapper")
     )
 
 
-def _source_wanvideo_sampler_if_loaded(model):
+def _source_wanvideo_sampler_if_loaded(model, class_name="WanVideoSampler"):
     if _is_gjj_vendored_model(model):
         return None
     comfy_nodes = sys.modules.get("nodes")
     mappings = getattr(comfy_nodes, "NODE_CLASS_MAPPINGS", {}) if comfy_nodes is not None else {}
-    sampler_cls = mappings.get("WanVideoSampler")
+    sampler_cls = mappings.get(class_name)
+    if sampler_cls is None and class_name == "WanVideoSampler":
+        sampler_cls = mappings.get("WanVideoSampler")
     if sampler_cls is None:
         return None
     module_name = str(getattr(sampler_cls, "__module__", "") or "")
@@ -512,7 +485,7 @@ class GJJ_WanVideoSamplerV2:
                     {
                         "default": _scheduler_default("dpm++_sde"),
                         "display_name": "调度器",
-                        "tooltip": "采样调度器，直接在节点面板选择。",
+                        "tooltip": "旧版兼容调度器。未连接“调度器配置”时使用这里的面板值。",
                     },
                 ),
                 "riflex_freq_index": (
@@ -593,7 +566,7 @@ class GJJ_WanVideoSamplerV2:
                     {
                         "default": False,
                         "display_name": "批量 CFG",
-                        "tooltip": "将正负条件合批运行，可能更快但会占用更多显存。",
+                        "tooltip": "WanVideoWrapper 的实验加速开关。GJJ v2 会自动关闭它，避免正负条件合批后出现 42/21 这类维度不一致。",
                     },
                 ),
                 "slg_args": (
@@ -629,7 +602,14 @@ class GJJ_WanVideoSamplerV2:
                     "SIGMAS",
                     {
                         "display_name": "Sigmas",
-                        "tooltip": "对齐原版 WanVideo Sampler 的自定义 sigmas 输入；连接后会改变采样时间步。",
+                        "tooltip": "旧版兼容 Sigmas。推荐连接 GJJ WanVideo 调度器 v2 的 Sigmas 输入。",
+                    },
+                ),
+                "scheduler_config": (
+                    "WANVIDEOSCHEDULER",
+                    {
+                        "display_name": "调度器配置",
+                        "tooltip": "源版 WanVideo Sampler v2 使用的调度器对象；由 GJJ WanVideo 调度器 v2 输出。",
                     },
                 ),
                 "unianimate_poses": (
@@ -754,6 +734,7 @@ class GJJ_WanVideoSamplerV2:
         loop_args=None,
         experimental_args=None,
         sigmas=None,
+        scheduler_config=None,
         unianimate_poses=None,
         fantasytalking_embeds=None,
         uni3c_embeds=None,
@@ -765,6 +746,7 @@ class GJJ_WanVideoSamplerV2:
         extra_args=None,
         seed=0,
     ):
+        effective_scheduler = scheduler_config if scheduler_config is not None else scheduler
         args = {
             "model": model,
             "image_embeds": image_embeds,
@@ -773,7 +755,7 @@ class GJJ_WanVideoSamplerV2:
             "shift": shift,
             "seed": seed,
             "force_offload": force_offload,
-            "scheduler": scheduler,
+            "scheduler": effective_scheduler,
             "riflex_freq_index": riflex_freq_index,
             "text_embeds": text_embeds,
             "samples": samples,
@@ -798,7 +780,8 @@ class GJJ_WanVideoSamplerV2:
             "end_step": end_step,
             "add_noise_to_samples": add_noise_to_samples,
         }
-        _merge_extra_args(args, extra_args)
+        if extra_args is not None and not isinstance(extra_args, dict):
+            raise TypeError("WanVideo 采样扩展参数必须是字典类型，请连接 GJJ · 🧰 WanVideo 采样扩展参数。")
 
         scheduler_choices = _scheduler_choices()
         rope_choices = _rope_choices()
@@ -821,15 +804,20 @@ class GJJ_WanVideoSamplerV2:
         args["riflex_freq_index"] = _as_int(args["riflex_freq_index"], 0, min_value=0, max_value=1000)
         args["denoise_strength"] = _as_float(args["denoise_strength"], 1.0, min_value=0.0, max_value=1.0)
         args["batched_cfg"] = _as_bool(args["batched_cfg"], False)
+        if args["batched_cfg"]:
+            print(
+                "[GJJ WanVideoSamplerV2] 批量 CFG 已自动关闭："
+                "该实验路径会把条件批次翻倍，容易与 Bernini/图像条件/文本条件产生 42/21 维度不一致。"
+            )
+            args["batched_cfg"] = False
         args["start_step"] = _as_int(args["start_step"], 0, min_value=0, max_value=10000)
         args["end_step"] = _as_int(args["end_step"], -1, min_value=-1, max_value=10000)
         args["add_noise_to_samples"] = _as_bool(args["add_noise_to_samples"], False)
 
-        node = _source_wanvideo_sampler_if_loaded(model)
-        if node is None:
-            runtime = _load_sampler_runtime()
-            node = runtime.WanVideoSampler()
-        return node.process(**args)
+        runtime = _load_sampler_runtime()
+        node_cls = getattr(runtime, "WanVideoSamplerv2", None) or getattr(runtime, "WanVideoSampler")
+        node = node_cls()
+        return node.process(**args, extra_args=extra_args)
 
 
 NODE_CLASS_MAPPINGS = {

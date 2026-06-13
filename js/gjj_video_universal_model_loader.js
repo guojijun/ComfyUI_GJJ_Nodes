@@ -1628,6 +1628,8 @@ function slotNeedsDtype(slot) {
 }
 function officialIconFor(slot) {
 	const kind = String(slot?.kind || "");
+	const customIcon = String(slot?.icon || "").trim();
+	if (customIcon) return customIcon;
 	// 与官方插口颜色对齐：MODEL 紫、VAE 红、CLIP 黄。
 	if (["diffusion", "checkpoint_model"].includes(kind)) return "🟣";
 	if (["wanvideo_model"].includes(kind)) return "🟣";
@@ -2404,7 +2406,7 @@ function applyConfig(node, opts = {}) {
 		if (isLoraSlot(slot) && !loraEnabled) row.style.display = "none";
 		const label = document.createElement("div");
 		label.className = "gjj-vu-label";
-		const icon = isLoraSlot(slot) ? "🟠" : officialIconFor(slot);
+		const icon = officialIconFor(slot);
 		label.textContent = `${icon} ${String(slot.label || slot.id || `模型${i}`)}`;
 		label.title = slotTitle(slot, folder);
 		const select = createSearchableSelect(node, fileName, values, (value) => {

@@ -681,8 +681,8 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             WM("low_model", "Low模型", ["wan2_2", "i2v", "a14b", "low"], preferred_name="Wan2_2-I2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors", target="low", quantization="fp8_e4m3fn_scaled"),
             WAN21_VAE,
             WAN_T5,
-            LIGHTX_I2V_14B,
-            L("lightx2v_i2v_low", "Low增强 LoRA", ["lightx2v", "i2v", "14b"], preferred_name="lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", target="low", strength=3.0, merge_loras=False),
+            L("lightx2v_i2v_high", "High加速 LoRA", ["lightx2v", "i2v", "14b"], preferred_name="lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", target="high", strength=3.0, merge_loras=False, icon="🔺"),
+            L("lightx2v_i2v_low", "Low加速 LoRA", ["lightx2v", "i2v", "14b"], preferred_name="lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", target="low", strength=1.0, merge_loras=False, icon="🔻"),
         ],
     },
     "wan22_fun_control_dual": {
@@ -708,7 +708,7 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "wan22_ti2v_5b": {
         "label": "Wan2.2 TI2V 5B 单模型",
         "slots": [
-            WM("model", "TI2V 5B模型", ["wan2_2", "ti2v", "5b"], preferred_name="wan2.2_ti2v_5B_fp16.safetensors", base_precision="fp16_fast", attention_mode="sageattn"),
+            WM("model", "TI2V 5B模型", ["wan2_2", "ti2v", "5b","kj"], preferred_name="Wan2_2-TI2V-5B_fp8_e4m3fn_scaled_KJ.safetensors", base_precision="fp16_fast", attention_mode="sdpa"),
             WAN22_VAE,
             WAN_T5,
         ],
@@ -716,7 +716,7 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "wan22_ovi_audio": {
         "label": "Wan2.2 Ovi 图像音频驱动",
         "slots": [
-            WM("model", "Ovi视频模型", ["ovi", "video"], preferred_name="Wan_2_1_Ovi_video_model_bf16.safetensors", base_precision="bf16", attention_mode="sageattn"),
+            WM("model", "Ovi视频模型", ["ovi", "video"], preferred_name="Wan_2_1_Ovi_video_model_bf16.safetensors", base_precision="bf16", attention_mode="sdpa"),
             WAN22_VAE,
             WAN_T5,
             EXTRA("ovi_audio_extra", "Ovi音频额外模型", ["ovi", "audio"], preferred_name="Wan_2_1_Ovi_audio_model_bf16.safetensors"),
@@ -728,6 +728,7 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             WM("model", "WanAnimate模型", ["wan2_2", "animate", "14b"], preferred_name="Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors", quantization="fp8_e4m3fn_scaled"),
             WAN21_VAE,
             WAN_T5,
+            S("clip_vision", "CLIP视觉", "clip_vision", "clip_vision", ["clip_vision_h"], preferred_name="clip_vision_h.safetensors", required_name="clip_vision_h.safetensors"),
             L("wananimate_relight_lora", "WanAnimate Relight LoRA", ["wananimate", "relight"], preferred_name="WanAnimate_relight_lora_fp16.safetensors", strength=1.0, merge_loras=False),
             L("wananimate_lightx_lora", "LightX2V I2V LoRA", ["lightx2v", "i2v", "14b"], preferred_name="lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors", strength=1.2, merge_loras=False),
         ],
@@ -762,7 +763,7 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "wan21_flf2v_14b": {
         "label": "Wan2.1 FLF2V 首尾帧 14B",
         "slots": [
-            WM("model", "FLF2V 720P模型", ["flf2v", "14b", "720"], preferred_name="Wan2_1-FLF2V-14B-720P_fp8_e4m3fn.safetensors", base_precision="fp16_fast", quantization="fp8_e4m3fn", attention_mode="sageattn"),
+            WM("model", "FLF2V 720P模型", ["flf2v", "14b", "720"], preferred_name="Wan2_1-FLF2V-14B-720P_fp8_e4m3fn.safetensors", base_precision="fp16_fast", quantization="fp8_e4m3fn", attention_mode="sdpa"),
             WAN21_VAE,
             WAN_T5,
             L("flf2v_lightx_lora", "FLF2V LightX LoRA", ["lightx2v", "14b", "rank32"], preferred_name="Wan21_T2V_14B_lightx2v_cfg_step_distill_lora_rank32.safetensors", strength=1.2, merge_loras=True),
@@ -838,7 +839,7 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "longcat_avatar": {
         "label": "LongCat Avatar 音频图生视频",
         "slots": [
-            WM("model", "LongCat Avatar模型", ["longcat", "avatar", "15"], preferred_name="LongCat-Avatar-15_fp8_e4m3fn_wancompatible.safetensors", base_precision="bf16", quantization="disabled", attention_mode="sageattn", fallback_keywords=[["longcat", "avatar", "fp8_e4m3fn"], ["longcat", "avatar"]]),
+            WM("model", "LongCat Avatar模型", ["longcat", "avatar", "15"], preferred_name="LongCat-Avatar-15_fp8_e4m3fn_wancompatible.safetensors", base_precision="bf16", quantization="disabled", attention_mode="sdpa", fallback_keywords=[["longcat", "avatar", "fp8_e4m3fn"], ["longcat", "avatar"]]),
             WAN21_VAE,
             WAN_T5,
             L("longcat_distill_lora", "LongCat Avatar DMD Distill LoRA", ["longcat", "avatar", "dmd", "distill"], preferred_name="LongCat-Avatar-15_dmd_distillLoRA.safetensors", strength=0.9, fallback_keywords=[["longcat", "distill"]]),
@@ -856,7 +857,7 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "wan21_13b_echoshot": {
         "label": "Wan2.1 1.3B EchoShot",
         "slots": [
-            WM("model", "EchoShot 1.3B模型", ["echoshot", "1", "3b"], preferred_name="Wan2_1-T2V-1-3B-EchoShot_fp16.safetensors", base_precision="fp16_fast", attention_mode="sageattn"),
+            WM("model", "EchoShot 1.3B模型", ["echoshot", "1", "3b"], preferred_name="Wan2_1-T2V-1-3B-EchoShot_fp16.safetensors", base_precision="fp16_fast", attention_mode="sdpa"),
             WAN21_VAE,
             WAN_T5,
             L("echoshot_causvid_lora", "CausVid LoRA", ["causvid", "1_3b"], preferred_name="Wan21_CausVid_bidirect2_T2V_1_3B_lora_rank32.safetensors", strength=0.6, merge_loras=True),
@@ -1459,7 +1460,7 @@ class GJJ_VideoKijaiModelLoader:
     CATEGORY = "GJJ/模型加载"
     FUNCTION = "load_models"
     DESCRIPTION = (
-        "Kijai/WanVideoWrapper 生态模型族预设加载器。输出 WANVIDEOMODEL / WANVAE / WANTEXTENCODER，"
+        "Kijai/WanVideoWrapper 生态模型族预设加载器。输出 WANVIDEOMODEL / WANVAE / WANTEXTENCODER / CLIP_VISION，"
         "支持双模型、单模型、预设 LoRA、VACE、FantasyTalking、MultiTalk/InfiniteTalk、FantasyPortrait 等扩展模块。"
         "节点使用 GJJ 内置 vendor/wanvideo_wrapper 运行层，不依赖外部 ComfyUI-WanVideoWrapper 节点包。"
     )
@@ -1479,6 +1480,7 @@ class GJJ_VideoKijaiModelLoader:
         "models": [
             {"label": "主模型", "value": "models/diffusion_models/...", "tooltip": "按当前预设从 Kijai/WanVideoWrapper 工作流模型族中自动匹配。"},
             {"label": "VAE", "value": "models/vae/Wan2_1_VAE_bf16.safetensors 或 Wan2_2_VAE_bf16.safetensors", "tooltip": "输出 WANVAE，可直连 KJ 系 WanVideo 节点。"},
+            {"label": "CLIP视觉", "value": "models/clip_vision/clip_vision_h.safetensors", "tooltip": "WanAnimate 等图像/人物参考分支需要，输出 CLIP_VISION。"},
             {"label": "扩展模型", "value": "models/diffusion_models/extra/fantasytalking/multitalk/fantasyportrait/vace...", "tooltip": "预设会按模型族显示需要的额外模块。"},
         ],
         "dependencies": ["GJJ 内置 vendor/wanvideo_wrapper 运行层", "WanVideo 运行依赖按 GJJ WanVideo 节点环境安装"],

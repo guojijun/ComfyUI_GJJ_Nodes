@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-import sys
 import torch
 
 import folder_paths
 import comfy.model_management as mm
 from comfy.utils import load_torch_file
+
+try:
+    from .gjj_wanvideo_runtime_shims import ensure_optional_gguf_module
+except ImportError:
+    from gjj_wanvideo_runtime_shims import ensure_optional_gguf_module
 
 # 导入公共依赖检查器
 try:
@@ -139,27 +143,7 @@ def _filter_vae_models(keyword: str = "wan"):
 
 def _load_wan_video_vae():
     """懒加载 WanVideoVAE 依赖"""
-    # 为可选依赖 gguf 创建占位模块，避免 vendor 导入链中断
-    if "gguf" not in sys.modules:
-        import types
-        gguf_stub = types.ModuleType("gguf")
-        gguf_stub.GGML_QUANT_SIZES = {}
-        gguf_stub.GGMLQuantizationType = type("GGMLQuantizationType", (), {
-            "F32": 0,
-            "F16": 1,
-            "BF16": 2,
-            "Q8_0": 3,
-            "Q5_1": 4,
-            "Q5_0": 5,
-            "Q4_1": 6,
-            "Q4_0": 7,
-            "Q6_K": 8,
-            "Q5_K": 9,
-            "Q4_K": 10,
-            "Q3_K": 11,
-            "Q2_K": 12,
-        })
-        sys.modules["gguf"] = gguf_stub
+    ensure_optional_gguf_module()
 
     try:
         from ..vendor.wanvideo_wrapper.wanvideo import wan_video_vae as vae_module

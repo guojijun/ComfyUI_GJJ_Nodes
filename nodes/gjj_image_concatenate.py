@@ -276,4 +276,4 @@ class GJJ_ImageConcanate:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_ImageConcanate}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🧩 图片拼接（简易）"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🧩 图片、视频拼接（简易）"}

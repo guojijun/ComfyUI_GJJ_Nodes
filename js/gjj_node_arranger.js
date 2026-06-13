@@ -685,7 +685,9 @@ function markArrangeCanvasDirty(node = null) {
 
 function getLinkByIdForGeometry(linkId) {
 	if (linkId == null) return null;
-	return app?.graph?.links?.[linkId] || app?.graph?.links?.[String(linkId)] || null;
+	const links = app?.graph?.links || app?.graph?._links;
+	if (links instanceof Map) return links.get(linkId) || links.get(String(linkId)) || null;
+	return links?.[linkId] || links?.[String(linkId)] || null;
 }
 
 function clearLinkGeometryCache(link) {
@@ -724,6 +726,49 @@ function clearSlotGeometryCache(slot) {
 	}
 }
 
+function alignLinkEndpoint(link, side, nodeId, slotIndex) {
+	if (!link) return;
+	if (Array.isArray(link)) {
+		if (side === "origin") {
+			link[1] = nodeId;
+			link[2] = slotIndex;
+		} else {
+			link[3] = nodeId;
+			link[4] = slotIndex;
+		}
+		return;
+	}
+
+	if (side === "origin") {
+		link.origin_id = nodeId;
+		link.origin_slot = slotIndex;
+		link.from_id = nodeId;
+		link.from_slot = slotIndex;
+	} else {
+		link.target_id = nodeId;
+		link.target_slot = slotIndex;
+		link.to_id = nodeId;
+		link.to_slot = slotIndex;
+	}
+}
+
+function repairGraphLinkSlotAlignment() {
+	const nodes = filterValidNodes(getAllGraphNodes(), false);
+	for (const node of nodes) {
+		for (let slotIndex = 0; slotIndex < safeArray(node.inputs).length; slotIndex++) {
+			const linkId = node.inputs[slotIndex]?.link;
+			if (linkId == null) continue;
+			alignLinkEndpoint(getLinkByIdForGeometry(linkId), "target", node.id, slotIndex);
+		}
+		for (let slotIndex = 0; slotIndex < safeArray(node.outputs).length; slotIndex++) {
+			for (const linkId of safeArray(node.outputs[slotIndex]?.links)) {
+				alignLinkEndpoint(getLinkByIdForGeometry(linkId), "origin", node.id, slotIndex);
+			}
+		}
+	}
+	return nodes;
+}
+
 function resetNodeLinkGeometry(node) {
 	if (!node) return;
 	for (const input of safeArray(node?.inputs)) clearSlotGeometryCache(input);
@@ -735,6 +780,40 @@ function resetNodeLinkGeometry(node) {
 		clearLinkGeometryCache(getLinkByIdForGeometry(linkId));
 	}
 	markArrangeCanvasDirty(node);
+}
+
+function uniqueNodes(nodes = []) {
+	const result = [];
+	const seen = new Set();
+	for (const node of safeArray(nodes)) {
+		if (!isRealNode(node) || seen.has(node)) continue;
+		seen.add(node);
+		result.push(node);
+	}
+	return result;
+}
+
+function runRegisteredLayoutStabilizers(nodes = [], phase = "sync") {
+	const targetNodes = uniqueNodes(nodes.length ? nodes : getAllGraphNodes());
+	const registry = safeArray(globalThis.GJJ_NodeArrangerLayoutStabilizers);
+	if (!registry.length || !targetNodes.length) return [];
+
+	const touched = [];
+	for (const node of targetNodes) {
+		for (const stabilizer of registry) {
+			try {
+				const matches = typeof stabilizer?.matches === "function"
+					? stabilizer.matches(node)
+					: false;
+				if (!matches || typeof stabilizer?.stabilize !== "function") continue;
+				stabilizer.stabilize(node, { phase, source: "GJJ_NodeArranger" });
+				touched.push(node);
+			} catch (error) {
+				console.warn("[GJJ_NodeArranger] layout stabilizer failed:", stabilizer?.id || "unknown", error);
+			}
+		}
+	}
+	return uniqueNodes(touched);
 }
 
 function applyManualResizeStep(node, width, height) {
@@ -887,18 +966,28 @@ function showMessage(message) {
 }
 
 function refreshAfterArrange(nodes = []) {
-	for (const node of nodes) {
-		roundNodePosition(node);
-		resetNodeLinkGeometry(node);
-	}
+	const arrangedNodes = filterValidNodes(nodes, false);
+	const stabilizedNodes = runRegisteredLayoutStabilizers(arrangedNodes, "sync");
+	const graphNodes = repairGraphLinkSlotAlignment();
+	const refreshNodes = uniqueNodes([
+		...(graphNodes.length ? graphNodes : arrangedNodes),
+		...arrangedNodes,
+		...stabilizedNodes,
+	]);
+	for (const node of arrangedNodes) roundNodePosition(node);
+	for (const node of refreshNodes) resetNodeLinkGeometry(node);
 
 	try {
 		markArrangeCanvasDirty();
 		globalThis.requestAnimationFrame?.(() => {
-			for (const node of nodes) resetNodeLinkGeometry(node);
+			runRegisteredLayoutStabilizers(refreshNodes, "raf1");
+			repairGraphLinkSlotAlignment();
+			for (const node of refreshNodes) resetNodeLinkGeometry(node);
 			markArrangeCanvasDirty();
 			globalThis.requestAnimationFrame?.(() => {
-				for (const node of nodes) resetNodeLinkGeometry(node);
+				runRegisteredLayoutStabilizers(refreshNodes, "raf2");
+				repairGraphLinkSlotAlignment();
+				for (const node of refreshNodes) resetNodeLinkGeometry(node);
 				markArrangeCanvasDirty();
 			});
 		});
@@ -4984,10 +5073,33 @@ function arrangeTopologicalFromGraph(sortMode = TOPO_SORT_MODES.TOPO_MAIN_PATH, 
 	return arrangeTopological(validNodes, spacing, sortMode);
 }
 
+function runArrangeAction(action, spacing = DEFAULT_SPACING) {
+	const selectedOnly = shouldUseSelectedOnly();
+	switch (action) {
+		case "auto":
+		case "horizontal":
+		case "vertical":
+		case "grid":
+			return arrangeNodes(action, spacing, 10, 0.5, true, true, selectedOnly);
+		case TOPO_SORT_MODES.TOPO_MAIN_PATH:
+		case TOPO_SORT_MODES.TOPO_OUTPUT_ANCHOR:
+		case TOPO_SORT_MODES.TOPO_COMPACT:
+		case TOPO_SORT_MODES.TOPO_BRANCH:
+		case TOPO_SORT_MODES.TOPO_ORIGINAL_Y:
+			return arrangeTopologicalFromGraph(action, selectedOnly, spacing);
+		case "collapse":
+			return setAllNodesCollapsed(true, selectedOnly);
+		case "expand":
+			return setAllNodesCollapsed(false, selectedOnly);
+		case "toggle-collapse":
+			return toggleAllNodesCollapsed(selectedOnly);
+		default:
+			return undefined;
+	}
+}
+
 function createMenuCallback(mode) {
-	return () => {
-		arrangeNodes(mode, DEFAULT_SPACING, 10, 0.5, true, true, shouldUseSelectedOnly());
-	};
+	return () => runArrangeAction(mode, DEFAULT_SPACING);
 }
 
 function addContextMenuItems() {
@@ -5018,27 +5130,35 @@ function addContextMenuItems() {
 					null,
 					{
 						content: "🔢 拓扑排序：主链路",
-						callback: () => arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_MAIN_PATH, shouldUseSelectedOnly(), DEFAULT_SPACING),
+						callback: createMenuCallback(TOPO_SORT_MODES.TOPO_MAIN_PATH),
 					},
 					{
 						content: "🎯 拓扑排序：输出锚定",
-						callback: () => arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_OUTPUT_ANCHOR, shouldUseSelectedOnly(), DEFAULT_SPACING),
+						callback: createMenuCallback(TOPO_SORT_MODES.TOPO_OUTPUT_ANCHOR),
 					},
 					{
 						content: "🧩 拓扑排序：紧凑层级",
-						callback: () => arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_COMPACT, shouldUseSelectedOnly(), DEFAULT_SPACING),
+						callback: createMenuCallback(TOPO_SORT_MODES.TOPO_COMPACT),
 					},
 					{
 						content: "🌿 拓扑排序：分支优先",
-						callback: () => arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_BRANCH, shouldUseSelectedOnly(), DEFAULT_SPACING),
+						callback: createMenuCallback(TOPO_SORT_MODES.TOPO_BRANCH),
 					},
 					{
-						content: "📦 全部折叠 / 全部打开",
-						callback: () => toggleAllNodesCollapsed(shouldUseSelectedOnly()),
+						content: "📦 全部折叠",
+						callback: createMenuCallback("collapse"),
+					},
+					{
+						content: "📭 全部打开",
+						callback: createMenuCallback("expand"),
+					},
+					{
+						content: "🔁 全部折叠 / 全部打开",
+						callback: createMenuCallback("toggle-collapse"),
 					},
 					{
 						content: "↕️ 拓扑排序：保持上下",
-						callback: () => arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_ORIGINAL_Y, shouldUseSelectedOnly(), DEFAULT_SPACING),
+						callback: createMenuCallback(TOPO_SORT_MODES.TOPO_ORIGINAL_Y),
 					},
 					null,
 					{
@@ -5126,7 +5246,7 @@ function addTopBarButtons() {
 		arrangeBtn.style.cssText = buttonStyle();
 		installHoverStyle(arrangeBtn);
 		arrangeBtn.addEventListener("click", () => {
-			arrangeNodes("auto", DEFAULT_SPACING, 10, 0.5, true, true, shouldUseSelectedOnly());
+			runArrangeAction("auto");
 		});
 		group.appendChild(arrangeBtn);
 
@@ -5136,7 +5256,7 @@ function addTopBarButtons() {
 		topoBtn.style.cssText = buttonStyle();
 		installHoverStyle(topoBtn);
 		topoBtn.addEventListener("click", () => {
-			arrangeTopologicalFromGraph(TOPO_SORT_MODES.TOPO_MAIN_PATH, shouldUseSelectedOnly(), DEFAULT_SPACING);
+			runArrangeAction(TOPO_SORT_MODES.TOPO_MAIN_PATH);
 		});
 		group.appendChild(topoBtn);
 
@@ -5162,10 +5282,41 @@ function addTopBarButtons() {
 		}
 
 		topoSelect.addEventListener("change", () => {
-			arrangeTopologicalFromGraph(topoSelect.value, shouldUseSelectedOnly(), DEFAULT_SPACING);
+			runArrangeAction(topoSelect.value);
 		});
 
 		group.appendChild(topoSelect);
+
+		const allActionsSelect = document.createElement("select");
+		allActionsSelect.title = "全部排列、折叠和打开动作；部分选择时仅作用所选，否则立即作用全部节点";
+		allActionsSelect.style.cssText = topoSelect.style.cssText;
+		const allActions = [
+			["", "📋 全部动作"],
+			["auto", "🔄 智能自动排列"],
+			[TOPO_SORT_MODES.TOPO_MAIN_PATH, "🔢 拓扑：主链路"],
+			[TOPO_SORT_MODES.TOPO_OUTPUT_ANCHOR, "🎯 拓扑：输出锚定"],
+			[TOPO_SORT_MODES.TOPO_COMPACT, "🧩 拓扑：紧凑层级"],
+			[TOPO_SORT_MODES.TOPO_BRANCH, "🌿 拓扑：分支优先"],
+			[TOPO_SORT_MODES.TOPO_ORIGINAL_Y, "↕️ 拓扑：保持上下"],
+			["horizontal", "➡️ 水平排列"],
+			["vertical", "⬇️ 垂直排列"],
+			["grid", "⊞ 正方形预览排版"],
+			["collapse", "📦 全部折叠"],
+			["expand", "📭 全部打开"],
+			["toggle-collapse", "🔁 折叠 / 打开切换"],
+		];
+		for (const [value, label] of allActions) {
+			const option = document.createElement("option");
+			option.value = value;
+			option.textContent = label;
+			allActionsSelect.appendChild(option);
+		}
+		allActionsSelect.addEventListener("change", () => {
+			const action = allActionsSelect.value;
+			allActionsSelect.value = "";
+			if (action) runArrangeAction(action);
+		});
+		group.appendChild(allActionsSelect);
 
 		const collapseBtn = document.createElement("button");
 		collapseBtn.textContent = "📦 折叠/打开";
@@ -5173,7 +5324,7 @@ function addTopBarButtons() {
 		collapseBtn.style.cssText = buttonStyle();
 		installHoverStyle(collapseBtn);
 		collapseBtn.addEventListener("click", () => {
-			toggleAllNodesCollapsed(shouldUseSelectedOnly());
+			runArrangeAction("toggle-collapse");
 		});
 		group.appendChild(collapseBtn);
 
@@ -5384,7 +5535,7 @@ function addButtonToArrangerNode(node) {
 		].join(";");
 
 		btn.addEventListener("click", () => {
-			arrangeNodes("auto", DEFAULT_SPACING, 10, 0.5, true, true, shouldUseSelectedOnly());
+			runArrangeAction("auto");
 		});
 
 		btn.addEventListener("mouseenter", () => {

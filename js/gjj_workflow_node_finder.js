@@ -1027,6 +1027,9 @@ import { app } from "/scripts/app.js";
 		const nextQuery = selectedType || lastQuery;
 		if (selectedType) {
 			lastQuery = selectedType;
+			const nextReplaceTarget = `GJJ_${selectedType}`;
+			replaceInput.value = nextReplaceTarget;
+			saveReplaceTarget(nextReplaceTarget);
 		}
 		if (overlay.style.display !== "none") {
 			hideReplaceSuggestions();

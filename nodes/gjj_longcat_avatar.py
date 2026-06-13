@@ -647,7 +647,7 @@ def _load_reference_workflow_assets(unique_id=None, blocks_to_swap=40, lora_stre
         lora=lora_config,
         rms_norm_function="default",
     )[0]
-    _block_swap_args, model = block_swap_node.setargs(
+    model, _low_model, _block_swap_args = block_swap_node.setargs(
         blocks_to_swap=swap_blocks,
         offload_img_emb=False,
         offload_txt_emb=False,

@@ -32,6 +32,21 @@ VAE_STRIDE = (4, 8, 8)
 PATCH_SIZE = (1, 2, 2)
 
 
+def _forward_accepts_kwarg(module, key):
+    seen = set()
+    while hasattr(module, "_orig_mod") and id(module) not in seen:
+        seen.add(id(module))
+        module = module._orig_mod
+    try:
+        signature = inspect.signature(module.forward)
+    except Exception:
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+    return key in signature.parameters
+
+
 class WanVideoSampler:
     @classmethod
     def INPUT_TYPES(s):
@@ -83,6 +98,12 @@ class WanVideoSampler:
         experimental_args=None, sigmas=None, unianimate_poses=None, fantasytalking_embeds=None, uni3c_embeds=None, multitalk_embeds=None, freeinit_args=None, start_step=0, end_step=-1, add_noise_to_samples=False):
         if flowedit_args is not None:
             raise Exception("FlowEdit support has been deprecated and removed due to lack of use and code maintainability")
+        if batched_cfg:
+            print(
+                "[GJJ WanVideoWrapper] batched_cfg has been disabled for compatibility: "
+                "the batched cond/uncond path can produce mismatched condition lengths such as 42 vs 21."
+            )
+            batched_cfg = False
         patcher = model
         model = model.model
         transformer = model.diffusion_model
@@ -479,9 +500,16 @@ class WanVideoSampler:
         context_latents = image_embeds.get("context_latents", None)
         if context_latents is None and isinstance(text_embeds, dict):
             context_latents = text_embeds.get("context_latents", None)
+        supports_context_latents = _forward_accepts_kwarg(transformer, "context_latents")
         if context_latents:
             context_shapes = [tuple(lat.shape) for lat in context_latents if isinstance(lat, torch.Tensor)]
-            log.info(f"GJJ Bernini: sampler received {len(context_shapes)} context_latents: {context_shapes}")
+            if supports_context_latents:
+                log.info(f"GJJ Bernini: sampler received {len(context_shapes)} context_latents: {context_shapes}")
+            else:
+                log.warning(
+                    "GJJ Bernini: 当前 WanModel 不支持 context_latents，已跳过 Bernini 上下文注入以避免采样中断。"
+                    "请使用 GJJ 内置 WanVideo 模型加载器与 vendored runtime 获得 Bernini 支持。"
+                )
         if wananimate_loop and context_options is not None:
             raise Exception("context_options are not compatible or necessary with WanAnim looping, since it creates the video in a loop.")
         wananim_pose_latents = image_embeds.get("pose_latents", None)
@@ -1506,9 +1534,10 @@ class WanVideoSampler:
                     "transformer_options": transformer_options,
                     "rope_negative_offset": image_embeds.get("rope_negative_offset_frames", 0), # StoryMem rope negative offset
                     "num_memory_frames": story_mem_latents.shape[1] if story_mem_latents is not None else 0, # StoryMem memory frames
-                    "context_latents": context_latents, # Bernini in-context reference
-                    "context_window_start": context_window_start, # Bernini context RoPE offset
                 }
+                if supports_context_latents and context_latents is not None:
+                    base_params["context_latents"] = context_latents # Bernini in-context reference
+                    base_params["context_window_start"] = context_window_start # Bernini context RoPE offset
 
                 batch_size = 1
 
@@ -1663,12 +1692,12 @@ class WanVideoSampler:
 
                     #batched
                     else:
-                        base_params['z'] = [z] * 2
+                        base_params['x'] = [z] * 2
                         base_params['y'] = [image_cond_input] * 2 if image_cond_input is not None else None
                         base_params['clip_fea'] = torch.cat([clip_fea, clip_fea], dim=0)
                         cache_state_uncond = None
                         [noise_pred_cond, noise_pred_uncond_text], _, cache_state_cond = transformer(
-                            context=positive_embeds + negative_embeds, is_uncond=False,
+                            context=positive_embeds + negative_embeds,
                             pred_id=cache_state[0] if cache_state else None,
                             **base_params
                         )

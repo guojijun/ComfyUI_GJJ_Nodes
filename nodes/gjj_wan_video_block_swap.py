@@ -41,11 +41,12 @@ class GJJ_WanVideoBlockSwap:
         "分块卸载",
     ]
 
-    RETURN_TYPES = ("BLOCKSWAPARGS", "WANVIDEOMODEL")
-    RETURN_NAMES = ("分块交换参数", "WanVideo模型")
+    RETURN_TYPES = ("WANVIDEOMODEL", "WANVIDEOMODEL", "BLOCKSWAPARGS")
+    RETURN_NAMES = ("High模型", "Low模型", "分块交换参数")
     OUTPUT_TOOLTIPS = (
+        "当 High 模型接入 WANVIDEOMODEL 时，输出已写入 block_swap_args 的克隆模型；未接入时为空。",
+        "当 Low 模型接入 WANVIDEOMODEL 时，输出已写入 block_swap_args 的克隆模型；未接入时为空。",
         "WanVideo 分块换入/卸载参数，可连接到支持 BLOCKSWAPARGS 的 WanVideo 模型加载器或采样器。",
-        "当左侧 model 接入 WANVIDEOMODEL 时，输出已写入 block_swap_args 的克隆模型；未接入时为空。",
     )
 
     GJJ_HELP = {
@@ -56,7 +57,7 @@ class GJJ_WanVideoBlockSwap:
             "14B 常见为 40 个块，1.3B/5B 常见为 30 个块，LongCat-video 常见为 48 个块。",
             "VACE 模型可额外设置 vace_blocks_to_swap，VACE 通常有 15 个块。",
             "prefetch_blocks 可提前换入后续块，可能提速但会增加内存占用。",
-            "如果接入可选 model 输入，节点会直接输出已写入分块交换参数的 WANVIDEOMODEL。",
+            "如果接入可选 High模型 或 Low模型 输入，节点会分别输出已写入分块交换参数的 WANVIDEOMODEL。",
         ],
         "notes": [
             "该节点不导入 ComfyUI-WanVideoWrapper；model 接入时仅复刻 WanVideoSetBlockSwap 的 clone + model_options 写入逻辑。",
@@ -100,8 +101,15 @@ class GJJ_WanVideoBlockSwap:
                 "model": (
                     "WANVIDEOMODEL",
                     {
-                        "display_name": "WanVideo模型",
-                        "tooltip": "可选接入 WANVIDEOMODEL。接入后节点会 clone 模型并写入 transformer_options.block_swap_args，等同 WanVideoSetBlockSwap。",
+                        "display_name": "High模型",
+                        "tooltip": "可选接入 High 路 WANVIDEOMODEL。接入后节点会 clone 模型并写入 transformer_options.block_swap_args，输出到 High模型。",
+                    },
+                ),
+                "low_model": (
+                    "WANVIDEOMODEL",
+                    {
+                        "display_name": "Low模型",
+                        "tooltip": "可选接入 Low 路 WANVIDEOMODEL。该线路独立输出，未接入时 Low模型 输出为空。",
                     },
                 ),
                 "use_non_blocking": (
@@ -151,11 +159,12 @@ class GJJ_WanVideoBlockSwap:
         offload_img_emb: bool,
         offload_txt_emb: bool,
         model=None,
+        low_model=None,
         use_non_blocking: bool = False,
         vace_blocks_to_swap: int = 0,
         prefetch_blocks: int = 0,
         block_swap_debug: bool = False,
-    ) -> tuple[dict[str, Any], Any]:
+    ) -> tuple[Any, Any, dict[str, Any]]:
         args = {
             "blocks_to_swap": max(0, min(48, int(blocks_to_swap))),
             "offload_img_emb": bool(offload_img_emb),
@@ -165,7 +174,11 @@ class GJJ_WanVideoBlockSwap:
             "prefetch_blocks": max(0, min(40, int(prefetch_blocks))),
             "block_swap_debug": bool(block_swap_debug),
         }
-        return (args, _apply_block_swap_to_model(model, args) if model is not None else None)
+        return (
+            _apply_block_swap_to_model(model, args) if model is not None else None,
+            _apply_block_swap_to_model(low_model, args) if low_model is not None else None,
+            args,
+        )
 
 
 class GJJ_WanVideoSetBlockSwap:
@@ -220,10 +233,10 @@ class GJJ_WanVideoSetBlockSwap:
 
 NODE_CLASS_MAPPINGS = {
     "GJJ_WanVideoBlockSwap": GJJ_WanVideoBlockSwap,
-    "GJJ_WanVideoSetBlockSwap": GJJ_WanVideoSetBlockSwap,
+#    "GJJ_WanVideoSetBlockSwap": GJJ_WanVideoSetBlockSwap,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "GJJ_WanVideoBlockSwap": "🧱 Wan 分块交换",
-    "GJJ_WanVideoSetBlockSwap": "GJJ · 🧱 WanVideo 设置分块交换",
+    "GJJ_WanVideoBlockSwap": "🧱 Wan 分块交换（Kijai流）",
+#    "GJJ_WanVideoSetBlockSwap": "GJJ · 🧱 WanVideo 设置分块交换",
 }

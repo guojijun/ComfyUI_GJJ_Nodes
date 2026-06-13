@@ -29,7 +29,7 @@ except ImportError:
 
 
 NODE_NAME = "GJJ_ModelPatchBundle"
-NODE_DISPLAY_NAME = "GJJ · ⚡ 模型补丁三合一"
+NODE_DISPLAY_NAME = "GJJ · ⚡ 模型补丁三合一(Wan2.2官方流)"
 DESCRIPTION_INTRO = "把 SageAttention、FP16 累积设置、LTXV FeedForward 分块合并为一个零 KJ 依赖的 GJJ MODEL 补丁节点。支持高模、低模双通道分别输入输出，第二路可不接。"
 
 SAGE_ATTENTION_MODES = [

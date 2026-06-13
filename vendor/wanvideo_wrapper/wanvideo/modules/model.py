@@ -1167,7 +1167,7 @@ class WanAttentionBlock(nn.Module):
 
         # FETA
         if enhance_enabled:
-            feta_scores = get_feta_scores(q, k)
+            feta_scores = get_feta_scores(q, k, num_frames=T)
 
         if self.attention_mode == "sageattn_3" and attention_mode_override is None:
             if current_step != 0 and not last_step:

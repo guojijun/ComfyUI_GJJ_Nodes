@@ -10,6 +10,7 @@ const TEMPLATE_PARAMS_TYPE = "GJJ_TemplateParams";
 const BROADCAST_OUTPUT_SOURCE_TYPES = new Set([
 	"GJJ_VideoUniversalModelLoader",
 	"GJJ_VideoKijaiModelLoader",
+	"GJJ_WanVideoBlockSwap",
 	"GJJ_ModelBundleLoader",
 	"GJJ_LoraChainConfig",
 ]);
@@ -1689,6 +1690,7 @@ function findBroadcastEntryForInput(entries, targetNode, input) {
 	for (const entry of entries) {
 		if (!entry?.node || entry.node === targetNode) continue;
 		if (!broadcastTypesMatch(entry.type, targetType)) continue;
+		if (entry.role && targetRole && entry.role !== targetRole) continue;
 		const roleMatched = Boolean(entry.role && targetRole && entry.role === targetRole);
 		if (!roleMatched && !broadcastNamesMatch(entry.names, input)) continue;
 		return entry;

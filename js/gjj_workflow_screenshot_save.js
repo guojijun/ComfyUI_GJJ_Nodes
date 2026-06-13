@@ -4418,9 +4418,21 @@ import { api } from "/scripts/api.js";
 
 	function runArrangeCommand(command, anchorButton) {
 		const arranger = window.GJJ_NodeArranger;
-		const action = arranger?.[command];
-		if (typeof action === "function") {
-			const result = action();
+		const modeByCommand = {
+			arrangeAuto: "auto",
+			arrangeTopoMainPath: "topo_main_path",
+			arrangeTopoCompact: "topo_compact",
+			arrangeHorizontal: "horizontal",
+			arrangeVertical: "vertical",
+			arrangeGrid: "grid",
+		};
+		const mode = modeByCommand[command];
+		if (mode && typeof arranger?.arrangeNodes === "function") {
+			// 顶部工具栏始终排列全部节点，避免当前选中节点导致首次点击看起来无效。
+			const result = arranger.arrangeNodes(mode, undefined, 10, 0.5, true, true, false);
+			if (result?.catch) result.catch((error) => console.warn("[GJJ] 节点排列失败：", error));
+		} else if (typeof arranger?.[command] === "function") {
+			const result = arranger[command]();
 			if (result?.catch) result.catch((error) => console.warn("[GJJ] 节点排列失败：", error));
 		} else if (command === "arrangeAuto") {
 			arrangeWorkflowNodes(anchorButton);
@@ -4439,6 +4451,13 @@ import { api } from "/scripts/api.js";
 
 		const menu = document.createElement("div");
 		menu.id = ARRANGE_MENU_ID;
+		menu.addEventListener("pointerdown", (event) => {
+			event.stopPropagation();
+		});
+		menu.addEventListener("mousedown", (event) => {
+			event.stopPropagation();
+		});
+		menu.addEventListener("click", (event) => event.stopPropagation());
 		const items = [
 			["🔄 智能自动排列", "arrangeAuto"],
 			["🔢 拓扑主链路", "arrangeTopoMainPath"],
@@ -4459,7 +4478,6 @@ import { api } from "/scripts/api.js";
 			const button = document.createElement("button");
 			button.type = "button";
 			button.textContent = label;
-			button.addEventListener("pointerdown", (event) => event.stopPropagation());
 			button.addEventListener("click", (event) => {
 				event.preventDefault();
 				event.stopPropagation();

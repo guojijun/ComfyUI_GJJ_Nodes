@@ -11,12 +11,12 @@
     "jpeg_quality": 0.86
   },
   "workflow_title": {
-    "font": "Hi字楷体简.ttf",
+    "font": "simhei.ttf",
     "fontSize": 72,
-    "colorA": "#FFFA70",
-    "colorB": "#BB00FF",
+    "colorA": "#FFB8FF",
+    "colorB": "#81CAA0",
     "gradient": true,
-    "gradientDirection": "垂直",
+    "gradientDirection": "水平",
     "opacity": 1,
     "letterSpacing": 1,
     "lineSpacing": 0,
@@ -28,14 +28,14 @@
     "strokeOpacity": 1,
     "backgroundColor": "#1E5A48",
     "borderMode": "透明",
-    "borderColor": "#55C685",
+    "borderColor": "#8FC7A6",
     "borderOpacity": 0,
-    "shadowEnabled": true,
+    "shadowEnabled": false,
     "shadowColor": "#F2FF04",
     "shadowOpacity": 0.42,
     "shadowBlur": 0,
-    "shadowX": 0,
-    "shadowY": 0,
+    "shadowX": 2,
+    "shadowY": -142,
     "align": "居中",
     "version": 1
   },
@@ -81,7 +81,7 @@
   "user": {},
   "node_color_theme": {
     "version": 1,
-    "selected_style_id": "soft",
+    "selected_style_id": "dim",
     "custom_palette": [
       "#00AEEF",
       "#6F5CC4",
@@ -100,74 +100,74 @@
       {
         "id": "input",
         "label": "输入",
-        "styleId": "soft",
-        "color": "#5D89A8"
+        "styleId": "dim",
+        "color": "#244D73"
       },
       {
         "id": "guide",
         "label": "引导",
-        "styleId": "soft",
-        "color": "#8072B2"
+        "styleId": "dim",
+        "color": "#504287"
       },
       {
         "id": "sample",
         "label": "采样",
-        "styleId": "soft",
-        "color": "#A98248"
+        "styleId": "dim",
+        "color": "#77501E"
       },
       {
         "id": "output",
         "label": "输出",
-        "styleId": "soft",
-        "color": "#5A9A77"
+        "styleId": "dim",
+        "color": "#236B4B"
       },
       {
         "id": "decode",
         "label": "解码",
-        "styleId": "soft",
-        "color": "#69A98A"
+        "styleId": "dim",
+        "color": "#28705A"
       },
       {
         "id": "encode",
         "label": "编码",
-        "styleId": "soft",
-        "color": "#5F9188"
+        "styleId": "dim",
+        "color": "#315F58"
       },
       {
         "id": "model",
         "label": "模型",
-        "styleId": "soft",
-        "color": "#8770AA"
+        "styleId": "dim",
+        "color": "#5B3B78"
       },
       {
         "id": "prompt",
         "label": "提示",
-        "styleId": "soft",
-        "color": "#7479AA"
+        "styleId": "dim",
+        "color": "#4E527C"
       },
       {
         "id": "image",
         "label": "图像",
-        "styleId": "soft",
-        "color": "#5C9AA6"
+        "styleId": "dim",
+        "color": "#255D69"
       },
       {
         "id": "video",
         "label": "视频",
-        "styleId": "soft",
-        "color": "#A48852"
+        "styleId": "dim",
+        "color": "#735222"
       },
       {
         "id": "audio",
         "label": "音频",
-        "styleId": "soft",
-        "color": "#7C8D6A"
+        "styleId": "dim",
+        "color": "#56693C"
       },
       {
         "id": "tool",
         "label": "工具",
-        "styleId": "soft",
-        "color": "#68757A"
+        "styleId": "dim",
+        "color": "#424B52"
       }
     ]
   }
