@@ -143,12 +143,22 @@ function applySettingsVisibility(node) {
 	}
 	node.properties = node.properties || {};
 	const open = settingsOpen(node);
+	
+	// 确保所有 widget 的初始状态已被记录
+	for (const widget of node.widgets) {
+		if (!widget.__gjjCheckpointVisibilityState && !INTERNAL_WIDGETS.has(widget.name)) {
+			rememberWidgetState(widget);
+		}
+	}
+	
 	for (const name of PANEL_SYNC_WIDGETS) {
 		if (INTERNAL_WIDGETS.has(name)) {
 			continue;
 		}
 		const widget = getWidget(node, name);
-		setWidgetHidden(widget, !open && !ALWAYS_VISIBLE_WIDGETS.has(name));
+		if (widget) {
+			setWidgetHidden(widget, !open && !ALWAYS_VISIBLE_WIDGETS.has(name));
+		}
 	}
 	updateSettingsButtonState(node);
 	GJJ_Utils.refreshNode(node, { minWidth: 300, minHeight: 90 });

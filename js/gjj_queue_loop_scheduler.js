@@ -16,14 +16,26 @@ const endStateByNodeId = new Map();
 let queueTimer = null;
 let autoQueueCount = 0;
 let lastPromptId = null;
+let currentRunToken = 0;
 
 function eventPromptId(event) {
-	return event?.detail?.prompt_id || null;
+	return event?.detail?.prompt_id || event?.detail?.promptId || event?.detail?.prompt || null;
 }
 
 function samePrompt(event) {
 	const promptId = eventPromptId(event);
 	return !promptId || !lastPromptId || promptId === lastPromptId;
+}
+
+function isCurrentRunData(data, event = null) {
+	if (!data || data.__runToken !== currentRunToken) {
+		return false;
+	}
+	const promptId = eventPromptId(event);
+	if (promptId && data.__promptId && String(promptId) !== String(data.__promptId)) {
+		return false;
+	}
+	return true;
 }
 
 function findWidget(node, name) {
@@ -137,6 +149,42 @@ function stopLoop(node) {
 	stopAutoQueue("已手动停止队列循环");
 }
 
+function disableAllLoops(reason) {
+	if (queueTimer) {
+		clearTimeout(queueTimer);
+		queueTimer = null;
+	}
+	autoQueueCount = 0;
+	endStateByNodeId.clear();
+	for (const node of app.graph?._nodes || []) {
+		if (node?.comfyClass !== START_NODE && node?.comfyClass !== END_NODE) {
+			continue;
+		}
+		if (node.comfyClass === START_NODE) {
+			setWidgetValue(node, ENABLED_WIDGET, false);
+		}
+		setStatus(node, reason || "已停止所有 GJJ 队列循环");
+	}
+}
+
+function registerGlobalStop() {
+	const root = globalThis;
+	if (!root.GJJ_AutoQueueStopHandlers) {
+		root.GJJ_AutoQueueStopHandlers = new Set();
+	}
+	root.GJJ_AutoQueueStopHandlers.add(disableAllLoops);
+	root.GJJ_StopAllAutoQueues = (reason = "已停止所有 GJJ 自动排队") => {
+		for (const handler of Array.from(root.GJJ_AutoQueueStopHandlers || [])) {
+			try {
+				handler(reason);
+			} catch (error) {
+				console.warn("[GJJ] 停止自动排队失败", error);
+			}
+		}
+		return true;
+	};
+}
+
 function ensureControls(node) {
 	if (node.__gjjQueueLoopControls) {
 		return;
@@ -188,6 +236,9 @@ function activeEndState() {
 		if (!data?.enabled || !data?.should_continue) {
 			continue;
 		}
+		if (!isCurrentRunData(data)) {
+			continue;
+		}
 		const startNode = startNodeFromPayload(data);
 		if (!isStartEnabled(startNode)) {
 			continue;
@@ -232,6 +283,7 @@ async function queueNextIfNeeded() {
 
 api.addEventListener("execution_start", (event) => {
 	lastPromptId = eventPromptId(event);
+	currentRunToken += 1;
 	if (queueTimer) {
 		clearTimeout(queueTimer);
 		queueTimer = null;
@@ -285,6 +337,8 @@ app.registerExtension({
 			} else {
 				const data = Array.isArray(message?.[END_UI_KEY]) ? message[END_UI_KEY][0] : null;
 				if (data) {
+					data.__promptId = lastPromptId || "";
+					data.__runToken = currentRunToken;
 					endStateByNodeId.set(String(this.id), data);
 					setStatus(this, data.status || "");
 					const startNode = startNodeFromPayload(data);
@@ -297,6 +351,7 @@ app.registerExtension({
 		};
 	},
 	setup() {
+		registerGlobalStop();
 		try {
 			app.canvas.default_connection_color_byType[STATE_TYPE] = "#7bbf8b";
 			window.LGraphCanvas.link_type_colors[STATE_TYPE] = "#7bbf8b";

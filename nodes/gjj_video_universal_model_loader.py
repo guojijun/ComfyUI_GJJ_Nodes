@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import importlib.util
 import json
 import os
 import re
@@ -26,6 +27,21 @@ try:
     from .gjj_extra_model_chain import parse_extra_model_chain_data
 except Exception:  # pragma: no cover - allows standalone syntax checks
     parse_extra_model_chain_data = None
+
+try:
+    from .common_utils.dependency_checker import (
+        build_dependency_model_report,
+        print_dependency_model_report,
+        raise_dependency_model_error,
+        send_dependency_model_notice,
+        get_report_from_exception,
+    )
+except Exception:  # pragma: no cover - keeps standalone syntax checks lightweight
+    build_dependency_model_report = None
+    print_dependency_model_report = None
+    raise_dependency_model_error = None
+    send_dependency_model_notice = None
+    get_report_from_exception = None
 
 NODE_NAME = "GJJ_VideoUniversalModelLoader"
 LIST_API = "/gjj/video_universal_loader_lists"
@@ -56,6 +72,20 @@ WAN_VAE_PRECISIONS = ["bf16", "fp16", "fp32"]
 WAN_T5_PRECISIONS = ["bf16", "fp32"]
 WAN_T5_QUANTIZATIONS = ["disabled", "fp8_e4m3fn"]
 EXTRA_BASE_PRECISIONS = ["fp16", "bf16", "fp32"]
+WANVIDEO_RUNTIME_DEPENDENCIES = [
+    {
+        "module_name": "accelerate",
+        "package_name": "accelerate",
+        "display_name": "accelerate",
+        "description": "WanVideo 模型、T5、CLIP 低内存权重初始化与设备分配必需。",
+    },
+    {
+        "module_name": "transformers",
+        "package_name": "transformers",
+        "display_name": "transformers",
+        "description": "WanVideo T5 tokenizer 与部分文本/音频编码器运行必需。",
+    },
+]
 
 KIND_OUTPUT_TYPE = {
     "diffusion": "MODEL",
@@ -764,6 +794,60 @@ def _build_ltx23_kj_required_models() -> list[dict[str, str]]:
     return items
 
 
+def _missing_wanvideo_runtime_dependencies() -> list[dict[str, str]]:
+    missing: list[dict[str, str]] = []
+    for spec in WANVIDEO_RUNTIME_DEPENDENCIES:
+        module_name = str(spec.get("module_name", "") or "").strip()
+        if not module_name:
+            continue
+        try:
+            available = importlib.util.find_spec(module_name) is not None
+        except Exception:
+            available = False
+        if not available:
+            missing.append(dict(spec))
+    return missing
+
+
+def _raise_wanvideo_runtime_dependency_error(original_error: Any = "", unique_id: Any = None) -> None:
+    missing = _missing_wanvideo_runtime_dependencies()
+    if not missing:
+        missing = [
+            {
+                "module_name": "accelerate",
+                "package_name": "accelerate",
+                "display_name": "accelerate",
+                "description": "GJJ 内置 WanVideo runtime 导入失败时最常见的必需依赖。",
+            }
+        ]
+    description = (
+        "当前模型文件已经进入 WanVideo 加载流程，但 GJJ 内置 WanVideo runtime 缺少必需 Python 运行依赖。"
+        "这不是 diffusion_models 目录里的模型文件缺失。"
+    )
+    packages = [item.get("package_name") or item.get("module_name") for item in missing]
+    if callable(raise_dependency_model_error):
+        raise_dependency_model_error(
+            node_name="GJJ 智能视频模型加载",
+            missing_dependencies=missing,
+            install_packages=packages,
+            description=description,
+            original_error=str(original_error or ""),
+            unique_id=unique_id,
+            title="GJJ WanVideo runtime 依赖缺失！",
+        )
+
+    lines = [
+        "⚠️缺失运行依赖，点击❓按钮了解详情。",
+        "",
+        description,
+        "",
+        "缺失依赖：" + "、".join(str(item.get("display_name") or item.get("package_name") or item.get("module_name")) for item in missing),
+    ]
+    if original_error:
+        lines += ["", f"原始错误：{original_error}"]
+    raise RuntimeError("\n".join(lines))
+
+
 def _format_slot_runtime_error(
     cfg_label: str,
     slot: dict[str, Any],
@@ -798,8 +882,12 @@ def _format_slot_runtime_error(
     message = str(exc or "").strip()
     if message:
         lower_message = message.lower()
-        if "no module named" in lower_message or "cannot import name" in lower_message or "没有可调用" in message:
-            lines.append("提示：这更像是 ComfyUI 官方加载器/节点缺失或版本过旧，不是 pip 依赖问题。")
+        if "no module named" in lower_message:
+            lines.append("提示：这是 Python 运行依赖缺失，不是模型文件缺失。")
+        elif "cannot import name" in lower_message:
+            lines.append("提示：这更像是 Python 依赖版本不兼容或运行库缺失，不是模型文件缺失。")
+        elif "没有可调用" in message:
+            lines.append("提示：这更像是 ComfyUI 官方加载器/节点缺失或版本过旧。")
         elif "not found" in lower_message or "未找到" in message or "no such file" in lower_message:
             lines.append("提示：这是模型文件缺失，请按上面的目录与文件名放置。")
         lines.append(f"原始错误：{message}")
@@ -1308,13 +1396,21 @@ def _load_clip_vision(name: str):
 _WANVIDEO_RUNTIME: dict[str, Any] | None = None
 
 
-def _load_wanvideo_runtime() -> dict[str, Any]:
+def _load_wanvideo_runtime(unique_id: Any = None) -> dict[str, Any]:
     global _WANVIDEO_RUNTIME
     if _WANVIDEO_RUNTIME is not None:
         return _WANVIDEO_RUNTIME
+    missing = _missing_wanvideo_runtime_dependencies()
+    if missing:
+        _raise_wanvideo_runtime_dependency_error(
+            "缺少 " + "、".join(str(item.get("display_name") or item.get("package_name") or item.get("module_name")) for item in missing),
+            unique_id=unique_id,
+        )
     try:
         from ..vendor.wanvideo_wrapper import nodes_model_loading
     except Exception as error:
+        if "No module named" in str(error) or isinstance(error, ModuleNotFoundError):
+            _raise_wanvideo_runtime_dependency_error(error, unique_id=unique_id)
         raise RuntimeError(
             "GJJ 内置 WanVideo runtime 加载失败。无需安装 ComfyUI-WanVideoWrapper 插件本体；"
             f"如果是 pip 运行库缺失，请按 GJJ 的 WanVideo 运行时依赖方案安装。\n错误信息：{error}"
@@ -1682,8 +1778,9 @@ def _load_wanvideo_model(
     compile_args: Any = None,
     block_swap_args: Any = None,
     vram_management_args: Any = None,
+    unique_id: Any = None,
 ):
-    runtime = _load_wanvideo_runtime()
+    runtime = _load_wanvideo_runtime(unique_id=unique_id)
     loader = runtime["model_loading"].WanVideoModelLoader()
     extra_kwargs = _build_wanvideo_extra_model_kwargs(extra_chain, model_branch)
     return _unwrap_loader_output(
@@ -1716,8 +1813,8 @@ def _load_wanvideo_model(
     )
 
 
-def _load_wan_t5_encoder(model_name: str, slot: dict[str, Any]):
-    runtime = _load_wanvideo_runtime()
+def _load_wan_t5_encoder(model_name: str, slot: dict[str, Any], unique_id: Any = None):
+    runtime = _load_wanvideo_runtime(unique_id=unique_id)
     loader = runtime["model_loading"].LoadWanVideoT5TextEncoder()
     return _unwrap_loader_output(
         loader.loadmodel(
@@ -1729,8 +1826,8 @@ def _load_wan_t5_encoder(model_name: str, slot: dict[str, Any]):
     )
 
 
-def _load_wan_vae(model_name: str, slot: dict[str, Any]):
-    runtime = _load_wanvideo_runtime()
+def _load_wan_vae(model_name: str, slot: dict[str, Any], unique_id: Any = None):
+    runtime = _load_wanvideo_runtime(unique_id=unique_id)
     loader = runtime["model_loading"].WanVideoVAELoader()
     return _unwrap_loader_output(
         loader.loadmodel(
@@ -2408,6 +2505,9 @@ class GJJ_VideoUniversalModelLoader:
                     "tooltip": "外部布尔控制加速 LoRA 开关；连接后优先使用外部输入。",
                 }),
             },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            },
         }
 
     @classmethod
@@ -2436,6 +2536,7 @@ class GJJ_VideoUniversalModelLoader:
 
     def load_models(self, *args, **kwargs):
         # 只按名称读取，故意忽略位置参数，避免动态面板/输入口/输出口变化引起参数错位。
+        unique_id = kwargs.get("unique_id", None)
         config_key = str(kwargs.get("config", "") or "")
         if config_key not in VIDEO_MODEL_CONFIGS:
             config_key = next(iter(VIDEO_MODEL_CONFIGS.keys()))
@@ -2537,6 +2638,7 @@ class GJJ_VideoUniversalModelLoader:
                         compile_args=wan_compile_args,
                         block_swap_args=wan_block_swap_args,
                         vram_management_args=wan_vram_management_args,
+                        unique_id=unique_id,
                     )
                 elif kind == "checkpoint_model":
                     value = _load_checkpoint_parts(name, ckpt_cache)[0]
@@ -2618,9 +2720,9 @@ class GJJ_VideoUniversalModelLoader:
                 elif kind == "clip_vision":
                     value = _load_clip_vision(name)
                 elif kind == "wan_t5_encoder":
-                    value = _load_wan_t5_encoder(name, slot)
+                    value = _load_wan_t5_encoder(name, slot, unique_id=unique_id)
                 elif kind == "wan_vae":
-                    value = _load_wan_vae(name, slot)
+                    value = _load_wan_vae(name, slot, unique_id=unique_id)
                 elif kind == "audio_encoder":
                     value = _load_audio_encoder(name)
                 elif kind == "latent_upscale_model":
@@ -2628,6 +2730,11 @@ class GJJ_VideoUniversalModelLoader:
                 else:
                     value = name
             except Exception as exc:
+                report = get_report_from_exception(exc) if callable(get_report_from_exception) else None
+                if report:
+                    if callable(send_dependency_model_notice):
+                        send_dependency_model_notice(report, unique_id=unique_id)
+                    raise
                 existing_text = str(exc or "")
                 if existing_text.startswith(f"[{cfg.get('label', config_key)}]") and "需要文件：" in existing_text:
                     raise

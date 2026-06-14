@@ -11,6 +11,7 @@ const BROADCAST_OUTPUT_SOURCE_TYPES = new Set([
 	"GJJ_VideoUniversalModelLoader",
 	"GJJ_VideoKijaiModelLoader",
 	"GJJ_WanVideoBlockSwap",
+	"GJJ_WanVideoTorchCompileSettings",
 	"GJJ_ModelBundleLoader",
 	"GJJ_LoraChainConfig",
 ]);

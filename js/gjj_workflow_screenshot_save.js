@@ -110,6 +110,11 @@ import { api } from "/scripts/api.js";
 	function dirtyCanvas() {
 		try { app?.graph?.setDirtyCanvas?.(true, true); } catch (_) {}
 		try { app?.canvas?.setDirty?.(true, true); } catch (_) {}
+		try { app.canvas && (app.canvas.dirty_canvas = true); } catch (_) {}
+		try { app.canvas && (app.canvas.dirty_bgcanvas = true); } catch (_) {}
+		try { app?.graph?.afterChange?.(); } catch (_) {}
+		try { app?.graph?.change?.(); } catch (_) {}
+		try { app?.canvas?.draw?.(true, true); } catch (_) {}
 	}
 
 	function selectedGraphNodes() {
@@ -3596,12 +3601,14 @@ import { api } from "/scripts/api.js";
 	flex-direction: column;
 	gap: 2px;
 	min-width: 176px;
+	max-height: min(70vh, 560px);
 	padding: 6px;
 	border: 1px solid #40525b;
 	border-radius: 7px;
 	background: #11191d;
 	box-shadow: 0 12px 32px rgba(0, 0, 0, 0.48);
 	color: #e7f2f4;
+	overflow-y: auto;
 }
 #${ARRANGE_MENU_ID} button {
 	width: 100%;
@@ -4416,33 +4423,151 @@ import { api } from "/scripts/api.js";
 		document.getElementById(ARRANGE_MENU_ID)?.remove();
 	}
 
-	function runArrangeCommand(command, anchorButton) {
-		const arranger = window.GJJ_NodeArranger;
-		const modeByCommand = {
+	function flashArrangeButton(button) {
+		if (!button) return;
+		button.classList.add("gjj-saved");
+		setTimeout(() => button.classList.remove("gjj-saved"), 520);
+	}
+
+	function requestAnimationFrameSafe(callback) {
+		if (typeof window.requestAnimationFrame === "function") {
+			return window.requestAnimationFrame(callback);
+		}
+		return setTimeout(callback, 0);
+	}
+
+	function releaseCanvasInteractionState(event = null) {
+		const canvas = app?.canvas;
+		try { document.activeElement?.blur?.(); } catch (_) {}
+		try { window.LiteGraph?.closeAllContextMenus?.(); } catch (_) {}
+		try {
+			const canvasElement = canvas?.canvas || canvas?.canvasEl || canvas?.element;
+			if (event?.pointerId != null && canvasElement?.releasePointerCapture) {
+				canvasElement.releasePointerCapture(event.pointerId);
+			}
+		} catch (_) {}
+
+		if (!canvas) return;
+		for (const key of [
+			"node_dragged",
+			"dragging_node",
+			"node_capturing_input",
+			"node_capturing_output",
+			"connecting_node",
+			"connecting_output",
+			"connecting_input",
+			"connecting_slot",
+			"connecting_pos",
+			"resizing_node",
+			"dragging_link",
+			"current_node",
+			"node_over",
+			"mouse_node",
+		]) {
+			try { canvas[key] = null; } catch (_) {}
+		}
+		for (const key of [
+			"dragging_canvas",
+			"dragging_rectangle",
+			"dragging",
+			"is_dragging",
+			"pointer_is_down",
+			"mouse_is_down",
+			"is_mouse_down",
+		]) {
+			try { canvas[key] = false; } catch (_) {}
+		}
+	}
+
+	function runArrangeCommand(command, anchorButton, retryCount = 0) {
+		const actionByCommand = {
 			arrangeAuto: "auto",
 			arrangeTopoMainPath: "topo_main_path",
+			arrangeTopoOutputAnchor: "topo_output_anchor",
 			arrangeTopoCompact: "topo_compact",
+			arrangeTopoBranch: "topo_branch",
+			arrangeTopoOriginalY: "topo_original_y",
 			arrangeHorizontal: "horizontal",
 			arrangeVertical: "vertical",
 			arrangeGrid: "grid",
+			collapseAllNodes: "collapse",
+			expandAllNodes: "expand",
+			toggleAllNodesCollapsed: "toggle-collapse",
 		};
-		const mode = modeByCommand[command];
-		if (mode && typeof arranger?.arrangeNodes === "function") {
-			// 顶部工具栏始终排列全部节点，避免当前选中节点导致首次点击看起来无效。
-			const result = arranger.arrangeNodes(mode, undefined, 10, 0.5, true, true, false);
-			if (result?.catch) result.catch((error) => console.warn("[GJJ] 节点排列失败：", error));
-		} else if (typeof arranger?.[command] === "function") {
-			const result = arranger[command]();
-			if (result?.catch) result.catch((error) => console.warn("[GJJ] 节点排列失败：", error));
-		} else if (command === "arrangeAuto") {
-			arrangeWorkflowNodes(anchorButton);
-		} else {
-			console.warn(`[GJJ] 节点排列命令不可用：${command}`);
-		}
+		releaseCanvasInteractionState();
 		closeArrangeMenu();
+		const action = actionByCommand[command] || command;
+		const modeActions = new Set([
+			"auto",
+			"horizontal",
+			"vertical",
+			"grid",
+			"topo_main_path",
+			"topo_output_anchor",
+			"topo_compact",
+			"topo_branch",
+			"topo_original_y",
+		]);
+		const methodByAction = {
+			auto: "arrangeAuto",
+			horizontal: "arrangeHorizontal",
+			vertical: "arrangeVertical",
+			grid: "arrangeGrid",
+			topo_main_path: "arrangeTopoMainPath",
+			topo_output_anchor: "arrangeTopoOutputAnchor",
+			topo_compact: "arrangeTopoCompact",
+			topo_branch: "arrangeTopoBranch",
+			topo_original_y: "arrangeTopoOriginalY",
+			collapse: "collapseAllNodes",
+			expand: "expandAllNodes",
+			"toggle-collapse": "toggleAllNodesCollapsed",
+		};
+
+		const run = () => {
+			const arranger = window.GJJ_NodeArranger;
+			let result;
+			let handled = false;
+
+			if (typeof arranger?.runArrangeAction === "function") {
+				// 顶部工具栏始终作用全部节点，避免当前选中节点让首次点击看起来无效。
+				result = arranger.runArrangeAction(action, undefined, { selectedOnly: false });
+				handled = true;
+			} else if (modeActions.has(action) && typeof arranger?.arrangeNodes === "function") {
+				result = arranger.arrangeNodes(action, undefined, 10, 0.5, true, true, false);
+				handled = true;
+			} else if (typeof arranger?.[methodByAction[action]] === "function") {
+				result = arranger[methodByAction[action]]();
+				handled = true;
+			} else if (action === "auto") {
+				arrangeWorkflowNodes(anchorButton);
+				handled = true;
+			}
+
+			if (!handled) {
+				if (!arranger && retryCount < 10) {
+					setTimeout(() => runArrangeCommand(action, anchorButton, retryCount + 1), 100);
+					return;
+				}
+				console.warn(`[GJJ] 节点排列命令不可用：${command}`);
+				return;
+			}
+
+			flashArrangeButton(anchorButton);
+			dirtyCanvas();
+			if (result?.catch) {
+				result
+					.then?.(() => dirtyCanvas())
+					.catch((error) => console.warn("[GJJ] 节点排列失败：", error));
+			}
+		};
+
+		setTimeout(() => {
+			requestAnimationFrameSafe(run);
+		}, 0);
 	}
 
-	function toggleArrangeMenu(anchorButton) {
+	function toggleArrangeMenu(anchorButton, event = null) {
+		releaseCanvasInteractionState(event);
 		const existing = document.getElementById(ARRANGE_MENU_ID);
 		if (existing) {
 			existing.remove();
@@ -4459,13 +4584,21 @@ import { api } from "/scripts/api.js";
 		});
 		menu.addEventListener("click", (event) => event.stopPropagation());
 		const items = [
-			["🔄 智能自动排列", "arrangeAuto"],
-			["🔢 拓扑主链路", "arrangeTopoMainPath"],
-			["📦 拓扑紧凑排列", "arrangeTopoCompact"],
+			["🔄 智能自动排列", "auto"],
 			null,
-			["➡️ 水平排列", "arrangeHorizontal"],
-			["⬇️ 垂直排列", "arrangeVertical"],
-			["▦ 网格排列", "arrangeGrid"],
+			["🔢 拓扑主链路", "topo_main_path"],
+			["🎯 拓扑输出锚定", "topo_output_anchor"],
+			["🧩 拓扑紧凑层级", "topo_compact"],
+			["🌿 拓扑分支优先", "topo_branch"],
+			["↕️ 拓扑保持上下", "topo_original_y"],
+			null,
+			["➡️ 水平排列", "horizontal"],
+			["⬇️ 垂直排列", "vertical"],
+			["▦ 网格排列", "grid"],
+			null,
+			["📦 全部折叠", "collapse"],
+			["📭 全部打开", "expand"],
+			["🔁 折叠 / 打开切换", "toggle-collapse"],
 		];
 		for (const item of items) {
 			if (!item) {
@@ -4478,11 +4611,18 @@ import { api } from "/scripts/api.js";
 			const button = document.createElement("button");
 			button.type = "button";
 			button.textContent = label;
-			button.addEventListener("click", (event) => {
+			let fired = false;
+			const fire = (event) => {
 				event.preventDefault();
+				event.stopImmediatePropagation?.();
 				event.stopPropagation();
+				if (fired) return;
+				fired = true;
 				runArrangeCommand(command, anchorButton);
-			});
+			};
+			button.addEventListener("pointerdown", fire, true);
+			button.addEventListener("pointerup", fire);
+			button.addEventListener("click", fire);
 			menu.appendChild(button);
 		}
 
@@ -4506,7 +4646,7 @@ import { api } from "/scripts/api.js";
 		}, 0);
 	}
 
-	function makeToolbarButton(id, text, title, onClick) {
+	function makeToolbarButton(id, text, title, onClick, options = {}) {
 		let button = document.getElementById(id);
 		if (button) button.remove();
 		button = document.createElement("button");
@@ -4516,21 +4656,45 @@ import { api } from "/scripts/api.js";
 		button.textContent = text;
 		button.title = title;
 		button.setAttribute("aria-label", title);
-		button.addEventListener("pointerdown", (event) => event.stopPropagation());
-		button.addEventListener("mousedown", (event) => event.stopPropagation());
-		button.addEventListener("contextmenu", (event) => {
+		let firedOnPointer = false;
+		const stopToolbarEvent = (event) => {
 			event.preventDefault();
+			event.stopImmediatePropagation?.();
 			event.stopPropagation();
-		});
-		button.addEventListener("click", (event) => {
-			event.preventDefault();
-			event.stopPropagation();
+		};
+		const runToolbarAction = (event) => {
+			stopToolbarEvent(event);
+			releaseCanvasInteractionState(event);
 			try {
-				const result = onClick(button);
+				const result = onClick(button, event);
 				if (result?.catch) result.catch((error) => console.warn("[GJJ] 工具栏按钮执行失败：", error));
 			} catch (error) {
 				console.warn("[GJJ] 工具栏按钮执行失败：", error);
 			}
+		};
+		button.addEventListener("pointerdown", (event) => {
+			if (options.triggerOnPointerDown) {
+				firedOnPointer = true;
+				runToolbarAction(event);
+				setTimeout(() => { firedOnPointer = false; }, 350);
+				return;
+			}
+			stopToolbarEvent(event);
+		}, true);
+		for (const eventName of ["mousedown", "pointerup", "mouseup"]) {
+			button.addEventListener(eventName, stopToolbarEvent, true);
+		}
+		button.addEventListener("contextmenu", (event) => {
+			event.preventDefault();
+			event.stopImmediatePropagation?.();
+			event.stopPropagation();
+		});
+		button.addEventListener("click", (event) => {
+			if (firedOnPointer) {
+				stopToolbarEvent(event);
+				return;
+			}
+			runToolbarAction(event);
 		});
 		return button;
 	}
@@ -4549,7 +4713,7 @@ import { api } from "/scripts/api.js";
 			makeToolbarButton(SAVE_BUTTON_ID, "💾", "保存工作流截图（Alt+Shift+S）", saveWorkflowScreenshot),
 			makeToolbarButton(OPEN_BUTTON_ID, "📁", "预览并打开工作流截图（Alt+Shift+O）", showScreenshotPreview),
 			makeToolbarButton(COLOR_BUTTON_ID, "🎨", "按节点类型设置辨识配色", toggleNodeColorPanel),
-			makeToolbarButton(ARRANGE_BUTTON_ID, "↔", "选择节点排列方式", toggleArrangeMenu)
+			makeToolbarButton(ARRANGE_BUTTON_ID, "↔", "选择节点排列方式", toggleArrangeMenu, { triggerOnPointerDown: true })
 		);
 		positionToolbar(toolbar);
 		return toolbar;

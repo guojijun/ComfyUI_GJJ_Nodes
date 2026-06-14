@@ -18,6 +18,22 @@ const stateByNodeId = new Map();
 let queuedTimer = null;
 let autoQueueCount = 0;
 let lastPromptId = null;
+let currentRunToken = 0;
+
+function eventPromptId(event) {
+	return event?.detail?.prompt_id || event?.detail?.promptId || event?.detail?.prompt || null;
+}
+
+function isCurrentRunData(data, event = null) {
+	if (!data || data.__runToken !== currentRunToken) {
+		return false;
+	}
+	const eventId = eventPromptId(event);
+	if (eventId && data.__promptId && String(eventId) !== String(data.__promptId)) {
+		return false;
+	}
+	return true;
+}
 
 function findWidget(node, name) {
 	return node?.widgets?.find((widget) => widget?.name === name);
@@ -171,13 +187,48 @@ function stopAutoQueue(node, reason) {
 	}
 }
 
-function pickLatestEnabledState() {
+function disableAllExecutors(reason) {
+	if (queuedTimer) {
+		clearTimeout(queuedTimer);
+		queuedTimer = null;
+	}
+	autoQueueCount = 0;
+	stateByNodeId.clear();
+	for (const node of activeExecutorNodes()) {
+		const enabled = findWidget(node, ENABLED_WIDGET);
+		if (enabled) {
+			enabled.value = false;
+			enabled.callback?.call(enabled, false);
+		}
+		setStatus(node, reason || "已停止所有 GJJ 自动执行");
+	}
+}
+
+function registerGlobalStop() {
+	const root = globalThis;
+	if (!root.GJJ_AutoQueueStopHandlers) {
+		root.GJJ_AutoQueueStopHandlers = new Set();
+	}
+	root.GJJ_AutoQueueStopHandlers.add(disableAllExecutors);
+	root.GJJ_StopAllAutoQueues = (reason = "已停止所有 GJJ 自动排队") => {
+		for (const handler of Array.from(root.GJJ_AutoQueueStopHandlers || [])) {
+			try {
+				handler(reason);
+			} catch (error) {
+				console.warn("[GJJ] 停止自动排队失败", error);
+			}
+		}
+		return true;
+	};
+}
+
+function pickLatestEnabledState(event = null) {
 	for (const node of activeExecutorNodes()) {
 		if (!enabledValue(node)) {
 			continue;
 		}
 		const data = stateByNodeId.get(String(node.id));
-		if (data?.enabled) {
+		if (data?.enabled && isCurrentRunData(data, event)) {
 			return { node, data };
 		}
 	}
@@ -222,7 +273,8 @@ async function queueNext(node, data) {
 }
 
 api.addEventListener("execution_start", (event) => {
-	lastPromptId = event?.detail?.prompt_id || null;
+	lastPromptId = eventPromptId(event);
+	currentRunToken += 1;
 	if (queuedTimer) {
 		clearTimeout(queuedTimer);
 		queuedTimer = null;
@@ -230,11 +282,11 @@ api.addEventListener("execution_start", (event) => {
 });
 
 api.addEventListener("execution_success", (event) => {
-	const promptId = event?.detail?.prompt_id || null;
+	const promptId = eventPromptId(event);
 	if (promptId && lastPromptId && promptId !== lastPromptId) {
 		return;
 	}
-	const active = pickLatestEnabledState();
+	const active = pickLatestEnabledState(event);
 	if (!active) {
 		autoQueueCount = 0;
 		return;
@@ -275,10 +327,15 @@ app.registerExtension({
 			const result = originalOnExecuted?.apply(this, [message]);
 			const data = Array.isArray(message?.[UI_KEY]) ? message[UI_KEY][0] : null;
 			if (data) {
+				data.__promptId = lastPromptId || "";
+				data.__runToken = currentRunToken;
 				stateByNodeId.set(String(this.id), data);
 				setStatus(this, data.status || "");
 			}
 			return result;
 		};
+	},
+	setup() {
+		registerGlobalStop();
 	},
 });

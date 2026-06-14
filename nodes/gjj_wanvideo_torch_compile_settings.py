@@ -34,10 +34,12 @@ class GJJ_WanVideoTorchCompileSettings:
             "backend、fullgraph、mode、dynamic 等字段按原版节点原样输出。",
             "本节点只生成参数，不加载模型，也不执行 torch.compile。",
             "真正编译发生在下游 WanVideo 模型加载器接收到该参数后。",
+            "前端会把所有布尔参数合并成一排可自动换行的开关按钮，行末 ⚡ 用于广播 WANCOMPILEARGS 输出。",
         ],
         "notes": [
             "字段名保持为 backend、fullgraph、mode、dynamic、dynamo_cache_size_limit、dynamo_recompile_limit、compile_transformer_blocks_only、force_parameter_static_shapes、allow_unmerged_lora_compile。",
             "不依赖 ComfyUI-WanVideoWrapper 插件本体，也不新增第三方 pip 依赖。",
+            "开启 ⚡ 广播后，未接真实连线的 WANCOMPILEARGS 输入口会在提交工作流时自动接收本节点输出；手动连线优先。",
             "如果下游实际启用 torch.compile，Triton 与 PyTorch 版本要求仍由下游运行环境决定。",
         ],
     }
@@ -161,5 +163,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    NODE_NAME: "⚙️ WanVideo编译设置",
+    NODE_NAME: "GJJ · ⚙️ WanVideo编译设置",
 }
