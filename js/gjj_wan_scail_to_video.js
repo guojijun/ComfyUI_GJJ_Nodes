@@ -36,21 +36,23 @@ const COLORED_MASK_INPUT_SPECS = [
 	["driving_track_data", "SAM3_TRACK_DATA", null, "驱动视频轨迹", "来自 SAM3 的视频追踪数据。节点会渲染为姿态彩色遮罩。"],
 	["object_indices", "STRING", "object_indices", "对象编号列表", "可选。用逗号分隔要保留的 SAM3 对象编号，例如 0,2,3；留空表示保留全部对象。"],
 	["sort_by", "COMBO", "sort_by", "颜色分配排序", "决定对象按什么顺序分配固定色板颜色，并同时作用于驱动和参考轨迹。"],
-	["replacement_mode", "BOOLEAN", "replacement_mode", "替换模式", "关闭为动画模式黑底；开启为替换模式白底。参考图遮罩始终黑底。"],
+	["replacement_mode", "BOOLEAN", "replacement_mode", "替换模式", "开启：视频白底、参考黑底；关闭：视频黑底、参考白底。"],
 	["ref_track_data", "SAM3_TRACK_DATA", null, "参考图轨迹", "可选。参考图对应的 SAM3 轨迹数据；连接后生成参考图彩色遮罩。"],
 ];
 
 const COLORED_MASK_OUTPUT_SPECS = [
 	["pose_video_mask", "IMAGE", "姿态彩色遮罩", "可连接到 WanSCAILToVideo 的“姿态彩色遮罩”。替换模式关闭时黑底，开启时白底。"],
-	["reference_image_mask", "IMAGE", "参考图彩色遮罩", "可连接到 WanSCAILToVideo 的“参考图彩色遮罩”。始终黑底，未连接参考轨迹时输出一张黑图。"],
+	["reference_image_mask", "IMAGE", "参考图彩色遮罩", "可连接到 WanSCAILToVideo 的“参考图彩色遮罩”。替换模式开启时黑底，关闭时白底。"],
 ];
 
-const SPEC_BY_NAME = new Map(INPUT_SPECS.map((spec, index) => [spec[0], { spec, index }]));
-const SPEC_BY_WIDGET = new Map(INPUT_SPECS.filter((spec) => spec[2]).map((spec, index) => [spec[2], { spec, index }]));
-const SPEC_BY_LABEL = new Map(INPUT_SPECS.map((spec, index) => [spec[3], { spec, index }]));
-const COLORED_MASK_SPEC_BY_NAME = new Map(COLORED_MASK_INPUT_SPECS.map((spec, index) => [spec[0], { spec, index }]));
-const COLORED_MASK_SPEC_BY_WIDGET = new Map(COLORED_MASK_INPUT_SPECS.filter((spec) => spec[2]).map((spec, index) => [spec[2], { spec, index }]));
-const COLORED_MASK_SPEC_BY_LABEL = new Map(COLORED_MASK_INPUT_SPECS.map((spec, index) => [spec[3], { spec, index }]));
+const SPEC_INFOS = INPUT_SPECS.map((spec, index) => ({ spec, index }));
+const COLORED_MASK_SPEC_INFOS = COLORED_MASK_INPUT_SPECS.map((spec, index) => ({ spec, index }));
+const SPEC_BY_NAME = new Map(SPEC_INFOS.map((info) => [info.spec[0], info]));
+const SPEC_BY_WIDGET = new Map(SPEC_INFOS.filter((info) => info.spec[2]).map((info) => [info.spec[2], info]));
+const SPEC_BY_LABEL = new Map(SPEC_INFOS.map((info) => [info.spec[3], info]));
+const COLORED_MASK_SPEC_BY_NAME = new Map(COLORED_MASK_SPEC_INFOS.map((info) => [info.spec[0], info]));
+const COLORED_MASK_SPEC_BY_WIDGET = new Map(COLORED_MASK_SPEC_INFOS.filter((info) => info.spec[2]).map((info) => [info.spec[2], info]));
+const COLORED_MASK_SPEC_BY_LABEL = new Map(COLORED_MASK_SPEC_INFOS.map((info) => [info.spec[3], info]));
 const COLORED_MASK_OUTPUT_BY_NAME = new Map(COLORED_MASK_OUTPUT_SPECS.map((spec, index) => [spec[0], { spec, index }]));
 const COLORED_MASK_OUTPUT_BY_LABEL = new Map(COLORED_MASK_OUTPUT_SPECS.map((spec, index) => [spec[2], { spec, index }]));
 
@@ -202,6 +204,29 @@ function refreshNode(node) {
 	});
 }
 
+function syncInputLinkSlots(node) {
+	const links = node?.graph?.links || app.graph?.links || {};
+	for (let index = 0; index < (node.inputs?.length || 0); index++) {
+		const linkId = node.inputs[index]?.link;
+		const link = linkId != null ? links[linkId] : null;
+		if (link) {
+			link.target_slot = index;
+		}
+	}
+}
+
+function syncOutputLinkSlots(node) {
+	const links = node?.graph?.links || app.graph?.links || {};
+	for (let index = 0; index < (node.outputs?.length || 0); index++) {
+		for (const linkId of node.outputs[index]?.links || []) {
+			const link = linkId != null ? links[linkId] : null;
+			if (link) {
+				link.origin_slot = index;
+			}
+		}
+	}
+}
+
 function hasColoredMaskPreview(node, message = null) {
 	const messageImages = Array.isArray(message?.images) ? message.images : [];
 	if (messageImages.length > 0) return true;
@@ -242,6 +267,7 @@ function stabilizeNode(node) {
 		ensureInput(node, spec);
 	}
 	node.inputs.sort(compareInputs);
+	syncInputLinkSlots(node);
 	refreshNode(node);
 }
 
@@ -252,11 +278,13 @@ function stabilizeColoredMaskNode(node) {
 		ensureInput(node, spec);
 	}
 	node.inputs.sort(compareColoredMaskInputs);
+	syncInputLinkSlots(node);
 	if (Array.isArray(node.outputs)) {
 		for (const spec of COLORED_MASK_OUTPUT_SPECS) {
 			ensureOutput(node, spec);
 		}
 		node.outputs.sort(compareColoredMaskOutputs);
+		syncOutputLinkSlots(node);
 	}
 	refreshNode(node);
 	collapseColoredMaskIfNoPreview(node);

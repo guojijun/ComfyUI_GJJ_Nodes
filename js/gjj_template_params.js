@@ -2101,18 +2101,20 @@ function buildBoolButtonForField(node, field, values) {
 
 	const box = document.createElement("div");
 	box.className = "gjj-template-param-bool";
-	const button = document.createElement("button");
-	button.type = "button";
-	button.className = "gjj-template-param-bool-button";
 	const labels = field?.bool_labels || {};
 	const trueLabel = String(labels.true_label || "true");
 	const falseLabel = String(labels.false_label || "false");
-	button.title = field.tooltip || `布尔参数：点击切换 ${trueLabel} / ${falseLabel}`;
+	box.title = field.tooltip || `布尔参数：${trueLabel} / ${falseLabel} 互斥选择`;
+	const buttons = [];
 
 	const sync = () => {
 		const enabled = parseValue(values[field.key] ?? field.default ?? "false") === true;
-		button.dataset.value = enabled ? "true" : "false";
-		button.textContent = enabled ? `✅ ${trueLabel}` : `⬜ ${falseLabel}`;
+		for (const button of buttons) {
+			const active = button.dataset.boolValue === (enabled ? "true" : "false");
+			button.dataset.value = active ? "true" : "false";
+			button.classList.toggle("active", active);
+			button.setAttribute("aria-pressed", String(active));
+		}
 	};
 
 	const commit = (nextBool) => {
@@ -2124,15 +2126,24 @@ function buildBoolButtonForField(node, field, values) {
 		updateOutputs(node, fields, values);
 	};
 
-	button.addEventListener("pointerdown", (event) => event.stopPropagation());
-	button.addEventListener("mousedown", (event) => event.stopPropagation());
-	button.addEventListener("click", (event) => {
-		event.preventDefault();
-		event.stopPropagation();
-		commit(!(parseValue(values[field.key] ?? field.default ?? "false") === true));
-	});
+	for (const [nextBool, text] of [[true, trueLabel], [false, falseLabel]]) {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.className = "gjj-template-param-bool-button";
+		button.textContent = text;
+		button.dataset.boolValue = nextBool ? "true" : "false";
+		button.title = `${field.label || "布尔参数"}：${text}`;
+		button.addEventListener("pointerdown", (event) => event.stopPropagation());
+		button.addEventListener("mousedown", (event) => event.stopPropagation());
+		button.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			commit(nextBool);
+		});
+		buttons.push(button);
+		box.appendChild(button);
+	}
 
-	box.appendChild(button);
 	wrap.append(label, box);
 	sync();
 	node.__gjjTemplateParamsRows.set(field.key, {
@@ -2479,9 +2490,9 @@ function buildDom(node) {
 		.gjj-template-param-file-button:hover { background:#3a3d40; border-color:#6aa6b8; }
 		.gjj-template-param-preview-image, .gjj-template-param-preview-video, .gjj-template-param-preview-audio { grid-column: 1 / -1; margin-top: 4px; min-height: 40px; display:block; width:100%; }
 		.gjj-template-param-media-preview-group { display:block; width:100%; min-width:0; padding:6px; border:1px solid #253841; border-radius:8px; background:#0a1418; }
-		.gjj-template-param-bool { display:flex; align-items:center; min-width:0; }
-		.gjj-template-param-bool-button { width:100%; height:30px; padding:4px 8px; border:1px solid #33464e; border-radius:8px; outline:none; background:#2b2d30; color:#f1f5f5; font-size:13px; cursor:pointer; text-align:left; }
-		.gjj-template-param-bool-button[data-value="true"] { border-color:#4f8f7a; background:#20362f; color:#dff8ea; }
+		.gjj-template-param-bool { display:flex; align-items:center; gap:5px; min-width:0; width:100%; }
+		.gjj-template-param-bool-button { min-width:0; flex:1 1 72px; height:30px; padding:4px 8px; border:1px solid #33464e; border-radius:8px; outline:none; background:#24282b; color:#cdd5d8; font-size:13px; cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+		.gjj-template-param-bool-button.active, .gjj-template-param-bool-button[data-value="true"] { border-color:#4f8f7a; background:#20362f; color:#dff8ea; font-weight:700; }
 		.gjj-template-param-bool-button[data-value="false"] { border-color:#46535a; background:#24282b; color:#cdd5d8; }
 		.gjj-template-param-bool-button:hover { filter:brightness(1.12); }
 		.gjj-template-param-enum { display:flex; align-items:center; gap:5px; min-width:0; width:100%; flex-wrap:wrap; }

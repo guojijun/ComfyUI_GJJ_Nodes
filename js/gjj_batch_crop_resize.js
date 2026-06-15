@@ -85,6 +85,8 @@ function isLiveLink(id) {
 function cleanLabel(value) {
 	const text = String(value || "").trim();
 	if (!text || text === "*" || text === "undefined" || text === "null") return "";
+	if (/^(?:media|result)_\d+$/i.test(text)) return "";
+	if (/^(?:图片\/视频帧|结果)\s*\d+$/i.test(text)) return "";
 	return text.replace(/^GJJ\s*·\s*/i, "").trim();
 }
 
@@ -203,15 +205,17 @@ function ensureOutput(node, name, type) {
 }
 
 function applyDimInput(input, name, label) {
+	label = cleanLabel(label) || (name === "width" ? "宽度" : "高度");
 	input.name = name;
 	input.type = DIM_TYPE;
 	input.label = label;
 	input.localized_name = label;
 	input.display_name = label;
-	input.tooltip = `${label}统一目标尺寸；不连接时按第一路第一帧尺寸对齐倍数。`;
+	input.tooltip = `${label}；统一目标尺寸，不连接时按第一路第一帧尺寸对齐倍数。`;
 }
 
 function applyDimOutput(output, name, label) {
+	label = cleanLabel(label) || (name === "width" ? "宽度" : "高度");
 	output.name = name;
 	output.type = DIM_TYPE;
 	output.label = label;
@@ -333,8 +337,14 @@ function stabilizeNode(node) {
 
 	const widthInput = ensureInput(node, "width", DIM_TYPE);
 	const heightInput = ensureInput(node, "height", DIM_TYPE);
-	applyDimInput(widthInput, "width", "宽度");
-	applyDimInput(heightInput, "height", "高度");
+	const widthOutput = ensureOutput(node, "width", DIM_TYPE);
+	const heightOutput = ensureOutput(node, "height", DIM_TYPE);
+	const widthSourceLabel = linkedSourceLabel(widthInput);
+	const heightSourceLabel = linkedSourceLabel(heightInput);
+	const widthTargetLabel = linkedTargetLabel(widthOutput);
+	const heightTargetLabel = linkedTargetLabel(heightOutput);
+	applyDimInput(widthInput, "width", widthSourceLabel || widthTargetLabel || "宽度");
+	applyDimInput(heightInput, "height", heightSourceLabel || heightTargetLabel || "高度");
 
 	const mediaInputs = [];
 	for (let i = 1; i <= count; i += 1) {
@@ -343,10 +353,8 @@ function stabilizeNode(node) {
 		mediaInputs.push(input);
 	}
 
-	const widthOutput = ensureOutput(node, "width", DIM_TYPE);
-	const heightOutput = ensureOutput(node, "height", DIM_TYPE);
-	applyDimOutput(widthOutput, "width", "宽度");
-	applyDimOutput(heightOutput, "height", "高度");
+	applyDimOutput(widthOutput, "width", widthTargetLabel || widthSourceLabel || "宽度");
+	applyDimOutput(heightOutput, "height", heightTargetLabel || heightSourceLabel || "高度");
 
 	const resultOutputs = [];
 	for (let i = 1; i <= count; i += 1) {

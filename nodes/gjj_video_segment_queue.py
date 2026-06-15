@@ -100,6 +100,22 @@ def _as_float(value: Any, default: float = 0.0) -> float:
     return result if math.isfinite(result) else default
 
 
+def _prompt_input_is_linked(prompt: Any, unique_id: Any, names: tuple[str, ...]) -> bool:
+    if unique_id is None or not isinstance(prompt, dict):
+        return False
+    node_data = prompt.get(str(unique_id)) or prompt.get(unique_id)
+    if not isinstance(node_data, dict):
+        return False
+    inputs = node_data.get("inputs")
+    if not isinstance(inputs, dict):
+        return False
+    for name in names:
+        value = inputs.get(name)
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            return True
+    return False
+
+
 def _normalize_segment_frames(value: Any) -> tuple[int, bool]:
     raw = _as_int(value, DEFAULT_SEGMENT_FRAMES)
     if raw < 9:
@@ -517,6 +533,7 @@ class GJJ_VideoSegmentQueue:
                 ),
             },
             "hidden": {
+                "prompt": "PROMPT",
                 "extra_pnginfo": "EXTRA_PNGINFO",
                 "unique_id": "UNIQUE_ID",
             },
@@ -533,6 +550,7 @@ class GJJ_VideoSegmentQueue:
         segment_index: int = 1,
         media=None,
         slide_start_index=None,
+        prompt=None,
         extra_pnginfo=None,
         unique_id=None,
     ):
@@ -555,10 +573,10 @@ class GJJ_VideoSegmentQueue:
         segment_len, adjusted = _normalize_segment_frames(segment_frames)
         total_segments = max(1, int(math.ceil(total_frames / float(segment_len))))
 
+        external_controlled = _prompt_input_is_linked(prompt, unique_id, ("segment_index", "slide_start_index"))
         index_value = slide_start_index if slide_start_index is not None else segment_index
         raw_index = max(1, _as_int(index_value, 1))
         current_segment = min(raw_index, total_segments)
-        external_controlled = slide_start_index is not None
 
         start = (current_segment - 1) * segment_len
         remaining_frames = max(1, total_frames - start)
@@ -606,4 +624,4 @@ class GJJ_VideoSegmentQueue:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_VideoSegmentQueue}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "🎞️ 单视频分段队列"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "🎞️ 单视频分段队列执行"}

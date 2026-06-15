@@ -182,6 +182,29 @@ def _extract_mask_to_28ch(rgb_video: torch.Tensor) -> torch.Tensor:
     return padded.view(latent_frames, 28, latent_h, latent_w).unsqueeze(0)
 
 
+def _coerce_pose_mask_background(rgb_video: torch.Tensor, replacement_mode: bool) -> torch.Tensor:
+    """Make pose mask background match official SCAIL-2 mode convention."""
+    if rgb_video.ndim != 4 or int(rgb_video.shape[-1]) < 3:
+        return rgb_video
+
+    rgb = rgb_video[..., :3].float().clamp(0.0, 1.0)
+    near_white = rgb.min(dim=-1, keepdim=True).values > 225.0 / 255.0
+    near_black = rgb.max(dim=-1, keepdim=True).values < 0.1
+
+    if bool(replacement_mode):
+        if torch.any(near_black):
+            white = torch.ones_like(rgb)
+            rgb = torch.where(near_black, white, rgb)
+    else:
+        if torch.any(near_white):
+            black = torch.zeros_like(rgb)
+            rgb = torch.where(near_white, black, rgb)
+
+    if int(rgb_video.shape[-1]) == 3:
+        return rgb.contiguous()
+    return torch.cat([rgb, rgb_video[..., 3:]], dim=-1).contiguous()
+
+
 def _unpack_sam3_masks(track_data: dict[str, Any]) -> torch.Tensor | None:
     if not isinstance(track_data, dict):
         raise RuntimeError("SAM3轨迹数据无效：需要连接 SAM3_TRACK_DATA。")
@@ -327,7 +350,6 @@ class GJJ_WanSCAILToVideo:
     DESCRIPTION = DESCRIPTION
     GJJ_PRESERVE_DISPLAY_NAME_KEYS = (NODE_NAME,)
     SEARCH_ALIASES = [
-        "WanSCAILToVideo",
         "SCAIL",
         "SCAIL-2",
         "Wan SCAIL",
@@ -372,6 +394,7 @@ class GJJ_WanSCAILToVideo:
         "notes": [
             "本节点复刻官方 WanSCAILToVideo，不包含官方 SCAIL2ColoredMask / SAM3 轨迹转彩色遮罩预处理。",
             "如果彩色遮罩不是高亮纯色，28 通道遮罩可能为空；请优先检查上游遮罩颜色是否接近 255。",
+            "姿态彩色遮罩会按替换模式自动校正近黑/近白底色：动画模式黑底，人物替换白底；参考图彩色遮罩请使用 SCAIL-2 彩色遮罩节点的配对输出。",
             "帧数最好保持 4n+1，例如 81；姿态视频和遮罩会共同裁切到不超过目标帧数的 4n+1 长度。",
         ],
     }
@@ -559,6 +582,7 @@ class GJJ_WanSCAILToVideo:
 
         if pose_mask_frames is not None:
             mask_video_hw = _upscale_bhwc(pose_mask_frames[:length], width // 2, height // 2, "area", "center")
+            mask_video_hw = _coerce_pose_mask_background(mask_video_hw, bool(replacement_mode))
             driving_mask_28ch = _extract_mask_to_28ch(mask_video_hw)
             positive = _conditioning_set_values(positive, {"driving_mask_28ch": driving_mask_28ch})
             negative = _conditioning_set_values(negative, {"driving_mask_28ch": driving_mask_28ch})
@@ -605,7 +629,7 @@ class GJJ_SCAIL2ColoredMask:
     RETURN_NAMES = ("姿态彩色遮罩", "参考图彩色遮罩")
     OUTPUT_TOOLTIPS = (
         "可连接到 GJJ_WanSCAILToVideo 的“姿态彩色遮罩”。替换模式关闭时为黑底，开启时为白底。",
-        "可连接到 GJJ_WanSCAILToVideo 的“参考图彩色遮罩”。始终使用黑底，未连接参考轨迹时输出一张黑图。",
+        "可连接到 GJJ_WanSCAILToVideo 的“参考图彩色遮罩”。替换模式开启时黑底，关闭时白底。",
     )
     SEARCH_ALIASES = [
         "SCAIL2ColoredMask",
@@ -624,7 +648,7 @@ class GJJ_SCAIL2ColoredMask:
         ],
         "usage": [
             "连接 SAM3 视频轨迹到“驱动视频轨迹”，节点会输出可接入 WanSCAILToVideo 的姿态彩色遮罩。",
-            "可选连接参考图的 SAM3 轨迹到“参考图轨迹”，节点会输出参考图彩色遮罩；未连接时输出黑底空遮罩。",
+            "可选连接参考图的 SAM3 轨迹到“参考图轨迹”，节点会输出参考图彩色遮罩；替换模式开时参考图黑底，关时参考图白底。",
             "多人场景建议保持默认“从左到右”排序，让同一身份在驱动视频与参考图两侧使用同一色板颜色。",
             "执行后节点面板会预览姿态遮罩动图和参考图遮罩单帧。",
         ],
@@ -633,7 +657,7 @@ class GJJ_SCAIL2ColoredMask:
             "参考图轨迹": "可选。来自 SAM3 追踪节点的 SAM3_TRACK_DATA，通常对应参考图。",
             "对象编号列表": "可选。逗号分隔的对象编号，例如 0,2,3；留空表示保留全部对象。编号使用 SAM3 内部 0 基序号。",
             "颜色分配排序": "控制对象映射到固定色板的顺序，并同时作用于驱动和参考轨迹。",
-            "替换模式": "关闭时姿态遮罩黑底，开启时姿态遮罩白底；参考图遮罩始终黑底。",
+            "替换模式": "开启时视频遮罩白底、参考图遮罩黑底；关闭时视频遮罩黑底、参考图遮罩白底。",
         },
     }
 
@@ -670,7 +694,7 @@ class GJJ_SCAIL2ColoredMask:
                     {
                         "default": False,
                         "display_name": "替换模式",
-                        "tooltip": "关闭为动画模式，姿态遮罩使用黑底；开启为替换模式，姿态遮罩使用白底。参考图遮罩始终黑底。",
+                        "tooltip": "开启时视频遮罩白底、参考图遮罩黑底；关闭时视频遮罩黑底、参考图遮罩白底。",
                     },
                 ),
             },
@@ -717,19 +741,24 @@ class GJJ_SCAIL2ColoredMask:
 
         driving = self._prepare_track_data(driving_track_data, object_indices, sort_by)
         pose_video_mask = _render_colored_masks(driving, "白色" if bool(replacement_mode) else "黑色")
+        reference_background = "黑色" if bool(replacement_mode) else "白色"
 
         if ref_track_data is not None:
             if not isinstance(ref_track_data, dict):
                 raise RuntimeError("“参考图轨迹”数据格式无效，请连接 SAM3_TRACK_DATA。")
             reference = self._prepare_track_data(ref_track_data, object_indices, sort_by)
-            reference_image_mask = _render_colored_masks(reference, "黑色")
+            reference_image_mask = _render_colored_masks(reference, reference_background)
         else:
             height, width = [int(v) for v in driving["orig_size"]]
-            reference_image_mask = torch.zeros(
-                1,
-                height,
-                width,
-                3,
+            reference_fill = 0.0 if bool(replacement_mode) else 1.0
+            reference_image_mask = torch.full(
+                (
+                    1,
+                    height,
+                    width,
+                    3,
+                ),
+                reference_fill,
                 device=comfy.model_management.intermediate_device(),
                 dtype=comfy.model_management.intermediate_dtype(),
             )

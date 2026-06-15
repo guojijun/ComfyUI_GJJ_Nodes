@@ -5,7 +5,7 @@
     "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.jpg",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
-    "search_text": "sc",
+    "search_text": "",
     "page_size": 15,
     "image_format": "jpg",
     "jpeg_quality": 0.86
@@ -81,7 +81,7 @@
   "user": {},
   "node_color_theme": {
     "version": 1,
-    "selected_style_id": "dim",
+    "selected_style_id": "warm_cool",
     "custom_palette": [
       "#00AEEF",
       "#6F5CC4",
@@ -100,74 +100,74 @@
       {
         "id": "input",
         "label": "输入",
-        "styleId": "dim",
-        "color": "#244D73"
+        "styleId": "warm_cool",
+        "color": "#2E74B5"
       },
       {
         "id": "guide",
         "label": "引导",
-        "styleId": "dim",
-        "color": "#504287"
+        "styleId": "warm_cool",
+        "color": "#775FC7"
       },
       {
         "id": "sample",
         "label": "采样",
-        "styleId": "dim",
-        "color": "#77501E"
+        "styleId": "warm_cool",
+        "color": "#243141"
       },
       {
         "id": "output",
         "label": "输出",
-        "styleId": "dim",
-        "color": "#236B4B"
+        "styleId": "warm_cool",
+        "color": "#27A064"
       },
       {
         "id": "decode",
         "label": "解码",
-        "styleId": "dim",
-        "color": "#28705A"
+        "styleId": "warm_cool",
+        "color": "#49B487"
       },
       {
         "id": "encode",
         "label": "编码",
-        "styleId": "dim",
-        "color": "#315F58"
+        "styleId": "warm_cool",
+        "color": "#3F8F88"
       },
       {
         "id": "model",
         "label": "模型",
-        "styleId": "dim",
-        "color": "#5B3B78"
+        "styleId": "warm_cool",
+        "color": "#8B5FBF"
       },
       {
         "id": "prompt",
         "label": "提示",
-        "styleId": "dim",
-        "color": "#4E527C"
+        "styleId": "warm_cool",
+        "color": "#6E70B8"
       },
       {
         "id": "image",
         "label": "图像",
-        "styleId": "dim",
-        "color": "#255D69"
+        "styleId": "warm_cool",
+        "color": "#2D9CB2"
       },
       {
         "id": "video",
         "label": "视频",
-        "styleId": "dim",
-        "color": "#735222"
+        "styleId": "warm_cool",
+        "color": "#C98A2B"
       },
       {
         "id": "audio",
         "label": "音频",
-        "styleId": "dim",
-        "color": "#56693C"
+        "styleId": "warm_cool",
+        "color": "#6F8E56"
       },
       {
         "id": "tool",
         "label": "工具",
-        "styleId": "dim",
-        "color": "#424B52"
+        "styleId": "warm_cool",
+        "color": "#5D6874"
       }
     ]
   }

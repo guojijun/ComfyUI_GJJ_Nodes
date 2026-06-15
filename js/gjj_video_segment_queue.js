@@ -53,21 +53,25 @@ function normalizeSlotName(value) {
 	return String(value || "").replace(/^converted-widget:/i, "");
 }
 
+function inputMatchesName(input, name) {
+	const inputName = normalizeSlotName(input?.name);
+	const inputType = normalizeSlotName(input?.type);
+	const widgetName = String(input?.widget?.name || input?.widget_name || "");
+	return inputName === name || inputType === name || widgetName === name;
+}
+
 function findInput(node, name) {
 	return node?.inputs?.find((input) => {
-		const inputName = normalizeSlotName(input?.name);
-		const inputType = normalizeSlotName(input?.type);
-		const widgetName = String(input?.widget?.name || input?.widget_name || "");
-		return inputName === name || inputType === name || widgetName === name;
+		return inputMatchesName(input, name);
 	});
 }
 
 function hasInputLink(node, name) {
-	return Boolean(findInput(node, name)?.link != null);
+	return Boolean(node?.inputs?.some((input) => inputMatchesName(input, name) && input?.link != null));
 }
 
 function hasExternalIndexLink(node) {
-	return hasInputLink(node, SEGMENT_INDEX_WIDGET);
+	return hasInputLink(node, SEGMENT_INDEX_WIDGET) || hasInputLink(node, LEGACY_SLIDE_INDEX_INPUT);
 }
 
 function dirty(node) {
@@ -837,7 +841,7 @@ function scheduleStabilize(node, ms = 32) {
 }
 
 function queueNext(node, data) {
-	if (!node || !isAutoEnabled(node) || hasExternalIndexLink(node)) {
+	if (!node || !isAutoEnabled(node) || hasExternalIndexLink(node) || data?.external_controlled) {
 		if (node) stopLoop(node);
 		return;
 	}

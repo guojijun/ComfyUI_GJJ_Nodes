@@ -10,6 +10,7 @@ const REFRESH_MS = 250;
 let currentRun = null;
 let panel = null;
 let refreshTimer = null;
+let panelClosedForRun = false;
 
 function nowMs() {
 	return performance.now();
@@ -310,10 +311,16 @@ function ensurePanel() {
 	const clear = button("🧹", "清除本次计时结果", () => {
 		stopRefresh();
 		currentRun = null;
+		panelClosedForRun = false;
+		root.style.display = "none";
+	});
+	const close = button("✖", "关闭计时器", () => {
+		stopRefresh();
+		panelClosedForRun = true;
 		root.style.display = "none";
 	});
 
-	header.append(title, summary, collapse, copy, clear);
+	header.append(title, summary, collapse, copy, clear, close);
 
 	const body = document.createElement("div");
 	body.className = "gjj-exec-body";
@@ -374,6 +381,10 @@ function render() {
 	const state = root.__gjjTimer;
 	if (!currentRun) {
 		root.classList.remove("gjj-run-error");
+		root.style.display = "none";
+		return;
+	}
+	if (panelClosedForRun) {
 		root.style.display = "none";
 		return;
 	}
@@ -482,6 +493,7 @@ function startNode(id, at = nowMs()) {
 
 function startRun(event) {
 	stopRefresh();
+	panelClosedForRun = false;
 	currentRun = {
 		promptId: eventPromptId(event),
 		startedAt: nowMs(),

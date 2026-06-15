@@ -951,4 +951,4 @@ class GJJ_MultiImageLoader:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_MultiImageLoader}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "🧡·📂 批量多图片加载浏览器"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "🧡·📂 批量多图加载浏览,队列执行"}

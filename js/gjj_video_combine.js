@@ -1773,7 +1773,16 @@ function shouldUseAutoFilenamePrefix(node, nextPrefix) {
 	return Boolean(nextPrefix) && (!current || current === DEFAULT_FILENAME_PREFIX || (!!lastAuto && current === lastAuto));
 }
 
+function filenamePrefixInputHasManualLink(node) {
+	const candidates = [
+		...(Array.isArray(node?.inputs) ? node.inputs : []),
+		...(Array.isArray(node?.__gjjVideoCombineFullInputs) ? node.__gjjVideoCombineFullInputs : []),
+	];
+	return candidates.some((input) => String(input?.name || "") === "filename_prefix" && input?.link != null);
+}
+
 function applyAutoFilenamePrefix(node, graph = app.graph, promptNodeInfo = null) {
+	if (filenamePrefixInputHasManualLink(node)) return "";
 	const nextPrefix = autoFilenamePrefixForNode(node, graph);
 	if (!shouldUseAutoFilenamePrefix(node, nextPrefix)) return "";
 	node.properties ||= {};

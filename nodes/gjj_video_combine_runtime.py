@@ -32,6 +32,7 @@ DEFAULT_FRAME_RATE = 8
 FORMATS_DIR = Path(__file__).resolve().parents[1] / "presets" / "video_formats"
 IMAGE_FORMATS = ("image/gif", "image/webp")
 SEQUENCE_PATTERN_RE = re.compile(r"%0?(\d*)d", re.IGNORECASE)
+VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".wmv", ".mpeg", ".mpg"}
 
 
 def _send_status(unique_id: Any, text: str, progress: float | None = None) -> None:
@@ -318,6 +319,128 @@ def _combine_frame_segments(frames_list: list[torch.Tensor]) -> torch.Tensor:
 
 def _is_video_object(value: Any) -> bool:
     return value is not None and hasattr(value, "get_components")
+
+
+def _root_path(kind: str) -> Path:
+    if kind == "input":
+        return Path(folder_paths.get_input_directory()).resolve()
+    if kind == "temp":
+        return Path(folder_paths.get_temp_directory()).resolve()
+    return Path(folder_paths.get_output_directory()).resolve()
+
+
+def _as_video_path_from_text(value: Any) -> Path | None:
+    text = str(value or "").strip().strip('"')
+    if not text:
+        return None
+    candidate = Path(os.path.expandvars(os.path.expanduser(text)))
+    candidates = [candidate]
+    if not candidate.is_absolute():
+        candidates.extend([_root_path("input") / candidate, _root_path("output") / candidate, _root_path("temp") / candidate, Path.cwd() / candidate])
+    for item in candidates:
+        try:
+            if item.exists() and item.is_file() and item.suffix.lower() in VIDEO_SUFFIXES:
+                return item.resolve()
+        except Exception:
+            continue
+    return None
+
+
+def _video_path_from_comfy_item(value: Any) -> Path | None:
+    if not isinstance(value, dict):
+        return None
+    for key in ("path", "filepath", "fullpath", "file"):
+        found = _as_video_path_from_text(value.get(key))
+        if found:
+            return found
+    filename = str(value.get("filename") or "").strip()
+    if not filename:
+        return None
+    subfolder = str(value.get("subfolder") or "").strip().replace("\\", "/")
+    item_type = str(value.get("type") or "input").strip().lower()
+    root_kind = "temp" if item_type == "temp" else "output" if item_type == "output" else "input"
+    return _as_video_path_from_text(_root_path(root_kind) / subfolder / filename)
+
+
+def _resolve_video_file_path(value: Any) -> Path | None:
+    found = _video_path_from_comfy_item(value)
+    if found:
+        return found
+    if isinstance(value, dict):
+        for key in ("video", "source", "stream_source", "value", "selected", "filename", "file"):
+            found = _resolve_video_file_path(value.get(key))
+            if found:
+                return found
+    for method_name in ("get_stream_source", "get_filename", "get_filepath", "get_path", "path"):
+        method = getattr(value, method_name, None)
+        if callable(method):
+            try:
+                found = _resolve_video_file_path(method())
+            except Exception:
+                found = None
+            if found:
+                return found
+    for attr in ("stream_source", "source", "source_path", "filepath", "file_path", "filename", "path", "_path", "_filename"):
+        candidate = getattr(value, attr, None)
+        if candidate is not None and candidate is not value:
+            found = _resolve_video_file_path(candidate)
+            if found:
+                return found
+    if isinstance(value, (str, os.PathLike)):
+        return _as_video_path_from_text(value)
+    return None
+
+
+def _ratio_to_float(value: Any) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    if "/" in text:
+        left, right = text.split("/", 1)
+        try:
+            return float(left) / max(1e-9, float(right))
+        except Exception:
+            return 0.0
+    try:
+        return float(text)
+    except Exception:
+        return 0.0
+
+
+def _probe_video_file(path: Path) -> tuple[int, int, float, int, float]:
+    ffmpeg_path = get_ffmpeg_path()
+    ffprobe = "ffprobe"
+    if ffmpeg_path:
+        ffmpeg_file = Path(ffmpeg_path)
+        probe_name = "ffprobe.exe" if ffmpeg_file.suffix.lower() == ".exe" else "ffprobe"
+        candidate = ffmpeg_file.with_name(probe_name)
+        if candidate.exists():
+            ffprobe = str(candidate)
+    command = [
+        ffprobe,
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,nb_frames,duration,avg_frame_rate,r_frame_rate",
+        "-of", "json",
+        str(path),
+    ]
+    try:
+        proc = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=10)
+        payload = json.loads(proc.stdout or "{}") if proc.returncode == 0 else {}
+        stream = (payload.get("streams") or [{}])[0]
+        width = int(float(stream.get("width") or 0))
+        height = int(float(stream.get("height") or 0))
+        fps = _ratio_to_float(stream.get("avg_frame_rate")) or _ratio_to_float(stream.get("r_frame_rate")) or DEFAULT_FRAME_RATE
+        try:
+            duration = float(stream.get("duration") or 0.0)
+        except Exception:
+            duration = 0.0
+        frames = int(float(stream.get("nb_frames") or 0))
+        if frames <= 0 and duration > 0:
+            frames = max(1, int(round(duration * fps)))
+        return width, height, fps, frames, duration
+    except Exception:
+        return 0, 0, DEFAULT_FRAME_RATE, 0, 0.0
 
 
 def _extract_video_components(source: Any) -> tuple[list[dict[str, Any]], float | None]:
@@ -1016,6 +1139,101 @@ def combine_video(
     if resolved_format not in list_supported_formats():
         raise RuntimeError(f"不支持的输出格式：{resolved_format}")
 
+    frame_rate_is_linked = _is_prompt_input_linked(prompt, unique_id, "frame_rate")
+    loop_count = max(0, int(loop_count))
+    filename_prefix_is_linked = _is_prompt_input_linked(prompt, unique_id, "filename_prefix")
+    prefix = str(filename_prefix if filename_prefix_is_linked else (filename_prefix or DEFAULT_FILENAME_PREFIX)).strip() or DEFAULT_FILENAME_PREFIX
+    direct_video_path = _resolve_video_file_path(images) if not video_inputs else None
+    can_passthrough_video = (
+        direct_video_path is not None
+        and resolved_format.startswith("video/")
+        and not bool(pingpong)
+        and loop_count == 0
+        and not bool(delete_tail_frame)
+    )
+    if can_passthrough_video and direct_video_path is not None:
+        width, height, source_fps, frame_count, _duration = _probe_video_file(direct_video_path)
+        fps_source = source_fps if (bool(use_source_fps) and source_fps and not frame_rate_is_linked) else frame_rate
+        fps = max(0.01, _normalize_fps(fps_source, source_fps or DEFAULT_FRAME_RATE))
+        output_dir = folder_paths.get_output_directory() if bool(save_output) else folder_paths.get_temp_directory()
+        full_output_folder, filename, _, subfolder, _ = folder_paths.get_save_image_path(
+            prefix,
+            output_dir,
+            max(1, int(width or 1)),
+            max(1, int(height or 1)),
+        )
+        os.makedirs(full_output_folder, exist_ok=True)
+        counter = _find_next_output_counter(full_output_folder, filename)
+        overrides = parse_format_overrides(format_overrides_json)
+        metadata = _encode_metadata(prompt=prompt, extra_pnginfo=extra_pnginfo)
+        format_ext = resolved_format.split("/", 1)[1]
+        video_format = apply_format_widgets(format_ext, dict(overrides))
+        extension = str(video_format.get("extension", "") or "mp4")
+        main_output_path = os.path.join(full_output_folder, f"{filename}_{counter:05}.{extension}")
+        effective_audio = _resolve_audio_or_none(audio, unique_id)
+        _send_status(unique_id, "1/2 检测到磁盘 VIDEO，跳过抽帧并直接输出...", 0.35)
+        ffmpeg_path = get_ffmpeg_path()
+        if effective_audio is not None and _format_supports_audio(extension):
+            _send_status(unique_id, "2/2 正在封入外接音频...", 0.7)
+            _mux_audio_into_video(
+                input_video_path=str(direct_video_path),
+                output_video_path=main_output_path,
+                audio=effective_audio,
+                video_format=video_format,
+                frame_count=max(1, int(frame_count or round(fps))),
+                frame_rate=fps,
+            )
+        elif ffmpeg_path:
+            command = [
+                ffmpeg_path,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(direct_video_path),
+                "-map",
+                "0",
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                main_output_path,
+            ]
+            proc = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+            if proc.returncode != 0:
+                raise RuntimeError((proc.stderr or proc.stdout or "ffmpeg 复制视频失败").strip())
+        else:
+            shutil.copyfile(str(direct_video_path), main_output_path)
+        try:
+            video_output = InputImpl.VideoFromFile(main_output_path)
+        except Exception:
+            video_output = _create_video_output(torch.empty((1, max(1, height), max(1, width), 3)), fps, effective_audio)
+        output_files = [main_output_path]
+        output_files_json = json.dumps(output_files, ensure_ascii=False)
+        preview_item = {
+            "filename": os.path.basename(main_output_path),
+            "subfolder": str(subfolder or ""),
+            "type": "output" if bool(save_output) else "temp",
+            "format": resolved_format,
+            "frame_rate": fps,
+            "width": int(width or 0),
+            "height": int(height or 0),
+            "frame_count": int(frame_count or 0),
+        }
+        _send_status(unique_id, "完成：已直通输出 VIDEO，未展开为图片帧", 1.0)
+        return {
+            "ui": {
+                "preview_main_path": (main_output_path,),
+                "preview_format": (resolved_format,),
+                "preview_is_video": (True,),
+                "preview_width": (int(width or 0),),
+                "preview_height": (int(height or 0),),
+                "preview_media": [preview_item],
+            },
+            "result": (video_output, main_output_path, output_files_json),
+        }
+
     video_segments, source_video_fps = _extract_video_components(images)
     if not video_segments and video_inputs:
         video_segments, source_video_fps = _extract_video_components(video_inputs)
@@ -1024,11 +1242,8 @@ def combine_video(
     if not has_image_input and not has_video_input:
         raise RuntimeError("请连接“图像/视频/Latent”。")
 
-    frame_rate_is_linked = _is_prompt_input_linked(prompt, unique_id, "frame_rate")
     fps_source = source_video_fps if (bool(use_source_fps) and source_video_fps and not frame_rate_is_linked) else frame_rate
     fps = max(0.01, _normalize_fps(fps_source, DEFAULT_FRAME_RATE))
-    loop_count = max(0, int(loop_count))
-    prefix = str(filename_prefix or "").strip() or DEFAULT_FILENAME_PREFIX
 
     _send_status(unique_id, "1/5 整理输入帧序列...", 0.05)
     frame_segments: list[torch.Tensor] = []

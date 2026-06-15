@@ -12,6 +12,7 @@ MAX_GROUPS = 16
 DIM_TYPE = "INT,STRING,FLOAT"
 INPUT_MEDIA_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
 OUTPUT_MEDIA_TYPE = "IMAGE"
+CUDA_HEADROOM = 0.82
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -90,10 +91,17 @@ def _coerce_to_bhwc(value: Any) -> torch.Tensor:
         tensor = tensor.permute(0, 2, 3, 1)
     if int(tensor.shape[-1]) <= 0:
         raise RuntimeError("批次裁剪失败：输入通道数无效。")
-    return tensor.detach().float().contiguous()
+    tensor = tensor.detach()
+    if not torch.is_floating_point(tensor) or tensor.dtype != torch.float32:
+        tensor = tensor.float()
+    if not tensor.is_contiguous():
+        tensor = tensor.contiguous()
+    return tensor
 
 
 def _resize_center_crop(frames: torch.Tensor, target_w: int, target_h: int) -> torch.Tensor:
+    device = _choose_processing_device(int(frames.numel()), int(frames.shape[0]) * target_w * target_h * int(frames.shape[-1]))
+    frames = frames.to(device=device, non_blocking=True, copy=False)
     batch, src_h, src_w, channels = frames.shape
     scale = max(float(target_w) / float(max(1, src_w)), float(target_h) / float(max(1, src_h)))
     resize_w = max(target_w, int(math.ceil(src_w * scale)))
@@ -106,6 +114,19 @@ def _resize_center_crop(frames: torch.Tensor, target_w: int, target_h: int) -> t
     if int(cropped.shape[-2]) != target_h or int(cropped.shape[-1]) != target_w:
         cropped = F.interpolate(cropped, size=(target_h, target_w), mode="bilinear", align_corners=False)
     return cropped.movedim(1, -1).clamp(0.0, 1.0).contiguous()
+
+
+def _choose_processing_device(input_numel: int, output_numel: int) -> torch.device:
+    if not torch.cuda.is_available():
+        return torch.device("cpu")
+    try:
+        free_bytes, _total_bytes = torch.cuda.mem_get_info()
+        needed_bytes = max(1, int(input_numel) + int(output_numel)) * 4
+        if needed_bytes < int(free_bytes * CUDA_HEADROOM):
+            return torch.device("cuda")
+    except Exception:
+        pass
+    return torch.device("cpu")
 
 
 class GJJ_BatchCropResize:
@@ -169,17 +190,17 @@ class GJJ_BatchCropResize:
 
     def crop_resize(self, align_multiple: int = 16, **kwargs):
         multiple = max(1, _as_int(align_multiple, 16))
-        media_items: dict[int, torch.Tensor] = {}
-        for index in range(1, MAX_GROUPS + 1):
-            media = kwargs.get(f"media_{index:02d}", None)
-            if media is None:
-                continue
-            media_items[index] = _coerce_to_bhwc(media)
+        media_indices = [
+            index
+            for index in range(1, MAX_GROUPS + 1)
+            if kwargs.get(f"media_{index:02d}", None) is not None
+        ]
 
-        if not media_items:
+        if not media_indices:
             return (None, None) + tuple(None for _ in range(MAX_GROUPS))
 
-        first_frames = media_items[min(media_items.keys())]
+        first_index = min(media_indices)
+        first_frames = _coerce_to_bhwc(kwargs.get(f"media_{first_index:02d}", None))
         src_h = int(first_frames.shape[1])
         src_w = int(first_frames.shape[2])
         width = _as_int(kwargs.get("width", None), 0)
@@ -189,10 +210,13 @@ class GJJ_BatchCropResize:
 
         outputs: list[Any] = [target_w, target_h]
         for index in range(1, MAX_GROUPS + 1):
-            item = media_items.get(index)
-            if item is None:
+            if index not in media_indices:
                 outputs.append(None)
                 continue
+            if index == first_index:
+                item = first_frames
+            else:
+                item = _coerce_to_bhwc(kwargs.get(f"media_{index:02d}", None))
             cropped = _resize_center_crop(item, target_w, target_h)
             outputs.append(cropped)
         return tuple(outputs)
