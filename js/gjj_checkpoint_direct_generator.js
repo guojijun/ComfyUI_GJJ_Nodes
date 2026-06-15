@@ -10,6 +10,7 @@ const IMAGE_PREVIEW_NAME = "gjj_image_preview";
 const SETTINGS_OPEN_PROPERTY = "gjj_checkpoint_settings_open";
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt", "positive"]);
 const INTERNAL_WIDGETS = new Set([STATUS_WIDGET, EXECUTE_BUTTON_NAME, IMAGE_PREVIEW_NAME]);
+const FIXED_INPUTS = new Set(["image", "lora_chain_config"]);
 const PANEL_SYNC_WIDGETS = [
 	"prompt",
 	"positive",
@@ -48,7 +49,34 @@ function getWidget(node, name) {
 }
 
 function settingsOpen(node) {
-	return Boolean(node?.properties?.[SETTINGS_OPEN_PROPERTY]);
+	const saved = node?.properties?.[SETTINGS_OPEN_PROPERTY];
+	return saved === undefined ? true : Boolean(saved);
+}
+
+function nodeContentWidth(node, width = null) {
+	const source = Number(width ?? node?.size?.[0] ?? 0);
+	return Math.max(0, Math.round(source) - 20);
+}
+
+function configureDomWidgetSize(node, widget, element, heightProvider) {
+	if (!widget) {
+		return;
+	}
+	widget.computeSize = (width) => {
+		const rawHeight = typeof heightProvider === "function"
+			? heightProvider()
+			: heightProvider;
+		return [
+			nodeContentWidth(node, width),
+			Math.max(0, Math.round(Number(rawHeight) || 0)),
+		];
+	};
+	if (element) {
+		element.style.width = "100%";
+		element.style.maxWidth = "100%";
+		element.style.minWidth = "0";
+		element.style.overflow = "hidden";
+	}
 }
 
 function rememberWidgetState(widget) {
@@ -137,6 +165,55 @@ function updateSettingsButtonState(node) {
 	button.style.color = open ? "#ffffff" : "#e5edf2";
 }
 
+function removeConvertedWidgetInputs(node) {
+	if (!Array.isArray(node?.inputs)) {
+		return;
+	}
+	const open = settingsOpen(node);
+	for (let index = node.inputs.length - 1; index >= 0; index -= 1) {
+		const input = node.inputs[index];
+		const name = String(input?.name || "");
+		const type = String(input?.type || "");
+		const converted = type.startsWith("converted-widget:")
+			? type.slice("converted-widget:".length)
+			: "";
+		const target = converted || name;
+		if (!target || FIXED_INPUTS.has(target)) {
+			continue;
+		}
+		if (PANEL_SYNC_WIDGETS.includes(target) && (open || !ALWAYS_VISIBLE_WIDGETS.has(target))) {
+			if (input?.link != null) {
+				try { node.disconnectInput?.(index); } catch (_) {}
+			}
+			if (typeof node.removeInput === "function") {
+				node.removeInput(index);
+			} else {
+				node.inputs.splice(index, 1);
+			}
+		}
+	}
+}
+
+function orderCheckpointWidgets(node) {
+	if (!Array.isArray(node?.widgets)) {
+		return;
+	}
+	const rank = (widget) => {
+		const name = String(widget?.name || "");
+		if (widget === node.__gjjCheckpointStatus?.widget || name === STATUS_WIDGET) return 0;
+		if (name === "prompt" || name === "positive") return 10;
+		if (PANEL_SYNC_WIDGETS.includes(name)) return 30;
+		if (widget === node.__gjjExecuteButtonWidget || name === EXECUTE_BUTTON_NAME) return 80;
+		if (widget === node.__gjjImagePreviewWidget || name === IMAGE_PREVIEW_NAME) return 100;
+		if (INTERNAL_WIDGETS.has(name) || widget?.hidden) return 900;
+		return 50;
+	};
+	node.widgets = node.widgets
+		.map((widget, index) => ({ widget, index }))
+		.sort((left, right) => rank(left.widget) - rank(right.widget) || left.index - right.index)
+		.map((item) => item.widget);
+}
+
 function applySettingsVisibility(node) {
 	if (!node || !Array.isArray(node.widgets)) {
 		return;
@@ -160,12 +237,14 @@ function applySettingsVisibility(node) {
 			setWidgetHidden(widget, !open && !ALWAYS_VISIBLE_WIDGETS.has(name));
 		}
 	}
+	removeConvertedWidgetInputs(node);
+	orderCheckpointWidgets(node);
 	updateSettingsButtonState(node);
-	GJJ_Utils.refreshNode(node, { minWidth: 300, minHeight: 90 });
+	GJJ_Utils.refreshNode(node, { minWidth: 0, minHeight: 90 });
 }
 
 function scheduleCheckpointRefresh(node) {
-	GJJ_Utils.scheduleRefreshNode?.(node, { minWidth: 300, minHeight: 90, delay: 0 });
+	GJJ_Utils.scheduleRefreshNode?.(node, { minWidth: 0, minHeight: 90, delay: 0 });
 }
 
 function setSettingsOpen(node, open) {
@@ -298,6 +377,7 @@ function ensureStatusWidget(node) {
 	const widget = node.addDOMWidget(STATUS_WIDGET, "HTML", container, {
 		serialize: false,
 	});
+	configureDomWidgetSize(node, widget, container, 48);
 
 	node.__gjjCheckpointStatus = { widget, label, bar };
 	return node.__gjjCheckpointStatus;
@@ -339,6 +419,9 @@ function createExecuteButton(node) {
 		"flex-direction:row",
 		"gap:6px",
 		"width:100%",
+		"max-width:100%",
+		"min-width:0",
+		"overflow:hidden",
 		"box-sizing:border-box",
 		"position:relative",
 		"z-index:1000",
@@ -387,7 +470,9 @@ function createExecuteButton(node) {
 		"border:1px solid #55636f",
 		"background:linear-gradient(135deg, #1f2933, #374151)",
 		"color:#e5edf2",
-		"flex:0 0 74px",
+		"flex:0 1 74px",
+		"max-width:74px",
+		"min-width:0",
 	].join(";");
 	node.__gjjCheckpointSettingsButton = settingsButton;
 
@@ -833,25 +918,39 @@ function stabilizeNode(node) {
 
 	installModelHelpProvider(node);
 
-	if (node.__gjjStabilized) {
+	if (!Array.isArray(node.widgets) || node.widgets.length === 0) {
+		node.__gjjStabilized = false;
 		return;
 	}
 	node.__gjjStabilized = true;
 
-	ensureStatusWidget(node);
+	if (typeof node.addDOMWidget === "function") {
+		ensureStatusWidget(node);
 
-	if (!node.__gjjExecuteButtonWidget) {
-		const buttonsContainer = createExecuteButton(node);
-		node.__gjjExecuteButtonWidget = node.addDOMWidget(EXECUTE_BUTTON_NAME, "HTML", buttonsContainer, { serialize: false });
-	}
+		if (!node.__gjjExecuteButtonWidget) {
+			const buttonsContainer = createExecuteButton(node);
+			node.__gjjExecuteButtonWidget = node.addDOMWidget(EXECUTE_BUTTON_NAME, "HTML", buttonsContainer, { serialize: false });
+			configureDomWidgetSize(node, node.__gjjExecuteButtonWidget, buttonsContainer, 40);
+		}
 
-	if (!node.__gjjImagePreviewWidget) {
-		const previewContainer = createImagePreview(node);
-		node.__gjjImagePreviewWidget = node.addDOMWidget(IMAGE_PREVIEW_NAME, "HTML", previewContainer, { serialize: false });
+		if (!node.__gjjImagePreviewWidget) {
+			const previewContainer = createImagePreview(node);
+			node.__gjjImagePreviewWidget = node.addDOMWidget(IMAGE_PREVIEW_NAME, "HTML", previewContainer, { serialize: false });
+			configureDomWidgetSize(
+				node,
+				node.__gjjImagePreviewWidget,
+				previewContainer,
+				() => node.__gjjPreviewImage?.style?.display === "none"
+					? 0
+					: Math.max(0, Math.round(node.__gjjPreviewImage?.offsetHeight || 0)),
+			);
+		}
 	}
 
 	applySettingsVisibility(node);
-	setStatus(node, "等待执行");
+	if (node.__gjjCheckpointStatus) {
+		setStatus(node, "等待执行");
+	}
 
 	node.setDirtyCanvas?.(true, true);
 	node.graph?.setDirtyCanvas?.(true, true);
@@ -897,11 +996,13 @@ app.registerExtension({
 
 			this.__gjjPreviewObserver = null;
 
-			setTimeout(() => {
-				stabilizeNode(this);
-				hideDefaultPreviewElements(this);
-				setupPreviewObserver(this);
-			}, 0);
+			for (const delay of [0, 40, 120, 300]) {
+				setTimeout(() => {
+					stabilizeNode(this);
+					hideDefaultPreviewElements(this);
+					setupPreviewObserver(this);
+				}, delay);
+			}
 			setTimeout(() => scheduleSettingsVisibility(this), 40);
 
 			return result;
@@ -911,6 +1012,7 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalConfigure?.apply(this, args);
 			setTimeout(() => {
+				stabilizeNode(this);
 				scheduleSettingsVisibility(this);
 				if (this.__gjjCheckpointStatus) {
 					setStatus(this, "等待执行");

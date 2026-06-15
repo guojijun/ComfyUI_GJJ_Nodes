@@ -25,6 +25,7 @@ const LORA_CHAIN_CONFIG_INPUT = "lora_chain_config";
 const LORA_DATA_WIDGET_NAME = "lora_data";
 const SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_settings_open";
 const PARAM_VALUES_PROPERTY = "gjj_lazy_image_studio_param_values";
+const IMAGE_SIZE_SIGNATURE_PROPERTY = "gjj_lazy_image_studio_image_size_signature";
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
 const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME]);
 
@@ -787,10 +788,9 @@ function getImageInputs(node) {
 }
 
 function addImageInput(node) {
-	const nextIndex = getImageInputs(node).length + 1;
-	const name = `${IMAGE_PREFIX}${String(nextIndex).padStart(2, "0")}`;
-	const type = nextIndex === 1 ? BATCH_IMAGE_TYPE : "IMAGE";
-	node.addInput?.(name, type);
+	if (!getInput(node, PRIMARY_IMAGE_INPUT)) {
+		node.addInput?.(PRIMARY_IMAGE_INPUT, BATCH_IMAGE_TYPE);
+	}
 }
 
 function hasLinked(input) {
@@ -799,41 +799,34 @@ function hasLinked(input) {
 
 function trimUnusedImageInputs(node) {
 	const inputs = getImageInputs(node);
-	for (let index = inputs.length - 1; index >= MIN_VISIBLE_IMAGES; index -= 1) {
+	for (let index = inputs.length - 1; index >= 0; index -= 1) {
 		const input = inputs[index];
-		if (hasLinked(input)) {
-			break;
+		if (String(input?.name || "") === PRIMARY_IMAGE_INPUT && index === 0) {
+			continue;
 		}
 		const slot = node.inputs?.indexOf(input) ?? -1;
 		if (slot >= 0) {
+			if (hasLinked(input)) node.disconnectInput?.(slot);
 			node.removeInput?.(slot);
 		}
 	}
 }
 
 function ensureTrailingImageInput(node) {
-	const inputs = getImageInputs(node);
-	if (!inputs.length) {
-		addImageInput(node);
-		return;
-	}
-	if (inputs.length >= MAX_IMAGES) {
-		return;
-	}
-	if (hasLinked(inputs[inputs.length - 1])) {
-		addImageInput(node);
-	}
+	if (!getInput(node, PRIMARY_IMAGE_INPUT)) addImageInput(node);
+	trimUnusedImageInputs(node);
 }
 
 function renameImageInputs(node) {
-	getImageInputs(node).forEach((input, idx) => {
-		const displayIndex = idx + 1;
-		input.name = `${IMAGE_PREFIX}${String(displayIndex).padStart(2, "0")}`;
-		input.type = displayIndex === 1 ? BATCH_IMAGE_TYPE : "IMAGE";
-		input.label = displayIndex === 1 ? "批量图片" : `图片 ${displayIndex - 1}`;
+	trimUnusedImageInputs(node);
+	const input = getInput(node, PRIMARY_IMAGE_INPUT) || getImageInputs(node)[0];
+	if (input) {
+		input.name = PRIMARY_IMAGE_INPUT;
+		input.type = BATCH_IMAGE_TYPE;
+		input.label = "批量图片";
 		input.localized_name = input.label;
-		input.tooltip = displayIndex === 1 ? PRIMARY_IMAGE_TOOLTIP : IMAGE_TOOLTIP;
-	});
+		input.tooltip = PRIMARY_IMAGE_TOOLTIP;
+	}
 	const maskInput = getInput(node, MAIN_MASK_INPUT);
 	if (maskInput) {
 		maskInput.type = "MASK";
@@ -1061,6 +1054,9 @@ async function syncSizeFromPrimaryInput(node) {
 	if (getLinkedWidgetInput(node, "width") || getLinkedWidgetInput(node, "height")) {
 		return;
 	}
+	if (node.__gjjLazyImageSizeSyncRunning) {
+		return;
+	}
 	const primary = getInput(node, PRIMARY_IMAGE_INPUT);
 	const linkId = primary?.link;
 	if (!linkId || !app.graph?.links) {
@@ -1071,24 +1067,57 @@ async function syncSizeFromPrimaryInput(node) {
 	if (!sourceNode) {
 		return;
 	}
-	let size = null;
-	if (sourceNode.comfyClass === "GJJ_MultiImageLoader") {
-		size = await largestMultiImageLoaderSize(sourceNode);
-	} else if (["LoadImage", "LoadImageOutput"].includes(sourceNode.comfyClass)) {
-		const imageWidget = getWidget(sourceNode, "image");
-		const filename = String(imageWidget?.value || "").trim();
-		const type = sourceNode.comfyClass === "LoadImage" ? "input" : "output";
-		if (filename) {
-			size = await loadImageDimensions(
-				`/api/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(type)}&subfolder=&rand=${Date.now()}`
-			);
+	node.__gjjLazyImageSizeSyncRunning = true;
+	try {
+		let size = null;
+		let signature = "";
+		if (sourceNode.comfyClass === "GJJ_MultiImageLoader") {
+			const selected = String(getWidget(sourceNode, "selected_images")?.value || "");
+			signature = JSON.stringify(["multi", link.origin_id, link.origin_slot, selected]);
+			size = await largestMultiImageLoaderSize(sourceNode);
+		} else if (["LoadImage", "LoadImageOutput"].includes(sourceNode.comfyClass)) {
+			const imageWidget = getWidget(sourceNode, "image");
+			const filename = String(imageWidget?.value || "").trim();
+			const type = sourceNode.comfyClass === "LoadImage" ? "input" : "output";
+			signature = JSON.stringify(["load", link.origin_id, link.origin_slot, type, filename]);
+			if (filename) {
+				size = await loadImageDimensions(
+					`/api/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(type)}&subfolder=&rand=${Date.now()}`
+				);
+			}
+		} else if (sourceNode.comfyClass === "GJJ_ImageResizeKJv2") {
+			const cfg = readResizeNodeConfig(sourceNode);
+			if (cfg) {
+				const width = Number(cfg.width || 0);
+				const height = Number(cfg.height || 0);
+				signature = JSON.stringify(["resize", link.origin_id, link.origin_slot, width, height, cfg.mode || "", cfg.ratio || ""]);
+				if (width > 0 && height > 0) {
+					size = { width, height };
+				}
+			}
+		} else if (sourceNode.comfyClass === "GJJ_PenMaskEditor") {
+			const imageSize = sourceNode.properties?.gjj_pen_mask_image_size || {};
+			const width = Number(imageSize.width || sourceNode.__gjjPenMaskEditor?.imageWidth || 0);
+			const height = Number(imageSize.height || sourceNode.__gjjPenMaskEditor?.imageHeight || 0);
+			const imageFile = String(getWidget(sourceNode, "image_file")?.value || "");
+			signature = JSON.stringify(["pen-mask", link.origin_id, link.origin_slot, width, height, imageFile, imageSize.source || ""]);
+			if (width > 0 && height > 0) {
+				size = { width, height };
+			}
 		}
+		if (!size || !signature) {
+			return;
+		}
+		node.properties = node.properties || {};
+		if (node.properties[IMAGE_SIZE_SIGNATURE_PROPERTY] === signature) {
+			return;
+		}
+		setWidgetValue(getWidget(node, "width"), roundToEight(size.width));
+		setWidgetValue(getWidget(node, "height"), roundToEight(size.height));
+		node.properties[IMAGE_SIZE_SIGNATURE_PROPERTY] = signature;
+	} finally {
+		node.__gjjLazyImageSizeSyncRunning = false;
 	}
-	if (!size) {
-		return;
-	}
-	setWidgetValue(getWidget(node, "width"), roundToEight(size.width));
-	setWidgetValue(getWidget(node, "height"), roundToEight(size.height));
 }
 
 function createButtons(node) {
@@ -1542,6 +1571,36 @@ function syncStepsFromLoras(node) {
 	}
 }
 
+function replaceLoraRows(node, rows) {
+	const normalizedRows = Array.isArray(rows) && rows.length
+		? rows.map((row) => ({
+			enabled: row?.enabled !== false,
+			name: String(row?.name || ""),
+			strength: normalizeStrength(row?.strength, 1.0),
+		}))
+		: [{ ...DEFAULT_ROW }];
+	const state = ensureLoraNodeState(node);
+	state.rows = normalizedRows;
+	const serialized = serializeRows(normalizedRows);
+
+	node.properties = node.properties || {};
+	node.properties[LORA_DATA_WIDGET_NAME] = serialized;
+
+	const dataWidget = getWidget(node, LORA_DATA_WIDGET_NAME);
+	if (dataWidget) {
+		dataWidget.value = serialized;
+		const widgetIndex = Array.isArray(node.widgets) ? node.widgets.indexOf(dataWidget) : -1;
+		if (Array.isArray(node.widgets_values) && widgetIndex >= 0) {
+			node.widgets_values[widgetIndex] = serialized;
+		}
+	}
+	renderLoraUi(node);
+}
+
+function clearPresetLoras(node) {
+	replaceLoraRows(node, [{ ...DEFAULT_ROW }]);
+}
+
 function applyPreset(node, force = false) {
 	const unetWidget = getWidget(node, "unet_name");
 	if (!unetWidget) {
@@ -1552,7 +1611,15 @@ function applyPreset(node, force = false) {
 	const preset = matchPreset(currentUnet);
 	updateMainImageIndexState(node, preset);
 	if (!preset) {
+		clearPresetLoras(node);
+		node.properties[LAST_PRESET_KEY] = currentUnet;
 		return;
+	}
+	const hasPresetLora = Boolean(
+		String(preset.lora1 || "").trim() || String(preset.lora2 || "").trim()
+	);
+	if (!hasPresetLora) {
+		clearPresetLoras(node);
 	}
 	if (!force && node.properties[LAST_PRESET_KEY] === currentUnet) {
 		return;
@@ -1586,27 +1653,11 @@ function applyPreset(node, force = false) {
 		setWidgetValue(getWidget(node, "height"), Number(preset.height));
 	}
 
-	// 完全彻底地重置 LoRA 状态，不管有没有预设都清空旧数据
-	// 第一步：清除所有持久化数据
-	if (node.properties) {
-		node.properties[LORA_DATA_WIDGET_NAME] = "[]";
-	}
-
-	// 第二步：清除内存中的状态（完全重置）
-	if (node.__gjjLoraState) {
-		node.__gjjLoraState.rows = []; // 先清空
-	}
-
-	// 第三步：判断预设中是否有 LoRA 配置
-	const hasPresetLora = (preset.lora1 && String(preset.lora1).trim()) ||
-						(preset.lora2 && String(preset.lora2).trim());
-
 	let newLoraRows = [];
 	if (hasPresetLora) {
-		// 预设中有 LoRA，应用预设
 		if (preset.lora1 && String(preset.lora1).trim()) {
 			newLoraRows.push({
-				enabled: true,
+				enabled: preset.lora1AutoEnabled !== false,
 				name: String(preset.lora1),
 				strength: normalizeStrength(preset.lora1Strength, 1.0),
 			});
@@ -1618,27 +1669,12 @@ function applyPreset(node, force = false) {
 				strength: normalizeStrength(preset.lora2Strength, 0.7),
 			});
 		}
-		// 添加空行用于新增
 		newLoraRows.push({ ...DEFAULT_ROW });
 	} else {
-		// 预设中没有 LoRA，完全清空，只保留一个空行
 		newLoraRows = [{ ...DEFAULT_ROW }];
 	}
 
-	// 第四步：强制更新内存状态
-	if (node.__gjjLoraState) {
-		node.__gjjLoraState.rows = newLoraRows;
-	} else {
-		// 如果还没有状态，创建一个全新的
-		node.__gjjLoraState = {
-			rows: newLoraRows,
-			options: [{ ...DEFAULT_EMPTY_OPTION }],
-		};
-	}
-
-	// 第五步：强制更新 widget 值和 UI
-	updateLoraDataWidget(node);
-	renderLoraUi(node);
+	replaceLoraRows(node, newLoraRows);
 	syncStepsFromLoras(node);
 
 	node.properties[LAST_PRESET_KEY] = currentUnet;
@@ -1654,20 +1690,9 @@ function hookUnetWidget(node) {
 	widget.callback = function (value, ...args) {
 		const result = original?.call(this, value, ...args);
 
-		// 第一步：清除所有持久化数据
-		if (node.properties) {
-			node.properties[LAST_PRESET_KEY] = "";
-			node.properties[LORA_DATA_WIDGET_NAME] = "[]";
-		}
-
-		// 第二步：完全重置内存中的 LoRA 状态
-		if (node.__gjjLoraState) {
-			node.__gjjLoraState.rows = []; // 先清空
-			// 然后设置为默认值（只有一个空行）
-			node.__gjjLoraState.rows = [{ ...DEFAULT_ROW }];
-		}
-
-		// 第三步：应用预设
+		node.properties = node.properties || {};
+		node.properties[LAST_PRESET_KEY] = "";
+		clearPresetLoras(node);
 		applyPreset(node, true);
 		GJJ_Utils.refreshNode(node);
 		return result;
@@ -2590,6 +2615,26 @@ globalThis.GJJLazyImageStudioSyncBatchSources = function (sourceNode) {
 		const link = app.graph.links[linkId];
 		if (link?.origin_id === sourceNode.id) {
 			syncBatchSourceWidget(node);
+		}
+	}
+};
+
+globalThis.GJJLazyImageStudioSyncImageSources = function (sourceNode) {
+	if (!sourceNode) {
+		return;
+	}
+	for (const node of app.graph?._nodes || []) {
+		if (!TARGET_NODES.has(node?.comfyClass)) {
+			continue;
+		}
+		const primary = getInput(node, PRIMARY_IMAGE_INPUT);
+		const linkId = primary?.link;
+		if (!linkId || !app.graph?.links) {
+			continue;
+		}
+		const link = app.graph.links[linkId];
+		if (link?.origin_id === sourceNode.id) {
+			void syncSizeFromPrimaryInput(node);
 		}
 	}
 };

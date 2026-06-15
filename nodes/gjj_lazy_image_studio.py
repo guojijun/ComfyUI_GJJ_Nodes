@@ -81,6 +81,7 @@ DEFAULT_LIGHTNING_LORA = ""
 DEFAULT_NSFW_LORA = ""
 REFERENCE_IMAGE_MEGAPIXELS = 1.0
 REFERENCE_IMAGE_RESOLUTION_STEPS = 1
+FLUX2_REFERENCE_RESOLUTION_STEPS = 16
 IMAGE_RATIO_EPSILON = 0.015
 
 
@@ -129,6 +130,61 @@ def _format_model_missing_error(
 
 def _format_runtime_error(stage: str, exc: Exception) -> RuntimeError:
     return RuntimeError(f"{stage}失败。\n详细错误：{exc}")
+
+
+def _is_flux2_family(unet_name: str | None = "", clip_type: str | None = "") -> bool:
+    normalized_unet = _normalize_text(unet_name)
+    normalized_clip = _normalize_text(clip_type)
+    return (
+        normalized_clip == "flux2"
+        or "flux2" in normalized_unet
+        or "f2k" in normalized_unet
+        or "flux-2" in str(unet_name or "").lower()
+        or "klein" in normalized_unet
+    )
+
+
+def _apply_f2k_fallback_preset(preset: dict[str, Any], unet_name: str) -> dict[str, Any]:
+    if str(preset.get("id", "")) != "generic":
+        return preset
+    normalized = _normalize_text(unet_name)
+    if "f2k" not in normalized:
+        return preset
+    is_4b = "4b" in normalized
+    return {
+        **preset,
+        "id": "flux2_klein_4b" if is_4b else "flux2_klein_9b",
+        "keywords": ["f2k-4b", "f2k4b"] if is_4b else ["f2k-9b", "f2k9b", "f2k"],
+        "clip_type": "flux2",
+        "clip_names": ["qwen_3_4b.safetensors"] if is_4b else ["qwen_3_8b_fp8mixed.safetensors"],
+        "vae_name": "flux2-vae.safetensors",
+        "steps": 4,
+        "cfg": 1.0,
+        "sampler_name": "lcm",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "supports_multi_image_edit": False,
+        "width": 1024,
+        "height": 1024,
+    }
+
+
+def _supports_multi_reference_edit(
+    preset: dict[str, Any], unet_name: str | None = "", clip_type: str | None = ""
+) -> bool:
+    text = _canonical_model_text(
+        "|".join(
+            [
+                str(unet_name or ""),
+                str(clip_type or ""),
+                str(preset.get("id", "")),
+                str(preset.get("keywords", "")),
+            ]
+        )
+    )
+    return bool(preset.get("supports_multi_image_edit")) or any(
+        keyword in text for keyword in ("flux", "f2k", "edit")
+    )
 
 
 class FlexibleImageStudioInputType(dict):
@@ -211,6 +267,11 @@ def sorted_dynamic_items(kwargs: dict[str, Any], prefix: str) -> list[tuple[str,
 def _split_image_batch(value: Any) -> list[Any]:
     if value is None:
         return []
+    if isinstance(value, (list, tuple)):
+        images: list[Any] = []
+        for item in value:
+            images.extend(_split_image_batch(item))
+        return images
     if not isinstance(value, torch.Tensor):
         return [value]
     if value.ndim == 3:
@@ -221,6 +282,12 @@ def _split_image_batch(value: Any) -> list[Any]:
     if batch_size <= 1:
         return [value.contiguous()]
     return [value[index : index + 1].contiguous() for index in range(batch_size)]
+
+
+def _unwrap_list_input(value: Any) -> Any:
+    while isinstance(value, (list, tuple)) and len(value) == 1:
+        value = value[0]
+    return value
 
 
 def _resolve_prompt_node(prompt_graph: Any, node_id: Any) -> dict[str, Any] | None:
@@ -281,41 +348,27 @@ def collect_image_pairs(
     batch_source_images: Any = None,
 ) -> list[dict[str, Any]]:
     primary_value = kwargs.get("image_01")
-    recovered_primary_images = _recover_serialized_image_entries(
-        batch_source_images
-    ) or _recover_multi_image_loader_primary_batch(prompt_graph, unique_id)
-    has_secondary_images = any(
-        input_index(name, "image_") > 1 and value is not None
-        for name, value in sorted_dynamic_items(kwargs, "image_")
-    )
-    skip_primary_batch = has_secondary_images and (
-        bool(recovered_primary_images)
-        or (
-            isinstance(primary_value, torch.Tensor)
-            and getattr(primary_value, "ndim", 0) == 4
-            and int(primary_value.shape[0]) > 1
-        )
-    )
+    primary_images = [
+        image
+        for image in _split_image_batch(primary_value)
+        if isinstance(image, torch.Tensor) and image.ndim in (3, 4)
+    ]
+    recovered_primary_images: list[torch.Tensor] = []
+    if not primary_images:
+        recovered_primary_images = _recover_serialized_image_entries(
+            batch_source_images
+        ) or _recover_multi_image_loader_primary_batch(prompt_graph, unique_id)
     pairs: list[dict[str, Any]] = []
-    for name, value in sorted_dynamic_items(kwargs, "image_"):
-        input_slot = input_index(name, "image_")
-        if input_slot >= 999999 or value is None:
-            continue
-        if skip_primary_batch and input_slot == 1:
-            continue
-        if input_slot == 1 and recovered_primary_images:
-            source_images = recovered_primary_images
-        else:
-            source_images = _split_image_batch(value)
-        for batch_index, image in enumerate(source_images):
-            pairs.append(
-                {
-                    "slot_index": len(pairs),
-                    "source_input_index": input_slot - 1,
-                    "source_batch_index": batch_index,
-                    "image": image,
-                }
-            )
+    source_images = primary_images or recovered_primary_images
+    for batch_index, image in enumerate(source_images):
+        pairs.append(
+            {
+                "slot_index": len(pairs),
+                "source_input_index": 0,
+                "source_batch_index": batch_index,
+                "image": image,
+            }
+        )
     return pairs
 
 
@@ -331,6 +384,44 @@ def zero_out_conditioning(conditioning):
             payload["conditioning_lyrics"] = torch.zeros_like(conditioning_lyrics)
         result.append([torch.zeros_like(item[0]), payload])
     return result
+
+
+def _limit_latent_batch(latent: Any, batch_size: int) -> Any:
+    if not isinstance(latent, dict):
+        return latent
+    samples = latent.get("samples")
+    if not isinstance(samples, torch.Tensor) or samples.ndim < 1:
+        return latent
+    target = max(1, int(batch_size))
+    current = int(samples.shape[0])
+    if current <= target:
+        return latent
+    limited = dict(latent)
+    limited["samples"] = samples[:target].contiguous()
+    noise_mask = limited.get("noise_mask")
+    if (
+        isinstance(noise_mask, torch.Tensor)
+        and noise_mask.ndim >= 1
+        and int(noise_mask.shape[0]) == current
+    ):
+        limited["noise_mask"] = noise_mask[:target].contiguous()
+    return limited
+
+
+def _limit_conditioning_batch(conditioning: Any, batch_size: int) -> Any:
+    if not isinstance(conditioning, list):
+        return conditioning
+    target = max(1, int(batch_size))
+    limited = []
+    for item in conditioning:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            limited.append(item)
+            continue
+        cond = item[0]
+        if isinstance(cond, torch.Tensor) and cond.ndim >= 1 and int(cond.shape[0]) > target:
+            cond = cond[:target].contiguous()
+        limited.append([cond, item[1]])
+    return limited
 
 
 def load_standard_lora_patches(
@@ -509,6 +600,29 @@ def _scale_image_to_total_pixels(
     step = max(1, int(resolution_steps))
     target_width = max(step, int(round((samples.shape[3] * scale_by) / step)) * step)
     target_height = max(step, int(round((samples.shape[2] * scale_by) / step)) * step)
+    return comfy.utils.common_upscale(
+        samples, target_width, target_height, upscale, "disabled"
+    ).movedim(1, -1)
+
+
+def _scale_image_to_short_edge(
+    image: torch.Tensor,
+    short_edge: int,
+    resolution_steps: int = FLUX2_REFERENCE_RESOLUTION_STEPS,
+    upscale: str = "lanczos",
+) -> torch.Tensor:
+    samples = image.movedim(-1, 1)
+    source_height = max(1, int(samples.shape[2]))
+    source_width = max(1, int(samples.shape[3]))
+    target_short_edge = max(16, int(short_edge))
+    scale = float(target_short_edge) / float(min(source_width, source_height))
+    step = max(1, int(resolution_steps))
+    target_width = max(
+        step, int(round((source_width * scale) / step)) * step
+    )
+    target_height = max(
+        step, int(round((source_height * scale) / step)) * step
+    )
     return comfy.utils.common_upscale(
         samples, target_width, target_height, upscale, "disabled"
     ).movedim(1, -1)
@@ -812,6 +926,7 @@ class GJJ_LazyImageStudio:
     ]
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("🖼️ 最终生成图像",)
+    INPUT_IS_LIST = True
     OUTPUT_NODE = True  # 设为True以确保节点可以作为有效输出节点
     OUTPUT_TOOLTIPS = ("节点内部完成条件编码、采样和解码后的最终图片。",)
 
@@ -822,7 +937,7 @@ class GJJ_LazyImageStudio:
     @classmethod
     def INPUT_TYPES(cls):
         _raw_diffusion_models = list_unet_models() or [DEFAULT_UNET_NAME]
-        _diffusion_keywords = ["flux", "zimage", "z_image", "z-image","qwen", "firered"]
+        _diffusion_keywords = ["flux", "f2k", "zimage", "z_image", "z-image", "qwen", "firered"]
         _filtered = [
             m
             for m in _raw_diffusion_models
@@ -1126,6 +1241,7 @@ class GJJ_LazyImageStudio:
         vl_long_edge: int = 512,
         target_width: int = 1024,
         target_height: int = 1024,
+        batch_size: int = 1,
     ):
         # 限制最大参考图数量以避免OOM，特别是对于FireRed和qwen-image-edit模型
         MAX_REFERENCE_IMAGES = 3
@@ -1177,7 +1293,13 @@ class GJJ_LazyImageStudio:
             conditioning, {"reference_latents": ref_latents}, append=True
         )
         negative = self._encode_negative_conditioning(clip, positive, negative_prompt)
-        latent_out = {"samples": torch.zeros_like(ref_latents[0])}
+        latent_samples = torch.zeros_like(ref_latents[0])
+        requested_batch = max(1, int(batch_size))
+        if int(latent_samples.shape[0]) != requested_batch:
+            latent_samples = latent_samples[:1].repeat(
+                requested_batch, 1, 1, 1
+            ).contiguous()
+        latent_out = {"samples": latent_samples}
 
         # 清理VL图像列表以释放显存
         del vl_images
@@ -1284,19 +1406,9 @@ class GJJ_LazyImageStudio:
     def _build_latent(
         self, vae, width, height, batch_size, image_pairs, mask, grow_mask_by, preset
     ):
-        # 检查是否为Flux2模型（32通道）
-        is_flux2_model = False
-        clip_type = preset.get("clip_type", "stable_diffusion")
-        unet_name = preset.get("unet_name", "")
-
-        # 通过UNET名称判断是否为Flux2模型
-        normalized_unet = _normalize_text(unet_name)
-        if "flux2" in normalized_unet:
-            is_flux2_model = True
-
-        # 或者通过clip_type判断
-        if _normalize_text(clip_type) == "flux2":
-            is_flux2_model = True
+        clip_type = str(preset.get("resolved_clip_type") or preset.get("clip_type") or "")
+        unet_name = str(preset.get("resolved_unet_name") or preset.get("unet_name") or "")
+        is_flux2_model = _is_flux2_family(unet_name, clip_type)
 
         if not image_pairs:
             if _normalize_text(preset.get("clip_type", "")) == "lumina2":
@@ -1348,29 +1460,39 @@ class GJJ_LazyImageStudio:
         negative = self._encode_negative_conditioning(clip, positive, negative_prompt)
         resolved_width = max(16, int(width))
         resolved_height = max(16, int(height))
-        for ordered_index, pair in enumerate(ordered_pairs):
-            # 输出尺寸必须服从面板/外部连接。参考图只适配到目标画布，
-            # 不再用 1MP 参考缩放结果反向覆盖输出尺寸。
+        reference_latents: list[torch.Tensor] = []
+        reference_sizes: list[str] = []
+        reference_short_edge = min(resolved_width, resolved_height)
+        for pair in ordered_pairs:
             image = pair["image"]
-            scaled_image, _ignore_mask, _ignore_outpaint = (
-                _prepare_primary_image_for_target(
-                    image,
-                    int(resolved_width),
-                    int(resolved_height),
-                    None,
-                )
+            # 所有参考图统一按输出画布短边等比缩放。
+            # 不裁切、不拉伸、不补边，也不再把辅助图压缩到较小像素预算。
+            scaled_image = _scale_image_to_short_edge(
+                image,
+                short_edge=reference_short_edge,
+                resolution_steps=FLUX2_REFERENCE_RESOLUTION_STEPS,
             )
 
-            # FLUX2 多图参考使用标准 VAE 编码（128 通道）
             reference_latent = VAEEncode().encode(vae, scaled_image)[0]["samples"]
+            reference_latents.append(reference_latent)
+            reference_sizes.append(
+                f"{int(scaled_image.shape[2])}x{int(scaled_image.shape[1])}"
+            )
+        if reference_latents:
             positive = node_helpers.conditioning_set_values(
-                positive, {"reference_latents": [reference_latent]}, append=True
+                positive, {"reference_latents": reference_latents}, append=True
             )
             negative = node_helpers.conditioning_set_values(
-                negative, {"reference_latents": [reference_latent]}, append=True
+                negative, {"reference_latents": reference_latents}, append=True
             )
         latent_out = EmptyFlux2LatentImage(
             int(resolved_width), int(resolved_height), int(batch_size)
+        )
+        print(
+            "[GJJ] Flux2/F2K 多图参考："
+            f"主图+参考图 {len(reference_latents)} 张，"
+            f"编码尺寸 {', '.join(reference_sizes)}，"
+            f"输出 {resolved_width}x{resolved_height}，batch={max(1, int(batch_size))}"
         )
         return positive, negative, latent_out, resolved_width, resolved_height
 
@@ -1414,6 +1536,30 @@ class GJJ_LazyImageStudio:
         extra_pnginfo=None,
         **kwargs,
     ):
+        prompt = _unwrap_list_input(prompt)
+        negative_prompt = _unwrap_list_input(negative_prompt)
+        main_image_index = _unwrap_list_input(main_image_index)
+        width = _unwrap_list_input(width)
+        height = _unwrap_list_input(height)
+        batch_size = _unwrap_list_input(batch_size)
+        unet_name = _unwrap_list_input(unet_name)
+        unet_dtype = _unwrap_list_input(unet_dtype)
+        clip_name1 = _unwrap_list_input(clip_name1)
+        vae_name = _unwrap_list_input(vae_name)
+        seed = _unwrap_list_input(seed)
+        steps = _unwrap_list_input(steps)
+        cfg = _unwrap_list_input(cfg)
+        sampler_name = _unwrap_list_input(sampler_name)
+        scheduler = _unwrap_list_input(scheduler)
+        denoise = _unwrap_list_input(denoise)
+        grow_mask_by = _unwrap_list_input(grow_mask_by)
+        lora_chain_config = _unwrap_list_input(lora_chain_config)
+        batch_source_images = _unwrap_list_input(batch_source_images)
+        mask = _unwrap_list_input(mask)
+        prompt_graph = _unwrap_list_input(prompt_graph)
+        unique_id = _unwrap_list_input(unique_id)
+        extra_pnginfo = _unwrap_list_input(extra_pnginfo)
+
         # 从 properties 读取 lora_data（通过 extra_pnginfo + unique_id）
         lora_data = ""
         try:
@@ -1440,6 +1586,7 @@ class GJJ_LazyImageStudio:
         try:
             _send_status(unique_id, "1/6 解析模型配套...")
             preset = match_model_family(unet_name)
+            preset = _apply_f2k_fallback_preset(preset, unet_name)
             clip_models = list_clip_models() or [DEFAULT_CLIP_NAME]
             vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
             # 确保 loras 目录存在并获取文件列表
@@ -1483,6 +1630,15 @@ class GJJ_LazyImageStudio:
                 resolved_clip_names,
                 str(preset.get("clip_type", "stable_diffusion")),
             )
+            is_flux2_runtime = _is_flux2_family(
+                unet_name,
+                str(resolved_clip_type or preset.get("clip_type", "")),
+            )
+            if is_flux2_runtime:
+                resolved_clip_type = "flux2"
+            preset = dict(preset)
+            preset["resolved_unet_name"] = str(unet_name or "")
+            preset["resolved_clip_type"] = str(resolved_clip_type or "")
             pairs = [
                 pair
                 for pair in collect_image_pairs(
@@ -1493,6 +1649,15 @@ class GJJ_LazyImageStudio:
                 )
                 if pair["image"] is not None
             ]
+            input_shapes = [
+                "x".join(str(int(size)) for size in pair["image"].shape)
+                for pair in pairs
+                if isinstance(pair.get("image"), torch.Tensor)
+            ]
+            print(
+                f"[GJJ] LazyImageStudio 实际接收图片：{len(pairs)} 张"
+                + (f"，张量尺寸 {', '.join(input_shapes)}" if input_shapes else "")
+            )
 
             _send_status(unique_id, "2/6 加载主模型、CLIP 和 VAE...")
             model, clip, vae = self._load_runtime_pipeline(
@@ -1520,9 +1685,12 @@ class GJJ_LazyImageStudio:
 
             _send_status(unique_id, "4/6 编码条件与 latent...")
             flux2_sample_size = None
-            if len(pairs) > 1 and resolved_clip_type == "flux2" and mask is None:
+            supports_reference_edit = _supports_multi_reference_edit(
+                preset, unet_name, resolved_clip_type
+            )
+            if pairs and resolved_clip_type == "flux2":
                 _send_status(
-                    unique_id, f"4/6 编码 Flux2 多参考条件（{len(pairs)} 张）..."
+                    unique_id, f"4/6 编码 Flux2 图片编辑条件（{len(pairs)} 张）..."
                 )
                 positive, negative, latent_out, flux2_width, flux2_height = (
                     self._encode_flux2_multi_reference(
@@ -1542,7 +1710,7 @@ class GJJ_LazyImageStudio:
             elif (
                 pairs
                 and mask is None
-                and bool(preset.get("supports_multi_image_edit"))
+                and supports_reference_edit
                 and _uses_equal_reference_canvas(preset, unet_name)
             ):
                 _send_status(
@@ -1559,11 +1727,12 @@ class GJJ_LazyImageStudio:
                         vl_long_edge=int(preset.get("vl_long_edge", 512)),
                         target_width=int(width),
                         target_height=int(height),
+                        batch_size=int(batch_size),
                     )
                 )
                 width = int(equal_width)
                 height = int(equal_height)
-            elif pairs and bool(preset.get("supports_multi_image_edit")):
+            elif pairs and supports_reference_edit:
                 positive, negative, latent_out = self._encode_multi_image_edit(
                     clip=clip,
                     vae=vae,
@@ -1594,6 +1763,8 @@ class GJJ_LazyImageStudio:
                 )
 
             _send_status(unique_id, "5/6 采样生成图像...")
+            positive = _limit_conditioning_batch(positive, int(batch_size))
+            negative = _limit_conditioning_batch(negative, int(batch_size))
             effective_steps = _resolve_effective_steps(
                 int(steps),
                 preset,
@@ -1631,6 +1802,7 @@ class GJJ_LazyImageStudio:
                 )[0]
 
             _send_status(unique_id, "6/6 解码输出图像...")
+            sampled_latent = _limit_latent_batch(sampled_latent, int(batch_size))
             image = VAEDecode().decode(vae, sampled_latent)[0]
 
             # 计算耗时

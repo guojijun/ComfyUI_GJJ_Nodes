@@ -133,6 +133,27 @@ def _optional_image_tensor(value: Any, label: str) -> torch.Tensor | None:
     return _ensure_image_tensor(value, label)
 
 
+def _optional_valid_image_tensor(value: Any, label: str, allow_all_black: bool = True) -> torch.Tensor | None:
+    if value is None:
+        return None
+    try:
+        tensor = _ensure_image_tensor(value, label)
+    except Exception as exc:
+        log.warning("%s输入无效，已忽略：%s", label, exc)
+        return None
+    if tensor.numel() == 0 or int(tensor.shape[0]) <= 0:
+        log.warning("%s为空，已忽略。", label)
+        return None
+    if not allow_all_black:
+        try:
+            if float(tensor.detach().abs().amax().cpu()) <= 1e-6:
+                log.warning("%s没有有效颜色内容，已忽略。", label)
+                return None
+        except Exception:
+            pass
+    return tensor
+
+
 def _upscale_bhwc(image: torch.Tensor, width: int, height: int, method: str, crop: str = "center") -> torch.Tensor:
     return comfy.utils.common_upscale(
         image.movedim(-1, 1),
@@ -141,6 +162,42 @@ def _upscale_bhwc(image: torch.Tensor, width: int, height: int, method: str, cro
         method,
         crop,
     ).movedim(1, -1)
+
+
+def _fit_or_trim_batch(tensor: torch.Tensor | None, count: int) -> torch.Tensor | None:
+    if tensor is None or count <= 0:
+        return None
+    if int(tensor.shape[0]) == count:
+        return tensor
+    if int(tensor.shape[0]) > count:
+        return tensor[:count]
+    if int(tensor.shape[0]) <= 0:
+        return None
+    return torch.cat([tensor, tensor[-1:].repeat(count - int(tensor.shape[0]), 1, 1, 1)], dim=0)
+
+
+def _normalize_reference_mask(rgb: torch.Tensor, white_background: bool) -> torch.Tensor:
+    rgb = rgb[..., :3].float().clamp(0.0, 1.0)
+    if bool(white_background):
+        bg = rgb.amax(dim=-1, keepdim=True) <= 0.05
+        return torch.where(bg, torch.ones_like(rgb), rgb).contiguous()
+    bg = rgb.amin(dim=-1, keepdim=True) >= 0.95
+    return torch.where(bg, torch.zeros_like(rgb), rgb).contiguous()
+
+
+def _composite_on_background(images: torch.Tensor, masks: torch.Tensor | None, background: torch.Tensor | None, width: int, height: int) -> torch.Tensor:
+    if images is None or background is None or masks is None or int(masks.shape[0]) <= 0:
+        return images
+    count = min(int(images.shape[0]), int(masks.shape[0]))
+    if count <= 0:
+        return images
+    bg = _upscale_bhwc(background[:1], width, height, "bicubic", "center").to(device=images.device, dtype=images.dtype)
+    mask = _upscale_bhwc(masks[:count], width, height, "nearest-exact", "center")
+    mask = _normalize_reference_mask(mask, white_background=False).to(device=images.device, dtype=images.dtype)
+    is_character = (mask[..., :3].max(dim=-1, keepdim=True).values > 0.1).to(images.dtype)
+    out = images.clone()
+    out[:count] = out[:count] * is_character + bg * (1.0 - is_character)
+    return out
 
 
 def _extract_mask_to_28ch(rgb_video: torch.Tensor) -> torch.Tensor:
@@ -379,7 +436,8 @@ class GJJ_WanSCAILToVideo:
             "姿态控制：连接 姿态视频帧，节点会缩放到目标视频一半分辨率，VAE 编码为 pose_video_latent，并按姿态开始/结束比例生效。",
             "SCAIL-2 身份遮罩：连接 姿态彩色遮罩 和/或 参考图彩色遮罩，遮罩应使用官方训练色板：红、绿、蓝、黄、洋红、青、白。",
             "替换模式：开启后参考图会按参考图彩色遮罩裁到黑底，并把 ref_mask_flag 写为 False；关闭时为动画模式。",
-            "参考图：连接参考图后会缩放到目标宽高并编码为 reference_latents；多参考请在上游先合成到一张图。",
+            "背景与参考：连接背景图、参考图、多参考图时，节点会在有有效数据时自动编码；动画模式下参考遮罩可把人物合成到背景上。",
+            "多参考：多参考图会逐张编码并追加到 reference_latents；多参考图遮罩会按参考数量自动对齐，不足时复用最后一张，空输入自动忽略。",
             "续段生成：连接上一段完整输出帧，并把上段输出的 下一段帧偏移 接回本节点；节点会取末尾若干帧作为 anchor，并输出 noise_mask。",
         ],
         "inputs": {
@@ -388,7 +446,10 @@ class GJJ_WanSCAILToVideo:
             "宽度/高度/帧数/批次数": "决定输出视频 latent 形状；姿态视频会缩放到宽高的一半。",
             "姿态视频帧": "可选 IMAGE 帧队列，通常来自姿态视频或驱动视频抽帧。",
             "姿态彩色遮罩": "SCAIL-2 可选 IMAGE 帧队列，应与姿态视频同步；动画模式用黑底，替换模式用白底。",
+            "背景图": "SCAIL-2 可选单张背景图。动画模式下用于参考图/多参考图按遮罩合成背景；替换模式下自动忽略。",
             "参考图彩色遮罩": "SCAIL-2 可选单帧彩色身份遮罩，应与参考图同构。",
+            "多参考图": "SCAIL-2 可选多张参考图，会逐张编码成 reference_latents。",
+            "多参考图遮罩": "SCAIL-2 可选多参考图对应彩色遮罩，可少于参考图数量；不足时复用最后一张。",
             "上一段视频帧": "SCAIL-2 续段可选输入，节点只取末尾 上一段锚定帧数 帧。",
         },
         "notes": [
@@ -466,13 +527,25 @@ class GJJ_WanSCAILToVideo:
                     "IMAGE",
                     {"display_name": "姿态彩色遮罩", "tooltip": "SCAIL-2 可选。与姿态视频同步的彩色身份遮罩帧队列，动画模式黑底，替换模式白底。"},
                 ),
+                "background_image": (
+                    "IMAGE",
+                    {"display_name": "背景图", "tooltip": "SCAIL-2 可选。动画模式下用于把参考图/多参考图按遮罩合成到背景上；替换模式会自动忽略。"},
+                ),
                 "reference_image": (
                     "IMAGE",
-                    {"display_name": "参考图", "tooltip": "可选参考图。多参考请在上游合成到单张图；节点会缩放到目标宽高并编码为 reference_latents。"},
+                    {"display_name": "参考图片", "tooltip": "可选主参考图。连接后缩放到目标宽高并编码为 reference_latents；无有效数据时自动忽略。"},
                 ),
                 "reference_image_mask": (
                     "IMAGE",
-                    {"display_name": "参考图彩色遮罩", "tooltip": "SCAIL-2 可选。参考图对应的彩色身份遮罩；替换模式下还会作为参考图裁切蒙版。"},
+                    {"display_name": "参考图彩色遮罩", "tooltip": "SCAIL-2 可选。主参考图对应的彩色身份遮罩；替换模式下用于裁切，动画模式下可用于背景合成。"},
+                ),
+                "multi_reference_images": (
+                    "IMAGE",
+                    {"display_name": "多参考图", "tooltip": "SCAIL-2 可选。多张参考图会逐张编码并追加到 reference_latents；空输入不会打断工作流。"},
+                ),
+                "multi_reference_masks": (
+                    "IMAGE",
+                    {"display_name": "多参考图遮罩", "tooltip": "SCAIL-2 可选。多参考图对应的彩色身份遮罩；数量不足会复用最后一张，未连接或无效时自动跳过。"},
                 ),
                 "clip_vision_output": (
                     "CLIP_VISION_OUTPUT",
@@ -504,7 +577,10 @@ class GJJ_WanSCAILToVideo:
         clip_vision_output: Any = None,
         pose_video: Any = None,
         pose_video_mask: Any = None,
+        background_image: Any = None,
         reference_image_mask: Any = None,
+        multi_reference_images: Any = None,
+        multi_reference_masks: Any = None,
         previous_frames: Any = None,
     ):
         positive = _ensure_conditioning(positive, "正向条件")
@@ -534,25 +610,53 @@ class GJJ_WanSCAILToVideo:
             prev_trimmed = prev_trimmed[-previous_frame_count:]
             video_frame_offset = max(0, video_frame_offset - int(prev_trimmed.shape[0]))
 
-        ref_latent = None
-        ref_image = _optional_image_tensor(reference_image, "参考图")
-        ref_mask = _optional_image_tensor(reference_image_mask, "参考图彩色遮罩")
-        if ref_mask is not None and ref_image is None:
-            raise RuntimeError(
-                "已连接“参考图彩色遮罩”，但“参考图”未连接。"
-                "SCAIL-2 参考遮罩包含 1 个参考 latent 帧；缺少参考图会导致采样时视频 latent 与遮罩长度不一致。"
-            )
-        if ref_image is not None:
-            ref_image = _upscale_bhwc(ref_image[:1], width, height, "bicubic", "center")
-            if replacement_mode and ref_mask is not None:
-                resized_mask = _upscale_bhwc(ref_mask[:1], width, height, "nearest-exact", "center")
-                is_character = (resized_mask[..., :3].max(dim=-1, keepdim=True).values > 0.1).to(ref_image.dtype)
-                ref_image = ref_image * is_character
-            ref_latent = vae.encode(ref_image[:, :, :, :3])
+        ref_latents: list[torch.Tensor] = []
+        ref_mask_inputs: list[torch.Tensor | None] = []
+        background = _optional_valid_image_tensor(background_image, "背景图")
+        if background is not None and bool(replacement_mode):
+            log.info("SCAIL-2 背景图在替换模式下自动忽略。")
+            background = None
 
-        if ref_latent is not None:
-            positive = _conditioning_set_values(positive, {"reference_latents": [ref_latent]}, append=True)
-            negative = _conditioning_set_values(negative, {"reference_latents": [ref_latent]}, append=True)
+        ref_image = _optional_valid_image_tensor(reference_image, "参考图片")
+        ref_mask = _optional_valid_image_tensor(reference_image_mask, "参考图彩色遮罩", allow_all_black=False)
+        if ref_mask is not None and ref_image is None:
+            log.warning("已连接参考图彩色遮罩，但参考图片无有效数据，已忽略该遮罩。")
+            ref_mask = None
+
+        ref_images_to_encode: list[tuple[str, torch.Tensor, torch.Tensor | None]] = []
+        if ref_image is not None:
+            ref_images_to_encode.append(("参考图片", ref_image[:1], ref_mask[:1] if ref_mask is not None else None))
+
+        multi_refs = _optional_valid_image_tensor(multi_reference_images, "多参考图")
+        multi_masks = _optional_valid_image_tensor(multi_reference_masks, "多参考图遮罩", allow_all_black=False)
+        if multi_refs is not None:
+            aligned_multi_masks = _fit_or_trim_batch(multi_masks, int(multi_refs.shape[0])) if multi_masks is not None else None
+            for index in range(int(multi_refs.shape[0])):
+                one_mask = aligned_multi_masks[index:index + 1] if aligned_multi_masks is not None else None
+                ref_images_to_encode.append((f"多参考图 {index + 1}", multi_refs[index:index + 1], one_mask))
+        elif multi_masks is not None:
+            log.warning("已连接多参考图遮罩，但多参考图无有效数据，已忽略该遮罩。")
+
+        if background is not None and not ref_images_to_encode:
+            ref_images_to_encode.append(("背景图", background[:1], None))
+
+        for label, image_tensor, mask_tensor in ref_images_to_encode:
+            prepared = _upscale_bhwc(image_tensor[:1], width, height, "bicubic", "center")
+            if mask_tensor is not None:
+                if bool(replacement_mode):
+                    resized_mask = _upscale_bhwc(mask_tensor[:1], width, height, "nearest-exact", "center")
+                    resized_mask = _normalize_reference_mask(resized_mask, white_background=False)
+                    is_character = (resized_mask[..., :3].max(dim=-1, keepdim=True).values > 0.1).to(prepared.dtype)
+                    prepared = prepared * is_character
+                elif background is not None:
+                    prepared = _composite_on_background(prepared, mask_tensor[:1], background, width, height)
+            ref_latents.append(vae.encode(prepared[:, :, :, :3]))
+            ref_mask_inputs.append(mask_tensor[:1] if mask_tensor is not None else None)
+            log.info("SCAIL-2 已编码%s参考 latent。", label)
+
+        if ref_latents:
+            positive = _conditioning_set_values(positive, {"reference_latents": ref_latents}, append=True)
+            negative = _conditioning_set_values(negative, {"reference_latents": ref_latents}, append=True)
 
         if clip_vision_output is not None:
             positive = _conditioning_set_values(positive, {"clip_vision_output": clip_vision_output})
@@ -587,15 +691,26 @@ class GJJ_WanSCAILToVideo:
             positive = _conditioning_set_values(positive, {"driving_mask_28ch": driving_mask_28ch})
             negative = _conditioning_set_values(negative, {"driving_mask_28ch": driving_mask_28ch})
 
-        if ref_mask is not None:
-            ref_mask_hw = _upscale_bhwc(ref_mask[:1], width, height, "bicubic", "center")
-            ref_mask_1f = _extract_mask_to_28ch(ref_mask_hw)
+        valid_ref_masks = [mask for mask in ref_mask_inputs if mask is not None]
+        if valid_ref_masks:
+            ref_mask_latents = []
+            first_mask_tensor = _normalize_reference_mask(valid_ref_masks[0][:1], white_background=not bool(replacement_mode))
+            first_mask_hw = _upscale_bhwc(first_mask_tensor, width, height, "bicubic", "center")
+            first_mask_latent = _extract_mask_to_28ch(first_mask_hw)
+            for mask in ref_mask_inputs:
+                if mask is None:
+                    ref_mask_latents.append(torch.zeros_like(first_mask_latent))
+                    continue
+                ref_mask_tensor = _normalize_reference_mask(mask[:1], white_background=not bool(replacement_mode))
+                ref_mask_hw = _upscale_bhwc(ref_mask_tensor, width, height, "bicubic", "center")
+                ref_mask_latents.append(_extract_mask_to_28ch(ref_mask_hw))
+            ref_mask_prefix = torch.cat(ref_mask_latents, dim=1)
             zeros = torch.zeros(
-                (1, latent.shape[2], 28, ref_mask_1f.shape[-2], ref_mask_1f.shape[-1]),
-                device=ref_mask_1f.device,
-                dtype=ref_mask_1f.dtype,
+                (1, latent.shape[2], 28, ref_mask_prefix.shape[-2], ref_mask_prefix.shape[-1]),
+                device=ref_mask_prefix.device,
+                dtype=ref_mask_prefix.dtype,
             )
-            ref_mask_28ch = torch.cat([ref_mask_1f, zeros], dim=1)
+            ref_mask_28ch = torch.cat([ref_mask_prefix, zeros], dim=1)
             positive = _conditioning_set_values(positive, {"ref_mask_28ch": ref_mask_28ch})
             negative = _conditioning_set_values(negative, {"ref_mask_28ch": ref_mask_28ch})
 

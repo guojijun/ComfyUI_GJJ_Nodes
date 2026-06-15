@@ -99,6 +99,27 @@ def _coerce_to_bhwc(value: Any) -> torch.Tensor:
     return tensor
 
 
+def _unwrap_single(value: Any) -> Any:
+    while isinstance(value, (list, tuple)) and len(value) == 1:
+        value = value[0]
+    return value
+
+
+def _coerce_media_items(value: Any) -> list[torch.Tensor]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        items: list[torch.Tensor] = []
+        for item in value:
+            items.extend(_coerce_media_items(item))
+        return items
+    tensor = _coerce_to_bhwc(value)
+    return [
+        tensor[index : index + 1].contiguous()
+        for index in range(int(tensor.shape[0]))
+    ]
+
+
 def _resize_center_crop(frames: torch.Tensor, target_w: int, target_h: int) -> torch.Tensor:
     device = _choose_processing_device(int(frames.numel()), int(frames.shape[0]) * target_w * target_h * int(frames.shape[-1]))
     frames = frames.to(device=device, non_blocking=True, copy=False)
@@ -136,6 +157,7 @@ class GJJ_BatchCropResize:
     SEARCH_ALIASES = ["批次裁剪", "视频帧裁剪", "center crop", "batch crop", "resize crop"]
     RETURN_TYPES = (DIM_TYPE, DIM_TYPE) + tuple(OUTPUT_MEDIA_TYPE for _ in range(MAX_GROUPS))
     RETURN_NAMES = ("宽度", "高度") + tuple(f"结果 {i}" for i in range(1, MAX_GROUPS + 1))
+    INPUT_IS_LIST = True
     OUTPUT_TOOLTIPS = (
         "统一实际输出宽度。",
         "统一实际输出高度。",
@@ -189,22 +211,23 @@ class GJJ_BatchCropResize:
         }
 
     def crop_resize(self, align_multiple: int = 16, **kwargs):
-        multiple = max(1, _as_int(align_multiple, 16))
+        multiple = max(1, _as_int(_unwrap_single(align_multiple), 16))
         media_indices = [
             index
             for index in range(1, MAX_GROUPS + 1)
-            if kwargs.get(f"media_{index:02d}", None) is not None
+            if _coerce_media_items(kwargs.get(f"media_{index:02d}", None))
         ]
 
         if not media_indices:
             return (None, None) + tuple(None for _ in range(MAX_GROUPS))
 
         first_index = min(media_indices)
-        first_frames = _coerce_to_bhwc(kwargs.get(f"media_{first_index:02d}", None))
+        first_items = _coerce_media_items(kwargs.get(f"media_{first_index:02d}", None))
+        first_frames = first_items[0]
         src_h = int(first_frames.shape[1])
         src_w = int(first_frames.shape[2])
-        width = _as_int(kwargs.get("width", None), 0)
-        height = _as_int(kwargs.get("height", None), 0)
+        width = _as_int(_unwrap_single(kwargs.get("width", None)), 0)
+        height = _as_int(_unwrap_single(kwargs.get("height", None)), 0)
         target_w = _align(width if width > 0 else src_w, multiple)
         target_h = _align(height if height > 0 else src_h, multiple)
 
@@ -213,12 +236,15 @@ class GJJ_BatchCropResize:
             if index not in media_indices:
                 outputs.append(None)
                 continue
-            if index == first_index:
-                item = first_frames
-            else:
-                item = _coerce_to_bhwc(kwargs.get(f"media_{index:02d}", None))
-            cropped = _resize_center_crop(item, target_w, target_h)
-            outputs.append(cropped)
+            items = (
+                first_items
+                if index == first_index
+                else _coerce_media_items(kwargs.get(f"media_{index:02d}", None))
+            )
+            cropped_items = [
+                _resize_center_crop(item, target_w, target_h) for item in items
+            ]
+            outputs.append(torch.cat(cropped_items, dim=0))
         return tuple(outputs)
 
 
