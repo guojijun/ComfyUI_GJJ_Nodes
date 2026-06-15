@@ -821,6 +821,177 @@ class GJJ_VideoFramesLoader:
             return (torch.cat(frames, dim=0), fps, output_fps, total)
 
 
+def _empty_image_batch() -> torch.Tensor:
+    return torch.zeros((0, 64, 64, 3), dtype=torch.float32)
+
+
+def _video_timestamp_ns(path: Path) -> int:
+    try:
+        stat = path.stat()
+    except Exception:
+        return 0
+    return max(int(getattr(stat, "st_ctime_ns", 0) or 0), int(getattr(stat, "st_mtime_ns", 0) or 0))
+
+
+def _format_video_timestamp(path: Path) -> str:
+    timestamp_ns = _video_timestamp_ns(path)
+    if timestamp_ns <= 0:
+        return "未知时间"
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp_ns / 1_000_000_000))
+    except Exception:
+        return "未知时间"
+
+
+def _latest_video_key(path: Path) -> tuple[int, str]:
+    return (_video_timestamp_ns(path), str(path.resolve()).lower())
+
+
+def _latest_video_from_prefix(filename_prefix: Any, source: Any = None) -> tuple[Path | None, str]:
+    prefix_from_source = _segment_prefix_text(_first_text_hint(source))
+    prefix_from_panel = _segment_prefix_text(filename_prefix)
+    effective_prefix = prefix_from_source or prefix_from_panel or str(filename_prefix or "").strip()
+
+    videos = _find_prefixed_videos(effective_prefix) if effective_prefix else []
+    if not videos:
+        videos = _collect_media_paths(source, VIDEO_SUFFIXES)
+    if not videos:
+        direct = _resolve_media_path(filename_prefix, VIDEO_SUFFIXES)
+        videos = [direct] if direct is not None else []
+    if not videos:
+        return None, effective_prefix
+    return max(videos, key=_latest_video_key), effective_prefix
+
+
+def _latest_video_signature(filename_prefix: Any, source: Any = None) -> str:
+    video_path, effective_prefix = _latest_video_from_prefix(filename_prefix, source)
+    if video_path is None:
+        return f"missing:{effective_prefix}"
+    try:
+        stat = video_path.stat()
+        return f"{video_path}:{stat.st_size}:{getattr(stat, 'st_ctime_ns', 0)}:{stat.st_mtime_ns}"
+    except Exception:
+        return str(video_path)
+
+
+def _extract_video_tail_frames(video_path: Path, frame_count: int, ffmpeg_path: str) -> torch.Tensor:
+    count = max(1, int(frame_count))
+    with tempfile.TemporaryDirectory() as tmp:
+        pattern = str(Path(tmp) / "tail_%06d.png")
+        _run([
+            ffmpeg_path,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vf",
+            "reverse",
+            "-frames:v",
+            str(count),
+            pattern,
+        ])
+        frame_paths = sorted(Path(tmp).glob("tail_*.png"))
+        if not frame_paths:
+            return _empty_image_batch()
+        frames = []
+        for frame_path in reversed(frame_paths):
+            with Image.open(frame_path) as img:
+                array = np.asarray(img.convert("RGB")).astype(np.float32) / 255.0
+                frames.append(torch.from_numpy(array).unsqueeze(0))
+        return torch.cat(frames, dim=0).contiguous()
+
+
+class GJJ_LatestVideoTailFrames:
+    CATEGORY = "GJJ/视频"
+    FUNCTION = "load_tail"
+    DESCRIPTION = "按文件名前缀查找最新视频，并用 FFmpeg 返回最后若干帧；找不到或读取失败时输出空 IMAGE 批次，不打断工作流。"
+    SEARCH_ALIASES = ["latest video tail frames", "last video frames", "视频尾帧", "最新视频", "文件名前缀"]
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING", "INT")
+    RETURN_NAMES = ("尾帧", "视频路径", "状态", "返回帧数")
+    OUTPUT_TOOLTIPS = (
+        "最新匹配视频的最后若干帧。找不到视频或读取失败时输出空 IMAGE 批次。",
+        "实际读取的视频路径；未找到时为空。",
+        "中文状态说明，可接到预览或日志节点。",
+        "实际返回的帧数。",
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "filename_prefix": ("STRING", {
+                    "default": "GJJ/ffmpeg/mux",
+                    "display_name": "文件名前缀",
+                    "tooltip": "用于搜索输出目录下同前缀视频；也可以直接填视频路径。若“图片帧/前缀”入口接入 STRING，则优先使用入口值。",
+                }),
+                "frame_count": ("INT", {
+                    "default": 1,
+                    "min": 1,
+                    "max": 10000,
+                    "step": 1,
+                    "display_name": "返回尾帧数量",
+                    "tooltip": "从最新视频末尾返回多少帧；视频不足时返回实际可读取的帧数。",
+                }),
+                "ffmpeg_path": ("STRING", {
+                    "default": "",
+                    "display_name": "",
+                    "tooltip": "内部高级参数：ffmpeg 可执行文件路径。留空时自动查找；不可用时输出空帧并继续。",
+                    "display": "hidden",
+                    "hidden": True,
+                }),
+            },
+            "optional": {
+                "images": (MEDIA_FRAME_INPUT_TYPE, {
+                    "display_name": "图片帧/前缀",
+                    "tooltip": "可选。支持 GJJ_BATCH_IMAGE、IMAGE、VIDEO、STRING；本节点主要读取其中的 STRING 前缀或视频路径，优先级高于面板文件名前缀。",
+                }),
+            },
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, filename_prefix: str, frame_count: int = 1, ffmpeg_path: str = "", images=None, **kwargs):
+        return "|".join([
+            str(max(1, int(frame_count))),
+            str(_first_text_hint(images)),
+            str(filename_prefix or ""),
+            _latest_video_signature(filename_prefix, images),
+        ])
+
+    def load_tail(self, filename_prefix: str, frame_count: int = 1, ffmpeg_path: str = "", images=None):
+        requested = max(1, int(frame_count))
+        video_path, effective_prefix = _latest_video_from_prefix(filename_prefix, images)
+        if video_path is None:
+            status = f"未找到同前缀视频，已输出空帧并继续。搜索前缀：{effective_prefix or '空'}"
+            return {
+                "ui": {"text": [status]},
+                "result": (_empty_image_batch(), "", status, 0),
+            }
+
+        try:
+            ffmpeg = _ffmpeg(ffmpeg_path)
+            frames = _extract_video_tail_frames(video_path, requested, ffmpeg)
+            count = int(frames.shape[0]) if isinstance(frames, torch.Tensor) and frames.ndim >= 1 else 0
+            if count <= 0:
+                status = f"已找到视频但未能读取到尾帧，已输出空帧并继续：{video_path.name}"
+                return {
+                    "ui": {"text": [status]},
+                    "result": (_empty_image_batch(), str(video_path), status, 0),
+                }
+            status = f"已按时间戳读取最新视频尾帧：{video_path.name}，时间：{_format_video_timestamp(video_path)}，返回 {count} / {requested} 帧。"
+            return {
+                "ui": {"text": [status]},
+                "result": (frames, str(video_path), status, count),
+            }
+        except Exception as exc:
+            status = f"读取最新视频尾帧失败，已输出空帧并继续：{video_path.name}；{exc}"
+            return {
+                "ui": {"text": [status]},
+                "result": (_empty_image_batch(), str(video_path), status, 0),
+            }
+
+
 class GJJ_FFmpegMuxAudioVideo:
     CATEGORY = "GJJ/视频"
     FUNCTION = "mux"
@@ -1030,10 +1201,12 @@ class GJJ_FFmpegMuxAudioVideo:
 NODE_CLASS_MAPPINGS = {
     "GJJ_VideoInfo": GJJ_VideoInfo,
     "GJJ_VideoFramesLoader": GJJ_VideoFramesLoader,
+    "GJJ_LatestVideoTailFrames": GJJ_LatestVideoTailFrames,
     "GJJ_FFmpegMuxAudioVideo": GJJ_FFmpegMuxAudioVideo,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "GJJ_VideoInfo": "GJJ · 🎞️ 视频信息读取",
     "GJJ_VideoFramesLoader": "GJJ · 🎞️ 视频抽帧",
+    "GJJ_LatestVideoTailFrames": "GJJ · 🎞️ 最新视频尾帧",
     "GJJ_FFmpegMuxAudioVideo": "GJJ · 🔊 音视频合并",
 }

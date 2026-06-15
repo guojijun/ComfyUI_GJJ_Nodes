@@ -646,6 +646,7 @@ class GJJ_WanSCAILToVideo:
                 if bool(replacement_mode):
                     resized_mask = _upscale_bhwc(mask_tensor[:1], width, height, "nearest-exact", "center")
                     resized_mask = _normalize_reference_mask(resized_mask, white_background=False)
+                    resized_mask = resized_mask.to(device=prepared.device, dtype=prepared.dtype)
                     is_character = (resized_mask[..., :3].max(dim=-1, keepdim=True).values > 0.1).to(prepared.dtype)
                     prepared = prepared * is_character
                 elif background is not None:

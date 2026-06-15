@@ -29,7 +29,7 @@ from .gjj_comprehensive_matting import (
 )
 
 NODE_NAME = "GJJ_RemoveBgStitch"
-NODE_DISPLAY_NAME = "GJJ · 🧩 去背景拼接"
+NODE_DISPLAY_NAME = "GJJ · 🧩 多对象去背景拼接（添加背景）"
 MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
 BASE_DESCRIPTION = (
     "使用 RMBG1.4 自动抠出全部前景，并把每个可独立调整位置和大小的对象叠加到同一张背景上，最终只输出一张合成图。"

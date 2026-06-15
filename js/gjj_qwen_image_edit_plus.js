@@ -111,6 +111,18 @@ function restoreValues(node, serializedNode = null) {
 		if (widget.inputEl && "value" in widget.inputEl) widget.inputEl.value = value;
 		if (widget.element && "value" in widget.element) widget.element.value = value;
 	}
+	const positiveWidget = getWidget(node, FIELD.positive);
+	if (positiveWidget && !String(positiveWidget.value || "").trim()) {
+		const legacyPrompt = typeof props.prompt === "string"
+			? props.prompt
+			: (serializedNode?.widgets_values || []).find((value) => typeof value === "string" && value.trim());
+		if (typeof legacyPrompt === "string" && legacyPrompt.trim()) {
+			positiveWidget.value = legacyPrompt;
+			if (positiveWidget.inputEl && "value" in positiveWidget.inputEl) positiveWidget.inputEl.value = legacyPrompt;
+			if (positiveWidget.element && "value" in positiveWidget.element) positiveWidget.element.value = legacyPrompt;
+			saveValues(node);
+		}
+	}
 }
 
 function safeAssign(widget, key, value) {
@@ -485,7 +497,7 @@ function updateButtons(node) {
 		node.__gjjQwenEditUnloadButton.textContent = unload ? "✅ 卸载" : "⬜ 卸载";
 	}
 	if (node.__gjjQwenEditDeviceSelect) node.__gjjQwenEditDeviceSelect.value = String(getValue(node, FIELD.device, "auto") || "auto");
-	const methodEnabled = toBool(getValue(node, FIELD.methodEnabled, true));
+	const methodEnabled = toBool(getValue(node, FIELD.methodEnabled, false));
 	if (node.__gjjQwenEditMethodToggle) {
 		node.__gjjQwenEditMethodToggle.dataset.value = methodEnabled ? "true" : "false";
 		node.__gjjQwenEditMethodToggle.textContent = methodEnabled ? "✅" : "⬜";
@@ -761,8 +773,8 @@ function buildDom(node) {
 
 	const methodRow = document.createElement("div");
 	methodRow.className = "gjj-qwen-edit-method-row";
-	const methodToggle = buildButton("✅", "开启/关闭 FluxKontext 多参考潜在方法写入。", () => {
-		const next = !toBool(getValue(node, FIELD.methodEnabled, true));
+	const methodToggle = buildButton("⬜", "开启/关闭 FluxKontext 多参考潜在方法写入。默认关闭以保持 Qwen 原版提示词控制。", () => {
+		const next = !toBool(getValue(node, FIELD.methodEnabled, false));
 		setValue(node, FIELD.methodEnabled, next);
 		setStatus(node, next ? "参考潜在方法已开启" : "参考潜在方法已关闭");
 		syncDomFromWidgets(node);

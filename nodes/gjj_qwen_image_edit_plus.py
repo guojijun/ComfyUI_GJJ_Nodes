@@ -372,7 +372,7 @@ def _encode_qwen_image_edit_plus(
             )
             images_vl.append(vl_image[:, :, :, :3])
             ref_latents.append(vae.encode(vae_image[:, :, :, :3]))
-            image_prompt += f"Picture {index}: "
+            image_prompt += f"Picture {index}: <|vision_start|><|image_pad|><|vision_end|>"
             continue
 
         total = int(384 * 384)
@@ -395,10 +395,7 @@ def _encode_qwen_image_edit_plus(
 
         image_prompt += f"Picture {index}: <|vision_start|><|image_pad|><|vision_end|>"
 
-    if lazy_reference_mode:
-        tokens = clip.tokenize(image_prompt + str(prompt or ""), images=images_vl)
-    else:
-        tokens = clip.tokenize(image_prompt + str(prompt or ""), images=images_vl, llama_template=DEFAULT_LLAMA_TEMPLATE)
+    tokens = clip.tokenize(image_prompt + str(prompt or ""), images=images_vl, llama_template=DEFAULT_LLAMA_TEMPLATE)
     conditioning = clip.encode_from_tokens_scheduled(tokens)
     if ref_latents:
         conditioning = node_helpers.conditioning_set_values(
@@ -590,11 +587,11 @@ class GJJ_TextEncodeQwenImageEditPlus:
                 "apply_reference_latents_method": (
                     "BOOLEAN",
                     {
-                        "default": True,
+                        "default": False,
                         "display": "hidden",
                         "hidden": True,
                         "display_name": "参考潜在方法开关",
-                        "tooltip": "关闭后不写入 FluxKontext 多参考潜在方法，正负条件按 Qwen 原始编码输出。",
+                        "tooltip": "默认关闭，保持 Qwen 原版 TextEncodeQwenImageEditPlus 编码；开启后会写入 FluxKontext 多参考潜在方法，部分 Qwen 链路会削弱提示词。",
                     },
                 ),
             },
@@ -637,7 +634,7 @@ class GJJ_TextEncodeQwenImageEditPlus:
         translation_unload_after_use = as_bool(kwargs.get("translation_unload_after_use", False))
         zero_conditioning = as_bool(kwargs.get("zero_conditioning", False))
         apply_kontext_scale = as_bool(kwargs.get("apply_kontext_scale", True))
-        apply_reference_latents_method = as_bool(kwargs.get("apply_reference_latents_method", True))
+        apply_reference_latents_method = as_bool(kwargs.get("apply_reference_latents_method", False))
         reference_latents_method = kwargs.get("reference_latents_method", DEFAULT_REFERENCE_LATENTS_METHOD)
         negative_prompt = str(kwargs.get("negative_prompt", "") or "")
 
@@ -664,7 +661,7 @@ class GJJ_TextEncodeQwenImageEditPlus:
                     event_name=TRANSLATED_EVENT,
                 )
         else:
-            source_positive_prompt = str(kwargs.get("positive_prompt", "") or "")
+            source_positive_prompt = str(kwargs.get("positive_prompt", "") or kwargs.get("prompt", "") or "")
             positive_prompt = source_positive_prompt
             if translation_enabled:
                 translated = translate_prompt_pair(

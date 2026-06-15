@@ -669,8 +669,8 @@ KIJAI_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             WM("low_model", "Low模型", ["wan2_2", "t2v", "a14b", "low"], preferred_name="Wan2_2-T2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors", target="low", quantization="fp8_e4m3fn_scaled"),
             WAN21_VAE,
             WAN_T5,
-            L("high_pusa_lora", "High Pusa LoRA", ["pusa", "high"], preferred_name="Wan22_PusaV1_lora_HIGH_resized_dynamic_avg_rank_98_bf16.safetensors", target="high", strength=1.5, merge_loras=True),
-            L("low_pusa_lora", "Low Pusa LoRA", ["pusa", "low"], preferred_name="Wan22_PusaV1_lora_LOW_resized_dynamic_avg_rank_98_bf16.safetensors", target="low", strength=1.4, merge_loras=True),
+            L("high_pusa_lora", "High Pusa LoRA", ["pusa", "high"], preferred_name="Wan22_PusaV1_lora_HIGH_resized_dynamic_avg_rank_98_bf16.safetensors", target="high", strength=1.5, merge_loras=False),
+            L("low_pusa_lora", "Low Pusa LoRA", ["pusa", "low"], preferred_name="Wan22_PusaV1_lora_LOW_resized_dynamic_avg_rank_98_bf16.safetensors", target="low", strength=1.4, merge_loras=False),
             LIGHTX_T2V_14B,
         ],
     },
@@ -1260,6 +1260,26 @@ def _load_wanvideo_model(
     branch_loras = [dict(item) for item in loras if _target_matches(str(item.get("target", "both")), model_target)]
     for item in branch_loras:
         item.pop("target", None)
+    slot_quantization = _choice(
+        slot.get("quantization"),
+        {
+            "disabled",
+            "fp8_e4m3fn",
+            "fp8_e4m3fn_fast",
+            "fp8_e4m3fn_scaled",
+            "fp8_e4m3fn_scaled_fast",
+            "fp8_e5m2",
+            "fp8_e5m2_fast",
+            "fp8_e5m2_scaled",
+            "fp8_e5m2_scaled_fast",
+        },
+        "disabled",
+    )
+    inferred_quantization = _quantization_from_model_name(model_name)
+    if model_name.lower().endswith(".gguf") or "scaled" in slot_quantization or "scaled" in inferred_quantization:
+        for item in branch_loras:
+            item["merge_loras"] = False
+            item["low_mem_load"] = False
     # Kijai 示例流里大多数 distill LoRA 是 WanVideoLoraSelect -> WanVideoSetLoRAs：
     # merge_loras=False 时要在模型加载后走 SetLoRAs 的 WanVideo 专用 patch 逻辑，不能塞进 ModelLoader。
     loader_loras = [item for item in branch_loras if bool(item.get("merge_loras", False))]
@@ -1269,21 +1289,7 @@ def _load_wanvideo_model(
         "model": model_name,
         "base_precision": _choice(slot.get("base_precision"), {"fp32", "bf16", "fp16", "fp16_fast"}, "bf16"),
         "load_device": _choice(slot.get("load_device"), {"main_device", "offload_device"}, "offload_device"),
-        "quantization": _choice(
-            slot.get("quantization"),
-            {
-                "disabled",
-                "fp8_e4m3fn",
-                "fp8_e4m3fn_fast",
-                "fp8_e4m3fn_scaled",
-                "fp8_e4m3fn_scaled_fast",
-                "fp8_e5m2",
-                "fp8_e5m2_fast",
-                "fp8_e5m2_scaled",
-                "fp8_e5m2_scaled_fast",
-            },
-            "disabled",
-        ),
+        "quantization": slot_quantization,
         "attention_mode": attention_mode,
         "rms_norm_function": _choice(slot.get("rms_norm_function"), {"default", "pytorch"}, "default"),
         "compile_args": compile_args,
