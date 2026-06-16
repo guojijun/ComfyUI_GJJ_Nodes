@@ -336,7 +336,12 @@ function syncActiveTemplateParams(node) {
 	if (!paramsEnabled(node)) return false;
 	const sourceNode = getTemplateParamsSourceNode(node);
 	if (!sourceNode) return false;
-	return applyTemplateParams(node, sourceNode);
+	node.__gjjWanUnifiedSyncingTemplateParams = true;
+	try {
+		return applyTemplateParams(node, sourceNode);
+	} finally {
+		node.__gjjWanUnifiedSyncingTemplateParams = false;
+	}
 }
 
 function applyParamVisibility(node) {
@@ -850,6 +855,9 @@ app.registerExtension({
 
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (info, ...args) {
+			if (paramsEnabled(this)) {
+				syncActiveTemplateParams(this);
+			}
 			const result = originalOnSerialize?.apply(this, [info, ...args]);
 			info.properties ||= {};
 			info.properties.gjj_wan_unified_mode = getMode(this);
@@ -870,7 +878,7 @@ app.registerExtension({
 				for (const node of app.graph?._nodes || []) {
 					if (isTargetNode(node) && paramsEnabled(node)) {
 						syncActiveTemplateParams(node);
-						applyParamVisibility(node);
+						applyMode(node);
 					}
 				}
 			});

@@ -158,11 +158,13 @@ async function fetchUserSettings(options = undefined) {
 }
 
 async function loadUserSettings(node) {
-	if (node.__gjjTextMergeLoadedUserSettings || app.configuringGraph) return;
+	if (node.__gjjTextMergeConfiguredFromWorkflow || node.__gjjTextMergeLoadedUserSettings || app.configuringGraph) return;
 	node.__gjjTextMergeLoadedUserSettings = true;
 	try {
 		const response = await fetchUserSettings();
+		if (node.__gjjTextMergeConfiguredFromWorkflow || app.configuringGraph) return;
 		const data = await response.json();
+		if (node.__gjjTextMergeConfiguredFromWorkflow || app.configuringGraph) return;
 		const section = data?.settings?.[USER_SETTINGS_SECTION];
 		if (!section || typeof section !== "object") return;
 		const savedTemplate = String(section.template_text || "").trim();
@@ -836,6 +838,8 @@ app.registerExtension({
 
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (...args) {
+			this.__gjjTextMergeConfiguredFromWorkflow = true;
+			this.__gjjTextMergeLoadedUserSettings = true;
 			const result = originalOnConfigure?.apply(this, args);
 			ensurePreviewWidget(this);
 			setTimeout(() => syncDynamicInputs(this), 0);
