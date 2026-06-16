@@ -61,6 +61,61 @@ def _video_components(value: Any) -> dict[str, Any] | None:
     }
 
 
+def _normalize_bhwc_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.ndim == 3:
+        tensor = tensor.unsqueeze(0)
+    if tensor.ndim != 4:
+        raise RuntimeError(f"批次裁剪失败：图片/视频帧必须是 [B,H,W,C] 或 [B,C,H,W]，实际为 {tuple(tensor.shape)}。")
+    if tensor.shape[-1] not in (1, 2, 3, 4) and tensor.shape[1] in (1, 2, 3, 4):
+        tensor = tensor.permute(0, 2, 3, 1)
+    if int(tensor.shape[-1]) <= 0:
+        raise RuntimeError("批次裁剪失败：输入通道数无效。")
+    tensor = tensor.detach()
+    if not torch.is_floating_point(tensor) or tensor.dtype != torch.float32:
+        tensor = tensor.float()
+    if not tensor.is_contiguous():
+        tensor = tensor.contiguous()
+    return tensor
+
+
+def _convert_channels_for_cat(tensor: torch.Tensor, target_channels: int) -> torch.Tensor:
+    channels = int(tensor.shape[-1])
+    if channels == target_channels:
+        return tensor
+    if target_channels == 4:
+        if channels >= 4:
+            return tensor[..., :4].contiguous()
+        if channels == 3:
+            alpha = torch.ones((*tensor.shape[:-1], 1), dtype=tensor.dtype, device=tensor.device)
+            return torch.cat((tensor, alpha), dim=-1).contiguous()
+        if channels == 2:
+            rgb = tensor[..., :1].repeat(1, 1, 1, 3)
+            alpha = tensor[..., 1:2].clamp(0.0, 1.0)
+            return torch.cat((rgb, alpha), dim=-1).contiguous()
+        if channels == 1:
+            rgb = tensor.repeat(1, 1, 1, 3)
+            alpha = torch.ones((*tensor.shape[:-1], 1), dtype=tensor.dtype, device=tensor.device)
+            return torch.cat((rgb, alpha), dim=-1).contiguous()
+    if target_channels == 3:
+        if channels >= 3:
+            return tensor[..., :3].contiguous()
+        return tensor[..., :1].repeat(1, 1, 1, 3).contiguous()
+    if channels > target_channels:
+        return tensor[..., :target_channels].contiguous()
+    pad = torch.zeros((*tensor.shape[:-1], target_channels - channels), dtype=tensor.dtype, device=tensor.device)
+    return torch.cat((tensor, pad), dim=-1).contiguous()
+
+
+def _cat_with_channel_compat(tensors: list[torch.Tensor]) -> torch.Tensor:
+    if not tensors:
+        raise RuntimeError("批次裁剪失败：没有可合并的图片帧。")
+    channels = [int(tensor.shape[-1]) for tensor in tensors]
+    if len(set(channels)) == 1:
+        return torch.cat(tensors, dim=0)
+    target_channels = 4 if 4 in channels else 3 if 3 in channels else max(channels)
+    return torch.cat([_convert_channels_for_cat(tensor, target_channels) for tensor in tensors], dim=0)
+
+
 def _coerce_to_bhwc(value: Any) -> torch.Tensor:
     source = value
     components = _video_components(value)
@@ -78,25 +133,15 @@ def _coerce_to_bhwc(value: Any) -> torch.Tensor:
             if isinstance(candidate, torch.Tensor):
                 tensor = candidate
                 break
+            if isinstance(candidate, (list, tuple)) and candidate and all(isinstance(item, torch.Tensor) for item in candidate):
+                tensor = _cat_with_channel_compat([_normalize_bhwc_tensor(item) for item in candidate])
+                break
     elif isinstance(source, (list, tuple)) and source and all(isinstance(item, torch.Tensor) for item in source):
-        tensor = torch.cat([item if item.ndim == 4 else item.unsqueeze(0) for item in source], dim=0)
+        tensor = _cat_with_channel_compat([_normalize_bhwc_tensor(item) for item in source])
 
     if tensor is None:
         raise RuntimeError(f"批次裁剪失败：输入不是有效的 GJJ_BATCH_IMAGE / IMAGE / VIDEO：{type(value).__name__}。")
-    if tensor.ndim == 3:
-        tensor = tensor.unsqueeze(0)
-    if tensor.ndim != 4:
-        raise RuntimeError(f"批次裁剪失败：图片/视频帧必须是 [B,H,W,C] 或 [B,C,H,W]，实际为 {tuple(tensor.shape)}。")
-    if tensor.shape[-1] not in (1, 2, 3, 4) and tensor.shape[1] in (1, 2, 3, 4):
-        tensor = tensor.permute(0, 2, 3, 1)
-    if int(tensor.shape[-1]) <= 0:
-        raise RuntimeError("批次裁剪失败：输入通道数无效。")
-    tensor = tensor.detach()
-    if not torch.is_floating_point(tensor) or tensor.dtype != torch.float32:
-        tensor = tensor.float()
-    if not tensor.is_contiguous():
-        tensor = tensor.contiguous()
-    return tensor
+    return _normalize_bhwc_tensor(tensor)
 
 
 def _unwrap_single(value: Any) -> Any:
@@ -244,7 +289,7 @@ class GJJ_BatchCropResize:
             cropped_items = [
                 _resize_center_crop(item, target_w, target_h) for item in items
             ]
-            outputs.append(torch.cat(cropped_items, dim=0))
+            outputs.append(_cat_with_channel_compat(cropped_items))
         return tuple(outputs)
 
 

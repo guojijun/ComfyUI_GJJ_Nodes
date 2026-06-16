@@ -2,13 +2,11 @@
   "version": 1,
   "workflow_screenshot": {
     "directory": "workflows",
-    "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.jpg",
+    "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
     "search_text": "",
-    "page_size": 15,
-    "image_format": "jpg",
-    "jpeg_quality": 0.86
+    "page_size": 12
   },
   "workflow_title": {
     "font": "simhei.ttf",
@@ -79,9 +77,19 @@
   },
   "nodes": {},
   "user": {},
+  "text_merge": {
+    "template_text": "#请选择三视图风格\n《把图中角色生成正面、侧面、背面三视图，白色背景，角色身材比例保持不变》\n【风格】：｛真实、摄影、国漫、日漫、美漫、吉卜力、油画、水彩、素描、皮克斯、迪士尼、赛璐璐、双城、像素、水墨、粉彩、炭笔、版画、影视、胶片、古风、国潮、二次元、新海诚、扳机社、京阿尼、漫威、粘土、Q版、丙烯画、马克笔、彩铅、粉笔、钢笔、铜版、水彩、油画、敦煌、年画、浮世绘、日式、赛博、蒸汽、废土、扁平、极简、蒸汽波、复古、蓝图、线稿、草稿、涂鸦、贴纸、卡通、毛绒、玻璃、金属、剪纸、拼贴、火柴人｝",
+    "selected_template": "美漫",
+    "selected_groups": {
+      "风格": "钢笔",
+      "景别": "四宫格",
+      "🧡风格": "拼贴",
+      "🧡景别": "微距"
+    }
+  },
   "node_color_theme": {
     "version": 1,
-    "selected_style_id": "soft",
+    "selected_style_id": "contrast",
     "custom_palette": [
       "#00AEEF",
       "#6F5CC4",
@@ -100,74 +108,74 @@
       {
         "id": "input",
         "label": "输入",
-        "styleId": "soft",
-        "color": "#5D89A8"
+        "styleId": "contrast",
+        "color": "#2563EB"
       },
       {
         "id": "guide",
         "label": "引导",
-        "styleId": "soft",
-        "color": "#8072B2"
+        "styleId": "contrast",
+        "color": "#A855F7"
       },
       {
         "id": "sample",
         "label": "采样",
-        "styleId": "soft",
-        "color": "#A98248"
+        "styleId": "contrast",
+        "color": "#F59E0B"
       },
       {
         "id": "output",
         "label": "输出",
-        "styleId": "soft",
-        "color": "#5A9A77"
+        "styleId": "contrast",
+        "color": "#22C55E"
       },
       {
         "id": "decode",
         "label": "解码",
-        "styleId": "soft",
-        "color": "#69A98A"
+        "styleId": "contrast",
+        "color": "#00D1FF"
       },
       {
         "id": "encode",
         "label": "编码",
-        "styleId": "soft",
-        "color": "#5F9188"
+        "styleId": "contrast",
+        "color": "#38BDF8"
       },
       {
         "id": "model",
         "label": "模型",
-        "styleId": "soft",
-        "color": "#8770AA"
+        "styleId": "contrast",
+        "color": "#7C3AED"
       },
       {
         "id": "prompt",
         "label": "提示",
-        "styleId": "soft",
-        "color": "#7479AA"
+        "styleId": "contrast",
+        "color": "#10B981"
       },
       {
         "id": "image",
         "label": "图像",
-        "styleId": "soft",
-        "color": "#5C9AA6"
+        "styleId": "contrast",
+        "color": "#14B8A6"
       },
       {
         "id": "video",
         "label": "视频",
-        "styleId": "soft",
-        "color": "#A48852"
+        "styleId": "contrast",
+        "color": "#EAB308"
       },
       {
         "id": "audio",
         "label": "音频",
-        "styleId": "soft",
-        "color": "#7C8D6A"
+        "styleId": "contrast",
+        "color": "#A3E635"
       },
       {
         "id": "tool",
         "label": "工具",
-        "styleId": "soft",
-        "color": "#68757A"
+        "styleId": "contrast",
+        "color": "#94A3B8"
       }
     ]
   }

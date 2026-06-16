@@ -259,6 +259,19 @@ def _normalize_ik_pose(pose: dict[str, list[float]]) -> dict[str, list[float]]:
     return clean
 
 
+def _clean_pose(pose: dict[str, list[float]] | None) -> dict[str, list[float]]:
+    clean = {key: list(DEFAULT_POSE[key]) for key in DEFAULT_POSE}
+    if isinstance(pose, dict):
+        for key, point in pose.items():
+            if key not in DEFAULT_POSE or not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            clean[str(key)] = [
+                _clamp(_float(point[0], DEFAULT_POSE[key][0]), -1.2, 1.2),
+                _clamp(_float(point[1], DEFAULT_POSE[key][1]), -1.2, 1.2),
+            ]
+    return clean
+
+
 def _resample_lanczos():
     return getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
 
@@ -308,7 +321,7 @@ def _parse_config(value: str) -> dict[str, dict[str, Any]]:
             "rotation": _float(item.get("rotation"), 0.0),
             "face_angle": _float(item.get("face_angle"), 0.0),
             "z": _float(item.get("z"), index),
-            "pose": _normalize_ik_pose({**DEFAULT_POSE, **clean_pose}),
+            "pose": _clean_pose({**DEFAULT_POSE, **clean_pose}),
         }
     return result
 
@@ -446,21 +459,69 @@ def _place_cutout(canvas: Image.Image, cutout: Image.Image, config: dict[str, An
     return {"left": left, "top": top, "right": left + layer.width, "bottom": top + layer.height}
 
 
-def _white_layout_slots(count: int, canvas_w: int, canvas_h: int) -> list[tuple[int, int, int, int]]:
-    count = max(1, int(count or 1))
-    columns = count
-    rows = 1
-    slots: list[tuple[int, int, int, int]] = []
-    margin = max(8, int(round(min(canvas_w, canvas_h) * 0.025)))
-    for index in range(count):
-        col = index % columns
-        row = index // columns
-        left = int(round(col * canvas_w / columns)) + margin
-        top = int(round(row * canvas_h / rows)) + margin
-        right = int(round((col + 1) * canvas_w / columns)) - margin
-        bottom = int(round((row + 1) * canvas_h / rows)) - margin
-        slots.append((left, top, max(left + 1, right), max(top + 1, bottom)))
-    return slots
+def _trim_cutout_alpha(cutout: Image.Image, padding: int = 2) -> Image.Image:
+    rgba = cutout.convert("RGBA")
+    alpha = rgba.getchannel("A")
+    bbox = alpha.point(lambda value: 255 if value > 8 else 0).getbbox()
+    if not bbox:
+        return rgba
+    left = max(0, bbox[0] - padding)
+    top = max(0, bbox[1] - padding)
+    right = min(rgba.width, bbox[2] + padding)
+    bottom = min(rgba.height, bbox[3] + padding)
+    if right <= left or bottom <= top:
+        return rgba
+    return rgba.crop((left, top, right, bottom))
+
+
+def _white_layout_slots(cutouts: list[Image.Image], canvas_w: int, canvas_h: int) -> list[tuple[int, int, int, int]]:
+    count = max(1, len(cutouts))
+    margin = max(4, int(round(min(canvas_w, canvas_h) * 0.012)))
+    gap = max(4, int(round(min(canvas_w, canvas_h) * 0.012)))
+    work_w = max(1, canvas_w - margin * 2)
+    work_h = max(1, canvas_h - margin * 2)
+    aspects = [max(0.05, min(8.0, item.width / max(1, item.height))) for item in cutouts] or [1.0]
+
+    best_slots: list[tuple[int, int, int, int]] = []
+    best_score = -1.0
+    for rows in range(1, count + 1):
+        columns = int(math.ceil(count / rows))
+        if columns <= 0:
+            continue
+        row_h = (work_h - gap * (rows - 1)) / rows
+        if row_h <= 1:
+            continue
+        slots: list[tuple[int, int, int, int]] = []
+        score = 0.0
+        index = 0
+        for row in range(rows):
+            remaining = count - index
+            if remaining <= 0:
+                break
+            row_count = min(columns, remaining)
+            row_aspects = aspects[index : index + row_count]
+            max_row_w = work_w - gap * (row_count - 1)
+            natural_w = sum(row_aspects) * row_h
+            scale = min(1.0, max_row_w / max(1.0, natural_w))
+            item_h = max(1, int(round(row_h * scale)))
+            item_widths = [max(1, int(round(aspect * item_h))) for aspect in row_aspects]
+            used_w = sum(item_widths) + gap * (row_count - 1)
+            row_left = margin + max(0, int(round((work_w - used_w) / 2)))
+            row_top = margin + int(round(row * (row_h + gap) + max(0.0, (row_h - item_h) / 2.0)))
+            cursor = row_left
+            for item_w in item_widths:
+                slots.append((cursor, row_top, cursor + item_w, row_top + item_h))
+                score += float(item_w * item_h)
+                cursor += item_w + gap
+            index += row_count
+        fill_penalty = abs((columns / max(1, rows)) - (canvas_w / max(1, canvas_h))) * 0.01
+        score -= fill_penalty * float(canvas_w * canvas_h)
+        if len(slots) == count and score > best_score:
+            best_score = score
+            best_slots = slots
+    if best_slots:
+        return best_slots
+    return [(margin, margin, max(margin + 1, canvas_w - margin), max(margin + 1, canvas_h - margin))]
 
 
 def _place_cutout_in_slot(canvas: Image.Image, cutout: Image.Image, slot: tuple[int, int, int, int]) -> dict[str, int]:
@@ -727,8 +788,12 @@ class GJJ_SceneFusionPrep:
 
         white = Image.new("RGBA", (width, height), (255, 255, 255, 255))
         placed_boxes: list[tuple[dict[str, Any], dict[str, int]]] = []
-        white_items = list(zip(person_configs, cutouts))
-        slots = _white_layout_slots(len(white_items), width, height)
+        white_cutouts = [
+            _trim_cutout_alpha(cutout, max(2, int(round(min(cutout.width, cutout.height) * 0.006))))
+            for cutout in cutouts
+        ]
+        white_items = list(zip(person_configs, white_cutouts))
+        slots = _white_layout_slots(white_cutouts, width, height)
         for slot, (config, cutout) in zip(slots, white_items):
             placed_boxes.append((config, _place_cutout_in_slot(white, cutout, slot)))
         white_rgb = white.convert("RGB")

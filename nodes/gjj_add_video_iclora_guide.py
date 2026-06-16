@@ -4,6 +4,144 @@ import comfy_extras.nodes_lt as nodes_lt
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
+MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
+
+
+def _component_value(value, key):
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def _video_components(value):
+    if not hasattr(value, "get_components"):
+        return None
+    try:
+        components = value.get_components()
+    except Exception:
+        return None
+    if isinstance(components, dict):
+        return components
+    return {
+        "images": _component_value(components, "images"),
+        "frames": _component_value(components, "frames"),
+        "audio": _component_value(components, "audio"),
+        "frame_rate": _component_value(components, "frame_rate"),
+    }
+
+
+def _iter_container_values(obj):
+    if obj is None or isinstance(obj, (str, bytes, bytearray)) or torch.is_tensor(obj):
+        return []
+    if isinstance(obj, dict):
+        return list(obj.values())
+    if isinstance(obj, (list, tuple, set)):
+        return list(obj)
+
+    values = []
+    for name in (
+        "images", "image", "imgs", "frames", "frame", "batch", "queue", "items",
+        "data", "samples", "outputs", "values", "selected", "selected_images",
+        "image_list", "image_queue", "pictures", "pics",
+    ):
+        try:
+            if hasattr(obj, name):
+                value = getattr(obj, name)
+                if value is not None and value is not obj:
+                    values.append(value)
+        except Exception:
+            pass
+    try:
+        values.extend(vars(obj).values())
+    except Exception:
+        pass
+    return values
+
+
+def _normalize_image_tensor(tensor):
+    if tensor.ndim == 3:
+        tensor = tensor.unsqueeze(0)
+    if tensor.ndim != 4:
+        raise RuntimeError(f"IC-LoRA Guide 输入帧必须是 [B,H,W,C] 或 [B,C,H,W]，实际为 {tuple(tensor.shape)}。")
+    if tensor.shape[-1] not in (1, 2, 3, 4) and tensor.shape[1] in (1, 2, 3, 4):
+        tensor = tensor.permute(0, 2, 3, 1)
+    channels = int(tensor.shape[-1])
+    if channels == 1:
+        tensor = tensor.repeat(1, 1, 1, 3)
+    elif channels == 2:
+        tensor = tensor[..., :1].repeat(1, 1, 1, 3)
+    elif channels == 4:
+        tensor = tensor[..., :3]
+    elif channels > 4:
+        tensor = tensor[..., :3]
+    elif channels != 3:
+        raise RuntimeError(f"IC-LoRA Guide 输入帧通道数无效：{tuple(tensor.shape)}。")
+    return tensor.detach().float().clamp(0.0, 1.0).contiguous()
+
+
+def _collect_single_frames(value, _seen=None):
+    if _seen is None:
+        _seen = set()
+    if value is None:
+        return []
+
+    obj_id = id(value)
+    if obj_id in _seen:
+        return []
+    _seen.add(obj_id)
+
+    components = _video_components(value)
+    if components is not None:
+        frames = components.get("images", None)
+        if frames is None:
+            frames = components.get("frames", None)
+        return _collect_single_frames(frames, _seen)
+
+    if isinstance(value, torch.Tensor):
+        tensor = _normalize_image_tensor(value)
+        return [tensor[index:index + 1].contiguous() for index in range(int(tensor.shape[0]))]
+
+    frames = []
+    for item in _iter_container_values(value):
+        frames.extend(_collect_single_frames(item, _seen))
+    return frames
+
+
+def _resize_frame(frame, target_width, target_height):
+    if int(frame.shape[1]) == int(target_height) and int(frame.shape[2]) == int(target_width):
+        return frame.contiguous()
+    return comfy.utils.common_upscale(
+        frame.movedim(-1, 1),
+        int(target_width),
+        int(target_height),
+        "bilinear",
+        crop="disabled",
+    ).movedim(1, -1).clamp(0.0, 1.0).contiguous()
+
+
+def _expand_msr_frames(frames, frame_count):
+    if not frames:
+        return []
+    frame_count = max(1, int(frame_count))
+    base_count = frame_count // len(frames)
+    remainder = frame_count % len(frames)
+    output = []
+    for index, frame in enumerate(frames):
+        repeats = base_count + (1 if index < remainder else 0)
+        output.extend([frame] * repeats)
+    return output
+
+
+def _normalize_frame_count(value):
+    try:
+        count = int(value)
+    except Exception:
+        count = 33
+    if count not in (17, 25, 33, 41):
+        count = 33
+    return count
 
 
 def _get_guide_attention_entries(conditioning):
@@ -61,7 +199,6 @@ class GJJ_AddVideoICLoRAGuide:
                 "negative": ("CONDITIONING", {"display_name": "负向条件", "tooltip": "负向 conditioning"}),
                 "vae": ("VAE", {"display_name": "VAE", "tooltip": "用于编码图像的 VAE 模型"}),
                 "latent": ("LATENT", {"display_name": "视频 Latent", "tooltip": "要条件化的视频 latent，必须是 5D 张量 (batch, channels, frames, height, width)"}),
-                "image": ("IMAGE", {"display_name": "引导图像", "tooltip": "作为 guide 的输入图像或视频帧"}),
                 "frame_idx": ("INT", {"default": 0, "min": -9999, "max": 9999,
                                      "display_name": "起始帧索引", "tooltip": "开始条件化的帧索引。对于单帧视频，任何值都可接受。对于视频，值会被向下取整到最接近的 8 的倍数。负值从视频末尾计数。"}),
                 "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
@@ -70,6 +207,7 @@ class GJJ_AddVideoICLoRAGuide:
                                                       "display_name": "Latent 缩放因子", "tooltip": "用于小网格 IC-LoRA。1 表示原始尺寸，2 表示一半尺寸，3 表示三分之一，依此类推。"}),
             },
             "optional": {
+                "image": (MEDIA_INPUT_TYPE, {"display_name": "引导图像", "tooltip": "可选。支持 GJJ_BATCH_IMAGE、普通 IMAGE 批次和 VIDEO；会先解包为单帧图片，再按 LiconMSR 逻辑生成 guide 帧序列。"}),
                 "crop": (["disabled", "center"], {"default": "disabled", 
                                                   "display_name": "裁剪模式", "tooltip": "调整大小时的裁剪模式。'center' 裁剪以适应，'disabled' 拉伸以适应。"}),
                 "use_tiled_encode": ("BOOLEAN", {"default": False, 
@@ -80,6 +218,10 @@ class GJJ_AddVideoICLoRAGuide:
                                          "display_name": "平铺重叠", "tooltip": "平铺编码时平铺之间的重叠，仅在启用平铺编码时使用"}),
                 "bypass": ("BOOLEAN", {"default": False, "display_name": "跳过处理",
                                        "tooltip": "启用后直接返回原始输入，不应用任何条件化"}),
+                "background": (MEDIA_INPUT_TYPE, {"display_name": "背景", "tooltip": "可选。支持 GJJ_BATCH_IMAGE、普通 IMAGE 批次和 VIDEO；连接后会作为 LiconMSR 式 guide 序列的背景/末尾图片参与分帧。"}),
+                "frame_count": (["17", "25", "33", "41"], {"default": "33",
+                                                           "display_name": "Guide帧数",
+                                                           "tooltip": "连接引导图像或背景时，按 LiconMSR 逻辑生成的 guide 固定帧数。必须是 8N+1；帧数越大，VAE 编码显存占用越高。"}),
             },
         }
 
@@ -92,7 +234,7 @@ class GJJ_AddVideoICLoRAGuide:
     )
     CATEGORY = "GJJ/视频"
     FUNCTION = "generate"
-    DESCRIPTION = "向视频 latent 添加 IC-LoRA guide 条件。支持单帧图像和多帧视频，可调整 latent_downscale_factor 用于小网格 IC-LoRA。"
+    DESCRIPTION = "向视频 latent 添加 IC-LoRA guide 条件。引导图像/背景支持 IMAGE、GJJ_BATCH_IMAGE 和 VIDEO，会按 LiconMSR 逻辑生成参考帧序列。"
 
     @classmethod
     def encode(cls, vae, latent_width, latent_height, images, scale_factors, 
@@ -247,9 +389,26 @@ class GJJ_AddVideoICLoRAGuide:
             causal_fix=causal_fix,
         )
 
-    def generate(self, positive, negative, vae, latent, image, frame_idx, strength,
+    def _build_msr_guide_frames(self, image, background, target_width, target_height, frame_count):
+        """按 LiconMSR 的分帧方式，把输入媒体整理为固定帧数的 guide 视频帧。"""
+        source_frames = []
+        source_frames.extend(_collect_single_frames(image))
+        source_frames.extend(_collect_single_frames(background))
+        if not source_frames:
+            return None
+
+        prepared = [
+            _resize_frame(frame, target_width, target_height)
+            for frame in source_frames
+        ]
+        expanded = _expand_msr_frames(prepared, frame_count)
+        if not expanded:
+            return None
+        return torch.cat(expanded, dim=0).contiguous()
+
+    def generate(self, positive, negative, vae, latent, image=None, frame_idx=0, strength=1.0,
                  latent_downscale_factor=1.0, crop="disabled", use_tiled_encode=False,
-                 tile_size=256, tile_overlap=64, bypass=False):
+                 tile_size=256, tile_overlap=64, bypass=False, background=None, frame_count="33"):
         """
         执行 IC-LoRA guide 添加操作。
         
@@ -258,7 +417,6 @@ class GJJ_AddVideoICLoRAGuide:
             negative: 负向 conditioning
             vae: VAE 模型
             latent: 视频 latent
-            image: 引导图像
             frame_idx: 起始帧索引
             strength: 强度
             latent_downscale_factor: latent 缩放因子
@@ -267,6 +425,9 @@ class GJJ_AddVideoICLoRAGuide:
             tile_size: 平铺大小
             tile_overlap: 平铺重叠
             bypass: 是否跳过处理
+            image: 可选引导图像、批量图像或视频
+            background: 可选背景图像、批量图像或视频
+            frame_count: LiconMSR 式 guide 固定帧数
         
         返回：
             (positive, negative, latent)
@@ -281,7 +442,18 @@ class GJJ_AddVideoICLoRAGuide:
         # 获取 latent 尺寸
         _, _, latent_length, latent_height, latent_width = latent_image.shape
 
-        time_scale_factor = scale_factors[0]
+        time_scale_factor = int(scale_factors[0])
+        width_scale_factor = int(scale_factors[1])
+        height_scale_factor = int(scale_factors[2])
+        image = self._build_msr_guide_frames(
+            image,
+            background,
+            int(latent_width * width_scale_factor),
+            int(latent_height * height_scale_factor),
+            _normalize_frame_count(frame_count),
+        )
+        if image is None:
+            return (positive, negative, latent)
         
         # 计算要保留的帧数
         num_frames_to_keep = ((image.shape[0] - 1) // time_scale_factor) * time_scale_factor + 1

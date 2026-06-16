@@ -657,7 +657,7 @@ def _split_enum_options(inner: str) -> list[str]:
             if quote is None:
                 quote = ch
                 continue
-        if ch in {",", "，", "|"} and quote is None:
+        if ch in {",", "，", "、", "|"} and quote is None:
             option = "".join(current).strip()
             if option:
                 options.append(_strip_quotes(option))
@@ -668,6 +668,57 @@ def _split_enum_options(inner: str) -> list[str]:
     if option:
         options.append(_strip_quotes(option))
     return options
+
+
+BOOK_PROMPT_RE = re.compile(
+    r"(?is)^\s*(?:(?:提示词|正向提示词|prompt|positive_prompt|positive)\s*[:：])?\s*《([\s\S]*?)》\s*(?:#.*)?$"
+)
+CHOICE_GROUP_RE = re.compile(r"(?is)^\s*【([^】]+)】\s*(?:[:：]\s*)?[{｛]([\s\S]*?)[}｝]\s*(?:#(.*))?$")
+
+
+def _join_prompt_parts(parts: list[Any]) -> str:
+    cleaned: list[str] = []
+    for part in parts:
+        text = _normalize_text(part).strip("，,。；; ")
+        if text:
+            cleaned.append(text)
+    return "，".join(cleaned).strip()
+
+
+def _parse_book_prompt_directive(raw: Any) -> str:
+    match = BOOK_PROMPT_RE.match(_normalize_text(raw).strip())
+    return match.group(1).strip() if match else ""
+
+
+def _parse_choice_group_directive(raw: Any) -> tuple[str, list[dict[str, str]], str] | None:
+    match = CHOICE_GROUP_RE.match(_normalize_text(raw).strip())
+    if not match:
+        return None
+    label = match.group(1).strip()
+    options = [_parse_option_item(item) for item in _split_enum_options(match.group(2))]
+    options = [item for item in options if _option_value(item)]
+    tooltip = (match.group(3) or "").strip()
+    if not label or not options:
+        return None
+    return label, options, tooltip
+
+
+def _selected_prompt_group_lines(fields: list[dict[str, Any]], value_map: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    by_key = {str(field.get("key") or ""): field for field in fields}
+    for field in fields:
+        if not field.get("template_prompt"):
+            continue
+        for key in field.get("prompt_group_keys") or []:
+            group = by_key.get(str(key or ""))
+            if not group:
+                continue
+            raw_value = value_map.get(key, value_map.get(group.get("label"), group.get("default", "")))
+            selected = _coerce_enum_value(raw_value, list(group.get("options", [])))
+            label = _normalize_text(group.get("label")).strip()
+            if label and selected:
+                lines.append(f"{label}：{selected}")
+    return lines
 
 
 def _split_pipe_pair(text: str) -> tuple[str, str]:
@@ -1033,7 +1084,67 @@ def _make_unique_template_key(source: Any, index: int, seen: dict[str, int]) -> 
 def parse_template(template_text: Any) -> list[dict[str, Any]]:
     fields: list[dict[str, Any]] = []
     seen: dict[str, int] = {}
-    for raw in _template_logical_lines(template_text):
+    logical_lines = _template_logical_lines(template_text)
+    prompt_parts: list[str] = []
+    choice_groups: list[tuple[str, list[dict[str, str]], str]] = []
+    normal_lines: list[str] = []
+
+    for raw in logical_lines:
+        prompt_text = _parse_book_prompt_directive(raw)
+        if prompt_text:
+            prompt_parts.append(prompt_text)
+            continue
+        choice_group = _parse_choice_group_directive(raw)
+        if choice_group:
+            choice_groups.append(choice_group)
+            continue
+        normal_lines.append(raw)
+
+    prompt_field: dict[str, Any] | None = None
+    if prompt_parts or choice_groups:
+        key = _make_unique_template_key("prompt", len(fields), seen)
+        default_text = _join_prompt_parts(prompt_parts)
+        prompt_field = {
+            "key": key,
+            "label": "提示词",
+            "output_enabled": True,
+            "broadcast_key": "",
+            "broadcast_keys": [],
+            "default": default_text,
+            "value": default_text,
+            "socket_type": "STRING",
+            "type": "STRING",
+            "options": [],
+            "tooltip": "由《...》基础提示词与下方【分组】选择自动组合输出。",
+            "template_prompt": True,
+            "prompt_group_keys": [],
+        }
+        fields.append(prompt_field)
+
+    for label, enum_options, tooltip in choice_groups:
+        key = _make_unique_template_key(_implicit_template_key_source(label), len(fields), seen)
+        default_value = _option_value(enum_options[0])
+        field = {
+            "key": key,
+            "label": label,
+            "output_enabled": True,
+            "broadcast_key": "",
+            "broadcast_keys": [],
+            "default": default_value,
+            "value": default_value,
+            "socket_type": "",
+            "type": "ENUM",
+            "options": enum_options,
+            "tooltip": tooltip or "同一分组内选择一个选项；提示词输出会自动附加“名称：选项”。",
+            "prompt_group": True,
+        }
+        fields.append(field)
+        if prompt_field is not None:
+            prompt_field["prompt_group_keys"].append(key)
+        if len(fields) >= MAX_OUTPUTS:
+            return fields
+
+    for raw in normal_lines:
         match = re.match(r"(?s)^([^:=：=]+?)\s*[:：=]\s*(.*)$", raw)
         if not match:
             continue
@@ -1095,7 +1206,7 @@ def values_from_json(values_json: Any) -> dict[str, Any]:
 class GJJ_TemplateParams:
     CATEGORY = "GJJ/逻辑控制"
     FUNCTION = "output_params"
-    DESCRIPTION = "通过模板文本自动生成参数输入框和输出口。支持格式：帧率 (frame_rate) [INT,FLOAT]：24.0 # 浮点；也兼容 帧率：24、宽度：832、模式：图生 这类未写括号的常用参数。\n提示词：'''多段文本''' # 字符串\n是否启用：[enable,disable] # 枚举\n媒体资源优先读取当前本地文件；本地文件不存在时，自动下载设置模板中的默认 URL。⚡ 广播默认关闭，开启后只广播写了 (变量名) 的字段。"
+    DESCRIPTION = "通过模板文本自动生成参数输入框和输出口。支持格式：帧率 (frame_rate) [INT,FLOAT]：24.0 # 浮点；也兼容 帧率：24、宽度：832、模式：图生 这类未写括号的常用参数。\n提示词：'''多段文本''' # 字符串\n提示词：《基础提示》 与 【风格】｛真实、日漫｝ 会生成 TextMerge 风格的组合提示词输出。\n是否启用：[enable,disable] # 枚举\n媒体资源优先读取当前本地文件；本地文件不存在时，自动下载设置模板中的默认 URL。⚡ 广播默认关闭，开启后只广播写了 (变量名) 的字段。"
     SEARCH_ALIASES = [
         "template params",
         "params",
@@ -1161,6 +1272,9 @@ class GJJ_TemplateParams:
             label = str(field.get("label") or "")
             raw_value = value_map.get(key, value_map.get(label, field.get("default", "")))
             default_value = field.get("default", "")
+            if field.get("template_prompt"):
+                outputs.append(_join_prompt_parts([default_value, *_selected_prompt_group_lines(fields, value_map)]))
+                continue
             if field.get("type") == "BOOLEAN" and field.get("bool_labels"):
                 outputs.append(_coerce_bool_value(raw_value, field.get("bool_labels") or {}))
                 continue

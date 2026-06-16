@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,7 @@ from typing import Any
 import comfy.utils
 import folder_paths
 import torch
-from nodes import PreviewImage
+from nodes import PreviewImage, SaveImage
 from PIL import Image
 
 NODE_NAME = "GJJ_AnyPreview"
@@ -17,6 +18,7 @@ ANY_PREVIEW_INPUT_TYPE = "*"
 ANY_PREVIEW_FAST_TYPES = "GJJ_BATCH_IMAGE、IMAGE、MASK、STRING、AUDIO、VIDEO"
 VIDEO_SEQUENCE_MIN_FRAMES = 16
 VIDEO_SEQUENCE_PREVIEW_FPS = 16.0
+QUEUE_THUMBNAIL_PREFIX_FALLBACK = "GJJ/AnyPreview/工作流"
 
 
 class AnyType(str):
@@ -141,6 +143,64 @@ def is_none(value: Any) -> bool:
     if isinstance(value, dict) and "model" in value and "clip" in value:
         return not value or all(v is None for v in value.values())
     return False
+
+
+def _sanitize_filename_part(part: str) -> str:
+    text = re.sub(r'[<>:"|?*\x00-\x1f]', "_", str(part or "").strip())
+    text = text.replace("\\", "/")
+    text = re.sub(r"/+", "/", text)
+    return text.strip(" /.")
+
+
+def _clean_workflow_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = text.replace("\\", "/").rsplit("/", 1)[-1]
+    text = re.sub(r"\.(json|workflow)$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^ComfyUI\s*[-|–—]\s*", "", text, flags=re.IGNORECASE)
+    clean = _sanitize_filename_part(text)
+    return "" if clean.lower() in {"comfyui", "untitled", "未命名"} else clean
+
+
+def _workflow_name_from_value(value: Any, depth: int = 0) -> str:
+    if depth > 4 or value is None:
+        return ""
+    if isinstance(value, str):
+        return _clean_workflow_name(value)
+    if not isinstance(value, dict):
+        return ""
+
+    name_keys = (
+        "workflow_name",
+        "workflowName",
+        "name",
+        "title",
+        "filename",
+        "file",
+        "path",
+        "workflow_path",
+        "workflowPath",
+    )
+    for key in name_keys:
+        if key not in value:
+            continue
+        name = _workflow_name_from_value(value.get(key), depth + 1)
+        if name:
+            return name
+
+    for key in ("workflow", "extra", "metadata", "config", "app", "info"):
+        nested = value.get(key)
+        if isinstance(nested, dict):
+            name = _workflow_name_from_value(nested, depth + 1)
+            if name:
+                return name
+    return ""
+
+
+def _queue_thumbnail_prefix(extra_pnginfo: Any) -> str:
+    workflow_name = _workflow_name_from_value(extra_pnginfo)
+    return f"GJJ/AnyPreview/{workflow_name}" if workflow_name else QUEUE_THUMBNAIL_PREFIX_FALLBACK
 
 
 def is_image_tensor(value: Any) -> bool:
@@ -467,6 +527,68 @@ def collect_queue_preview_images(items: list[dict[str, Any]]) -> list[dict[str, 
             if isinstance(image, dict) and image.get("filename"):
                 queue_images.append(dict(image))
     return queue_images
+
+
+def collect_queue_preview_media(items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """从自定义预览项目中抽出队列/历史面板可识别的标准媒体字段。"""
+    queue_images: list[dict[str, Any]] = []
+    queue_media: list[dict[str, Any]] = []
+    animated: list[dict[str, Any]] = []
+    gifs: list[dict[str, Any]] = []
+
+    def append_media(target: list[dict[str, Any]], media_item: Any) -> None:
+        if isinstance(media_item, dict) and media_item.get("filename"):
+            target.append(dict(media_item))
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for image in item.get("images") or []:
+            if not isinstance(image, dict) or not image.get("filename"):
+                continue
+            image_copy = dict(image)
+            queue_images.append(image_copy)
+            filename = str(image_copy.get("filename") or "").lower()
+            if image_copy.get("is_sequence") or filename.endswith((".gif", ".webp")):
+                animated.append(dict(image_copy))
+                if filename.endswith(".gif"):
+                    gifs.append(dict(image_copy))
+        for media_key in ("video", "audio", "files"):
+            media_values = item.get(media_key)
+            if not isinstance(media_values, (list, tuple)):
+                continue
+            for media_item in media_values:
+                append_media(queue_media, media_item)
+
+    result: dict[str, list[dict[str, Any]]] = {}
+    if queue_images:
+        result["images"] = queue_images
+    if queue_media:
+        result["preview_media"] = queue_media
+        result["animated"] = queue_media
+    if animated:
+        result["animated"] = animated
+    if gifs:
+        result["gifs"] = gifs
+    return result
+
+
+def first_queue_thumbnail_tensor(values: list[Any]) -> torch.Tensor | None:
+    """取第一张适合写入 output 历史缩略图的图像。"""
+    sequence_info = detect_video_sequence_preview(values)
+    if sequence_info is not None:
+        _source_kind, frames = sequence_info
+        if isinstance(frames, torch.Tensor) and int(frames.shape[0]) > 0:
+            return normalize_image_tensor(frames[:1])
+
+    for value in values:
+        if is_image_tensor(value) and isinstance(value, torch.Tensor):
+            image = normalize_image_tensor(value)
+            return image[:1]
+        if is_mask_tensor(value) and isinstance(value, torch.Tensor):
+            image = mask_to_preview_image(value)
+            return normalize_image_tensor(image[:1])
+    return None
 
 
 def save_audio_with_native_preview(audio: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1005,6 +1127,31 @@ class GJJ_AnyPreview:
 
     def __init__(self):
         self.preview_image = PreviewImage()
+        self.queue_image = SaveImage()
+
+    def _save_queue_thumbnail(
+        self,
+        preview_values: list[Any],
+        prompt: Any = None,
+        extra_pnginfo: Any = None,
+    ) -> list[dict[str, Any]]:
+        thumbnail = first_queue_thumbnail_tensor(preview_values)
+        if thumbnail is None:
+            return []
+        try:
+            image_ui = self.queue_image.save_images(
+                thumbnail,
+                filename_prefix=_queue_thumbnail_prefix(extra_pnginfo),
+                prompt=prompt,
+                extra_pnginfo=extra_pnginfo,
+            )
+            return annotate_preview_image_dimensions(
+                image_ui.get("ui", {}).get("images", []),
+                thumbnail,
+            )
+        except Exception as error:
+            print(f"[GJJ] AnyPreview 队列缩略图保存失败: {error}")
+            return []
 
     def check_lazy_status(self, batch_image=None, **kwargs):
         if batch_image is not None and not is_none(batch_image):
@@ -1163,9 +1310,15 @@ class GJJ_AnyPreview:
                 extra_pnginfo=extra_pnginfo,
             )
             ui["preview_items"] = (preview_items,)
-            queue_images = collect_queue_preview_images(preview_items)
-            if queue_images:
-                ui["images"] = queue_images
+            ui.update(collect_queue_preview_media(preview_items))
+
+        queue_thumbnails = self._save_queue_thumbnail(
+            preview_values,
+            prompt=prompt,
+            extra_pnginfo=extra_pnginfo,
+        )
+        if queue_thumbnails:
+            ui["images"] = queue_thumbnails
 
         # 添加调试日志
         print(f"[GJJ] 开始构建ui数据 - preview_kind: {preview_kind}")
@@ -1174,7 +1327,10 @@ class GJJ_AnyPreview:
 
         if sequence_media:
             ui["preview_images"] = sequence_media
-            ui["images"] = [dict(item) for item in sequence_media]
+            if not queue_thumbnails:
+                ui["images"] = [dict(item) for item in sequence_media]
+            ui["preview_media"] = [dict(item) for item in sequence_media]
+            ui["animated"] = [dict(item) for item in sequence_media]
             print(f"[GJJ] WebP 序列预览数据: {sequence_media}")
 
         elif (
@@ -1188,7 +1344,8 @@ class GJJ_AnyPreview:
                 extra_pnginfo=extra_pnginfo,
             )
             ui["preview_images"] = preview_images
-            ui["images"] = [dict(item) for item in preview_images]
+            if not queue_thumbnails:
+                ui["images"] = [dict(item) for item in preview_images]
             if preview_kind == "mask":
                 ui["preview_kind"] = ("image",)
             print(f"[GJJ] 图片ui数据: {ui['preview_images']}")
@@ -1221,6 +1378,8 @@ class GJJ_AnyPreview:
             )
             if preview_media:
                 ui["preview_video"] = (preview_media,)
+                ui["preview_media"] = [dict(item) for item in preview_media]
+                ui["animated"] = [dict(item) for item in preview_media]
                 print(f"[GJJ] 视频预览数据: {preview_media}")
 
         elif not has_expanded_items and preview_kind == "3d" and is_3d_file_object(merged):

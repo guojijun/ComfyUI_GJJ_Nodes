@@ -42,6 +42,8 @@ const POSE_LINES = [
 	["pelvis", "left_knee"], ["left_knee", "left_foot"],
 	["pelvis", "right_knee"], ["right_knee", "right_foot"],
 ];
+const MERGED_UPPER_JOINT = "upper_body";
+const HIDDEN_DRAW_JOINTS = new Set(["neck", "left_shoulder", "right_shoulder"]);
 
 function injectStyles() {
 	if (document.getElementById("gjj-scene-fusion-prep-style")) return;
@@ -58,8 +60,10 @@ function injectStyles() {
 .gjj-sfp-overlay{position:absolute;inset:0;width:100%;height:100%;overflow:visible;touch-action:none;}
 .gjj-sfp-person{cursor:grab;}
 .gjj-sfp-bone{fill:none;stroke-linecap:round;stroke-linejoin:round;}
+.gjj-sfp-person-hit{fill:none;stroke:rgba(255,255,255,0);stroke-linecap:round;stroke-linejoin:round;pointer-events:stroke;cursor:grab;}
 .gjj-sfp-head{fill:rgba(8,16,21,.2);}
 .gjj-sfp-joint{stroke:#071014;stroke-width:2;cursor:pointer;}
+.gjj-sfp-joint-hit{fill:rgba(255,255,255,0);stroke:none;pointer-events:all;cursor:pointer;}
 .gjj-sfp-handle{stroke:#071014;stroke-width:2;cursor:pointer;}
 .gjj-sfp-face-line{stroke-linecap:round;}
 .gjj-sfp-face-handle{stroke:#071014;stroke-width:2;cursor:pointer;}
@@ -184,7 +188,7 @@ function normalizePose(value) {
 			}
 		}
 	}
-	return normalizeIkPose(pose);
+	return pose;
 }
 
 function metricPoint(point) {
@@ -195,10 +199,43 @@ function localPoint(point) {
 	return [clamp(finite(point?.[0], 0) / FIGURE_ASPECT, -1.2, 1.2), clamp(finite(point?.[1], 0), -1.2, 1.2)];
 }
 
+function metricToLocal(point) {
+	return localPoint(point);
+}
+
 function distanceMetric(a, b) {
 	const pa = metricPoint(a);
 	const pb = metricPoint(b);
 	return Math.hypot(pb[0] - pa[0], pb[1] - pa[1]);
+}
+
+function boneLength(a, b) {
+	return Math.max(0.01, distanceMetric(DEFAULT_POSE[a], DEFAULT_POSE[b]));
+}
+
+function translatePosePoints(clean, keys, delta) {
+	for (const key of keys) {
+		clean[key] = [
+			clamp(finite(clean[key]?.[0], DEFAULT_POSE[key][0]) + delta[0], -1.2, 1.2),
+			clamp(finite(clean[key]?.[1], DEFAULT_POSE[key][1]) + delta[1], -1.2, 1.2),
+		];
+	}
+	return clean;
+}
+
+function fixedLengthPoint(anchorLocal, targetLocal, length, fallbackLocal) {
+	const anchor = metricPoint(anchorLocal);
+	const target = metricPoint(targetLocal);
+	const fallback = metricPoint(fallbackLocal || targetLocal);
+	let dx = target[0] - anchor[0];
+	let dy = target[1] - anchor[1];
+	let dist = Math.hypot(dx, dy);
+	if (dist < 1e-5) {
+		dx = fallback[0] - anchor[0];
+		dy = fallback[1] - anchor[1];
+		dist = Math.hypot(dx, dy) || 1;
+	}
+	return metricToLocal([anchor[0] + (dx / dist) * length, anchor[1] + (dy / dist) * length]);
 }
 
 function chainLengths(chain) {
@@ -243,6 +280,42 @@ function solveTwoBone(rootLocal, targetLocal, upperLen, lowerLen, bendSide = 1) 
 	return { mid: localPoint(mid), end: localPoint(target) };
 }
 
+function moveUpperBodyJoint(clean, local) {
+	const oldNeck = clean.neck || DEFAULT_POSE.neck;
+	const newNeck = fixedLengthPoint(clean.pelvis, local, boneLength("neck", "pelvis"), oldNeck);
+	const delta = [newNeck[0] - oldNeck[0], newNeck[1] - oldNeck[1]];
+	return translatePosePoints(clean, ["head", "neck", "left_shoulder", "right_shoulder", "left_elbow", "right_elbow", "left_hand", "right_hand"], delta);
+}
+
+function movePelvisJoint(clean, local) {
+	const oldPelvis = clean.pelvis || DEFAULT_POSE.pelvis;
+	const newPelvis = fixedLengthPoint(clean.neck, local, boneLength("neck", "pelvis"), oldPelvis);
+	const delta = [newPelvis[0] - oldPelvis[0], newPelvis[1] - oldPelvis[1]];
+	return translatePosePoints(clean, ["pelvis", "left_knee", "right_knee", "left_foot", "right_foot"], delta);
+}
+
+function applyFkMidDrag(clean, chain, local) {
+	const lengths = chainLengths(chain);
+	const root = metricPoint(clean[chain.root]);
+	const target = metricPoint(local);
+	const oldMid = metricPoint(clean[chain.mid]);
+	const oldEnd = metricPoint(clean[chain.end]);
+	let dx = target[0] - root[0];
+	let dy = target[1] - root[1];
+	let dist = Math.hypot(dx, dy);
+	if (dist < 1e-5) {
+		dx = oldMid[0] - root[0];
+		dy = oldMid[1] - root[1];
+		dist = Math.hypot(dx, dy) || 1;
+	}
+	const newMid = [root[0] + (dx / dist) * lengths.upper, root[1] + (dy / dist) * lengths.upper];
+	const delta = [newMid[0] - oldMid[0], newMid[1] - oldMid[1]];
+	clean[chain.mid] = metricToLocal(newMid);
+	const movedEnd = metricToLocal([oldEnd[0] + delta[0], oldEnd[1] + delta[1]]);
+	clean[chain.end] = fixedLengthPoint(clean[chain.mid], movedEnd, lengths.lower, clean[chain.end]);
+	return clean;
+}
+
 function normalizeIkPose(pose, active = null) {
 	const clean = structuredClone(pose || DEFAULT_POSE);
 	for (const chain of IK_CHAINS) {
@@ -261,24 +334,31 @@ function normalizeIkPose(pose, active = null) {
 	return clean;
 }
 
-function applyIkDrag(pose, key, local) {
-	const clean = normalizeIkPose(pose);
+function applyJointDrag(pose, key, local) {
+	const clean = normalizePose(pose);
+	if (key === MERGED_UPPER_JOINT) {
+		return moveUpperBodyJoint(clean, local);
+	}
 	const chain = IK_CHAINS.find((item) => item.mid === key || item.end === key);
 	if (!chain) {
+		if (key === "pelvis") {
+			return movePelvisJoint(clean, local);
+		}
+		if (key === "head") {
+			clean.head = fixedLengthPoint(clean.neck, local, boneLength("head", "neck"), clean.head);
+			return clean;
+		}
 		clean[key] = local;
-		return normalizeIkPose(clean);
-	}
-	const lengths = chainLengths(chain);
-	if (key === chain.end) {
-		const bend = sideOfLine(clean[chain.root], local, clean[chain.mid], chain.bend);
-		const solved = solveTwoBone(clean[chain.root], local, lengths.upper, lengths.lower, bend);
-		clean[chain.mid] = solved.mid;
-		clean[chain.end] = solved.end;
 		return clean;
 	}
-	const bend = sideOfLine(clean[chain.root], clean[chain.end], local, chain.bend);
-	const solved = solveTwoBone(clean[chain.root], clean[chain.end], lengths.upper, lengths.lower, bend);
+	if (key === chain.mid) {
+		return applyFkMidDrag(clean, chain, local);
+	}
+	const lengths = chainLengths(chain);
+	const bend = sideOfLine(clean[chain.root], local, clean[chain.mid], chain.bend);
+	const solved = solveTwoBone(clean[chain.root], local, lengths.upper, lengths.lower, bend);
 	clean[chain.mid] = solved.mid;
+	clean[chain.end] = solved.end;
 	return clean;
 }
 
@@ -395,6 +475,14 @@ function drawPerson(node, svg, person, persons, canvasW, canvasH) {
 		line.setAttribute("stroke", color);
 		line.setAttribute("stroke-width", Math.max(3, Math.round(rect.height * 0.018)));
 		group.appendChild(line);
+		const hitLine = makeSvg("line");
+		hitLine.classList.add("gjj-sfp-person-hit");
+		hitLine.setAttribute("x1", start[0]);
+		hitLine.setAttribute("y1", start[1]);
+		hitLine.setAttribute("x2", end[0]);
+		hitLine.setAttribute("y2", end[1]);
+		hitLine.setAttribute("stroke-width", Math.max(22, Math.round(rect.height * 0.075)));
+		group.appendChild(hitLine);
 	}
 	const circle = makeSvg("circle");
 	circle.classList.add("gjj-sfp-head");
@@ -404,6 +492,12 @@ function drawPerson(node, svg, person, persons, canvasW, canvasH) {
 	circle.setAttribute("stroke", color);
 	circle.setAttribute("stroke-width", Math.max(3, Math.round(rect.height * 0.018)));
 	group.appendChild(circle);
+	const headHit = makeSvg("circle");
+	headHit.classList.add("gjj-sfp-person-hit");
+	headHit.setAttribute("cx", head[0]);
+	headHit.setAttribute("cy", head[1]);
+	headHit.setAttribute("r", Math.max(radius + 10, Math.round(rect.height * 0.16)));
+	group.appendChild(headHit);
 	const faceH1 = pointFromAngle(faceCenter, radius * 0.82, faceAngle);
 	const faceH2 = pointFromAngle(faceCenter, radius * 0.82, faceAngle + 180);
 	const faceV1 = pointFromAngle(faceCenter, radius * 0.82, faceAngle + 90);
@@ -419,7 +513,9 @@ function drawPerson(node, svg, person, persons, canvasW, canvasH) {
 		line.setAttribute("stroke-width", Math.max(1, Math.round(rect.height * 0.008)));
 		group.appendChild(line);
 	}
-	for (const [key, point] of Object.entries(points)) {
+	const jointEntries = Object.entries(points).filter(([key]) => !HIDDEN_DRAW_JOINTS.has(key));
+	jointEntries.push([MERGED_UPPER_JOINT, points.neck]);
+	for (const [key, point] of jointEntries) {
 		const joint = makeSvg("circle");
 		joint.classList.add("gjj-sfp-joint");
 		joint.dataset.joint = key;
@@ -429,6 +525,14 @@ function drawPerson(node, svg, person, persons, canvasW, canvasH) {
 		joint.setAttribute("fill", color);
 		bindJointDrag(node, joint, person, persons, canvasW, canvasH);
 		group.appendChild(joint);
+		const jointHit = makeSvg("circle");
+		jointHit.classList.add("gjj-sfp-joint-hit");
+		jointHit.dataset.joint = key;
+		jointHit.setAttribute("cx", point[0]);
+		jointHit.setAttribute("cy", point[1]);
+		jointHit.setAttribute("r", selected ? "17" : "14");
+		bindJointDrag(node, jointHit, person, persons, canvasW, canvasH);
+		group.appendChild(jointHit);
 	}
 	if (selected) {
 		drawControlHandles(node, group, person, persons, rect, head, radius, color, canvasW, canvasH);
@@ -463,7 +567,8 @@ function trimLineToCircle(start, end, center, radius) {
 }
 
 function drawControlHandles(node, group, person, persons, rect, head, radius, color, canvasW, canvasH) {
-	const move = [rect.cx, rect.cy];
+	const pelvis = localToCanvas(person.pose?.pelvis || DEFAULT_POSE.pelvis, rect, finite(person.rotation, 0));
+	const move = pelvis;
 	const rotate = pointFromAngle([rect.cx, rect.cy], Math.max(24, rect.height * 0.62), finite(person.rotation, 0) - 90);
 	const scale = localToCanvas([0.28, 0.66], rect, finite(person.rotation, 0));
 	const faceAngle = finite(person.rotation, 0) + finite(person.face_angle, 0);
@@ -549,7 +654,7 @@ function svgPointFromRect(event, rect, canvasW, canvasH) {
 
 function bindPersonDrag(node, group, person, persons, canvasW, canvasH) {
 	group.addEventListener("pointerdown", (event) => {
-		if (event.target?.classList?.contains("gjj-sfp-joint")) return;
+		if (event.target?.classList?.contains("gjj-sfp-joint") || event.target?.classList?.contains("gjj-sfp-joint-hit")) return;
 		event.preventDefault();
 		event.stopPropagation();
 		node.__gjjSceneFusionSelected = person.id;
@@ -598,7 +703,7 @@ function bindJointDrag(node, joint, person, persons, canvasW, canvasH) {
 			const rect = personRect(person, canvasW, canvasH);
 			person.pose ||= structuredClone(DEFAULT_POSE);
 			const local = canvasToLocal(x, y, rect, finite(person.rotation, 0));
-			person.pose = applyIkDrag(person.pose, key, local);
+			person.pose = applyJointDrag(person.pose, key, local);
 			writeConfig(node, persons);
 			renderPayload(node);
 		};

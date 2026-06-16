@@ -131,6 +131,28 @@ def _send_sampling_preview(
         pass
 
 
+def _preview_video_latent(value: Any) -> Any:
+    try:
+        if isinstance(value, comfy.nested_tensor.NestedTensor):
+            parts = value.unbind()
+            return parts[0] if parts else value
+    except Exception:
+        pass
+    return value
+
+
+def _decode_preview_payload(previewer: Any, preview_format: str, latent_value: Any) -> tuple[Any | None, str]:
+    if previewer is None or latent_value is None:
+        return None, ""
+    try:
+        preview_latent = _preview_video_latent(latent_value)
+        preview_bytes = previewer.decode_latent_to_preview_image(preview_format, preview_latent)
+        fmt, image, max_edge = preview_bytes
+        return preview_bytes, _pil_to_data_url(image, fmt, max_edge)
+    except Exception:
+        return None, ""
+
+
 def _make_sampling_callback(model_patcher: Any, steps: int, x0_output: dict[str, Any] | None, unique_id: Any):
     preview_format = "JPEG"
     previewer = latent_preview.get_previewer(model_patcher.load_device, model_patcher.model.latent_format)
@@ -146,15 +168,14 @@ def _make_sampling_callback(model_patcher: Any, steps: int, x0_output: dict[str,
         image_data_url = ""
         if previewer:
             try:
-                preview_bytes = previewer.decode_latent_to_preview_image(preview_format, x0)
                 now = time.monotonic()
                 is_last = int(step) + 1 >= int(total_steps)
                 if is_last or now - last_sent >= 0.35:
-                    fmt, image, max_edge = preview_bytes
-                    image_data_url = _pil_to_data_url(image, fmt, max_edge)
+                    preview_bytes, image_data_url = _decode_preview_payload(previewer, preview_format, x0)
                     last_sent = now
             except Exception:
                 preview_bytes = None
+                image_data_url = ""
 
         pbar.update_absolute(step + 1, total_steps, preview_bytes)
         if image_data_url:
@@ -162,6 +183,18 @@ def _make_sampling_callback(model_patcher: Any, steps: int, x0_output: dict[str,
             _send_sampling_preview(unique_id, image_data_url, int(step) + 1, int(total_steps), progress)
 
     return callback
+
+
+def _send_initial_sampling_preview(model_patcher: Any, latent_value: Any, unique_id: Any, total_steps: int) -> None:
+    if not unique_id:
+        return
+    try:
+        previewer = latent_preview.get_previewer(model_patcher.load_device, model_patcher.model.latent_format)
+        _preview_bytes, image_data_url = _decode_preview_payload(previewer, "JPEG", latent_value)
+        if image_data_url:
+            _send_sampling_preview(unique_id, image_data_url, 0, max(1, int(total_steps)), 0.0)
+    except Exception:
+        pass
 
 
 def _parse_sigmas_text(sigmas: str) -> torch.Tensor:
@@ -519,6 +552,7 @@ class GJJ_LTXVVideoSampler:
             _send_status(unique_id, "4/5 采样生成 LTXV Latent...", 0.48)
             _cleanup_cuda()
             resolved_noise = _resolve_noise(noise_seed, latent)
+            _send_initial_sampling_preview(guider.model_patcher, resolved_noise, unique_id, int(sigmas_tensor.shape[-1]) - 1)
             samples = guider.sample(
                 resolved_noise,
                 latent_image,

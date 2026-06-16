@@ -1931,6 +1931,20 @@ function appendImagePreviewCards(node, parent, images) {
 			].join(";");
 
 			overlay.appendChild(previewImg);
+			const hint = document.createElement("div");
+			hint.style.cssText = [
+				"position:absolute",
+				"bottom:20px",
+				"left:50%",
+				"transform:translateX(-50%)",
+				"color:#fff",
+				"font-size:13px",
+				"opacity:0.66",
+				"pointer-events:none",
+				"white-space:nowrap",
+			].join(";");
+			overlay.appendChild(hint);
+			bindZoomableImageOverlay(overlay, previewImg, hint);
 			overlay.addEventListener("click", () => overlay.remove());
 			document.body.appendChild(overlay);
 		});
@@ -1970,6 +1984,37 @@ function appendPreviewOverlay(parent, title = "", detail = "") {
 		"-webkit-box-orient:vertical",
 	].join(";");
 	parent.appendChild(overlay);
+}
+
+function bindZoomableImageOverlay(overlay, previewImg, hint = null) {
+	let currentScale = 1;
+	const minScale = 0.1;
+	const maxScale = 10;
+	const applyScale = () => {
+		previewImg.style.transform = `scale(${currentScale})`;
+		if (hint) {
+			hint.textContent = currentScale === 1
+				? "滚轮缩放 · 双击重置 · 点击关闭"
+				: `缩放 ${Math.round(currentScale * 100)}% · 双击重置 · 点击关闭`;
+		}
+	};
+	previewImg.style.transformOrigin = "center center";
+	previewImg.style.transition = "transform 0.08s ease";
+	previewImg.style.cursor = "grab";
+	overlay.addEventListener("wheel", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const step = event.deltaY > 0 ? 0.9 : 1.1;
+		currentScale = Math.max(minScale, Math.min(maxScale, currentScale * step));
+		applyScale();
+	}, { passive: false });
+	previewImg.addEventListener("dblclick", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		currentScale = 1;
+		applyScale();
+	});
+	applyScale();
 }
 
 function pixelTextFromMediaItem(item) {
@@ -2135,11 +2180,25 @@ function appendPreviewTileImage(node, parent, item, badgeText = "", imageItems =
 			"object-fit:contain",
 			"border-radius:8px",
 		].join(";");
+		const hint = document.createElement("div");
+		hint.style.cssText = [
+			"position:absolute",
+			"bottom:20px",
+			"left:50%",
+			"transform:translateX(-50%)",
+			"color:#fff",
+			"font-size:13px",
+			"opacity:0.66",
+			"pointer-events:none",
+			"white-space:nowrap",
+		].join(";");
 		const renderOverlayPage = () => {
 			previewImg.src = imageDataToUrl(pageItems[overlayIndex] || currentItem());
 		};
 		renderOverlayPage();
 		overlay.appendChild(previewImg);
+		overlay.appendChild(hint);
+		bindZoomableImageOverlay(overlay, previewImg, hint);
 		if (pageItems.length > 1) {
 			const prev = makeTilePageButton("‹", "上一张图片", "left");
 			const next = makeTilePageButton("›", "下一张图片", "right");
@@ -2951,27 +3010,6 @@ function applyPreviewContent(node) {
 					"cursor:grab",
 				].join(";");
 
-				// 滚轮缩放功能
-				let currentScale = 1;
-				const minScale = 0.1;
-				const maxScale = 10;
-
-				overlay.addEventListener("wheel", (e) => {
-					e.preventDefault();
-					e.stopPropagation();
-
-					const delta = e.deltaY > 0 ? -0.1 : 0.1;
-					currentScale = Math.max(minScale, Math.min(maxScale, currentScale + delta));
-					previewImg.style.transform = `scale(${currentScale})`;
-				});
-
-				// 双击重置缩放
-				previewImg.addEventListener("dblclick", (e) => {
-					e.stopPropagation();
-					currentScale = 1;
-					previewImg.style.transform = `scale(${currentScale})`;
-				});
-
 				// 提示文字
 				const hint = document.createElement("div");
 				hint.style.cssText = [
@@ -2989,6 +3027,7 @@ function applyPreviewContent(node) {
 
 				overlay.appendChild(previewImg);
 				overlay.appendChild(hint);
+				bindZoomableImageOverlay(overlay, previewImg, hint);
 				document.body.appendChild(overlay);
 
 				// 点击关闭
@@ -3683,9 +3722,12 @@ app.registerExtension({
 			this.__gjjAnyPreviewVideo =
 				liveText !== null
 					? []
-					: Array.isArray(message?.preview_video?.[0])
-						? message.preview_video[0]
-						: [];
+					: firstMediaPayload(
+						message?.preview_video,
+						message?.preview_media,
+						message?.animated,
+						message?.gifs,
+					);
 			this.__gjjAnyPreviewFiles =
 				liveText !== null
 					? []

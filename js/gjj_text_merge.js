@@ -1,4 +1,5 @@
 import { app } from "/scripts/app.js";
+import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set(["GJJ_TextMerge"]);
@@ -8,6 +9,9 @@ const PREVIEW_WIDGET_NAME = "gjj_text_merge_preview";
 const DEFAULT_EMPTY_PREVIEW = "执行后在这里预览合并结果";
 const TEMPLATE_WIDGET_NAME = "template_text";
 const SELECTED_TEMPLATE_WIDGET_NAME = "selected_template";
+const SELECTED_GROUPS_WIDGET_NAME = "selected_groups";
+const USER_SETTINGS_ENDPOINT = "/gjj/user_settings";
+const USER_SETTINGS_SECTION = "text_merge";
 const DEFAULT_TEMPLATE_TEXT = `【默认】You are a helpful assistant. #默认值
 【T2I】You are a helpful assistant specialized in text-to-image generation.#文本到图片
 【T2V】You are a helpful assistant specialized in text-to-video generation.#文本到视频
@@ -129,7 +133,7 @@ function findWidget(node, name) {
 }
 
 function hideTemplateWidgets(node) {
-	for (const name of [TEMPLATE_WIDGET_NAME, SELECTED_TEMPLATE_WIDGET_NAME]) {
+	for (const name of [TEMPLATE_WIDGET_NAME, SELECTED_TEMPLATE_WIDGET_NAME, SELECTED_GROUPS_WIDGET_NAME]) {
 		hideWidget(findWidget(node, name));
 	}
 }
@@ -148,8 +152,56 @@ function setWidgetValue(node, name, value) {
 	app.graph?.setDirtyCanvas?.(true, true);
 }
 
+async function fetchUserSettings(options = undefined) {
+	const fetcher = api?.fetchApi ? api.fetchApi.bind(api) : fetch;
+	return fetcher(USER_SETTINGS_ENDPOINT, options);
+}
+
+async function loadUserSettings(node) {
+	if (node.__gjjTextMergeLoadedUserSettings || app.configuringGraph) return;
+	node.__gjjTextMergeLoadedUserSettings = true;
+	try {
+		const response = await fetchUserSettings();
+		const data = await response.json();
+		const section = data?.settings?.[USER_SETTINGS_SECTION];
+		if (!section || typeof section !== "object") return;
+		const savedTemplate = String(section.template_text || "").trim();
+		const currentTemplate = getWidgetValue(node, TEMPLATE_WIDGET_NAME, DEFAULT_TEMPLATE_TEXT).trim();
+		if (savedTemplate && (!currentTemplate || currentTemplate === DEFAULT_TEMPLATE_TEXT.trim())) {
+			setWidgetValue(node, TEMPLATE_WIDGET_NAME, savedTemplate);
+		}
+		const templates = getTemplates(node);
+		if (templates[0]) {
+			setWidgetValue(node, SELECTED_TEMPLATE_WIDGET_NAME, templates[0].label);
+		}
+		setWidgetValue(node, SELECTED_GROUPS_WIDGET_NAME, "{}");
+		refreshTemplateButtons(node);
+		const baseText = String(node.__gjjBasePreviewText || "").trim();
+		node.__gjjPreviewText = applyTemplateToText(node, baseText);
+		applyPreviewContent(node);
+	} catch (_) {}
+}
+
+async function saveUserSettings(node) {
+	const templateText = getWidgetValue(node, TEMPLATE_WIDGET_NAME, DEFAULT_TEMPLATE_TEXT) || DEFAULT_TEMPLATE_TEXT;
+	const body = JSON.stringify({
+		section: USER_SETTINGS_SECTION,
+		values: {
+			template_text: templateText,
+		},
+	});
+	const response = await fetchUserSettings({
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body,
+	});
+	if (!response?.ok) throw new Error("保存设置失败");
+	return response.json().catch(() => ({}));
+}
+
 function parseTemplateLine(line) {
 	const text = String(line || "").trim();
+	if (parseChoiceGroupLine(text)) return null;
 	if (!text.startsWith("【") || !text.includes("】")) return null;
 	const end = text.indexOf("】");
 	const label = text.slice(1, end).trim();
@@ -168,16 +220,37 @@ function parseTemplateLine(line) {
 	return { label, content, tooltip, placement };
 }
 
+function parseChoiceGroupLine(line) {
+	const text = String(line || "").trim();
+	const match = text.match(/^【([^】]+)】\s*[：:]\s*[｛{]([\s\S]*?)[｝}]\s*(?:#(.*))?$/);
+	if (!match) return null;
+	const label = String(match[1] || "").trim();
+	const options = String(match[2] || "")
+		.split(/[、,，|]/)
+		.map((item) => item.trim())
+		.filter(Boolean);
+	if (!label || !options.length) return null;
+	return { label, options: [...new Set(options)], tooltip: String(match[3] || "").trim() };
+}
+
 function joinTemplateParts(parts) {
 	return parts.map((part) => String(part || "").trim()).filter(Boolean).join("\n\n").trim();
 }
 
+function joinPromptParts(parts) {
+	return parts
+		.map((part) => String(part || "").trim().replace(/^[，,。；;\s]+|[，,。；;\s]+$/g, ""))
+		.filter(Boolean)
+		.join("，")
+		.trim();
+}
+
 function templateDirectives(text) {
 	let source = String(text || DEFAULT_TEMPLATE_TEXT).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-	const sharedParts = [];
+	const requiredParts = [];
 	source = source.replace(/《([\s\S]*?)》/g, (_, value) => {
 		const text = String(value || "").trim();
-		if (text) sharedParts.push(text);
+		if (text && !requiredParts.includes(text)) requiredParts.push(text);
 		return "";
 	});
 
@@ -194,7 +267,7 @@ function templateDirectives(text) {
 	}
 
 	return {
-		sharedText: joinTemplateParts(sharedParts),
+		requiredText: joinPromptParts(requiredParts),
 		previewHint: joinTemplateParts(previewParts),
 		templateLines,
 	};
@@ -205,14 +278,49 @@ function parseTemplates(text) {
 	return directives.templateLines
 		.map(parseTemplateLine)
 		.filter(Boolean)
-		.map((entry) => ({
-			...entry,
-			content: joinTemplateParts([entry.content, directives.sharedText]),
-		}));
+		.map((entry) => ({ ...entry }));
 }
 
 function getTemplates(node) {
 	return parseTemplates(getWidgetValue(node, TEMPLATE_WIDGET_NAME, DEFAULT_TEMPLATE_TEXT));
+}
+
+function getChoiceGroups(node) {
+	const directives = templateDirectives(getWidgetValue(node, TEMPLATE_WIDGET_NAME, DEFAULT_TEMPLATE_TEXT));
+	return directives.templateLines.map(parseChoiceGroupLine).filter(Boolean);
+}
+
+function getSelectedGroups(node) {
+	try {
+		const parsed = JSON.parse(getWidgetValue(node, SELECTED_GROUPS_WIDGET_NAME, "{}"));
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+	} catch (_) {
+		return {};
+	}
+}
+
+function setSelectedGroups(node, selections) {
+	const clean = {};
+	for (const [label, value] of Object.entries(selections || {})) {
+		const labelText = String(label || "").trim();
+		const valueText = String(value || "").trim();
+		if (labelText && valueText) clean[labelText] = valueText;
+	}
+	setWidgetValue(node, SELECTED_GROUPS_WIDGET_NAME, JSON.stringify(clean));
+	refreshChoiceButtons(node);
+}
+
+function selectedGroupLines(node) {
+	const selections = getSelectedGroups(node);
+	return Object.entries(selections)
+		.map(([label, value]) => [String(label || "").trim(), String(value || "").trim()])
+		.filter(([label, value]) => label && value)
+		.map(([label, value]) => `${label}：${value}`);
+}
+
+function selectedRequiredText(node) {
+	const directives = templateDirectives(getWidgetValue(node, TEMPLATE_WIDGET_NAME, DEFAULT_TEMPLATE_TEXT));
+	return String(directives.requiredText || "").trim();
 }
 
 function getEmptyPreviewText(node) {
@@ -237,10 +345,10 @@ function selectedTemplateEntry(node) {
 
 function applyTemplateToText(node, text) {
 	const entry = selectedTemplateEntry(node);
-	const base = String(text || "").trim();
+	const base = joinPromptParts([selectedRequiredText(node), ...selectedGroupLines(node), String(text || "").trim()]);
 	if (!entry?.content) return base;
 	if (!base) return entry.content;
-	return entry.placement === "suffix" ? `${base}\n\n${entry.content}` : `${entry.content}\n\n${base}`;
+	return entry.placement === "suffix" ? joinPromptParts([base, entry.content]) : joinPromptParts([entry.content, base]);
 }
 
 function escapeHtml(text) {
@@ -374,6 +482,53 @@ function refreshTemplateButtons(node) {
 		});
 		wrap.appendChild(button);
 	}
+	refreshChoiceButtons(node);
+}
+
+function refreshChoiceButtons(node) {
+	const wrap = node?.__gjjChoiceButtons;
+	if (!wrap) return;
+	const groups = getChoiceGroups(node);
+	const selected = getSelectedGroups(node);
+	wrap.replaceChildren();
+	if (!groups.length) {
+		wrap.style.display = "none";
+		return;
+	}
+	wrap.style.display = "flex";
+	for (const group of groups) {
+		const row = document.createElement("div");
+		row.style.cssText = "display:flex;align-items:center;gap:5px;flex-wrap:wrap;min-width:0;width:100%;";
+		const label = document.createElement("span");
+		label.textContent = `${group.label}：`;
+		label.title = group.tooltip || "同一分组内只能选择一个选项；再次点击可取消。";
+		label.style.cssText = "color:#9fb2b9;font-size:11px;font-weight:700;line-height:22px;white-space:nowrap;";
+		row.appendChild(label);
+		for (const option of group.options) {
+			const active = selected[group.label] === option;
+			const button = document.createElement("button");
+			button.type = "button";
+			button.textContent = option;
+			button.title = `${group.label}：${option}`;
+			button.style.cssText = templateButtonStyle(active);
+			button.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				const next = { ...getSelectedGroups(node) };
+				if (next[group.label] === option) {
+					delete next[group.label];
+				} else {
+					next[group.label] = option;
+				}
+				setSelectedGroups(node, next);
+				const baseText = String(node.__gjjBasePreviewText || "").trim();
+				node.__gjjPreviewText = applyTemplateToText(node, baseText);
+				applyPreviewContent(node);
+			});
+			row.appendChild(button);
+		}
+		wrap.appendChild(row);
+	}
 }
 
 function showTemplateSettings(node, anchorEl) {
@@ -443,7 +598,7 @@ function showTemplateSettings(node, anchorEl) {
 		event.stopPropagation();
 		close();
 	});
-	ok.addEventListener("click", (event) => {
+	ok.addEventListener("click", async (event) => {
 		event.preventDefault();
 		event.stopPropagation();
 		setWidgetValue(node, TEMPLATE_WIDGET_NAME, textarea.value || DEFAULT_TEMPLATE_TEXT);
@@ -457,7 +612,19 @@ function showTemplateSettings(node, anchorEl) {
 			node.__gjjPreviewText = applyTemplateToText(node, baseText);
 		}
 		applyPreviewContent(node);
-		close();
+		const oldText = ok.textContent;
+		ok.textContent = "保存中...";
+		ok.disabled = true;
+		try {
+			await saveUserSettings(node);
+			close();
+		} catch (_) {
+			ok.textContent = "保存失败";
+			setTimeout(() => {
+				ok.textContent = oldText;
+				ok.disabled = false;
+			}, 900);
+		}
 	});
 
 	panel.addEventListener("mousedown", (event) => event.stopPropagation());
@@ -542,11 +709,14 @@ function ensurePreviewWidget(node) {
 	const settingsButton = document.createElement("button");
 	settingsButton.type = "button";
 	settingsButton.textContent = "⚙️设置";
-	settingsButton.title = "编辑模板。格式：【按钮文字】模板内容#按钮提示；单独一行 #文字 可作为执行前预览提示；《公共文字》会加入每个模板选项；【按钮文字】⬛模板内容 表示追加到输入文本后面。";
+	settingsButton.title = "编辑模板并保存模板文本；当前按钮选择不保存。格式：《必填公共提示》；【按钮文字】模板内容#按钮提示；【分组】：｛选项1、选项2｝ 会生成互斥按钮。";
 	settingsButton.style.cssText = templateButtonStyle(false);
 
 	const templateButtons = document.createElement("div");
 	templateButtons.style.cssText = "display:flex;align-items:center;gap:5px;flex-wrap:wrap;min-width:0;";
+
+	const choiceButtons = document.createElement("div");
+	choiceButtons.style.cssText = "display:none;align-items:flex-start;gap:5px;flex-wrap:wrap;min-width:0;width:100%;";
 
 	const body = document.createElement("div");
 	body.className = "comfy-markdown-content gjj-text-merge-preview-body";
@@ -583,6 +753,7 @@ function ensurePreviewWidget(node) {
 
 	leftTools.appendChild(settingsButton);
 	leftTools.appendChild(templateButtons);
+	leftTools.appendChild(choiceButtons);
 	toolbar.appendChild(leftTools);
 	container.appendChild(toolbar);
 	container.appendChild(body);
@@ -590,6 +761,7 @@ function ensurePreviewWidget(node) {
 	node.__gjjPreviewContainer = container;
 	node.__gjjPreviewBody = body;
 	node.__gjjTemplateButtons = templateButtons;
+	node.__gjjChoiceButtons = choiceButtons;
 	node.__gjjPreviewWidget = node.addDOMWidget(PREVIEW_WIDGET_NAME, "HTML", container, { serialize: false });
 	node.__gjjPreviewWidget.computeSize = (width) => [
 		Math.max(1, Number(width || node.size?.[0] || 1)),
@@ -657,6 +829,7 @@ app.registerExtension({
 		nodeType.prototype.onNodeCreated = function (...args) {
 			const result = originalOnNodeCreated?.apply(this, args);
 			ensurePreviewWidget(this);
+			setTimeout(() => loadUserSettings(this), 0);
 			setTimeout(() => syncDynamicInputs(this), 0);
 			return result;
 		};
@@ -693,6 +866,7 @@ app.registerExtension({
 		}
 
 		ensurePreviewWidget(node);
+		setTimeout(() => loadUserSettings(node), 0);
 		setTimeout(() => syncDynamicInputs(node), 0);
 	},
 });

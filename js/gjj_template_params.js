@@ -1525,7 +1525,7 @@ function splitEnumOptions(inner) {
 				continue;
 			}
 		}
-		if ((ch === "," || ch === "，" || ch === "|") && !quote) {
+		if ((ch === "," || ch === "，" || ch === "、" || ch === "|") && !quote) {
 			const option = stripQuotes(current);
 			if (option) options.push(option);
 			current = "";
@@ -1536,6 +1536,58 @@ function splitEnumOptions(inner) {
 	const option = stripQuotes(current);
 	if (option) options.push(option);
 	return options;
+}
+
+const BOOK_PROMPT_RE = /^\s*(?:(?:提示词|正向提示词|prompt|positive_prompt|positive)\s*[：:])?\s*《([\s\S]*?)》\s*(?:#.*)?$/i;
+const CHOICE_GROUP_RE = /^\s*【([^】]+)】\s*(?:[：:]\s*)?[｛{]([\s\S]*?)[｝}]\s*(?:#(.*))?$/i;
+
+function joinPromptParts(parts) {
+	return (parts || [])
+		.map((part) => String(part ?? "").trim().replace(/^[，,。；;\s]+|[，,。；;\s]+$/g, ""))
+		.filter(Boolean)
+		.join("，")
+		.trim();
+}
+
+function parseBookPromptDirective(raw) {
+	const match = String(raw || "").trim().match(BOOK_PROMPT_RE);
+	return match ? String(match[1] || "").trim() : "";
+}
+
+function parseChoiceGroupDirective(raw) {
+	const match = String(raw || "").trim().match(CHOICE_GROUP_RE);
+	if (!match) return null;
+	const label = String(match[1] || "").trim();
+	const options = splitEnumOptions(match[2])
+		.map((item) => parseOptionItem(item))
+		.filter((item) => optionValue(item));
+	if (!label || !options.length) return null;
+	return {
+		label,
+		options,
+		tooltip: String(match[3] || "").trim(),
+	};
+}
+
+function selectedPromptGroupLines(fields, values) {
+	const byKey = new Map((fields || []).map((field) => [String(field?.key || ""), field]));
+	const lines = [];
+	for (const field of fields || []) {
+		if (!field?.template_prompt) continue;
+		for (const key of field.prompt_group_keys || []) {
+			const group = byKey.get(String(key || ""));
+			if (!group) continue;
+			const rawValue = values?.[group.key] ?? values?.[group.label] ?? group.default ?? "";
+			const selected = normalizeEnumValue(group, rawValue);
+			if (group.label && selected) lines.push(`${group.label}：${selected}`);
+		}
+	}
+	return lines;
+}
+
+function combinedPromptValue(field, fields, values) {
+	const base = field?.template_prompt ? field.default : (values?.[field.key] ?? values?.[field.label] ?? field.default ?? "");
+	return joinPromptParts([base, ...selectedPromptGroupLines(fields, values)]);
 }
 
 function splitPipePair(text) {
@@ -1573,6 +1625,14 @@ function optionLabel(option) {
 
 function optionValue(option) {
 	return String((option && typeof option === "object" ? option.value ?? option.label : option) ?? "").trim();
+}
+
+function normalizeEnumValue(field, value) {
+	const options = Array.isArray(field?.options) ? field.options : [];
+	const fallback = optionValue(options[0] || "");
+	const text = String(value ?? "").trim();
+	const matched = options.find((item) => text === optionValue(item) || text === optionLabel(item));
+	return matched ? optionValue(matched) : fallback;
 }
 
 function parseEnumOptions(defaultText, tooltip = "") {
@@ -1633,7 +1693,65 @@ function parseBoolSpec(defaultText) {
 function parseTemplate(template) {
 	const seen = new Map();
 	const fields = [];
+	const promptParts = [];
+	const choiceGroups = [];
+	const normalLines = [];
 	for (const raw of templateLogicalLines(template)) {
+		const promptText = parseBookPromptDirective(raw);
+		if (promptText) {
+			promptParts.push(promptText);
+			continue;
+		}
+		const choiceGroup = parseChoiceGroupDirective(raw);
+		if (choiceGroup) {
+			choiceGroups.push(choiceGroup);
+			continue;
+		}
+		normalLines.push(raw);
+	}
+
+	let promptField = null;
+	if (promptParts.length || choiceGroups.length) {
+		const key = makeUniqueKey("prompt", fields.length, seen);
+		const defaultText = joinPromptParts(promptParts);
+		promptField = {
+			key,
+			label: "提示词",
+			output_enabled: true,
+			broadcast_key: "",
+			broadcast_keys: [],
+			default: defaultText,
+			tooltip: "由《...》基础提示词与下方【分组】选择自动组合输出。",
+			socket_type: "STRING",
+			type: "STRING",
+			options: [],
+			template_prompt: true,
+			prompt_group_keys: [],
+		};
+		fields.push(promptField);
+	}
+
+	for (const group of choiceGroups) {
+		const key = makeUniqueKey(implicitTemplateKeySource(group.label), fields.length, seen);
+		const field = {
+			key,
+			label: group.label,
+			output_enabled: true,
+			broadcast_key: "",
+			broadcast_keys: [],
+			default: optionValue(group.options[0]),
+			tooltip: group.tooltip || "同一分组内选择一个选项；提示词输出会自动附加“名称：选项”。",
+			socket_type: "",
+			type: "ENUM",
+			options: group.options,
+			prompt_group: true,
+		};
+		fields.push(field);
+		if (promptField) promptField.prompt_group_keys.push(key);
+		if (fields.length >= MAX_OUTPUTS) return fields;
+	}
+
+	for (const raw of normalLines) {
 		const match = raw.match(/^([^:=：=]+?)\s*[:：=]\s*([\s\S]*)$/);
 		if (!match) continue;
 		const { label: typedLabel, socketType } = splitLabelAndType(match[1].trim());
@@ -1932,7 +2050,9 @@ function valuesForNewTemplate(oldState, nextFields) {
 		const oldValue = oldValues[key] ?? oldValues[label];
 
 		// 模板默认值、类型、tooltip 任一改变时，以新模板为准，避免旧值把输出口类型锁死。
-		if (oldField && makeFieldSignature(oldField) === makeFieldSignature(field) && oldValue !== undefined) {
+		if (field.template_prompt) {
+			nextValues[key] = field.default ?? "";
+		} else if (oldField && makeFieldSignature(oldField) === makeFieldSignature(field) && oldValue !== undefined) {
 			nextValues[key] = oldValue;
 		} else {
 			nextValues[key] = field.default ?? "";
@@ -2041,11 +2161,14 @@ function updateOutputs(node, fields, values) {
 			const link = app.graph?.links?.[linkId];
 			if (link) link.type = nextType;
 		}
+		const displayValue = field.template_prompt
+			? combinedPromptValue(field, fields, values)
+			: displayValueForField(field, values[field.key] ?? field.default ?? "");
 		output.tooltip = [
 			`模板参数：${field.label}`,
 			output.gjj_broadcast_key ? `广播变量：${output.gjj_broadcast_key}` : "",
 			field.tooltip ? `说明：${field.tooltip}` : "",
-			`当前值：${displayValueForField(field, values[field.key] ?? field.default ?? "")}`,
+			`当前值：${displayValue}`,
 		].filter(Boolean).join("\n");
 		nextOutputs[i] = output;
 	}
@@ -2060,11 +2183,9 @@ function updateOutputs(node, fields, values) {
 
 function displayValueForField(field, rawValue) {
 	if (field?.type === "ENUM") {
-		const text = String(rawValue ?? "").trim();
-		const option = (Array.isArray(field.options) ? field.options : []).find((item) => {
-			return text === optionValue(item) || text === optionLabel(item);
-		});
-		return option ? `${optionLabel(option)} (${optionValue(option)})` : text;
+		const normalized = normalizeEnumValue(field, rawValue);
+		const option = (Array.isArray(field.options) ? field.options : []).find((item) => normalized === optionValue(item));
+		return option ? `${optionLabel(option)} (${optionValue(option)})` : normalized;
 	}
 	if (field?.type === "BOOLEAN") {
 		const enabled = parseValue(rawValue) === true;
@@ -2155,7 +2276,6 @@ function buildBoolButtonForField(node, field, values) {
 
 function buildEnumSelectForField(node, field, values) {
 	const options = Array.isArray(field.options) ? field.options : [];
-	const fallback = optionValue(options[0] || "");
 	if (!options.length) return null;
 
 	const wrap = document.createElement("div");
@@ -2167,12 +2287,8 @@ function buildEnumSelectForField(node, field, values) {
 	box.className = "gjj-template-param-enum";
 	box.title = field.tooltip || "枚举参数：点击选择输出值";
 
-	const normalizeCurrent = (value) => {
-		const text = String(value ?? "").trim();
-		const matched = options.find((item) => text === optionValue(item) || text === optionLabel(item));
-		return matched ? optionValue(matched) : fallback;
-	};
-	values[field.key] = normalizeCurrent(values[field.key] ?? field.default ?? fallback);
+	const normalizeCurrent = (value) => normalizeEnumValue(field, value);
+	values[field.key] = normalizeCurrent(values[field.key] ?? field.default ?? optionValue(options[0] || ""));
 
 	const buttons = [];
 	const sync = () => {
@@ -2211,6 +2327,86 @@ function buildEnumSelectForField(node, field, values) {
 	}
 
 	wrap.append(label, box);
+	sync();
+	node.__gjjTemplateParamsRows.set(field.key, {
+		get value() { return normalizeCurrent(values[field.key]); },
+		set value(next) { values[field.key] = normalizeCurrent(next); sync(); },
+	});
+	return wrap;
+}
+
+function registerHiddenPromptField(node, field, values) {
+	const key = String(field?.key || "");
+	if (!key) return null;
+	values[key] = String(field?.default ?? "");
+	const input = {
+		get value() {
+			return String(field?.default ?? "");
+		},
+		set value(_next) {
+			values[key] = String(field?.default ?? "");
+		},
+		closest() {
+			return null;
+		},
+	};
+	node.__gjjTemplateParamsRows.set(key, input);
+	return input;
+}
+
+function buildCompactPromptGroupForField(node, field, values) {
+	const options = Array.isArray(field.options) ? field.options : [];
+	if (!options.length) return null;
+
+	const wrap = document.createElement("div");
+	wrap.className = "gjj-template-param-prompt-group";
+	wrap.title = field.tooltip || "同一分组内选择一个选项；会自动拼到提示词输出后面。";
+
+	const label = document.createElement("span");
+	label.className = "gjj-template-param-prompt-group-label";
+	label.textContent = `${field.label || "选项"}：`;
+	label.title = field.tooltip || label.textContent;
+
+	const buttons = [];
+	const normalizeCurrent = (value) => normalizeEnumValue(field, value);
+	values[field.key] = normalizeCurrent(values[field.key] ?? field.default ?? optionValue(options[0] || ""));
+	const sync = () => {
+		const current = normalizeCurrent(values[field.key]);
+		values[field.key] = current;
+		for (const button of buttons) {
+			const active = button.dataset.optionValue === current;
+			button.dataset.value = active ? "true" : "false";
+			button.classList.toggle("active", active);
+		}
+	};
+	const commit = (nextValue) => {
+		values[field.key] = normalizeCurrent(nextValue);
+		sync();
+		const template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
+		const fields = parseTemplate(template);
+		saveState(node, template, fields, values);
+		updateOutputs(node, fields, values);
+	};
+
+	wrap.appendChild(label);
+	for (const option of options) {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.className = "gjj-template-param-enum-button gjj-template-param-prompt-group-button";
+		button.textContent = optionLabel(option);
+		button.dataset.optionValue = optionValue(option);
+		button.title = `${field.label || "选项"}：${optionLabel(option)}`;
+		button.addEventListener("pointerdown", (event) => event.stopPropagation());
+		button.addEventListener("mousedown", (event) => event.stopPropagation());
+		button.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			commit(button.dataset.optionValue || "");
+		});
+		buttons.push(button);
+		wrap.appendChild(button);
+	}
+
 	sync();
 	node.__gjjTemplateParamsRows.set(field.key, {
 		get value() { return normalizeCurrent(values[field.key]); },
@@ -2258,6 +2454,13 @@ function registerHiddenMediaField(node, field, values) {
 }
 
 function buildInputForField(node, field, values, options = {}) {
+	if (field?.template_prompt) {
+		registerHiddenPromptField(node, field, values);
+		return null;
+	}
+	if (field?.prompt_group) {
+		return buildCompactPromptGroupForField(node, field, values);
+	}
 	if (isBooleanField(field, values)) {
 		return buildBoolButtonForField(node, field, values);
 	}
@@ -2499,6 +2702,9 @@ function buildDom(node) {
 		.gjj-template-param-enum-button { min-width:0; flex:1 1 72px; height:30px; padding:4px 8px; border:1px solid #33464e; border-radius:8px; outline:none; background:#24282b; color:#cdd5d8; font-size:13px; cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 		.gjj-template-param-enum-button.active, .gjj-template-param-enum-button[data-value="true"] { border-color:#4f8f7a; background:#20362f; color:#dff8ea; font-weight:700; }
 		.gjj-template-param-enum-button:hover { filter:brightness(1.12); border-color:#6aa6b8; }
+		.gjj-template-param-prompt-group { display:flex; align-items:center; gap:4px; flex-wrap:wrap; min-width:0; width:100%; padding:0; }
+		.gjj-template-param-prompt-group-label { flex:0 0 auto; color:#9fb2b9; font-size:11px; font-weight:700; line-height:22px; white-space:nowrap; }
+		.gjj-template-param-prompt-group-button { flex:0 0 auto; min-width:0; width:auto; height:22px; padding:1px 8px; border-radius:6px; font-size:11px; line-height:1; }
 		.gjj-template-param-empty { color:#8ea0a8; font-size:12px; padding:4px 0; }
 	`;
 
@@ -2546,6 +2752,7 @@ function buildDom(node) {
 		"每行一个参数：名称：默认值 # 说明",
 		"广播示例：帧率 (frame_rate) [INT,FLOAT]：24.0 # 每秒帧数",
 		"多段提示词：提示词：'''第一段\\n第二段''' 或 提示词：\"\"\"多段文本\"\"\"。",
+		"组合提示词：提示词：《基础提示》；【风格】｛真实、日漫、美漫｝ 会生成风格按钮，并在第一个“提示词”输出里自动组合。",
 		"支持 int(1)、float(1)、true / false、json([1,2])、图片/音频/视频路径。",
 		"⚡ 默认关闭；开启后只广播写了 (变量名) 的字段，括号内只使用一个严格变量名。",
 		"🔌 控制本节点是否显示输出口；变量读取可不依赖输出口和广播开关。",
