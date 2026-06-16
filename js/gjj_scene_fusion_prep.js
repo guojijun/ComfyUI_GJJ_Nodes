@@ -27,6 +27,13 @@ const DEFAULT_POSE = {
 	left_foot: [-0.13, 0.66],
 	right_foot: [0.13, 0.66],
 };
+const FIGURE_ASPECT = 0.42;
+const IK_CHAINS = [
+	{ root: "left_shoulder", mid: "left_elbow", end: "left_hand", bend: 1 },
+	{ root: "right_shoulder", mid: "right_elbow", end: "right_hand", bend: -1 },
+	{ root: "pelvis", mid: "left_knee", end: "left_foot", bend: 1 },
+	{ root: "pelvis", mid: "right_knee", end: "right_foot", bend: -1 },
+];
 const POSE_LINES = [
 	["head", "neck"], ["neck", "pelvis"], ["left_shoulder", "right_shoulder"],
 	["neck", "left_shoulder"], ["neck", "right_shoulder"],
@@ -177,7 +184,102 @@ function normalizePose(value) {
 			}
 		}
 	}
-	return pose;
+	return normalizeIkPose(pose);
+}
+
+function metricPoint(point) {
+	return [finite(point?.[0], 0) * FIGURE_ASPECT, finite(point?.[1], 0)];
+}
+
+function localPoint(point) {
+	return [clamp(finite(point?.[0], 0) / FIGURE_ASPECT, -1.2, 1.2), clamp(finite(point?.[1], 0), -1.2, 1.2)];
+}
+
+function distanceMetric(a, b) {
+	const pa = metricPoint(a);
+	const pb = metricPoint(b);
+	return Math.hypot(pb[0] - pa[0], pb[1] - pa[1]);
+}
+
+function chainLengths(chain) {
+	return {
+		upper: Math.max(0.01, distanceMetric(DEFAULT_POSE[chain.root], DEFAULT_POSE[chain.mid])),
+		lower: Math.max(0.01, distanceMetric(DEFAULT_POSE[chain.mid], DEFAULT_POSE[chain.end])),
+	};
+}
+
+function sideOfLine(root, end, point, fallback = 1) {
+	const a = metricPoint(root);
+	const b = metricPoint(end);
+	const p = metricPoint(point);
+	const cross = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+	return Math.abs(cross) < 1e-5 ? (fallback < 0 ? -1 : 1) : (cross < 0 ? -1 : 1);
+}
+
+function solveTwoBone(rootLocal, targetLocal, upperLen, lowerLen, bendSide = 1) {
+	const root = metricPoint(rootLocal);
+	let target = metricPoint(targetLocal);
+	let dx = target[0] - root[0];
+	let dy = target[1] - root[1];
+	let dist = Math.hypot(dx, dy);
+	if (dist < 1e-5) {
+		dx = 0;
+		dy = upperLen + lowerLen;
+		dist = Math.hypot(dx, dy);
+	}
+	const minReach = Math.max(0.001, Math.abs(upperLen - lowerLen) + 0.001);
+	const maxReach = Math.max(minReach, upperLen + lowerLen - 0.001);
+	const solvedDist = clamp(dist, minReach, maxReach);
+	const ux = dx / dist;
+	const uy = dy / dist;
+	target = [root[0] + ux * solvedDist, root[1] + uy * solvedDist];
+	const along = clamp((upperLen * upperLen + solvedDist * solvedDist - lowerLen * lowerLen) / (2 * solvedDist), 0, upperLen);
+	const height = Math.sqrt(Math.max(0, upperLen * upperLen - along * along));
+	const side = bendSide < 0 ? -1 : 1;
+	const mid = [
+		root[0] + ux * along + (-uy) * height * side,
+		root[1] + uy * along + ux * height * side,
+	];
+	return { mid: localPoint(mid), end: localPoint(target) };
+}
+
+function normalizeIkPose(pose, active = null) {
+	const clean = structuredClone(pose || DEFAULT_POSE);
+	for (const chain of IK_CHAINS) {
+		const lengths = chainLengths(chain);
+		const bend = sideOfLine(clean[chain.root], clean[chain.end], clean[chain.mid], chain.bend);
+		const solved = solveTwoBone(clean[chain.root], clean[chain.end], lengths.upper, lengths.lower, bend);
+		if (active?.key === chain.mid) {
+			const midSide = sideOfLine(clean[chain.root], clean[chain.end], active.local, chain.bend);
+			const midSolved = solveTwoBone(clean[chain.root], clean[chain.end], lengths.upper, lengths.lower, midSide);
+			clean[chain.mid] = midSolved.mid;
+			continue;
+		}
+		clean[chain.mid] = solved.mid;
+		clean[chain.end] = solved.end;
+	}
+	return clean;
+}
+
+function applyIkDrag(pose, key, local) {
+	const clean = normalizeIkPose(pose);
+	const chain = IK_CHAINS.find((item) => item.mid === key || item.end === key);
+	if (!chain) {
+		clean[key] = local;
+		return normalizeIkPose(clean);
+	}
+	const lengths = chainLengths(chain);
+	if (key === chain.end) {
+		const bend = sideOfLine(clean[chain.root], local, clean[chain.mid], chain.bend);
+		const solved = solveTwoBone(clean[chain.root], local, lengths.upper, lengths.lower, bend);
+		clean[chain.mid] = solved.mid;
+		clean[chain.end] = solved.end;
+		return clean;
+	}
+	const bend = sideOfLine(clean[chain.root], clean[chain.end], local, chain.bend);
+	const solved = solveTwoBone(clean[chain.root], clean[chain.end], lengths.upper, lengths.lower, bend);
+	clean[chain.mid] = solved.mid;
+	return clean;
 }
 
 function validColor(value, fallback) {
@@ -495,7 +597,8 @@ function bindJointDrag(node, joint, person, persons, canvasW, canvasH) {
 			const [x, y] = svgPointFromRect(moveEvent, svgRect, canvasW, canvasH);
 			const rect = personRect(person, canvasW, canvasH);
 			person.pose ||= structuredClone(DEFAULT_POSE);
-			person.pose[key] = canvasToLocal(x, y, rect, finite(person.rotation, 0));
+			const local = canvasToLocal(x, y, rect, finite(person.rotation, 0));
+			person.pose = applyIkDrag(person.pose, key, local);
 			writeConfig(node, persons);
 			renderPayload(node);
 		};

@@ -64,6 +64,14 @@ DEFAULT_POSE = {
     "right_foot": [0.13, 0.66],
 }
 
+FIGURE_ASPECT = 0.42
+IK_CHAINS = (
+    {"root": "left_shoulder", "mid": "left_elbow", "end": "left_hand", "bend": 1.0},
+    {"root": "right_shoulder", "mid": "right_elbow", "end": "right_hand", "bend": -1.0},
+    {"root": "pelvis", "mid": "left_knee", "end": "left_foot", "bend": 1.0},
+    {"root": "pelvis", "mid": "right_knee", "end": "right_foot", "bend": -1.0},
+)
+
 POSE_LINES = (
     ("head", "neck"),
     ("neck", "pelvis"),
@@ -179,6 +187,78 @@ def _hex(value: str, fallback: str) -> str:
     return f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
 
 
+def _metric_point(point: list[float]) -> tuple[float, float]:
+    return _float(point[0], 0.0) * FIGURE_ASPECT, _float(point[1], 0.0)
+
+
+def _local_point(point: tuple[float, float]) -> list[float]:
+    return [
+        _clamp(_float(point[0], 0.0) / FIGURE_ASPECT, -1.2, 1.2),
+        _clamp(_float(point[1], 0.0), -1.2, 1.2),
+    ]
+
+
+def _metric_distance(a: list[float], b: list[float]) -> float:
+    ax, ay = _metric_point(a)
+    bx, by = _metric_point(b)
+    return math.hypot(bx - ax, by - ay)
+
+
+def _ik_chain_lengths(chain: dict[str, Any]) -> tuple[float, float]:
+    upper = max(0.01, _metric_distance(DEFAULT_POSE[str(chain["root"])], DEFAULT_POSE[str(chain["mid"])]))
+    lower = max(0.01, _metric_distance(DEFAULT_POSE[str(chain["mid"])], DEFAULT_POSE[str(chain["end"])]))
+    return upper, lower
+
+
+def _ik_side(root: list[float], end: list[float], point: list[float], fallback: float) -> float:
+    ax, ay = _metric_point(root)
+    bx, by = _metric_point(end)
+    px, py = _metric_point(point)
+    cross = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+    if abs(cross) < 1e-5:
+        return -1.0 if fallback < 0.0 else 1.0
+    return -1.0 if cross < 0.0 else 1.0
+
+
+def _solve_two_bone(root_local: list[float], target_local: list[float], upper: float, lower: float, bend_side: float) -> tuple[list[float], list[float]]:
+    root_x, root_y = _metric_point(root_local)
+    target_x, target_y = _metric_point(target_local)
+    dx = target_x - root_x
+    dy = target_y - root_y
+    dist = math.hypot(dx, dy)
+    if dist < 1e-5:
+        dx = 0.0
+        dy = upper + lower
+        dist = math.hypot(dx, dy)
+    min_reach = max(0.001, abs(upper - lower) + 0.001)
+    max_reach = max(min_reach, upper + lower - 0.001)
+    solved_dist = _clamp(dist, min_reach, max_reach)
+    ux = dx / dist
+    uy = dy / dist
+    target_x = root_x + ux * solved_dist
+    target_y = root_y + uy * solved_dist
+    along = _clamp((upper * upper + solved_dist * solved_dist - lower * lower) / (2.0 * solved_dist), 0.0, upper)
+    height = math.sqrt(max(0.0, upper * upper - along * along))
+    side = -1.0 if bend_side < 0.0 else 1.0
+    mid_x = root_x + ux * along + (-uy) * height * side
+    mid_y = root_y + uy * along + ux * height * side
+    return _local_point((mid_x, mid_y)), _local_point((target_x, target_y))
+
+
+def _normalize_ik_pose(pose: dict[str, list[float]]) -> dict[str, list[float]]:
+    clean = {key: list(pose.get(key, DEFAULT_POSE[key])) for key in DEFAULT_POSE}
+    for chain in IK_CHAINS:
+        root_key = str(chain["root"])
+        mid_key = str(chain["mid"])
+        end_key = str(chain["end"])
+        upper, lower = _ik_chain_lengths(chain)
+        bend = _ik_side(clean[root_key], clean[end_key], clean[mid_key], _float(chain.get("bend"), 1.0))
+        mid, end = _solve_two_bone(clean[root_key], clean[end_key], upper, lower, bend)
+        clean[mid_key] = mid
+        clean[end_key] = end
+    return clean
+
+
 def _resample_lanczos():
     return getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
 
@@ -228,7 +308,7 @@ def _parse_config(value: str) -> dict[str, dict[str, Any]]:
             "rotation": _float(item.get("rotation"), 0.0),
             "face_angle": _float(item.get("face_angle"), 0.0),
             "z": _float(item.get("z"), index),
-            "pose": {**DEFAULT_POSE, **clean_pose},
+            "pose": _normalize_ik_pose({**DEFAULT_POSE, **clean_pose}),
         }
     return result
 
@@ -242,7 +322,7 @@ def _default_person(index: int, count: int) -> dict[str, Any]:
         "face_angle": 0.0,
         "color": DEFAULT_COLORS[index % len(DEFAULT_COLORS)],
         "z": float(index),
-        "pose": DEFAULT_POSE,
+        "pose": _normalize_ik_pose(DEFAULT_POSE),
     }
 
 

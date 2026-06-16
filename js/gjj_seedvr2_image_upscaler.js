@@ -437,29 +437,11 @@ function linkTypeForInput(node, inputName) {
 function updateOutputType(node) {
 	const output = Array.isArray(node?.outputs) ? node.outputs[0] : null;
 	if (!output) return;
-	const mediaInput = getInputByName(node, MEDIA_INPUT_NAME);
-	const sourceType = linkTypeForInput(node, MEDIA_INPUT_NAME).toUpperCase();
-	if (mediaInput?.link && sourceType.includes("VIDEO")) {
-		output.type = "VIDEO";
-		output.name = "结果视频";
-		output.label = "结果视频";
-		output.localized_name = "结果视频";
-		output.tooltip = "输入 VIDEO 时输出放大后的视频，并保留原音频与帧率。";
-		return;
-	}
-	if (mediaInput?.link) {
-		output.type = "IMAGE";
-		output.name = "结果图像";
-		output.label = "结果图像";
-		output.localized_name = "结果图像";
-		output.tooltip = "输入 GJJ_BATCH_IMAGE 或 IMAGE 时输出放大后的图像。";
-		return;
-	}
-	output.type = "*";
+	output.type = MEDIA_INPUT_TYPE;
 	output.name = "放大结果";
 	output.label = "放大结果";
 	output.localized_name = "放大结果";
-	output.tooltip = "输入图像时输出 IMAGE，输入视频时输出 VIDEO。";
+	output.tooltip = "兼容 GJJ_BATCH_IMAGE、IMAGE、VIDEO；输入图像/批量图时输出放大后的图像帧，输入视频时输出放大后的视频。";
 }
 
 function patchCommonVideoHeight(node) {

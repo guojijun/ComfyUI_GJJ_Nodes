@@ -253,11 +253,6 @@ function updateAspectFromState(node) {
 
 function getWidgetWorkWidth(node, widgetWidth = null) {
 	const nodeWidth = Math.max(MIN_WIDTH, finiteNumber(widgetWidth, getSavedNodeWidth(node)));
-	const measured = finiteNumber(node.__gjjCompareMeasuredWidth, 0);
-	const measuredFor = finiteNumber(node.__gjjCompareMeasuredForNodeWidth, 0);
-	if (measured > 0 && Math.abs(measuredFor - nodeWidth) <= 2) {
-		return Math.max(1, measured);
-	}
 	return Math.max(1, nodeWidth - ESTIMATED_WIDGET_SIDE_PADDING);
 }
 
@@ -266,7 +261,8 @@ function getSelectorBarHeight(node) {
 	if (state.images.length <= 2) {
 		return 0;
 	}
-	const measured = Math.ceil(finiteNumber(node.__gjjCompareSelectorBar?.getBoundingClientRect?.().height, 0));
+	const selector = node.__gjjCompareSelectorBar;
+	const measured = Math.ceil(finiteNumber(selector?.scrollHeight, finiteNumber(selector?.offsetHeight, 0)));
 	return Math.max(SELECTOR_BAR_HEIGHT, measured || SELECTOR_BAR_HEIGHT);
 }
 
@@ -286,11 +282,6 @@ function syncDomDimensions(node, widgetWidth = null) {
 		return;
 	}
 	const width = Math.max(MIN_WIDTH, finiteNumber(widgetWidth, getSavedNodeWidth(node)));
-	const measured = Math.round(finiteNumber(container.getBoundingClientRect?.().width, 0));
-	if (measured > 0) {
-		node.__gjjCompareMeasuredWidth = measured;
-		node.__gjjCompareMeasuredForNodeWidth = width;
-	}
 	const selectorHeight = getSelectorBarHeight(node);
 	const compareHeight = getCompareAreaHeight(node, width);
 	const widgetHeight = selectorHeight + compareHeight;

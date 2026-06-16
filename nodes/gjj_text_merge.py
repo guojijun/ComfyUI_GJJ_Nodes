@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -19,6 +20,7 @@ DEFAULT_TEMPLATE_TEXT = """【默认】You are a helpful assistant. #默认值
 【ADS2V】You are a helpful assistant specialized in ads insertion.#广告插入到视频
 【VRC2V】You are a helpful assistant for editing. You may need to adjust the subject's action or position.#视频区域控制到视频
 【MV2V】You are a helpful assistant for editing. You might need to adjust the video's style, lighting, colors, textures, and the subject's pose or action.#多维编辑到视频"""
+BOOK_QUOTE_RE = re.compile(r"《([\s\S]*?)》")
 
 
 def build_text_input_options(index: int) -> tuple[str, dict[str, Any]]:
@@ -50,6 +52,39 @@ def normalize_text(value: Any) -> str:
     return str(value).strip()
 
 
+def join_template_parts(parts: list[str]) -> str:
+    return "\n\n".join(part.strip() for part in parts if part and part.strip()).strip()
+
+
+def template_directives(template_text: Any) -> dict[str, Any]:
+    source = normalize_text(template_text) or DEFAULT_TEMPLATE_TEXT
+    shared_parts: list[str] = []
+
+    def collect_shared(match: re.Match[str]) -> str:
+        text = match.group(1).strip()
+        if text:
+            shared_parts.append(text)
+        return ""
+
+    source = BOOK_QUOTE_RE.sub(collect_shared, source)
+    preview_parts: list[str] = []
+    template_lines: list[str] = []
+    for raw_line in source.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw_line.strip()
+        if line.startswith("#"):
+            hint = line[1:].strip()
+            if hint:
+                preview_parts.append(hint)
+            continue
+        template_lines.append(raw_line)
+
+    return {
+        "shared_text": join_template_parts(shared_parts),
+        "preview_hint": join_template_parts(preview_parts),
+        "template_lines": template_lines,
+    }
+
+
 def parse_template_line(line: Any) -> dict[str, str] | None:
     text = str(line or "").strip()
     if not text.startswith("【") or "】" not in text:
@@ -73,11 +108,13 @@ def parse_template_line(line: Any) -> dict[str, str] | None:
 
 
 def parse_templates(template_text: Any) -> list[dict[str, str]]:
-    source = normalize_text(template_text) or DEFAULT_TEMPLATE_TEXT
+    directives = template_directives(template_text)
+    shared_text = directives["shared_text"]
     templates: list[dict[str, str]] = []
-    for line in source.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+    for line in directives["template_lines"]:
         parsed = parse_template_line(line)
         if parsed:
+            parsed["content"] = join_template_parts([parsed["content"], shared_text])
             templates.append(parsed)
     return templates
 
@@ -136,7 +173,7 @@ class GJJ_TextMerge:
                         "display": "hidden",
                         "hidden": True,
                         "display_name": "隐藏模板",
-                        "tooltip": "由前端 ⚙️ 设置按钮维护。格式：【按钮文字】模板内容#提示；【按钮文字】⬛模板内容#提示 表示追加到输入文本后面。",
+                        "tooltip": "由前端 ⚙️ 设置按钮维护。格式：【按钮文字】模板内容#按钮提示；单独一行 #文字 可作为执行前预览提示；《公共文字》会加入每个模板选项；【按钮文字】⬛模板内容 表示追加到输入文本后面。",
                     },
                 ),
                 "selected_template": (

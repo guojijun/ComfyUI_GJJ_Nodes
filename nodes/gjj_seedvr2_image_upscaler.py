@@ -516,9 +516,9 @@ class GJJ_SeedVR2ImageUpscaler:
         "视频放大",
         "seedvr2",
     ]
-    RETURN_TYPES = (any_type,)
+    RETURN_TYPES = (MEDIA_INPUT_TYPE,)
     RETURN_NAMES = ("放大完成结果",)
-    OUTPUT_TOOLTIPS = ("输入图像时输出放大后的图像；输入视频时输出放大后的视频，并自动保留原音频与帧率。",)
+    OUTPUT_TOOLTIPS = ("兼容 GJJ_BATCH_IMAGE、IMAGE、VIDEO：输入图像/批量图时输出放大后的图像帧，输入视频时输出放大后的视频并保留原音频与帧率。",)
 
     @classmethod
     def INPUT_TYPES(cls):

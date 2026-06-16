@@ -20,6 +20,8 @@ import { api } from "/scripts/api.js";
 	const CUSTOM_NODE_COLOR_STYLE_ID = "custom";
 	const CROP_MARGIN_PX = 52;
 	const FIT_MARGIN_PX = 112;
+	const FALLBACK_TOOLBAR_LEFT_PX = 56;
+	const FALLBACK_TOOLBAR_TOP_PX = 14;
 	const MIN_FIT_SCALE = 0.08;
 	const MAX_FIT_SCALE = 1.35;
 	const MIN_READABLE_REAL_CAPTURE_SCALE = 0.18;
@@ -3540,14 +3542,14 @@ import { api } from "/scripts/api.js";
 		style.textContent = `
 #${TOOLBAR_ID} {
 	position: fixed;
-	left: 50%;
-	top: 12px;
+	left: ${FALLBACK_TOOLBAR_LEFT_PX}px;
+	top: ${FALLBACK_TOOLBAR_TOP_PX}px;
 	z-index: 12000;
 	display: flex;
 	flex-direction: row;
 	gap: 4px;
 	align-items: center;
-	transform: translateX(-50%);
+	transform: none;
 	pointer-events: none;
 }
 #${TOOLBAR_ID}.gjj-workflow-toolbar-topbar {
@@ -4130,14 +4132,42 @@ import { api } from "/scripts/api.js";
 
 	function findTopbarInsertPoint() {
 		const controls = Array.from(document.querySelectorAll("button,[role='button']"));
-		const manager = controls.find((element) => {
+		const preferredControl = controls.find((element) => {
 			if (!isVisibleElement(element)) return false;
 			const text = readableElementText(element);
 			const rect = element.getBoundingClientRect();
-			return rect.top < 140 && /管理扩展功能|manage extensions?|extension manager/i.test(text);
+			return rect.top < 140 && /管理扩展功能|manage extensions?|extension manager|ComfyTV|资产库|构想台|queue|运行|run/i.test(text);
 		});
-		if (!manager) return null;
+		const topbarSelectors = [
+			".comfyui-menu",
+			".comfy-menu",
+			".comfyui-menu-left",
+			".comfyui-menu-right",
+			"[data-testid='topbar']",
+			"[data-testid='comfy-topbar']",
+			"nav",
+			"header",
+		];
+		for (const selector of topbarSelectors) {
+			const row = Array.from(document.querySelectorAll(selector)).find((element) => {
+				if (!isVisibleElement(element)) return false;
+				const rect = element.getBoundingClientRect();
+				const style = window.getComputedStyle?.(element);
+				return rect.top < 140
+					&& rect.height <= 96
+					&& rect.width >= 140
+					&& (style?.display?.includes("flex") || /menu|toolbar|topbar|header|nav/i.test(element.className || selector));
+			});
+			if (row) {
+				const after = preferredControl && row.contains(preferredControl)
+					? directChildContaining(row, preferredControl) || preferredControl
+					: row.lastElementChild;
+				return { row, after };
+			}
+		}
+		if (!preferredControl) return null;
 
+		const manager = preferredControl;
 		const managerRect = manager.getBoundingClientRect();
 		let row = null;
 		for (let node = manager.parentElement, depth = 0; node && depth < 7; node = node.parentElement, depth += 1) {
@@ -4412,11 +4442,11 @@ import { api } from "/scripts/api.js";
 		if (toolbar.parentElement !== document.body) document.body.appendChild(toolbar);
 		toolbar.classList.remove("gjj-workflow-toolbar-topbar");
 
-		toolbar.style.left = "50%";
-		toolbar.style.top = "12px";
+		toolbar.style.left = `${FALLBACK_TOOLBAR_LEFT_PX}px`;
+		toolbar.style.top = `${FALLBACK_TOOLBAR_TOP_PX}px`;
 		toolbar.style.right = "";
 		toolbar.style.bottom = "";
-		toolbar.style.transform = "translateX(-50%)";
+		toolbar.style.transform = "none";
 	}
 
 	function closeArrangeMenu() {

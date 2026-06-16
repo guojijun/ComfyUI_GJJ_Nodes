@@ -39,7 +39,19 @@ class FlexibleOptionalInputType(dict):
     def __getitem__(self, key):
         if key in self.data:
             return self.data[key]
-        return (self.input_type,)
+        return (
+            self.input_type,
+            {
+                "lazy": True,
+                "display_name": key,
+                "tooltip": f"惰性任意输入；{ANY_PREVIEW_FAST_TYPES} 会走专用预览，已到达的第一路会先触发预览。",
+            },
+        )
+
+    def get(self, key, default=None):
+        if key in self:
+            return self[key]
+        return default
 
     def __contains__(self, key):
         return True
@@ -979,8 +991,9 @@ class GJJ_AnyPreview:
             "any_01": (
                 any_type,
                 {
+                    "lazy": True,
                     "display_name": "任意对象",
-                    "tooltip": f"可连接任意类型；{ANY_PREVIEW_FAST_TYPES} 会走专用预览，其它对象会像官方 PreviewAny 一样显示可读值。",
+                    "tooltip": f"可连接任意类型；{ANY_PREVIEW_FAST_TYPES} 会走专用预览。多路输入时，此节点会先预览已到达的第一路，不再等待所有入口完成。",
                 },
             ),
         }
@@ -992,6 +1005,21 @@ class GJJ_AnyPreview:
 
     def __init__(self):
         self.preview_image = PreviewImage()
+
+    def check_lazy_status(self, batch_image=None, **kwargs):
+        if batch_image is not None and not is_none(batch_image):
+            return []
+
+        input_keys = sorted(
+            [key for key in kwargs.keys() if str(key).startswith("any_")],
+            key=extract_input_index,
+        )
+        for key in input_keys:
+            value = kwargs.get(key)
+            if value is not None and not is_none(value):
+                return []
+
+        return [input_keys[0] if input_keys else "any_01"]
 
     def _save_image_preview(
         self,

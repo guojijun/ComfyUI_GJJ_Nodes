@@ -5,7 +5,7 @@ const TARGET_NODES = new Set(["GJJ_TextMerge"]);
 const MAX_TEXT_INPUTS = 32;
 const TEXT_INPUT_PREFIX = "text_";
 const PREVIEW_WIDGET_NAME = "gjj_text_merge_preview";
-const EMPTY_PREVIEW = "执行后在这里预览合并结果";
+const DEFAULT_EMPTY_PREVIEW = "执行后在这里预览合并结果";
 const TEMPLATE_WIDGET_NAME = "template_text";
 const SELECTED_TEMPLATE_WIDGET_NAME = "selected_template";
 const DEFAULT_TEMPLATE_TEXT = `【默认】You are a helpful assistant. #默认值
@@ -168,13 +168,56 @@ function parseTemplateLine(line) {
 	return { label, content, tooltip, placement };
 }
 
+function joinTemplateParts(parts) {
+	return parts.map((part) => String(part || "").trim()).filter(Boolean).join("\n\n").trim();
+}
+
+function templateDirectives(text) {
+	let source = String(text || DEFAULT_TEMPLATE_TEXT).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+	const sharedParts = [];
+	source = source.replace(/《([\s\S]*?)》/g, (_, value) => {
+		const text = String(value || "").trim();
+		if (text) sharedParts.push(text);
+		return "";
+	});
+
+	const previewParts = [];
+	const templateLines = [];
+	for (const rawLine of source.split("\n")) {
+		const line = rawLine.trim();
+		if (line.startsWith("#")) {
+			const hint = line.slice(1).trim();
+			if (hint) previewParts.push(hint);
+			continue;
+		}
+		templateLines.push(rawLine);
+	}
+
+	return {
+		sharedText: joinTemplateParts(sharedParts),
+		previewHint: joinTemplateParts(previewParts),
+		templateLines,
+	};
+}
+
 function parseTemplates(text) {
-	const source = String(text || DEFAULT_TEMPLATE_TEXT).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-	return source.split("\n").map(parseTemplateLine).filter(Boolean);
+	const directives = templateDirectives(text);
+	return directives.templateLines
+		.map(parseTemplateLine)
+		.filter(Boolean)
+		.map((entry) => ({
+			...entry,
+			content: joinTemplateParts([entry.content, directives.sharedText]),
+		}));
 }
 
 function getTemplates(node) {
 	return parseTemplates(getWidgetValue(node, TEMPLATE_WIDGET_NAME, DEFAULT_TEMPLATE_TEXT));
+}
+
+function getEmptyPreviewText(node) {
+	const directives = templateDirectives(getWidgetValue(node, TEMPLATE_WIDGET_NAME, DEFAULT_TEMPLATE_TEXT));
+	return directives.previewHint || DEFAULT_EMPTY_PREVIEW;
 }
 
 function getSelectedTemplateLabel(node) {
@@ -219,10 +262,10 @@ function renderInlineMarkdown(text) {
 	return output;
 }
 
-function renderMarkdown(text) {
+function renderMarkdown(text, emptyText = DEFAULT_EMPTY_PREVIEW) {
 	const source = String(text || "").replace(/\r\n/g, "\n").trim();
 	if (!source) {
-		return escapeHtml(EMPTY_PREVIEW);
+		return escapeHtml(emptyText);
 	}
 
 	const lines = source.split("\n");
@@ -276,7 +319,7 @@ function applyPreviewContent(node) {
 	}
 
 	const text = getPreviewText(node);
-	const resolvedText = text || EMPTY_PREVIEW;
+	const resolvedText = text || getEmptyPreviewText(node);
 
 	node.__gjjPreviewContainer.style.gap = "8px";
 	node.__gjjPreviewBody.style.whiteSpace = "normal";
@@ -287,7 +330,7 @@ function applyPreviewContent(node) {
 	node.__gjjPreviewBody.style.border = "none";
 	node.__gjjPreviewBody.style.borderRadius = "0";
 	node.__gjjPreviewBody.style.background = "transparent";
-	node.__gjjPreviewBody.innerHTML = renderMarkdown(resolvedText);
+	node.__gjjPreviewBody.innerHTML = renderMarkdown(resolvedText, getEmptyPreviewText(node));
 
 	requestAnimationFrame(() => refreshLayout(node));
 }
@@ -412,8 +455,8 @@ function showTemplateSettings(node, anchorEl) {
 		const baseText = String(node.__gjjBasePreviewText || "").trim();
 		if (baseText) {
 			node.__gjjPreviewText = applyTemplateToText(node, baseText);
-			applyPreviewContent(node);
 		}
+		applyPreviewContent(node);
 		close();
 	});
 
@@ -499,7 +542,7 @@ function ensurePreviewWidget(node) {
 	const settingsButton = document.createElement("button");
 	settingsButton.type = "button";
 	settingsButton.textContent = "⚙️设置";
-	settingsButton.title = "编辑模板。格式：【按钮文字】模板内容#提示；【按钮文字】⬛模板内容#提示 表示追加到输入文本后面。";
+	settingsButton.title = "编辑模板。格式：【按钮文字】模板内容#按钮提示；单独一行 #文字 可作为执行前预览提示；《公共文字》会加入每个模板选项；【按钮文字】⬛模板内容 表示追加到输入文本后面。";
 	settingsButton.style.cssText = templateButtonStyle(false);
 
 	const templateButtons = document.createElement("div");

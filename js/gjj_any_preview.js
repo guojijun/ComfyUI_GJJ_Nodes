@@ -74,6 +74,11 @@ const ORDINAL_EMOJIS = ["", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣
 let lastPromptId = null;
 let motionGuardInstalled = false;
 let motionGuardTimer = null;
+const liveVirtualPreviewTargets = new Map();
+
+function isTargetNode(node) {
+	return TARGET_NODES.has(node?.comfyClass || node?.type);
+}
 
 function ordinalEmoji(index) {
 	const value = Number(index);
@@ -215,10 +220,7 @@ function imageDataToUrl(data) {
 }
 
 function withoutNativeImagePreview(message = {}) {
-	const clean = { ...(message || {}) };
-	delete clean.images;
-	delete clean.preview_images;
-	return clean;
+	return { ...(message || {}) };
 }
 
 function targetNodeFromExecutedEvent(event) {
@@ -230,7 +232,7 @@ function targetNodeFromExecutedEvent(event) {
 		app.graph?.getNodeById?.(nodeId) ||
 		app.graph?.getNodeById?.(Number(nodeId)) ||
 		null;
-	return TARGET_NODES.has(node?.comfyClass || node?.type) ? node : null;
+	return isTargetNode(node) ? node : null;
 }
 
 function suppressNativeExecutedImages(event) {
@@ -432,6 +434,47 @@ function getInputs(node) {
 		: [];
 }
 
+function getGraphLink(linkId, graph = app.graph) {
+	if (linkId == null || !graph) {
+		return null;
+	}
+	if (typeof graph.getLink === "function") {
+		const link = graph.getLink(linkId);
+		if (link) return link;
+	}
+	const links = graph.links || graph._links;
+	if (!links) {
+		return null;
+	}
+	if (Array.isArray(links)) {
+		return links.find((link) => String(link?.id ?? link?.[0]) === String(linkId)) || null;
+	}
+	if (links instanceof Map) {
+		return links.get(linkId) || links.get(String(linkId)) || null;
+	}
+	return links[linkId] || links[String(linkId)] || null;
+}
+
+function getGraphNodeById(id, graph = app.graph) {
+	if (id == null || !graph) {
+		return null;
+	}
+	return graph.getNodeById?.(id)
+		|| graph.getNodeById?.(Number(id))
+		|| graph._nodes_by_id?.[id]
+		|| graph._nodes_by_id?.[String(id)]
+		|| graph._nodes?.find((node) => String(node?.id) === String(id))
+		|| null;
+}
+
+function linkOriginId(link) {
+	return Array.isArray(link) ? link[1] : link?.origin_id;
+}
+
+function linkOriginSlot(link) {
+	return Number(Array.isArray(link) ? link[2] : link?.origin_slot);
+}
+
 function migrateLegacyInputs(node) {
 	for (const input of node?.inputs || []) {
 		if (String(input?.name || "") === "batch_image") {
@@ -442,13 +485,12 @@ function migrateLegacyInputs(node) {
 
 function getLinkedOutputInfo(input) {
 	const linkId = input?.link;
-	if (!linkId || !app.graph?.links) {
+	if (linkId == null) {
 		return null;
 	}
-	const link = app.graph.links[linkId];
-	const sourceNode =
-		link?.origin_id != null ? app.graph.getNodeById?.(link.origin_id) : null;
-	const sourceSlot = sourceNode?.outputs?.[link.origin_slot];
+	const link = getGraphLink(linkId);
+	const sourceNode = getGraphNodeById(linkOriginId(link));
+	const sourceSlot = sourceNode?.outputs?.[linkOriginSlot(link)];
 	if (!sourceSlot) {
 		return null;
 	}
@@ -460,13 +502,12 @@ function getLinkedOutputInfo(input) {
 
 function getLinkedSourceInfo(input) {
 	const linkId = input?.link;
-	if (!linkId || !app.graph?.links) {
+	if (linkId == null) {
 		return null;
 	}
-	const link = app.graph.links[linkId];
-	const sourceNode =
-		link?.origin_id != null ? app.graph.getNodeById?.(link.origin_id) : null;
-	const sourceSlot = sourceNode?.outputs?.[link?.origin_slot];
+	const link = getGraphLink(linkId);
+	const sourceNode = getGraphNodeById(linkOriginId(link));
+	const sourceSlot = sourceNode?.outputs?.[linkOriginSlot(link)];
 	if (!sourceNode || !sourceSlot) {
 		return null;
 	}
@@ -562,6 +603,85 @@ function resetLivePreviewState(node) {
 	};
 }
 
+function findPromptNodeInfo(promptResult, node) {
+	const output = promptResult?.output;
+	if (!output || !node) {
+		return null;
+	}
+	const id = String(node.id);
+	if (output[id]) {
+		return { id, info: output[id] };
+	}
+	for (const [nodeId, nodeInfo] of Object.entries(output)) {
+		const tail = String(nodeId).split(":").filter(Boolean).pop();
+		if (tail === id) {
+			return { id: nodeId, info: nodeInfo };
+		}
+	}
+	return null;
+}
+
+function virtualPreviewId(node, input, inputOrder) {
+	return `${node.id}:gjj_any_live:${String(input?.name || inputOrder)}`;
+}
+
+function patchLiveVirtualPreviewPrompt(promptResult, graph = app.graph) {
+	const output = promptResult?.output;
+	if (!output || !graph?._nodes) {
+		return promptResult;
+	}
+	liveVirtualPreviewTargets.clear();
+	for (const node of graph._nodes) {
+		if (!isTargetNode(node)) {
+			continue;
+		}
+		const promptEntry = findPromptNodeInfo(promptResult, node);
+		if (!promptEntry?.info?.inputs) {
+			continue;
+		}
+		const linkedInputs = getInputs(node)
+			.map((input, inputOrder) => ({ input, inputOrder, linkValue: promptEntry.info.inputs[input?.name] }))
+			.filter((item) => Array.isArray(item.linkValue) && item.linkValue.length >= 2);
+		if (linkedInputs.length < 2) {
+			continue;
+		}
+		for (const item of linkedInputs) {
+			const id = virtualPreviewId(node, item.input, item.inputOrder);
+			if (output[id]) {
+				continue;
+			}
+			output[id] = {
+				class_type: TARGET_NODES.values().next().value,
+				inputs: {
+					any_01: item.linkValue,
+				},
+				_meta: {
+					title: `GJJ AnyPreview 实时预览 ${item.inputOrder + 1}`,
+				},
+			};
+			liveVirtualPreviewTargets.set(String(id), {
+				nodeId: String(node.id),
+				inputName: String(item.input?.name || ""),
+				inputOrder: item.inputOrder,
+			});
+		}
+	}
+	return promptResult;
+}
+
+function installLiveVirtualPreviewPromptPatch() {
+	if (app.__gjjAnyPreviewLiveVirtualPromptPatchInstalled || typeof app.graphToPrompt !== "function") {
+		return;
+	}
+	app.__gjjAnyPreviewLiveVirtualPromptPatchInstalled = true;
+	const originalGraphToPrompt = app.graphToPrompt.bind(app);
+	app.graphToPrompt = async function (...args) {
+		const result = await originalGraphToPrompt(...args);
+		const graph = args[0] || this.rootGraph || this.graph || app.rootGraph || app.graph;
+		return patchLiveVirtualPreviewPrompt(result, graph);
+	};
+}
+
 function buildLivePreviewItems(event, input, inputOrder, sourceInfo) {
 	const detail = event?.detail || {};
 	const output = detail.output || detail || {};
@@ -645,6 +765,48 @@ function buildLivePreviewItems(event, input, inputOrder, sourceInfo) {
 	if (video.length) item.video = video;
 	if (files.length) item.files = files;
 	return [item];
+}
+
+function retitleLiveItemsForInput(items, inputOrder) {
+	return (Array.isArray(items) ? items : []).map((item, index) => {
+		const normalized = {
+			...item,
+			ordinal: inputOrder + index + 1,
+			ordinal_emoji: ordinalEmoji(inputOrder + index + 1),
+		};
+		return {
+			...normalized,
+			title: previewItemDisplayTitle(normalized, inputOrder + index),
+		};
+	});
+}
+
+function linkedInputEntries(node) {
+	return getInputs(node)
+		.map((input, inputOrder) => ({ input, inputOrder }))
+		.filter(({ input }) => input?.link != null);
+}
+
+function applyExecutedMessageAsLiveInput(node, message) {
+	const linked = linkedInputEntries(node);
+	if (linked.length < 2) {
+		return false;
+	}
+	const entry = linked.find(({ input }) => {
+		const state = node?.[LIVE_PREVIEW_STATE_KEY];
+		return !state?.itemsByInput?.[String(input?.name || "")];
+	}) || linked[0];
+	const sourceInfo = getLinkedSourceInfo(entry.input) || {
+		type: entry.input?.type || "*",
+		label: entry.input?.label || entry.input?.name || "*",
+	};
+	const syntheticEvent = { detail: { output: message || {} } };
+	const items = buildLivePreviewItems(syntheticEvent, entry.input, entry.inputOrder, sourceInfo);
+	if (!items.length) {
+		return false;
+	}
+	applyLivePreviewItems(node, entry.input, entry.inputOrder, retitleLiveItemsForInput(items, entry.inputOrder));
+	return true;
 }
 
 function applyLivePreviewItems(node, input, inputOrder, items) {
@@ -744,8 +906,26 @@ function refreshLivePreviewFromExecuted(event) {
 	if (!sourceId) {
 		return;
 	}
+	const virtualTarget = liveVirtualPreviewTargets.get(String(sourceId));
+	if (virtualTarget) {
+		const target = getGraphNodeById(virtualTarget.nodeId);
+		if (!target) {
+			return;
+		}
+		const input = getInputs(target).find((item) => String(item?.name || "") === virtualTarget.inputName);
+		if (!input) {
+			return;
+		}
+		const sourceInfo = getLinkedSourceInfo(input) || {
+			type: input.type || "*",
+			label: input.label || input.name || "*",
+		};
+		const items = buildLivePreviewItems(event, input, virtualTarget.inputOrder, sourceInfo);
+		applyLivePreviewItems(target, input, virtualTarget.inputOrder, retitleLiveItemsForInput(items, virtualTarget.inputOrder));
+		return;
+	}
 	for (const node of app.graph?._nodes || []) {
-		if (!TARGET_NODES.has(node?.comfyClass) || String(node.id) === String(sourceId)) {
+		if (!isTargetNode(node) || String(node.id) === String(sourceId)) {
 			continue;
 		}
 		const inputs = getInputs(node);
@@ -1614,13 +1794,24 @@ function defineSuppressedNativePreviewProperty(node, key, emptyValue) {
 	}
 }
 
+function restoreSuppressedNativePreviewDataProperty(node, key) {
+	const descriptor = Object.getOwnPropertyDescriptor(node, key);
+	if (!descriptor?.get?.__gjjSuppressNativePreview) {
+		return;
+	}
+	try {
+		delete node[key];
+		node[key] = [];
+	} catch (_) {}
+}
+
 function suppressNativePreviewProperties(node) {
 	if (!node) {
 		return;
 	}
+	restoreSuppressedNativePreviewDataProperty(node, "imgs");
+	restoreSuppressedNativePreviewDataProperty(node, "images");
 	defineSuppressedNativePreviewProperty(node, "hideOutputImages", true);
-	defineSuppressedNativePreviewProperty(node, "imgs", []);
-	defineSuppressedNativePreviewProperty(node, "images", []);
 	defineSuppressedNativePreviewProperty(node, "imageRects", []);
 	defineSuppressedNativePreviewProperty(node, "preview", null);
 	defineSuppressedNativePreviewProperty(node, "imageIndex", null);
@@ -1632,16 +1823,10 @@ function clearNativeImagePreviewState(node) {
 		return;
 	}
 	suppressNativePreviewProperties(node);
-	node.imgs = [];
-	node.images = [];
 	node.preview = null;
 	node.imageRects = [];
 	node.imageIndex = null;
 	node.overIndex = null;
-	if (node.properties) {
-		delete node.properties.image;
-		delete node.properties.images;
-	}
 	if (node.constructor?.nodeData) {
 		node.constructor.nodeData.output_preview = false;
 	}
@@ -3467,6 +3652,12 @@ app.registerExtension({
 					? originalOnExecuted.call(this, withoutNativeImagePreview(message || {}))
 					: undefined;
 			clearNativeImagePreviewState(this);
+			if (applyExecutedMessageAsLiveInput(this, message || {})) {
+				clearNativeImagePreviewState(this);
+				scheduleNativePreviewCleanup(this);
+				scheduleStabilize(this, 0);
+				return result;
+			}
 			const liveText = getLoraEffectLiveText(this);
 			this.__gjjAnyPreviewKind =
 				liveText !== null ? "text" : message?.preview_kind?.[0] || "";
@@ -3482,9 +3673,7 @@ app.registerExtension({
 			this.__gjjAnyPreviewImages =
 				liveText !== null
 					? []
-					: Array.isArray(message?.preview_images)
-						? message.preview_images
-						: [];
+					: firstMediaPayload(message?.preview_images, message?.images, message?.__gjj_queue_images);
 			// 同时兼容本节点 preview_audio 和 ComfyUI 原生 audio 字段。
 			this.__gjjAnyPreviewAudio =
 				liveText !== null
@@ -3523,7 +3712,7 @@ app.registerExtension({
 
 	onNodeOutputsUpdated() {
 		for (const node of app.graph?._nodes || []) {
-			if (TARGET_NODES.has(node?.comfyClass)) {
+			if (isTargetNode(node)) {
 				clearNativeImagePreviewState(node);
 				scheduleNativePreviewCleanup(node);
 			}
@@ -3532,8 +3721,9 @@ app.registerExtension({
 
 	setup() {
 		installCanvasMotionGuard();
+		installLiveVirtualPreviewPromptPatch();
 		for (const node of app.graph?._nodes || []) {
-			if (TARGET_NODES.has(node?.comfyClass)) {
+			if (isTargetNode(node)) {
 				resetLivePreviewState(node);
 				stabilizeNode(node);
 			}
@@ -3543,11 +3733,6 @@ app.registerExtension({
 
 api.addEventListener("execution_start", (event) => {
 	lastPromptId = eventPromptId(event);
-	for (const node of app.graph?._nodes || []) {
-		if (TARGET_NODES.has(node?.comfyClass)) {
-			resetLivePreviewState(node);
-		}
-	}
 });
 
 api.addEventListener("executed", refreshLivePreviewFromExecuted);
