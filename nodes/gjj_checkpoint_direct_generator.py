@@ -505,14 +505,14 @@ class GJJ_CheckpointDirectGenerator:
                 f"✅ 完成：{image.shape[2]} x {image.shape[1]} | {mode_text} | 降噪: {denoise:.2f} | 耗时: {elapsed_time:.2f}s",
             )
 
-            # 保存预览图片并返回 UI 数据
+            # 保存预览图片给 GJJ 自定义前端预览；避免使用 ui.images 触发 ComfyUI 原生重复预览。
             preview_ui = self.preview_image.save_images(
                 image,
                 filename_prefix="GJJ_CheckpointDirectGenerator",
             )
             preview_images = preview_ui.get("ui", {}).get("images", [])
 
-            return {"ui": {"images": preview_images}, "result": (image,)}
+            return {"ui": {"gjj_images": preview_images}, "result": (image,)}
         except RuntimeError as exc:
             elapsed_time = time.time() - start_time
             _send_status(

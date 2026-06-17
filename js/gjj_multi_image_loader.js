@@ -15,6 +15,9 @@ const DEFAULT_NETWORK_IMAGE_API_PATH = "/gjj/multi_image_loader/default_image";
 const UPLOAD_SUBFOLDER = "gjj_multi_image_loader";
 const NETWORK_CACHE_SUBFOLDER = "GJJ_TemplateParams";
 const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE";
+const INPUT_IMAGES_NAME = "input_images";
+const INPUT_IMAGES_LABEL = "导入图片";
+const INPUT_IMAGES_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const SEQUENCE_RANGE_INPUT_TYPE = "INT,STRING,FLOAT";
 const FILE_NAME_COLLATOR = new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "base" });
 const DEFAULT_THUMB_SIZE = 132;
@@ -992,6 +995,7 @@ function syncSlideStartInput(node) {
 	const state = ensureState(node);
 	if (state.extraToolsExpanded) ensureSlideStartInput(node);
 	else removeSlideStartInputIfUnused(node);
+	reorderInputSlots(node);
 }
 
 function resetSlidingRange(node) {
@@ -1120,7 +1124,68 @@ function updateSlideOutputButtonsState(node) {
 }
 
 function hasExternalImageLink(node) {
-	return Array.isArray(node?.inputs) && node.inputs.some((input) => input?.name === "input_images" && !!input?.link);
+	return Array.isArray(node?.inputs) && node.inputs.some((input) => input?.name === INPUT_IMAGES_NAME && !!input?.link);
+}
+
+function ensureExternalImageInput(node) {
+	let input = (node.inputs || []).find((item) => item?.name === INPUT_IMAGES_NAME);
+	if (!input) {
+		node.addInput?.(INPUT_IMAGES_NAME, INPUT_IMAGES_TYPE);
+		input = (node.inputs || []).find((item) => item?.name === INPUT_IMAGES_NAME);
+	}
+	if (input) {
+		input.name = INPUT_IMAGES_NAME;
+		input.label = INPUT_IMAGES_LABEL;
+		input.localized_name = INPUT_IMAGES_LABEL;
+		input.type = INPUT_IMAGES_TYPE;
+		input.forceInput = true;
+		input.tooltip = "可接入 GJJ 专用批量图片队列或普通 IMAGE batch；会与当前已选图片合并预览并一起输出。";
+		if (input.widget?.name === INPUT_IMAGES_NAME) {
+			delete input.widget;
+		}
+	}
+	return input;
+}
+
+function syncInputLinkSlots(node) {
+	const links = app.graph?.links;
+	if (!links || !Array.isArray(node?.inputs)) {
+		return;
+	}
+	node.inputs.forEach((input, index) => {
+		const linkIds = Array.isArray(input?.link) ? input.link : (input?.link == null ? [] : [input.link]);
+		for (const linkId of linkIds) {
+			const link = links[linkId];
+			if (link && Number(link.target_id) === Number(node.id)) {
+				link.target_slot = index;
+			}
+		}
+	});
+}
+
+function reorderInputSlots(node) {
+	if (!Array.isArray(node?.inputs)) {
+		return;
+	}
+	const priority = (input, index) => {
+		const name = String(input?.name || "");
+		if (name === INPUT_IMAGES_NAME) return 10;
+		if (name === SEQUENCE_RANGE_WIDGET_NAME) return 20;
+		if (name === SLIDE_START_INPUT_NAME) return 30;
+		return 100 + index;
+	};
+	const ordered = node.inputs
+		.map((input, index) => ({ input, index }))
+		.sort((left, right) => priority(left.input, left.index) - priority(right.input, right.index) || left.index - right.index)
+		.map((item) => item.input);
+	const changed = ordered.some((input, index) => input !== node.inputs[index]);
+	if (!changed) {
+		return;
+	}
+	node.inputs.splice(0, node.inputs.length, ...ordered);
+	syncInputLinkSlots(node);
+	node.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
 }
 
 function ensureOutputs(node, count) {
@@ -2042,10 +2107,12 @@ function stabilizeNode(node) {
 	}
 	removeInternalDataInputs(node);
 	removeInternalDataWidget(node);
+	ensureExternalImageInput(node);
 	ensureDomWidget(node);
 	reorderWidgets(node);
 	syncSequenceRangeInput(node);
 	syncSlideStartInput(node);
+	reorderInputSlots(node);
 	syncDataWidget(node);
 	applySlidingRange(node);
 	ensureOutputs(node, totalImageCount(node));
@@ -2119,6 +2186,15 @@ app.registerExtension({
 			const def = section?.[SEQUENCE_RANGE_WIDGET_NAME];
 			if (Array.isArray(def)) {
 				def[0] = SEQUENCE_RANGE_INPUT_TYPE;
+			}
+			const inputImagesDef = section?.[INPUT_IMAGES_NAME];
+			if (Array.isArray(inputImagesDef)) {
+				inputImagesDef[0] = INPUT_IMAGES_TYPE;
+				inputImagesDef[1] = {
+					...(inputImagesDef[1] || {}),
+					display_name: INPUT_IMAGES_LABEL,
+					forceInput: true,
+				};
 			}
 		}
 

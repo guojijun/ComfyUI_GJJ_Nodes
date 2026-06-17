@@ -287,7 +287,7 @@ wan2.2-ti2v-5b-gydboy	lora	wan2.2|ti2v|5b|gydboy	Wan2.2 Ti2V 5B Gydboy	Wan2.2 Ti
 wan22-combo-qo-ipref-noprefix-ed	lora	wan22|combo|qo|ipref|noprefix	Wan22 Combo Qo Ipref Noprefix Ed	Wan22 Combo Qo Ipref Noprefix Ed (lora)	lora|loras	80
 wananimate-relight-lora	lora	wananimate|relight|lora	Wananimate Relight Lora	Wananimate Relight Lora (lora)	lora|loras	80
 white high-neck tight dress with oversized bell sleeves and platform sandals-nsfw	lora	white high|neck tight dress with oversized bell sleeves and platform sandals|nsfw	White High Neck Tight Dress With Oversized Bell Sleeves And Platform Sandals Nsfw	White High Neck Tight Dress With Oversized Bell Sleeves And Platform Sandals Nsfw (lora)	lora|loras	80
-z-image	lora	z|image	Z Image	Z Image (lora)	lora|loras	80
+z-image	lora	z|image|zit	Z Image	Z Image (lora)	lora|loras	80
 zimage-gydboy	lora	zimage|gydboy	Zimage Gydboy	Zimage Gydboy (lora)	lora|loras	80
 zitnsfwlora	lora	zitnsfwlora	Zitnsfwlora	Zitnsfwlora (lora)	lora|loras	80
 娓呮柊瀹跺眳瑁呴グ椋庢牸妯″瀷 fresh decor style	lora	娓呮柊瀹跺眳瑁呴グ椋庢牸妯″瀷 fresh decor style	娓呮柊瀹跺眳瑁呴グ椋庢牸妯″瀷 Fresh Decor Style	娓呮柊瀹跺眳瑁呴グ椋庢牸妯″瀷 Fresh Decor Style (lora)	lora|loras	80
@@ -440,7 +440,7 @@ wan22-rapid-mega	unet	wan2.2|rapid|mega|aio	Wan 2.2 Rapid Mega	Wan 2.2 快速全
 xsarchitectural	unet	xsarchitectural	Xsarchitectural	Xsarchitectural (unet)	unet|checkpoints	90
 yolo11x-train28-best	unet	yolo11x|train28|best	Yolo11X Train28 Best	Yolo11X Train28 Best (unet)	unet|yolo	60
 yolov10m	unet	yolov10m	Yolov10M	Yolov10M (unet)	unet|detection	60
-z-image	unet	z|image	Z Image	Z Image (unet)	unet|diffusion-models	60
+z-image	unet	z|image|zit	Z Image	Z Image (unet)	unet|diffusion-models	60
 zimage	unet	zimage	Zimage	Zimage (unet)	unet|diffusion-models	60
 diffusion-pytorch-model	unknown	diffusion|pytorch|model	Diffusion Pytorch Model	Diffusion Pytorch Model (unknown)	unknown|z-image-turbo-nvfp4-local	60
 model	unknown	model	Model	Model (unknown)	unknown|LLM	60

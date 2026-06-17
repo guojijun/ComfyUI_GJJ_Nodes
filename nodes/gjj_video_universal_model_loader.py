@@ -622,7 +622,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 "UNET主模型",
                 "diffusion_models",
                 "diffusion",
-                ["ltx","22b","distilled"],
+                ["ltx"],
                 loader="unet",
                 required_name="ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v2.safetensors",
                 preferred_name=LTX23_KJ_MODEL_NAMES[0],

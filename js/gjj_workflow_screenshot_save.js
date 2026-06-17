@@ -104,6 +104,7 @@ import { api } from "/scripts/api.js";
 	let lastWorkflowObject = null;
 	let keyboardShortcutsInstalled = false;
 	let previewPage = 1;
+	let previewListGeneration = 0;
 
 	function graphNodes() {
 		return Array.isArray(app?.graph?._nodes) ? app.graph._nodes.filter(Boolean) : [];
@@ -3160,7 +3161,7 @@ import { api } from "/scripts/api.js";
 		const filterMode = DEFAULT_FILTER_MODE;
 		const query = String(settings.searchText || "").trim().toLowerCase();
 		const items = previewItems.filter((item) => {
-			if (filterMode === "openable" && !item.workflow) return false;
+			if (filterMode === "openable" && item.loaded && !item.workflow) return false;
 			if (filterMode === "missing" && item.workflow) return false;
 			return !query || previewSearchText(item).includes(query);
 		});
@@ -3234,14 +3235,63 @@ import { api } from "/scripts/api.js";
 
 	function updatePreviewSummary() {
 		const total = previewItems.length;
+		const loaded = previewItems.filter((item) => item.loaded).length;
+		const loading = previewItems.filter((item) => item.loading).length;
 		const usable = previewItems.filter((item) => item.workflow).length;
 		const visibleItems = sortedFilteredPreviewItems();
 		const page = previewPageInfo(visibleItems);
 		const range = visibleItems.length ? `，当前 ${page.start + 1}-${page.end}/${visibleItems.length} 张` : "，当前无匹配";
-		setPreviewStatus(`保存目录：${effectiveDirectory()}；已读取 ${total} 张，${usable} 张可打开${range}。`, usable ? "ok" : "warn");
+		const progress = loaded < total || loading
+			? `，已解析 ${loaded}/${total}${loading ? `，正在解析 ${loading} 张` : ""}`
+			: "";
+		setPreviewStatus(`保存目录：${effectiveDirectory()}；已列出 ${total} 张${progress}，${usable} 张可打开${range}。`, usable || loading || loaded < total ? "ok" : "warn");
 	}
 
-	function renderPreviewItems() {
+	async function loadPreviewItemMetadata(item, generation) {
+		if (!item || item.loaded || item.loading || !item.sourceUrl) {
+			return;
+		}
+		item.loading = true;
+		try {
+			const data = await previewDataFromImageUrl(item.sourceUrl, item.file?.name);
+			if (generation !== previewListGeneration) return;
+			item.workflow = data?.workflow || null;
+			item.metadata = data?.metadata || null;
+			item.title = data?.title || "";
+			if (data?.previewUrl) item.url = data.previewUrl;
+			item.error = item.workflow ? "" : "未找到 workflow";
+		} catch (error) {
+			if (generation !== previewListGeneration) return;
+			item.error = String(error?.message || error || "读取失败");
+		} finally {
+			if (generation === previewListGeneration) {
+				item.loading = false;
+				item.loaded = true;
+			}
+		}
+	}
+
+	function loadPreviewPageMetadata(items) {
+		const generation = previewListGeneration;
+		const targets = (items || []).filter((item) => item && !item.loaded && !item.loading && item.sourceUrl);
+		if (!targets.length) {
+			return;
+		}
+		updatePreviewSummary();
+		Promise.all(targets.map((item) => loadPreviewItemMetadata(item, generation)))
+			.then(() => {
+				if (generation !== previewListGeneration) return;
+				renderPreviewItems(false);
+				updatePreviewSummary();
+			})
+			.catch(() => {
+				if (generation !== previewListGeneration) return;
+				renderPreviewItems(false);
+				updatePreviewSummary();
+			});
+	}
+
+	function renderPreviewItems(loadCurrentPage = true) {
 		const overlay = previewOverlay();
 		const grid = overlay.querySelector(".gjj-workflow-preview-grid");
 		if (!grid) return;
@@ -3265,7 +3315,9 @@ import { api } from "/scripts/api.js";
 			card.disabled = !item.workflow;
 			card.title = item.workflow
 				? "打开这个截图内嵌的工作流"
-				: `未找到可加载的 workflow 元数据：${item.error || item.file?.name || ""}`;
+				: (item.loading || !item.loaded
+					? `正在读取 workflow 元数据：${item.file?.name || ""}`
+					: `未找到可加载的 workflow 元数据：${item.error || item.file?.name || ""}`);
 
 			const image = document.createElement("img");
 			image.src = item.url;
@@ -3277,7 +3329,7 @@ import { api } from "/scripts/api.js";
 
 			const mark = document.createElement("div");
 			mark.className = "gjj-workflow-preview-mark";
-			mark.textContent = item.workflow ? "打开" : "无元数据";
+			mark.textContent = item.workflow ? "打开" : (item.loading || !item.loaded ? "读取中" : "无元数据");
 
 			card.append(image, label, mark);
 			card.addEventListener("click", () => {
@@ -3286,6 +3338,9 @@ import { api } from "/scripts/api.js";
 				loadWorkflowFromPreview(item);
 			});
 			grid.appendChild(card);
+		}
+		if (loadCurrentPage) {
+			loadPreviewPageMetadata(page.items);
 		}
 	}
 
@@ -3367,6 +3422,7 @@ import { api } from "/scripts/api.js";
 	async function refreshBackendScreenshotList() {
 		const overlay = previewOverlay();
 		overlay.style.display = "flex";
+		previewListGeneration += 1;
 		await flushBackendWorkflowSettingsSave();
 		try {
 			await loadBackendInfo();
@@ -3390,20 +3446,9 @@ import { api } from "/scripts/api.js";
 			metadata: null,
 			mtime: Number(item.mtime) || 0,
 			error: "",
+			loaded: false,
+			loading: false,
 			directory: item.directory || data.directory || effectiveDirectory(),
-		}));
-
-		await Promise.all(previewItems.map(async (item) => {
-			try {
-				const data = item.sourceUrl ? await previewDataFromImageUrl(item.sourceUrl, item.file?.name) : null;
-				item.workflow = data?.workflow || null;
-				item.metadata = data?.metadata || null;
-				item.title = data?.title || "";
-				if (data?.previewUrl) item.url = data.previewUrl;
-				if (!item.workflow) item.error = "未找到 workflow";
-			} catch (error) {
-				item.error = String(error?.message || error || "读取失败");
-			}
 		}));
 		renderPreviewItems();
 		updatePreviewSummary();

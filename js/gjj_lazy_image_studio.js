@@ -5,6 +5,7 @@ import {
 	getModelFamilyPresets,
 } from "./gjj_model_family_preset_table.js";
 import { GJJ_Utils, queueOnlyCurrentNode } from "./gjj_utils.js";
+import { createTemplateSourceButton, updateTemplateSourcePanel } from "./gjj_generation_template_sources.js";
 
 const TARGET_NODES = new Set(["GJJ_LazyImageStudio"]);
 const IMAGE_PREFIX = "image_";
@@ -28,10 +29,34 @@ const PARAM_VALUES_PROPERTY = "gjj_lazy_image_studio_param_values";
 const IMAGE_SIZE_SIGNATURE_PROPERTY = "gjj_lazy_image_studio_image_size_signature";
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
 const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME]);
+const TEMPLATE_SOURCE_FIELDS = [
+	{ name: "prompt", widget: "prompt", label: "提示词", type: "STRING", aliases: ["prompt", "positive", "正向", "提示词"] },
+	{ name: "width", widget: "width", label: "宽度", type: "INT", aliases: ["width", "宽", "宽度"] },
+	{ name: "height", widget: "height", label: "高度", type: "INT", aliases: ["height", "高", "高度"] },
+];
 
 const DEFAULT_EMPTY_OPTION = { value: "", label: "未选择" };
 const DEFAULT_ROW = { enabled: true, name: "", strength: 1.0 };
 const DEFAULT_FIRST_SEARCH_TERMS = "";
+
+function clearNativePreview(node) {
+	if (!node) {
+		return;
+	}
+	node.imgs = null;
+	node.images = null;
+	node.imageIndex = null;
+	node.overIndex = null;
+}
+
+function scheduleNativePreviewClear(node) {
+	clearNativePreview(node);
+	if (typeof requestAnimationFrame === "function") {
+		requestAnimationFrame(() => clearNativePreview(node));
+	}
+	setTimeout(() => clearNativePreview(node), 80);
+}
+
 const PANEL_SYNC_WIDGETS = [
 	"prompt",
 	"negative_prompt",
@@ -421,6 +446,7 @@ function applySettingsVisibility(node) {
 	setDomWidgetHidden(node.__gjjLoraWidget, node.__gjjLoraContainer, !open);
 	updateSettingsButtonState(node);
 	orderLazyWidgets(node);
+	updateTemplateSourcePanel(node, TEMPLATE_SOURCE_FIELDS);
 	GJJ_Utils.refreshNode(node);
 }
 
@@ -739,6 +765,7 @@ function writeSerializedWidgetValues(node, serializedNode) {
 	saveParamSnapshot(node, params);
 	serializedNode.properties = serializedNode.properties || {};
 	serializedNode.properties[PARAM_VALUES_PROPERTY] = { ...params };
+	persistLoraRows(node, ensureLoraNodeState(node).rows, serializedNode);
 	const fixed = serializedParamValues(params, node);
 	serializedNode.widgets_values = fixed;
 	node.widgets_values = fixed.slice();
@@ -1193,6 +1220,7 @@ function createButtons(node) {
 		"flex:0 0 74px",
 	].join(";");
 	node.__gjjSettingsButton = settingsButton;
+	const templateButton = createTemplateSourceButton(node, TEMPLATE_SOURCE_FIELDS, sharedButtonStyle);
 
 	// 按钮悬停效果函数
 	function setupButtonHover(btn, defaultBg, hoverBg) {
@@ -1331,6 +1359,7 @@ function createButtons(node) {
 
 	container.appendChild(refreshButton);
 	container.appendChild(generateButton);
+	container.appendChild(templateButton);
 	container.appendChild(settingsButton);
 	return container;
 }
@@ -1349,8 +1378,9 @@ function createImagePreview(node) {
 	// 给自定义预览添加标记，避免被隐藏
 	image.dataset.gjjCustomPreview = "true";
 	image.style.cssText = [
+		"width:100%",
 		"max-width:100%",
-		"max-height:400px",
+		"height:auto",
 		"object-fit:contain",
 		"display:none",
 		"cursor:pointer",
@@ -1369,6 +1399,12 @@ function createImagePreview(node) {
 	});
 	image.addEventListener("mouseleave", () => {
 		image.style.transform = "scale(1)";
+	});
+	image.addEventListener("load", () => {
+		node.__gjjLazyPreviewNaturalWidth = Number(image.naturalWidth || 0);
+		node.__gjjLazyPreviewNaturalHeight = Number(image.naturalHeight || 0);
+		node.__gjjLazyPreviewHeight = lazyPreviewHeightForNode(node);
+		GJJ_Utils.refreshNode(node);
 	});
 
 	// 图片点击放大功能 - 完全参考批量多图片加载器
@@ -1468,18 +1504,17 @@ function updateImagePreview(node, images) {
 
 	if (!images || !images.length) {
 		node.__gjjPreviewImage.style.display = "none";
+		node.__gjjLazyPreviewHeight = 0;
 		return;
 	}
 
-	console.log("[GJJ] 图片预览数据:", images);
 	const imageUrl = imageDataToUrl(images[0]);
-	console.log("[GJJ] 图片预览 URL:", imageUrl);
 	node.__gjjPreviewImage.src = imageUrl;
 	// 确保自定义预览图的样式完全正常！
 	node.__gjjPreviewImage.style.display = "block";
 	node.__gjjPreviewImage.style.visibility = "visible";
-	node.__gjjPreviewImage.style.height = "";
-	node.__gjjPreviewImage.style.width = "";
+	node.__gjjPreviewImage.style.height = "auto";
+	node.__gjjPreviewImage.style.width = "100%";
 	node.__gjjPreviewImage.style.margin = "";
 	node.__gjjPreviewImage.style.padding = "";
 	node.__gjjPreviewImage.style.opacity = "";
@@ -1488,6 +1523,36 @@ function updateImagePreview(node, images) {
 
 	// 刷新节点尺寸
 	GJJ_Utils.refreshNode(node);
+}
+
+function lazyPreviewHeightForNode(node, width = null) {
+	const image = node?.__gjjPreviewImage;
+	if (!image || image.style.display === "none") {
+		return 0;
+	}
+	const naturalWidth = Number(image.naturalWidth || node.__gjjLazyPreviewNaturalWidth || 0);
+	const naturalHeight = Number(image.naturalHeight || node.__gjjLazyPreviewNaturalHeight || 0);
+	if (naturalWidth <= 0 || naturalHeight <= 0) {
+		return Number(node.__gjjLazyPreviewHeight || 0);
+	}
+	const contentWidth = Math.max(0, Math.round(Number(width || node?.size?.[0] || 320) - 20));
+	return Math.max(0, Math.ceil(contentWidth * naturalHeight / naturalWidth) + 8);
+}
+
+function configureImagePreviewWidget(node, widget, container) {
+	if (!widget) {
+		return;
+	}
+	widget.computeSize = (width) => [
+		Math.max(0, Math.round(Number(width || node?.size?.[0] || 320) - 20)),
+		lazyPreviewHeightForNode(node, width),
+	];
+	widget.getHeight = () => lazyPreviewHeightForNode(node);
+	if (container) {
+		container.style.width = "100%";
+		container.style.maxWidth = "100%";
+		container.style.minWidth = "0";
+	}
 }
 
 function matchPreset(unetName) {
@@ -1550,6 +1615,10 @@ function isLoraEnabled(name, strength) {
 	return Boolean(String(name || "").trim()) && Math.abs(Number(strength || 0)) > 1e-6;
 }
 
+function hasConfiguredLoraRows(node) {
+	return ensureLoraNodeState(node).rows.some((row) => String(row?.name || "").trim());
+}
+
 function syncStepsFromLoras(node) {
 	const stepsWidget = getWidget(node, "steps");
 	if (!stepsWidget) {
@@ -1581,19 +1650,7 @@ function replaceLoraRows(node, rows) {
 		: [{ ...DEFAULT_ROW }];
 	const state = ensureLoraNodeState(node);
 	state.rows = normalizedRows;
-	const serialized = serializeRows(normalizedRows);
-
-	node.properties = node.properties || {};
-	node.properties[LORA_DATA_WIDGET_NAME] = serialized;
-
-	const dataWidget = getWidget(node, LORA_DATA_WIDGET_NAME);
-	if (dataWidget) {
-		dataWidget.value = serialized;
-		const widgetIndex = Array.isArray(node.widgets) ? node.widgets.indexOf(dataWidget) : -1;
-		if (Array.isArray(node.widgets_values) && widgetIndex >= 0) {
-			node.widgets_values[widgetIndex] = serialized;
-		}
-	}
+	persistLoraRows(node, normalizedRows);
 	renderLoraUi(node);
 }
 
@@ -1611,7 +1668,13 @@ function applyPreset(node, force = false) {
 	const preset = matchPreset(currentUnet);
 	updateMainImageIndexState(node, preset);
 	if (!preset) {
-		clearPresetLoras(node);
+		if (force || !hasConfiguredLoraRows(node)) {
+			clearPresetLoras(node);
+		}
+		node.properties[LAST_PRESET_KEY] = currentUnet;
+		return;
+	}
+	if (!force && hasConfiguredLoraRows(node) && node.properties[LAST_PRESET_KEY] !== currentUnet) {
 		node.properties[LAST_PRESET_KEY] = currentUnet;
 		return;
 	}
@@ -1751,6 +1814,59 @@ function serializeRows(rows) {
 	return JSON.stringify(cleaned);
 }
 
+function looksLikeLoraRowsData(value) {
+	try {
+		const parsed = JSON.parse(String(value || ""));
+		return Array.isArray(parsed) && parsed.some((item) => item && typeof item === "object" && (
+			Object.prototype.hasOwnProperty.call(item, "name")
+			|| Object.prototype.hasOwnProperty.call(item, "strength")
+			|| Object.prototype.hasOwnProperty.call(item, "enabled")
+		));
+	} catch (error) {
+		return false;
+	}
+}
+
+function readStoredLoraData(node, serializedNode = null) {
+	const dataWidget = getWidget(node, LORA_DATA_WIDGET_NAME);
+	for (const value of [
+		serializedNode?.properties?.[LORA_DATA_WIDGET_NAME],
+		node?.properties?.[LORA_DATA_WIDGET_NAME],
+		dataWidget?.value,
+	]) {
+		const text = String(value || "").trim();
+		if (text) {
+			return text;
+		}
+	}
+	for (const value of Array.isArray(serializedNode?.widgets_values) ? serializedNode.widgets_values : []) {
+		const text = String(value || "").trim();
+		if (text && looksLikeLoraRowsData(text)) {
+			return text;
+		}
+	}
+	return "[]";
+}
+
+function persistLoraRows(node, rows = null, serializedNode = null) {
+	const serialized = serializeRows(rows || ensureLoraNodeState(node).rows);
+	node.properties = node.properties || {};
+	node.properties[LORA_DATA_WIDGET_NAME] = serialized;
+	if (serializedNode) {
+		serializedNode.properties = serializedNode.properties || {};
+		serializedNode.properties[LORA_DATA_WIDGET_NAME] = serialized;
+	}
+	const dataWidget = getWidget(node, LORA_DATA_WIDGET_NAME);
+	if (dataWidget) {
+		dataWidget.value = serialized;
+		const widgetIndex = Array.isArray(node.widgets) ? node.widgets.indexOf(dataWidget) : -1;
+		if (Array.isArray(node.widgets_values) && widgetIndex >= 0) {
+			node.widgets_values[widgetIndex] = serialized;
+		}
+	}
+	return serialized;
+}
+
 async function fetchLoraOptions() {
 	try {
 		const response = await fetch("/gjj/loras");
@@ -1821,7 +1937,7 @@ function ensureLoraNodeState(node) {
 	}
 	// 第一次初始化时，从 properties 读取
 	node.__gjjLoraState = {
-		rows: normalizeRows(node.properties[LORA_DATA_WIDGET_NAME] || "[]"),
+		rows: normalizeRows(readStoredLoraData(node)),
 		options: [{ ...DEFAULT_EMPTY_OPTION }],
 	};
 	return node.__gjjLoraState;
@@ -1838,11 +1954,7 @@ function updateLoraNodeHeight(node, rowCount) {
 
 function updateLoraDataWidget(node) {
 	const state = ensureLoraNodeState(node);
-	const serialized = serializeRows(state.rows);
-
-	// 保存到 node.properties（用于持久化和后端读取）
-	if (!node.properties) node.properties = {};
-	node.properties[LORA_DATA_WIDGET_NAME] = serialized;
+	persistLoraRows(node, state.rows);
 
 	// 同步步数
 	syncStepsFromLoras(node);
@@ -2274,11 +2386,8 @@ function setupLoraUi(node) {
 		return;
 	}
 
-	// Step 1: 从 properties 读取初始数据
-	let initialData = node.properties?.[LORA_DATA_WIDGET_NAME] || "";
-
 	// 初始化 state
-	ensureLoraNodeState(node).rows = normalizeRows(initialData || "[]");
+	ensureLoraNodeState(node).rows = normalizeRows(readStoredLoraData(node));
 
 	const container = document.createElement("div");
 	container.className = "gjj-lora-wrap";
@@ -2356,8 +2465,7 @@ function setupLoraUi(node) {
 			originalOnSerialize.apply(this, arguments);
 		}
 		if (serializedNode) {
-			serializedNode.properties = serializedNode.properties || {};
-			serializedNode.properties[LORA_DATA_WIDGET_NAME] = serializeRows(ensureLoraNodeState(this).rows);
+			persistLoraRows(this, ensureLoraNodeState(this).rows, serializedNode);
 		}
 	};
 
@@ -2431,165 +2539,16 @@ function stabilizeNode(node, forcePreset = false) {
 
 	setupLoraUi(node);
 
-	// 最后创建图片预览，这样它就会在最下面
 	if (!node.__gjjImagePreviewWidget) {
 		const previewContainer = createImagePreview(node);
 		node.__gjjImagePreviewWidget = node.addDOMWidget(IMAGE_PREVIEW_NAME, "HTML", previewContainer, { serialize: false });
+		configureImagePreviewWidget(node, node.__gjjImagePreviewWidget, previewContainer);
 	}
 
 	applyPreset(node, forcePreset);
 	syncPanelFromLinkedSources(node);
 	applySettingsVisibility(node);
 	GJJ_Utils.refreshNode(node);
-}
-
-function hideDefaultPreviewElements(node) {
-	// 按照文档中的终极方案：彻底隐藏默认预览
-	// 找到节点的 DOM 元素
-	let nodeElement = null;
-	try {
-		// 尝试多种方式获取节点元素
-		if (node.imgs) {
-			nodeElement = node.imgs;
-		} else if (node.element) {
-			nodeElement = node.element;
-		} else if (node.dummyEl) {
-			nodeElement = node.dummyEl;
-		} else {
-			// 通过 DOM 查找所有可能的节点
-			const allCanvasNodes = document.querySelectorAll('.litegraph');
-			for (const canvasNode of allCanvasNodes) {
-				const potentialNodes = canvasNode.querySelectorAll ?
-					canvasNode.querySelectorAll('[data-node-id]') : [];
-				for (const el of potentialNodes) {
-					if (el.getAttribute('data-node-id') === String(node.id)) {
-						nodeElement = el;
-						break;
-					}
-				}
-			}
-		}
-	} catch (e) {
-		console.log("[GJJ] Error finding node element:", e);
-	}
-
-	// 只要找到了任何节点相关的元素，都尝试查找并隐藏
-	if (nodeElement) {
-		// 查找所有元素
-		const allElements = nodeElement.querySelectorAll ?
-			nodeElement.querySelectorAll("*") : [];
-
-		// 查找所有图片元素
-		const allImgs = nodeElement.querySelectorAll ?
-			nodeElement.querySelectorAll("img") : [];
-
-		// 隐藏所有非自定义的图片
-		for (const img of allImgs) {
-			if (!img.dataset?.gjjCustomPreview) {
-				img.style.display = "none";
-				img.style.visibility = "hidden";
-			}
-		}
-
-		// 隐藏所有看起来是预览的元素
-		for (const el of allElements) {
-			const classStr = String(el.className || "").toLowerCase();
-			const idStr = String(el.id || "").toLowerCase();
-			const tagName = String(el.tagName || "").toLowerCase();
-
-			// 判断是否是预览相关的元素
-			if (
-				classStr.includes("preview") ||
-				idStr.includes("preview") ||
-				(tagName === "div" && el.querySelector && el.querySelector("img"))) {
-				// 检查这个元素是否是我们的自定义预览容器
-				let isOurCustomPreview = false;
-				const customImgs = el.querySelectorAll ?
-					el.querySelectorAll("img[data-gjj-custom-preview='true']") : [];
-				if (customImgs.length > 0) {
-					isOurCustomPreview = true;
-				}
-
-				// 如果不是我们的自定义预览，就隐藏它
-				if (!isOurCustomPreview) {
-					// 只隐藏明显的预览容器，不隐藏整个节点！
-					// 小心地只调整高度！
-					el.style.visibility = "hidden";
-					el.style.height = "0px";
-					el.style.overflow = "hidden";
-					el.style.margin = "0px";
-					el.style.padding = "0px";
-				}
-			}
-		}
-	}
-}
-
-function setupPreviewObserver(node) {
-	// 按照文档：使用 MutationObserver 实时隐藏默认预览
-	// 停止之前的观察器
-	if (node.__gjjPreviewObserver) {
-		try {
-			node.__gjjPreviewObserver.disconnect();
-		} catch (e) {
-			// 忽略错误
-		}
-	}
-
-	// 尝试找到节点的 DOM 元素
-	let targetElement = null;
-	try {
-		if (node.imgs) {
-			targetElement = node.imgs;
-		} else if (node.element) {
-			targetElement = node.element;
-		} else if (node.dummyEl) {
-			targetElement = node.dummyEl;
-		}
-	} catch (e) {
-		// 忽略错误
-	}
-
-	// 如果找到了元素，设置观察器
-	if (targetElement && targetElement.ownerDocument) {
-		node.__gjjPreviewObserver = new MutationObserver((mutations) => {
-			// 只要有任何变化，就尝试隐藏预览
-			let needsHide = false;
-
-			for (const mutation of mutations) {
-				if (mutation.addedNodes && mutation.addedNodes.length > 0) {
-					needsHide = true;
-					break;
-				}
-				if (mutation.type === 'attributes' &&
-					(mutation.attributeName === 'style' ||
-					 mutation.attributeName === 'class' ||
-					 mutation.attributeName === 'src')) {
-					needsHide = true;
-					break;
-				}
-			}
-
-			if (needsHide) {
-				// 延迟隐藏，确保元素完全添加
-				setTimeout(() => hideDefaultPreviewElements(node), 0);
-				setTimeout(() => hideDefaultPreviewElements(node), 20);
-				setTimeout(() => hideDefaultPreviewElements(node), 50);
-			}
-		});
-
-		// 观察元素的变化
-		try {
-			node.__gjjPreviewObserver.observe(targetElement, {
-				childList: true,
-				subtree: true,
-				attributes: true,
-				attributeFilter: ['style', 'class', 'src'],
-			});
-		} catch (e) {
-			console.log("[GJJ] Error setting up MutationObserver:", e);
-		}
-	}
 }
 
 function scheduleStabilize(node, forcePreset = false) {
@@ -2647,9 +2606,7 @@ app.registerExtension({
 			return;
 		}
 
-		// 隐藏节点默认的图片预览 - 更彻底的方式
 		nodeData.output_preview = false;
-		// 确保对所有输出都禁用预览
 		if (nodeData.outputs && Array.isArray(nodeData.outputs)) {
 			for (const output of nodeData.outputs) {
 				output.preview = false;
@@ -2659,46 +2616,48 @@ app.registerExtension({
 		const originalCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
 			const result = originalCreated?.apply(this, args);
-
-			// 创建观察器，确保任何时候添加的预览都会被隐藏
-			this.__gjjPreviewObserver = null;
+			clearNativePreview(this);
 
 			setTimeout(() => {
+				clearNativePreview(this);
 				cleanupRedundantMultiLoaderLinks(this);
 				syncBatchSourceWidget(this);
 				void syncSizeFromPrimaryInput(this);
-				stabilizeNode(this, true);
+				stabilizeNode(this, !this.__gjjLazyConfiguredFromWorkflow);
 				syncPanelFromLinkedSources(this);
+				updateTemplateSourcePanel(this, TEMPLATE_SOURCE_FIELDS);
 
-				// 隐藏默认预览元素
-				hideDefaultPreviewElements(this);
-
-				// 启动 DOM 变化观察器
-				setupPreviewObserver(this);
 			}, 0);
-			void ensureModelPresetsLoaded().then(() => scheduleStabilize(this, true));
+			void ensureModelPresetsLoaded().then(() => scheduleStabilize(this, !this.__gjjLazyConfiguredFromWorkflow));
 			return result;
 		};
 
 		const originalConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
+			this.__gjjLazyConfiguredFromWorkflow = true;
+			const storedLoraData = readStoredLoraData(this, serializedNode);
 			sanitizeSerializedNodeWidgets(serializedNode, this);
 			const result = originalConfigure?.apply(this, [serializedNode, ...args]);
 			repairLiveWidgetValues(this, serializedNode?.widgets_values, serializedNode);
+			clearNativePreview(this);
 			setTimeout(() => {
+				clearNativePreview(this);
 				const state = ensureLoraNodeState(this);
-				const dataWidget = this.widgets?.find((widget) => widget?.name === LORA_DATA_WIDGET_NAME);
-				if (dataWidget) {
-					state.rows = normalizeRows(dataWidget?.value || this.properties?.[LORA_DATA_WIDGET_NAME] || "[]");
+				const loraData = looksLikeLoraRowsData(storedLoraData)
+					? storedLoraData
+					: readStoredLoraData(this, serializedNode);
+				state.rows = normalizeRows(loraData);
+				persistLoraRows(this, state.rows);
+				if (this.__gjjLoraContainer) {
+					renderLoraUi(this);
 				}
 				cleanupRedundantMultiLoaderLinks(this);
 				syncBatchSourceWidget(this);
 				void syncSizeFromPrimaryInput(this);
 				stabilizeNode(this, false);
 				syncPanelFromLinkedSources(this);
+				updateTemplateSourcePanel(this, TEMPLATE_SOURCE_FIELDS);
 
-				// 隐藏默认预览元素
-				hideDefaultPreviewElements(this);
 			}, 0);
 			return result;
 		};
@@ -2719,12 +2678,14 @@ app.registerExtension({
 				void syncSizeFromPrimaryInput(this);
 				stabilizeNode(this, false);
 				syncPanelFromLinkedSources(this);
+				updateTemplateSourcePanel(this, TEMPLATE_SOURCE_FIELDS);
 			}, 0);
 			return result;
 		};
 
 		const originalDrawBackground = nodeType.prototype.onDrawBackground;
 		nodeType.prototype.onDrawBackground = function (...args) {
+			clearNativePreview(this);
 			const result = originalDrawBackground?.apply(this, args);
 			const signature = externalPanelSignature(this);
 			if (signature !== this.__gjjLazyExternalPanelSignature) {
@@ -2734,17 +2695,20 @@ app.registerExtension({
 			return result;
 		};
 
+		const originalDrawForeground = nodeType.prototype.onDrawForeground;
+		nodeType.prototype.onDrawForeground = function (...args) {
+			clearNativePreview(this);
+			return originalDrawForeground?.apply(this, args);
+		};
+
 		const originalExecuted = nodeType.prototype.onExecuted;
 		nodeType.prototype.onExecuted = function (message) {
-			console.log("[GJJ] onExecuted message:", message);
-
-			// 不调用 originalExecuted，避免显示默认预览
-			// const result = originalExecuted?.apply(this, [message]);
-
-			// 处理不同格式的图片数据
 			let images = null;
-
-			if (message?.images) {
+			if (message?.gjj_images) {
+				images = message.gjj_images;
+			} else if (message?.ui?.gjj_images) {
+				images = message.ui.gjj_images;
+			} else if (message?.images) {
 				images = message.images;
 			} else if (message?.ui?.images) {
 				images = message.ui.images;
@@ -2753,31 +2717,27 @@ app.registerExtension({
 			} else if (message?.results?.images) {
 				images = message.results.images;
 			} else if (Array.isArray(message?.ui)) {
-				// 处理 ui 是数组的情况
 				for (const uiItem of message.ui) {
+					if (uiItem?.gjj_images) {
+						images = uiItem.gjj_images;
+						break;
+					}
 					if (uiItem?.images) {
 						images = uiItem.images;
 						break;
 					}
 				}
 			}
-
 			if (images) {
-				console.log("[GJJ] Updating image preview with images:", images);
 				updateImagePreview(this, images);
 			}
+			scheduleNativePreviewClear(this);
 
 			const effectiveParams = Array.isArray(message?.effective_params)
 				? message.effective_params[0]
 				: (Array.isArray(message?.ui?.effective_params) ? message.ui.effective_params[0] : null);
 			applyEffectiveParamsToPanel(this, effectiveParams, true);
-
-			// 按照文档：不管怎样都执行一次隐藏，确保之前的被隐藏
-			setTimeout(() => hideDefaultPreviewElements(this), 0);
-			setTimeout(() => hideDefaultPreviewElements(this), 50);
-			setTimeout(() => hideDefaultPreviewElements(this), 150);
-
-			// 不返回 result，因为我们没有调用 originalExecuted
+			updateTemplateSourcePanel(this, TEMPLATE_SOURCE_FIELDS);
 			return;
 		};
 	},
@@ -2790,6 +2750,7 @@ app.registerExtension({
 				}
 				stabilizeNode(node, false);
 				syncPanelFromLinkedSources(node);
+				updateTemplateSourcePanel(node, TEMPLATE_SOURCE_FIELDS);
 			}
 		});
 	},

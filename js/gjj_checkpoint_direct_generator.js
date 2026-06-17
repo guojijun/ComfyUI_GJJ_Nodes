@@ -2,6 +2,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { GJJ_Utils, queueOnlyCurrentNode } from "./gjj_utils.js";
+import { createTemplateSourceButton, updateTemplateSourcePanel } from "./gjj_generation_template_sources.js";
 
 const TARGET_NODE = "GJJ_CheckpointDirectGenerator";
 const STATUS_WIDGET = "gjj_checkpoint_status";
@@ -11,6 +12,11 @@ const SETTINGS_OPEN_PROPERTY = "gjj_checkpoint_settings_open";
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt", "positive"]);
 const INTERNAL_WIDGETS = new Set([STATUS_WIDGET, EXECUTE_BUTTON_NAME, IMAGE_PREVIEW_NAME]);
 const FIXED_INPUTS = new Set(["image", "lora_chain_config"]);
+const TEMPLATE_SOURCE_FIELDS = [
+	{ name: "prompt", widget: "prompt", label: "提示词", type: "STRING", aliases: ["prompt", "positive", "正向", "提示词"] },
+	{ name: "width", widget: "width", label: "宽度", type: "INT", aliases: ["width", "宽", "宽度"] },
+	{ name: "height", widget: "height", label: "高度", type: "INT", aliases: ["height", "高", "高度"] },
+];
 const PANEL_SYNC_WIDGETS = [
 	"prompt",
 	"positive",
@@ -64,7 +70,7 @@ function configureDomWidgetSize(node, widget, element, heightProvider) {
 	}
 	widget.computeSize = (width) => {
 		const rawHeight = typeof heightProvider === "function"
-			? heightProvider()
+			? heightProvider(width)
 			: heightProvider;
 		return [
 			nodeContentWidth(node, width),
@@ -77,6 +83,37 @@ function configureDomWidgetSize(node, widget, element, heightProvider) {
 		element.style.minWidth = "0";
 		element.style.overflow = "hidden";
 	}
+}
+
+function previewHeightForNode(node, width = null) {
+	const image = node?.__gjjPreviewImage;
+	if (!image || image.style.display === "none") {
+		return 0;
+	}
+	const naturalWidth = Number(image.naturalWidth || node.__gjjPreviewNaturalWidth || 0);
+	const naturalHeight = Number(image.naturalHeight || node.__gjjPreviewNaturalHeight || 0);
+	if (naturalWidth <= 0 || naturalHeight <= 0) {
+		return Number(node.__gjjPreviewHeight || 0);
+	}
+	return Math.max(0, Math.round(nodeContentWidth(node, width) * naturalHeight / naturalWidth));
+}
+
+function clearNativePreview(node) {
+	if (!node) {
+		return;
+	}
+	node.imgs = null;
+	node.images = null;
+	node.imageIndex = null;
+	node.overIndex = null;
+}
+
+function scheduleNativePreviewClear(node) {
+	clearNativePreview(node);
+	if (typeof requestAnimationFrame === "function") {
+		requestAnimationFrame(() => clearNativePreview(node));
+	}
+	setTimeout(() => clearNativePreview(node), 80);
 }
 
 function rememberWidgetState(widget) {
@@ -129,26 +166,25 @@ function setWidgetHidden(widget, hidden) {
 		if (widget.inputEl) widget.inputEl.style.display = "none";
 		return;
 	}
-	widget.hidden = Boolean(state.hidden);
-	widget.disabled = Boolean(state.disabled);
+	widget.hidden = false;
+	widget.disabled = false;
+	const stateLooksHidden = state.type === "hidden" || state.optionsHidden === true || state.optionsDisplay === "hidden";
 	widget.type = state.type && state.type !== "hidden" ? state.type : (RESTORE_WIDGET_TYPES[widget.name] || state.type || "text");
-	if (state.computeSize) widget.computeSize = state.computeSize;
+	if (!stateLooksHidden && state.computeSize) widget.computeSize = state.computeSize;
 	else delete widget.computeSize;
-	if (state.getHeight) widget.getHeight = state.getHeight;
+	if (!stateLooksHidden && state.getHeight) widget.getHeight = state.getHeight;
 	else delete widget.getHeight;
-	if (state.draw) widget.draw = state.draw;
+	if (!stateLooksHidden && state.draw) widget.draw = state.draw;
 	else delete widget.draw;
-	if (state.mouse) widget.mouse = state.mouse;
+	if (!stateLooksHidden && state.mouse) widget.mouse = state.mouse;
 	else delete widget.mouse;
-	widget.label = state.label ?? widget.label;
-	widget.localized_name = state.localized_name ?? widget.localized_name;
-	if (state.optionsHidden === undefined) delete widget.options.hidden;
-	else widget.options.hidden = state.optionsHidden;
-	if (state.optionsDisplay === undefined) delete widget.options.display;
-	else widget.options.display = state.optionsDisplay;
-	if (widget.widget) widget.widget.style.display = state.widgetDisplay || "";
-	if (widget.element) widget.element.style.display = state.elementDisplay || "";
-	if (widget.inputEl) widget.inputEl.style.display = state.inputDisplay || "";
+	if (!stateLooksHidden || state.label) widget.label = state.label ?? widget.label;
+	if (!stateLooksHidden || state.localized_name) widget.localized_name = state.localized_name ?? widget.localized_name;
+	delete widget.options.hidden;
+	delete widget.options.display;
+	if (widget.widget) widget.widget.style.display = "";
+	if (widget.element) widget.element.style.display = "";
+	if (widget.inputEl) widget.inputEl.style.display = "";
 }
 
 function updateSettingsButtonState(node) {
@@ -163,55 +199,6 @@ function updateSettingsButtonState(node) {
 	button.style.background = open ? "linear-gradient(135deg, #4b5563, #64748b)" : "linear-gradient(135deg, #1f2933, #374151)";
 	button.style.borderColor = open ? "#94a3b8" : "#55636f";
 	button.style.color = open ? "#ffffff" : "#e5edf2";
-}
-
-function removeConvertedWidgetInputs(node) {
-	if (!Array.isArray(node?.inputs)) {
-		return;
-	}
-	const open = settingsOpen(node);
-	for (let index = node.inputs.length - 1; index >= 0; index -= 1) {
-		const input = node.inputs[index];
-		const name = String(input?.name || "");
-		const type = String(input?.type || "");
-		const converted = type.startsWith("converted-widget:")
-			? type.slice("converted-widget:".length)
-			: "";
-		const target = converted || name;
-		if (!target || FIXED_INPUTS.has(target)) {
-			continue;
-		}
-		if (PANEL_SYNC_WIDGETS.includes(target) && (open || !ALWAYS_VISIBLE_WIDGETS.has(target))) {
-			if (input?.link != null) {
-				try { node.disconnectInput?.(index); } catch (_) {}
-			}
-			if (typeof node.removeInput === "function") {
-				node.removeInput(index);
-			} else {
-				node.inputs.splice(index, 1);
-			}
-		}
-	}
-}
-
-function orderCheckpointWidgets(node) {
-	if (!Array.isArray(node?.widgets)) {
-		return;
-	}
-	const rank = (widget) => {
-		const name = String(widget?.name || "");
-		if (widget === node.__gjjCheckpointStatus?.widget || name === STATUS_WIDGET) return 0;
-		if (name === "prompt" || name === "positive") return 10;
-		if (PANEL_SYNC_WIDGETS.includes(name)) return 30;
-		if (widget === node.__gjjExecuteButtonWidget || name === EXECUTE_BUTTON_NAME) return 80;
-		if (widget === node.__gjjImagePreviewWidget || name === IMAGE_PREVIEW_NAME) return 100;
-		if (INTERNAL_WIDGETS.has(name) || widget?.hidden) return 900;
-		return 50;
-	};
-	node.widgets = node.widgets
-		.map((widget, index) => ({ widget, index }))
-		.sort((left, right) => rank(left.widget) - rank(right.widget) || left.index - right.index)
-		.map((item) => item.widget);
 }
 
 function applySettingsVisibility(node) {
@@ -237,9 +224,8 @@ function applySettingsVisibility(node) {
 			setWidgetHidden(widget, !open && !ALWAYS_VISIBLE_WIDGETS.has(name));
 		}
 	}
-	removeConvertedWidgetInputs(node);
-	orderCheckpointWidgets(node);
 	updateSettingsButtonState(node);
+	updateTemplateSourcePanel(node, TEMPLATE_SOURCE_FIELDS);
 	GJJ_Utils.refreshNode(node, { minWidth: 0, minHeight: 90 });
 }
 
@@ -475,6 +461,7 @@ function createExecuteButton(node) {
 		"min-width:0",
 	].join(";");
 	node.__gjjCheckpointSettingsButton = settingsButton;
+	const templateButton = createTemplateSourceButton(node, TEMPLATE_SOURCE_FIELDS, sharedButtonStyle);
 
 	function setupButtonHover(btn, defaultBg, hoverBg) {
 		btn.addEventListener("mouseenter", () => {
@@ -519,7 +506,6 @@ function createExecuteButton(node) {
 		};
 		for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu", "wheel"]) {
 			btn.addEventListener(eventName, protectEvent, true);
-			container.addEventListener(eventName, protectEvent, true);
 		}
 		btn.addEventListener("pointerup", wrappedHandler, true);
 		btn.addEventListener("click", wrappedHandler, true);
@@ -566,6 +552,7 @@ function createExecuteButton(node) {
 	updateSettingsButtonState(node);
 
 	container.appendChild(executeButton);
+	container.appendChild(templateButton);
 	container.appendChild(settingsButton);
 	return container;
 }
@@ -755,162 +742,22 @@ function updateImagePreview(node, images) {
 	node.__gjjPreviewImage.style.left = "";
 
 	node.__gjjPreviewImage.onload = () => {
+		node.__gjjPreviewNaturalWidth = Number(node.__gjjPreviewImage.naturalWidth || 0);
+		node.__gjjPreviewNaturalHeight = Number(node.__gjjPreviewImage.naturalHeight || 0);
+		node.__gjjPreviewHeight = previewHeightForNode(node);
+		node.setDirtyCanvas?.(true, true);
+		node.graph?.setDirtyCanvas?.(true, true);
+		app.graph?.setDirtyCanvas?.(true, true);
 	};
 	node.__gjjPreviewImage.onerror = () => {
+		node.__gjjPreviewNaturalWidth = 0;
+		node.__gjjPreviewNaturalHeight = 0;
+		node.__gjjPreviewHeight = 0;
 	};
 
 	node.setDirtyCanvas?.(true, true);
 	node.graph?.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
-}
-
-function hideDefaultPreviewElements(node) {
-	let nodeElement = null;
-	try {
-		if (node.imgs) {
-			nodeElement = node.imgs;
-		} else if (node.element) {
-			nodeElement = node.element;
-		} else if (node.dummyEl) {
-			nodeElement = node.dummyEl;
-		} else {
-			const allCanvasNodes = document.querySelectorAll('.litegraph');
-			for (const canvasNode of allCanvasNodes) {
-				const potentialNodes = canvasNode.querySelectorAll ?
-					canvasNode.querySelectorAll('[data-node-id]') : [];
-				for (const el of potentialNodes) {
-					if (el.getAttribute('data-node-id') === String(node.id)) {
-						nodeElement = el;
-						break;
-					}
-				}
-			}
-		}
-	} catch (e) {
-	}
-
-	if (nodeElement) {
-		const allElements = nodeElement.querySelectorAll ?
-			nodeElement.querySelectorAll("*") : [];
-
-		const allImgs = nodeElement.querySelectorAll ?
-			nodeElement.querySelectorAll("img") : [];
-
-		for (const img of allImgs) {
-			if (!img.dataset?.gjjCustomPreview) {
-				img.style.display = "none";
-				img.style.visibility = "hidden";
-			}
-		}
-
-		for (const el of allElements) {
-			const classStr = String(el.className || "").toLowerCase();
-			const idStr = String(el.id || "").toLowerCase();
-			const tagName = String(el.tagName || "").toLowerCase();
-
-			if (
-				classStr.includes("preview") ||
-				idStr.includes("preview") ||
-				(tagName === "div" && el.querySelector && el.querySelector("img"))) {
-				let isOurCustomPreview = false;
-				const customImgs = el.querySelectorAll ?
-					el.querySelectorAll("img[data-gjj-custom-preview='true']") : [];
-				if (customImgs.length > 0) {
-					isOurCustomPreview = true;
-				}
-
-				if (!isOurCustomPreview) {
-					el.style.visibility = "hidden";
-					el.style.height = "0px";
-					el.style.overflow = "hidden";
-					el.style.margin = "0px";
-					el.style.padding = "0px";
-				}
-			}
-
-			const text = String(el.textContent || "").trim();
-
-			if (
-				text.includes("执行完成") ||
-				text.includes("完成：") ||
-				text.includes("耗时") ||
-				text.includes("已完成") ||
-				classStr.includes("status") ||
-				classStr.includes("progress")
-			) {
-				const hasCustomStatus = el.querySelector?.(`[name="${STATUS_WIDGET}"]`);
-				const isOurStatus =
-					el === node.__gjjCheckpointStatus?.widget?.element ||
-					el.contains?.(node.__gjjCheckpointStatus?.label);
-
-				if (!isOurStatus && !hasCustomStatus) {
-					el.style.visibility = "hidden";
-					el.style.height = "0px";
-					el.style.overflow = "hidden";
-					el.style.margin = "0px";
-					el.style.padding = "0px";
-				}
-			}
-		}
-	}
-}
-
-function setupPreviewObserver(node) {
-	if (node.__gjjPreviewObserver) {
-		try {
-			node.__gjjPreviewObserver.disconnect();
-		} catch (e) {
-		}
-	}
-
-	let targetElement = null;
-	try {
-		if (node.imgs) {
-			targetElement = node.imgs;
-		} else if (node.element) {
-			targetElement = node.element;
-		} else if (node.dummyEl) {
-			targetElement = node.dummyEl;
-		}
-	} catch (e) {
-	}
-
-	if (targetElement && targetElement.ownerDocument) {
-		node.__gjjPreviewObserver = new MutationObserver((mutations) => {
-			let needsHide = false;
-
-			for (const mutation of mutations) {
-				if (mutation.addedNodes && mutation.addedNodes.length > 0) {
-					needsHide = true;
-					break;
-				}
-				if (mutation.type === 'attributes' &&
-					(mutation.attributeName === 'style' ||
-					 mutation.attributeName === 'class' ||
-					 mutation.attributeName === 'src')) {
-					needsHide = true;
-					break;
-				}
-			}
-
-			if (needsHide) {
-				setTimeout(() => hideDefaultPreviewElements(node), 0);
-				setTimeout(() => hideDefaultPreviewElements(node), 20);
-				setTimeout(() => hideDefaultPreviewElements(node), 50);
-			}
-		});
-
-		try {
-			node.__gjjPreviewObserver.observe(targetElement, {
-				childList: true,
-				subtree: true,
-				attributes: true,
-				attributeFilter: ['style', 'class', 'src'],
-			});
-		} catch (e) {
-			// Error setting up MutationObserver
-		}
-	}
 }
 
 function stabilizeNode(node) {
@@ -940,9 +787,7 @@ function stabilizeNode(node) {
 				node,
 				node.__gjjImagePreviewWidget,
 				previewContainer,
-				() => node.__gjjPreviewImage?.style?.display === "none"
-					? 0
-					: Math.max(0, Math.round(node.__gjjPreviewImage?.offsetHeight || 0)),
+				(width) => previewHeightForNode(node, width),
 			);
 		}
 	}
@@ -993,14 +838,12 @@ app.registerExtension({
 		const originalCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
 			const result = originalCreated?.apply(this, args);
-
-			this.__gjjPreviewObserver = null;
+			clearNativePreview(this);
 
 			for (const delay of [0, 40, 120, 300]) {
 				setTimeout(() => {
+					clearNativePreview(this);
 					stabilizeNode(this);
-					hideDefaultPreviewElements(this);
-					setupPreviewObserver(this);
 				}, delay);
 			}
 			setTimeout(() => scheduleSettingsVisibility(this), 40);
@@ -1011,15 +854,28 @@ app.registerExtension({
 		const originalConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalConfigure?.apply(this, args);
+			clearNativePreview(this);
 			setTimeout(() => {
+				clearNativePreview(this);
 				stabilizeNode(this);
 				scheduleSettingsVisibility(this);
 				if (this.__gjjCheckpointStatus) {
 					setStatus(this, "等待执行");
 				}
-				hideDefaultPreviewElements(this);
 			}, 0);
 			return result;
+		};
+
+		const originalDrawBackground = nodeType.prototype.onDrawBackground;
+		nodeType.prototype.onDrawBackground = function (...args) {
+			clearNativePreview(this);
+			return originalDrawBackground?.apply(this, args);
+		};
+
+		const originalDrawForeground = nodeType.prototype.onDrawForeground;
+		nodeType.prototype.onDrawForeground = function (...args) {
+			clearNativePreview(this);
+			return originalDrawForeground?.apply(this, args);
 		};
 
 		const originalResize = nodeType.prototype.onResize;
@@ -1042,7 +898,11 @@ app.registerExtension({
 
 			let images = null;
 
-			if (message?.images) {
+			if (message?.gjj_images) {
+				images = message.gjj_images;
+			} else if (message?.ui?.gjj_images) {
+				images = message.ui.gjj_images;
+			} else if (message?.images) {
 				images = message.images;
 			} else if (message?.ui?.images) {
 				images = message.ui.images;
@@ -1052,6 +912,10 @@ app.registerExtension({
 				images = message.results.images;
 			} else if (Array.isArray(message?.ui)) {
 				for (const uiItem of message.ui) {
+					if (uiItem?.gjj_images) {
+						images = uiItem.gjj_images;
+						break;
+					}
 					if (uiItem?.images) {
 						images = uiItem.images;
 						break;
@@ -1062,10 +926,7 @@ app.registerExtension({
 			if (images) {
 				updateImagePreview(this, images);
 			}
-
-			setTimeout(() => hideDefaultPreviewElements(this), 0);
-			setTimeout(() => hideDefaultPreviewElements(this), 20);
-			setTimeout(() => hideDefaultPreviewElements(this), 50);
+			scheduleNativePreviewClear(this);
 		};
 	},
 });

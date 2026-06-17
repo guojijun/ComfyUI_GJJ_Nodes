@@ -9,10 +9,49 @@ from pathlib import Path
 from typing import Any
 
 import folder_paths
-import numpy as np
-import torch
-from comfy_api.latest import InputImpl, Types
-from PIL import Image, ImageOps
+
+_np = None
+_PIL_Image = None
+_PIL_ImageOps = None
+_torch = None
+
+
+def _ensure_numpy():
+    global _np
+    if _np is not None:
+        return _np
+    from nodes.common_utils.dependency_checker import load_dependency_at_runtime
+    _np = load_dependency_at_runtime(
+        "numpy", node_name=NODE_NAME, package_name="numpy",
+        description="数值计算库，用于图像数组处理。"
+    )
+    return _np
+
+
+def _ensure_pil():
+    global _PIL_Image, _PIL_ImageOps
+    if _PIL_Image is not None:
+        return _PIL_Image, _PIL_ImageOps
+    from nodes.common_utils.dependency_checker import load_dependency_at_runtime
+    pil_mod = load_dependency_at_runtime(
+        "PIL", node_name=NODE_NAME, package_name="Pillow",
+        description="图像处理库，用于截图读取和缩放。"
+    )
+    _PIL_Image = pil_mod.Image
+    _PIL_ImageOps = pil_mod.ImageOps
+    return _PIL_Image, _PIL_ImageOps
+
+
+def _ensure_torch():
+    global _torch
+    if _torch is not None:
+        return _torch
+    from nodes.common_utils.dependency_checker import load_dependency_at_runtime
+    _torch = load_dependency_at_runtime(
+        "torch", node_name=NODE_NAME, package_name="torch",
+        description="深度学习框架，用于张量处理。"
+    )
+    return _torch
 
 
 NODE_NAME = "GJJ_Mesh2MotionExplore"
@@ -142,8 +181,9 @@ def _normalize_size(value: Any, fallback: int, label: str) -> int:
     return number
 
 
-def _blank_image(width: int, height: int) -> torch.Tensor:
-    return torch.zeros((1, int(height), int(width), 3), dtype=torch.float32)
+def _blank_image(width: int, height: int):
+    t = _ensure_torch()
+    return t.zeros((1, int(height), int(width), 3), dtype=t.float32)
 
 
 def _get_node_properties(extra_pnginfo: dict | None, unique_id: str | None) -> dict:
@@ -160,7 +200,10 @@ def _get_node_properties(extra_pnginfo: dict | None, unique_id: str | None) -> d
     return {}
 
 
-def _load_and_resize_image(image_path: str, width: int, height: int) -> torch.Tensor:
+def _load_and_resize_image(image_path: str, width: int, height: int):
+    Image, ImageOps = _ensure_pil()
+    np = _ensure_numpy()
+    t = _ensure_torch()
     try:
         image = Image.open(image_path)
     except Exception as exc:
@@ -184,16 +227,19 @@ def _load_and_resize_image(image_path: str, width: int, height: int) -> torch.Te
         image = image.resize((width, height), Image.LANCZOS)
 
     image_np = np.array(image).astype(np.float32) / 255.0
-    return torch.from_numpy(image_np)[None,]
+    return t.from_numpy(image_np)[None,]
 
 
-def _decode_video_to_tensor(video_path: str, width: int, height: int) -> torch.Tensor:
+def _decode_video_to_tensor(video_path: str, width: int, height: int):
+    Image, _ = _ensure_pil()
+    np = _ensure_numpy()
+    t = _ensure_torch()
     try:
         import av
     except Exception as exc:
         raise RuntimeError("当前环境缺少 PyAV，无法把 Mesh2Motion 的 WebM 临时文件解码为 VIDEO。") from exc
 
-    frames: list[torch.Tensor] = []
+    frames = []
     container = av.open(video_path)
     try:
         for frame in container.decode(video=0):
@@ -201,23 +247,39 @@ def _decode_video_to_tensor(video_path: str, width: int, height: int) -> torch.T
             if rgb.shape[0] != height or rgb.shape[1] != width:
                 image = Image.fromarray(rgb).resize((width, height), Image.LANCZOS)
                 rgb = np.array(image)
-            frames.append(torch.from_numpy(rgb).float() / 255.0)
+            frames.append(t.from_numpy(rgb).float() / 255.0)
     finally:
         container.close()
 
     if not frames:
         return _blank_image(width, height)
-    return torch.stack(frames)
+    return t.stack(frames)
 
 
-def _video_from_frames(frames: torch.Tensor, fps: int):
-    return InputImpl.VideoFromComponents(
-        Types.VideoComponents(
-            images=frames,
-            audio=None,
-            frame_rate=Fraction(max(1, int(fps))),
+def _video_from_frames(frames, fps: int):
+    try:
+        from comfy_api.latest import InputImpl, Types
+        return InputImpl.VideoFromComponents(
+            Types.VideoComponents(
+                images=frames,
+                audio=None,
+                frame_rate=Fraction(max(1, int(fps))),
+            )
         )
-    )
+    except ImportError:
+        pass
+    try:
+        from comfy.utils import InputImpl, Types
+        return InputImpl.VideoFromComponents(
+            Types.VideoComponents(
+                images=frames,
+                audio=None,
+                frame_rate=Fraction(max(1, int(fps))),
+            )
+        )
+    except ImportError:
+        pass
+    return {"images": frames, "fps": max(1, int(fps))}
 
 
 class GJJ_Mesh2MotionExplore:

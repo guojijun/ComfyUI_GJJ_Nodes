@@ -169,6 +169,34 @@ def _apply_f2k_fallback_preset(preset: dict[str, Any], unet_name: str) -> dict[s
     }
 
 
+def _apply_zit_fallback_preset(preset: dict[str, Any], unet_name: str) -> dict[str, Any]:
+    if str(preset.get("id", "")) != "generic":
+        return preset
+    canonical = _canonical_model_text(unet_name)
+    if "zit" not in canonical:
+        return preset
+    return {
+        **preset,
+        "id": "z_image_turbo",
+        "keywords": ["z_image_turbo", "zit", "z-it", "zit-turbo"],
+        "clip_type": "lumina2",
+        "clip_names": ["qwen_3_4b.safetensors"],
+        "vae_name": "ae.safetensors",
+        "lora_1_strength": 1.0,
+        "steps": 8,
+        "cfg": 1.0,
+        "sampler_name": "res_multistep",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "model_sampling": "aura",
+        "model_shift": 3.0,
+        "cfg_norm_strength": 0.0,
+        "supports_multi_image_edit": False,
+        "width": 1024,
+        "height": 1024,
+    }
+
+
 def _supports_multi_reference_edit(
     preset: dict[str, Any], unet_name: str | None = "", clip_type: str | None = ""
 ) -> bool:
@@ -937,7 +965,7 @@ class GJJ_LazyImageStudio:
     @classmethod
     def INPUT_TYPES(cls):
         _raw_diffusion_models = list_unet_models() or [DEFAULT_UNET_NAME]
-        _diffusion_keywords = ["flux", "f2k", "zimage", "z_image", "z-image", "qwen", "firered"]
+        _diffusion_keywords = ["flux", "f2k", "zimage", "z_image", "z-image", "zit", "qwen", "firered"]
         _filtered = [
             m
             for m in _raw_diffusion_models
@@ -1587,6 +1615,7 @@ class GJJ_LazyImageStudio:
             _send_status(unique_id, "1/6 解析模型配套...")
             preset = match_model_family(unet_name)
             preset = _apply_f2k_fallback_preset(preset, unet_name)
+            preset = _apply_zit_fallback_preset(preset, unet_name)
             clip_models = list_clip_models() or [DEFAULT_CLIP_NAME]
             vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
             # 确保 loras 目录存在并获取文件列表
@@ -1813,7 +1842,7 @@ class GJJ_LazyImageStudio:
             # 更新状态，显示尺寸和耗时
             _send_status(unique_id, f"完成：{image.shape[2]} x {image.shape[1]}  耗时：{elapsed_str}")
 
-            # 保存预览图片并返回 UI 数据
+            # 保存预览图片给 GJJ 自定义前端预览；避免使用 ui.images 触发 ComfyUI 原生重复预览。
             preview_ui = self.preview_image.save_images(
                 image,
                 filename_prefix="GJJ_LazyImageStudio",
@@ -1845,7 +1874,7 @@ class GJJ_LazyImageStudio:
             # 准备返回值（在清理资源之前）
             result_data = {
                 "ui": {
-                    "images": preview_images,
+                    "gjj_images": preview_images,
                     "elapsed_time": [elapsed_time],
                     "effective_params": [effective_params],
                 },

@@ -811,6 +811,7 @@ class GJJ_MultiImageLoader:
                     {
                         "display_name": "导入图片",
                         "tooltip": "可接入 GJJ 专用批量图片队列或普通 IMAGE batch；会与当前已选图片合并预览并一起输出。",
+                        "forceInput": True,
                     },
                 ),
                 "slide_start_index": (
