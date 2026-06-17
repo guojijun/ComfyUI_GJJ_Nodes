@@ -5,6 +5,10 @@ import re
 import traceback
 import sys
 
+def _console_dependency_warnings_enabled():
+    value = str(os.environ.get("GJJ_SHOW_STARTUP_DEPENDENCY_WARNINGS", "") or "").strip().lower()
+    return value in {"1", "true", "yes", "on", "debug"}
+
 # 优先导入 common_utils 子包，确保其他模块可以使用
 _common_utils_loaded = False
 for subdir in glob.glob(os.path.join(os.path.dirname(__file__), "*")):
@@ -18,9 +22,11 @@ for subdir in glob.glob(os.path.join(os.path.dirname(__file__), "*")):
                 common_utils_module = importlib.import_module("." + subdir_name, __name__)
                 sys.modules["nodes.common_utils"] = common_utils_module
                 _common_utils_loaded = True
-                print(f"[GJJ] 优先加载: common_utils")
+                if _console_dependency_warnings_enabled():
+                    print(f"[GJJ] 优先加载: common_utils")
             except Exception as exc:
-                print(f"[GJJ] 加载 common_utils 失败: {type(exc).__name__}: {exc}")
+                if _console_dependency_warnings_enabled():
+                    print(f"[GJJ] 加载 common_utils 失败: {type(exc).__name__}: {exc}")
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -120,6 +126,8 @@ def _safe_import_node_module(module_name):
     try:
         return importlib.import_module("." + module_name, __name__)
     except Exception as exc:
+        if not _console_dependency_warnings_enabled():
+            return None
         # ANSI 颜色代码
         RED = '\033[91m'
         YELLOW = '\033[93m'
@@ -211,9 +219,11 @@ for subdir in glob.glob(os.path.join(os.path.dirname(__file__), "*")):
     try:
         subdir_module = importlib.import_module("." + subdir_name, __name__)
         _merge_node_module(subdir_module)
-        print(f"[GJJ] 已加载子包: {subdir_name}")
+        if _console_dependency_warnings_enabled():
+            print(f"[GJJ] 已加载子包: {subdir_name}")
     except Exception as exc:
-        print(f"[GJJ] 跳过子包 {subdir_name}: {type(exc).__name__}: {exc}")
+        if _console_dependency_warnings_enabled():
+            print(f"[GJJ] 跳过子包 {subdir_name}: {type(exc).__name__}: {exc}")
 
 
 # 单独导入可选节点：LatentSync

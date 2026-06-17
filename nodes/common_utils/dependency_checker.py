@@ -2,6 +2,9 @@ import sys, os, site, traceback, importlib, re
 from typing import List, Optional
 DEFAULT_PYPI = "https://pypi.tuna.tsinghua.edu.cn/simple"
 DEFAULT_MODEL_URL = "https://pan.quark.cn/s/6ec846f1f58d"
+def _console_dependency_warnings_enabled():
+	value = str(os.environ.get("GJJ_SHOW_STARTUP_DEPENDENCY_WARNINGS", "") or "").strip().lower()
+	return value in {"1", "true", "yes", "on", "debug"}
 def _import_ok(pkg):
 	try: return importlib.util.find_spec(str(pkg or "").strip()) is not None
 	except:return False
@@ -211,6 +214,8 @@ def build_dependency_model_report(node_name="",missing_dependencies=None,missing
 		"original_error": original_error or "",
 	}
 def print_dependency_model_report(report,title="GJJ 节点运行环境缺失！"):
+	if not _console_dependency_warnings_enabled():
+		return
 	c={"r":"\033[91m","y":"\033[93m","g":"\033[92m","c":"\033[96m","b":"\033[1m","x":"\033[0m"}
 	print(f"\n{c['r']}{'='*80}")
 	print(f"{c['b']} {title}")
