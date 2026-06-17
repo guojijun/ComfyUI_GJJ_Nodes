@@ -17,6 +17,8 @@ const OUTPUT_NAME = 1;
 const OUTPUT_LIST = 2;
 const OUTPUT_TOTAL = 3;
 const STRENGTH_CHOICES = [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.5];
+const PARAMS_PROPERTY = "gjj_lora_effect_tester_params";
+const PARAM_WIDGETS = [INDEX_WIDGET, "label_width", "label_height", "font_size", STATE_WIDGET];
 const DEFAULT_STATE = {
 	version: 2,
 	filter: "",
@@ -26,6 +28,13 @@ const DEFAULT_STATE = {
 	auto: true,
 	skip: true,
 	refresh: "",
+};
+const DEFAULT_PARAMS = {
+	[INDEX_WIDGET]: 1,
+	label_width: 1024,
+	label_height: 96,
+	font_size: 28,
+	[STATE_WIDGET]: JSON.stringify(DEFAULT_STATE),
 };
 const OBSOLETE_WIDGETS = new Set([
 	"auto_execute",
@@ -40,9 +49,6 @@ const OBSOLETE_WIDGETS = new Set([
 
 let loraOptions = [];
 let loraLoadPromise = null;
-let queuePatched = false;
-let graphPromptPatched = false;
-let patchRetryCount = 0;
 let activeRun = null;
 let lastPromptId = null;
 let autoQueueTimer = null;
@@ -122,31 +128,133 @@ function serializeState(state) {
 	return JSON.stringify(parseState(state));
 }
 
-function findWidget(node, name) {
-	return node?.widgets?.find((widget) => widget?.name === name);
+function looksLikeState(value) {
+	try {
+		const parsed = JSON.parse(String(value || ""));
+		return Boolean(parsed && typeof parsed === "object" && (
+			Object.prototype.hasOwnProperty.call(parsed, "filter")
+			|| Object.prototype.hasOwnProperty.call(parsed, "strengths")
+			|| Object.prototype.hasOwnProperty.call(parsed, "passed")
+			|| Object.prototype.hasOwnProperty.call(parsed, "failed")
+		));
+	} catch (error) {
+		return false;
+	}
 }
 
-function widgetValue(node, widget, index) {
-	if (!widget) {
-		return undefined;
+function intParam(value, fallback, min, max) {
+	const parsed = Number(value);
+	if (!Number.isFinite(parsed)) {
+		return fallback;
 	}
-	if (typeof widget.serializeValue === "function") {
-		try {
-			return widget.serializeValue(node, index);
-		} catch (error) {
-			return widget.value;
+	return Math.max(min, Math.min(max, Math.floor(parsed)));
+}
+
+function currentParams(node) {
+	const params = {};
+	for (const name of PARAM_WIDGETS) {
+		if (name === STATE_WIDGET) {
+			params[name] = serializeState(readState(node));
+		} else {
+			params[name] = findWidget(node, name)?.value ?? DEFAULT_PARAMS[name];
 		}
 	}
-	return widget.value;
+	return normalizeParams(params);
+}
+
+function normalizeParams(params) {
+	const stateText = looksLikeState(params?.[STATE_WIDGET])
+		? String(params[STATE_WIDGET])
+		: JSON.stringify(DEFAULT_STATE);
+	return {
+		[INDEX_WIDGET]: intParam(params?.[INDEX_WIDGET], DEFAULT_PARAMS[INDEX_WIDGET], 1, 0xFFFFFFFFFFFF),
+		label_width: intParam(params?.label_width, DEFAULT_PARAMS.label_width, 64, 8192),
+		label_height: intParam(params?.label_height, DEFAULT_PARAMS.label_height, 24, 512),
+		font_size: intParam(params?.font_size, DEFAULT_PARAMS.font_size, 8, 160),
+		[STATE_WIDGET]: serializeState(parseState(stateText)),
+	};
+}
+
+function paramsFromSerialized(serializedNode, node) {
+	const fromProperties = serializedNode?.properties?.[PARAMS_PROPERTY];
+	if (fromProperties && typeof fromProperties === "object") {
+		return normalizeParams(fromProperties);
+	}
+
+	const raw = Array.isArray(serializedNode?.widgets_values) ? serializedNode.widgets_values : [];
+	const stateText = raw.find((value) => looksLikeState(value))
+		?? serializedNode?.properties?.[STATE_WIDGET]
+		?? node?.properties?.[STATE_WIDGET]
+		?? DEFAULT_PARAMS[STATE_WIDGET];
+
+	const direct = {
+		[INDEX_WIDGET]: raw[0],
+		label_width: raw[1],
+		label_height: raw[2],
+		font_size: raw[3],
+		[STATE_WIDGET]: stateText,
+	};
+	let params = normalizeParams(direct);
+
+	// Old workflows sometimes contain extra hidden/obsolete widgets before the real fields.
+	// Recover the most likely annotation width when the direct slot is blank or implausible.
+	if (!Number.isFinite(Number(raw[1])) || Number(raw[1]) < 64) {
+		const widthCandidate = raw
+			.map((value) => Number(value))
+			.find((value) => Number.isFinite(value) && value >= 256 && value <= 8192 && value % 8 === 0);
+		if (widthCandidate) {
+			params.label_width = intParam(widthCandidate, DEFAULT_PARAMS.label_width, 64, 8192);
+		}
+	}
+	return params;
+}
+
+function serializedParamValues(params) {
+	const normalized = normalizeParams(params);
+	return PARAM_WIDGETS.map((name) => normalized[name]);
+}
+
+function sanitizeSerializedNode(serializedNode, node) {
+	if (!serializedNode) {
+		return normalizeParams(DEFAULT_PARAMS);
+	}
+	const params = paramsFromSerialized(serializedNode, node);
+	serializedNode.properties = serializedNode.properties || {};
+	serializedNode.properties[PARAMS_PROPERTY] = { ...params };
+	serializedNode.properties[STATE_WIDGET] = params[STATE_WIDGET];
+	serializedNode.widgets_values = serializedParamValues(params);
+	return params;
+}
+
+function applyParamsToWidgets(node, params) {
+	const normalized = normalizeParams(params);
+	for (const name of PARAM_WIDGETS) {
+		const widget = findWidget(node, name);
+		if (!widget) {
+			continue;
+		}
+		widget.value = normalized[name];
+	}
+	node.properties = node.properties || {};
+	node.properties[PARAMS_PROPERTY] = { ...normalized };
+	node.properties[STATE_WIDGET] = normalized[STATE_WIDGET];
+	node.__gjjLoraEffectState = parseState(normalized[STATE_WIDGET]);
+	refreshWidgetValues(node);
+}
+
+function findWidget(node, name) {
+	return node?.widgets?.find((widget) => widget?.name === name);
 }
 
 function refreshWidgetValues(node) {
 	if (!Array.isArray(node?.widgets)) {
 		return;
 	}
-	node.widgets_values = node.widgets
-		.filter((widget) => widget?.serialize !== false)
-		.map((widget, index) => widgetValue(node, widget, index));
+	const params = currentParams(node);
+	node.properties = node.properties || {};
+	node.properties[PARAMS_PROPERTY] = { ...params };
+	node.properties[STATE_WIDGET] = params[STATE_WIDGET];
+	node.widgets_values = serializedParamValues(params);
 }
 
 function dirty(node) {
@@ -195,6 +303,10 @@ function setCurrentIndex(node, value) {
 	setWidgetValue(node, INDEX_WIDGET, Math.max(1, Math.floor(Number(value) || 1)));
 }
 
+function consumeDomEvent(event) {
+	event.stopPropagation();
+}
+
 function hideWidget(widget, serialize, fallbackLabel = "") {
 	if (!widget) {
 		return;
@@ -206,12 +318,15 @@ function hideWidget(widget, serialize, fallbackLabel = "") {
 	widget.computeSize = () => [0, -4];
 	widget.getHeight = () => -4;
 	widget.draw = () => {};
+	widget.mouse = () => false;
 	widget.y = -10000;
 	widget.last_y = -10000;
 	widget.label = fallbackLabel;
 	widget.localized_name = fallbackLabel;
 	widget.options = widget.options || {};
 	widget.options.display_name = fallbackLabel;
+	widget.options.hidden = true;
+	widget.options.display = "hidden";
 	if (widget.element) {
 		widget.element.style.display = "none";
 	}
@@ -276,19 +391,20 @@ function reorderWidgets(node) {
 	if (!Array.isArray(node?.widgets)) {
 		return;
 	}
+	const paramOrder = new Map(PARAM_WIDGETS.map((name, index) => [name, index]));
 	const priority = (widget) => {
 		const name = String(widget?.name || "");
-		if (name === CONTROL_WIDGET) {
-			return 10;
-		}
-		if (name === PANEL_WIDGET) {
-			return 20;
-		}
-		if (name === STATE_WIDGET) {
-			return 90;
+		if (paramOrder.has(name)) {
+			return paramOrder.get(name);
 		}
 		if (OBSOLETE_WIDGETS.has(name)) {
-			return 95;
+			return 100;
+		}
+		if (name === CONTROL_WIDGET) {
+			return 200;
+		}
+		if (name === PANEL_WIDGET) {
+			return 201;
 		}
 		return 50;
 	};
@@ -707,6 +823,10 @@ function openPicker(node, anchor) {
 	popup.style.minWidth = `${Math.max(260, rect.width)}px`;
 	const input = popup.querySelector("input");
 	const list = popup.querySelector(".list");
+	for (const eventName of ["pointerdown", "mousedown", "click", "dblclick", "contextmenu", "keydown", "keyup"]) {
+		popup.addEventListener(eventName, consumeDomEvent);
+	}
+	popup.addEventListener("wheel", consumeDomEvent, { passive: true });
 
 	const render = () => {
 		const selected = itemAtCurrentIndex(node)?.loraName || "";
@@ -766,8 +886,8 @@ function setupControls(node) {
 	const auto = wrap.querySelector(".auto");
 	const skip = wrap.querySelector(".skip");
 	const resetButton = wrap.querySelector(".reset");
-	for (const button of [resetButton, stop, auto, skip]) {
-		button.addEventListener("pointerdown", (event) => event.stopPropagation());
+	for (const eventName of ["pointerdown", "mousedown", "click", "dblclick", "contextmenu", "keydown", "keyup"]) {
+		wrap.addEventListener(eventName, consumeDomEvent);
 	}
 	resetButton.addEventListener("click", (event) => {
 		event.preventDefault();
@@ -831,10 +951,10 @@ function setupPanel(node) {
 		button.textContent = formatStrength(choice);
 		strengths.appendChild(button);
 	}
-	for (const eventName of ["mousedown", "pointerdown", "click"]) {
-		panel.addEventListener(eventName, (event) => event.stopPropagation());
+	for (const eventName of ["pointerdown", "mousedown", "click", "dblclick", "contextmenu", "keydown", "keyup"]) {
+		panel.addEventListener(eventName, consumeDomEvent);
 	}
-	panel.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true });
+	panel.addEventListener("wheel", consumeDomEvent, { passive: true });
 
 	const filter = panel.querySelector(".filter");
 	const refresh = panel.querySelector(".refresh");
@@ -1038,43 +1158,21 @@ function activeTesterNodes() {
 }
 
 function persistNode(node) {
-	compactNode(node);
 	writeState(node, readState(node), true);
 	const total = comboItems(node).length;
 	if (total > 0 && currentIndex(node) > total) {
 		setCurrentIndex(node, 1);
 	}
-	renderPanel(node);
-	pushLivePreviews(node);
+	const params = currentParams(node);
+	node.properties = node.properties || {};
+	node.properties[PARAMS_PROPERTY] = { ...params };
+	node.properties[STATE_WIDGET] = params[STATE_WIDGET];
+	node.widgets_values = serializedParamValues(params);
 }
 
 function persistAll() {
 	for (const node of activeTesterNodes()) {
 		persistNode(node);
-	}
-}
-
-function patchPromptQueue() {
-	if (!queuePatched && typeof app.queuePrompt === "function") {
-		const original = app.queuePrompt;
-		app.queuePrompt = async function (...args) {
-			await loadLoras(false);
-			persistAll();
-			return original.apply(this, args);
-		};
-		queuePatched = true;
-	}
-	if (!graphPromptPatched && typeof app.graphToPrompt === "function") {
-		const original = app.graphToPrompt;
-		app.graphToPrompt = function (...args) {
-			persistAll();
-			return original.apply(this, args);
-		};
-		graphPromptPatched = true;
-	}
-	if ((!queuePatched || !graphPromptPatched) && patchRetryCount < 30) {
-		patchRetryCount += 1;
-		setTimeout(patchPromptQueue, 500);
 	}
 }
 
@@ -1161,8 +1259,6 @@ api.addEventListener("execution_interrupted", () => {
 	autoQueueTimer = null;
 });
 
-patchPromptQueue();
-
 app.registerExtension({
 	name: "GJJ.LoraEffectTester.CleanRewrite",
 
@@ -1179,9 +1275,14 @@ app.registerExtension({
 		if (node.comfyClass !== NODE_NAME) {
 			return;
 		}
-		node.__gjjLoraEffectState = parseState(
-			node.properties?.[STATE_WIDGET] ?? findWidget(node, STATE_WIDGET)?.value ?? "",
-		);
+		const params = normalizeParams(node.properties?.[PARAMS_PROPERTY] || {
+			[INDEX_WIDGET]: findWidget(node, INDEX_WIDGET)?.value,
+			label_width: findWidget(node, "label_width")?.value,
+			label_height: findWidget(node, "label_height")?.value,
+			font_size: findWidget(node, "font_size")?.value,
+			[STATE_WIDGET]: node.properties?.[STATE_WIDGET] ?? findWidget(node, STATE_WIDGET)?.value ?? "",
+		});
+		applyParamsToWidgets(node, params);
 		compactNode(node);
 		setupControls(node);
 		setupPanel(node);
@@ -1214,18 +1315,30 @@ app.registerExtension({
 		};
 
 		const originalOnConfigure = nodeType.prototype.onConfigure;
-		nodeType.prototype.onConfigure = function (...args) {
-			const result = originalOnConfigure?.apply(this, args);
+		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
+			const params = sanitizeSerializedNode(serializedNode, this);
+			const result = originalOnConfigure?.apply(this, [serializedNode, ...args]);
+			applyParamsToWidgets(this, params);
 			setTimeout(() => {
-				this.__gjjLoraEffectState = parseState(
-					this.properties?.[STATE_WIDGET] ?? findWidget(this, STATE_WIDGET)?.value ?? "",
-				);
+				applyParamsToWidgets(this, params);
 				compactNode(this);
 				setupControls(this);
 				setupPanel(this);
 				renderPanel(this);
 				pushLivePreviews(this);
 			}, 0);
+			return result;
+		};
+
+		const originalOnSerialize = nodeType.prototype.onSerialize;
+		nodeType.prototype.onSerialize = function (serializedNode, ...args) {
+			const result = originalOnSerialize?.apply(this, [serializedNode, ...args]);
+			const params = currentParams(this);
+			serializedNode.properties = serializedNode.properties || {};
+			serializedNode.properties[PARAMS_PROPERTY] = { ...params };
+			serializedNode.properties[STATE_WIDGET] = params[STATE_WIDGET];
+			serializedNode.widgets_values = serializedParamValues(params);
+			this.widgets_values = serializedNode.widgets_values.slice();
 			return result;
 		};
 	},

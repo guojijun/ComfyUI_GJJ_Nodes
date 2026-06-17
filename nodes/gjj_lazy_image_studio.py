@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import time
 from typing import Any
@@ -1181,6 +1182,18 @@ class GJJ_LazyImageStudio:
                             "tooltip": "可选接入 LoRA串联配置 节点的输出；接入后会在面板 LoRA 1/LoRA 2 之后继续按顺序串联应用多组 LoRA。",
                         },
                     ),
+                    "lora_data": (
+                        "STRING",
+                        {
+                            "default": "[]",
+                            "multiline": False,
+                            "display_name": "LoRA 配置",
+                            "tooltip": "前端 LoRA 面板自动维护的隐藏配置。",
+                            "hidden": True,
+                            "display": "hidden",
+                            "forceInput": False,
+                        },
+                    ),
                 }
             ),
             "hidden": {
@@ -1215,15 +1228,35 @@ class GJJ_LazyImageStudio:
     ):
         current_model = model
         current_clip = clip
-        # 优先使用 lora_data，如果没有则使用 lora_chain_config
-        final_lora_data = (
-            lora_data if str(lora_data or "").strip() else lora_chain_config
-        )
-        if str(final_lora_data or "").strip():
+        lora_parts = [
+            normalize_lora_chain_data(value)
+            for value in (lora_data, lora_chain_config)
+            if str(value or "").strip()
+        ]
+        if not lora_parts:
+            return current_model, current_clip
+
+        merged_lora_rows: list[dict[str, Any]] = []
+        for part in lora_parts:
+            try:
+                rows = normalize_lora_chain_data(part)
+                parsed = json.loads(rows)
+            except Exception:
+                parsed = []
+            if isinstance(parsed, list):
+                merged_lora_rows.extend(item for item in parsed if isinstance(item, dict))
+
+        final_lora_data = json.dumps(merged_lora_rows, ensure_ascii=False)
+        effective_lora_rows = [
+            row for row in merged_lora_rows
+            if row.get("enabled", True) is not False and str(row.get("name", "")).strip()
+        ]
+        if effective_lora_rows:
+            print(f"[GJJ] LazyImageStudio 应用 LoRA 数量：{len(effective_lora_rows)}")
             current_model, current_clip, _ = apply_lora_chain_config(
                 current_model,
                 current_clip,
-                lora_data=normalize_lora_chain_data(final_lora_data),
+                lora_data=final_lora_data,
                 loaded_lora_cache=None,
             )
         return current_model, current_clip
@@ -1557,6 +1590,7 @@ class GJJ_LazyImageStudio:
         denoise,
         grow_mask_by,
         lora_chain_config="",
+        lora_data="",
         batch_source_images="[]",
         mask=None,
         prompt_graph=None,
@@ -1582,28 +1616,29 @@ class GJJ_LazyImageStudio:
         denoise = _unwrap_list_input(denoise)
         grow_mask_by = _unwrap_list_input(grow_mask_by)
         lora_chain_config = _unwrap_list_input(lora_chain_config)
+        lora_data = _unwrap_list_input(lora_data)
         batch_source_images = _unwrap_list_input(batch_source_images)
         mask = _unwrap_list_input(mask)
         prompt_graph = _unwrap_list_input(prompt_graph)
         unique_id = _unwrap_list_input(unique_id)
         extra_pnginfo = _unwrap_list_input(extra_pnginfo)
 
-        # 从 properties 读取 lora_data（通过 extra_pnginfo + unique_id）
-        lora_data = ""
-        try:
-            if extra_pnginfo and isinstance(extra_pnginfo, dict):
-                workflow = extra_pnginfo.get("workflow", {})
-                if isinstance(workflow, dict):
-                    nodes = workflow.get("nodes", [])
-                    if isinstance(nodes, list):
-                        uid = str(unique_id)
-                        for n in nodes:
-                            if isinstance(n, dict) and str(n.get("id")) == uid:
-                                props = n.get("properties", {}) or {}
-                                lora_data = str(props.get("lora_data", ""))
-                                break
-        except Exception:
-            lora_data = ""
+        # 兼容旧工作流：如果隐藏输入未提交，再从 workflow properties 读取。
+        if not str(lora_data or "").strip():
+            try:
+                if extra_pnginfo and isinstance(extra_pnginfo, dict):
+                    workflow = extra_pnginfo.get("workflow", {})
+                    if isinstance(workflow, dict):
+                        nodes = workflow.get("nodes", [])
+                        if isinstance(nodes, list):
+                            uid = str(unique_id)
+                            for n in nodes:
+                                if isinstance(n, dict) and str(n.get("id")) == uid:
+                                    props = n.get("properties", {}) or {}
+                                    lora_data = str(props.get("lora_data", ""))
+                                    break
+            except Exception:
+                lora_data = ""
 
         # 设置当前节点引用用于状态更新
         _send_status.current_node = self
