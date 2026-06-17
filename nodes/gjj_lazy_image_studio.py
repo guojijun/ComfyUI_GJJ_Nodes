@@ -117,6 +117,20 @@ def _send_status(unique_id: Any, text: str) -> None:
             pass
 
 
+def _send_soft_test_error(unique_id: Any, text: str) -> None:
+    if not unique_id:
+        return
+    try:
+        from server import PromptServer
+
+        PromptServer.instance.send_sync(
+            "gjj_lazy_image_studio_soft_error",
+            {"node": str(unique_id), "message": str(text or "")},
+        )
+    except Exception:
+        pass
+
+
 def _format_model_missing_error(
     label: str, filename: str, categories: tuple[str, ...], exc: Exception | None = None
 ) -> RuntimeError:
@@ -328,6 +342,51 @@ def _resolve_prompt_node(prompt_graph: Any, node_id: Any) -> dict[str, Any] | No
     if node_id in prompt_graph and isinstance(prompt_graph[node_id], dict):
         return prompt_graph[node_id]
     return None
+
+
+def _is_prompt_input_linked(prompt_graph: Any, node_id: Any, input_name: str) -> bool:
+    current_node = _resolve_prompt_node(prompt_graph, node_id)
+    if not isinstance(current_node, dict):
+        return False
+    inputs = current_node.get("inputs", {})
+    if not isinstance(inputs, dict):
+        return False
+    value = inputs.get(input_name)
+    return isinstance(value, (list, tuple)) and len(value) >= 2
+
+
+def _prompt_input_source_class(prompt_graph: Any, node_id: Any, input_name: str) -> str:
+    current_node = _resolve_prompt_node(prompt_graph, node_id)
+    if not isinstance(current_node, dict):
+        return ""
+    inputs = current_node.get("inputs", {})
+    if not isinstance(inputs, dict):
+        return ""
+    value = inputs.get(input_name)
+    if not isinstance(value, (list, tuple)) or len(value) < 1:
+        return ""
+    source_node = _resolve_prompt_node(prompt_graph, value[0])
+    if not isinstance(source_node, dict):
+        return ""
+    return str(source_node.get("class_type") or "")
+
+
+def _is_model_effect_tester_input(prompt_graph: Any, node_id: Any, input_name: str) -> bool:
+    return _prompt_input_source_class(prompt_graph, node_id, input_name) == "GJJ_ModelEffectTester"
+
+
+def _make_soft_error_image(width: Any, height: Any) -> torch.Tensor:
+    w = max(64, min(2048, int(float(width or 512))))
+    h = max(64, min(2048, int(float(height or 512))))
+    image = torch.zeros((1, h, w, 3), dtype=torch.float32)
+    image[..., 0] = 0.24
+    image[..., 1] = 0.04
+    image[..., 2] = 0.06
+    band_h = max(4, min(32, h // 20))
+    image[:, :band_h, :, 0] = 0.95
+    image[:, :band_h, :, 1] = 0.12
+    image[:, :band_h, :, 2] = 0.18
+    return image
 
 
 def _recover_serialized_image_entries(raw_value: Any) -> list[torch.Tensor]:
@@ -1645,6 +1704,45 @@ class GJJ_LazyImageStudio:
 
         # 记录开始时间
         start_time = time.time()
+        unet_name_is_linked = _is_prompt_input_linked(prompt_graph, unique_id, "unet_name")
+        clip_name_is_linked = _is_prompt_input_linked(prompt_graph, unique_id, "clip_name1")
+        vae_name_is_linked = _is_prompt_input_linked(prompt_graph, unique_id, "vae_name")
+        soft_test_mode = bool(
+            unet_name_is_linked
+            or _is_model_effect_tester_input(prompt_graph, unique_id, "unet_name")
+        )
+
+        def soft_error_result(exc: Exception):
+            first_line = str(exc).splitlines()[0] if str(exc).splitlines() else str(exc)
+            _send_status(unique_id, f"测试跳过：{first_line}")
+            _send_soft_test_error(unique_id, first_line)
+            image = _make_soft_error_image(width, height)
+            effective_params = {
+                "prompt": str(prompt or ""),
+                "negative_prompt": str(negative_prompt or ""),
+                "main_image_index": int(main_image_index),
+                "width": int(width),
+                "height": int(height),
+                "batch_size": int(batch_size),
+                "unet_name": str(unet_name or ""),
+                "unet_dtype": str(unet_dtype or ""),
+                "clip_name1": str(clip_name1 or ""),
+                "vae_name": str(vae_name or ""),
+                "seed": int(seed),
+                "steps": int(steps),
+                "cfg": float(cfg),
+                "sampler_name": str(sampler_name or ""),
+                "scheduler": str(scheduler or ""),
+                "denoise": float(denoise),
+                "grow_mask_by": int(grow_mask_by),
+            }
+            return {
+                "ui": {
+                    "gjj_lazy_soft_error": [{"message": first_line}],
+                    "effective_params": [effective_params],
+                },
+                "result": (image,),
+            }
 
         try:
             _send_status(unique_id, "1/6 解析模型配套...")
@@ -1659,11 +1757,14 @@ class GJJ_LazyImageStudio:
                 lora_models = [str(f) for f in lora_files if str(f or "").strip()]
             except Exception:
                 lora_models = []
+            preset_driven_model = bool(unet_name_is_linked and not clip_name_is_linked)
+            exposed_clip_name = "" if preset_driven_model else clip_name1
+            legacy_clip_names = [] if preset_driven_model else [clip_name1]
             resolved_clip_names = resolve_clip_names_for_preset(
                 preset,
                 clip_models,
-                exposed_clip_name=clip_name1,
-                legacy_clip_names=[clip_name1],
+                exposed_clip_name=exposed_clip_name,
+                legacy_clip_names=legacy_clip_names,
             )
             if not resolved_clip_names:
                 resolved_clip_names.append(
@@ -1686,8 +1787,13 @@ class GJJ_LazyImageStudio:
                         print(
                             f"  这可能导致维度不匹配错误。请确保 '{recommended}' 存在于 models/text_encoders 或 models/clip 目录中。"
                         )
+            vae_fallback = (
+                DEFAULT_VAE_NAME
+                if unet_name_is_linked and not vae_name_is_linked
+                else vae_name
+            )
             resolved_vae_name = _pick_available_name(
-                preset.get("vae_name", DEFAULT_VAE_NAME), vae_models, vae_name
+                preset.get("vae_name", DEFAULT_VAE_NAME), vae_models, vae_fallback
             )
             resolved_clip_type = resolve_clip_type(
                 unet_name,
@@ -1895,8 +2001,8 @@ class GJJ_LazyImageStudio:
                 "batch_size": int(batch_size),
                 "unet_name": str(unet_name or ""),
                 "unet_dtype": str(unet_dtype or ""),
-                "clip_name1": str(clip_name1 or ""),
-                "vae_name": str(vae_name or ""),
+                "clip_name1": str(resolved_clip_names[0] if resolved_clip_names else clip_name1 or ""),
+                "vae_name": str(resolved_vae_name or vae_name or ""),
                 "seed": int(seed),
                 "steps": int(steps),
                 "cfg": float(cfg),
@@ -1926,9 +2032,14 @@ class GJJ_LazyImageStudio:
             # 返回 UI 数据，包含图片和耗时
             return result_data
         except RuntimeError as exc:
-            _send_status(unique_id, f"执行失败：{str(exc).splitlines()[0]}")
+            first_line = str(exc).splitlines()[0]
+            if soft_test_mode:
+                return soft_error_result(exc)
+            _send_status(unique_id, f"执行失败：{first_line}")
             raise
         except Exception as exc:
+            if soft_test_mode:
+                return soft_error_result(exc)
             _send_status(unique_id, "执行失败")
             raise RuntimeError(
                 f"懒人图文集成一键生图执行失败。\n"

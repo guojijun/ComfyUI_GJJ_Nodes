@@ -6,10 +6,14 @@ const STYLE_ID = "gjj-common-execution-timer-style";
 const COLLAPSED_KEY = "gjj_common_execution_timer_collapsed";
 const MAX_VISIBLE_ROWS = 80;
 const REFRESH_MS = 250;
+const MEMORY_REFRESH_MS = 500;
 
 let currentRun = null;
 let panel = null;
 let refreshTimer = null;
+let memoryTimer = null;
+let memorySampleInFlight = false;
+let lastMemorySampleAt = 0;
 let panelClosedForRun = false;
 
 function nowMs() {
@@ -24,6 +28,75 @@ function formatElapsed(ms) {
 	const minutes = Math.floor(seconds / 60);
 	const rest = seconds - minutes * 60;
 	return `${minutes}m ${rest.toFixed(1)}s`;
+}
+
+function percent(used, total) {
+	const value = Number(total) > 0 ? (Number(used || 0) / Number(total)) * 100 : 0;
+	return Math.max(0, Math.min(100, value));
+}
+
+function formatStatValue(value, unit = "GB") {
+	const n = Number(value);
+	if (!Number.isFinite(n)) return "--";
+	return `${n.toFixed(n < 10 ? 2 : 1)}${unit || ""}`;
+}
+
+function emptyMemoryStats() {
+	return {
+		ram: { used: 0, total: 0, percent: 0, unit: "GB", label: "内存 RAM", detail: "等待数据" },
+		vram: { used: 0, total: 0, percent: 0, unit: "GB", label: "显存 VRAM", detail: "等待数据" },
+	};
+}
+
+function normalizeMemoryStats(payload = {}) {
+	const stats = emptyMemoryStats();
+	const memory = payload?.memory;
+	if (memory && !memory.error) {
+		const used = Number(memory.used || 0);
+		const total = Number(memory.total || 0);
+		const unit = String(memory.unit || "GB");
+		stats.ram = {
+			used,
+			total,
+			unit,
+			percent: Number.isFinite(Number(memory.percent)) ? Number(memory.percent) : percent(used, total),
+			label: "内存 RAM",
+			detail: `已用 ${formatStatValue(used, unit)} / ${formatStatValue(total, unit)}`,
+		};
+	}
+	const gpu = Array.isArray(payload?.gpu) ? payload.gpu : [];
+	const firstGpu = gpu.find((item) => item && !item.error) || null;
+	if (firstGpu) {
+		const used = Number(firstGpu.cached ?? firstGpu.allocated ?? 0);
+		const total = Number(firstGpu.total || 0);
+		const unit = String(firstGpu.unit || "GB");
+		stats.vram = {
+			used,
+			total,
+			unit,
+			percent: Number.isFinite(Number(firstGpu.percent)) ? Number(firstGpu.percent) : percent(used, total),
+			label: "显存 VRAM",
+			detail: `已占 ${formatStatValue(used, unit)} / ${formatStatValue(total, unit)}`,
+		};
+	}
+	return stats;
+}
+
+function peakText(stats) {
+	if (!stats) return "内存峰值 -- · 显存峰值 --";
+	const ram = stats.ram?.used > 0
+		? `${formatStatValue(stats.ram.used, stats.ram.unit)} (${Math.round(stats.ram.percent)}%)`
+		: "--";
+	const vram = stats.vram?.used > 0
+		? `${formatStatValue(stats.vram.used, stats.vram.unit)} (${Math.round(stats.vram.percent)}%)`
+		: "--";
+	return `内存峰值 ${ram} · 显存峰值 ${vram}`;
+}
+
+function inlinePeakText(stats) {
+	const ram = stats?.ram?.used > 0 ? formatStatValue(stats.ram.used, stats.ram.unit) : "--";
+	const vram = stats?.vram?.used > 0 ? formatStatValue(stats.vram.used, stats.vram.unit) : "--";
+	return `🟢内存峰值:${ram} 🟣显存峰值:${vram}`;
 }
 
 function eventPromptId(event) {
@@ -199,13 +272,63 @@ function ensureStyles() {
 			min-height: 0;
 		}
 		#${PANEL_ID} .gjj-exec-total {
-			display: grid;
-			grid-template-columns: 1fr auto;
-			gap: 8px;
+			display: block;
 			padding: 7px 9px;
 			color: #d8e7eb;
 			background: rgba(76, 211, 194, 0.09);
 			border-bottom: 1px solid rgba(132, 164, 176, 0.14);
+			font-variant-numeric: tabular-nums;
+		}
+		#${PANEL_ID} .gjj-exec-total-label {
+			min-width: 0;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+		#${PANEL_ID} .gjj-exec-memory {
+			display: flex;
+			flex-direction: column;
+			gap: 4px;
+			padding: 6px 9px 7px;
+			background: rgba(10, 20, 24, 0.58);
+			border-bottom: 1px solid rgba(132, 164, 176, 0.12);
+		}
+		#${PANEL_ID} .gjj-exec-memory-row {
+			display: grid;
+			grid-template-columns: 76px minmax(0, 1fr) 90px;
+			align-items: center;
+			gap: 7px;
+			color: #bccbd1;
+			font-size: 11px;
+			line-height: 1;
+		}
+		#${PANEL_ID} .gjj-exec-memory-name {
+			font-weight: 700;
+			white-space: nowrap;
+		}
+		#${PANEL_ID} .gjj-exec-memory-track {
+			height: 4px;
+			border-radius: 999px;
+			background: rgba(255, 255, 255, 0.08);
+			overflow: hidden;
+		}
+		#${PANEL_ID} .gjj-exec-memory-fill {
+			height: 100%;
+			width: 0%;
+			border-radius: inherit;
+			transition: width 0.24s ease;
+		}
+		#${PANEL_ID} .gjj-ram .gjj-exec-memory-fill {
+			background: linear-gradient(90deg, #24bd73, #63d991);
+		}
+		#${PANEL_ID} .gjj-vram .gjj-exec-memory-fill {
+			background: linear-gradient(90deg, #6e85ff, #a875ff);
+		}
+		#${PANEL_ID} .gjj-exec-memory-value {
+			text-align: right;
+			white-space: nowrap;
+			font-variant-numeric: tabular-nums;
+			color: #d9e8ed;
 		}
 		#${PANEL_ID} .gjj-exec-list {
 			overflow: auto;
@@ -327,18 +450,31 @@ function ensurePanel() {
 	const total = document.createElement("div");
 	total.className = "gjj-exec-total";
 	const totalLabel = document.createElement("div");
-	totalLabel.textContent = "⏱️ 总耗时";
-	const totalTime = document.createElement("div");
-	totalTime.className = "gjj-exec-time";
-	totalTime.textContent = "0ms";
-	total.append(totalLabel, totalTime);
+	totalLabel.className = "gjj-exec-total-label";
+	totalLabel.textContent = "⏰耗时:0ms 🟢内存峰值:-- 🟣显存峰值:--";
+	total.append(totalLabel);
+
+	const memory = document.createElement("div");
+	memory.className = "gjj-exec-memory";
+	memory.innerHTML = `
+		<div class="gjj-exec-memory-row gjj-ram">
+			<div class="gjj-exec-memory-name">内存 RAM</div>
+			<div class="gjj-exec-memory-track"><div class="gjj-exec-memory-fill"></div></div>
+			<div class="gjj-exec-memory-value">--</div>
+		</div>
+		<div class="gjj-exec-memory-row gjj-vram">
+			<div class="gjj-exec-memory-name">显存 VRAM</div>
+			<div class="gjj-exec-memory-track"><div class="gjj-exec-memory-fill"></div></div>
+			<div class="gjj-exec-memory-value">--</div>
+		</div>
+	`;
 
 	const list = document.createElement("div");
 	list.className = "gjj-exec-list";
-	body.append(total, list);
+	body.append(total, memory, list);
 	root.append(header, body);
 
-	root.__gjjTimer = { summary, totalTime, list, collapse };
+	root.__gjjTimer = { summary, totalLabel, memory, list, collapse };
 	if (localStorage.getItem(COLLAPSED_KEY) === "1") {
 		root.classList.add("gjj-collapsed");
 		collapse.textContent = "🔽";
@@ -376,6 +512,80 @@ function visibleRows() {
 		.slice(-MAX_VISIBLE_ROWS);
 }
 
+function updatePeakStats(sample) {
+	if (!currentRun || !sample) return;
+	for (const key of ["ram", "vram"]) {
+		const value = sample[key];
+		if (!value || !Number.isFinite(Number(value.used))) continue;
+		const old = currentRun.memoryPeak?.[key];
+		if (!old || Number(value.used) > Number(old.used || 0)) {
+			currentRun.memoryPeak[key] = { ...value };
+		}
+	}
+}
+
+function updateMemoryDom(state, sample) {
+	if (!state?.memory) return;
+	const stats = sample || currentRun?.memoryCurrent || emptyMemoryStats();
+	for (const [key, cls] of [["ram", ".gjj-ram"], ["vram", ".gjj-vram"]]) {
+		const row = state.memory.querySelector(cls);
+		const item = stats[key];
+		if (!row || !item) continue;
+		const fill = row.querySelector(".gjj-exec-memory-fill");
+		const value = row.querySelector(".gjj-exec-memory-value");
+		const p = Math.max(0, Math.min(100, Number(item.percent || 0)));
+		if (fill) fill.style.width = `${p}%`;
+		if (value) {
+			value.textContent = item.used > 0
+				? `${p.toFixed(1)}%`
+				: "--";
+			value.title = item.detail || "";
+		}
+	}
+}
+
+async function fetchMemorySample() {
+	const fetcher = api?.fetchApi ? api.fetchApi.bind(api) : fetch;
+	const response = await fetcher(`/gjj_memory_manager/stats?node=timer&t=${Date.now()}`);
+	if (!response.ok) {
+		throw new Error(`${response.status} ${response.statusText}`);
+	}
+	return normalizeMemoryStats(await response.json());
+}
+
+async function sampleMemory(force = false) {
+	if (!currentRun || memorySampleInFlight) return;
+	const at = nowMs();
+	if (!force && at - lastMemorySampleAt < MEMORY_REFRESH_MS) return;
+	lastMemorySampleAt = at;
+	memorySampleInFlight = true;
+	try {
+		const sample = await fetchMemorySample();
+		if (!currentRun) return;
+		currentRun.memoryCurrent = sample;
+		updatePeakStats(sample);
+		updateMemoryDom(ensurePanel().__gjjTimer, sample);
+		if (currentRun.finishedAt) {
+			render();
+		}
+	} catch (_) {
+		// 计时器保持静默降级；没有 MemoryManager 后端时只是不显示资源条数据。
+	} finally {
+		memorySampleInFlight = false;
+	}
+}
+
+function applyMemoryPayload(payload) {
+	if (!currentRun) return;
+	const sample = normalizeMemoryStats(payload);
+	currentRun.memoryCurrent = sample;
+	updatePeakStats(sample);
+	updateMemoryDom(ensurePanel().__gjjTimer, sample);
+	if (currentRun.finishedAt) {
+		render();
+	}
+}
+
 function render() {
 	const root = ensurePanel();
 	const state = root.__gjjTimer;
@@ -395,7 +605,10 @@ function render() {
 	const total = (currentRun.finishedAt || now) - currentRun.startedAt;
 	const rows = visibleRows();
 	state.summary.textContent = `${runLabel(currentRun.status)} · ${rows.length} 个节点 · 总耗时 ${formatElapsed(total)}`;
-	state.totalTime.textContent = formatElapsed(total);
+	const totalLabel = `⏰耗时:${formatElapsed(total)} ${inlinePeakText(currentRun.memoryPeak)}`;
+	state.totalLabel.textContent = totalLabel;
+	state.totalLabel.title = currentRun.finishedAt ? `工作流 ${peakText(currentRun.memoryPeak)}` : "";
+	updateMemoryDom(state, currentRun.memoryCurrent);
 	state.list.replaceChildren();
 
 	for (const row of rows) {
@@ -422,11 +635,15 @@ function render() {
 function startRefresh() {
 	stopRefresh();
 	refreshTimer = setInterval(render, REFRESH_MS);
+	memoryTimer = setInterval(() => void sampleMemory(false), MEMORY_REFRESH_MS);
+	void sampleMemory(true);
 }
 
 function stopRefresh() {
 	if (refreshTimer) clearInterval(refreshTimer);
 	refreshTimer = null;
+	if (memoryTimer) clearInterval(memoryTimer);
+	memoryTimer = null;
 }
 
 function ensureRow(id) {
@@ -502,6 +719,8 @@ function startRun(event) {
 		activeId: "",
 		nextOrder: 1,
 		rows: new Map(),
+		memoryCurrent: emptyMemoryStats(),
+		memoryPeak: emptyMemoryStats(),
 	};
 	ensurePanel();
 	render();
@@ -519,6 +738,7 @@ function finishRun(status, event) {
 	finishActive(status === "interrupted" ? "interrupted" : status === "error" ? "error" : "done", at, errorText);
 	currentRun.status = status;
 	currentRun.finishedAt = at;
+	void sampleMemory(true);
 	stopRefresh();
 	render();
 }
@@ -539,7 +759,7 @@ function markCached(event) {
 function summaryText() {
 	if (!currentRun) return "";
 	const total = (currentRun.finishedAt || nowMs()) - currentRun.startedAt;
-	const lines = [`GJJ计时器：${runLabel(currentRun.status)}，总耗时 ${formatElapsed(total)}`];
+	const lines = [`GJJ计时器：${runLabel(currentRun.status)}，总耗时 ${formatElapsed(total)}，工作流 ${peakText(currentRun.memoryPeak)}`];
 	for (const row of visibleRows()) {
 		lines.push(`${row.label} #${row.id}：${formatElapsed(rowDuration(row))}，${statusLabel(row.status)}`);
 	}
@@ -582,6 +802,7 @@ function setupListeners() {
 	api.addEventListener("execution_success", (event) => finishRun("success", event));
 	api.addEventListener("execution_error", (event) => finishRun("error", event));
 	api.addEventListener("execution_interrupted", (event) => finishRun("interrupted", event));
+	api.addEventListener("gjj_memory_manager_stats", (event) => applyMemoryPayload(event?.detail || {}));
 }
 
 app.registerExtension({

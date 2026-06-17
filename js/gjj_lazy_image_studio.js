@@ -966,6 +966,10 @@ function inferExternalOutputValue(link, targetWidgetName = "") {
 	if (!sourceNode || !outputName) {
 		return undefined;
 	}
+	const liveValue = sourceNode.__gjjLastOutputValues?.[Number(link.origin_slot || 0)];
+	if (liveValue !== undefined && liveValue !== null && String(liveValue) !== "") {
+		return liveValue;
+	}
 	if (sourceNode.comfyClass === "GJJ_ImageResizeKJv2") {
 		const cfg = readResizeNodeConfig(sourceNode);
 		if (cfg) {
@@ -994,7 +998,7 @@ function inferExternalOutputValue(link, targetWidgetName = "") {
 			return widget.value;
 		}
 	}
-	return sourceNode.__gjjLastOutputValues?.[Number(link.origin_slot || 0)];
+	return undefined;
 }
 
 function externalPanelSignature(node) {
@@ -1008,7 +1012,8 @@ function externalPanelSignature(node) {
 		const sourceNode = link?.origin_id != null ? app.graph.getNodeById?.(link.origin_id) : null;
 		const resizeCfg = sourceNode?.comfyClass === "GJJ_ImageResizeKJv2" ? readResizeNodeConfig(sourceNode) : null;
 		const widgetValues = (sourceNode?.widgets || []).map((widget) => [widget?.name, widget?.value]);
-		parts.push([widgetName, link?.origin_id, link?.origin_slot, resizeCfg, widgetValues]);
+		const liveValue = sourceNode?.__gjjLastOutputValues?.[Number(link?.origin_slot || 0)];
+		parts.push([widgetName, link?.origin_id, link?.origin_slot, resizeCfg, widgetValues, liveValue]);
 	}
 	return JSON.stringify(parts);
 }
@@ -1017,14 +1022,26 @@ function applyEffectiveParamsToPanel(node, params, onlyLinked = false) {
 	if (!params || typeof params !== "object") {
 		return;
 	}
+	const unetLinked = Boolean(getLinkedWidgetInput(node, "unet_name"));
 	for (const widgetName of PANEL_SYNC_WIDGETS) {
-		if (onlyLinked && !getLinkedWidgetInput(node, widgetName)) {
+		const allowPresetCompanion =
+			unetLinked && (widgetName === "clip_name1" || widgetName === "vae_name");
+		if (onlyLinked && !allowPresetCompanion && !getLinkedWidgetInput(node, widgetName)) {
 			continue;
 		}
 		if (!Object.prototype.hasOwnProperty.call(params, widgetName)) {
 			continue;
 		}
-		setWidgetValue(getWidget(node, widgetName), params[widgetName]);
+		const widget = getWidget(node, widgetName);
+		const oldValue = widget?.value;
+		setWidgetValue(widget, params[widgetName]);
+		if (widgetName === "unet_name" && String(oldValue || "") !== String(params[widgetName] || "")) {
+			try {
+				widget?.callback?.call(widget, params[widgetName], node, widget);
+			} catch (error) {
+				console.warn("[GJJ_LazyImageStudio] preset sync failed:", error);
+			}
+		}
 	}
 }
 

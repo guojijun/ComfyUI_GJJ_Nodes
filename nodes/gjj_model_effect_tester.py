@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 from typing import Any
 
@@ -76,36 +75,13 @@ def _matches_search_expression(text: str, groups: list[list[str]]) -> bool:
     return all(any(keyword in lowered for keyword in group) for group in groups)
 
 
-def _matches_subdir(text: str, subdir: str) -> bool:
-    subdir = _normalize_keyword(subdir).strip("/")
-    if not subdir:
-        return True
-    normalized = _normalize_keyword(text)
-    return normalized.startswith(f"{subdir}/") or normalized == subdir
-
-
 def _filtered_models(source: str, filter_keywords: str, subdir: str) -> list[str]:
     expression = _parse_search_expression(filter_keywords)
     return [
         name
         for name in _safe_model_list(source)
-        if _matches_subdir(name, subdir) and _matches_search_expression(name, expression)
+        if _matches_search_expression(name, expression)
     ]
-
-
-def _subdirs(source: str) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for name in _safe_model_list(source):
-        parts = str(name or "").replace("\\", "/").split("/")[:-1]
-        current = ""
-        for part in parts:
-            current = f"{current}/{part}".strip("/")
-            key = current.lower()
-            if current and key not in seen:
-                seen.add(key)
-                result.append(current)
-    return result
 
 
 async def get_model_effect_models(request):
@@ -115,7 +91,6 @@ async def get_model_effect_models(request):
     return web.json_response({
         "source": source,
         "models": _safe_model_list(source),
-        "subdirs": _subdirs(source),
     })
 
 
@@ -156,7 +131,7 @@ def _parse_state(raw_value: Any) -> dict[str, Any]:
         parsed = {}
     if isinstance(parsed, dict):
         state["filter"] = str(parsed.get("filter", state["filter"]) or "")
-        state["subdir"] = str(parsed.get("subdir", state["subdir"]) or "")
+        state["subdir"] = ""
         state["passed"] = _parse_key_list(parsed.get("passed", []))
         state["failed"] = _parse_key_list(parsed.get("failed", []))
         state["auto"] = _as_bool(parsed.get("auto"), True)
@@ -167,11 +142,7 @@ def _parse_state(raw_value: Any) -> dict[str, Any]:
 
 def _display_model_name(model_name: str) -> str:
     text = str(model_name or "").strip()
-    if not text:
-        return ""
-    base, ext = os.path.splitext(text)
-    display = base if ext else text
-    return re.sub(r"[\\/]+", "_", display)
+    return re.sub(r"[\\/]+", r"\\", text)
 
 
 def _combo_label(model_name: str, passed: set[str], failed: set[str]) -> str:
@@ -254,12 +225,11 @@ class GJJ_ModelEffectTester:
     FUNCTION = "build"
     DESCRIPTION = "按 checkpoints 或 diffusion_models 的过滤列表逐项输出当前模型、宽度、列表状态和名称注解图。"
     SEARCH_ALIASES = ["model test", "model effect", "checkpoint test", "unet test", "模型效果", "模型测试", "底模测试"]
-    RETURN_TYPES = ("COMBO", "INT", "STRING", "STRING", "IMAGE")
-    RETURN_NAMES = ("当前模型", "宽度", "当前模型名称", "过滤模型列表", "模型名称注解图")
+    RETURN_TYPES = ("STRING,COMBO", "INT", "STRING", "IMAGE")
+    RETURN_NAMES = ("当前模型", "宽度", "过滤模型列表", "模型名称注解图")
     OUTPUT_TOOLTIPS = (
-        "当前序号对应的模型相对路径。可连接到 GJJ_LazyImageStudio 的 UNET 主模型，或 GJJ_CheckpointDirectGenerator 的底模模型。",
+        "当前序号对应的模型相对路径。兼容 STRING 和 COMBO，可连接到 GJJ_LazyImageStudio 的 UNET 主模型，或 GJJ_CheckpointDirectGenerator 的底模模型。",
         "测试宽度，可连接到生成节点宽度输入。",
-        "当前模型的显示名称。",
         "过滤后的模型测试队列，每行一个模型，带 ✅/❌ 状态。",
         "当前模型名称注解图，可与生成结果拼版查看。",
     )
@@ -295,12 +265,8 @@ class GJJ_ModelEffectTester:
                         "max": 8192,
                         "step": 8,
                         "display_name": "输出宽度",
-                        "tooltip": "随当前模型一起输出，便于接入生成节点宽度。",
+                        "tooltip": "随当前模型一起输出，便于接入生成节点宽度；也作为模型名称注解图宽度。",
                     },
-                ),
-                "label_width": (
-                    "INT",
-                    {"default": 1024, "min": 64, "max": 8192, "step": 8, "display_name": "注解图宽度"},
                 ),
                 "label_height": (
                     "INT",
@@ -315,7 +281,7 @@ class GJJ_ModelEffectTester:
                     {
                         "default": json.dumps(DEFAULT_STATE, ensure_ascii=False),
                         "display_name": "测试状态",
-                        "tooltip": "前端面板维护的 JSON 状态；包含过滤词、子目录、通过/失败记录和自动执行开关。",
+                        "tooltip": "前端面板维护的 JSON 状态；包含过滤词、通过/失败记录和自动执行开关。",
                     },
                 ),
             }
@@ -327,7 +293,6 @@ class GJJ_ModelEffectTester:
         current_index=1,
         model_source="diffusion_models",
         width=1024,
-        label_width=1024,
         label_height=96,
         font_size=28,
         test_state="",
@@ -338,7 +303,6 @@ class GJJ_ModelEffectTester:
                 "current_index": int(current_index),
                 "model_source": str(model_source),
                 "width": int(width),
-                "label_width": int(label_width),
                 "label_height": int(label_height),
                 "font_size": int(font_size),
                 "state": state,
@@ -353,7 +317,6 @@ class GJJ_ModelEffectTester:
         current_index: int = 1,
         model_source: str = "diffusion_models",
         width: int = 1024,
-        label_width: int = 1024,
         label_height: int = 96,
         font_size: int = 28,
         test_state: str = "",
@@ -379,7 +342,7 @@ class GJJ_ModelEffectTester:
             effective_index,
             total_count,
             current_name,
-            label_width,
+            width,
             label_height,
             font_size,
         )
@@ -408,7 +371,6 @@ class GJJ_ModelEffectTester:
             "result": (
                 current_model,
                 int(width),
-                current_name,
                 "\n".join(_combo_label(name, passed, failed) for name in models),
                 label_image,
             ),
