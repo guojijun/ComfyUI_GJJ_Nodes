@@ -243,6 +243,18 @@ def _safe_filename_list(category: str) -> list[str]:
 def _pick_available_name(preferred: str, available: Iterable[str]) -> str:
 	_ensure_runtime_dependencies()
 	return pick_available_model_name(preferred, available, allow_first=False)
+
+
+def _candidate_available_names(category: str, candidates: Iterable[str]) -> list[str]:
+	available = _safe_filename_list(category)
+	resolved_names: list[str] = []
+	for candidate in candidates:
+		resolved = _pick_available_name(candidate, available)
+		if resolved and resolved not in resolved_names:
+			resolved_names.append(resolved)
+	return resolved_names
+
+
 def _pick_first_candidate(category: str, candidates: Iterable[str], label: str, required: bool = True) -> str:
     available = _safe_filename_list(category)
     # 遍历候选模型
@@ -263,6 +275,36 @@ def _pick_first_candidate(category: str, candidates: Iterable[str], label: str, 
     error_msg = f"\033[91m\033[1m[✗] 未找到 {label}，候选项：{candidate_text}\033[0m"
     print(error_msg)
     raise RuntimeError(f"未找到{label}，候选项：{candidate_text}")
+
+
+def _get_diffusion_model_object(model: Any) -> Any:
+	try:
+		if hasattr(model, "get_model_object"):
+			return model.get_model_object("diffusion_model")
+	except Exception:
+		pass
+	try:
+		return getattr(getattr(model, "model", None), "diffusion_model", None)
+	except Exception:
+		return None
+
+
+def _validate_ltx_model_structure(model: Any, model_name: str = "") -> None:
+	diffusion_model = _get_diffusion_model_object(model)
+	if diffusion_model is None:
+		raise RuntimeError("加载结果中没有 diffusion_model，无法作为 LTX 主模型使用。")
+	blocks = getattr(diffusion_model, "transformer_blocks", None)
+	if blocks is None:
+		model_type = type(diffusion_model).__name__
+		hint = ""
+		if model_type == "WanModel" or hasattr(diffusion_model, "blocks"):
+			hint = " 当前加载到的是 Wan 类模型，请在 LTX 节点的“LTX主模型”里选择 ltx-2.3-22b / ltx23 / ltx 模型，不要连接或选择 Wan 模型。"
+		raise RuntimeError(f"{model_name or '当前模型'} 不是 LTX 模型结构：{model_type} 缺少 transformer_blocks。{hint}".strip())
+	try:
+		if len(blocks) <= 0:
+			raise RuntimeError(f"{model_name or '当前模型'} 的 transformer_blocks 为空。")
+	except TypeError:
+		pass
 
 def _is_ltx_transition_lora_name(lora_name: Any) -> bool:
 	normalized = _normalize_text(str(lora_name or ""))
@@ -2617,13 +2659,37 @@ def run_ltx23_multiref_video(
 			for fallback_ckpt in ("ltx-2.3-22b", "ltx23", "ltx"):
 				if fallback_ckpt not in ckpt_candidates:
 					ckpt_candidates.append(fallback_ckpt)
-			resolved_ckpt = _pick_first_candidate("diffusion_models", tuple(ckpt_candidates), "LTX 主模型")
+			available_ckpts = _candidate_available_names("diffusion_models", tuple(ckpt_candidates))
+			if not available_ckpts:
+				candidate_text = " / ".join(str(item) for item in ckpt_candidates)
+				raise RuntimeError(f"未找到LTX 主模型，候选项：{candidate_text}")
 			resolved_video_vae = _pick_first_candidate("vae",("video_vae",), "LTX 视频 VAE")
 			resolved_audio_vae = _pick_first_candidate("vae",("audio_vae",), "LTX 音频 VAE")
 			resolved_text_encoder = _pick_first_candidate("text_encoders",("gemma_3_12B_it_fp8_e4m3fn.safetensors", "gemma_3_12B_it.safetensors", "gemma-3-12b-it-qat-q4_0-unquantized_readout_proj/model/model.safetensors", "gemma-3-12b-it-qat-q4_0-unquantized_readout_proj", "gemma_3_12B_it"), "LTX 文本编码器")
 			resolved_latent_upscaler = _pick_first_candidate("latent_upscale_models",("ltx-2.3-spatial-upscaler",), "LTX latent 放大模型")
 
-			model = _load_ltx_main_model(resolved_ckpt)
+			model = None
+			resolved_ckpt = ""
+			model_errors: list[str] = []
+			for ckpt_name in available_ckpts:
+				try:
+					candidate_model = _load_ltx_main_model(ckpt_name)
+					_validate_ltx_model_structure(candidate_model, ckpt_name)
+					model = candidate_model
+					resolved_ckpt = ckpt_name
+					print(f"\033[93m\033[1m[✓] 成功加载 LTX 主模型\033[0m")
+					print(f"\033[0m  └─ 模型分类：diffusion_models\033[0m")
+					print(f"\033[0m  └─ 实际使用：{resolved_ckpt}\033[0m")
+					break
+				except Exception as exc:
+					model_errors.append(f"{ckpt_name}：{exc}")
+					_send_status(unique_id, f"跳过不可用的 LTX 主模型候选：{ckpt_name}（{exc}）")
+					try:
+						print(f"[GJJ LTX2.3] skip invalid main model candidate: {ckpt_name}: {exc}", flush=True)
+					except Exception:
+						pass
+			if model is None:
+				raise RuntimeError("未能加载可用的 LTX 主模型：" + "；".join(model_errors[-6:]))
 			clip = _load_ltx_text_encoder(resolved_text_encoder, resolved_ckpt)
 			video_vae = _load_video_vae(resolved_video_vae)
 			audio_vae = _load_audio_vae(resolved_audio_vae)

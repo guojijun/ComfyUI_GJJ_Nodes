@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 import uuid
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,8 @@ from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
 
 NODE_NAME = "GJJ_MultiVideoLoader"
-VIDEO_FRAME_QUEUE_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
+VIDEO_FRAME_QUEUE_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE,VIDEO"
+FIRST_LAST_FRAME_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
 VIDEO_API_PATH = "/gjj/input_videos"
 VIDEO_UPLOAD_API_PATH = "/gjj/upload_video"
 VIDEO_META_API_PATH = "/gjj/video_meta"
@@ -44,6 +46,8 @@ OPTIONAL_OUTPUT_DEFS = {
     "height": {"name": "高度", "type": "INT"},
     "video_format": {"name": "视频格式", "type": "STRING"},
     "audio": {"name": "音频", "type": "AUDIO"},
+    "first_last_frames": {"name": "首尾帧", "type": FIRST_LAST_FRAME_TYPE},
+    "processed_video": {"name": "处理后视频", "type": "VIDEO"},
 }
 OPTIONAL_OUTPUT_KEYS = list(OPTIONAL_OUTPUT_DEFS.keys())
 
@@ -640,6 +644,31 @@ def _slice_external_frames(
     return frames.index_select(0, index_tensor).contiguous()
 
 
+def _range_first_last_indices(total_frames: int, start_frame: int, end_frame: int) -> tuple[int, int]:
+    total = max(0, int(total_frames))
+    if total <= 0:
+        return 0, 0
+    start = max(0, min(int(start_frame), total - 1))
+    stop = int(end_frame) if int(end_frame) > 0 else total - 1
+    stop = max(start, min(stop, total - 1))
+    return start, stop
+
+
+def _first_last_from_tensor_range(
+    frames: torch.Tensor,
+    start_frame: int,
+    end_frame: int,
+    width: int = 0,
+    height: int = 0,
+) -> torch.Tensor:
+    if not isinstance(frames, torch.Tensor) or frames.ndim != 4 or int(frames.shape[0]) <= 0:
+        return empty_image_tensor().repeat(2, 1, 1, 1)
+    first_index, last_index = _range_first_last_indices(int(frames.shape[0]), start_frame, end_frame)
+    index_tensor = torch.tensor([first_index, last_index], dtype=torch.long, device=frames.device)
+    selected = frames.index_select(0, index_tensor).contiguous()
+    return _resize_image_tensor(selected, width, height)
+
+
 def _slice_audio_window(audio: dict[str, Any] | None, start_seconds: float, duration_seconds: float) -> dict[str, Any] | None:
     if not isinstance(audio, dict):
         return None
@@ -841,6 +870,52 @@ def decode_video_cv2(
     }
 
 
+def decode_video_frame_pair(
+    path: Path,
+    start_frame: int,
+    end_frame: int,
+    width: int = 0,
+    height: int = 0,
+) -> torch.Tensor:
+    meta = video_meta(path)
+    fps = float(meta.get("fps") or 24.0)
+    source_width = int(meta.get("width") or 0)
+    source_height = int(meta.get("height") or 0)
+    total = int(meta.get("frames") or 0)
+    first_index, last_index = _range_first_last_indices(total, start_frame, end_frame)
+    output_width, output_height = _target_output_size(source_width, source_height, int(width), int(height))
+
+    decoded: list[torch.Tensor] = []
+    for frame_index in (first_index, last_index):
+        filters = [f"select=eq(n\\,{int(frame_index)})"]
+        if output_width != source_width or output_height != source_height:
+            filters.append(f"scale={output_width}:{output_height}:flags=bicubic")
+        cmd = [
+            _get_ffmpeg_path(),
+            "-hide_banner",
+            "-loglevel", "error",
+            "-i", str(path),
+            "-an",
+            "-sn",
+            "-frames:v", "1",
+            "-vf", ",".join(filters),
+            "-vsync", "vfr",
+            "-f", "image2pipe",
+            "-pix_fmt", "rgb24",
+            "-vcodec", "rawvideo",
+            "-",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, timeout=60)
+        if proc.returncode != 0 or not proc.stdout:
+            stderr_msg = proc.stderr.decode("utf-8", errors="ignore") if proc.stderr else ""
+            raise RuntimeError(f"FFmpeg 读取首尾帧失败：{path.name} frame={frame_index} {stderr_msg}")
+        frame_size = int(output_width) * int(output_height) * 3
+        if len(proc.stdout) < frame_size:
+            raise RuntimeError(f"FFmpeg 首尾帧输出数据不完整：{path.name} frame={frame_index}")
+        decoded.append(_frames_tensor_from_rgb_bytes(proc.stdout[:frame_size], 1, output_width, output_height))
+    return torch.cat(decoded, dim=0).contiguous()
+
+
 def _hidden_panel_widget(extra: dict[str, Any] | None = None) -> dict[str, Any]:
     """Keep backend inputs serializable while letting the JS DOM panel render them.
 
@@ -858,6 +933,28 @@ def _hidden_panel_widget(extra: dict[str, Any] | None = None) -> dict[str, Any]:
     return options
 
 
+def _create_processed_video(frames: torch.Tensor, fps: float, audio: dict[str, Any] | None = None):
+    if not isinstance(frames, torch.Tensor) or frames.ndim != 4 or int(frames.shape[0]) <= 0:
+        raise RuntimeError("处理后 VIDEO 输出失败：没有可用的视频帧。")
+    safe_frames = frames.float().clamp(0.0, 1.0)
+    if int(safe_frames.shape[-1]) == 1:
+        safe_frames = safe_frames.repeat(1, 1, 1, 3)
+    elif int(safe_frames.shape[-1]) > 3:
+        safe_frames = safe_frames[..., :3]
+    try:
+        from comfy_api.latest import InputImpl, Types
+    except Exception as exc:
+        raise RuntimeError(f"处理后 VIDEO 输出失败：当前 ComfyUI 缺少官方 VIDEO 接口：{exc}") from exc
+    frame_rate = Fraction(float(max(0.01, fps))).limit_denominator(1000)
+    return InputImpl.VideoFromComponents(
+        Types.VideoComponents(
+            images=safe_frames.contiguous(),
+            audio=audio,
+            frame_rate=frame_rate,
+        )
+    )
+
+
 class GJJ_MultiVideoLoader:
     CATEGORY = "GJJ"
     FUNCTION = "load_videos"
@@ -868,6 +965,8 @@ class GJJ_MultiVideoLoader:
     # 否则例如“音频”落在静态 STRING 槽位时会被严格 AUDIO 输入拒绝。
     RETURN_TYPES = (
         VIDEO_FRAME_QUEUE_TYPE,  # 视频帧队列
+        any_type,
+        any_type,
         any_type,
         any_type,
         any_type,
@@ -891,9 +990,11 @@ class GJJ_MultiVideoLoader:
         "高度",
         "视频格式",
         "音频",
+        "首尾帧",
+        "处理后视频",
     )
     OUTPUT_TOOLTIPS = (
-        "按选择顺序解码后拼接的帧序列，类型为 GJJ_BATCH_IMAGE,IMAGE，兼容 GJJ 批量帧队列和普通 IMAGE 输入。",
+        "按选择顺序解码后拼接的帧序列，类型为 GJJ_BATCH_IMAGE,IMAGE,VIDEO，兼容 GJJ 批量帧队列、普通 IMAGE 和 VIDEO 输入口。",
         "首帧预览图片。",
         "尾帧预览图片。",
         "视频信息JSON字符串。",
@@ -904,6 +1005,8 @@ class GJJ_MultiVideoLoader:
         "输出高度。",
         "视频格式参数。",
         "从所选视频音轨提取并按选择顺序拼接的 AUDIO；没有音轨时输出同段静音。",
+        "视频序列首帧和尾帧拼成的 2 张 IMAGE 批次，类型为 GJJ_BATCH_IMAGE,IMAGE。",
+        "按当前宽高、起止帧、抽帧间隔、最大帧数处理后的官方 VIDEO，包含同步裁剪/拼接后的音频。",
     )
 
     @classmethod
@@ -1250,7 +1353,8 @@ class GJJ_MultiVideoLoader:
     ):
         selected = recover_selected_videos(None, extra_pnginfo, unique_id)
         enabled_outputs = recover_enabled_outputs(None, extra_pnginfo, unique_id)
-        audio_enabled = "audio" in set(enabled_outputs or [])
+        enabled_output_set = set(enabled_outputs or [])
+        audio_enabled = bool({"audio", "processed_video"} & enabled_output_set)
 
         def _safe_int(value, default=0, min_val=0, max_val=999999):
             try:
@@ -1274,6 +1378,7 @@ class GJJ_MultiVideoLoader:
         frame_stride_val = _safe_int(frame_stride, 1, 1, 1000)
         max_frames_val = _safe_int(max_frames, 240, 1, 100000)
         _ = (filter_keyword, filter_directory, refresh_interval, auto_refresh)
+        first_last_frames = None
 
         external_video = self._coerce_external_video(input_frames)
         if external_video is not None:
@@ -1289,6 +1394,7 @@ class GJJ_MultiVideoLoader:
                 max_frames_val,
             )
             batch_output = _resize_image_tensor(external_frames, target_width, target_height)
+            first_last_frames = _first_last_from_tensor_range(raw_external_frames, start_frame_val, end_frame_val, target_width, target_height)
             selected_indices = _selected_frame_indices(
                 int(raw_external_frames.shape[0]),
                 start_frame_val,
@@ -1347,6 +1453,11 @@ class GJJ_MultiVideoLoader:
                     width=target_width,
                     height=target_height,
                 )
+                try:
+                    pair = decode_video_frame_pair(path, start_frame_val, end_frame_val, target_width, target_height)
+                    first_last_frames = pair if first_last_frames is None else torch.cat([first_last_frames[:1], pair[-1:]], dim=0).contiguous()
+                except Exception as error:
+                    print(f"[GJJ_MultiVideoLoader] 独立读取首尾帧失败，回退到输出队列首尾: {error}")
                 if audio_enabled:
                     audio_start, audio_duration = _audio_window_from_meta(
                         meta,
@@ -1385,6 +1496,8 @@ class GJJ_MultiVideoLoader:
             output_audio = concat_audio_segments(audio_segments) if audio_enabled else None
         first_frame = batch_output[0:1].contiguous() if int(batch_output.shape[0]) > 0 else empty_image_tensor()
         last_frame = batch_output[-1:].contiguous() if int(batch_output.shape[0]) > 0 else empty_image_tensor()
+        if first_last_frames is None:
+            first_last_frames = torch.cat([first_frame, last_frame], dim=0).contiguous()
         final_width = int(batch_output.shape[2]) if int(batch_output.ndim) == 4 else 0
         final_height = int(batch_output.shape[1]) if int(batch_output.ndim) == 4 else 0
 
@@ -1393,6 +1506,14 @@ class GJJ_MultiVideoLoader:
             preview_tensor = batch_output
             preview_fps = max(1.0, float(output_fps or _effective_output_fps(source_fps, frame_stride_val)))
             preview_entries = _save_sequence_webp_preview(preview_tensor, preview_fps)
+
+        processed_video = None
+        if "processed_video" in enabled_output_set:
+            processed_video = _create_processed_video(
+                batch_output,
+                float(output_fps or _effective_output_fps(source_fps, frame_stride_val)),
+                output_audio if output_audio is not None else empty_audio(total_duration),
+            )
 
         info = {
             "videos": video_infos,
@@ -1421,7 +1542,10 @@ class GJJ_MultiVideoLoader:
             "height": int(final_height),
             "video_format": output_format,
             "audio": output_audio if output_audio is not None else empty_audio(0.0),
+            "first_last_frames": first_last_frames,
         }
+        if "processed_video" in enabled_output_set:
+            optional_values["processed_video"] = processed_video
         
         # 返回真正显示的动态输出，顺序必须与前端 enabled_outputs JSON 配置一致。
         # 前端会把用户当前选择序列化为 {outputs:[{key,name,type}]}，这里只按 key 取值，

@@ -4,15 +4,17 @@ const { app } = window.comfyAPI.app;
 
 // ─── Constants ───
 const NODE_NAME = "GJJ_VideoSegmentEditor";
-const CANVAS_HEIGHT = 140;
+const CANVAS_HEIGHT = 104;
 const RULER_HEIGHT = 24;
 const BLOCK_Y = RULER_HEIGHT + 4;
-const BLOCK_H = 56;
+const BLOCK_H = 48;
 const HANDLE_HIT_PX = 6;
 const MIN_DURATION = 0.01;
+const DEFAULT_PREVIEW_ASPECT = 16 / 9;
+const FRAME_SNAP = 8;
 const MIN_VISIBLE_OUTPUTS = 2; // 1个分段列表 + 1个视频片段
 const SEGMENT_LIST_NAME = "分段列表";
-const HIDDEN_WIDGET_NAMES = ["segments_json", "preview_text", "preview_kind", "preview_video", "preview_frame_rate", "preview_total_frames", "segment_count"];
+const HIDDEN_WIDGET_NAMES = ["video_file", "segments_json", "refresh_nonce", "preview_text", "preview_kind", "preview_video", "preview_frame_rate", "preview_total_frames", "segment_count"];
 
 function refreshNodeCanvas(node) {
 	if (!node) return;
@@ -53,6 +55,7 @@ async function queueOnlyCurrentNode(node) {
 
 	const graph = node.graph || app.graph;
 	const allNodes = graph?._nodes || app.graph?._nodes || [];
+	const upstreamNodeIds = collectUpstreamNodeIds(node);
 
 	const savedModes = [];
 	const oldSelectedNodes = app.canvas?.selected_nodes;
@@ -61,6 +64,7 @@ async function queueOnlyCurrentNode(node) {
 	try {
 		for (const n of allNodes) {
 			if (!n || n === node) continue;
+			if (upstreamNodeIds.has(String(n.id))) continue;
 
 			if (isExecutionOutputNode(n)) {
 				savedModes.push([n, n.mode]);
@@ -97,12 +101,39 @@ async function queueOnlyCurrentNode(node) {
 	}
 }
 
+function collectUpstreamNodeIds(node) {
+	const graph = node?.graph || app.graph;
+	const keep = new Set();
+	const visit = (n) => {
+		if (!n?.inputs || keep.has(String(n.id))) return;
+		for (const input of n.inputs) {
+			const linkId = input?.link;
+			if (linkId == null) continue;
+			const link = graph?.links?.[linkId] || app.graph?.links?.[linkId];
+			if (!link || link.origin_id == null) continue;
+			const originId = String(link.origin_id);
+			keep.add(originId);
+			const originNode = graph?.getNodeById?.(link.origin_id) || (graph?._nodes || []).find(x => String(x?.id) === originId);
+			if (originNode) visit(originNode);
+		}
+	};
+	visit(node);
+	return keep;
+}
+
 const SEGMENT_COLORS = [
 	"#4f8edc", "#e07b3a", "#5cb85c", "#d9534f", "#9b6cd6",
 	"#a07060", "#e377c2", "#7f7f7f", "#c4c447", "#3fbac4",
 ];
 
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+
+function getEditorHeightForWidth(node) {
+	const width = Math.max(360, Number(node?.size?.[0] || 420) - 34);
+	const aspect = Number(node?.__gjjPreviewAspect || DEFAULT_PREVIEW_ASPECT);
+	const previewHeight = Math.max(140, Math.round(width / Math.max(0.1, aspect)));
+	return previewHeight + CANVAS_HEIGHT + 86;
+}
 
 function pickColor(existingColors) {
 	for (const c of SEGMENT_COLORS) if (!existingColors.has(c)) return c;
@@ -113,15 +144,7 @@ function pickColor(existingColors) {
 
 function hideWidget(w) {
 	if (!w) return;
-	if (!w.__gjjVideoSegHiddenState) {
-		w.__gjjVideoSegHiddenState = { type: w.type, draw: w.draw, computeSize: w.computeSize };
-	}
-	w.type = "hidden";
-	w.hidden = true;
-	w.draw = () => {};
-	w.computeSize = () => [0, -4];
-	if (w.inputEl?.style) w.inputEl.style.display = "none";
-	if (w.element?.style) w.element.style.display = "none";
+	GJJ_Utils.hideWidget(w);
 }
 
 // ─── Parsing ───
@@ -129,7 +152,10 @@ function parseSegments(text) {
 	try {
 		const parsed = JSON.parse(text);
 		if (Array.isArray(parsed)) {
-			return parsed.filter(s => typeof s === "object" && s !== null && ("start" in s || "end" in s));
+			return parsed.filter(s => {
+				if (typeof s !== "object" || s === null) return false;
+				return "start" in s || "end" in s || "start_frame" in s || "end_frame" in s;
+			});
 		}
 		return [];
 	} catch (e) {
@@ -138,6 +164,10 @@ function parseSegments(text) {
 }
 
 function videoDataToUrl(previewVideo) {
+	previewVideo = unwrapFirst(previewVideo);
+	if (previewVideo && !Array.isArray(previewVideo) && typeof previewVideo === "object") {
+		previewVideo = [previewVideo];
+	}
 	if (!previewVideo || !Array.isArray(previewVideo) || previewVideo.length === 0) return null;
 	const data = previewVideo[0];
 	if (!data?.filename) return null;
@@ -148,7 +178,28 @@ function videoDataToUrl(previewVideo) {
 	const filename = data.filename;
 
 	// 使用相对路径，避免跨域问题
-	return `/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(type)}&subfolder=${encodeURIComponent(subfolder)}`;
+	const rand = data.mtime_ns || data.ts || Date.now();
+	return `/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(type)}&subfolder=${encodeURIComponent(subfolder)}&t=${encodeURIComponent(rand)}`;
+}
+
+function videoFileToUrl(filename, type = "input") {
+	if (!filename || filename === "[不加载]") return null;
+	const normalized = String(filename).replaceAll("\\", "/");
+	const parts = normalized.split("/");
+	const name = parts.pop() || normalized;
+	const subfolder = parts.join("/");
+	return `/view?filename=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}&subfolder=${encodeURIComponent(subfolder)}&t=${encodeURIComponent(Date.now())}`;
+}
+
+function hasExternalVideoConnection(node) {
+	const input = node?.inputs?.find(i => i?.name === "video" || i?.label === "外部视频" || i?.localized_name === "外部视频");
+	return !!(input && input.link != null);
+}
+
+function unwrapFirst(value) {
+	let current = value;
+	while (Array.isArray(current) && current.length === 1) current = current[0];
+	return current;
 }
 
 // ─── Output Management ───
@@ -267,6 +318,10 @@ class VideoSegmentEditorWidget {
 		this.frameRate = 24;
 		this.totalFrames = 0;
 		this.previewImageUrl = null;
+		this._previewFallbackUrl = null;
+		this._pendingSeekTime = null;
+		this._seekRaf = null;
+		this.previewAspect = Number(node.__gjjPreviewAspect || DEFAULT_PREVIEW_ASPECT);
 
 		this.selectedIndex = 0;
 		this.hoverIndex = -1;
@@ -274,6 +329,7 @@ class VideoSegmentEditorWidget {
 		this.dragHandle = -1;
 		this.dragStart = null;
 		this.dragBaseline = null;
+		this.loopSelectedSegment = false;
 
 		// Animation
 		this._displayedX = new Map();
@@ -299,6 +355,118 @@ class VideoSegmentEditorWidget {
 		return `${secs.toFixed(1)}`;
 	}
 
+	snapFrame(value) {
+		const frame = Math.max(1, Math.round(Number(value) || 1));
+		return 1 + Math.round((frame - 1) / FRAME_SNAP) * FRAME_SNAP;
+	}
+
+	secondsToFrame(seconds) {
+		return this.snapFrame((Number(seconds) || 0) * (this.frameRate || 24) + 1);
+	}
+
+	frameToSeconds(frame) {
+		const fps = this.frameRate || 24;
+		return fps > 0 ? (Math.max(1, Number(frame) || 1) - 1) / fps : 0;
+	}
+
+	frameEndToSeconds(frame) {
+		const fps = this.frameRate || 24;
+		return fps > 0 ? Math.max(1, Number(frame) || 1) / fps : 0;
+	}
+
+	getTotalFrameCount() {
+		const explicitTotal = Number(this.totalFrames || 0);
+		if (explicitTotal > 0) return Math.max(1, Math.round(explicitTotal));
+		if (this.duration > 0) return Math.max(1, Math.round(this.duration * (this.frameRate || 24)));
+		const segmentMax = Math.max(0, ...this.segments.map(seg => Number(seg?.end_frame || 0)));
+		if (segmentMax > 0) return Math.max(1, Math.round(segmentMax));
+		return Math.max(1, Math.round(60 * (this.frameRate || 24)));
+	}
+
+	getMaxAnchorFrame() {
+		const total = this.getTotalFrameCount();
+		return Math.max(1, 1 + Math.floor((total - 1) / FRAME_SNAP) * FRAME_SNAP);
+	}
+
+	frameToX(frame) {
+		const width = this._cssWidth || 1;
+		const maxAnchor = this.getMaxAnchorFrame();
+		if (maxAnchor <= 1) return 0;
+		return ((Math.max(1, Number(frame) || 1) - 1) / (maxAnchor - 1)) * width;
+	}
+
+	xToFrame(x) {
+		const width = this._cssWidth || 1;
+		const maxAnchor = this.getMaxAnchorFrame();
+		if (width <= 0 || maxAnchor <= 1) return 1;
+		return this.snapFrame(1 + (clamp(x, 0, width) / width) * (maxAnchor - 1));
+	}
+
+	normalizeSegmentFrames(seg) {
+		const total = this.getTotalFrameCount();
+		let startFrame = ("start_frame" in seg) ? this.snapFrame(seg.start_frame) : this.secondsToFrame(seg.start || 0);
+		let endFrame = ("end_frame" in seg) ? this.snapFrame(seg.end_frame) : this.secondsToFrame(seg.end || this.duration || 0);
+
+		const maxAnchor = this.getMaxAnchorFrame();
+		if (maxAnchor <= 1) {
+			seg.start_frame = 1;
+			seg.end_frame = 1;
+			seg.start = 0;
+			seg.end = this.frameEndToSeconds(1);
+			return seg;
+		}
+		startFrame = clamp(startFrame, 1, Math.max(1, maxAnchor - FRAME_SNAP));
+		endFrame = clamp(endFrame, startFrame + FRAME_SNAP, maxAnchor);
+
+		seg.start_frame = startFrame;
+		seg.end_frame = endFrame;
+		seg.start = this.frameToSeconds(startFrame);
+		seg.end = this.frameEndToSeconds(endFrame);
+		return seg;
+	}
+
+	normalizeAllSegmentFrames() {
+		for (const seg of this.segments) {
+			this.normalizeSegmentFrames(seg);
+		}
+	}
+
+	getSavedSegmentsText() {
+		const widgetText = this.node.widgets?.find(w => w.name === "segments_json")?.value;
+		if (parseSegments(widgetText).length) return widgetText;
+		const propText = this.node.properties?.segments;
+		if (parseSegments(propText).length) return propText;
+		return "";
+	}
+
+	restoreStateFromNode() {
+		const savedSegments = parseSegments(this.getSavedSegmentsText());
+		if (savedSegments.length) {
+			this.segments = savedSegments;
+			this.selectedIndex = clamp(this.selectedIndex, 0, this.segments.length - 1);
+			const colors = new Set();
+			for (const seg of this.segments) {
+				if (!seg.color) seg.color = pickColor(colors);
+				colors.add(seg.color);
+			}
+			this.syncOutputs();
+		}
+		this.updateLabels();
+		this.updateTotalLabel();
+		this.render();
+	}
+
+	serializeSegments() {
+		this.normalizeAllSegmentFrames();
+		return this.segments.map((seg, i) => ({
+			start_frame: Number(seg.start_frame || 0),
+			end_frame: Number(seg.end_frame || (FRAME_SNAP + 1)),
+			frames: Math.max(1, Number(seg.end_frame || 1) - Number(seg.start_frame || 1) + 1),
+			label: seg.label || `片段 ${i + 1}`,
+			...(seg.color ? { color: seg.color } : {}),
+		}));
+	}
+
 	buildDOM() {
 		// 清空容器并使用flex布局
 		this.container.innerHTML = "";
@@ -306,19 +474,43 @@ class VideoSegmentEditorWidget {
 			display: flex; flex-direction: column; gap: 6px;
 			padding: 6px 8px; box-sizing: border-box;
 			font-family: sans-serif; font-size: 11px; color: #ddd;
-			width: 100%;
+			width: 100%; min-width: 0;
 		`;
+
+		this.fileInput = document.createElement("input");
+		this.fileInput.type = "file";
+		this.fileInput.accept = "video/*";
+		this.fileInput.style.display = "none";
+		this.container.appendChild(this.fileInput);
 
 		// 视频预览区域（带播放器）
 		const videoPreview = document.createElement('div');
 		videoPreview.className = 'gjj-video-preview';
-		videoPreview.style.cssText = 'width: 100%; height: 160px; border-radius: 4px; overflow: hidden; background: #111; position: relative; flex-shrink: 0;';
-		videoPreview.innerHTML = '<div style="height: 160px; display: flex; align-items: center; justify-content: center; color: #888; font-size: 12px;">加载中...</div>';
+		videoPreview.style.cssText = [
+			"width: 100%",
+			"height: 160px",
+			"border-radius: 4px",
+			"overflow: hidden",
+			"background: #000",
+			"position: relative",
+			"flex-shrink: 0",
+			"box-sizing: border-box",
+		].join(";");
 		this.container.appendChild(videoPreview);
 
 		// 保存视频播放器引用
 		this.videoPreviewEl = videoPreview;
-		this.videoPlayer = null;
+		this.videoPlayer = document.createElement("video");
+		this.videoPlayer.controls = true;
+		this.videoPlayer.preload = "metadata";
+		this.videoPlayer.controlsList = "nodownload noremoteplayback";
+		this.videoPlayer.style.cssText = "width:100%;height:100%;object-fit:contain;background:#000;display:none;";
+		videoPreview.appendChild(this.videoPlayer);
+
+		this.emptyPreview = document.createElement("div");
+		this.emptyPreview.textContent = "暂无预览";
+		this.emptyPreview.style.cssText = "height:100%;display:flex;align-items:center;justify-content:center;color:#888;font-size:12px;";
+		videoPreview.appendChild(this.emptyPreview);
 
 		// Canvas编辑区域 - 直接使用canvas，不使用额外容器
 		this.canvas = document.createElement('canvas');
@@ -347,20 +539,24 @@ class VideoSegmentEditorWidget {
 
 		// 控制按钮
 		const controls = document.createElement('div');
-		controls.style.cssText = 'display: flex; gap: 6px; align-items: center;';
+		controls.style.cssText = 'display: flex; gap: 6px; align-items: center; flex-wrap: wrap;';
 
-		this.addBtn = this.makeButton("+ 添加", "在末尾添加一个新分段");
-		this.distributeBtn = this.makeButton("均分", "将所有分段均匀分布到整个时长");
-		this.deleteBtn = this.makeButton("删除", "删除当前选中的分段（至少保留1个）");
+		this.openBtn = this.makeButton("📁 打开", "打开任意视频，并复制到 ComfyUI input 目录");
+		this.addBtn = this.makeButton("➕ 添加", "在末尾添加一个新分段");
+		this.distributeBtn = this.makeButton("⚖️ 均分", "将所有分段均匀分布到整个时长");
+		this.deleteBtn = this.makeButton("🗑️ 删除", "删除当前选中的分段（至少保留1个）");
+		this.loopBtn = this.makeButton("🔁 循环", "循环播放当前选中的分段");
 		this.refreshBtn = this.makeButton("🔄 刷新", "只刷新当前视频分段节点");
 
 		this.totalLabel = document.createElement('span');
 		this.totalLabel.style.cssText = 'color: #888; margin-left: 4px; flex: 1; text-align: right;';
 		this.totalLabel.textContent = '合计: --';
 
+		controls.appendChild(this.openBtn);
 		controls.appendChild(this.addBtn);
 		controls.appendChild(this.distributeBtn);
 		controls.appendChild(this.deleteBtn);
+		controls.appendChild(this.loopBtn);
 		controls.appendChild(this.refreshBtn);
 		controls.appendChild(this.totalLabel);
 		this.container.appendChild(controls);
@@ -374,12 +570,20 @@ class VideoSegmentEditorWidget {
 			background: #3a3a3a; color: #eee; border: 1px solid #555;
 			border-radius: 3px; padding: 3px 10px; cursor: pointer; font-size: 11px;
 		`;
-		b.addEventListener("mouseenter", () => b.style.background = "#4a4a4a");
-		b.addEventListener("mouseleave", () => b.style.background = "#3a3a3a");
+		b.addEventListener("mouseenter", () => b.style.background = b.__gjjActive ? "#3a806d" : "#4a4a4a");
+		b.addEventListener("mouseleave", () => b.style.background = b.__gjjActive ? "#2f6f5f" : "#3a3a3a");
 		return b;
 	}
 
 	bindEvents() {
+		this.fileInput.addEventListener("change", e => this.handleOpenFile(e));
+
+		this.openBtn.addEventListener("pointerdown", e => e.stopPropagation());
+		this.openBtn.addEventListener("click", () => {
+			if (hasExternalVideoConnection(this.node)) return;
+			this.fileInput.click();
+		});
+
 		this.canvas.addEventListener("pointerdown", e => { e.stopPropagation(); this.onPointerDown(e); });
 		this.canvas.addEventListener("pointermove", e => { e.stopPropagation(); this.onPointerMove(e); });
 		this.canvas.addEventListener("pointerup", e => { e.stopPropagation(); this.onPointerUp(e); });
@@ -419,21 +623,358 @@ class VideoSegmentEditorWidget {
 			}
 		});
 
+		this.loopBtn.addEventListener("pointerdown", e => e.stopPropagation());
+		this.loopBtn.addEventListener("click", () => this.toggleSegmentLoop());
+
 		this.refreshBtn.addEventListener("pointerdown", e => e.stopPropagation());
 		this.refreshBtn.addEventListener("click", () => this.refreshVideo());
 
+		this.videoPlayer.addEventListener("loadedmetadata", () => this.onPreviewMetadata());
+		this.videoPlayer.addEventListener("error", () => this.onPreviewError());
+		this.videoPlayer.addEventListener("play", () => this.ensureLoopPlaybackStartsInSegment());
+		this.videoPlayer.addEventListener("timeupdate", () => this.onPreviewTimeUpdate());
+		this.videoPlayer.addEventListener("pointerdown", e => e.stopPropagation());
+		this.videoPlayer.addEventListener("wheel", e => e.stopPropagation(), { passive: true });
+
 		this.resizeObserver = new ResizeObserver(() => this.resizeCanvas());
 		this.resizeObserver.observe(this.container);
+		this.updateOpenButtonState();
+	}
+
+	updateOpenButtonState() {
+		if (!this.openBtn) return;
+		const disabled = hasExternalVideoConnection(this.node);
+		this.openBtn.disabled = disabled;
+		this.openBtn.style.opacity = disabled ? "0.45" : "1";
+		this.openBtn.style.cursor = disabled ? "not-allowed" : "pointer";
+		this.openBtn.title = disabled ? "外部视频已连接，📁打开已禁用" : "打开任意视频，并复制到 ComfyUI input 目录";
 	}
 
 	resizeCanvas() {
 		const dpr = window.devicePixelRatio || 1;
 		const w = Math.max(50, Math.floor(this.canvas.offsetWidth));
+		this.resizePreview(false);
 		this.canvas.width = w * dpr;
 		this.canvas.height = CANVAS_HEIGHT * dpr;
 		this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 		this._cssWidth = w;
 		this.render();
+	}
+
+	resizePreview(allowNodeResize = false) {
+		if (!this.videoPreviewEl) return;
+		if (this.dragHandle >= 0 && this._stablePreviewHeight) {
+			this.videoPreviewEl.style.height = `${this._stablePreviewHeight}px`;
+			return;
+		}
+		const nodeWidth = Number(this.node?.size?.[0] || 420);
+		const contentWidth = Math.max(260, Math.floor(nodeWidth - 24));
+		const aspect = Math.max(0.1, Number(this.previewAspect || this.node?.__gjjPreviewAspect || DEFAULT_PREVIEW_ASPECT));
+		const height = Math.max(140, Math.round(contentWidth / aspect));
+		this._stablePreviewHeight = height;
+		this.videoPreviewEl.style.height = `${height}px`;
+
+		if (this.node?._videoSegmentEditorWidget) {
+			this.node.__gjjPreviewAspect = aspect;
+			const targetHeight = height + CANVAS_HEIGHT + 86;
+			this.node._videoSegmentEditorWidget.getHeight = () => targetHeight;
+			this.node._videoSegmentEditorWidget.getMinHeight = () => targetHeight;
+			if (allowNodeResize && this.node.size?.[1] && Math.abs(this.node.size[1] - targetHeight) > 2) {
+				this.node.setSize?.([this.node.size[0], targetHeight]);
+			}
+		}
+	}
+
+	setPreviewSource(url, fallbackUrl = null) {
+		this._previewFallbackUrl = fallbackUrl;
+		if (!url) {
+			this.videoPlayer.removeAttribute("src");
+			this.videoPlayer.load();
+			this.videoPlayer.style.display = "none";
+			this.emptyPreview.style.display = "flex";
+			this.emptyPreview.textContent = "暂无预览";
+			return;
+		}
+
+		if (this.videoPlayer.src === new URL(url, window.location.href).href) return;
+		this.emptyPreview.style.display = "none";
+		this.videoPlayer.style.display = "block";
+		this.videoPlayer.src = url;
+		this.videoPlayer.load();
+	}
+
+	setVideoFileValue(value) {
+		const widget = this.node.widgets?.find(w => w.name === "video_file");
+		if (!widget) return;
+		widget.value = value || "";
+		try {
+			widget.callback?.(widget.value);
+		} catch (_) {}
+	}
+
+	setRefreshNonce() {
+		const widget = this.node.widgets?.find(w => w.name === "refresh_nonce");
+		if (!widget) return;
+		widget.value = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+		try {
+			widget.callback?.(widget.value);
+		} catch (_) {}
+	}
+
+	clearWidgetValue(name, value = "") {
+		const widget = this.node.widgets?.find(w => w.name === name);
+		if (!widget) return;
+		widget.value = value;
+		try {
+			widget.callback?.(widget.value);
+		} catch (_) {}
+	}
+
+	resetForExternalVideo() {
+		this.clearWidgetValue("video_file", "");
+		this.clearWidgetValue("segments_json", "[]");
+		if (!this.node.properties) this.node.properties = {};
+		this.node.properties.segments = "[]";
+		this.segments = [];
+		this.selectedIndex = 0;
+		this.duration = 0;
+		this.totalFrames = 0;
+		this.setPreviewSource(null);
+		this.emptyPreview.textContent = "外部视频执行后显示预览";
+		this.updateLabels();
+		this.updateTotalLabel();
+		this.render();
+		scheduleStabilize(this.node, 1);
+	}
+
+	async handleOpenFile(e) {
+		const file = e?.target?.files?.[0];
+		if (!file) return;
+		if (hasExternalVideoConnection(this.node)) {
+			if (this.fileInput) this.fileInput.value = "";
+			this.updateOpenButtonState();
+			return;
+		}
+
+		const originalText = this.openBtn.textContent;
+		try {
+			this.openBtn.textContent = "📁 复制中...";
+			this.openBtn.disabled = true;
+			this.openBtn.style.opacity = "0.65";
+
+			const body = new FormData();
+			body.append("video", file, file.name);
+			const response = await fetch("/gjj/video_segment_editor/upload", {
+				method: "POST",
+				body,
+			});
+			const data = await response.json();
+			if (!response.ok || !data?.ok || !data?.video) {
+				throw new Error(data?.error || "视频复制失败");
+			}
+
+			const video = data.video;
+			const value = [video.subfolder, video.filename].filter(Boolean).join("/");
+			if (Number.isFinite(Number(video.duration)) && Number(video.duration) > 0) this.duration = Number(video.duration);
+			if (Number.isFinite(Number(video.fps)) && Number(video.fps) > 0) this.frameRate = Number(video.fps);
+			if (Number.isFinite(Number(video.duration)) && Number.isFinite(Number(video.fps))) {
+				this.totalFrames = Math.round(Number(video.duration) * Number(video.fps));
+			}
+			this.setVideoFileValue(value);
+			this.updatePreviewFromFile(value, true);
+		} catch (err) {
+			console.error("[GJJ] 打开视频失败:", err);
+			alert(`打开视频失败：${err?.message || err}`);
+		} finally {
+			this.openBtn.textContent = originalText;
+			this.updateOpenButtonState();
+			if (this.fileInput) this.fileInput.value = "";
+		}
+	}
+
+	updatePreviewFromFile(filename, resetSegments = false) {
+		this.updateOpenButtonState();
+		if (hasExternalVideoConnection(this.node)) {
+			if (resetSegments) this.segments = [];
+			this.emptyPreview.textContent = "外部视频执行后显示预览";
+			if (!this.videoPlayer?.src) {
+				this.videoPlayer.style.display = "none";
+				this.emptyPreview.style.display = "flex";
+			}
+			this.render();
+			return;
+		}
+
+		if (!filename || filename === "[不加载]") {
+			this.duration = 0;
+			this.totalFrames = 0;
+			if (resetSegments) this.segments = [];
+			this.setPreviewSource(null);
+			this.updateLabels();
+			this.render();
+			return;
+		}
+
+		if (resetSegments) {
+			this.segments = [];
+			this.selectedIndex = 0;
+		}
+		this.segments.forEach(seg => {
+			seg.thumbnail = null;
+			seg._thumbnailImage = null;
+		});
+		this.setPreviewSource(videoFileToUrl(filename, "input"), videoFileToUrl(filename, "output"));
+	}
+
+	onPreviewMetadata() {
+		const videoWidth = Number(this.videoPlayer.videoWidth || 0);
+		const videoHeight = Number(this.videoPlayer.videoHeight || 0);
+		if (videoWidth > 0 && videoHeight > 0) {
+			this.previewAspect = videoWidth / videoHeight;
+			if (this.node) this.node.__gjjPreviewAspect = this.previewAspect;
+			this.resizePreview(true);
+		}
+
+		const nextDuration = Number.isFinite(this.videoPlayer.duration) ? this.videoPlayer.duration : 0;
+		if (nextDuration > 0) {
+			this.duration = nextDuration;
+			this.totalFrames = Math.round(this.duration * (this.frameRate || 24));
+
+			if (!this.segments.length || this.segments.some(seg => (seg.end || 0) > this.duration + 0.001)) {
+				this.segments = this.makeAutoSegments(3);
+				this.selectedIndex = 0;
+				this.commit();
+			}
+		}
+
+		this.updateLabels();
+		this.updateTotalLabel();
+		this.render();
+		this.node?.onResize?.(this.node.size);
+	}
+
+	onPreviewError() {
+		if (this._previewFallbackUrl && this.videoPlayer.src !== new URL(this._previewFallbackUrl, window.location.href).href) {
+			const fallback = this._previewFallbackUrl;
+			this._previewFallbackUrl = null;
+			this.setPreviewSource(fallback);
+			return;
+		}
+		this.videoPlayer.style.display = "none";
+		this.emptyPreview.style.display = "flex";
+		this.emptyPreview.textContent = "视频预览加载失败";
+	}
+
+	makeAutoSegments(count = 4) {
+		const segmentCount = Math.max(1, count);
+		const maxAnchor = this.getMaxAnchorFrame();
+		if (maxAnchor <= 1) {
+			return [{
+				start_frame: 1,
+				end_frame: 1,
+				start: 0,
+				end: this.frameEndToSeconds(1),
+				label: "片段 1",
+				color: SEGMENT_COLORS[0],
+			}];
+		}
+		const step = Math.max(FRAME_SNAP, Math.round(((maxAnchor - 1) / segmentCount) / FRAME_SNAP) * FRAME_SNAP);
+		const colors = new Set();
+		return Array.from({ length: segmentCount }, (_, i) => {
+			const color = pickColor(colors);
+			colors.add(color);
+			const startFrame = Math.min(Math.max(1, maxAnchor - FRAME_SNAP), 1 + i * step);
+			const endFrame = i === segmentCount - 1 ? maxAnchor : Math.min(maxAnchor, Math.max(startFrame + FRAME_SNAP, 1 + (i + 1) * step));
+			return {
+				start_frame: startFrame,
+				end_frame: endFrame,
+				start: this.frameToSeconds(startFrame),
+				end: this.frameEndToSeconds(endFrame),
+				label: `片段 ${i + 1}`,
+				color,
+			};
+		});
+	}
+
+	updateLabels() {
+		this.durationLabel.textContent = `${this.formatTime(this.duration)}`;
+		this.frameRateLabel.textContent = this.frameRate ? `${Number(this.frameRate).toFixed(2).replace(/\.?0+$/, "")}` : "";
+		this.framesLabel.textContent = this.totalFrames ? `${this.totalFrames}` : "";
+	}
+
+	syncVideoToTime(seconds) {
+		if (!this.videoPlayer || !Number.isFinite(seconds) || this.videoPlayer.readyState < 1) return;
+		this._pendingSeekTime = clamp(seconds, 0, Math.max(0, this.duration || this.videoPlayer.duration || 0));
+		if (this._seekRaf) return;
+		this._seekRaf = requestAnimationFrame(() => {
+			this._seekRaf = null;
+			const t = this._pendingSeekTime;
+			this._pendingSeekTime = null;
+			if (!Number.isFinite(t)) return;
+			try {
+				if (typeof this.videoPlayer.fastSeek === "function") {
+					this.videoPlayer.fastSeek(t);
+				} else {
+					this.videoPlayer.currentTime = t;
+				}
+			} catch (_) {}
+		});
+	}
+
+	getSelectedSegment() {
+		if (this.selectedIndex < 0 || this.selectedIndex >= this.segments.length) return null;
+		const seg = this.segments[this.selectedIndex];
+		if (!seg) return null;
+		const start = Math.max(0, Number(seg.start || 0));
+		const end = Math.max(start + MIN_DURATION, Number(seg.end || start + MIN_DURATION));
+		return { ...seg, start, end };
+	}
+
+	toggleSegmentLoop() {
+		this.loopSelectedSegment = !this.loopSelectedSegment;
+		this.updateLoopButton();
+
+		if (this.loopSelectedSegment) {
+			const seg = this.getSelectedSegment();
+			if (seg) {
+				this.syncVideoToTime(seg.start);
+				this.videoPlayer?.play?.().catch?.(() => {});
+			}
+		}
+	}
+
+	updateLoopButton() {
+		if (!this.loopBtn) return;
+		const active = this.loopSelectedSegment;
+		this.loopBtn.__gjjActive = active;
+		this.loopBtn.textContent = active ? "🔁 循环中" : "🔁 循环";
+		this.loopBtn.style.background = active ? "#2f6f5f" : "#3a3a3a";
+		this.loopBtn.style.borderColor = active ? "#55c6a6" : "#555";
+		this.loopBtn.style.color = active ? "#f3fffb" : "#eee";
+		this.loopBtn.title = active ? "正在循环播放当前选中的分段" : "循环播放当前选中的分段";
+	}
+
+	ensureLoopPlaybackStartsInSegment() {
+		if (!this.loopSelectedSegment) return;
+		const seg = this.getSelectedSegment();
+		if (!seg || this.videoPlayer.readyState < 1) return;
+		const t = this.videoPlayer.currentTime;
+		if (t < seg.start || t >= seg.end) {
+			this.syncVideoToTime(seg.start);
+		}
+	}
+
+	onPreviewTimeUpdate() {
+		if (!this.loopSelectedSegment) return;
+		const seg = this.getSelectedSegment();
+		if (!seg || this.videoPlayer.readyState < 1) return;
+		const t = this.videoPlayer.currentTime;
+		if (t >= seg.end || t < seg.start - 0.05) {
+			try {
+				this.videoPlayer.currentTime = seg.start;
+				if (this.videoPlayer.paused) this.videoPlayer.play?.().catch?.(() => {});
+			} catch (_) {}
+		}
 	}
 
 	// ─── Layout ───
@@ -445,19 +986,25 @@ class VideoSegmentEditorWidget {
 	segmentRects() {
 		const rects = [];
 		const pps = this.pxPerSecond();
+		this.normalizeAllSegmentFrames();
 
 		for (let i = 0; i < this.segments.length; i++) {
 			const seg = this.segments[i];
 			const startSec = seg.start || 0;
 			const endSec = seg.end || startSec + MIN_DURATION;
-			const len = Math.max(MIN_DURATION, endSec - startSec);
+			const startFrame = seg.start_frame || 1;
+			const endFrame = seg.end_frame || (FRAME_SNAP + 1);
+			const x = this.frameToX(startFrame);
+			const right = this.frameToX(endFrame);
 
 			rects.push({
 				index: i,
-				x: startSec * pps,
-				w: len * pps,
+				x,
+				w: Math.max(2, right - x),
 				startSec,
 				endSec,
+				startFrame,
+				endFrame,
 			});
 		}
 		return rects;
@@ -497,7 +1044,13 @@ class VideoSegmentEditorWidget {
 		const handle = this.hitBoundary(x);
 		if (handle >= 0) {
 			this.dragHandle = handle;
-			this.dragBaseline = this.segments.map(s => ({ start: s.start || 0, end: s.end || 0 }));
+			this.normalizeAllSegmentFrames();
+			this.dragBaseline = this.segments.map(s => ({
+				start: s.start || 0,
+				end: s.end || 0,
+				start_frame: s.start_frame || 1,
+				end_frame: s.end_frame || (FRAME_SNAP + 1),
+			}));
 			this.dragStart = { x };
 			try { this.canvas.setPointerCapture(e.pointerId); } catch (_) {}
 			return;
@@ -505,10 +1058,18 @@ class VideoSegmentEditorWidget {
 		const block = this.hitBlock(x, y);
 		if (block >= 0) {
 			this.selectedIndex = block;
+			if (this.loopSelectedSegment) {
+				const seg = this.getSelectedSegment();
+				if (seg) this.syncVideoToTime(seg.start);
+			}
 			this.render();
 			return;
 		}
 		this.selectedIndex = -1;
+		if (this.loopSelectedSegment) {
+			this.loopSelectedSegment = false;
+			this.updateLoopButton();
+		}
 		this.render();
 	}
 
@@ -524,11 +1085,13 @@ class VideoSegmentEditorWidget {
 			for (let i = 0; i < this.segments.length; i++) {
 				this.segments[i].start = baseline[i].start;
 				this.segments[i].end = baseline[i].end;
+				this.segments[i].start_frame = baseline[i].start_frame;
+				this.segments[i].end_frame = baseline[i].end_frame;
 			}
-			this._shiftBoundary(handle, dx);
+			const boundaryTime = this._shiftBoundary(handle, dx);
 			this._ensureMinDuration();
-			this.commit();
 			this.updateTotalLabel();
+			this.syncVideoToTime(boundaryTime);
 			this.render();
 			return;
 		}
@@ -549,23 +1112,52 @@ class VideoSegmentEditorWidget {
 			this.dragStart = null;
 			this.dragBaseline = null;
 			try { this.canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+			this.commit();
 			// 不再自动刷新，由用户手动点击刷新按钮更新缩略图
 		}
 	}
 
 	// ─── Manipulation ───
 	addSegment() {
-		const lastEnd = this.segments.length > 0 ? (this.segments[this.segments.length - 1].end || 0) : 0;
-		const newStart = Math.min(lastEnd, this.duration - MIN_DURATION);
-		const newEnd = Math.min(newStart + MIN_DURATION, this.duration);
+		this.normalizeAllSegmentFrames();
+		if (!this.segments.length) {
+			this.segments = this.makeAutoSegments(1);
+			this.selectedIndex = 0;
+			this.commit();
+			this.updateTotalLabel();
+			this.render();
+			return;
+		}
+
+		const index = clamp(this.selectedIndex, 0, this.segments.length - 1);
+		const target = this.segments[index];
+		const startFrame = Number(target.start_frame || 1);
+		const endFrame = Number(target.end_frame || startFrame);
+		const units = Math.round((endFrame - startFrame) / FRAME_SNAP);
+		if (units < 2) return;
+
+		const leftUnits = Math.max(1, Math.min(units - 1, Math.round(units / 2)));
+		const splitFrame = startFrame + leftUnits * FRAME_SNAP;
 		const colors = new Set(this.segments.map(s => s.color));
-		this.segments.push({
-			start: newStart,
-			end: newEnd,
-			label: `(${this.segments.length + 1})`,
+
+		const left = {
+			...target,
+			start_frame: startFrame,
+			end_frame: splitFrame,
+			start: this.frameToSeconds(startFrame),
+			end: this.frameEndToSeconds(splitFrame),
+		};
+		const right = {
+			...target,
+			start_frame: splitFrame,
+			end_frame: endFrame,
+			start: this.frameToSeconds(splitFrame),
+			end: this.frameEndToSeconds(endFrame),
 			color: pickColor(colors),
-		});
-		this.selectedIndex = this.segments.length - 1;
+		};
+		this.segments.splice(index, 1, left, right);
+		this.relabelSegments();
+		this.selectedIndex = index + 1;
 		this.commit();
 		this.updateTotalLabel();
 		this.render();
@@ -573,11 +1165,23 @@ class VideoSegmentEditorWidget {
 
 	distributeEvenly() {
 		if (this.segments.length === 0) return;
-		const dur = this.duration || 60;
-		const step = dur / this.segments.length;
+		const maxAnchor = this.getMaxAnchorFrame();
+		if (maxAnchor <= 1) {
+			this.segments = [this.makeAutoSegments(1)[0]];
+			this.selectedIndex = 0;
+			this.commit();
+			this.updateTotalLabel();
+			this.render();
+			return;
+		}
+		const step = Math.max(FRAME_SNAP, Math.round(((maxAnchor - 1) / this.segments.length) / FRAME_SNAP) * FRAME_SNAP);
 		for (let i = 0; i < this.segments.length; i++) {
-			this.segments[i].start = i * step;
-			this.segments[i].end = (i + 1) * step;
+			const startFrame = Math.min(Math.max(1, maxAnchor - FRAME_SNAP), 1 + i * step);
+			const endFrame = i === this.segments.length - 1 ? maxAnchor : Math.min(maxAnchor, Math.max(startFrame + FRAME_SNAP, 1 + (i + 1) * step));
+			this.segments[i].start_frame = startFrame;
+			this.segments[i].end_frame = endFrame;
+			this.segments[i].start = this.frameToSeconds(startFrame);
+			this.segments[i].end = this.frameEndToSeconds(endFrame);
 		}
 		this.commit();
 		this.updateTotalLabel();
@@ -587,27 +1191,60 @@ class VideoSegmentEditorWidget {
 	deleteSelected() {
 		if (this.segments.length <= 1) return;
 		if (this.selectedIndex < 0 || this.selectedIndex >= this.segments.length) return;
-		this.segments.splice(this.selectedIndex, 1);
-		this.selectedIndex = Math.min(this.selectedIndex, this.segments.length - 1);
+		this.normalizeAllSegmentFrames();
+		const removed = this.segments[this.selectedIndex];
+		const index = this.selectedIndex;
+		this.segments.splice(index, 1);
+
+		if (index > 0) {
+			const prev = this.segments[index - 1];
+			prev.end_frame = removed.end_frame;
+			prev.end = this.frameEndToSeconds(prev.end_frame);
+			this.selectedIndex = index - 1;
+		} else if (this.segments.length > 0) {
+			const next = this.segments[0];
+			next.start_frame = removed.start_frame;
+			next.start = this.frameToSeconds(next.start_frame);
+			this.selectedIndex = 0;
+		}
+
+		this.relabelSegments();
 		this.commit();
 		this.updateTotalLabel();
+		if (this.loopSelectedSegment) {
+			const seg = this.getSelectedSegment();
+			if (seg) this.syncVideoToTime(seg.start);
+		}
 		this.render();
 	}
 
+	relabelSegments() {
+		for (let i = 0; i < this.segments.length; i++) {
+			this.segments[i].label = `片段 ${i + 1}`;
+		}
+	}
+
 	_shiftBoundary(index, delta) {
-		if (index < 0 || index >= this.segments.length - 1) return;
+		if (index < 0 || index >= this.segments.length - 1) return 0;
 		const left = this.segments[index];
 		const right = this.segments[index + 1];
-		const newEnd = clamp(left.start + delta + (left.end - left.start), left.start + MIN_DURATION, right.end - MIN_DURATION);
-		left.end = newEnd;
-		right.start = newEnd;
+		this.normalizeSegmentFrames(left);
+		this.normalizeSegmentFrames(right);
+		const minFrame = (left.start_frame || 0) + FRAME_SNAP;
+		const maxFrame = (right.end_frame || this.getMaxAnchorFrame()) - FRAME_SNAP;
+		const proposedFrame = this.secondsToFrame(this.frameToSeconds(left.end_frame || 1) + delta);
+		const boundaryFrame = clamp(proposedFrame, minFrame, maxFrame);
+		const newStart = this.frameToSeconds(boundaryFrame);
+		left.end = this.frameEndToSeconds(boundaryFrame);
+		left.end_frame = boundaryFrame;
+		right.start = newStart;
+		right.start_frame = boundaryFrame;
+		return newStart;
 	}
 
 	_ensureMinDuration() {
 		for (const seg of this.segments) {
-			if ((seg.end - seg.start) < MIN_DURATION) {
-				seg.end = seg.start + MIN_DURATION;
-			}
+			this.normalizeSegmentFrames(seg);
 		}
 	}
 
@@ -624,7 +1261,7 @@ class VideoSegmentEditorWidget {
 		const widget = this.node.widgets?.find(w => w.name === "segments_json");
 
 		if (widget) {
-			widget.value = JSON.stringify(this.segments);
+			widget.value = JSON.stringify(this.serializeSegments());
 
 			if (widget.callback) {
 				try {
@@ -639,19 +1276,20 @@ class VideoSegmentEditorWidget {
 			this.node.properties = {};
 		}
 
-		this.node.properties.segments = JSON.stringify(this.segments);
+		this.node.properties.segments = JSON.stringify(this.serializeSegments());
 
 		refreshNodeCanvas(this.node);
 	}
 
 	syncOutputs() {
 		const targetCount = Math.max(1, this.segments.length);
-		stabilizeNode(this, targetCount);
+		scheduleStabilize(this.node, targetCount);
 	}
 
 	updateTotalLabel() {
-		const total = this.segments.reduce((sum, s) => sum + Math.max(0, (s.end || 0) - (s.start || 0)), 0);
-		this.totalLabel.textContent = `合计: ${this.formatTime(total)}秒`;
+		this.normalizeAllSegmentFrames();
+		const total = this.segments.reduce((sum, s) => sum + Math.max(1, (s.end_frame || 1) - (s.start_frame || 1) + 1), 0);
+		this.totalLabel.textContent = `合计: ${total}帧`;
 	}
 
 	async refreshVideo() {
@@ -671,6 +1309,7 @@ class VideoSegmentEditorWidget {
 			// 直接同步数据，不调用 commit()（与音频编辑器一致）
 			this._syncSegmentsJSON();
 			this._syncProperties();
+			this.setRefreshNonce();
 
 			// 使用专用函数只刷新当前节点
 			const ok = await queueOnlyCurrentNode(this.node);
@@ -696,6 +1335,7 @@ class VideoSegmentEditorWidget {
 		const ctx = this.ctx;
 		const width = this._cssWidth;
 		const height = CANVAS_HEIGHT;
+		this.updateLoopButton();
 
 		ctx.clearRect(0, 0, width, height);
 
@@ -760,17 +1400,17 @@ class VideoSegmentEditorWidget {
 		ctx.lineTo(width, RULER_HEIGHT);
 		ctx.stroke();
 
-		const pps = this.pxPerSecond();
-		const maxDur = this.getMaxDuration();
-		const tickInterval = this._getTickInterval(pps);
+		const maxFrame = this.getMaxAnchorFrame();
+		const tickFrameInterval = this._getTickFrameInterval(width, maxFrame);
 
 		ctx.fillStyle = "#aaa";
 		ctx.font = "10px sans-serif";
 		ctx.textAlign = "center";
 		ctx.textBaseline = "top";
 
-		for (let t = 0; t <= maxDur; t += tickInterval) {
-			const x = t * pps;
+		for (let offset = 0; offset <= maxFrame - 1; offset += tickFrameInterval) {
+			const frame = 1 + offset;
+			const x = this.frameToX(frame);
 			if (x > width) break;
 
 			ctx.beginPath();
@@ -779,18 +1419,17 @@ class VideoSegmentEditorWidget {
 			ctx.strokeStyle = "#666";
 			ctx.stroke();
 
-			ctx.fillText(this.formatTime(t), x, 4);
+			ctx.fillText(String(frame), x, 4);
 		}
 	}
 
-	_getTickInterval(pps) {
-		const targetPx = 80;
-		const rawSec = targetPx / pps;
-		const candidates = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60];
+	_getTickFrameInterval(width, maxFrame) {
+		const rawFrames = Math.max(FRAME_SNAP, ((maxFrame - 1) / Math.max(1, width)) * 86);
+		const candidates = [8, 16, 24, 32, 48, 64, 80, 120, 160, 240, 320, 480, 640, 960, 1440, 1920];
 		for (const c of candidates) {
-			if (c >= rawSec) return c;
+			if (c >= rawFrames) return c;
 		}
-		return 60;
+		return Math.max(FRAME_SNAP, Math.round(rawFrames / FRAME_SNAP) * FRAME_SNAP);
 	}
 
 	_drawSegment(ctx, rect, isSelected, isHover) {
@@ -850,7 +1489,7 @@ class VideoSegmentEditorWidget {
 
 		// Label - 绘制在底部，透明度50%
 		const labelText = seg.label || `(${rect.index + 1})`;
-		const timeText = `${this.formatTime(rect.startSec)} - ${this.formatTime(rect.endSec)}`;
+		const timeText = `${rect.startFrame} - ${rect.endFrame}f`;
 
 		// 底部背景条
 		const labelHeight = 28;
@@ -866,7 +1505,7 @@ class VideoSegmentEditorWidget {
 		ctx.textBaseline = "middle";
 
 		// 绘制文字（单行显示：标签 + 时间）
-		const displayText = `${labelText}  ${timeText}`;
+		const displayText = `${labelText} ${timeText}`;
 		ctx.fillText(displayText, x + w / 2, labelY + labelHeight / 2);
 
 		// 重置透明度
@@ -915,15 +1554,19 @@ class VideoSegmentEditorWidget {
 		if (data.preview_segments) {
 			// 解析新的分段数据
 			const newSegments = parseSegments(data.preview_segments);
+			if (!newSegments.length && this.segments.length) {
+				console.warn("[GJJ] 视频分段编辑器 - 后端分段数据解析为空，保留当前面板分段。", data.preview_segments);
+			} else {
 
-			// 清除旧的缩略图引用，强制重新加载
-			this.segments.forEach(seg => {
-				if (seg._thumbnailImage) {
-					seg._thumbnailImage = null;
-				}
-			});
+				// 清除旧的缩略图引用，强制重新加载
+				this.segments.forEach(seg => {
+					if (seg._thumbnailImage) {
+						seg._thumbnailImage = null;
+					}
+				});
 
-			this.segments = newSegments;
+				this.segments = newSegments;
+			}
 		}
 
 		// 更新分段缩略图
@@ -966,10 +1609,10 @@ class VideoSegmentEditorWidget {
 			colors.add(seg.color);
 		}
 
-		// Update labels - 修复重复文字问题
-		this.durationLabel.textContent = `${this.formatTime(this.duration)}`;
-		this.frameRateLabel.textContent = this.frameRate ? `${this.frameRate}` : "";
-		this.framesLabel.textContent = this.totalFrames ? `${this.totalFrames}` : "";
+		this.updateLabels();
+		this.updateTotalLabel();
+		this._syncSegmentsJSON();
+		this._syncProperties();
 
 		// 更新视频预览显示
 		this.updateVideoPreview(data.preview_video);
@@ -994,53 +1637,17 @@ class VideoSegmentEditorWidget {
 	}
 
 	updateVideoPreview(previewVideoData) {
-		const videoPreviewEl = this.container.querySelector('.gjj-video-preview');
-		if (!videoPreviewEl) return;
-
-		const imageUrl = videoDataToUrl(previewVideoData);
+		const videoUrl = videoDataToUrl(previewVideoData);
 		console.log('[GJJ] 视频分段编辑器 - updateVideoPreview:', {
 			previewVideoData,
-			imageUrl,
+			videoUrl,
 		});
 
-		if (imageUrl) {
-			// 恢复视频播放器，但添加错误回退
-			videoPreviewEl.innerHTML = `
-				<video controls style="width: 100%; height: 160px; object-fit: contain; border-radius: 4px; background: #000;">
-					您的浏览器不支持视频播放
-				</video>
-			`;
-
-			// 保存视频播放器引用
-			this.videoPlayer = videoPreviewEl.querySelector('video');
-
-			// 设置视频源
-			this.videoPlayer.src = imageUrl;
-
-			// 添加错误监听 - 如果视频加载失败，显示图片预览
-			this.videoPlayer.addEventListener('error', (e) => {
-				console.warn('[GJJ] 视频加载失败，回退到图片预览:', {
-					src: this.videoPlayer.src,
-					error: this.videoPlayer.error,
-				});
-				// 回退到图片预览
-				videoPreviewEl.innerHTML = `
-					<img style="width: 100%; height: 160px; object-fit: contain; border-radius: 4px; background: #000; cursor: pointer;" src="${imageUrl}" alt="视频预览">
-				`;
-				const img = videoPreviewEl.querySelector('img');
-				img.addEventListener('click', () => {
-					window.open(imageUrl, '_blank');
-				});
-				this.videoPlayer = null;
-			});
-
-			// 添加成功加载监听
-			this.videoPlayer.addEventListener('loadeddata', () => {
-				console.log('[GJJ] 视频加载成功:', this.videoPlayer.src);
-			});
-		} else {
-			videoPreviewEl.innerHTML = '<div style="height: 160px; display: flex; align-items: center; justify-content: center; color: #888; font-size: 12px;">暂无预览</div>';
-			this.videoPlayer = null;
+		if (videoUrl) {
+			this.setPreviewSource(videoUrl);
+		} else if (!this.videoPlayer?.src) {
+			this.setPreviewSource(null);
+			this.emptyPreview.textContent = hasExternalVideoConnection(this.node) ? "外部视频执行后显示预览" : "暂无预览";
 		}
 	}
 
@@ -1052,6 +1659,62 @@ app.registerExtension({
 
 	beforeRegisterNodeDef(nodeType, nodeData, appInstance) {
 		if (nodeData.name !== NODE_NAME) return;
+
+		const applyHiddenWidgets = (node) => {
+			for (const name of HIDDEN_WIDGET_NAMES) {
+				hideWidget(node.widgets?.find(w => w.name === name));
+			}
+			GJJ_Utils.refreshNode(node);
+		};
+
+		const origOnConfigure = nodeType.prototype.onConfigure;
+		nodeType.prototype.onConfigure = function() {
+			const result = origOnConfigure?.apply(this, arguments);
+			requestAnimationFrame(() => {
+				applyHiddenWidgets(this);
+				this.__gjjVideoSegmentEditor?.restoreStateFromNode();
+				const videoFileWidget = this.widgets?.find(w => w.name === "video_file");
+				if (!hasExternalVideoConnection(this) && videoFileWidget?.value && this.__gjjVideoSegmentEditor) {
+					this.__gjjVideoSegmentEditor.updatePreviewFromFile(videoFileWidget.value);
+				}
+			});
+			return result;
+		};
+
+		const origOnResize = nodeType.prototype.onResize;
+		nodeType.prototype.onResize = function(size) {
+			const result = origOnResize?.apply(this, arguments);
+			this.__gjjVideoSegmentEditor?.resizeCanvas();
+			this.__gjjVideoSegmentEditor?.updateOpenButtonState();
+			if (this._videoSegmentEditorWidget) {
+				const previewHeight = this.__gjjVideoSegmentEditor?._stablePreviewHeight;
+				const height = previewHeight ? previewHeight + CANVAS_HEIGHT + 86 : getEditorHeightForWidth(this);
+				this._videoSegmentEditorWidget.getHeight = () => height;
+				this._videoSegmentEditorWidget.getMinHeight = () => height;
+			}
+			return result;
+		};
+
+		const origOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+		nodeType.prototype.onConnectionsChange = function(type, slotIndex, connected, linkInfo, ioSlot) {
+			const result = origOnConnectionsChange?.apply(this, arguments);
+			const input = this.inputs?.[slotIndex];
+			if (input?.name === "video" || input?.label === "外部视频" || input?.localized_name === "外部视频") {
+				const editor = this.__gjjVideoSegmentEditor;
+				editor?.updateOpenButtonState();
+				if (hasExternalVideoConnection(this)) {
+					editor?.resetForExternalVideo();
+					clearTimeout(this.__gjjExternalVideoRefreshTimer);
+					this.__gjjExternalVideoRefreshTimer = setTimeout(() => {
+						this.__gjjVideoSegmentEditor?.refreshVideo();
+					}, 120);
+				} else {
+					const videoFileWidget = this.widgets?.find(w => w.name === "video_file");
+					editor?.updatePreviewFromFile(videoFileWidget?.value || "");
+				}
+			}
+			return result;
+		};
 
 		const origOnExecuted = nodeType.prototype.onExecuted;
 		nodeType.prototype.onExecuted = function(message) {
@@ -1088,11 +1751,7 @@ app.registerExtension({
 		nodeType.prototype.onNodeCreated = function() {
 			origOnNodeCreated?.apply(this, arguments);
 
-			// Hide internal widgets
-			for (const name of HIDDEN_WIDGET_NAMES) {
-				const w = this.widgets?.find(w => w.name === name);
-				if (w) hideWidget(w);
-			}
+			applyHiddenWidgets(this);
 
 			// Hook video_file widget to trigger re-execution on change
 			const videoFileWidget = this.widgets?.find(w => w.name === "video_file");
@@ -1101,8 +1760,8 @@ app.registerExtension({
 				const self = this;
 				videoFileWidget.callback = function (...args) {
 					const result = origCallback?.apply(this, args);
-					// Re-queue node to refresh video and duration
-					try { app.graph?.queueNode?.(self); } catch (_) {}
+					self.__gjjPendingVideoFile = this.value;
+					self.__gjjVideoSegmentEditor?.updatePreviewFromFile(this.value);
 					return result;
 				};
 			}
@@ -1115,14 +1774,17 @@ app.registerExtension({
 			this._videoSegmentEditorWidget = this.addDOMWidget("video_segment_editor_canvas", "GJJVideoSegmentEditor", container, {
 				serialize: false,
 				hideOnZoom: false,
-				// 固定高度，与音频编辑器逻辑一致
-				getMinHeight: () => 370,
-				getHeight: () => 370,
+				getMinHeight: () => getEditorHeightForWidth(this),
+				getHeight: () => getEditorHeightForWidth(this),
 			});
 
 			setTimeout(() => {
 				try {
 					this.__gjjVideoSegmentEditor = new VideoSegmentEditorWidget(self, container);
+					this.__gjjVideoSegmentEditor.restoreStateFromNode();
+					const pending = this.__gjjPendingVideoFile || videoFileWidget?.value;
+					if (!hasExternalVideoConnection(this) && pending) this.__gjjVideoSegmentEditor.updatePreviewFromFile(pending);
+					applyHiddenWidgets(this);
 				} catch (err) {
 					console.error("[GJJ] 视频分段编辑器初始化失败:", err);
 				}
