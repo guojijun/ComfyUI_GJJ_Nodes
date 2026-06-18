@@ -5,6 +5,7 @@ import comfy_extras.nodes_lt as nodes_lt
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
+GUIDE_MODES = ("写入Latent", "仅注意力引导")
 
 
 def _component_value(value, key):
@@ -139,7 +140,7 @@ def _normalize_frame_count(value):
         count = int(value)
     except Exception:
         count = 33
-    if count not in (17, 25, 33, 41):
+    if count not in (1, 9, 17, 25, 33, 41):
         count = 33
     return count
 
@@ -219,9 +220,12 @@ class GJJ_AddVideoICLoRAGuide:
                 "bypass": ("BOOLEAN", {"default": False, "display_name": "跳过处理",
                                        "tooltip": "启用后直接返回原始输入，不应用任何条件化"}),
                 "background": (MEDIA_INPUT_TYPE, {"display_name": "背景", "tooltip": "可选。支持 GJJ_BATCH_IMAGE、普通 IMAGE 批次和 VIDEO；连接后会作为 LiconMSR 式 guide 序列的背景/末尾图片参与分帧。"}),
-                "frame_count": (["17", "25", "33", "41"], {"default": "33",
+                "frame_count": (["1", "9", "17", "25", "33", "41"], {"default": "33",
                                                            "display_name": "Guide帧数",
                                                            "tooltip": "连接引导图像或背景时，按 LiconMSR 逻辑生成的 guide 固定帧数。必须是 8N+1；帧数越大，VAE 编码显存占用越高。"}),
+                "guide_mode": (GUIDE_MODES, {"default": "写入Latent",
+                                             "display_name": "Guide模式",
+                                             "tooltip": "写入Latent为原始行为，会把引导帧注入视频 latent；仅注意力引导只登记 IC-LoRA guide attention，不改写视频 latent，可避免引导图直接出现在视频开头。"}),
             },
         }
 
@@ -408,7 +412,8 @@ class GJJ_AddVideoICLoRAGuide:
 
     def generate(self, positive, negative, vae, latent, image=None, frame_idx=0, strength=1.0,
                  latent_downscale_factor=1.0, crop="disabled", use_tiled_encode=False,
-                 tile_size=256, tile_overlap=64, bypass=False, background=None, frame_count="33"):
+                 tile_size=256, tile_overlap=64, bypass=False, background=None, frame_count="33",
+                 guide_mode="写入Latent"):
         """
         执行 IC-LoRA guide 添加操作。
         
@@ -428,6 +433,7 @@ class GJJ_AddVideoICLoRAGuide:
             image: 可选引导图像、批量图像或视频
             background: 可选背景图像、批量图像或视频
             frame_count: LiconMSR 式 guide 固定帧数
+            guide_mode: Guide 应用模式。仅注意力引导不会改写视频 latent。
         
         返回：
             (positive, negative, latent)
@@ -505,22 +511,30 @@ class GJJ_AddVideoICLoRAGuide:
         assert latent_idx + guide_latent.shape[2] <= latent_length, \
             "条件帧超过了 latent 序列的长度。"
 
-        # 追加关键帧
-        positive, negative, latent_image, noise_mask = self.append_keyframe(
-            positive, negative, frame_idx, latent_image, noise_mask,
-            guide_latent, strength, scale_factors,
-            guide_mask=guide_mask,
-            latent_downscale_factor=latent_downscale_factor,
-            causal_fix=causal_fix,
-        )
+        if str(guide_mode or "写入Latent") != "仅注意力引导":
+            # 追加关键帧：原始行为，会把 guide latent 写入视频 latent。
+            positive, negative, latent_image, noise_mask = self.append_keyframe(
+                positive, negative, frame_idx, latent_image, noise_mask,
+                guide_latent, strength, scale_factors,
+                guide_mask=guide_mask,
+                latent_downscale_factor=latent_downscale_factor,
+                causal_fix=causal_fix,
+            )
 
         # 跟踪 guide attention entry
         positive = append_guide_attention_entry(
-            positive, iclora_tokens_added, guide_orig_shape
+            positive, iclora_tokens_added, guide_orig_shape, attention_strength=float(strength)
         )
         negative = append_guide_attention_entry(
-            negative, iclora_tokens_added, guide_orig_shape
+            negative, iclora_tokens_added, guide_orig_shape, attention_strength=float(strength)
         )
+
+        if str(guide_mode or "写入Latent") == "仅注意力引导":
+            return (
+                positive,
+                negative,
+                latent,
+            )
 
         return (
             positive,
