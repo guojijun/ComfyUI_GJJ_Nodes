@@ -6,6 +6,7 @@ qwen_image_edit	qwen_image_edit	qwen_image	qwen_2.5_vl_7b_fp8_scaled.safetensors
 qwen_image_2512	qwen_image_2512	qwen_image	qwen_2.5_vl_7b_fp8_scaled.safetensors	qwen_image_vae.safetensors	Qwen-Image-2512-Lightning	1.0		0.0	4		2.5	euler	simple	1.0	aura	3.1	1.0	false			1328	1328
 qwen_image	qwen_image_fp|qwen_image_distill	qwen_image	qwen_2.5_vl_7b_fp8_scaled.safetensors	qwen_image_vae.safetensors	Qwen-Image-Lightning	1.0		0.0	8		2.5	euler	simple	1.0	aura	3.1	1.0	false			1328	1328			controlnet
 qwen_image_layered	qwen_image_layered	qwen_image	qwen_2.5_vl_7b_fp8_scaled.safetensors	qwen_image_layered_vae.safetensors		0.0		0.0	50		4.0	euler	simple	1.0	aura	1.0	0.0	false			640	640
+boogu_image	boogu_image|boogu-image|boogu	boogu	qwen3vl_8b_fp8_scaled.safetensors	flux1_vae_bf16.safetensors		0.0		0.0	4		1.0	euler	simple	1.0			0.0	true	1024	384	1024	1024						false
 lotus_depth	lotus-depth-	qwen_image	qwen_2.5_vl_7b_fp8_scaled.safetensors	lvae-ft-mse-840000-ema-pruned.safetensors	qwen_image_union_diffsynth_lora	1.0		0.0	20		1.0	euler	simple	1.0			0.0	false			1024	1024
 architecturerealmix_v11_depth	architecturerealmix_v11|architecturerealmix|architecture-realmix|sd15-depth	stable_diffusion				0.0		0.0	20		7.0	euler_ancestral	normal	1.0			0.0	false			1024	1024	architecturerealmix_v11.safetensors	checkpoints			SD1.5\control_v11f1p_sd15_depth_fp16.safetensors
 flux2_klein_9b	flux-2-klein-9b|flux-2-klein-base-9b|f2k-9b|f2k9b|f2k	flux2	qwen_3_8b_fp8mixed.safetensors	flux2-vae.safetensors		0.0		0.0	4		1.0	lcm	simple	1.0			0.0	false			1024	1024

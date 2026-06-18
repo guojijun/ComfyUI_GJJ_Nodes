@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import re
+import struct
 
 import folder_paths
 import torch
@@ -52,6 +54,7 @@ CLIP_TYPE_OPTIONS = [
     "ovis",
     "newbie",
     "longcat_image",
+    "boogu",
 ]
 CLIP_DTYPE_OPTIONS = ["default", "float16", "bfloat16", "float32"]
 CLIP_DEVICE_OPTIONS = ["default", "cpu"]
@@ -475,6 +478,85 @@ def _clip_type_enum(name: str):
     normalized = _normalize_text(name)
     enum_name = aliases.get(normalized, normalized).upper()
     return getattr(comfy.sd.CLIPType, enum_name, comfy.sd.CLIPType.STABLE_DIFFUSION)
+
+
+def _load_boogu_clip_compatible(clip_paths: list[str], clip_dtype: str, clip_device: str):
+    model_options = _build_clip_model_options(clip_dtype, clip_device)
+    boogu_type = getattr(comfy.sd.CLIPType, "BOOGU", None)
+    if boogu_type is not None:
+        return comfy.sd.load_clip(
+            ckpt_paths=clip_paths,
+            embedding_directory=folder_paths.get_folder_paths("embeddings"),
+            clip_type=boogu_type,
+            model_options=model_options,
+        )
+    raise RuntimeError(
+        "当前 ComfyUI 缺少原生 BOOGU CLIP 类型，无法零依赖加载 Boogu 的 Qwen3-VL-8B 文本编码器。\n"
+        "Boogu 不是普通 Flux/OmniGen2 CLIP：它需要 qwen3vl、boogu tokenizer、BOOGU CLIPType 和 Qwen3-VL 视觉编码支持。"
+        "这部分兼容代码接近复制新版 ComfyUI 内核，不适合塞进 GJJ 作为轻量零依赖补丁。\n"
+        "请更新到包含 comfy.text_encoders.boogu / qwen3vl 与 CLIPType.BOOGU 的 ComfyUI 版本后再使用。"
+    )
+
+
+def _read_safetensors_header(path: str) -> dict:
+    if not str(path or "").lower().endswith(".safetensors"):
+        return {}
+    try:
+        with open(path, "rb") as file:
+            header_size = struct.unpack("<Q", file.read(8))[0]
+            if header_size <= 0 or header_size > 256 * 1024 * 1024:
+                return {}
+            return json.loads(file.read(header_size))
+    except Exception:
+        return {}
+
+
+def _safetensors_shape(header: dict, key: str) -> list[int]:
+    value = (header or {}).get(key)
+    shape = value.get("shape") if isinstance(value, dict) else None
+    if not isinstance(shape, list):
+        return []
+    try:
+        return [int(item) for item in shape]
+    except Exception:
+        return []
+
+
+def _is_boogu_diffusion_header(header: dict) -> bool:
+    if not header:
+        return False
+    keys = set(key for key in header.keys() if key != "__metadata__")
+    image_index_shape = _safetensors_shape(header, "image_index_embedding")
+    return (
+        image_index_shape == [5, 3360]
+        and any(key.startswith("double_stream_layers.") for key in keys)
+        and any(key.startswith("single_stream_layers.") for key in keys)
+    )
+
+
+def _comfy_supports_native_boogu_diffusion() -> bool:
+    try:
+        import comfy.supported_models as supported_models
+    except Exception:
+        return False
+    return any("boogu" in str(name).lower() for name in dir(supported_models))
+
+
+def _raise_if_unsupported_boogu_diffusion(unet_path: str, clip_type: str):
+    if _normalize_text(clip_type) != "boogu" and "boogu" not in _normalize_text(os.path.basename(str(unet_path or ""))):
+        return
+    header = _read_safetensors_header(unet_path)
+    if not _is_boogu_diffusion_header(header) or _comfy_supports_native_boogu_diffusion():
+        return
+    raise RuntimeError(
+        "当前 ComfyUI 版本还没有 Boogu-Image 主扩散模型架构支持，不能用原生 OmniGen2 加载 "
+        f"{os.path.basename(str(unet_path or ''))}。\n"
+        "检测到该权重是 Boogu 新结构：hidden_size=3360，包含 double_stream_layers / single_stream_layers；"
+        "而当前 ComfyUI 会按旧 OmniGen2 结构创建模型，因此会报 image_index_embedding 或大量 state_dict 尺寸不匹配。\n"
+        "完整零依赖兼容需要携带 BooguTransformer2DModel、model_detection、supported_models、model_base、Qwen3VL 文本视觉编码等一整套新版内核代码，"
+        "代码量和维护风险都偏高，因此 GJJ 不在旧版 ComfyUI 内强行模拟。\n"
+        "请更新到包含 comfy.ldm.boogu.model 与 supported_models.Boogu 的 ComfyUI 版本后再使用。"
+    )
 
 
 def _find_preset(template_id: str) -> dict:
@@ -1110,15 +1192,19 @@ class GJJ_ModelBundleLoader:
         vae_name = _resolve_model_name(("vae",), vae_name)
 
         unet_path = _resolve_full_path(unet_categories, unet_name)
+        _raise_if_unsupported_boogu_diffusion(unet_path, clip_type)
         model = comfy.sd.load_diffusion_model(unet_path, model_options=_build_unet_model_options(unet_dtype))
 
         clip_paths = [_resolve_full_path(("text_encoders", "clip"), name) for name in clip_names]
-        clip = comfy.sd.load_clip(
-            ckpt_paths=clip_paths,
-            embedding_directory=folder_paths.get_folder_paths("embeddings"),
-            clip_type=_clip_type_enum(clip_type),
-            model_options=_build_clip_model_options(clip_dtype, clip_device),
-        )
+        if _normalize_text(clip_type) == "boogu":
+            clip = _load_boogu_clip_compatible(clip_paths, clip_dtype, clip_device)
+        else:
+            clip = comfy.sd.load_clip(
+                ckpt_paths=clip_paths,
+                embedding_directory=folder_paths.get_folder_paths("embeddings"),
+                clip_type=_clip_type_enum(clip_type),
+                model_options=_build_clip_model_options(clip_dtype, clip_device),
+            )
 
         vae = self._load_vae(vae_name, vae_dtype)
         return model, clip, vae

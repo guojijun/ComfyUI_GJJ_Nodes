@@ -109,6 +109,7 @@ const CLIP_TYPE_VALUES = new Set([
 	"ovis",
 	"newbie",
 	"longcat_image",
+	"boogu",
 ]);
 const MODEL_IGNORED_TOKENS = new Set([
 	"fp8", "fp16", "fp32", "bf16", "float8", "float16", "float32",
@@ -265,6 +266,7 @@ const TEMPLATE_CHINESE_DESCRIPTIONS = {
 	qwen_image_2512: "Qwen 文生图 2512",
 	qwen_image: "Qwen 文生图通用",
 	qwen_image_layered: "Qwen 分层图像",
+	boogu_image: "Boogu 图像编辑",
 	lotus_depth: "Lotus 深度图",
 	architecturerealmix_v11_depth: "建筑写实 SD1.5 + 深度 ControlNet",
 	flux2_klein_9b: "Flux2 Klein 9B 快速",
@@ -587,7 +589,7 @@ function ensureState(node) {
 		clipDtypes: ["default", "float16", "bfloat16", "float32"],
 		clipDevices: ["default", "cpu"],
 		vaeDtypes: ["default", "float16", "bfloat16", "float32"],
-		clipTypes: ["stable_diffusion", "flux", "flux2", "qwen_image", "wan", "ltx", "ltxv", "hidream", "lumina2"],
+		clipTypes: ["stable_diffusion", "flux", "flux2", "qwen_image", "wan", "ltx", "ltxv", "hidream", "lumina2", "boogu"],
 		presets: [],
 		loading: false,
 		loadingPromise: null,
@@ -2598,16 +2600,7 @@ function renderPanel(node) {
 			createSelectSetting(node, UNET_DTYPE_WIDGET, "UNET精度", state.unetDtypes),
 		],
 		(value) => {
-			if (checkpointCommon) {
-				saveWidgetValues(node);
-				renderPanel(node);
-				return;
-			}
-			const matched = matchModelFamilyPreset(value, allPresets(node));
-			if (matched?.id) {
-				setTemplateId(node, matched.id);
-				applyPreset(node, true);
-			}
+			saveWidgetValues(node);
 			renderPanel(node);
 		},
 		{

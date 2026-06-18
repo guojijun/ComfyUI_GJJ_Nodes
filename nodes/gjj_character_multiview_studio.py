@@ -323,7 +323,7 @@ REQUIRED_MULTIVIEW_MODELS = [
 		"subdir": "models/diffusion_models",
 		"filename": DEFAULT_QWEN2511_UNET,
 		"download_url": MODEL_DOWNLOAD_URL,
-		"description": "主体多视图主生成模型；也可放在 ComfyUI 可识别的 unet/checkpoints 目录。",
+		"description": "主体多视图主生成模型；请放在 ComfyUI/models/diffusion_models。",
 	},
 	{
 		"label": "Qwen 2.5 VL 文本编码器",
@@ -352,6 +352,39 @@ REQUIRED_MULTIVIEW_MODELS = [
 		"filename": DEFAULT_MULTI_ANGLES_LORA,
 		"download_url": MODEL_DOWNLOAD_URL,
 		"description": "多视图角度一致性 LoRA。",
+	},
+]
+
+MULTIVIEW_MODEL_TREE = [
+	{
+		"label": "Qwen Image Edit 2511 主模型",
+		"folder": "diffusion_models",
+		"filename": DEFAULT_QWEN2511_UNET,
+		"icon": "🟣",
+	},
+	{
+		"label": "Qwen 2.5 VL 文本编码器",
+		"folder": "text_encoders",
+		"filename": DEFAULT_QWEN2511_CLIP,
+		"icon": "🟡",
+	},
+	{
+		"label": "Qwen Image VAE",
+		"folder": "vae",
+		"filename": DEFAULT_QWEN2511_VAE,
+		"icon": "🔴",
+	},
+	{
+		"label": "Qwen 2511 Lightning LoRA",
+		"folder": "loras/QWEN/lighting",
+		"filename": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+		"icon": "🟠",
+	},
+	{
+		"label": "Qwen 2511 多角度 LoRA",
+		"folder": "loras/QWEN/2511",
+		"filename": DEFAULT_MULTI_ANGLES_LORA,
+		"icon": "🟠",
 	},
 ]
 
@@ -1653,6 +1686,8 @@ class GJJ_CharacterMultiViewStudio:
 		"copy_label": _MULTIVIEW_MODEL_REPORT["copy_label"] if not _MULTIVIEW_MODEL_REPORT.get("available", True) else "🌏 复制模型下载网址",
 		"model_download_url": MODEL_DOWNLOAD_URL,
 		"install_cmd": "",
+		"model_tree": MULTIVIEW_MODEL_TREE,
+		"static_model_tree_only": True,
 		"dependencies": [
 			"无需额外 Python 依赖；依赖 ComfyUI 官方模型加载、采样、VAE 解码和 GJJ 内部工具。",
 			"动作图不是骨架图时，会调用 GJJ 内置 OpenPose 转骨架；OpenPose 模型缺失时请改用骨架图或补齐可选模型。",
