@@ -14,11 +14,52 @@ try:
 except Exception:
     model_management = None
 
+try:
+    from .common_utils.dependency_checker import build_node_help_payload, make_missing_model_spec
+except Exception:
+    from common_utils.dependency_checker import build_node_help_payload, make_missing_model_spec
+
 
 NODE_NAME = "GJJ_LongCatAvatarWhisperEmbeds"
 NODE_DISPLAY_NAME = "🎙️ LongCat数字人Whisper嵌入"
 LONGCAT_WHISPER_MODEL = "whisper_large_v3_encoder_fp16.safetensors"
 _WHISPER_MODEL_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+_GJJ_HELP = build_node_help_payload(
+    description="内置 Whisper Model Loader 的 LongCat Avatar Whisper Embeds (v1.5)，用 Whisper-large-v3 生成 LongCat-Avatar 音频条件。",
+    dependencies=[
+        {"name": "transformers", "type": "运行依赖", "required": True, "description": "读取 WhisperConfig、WhisperFeatureExtractor 与 WhisperModel。"},
+        {"name": "accelerate", "type": "运行依赖", "required": True, "description": "使用 init_empty_weights 低内存初始化 Whisper 模型。"},
+        {"name": "torchaudio", "type": "运行依赖", "required": True, "description": "用于音频重采样。"},
+        {"name": "pyloudnorm", "type": "运行依赖", "required": False, "description": "仅开启响度归一化时需要。"},
+    ],
+    model_tree=[
+        {
+            "label": LONGCAT_WHISPER_MODEL,
+            "path": "models/audio_encoders",
+            "required": True,
+            "description": "LongCat Avatar 1.5 默认 Whisper-large-v3 encoder 权重。",
+        },
+    ],
+    models=[
+        make_missing_model_spec(
+            label="Whisper encoder",
+            subdir="audio_encoders",
+            filename=LONGCAT_WHISPER_MODEL,
+            description="放入 ComfyUI/models/audio_encoders/ 后在 Whisper模型下拉中选择。",
+        ),
+    ],
+    usage=[
+        "模型选择会从 models/audio_encoders 中读取 Whisper encoder 权重。",
+        "默认只显示音频1；连接最后一个音频口后会自动扩充下一路音频。",
+        "输出的音频嵌入接 GJJ LongCat数字人续帧条件节点。",
+    ],
+    runtime=[
+        "para 模式会把多路音频按最长长度对齐并混合；add 模式会按顺序拼接。",
+        "开启响度归一化时需要 pyloudnorm；关闭后可跳过该依赖。",
+        "本节点逻辑已内联在 GJJ，不依赖外部 ComfyUI-WanVideoWrapper 插件。",
+    ],
+)
 
 
 def _audio_encoder_models(keyword: str = "whisper"):
@@ -169,20 +210,7 @@ class GJJ_LongCatAvatarWhisperEmbeds:
         "数字人Whisper嵌入",
         "LongCat音频嵌入",
     ]
-    GJJ_HELP = {
-        "title": "LongCat 数字人 Whisper 嵌入",
-        "description": "内置 Whisper Model Loader 的 LongCat Avatar Whisper Embeds (v1.5)，用 Whisper-large-v3 生成 LongCat-Avatar 音频条件。",
-        "usage": [
-            "模型选择会从 models/audio_encoders 中读取 Whisper encoder 权重。",
-            "默认只显示音频1；连接最后一个音频口后会自动扩充下一路音频。",
-            "输出的音频嵌入接 GJJ LongCat数字人续帧条件节点。",
-        ],
-        "notes": [
-            "para 模式会把多路音频按最长长度对齐并混合；add 模式会按顺序拼接。",
-            "开启响度归一化时需要 pyloudnorm；关闭后可跳过该依赖。",
-            "本节点逻辑已内联在 GJJ，不依赖外部 ComfyUI-WanVideoWrapper 插件。",
-        ],
-    }
+    GJJ_HELP = {"title": NODE_DISPLAY_NAME, **_GJJ_HELP}
 
     @classmethod
     def INPUT_TYPES(cls):

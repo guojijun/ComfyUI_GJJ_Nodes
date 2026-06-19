@@ -11,8 +11,10 @@ const MODE_INITIAL = "初始";
 const MODE_AUTO = "自动";
 const NUMBER_SOCKET_TYPE = "INT,FLOAT";
 const AUTO_PROPERTY = "gjj_audio_silence_trim_auto_queue";
+const AUTO_STOP_REASON_PROPERTY = "gjj_audio_silence_trim_auto_stop_reason";
 const QUEUE_DELAY_MS = 800;
 let activeAutoNodeId = null;
+let activeAutoToken = 0;
 let queueTimer = null;
 let pendingAutoData = null;
 let lastPromptId = null;
@@ -202,10 +204,36 @@ function setActive(button, active) {
 	button.style.color = active ? "#ffffff" : "#f0fbf5";
 }
 
+function setAutoButtonState(node, state) {
+	const button = node?.__gjjSilenceTrimAutoBtn;
+	if (!button) return;
+	if (state === "running") {
+		button.style.background = "#1c8f56";
+		button.style.borderColor = "#58c27c";
+		button.style.color = "#ffffff";
+		return;
+	}
+	if (state === "stopped") {
+		button.style.background = "#6f4b19";
+		button.style.borderColor = "#bd8b35";
+		button.style.color = "#fff4dc";
+		return;
+	}
+	setActive(button, false);
+}
+
 function setStatus(node, text) {
 	if (node?.__gjjSilenceTrimStatus) {
 		node.__gjjSilenceTrimStatus.textContent = text || "等待执行";
 	}
+}
+
+function isAutoRunning(node) {
+	return Boolean(
+		node?.properties?.[AUTO_PROPERTY]
+		&& activeAutoNodeId === String(node.id)
+		&& node.__gjjSilenceTrimAutoToken === activeAutoToken
+	);
 }
 
 function updateToolbar(node) {
@@ -215,14 +243,17 @@ function updateToolbar(node) {
 	ensureCurrentSegmentInput(node);
 	const external = inputLinked(node, CURRENT_SEGMENT_NAME);
 	const mode = getWidget(node, QUEUE_MODE_NAME)?.value || MODE_AUTO;
-	const autoRunning = Boolean(node.properties?.[AUTO_PROPERTY]) && !external;
+	const autoRunning = isAutoRunning(node) && !external;
+	const autoStopped = Boolean(node.properties?.[AUTO_STOP_REASON_PROPERTY]) && !autoRunning && !external;
 	const currentValue = Math.max(1, Number(getWidget(node, CURRENT_SEGMENT_NAME)?.value || 1));
 	setActive(node.__gjjSilenceTrimBlankBtn, mode === MODE_BLANK && !external);
 	setActive(node.__gjjSilenceTrimInitialBtn, mode === MODE_INITIAL && !external);
-	setActive(node.__gjjSilenceTrimAutoBtn, mode === MODE_AUTO && !external);
+	setAutoButtonState(node, autoRunning ? "running" : (autoStopped ? "stopped" : "idle"));
 	if (node.__gjjSilenceTrimAutoBtn) {
 		node.__gjjSilenceTrimAutoBtn.textContent = autoRunning ? "■ 自动" : "▶ 自动";
-		node.__gjjSilenceTrimAutoBtn.title = autoRunning ? "停止自动队列" : "从当前分段开始自动排队执行";
+		node.__gjjSilenceTrimAutoBtn.title = autoRunning
+			? "停止自动队列"
+			: (autoStopped ? `自动已关闭：${node.properties?.[AUTO_STOP_REASON_PROPERTY] || ""}` : "从当前分段开始自动排队执行");
 	}
 	for (const button of [node.__gjjSilenceTrimBlankBtn, node.__gjjSilenceTrimInitialBtn, node.__gjjSilenceTrimAutoBtn]) {
 		if (!button) continue;
@@ -239,6 +270,7 @@ function updateToolbar(node) {
 }
 
 function stopAuto(node, reason = "自动队列已停止") {
+	activeAutoToken += 1;
 	if (queueTimer) {
 		clearTimeout(queueTimer);
 		queueTimer = null;
@@ -251,6 +283,8 @@ function stopAuto(node, reason = "自动队列已停止") {
 	}
 	node.properties = node.properties || {};
 	node.properties[AUTO_PROPERTY] = false;
+	node.properties[AUTO_STOP_REASON_PROPERTY] = reason;
+	delete node.__gjjSilenceTrimAutoToken;
 	setStatus(node, reason);
 	updateToolbar(node);
 }
@@ -266,6 +300,9 @@ function startAuto(node) {
 		queueTimer = null;
 	}
 	node.properties[AUTO_PROPERTY] = true;
+	delete node.properties[AUTO_STOP_REASON_PROPERTY];
+	activeAutoToken += 1;
+	node.__gjjSilenceTrimAutoToken = activeAutoToken;
 	activeAutoNodeId = String(node.id);
 	pendingAutoData = null;
 	setWidgetValue(node, QUEUE_MODE_NAME, MODE_AUTO);
@@ -276,8 +313,8 @@ function startAuto(node) {
 	queueRun(node);
 }
 
-function queueNextIfNeeded(node, count, index) {
-	if (!node || !node.properties?.[AUTO_PROPERTY] || activeAutoNodeId !== String(node.id)) {
+function queueNextIfNeeded(node, count, index, token) {
+	if (!node || !node.properties?.[AUTO_PROPERTY] || activeAutoNodeId !== String(node.id) || token !== activeAutoToken || token !== node.__gjjSilenceTrimAutoToken) {
 		return;
 	}
 	if (inputLinked(node, CURRENT_SEGMENT_NAME)) {
@@ -304,7 +341,7 @@ function queueNextIfNeeded(node, count, index) {
 	}
 	queueTimer = setTimeout(async () => {
 		queueTimer = null;
-		if (!node.properties?.[AUTO_PROPERTY] || activeAutoNodeId !== String(node.id)) {
+		if (!node.properties?.[AUTO_PROPERTY] || activeAutoNodeId !== String(node.id) || token !== activeAutoToken || token !== node.__gjjSilenceTrimAutoToken) {
 			return;
 		}
 		if (inputLinked(node, CURRENT_SEGMENT_NAME)) {
@@ -315,22 +352,17 @@ function queueNextIfNeeded(node, count, index) {
 	}, QUEUE_DELAY_MS);
 }
 
-function autoModeEnabled(node, data) {
-	const mode = String(data?.queue_mode || getWidget(node, QUEUE_MODE_NAME)?.value || "").trim();
-	return mode === MODE_AUTO;
-}
-
 function queuePendingAfterWorkflow(reason = "执行完成") {
 	const data = pendingAutoData;
 	if (!data?.node) {
 		return;
 	}
 	pendingAutoData = null;
-	if (activeAutoNodeId !== String(data.node.id)) {
+	if (activeAutoNodeId !== String(data.node.id) || data.token !== activeAutoToken || data.token !== data.node.__gjjSilenceTrimAutoToken || !data.node.properties?.[AUTO_PROPERTY]) {
 		return;
 	}
 	setStatus(data.node, `${reason}，准备推进分段`);
-	queueNextIfNeeded(data.node, data.count, data.index);
+	queueNextIfNeeded(data.node, data.count, data.index, data.token);
 }
 
 function ensureToolbar(node) {
@@ -339,32 +371,39 @@ function ensureToolbar(node) {
 		return;
 	}
 	const row = document.createElement("div");
-	row.style.cssText = "display:flex;gap:6px;align-items:center;flex-wrap:nowrap;padding:2px 0 0;overflow:hidden;";
+	row.style.cssText = "display:flex;flex-direction:column;gap:4px;padding:2px 0 0;overflow:hidden;";
+	const buttonRow = document.createElement("div");
+	buttonRow.style.cssText = "display:flex;gap:6px;align-items:center;flex-wrap:nowrap;overflow:hidden;";
 
 	node.__gjjSilenceTrimBlankBtn = makeButton("🧹 空行", "输出一个静音占位段", () => {
+		if (isAutoRunning(node) || node.properties?.[AUTO_PROPERTY]) stopAuto(node, "自动队列已停止");
+		delete node.properties?.[AUTO_STOP_REASON_PROPERTY];
 		setWidgetValue(node, QUEUE_MODE_NAME, MODE_BLANK);
 		updateToolbar(node);
 	});
 	node.__gjjSilenceTrimInitialBtn = makeButton("░ 初始", "只输出第一段，方便先预览", () => {
+		if (isAutoRunning(node) || node.properties?.[AUTO_PROPERTY]) stopAuto(node, "自动队列已停止");
+		delete node.properties?.[AUTO_STOP_REASON_PROPERTY];
 		setWidgetValue(node, QUEUE_MODE_NAME, MODE_INITIAL);
 		updateToolbar(node);
 	});
 	node.__gjjSilenceTrimAutoBtn = makeButton("▶ 自动", "输出完整分段队列，让后续节点自动逐段执行", () => {
-		if (node.properties?.[AUTO_PROPERTY]) stopAuto(node);
+		if (isAutoRunning(node)) stopAuto(node);
 		else startAuto(node);
 	});
 	const status = document.createElement("span");
-	status.style.cssText = "font-size:12px;color:#b8cac6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+	status.style.cssText = "display:block;font-size:12px;color:#b8cac6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:16px;max-width:100%;";
 	node.__gjjSilenceTrimStatus = status;
-	row.append(node.__gjjSilenceTrimBlankBtn, node.__gjjSilenceTrimInitialBtn, node.__gjjSilenceTrimAutoBtn, status);
+	buttonRow.append(node.__gjjSilenceTrimBlankBtn, node.__gjjSilenceTrimInitialBtn, node.__gjjSilenceTrimAutoBtn);
+	row.append(buttonRow, status);
 
 	const widget = node.addDOMWidget?.("gjj_silence_trim_queue_toolbar", "HTML", row, {
 		serialize: false,
 		hideOnZoom: false,
-		getHeight: () => 32,
+		getHeight: () => 50,
 	});
 	if (widget) {
-		widget.computeSize = (width) => [Math.max(280, width || 280), 32];
+		widget.computeSize = (width) => [Math.max(280, width || 280), 50];
 	}
 	node.__gjjSilenceTrimToolbar = widget || { element: row };
 	updateToolbar(node);
@@ -387,14 +426,11 @@ function patchNode(node) {
 		const index = Number(data?.segment_index || getWidget(this, CURRENT_SEGMENT_NAME)?.value || 1);
 		this.__gjjSilenceTrimExecuted = true;
 		setStatus(this, count > 0 ? `当前分段：${index} / ${count}` : "当前分段：0 / 0");
-		if (!inputLinked(this, CURRENT_SEGMENT_NAME) && autoModeEnabled(this, data)) {
-			this.properties = this.properties || {};
-			this.properties[AUTO_PROPERTY] = true;
-			activeAutoNodeId = String(this.id);
+		const token = this.__gjjSilenceTrimAutoToken;
+		const autoActive = Boolean(isAutoRunning(this) && token === activeAutoToken);
+		if (autoActive) {
 			updateToolbar(this);
-		}
-		if (activeAutoNodeId === String(this.id)) {
-			pendingAutoData = { node: this, count, index };
+			pendingAutoData = { node: this, count, index, token };
 			setStatus(this, count > 0 ? `当前分段：${index} / ${count}，等待当前工作流结束` : "当前分段：0 / 0");
 		}
 		return result;
@@ -437,6 +473,51 @@ function normalizeMaxDurationInput(node) {
 	app.graph?.setDirtyCanvas?.(true, true);
 }
 
+function clearLoadedAutoState(node) {
+	if (!node) return;
+	if (queueTimer && activeAutoNodeId === String(node.id)) {
+		clearTimeout(queueTimer);
+		queueTimer = null;
+	}
+	if (activeAutoNodeId === String(node.id)) {
+		activeAutoNodeId = null;
+	}
+	if (pendingAutoData?.node === node) {
+		pendingAutoData = null;
+	}
+	node.properties = node.properties || {};
+	delete node.properties[AUTO_STOP_REASON_PROPERTY];
+	delete node.__gjjSilenceTrimAutoToken;
+	clearTimeout(node.__gjjSilenceTrimAutoResumeTimer);
+	delete node.__gjjSilenceTrimAutoResumeTimer;
+}
+
+function armAutoForManualRun(node) {
+	if (!node?.properties?.[AUTO_PROPERTY] || isAutoRunning(node)) return false;
+	if (node.properties?.[AUTO_STOP_REASON_PROPERTY] || inputLinked(node, CURRENT_SEGMENT_NAME)) return false;
+	if (queueTimer) {
+		clearTimeout(queueTimer);
+		queueTimer = null;
+	}
+	activeAutoToken += 1;
+	node.__gjjSilenceTrimAutoToken = activeAutoToken;
+	activeAutoNodeId = String(node.id);
+	pendingAutoData = null;
+	node.__gjjSilenceTrimExecuted = false;
+	setWidgetValue(node, QUEUE_MODE_NAME, MODE_AUTO);
+	setStatus(node, `自动队列待续跑：第 ${getWidget(node, CURRENT_SEGMENT_NAME)?.value || 1} 段`);
+	updateToolbar(node);
+	return true;
+}
+
+function armFirstAutoNodeForManualRun() {
+	if (activeAutoNodeId) return;
+	for (const node of app.graph?._nodes || []) {
+		if (!TARGET_NODES.has(String(node?.comfyClass || node?.type || ""))) continue;
+		if (armAutoForManualRun(node)) return;
+	}
+}
+
 function scheduleNormalize(node, delay = 0) {
 	setTimeout(() => {
 		normalizeMaxDurationInput(node);
@@ -461,6 +542,7 @@ app.registerExtension({
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalOnConfigure?.apply(this, args);
+			clearLoadedAutoState(this);
 			scheduleNormalize(this, 0);
 			scheduleNormalize(this, 80);
 			return result;
@@ -490,6 +572,7 @@ app.registerExtension({
 
 api.addEventListener("execution_start", (event) => {
 	lastPromptId = eventPromptId(event);
+	armFirstAutoNodeForManualRun();
 	if (!activeAutoNodeId) {
 		pendingAutoData = null;
 	}

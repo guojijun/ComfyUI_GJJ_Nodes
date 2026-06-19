@@ -122,7 +122,7 @@ class GJJ_VideoCombine:
                         "display": "hidden",
                         "hidden": True,
                         "display_name": "文件名前缀",
-                        "tooltip": "支持子目录，例如 video/MyJob。",
+                        "tooltip": "支持子目录和 GJJ_SETNODE / 模板参数变量占位，例如 video/第{当前分段}段。",
                     },
                 ),
                 "format_name": (

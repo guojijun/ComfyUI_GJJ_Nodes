@@ -9,6 +9,11 @@ try:
 except Exception:
     from common_utils.dependency_checker import build_node_help_payload
 
+try:
+    from .gjj_video_combine_runtime import register_runtime_variable_source
+except Exception:
+    register_runtime_variable_source = None
+
 
 NODE_NAME = "GJJ_AudioSilenceTrimmer"
 NODE_DISPLAY_NAME = "GJJ · ✂️ 音频静音修剪"
@@ -117,6 +122,51 @@ def _merge_close_regions(regions: list[tuple[int, int]], min_gap_samples: int) -
     return merged
 
 
+def _build_kept_intervals_from_regions(
+    regions: list[tuple[int, int]],
+    total_samples: int,
+    keep_samples: int,
+) -> list[tuple[int, int]]:
+    total = max(0, int(total_samples))
+    if total <= 0:
+        return []
+    ordered = sorted(
+        (max(0, min(int(start), total)), max(0, min(int(end), total)))
+        for start, end in regions
+        if int(end) > int(start)
+    )
+    if not ordered:
+        return []
+
+    keep = max(0, int(keep_samples))
+    intervals: list[tuple[int, int]] = []
+    for index, (start, end) in enumerate(ordered):
+        if index == 0:
+            kept_start = max(0, start - keep)
+        else:
+            prev_end = ordered[index - 1][1]
+            if start > prev_end:
+                midpoint = prev_end + max(1, (start - prev_end) // 2)
+                kept_start = max(midpoint, start - keep)
+            else:
+                kept_start = start
+
+        if index + 1 < len(ordered):
+            next_start = ordered[index + 1][0]
+            if next_start > end:
+                midpoint = end + max(1, (next_start - end) // 2)
+                kept_end = min(midpoint, end + keep)
+            else:
+                kept_end = end
+        else:
+            kept_end = min(total, end + keep)
+
+        kept_start = max(0, min(kept_start, total))
+        kept_end = max(kept_start + 1, min(kept_end, total))
+        intervals.append((kept_start, kept_end))
+    return intervals
+
+
 def _find_non_silent_regions(
     waveform: torch.Tensor,
     threshold_db: float,
@@ -186,6 +236,61 @@ def _audio_dict(waveform: torch.Tensor, sample_rate: int) -> dict[str, Any]:
     return {"waveform": waveform.contiguous().clamp(-1.0, 1.0), "sample_rate": int(sample_rate)}
 
 
+def _pad_audio_samples(waveform: torch.Tensor, target_samples: int) -> torch.Tensor:
+    target_samples = max(1, int(target_samples))
+    current_samples = int(waveform.shape[-1])
+    if current_samples == target_samples:
+        return waveform.contiguous()
+    if current_samples > target_samples:
+        return waveform[..., :target_samples].contiguous()
+    blank = torch.zeros((*waveform.shape[:-1], target_samples - current_samples), device=waveform.device, dtype=waveform.dtype)
+    return torch.cat([waveform.contiguous(), blank], dim=-1).contiguous()
+
+
+def _frame_counts_for_segment(segment: dict[str, Any], fps: float) -> tuple[int, int]:
+    waveform = segment.get("waveform") if isinstance(segment, dict) else None
+    sample_rate = int(segment.get("sample_rate") or 0) if isinstance(segment, dict) else 0
+    if not isinstance(waveform, torch.Tensor) or sample_rate <= 0:
+        return 8, 9
+    frame_rate = max(0.01, float(fps or 24.0))
+    source_samples = max(1, int(waveform.shape[-1]))
+    raw_frames = max(1, int(torch.ceil(torch.tensor(source_samples / float(sample_rate) * frame_rate)).item()))
+    content_frames = max(8, ((raw_frames + 7) // 8) * 8)
+    return content_frames, content_frames + 1
+
+
+def _align_audio_segment_to_frame_counts(segment: dict[str, Any], content_frames: int, total_frames: int, fps: float) -> dict[str, Any]:
+    waveform = segment.get("waveform") if isinstance(segment, dict) else None
+    sample_rate = int(segment.get("sample_rate") or 0) if isinstance(segment, dict) else 0
+    if not isinstance(waveform, torch.Tensor) or sample_rate <= 0:
+        return segment
+    frame_rate = max(0.01, float(fps or 24.0))
+    total_samples = max(int(waveform.shape[-1]) + 1, int((float(total_frames) / frame_rate) * sample_rate))
+    return _audio_dict(_pad_audio_samples(waveform, total_samples), sample_rate)
+
+
+def _align_audio_segment_to_8n_plus_blank(segment: dict[str, Any], fps: float) -> dict[str, Any]:
+    content_frames, total_frames = _frame_counts_for_segment(segment, fps)
+    return _align_audio_segment_to_frame_counts(segment, content_frames, total_frames, fps)
+
+
+def _align_audio_queue_to_8n_plus_blank(segment_queue: list[dict[str, Any]], fps: float) -> list[dict[str, Any]]:
+    return [_align_audio_segment_to_8n_plus_blank(segment, fps) for segment in segment_queue]
+
+
+def _align_audio_queue_like_reference(
+    segment_queue: list[dict[str, Any]],
+    reference_queue: list[dict[str, Any]],
+    fps: float,
+) -> list[dict[str, Any]]:
+    aligned: list[dict[str, Any]] = []
+    for index, segment in enumerate(segment_queue):
+        reference = reference_queue[index] if index < len(reference_queue) else segment
+        content_frames, total_frames = _frame_counts_for_segment(reference, fps)
+        aligned.append(_align_audio_segment_to_frame_counts(segment, content_frames, total_frames, fps))
+    return aligned
+
+
 def _silent_audio_like(waveform: torch.Tensor, sample_rate: int, seconds: float = 0.05) -> dict[str, Any]:
     samples = max(1, int(round(float(seconds) * max(1, sample_rate))))
     silent = torch.zeros((*waveform.shape[:-1], samples), device=waveform.device, dtype=waveform.dtype)
@@ -197,6 +302,7 @@ def _segment_audio_queue_from_boundaries(
     safe_cut_points: list[int],
     max_duration: float,
     sample_rate: int,
+    min_segment_samples: int = 0,
 ) -> list[dict[str, Any]]:
     total_samples = int(waveform.shape[-1])
     if total_samples <= 0:
@@ -205,6 +311,7 @@ def _segment_audio_queue_from_boundaries(
     if max_samples <= 0:
         return [_audio_dict(waveform, sample_rate)]
 
+    min_gap = max(1, int(min_segment_samples or 0))
     boundaries = sorted(
         {
             max(1, min(int(point), total_samples))
@@ -216,6 +323,20 @@ def _segment_audio_queue_from_boundaries(
         boundaries.append(total_samples)
     if not boundaries:
         return [_audio_dict(waveform, sample_rate)]
+    if min_gap > 1:
+        filtered: list[int] = []
+        last = 0
+        for point in boundaries:
+            point = int(point)
+            if point >= total_samples:
+                continue
+            if point - last >= min_gap:
+                filtered.append(point)
+                last = point
+        if total_samples - last < min_gap and filtered:
+            filtered.pop()
+        filtered.append(total_samples)
+        boundaries = filtered
 
     segments: list[dict[str, Any]] = []
     start = 0
@@ -225,8 +346,8 @@ def _segment_audio_queue_from_boundaries(
         if candidates:
             end = max(candidates)
         else:
-            # 当前句子本身超过最长时间时，回退点不存在；保留整句，不从句中硬切。
-            future = [point for point in boundaries if point > start]
+            # 软最长时长：不能硬切句中；往后找下一个静音段中间切点。
+            future = [point for point in boundaries if point > limit]
             end = min(future) if future else total_samples
         end = max(start + 1, min(int(end), total_samples))
         segment = waveform[..., start:end]
@@ -235,6 +356,30 @@ def _segment_audio_queue_from_boundaries(
         segments.append(_audio_dict(segment, sample_rate))
         start = end
     return segments or [_audio_dict(waveform, sample_rate)]
+
+
+def _scale_cut_points(cut_points: list[int], source_rate: int, target_rate: int, target_total: int) -> list[int]:
+    if source_rate <= 0 or target_rate <= 0:
+        return []
+    return [
+        max(1, min(int(round(float(point) / float(source_rate) * float(target_rate))), int(target_total)))
+        for point in cut_points
+        if int(point) > 0
+    ]
+
+
+def _segment_background_like_vocal(
+    background_waveform: torch.Tensor,
+    background_rate: int,
+    vocal_cut_points: list[int],
+    vocal_rate: int,
+    max_duration: float,
+    min_segment_samples: int = 0,
+) -> list[dict[str, Any]]:
+    total_samples = int(background_waveform.shape[-1])
+    cut_points = _scale_cut_points(vocal_cut_points, vocal_rate, background_rate, total_samples)
+    background_min_segment = int(round(float(min_segment_samples) / float(max(1, vocal_rate)) * float(max(1, background_rate))))
+    return _segment_audio_queue_from_boundaries(background_waveform, cut_points, max_duration, background_rate, background_min_segment)
 
 
 def _limit_to_safe_boundary(
@@ -252,10 +397,7 @@ def _limit_to_safe_boundary(
         cut_samples = max(candidates)
     else:
         future = [point for point in safe_cut_points if int(point) > max_samples]
-        if future:
-            cut_samples = min(future)
-        else:
-            cut_samples = max_samples
+        cut_samples = min(future) if future else int(waveform.shape[-1])
     cut_samples = max(1, min(int(cut_samples), int(waveform.shape[-1])))
     return waveform[..., :cut_samples]
 
@@ -324,7 +466,12 @@ def _return_payload(
     current_audio: dict[str, Any],
     current_index: int,
     queue_mode: str,
+    current_background_audio: dict[str, Any] | None = None,
+    unique_id=None,
 ):
+    if register_runtime_variable_source is not None:
+        register_runtime_variable_source(unique_id, 0, int(segment_count))
+        register_runtime_variable_source(unique_id, 2, int(current_index))
     return {
         "ui": {
             "gjj_audio_silence_trimmer": [
@@ -342,6 +489,7 @@ def _return_payload(
             int(segment_count),
             current_audio,
             int(current_index),
+            current_background_audio if current_background_audio is not None else current_audio,
         ),
     }
 
@@ -357,14 +505,15 @@ class GJJ_AudioSilenceTrimmer:
         "静音修剪",
         "音频去静音",
     ]
-    RETURN_TYPES = ("INT", "AUDIO", "INT")
-    RETURN_NAMES = ("分段总数", "当前分段音频", "当前分段序号")
+    RETURN_TYPES = ("INT", "AUDIO", "INT", "AUDIO")
+    RETURN_NAMES = ("分段总数", "当前分段音频", "当前分段序号", "当前分段背景声")
     OUTPUT_TOOLTIPS = (
         "分段队列中的音频片段总数。",
         "按当前分段序号选中的当前 AUDIO 分段。",
         "当前实际输出的 1 基分段序号；可接到其它队列节点保持同步。",
+        "按同一分段边界、同一 8n+1 时长处理后的背景声；未接背景声时输出等长静音。",
     )
-    OUTPUT_IS_LIST = (False, False, False)
+    OUTPUT_IS_LIST = (False, False, False, False)
     GJJ_HELP = {"title": NODE_DISPLAY_NAME, **_GJJ_HELP}
 
     @classmethod
@@ -375,18 +524,18 @@ class GJJ_AudioSilenceTrimmer:
                 "threshold_db": (
                     "FLOAT",
                     {
-                        "default": -30.0,
+                        "default": -40.0,
                         "min": -120.0,
                         "max": 0.0,
                         "step": 1.0,
                         "display_name": "静音阈值dB",
-                        "tooltip": "低于该音量的窗口视为静音。默认 -30，适合更积极地识别静音。",
+                        "tooltip": "低于该音量的窗口视为静音。默认 -40，适合保留更多尾音和弱气声。",
                     },
                 ),
                 "min_silence_duration": (
                     "FLOAT",
                     {
-                        "default": 0.2,
+                        "default": 0.1,
                         "min": 0.01,
                         "max": 30.0,
                         "step": 0.01,
@@ -397,7 +546,7 @@ class GJJ_AudioSilenceTrimmer:
                 "keep_silence": (
                     "FLOAT",
                     {
-                        "default": 0.2,
+                        "default": 0.4,
                         "min": 0.0,
                         "max": 60.0,
                         "step": 0.01,
@@ -408,18 +557,18 @@ class GJJ_AudioSilenceTrimmer:
                 "max_duration": (
                     "FLOAT",
                     {
-                        "default": 6.0,
+                        "default": 7.0,
                         "min": 0.0,
                         "max": 36000.0,
                         "step": 0.1,
                         "display_name": "最长保留时长",
-                        "tooltip": "默认 5 秒。0 表示不限；大于 0 时，输出会优先在不超过该秒数的静音或段落边界处截断。前方接口支持连接 INT 或 FLOAT。",
+                        "tooltip": "默认 7 秒。0 表示不限；大于 0 时，输出会优先在静音段中点附近截断，不硬切尾音。前方接口支持连接 INT 或 FLOAT。",
                     },
                 ),
                 "fade_duration": (
                     "FLOAT",
                     {
-                        "default": 0.01,
+                        "default": 0.001,
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.001,
@@ -447,6 +596,26 @@ class GJJ_AudioSilenceTrimmer:
                         "tooltip": "面板里的滑动起始序号。可手动设置，也可连接本行小圆点外接；外接时由外部接管。",
                     },
                 ),
+                "fps": (
+                    "FLOAT",
+                    {
+                        "default": 24.0,
+                        "min": 0.01,
+                        "max": 240.0,
+                        "step": 0.01,
+                        "display_name": "帧率",
+                        "tooltip": "每段音频只在末尾补静音到 8n+1，不拉伸人声主体，避免改变音色。",
+                    },
+                ),
+            },
+            "optional": {
+                "background_audio": (
+                    "AUDIO",
+                    {
+                        "display_name": "背景声",
+                        "tooltip": "可选背景声。会跟随人声使用相同切点，并同样对齐到 8n+1，方便对口型后混回。",
+                    },
+                ),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -457,32 +626,60 @@ class GJJ_AudioSilenceTrimmer:
     def trim_silence(
         self,
         audio: dict[str, Any],
-        threshold_db: float = -30.0,
-        min_silence_duration: float = 0.2,
-        keep_silence: float = 0.2,
-        max_duration: float = 6.0,
-        fade_duration: float = 0.01,
+        threshold_db: float = -40.0,
+        min_silence_duration: float = 0.1,
+        keep_silence: float = 0.4,
+        max_duration: float = 7.0,
+        fade_duration: float = 0.001,
         queue_mode: str = QUEUE_MODE_AUTO,
         current_segment: int = 1,
+        fps: float = 24.0,
+        background_audio: dict[str, Any] | None = None,
         prompt=None,
         unique_id=None,
     ):
         waveform, sample_rate = _normalize_audio(audio)
+        if background_audio is not None:
+            background_waveform, background_rate = _normalize_audio(background_audio)
+        else:
+            background_waveform = torch.zeros_like(waveform)
+            background_rate = sample_rate
         total_samples = int(waveform.shape[-1])
         min_silence_samples = max(1, int(round(float(min_silence_duration) * sample_rate)))
         keep_samples = max(0, int(round(float(keep_silence) * sample_rate)))
+        min_segment_samples = max(int(round(2.0 * sample_rate)), int(round(float(min_silence_duration) * sample_rate * 0.5)))
         max_duration_value = float(max_duration)
         fade_samples = max(0, int(round(float(fade_duration) * sample_rate)))
+        background_fade_samples = max(0, int(round(float(fade_duration) * background_rate)))
+
+        def background_slice(start_sample: int, end_sample: int) -> torch.Tensor:
+            bg_total = int(background_waveform.shape[-1])
+            start_bg = max(0, min(int(round(float(start_sample) / float(sample_rate) * float(background_rate))), bg_total))
+            end_bg = max(start_bg + 1, min(int(round(float(end_sample) / float(sample_rate) * float(background_rate))), bg_total))
+            return background_waveform[..., start_bg:end_bg]
+
+        def current_background_from_queue(background_queue: list[dict[str, Any]], current_audio: dict[str, Any], current_index: int) -> dict[str, Any]:
+            if current_index > 0 and current_index <= len(background_queue):
+                return background_queue[current_index - 1]
+            current_waveform = current_audio.get("waveform") if isinstance(current_audio, dict) else waveform
+            current_rate = int(current_audio.get("sample_rate") or sample_rate) if isinstance(current_audio, dict) else sample_rate
+            if isinstance(current_waveform, torch.Tensor):
+                return _silent_audio_like(current_waveform, current_rate)
+            return _silent_audio_like(waveform, sample_rate)
 
         panel_index_linked = _prompt_input_is_linked(prompt, unique_id, ("current_segment",))
         effective_slide_index = current_segment if panel_index_linked else None
 
-        regions = _find_non_silent_regions(waveform, threshold_db, min_silence_samples, sample_rate)
-        if not regions:
+        raw_regions = _find_non_silent_regions(waveform, threshold_db, min_silence_samples, sample_rate)
+        kept_intervals = _build_kept_intervals_from_regions(raw_regions, total_samples, keep_samples)
+        if not kept_intervals:
             safe_cut_points = [int(waveform.shape[-1])]
             limited = _limit_to_safe_boundary(waveform, safe_cut_points, max_duration_value, sample_rate)
             limited = limited.contiguous().clamp(-1.0, 1.0)
-            segment_queue = _segment_audio_queue_from_boundaries(waveform, safe_cut_points, max_duration_value, sample_rate)
+            raw_segment_queue = _segment_audio_queue_from_boundaries(waveform, safe_cut_points, max_duration_value, sample_rate, min_segment_samples)
+            raw_background_queue = _segment_background_like_vocal(background_waveform, background_rate, safe_cut_points, sample_rate, max_duration_value, min_segment_samples)
+            segment_queue = _align_audio_queue_to_8n_plus_blank(raw_segment_queue, fps)
+            background_queue = _align_audio_queue_like_reference(raw_background_queue, raw_segment_queue, fps)
             current_audio, current_index = _resolve_queue_outputs(
                 segment_queue,
                 waveform,
@@ -491,49 +688,50 @@ class GJJ_AudioSilenceTrimmer:
                 queue_mode=queue_mode,
                 current_segment=current_segment,
             )
+            current_background = current_background_from_queue(background_queue, current_audio, current_index)
             return _return_payload(
                 len(segment_queue),
                 current_audio,
                 current_index,
                 queue_mode,
+                current_background,
+                unique_id,
             )
 
         result: torch.Tensor | None = None
+        background_result: torch.Tensor | None = None
         safe_cut_points: list[int] = []
-        last_end = 0
 
         def remember_boundary() -> None:
             if result is not None and result.shape[-1] > 0:
                 safe_cut_points.append(int(result.shape[-1]))
 
-        for index, (start, end) in enumerate(regions):
+        for index, (start, end) in enumerate(kept_intervals):
             start = max(0, min(int(start), total_samples))
             end = max(start + 1, min(int(end), total_samples))
             if index == 0:
-                kept_start = max(0, start - keep_samples)
-                result = waveform[..., kept_start:end]
+                result = waveform[..., start:end]
+                background_result = background_slice(start, end)
                 remember_boundary()
             else:
-                gap = max(0, start - last_end)
-                keep_gap = min(gap, keep_samples)
-                if keep_gap > 0:
-                    result = _append_audio(result, waveform[..., start - keep_gap:start], fade_samples)
-                    if fade_samples <= 0:
-                        remember_boundary()
                 result = _append_audio(result, waveform[..., start:end], fade_samples)
+                background_result = _append_audio(background_result, background_slice(start, end), background_fade_samples)
                 remember_boundary()
-            last_end = end
-
-        tail_keep = min(max(0, total_samples - last_end), keep_samples)
-        if tail_keep > 0:
-            result = _append_audio(result, waveform[..., last_end:last_end + tail_keep], fade_samples)
-            remember_boundary()
 
         if result is None or result.shape[-1] <= 0:
             result = waveform
+            background_result = background_waveform
             safe_cut_points = [int(result.shape[-1])]
         full_result = result.contiguous().clamp(-1.0, 1.0)
-        segment_queue = _segment_audio_queue_from_boundaries(full_result, safe_cut_points, max_duration_value, sample_rate)
+        full_background_result = (
+            background_result.contiguous().clamp(-1.0, 1.0)
+            if background_result is not None and background_result.shape[-1] > 0
+            else torch.zeros_like(full_result)
+        )
+        raw_segment_queue = _segment_audio_queue_from_boundaries(full_result, safe_cut_points, max_duration_value, sample_rate, min_segment_samples)
+        raw_background_queue = _segment_background_like_vocal(full_background_result, background_rate, safe_cut_points, sample_rate, max_duration_value, min_segment_samples)
+        segment_queue = _align_audio_queue_to_8n_plus_blank(raw_segment_queue, fps)
+        background_queue = _align_audio_queue_like_reference(raw_background_queue, raw_segment_queue, fps)
         result = _limit_to_safe_boundary(full_result, safe_cut_points, max_duration_value, sample_rate)
         result = result.contiguous().clamp(-1.0, 1.0)
         segment_count = len(segment_queue)
@@ -545,11 +743,14 @@ class GJJ_AudioSilenceTrimmer:
             queue_mode=queue_mode,
             current_segment=current_segment,
         )
+        current_background = current_background_from_queue(background_queue, current_audio, current_index)
         return _return_payload(
             int(segment_count),
             current_audio,
             int(current_index),
             queue_mode,
+            current_background,
+            unique_id,
         )
 
 

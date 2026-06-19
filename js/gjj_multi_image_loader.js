@@ -15,6 +15,7 @@ const DEFAULT_NETWORK_IMAGE_API_PATH = "/gjj/multi_image_loader/default_image";
 const UPLOAD_SUBFOLDER = "gjj_multi_image_loader";
 const NETWORK_CACHE_SUBFOLDER = "GJJ_TemplateParams";
 const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE";
+const BATCH_IMAGE_OUTPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const INPUT_IMAGES_NAME = "input_images";
 const INPUT_IMAGES_LABEL = "导入图片";
 const INPUT_IMAGES_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
@@ -1197,7 +1198,7 @@ function ensureOutputs(node, count) {
 	while ((node.outputs?.length || 0) < visibleCount) {
 		const outputIndex = node.outputs?.length || 0;
 		if (outputIndex === 0) {
-			node.addOutput?.("批量图片队列", BATCH_IMAGE_TYPE);
+			node.addOutput?.("批量图片队列", BATCH_IMAGE_OUTPUT_TYPE);
 			continue;
 		}
 		node.addOutput?.(`图片 ${outputIndex}`, "IMAGE");
@@ -1218,7 +1219,7 @@ function ensureOutputs(node, count) {
 			output.name = "批量图片队列";
 			output.label = output.name;
 			output.localized_name = output.name;
-			output.type = BATCH_IMAGE_TYPE;
+			output.type = BATCH_IMAGE_OUTPUT_TYPE;
 			output.tooltip = imageCount > MAX_OUTPUT_IMAGES
 				? `已选择 ${imageCount} 张图片，单图输出最多展开 ${MAX_OUTPUT_IMAGES} 个；批量队列不限制。`
 				: "将所有已选图片按顺序打包成一个 GJJ 专用批量图片队列输出。";

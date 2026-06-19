@@ -15,10 +15,16 @@ from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
 try:
-    from .gjj_video_combine_runtime import DEFAULT_FRAME_RATE, DEFAULT_FORMAT, combine_video
+    from .gjj_video_combine_runtime import (
+        DEFAULT_FRAME_RATE,
+        DEFAULT_FORMAT,
+        _render_filename_prefix_template,
+        combine_video,
+    )
 except Exception:
     DEFAULT_FRAME_RATE = 24
     DEFAULT_FORMAT = "video/h264-mp4"
+    _render_filename_prefix_template = None
     combine_video = None
 
 try:
@@ -770,7 +776,7 @@ class GJJ_SaveAnyObject:
                     {
                         "default": DEFAULT_FILENAME_PREFIX,
                         "display_name": "文件名前缀",
-                        "tooltip": "保存到 output 目录下，支持子目录。保持默认值时会自动改用当前工作流名称。",
+                        "tooltip": "保存到 output 目录下，支持子目录。保持默认值时会自动改用当前工作流名称；支持 GJJ_SETNODE / 模板参数变量占位，例如 GJJ/第{当前分段}段。",
                     },
                 ),
             },
@@ -802,6 +808,8 @@ class GJJ_SaveAnyObject:
             if _should_use_workflow_prefix(filename_prefix) or normalized_prefix in old_source_prefixes
             else filename_prefix
         )
+        if _render_filename_prefix_template is not None:
+            effective_prefix = _render_filename_prefix_template(effective_prefix, prompt, extra_pnginfo=extra_pnginfo)
         directory, base_name = _resolve_prefix(effective_prefix)
         saved_paths: list[str] = []
         for key in sorted(kwargs.keys(), key=_extract_input_index):

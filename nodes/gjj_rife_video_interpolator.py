@@ -213,11 +213,14 @@ class GJJ_RifeVideoInterpolator:
                     },
                 ),
                 "scale_factor": (
-                    [0.25, 0.5, 1.0, 2.0, 4.0],
+                    "FLOAT",
                     {
                         "default": 1.0,
+                        "min": 0.25,
+                        "max": 4.0,
+                        "step": 0.25,
                         "display_name": "尺度因子",
-                        "tooltip": "按原插件逻辑传给 RIFE 的 scale 参数；通常保持 1.0 即可。",
+                        "tooltip": "按原插件逻辑传给 RIFE 的 scale 参数；通常保持 1.0 即可。兼容旧工作流里保存的字符串 1。",
                     },
                 ),
             },

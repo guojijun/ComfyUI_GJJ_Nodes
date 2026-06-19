@@ -17,19 +17,24 @@ from .gjj_any_switch import AnyType, FlexibleOptionalInputType
 from .gjj_ffmpeg_tools import (
     VIDEO_SUFFIXES,
     _collect_media_paths,
+    _condition_enabled,
     _concat_videos,
     _ffmpeg,
     _ffprobe,
     _fps_from_value,
+    _find_prefixed_videos,
     _preview_item,
+    _prefixed_videos_signature,
     _run,
     _safe_output_info,
+    _segment_prefix_text,
     _trim_tail_frame,
     _unique_output_path,
     _write_audio_wav,
     _write_frames,
     _tensor_from_media,
 )
+from .gjj_video_combine_runtime import _render_filename_prefix_template
 
 
 NODE_NAME = "GJJ_AnyVideoConcat"
@@ -64,6 +69,15 @@ def _collect_video_inputs(kwargs: dict[str, Any]) -> list[Any]:
         if not _is_empty(value):
             values.append(value)
     return values
+
+
+def _dependency_signature(value: Any) -> str:
+    paths = _collect_media_paths(value, VIDEO_SUFFIXES)
+    if paths:
+        return ",".join(str(path) for path in paths)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return str(value)
+    return str(id(value))
 
 
 def _input_to_video_path(value: Any, index: int, tmp_path: Path, ffmpeg: str, fps: float) -> Path | None:
@@ -182,8 +196,8 @@ class GJJ_AnyVideoConcat:
             "required": {
                 "filename_prefix": ("STRING", {
                     "default": "GJJ/video_concat/concat",
-                    "display_name": "文件名前缀",
-                    "tooltip": "输出到 ComfyUI output 目录的文件名前缀。",
+                    "display_name": "待合并视频前缀",
+                    "tooltip": "未连接视频输入时，用此前缀查找要合并的分段视频；合并结果会以此前缀派生命名并保存到 ComfyUI output 目录。",
                 }),
                 "fps": ("FLOAT", {
                     "default": 30.0,
@@ -213,7 +227,22 @@ class GJJ_AnyVideoConcat:
                     "hidden": True,
                 }),
             },
-            "optional": FlexibleOptionalInputType(VIDEO_INPUT_TYPE),
+            "optional": FlexibleOptionalInputType(VIDEO_INPUT_TYPE, {
+                "condition": ("BOOLEAN", {
+                    "default": True,
+                    "display_name": "条件通行",
+                    "tooltip": "可选布尔门控；未连接时默认为真。为假时本节点不执行，下游到此停止。",
+                }),
+                "wait_for": (any_type, {
+                    "display_name": "等待完成",
+                    "tooltip": "任意类型依赖输入；不参与合并，只用于等待最后一段或其它上游节点执行完成后再开始合并。",
+                }),
+            }),
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+                "unique_id": "UNIQUE_ID",
+            },
         }
 
     @classmethod
@@ -224,10 +253,16 @@ class GJJ_AnyVideoConcat:
         delete_anchor_frame: bool = True,
         ffmpeg_path: str = "",
         ffprobe_path: str = "",
+        prompt=None,
+        extra_pnginfo=None,
+        unique_id=None,
         **kwargs,
     ):
         parts = [
+            str(_condition_enabled(kwargs.get("condition", True))),
+            _dependency_signature(kwargs.get("wait_for")),
             str(filename_prefix or ""),
+            _prefixed_videos_signature(_segment_prefix_text(filename_prefix)),
             str(float(fps or 30.0)),
             str(bool(delete_anchor_frame)),
         ]
@@ -245,25 +280,50 @@ class GJJ_AnyVideoConcat:
         delete_anchor_frame: bool = True,
         ffmpeg_path: str = "",
         ffprobe_path: str = "",
+        prompt=None,
+        extra_pnginfo=None,
+        unique_id=None,
         **kwargs,
     ):
-        inputs = _collect_video_inputs(kwargs)
-        if not inputs:
-            raise RuntimeError("请至少连接一个视频输入。")
+        condition = kwargs.get("condition", True)
+        if not _condition_enabled(condition):
+            info_json = json.dumps({"skipped": True, "reason": "condition_false"}, ensure_ascii=False, indent=2)
+            return {
+                "ui": {"text": ["条件通行关闭，任意视频合并节点已跳过。"]},
+                "result": (None, "", 0.0, 0, info_json),
+            }
 
         ffmpeg = _ffmpeg(ffmpeg_path)
         ffprobe = _ffprobe(ffprobe_path, ffmpeg)
         fps_value = _fps_from_value(fps, 30.0)
-        output_path = _unique_output_path(str(filename_prefix or "GJJ/video_concat/concat"), ".mp4", marker="Concat")
+        resolved_prefix = _render_filename_prefix_template(
+            filename_prefix or "GJJ/video_concat/concat",
+            prompt,
+            {
+                "frame_rate": fps_value,
+                "frameRate": fps_value,
+                "fps": fps_value,
+                "帧率": fps_value,
+            },
+            extra_pnginfo,
+        )
+        output_path = _unique_output_path(str(resolved_prefix or "GJJ/video_concat/concat"), ".mp4", marker="Concat")
 
         source_paths: list[Path] = []
+        inputs = _collect_video_inputs(kwargs)
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            for index, value in enumerate(inputs, start=1):
-                path = _input_to_video_path(value, index, tmp_path, ffmpeg, fps_value)
-                if path is None:
-                    raise RuntimeError(f"第 {index} 个输入无法解析为视频路径或 VIDEO 帧。")
-                source_paths.append(path)
+            if inputs:
+                for index, value in enumerate(inputs, start=1):
+                    path = _input_to_video_path(value, index, tmp_path, ffmpeg, fps_value)
+                    if path is None:
+                        raise RuntimeError(f"第 {index} 个输入无法解析为视频路径或 VIDEO 帧。")
+                    source_paths.append(path)
+            else:
+                input_prefix = _segment_prefix_text(resolved_prefix or filename_prefix)
+                source_paths = _find_prefixed_videos(input_prefix)
+                if not source_paths:
+                    raise RuntimeError(f"未找到同前缀视频片段：{input_prefix or filename_prefix or '空'}")
 
             concat_paths = list(source_paths)
             if bool(delete_anchor_frame) and len(concat_paths) > 1:

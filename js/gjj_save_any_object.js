@@ -17,6 +17,7 @@ const MIN_WIDTH = 320;
 const MULTI_IMAGE_MIN_WIDTH = 104;
 const BUTTON_WIDGET_NAME = "gjj_save_any_object_output_button";
 const FOLDER_WIDGET_NAME = "gjj_save_any_object_folder_button";
+const FILENAME_VARIABLES_PROPERTY = "gjj_save_any_object_filename_prefix_variables";
 
 function previewDataToUrl(data, includePreviewFormat = true) {
 	if (!data?.filename) {
@@ -240,6 +241,37 @@ function getWidget(node, name) {
 		: null;
 }
 
+function setWidgetValue(node, name, value) {
+	const widget = getWidget(node, name);
+	if (!widget) {
+		return false;
+	}
+	widget.value = value;
+	const index = Array.isArray(node?.widgets) ? node.widgets.indexOf(widget) : -1;
+	if (index >= 0) {
+		node.widgets_values ||= [];
+		node.widgets_values[index] = value;
+	}
+	widget.callback?.(value, app.canvas, node, app.canvas?.graph_mouse);
+	node.onWidgetChanged?.(name, value, widget, node);
+	setDirty(node);
+	return true;
+}
+
+function variableOptions(node) {
+	const apiObject = globalThis.GJJ_VariableBroadcast;
+	const graph = node?.graph || app.graph;
+	return typeof apiObject?.getVisibleSetOptions === "function" ? (apiObject.getVisibleSetOptions(graph) || []) : [];
+}
+
+function variableOptionDisplay(option) {
+	const value = String(option?.value || "").trim();
+	const label = String(option?.label || value).trim();
+	const match = label.match(/^[^()（）]+[（(]([^()（）]+?)[\s·]+([^()（）]+?)[）)]$/);
+	if (match) return { title: match[2].trim() || value, source: match[1].trim(), value };
+	return { title: label || value, source: "", value };
+}
+
 function stopCanvasEvent(event) {
 	event?.stopPropagation?.();
 }
@@ -252,6 +284,201 @@ function protectButton(button) {
 	for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "contextmenu"]) {
 		button.addEventListener(eventName, stopCanvasEvent);
 	}
+}
+
+function closeVariablePicker(node) {
+	node?.__gjjSaveAnyObjectVariablePicker?.remove?.();
+	node.__gjjSaveAnyObjectVariablePicker = null;
+	updateButtonState(node);
+}
+
+function insertFilenameVariables(node, variableNames) {
+	const names = (Array.isArray(variableNames) ? variableNames : [variableNames])
+		.map((item) => String(item || "").trim())
+		.filter(Boolean);
+	if (!names.length) return;
+	const widget = getWidget(node, "filename_prefix");
+	const current = String(widget?.value || DEFAULT_PREFIX);
+	const tokens = names.map((name) => `{${name}}`).filter((token) => !current.includes(token));
+	if (!tokens.length) return;
+	const separator = current.endsWith("/") || current.endsWith("_") || !current ? "" : "_";
+	const next = `${current}${separator}${tokens.join("_")}`;
+	setWidgetValue(node, "filename_prefix", next);
+}
+
+function removeFilenameVariables(node, variableNames) {
+	const names = (Array.isArray(variableNames) ? variableNames : [variableNames])
+		.map((item) => String(item || "").trim())
+		.filter(Boolean);
+	const widget = getWidget(node, "filename_prefix");
+	if (!widget || !names.length) return;
+	const escaped = names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+	const pattern = new RegExp(`(?:^|_)?\\{(?:${escaped.join("|")})\\}`, "g");
+	let next = String(widget.value || "").replace(pattern, "");
+	next = next.replace(/_{2,}/g, "_").replace(/\/_/g, "/").replace(/^_+|_+$/g, "");
+	setWidgetValue(node, "filename_prefix", next || DEFAULT_PREFIX);
+}
+
+function filenameVariableTokens(node) {
+	const widget = getWidget(node, "filename_prefix");
+	const text = String(widget?.value || "");
+	return [...text.matchAll(/\{([^{}]+)\}/g)].map((match) => String(match[1] || "").trim()).filter(Boolean);
+}
+
+function selectedFilenameVariables(node) {
+	const saved = Array.isArray(node?.properties?.[FILENAME_VARIABLES_PROPERTY])
+		? node.properties[FILENAME_VARIABLES_PROPERTY]
+		: [];
+	return [...new Set([...saved, ...filenameVariableTokens(node)].map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+function setSelectedFilenameVariables(node, names) {
+	node.properties ||= {};
+	const values = [...new Set((Array.isArray(names) ? names : []).map((item) => String(item || "").trim()).filter(Boolean))];
+	if (values.length) node.properties[FILENAME_VARIABLES_PROPERTY] = values;
+	else delete node.properties[FILENAME_VARIABLES_PROPERTY];
+	updateButtonState(node);
+	setDirty(node);
+}
+
+function openVariablePicker(node, anchorButton) {
+	closeVariablePicker(node);
+	const options = variableOptions(node);
+	const popup = document.createElement("div");
+	popup.style.cssText = [
+		"position:fixed",
+		"z-index:10050",
+		"width:min(420px,calc(100vw - 28px))",
+		"max-height:min(500px,calc(100vh - 40px))",
+		"overflow:hidden",
+		"display:flex",
+		"flex-direction:column",
+		"gap:8px",
+		"padding:10px",
+		"border:1px solid #486575",
+		"border-radius:8px",
+		"background:#08151a",
+		"box-shadow:0 18px 46px rgba(0,0,0,.55)",
+		"color:#dce7e2",
+		"font:12px system-ui,'Microsoft YaHei',sans-serif",
+	].join(";");
+	const rect = anchorButton?.getBoundingClientRect?.() || { left: 24, bottom: 80 };
+	popup.style.left = `${Math.round(Math.max(12, Math.min(window.innerWidth - 440, rect.left || 24)))}px`;
+	popup.style.top = `${Math.round(Math.max(12, Math.min(window.innerHeight - 520, (rect.bottom || 80) + 6)))}px`;
+
+	const header = document.createElement("div");
+	header.style.cssText = "display:flex;align-items:center;gap:8px;";
+	const title = document.createElement("div");
+	title.textContent = "⚡ 插入文件名变量";
+	title.style.cssText = "font-weight:800;flex:1 1 auto;";
+	const close = document.createElement("button");
+	close.type = "button";
+	close.textContent = "关闭";
+	const clear = document.createElement("button");
+	clear.type = "button";
+	clear.textContent = "清空";
+	const confirm = document.createElement("button");
+	confirm.type = "button";
+	confirm.textContent = "确定";
+	for (const button of [clear, confirm, close]) {
+		button.style.cssText = "height:28px;border:1px solid #44565f;border-radius:7px;background:#202b31;color:#dce7e2;cursor:pointer;padding:0 8px;font-size:12px;font-weight:650;";
+		protectButton(button);
+	}
+	clear.style.background = "#26343a";
+	confirm.style.background = "#1f6b43";
+	header.append(title, clear, confirm, close);
+	popup.appendChild(header);
+
+	const search = document.createElement("input");
+	search.placeholder = "搜索变量，点击多选，确定后插入 {变量名}";
+	search.style.cssText = "height:30px;border:1px solid #3f5b66;border-radius:7px;background:#071015;color:#dce7e2;padding:0 10px;outline:none;";
+	popup.appendChild(search);
+	const list = document.createElement("div");
+	list.style.cssText = "overflow:auto;display:flex;flex-direction:column;gap:5px;max-height:340px;padding-right:2px;";
+	popup.appendChild(list);
+	const selected = new Set(selectedFilenameVariables(node));
+
+	function render() {
+		const needle = String(search.value || "").trim().toLowerCase();
+		list.textContent = "";
+		for (const option of options) {
+			const parts = variableOptionDisplay(option);
+			if (!parts.value) continue;
+			if (needle && !`${parts.title} ${parts.source} ${parts.value} ${option.label || ""}`.toLowerCase().includes(needle)) continue;
+			const isSelected = selected.has(parts.value);
+			const item = document.createElement("button");
+			item.type = "button";
+			item.style.cssText = [
+				"display:flex",
+				"align-items:center",
+				"gap:8px",
+				"text-align:left",
+				`border:1px solid ${isSelected ? "#68d18d" : "transparent"}`,
+				"border-radius:7px",
+				"padding:8px 10px",
+				`background:${isSelected ? "#245c3d" : "transparent"}`,
+				`color:${isSelected ? "#ffffff" : "#dce7e2"}`,
+				"cursor:pointer",
+				`box-shadow:${isSelected ? "0 0 0 1px rgba(104,209,141,.25) inset" : "none"}`,
+			].join(";");
+			const mark = document.createElement("span");
+			mark.textContent = "⚡";
+			mark.style.cssText = `width:18px;color:${isSelected ? "#b7ffd0" : "#6f8790"};font-weight:900;`;
+			const text = document.createElement("span");
+			const titleLine = document.createElement("b");
+			titleLine.textContent = parts.title;
+			const detailLine = document.createElement("span");
+			detailLine.style.cssText = "color:#8fa3ad";
+			detailLine.textContent = `${parts.source ? `${parts.source} · ` : ""}{${parts.value}}`;
+			text.append(titleLine, document.createElement("br"), detailLine);
+			item.append(mark, text);
+			protectButton(item);
+			item.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				if (selected.has(parts.value)) selected.delete(parts.value);
+				else selected.add(parts.value);
+				render();
+			});
+			list.appendChild(item);
+		}
+		if (!list.children.length) {
+			const empty = document.createElement("div");
+			empty.textContent = options.length ? "没有匹配的变量" : "当前工作流没有可选变量";
+			empty.style.cssText = "padding:14px 10px;color:#9aaab2;text-align:center;";
+			list.appendChild(empty);
+		}
+	}
+
+	confirm.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const values = [...selected];
+		setSelectedFilenameVariables(node, values);
+		insertFilenameVariables(node, values);
+		closeVariablePicker(node);
+	});
+	clear.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const values = selectedFilenameVariables(node);
+		selected.clear();
+		setSelectedFilenameVariables(node, []);
+		removeFilenameVariables(node, values);
+		render();
+	});
+	close.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		closeVariablePicker(node);
+	});
+	search.addEventListener("input", render);
+	search.addEventListener("mousedown", stopCanvasEvent);
+	popup.addEventListener("mousedown", stopCanvasEvent);
+	document.body.appendChild(popup);
+	node.__gjjSaveAnyObjectVariablePicker = popup;
+	render();
+	setTimeout(() => search.focus(), 0);
 }
 
 function getLinkedSourceNode(input) {
@@ -544,7 +771,21 @@ function ensureButtonWidget(node) {
 		openOutputFolder(node, folderButton);
 	});
 
+	const variableButton = document.createElement("button");
+	variableButton.textContent = "⚡";
+	variableButton.title = "选择 GJJ_SETNODE / 模板参数变量，插入到文件名前缀";
+	variableButton.style.cssText = folderButton.style.cssText;
+	variableButton.onmouseover = () => { variableButton.style.background = "#3a4a52"; };
+	variableButton.onmouseout = () => updateButtonState(node);
+	protectButton(variableButton);
+	variableButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		openVariablePicker(node, variableButton);
+	});
+
 	container.appendChild(outputButton);
+	container.appendChild(variableButton);
 	container.appendChild(folderButton);
 
 	const widget = node.addDOMWidget?.(BUTTON_WIDGET_NAME, "操作按钮", container, {
@@ -562,6 +803,7 @@ function ensureButtonWidget(node) {
 
 	node.__gjjSaveAnyObjectButtonContainer = container;
 	node.__gjjSaveAnyObjectButton = outputButton;
+	node.__gjjSaveAnyObjectVariableButton = variableButton;
 	node.__gjjSaveAnyObjectFolderButton = folderButton;
 	updateButtonState(node);
 }
@@ -577,6 +819,15 @@ function updateButtonState(node) {
 	} else {
 		button.textContent = "输出";
 		button.style.background = "#2a3a42";
+	}
+	const variableButton = node.__gjjSaveAnyObjectVariableButton;
+	if (variableButton) {
+		const hasVariables = selectedFilenameVariables(node).length > 0 || Boolean(node.__gjjSaveAnyObjectVariablePicker);
+		variableButton.style.background = hasVariables ? "#1f6b43" : "#2a3a42";
+		variableButton.style.borderColor = hasVariables ? "#65c783" : "#33434a";
+		variableButton.title = hasVariables
+			? `文件名变量：${selectedFilenameVariables(node).map((item) => `{${item}}`).join(" ")}`
+			: "选择 GJJ_SETNODE / 模板参数变量，插入到文件名前缀";
 	}
 }
 
@@ -745,10 +996,31 @@ app.registerExtension({
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalOnConfigure?.apply(this, args);
+			const serializedNode = args?.[0];
+			const props = serializedNode?.properties || this.properties || {};
+			if (Array.isArray(props[FILENAME_VARIABLES_PROPERTY])) {
+				this.properties ||= {};
+				this.properties[FILENAME_VARIABLES_PROPERTY] = props[FILENAME_VARIABLES_PROPERTY].map((item) => String(item || "").trim()).filter(Boolean);
+			}
 			if (this.__gjjSaveAnyObjectHasOutput === undefined) {
 				this.__gjjSaveAnyObjectHasOutput = false;
 			}
 			setTimeout(() => stabilizeNode(this), 0);
+			return result;
+		};
+
+		const originalOnSerialize = nodeType.prototype.onSerialize;
+		nodeType.prototype.onSerialize = function (serializedNode, ...args) {
+			const result = originalOnSerialize?.apply(this, [serializedNode, ...args]);
+			if (serializedNode && typeof serializedNode === "object") {
+				serializedNode.properties ||= {};
+				const filenameVariables = selectedFilenameVariables(this);
+				if (filenameVariables.length) {
+					serializedNode.properties[FILENAME_VARIABLES_PROPERTY] = filenameVariables;
+				} else {
+					delete serializedNode.properties[FILENAME_VARIABLES_PROPERTY];
+				}
+			}
 			return result;
 		};
 

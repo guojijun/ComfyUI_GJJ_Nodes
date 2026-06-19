@@ -22,12 +22,13 @@ except Exception:
     folder_paths = None
 
 try:
-    from .gjj_video_combine_runtime import get_ffmpeg_path
+    from .gjj_video_combine_runtime import get_ffmpeg_path, _render_filename_prefix_template
 except Exception:
     try:
-        from gjj_video_combine_runtime import get_ffmpeg_path
+        from gjj_video_combine_runtime import get_ffmpeg_path, _render_filename_prefix_template
     except Exception:
         get_ffmpeg_path = None
+        _render_filename_prefix_template = None
 
 
 MEDIA_FRAME_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO,STRING"
@@ -524,6 +525,62 @@ def _matches_loose_prefix(path: Path, stem: str) -> bool:
     return bool(compact_prefix and compact_name.startswith(compact_prefix))
 
 
+def _matches_short_prefix(path: Path, prefix: str) -> bool:
+    compact_prefix = _compact_prefix_key(prefix)
+    if not compact_prefix:
+        return False
+    compact_stem = _compact_prefix_key(path.stem)
+    if compact_prefix in compact_stem:
+        return True
+    try:
+        relative = path.resolve().relative_to(_output_root())
+        compact_relative = _compact_prefix_key(str(relative.with_suffix("")))
+        return compact_prefix in compact_relative
+    except Exception:
+        return False
+
+
+def _is_merged_video(path: Path) -> bool:
+    lowered_stem = path.stem.lower()
+    return (
+        "_merged_" in lowered_stem
+        or lowered_stem.startswith("merged_")
+        or "_concat_" in lowered_stem
+        or lowered_stem.startswith("concat_")
+    )
+
+
+def _directory_candidates_from_prefix(value: Any) -> list[Path]:
+    raw = str(value or "").strip().strip('"')
+    if not raw:
+        return []
+    expanded = Path(os.path.expandvars(os.path.expanduser(raw)))
+    directory_like = raw.endswith(("/", "\\")) or (expanded.exists() and expanded.is_dir())
+    if not directory_like:
+        return []
+    candidates = [expanded]
+    if not expanded.is_absolute():
+        parts = _safe_parts(raw)
+        if parts:
+            relative = Path(*parts)
+            candidates.extend([_output_root() / relative, _temp_root() / relative, Path.cwd() / relative])
+    folders: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            if not resolved.exists() or not resolved.is_dir():
+                continue
+            key = str(resolved).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            folders.append(resolved)
+        except Exception:
+            continue
+    return folders
+
+
 def _segment_prefix_path(path: Path) -> Path | None:
     match = re.match(r"^(.*?)[\s._-]+(\d+)$", path.stem)
     if not match:
@@ -573,21 +630,36 @@ def _find_prefixed_videos(filename_prefix: str, explicit_prefix: str = "") -> li
                 search_values.append(f"video/{basename}")
     results: list[Path] = []
     seen: set[str] = set()
+
+    def add_candidate(candidate: Path) -> None:
+        if not candidate.is_file() or _is_merged_video(candidate):
+            return
+        key = str(candidate.resolve()).lower()
+        if key in seen:
+            return
+        seen.add(key)
+        results.append(candidate.resolve())
+
     for raw in search_values:
         before_count = len(results)
         text = str(raw or "").strip().strip('"')
         if not text:
             continue
+        for folder in _directory_candidates_from_prefix(text):
+            for suffix in VIDEO_SUFFIXES:
+                for candidate in folder.rglob(f"*{suffix}"):
+                    add_candidate(candidate)
+            if len(results) > before_count:
+                break
+        if len(results) > before_count:
+            break
         file_path = _as_path_from_text(text)
         if file_path and file_path.suffix.lower() in VIDEO_SUFFIXES:
             segment_prefix = _segment_prefix_path(file_path)
             if segment_prefix is not None:
                 text = str(segment_prefix)
             else:
-                key = str(file_path.resolve()).lower()
-                if key not in seen:
-                    seen.add(key)
-                    results.append(file_path.resolve())
+                add_candidate(file_path)
                 break
         direct = Path(os.path.expanduser(os.path.expandvars(text)))
         folder, stem = _prefix_parts(text)
@@ -611,19 +683,114 @@ def _find_prefixed_videos(filename_prefix: str, explicit_prefix: str = "") -> li
         if numbered_candidates:
             candidates = numbered_candidates
         for candidate in candidates:
-            if not candidate.is_file():
+            add_candidate(candidate)
+        if len(results) <= before_count:
+            short_prefix = Path(text.replace("\\", "/").strip("/")).name or text
+            for suffix in VIDEO_SUFFIXES:
+                for candidate in _output_root().rglob(f"*{suffix}"):
+                    if _matches_short_prefix(candidate, short_prefix):
+                        add_candidate(candidate)
+        if len(results) > before_count:
+            break
+    return sorted(results, key=_natural_key)
+
+
+def _short_prefix_text(value: Any) -> str:
+    text = str(value or "").strip().strip('"')
+    if not text:
+        return ""
+    normalized = text.replace("\\", "/").strip("/")
+    if not normalized:
+        return ""
+    return Path(normalized).name or normalized
+
+
+def _find_latest_short_prefix_videos(filename_prefix: str, explicit_prefix: str = "") -> list[Path]:
+    prefixes = [_short_prefix_text(explicit_prefix), _short_prefix_text(filename_prefix)]
+    prefixes = [item for item in dict.fromkeys(prefixes) if item]
+    results: list[Path] = []
+    seen: set[str] = set()
+
+    def add(candidate: Path) -> None:
+        if not candidate.is_file() or _is_merged_video(candidate):
+            return
+        key = str(candidate.resolve()).lower()
+        if key in seen:
+            return
+        seen.add(key)
+        results.append(candidate.resolve())
+
+    for raw in (explicit_prefix, filename_prefix):
+        for folder in _directory_candidates_from_prefix(raw):
+            for suffix in VIDEO_SUFFIXES:
+                for candidate in folder.rglob(f"*{suffix}"):
+                    add(candidate)
+
+    for suffix in VIDEO_SUFFIXES:
+        for candidate in _output_root().rglob(f"*{suffix}"):
+            if any(_matches_short_prefix(candidate, prefix) for prefix in prefixes):
+                add(candidate)
+    return sorted(results, key=_natural_key)
+
+
+def _last_number_span(value: str) -> re.Match[str] | None:
+    matches = list(re.finditer(r"\d+", str(value or "")))
+    return matches[-1] if matches else None
+
+
+def _numbered_sibling_info(path: Path, before: str, after: str) -> tuple[int, int] | None:
+    stem = path.stem
+    pattern = rf"^{re.escape(before)}(\d+){re.escape(after)}(?:[\s._-].*)?$"
+    match = re.fullmatch(pattern, stem)
+    if not match:
+        return None
+    try:
+        return int(match.group(1)), len(match.group(1))
+    except Exception:
+        return None
+
+
+def _previous_numbered_sibling_videos(filename_prefix: Any) -> list[Path]:
+    text = str(filename_prefix or "").strip().strip('"')
+    if not text:
+        return []
+    direct = Path(os.path.expandvars(os.path.expanduser(text)))
+    if direct.is_absolute() and direct.parent.exists():
+        folder = direct.parent
+        stem = direct.stem if direct.suffix.lower() in VIDEO_SUFFIXES else direct.name
+    else:
+        folder, stem = _prefix_parts(text)
+    match = _last_number_span(stem)
+    if not match:
+        return []
+    try:
+        current_number = int(match.group(0))
+    except Exception:
+        return []
+    before = stem[:match.start()]
+    after = stem[match.end():]
+    if not before and not after:
+        return []
+
+    candidates: list[tuple[int, int, Path]] = []
+    seen: set[str] = set()
+    for suffix in VIDEO_SUFFIXES:
+        for candidate in folder.rglob(f"*{suffix}") if folder.exists() else []:
+            if not candidate.is_file() or _is_merged_video(candidate):
                 continue
-            lowered_stem = candidate.stem.lower()
-            if "_merged_" in lowered_stem or lowered_stem.startswith("merged_"):
+            info = _numbered_sibling_info(candidate, before, after)
+            if info is None:
+                continue
+            number, width = info
+            if number >= current_number:
                 continue
             key = str(candidate.resolve()).lower()
             if key in seen:
                 continue
             seen.add(key)
-            results.append(candidate.resolve())
-        if len(results) > before_count:
-            break
-    return sorted(results, key=_natural_key)
+            candidates.append((number, width, candidate.resolve()))
+    candidates.sort(key=lambda item: (item[0], item[1], _video_timestamp_ns(item[2]), str(item[2]).lower()))
+    return [item[2] for item in candidates]
 
 
 def _prefixed_videos_signature(filename_prefix: str) -> str:
@@ -825,6 +992,13 @@ def _empty_image_batch() -> torch.Tensor:
     return torch.zeros((0, 64, 64, 3), dtype=torch.float32)
 
 
+def _first_image_frame(value: Any) -> torch.Tensor | None:
+    frames, _audio, _fps = _tensor_from_media(value)
+    if not isinstance(frames, torch.Tensor) or frames.ndim != 4 or int(frames.shape[0]) <= 0:
+        return None
+    return frames[:1].contiguous()
+
+
 def _video_timestamp_ns(path: Path) -> int:
     try:
         stat = path.stat()
@@ -852,15 +1026,43 @@ def _latest_video_from_prefix(filename_prefix: Any, source: Any = None) -> tuple
     prefix_from_panel = _segment_prefix_text(filename_prefix)
     effective_prefix = prefix_from_source or prefix_from_panel or str(filename_prefix or "").strip()
 
+    direct = _resolve_media_path(filename_prefix, VIDEO_SUFFIXES)
+    if direct is not None:
+        return direct, str(filename_prefix or "").strip()
+    previous_siblings = _previous_numbered_sibling_videos(filename_prefix)
+    if previous_siblings:
+        return previous_siblings[-1], effective_prefix
     videos = _find_prefixed_videos(effective_prefix) if effective_prefix else []
+    if not videos and effective_prefix:
+        videos = _find_latest_short_prefix_videos(effective_prefix)
     if not videos:
         videos = _collect_media_paths(source, VIDEO_SUFFIXES)
     if not videos:
-        direct = _resolve_media_path(filename_prefix, VIDEO_SUFFIXES)
-        videos = [direct] if direct is not None else []
-    if not videos:
         return None, effective_prefix
     return max(videos, key=_latest_video_key), effective_prefix
+
+
+def _render_latest_video_prefix(value: Any, prompt: Any = None, extra_pnginfo: Any = None) -> str:
+    text = str(value or "").strip()
+    if not text or "{" not in text or "}" not in text or _render_filename_prefix_template is None:
+        return text
+    directory_like = text.endswith(("/", "\\"))
+    rendered = _render_filename_prefix_template(text, prompt, extra_pnginfo=extra_pnginfo)
+    if directory_like and rendered and not str(rendered).endswith(("/", "\\")):
+        return f"{rendered}/"
+    return rendered
+
+
+def _latest_video_from_rendered_prefix(
+    filename_prefix: Any,
+    source: Any = None,
+    prompt: Any = None,
+    extra_pnginfo: Any = None,
+) -> tuple[Path | None, str]:
+    source_hint = _first_text_hint(source)
+    rendered_source = _render_latest_video_prefix(source_hint, prompt, extra_pnginfo)
+    rendered_prefix = _render_latest_video_prefix(filename_prefix, prompt, extra_pnginfo)
+    return _latest_video_from_prefix(rendered_prefix, rendered_source or source)
 
 
 def _latest_video_signature(filename_prefix: Any, source: Any = None) -> str:
@@ -872,6 +1074,69 @@ def _latest_video_signature(filename_prefix: Any, source: Any = None) -> str:
         return f"{video_path}:{stat.st_size}:{getattr(stat, 'st_ctime_ns', 0)}:{stat.st_mtime_ns}"
     except Exception:
         return str(video_path)
+
+
+def _latest_video_rendered_signature(filename_prefix: Any, source: Any = None, prompt: Any = None, extra_pnginfo: Any = None) -> str:
+    video_path, effective_prefix = _latest_video_from_rendered_prefix(filename_prefix, source, prompt, extra_pnginfo)
+    if video_path is None:
+        return f"missing:{effective_prefix}"
+    try:
+        stat = video_path.stat()
+        return f"{video_path}:{stat.st_size}:{getattr(stat, 'st_ctime_ns', 0)}:{stat.st_mtime_ns}"
+    except Exception:
+        return str(video_path)
+
+
+def _video_candidates_signature(filename_prefix: Any, source: Any = None) -> str:
+    prefix_from_source = _segment_prefix_text(_first_text_hint(source))
+    prefix_from_panel = _segment_prefix_text(filename_prefix)
+    effective_prefix = prefix_from_source or prefix_from_panel or str(filename_prefix or "").strip()
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path | None) -> None:
+        if path is None:
+            return
+        try:
+            resolved = path.resolve()
+        except Exception:
+            resolved = path
+        key = str(resolved).lower()
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(resolved)
+
+    direct = _resolve_media_path(filename_prefix, VIDEO_SUFFIXES)
+    add(direct)
+    for path in _previous_numbered_sibling_videos(filename_prefix):
+        add(path)
+    if effective_prefix:
+        for path in _find_prefixed_videos(effective_prefix):
+            add(path)
+        for path in _find_latest_short_prefix_videos(effective_prefix):
+            add(path)
+    for path in _collect_media_paths(source, VIDEO_SUFFIXES):
+        add(path)
+
+    parts = [f"prefix:{effective_prefix}"]
+    for path in sorted(candidates, key=lambda item: str(item).lower()):
+        try:
+            stat = path.stat()
+            parts.append(
+                f"{path}:{stat.st_size}:{getattr(stat, 'st_ctime_ns', 0)}:{getattr(stat, 'st_mtime_ns', 0)}"
+            )
+        except Exception:
+            parts.append(str(path))
+    return "|".join(parts)
+
+
+def _video_candidates_rendered_signature(filename_prefix: Any, source: Any = None, prompt: Any = None, extra_pnginfo: Any = None) -> str:
+    source_hint = _first_text_hint(source)
+    rendered_source = _render_latest_video_prefix(source_hint, prompt, extra_pnginfo)
+    rendered_prefix = _render_latest_video_prefix(filename_prefix, prompt, extra_pnginfo)
+    return _video_candidates_signature(rendered_prefix, rendered_source or source)
+
 
 
 def _extract_video_tail_frames(video_path: Path, frame_count: int, ffmpeg_path: str) -> torch.Tensor:
@@ -908,7 +1173,7 @@ class GJJ_LatestVideoTailFrames:
     FUNCTION = "load_tail"
     DESCRIPTION = "按文件名前缀查找最新视频，并用 FFmpeg 返回最后若干帧；找不到或读取失败时输出空 IMAGE 批次，不打断工作流。"
     SEARCH_ALIASES = ["latest video tail frames", "last video frames", "视频尾帧", "最新视频", "文件名前缀"]
-    RETURN_TYPES = ("IMAGE", "STRING", "STRING", "INT")
+    RETURN_TYPES = ("GJJ_BATCH_IMAGE,IMAGE", "STRING", "STRING", "INT")
     RETURN_NAMES = ("尾帧", "视频路径", "状态", "返回帧数")
     OUTPUT_TOOLTIPS = (
         "最新匹配视频的最后若干帧。找不到视频或读取失败时输出空 IMAGE 批次。",
@@ -924,7 +1189,7 @@ class GJJ_LatestVideoTailFrames:
                 "filename_prefix": ("STRING", {
                     "default": "GJJ/ffmpeg/mux",
                     "display_name": "文件名前缀",
-                    "tooltip": "用于搜索输出目录下同前缀视频；也可以直接填视频路径。若“图片帧/前缀”入口接入 STRING，则优先使用入口值。",
+                    "tooltip": "用于搜索输出目录下同前缀视频；也可以直接填视频路径。支持外接小圆点传入前缀或 {变量名} 模板。",
                 }),
                 "frame_count": ("INT", {
                     "default": 1,
@@ -943,27 +1208,63 @@ class GJJ_LatestVideoTailFrames:
                 }),
             },
             "optional": {
-                "images": (MEDIA_FRAME_INPUT_TYPE, {
-                    "display_name": "图片帧/前缀",
-                    "tooltip": "可选。支持 GJJ_BATCH_IMAGE、IMAGE、VIDEO、STRING；本节点主要读取其中的 STRING 前缀或视频路径，优先级高于面板文件名前缀。",
+                "images": ("GJJ_BATCH_IMAGE,IMAGE,VIDEO", {
+                    "display_name": "首帧候选图片",
+                    "tooltip": "第一次序列还没有上一段保存视频时，使用这里输入的第一张图片作为尾帧兜底。",
                 }),
+                "slide_start_index": ("INT,FLOAT", {
+                    "display_name": "滑动起始序号",
+                    "tooltip": "可接 GJJ_AudioSilenceTrimmer 的“当前分段序号”，用于建立执行依赖并让每段重新读取最新尾帧。",
+                }),
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
             },
         }
 
     @classmethod
-    def IS_CHANGED(cls, filename_prefix: str, frame_count: int = 1, ffmpeg_path: str = "", images=None, **kwargs):
+    def IS_CHANGED(
+        cls,
+        filename_prefix: str,
+        frame_count: int = 1,
+        ffmpeg_path: str = "",
+        images=None,
+        slide_start_index=None,
+        prompt=None,
+        extra_pnginfo=None,
+        **kwargs,
+    ):
         return "|".join([
             str(max(1, int(frame_count))),
-            str(_first_text_hint(images)),
+            str(_media_input_summary(images)),
+            str(slide_start_index if slide_start_index is not None else ""),
             str(filename_prefix or ""),
-            _latest_video_signature(filename_prefix, images),
+            _latest_video_rendered_signature(filename_prefix, None, prompt, extra_pnginfo),
+            _video_candidates_rendered_signature(filename_prefix, None, prompt, extra_pnginfo),
         ])
 
-    def load_tail(self, filename_prefix: str, frame_count: int = 1, ffmpeg_path: str = "", images=None):
+    def load_tail(
+        self,
+        filename_prefix: str,
+        frame_count: int = 1,
+        ffmpeg_path: str = "",
+        images=None,
+        slide_start_index=None,
+        prompt=None,
+        extra_pnginfo=None,
+    ):
         requested = max(1, int(frame_count))
-        video_path, effective_prefix = _latest_video_from_prefix(filename_prefix, images)
+        video_path, effective_prefix = _latest_video_from_rendered_prefix(filename_prefix, None, prompt, extra_pnginfo)
         if video_path is None:
-            status = f"未找到同前缀视频，已输出空帧并继续。搜索前缀：{effective_prefix or '空'}"
+            fallback = _first_image_frame(images)
+            if fallback is not None:
+                status = f"未找到上一段视频，已使用首帧候选图片作为第一次序列起始帧。搜索前缀：{effective_prefix or '空'}"
+                return {
+                    "ui": {"text": [status]},
+                    "result": (fallback, "", status, int(fallback.shape[0])),
+                }
+            status = f"未找到同前缀视频，且未提供首帧候选图片，已输出空帧并继续。搜索前缀：{effective_prefix or '空'}"
             return {
                 "ui": {"text": [status]},
                 "result": (_empty_image_batch(), "", status, 0),

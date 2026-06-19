@@ -4,6 +4,7 @@ import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set(["GJJ_RifeVideoInterpolator"]);
 const STATUS_WIDGET_NAME = "gjj_rife_vfi_status";
+const SCALE_FACTOR_WIDGET = "scale_factor";
 const MEDIA_INPUT = {
 	name: "media",
 	type: "GJJ_BATCH_IMAGE,IMAGE,VIDEO",
@@ -123,12 +124,24 @@ function setStatus(node, text) {
 	refreshNode(node);
 }
 
+function normalizeScaleFactorWidget(node) {
+	const widget = node?.widgets?.find((item) => item?.name === SCALE_FACTOR_WIDGET);
+	if (!widget) return;
+	const value = Number.parseFloat(String(widget.value ?? 1).trim());
+	widget.value = Number.isFinite(value) ? value : 1.0;
+	if (Array.isArray(widget.options?.values)) {
+		widget.options.values = [0.25, 0.5, 1.0, 2.0, 4.0];
+	}
+	if (widget.inputEl) widget.inputEl.value = String(widget.value);
+}
+
 function patchNode(node) {
 	if (!node || node.__gjjRifeVfiPatched) {
 		return;
 	}
 	node.__gjjRifeVfiPatched = true;
 	stabilizeMediaInput(node);
+	normalizeScaleFactorWidget(node);
 	ensureStatusWidget(node);
 	setStatus(node, "等待执行");
 }
@@ -161,6 +174,7 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalOnConfigure?.apply(this, args);
 			patchNode(this);
+			normalizeScaleFactorWidget(this);
 			setTimeout(() => stabilizeMediaInput(this), 0);
 			return result;
 		};

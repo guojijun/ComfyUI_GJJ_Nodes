@@ -33,6 +33,17 @@ FORMATS_DIR = Path(__file__).resolve().parents[1] / "presets" / "video_formats"
 IMAGE_FORMATS = ("image/gif", "image/webp")
 SEQUENCE_PATTERN_RE = re.compile(r"%0?(\d*)d", re.IGNORECASE)
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".wmv", ".mpeg", ".mpg"}
+FILENAME_TEMPLATE_RE = re.compile(r"\{([^{}]+)\}")
+_RUNTIME_VARIABLE_CACHE: dict[tuple[str, int], Any] = {}
+
+
+def register_runtime_variable_source(unique_id: Any, output_index: int, value: Any) -> None:
+    if unique_id is None:
+        return
+    try:
+        _RUNTIME_VARIABLE_CACHE[(str(unique_id), int(output_index))] = value
+    except Exception:
+        return
 
 
 def _send_status(unique_id: Any, text: str, progress: float | None = None) -> None:
@@ -270,6 +281,239 @@ def _is_prompt_input_linked(prompt: Any, unique_id: Any, input_name: str) -> boo
         return False
     value = inputs.get(input_name)
     return isinstance(value, (list, tuple)) and len(value) >= 2
+
+
+def _safe_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(str(value or ""))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _filename_token(value: Any) -> str:
+    if isinstance(value, bool):
+        text = "true" if value else "false"
+    elif value is None:
+        text = ""
+    elif isinstance(value, (dict, list, tuple, set)):
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    else:
+        text = str(value)
+    text = text.strip()
+    text = text.replace("\\", "/")
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text)
+    text = re.sub(r"\s+", "_", text)
+    return text.strip(" ._")
+
+
+def _safe_filename_prefix(value: Any) -> str:
+    text = str(value or DEFAULT_FILENAME_PREFIX).strip() or DEFAULT_FILENAME_PREFIX
+    text = text.replace("\\", "/")
+    text = re.sub(r"^[A-Za-z]:/*", "", text)
+    text = re.sub(r"^/+", "", text)
+    parts: list[str] = []
+    for part in text.split("/"):
+        clean = re.sub(r'[<>:"\\|?*\x00-\x1f]', "_", str(part or "").strip())
+        clean = clean.strip(" .")
+        if not clean or clean in {".", ".."}:
+            continue
+        parts.append(clean)
+    return "/".join(parts) or DEFAULT_FILENAME_PREFIX
+
+
+def _prompt_node_items(prompt: Any) -> Iterable[tuple[str, dict[str, Any]]]:
+    if not isinstance(prompt, dict):
+        return []
+    return [
+        (str(node_id), node_data)
+        for node_id, node_data in prompt.items()
+        if isinstance(node_data, dict)
+    ]
+
+
+def _prompt_input_value(inputs: dict[str, Any], key: str) -> Any:
+    value = inputs.get(key)
+    if isinstance(value, list) and len(value) == 2:
+        try:
+            return _RUNTIME_VARIABLE_CACHE.get((str(value[0]), int(value[1])))
+        except Exception:
+            return None
+    return value
+
+
+def _split_variable_names(value: Any) -> list[str]:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    parts = re.split(r"[,，\n|/]+", text)
+    return [part.strip() for part in parts if part and part.strip()]
+
+
+def _collect_setnode_direct_variables(inputs: dict[str, Any], node_data: dict[str, Any]) -> dict[str, Any]:
+    variables: dict[str, Any] = {}
+    name_sources = (
+        inputs.get("变量名"),
+        inputs.get("变量名称"),
+        inputs.get("variable_names"),
+        inputs.get("set_names"),
+        inputs.get("names"),
+        inputs.get("name"),
+    )
+    widgets = node_data.get("widgets_values")
+    if isinstance(widgets, list) and widgets:
+        name_sources = (*name_sources, widgets[0])
+
+    names: list[str] = []
+    for source in name_sources:
+        names.extend(_split_variable_names(source))
+    names = list(dict.fromkeys(names))
+    if not names:
+        return variables
+
+    for index, name in enumerate(names, start=1):
+        value = _prompt_input_value(inputs, f"value_{index:02d}")
+        if value is None:
+            value = _prompt_input_value(inputs, f"value_{index}")
+        if value is None:
+            continue
+        variables[name] = value
+    return variables
+
+
+def _collect_setnode_variables(prompt: Any) -> dict[str, Any]:
+    variables: dict[str, Any] = {}
+    for _node_id, node_data in _prompt_node_items(prompt):
+        class_type = str(node_data.get("class_type") or node_data.get("type") or "")
+        if class_type not in {"GJJ_TemplateSetVariables", "GJJ_SETNODE", "GJJ_SetNode", "GJJ_TemplateParams"}:
+            continue
+        inputs = node_data.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        if class_type in {"GJJ_SETNODE", "GJJ_SetNode"}:
+            variables.update(_collect_setnode_direct_variables(inputs, node_data))
+        template_text = str(inputs.get("template_text") or "")
+        values_json = inputs.get("values_json")
+        schema_json = inputs.get("schema_json", "[]")
+        value_map = _safe_json_object(values_json)
+        try:
+            if class_type == "GJJ_TemplateParams":
+                from .gjj_template_params import _apply_schema_field_settings, parse_template
+
+                fields = _apply_schema_field_settings(parse_template(template_text), schema_json)
+                for field in fields:
+                    key = str(field.get("key") or "")
+                    label = str(field.get("label") or "")
+                    if not key and not label:
+                        continue
+                    value = value_map.get(key, value_map.get(label, field.get("default", field.get("value", ""))))
+                    for name in (key, label, field.get("broadcast_key")):
+                        name = str(name or "").strip()
+                        if name:
+                            variables[name] = value
+                    for name in field.get("broadcast_keys") or []:
+                        name = str(name or "").strip()
+                        if name:
+                            variables[name] = value
+            else:
+                from .gjj_template_set_variables import parse_template
+
+                for field in parse_template(template_text):
+                    key = str(field.get("key") or "")
+                    label = str(field.get("label") or "")
+                    input_key = str(field.get("input_key") or f"var_{key}")
+                    if not key and not label:
+                        continue
+                    value = value_map.get(key, value_map.get(input_key, field.get("value", field.get("default", ""))))
+                    for name in (key, label, input_key):
+                        name = str(name or "").strip()
+                        if name:
+                            variables[name] = value
+        except Exception:
+            LOGGER.debug("收集 GJJ 文件名变量失败：%s", class_type, exc_info=True)
+    return variables
+
+
+def _workflow_link_lookup(extra_pnginfo: Any) -> dict[str, tuple[str, int]]:
+    workflow = extra_pnginfo.get("workflow") if isinstance(extra_pnginfo, dict) else None
+    links = workflow.get("links") if isinstance(workflow, dict) else None
+    lookup: dict[str, tuple[str, int]] = {}
+    if not isinstance(links, list):
+        return lookup
+    for link in links:
+        try:
+            if isinstance(link, dict):
+                link_id = link.get("id")
+                source_id = link.get("origin_id", link.get("source_id"))
+                source_slot = link.get("origin_slot", link.get("source_slot", 0))
+            else:
+                link_id = link[0]
+                source_id = link[1]
+                source_slot = link[2]
+            lookup[str(link_id)] = (str(source_id), int(source_slot))
+        except Exception:
+            continue
+    return lookup
+
+
+def _collect_workflow_setnode_variables(extra_pnginfo: Any) -> dict[str, Any]:
+    workflow = extra_pnginfo.get("workflow") if isinstance(extra_pnginfo, dict) else None
+    nodes = workflow.get("nodes") if isinstance(workflow, dict) else None
+    if not isinstance(nodes, list):
+        return {}
+    links = _workflow_link_lookup(extra_pnginfo)
+    variables: dict[str, Any] = {}
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        node_type = str(node.get("type") or node.get("class_type") or "")
+        if node_type not in {"GJJ_SETNODE", "GJJ_SetNode"}:
+            continue
+        widgets = node.get("widgets_values")
+        names = _split_variable_names(widgets[0] if isinstance(widgets, list) and widgets else "")
+        inputs = node.get("inputs")
+        if not names or not isinstance(inputs, list):
+            continue
+        for index, name in enumerate(names, start=1):
+            input_name = f"value_{index:02d}"
+            slot = next((item for item in inputs if isinstance(item, dict) and str(item.get("name") or "") == input_name), None)
+            if slot is None:
+                continue
+            link_id = slot.get("link")
+            source = links.get(str(link_id))
+            if source is None:
+                continue
+            value = _RUNTIME_VARIABLE_CACHE.get(source)
+            if value is not None:
+                variables[name] = value
+    return variables
+
+
+def _render_filename_prefix_template(
+    prefix: Any,
+    prompt: Any,
+    extra_variables: dict[str, Any] | None = None,
+    extra_pnginfo: Any = None,
+) -> str:
+    text = str(prefix or DEFAULT_FILENAME_PREFIX).strip() or DEFAULT_FILENAME_PREFIX
+    if "{" not in text or "}" not in text:
+        return _safe_filename_prefix(text)
+    variables = _collect_setnode_variables(prompt)
+    variables.update(_collect_workflow_setnode_variables(extra_pnginfo))
+    if extra_variables:
+        variables.update({str(key): value for key, value in extra_variables.items() if str(key or "").strip()})
+    if not variables:
+        return _safe_filename_prefix(text)
+
+    def replace(match: re.Match[str]) -> str:
+        name = str(match.group(1) or "").strip()
+        if not name:
+            return match.group(0)
+        if name in variables:
+            return _filename_token(variables[name]) or "空"
+        return match.group(0)
+
+    return _safe_filename_prefix(FILENAME_TEMPLATE_RE.sub(replace, text))
 
 def _ensure_image_batch(images: torch.Tensor) -> torch.Tensor:
     if images is None:
@@ -1142,7 +1386,18 @@ def combine_video(
     frame_rate_is_linked = _is_prompt_input_linked(prompt, unique_id, "frame_rate")
     loop_count = max(0, int(loop_count))
     filename_prefix_is_linked = _is_prompt_input_linked(prompt, unique_id, "filename_prefix")
-    prefix = str(filename_prefix if filename_prefix_is_linked else (filename_prefix or DEFAULT_FILENAME_PREFIX)).strip() or DEFAULT_FILENAME_PREFIX
+    raw_prefix = str(filename_prefix if filename_prefix_is_linked else (filename_prefix or DEFAULT_FILENAME_PREFIX)).strip() or DEFAULT_FILENAME_PREFIX
+    prefix = _render_filename_prefix_template(
+        raw_prefix,
+        prompt,
+        {
+            "frame_rate": frame_rate,
+            "frameRate": frame_rate,
+            "fps": frame_rate,
+            "帧率": frame_rate,
+        },
+        extra_pnginfo,
+    )
     direct_video_path = _resolve_video_file_path(images) if not video_inputs else None
     can_passthrough_video = (
         direct_video_path is not None

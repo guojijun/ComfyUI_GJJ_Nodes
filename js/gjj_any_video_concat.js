@@ -8,6 +8,18 @@ const INPUT_TYPE = "VIDEO,STRING";
 const MIN_VISIBLE_INPUTS = 1;
 const PREVIEW_WIDGET_NAME = "gjj_any_video_concat_preview";
 const HIDDEN_WIDGETS = new Set(["ffmpeg_path", "ffprobe_path"]);
+const CONDITION_INPUT = {
+	name: "condition",
+	type: "BOOLEAN",
+	label: "条件通行",
+	tooltip: "可选布尔门控；未连接时默认为真。为假时本节点不执行，下游到此停止。",
+};
+const WAIT_INPUT = {
+	name: "wait_for",
+	type: "*",
+	label: "等待完成",
+	tooltip: "任意类型依赖输入；不参与合并，只用于等待最后一段或其它上游节点执行完成后再开始合并。",
+};
 
 function formatInputName(index) {
 	return `${INPUT_PREFIX}${String(index).padStart(2, "0")}`;
@@ -58,6 +70,72 @@ function renameInputsSequentially(node) {
 		input.display_name = input.label;
 		input.tooltip = "按从上到下顺序合并；开启删除锚点帧时会删除非最后片段的尾帧。";
 	});
+}
+
+function findConditionInput(node) {
+	return Array.isArray(node?.inputs)
+		? node.inputs.find((input) => String(input?.name || "") === CONDITION_INPUT.name || String(input?.label || input?.localized_name || "") === CONDITION_INPUT.label)
+		: null;
+}
+
+function applyConditionInput(input) {
+	if (!input) return;
+	input.name = CONDITION_INPUT.name;
+	input.type = CONDITION_INPUT.type;
+	input.label = CONDITION_INPUT.label;
+	input.localized_name = CONDITION_INPUT.label;
+	input.display_name = CONDITION_INPUT.label;
+	input.tooltip = CONDITION_INPUT.tooltip;
+	input.hidden = false;
+	input.visible = true;
+}
+
+function ensureConditionInput(node) {
+	let input = findConditionInput(node);
+	if (!input) {
+		node.addInput?.(CONDITION_INPUT.name, CONDITION_INPUT.type);
+		input = node.inputs?.[node.inputs.length - 1] || null;
+	}
+	applyConditionInput(input);
+	return input;
+}
+
+function findWaitInput(node) {
+	return Array.isArray(node?.inputs)
+		? node.inputs.find((input) => String(input?.name || "") === WAIT_INPUT.name || String(input?.label || input?.localized_name || "") === WAIT_INPUT.label)
+		: null;
+}
+
+function applyWaitInput(input) {
+	if (!input) return;
+	input.name = WAIT_INPUT.name;
+	input.type = WAIT_INPUT.type;
+	input.label = WAIT_INPUT.label;
+	input.localized_name = WAIT_INPUT.label;
+	input.display_name = WAIT_INPUT.label;
+	input.tooltip = WAIT_INPUT.tooltip;
+	input.hidden = false;
+	input.visible = true;
+}
+
+function ensureWaitInput(node) {
+	let input = findWaitInput(node);
+	if (!input) {
+		node.addInput?.(WAIT_INPUT.name, WAIT_INPUT.type);
+		input = node.inputs?.[node.inputs.length - 1] || null;
+	}
+	applyWaitInput(input);
+	return input;
+}
+
+function orderFixedInputs(node, conditionInput, waitInput) {
+	if (!Array.isArray(node.inputs)) return;
+	for (const input of [conditionInput, waitInput]) {
+		const slotIndex = node.inputs.indexOf(input);
+		if (slotIndex >= 0) node.inputs.splice(slotIndex, 1);
+	}
+	if (conditionInput) node.inputs.push(conditionInput);
+	if (waitInput) node.inputs.push(waitInput);
 }
 
 function syncInputLinkSlots(node) {
@@ -200,6 +278,9 @@ function compactNode(node) {
 	removeUnusedInputsFromEnd(node);
 	ensureTrailingEmptyInput(node);
 	renameInputsSequentially(node);
+	const conditionInput = ensureConditionInput(node);
+	const waitInput = ensureWaitInput(node);
+	orderFixedInputs(node, conditionInput, waitInput);
 	syncInputLinkSlots(node);
 	ensureOutputs(node);
 	ensurePreviewWidget(node);

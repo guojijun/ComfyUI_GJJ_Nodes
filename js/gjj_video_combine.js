@@ -11,6 +11,7 @@ const USER_WIDTH_PROPERTY = "gjj_video_combine_user_width";
 const BASIC_SETTINGS_PROPERTY = "gjj_video_combine_show_basic_settings";
 const FRAME_RATE_VARIABLE_PROPERTY = "gjj_video_combine_frame_rate_variable";
 const AUTO_FILENAME_PREFIX_PROPERTY = "gjj_video_combine_auto_filename_prefix";
+const FILENAME_VARIABLES_PROPERTY = "gjj_video_combine_filename_prefix_variables";
 const UNIVERSAL_LOADER_METADATA_PROPERTY = "gjj_video_universal_loader_metadata";
 const TEMPLATE_PARAMS_VALUES_PROPERTY = "gjj_template_params_values";
 const TEMPLATE_PARAMS_SCHEMA_PROPERTY = "gjj_template_params_schema";
@@ -302,6 +303,7 @@ function selectedFrameRateVariableDisplay(node) {
 function getFrameRateSourceState(node) {
 	const external = frameRateInputHasManualLink(node);
 	const variable = selectedFrameRateVariable(node);
+	const resolvedVariable = variable && Array.isArray(resolveSelectedFrameRateVariable(node)) ? variable : "";
 	const display = selectedFrameRateVariableDisplay(node);
 	if (external) {
 		return {
@@ -314,13 +316,13 @@ function getFrameRateSourceState(node) {
 				: "面板帧率已停用；断开 frame_rate 连接后可恢复手动输入或选择变量。",
 		};
 	}
-	if (variable) {
+	if (resolvedVariable) {
 		return {
 			active: true,
 			external: false,
-			variable,
+			variable: resolvedVariable,
 			title: "帧率由变量控制",
-			body: `面板帧率已停用；执行时读取变量「${display.title || variable}」。点击 ⚡ 可清空变量。`,
+			body: `面板帧率已停用；执行时读取变量「${display.title || resolvedVariable}」。点击 ⚡ 可清空变量。`,
 		};
 	}
 	return {
@@ -523,12 +525,68 @@ function makeToolbarButton(label, title, onClick) {
 function closeFrameRateVariablePicker(node) {
 	node?.__gjjVideoCombineFrameRatePicker?.remove?.();
 	node.__gjjVideoCombineFrameRatePicker = null;
+	const button = node?.__gjjVideoCombineToolbar?.buttons?.frameRateVariable;
+	if (button) button.classList.remove("on");
+	updateToolbar(node);
+}
+
+function insertFilenameVariables(node, variableNames) {
+	const names = (Array.isArray(variableNames) ? variableNames : [variableNames])
+		.map((item) => String(item || "").trim())
+		.filter(Boolean);
+	if (!names.length) return;
+	const widget = getWidget(node, "filename_prefix");
+	const current = String(widget?.value || DEFAULT_FILENAME_PREFIX);
+	const tokens = names.map((name) => `{${name}}`).filter((token) => !current.includes(token));
+	if (!tokens.length) return;
+	const separator = current.endsWith("/") || current.endsWith("_") || !current ? "" : "_";
+	writeWidgetValue(node, "filename_prefix", `${current}${separator}${tokens.join("_")}`);
+}
+
+function removeFilenameVariables(node, variableNames) {
+	const names = (Array.isArray(variableNames) ? variableNames : [variableNames])
+		.map((item) => String(item || "").trim())
+		.filter(Boolean);
+	const widget = getWidget(node, "filename_prefix");
+	if (!widget || !names.length) return;
+	const escaped = names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+	const pattern = new RegExp(`(?:^|_)?\\{(?:${escaped.join("|")})\\}`, "g");
+	let next = String(widget.value || "").replace(pattern, "");
+	next = next.replace(/_{2,}/g, "_").replace(/\/_/g, "/").replace(/^_+|_+$/g, "");
+	writeWidgetValue(node, "filename_prefix", next || DEFAULT_FILENAME_PREFIX);
+}
+
+function filenameVariableTokens(node) {
+	const widget = getWidget(node, "filename_prefix");
+	const text = String(widget?.value || "");
+	return [...text.matchAll(/\{([^{}]+)\}/g)].map((match) => String(match[1] || "").trim()).filter(Boolean);
+}
+
+function selectedFilenameVariables(node) {
+	const saved = Array.isArray(node?.properties?.[FILENAME_VARIABLES_PROPERTY])
+		? node.properties[FILENAME_VARIABLES_PROPERTY]
+		: [];
+	return [...new Set([...saved, ...filenameVariableTokens(node)].map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+function setSelectedFilenameVariables(node, names) {
+	node.properties ||= {};
+	const values = [...new Set((Array.isArray(names) ? names : []).map((item) => String(item || "").trim()).filter(Boolean))];
+	if (values.length) node.properties[FILENAME_VARIABLES_PROPERTY] = values;
+	else delete node.properties[FILENAME_VARIABLES_PROPERTY];
+	updateToolbar(node);
+	refreshNode(node);
+}
+
+function frameRateVariableFromSelection(names) {
+	const values = Array.isArray(names) ? names : [];
+	return values.find((name) => /^(frame_rate|fps|帧率)$/i.test(String(name || "").trim())) || "";
 }
 
 function openFrameRateVariablePicker(node) {
 	closeFrameRateVariablePicker(node);
+	node?.__gjjVideoCombineToolbar?.buttons?.frameRateVariable?.classList.add("on");
 	const options = variableOptions(node);
-	const current = selectedFrameRateVariable(node);
 	const popup = document.createElement("div");
 	popup.style.cssText = [
 		"position:fixed",
@@ -554,29 +612,35 @@ function openFrameRateVariablePicker(node) {
 	const header = document.createElement("div");
 	header.style.cssText = "display:flex;align-items:center;gap:8px;";
 	const title = document.createElement("div");
-	title.textContent = "⚡ 选择帧率变量";
+	title.textContent = "⚡ 插入文件名变量";
 	title.style.cssText = "font-weight:800;flex:1 1 auto;";
+	const confirm = document.createElement("button");
+	confirm.type = "button";
+	confirm.textContent = "确定";
 	const clear = document.createElement("button");
 	clear.type = "button";
 	clear.textContent = "清空";
 	const close = document.createElement("button");
 	close.type = "button";
 	close.textContent = "关闭";
-	for (const button of [clear, close]) {
+	for (const button of [clear, confirm, close]) {
 		button.style.cssText = "height:28px;border:1px solid #44565f;border-radius:7px;background:#202b31;color:#dce7e2;cursor:pointer;padding:0 8px;font-size:12px;font-weight:650;";
 		button.addEventListener("pointerdown", (event) => event.stopPropagation());
 		button.addEventListener("mousedown", (event) => event.stopPropagation());
 	}
-	header.append(title, clear, close);
+	clear.style.background = "#26343a";
+	confirm.style.background = "#1f6b43";
+	header.append(title, clear, confirm, close);
 	popup.appendChild(header);
 
 	const search = document.createElement("input");
-	search.placeholder = "搜索变量，建议选择 INT/FLOAT 帧率";
+	search.placeholder = "搜索变量，点击多选，确定后插入 {变量名}";
 	search.style.cssText = "height:30px;border:1px solid #3f5b66;border-radius:7px;background:#071015;color:#dce7e2;padding:0 10px;outline:none;";
 	popup.appendChild(search);
 	const list = document.createElement("div");
 	list.style.cssText = "overflow:auto;display:flex;flex-direction:column;gap:5px;max-height:340px;padding-right:2px;";
 	popup.appendChild(list);
+	const selected = new Set(selectedFilenameVariables(node));
 
 	function render() {
 		const needle = String(search.value || "").trim().toLowerCase();
@@ -585,6 +649,7 @@ function openFrameRateVariablePicker(node) {
 			const parts = variableOptionDisplay(option);
 			if (!parts.value) continue;
 			if (needle && !`${parts.title} ${parts.source} ${parts.value} ${option.label || ""}`.toLowerCase().includes(needle)) continue;
+			const isSelected = selected.has(parts.value);
 			const item = document.createElement("button");
 			item.type = "button";
 			item.style.cssText = [
@@ -592,25 +657,32 @@ function openFrameRateVariablePicker(node) {
 				"align-items:center",
 				"gap:8px",
 				"text-align:left",
-				"border:0",
+				"border:1px solid " + (isSelected ? "#68d18d" : "transparent"),
 				"border-radius:7px",
 				"padding:8px 10px",
-				"background:" + (current === parts.value ? "#234a37" : "transparent"),
-				"color:#dce7e2",
+				"background:" + (isSelected ? "#245c3d" : "transparent"),
+				"color:" + (isSelected ? "#ffffff" : "#dce7e2"),
 				"cursor:pointer",
+				"box-shadow:" + (isSelected ? "0 0 0 1px rgba(104,209,141,.25) inset" : "none"),
 			].join(";");
 			const mark = document.createElement("span");
-			mark.textContent = current === parts.value ? "✓" : "";
-			mark.style.cssText = "width:16px;color:#7de39b;font-weight:900;";
+			mark.textContent = "⚡";
+			mark.style.cssText = "width:16px;color:" + (isSelected ? "#b7ffd0" : "#6f8790") + ";font-weight:900;";
 			const text = document.createElement("span");
-			text.innerHTML = `<b>${parts.title}</b><br><span style="color:#8fa3ad">${parts.source ? `${parts.source} · ` : ""}${parts.value}</span>`;
+			const titleLine = document.createElement("b");
+			titleLine.textContent = parts.title;
+			const detailLine = document.createElement("span");
+			detailLine.style.cssText = "color:#8fa3ad";
+			detailLine.textContent = `${parts.source ? `${parts.source} · ` : ""}{${parts.value}}`;
+			text.append(titleLine, document.createElement("br"), detailLine);
 			item.append(mark, text);
 			item.addEventListener("mousedown", (event) => { event.preventDefault(); event.stopPropagation(); });
 			item.addEventListener("click", (event) => {
 				event.preventDefault();
 				event.stopPropagation();
-				setSelectedFrameRateVariable(node, parts.value);
-				closeFrameRateVariablePicker(node);
+				if (selected.has(parts.value)) selected.delete(parts.value);
+				else selected.add(parts.value);
+				render();
 			});
 			list.appendChild(item);
 		}
@@ -621,11 +693,23 @@ function openFrameRateVariablePicker(node) {
 			list.appendChild(empty);
 		}
 	}
+	confirm.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const values = [...selected];
+		setSelectedFilenameVariables(node, values);
+		insertFilenameVariables(node, values);
+		closeFrameRateVariablePicker(node);
+	});
 	clear.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
+		const values = selectedFilenameVariables(node);
+		selected.clear();
+		setSelectedFilenameVariables(node, []);
 		setSelectedFrameRateVariable(node, "");
-		closeFrameRateVariablePicker(node);
+		removeFilenameVariables(node, values);
+		render();
 	});
 	close.addEventListener("click", (event) => {
 		event.preventDefault();
@@ -668,7 +752,7 @@ function ensureToolbarWidget(node) {
 		wrap.appendChild(buttons[config.name]);
 	}
 
-	buttons.frameRateVariable = makeToolbarButton("⚡", "从 GJJ 变量选择帧率；手动连接 frame_rate 口时，手动连线优先。", () => {
+	buttons.frameRateVariable = makeToolbarButton("⚡", "选择 GJJ_SETNODE / 模板参数变量，插入到文件名前缀。", () => {
 		openFrameRateVariablePicker(node);
 	});
 	wrap.appendChild(buttons.frameRateVariable);
@@ -730,22 +814,18 @@ function updateToolbar(node) {
 		button.setAttribute("aria-label", config.label);
 		button.setAttribute("aria-pressed", !isDefault ? "true" : "false");
 	}
-	const selectedVariable = selectedFrameRateVariable(node);
 	if (toolbar.buttons.frameRateVariable) {
-		const state = getFrameRateSourceState(node);
-		const display = selectedFrameRateVariableDisplay(node);
+		const hasFilenameVariables = selectedFilenameVariables(node).length > 0 || Boolean(node.__gjjVideoCombineFrameRatePicker);
 		toolbar.buttons.frameRateVariable.textContent = "⚡";
-		toolbar.buttons.frameRateVariable.classList.toggle("on", Boolean(selectedVariable));
-		toolbar.buttons.frameRateVariable.classList.toggle("disabled", Boolean(state.external));
-		toolbar.buttons.frameRateVariable.disabled = Boolean(state.external);
-		toolbar.buttons.frameRateVariable.title = state.external
-			? "frame_rate 已连接外部输入，外部连接优先；断开连接后可选择帧率变量。"
-			: selectedVariable
-				? `帧率变量：${display.title || selectedVariable}\n来源：${display.source || "变量"}\n当前会覆盖面板帧率；手动连接 frame_rate 口时手动连线优先。`
-			: "从 GJJ_TemplateParams 或 GJJ_SetNode 选择帧率变量。";
-		toolbar.buttons.frameRateVariable.setAttribute("aria-label", "选择帧率变量");
-		toolbar.buttons.frameRateVariable.setAttribute("aria-pressed", selectedVariable ? "true" : "false");
-		toolbar.buttons.frameRateVariable.setAttribute("aria-disabled", state.external ? "true" : "false");
+		toolbar.buttons.frameRateVariable.classList.toggle("on", hasFilenameVariables);
+		toolbar.buttons.frameRateVariable.classList.toggle("disabled", false);
+		toolbar.buttons.frameRateVariable.disabled = false;
+		toolbar.buttons.frameRateVariable.title = hasFilenameVariables
+			? `文件名变量：${selectedFilenameVariables(node).map((item) => `{${item}}`).join(" ")}`
+			: "选择 GJJ_SETNODE / 模板参数变量，插入到文件名前缀。";
+		toolbar.buttons.frameRateVariable.setAttribute("aria-label", "插入文件名变量");
+		toolbar.buttons.frameRateVariable.setAttribute("aria-pressed", hasFilenameVariables ? "true" : "false");
+		toolbar.buttons.frameRateVariable.setAttribute("aria-disabled", "false");
 	}
 	const basicOpen = getBasicSettingsOpen(node);
 	if (toolbar.buttons.basic) {
@@ -1869,6 +1949,10 @@ app.registerExtension({
 				this.properties ||= {};
 				this.properties[FRAME_RATE_VARIABLE_PROPERTY] = String(props[FRAME_RATE_VARIABLE_PROPERTY] || "");
 			}
+			if (Array.isArray(props[FILENAME_VARIABLES_PROPERTY])) {
+				this.properties ||= {};
+				this.properties[FILENAME_VARIABLES_PROPERTY] = props[FILENAME_VARIABLES_PROPERTY].map((item) => String(item || "").trim()).filter(Boolean);
+			}
 			patchNode(this);
 			clearNativePreview(this);
 			return result;
@@ -1944,6 +2028,12 @@ app.registerExtension({
 					serializedNode.properties[FRAME_RATE_VARIABLE_PROPERTY] = selectedFrameRateVariable(this);
 				} else {
 					delete serializedNode.properties[FRAME_RATE_VARIABLE_PROPERTY];
+				}
+				const filenameVariables = selectedFilenameVariables(this);
+				if (filenameVariables.length) {
+					serializedNode.properties[FILENAME_VARIABLES_PROPERTY] = filenameVariables;
+				} else {
+					delete serializedNode.properties[FILENAME_VARIABLES_PROPERTY];
 				}
 			}
 			return result;

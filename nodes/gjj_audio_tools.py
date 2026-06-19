@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image, ImageDraw
 
 
@@ -188,11 +189,226 @@ class GJJ_AudioBeatAnalyzer:
         return (audio, float(bpm_value), json.dumps(payload, ensure_ascii=False, indent=2), preview)
 
 
+class GJJ_AudioFrameCount8NPlus1:
+    CATEGORY = "GJJ/音频"
+    FUNCTION = "calculate"
+    DESCRIPTION = "输入人声和可选背景声，已满足 8n+1 时原样输出；否则只在末尾补静音到 8n+1，不改变人声主体音色。"
+    SEARCH_ALIASES = ["audio fps frame count", "8n+1", "音频帧数", "帧率"]
+    RETURN_TYPES = ("AUDIO", "AUDIO", "INT")
+    RETURN_NAMES = ("对齐人声", "对齐背景声", "8n+1帧数")
+    OUTPUT_TOOLTIPS = (
+        "满足 8n+1 时原样输出；否则只在末尾补静音到 8n+1 的人声 AUDIO。",
+        "按同一目标长度处理后的背景声 AUDIO；未接背景声时输出等长静音。",
+        "最终对齐帧数，保证满足 8n+1。",
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "vocal_audio": ("AUDIO", {"display_name": "人声", "tooltip": "用于计算时长并对口型的人声 AUDIO。"}),
+                "fps": (
+                    "FLOAT",
+                    {
+                        "default": 24.0,
+                        "min": 0.01,
+                        "max": 240.0,
+                        "step": 0.01,
+                        "display_name": "帧率",
+                        "tooltip": "目标视频帧率。已满足 8n+1 时不改人声；否则只在末尾补静音到 8n+1。",
+                    },
+                ),
+            },
+            "optional": {
+                "background_audio": ("AUDIO", {"display_name": "背景声", "tooltip": "可选背景声，会和人声使用同一个目标时长对齐。"}),
+            },
+        }
+
+    @staticmethod
+    def _normalize_audio(audio: dict[str, Any], label: str) -> tuple[dict[str, Any], torch.Tensor, int]:
+        waveform = audio.get("waveform") if isinstance(audio, dict) else None
+        sample_rate = int(audio.get("sample_rate") or 0) if isinstance(audio, dict) else 0
+        if not isinstance(waveform, torch.Tensor):
+            raise RuntimeError(f"{label} AUDIO 输入缺少 waveform。")
+        if sample_rate <= 0:
+            raise RuntimeError(f"{label} AUDIO 输入缺少有效 sample_rate。")
+        value = waveform.detach()
+        if value.ndim == 1:
+            value = value.unsqueeze(0).unsqueeze(0)
+        elif value.ndim == 2:
+            value = value.unsqueeze(0)
+        elif value.ndim > 3:
+            value = value.reshape(-1, value.shape[-2], value.shape[-1])
+        if int(value.shape[-1]) <= 0:
+            raise RuntimeError(f"{label} AUDIO 输入为空。")
+        return audio, value.contiguous(), sample_rate
+
+    @staticmethod
+    def _pad_audio(audio: dict[str, Any], waveform: torch.Tensor, sample_rate: int, target_samples: int) -> dict[str, Any]:
+        target_samples = max(1, int(target_samples))
+        current_samples = int(waveform.shape[-1])
+        if current_samples == target_samples:
+            padded = waveform.contiguous()
+        elif current_samples > target_samples:
+            padded = waveform[..., :target_samples].contiguous()
+        else:
+            silence = torch.zeros((*waveform.shape[:-1], target_samples - current_samples), device=waveform.device, dtype=waveform.dtype)
+            padded = torch.cat([waveform.contiguous(), silence], dim=-1).contiguous()
+        result = dict(audio)
+        result["waveform"] = padded.contiguous()
+        result["sample_rate"] = int(sample_rate)
+        return result
+
+    @staticmethod
+    def _append_silence_to_samples(audio: dict[str, Any], waveform: torch.Tensor, sample_rate: int, target_samples: int) -> dict[str, Any]:
+        blank_samples = max(1, int(target_samples) - int(waveform.shape[-1]))
+        silence = torch.zeros((*waveform.shape[:-1], blank_samples), device=waveform.device, dtype=waveform.dtype)
+        result = dict(audio)
+        result["waveform"] = torch.cat([waveform.contiguous(), silence], dim=-1).contiguous()
+        result["sample_rate"] = int(sample_rate)
+        return result
+
+    @staticmethod
+    def _silent_audio_like(waveform: torch.Tensor, sample_rate: int, target_samples: int) -> dict[str, Any]:
+        silent = torch.zeros((*waveform.shape[:-1], max(1, int(target_samples))), device=waveform.device, dtype=waveform.dtype)
+        return {"waveform": silent.contiguous(), "sample_rate": int(sample_rate)}
+
+    @staticmethod
+    def _frame_count_from_samples(samples: int, sample_rate: int, fps: float) -> int:
+        return max(1, int(math.ceil(float(max(1, samples)) / float(sample_rate) * max(0.01, float(fps)))))
+
+    @staticmethod
+    def _is_8n_plus_1(frame_count: int) -> bool:
+        return int(frame_count) >= 1 and (int(frame_count) - 1) % 8 == 0
+
+    def calculate(self, vocal_audio: dict[str, Any], fps: float = 24.0, background_audio: dict[str, Any] | None = None):
+        vocal_source, vocal_waveform, sample_rate = self._normalize_audio(vocal_audio, "人声")
+        total_samples = int(vocal_waveform.shape[-1])
+        frame_rate = max(0.01, float(fps))
+        raw_frames = self._frame_count_from_samples(total_samples, sample_rate, frame_rate)
+        if self._is_8n_plus_1(raw_frames):
+            aligned_frames = raw_frames
+            target_samples = total_samples
+            aligned_vocal = vocal_source
+        else:
+            content_frames = max(8, int(math.ceil(float(raw_frames) / 8.0)) * 8)
+            aligned_frames = content_frames + 1
+            target_total_samples = max(total_samples + 1, int(math.floor(float(aligned_frames) / frame_rate * sample_rate)))
+            aligned_vocal = self._pad_audio(vocal_source, vocal_waveform, sample_rate, target_total_samples)
+            target_samples = int(aligned_vocal["waveform"].shape[-1])
+
+        if background_audio is not None:
+            background_source, background_waveform, background_rate = self._normalize_audio(background_audio, "背景声")
+            background_target_samples = int(math.ceil(float(target_samples) / float(sample_rate) * background_rate))
+            if int(background_waveform.shape[-1]) == background_target_samples:
+                aligned_background = background_source
+            else:
+                aligned_background = self._pad_audio(background_source, background_waveform, background_rate, background_target_samples)
+        else:
+            aligned_background = self._silent_audio_like(vocal_waveform, sample_rate, target_samples)
+
+        return (aligned_vocal, aligned_background, int(aligned_frames))
+
+
+class GJJ_AudioVocalBackgroundMixer:
+    CATEGORY = "GJJ/音频"
+    FUNCTION = "mix"
+    DESCRIPTION = "合并人声和背景声，两路自动按最长长度补齐后混合输出。"
+    SEARCH_ALIASES = ["audio mix", "vocal background mix", "人声背景合并", "混音"]
+    RETURN_TYPES = ("AUDIO",)
+    RETURN_NAMES = ("合并音频",)
+    OUTPUT_TOOLTIPS = ("人声和背景声混合后的 AUDIO。",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "vocal_audio": ("AUDIO", {"display_name": "人声", "tooltip": "需要合并的人声 AUDIO。"}),
+                "background_audio": ("AUDIO", {"display_name": "背景声", "tooltip": "需要合并回去的背景声 AUDIO。"}),
+                "vocal_gain": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.01, "display_name": "人声音量", "tooltip": "人声混合倍率。"}),
+                "background_gain": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.01, "display_name": "背景音量", "tooltip": "背景声混合倍率。"}),
+                "normalize_peak": ("BOOLEAN", {"default": True, "display_name": "防爆音归一化", "tooltip": "开启后，如果混合结果峰值超过 1，会整体缩放到安全范围。"}),
+            }
+        }
+
+    @staticmethod
+    def _normalize_audio(audio: dict[str, Any], label: str) -> tuple[torch.Tensor, int]:
+        waveform = audio.get("waveform") if isinstance(audio, dict) else None
+        sample_rate = int(audio.get("sample_rate") or 0) if isinstance(audio, dict) else 0
+        if not isinstance(waveform, torch.Tensor):
+            raise RuntimeError(f"{label} AUDIO 输入缺少 waveform。")
+        if sample_rate <= 0:
+            raise RuntimeError(f"{label} AUDIO 输入缺少有效 sample_rate。")
+        value = waveform.detach().float()
+        if value.ndim == 1:
+            value = value.unsqueeze(0).unsqueeze(0)
+        elif value.ndim == 2:
+            value = value.unsqueeze(0)
+        elif value.ndim > 3:
+            value = value.reshape(-1, value.shape[-2], value.shape[-1])
+        if int(value.shape[-1]) <= 0:
+            raise RuntimeError(f"{label} AUDIO 输入为空。")
+        return value.contiguous(), sample_rate
+
+    @staticmethod
+    def _fit_channels(waveform: torch.Tensor, channels: int) -> torch.Tensor:
+        current = int(waveform.shape[1])
+        if current == channels:
+            return waveform
+        if current == 1:
+            return waveform.repeat(1, channels, 1)
+        if channels == 1:
+            return waveform.mean(dim=1, keepdim=True)
+        if current > channels:
+            return waveform[:, :channels, :]
+        repeat_count = int(math.ceil(channels / current))
+        return waveform.repeat(1, repeat_count, 1)[:, :channels, :]
+
+    @staticmethod
+    def _pad_to(waveform: torch.Tensor, samples: int) -> torch.Tensor:
+        samples = max(1, int(samples))
+        current = int(waveform.shape[-1])
+        if current >= samples:
+            return waveform[..., :samples].contiguous()
+        padding = torch.zeros((*waveform.shape[:-1], samples - current), device=waveform.device, dtype=waveform.dtype)
+        return torch.cat([waveform, padding], dim=-1).contiguous()
+
+    def mix(
+        self,
+        vocal_audio: dict[str, Any],
+        background_audio: dict[str, Any],
+        vocal_gain: float = 1.0,
+        background_gain: float = 1.0,
+        normalize_peak: bool = True,
+    ):
+        vocal, vocal_rate = self._normalize_audio(vocal_audio, "人声")
+        background, background_rate = self._normalize_audio(background_audio, "背景声")
+        if vocal_rate != background_rate:
+            target_background_samples = int(round(float(background.shape[-1]) / float(background_rate) * vocal_rate))
+            background = F.interpolate(background.float(), size=max(1, target_background_samples), mode="linear", align_corners=False)
+            background_rate = vocal_rate
+        channels = max(int(vocal.shape[1]), int(background.shape[1]))
+        target_samples = max(int(vocal.shape[-1]), int(background.shape[-1]))
+        vocal = self._pad_to(self._fit_channels(vocal, channels), target_samples)
+        background = self._pad_to(self._fit_channels(background, channels), target_samples)
+        mixed = vocal * float(vocal_gain) + background * float(background_gain)
+        if bool(normalize_peak):
+            peak = float(mixed.abs().max().item()) if mixed.numel() else 0.0
+            if peak > 1.0:
+                mixed = mixed / peak
+        mixed = mixed.clamp(-1.0, 1.0).contiguous()
+        return ({"waveform": mixed, "sample_rate": int(vocal_rate)},)
+
+
 NODE_CLASS_MAPPINGS = {
     "GJJ_AudioCrop": GJJ_AudioCrop,
     "GJJ_AudioBeatAnalyzer": GJJ_AudioBeatAnalyzer,
+    "GJJ_AudioFrameCount8NPlus1": GJJ_AudioFrameCount8NPlus1,
+    "GJJ_AudioVocalBackgroundMixer": GJJ_AudioVocalBackgroundMixer,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "GJJ_AudioCrop": "GJJ · ✂️ 音频裁剪",
     "GJJ_AudioBeatAnalyzer": "GJJ · 🥁 音频节拍分析",
+    "GJJ_AudioFrameCount8NPlus1": "GJJ · 🎞️ 音频帧数 8n+1",
+    "GJJ_AudioVocalBackgroundMixer": "GJJ · 🎚️ 人声背景合并",
 }

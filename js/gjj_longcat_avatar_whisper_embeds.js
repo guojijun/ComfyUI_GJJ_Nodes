@@ -8,6 +8,11 @@ const MASK_TYPE = "MASK";
 const LEGACY_WHISPER_INPUT = "whisper_model";
 const FPS_NAME = "fps";
 const FPS_SOCKET_TYPE = "INT,FLOAT";
+const MODEL_WIDGET_NAME = "model_name";
+
+function getWidget(node, name) {
+	return (node?.widgets || []).find((widget) => String(widget?.name || "") === name) || null;
+}
 
 function audioIndex(input) {
 	const match = String(input?.name || "").match(/^audio_(\d+)$/);
@@ -122,6 +127,28 @@ function setDirty(node) {
 	app.graph?.setDirtyCanvas?.(true, true);
 }
 
+function attachHelpModelProvider(node) {
+	if (!node || node.__gjjLongCatWhisperHelpAttached) return;
+	node.__gjjLongCatWhisperHelpAttached = true;
+	node.__gjjHelpModelTreeEntries = () => {
+		const modelName = String(getWidget(node, MODEL_WIDGET_NAME)?.value || "").trim();
+		const entries = [];
+		if (modelName) {
+			entries.push({
+				label: "🎙️ Whisper Encoder",
+				value: modelName,
+				folder: "audio_encoders",
+				kind: "audio_encoders",
+				name: MODEL_WIDGET_NAME,
+				tooltip: "调用方法：从 models/audio_encoders 加载 Whisper encoder，生成 LongCat Avatar 音频嵌入。",
+			});
+		}
+		return entries;
+	};
+	node.__gjjHelpModelEntries = node.__gjjHelpModelTreeEntries;
+	node.__gjjModelHelpEntries = node.__gjjHelpModelTreeEntries;
+}
+
 function stabilizeNode(node) {
 	if (!node) return;
 	removeLegacyInputs(node);
@@ -131,6 +158,7 @@ function stabilizeNode(node) {
 	renameAudioInputs(node);
 	reorderInputs(node);
 	normalizeFpsInput(node);
+	attachHelpModelProvider(node);
 	setDirty(node);
 }
 
