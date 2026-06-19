@@ -1,8 +1,427 @@
 import { app } from "/scripts/app.js";
+import { api } from "/scripts/api.js";
 
 const TARGET_NODES = new Set(["GJJ_AudioSilenceTrimmer"]);
+const UI_KEY = "gjj_audio_silence_trimmer";
 const MAX_DURATION_NAME = "max_duration";
+const QUEUE_MODE_NAME = "queue_mode";
+const CURRENT_SEGMENT_NAME = "current_segment";
+const MODE_BLANK = "空行";
+const MODE_INITIAL = "初始";
+const MODE_AUTO = "自动";
 const NUMBER_SOCKET_TYPE = "INT,FLOAT";
+const AUTO_PROPERTY = "gjj_audio_silence_trim_auto_queue";
+const QUEUE_DELAY_MS = 800;
+let activeAutoNodeId = null;
+let queueTimer = null;
+let pendingAutoData = null;
+let lastPromptId = null;
+
+function getWidget(node, name) {
+	return node?.widgets?.find((widget) => widget?.name === name);
+}
+
+function firstArrayValue(value) {
+	return Array.isArray(value) ? value[0] : value;
+}
+
+function readUiData(message) {
+	const direct = firstArrayValue(message?.[UI_KEY]);
+	if (direct && typeof direct === "object") return direct;
+	const nested = firstArrayValue(message?.ui?.[UI_KEY]);
+	if (nested && typeof nested === "object") return nested;
+	return {
+		segment_count: firstArrayValue(message?.segment_count ?? message?.ui?.segment_count ?? message?.output?.segment_count),
+		segment_index: firstArrayValue(message?.segment_index ?? message?.ui?.segment_index ?? message?.output?.segment_index),
+		queue_mode: firstArrayValue(message?.queue_mode ?? message?.ui?.queue_mode ?? message?.output?.queue_mode),
+	};
+}
+
+function eventPromptId(event) {
+	return event?.detail?.prompt_id || null;
+}
+
+function samePrompt(event) {
+	const promptId = eventPromptId(event);
+	return !(promptId && lastPromptId && promptId !== lastPromptId);
+}
+
+function setWidgetValue(node, name, value) {
+	const widget = getWidget(node, name);
+	if (!widget) return;
+	widget.value = value;
+	if (widget.inputEl) widget.inputEl.value = value;
+	if (widget.element && "value" in widget.element) widget.element.value = value;
+	widget.callback?.(value);
+	node.widgets_values = node.widgets?.map((item) => item.value) || node.widgets_values;
+	node?.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function inputLinked(node, name) {
+	return Boolean((node?.inputs || []).find((input) => inputMatchesName(input, name))?.link);
+}
+
+function normalizeSlotName(value) {
+	return String(value || "").replace(/^converted-widget:/i, "");
+}
+
+function inputMatchesName(input, name) {
+	const inputName = normalizeSlotName(input?.name);
+	const inputType = normalizeSlotName(input?.type);
+	const widgetName = String(input?.widget?.name || input?.widget_name || "");
+	return inputName === name || inputType === name || widgetName === name;
+}
+
+function findInput(node, name) {
+	return node?.inputs?.find((input) => inputMatchesName(input, name));
+}
+
+function removeInputAt(node, index) {
+	if (!Array.isArray(node?.inputs) || index < 0 || index >= node.inputs.length) return;
+	if (node.inputs[index]?.link != null) {
+		try { node.disconnectInput?.(index); } catch (_) {}
+	}
+	try { node.removeInput?.(index); }
+	catch (_) { node.inputs.splice(index, 1); }
+}
+
+function ensureCurrentSegmentInput(node) {
+	if (!node || !Array.isArray(node.inputs)) return;
+	let current = findInput(node, CURRENT_SEGMENT_NAME);
+	if (!current) {
+		node.addInput?.(CURRENT_SEGMENT_NAME, "INT");
+		current = node.inputs?.[node.inputs.length - 1] || null;
+	}
+	if (current) {
+		current.name = CURRENT_SEGMENT_NAME;
+		current.type = "INT";
+		current.label = "当前分段";
+		current.localized_name = "当前分段";
+		current.display_name = "当前分段";
+		current.tooltip = "可外接滑动序号；未外接时由面板数字框或自动队列控制。";
+		current.widget = { name: CURRENT_SEGMENT_NAME };
+		current.forceInput = false;
+		current.hidden = false;
+		current.visible = true;
+	}
+	for (let index = node.inputs.length - 1; index >= 0; index -= 1) {
+		const input = node.inputs[index];
+		if (input === current) continue;
+		if (inputMatchesName(input, "slide_start_index")) {
+			removeInputAt(node, index);
+		}
+	}
+}
+
+async function queueRun(node) {
+	if (typeof app.queuePrompt !== "function") {
+		setStatus(node, "当前前端不支持自动排队");
+		return;
+	}
+	try {
+		await app.queuePrompt(0);
+	} catch (error) {
+		console.error("[GJJ] 音频静音修剪自动排队失败:", error);
+		stopAuto(node, `自动排队失败：${error?.message || error || "未知错误"}`);
+	}
+}
+
+function hideWidget(widget, hidden) {
+	if (!widget) return;
+	widget.options = widget.options || {};
+	if (!widget.__gjjOriginalState) {
+		widget.__gjjOriginalState = {
+			computeSize: widget.computeSize,
+			getHeight: widget.getHeight,
+			draw: widget.draw,
+			mouse: widget.mouse,
+			type: widget.type,
+		};
+	}
+	if (hidden) {
+		widget.hidden = true;
+		widget.disabled = true;
+		widget.type = "hidden";
+		widget.options.hidden = true;
+		widget.options.display = "hidden";
+		widget.computeSize = () => [0, -4];
+		widget.getHeight = () => 0;
+		widget.draw = () => {};
+		widget.mouse = () => false;
+	} else {
+		const state = widget.__gjjOriginalState;
+		widget.hidden = false;
+		widget.disabled = false;
+		widget.type = state.type || widget.type || "combo";
+		widget.computeSize = state.computeSize;
+		widget.getHeight = state.getHeight;
+		if (state.draw) widget.draw = state.draw;
+		else delete widget.draw;
+		if (state.mouse) widget.mouse = state.mouse;
+		else delete widget.mouse;
+		delete widget.options.hidden;
+		delete widget.options.display;
+	}
+}
+
+function makeButton(label, title, onClick) {
+	const button = document.createElement("button");
+	button.type = "button";
+	button.textContent = label;
+	button.title = title;
+	button.style.cssText = [
+		"border:1px solid #345b60",
+		"background:#17363a",
+		"color:#f0fbf5",
+		"border-radius:6px",
+		"padding:5px 10px",
+		"font-size:13px",
+		"font-weight:800",
+		"line-height:1.15",
+		"cursor:pointer",
+		"white-space:nowrap",
+		"min-width:72px",
+	].join(";");
+	button.addEventListener("mousedown", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+	});
+	button.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		onClick?.();
+	});
+	return button;
+}
+
+function setActive(button, active) {
+	if (!button) return;
+	button.style.background = active ? "#1c8f56" : "#17363a";
+	button.style.borderColor = active ? "#58c27c" : "#345b60";
+	button.style.color = active ? "#ffffff" : "#f0fbf5";
+}
+
+function setStatus(node, text) {
+	if (node?.__gjjSilenceTrimStatus) {
+		node.__gjjSilenceTrimStatus.textContent = text || "等待执行";
+	}
+}
+
+function updateToolbar(node) {
+	if (!node) return;
+	hideWidget(getWidget(node, QUEUE_MODE_NAME), true);
+	hideWidget(getWidget(node, CURRENT_SEGMENT_NAME), false);
+	ensureCurrentSegmentInput(node);
+	const external = inputLinked(node, CURRENT_SEGMENT_NAME);
+	const mode = getWidget(node, QUEUE_MODE_NAME)?.value || MODE_AUTO;
+	const autoRunning = Boolean(node.properties?.[AUTO_PROPERTY]) && !external;
+	const currentValue = Math.max(1, Number(getWidget(node, CURRENT_SEGMENT_NAME)?.value || 1));
+	setActive(node.__gjjSilenceTrimBlankBtn, mode === MODE_BLANK && !external);
+	setActive(node.__gjjSilenceTrimInitialBtn, mode === MODE_INITIAL && !external);
+	setActive(node.__gjjSilenceTrimAutoBtn, mode === MODE_AUTO && !external);
+	if (node.__gjjSilenceTrimAutoBtn) {
+		node.__gjjSilenceTrimAutoBtn.textContent = autoRunning ? "■ 自动" : "▶ 自动";
+		node.__gjjSilenceTrimAutoBtn.title = autoRunning ? "停止自动队列" : "从当前分段开始自动排队执行";
+	}
+	for (const button of [node.__gjjSilenceTrimBlankBtn, node.__gjjSilenceTrimInitialBtn, node.__gjjSilenceTrimAutoBtn]) {
+		if (!button) continue;
+		button.disabled = external;
+		button.style.opacity = external ? "0.58" : "1";
+	}
+	if (external) {
+		setStatus(node, "外接当前分段已接管");
+	} else if (!node.__gjjSilenceTrimExecuted) {
+		setStatus(node, `当前：${mode} ｜ 第 ${currentValue} 段`);
+	}
+	node?.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function stopAuto(node, reason = "自动队列已停止") {
+	if (queueTimer) {
+		clearTimeout(queueTimer);
+		queueTimer = null;
+	}
+	if (activeAutoNodeId === String(node?.id)) {
+		activeAutoNodeId = null;
+	}
+	if (!node || pendingAutoData?.node === node) {
+		pendingAutoData = null;
+	}
+	node.properties = node.properties || {};
+	node.properties[AUTO_PROPERTY] = false;
+	setStatus(node, reason);
+	updateToolbar(node);
+}
+
+function startAuto(node) {
+	if (inputLinked(node, CURRENT_SEGMENT_NAME)) {
+		stopAuto(node, "外接当前分段已接管");
+		return;
+	}
+	node.properties = node.properties || {};
+	if (queueTimer) {
+		clearTimeout(queueTimer);
+		queueTimer = null;
+	}
+	node.properties[AUTO_PROPERTY] = true;
+	activeAutoNodeId = String(node.id);
+	pendingAutoData = null;
+	setWidgetValue(node, QUEUE_MODE_NAME, MODE_AUTO);
+	setWidgetValue(node, CURRENT_SEGMENT_NAME, Math.max(1, Number(getWidget(node, CURRENT_SEGMENT_NAME)?.value || 1)));
+	node.__gjjSilenceTrimExecuted = false;
+	setStatus(node, `自动队列启动：第 ${getWidget(node, CURRENT_SEGMENT_NAME)?.value || 1} 段`);
+	updateToolbar(node);
+	queueRun(node);
+}
+
+function queueNextIfNeeded(node, count, index) {
+	if (!node || !node.properties?.[AUTO_PROPERTY] || activeAutoNodeId !== String(node.id)) {
+		return;
+	}
+	if (inputLinked(node, CURRENT_SEGMENT_NAME)) {
+		stopAuto(node, "外接当前分段已接管，自动队列停止");
+		return;
+	}
+	const total = Math.max(0, Math.floor(Number(count) || 0));
+	const current = Math.max(0, Math.floor(Number(index) || 0));
+	const next = current + 1;
+	if (total <= 0) {
+		stopAuto(node, "没有可执行的分段");
+		return;
+	}
+	if (next > total) {
+		setWidgetValue(node, CURRENT_SEGMENT_NAME, 1);
+		stopAuto(node, "自动队列完成");
+		return;
+	}
+	setWidgetValue(node, CURRENT_SEGMENT_NAME, next);
+	setStatus(node, `已完成 ${current} / ${total}，下一段 ${next} / ${total}，${QUEUE_DELAY_MS}ms 后继续`);
+	if (queueTimer) {
+		clearTimeout(queueTimer);
+		queueTimer = null;
+	}
+	queueTimer = setTimeout(async () => {
+		queueTimer = null;
+		if (!node.properties?.[AUTO_PROPERTY] || activeAutoNodeId !== String(node.id)) {
+			return;
+		}
+		if (inputLinked(node, CURRENT_SEGMENT_NAME)) {
+			stopAuto(node, "外接当前分段已接管，自动队列停止");
+			return;
+		}
+		await queueRun(node);
+	}, QUEUE_DELAY_MS);
+}
+
+function autoModeEnabled(node, data) {
+	const mode = String(data?.queue_mode || getWidget(node, QUEUE_MODE_NAME)?.value || "").trim();
+	return mode === MODE_AUTO;
+}
+
+function queuePendingAfterWorkflow(reason = "执行完成") {
+	const data = pendingAutoData;
+	if (!data?.node) {
+		return;
+	}
+	pendingAutoData = null;
+	if (activeAutoNodeId !== String(data.node.id)) {
+		return;
+	}
+	setStatus(data.node, `${reason}，准备推进分段`);
+	queueNextIfNeeded(data.node, data.count, data.index);
+}
+
+function ensureToolbar(node) {
+	if (!node || node.__gjjSilenceTrimToolbar) {
+		updateToolbar(node);
+		return;
+	}
+	const row = document.createElement("div");
+	row.style.cssText = "display:flex;gap:6px;align-items:center;flex-wrap:nowrap;padding:2px 0 0;overflow:hidden;";
+
+	node.__gjjSilenceTrimBlankBtn = makeButton("🧹 空行", "输出一个静音占位段", () => {
+		setWidgetValue(node, QUEUE_MODE_NAME, MODE_BLANK);
+		updateToolbar(node);
+	});
+	node.__gjjSilenceTrimInitialBtn = makeButton("░ 初始", "只输出第一段，方便先预览", () => {
+		setWidgetValue(node, QUEUE_MODE_NAME, MODE_INITIAL);
+		updateToolbar(node);
+	});
+	node.__gjjSilenceTrimAutoBtn = makeButton("▶ 自动", "输出完整分段队列，让后续节点自动逐段执行", () => {
+		if (node.properties?.[AUTO_PROPERTY]) stopAuto(node);
+		else startAuto(node);
+	});
+	const status = document.createElement("span");
+	status.style.cssText = "font-size:12px;color:#b8cac6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+	node.__gjjSilenceTrimStatus = status;
+	row.append(node.__gjjSilenceTrimBlankBtn, node.__gjjSilenceTrimInitialBtn, node.__gjjSilenceTrimAutoBtn, status);
+
+	const widget = node.addDOMWidget?.("gjj_silence_trim_queue_toolbar", "HTML", row, {
+		serialize: false,
+		hideOnZoom: false,
+		getHeight: () => 32,
+	});
+	if (widget) {
+		widget.computeSize = (width) => [Math.max(280, width || 280), 32];
+	}
+	node.__gjjSilenceTrimToolbar = widget || { element: row };
+	updateToolbar(node);
+}
+
+function patchNode(node) {
+	if (!node || node.__gjjSilenceTrimPatched) {
+		updateToolbar(node);
+		return;
+	}
+	node.__gjjSilenceTrimPatched = true;
+	node.properties = node.properties || {};
+	ensureCurrentSegmentInput(node);
+	ensureToolbar(node);
+	const originalExecuted = node.onExecuted;
+	node.onExecuted = function (message) {
+		const result = originalExecuted?.apply(this, arguments);
+		const data = readUiData(message);
+		const count = Number(data?.segment_count || 0);
+		const index = Number(data?.segment_index || getWidget(this, CURRENT_SEGMENT_NAME)?.value || 1);
+		this.__gjjSilenceTrimExecuted = true;
+		setStatus(this, count > 0 ? `当前分段：${index} / ${count}` : "当前分段：0 / 0");
+		if (!inputLinked(this, CURRENT_SEGMENT_NAME) && autoModeEnabled(this, data)) {
+			this.properties = this.properties || {};
+			this.properties[AUTO_PROPERTY] = true;
+			activeAutoNodeId = String(this.id);
+			updateToolbar(this);
+		}
+		if (activeAutoNodeId === String(this.id)) {
+			pendingAutoData = { node: this, count, index };
+			setStatus(this, count > 0 ? `当前分段：${index} / ${count}，等待当前工作流结束` : "当前分段：0 / 0");
+		}
+		return result;
+	};
+	const widget = getWidget(node, QUEUE_MODE_NAME);
+	if (widget && !widget.__gjjSilenceTrimCallbackPatched) {
+		const original = widget.callback;
+		widget.callback = function (...args) {
+			const result = original?.apply(this, args);
+			setTimeout(() => updateToolbar(node), 0);
+			return result;
+		};
+		widget.__gjjSilenceTrimCallbackPatched = true;
+	}
+	const currentWidget = getWidget(node, CURRENT_SEGMENT_NAME);
+	if (currentWidget && !currentWidget.__gjjSilenceTrimCallbackPatched) {
+		const original = currentWidget.callback;
+		currentWidget.callback = function (...args) {
+			const result = original?.apply(this, args);
+			node.__gjjSilenceTrimExecuted = false;
+			setTimeout(() => updateToolbar(node), 0);
+			return result;
+		};
+		currentWidget.__gjjSilenceTrimCallbackPatched = true;
+	}
+	updateToolbar(node);
+}
 
 function normalizeMaxDurationInput(node) {
 	for (const input of node?.inputs || []) {
@@ -19,7 +438,10 @@ function normalizeMaxDurationInput(node) {
 }
 
 function scheduleNormalize(node, delay = 0) {
-	setTimeout(() => normalizeMaxDurationInput(node), delay);
+	setTimeout(() => {
+		normalizeMaxDurationInput(node);
+		patchNode(node);
+	}, delay);
 }
 
 app.registerExtension({
@@ -47,7 +469,11 @@ app.registerExtension({
 		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalOnConnectionsChange?.apply(this, args);
+			if (inputLinked(this, CURRENT_SEGMENT_NAME) && this.properties?.[AUTO_PROPERTY]) {
+				stopAuto(this, "外接当前分段已接管，自动队列停止");
+			}
 			scheduleNormalize(this, 16);
+			setTimeout(() => updateToolbar(this), 32);
 			return result;
 		};
 	},
@@ -56,7 +482,39 @@ app.registerExtension({
 		for (const node of app.graph?._nodes || []) {
 			if (TARGET_NODES.has(String(node?.comfyClass || node?.type || ""))) {
 				normalizeMaxDurationInput(node);
+				patchNode(node);
 			}
 		}
 	},
+});
+
+api.addEventListener("execution_start", (event) => {
+	lastPromptId = eventPromptId(event);
+	if (!activeAutoNodeId) {
+		pendingAutoData = null;
+	}
+	if (queueTimer) {
+		clearTimeout(queueTimer);
+		queueTimer = null;
+	}
+});
+
+api.addEventListener("execution_success", (event) => {
+	if (!activeAutoNodeId || !samePrompt(event)) {
+		pendingAutoData = null;
+		return;
+	}
+	queuePendingAfterWorkflow("执行完成");
+});
+
+api.addEventListener("execution_error", (event) => {
+	if (!activeAutoNodeId || !samePrompt(event)) {
+		pendingAutoData = null;
+		return;
+	}
+	const node = pendingAutoData?.node || app.graph?.getNodeById?.(activeAutoNodeId);
+	if (node) {
+		stopAuto(node, "执行出错，自动队列停止");
+	}
+	pendingAutoData = null;
 });

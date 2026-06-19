@@ -4,9 +4,50 @@ from typing import Any
 
 import torch
 
+try:
+    from .common_utils.dependency_checker import build_node_help_payload
+except Exception:
+    from common_utils.dependency_checker import build_node_help_payload
+
 
 NODE_NAME = "GJJ_AudioSilenceTrimmer"
 NODE_DISPLAY_NAME = "GJJ · ✂️ 音频静音修剪"
+QUEUE_MODE_AUTO = "自动"
+QUEUE_MODE_INITIAL = "初始"
+QUEUE_MODE_BLANK = "空行"
+QUEUE_MODES = [QUEUE_MODE_AUTO, QUEUE_MODE_INITIAL, QUEUE_MODE_BLANK]
+_GJJ_HELP = build_node_help_payload(
+    description="从 SoundFlow_SilenceTrimmer 迁移来的 GJJ 零依赖版，只使用 torch 和 ComfyUI AUDIO 数据，不依赖 SoundFlow 原包。",
+    dependencies=[
+        {
+            "name": "torch",
+            "type": "内置运行依赖",
+            "required": True,
+            "description": "ComfyUI 自带，用于音频张量处理、能量检测、交叉淡化和队列切片。",
+        },
+    ],
+    model_tree=[
+        {
+            "label": "无需模型",
+            "path": "",
+            "required": False,
+            "description": "本节点不加载任何模型文件。",
+        },
+    ],
+    usage=[
+        "阈值越高，越容易把低音量区域判为静音。",
+        "最短静音秒决定多长的连续静音才会被压缩。",
+        "保留静音秒决定每段之间以及首尾最多留下多少静音。",
+        "最长保留时长用于分段队列：优先在静音边界或段落边界截断，0 表示不限制。",
+        "模式为“自动”且当前分段未外接时，会按分段顺序自动添加任务。",
+    ],
+    runtime=[
+        "如果最长时间落在句子中间，会回退到上一个安全断句边界；单句本身超长时保留整句，不硬切。",
+        "外接“当前分段”输入后，节点会交出自动队列控制权，由外部序号控制。",
+        "“空行”模式会输出一个短静音占位段，适合批处理占位。",
+    ],
+    notice="零额外模型依赖；无需下载模型。",
+)
 
 
 def _normalize_audio(audio: dict[str, Any]) -> tuple[torch.Tensor, int]:
@@ -141,6 +182,61 @@ def _append_audio(result: torch.Tensor | None, segment: torch.Tensor, fade_sampl
     return _apply_crossfade(result, segment, fade_samples)
 
 
+def _audio_dict(waveform: torch.Tensor, sample_rate: int) -> dict[str, Any]:
+    return {"waveform": waveform.contiguous().clamp(-1.0, 1.0), "sample_rate": int(sample_rate)}
+
+
+def _silent_audio_like(waveform: torch.Tensor, sample_rate: int, seconds: float = 0.05) -> dict[str, Any]:
+    samples = max(1, int(round(float(seconds) * max(1, sample_rate))))
+    silent = torch.zeros((*waveform.shape[:-1], samples), device=waveform.device, dtype=waveform.dtype)
+    return _audio_dict(silent, sample_rate)
+
+
+def _segment_audio_queue_from_boundaries(
+    waveform: torch.Tensor,
+    safe_cut_points: list[int],
+    max_duration: float,
+    sample_rate: int,
+) -> list[dict[str, Any]]:
+    total_samples = int(waveform.shape[-1])
+    if total_samples <= 0:
+        return [_audio_dict(waveform, sample_rate)]
+    max_samples = int(round(float(max_duration) * sample_rate))
+    if max_samples <= 0:
+        return [_audio_dict(waveform, sample_rate)]
+
+    boundaries = sorted(
+        {
+            max(1, min(int(point), total_samples))
+            for point in safe_cut_points
+            if int(point) > 0
+        }
+    )
+    if total_samples not in boundaries:
+        boundaries.append(total_samples)
+    if not boundaries:
+        return [_audio_dict(waveform, sample_rate)]
+
+    segments: list[dict[str, Any]] = []
+    start = 0
+    while start < total_samples:
+        limit = min(total_samples, start + max_samples)
+        candidates = [point for point in boundaries if start < point <= limit]
+        if candidates:
+            end = max(candidates)
+        else:
+            # 当前句子本身超过最长时间时，回退点不存在；保留整句，不从句中硬切。
+            future = [point for point in boundaries if point > start]
+            end = min(future) if future else total_samples
+        end = max(start + 1, min(int(end), total_samples))
+        segment = waveform[..., start:end]
+        if segment.shape[-1] <= 0:
+            break
+        segments.append(_audio_dict(segment, sample_rate))
+        start = end
+    return segments or [_audio_dict(waveform, sample_rate)]
+
+
 def _limit_to_safe_boundary(
     waveform: torch.Tensor,
     safe_cut_points: list[int],
@@ -155,9 +251,99 @@ def _limit_to_safe_boundary(
     if candidates:
         cut_samples = max(candidates)
     else:
-        cut_samples = max_samples
+        future = [point for point in safe_cut_points if int(point) > max_samples]
+        if future:
+            cut_samples = min(future)
+        else:
+            cut_samples = max_samples
     cut_samples = max(1, min(int(cut_samples), int(waveform.shape[-1])))
     return waveform[..., :cut_samples]
+
+
+def _select_slide_index(total: int, fallback: int = 1, slide_start_index=None) -> int:
+    total = max(0, int(total))
+    if total <= 0:
+        return 0
+    current_value = max(1, int(fallback))
+    if slide_start_index is not None:
+        try:
+            x = int(slide_start_index)
+            current_value = x % total
+            current_value = total if current_value == 0 else current_value
+        except Exception:
+            pass
+    return ((current_value - 1) % total) + 1
+
+
+def _prompt_input_is_linked(prompt: Any, unique_id: Any, names: tuple[str, ...]) -> bool:
+    if unique_id is None or not isinstance(prompt, dict):
+        return False
+    node_data = prompt.get(str(unique_id)) or prompt.get(unique_id)
+    if not isinstance(node_data, dict):
+        return False
+    inputs = node_data.get("inputs")
+    if not isinstance(inputs, dict):
+        return False
+    for name in names:
+        value = inputs.get(name)
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            return True
+    return False
+
+
+def _resolve_queue_outputs(
+    segment_queue: list[dict[str, Any]],
+    waveform: torch.Tensor,
+    sample_rate: int,
+    slide_start_index=None,
+    queue_mode: str = QUEUE_MODE_AUTO,
+    current_segment: int = 1,
+) -> tuple[dict[str, Any], int]:
+    segment_count = len(segment_queue)
+    mode = str(queue_mode or QUEUE_MODE_AUTO).strip()
+    external_slide = slide_start_index is not None
+
+    if external_slide:
+        current_index = _select_slide_index(segment_count, fallback=1, slide_start_index=slide_start_index)
+        current_audio = segment_queue[current_index - 1] if current_index > 0 else _silent_audio_like(waveform, sample_rate)
+        return current_audio, current_index
+
+    if mode == QUEUE_MODE_BLANK:
+        current_audio = _silent_audio_like(waveform, sample_rate)
+        return current_audio, 0
+
+    current_index = _select_slide_index(segment_count, fallback=current_segment)
+    current_audio = segment_queue[0] if segment_count > 0 else _silent_audio_like(waveform, sample_rate)
+    if current_index > 0 and segment_count > 0:
+        current_audio = segment_queue[current_index - 1]
+    return current_audio, current_index
+
+
+def _return_payload(
+    segment_count: int,
+    current_audio: dict[str, Any],
+    current_index: int,
+    queue_mode: str,
+):
+    return {
+        "ui": {
+            "gjj_audio_silence_trimmer": [
+                {
+                    "segment_count": int(segment_count),
+                    "segment_index": int(current_index),
+                    "queue_mode": str(queue_mode or QUEUE_MODE_AUTO),
+                }
+            ],
+            "segment_count": (int(segment_count),),
+            "segment_index": (int(current_index),),
+            "queue_mode": (str(queue_mode or QUEUE_MODE_AUTO),),
+        },
+        "result": (
+            int(segment_count),
+            current_audio,
+            int(current_index),
+        ),
+    }
 
 
 class GJJ_AudioSilenceTrimmer:
@@ -171,22 +357,15 @@ class GJJ_AudioSilenceTrimmer:
         "静音修剪",
         "音频去静音",
     ]
-    RETURN_TYPES = ("AUDIO", "FLOAT")
-    RETURN_NAMES = ("处理后音频", "处理后总时长")
+    RETURN_TYPES = ("INT", "AUDIO", "INT")
+    RETURN_NAMES = ("分段总数", "当前分段音频", "当前分段序号")
     OUTPUT_TOOLTIPS = (
-        "移除长静音，并按最长保留时长裁剪后的 AUDIO。",
-        "处理后音频的总时长，单位为秒。",
+        "分段队列中的音频片段总数。",
+        "按当前分段序号选中的当前 AUDIO 分段。",
+        "当前实际输出的 1 基分段序号；可接到其它队列节点保持同步。",
     )
-    GJJ_HELP = {
-        "description": "从 SoundFlow_SilenceTrimmer 迁移来的 GJJ 零依赖版，只使用 torch 和 ComfyUI AUDIO 数据，不依赖 SoundFlow 原包。",
-        "usage": [
-            "阈值越高，越容易把低音量区域判为静音。",
-            "最短静音秒决定多长的连续静音才会被压缩。",
-            "保留静音秒决定每段之间以及首尾最多留下多少静音。",
-            "最长保留时长用于总时长裁剪：优先在静音边界或段落边界截断，0 表示不限制。",
-            "处理后总时长可接到计算器、日志或后续节奏控制节点。",
-        ],
-    }
+    OUTPUT_IS_LIST = (False, False, False)
+    GJJ_HELP = {"title": NODE_DISPLAY_NAME, **_GJJ_HELP}
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -207,7 +386,7 @@ class GJJ_AudioSilenceTrimmer:
                 "min_silence_duration": (
                     "FLOAT",
                     {
-                        "default": 0.1,
+                        "default": 0.2,
                         "min": 0.01,
                         "max": 30.0,
                         "step": 0.01,
@@ -218,7 +397,7 @@ class GJJ_AudioSilenceTrimmer:
                 "keep_silence": (
                     "FLOAT",
                     {
-                        "default": 0.1,
+                        "default": 0.2,
                         "min": 0.0,
                         "max": 60.0,
                         "step": 0.01,
@@ -229,7 +408,7 @@ class GJJ_AudioSilenceTrimmer:
                 "max_duration": (
                     "FLOAT",
                     {
-                        "default": 5.0,
+                        "default": 6.0,
                         "min": 0.0,
                         "max": 36000.0,
                         "step": 0.1,
@@ -248,6 +427,30 @@ class GJJ_AudioSilenceTrimmer:
                         "tooltip": "拼接片段时的交叉淡化时长，能减少硬切产生的爆音。",
                     },
                 ),
+                "queue_mode": (
+                    QUEUE_MODES,
+                    {
+                        "default": QUEUE_MODE_AUTO,
+                        "display_name": "队列模式",
+                        "tooltip": "自动：未外接滑动序号时输出完整分段队列；初始：只输出第一段；空行：输出一个静音占位段。外接滑动起始序号时由外部接管。",
+                    },
+                ),
+                "current_segment": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 1,
+                        "max": 100000,
+                        "step": 1,
+                        "display_name": "当前分段",
+                        "forceInput": False,
+                        "tooltip": "面板里的滑动起始序号。可手动设置，也可连接本行小圆点外接；外接时由外部接管。",
+                    },
+                ),
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "unique_id": "UNIQUE_ID",
             },
         }
 
@@ -255,10 +458,14 @@ class GJJ_AudioSilenceTrimmer:
         self,
         audio: dict[str, Any],
         threshold_db: float = -30.0,
-        min_silence_duration: float = 0.1,
-        keep_silence: float = 0.1,
-        max_duration: float = 5.0,
+        min_silence_duration: float = 0.2,
+        keep_silence: float = 0.2,
+        max_duration: float = 6.0,
         fade_duration: float = 0.01,
+        queue_mode: str = QUEUE_MODE_AUTO,
+        current_segment: int = 1,
+        prompt=None,
+        unique_id=None,
     ):
         waveform, sample_rate = _normalize_audio(audio)
         total_samples = int(waveform.shape[-1])
@@ -267,11 +474,29 @@ class GJJ_AudioSilenceTrimmer:
         max_duration_value = float(max_duration)
         fade_samples = max(0, int(round(float(fade_duration) * sample_rate)))
 
+        panel_index_linked = _prompt_input_is_linked(prompt, unique_id, ("current_segment",))
+        effective_slide_index = current_segment if panel_index_linked else None
+
         regions = _find_non_silent_regions(waveform, threshold_db, min_silence_samples, sample_rate)
         if not regions:
-            limited = _limit_to_safe_boundary(waveform, [int(waveform.shape[-1])], max_duration_value, sample_rate)
+            safe_cut_points = [int(waveform.shape[-1])]
+            limited = _limit_to_safe_boundary(waveform, safe_cut_points, max_duration_value, sample_rate)
             limited = limited.contiguous().clamp(-1.0, 1.0)
-            return ({"waveform": limited, "sample_rate": sample_rate}, _audio_duration(limited, sample_rate))
+            segment_queue = _segment_audio_queue_from_boundaries(waveform, safe_cut_points, max_duration_value, sample_rate)
+            current_audio, current_index = _resolve_queue_outputs(
+                segment_queue,
+                waveform,
+                sample_rate,
+                slide_start_index=effective_slide_index,
+                queue_mode=queue_mode,
+                current_segment=current_segment,
+            )
+            return _return_payload(
+                len(segment_queue),
+                current_audio,
+                current_index,
+                queue_mode,
+            )
 
         result: torch.Tensor | None = None
         safe_cut_points: list[int] = []
@@ -307,9 +532,25 @@ class GJJ_AudioSilenceTrimmer:
         if result is None or result.shape[-1] <= 0:
             result = waveform
             safe_cut_points = [int(result.shape[-1])]
-        result = _limit_to_safe_boundary(result, safe_cut_points, max_duration_value, sample_rate)
+        full_result = result.contiguous().clamp(-1.0, 1.0)
+        segment_queue = _segment_audio_queue_from_boundaries(full_result, safe_cut_points, max_duration_value, sample_rate)
+        result = _limit_to_safe_boundary(full_result, safe_cut_points, max_duration_value, sample_rate)
         result = result.contiguous().clamp(-1.0, 1.0)
-        return ({"waveform": result, "sample_rate": sample_rate}, _audio_duration(result, sample_rate))
+        segment_count = len(segment_queue)
+        current_audio, current_index = _resolve_queue_outputs(
+            segment_queue,
+            full_result,
+            sample_rate,
+            slide_start_index=effective_slide_index,
+            queue_mode=queue_mode,
+            current_segment=current_segment,
+        )
+        return _return_payload(
+            int(segment_count),
+            current_audio,
+            int(current_index),
+            queue_mode,
+        )
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_AudioSilenceTrimmer}
