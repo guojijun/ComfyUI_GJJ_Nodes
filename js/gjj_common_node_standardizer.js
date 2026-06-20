@@ -1359,11 +1359,7 @@ function clipPromptEncodeFallbackDescription() {
 
 function clipPromptEncodeFallbackModelEntries() {
 	return [
-		{ label: "Opus-MT 配置", value: "config.json", folder: "translation/opus-mt-zh-en", icon: "📄" },
-		{ label: "Opus-MT 权重", value: "pytorch_model.bin", folder: "translation/opus-mt-zh-en", icon: "🧠" },
-		{ label: "Opus-MT 权重", value: "model.safetensors", folder: "translation/opus-mt-zh-en", icon: "🧠" },
-		{ label: "源语言分词", value: "source.spm", folder: "translation/opus-mt-zh-en", icon: "🔤" },
-		{ label: "目标语言分词", value: "target.spm", folder: "translation/opus-mt-zh-en", icon: "🔤" },
+		{ label: "Opus-MT 翻译模型包", value: "opus-mt-zh-en.safetensors", folder: "translation", icon: "🧠" },
 	];
 }
 
