@@ -1,6 +1,6 @@
 """
 GJJ · ✂️ 可视化视频分段编辑器
-支持加载视频、自动生成分段、可视化编辑起止时间、按时间段裁剪并输出多个视频片段
+支持加载视频、自动生成分段、可视化编辑帧范围、按帧裁剪并输出多个视频片段
 """
 
 from __future__ import annotations
@@ -91,7 +91,11 @@ def is_video_object(value: Any) -> bool:
 	if isinstance(value, torch.Tensor):
 		return value.ndim in (3, 4)
 	# 检查是否有get_components方法（ComfyUI VIDEO对象的特征）
-	return hasattr(value, "get_components") or (isinstance(value, dict) and any(key in value for key in ("images", "frames", "samples")))
+	return (
+		hasattr(value, "get_components")
+		or hasattr(value, "get_stream_source")
+		or (isinstance(value, dict) and any(key in value for key in ("images", "frames", "samples")))
+	)
 
 
 def parse_segments_list(text: str) -> list[dict[str, Any]]:
@@ -102,12 +106,12 @@ def parse_segments_list(text: str) -> list[dict[str, Any]]:
 	try:
 		data = json.loads(text)
 		if isinstance(data, list):
-			# 过滤掉非dict元素，只保留带有start/end字段的字典
+			# 过滤掉非dict元素，只保留带有 start_frame/end_frame 字段的字典
 			return [
 				item for item in data
-				if isinstance(item, dict) and ("start" in item or "end" in item or "start_frame" in item or "end_frame" in item)
+				if isinstance(item, dict) and ("start_frame" in item or "end_frame" in item)
 			]
-		elif isinstance(data, dict) and ("start" in data or "end" in data or "start_frame" in data or "end_frame" in data):
+		elif isinstance(data, dict) and ("start_frame" in data or "end_frame" in data):
 			return [data]
 	except json.JSONDecodeError:
 		pass
@@ -128,12 +132,12 @@ def _max_ltx_anchor(frame_count: int) -> int:
 	return 1 + ((frame_count - 1) // FRAME_SNAP) * FRAME_SNAP
 
 
-def normalize_segments_to_seconds(segments: list[dict[str, Any]], fps: float, duration: float) -> list[dict[str, Any]]:
-	"""前端以帧为单位保存 JSON；这里转换为秒用于裁剪，同时保留帧字段。"""
-	if fps <= 0:
-		fps = 24.0
-	max_frame = int(round(duration * fps)) if duration > 0 else 0
-	max_anchor = _max_ltx_anchor(max_frame)
+def normalize_segments_to_frames(
+	segments: list[dict[str, Any]],
+	total_frames: int,
+) -> list[dict[str, Any]]:
+	"""把分段规整为 1 基闭区间帧号；后续裁剪只使用帧号。"""
+	max_anchor = _max_ltx_anchor(total_frames)
 	normalized = []
 	for index, item in enumerate(segments):
 		if not isinstance(item, dict):
@@ -143,44 +147,21 @@ def normalize_segments_to_seconds(segments: list[dict[str, Any]], fps: float, du
 				"start_frame": 1,
 				"end_frame": 1,
 				"frames": 1,
-				"start": 0,
-				"end": 1 / fps,
 				"label": item.get("label") or f"片段 {index + 1}",
 				**({"color": item.get("color")} if item.get("color") else {}),
 			})
 			continue
 
-		if "start_frame" in item or "end_frame" in item:
-			start_frame = _snap_frame(item.get("start_frame", 1))
-			end_frame = _snap_frame(item.get("end_frame", max_anchor))
-			start_frame = min(max(start_frame, 1), max(1, max_anchor - FRAME_SNAP))
-			end_frame = min(max_anchor, max(start_frame + FRAME_SNAP, end_frame))
-			start = (start_frame - 1) / fps
-			end = end_frame / fps
-		else:
-			start = max(0.0, float(item.get("start", 0) or 0))
-			end = max(start, float(item.get("end", duration) or duration))
-			start_frame = _snap_frame(start * fps + 1)
-			end_frame = _snap_frame(end * fps)
-			start_frame = min(max(start_frame, 1), max(1, max_anchor - FRAME_SNAP))
-			end_frame = min(max_anchor, max(start_frame + FRAME_SNAP, end_frame))
-			start = (start_frame - 1) / fps
-			end = end_frame / fps
+		start_frame = _snap_frame(item.get("start_frame", 1))
+		end_frame = _snap_frame(item.get("end_frame", max_anchor))
 
-		if duration > 0:
-			end = min(end, duration)
-			if end <= start:
-				end_frame = min(max_anchor, max(1 + FRAME_SNAP, end_frame))
-				start_frame = max(1, end_frame - FRAME_SNAP)
-				start = (start_frame - 1) / fps
-				end = end_frame / fps
+		start_frame = min(max(int(start_frame), 1), max(1, max_anchor - FRAME_SNAP))
+		end_frame = min(max_anchor, max(start_frame + FRAME_SNAP, int(end_frame)))
 
 		normalized.append({
 			"start_frame": int(start_frame),
 			"end_frame": int(end_frame),
 			"frames": int(end_frame - start_frame + 1),
-			"start": round(float(start), 6),
-			"end": round(float(end), 6),
 			"label": item.get("label") or f"片段 {index + 1}",
 			**({"color": item.get("color")} if item.get("color") else {}),
 		})
@@ -218,12 +199,129 @@ def get_ffmpeg_executable() -> str:
 		return "ffmpeg"
 
 
+def _parse_int(value: Any, default: int = 0) -> int:
+	try:
+		text = str(value).strip()
+		if not text or text.upper() == "N/A":
+			return default
+		return int(float(text))
+	except Exception:
+		return default
+
+
+def _parse_fps(value: Any, default: float = 24.0) -> float:
+	try:
+		text = str(value or "").strip()
+		if not text or text.upper() == "N/A":
+			return default
+		if "/" in text:
+			num, den = text.split("/", 1)
+			den_value = float(den)
+			return float(num) / den_value if den_value != 0 else default
+		return float(text)
+	except Exception:
+		return default
+
+
+def _path_preview_entry(video_path: str) -> dict[str, str]:
+	"""构建 /view 可访问的预览对象，自动判断 input/temp/output。"""
+	path = Path(video_path).resolve()
+	for type_name, base_getter in (
+		("input", folder_paths.get_input_directory),
+		("temp", folder_paths.get_temp_directory),
+		("output", folder_paths.get_output_directory),
+	):
+		try:
+			base = Path(base_getter()).resolve()
+			relative = path.relative_to(base)
+		except Exception:
+			continue
+		subfolder = relative.parent.as_posix()
+		if subfolder == ".":
+			subfolder = ""
+		return {
+			"filename": path.name,
+			"subfolder": subfolder,
+			"type": type_name,
+		}
+	return {
+		"filename": path.name,
+		"subfolder": "",
+		"type": "input",
+	}
+
+
+def _temp_segment_path(segment_index: int, start_frame: int, end_frame: int, prompt: Any = None) -> Path:
+	output_dir = Path(folder_paths.get_temp_directory())
+	filename = (
+		f"GJJ_VideoSegmentEditor_segment_{abs(hash(str(prompt)))}_"
+		f"{time.time_ns()}_{int(segment_index):02d}_{int(start_frame)}-{int(end_frame)}.mp4"
+	)
+	return _unique_path(output_dir, filename)
+
+
+def video_from_file_path(filepath: str | Path):
+	"""返回指向实际视频文件的 ComfyUI VIDEO 对象。"""
+	path = str(filepath)
+	try:
+		from comfy_api.latest import InputImpl
+
+		return InputImpl.VideoFromFile(path)
+	except Exception:
+		from comfy_api.input_impl import VideoFromFile
+
+		return VideoFromFile(path)
+
+
 def _component_value(value: Any, key: str, default: Any = None) -> Any:
 	if value is None:
 		return default
 	if isinstance(value, dict):
 		return value.get(key, default)
 	return getattr(value, key, default)
+
+
+def _stream_source_path(value: Any) -> str | None:
+	stream_source = None
+	getter = getattr(value, "get_stream_source", None)
+	if callable(getter):
+		try:
+			stream_source = getter()
+		except Exception:
+			stream_source = None
+
+	if stream_source is None:
+		for name in ("path", "filepath", "file_path", "filename", "video_path", "source", "src", "loaded_file", "full_path", "abs_path"):
+			try:
+				candidate = getattr(value, name, None)
+				if callable(candidate):
+					candidate = candidate()
+				if candidate:
+					stream_source = candidate
+					break
+			except Exception:
+				pass
+
+	if stream_source is None and isinstance(value, dict):
+		for key in ("path", "filepath", "file_path", "filename", "video_path", "source", "src"):
+			if value.get(key):
+				stream_source = value.get(key)
+				break
+
+	if isinstance(stream_source, (str, os.PathLike)):
+		raw_path = os.fspath(stream_source)
+		try:
+			if folder_paths.exists_annotated_filepath(raw_path):
+				raw_path = folder_paths.get_annotated_filepath(raw_path)
+			elif not os.path.exists(raw_path):
+				annotated = folder_paths.get_annotated_filepath(raw_path)
+				if annotated and os.path.exists(annotated):
+					raw_path = annotated
+		except Exception:
+			pass
+		if os.path.isfile(raw_path):
+			return raw_path
+	return None
 
 
 def _normalize_frames_array(images: Any) -> np.ndarray | None:
@@ -285,45 +383,14 @@ def video_to_frames_data(video: dict[str, Any]) -> tuple[np.ndarray, float, int,
 			height, width = frames_np.shape[1], frames_np.shape[2]
 			return frames_np, frame_rate, width, height
 
+	stream_path = _stream_source_path(video)
+	if stream_path:
+		video_data = _decode_video_with_ffmpeg(stream_path)
+		frames_np = _normalize_frames_array(video_data["images"])
+		if frames_np is not None:
+			return frames_np, float(video_data["frame_rate"]), int(video_data["width"]), int(video_data["height"])
+
 	raise RuntimeError("无法从视频对象中提取帧数据")
-
-
-def get_video_audio_data(video: Any) -> dict[str, Any] | None:
-	"""从 ComfyUI VIDEO 对象中提取 AUDIO 数据。"""
-	try:
-		if hasattr(video, "get_components"):
-			components = video.get_components()
-			audio = _component_value(components, "audio")
-			if isinstance(audio, dict) and isinstance(audio.get("waveform"), torch.Tensor):
-				return audio
-		if isinstance(video, dict):
-			audio = video.get("audio")
-			if isinstance(audio, dict) and isinstance(audio.get("waveform"), torch.Tensor):
-				return audio
-	except Exception as e:
-		print(f"[GJJ] 视频分段编辑器 - 提取视频音频失败: {e}")
-	return None
-
-
-def crop_audio_segment(audio: dict[str, Any] | None, start: float, end: float) -> dict[str, Any] | None:
-	"""按秒裁剪 ComfyUI AUDIO，保持 [B,C,N] waveform 结构。"""
-	if not isinstance(audio, dict):
-		return None
-	waveform = audio.get("waveform")
-	if not isinstance(waveform, torch.Tensor):
-		return None
-	sample_rate = int(audio.get("sample_rate") or 44100)
-	total = int(waveform.shape[-1])
-	if total <= 0 or sample_rate <= 0:
-		return None
-	start_sample = max(0, min(int(float(start) * sample_rate), total))
-	end_sample = max(0, min(int(float(end) * sample_rate), total))
-	if end_sample <= start_sample:
-		return None
-	return {
-		"waveform": waveform[..., start_sample:end_sample].contiguous(),
-		"sample_rate": sample_rate,
-	}
 
 
 def load_audio_from_media_file(filepath: str) -> dict[str, Any] | None:
@@ -361,29 +428,30 @@ def save_frames_for_preview(frames: np.ndarray, prompt: Any = None, suffix: str 
 
 def crop_video_segment_ffmpeg(
 	video_path: str,
-	start_time: float,
-	end_time: float,
+	start_frame: int,
+	end_frame: int,
 	output_path: str
 ) -> bool:
-	"""使用FFmpeg裁剪视频片段"""
+	"""使用 FFmpeg 按 1 基闭区间帧号裁剪视频片段。"""
 	try:
-		duration = end_time - start_time
+		start_index = max(0, int(start_frame) - 1)
+		end_index = max(start_index + 1, int(end_frame))
+		trim_filter = f"trim=start_frame={start_index}:end_frame={end_index},setpts=PTS-STARTPTS"
 
 		cmd = [
 			get_ffmpeg_executable(), "-y", "-v", "error",
-			"-ss", str(start_time),
-			"-t", str(duration),
 			"-i", video_path,
-			"-map", "0:v:0",
-			"-map", "0:a?",
+			"-filter:v", trim_filter,
+			"-an",
 			"-c:v", "libx264",
 			"-pix_fmt", "yuv420p",
-			"-c:a", "aac",
-			"-avoid_negative_ts", "make_zero",
+			"-movflags", "+faststart",
 			output_path,
 		]
 
 		result = subprocess.run(cmd, capture_output=True, text=True)
+		if result.returncode != 0:
+			print(f"[GJJ] FFmpeg按帧裁剪失败: {result.stderr.strip()}")
 		return result.returncode == 0
 	except Exception as e:
 		print(f"[GJJ] FFmpeg裁剪失败: {e}")
@@ -456,22 +524,7 @@ def resolve_video_file_path(video_file: str) -> str | None:
 
 def input_preview_entry(video_path: str) -> dict[str, str]:
 	"""构建 /view 可访问的预览对象。"""
-	input_dir = os.path.abspath(folder_paths.get_input_directory())
-	path = os.path.abspath(video_path)
-	if path.startswith(input_dir):
-		subfolder = os.path.relpath(os.path.dirname(path), input_dir)
-		if subfolder == ".":
-			subfolder = ""
-		return {
-			"filename": os.path.basename(path),
-			"subfolder": subfolder.replace("\\", "/"),
-			"type": "input",
-		}
-	return {
-		"filename": os.path.basename(path),
-		"subfolder": "",
-		"type": "input",
-	}
+	return _path_preview_entry(video_path)
 
 
 def save_video_for_preview(frames: np.ndarray | torch.Tensor, fps: float, prompt: Any = None) -> tuple[str, str]:
@@ -481,6 +534,12 @@ def save_video_for_preview(frames: np.ndarray | torch.Tensor, fps: float, prompt
 	filepath = os.path.join(output_dir, filename)
 	os.makedirs(output_dir, exist_ok=True)
 
+	save_frames_to_video_file(frames, fps, filepath)
+	return filepath, filename
+
+
+def save_frames_to_video_file(frames: np.ndarray | torch.Tensor, fps: float, filepath: str | Path) -> None:
+	"""把帧数组编码成 mp4 文件。"""
 	if isinstance(frames, torch.Tensor):
 		arr = frames.detach().cpu().numpy()
 	else:
@@ -492,16 +551,15 @@ def save_video_for_preview(frames: np.ndarray | torch.Tensor, fps: float, prompt
 
 	try:
 		import imageio.v2 as imageio
-		writer = imageio.get_writer(filepath, fps=max(1.0, float(fps or 24.0)), codec="libx264", macro_block_size=2)
+		writer = imageio.get_writer(str(filepath), fps=max(1.0, float(fps or 24.0)), codec="libx264", macro_block_size=2)
 		try:
 			for frame in arr:
 				writer.append_data(frame)
 		finally:
 			writer.close()
 	except Exception as e:
-		print(f"[GJJ] 外部视频预览保存失败: {e}")
+		print(f"[GJJ] 保存视频文件失败: {e}")
 		raise
-	return filepath, filename
 
 
 def _decode_video_with_ffmpeg(video_path: str) -> dict[str, Any]:
@@ -622,13 +680,12 @@ def _get_video_fps(video_path: str) -> float:
 
 
 def get_video_metadata(video_path: str) -> dict[str, Any]:
-	"""快速获取视频元数据（时长、帧率、分辨率），不解码帧"""
+	"""获取视频元数据和真实帧数。"""
 	try:
 		cmd = [
-			"ffprobe", "-v", "error",
+			"ffprobe", "-v", "error", "-count_frames",
 			"-select_streams", "v:0",
-			"-show_entries", "stream=r_frame_rate,width,height",
-			"-show_entries", "format=duration",
+			"-show_entries", "stream=r_frame_rate,avg_frame_rate,width,height,nb_frames,nb_read_frames",
 			"-of", "json",
 			video_path,
 		]
@@ -638,36 +695,32 @@ def get_video_metadata(video_path: str) -> dict[str, Any]:
 			data = json_module.loads(result.stdout)
 
 			stream = data.get("streams", [{}])[0]
-			fmt = data.get("format", {})
-
 			# 解析帧率
-			fps_str = stream.get("r_frame_rate", "24/1")
-			if "/" in fps_str:
-				num, den = fps_str.split("/")
-				fps = float(num) / float(den) if float(den) != 0 else 24.0
-			else:
-				fps = float(fps_str) if fps_str else 24.0
+			fps = _parse_fps(stream.get("avg_frame_rate") or stream.get("r_frame_rate"), 24.0)
+			if fps <= 0:
+				fps = _parse_fps(stream.get("r_frame_rate"), 24.0)
 
 			# 获取其他信息
-			duration = float(fmt.get("duration", 0))
 			width = int(stream.get("width", 0))
 			height = int(stream.get("height", 0))
-
+			frame_count = _parse_int(stream.get("nb_read_frames"), 0)
+			if frame_count <= 0:
+				frame_count = _parse_int(stream.get("nb_frames"), 0)
 			return {
-				"duration": duration,
 				"fps": fps,
 				"width": width,
 				"height": height,
+				"frame_count": frame_count,
 			}
 	except Exception as e:
 		print(f"[GJJ] 获取视频元数据失败: {e}")
 
 	# 回退方案
 	return {
-		"duration": 0,
 		"fps": 24.0,
 		"width": 0,
 		"height": 0,
+		"frame_count": 0,
 	}
 
 
@@ -735,69 +788,14 @@ def extract_first_frame(video_path: str) -> np.ndarray | None:
 	return None
 
 
-def extract_segment_frame(video_path: str, timestamp: float) -> np.ndarray | None:
-	"""在指定时间点提取单帧用于分段预览"""
-	try:
-		import tempfile
-		from pathlib import Path
-		from PIL import Image
-
-		with tempfile.TemporaryDirectory() as tmpdir:
-			tmpdir_path = Path(tmpdir)
-			frame_file = tmpdir_path / f"segment_frame_{int(timestamp * 1000)}.png"
-
-			# 使用 ffmpeg 在指定时间点提取一帧
-			cmd = [
-				"ffmpeg", "-y", "-v", "error",
-				"-ss", str(timestamp),  # 跳转到指定时间
-				"-i", video_path,
-				"-frames:v", "1",
-				"-q:v", "2",  # 高质量
-				str(frame_file),
-			]
-
-			result = subprocess.run(cmd, capture_output=True, text=True)
-			if result.returncode == 0 and frame_file.exists():
-				with Image.open(frame_file) as img:
-					img_array = np.asarray(img.convert("RGB")).astype(np.float32) / 255.0
-					return img_array
-
-	except Exception as e:
-		print(f"[GJJ] 提取分段帧失败 (timestamp={timestamp}): {e}")
-
-	return None
-
-
-def generate_auto_segments(duration: float, segment_count: int = 4) -> list[dict[str, Any]]:
-	"""根据视频时长自动生成等分的时间段"""
-	if duration <= 0:
-		return []
-
-	segment_duration = duration / segment_count
-	segments = []
-
-	for i in range(segment_count):
-		start = i * segment_duration
-		end = (i + 1) * segment_duration
-		segments.append({
-			"start": round(start, 3),
-			"end": round(end, 3),
-			"label": f"片段 {i + 1}",
-		})
-
-	return segments
-
-
-def generate_auto_frame_segments(duration: float, fps: float, segment_count: int = 3) -> list[dict[str, Any]]:
-	frame_count = max(1, int(round(duration * fps)))
+def generate_auto_frame_segments(frame_count: int, segment_count: int = 3) -> list[dict[str, Any]]:
+	frame_count = max(1, int(frame_count or 1))
 	max_anchor = _max_ltx_anchor(frame_count)
 	if max_anchor <= 1:
 		return [{
 			"start_frame": 1,
 			"end_frame": 1,
 			"frames": 1,
-			"start": 0,
-			"end": round(1 / fps, 6) if fps > 0 else 0,
 			"label": "片段 1",
 		}]
 	segment_count = max(1, int(segment_count or 3))
@@ -810,8 +808,6 @@ def generate_auto_frame_segments(duration: float, fps: float, segment_count: int
 			"start_frame": int(start_frame),
 			"end_frame": int(end_frame),
 			"frames": int(end_frame - start_frame + 1),
-			"start": round((start_frame - 1) / fps, 6) if fps > 0 else 0,
-			"end": round(end_frame / fps, 6) if fps > 0 else 0,
 			"label": f"片段 {i + 1}",
 		})
 	return segments
@@ -861,31 +857,30 @@ class GJJ_VideoSegmentEditor:
 	CATEGORY = "GJJ/视频"
 	FUNCTION = "edit_segments"
 	OUTPUT_NODE = True
-	DESCRIPTION = """视频分段编辑器：加载视频后自动生成分段，可视化编辑起止时间，按时间段裁剪并输出多个视频片段。
+	DESCRIPTION = """视频分段编辑器：加载视频后自动生成分段，可视化编辑起止帧，按帧裁剪并输出多个视频片段。
 
 【核心功能】
 • 节点内加载视频 - 支持从下拉列表选择视频文件
-• 自动生成分段 - 根据视频时长自动创建等分时间段
-• 可视化编辑 - Canvas帧预览显示，拖拽调整起止时间标记
+• 自动生成分段 - 根据视频总帧数自动创建等分帧段
+• 可视化编辑 - Canvas帧预览显示，拖拽调整起止帧标记
 • 动态输出 - 根据分段数量自动扩展输出接口
 • 批量裁剪 - 一次性输出所有分段的视频片段
 
-【时间戳格式】
-支持 start（开始时间）和 end（结束时间）：
+【分段格式】
+使用 1 基闭区间帧号：
 [
-  {"start": 0.0, "end": 2.5, "label": "片段 1"},
-  {"start": 2.5, "end": 5.0, "label": "片段 2"}
+  {"start_frame": 1, "end_frame": 81, "frames": 81, "label": "片段 1"},
+  {"start_frame": 81, "end_frame": 161, "frames": 81, "label": "片段 2"}
 ]
 
 【交互操作】
-• 左键拖拽蓝色标记 - 调整开始时间
-• 左键拖拽红色标记 - 调整结束时间
+• 左键拖拽标记 - 调整分段边界帧
 • 滚轮缩放 - 查看帧细节
 • 右键菜单 - 添加/删除/自动生成分段
 
 【输出说明】
-• 视频片段1...N - 按时间段裁剪的视频
-• 分段列表JSON - 编辑后的时间段配置"""
+• 视频片段1...N - 按帧裁剪后写入 ComfyUI temp 的分段视频
+• 分段列表JSON - 编辑后的帧段配置"""
 
 	# 依赖声明
 	REQUIRED_PACKAGES = [
@@ -910,14 +905,14 @@ class GJJ_VideoSegmentEditor:
 			},
 			{
 				"name": "自动分段生成",
-				"description": "根据视频时长自动创建等分时间段",
+				"description": "根据视频总帧数自动创建等分帧段",
 				"default_segments": 4,
 				"customizable": True,
 			},
 			{
 				"name": "可视化编辑",
-				"description": "Canvas帧预览显示，拖拽调整起止时间",
-				"precision": "millisecond",
+				"description": "Canvas帧预览显示，拖拽调整起止帧",
+				"precision": "frame",
 			},
 			{
 				"name": "动态输出接口",
@@ -946,7 +941,7 @@ class GJJ_VideoSegmentEditor:
 				"type": "STRING",
 				"required": False,
 				"default": "[]",
-				"description": "分段列表JSON（可选，为空则自动生成）",
+				"description": "帧段列表JSON（可选，为空则自动生成）",
 				"multiline": True,
 			},
 			"segment_count": {
@@ -964,7 +959,7 @@ class GJJ_VideoSegmentEditor:
 			},
 			"分段列表": {
 				"type": "STRING",
-				"description": "编辑后的时间段JSON配置",
+				"description": "编辑后的帧段JSON配置",
 			},
 		},
 
@@ -981,15 +976,15 @@ class GJJ_VideoSegmentEditor:
 			},
 			{
 				"title": "教学视频分段",
-				"description": "按知识点时间戳分离教学内容",
+				"description": "按知识点帧段分离教学内容",
 				"workflow": "[Tutorial Video] → [GJJ Video Segment Editor]",
 			},
 		],
 
 		"technical_notes": [
-			"视频裁剪使用FFmpeg进行快速分割，保持原始编码",
+			"视频裁剪使用FFmpeg trim 按帧裁剪，并把每段写入 ComfyUI temp",
 			"动态输出接口通过IS_CHANGED机制实现，前端根据分段数量动态调整",
-			"时间段精度为毫秒级（小数点后3位）",
+			"分段精度为帧号，JSON 只保存 start_frame/end_frame/frames",
 			"输出顺序与分段列表顺序一致",
 			"需要安装FFmpeg才能正常工作",
 		],
@@ -997,11 +992,11 @@ class GJJ_VideoSegmentEditor:
 		"troubleshooting": [
 			{
 				"problem": "输出接口数量不对",
-				"solution": "检查分段列表JSON，确保包含有效的start和end字段",
+				"solution": "检查分段列表JSON，确保包含有效的 start_frame 和 end_frame 字段",
 			},
 			{
-				"problem": "视频片段时长不正确",
-				"solution": "检查起止时间是否重叠或超出视频总时长",
+				"problem": "视频片段帧数不正确",
+				"solution": "检查 start_frame/end_frame 是否超出视频总帧数",
 			},
 			{
 				"problem": "FFmpeg未找到",
@@ -1015,7 +1010,7 @@ class GJJ_VideoSegmentEditor:
 				"date": "2026-05-05",
 				"changes": [
 					"✨ 初始版本发布",
-					"✨ 支持起止时间标记",
+					"✨ 支持起止帧标记",
 					"✨ 自动生成分段功能",
 					"✨ 动态输出接口",
 					"✨ 节点内视频加载",
@@ -1040,7 +1035,7 @@ class GJJ_VideoSegmentEditor:
 	# 由前端动态添加更多VIDEO输出
 	RETURN_TYPES = ("STRING",) + ("VIDEO",) * MAX_SEGMENTS
 	RETURN_NAMES = ("分段列表",) + tuple(f"视频片段{i}" for i in range(1, MAX_SEGMENTS + 1))
-	OUTPUT_TOOLTIPS = ("编辑后的时间段JSON配置",) + tuple(f"第{i}个时间段的视频片段" for i in range(1, MAX_SEGMENTS + 1))
+	OUTPUT_TOOLTIPS = ("编辑后的帧段JSON配置",) + tuple(f"第{i}个帧段的视频片段" for i in range(1, MAX_SEGMENTS + 1))
 
 	@classmethod
 	def INPUT_TYPES(cls):
@@ -1119,29 +1114,25 @@ class GJJ_VideoSegmentEditor:
 		width = 0
 		height = 0
 		total_frames = 0
-		duration = 0
-		source_audio = None
 
 		if video is not None and is_video_object(video):
 			# 外部连接的视频对象
 			current_video = video
+			video_path = _stream_source_path(current_video)
 			frames, frame_rate, width, height = video_to_frames_data(current_video)
-			source_audio = get_video_audio_data(current_video)
 			total_frames = len(frames)
-			duration = total_frames / frame_rate if frame_rate > 0 else 0
 		else:
 			video_path = resolve_video_file_path(video_file)
 
 		if video is None and video_path:
 			# 从文件加载 - 先快速获取元数据
 			metadata = get_video_metadata(video_path)
-			duration = metadata["duration"]
 			frame_rate = metadata["fps"]
 			width = metadata["width"]
 			height = metadata["height"]
-			total_frames = int(duration * frame_rate) if duration > 0 and frame_rate > 0 else 0
+			total_frames = int(metadata.get("frame_count") or 0)
 
-			print(f"[GJJ] 视频分段编辑器 - 快速加载元数据: {duration:.2f}秒, {frame_rate}fps, {width}x{height}")
+			print(f"[GJJ] 视频分段编辑器 - 加载元数据: {total_frames}帧, {frame_rate}fps, {width}x{height}")
 
 			# 快速提取首帧用于预览（不加载全部帧）
 			first_frame = extract_first_frame(video_path)
@@ -1156,14 +1147,14 @@ class GJJ_VideoSegmentEditor:
 		segments = parse_segments_list(segments_json)
 		if not segments:
 			# 自动生成分段
-			segments = generate_auto_frame_segments(duration, frame_rate, 3)
+			segments = generate_auto_frame_segments(total_frames, 3)
 		else:
-			segments = normalize_segments_to_seconds(segments, frame_rate, duration)
+			segments = normalize_segments_to_frames(segments, total_frames)
 
 		# 4. 构建预览数据 - 优先使用原始视频文件（快速）
 		preview_video_data = []
 		if video_path:
-			# 直接使用原始视频文件作为预览（毫秒级，无需解码）
+			# 直接使用原始视频文件作为预览，无需解码整段视频
 			preview_video_data = [input_preview_entry(video_path)]
 			try:
 				preview_video_data[0]["mtime_ns"] = os.stat(video_path).st_mtime_ns
@@ -1190,22 +1181,21 @@ class GJJ_VideoSegmentEditor:
 		segment_thumbnails = []
 
 		ui: dict[str, Any] = {
-			"preview_text": (f"视频时长: {duration:.2f}秒 | 帧数: {total_frames} | 帧率: {frame_rate}Hz | 分辨率: {width}x{height} | 分段数量: {len(segments)}",),
+			"preview_text": (f"视频帧数: {total_frames} | 帧率: {frame_rate}Hz | 分辨率: {width}x{height} | 分段数量: {len(segments)}",),
 			"preview_kind": ("video_segment_editor",),
 			"preview_video": (preview_video_data,) if preview_video_data else (),
 			"preview_segments": (format_segments_list(segments),),  # 字符串必须用元组包裹
-			"preview_duration": (duration,),  # 数值必须用元组包裹
 			"preview_frame_rate": (frame_rate,),  # 数值必须用元组包裹
 			"preview_total_frames": (total_frames,),  # 数值必须用元组包裹
 			"preview_segment_count": (len(segments),),  # 数值必须用元组包裹
 			"segment_thumbnails": (json.dumps(segment_thumbnails),),  # 分段缩略图
 		}
 
-		print(f"[GJJ] 视频分段编辑器 - 视频时长: {duration:.2f}秒, 总帧数: {total_frames}, 分段数量: {len(segments)}")
+		print(f"[GJJ] 视频分段编辑器 - 总帧数: {total_frames}, 分段数量: {len(segments)}")
 		print(f"[GJJ] 视频分段编辑器 - preview_video_data: {preview_video_data}")
 		print(f"[GJJ] 视频分段编辑器 - video_path: {video_path}, frames_loaded: {frames is not None}")
 
-		# 7. 按时间段裁剪视频
+		# 7. 按帧裁剪视频
 		video_segments = []
 		has_valid_source = video_path is not None or (frames is not None and len(frames) > 0)
 
@@ -1220,24 +1210,24 @@ class GJJ_VideoSegmentEditor:
 				if not isinstance(segment, dict):
 					print(f"[GJJ] 警告：分段{i+1}不是dict类型 ({type(segment).__name__})，跳过")
 					continue
-				start = float(segment.get("start", 0))
-				end = float(segment.get("end", duration))
+				start_frame = int(segment.get("start_frame", 1) or 1)
+				end_frame = int(segment.get("end_frame", start_frame) or start_frame)
 
-				# 确保时间范围有效
-				if start >= end:
-					print(f"[GJJ] 警告：分段{i+1}的时间范围无效 ({start}s - {end}s)，跳过")
+				# 确保帧范围有效
+				if start_frame > end_frame:
+					print(f"[GJJ] 警告：分段{i+1}的帧范围无效 ({start_frame}f - {end_frame}f)，跳过")
 					continue
 
 				try:
 					if video_path:
-						# 如果有原始文件路径，使用FFmpeg裁剪
-						segment_video = self._crop_video_with_ffmpeg(video_path, start, end, frame_rate)
+						# 如果有原始文件路径，使用 FFmpeg 按帧裁剪到 ComfyUI temp
+						segment_video = self._crop_video_with_ffmpeg(video_path, start_frame, end_frame, i + 1, prompt)
 					else:
-						# 否则从帧数组中裁剪
-						segment_video = self._crop_video_from_frames(frames, start, end, frame_rate, source_audio)
+						# 否则从帧数组中裁剪并保存为 temp 视频
+						segment_video = self._crop_video_from_frames(frames, start_frame, end_frame, frame_rate, i + 1, prompt)
 
 					video_segments.append(segment_video)
-					print(f"[GJJ] 成功裁剪分段{i+1}: {start}s - {end}s")
+					print(f"[GJJ] 成功按帧裁剪分段{i+1}: {start_frame}f - {end_frame}f")
 				except Exception as e:
 					print(f"[GJJ] 裁剪分段{i+1}失败: {e}")
 					# 填充空视频
@@ -1258,48 +1248,38 @@ class GJJ_VideoSegmentEditor:
 			"result": tuple(result_list),
 		}
 
-	def _crop_video_with_ffmpeg(self, video_path: str, start: float, end: float, fps: float) -> dict[str, Any]:
-		"""使用FFmpeg裁剪视频并重新加载为VIDEO对象"""
-		tmpdir = tempfile.TemporaryDirectory()
-		try:
-			output_path = os.path.join(tmpdir.name, "segment.mp4")
+	def _crop_video_with_ffmpeg(self, video_path: str, start_frame: int, end_frame: int, segment_index: int, prompt: Any = None):
+		"""使用 FFmpeg 按帧裁剪到 ComfyUI temp，并返回该分段文件的 VIDEO 对象。"""
+		output_path = _temp_segment_path(segment_index, start_frame, end_frame, prompt)
 
-			if not crop_video_segment_ffmpeg(video_path, start, end, output_path):
-				raise RuntimeError("FFmpeg裁剪失败")
+		if not crop_video_segment_ffmpeg(video_path, start_frame, end_frame, str(output_path)):
+			raise RuntimeError("FFmpeg按帧裁剪失败")
 
-			# 检查输出文件是否存在且有内容
-			if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-				raise RuntimeError("FFmpeg裁剪后文件为空")
+		# 检查输出文件是否存在且有内容
+		if not output_path.exists() or output_path.stat().st_size == 0:
+			raise RuntimeError("FFmpeg裁剪后文件为空")
 
-			# 使用load_video_from_path加载临时文件
-			return load_video_from_path(output_path)
-		finally:
-			tmpdir.cleanup()
+		return video_from_file_path(output_path)
 
-	def _crop_video_from_frames(self, frames: np.ndarray, start: float, end: float, fps: float, audio: dict[str, Any] | None = None) -> dict[str, Any]:
-		"""从帧数组中裁剪视频片段"""
+	def _crop_video_from_frames(self, frames: np.ndarray, start_frame: int, end_frame: int, fps: float, segment_index: int, prompt: Any = None):
+		"""从帧数组中按帧裁剪，保存到 ComfyUI temp，并返回该分段文件的 VIDEO 对象。"""
 		total_frames = len(frames)
 		if total_frames == 0:
 			raise RuntimeError("无法从空帧数组裁剪视频片段")
 
-		start_frame = int(start * fps)
-		end_frame = int(end * fps)
-
 		# 边界检查
-		start_frame = max(0, min(start_frame, total_frames - 1))
-		end_frame = max(start_frame + 1, min(end_frame, total_frames))
+		start_index = max(0, min(int(start_frame) - 1, total_frames - 1))
+		end_index = max(start_index + 1, min(int(end_frame), total_frames))
 
 		# 裁剪帧
-		cropped_frames = frames[start_frame:end_frame]
+		cropped_frames = frames[start_index:end_index]
 
 		if len(cropped_frames) == 0:
 			raise RuntimeError(f"裁剪后帧数为0 (start_frame={start_frame}, end_frame={end_frame}, total={total_frames})")
 
-		# 转换为tensor
-		frames_tensor = torch.from_numpy(cropped_frames).float()
-		cropped_audio = crop_audio_segment(audio, start, end)
-
-		return create_video_object(frames_tensor, fps, audio=cropped_audio)
+		output_path = _temp_segment_path(segment_index, start_frame, end_frame, prompt)
+		save_frames_to_video_file(cropped_frames, fps, output_path)
+		return video_from_file_path(output_path)
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_VideoSegmentEditor}

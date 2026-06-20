@@ -16,7 +16,7 @@ except Exception:
 
 
 NODE_NAME = "GJJ_AudioSilenceTrimmer"
-NODE_DISPLAY_NAME = "GJJ · ✂️ 音频静音修剪"
+NODE_DISPLAY_NAME = "GJJ · ✂️ 音频静音修剪，队列输出"
 QUEUE_MODE_AUTO = "自动"
 QUEUE_MODE_INITIAL = "初始"
 QUEUE_MODE_BLANK = "空行"

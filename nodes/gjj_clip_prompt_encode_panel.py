@@ -9,6 +9,8 @@ try:
     from .common_utils.prompt_translation import (
         COMMON_PROMPT_TRANSLATE_API_PATH,
         LEGACY_CLIP_PROMPT_TRANSLATE_API_PATH,
+        TRANSLATION_BUNDLE_FILENAME,
+        TRANSLATION_BUNDLE_RELATIVE_PATH,
         TRANSLATION_DEPENDENCY_SPECS,
         TRANSLATION_MODEL_DOWNLOAD_URL,
         TRANSLATION_MODEL_SUBDIR,
@@ -25,6 +27,8 @@ except ImportError:
     from common_utils.prompt_translation import (
         COMMON_PROMPT_TRANSLATE_API_PATH,
         LEGACY_CLIP_PROMPT_TRANSLATE_API_PATH,
+        TRANSLATION_BUNDLE_FILENAME,
+        TRANSLATION_BUNDLE_RELATIVE_PATH,
         TRANSLATION_DEPENDENCY_SPECS,
         TRANSLATION_MODEL_DOWNLOAD_URL,
         TRANSLATION_MODEL_SUBDIR,
@@ -46,47 +50,15 @@ _DESCRIPTION_INTRO = (
     "内置条件零化与 Opus-MT 中英翻译开关，翻译时保留中文引号中的原文，输出正负 CONDITIONING。"
 )
 _TRANSLATION_DEPENDENCY_SPECS = TRANSLATION_DEPENDENCY_SPECS
-_TRANSLATION_MODEL_FOLDER = "translation/opus-mt-zh-en"
+_TRANSLATION_MODEL_FOLDER = "translation"
 _TRANSLATION_MODEL_TREE = [
     {
-        "label": "配置文件",
+        "label": "翻译模型包",
         "folder": _TRANSLATION_MODEL_FOLDER,
-        "filename": "config.json",
-        "value": "models/translation/opus-mt-zh-en/config.json",
-        "description": "Opus-MT 模型配置。",
-        "icon": "📄",
-    },
-    {
-        "label": "模型权重",
-        "folder": _TRANSLATION_MODEL_FOLDER,
-        "filename": "pytorch_model.bin",
-        "value": "models/translation/opus-mt-zh-en/pytorch_model.bin",
-        "description": "Helsinki-NLP/opus-mt-zh-en 权重文件，和 model.safetensors 二选一即可。",
+        "filename": TRANSLATION_BUNDLE_FILENAME,
+        "value": TRANSLATION_BUNDLE_RELATIVE_PATH,
+        "description": "GJJ 单文件 Opus-MT 中英翻译模型包，内部已包含配置、权重与分词文件。",
         "icon": "🧠",
-    },
-    {
-        "label": "模型权重",
-        "folder": _TRANSLATION_MODEL_FOLDER,
-        "filename": "model.safetensors",
-        "value": "models/translation/opus-mt-zh-en/model.safetensors",
-        "description": "Helsinki-NLP/opus-mt-zh-en 权重文件，和 pytorch_model.bin 二选一即可。",
-        "icon": "🧠",
-    },
-    {
-        "label": "源语言分词",
-        "folder": _TRANSLATION_MODEL_FOLDER,
-        "filename": "source.spm",
-        "value": "models/translation/opus-mt-zh-en/source.spm",
-        "description": "中文源语言 SentencePiece 分词模型。",
-        "icon": "🔤",
-    },
-    {
-        "label": "目标语言分词",
-        "folder": _TRANSLATION_MODEL_FOLDER,
-        "filename": "target.spm",
-        "value": "models/translation/opus-mt-zh-en/target.spm",
-        "description": "英文目标语言 SentencePiece 分词模型。",
-        "icon": "🔤",
     },
 ]
 
@@ -94,8 +66,8 @@ _TRANSLATION_MODEL_TREE = [
 _ENVIRONMENT_REPORT = build_translation_environment_report(
     node_name=NODE_DISPLAY_NAME,
     description=(
-        "CLIP 编码本身可继续使用；只有开启翻译开关时需要这些依赖和本地模型。"
-        f"模型请放到 {TRANSLATION_MODEL_SUBDIR}。"
+        "CLIP 编码本身可继续使用；只有开启翻译开关时需要这些依赖和本地翻译模型包。"
+        f"模型包请放到 {TRANSLATION_MODEL_SUBDIR}。"
     ),
 )
 _DEPENDENCIES_AVAILABLE = bool(_ENVIRONMENT_REPORT.get("dependencies_available", True))
@@ -113,8 +85,8 @@ def _translation_environment_report() -> dict[str, Any]:
     return build_translation_environment_report(
         node_name=NODE_DISPLAY_NAME,
         description=(
-            "CLIP 编码本身可继续使用；只有开启翻译开关时需要这些依赖和本地模型。"
-            f"模型请放到 {TRANSLATION_MODEL_SUBDIR}。"
+            "CLIP 编码本身可继续使用；只有开启翻译开关时需要这些依赖和本地翻译模型包。"
+            f"模型包请放到 {TRANSLATION_MODEL_SUBDIR}。"
         ),
     )
 
@@ -201,7 +173,7 @@ class GJJ_CLIPPromptEncodePanel:
         "description": _DESCRIPTION_INTRO,
         "usage": [
             "连接 CLIP 后，在面板内编辑正面和负面提示词，输出对应 CONDITIONING。",
-            "翻译开关开启时，会调用本地 Opus-MT 中英翻译模型；中文引号“...”中的内容会保持原文。",
+            "翻译开关开启时，会调用本地单文件 Opus-MT 中英翻译模型包；中文引号“...”中的内容会保持原文。",
             "正向提示词连接上游输入时，翻译开关开启后会在本节点正面文本框显示译文。",
             "翻译环境缺失时，关闭翻译开关仍可继续做普通 CLIP 编码。",
         ],

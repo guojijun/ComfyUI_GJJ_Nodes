@@ -9,7 +9,6 @@ const RULER_HEIGHT = 24;
 const BLOCK_Y = RULER_HEIGHT + 4;
 const BLOCK_H = 48;
 const HANDLE_HIT_PX = 6;
-const MIN_DURATION = 0.01;
 const DEFAULT_PREVIEW_ASPECT = 16 / 9;
 const FRAME_SNAP = 8;
 const MIN_VISIBLE_OUTPUTS = 2; // 1个分段列表 + 1个视频片段
@@ -154,7 +153,7 @@ function parseSegments(text) {
 		if (Array.isArray(parsed)) {
 			return parsed.filter(s => {
 				if (typeof s !== "object" || s === null) return false;
-				return "start" in s || "end" in s || "start_frame" in s || "end_frame" in s;
+				return "start_frame" in s || "end_frame" in s;
 			});
 		}
 		return [];
@@ -314,12 +313,11 @@ class VideoSegmentEditorWidget {
 		this.node = node;
 		this.container = container;
 		this.segments = [];
-		this.duration = 0;
 		this.frameRate = 24;
 		this.totalFrames = 0;
 		this.previewImageUrl = null;
 		this._previewFallbackUrl = null;
-		this._pendingSeekTime = null;
+		this._pendingSeekFrame = null;
 		this._seekRaf = null;
 		this.previewAspect = Number(node.__gjjPreviewAspect || DEFAULT_PREVIEW_ASPECT);
 
@@ -341,46 +339,28 @@ class VideoSegmentEditorWidget {
 		this.resizeCanvas();
 	}
 
-	getMaxDuration() {
-		return Math.max(MIN_DURATION, this.duration || 60);
-	}
-
-	formatTime(seconds) {
-		if (seconds === undefined || seconds === null) return "0.0";
-		const mins = Math.floor(seconds / 60);
-		const secs = seconds % 60;
-		if (mins > 0) {
-			return `${mins}:${secs.toFixed(1).padStart(4, "0")}`;
-		}
-		return `${secs.toFixed(1)}`;
-	}
-
 	snapFrame(value) {
 		const frame = Math.max(1, Math.round(Number(value) || 1));
 		return 1 + Math.round((frame - 1) / FRAME_SNAP) * FRAME_SNAP;
 	}
 
-	secondsToFrame(seconds) {
-		return this.snapFrame((Number(seconds) || 0) * (this.frameRate || 24) + 1);
-	}
-
-	frameToSeconds(frame) {
+	frameToPlaybackPosition(frame) {
 		const fps = this.frameRate || 24;
 		return fps > 0 ? (Math.max(1, Number(frame) || 1) - 1) / fps : 0;
 	}
 
-	frameEndToSeconds(frame) {
+	playbackPositionToFrame(value) {
 		const fps = this.frameRate || 24;
-		return fps > 0 ? Math.max(1, Number(frame) || 1) / fps : 0;
+		if (fps <= 0) return 1;
+		return Math.max(1, Math.round((Number(value) || 0) * fps) + 1);
 	}
 
 	getTotalFrameCount() {
 		const explicitTotal = Number(this.totalFrames || 0);
 		if (explicitTotal > 0) return Math.max(1, Math.round(explicitTotal));
-		if (this.duration > 0) return Math.max(1, Math.round(this.duration * (this.frameRate || 24)));
 		const segmentMax = Math.max(0, ...this.segments.map(seg => Number(seg?.end_frame || 0)));
 		if (segmentMax > 0) return Math.max(1, Math.round(segmentMax));
-		return Math.max(1, Math.round(60 * (this.frameRate || 24)));
+		return 1 + FRAME_SNAP * 180;
 	}
 
 	getMaxAnchorFrame() {
@@ -403,16 +383,13 @@ class VideoSegmentEditorWidget {
 	}
 
 	normalizeSegmentFrames(seg) {
-		const total = this.getTotalFrameCount();
-		let startFrame = ("start_frame" in seg) ? this.snapFrame(seg.start_frame) : this.secondsToFrame(seg.start || 0);
-		let endFrame = ("end_frame" in seg) ? this.snapFrame(seg.end_frame) : this.secondsToFrame(seg.end || this.duration || 0);
+		let startFrame = this.snapFrame(seg.start_frame || 1);
+		let endFrame = this.snapFrame(seg.end_frame || this.getMaxAnchorFrame());
 
 		const maxAnchor = this.getMaxAnchorFrame();
 		if (maxAnchor <= 1) {
 			seg.start_frame = 1;
 			seg.end_frame = 1;
-			seg.start = 0;
-			seg.end = this.frameEndToSeconds(1);
 			return seg;
 		}
 		startFrame = clamp(startFrame, 1, Math.max(1, maxAnchor - FRAME_SNAP));
@@ -420,8 +397,6 @@ class VideoSegmentEditorWidget {
 
 		seg.start_frame = startFrame;
 		seg.end_frame = endFrame;
-		seg.start = this.frameToSeconds(startFrame);
-		seg.end = this.frameEndToSeconds(endFrame);
 		return seg;
 	}
 
@@ -526,14 +501,12 @@ class VideoSegmentEditorWidget {
 		const stats = document.createElement('div');
 		stats.style.cssText = 'display: flex; gap: 16px; font-size: 11px; color: #999;';
 		stats.innerHTML = `
-			<span>时长: <span class="gjj-stats-duration">0.0</span>秒</span>
 			<span>帧率: <span class="gjj-stats-fps">24</span>Hz</span>
 			<span>帧数: <span class="gjj-stats-frames">0</span></span>
 		`;
 		this.container.appendChild(stats);
 
 		// 保存统计标签引用
-		this.durationLabel = stats.querySelector('.gjj-stats-duration');
 		this.frameRateLabel = stats.querySelector('.gjj-stats-fps');
 		this.framesLabel = stats.querySelector('.gjj-stats-frames');
 
@@ -741,7 +714,6 @@ class VideoSegmentEditorWidget {
 		this.node.properties.segments = "[]";
 		this.segments = [];
 		this.selectedIndex = 0;
-		this.duration = 0;
 		this.totalFrames = 0;
 		this.setPreviewSource(null);
 		this.emptyPreview.textContent = "外部视频执行后显示预览";
@@ -779,10 +751,9 @@ class VideoSegmentEditorWidget {
 
 			const video = data.video;
 			const value = [video.subfolder, video.filename].filter(Boolean).join("/");
-			if (Number.isFinite(Number(video.duration)) && Number(video.duration) > 0) this.duration = Number(video.duration);
 			if (Number.isFinite(Number(video.fps)) && Number(video.fps) > 0) this.frameRate = Number(video.fps);
-			if (Number.isFinite(Number(video.duration)) && Number.isFinite(Number(video.fps))) {
-				this.totalFrames = Math.round(Number(video.duration) * Number(video.fps));
+			if (Number.isFinite(Number(video.frame_count)) && Number(video.frame_count) > 0) {
+				this.totalFrames = Math.round(Number(video.frame_count));
 			}
 			this.setVideoFileValue(value);
 			this.updatePreviewFromFile(value, true);
@@ -810,7 +781,6 @@ class VideoSegmentEditorWidget {
 		}
 
 		if (!filename || filename === "[不加载]") {
-			this.duration = 0;
 			this.totalFrames = 0;
 			if (resetSegments) this.segments = [];
 			this.setPreviewSource(null);
@@ -839,16 +809,10 @@ class VideoSegmentEditorWidget {
 			this.resizePreview(true);
 		}
 
-		const nextDuration = Number.isFinite(this.videoPlayer.duration) ? this.videoPlayer.duration : 0;
-		if (nextDuration > 0) {
-			this.duration = nextDuration;
-			this.totalFrames = Math.round(this.duration * (this.frameRate || 24));
-
-			if (!this.segments.length || this.segments.some(seg => (seg.end || 0) > this.duration + 0.001)) {
-				this.segments = this.makeAutoSegments(3);
-				this.selectedIndex = 0;
-				this.commit();
-			}
+		if (!this.segments.length) {
+			this.segments = this.makeAutoSegments(3);
+			this.selectedIndex = 0;
+			this.commit();
 		}
 
 		this.updateLabels();
@@ -876,8 +840,6 @@ class VideoSegmentEditorWidget {
 			return [{
 				start_frame: 1,
 				end_frame: 1,
-				start: 0,
-				end: this.frameEndToSeconds(1),
 				label: "片段 1",
 				color: SEGMENT_COLORS[0],
 			}];
@@ -892,15 +854,13 @@ class VideoSegmentEditorWidget {
 			return {
 				start_frame: startFrame,
 				end_frame: endFrame,
-				start: this.frameToSeconds(startFrame),
-				end: this.frameEndToSeconds(endFrame),
 				label: `片段 ${i + 1}`,
 				color,
 			};
 		});
 	}
 
-	waitForVideoSeek(time) {
+	waitForVideoFrame(frame) {
 		return new Promise((resolve, reject) => {
 			const video = this.videoPlayer;
 			if (!video) {
@@ -929,7 +889,10 @@ class VideoSegmentEditorWidget {
 			video.addEventListener("seeked", done, { once: true });
 			video.addEventListener("error", fail, { once: true });
 			try {
-				video.currentTime = clamp(Number(time) || 0, 0, Math.max(0, (this.duration || video.duration || 0) - 0.02));
+				const maxFrame = this.getTotalFrameCount();
+				const targetFrame = clamp(Math.round(Number(frame) || 1), 1, maxFrame);
+				const targetPosition = this.frameToPlaybackPosition(targetFrame);
+				video.currentTime = Math.max(0, targetPosition);
 			} catch (error) {
 				fail();
 			}
@@ -986,8 +949,6 @@ class VideoSegmentEditorWidget {
 				start_frame: startFrame,
 				end_frame: endFrame,
 				frames: Math.max(1, endFrame - startFrame + 1),
-				start: this.frameToSeconds(startFrame),
-				end: this.frameEndToSeconds(endFrame),
 				label: `片段 ${index + 1}`,
 				color,
 			};
@@ -996,17 +957,16 @@ class VideoSegmentEditorWidget {
 
 	async detectSceneCuts() {
 		const video = this.videoPlayer;
-		if (!video || !video.src || !Number.isFinite(video.duration) || video.duration <= 0) {
+		const totalFrames = this.getTotalFrameCount();
+		if (!video || !video.src || totalFrames <= 1) {
 			alert("请先加载可预览的视频。");
 			return;
 		}
 		const originalText = this.sceneDetectBtn.textContent;
 		const wasPaused = video.paused;
-		const originalTime = video.currentTime || 0;
-		const duration = Math.max(MIN_DURATION, Number(this.duration || video.duration || 0));
-		const fps = Math.max(0.01, Number(this.frameRate || 24));
-		const sampleCount = Math.max(12, Math.min(220, Math.round(duration / 0.35)));
-		const step = duration / sampleCount;
+		const originalFrame = this.playbackPositionToFrame(video.currentTime || 0);
+		const sampleCount = Math.max(12, Math.min(220, Math.round(totalFrames / Math.max(1, FRAME_SNAP * 2))));
+		const stepFrames = Math.max(1, Math.round((totalFrames - 1) / sampleCount));
 		const canvas = document.createElement("canvas");
 		canvas.width = 96;
 		canvas.height = Math.max(32, Math.round(96 / Math.max(0.1, this.previewAspect || DEFAULT_PREVIEW_ASPECT)));
@@ -1018,17 +978,17 @@ class VideoSegmentEditorWidget {
 			this.sceneDetectBtn.textContent = "🧠 分析...";
 			video.pause?.();
 			for (let index = 0; index <= sampleCount; index += 1) {
-				const time = Math.min(duration - 0.02, Math.max(0, index * step));
-				await this.waitForVideoSeek(time);
+				const frame = Math.min(totalFrames, Math.max(1, 1 + index * stepFrames));
+				await this.waitForVideoFrame(frame);
 				ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 				const signature = this.frameSignatureFromCanvas(canvas, ctx);
 				if (previous) {
-					diffs.push({ time, frame: Math.max(1, Math.round(time * fps) + 1), diff: this.frameDifference(previous, signature) });
+					diffs.push({ frame, diff: this.frameDifference(previous, signature) });
 				}
 				previous = signature;
 			}
 			const threshold = this.sceneThreshold(diffs);
-			const minGapFrames = Math.max(FRAME_SNAP * 2, Math.round(fps * 0.8 / FRAME_SNAP) * FRAME_SNAP);
+			const minGapFrames = FRAME_SNAP * 2;
 			const candidates = diffs
 				.filter((item, index) => {
 					const prev = diffs[index - 1]?.diff ?? -1;
@@ -1063,32 +1023,32 @@ class VideoSegmentEditorWidget {
 			this.sceneDetectBtn.textContent = originalText;
 			this.sceneDetectBtn.disabled = false;
 			try {
-				await this.waitForVideoSeek(originalTime);
+				await this.waitForVideoFrame(originalFrame);
 				if (!wasPaused) video.play?.().catch?.(() => {});
 			} catch (_) {}
 		}
 	}
 
 	updateLabels() {
-		this.durationLabel.textContent = `${this.formatTime(this.duration)}`;
 		this.frameRateLabel.textContent = this.frameRate ? `${Number(this.frameRate).toFixed(2).replace(/\.?0+$/, "")}` : "";
 		this.framesLabel.textContent = this.totalFrames ? `${this.totalFrames}` : "";
 	}
 
-	syncVideoToTime(seconds) {
-		if (!this.videoPlayer || !Number.isFinite(seconds) || this.videoPlayer.readyState < 1) return;
-		this._pendingSeekTime = clamp(seconds, 0, Math.max(0, this.duration || this.videoPlayer.duration || 0));
+	syncVideoToFrame(frame) {
+		if (!this.videoPlayer || !Number.isFinite(Number(frame)) || this.videoPlayer.readyState < 1) return;
+		this._pendingSeekFrame = clamp(Math.round(Number(frame) || 1), 1, this.getTotalFrameCount());
 		if (this._seekRaf) return;
 		this._seekRaf = requestAnimationFrame(() => {
 			this._seekRaf = null;
-			const t = this._pendingSeekTime;
-			this._pendingSeekTime = null;
-			if (!Number.isFinite(t)) return;
+			const targetFrame = this._pendingSeekFrame;
+			this._pendingSeekFrame = null;
+			if (!Number.isFinite(targetFrame)) return;
+			const targetPosition = this.frameToPlaybackPosition(targetFrame);
 			try {
 				if (typeof this.videoPlayer.fastSeek === "function") {
-					this.videoPlayer.fastSeek(t);
+					this.videoPlayer.fastSeek(targetPosition);
 				} else {
-					this.videoPlayer.currentTime = t;
+					this.videoPlayer.currentTime = targetPosition;
 				}
 			} catch (_) {}
 		});
@@ -1098,9 +1058,8 @@ class VideoSegmentEditorWidget {
 		if (this.selectedIndex < 0 || this.selectedIndex >= this.segments.length) return null;
 		const seg = this.segments[this.selectedIndex];
 		if (!seg) return null;
-		const start = Math.max(0, Number(seg.start || 0));
-		const end = Math.max(start + MIN_DURATION, Number(seg.end || start + MIN_DURATION));
-		return { ...seg, start, end };
+		this.normalizeSegmentFrames(seg);
+		return { ...seg };
 	}
 
 	toggleSegmentLoop() {
@@ -1110,7 +1069,7 @@ class VideoSegmentEditorWidget {
 		if (this.loopSelectedSegment) {
 			const seg = this.getSelectedSegment();
 			if (seg) {
-				this.syncVideoToTime(seg.start);
+				this.syncVideoToFrame(seg.start_frame);
 				this.videoPlayer?.play?.().catch?.(() => {});
 			}
 		}
@@ -1131,9 +1090,9 @@ class VideoSegmentEditorWidget {
 		if (!this.loopSelectedSegment) return;
 		const seg = this.getSelectedSegment();
 		if (!seg || this.videoPlayer.readyState < 1) return;
-		const t = this.videoPlayer.currentTime;
-		if (t < seg.start || t >= seg.end) {
-			this.syncVideoToTime(seg.start);
+		const frame = this.playbackPositionToFrame(this.videoPlayer.currentTime || 0);
+		if (frame < seg.start_frame || frame > seg.end_frame) {
+			this.syncVideoToFrame(seg.start_frame);
 		}
 	}
 
@@ -1141,30 +1100,22 @@ class VideoSegmentEditorWidget {
 		if (!this.loopSelectedSegment) return;
 		const seg = this.getSelectedSegment();
 		if (!seg || this.videoPlayer.readyState < 1) return;
-		const t = this.videoPlayer.currentTime;
-		if (t >= seg.end || t < seg.start - 0.05) {
+		const frame = this.playbackPositionToFrame(this.videoPlayer.currentTime || 0);
+		if (frame > seg.end_frame || frame < seg.start_frame) {
 			try {
-				this.videoPlayer.currentTime = seg.start;
+				this.videoPlayer.currentTime = this.frameToPlaybackPosition(seg.start_frame);
 				if (this.videoPlayer.paused) this.videoPlayer.play?.().catch?.(() => {});
 			} catch (_) {}
 		}
 	}
 
 	// ─── Layout ───
-	pxPerSecond() {
-		const max = this.getMaxDuration();
-		return max > 0 ? this._cssWidth / max : 1;
-	}
-
 	segmentRects() {
 		const rects = [];
-		const pps = this.pxPerSecond();
 		this.normalizeAllSegmentFrames();
 
 		for (let i = 0; i < this.segments.length; i++) {
 			const seg = this.segments[i];
-			const startSec = seg.start || 0;
-			const endSec = seg.end || startSec + MIN_DURATION;
 			const startFrame = seg.start_frame || 1;
 			const endFrame = seg.end_frame || (FRAME_SNAP + 1);
 			const x = this.frameToX(startFrame);
@@ -1174,8 +1125,6 @@ class VideoSegmentEditorWidget {
 				index: i,
 				x,
 				w: Math.max(2, right - x),
-				startSec,
-				endSec,
 				startFrame,
 				endFrame,
 			});
@@ -1219,8 +1168,6 @@ class VideoSegmentEditorWidget {
 			this.dragHandle = handle;
 			this.normalizeAllSegmentFrames();
 			this.dragBaseline = this.segments.map(s => ({
-				start: s.start || 0,
-				end: s.end || 0,
 				start_frame: s.start_frame || 1,
 				end_frame: s.end_frame || (FRAME_SNAP + 1),
 			}));
@@ -1233,7 +1180,7 @@ class VideoSegmentEditorWidget {
 			this.selectedIndex = block;
 			if (this.loopSelectedSegment) {
 				const seg = this.getSelectedSegment();
-				if (seg) this.syncVideoToTime(seg.start);
+				if (seg) this.syncVideoToFrame(seg.start_frame);
 			}
 			this.render();
 			return;
@@ -1249,22 +1196,18 @@ class VideoSegmentEditorWidget {
 	onPointerMove(e) {
 		const { x, y } = this.localPos(e);
 		if (this.dragHandle >= 0) {
-			const pps = this.pxPerSecond();
-			const dx = (x - this.dragStart.x) / pps;
 			const handle = this.dragHandle;
 			const baseline = this.dragBaseline;
 
 			// Restore baseline, then shift boundary
 			for (let i = 0; i < this.segments.length; i++) {
-				this.segments[i].start = baseline[i].start;
-				this.segments[i].end = baseline[i].end;
 				this.segments[i].start_frame = baseline[i].start_frame;
 				this.segments[i].end_frame = baseline[i].end_frame;
 			}
-			const boundaryTime = this._shiftBoundary(handle, dx);
+			const boundaryFrame = this._shiftBoundary(handle, this.xToFrame(x));
 			this._ensureMinDuration();
 			this.updateTotalLabel();
-			this.syncVideoToTime(boundaryTime);
+			this.syncVideoToFrame(boundaryFrame);
 			this.render();
 			return;
 		}
@@ -1317,15 +1260,11 @@ class VideoSegmentEditorWidget {
 			...target,
 			start_frame: startFrame,
 			end_frame: splitFrame,
-			start: this.frameToSeconds(startFrame),
-			end: this.frameEndToSeconds(splitFrame),
 		};
 		const right = {
 			...target,
 			start_frame: splitFrame,
 			end_frame: endFrame,
-			start: this.frameToSeconds(splitFrame),
-			end: this.frameEndToSeconds(endFrame),
 			color: pickColor(colors),
 		};
 		this.segments.splice(index, 1, left, right);
@@ -1353,8 +1292,6 @@ class VideoSegmentEditorWidget {
 			const endFrame = i === this.segments.length - 1 ? maxAnchor : Math.min(maxAnchor, Math.max(startFrame + FRAME_SNAP, 1 + (i + 1) * step));
 			this.segments[i].start_frame = startFrame;
 			this.segments[i].end_frame = endFrame;
-			this.segments[i].start = this.frameToSeconds(startFrame);
-			this.segments[i].end = this.frameEndToSeconds(endFrame);
 		}
 		this.commit();
 		this.updateTotalLabel();
@@ -1372,12 +1309,10 @@ class VideoSegmentEditorWidget {
 		if (index > 0) {
 			const prev = this.segments[index - 1];
 			prev.end_frame = removed.end_frame;
-			prev.end = this.frameEndToSeconds(prev.end_frame);
 			this.selectedIndex = index - 1;
 		} else if (this.segments.length > 0) {
 			const next = this.segments[0];
 			next.start_frame = removed.start_frame;
-			next.start = this.frameToSeconds(next.start_frame);
 			this.selectedIndex = 0;
 		}
 
@@ -1386,7 +1321,7 @@ class VideoSegmentEditorWidget {
 		this.updateTotalLabel();
 		if (this.loopSelectedSegment) {
 			const seg = this.getSelectedSegment();
-			if (seg) this.syncVideoToTime(seg.start);
+			if (seg) this.syncVideoToFrame(seg.start_frame);
 		}
 		this.render();
 	}
@@ -1397,7 +1332,7 @@ class VideoSegmentEditorWidget {
 		}
 	}
 
-	_shiftBoundary(index, delta) {
+	_shiftBoundary(index, proposedFrame) {
 		if (index < 0 || index >= this.segments.length - 1) return 0;
 		const left = this.segments[index];
 		const right = this.segments[index + 1];
@@ -1405,14 +1340,10 @@ class VideoSegmentEditorWidget {
 		this.normalizeSegmentFrames(right);
 		const minFrame = (left.start_frame || 0) + FRAME_SNAP;
 		const maxFrame = (right.end_frame || this.getMaxAnchorFrame()) - FRAME_SNAP;
-		const proposedFrame = this.secondsToFrame(this.frameToSeconds(left.end_frame || 1) + delta);
-		const boundaryFrame = clamp(proposedFrame, minFrame, maxFrame);
-		const newStart = this.frameToSeconds(boundaryFrame);
-		left.end = this.frameEndToSeconds(boundaryFrame);
+		const boundaryFrame = clamp(this.snapFrame(proposedFrame), minFrame, maxFrame);
 		left.end_frame = boundaryFrame;
-		right.start = newStart;
 		right.start_frame = boundaryFrame;
-		return newStart;
+		return boundaryFrame;
 	}
 
 	_ensureMinDuration() {
@@ -1662,7 +1593,7 @@ class VideoSegmentEditorWidget {
 
 		// Label - 绘制在底部，透明度50%
 		const labelText = seg.label || `(${rect.index + 1})`;
-		const timeText = `${rect.startFrame} - ${rect.endFrame}f`;
+		const frameText = `${rect.startFrame} - ${rect.endFrame}f`;
 
 		// 底部背景条
 		const labelHeight = 28;
@@ -1677,8 +1608,8 @@ class VideoSegmentEditorWidget {
 		ctx.textAlign = "center";
 		ctx.textBaseline = "middle";
 
-		// 绘制文字（单行显示：标签 + 时间）
-		const displayText = `${labelText} ${timeText}`;
+		// 绘制文字（单行显示：标签 + 帧号）
+		const displayText = `${labelText} ${frameText}`;
 		ctx.fillText(displayText, x + w / 2, labelY + labelHeight / 2);
 
 		// 重置透明度
@@ -1760,9 +1691,6 @@ class VideoSegmentEditorWidget {
 			}
 		}
 
-		if (data.preview_duration !== undefined) {
-			this.duration = parseFloat(data.preview_duration);
-		}
 		if (data.preview_frame_rate !== undefined) {
 			this.frameRate = parseFloat(data.preview_frame_rate);
 		}
@@ -1902,7 +1830,6 @@ app.registerExtension({
 			if (editor) {
 				editor.updateFromBackend({
 					preview_segments: message.preview_segments?.[0],
-					preview_duration: message.preview_duration?.[0],
 					preview_frame_rate: message.preview_frame_rate?.[0],
 					preview_total_frames: message.preview_total_frames?.[0],
 					preview_video: message.preview_video?.[0],  // 解包元组

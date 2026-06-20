@@ -95,8 +95,8 @@ _CN_NUMBER_MAP = {
 _TRANSLATION_ENVIRONMENT_REPORT = build_translation_environment_report(
     node_name=NODE_DISPLAY_NAME,
     description=(
-        "Qwen 图像编辑编码本身可继续使用；只有开启翻译开关时需要这些依赖和本地模型。"
-        f"模型请放到 {TRANSLATION_MODEL_SUBDIR}。"
+        "Qwen 图像编辑编码本身可继续使用；只有开启翻译开关时需要这些依赖和本地翻译模型包。"
+        f"模型包请放到 {TRANSLATION_MODEL_SUBDIR}。"
     ),
 )
 if not _TRANSLATION_ENVIRONMENT_REPORT.get("available", True):
@@ -477,7 +477,7 @@ class GJJ_TextEncodeQwenImageEditPlus:
             "多图且接入 VAE 后，最多取前 3 张图按 LazyImageStudio 的 FireRed 平等参考方式写入 reference_latents，图2/图3不会再作为缩小的小物件视觉贴片参与。",
             "面板底部可开启/关闭 FluxKontext 多参考潜在方法；该项只作用于多图条件，关闭后正负条件保持 Qwen 原始编码。",
             "复刻原版链路时，将本节点【主图】输出接 VAEEncode；需要图2当背景时按自然顺序接图1、图2即可。",
-            "开启翻译会调用本地 Opus-MT 中英翻译模型；中文引号“...”中的内容会保持原文。",
+            "开启翻译会调用本地单文件 Opus-MT 中英翻译模型包；中文引号“...”中的内容会保持原文。",
             "单图负向为空时会按 TextEncodeQwenImageEdit 的空提示词方式编码；多图 FireRed/Lazy 参考模式负向为空时会静默 zero_out，减少参考图抵消。",
         ],
         "translation_notice": _TRANSLATION_ENVIRONMENT_REPORT.get("help_message", "")

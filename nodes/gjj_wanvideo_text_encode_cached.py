@@ -62,7 +62,7 @@ _GJJ_HELP = {
     "usage": [
         "把 GJJ · 🎞️ Kijai视频模型加载 的 Wan T5 文本编码器输出接到本节点的 T5模型接口。",
         "在正向提示词中填写希望生成的画面内容；支持原版 WanVideo 的 | 分段和 [1] EchoShot 写法。",
-        "翻译按钮会调用本地 Opus-MT 中英翻译模型，并把译文回填到正向提示词。",
+        "翻译按钮会调用本地单文件 Opus-MT 中英翻译模型包，并把译文回填到正向提示词。",
         "负向提示词为空时按原版 WanVideo 的空负向编码；开启条件零化时会忽略负向文本并生成全零负向嵌入。",
         "输出的文本条件可直接连接到 GJJ WanVideo 采样器的文本条件输入。",
     ],
@@ -82,8 +82,8 @@ _GJJ_HELP = {
 _TRANSLATION_ENVIRONMENT_REPORT = build_translation_environment_report(
     node_name=NODE_DISPLAY_NAME,
     description=(
-        "WanVideo 文本编码本身可继续使用；只有点击翻译按钮时需要这些依赖和本地模型。"
-        f"模型请放到 {TRANSLATION_MODEL_SUBDIR}。"
+        "WanVideo 文本编码本身可继续使用；只有点击翻译按钮时需要这些依赖和本地翻译模型包。"
+        f"模型包请放到 {TRANSLATION_MODEL_SUBDIR}。"
     ),
 )
 if not _TRANSLATION_ENVIRONMENT_REPORT.get("available", True):

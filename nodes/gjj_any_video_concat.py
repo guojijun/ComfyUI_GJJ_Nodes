@@ -174,6 +174,24 @@ def _frames_from_video_components(value: Any) -> tuple[torch.Tensor | None, floa
     return frames.detach().float().clamp(0.0, 1.0).contiguous(), fps_value
 
 
+def _video_frame_count(path: Path, ffprobe: str, fallback_fps: float) -> int:
+    try:
+        info = _safe_output_info(path, ffprobe, fallback_fps)
+        return max(0, int(info[4] or 0))
+    except Exception:
+        return 0
+
+
+def _scene_cuts_from_counts(frame_counts: list[int]) -> list[int]:
+    cuts: list[int] = []
+    cursor = 1
+    for count in frame_counts[:-1]:
+        cursor += max(0, int(count or 0))
+        if cursor > 1:
+            cuts.append(cursor)
+    return cuts
+
+
 class GJJ_AnyVideoConcat:
     CATEGORY = "GJJ/视频"
     FUNCTION = "concat"
@@ -335,6 +353,8 @@ class GJJ_AnyVideoConcat:
                         trimmed.append(path)
                 concat_paths = trimmed
 
+            segment_frame_counts = [_video_frame_count(path, ffprobe, fps_value) for path in concat_paths]
+            scene_cut_frames = _scene_cuts_from_counts(segment_frame_counts)
             temp_output = tmp_path / "concat_output.mp4"
             _concat_videos(concat_paths, temp_output, ffmpeg)
             shutil.copy2(temp_output, output_path)
@@ -353,11 +373,25 @@ class GJJ_AnyVideoConcat:
         if InputImpl is None:
             raise RuntimeError("当前 ComfyUI 环境不支持 InputImpl.VideoFromFile，无法构建 VIDEO 输出。")
         video_output = InputImpl.VideoFromFile(str(output_path))
+        for key, value in {
+            "gjj_scene_cut_frames": scene_cut_frames,
+            "gjj_segment_frame_counts": segment_frame_counts,
+            "gjj_concat_info": {
+                "scene_cut_frames": scene_cut_frames,
+                "segment_frame_counts": segment_frame_counts,
+            },
+        }.items():
+            try:
+                setattr(video_output, key, value)
+            except Exception:
+                pass
 
         info = {
             "output_path": str(output_path),
             "input_count": len(inputs),
             "source_paths": [str(path) for path in source_paths],
+            "segment_frame_counts": segment_frame_counts,
+            "scene_cut_frames": scene_cut_frames,
             "delete_anchor_frame": bool(delete_anchor_frame),
             "frame_rate": float(output_fps or fps_value),
             "frame_count": int(frame_count),
