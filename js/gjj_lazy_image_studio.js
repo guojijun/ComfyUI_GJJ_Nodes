@@ -6,6 +6,7 @@ import {
 } from "./gjj_model_family_preset_table.js";
 import { GJJ_Utils, queueOnlyCurrentNode } from "./gjj_utils.js";
 import { createTemplateSourceButton, updateTemplateSourcePanel } from "./gjj_generation_template_sources.js";
+import { requestPromptTranslation } from "./gjj_common_prompt_translation.js";
 
 const TARGET_NODES = new Set(["GJJ_LazyImageStudio"]);
 const IMAGE_PREFIX = "image_";
@@ -25,8 +26,38 @@ const IMAGE_PREVIEW_NAME = "__gjj_image_preview";
 const LORA_CHAIN_CONFIG_INPUT = "lora_chain_config";
 const LORA_DATA_WIDGET_NAME = "lora_data";
 const SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_settings_open";
+const TRANSLATE_ENABLED_PROPERTY = "gjj_lazy_image_studio_translate_enabled";
 const PARAM_VALUES_PROPERTY = "gjj_lazy_image_studio_param_values";
 const IMAGE_SIZE_SIGNATURE_PROPERTY = "gjj_lazy_image_studio_image_size_signature";
+const TRANSLATE_BUTTON_STYLES = {
+	off: {
+		bg: "linear-gradient(135deg, #1f2933, #374151)",
+		hover: "linear-gradient(135deg, #374151, #4b5563)",
+		border: "#55636f",
+		color: "#cbd5e1",
+		title: "翻译已关闭：点击开启并立即翻译当前提示词。",
+	},
+	on: {
+		bg: "linear-gradient(135deg, #047857, #059669)",
+		hover: "linear-gradient(135deg, #059669, #10b981)",
+		border: "#34d399",
+		color: "#ecfdf5",
+		title: "翻译已开启：点击会立即翻译当前提示词；上游来的提示词字段会自动翻译。",
+	},
+	busy: {
+		bg: "linear-gradient(135deg, #075985, #0e7490)",
+		hover: "linear-gradient(135deg, #0e7490, #0891b2)",
+		border: "#38bdf8",
+		color: "#e0f2fe",
+		title: "正在翻译提示词...",
+	},
+	error: {
+		bg: "linear-gradient(135deg, #7f1d1d, #dc2626)",
+		hover: "linear-gradient(135deg, #991b1b, #ef4444)",
+		border: "#ef4444",
+		color: "#fee2e2",
+	},
+};
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
 const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME]);
 const TEMPLATE_SOURCE_FIELDS = [
@@ -47,6 +78,11 @@ function clearNativePreview(node) {
 	node.images = null;
 	node.imageIndex = null;
 	node.overIndex = null;
+	node._imgs = null;
+	node._images = null;
+	node.imageRects = null;
+	node.animatedImages = null;
+	node.preview = null;
 }
 
 function scheduleNativePreviewClear(node) {
@@ -54,7 +90,19 @@ function scheduleNativePreviewClear(node) {
 	if (typeof requestAnimationFrame === "function") {
 		requestAnimationFrame(() => clearNativePreview(node));
 	}
-	setTimeout(() => clearNativePreview(node), 80);
+	for (const delay of [80, 180, 360, 720, 1400, 2400]) {
+		setTimeout(() => clearNativePreview(node), delay);
+	}
+	clearInterval(node.__gjjNativePreviewClearInterval);
+	const startedAt = Date.now();
+	node.__gjjNativePreviewClearInterval = setInterval(() => {
+		clearNativePreview(node);
+		node?.graph?.setDirtyCanvas?.(true, true);
+		if (Date.now() - startedAt > 2600) {
+			clearInterval(node.__gjjNativePreviewClearInterval);
+			node.__gjjNativePreviewClearInterval = null;
+		}
+	}, 120);
 }
 
 const PANEL_SYNC_WIDGETS = [
@@ -260,6 +308,162 @@ function setWidgetValue(widget, value) {
 	widget.callback?.(value);
 }
 
+function commitPromptTranslation(node, values) {
+	for (const [name, value] of Object.entries(values || {})) {
+		setWidgetValue(getWidget(node, name), value);
+	}
+	const params = currentParamValues(node);
+	saveParamSnapshot(node, params);
+	node.widgets_values = serializedParamValues(params, node).slice();
+	node.setDirtyCanvas?.(true, true);
+	node.graph?.setDirtyCanvas?.(true, true);
+	node.graph?.change?.();
+}
+
+function upstreamPromptTranslationValues(values) {
+	const result = {};
+	if (Object.prototype.hasOwnProperty.call(values || {}, "prompt")) {
+		result.prompt = String(values.prompt ?? "");
+	}
+	if (Object.prototype.hasOwnProperty.call(values || {}, "negative_prompt")) {
+		result.negative_prompt = String(values.negative_prompt ?? "");
+	}
+	return result;
+}
+
+function linkedPromptTranslationValues(node) {
+	const values = {};
+	for (const widgetName of ["prompt", "negative_prompt"]) {
+		const input = getLinkedWidgetInput(node, widgetName);
+		if (!input?.link || !app.graph?.links) {
+			continue;
+		}
+		const value = inferExternalOutputValue(app.graph.links[input.link], widgetName);
+		if (value !== undefined && value !== null && String(value) !== "") {
+			values[widgetName] = value;
+		}
+	}
+	return values;
+}
+
+function hasLinkedPromptTranslationInput(node) {
+	return Boolean(getLinkedWidgetInput(node, "prompt") || getLinkedWidgetInput(node, "negative_prompt"));
+}
+
+function upstreamPromptTranslationSignature(values) {
+	const parts = [];
+	for (const name of ["prompt", "negative_prompt"]) {
+		if (Object.prototype.hasOwnProperty.call(values || {}, name)) {
+			parts.push([name, String(values[name] ?? "")]);
+		}
+	}
+	return parts.length ? JSON.stringify(parts) : "";
+}
+
+async function translateLazyPromptValues(node, options = {}) {
+	if (node.__gjjLazyTranslating) {
+		return { ok: false, busy: true };
+	}
+	const commitPrompt = options.commitPrompt !== false;
+	const commitNegative = options.commitNegative !== false;
+	const positive = String(options.positive ?? getWidget(node, "prompt")?.value ?? "");
+	const negative = String(options.negative ?? getWidget(node, "negative_prompt")?.value ?? "");
+	if (!positive.trim() && !negative.trim()) {
+		flashLazyTranslateButton(node, null, options.emptyTitle || "没有需要翻译的提示词", 1200);
+		return { ok: true, skipped: true };
+	}
+
+	clearTimeout(node.__gjjLazyTranslateFlashTimer);
+	node.__gjjLazyTranslating = true;
+	applyLazyTranslateButtonState(node);
+	let flash = null;
+	try {
+		const data = await requestPromptTranslation({
+			node,
+			positive,
+			negative,
+			device: "auto",
+			maxLength: 512,
+			batchSize: 8,
+			unloadAfterUse: false,
+			nodeName: "GJJ · 🖼️ 懒人图文集成一键生图",
+		});
+		const translated = {};
+		if (commitPrompt) {
+			translated.prompt = String(data?.positive ?? positive);
+		}
+		if (commitNegative) {
+			translated.negative_prompt = String(data?.negative ?? negative);
+		}
+		commitPromptTranslation(node, translated);
+		if (options.upstreamSignature) {
+			node.__gjjLazyLastUpstreamTranslation = {
+				signature: options.upstreamSignature,
+				values: { ...translated },
+			};
+			node.__gjjLazyPendingUpstreamTranslationSignature = "";
+		}
+		flash = { mode: null, title: options.successTitle || "提示词翻译完成" };
+		return { ok: true, values: translated };
+	} catch (error) {
+		console.error("[GJJ LazyImageStudio] 翻译失败", error);
+		flash = { mode: "error", title: `翻译失败：${error?.message || error}` };
+		return { ok: false, error };
+	} finally {
+		node.__gjjLazyTranslating = false;
+		if (flash) {
+			flashLazyTranslateButton(node, flash.mode, flash.title, 1600);
+		} else {
+			applyLazyTranslateButtonState(node);
+		}
+	}
+}
+
+function scheduleUpstreamPromptTranslation(node, values, signature, ms = 180) {
+	if (!translationEnabled(node) || !signature || node.__gjjLazyTranslating) {
+		return;
+	}
+	if (
+		signature === node.__gjjLazyPendingUpstreamTranslationSignature
+		|| signature === node.__gjjLazyLastUpstreamTranslation?.signature
+	) {
+		return;
+	}
+	node.__gjjLazyPendingUpstreamTranslationSignature = signature;
+	clearTimeout(node.__gjjLazyUpstreamTranslateTimer);
+	node.__gjjLazyUpstreamTranslateTimer = setTimeout(() => {
+		void translateLazyPromptValues(node, {
+			positive: Object.prototype.hasOwnProperty.call(values, "prompt") ? values.prompt : "",
+			negative: Object.prototype.hasOwnProperty.call(values, "negative_prompt") ? values.negative_prompt : "",
+			commitPrompt: Object.prototype.hasOwnProperty.call(values, "prompt"),
+			commitNegative: Object.prototype.hasOwnProperty.call(values, "negative_prompt"),
+			upstreamSignature: signature,
+			successTitle: "上游提示词已翻译",
+			emptyTitle: "上游提示词为空",
+		});
+	}, ms);
+}
+
+function updateUpstreamTranslationWatcher(node, active) {
+	if (!active) {
+		clearInterval(node.__gjjLazyUpstreamTranslateWatchTimer);
+		node.__gjjLazyUpstreamTranslateWatchTimer = null;
+		node.__gjjLazyPendingUpstreamTranslationSignature = "";
+		return;
+	}
+	if (node.__gjjLazyUpstreamTranslateWatchTimer) {
+		return;
+	}
+	node.__gjjLazyUpstreamTranslateWatchTimer = setInterval(() => {
+		const exists = app.graph?._nodes?.includes(node);
+		if (!exists || !translationEnabled(node) || !hasLinkedPromptTranslationInput(node)) {
+			updateUpstreamTranslationWatcher(node, false);
+			return;
+		}
+		syncPanelFromLinkedSources(node);
+	}, 900);
+}
+
 function setWidgetEnabled(widget, enabled) {
 	if (!widget) {
 		return;
@@ -284,6 +488,55 @@ function setWidgetEnabled(widget, enabled) {
 
 function settingsOpen(node) {
 	return Boolean(node?.properties?.[SETTINGS_OPEN_PROPERTY]);
+}
+
+function translationEnabled(node) {
+	return Boolean(node?.properties?.[TRANSLATE_ENABLED_PROPERTY]);
+}
+
+function setTranslationEnabled(node, enabled) {
+	if (!node) {
+		return;
+	}
+	node.properties = node.properties || {};
+	node.properties[TRANSLATE_ENABLED_PROPERTY] = Boolean(enabled);
+	if (!enabled) {
+		clearTimeout(node.__gjjLazyUpstreamTranslateTimer);
+		node.__gjjLazyPendingUpstreamTranslationSignature = "";
+		node.__gjjLazyLastUpstreamTranslation = null;
+		updateUpstreamTranslationWatcher(node, false);
+	} else {
+		updateUpstreamTranslationWatcher(node, hasLinkedPromptTranslationInput(node));
+	}
+	applyLazyTranslateButtonState(node);
+	node.graph?.change?.();
+}
+
+function applyLazyTranslateButtonState(node, override = {}) {
+	const button = node?.__gjjLazyTranslateButton;
+	if (!button) {
+		return;
+	}
+	const enabled = translationEnabled(node);
+	const mode = override.mode || (node.__gjjLazyTranslating ? "busy" : enabled ? "on" : "off");
+	const style = TRANSLATE_BUTTON_STYLES[mode] || TRANSLATE_BUTTON_STYLES.off;
+	button.textContent = "🌏";
+	button.dataset.value = enabled ? "true" : "false";
+	button.setAttribute("aria-pressed", enabled ? "true" : "false");
+	button.title = override.title || style.title || (enabled ? TRANSLATE_BUTTON_STYLES.on.title : TRANSLATE_BUTTON_STYLES.off.title);
+	button.disabled = Boolean(node.__gjjLazyTranslating);
+	button.style.background = style.bg;
+	button.style.borderColor = style.border;
+	button.style.color = style.color;
+	button.style.opacity = node.__gjjLazyTranslating ? "0.7" : "1";
+	button.__gjjLazyDefaultBg = style.bg;
+	button.__gjjLazyHoverBg = style.hover;
+}
+
+function flashLazyTranslateButton(node, mode, title, ms = 1500) {
+	applyLazyTranslateButtonState(node, { mode, title });
+	clearTimeout(node.__gjjLazyTranslateFlashTimer);
+	node.__gjjLazyTranslateFlashTimer = setTimeout(() => applyLazyTranslateButtonState(node), ms);
 }
 
 function rememberWidgetState(widget) {
@@ -1057,7 +1310,20 @@ function syncPanelFromLinkedSources(node) {
 			values[widgetName] = value;
 		}
 	}
+	const promptValues = upstreamPromptTranslationValues(values);
+	const promptSignature = upstreamPromptTranslationSignature(promptValues);
+	if (
+		translationEnabled(node)
+		&& promptSignature
+		&& node.__gjjLazyLastUpstreamTranslation?.signature === promptSignature
+	) {
+		Object.assign(values, node.__gjjLazyLastUpstreamTranslation.values || {});
+	}
 	applyEffectiveParamsToPanel(node, values, true);
+	updateUpstreamTranslationWatcher(node, translationEnabled(node) && hasLinkedPromptTranslationInput(node));
+	if (translationEnabled(node) && promptSignature) {
+		scheduleUpstreamPromptTranslation(node, promptValues, promptSignature, 180);
+	}
 }
 
 async function largestMultiImageLoaderSize(sourceNode) {
@@ -1198,7 +1464,6 @@ function createButtons(node) {
 		"white-space:nowrap",
 		"min-width:0",
 	];
-
 	// 刷新Lora按钮
 	const refreshButton = document.createElement("button");
 	refreshButton.type = "button";
@@ -1211,6 +1476,22 @@ function createButtons(node) {
 		"color:#e0e7ff",
 		"flex:1",
 	].join(";");
+
+	const translateButton = document.createElement("button");
+	translateButton.type = "button";
+	translateButton.textContent = "🌏";
+	translateButton.title = TRANSLATE_BUTTON_STYLES.off.title;
+	translateButton.setAttribute("aria-label", "提示词翻译开关");
+	translateButton.style.cssText = [
+		...sharedButtonStyle,
+		"padding:0",
+		`border:1px solid ${TRANSLATE_BUTTON_STYLES.off.border}`,
+		`background:${TRANSLATE_BUTTON_STYLES.off.bg}`,
+		`color:${TRANSLATE_BUTTON_STYLES.off.color}`,
+		"flex:0 0 34px",
+		"font-size:15px",
+	].join(";");
+	node.__gjjLazyTranslateButton = translateButton;
 
 	// 生成图片按钮
 	const generateButton = document.createElement("button");
@@ -1241,11 +1522,13 @@ function createButtons(node) {
 
 	// 按钮悬停效果函数
 	function setupButtonHover(btn, defaultBg, hoverBg) {
+		btn.__gjjLazyDefaultBg = defaultBg;
+		btn.__gjjLazyHoverBg = hoverBg;
 		btn.addEventListener("mouseenter", () => {
 			if (btn === settingsButton && settingsOpen(node)) {
 				return;
 			}
-			btn.style.background = hoverBg;
+			btn.style.background = btn.__gjjLazyHoverBg || hoverBg;
 			btn.style.transform = "translateY(-1px)";
 		});
 
@@ -1255,7 +1538,7 @@ function createButtons(node) {
 				updateSettingsButtonState(node);
 				return;
 			}
-			btn.style.background = defaultBg;
+			btn.style.background = btn.__gjjLazyDefaultBg || defaultBg;
 			btn.style.transform = "translateY(0)";
 		});
 
@@ -1361,20 +1644,44 @@ function createButtons(node) {
 		}
 	}
 
+	async function handleTranslate(event) {
+		protectEvent(event);
+		if (node.__gjjLazyTranslating) {
+			return;
+		}
+		const nextEnabled = !translationEnabled(node);
+		setTranslationEnabled(node, nextEnabled);
+		const linkedValues = nextEnabled ? linkedPromptTranslationValues(node) : {};
+		const linkedSignature = upstreamPromptTranslationSignature(linkedValues);
+		await translateLazyPromptValues(node, {
+			positive: Object.prototype.hasOwnProperty.call(linkedValues, "prompt") ? linkedValues.prompt : undefined,
+			negative: Object.prototype.hasOwnProperty.call(linkedValues, "negative_prompt") ? linkedValues.negative_prompt : undefined,
+			upstreamSignature: linkedSignature,
+			successTitle: nextEnabled ? "翻译已开启，当前提示词已翻译" : "翻译已关闭，当前提示词已翻译",
+		});
+		if (nextEnabled && !linkedSignature) {
+			syncPanelFromLinkedSources(node);
+		}
+	}
+
 	function handleSettings(event) {
 		protectEvent(event);
 		setSettingsOpen(node, !settingsOpen(node));
 	}
 
 	setupButtonHover(refreshButton, "linear-gradient(135deg, #1e3a5f, #1e40af)", "linear-gradient(135deg, #1e40af, #3b82f6)");
+	setupButtonHover(translateButton, TRANSLATE_BUTTON_STYLES.off.bg, TRANSLATE_BUTTON_STYLES.off.hover);
 	setupButtonHover(generateButton, "linear-gradient(135deg, #064e3b, #059669)", "linear-gradient(135deg, #059669, #10b981)");
 	setupButtonHover(settingsButton, "linear-gradient(135deg, #1f2933, #374151)", "linear-gradient(135deg, #374151, #4b5563)");
 	setupButtonEvents(refreshButton, handleRefresh);
+	setupButtonEvents(translateButton, handleTranslate);
 	setupButtonEvents(generateButton, handleGenerate);
 	setupButtonEvents(settingsButton, handleSettings);
+	applyLazyTranslateButtonState(node);
 	updateSettingsButtonState(node);
 
 	container.appendChild(refreshButton);
+	container.appendChild(translateButton);
 	container.appendChild(generateButton);
 	container.appendChild(templateButton);
 	container.appendChild(settingsButton);
@@ -2700,22 +3007,19 @@ app.registerExtension({
 			return result;
 		};
 
-		const originalDrawBackground = nodeType.prototype.onDrawBackground;
 		nodeType.prototype.onDrawBackground = function (...args) {
 			clearNativePreview(this);
-			const result = originalDrawBackground?.apply(this, args);
 			const signature = externalPanelSignature(this);
 			if (signature !== this.__gjjLazyExternalPanelSignature) {
 				this.__gjjLazyExternalPanelSignature = signature;
 				syncPanelFromLinkedSources(this);
 			}
-			return result;
+			return undefined;
 		};
 
-		const originalDrawForeground = nodeType.prototype.onDrawForeground;
 		nodeType.prototype.onDrawForeground = function (...args) {
 			clearNativePreview(this);
-			return originalDrawForeground?.apply(this, args);
+			return undefined;
 		};
 
 		const originalExecuted = nodeType.prototype.onExecuted;

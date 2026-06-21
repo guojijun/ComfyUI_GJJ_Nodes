@@ -11,6 +11,7 @@ const DEFAULT_TEMPLATE = "一张{{主体}}的照片，{{风格}}，细节丰富"
 const DEFAULT_WIDTH = 320;
 const MIN_HEIGHT = 92;
 const STYLE_ID = "gjj-template-prompt-style";
+const MAX_BATCH_PROMPTS = 1000;
 const USER_SETTINGS_SECTION = "template_prompt";
 const USER_SETTINGS_KEY = "default_template";
 const SET_NODE_TYPE = "GJJ_SetNode";
@@ -48,6 +49,58 @@ function slugKey(value) {
 	return String(value || "").trim().replace(/[^0-9A-Za-z_\u4e00-\u9fff-]+/g, "_").replace(/^_+|_+$/g, "") || "param";
 }
 
+function outputLabel(value) {
+	const source = String(value || "").trim();
+	const cleaned = source
+		.replace(/^[^0-9A-Za-z_\u4e00-\u9fff]+/u, "")
+		.replace(/[\u200d\ufe0e\ufe0f]/g, "")
+		.trim();
+	return cleaned || source;
+}
+
+function parseDefaultExpression(expr) {
+	const source = String(expr || "").trim();
+	const match = source.match(/^(.*?)[(（]\s*([^()（）]+?)\s*[)）]\s*$/);
+	if (!match) return { label: source, defaultValue: "" };
+	const label = String(match[1] || "").trim();
+	const defaultValue = String(match[2] || "").trim();
+	if (!label || !defaultValue) return { label: source, defaultValue: "" };
+	return { label, defaultValue };
+}
+
+function parsePlaceholderExpression(expr) {
+	const source = String(expr || "").trim();
+	for (const separator of ["：", ":"]) {
+		if (!source.includes(separator)) continue;
+		const [rawLabel, ...rest] = source.split(separator);
+		const parsedLabel = parseDefaultExpression(rawLabel);
+		const label = parsedLabel.label;
+		const optionText = rest.join(separator);
+		const options = optionText.split(/[,，、|]+/).map((item) => item.trim()).filter(Boolean);
+		if (label && options.length >= 2) {
+			return {
+				expr: source,
+				label,
+				outputLabel: outputLabel(label),
+				keySource: label,
+				kind: "choice",
+				options,
+				defaultValue: options.includes(parsedLabel.defaultValue) ? parsedLabel.defaultValue : options[0],
+			};
+		}
+	}
+	const parsed = parseDefaultExpression(source);
+	return {
+		expr: source,
+		label: parsed.label,
+		outputLabel: outputLabel(parsed.label),
+		keySource: parsed.label,
+		kind: "text",
+		options: [],
+		defaultValue: parsed.defaultValue,
+	};
+}
+
 function parseTemplate(templateText) {
 	const fields = [];
 	const seenNames = new Set();
@@ -58,24 +111,117 @@ function parseTemplate(templateText) {
 		const label = String(match[1] || "").trim();
 		if (!label || seenNames.has(label)) continue;
 		seenNames.add(label);
-		const base = slugKey(label);
+		const parsed = parsePlaceholderExpression(label);
+		const base = slugKey(parsed.keySource);
 		const count = seenKeys.get(base) || 0;
 		seenKeys.set(base, count + 1);
 		const key = count ? `${base}_${count + 1}` : base;
 		fields.push({
+			expr: parsed.expr,
 			key,
-			label,
+			label: parsed.label,
+			outputLabel: parsed.outputLabel,
+			kind: parsed.kind,
+			options: parsed.options,
+			defaultValue: parsed.defaultValue,
 			inputName: `param_${key}`,
 			type: "STRING",
 			outputIndex: 0,
-			displayLabel: label === key ? label : `${label}（${key}）`,
+			displayLabel: parsed.label === key ? parsed.label : `${parsed.label}（${key}）`,
 		});
 	}
 	return fields;
 }
 
+function isChoiceField(field) {
+	return String(field?.kind || "") === "choice" && Array.isArray(field?.options) && field.options.length > 0;
+}
+
+function bindableFields(fields) {
+	return (fields || []).filter((field) => !isChoiceField(field));
+}
+
+function choiceFields(fields) {
+	return (fields || []).filter(isChoiceField);
+}
+
+function uniqueValidOptions(items, options) {
+	const valid = new Set((options || []).map((item) => String(item)));
+	const result = [];
+	for (const item of Array.isArray(items) ? items : [items]) {
+		const text = String(item ?? "").trim();
+		if (!valid.has(text) || result.includes(text)) continue;
+		result.push(text);
+	}
+	return result;
+}
+
+function getChoiceValue(field, values = {}) {
+	const sources = [
+		field?.key,
+		field?.label,
+		field?.outputLabel,
+		field?.expr,
+		field?.expr ? slugKey(field.expr) : "",
+	].filter(Boolean);
+	for (const key of sources) {
+		if (Object.prototype.hasOwnProperty.call(values || {}, key)) {
+			return { found: true, raw: values[key] };
+		}
+	}
+	return { found: false, raw: undefined };
+}
+
+function choiceSelections(field, values = {}) {
+	const options = Array.isArray(field?.options) ? field.options.map((item) => String(item)) : [];
+	const stored = getChoiceValue(field, values);
+	if (stored.found) {
+		const rawItems = Array.isArray(stored.raw) ? stored.raw : [stored.raw];
+		const selected = uniqueValidOptions(rawItems, options);
+		if (selected.length) return selected;
+		if (Array.isArray(stored.raw) || String(stored.raw ?? "").trim() === "") return [];
+	}
+	const fallback = String(field?.defaultValue ?? options[0] ?? "").trim();
+	return options.includes(fallback) ? [fallback] : (options.length ? [options[0]] : []);
+}
+
+function updateChoiceSelection(field, values, option, additive = false) {
+	const selected = choiceSelections(field, values);
+	const text = String(option ?? "").trim();
+	if (!field.options.includes(text)) return selected;
+	if (!additive) return [text];
+	if (selected.includes(text)) {
+		return selected.filter((item) => item !== text);
+	}
+	return [...selected, text];
+}
+
+function choiceCombinationCount(fields, values) {
+	const choices = choiceFields(fields);
+	if (!choices.length) return 0;
+	return choices.reduce((total, field) => total * Math.max(1, choiceSelections(field, values).length), 1);
+}
+
+function choiceCombinations(fields, values) {
+	const choices = choiceFields(fields);
+	if (!choices.length) return [];
+	let combinations = [{}];
+	for (const field of choices) {
+		const selected = choiceSelections(field, values);
+		const options = selected.length ? selected : [""];
+		const next = [];
+		for (const combination of combinations) {
+			for (const option of options) {
+				next.push({ ...combination, [field.key]: option });
+			}
+		}
+		combinations = next;
+	}
+	return combinations;
+}
+
 function fieldNames(fields) {
-	return new Set(fields.map((field) => field.inputName));
+	return new Set(bindableFields(fields).map((field) => field.inputName));
 }
 
 function currentNodeWidth(node) {
@@ -126,20 +272,29 @@ function ensureStyles() {
 	const style = document.createElement("style");
 	style.id = STYLE_ID;
 	style.textContent = `
-.gjj-template-prompt{box-sizing:border-box;width:100%;padding:2px 0 4px 0;color:#dce7e2;font-family:system-ui,"Microsoft YaHei",sans-serif;pointer-events:auto;}
+.gjj-template-prompt{box-sizing:border-box;width:100%;padding:1px 0 2px 0;color:#dce7e2;font-family:system-ui,"Microsoft YaHei",sans-serif;pointer-events:auto;}
 .gjj-template-prompt *{box-sizing:border-box;}
-.gjj-template-prompt-toolbar{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap;}
-.gjj-template-prompt-btn{height:25px;border:1px solid #44565f;border-radius:7px;background:#202b31;color:#dce7e2;cursor:pointer;padding:0 8px;font-size:12px;font-weight:650;white-space:nowrap;}
+.gjj-template-prompt-toolbar{display:flex;align-items:center;gap:4px;min-width:0;flex-wrap:wrap;}
+.gjj-template-prompt-btn{height:23px;border:1px solid #44565f;border-radius:6px;background:#202b31;color:#dce7e2;cursor:pointer;padding:0 6px;font-size:11px;font-weight:650;white-space:nowrap;}
 .gjj-template-prompt-btn:hover{background:#2c3b43;border-color:#6aa6b8;}
 .gjj-template-prompt-count{color:#8ea0a8;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.gjj-template-prompt-panel{display:none;flex-direction:column;gap:6px;margin-top:6px;padding:6px;border:1px solid #33464e;border-radius:8px;background:#0d1519;}
+.gjj-template-prompt-panel{display:none;flex-direction:column;gap:5px;margin-top:5px;padding:5px;border:1px solid #33464e;border-radius:8px;background:#0d1519;}
 .gjj-template-prompt-template{width:100%;min-height:110px;resize:vertical;padding:7px 8px;border:1px solid #44565f;border-radius:7px;outline:none;background:#070f12;color:#dce7e2;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;}
-.gjj-template-prompt-actions{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap;}
-.gjj-template-prompt-rows{display:flex;flex-direction:column;gap:6px;margin-top:6px;}
-.gjj-template-prompt-row{display:grid;grid-template-columns:76px minmax(0,1fr);gap:7px;align-items:center;}
+.gjj-template-prompt-actions{display:flex;gap:5px;justify-content:flex-end;flex-wrap:wrap;}
+.gjj-template-prompt-rows{display:flex;flex-direction:column;gap:4px;margin-top:4px;}
+.gjj-template-prompt-row{display:grid;grid-template-columns:72px minmax(0,1fr);gap:5px;align-items:center;}
 .gjj-template-prompt-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#b9c8cc;font-size:12px;}
 .gjj-template-prompt-input{width:100%;height:30px;border:1px solid #33464e;border-radius:7px;background:#2b2d30;color:#f1f5f5;padding:4px 8px;outline:none;font-size:13px;}
 .gjj-template-prompt-input:focus{border-color:#6aa6b8;background:#22282c;}
+.gjj-template-prompt-choice{display:flex;flex-wrap:wrap;gap:5px;min-width:0;}
+.gjj-template-prompt-choice-row{display:flex;flex-wrap:wrap;gap:4px 5px;align-items:center;}
+.gjj-template-prompt-choice-row .gjj-template-prompt-label{flex:0 0 auto;width:auto;max-width:100%;font-weight:800;color:#c8d7dc;}
+.gjj-template-prompt-choice-separator{color:#78919b;font-size:11px;line-height:1;margin:1px 0 0 0;text-align:center;}
+.gjj-template-prompt-choice-btn{min-height:24px;border:1px solid #33464e;border-radius:6px;background:#1b252b;color:#dce7e2;cursor:pointer;padding:0 7px;font-size:12px;font-weight:700;white-space:nowrap;}
+.gjj-template-prompt-choice-btn:hover{background:#273943;border-color:#6aa6b8;}
+.gjj-template-prompt-choice-btn.active{background:#194233;border-color:#64c78f;color:#e8fff1;box-shadow:0 0 0 1px rgba(100,199,143,.24) inset;}
+.gjj-template-prompt-choice-action{min-height:22px;padding:0 6px;border-color:#4a5d66;background:#26323a;color:#c9d5d9;font-size:11px;font-weight:800;}
+.gjj-template-prompt-choice-action:hover{background:#33434c;border-color:#78aaba;}
 .gjj-template-prompt-bound{grid-column:1 / -1;border:1px solid #4f765e;border-radius:7px;background:#14251d;color:#c9f5d6;padding:6px 8px;font-size:11px;line-height:1.4;display:flex;justify-content:space-between;gap:6px;align-items:center;}
 .gjj-template-prompt-empty{color:#8ea0a8;font-size:12px;padding:4px 0;}
 .gjj-template-prompt-popup{position:fixed;z-index:100000;min-width:520px;width:min(720px,calc(100vw - 16px));max-width:calc(100vw - 16px);display:flex;flex-direction:column;gap:6px;padding:8px;border:1px solid #45606a;border-radius:8px;background:#10191e;color:#dce7e2;box-shadow:0 12px 32px rgba(0,0,0,.45);font-family:system-ui,"Microsoft YaHei",sans-serif;}
@@ -174,9 +329,18 @@ function valuesFromDom(node, fields = null) {
 	const values = safeJsonParse(getWidgetValue(node, VALUES_WIDGET, "{}"), {});
 	const result = values && typeof values === "object" && !Array.isArray(values) ? { ...values } : {};
 	for (const field of parsedFields) {
+		if (isChoiceField(field)) {
+			result[field.key] = choiceSelections(field, result);
+			continue;
+		}
 		const input = node?.__gjjTemplatePromptInputs?.get(field.key);
-		if (input) result[field.key] = input.value ?? "";
-		else if (!(field.key in result)) result[field.key] = "";
+		if (input) {
+			const inputValue = String(input.value ?? "");
+			result[field.key] = inputValue || String(field.defaultValue ?? "");
+		}
+		else if (field.expr && field.expr in result) result[field.key] = result[field.expr];
+		else if (field.expr && slugKey(field.expr) in result) result[field.key] = result[slugKey(field.expr)];
+		else if (!(field.key in result)) result[field.key] = String(field.defaultValue ?? "");
 	}
 	return result;
 }
@@ -262,6 +426,10 @@ function renderRows(node) {
 	const fields = parseTemplate(template);
 	const values = valuesFromDom(node, fields);
 	const bindings = bindingsForNode(node);
+	const bindableKeys = new Set(bindableFields(fields).map((field) => field.key));
+	for (const key of Object.keys(bindings)) {
+		if (!bindableKeys.has(key)) delete bindings[key];
+	}
 	node.__gjjTemplatePromptInputs = new Map();
 	rows.replaceChildren();
 	if (!fields.length) {
@@ -270,15 +438,71 @@ function renderRows(node) {
 		empty.textContent = "模板里写 {{参数名}} 后会在这里生成输入。";
 		rows.appendChild(empty);
 	}
+	let choiceGroupSeen = false;
 	for (const field of fields) {
 		const binding = String(bindings[field.key] || "").trim();
+		const choiceField = isChoiceField(field);
+		if (choiceField && choiceGroupSeen) {
+			const separator = document.createElement("div");
+			separator.className = "gjj-template-prompt-choice-separator";
+			separator.textContent = "---";
+			rows.appendChild(separator);
+		}
+		if (choiceField) choiceGroupSeen = true;
 		const row = document.createElement("div");
-		row.className = "gjj-template-prompt-row";
+		row.className = `gjj-template-prompt-row${choiceField ? " gjj-template-prompt-choice-row" : ""}`;
 		const label = document.createElement("div");
 		label.className = "gjj-template-prompt-label";
-		label.textContent = field.label;
-		label.title = `模板参数：{{${field.label}}}`;
-		if (binding) {
+		label.textContent = choiceField ? `${field.label}：` : field.label;
+		label.title = `模板参数：{{${field.expr || field.label}}}`;
+		if (choiceField) {
+			const selected = new Set(choiceSelections(field, values));
+			const saveChoiceValues = (selection) => {
+				const nextValues = valuesFromDom(node, fields);
+				nextValues[field.key] = selection;
+				saveState(node, template, fields, nextValues, bindingsForNode(node));
+				renderRows(node);
+			};
+			row.appendChild(label);
+			const allButton = document.createElement("button");
+			allButton.type = "button";
+			allButton.className = "gjj-template-prompt-choice-btn gjj-template-prompt-choice-action";
+			allButton.textContent = "全选";
+			allButton.title = `选择 ${field.label} 的全部选项`;
+			allButton.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				saveChoiceValues([...field.options]);
+			});
+			const clearButton = document.createElement("button");
+			clearButton.type = "button";
+			clearButton.className = "gjj-template-prompt-choice-btn gjj-template-prompt-choice-action";
+			clearButton.textContent = "清除";
+			clearButton.title = `清除 ${field.label} 的所有选择`;
+			clearButton.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				saveChoiceValues([]);
+			});
+			row.append(allButton, clearButton);
+			for (const option of field.options) {
+				const btn = document.createElement("button");
+				btn.type = "button";
+				const active = selected.has(option);
+				btn.className = `gjj-template-prompt-choice-btn${active ? " active" : ""}`;
+				btn.textContent = option;
+				btn.title = `${field.label}：${option}${active ? "（已选择）" : ""}；普通点击单选，Ctrl/Shift 点击多选`;
+				btn.addEventListener("click", (event) => {
+					event.preventDefault();
+					event.stopPropagation();
+					const nextValues = valuesFromDom(node, fields);
+					nextValues[field.key] = updateChoiceSelection(field, nextValues, option, event.ctrlKey || event.shiftKey);
+					saveState(node, template, fields, nextValues, bindingsForNode(node));
+					renderRows(node);
+				});
+				row.appendChild(btn);
+			}
+		} else if (binding) {
 			const bound = document.createElement("div");
 			bound.className = "gjj-template-prompt-bound";
 			const text = document.createElement("span");
@@ -314,8 +538,19 @@ function renderRows(node) {
 	}
 	const count = node.__gjjTemplatePromptCount;
 	if (count) {
-		const boundCount = fields.filter((field) => bindings[field.key]).length;
-		count.textContent = `${fields.length} 参数${boundCount ? ` · ${boundCount} 已接管` : ""}`;
+		const bindable = bindableFields(fields);
+		const boundCount = bindable.filter((field) => bindings[field.key]).length;
+		const choiceCount = choiceFields(fields).length;
+		const comboCount = choiceCombinationCount(fields, values);
+		count.textContent = `${fields.length} 参数${choiceCount ? ` · ${choiceCount} 按钮` : ""}${comboCount > 1 ? ` · ${comboCount} 组合` : ""}${boundCount ? ` · ${boundCount} 已接管` : ""}`;
+	}
+	const batchButton = node.__gjjTemplatePromptBatchButton;
+	if (batchButton && !node.__gjjTemplatePromptBatchBusy) {
+		const choiceCount = choiceFields(fields).length;
+		const comboCount = choiceCombinationCount(fields, values);
+		batchButton.disabled = choiceCount <= 0;
+		batchButton.textContent = "🚀批量";
+		batchButton.title = choiceCount > 0 ? `按已选按钮组合逐条加入队列：${Math.max(1, comboCount)} 条` : "模板中没有按钮组选项";
 	}
 	saveState(node, template, fields, values, bindings);
 	refreshNode(node);
@@ -334,7 +569,7 @@ function ensureInputs(node, fields) {
 			node.removeInput?.(index);
 		}
 	}
-	for (const field of fields) {
+	for (const field of bindableFields(fields)) {
 		if (bindings[field.key]) continue;
 		let input = node.inputs?.find((item) => item?.name === field.inputName);
 		if (!input) {
@@ -459,7 +694,7 @@ function resolveBindingSource(graph, name) {
 
 function openParamPopup(node, event) {
 	closeParamPopup();
-	const fields = parseTemplate(getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE));
+	const fields = bindableFields(parseTemplate(getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE)));
 	const options = getVariableOptions(node);
 	const bindings = bindingsForNode(node);
 	const popup = document.createElement("div");
@@ -705,6 +940,60 @@ async function saveDefaultTemplate(node) {
 	return response.json().catch(() => ({}));
 }
 
+async function queueCurrentWorkflowOnce() {
+	if (typeof app.queuePrompt === "function") {
+		await app.queuePrompt(0, 1);
+		return;
+	}
+	if (typeof app.graphToPrompt === "function" && typeof api?.queuePrompt === "function") {
+		const promptData = await app.graphToPrompt();
+		await api.queuePrompt(0, promptData);
+		return;
+	}
+	throw new Error("当前 ComfyUI 前端不支持加入队列");
+}
+
+async function queueChoiceBatchPrompts(node, button) {
+	const template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
+	const fields = parseTemplate(template);
+	const choices = choiceFields(fields);
+	if (!choices.length) return 0;
+
+	const originalValues = valuesFromDom(node, fields);
+	const originalBindings = bindingsForNode(node);
+	const combinations = choiceCombinations(fields, originalValues);
+	const total = combinations.length;
+	if (!total) return 0;
+	if (total > MAX_BATCH_PROMPTS) {
+		throw new Error(`批量组合过多：${total} 条，当前上限 ${MAX_BATCH_PROMPTS} 条`);
+	}
+
+	let queued = 0;
+	node.__gjjTemplatePromptBatchBusy = true;
+	if (button) {
+		button.disabled = true;
+		button.textContent = `🚀0/${total}`;
+		button.title = `正在加入队列：0 / ${total}`;
+	}
+	try {
+		for (const combination of combinations) {
+			const nextValues = { ...originalValues, ...combination };
+			saveState(node, template, fields, nextValues, originalBindings);
+			await queueCurrentWorkflowOnce();
+			queued += 1;
+			if (button) {
+				button.textContent = `🚀${queued}/${total}`;
+				button.title = `正在加入队列：${queued} / ${total}`;
+			}
+		}
+		return queued;
+	} finally {
+		saveState(node, template, fields, originalValues, originalBindings);
+		node.__gjjTemplatePromptBatchBusy = false;
+		renderRows(node);
+	}
+}
+
 function buildDom(node) {
 	ensureStyles();
 	const root = document.createElement("div");
@@ -719,20 +1008,24 @@ function buildDom(node) {
 	params.type = "button";
 	params.className = "gjj-template-prompt-btn";
 	params.textContent = "⚡参数";
+	const batch = document.createElement("button");
+	batch.type = "button";
+	batch.className = "gjj-template-prompt-btn";
+	batch.textContent = "🚀批量";
 	const save = document.createElement("button");
 	save.type = "button";
 	save.className = "gjj-template-prompt-btn";
 	save.textContent = "💾保存";
 	const count = document.createElement("span");
 	count.className = "gjj-template-prompt-count";
-	toolbar.append(settings, params, save, count);
+	toolbar.append(settings, params, batch, save, count);
 
 	const panel = document.createElement("div");
 	panel.className = "gjj-template-prompt-panel";
 	const textarea = document.createElement("textarea");
 	textarea.className = "gjj-template-prompt-template";
 	textarea.value = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE) || DEFAULT_TEMPLATE;
-	textarea.placeholder = "在这里写模板，例如：{{主体}}，{{风格}}";
+	textarea.placeholder = "在这里写模板，例如：一张{{主体}}照片，{{背景(白色)}}背景，{{风格：真实,影视}}";
 	const actions = document.createElement("div");
 	actions.className = "gjj-template-prompt-actions";
 	const cancel = document.createElement("button");
@@ -750,7 +1043,7 @@ function buildDom(node) {
 	root.append(toolbar, panel, rows);
 
 	const stop = (event) => event.stopPropagation();
-	for (const el of [root, toolbar, settings, params, save, panel, textarea, cancel, ok, rows]) {
+	for (const el of [root, toolbar, settings, params, batch, save, panel, textarea, cancel, ok, rows]) {
 		for (const name of ["pointerdown", "mousedown", "click", "keydown", "keyup", "wheel", "dblclick", "contextmenu"]) {
 			el.addEventListener(name, stop);
 		}
@@ -766,6 +1059,22 @@ function buildDom(node) {
 	params.addEventListener("click", (event) => {
 		event.preventDefault();
 		openParamPopup(node, event);
+	});
+	batch.addEventListener("click", async (event) => {
+		event.preventDefault();
+		try {
+			const queued = await queueChoiceBatchPrompts(node, batch);
+			batch.disabled = false;
+			batch.textContent = queued ? `已加入 ${queued}` : "无组合";
+			batch.title = queued ? `已加入队列：${queued} 条` : "模板中没有可用按钮组合";
+			setTimeout(() => renderRows(node), 1200);
+		} catch (err) {
+			batch.disabled = false;
+			batch.textContent = "批量失败";
+			batch.title = err?.message || String(err || "批量加入队列失败");
+			console.warn("[GJJ_TemplatePrompt] 批量加入队列失败", err);
+			setTimeout(() => renderRows(node), 1600);
+		}
 	});
 	save.addEventListener("click", async (event) => {
 		event.preventDefault();
@@ -795,8 +1104,13 @@ function buildDom(node) {
 		const nextValues = {};
 		const nextBindings = {};
 		for (const field of fields) {
-			nextValues[field.key] = oldValues[field.key] ?? "";
-			if (oldBindings[field.key]) nextBindings[field.key] = oldBindings[field.key];
+			if (isChoiceField(field)) {
+				nextValues[field.key] = choiceSelections(field, oldValues);
+			} else {
+				const oldValue = String(oldValues[field.key] ?? "");
+				nextValues[field.key] = oldValue || String(field.defaultValue ?? "");
+				if (oldBindings[field.key]) nextBindings[field.key] = oldBindings[field.key];
+			}
 		}
 		saveState(node, textarea.value || DEFAULT_TEMPLATE, fields, nextValues, nextBindings);
 		panel.style.display = "none";
@@ -805,6 +1119,7 @@ function buildDom(node) {
 	node.__gjjTemplatePromptRoot = root;
 	node.__gjjTemplatePromptRows = rows;
 	node.__gjjTemplatePromptCount = count;
+	node.__gjjTemplatePromptBatchButton = batch;
 	return root;
 }
 
@@ -855,6 +1170,7 @@ function patchPromptBindings(promptResult, graph) {
 		const bindings = bindingsForNode(node);
 		nodeInfo.inputs = nodeInfo.inputs || {};
 		for (const field of fields) {
+			if (isChoiceField(field)) continue;
 			const binding = String(bindings[field.key] || "").trim();
 			if (!binding) continue;
 			const resolved = resolveBindingSource(node.graph || graph, binding);

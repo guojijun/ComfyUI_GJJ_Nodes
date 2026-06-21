@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
 from typing import Any
 
@@ -45,6 +46,10 @@ from .common_utils.sampler_tools import (
     CFGGuider_execute as CFGGuider,
     SamplerCustomAdvanced_execute as SamplerCustomAdvanced,
 )
+from .common_utils.prompt_translation import (
+    COMMON_PROMPT_TRANSLATE_API_PATH,
+    register_prompt_translation_api,
+)
 from .gjj_model_bundle_loader import (
     UNET_DTYPE_OPTIONS,
     _build_unet_model_options,
@@ -74,6 +79,14 @@ from .gjj_multi_image_loader import (
     resolve_input_image_path,
 )
 
+try:
+    from .gjj_wanvideo_runtime_shims import ensure_optional_gguf_module
+except Exception:  # pragma: no cover - 单文件语法检查兜底
+    def ensure_optional_gguf_module():
+        import importlib
+
+        return importlib.import_module("gguf")
+
 NODE_NAME = "GJJ_LazyImageStudio"
 MAX_MAIN_IMAGE_INDEX = 9999
 DEFAULT_UNET_NAME = "flux-2-klein-9b-nvfp4.safetensors"
@@ -84,6 +97,9 @@ REFERENCE_IMAGE_MEGAPIXELS = 1.0
 REFERENCE_IMAGE_RESOLUTION_STEPS = 1
 FLUX2_REFERENCE_RESOLUTION_STEPS = 16
 IMAGE_RATIO_EPSILON = 0.015
+GGUF_PACKAGE_SPEC = "gguf>=0.13.0"
+
+register_prompt_translation_api((COMMON_PROMPT_TRANSLATE_API_PATH,))
 
 
 def _send_status(unique_id: Any, text: str) -> None:
@@ -255,6 +271,63 @@ def _safe_filename_list(category: str) -> list[str]:
         return _dedupe_keep_order(list(folder_paths.get_filename_list(category)))
     except Exception:
         return []
+
+
+def _is_gguf_model(value: Any) -> bool:
+    return str(value or "").replace("\\", "/").lower().endswith(".gguf")
+
+
+def _merge_model_folder_path(folder_name: str, path: str, extensions: set[str]) -> None:
+    if not path:
+        return
+    existing = getattr(folder_paths, "folder_names_and_paths", {})
+    current = existing.get(folder_name)
+    if current:
+        paths, exts = current
+        path_list = list(paths) if isinstance(paths, (list, tuple, set)) else [paths]
+        if path not in path_list:
+            path_list.append(path)
+        existing[folder_name] = (path_list, set(exts or set()) | set(extensions))
+        return
+    existing[folder_name] = ([path], set(extensions))
+
+
+def _ensure_gguf_model_folders() -> None:
+    existing = getattr(folder_paths, "folder_names_and_paths", {})
+    models_dir = str(getattr(folder_paths, "models_dir", "") or "").strip()
+
+    for target in ("diffusion_models", "unet", "text_encoders", "clip"):
+        current = existing.get(target)
+        if not current:
+            continue
+        paths, exts = current
+        existing[target] = (paths, set(exts or set()) | {".gguf"})
+
+    if models_dir:
+        _merge_model_folder_path("unet_gguf", os.path.join(models_dir, "unet_gguf"), {".gguf"})
+        _merge_model_folder_path("clip_gguf", os.path.join(models_dir, "clip_gguf"), {".gguf"})
+
+    for source, target in (
+        ("diffusion_models", "unet_gguf"),
+        ("text_encoders", "clip_gguf"),
+        ("clip", "clip_gguf"),
+    ):
+        current = existing.get(source)
+        if not current:
+            continue
+        paths, _exts = current
+        for path in list(paths) if isinstance(paths, (list, tuple, set)) else [paths]:
+            _merge_model_folder_path(target, str(path), {".gguf"})
+
+
+def _list_lazy_unet_models() -> list[str]:
+    _ensure_gguf_model_folders()
+    return _dedupe_keep_order(_safe_filename_list("unet_gguf") + list_unet_models())
+
+
+def _list_lazy_clip_models() -> list[str]:
+    _ensure_gguf_model_folders()
+    return _dedupe_keep_order(_safe_filename_list("clip_gguf") + list_clip_models())
 
 
 def _preferred_default(values: list[str], preferred: str) -> str:
@@ -592,7 +665,48 @@ def _load_vae(vae_name: str):
         raise _format_runtime_error("VAE 加载", exc) from exc
 
 
+def _raise_gguf_dependency_missing(model_name: str, model_kind: str, exc: Exception | None = None) -> None:
+    detail = f"\n详细错误：{exc}" if exc else ""
+    raise RuntimeError(
+        f"检测到 GGUF {model_kind}：{model_name}\n"
+        f"当前 ComfyUI Python 缺少 gguf 依赖，请安装 {GGUF_PACKAGE_SPEC} 后重启 ComfyUI。"
+        f"{detail}"
+    )
+
+
+def _ensure_gguf_dependency(model_name: str, model_kind: str) -> None:
+    gguf_module = ensure_optional_gguf_module()
+    if getattr(gguf_module, "_GJJ_OPTIONAL_RUNTIME_STUB", False):
+        _raise_gguf_dependency_missing(model_name, model_kind)
+
+
+def _load_model_gguf(unet_name: str):
+    _ensure_gguf_model_folders()
+    _ensure_gguf_dependency(unet_name, "UNET")
+    try:
+        from ..vendor.gjj_gguf_runtime import load_unet_gguf as load_gjj_gguf_unet
+    except ImportError:
+        from vendor.gjj_gguf_runtime import load_unet_gguf as load_gjj_gguf_unet
+    try:
+        print(f"[DEBUG] Loading GGUF UNET model: {unet_name}")
+        model = load_gjj_gguf_unet(unet_name)
+        print(f"[DEBUG] Successfully loaded GGUF UNET model: {unet_name}")
+        print(f"\033[95m🟣 UNET GGUF: {unet_name}\033[0m")
+        return model
+    except ModuleNotFoundError as exc:
+        if getattr(exc, "name", "") == "gguf":
+            _raise_gguf_dependency_missing(unet_name, "UNET", exc)
+        raise
+    except Exception as exc:
+        error_text = str(exc)
+        if "No module named 'gguf'" in error_text or "需要先安装 gguf" in error_text:
+            _raise_gguf_dependency_missing(unet_name, "UNET", exc)
+        raise _format_runtime_error("GGUF UNET 加载", exc) from exc
+
+
 def _load_model(unet_name: str, unet_dtype: str):
+    if _is_gguf_model(unet_name):
+        return _load_model_gguf(unet_name)
     try:
         unet_path = _resolve_full_path(("diffusion_models", "checkpoints"), unet_name)
         print(f"[DEBUG] Loading UNET model: {unet_name}")
@@ -614,12 +728,67 @@ def _load_model(unet_name: str, unet_dtype: str):
         raise _format_runtime_error("UNET 加载", exc) from exc
 
 
+def _load_clip_from_names_with_gguf(clean_names: list[str], clip_type: str):
+    _ensure_gguf_model_folders()
+    for name in clean_names:
+        if _is_gguf_model(name):
+            _ensure_gguf_dependency(name, "CLIP")
+    try:
+        from ..vendor.gjj_gguf_runtime.runtime import GGUFModelPatcher
+        from ..vendor.gjj_gguf_runtime.loader import gguf_clip_loader
+        from ..vendor.gjj_gguf_runtime.ops import GGMLOps
+    except ImportError:
+        from vendor.gjj_gguf_runtime.runtime import GGUFModelPatcher
+        from vendor.gjj_gguf_runtime.loader import gguf_clip_loader
+        from vendor.gjj_gguf_runtime.ops import GGMLOps
+
+    state_dicts: list[Any] = []
+    clip_paths: list[str] = []
+    for name in clean_names:
+        if _is_gguf_model(name):
+            path = _resolve_full_path(("clip_gguf", "text_encoders", "clip"), name)
+            state_dicts.append(gguf_clip_loader(path))
+        else:
+            path = _resolve_full_path(("text_encoders", "clip"), name)
+            state_dicts.append(comfy.utils.load_torch_file(path))
+        clip_paths.append(path)
+
+    try:
+        print(f"[DEBUG] Loading CLIP models with GGUF support: {clean_names}")
+        print(f"[DEBUG] CLIP model paths: {clip_paths}")
+        print(f"[DEBUG] CLIP type: {clip_type}")
+        clip = comfy.sd.load_text_encoder_state_dicts(
+            clip_type=_clip_type_enum(clip_type),
+            state_dicts=state_dicts,
+            model_options={
+                "custom_operations": GGMLOps,
+                "initial_device": comfy.model_management.text_encoder_offload_device(),
+            },
+            embedding_directory=folder_paths.get_folder_paths("embeddings"),
+        )
+        clip.patcher = GGUFModelPatcher.clone(clip.patcher)
+        print(f"[DEBUG] Successfully loaded CLIP models with GGUF support: {clean_names}")
+        print(f"\033[93m🟡 CLIP: {', '.join(clean_names)}\033[0m")
+        return clip
+    except ModuleNotFoundError as exc:
+        if getattr(exc, "name", "") == "gguf":
+            _raise_gguf_dependency_missing(" + ".join(clean_names), "CLIP", exc)
+        raise
+    except Exception as exc:
+        error_text = str(exc)
+        if "No module named 'gguf'" in error_text or "需要先安装 gguf" in error_text:
+            _raise_gguf_dependency_missing(" + ".join(clean_names), "CLIP", exc)
+        raise _format_runtime_error("GGUF CLIP 加载", exc) from exc
+
+
 def _load_clip_from_names(clip_names: list[str], clip_type: str):
     clean_names = [
         str(name or "").strip() for name in clip_names if str(name or "").strip()
     ]
     if not clean_names:
         raise RuntimeError("至少需要一个文本编码器模型。")
+    if any(_is_gguf_model(name) for name in clean_names):
+        return _load_clip_from_names_with_gguf(clean_names, clip_type)
     try:
         clip_paths = [
             _resolve_full_path(("text_encoders", "clip"), name) for name in clean_names
@@ -1024,15 +1193,15 @@ class GJJ_LazyImageStudio:
 
     @classmethod
     def INPUT_TYPES(cls):
-        _raw_diffusion_models = list_unet_models() or [DEFAULT_UNET_NAME]
-        _diffusion_keywords = ["flux", "f2k", "zimage", "z_image", "z-image", "zit", "qwen", "firered"]
+        _raw_diffusion_models = _list_lazy_unet_models() or [DEFAULT_UNET_NAME]
+        _diffusion_keywords = ["flux", "f2k", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "gguf"]
         _filtered = [
             m
             for m in _raw_diffusion_models
             if any(k in str(m).lower() for k in _diffusion_keywords)
         ]
         diffusion_models = _filtered if _filtered else _raw_diffusion_models
-        clip_models = list_clip_models() or [DEFAULT_CLIP_NAME]
+        clip_models = _list_lazy_clip_models() or [DEFAULT_CLIP_NAME]
         vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
         # 确保 loras 目录存在并获取文件列表
         try:
@@ -1111,7 +1280,7 @@ class GJJ_LazyImageStudio:
                             diffusion_models, DEFAULT_UNET_NAME
                         ),
                         "display_name": "🟣 UNET 主模型",
-                        "tooltip": "主扩散模型；前端会根据模型关键词自动推荐匹配的编码器、VAE、LoRA 与采样参数。",
+                        "tooltip": "主扩散模型；支持 diffusion_models / unet_gguf 中的 safetensors 与 GGUF。前端会根据模型关键词自动推荐匹配的编码器、VAE、LoRA 与采样参数。",
                     },
                 ),
                 "unet_dtype": (
@@ -1127,7 +1296,7 @@ class GJJ_LazyImageStudio:
                     {
                         "default": _preferred_default(clip_models, DEFAULT_CLIP_NAME),
                         "display_name": "🟡 CLIP 编码器",
-                        "tooltip": "仅在需要手动选择可变文本编码器的模型族中显示，例如 Flux1 的 T5 编码器；固定配套模型会在节点内部自动匹配。",
+                        "tooltip": "仅在需要手动选择可变文本编码器的模型族中显示，例如 Flux1 的 T5 编码器；支持 text_encoders / clip_gguf 中的 safetensors 与 GGUF。",
                     },
                 ),
                 "vae_name": (
@@ -1749,7 +1918,7 @@ class GJJ_LazyImageStudio:
             preset = match_model_family(unet_name)
             preset = _apply_f2k_fallback_preset(preset, unet_name)
             preset = _apply_zit_fallback_preset(preset, unet_name)
-            clip_models = list_clip_models() or [DEFAULT_CLIP_NAME]
+            clip_models = _list_lazy_clip_models() or [DEFAULT_CLIP_NAME]
             vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
             # 确保 loras 目录存在并获取文件列表
             try:
