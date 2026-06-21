@@ -8,7 +8,8 @@ import torch.nn.functional as F
 
 NODE_NAME = "GJJ_ImageBatchMulti"
 COMPAT_BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
-SIZE_PRESET_OPTIONS = ("320", "480", "720", "1024", "2K", "4K")
+ORIGINAL_SIZE_OPTION = "原始尺寸"
+SIZE_PRESET_OPTIONS = ("320", "480", "720", "1024", "2K", "4K", ORIGINAL_SIZE_OPTION)
 ORIENTATION_OPTIONS = ("原始比例", "横屏", "竖屏", "正方形")
 PREPEND_FRAME_OPTIONS = ("无", "黑帧", "白帧")
 DEFAULT_SIZE_PRESET = "320"
@@ -105,8 +106,20 @@ def _normalize_size_preset(value: Any) -> str:
         "#": "4K",
         "#️⃣": "4K",
         "4k": "4K",
+        "原始尺寸": ORIGINAL_SIZE_OPTION,
+        "原图尺寸": ORIGINAL_SIZE_OPTION,
+        "原尺寸": ORIGINAL_SIZE_OPTION,
+        "originalsize": ORIGINAL_SIZE_OPTION,
+        "sourcesize": ORIGINAL_SIZE_OPTION,
+        "source": ORIGINAL_SIZE_OPTION,
+        "🖼️": ORIGINAL_SIZE_OPTION,
+        "🖼": ORIGINAL_SIZE_OPTION,
     }
-    return aliases.get(normalized, text if text in SIZE_PRESET_DIMENSIONS else DEFAULT_SIZE_PRESET)
+    if normalized in aliases:
+        return aliases[normalized]
+    if text == ORIGINAL_SIZE_OPTION:
+        return ORIGINAL_SIZE_OPTION
+    return text if text in SIZE_PRESET_DIMENSIONS else DEFAULT_SIZE_PRESET
 
 
 def _normalize_orientation(value: Any) -> str:
@@ -228,6 +241,16 @@ def _dimensions_from_original_ratio(size_preset: Any, images: list[torch.Tensor]
     return _align_to_multiple(width, align_multiple), _align_to_multiple(height, align_multiple)
 
 
+def _dimensions_from_original_size(images: list[torch.Tensor]) -> tuple[int, int] | None:
+    if not images:
+        return None
+    source_height = int(images[0].shape[1])
+    source_width = int(images[0].shape[2])
+    if source_width <= 0 or source_height <= 0:
+        return None
+    return source_width, source_height
+
+
 def _resolve_canvas_size(size_preset: Any, orientation: Any, kwargs: dict[str, Any], images: list[torch.Tensor] | None = None) -> tuple[int, int]:
     align_multiple = kwargs.get("align_multiple", DEFAULT_ALIGN_MULTIPLE)
     legacy_size = _legacy_width_height(kwargs.get("width"), kwargs.get("height"), align_multiple)
@@ -243,6 +266,12 @@ def _resolve_canvas_size(size_preset: Any, orientation: Any, kwargs: dict[str, A
         return legacy_size
 
     preset = _normalize_size_preset(size_preset)
+    if preset == ORIGINAL_SIZE_OPTION:
+        original_size = _dimensions_from_original_size(images or [])
+        if original_size is not None:
+            return original_size
+        return SIZE_PRESET_DIMENSIONS[DEFAULT_SIZE_PRESET]["正方形"]
+
     direction = _normalize_orientation(orientation)
     if direction == "原始比例":
         original_size = _dimensions_from_original_ratio(preset, images or [], align_multiple)
@@ -338,19 +367,19 @@ class GJJ_ImageBatchMulti:
     DESCRIPTION = "零依赖图片批量打包：用预设尺寸和画幅方向统一缩放图片，也可通过前端 ⚙️ 自定义尺寸 / 比例；可选前置黑帧或白帧。"
     GJJ_HELP = {
         "title": "GJJ · 🧺 图片批量打包到序列",
-        "version": "1.2.0",
+        "version": "1.2.1",
         "author": "GJJ Custom Nodes Team",
         "description": "把多路 IMAGE 或 GJJ 批量图片按顺序收集、统一缩放裁切到目标尺寸，并打包成连续图片序列输出。",
         "features": [
             {"name": "动态图片输入", "description": "默认只显示一个图片输入口，连接最后一个图片口后自动添加下一路输入。"},
-            {"name": "尺寸图标按钮", "description": "默认最低 320 档、🟧 原始比例，避免新节点一开始生成过大图像；也可切换横屏、竖屏、正方形。"},
+            {"name": "尺寸图标按钮", "description": "默认最低 320 档、🟧 原始比例，避免新节点一开始生成过大图像；也可切换横屏、竖屏、正方形，或选择原始尺寸直接使用第一张输入图的宽高。"},
             {"name": "原生宽高设置", "description": "点击 ⚙️ 可设置原生宽度、高度和对齐倍数；宽高可外部拉线，最终尺寸会按对齐倍数取整。"},
             {"name": "前置帧", "description": "可一键添加黑帧或白帧到序列开头，再次点击当前前置帧按钮可取消。"},
             {"name": "扩展输出口", "description": "默认只显示批量图像输出；点击 🔌 可显示宽度、高度、数量三个 INT 输出口。"},
         ],
         "inputs": {
             "图片 1...N": {"type": COMPAT_BATCH_IMAGE_TYPE, "description": "动态图片输入；支持普通 IMAGE 和 GJJ 批量图片，按输入口顺序展开为序列。"},
-            "尺寸档位": {"type": "COMBO", "description": "由前端图标按钮控制的基础尺寸档位。"},
+            "尺寸档位": {"type": "COMBO", "description": "由前端图标按钮控制的基础尺寸档位；原始尺寸会直接使用第一张输入图宽高。"},
             "画幅方向": {"type": "COMBO", "description": "默认 🟧 原始比例；也可切换横屏、竖屏、正方形，与尺寸档位组合得到输出宽高。"},
             "前置帧": {"type": "COMBO", "description": "黑帧、白帧或无；前置帧会计入输出数量。"},
             "自定义宽度 / 高度 / 对齐倍数": {"type": "INT/COMBO", "description": "点击 ⚙️ 后显示原生宽度、高度和对齐倍数；宽高可外部拉线。"},
@@ -365,6 +394,7 @@ class GJJ_ImageBatchMulti:
             "把多张图片或多个批量图片连接到动态图片输入口，节点会按输入顺序输出连续序列。",
             "默认使用 320 档 🟧 原始比例，避免新节点首次运行时因为大图尺寸导致显存不足。",
             "🟧 原始比例会按第一张输入图的宽高比计算目标尺寸；没有输入图时退回同档位正方形。",
+            "🖼️ 原始尺寸会直接使用第一张输入图的真实宽高；没有输入图时退回 320 正方形。",
             "需要统一视频帧尺寸时，先选择尺寸档位和方向；需要精确控制时点击 ⚙️ 设置原生宽度、高度和对齐倍数。",
             "需要把宽度、高度、数量接给下游循环、尺寸或保存节点时，点击 🔌 展开三个 INT 输出口。",
             "本节点不需要额外模型或第三方自定义节点依赖，只使用 ComfyUI 已有 torch 张量能力。",
@@ -388,7 +418,7 @@ class GJJ_ImageBatchMulti:
                 {
                     "default": DEFAULT_SIZE_PRESET,
                     "display_name": "尺寸档位",
-                    "tooltip": "由前端图标按钮控制：320、480、720、1024、2K、4K；最终宽高会按对齐倍数取整。",
+                    "tooltip": "由前端图标按钮控制：320、480、720、1024、2K、4K、原始尺寸；原始尺寸直接使用第一张输入图宽高，其它档位最终宽高会按对齐倍数取整。",
                 },
             ),
             "orientation": (

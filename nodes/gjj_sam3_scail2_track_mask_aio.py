@@ -476,6 +476,32 @@ def _track_route(images, model, conditioning, detection_threshold, max_objects, 
     return result
 
 
+def _normalize_track_frame_count(track_data: dict[str, Any], images: torch.Tensor | None) -> dict[str, Any]:
+    if not isinstance(track_data, dict) or not isinstance(images, torch.Tensor) or images.ndim < 4:
+        return track_data
+
+    expected = max(0, int(images.shape[0]))
+    normalized = dict(track_data)
+    normalized["orig_size"] = (int(images.shape[1]), int(images.shape[2]))
+    normalized["n_frames"] = expected
+
+    packed = normalized.get("packed_masks")
+    if not isinstance(packed, torch.Tensor) or packed.ndim <= 0:
+        return normalized
+
+    current = int(packed.shape[0])
+    if current == expected:
+        return normalized
+    if current > expected:
+        normalized["packed_masks"] = packed[:expected].contiguous()
+        return normalized
+
+    pad_shape = (expected - current, *tuple(packed.shape[1:]))
+    padding = torch.zeros(pad_shape, device=packed.device, dtype=packed.dtype)
+    normalized["packed_masks"] = torch.cat([packed, padding], dim=0).contiguous()
+    return normalized
+
+
 def _unpack_sam3_masks(track_data: dict[str, Any]) -> torch.Tensor | None:
     if not isinstance(track_data, dict):
         raise RuntimeError("SAM3轨迹数据无效：需要连接 SAM3_TRACK_DATA。")
@@ -571,6 +597,27 @@ def _render_colored_masks(track_data: dict[str, Any], background: str = "黑色"
     color_overlay = colors[obj_idx_map]
     bg_tensor = torch.tensor(bg_rgb, device=device, dtype=color_overlay.dtype).view(1, 1, 1, 3)
     return torch.where(any_mask.unsqueeze(-1), color_overlay, bg_tensor.expand_as(color_overlay))
+
+
+def _fit_mask_frame_count(mask: torch.Tensor, frame_count: int, background: str) -> torch.Tensor:
+    if not isinstance(mask, torch.Tensor) or mask.ndim != 4:
+        return mask
+
+    expected = max(1, int(frame_count))
+    current = int(mask.shape[0])
+    if current == expected:
+        return mask
+    if current > expected:
+        return mask[:expected].contiguous()
+
+    bg_value = 1.0 if str(background).startswith("白") else 0.0
+    padding = torch.full(
+        (expected - current, int(mask.shape[1]), int(mask.shape[2]), int(mask.shape[3])),
+        bg_value,
+        device=mask.device,
+        dtype=mask.dtype,
+    )
+    return torch.cat([mask, padding], dim=0).contiguous()
 
 
 def _repair_empty_mask_frames(mask: torch.Tensor, background: str) -> torch.Tensor:
@@ -947,6 +994,7 @@ class GJJ_SAM3SCAIL2TrackMaskAIO:
         for index, images in enumerate(route_images, start=1):
             source_prompt = str(prompt_by_channel[index - 1] or "").strip()
             translated_prompt = translated_by_channel[index - 1] if active_indices else ""
+            expected_frame_count = 1
 
             if images is None:
                 fallback_images = (
@@ -958,10 +1006,14 @@ class GJJ_SAM3SCAIL2TrackMaskAIO:
                     else None
                 )
                 track_data = _empty_track_data(fallback_images)
+                if isinstance(fallback_images, torch.Tensor):
+                    expected_frame_count = int(fallback_images.shape[0])
             elif not source_prompt:
                 track_data = _empty_track_data(images)
+                expected_frame_count = int(images.shape[0])
             else:
                 try:
+                    expected_frame_count = int(images.shape[0])
                     conditioning = conditioning_by_prompt[translated_prompt]
                     track_data = _track_route(
                         images,
@@ -971,6 +1023,7 @@ class GJJ_SAM3SCAIL2TrackMaskAIO:
                         max_objects,
                         detect_interval,
                     )
+                    track_data = _normalize_track_frame_count(track_data, images)
                 except Exception as exc:
                     raise RuntimeError(
                         f"SAM3+SCAIL-2 第 {index} 通道执行失败。\n"
@@ -985,6 +1038,7 @@ class GJJ_SAM3SCAIL2TrackMaskAIO:
             mask = _render_colored_masks(prepared, background)
             if index == 2:
                 mask = _repair_empty_mask_frames(mask, background)
+            mask = _fit_mask_frame_count(mask, expected_frame_count, background)
             mask_results.append(mask)
 
             if images is not None:

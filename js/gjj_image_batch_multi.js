@@ -3,6 +3,7 @@ import { app } from "/scripts/app.js";
 const NODE_TYPE = "GJJ_ImageBatchMulti";
 const IMAGE_PREFIX = "image_";
 const COMPAT_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
+const ORIGINAL_SIZE_VALUE = "原始尺寸";
 const MIN_INPUTS = 1;
 const MAX_INPUTS = 16;
 const CONTROL_WIDGET = "gjj_image_batch_multi_controls";
@@ -62,6 +63,7 @@ const SIZE_OPTIONS = [
 	{ value: "1024", emoji: "1️⃣", tooltip: "1024 档位。横屏 1824 x 1024，竖屏 1024 x 1824，正方形 1024 x 1024；最终尺寸按对齐倍数取整。" },
 	{ value: "2K", emoji: "2️⃣", tooltip: "2K 档位。横屏 2048 x 1152，竖屏 1152 x 2048，正方形 2048 x 2048；最终尺寸按对齐倍数取整。" },
 	{ value: "4K", emoji: "#️⃣", tooltip: "4K 档位。横屏 3840 x 2160，竖屏 2160 x 3840，正方形 3840 x 3840；最终尺寸按对齐倍数取整。" },
+	{ value: ORIGINAL_SIZE_VALUE, emoji: "🖼️", tooltip: "原始尺寸。直接使用第一张输入图的真实宽高；多张图片会统一裁切缩放到这个尺寸。" },
 ];
 const ORIENTATION_OPTIONS = [
 	{ value: "原始比例", emoji: "🟧", tooltip: "原始比例。按第一张输入图的宽高比输出；没有输入图时按当前尺寸档位输出正方形。" },
@@ -369,6 +371,9 @@ function dimensionsFromSizeRatio(sizeValue, ratioValue) {
 
 function presetDimensions(sizePreset, orientation) {
 	const size = normalizeSize(sizePreset);
+	if (size === ORIGINAL_SIZE_VALUE) {
+		return SIZE_DIMENSIONS[DEFAULT_VALUES.size_preset]["正方形"];
+	}
 	const direction = normalizeOrientation(orientation);
 	if (direction === "原始比例") {
 		return SIZE_DIMENSIONS[size]?.["正方形"] || SIZE_DIMENSIONS[DEFAULT_VALUES.size_preset]["正方形"];
@@ -427,6 +432,7 @@ function normalizeSize(value) {
 	if (text === "1024" || text === "1" || text === "1️⃣") return "1024";
 	if (text === "2k" || text === "2" || text === "2️⃣") return "2K";
 	if (text === "4k" || text === "#" || text === "#️⃣") return "4K";
+	if (["原始尺寸", "原图尺寸", "原尺寸", "originalsize", "sourcesize", "source", "🖼", "🖼️"].includes(text)) return ORIGINAL_SIZE_VALUE;
 	return DEFAULT_VALUES.size_preset;
 }
 
@@ -739,6 +745,9 @@ function syncControlButtons(node) {
 			const ratio = String(readWidget(node, "custom_ratio") || ratioTextFromDimensions(width, height)).trim();
 			state.summary.textContent = `${frameText} 自定 ${width}x${height}`;
 			state.summary.title = `当前组合：自定义尺寸 ${width} x ${height}，比例 ${ratio}。点击 ⚙️ 可修改；清除后恢复尺寸档位和画幅方向。`;
+		} else if (selectedSize === ORIGINAL_SIZE_VALUE) {
+			state.summary.textContent = `${frameText} 原始尺寸`;
+			state.summary.title = `当前组合：原始尺寸 / ${selectedPrepend === "无" ? "不添加前置帧" : `前置${selectedPrepend}`}。执行时直接使用第一张输入图的真实宽高；没有输入图时退回 320 正方形。`;
 		} else {
 			state.summary.textContent = `${frameText} ${selectedSize} ${selectedOrientation}`;
 			state.summary.title = `当前组合：${selectedSize} / ${selectedOrientation} / ${selectedPrepend === "无" ? "不添加前置帧" : `前置${selectedPrepend}`}。按钮同组互斥，黑白帧再次点击可取消。`;
