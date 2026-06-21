@@ -1336,6 +1336,7 @@ class GJJ_ComprehensiveMatting:
     ]
     RETURN_TYPES = ("IMAGE", "MASK")
     RETURN_NAMES = ("图像", "遮罩")
+    OUTPUT_NODE = True
     OUTPUT_TOOLTIPS = (
         "把所有已选路线的结果按路线顺序合并成一个 ComfyUI 原生 IMAGE batch 输出，可直接连接预览、保存和普通 IMAGE 节点。",
         "把所有已选路线生成的前景遮罩按路线顺序合并成 MASK batch 输出，可连接遮罩预览、合成或后续修边节点。",

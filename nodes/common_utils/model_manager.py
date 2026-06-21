@@ -454,6 +454,279 @@ def gjjutils_get_available_models_by_category(
     return matching_models
 
 
+_GJJ_COMMON_MODEL_EXTENSIONS = {
+    ".safetensors",
+    ".ckpt",
+    ".pt",
+    ".pt2",
+    ".pth",
+    ".bin",
+    ".gguf",
+    ".sft",
+    ".pkl",
+    ".onnx",
+    ".engine",
+    ".torchscript",
+}
+
+
+def _gjjutils_normalize_extensions(extensions: Any = None) -> set[str]:
+    values = extensions or _GJJ_COMMON_MODEL_EXTENSIONS
+    result: set[str] = set()
+    for item in values:
+        text = str(item or "").strip().lower()
+        if not text:
+            continue
+        result.add(text if text.startswith(".") else f".{text}")
+    return result or set(_GJJ_COMMON_MODEL_EXTENSIONS)
+
+
+def _gjjutils_normalize_model_relpath(value: Any) -> str:
+    return str(value or "").strip().replace("\\", "/").strip("/")
+
+
+def gjjutils_ensure_model_folder(
+    folder_type: str,
+    relative_dir: str | None = None,
+    extensions: Any = None,
+) -> Path:
+    """Ensure a ComfyUI model folder exists and is known to folder_paths.
+
+    This is the shared entry point for GJJ nodes that need a custom models/
+    subdirectory such as models/nlf or models/detection.
+    """
+    folder_key = str(folder_type or "").strip()
+    if not folder_key:
+        raise ValueError("folder_type 不能为空。")
+    rel_dir = _gjjutils_normalize_model_relpath(relative_dir or folder_key)
+    base_dir = Path(getattr(folder_paths, "models_dir", Path.cwd() / "models"))
+    model_dir = base_dir / rel_dir
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    ext_set = _gjjutils_normalize_extensions(extensions)
+    try:
+        folder_paths.add_model_folder_path(folder_key, str(model_dir))
+    except Exception:
+        pass
+
+    try:
+        registry = getattr(folder_paths, "folder_names_and_paths", {})
+        current = registry.get(folder_key)
+        if current:
+            paths, known_exts = current
+            path_list = [str(path) for path in (paths or [])]
+            if str(model_dir) not in path_list:
+                path_list.append(str(model_dir))
+            registry[folder_key] = (path_list, set(known_exts or set()).union(ext_set))
+        else:
+            registry[folder_key] = ([str(model_dir)], ext_set)
+    except Exception:
+        pass
+    return model_dir
+
+
+def gjjutils_list_model_files(
+    folder_type: str,
+    relative_dir: str | None = None,
+    extensions: Any = None,
+) -> list[str]:
+    """List model files from a ComfyUI models/ subdirectory, recursively.
+
+    Returned names keep folder_paths-compatible relative subpaths.
+    """
+    ext_set = _gjjutils_normalize_extensions(extensions)
+    model_dir = gjjutils_ensure_model_folder(folder_type, relative_dir, ext_set)
+
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add_name(value: Any) -> None:
+        rel = _gjjutils_normalize_model_relpath(value)
+        if not rel:
+            return
+        if ext_set and Path(rel).suffix.lower() not in ext_set:
+            return
+        key = rel.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        names.append(rel)
+
+    try:
+        for filename in folder_paths.get_filename_list(str(folder_type)):
+            add_name(filename)
+    except Exception:
+        pass
+
+    try:
+        for path in model_dir.rglob("*"):
+            if path.is_file():
+                add_name(path.relative_to(model_dir).as_posix())
+    except Exception:
+        pass
+
+    return sorted(names, key=lambda item: item.lower())
+
+
+def _gjjutils_model_path_for_rel(folder_type: str, rel_name: str) -> str:
+    rel = _gjjutils_normalize_model_relpath(rel_name)
+    try:
+        path = folder_paths.get_full_path(str(folder_type), rel)
+        if path and os.path.exists(path):
+            return os.path.abspath(path)
+    except Exception:
+        pass
+    try:
+        for base in (getattr(folder_paths, "folder_names_and_paths", {}).get(str(folder_type)) or ([], set()))[0]:
+            path = Path(base) / rel
+            if path.is_file():
+                return str(path.resolve())
+    except Exception:
+        pass
+    return ""
+
+
+def _gjjutils_compact_model_key(value: Any) -> str:
+    text = gjjutils_model_stem_without_quant(str(value or ""))
+    return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", text.lower())
+
+
+def _gjjutils_model_match_score(query: str, filename: str) -> int:
+    raw_query = _gjjutils_normalize_model_relpath(query).lower()
+    raw_file = _gjjutils_normalize_model_relpath(filename).lower()
+    if not raw_query or not raw_file:
+        return 0
+
+    query_path = raw_query
+    file_path = raw_file
+    query_base = raw_query.rsplit("/", 1)[-1]
+    file_base = raw_file.rsplit("/", 1)[-1]
+    query_stem = gjjutils_model_stem_without_quant(query_base)
+    file_stem = gjjutils_model_stem_without_quant(file_base)
+    query_key = _gjjutils_compact_model_key(query_base)
+    file_key = _gjjutils_compact_model_key(file_base)
+
+    score = 0
+    if file_path == query_path:
+        score = max(score, 100000)
+    if file_base == query_base:
+        score = max(score, 95000)
+    if file_stem and query_stem and file_stem == query_stem:
+        score = max(score, 90000)
+    if query_key and file_key and query_key == file_key:
+        score = max(score, 85000)
+    if query_key and file_key and (query_key in file_key or file_key in query_key):
+        score = max(score, 70000 + min(len(query_key), len(file_key)))
+
+    query_tokens = [token for token in re.split(r"[\s._\-/\\]+", query_stem) if token]
+    if query_tokens and file_stem:
+        hits = sum(1 for token in query_tokens if token in file_stem)
+        if hits == len(query_tokens):
+            score = max(score, 60000 + hits * 100 + len(query_key))
+        elif hits:
+            score = max(score, 40000 + hits * 100)
+
+    common = _gjjutils_longest_common_substring(query_key, file_key)
+    if common >= min(4, len(query_key), len(file_key)):
+        score = max(score, 20000 + common * 100)
+    return score
+
+
+def _dedupe_keep_order(values: Any) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        key = text.replace("\\", "/").lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
+
+
+def gjjutils_resolve_model_file(
+    selection: Any,
+    folder_type: str,
+    *,
+    relative_dir: str | None = None,
+    candidates: Any = None,
+    extensions: Any = None,
+    label: str = "模型",
+    auto_values: Any = None,
+) -> tuple[str, str]:
+    """Resolve a model selection to (absolute_path, relative_name).
+
+    The resolver searches ComfyUI/models/<relative_dir or folder_type>
+    recursively, supports "Auto" selections, and scores candidates by exact
+    filename, extensionless filename, quantization-insensitive stem, and token
+    overlap.
+    """
+    ext_set = _gjjutils_normalize_extensions(extensions)
+    files = gjjutils_list_model_files(folder_type, relative_dir, ext_set)
+    auto_set = {str(item).strip().lower() for item in (auto_values or ("", "auto", "自动", "智能查找"))}
+    selected = str(selection or "").strip()
+
+    direct = Path(os.path.expandvars(os.path.expanduser(selected))) if selected else None
+    if direct is not None and direct.is_file():
+        return str(direct.resolve()), direct.name
+
+    seeds: list[str] = []
+    if selected and selected.lower() not in auto_set and not selected.startswith("未找到"):
+        seeds.append(selected)
+        if Path(selected).suffix == "":
+            for ext in ext_set:
+                seeds.append(f"{selected}{ext}")
+    for candidate in candidates or []:
+        text = str(candidate or "").strip()
+        if text:
+            seeds.append(text)
+
+    seeds = _dedupe_keep_order(seeds)
+    scored: list[tuple[int, int, int, str]] = []
+    for seed_index, seed in enumerate(seeds or files[:1]):
+        for filename in files:
+            score = _gjjutils_model_match_score(seed, filename)
+            if score <= 0:
+                continue
+            scored.append((score - seed_index * 10, -filename.count("/"), -len(filename), filename))
+
+    if scored:
+        scored.sort(reverse=True)
+        rel_name = scored[0][3]
+        full_path = _gjjutils_model_path_for_rel(folder_type, rel_name)
+        if full_path:
+            return full_path, rel_name
+
+    subdir = f"models/{_gjjutils_normalize_model_relpath(relative_dir or folder_type)}"
+    hints = ", ".join(seeds[:8]) or "Auto"
+    raise FileNotFoundError(f"未找到{label}：{hints}。请把模型放入 {subdir} 后刷新或重启 ComfyUI。")
+
+
+def gjjutils_resolve_model_name(
+    selection: Any,
+    folder_type: str,
+    *,
+    relative_dir: str | None = None,
+    candidates: Any = None,
+    extensions: Any = None,
+    label: str = "模型",
+    auto_values: Any = None,
+) -> str:
+    """Resolve a model and return the folder_paths-compatible relative name."""
+    return gjjutils_resolve_model_file(
+        selection,
+        folder_type,
+        relative_dir=relative_dir,
+        candidates=candidates,
+        extensions=extensions,
+        label=label,
+        auto_values=auto_values,
+    )[1]
+
+
 def gjjutils_build_model_choices(
     query: str,
     category: str | None = None,

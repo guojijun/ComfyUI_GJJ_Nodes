@@ -12,11 +12,15 @@ const HIDDEN_WIDGETS = new Set([
 	"video_path",
 	"audio_path",
 ]);
+const DELETE_TAIL_FRAME_WIDGET = "delete_tail_frame";
 const INPUT_SPECS = [
 	["images", "GJJ_BATCH_IMAGE,IMAGE,VIDEO,STRING", "图片帧", "可连接视频片段、图片帧、VIDEO 对象，或分段视频文件名前缀。"],
 	["audio", "AUDIO,VIDEO,STRING", "音频", "可选。支持 AUDIO、VIDEO 或音频/视频文件路径。"],
 	["fps", "INT,FLOAT,STRING,VIDEO", "帧率", "可选。支持 INT、FLOAT、STRING；接 VIDEO 时读取源帧率。"],
 	["condition", "BOOLEAN", "条件通行", "可选布尔门控；为假时本节点跳过。"],
+	["delete_tail_frame", "INT", "删除尾帧数", "0 表示不删除；大于 0 时自动递进为 1、5、9、13...。合并分段视频时删除每个非最后分段的尾部帧。"],
+	["delete_segments_after_merge", "BOOLEAN", "合并后删除片段", "合并成功并生成最终视频后删除参与合并的原始片段文件；不会删除输出成品。"],
+	["wait_for", "*", "等待完成", "任意类型依赖输入；不参与合并，只用于等待最后一段或其它上游节点执行完成后再开始合并。"],
 ];
 
 function buildViewUrl(item) {
@@ -74,6 +78,56 @@ function syncInputLinkSlots(node) {
 
 function preferredNodeWidth(node) {
 	return Math.max(320, Math.round(Number(node?.size?.[0] || 360)));
+}
+
+function normalizeDeleteTailFrameCount(value) {
+	if (value === true) return 1;
+	if (value === false || value == null) return 0;
+	const text = String(value).trim().toLowerCase();
+	if (["true", "yes", "on", "enable", "enabled", "开", "是", "真"].includes(text)) return 1;
+	if (!text || ["false", "no", "off", "disable", "disabled", "关", "否", "假"].includes(text)) return 0;
+	let number = Math.round(Number.parseFloat(text));
+	if (!Number.isFinite(number) || number <= 0) return 0;
+	return Math.max(1, (Math.max(0, Math.ceil((number - 1) / 4)) * 4) + 1);
+}
+
+function decorateDeleteTailFrameWidget(node) {
+	const widget = GJJ_Utils.getWidget(node, DELETE_TAIL_FRAME_WIDGET);
+	if (!widget) return;
+	widget.type = "number";
+	widget.label = "删除尾帧数";
+	widget.localized_name = "删除尾帧数";
+	widget.display_name = "删除尾帧数";
+	widget.tooltip = "0 表示不删除；大于 0 时自动递进为 1、5、9、13...。";
+	widget.options ||= {};
+	widget.options.min = 0;
+	widget.options.max = 10001;
+	widget.options.step = 1;
+	widget.options.display_name = "删除尾帧数";
+	widget.options.tooltip = widget.tooltip;
+	const normalized = normalizeDeleteTailFrameCount(widget.value);
+	if (widget.value !== normalized) widget.value = normalized;
+	if (!widget.__gjjFfmpegMuxDeleteTailPatched) {
+		const originalCallback = widget.callback;
+		widget.callback = function (value, ...args) {
+			const fixed = normalizeDeleteTailFrameCount(value);
+			this.value = fixed;
+			return originalCallback?.call(this, fixed, ...args);
+		};
+		widget.__gjjFfmpegMuxDeleteTailPatched = true;
+	}
+}
+
+function decorateDeleteSegmentsAfterMergeWidget(node) {
+	const widget = GJJ_Utils.getWidget(node, "delete_segments_after_merge");
+	if (!widget) return;
+	widget.label = "合并后删除片段";
+	widget.localized_name = "合并后删除片段";
+	widget.display_name = "合并后删除片段";
+	widget.tooltip = "合并成功并生成最终视频后删除参与合并的原始片段文件；不会删除输出成品。";
+	widget.options ||= {};
+	widget.options.display_name = "合并后删除片段";
+	widget.options.tooltip = widget.tooltip;
 }
 
 function ensurePreviewWidget(node) {
@@ -168,6 +222,8 @@ function compactMuxNode(node) {
 			widget.options.display = "hidden";
 		}
 	}
+	decorateDeleteTailFrameWidget(node);
+	decorateDeleteSegmentsAfterMergeWidget(node);
 
 	GJJ_Utils.removeHiddenInputSockets(node, HIDDEN_WIDGETS);
 	for (const spec of INPUT_SPECS) ensureInput(node, spec);

@@ -517,7 +517,6 @@ class VideoSegmentEditorWidget {
 		this.openBtn = this.makeButton("📁 打开", "打开任意视频，并复制到 ComfyUI input 目录");
 		this.addBtn = this.makeButton("➕ 添加", "在末尾添加一个新分段");
 		this.distributeBtn = this.makeButton("⚖️ 均分", "将所有分段均匀分布到整个时长");
-		this.sceneDetectBtn = this.makeButton("🧠 分镜", "按画面变化自动添加切割点");
 		this.deleteBtn = this.makeButton("🗑️ 删除", "删除当前选中的分段（至少保留1个）");
 		this.loopBtn = this.makeButton("🔁 循环", "循环播放当前选中的分段");
 		this.refreshBtn = this.makeButton("🔄 刷新", "只刷新当前视频分段节点");
@@ -529,7 +528,6 @@ class VideoSegmentEditorWidget {
 		controls.appendChild(this.openBtn);
 		controls.appendChild(this.addBtn);
 		controls.appendChild(this.distributeBtn);
-		controls.appendChild(this.sceneDetectBtn);
 		controls.appendChild(this.deleteBtn);
 		controls.appendChild(this.loopBtn);
 		controls.appendChild(this.refreshBtn);
@@ -589,8 +587,6 @@ class VideoSegmentEditorWidget {
 				scheduleStabilize(this.node, this.segments.length);
 			}
 		});
-		this.sceneDetectBtn.addEventListener("pointerdown", e => e.stopPropagation());
-		this.sceneDetectBtn.addEventListener("click", () => this.detectSceneCuts());
 		this.deleteBtn.addEventListener("pointerdown", e => e.stopPropagation());
 		this.deleteBtn.addEventListener("click", () => {
 			this.deleteSelected();
@@ -897,136 +893,6 @@ class VideoSegmentEditorWidget {
 				fail();
 			}
 		});
-	}
-
-	frameSignatureFromCanvas(canvas, ctx) {
-		const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-		const signature = new Float32Array(canvas.width * canvas.height * 3);
-		let out = 0;
-		for (let i = 0; i < data.length; i += 4) {
-			signature[out++] = data[i] / 255;
-			signature[out++] = data[i + 1] / 255;
-			signature[out++] = data[i + 2] / 255;
-		}
-		return signature;
-	}
-
-	frameDifference(a, b) {
-		if (!a || !b || a.length !== b.length) return 0;
-		let sum = 0;
-		for (let i = 0; i < a.length; i += 1) sum += Math.abs(a[i] - b[i]);
-		return sum / a.length;
-	}
-
-	sceneThreshold(diffs) {
-		const values = diffs.map(item => item.diff).filter(value => Number.isFinite(value) && value > 0).sort((a, b) => a - b);
-		if (!values.length) return 1;
-		const median = values[Math.floor(values.length * 0.5)] || 0;
-		const p90 = values[Math.floor(values.length * 0.9)] || median;
-		const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-		const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
-		const std = Math.sqrt(Math.max(0, variance));
-		return Math.max(0.08, median * 3.0, mean + std * 1.2, p90 * 0.82);
-	}
-
-	cutsToSegments(cutFrames) {
-		const maxAnchor = this.getMaxAnchorFrame();
-		const boundaries = [1];
-		for (const frame of cutFrames) {
-			const snapped = this.snapFrame(frame);
-			const last = boundaries[boundaries.length - 1];
-			if (snapped <= last + FRAME_SNAP) continue;
-			if (snapped >= maxAnchor - FRAME_SNAP) continue;
-			boundaries.push(snapped);
-		}
-		boundaries.push(maxAnchor);
-		const colors = new Set();
-		return boundaries.slice(0, -1).map((startFrame, index) => {
-			const endFrame = boundaries[index + 1];
-			const color = pickColor(colors);
-			colors.add(color);
-			return {
-				start_frame: startFrame,
-				end_frame: endFrame,
-				frames: Math.max(1, endFrame - startFrame + 1),
-				label: `片段 ${index + 1}`,
-				color,
-			};
-		});
-	}
-
-	async detectSceneCuts() {
-		const video = this.videoPlayer;
-		const totalFrames = this.getTotalFrameCount();
-		if (!video || !video.src || totalFrames <= 1) {
-			alert("请先加载可预览的视频。");
-			return;
-		}
-		const originalText = this.sceneDetectBtn.textContent;
-		const wasPaused = video.paused;
-		const originalFrame = this.playbackPositionToFrame(video.currentTime || 0);
-		const sampleCount = Math.max(12, Math.min(220, Math.round(totalFrames / Math.max(1, FRAME_SNAP * 2))));
-		const stepFrames = Math.max(1, Math.round((totalFrames - 1) / sampleCount));
-		const canvas = document.createElement("canvas");
-		canvas.width = 96;
-		canvas.height = Math.max(32, Math.round(96 / Math.max(0.1, this.previewAspect || DEFAULT_PREVIEW_ASPECT)));
-		const ctx = canvas.getContext("2d", { willReadFrequently: true });
-		const diffs = [];
-		let previous = null;
-		try {
-			this.sceneDetectBtn.disabled = true;
-			this.sceneDetectBtn.textContent = "🧠 分析...";
-			video.pause?.();
-			for (let index = 0; index <= sampleCount; index += 1) {
-				const frame = Math.min(totalFrames, Math.max(1, 1 + index * stepFrames));
-				await this.waitForVideoFrame(frame);
-				ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-				const signature = this.frameSignatureFromCanvas(canvas, ctx);
-				if (previous) {
-					diffs.push({ frame, diff: this.frameDifference(previous, signature) });
-				}
-				previous = signature;
-			}
-			const threshold = this.sceneThreshold(diffs);
-			const minGapFrames = FRAME_SNAP * 2;
-			const candidates = diffs
-				.filter((item, index) => {
-					const prev = diffs[index - 1]?.diff ?? -1;
-					const next = diffs[index + 1]?.diff ?? -1;
-					return item.diff >= threshold && item.diff >= prev && item.diff >= next;
-				})
-				.sort((a, b) => b.diff - a.diff);
-			const cuts = [];
-			for (const candidate of candidates) {
-				const frame = this.snapFrame(candidate.frame);
-				if (cuts.some(existing => Math.abs(existing - frame) < minGapFrames)) continue;
-				cuts.push(frame);
-				if (cuts.length >= 48) break;
-			}
-			cuts.sort((a, b) => a - b);
-			const detected = this.cutsToSegments(cuts);
-			if (detected.length <= 1) {
-				alert("未检测到明显分镜切换。");
-				return;
-			}
-			this.segments = detected;
-			this.selectedIndex = 0;
-			this.commit();
-			this.updateLabels();
-			this.updateTotalLabel();
-			this.render();
-			scheduleStabilize(this.node, this.segments.length);
-		} catch (error) {
-			console.error("[GJJ] 分镜智能切割失败:", error);
-			alert(`智能切割失败：${error?.message || error}`);
-		} finally {
-			this.sceneDetectBtn.textContent = originalText;
-			this.sceneDetectBtn.disabled = false;
-			try {
-				await this.waitForVideoFrame(originalFrame);
-				if (!wasPaused) video.play?.().catch?.(() => {});
-			} catch (_) {}
-		}
 	}
 
 	updateLabels() {

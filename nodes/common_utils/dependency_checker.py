@@ -291,9 +291,16 @@ def build_node_help_payload(
 		if isinstance(item, dict):
 			tree_items.append({
 				"label": str(item.get("label") or item.get("name") or "").strip(),
-				"path": str(item.get("path") or "").strip(),
+				"path": str(item.get("path") or item.get("subdir") or item.get("folder") or item.get("directory") or "").strip(),
+				"folder": str(item.get("folder") or item.get("directory") or "").strip(),
+				"subdir": str(item.get("subdir") or "").strip(),
+				"filename": str(item.get("filename") or item.get("file") or "").strip(),
+				"value": str(item.get("value") or item.get("filename") or item.get("file") or "").strip(),
+				"kind": str(item.get("kind") or item.get("type") or item.get("model_kind") or "").strip(),
+				"type": str(item.get("type") or item.get("output_type") or "").strip(),
+				"icon": str(item.get("icon") or "").strip(),
 				"required": bool(item.get("required", True)),
-				"description": str(item.get("description") or "").strip(),
+				"description": str(item.get("description") or item.get("tooltip") or item.get("note") or "").strip(),
 			})
 		else:
 			tree_items.append({"label": str(item or "").strip(), "path": "", "required": True, "description": ""})

@@ -324,6 +324,48 @@ def _stream_source_path(value: Any) -> str | None:
 	return None
 
 
+def _video_audio_component(value: Any) -> dict[str, Any] | None:
+	if value is None:
+		return None
+	if hasattr(value, "get_components"):
+		try:
+			components = value.get_components()
+			audio = _component_value(components, "audio")
+			if audio is not None:
+				return audio
+		except Exception:
+			pass
+	if isinstance(value, dict):
+		audio = value.get("audio")
+		if audio is not None:
+			return audio
+	return None
+
+
+def _crop_audio_component(audio: dict[str, Any] | None, start_frame: int, end_frame: int, fps: float) -> dict[str, Any] | None:
+	if not isinstance(audio, dict):
+		return None
+	waveform = audio.get("waveform")
+	sample_rate = audio.get("sample_rate")
+	if not isinstance(waveform, torch.Tensor) or not sample_rate or fps <= 0:
+		return audio
+	try:
+		sr = int(sample_rate)
+		start_time = max(0.0, (int(start_frame) - 1) / float(fps))
+		end_time = max(start_time, int(end_frame) / float(fps))
+		start_sample = max(0, int(round(start_time * sr)))
+		end_sample = max(start_sample + 1, int(round(end_time * sr)))
+		max_samples = int(waveform.shape[-1])
+		start_sample = min(start_sample, max_samples)
+		end_sample = min(end_sample, max_samples)
+		if start_sample >= end_sample:
+			return None
+		cropped = waveform[..., start_sample:end_sample].contiguous()
+		return {**audio, "waveform": cropped, "sample_rate": sr}
+	except Exception:
+		return audio
+
+
 def _normalize_frames_array(images: Any) -> np.ndarray | None:
 	if images is None:
 		return None
@@ -404,6 +446,22 @@ def load_audio_from_media_file(filepath: str) -> dict[str, Any] | None:
 		return None
 
 
+def media_has_audio_stream(filepath: str) -> bool:
+	"""检查媒体文件是否包含音频流。"""
+	try:
+		cmd = [
+			"ffprobe", "-v", "error",
+			"-select_streams", "a:0",
+			"-show_entries", "stream=index",
+			"-of", "csv=p=0",
+			filepath,
+		]
+		result = subprocess.run(cmd, capture_output=True, text=True)
+		return result.returncode == 0 and bool(result.stdout.strip())
+	except Exception:
+		return False
+
+
 def save_frames_for_preview(frames: np.ndarray, prompt: Any = None, suffix: str = "") -> tuple[str, str]:
 	"""保存首帧到临时文件用于预览，支持suffix参数避免文件名冲突"""
 	output_dir = folder_paths.get_temp_directory()
@@ -437,17 +495,40 @@ def crop_video_segment_ffmpeg(
 		start_index = max(0, int(start_frame) - 1)
 		end_index = max(start_index + 1, int(end_frame))
 		trim_filter = f"trim=start_frame={start_index}:end_frame={end_index},setpts=PTS-STARTPTS"
+		has_audio = media_has_audio_stream(video_path)
 
-		cmd = [
-			get_ffmpeg_executable(), "-y", "-v", "error",
-			"-i", video_path,
-			"-filter:v", trim_filter,
-			"-an",
-			"-c:v", "libx264",
-			"-pix_fmt", "yuv420p",
-			"-movflags", "+faststart",
-			output_path,
-		]
+		if has_audio:
+			fps = max(_get_video_fps(video_path), 0.001)
+			start_time = start_index / fps
+			end_time = end_index / fps
+			filter_complex = (
+				f"[0:v]{trim_filter}[v];"
+				f"[0:a]atrim=start={start_time:.9f}:end={end_time:.9f},asetpts=PTS-STARTPTS[a]"
+			)
+			cmd = [
+				get_ffmpeg_executable(), "-y", "-v", "error",
+				"-i", video_path,
+				"-filter_complex", filter_complex,
+				"-map", "[v]",
+				"-map", "[a]",
+				"-c:v", "libx264",
+				"-c:a", "aac",
+				"-pix_fmt", "yuv420p",
+				"-movflags", "+faststart",
+				"-shortest",
+				output_path,
+			]
+		else:
+			cmd = [
+				get_ffmpeg_executable(), "-y", "-v", "error",
+				"-i", video_path,
+				"-filter:v", trim_filter,
+				"-an",
+				"-c:v", "libx264",
+				"-pix_fmt", "yuv420p",
+				"-movflags", "+faststart",
+				output_path,
+			]
 
 		result = subprocess.run(cmd, capture_output=True, text=True)
 		if result.returncode != 0:
@@ -560,6 +641,70 @@ def save_frames_to_video_file(frames: np.ndarray | torch.Tensor, fps: float, fil
 	except Exception as e:
 		print(f"[GJJ] 保存视频文件失败: {e}")
 		raise
+
+
+def save_audio_to_wav_file(audio: dict[str, Any], filepath: str | Path) -> bool:
+	waveform = audio.get("waveform") if isinstance(audio, dict) else None
+	sample_rate = audio.get("sample_rate") if isinstance(audio, dict) else None
+	if not isinstance(waveform, torch.Tensor) or not sample_rate:
+		return False
+	try:
+		import wave
+
+		sr = int(sample_rate)
+		data = waveform.detach().cpu().float()
+		while data.ndim > 2:
+			data = data.squeeze(0)
+		if data.ndim == 1:
+			data = data.unsqueeze(0)
+		if data.shape[0] > data.shape[-1]:
+			data = data.transpose(0, 1)
+		channels = int(data.shape[0])
+		pcm = (data.clamp(-1.0, 1.0).transpose(0, 1).numpy() * 32767.0).astype(np.int16)
+		with wave.open(str(filepath), "wb") as wav:
+			wav.setnchannels(channels)
+			wav.setsampwidth(2)
+			wav.setframerate(sr)
+			wav.writeframes(pcm.tobytes())
+		return True
+	except Exception as e:
+		print(f"[GJJ] 保存音频文件失败: {e}")
+		return False
+
+
+def mux_audio_into_video_file(video_path: str | Path, audio: dict[str, Any] | None) -> None:
+	if not isinstance(audio, dict):
+		return
+	video_path = Path(video_path)
+	audio_path = video_path.with_suffix(".wav")
+	muxed_path = video_path.with_name(f"{video_path.stem}_audio{video_path.suffix}")
+	if not save_audio_to_wav_file(audio, audio_path):
+		return
+	try:
+		cmd = [
+			get_ffmpeg_executable(), "-y", "-v", "error",
+			"-i", str(video_path),
+			"-i", str(audio_path),
+			"-map", "0:v:0",
+			"-map", "1:a:0",
+			"-c:v", "copy",
+			"-c:a", "aac",
+			"-shortest",
+			"-movflags", "+faststart",
+			str(muxed_path),
+		]
+		result = subprocess.run(cmd, capture_output=True, text=True)
+		if result.returncode != 0:
+			print(f"[GJJ] 封入分段音频失败: {result.stderr.strip()}")
+			return
+		os.replace(muxed_path, video_path)
+	finally:
+		for path in (audio_path, muxed_path):
+			try:
+				if path.exists():
+					path.unlink()
+			except Exception:
+				pass
 
 
 def _decode_video_with_ffmpeg(video_path: str) -> dict[str, Any]:
@@ -1110,6 +1255,7 @@ class GJJ_VideoSegmentEditor:
 		video_path = None
 		current_video = None
 		frames = None
+		source_audio = None
 		frame_rate = 24.0
 		width = 0
 		height = 0
@@ -1118,6 +1264,7 @@ class GJJ_VideoSegmentEditor:
 		if video is not None and is_video_object(video):
 			# 外部连接的视频对象
 			current_video = video
+			source_audio = _video_audio_component(current_video)
 			video_path = _stream_source_path(current_video)
 			frames, frame_rate, width, height = video_to_frames_data(current_video)
 			total_frames = len(frames)
@@ -1224,7 +1371,7 @@ class GJJ_VideoSegmentEditor:
 						segment_video = self._crop_video_with_ffmpeg(video_path, start_frame, end_frame, i + 1, prompt)
 					else:
 						# 否则从帧数组中裁剪并保存为 temp 视频
-						segment_video = self._crop_video_from_frames(frames, start_frame, end_frame, frame_rate, i + 1, prompt)
+						segment_video = self._crop_video_from_frames(frames, start_frame, end_frame, frame_rate, i + 1, prompt, source_audio)
 
 					video_segments.append(segment_video)
 					print(f"[GJJ] 成功按帧裁剪分段{i+1}: {start_frame}f - {end_frame}f")
@@ -1261,7 +1408,7 @@ class GJJ_VideoSegmentEditor:
 
 		return video_from_file_path(output_path)
 
-	def _crop_video_from_frames(self, frames: np.ndarray, start_frame: int, end_frame: int, fps: float, segment_index: int, prompt: Any = None):
+	def _crop_video_from_frames(self, frames: np.ndarray, start_frame: int, end_frame: int, fps: float, segment_index: int, prompt: Any = None, audio: dict[str, Any] | None = None):
 		"""从帧数组中按帧裁剪，保存到 ComfyUI temp，并返回该分段文件的 VIDEO 对象。"""
 		total_frames = len(frames)
 		if total_frames == 0:
@@ -1279,6 +1426,8 @@ class GJJ_VideoSegmentEditor:
 
 		output_path = _temp_segment_path(segment_index, start_frame, end_frame, prompt)
 		save_frames_to_video_file(cropped_frames, fps, output_path)
+		cropped_audio = _crop_audio_component(audio, start_frame, end_frame, fps)
+		mux_audio_into_video_file(output_path, cropped_audio)
 		return video_from_file_path(output_path)
 
 

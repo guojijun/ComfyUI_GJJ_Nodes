@@ -350,6 +350,21 @@ def _clear_gjj_model_caches() -> dict:
     cleared = []
     errors = []
 
+    try:
+        module = _import_gjj_node_module("gjj_latent_file_io")
+        fn = getattr(module, "clear_smart_latent_cache", None)
+        if callable(fn):
+            result = fn()
+            if isinstance(result, dict):
+                total = int(result.get("total") or 0)
+                vram_count = int(result.get("vram") or 0)
+                ram_count = int(result.get("ram") or 0)
+                cleared.append(f"智能Latent缓存({total}，显存{vram_count}/内存{ram_count})")
+            else:
+                cleared.append("智能Latent缓存")
+    except Exception as e:
+        errors.append(f"智能Latent缓存: {e}")
+
     unload_targets = [
         ("gjj_fish_audio_s2_model_cache", "unload_engine", "FishAudioS2"),
         ("gjj_longcat_audiodit_model_cache", "unload_model", "LongCatAudioDiT"),

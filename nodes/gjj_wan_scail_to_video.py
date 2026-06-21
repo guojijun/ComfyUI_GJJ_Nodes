@@ -13,6 +13,15 @@ import comfy.utils
 import folder_paths
 from PIL import Image
 
+from .gjj_latent_file_io import (
+    _file_signature,
+    _load_safetensor_file,
+    _load_smart_cache_latent,
+    _resolve_latent_location,
+    _select_loaded_samples,
+    _vram_cache_signature,
+)
+
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +32,7 @@ COLORED_MASK_NODE_DISPLAY_NAME = "🧩 SCAIL-2 彩色遮罩"
 
 DESCRIPTION = (
     "零依赖复刻官方 WanSCAILToVideo：创建 Wan SCAIL/SCAIL-2 视频 latent，"
-    "并把姿态视频、彩色身份遮罩、参考图、CLIP视觉条件和上一段帧写入正负条件。"
+    "并处理姿态视频、彩色身份遮罩、参考图、CLIP视觉条件和上一段帧/Latent续段锚定。"
 )
 
 DEFAULT_PALETTE = [
@@ -133,7 +142,83 @@ def _optional_image_tensor(value: Any, label: str) -> torch.Tensor | None:
     return _ensure_image_tensor(value, label)
 
 
-def _optional_valid_image_tensor(value: Any, label: str, allow_all_black: bool = True) -> torch.Tensor | None:
+def _optional_latent_samples(value: Any, label: str) -> torch.Tensor | None:
+    if value is None:
+        return None
+    if isinstance(value, dict) and "samples" not in value:
+        return None
+    if not isinstance(value, dict) or "samples" not in value:
+        raise RuntimeError(f"{label}必须是 ComfyUI LATENT，且包含 samples。")
+    samples = value["samples"]
+    if not isinstance(samples, torch.Tensor):
+        raise RuntimeError(f"{label}的 samples 不是张量。")
+    if samples.ndim == 4:
+        if int(samples.shape[0]) == 16:
+            samples = samples.unsqueeze(0)
+        else:
+            samples = samples.unsqueeze(2)
+    if samples.ndim != 5:
+        raise RuntimeError(f"{label}维度无效：需要 [批次,通道,时间,高,宽]，当前为 {tuple(samples.shape)}。")
+    if int(samples.shape[0]) <= 0 or int(samples.shape[2]) <= 0:
+        raise RuntimeError(f"{label}为空，无法作为续段锚定。")
+    return samples
+
+
+def _load_previous_latent_reference(value: Any) -> dict[str, torch.Tensor] | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    mode, location = _resolve_latent_location(raw)
+    if mode == "path":
+        if not Path(location).is_file():
+            return None
+        data = _load_safetensor_file(location)
+        return {"samples": _select_loaded_samples(data)}
+    latent, exists, _version, _device = _load_smart_cache_latent(location)
+    return latent if exists else None
+
+
+def _previous_latent_reference_signature(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    mode, location = _resolve_latent_location(raw)
+    if mode == "path":
+        return _file_signature(location)
+    return _vram_cache_signature(location)
+
+
+def _fit_latent_batch(samples: torch.Tensor, batch_size: int) -> torch.Tensor:
+    batch = int(samples.shape[0])
+    if batch == batch_size or batch_size <= 0:
+        return samples
+    if batch > batch_size:
+        return samples[:batch_size]
+    return torch.cat([samples, samples[-1:].repeat(batch_size - batch, 1, 1, 1, 1)], dim=0)
+
+
+def _resize_latent_spatial(samples: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    if tuple(samples.shape[-2:]) == (int(height), int(width)):
+        return samples
+    work = samples
+    restore_dtype = samples.dtype
+    if samples.device.type == "cpu" and samples.dtype in (torch.float16, torch.bfloat16):
+        work = samples.float()
+    resized = F.interpolate(
+        work,
+        size=(int(samples.shape[2]), int(height), int(width)),
+        mode="trilinear",
+        align_corners=False,
+    )
+    return resized.to(dtype=restore_dtype)
+
+
+def _optional_valid_image_tensor(
+    value: Any,
+    label: str,
+    allow_all_black: bool = True,
+    allow_all_white: bool = True,
+) -> torch.Tensor | None:
     if value is None:
         return None
     try:
@@ -148,6 +233,13 @@ def _optional_valid_image_tensor(value: Any, label: str, allow_all_black: bool =
         try:
             if float(tensor.detach().abs().amax().cpu()) <= 1e-6:
                 log.warning("%s没有有效颜色内容，已忽略。", label)
+                return None
+        except Exception:
+            pass
+    if not allow_all_white:
+        try:
+            if float((1.0 - tensor.detach()).abs().amax().cpu()) <= 1e-6:
+                log.warning("%s是纯白背景，没有有效颜色内容，已忽略。", label)
                 return None
         except Exception:
             pass
@@ -438,11 +530,11 @@ class GJJ_WanSCAILToVideo:
             "替换模式：开启后参考图会按参考图彩色遮罩裁到黑底，并把 ref_mask_flag 写为 False；关闭时为动画模式。",
             "背景与参考：连接背景图、参考图、多参考图时，节点会在有有效数据时自动编码；动画模式下参考遮罩可把人物合成到背景上。",
             "多参考：多参考图会逐张编码并追加到 reference_latents；多参考图遮罩会按参考数量自动对齐，不足时复用最后一张，空输入自动忽略。",
-            "续段生成：连接上一段完整输出帧，并把上段输出的 下一段帧偏移 接回本节点；节点会取末尾若干帧作为 anchor，并输出 noise_mask。",
+            "续段生成：优先连接上一段视频 Latent；没有 Latent 时可连接上一段完整输出帧。节点会取末尾若干帧/latent 作为 anchor，并输出 noise_mask。",
         ],
         "inputs": {
             "正向条件/负向条件": "来自 Wan 文本编码节点的 CONDITIONING。",
-            "VAE": "用于编码参考图、姿态视频和上一段帧。请使用与 Wan/SCAIL 模型匹配的视频 VAE。",
+            "VAE": "用于编码参考图、姿态视频和上一段帧。上一段视频 Latent 已经编码好时不会重复编码。",
             "宽度/高度/帧数/批次数": "决定输出视频 latent 形状；姿态视频会缩放到宽高的一半。",
             "姿态视频帧": "可选 IMAGE 帧队列，通常来自姿态视频或驱动视频抽帧。",
             "姿态彩色遮罩": "SCAIL-2 可选 IMAGE 帧队列，应与姿态视频同步；动画模式用黑底，替换模式用白底。",
@@ -451,12 +543,15 @@ class GJJ_WanSCAILToVideo:
             "多参考图": "SCAIL-2 可选多张参考图，会逐张编码成 reference_latents。",
             "多参考图遮罩": "SCAIL-2 可选多参考图对应彩色遮罩，可少于参考图数量；不足时复用最后一张。",
             "上一段视频帧": "SCAIL-2 续段可选输入，节点只取末尾 上一段锚定帧数 帧。",
+            "上一段视频 Latent": "SCAIL-2 续段可选输入，优先级高于上一段视频帧；节点会按 上一段锚定帧数 换算需要的尾部 latent 数。",
+            "上一段 Latent 键值/路径": "和 GJJ_LoadLatentVRAM 相同的键值/路径接口。留空不读取；填普通键值时优先读显存缓存再读内存缓存；填路径时读硬盘 .latent。",
         },
         "notes": [
             "本节点复刻官方 WanSCAILToVideo，不包含官方 SCAIL2ColoredMask / SAM3 轨迹转彩色遮罩预处理。",
             "如果彩色遮罩不是高亮纯色，28 通道遮罩可能为空；请优先检查上游遮罩颜色是否接近 255。",
             "姿态彩色遮罩会按替换模式自动校正近黑/近白底色：动画模式黑底，人物替换白底；参考图彩色遮罩请使用 SCAIL-2 彩色遮罩节点的配对输出。",
             "帧数最好保持 4n+1，例如 81；姿态视频和遮罩会共同裁切到不超过目标帧数的 4n+1 长度。",
+            "上一段视频 Latent 直连优先级最高；未直连或直连为空时，才会按 上一段 Latent 键值/路径 读取。",
         ],
     }
 
@@ -555,6 +650,19 @@ class GJJ_WanSCAILToVideo:
                     "IMAGE",
                     {"display_name": "上一段视频帧", "tooltip": "SCAIL-2 续段可选。上一段完整解码帧队列；节点只取末尾 上一段锚定帧数 帧。"},
                 ),
+                "previous_latent": (
+                    "LATENT",
+                    {"display_name": "上一段视频 Latent", "tooltip": "SCAIL-2 续段可选。优先使用上一段输出的 Latent，取尾部 latent 作为当前段开头锚定，避免视频帧重复 VAE 编码。"},
+                ),
+                "previous_latent_cache_key": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": False,
+                        "display_name": "上一段 Latent 键值/路径",
+                        "tooltip": "和 GJJ_LoadLatentVRAM 相同：留空不读取；填普通键值时优先读显存缓存再读内存缓存；填路径时读取硬盘 .latent。",
+                    },
+                ),
             },
         }
 
@@ -582,6 +690,8 @@ class GJJ_WanSCAILToVideo:
         multi_reference_images: Any = None,
         multi_reference_masks: Any = None,
         previous_frames: Any = None,
+        previous_latent: Any = None,
+        previous_latent_cache_key: str = "",
     ):
         positive = _ensure_conditioning(positive, "正向条件")
         negative = _ensure_conditioning(negative, "负向条件")
@@ -605,7 +715,24 @@ class GJJ_WanSCAILToVideo:
         positive = _conditioning_set_values(positive, {"ref_mask_flag": ref_mask_flag})
         negative = _conditioning_set_values(negative, {"ref_mask_flag": ref_mask_flag})
 
-        prev_trimmed = _optional_image_tensor(previous_frames, "上一段视频帧")
+        cached_previous_latent = None
+        prev_latent_input = _optional_latent_samples(previous_latent, "上一段视频 Latent")
+        if prev_latent_input is None:
+            cached_previous_latent = _load_previous_latent_reference(previous_latent_cache_key)
+            prev_latent_input = _optional_latent_samples(cached_previous_latent, "上一段 Latent 键值/路径")
+        prev_latent_anchor = None
+        if prev_latent_input is not None:
+            if previous_frames is not None:
+                log.info("已连接上一段视频 Latent，优先使用 Latent，忽略上一段视频帧。")
+            elif cached_previous_latent is not None:
+                log.info("已从上一段 Latent 键值/路径读取 Latent，作为续段锚定。")
+            wanted_prev_latents = ((previous_frame_count - 1) // 4) + 1
+            used_prev_latents = min(wanted_prev_latents, int(prev_latent_input.shape[2]), int(latent.shape[2]))
+            prev_latent_anchor = prev_latent_input[:, :, -used_prev_latents:].contiguous()
+            used_anchor_frames = min(previous_frame_count, ((used_prev_latents - 1) * 4) + 1)
+            video_frame_offset = max(0, video_frame_offset - used_anchor_frames)
+
+        prev_trimmed = _optional_image_tensor(previous_frames, "上一段视频帧") if prev_latent_anchor is None else None
         if prev_trimmed is not None and int(prev_trimmed.shape[0]) > 0:
             prev_trimmed = prev_trimmed[-previous_frame_count:]
             video_frame_offset = max(0, video_frame_offset - int(prev_trimmed.shape[0]))
@@ -618,7 +745,12 @@ class GJJ_WanSCAILToVideo:
             background = None
 
         ref_image = _optional_valid_image_tensor(reference_image, "参考图片")
-        ref_mask = _optional_valid_image_tensor(reference_image_mask, "参考图彩色遮罩", allow_all_black=False)
+        ref_mask = _optional_valid_image_tensor(
+            reference_image_mask,
+            "参考图彩色遮罩",
+            allow_all_black=False,
+            allow_all_white=False,
+        )
         if ref_mask is not None and ref_image is None:
             log.warning("已连接参考图彩色遮罩，但参考图片无有效数据，已忽略该遮罩。")
             ref_mask = None
@@ -628,7 +760,12 @@ class GJJ_WanSCAILToVideo:
             ref_images_to_encode.append(("参考图片", ref_image[:1], ref_mask[:1] if ref_mask is not None else None))
 
         multi_refs = _optional_valid_image_tensor(multi_reference_images, "多参考图")
-        multi_masks = _optional_valid_image_tensor(multi_reference_masks, "多参考图遮罩", allow_all_black=False)
+        multi_masks = _optional_valid_image_tensor(
+            multi_reference_masks,
+            "多参考图遮罩",
+            allow_all_black=False,
+            allow_all_white=False,
+        )
         if multi_refs is not None:
             aligned_multi_masks = _fit_or_trim_batch(multi_masks, int(multi_refs.shape[0])) if multi_masks is not None else None
             for index in range(int(multi_refs.shape[0])):
@@ -715,11 +852,24 @@ class GJJ_WanSCAILToVideo:
             positive = _conditioning_set_values(positive, {"ref_mask_28ch": ref_mask_28ch})
             negative = _conditioning_set_values(negative, {"ref_mask_28ch": ref_mask_28ch})
 
-        if prev_trimmed is not None:
+        prev_latent_to_apply = prev_latent_anchor
+        if prev_latent_to_apply is None and prev_trimmed is not None:
             previous = _upscale_bhwc(prev_trimmed, width, height, "bicubic", "center")
-            prev_latent = vae.encode(previous[:, :, :, :3])
-            prev_latent_frames = min(int(prev_latent.shape[2]), int(latent.shape[2]))
-            latent[:, :, :prev_latent_frames] = prev_latent[:, :, :prev_latent_frames].to(latent.dtype)
+            prev_latent_to_apply = vae.encode(previous[:, :, :, :3])
+
+        if prev_latent_to_apply is not None:
+            prev_latent_to_apply = _fit_latent_batch(prev_latent_to_apply, batch_size)
+            if int(prev_latent_to_apply.shape[1]) != int(latent.shape[1]):
+                raise RuntimeError(
+                    "上一段视频 Latent 通道数不匹配："
+                    f"需要 {int(latent.shape[1])}，当前为 {int(prev_latent_to_apply.shape[1])}。"
+                )
+            prev_latent_to_apply = _resize_latent_spatial(prev_latent_to_apply, int(latent.shape[-2]), int(latent.shape[-1]))
+            prev_latent_frames = min(int(prev_latent_to_apply.shape[2]), int(latent.shape[2]))
+            latent[:, :, :prev_latent_frames] = prev_latent_to_apply[:, :, :prev_latent_frames].to(
+                device=latent.device,
+                dtype=latent.dtype,
+            )
             noise_mask = torch.ones(
                 (1, 1, latent.shape[2], latent.shape[-2], latent.shape[-1]),
                 device=latent.device,
@@ -732,6 +882,12 @@ class GJJ_WanSCAILToVideo:
             out_latent["noise_mask"] = noise_mask
 
         return (positive, negative, out_latent, video_frame_offset + length)
+
+    @classmethod
+    def IS_CHANGED(cls, previous_latent=None, previous_latent_cache_key: str = "", **_kwargs):
+        if isinstance(previous_latent, dict) and "samples" in previous_latent:
+            return ""
+        return _previous_latent_reference_signature(previous_latent_cache_key)
 
 
 class GJJ_SCAIL2ColoredMask:

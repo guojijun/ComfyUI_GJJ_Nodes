@@ -4,6 +4,9 @@ import { GJJ_Utils } from "./gjj_utils.js";
 const TARGET_NODES = new Set([
 	"GJJ_WanSCAILToVideo",
 ]);
+const INFINITY_NODES = new Set([
+	"GJJ_WanSCAILInfinity",
+]);
 const WAN_SCAIL_MIN_WIDTH = 200;
 const COLORED_MASK_NODES = new Set([
 	"GJJ_SCAIL2ColoredMask",
@@ -33,6 +36,8 @@ const INPUT_SPECS = [
 	["video_frame_offset", "INT", "video_frame_offset", "视频帧偏移", "当前分段从完整控制视频的第几帧开始。"],
 	["previous_frame_count", "INT", "previous_frame_count", "上一段锚定帧数", "续段时从上一段视频末尾取多少帧作为锚定。"],
 	["previous_frames", "IMAGE", null, "上一段视频帧", "SCAIL-2 续段可选。上一段完整解码帧队列。"],
+	["previous_latent", "LATENT", null, "上一段视频 Latent", "SCAIL-2 续段可选。优先用上一段输出 Latent，避免重复 VAE 编码。"],
+	["previous_latent_cache_key", "STRING", "previous_latent_cache_key", "上一段 Latent 键值/路径", "和 GJJ_LoadLatentVRAM 相同：留空不读取；填普通键值时优先读显存缓存再读内存缓存；填路径时读取硬盘 .latent。"],
 ];
 
 const COLORED_MASK_INPUT_SPECS = [
@@ -58,6 +63,17 @@ const COLORED_MASK_SPEC_BY_WIDGET = new Map(COLORED_MASK_SPEC_INFOS.filter((info
 const COLORED_MASK_SPEC_BY_LABEL = new Map(COLORED_MASK_SPEC_INFOS.map((info) => [info.spec[3], info]));
 const COLORED_MASK_OUTPUT_BY_NAME = new Map(COLORED_MASK_OUTPUT_SPECS.map((spec, index) => [spec[0], { spec, index }]));
 const COLORED_MASK_OUTPUT_BY_LABEL = new Map(COLORED_MASK_OUTPUT_SPECS.map((spec, index) => [spec[2], { spec, index }]));
+const INFINITY_LEGACY_INPUTS = new Set(["multi_reference_images", "multi_reference_masks"]);
+const INFINITY_LEGACY_LABELS = new Set(["多参考图", "多参考图遮罩"]);
+const INFINITY_REFERENCE_INPUTS = new Map([
+	["reference_image", ["GJJ_BATCH_IMAGE,IMAGE", "参考图片", "支持 IMAGE / GJJ_BATCH_IMAGE；多图输入时第 1 张作为主参考，后续图片自动作为多参考图。"]],
+	["reference_image_mask", ["GJJ_BATCH_IMAGE,IMAGE", "参考图片彩色遮罩", "支持 IMAGE / GJJ_BATCH_IMAGE；多图输入时第 1 张作为主遮罩，后续图片自动作为多参考图遮罩。"]],
+]);
+const INFINITY_REFERENCE_LABELS = new Map([
+	["参考图片", "reference_image"],
+	["参考图彩色遮罩", "reference_image_mask"],
+	["参考图片彩色遮罩", "reference_image_mask"],
+]);
 
 function findWidget(node, name) {
 	return Array.isArray(node?.widgets) ? node.widgets.find((widget) => String(widget?.name || "") === name) : null;
@@ -119,6 +135,58 @@ function applyInputSpec(input, spec) {
 	} else {
 		delete input.widget;
 		delete input.widget_name;
+	}
+}
+
+function removeInputAt(node, index) {
+	if (!node || !Array.isArray(node.inputs) || index < 0 || index >= node.inputs.length) return false;
+	if (node.inputs[index]?.link != null) {
+		try { node.disconnectInput?.(index); } catch (_) {}
+	}
+	try {
+		node.removeInput?.(index);
+	} catch (_) {
+		node.inputs.splice(index, 1);
+	}
+	return true;
+}
+
+function normalizeInfinityInput(input) {
+	if (!input) return false;
+	const rawName = String(input?.name || "").replace(/^converted-widget:/i, "");
+	const rawLabel = String(input?.localized_name || input?.label || input?.display_name || "");
+	const key = INFINITY_REFERENCE_INPUTS.has(rawName) ? rawName : INFINITY_REFERENCE_LABELS.get(rawLabel);
+	const spec = key ? INFINITY_REFERENCE_INPUTS.get(key) : null;
+	if (!spec) return false;
+	const [type, label, tooltip] = spec;
+	input.name = key;
+	input.type = type;
+	input.label = label;
+	input.localized_name = label;
+	input.display_name = label;
+	input.tooltip = tooltip;
+	input.hidden = false;
+	input.visible = true;
+	return true;
+}
+
+function stabilizeInfinityNode(node) {
+	if (!node || !Array.isArray(node.inputs)) return;
+	let changed = false;
+	for (let index = node.inputs.length - 1; index >= 0; index--) {
+		const input = node.inputs[index];
+		const name = String(input?.name || "").replace(/^converted-widget:/i, "");
+		const label = String(input?.localized_name || input?.label || input?.display_name || "");
+		if (INFINITY_LEGACY_INPUTS.has(name) || INFINITY_LEGACY_LABELS.has(label)) {
+			changed = removeInputAt(node, index) || changed;
+		}
+	}
+	for (const input of node.inputs || []) {
+		changed = normalizeInfinityInput(input) || changed;
+	}
+	if (changed) {
+		syncInputLinkSlots(node);
+		refreshNode(node);
 	}
 }
 
@@ -303,11 +371,16 @@ function scheduleColoredMaskStabilize(node, ms = 32) {
 	node.__gjjScail2ColoredMaskTimer = setTimeout(() => stabilizeColoredMaskNode(node), ms);
 }
 
+function scheduleInfinityStabilize(node, ms = 32) {
+	clearTimeout(node.__gjjScailInfinityTimer);
+	node.__gjjScailInfinityTimer = setTimeout(() => stabilizeInfinityNode(node), ms);
+}
+
 app.registerExtension({
 	name: "Comfy.GJJ.WanSCAILToVideoLayout",
 
 	beforeRegisterNodeDef(nodeType, nodeData) {
-		if (!TARGET_NODES.has(nodeData?.name) && !COLORED_MASK_NODES.has(nodeData?.name)) return;
+		if (!TARGET_NODES.has(nodeData?.name) && !COLORED_MASK_NODES.has(nodeData?.name) && !INFINITY_NODES.has(nodeData?.name)) return;
 
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
@@ -315,6 +388,9 @@ app.registerExtension({
 			if (COLORED_MASK_NODES.has(nodeData?.name)) {
 				scheduleColoredMaskStabilize(this, 0);
 				scheduleColoredMaskStabilize(this, 120);
+			} else if (INFINITY_NODES.has(nodeData?.name)) {
+				scheduleInfinityStabilize(this, 0);
+				scheduleInfinityStabilize(this, 120);
 			} else {
 				scheduleStabilize(this, 0);
 				scheduleStabilize(this, 120);
@@ -328,6 +404,9 @@ app.registerExtension({
 			if (COLORED_MASK_NODES.has(nodeData?.name)) {
 				scheduleColoredMaskStabilize(this, 0);
 				scheduleColoredMaskStabilize(this, 120);
+			} else if (INFINITY_NODES.has(nodeData?.name)) {
+				scheduleInfinityStabilize(this, 0);
+				scheduleInfinityStabilize(this, 120);
 			} else {
 				scheduleStabilize(this, 0);
 				scheduleStabilize(this, 120);
@@ -340,6 +419,8 @@ app.registerExtension({
 			const result = originalOnConnectionsChange?.apply(this, args);
 			if (COLORED_MASK_NODES.has(nodeData?.name)) {
 				scheduleColoredMaskStabilize(this, 16);
+			} else if (INFINITY_NODES.has(nodeData?.name)) {
+				scheduleInfinityStabilize(this, 16);
 			} else {
 				scheduleStabilize(this, 16);
 			}
@@ -351,6 +432,8 @@ app.registerExtension({
 			const result = originalOnResize?.apply(this, args);
 			if (COLORED_MASK_NODES.has(nodeData?.name)) {
 				scheduleColoredMaskStabilize(this, 16);
+			} else if (INFINITY_NODES.has(nodeData?.name)) {
+				scheduleInfinityStabilize(this, 16);
 			} else {
 				scheduleStabilize(this, 16);
 			}
@@ -373,6 +456,8 @@ app.registerExtension({
 				stabilizeNode(node);
 			} else if (COLORED_MASK_NODES.has(node?.comfyClass)) {
 				stabilizeColoredMaskNode(node);
+			} else if (INFINITY_NODES.has(node?.comfyClass)) {
+				stabilizeInfinityNode(node);
 			}
 		}
 

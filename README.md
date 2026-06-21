@@ -118,6 +118,9 @@ pip install -r requirements-accelerate.txt # 推理加速
 | `models/checkpoints/LatentSync-1.6/` | UNet / VAE / Whisper | Local LipSync 视频分支 |
 | `models/ckpts/` | big-lama.pt | LaMa 图像修复（去物补边） |
 | `models/translation/` | opus-mt-zh-en.safetensors | 中英翻译节点（旧的 opus-mt-zh-en 多文件目录仍兼容） |
+| `models/checkpoints/` | xsarchitectural_v11.ckpt 或其他 SD1.5 底模 | GJJ 涂鸦画板 / 涂鸦 ControlNet 生图 |
+| `models/controlnet/SD1.5/` | control_v11p_sd15_scribble_fp16.safetensors | GJJ 涂鸦画板 / 涂鸦 ControlNet 生图 |
+| `models/vae/` | vae-ft-mse-840000-ema-pruned.safetensors | GJJ 涂鸦画板 / 涂鸦 ControlNet 生图 |
 | `models/upscale_models/` | ESRGAN / RealESRGAN 等超分模型 | 模型图片放大器 |
 | `models/upscale_models/` | ltx-2.3-spatial-upscaler-x2 | LTX2.3 潜空间放大 |
 | `models/checkpoints/` | LTX / Flux / Wan / SD 等底模 | 各生成/视频节点 |

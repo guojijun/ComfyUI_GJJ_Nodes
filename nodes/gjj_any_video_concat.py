@@ -28,7 +28,7 @@ from .gjj_ffmpeg_tools import (
     _run,
     _safe_output_info,
     _segment_prefix_text,
-    _trim_tail_frame,
+    _trim_tail_frames,
     _unique_output_path,
     _write_audio_wav,
     _write_frames,
@@ -348,7 +348,7 @@ class GJJ_AnyVideoConcat:
                 trimmed: list[Path] = []
                 for index, path in enumerate(concat_paths):
                     if index < len(concat_paths) - 1:
-                        trimmed.append(_trim_tail_frame(path, fps_value, tmp_path, ffmpeg, ffprobe))
+                        trimmed.append(_trim_tail_frames(path, 1, fps_value, tmp_path, ffmpeg, ffprobe))
                     else:
                         trimmed.append(path)
                 concat_paths = trimmed

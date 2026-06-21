@@ -29,6 +29,12 @@ except Exception:  # pragma: no cover - allows standalone syntax checks
     parse_extra_model_chain_data = None
 
 try:
+    from .gjj_wanvideo_runtime_shims import ensure_optional_gguf_module
+except Exception:  # pragma: no cover - keeps standalone syntax checks lightweight
+    def ensure_optional_gguf_module():
+        return None
+
+try:
     from .common_utils.dependency_checker import (
         build_dependency_model_report,
         print_dependency_model_report,
@@ -52,7 +58,7 @@ DTYPES = ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"]
 WEIGHT_DTYPES = ["bf16", "fp16", "fp32"]
 WEIGHT_DTYPE_CHOICES = ["default", *WEIGHT_DTYPES]
 CLIP_TYPES = ["auto", "wan", "ltxv", "hunyuan_video", "flux", "stable_diffusion"]
-MODEL_EXTENSIONS = {".ckpt", ".pt", ".pt2", ".bin", ".pth", ".safetensors", ".pkl", ".sft"}
+MODEL_EXTENSIONS = {".ckpt", ".pt", ".pt2", ".bin", ".pth", ".safetensors", ".pkl", ".sft", ".gguf"}
 WAN_BASE_PRECISIONS = ["fp32", "bf16", "fp16", "fp16_fast"]
 WAN_QUANTIZATIONS = [
     "disabled",
@@ -200,6 +206,30 @@ def _ensure_model_folder(folder_name: str) -> None:
         existing[folder_name] = (paths, MODEL_EXTENSIONS)
 
 
+def _ensure_unet_gguf_folder() -> None:
+    existing = getattr(folder_paths, "folder_names_and_paths", {})
+    for target in ("diffusion_models", "unet"):
+        current = existing.get(target)
+        if not current:
+            continue
+        paths, exts = current
+        ext_set = set(exts or [])
+        if ".gguf" not in ext_set:
+            existing[target] = (paths, ext_set | {".gguf"})
+    if "unet_gguf" in existing:
+        return
+    for target in ("diffusion_models", "unet"):
+        current = existing.get(target)
+        if current and current[0]:
+            paths = current[0] if isinstance(current[0], (list, tuple, set)) else [current[0]]
+            existing["unet_gguf"] = (list(paths), {".gguf"})
+            return
+    models_dir = str(getattr(folder_paths, "models_dir", "") or "").strip()
+    if models_dir:
+        existing["unet_gguf"] = ([os.path.join(models_dir, "diffusion_models")], {".gguf"})
+
+
+_ensure_unet_gguf_folder()
 _ensure_model_folder("sam2")
 
 
@@ -217,6 +247,19 @@ def _unique_folders(values: list[Any] | tuple[Any, ...]) -> list[str]:
     return result
 
 
+def _dedupe(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        text = str(value or "").strip()
+        key = text.replace("\\", "/").lower()
+        if not text or key in seen:
+            continue
+        result.append(text)
+        seen.add(key)
+    return result
+
+
 def _slot_search_folders(slot: dict[str, Any], folder: str = "") -> list[str]:
     values: list[Any] = [folder or slot.get("folder", "")]
     extra = slot.get("search_folders", [])
@@ -226,6 +269,8 @@ def _slot_search_folders(slot: dict[str, Any], folder: str = "") -> list[str]:
         values.extend(extra)
     if str(slot.get("kind", "") or "").lower() == "latent_upscale_model":
         values.extend(["latent_upscale_models", "upscale_models"])
+    if "diffusion_models" in {str(value or "").strip() for value in values}:
+        values.append("unet_gguf")
     return _unique_folders(values)
 
 
@@ -895,10 +940,15 @@ def _format_slot_runtime_error(
 
 
 def _filename_list(kind: str) -> list[str]:
-    try:
-        return list(folder_paths.get_filename_list(kind))
-    except Exception:
-        return []
+    def read(folder: str) -> list[str]:
+        try:
+            return list(folder_paths.get_filename_list(folder))
+        except Exception:
+            return []
+
+    if kind == "diffusion_models":
+        return _dedupe(read("unet_gguf") + read("diffusion_models"))
+    return read(kind)
 
 
 def _filename_list_for_folders(folders: list[str] | tuple[str, ...] | str) -> list[str]:
@@ -919,7 +969,7 @@ def _is_usable_file(name: str, allow_any: bool = False) -> bool:
     lower = str(name or "").replace("\\", "/").lower().strip()
     if lower.endswith(".metadata.json"):
         return False
-    exts = (".safetensors", ".sft", ".pt", ".pth", ".ckpt", ".bin", ".torchscript.pt") if allow_any else (".safetensors", ".sft", ".ckpt", ".pt", ".pth")
+    exts = (".safetensors", ".sft", ".pt", ".pth", ".ckpt", ".bin", ".gguf", ".torchscript.pt") if allow_any else (".safetensors", ".sft", ".ckpt", ".pt", ".pth", ".gguf")
     return lower.endswith(exts)
 
 
@@ -1174,6 +1224,8 @@ def _score_name(name: str, keywords: list[str]) -> tuple[int, str]:
             score += 10
     if text.endswith(".safetensors"):
         score += 10
+    if text.endswith(".gguf"):
+        score += 6
     score -= text.count("/")
     return (-score, text)
 
@@ -1406,6 +1458,7 @@ def _load_wanvideo_runtime(unique_id: Any = None) -> dict[str, Any]:
             "缺少 " + "、".join(str(item.get("display_name") or item.get("package_name") or item.get("module_name")) for item in missing),
             unique_id=unique_id,
         )
+    ensure_optional_gguf_module()
     try:
         from ..vendor.wanvideo_wrapper import nodes_model_loading
     except Exception as error:
@@ -1588,6 +1641,8 @@ def _as_float(value: Any, default: float = 1.0) -> float:
 
 def _infer_quantization_from_model_name(name: Any) -> str:
     text = _model_basename_stem(name).lower()
+    if str(name or "").replace("\\", "/").lower().endswith(".gguf"):
+        return "disabled"
     text = re.sub(r"[^0-9a-z]+", "_", text)
     if "fp8" not in text:
         return ""
@@ -1783,26 +1838,29 @@ def _load_wanvideo_model(
     runtime = _load_wanvideo_runtime(unique_id=unique_id)
     loader = runtime["model_loading"].WanVideoModelLoader()
     extra_kwargs = _build_wanvideo_extra_model_kwargs(extra_chain, model_branch)
+    quantization = _choice(
+        slot.get("quantization"),
+        {
+            "disabled",
+            "fp8_e4m3fn",
+            "fp8_e4m3fn_fast",
+            "fp8_e4m3fn_scaled",
+            "fp8_e4m3fn_scaled_fast",
+            "fp8_e5m2",
+            "fp8_e5m2_fast",
+            "fp8_e5m2_scaled",
+            "fp8_e5m2_scaled_fast",
+        },
+        "disabled",
+    )
+    if str(model_name or "").replace("\\", "/").lower().endswith(".gguf"):
+        quantization = "disabled"
     return _unwrap_loader_output(
         loader.loadmodel(
             model=model_name,
             base_precision=_choice(slot.get("base_precision"), {"fp32", "bf16", "fp16", "fp16_fast"}, "bf16"),
             load_device=_choice(slot.get("load_device"), {"main_device", "offload_device"}, "offload_device"),
-            quantization=_choice(
-                slot.get("quantization"),
-                {
-                    "disabled",
-                    "fp8_e4m3fn",
-                    "fp8_e4m3fn_fast",
-                    "fp8_e4m3fn_scaled",
-                    "fp8_e4m3fn_scaled_fast",
-                    "fp8_e5m2",
-                    "fp8_e5m2_fast",
-                    "fp8_e5m2_scaled",
-                    "fp8_e5m2_scaled_fast",
-                },
-                "disabled",
-            ),
+            quantization=quantization,
             attention_mode=str(slot.get("attention_mode", "sdpa") or "sdpa"),
             rms_norm_function=_choice(slot.get("rms_norm_function"), {"default", "pytorch"}, "default"),
             compile_args=compile_args,

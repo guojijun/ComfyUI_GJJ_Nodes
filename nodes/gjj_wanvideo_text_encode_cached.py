@@ -16,6 +16,9 @@ try:
     )
     from .common_utils.prompt_translation import (
         COMMON_PROMPT_TRANSLATE_API_PATH,
+        TRANSLATION_BUNDLE_FILENAME,
+        TRANSLATION_BUNDLE_RELATIVE_PATH,
+        TRANSLATION_MODEL_DOWNLOAD_URL,
         TRANSLATION_MODEL_SUBDIR,
         as_bool,
         build_translation_environment_report,
@@ -31,6 +34,9 @@ except ImportError:
     )
     from common_utils.prompt_translation import (
         COMMON_PROMPT_TRANSLATE_API_PATH,
+        TRANSLATION_BUNDLE_FILENAME,
+        TRANSLATION_BUNDLE_RELATIVE_PATH,
+        TRANSLATION_MODEL_DOWNLOAD_URL,
         TRANSLATION_MODEL_SUBDIR,
         as_bool,
         build_translation_environment_report,
@@ -56,6 +62,16 @@ NEGATIVE_PROMPT = ""
 # 节点描述和帮助信息
 # ============================================================================
 _DESCRIPTION = "接收 Wan T5 编码器和正向提示词，输出打包好的 WanVideo 文本条件。"
+_TRANSLATION_MODEL_TREE = [
+    {
+        "label": "翻译模型包",
+        "folder": "translation",
+        "filename": TRANSLATION_BUNDLE_FILENAME,
+        "value": TRANSLATION_BUNDLE_RELATIVE_PATH,
+        "description": "GJJ 单文件 Opus-MT 中英翻译模型包，内部已包含配置、权重与分词文件。",
+        "icon": "🧠",
+    },
+]
 _GJJ_HELP = {
     "title": "WanVideo 文本编码（缓存版）",
     "description": "接收 GJJ 视频模型加载器或 LoadWanVideoT5TextEncoder 输出的 WANTEXTENCODER，把正向提示词编码为 WanVideo 可读取的文本条件。",
@@ -76,6 +92,11 @@ _GJJ_HELP = {
         "缺失依赖时，节点面板会显示复制安装命令按钮，点击后可在 PowerShell 中直接执行安装。",
         "安装完成后请重启 ComfyUI 服务器。",
     ],
+    "model_download_url": TRANSLATION_MODEL_DOWNLOAD_URL,
+    "static_model_tree_only": True,
+    "model_tree_priority": "static",
+    "model_tree": _TRANSLATION_MODEL_TREE,
+    "models": _TRANSLATION_MODEL_TREE,
 }
 
 

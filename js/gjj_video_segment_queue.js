@@ -44,6 +44,17 @@ const QUEUE_DELAY_MS = 360;
 
 let activeLoopNodeId = null;
 let loopTimer = null;
+let lastPromptId = null;
+let pendingLoopData = null;
+
+function eventPromptId(event) {
+	return event?.detail?.prompt_id || null;
+}
+
+function samePrompt(event) {
+	const promptId = eventPromptId(event);
+	return !(promptId && lastPromptId && promptId !== lastPromptId);
+}
 
 function findWidget(node, name) {
 	return node?.widgets?.find((widget) => widget?.name === name);
@@ -459,10 +470,17 @@ function isAutoEnabled(node) {
 	return Boolean(node?.properties?.[AUTO_PROP]);
 }
 
+function isLoopActive(node) {
+	return Boolean(node && activeLoopNodeId === String(node.id));
+}
+
 function setAutoEnabled(node, enabled) {
 	node.properties = node.properties || {};
 	node.properties[AUTO_PROP] = Boolean(enabled);
-	if (enabled) activeLoopNodeId = String(node.id);
+	if (enabled) {
+		activeLoopNodeId = String(node.id);
+		pendingLoopData = null;
+	}
 	else if (activeLoopNodeId === String(node.id)) activeLoopNodeId = null;
 	renderControls(node);
 	dirty(node);
@@ -473,7 +491,48 @@ function stopLoop(node) {
 		clearTimeout(loopTimer);
 		loopTimer = null;
 	}
+	if (!node || pendingLoopData?.node === node) {
+		pendingLoopData = null;
+	}
 	setAutoEnabled(node, false);
+}
+
+function clearLoadedLoopState(node) {
+	if (!node) return;
+	if (loopTimer && activeLoopNodeId === String(node.id)) {
+		clearTimeout(loopTimer);
+		loopTimer = null;
+	}
+	if (activeLoopNodeId === String(node.id)) {
+		activeLoopNodeId = null;
+	}
+	if (pendingLoopData?.node === node) {
+		pendingLoopData = null;
+	}
+	renderControls(node);
+}
+
+function armLoopForManualRun(node) {
+	if (!node || !isAutoEnabled(node) || isLoopActive(node) || hasExternalIndexLink(node)) {
+		return false;
+	}
+	if (loopTimer) {
+		clearTimeout(loopTimer);
+		loopTimer = null;
+	}
+	activeLoopNodeId = String(node.id);
+	pendingLoopData = null;
+	renderControls(node);
+	dirty(node);
+	return true;
+}
+
+function armFirstLoopNodeForManualRun() {
+	if (activeLoopNodeId) return;
+	for (const node of app.graph?._nodes || []) {
+		if (node?.comfyClass !== NODE_NAME) continue;
+		if (armLoopForManualRun(node)) return;
+	}
 }
 
 function ensureState(node) {
@@ -762,11 +821,12 @@ function renderControls(node) {
 	const externalMedia = hasInputLink(node, MEDIA_INPUT);
 	const externalIndex = hasExternalIndexLink(node);
 	const auto = isAutoEnabled(node) && !externalIndex;
+	const active = auto && isLoopActive(node);
 	elements.loopButton.classList.toggle("on", auto);
-	elements.loopButton.textContent = externalIndex ? "🔗 外控" : (auto ? "⏹️ 停止" : "▶️ 循环");
+	elements.loopButton.textContent = externalIndex ? "🔗 外控" : (auto ? (active ? "⏹️ 停止" : "▶️ 待运行") : "▶️ 循环");
 	elements.loopButton.title = externalIndex
 		? "已接入滑动序号：当前分段交给外部序号控制。"
-		: (auto ? "停止循环队列。" : "启动循环队列：执行后自动推进分段，到最后一段后停止。");
+		: (auto ? (active ? "停止循环队列。" : "循环已开启：点击 ComfyUI 运行后开始，并在执行完成后自动推进下一段。") : "启动循环队列：执行后自动推进分段，到最后一段后停止。");
 	elements.loopButton.style.opacity = externalIndex ? "0.72" : "1";
 	elements.browseButton.disabled = state.uploading;
 	elements.browseButton.textContent = state.uploading ? "⏳" : "📁";
@@ -845,6 +905,9 @@ function queueNext(node, data) {
 		if (node) stopLoop(node);
 		return;
 	}
+	if (!isLoopActive(node)) {
+		return;
+	}
 	const total = Number(data?.total_segments || 0);
 	if (!Number.isFinite(total) || total <= 0) {
 		stopLoop(node);
@@ -879,18 +942,34 @@ function activeLoopNode() {
 api.addEventListener("execution_error", () => {
 	const node = activeLoopNode();
 	if (node) stopLoop(node);
+	pendingLoopData = null;
 });
 
 api.addEventListener("execution_interrupted", () => {
 	const node = activeLoopNode();
 	if (node) stopLoop(node);
+	pendingLoopData = null;
 });
 
-api.addEventListener("execution_success", () => {
-	const node = activeLoopNode();
-	if (!node || node.comfyClass !== NODE_NAME) return;
-	const data = ensureState(node).lastData;
-	if (data) queueNext(node, data);
+api.addEventListener("execution_start", (event) => {
+	lastPromptId = eventPromptId(event);
+	armFirstLoopNodeForManualRun();
+	pendingLoopData = null;
+	if (loopTimer) {
+		clearTimeout(loopTimer);
+		loopTimer = null;
+	}
+});
+
+api.addEventListener("execution_success", (event) => {
+	if (!samePrompt(event)) {
+		pendingLoopData = null;
+		return;
+	}
+	const run = pendingLoopData;
+	pendingLoopData = null;
+	if (!run?.node || run.node.comfyClass !== NODE_NAME || activeLoopNodeId !== String(run.node.id)) return;
+	queueNext(run.node, run.data);
 });
 
 app.registerExtension({
@@ -913,6 +992,7 @@ app.registerExtension({
 			const result = originalOnConfigure?.apply(this, args);
 			this.properties ||= {};
 			Object.assign(this.properties, args[0]?.properties || {});
+			clearLoadedLoopState(this);
 			restorePropertiesToWidgets(this);
 			const state = ensureState(this);
 			state.selectedVideo = parseSelectedVideo(selectedVideoFromNode(this, args[0]));
@@ -950,6 +1030,8 @@ app.registerExtension({
 				if (hasExternalIndexLink(this)) {
 					setWidgetValue(this, SEGMENT_INDEX_WIDGET, Math.max(1, Number(data.current_segment || 1)));
 					stopLoop(this);
+				} else if (isAutoEnabled(this) && isLoopActive(this)) {
+					pendingLoopData = { node: this, data };
 				}
 			}
 			renderControls(this);
@@ -979,6 +1061,7 @@ app.registerExtension({
 	setup() {
 		for (const node of app.graph?._nodes || []) {
 			if (node?.comfyClass === NODE_NAME) {
+				clearLoadedLoopState(node);
 				scheduleStabilize(node, 0);
 			}
 		}

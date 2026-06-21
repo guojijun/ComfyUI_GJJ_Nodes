@@ -20,6 +20,14 @@ from .common_utils.dependency_checker import (
 	raise_dependency_model_error,
 	send_dependency_model_notice,
 )
+from .common_utils.prompt_translation import (
+	TRANSLATION_BUNDLE_FILENAME,
+	TRANSLATION_DEPENDENCY_SPECS,
+	TRANSLATION_MODEL_DOWNLOAD_URL,
+	TRANSLATION_MODEL_SUBDIR,
+	build_translation_environment_report,
+	translate_zh_to_en,
+)
 
 
 NODE_NAME = "GJJ_SAM3VideoTrackAIO"
@@ -94,6 +102,16 @@ _ENVIRONMENT_REPORT = build_dependency_model_report(
 if not _ENVIRONMENT_REPORT.get("available", True):
 	print_dependency_model_report(_ENVIRONMENT_REPORT, title="GJJ SAM3 视频跟踪模型缺失！")
 
+_TRANSLATION_ENVIRONMENT_REPORT = build_translation_environment_report(
+	node_name=DISPLAY_NAME,
+	description=(
+		"SAM3 视频跟踪会先把跟踪目标文本翻译为英文，因此需要这些依赖和本地翻译模型包。"
+		f"模型包请放到 {TRANSLATION_MODEL_SUBDIR}。"
+	),
+)
+if not _TRANSLATION_ENVIRONMENT_REPORT.get("available", True):
+	print_dependency_model_report(_TRANSLATION_ENVIRONMENT_REPORT, title="GJJ SAM3 视频跟踪翻译环境缺失！")
+
 
 SAM31_MODEL_SPEC = make_missing_model_spec(
 	label="SAM3.1 Multiplex checkpoint",
@@ -107,18 +125,28 @@ SAM31_MODEL_TREE = [
 		"path": "models/checkpoints",
 		"required": True,
 		"description": "默认 SAM3.1 Multiplex checkpoint；实际执行时会优先匹配 checkpoints 列表中第一个包含 sam3.1_multiplex 的文件。",
+	},
+	{
+		"label": TRANSLATION_BUNDLE_FILENAME,
+		"path": "models/translation",
+		"filename": TRANSLATION_BUNDLE_FILENAME,
+		"required": True,
+		"description": "GJJ 单文件 Opus-MT 中英翻译模型包，跟踪目标文本编码前固定使用。",
 	}
 ]
 SAM31_HELP = build_node_help_payload(
-	description="把官方 CheckpointLoaderSimple、CLIPTextEncode、SAM3_VideoTrack 合成一个 GJJ 单节点。",
+	description="把官方 CheckpointLoaderSimple、CLIPTextEncode、SAM3_VideoTrack 合成一个 GJJ 单节点；跟踪目标文本会先后台翻译为英文再编码。",
 	notice=(
 		_ENVIRONMENT_REPORT.get("warning_message")
-		or "需要本地 SAM3.1 Multiplex checkpoint；输入图片/视频帧后按文本目标执行视频跟踪。"
+		or _TRANSLATION_ENVIRONMENT_REPORT.get("warning_message")
+		or "需要本地 SAM3.1 Multiplex checkpoint 和 Opus-MT 翻译模型包；输入图片/视频帧后按文本目标执行视频跟踪。"
 	),
+	dependencies=TRANSLATION_DEPENDENCY_SPECS,
 	model_tree=SAM31_MODEL_TREE,
 	models=[SAM31_MODEL_SPEC],
 	usage=[
 		"模型放在 models/checkpoints 下，默认使用 sam3.1_multiplex_fp16.safetensors。",
+		"跟踪目标会先用 models/translation/opus-mt-zh-en.safetensors 自动翻译为英文，没有单独开关。",
 		"输入支持 GJJ_BATCH_IMAGE、IMAGE batch 和官方 VIDEO。",
 		"每一路输入独立执行跟踪，并输出对应的 SAM3_TRACK_DATA。",
 	],
@@ -138,6 +166,13 @@ SAM31_HELP = build_node_help_payload(
 		"missing_models": _ENVIRONMENT_REPORT.get("missing_models", []),
 		"install_cmd": _ENVIRONMENT_REPORT.get("install_cmd", ""),
 		"optional_install_cmd": _ENVIRONMENT_REPORT.get("optional_install_cmd", ""),
+		"translation_notice": _TRANSLATION_ENVIRONMENT_REPORT.get("help_message", "")
+		if not _TRANSLATION_ENVIRONMENT_REPORT.get("available", True)
+		else "",
+		"translation_install_cmd": _TRANSLATION_ENVIRONMENT_REPORT.get("install_cmd", ""),
+		"translation_copy_text": _TRANSLATION_ENVIRONMENT_REPORT.get("copy_text", ""),
+		"translation_model_download_url": _TRANSLATION_ENVIRONMENT_REPORT.get("model_download_url", ""),
+		"model_download_url": TRANSLATION_MODEL_DOWNLOAD_URL,
 	},
 )
 
@@ -364,8 +399,21 @@ class GJJ_SAM3VideoTrackAIO:
 		return json.dumps([text_prompt, checkpoint, detection_threshold, max_objects, detect_interval, route_shapes], ensure_ascii=False)
 
 	def track(self, media_01, text_prompt, checkpoint, detection_threshold=0.5, max_objects=4, detect_interval=1, unique_id=None, **kwargs):
+		source_text_prompt = str(text_prompt or "").strip()
+		translated_text_prompt = source_text_prompt
+		if source_text_prompt:
+			translated_text_prompt = translate_zh_to_en(
+				source_text_prompt,
+				"auto",
+				max_length=512,
+				batch_size=8,
+				unload_after_use=False,
+				unique_id=unique_id,
+				node_name=DISPLAY_NAME,
+				preserve_chinese_quotes=False,
+			).strip()
 		model, clip, resolved = _load_checkpoint(checkpoint, unique_id=unique_id)
-		conditioning = _encode_text(clip, text_prompt)
+		conditioning = _encode_text(clip, translated_text_prompt)
 		results = []
 		for index in range(1, MAX_ROUTES + 1):
 			media = media_01 if index == 1 else kwargs.get(f"media_{index:02d}")
@@ -379,7 +427,8 @@ class GJJ_SAM3VideoTrackAIO:
 				raise RuntimeError(
 					f"SAM3 视频跟踪第 {index} 路执行失败。\n"
 					f"模型：{resolved}\n"
-					f"目标：{text_prompt}\n"
+					f"原始目标：{source_text_prompt}\n"
+					f"翻译目标：{translated_text_prompt}\n"
 					f"详细错误：{exc}"
 				) from exc
 		return tuple(results)

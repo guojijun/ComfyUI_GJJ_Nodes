@@ -106,9 +106,20 @@ def _convert_channels_for_cat(tensor: torch.Tensor, target_channels: int) -> tor
     return torch.cat((tensor, pad), dim=-1).contiguous()
 
 
+def _cat_target_device(tensors: list[torch.Tensor]) -> torch.device:
+    if any(tensor.device.type == "cpu" for tensor in tensors):
+        return torch.device("cpu")
+    return tensors[0].device
+
+
 def _cat_with_channel_compat(tensors: list[torch.Tensor]) -> torch.Tensor:
     if not tensors:
         raise RuntimeError("批次裁剪失败：没有可合并的图片帧。")
+    target_device = _cat_target_device(tensors)
+    tensors = [
+        tensor.to(device=target_device, dtype=torch.float32, non_blocking=True, copy=False).contiguous()
+        for tensor in tensors
+    ]
     channels = [int(tensor.shape[-1]) for tensor in tensors]
     if len(set(channels)) == 1:
         return torch.cat(tensors, dim=0)

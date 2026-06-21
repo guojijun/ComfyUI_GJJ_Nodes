@@ -53,9 +53,35 @@ export async function requestPromptTranslation({
 	return data;
 }
 
+export async function translatePromptText({
+	node = null,
+	nodeId = "",
+	text = "",
+	device = "auto",
+	maxLength = 512,
+	batchSize = 8,
+	unloadAfterUse = false,
+	nodeName = "",
+	endpoint = GJJ_COMMON_PROMPT_TRANSLATE_API,
+} = {}) {
+	const data = await requestPromptTranslation({
+		node,
+		nodeId,
+		text,
+		device,
+		maxLength,
+		batchSize,
+		unloadAfterUse,
+		nodeName,
+		endpoint,
+	});
+	return String(data?.text ?? data?.positive ?? "");
+}
+
 globalThis.GJJ_CommonPromptTranslation = {
 	GJJ_COMMON_PROMPT_TRANSLATE_API,
 	GJJ_LEGACY_CLIP_PROMPT_TRANSLATE_API,
 	applyPromptTranslationDependencyNotice,
 	requestPromptTranslation,
+	translatePromptText,
 };

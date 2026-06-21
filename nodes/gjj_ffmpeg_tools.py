@@ -38,6 +38,17 @@ VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
 
 
+class AnyType(str):
+    def __ne__(self, __value: object) -> bool:
+        return False
+
+    def __eq__(self, __value: object) -> bool:
+        return True
+
+
+any_type = AnyType("*")
+
+
 def _looks_like_bad_executable_path(value: Any) -> bool:
     text = str(value or "").strip().lower()
     if not text:
@@ -827,6 +838,17 @@ def _media_input_summary(value: Any) -> str:
     return type(value).__name__
 
 
+def _dependency_signature(value: Any) -> str:
+    paths = _collect_media_paths(value, VIDEO_SUFFIXES | AUDIO_SUFFIXES)
+    if paths:
+        return ",".join(str(path) for path in paths)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return str(value)
+    if isinstance(value, torch.Tensor):
+        return f"Tensor{tuple(value.shape)}:{value.dtype}:{value.device}"
+    return f"{type(value).__name__}:{id(value)}"
+
+
 def _probe_duration(path: Path, ffprobe_path: str, ffmpeg_path: str | None = None) -> float:
     try:
         result = _run([_ffprobe(ffprobe_path, ffmpeg_path), "-v", "error", "-show_entries", "format=duration", "-of", "default=nk=1:nw=1", str(path)])
@@ -835,14 +857,76 @@ def _probe_duration(path: Path, ffprobe_path: str, ffmpeg_path: str | None = Non
         return 0.0
 
 
-def _trim_tail_frame(video_path: Path, fps: float, tmp_path: Path, ffmpeg_path: str, ffprobe_path: str) -> Path:
+def _normalize_tail_frame_count(value: Any) -> int:
+    if isinstance(value, bool):
+        return 1 if value else 0
+    text = str(value or "").strip().lower()
+    if text in {"true", "yes", "on", "enable", "enabled", "开", "是", "真"}:
+        return 1
+    if text in {"", "false", "no", "off", "disable", "disabled", "关", "否", "假"}:
+        return 0
+    try:
+        raw = int(round(float(text)))
+    except Exception:
+        return 0
+    if raw <= 0:
+        return 0
+    return max(1, (max(0, int((raw - 1 + 3) // 4)) * 4) + 1)
+
+
+def _trim_tail_frames(video_path: Path, frame_count: int, fps: float, tmp_path: Path, ffmpeg_path: str, ffprobe_path: str) -> Path:
+    frame_count = _normalize_tail_frame_count(frame_count)
+    if frame_count <= 0:
+        return video_path
     duration = _probe_duration(video_path, ffprobe_path, ffmpeg_path)
     if duration <= 0 or fps <= 0:
         return video_path
-    keep = max(0.001, duration - (1.0 / fps))
-    out = tmp_path / f"{video_path.stem}_trim_tail{video_path.suffix or '.mp4'}"
+    keep = max(0.001, duration - (float(frame_count) / float(fps)))
+    out = tmp_path / f"{video_path.stem}_trim_tail_{frame_count}{video_path.suffix or '.mp4'}"
     _run([ffmpeg_path, "-y", "-i", str(video_path), "-t", f"{keep:.6f}", "-c", "copy", str(out)])
     return out if out.exists() else video_path
+
+
+def _delete_merged_segment_files(segment_paths: list[Path], output_path: Path, tmp_path: Path | None = None) -> tuple[int, list[str]]:
+    deleted = 0
+    errors: list[str] = []
+    seen: set[str] = set()
+    try:
+        output_resolved = output_path.resolve()
+    except Exception:
+        output_resolved = output_path
+    tmp_resolved = None
+    if tmp_path is not None:
+        try:
+            tmp_resolved = tmp_path.resolve()
+        except Exception:
+            tmp_resolved = tmp_path
+
+    for raw_path in segment_paths:
+        try:
+            path = Path(raw_path).resolve()
+        except Exception:
+            path = Path(raw_path)
+        key = str(path).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if path == output_resolved or not path.is_file():
+            continue
+        if tmp_resolved is not None:
+            try:
+                path.relative_to(tmp_resolved)
+                continue
+            except ValueError:
+                pass
+            except Exception:
+                pass
+        try:
+            path.unlink()
+            deleted += 1
+        except Exception as exc:
+            errors.append(f"{path.name}: {exc}")
+    return deleted, errors
 
 
 def _concat_videos(video_paths: list[Path], output_path: Path, ffmpeg_path: str, reencode: bool = False) -> Path:
@@ -999,6 +1083,14 @@ def _first_image_frame(value: Any) -> torch.Tensor | None:
     return frames[:1].contiguous()
 
 
+def _repeated_first_image_frame(value: Any, count: int) -> torch.Tensor | None:
+    first = _first_image_frame(value)
+    if first is None:
+        return None
+    repeat_count = max(1, int(count))
+    return first.repeat((repeat_count, 1, 1, 1)).contiguous()
+
+
 def _video_timestamp_ns(path: Path) -> int:
     try:
         stat = path.stat()
@@ -1015,6 +1107,50 @@ def _format_video_timestamp(path: Path) -> str:
         return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp_ns / 1_000_000_000))
     except Exception:
         return "未知时间"
+
+
+def _format_elapsed_seconds(seconds: float) -> str:
+    value = max(0.0, float(seconds or 0.0))
+    total = int(round(value))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}小时{minutes:02d}分{secs:02d}秒"
+    if minutes > 0:
+        return f"{minutes}分{secs:02d}秒"
+    return f"{value:.1f}秒"
+
+
+def _segment_timing_text(segment_paths: list[Path]) -> str:
+    unique_paths: list[Path] = []
+    seen: set[str] = set()
+    for raw_path in segment_paths:
+        try:
+            path = Path(raw_path).resolve()
+        except Exception:
+            path = Path(raw_path)
+        key = str(path).lower()
+        if key in seen or not path.is_file():
+            continue
+        seen.add(key)
+        unique_paths.append(path)
+
+    count = len(unique_paths)
+    if count <= 0:
+        return ""
+
+    timestamps = [_video_timestamp_ns(path) for path in unique_paths]
+    intervals: list[float] = []
+    for previous, current in zip(timestamps, timestamps[1:]):
+        if previous > 0 and current > 0:
+            intervals.append(max(0.0, (current - previous) / 1_000_000_000.0))
+    if not intervals:
+        return f"\n片段：{count} 段，总耗时：无法推算"
+
+    estimated_first_elapsed = sum(intervals) / len(intervals)
+    total_elapsed = estimated_first_elapsed + sum(intervals)
+    average_text = f"，平均 {_format_elapsed_seconds(total_elapsed / max(1, count))}/段"
+    return f"\n片段：{count} 段，总耗时：{_format_elapsed_seconds(total_elapsed)}{average_text}"
 
 
 def _latest_video_key(path: Path) -> tuple[int, str]:
@@ -1210,7 +1346,7 @@ class GJJ_LatestVideoTailFrames:
             "optional": {
                 "images": ("GJJ_BATCH_IMAGE,IMAGE,VIDEO", {
                     "display_name": "首帧候选图片",
-                    "tooltip": "第一次序列还没有上一段保存视频时，使用这里输入的第一张图片作为尾帧兜底。",
+                    "tooltip": "第一次序列还没有上一段保存视频时，使用这里输入的第一张图片作为尾帧兜底，并按返回尾帧数量复制。",
                 }),
                 "slide_start_index": ("INT,FLOAT", {
                     "display_name": "滑动起始序号",
@@ -1257,12 +1393,13 @@ class GJJ_LatestVideoTailFrames:
         requested = max(1, int(frame_count))
         video_path, effective_prefix = _latest_video_from_rendered_prefix(filename_prefix, None, prompt, extra_pnginfo)
         if video_path is None:
-            fallback = _first_image_frame(images)
+            fallback = _repeated_first_image_frame(images, requested)
             if fallback is not None:
-                status = f"未找到上一段视频，已使用首帧候选图片作为第一次序列起始帧。搜索前缀：{effective_prefix or '空'}"
+                count = int(fallback.shape[0])
+                status = f"未找到上一段视频，已使用首帧候选图片复制 {count} 帧作为第一次序列起始帧。搜索前缀：{effective_prefix or '空'}"
                 return {
                     "ui": {"text": [status]},
-                    "result": (fallback, "", status, int(fallback.shape[0])),
+                    "result": (fallback, "", status, count),
                 }
             status = f"未找到同前缀视频，且未提供首帧候选图片，已输出空帧并继续。搜索前缀：{effective_prefix or '空'}"
             return {
@@ -1309,17 +1446,19 @@ class GJJ_FFmpegMuxAudioVideo:
             "required": {
                 "filename_prefix": ("STRING", {"default": "GJJ/ffmpeg/mux", "display_name": "", "tooltip": "内部兼容字段：旧工作流文件名前缀。新工作流请把 STRING 前缀接到图片帧入口。", "display": "hidden", "hidden": True}),
                 "default_fps": ("STRING", {"default": "30.0", "display_name": "", "tooltip": "内部默认帧率；帧率输入未连接或无法解析时使用。用 STRING 保持旧工作流错位值也不会阻断执行。", "display": "hidden", "hidden": True}),
-                "delete_tail_frame": ("BOOLEAN", {"default": False, "display_name": "删除尾帧", "tooltip": "开启后会删除帧队列最后一帧；合并分段视频时会删除每个非最后分段的最后一帧，避免分段边界重复。"}),
+                "delete_tail_frame": ("INT", {"default": 0, "min": 0, "max": 10001, "step": 1, "display_name": "删除尾帧数", "tooltip": "0 表示不删除；大于 0 时自动递进为 1、5、9、13...。合并分段视频时会删除每个非最后分段的尾部帧，避免分段边界重复。"}),
                 "ffmpeg_path": ("STRING", {"default": "", "display_name": "", "tooltip": "内部高级参数：ffmpeg 可执行文件路径。留空时自动查找。", "display": "hidden", "hidden": True}),
                 "ffprobe_path": ("STRING", {"default": "", "display_name": "", "tooltip": "内部高级参数：ffprobe 可执行文件路径。留空时自动查找。", "display": "hidden", "hidden": True}),
+                "delete_segments_after_merge": ("BOOLEAN", {"default": False, "display_name": "合并后删除片段", "tooltip": "开启后，合并成功并生成最终视频后删除参与合并的原始片段文件；不会删除输出成品。"}),
             },
             "optional": {
                 "condition": ("BOOLEAN", {"default": True, "display_name": "条件通行", "tooltip": "可选布尔门控；未连接时默认为真。为假时本节点不执行，下游到此停止。"}),
-                "images": (MEDIA_FRAME_INPUT_TYPE, {"display_name": "图片帧", "tooltip": "可选。支持 GJJ_BATCH_IMAGE、IMAGE、VIDEO、STRING。STRING 可是视频文件路径或分段视频前缀。"}),
+                "images": (MEDIA_FRAME_INPUT_TYPE, {"display_name": "图片帧（文件）", "tooltip": "可选。支持 GJJ_BATCH_IMAGE、IMAGE、VIDEO、STRING。STRING 可是视频文件路径或分段视频前缀。"}),
                 "audio": (AUDIO_INPUT_TYPE, {"display_name": "音频", "tooltip": "可选。支持 AUDIO、VIDEO、STRING。VIDEO/STRING 会尽量解析其中的音频轨道或文件路径。"}),
                 "fps": (FPS_INPUT_TYPE, {"display_name": "帧率", "tooltip": "可选。支持 INT、FLOAT、STRING、VIDEO；接 VIDEO 时读取其 frame_rate。"}),
                 "video_path": ("STRING", {"default": "", "display_name": "", "tooltip": "内部兼容字段：旧工作流视频路径。新工作流请使用图片帧/文件名前缀入口。", "display": "hidden", "hidden": True}),
                 "audio_path": ("STRING", {"default": "", "display_name": "", "tooltip": "内部兼容字段：旧工作流音频路径。新工作流请使用音频入口。", "display": "hidden", "hidden": True}),
+                "wait_for": (any_type, {"display_name": "等待完成", "tooltip": "任意类型依赖输入；不参与合并，只用于等待最后一段或其它上游节点执行完成后再开始合并。"}),
             },
         }
 
@@ -1328,7 +1467,7 @@ class GJJ_FFmpegMuxAudioVideo:
         cls,
         filename_prefix: str,
         default_fps: Any = "30.0",
-        delete_tail_frame: bool = False,
+        delete_tail_frame: Any = 0,
         ffmpeg_path: str = "",
         ffprobe_path: str = "",
         condition: bool = True,
@@ -1337,20 +1476,25 @@ class GJJ_FFmpegMuxAudioVideo:
         fps=None,
         video_path: str = "",
         audio_path: str = "",
+        delete_segments_after_merge: bool = False,
+        wait_for=None,
         **kwargs,
     ):
         prefix_from_images = _segment_prefix_text(_first_text_hint(images))
         effective_prefix = prefix_from_images or str(filename_prefix or "").strip() or "GJJ/ffmpeg/mux"
+        delete_tail_count = _normalize_tail_frame_count(delete_tail_frame)
         return "|".join(
             [
                 str(_condition_enabled(condition)),
-                str(bool(delete_tail_frame)),
+                str(delete_tail_count),
                 str(_fps_from_value(fps, default_fps)),
                 effective_prefix,
                 _prefixed_videos_signature(effective_prefix),
                 str(_first_text_hint(audio)),
                 str(_first_text_hint(video_path)),
                 str(_first_text_hint(audio_path)),
+                str(_condition_enabled(delete_segments_after_merge)),
+                _dependency_signature(wait_for),
             ]
         )
 
@@ -1358,7 +1502,7 @@ class GJJ_FFmpegMuxAudioVideo:
         self,
         filename_prefix: str,
         default_fps: Any = "30.0",
-        delete_tail_frame: bool = False,
+        delete_tail_frame: Any = 0,
         ffmpeg_path: str = "",
         ffprobe_path: str = "",
         condition: bool = True,
@@ -1367,6 +1511,8 @@ class GJJ_FFmpegMuxAudioVideo:
         fps=None,
         video_path: str = "",
         audio_path: str = "",
+        delete_segments_after_merge: bool = False,
+        wait_for=None,
     ):
         if not _condition_enabled(condition):
             return {
@@ -1379,8 +1525,11 @@ class GJJ_FFmpegMuxAudioVideo:
         prefix_from_images = _segment_prefix_text(_first_text_hint(images))
         effective_prefix = prefix_from_images or str(filename_prefix or "").strip() or "GJJ/ffmpeg/mux"
         fps_value = _fps_from_value(fps, default_fps)
+        delete_tail_count = _normalize_tail_frame_count(delete_tail_frame)
+        delete_segments_enabled = _condition_enabled(delete_segments_after_merge)
         output_path = _unique_output_path(effective_prefix, ".mp4", marker="Merged")
         preview_segments: list[Path] = []
+        segment_cleanup_paths: list[Path] = []
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             source_audio_from_video = None
@@ -1400,11 +1549,12 @@ class GJJ_FFmpegMuxAudioVideo:
 
             if segments:
                 preview_segments = list(segments)
-                if bool(delete_tail_frame) and len(segments) > 1:
+                segment_cleanup_paths.extend(segments)
+                if delete_tail_count > 0 and len(segments) > 1:
                     trimmed_segments = []
                     for index, segment in enumerate(segments):
                         if index < len(segments) - 1:
-                            trimmed_segments.append(_trim_tail_frame(segment, fps_value, tmp_path, ffmpeg, ffprobe))
+                            trimmed_segments.append(_trim_tail_frames(segment, delete_tail_count, fps_value, tmp_path, ffmpeg, ffprobe))
                         else:
                             trimmed_segments.append(segment)
                     segments = trimmed_segments
@@ -1416,8 +1566,9 @@ class GJJ_FFmpegMuxAudioVideo:
                     fps_value = _fps_from_value(source_fps_from_video, fps_value)
 
             if not segments and frame_tensor is not None:
-                if bool(delete_tail_frame) and int(frame_tensor.shape[0]) > 1:
-                    frame_tensor = frame_tensor[:-1].contiguous()
+                if delete_tail_count > 0 and int(frame_tensor.shape[0]) > 1:
+                    keep_frames = max(1, int(frame_tensor.shape[0]) - delete_tail_count)
+                    frame_tensor = frame_tensor[:keep_frames].contiguous()
                 frame_pattern = _write_frames(frame_tensor, tmp_path)
                 source_video = tmp_path / "source.mp4"
                 _run([ffmpeg, "-y", "-framerate", str(float(fps_value)), "-i", frame_pattern, "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source_video)])
@@ -1434,11 +1585,12 @@ class GJJ_FFmpegMuxAudioVideo:
                             f"旧视频路径={_media_input_summary(video_path)}；"
                             f"搜索前缀={segment_prefix or '空'}。"
                         )
-                    if bool(delete_tail_frame) and len(segments) > 1:
+                    segment_cleanup_paths.extend(segments)
+                    if delete_tail_count > 0 and len(segments) > 1:
                         trimmed_segments = []
                         for index, segment in enumerate(segments):
                             if index < len(segments) - 1:
-                                trimmed_segments.append(_trim_tail_frame(segment, fps_value, tmp_path, ffmpeg, ffprobe))
+                                trimmed_segments.append(_trim_tail_frames(segment, delete_tail_count, fps_value, tmp_path, ffmpeg, ffprobe))
                             else:
                                 trimmed_segments.append(segment)
                         segments = trimmed_segments
@@ -1478,6 +1630,18 @@ class GJJ_FFmpegMuxAudioVideo:
         height = int(info[2])
         if width <= 0 or height <= 0:
             width, height = _video_dimensions_from_first_segment(preview_segments, ffprobe)
+        timing_text = _segment_timing_text(segment_cleanup_paths)
+        cleanup_text = ""
+        if delete_segments_enabled:
+            if output_path.is_file() and segment_cleanup_paths:
+                deleted_count, delete_errors = _delete_merged_segment_files(segment_cleanup_paths, output_path)
+                cleanup_text = f"\n已删除片段：{deleted_count} 个"
+                if delete_errors:
+                    cleanup_text += f"，失败 {len(delete_errors)} 个：{' | '.join(delete_errors[:3])}"
+            elif not segment_cleanup_paths:
+                cleanup_text = "\n已开启合并后删除片段，但本次没有可删除的原始片段。"
+            else:
+                cleanup_text = "\n已开启合并后删除片段，但未确认输出成品存在，已跳过删除。"
         preview.update(
             {
                 "format": "video/h264-mp4",
@@ -1494,7 +1658,7 @@ class GJJ_FFmpegMuxAudioVideo:
             "preview_width": (int(width),),
             "preview_height": (int(height),),
             "preview_media": [preview],
-            "text": [f"已合并：{output_path.name}\n时长：{float(info[5]):.3f} 秒，帧数：{int(info[4])}"],
+            "text": [f"已合并：{output_path.name}\n时长：{float(info[5]):.3f} 秒，帧数：{int(info[4])}{timing_text}{cleanup_text}"],
         }
         return {"ui": ui_payload, "result": (str(output_path), float(info[5]), int(info[4]))}
 

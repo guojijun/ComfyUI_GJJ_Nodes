@@ -23,6 +23,27 @@ from .gjj_sam3_runtime import (
 	send_status,
 )
 
+try:
+	from .common_utils.dependency_checker import print_dependency_model_report
+	from .common_utils.prompt_translation import (
+		TRANSLATION_BUNDLE_FILENAME,
+		TRANSLATION_DEPENDENCY_SPECS,
+		TRANSLATION_MODEL_DOWNLOAD_URL,
+		TRANSLATION_MODEL_SUBDIR,
+		build_translation_environment_report,
+		translate_zh_to_en,
+	)
+except ImportError:
+	from common_utils.dependency_checker import print_dependency_model_report
+	from common_utils.prompt_translation import (
+		TRANSLATION_BUNDLE_FILENAME,
+		TRANSLATION_DEPENDENCY_SPECS,
+		TRANSLATION_MODEL_DOWNLOAD_URL,
+		TRANSLATION_MODEL_SUBDIR,
+		build_translation_environment_report,
+		translate_zh_to_en,
+	)
+
 
 def _empty_point_prompt():
 	return {"points": [], "labels": []}
@@ -30,6 +51,41 @@ def _empty_point_prompt():
 
 def _empty_box_prompt():
 	return {"boxes": [], "labels": []}
+
+
+_SAM3_TEXT_TRANSLATION_MODEL_TREE = [
+	{
+		"label": "SAM3 模型",
+		"path": "models/sam3",
+		"folder": "sam3",
+		"filename": "sam3.safetensors",
+		"value": "sam3.safetensors",
+		"description": "SAM3 文本分割模型；节点下拉框会自动搜索 models/sam3 及其子目录。",
+		"icon": "🧠",
+	},
+	{
+		"label": "翻译模型包",
+		"path": "models/translation",
+		"folder": "translation",
+		"filename": TRANSLATION_BUNDLE_FILENAME,
+		"value": TRANSLATION_BUNDLE_FILENAME,
+		"description": "GJJ 单文件 Opus-MT 中英翻译模型包，SAM3 文本提示执行前固定使用。",
+		"icon": "🌐",
+	},
+]
+
+_SAM3_TEXT_TRANSLATION_ENVIRONMENT_REPORT = build_translation_environment_report(
+	node_name="GJJ · 📝 SAM3文本分割器",
+	description=(
+		"SAM3 文本分割会先把文本提示翻译为英文，因此需要这些依赖和本地翻译模型包。"
+		f"模型包请放到 {TRANSLATION_MODEL_SUBDIR}。"
+	),
+)
+if not _SAM3_TEXT_TRANSLATION_ENVIRONMENT_REPORT.get("available", True):
+	try:
+		print_dependency_model_report(_SAM3_TEXT_TRANSLATION_ENVIRONMENT_REPORT, title="GJJ SAM3 文本分割翻译环境缺失")
+	except Exception:
+		pass
 
 
 class GJJ_SAM3PointCollector:
@@ -403,6 +459,31 @@ class GJJ_SAM3PointSegmenter:
 
 class GJJ_SAM3TextSegmenter:
 	DESCRIPTION = "SAM3 文本分割器。输入自然语言描述，例如“人物”“红色汽车”，节点会尝试返回所有匹配目标的遮罩。"
+	GJJ_HELP = {
+		"title": "SAM3文本分割器",
+		"description": (
+			"SAM3 文本分割器。输入自然语言目标描述后，节点会先调用公共 Opus-MT 翻译函数"
+			"将提示词翻译为英文，再交给 SAM3 执行开放词汇分割。"
+		),
+		"usage": [
+			"连接输入图像，填写中文或英文目标描述，例如：人物、红色汽车、tree。",
+			"执行时文本提示会自动翻译为英文；这个翻译步骤是固定流程，没有单独开关。",
+			"SAM3 模型从 models/sam3 及其子目录搜索；翻译模型包使用 models/translation/opus-mt-zh-en.safetensors。",
+			"正向框可缩小检测范围，反向框可排除不参与检测的区域。",
+		],
+		"translation_notice": _SAM3_TEXT_TRANSLATION_ENVIRONMENT_REPORT.get("help_message", "")
+		if not _SAM3_TEXT_TRANSLATION_ENVIRONMENT_REPORT.get("available", True)
+		else "",
+		"translation_install_cmd": _SAM3_TEXT_TRANSLATION_ENVIRONMENT_REPORT.get("install_cmd", ""),
+		"translation_copy_text": _SAM3_TEXT_TRANSLATION_ENVIRONMENT_REPORT.get("copy_text", ""),
+		"translation_model_download_url": _SAM3_TEXT_TRANSLATION_ENVIRONMENT_REPORT.get("model_download_url", ""),
+		"model_download_url": TRANSLATION_MODEL_DOWNLOAD_URL,
+		"static_model_tree_only": True,
+		"model_tree_priority": "static",
+		"model_tree": _SAM3_TEXT_TRANSLATION_MODEL_TREE,
+		"models": _SAM3_TEXT_TRANSLATION_MODEL_TREE,
+		"dependencies": [spec.get("description", "") for spec in TRANSLATION_DEPENDENCY_SPECS],
+	}
 
 	@classmethod
 	def INPUT_TYPES(cls):
@@ -485,7 +566,24 @@ class GJJ_SAM3TextSegmenter:
 		negative_boxes=None,
 		unique_id=None,
 	):
+		source_text_prompt = str(text_prompt or "").strip()
+		translated_text_prompt = source_text_prompt
 		try:
+			if source_text_prompt:
+				send_status(unique_id, "翻译文本提示…")
+				translated_text_prompt = translate_zh_to_en(
+					source_text_prompt,
+					"auto",
+					max_length=512,
+					batch_size=8,
+					unload_after_use=False,
+					unique_id=unique_id,
+					node_name="GJJ · 📝 SAM3文本分割器",
+					preserve_chinese_quotes=False,
+				).strip()
+				if translated_text_prompt:
+					send_status(unique_id, f"翻译完成：{translated_text_prompt[:80]}")
+
 			send_status(unique_id, "加载 SAM3 模型…")
 			sam3 = get_or_build_model(sam3_model, precision=precision, compile_model=False)
 			comfy.model_management.load_models_gpu([sam3])
@@ -499,9 +597,9 @@ class GJJ_SAM3TextSegmenter:
 			img_w, img_h = pil_image.size
 			state = processor.set_image(pil_image)
 
-			if str(text_prompt or "").strip():
+			if translated_text_prompt:
 				send_status(unique_id, "执行文本检测…")
-				state = processor.set_text_prompt(str(text_prompt).strip(), state)
+				state = processor.set_text_prompt(translated_text_prompt, state)
 
 			if positive_boxes is not None and len(positive_boxes.get("boxes", [])) > 0:
 				state = processor.add_multiple_box_prompts(positive_boxes["boxes"], positive_boxes["labels"], state)
@@ -514,7 +612,7 @@ class GJJ_SAM3TextSegmenter:
 
 			if masks is None or len(masks) == 0:
 				empty_mask = torch.zeros(1, img_h, img_w)
-				send_status(unique_id, f"未检测到目标：{text_prompt}")
+				send_status(unique_id, f"未检测到目标：{translated_text_prompt or source_text_prompt}")
 				return (
 					empty_mask,
 					pil_to_comfy_image(pil_image),
@@ -551,7 +649,8 @@ class GJJ_SAM3TextSegmenter:
 			raise RuntimeError(
 				" SAM3 文本分割节点执行失败。\n"
 				f"模型：{sam3_model}\n"
-				f"提示词：{text_prompt}\n"
+				f"原始提示词：{source_text_prompt}\n"
+				f"翻译提示词：{translated_text_prompt}\n"
 				f"详细错误：{exc}"
 			) from exc
 

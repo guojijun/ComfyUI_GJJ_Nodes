@@ -33,6 +33,7 @@ UPLOAD_SUBFOLDER = "gjj_multi_video_loader"
 MAX_SELECTED_VIDEOS = 20
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".wmv", ".flv", ".gif"}
 ENABLED_OUTPUTS_PROPERTY = "enabled_outputs"
+SELECTED_VIDEOS_PROPERTY = "selected_videos"
 PREVIEW_MAX_FRAMES = 96
 PREVIEW_MAX_EDGE = 250
 OPTIONAL_OUTPUT_DEFS = {
@@ -387,12 +388,44 @@ def recover_selected_videos(raw_value: Any, extra_pnginfo: Any = None, unique_id
             continue
         properties = node.get("properties")
         if isinstance(properties, dict):
-            from_property = parse_selected_videos(properties.get("selected_videos"))
+            from_property = parse_selected_videos(properties.get(SELECTED_VIDEOS_PROPERTY))
             if from_property:
                 candidates.append(from_property)
     if unique_id is not None and candidates:
         return candidates[0]
     return candidates[0] if len(candidates) == 1 else []
+
+
+def _is_prompt_link(value: Any) -> bool:
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        return True
+    if isinstance(value, dict):
+        return any(key in value for key in ("node_id", "node", "slot", "output", "link"))
+    return False
+
+
+def _prompt_node(prompt: Any, unique_id: Any) -> dict[str, Any] | None:
+    if not isinstance(prompt, dict) or unique_id is None:
+        return None
+    for key in (unique_id, str(unique_id)):
+        node = prompt.get(key)
+        if isinstance(node, dict):
+            return node
+    try:
+        node = prompt.get(int(unique_id))
+        if isinstance(node, dict):
+            return node
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def prompt_has_linked_input(prompt: Any, unique_id: Any, input_name: str) -> bool:
+    node = _prompt_node(prompt, unique_id)
+    inputs = node.get("inputs") if isinstance(node, dict) else None
+    if not isinstance(inputs, dict):
+        return False
+    return _is_prompt_link(inputs.get(input_name))
 
 
 def parse_enabled_outputs(raw_value: Any) -> list[str]:
@@ -1133,6 +1166,14 @@ class GJJ_MultiVideoLoader:
                         "tooltip": "开启后前端按刷新时间自动重新扫描视频列表，适合监控分段生成的视频。",
                     }),
                 ),
+                "selected_videos_json": (
+                    "STRING",
+                    _hidden_panel_widget({
+                        "default": "[]",
+                        "display_name": "已选视频JSON",
+                        "tooltip": "内部保存用：记录面板中选择的视频，重新打开工作流后用于恢复真实源视频。",
+                    }),
+                ),
             },
             "optional": {
                 "input_frames": ("GJJ_BATCH_IMAGE,IMAGE,VIDEO", {"display_name": "视频帧队列", "tooltip": "非必选：可直接输入上游帧队列。接入后优先使用输入帧，未接入时读取下拉选择的视频。"}),
@@ -1346,12 +1387,13 @@ class GJJ_MultiVideoLoader:
         filter_directory=None,
         refresh_interval=None,
         auto_refresh=False,
+        selected_videos_json=None,
         input_frames=None,
         prompt=None,
         extra_pnginfo=None,
         unique_id=None,
     ):
-        selected = recover_selected_videos(None, extra_pnginfo, unique_id)
+        selected = recover_selected_videos(selected_videos_json, extra_pnginfo, unique_id)
         enabled_outputs = recover_enabled_outputs(None, extra_pnginfo, unique_id)
         enabled_output_set = set(enabled_outputs or [])
         audio_enabled = bool({"audio", "processed_video"} & enabled_output_set)
@@ -1381,6 +1423,8 @@ class GJJ_MultiVideoLoader:
         first_last_frames = None
 
         external_video = self._coerce_external_video(input_frames)
+        if external_video is not None and selected and isinstance(prompt, dict) and not prompt_has_linked_input(prompt, unique_id, "input_frames"):
+            external_video = None
         if external_video is not None:
             raw_external_frames = external_video["frames"]
             source_fps = float(external_video.get("fps") or output_fps)
@@ -1502,7 +1546,7 @@ class GJJ_MultiVideoLoader:
         final_height = int(batch_output.shape[1]) if int(batch_output.ndim) == 4 else 0
 
         preview_entries: list[dict[str, Any]] = []
-        if int(batch_output.shape[0]) > 0:
+        if selected_count != 1 and int(batch_output.shape[0]) > 0:
             preview_tensor = batch_output
             preview_fps = max(1.0, float(output_fps or _effective_output_fps(source_fps, frame_stride_val)))
             preview_entries = _save_sequence_webp_preview(preview_tensor, preview_fps)
@@ -1555,17 +1599,18 @@ class GJJ_MultiVideoLoader:
             if key in optional_values:
                 result.append(optional_values[key])
 
+        ui_payload = {
+            "preview_images": [] if selected_count == 1 else preview_entries,
+            "video_count": [selected_count],
+            "frame_count": [int(batch_output.shape[0])],
+            "source_fps": [float(source_fps)],
+            "frame_rate": [float(output_fps)],
+            "width": [int(final_width)],
+            "height": [int(final_height)],
+            "video_format": [output_format],
+        }
         return {
-            "ui": {
-                "preview_images": preview_entries,
-                "video_count": [selected_count],
-                "frame_count": [int(batch_output.shape[0])],
-                "source_fps": [float(source_fps)],
-                "frame_rate": [float(output_fps)],
-                "width": [int(final_width)],
-                "height": [int(final_height)],
-                "video_format": [output_format],
-            },
+            "ui": ui_payload,
             "result": tuple(result),
         }
 

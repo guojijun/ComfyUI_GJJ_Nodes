@@ -20,12 +20,14 @@ def _build_node_help_payload():
 	payload = {}
 	for node_name, node_cls in NODE_CLASS_MAPPINGS.items():
 		help_data = getattr(node_cls, "GJJ_HELP", None)
+		ui_data = getattr(node_cls, "GJJ_UI", None)
 		required_models = getattr(node_cls, "REQUIRED_MODELS", None)
 		if help_data is None and required_models:
 			help_data = {"models": required_models}
 		payload[str(node_name)] = {
 			"description": str(getattr(node_cls, "DESCRIPTION", "") or ""),
 			"help": _serialize_help_value(help_data or {}),
+			"ui": _serialize_help_value(ui_data or {}),
 		}
 	return payload
 def _register_gjj_help_api():

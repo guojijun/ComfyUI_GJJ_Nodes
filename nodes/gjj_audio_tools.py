@@ -9,6 +9,9 @@ import torch
 import torch.nn.functional as F
 from PIL import Image, ImageDraw
 
+MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
+IMAGE_OUTPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
+
 
 def _parse_time(value: str | float | int) -> float:
     text = str(value).strip()
@@ -71,6 +74,115 @@ def _visualize_beats(waveform: torch.Tensor, sample_rate: int, beats: list[float
         draw.line((x, 24, x, height - 24), fill=(235, 115, 95), width=2)
     draw.text((14, 10), f"BPM {bpm:.2f} / Beats {len(beats)} / {duration:.2f}s", fill=(220, 232, 226))
     return torch.from_numpy(np.asarray(image).astype(np.float32) / 255.0).unsqueeze(0)
+
+
+def _component_value(value: Any, key: str) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def _video_components(value: Any) -> dict[str, Any] | None:
+    if hasattr(value, "get_components"):
+        try:
+            components = value.get_components()
+        except Exception:
+            return None
+        return {
+            "images": _component_value(components, "images"),
+            "frames": _component_value(components, "frames"),
+            "audio": _component_value(components, "audio"),
+            "frame_rate": _component_value(components, "frame_rate"),
+        }
+    if isinstance(value, dict) and any(key in value for key in ("images", "image", "frames", "audio", "frame_rate", "fps")):
+        return value
+    return None
+
+
+def _normalize_image_tensor(value: torch.Tensor, label: str) -> torch.Tensor:
+    tensor = value.detach()
+    if tensor.ndim == 3:
+        tensor = tensor.unsqueeze(0)
+    elif tensor.ndim > 4 and int(tensor.shape[-1]) in (1, 2, 3, 4):
+        tensor = tensor.reshape(-1, int(tensor.shape[-3]), int(tensor.shape[-2]), int(tensor.shape[-1]))
+    if tensor.ndim != 4:
+        raise RuntimeError(f"{label} 必须是 IMAGE/GJJ_BATCH_IMAGE/VIDEO 帧张量，实际维度为 {tuple(tensor.shape)}。")
+    if int(tensor.shape[-1]) not in (1, 2, 3, 4) and int(tensor.shape[1]) in (1, 2, 3, 4):
+        tensor = tensor.permute(0, 2, 3, 1)
+    channels = int(tensor.shape[-1])
+    if channels == 1:
+        tensor = tensor.repeat(1, 1, 1, 3)
+    elif channels == 2:
+        tensor = tensor[..., :1].repeat(1, 1, 1, 3)
+    elif channels >= 4:
+        tensor = tensor[..., :3]
+    elif channels != 3:
+        raise RuntimeError(f"{label} 图像通道数无效：{tuple(tensor.shape)}。")
+    if int(tensor.shape[0]) <= 0:
+        raise RuntimeError(f"{label} 没有可用画面帧。")
+    return tensor.float().clamp(0.0, 1.0).contiguous()
+
+
+def _iter_media_values(value: Any) -> list[Any]:
+    if value is None or isinstance(value, (str, bytes, bytearray)) or torch.is_tensor(value):
+        return []
+    if isinstance(value, dict):
+        values = []
+        for key in ("images", "image", "frames", "frame", "batch", "samples", "items", "values"):
+            if key in value:
+                values.append(value[key])
+        return values
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    values = []
+    for name in ("images", "image", "frames", "frame", "batch", "samples", "items", "values"):
+        try:
+            item = getattr(value, name, None)
+        except Exception:
+            item = None
+        if item is not None and item is not value:
+            values.append(item)
+    return values
+
+
+def _extract_media_frames_audio(value: Any, label: str = "源视频") -> tuple[torch.Tensor | None, dict[str, Any] | None, float]:
+    if value is None:
+        return None, None, 0.0
+    components = _video_components(value)
+    audio = None
+    fps = 0.0
+    if components is not None:
+        audio_candidate = components.get("audio")
+        if isinstance(audio_candidate, dict) and isinstance(audio_candidate.get("waveform"), torch.Tensor):
+            audio = audio_candidate
+        for key in ("frame_rate", "fps", "source_fps"):
+            try:
+                fps = float(components.get(key) or 0.0)
+            except Exception:
+                fps = 0.0
+            if fps > 0:
+                break
+        for key in ("images", "image", "frames", "frame"):
+            frames = components.get(key)
+            if isinstance(frames, torch.Tensor):
+                return _normalize_image_tensor(frames, label), audio, fps
+    if isinstance(value, torch.Tensor):
+        return _normalize_image_tensor(value, label), audio, fps
+    for item in _iter_media_values(value):
+        frames, nested_audio, nested_fps = _extract_media_frames_audio(item, label)
+        if audio is None:
+            audio = nested_audio
+        if fps <= 0:
+            fps = nested_fps
+        if frames is not None:
+            return frames, audio, fps
+    return None, audio, fps
+
+
+def _empty_image() -> torch.Tensor:
+    return torch.zeros((1, 1, 1, 3), dtype=torch.float32)
 
 
 class GJJ_AudioCrop:
@@ -192,14 +304,15 @@ class GJJ_AudioBeatAnalyzer:
 class GJJ_AudioFrameCount8NPlus1:
     CATEGORY = "GJJ/音频"
     FUNCTION = "calculate"
-    DESCRIPTION = "输入人声和可选背景声，已满足 8n+1 时原样输出；否则只在末尾补静音到 8n+1，不改变人声主体音色。"
+    DESCRIPTION = "输入人声和可选背景声，已满足 8n+1 时原样输出；否则只在末尾补静音到 8n+1；可选接入视频/画面，视频音频会从第一路音频输出对齐后输出。"
     SEARCH_ALIASES = ["audio fps frame count", "8n+1", "音频帧数", "帧率"]
-    RETURN_TYPES = ("AUDIO", "AUDIO", "INT")
-    RETURN_NAMES = ("对齐人声", "对齐背景声", "8n+1帧数")
+    RETURN_TYPES = ("AUDIO", "AUDIO", "INT", IMAGE_OUTPUT_TYPE)
+    RETURN_NAMES = ("对齐人声", "对齐背景声", "8n+1帧数", "画面")
     OUTPUT_TOOLTIPS = (
-        "满足 8n+1 时原样输出；否则只在末尾补静音到 8n+1 的人声 AUDIO。",
+        "源视频带音频时输出对齐后的源音频；否则输出对齐后的人声 AUDIO。",
         "按同一目标长度处理后的背景声 AUDIO；未接背景声时输出等长静音。",
         "最终对齐帧数，保证满足 8n+1。",
+        "从源视频 / IMAGE / GJJ_BATCH_IMAGE 输入拆出的画面帧，类型兼容 GJJ_BATCH_IMAGE 和 IMAGE。",
     )
 
     @classmethod
@@ -221,6 +334,7 @@ class GJJ_AudioFrameCount8NPlus1:
             },
             "optional": {
                 "background_audio": ("AUDIO", {"display_name": "背景声", "tooltip": "可选背景声，会和人声使用同一个目标时长对齐。"}),
+                "source_video": (MEDIA_INPUT_TYPE, {"display_name": "源视频/画面", "tooltip": "可选。支持 GJJ_BATCH_IMAGE、IMAGE 和官方 VIDEO；VIDEO 会拆出画面与源音频。"}),
             },
         }
 
@@ -281,8 +395,18 @@ class GJJ_AudioFrameCount8NPlus1:
     def _is_8n_plus_1(frame_count: int) -> bool:
         return int(frame_count) >= 1 and (int(frame_count) - 1) % 8 == 0
 
-    def calculate(self, vocal_audio: dict[str, Any], fps: float = 24.0, background_audio: dict[str, Any] | None = None):
-        vocal_source, vocal_waveform, sample_rate = self._normalize_audio(vocal_audio, "人声")
+    def calculate(
+        self,
+        vocal_audio: dict[str, Any],
+        fps: float = 24.0,
+        background_audio: dict[str, Any] | None = None,
+        source_video: Any = None,
+    ):
+        source_frames, source_audio, _source_fps = _extract_media_frames_audio(source_video, "源视频/画面")
+        if source_audio is not None:
+            vocal_source, vocal_waveform, sample_rate = self._normalize_audio(source_audio, "源音频")
+        else:
+            vocal_source, vocal_waveform, sample_rate = self._normalize_audio(vocal_audio, "人声")
         total_samples = int(vocal_waveform.shape[-1])
         frame_rate = max(0.01, float(fps))
         raw_frames = self._frame_count_from_samples(total_samples, sample_rate, frame_rate)
@@ -307,7 +431,8 @@ class GJJ_AudioFrameCount8NPlus1:
         else:
             aligned_background = self._silent_audio_like(vocal_waveform, sample_rate, target_samples)
 
-        return (aligned_vocal, aligned_background, int(aligned_frames))
+        image_output = source_frames if source_frames is not None else _empty_image()
+        return (aligned_vocal, aligned_background, int(aligned_frames), image_output)
 
 
 class GJJ_AudioVocalBackgroundMixer:
@@ -409,6 +534,6 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "GJJ_AudioCrop": "GJJ · ✂️ 音频裁剪",
     "GJJ_AudioBeatAnalyzer": "GJJ · 🥁 音频节拍分析",
-    "GJJ_AudioFrameCount8NPlus1": "GJJ · 🎞️ 音频帧数 8n+1",
+    "GJJ_AudioFrameCount8NPlus1": "GJJ · 🎞️ 视频\音频帧数 8n+1",
     "GJJ_AudioVocalBackgroundMixer": "GJJ · 🎚️ 人声背景合并",
 }

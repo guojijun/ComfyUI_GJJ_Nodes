@@ -13,7 +13,10 @@ try:
     from .common_utils.dependency_checker import print_dependency_model_report
     from .common_utils.prompt_translation import (
         COMMON_PROMPT_TRANSLATE_API_PATH,
+        TRANSLATION_BUNDLE_FILENAME,
+        TRANSLATION_BUNDLE_RELATIVE_PATH,
         TRANSLATION_DEPENDENCY_SPECS,
+        TRANSLATION_MODEL_DOWNLOAD_URL,
         TRANSLATION_MODEL_SUBDIR,
         as_bool,
         build_translation_environment_report,
@@ -25,7 +28,10 @@ except ImportError:
     from common_utils.dependency_checker import print_dependency_model_report
     from common_utils.prompt_translation import (
         COMMON_PROMPT_TRANSLATE_API_PATH,
+        TRANSLATION_BUNDLE_FILENAME,
+        TRANSLATION_BUNDLE_RELATIVE_PATH,
         TRANSLATION_DEPENDENCY_SPECS,
+        TRANSLATION_MODEL_DOWNLOAD_URL,
         TRANSLATION_MODEL_SUBDIR,
         as_bool,
         build_translation_environment_report,
@@ -91,6 +97,17 @@ _CN_NUMBER_MAP = {
     "八": 8,
     "九": 9,
 }
+
+_TRANSLATION_MODEL_TREE = [
+    {
+        "label": "翻译模型包",
+        "folder": "translation",
+        "filename": TRANSLATION_BUNDLE_FILENAME,
+        "value": TRANSLATION_BUNDLE_RELATIVE_PATH,
+        "description": "GJJ 单文件 Opus-MT 中英翻译模型包，内部已包含配置、权重与分词文件。",
+        "icon": "🧠",
+    },
+]
 
 _TRANSLATION_ENVIRONMENT_REPORT = build_translation_environment_report(
     node_name=NODE_DISPLAY_NAME,
@@ -486,6 +503,11 @@ class GJJ_TextEncodeQwenImageEditPlus:
         "translation_install_cmd": _TRANSLATION_ENVIRONMENT_REPORT.get("install_cmd", ""),
         "translation_copy_text": _TRANSLATION_ENVIRONMENT_REPORT.get("copy_text", ""),
         "translation_model_download_url": _TRANSLATION_ENVIRONMENT_REPORT.get("model_download_url", ""),
+        "model_download_url": TRANSLATION_MODEL_DOWNLOAD_URL,
+        "static_model_tree_only": True,
+        "model_tree_priority": "static",
+        "model_tree": _TRANSLATION_MODEL_TREE,
+        "models": _TRANSLATION_MODEL_TREE,
         "dependencies": [spec.get("description", "") for spec in TRANSLATION_DEPENDENCY_SPECS],
     }
 

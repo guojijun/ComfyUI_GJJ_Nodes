@@ -111,6 +111,7 @@ const STATUS_ENABLED_CLASSES = new Set([
 	"GJJ_CheckpointDirectGenerator",
 	"GJJ_CosyVoice3Generator",
 	"GJJ_FasterWhisperASR",
+	"GJJ_F2KMultiImagePoseTransfer",
 	"GJJ_FishAudioS2Generator",
 	"GJJ_FlashVSRVideoUpscaler",
 	"GJJ_HuMoWhisperEmbeds",
@@ -130,6 +131,7 @@ const STATUS_ENABLED_CLASSES = new Set([
 	"GJJ_VideoCombine",
 	"GJJ_Wan22FirstLastVideo",
 	"GJJ_Wan22RapidAIOMega",
+	"GJJ_WanSCAILInfinity",
 	"GJJ_WanVideoSamplerV2",
 	"GJJ_WanVideoVAELoader",
 ]);
@@ -140,6 +142,7 @@ const PRESERVE_DETAILED_COMPLETION_CLASSES = new Set([
 	"GJJ_OldPhotoRestorer",
 ]);
 const CORE_PROGRESS_STATUS_CLASSES = new Set([
+	"GJJ_WanSCAILInfinity",
 	"GJJ_WanVideoSamplerV2",
 ]);
 const LEGACY_STATUS_WIDGET_POLICIES = new Map([
@@ -1311,7 +1314,7 @@ function modelTreeItems(items) {
 function createModelTreeDownloadLink(url = DEFAULT_MODEL_DOWNLOAD_URL) {
 	const link = createModelDownloadLink(url);
 	link.className = "gjj-help-model-tree-link";
-	link.textContent = "## [🌏 模型下载](https://pan.quark.cn/s/6ec846f1f58d)";
+	link.textContent = "🌏 模型下载";
 	link.title = link.href;
 	return link;
 }
@@ -1585,7 +1588,7 @@ function showHelpDialog(node) {
 		noticeText,
 		JSON.stringify(meta?.help || {}),
 	].map((item) => String(item || "")).join(" ");
-	isClipPromptPanel = isClipPromptPanel || /GJJ_CLIPPromptEncodePanel|CLIPPromptEncodePanel|CLIP正负提示词编码|opus-mt-zh-en/i.test(helpBlob);
+	isClipPromptPanel = isClipPromptPanel || /GJJ_CLIPPromptEncodePanel|CLIPPromptEncodePanel|CLIP正负提示词编码/i.test(helpBlob);
 	if (isClipPromptPanel && /缺失模型|翻译环境缺失/.test(descriptionText)) {
 		descriptionText = clipPromptEncodeFallbackDescription();
 	}

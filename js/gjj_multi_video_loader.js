@@ -4,6 +4,7 @@ import { api } from "/scripts/api.js";
 const TARGET_NODES = new Set(["GJJ_MultiVideoLoader"]);
 const NODE_CLASS_NAME = "GJJ_MultiVideoLoader";
 const DATA_PROPERTY = "selected_videos";
+const SELECTED_WIDGET_NAME = "selected_videos_json";
 const INPUTS_PROPERTY = "enabled_inputs";
 const OUTPUTS_PROPERTY = "enabled_outputs";
 const TAB_PROPERTY = "active_tab";
@@ -16,7 +17,7 @@ const MAX_SELECTED_VIDEOS = 20;
 const MIN_WIDTH = 260;
 const MIN_HEIGHT = 220;
 const DOM_WIDGET_NAME = "gjj_multi_video_loader_dom";
-const DOM_VERSION = 11;
+const DOM_VERSION = 15;
 const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
 const FIRST_LAST_FRAME_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const OPTIONAL_INPUT_NAME = "input_frames";
@@ -24,8 +25,8 @@ const OPTIONAL_INPUT_DISPLAY_NAME = "视频帧队列";
 const OPTIONAL_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
 const FILE_NAME_COLLATOR = new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "base" });
 
-const PARAM_WIDGET_NAMES = new Set(["frame_rate", "width", "height", "video_format", "start_frame", "end_frame", "frame_stride", "max_frames", "filter_keyword", "filter_directory", "refresh_interval", "auto_refresh"]);
-const PARAM_WIDGET_LABELS = new Set(["帧率", "宽度", "高度", "视频格式", "起始帧", "结束帧", "抽帧间隔", "最大帧数", "过滤关键词", "过滤目录", "刷新时间", "定时刷新"]);
+const PARAM_WIDGET_NAMES = new Set(["frame_rate", "width", "height", "video_format", "start_frame", "end_frame", "frame_stride", "max_frames", "filter_keyword", "filter_directory", "refresh_interval", "auto_refresh", SELECTED_WIDGET_NAME]);
+const PARAM_WIDGET_LABELS = new Set(["帧率", "宽度", "高度", "视频格式", "起始帧", "结束帧", "抽帧间隔", "最大帧数", "过滤关键词", "过滤目录", "刷新时间", "定时刷新", "已选视频JSON"]);
 const PARAM_WIDGET_ALIASES = new Map([
 	["帧率", "frame_rate"],
 	["宽度", "width"],
@@ -39,6 +40,7 @@ const PARAM_WIDGET_ALIASES = new Map([
 	["过滤目录", "filter_directory"],
 	["刷新时间", "refresh_interval"],
 	["定时刷新", "auto_refresh"],
+	["已选视频JSON", SELECTED_WIDGET_NAME],
 ]);
 const PARAM_DEFS = [
 	{ name: "frame_rate", label: "帧率", kind: "number", step: "0.01", min: "1", max: "240", default: 24.0, tip: "最终输出帧率；修改抽帧间隔时会同步为源帧率 ÷ 抽帧间隔。" },
@@ -53,6 +55,17 @@ const PARAM_DEFS = [
 	{ name: "filter_directory", label: "过滤目录", kind: "text", default: "", tip: "只显示 input 下相对目录包含该文本的视频；留空不过滤。" },
 	{ name: "refresh_interval", label: "刷新时间", kind: "number", step: "0.5", min: "1", max: "3600", default: 5.0, tip: "定时刷新开启时，每隔多少秒重新扫描视频列表。" },
 ];
+const AUTO_MEDIA_INFO_PARAM_NAMES = ["frame_rate", "width", "height", "video_format", "start_frame", "end_frame", "frame_stride", "max_frames"];
+const AUTO_MEDIA_INFO_DEFAULTS = new Map([
+	["frame_rate", [0, 1, 24]],
+	["width", [0]],
+	["height", [0]],
+	["video_format", ["", "video/h264-mp4"]],
+	["start_frame", [0]],
+	["end_frame", [0]],
+	["frame_stride", [1]],
+	["max_frames", [1, 240]],
+]);
 const INPUT_DEFS = [
 	{ key: "input_frames", name: "input_frames", label: "视频帧队列", type: OPTIONAL_INPUT_TYPE },
 	{ key: "frame_rate", name: "frame_rate", label: "帧率", type: "FLOAT" },
@@ -237,6 +250,10 @@ function selectedFromNode(node, serializedNode = null) {
 	if (parseSelection(propertyValue).length > 0) {
 		return propertyValue;
 	}
+	const widgetValue = String(findWidgetQuiet(node, SELECTED_WIDGET_NAME)?.value || "");
+	if (parseSelection(widgetValue).length > 0) {
+		return widgetValue;
+	}
 	const serializedProperty = String(serializedNode?.properties?.[DATA_PROPERTY] || "");
 	if (parseSelection(serializedProperty).length > 0) {
 		return serializedProperty;
@@ -277,6 +294,52 @@ function requestRedraw(node) {
 	app.graph?.setDirtyCanvas?.(true, true);
 }
 
+function clearNativePreview(node) {
+	if (!node) return;
+	node.imgs = [];
+	node.images = [];
+	node.image = null;
+	node.imageIndex = null;
+	node.overIndex = null;
+	node.imageRects = [];
+	node.animatedImages = [];
+	node.preview = null;
+	node.previews = null;
+	node.hideOutputImages = true;
+	if (node.properties) {
+		delete node.properties.image;
+		delete node.properties.images;
+		delete node.properties.preview;
+		delete node.properties.previews;
+		delete node.properties.gifs;
+		delete node.properties.animated;
+	}
+	requestRedraw(node);
+}
+
+function scheduleNativePreviewClear(node) {
+	clearNativePreview(node);
+	requestAnimationFrame(() => clearNativePreview(node));
+	for (const delay of [80, 240]) {
+		setTimeout(() => clearNativePreview(node), delay);
+	}
+}
+
+function messageWithoutNativePreview(message = {}) {
+	const clean = { ...(message || {}) };
+	for (const key of ["images", "preview_images", "animated", "gifs"]) {
+		delete clean[key];
+	}
+	for (const parentKey of ["ui", "output", "results"]) {
+		if (!clean[parentKey] || typeof clean[parentKey] !== "object") continue;
+		clean[parentKey] = { ...clean[parentKey] };
+		for (const key of ["images", "preview_images", "animated", "gifs"]) {
+			delete clean[parentKey][key];
+		}
+	}
+	return clean;
+}
+
 function initParamDefaults(node) {
 	for (const def of PARAM_DEFS) {
 		const currentValue = getWidgetValue(node, def.name);
@@ -291,7 +354,7 @@ function initParamDefaults(node) {
 		if (currentValue === null || currentValue === undefined) {
 			setWidgetValue(node, def.name, defaultValue, true);
 		} else if (!isNaN(min) && currentValue < min) {
-			setWidgetValue(node, def.name, min, true);
+			setWidgetValue(node, def.name, defaultValue ?? min, true);
 		} else if (!isNaN(max) && currentValue > max) {
 			setWidgetValue(node, def.name, max, true);
 		}
@@ -324,7 +387,9 @@ function ensureState(node) {
 function syncProperties(node) {
 	const state = ensureState(node);
 	node.properties = node.properties || {};
-	node.properties[DATA_PROPERTY] = serializeSelection(state.selection);
+	const serializedSelection = serializeSelection(state.selection);
+	node.properties[DATA_PROPERTY] = serializedSelection;
+	syncSelectedVideosWidget(node, serializedSelection);
 	node.properties[INPUTS_PROPERTY] = serializeInputs(state.enabledInputs);
 	node.properties[OUTPUTS_PROPERTY] = serializeOutputs(state.enabledOutputs);
 	node.properties[TAB_PROPERTY] = TAB_DEFS.some((tab) => tab.key === state.activeTab) ? state.activeTab : "video";
@@ -437,6 +502,27 @@ function findWidget(node, name) {
 
 	console.warn(`[GJJ] Widget not found for "${name}", available widgets:`, widgets.map(w => w?.name).filter(Boolean));
 	return null;
+}
+
+function findWidgetQuiet(node, name) {
+	const wanted = normalizeParamWidgetName(name);
+	for (const widget of node?.widgets || []) {
+		if (!widget || widget.name === DOM_WIDGET_NAME) continue;
+		const widgetName = String(widget.name || "").trim();
+		if (widgetName && normalizeParamWidgetName(widgetName) === wanted) return widget;
+		for (const candidate of widgetNames(widget)) {
+			if (normalizeParamWidgetName(candidate) === wanted) return widget;
+		}
+	}
+	return null;
+}
+
+function syncSelectedVideosWidget(node, serializedSelection) {
+	const widget = findWidgetQuiet(node, SELECTED_WIDGET_NAME);
+	if (!widget) return;
+	if (widget.value === serializedSelection) return;
+	widget.value = serializedSelection;
+	widget.callback?.(serializedSelection, app.canvas, node, app.canvas?.graph_mouse);
 }
 
 function hasLinkedInput(node, name) {
@@ -574,11 +660,86 @@ function guessFormatFromFilename(node, item) {
 
 function getPrimarySelectedItem(node) {
 	const state = ensureState(node);
-	const optionByKey = new Map((state.options || []).map((item) => [itemKey(item), item]));
+	const optionSource = [
+		...(Array.isArray(state.allOptions) ? state.allOptions : []),
+		...(Array.isArray(state.options) ? state.options : []),
+	];
+	const optionByKey = new Map(optionSource.map((item) => [itemKey(item), item]));
 	const select = node.__gjjMultiVideoSelect;
 	const fromDropdown = select?.value ? optionByKey.get(select.value) : null;
 	if (fromDropdown) return fromDropdown;
 	return state.selection.length ? (optionByKey.get(itemKey(state.selection[0])) || state.selection[0]) : null;
+}
+
+function mergeSelectionWithOptions(node) {
+	const state = ensureState(node);
+	if (!Array.isArray(state.selection) || !state.selection.length) return false;
+	const optionSource = [
+		...(Array.isArray(state.allOptions) ? state.allOptions : []),
+		...(Array.isArray(state.options) ? state.options : []),
+	];
+	if (!optionSource.length) return false;
+	const optionByKey = new Map(optionSource.map((item) => [itemKey(item), item]));
+	let changed = false;
+	state.selection = state.selection.map((item) => {
+		const option = optionByKey.get(itemKey(item));
+		if (!option) return item;
+		changed = true;
+		return { ...item, ...option };
+	});
+	return changed;
+}
+
+function hasUsefulMediaInfo(item) {
+	return Number(item?.width || 0) > 0 && Number(item?.height || 0) > 0 && Number(item?.fps || 0) > 0;
+}
+
+function isDefaultLikeMediaParam(node, name) {
+	if (hasLinkedInput(node, name)) return true;
+	const widget = findWidgetQuiet(node, name);
+	if (!widget) return false;
+	const def = PARAM_DEFS.find((item) => item.name === name);
+	const defaults = AUTO_MEDIA_INFO_DEFAULTS.get(name) || [def?.default];
+	const value = widget.value;
+	if (def?.kind === "number") {
+		const number = Number(value);
+		return Number.isFinite(number) && defaults.some((candidate) => Math.abs(number - Number(candidate)) < 0.0001);
+	}
+	const text = String(value ?? "");
+	return defaults.some((candidate) => text === String(candidate ?? ""));
+}
+
+function mediaInfoPanelLooksDefault(node) {
+	return AUTO_MEDIA_INFO_PARAM_NAMES.every((name) => isDefaultLikeMediaParam(node, name));
+}
+
+function mediaInfoPanelLooksUnextracted(node, item = null) {
+	const endFrame = Number(getWidgetValue(node, "end_frame") ?? 0);
+	const maxFrames = Number(getWidgetValue(node, "max_frames") ?? 0);
+	const sourceFrames = Number(item?.frames || 0);
+	const sourceFps = Number(item?.fps || 0);
+	const sourceHasMoreThanOneFrame = item == null || sourceFrames > 1 || sourceFps > 1;
+	return endFrame <= 0 && maxFrames <= 1 && sourceHasMoreThanOneFrame;
+}
+
+function mediaInfoPanelNeedsAutoApply(node, item = null) {
+	return mediaInfoPanelLooksDefault(node) || mediaInfoPanelLooksUnextracted(node, item);
+}
+
+async function autoApplyMediaInfoIfDefault(node) {
+	const state = ensureState(node);
+	if (!Array.isArray(state.selection) || state.selection.length !== 1) return false;
+	if (!mediaInfoPanelNeedsAutoApply(node)) return false;
+
+	const primary = getPrimarySelectedItem(node) || state.selection[0];
+	if (!primary?.filename) return false;
+	const primaryKey = itemKey(primary);
+	const resolved = await fetchMediaMeta(primary);
+	if (!hasUsefulMediaInfo(resolved)) return false;
+	const currentSelection = ensureState(node).selection || [];
+	if (currentSelection.length !== 1 || itemKey(currentSelection[0]) !== primaryKey) return false;
+	if (!mediaInfoPanelNeedsAutoApply(node, resolved)) return false;
+	return applyMediaInfoToPanel(node, false, resolved);
 }
 
 function sourceFpsForNode(node) {
@@ -1045,6 +1206,9 @@ function addSelection(node, item) {
 	const state = ensureState(node);
 	if (!item?.filename || isSelected(state, item) || state.selection.length >= MAX_SELECTED_VIDEOS) return;
 	state.selection.push(item);
+	state.executedFrames = [];
+	state.executedFrameCount = 0;
+	scheduleNativePreviewClear(node);
 	syncProperties(node);
 	syncPanelValuesFromSelection(node);
 	renderAll(node);
@@ -1053,6 +1217,9 @@ function addSelection(node, item) {
 function removeSelection(node, item) {
 	const state = ensureState(node);
 	state.selection = state.selection.filter((selected) => itemKey(selected) !== itemKey(item));
+	state.executedFrames = [];
+	state.executedFrameCount = 0;
+	scheduleNativePreviewClear(node);
 	syncProperties(node);
 	syncPanelValuesFromSelection(node);
 	renderAll(node);
@@ -1084,29 +1251,75 @@ function toggleInput(node, key) {
 	requestRedraw(node);
 }
 
-function makeSelectedCard(node, item) {
+function sourceVideoAspectRatio(item) {
+	const width = Number(item?.width || 0);
+	const height = Number(item?.height || 0);
+	return width > 0 && height > 0 ? `${width} / ${height}` : "";
+}
+
+function applySourceVideoPreviewSizing(video, item, node, isSinglePreview) {
+	const aspectRatio = sourceVideoAspectRatio(item);
+	video.style.cssText = isSinglePreview
+		? [
+			"width:100%",
+			"height:auto",
+			aspectRatio ? `aspect-ratio:${aspectRatio}` : "",
+			"object-fit:contain",
+			"background:#05080a",
+			"border-radius:6px",
+			"display:block",
+			"box-sizing:border-box",
+		].filter(Boolean).join(";")
+		: "width:100%;height:104px;object-fit:contain;background:#05080a;border-radius:6px;display:block;";
+	video.addEventListener("loadedmetadata", () => {
+		const width = Number(video.videoWidth || 0);
+		const height = Number(video.videoHeight || 0);
+		if (isSinglePreview && width > 0 && height > 0) video.style.aspectRatio = `${width} / ${height}`;
+		scheduleLayout(node);
+	});
+}
+
+function stopMediaPointer(event) {
+	event.stopPropagation();
+}
+
+function makeSelectedCard(node, item, options = {}) {
+	const isSinglePreview = options.mode === "single";
 	const wrap = document.createElement("div");
 	wrap.title = `${String(item?.label || item?.filename || "未命名视频")}\n${formatMeta(item)}`;
-	wrap.style.cssText = [
-		"position:relative",
-		"display:flex",
-		"min-width:0",
-		"padding:6px",
-		"border:1px solid #33434a",
-		"border-radius:8px",
-		"background:#12191d",
-		"box-sizing:border-box",
-	].join(";");
+	wrap.style.cssText = isSinglePreview
+		? [
+			"position:relative",
+			"display:block",
+			"width:100%",
+			"min-width:0",
+			"box-sizing:border-box",
+		].join(";")
+		: [
+			"position:relative",
+			"display:flex",
+			"min-width:0",
+			"padding:6px",
+			"border:1px solid #33434a",
+			"border-radius:8px",
+			"background:#12191d",
+			"box-sizing:border-box",
+		].join(";");
 
 	const video = document.createElement("video");
 	video.src = inputVideoUrl(item);
 	video.muted = true;
-	video.controls = false;
+	video.controls = isSinglePreview;
 	video.preload = "metadata";
 	video.playsInline = true;
-	video.style.cssText = "width:100%;height:104px;object-fit:contain;background:#05080a;border-radius:6px;display:block;";
-	video.addEventListener("mouseenter", () => video.play?.().catch(() => {}));
-	video.addEventListener("mouseleave", () => { video.pause?.(); video.currentTime = 0; });
+	applySourceVideoPreviewSizing(video, item, node, isSinglePreview);
+	for (const eventName of ["pointerdown", "click", "dblclick", "wheel"]) {
+		video.addEventListener(eventName, stopMediaPointer);
+	}
+	if (!isSinglePreview) {
+		video.addEventListener("mouseenter", () => video.play?.().catch(() => {}));
+		video.addEventListener("mouseleave", () => { video.pause?.(); video.currentTime = 0; });
+	}
 
 	const buttonContainer = document.createElement("div");
 	buttonContainer.style.cssText = [
@@ -1116,6 +1329,7 @@ function makeSelectedCard(node, item) {
 		"display:flex",
 		"flex-direction:column",
 		"gap:8px",
+		"z-index:1",
 	].join(";");
 
 	const buttonStyle = [
@@ -1257,24 +1471,32 @@ function renderSelected(node) {
 		node.__gjjMultiVideoSelected = null;
 		return;
 	}
+	const isSinglePreview = state.selection.length === 1;
+	const listStyle = isSinglePreview
+		? "display:block;width:100%;"
+		: "display:grid;grid-template-columns:repeat(auto-fill, minmax(150px, 1fr));gap:6px;";
 	const list = ensureLazyGrid(
 		node,
 		"__gjjMultiVideoSelectedWrap",
 		"__gjjMultiVideoSelected",
-		"display:grid;grid-template-columns:repeat(auto-fill, minmax(150px, 1fr));gap:6px;"
+		listStyle
 	);
 	if (!list) return;
+	list.style.cssText = listStyle;
 	list.replaceChildren();
-	const optionByKey = new Map((state.options || []).map((item) => [itemKey(item), item]));
+	const optionSource = Array.isArray(state.allOptions) && state.allOptions.length ? state.allOptions : state.options;
+	const optionByKey = new Map((optionSource || []).map((item) => [itemKey(item), item]));
 	for (const item of state.selection) {
-		list.appendChild(makeSelectedCard(node, optionByKey.get(itemKey(item)) || item));
+		list.appendChild(makeSelectedCard(node, optionByKey.get(itemKey(item)) || item, {
+			mode: isSinglePreview ? "single" : "grid",
+		}));
 	}
 }
 
 function renderExecutedPreview(node) {
 	const state = ensureState(node);
 	const items = Array.isArray(state.executedFrames) ? state.executedFrames : [];
-	if (!items.length) {
+	if (state.selection?.length === 1 || !items.length) {
 		removeElementRef(node, "__gjjMultiVideoPreviewWrap");
 		node.__gjjMultiVideoPreviewGrid = null;
 		return;
@@ -1502,7 +1724,13 @@ async function refreshOptions(node) {
 	state.allOptions = payload.videos;
 	state.formats = payload.formats;
 	applyVideoFilters(node);
+	mergeSelectionWithOptions(node);
 	renderAll(node);
+	try {
+		await autoApplyMediaInfoIfDefault(node);
+	} catch (error) {
+		console.warn("[GJJ] Auto media info extraction failed:", error);
+	}
 }
 
 async function uploadFiles(node, files) {
@@ -1638,6 +1866,7 @@ function buildDom(node) {
 		state.selection = [];
 		state.executedFrames = [];
 		state.executedFrameCount = 0;
+		scheduleNativePreviewClear(node);
 		syncProperties(node);
 		renderAll(node);
 	});
@@ -2482,6 +2711,7 @@ function stabilizeNode(node) {
 	moveDomWidgetToTop(node);
 	ensureOptionalInput(node);
 	initParamDefaults(node);
+	clearNativePreview(node);
 	syncProperties(node);
 	applyDynamicOutputs(node);
 	renderAll(node);
@@ -2531,6 +2761,7 @@ app.registerExtension({
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalOnConfigure?.apply(this, args);
+			scheduleNativePreviewClear(this);
 			this.properties = this.properties || {};
 			const serializedProps = args[0]?.properties || {};
 			syncFilterTextProperties(this, serializedProps);
@@ -2581,7 +2812,9 @@ app.registerExtension({
 
 		const originalOnExecuted = nodeType.prototype.onExecuted;
 		nodeType.prototype.onExecuted = function (message) {
-			const result = originalOnExecuted?.apply(this, [message]);
+			clearNativePreview(this);
+			const result = originalOnExecuted?.apply(this, [messageWithoutNativePreview(message)]);
+			clearNativePreview(this);
 			const state = ensureState(this);
 			state.executedFrames = Array.isArray(message?.preview_images) ? message.preview_images : [];
 			state.executedFrameCount = Number(message?.frame_count?.[0] || 0);
@@ -2589,6 +2822,10 @@ app.registerExtension({
 			state.outputWidth = Number(message?.width?.[0] || 0);
 			state.outputHeight = Number(message?.height?.[0] || 0);
 			state.videoFormat = String(message?.video_format?.[0] || "");
+			if (state.selection?.length === 1) {
+				state.executedFrames = [];
+			}
+			scheduleNativePreviewClear(this);
 			scheduleStabilize(this, 0);
 			return result;
 		};
