@@ -58,10 +58,11 @@ const TOOL_ICONS = Object.freeze({
 	layerAdd: "➕",
 	layerUp: "🔼",
 	layerDown: "🔽",
-	layerShow: "👁️",
-	layerHide: "🙈",
 	layerDelete: "🗑️",
 });
+
+const LAYER_COLORS = Object.freeze(["#ff6b6b", "#ffad4d", "#f6d95f", "#65d98b", "#66c2ff", "#c58bff", "#c28a5c", "#e8eef2"]);
+const LAYER_NUMBER_EMOJIS = Object.freeze(["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]);
 
 const NUMERIC_FIELDS = Object.freeze([
 	FIELD.seed,
@@ -222,8 +223,9 @@ function normalizeModelKey(value) {
 	return text;
 }
 
-function isQwen2512Unet(value) {
-	return normalizeModelKey(value).includes("qwen_image_2512");
+function isQwenOrFireRedUnet(value) {
+	const key = normalizeModelKey(value);
+	return key.includes("qwen") || key.includes("firered") || key.includes("fire_red");
 }
 
 function asDataUrl(value) {
@@ -242,6 +244,50 @@ function canvasToSourceDataUrl(canvas) {
 
 function canvasToPngDataUrl(canvas) {
 	return canvas.toDataURL("image/png");
+}
+
+function createCanvas(width = DEFAULT_WIDTH, height = DEFAULT_HEIGHT) {
+	const canvas = document.createElement("canvas");
+	canvas.width = width || DEFAULT_WIDTH;
+	canvas.height = height || DEFAULT_HEIGHT;
+	return canvas;
+}
+
+function copyCanvas(source) {
+	const canvas = createCanvas(source?.width || DEFAULT_WIDTH, source?.height || DEFAULT_HEIGHT);
+	if (source?.width && source?.height) {
+		canvas.getContext("2d").drawImage(source, 0, 0, canvas.width, canvas.height);
+	}
+	return canvas;
+}
+
+function canvasHasVisiblePixels(canvas) {
+	if (!canvas?.width || !canvas?.height) return false;
+	try {
+		const data = canvas.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, canvas.width, canvas.height).data;
+		for (let index = 0; index < data.length; index += 4) {
+			if (Math.max(data[index], data[index + 1], data[index + 2], data[index + 3]) > 0) return true;
+		}
+	} catch (_) {
+		return true;
+	}
+	return false;
+}
+
+function summarizePromptForLayer(value) {
+	const text = String(value || "")
+		.replace(/\s+/g, " ")
+		.replace(/[，。；;|]+/g, ",")
+		.trim();
+	if (!text) return "";
+	const first = text.split(",").map((item) => item.trim()).find(Boolean) || text;
+	return first.length > 22 ? `${first.slice(0, 22)}...` : first;
+}
+
+function layerNumberEmoji(index) {
+	const number = Math.max(1, Math.floor(Number(index) || 0) + 1);
+	if (LAYER_NUMBER_EMOJIS[number - 1]) return LAYER_NUMBER_EMOJIS[number - 1];
+	return String(number).split("").map((digit) => `${digit}\uFE0F\u20E3`).join("");
 }
 
 function imageElementToCacheDataUrl(image) {
@@ -406,6 +452,10 @@ function ensureStyles() {
 		.gjj-qwen-inpaint button:disabled { opacity:.58; cursor:default; }
 		.gjj-qwen-inpaint-range { width:130px; height:26px; accent-color:#54c78b; }
 		.gjj-qwen-inpaint-size { min-width:44px; color:#b9c7ca; text-align:right; font-size:11px; }
+		.gjj-qwen-inpaint-layer-shortcuts { display:flex; align-items:center; gap:2px; flex:0 1 auto; max-width:220px; overflow:hidden; flex-wrap:wrap; }
+		.gjj-qwen-inpaint .gjj-qwen-inpaint-layer-shortcut { flex:0 0 26px; width:26px; min-width:26px; height:26px; border-radius:6px; font-size:16px; background:#151f25; border-color:#354852; opacity:.92; }
+		.gjj-qwen-inpaint .gjj-qwen-inpaint-layer-shortcut.active { background:#21332d; box-shadow:0 0 0 1px rgba(84,199,139,.55) inset; }
+		.gjj-qwen-inpaint .gjj-qwen-inpaint-layer-shortcut.hidden { opacity:.34; filter:grayscale(1); background:#12181c; border-color:#27343a; }
 		.gjj-qwen-inpaint-prompt { display:grid; grid-template-columns:minmax(78px, 92px) minmax(0, 1fr) 32px; gap:6px; align-items:stretch; }
 		.gjj-qwen-inpaint-label { color:#b8c7ca; font-size:12px; display:flex; align-items:center; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 		.gjj-qwen-inpaint textarea { width:100%; min-width:0; height:46px; min-height:46px; max-height:120px; resize:vertical; border:1px solid #354852; border-radius:6px; background:#151f25; color:#e5edf2; padding:6px 8px; font:12px/1.35 Arial, sans-serif; outline:none; }
@@ -427,7 +477,7 @@ function ensureStyles() {
 		.gjj-qwen-model-popup-item.selected { background:#18352f; border-color:#2f7d67; color:#e8fff6; }
 		.gjj-qwen-model-popup-empty { color:#8da2ad; font-size:11px; padding:4px 2px; }
 		.gjj-qwen-inpaint-pair { display:grid; grid-template-columns:1fr 1fr; gap:6px; min-width:0; }
-		.gjj-qwen-inpaint-layers { display:grid; grid-template-columns:minmax(0, 1fr) repeat(5, 32px); gap:4px; align-items:center; }
+		.gjj-qwen-inpaint-layers { display:grid; grid-template-columns:minmax(0, 1fr) repeat(4, 32px); gap:4px; align-items:center; }
 		.gjj-qwen-inpaint-layer-select { width:100%; min-width:0; height:30px; border:1px solid #354852; border-radius:7px; background:#151f25; color:#dcecee; padding:0 8px; font:12px Arial, sans-serif; outline:none; }
 		.gjj-qwen-inpaint-layer-select:focus { border-color:#54c78b; }
 		.gjj-qwen-inpaint-canvas-wrap { width:100%; position:relative; overflow:hidden; border:1px solid #33464e; border-radius:8px; background:#071014; display:flex; align-items:center; justify-content:center; touch-action:none; }
@@ -498,6 +548,8 @@ class QwenInpaintEditor {
 			settings: this.makeButton(TOOL_ICONS.settings, "设置", () => this.toggleSettings()),
 			generate: this.makeButton(TOOL_ICONS.generate, "用当前图像和遮罩只执行本节点生成", () => this.generateInPlace()),
 		};
+		this.layerShortcutBar = document.createElement("div");
+		this.layerShortcutBar.className = "gjj-qwen-inpaint-layer-shortcuts";
 		this.toolbar.append(
 			this.buttons.upload,
 			this.buttons.brush,
@@ -523,7 +575,7 @@ class QwenInpaintEditor {
 		this.sizeText = document.createElement("span");
 		this.sizeText.className = "gjj-qwen-inpaint-size";
 		this.sizeText.textContent = "48px";
-		this.controls.append(this.sizeRange, this.sizeText);
+		this.controls.append(this.sizeRange, this.sizeText, this.layerShortcutBar);
 
 		this.buildLayerPanel();
 		this.buildPromptPanel();
@@ -562,7 +614,6 @@ class QwenInpaintEditor {
 		protectDomEvents(this.layerSelect);
 		this.layerButtons = {
 			add: this.makeButton(TOOL_ICONS.layerAdd, "新建透明图层", () => this.addLayer()),
-			visible: this.makeButton(TOOL_ICONS.layerShow, "显示/隐藏当前图层", () => this.toggleActiveLayerVisible()),
 			up: this.makeButton(TOOL_ICONS.layerUp, "当前图层上移", () => this.moveActiveLayer(1)),
 			down: this.makeButton(TOOL_ICONS.layerDown, "当前图层下移", () => this.moveActiveLayer(-1)),
 			delete: this.makeButton(TOOL_ICONS.layerDelete, "删除当前图层", () => this.deleteActiveLayer()),
@@ -570,7 +621,6 @@ class QwenInpaintEditor {
 		this.layerPanel.append(
 			this.layerSelect,
 			this.layerButtons.add,
-			this.layerButtons.visible,
 			this.layerButtons.up,
 			this.layerButtons.down,
 			this.layerButtons.delete,
@@ -776,6 +826,11 @@ class QwenInpaintEditor {
 		});
 		this.sizeRange.addEventListener("input", () => this.setBrushSize(this.sizeRange.value, true));
 		this.layerSelect.addEventListener("change", () => this.selectLayer(this.layerSelect.value));
+		this.layerSelect.addEventListener("contextmenu", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			this.toggleActiveLayerVisible();
+		});
 		this.promptInput.addEventListener("input", () => this.invalidateGeneratedCacheAndSync());
 		this.negativeInput.addEventListener("input", () => this.invalidateGeneratedCacheAndSync());
 		for (const select of this.selectControls.values()) {
@@ -789,16 +844,16 @@ class QwenInpaintEditor {
 	widgetOptions(name, currentValue = "") {
 		const w = widget(this.node, name);
 		let values = Array.isArray(w?.options?.values) ? w.options.values.map(String) : [];
-		if (name === FIELD.unet) values = values.filter(isQwen2512Unet);
+		if (name === FIELD.unet) values = values.filter(isQwenOrFireRedUnet);
 		const current = String(currentValue || w?.value || "");
-		if (current && !values.includes(current) && (name !== FIELD.unet || isQwen2512Unet(current))) values.unshift(current);
+		if (current && !values.includes(current) && (name !== FIELD.unet || isQwenOrFireRedUnet(current))) values.unshift(current);
 		return values;
 	}
 
 	filterSelectOptions(name, values, currentValue = "", searchText = "") {
 		const filter = String(searchText || "").trim().toLowerCase();
 		const terms = filter.split(/\s+/).filter(Boolean);
-		const source = (values || []).filter((value) => name !== FIELD.unet || isQwen2512Unet(value));
+		const source = (values || []).filter((value) => name !== FIELD.unet || isQwenOrFireRedUnet(value));
 		let filtered = source;
 		if (terms.length) {
 			filtered = source.filter((value) => {
@@ -808,7 +863,7 @@ class QwenInpaintEditor {
 			});
 		}
 		const current = String(currentValue || "");
-		if (current && (name !== FIELD.unet || isQwen2512Unet(current)) && !filtered.includes(current)) {
+		if (current && (name !== FIELD.unet || isQwenOrFireRedUnet(current)) && !filtered.includes(current)) {
 			filtered = [current, ...filtered];
 		}
 		return filtered;
@@ -853,7 +908,7 @@ class QwenInpaintEditor {
 		const values = this.selectOptionLists.get(name) || this.widgetOptions(name, select.value);
 		popup.open({
 			anchorEl: picker,
-			placeholder: name === FIELD.unet ? "搜索 qwen_image_2512 / gguf" : "搜索模型",
+			placeholder: name === FIELD.unet ? "搜索 qwen / firered / gguf" : "搜索模型",
 			getSelectedValue: () => String(select.value || ""),
 			getOptions: (searchText) => this.filterSelectOptions(name, values, select.value, searchText).map((value) => ({ value, label: value || "未选择" })),
 			onSelect: (value) => {
@@ -920,32 +975,26 @@ class QwenInpaintEditor {
 	setCanvasSize(width, height, preserve = false) {
 		width = coerceDimension(width, DEFAULT_WIDTH);
 		height = coerceDimension(height, DEFAULT_HEIGHT);
+		this.storeActiveLayerState();
 		const oldImage = document.createElement("canvas");
-		const oldMask = document.createElement("canvas");
 		const oldLayers = preserve ? this.captureLayers() : [];
 		if (preserve && this.canvas.width > 0 && this.canvas.height > 0) {
 			oldImage.width = this.imageCanvas.width;
 			oldImage.height = this.imageCanvas.height;
 			oldImage.getContext("2d").drawImage(this.imageCanvas, 0, 0);
-			oldMask.width = this.maskCanvas.width;
-			oldMask.height = this.maskCanvas.height;
-			oldMask.getContext("2d").drawImage(this.maskCanvas, 0, 0);
 		}
-		for (const item of [this.canvas, this.imageCanvas, this.maskCanvas, this.layerCanvas, this.overlayCanvas]) {
+		for (const item of [this.canvas, this.imageCanvas, this.layerCanvas, this.overlayCanvas]) {
 			item.width = width;
 			item.height = height;
 		}
 		this.ctx = this.canvas.getContext("2d", { willReadFrequently: true });
 		this.imageCtx = this.imageCanvas.getContext("2d", { willReadFrequently: true });
-		this.maskCtx = this.maskCanvas.getContext("2d", { willReadFrequently: true });
 		this.layerCtx = this.layerCanvas.getContext("2d", { willReadFrequently: true });
 		this.overlayCtx = this.overlayCanvas.getContext("2d", { willReadFrequently: true });
 		this.imageCtx.fillStyle = "#000000";
 		this.imageCtx.fillRect(0, 0, width, height);
-		this.maskCtx.clearRect(0, 0, width, height);
 		if (preserve && oldImage.width > 0 && oldImage.height > 0) {
 			this.imageCtx.drawImage(oldImage, 0, 0, width, height);
-			this.maskCtx.drawImage(oldMask, 0, 0, width, height);
 			this.restoreLayerCopies(oldLayers, width, height);
 		} else {
 			this.resetLayers(false);
@@ -960,31 +1009,41 @@ class QwenInpaintEditor {
 	}
 
 	createLayer(name = "", options = {}) {
-		const canvas = document.createElement("canvas");
-		canvas.width = this.canvas.width || DEFAULT_WIDTH;
-		canvas.height = this.canvas.height || DEFAULT_HEIGHT;
+		const width = this.canvas.width || DEFAULT_WIDTH;
+		const height = this.canvas.height || DEFAULT_HEIGHT;
+		const canvas = createCanvas(width, height);
+		const maskCanvas = createCanvas(width, height);
 		return {
 			id: String(options.id || this.nextLayerId()),
 			name: String(name || `图层 ${this.layers.length + 1}`),
 			visible: options.visible !== false,
+			prompt: String(options.prompt || ""),
 			canvas,
 			ctx: canvas.getContext("2d", { willReadFrequently: true }),
+			maskCanvas,
+			maskCtx: maskCanvas.getContext("2d", { willReadFrequently: true }),
 			hasContent: Boolean(options.hasContent),
+			maskHasContent: Boolean(options.maskHasContent),
+			history: [],
+			historyIndex: -1,
 		};
 	}
 
 	captureLayers() {
+		this.storeActiveLayerState();
 		return (this.layers || []).map((layer) => {
-			const canvas = document.createElement("canvas");
-			canvas.width = layer.canvas?.width || this.canvas.width || DEFAULT_WIDTH;
-			canvas.height = layer.canvas?.height || this.canvas.height || DEFAULT_HEIGHT;
-			canvas.getContext("2d").drawImage(layer.canvas, 0, 0);
+			this.ensureLayerSurfaces(layer);
+			const canvas = copyCanvas(layer.canvas);
+			const maskCanvas = copyCanvas(layer.maskCanvas);
 			return {
 				id: layer.id,
 				name: layer.name,
 				visible: layer.visible !== false,
+				prompt: layer.prompt || "",
 				canvas,
+				maskCanvas,
 				hasContent: Boolean(layer.hasContent),
+				maskHasContent: Boolean(layer.maskHasContent || canvasHasVisiblePixels(layer.maskCanvas)),
 			};
 		});
 	}
@@ -994,7 +1053,9 @@ class QwenInpaintEditor {
 			const layer = this.createLayer(item.name || `图层 ${index + 1}`, {
 				id: item.id,
 				visible: item.visible !== false,
+				prompt: item.prompt || "",
 				hasContent: item.hasContent,
+				maskHasContent: item.maskHasContent,
 			});
 			layer.canvas.width = width;
 			layer.canvas.height = height;
@@ -1002,14 +1063,23 @@ class QwenInpaintEditor {
 			if (item.canvas?.width && item.canvas?.height && item.hasContent) {
 				layer.ctx.drawImage(item.canvas, 0, 0, width, height);
 			}
+			layer.maskCanvas.width = width;
+			layer.maskCanvas.height = height;
+			layer.maskCtx = layer.maskCanvas.getContext("2d", { willReadFrequently: true });
+			if (item.maskCanvas?.width && item.maskCanvas?.height && item.maskHasContent) {
+				layer.maskCtx.drawImage(item.maskCanvas, 0, 0, width, height);
+				layer.maskHasContent = true;
+			}
 			return layer;
 		});
-		this.ensureLayer();
+		const layer = this.ensureLayer();
+		this.activateLayerMask(layer, true);
 	}
 
 	resetLayers(shouldSync = true) {
 		this.layers = [this.createLayer("图层 1")];
 		this.activeLayerId = this.layers[0].id;
+		this.activateLayerMask(this.layers[0], true);
 		this.rebuildLayerComposite({ render: true, sync: shouldSync });
 	}
 
@@ -1019,7 +1089,9 @@ class QwenInpaintEditor {
 		if (!this.layers.some((layer) => layer.id === this.activeLayerId)) {
 			this.activeLayerId = this.layers[this.layers.length - 1]?.id || "";
 		}
-		return this.activeLayer();
+		const layer = this.activeLayer();
+		this.ensureLayerSurfaces(layer);
+		return layer;
 	}
 
 	activeLayer() {
@@ -1028,6 +1100,108 @@ class QwenInpaintEditor {
 
 	activeLayerIndex() {
 		return this.layers.findIndex((layer) => layer.id === this.activeLayerId);
+	}
+
+	ensureLayerSurfaces(layer) {
+		if (!layer) return null;
+		const width = this.canvas.width || DEFAULT_WIDTH;
+		const height = this.canvas.height || DEFAULT_HEIGHT;
+		if (!layer.canvas) {
+			layer.canvas = createCanvas(width, height);
+			layer.ctx = layer.canvas.getContext("2d", { willReadFrequently: true });
+		}
+		if (layer.canvas.width !== width || layer.canvas.height !== height) {
+			const oldCanvas = copyCanvas(layer.canvas);
+			layer.canvas.width = width;
+			layer.canvas.height = height;
+			layer.ctx = layer.canvas.getContext("2d", { willReadFrequently: true });
+			if (oldCanvas.width && oldCanvas.height && layer.hasContent) {
+				layer.ctx.drawImage(oldCanvas, 0, 0, width, height);
+			}
+		}
+		if (!layer.maskCanvas) {
+			layer.maskCanvas = createCanvas(width, height);
+			layer.maskCtx = layer.maskCanvas.getContext("2d", { willReadFrequently: true });
+		}
+		if (layer.maskCanvas.width !== width || layer.maskCanvas.height !== height) {
+			const oldMask = copyCanvas(layer.maskCanvas);
+			layer.maskCanvas.width = width;
+			layer.maskCanvas.height = height;
+			layer.maskCtx = layer.maskCanvas.getContext("2d", { willReadFrequently: true });
+			if (oldMask.width && oldMask.height && (layer.maskHasContent || canvasHasVisiblePixels(oldMask))) {
+				layer.maskCtx.drawImage(oldMask, 0, 0, width, height);
+				layer.maskHasContent = true;
+			}
+		}
+		if (!layer.ctx) layer.ctx = layer.canvas.getContext("2d", { willReadFrequently: true });
+		if (!layer.maskCtx) layer.maskCtx = layer.maskCanvas.getContext("2d", { willReadFrequently: true });
+		if (!Array.isArray(layer.history)) layer.history = [];
+		if (!Number.isFinite(Number(layer.historyIndex))) layer.historyIndex = -1;
+		return layer;
+	}
+
+	activateLayerMask(layer, resetHistoryIfEmpty = false) {
+		this.ensureLayerSurfaces(layer);
+		if (!layer) return;
+		this.maskCanvas = layer.maskCanvas;
+		this.maskCtx = layer.maskCtx;
+		this.history = Array.isArray(layer.history) ? layer.history : [];
+		this.historyIndex = Number.isFinite(Number(layer.historyIndex)) ? Number(layer.historyIndex) : -1;
+		if (resetHistoryIfEmpty || !this.history.length) this.resetHistory();
+		else this.updateHistoryButtons();
+		this.render();
+	}
+
+	storeActiveLayerState() {
+		const layer = this.activeLayer();
+		if (!layer || !this.maskCanvas) return;
+		this.ensureLayerSurfaces(layer);
+		layer.maskHasContent = canvasHasVisiblePixels(this.maskCanvas);
+		layer.history = this.history || [];
+		layer.historyIndex = this.historyIndex ?? -1;
+	}
+
+	currentLayerPrompt() {
+		return summarizePromptForLayer(this.promptInput?.value || getWidgetValue(this.node, FIELD.positive, ""));
+	}
+
+	layerColor(index, layer) {
+		if (layer?.visible === false) return "#647178";
+		return LAYER_COLORS[index % LAYER_COLORS.length];
+	}
+
+	layerLabel(layer, index) {
+		const visible = layer?.visible !== false;
+		const icon = layerNumberEmoji(index);
+		const prompt = summarizePromptForLayer(layer?.prompt || "");
+		const name = String(layer?.name || `图层 ${index + 1}`);
+		const state = visible ? "显示" : "隐藏";
+		return `${icon} ${name}${prompt ? ` · ${prompt}` : ""} · ${state}`;
+	}
+
+	updateLayerShortcuts() {
+		if (!this.layerShortcutBar) return;
+		this.layerShortcutBar.replaceChildren();
+		this.layers.forEach((layer, index) => {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.className = "gjj-qwen-inpaint-layer-shortcut";
+			button.textContent = layerNumberEmoji(index);
+			button.title = `${this.layerLabel(layer, index)}；点击选择并切换显示/隐藏`;
+			button.style.color = this.layerColor(index, layer);
+			button.style.borderColor = this.layerColor(index, layer);
+			button.classList.toggle("active", layer.id === this.activeLayerId);
+			button.classList.toggle("hidden", layer.visible === false);
+			for (const eventName of ["pointerdown", "mousedown", "mouseup", "dblclick", "wheel", "contextmenu"]) {
+				button.addEventListener(eventName, (event) => event.stopPropagation());
+			}
+			button.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				this.handleLayerShortcut(layer.id);
+			});
+			this.layerShortcutBar.appendChild(button);
+		});
 	}
 
 	rebuildLayerComposite(options = {}) {
@@ -1048,12 +1222,15 @@ class QwenInpaintEditor {
 	}
 
 	serializeLayers() {
+		this.storeActiveLayerState();
 		this.ensureLayer();
 		return this.layers.map((layer, index) => ({
 			id: layer.id,
 			name: layer.name || `图层 ${index + 1}`,
 			visible: layer.visible !== false,
+			prompt: layer.prompt || "",
 			image: layer.hasContent ? canvasToPngDataUrl(layer.canvas) : "",
+			maskImage: layer.maskHasContent ? canvasToPngDataUrl(layer.maskCanvas) : "",
 		}));
 	}
 
@@ -1064,35 +1241,63 @@ class QwenInpaintEditor {
 		this.layers.forEach((layer, index) => {
 			const option = document.createElement("option");
 			option.value = layer.id;
-			const visibility = layer.visible === false ? "隐藏" : "显示";
-			option.textContent = `${index + 1}. ${layer.name || `图层 ${index + 1}`} · ${visibility}`;
+			option.textContent = this.layerLabel(layer, index);
+			option.style.color = this.layerColor(index, layer);
+			option.style.backgroundColor = layer.visible === false ? "#101417" : "#151f25";
+			option.style.opacity = layer.visible === false ? "0.5" : "1";
 			this.layerSelect.appendChild(option);
 		});
 		this.layerSelect.value = this.activeLayerId;
-		const active = this.activeLayer();
 		const index = this.activeLayerIndex();
-		this.layerButtons.visible.title = active?.visible === false ? "显示当前图层" : "隐藏当前图层";
-		setButtonContent(this.layerButtons.visible, active?.visible === false ? TOOL_ICONS.layerHide : TOOL_ICONS.layerShow);
+		const active = this.activeLayer();
+		this.layerSelect.style.color = this.layerColor(Math.max(0, index), active);
+		this.layerSelect.style.borderColor = this.layerColor(Math.max(0, index), active);
+		this.layerSelect.style.opacity = active?.visible === false ? "0.56" : "1";
+		this.layerSelect.title = `${active ? this.layerLabel(active, Math.max(0, index)) : "选择图层"}；右键切换显示/隐藏`;
+		this.updateLayerShortcuts();
 		this.layerButtons.up.disabled = index < 0 || index >= this.layers.length - 1;
 		this.layerButtons.down.disabled = index <= 0;
 		this.layerButtons.delete.disabled = this.layers.length <= 1;
 	}
 
+	handleLayerShortcut(id) {
+		const layer = this.layers.find((item) => item.id === id);
+		if (!layer) return;
+		this.storeActiveLayerState();
+		this.activeLayerId = id;
+		this.activateLayerMask(layer, false);
+		layer.visible = layer.visible === false;
+		this.invalidateGeneratedCache(false);
+		this.rebuildLayerComposite({ render: true, sync: true });
+		this.renderStatus(layer.visible ? "已选择并显示图层" : "已选择并隐藏图层");
+	}
+
 	selectLayer(id, shouldSync = true) {
 		if (!this.layers.some((layer) => layer.id === id)) return;
+		this.storeActiveLayerState();
 		this.activeLayerId = id;
+		this.activateLayerMask(this.activeLayer(), false);
 		this.updateLayerPanel();
 		if (shouldSync) this.syncState();
 		this.renderStatus("已选择图层");
 	}
 
 	addLayer() {
-		const layer = this.createLayer(`图层 ${this.layers.length + 1}`);
+		this.storeActiveLayerState();
+		const sourceMask = this.maskCanvas && canvasHasVisiblePixels(this.maskCanvas)
+			? copyCanvas(this.maskCanvas)
+			: null;
+		const layer = this.createLayer(`图层 ${this.layers.length + 1}`, { prompt: this.currentLayerPrompt() });
+		if (sourceMask) {
+			layer.maskCtx.drawImage(sourceMask, 0, 0, layer.maskCanvas.width, layer.maskCanvas.height);
+			layer.maskHasContent = true;
+		}
 		this.layers.push(layer);
 		this.activeLayerId = layer.id;
+		this.activateLayerMask(layer, true);
 		this.updateLayerPanel();
 		this.syncState();
-		this.renderStatus("已新建透明图层");
+		this.renderStatus(sourceMask ? "已新建图层并复制当前蒙版" : "已新建透明图层");
 	}
 
 	toggleActiveLayerVisible() {
@@ -1108,6 +1313,7 @@ class QwenInpaintEditor {
 		const index = this.activeLayerIndex();
 		const next = index + delta;
 		if (index < 0 || next < 0 || next >= this.layers.length) return;
+		this.storeActiveLayerState();
 		const [layer] = this.layers.splice(index, 1);
 		this.layers.splice(next, 0, layer);
 		this.invalidateGeneratedCache(false);
@@ -1118,8 +1324,10 @@ class QwenInpaintEditor {
 	deleteActiveLayer() {
 		const index = this.activeLayerIndex();
 		if (index < 0 || this.layers.length <= 1) return;
+		this.storeActiveLayerState();
 		this.layers.splice(index, 1);
 		this.activeLayerId = this.layers[Math.min(index, this.layers.length - 1)]?.id || "";
+		this.activateLayerMask(this.activeLayer(), false);
 		this.invalidateGeneratedCache(false);
 		this.rebuildLayerComposite({ render: true, sync: true });
 		this.renderStatus("已删除当前图层");
@@ -1141,26 +1349,51 @@ class QwenInpaintEditor {
 		});
 	}
 
+	loadMaskToLayer(layer, src) {
+		const value = asDataUrl(src);
+		if (!layer || !value) return Promise.resolve(false);
+		this.ensureLayerSurfaces(layer);
+		return new Promise((resolve) => {
+			const image = new Image();
+			image.onload = () => {
+				layer.maskCtx.clearRect(0, 0, layer.maskCanvas.width, layer.maskCanvas.height);
+				layer.maskCtx.drawImage(image, 0, 0, layer.maskCanvas.width, layer.maskCanvas.height);
+				layer.maskHasContent = canvasHasVisiblePixels(layer.maskCanvas);
+				layer.history = [];
+				layer.historyIndex = -1;
+				resolve(true);
+			};
+			image.onerror = () => resolve(false);
+			image.src = value;
+		});
+	}
+
 	async loadLayersFromState(state = {}, fallbackLayerImage = "", shouldSync = true) {
 		const savedLayers = Array.isArray(state.layers) ? state.layers : [];
+		const legacyMaskImage = state.maskImage || state.mask || state.maskData || state.mask_data || "";
 		this.layers = [];
 		for (let index = 0; index < savedLayers.length; index += 1) {
 			const item = savedLayers[index] || {};
 			const layer = this.createLayer(item.name || `图层 ${index + 1}`, {
 				id: item.id,
 				visible: item.visible !== false,
+				prompt: item.prompt || item.positivePrompt || "",
 			});
 			await this.loadImageToLayer(layer, item.image || item.layerImage || "");
+			const layerMask = item.maskImage || item.mask || item.maskData || "";
+			await this.loadMaskToLayer(layer, layerMask || (item.id === state.activeLayerId ? legacyMaskImage : ""));
 			this.layers.push(layer);
 		}
 		if (!this.layers.length) {
-			const layer = this.createLayer("图层 1");
+			const layer = this.createLayer("图层 1", { prompt: this.currentLayerPrompt() });
 			await this.loadImageToLayer(layer, fallbackLayerImage);
+			await this.loadMaskToLayer(layer, legacyMaskImage);
 			this.layers.push(layer);
 		}
 		this.activeLayerId = this.layers.some((layer) => layer.id === state.activeLayerId)
 			? state.activeLayerId
 			: this.layers[this.layers.length - 1]?.id || "";
+		this.activateLayerMask(this.activeLayer(), false);
 		this.rebuildLayerComposite({ render: true, sync: shouldSync });
 	}
 
@@ -1177,7 +1410,6 @@ class QwenInpaintEditor {
 		this.setCanvasSize(width, height, false);
 		const baseImage = state.baseImage || state.sourceImage || state.image || "";
 		const layerImage = state.layerImage || state.editLayerImage || "";
-		const maskImage = state.maskImage || state.mask || "";
 		const generatedImage = state.generatedImage || state.generated_image || "";
 		this.generatedImageData = generatedImage ? asDataUrl(generatedImage) : "";
 		this.cacheSignature = String(state.cacheSignature || state.generationSignature || "");
@@ -1187,8 +1419,6 @@ class QwenInpaintEditor {
 		if (baseImage) {
 			this.loadImage(asDataUrl(baseImage), { sync: false, clearMask: true, status: "", invalidateCache: false }).then(() => {
 				this.loadLayersFromState(state, layerImage ? asDataUrl(layerImage) : "", false).then(() => {
-					if (maskImage) this.loadMask(asDataUrl(maskImage), false);
-					else this.resetHistory();
 					if (this.generatedImageData && !this.hasLayerContent()) this.loadGeneratedPreview(this.generatedImageData, false);
 					this.syncState();
 				});
@@ -1198,7 +1428,6 @@ class QwenInpaintEditor {
 				if (this.generatedImageData && !this.hasLayerContent()) this.loadGeneratedPreview(this.generatedImageData, false);
 				this.syncState();
 			});
-			this.resetHistory();
 		}
 		this.updateMaskButton();
 	}
@@ -1218,19 +1447,10 @@ class QwenInpaintEditor {
 			image.onload = () => {
 				const nextWidth = image.naturalWidth || this.canvas.width || DEFAULT_WIDTH;
 				const nextHeight = image.naturalHeight || this.canvas.height || DEFAULT_HEIGHT;
-				const oldMask = document.createElement("canvas");
-				if (preserveMask && this.maskCanvas.width > 0 && this.maskCanvas.height > 0) {
-					oldMask.width = this.maskCanvas.width;
-					oldMask.height = this.maskCanvas.height;
-					oldMask.getContext("2d").drawImage(this.maskCanvas, 0, 0);
-				}
-				const oldLayers = preserveLayer ? this.captureLayers() : [];
+				const oldLayers = preserveLayer || preserveMask ? this.captureLayers() : [];
 				this.setCanvasSize(nextWidth, nextHeight, false);
 				this.imageCtx.drawImage(image, 0, 0, this.imageCanvas.width, this.imageCanvas.height);
-				if (preserveMask && oldMask.width > 0) {
-					this.maskCtx.drawImage(oldMask, 0, 0, this.maskCanvas.width, this.maskCanvas.height);
-				}
-				if (preserveLayer && oldLayers.length) {
+				if ((preserveLayer || preserveMask) && oldLayers.length) {
 					this.restoreLayerCopies(oldLayers, this.layerCanvas.width, this.layerCanvas.height);
 					this.rebuildLayerComposite({ render: false, sync: false });
 				} else {
@@ -1257,8 +1477,11 @@ class QwenInpaintEditor {
 	loadMask(src, shouldSync = true) {
 		const image = new Image();
 		image.onload = () => {
+			const layer = this.ensureLayer();
+			this.activateLayerMask(layer, false);
 			this.maskCtx.clearRect(0, 0, this.maskCanvas.width, this.maskCanvas.height);
 			this.maskCtx.drawImage(image, 0, 0, this.maskCanvas.width, this.maskCanvas.height);
+			layer.maskHasContent = canvasHasVisiblePixels(this.maskCanvas);
 			this.render();
 			this.resetHistory();
 			if (shouldSync) this.syncState();
@@ -1321,13 +1544,14 @@ class QwenInpaintEditor {
 
 	async generateInPlace() {
 		if (this.generating) return;
+		this.node.__gjjQwenInpaintExplicitGenerate = true;
 		this.prepareQueue();
 		this.markGenerating("生成中");
-		this.node.__gjjQwenInpaintExplicitGenerate = true;
 		try {
 			const ok = await queueOnlyCurrentNode(this.node);
 			if (!ok) {
 				delete this.node.__gjjQwenInpaintExplicitGenerate;
+				this.prepareQueue();
 				this.finishGenerating("提交失败");
 				return;
 			}
@@ -1337,6 +1561,7 @@ class QwenInpaintEditor {
 		} catch (error) {
 			console.error("[GJJ] 千问局部重绘原地生成失败:", error);
 			delete this.node.__gjjQwenInpaintExplicitGenerate;
+			this.prepareQueue();
 			this.finishGenerating("生成失败");
 		}
 	}
@@ -1403,8 +1628,16 @@ class QwenInpaintEditor {
 		this.buttons.mask.title = this.showMask ? "当前显示遮罩覆盖；点击隐藏" : "当前隐藏遮罩覆盖；点击显示";
 	}
 
+	showMaskForDrawing() {
+		if (this.showMask) return;
+		this.showMask = true;
+		this.updateMaskButton();
+	}
+
 	clearMask() {
+		const layer = this.ensureLayer();
 		this.maskCtx.clearRect(0, 0, this.maskCanvas.width, this.maskCanvas.height);
+		if (layer) layer.maskHasContent = false;
 		this.recordSnapshot(false);
 		this.renderStatus("已清空遮罩");
 	}
@@ -1442,6 +1675,7 @@ class QwenInpaintEditor {
 			}
 			return;
 		}
+		if (this.tool === "brush" || this.tool === "eraser") this.showMaskForDrawing();
 		this.drag = { last: point, moved: false };
 		try { this.canvas.setPointerCapture(event.pointerId); } catch (_) {}
 		this.drawDot(point, this.tool === "eraser");
@@ -1613,6 +1847,12 @@ class QwenInpaintEditor {
 	resetHistory() {
 		this.history = [this.maskCtx.getImageData(0, 0, this.maskCanvas.width, this.maskCanvas.height)];
 		this.historyIndex = 0;
+		const layer = this.activeLayer();
+		if (layer) {
+			layer.history = this.history;
+			layer.historyIndex = this.historyIndex;
+			layer.maskHasContent = canvasHasVisiblePixels(this.maskCanvas);
+		}
 		this.updateHistoryButtons();
 	}
 
@@ -1623,6 +1863,7 @@ class QwenInpaintEditor {
 		this.history.push(snapshot);
 		if (this.history.length > MAX_HISTORY) this.history.shift();
 		this.historyIndex = this.history.length - 1;
+		this.storeActiveLayerState();
 		this.updateHistoryButtons();
 		this.render();
 		this.syncState();
@@ -1638,6 +1879,7 @@ class QwenInpaintEditor {
 			this.setCanvasSize(snapshot.width, snapshot.height, true);
 		}
 		this.maskCtx.putImageData(snapshot, 0, 0);
+		this.storeActiveLayerState();
 		this.updateHistoryButtons();
 		this.render();
 		this.syncState();
@@ -1694,6 +1936,7 @@ class QwenInpaintEditor {
 	}
 
 	syncState() {
+		this.storeActiveLayerState();
 		if (!this.baseImageData) this.baseImageData = canvasToSourceDataUrl(this.imageCanvas);
 		const shouldStoreSourceImage = !this.hasImageLink();
 		const payload = {
@@ -1706,6 +1949,7 @@ class QwenInpaintEditor {
 			baseImage: shouldStoreSourceImage ? this.baseImageData : "",
 			layerImage: this.layerImageData || "",
 			maskImage: this.maskCanvas.toDataURL("image/png"),
+			executionMode: this.node.__gjjQwenInpaintExplicitGenerate ? "inpaint" : "composite",
 			generatedImage: this.generatedImageData || "",
 			cacheSignature: this.cacheSignature || "",
 			imageSignature: this.imageSignature || "",
@@ -1788,6 +2032,7 @@ class QwenInpaintEditor {
 				const layer = this.activeLayer() || this.ensureLayer();
 				if (layer) {
 					layer.visible = true;
+					layer.prompt = this.currentLayerPrompt();
 					layer.ctx.drawImage(image, 0, 0, layer.canvas.width, layer.canvas.height);
 					layer.hasContent = true;
 				}

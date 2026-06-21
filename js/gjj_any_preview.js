@@ -924,6 +924,10 @@ function refreshLivePreviewFromExecuted(event) {
 		applyLivePreviewItems(target, input, virtualTarget.inputOrder, retitleLiveItemsForInput(items, virtualTarget.inputOrder));
 		return;
 	}
+	const sourceNode = getGraphNodeById(sourceId);
+	if (isTargetNode(sourceNode)) {
+		return;
+	}
 	for (const node of app.graph?._nodes || []) {
 		if (!isTargetNode(node) || String(node.id) === String(sourceId)) {
 			continue;

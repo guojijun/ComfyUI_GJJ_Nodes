@@ -45,6 +45,7 @@ try:
         _load_vae,
         _send_status,
     )
+    from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
     from .gjj_wanvideo_runtime_shims import ensure_optional_gguf_module
 except ImportError:
     from common_utils.dependency_checker import (
@@ -77,6 +78,7 @@ except ImportError:
         _load_vae,
         _send_status,
     )
+    from gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
     from gjj_wanvideo_runtime_shims import ensure_optional_gguf_module
 
 
@@ -86,7 +88,8 @@ DESCRIPTION = (
     "仿 GJJ_DoodleCanvas 的交互式单节点局部重绘：节点内载图、画遮罩，"
     "按 Qwen Image 2512 + InstantX Inpainting ControlNet 工作流直接生成结果图。"
 )
-MIXED_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
+INPUT_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
+OUTPUT_IMAGE_TYPE = "IMAGE"
 MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
 GGUF_PACKAGE_SPEC = "gguf>=0.13.0"
 
@@ -130,23 +133,23 @@ _TRANSLATION_ENVIRONMENT_REPORT = build_translation_environment_report(
 
 _QWEN_INPAINT_MODEL_TREE = [
     {
-        "label": "Qwen Image 2512 UNET",
+        "label": "Qwen / FireRed UNET",
         "path": "models/diffusion_models",
         "folder": "diffusion_models",
         "subdir": "models/diffusion_models",
         "filename": DEFAULT_UNET,
         "value": DEFAULT_UNET,
         "kind": "diffusion",
-        "description": "必需。工作流中的主模型；默认使用 qwen 2512 版 fp8 e4m3fn 权重。",
+        "description": "必需。工作流中的主模型；下拉列表会优先显示文件名包含 qwen 或 firered 的权重。",
         "icon": "🟣",
     },
     {
-        "label": "Qwen Image 2512 UNET GGUF",
+        "label": "Qwen / FireRed UNET GGUF",
         "path": "models/unet_gguf",
         "folder": "unet_gguf",
         "subdir": "models/unet_gguf",
-        "filename": "qwen_image_2512_*.gguf",
-        "value": "qwen_image_2512_*.gguf",
+        "filename": "qwen*.gguf / firered*.gguf",
+        "value": "qwen*.gguf / firered*.gguf",
         "kind": "diffusion",
         "description": "可选。选择 .gguf 主模型时使用 GJJ 内置 GGUF UNET 加载器；只需安装 gguf Python 依赖。",
         "icon": "🟪",
@@ -255,10 +258,10 @@ _QWEN_INPAINT_HELP = build_node_help_payload(
         "图像输入口接线时优先使用上游图像；未接线时使用面板中上传/粘贴的图片；两者都没有时使用空白画布并全图生成。",
         "遮罩输入口接线时优先使用上游 MASK；未接线时使用面板绘制的遮罩；两者都没有时自动全图重绘。",
         "默认参数完全贴近工作流：steps=4、cfg=1、euler/simple、denoise=1、最大边=1536、mask blur radius=31、sigma=1。",
-        "默认模型按 qwen 2512：diffusion_models/qwen_image_2512_fp8_e4m3fn.safetensors。",
+        "UNET 下拉会筛选文件名包含 qwen 或 firered 的模型，默认仍优先 qwen_image_2512_fp8_e4m3fn.safetensors。",
     ],
     runtime=[
-        "执行链路：GJJ 内置 UNET/CLIP GGUF Loader → VAELoader → LoraLoaderModelOnly → ModelSamplingAuraFlow(shift=3.1)。",
+        "执行链路：GJJ 内置 UNET/CLIP GGUF Loader → VAELoader → LoraLoaderModelOnly → 可选 LoRA串联配置 → ModelSamplingAuraFlow(shift=3.1)。",
         "图像会按最大边缩放到 1536 内，并对遮罩执行扩展与模糊，然后同时用于 latent noise mask 与 InstantX ControlNet。",
         "ControlNet 路径复用 GJJ 阿里妈妈 ControlNet Apply 的 inpaint mask 处理逻辑，以兼容 concat_mask 模型。",
         "采样后会按处理后的遮罩把生成结果合回缩放后的原图，输出就是局部重绘后的图片。",
@@ -287,7 +290,7 @@ _QWEN_INPAINT_HELP = build_node_help_payload(
         "troubleshooting": [
             "点击运行没有生成：重启 ComfyUI 后端，并强刷新浏览器，确认加载到 gjj_qwen_instantx_inpaint_canvas.js。",
             "模型树为空：确认帮助面板读取到本节点 GJJ_HELP；本节点声明了 diffusion_models、text_encoders、controlnet、vae、loras、translation。",
-            "生成报模型不存在：按模型树路径放入 Qwen 2512 UNET、Qwen 2.5 VL、InstantX Inpainting ControlNet、Qwen VAE 和 2512 Lightning LoRA。",
+            "生成报模型不存在：按模型树路径放入 Qwen/FireRed UNET、Qwen 2.5 VL、InstantX Inpainting ControlNet、Qwen VAE 和 2512 Lightning LoRA。",
             "只想局部改动：画遮罩后再生成；没有任何遮罩时会按全图重绘处理。",
         ],
     },
@@ -372,11 +375,12 @@ def _normalize_model_key(value: Any) -> str:
     return text
 
 
-def _is_qwen_2512_unet(value: Any) -> bool:
-    return "qwen_image_2512" in _normalize_model_key(value)
+def _is_qwen_or_firered_unet(value: Any) -> bool:
+    key = _normalize_model_key(value)
+    return "qwen" in key or "firered" in key or "fire_red" in key
 
 
-def _list_qwen_2512_unets(preferred: str = DEFAULT_UNET) -> list[str]:
+def _list_qwen_or_firered_unets(preferred: str = DEFAULT_UNET) -> list[str]:
     _ensure_unet_gguf_folder()
     values: list[str] = []
     for category in ("diffusion_models", "unet_gguf"):
@@ -387,7 +391,7 @@ def _list_qwen_2512_unets(preferred: str = DEFAULT_UNET) -> list[str]:
     preferred = str(preferred or "").strip()
     if preferred:
         values.insert(0, preferred)
-    filtered = [item for item in values if _is_qwen_2512_unet(item)]
+    filtered = [item for item in values if _is_qwen_or_firered_unet(item)]
     seen: set[str] = set()
     unique: list[str] = []
     for item in filtered or ([preferred] if preferred else []):
@@ -712,7 +716,7 @@ def _image_to_data_url(image: Image.Image) -> str:
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
-def _tensor_layer_to_base64(image: torch.Tensor, mask: torch.Tensor) -> str:
+def _tensor_layer_to_pil(image: torch.Tensor, mask: torch.Tensor, size: tuple[int, int] | None = None) -> Image.Image:
     image_tensor = _ensure_image_batch(image)[0].detach().cpu().float().clamp(0.0, 1.0)
     mask_tensor = _ensure_mask(mask)
     if mask_tensor is None:
@@ -723,7 +727,14 @@ def _tensor_layer_to_base64(image: torch.Tensor, mask: torch.Tensor) -> str:
     rgb = (image_tensor.numpy() * 255.0).round().astype(np.uint8)
     a = (alpha.numpy() * 255.0).round().astype(np.uint8)
     rgba = np.concatenate([rgb, a[..., None]], axis=-1)
-    return _image_to_data_url(Image.fromarray(rgba, mode="RGBA"))
+    layer = Image.fromarray(rgba, mode="RGBA")
+    if size and layer.size != size:
+        layer = layer.resize(size, _resampling_filter())
+    return layer
+
+
+def _tensor_layer_to_base64(image: torch.Tensor, mask: torch.Tensor) -> str:
+    return _image_to_data_url(_tensor_layer_to_pil(image, mask))
 
 
 def _decode_layer_image(value: Any, size: tuple[int, int]) -> Image.Image | None:
@@ -742,22 +753,87 @@ def _decode_layer_image(value: Any, size: tuple[int, int]) -> Image.Image | None
     return layer
 
 
-def _state_layer_payloads(state: Any) -> list[str]:
+def _state_layer_is_visible(item: dict[str, Any]) -> bool:
+    value = item.get("visible", True)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        return normalized not in {"", "0", "false", "no", "off", "hidden", "hide", "隐藏"}
+    return value is not False
+
+
+def _state_layer_entries(state: Any) -> list[tuple[int, dict[str, Any]]]:
     if not isinstance(state, dict):
         return []
     layers = state.get("layers")
+    if not isinstance(layers, list):
+        return []
+    return [(index, item) for index, item in enumerate(layers) if isinstance(item, dict)]
+
+
+def _state_active_layer_index(state: Any) -> int:
+    entries = _state_layer_entries(state)
+    if not entries:
+        return -1
+    active_id = str(state.get("activeLayerId") or "").strip() if isinstance(state, dict) else ""
+    if active_id:
+        for index, item in entries:
+            if str(item.get("id") or "").strip() == active_id:
+                return index
+    return entries[-1][0]
+
+
+def _state_active_layer_cache_context(state: Any) -> str:
+    entries = _state_layer_entries(state)
+    if not entries:
+        return ""
+    active_index = _state_active_layer_index(state)
+    active_id = ""
+    for index, item in entries:
+        if index == active_index:
+            active_id = str(item.get("id") or "").strip()
+            break
+    return json.dumps(
+        {
+            "activeLayerId": active_id,
+            "activeLayerIndex": active_index,
+            "layerCount": len(entries),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _state_layer_payloads(state: Any, active_only: bool = False) -> list[str]:
+    if not isinstance(state, dict):
+        return []
     payloads: list[str] = []
-    if isinstance(layers, list):
-        for item in layers:
-            if not isinstance(item, dict) or item.get("visible") is False:
+    entries = _state_layer_entries(state)
+    if entries:
+        active_index = _state_active_layer_index(state)
+        for index, item in entries:
+            if active_only and index != active_index:
+                continue
+            if not isinstance(item, dict) or not _state_layer_is_visible(item):
                 continue
             payload = str(item.get("image") or item.get("layerImage") or "").strip()
             if payload:
                 payloads.append(payload)
-    if payloads:
         return payloads
     legacy = str(state.get("layerImage") or state.get("editLayerImage") or state.get("generatedLayerImage") or "").strip()
     return [legacy] if legacy else []
+
+
+def _state_requests_inpaint(state: Any) -> bool:
+    if not isinstance(state, dict):
+        return False
+    mode = str(state.get("executionMode") or state.get("execution_mode") or "").strip().lower()
+    if mode in {"inpaint", "redraw", "repaint", "generate", "内部重绘", "重绘"}:
+        return True
+    return state.get("runInpaint") is True or state.get("run_inpaint") is True
 
 
 def _composite_layer_on_tensor(image: torch.Tensor, layer_payload: Any) -> torch.Tensor:
@@ -776,6 +852,47 @@ def _composite_layers_on_tensor(image: torch.Tensor, layer_payloads: list[str]) 
     for layer_payload in layer_payloads:
         result = _composite_layer_on_tensor(result, layer_payload)
     return result
+
+
+def _composite_generated_layer_on_state(
+    image: torch.Tensor,
+    state: Any,
+    generated_image: torch.Tensor,
+    generated_mask: torch.Tensor,
+) -> torch.Tensor:
+    image_tensor = _single_output_image(image)
+    base = _tensor_to_pil(image_tensor).convert("RGBA")
+    generated_layer = _tensor_layer_to_pil(generated_image, generated_mask, base.size)
+    entries = _state_layer_entries(state)
+
+    if not entries:
+        for layer_payload in _state_layer_payloads(state):
+            layer = _decode_layer_image(layer_payload, base.size)
+            if layer is not None:
+                base.alpha_composite(layer)
+        base.alpha_composite(generated_layer)
+        return _image_to_tensor(base.convert("RGB")).to(dtype=image_tensor.dtype, device=image_tensor.device)
+
+    active_index = _state_active_layer_index(state)
+    active_rendered = False
+    for index, item in entries:
+        is_active = index == active_index
+        if not is_active and not _state_layer_is_visible(item):
+            continue
+
+        payload = str(item.get("image") or item.get("layerImage") or "").strip()
+        layer = _decode_layer_image(payload, base.size) if payload else None
+        if is_active:
+            if layer is None:
+                layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+            layer.alpha_composite(generated_layer)
+            active_rendered = True
+        if layer is not None:
+            base.alpha_composite(layer)
+
+    if not active_rendered:
+        base.alpha_composite(generated_layer)
+    return _image_to_tensor(base.convert("RGB")).to(dtype=image_tensor.dtype, device=image_tensor.device)
 
 
 def _mask_to_base64(mask: torch.Tensor) -> str:
@@ -912,6 +1029,11 @@ def _tensor_content_signature(value: Any, label: str = "tensor") -> str:
         return f"{label}:{_tensor_signature(value)}"
 
 
+def _single_output_image(value: torch.Tensor) -> torch.Tensor:
+    image = _ensure_image_batch(value).float().clamp(0.0, 1.0)
+    return image[:1].contiguous()
+
+
 def _is_no_lora(value: Any) -> bool:
     text = str(value or "").strip()
     return not text or text == NO_LORA or text == "[未找到模型]"
@@ -966,11 +1088,13 @@ def _build_generation_signature(
     end_percent: float,
     lora_strength: float,
     shift: float,
+    lora_chain_config: Any = "",
+    layer_context: Any = "",
 ) -> tuple[str, str, str]:
     image_signature = _tensor_content_signature(image, "image")
     mask_signature = _tensor_content_signature(mask, "mask")
     payload = {
-        "cache_contract": 1,
+        "cache_contract": 2,
         "image_signature": image_signature,
         "mask_signature": mask_signature,
         "positive_prompt": str(positive_prompt or DEFAULT_POSITIVE),
@@ -995,6 +1119,8 @@ def _build_generation_signature(
         "end_percent": float(end_percent),
         "lora_strength": float(lora_strength),
         "shift": float(shift),
+        "lora_chain_config": normalize_lora_chain_data(lora_chain_config),
+        "layer_context": str(layer_context or ""),
     }
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(text.encode("utf-8")).hexdigest(), image_signature, mask_signature
@@ -1013,21 +1139,22 @@ class GJJ_QwenInstantXInpaintCanvas:
         "千问局部重绘",
         "交互式局部重绘",
     ]
-    RETURN_TYPES = (MIXED_IMAGE_TYPE,)
+    RETURN_TYPES = (OUTPUT_IMAGE_TYPE,)
     RETURN_NAMES = ("生成图像",)
-    OUTPUT_TOOLTIPS = ("输出 Qwen 2512 + InstantX ControlNet 局部重绘后的图片。",)
+    OUTPUT_TOOLTIPS = ("输出单张最终合成 IMAGE，不输出 GJJ_BATCH_IMAGE 批次。",)
     GJJ_HELP = {"title": "千问2512局部重绘画布", **_QWEN_INPAINT_HELP}
 
     def __init__(self):
         self._runtime_cache_key: tuple[Any, ...] | None = None
         self._runtime_cache_value: tuple[Any, Any, Any] | None = None
+        self._loaded_lora_cache: tuple[str, Any] | tuple[str, Any, dict[str, Any]] | None = None
         self._controlnet_apply = GJJ_AliMamaControlNetApply()
         self._generated_cache: dict[str, torch.Tensor] = {}
         self._generated_cache_order: list[str] = []
 
     @classmethod
     def INPUT_TYPES(cls):
-        unets = _list_qwen_2512_unets(DEFAULT_UNET)
+        unets = _list_qwen_or_firered_unets(DEFAULT_UNET)
         clips = _list_qwen_clips(DEFAULT_CLIP)
         controlnets = _list_models("controlnet", DEFAULT_CONTROLNET)
         vaes = _list_models("vae", DEFAULT_VAE)
@@ -1073,8 +1200,8 @@ class GJJ_QwenInstantXInpaintCanvas:
                     unets,
                     {
                         "default": _preferred_default(unets, DEFAULT_UNET),
-                        "display_name": "Qwen 2512 UNET",
-                        "tooltip": "只显示 qwen_image_2512 相关 UNET；支持 diffusion_models/unet_gguf 里的 safetensors 与 GGUF。",
+                        "display_name": "Qwen / FireRed UNET",
+                        "tooltip": "只显示文件名包含 qwen 或 firered 的 UNET；支持 diffusion_models/unet_gguf 里的 safetensors 与 GGUF。",
                     },
                 ),
                 "clip_name": (
@@ -1277,7 +1404,7 @@ class GJJ_QwenInstantXInpaintCanvas:
             },
             "optional": {
                 "image": (
-                    MIXED_IMAGE_TYPE,
+                    INPUT_IMAGE_TYPE,
                     {
                         "display_name": "图像",
                         "tooltip": "可选。连接后优先作为局部重绘原图；不连接则使用面板上传/粘贴图像。",
@@ -1288,6 +1415,13 @@ class GJJ_QwenInstantXInpaintCanvas:
                     {
                         "display_name": "遮罩",
                         "tooltip": "可选。连接后优先作为重绘遮罩；不连接则使用面板绘制遮罩。白色区域会被重绘。",
+                    },
+                ),
+                "lora_chain_config": (
+                    "LORA_CHAIN_CONFIG",
+                    {
+                        "display_name": "LoRA串联配置",
+                        "tooltip": "可选。接入 GJJ · 额外LoRA串联配置 后，会在节点内部按顺序把多组 LoRA 应用到 Qwen 模型与 CLIP。",
                     },
                 ),
             },
@@ -1324,6 +1458,7 @@ class GJJ_QwenInstantXInpaintCanvas:
         shift,
         image=None,
         mask=None,
+        lora_chain_config="",
         unique_id=None,
     ):
         payload = json.dumps(
@@ -1354,6 +1489,7 @@ class GJJ_QwenInstantXInpaintCanvas:
                 "shift": shift,
                 "image": _tensor_signature(image),
                 "mask": _tensor_signature(mask),
+                "lora_chain_config": normalize_lora_chain_data(lora_chain_config),
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -1368,8 +1504,10 @@ class GJJ_QwenInstantXInpaintCanvas:
         lora_name: str,
         lora_strength: float,
         shift: float,
+        lora_chain_config: Any = "",
         unique_id: Any = None,
     ):
+        normalized_lora_chain_config = normalize_lora_chain_data(lora_chain_config)
         cache_key = (
             str(unet_name or ""),
             str(clip_name or ""),
@@ -1377,6 +1515,7 @@ class GJJ_QwenInstantXInpaintCanvas:
             str(lora_name or ""),
             float(lora_strength),
             float(shift),
+            normalized_lora_chain_config,
         )
         if self._runtime_cache_key == cache_key and self._runtime_cache_value is not None:
             return self._runtime_cache_value
@@ -1386,6 +1525,20 @@ class GJJ_QwenInstantXInpaintCanvas:
         vae = _load_vae(vae_name)
         if not _is_no_lora(lora_name):
             model = _apply_lora_model_only(model, lora_name, float(lora_strength))
+        if str(normalized_lora_chain_config or "").strip() and normalized_lora_chain_config != "[]":
+            def send_lora_applied(payload: dict[str, Any]) -> None:
+                name = str(payload.get("name") or "").strip()
+                strength = payload.get("strength", "")
+                if name:
+                    _send_status(unique_id, f"已应用 LoRA串联：{name} ({strength})")
+
+            model, clip, self._loaded_lora_cache = apply_lora_chain_config(
+                model,
+                clip,
+                lora_data=normalized_lora_chain_config,
+                loaded_lora_cache=self._loaded_lora_cache,
+                on_lora_applied=send_lora_applied,
+            )
         model = _apply_aura_flow_shift(model, float(shift))
 
         self._runtime_cache_key = cache_key
@@ -1407,14 +1560,14 @@ class GJJ_QwenInstantXInpaintCanvas:
     def _load_generated_cache(self, state: Any, signature: str) -> tuple[torch.Tensor, str, str] | None:
         key = str(signature or "").strip()
         state_key = _state_cache_signature(state)
-        lookup_key = state_key or key
+        lookup_key = state_key if state_key and state_key == key else key
         if not lookup_key:
             return None
         cached = self._generated_cache.get(lookup_key)
         if cached is not None:
             return cached.clone(), _tensor_to_base64(cached), "内存缓存"
         payload = _state_generated_payload(state)
-        if not payload or not state_key:
+        if not payload or not state_key or state_key != key:
             return None
         tensor = _image_payload_to_tensor(payload)
         if tensor is None:
@@ -1422,13 +1575,12 @@ class GJJ_QwenInstantXInpaintCanvas:
         self._remember_generated_cache(state_key, tensor)
         return tensor, payload, "工作流缓存"
 
-    def _resolve_inputs(
+    def _resolve_base_image(
         self,
         inpaint_data: str,
         image: Any = None,
-        mask: Any = None,
         unique_id: Any = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, str, torch.Tensor]:
+    ) -> tuple[torch.Tensor, str]:
         state = _safe_json_loads(inpaint_data, {})
         width = _coerce_int(state.get("width") if isinstance(state, dict) else DEFAULT_WIDTH, DEFAULT_WIDTH, 16, 4096)
         height = _coerce_int(state.get("height") if isinstance(state, dict) else DEFAULT_HEIGHT, DEFAULT_HEIGHT, 16, 4096)
@@ -1446,11 +1598,20 @@ class GJJ_QwenInstantXInpaintCanvas:
         if image_tensor is None:
             image_tensor = _blank_image(width, height)
             source = "空白画布"
-            _send_status(unique_id, "未提供图像，使用空白画布并全图生成。")
+            _send_status(unique_id, "未提供图像，使用空白画布。")
+        return _ensure_image_batch(image_tensor).float().clamp(0.0, 1.0), source
 
-        image_tensor = _ensure_image_batch(image_tensor).float().clamp(0.0, 1.0)
+    def _resolve_inputs(
+        self,
+        inpaint_data: str,
+        image: Any = None,
+        mask: Any = None,
+        unique_id: Any = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, str, torch.Tensor]:
+        state = _safe_json_loads(inpaint_data, {})
+        image_tensor, source = self._resolve_base_image(inpaint_data, image=image, unique_id=unique_id)
         base_tensor = image_tensor.clone()
-        image_tensor = _composite_layers_on_tensor(image_tensor, _state_layer_payloads(state)).clamp(0.0, 1.0)
+        image_tensor = _composite_layers_on_tensor(image_tensor, _state_layer_payloads(state, active_only=True)).clamp(0.0, 1.0)
         batch = int(image_tensor.shape[0])
         height = int(image_tensor.shape[1])
         width = int(image_tensor.shape[2])
@@ -1493,11 +1654,12 @@ class GJJ_QwenInstantXInpaintCanvas:
         end_percent: float,
         lora_strength: float,
         shift: float,
+        lora_chain_config: Any = "",
         unique_id: Any = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         from nodes import VAEEncode
 
-        _send_status(unique_id, "1/7 加载 Qwen 2512、CLIP、VAE、Lightning LoRA...")
+        _send_status(unique_id, "1/7 加载 Qwen 2512、CLIP、VAE、LoRA...")
         try:
             model, clip, vae = self._load_runtime(
                 unet_name,
@@ -1506,6 +1668,7 @@ class GJJ_QwenInstantXInpaintCanvas:
                 lora_name,
                 lora_strength,
                 shift,
+                lora_chain_config=lora_chain_config,
                 unique_id=unique_id,
             )
         except Exception as exc:
@@ -1519,6 +1682,7 @@ class GJJ_QwenInstantXInpaintCanvas:
                 f"ControlNet: {controlnet_name}\n"
                 f"VAE: {vae_name}\n"
                 f"LoRA: {lora_name}\n"
+                f"LoRA串联配置: {normalize_lora_chain_data(lora_chain_config)}\n"
                 f"详细错误：{exc}"
             )
             wrapped = RuntimeError(detailed_error)
@@ -1615,9 +1779,28 @@ class GJJ_QwenInstantXInpaintCanvas:
         shift: float,
         image=None,
         mask=None,
+        lora_chain_config="",
         unique_id=None,
     ):
         state = _safe_json_loads(inpaint_data, {})
+        if not _state_requests_inpaint(state):
+            base_image, source_label = self._resolve_base_image(
+                inpaint_data,
+                image=image,
+                unique_id=unique_id,
+            )
+            result = _single_output_image(
+                _composite_layers_on_tensor(base_image, _state_layer_payloads(state)).clamp(0.0, 1.0)
+            ).contiguous()
+            _send_status(unique_id, "已输出当前可见图层合并图，未调用重绘模型。")
+            return {
+                "ui": {
+                    "source_image": [_tensor_to_base64(base_image)],
+                    "preview_text": [f"{source_label} → 已合并当前可见图层"],
+                },
+                "result": (result,),
+            }
+
         source_image, source_mask, source_label, base_image = self._resolve_inputs(
             inpaint_data,
             image=image,
@@ -1649,10 +1832,13 @@ class GJJ_QwenInstantXInpaintCanvas:
             end_percent=float(end_percent),
             lora_strength=float(lora_strength),
             shift=float(shift),
+            lora_chain_config=lora_chain_config,
+            layer_context=_state_active_layer_cache_context(state),
         )
         cached = self._load_generated_cache(state, cache_signature)
         if cached is not None:
             cached_tensor, cached_payload, cache_source = cached
+            cached_tensor = _single_output_image(cached_tensor)
             generated_signature = _tensor_content_signature(cached_tensor, "generated")
             _send_status(unique_id, f"签名命中，直接输出{cache_source}生成图。")
             return {
@@ -1693,8 +1879,12 @@ class GJJ_QwenInstantXInpaintCanvas:
             float(end_percent),
             float(lora_strength),
             float(shift),
+            lora_chain_config=lora_chain_config,
             unique_id=unique_id,
         )
+        result = _single_output_image(result)
+        scaled_base_image = _resize_image_tensor(base_image, int(result.shape[1]), int(result.shape[2]))
+        result = _composite_generated_layer_on_state(scaled_base_image, state, decoded, processed_mask).contiguous()
         generated_signature = _tensor_content_signature(result, "generated")
         self._remember_generated_cache(cache_signature, result)
         return {

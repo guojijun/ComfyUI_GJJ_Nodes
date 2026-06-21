@@ -911,6 +911,58 @@ def merge_values(values: list[Any]) -> tuple[str, Any, str]:
     return "other", merged, serialize_preview(merged)
 
 
+def clone_cached_preview_value(value: Any, depth: int = 0) -> Any:
+    if depth > 4:
+        return value
+    if torch.is_tensor(value):
+        try:
+            return value.detach().clone()
+        except Exception:
+            return value
+    if isinstance(value, list):
+        return [clone_cached_preview_value(item, depth + 1) for item in value]
+    if isinstance(value, tuple):
+        return tuple(clone_cached_preview_value(item, depth + 1) for item in value)
+    if isinstance(value, dict):
+        return {
+            key: clone_cached_preview_value(item, depth + 1)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _prompt_node_data(prompt: Any, unique_id: Any) -> dict[str, Any] | None:
+    if unique_id is None or not isinstance(prompt, dict):
+        return None
+    key = str(unique_id).strip()
+    if not key:
+        return None
+    node_data = prompt.get(key) or prompt.get(unique_id)
+    return node_data if isinstance(node_data, dict) else None
+
+
+def _is_prompt_link(value: Any) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) >= 2
+        and isinstance(value[0], (str, int))
+        and isinstance(value[1], (int, float))
+    )
+
+
+def _node_has_linked_preview_inputs(prompt: Any, unique_id: Any) -> bool:
+    node_data = _prompt_node_data(prompt, unique_id)
+    inputs = node_data.get("inputs") if isinstance(node_data, dict) else None
+    if not isinstance(inputs, dict):
+        return False
+    for key, value in inputs.items():
+        key_text = str(key or "")
+        if key_text == "batch_image" or key_text.startswith("any_"):
+            if _is_prompt_link(value):
+                return True
+    return False
+
+
 class GJJ_AnyPreview:
     CATEGORY = "GJJ"
     FUNCTION = "preview"
@@ -1106,6 +1158,9 @@ class GJJ_AnyPreview:
     RETURN_TYPES = (any_type,)
     RETURN_NAMES = ("透传输出",)
     OUTPUT_TOOLTIPS = ("透传第一个有效输入；多路输入只用于浏览平铺。",)
+    _LAST_INPUT_CACHE: dict[str, list[Any]] = {}
+    _LAST_INPUT_CACHE_ORDER: list[str] = []
+    _LAST_INPUT_CACHE_MAX = 64
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1122,12 +1177,45 @@ class GJJ_AnyPreview:
         return {
             "required": {},
             "optional": FlexibleOptionalInputType(any_type, first_input_data),
-            "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
+            "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO", "unique_id": "UNIQUE_ID"},
         }
 
     def __init__(self):
         self.preview_image = PreviewImage()
         self.queue_image = SaveImage()
+
+    @classmethod
+    def _cache_key(cls, unique_id: Any, prompt: Any = None) -> str:
+        key = str(unique_id or "").strip()
+        if not key or key == NODE_NAME:
+            return ""
+        return f"node:{key}"
+
+    @classmethod
+    def _remember_last_inputs(cls, unique_id: Any, values: list[Any], prompt: Any = None) -> None:
+        key = cls._cache_key(unique_id, prompt)
+        if not key or not values:
+            return
+        cls._LAST_INPUT_CACHE[key] = clone_cached_preview_value(values)
+        if key in cls._LAST_INPUT_CACHE_ORDER:
+            cls._LAST_INPUT_CACHE_ORDER.remove(key)
+        cls._LAST_INPUT_CACHE_ORDER.append(key)
+        while len(cls._LAST_INPUT_CACHE_ORDER) > cls._LAST_INPUT_CACHE_MAX:
+            old_key = cls._LAST_INPUT_CACHE_ORDER.pop(0)
+            cls._LAST_INPUT_CACHE.pop(old_key, None)
+
+    @classmethod
+    def _load_last_inputs(cls, unique_id: Any, prompt: Any = None) -> list[Any]:
+        key = cls._cache_key(unique_id, prompt)
+        if not key:
+            return []
+        values = cls._LAST_INPUT_CACHE.get(key)
+        if not values:
+            return []
+        if key in cls._LAST_INPUT_CACHE_ORDER:
+            cls._LAST_INPUT_CACHE_ORDER.remove(key)
+            cls._LAST_INPUT_CACHE_ORDER.append(key)
+        return clone_cached_preview_value(values)
 
     def _save_queue_thumbnail(
         self,
@@ -1166,7 +1254,9 @@ class GJJ_AnyPreview:
             if value is not None and not is_none(value):
                 return []
 
-        return [input_keys[0] if input_keys else "any_01"]
+        if not input_keys:
+            return []
+        return [input_keys[0]]
 
     def _save_image_preview(
         self,
@@ -1265,8 +1355,9 @@ class GJJ_AnyPreview:
             items.append(item)
         return items
 
-    def preview(self, batch_image=None, prompt=None, extra_pnginfo=None, **kwargs):
+    def preview(self, batch_image=None, prompt=None, extra_pnginfo=None, unique_id=None, **kwargs):
         raw_values = []
+        using_cached_inputs = False
 
         # 优先处理 batch_image 参数
         if batch_image is not None and not is_none(batch_image):
@@ -1280,8 +1371,17 @@ class GJJ_AnyPreview:
                 continue
             raw_values.append(value)
 
+        has_linked_inputs = _node_has_linked_preview_inputs(prompt, unique_id)
+        if raw_values:
+            self._remember_last_inputs(unique_id, raw_values, prompt)
+        elif not has_linked_inputs:
+            raw_values = self._load_last_inputs(unique_id, prompt)
+            using_cached_inputs = bool(raw_values)
+
         preview_values = flatten_preview_values(raw_values)
         preview_kind, merged, preview_text = merge_values(preview_values)
+        if using_cached_inputs and preview_values:
+            preview_text = f"使用断开前缓存：{preview_text}"
         sequence_media: list[dict[str, Any]] = []
         sequence_info = detect_video_sequence_preview(preview_values)
         if sequence_info is not None:
@@ -1302,6 +1402,7 @@ class GJJ_AnyPreview:
             "preview_text": (preview_text,),
             "preview_kind": (preview_kind,),
             "preview_item_count": (len(preview_values),),
+            "preview_cached": ("true" if using_cached_inputs else "false",),
         }
         if len(preview_values) > 1 and not sequence_media:
             preview_items = self._build_preview_items(

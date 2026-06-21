@@ -8,6 +8,7 @@
  */
 
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
 
 export class GJJ_Utils {
 
@@ -1042,6 +1043,132 @@ function isExecutionOutputNode(node) {
 	return false;
 }
 
+function promptKeyById(output, idValue) {
+	if (!output || idValue === undefined || idValue === null) return "";
+	const id = String(idValue);
+	if (output[id]) return id;
+	for (const key of Object.keys(output)) {
+		const tail = String(key).split(":").filter(Boolean).pop();
+		if (tail === id) return String(key);
+	}
+	return "";
+}
+
+function promptNodeKey(output, node) {
+	return promptKeyById(output, node?.id);
+}
+
+function promptInputSourceIds(value, ids = []) {
+	if (Array.isArray(value)) {
+		if (
+			value.length >= 2
+			&& (typeof value[0] === "string" || typeof value[0] === "number")
+			&& Number.isFinite(Number(value[1]))
+		) {
+			ids.push(String(value[0]));
+			return ids;
+		}
+		for (const item of value) promptInputSourceIds(item, ids);
+		return ids;
+	}
+	if (value && typeof value === "object") {
+		for (const item of Object.values(value)) promptInputSourceIds(item, ids);
+	}
+	return ids;
+}
+
+function collectPromptAncestors(output, rootKey) {
+	const keep = new Set();
+	const visit = (key) => {
+		const normalizedKey = String(key);
+		if (!normalizedKey || keep.has(normalizedKey) || !output?.[normalizedKey]) return;
+		keep.add(normalizedKey);
+		const inputs = output[normalizedKey]?.inputs || {};
+		for (const value of Object.values(inputs)) {
+			for (const sourceId of promptInputSourceIds(value)) {
+				const sourceKey = promptKeyById(output, sourceId);
+				if (sourceKey) visit(sourceKey);
+			}
+		}
+	};
+	visit(rootKey);
+	return keep;
+}
+
+function clonePlain(value) {
+	try {
+		if (typeof structuredClone === "function") return structuredClone(value);
+	} catch (_) {}
+	try {
+		return JSON.parse(JSON.stringify(value));
+	} catch (_) {
+		return value;
+	}
+}
+
+function workflowNodeId(node) {
+	if (!node || typeof node !== "object") return "";
+	return String(node.id ?? node.node_id ?? "");
+}
+
+function workflowLinkEndpoint(link, index) {
+	if (Array.isArray(link)) return link[index];
+	const keys = index === 1
+		? ["origin_id", "source_id", "src_id", "from_id"]
+		: ["target_id", "destination_id", "dst_id", "to_id"];
+	for (const key of keys) {
+		if (link?.[key] !== undefined && link?.[key] !== null) return link[key];
+	}
+	return undefined;
+}
+
+function pruneWorkflowToNode(workflow, keepIds) {
+	const pruned = clonePlain(workflow);
+	if (!pruned || typeof pruned !== "object") return workflow;
+	if (Array.isArray(pruned.nodes)) {
+		pruned.nodes = pruned.nodes.filter((item) => keepIds.has(workflowNodeId(item)));
+	}
+	if (Array.isArray(pruned.links)) {
+		pruned.links = pruned.links.filter((link) => {
+			const source = workflowLinkEndpoint(link, 1);
+			const target = workflowLinkEndpoint(link, 3);
+			if (source === undefined || target === undefined) return true;
+			return keepIds.has(String(source)) && keepIds.has(String(target));
+		});
+	}
+	return pruned;
+}
+
+async function queuePrunedCurrentNodePrompt(node) {
+	if (!node || !node.graph || typeof app.graphToPrompt !== "function" || typeof api?.queuePrompt !== "function") {
+		return false;
+	}
+	const promptData = await app.graphToPrompt();
+	const output = promptData?.output || promptData?.prompt;
+	const rootKey = promptNodeKey(output, node);
+	if (!output || !rootKey) return false;
+
+	const keep = collectPromptAncestors(output, rootKey);
+	if (!keep.has(rootKey)) return false;
+
+	const prunedOutput = {};
+	for (const key of keep) prunedOutput[key] = output[key];
+
+	const nextPromptData = {
+		...promptData,
+		output: prunedOutput,
+	};
+	if (promptData?.prompt && promptData.prompt !== promptData.output) {
+		nextPromptData.prompt = prunedOutput;
+	}
+	if (promptData?.workflow) {
+		nextPromptData.workflow = pruneWorkflowToNode(promptData.workflow, keep);
+	}
+
+	await api.queuePrompt(0, nextPromptData);
+	return true;
+}
+
 /**
  * 仅执行当前节点（不触发整个工作流队列）。
  * 核心功能：临时禁用其他输出节点，只执行当前节点，执行完成后恢复状态。
@@ -1059,6 +1186,13 @@ export async function queueOnlyCurrentNode(node) {
 	const oldSelectedNode = app.canvas?.selected_node;
 
 	try {
+		try {
+			const prunedQueued = await queuePrunedCurrentNodePrompt(node);
+			if (prunedQueued) return true;
+		} catch (error) {
+			console.warn("[GJJ] 精准提交当前节点失败，回退到临时禁用输出节点：", error);
+		}
+
 		// 临时禁用其他输出节点
 		for (const n of allNodes) {
 			if (!n || n === node) continue;
