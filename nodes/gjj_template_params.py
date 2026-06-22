@@ -751,20 +751,24 @@ def _parse_option_item(value: Any) -> dict[str, str]:
 
 def _parse_enum_options(default_text: Any, tooltip: str = "") -> list[dict[str, str]]:
     raw = str(default_text or "").strip()
-    if not (raw.startswith("[") and raw.endswith("]")):
+    is_square = raw.startswith("[") and raw.endswith("]")
+    is_brace = (raw.startswith("{") and raw.endswith("}")) or (raw.startswith("｛") and raw.endswith("｝"))
+    if not (is_square or is_brace):
         return []
     inner = raw[1:-1].strip()
     if not inner:
         return []
     tooltip_lower = str(tooltip or "").lower()
-    try:
-        parsed = json.loads(raw)
-        if isinstance(parsed, list) and ("枚举" in tooltip_lower or "enum" in tooltip_lower):
-            return [_parse_option_item(item) for item in parsed]
-        return []
-    except Exception:
-        pass
-    return [_parse_option_item(item) for item in _split_enum_options(inner)]
+    if is_square:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list) and ("枚举" in tooltip_lower or "enum" in tooltip_lower):
+                options = [_parse_option_item(item) for item in parsed]
+                return [item for item in options if _option_value(item)]
+            return []
+        except Exception:
+            pass
+    return [item for item in (_parse_option_item(option) for option in _split_enum_options(inner)) if _option_value(item)]
 
 
 def _option_value(option: Any) -> str:
@@ -779,17 +783,49 @@ def _option_label(option: Any) -> str:
     return _normalize_text(option).strip()
 
 
-def _coerce_enum_value(raw_value: Any, options: list[Any]) -> str:
+def _is_int_text(value: Any) -> bool:
+    return re.fullmatch(r"[-+]?\d+", _normalize_text(value).strip()) is not None
+
+
+def _is_number_text(value: Any) -> bool:
+    text = _normalize_text(value).strip()
+    return (
+        re.fullmatch(r"[-+]?\d+", text) is not None
+        or re.fullmatch(r"[-+]?(?:\d+\.\d*|\.\d+)(?:[eE][-+]?\d+)?", text) is not None
+        or re.fullmatch(r"[-+]?\d+[eE][-+]?\d+", text) is not None
+    )
+
+
+def _enum_outputs_int(options: list[Any]) -> bool:
+    return bool(options) and all(_is_int_text(_option_value(option)) for option in options)
+
+
+def _enum_outputs_number(options: list[Any]) -> bool:
+    return bool(options) and all(_is_number_text(_option_value(option)) for option in options)
+
+
+def _coerce_enum_value(raw_value: Any, options: list[Any]) -> Any:
     if not options:
         return _normalize_text(raw_value)
+    output_int = _enum_outputs_int(options)
+    output_number = _enum_outputs_number(options)
+
+    def finalize(value: Any) -> Any:
+        text = _normalize_text(value).strip()
+        if output_int and _is_int_text(text):
+            return int(text)
+        if output_number and _is_number_text(text):
+            return float(text)
+        return text
+
     text = _normalize_text(raw_value).strip()
     for option in options:
         if text in {_option_value(option), _option_label(option)}:
-            return _option_value(option)
+            return finalize(_option_value(option))
     nested_options = _parse_enum_options(text, "枚举")
     if nested_options:
-        return _option_value(nested_options[0])
-    return _option_value(options[0])
+        return finalize(_option_value(nested_options[0]))
+    return finalize(_option_value(options[0]))
 
 
 def _coerce_bool_value(raw_value: Any, bool_labels: dict[str, str] | None = None) -> bool:
@@ -812,7 +848,13 @@ def _parse_bool_spec(default_text: Any) -> tuple[bool | None, dict[str, str] | N
     brace_match = re.fullmatch(r"(?is)\s*(true|false|yes|no|on|off|1|0|是|否|开|关)?\s*[{｛]\s*(.*?)\s*[}｝]\s*", raw)
     if brace_match:
         default_raw = (brace_match.group(1) or "true").strip()
-        true_label, false_label = _split_pipe_pair(brace_match.group(2).strip())
+        has_explicit_default = bool(brace_match.group(1))
+        parts = _split_enum_options(brace_match.group(2).strip())
+        if not has_explicit_default and len(parts) != 2:
+            return None, None
+        if has_explicit_default and len(parts) < 2:
+            return None, None
+        true_label, false_label = parts[0], parts[1]
         return parse_value(default_raw) is True, {
             "true_label": true_label or "开启",
             "false_label": false_label or "关闭",

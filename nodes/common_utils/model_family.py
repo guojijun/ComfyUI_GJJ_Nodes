@@ -179,6 +179,9 @@ def gjjutils_model_family_resolve_clip_type(
             return clip_type
 
     # 基于 CLIP 名称的特殊规则
+    if "qwen3vl" in normalized_clips or "qwen3vl" in canonical_clips:
+        if "boogu" in normalized_unet or "boogu" in canonical_unet:
+            return "boogu"
     if "clip_l_hidream" in normalized_clips or "clipghidream" in canonical_clips:
         return "hidream"
     if "qwen_2.5_vl" in normalized_clips or "qwen25vl" in canonical_clips:
@@ -825,6 +828,7 @@ def gjjutils_match_model_family_preset(
 
 # CLIP 类型关键词映射
 CLIP_TYPE_KEYWORDS = [
+    (("boogu", "boogu_image", "boogu-image"), "boogu"),
     (("flux2", "klein"), "flux2"),
     (("wan", "wan2.1", "wan2.2"), "wan"),
     (("ltx", "ltx-2.3", "ltx23"), "ltx"),

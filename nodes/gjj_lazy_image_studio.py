@@ -338,9 +338,15 @@ def _preferred_default(values: list[str], preferred: str) -> str:
 
 
 def _clip_type_enum(name: str):
-    return getattr(
-        comfy.sd.CLIPType, str(name or "").upper(), comfy.sd.CLIPType.STABLE_DIFFUSION
-    )
+    normalized = _normalize_text(name)
+    enum_name = str(name or "").upper()
+    clip_type = getattr(comfy.sd.CLIPType, enum_name, None)
+    if clip_type is None and normalized == "boogu":
+        raise RuntimeError(
+            "当前 ComfyUI 缺少原生 BOOGU CLIP 类型，无法加载 Boogu-Image 的 Qwen3VL 文本编码器。"
+            "请更新到包含 CLIPType.BOOGU / comfy.text_encoders.boogu 的 ComfyUI 版本后再使用。"
+        )
+    return clip_type or comfy.sd.CLIPType.STABLE_DIFFUSION
 
 
 # ============================================================================
@@ -610,7 +616,7 @@ def apply_lora_to_model_and_clip(
 
 def _should_skip_clip_lora_for_family(clip_type: str) -> bool:
     normalized = _normalize_text(clip_type)
-    return normalized in {"qwen_image"}
+    return normalized in {"qwen_image", "boogu"}
 
 
 # 以下函数已迁移到 common_utils.model_family，使用导入的别名
@@ -1176,6 +1182,7 @@ class GJJ_LazyImageStudio:
         "图文生成",
         "图生图",
         "文生图",
+        "boogu",
         "flux",
         "hidream",
         "omnigen2",
@@ -1194,7 +1201,7 @@ class GJJ_LazyImageStudio:
     @classmethod
     def INPUT_TYPES(cls):
         _raw_diffusion_models = _list_lazy_unet_models() or [DEFAULT_UNET_NAME]
-        _diffusion_keywords = ["flux", "f2k", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "gguf"]
+        _diffusion_keywords = ["flux", "f2k", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "gguf"]
         _filtered = [
             m
             for m in _raw_diffusion_models

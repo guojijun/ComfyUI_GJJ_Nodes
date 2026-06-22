@@ -1627,6 +1627,18 @@ function optionValue(option) {
 	return String((option && typeof option === "object" ? option.value ?? option.label : option) ?? "").trim();
 }
 
+function isNumberText(value) {
+	const text = String(value ?? "").trim();
+	return /^[-+]?\d+$/.test(text)
+		|| /^[-+]?(?:\d+\.\d*|\.\d+)(?:[eE][-+]?\d+)?$/.test(text)
+		|| /^[-+]?\d+[eE][-+]?\d+$/.test(text);
+}
+
+function enumOutputsNumber(field) {
+	const options = Array.isArray(field?.options) ? field.options : [];
+	return Boolean(options.length) && options.every((option) => isNumberText(optionValue(option)));
+}
+
 function normalizeEnumValue(field, value) {
 	const options = Array.isArray(field?.options) ? field.options : [];
 	const fallback = optionValue(options[0] || "");
@@ -1637,19 +1649,24 @@ function normalizeEnumValue(field, value) {
 
 function parseEnumOptions(defaultText, tooltip = "") {
 	const raw = String(defaultText || "").trim();
-	if (!raw.startsWith("[") || !raw.endsWith("]")) return [];
+	const isSquare = raw.startsWith("[") && raw.endsWith("]");
+	const isBrace = (raw.startsWith("{") && raw.endsWith("}")) || (raw.startsWith("｛") && raw.endsWith("｝"));
+	if (!isSquare && !isBrace) return [];
 	const inner = raw.slice(1, -1).trim();
 	if (!inner) return [];
 	const tooltipText = String(tooltip || "").toLowerCase();
-	try {
-		const parsed = JSON.parse(raw);
-		if (Array.isArray(parsed) && (tooltipText.includes("枚举") || tooltipText.includes("enum"))) {
-			return parsed.map((item) => parseOptionItem(item));
+	if (isSquare) {
+		try {
+			const parsed = JSON.parse(raw);
+			if (Array.isArray(parsed) && (tooltipText.includes("枚举") || tooltipText.includes("enum"))) {
+				return parsed.map((item) => parseOptionItem(item)).filter((item) => optionValue(item));
+			}
+			return [];
+		} catch (_) {
+			return splitEnumOptions(inner).map((item) => parseOptionItem(item)).filter((item) => optionValue(item));
 		}
-		return [];
-	} catch (_) {
-		return splitEnumOptions(inner).map((item) => parseOptionItem(item));
 	}
+	return splitEnumOptions(inner).map((item) => parseOptionItem(item)).filter((item) => optionValue(item));
 }
 
 function parseBoolSpec(defaultText) {
@@ -1657,7 +1674,11 @@ function parseBoolSpec(defaultText) {
 	const brace = raw.match(/^\s*(true|false|yes|no|on|off|1|0|是|否|开|关)?\s*[{｛]\s*([\s\S]*?)\s*[}｝]\s*$/i);
 	if (brace) {
 		const defaultRaw = brace[1] || "true";
-		const [trueLabel, falseLabel] = splitPipePair(brace[2]);
+		const hasExplicitDefault = Boolean(brace[1]);
+		const parts = splitEnumOptions(brace[2]);
+		if (!hasExplicitDefault && parts.length !== 2) return null;
+		if (hasExplicitDefault && parts.length < 2) return null;
+		const [trueLabel, falseLabel] = parts;
 		return {
 			defaultValue: parseValue(defaultRaw) === true,
 			labels: {
@@ -2148,7 +2169,9 @@ function updateOutputs(node, fields, values) {
 		const value = parseValue(rawValue);
 		// 输出类型必须按“当前输入文本”实时推断。
 		// JS 的 Number.isInteger(5.0) 会返回 true，所以 5.0 不能只看 parsed number。
-		const nextType = field.type === "ENUM" ? "COMBO" : (field.socket_type ? normalizeSocketType(field.socket_type) : inferTypeFromRaw(rawValue, value));
+		const nextType = field.type === "ENUM"
+			? (enumOutputsNumber(field) ? "INT,FLOAT,STRING" : "COMBO")
+			: (field.socket_type ? normalizeSocketType(field.socket_type) : inferTypeFromRaw(rawValue, value));
 		output.name = field.label || `输出${i + 1}`;
 		output.label = output.name;
 		output.localized_name = output.name;
@@ -2699,7 +2722,7 @@ function buildDom(node) {
 		.gjj-template-param-bool-button[data-value="false"] { border-color:#46535a; background:#24282b; color:#cdd5d8; }
 		.gjj-template-param-bool-button:hover { filter:brightness(1.12); }
 		.gjj-template-param-enum { display:flex; align-items:center; gap:5px; min-width:0; width:100%; flex-wrap:wrap; }
-		.gjj-template-param-enum-button { min-width:0; flex:1 1 72px; height:30px; padding:4px 8px; border:1px solid #33464e; border-radius:8px; outline:none; background:#24282b; color:#cdd5d8; font-size:13px; cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+		.gjj-template-param-enum-button { min-width:34px; max-width:100%; flex:0 0 auto; width:auto; height:26px; padding:2px 8px; border:1px solid #33464e; border-radius:7px; outline:none; background:#24282b; color:#cdd5d8; font-size:12px; cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 		.gjj-template-param-enum-button.active, .gjj-template-param-enum-button[data-value="true"] { border-color:#4f8f7a; background:#20362f; color:#dff8ea; font-weight:700; }
 		.gjj-template-param-enum-button:hover { filter:brightness(1.12); border-color:#6aa6b8; }
 		.gjj-template-param-prompt-group { display:flex; align-items:center; gap:4px; flex-wrap:wrap; min-width:0; width:100%; padding:0; }

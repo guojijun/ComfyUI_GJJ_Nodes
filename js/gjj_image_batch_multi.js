@@ -2,8 +2,10 @@ import { app } from "/scripts/app.js";
 
 const NODE_TYPE = "GJJ_ImageBatchMulti";
 const IMAGE_PREFIX = "image_";
-const COMPAT_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
+const OUTPUT_COMPAT_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
+const INPUT_MEDIA_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
 const ORIGINAL_SIZE_VALUE = "原始尺寸";
+const FALLBACK_SIZE_VALUE = "320";
 const MIN_INPUTS = 1;
 const MAX_INPUTS = 16;
 const CONTROL_WIDGET = "gjj_image_batch_multi_controls";
@@ -11,7 +13,7 @@ const EXTRA_OUTPUTS_PROPERTY = "gjj_image_batch_multi_show_extra_outputs";
 const INPUT_COUNT_PROPERTY = "gjj_image_batch_multi_input_count";
 const SETTINGS_OPEN_PROPERTY = "gjj_image_batch_multi_settings_open";
 const OUTPUT_DEFS = [
-	{ name: "批量图像", type: COMPAT_TYPE, tooltip: "兼容 GJJ 批量图片和普通 IMAGE batch 的输出。" },
+	{ name: "批量图像", type: OUTPUT_COMPAT_TYPE, tooltip: "兼容 GJJ 批量图片和普通 IMAGE batch 的输出。" },
 	{ name: "宽度", type: "INT", tooltip: "最终输出图像的宽度。点击 🔌 可显示或收起。" },
 	{ name: "高度", type: "INT", tooltip: "最终输出图像的高度。点击 🔌 可显示或收起。" },
 	{ name: "数量", type: "INT", tooltip: "最终输出序列的张数，包含可选前置黑帧或白帧。点击 🔌 可显示或收起。" },
@@ -38,7 +40,7 @@ const HIDDEN_WIDGETS = new Set(["size_preset", "orientation", "prepend_frame", "
 const NATIVE_SIZE_WIDGETS = new Set(["width", "height"]);
 const SETTINGS_NATIVE_WIDGETS = new Set(["width", "height", "align_multiple"]);
 const DEFAULT_VALUES = {
-	size_preset: "320",
+	size_preset: ORIGINAL_SIZE_VALUE,
 	orientation: "原始比例",
 	prepend_frame: "无",
 	width: 0,
@@ -63,7 +65,7 @@ const SIZE_OPTIONS = [
 	{ value: "1024", emoji: "1️⃣", tooltip: "1024 档位。横屏 1824 x 1024，竖屏 1024 x 1824，正方形 1024 x 1024；最终尺寸按对齐倍数取整。" },
 	{ value: "2K", emoji: "2️⃣", tooltip: "2K 档位。横屏 2048 x 1152，竖屏 1152 x 2048，正方形 2048 x 2048；最终尺寸按对齐倍数取整。" },
 	{ value: "4K", emoji: "#️⃣", tooltip: "4K 档位。横屏 3840 x 2160，竖屏 2160 x 3840，正方形 3840 x 3840；最终尺寸按对齐倍数取整。" },
-	{ value: ORIGINAL_SIZE_VALUE, emoji: "🖼️", tooltip: "原始尺寸。直接使用第一张输入图的真实宽高；多张图片会统一裁切缩放到这个尺寸。" },
+	{ value: ORIGINAL_SIZE_VALUE, emoji: "🖼️", tooltip: "原始尺寸。使用第一张输入图的真实宽高，并按对齐倍数取整；多张图片会统一裁切缩放到这个尺寸。" },
 ];
 const ORIENTATION_OPTIONS = [
 	{ value: "原始比例", emoji: "🟧", tooltip: "原始比例。按第一张输入图的宽高比输出；没有输入图时按当前尺寸档位输出正方形。" },
@@ -372,13 +374,13 @@ function dimensionsFromSizeRatio(sizeValue, ratioValue) {
 function presetDimensions(sizePreset, orientation) {
 	const size = normalizeSize(sizePreset);
 	if (size === ORIGINAL_SIZE_VALUE) {
-		return SIZE_DIMENSIONS[DEFAULT_VALUES.size_preset]["正方形"];
+		return SIZE_DIMENSIONS[FALLBACK_SIZE_VALUE]["正方形"];
 	}
 	const direction = normalizeOrientation(orientation);
 	if (direction === "原始比例") {
-		return SIZE_DIMENSIONS[size]?.["正方形"] || SIZE_DIMENSIONS[DEFAULT_VALUES.size_preset]["正方形"];
+		return SIZE_DIMENSIONS[size]?.["正方形"] || SIZE_DIMENSIONS[FALLBACK_SIZE_VALUE]["正方形"];
 	}
-	return SIZE_DIMENSIONS[size]?.[direction] || SIZE_DIMENSIONS[DEFAULT_VALUES.size_preset]["正方形"];
+	return SIZE_DIMENSIONS[size]?.[direction] || SIZE_DIMENSIONS[FALLBACK_SIZE_VALUE]["正方形"];
 }
 
 function customDimensions(node) {
@@ -747,7 +749,7 @@ function syncControlButtons(node) {
 			state.summary.title = `当前组合：自定义尺寸 ${width} x ${height}，比例 ${ratio}。点击 ⚙️ 可修改；清除后恢复尺寸档位和画幅方向。`;
 		} else if (selectedSize === ORIGINAL_SIZE_VALUE) {
 			state.summary.textContent = `${frameText} 原始尺寸`;
-			state.summary.title = `当前组合：原始尺寸 / ${selectedPrepend === "无" ? "不添加前置帧" : `前置${selectedPrepend}`}。执行时直接使用第一张输入图的真实宽高；没有输入图时退回 320 正方形。`;
+			state.summary.title = `当前组合：原始尺寸 / ${selectedPrepend === "无" ? "不添加前置帧" : `前置${selectedPrepend}`}。执行时使用第一张输入图的真实宽高，并按对齐倍数取整；没有输入图时退回 320 正方形。`;
 		} else {
 			state.summary.textContent = `${frameText} ${selectedSize} ${selectedOrientation}`;
 			state.summary.title = `当前组合：${selectedSize} / ${selectedOrientation} / ${selectedPrepend === "无" ? "不添加前置帧" : `前置${selectedPrepend}`}。按钮同组互斥，黑白帧再次点击可取消。`;
@@ -981,9 +983,9 @@ function applyImageInputMeta(node) {
 		input.name = formatImageInputName(displayIndex);
 		input.label = `图片 ${displayIndex}`;
 		input.localized_name = `图片 ${displayIndex}`;
-		input.type = COMPAT_TYPE;
+		input.type = INPUT_MEDIA_TYPE;
 		input.forceInput = true;
-		input.tooltip = `第 ${displayIndex} 路图片输入；支持普通 IMAGE 或 GJJ 批量图片。`;
+		input.tooltip = `第 ${displayIndex} 路图片输入；支持普通 IMAGE、GJJ 批量图片或官方 VIDEO。`;
 		input.hidden = false;
 		input.visible = true;
 	}
@@ -1011,13 +1013,13 @@ function syncInputLinkSlots(node) {
 
 function addImageInput(node, index) {
 	if (typeof node.addInput !== "function") return null;
-	node.addInput(formatImageInputName(index), COMPAT_TYPE);
+	node.addInput(formatImageInputName(index), INPUT_MEDIA_TYPE);
 	const input = Array.isArray(node.inputs) ? node.inputs[node.inputs.length - 1] : null;
 	if (input) {
 		input.label = `图片 ${index}`;
 		input.localized_name = `图片 ${index}`;
 		input.forceInput = true;
-		input.tooltip = `第 ${index} 路图片输入；支持普通 IMAGE 或 GJJ 批量图片。`;
+		input.tooltip = `第 ${index} 路图片输入；支持普通 IMAGE、GJJ 批量图片或官方 VIDEO。`;
 	}
 	return input;
 }
@@ -1111,7 +1113,7 @@ app.registerExtension({
 			if (!section || typeof section !== "object") continue;
 			for (const [name, def] of Object.entries(section)) {
 				if (!/^image_\d+$/.test(String(name || "")) || !Array.isArray(def)) continue;
-				def[0] = COMPAT_TYPE;
+				def[0] = INPUT_MEDIA_TYPE;
 				def[1] = { ...(def[1] || {}), forceInput: true };
 			}
 		}
@@ -1164,7 +1166,7 @@ app.registerExtension({
 						input.name = formatImageInputName(displayIndex);
 						input.label = `图片 ${displayIndex}`;
 						input.localized_name = `图片 ${displayIndex}`;
-						input.type = COMPAT_TYPE;
+						input.type = INPUT_MEDIA_TYPE;
 						input.forceInput = true;
 					});
 			}

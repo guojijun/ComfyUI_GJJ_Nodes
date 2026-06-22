@@ -5,7 +5,7 @@
     "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.jpg",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
-    "search_text": "风格",
+    "search_text": "",
     "page_size": 10,
     "image_format": "jpg",
     "jpeg_quality": 0.86
@@ -80,7 +80,7 @@
   "nodes": {},
   "user": {},
   "text_merge": {
-    "template_text": "《keep scene, keep enviroment,》",
+    "template_text": "\n【默认】You are a helpful assistant. #默认值\n【T2I】You are a helpful assistant specialized in text-to-image generation.#文本到图片\n【T2V】You are a helpful assistant specialized in text-to-video generation.#文本到视频\n【I2I】You are a helpful assistant specialized in image editing.#图片到图片\n【R2I】You are a helpful assistant specialized in subject-to-image generation.#参考主体到图片\n【I2V】\n【V2V】You are a helpful assistant specialized in video editing.#视频到视频\n【R2V】You are a helpful assistant specialized in subject-to-video generation.#参考主体到视频\n【VI2V】You are a helpful assistant specialized in video editing on content propagation.#视频指令到视频\n【RV2V】You are a helpful assistant specialized in video editing with reference.#参考视频到视频\n【ADS2V】You are a helpful assistant specialized in ads insertion.#广告插入到视频\n【VRC2V】You are a helpful assistant for editing. You may need to adjust the subject's action or position.#视频区域控制到视频\n【MV2V】You are a helpful assistant for editing. You might need to adjust the video's style, lighting, colors, textures, and the subject's pose or action.#多维编辑到视频",
     "selected_template": "美漫",
     "selected_groups": {
       "风格": "钢笔",
@@ -182,6 +182,6 @@
     ]
   },
   "template_prompt": {
-    "default_template": "一张{{🧍主体(美女)}}照片,{{🏞️背景(白色)}}背景，高清，4K。{{🎨风格：真实、影视、摄影、国漫、水彩、素描、水墨、粉彩、炭笔、版画、胶片、古风、国潮、漫威、粘土、Q版、彩铅、粉笔、钢笔、铜版、油画、敦煌、年画、赛博、废土、复古、蓝图、线稿、毛绒、玻璃、金属、剪纸}}风格；{{👁️视角：正面，左前 45°, 右前 45°, 左侧面，右侧面，左后 45°, 右后 45°, 背面，底部仰视，顶部俯视}}；{{🖼️景别：广角，大全景，远景，中远景，中景，中近景，半身，特写，大特写，微距，全身肖像，肩部肖像}}；{{📐角度：超低仰拍，仰拍，齐眼平视，微高角度，高角度，俯拍，高空鸟瞰，极致俯拍，倾斜镜头}}"
+    "default_template": "一张{{🧍主体(美女)}}照片,{{🏞️背景(白色)}}背景，高清，4K。{{🎨风格：宫崎骏,真实、影视、摄影、国漫、水彩、素描、水墨、粉彩、炭笔、版画、胶片、古风、国潮、漫威、粘土、Q版、彩铅、粉笔、钢笔、铜版、油画、敦煌、年画、赛博、废土、复古、蓝图、线稿、毛绒、玻璃、金属、剪纸}}风格；{{👁️视角：正面，左前 45°, 右前 45°, 左侧面，右侧面，左后 45°, 右后 45°, 背面，底部仰视，顶部俯视}}；{{🖼️景别：广角，大全景，远景，中远景，中景，中近景，半身，特写，大特写，微距，全身肖像，肩部肖像}}；{{📐角度：超低仰拍，仰拍，齐眼平视，微高角度，高角度，俯拍，高空鸟瞰，极致俯拍，倾斜镜头}}"
   }
 }

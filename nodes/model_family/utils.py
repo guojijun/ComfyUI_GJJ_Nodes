@@ -19,6 +19,7 @@ DEFAULT_CLIP_NAME = "qwen_3_8b.safetensors"
 DEFAULT_VAE_NAME = "flux2-vae.safetensors"
 
 CLIP_TYPE_KEYWORDS = [
+    (("boogu", "boogu_image", "boogu-image"), "boogu"),
     (("hidream",), "hidream"),
     (("wan", "wan2.2"), "wan"),
     (("ace",), "ace"),
@@ -227,6 +228,9 @@ def gjjutils_model_family_resolve_clip_type(
             return clip_type
 
     # 基于 CLIP 名称的特殊规则
+    if "qwen3vl" in normalized_clips or "qwen3vl" in canonical_clips:
+        if "boogu" in normalized_unet or "boogu" in canonical_unet:
+            return "boogu"
     if "clip_l_hidream" in normalized_clips or "clipghidream" in canonical_clips:
         return "hidream"
     if "qwen_2.5_vl" in normalized_clips or "qwen25vl" in canonical_clips:

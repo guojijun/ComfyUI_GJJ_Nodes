@@ -40,7 +40,7 @@ from .common_utils.prompt_translation import (
 log = logging.getLogger(__name__)
 
 NODE_NAME = "GJJ_SAM3SCAIL2TrackMaskAIO"
-DISPLAY_NAME = "GJJ · 🎯🧩 SAM3跟踪SCAIL2彩色遮罩一体机"
+DISPLAY_NAME = "GJJ · 🎯🧩 SAM3跟踪彩色遮罩一体机"
 MODEL_KEYWORD = "sam3.1_multiplex"
 DEFAULT_CHECKPOINT = "sam3.1_multiplex_fp16.safetensors"
 MAX_ROUTES = 2
@@ -85,8 +85,8 @@ MEDIA_INPUT = MultiInput(MEDIA_INPUT_TYPE, ["GJJ_BATCH_IMAGE", "IMAGE", "VIDEO"]
 
 def _mask_title(index: int) -> str:
     if index == 1:
-        return "姿态彩色遮罩"
-    return "参考图彩色遮罩"
+        return "通道1彩色遮罩"
+    return "通道2彩色遮罩"
 
 
 def _checkpoint_list() -> list[str]:
@@ -123,7 +123,7 @@ _ENVIRONMENT_REPORT = build_dependency_model_report(
     description="请把包含 sam3.1_multiplex 字样的 SAM3.1 Multiplex checkpoint 放到 models/checkpoints 或其子目录。",
 )
 if not _ENVIRONMENT_REPORT.get("available", True):
-    print_dependency_model_report(_ENVIRONMENT_REPORT, title="GJJ SAM3+SCAIL-2 一体机模型缺失！")
+    print_dependency_model_report(_ENVIRONMENT_REPORT, title="GJJ SAM3 跟踪彩色遮罩节点模型缺失！")
 
 _TRANSLATION_ENVIRONMENT_REPORT = build_translation_environment_report(
     node_name=DISPLAY_NAME,
@@ -160,8 +160,8 @@ SAM31_MODEL_TREE = [
 ]
 
 NODE_DESCRIPTION = (
-    "SAM3.1 双路图片/视频跟踪 + SCAIL-2 彩色遮罩一体机。"
-    "输入图片或视频帧，节点内部完成 SAM3 跟踪并直接输出遮罩：通道1输出姿态彩色遮罩，通道2输出参考图彩色遮罩。"
+    "SAM3.1 双路图片/视频跟踪 + 通用彩色遮罩生成节点。"
+    "输入图片或视频帧，节点内部完成 SAM3 跟踪并直接输出两路通道彩色遮罩。"
 )
 
 CHANNEL_SYNTAX_HELP = (
@@ -176,10 +176,10 @@ CHANNEL_SYNTAX_HELP = (
 
 OUTPUT_RULES_HELP = (
     "【输出规则】\n"
-    "输出1：通道1的 SCAIL-2 姿态彩色遮罩，会应用颜色分配排序和对象编号列表。\n"
-    "输出2：通道2的 SCAIL-2 参考图彩色遮罩，会应用颜色分配排序和对象编号列表。\n"
-    "通道1遮罩等同旧“姿态彩色遮罩”：替换模式关=黑底，开=白底。\n"
-    "通道2遮罩等同旧“参考图彩色遮罩”：替换模式关=白底，开=黑底。\n"
+    "输出1：通道1彩色遮罩，会应用颜色分配排序和对象编号列表。\n"
+    "输出2：通道2彩色遮罩，会应用颜色分配排序和对象编号列表。\n"
+    "通道1遮罩：替换模式关=黑底，开=白底。\n"
+    "通道2遮罩：替换模式关=白底，开=黑底。\n"
     "已连接媒体但没有目标、没有识别到对象、或对象编号全越界时，会输出对应帧数和尺寸的纯背景遮罩。"
 )
 
@@ -224,11 +224,11 @@ SAM31_SCAIL2_HELP = build_node_help_payload(
     model_tree=SAM31_MODEL_TREE,
     models=[SAM31_MODEL_SPEC],
     usage=[
-        "media_01 是通道1，media_02 是通道2；输入支持 GJJ_BATCH_IMAGE、IMAGE batch 和官方 VIDEO。",
+        "media_01 是通道1，media_02 是通道2；输入支持 GJJ_BATCH_IMAGE、IMAGE batch 和官方 VIDEO；未连接的通道会输出纯背景兜底遮罩。",
         "跟踪目标没有通道前缀时通用于全部通道；写 通道1=person;通道2=dog 时分别跟踪不同目标；输入中文会在前端翻译成英文回填。",
         "对象编号没有通道前缀时通用于全部通道；写 通道1=0,1;通道2=2 时分别筛选不同对象。",
-        "输出只有两个 IMAGE：姿态彩色遮罩、参考图彩色遮罩；SAM3 跟踪数据只在节点内部使用，不再输出。",
-        "通道1彩色遮罩按旧“姿态彩色遮罩”规则输出；通道2按旧“参考图彩色遮罩”规则输出。",
+        "输出只有两个 IMAGE：通道1彩色遮罩、通道2彩色遮罩；SAM3 跟踪数据只在节点内部使用，不再输出。",
+        "通道1彩色遮罩默认黑底，替换模式下白底；通道2彩色遮罩默认白底，替换模式下黑底。",
         "通道2如果输入是多帧/多图，面板预览会保存完整动态 WebP，不再只取第一帧。",
     ],
     runtime=[
@@ -255,13 +255,13 @@ SAM31_SCAIL2_HELP = build_node_help_payload(
             "替换模式": "开启时通道1白底、通道2黑底；关闭时通道1黑底、通道2白底。",
         },
         "outputs": {
-            "姿态彩色遮罩": {
+            "通道1彩色遮罩": {
                 "type": "IMAGE",
-                "description": "通道1遮罩。动画模式黑底，替换模式白底，通常接 GJJ_WanSCAILToVideo 的姿态彩色遮罩。",
+                "description": "第一路媒体的对象彩色遮罩。默认黑底，替换模式白底，可接任意需要彩色对象遮罩的后续节点。",
             },
-            "参考图彩色遮罩": {
+            "通道2彩色遮罩": {
                 "type": "IMAGE",
-                "description": "通道2遮罩。动画模式白底，替换模式黑底；多图/多帧时完整输出并动态 WebP 预览。",
+                "description": "第二路媒体的对象彩色遮罩。默认白底，替换模式黑底；多图/多帧时完整输出并动态 WebP 预览。",
             },
         },
         "features": [
@@ -279,7 +279,7 @@ SAM31_SCAIL2_HELP = build_node_help_payload(
             },
             {
                 "name": "🔌 旧节点能力合并",
-                "description": "包含 SAM3.1 加载、文本翻译、视频跟踪、SCAIL-2 彩色遮罩和内部预览；跟踪数据留在内部，不依赖旧节点源文件。",
+                "description": "包含 SAM3.1 加载、文本翻译、视频跟踪、彩色对象遮罩和内部预览；跟踪数据留在内部，不依赖旧节点源文件。",
             },
         ],
         "usage_examples": [
@@ -418,7 +418,7 @@ def _load_checkpoint(ckpt_name: str, unique_id=None):
             missing_models=_missing_model_specs(),
             description="未在 models/checkpoints 中找到 sam3.1_multiplex。节点不会自动替换成其它 checkpoint。",
             unique_id=unique_id,
-            title="GJJ SAM3+SCAIL-2 一体机模型缺失！",
+            title="GJJ SAM3 跟踪彩色遮罩节点模型缺失！",
         )
     resolved = ckpt_name if ckpt_name in available else _pick_default_checkpoint()
     ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", resolved)
@@ -681,7 +681,7 @@ def _save_mask_webp_preview(tensor: torch.Tensor, prefix: str, title: str, fps: 
             "height": int(preview.shape[1]),
         }
     except Exception as exc:
-        log.warning("SAM3+SCAIL-2 彩色遮罩预览保存失败：%s", exc)
+        log.warning("SAM3 跟踪彩色遮罩预览保存失败：%s", exc)
         return None
 
 
@@ -796,17 +796,20 @@ class GJJ_SAM3SCAIL2TrackMaskAIO:
     GJJ_HELP = {
         **SAM31_SCAIL2_HELP,
     }
-    CATEGORY = "GJJ/视频生成/SCAIL"
+    CATEGORY = "GJJ/视频工具/遮罩"
     FUNCTION = "track_and_build"
     RETURN_TYPES = ("IMAGE", "IMAGE")
-    RETURN_NAMES = ("姿态彩色遮罩", "参考图彩色遮罩")
+    RETURN_NAMES = ("通道1彩色遮罩", "通道2彩色遮罩")
     OUTPUT_NODE = True
     OUTPUT_TOOLTIPS = (
-        "通道1的 SCAIL-2 姿态彩色遮罩。替换模式关闭时为黑底，开启时为白底。",
-        "通道2的 SCAIL-2 参考图彩色遮罩。替换模式开启时为黑底，关闭时为白底；多帧会以 2fps 动态 WebP 预览，避免少量参考图快速闪烁。",
+        "第一路媒体的对象彩色遮罩。替换模式关闭时为黑底，开启时为白底。",
+        "第二路媒体的对象彩色遮罩。替换模式开启时为黑底，关闭时为白底；多帧会以 2fps 动态 WebP 预览，避免少量参考图快速闪烁。",
     )
     SEARCH_ALIASES = [
         "GJJ_SAM3VideoTrackAIO",
+        "GJJ_SAM3ColoredMask",
+        "SAM3彩色遮罩",
+        "SAM3对象遮罩",
         "GJJ_SCAIL2ColoredMask",
         "SAM3跟踪",
         "SCAIL2ColoredMask",
@@ -820,20 +823,6 @@ class GJJ_SAM3SCAIL2TrackMaskAIO:
         default_model = _pick_default_checkpoint()
         return {
             "required": {
-                "media_01": (
-                    MEDIA_INPUT,
-                    {
-                        "display_name": "图片/视频 1",
-                        "tooltip": "第一路输入，支持 GJJ_BATCH_IMAGE、普通 IMAGE batch 和官方 VIDEO。通道1通常作为姿态/驱动视频。",
-                    },
-                ),
-                "media_02": (
-                    MEDIA_INPUT,
-                    {
-                        "display_name": "图片/视频 2",
-                        "tooltip": "第二路输入，通常作为参考图/参考帧；多图或多帧时参考图彩色遮罩会动态 WebP 预览。",
-                    },
-                ),
                 "text_prompt": (
                     "STRING",
                     {
@@ -906,7 +895,23 @@ class GJJ_SAM3SCAIL2TrackMaskAIO:
                     {
                         "default": False,
                         "display_name": "替换模式",
-                        "tooltip": "开启时通道1/3-8白底、通道2黑底；关闭时通道1/3-8黑底、通道2白底。",
+                        "tooltip": "开启时通道1白底、通道2黑底；关闭时通道1黑底、通道2白底。",
+                    },
+                ),
+            },
+            "optional": {
+                "media_01": (
+                    MEDIA_INPUT,
+                    {
+                        "display_name": "媒体通道 1",
+                        "tooltip": "第一路输入，支持 GJJ_BATCH_IMAGE、普通 IMAGE batch 和官方 VIDEO；不连接时输出纯背景兜底遮罩。",
+                    },
+                ),
+                "media_02": (
+                    MEDIA_INPUT,
+                    {
+                        "display_name": "媒体通道 2",
+                        "tooltip": "第二路输入，支持 GJJ_BATCH_IMAGE、普通 IMAGE batch 和官方 VIDEO；不连接时输出纯背景兜底遮罩，多图或多帧时彩色遮罩会动态 WebP 预览。",
                     },
                 ),
             },
@@ -918,8 +923,6 @@ class GJJ_SAM3SCAIL2TrackMaskAIO:
     @classmethod
     def IS_CHANGED(
         cls,
-        media_01,
-        media_02,
         text_prompt,
         object_indices,
         checkpoint,
@@ -928,6 +931,8 @@ class GJJ_SAM3SCAIL2TrackMaskAIO:
         detect_interval,
         sort_by,
         replacement_mode,
+        media_01=None,
+        media_02=None,
         **kwargs,
     ):
         route_shapes = []
@@ -951,8 +956,6 @@ class GJJ_SAM3SCAIL2TrackMaskAIO:
 
     def track_and_build(
         self,
-        media_01,
-        media_02,
         text_prompt,
         object_indices,
         checkpoint,
@@ -961,6 +964,8 @@ class GJJ_SAM3SCAIL2TrackMaskAIO:
         detect_interval=1,
         sort_by="从左到右",
         replacement_mode=False,
+        media_01=None,
+        media_02=None,
         unique_id=None,
         **kwargs,
     ):
@@ -1026,7 +1031,7 @@ class GJJ_SAM3SCAIL2TrackMaskAIO:
                     track_data = _normalize_track_frame_count(track_data, images)
                 except Exception as exc:
                     raise RuntimeError(
-                        f"SAM3+SCAIL-2 第 {index} 通道执行失败。\n"
+                        f"SAM3 跟踪彩色遮罩第 {index} 通道执行失败。\n"
                         f"模型：{resolved}\n"
                         f"原始目标：{source_prompt}\n"
                         f"翻译目标：{translated_prompt}\n"

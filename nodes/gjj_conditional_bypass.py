@@ -290,7 +290,7 @@ class GJJ_ConditionalBypass:
                 "formula": (
                     "STRING",
                     {
-                        "default": "x1 // x3 > x2",
+                        "default": "(x1 //x2)+1== x3",
                         "multiline": False,
                         "display_name": "公式输入",
                         "tooltip": "输入条件公式，结果转为布尔值。可用 x1、x2、x3，也可用变量运算选择的变量显示名，例如：视频帧数量 // 每段帧数 > 当前段序号。",

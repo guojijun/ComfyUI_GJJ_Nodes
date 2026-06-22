@@ -3,7 +3,7 @@ import { GJJ_Utils } from "./gjj_utils.js";
 import { requestPromptTranslation } from "./gjj_common_prompt_translation.js";
 
 const NODE_TYPE = "GJJ_SAM3SCAIL2TrackMaskAIO";
-const NODE_DISPLAY_NAME = "GJJ · SAM3跟踪SCAIL2彩色遮罩一体机";
+const NODE_DISPLAY_NAME = "GJJ · SAM3跟踪彩色遮罩一体机";
 const TARGET_WIDGET = "text_prompt";
 const CHANNEL_VALUE_PATTERN = /^\s*((?:通道|频道|channel|ch|route|路)?\s*\[?\s*[0-9]+(?:\s*[,，/|]\s*[0-9]+)*\s*\]?\s*[:：=＝]\s*)(.*?)\s*$/i;
 
@@ -89,7 +89,7 @@ async function translateTargetPrompt(node) {
 			setWidgetValue(node, TARGET_WIDGET, translated);
 		}
 	} catch (error) {
-		console.warn("[GJJ SAM3 SCAIL2] 跟踪目标前端翻译失败，执行时会由后端兜底翻译。", error);
+		console.warn("[GJJ SAM3 Mask] 跟踪目标前端翻译失败，执行时会由后端兜底翻译。", error);
 	} finally {
 		node.__gjjSam31Scail2Translating = false;
 	}
