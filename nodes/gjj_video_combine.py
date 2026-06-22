@@ -40,10 +40,66 @@ class MultiInput(str):
         return not (incoming.issubset(allowed) or allowed.issubset(incoming))
 
 
+class AnyOfInput(MultiInput):
+    def __ne__(self, other):
+        if self.allowed_types == "*" or other == "*":
+            return False
+        allowed = self._type_set(self.allowed_types)
+        incoming = self._type_set(other)
+        return not bool(allowed.intersection(incoming))
+
+
 image_or_latent = MultiInput(
     f"{GJJ_BATCH_IMAGE_TYPE},IMAGE", [GJJ_BATCH_IMAGE_TYPE, "IMAGE", "LATENT", "VIDEO"]
 )
-float_or_int = MultiInput("FLOAT", ["INT", "FLOAT"])
+FRAME_RATE_INPUT_TYPE = "INT,FLOAT,VIDEO"
+AUDIO_INPUT_TYPE = "AUDIO,VIDEO"
+float_or_int = AnyOfInput(FRAME_RATE_INPUT_TYPE, ["INT", "FLOAT", "VIDEO"])
+audio_or_video = AnyOfInput(AUDIO_INPUT_TYPE, ["AUDIO", "VIDEO"])
+
+
+def _component_value(value: Any, key: str) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def _video_components(value: Any) -> Any | None:
+    if not hasattr(value, "get_components"):
+        return None
+    try:
+        return value.get_components()
+    except Exception as exc:
+        raise RuntimeError(f"读取 VIDEO 输入失败：{exc}") from exc
+
+
+def _audio_from_input(value: Any) -> Any:
+    components = _video_components(value)
+    if components is None:
+        return value
+    return _component_value(components, "audio")
+
+
+def _frame_rate_from_input(value: Any) -> Any:
+    components = _video_components(value)
+    if components is not None:
+        frame_rate = _component_value(components, "frame_rate")
+        if frame_rate is not None:
+            return frame_rate
+    if callable(getattr(value, "get_frame_rate", None)):
+        try:
+            frame_rate = value.get_frame_rate()
+            if frame_rate is not None:
+                return frame_rate
+        except Exception:
+            pass
+    if isinstance(value, dict):
+        for key in ("frame_rate", "fps", "frameRate", "source_fps", "source_video_fps"):
+            if value.get(key) is not None:
+                return value.get(key)
+    return value
 
 
 class GJJ_VideoCombine:
@@ -99,7 +155,7 @@ class GJJ_VideoCombine:
                         "min": 1,
                         "step": 1,
                         "display_name": "帧率",
-                        "tooltip": "输出动画或视频的帧率。可连接 INT 或 FLOAT，执行时会统一按浮点数计算。",
+                        "tooltip": "输出动画或视频的帧率。可连接 INT、FLOAT 或 VIDEO；连接 VIDEO 时读取该视频帧率。",
                     },
                 ),
                 "loop_count": (
@@ -229,10 +285,10 @@ class GJJ_VideoCombine:
             "optional": {
 
                 "audio": (
-                    "AUDIO",
+                    audio_or_video,
                     {
                         "display_name": "音频",
-                        "tooltip": "可选。接入后会在支持的格式里封入音轨，VIDEO 输出也会保留音频。",
+                        "tooltip": "可选。可连接 AUDIO 或 VIDEO；连接 VIDEO 时读取其中音轨并封入输出。",
                     },
                 ),
                 "vae": (
@@ -280,9 +336,10 @@ class GJJ_VideoCombine:
             if str(key or "").startswith("video_") and value is not None
         }
         try:
-            resolved_frame_rate = float(frame_rate)
+            resolved_frame_rate = float(_frame_rate_from_input(frame_rate))
         except Exception as exc:
-            raise RuntimeError(f"帧率必须是可转换为数字的 INT/FLOAT：{frame_rate!r}") from exc
+            raise RuntimeError(f"帧率必须是可转换为数字的 INT/FLOAT，或包含帧率的 VIDEO：{frame_rate!r}") from exc
+        resolved_audio = _audio_from_input(audio)
         format_overrides: dict[str, Any] = {}
         raw_overrides = str(format_overrides_json or "").strip()
         if raw_overrides:
@@ -317,7 +374,7 @@ class GJJ_VideoCombine:
             use_source_fps=use_source_fps,
             delete_tail_frame=delete_tail_frame,
             vae=vae,
-            audio=audio,
+            audio=resolved_audio,
             format_overrides_json=json.dumps(format_overrides, ensure_ascii=False),
             prompt=prompt,
             extra_pnginfo=extra_pnginfo,

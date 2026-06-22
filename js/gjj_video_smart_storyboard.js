@@ -4,6 +4,7 @@ import { api } from "/scripts/api.js";
 const NODE_NAME = "GJJ_VideoSmartStoryboard";
 const UI_KEY = "gjj_video_smart_storyboard";
 const MEDIA_INPUT = "media";
+const AUDIO_INPUT = "audio";
 const OUTPUT_SCENE_WIDGET = "output_scene";
 const SELECTED_VIDEO_WIDGET = "selected_video";
 const DOM_WIDGET = "gjj_video_smart_storyboard_controls";
@@ -12,15 +13,16 @@ const SELECTED_VIDEO_PROP = "selected_video";
 const UPLOAD_API = "/gjj/video_smart_storyboard/upload";
 const META_API = "/gjj/video_smart_storyboard/meta";
 const MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
-const OUTPUT_MEDIA_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
+const OUTPUT_MEDIA_TYPE = "VIDEO,GJJ_BATCH_IMAGE,IMAGE";
+const AUDIO_INPUT_TYPE = "AUDIO,VIDEO";
 const QUEUE_DELAY_MS = 360;
 const TOOLBAR_HEIGHT = 48;
-const THUMB_W = 52;
-const THUMB_H = 48;
-const THUMB_GAP = 5;
+const THUMB_W = 72;
+const THUMB_H = 58;
+const THUMB_GAP = 7;
 
 const OUTPUT_DEFS = [
-	{ name: "当前分镜", type: OUTPUT_MEDIA_TYPE, tooltip: "当前分镜帧；如果第一路下游是 VIDEO，会输出带音频的官方 VIDEO。" },
+	{ name: "当前分镜", type: OUTPUT_MEDIA_TYPE, tooltip: "当前分镜优先输出官方 VIDEO，并携带当段源音频；无法创建 VIDEO 时回退为帧序列。" },
 	{ name: "当前分镜序号", type: "INT", tooltip: "当前实际输出的 1 基分镜序号。" },
 	{ name: "总分镜数", type: "INT", tooltip: "自动检测到的总分镜数。" },
 ];
@@ -167,6 +169,14 @@ function normalizeSceneIndex(value) {
 	return Number.isFinite(number) ? Math.max(1, number) : 1;
 }
 
+function currentOutputScene(node, data = null) {
+	const widget = findWidget(node, OUTPUT_SCENE_WIDGET);
+	const raw = widget?.value ?? node?.properties?.[OUTPUT_SCENE_WIDGET] ?? data?.current_scene ?? data?.requested_scene ?? 1;
+	const current = normalizeSceneIndex(raw);
+	const total = Number(data?.total_scenes || 0);
+	return total > 0 ? Math.min(current, total) : current;
+}
+
 function setWidgetValue(node, name, value) {
 	const widget = findWidget(node, name);
 	if (!widget) return false;
@@ -261,13 +271,22 @@ function ensureOutputSceneWidget(node) {
 	widget.options.tooltip = widget.tooltip;
 	if (!widget.__gjjSmartStoryboardPatched) {
 		const originalCallback = widget.callback;
+		widget.__gjjSmartStoryboardOwner = node;
 		widget.callback = function (value, ...args) {
 			const fixed = normalizeSceneIndex(value);
 			if (fixed !== value) this.value = fixed;
-			return originalCallback?.call(this, fixed, ...args);
+			const result = originalCallback?.call(this, fixed, ...args);
+			const owner = this.__gjjSmartStoryboardOwner;
+			if (owner?.comfyClass === NODE_NAME) {
+				owner.properties ||= {};
+				owner.properties[OUTPUT_SCENE_WIDGET] = fixed;
+				renderControls(owner);
+			}
+			return result;
 		};
 		widget.__gjjSmartStoryboardPatched = true;
 	}
+	widget.__gjjSmartStoryboardOwner = node;
 }
 
 function ensureWidgetInput(node) {
@@ -290,6 +309,26 @@ function ensureWidgetInput(node) {
 	return input;
 }
 
+function ensureAudioInput(node) {
+	let input = findInput(node, AUDIO_INPUT);
+	if (!input) {
+		node.addInput?.(AUDIO_INPUT, AUDIO_INPUT_TYPE);
+		input = node.inputs?.[node.inputs.length - 1] || null;
+	}
+	if (!input) return null;
+	input.name = AUDIO_INPUT;
+	input.type = AUDIO_INPUT_TYPE;
+	input.label = "音频";
+	input.localized_name = "音频";
+	input.display_name = "音频";
+	input.tooltip = "可选。可连接 AUDIO 或 VIDEO；连接后按当前分镜范围裁切并封入输出 VIDEO。";
+	input.forceInput = false;
+	input.hidden = false;
+	input.visible = true;
+	delete input.widget;
+	return input;
+}
+
 function ensureInputShape(node) {
 	if (!Array.isArray(node?.inputs)) return;
 	let media = findInput(node, MEDIA_INPUT);
@@ -306,15 +345,17 @@ function ensureInputShape(node) {
 		media.tooltip = "支持 GJJ_BATCH_IMAGE、IMAGE 批次和官方 VIDEO；连接后优先使用外接输入。";
 	}
 	ensureOutputSceneWidget(node);
+	const audioInput = ensureAudioInput(node);
 	const sceneInput = ensureWidgetInput(node);
 	removeSelectedVideoInputs(node);
 	for (let index = node.inputs.length - 1; index >= 0; index -= 1) {
 		const input = node.inputs[index];
-		if (input === media || input === sceneInput) continue;
+		if (input === media || input === sceneInput || input === audioInput) continue;
 		if (inputMatchesName(input, OUTPUT_SCENE_WIDGET)) removeInputAt(node, index);
+		if (inputMatchesName(input, AUDIO_INPUT)) removeInputAt(node, index);
 	}
-	const otherInputs = node.inputs.filter((input) => input !== media && input !== sceneInput);
-	const next = [media, sceneInput, ...otherInputs].filter(Boolean);
+	const otherInputs = node.inputs.filter((input) => input !== media && input !== sceneInput && input !== audioInput);
+	const next = [media, audioInput, sceneInput, ...otherInputs].filter(Boolean);
 	if (next.length === node.inputs.length && next.some((input, index) => input !== node.inputs[index])) {
 		node.inputs = next;
 		repairInputLinkSlots(node);
@@ -549,9 +590,10 @@ function ensureStyles(root) {
 		.gjj-smart-storyboard .status{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8fa7b1;font-size:11px;padding:0 2px}
 		.gjj-smart-storyboard .thumbs{display:none;flex-wrap:wrap;gap:${THUMB_GAP}px;width:100%;align-items:flex-start}
 		.gjj-smart-storyboard .tile{position:relative;width:${THUMB_W}px;height:${THUMB_H}px;border:1px solid #32454d;border-radius:5px;overflow:hidden;background:#071014;cursor:pointer;padding:0}
-		.gjj-smart-storyboard .tile.active{border-color:#77d79b;box-shadow:0 0 0 1px rgba(119,215,155,.45)}
+		.gjj-smart-storyboard .tile.active{border-color:#86f5ad;box-shadow:0 0 0 2px rgba(134,245,173,.68),0 0 12px rgba(90,220,135,.35)}
 		.gjj-smart-storyboard .tile img{display:block;width:100%;height:100%;object-fit:cover}
-		.gjj-smart-storyboard .tile span{position:absolute;left:3px;top:3px;min-width:14px;height:14px;border-radius:4px;background:rgba(0,0,0,.58);color:#fff;font:700 10px/14px sans-serif;text-align:center;padding:0 3px;pointer-events:none}
+		.gjj-smart-storyboard .tile span{position:absolute;left:4px;top:4px;min-width:17px;height:17px;border-radius:5px;background:rgba(0,0,0,.62);color:#fff;font:700 11px/17px sans-serif;text-align:center;padding:0 4px;pointer-events:none}
+		.gjj-smart-storyboard .tile.active span{background:rgba(31,137,78,.9)}
 	`;
 	root.appendChild(style);
 }
@@ -687,7 +729,7 @@ function renderThumbnails(node, data) {
 		scheduleNodeResize(node);
 		return;
 	}
-	const current = Number(data?.current_scene || 1);
+	const current = currentOutputScene(node, data);
 	const fragment = document.createDocumentFragment();
 	for (const scene of scenes) {
 		if (!scene?.thumb) continue;
@@ -695,6 +737,7 @@ function renderThumbnails(node, data) {
 		tile.type = "button";
 		tile.className = "tile";
 		tile.classList.toggle("active", Number(scene.index) === current);
+		tile.setAttribute("aria-pressed", Number(scene.index) === current ? "true" : "false");
 		tile.title = sceneTitle(scene);
 		const img = document.createElement("img");
 		img.src = scene.thumb;
@@ -757,7 +800,7 @@ function renderControls(node) {
 		elements.status.textContent = state.stopReason || "正在执行当前节点，完成后显示分镜首帧。";
 	} else if (data.total_scenes) {
 		const mode = data.output_as_video ? (data.has_audio ? "VIDEO+音频" : "VIDEO") : "帧批次";
-		elements.summary.textContent = `${data.source || "输入"} · ${data.current_scene}/${data.total_scenes} · ${mode}`;
+		elements.summary.textContent = `${data.source || "输入"} · ${currentOutputScene(node, data)}/${data.total_scenes} · ${mode}`;
 		elements.status.textContent = data.status || data.range_text || "";
 	} else if (externalMedia) {
 		elements.summary.textContent = "外接输入优先";

@@ -31,7 +31,8 @@ from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
 NODE_NAME = "GJJ_VideoSmartStoryboard"
 MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
-OUTPUT_MEDIA_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE,VIDEO"
+OUTPUT_MEDIA_TYPE = f"VIDEO,{GJJ_BATCH_IMAGE_TYPE},IMAGE"
+AUDIO_INPUT_TYPE = "AUDIO,VIDEO"
 UI_KEY = "gjj_video_smart_storyboard"
 VIDEO_UPLOAD_API_PATH = "/gjj/video_smart_storyboard/upload"
 VIDEO_META_API_PATH = "/gjj/video_smart_storyboard/meta"
@@ -39,7 +40,7 @@ UPLOAD_SUBFOLDER = "gjj_video_smart_storyboard"
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".wmv", ".flv", ".mpeg", ".mpg", ".gif"}
 
 ANALYSIS_MAX_EDGE = 48
-THUMB_MAX_EDGE = 96
+THUMB_MAX_EDGE = 160
 MAX_CACHE_ITEMS = 4
 
 _SCENE_CACHE: dict[str, dict[str, Any]] = {}
@@ -382,10 +383,8 @@ def _normalize_frames_tensor(value: Any, source_label: str) -> torch.Tensor | No
 
 
 def _slice_audio_window(audio: Any, start_seconds: float, duration_seconds: float) -> Any | None:
-    if not isinstance(audio, dict):
-        return audio
-    waveform = audio.get("waveform")
-    sample_rate = int(audio.get("sample_rate") or 0)
+    waveform = audio.get("waveform") if isinstance(audio, dict) else _component_value(audio, "waveform")
+    sample_rate = int((audio.get("sample_rate") if isinstance(audio, dict) else _component_value(audio, "sample_rate")) or 0)
     if not isinstance(waveform, torch.Tensor) or sample_rate <= 0:
         return audio
     start_sample = max(0, int(round(float(start_seconds) * sample_rate)))
@@ -396,6 +395,32 @@ def _slice_audio_window(audio: Any, start_seconds: float, duration_seconds: floa
         empty = torch.zeros((1, channels, max(1, count)), dtype=torch.float32)
         return {"waveform": empty, "sample_rate": sample_rate}
     return {"waveform": waveform[..., start_sample:end_sample].contiguous(), "sample_rate": sample_rate}
+
+
+def _audio_has_waveform(audio: Any) -> bool:
+    waveform = audio.get("waveform") if isinstance(audio, dict) else _component_value(audio, "waveform")
+    sample_rate = int((audio.get("sample_rate") if isinstance(audio, dict) else _component_value(audio, "sample_rate")) or 0)
+    return isinstance(waveform, torch.Tensor) and sample_rate > 0 and int(waveform.numel()) > 0
+
+
+def _coerce_audio_input(value: Any) -> Any | None:
+    if value is None:
+        return None
+    if _audio_has_waveform(value):
+        return value
+    if isinstance(value, dict):
+        nested = value.get("audio")
+        if _audio_has_waveform(nested):
+            return nested
+    if hasattr(value, "get_components"):
+        try:
+            components = value.get_components()
+        except Exception as error:
+            raise RuntimeError(f"输入音频 VIDEO 读取失败：{error}") from error
+        nested = _component_value(components, "audio")
+        if _audio_has_waveform(nested):
+            return nested
+    return None
 
 
 def _create_video_output(frames: torch.Tensor, fps: float, audio: Any | None = None):
@@ -849,7 +874,7 @@ class GJJ_VideoSmartStoryboard:
     RETURN_TYPES = (OUTPUT_MEDIA_TYPE, "INT", "INT")
     RETURN_NAMES = ("当前分镜", "当前分镜序号", "总分镜数")
     OUTPUT_TOOLTIPS = (
-        "当前分镜的帧序列；类型声明为 GJJ_BATCH_IMAGE,IMAGE,VIDEO，便于接入 GJJ 批图、IMAGE 和混合视频链路。",
+        "当前分镜优先输出官方 VIDEO，并携带当段源音频；无法创建 VIDEO 时回退为帧序列。",
         "当前实际输出的 1 基分镜序号。",
         "自动检测到的总分镜数。",
     )
@@ -861,7 +886,8 @@ class GJJ_VideoSmartStoryboard:
             "优先连接 GJJ_BATCH_IMAGE、IMAGE 批次或官方 VIDEO；没有外接输入时，点击节点内 📁 打开视频。",
             "点击节点内 🔄 可只执行当前节点并生成/刷新分镜首帧预览。",
             "在“输出分镜”输入要输出的分镜序号，或连接外部 INT 控制。",
-            "执行后节点内会显示每个分镜首帧；点击首帧会更新“输出分镜”。",
+            "可选连接 AUDIO/VIDEO 到“音频”输入；执行时会按当前分镜范围自动裁切并封入输出 VIDEO。",
+            "执行后优先输出带当段源音频的 VIDEO，节点内会显示每个分镜首帧；点击首帧会更新“输出分镜”。",
             "未连接外部“输出分镜”时，可用“自动队列”从当前分镜连续排队到最后一段。",
         ],
     }
@@ -903,6 +929,13 @@ class GJJ_VideoSmartStoryboard:
                         "tooltip": "可选。支持 GJJ_BATCH_IMAGE、普通 IMAGE batch 和官方 VIDEO；连接后优先使用外接输入。",
                     },
                 ),
+                "audio": (
+                    AUDIO_INPUT_TYPE,
+                    {
+                        "display_name": "音频",
+                        "tooltip": "可选。可连接 AUDIO 或 VIDEO；连接后按当前分镜范围裁切并封入输出 VIDEO。",
+                    },
+                ),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -920,6 +953,7 @@ class GJJ_VideoSmartStoryboard:
         output_scene: int = 1,
         selected_video: str = "",
         media=None,
+        audio=None,
         prompt=None,
         extra_pnginfo=None,
         unique_id=None,
@@ -947,14 +981,33 @@ class GJJ_VideoSmartStoryboard:
         start = max(0, min(int(start), total_frames - 1))
         end = max(start + 1, min(int(end), total_frames))
         segment = frames[start:end].contiguous()
-        output_as_video = _downstream_prefers_video(prompt, unique_id, extra_pnginfo, 0)
+        downstream_prefers_video = _downstream_prefers_video(prompt, unique_id, extra_pnginfo, 0)
         fps_value = float(fps or 24.0)
+        input_audio = _coerce_audio_input(audio)
+        if input_audio is not None:
+            source_audio = input_audio
         audio = _slice_audio_window(source_audio, float(start) / max(0.01, fps_value), float(end - start) / max(0.01, fps_value))
-        media_output = _create_video_output(segment, fps_value, audio) if output_as_video else segment
+        has_audio = _audio_has_waveform(audio)
+        output_as_video = False
+        video_fallback_reason = ""
+        try:
+            media_output = _create_video_output(segment, fps_value, audio)
+            output_as_video = True
+        except Exception as exc:
+            if downstream_prefers_video:
+                raise
+            media_output = segment
+            video_fallback_reason = str(exc)
 
         external_controlled = _prompt_input_is_linked(prompt, unique_id, ("output_scene",))
         range_text = f"源帧 {start + 1}-{end} / {total_frames}"
         status = f"第 {current} / {total_scenes} 个分镜，输出 {int(segment.shape[0])} 帧"
+        if output_as_video:
+            status += "，VIDEO"
+            if has_audio:
+                status += "+当段源音频"
+        elif video_fallback_reason:
+            status += "，VIDEO 不可用，已回退帧批次"
         trimmed = int(analysis.get("trimmed_frames") or 0)
         if trimmed > 0:
             status += f"，已剔除 {trimmed} 帧过渡画面"
@@ -972,7 +1025,8 @@ class GJJ_VideoSmartStoryboard:
                         "requested_scene": int(requested),
                         "output_frames": int(segment.shape[0]),
                         "output_as_video": bool(output_as_video),
-                        "has_audio": bool(isinstance(audio, dict) and isinstance(audio.get("waveform"), torch.Tensor)),
+                        "has_audio": has_audio,
+                        "video_fallback_reason": video_fallback_reason,
                         "range_text": range_text,
                         "status": status,
                         "external_controlled": bool(external_controlled),

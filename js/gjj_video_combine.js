@@ -35,12 +35,12 @@ const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "mkv", "avi", "m4v"]);
 const PRIMARY_INPUT_NAME = "images";
 const PRIMARY_INPUT_ALIASES = new Set(["images", "图像"]);
 const FRAME_RATE_WIDGET_NAME = "frame_rate";
-const FRAME_RATE_SOCKET_TYPE = "INT,FLOAT";
+const FRAME_RATE_SOCKET_TYPE = "INT,FLOAT,VIDEO";
 const FINAL_NODE_COLOR = "#0a0a5f";
 const FINAL_NODE_BGCOLOR = "#23292b";
 const FINAL_NODE_COLOR_PROPERTY = "gjj_video_combine_final_node_color";
 const OPTIONAL_INPUTS = [
-	{ name: "audio", type: "AUDIO", label: "音频", localized_name: "音频", tooltip: "可选。接入后会在支持的格式里封入音轨，VIDEO 输出也会保留音频。" },
+	{ name: "audio", type: "AUDIO,VIDEO", label: "音频", localized_name: "音频", tooltip: "可选。可连接 AUDIO 或 VIDEO；连接 VIDEO 时读取其中音轨并封入输出。" },
 	{ name: "vae", type: "VAE", label: "VAE 解码器", localized_name: "VAE 解码器", tooltip: "仅当上方输入 LATENT 时需要连接。" },
 
 ];
@@ -362,7 +362,7 @@ function normalizeSlotCopy(copy) {
 		copy.type = FRAME_RATE_SOCKET_TYPE;
 		copy.label = "帧率";
 		copy.localized_name = "帧率";
-		copy.tooltip = "输出动画或视频的帧率。可连接 INT 或 FLOAT，执行时会统一按浮点数计算。";
+		copy.tooltip = "输出动画或视频的帧率。可连接 INT、FLOAT 或 VIDEO；连接 VIDEO 时读取该视频帧率。";
 		copy.widget = { name: FRAME_RATE_WIDGET_NAME };
 	}
 	const optional = OPTIONAL_INPUTS.find((item) => item.name === String(copy?.name || ""));
