@@ -17,6 +17,7 @@ const TEMPLATE_PARAMS_VALUES_PROPERTY = "gjj_template_params_values";
 const TEMPLATE_PARAMS_SCHEMA_PROPERTY = "gjj_template_params_schema";
 const WAN_MODE_PARAM_NAMES = ["wan_mode", "video_mode", "mode", "模式", "视频模式", "生成模式"];
 const DEFAULT_FILENAME_PREFIX = "video/GJJ";
+const DEFAULT_FRAME_RATE = 8;
 const DEFAULT_NODE_WIDTH = 340;
 const TOOLBAR_BUTTON_WIDTH = 30;
 const TOOLBAR_BUTTON_HEIGHT = 28;
@@ -262,6 +263,22 @@ function injectToolbarStyle() {
 
 function getWidget(node, name) {
 	return (node?.widgets || []).find((widget) => String(widget?.name || "") === name) || null;
+}
+
+function repairMissingFrameRateWidgetValue(serializedNode) {
+	const values = serializedNode?.widgets_values;
+	if (!Array.isArray(values) || values.length < 4) {
+		return;
+	}
+	// Workflows saved while frame_rate used a mixed primitive/video type omitted
+	// the FPS widget entirely: [loop_count, filename_prefix, format_name, ...].
+	const missingFrameRate = typeof values[0] === "number"
+		&& typeof values[1] === "string"
+		&& typeof values[2] === "string"
+		&& typeof values[3] === "boolean";
+	if (missingFrameRate) {
+		values.unshift(DEFAULT_FRAME_RATE);
+	}
 }
 
 function selectedFrameRateVariable(node) {
@@ -1942,8 +1959,9 @@ app.registerExtension({
 
 		const originalOnConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (...args) {
-			const result = originalOnConfigure?.apply(this, args);
 			const serializedNode = args?.[0];
+			repairMissingFrameRateWidgetValue(serializedNode);
+			const result = originalOnConfigure?.apply(this, args);
 			const props = serializedNode?.properties || this.properties || {};
 			if (props[FRAME_RATE_VARIABLE_PROPERTY] !== undefined) {
 				this.properties ||= {};

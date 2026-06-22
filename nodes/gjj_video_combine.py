@@ -54,7 +54,9 @@ image_or_latent = MultiInput(
 )
 FRAME_RATE_INPUT_TYPE = "INT,FLOAT,VIDEO"
 AUDIO_INPUT_TYPE = "AUDIO,VIDEO"
-float_or_int = AnyOfInput(FRAME_RATE_INPUT_TYPE, ["INT", "FLOAT", "VIDEO"])
+# Keep the frontend-facing type numeric so ComfyUI creates the FPS widget.
+# AnyOfInput still accepts INT/FLOAT/VIDEO links during backend validation.
+float_or_int = AnyOfInput("FLOAT", ["INT", "FLOAT", "VIDEO"])
 audio_or_video = AnyOfInput(AUDIO_INPUT_TYPE, ["AUDIO", "VIDEO"])
 
 
