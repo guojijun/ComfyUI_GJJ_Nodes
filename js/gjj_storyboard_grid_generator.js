@@ -570,14 +570,14 @@ function configureInputs(node) {
 		scene.type = "GJJ_BATCH_IMAGE,IMAGE";
 		scene.label = "场景";
 		scene.localized_name = "场景";
-		scene.tooltip = "场景输入会按设定尺寸短边缩放、中心裁剪，并对齐到 32 倍。";
+		scene.tooltip = "接收上游素材/背景作为参考图参与生成；不会启用自动局部蒙版。";
 	}
 	const reference = getInput(node, "reference");
 	if (reference) {
 		reference.type = "GJJ_BATCH_IMAGE,IMAGE";
 		reference.label = "参考图";
 		reference.localized_name = "参考图";
-		reference.tooltip = "参考图输入，支持批量图片或普通图片。";
+		reference.tooltip = "接收上游素材/背景作为参考图参与生成；不会启用自动局部蒙版。";
 	}
 }
 

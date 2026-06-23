@@ -30,8 +30,11 @@ from .gjj_ltx_director_prompt_relay import (
 )
 
 from .gjj_ltx_director_patches import detect_model_type, apply_patches
+from .common_utils.prompt_translation import COMMON_PROMPT_TRANSLATE_API_PATH, register_prompt_translation_api
 
 log = logging.getLogger(__name__)
+
+register_prompt_translation_api((COMMON_PROMPT_TRANSLATE_API_PATH,))
 
 # Setup global event loop exception handler to silence ConnectionResetError (WinError 10054/10053) on Windows
 try:
@@ -468,6 +471,116 @@ def _load_video_tensor(seg: dict, frame_rate: float) -> torch.Tensor:
     frames_np = np.array(frames, dtype=np.float32) / 255.0
     return torch.from_numpy(frames_np)
 
+
+def _ensure_bhwc_rgb_tensor(value: torch.Tensor) -> torch.Tensor:
+    tensor = value.detach().float().clamp(0.0, 1.0)
+    if tensor.ndim == 3:
+        if int(tensor.shape[-1]) in (1, 3, 4):
+            tensor = tensor.unsqueeze(0)
+        elif int(tensor.shape[0]) in (1, 3, 4):
+            tensor = tensor.movedim(0, -1).unsqueeze(0)
+        else:
+            raise RuntimeError(f"素材图维度不支持：{tuple(tensor.shape)}")
+    if tensor.ndim != 4:
+        raise RuntimeError(f"素材图维度不支持：{tuple(tensor.shape)}")
+    if int(tensor.shape[-1]) not in (1, 3, 4) and int(tensor.shape[1]) in (1, 3, 4):
+        tensor = tensor.movedim(1, -1)
+    channels = int(tensor.shape[-1])
+    if channels == 1:
+        tensor = tensor.repeat(1, 1, 1, 3)
+    elif channels > 3:
+        tensor = tensor[..., :3]
+    elif channels != 3:
+        raise RuntimeError(f"素材图通道数不支持：{channels}")
+    return tensor.contiguous()
+
+
+def _split_runtime_images(value) -> list[torch.Tensor]:
+    if value is None:
+        return []
+    if isinstance(value, torch.Tensor):
+        tensor = _ensure_bhwc_rgb_tensor(value)
+        return [tensor[index:index + 1].contiguous() for index in range(int(tensor.shape[0]))]
+    if isinstance(value, dict):
+        images: list[torch.Tensor] = []
+        for item in value.values():
+            images.extend(_split_runtime_images(item))
+        return images
+    if isinstance(value, (list, tuple)):
+        images: list[torch.Tensor] = []
+        for item in value:
+            images.extend(_split_runtime_images(item))
+        return images
+    return []
+
+
+def _parse_grid_layout_value(value) -> tuple[int, int]:
+    match = re.match(r"^\s*(\d+)\s*x\s*(\d+)\s*$", str(value or ""), re.I)
+    if not match:
+        return 2, 2
+    return max(1, int(match.group(1))), max(1, int(match.group(2)))
+
+
+def _split_runtime_grid_images(value, grid_layout="2x2", grid_edge_cut=0) -> list[torch.Tensor]:
+    columns, rows = _parse_grid_layout_value(grid_layout)
+    edge = max(0.0, min(45.0, float(grid_edge_cut or 0))) / 100.0
+    crops: list[torch.Tensor] = []
+    for image in _split_runtime_images(value):
+        h = int(image.shape[1])
+        w = int(image.shape[2])
+        cell_w = w / columns
+        cell_h = h / rows
+        for row in range(rows):
+            for col in range(columns):
+                cut_x = cell_w * edge
+                cut_y = cell_h * edge
+                left = max(0, min(w - 1, int(round(col * cell_w + cut_x))))
+                top = max(0, min(h - 1, int(round(row * cell_h + cut_y))))
+                right = max(left + 1, min(w, int(round((col + 1) * cell_w - cut_x))))
+                bottom = max(top + 1, min(h, int(round((row + 1) * cell_h - cut_y))))
+                crops.append(image[:, top:bottom, left:right, :].contiguous())
+    return crops
+
+
+def _runtime_material_segments(material_1=None, material_2=None, grid_material=None, duration_frames=1,
+                               grid_layout="2x2", grid_edge_cut=0) -> list[dict]:
+    grid_images = _split_runtime_grid_images(grid_material, grid_layout, grid_edge_cut)
+    material_images = [*_split_runtime_images(material_1), *_split_runtime_images(material_2)]
+    images = [*grid_images, *material_images]
+    if not images:
+        return []
+    total = max(1, int(duration_frames or 1))
+    length = max(1, total // max(1, len(images)))
+    segments: list[dict] = []
+    cursor = 0
+    for index, image in enumerate(images):
+        seg_len = length if index < len(images) - 1 else max(1, total - cursor)
+        segments.append({
+            "id": f"runtime_upstream_{index + 1}",
+            "type": "image",
+            "start": cursor,
+            "length": seg_len,
+            "gjjUpstream": True,
+            "_runtime_tensor": image,
+        })
+        cursor += seg_len
+    return segments
+
+
+def _strip_runtime_tensors(value):
+    if isinstance(value, torch.Tensor):
+        return None
+    if isinstance(value, dict):
+        return {
+            key: _strip_runtime_tensors(item)
+            for key, item in value.items()
+            if key != "_runtime_tensor"
+        }
+    if isinstance(value, (list, tuple)):
+        return [_strip_runtime_tensors(item) for item in value]
+    return value
+
+
 def _resize_image(tensor: torch.Tensor, target_w: int, target_h: int, method: str, divisible_by: int) -> torch.Tensor:
     """Resize an [N, H, W, 3] float32 tensor to target dimensions using the given method,
     then snap the final dimensions to be divisible by `divisible_by`."""
@@ -842,15 +955,31 @@ def _encode_relay(model, clip, latent, global_prompt, local_prompts, segment_len
 def _parse_external_prompt_script(value: str) -> tuple[str, list[str]]:
     """解析《全局提示词》+ 分镜块；分镜以 --- 或空行分隔。"""
     text = str(value or "").strip()
+    if not text:
+        return "", []
     match = re.match(r"^\s*《([\s\S]*?)》\s*([\s\S]*)$", text)
-    if not match:
-        return text, []
-    header = match.group(1).strip()
-    remainder = match.group(2).strip()
-    blocks = [item.strip() for item in re.split(r"(?:\r?\n\s*---+\s*\r?\n|\r?\n\s*\r?\n+)", remainder) if item.strip()]
-    if header in {"全局提示词", "全局", "global prompt", "global_prompt"}:
-        return (blocks[0] if blocks else ""), blocks[1:]
-    return header, blocks
+    if match:
+        header = match.group(1).strip()
+        remainder = match.group(2).strip()
+        blocks = [item.strip() for item in re.split(r"(?:\r?\n\s*---+\s*\r?\n|\r?\n\s*\r?\n+)", remainder) if item.strip()]
+        if header in {"全局提示词", "全局", "global prompt", "global_prompt"}:
+            return (blocks[0] if blocks else ""), blocks[1:]
+        return header, blocks
+
+    normalized = text.replace("\r\n", "\n")
+    numbered = re.findall(
+        r"(?:^|\n)\s*(?:[\(\[（【]\s*\d+\s*[\)\]）】]|\d+\s*[:：.、])\s*([\s\S]*?)(?=\n\s*(?:[\(\[（【]\s*\d+\s*[\)\]）】]|\d+\s*[:：.、])\s*|$)",
+        normalized,
+    )
+    if numbered:
+        return "", [item.strip() for item in numbered if item.strip()]
+
+    if re.search(r"\n\s*---+\s*\n|\n\s*\n+", normalized):
+        blocks = [item.strip() for item in re.split(r"(?:\n\s*---+\s*\n|\n\s*\n+)", normalized) if item.strip()]
+        if len(blocks) > 1:
+            return "", blocks
+
+    return text, []
 
 
 class GJJLTXDirector(io.ComfyNode):
@@ -1048,14 +1177,67 @@ class GJJLTXDirector(io.ComfyNode):
                 divisible_by=32, img_compression=0, audio_vae=None, optional_latent=None,
                 use_custom_audio=False, inpaint_audio=True, use_custom_motion=True, override_audio=False,
                 grid_layout="2x2", grid_edge_cut=0, material_1=None, material_2=None, grid_material=None) -> io.NodeOutput:
-        _ = (material_1, material_2, grid_material)
-
         # Parse timeline data
         try:
             tdata = json.loads(timeline_data) if timeline_data else {}
         except Exception as e:
             log.error(f"[LTXDirector] execute timeline_data parse error: {e}")
             tdata = {}
+
+        try:
+            start_frame = int(start_frame)
+        except Exception:
+            start_frame = 0
+        try:
+            requested_duration_frames = max(1, int(duration_frames))
+        except Exception:
+            requested_duration_frames = 1
+
+        # LTXV requires pixel frame counts to be 8n+1. Snap once at the
+        # entrance and make the snapped value authoritative for the whole run.
+        ltxv_length = int(math.ceil((requested_duration_frames - 1) / 8.0) * 8) + 1
+        if ltxv_length != requested_duration_frames:
+            log.info(
+                "[LTXDirector] duration_frames %d 已按 LTX 8N+1 对齐为 %d。",
+                requested_duration_frames,
+                ltxv_length,
+            )
+        duration_frames = ltxv_length
+        end_frame = start_frame + duration_frames
+        try:
+            duration_seconds = duration_frames / float(frame_rate)
+        except Exception:
+            pass
+
+        if isinstance(tdata, dict):
+            tdata["durationFrames"] = int(duration_frames)
+            tdata["duration_frames"] = int(duration_frames)
+            tdata["startFrame"] = int(start_frame)
+            tdata["start_frame"] = int(start_frame)
+            tdata["endFrame"] = int(end_frame)
+            tdata["end_frame"] = int(end_frame)
+            if isinstance(duration_seconds, (int, float)):
+                tdata["durationSeconds"] = float(duration_seconds)
+                tdata["duration_seconds"] = float(duration_seconds)
+
+        runtime_segments = _runtime_material_segments(
+            material_1=material_1,
+            material_2=material_2,
+            grid_material=grid_material,
+            duration_frames=duration_frames,
+            grid_layout=grid_layout,
+            grid_edge_cut=grid_edge_cut,
+        )
+        if runtime_segments:
+            manual_segments = [
+                seg for seg in tdata.get("segments", [])
+                if not (isinstance(seg, dict) and seg.get("gjjUpstream"))
+            ]
+            tdata["segments"] = [*manual_segments, *runtime_segments]
+            log.info("[LTXDirector] 使用运行时上游素材刷新时间线：%d 个图片片段。", len(runtime_segments))
+
+        if isinstance(tdata, dict):
+            timeline_data = json.dumps(_strip_runtime_tensors(tdata), ensure_ascii=False)
 
         is_retake_mode = tdata.get("retakeMode", False)
         is_retake_active = is_retake_mode and tdata.get("retakeVideo") is not None
@@ -1082,7 +1264,7 @@ class GJJLTXDirector(io.ComfyNode):
             img_segs = [
                 s for s in tdata.get("segments", [])
                 if s.get("type", "image") in ("image", "video")
-                and (s.get("imageFile") or s.get("imageB64"))
+                and (s.get("imageFile") or s.get("imageB64") or isinstance(s.get("_runtime_tensor"), torch.Tensor))
                 and int(s.get("start", 0)) < start_frame + duration_frames
                 and int(s.get("start", 0)) + int(s.get("length", 1)) > start_frame
             ]
@@ -1101,6 +1283,8 @@ class GJJLTXDirector(io.ComfyNode):
                         seg["trimStart"] = float(seg.get("trimStart", 0)) + offset
                         seg["length"] = max(1, int(seg.get("length", 1)) - offset)
                     tensor = _load_video_tensor(seg, float(frame_rate))
+                elif isinstance(seg.get("_runtime_tensor"), torch.Tensor):
+                    tensor = _ensure_bhwc_rgb_tensor(seg["_runtime_tensor"])
                 else:
                     tensor = _load_image_tensor(seg)
 
@@ -1230,11 +1414,6 @@ class GJJLTXDirector(io.ComfyNode):
             log.warning("[PromptRelay] Could not build guide_data: %s", e)
 
         # --- Auto-generate LTXV latent if none was provided ---
-        # Apply the community 8n+1 rule directly to the timeline's duration_frames:
-        # int(ceil(((duration_frames) - 1) / 8) * 8) + 1
-        # This ensures we get AT LEAST the requested frames, snapped to LTXV's requirements.
-        ltxv_length = int(math.ceil((duration_frames - 1) / 8.0) * 8) + 1
-
         if optional_latent is None:
             latent_w = max(32, (derived_w // 32) * 32)
             latent_h = max(32, (derived_h // 32) * 32)

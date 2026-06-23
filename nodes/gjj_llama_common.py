@@ -69,7 +69,7 @@ def is_llm_main_model_file(name: str) -> bool:
 
 def llm_main_model_options() -> list[str]:
     models = [item for item in list_llm_files() if is_llm_main_model_file(item)]
-    return sorted(models, key=_natural_model_key) or [MISSING_LLM_MODEL]
+    return sorted(models, key=_preferred_main_model_key) or [MISSING_LLM_MODEL]
 
 
 def llm_mmproj_options() -> list[str]:
@@ -147,3 +147,22 @@ def _model_tokens(name: str) -> list[str]:
 def _natural_model_key(name: str):
     text = str(name or "").replace("\\", "/").lower()
     return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", text)]
+
+
+def _preferred_main_model_key(name: str):
+    text = str(name or "").replace("\\", "/").lower()
+    score = 0
+    for weight, pattern in [
+        (120, "qwen3.5"),
+        (110, "qwen35"),
+        (90, "4b"),
+        (70, "hauhau"),
+        (60, "aggressive"),
+        (50, "uncensored"),
+        (30, "qwen"),
+    ]:
+        if pattern in text:
+            score += weight
+    if "mmproj" in text:
+        score -= 1000
+    return (-score, _natural_model_key(name))

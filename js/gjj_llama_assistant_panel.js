@@ -490,16 +490,22 @@ async function refreshModels(node, autoPair = false) {
 	const mainValues = catalog.main_models?.length ? catalog.main_models : [String(value(node, "main_model", ""))].filter(Boolean);
 	const mmprojValues = catalog.mmproj_models?.length ? catalog.mmproj_models : [NO_MMPROJ];
 	const currentMain = String(value(node, "main_model", mainValues[0] || ""));
+	const useDefaultMain = !currentMain || !mainValues.includes(currentMain);
+	const selectedMain = useDefaultMain ? (mainValues[0] || "") : currentMain;
 	setSelectOptions(state.mainModel, mainValues, currentMain);
 	setSelectOptions(state.mmprojModel, mmprojValues, value(node, "mmproj_model", NO_MMPROJ));
 	widget(node, "main_model") && (widget(node, "main_model").options.values = mainValues);
 	widget(node, "mmproj_model") && (widget(node, "mmproj_model").options.values = mmprojValues);
-	if (autoPair) {
-		const matched = bestMmproj(state.mainModel.value, mmprojValues);
+	if (useDefaultMain && selectedMain) {
+		setWidgetValue(node, "main_model", selectedMain);
+		state.mainModel.value = selectedMain;
+	}
+	if (autoPair || useDefaultMain) {
+		const matched = bestMmproj(selectedMain || state.mainModel.value, mmprojValues);
 		setWidgetValue(node, "mmproj_model", matched);
 		state.mmprojModel.value = matched;
 	}
-	GJJ_Utils.refreshNode(node);
+	resizeNode(node);
 }
 
 function remember(node, serializedNode = null) {

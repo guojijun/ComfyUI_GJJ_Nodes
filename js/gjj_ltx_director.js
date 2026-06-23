@@ -1,3 +1,5 @@
+import { translatePromptText } from "./gjj_common_prompt_translation.js";
+
 const { app } = window.comfyAPI.app;
 const { api } = window.comfyAPI.api;
 
@@ -110,6 +112,47 @@ function ensureDirectorMaterialInputs(node) {
 
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 
+function splitQuotedPromptText(text) {
+  const source = String(text || "");
+  const pairs = new Map([
+    ['"', '"'], ["'", "'"], ["“", "”"], ["‘", "’"],
+    ["「", "」"], ["『", "』"], ["《", "》"], ["〈", "〉"],
+    ["`", "`"],
+  ]);
+  const parts = [];
+  let buffer = "";
+  let quoteEnd = "";
+  let quoteBuffer = "";
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index];
+    if (quoteEnd) {
+      quoteBuffer += char;
+      if (char === quoteEnd) {
+        parts.push({ text: quoteBuffer, quoted: true });
+        quoteBuffer = "";
+        quoteEnd = "";
+      }
+      continue;
+    }
+    const end = pairs.get(char);
+    if (end) {
+      if (buffer) parts.push({ text: buffer, quoted: false });
+      buffer = "";
+      quoteEnd = end;
+      quoteBuffer = char;
+      continue;
+    }
+    buffer += char;
+  }
+  if (quoteBuffer) parts.push({ text: quoteBuffer, quoted: true });
+  if (buffer) parts.push({ text: buffer, quoted: false });
+  return parts;
+}
+
+function hasChineseText(text) {
+  return /[\u3400-\u9fff]/.test(String(text || ""));
+}
+
 // --- Modern Dark/Grey UI CSS (ComfyUI Match) ---
 const STYLES = `
   .pr-wrapper {
@@ -159,13 +202,46 @@ const STYLES = `
     border-color: #555;
   }
   .pr-btn.toggle-on {
-    background: #1c222d;
-    border-color: #283142;
-    color: #e0e0e0;
+    background: linear-gradient(180deg, #1f6f45, #12442d);
+    border-color: #42d483;
+    color: #f2fff7;
+    box-shadow: inset 0 0 0 1px rgba(143,255,184,.22), 0 0 8px rgba(66,212,131,.28);
   }
   .pr-btn.toggle-on:hover:not(:disabled) {
-    background: #2a3445;
-    border-color: #3b4b66;
+    background: linear-gradient(180deg, #268253, #175337);
+    border-color: #6cf0a5;
+  }
+  .pr-btn.pr-tool-muted {
+    background: #202328;
+    border-color: #343a42;
+    color: #c8d0d6;
+  }
+  .pr-btn.pr-tool-start {
+    background: #14271c;
+    border-color: #2d8c55;
+    color: #82f2a6;
+  }
+  .pr-btn.pr-tool-start:hover:not(:disabled) {
+    background: #1a3a27;
+    border-color: #54d982;
+  }
+  .pr-btn.pr-tool-end {
+    background: #2b181d;
+    border-color: #9b394d;
+    color: #ff8da0;
+  }
+  .pr-btn.pr-tool-end:hover:not(:disabled) {
+    background: #401f28;
+    border-color: #dc5c73;
+  }
+  .pr-btn.pr-tool-mark {
+    background: #271f15;
+    border-color: #9a6a28;
+    color: #ffd17a;
+  }
+  .pr-btn.pr-tool-mark:hover:not(:disabled) {
+    background: #3b2b18;
+    border-color: #d49b3d;
   }
   .pr-btn-danger:hover:not(:disabled) {
     background: #4a1515;
@@ -415,9 +491,10 @@ const STYLES = `
     border-color: #666;
   }
   .pr-icon-btn.active {
-    color: #4fff8f;
-    border-color: #4fff8f;
-    background: #1a3a2a;
+    color: #f2fff7;
+    border-color: #42d483;
+    background: linear-gradient(180deg, #1f6f45, #12442d);
+    box-shadow: inset 0 0 0 1px rgba(143,255,184,.22), 0 0 8px rgba(66,212,131,.28);
   }
   .pr-seek-bar {
     -webkit-appearance: none;
@@ -996,6 +1073,9 @@ class TimelineEditor {
 
     // File handling
     this.currentFileHandle = null;
+    this._lastUpstreamSignature = "";
+    this._lastUpstreamSignatureCheckAt = 0;
+    this._upstreamRefreshTimer = null;
 
     // --- Ghost dragging state ---
     this._ghostSegmentId = null;
@@ -1080,6 +1160,7 @@ class TimelineEditor {
     this.updateUIFromSelection();
     this.syncWidgetsAndUI();
     this.commitChanges(true);
+    this._lastUpstreamSignature = this._buildUpstreamSignature();
     // Hide settings widgets by default to reduce node clutter.
     // Deferred so all widget types are finalized before we touch them.
     setTimeout(() => this.hideSettingsWidgets(), 0);
@@ -1444,6 +1525,10 @@ class TimelineEditor {
 
   destroy() {
     cancelAnimationFrame(this._renderLoop);
+    if (this._upstreamRefreshTimer) {
+      clearTimeout(this._upstreamRefreshTimer);
+      this._upstreamRefreshTimer = null;
+    }
     this.pauseAudio();
     window.removeEventListener("keydown", this.handleKeyDown, true);
     window.removeEventListener("paste", this.handlePaste, true);
@@ -2494,6 +2579,34 @@ class TimelineEditor {
     });
     this.refreshUpstreamBtn = refreshUpstreamBtn;
 
+    const translateToggleBtn = document.createElement("button");
+    translateToggleBtn.className = "pr-btn";
+    translateToggleBtn.textContent = "🌏";
+    translateToggleBtn.title = "翻译开关：将中文提示词翻译成英文；引号中的内容保持原文。";
+    translateToggleBtn.style.width = "34px";
+    translateToggleBtn.style.justifyContent = "center";
+    this.translationEnabled = !!this.node.properties.gjj_ltx_translate_enabled;
+    this.updateTranslateToggleStyle = () => {
+      translateToggleBtn.classList.toggle("toggle-on", !!this.translationEnabled);
+      translateToggleBtn.title = this.translationEnabled
+        ? "翻译已开启：点击关闭翻译开关；引号内不翻译。"
+        : "翻译已关闭：点击开启并翻译当前全局/片段提示词；引号内不翻译。";
+    };
+    this.updateTranslateToggleStyle();
+    translateToggleBtn.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      if (this._translatingPrompt) return;
+      this.translationEnabled = !this.translationEnabled;
+      this.node.properties.gjj_ltx_translate_enabled = this.translationEnabled;
+      this.updateTranslateToggleStyle();
+      if (this.translationEnabled) {
+        await this.translateVisiblePrompts(translateToggleBtn);
+      }
+      this.commitChanges(true);
+      this.render();
+    });
+    this.translateToggleBtn = translateToggleBtn;
+
     const uploadBtn = document.createElement("button");
     uploadBtn.className = "pr-btn";
     uploadBtn.innerHTML = `${ICONS.upload} 添加图片`;
@@ -2539,6 +2652,7 @@ class TimelineEditor {
     actionGroup.appendChild(materialBtn);
     actionGroup.appendChild(gridBtn);
     actionGroup.appendChild(refreshUpstreamBtn);
+    actionGroup.appendChild(translateToggleBtn);
     actionGroup.appendChild(addTextBtn);
     actionGroup.appendChild(deleteBtn);
 
@@ -2562,6 +2676,63 @@ class TimelineEditor {
     this.segmentBoundsDisplay = document.createElement("div");
     this.segmentBoundsDisplay.className = "pr-segment-bounds";
     this.segmentBoundsDisplay.textContent = "起点：-｜终点：-｜长度：-";
+
+    this.segmentDurationEditor = document.createElement("div");
+    this.segmentDurationEditor.className = "pr-duration-editor";
+    this.segmentDurationEditor.style.display = "inline-flex";
+    this.segmentDurationEditor.style.alignItems = "center";
+    this.segmentDurationEditor.style.gap = "4px";
+    this.segmentDurationEditor.style.marginLeft = "8px";
+
+    this.segmentDurationFramesInput = document.createElement("input");
+    this.segmentDurationFramesInput.type = "number";
+    this.segmentDurationFramesInput.min = "1";
+    this.segmentDurationFramesInput.step = "1";
+    this.segmentDurationFramesInput.className = "pr-strength-input";
+    this.segmentDurationFramesInput.style.width = "58px";
+    this.segmentDurationFramesInput.title = "所选素材片段时长（帧）";
+
+    this.segmentDurationSecondsInput = document.createElement("input");
+    this.segmentDurationSecondsInput.type = "number";
+    this.segmentDurationSecondsInput.min = "0.001";
+    this.segmentDurationSecondsInput.step = "0.001";
+    this.segmentDurationSecondsInput.className = "pr-strength-input";
+    this.segmentDurationSecondsInput.style.width = "64px";
+    this.segmentDurationSecondsInput.title = "所选素材片段时长（秒）";
+
+    this.segmentDurationApplyBtn = document.createElement("button");
+    this.segmentDurationApplyBtn.className = "pr-btn";
+    this.segmentDurationApplyBtn.textContent = "应用";
+    this.segmentDurationApplyBtn.title = "把换算后的时长应用到当前选中素材";
+    this.segmentDurationApplyBtn.style.height = "22px";
+    this.segmentDurationApplyBtn.style.padding = "2px 8px";
+
+    const syncDurationSecondsFromFrames = () => {
+      const frames = Math.max(1, Math.round(Number(this.segmentDurationFramesInput.value) || 1));
+      this.segmentDurationFramesInput.value = String(frames);
+      this.segmentDurationSecondsInput.value = (frames / this.getFrameRate()).toFixed(3);
+    };
+    const syncDurationFramesFromSeconds = () => {
+      const seconds = Math.max(1 / this.getFrameRate(), Number(this.segmentDurationSecondsInput.value) || (1 / this.getFrameRate()));
+      const frames = Math.max(1, Math.round(seconds * this.getFrameRate()));
+      this.segmentDurationFramesInput.value = String(frames);
+      this.segmentDurationSecondsInput.value = (frames / this.getFrameRate()).toFixed(3);
+    };
+    this.segmentDurationFramesInput.addEventListener("input", syncDurationSecondsFromFrames);
+    this.segmentDurationSecondsInput.addEventListener("input", syncDurationFramesFromSeconds);
+    this.segmentDurationApplyBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.applySelectedSegmentDuration();
+    });
+
+    this.segmentDurationEditor.append(
+      document.createTextNode("时长"),
+      this.segmentDurationFramesInput,
+      document.createTextNode("帧"),
+      this.segmentDurationSecondsInput,
+      document.createTextNode("秒"),
+      this.segmentDurationApplyBtn,
+    );
 
     this.timeCodeDisplay = document.createElement("div");
     this.timeCodeDisplay.className = "pr-timecode";
@@ -2750,7 +2921,7 @@ class TimelineEditor {
     this.isSnapping = this.node.properties.isSnapping !== false;
 
     const snapBtn = document.createElement("button");
-    snapBtn.className = "pr-btn";
+    snapBtn.className = "pr-btn pr-tool-muted";
     snapBtn.style.padding = "6px";
     snapBtn.style.display = "flex";
     snapBtn.style.alignItems = "center";
@@ -2781,7 +2952,7 @@ class TimelineEditor {
     });
 
     const startBtn = document.createElement("button");
-    startBtn.className = "pr-btn";
+    startBtn.className = "pr-btn pr-tool-start";
     startBtn.style.padding = "6px";
     startBtn.style.display = "flex";
     startBtn.style.alignItems = "center";
@@ -2805,7 +2976,7 @@ class TimelineEditor {
     });
 
     const endBtn = document.createElement("button");
-    endBtn.className = "pr-btn";
+    endBtn.className = "pr-btn pr-tool-end";
     endBtn.style.padding = "6px";
     endBtn.style.display = "flex";
     endBtn.style.alignItems = "center";
@@ -2829,7 +3000,7 @@ class TimelineEditor {
     });
 
     const markBtn = document.createElement("button");
-    markBtn.className = "pr-btn";
+    markBtn.className = "pr-btn pr-tool-mark";
     markBtn.style.padding = "6px";
     markBtn.style.display = "flex";
     markBtn.style.alignItems = "center";
@@ -3725,6 +3896,7 @@ class TimelineEditor {
 
     this.strengthRow.appendChild(this.timeCodeDisplay);
     this.strengthRow.appendChild(this.segmentBoundsDisplay);
+    this.strengthRow.appendChild(this.segmentDurationEditor);
     this.strengthRow.appendChild(this.strengthLabel);
     this.strengthRow.appendChild(this.strengthValue);
     this.strengthRow.appendChild(this.vidStrLabel);
@@ -4195,6 +4367,21 @@ class TimelineEditor {
     return link ? app.graph?.getNodeById?.(link.origin_id) : null;
   }
 
+  _linkedInputInfo(inputName) {
+    const input = this.node.inputs?.find(item => item.name === inputName);
+    if (!input || input.link === null || input.link === undefined) return null;
+    const link = app.graph?.links?.[input.link];
+    if (!link) return null;
+    const sourceNode = app.graph?.getNodeById?.(link.origin_id) || null;
+    return {
+      linkId: input.link,
+      originId: link.origin_id,
+      originSlot: link.origin_slot,
+      targetSlot: link.target_slot,
+      sourceNode,
+    };
+  }
+
   _parseJsonArray(value) {
     try {
       const parsed = JSON.parse(String(value || "[]"));
@@ -4278,6 +4465,35 @@ class TimelineEditor {
       for (const item of stateSelection) refs.push({ ...item, type: item.type || "input", kind: "video" });
     }
 
+    const collectAnyPreviewItems = (items) => {
+      for (const item of Array.isArray(items) ? items : []) {
+        const mediaGroups = [
+          { values: item?.images, kind: "image" },
+          { values: item?.video, kind: "video" },
+          { values: item?.audio, kind: "audio" },
+        ];
+        for (const group of mediaGroups) {
+          const values = Array.isArray(group.values) ? group.values : (group.values ? [group.values] : []);
+          for (const media of values) {
+            if (media?.filename || media?.url || media?.src) {
+              refs.push({ ...media, kind: media.kind || group.kind });
+            }
+          }
+        }
+      }
+    };
+
+    for (const item of Array.isArray(sourceNode.__gjjAnyPreviewImages) ? sourceNode.__gjjAnyPreviewImages : []) {
+      if (item?.filename || item?.url || item?.src) refs.push({ ...item, kind: "image" });
+    }
+    for (const item of Array.isArray(sourceNode.__gjjAnyPreviewVideo) ? sourceNode.__gjjAnyPreviewVideo : []) {
+      if (item?.filename || item?.url || item?.src) refs.push({ ...item, kind: "video" });
+    }
+    for (const item of Array.isArray(sourceNode.__gjjAnyPreviewAudio) ? sourceNode.__gjjAnyPreviewAudio : []) {
+      if (item?.filename || item?.url || item?.src) refs.push({ ...item, kind: "audio" });
+    }
+    collectAnyPreviewItems(sourceNode.__gjjAnyPreviewItems);
+
     for (const key of ["images", "preview_images", "gjj_images", "__gjj_queue_images"]) {
       const items = sourceNode[key] || sourceNode.properties?.[key];
       if (Array.isArray(items)) {
@@ -4301,6 +4517,127 @@ class TimelineEditor {
       seen.add(key);
       return true;
     });
+  }
+
+  _safeShortJson(value, limit = 6000) {
+    const seen = new WeakSet();
+    const json = JSON.stringify(value, (key, val) => {
+      if (typeof val === "function") return undefined;
+      if (val instanceof Element || val instanceof HTMLCanvasElement || val instanceof HTMLImageElement || val instanceof HTMLVideoElement) {
+        return undefined;
+      }
+      if (val && typeof val === "object") {
+        if (seen.has(val)) return undefined;
+        seen.add(val);
+      }
+      if (typeof val === "string" && val.length > 2000) return val.slice(0, 2000);
+      return val;
+    });
+    return String(json || "").slice(0, limit);
+  }
+
+  _sourceNodeSignature(inputName, fallbackKind = "image") {
+    const info = this._linkedInputInfo(inputName);
+    if (!info?.sourceNode) return `${inputName}:unlinked`;
+    const node = info.sourceNode;
+    const refs = this._collectRefsFromSource(node, fallbackKind).map(ref => ({
+      kind: ref.kind || fallbackKind,
+      type: ref.type || "",
+      subfolder: ref.subfolder || "",
+      filename: ref.filename || ref.name || "",
+      url: ref.url || ref.src || "",
+    }));
+    const widgets = (node.widgets || []).map(widget => ({
+      name: widget.name || "",
+      type: widget.type || "",
+      value: widget.value,
+      inputValue: widget.inputEl?.value,
+      elementValue: widget.element?.value,
+    }));
+    const selectedProperties = {};
+    for (const key of [
+      "selected_images", "selected_videos", "images", "preview_images", "gjj_images",
+      "__gjj_queue_images", "__gjjAnyPreviewImages", "__gjjAnyPreviewItems",
+      "__gjjAnyPreviewVideo", "__gjjAnyPreviewAudio",
+      "text", "prompt", "global_prompt", "value", "markdown",
+    ]) {
+      if (node.properties?.[key] !== undefined) selectedProperties[key] = node.properties[key];
+      else if (node[key] !== undefined) selectedProperties[key] = node[key];
+    }
+    const state = {
+      inputName,
+      linkId: info.linkId,
+      originId: info.originId,
+      originSlot: info.originSlot,
+      comfyClass: node.comfyClass || node.type || "",
+      refs,
+      widgets,
+      selectedProperties,
+      bestText: inputName === "global_prompt" ? this._extractBestTextFromNode(node) : "",
+    };
+    return this._safeShortJson(state);
+  }
+
+  _buildUpstreamSignature() {
+    return [
+      this._sourceNodeSignature("global_prompt", "text"),
+      this._sourceNodeSignature("material_1", "image"),
+      this._sourceNodeSignature("material_2", "image"),
+      this._sourceNodeSignature("grid_material", "image"),
+    ].join("\n");
+  }
+
+  _hasLinkedUpstreamInput() {
+    return ["global_prompt", "material_1", "material_2", "grid_material"]
+      .some(name => this._linkedInputInfo(name));
+  }
+
+  _hasImportedUpstreamSegments() {
+    return [
+      ...(this.timeline.segments || []),
+      ...(this.timeline.audioSegments || []),
+      ...(this.timeline.motionSegments || []),
+    ].some(seg => seg?.gjjUpstream || seg?.gjjPromptUpstream);
+  }
+
+  _hasLinkedMediaUpstreamInput() {
+    return ["material_1", "material_2", "grid_material"]
+      .some(name => this._linkedInputInfo(name));
+  }
+
+  _hasImportedMediaUpstreamSegments() {
+    return [
+      ...(this.timeline.segments || []),
+      ...(this.timeline.audioSegments || []),
+      ...(this.timeline.motionSegments || []),
+    ].some(seg => seg?.gjjUpstream);
+  }
+
+  _scheduleUpstreamAutoRefresh(force = false) {
+    if (this._upstreamRefreshTimer) clearTimeout(this._upstreamRefreshTimer);
+    this._upstreamRefreshTimer = setTimeout(() => {
+      this._upstreamRefreshTimer = null;
+      this._checkUpstreamAutoRefresh(force);
+    }, force ? 40 : 180);
+  }
+
+  async _checkUpstreamAutoRefresh(force = false) {
+    try {
+      if (this._upstreamRefreshBusy) return false;
+      const now = Date.now();
+      if (!force && now - (this._lastUpstreamSignatureCheckAt || 0) < 500) return false;
+      this._lastUpstreamSignatureCheckAt = now;
+      const signature = this._buildUpstreamSignature();
+      if (!force && (!this._lastUpstreamSignature || signature === this._lastUpstreamSignature)) return false;
+      this._lastUpstreamSignature = signature;
+      if (!this._hasLinkedUpstreamInput()) return false;
+      const refreshed = await this.refreshUpstreamInputs();
+      this._lastUpstreamSignature = this._buildUpstreamSignature();
+      return refreshed;
+    } catch (err) {
+      console.warn("[LTXDirector] 上游自动同步失败：", err);
+      return false;
+    }
   }
 
   async _filesFromInput(inputName, fallbackKind = "image") {
@@ -4531,6 +4868,7 @@ class TimelineEditor {
       this.updateUIFromSelection();
       this.commitChanges(true);
       this.render();
+      this._lastUpstreamSignature = this._buildUpstreamSignature();
       return true;
     } finally {
       setTimeout(() => { this._upstreamRefreshBusy = false; }, 600);
@@ -5980,6 +6318,146 @@ class TimelineEditor {
     }
   }
 
+  getSelectedSegmentForDuration() {
+    if (this.retakeMode) {
+      return null;
+    }
+    if (this.selectedIndex < 0 || this.isMultiSelectActive?.()) {
+      return null;
+    }
+    const arr = this.getSegmentArray(this.selectionType);
+    return arr?.[this.selectedIndex] || null;
+  }
+
+  updateSegmentDurationEditor(seg = this.getSelectedSegmentForDuration()) {
+    if (!this.segmentDurationEditor || !this.segmentDurationFramesInput || !this.segmentDurationSecondsInput || !this.segmentDurationApplyBtn) {
+      return;
+    }
+    const enabled = !!seg && Number.isFinite(Number(seg.length)) && Number(seg.length) > 0;
+    this.segmentDurationEditor.style.display = enabled ? "inline-flex" : "none";
+    this.segmentDurationFramesInput.disabled = !enabled;
+    this.segmentDurationSecondsInput.disabled = !enabled;
+    this.segmentDurationApplyBtn.disabled = !enabled;
+    this.segmentDurationEditor.style.opacity = enabled ? "1" : "0.35";
+    if (!enabled) {
+      this.segmentDurationFramesInput.value = "";
+      this.segmentDurationSecondsInput.value = "";
+      return;
+    }
+    const frames = Math.max(1, Math.round(Number(seg.length) || 1));
+    this.segmentDurationFramesInput.value = String(frames);
+    this.segmentDurationSecondsInput.value = (frames / this.getFrameRate()).toFixed(3);
+  }
+
+  applySelectedSegmentDuration() {
+    const seg = this.getSelectedSegmentForDuration();
+    if (!seg || !this.segmentDurationFramesInput) {
+      return;
+    }
+    let frames = Math.max(1, Math.round(Number(this.segmentDurationFramesInput.value) || seg.length || 1));
+    const mediaLimit = Math.max(0, Number(seg.videoDurationFrames || seg.audioDurationFrames || 0));
+    const trimStart = Math.max(0, Math.round(Number(seg.trimStart || 0)));
+    if (mediaLimit > 0) {
+      frames = Math.min(frames, Math.max(1, mediaLimit - trimStart));
+    }
+    seg.length = frames;
+    this.growTimelineIfNeeded(seg.start + seg.length);
+    this.updateSegmentDurationEditor(seg);
+    this.updateUIFromSelection();
+    this.commitChanges(true);
+    this.render();
+  }
+
+  async translateTextKeepingQuotes(text) {
+    const source = String(text || "");
+    if (!hasChineseText(source)) return source;
+    const parts = splitQuotedPromptText(source);
+    const translatedParts = [];
+    for (const part of parts) {
+      if (part.quoted || !hasChineseText(part.text) || !String(part.text || "").trim()) {
+        translatedParts.push(part.text);
+        continue;
+      }
+      const translated = await translatePromptText({
+        node: this.node,
+        text: part.text,
+        device: "auto",
+        maxLength: 512,
+        batchSize: 8,
+        unloadAfterUse: false,
+        nodeName: "GJJ LTXDirector",
+      });
+      translatedParts.push(String(translated || part.text));
+    }
+    return translatedParts.join("");
+  }
+
+  async translateVisiblePrompts(button = null) {
+    if (this._translatingPrompt) return;
+    this._translatingPrompt = true;
+    const oldText = button?.textContent;
+    if (button) {
+      button.textContent = "…";
+      button.disabled = true;
+      button.style.opacity = "0.75";
+    }
+    try {
+      const globalSource = this.globalPromptInput ? String(this.globalPromptInput.value || "") : this.getGlobalPrompt();
+      if (globalSource.trim() && hasChineseText(globalSource)) {
+        const translatedGlobal = await this.translateTextKeepingQuotes(globalSource);
+        if (translatedGlobal.trim() && translatedGlobal !== globalSource) {
+          this.syncGlobalPrompt(translatedGlobal);
+        }
+      }
+
+      if (this.retakeMode) {
+        const source = String(this.timeline.retakePrompt || this.promptInput?.value || "");
+        if (source.trim() && hasChineseText(source)) {
+          const translated = await this.translateTextKeepingQuotes(source);
+          if (translated.trim()) {
+            this.timeline.retakePrompt = translated;
+            if (this.promptInput) this.promptInput.value = translated;
+          }
+        }
+      } else if (this.selectionType === "image" && this.timeline.segments[this.selectedIndex]) {
+        const seg = this.timeline.segments[this.selectedIndex];
+        const source = String(seg.prompt || this.promptInput?.value || "");
+        if (source.trim() && hasChineseText(source)) {
+          const translated = await this.translateTextKeepingQuotes(source);
+          if (translated.trim()) {
+            seg.prompt = translated;
+            if (this.promptInput) this.promptInput.value = translated;
+          }
+        }
+      } else if (this.selectionType === "motion") {
+        const source = String(this.promptInput?.value || this.getGlobalPrompt() || "");
+        if (source.trim() && hasChineseText(source)) {
+          const translated = await this.translateTextKeepingQuotes(source);
+          if (translated.trim()) {
+            this.syncGlobalPrompt(translated);
+            if (this.promptInput) this.promptInput.value = translated;
+          }
+        }
+      }
+
+      this.commitChanges(true);
+      this.updateUIFromSelection();
+    } catch (error) {
+      console.error("[LTXDirector] 提示词翻译失败：", error);
+      if (this.segmentBoundsDisplay) {
+        this.segmentBoundsDisplay.textContent = `翻译失败：${error?.message || error}`;
+      }
+    } finally {
+      this._translatingPrompt = false;
+      if (button) {
+        button.textContent = oldText || "🌏";
+        button.disabled = false;
+        button.style.opacity = "1";
+      }
+      this.updateTranslateToggleStyle?.();
+    }
+  }
+
   updateUIFromSelection() {
     if (this.selectedSegmentIds && this.isMultiSelectActive()) {
       if (this.globalPromptInput) {
@@ -6028,6 +6506,7 @@ class TimelineEditor {
       if (this.segmentBoundsDisplay) {
       this.segmentBoundsDisplay.textContent = "已选择多个片段";
       }
+      this.updateSegmentDurationEditor(null);
       return;
     }
 
@@ -6104,6 +6583,7 @@ class TimelineEditor {
         const lengthStr = this.formatTime(this.timeline.retakeLength, true);
       this.segmentBoundsDisplay.textContent = `起点：${startStr}｜终点：${endStr}｜长度：${lengthStr}`;
       }
+      this.updateSegmentDurationEditor(null);
     } else if (this.selectionType === "audio" && seg) {
       if (this.globalPromptInput) {
         this.globalPromptInput.disabled = false;
@@ -6127,6 +6607,7 @@ class TimelineEditor {
       `;
       this.strengthValue.value = "1.00";
       this.strengthValue.disabled = true;
+      this.updateSegmentDurationEditor(seg);
     } else if (this.selectionType === "motion" && seg) {
       if (this.globalPromptInput) {
         this.globalPromptInput.disabled = true;
@@ -6155,6 +6636,7 @@ class TimelineEditor {
 
       this.audioInfoArea.style.display = "none";
       this.motionInfoArea.style.display = "none";
+      this.updateSegmentDurationEditor(seg);
     } else {
       if (this.segmentPromptLabel) {
         this.segmentPromptLabel.style.display = "block";
@@ -6189,6 +6671,7 @@ class TimelineEditor {
         this.strengthValue.value = strength.toFixed(2);
         this.strengthValue.disabled = !isImage;
         this.strengthValue.style.opacity = isImage ? "1.0" : "0.35";
+        this.updateSegmentDurationEditor(seg);
       } else {
         this.promptInput.value = "";
       this.promptInput.placeholder = "尚未选择片段";
@@ -6197,6 +6680,7 @@ class TimelineEditor {
         this.strengthValue.value = "1.00";
         this.strengthValue.disabled = true;
         this.strengthValue.style.opacity = "0.35";
+        this.updateSegmentDurationEditor(null);
       }
     }
 
@@ -11896,13 +12380,32 @@ function patchDirectorTemplateSources(promptResult, graph) {
   return promptResult;
 }
 
+async function refreshLinkedDirectorUpstreams(graph) {
+  const nodes = graph?._nodes || graph?.nodes || [];
+  const tasks = [];
+  for (const node of nodes) {
+    if (String(node?.comfyClass || node?.type || "") !== "GJJ_LTXDirector") continue;
+    const editor = node._timelineEditor;
+    if (!editor?._checkUpstreamAutoRefresh) continue;
+    const forceImport =
+      (!!editor._hasLinkedMediaUpstreamInput?.() && !editor._hasImportedMediaUpstreamSegments?.()) ||
+      (!!editor._hasLinkedUpstreamInput?.() && !editor._hasImportedUpstreamSegments?.());
+    tasks.push(editor._checkUpstreamAutoRefresh(forceImport).catch((err) => {
+      console.warn("[LTXDirector] 上游自动同步失败：", err);
+      return false;
+    }));
+  }
+  if (tasks.length) await Promise.all(tasks);
+}
+
 function installDirectorTemplatePromptPatch() {
   if (!app.__gjjLtxDirectorTemplatePatchInstalled && typeof app.graphToPrompt === "function") {
     app.__gjjLtxDirectorTemplatePatchInstalled = true;
     const original = app.graphToPrompt.bind(app);
     app.graphToPrompt = async function (...args) {
-      const result = await original(...args);
       const graph = args[0] || this.rootGraph || this.graph || app.rootGraph || app.graph;
+      await refreshLinkedDirectorUpstreams(graph);
+      const result = await original(...args);
       return patchDirectorTemplateSources(result, graph);
     };
   }
@@ -11910,7 +12413,9 @@ function installDirectorTemplatePromptPatch() {
     api.__gjjLtxDirectorTemplateQueuePatchInstalled = true;
     const original = api.queuePrompt.bind(api);
     api.queuePrompt = async function (...args) {
-      patchDirectorTemplateSources(args[1], app.rootGraph || app.graph);
+      const graph = app.rootGraph || app.graph;
+      await refreshLinkedDirectorUpstreams(graph);
+      patchDirectorTemplateSources(args[1], graph);
       return original(...args);
     };
   }
@@ -12084,6 +12589,10 @@ app.registerExtension({
             origOnConnectionsChange.apply(this, arguments);
           }
           self._syncGlobalPromptFromLink();
+          const input = typeof index === "number" ? self.inputs?.[index] : null;
+          if (input && ["global_prompt", "material_1", "material_2", "grid_material"].includes(input.name)) {
+            self._timelineEditor?._scheduleUpstreamAutoRefresh?.(true);
+          }
         };
 
         const origOnDrawForeground = this.onDrawForeground;
@@ -12092,6 +12601,7 @@ app.registerExtension({
             origOnDrawForeground.apply(this, arguments);
           }
           self._syncGlobalPromptFromLink();
+          self._timelineEditor?._checkUpstreamAutoRefresh?.(false);
         };
 
         const container = document.createElement("div");

@@ -1623,6 +1623,7 @@ class GJJ_LazyImageStudio:
         vl_long_edge: int = 512,
         target_width: int = 1024,
         target_height: int = 1024,
+        disable_auto_noise_mask: bool = False,
     ):
         # 限制最大参考图数量以避免OOM
         MAX_REFERENCE_IMAGES = 5
@@ -1657,7 +1658,7 @@ class GJJ_LazyImageStudio:
                     image, int(target_width), int(target_height), main_mask
                 )
                 main_ref_latent = vae.encode(processed_image[:, :, :, :3])
-                noise_mask = prepared_mask
+                noise_mask = None if disable_auto_noise_mask else prepared_mask
                 vl_image, _ignore_mask, _ignore_outpaint = (
                     _prepare_primary_image_for_target(
                         processed_image,
@@ -1700,7 +1701,16 @@ class GJJ_LazyImageStudio:
         return positive, negative, latent_out
 
     def _build_latent(
-        self, vae, width, height, batch_size, image_pairs, mask, grow_mask_by, preset
+        self,
+        vae,
+        width,
+        height,
+        batch_size,
+        image_pairs,
+        mask,
+        grow_mask_by,
+        preset,
+        disable_auto_mask=False,
     ):
         clip_type = str(preset.get("resolved_clip_type") or preset.get("clip_type") or "")
         unet_name = str(preset.get("resolved_unet_name") or preset.get("unet_name") or "")
@@ -1730,7 +1740,7 @@ class GJJ_LazyImageStudio:
         prepared_image, prepared_mask, use_outpaint = _prepare_primary_image_for_target(
             image, int(width), int(height), mask
         )
-        if prepared_mask is not None and (use_outpaint or mask is not None):
+        if prepared_mask is not None and (use_outpaint or mask is not None) and not bool(disable_auto_mask):
             return VAEEncodeForInpaint().encode(
                 vae, prepared_image, prepared_mask, int(grow_mask_by)
             )[0]
@@ -1828,6 +1838,7 @@ class GJJ_LazyImageStudio:
         lora_data="",
         batch_source_images="[]",
         mask=None,
+        disable_reference_auto_mask=False,
         prompt_graph=None,
         unique_id=None,
         extra_pnginfo=None,
@@ -1854,6 +1865,7 @@ class GJJ_LazyImageStudio:
         lora_data = _unwrap_list_input(lora_data)
         batch_source_images = _unwrap_list_input(batch_source_images)
         mask = _unwrap_list_input(mask)
+        disable_reference_auto_mask = _unwrap_list_input(disable_reference_auto_mask)
         prompt_graph = _unwrap_list_input(prompt_graph)
         unique_id = _unwrap_list_input(unique_id)
         extra_pnginfo = _unwrap_list_input(extra_pnginfo)
@@ -2091,6 +2103,7 @@ class GJJ_LazyImageStudio:
                     vl_long_edge=int(preset.get("vl_long_edge", 512)),
                     target_width=int(width),
                     target_height=int(height),
+                    disable_auto_noise_mask=bool(disable_reference_auto_mask),
                 )
             else:
                 positive = self._encode_text_conditioning(clip, prompt)
@@ -2106,6 +2119,7 @@ class GJJ_LazyImageStudio:
                     mask=mask,
                     grow_mask_by=grow_mask_by,
                     preset=preset,
+                    disable_auto_mask=bool(disable_reference_auto_mask),
                 )
 
             _send_status(unique_id, "5/6 采样生成图像...")

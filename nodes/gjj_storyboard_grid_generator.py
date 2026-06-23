@@ -46,21 +46,21 @@ PREVIEW_SUBFOLDER = "gjj_storyboard_grid_generator"
 
 
 def _send_status(unique_id: Any, text: str) -> None:
-    if not unique_id:
+    if unique_id is None or _safe_text(unique_id).strip() == "":
         return
     try:
         from server import PromptServer
 
         PromptServer.instance.send_sync(
             "gjj_node_progress",
-            {"node": str(unique_id), "text": str(text or "").strip() or "处理中..."},
+            {"node": str(unique_id), "text": _safe_text(text).strip() or "处理中..."},
         )
     except Exception:
         pass
 
 
 def _send_live_preview(unique_id: Any, image: torch.Tensor, index: int, total: int) -> None:
-    if not unique_id or not isinstance(image, torch.Tensor):
+    if unique_id is None or _safe_text(unique_id).strip() == "" or not isinstance(image, torch.Tensor):
         return
     try:
         preview = _ensure_bhwc_rgb(image)[:1].detach().float().clamp(0.0, 1.0).cpu()[0]
@@ -90,7 +90,7 @@ def _send_live_preview(unique_id: Any, image: torch.Tensor, index: int, total: i
 
 
 def _split_prompt_segments(prompt: Any) -> list[str]:
-    text = str(prompt or "").strip()
+    text = _safe_text(prompt).strip()
     if not text:
         return []
     parts = re.split(r"(?:^\s*---+\s*$)|(?:\n\s*\n+)", text, flags=re.MULTILINE)
@@ -116,12 +116,34 @@ def _split_media(value: Any) -> list[torch.Tensor]:
     return []
 
 
+def _safe_text(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 0:
+            return default
+        if value.numel() == 1:
+            try:
+                return str(value.detach().cpu().reshape(-1)[0].item())
+            except Exception:
+                return default
+        return default
+    return str(value)
+
+
 def _ensure_bhwc_rgb(image: torch.Tensor) -> torch.Tensor:
     tensor = image.detach().float().clamp(0.0, 1.0)
     if tensor.ndim == 3:
-        tensor = tensor.unsqueeze(0)
+        if int(tensor.shape[-1]) in (1, 3, 4):
+            tensor = tensor.unsqueeze(0)
+        elif int(tensor.shape[0]) in (1, 3, 4):
+            tensor = tensor.movedim(0, -1).unsqueeze(0)
+        else:
+            raise RuntimeError(f"场景图维度不支持：{tuple(tensor.shape)}")
     if tensor.ndim != 4:
         raise RuntimeError(f"场景图维度不支持：{tuple(tensor.shape)}")
+    if int(tensor.shape[-1]) not in (1, 3, 4) and int(tensor.shape[1]) in (1, 3, 4):
+        tensor = tensor.movedim(1, -1)
     channels = int(tensor.shape[-1])
     if channels == 1:
         tensor = tensor.repeat(1, 1, 1, 3)
@@ -269,7 +291,7 @@ def _make_grid(
             image[:1].to(device=first.device, dtype=first.dtype).clamp(0.0, 1.0),
             cell_w,
             cell_h,
-            str(fit_mode or "铺满裁切"),
+            _safe_text(fit_mode, "铺满裁切") or "铺满裁切",
             0.0,
             resize_method,
         )
@@ -287,7 +309,16 @@ def _lazy_optional_images(scene: Any, reference: Any, width: int, height: int) -
     images = [*scene_images, *reference_images]
     if not images:
         return {}
-    one_each = [_ensure_bhwc_rgb(image)[:1].detach().float().clamp(0.0, 1.0).contiguous() for image in images]
+    base = _ensure_bhwc_rgb(images[0])[:1].detach().float().clamp(0.0, 1.0).contiguous()
+    one_each = [base]
+    for image in images[1:]:
+        one_each.append(
+            _ensure_bhwc_rgb(image)[:1]
+            .detach()
+            .to(device=base.device, dtype=base.dtype)
+            .clamp(0.0, 1.0)
+            .contiguous()
+        )
     return {"image_01": torch.cat(one_each, dim=0)}
 
 
@@ -310,7 +341,7 @@ def _parse_enabled(value: Any, fallback: bool = True) -> bool:
 
 
 def _has_configured_lora_data(value: Any) -> bool:
-    text = str(value or "").strip()
+    text = _safe_text(value).strip()
     if not text or text == "[]":
         return False
     try:
@@ -323,11 +354,11 @@ def _has_configured_lora_data(value: Any) -> bool:
 
 
 def _preset_lora_data(unet_name: Any) -> str:
-    preset = _match_model_family_preset(str(unet_name or ""))
-    if not preset or str(preset.get("id", "generic")) == "generic":
+    preset = _match_model_family_preset(_safe_text(unet_name))
+    if not preset or _safe_text(preset.get("id", "generic")) == "generic":
         return "[]"
     rows: list[dict[str, Any]] = []
-    lora1 = str(preset.get("lora_1_name", "") or "").strip()
+    lora1 = _safe_text(preset.get("lora_1_name", "")).strip()
     if lora1:
         rows.append(
             {
@@ -336,7 +367,7 @@ def _preset_lora_data(unet_name: Any) -> str:
                 "strength": _normalize_strength(preset.get("lora_1_strength"), 1.0),
             }
         )
-    lora2 = str(preset.get("lora_2_name", "") or "").strip()
+    lora2 = _safe_text(preset.get("lora_2_name", "")).strip()
     if lora2:
         rows.append(
             {
@@ -460,8 +491,8 @@ class GJJ_StoryboardGridGenerator:
                 "size_alignment": (SIZE_ALIGN_MODES, {"default": "LTX 32倍数", "display_name": "📐 尺寸对齐"}),
             },
             "optional": {
-                "scene": (IMAGE_INPUT_TYPE, {"display_name": "🏞️ 场景", "tooltip": "场景输入会按设定尺寸短边缩放、中心裁剪，并对齐到 32 倍。"}),
-                "reference": (IMAGE_INPUT_TYPE, {"display_name": "🖼️ 参考图", "tooltip": "参考图输入，支持 GJJ_BATCH_IMAGE / IMAGE。"}),
+                "scene": (IMAGE_INPUT_TYPE, {"display_name": "🏞️ 场景", "tooltip": "接收上游素材/背景作为参考图参与生成；不会启用自动局部蒙版。"}),
+                "reference": (IMAGE_INPUT_TYPE, {"display_name": "🖼️ 参考图", "tooltip": "接收上游素材/背景作为参考图参与生成；不会启用自动局部蒙版。"}),
                 "lora_chain_config": ("LORA_CHAIN_CONFIG", {"display_name": "🔗 LoRA串联配置"}),
                 "lora_data": (
                     "STRING",
@@ -580,6 +611,7 @@ class GJJ_StoryboardGridGenerator:
                 lora_chain_config=lora_chain_config,
                 lora_data=lora_data,
                 batch_source_images="[]",
+                disable_reference_auto_mask=True,
                 prompt_graph=prompt_graph,
                 unique_id=unique_id,
                 extra_pnginfo=extra_pnginfo,

@@ -8,6 +8,7 @@ const DOM_WIDGET_NAME = "gjj_text_input_markdown";
 const SAVED_TEXT_PROPERTY = "gjj_text_input_saved_text";
 const MODE_PROPERTY = "gjj_text_input_mode";
 const WIDTH_PROPERTY = "gjj_text_input_width";
+const LAST_LINK_PROPERTY = "gjj_text_input_last_upstream_link";
 const MODE_EDIT = "edit";
 const MODE_PREVIEW = "preview";
 const MIN_WIDGET_WIDTH = 1;
@@ -30,6 +31,135 @@ function getInputByName(node, name) {
 
 function hasLinkedTextInput(node) {
 	return getInputByName(node, TEXT_INPUT_NAME)?.link != null;
+}
+
+function getGraphLink(linkId, graph = app.graph) {
+	if (linkId == null || !graph) {
+		return null;
+	}
+	if (typeof graph.getLink === "function") {
+		const link = graph.getLink(linkId);
+		if (link) return link;
+	}
+	const links = graph.links || graph._links;
+	if (!links) {
+		return null;
+	}
+	if (Array.isArray(links)) {
+		return links.find((link) => String(link?.id ?? link?.[0]) === String(linkId)) || null;
+	}
+	if (links instanceof Map) {
+		return links.get(linkId) || links.get(String(linkId)) || null;
+	}
+	return links[linkId] || links[String(linkId)] || null;
+}
+
+function getGraphNodeById(id, graph = app.graph) {
+	if (id == null || !graph) {
+		return null;
+	}
+	return graph.getNodeById?.(id)
+		|| graph.getNodeById?.(Number(id))
+		|| graph._nodes_by_id?.[id]
+		|| graph._nodes_by_id?.[String(id)]
+		|| graph._nodes?.find((item) => String(item?.id) === String(id))
+		|| null;
+}
+
+function linkOriginId(link) {
+	return Array.isArray(link) ? link[1] : link?.origin_id;
+}
+
+function linkOriginSlot(link) {
+	return Number(Array.isArray(link) ? link[2] : link?.origin_slot);
+}
+
+function linkTargetSlot(link) {
+	return Number(Array.isArray(link) ? link[4] : link?.target_slot);
+}
+
+function outputLabel(node, slot) {
+	const output = node?.outputs?.[Number(slot)];
+	return String(output?.label || output?.name || output?.type || `输出 ${Number(slot) + 1}`);
+}
+
+function sourceNodeTitle(node) {
+	return String(node?.title || node?.comfyClass || node?.type || `节点 ${node?.id ?? ""}`).trim();
+}
+
+function storeLastTextInputLink(node, link, targetSlot = null) {
+	if (!node || !link) {
+		return false;
+	}
+	const sourceId = linkOriginId(link);
+	const sourceSlot = linkOriginSlot(link);
+	if (sourceId == null || !Number.isFinite(sourceSlot)) {
+		return false;
+	}
+	const sourceNode = getGraphNodeById(sourceId, node.graph || app.graph);
+	const slot = Number.isFinite(Number(targetSlot)) ? Number(targetSlot) : linkTargetSlot(link);
+	node.properties = node.properties || {};
+	node.properties[LAST_LINK_PROPERTY] = {
+		source_id: sourceId,
+		source_slot: sourceSlot,
+		source_label: outputLabel(sourceNode, sourceSlot),
+		source_title: sourceNodeTitle(sourceNode),
+		target_input_name: TEXT_INPUT_NAME,
+		target_slot: Number.isFinite(slot) ? slot : (node.inputs || []).findIndex((input) => input === getInputByName(node, TEXT_INPUT_NAME)),
+	};
+	updateReconnectButton(node);
+	return true;
+}
+
+function recordCurrentTextInputLink(node) {
+	const input = getInputByName(node, TEXT_INPUT_NAME);
+	const link = getGraphLink(input?.link, node?.graph || app.graph);
+	if (!link) {
+		return false;
+	}
+	return storeLastTextInputLink(node, link, node.inputs?.indexOf(input));
+}
+
+function recordTextInputLinkFromConnectionEvent(node, args) {
+	const [type, slot, connected, linkInfo] = args || [];
+	const input = getInputByName(node, TEXT_INPUT_NAME);
+	const inputSlot = node?.inputs?.indexOf(input);
+	const isInputEvent =
+		type === globalThis.LiteGraph?.INPUT ||
+		type === 1 ||
+		String(type).toLowerCase() === "input";
+	if (!isInputEvent || Number(slot) !== Number(inputSlot)) {
+		return false;
+	}
+	if (connected) {
+		return recordCurrentTextInputLink(node);
+	}
+	return storeLastTextInputLink(node, linkInfo, inputSlot);
+}
+
+function lastTextInputLink(node) {
+	const memory = node?.properties?.[LAST_LINK_PROPERTY];
+	return memory && typeof memory === "object" ? memory : null;
+}
+
+function hasReconnectTarget(node) {
+	const memory = lastTextInputLink(node);
+	return Boolean(memory && memory.source_id != null && Number.isFinite(Number(memory.source_slot)) && !hasLinkedTextInput(node));
+}
+
+function updateReconnectButton(node) {
+	const button = node?.__gjjTextInputReconnectButton;
+	if (!button) {
+		return;
+	}
+	const memory = lastTextInputLink(node);
+	const visible = hasReconnectTarget(node);
+	button.style.display = visible ? "" : "none";
+	if (memory) {
+		const source = [memory.source_title, memory.source_label].filter(Boolean).join(" · ");
+		button.title = source ? `重新连接：${source}` : "重新连接上游";
+		button.dataset.originalTitle = button.title;
+	}
 }
 
 function getPreviewText(node) {
@@ -608,6 +738,7 @@ async function runCurrentTextInputNode(node) {
 }
 
 function disconnectTextInput(node) {
+	recordCurrentTextInputLink(node);
 	const input = getInputByName(node, TEXT_INPUT_NAME);
 	if (!input) {
 		return;
@@ -621,6 +752,44 @@ function disconnectTextInput(node) {
 	if (linkId != null && app.graph?.removeLink) {
 		app.graph.removeLink(linkId);
 		input.link = null;
+	}
+}
+
+function reconnectTextInput(node) {
+	const button = node?.__gjjTextInputReconnectButton;
+	const memory = lastTextInputLink(node);
+	if (!memory) {
+		flashButton(button, "无记录", false);
+		return false;
+	}
+	const graph = node?.graph || app.graph;
+	const sourceNode = getGraphNodeById(memory.source_id, graph);
+	const sourceSlot = Number(memory.source_slot);
+	if (!sourceNode || !sourceNode.outputs?.[sourceSlot]) {
+		flashButton(button, "来源不存在", false);
+		return false;
+	}
+	const input = getInputByName(node, TEXT_INPUT_NAME);
+	const targetSlot = node?.inputs?.indexOf(input);
+	if (!input || targetSlot < 0) {
+		flashButton(button, "接口不存在", false);
+		return false;
+	}
+	if (input.link != null) {
+		disconnectTextInput(node);
+	}
+	try {
+		sourceNode.connect(sourceSlot, node, targetSlot);
+		node.__gjjTextInputLiveText = null;
+		enterPreviewMode(node);
+		scheduleStabilize(node, 0);
+		refreshNode(node);
+		flashButton(button, "已连接");
+		return true;
+	} catch (error) {
+		console.warn("[GJJ_TextInput] reconnect upstream failed", error);
+		flashButton(button, "连接失败", false);
+		return false;
 	}
 }
 
@@ -783,7 +952,17 @@ function applyMode(node) {
 		node.__gjjTextInputPreviewBody.innerHTML = renderMarkdown(getPreviewText(node));
 	}
 	if (node.__gjjTextInputActionBar) {
-		node.__gjjTextInputActionBar.style.display = preview && hasReadyLinkedPreviewText(node) ? "flex" : "none";
+		const hasReadyText = hasReadyLinkedPreviewText(node);
+		node.__gjjTextInputActionBar.style.display = preview && (hasReadyText || hasReconnectTarget(node)) ? "flex" : "none";
+		updateReconnectButton(node);
+		for (const button of [
+			node.__gjjTextInputHoldButton,
+			node.__gjjTextInputRunButton,
+			node.__gjjTextInputCopyNodeButton,
+			node.__gjjTextInputCopyClipboardButton,
+		]) {
+			if (button) button.style.display = hasReadyText ? "" : "none";
+		}
 	}
 	if (node.__gjjTextInputEditor) {
 		node.__gjjTextInputEditor.style.display = preview ? "none" : "block";
@@ -1020,6 +1199,15 @@ function buildDom(node) {
 	holdButton.className = "gjj-text-input-action-button";
 	setupIconButton(holdButton, "保持文本并断开链接", HOLD_ICON_SVG);
 
+	const reconnectButton = document.createElement("button");
+	reconnectButton.type = "button";
+	reconnectButton.className = "gjj-text-input-action-button";
+	reconnectButton.textContent = "🔗";
+	reconnectButton.title = "重新连接上游";
+	reconnectButton.setAttribute("aria-label", reconnectButton.title);
+	reconnectButton.dataset.originalTitle = reconnectButton.title;
+	reconnectButton.style.display = "none";
+
 	const runButton = document.createElement("button");
 	runButton.type = "button";
 	runButton.className = "gjj-text-input-action-button";
@@ -1038,7 +1226,7 @@ function buildDom(node) {
 	copyClipboardButton.className = "gjj-text-input-action-button";
 	setupIconButton(copyClipboardButton, "复制到剪贴板", CLIPBOARD_ICON_SVG);
 
-	actionBar.append(holdButton, runButton, copyNodeButton, copyClipboardButton);
+	actionBar.append(holdButton, reconnectButton, runButton, copyNodeButton, copyClipboardButton);
 
 	const style = document.createElement("style");
 	style.textContent = `
@@ -1220,7 +1408,7 @@ function buildDom(node) {
 		node.__gjjTextInputEditInitialValue = "";
 		enterPreviewMode(node);
 	});
-	for (const button of [holdButton, runButton, copyNodeButton, copyClipboardButton]) {
+	for (const button of [holdButton, reconnectButton, runButton, copyNodeButton, copyClipboardButton]) {
 		button.addEventListener("pointerdown", (event) => event.stopPropagation());
 		button.addEventListener("mousedown", (event) => event.stopPropagation());
 		button.addEventListener("dblclick", (event) => event.stopPropagation());
@@ -1229,6 +1417,11 @@ function buildDom(node) {
 		event.preventDefault();
 		event.stopPropagation();
 		holdCurrentPreviewText(node);
+	});
+	reconnectButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		reconnectTextInput(node);
 	});
 	runButton.addEventListener("click", (event) => {
 		event.preventDefault();
@@ -1251,6 +1444,7 @@ function buildDom(node) {
 	node.__gjjTextInputContainer = container;
 	node.__gjjTextInputActionBar = actionBar;
 	node.__gjjTextInputHoldButton = holdButton;
+	node.__gjjTextInputReconnectButton = reconnectButton;
 	node.__gjjTextInputRunButton = runButton;
 	node.__gjjTextInputCopyNodeButton = copyNodeButton;
 	node.__gjjTextInputCopyClipboardButton = copyClipboardButton;
@@ -1288,6 +1482,7 @@ function stabilizeNode(node) {
 		return;
 	}
 	ensureDom(node);
+	recordCurrentTextInputLink(node);
 	bindTextWidget(node);
 	disableStandardStatus(node);
 	restoreSavedValue(node);
@@ -1373,7 +1568,9 @@ app.registerExtension({
 
 		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
 		nodeType.prototype.onConnectionsChange = function (...args) {
+			recordTextInputLinkFromConnectionEvent(this, args);
 			const result = originalOnConnectionsChange?.apply(this, args);
+			recordCurrentTextInputLink(this);
 			if (!hasLinkedTextInput(this)) {
 				this.__gjjTextInputLiveText = null;
 			}

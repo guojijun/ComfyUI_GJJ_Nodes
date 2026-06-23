@@ -38,6 +38,7 @@ const MODE_PROPERTY = "__gjjAnyPreviewMode";
 const WIDTH_PROPERTY = "gjj_any_preview_width";
 const HELD_TEXT_PROPERTY = "gjj_any_preview_held_text";
 const HELD_IMAGES_PROPERTY = "gjj_any_preview_held_images";
+const LAST_LINKS_PROPERTY = "gjj_any_preview_last_upstream_links";
 const TEXT_INPUT_SAVED_TEXT_PROPERTY = "gjj_text_input_saved_text";
 const MOTION_GUARD_STYLE_ID = "gjj-any-preview-motion-guard-style";
 const MOTION_CLASS = "gjj-any-preview-motion";
@@ -525,6 +526,121 @@ function getLinkedSourceInfo(input) {
 		type: sourceSlot.type || "*",
 		label: sourceSlot.label || sourceSlot.name || sourceSlot.type || "*",
 	};
+}
+
+function linkTargetSlot(link) {
+	return Number(Array.isArray(link) ? link[4] : link?.target_slot);
+}
+
+function sourceNodeTitle(node) {
+	return String(node?.title || node?.comfyClass || node?.type || `节点 ${node?.id ?? ""}`).trim();
+}
+
+function sourceOutputLabel(node, slot) {
+	const output = node?.outputs?.[Number(slot)];
+	return String(output?.label || output?.name || output?.type || `输出 ${Number(slot) + 1}`);
+}
+
+function anyPreviewLinkMemory(node) {
+	const value = node?.properties?.[LAST_LINKS_PROPERTY];
+	return Array.isArray(value) ? value.filter((item) => item && typeof item === "object") : [];
+}
+
+function saveAnyPreviewLinkMemory(node, records) {
+	if (!node) {
+		return;
+	}
+	node.properties = node.properties || {};
+	node.properties[LAST_LINKS_PROPERTY] = records;
+	updateReconnectButton(node);
+}
+
+function upsertAnyPreviewLinkMemory(node, record) {
+	if (!node || !record?.target_input_name || record.source_id == null) {
+		return false;
+	}
+	const records = anyPreviewLinkMemory(node).filter(
+		(item) => String(item.target_input_name || "") !== String(record.target_input_name || ""),
+	);
+	records.push(record);
+	records.sort((left, right) => getInputIndex(left.target_input_name) - getInputIndex(right.target_input_name));
+	saveAnyPreviewLinkMemory(node, records);
+	return true;
+}
+
+function storeAnyPreviewLink(node, input, link, targetSlot = null) {
+	if (!node || !input || !link) {
+		return false;
+	}
+	const sourceId = linkOriginId(link);
+	const sourceSlot = linkOriginSlot(link);
+	if (sourceId == null || !Number.isFinite(sourceSlot)) {
+		return false;
+	}
+	const graph = node.graph || app.graph;
+	const sourceNode = getGraphNodeById(sourceId, graph);
+	const slot = Number.isFinite(Number(targetSlot)) ? Number(targetSlot) : linkTargetSlot(link);
+	return upsertAnyPreviewLinkMemory(node, {
+		source_id: sourceId,
+		source_slot: sourceSlot,
+		source_title: sourceNodeTitle(sourceNode),
+		source_label: sourceOutputLabel(sourceNode, sourceSlot),
+		target_input_name: String(input.name || ""),
+		target_slot: Number.isFinite(slot) ? slot : node.inputs?.indexOf(input),
+	});
+}
+
+function recordCurrentAnyPreviewLinks(node) {
+	let changed = false;
+	for (const input of getInputs(node)) {
+		const link = getGraphLink(input?.link, node?.graph || app.graph);
+		if (link) {
+			changed = storeAnyPreviewLink(node, input, link, node.inputs?.indexOf(input)) || changed;
+		}
+	}
+	return changed;
+}
+
+function recordAnyPreviewLinkFromConnectionEvent(node, args) {
+	const [type, slot, connected, linkInfo] = args || [];
+	const isInputEvent =
+		type === globalThis.LiteGraph?.INPUT ||
+		type === 1 ||
+		String(type).toLowerCase() === "input";
+	if (!isInputEvent) {
+		return false;
+	}
+	const input = node?.inputs?.[Number(slot)];
+	if (!input || !String(input.name || "").startsWith(INPUT_PREFIX)) {
+		return false;
+	}
+	if (connected) {
+		return recordCurrentAnyPreviewLinks(node);
+	}
+	return storeAnyPreviewLink(node, input, linkInfo, slot);
+}
+
+function hasReconnectTargets(node) {
+	if (hasLinkedInputs(node)) {
+		return false;
+	}
+	return anyPreviewLinkMemory(node).some((record) => record.source_id != null && Number.isFinite(Number(record.source_slot)));
+}
+
+function updateReconnectButton(node) {
+	const button = node?.__gjjAnyPreviewReconnectButton;
+	if (!button) {
+		return;
+	}
+	const records = anyPreviewLinkMemory(node);
+	const visible = hasReconnectTargets(node);
+	button.style.display = visible ? "" : "none";
+	const first = records[0];
+	const label = first ? [first.source_title, first.source_label].filter(Boolean).join(" · ") : "";
+	button.title = records.length > 1
+		? `重新连接 ${records.length} 个上游`
+		: (label ? `重新连接：${label}` : "重新连接上游");
+	button.dataset.originalTitle = button.title;
 }
 
 function eventPromptId(event) {
@@ -1680,11 +1796,26 @@ function updatePreviewActionButtons(node) {
 	const copyBar = node?.__gjjAnyPreviewCopyBar;
 	if (!copyBar) return;
 	const hasContent = hasCurrentPreviewContent(node);
-	copyBar.style.display = hasContent ? "flex" : "none";
-	if (!hasContent) return;
+	const reconnect = hasReconnectTargets(node);
+	copyBar.style.display = hasContent || reconnect ? "flex" : "none";
+	updateReconnectButton(node);
+	if (!hasContent) {
+		for (const button of [
+			node.__gjjAnyPreviewHoldButton,
+			node.__gjjAnyPreviewRunButton,
+			node.__gjjAnyPreviewCopyNodeButton,
+			node.__gjjAnyPreviewCopyClipboardButton,
+		]) {
+			if (button) button.style.display = "none";
+		}
+		return;
+	}
 	const text = currentPreviewTextForCopy(node);
 	const hasText = Boolean(text.trim());
 	const hasImages = currentPreviewImages(node).length > 0;
+	for (const button of [node.__gjjAnyPreviewHoldButton, node.__gjjAnyPreviewRunButton]) {
+		if (button) button.style.display = "";
+	}
 	if (node.__gjjAnyPreviewCopyNodeButton) {
 		node.__gjjAnyPreviewCopyNodeButton.style.display = hasImages || hasText ? "" : "none";
 		node.__gjjAnyPreviewCopyNodeButton.title = hasImages
@@ -1941,6 +2072,7 @@ function disconnectLinkedInputs(node) {
 	if (!Array.isArray(node?.inputs)) {
 		return 0;
 	}
+	recordCurrentAnyPreviewLinks(node);
 	let count = 0;
 	for (const [index, input] of node.inputs.entries()) {
 		if (input?.link == null) {
@@ -1954,6 +2086,75 @@ function disconnectLinkedInputs(node) {
 		count += 1;
 	}
 	return count;
+}
+
+function ensureReconnectInput(node, record) {
+	const name = String(record?.target_input_name || "");
+	const desiredIndex = getInputIndex(name);
+	if (Number.isFinite(desiredIndex) && desiredIndex !== Number.MAX_SAFE_INTEGER) {
+		while (getInputs(node).length < desiredIndex) {
+			addDynamicInput(node);
+		}
+		renameInputsSequentially(node);
+		const byName = getInputs(node).find((input) => String(input.name || "") === name);
+		if (byName) {
+			return byName;
+		}
+	}
+	const empty = getInputs(node).find((input) => input?.link == null);
+	if (empty) {
+		return empty;
+	}
+	addDynamicInput(node);
+	renameInputsSequentially(node);
+	return getInputs(node).find((input) => input?.link == null) || getInputs(node).at(-1) || null;
+}
+
+function reconnectAnyPreviewLinks(node) {
+	const button = node?.__gjjAnyPreviewReconnectButton;
+	const graph = node?.graph || app.graph;
+	const records = anyPreviewLinkMemory(node);
+	if (!records.length) {
+		flashActionButton(button, "无记录", false);
+		return false;
+	}
+	let connected = 0;
+	let missing = 0;
+	for (const record of records) {
+		const sourceNode = getGraphNodeById(record.source_id, graph);
+		const sourceSlot = Number(record.source_slot);
+		if (!sourceNode || !sourceNode.outputs?.[sourceSlot]) {
+			missing += 1;
+			continue;
+		}
+		const input = ensureReconnectInput(node, record);
+		const targetSlot = node?.inputs?.indexOf(input);
+		if (!input || targetSlot < 0) {
+			missing += 1;
+			continue;
+		}
+		if (input.link != null) {
+			try { node.disconnectInput?.(targetSlot); } catch (_) {}
+		}
+		try {
+			sourceNode.connect(sourceSlot, node, targetSlot);
+			connected += 1;
+		} catch (error) {
+			console.warn("[GJJ_AnyPreview] reconnect upstream failed", error);
+			missing += 1;
+		}
+	}
+	ensureTrailingEmptyInput(node);
+	renameInputsSequentially(node);
+	resetLivePreviewState(node);
+	scheduleStabilize(node, 0);
+	setDirty(node);
+	if (connected > 0) {
+		flashActionButton(button, missing ? `已连接 ${connected} 个` : "已连接");
+		return true;
+	}
+	flashActionButton(button, "来源不存在", false);
+	return false;
 }
 
 function flashHoldButton(button, ok) {
@@ -3707,6 +3908,13 @@ function ensurePreviewWidget(node) {
 	holdButton.type = "button";
 	holdButton.style.cssText = buttonStyle;
 	setupIconButton(holdButton, "保持文本并断开链接", HOLD_ICON_SVG);
+	const reconnectButton = document.createElement("button");
+	reconnectButton.type = "button";
+	reconnectButton.style.cssText = `${buttonStyle};display:none`;
+	reconnectButton.textContent = "🔗";
+	reconnectButton.title = "重新连接上游";
+	reconnectButton.setAttribute("aria-label", reconnectButton.title);
+	reconnectButton.dataset.originalTitle = reconnectButton.title;
 	const runButton = document.createElement("button");
 	runButton.type = "button";
 	runButton.style.cssText = buttonStyle;
@@ -3723,7 +3931,7 @@ function ensurePreviewWidget(node) {
 	copyClipboardButton.style.cssText = buttonStyle;
 	setupIconButton(copyClipboardButton, "复制到剪贴板", CLIPBOARD_ICON_SVG);
 
-	for (const button of [holdButton, runButton, copyNodeButton, copyClipboardButton]) {
+	for (const button of [holdButton, reconnectButton, runButton, copyNodeButton, copyClipboardButton]) {
 		button.className = "gjj-any-preview-action-icon";
 		button.addEventListener("pointerdown", (event) => {
 			event.preventDefault();
@@ -3751,6 +3959,11 @@ function ensurePreviewWidget(node) {
 		event.stopPropagation();
 		holdCurrentPreview(node);
 	});
+	reconnectButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		reconnectAnyPreviewLinks(node);
+	});
 	runButton.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
@@ -3767,6 +3980,7 @@ function ensurePreviewWidget(node) {
 		copyPreviewText(node);
 	});
 	copyBar.appendChild(holdButton);
+	copyBar.appendChild(reconnectButton);
 	copyBar.appendChild(runButton);
 	copyBar.appendChild(copyNodeButton);
 	copyBar.appendChild(copyClipboardButton);
@@ -3971,6 +4185,7 @@ function ensurePreviewWidget(node) {
 	node.__gjjAnyPreviewWrap = previewWrap;
 	node.__gjjAnyPreviewCopyBar = copyBar;
 	node.__gjjAnyPreviewHoldButton = holdButton;
+	node.__gjjAnyPreviewReconnectButton = reconnectButton;
 	node.__gjjAnyPreviewRunButton = runButton;
 	node.__gjjAnyPreviewCopyNodeButton = copyNodeButton;
 	node.__gjjAnyPreviewCopyClipboardButton = copyClipboardButton;
@@ -3988,6 +4203,7 @@ function stabilizeNode(node) {
 
 	migrateLegacyInputs(node);
 	ensureOutput(node);
+	recordCurrentAnyPreviewLinks(node);
 	removeUnusedInputsFromEnd(node, MIN_VISIBLE_INPUTS);
 	ensureTrailingEmptyInput(node);
 	renameInputsSequentially(node);
@@ -4093,7 +4309,9 @@ app.registerExtension({
 
 		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
 		nodeType.prototype.onConnectionsChange = function (...args) {
+			recordAnyPreviewLinkFromConnectionEvent(this, args);
 			const result = originalOnConnectionsChange?.apply(this, args);
+			recordCurrentAnyPreviewLinks(this);
 			resetLivePreviewState(this);
 			if (!hasLinkedInputs(this)) {
 				applyHeldPreview(this);
