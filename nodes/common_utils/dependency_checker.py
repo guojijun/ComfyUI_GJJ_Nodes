@@ -29,7 +29,7 @@ def get_site_packages(py=None):
 	return os.path.join(py_dir, "Lib", "site-packages")
 
 def get_pip_install_command_text(pkg="",*,packages=None,py=None):
-	pkg = " ".join(_norm(packages or pkg))
+	pkg = " ".join(f'"{item}"' for item in _norm(packages or pkg))
 	return (f'& "{py or sys.executable}" -m pip install {pkg} -i {DEFAULT_PYPI} --ignore-installed --target "{get_site_packages(py)}"')
 
 def analyze_import_error(error_message, dependency_name=""):

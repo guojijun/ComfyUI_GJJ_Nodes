@@ -289,6 +289,13 @@ def _dimensions_from_original_size(images: list[torch.Tensor], align_multiple: A
 
 def _resolve_canvas_size(size_preset: Any, orientation: Any, kwargs: dict[str, Any], images: list[torch.Tensor] | None = None) -> tuple[int, int]:
     align_multiple = kwargs.get("align_multiple", DEFAULT_ALIGN_MULTIPLE)
+    preset = _normalize_size_preset(size_preset)
+    if preset == ORIGINAL_SIZE_OPTION:
+        original_size = _dimensions_from_original_size(images or [], align_multiple)
+        if original_size is not None:
+            return original_size
+        return SIZE_PRESET_DIMENSIONS[FALLBACK_SIZE_PRESET]["正方形"]
+
     legacy_size = _legacy_width_height(kwargs.get("width"), kwargs.get("height"), align_multiple)
     if legacy_size is not None:
         return legacy_size
@@ -300,13 +307,6 @@ def _resolve_canvas_size(size_preset: Any, orientation: Any, kwargs: dict[str, A
     legacy_size = _legacy_width_height(size_preset, orientation, align_multiple)
     if legacy_size is not None:
         return legacy_size
-
-    preset = _normalize_size_preset(size_preset)
-    if preset == ORIGINAL_SIZE_OPTION:
-        original_size = _dimensions_from_original_size(images or [], align_multiple)
-        if original_size is not None:
-            return original_size
-        return SIZE_PRESET_DIMENSIONS[FALLBACK_SIZE_PRESET]["正方形"]
 
     direction = _normalize_orientation(orientation)
     if direction == "原始比例":

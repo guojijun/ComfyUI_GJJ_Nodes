@@ -389,11 +389,16 @@ function customDimensions(node) {
 	return width > 0 && height > 0 ? [alignNodeSize(node, width), alignNodeSize(node, height)] : null;
 }
 
+function originalSizeActive(node) {
+	return normalizeSize(readWidget(node, "size_preset")) === ORIGINAL_SIZE_VALUE;
+}
+
 function customActive(node) {
-	return Boolean(customDimensions(node));
+	return !originalSizeActive(node) && Boolean(customDimensions(node));
 }
 
 function effectiveDimensions(node) {
+	if (originalSizeActive(node)) return presetDimensions(ORIGINAL_SIZE_VALUE, readWidget(node, "orientation"));
 	return customDimensions(node) || presetDimensions(readWidget(node, "size_preset"), readWidget(node, "orientation"));
 }
 
@@ -702,6 +707,7 @@ function applyCustomSettings(node) {
 	}
 	const width = alignTo16(directWidth || ratioDims[0]);
 	const height = alignTo16(directHeight || ratioDims[1]);
+	if (originalSizeActive(node)) writeWidget(node, "size_preset", FALLBACK_SIZE_VALUE);
 	writeWidget(node, "width", width);
 	writeWidget(node, "height", height);
 	writeWidget(node, "custom_size", ratioDims ? alignTo16(state.customSizeInput.value) : Math.min(width, height));
