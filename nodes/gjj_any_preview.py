@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import uuid
 from pathlib import Path
 from typing import Any
@@ -963,6 +964,57 @@ def _node_has_linked_preview_inputs(prompt: Any, unique_id: Any) -> bool:
     return False
 
 
+def _workflow_from_extra_pnginfo(extra_pnginfo: Any) -> dict[str, Any] | None:
+    if not isinstance(extra_pnginfo, dict):
+        return None
+    workflow = extra_pnginfo.get("workflow")
+    if isinstance(workflow, dict):
+        return workflow
+    nested = extra_pnginfo.get("extra_pnginfo")
+    if isinstance(nested, dict) and isinstance(nested.get("workflow"), dict):
+        return nested["workflow"]
+    return None
+
+
+def _held_preview_text(extra_pnginfo: Any, unique_id: Any) -> str:
+    workflow = _workflow_from_extra_pnginfo(extra_pnginfo)
+    if not workflow:
+        return ""
+    target = str(unique_id or "").strip()
+    if not target:
+        return ""
+    for node in workflow.get("nodes") or []:
+        if not isinstance(node, dict) or str(node.get("id")) != target:
+            continue
+        props = node.get("properties") if isinstance(node.get("properties"), dict) else {}
+        text = str(props.get("gjj_any_preview_held_text") or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _held_preview_images(extra_pnginfo: Any, unique_id: Any) -> list[dict[str, Any]]:
+    workflow = _workflow_from_extra_pnginfo(extra_pnginfo)
+    if not workflow:
+        return []
+    target = str(unique_id or "").strip()
+    if not target:
+        return []
+    for node in workflow.get("nodes") or []:
+        if not isinstance(node, dict) or str(node.get("id")) != target:
+            continue
+        props = node.get("properties") if isinstance(node.get("properties"), dict) else {}
+        images = props.get("gjj_any_preview_held_images")
+        if not isinstance(images, (list, tuple)):
+            return []
+        result: list[dict[str, Any]] = []
+        for item in images:
+            if isinstance(item, dict) and str(item.get("filename") or "").strip():
+                result.append(dict(item))
+        return result
+    return []
+
+
 class GJJ_AnyPreview:
     CATEGORY = "GJJ"
     FUNCTION = "preview"
@@ -1358,6 +1410,7 @@ class GJJ_AnyPreview:
     def preview(self, batch_image=None, prompt=None, extra_pnginfo=None, unique_id=None, **kwargs):
         raw_values = []
         using_cached_inputs = False
+        held_images: list[dict[str, Any]] = []
 
         # 优先处理 batch_image 参数
         if batch_image is not None and not is_none(batch_image):
@@ -1377,9 +1430,21 @@ class GJJ_AnyPreview:
         elif not has_linked_inputs:
             raw_values = self._load_last_inputs(unique_id, prompt)
             using_cached_inputs = bool(raw_values)
+            if not raw_values:
+                held_images = _held_preview_images(extra_pnginfo, unique_id)
+                if not held_images:
+                    held_text = _held_preview_text(extra_pnginfo, unique_id)
+                else:
+                    held_text = ""
+                if held_text:
+                    raw_values = [held_text]
 
         preview_values = flatten_preview_values(raw_values)
         preview_kind, merged, preview_text = merge_values(preview_values)
+        if held_images and not preview_values:
+            preview_kind = "image"
+            preview_text = f"保持图片预览：{len(held_images)} 张"
+            merged = held_images[0] if len(held_images) == 1 else held_images
         if using_cached_inputs and preview_values:
             preview_text = f"使用断开前缓存：{preview_text}"
         sequence_media: list[dict[str, Any]] = []
@@ -1425,6 +1490,11 @@ class GJJ_AnyPreview:
         print(f"[GJJ] 开始构建ui数据 - preview_kind: {preview_kind}")
 
         has_expanded_items = "preview_items" in ui
+
+        if held_images and not preview_values:
+            ui["preview_images"] = [dict(item) for item in held_images]
+            if not queue_thumbnails:
+                ui["images"] = [dict(item) for item in held_images]
 
         if sequence_media:
             ui["preview_images"] = sequence_media
@@ -1528,6 +1598,43 @@ try:
             return Path(folder_paths.get_input_directory()).resolve()
         return Path(folder_paths.get_temp_directory()).resolve()
 
+    def _safe_media_path(media_type: str, subfolder: str, filename: str) -> tuple[Path, Path]:
+        root = _media_root(media_type)
+        safe_subfolder = str(subfolder or "").replace("\\", "/").strip("/")
+        safe_filename = str(filename or "").replace("\\", "/").strip("/")
+        if not safe_filename or "/" in safe_filename:
+            raise ValueError("文件名无效")
+        path = (root / safe_subfolder / safe_filename).resolve() if safe_subfolder else (root / safe_filename).resolve()
+        path.relative_to(root)
+        return root, path
+
+    def _copy_preview_media_to_input(item: dict[str, Any]) -> dict[str, Any]:
+        media_type = str(item.get("type") or "temp").strip().lower()
+        filename = str(item.get("filename") or "").strip()
+        subfolder = str(item.get("subfolder") or "").strip()
+        if not filename:
+            raise ValueError("缺少文件名")
+        _, source = _safe_media_path(media_type, subfolder, filename)
+        if not source.exists() or not source.is_file():
+            raise FileNotFoundError("源图片不存在")
+        suffix = source.suffix.lower()
+        if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}:
+            raise ValueError("仅支持复制图片文件")
+        if media_type == "input":
+            return {**item, "type": "input"}
+        input_root = Path(folder_paths.get_input_directory()).resolve()
+        target_subfolder = "GJJ_AnyPreview"
+        target_dir = (input_root / target_subfolder).resolve()
+        target_dir.relative_to(input_root)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        stem = re.sub(r"[^0-9A-Za-z._-]+", "_", source.stem).strip("._-") or "preview"
+        target_name = f"{stem}_{uuid.uuid4().hex[:10]}{suffix}"
+        target = (target_dir / target_name).resolve()
+        target.relative_to(input_root)
+        shutil.copy2(source, target)
+        copied = {**item, "filename": target_name, "subfolder": target_subfolder, "type": "input"}
+        return copied
+
     @PromptServer.instance.routes.post("/gjj/any_preview/open_media_folder")
     async def gjj_any_preview_open_media_folder(request):
         try:
@@ -1563,6 +1670,23 @@ try:
             else:
                 subprocess.Popen(["xdg-open", str(folder)])
             return web.json_response({"status": "ok", "path": str(folder)})
+        except Exception as error:
+            return web.json_response({"error": str(error)}, status=500)
+
+    @PromptServer.instance.routes.post("/gjj/any_preview/copy_media_to_input")
+    async def gjj_any_preview_copy_media_to_input(request):
+        try:
+            payload = await request.json()
+            images = payload.get("images") if isinstance(payload, dict) else None
+            if not isinstance(images, list) or not images:
+                return web.json_response({"error": "缺少图片"}, status=400)
+            copied = []
+            for item in images:
+                if isinstance(item, dict):
+                    copied.append(_copy_preview_media_to_input(item))
+            if not copied:
+                return web.json_response({"error": "没有可复制的图片"}, status=400)
+            return web.json_response({"images": copied})
         except Exception as error:
             return web.json_response({"error": str(error)}, status=500)
 

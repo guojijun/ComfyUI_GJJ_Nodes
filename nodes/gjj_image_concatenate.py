@@ -39,16 +39,18 @@ except Exception:
 NODE_NAME = "GJJ_ImageConcanate"
 MEDIA_TYPE = "GJJ_BATCH_IMAGE,IMAGE,MASK,VIDEO"
 IMAGE_PREFIX = "media_"
-DIRECTIONS = ("right", "down", "left", "up")
+DIRECTIONS = ("right", "down", "left", "up", "square")
 DIRECTION_LABELS = {
     "up": "向上",
     "down": "向下",
     "left": "向左",
     "right": "向右",
+    "square": "方形",
 }
 BLACK_PLACEHOLDER_EPSILON = 1e-6
 CUDA_HEADROOM = 0.82
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".wmv", ".mpeg", ".mpg"}
+MEDIA_KEYS = ("images", "frames", "image", "samples", "items", "queue", "batch")
 
 
 class FlexibleMediaInputs(dict):
@@ -75,6 +77,12 @@ def _input_index(name: str) -> int:
         return int(text[len(IMAGE_PREFIX):])
     except Exception:
         return 999999
+
+
+def _single_value(value: Any, default: Any = None) -> Any:
+    while isinstance(value, (list, tuple)) and len(value) == 1:
+        value = value[0]
+    return default if value is None else value
 
 
 def _extract_video_frames(value: Any) -> Any:
@@ -145,6 +153,8 @@ def _path_from_comfy_item(value: Any) -> Path | None:
 
 
 def _video_path(value: Any) -> Path | None:
+    while isinstance(value, (list, tuple)) and len(value) == 1:
+        value = value[0]
     found = _path_from_comfy_item(value)
     if found:
         return found
@@ -247,6 +257,26 @@ def _video_from_file(path: Path):
         return VideoFromFile(str(path))
 
 
+def _component_value(value: Any, key: str) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def _video_components(value: Any) -> dict[str, Any] | None:
+    if not hasattr(value, "get_components"):
+        return None
+    try:
+        components = value.get_components()
+    except Exception:
+        return None
+    if isinstance(components, dict):
+        return components
+    return {key: _component_value(components, key) for key in ("images", "frames", "audio", "frame_rate")}
+
+
 def _safe_name(text: str) -> str:
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(text or "concat")).strip(" ._")
     return name or "concat"
@@ -335,16 +365,75 @@ def _concat_video_files(items: list[Any], direction: str, match_image_size: bool
 
 def _as_media_tensor(value: Any) -> torch.Tensor | None:
     value = _extract_video_frames(value)
-    if isinstance(value, (tuple, list)) and value:
-        value = value[0]
     if not torch.is_tensor(value):
         return None
     tensor = value
     if tensor.dim() == 2:
         tensor = tensor.unsqueeze(0)
+    if tensor.dim() == 3 and int(tensor.shape[-1]) in (1, 2, 3, 4) and int(tensor.shape[0]) not in (1, 2, 3, 4):
+        tensor = tensor.unsqueeze(0)
+    if tensor.dim() == 4 and int(tensor.shape[-1]) not in (1, 2, 3, 4) and int(tensor.shape[1]) in (1, 2, 3, 4):
+        tensor = tensor.permute(0, 2, 3, 1)
     if tensor.dim() not in (3, 4):
         return None
     return tensor.float().clamp(0.0, 1.0)
+
+
+def _media_tensors_recursive(value: Any, seen: set[int] | None = None, depth: int = 0) -> list[torch.Tensor]:
+    if value is None or depth > 24:
+        return []
+    seen = seen if seen is not None else set()
+    if isinstance(value, (str, bytes, os.PathLike)):
+        return []
+    if not torch.is_tensor(value):
+        value_id = id(value)
+        if value_id in seen:
+            return []
+        seen.add(value_id)
+
+    tensor = _as_media_tensor(value)
+    if tensor is not None:
+        return [tensor]
+
+    components = _video_components(value)
+    if components is not None:
+        tensors: list[torch.Tensor] = []
+        for key in MEDIA_KEYS:
+            tensors.extend(_media_tensors_recursive(components.get(key), seen, depth + 1))
+        return tensors
+
+    if isinstance(value, dict):
+        tensors: list[torch.Tensor] = []
+        for key in MEDIA_KEYS:
+            tensors.extend(_media_tensors_recursive(value.get(key), seen, depth + 1))
+        return tensors
+
+    if isinstance(value, (list, tuple)):
+        tensors: list[torch.Tensor] = []
+        for item in value:
+            tensors.extend(_media_tensors_recursive(item, seen, depth + 1))
+        return tensors
+
+    tensors = []
+    for key in MEDIA_KEYS:
+        if hasattr(value, key):
+            tensors.extend(_media_tensors_recursive(getattr(value, key, None), seen, depth + 1))
+    return tensors
+
+
+def _media_frames(value: Any) -> list[torch.Tensor]:
+    tensors = _media_tensors_recursive(value)
+    frames: list[torch.Tensor] = []
+    for tensor in tensors:
+        if tensor is None:
+            continue
+        if tensor.dim() == 4:
+            frames.extend(tensor[index:index + 1] for index in range(int(tensor.shape[0])))
+        elif tensor.dim() == 3:
+            frames.extend(tensor[index:index + 1] for index in range(int(tensor.shape[0])))
+        else:
+            frames.append(tensor)
+    return [frame for frame in frames if not _is_black_placeholder(frame)]
 
 
 def _is_black_placeholder(tensor: torch.Tensor) -> bool:
@@ -499,11 +588,125 @@ def _concat_pair(base: torch.Tensor, other: torch.Tensor, direction: str, match_
     return output.squeeze(-1) if output_is_mask else output
 
 
+def _grid_shape(count: int, cell_height: int, cell_width: int) -> tuple[int, int]:
+    count = max(1, int(count))
+    cell_height = max(1, int(cell_height))
+    cell_width = max(1, int(cell_width))
+    best_cols = 1
+    best_rows = count
+    best_score = float("inf")
+    for cols in range(1, count + 1):
+        rows = int(math.ceil(count / cols))
+        aspect = (cols * cell_width) / max(1.0, rows * cell_height)
+        empty = rows * cols - count
+        score = abs(math.log(max(1e-9, aspect))) + empty * 0.05
+        if score < best_score:
+            best_score = score
+            best_cols = cols
+            best_rows = rows
+    return best_rows, best_cols
+
+
+def _as_base_media(tensor: torch.Tensor, output_is_mask: bool, image_channels: int) -> torch.Tensor:
+    if output_is_mask:
+        if tensor.dim() == 4:
+            channels = min(3, int(tensor.shape[-1]))
+            tensor = tensor[..., :channels].mean(dim=-1)
+        return tensor.unsqueeze(-1)
+    if tensor.dim() == 3:
+        tensor = tensor.unsqueeze(-1).expand(-1, -1, -1, image_channels)
+    return tensor
+
+
+def _write_grid_slot(
+    output: torch.Tensor,
+    slot: torch.Tensor,
+    tensor: torch.Tensor,
+    src_channels: int,
+    batch: int,
+    match_image_size: bool,
+    target_height: int,
+    target_width: int,
+    progress: Any,
+):
+    if match_image_size:
+        device = _torch_device()
+        for index in range(batch):
+            src_index = min(index, int(tensor.shape[0]) - 1)
+            frame = tensor[src_index:src_index + 1].to(device, non_blocking=True)
+            resized = _resize_frame(frame, target_height, target_width)
+            _write(slot[index:index + 1], resized, src_channels)
+            if progress is not None:
+                progress.update(1)
+        return
+
+    src_height, src_width = int(tensor.shape[1]), int(tensor.shape[2])
+    y = (target_height - src_height) // 2
+    x = (target_width - src_width) // 2
+    dst = output[:, y:y + src_height, x:x + src_width, :]
+    if int(tensor.shape[0]) == batch:
+        _write(dst, tensor, src_channels)
+    else:
+        _write(dst[: int(tensor.shape[0])], tensor, src_channels)
+        _write(dst[int(tensor.shape[0]):], tensor[-1:].expand(batch - int(tensor.shape[0]), -1, -1, -1), src_channels)
+
+
+def _concat_square(media_items: list[torch.Tensor], match_image_size: bool) -> torch.Tensor:
+    first = media_items[0]
+    output_is_mask = first.dim() == 3
+    image_channels = 1 if output_is_mask else int(first.shape[-1])
+    items = [_as_base_media(tensor, output_is_mask, image_channels) for tensor in media_items]
+
+    batch = max(int(tensor.shape[0]) for tensor in items)
+    out_channels = max(int(tensor.shape[-1]) for tensor in items)
+    input_numel = sum(int(tensor.numel()) for tensor in items)
+
+    if match_image_size:
+        cell_height = int(items[0].shape[1])
+        cell_width = int(items[0].shape[2])
+    else:
+        cell_height = max(int(tensor.shape[1]) for tensor in items)
+        cell_width = max(int(tensor.shape[2]) for tensor in items)
+
+    rows, cols = _grid_shape(len(items), cell_height, cell_width)
+    output_shape = (batch, rows * cell_height, cols * cell_width, out_channels)
+    output = torch.zeros(
+        output_shape,
+        dtype=_intermediate_dtype(),
+        device=_concat_device(input_numel, math.prod(output_shape)),
+    )
+    progress = ProgressBar(batch * len(items)) if match_image_size and ProgressBar is not None else None
+
+    for index, tensor in enumerate(items):
+        row = index // cols
+        col = index % cols
+        slot = output[
+            :,
+            row * cell_height:(row + 1) * cell_height,
+            col * cell_width:(col + 1) * cell_width,
+            :,
+        ]
+        _write_grid_slot(
+            output=slot,
+            slot=slot,
+            tensor=tensor,
+            src_channels=int(tensor.shape[-1]),
+            batch=batch,
+            match_image_size=match_image_size,
+            target_height=cell_height,
+            target_width=cell_width,
+            progress=progress,
+        )
+
+    return output.squeeze(-1) if output_is_mask else output
+
+
 class GJJ_ImageConcanate:
     CATEGORY = "GJJ/图像"
     FUNCTION = "concatenate"
     DESCRIPTION = "GJJ 零依赖媒体拼接节点：动态接收 GJJ_BATCH_IMAGE、IMAGE、MASK、VIDEO，按方向依次拼接，可选择匹配首图尺寸。"
     SEARCH_ALIASES = ["image concatenate", "image concat", "图片拼接", "图像拼接", "媒体拼接", "ImageConcanate"]
+    INPUT_IS_LIST = True
     RETURN_TYPES = (MEDIA_TYPE,)
     RETURN_NAMES = ("拼接结果",)
     OUTPUT_TOOLTIPS = ("按输入顺序拼接后的结果；首个有效输入是 MASK 时输出 MASK，否则输出 IMAGE/GJJ 批量图片。",)
@@ -517,7 +720,7 @@ class GJJ_ImageConcanate:
                     {
                         "default": "right",
                         "display_name": "拼接方向",
-                        "tooltip": "第二张及之后的媒体相对当前结果放置的方向；前端按钮会同步这个值。",
+                        "tooltip": "第二张及之后的媒体相对当前结果放置的方向；方形模式会按输入顺序排成尽量接近正方形的网格；前端按钮会同步这个值。",
                     },
                 ),
                 "match_image_size": (
@@ -533,6 +736,8 @@ class GJJ_ImageConcanate:
         }
 
     def concatenate(self, direction="right", match_image_size=True, **kwargs):
+        direction = str(_single_value(direction, "right"))
+        match_image_size = bool(_single_value(match_image_size, True))
         raw_items: list[Any] = []
         media_items: list[torch.Tensor] = []
         for key in sorted(kwargs.keys(), key=_input_index):
@@ -542,16 +747,18 @@ class GJJ_ImageConcanate:
             if raw_value is None:
                 continue
             raw_items.append(raw_value)
-            tensor = _as_media_tensor(raw_value)
-            if tensor is not None and not _is_black_placeholder(tensor):
-                media_items.append(tensor)
+            media_items.extend(_media_frames(raw_value))
 
-        video_result = _concat_video_files(raw_items, str(direction), bool(match_image_size))
-        if video_result is not None:
-            return (video_result,)
+        if direction != "square":
+            video_result = _concat_video_files(raw_items, str(direction), bool(match_image_size))
+            if video_result is not None:
+                return (video_result,)
 
         if not media_items:
             raise RuntimeError("GJJ 图片/视频拼接失败：未解析到可用媒体。若输入是 VIDEO，请确认它来自 Load Video 或包含可访问的视频文件路径。")
+
+        if direction == "square":
+            return (_concat_square(media_items, bool(match_image_size)),)
 
         result = media_items[0]
         first_shape = result.shape

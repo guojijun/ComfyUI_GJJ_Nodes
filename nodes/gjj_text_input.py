@@ -11,6 +11,7 @@ def normalize_text(value: Any) -> str:
 class GJJ_TextInput:
     CATEGORY = "GJJ"
     FUNCTION = "output_text"
+    OUTPUT_NODE = True
     DESCRIPTION = "提供一个可手填或透传外部输入的文本节点，适合作为工作流里的文本源头；前端支持 Markdown 预览模式。"
     SEARCH_ALIASES = [
         "text",
@@ -69,7 +70,13 @@ class GJJ_TextInput:
 
     def output_text(self, text: str, text_in: str | None = None):
         result = normalize_text(text_in) if text_in else normalize_text(text)
-        return (result,)
+        return {
+            "ui": {
+                "preview_text": (result,),
+                "preview_kind": ("text",),
+            },
+            "result": (result,),
+        }
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_TextInput}

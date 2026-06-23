@@ -310,7 +310,7 @@ const REROUTE_TYPES = new Set([
 const SET_NODE_TYPES = new Set(["GJJ_SetNode", "SetNode", "Set"]);
 const GET_NODE_TYPES = new Set(["GJJ_GetNode", "GetNode", "Get"]);
 const BROADCAST_PROPERTY = "gjj_variable_broadcast_enabled";
-const PRIORITY_ARRANGE_NODE_TYPES = ["GJJ_MemoryManager","GJJ_TextInput","GJJ_TemplateParams","LoraChainConfig",	"GJJ_ModelBundleLoader","GJJ_VideoKijaiModelLoader","GJJ_VideoUniversalModelLoader",];
+const PRIORITY_ARRANGE_NODE_TYPES = ["GJJ_MemoryManager","GJJ_TextInput","GJJ_TemplateParams","LoraChainConfig",	"GJJ_ModelBundleLoader","GJJ_VideoKijaiModelLoader","GJJ_VideoUniversalModelLoader","GJJ_LTXDirector"];
 const PRIORITY_ARRANGE_NODE_TYPE_SET = new Set(PRIORITY_ARRANGE_NODE_TYPES);
 const PRIORITY_ARRANGE_NODE_RANKS = new Map(PRIORITY_ARRANGE_NODE_TYPES.map((type, index) => [type, index]));
 const PRIORITY_ARRANGE_NODE_PATTERNS = [

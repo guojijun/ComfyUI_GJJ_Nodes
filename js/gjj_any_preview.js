@@ -5,6 +5,7 @@ import {
 	gjjRenderAudioWaveformPreview,
 	gjjStyleCompactAudioPlayer,
 } from "./gjj_common_media_preview.js";
+import { queueOnlyCurrentNode } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set(["GJJ_AnyPreview"]);
 const INPUT_PREFIX = "any_";
@@ -35,6 +36,9 @@ const MODE_PREVIEW = "preview";
 const DOUBLE_CLICK_MS = 420;
 const MODE_PROPERTY = "__gjjAnyPreviewMode";
 const WIDTH_PROPERTY = "gjj_any_preview_width";
+const HELD_TEXT_PROPERTY = "gjj_any_preview_held_text";
+const HELD_IMAGES_PROPERTY = "gjj_any_preview_held_images";
+const TEXT_INPUT_SAVED_TEXT_PROPERTY = "gjj_text_input_saved_text";
 const MOTION_GUARD_STYLE_ID = "gjj-any-preview-motion-guard-style";
 const MOTION_CLASS = "gjj-any-preview-motion";
 const MOTION_IDLE_MS = 260;
@@ -71,6 +75,9 @@ const KIND_EMOJIS = {
 	other: "🧩",
 };
 const ORDINAL_EMOJIS = ["", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"];
+const HOLD_ICON_SVG = `<svg viewBox="0 0 1024 1024" aria-hidden="true"><path d="M635.172 95.834c-1.998 1.999-3.996 3.999-5.996 5.997l-16.061 16.061-23.229 23.23-27.507 27.506-28.888 28.889-27.376 27.376-22.969 22.97-15.67 15.67c-2.473 2.473-5.002 4.904-7.388 7.462-13.211 14.175-21.229 32.737-22.46 52.078-1.213 19.078 4.198 38.318 15.289 53.899a84.425 84.425 0 0 0 9.07 10.72l31.855 31.869 182.6-182.397 109.26 109.485-182.384 182.374 20.919 20.92 10.193 10.193c5.181 5.182 10.847 9.786 17.141 13.558 16.325 9.776 35.837 13.714 54.68 11.066 17.979-2.523 34.807-11.007 47.594-23.882l5.997-5.996c5.354-5.354 10.706-10.708 16.061-16.061l23.229-23.23a713271.6 713271.6 0 0 0 27.505-27.506l28.891-28.889c9.124-9.126 18.251-18.25 27.375-27.376l22.971-22.97 15.669-15.67c2.472-2.472 4.996-4.904 7.396-7.445 13.269-14.051 21.348-32.522 22.611-51.809 1.252-19.079-4.176-38.311-15.231-53.911a85.416 85.416 0 0 0-9.286-10.995c-1.999-1.999-3.997-3.998-5.998-5.997-5.354-5.353-10.705-10.707-16.061-16.061l-23.229-23.23-27.505-27.506-28.891-28.889-27.374-27.376c-7.656-7.657-15.314-15.313-22.972-22.97l-15.669-15.67c-2.567-2.567-5.091-5.197-7.752-7.669-16.305-15.139-38.344-23.235-60.571-22.292-20.912 0.891-40.991 9.736-55.839 24.474M270.406 460.605l-5.99 5.997c-5.348 5.354-10.696 10.711-16.044 16.064l-23.208 23.239-27.484 27.52a787376.15 787376.15 0 0 0-28.871 28.908l-27.368 27.402-22.978 23.009-15.697 15.715c-2.415 2.419-4.882 4.802-7.231 7.287-13.289 14.056-21.379 32.548-22.674 51.85-1.28 19.061 4.081 38.305 15.116 53.905a84.198 84.198 0 0 0 9.252 10.961l5.99 5.998 16.043 16.064 23.208 23.236c9.162 9.172 18.323 18.348 27.484 27.521 9.624 9.636 19.248 19.271 28.871 28.908l27.369 27.403 22.977 23.007 15.697 15.719c2.417 2.419 4.792 4.895 7.293 7.229 14.189 13.233 32.776 21.258 52.139 22.518 19.101 1.241 38.388-4.114 54.027-15.168a84.46 84.46 0 0 0 10.748-9.034l5.984-5.984 16.032-16.032 23.197-23.196 27.479-27.479c9.625-9.626 19.25-19.251 28.877-28.875l27.392-27.392 23.022-23.024 15.772-15.771c2.31-2.31 4.662-4.584 6.913-6.949 13.354-14.033 21.499-32.532 22.885-51.852 1.37-19.068-3.854-38.374-14.785-54.073a84.293 84.293 0 0 0-9.367-11.228l-32.069-31.851L348.02 784.541 238.536 675.068 420.932 492.47c-6.974-6.975-13.947-13.952-20.922-20.927l-10.196-10.199c-5.894-5.896-12.449-11.012-19.774-15.02-19.235-10.525-42.329-13.024-63.399-7.006-13.644 3.901-26.169 11.292-36.235 21.287" fill="#0071BC"></path><path d="M876.584 751.132c11.711 11.711 11.761 30.69 0.024 42.428-11.712 11.711-30.691 11.712-42.404 0.05l-0.025 0.025-113.25-113.25 0.025-0.025-0.051-0.051c-11.711-11.711-11.786-30.717-0.024-42.479 11.737-11.737 30.742-11.66 42.453 0.051l0.504 0.504 112.24 112.24 0.508 0.507M791.677 836.039c11.711 11.711 11.736 30.715-0.025 42.477-11.685 11.686-30.69 11.712-42.378 0.024l-0.025 0.026-113.25-113.251 0.025-0.025-0.051-0.051c-11.711-11.711-11.736-30.767-0.05-42.453 11.761-11.761 30.792-11.71 42.503 0.001l0.504 0.504 112.24 112.24 0.507 0.508" fill="#00A0E9"></path></svg>`;
+const COPY_NODE_ICON_SVG = `<svg viewBox="0 0 1024 1024" aria-hidden="true"><path d="M744.155429 187.026286a92.891429 92.891429 0 0 1 92.891428 92.891428v614.619429a92.891429 92.891429 0 0 1-92.891428 92.891428H129.462857A92.891429 92.891429 0 0 1 36.571429 894.537143V279.844571c0-51.273143 41.545143-92.891429 92.891428-92.891428h614.692572z m0 74.24H129.462857a18.578286 18.578286 0 0 0-18.578286 18.578285v614.692572c0 10.24 8.265143 18.578286 18.578286 18.578286h614.692572c10.24 0 18.578286-8.265143 18.578285-18.578286V279.844571a18.578286 18.578286 0 0 0-18.578285-18.578285zM894.537143 36.571429c51.346286 0 92.891429 41.545143 92.891428 92.891428v614.692572a92.891429 92.891429 0 0 1-92.891428 92.891428 37.156571 37.156571 0 1 1 0-74.313143c10.24 0 18.578286-8.338286 18.578286-18.578285V129.462857a18.578286 18.578286 0 0 0-18.578286-18.578286H279.844571a18.578286 18.578286 0 0 0-18.578285 18.578286 37.156571 37.156571 0 1 1-74.24 0c0-51.346286 41.545143-92.891429 92.891428-92.891428h614.619429zM436.809143 388.534857c20.48 0 37.083429 16.603429 37.083428 37.083429V550.034286h124.489143a37.156571 37.156571 0 1 1 0 74.313143H473.892571v124.416a37.156571 37.156571 0 1 1-74.24 0l-0.073142-124.416h-124.342858a37.156571 37.156571 0 1 1 0-74.24l124.342858-0.073143v-124.342857c0-20.553143 16.676571-37.156571 37.229714-37.156572z" fill="#257FFF"></path></svg>`;
+const CLIPBOARD_ICON_SVG = `<svg viewBox="0 0 1024 1024" aria-hidden="true"><path d="M515.53 511.994m-495.082 0a495.082 495.082 0 1 0 990.164 0 495.082 495.082 0 1 0-990.164 0Z" fill="#95BAF9"></path><path d="M709.882 128.214H321.176c-85.654 0-155.338 69.686-155.338 155.34v390.382l0.002 0.004v68.488c0 85.654 69.684 155.34 155.338 155.34h388.708c85.654 0 155.338-69.686 155.338-155.34V283.556c0-85.654-69.684-155.342-155.342-155.342z" fill="#0A2BDE"></path><path d="M279.442 233.812h472.18v558.362h-472.18z" fill="#FFFFFF"></path><path d="M324.52 161.624v99.154c0 50.08 40.742 90.822 90.824 90.822H615.72c50.08 0 90.822-40.742 90.822-90.822V161.624H324.52z" fill="#95BAF9"></path><path d="M362.614 401.504h305.836v46.662H362.614zM362.614 511.64h305.836v46.66H362.614zM362.614 621.774h305.836v46.66H362.614z" fill="#95BAF9"></path></svg>`;
 let lastPromptId = null;
 let motionGuardInstalled = false;
 let motionGuardTimer = null;
@@ -669,6 +676,29 @@ function patchLiveVirtualPreviewPrompt(promptResult, graph = app.graph) {
 	return promptResult;
 }
 
+function patchHeldTextPassthroughPrompt(promptResult, graph = app.graph) {
+	const output = promptResult?.output;
+	if (!output || !graph?._nodes) {
+		return promptResult;
+	}
+	for (const node of graph._nodes) {
+		if (!isTargetNode(node)) {
+			continue;
+		}
+		const heldText = heldTextFromProperties(node).trim();
+		if (!heldText || hasLinkedInputs(node)) {
+			continue;
+		}
+		const promptEntry = findPromptNodeInfo(promptResult, node);
+		if (!promptEntry?.info) {
+			continue;
+		}
+		promptEntry.info.inputs = promptEntry.info.inputs || {};
+		promptEntry.info.inputs.any_01 = heldText;
+	}
+	return promptResult;
+}
+
 function installLiveVirtualPreviewPromptPatch() {
 	if (app.__gjjAnyPreviewLiveVirtualPromptPatchInstalled || typeof app.graphToPrompt !== "function") {
 		return;
@@ -678,7 +708,7 @@ function installLiveVirtualPreviewPromptPatch() {
 	app.graphToPrompt = async function (...args) {
 		const result = await originalGraphToPrompt(...args);
 		const graph = args[0] || this.rootGraph || this.graph || app.rootGraph || app.graph;
-		return patchLiveVirtualPreviewPrompt(result, graph);
+		return patchLiveVirtualPreviewPrompt(patchHeldTextPassthroughPrompt(result, graph), graph);
 	};
 }
 
@@ -1580,29 +1610,400 @@ async function copyTextToClipboard(text) {
 	return copied;
 }
 
-function flashCopyButton(button, ok) {
+function setupIconButton(button, label, svg) {
+	button.innerHTML = svg;
+	button.title = label;
+	button.setAttribute("aria-label", label);
+	button.dataset.originalTitle = label;
+}
+
+function flashActionButton(button, text, ok = true) {
 	if (!button) return;
-	clearTimeout(button.__gjjAnyPreviewCopyTimer);
-	button.textContent = ok ? "✅ 已复制" : "复制失败";
-	button.style.background = ok ? "#246f4b" : "#743232";
-	button.style.borderColor = ok ? "#4aa978" : "#a85a5a";
-	button.__gjjAnyPreviewCopyTimer = setTimeout(() => {
-		button.textContent = "🗗 复制";
-		button.style.background = "#182329";
-		button.style.borderColor = "#3a4d56";
-		button.__gjjAnyPreviewCopyTimer = null;
+	const originalTitle = button.dataset.originalTitle || button.title || "";
+	button.dataset.originalTitle = originalTitle;
+	clearTimeout(button.__gjjAnyPreviewFlashTimer);
+	button.title = text;
+	button.style.background = ok ? "#143126" : "#351d1d";
+	button.style.borderColor = ok ? "#66d19e" : "#c95d5d";
+	button.__gjjAnyPreviewFlashTimer = setTimeout(() => {
+		button.title = button.dataset.originalTitle || originalTitle;
+		button.style.background = "";
+		button.style.borderColor = "";
+		button.__gjjAnyPreviewFlashTimer = null;
 	}, 1100);
 }
 
+function previewItemTextForCopy(item, index = 0) {
+	const lines = [];
+	const title = String(item?.title || previewItemDisplayTitle(item, index)).trim();
+	if (title) lines.push(title);
+	const text = String(item?.text || "").trim();
+	if (text) lines.push(text);
+	for (const [label, payload] of [
+		["图片", item?.images],
+		["音频", item?.audio],
+		["视频", item?.video],
+		["文件", item?.files],
+	]) {
+		const files = normalizeMediaPayload(payload)
+			.map((entry) => entry?.filename || entry?.name || entry?.url || "")
+			.filter(Boolean);
+		if (files.length) {
+			lines.push(`${label}: ${files.join(", ")}`);
+		}
+	}
+	return lines.join("\n");
+}
+
+function currentPreviewTextForCopy(node) {
+	const items = Array.isArray(node?.__gjjAnyPreviewItems) ? node.__gjjAnyPreviewItems : [];
+	if (items.length) {
+		return items.map(previewItemTextForCopy).filter(Boolean).join("\n\n");
+	}
+	return String(node?.__gjjAnyPreviewText || "").trim();
+}
+
+function hasCurrentPreviewContent(node) {
+	if (!hasLinkedInputs(node)) {
+		return false;
+	}
+	if (String(node?.__gjjAnyPreviewText || "").trim()) return true;
+	if (Array.isArray(node?.__gjjAnyPreviewItems) && node.__gjjAnyPreviewItems.length) return true;
+	if (currentPreviewImages(node).length) return true;
+	if (Array.isArray(node?.__gjjAnyPreviewAudio) && node.__gjjAnyPreviewAudio.length) return true;
+	if (Array.isArray(node?.__gjjAnyPreviewVideo) && node.__gjjAnyPreviewVideo.length) return true;
+	if (Array.isArray(node?.__gjjAnyPreviewFiles) && node.__gjjAnyPreviewFiles.length) return true;
+	return false;
+}
+
+function updatePreviewActionButtons(node) {
+	const copyBar = node?.__gjjAnyPreviewCopyBar;
+	if (!copyBar) return;
+	const hasContent = hasCurrentPreviewContent(node);
+	copyBar.style.display = hasContent ? "flex" : "none";
+	if (!hasContent) return;
+	const text = currentPreviewTextForCopy(node);
+	const hasText = Boolean(text.trim());
+	const hasImages = currentPreviewImages(node).length > 0;
+	if (node.__gjjAnyPreviewCopyNodeButton) {
+		node.__gjjAnyPreviewCopyNodeButton.style.display = hasImages || hasText ? "" : "none";
+		node.__gjjAnyPreviewCopyNodeButton.title = hasImages
+			? "复制节点：在当前节点旁边新建 GJJ_AnyPreview，并把图片复制到 input 后保存到工作流"
+			: "复制节点：在当前节点旁边新建 GJJ_TextInput，并填入当前预览文本";
+		node.__gjjAnyPreviewCopyNodeButton.dataset.originalTitle = node.__gjjAnyPreviewCopyNodeButton.title;
+	}
+	if (node.__gjjAnyPreviewCopyClipboardButton) {
+		node.__gjjAnyPreviewCopyClipboardButton.style.display = hasText ? "" : "none";
+	}
+	if (node.__gjjAnyPreviewHoldButton) {
+		node.__gjjAnyPreviewHoldButton.title = hasImages
+			? "保持图片预览并断开链接"
+			: "保持文本并断开链接";
+		node.__gjjAnyPreviewHoldButton.dataset.originalTitle = node.__gjjAnyPreviewHoldButton.title;
+	}
+}
+
+function setTextInputNodeValue(node, text) {
+	const value = String(text ?? "");
+	const widget = node?.widgets?.find((item) => item?.name === "text");
+	if (widget) {
+		widget.value = value;
+		if (widget.inputEl) widget.inputEl.value = value;
+		if (widget.element && "value" in widget.element) widget.element.value = value;
+		widget.callback?.(value);
+	}
+	node.properties = node.properties || {};
+	node.properties[TEXT_INPUT_SAVED_TEXT_PROPERTY] = value;
+}
+
+function nodeRect(node, fallbackWidth = MIN_WIDTH, fallbackHeight = 120) {
+	const x = Number(node?.pos?.[0] || 0);
+	const y = Number(node?.pos?.[1] || 0);
+	const width = Number(node?.size?.[0] || fallbackWidth);
+	const height = Number(node?.size?.[1] || fallbackHeight);
+	return { x, y, width, height };
+}
+
+function rectsOverlap(a, b, padding = 4) {
+	return !(
+		a.x + a.width + padding <= b.x
+		|| b.x + b.width + padding <= a.x
+		|| a.y + a.height + padding <= b.y
+		|| b.y + b.height + padding <= a.y
+	);
+}
+
+function nextAnyPreviewCopyPosition(sourceNode, copyNode, graph) {
+	const source = nodeRect(sourceNode);
+	const copy = nodeRect(copyNode, MIN_WIDTH, Math.max(120, source.height));
+	const x = source.x;
+	const step = Math.max(copy.height, source.height, 120) - 5;
+	let y = source.y - step;
+	const nodes = Array.isArray(graph?._nodes) ? graph._nodes : [];
+	for (let attempt = 0; attempt < 80; attempt += 1) {
+		const candidate = { x, y, width: copy.width, height: copy.height };
+		const occupied = nodes.some((item) => item !== copyNode && rectsOverlap(candidate, nodeRect(item)));
+		if (!occupied) {
+			return [x, y];
+		}
+		y -= step;
+	}
+	return [x, source.y - step];
+}
+
+async function copyImagesToInput(images) {
+	const response = await api.fetchApi("/gjj/any_preview/copy_media_to_input", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			images: images.map((item) => ({ ...item })),
+		}),
+	});
+	const data = await response.json().catch(() => ({}));
+	if (!response.ok || !Array.isArray(data?.images) || !data.images.length) {
+		throw new Error(data?.error || "复制图片失败");
+	}
+	return normalizeMediaPayload(data.images);
+}
+
+async function copyPreviewToAnyPreviewNode(node) {
+	const button = node?.__gjjAnyPreviewCopyNodeButton;
+	const images = currentPreviewImages(node);
+	if (!images.length) {
+		flashActionButton(button, "无图片", false);
+		return;
+	}
+	const graph = node?.graph || app.graph;
+	const copyNode = globalThis.LiteGraph?.createNode?.("GJJ_AnyPreview");
+	if (!copyNode || !graph?.add) {
+		flashActionButton(button, "创建失败", false);
+		return;
+	}
+	try {
+		flashActionButton(button, "复制中...");
+		const inputImages = await copyImagesToInput(images);
+		graph.add(copyNode);
+		copyNode.pos = nextAnyPreviewCopyPosition(node, copyNode, graph);
+		copyNode.properties = copyNode.properties || {};
+		copyNode.properties[HELD_IMAGES_PROPERTY] = inputImages.map((item) => ({ ...item }));
+		delete copyNode.properties[HELD_TEXT_PROPERTY];
+		resetLivePreviewState(copyNode);
+		applyHeldImagePreview(copyNode);
+		scheduleStabilize(copyNode, 0);
+		app.canvas?.selectNode?.(copyNode, false);
+		copyNode.setDirtyCanvas?.(true, true);
+		app.graph?.setDirtyCanvas?.(true, true);
+		flashActionButton(button, "已创建");
+	} catch (error) {
+		console.warn("[GJJ_AnyPreview] create GJJ_AnyPreview copy failed", error);
+		try {
+			graph.remove?.(copyNode);
+		} catch (_) {
+			// Ignore cleanup failure.
+		}
+		flashActionButton(button, error?.message || "创建失败", false);
+	}
+}
+
+async function copyPreviewToNode(node) {
+	if (currentPreviewImages(node).length) {
+		await copyPreviewToAnyPreviewNode(node);
+		return;
+	}
+	const button = node?.__gjjAnyPreviewCopyNodeButton;
+	const text = currentPreviewTextForCopy(node);
+	if (!text.trim()) {
+		flashActionButton(button, "无文本", false);
+		return;
+	}
+	const graph = node?.graph || app.graph;
+	const copyNode = globalThis.LiteGraph?.createNode?.("GJJ_TextInput");
+	if (!copyNode || !graph?.add) {
+		flashActionButton(button, "创建失败", false);
+		return;
+	}
+	try {
+		graph.add(copyNode);
+		copyNode.pos = nextAnyPreviewCopyPosition(node, copyNode, graph);
+		setTextInputNodeValue(copyNode, text);
+		app.canvas?.selectNode?.(copyNode, false);
+		copyNode.setDirtyCanvas?.(true, true);
+		app.graph?.setDirtyCanvas?.(true, true);
+		flashActionButton(button, "已创建");
+	} catch (error) {
+		console.warn("[GJJ_AnyPreview] create GJJ_TextInput copy failed", error);
+		try {
+			graph.remove?.(copyNode);
+		} catch (_) {
+			// Ignore cleanup failure.
+		}
+		flashActionButton(button, "创建失败", false);
+	}
+}
+
 async function copyPreviewText(node) {
-	const rawText = String(node?.__gjjAnyPreviewText || "").trim();
-	const text = rawText || EMPTY_PREVIEW;
-	const button = node?.__gjjAnyPreviewCopyButton;
+	const text = currentPreviewTextForCopy(node);
+	const button = node?.__gjjAnyPreviewCopyClipboardButton;
 	const ok = await copyTextToClipboard(text);
-	flashCopyButton(button, ok);
+	flashActionButton(button, ok ? "已复制到剪贴板" : "复制失败", ok);
 	if (!ok) {
 		window.prompt("复制预览文本", text);
 	}
+}
+
+async function runCurrentAnyPreviewNode(node) {
+	const button = node?.__gjjAnyPreviewRunButton;
+	try {
+		const queued = await queueOnlyCurrentNode(node);
+		flashActionButton(button, queued ? "已运行当前节点" : "运行失败", Boolean(queued));
+	} catch (error) {
+		console.warn("[GJJ_AnyPreview] run current node failed", error);
+		flashActionButton(button, "运行失败", false);
+	}
+}
+
+function heldTextFromProperties(node) {
+	const value = node?.properties?.[HELD_TEXT_PROPERTY];
+	return typeof value === "string" ? value : "";
+}
+
+function heldImagesFromProperties(node) {
+	return normalizeMediaPayload(node?.properties?.[HELD_IMAGES_PROPERTY]);
+}
+
+function imagesFromPreviewItems(items) {
+	const result = [];
+	for (const item of Array.isArray(items) ? items : []) {
+		for (const image of normalizeMediaPayload(item?.images)) {
+			result.push(image);
+		}
+	}
+	return result;
+}
+
+function currentPreviewImages(node) {
+	const images = normalizeMediaPayload(node?.__gjjAnyPreviewImages);
+	if (images.length) return images;
+	return imagesFromPreviewItems(node?.__gjjAnyPreviewItems);
+}
+
+function hasLinkedInputs(node) {
+	return Array.isArray(node?.inputs) && node.inputs.some((input) => input?.link != null);
+}
+
+function applyHeldTextPreview(node) {
+	const text = heldTextFromProperties(node).trim();
+	if (!node || !text) {
+		return false;
+	}
+	node.__gjjAnyPreviewKind = "text";
+	node.__gjjAnyPreviewLiveOnly = false;
+	node.__gjjAnyPreviewText = text;
+	node.__gjjAnyPreviewItems = [];
+	node.__gjjAnyPreviewImages = [];
+	node.__gjjAnyPreviewAudio = [];
+	node.__gjjAnyPreviewVideo = [];
+	node.__gjjAnyPreviewFiles = [];
+	clearNativeImagePreviewState(node);
+	ensurePreviewWidget(node);
+	applyPreviewContent(node);
+	updateLayout(node);
+	scheduleLayout(node);
+	return true;
+}
+
+function applyHeldImagePreview(node) {
+	const images = heldImagesFromProperties(node);
+	if (!node || !images.length) {
+		return false;
+	}
+	node.__gjjAnyPreviewKind = "image";
+	node.__gjjAnyPreviewLiveOnly = false;
+	node.__gjjAnyPreviewText = "";
+	node.__gjjAnyPreviewItems = [];
+	node.__gjjAnyPreviewImages = images;
+	node.__gjjAnyPreviewAudio = [];
+	node.__gjjAnyPreviewVideo = [];
+	node.__gjjAnyPreviewFiles = [];
+	clearNativeImagePreviewState(node);
+	ensurePreviewWidget(node);
+	applyPreviewContent(node);
+	updateLayout(node);
+	scheduleLayout(node);
+	return true;
+}
+
+function applyHeldPreview(node) {
+	return applyHeldImagePreview(node) || applyHeldTextPreview(node);
+}
+
+function disconnectLinkedInputs(node) {
+	if (!Array.isArray(node?.inputs)) {
+		return 0;
+	}
+	let count = 0;
+	for (const [index, input] of node.inputs.entries()) {
+		if (input?.link == null) {
+			continue;
+		}
+		if (typeof node.disconnectInput === "function") {
+			node.disconnectInput(index);
+		} else {
+			app.graph?.removeLink?.(input.link);
+		}
+		count += 1;
+	}
+	return count;
+}
+
+function flashHoldButton(button, ok) {
+	if (!button) return;
+	flashActionButton(button, ok ? "已保持" : "无内容", ok);
+}
+
+function holdCurrentTextPreview(node) {
+	const button = node?.__gjjAnyPreviewHoldButton;
+	const text = String(node?.__gjjAnyPreviewText || "").trim();
+	if (!node || !text) {
+		flashHoldButton(button, false);
+		return false;
+	}
+	node.properties = node.properties || {};
+	node.properties[HELD_TEXT_PROPERTY] = text;
+	delete node.properties[HELD_IMAGES_PROPERTY];
+	disconnectLinkedInputs(node);
+	resetLivePreviewState(node);
+	applyHeldTextPreview(node);
+	scheduleStabilize(node, 0);
+	setDirty(node);
+	flashHoldButton(button, true);
+	return true;
+}
+
+function holdCurrentImagePreview(node) {
+	const button = node?.__gjjAnyPreviewHoldButton;
+	const images = currentPreviewImages(node);
+	if (!node || !images.length) {
+		flashHoldButton(button, false);
+		return false;
+	}
+	node.properties = node.properties || {};
+	node.properties[HELD_IMAGES_PROPERTY] = images.map((item) => ({ ...item }));
+	delete node.properties[HELD_TEXT_PROPERTY];
+	disconnectLinkedInputs(node);
+	resetLivePreviewState(node);
+	applyHeldImagePreview(node);
+	scheduleStabilize(node, 0);
+	setDirty(node);
+	flashHoldButton(button, true);
+	return true;
+}
+
+function holdCurrentPreview(node) {
+	if (String(node?.__gjjAnyPreviewKind || "") === "image" && currentPreviewImages(node).length) {
+		return holdCurrentImagePreview(node);
+	}
+	return holdCurrentTextPreview(node);
 }
 
 function clampTextPreviewLines(body) {
@@ -2816,6 +3217,7 @@ function applyPreviewContent(node) {
 
 	if (previewItems.length > 0) {
 		renderPreviewItems(node, previewItems);
+		updatePreviewActionButtons(node);
 		requestAnimationFrame(() => {
 			const height = Math.max(
 				MIN_PREVIEW_HEIGHT,
@@ -3155,7 +3557,7 @@ function applyPreviewContent(node) {
 	}
 
 	if (copyBar) {
-		copyBar.style.display = body.style.display === "none" ? "none" : "flex";
+		updatePreviewActionButtons(node);
 	}
 
 	requestAnimationFrame(() => {
@@ -3278,50 +3680,96 @@ function ensurePreviewWidget(node) {
 		"display:none",
 		"align-items:center",
 		"justify-content:flex-end",
+		"gap:6px",
 		"width:100%",
 		"min-width:0",
 		"order:1",
 	].join(";");
-	const copyButton = document.createElement("button");
-	copyButton.type = "button";
-	copyButton.textContent = "🗗 复制";
-	copyButton.title = "复制当前文本预览内容";
-	copyButton.style.cssText = [
-		"border:1px solid #3a4d56",
-		"border-radius:6px",
-		"background:#182329",
-		"color:#dbe9e5",
-		"font:700 12px/1.2 system-ui, 'Microsoft YaHei', sans-serif",
-		"padding:4px 9px",
-		"min-height:24px",
+
+	const buttonStyle = [
+		"width:24px",
+		"height:24px",
+		"padding:3px",
+		"border:1px solid #3a4f58",
+		"border-radius:5px",
+		"background:#10191e",
+		"color:#cdd9d7",
+		"display:inline-flex",
+		"align-items:center",
+		"justify-content:center",
 		"cursor:pointer",
-		"white-space:nowrap",
 		"user-select:none",
 		"-webkit-user-select:none",
 		"transition:background .12s ease,border-color .12s ease,filter .12s ease",
 	].join(";");
-	copyButton.addEventListener("pointerdown", (event) => {
+
+	const holdButton = document.createElement("button");
+	holdButton.type = "button";
+	holdButton.style.cssText = buttonStyle;
+	setupIconButton(holdButton, "保持文本并断开链接", HOLD_ICON_SVG);
+	const runButton = document.createElement("button");
+	runButton.type = "button";
+	runButton.style.cssText = buttonStyle;
+	runButton.textContent = "▶";
+	runButton.title = "运行当前 GJJ_AnyPreview 节点";
+	runButton.setAttribute("aria-label", runButton.title);
+	runButton.dataset.originalTitle = runButton.title;
+	const copyNodeButton = document.createElement("button");
+	copyNodeButton.type = "button";
+	copyNodeButton.style.cssText = buttonStyle;
+	setupIconButton(copyNodeButton, "复制节点：在当前节点旁边新建 GJJ_TextInput，并填入当前预览文本", COPY_NODE_ICON_SVG);
+	const copyClipboardButton = document.createElement("button");
+	copyClipboardButton.type = "button";
+	copyClipboardButton.style.cssText = buttonStyle;
+	setupIconButton(copyClipboardButton, "复制到剪贴板", CLIPBOARD_ICON_SVG);
+
+	for (const button of [holdButton, runButton, copyNodeButton, copyClipboardButton]) {
+		button.className = "gjj-any-preview-action-icon";
+		button.addEventListener("pointerdown", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+		});
+		button.addEventListener("mousedown", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+		});
+		button.addEventListener("dblclick", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+		});
+		button.addEventListener("mouseenter", () => {
+			if (!button.__gjjAnyPreviewFlashTimer) {
+				button.style.filter = "brightness(1.12)";
+			}
+		});
+		button.addEventListener("mouseleave", () => {
+			button.style.filter = "";
+		});
+	}
+	holdButton.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
+		holdCurrentPreview(node);
 	});
-	copyButton.addEventListener("mousedown", (event) => {
+	runButton.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
+		runCurrentAnyPreviewNode(node);
 	});
-	copyButton.addEventListener("click", (event) => {
+	copyNodeButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		copyPreviewToNode(node);
+	});
+	copyClipboardButton.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
 		copyPreviewText(node);
 	});
-	copyButton.addEventListener("mouseenter", () => {
-		if (!copyButton.__gjjAnyPreviewCopyTimer) {
-			copyButton.style.filter = "brightness(1.12)";
-		}
-	});
-	copyButton.addEventListener("mouseleave", () => {
-		copyButton.style.filter = "";
-	});
-	copyBar.appendChild(copyButton);
+	copyBar.appendChild(holdButton);
+	copyBar.appendChild(runButton);
+	copyBar.appendChild(copyNodeButton);
+	copyBar.appendChild(copyClipboardButton);
 
 	const previewWrap = document.createElement("div");
 	previewWrap.className = "gjj-any-preview-wrap";
@@ -3349,6 +3797,15 @@ function ensurePreviewWidget(node) {
 	// 添加Markdown预览的CSS样式
 	const style = document.createElement("style");
 	style.textContent = `
+		.gjj-any-preview-action-icon svg {
+			width: 16px;
+			height: 16px;
+			display: block;
+		}
+		.gjj-any-preview-action-icon:hover {
+			border-color: #5f8fa0;
+			background: #16242a;
+		}
 		.gjj-text-input-markdown-body h1,
 		.gjj-text-input-markdown-body h2,
 		.gjj-text-input-markdown-body h3,
@@ -3513,7 +3970,10 @@ function ensurePreviewWidget(node) {
 	node.__gjjAnyPreviewContainer = container;
 	node.__gjjAnyPreviewWrap = previewWrap;
 	node.__gjjAnyPreviewCopyBar = copyBar;
-	node.__gjjAnyPreviewCopyButton = copyButton;
+	node.__gjjAnyPreviewHoldButton = holdButton;
+	node.__gjjAnyPreviewRunButton = runButton;
+	node.__gjjAnyPreviewCopyNodeButton = copyNodeButton;
+	node.__gjjAnyPreviewCopyClipboardButton = copyClipboardButton;
 	node.__gjjAnyPreviewBody = body;
 	node.__gjjAnyPreviewGrid = grid;
 	node.__gjjAnyPreviewEmpty = empty;
@@ -3606,8 +4066,14 @@ app.registerExtension({
 			}
 			clearNativeImagePreviewState(this);
 			resetLivePreviewState(this);
+			if (!hasLinkedInputs(this)) {
+				applyHeldPreview(this);
+			}
 			setTimeout(() => {
 				restoreConfiguredWidth(this);
+				if (!hasLinkedInputs(this)) {
+					applyHeldPreview(this);
+				}
 				stabilizeNode(this);
 			}, 0);
 			return result;
@@ -3629,6 +4095,9 @@ app.registerExtension({
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalOnConnectionsChange?.apply(this, args);
 			resetLivePreviewState(this);
+			if (!hasLinkedInputs(this)) {
+				applyHeldPreview(this);
+			}
 			scheduleStabilize(this);
 			return result;
 		};
@@ -3736,6 +4205,14 @@ app.registerExtension({
 				liveText !== null
 					? []
 					: firstMediaPayload(message?.preview_files, message?.files);
+			if (!hasLinkedInputs(this) && (heldImagesFromProperties(this).length || heldTextFromProperties(this).trim())) {
+				resetLivePreviewState(this);
+				applyHeldPreview(this);
+				clearNativeImagePreviewState(this);
+				scheduleNativePreviewCleanup(this);
+				scheduleStabilize(this, 0);
+				return result;
+			}
 			resetLivePreviewState(this);
 			clearNativeImagePreviewState(this);
 			const textLineCount = String(this.__gjjAnyPreviewText || "").split(/\r?\n/).length;

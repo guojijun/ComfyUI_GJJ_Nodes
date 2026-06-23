@@ -476,6 +476,29 @@ function clampInteger(value, fallback, min, max) {
 	return Math.round(clampNumber(value, fallback, min, max));
 }
 
+function randomSeedValue() {
+	const max = 2147483647;
+	try {
+		const values = new Uint32Array(1);
+		globalThis.crypto?.getRandomValues?.(values);
+		if (values[0]) {
+			return values[0] % (max + 1);
+		}
+	} catch (_) {}
+	return Math.floor(Math.random() * (max + 1));
+}
+
+function toggleRandomSeedMode(node) {
+	const randomEnabled = String(widgetValue(node, "seed_mode", DEFAULT_SAMPLING.seed_mode)) === "每次随机";
+	const nextMode = randomEnabled ? "固定种子" : "每次随机";
+	setWidgetValue(node, "seed_mode", nextMode);
+	if (nextMode === "固定种子" && Number(widgetValue(node, "seed", 0)) <= 0) {
+		setWidgetValue(node, "seed", randomSeedValue());
+	}
+	saveAssistantSettings(node);
+	syncPanel(node);
+}
+
 function normalizeSampling(value = {}) {
 	const source = value && typeof value === "object" ? value : {};
 	const seedMode = String(source.seed_mode || DEFAULT_SAMPLING.seed_mode) === "固定种子" ? "固定种子" : "每次随机";
@@ -560,6 +583,45 @@ function applyAssistantSettingsDefaults(node, settings) {
 	}
 }
 
+function assistantSettingsValuesFromNode(node, options = {}) {
+	const includeTemplate = options.includeTemplate !== false;
+	const values = {
+		system_prompt_output_rule: String(widgetValue(node, OUTPUT_RULE_WIDGET, "") || "").trim(),
+		sampling: samplingFromWidgets(node),
+	};
+	if (includeTemplate) {
+		const templateText = String(widgetValue(node, TEMPLATE_WIDGET, "") || "");
+		values.system_prompt_templates = templateText;
+		values.templates = templateTextToItems(templateText);
+	}
+	return values;
+}
+
+async function saveAssistantSettingsNow(node, options = {}) {
+	const state = node.__gjjOllamaAssistantPanel;
+	if (state) {
+		clearTimeout(state.saveTimer);
+	}
+	const response = await api.fetchApi(USER_SETTINGS_ENDPOINT, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			section: USER_SETTINGS_SECTION,
+			values: assistantSettingsValuesFromNode(node, options),
+		}),
+	});
+	const data = await response.json();
+	if (!response.ok || !data?.ok) {
+		throw new Error(data?.error || "保存失败");
+	}
+	const normalized = normalizeAssistantSettings(data.settings || {});
+	assistantSettingsPromise = Promise.resolve(normalized);
+	if (state) {
+		state.userSettings = normalized;
+	}
+	return data;
+}
+
 function saveAssistantSettings(node) {
 	const state = node.__gjjOllamaAssistantPanel;
 	if (!state) {
@@ -567,29 +629,43 @@ function saveAssistantSettings(node) {
 	}
 	clearTimeout(state.saveTimer);
 	state.saveTimer = setTimeout(() => {
-		const templateText = String(widgetValue(node, TEMPLATE_WIDGET, "") || "");
-		const values = {
-			system_prompt_templates: templateText,
-			templates: templateTextToItems(templateText),
-			system_prompt_output_rule: String(widgetValue(node, OUTPUT_RULE_WIDGET, "") || "").trim(),
-			sampling: samplingFromWidgets(node),
-		};
-		api.fetchApi(USER_SETTINGS_ENDPOINT, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				section: USER_SETTINGS_SECTION,
-				values,
-			}),
-		})
-			.then((response) => response.json())
-			.then((data) => {
-				if (data?.ok) {
-					assistantSettingsPromise = Promise.resolve(normalizeAssistantSettings(data.settings || {}));
-				}
-			})
+		saveAssistantSettingsNow(node, { includeTemplate: false })
 			.catch(() => {});
 	}, 450);
+}
+
+function flashSaveButton(button, ok, message = "") {
+	if (!button) {
+		return;
+	}
+	clearTimeout(button.__gjjOllamaAssistantSaveTimer);
+	button.disabled = false;
+	button.textContent = ok ? "已保存" : "保存失败";
+	button.title = ok
+		? "已保存到 presets/gjj_user_settings.json，新建节点会调用此模板"
+		: message || "保存失败";
+	button.classList.toggle("active", ok);
+	button.__gjjOllamaAssistantSaveTimer = setTimeout(() => {
+		button.textContent = "💾";
+		button.title = "保存当前系统提示词模板到 presets/gjj_user_settings.json，供新建节点调用";
+		button.classList.remove("active");
+		button.__gjjOllamaAssistantSaveTimer = null;
+	}, 1300);
+}
+
+function saveTemplateDefaults(node, button) {
+	if (!node || button?.disabled) {
+		return;
+	}
+	if (button) {
+		clearTimeout(button.__gjjOllamaAssistantSaveTimer);
+		button.disabled = true;
+		button.textContent = "保存中";
+		button.title = "正在保存当前提示词模板...";
+	}
+	saveAssistantSettingsNow(node, { includeTemplate: true })
+		.then(() => flashSaveButton(button, true))
+		.catch((error) => flashSaveButton(button, false, error?.message || ""));
 }
 
 function templatePrompt(config, item) {
@@ -765,19 +841,26 @@ function selectField(title, options) {
 	return element;
 }
 
-function labelledField(label, control) {
+function labelledField(label, control, action = null) {
 	const line = document.createElement("label");
 	line.className = "gjj-ia-field";
 	line.title = control?.title || "";
 	const name = document.createElement("span");
 	name.textContent = label;
 	name.className = "gjj-ia-label";
+	if (action) {
+		const header = document.createElement("span");
+		header.className = "gjj-ia-label-row";
+		header.append(name, action);
+		line.append(header, control);
+		return line;
+	}
 	line.append(name, control);
 	return line;
 }
 
-function parameterField(label, control) {
-	const line = labelledField(label, control);
+function parameterField(label, control, action = null) {
+	const line = labelledField(label, control, action);
 	line.classList.add("gjj-ia-param");
 	return line;
 }
@@ -841,23 +924,28 @@ function renderModelButtons(node) {
 		return;
 	}
 	state.modelSignature = signature;
-	state.models.replaceChildren();
-	if (!values.length) {
-		const empty = document.createElement("span");
-		empty.className = "gjj-ia-empty";
-		empty.textContent = "未发现 Ollama 模型，请检查地址后刷新。";
-		state.models.appendChild(empty);
+	const select = state.modelSelect;
+	if (!select) {
 		return;
 	}
-	for (const name of values) {
-		const choice = button(`🤖 ${name}`, `使用 Ollama 模型：${name}`, () => {
-			setWidgetValue(node, "model", name);
-			renderModelButtons(node);
-			syncPanel(node);
-		});
-		choice.classList.toggle("active", name === selected);
-		state.models.appendChild(choice);
+	select.replaceChildren();
+	if (!values.length) {
+		const empty = document.createElement("option");
+		empty.value = "";
+		empty.textContent = "未发现 Ollama 模型，请检查地址后刷新";
+		select.appendChild(empty);
+		select.disabled = true;
+		return;
 	}
+	select.disabled = false;
+	for (const name of values) {
+		const option = document.createElement("option");
+		option.value = name;
+		option.textContent = name;
+		select.appendChild(option);
+	}
+	select.value = values.includes(selected) ? selected : values[0] || "";
+	select.title = select.value ? `当前 Ollama 模型：${select.value}` : "选择 Ollama 模型";
 }
 
 function renderTemplateButtons(node, config) {
@@ -887,17 +975,45 @@ function syncPanel(node) {
 	}
 	const thinking = String(widgetValue(node, "thinking_mode", "关闭思考")) === "开启思考";
 	const unload = String(widgetValue(node, "model_keep_alive", "保持模型")) === "卸载模型";
-	state.thinking.textContent = thinking ? "💭 思考 开" : "💭 思考 关";
+	state.thinking.textContent = "💭";
+	state.thinking.title = thinking
+		? "思考模式：开。点击关闭模型思考。"
+		: "思考模式：关。点击开启模型思考。";
 	state.thinking.classList.toggle("active", thinking);
-	state.keepAlive.textContent = unload ? "🧹 用后卸载" : "🧠 模型常驻";
+	state.thinking.setAttribute("aria-pressed", thinking ? "true" : "false");
+	state.keepAlive.textContent = "🧠";
+	state.keepAlive.title = unload
+		? "模型处理：用后卸载。点击改为模型常驻。"
+		: "模型处理：模型常驻。点击改为用后卸载。";
 	state.keepAlive.classList.toggle("active", !unload);
-	state.settingsButton.textContent = state.expanded ? "⚙️ 收起" : "⚙️ 设置";
+	state.keepAlive.setAttribute("aria-pressed", unload ? "false" : "true");
+	if (state.modelButton) {
+		const selectedModel = String(widgetValue(node, "model", "") || "").trim();
+		state.modelButton.textContent = "🤖";
+		state.modelButton.title = selectedModel
+			? `当前模型：${selectedModel}。点击展开模型设置。`
+			: "当前模型：未选择。点击展开模型设置。";
+	}
+	state.settingsButton.textContent = "⚙️";
+	state.settingsButton.title = state.expanded
+		? "收起 Ollama 地址、模型、参数和提示词设置"
+		: "展开 Ollama 地址、模型、参数和提示词设置";
 	state.settingsButton.classList.toggle("active", state.expanded);
 	state.settings.style.display = state.expanded ? "flex" : "none";
+	if (state.randomSeed) {
+		const randomEnabled = String(widgetValue(node, "seed_mode", DEFAULT_SAMPLING.seed_mode)) === "每次随机";
+		state.randomSeed.textContent = "🎲";
+		state.randomSeed.classList.toggle("active", randomEnabled);
+		state.randomSeed.title = randomEnabled
+			? "随机种：开。每次执行自动变化 seed。"
+			: "随机种：关。使用当前固定 seed。";
+		state.randomSeed.setAttribute("aria-pressed", randomEnabled ? "true" : "false");
+	}
 
 	syncInputValue(state.host, widgetValue(node, "ollama_host", "http://127.0.0.1:11434"));
 	syncInputValue(state.temperature, widgetValue(node, "temperature", 0.7));
 	syncInputValue(state.maxTokens, widgetValue(node, "max_tokens", 1024));
+	syncInputValue(state.modelSelect, widgetValue(node, "model", ""));
 	syncInputValue(state.seedMode, widgetValue(node, "seed_mode", DEFAULT_SAMPLING.seed_mode));
 	syncInputValue(state.seed, widgetValue(node, "seed", DEFAULT_SAMPLING.seed));
 	syncInputValue(state.topK, widgetValue(node, "top_k", DEFAULT_SAMPLING.top_k));
@@ -1043,15 +1159,21 @@ function buildSettings(node) {
 
 	const modelTitle = document.createElement("div");
 	modelTitle.className = "gjj-ia-subtitle";
-	modelTitle.textContent = "🤖 Ollama 模型";
-	const refresh = button("🔄 刷新模型", "按照当前 Ollama 地址重新获取模型列表", () => {
+	const refresh = button("🔄", "按照当前 Ollama 地址重新获取模型列表", () => {
 		setWidgetValue(node, "ollama_host", String(widgetValue(node, "ollama_host", "")).trim());
 		setTimeout(() => renderModelButtons(node), 120);
 		setTimeout(() => renderModelButtons(node), 1200);
 	});
-	modelTitle.appendChild(refresh);
-	const models = document.createElement("div");
-	models.className = "gjj-ia-models";
+	modelTitle.append("🤖 Ollama 模型", refresh);
+	const modelSelect = selectField("选择 Ollama 模型", []);
+	modelSelect.addEventListener("change", () => {
+		if (!modelSelect.value) {
+			return;
+		}
+		setWidgetValue(node, "model", modelSelect.value);
+		renderModelButtons(node);
+		syncPanel(node);
+	});
 
 	const systemPrompt = document.createElement("textarea");
 	systemPrompt.className = "gjj-ia-textarea";
@@ -1068,9 +1190,12 @@ function buildSettings(node) {
 	protect(templateEditor);
 	templateEditor.addEventListener("input", () => {
 		setWidgetValue(node, TEMPLATE_WIDGET, templateEditor.value);
-		saveAssistantSettings(node);
 		syncPanel(node);
 	});
+	const saveTemplates = button("💾", "保存当前系统提示词模板到 presets/gjj_user_settings.json，供新建节点调用", () => {
+		saveTemplateDefaults(node, saveTemplates);
+	});
+	saveTemplates.classList.add("compact");
 
 	const outputRule = document.createElement("textarea");
 	outputRule.className = "gjj-ia-textarea rule";
@@ -1086,8 +1211,8 @@ function buildSettings(node) {
 		labelledField("🔌 Ollama 地址", host),
 		numeric,
 		modelTitle,
-		models,
-		labelledField("🧩 系统提示词模板", templateEditor),
+		labelledField("🤖 模型", modelSelect),
+		labelledField("🧩 系统提示词模板", templateEditor, saveTemplates),
 		labelledField("🚫 输出约束", outputRule),
 		labelledField("🧾 当前系统提示词", systemPrompt),
 	);
@@ -1105,9 +1230,10 @@ function buildSettings(node) {
 		presencePenalty,
 		frequencyPenalty,
 		repeatPenalty,
-		models,
+		modelSelect,
 		systemPrompt,
 		templateEditor,
+		saveTemplates,
 		outputRule,
 	};
 }
@@ -1126,11 +1252,15 @@ function createPanel(node) {
 		.gjj-ia-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:5px; overflow:visible; padding:0 0 3px; scrollbar-width:thin; }
 		.gjj-ia-templates { display:contents; }
 		.gjj-ia-button { flex:0 0 auto; height:27px; padding:0 9px; border:1px solid #3d5159; border-radius:6px; background:#172127; color:#dbe6e9; font:700 12px/25px system-ui, sans-serif; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:220px; }
+		.gjj-ia-button.compact { width:auto; min-width:28px; max-width:74px; height:22px; padding:0 7px; font-size:11px; line-height:20px; }
+		.gjj-ia-button:disabled { opacity:.72; cursor:wait; }
 		.gjj-ia-button:hover { background:#24333b; border-color:#5f8590; }
 		.gjj-ia-button.active { background:#24452d; border-color:#65a271; color:#ebffee; }
 		.gjj-ia-settings { display:none; flex-direction:column; gap:7px; padding:8px; border:1px solid rgba(73,93,101,.7); border-radius:9px; background:rgba(15,22,26,.88); }
 		.gjj-ia-field { display:flex; flex-direction:column; gap:4px; min-width:0; }
 		.gjj-ia-label, .gjj-ia-subtitle { color:#aebfc4; font-weight:700; font-size:11px; letter-spacing:.02em; }
+		.gjj-ia-label-row { display:flex; align-items:center; justify-content:space-between; gap:8px; min-width:0; }
+		.gjj-ia-label-row .gjj-ia-label { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 		.gjj-ia-input, .gjj-ia-textarea { width:100%; border:1px solid #334850; border-radius:6px; background:#10181c; color:#eef5f5; padding:5px 7px; outline:none; font:12px/1.4 system-ui, sans-serif; }
 		.gjj-ia-input { height:29px; }
 		.gjj-ia-input:focus, .gjj-ia-textarea:focus { border-color:#6a9dae; background:#111e23; }
@@ -1152,21 +1282,28 @@ function createPanel(node) {
 	toolbar.className = "gjj-ia-toolbar";
 	const templates = document.createElement("div");
 	templates.className = "gjj-ia-templates";
-	const thinking = button("💭 思考 关", "切换模型思考模式", () => {
+	const modelButton = button("🤖", "当前模型。点击展开模型设置。", () => {
+		node.__gjjOllamaAssistantPanel.expanded = true;
+		syncPanel(node);
+	});
+	const thinking = button("💭", "思考模式：关。点击开启模型思考。", () => {
 		const value = String(widgetValue(node, "thinking_mode", "关闭思考")) === "开启思考" ? "关闭思考" : "开启思考";
 		setWidgetValue(node, "thinking_mode", value);
 		syncPanel(node);
 	});
-	const keepAlive = button("🧠 模型常驻", "切换任务完成后是否卸载模型", () => {
+	const keepAlive = button("🧠", "模型处理：模型常驻。点击改为用后卸载。", () => {
 		const value = String(widgetValue(node, "model_keep_alive", "保持模型")) === "保持模型" ? "卸载模型" : "保持模型";
 		setWidgetValue(node, "model_keep_alive", value);
 		syncPanel(node);
 	});
-	const settingsButton = button("⚙ 设置", "展开 Ollama 地址、模型、参数和提示词设置", () => {
+	const randomSeed = button("🎲", "切换随机种模式", () => {
+		toggleRandomSeedMode(node);
+	});
+	const settingsButton = button("⚙️", "展开 Ollama 地址、模型、参数和提示词设置", () => {
 		node.__gjjOllamaAssistantPanel.expanded = !node.__gjjOllamaAssistantPanel.expanded;
 		syncPanel(node);
 	});
-	toolbar.append(templates, thinking, keepAlive, settingsButton);
+	toolbar.append(templates, modelButton, thinking, keepAlive, randomSeed, settingsButton);
 
 	const settingsState = buildSettings(node);
 	root.append(style, toolbar, settingsState.settings);
@@ -1184,8 +1321,10 @@ function createPanel(node) {
 		domWidget,
 		templates,
 		templateButtons: new Map(),
+		modelButton,
 		thinking,
 		keepAlive,
+		randomSeed,
 		settingsButton,
 		expanded: false,
 		...settingsState,

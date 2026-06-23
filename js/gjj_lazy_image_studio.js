@@ -147,6 +147,7 @@ const RESTORE_WIDGET_TYPES = {
 const SEED_CONTROL_KEY = "__seed_control_after_generate";
 const SEED_CONTROL_VALUES = new Set(["fixed", "increment", "decrement", "randomize"]);
 const MAX_SEED_VALUE = 0xFFFFFFFFFFFFFFFF;
+const JS_SAFE_MAX_SEED_VALUE = Number.MAX_SAFE_INTEGER;
 const SERIALIZED_PARAM_WIDGETS = [
 	"prompt",
 	"negative_prompt",
@@ -756,7 +757,15 @@ function optionValues(node, name) {
 
 function fallbackParamValue(node, name) {
 	if (name === SEED_CONTROL_KEY) {
-		return textValue(findSeedControlWidget(node)?.value) || DEFAULT_PARAM_VALUES[SEED_CONTROL_KEY];
+		const widgetValue = textValue(findSeedControlWidget(node)?.value);
+		if (isSeedControlValue(widgetValue)) {
+			return widgetValue;
+		}
+		const storedValue = textValue(node?.properties?.[PARAM_VALUES_PROPERTY]?.[SEED_CONTROL_KEY]);
+		if (isSeedControlValue(storedValue)) {
+			return storedValue;
+		}
+		return DEFAULT_PARAM_VALUES[SEED_CONTROL_KEY];
 	}
 	const widget = getWidget(node, name);
 	if (widget?.value !== undefined && widget?.value !== null && String(widget.value) !== "") {
@@ -839,9 +848,6 @@ function snapshotParamValues(source, node) {
 	const params = {};
 	let found = false;
 	for (const name of SERIALIZED_PARAM_WIDGETS) {
-		if (name === SEED_CONTROL_KEY && !shouldSerializeSeedControl(node)) {
-			continue;
-		}
 		if (Object.prototype.hasOwnProperty.call(source, name)) {
 			params[name] = coerceParamValue(name, source[name], node);
 			found = true;
@@ -854,9 +860,7 @@ function currentParamValues(node) {
 	const params = {};
 	for (const name of SERIALIZED_PARAM_WIDGETS) {
 		if (name === SEED_CONTROL_KEY) {
-			if (shouldSerializeSeedControl(node)) {
-				params[name] = fallbackParamValue(node, name);
-			}
+			params[name] = fallbackParamValue(node, name);
 			continue;
 		}
 		params[name] = coerceParamValue(name, getWidget(node, name)?.value, node);
@@ -900,7 +904,7 @@ function buildSequentialParams(rawValues, offset, withSeedControl, node) {
 	for (const name of names) {
 		params[name] = coerceParamValue(name, rawValues[offset + names.indexOf(name)], node);
 	}
-	if (shouldSerializeSeedControl(node) && !Object.prototype.hasOwnProperty.call(params, SEED_CONTROL_KEY)) {
+	if (!Object.prototype.hasOwnProperty.call(params, SEED_CONTROL_KEY)) {
 		params[SEED_CONTROL_KEY] = fallbackParamValue(node, SEED_CONTROL_KEY);
 	}
 	return params;
@@ -974,6 +978,111 @@ function applyParamValues(node, params) {
 		changed = true;
 	}
 	return changed;
+}
+
+function writeLiveParamSnapshot(node) {
+	const params = currentParamValues(node);
+	saveParamSnapshot(node, params);
+	node.widgets_values = serializedParamValues(params, node).slice();
+	node.setDirtyCanvas?.(true, true);
+	node.graph?.setDirtyCanvas?.(true, true);
+	node.graph?.change?.();
+	return params;
+}
+
+function randomSeedValue() {
+	return Math.floor(Math.random() * (JS_SAFE_MAX_SEED_VALUE + 1));
+}
+
+function applySeedControlBeforeQueue(node) {
+	const seedWidget = getWidget(node, "seed");
+	if (!seedWidget) {
+		return null;
+	}
+	const now = Date.now();
+	if (node.__gjjLazySeedPreparedAt && now - node.__gjjLazySeedPreparedAt < 500) {
+		return intValue(seedWidget.value, 0, 0, JS_SAFE_MAX_SEED_VALUE);
+	}
+	const mode = fallbackParamValue(node, SEED_CONTROL_KEY);
+	const currentSeed = intValue(seedWidget.value, 0, 0, JS_SAFE_MAX_SEED_VALUE);
+	let nextSeed = currentSeed;
+	if (mode === "randomize") {
+		nextSeed = randomSeedValue();
+	} else if (mode === "increment") {
+		nextSeed = currentSeed >= JS_SAFE_MAX_SEED_VALUE ? 0 : currentSeed + 1;
+	} else if (mode === "decrement") {
+		nextSeed = currentSeed <= 0 ? JS_SAFE_MAX_SEED_VALUE : currentSeed - 1;
+	} else {
+		return currentSeed;
+	}
+	setWidgetValue(seedWidget, nextSeed);
+	node.__gjjLazySeedPreparedAt = now;
+	writeLiveParamSnapshot(node);
+	return nextSeed;
+}
+
+function syncSeedControlWidget(node) {
+	const widget = findSeedControlWidget(node);
+	if (!widget || widget.__gjjLazySeedControlHooked) {
+		return;
+	}
+	widget.__gjjLazySeedControlHooked = true;
+	const storedValue = textValue(node?.properties?.[PARAM_VALUES_PROPERTY]?.[SEED_CONTROL_KEY]);
+	if (isSeedControlValue(storedValue) && widget.value !== storedValue) {
+		setWidgetValue(widget, storedValue);
+	}
+	const originalCallback = widget.callback;
+	widget.callback = function (value, ...args) {
+		const result = originalCallback?.apply(this, [value, ...args]);
+		const mode = textValue(value);
+		if (isSeedControlValue(mode)) {
+			const params = currentParamValues(node);
+			params[SEED_CONTROL_KEY] = mode;
+			saveParamSnapshot(node, params);
+			node.widgets_values = serializedParamValues(params, node).slice();
+		}
+		return result;
+	};
+}
+
+function patchLazySeedIntoPromptData(promptData) {
+	const output = promptData?.output || promptData?.prompt;
+	if (!output || typeof output !== "object") {
+		return promptData;
+	}
+	const nodes = Array.isArray(app.graph?._nodes) ? app.graph._nodes : [];
+	for (const [key, entry] of Object.entries(output)) {
+		if (!TARGET_NODES.has(entry?.class_type)) {
+			continue;
+		}
+		const node = nodes.find((item) => String(item?.id) === String(key) && TARGET_NODES.has(item?.comfyClass || item?.type));
+		if (!node) {
+			continue;
+		}
+		const seed = applySeedControlBeforeQueue(node);
+		if (seed === null || seed === undefined) {
+			continue;
+		}
+		entry.inputs = entry.inputs || {};
+		entry.inputs.seed = seed;
+		if (promptData?.prompt && promptData.prompt !== promptData.output && promptData.prompt[key]) {
+			promptData.prompt[key].inputs = promptData.prompt[key].inputs || {};
+			promptData.prompt[key].inputs.seed = seed;
+		}
+	}
+	return promptData;
+}
+
+function installLazySeedPromptPatch() {
+	if (app.__gjjLazyImageStudioSeedPromptPatchInstalled || typeof app.graphToPrompt !== "function") {
+		return;
+	}
+	app.__gjjLazyImageStudioSeedPromptPatchInstalled = true;
+	const originalGraphToPrompt = app.graphToPrompt.bind(app);
+	app.graphToPrompt = async function (...args) {
+		const result = await originalGraphToPrompt(...args);
+		return patchLazySeedIntoPromptData(result);
+	};
 }
 
 function saveParamSnapshot(node, params) {
@@ -1617,6 +1726,7 @@ function createButtons(node) {
 		generateButton.style.opacity = "0.7";
 
 		try {
+			applySeedControlBeforeQueue(node);
 			const ok = await queueOnlyCurrentNode(node);
 			if (!ok) {
 				console.warn("[GJJ] 当前节点执行失败：queueOnlyCurrentNode 返回 false");
@@ -2830,6 +2940,7 @@ function stabilizeNode(node, forcePreset = false) {
 	ensureTrailingImageInput(node);
 	renameImageInputs(node);
 	hookUnetWidget(node);
+	syncSeedControlWidget(node);
 
 	removeInternalInputs(node);
 
@@ -3064,6 +3175,7 @@ app.registerExtension({
 	},
 
 	setup() {
+		installLazySeedPromptPatch();
 		void ensureModelPresetsLoaded().then(() => {
 			for (const node of app.graph?._nodes || []) {
 				if (!TARGET_NODES.has(node?.comfyClass)) {

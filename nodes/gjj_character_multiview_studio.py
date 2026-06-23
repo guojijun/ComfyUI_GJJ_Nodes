@@ -1819,7 +1819,7 @@ class GJJ_CharacterMultiViewStudio:
 						"GJJ_BATCH_IMAGE,IMAGE",
 						{
 							"display_name": "👤 主图",
-							"tooltip": "主体主参考图，必选。支持 GJJ_BATCH_IMAGE 和 IMAGE 两种类型，节点会始终以这张图作为类别、外观与风格一致性的主参考。",
+							"tooltip": "主体主参考图，可选。接入时以这张图作为类别、外观与风格一致性的主参考；未接入时按动作文本每行一张直接文生图。",
 						},
 					),
 					"lora_chain_config": (
@@ -1849,21 +1849,21 @@ class GJJ_CharacterMultiViewStudio:
 	@classmethod
 	def IS_CHANGED(
 		cls,
-		main_image,
-		base_prompt,
-		negative_prompt,
-		action_prompts,
-		unet_name,
-		lora_1_name,
-		lora_1_strength,
-		lora_2_name,
-		lora_2_strength,
-		seed,
-		save_each_image,
+		main_image=None,
+		base_prompt="",
+		negative_prompt="",
+		action_prompts="",
+		unet_name="",
+		lora_1_name="",
+		lora_1_strength=0.0,
+		lora_2_name="",
+		lora_2_strength=0.0,
+		seed=0,
+		save_each_image=True,
 		unique_id=None,
 		**kwargs,
 	):
-		image_signature = str(tuple(main_image.shape)) if hasattr(main_image, "shape") else "main_image"
+		image_signature = str(tuple(main_image.shape)) if hasattr(main_image, "shape") else "no_main_image"
 		action_signature = "|".join(
 			str(tuple(pair["image"].shape))
 			for pair in collect_image_pairs({key.replace("image_", "action_image_"): value for key, value in kwargs.items()})
@@ -2061,7 +2061,20 @@ class GJJ_CharacterMultiViewStudio:
 			int(preset.get("width", 1024)),
 			int(preset.get("height", 1024)),
 		)
-		if bool(preset.get("supports_multi_image_edit")):
+		if main_image is None:
+			positive = self._encode_text_conditioning(clip, view_prompt)
+			negative = self._encode_negative_conditioning(clip, positive, negative_prompt)
+			latent_out = _build_latent(
+				vae=vae,
+				width=target_width,
+				height=target_height,
+				batch_size=1,
+				image_pairs=[],
+				mask=None,
+				grow_mask_by=0,
+				preset=preset,
+			)
+		elif bool(preset.get("supports_multi_image_edit")):
 			if action_image is not None:
 				is_skeleton, black_ratio = _is_skeleton_image(action_image)
 
@@ -2242,17 +2255,17 @@ class GJJ_CharacterMultiViewStudio:
 
 	def generate(
 		self,
-		main_image,
-		base_prompt,
-		negative_prompt,
-		action_prompts,
-		unet_name,
-		lora_1_name,
-		lora_1_strength,
-		lora_2_name,
-		lora_2_strength,
-		seed,
-		save_each_image,
+		main_image=None,
+		base_prompt="",
+		negative_prompt="",
+		action_prompts="",
+		unet_name="",
+		lora_1_name="",
+		lora_1_strength=0.0,
+		lora_2_name="",
+		lora_2_strength=0.0,
+		seed=0,
+		save_each_image=True,
 		prompt=None,
 		extra_pnginfo=None,
 		unique_id=None,
@@ -2339,7 +2352,8 @@ class GJJ_CharacterMultiViewStudio:
 			DEFAULT_CLIP_NAME,
 			DEFAULT_VAE_NAME,
 		)
-		action_pairs = self._collect_action_pairs(kwargs)
+		has_main_image = main_image is not None
+		action_pairs = self._collect_action_pairs(kwargs) if has_main_image else []
 		use_action_reference_mode = bool(action_pairs) and bool(preset.get("supports_multi_image_edit"))
 
 		if use_action_reference_mode:
@@ -2388,6 +2402,8 @@ class GJJ_CharacterMultiViewStudio:
 		if action_pairs:
 			_send_status(unique_id, f"[DEBUG] ✅ 收到 {len(action_pairs)} 张动作图，切换到动作迁移！")
 			action_lines = []
+		elif not has_main_image:
+			_send_status(unique_id, "未接入主图，按动作文本列表逐行执行文生图。")
 		else:
 			_send_status(unique_id, "[DEBUG]  未收到动作图数据")
 		raw_job_count = max(len(action_lines), len(action_pairs), 1)

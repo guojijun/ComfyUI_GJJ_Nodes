@@ -168,6 +168,14 @@ function nodeType(node) {
 	return node?.type || node?.comfyClass || node?.constructor?.type || "";
 }
 
+function isTemplateVariableNode(node) {
+	const type = nodeType(node);
+	return type === "GJJ_TemplateParams"
+		|| type === "GJJ_TemplateSetVariables"
+		|| type === "GJJ_SETNODE"
+		|| type === "GJJ_SetNode";
+}
+
 function parseJsonObject(value) {
 	if (!value || typeof value === "object") return value && !Array.isArray(value) ? value : {};
 	try {
@@ -235,8 +243,7 @@ function widgetCurrentValue(widget) {
 
 function valueFromNodeOutput(source, slot, graph, variableName = "") {
 	if (!source) return undefined;
-	const type = nodeType(source);
-	if (type === "GJJ_TemplateParams" || type === "GJJ_TemplateSetVariables") {
+	if (isTemplateVariableNode(source)) {
 		const field = findFieldForVariable(source, Number(slot || 0), variableName);
 		return valueFromTemplateNode(source, field, variableName, graph || source.graph || app.graph);
 	}
@@ -497,7 +504,7 @@ export function createTemplateSourceButton(node, fields, buttonStyle = []) {
 	const button = document.createElement("button");
 	button.type = "button";
 	button.textContent = "⚡";
-	button.title = "选择 GJJ_TemplateParams / GJJ_SETNODE 的提示词、宽度、高度变量";
+	button.title = "选择 GJJ_TemplateParams / GJJ_SETNODE 的宽度、高度变量";
 	button.style.cssText = [
 		...buttonStyle,
 		"width:34px",
@@ -553,7 +560,7 @@ export function updateTemplateSourcePanel(node, fields = null) {
 		iconButton.textContent = "⚡";
 		iconButton.title = active.length
 			? `已接管：${active.map((field) => field.label).join("、")}\n点击选择或清空参数变量。`
-			: "选择 GJJ_TemplateParams / GJJ_SETNODE 的提示词、宽度、高度变量";
+			: "选择 GJJ_TemplateParams / GJJ_SETNODE 的宽度、高度变量";
 		iconButton.style.borderColor = active.length ? "#f5c451" : "#d6a642";
 		iconButton.style.background = active.length ? "linear-gradient(135deg,#5a3b0f,#b7791f)" : "linear-gradient(135deg,#3b2a10,#7c4d12)";
 		iconButton.style.color = active.length ? "#fff6bf" : "#ffe8a3";

@@ -10,6 +10,7 @@ const DIRECTIONS = [
 	{ value: "down", icon: "⬇", title: "向下拼接" },
 	{ value: "left", icon: "⬅", title: "向左拼接" },
 	{ value: "right", icon: "➡", title: "向右拼接" },
+	{ value: "square", icon: "🪟", title: "尽量拼成正方形" },
 ];
 
 function inputName(index) {
@@ -77,12 +78,12 @@ function buttonStyle(button) {
 	button.style.borderRadius = "6px";
 	button.style.background = "#172229";
 	button.style.color = "#EAF7EE";
-	button.style.fontSize = "16px";
+	button.style.fontSize = "15px";
 	button.style.fontWeight = "700";
 	button.style.lineHeight = "1";
-	button.style.minWidth = "34px";
+	button.style.minWidth = "28px";
 	button.style.height = "30px";
-	button.style.padding = "0 8px";
+	button.style.padding = "0 4px";
 	button.style.cursor = "pointer";
 	button.style.boxSizing = "border-box";
 }
@@ -116,14 +117,14 @@ function createPanel(node) {
 	const root = document.createElement("div");
 	root.style.display = "flex";
 	root.style.alignItems = "center";
-	root.style.gap = "6px";
+	root.style.gap = "4px";
 	root.style.padding = "4px 0 2px";
 	root.style.width = "100%";
 	root.style.boxSizing = "border-box";
 
 	const directionRow = document.createElement("div");
 	directionRow.style.display = "flex";
-	directionRow.style.gap = "4px";
+	directionRow.style.gap = "3px";
 	directionRow.style.flexWrap = "nowrap";
 
 	for (const item of DIRECTIONS) {
@@ -149,7 +150,7 @@ function createPanel(node) {
 	matchButton.textContent = "✳️";
 	matchButton.dataset.match = "1";
 	buttonStyle(matchButton);
-	matchButton.style.marginLeft = "6px";
+	matchButton.style.marginLeft = "4px";
 	matchButton.addEventListener("pointerdown", (event) => event.stopPropagation());
 	matchButton.addEventListener("click", (event) => {
 		event.preventDefault();

@@ -1,7 +1,9 @@
 import { app } from "/scripts/app.js";
+import { queueOnlyCurrentNode } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set(["GJJ_TextInput"]);
 const TEXT_WIDGET_NAME = "text";
+const TEXT_INPUT_NAME = "text_in";
 const DOM_WIDGET_NAME = "gjj_text_input_markdown";
 const SAVED_TEXT_PROPERTY = "gjj_text_input_saved_text";
 const MODE_PROPERTY = "gjj_text_input_mode";
@@ -12,10 +14,41 @@ const MIN_WIDGET_WIDTH = 1;
 const MIN_WIDGET_HEIGHT = 24;
 const MIN_EDITOR_HEIGHT = 32;
 const EMPTY_TEXT = "空文本";
+const WAITING_UPSTREAM_TEXT = "等待执行后预览上游文本";
 const DOUBLE_CLICK_MS = 420;
+const HOLD_ICON_SVG = `<svg viewBox="0 0 1024 1024" aria-hidden="true"><path d="M635.172 95.834c-1.998 1.999-3.996 3.999-5.996 5.997l-16.061 16.061-23.229 23.23-27.507 27.506-28.888 28.889-27.376 27.376-22.969 22.97-15.67 15.67c-2.473 2.473-5.002 4.904-7.388 7.462-13.211 14.175-21.229 32.737-22.46 52.078-1.213 19.078 4.198 38.318 15.289 53.899a84.425 84.425 0 0 0 9.07 10.72l31.855 31.869 182.6-182.397 109.26 109.485-182.384 182.374 20.919 20.92 10.193 10.193c5.181 5.182 10.847 9.786 17.141 13.558 16.325 9.776 35.837 13.714 54.68 11.066 17.979-2.523 34.807-11.007 47.594-23.882l5.997-5.996c5.354-5.354 10.706-10.708 16.061-16.061l23.229-23.23a713271.6 713271.6 0 0 0 27.505-27.506l28.891-28.889c9.124-9.126 18.251-18.25 27.375-27.376l22.971-22.97 15.669-15.67c2.472-2.472 4.996-4.904 7.396-7.445 13.269-14.051 21.348-32.522 22.611-51.809 1.252-19.079-4.176-38.311-15.231-53.911a85.416 85.416 0 0 0-9.286-10.995c-1.999-1.999-3.997-3.998-5.998-5.997-5.354-5.353-10.705-10.707-16.061-16.061l-23.229-23.23-27.505-27.506-28.891-28.889-27.374-27.376c-7.656-7.657-15.314-15.313-22.972-22.97l-15.669-15.67c-2.567-2.567-5.091-5.197-7.752-7.669-16.305-15.139-38.344-23.235-60.571-22.292-20.912 0.891-40.991 9.736-55.839 24.474M270.406 460.605l-5.99 5.997c-5.348 5.354-10.696 10.711-16.044 16.064l-23.208 23.239-27.484 27.52a787376.15 787376.15 0 0 0-28.871 28.908l-27.368 27.402-22.978 23.009-15.697 15.715c-2.415 2.419-4.882 4.802-7.231 7.287-13.289 14.056-21.379 32.548-22.674 51.85-1.28 19.061 4.081 38.305 15.116 53.905a84.198 84.198 0 0 0 9.252 10.961l5.99 5.998 16.043 16.064 23.208 23.236c9.162 9.172 18.323 18.348 27.484 27.521 9.624 9.636 19.248 19.271 28.871 28.908l27.369 27.403 22.977 23.007 15.697 15.719c2.417 2.419 4.792 4.895 7.293 7.229 14.189 13.233 32.776 21.258 52.139 22.518 19.101 1.241 38.388-4.114 54.027-15.168a84.46 84.46 0 0 0 10.748-9.034l5.984-5.984 16.032-16.032 23.197-23.196 27.479-27.479c9.625-9.626 19.25-19.251 28.877-28.875l27.392-27.392 23.022-23.024 15.772-15.771c2.31-2.31 4.662-4.584 6.913-6.949 13.354-14.033 21.499-32.532 22.885-51.852 1.37-19.068-3.854-38.374-14.785-54.073a84.293 84.293 0 0 0-9.367-11.228l-32.069-31.851L348.02 784.541 238.536 675.068 420.932 492.47c-6.974-6.975-13.947-13.952-20.922-20.927l-10.196-10.199c-5.894-5.896-12.449-11.012-19.774-15.02-19.235-10.525-42.329-13.024-63.399-7.006-13.644 3.901-26.169 11.292-36.235 21.287" fill="#0071BC"></path><path d="M876.584 751.132c11.711 11.711 11.761 30.69 0.024 42.428-11.712 11.711-30.691 11.712-42.404 0.05l-0.025 0.025-113.25-113.25 0.025-0.025-0.051-0.051c-11.711-11.711-11.786-30.717-0.024-42.479 11.737-11.737 30.742-11.66 42.453 0.051l0.504 0.504 112.24 112.24 0.508 0.507M791.677 836.039c11.711 11.711 11.736 30.715-0.025 42.477-11.685 11.686-30.69 11.712-42.378 0.024l-0.025 0.026-113.25-113.251 0.025-0.025-0.051-0.051c-11.711-11.711-11.736-30.767-0.05-42.453 11.761-11.761 30.792-11.71 42.503 0.001l0.504 0.504 112.24 112.24 0.507 0.508" fill="#00A0E9"></path></svg>`;
+const COPY_NODE_ICON_SVG = `<svg viewBox="0 0 1024 1024" aria-hidden="true"><path d="M744.155429 187.026286a92.891429 92.891429 0 0 1 92.891428 92.891428v614.619429a92.891429 92.891429 0 0 1-92.891428 92.891428H129.462857A92.891429 92.891429 0 0 1 36.571429 894.537143V279.844571c0-51.273143 41.545143-92.891429 92.891428-92.891428h614.692572z m0 74.24H129.462857a18.578286 18.578286 0 0 0-18.578286 18.578285v614.692572c0 10.24 8.265143 18.578286 18.578286 18.578286h614.692572c10.24 0 18.578286-8.265143 18.578285-18.578286V279.844571a18.578286 18.578286 0 0 0-18.578285-18.578285zM894.537143 36.571429c51.346286 0 92.891429 41.545143 92.891428 92.891428v614.692572a92.891429 92.891429 0 0 1-92.891428 92.891428 37.156571 37.156571 0 1 1 0-74.313143c10.24 0 18.578286-8.338286 18.578286-18.578285V129.462857a18.578286 18.578286 0 0 0-18.578286-18.578286H279.844571a18.578286 18.578286 0 0 0-18.578285 18.578286 37.156571 37.156571 0 1 1-74.24 0c0-51.346286 41.545143-92.891429 92.891428-92.891428h614.619429zM436.809143 388.534857c20.48 0 37.083429 16.603429 37.083428 37.083429V550.034286h124.489143a37.156571 37.156571 0 1 1 0 74.313143H473.892571v124.416a37.156571 37.156571 0 1 1-74.24 0l-0.073142-124.416h-124.342858a37.156571 37.156571 0 1 1 0-74.24l124.342858-0.073143v-124.342857c0-20.553143 16.676571-37.156571 37.229714-37.156572z" fill="#257FFF"></path></svg>`;
+const CLIPBOARD_ICON_SVG = `<svg viewBox="0 0 1024 1024" aria-hidden="true"><path d="M515.53 511.994m-495.082 0a495.082 495.082 0 1 0 990.164 0 495.082 495.082 0 1 0-990.164 0Z" fill="#95BAF9"></path><path d="M709.882 128.214H321.176c-85.654 0-155.338 69.686-155.338 155.34v390.382l0.002 0.004v68.488c0 85.654 69.684 155.34 155.338 155.34h388.708c85.654 0 155.338-69.686 155.338-155.34V283.556c0-85.654-69.684-155.342-155.342-155.342z" fill="#0A2BDE"></path><path d="M279.442 233.812h472.18v558.362h-472.18z" fill="#FFFFFF"></path><path d="M324.52 161.624v99.154c0 50.08 40.742 90.822 90.824 90.822H615.72c50.08 0 90.822-40.742 90.822-90.822V161.624H324.52z" fill="#95BAF9"></path><path d="M362.614 401.504h305.836v46.662H362.614zM362.614 511.64h305.836v46.66H362.614zM362.614 621.774h305.836v46.66H362.614z" fill="#95BAF9"></path></svg>`;
 
 function getTextWidget(node) {
 	return node.widgets?.find((widget) => widget?.name === TEXT_WIDGET_NAME);
+}
+
+function getInputByName(node, name) {
+	return node?.inputs?.find((input) => String(input?.name || "") === name || String(input?.widget?.name || "") === name);
+}
+
+function hasLinkedTextInput(node) {
+	return getInputByName(node, TEXT_INPUT_NAME)?.link != null;
+}
+
+function getPreviewText(node) {
+	const liveText = node?.__gjjTextInputLiveText;
+	if (hasLinkedTextInput(node) && liveText !== undefined && liveText !== null) {
+		return String(liveText);
+	}
+	if (hasLinkedTextInput(node)) {
+		return WAITING_UPSTREAM_TEXT;
+	}
+	return getTextValue(node);
+}
+
+function hasReadyLinkedPreviewText(node) {
+	if (!hasLinkedTextInput(node)) {
+		return false;
+	}
+	const text = String(getPreviewText(node) ?? "");
+	return text !== "" && text !== WAITING_UPSTREAM_TEXT;
 }
 
 function getMode(node) {
@@ -192,6 +225,51 @@ function renderMarkdownTable(lines) {
 	return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
 
+function splitDoublePipeTableRow(line) {
+	let text = String(line || "").trim();
+	if (!text.includes("||")) {
+		return [];
+	}
+	if (text.startsWith("||")) {
+		text = text.slice(2);
+	}
+	if (text.endsWith("||")) {
+		text = text.slice(0, -2);
+	}
+	return text.split("||").map((cell) => cell.trim());
+}
+
+function isDoublePipeTableLine(line) {
+	const cells = splitDoublePipeTableRow(line);
+	return cells.length >= 2 && cells.some((cell) => cell.length > 0);
+}
+
+function isMarkdownTableSeparatorRow(cells) {
+	return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(String(cell || "").replace(/\s+/g, "")));
+}
+
+function renderDoublePipeTable(rows) {
+	const parsedRows = rows
+		.map(splitDoublePipeTableRow)
+		.filter((cells) => cells.length >= 2);
+	if (!parsedRows.length) {
+		return "";
+	}
+	const header = parsedRows[0];
+	const bodyRows = parsedRows.slice(1).filter((cells) => !isMarkdownTableSeparatorRow(cells));
+	const columnCount = Math.max(header.length, ...bodyRows.map((cells) => cells.length));
+	const padCells = (cells) => {
+		const padded = cells.slice(0, columnCount);
+		while (padded.length < columnCount) padded.push("");
+		return padded;
+	};
+	const head = padCells(header).map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`).join("");
+	const body = bodyRows
+		.map((row) => `<tr>${padCells(row).map((cell) => `<td>${renderInlineMarkdown(cell)}</td>`).join("")}</tr>`)
+		.join("");
+	return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
 function renderMarkdown(text) {
 	const source = String(text || "").replace(/\r\n/g, "\n").trim();
 	if (!source) {
@@ -205,6 +283,7 @@ function renderMarkdown(text) {
 	let inCode = false;
 	let codeLines = [];
 	let tableLines = [];
+	let doublePipeTableLines = [];
 
 	const flushTable = () => {
 		if (!tableLines.length) {
@@ -223,6 +302,16 @@ function renderMarkdown(text) {
 		return false;
 	};
 
+	const flushDoublePipeTable = () => {
+		if (!doublePipeTableLines.length) {
+			return;
+		}
+		flushParagraph(parts, paragraph);
+		flushList(parts, list);
+		parts.push(renderDoublePipeTable(doublePipeTableLines));
+		doublePipeTableLines = [];
+	};
+
 	for (const line of lines) {
 		const trimmed = line.trim();
 		const codeFence = trimmed.match(/^(```|~~~)/);
@@ -232,6 +321,7 @@ function renderMarkdown(text) {
 				codeLines = [];
 				inCode = false;
 			} else {
+				flushDoublePipeTable();
 				flushTable();
 				flushParagraph(parts, paragraph);
 				flushList(parts, list);
@@ -246,11 +336,22 @@ function renderMarkdown(text) {
 		}
 
 		if (!trimmed) {
+			flushDoublePipeTable();
 			flushTable();
 			flushParagraph(parts, paragraph);
 			flushList(parts, list);
 			continue;
 		}
+
+		if (isDoublePipeTableLine(trimmed)) {
+			flushTable();
+			flushParagraph(parts, paragraph);
+			flushList(parts, list);
+			doublePipeTableLines.push(trimmed);
+			continue;
+		}
+
+		flushDoublePipeTable();
 
 		if (trimmed.includes("|")) {
 			tableLines.push(line);
@@ -322,6 +423,7 @@ function renderMarkdown(text) {
 	if (inCode) {
 		parts.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
 	}
+	flushDoublePipeTable();
 	flushTable();
 	flushParagraph(parts, paragraph);
 	flushList(parts, list);
@@ -361,6 +463,180 @@ function syncSavedValue(node) {
 	node.properties = node.properties || {};
 	node.properties[SAVED_TEXT_PROPERTY] = value;
 	return value;
+}
+
+function setupIconButton(button, label, svg) {
+	button.innerHTML = svg;
+	button.title = label;
+	button.setAttribute("aria-label", label);
+	button.dataset.originalTitle = label;
+}
+
+async function writeClipboardText(text) {
+	const value = String(text ?? "");
+	if (navigator?.clipboard?.writeText) {
+		await navigator.clipboard.writeText(value);
+		return true;
+	}
+	const textarea = document.createElement("textarea");
+	textarea.value = value;
+	textarea.setAttribute("readonly", "readonly");
+	textarea.style.cssText = "position:fixed;left:-9999px;top:-9999px;opacity:0";
+	document.body.appendChild(textarea);
+	textarea.select();
+	const ok = document.execCommand?.("copy");
+	textarea.remove();
+	if (!ok) {
+		throw new Error("copy failed");
+	}
+	return true;
+}
+
+function flashButton(button, text, ok = true) {
+	if (!button) {
+		return;
+	}
+	const originalTitle = button.dataset.originalTitle || button.title || "";
+	button.dataset.originalTitle = originalTitle;
+	button.title = text;
+	button.style.borderColor = ok ? "#66d19e" : "#c95d5d";
+	button.style.background = ok ? "#143126" : "#351d1d";
+	clearTimeout(button.__gjjTextInputFlashTimer);
+	button.__gjjTextInputFlashTimer = setTimeout(() => {
+		button.title = button.dataset.originalTitle || originalTitle;
+		button.style.borderColor = "";
+		button.style.background = "";
+	}, 900);
+}
+
+function nodeRect(node, fallbackWidth = 260, fallbackHeight = 120) {
+	const x = Number(node?.pos?.[0] || 0);
+	const y = Number(node?.pos?.[1] || 0);
+	const width = Number(node?.size?.[0] || fallbackWidth);
+	const height = Number(node?.size?.[1] || fallbackHeight);
+	return { x, y, width, height };
+}
+
+function rectsOverlap(a, b, padding = 4) {
+	return !(
+		a.x + a.width + padding <= b.x
+		|| b.x + b.width + padding <= a.x
+		|| a.y + a.height + padding <= b.y
+		|| b.y + b.height + padding <= a.y
+	);
+}
+
+function nextTextCopyPosition(sourceNode, copyNode, graph) {
+	const source = nodeRect(sourceNode);
+	const copy = nodeRect(copyNode, 260, Math.max(120, source.height));
+	const x = source.x;
+	const step = Math.max(copy.height, source.height, 120) - 5;
+	let y = source.y - step;
+	const nodes = Array.isArray(graph?._nodes) ? graph._nodes : [];
+	for (let attempt = 0; attempt < 80; attempt += 1) {
+		const candidate = { x, y, width: copy.width, height: copy.height };
+		const occupied = nodes.some((item) => item !== copyNode && rectsOverlap(candidate, nodeRect(item)));
+		if (!occupied) {
+			return [x, y];
+		}
+		y -= step;
+	}
+	return [x, source.y - step];
+}
+
+function copyCurrentPreviewToNode(node) {
+	const button = node?.__gjjTextInputCopyNodeButton;
+	if (!hasReadyLinkedPreviewText(node)) {
+		flashButton(button, "无内容", false);
+		return;
+	}
+	const graph = node?.graph || app.graph;
+	const liteGraph = globalThis.LiteGraph;
+	const type = String(node?.type || node?.comfyClass || "GJJ_TextInput");
+	const copyNode = liteGraph?.createNode?.(type) || liteGraph?.createNode?.("GJJ_TextInput");
+	if (!copyNode || !graph?.add) {
+		flashButton(button, "创建失败", false);
+		return;
+	}
+	const text = getPreviewText(node);
+	try {
+		graph.add(copyNode);
+		copyNode.pos = nextTextCopyPosition(node, copyNode, graph);
+		setTextValue(copyNode, text);
+		syncSavedValue(copyNode);
+		setMode(copyNode, MODE_PREVIEW);
+		copyNode.__gjjTextInputLiveText = null;
+		scheduleStabilize(copyNode, 0);
+		app.canvas?.selectNode?.(copyNode, false);
+		refreshNode(copyNode);
+		flashButton(button, "已创建");
+	} catch (error) {
+		console.warn("[GJJ_TextInput] create text copy node failed", error);
+		try {
+			graph.remove?.(copyNode);
+		} catch (_) {
+			// Ignore cleanup failure; the user can still delete the partial node.
+		}
+		flashButton(button, "创建失败", false);
+	}
+}
+
+async function copyCurrentPreviewToClipboard(node) {
+	const button = node?.__gjjTextInputCopyClipboardButton;
+	if (!hasReadyLinkedPreviewText(node)) {
+		flashButton(button, "无内容", false);
+		return;
+	}
+	try {
+		await writeClipboardText(getPreviewText(node));
+		flashButton(button, "已复制到剪贴板");
+	} catch (error) {
+		console.warn("[GJJ_TextInput] copy to clipboard failed", error);
+		flashButton(button, "复制失败", false);
+	}
+}
+
+async function runCurrentTextInputNode(node) {
+	const button = node?.__gjjTextInputRunButton;
+	try {
+		const queued = await queueOnlyCurrentNode(node);
+		flashButton(button, queued ? "已运行当前节点" : "运行失败", Boolean(queued));
+	} catch (error) {
+		console.warn("[GJJ_TextInput] run current node failed", error);
+		flashButton(button, "运行失败", false);
+	}
+}
+
+function disconnectTextInput(node) {
+	const input = getInputByName(node, TEXT_INPUT_NAME);
+	if (!input) {
+		return;
+	}
+	const index = node.inputs?.indexOf(input) ?? -1;
+	if (index >= 0 && typeof node.disconnectInput === "function") {
+		node.disconnectInput(index);
+		return;
+	}
+	const linkId = input.link;
+	if (linkId != null && app.graph?.removeLink) {
+		app.graph.removeLink(linkId);
+		input.link = null;
+	}
+}
+
+function holdCurrentPreviewText(node) {
+	if (!hasReadyLinkedPreviewText(node)) {
+		flashButton(node?.__gjjTextInputHoldButton, "无内容", false);
+		return;
+	}
+	const text = getPreviewText(node);
+	setTextValue(node, text);
+	syncSavedValue(node);
+	node.__gjjTextInputLiveText = null;
+	disconnectTextInput(node);
+	enterPreviewMode(node);
+	flashButton(node.__gjjTextInputHoldButton, "已保持");
+	refreshNode(node);
 }
 
 function restoreSavedValue(node, serializedNode = null) {
@@ -504,12 +780,16 @@ function applyMode(node) {
 
 	if (node.__gjjTextInputPreviewBody) {
 		node.__gjjTextInputPreviewBody.style.display = preview ? "block" : "none";
-		node.__gjjTextInputPreviewBody.innerHTML = renderMarkdown(getTextValue(node));
+		node.__gjjTextInputPreviewBody.innerHTML = renderMarkdown(getPreviewText(node));
+	}
+	if (node.__gjjTextInputActionBar) {
+		node.__gjjTextInputActionBar.style.display = preview && hasReadyLinkedPreviewText(node) ? "flex" : "none";
 	}
 	if (node.__gjjTextInputEditor) {
 		node.__gjjTextInputEditor.style.display = preview ? "none" : "block";
-		if (node.__gjjTextInputEditor.value !== getTextValue(node)) {
-			node.__gjjTextInputEditor.value = getTextValue(node);
+		const editorText = getMode(node) === MODE_EDIT ? getPreviewText(node) : getTextValue(node);
+		if (node.__gjjTextInputEditor.value !== editorText) {
+			node.__gjjTextInputEditor.value = editorText;
 		}
 		syncEditorHeight(node.__gjjTextInputEditor);
 	}
@@ -540,6 +820,8 @@ function disableStandardStatus(node) {
 }
 
 function enterEditMode(node) {
+	node.__gjjTextInputEditingLinkedPreview = hasLinkedTextInput(node);
+	node.__gjjTextInputEditInitialValue = getPreviewText(node);
 	setMode(node, MODE_EDIT);
 	applyMode(node);
 	setTimeout(() => {
@@ -571,6 +853,24 @@ function handlePreviewPointer(node, event) {
 function enterPreviewMode(node) {
 	setMode(node, MODE_PREVIEW);
 	applyMode(node);
+}
+
+function firstPreviewText(message) {
+	const values = [
+		message?.preview_text,
+		message?.text,
+		message?.ui?.preview_text,
+	];
+	for (const value of values) {
+		if (Array.isArray(value)) {
+			for (const item of value) {
+				if (item !== undefined && item !== null) return String(item);
+			}
+		} else if (value !== undefined && value !== null) {
+			return String(value);
+		}
+	}
+	return "";
 }
 
 
@@ -704,6 +1004,42 @@ function buildDom(node) {
 		"overflow:auto",
 	].join(";");
 
+	const actionBar = document.createElement("div");
+	actionBar.className = "gjj-text-input-action-bar";
+	actionBar.style.cssText = [
+		"display:none",
+		"justify-content:flex-end",
+		"align-items:center",
+		"gap:6px",
+		"margin:0 0 6px",
+		"pointer-events:auto",
+	].join(";");
+
+	const holdButton = document.createElement("button");
+	holdButton.type = "button";
+	holdButton.className = "gjj-text-input-action-button";
+	setupIconButton(holdButton, "保持文本并断开链接", HOLD_ICON_SVG);
+
+	const runButton = document.createElement("button");
+	runButton.type = "button";
+	runButton.className = "gjj-text-input-action-button";
+	runButton.textContent = "▶";
+	runButton.title = "运行当前 GJJ_TextInput 节点";
+	runButton.setAttribute("aria-label", "运行当前 GJJ_TextInput 节点");
+	runButton.dataset.originalTitle = runButton.title;
+
+	const copyNodeButton = document.createElement("button");
+	copyNodeButton.type = "button";
+	copyNodeButton.className = "gjj-text-input-action-button";
+	setupIconButton(copyNodeButton, "复制节点：在当前节点旁边新建 GJJ_TextInput，并填入当前上游文本", COPY_NODE_ICON_SVG);
+
+	const copyClipboardButton = document.createElement("button");
+	copyClipboardButton.type = "button";
+	copyClipboardButton.className = "gjj-text-input-action-button";
+	setupIconButton(copyClipboardButton, "复制到剪贴板", CLIPBOARD_ICON_SVG);
+
+	actionBar.append(holdButton, runButton, copyNodeButton, copyClipboardButton);
+
 	const style = document.createElement("style");
 	style.textContent = `
 		.gjj-text-input-markdown-body h1,
@@ -786,6 +1122,28 @@ function buildDom(node) {
 			margin: 10px 0;
 		}
 		.gjj-text-input-empty { color: #8ea0a8; }
+		.gjj-text-input-action-button {
+			width: 24px;
+			height: 24px;
+			padding: 3px;
+			border: 1px solid #3a4f58;
+			border-radius: 5px;
+			background: #10191e;
+			color: #cdd9d7;
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			cursor: pointer;
+		}
+		.gjj-text-input-action-button svg {
+			width: 16px;
+			height: 16px;
+			display: block;
+		}
+		.gjj-text-input-action-button:hover {
+			border-color: #5f8fa0;
+			background: #16242a;
+		}
 	`;
 
 	// 链接事件必须在捕获阶段先截住，否则 ComfyUI 画布/节点拖拽事件会吃掉点击。
@@ -828,14 +1186,18 @@ function buildDom(node) {
 	editor.addEventListener("mousedown", (event) => event.stopPropagation());
 	editor.addEventListener("dblclick", (event) => event.stopPropagation());
 	editor.addEventListener("input", () => {
-		setTextValue(node, editor.value);
-		syncSavedValue(node);
+		if (!node.__gjjTextInputEditingLinkedPreview) {
+			setTextValue(node, editor.value);
+			syncSavedValue(node);
+		}
 		syncEditorHeight(editor);
 		refreshNode(node);
 	});
 	editor.addEventListener("change", () => {
-		setTextValue(node, editor.value);
-		syncSavedValue(node);
+		if (!node.__gjjTextInputEditingLinkedPreview) {
+			setTextValue(node, editor.value);
+			syncSavedValue(node);
+		}
 		refreshNode(node);
 	});
 	editor.addEventListener("keydown", (event) => {
@@ -845,14 +1207,53 @@ function buildDom(node) {
 		}
 	});
 	editor.addEventListener("blur", () => {
-		setTextValue(node, editor.value);
-		syncSavedValue(node);
+		const editedLinkedPreview = Boolean(node.__gjjTextInputEditingLinkedPreview);
+		const changed = String(editor.value ?? "") !== String(node.__gjjTextInputEditInitialValue ?? "");
+		if (!editedLinkedPreview || changed) {
+			setTextValue(node, editor.value);
+			syncSavedValue(node);
+			if (editedLinkedPreview) {
+				node.__gjjTextInputLiveText = null;
+			}
+		}
+		node.__gjjTextInputEditingLinkedPreview = false;
+		node.__gjjTextInputEditInitialValue = "";
 		enterPreviewMode(node);
 	});
+	for (const button of [holdButton, runButton, copyNodeButton, copyClipboardButton]) {
+		button.addEventListener("pointerdown", (event) => event.stopPropagation());
+		button.addEventListener("mousedown", (event) => event.stopPropagation());
+		button.addEventListener("dblclick", (event) => event.stopPropagation());
+	}
+	holdButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		holdCurrentPreviewText(node);
+	});
+	runButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		runCurrentTextInputNode(node);
+	});
+	copyNodeButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		copyCurrentPreviewToNode(node);
+	});
+	copyClipboardButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		copyCurrentPreviewToClipboard(node);
+	});
 
-	container.append(style, previewBody, editor);
+	container.append(style, actionBar, previewBody, editor);
 
 	node.__gjjTextInputContainer = container;
+	node.__gjjTextInputActionBar = actionBar;
+	node.__gjjTextInputHoldButton = holdButton;
+	node.__gjjTextInputRunButton = runButton;
+	node.__gjjTextInputCopyNodeButton = copyNodeButton;
+	node.__gjjTextInputCopyClipboardButton = copyClipboardButton;
 	node.__gjjTextInputPreviewBody = previewBody;
 	node.__gjjTextInputEditor = editor;
 	return container;
@@ -955,6 +1356,28 @@ app.registerExtension({
 		nodeType.prototype.onDblClick = function (...args) {
 			enterEditMode(this);
 			const result = originalOnDblClick?.apply(this, args);
+			return result;
+		};
+
+		const originalOnExecuted = nodeType.prototype.onExecuted;
+		nodeType.prototype.onExecuted = function (message, ...args) {
+			const result = originalOnExecuted?.apply(this, [message, ...args]);
+			if (hasLinkedTextInput(this)) {
+				this.__gjjTextInputLiveText = firstPreviewText(message);
+			} else {
+				this.__gjjTextInputLiveText = null;
+			}
+			enterPreviewMode(this);
+			return result;
+		};
+
+		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+		nodeType.prototype.onConnectionsChange = function (...args) {
+			const result = originalOnConnectionsChange?.apply(this, args);
+			if (!hasLinkedTextInput(this)) {
+				this.__gjjTextInputLiveText = null;
+			}
+			scheduleStabilize(this, 0);
 			return result;
 		};
 

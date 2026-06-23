@@ -1,357 +1,401 @@
-from __future__ import annotations
-
+import logging
+import asyncio
+import json
 import base64
 import io as _io
-import json
-import logging
 import math
-import os
-import types
-from pathlib import Path
-from typing import Any
+import re
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+import av
 from PIL import Image
 
-import folder_paths
-import comfy.ldm.modules.attention
-import comfy.model_management
-import comfy.utils
+import os
+import platform
 
-from .common_utils.network_media import (
-    gjjutils_detect_media_type as _detect_media_type,
-    gjjutils_download_network_media_to_input as _download_network_media_to_input,
-    gjjutils_input_relative_media_path as _input_relative_media_path,
-    gjjutils_is_network_url as _is_network_url,
+import folder_paths
+import comfy.model_management
+from server import PromptServer
+from aiohttp import web
+
+from comfy_api.latest import io
+from .gjj_ltx_director_prompt_relay import (
+    get_raw_tokenizer,
+    map_token_indices,
+    build_segments,
+    create_mask_fn,
+    distribute_segment_lengths,
 )
 
+from .gjj_ltx_director_patches import detect_model_type, apply_patches
 
 log = logging.getLogger(__name__)
 
-GUIDE_DATA_TYPE = "GUIDE_DATA"
-MEDIA_COPY_SUBDIR = "GJJ_LTXDirector"
-
-
-def _register_ltx_director_routes() -> None:
+# Setup global event loop exception handler to silence ConnectionResetError (WinError 10054/10053) on Windows
+try:
+    loop = None
     try:
-        from aiohttp import web
-        from server import PromptServer
-    except Exception:
-        return
-
-    server = getattr(PromptServer, "instance", None)
-    routes = getattr(server, "routes", None)
-    if server is None or routes is None:
-        return
-    if getattr(server, "_gjj_ltx_director_routes_registered", False):
-        return
-    setattr(server, "_gjj_ltx_director_routes_registered", True)
-
-    @routes.post("/gjj/ltx_director/download_media")
-    async def download_media(request):
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
         try:
-            data = await request.json()
+            loop = asyncio.get_event_loop_policy().get_event_loop()
         except Exception:
-            data = {}
+            pass
 
-        url = str(data.get("url") or "").strip()
-        media_type = str(data.get("media_type") or _detect_media_type(url) or "").upper()
-        if not _is_network_url(url):
-            return web.json_response({"error": "只支持 http/https 网络媒体地址。"}, status=400)
-        if media_type not in {"IMAGE", "AUDIO"}:
-            return web.json_response({"error": "LTX Director 设置面板只支持网络图片和网络音频。"}, status=400)
+    if loop is not None:
+        old_handler = loop.get_exception_handler()
 
-        try:
-            file_path = _download_network_media_to_input(url, media_type, copy_subdir=MEDIA_COPY_SUBDIR)
-        except Exception as exc:
-            return web.json_response({"error": f"下载失败：{exc}"}, status=500)
-
-        return web.json_response(
-            {
-                "filename": _input_relative_media_path(file_path),
-                "name": Path(file_path).name,
-                "media_type": media_type,
-            }
-        )
-
-
-_register_ltx_director_routes()
-
-
-def _conditioning_set_values(conditioning, values: dict[str, Any]):
-    out = []
-    for item in conditioning:
-        if len(item) == 2:
-            cond, pooled = item
-            data = dict(pooled)
-            data.update(values)
-            out.append([cond, data])
-        else:
-            out.append(item)
-    return out
-
-
-def _build_temporal_cost(q_token_idx, lq, lk, device, dtype, tokens_per_frame):
-    offset = torch.zeros(lq, lk, device=device, dtype=dtype)
-    query_frames = torch.arange(lq, device=device, dtype=torch.long) // tokens_per_frame
-    for seg in q_token_idx:
-        local = seg["local_token_idx"].to(device=device)
-        dist = (query_frames.float()[:, None] - seg["midpoint"]).abs()
-        cost = seg.get("strength", 1.0) * (torch.relu(dist - seg["window"]) ** 2) / (2 * seg["sigma"] ** 2)
-        offset[:, local] = cost.to(offset.dtype)
-    return offset
-
-
-def _build_temporal_cost_scaled(q_token_idx, lq, lk, device, dtype, latent_frames):
-    offset = torch.zeros(lq, lk, device=device, dtype=dtype)
-    query_frames = torch.arange(lq, device=device, dtype=torch.float32) * latent_frames / lq
-    for seg in q_token_idx:
-        local = seg["local_token_idx"].to(device=device)
-        dist = (query_frames[:, None] - seg["midpoint"]).abs()
-        sigma = seg.get("sigma_audio", seg["sigma"])
-        window = seg.get("window_audio", seg["window"])
-        strength = seg.get("strength_audio", 1.0)
-        cost = strength * (torch.relu(dist - window) ** 2) / (2 * sigma ** 2)
-        offset[:, local] = cost.to(offset.dtype)
-    return offset
-
-
-def _create_mask_fn(q_token_idx, fallback_tokens_per_frame, latent_frames):
-    cache = {}
-    max_token_idx = max(int(seg["local_token_idx"].max().item()) for seg in q_token_idx) + 1
-
-    def mask_fn(q, k, transformer_options):
-        lq, lk = q.shape[1], k.shape[1]
-        if lq == lk:
-            return None
-
-        cond_or_uncond = transformer_options.get("cond_or_uncond", [])
-        if 1 in cond_or_uncond and 0 not in cond_or_uncond:
-            return None
-
-        grid_sizes = transformer_options.get("grid_sizes", None)
-        video_tpf = int(grid_sizes[1]) * int(grid_sizes[2]) if grid_sizes is not None else fallback_tokens_per_frame
-        video_lq = latent_frames * video_tpf
-        if lk == video_lq or lk < max_token_idx:
-            return None
-
-        mode = "video" if lq == video_lq else "scaled"
-        key = (lq, lk, mode, q.device)
-        if key not in cache:
-            if mode == "video":
-                cost = _build_temporal_cost(q_token_idx, lq, lk, q.device, q.dtype, video_tpf)
+        def silence_connection_reset_handler(loop, context):
+            exception = context.get('exception')
+            if (isinstance(exception, (ConnectionResetError, ConnectionAbortedError)) or
+                (isinstance(exception, OSError) and getattr(exception, 'winerror', None) in (10054, 10053))):
+                # Suppress WinError 10054 and WinError 10053 tracebacks in logging
+                return
+            if old_handler:
+                old_handler(loop, context)
             else:
-                cost = _build_temporal_cost_scaled(q_token_idx, lq, lk, q.device, q.dtype, latent_frames)
-            cache[key] = -cost
-        return cache[key].to(q.dtype)
+                loop.default_exception_handler(context)
 
-    return mask_fn
+        loop.set_exception_handler(silence_connection_reset_handler)
+except Exception:
+    pass
 
+# Custom socket type shared with LTXSequencer
+GuideData = io.Custom("GUIDE_DATA")
+MotionGuideData = io.Custom("MOTION_GUIDE_DATA")
+DirectorMediaInput = io.Custom("GJJ_BATCH_IMAGE,IMAGE,VIDEO,AUDIO")
+DirectorGridInput = io.Custom("GJJ_BATCH_IMAGE,IMAGE")
 
-def _build_segments(token_ranges, segment_lengths, epsilon=1e-3):
-    sigma = 1.0 / math.log(1.0 / epsilon) if 0 < epsilon < 1 else 0.1448
-    q_token_idx = []
-    frame_cursor = 0
-    for (tok_start, tok_end), length in zip(token_ranges, segment_lengths):
-        if length <= 0:
-            frame_cursor += length
-            continue
-        midpoint = (2 * frame_cursor + length) // 2
-        window = max(length // 2 - 2, 0)
-        q_token_idx.append(
-            {
-                "local_token_idx": torch.arange(tok_start, tok_end),
-                "midpoint": midpoint,
-                "window": window,
-                "sigma": sigma,
-                "strength": 1.0,
-                "window_audio": window,
-                "sigma_audio": sigma,
-                "strength_audio": 1.0,
-            }
-        )
-        frame_cursor += length
-    return q_token_idx
+# --- File Check Endpoint for Deduplication ---
+@PromptServer.instance.routes.get("/gjj/ltx_director/check_file")
+async def gjj_ltx_director_check_file(request):
+    filename = request.query.get("filename", "")
+    file_size = request.query.get("size", "")
+    if not filename:
+        return web.json_response({"exists": False})
 
+    upload_dir = folder_paths.get_input_directory()
+    temp_dir = os.path.join(upload_dir, "GJJ_LTXDirector")
 
-def _get_raw_tokenizer(clip):
-    tokenizer_wrapper = clip.tokenizer
-    for attr_name in dir(tokenizer_wrapper):
-        if attr_name.startswith("_"):
-            continue
-        inner = getattr(tokenizer_wrapper, attr_name, None)
-        if inner is not None and hasattr(inner, "tokenizer"):
-            return inner.tokenizer
-    raise RuntimeError("无法在 CLIP 对象中找到原始 tokenizer，不能构建 LTX Director 分段提示词。")
+    # 1. Check if the exact filename exists in the GJJ workspace or root input dir
+    possible_paths = [
+        os.path.join(temp_dir, filename),
+        os.path.join(upload_dir, filename)
+    ]
 
+    found_path = None
+    for p in possible_paths:
+        if os.path.exists(p) and os.path.isfile(p):
+            if file_size:
+                try:
+                    if os.path.getsize(p) == int(file_size):
+                        found_path = p
+                        break
+                except ValueError:
+                    found_path = p
+                    break
+            else:
+                found_path = p
+                break
 
-def _map_token_indices(raw_tokenizer, global_prompt, local_prompts):
-    prefixed_locals = [" " + lp for lp in local_prompts]
-    full_prompt = global_prompt + "".join(prefixed_locals)
-    has_eos = getattr(raw_tokenizer, "add_eos", False)
-    eos_adj = 1 if has_eos else 0
-    prev_len = len(raw_tokenizer(global_prompt)["input_ids"]) - eos_adj
-    token_ranges = []
-    built = global_prompt
-    for prompt in prefixed_locals:
-        built += prompt
-        cur_len = len(raw_tokenizer(built)["input_ids"]) - eos_adj
-        if cur_len <= prev_len:
-            raise ValueError(f"局部提示词没有产生 token：{prompt.strip()}")
-        token_ranges.append((prev_len, cur_len))
-        prev_len = cur_len
-    return full_prompt, token_ranges
+    if found_path:
+        rel_name = os.path.relpath(found_path, upload_dir).replace('\\', '/')
+        return web.json_response({"exists": True, "name": rel_name})
 
+    # 2. Suffix search if exact match not found
+    base_name = os.path.basename(filename)
+    suffix = f"_{base_name}"
+    try:
+        for search_dir in [temp_dir, upload_dir]:
+            if os.path.exists(search_dir):
+                for f_name in os.listdir(search_dir):
+                    if f_name.endswith(suffix) or f_name == base_name:
+                        pot_path = os.path.join(search_dir, f_name)
+                        if os.path.isfile(pot_path):
+                            if file_size:
+                                try:
+                                    if os.path.getsize(pot_path) == int(file_size):
+                                        rel_name = os.path.relpath(pot_path, upload_dir).replace('\\', '/')
+                                        return web.json_response({"exists": True, "name": rel_name})
+                                except ValueError:
+                                    pass
+                            else:
+                                rel_name = os.path.relpath(pot_path, upload_dir).replace('\\', '/')
+                                return web.json_response({"exists": True, "name": rel_name})
+    except Exception as e:
+        log.warning(f"[LTXDirector] Error listing input directory: {e}")
 
-def _distribute_segment_lengths(num_segments, latent_frames, specified_lengths=None):
-    if specified_lengths:
-        if len(specified_lengths) != num_segments:
-            raise ValueError(f"时间线片段长度数量（{len(specified_lengths)}）与局部提示词数量（{num_segments}）不一致。")
-        lengths = specified_lengths
-    else:
-        step = -(-latent_frames // num_segments)
-        lengths = [step] * num_segments
-
-    effective = []
-    cursor = 0
-    for length in lengths:
-        end = min(cursor + length, latent_frames)
-        effective.append(max(end - cursor, 0))
-        cursor = end
-    return effective
+    return web.json_response({"exists": False})
 
 
-def _masked_attention(q, k, v, heads, mask, transformer_options=None, **kwargs):
-    return comfy.ldm.modules.attention.attention_pytorch(
-        q,
-        k,
-        v,
-        heads,
-        mask=mask,
-        _inside_attn_wrapper=True,
-        transformer_options=transformer_options or {},
-        **kwargs,
-    )
+def read_wav_peaks(wav_path):
+    import wave
+    peaks = []
+    with wave.open(wav_path, 'rb') as w:
+        n_frames = w.getnframes()
+        if n_frames > 0:
+            frames_bytes = w.readframes(n_frames)
+            samples = np.frombuffer(frames_bytes, dtype=np.int16)
+            num_peaks = 200
+            step = max(1, len(samples) // num_peaks)
+            for i in range(num_peaks):
+                chunk = samples[i * step : (i + 1) * step]
+                if len(chunk) > 0:
+                    max_val = np.max(np.abs(chunk)) / 32767.0
+                    peaks.append(float(max_val))
+                else:
+                    peaks.append(0.0)
+        else:
+            peaks = [0.0] * 200
+    return peaks
 
 
-def _wan_t2v_forward(self, mask_fn, x, context, transformer_options=None, **kwargs):
-    transformer_options = transformer_options or {}
-    q = self.norm_q(self.q(x))
-    k = self.norm_k(self.k(context))
-    v = self.v(context)
-    mask = mask_fn(q, k, transformer_options)
-    if mask is not None:
-        x = _masked_attention(q, k, v, heads=self.num_heads, mask=mask, transformer_options=transformer_options)
-    else:
-        x = comfy.ldm.modules.attention.optimized_attention(q, k, v, heads=self.num_heads, transformer_options=transformer_options)
-    return self.o(x)
+def extract_audio_from_video(video_path):
+    import wave
+    try:
+        base, _ = os.path.splitext(video_path)
+        output_wav = base + "_extracted_audio.wav"
+
+        # Check if already exists, is not empty, and has the correct 44100Hz sample rate
+        if os.path.exists(output_wav) and os.path.getsize(output_wav) > 44:
+            try:
+                with wave.open(output_wav, 'rb') as w_check:
+                    if w_check.getframerate() == 44100:
+                        peaks = read_wav_peaks(output_wav)
+                        input_dir = folder_paths.get_input_directory()
+                        rel_output = os.path.relpath(output_wav, input_dir).replace('\\', '/')
+                        return rel_output, peaks
+            except Exception:
+                pass
+
+        # Decode the video using PyAV
+        with av.open(video_path) as container:
+            if not container.streams.audio:
+                return None, None
+            stream = container.streams.audio[0]
+
+            # Setup resampler to 44100Hz, Mono, signed 16-bit integer (s16)
+            resampler = av.AudioResampler(
+                format='s16',
+                layout='mono',
+                rate=44100,
+            )
+
+            audio_bytes = bytearray()
+
+            for frame in container.decode(stream):
+                for resampled_frame in resampler.resample(frame):
+                    arr = resampled_frame.to_ndarray()
+                    audio_bytes.extend(arr.tobytes())
+
+            # Flush resampler
+            for resampled_frame in resampler.resample(None):
+                arr = resampled_frame.to_ndarray()
+                audio_bytes.extend(arr.tobytes())
+
+            if not audio_bytes:
+                return None, None
+
+            # Write WAV file
+            with wave.open(output_wav, 'wb') as w:
+                w.setnchannels(1)
+                w.setsampwidth(2) # 16-bit
+                w.setframerate(44100)
+                w.writeframes(audio_bytes)
+
+        # Calculate peaks
+        peaks = []
+        samples = np.frombuffer(audio_bytes, dtype=np.int16)
+        num_peaks = 200
+        step = max(1, len(samples) // num_peaks)
+        for i in range(num_peaks):
+            chunk = samples[i * step : (i + 1) * step]
+            if len(chunk) > 0:
+                max_val = np.max(np.abs(chunk)) / 32767.0
+                peaks.append(float(max_val))
+            else:
+                peaks.append(0.0)
+
+        input_dir = folder_paths.get_input_directory()
+        rel_output = os.path.relpath(output_wav, input_dir).replace('\\', '/')
+        return rel_output, peaks
+    except Exception as e:
+        print(f"[LTXDirector] Server audio extraction failed: {e}")
+        return None, None
 
 
-def _wan_i2v_forward(self, mask_fn, x, context, context_img_len, transformer_options=None, **kwargs):
-    transformer_options = transformer_options or {}
-    context_img = context[:, :context_img_len]
-    context_text = context[:, context_img_len:]
-    q = self.norm_q(self.q(x))
-    k_img = self.norm_k_img(self.k_img(context_img))
-    v_img = self.v_img(context_img)
-    img_x = comfy.ldm.modules.attention.optimized_attention(q, k_img, v_img, heads=self.num_heads, transformer_options=transformer_options)
-    k = self.norm_k(self.k(context_text))
-    v = self.v(context_text)
-    mask = mask_fn(q, k, transformer_options)
-    if mask is not None:
-        x = _masked_attention(q, k, v, heads=self.num_heads, mask=mask, transformer_options=transformer_options)
-    else:
-        x = comfy.ldm.modules.attention.optimized_attention(q, k, v, heads=self.num_heads, transformer_options=transformer_options)
-    return self.o(x + img_x)
+def get_audio_peaks(audio_path):
+    import wave
+    # If it is already a WAV file, read peaks directly
+    _, ext = os.path.splitext(audio_path)
+    if ext.lower() == ".wav":
+        try:
+            return read_wav_peaks(audio_path)
+        except Exception:
+            pass # fallback to PyAV
+
+    # Use PyAV to decode and resample the audio file
+    try:
+        with av.open(audio_path) as container:
+            if not container.streams.audio:
+                return None
+            stream = container.streams.audio[0]
+            resampler = av.AudioResampler(
+                format='s16',
+                layout='mono',
+                rate=8000,
+            )
+            audio_bytes = bytearray()
+            for frame in container.decode(stream):
+                for resampled_frame in resampler.resample(frame):
+                    arr = resampled_frame.to_ndarray()
+                    audio_bytes.extend(arr.tobytes())
+            for resampled_frame in resampler.resample(None):
+                arr = resampled_frame.to_ndarray()
+                audio_bytes.extend(arr.tobytes())
+
+            if not audio_bytes:
+                return None
+
+            peaks = []
+            samples = np.frombuffer(audio_bytes, dtype=np.int16)
+            num_peaks = 200
+            step = max(1, len(samples) // num_peaks)
+            for i in range(num_peaks):
+                chunk = samples[i * step : (i + 1) * step]
+                if len(chunk) > 0:
+                    max_val = np.max(np.abs(chunk)) / 32767.0
+                    peaks.append(float(max_val))
+                else:
+                    peaks.append(0.0)
+            return peaks
+    except Exception as e:
+        print(f"[LTXDirector] Failed to get audio peaks via PyAV: {e}")
+        return None
 
 
-def _ltx_forward(self, mask_fn, x, context=None, mask=None, pe=None, k_pe=None, transformer_options=None):
-    from comfy.ldm.lightricks.model import apply_rotary_emb
+@PromptServer.instance.routes.get("/gjj/ltx_director/get_audio")
+async def gjj_ltx_director_get_audio(request):
+    filename = request.query.get("filename")
+    if not filename:
+        return web.json_response({"error": "Missing filename"}, status=400)
 
-    transformer_options = transformer_options or {}
-    is_self_attn = context is None
-    context = x if is_self_attn else context
-    q = self.q_norm(self.to_q(x))
-    k = self.k_norm(self.to_k(context))
-    v = self.to_v(context)
-    if pe is not None:
-        q = apply_rotary_emb(q, pe)
-        k = apply_rotary_emb(k, pe if k_pe is None else k_pe)
-    if not is_self_attn:
-        temporal_mask = mask_fn(q, k, transformer_options)
-        if temporal_mask is not None:
-            mask = temporal_mask if mask is None else mask + temporal_mask
-    if mask is None:
-        out = comfy.ldm.modules.attention.optimized_attention(
-            q, k, v, self.heads, attn_precision=self.attn_precision, transformer_options=transformer_options
-        )
-    else:
-        out = _masked_attention(q, k, v, self.heads, mask=mask, attn_precision=self.attn_precision, transformer_options=transformer_options)
-    if self.to_gate_logits is not None:
-        gate_logits = self.to_gate_logits(x)
-        batch, tokens, _ = out.shape
-        out = out.view(batch, tokens, self.heads, self.dim_head)
-        out = out * (2.0 * torch.sigmoid(gate_logits)).unsqueeze(-1)
-        out = out.view(batch, tokens, self.heads * self.dim_head)
-    return self.to_out(out)
+    upload_dir = folder_paths.get_input_directory()
 
+    clean_filename = filename.replace('\\', '/')
+    file_path = os.path.join(upload_dir, clean_filename)
+    if not os.path.exists(file_path):
+        basename = os.path.basename(clean_filename)
+        temp_path = os.path.join(upload_dir, "GJJ_LTXDirector", basename)
+        if os.path.exists(temp_path):
+            file_path = temp_path
+        else:
+            file_path = os.path.join(upload_dir, basename)
 
-class _CrossAttnPatch:
-    def __init__(self, impl, mask_fn):
-        self.impl = impl
-        self.mask_fn = mask_fn
+    if not os.path.exists(file_path) or not os.path.isfile(file_path):
+        return web.json_response({"error": "File not found"}, status=404)
 
-    def __get__(self, obj, objtype=None):
-        impl, mask_fn = self.impl, self.mask_fn
+    _, ext = os.path.splitext(file_path)
+    is_audio = ext.lower() in [".wav", ".mp3", ".ogg", ".flac", ".m4a"]
 
-        def wrapped(self_module, *args, **kwargs):
-            return impl(self_module, mask_fn, *args, **kwargs)
+    if is_audio:
+        peaks = None
+        try:
+            peaks = get_audio_peaks(file_path)
+        except Exception as e:
+            print(f"[LTXDirector] Failed to get audio peaks for audio file: {e}")
 
-        return types.MethodType(wrapped, obj)
+        rel_path = os.path.relpath(file_path, upload_dir).replace('\\', '/')
+        return web.json_response({
+            "audio_file": rel_path,
+            "peaks": peaks
+        })
 
+    audio_file, peaks = None, None
+    try:
+        loop = asyncio.get_event_loop()
+        audio_file, peaks = await loop.run_in_executor(None, extract_audio_from_video, file_path)
+    except Exception as e:
+        print(f"[LTXDirector] Error extracting audio: {e}")
 
-def _detect_model_type(model):
-    diff_model = model.model.diffusion_model
-    if hasattr(diff_model, "patch_size") and not hasattr(diff_model, "patchifier"):
-        return "wan", tuple(diff_model.patch_size), 4
-    if hasattr(diff_model, "patchifier"):
-        return "ltx", (1, 1, 1), int(diff_model.vae_scale_factors[0])
-    raise ValueError(f"不支持的模型类型：{type(diff_model).__name__}。当前仅支持 Wan 与 LTX。")
+    return web.json_response({
+        "audio_file": audio_file,
+        "peaks": peaks
+    })
 
 
-def _check_unpatched(model_clone, key):
-    if key in getattr(model_clone, "object_patches", {}):
-        raise RuntimeError(f"LTX Director 的注意力补丁位置已被其它节点占用：{key}。请移除冲突节点后再试。")
+@PromptServer.instance.routes.get("/gjj/ltx_director/open_folder")
+async def gjj_ltx_director_open_folder(request):
+    upload_dir = os.path.join(folder_paths.get_input_directory(), "GJJ_LTXDirector")
+    os.makedirs(upload_dir, exist_ok=True)
+    try:
+        if hasattr(os, "startfile"):
+            os.startfile(upload_dir)
+        else:
+            import webbrowser
+            webbrowser.open(os.path.abspath(upload_dir))
+        return web.json_response({"success": True})
+    except Exception as e:
+        print(f"[LTXDirector] Failed to open workspace folder: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
-def _apply_patches(model_clone, arch, mask_fn):
-    diffusion_model = model_clone.get_model_object("diffusion_model")
-    if arch == "wan":
-        from comfy.ldm.wan.model import WanI2VCrossAttention
+def _read_and_write_file_chunk(file, file_path, mode):
+    chunk_bytes = file.file.read()
+    with open(file_path, mode) as f:
+        f.write(chunk_bytes)
 
-        for idx, block in enumerate(diffusion_model.blocks):
-            key = f"diffusion_model.blocks.{idx}.cross_attn.forward"
-            _check_unpatched(model_clone, key)
-            cross_attn = block.cross_attn
-            impl = _wan_i2v_forward if isinstance(cross_attn, WanI2VCrossAttention) else _wan_t2v_forward
-            model_clone.add_object_patch(key, _CrossAttnPatch(impl, mask_fn).__get__(cross_attn, cross_attn.__class__))
-        return
-    if arch == "ltx":
-        for idx, block in enumerate(diffusion_model.transformer_blocks):
-            for attr in ("attn2", "audio_attn2"):
-                module = getattr(block, attr, None)
-                if module is None:
-                    continue
-                key = f"diffusion_model.transformer_blocks.{idx}.{attr}.forward"
-                _check_unpatched(model_clone, key)
-                model_clone.add_object_patch(key, _CrossAttnPatch(_ltx_forward, mask_fn).__get__(module, module.__class__))
-        return
-    raise ValueError(f"未知模型架构：{arch}")
+
+# --- LTX Director Chunked Video Upload Endpoint ---
+# Bypasses the 413 Payload Too Large error for large video files.
+# This endpoint is self-contained and independent of any other node.
+@PromptServer.instance.routes.post("/gjj/ltx_director/upload_chunk")
+async def gjj_ltx_director_upload_chunk(request):
+    post = await request.post()
+    file = post.get("file")
+    filename = post.get("filename")
+    chunk_index = int(post.get("chunk_index"))
+    total_chunks = int(post.get("total_chunks"))
+
+    upload_dir = os.path.join(folder_paths.get_input_directory(), "GJJ_LTXDirector")
+    os.makedirs(upload_dir, exist_ok=True)
+
+    # Sanitize filename to prevent path traversal attacks (e.g. ../../etc/passwd)
+    filename = os.path.basename(filename)
+    file_path = os.path.join(upload_dir, filename)
+
+    # Belt-and-suspenders: confirm the resolved path is still inside the upload directory
+    if not os.path.realpath(file_path).startswith(os.path.realpath(upload_dir)):
+        return web.json_response({"error": "Invalid filename"}, status=400)
+
+    # Append chunk to file (write fresh on first chunk, append on subsequent)
+    mode = "ab" if chunk_index > 0 else "wb"
+
+    # Offload the blocking read/write disk I/O to a thread executor
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _read_and_write_file_chunk, file, file_path, mode)
+
+    if chunk_index == total_chunks - 1:
+        audio_file, peaks = None, None
+        try:
+            audio_file, peaks = await loop.run_in_executor(None, extract_audio_from_video, file_path)
+        except Exception as e:
+            print(f"[LTXDirector] Error in final chunk audio extraction: {e}")
+
+        return web.json_response({
+            "name": f"GJJ_LTXDirector/{filename}",
+            "audio_file": audio_file,
+            "peaks": peaks
+        })
+    return web.json_response({"status": "ok"})
+
 
 
 def _load_image_tensor(seg: dict) -> torch.Tensor:
+    """Decode an image from the ComfyUI input folder (if imageFile provided) or fallback to base64
+    to a ComfyUI-style image tensor of shape [1, H, W, 3], float32 in [0, 1]."""
     if seg.get("imageFile"):
         file_path = os.path.join(folder_paths.get_input_directory(), seg["imageFile"])
         if os.path.exists(file_path):
@@ -362,529 +406,1039 @@ def _load_image_tensor(seg: dict) -> torch.Tensor:
     b64_str = seg.get("imageB64", "")
     if not b64_str or b64_str.startswith("/view?"):
         return torch.zeros((1, 512, 512, 3), dtype=torch.float32)
+
     if "," in b64_str:
         b64_str = b64_str.split(",", 1)[1]
+
     try:
         img_bytes = base64.b64decode(b64_str)
         img = Image.open(_io.BytesIO(img_bytes)).convert("RGB")
         arr = np.array(img, dtype=np.float32) / 255.0
         return torch.from_numpy(arr).unsqueeze(0)
-    except Exception:
+    except:
         return torch.zeros((1, 512, 512, 3), dtype=torch.float32)
 
+def _load_video_tensor(seg: dict, frame_rate: float) -> torch.Tensor:
+    """Extracts a sequence of frames from a video file based on the segment's trim parameters,
+    and returns them as an [N, H, W, 3] float32 tensor."""
+    file_path = os.path.join(folder_paths.get_input_directory(), seg.get("imageFile", ""))
+
+    if not os.path.exists(file_path):
+        return torch.zeros((1, 512, 512, 3), dtype=torch.float32)
+
+    trim_start_frames = float(seg.get("trimStart", 0))
+    length_frames = float(seg.get("length", 1))
+    start_sec = trim_start_frames / frame_rate
+
+    frames = []
+    try:
+        with av.open(file_path) as container:
+            stream = container.streams.video[0]
+            stream.thread_type = "AUTO"
+
+            # Seek slightly before target to hit a keyframe
+            if stream.time_base:
+                seek_pts = int((max(0, start_sec - 0.5)) / float(stream.time_base))
+            else:
+                seek_pts = int((max(0, start_sec - 0.5)) * av.time_base)
+
+            container.seek(seek_pts, stream=stream, backward=True)
+
+            for frame in container.decode(stream):
+                frame_time = frame.time
+                if frame_time is None and frame.pts is not None and stream.time_base:
+                    frame_time = float(frame.pts * stream.time_base)
+
+                if frame_time is None:
+                    frame_time = 0.0
+
+                if frame_time < start_sec - 0.01:
+                    continue
+
+                frames.append(frame.to_ndarray(format='rgb24'))
+
+                if len(frames) >= int(length_frames):
+                    break
+    except Exception as e:
+        log.warning(f"[PromptRelay] Video extract error: {e}")
+
+    if not frames:
+        return torch.zeros((1, 512, 512, 3), dtype=torch.float32)
+
+    frames_np = np.array(frames, dtype=np.float32) / 255.0
+    return torch.from_numpy(frames_np)
 
 def _resize_image(tensor: torch.Tensor, target_w: int, target_h: int, method: str, divisible_by: int) -> torch.Tensor:
+    """Resize an [N, H, W, 3] float32 tensor to target dimensions using the given method,
+    then snap the final dimensions to be divisible by `divisible_by`."""
+
     def snap(val, div):
-        return max(div, (int(val) // div) * div)
+        return max(div, (val // div) * div)
 
     tw = snap(target_w, divisible_by)
     th = snap(target_h, divisible_by)
-    img_np = (tensor[0].cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
-    pil = Image.fromarray(img_np)
-    src_w, src_h = pil.size
+
+    N, H, W, C = tensor.shape
+    if H == th and W == tw:
+        return tensor
+
+    t_nchw = tensor.permute(0, 3, 1, 2)
 
     if method == "stretch to fit":
-        resized = pil.resize((tw, th), Image.LANCZOS)
-    elif method == "pad":
-        ratio = min(tw / src_w, th / src_h)
-        new_w = snap(src_w * ratio, divisible_by)
-        new_h = snap(src_h * ratio, divisible_by)
-        inner = pil.resize((new_w, new_h), Image.LANCZOS)
-        resized = Image.new("RGB", (tw, th), (0, 0, 0))
-        resized.paste(inner, ((tw - new_w) // 2, (th - new_h) // 2))
+        resized = F.interpolate(t_nchw, size=(th, tw), mode="bilinear", align_corners=False)
+
+    elif method == "maintain aspect ratio":
+        ratio = min(tw / W, th / H)
+        new_w = snap(int(W * ratio), divisible_by)
+        new_h = snap(int(H * ratio), divisible_by)
+        resized = F.interpolate(t_nchw, size=(new_h, new_w), mode="bilinear", align_corners=False)
+
+    elif method == "pad" or method == "pad green":
+        ratio = min(tw / W, th / H)
+        new_w = snap(int(W * ratio), divisible_by)
+        new_h = snap(int(H * ratio), divisible_by)
+        inner = F.interpolate(t_nchw, size=(new_h, new_w), mode="bilinear", align_corners=False)
+
+        pad_l = (tw - new_w) // 2
+        pad_t = (th - new_h) // 2
+
+        if method == "pad green":
+            resized = torch.zeros((N, C, th, tw), dtype=t_nchw.dtype, device=t_nchw.device)
+            # #66FF00 is roughly R: 102/255, G: 255/255, B: 0
+            resized[:, 0, :, :] = 102 / 255.0
+            resized[:, 1, :, :] = 1.0
+            resized[:, 2, :, :] = 0.0
+            resized[:, :, pad_t:pad_t+new_h, pad_l:pad_l+new_w] = inner
+        else:
+            resized = F.pad(inner, (pad_l, tw - new_w - pad_l, pad_t, th - new_h - pad_t), mode="constant", value=0)
+
     elif method == "crop":
-        ratio = max(tw / src_w, th / src_h)
-        new_w = int(src_w * ratio)
-        new_h = int(src_h * ratio)
-        inner = pil.resize((new_w, new_h), Image.LANCZOS)
+        ratio = max(tw / W, th / H)
+        new_w = int(W * ratio)
+        new_h = int(H * ratio)
+        inner = F.interpolate(t_nchw, size=(new_h, new_w), mode="bilinear", align_corners=False)
+
         left = (new_w - tw) // 2
         top = (new_h - th) // 2
-        resized = inner.crop((left, top, left + tw, top + th))
-    elif method == "maintain aspect ratio":
-        ratio = min(tw / src_w, th / src_h)
-        new_w = snap(src_w * ratio, divisible_by)
-        new_h = snap(src_h * ratio, divisible_by)
-        resized = pil.resize((new_w, new_h), Image.LANCZOS)
-    else:
-        resized = pil.resize((tw, th), Image.LANCZOS)
+        resized = inner[:, :, top:top+th, left:left+tw]
 
-    arr = np.array(resized, dtype=np.float32) / 255.0
-    return torch.from_numpy(arr).unsqueeze(0)
+    else:
+        resized = F.interpolate(t_nchw, size=(th, tw), mode="bilinear", align_corners=False)
+
+    return resized.permute(0, 2, 3, 1)
 
 
 def _compress_image(tensor: torch.Tensor, crf: int) -> torch.Tensor:
-    if crf <= 0:
-        return tensor
-    try:
-        import av
-    except Exception:
-        log.warning("[GJJ LTX Director] 当前环境缺少 PyAV，已跳过 guide 图像压缩。")
+    """Apply H.264 compression artefacts to an [N, H, W, 3] float32 tensor (ComfyUI image format).
+    crf=0 means no compression. Uses PyAV to encode/decode frames in-memory."""
+    if crf == 0:
         return tensor
 
-    img = tensor[0]
-    height = (img.shape[0] // 2) * 2
-    width = (img.shape[1] // 2) * 2
-    img_np = (img[:height, :width] * 255.0).byte().cpu().numpy()
+    N, H, W, C = tensor.shape
+
+    # Dimensions must be even for H.264
+    h = (H // 2) * 2
+    w = (W // 2) * 2
+
+    # uint8 [N, H, W, 3]
+    tensor_bytes = (tensor[:, :h, :w, :] * 255.0).byte().cpu().numpy()
+
     try:
         buf = _io.BytesIO()
         container = av.open(buf, mode="w", format="mp4")
-        stream = container.add_stream("libx264", rate=1)
-        stream.width = width
-        stream.height = height
+        stream = container.add_stream("libx264", rate=24)
+        stream.width = w
+        stream.height = h
         stream.pix_fmt = "yuv420p"
         stream.options = {"crf": str(crf), "preset": "ultrafast"}
-        frame = av.VideoFrame.from_ndarray(img_np, format="rgb24")
-        for packet in stream.encode(frame):
-            container.mux(packet)
-        for packet in stream.encode(None):
-            container.mux(packet)
+
+        for i in range(N):
+            frame = av.VideoFrame.from_ndarray(tensor_bytes[i], format="rgb24")
+            for pkt in stream.encode(frame):
+                container.mux(pkt)
+
+        for pkt in stream.encode(None):
+            container.mux(pkt)
+
         container.close()
 
         buf.seek(0)
         container_r = av.open(buf, mode="r")
-        decoded = None
-        for frame_r in container_r.decode(video=0):
-            decoded = frame_r.to_ndarray(format="rgb24")
-            break
+        decoded = [frame_r.to_ndarray(format="rgb24") for frame_r in container_r.decode(video=0)]
         container_r.close()
-        if decoded is None:
+
+        if not decoded:
             return tensor
-        arr = torch.from_numpy(decoded.astype(np.float32) / 255.0).to(tensor.device, tensor.dtype)
+
+        decoded_np = np.stack(decoded).astype(np.float32) / 255.0
+
+        # Re-embed into original tensor shape (may have been cropped by even-rounding)
         out = tensor.clone()
-        out[0, :height, :width] = arr
+        dec_N = min(N, len(decoded))
+        out[:dec_N, :h, :w] = torch.from_numpy(decoded_np[:dec_N]).to(tensor.device, tensor.dtype)
+
         return out
-    except Exception as exc:
-        log.warning("[GJJ LTX Director] guide 图像压缩失败：%s", exc)
+
+    except Exception as e:
+        log.warning("[PromptRelay] img_compression encode/decode failed: %s", e)
         return tensor
 
 
-def _build_combined_audio(timeline_data_str: str, duration_frames: int, frame_rate: float) -> dict:
+def _build_combined_audio(timeline_data_str: str, start_frame: int, duration_frames: int, frame_rate: float, override_audio: bool = False) -> dict:
+    """Parses timeline JSON, loads/trims audio directly from memory using PyAV,
+    and aligns to a global timeline yielding ComfyUI's format.
+    Output length explicitly mimics the timeline's duration_frames length."""
     target_sr = 44100
     total_samples = max(1, int(math.ceil(duration_frames / frame_rate * target_sr)))
     empty_audio = {"waveform": torch.zeros((1, 2, total_samples), dtype=torch.float32), "sample_rate": target_sr}
+
     if not timeline_data_str:
         return empty_audio
+
     try:
-        audio_segs = json.loads(timeline_data_str).get("audioSegments", [])
+        data = json.loads(timeline_data_str)
+        is_retake = data.get("retakeMode", False)
+        if is_retake and data.get("retakeVideo"):
+            retake_vid = data.get("retakeVideo")
+            audio_segs = [{
+                "videoFile": retake_vid.get("imageFile") or retake_vid.get("fileName"),
+                "audioFile": retake_vid.get("imageFile") or retake_vid.get("fileName"),
+                "start": 0,
+                "length": retake_vid.get("videoDurationFrames", duration_frames),
+                "trimStart": 0
+            }]
+            override_audio = True
+        elif override_audio:
+            audio_segs = data.get("motionSegments", [])
+        else:
+            audio_segs = data.get("audioSegments", [])
     except Exception:
         return empty_audio
+
     if not audio_segs:
         return empty_audio
-    try:
-        import av
-    except Exception as exc:
-        raise RuntimeError("时间线包含音频片段，但当前环境缺少 PyAV，无法合成时间线音频。") from exc
 
     out_waveform = torch.zeros((2, total_samples), dtype=torch.float32)
+
     for seg in audio_segs:
         buffer = None
-        if seg.get("audioFile"):
-            file_path = os.path.join(folder_paths.get_input_directory(), seg["audioFile"])
+        file_key = "videoFile" if override_audio else "audioFile"
+        if seg.get(file_key):
+            file_path = os.path.join(folder_paths.get_input_directory(), seg[file_key])
+            if not os.path.exists(file_path):
+                # Try fallback under the GJJ workspace subfolder
+                basename = os.path.basename(seg[file_key])
+                fallback_path = os.path.join(folder_paths.get_input_directory(), "GJJ_LTXDirector", basename)
+                if os.path.exists(fallback_path):
+                    file_path = fallback_path
+
             if os.path.exists(file_path):
-                with open(file_path, "rb") as handle:
-                    buffer = _io.BytesIO(handle.read())
-        if not buffer and seg.get("audioB64"):
-            audio_b64 = seg.get("audioB64")
-            if "," in audio_b64:
-                audio_b64 = audio_b64.split(",", 1)[1]
+                with open(file_path, "rb") as f:
+                    buffer = _io.BytesIO(f.read())
+
+        if not override_audio and not buffer and seg.get("audioB64"):
+            b64 = seg.get("audioB64")
+            if "," in b64:
+                b64 = b64.split(",", 1)[1]
             try:
-                buffer = _io.BytesIO(base64.b64decode(audio_b64))
-            except Exception:
+                audio_bytes = base64.b64decode(b64)
+                buffer = _io.BytesIO(audio_bytes)
+            except:
                 pass
+
         if not buffer:
             continue
+
         try:
             clip_frames = []
+
+            # Use PyAV to decode directly from memory buffer
             with av.open(buffer) as container:
+                if not container.streams.audio:
+                    continue
                 stream = container.streams.audio[0]
-                resampler = av.AudioResampler(format="fltp", layout="stereo", rate=target_sr)
+
+                # Setup resampler to ensure output is 44.1kHz, Stereo, Float32 Planar
+                resampler = av.AudioResampler(
+                    format='fltp',
+                    layout='stereo',
+                    rate=target_sr,
+                )
+
                 for frame in container.decode(stream):
                     for resampled_frame in resampler.resample(frame):
-                        clip_frames.append(torch.from_numpy(resampled_frame.to_ndarray()))
+                        # to_ndarray() on fltp gives shape (channels, samples)
+                        arr = resampled_frame.to_ndarray()
+                        clip_frames.append(torch.from_numpy(arr))
+
+                # Flush the resampler to get any remaining samples
                 for resampled_frame in resampler.resample(None):
-                    clip_frames.append(torch.from_numpy(resampled_frame.to_ndarray()))
+                    arr = resampled_frame.to_ndarray()
+                    clip_frames.append(torch.from_numpy(arr))
+
             if not clip_frames:
                 continue
-            waveform = torch.cat(clip_frames, dim=1)
+
+            # Concatenate all frame blocks along the samples dimension (dim 1)
+            waveform = torch.cat(clip_frames, dim=1) # Shape: [2, total_clip_samples]
+
+            # Calculate interactive trim boundaries
             trim_start_frames = float(seg.get("trimStart", 0))
             length_frames = float(seg.get("length", 1))
             start_frames = float(seg.get("start", 0))
-            start_sample_src = max(0, int(trim_start_frames / frame_rate * target_sr))
-            end_sample_src = min(waveform.shape[1], start_sample_src + int(length_frames / frame_rate * target_sr))
-            actual_length = end_sample_src - start_sample_src
-            if actual_length <= 0:
+
+            if start_frames + length_frames <= start_frame:
                 continue
+
+            offset = max(0, start_frame - start_frames)
+            trim_start_frames += offset
+            length_frames = max(1, length_frames - offset)
+            start_frames = max(0, start_frames - start_frame)
+
+            start_sample_src = int(trim_start_frames / frame_rate * target_sr)
+            length_samples = int(length_frames / frame_rate * target_sr)
+            end_sample_src = start_sample_src + length_samples
+
+            if start_sample_src < 0: start_sample_src = 0
+            if end_sample_src > waveform.shape[1]:
+                end_sample_src = waveform.shape[1]
+
+            actual_length = end_sample_src - start_sample_src
+            if actual_length <= 0: continue
+
+            # Extract the correct segment of the audio
             clip_waveform = waveform[:, start_sample_src:end_sample_src]
+
+            # Position onto the timeline
             start_sample_dst = int(start_frames / frame_rate * target_sr)
+
             if start_sample_dst >= out_waveform.shape[1]:
                 continue
+
             end_sample_dst = start_sample_dst + actual_length
+
+            # Clip any trailing overflow so we don't index past the timeline bounds
             if end_sample_dst > out_waveform.shape[1]:
                 actual_length = out_waveform.shape[1] - start_sample_dst
                 clip_waveform = clip_waveform[:, :actual_length]
                 end_sample_dst = start_sample_dst + actual_length
-            if actual_length > 0:
-                out_waveform[:, start_sample_dst:end_sample_dst] += clip_waveform
-        except Exception as exc:
-            log.warning("[GJJ LTX Director] 音频片段处理失败：%s", exc)
+
+            if actual_length <= 0:
+                continue
+
+            # Additive composite (allows clips overlapping to sum together naturally)
+            out_waveform[:, start_sample_dst:end_sample_dst] += clip_waveform
+
+        except Exception as e:
+            log.warning("[PromptRelay] Audio process error for segment %s: %s", seg.get("fileName"), e)
             continue
+
     return {"waveform": out_waveform.unsqueeze(0), "sample_rate": target_sr}
 
 
 def _convert_to_latent_lengths(pixel_lengths, temporal_stride, latent_frames):
+    """Convert pixel-space segment lengths to integer latent-space lengths using the
+    largest-remainder method. Targets the full `latent_frames` when the pixel sum looks
+    like full coverage (within one stride of latent_frames * stride). Otherwise targets
+    round(total_pixel / temporal_stride) so partial-coverage timelines stay partial.
+    """
     if not pixel_lengths:
         return []
     total_pixel = sum(pixel_lengths)
     if total_pixel <= 0:
         return [1] * len(pixel_lengths)
-    target_total = min(latent_frames, max(1, round(total_pixel / temporal_stride)))
+
+    naive_total = max(1, round(total_pixel / temporal_stride))
+    target_total = min(latent_frames, naive_total)
+    # Within one frame of full → user clearly intended full coverage; pin to latent_frames.
     if target_total >= latent_frames - 1:
         target_total = latent_frames
-    exact = [length * target_total / total_pixel for length in pixel_lengths]
-    result = [int(item) for item in exact]
+
+    exact = [p * target_total / total_pixel for p in pixel_lengths]
+    result = [int(e) for e in exact]
     diff = target_total - sum(result)
     if diff > 0:
         order = sorted(range(len(exact)), key=lambda i: -(exact[i] - int(exact[i])))
-        for idx in range(diff):
-            result[order[idx % len(order)]] += 1
-    for idx, value in enumerate(result):
-        if value < 1:
+        for k in range(diff):
+            result[order[k % len(order)]] += 1
+
+    # Ensure every segment has ≥ 1 latent frame (steal from the largest if needed).
+    for i in range(len(result)):
+        if result[i] < 1:
             max_idx = max(range(len(result)), key=lambda j: result[j])
             if result[max_idx] > 1:
                 result[max_idx] -= 1
-                result[idx] = 1
+                result[i] = 1
+
     return result
 
 
 def _encode_relay(model, clip, latent, global_prompt, local_prompts, segment_lengths, epsilon):
-    locals_list = [prompt.strip() for prompt in str(local_prompts or "").split("|")]
-    for prompt in locals_list:
-        if not prompt:
-            raise ValueError("时间线上有片段缺少提示词。")
-    if not locals_list or (len(locals_list) == 1 and not locals_list[0]):
-        raise ValueError("LTX Director 至少需要一个局部提示词片段。")
+    for name, val in (("global_prompt", global_prompt),
+                      ("local_prompts", local_prompts),
+                      ("segment_lengths", segment_lengths)):
+        if val is None:
+            raise ValueError(
+                f"PromptRelay: '{name}' arrived as None. "
+                "Likely causes: a stale workflow JSON saved with null, the timeline "
+                "editor's web extension failing to load, or an upstream node returning None. "
+                "Set the field to an empty string or fix the upstream connection."
+            )
 
-    arch, patch_size, temporal_stride = _detect_model_type(model)
+    # Split prompts but do NOT filter out empty ones yet, so we can detect them
+    locals_list = [p.strip() for p in local_prompts.split("|")]
+
+    # If there are no visual segments on the timeline (e.g., only using IC-LoRA motion track),
+    # bypass the local prompt chunking entirely and just use the global prompt.
+    if not locals_list or (len(locals_list) == 1 and not locals_list[0]):
+        log.info("[PromptRelay] No local segments found. Using global prompt exclusively.")
+        conditioning = clip.encode_from_tokens_scheduled(clip.tokenize(global_prompt))
+        return model.clone(), conditioning
+
+    # Check if any specific segment is empty and apply fallbacks
+    for i, p in enumerate(locals_list):
+        if not p:
+            fallback = global_prompt.strip() if global_prompt else "video"
+            if not fallback:
+                fallback = "video"
+            locals_list[i] = fallback
+
+    arch, patch_size, temporal_stride = detect_model_type(model)
+
     samples = latent["samples"]
     latent_frames = samples.shape[2]
     tokens_per_frame = (samples.shape[3] // patch_size[1]) * (samples.shape[4] // patch_size[2])
 
     parsed_lengths = None
-    if str(segment_lengths or "").strip():
-        pixel_lengths = [int(float(x.strip())) for x in str(segment_lengths).split(",") if x.strip()]
+    if segment_lengths.strip():
+        pixel_lengths = [int(float(x.strip())) for x in segment_lengths.split(",") if x.strip()]
         parsed_lengths = _convert_to_latent_lengths(pixel_lengths, temporal_stride, latent_frames)
 
-    raw_tokenizer = _get_raw_tokenizer(clip)
-    full_prompt, token_ranges = _map_token_indices(raw_tokenizer, str(global_prompt or ""), locals_list)
+    raw_tokenizer = get_raw_tokenizer(clip)
+    full_prompt, token_ranges = map_token_indices(raw_tokenizer, global_prompt, locals_list)
+
+    log.info("[PromptRelay] Global: tokens [0:%d] (%d tokens)", token_ranges[0][0], token_ranges[0][0])
+    for i, (s, e) in enumerate(token_ranges):
+        log.info("[PromptRelay] Segment %d: tokens [%d:%d] (%d tokens)", i, s, e, e - s)
+
     conditioning = clip.encode_from_tokens_scheduled(clip.tokenize(full_prompt))
-    effective_lengths = _distribute_segment_lengths(len(locals_list), latent_frames, parsed_lengths)
-    q_token_idx = _build_segments(token_ranges, effective_lengths, epsilon)
-    mask_fn = _create_mask_fn(q_token_idx, tokens_per_frame, latent_frames)
+
+    effective_lengths = distribute_segment_lengths(len(locals_list), latent_frames, parsed_lengths)
+
+    log.info(
+        "[PromptRelay] Latent: %d frames, %d tokens/frame, segments: %s",
+        latent_frames, tokens_per_frame, effective_lengths,
+    )
+
+    q_token_idx = build_segments(token_ranges, effective_lengths, epsilon, None)
+    mask_fn = create_mask_fn(q_token_idx, tokens_per_frame, latent_frames)
+
     patched = model.clone()
-    _apply_patches(patched, arch, mask_fn)
+    apply_patches(patched, arch, mask_fn)
+
     return patched, conditioning
 
 
-class GJJLTXDirector:
-    CATEGORY = "GJJ/LTX"
-    FUNCTION = "execute"
-    RETURN_TYPES = ("MODEL", "CONDITIONING", "LATENT", "LATENT", GUIDE_DATA_TYPE, "FLOAT", "AUDIO")
-    RETURN_NAMES = ("补丁模型", "正向条件", "视频Latent", "音频Latent", "Guide数据", "帧率", "合成音频")
-    OUTPUT_TOOLTIPS = (
-        "已写入 Prompt Relay 时间线注意力补丁的模型。",
-        "由全局提示词和时间线局部提示词编码出的正向条件。",
-        "连接外部 latent 时透传；未连接时按时间线尺寸自动创建 LTX 视频 latent。",
-        "连接音频 VAE 时生成的音频 latent；未连接时为空字典。",
-        "时间线 guide 图片、插入帧和强度数据，可连接到支持 GUIDE_DATA 的 guide 节点。",
-        "时间线使用的帧率。",
-        "按时间线音频轨合成后的 AUDIO；无音频片段时输出静音。",
+def _parse_external_prompt_script(value: str) -> tuple[str, list[str]]:
+    """解析《全局提示词》+ 分镜块；分镜以 --- 或空行分隔。"""
+    text = str(value or "").strip()
+    match = re.match(r"^\s*《([\s\S]*?)》\s*([\s\S]*)$", text)
+    if not match:
+        return text, []
+    header = match.group(1).strip()
+    remainder = match.group(2).strip()
+    blocks = [item.strip() for item in re.split(r"(?:\r?\n\s*---+\s*\r?\n|\r?\n\s*\r?\n+)", remainder) if item.strip()]
+    if header in {"全局提示词", "全局", "global prompt", "global_prompt"}:
+        return (blocks[0] if blocks else ""), blocks[1:]
+    return header, blocks
+
+
+class GJJLTXDirector(io.ComfyNode):
+    """WYSIWYG timeline variant — segments and lengths come from a visual editor in the node UI."""
+
+    DESCRIPTION = (
+        "GJJ 版 LTX Director 2.0.2 可视化时间线编辑器，支持图像、视频、音频、"
+        "IC-LoRA Motion Guide、Prompt Relay 分段注意力和 Retake 局部重做。"
     )
-    DESCRIPTION = "GJJ 版 LTX Director：1:1 复刻时间线编辑、Prompt Relay 分段注意力补丁、guide 数据与时间线音频输出，不依赖 WhatDreamsCost 原插件。"
     SEARCH_ALIASES = [
-        "ltx director",
-        "director timeline",
+        "LTX Director",
+        "LTX Director 2",
+        "LTX Director Timeline",
+        "GJJ LTX Director",
         "LTX导演",
         "导演时间线",
-        "时间线",
+        "视频时间线",
         "Prompt Relay",
-        "GUIDE_DATA",
+        "Motion Guide",
+        "Retake",
     ]
     GJJ_HELP = {
+        "title": "LTX 导演时间线",
+        "version": "2.0.2",
         "description": DESCRIPTION,
+        "features": [
+            "在节点内编辑图像、视频和音频片段，并同步帧数、秒数和时间线范围。",
+            "按局部提示词分段生成 Prompt Relay 注意力遮罩，控制不同时间段的语义。",
+            "输出图像 Guide、Motion Guide、视频/音频 Latent、合成音频和实际帧率。",
+            "支持 IC-LoRA 运动视频、音频空白补绘以及 Retake 指定区间重做。",
+        ],
+        "usage": [
+            "连接 LTX 模型和 CLIP；需要音频生成时再连接音频 VAE。",
+            "在时间线面板添加图像、视频或音频片段，并为画面片段填写局部提示词。",
+            "将补丁模型和正向条件连接到采样链；视频/音频 Latent 可直接用于 LTX 采样。",
+            "需要关键帧图像或运动引导时，把 Guide 数据输出连接到 LTX Director Guide 节点。",
+        ],
         "notes": [
-            "前端时间线状态保存在 timeline_data/local_prompts/segment_lengths/guide_strength 隐藏控件中。",
-            "图像 guide 数据输出为 GUIDE_DATA，可接 LTX Director Guide 类节点或其它兼容节点。",
-            "时间线音频合成需要当前 ComfyUI 环境可导入 PyAV；无音频片段时不需要。",
+            "时间线数据、局部提示词、分段帧数和 Guide 强度由前端自动维护，不建议手动编辑。",
+            "显示单位只影响时间线界面，内部始终以像素空间帧数保存。",
+            "图像压缩 CRF 为 0 时不压缩；数值越高，压缩痕迹越明显。",
+            "本节点不依赖 WhatDreamsCost-ComfyUI，可与原插件并存。",
         ],
     }
 
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "model": ("MODEL", {"display_name": "模型", "tooltip": "LTX 或 Wan 模型；节点会在 cross-attention 上写入时间线分段注意力补丁。"}),
-                "clip": ("CLIP", {"display_name": "CLIP", "tooltip": "用于编码全局提示词和时间线局部提示词。"}),
-                "global_prompt": ("STRING", {"default": "", "multiline": True, "display_name": "全局提示词", "tooltip": "作用于整段视频，用于稳定角色、物体和场景上下文。"}),
-                "duration_frames": ("INT", {"default": 120, "min": 1, "max": 10000, "step": 1, "display_name": "总帧数", "tooltip": "时间线显示用的总帧数；实际 latent 帧数仍由视频 latent 决定。"}),
-                "duration_seconds": ("FLOAT", {"default": 5.0, "min": 0.1, "max": 1000.0, "step": 0.01, "display_name": "总秒数", "tooltip": "时间线总时长，会与帧数和帧率同步。"}),
-                "timeline_data": ("STRING", {"default": "", "display_name": "时间线数据", "tooltip": "前端时间线编辑器自动维护的 JSON，请勿手动编辑。"}),
-                "local_prompts": ("STRING", {"default": "", "multiline": True, "display_name": "局部提示词", "tooltip": "前端时间线自动汇总的局部提示词，用竖线分隔。"}),
-                "segment_lengths": ("STRING", {"default": "", "display_name": "片段长度", "tooltip": "前端时间线自动汇总的片段帧长，用逗号分隔。"}),
-                "epsilon": ("FLOAT", {"default": 0.001, "min": 0.0001, "max": 0.99, "step": 0.0001, "display_name": "边界衰减", "tooltip": "Prompt Relay 分段边界衰减参数；越大过渡越软。"}),
-                "frame_rate": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0, "step": 1.0, "display_name": "帧率", "tooltip": "时间线显示和音频对齐使用的 FPS。"}),
-                "display_mode": (["seconds", "frames"], {"default": "seconds", "display_name": "显示单位", "tooltip": "时间线标尺显示秒数或帧数。"}),
-                "guide_strength": ("STRING", {"default": "", "display_name": "Guide强度", "tooltip": "前端时间线自动汇总的图像 guide 强度，用逗号分隔。"}),
-                "custom_width": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 1, "display_name": "Guide宽度", "tooltip": "图像 guide 目标宽度；0 表示跟随原图或默认宽度。"}),
-                "custom_height": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 1, "display_name": "Guide高度", "tooltip": "图像 guide 目标高度；0 表示跟随原图或默认高度。"}),
-                "resize_method": (["maintain aspect ratio", "stretch to fit", "pad", "crop"], {"default": "maintain aspect ratio", "display_name": "缩放方式", "tooltip": "图像 guide 适配目标尺寸的方式。"}),
-                "divisible_by": ("INT", {"default": 32, "min": 1, "max": 256, "step": 1, "display_name": "尺寸整除", "tooltip": "输出 guide 尺寸会吸附到该数值的整数倍。"}),
-                "img_compression": ("INT", {"default": 18, "min": 0, "max": 100, "step": 1, "display_name": "图像压缩CRF", "tooltip": "对 guide 图像模拟 H.264 压缩；0 表示不压缩。"}),
-                "use_custom_audio": ("BOOLEAN", {"default": False, "display_name": "使用时间线音频", "tooltip": "开启后若连接音频 VAE，会把时间线音频编码为音频 latent；关闭则创建空音频 latent。"}),
-            },
-            "optional": {
-                "audio_vae": ("VAE", {"display_name": "音频VAE", "tooltip": "可选。连接后生成 LTX 音频 latent。"}),
-                "optional_latent": ("LATENT", {"display_name": "外部视频Latent", "tooltip": "可选。连接后使用外部 latent，否则按时间线自动创建 LTX 视频 latent。"}),
-            },
-        }
+    def define_schema(cls):
+        return io.Schema(
+            node_id="GJJ_LTXDirector",
+            display_name="🎬 LTX导演时间线",
+            category="GJJ/LTX",
+            description=cls.DESCRIPTION,
+            search_aliases=cls.SEARCH_ALIASES,
+            inputs=[
+                io.Model.Input("model", display_name="模型", tooltip="要写入提示词接力时间线注意力补丁的 LTX 模型。"),
+                io.Clip.Input("clip", display_name="文本编码器", tooltip="用于编码全局提示词和各时间线片段局部提示词。"),
+                io.Vae.Input("audio_vae", display_name="音频解码器", optional=True, tooltip="可选。连接后生成或编码 LTX 音频潜空间数据。"),
+                io.Latent.Input("optional_latent", display_name="外部视频潜空间", optional=True, tooltip="可选。连接后使用外部视频潜空间数据；未连接时按时间线尺寸自动创建。"),
+                io.String.Input(
+                    "global_prompt", display_name="全局提示词", multiline=False, default="", optional=True,
+                    tooltip="作用于整段视频，可外接文本。脚本语法：用《全局提示词内容》声明全局提示词，后续分镜提示词使用 --- 或空行分隔。",
+                ),
+                io.Float.Input(
+                    "start_second", display_name="起始秒", default=0.0, min=0.0, max=1000.0, step=0.01,
+                    tooltip="本次生成区间在完整时间线中的起始时间（秒）。",
+                ),
+                io.Float.Input(
+                    "end_second", display_name="结束秒", default=5.0, min=0.0, max=1000.0, step=0.01,
+                    tooltip="本次生成区间在完整时间线中的结束时间（秒）。",
+                ),
+                io.Float.Input(
+                    "duration_seconds", display_name="时长（秒）", default=5.0, min=0.1, max=1000.0, step=0.01,
+                    tooltip="时间线总时长（秒），会根据总帧数和帧率自动同步。",
+                ),
+                io.Int.Input(
+                    "start_frame", display_name="起始帧", default=0, min=0, max=10000, step=1,
+                    tooltip="本次生成区间在完整时间线中的起始帧。",
+                ),
+                io.Int.Input(
+                    "end_frame", display_name="结束帧", default=120, min=1, max=10000, step=1,
+                    tooltip="本次生成区间在完整时间线中的结束帧。",
+                ),
+                io.Int.Input(
+                    "duration_frames", display_name="时长（帧）", default=120, min=1, max=10000, step=1,
+                    tooltip="时间线在像素空间中的总帧数，用于编辑器刻度和片段范围。",
+                ),
+                io.String.Input(
+                    "timeline_data", display_name="时间线数据", default="",
+                    tooltip="时间线编辑器自动维护的 JSON 状态，请勿手动编辑。",
+                ),
+                io.Boolean.Input(
+                    "use_custom_audio", display_name="使用时间线音频", default=False, optional=True,
+                    tooltip="开启后使用时间线音频片段；关闭后从零生成音频。",
+                ),
+                io.Boolean.Input(
+                    "use_custom_motion", display_name="使用运动引导", default=True, optional=True,
+                    tooltip="开启后输出时间线运动视频片段作为 Motion Guide；关闭后忽略运动视频轨。",
+                ),
+                io.Boolean.Input(
+                    "inpaint_audio", display_name="补绘音频空白", default=True, optional=True,
+                    tooltip="开启后用生成音频填补时间线音频轨中的空白区间。",
+                ),
+                io.String.Input(
+                    "local_prompts", display_name="局部提示词", multiline=True, default="",
+                    tooltip="由时间线编辑器自动汇总的分段局部提示词。",
+                ),
+                io.String.Input(
+                    "segment_lengths", display_name="分段帧数", default="",
+                    tooltip="由时间线编辑器自动生成的各提示词片段帧数，以逗号分隔。",
+                ),
+                io.Float.Input(
+                    "epsilon", display_name="边界衰减", default=0.001, min=0.0001, max=0.99, step=0.0001,
+                    tooltip="提示词分段边界的惩罚衰减参数。默认 0.001 边界清晰；0.5 以上可获得更柔和的过渡。",
+                ),
+                io.Float.Input(
+                    "frame_rate", display_name="帧率", default=24, min=1, max=240, step=1, optional=True,
+                    tooltip="每秒帧数，用于帧与秒的换算、时间线显示和音频对齐。",
+                ),
+                io.Combo.Input(
+                    "display_mode", display_name="时间显示单位", options=["frames", "seconds"], default="frames", optional=True,
+                    tooltip="时间线刻度使用帧或秒显示；内部数据始终以像素空间帧数保存。",
+                ),
+                io.String.Input(
+                    "guide_strength", display_name="引导强度", default="",
+                    tooltip="时间线编辑器自动维护的图像片段引导强度，以逗号分隔。",
+                ),
+                io.Int.Input(
+                    "custom_width", display_name="引导宽度", default=0, min=0, max=8192, step=1, optional=True,
+                    tooltip="所有图像引导素材的目标宽度；0 表示使用原图宽度。",
+                ),
+                io.Int.Input(
+                    "custom_height", display_name="引导高度", default=0, min=0, max=8192, step=1, optional=True,
+                    tooltip="所有图像引导素材的目标高度；0 表示使用原图高度。",
+                ),
+                io.Combo.Input(
+                    "resize_method",
+                    display_name="缩放方式",
+                    options=["maintain aspect ratio", "stretch to fit", "pad", "pad green", "crop"],
+                    default="maintain aspect ratio",
+                    optional=True,
+                    tooltip="图像引导素材适配目标宽高的方式：保持比例、拉伸、填充、绿底填充或裁剪。",
+                ),
+                io.Int.Input(
+                    "divisible_by", display_name="尺寸整除", default=32, min=1, max=256, step=1, optional=True,
+                    tooltip="最终引导素材宽高吸附到该数值的整数倍；LTX 通常使用 32。",
+                ),
+                io.Int.Input(
+                    "img_compression", display_name="图像压缩CRF", default=18, min=0, max=100, step=1, optional=True,
+                    tooltip="对每张 Guide 图像模拟 H.264 CRF 压缩；0 为不压缩，数值越高压缩痕迹越明显。",
+                ),
+                io.Boolean.Input(
+                    "override_audio", display_name="使用运动视频音频", default=False, optional=True,
+                    tooltip="开启后使用 IC-LoRA 运动视频中的音频，替代独立音频轨。",
+                ),
+                io.Combo.Input(
+                    "grid_layout", display_name="宫格布局",
+                    options=["2x2", "2x3", "3x2", "3x3", "3x4", "4x3", "4x4"],
+                    default="2x2", optional=True,
+                    tooltip="🪟宫格导入时采用的行列布局；每个格子会拆成独立图片片段并均分总帧数。",
+                ),
+                io.Int.Input(
+                    "grid_edge_cut", display_name="宫格切边强度", default=0, min=0, max=45, step=1, optional=True,
+                    tooltip="裁掉每个宫格四周的百分比，用于去除格子边框；0 不裁边，最大 45%。",
+                ),
+                DirectorMediaInput.Input(
+                    "material_1", display_name="素材入口 1", optional=True,
+                    tooltip="可选。接入 GJJ_BATCH_IMAGE、IMAGE、VIDEO 或 AUDIO；点击前端刷新按钮后会尝试同步上游素材到时间线。",
+                ),
+                DirectorMediaInput.Input(
+                    "material_2", display_name="素材入口 2", optional=True,
+                    tooltip="可选。第二路素材输入；点击前端刷新按钮后会尝试同步上游素材到时间线。",
+                ),
+                DirectorGridInput.Input(
+                    "grid_material", display_name="宫格输入", optional=True,
+                    tooltip="可选。接入 GJJ_BATCH_IMAGE 或 IMAGE；点击前端刷新按钮后会按宫格设置拆分并导入。",
+                ),
+            ],
+            outputs=[
+                io.Model.Output(display_name="补丁模型", tooltip="已写入提示词接力时间线注意力补丁的模型。"),
+                io.Conditioning.Output(display_name="正向条件", tooltip="由全局提示词和时间线局部提示词编码出的正向条件。"),
+                io.Latent.Output(display_name="视频潜空间", tooltip="外部潜空间数据的透传结果，或按时间线尺寸自动创建的 LTX 视频潜空间数据。"),
+                io.Latent.Output(display_name="音频潜空间", tooltip="根据时间线音频生成的 LTX 音频潜空间数据，或用于从零生成的空音频潜空间数据。"),
+                GuideData.Output(display_name="图像引导数据", tooltip="包含图像引导素材、插入帧位置和强度，可连接 LTX 导演引导节点。"),
+                MotionGuideData.Output(display_name="运动引导数据", tooltip="包含时间线运动视频片段及其范围，可连接支持运动引导的节点。"),
+                io.Float.Output(display_name="帧率", tooltip="当前时间线实际使用的帧率。"),
+                io.Audio.Output(display_name="合成音频", tooltip="按时间线位置、裁剪范围和覆盖设置合成后的音频。"),
+            ],
+        )
 
-    def execute(
-        self,
-        model,
-        clip,
-        global_prompt,
-        duration_frames,
-        duration_seconds,
-        timeline_data,
-        local_prompts,
-        segment_lengths,
-        epsilon=1e-3,
-        frame_rate=24.0,
-        display_mode="seconds",
-        guide_strength="",
-        custom_width=0,
-        custom_height=0,
-        resize_method="maintain aspect ratio",
-        divisible_by=32,
-        img_compression=18,
-        use_custom_audio=False,
-        audio_vae=None,
-        optional_latent=None,
-    ):
-        guide_data = {"images": [], "insert_frames": [], "strengths": [], "frame_rate": float(frame_rate)}
-        derived_w, derived_h = int(custom_width), int(custom_height)
+    @classmethod
+    def execute(cls, model, clip, start_second, end_second, duration_seconds, start_frame, end_frame, duration_frames,
+                timeline_data, local_prompts, segment_lengths, global_prompt="", guide_strength="", epsilon=1e-3,
+                frame_rate=24, display_mode="frames",
+                custom_width=768, custom_height=512, resize_method="maintain aspect ratio",
+                divisible_by=32, img_compression=0, audio_vae=None, optional_latent=None,
+                use_custom_audio=False, inpaint_audio=True, use_custom_motion=True, override_audio=False,
+                grid_layout="2x2", grid_edge_cut=0, material_1=None, material_2=None, grid_material=None) -> io.NodeOutput:
+        _ = (material_1, material_2, grid_material)
+
+        # Parse timeline data
         try:
             tdata = json.loads(timeline_data) if timeline_data else {}
+        except Exception as e:
+            log.error(f"[LTXDirector] execute timeline_data parse error: {e}")
+            tdata = {}
+
+        is_retake_mode = tdata.get("retakeMode", False)
+        is_retake_active = is_retake_mode and tdata.get("retakeVideo") is not None
+
+        # Extract global_prompt from timeline_data if not connected/empty
+        if not global_prompt:
+            if is_retake_mode:
+                global_prompt = tdata.get("retake_global_prompt", "")
+            else:
+                global_prompt = tdata.get("global_prompt", "")
+
+        parsed_global_prompt, storyboard_prompts = _parse_external_prompt_script(global_prompt)
+        if storyboard_prompts:
+            global_prompt = parsed_global_prompt
+            local_prompts = "|".join(storyboard_prompts)
+            segment_lengths = ""
+
+        log.info(f"[LTXDirector] execute RECEIVED global_prompt: {repr(global_prompt)}")
+
+        # --- Build guide_data from image segments FIRST (to derive output dimensions) ---
+        guide_data = {"images": [], "insert_frames": [], "strengths": [], "frame_rate": frame_rate}
+        derived_w, derived_h = custom_width, custom_height
+        try:
             img_segs = [
-                seg
-                for seg in tdata.get("segments", [])
-                if seg.get("type", "image") == "image"
-                and (seg.get("imageFile") or seg.get("imageB64"))
-                and int(seg.get("start", 0)) < int(duration_frames)
+                s for s in tdata.get("segments", [])
+                if s.get("type", "image") in ("image", "video")
+                and (s.get("imageFile") or s.get("imageB64"))
+                and int(s.get("start", 0)) < start_frame + duration_frames
+                and int(s.get("start", 0)) + int(s.get("length", 1)) > start_frame
             ]
-            img_segs.sort(key=lambda item: item["start"])
-            strengths = [float(x.strip()) for x in str(guide_strength or "").split(",") if x.strip()]
+            img_segs.sort(key=lambda s: s["start"])
+
+            strengths = []
+            if guide_strength.strip():
+                strengths = [float(x.strip()) for x in guide_strength.split(",") if x.strip()]
+
             for idx, seg in enumerate(img_segs):
-                tensor = _load_image_tensor(seg)
+                seg_start = int(seg.get("start", 0))
+                offset = max(0, start_frame - seg_start)
+
+                if seg.get("type") == "video":
+                    if offset > 0:
+                        seg["trimStart"] = float(seg.get("trimStart", 0)) + offset
+                        seg["length"] = max(1, int(seg.get("length", 1)) - offset)
+                    tensor = _load_video_tensor(seg, float(frame_rate))
+                else:
+                    tensor = _load_image_tensor(seg)
+
+                # Apply resize
                 src_h, src_w = tensor.shape[1], tensor.shape[2]
 
                 def snap(val, div):
-                    return max(div, (int(val) // div) * div)
+                    return max(div, (val // div) * div)
 
+                if custom_width > 0 and custom_height > 0:
+                    # Both dimensions set — apply selected resize_method (pad, crop, stretch, maintain AR)
+                    tensor = _resize_image(tensor, custom_width, custom_height, resize_method, divisible_by)
+                elif custom_width > 0:
+                    # Width only — scale height from AR, snap both, then resize to exact dimensions
+                    tgt_w = snap(custom_width, divisible_by)
+                    tgt_h = snap(int(src_h * tgt_w / src_w), divisible_by)
+                    tensor = _resize_image(tensor, tgt_w, tgt_h, "stretch to fit", divisible_by)
+                elif custom_height > 0:
+                    # Height only — scale width from AR, snap both, then resize to exact dimensions
+                    tgt_h = snap(custom_height, divisible_by)
+                    tgt_w = snap(int(src_w * tgt_h / src_h), divisible_by)
+                    tensor = _resize_image(tensor, tgt_w, tgt_h, "stretch to fit", divisible_by)
+                else:
+                    # Both zero — keep original dimensions, just snap to divisible_by
+                    tensor = _resize_image(tensor, src_w, src_h, "maintain aspect ratio", divisible_by)
+
+
+                # Apply compression
+                if img_compression > 0:
+                    tensor = _compress_image(tensor, img_compression)
+
+                # Record dimensions of the first processed image for latent generation
+                if idx == 0:
+                    derived_h = tensor.shape[1]
+                    derived_w = tensor.shape[2]
+
+                if seg.get("isEndFrame"):
+                    insert_frame = max(0, seg_start + int(seg.get("length", 1)) - 1 - start_frame)
+                else:
+                    insert_frame = max(0, seg_start - start_frame)
+                strength = strengths[idx] if idx < len(strengths) else 1.0
+                guide_data["images"].append(tensor)
+                guide_data["insert_frames"].append(insert_frame)
+                guide_data["strengths"].append(float(strength))
+
+            # If no images were loaded from the timeline, create a dummy image at strength 0
+            # to prevent artifacts in text-to-video mode.
+            if not guide_data["images"] and optional_latent is None:
+                src_w = derived_w if derived_w > 0 else 768
+                src_h = derived_h if derived_h > 0 else 512
+
+                # If there's an IC-LoRA video or retake base video on the timeline, extract its dimensions for accurate aspect ratio scaling
+                tdata_motion = json.loads(timeline_data) if timeline_data else {}
+                found_dims = False
+
+                # Check for retake base video first
+                is_retake = tdata_motion.get("retakeMode", False)
+                retake_vid = tdata_motion.get("retakeVideo") or {}
+                retake_file = retake_vid.get("imageFile", "") if isinstance(retake_vid, dict) else ""
+                if is_retake and retake_file:
+                    r_path = os.path.join(folder_paths.get_input_directory(), retake_file)
+                    if not os.path.exists(r_path):
+                        basename = os.path.basename(retake_file)
+                        fallback_path = os.path.join(folder_paths.get_input_directory(), "GJJ_LTXDirector", basename)
+                        if os.path.exists(fallback_path):
+                            r_path = fallback_path
+                    if os.path.exists(r_path):
+                        try:
+                            with av.open(r_path) as container:
+                                stream = container.streams.video[0]
+                                src_w = stream.width or stream.codec_context.width
+                                src_h = stream.height or stream.codec_context.height
+                                found_dims = True
+                        except:
+                            pass
+
+                # Fallback to normal motion segments
+                if not found_dims:
+                    for mseg in tdata_motion.get("motionSegments", []):
+                        v_file = mseg.get("videoFile")
+                        if v_file:
+                            v_path = os.path.join(folder_paths.get_input_directory(), v_file)
+                            if not os.path.exists(v_path):
+                                basename = os.path.basename(v_file)
+                                fallback_path = os.path.join(folder_paths.get_input_directory(), "GJJ_LTXDirector", basename)
+                                if os.path.exists(fallback_path):
+                                    v_path = fallback_path
+                            if os.path.exists(v_path):
+                                try:
+                                    with av.open(v_path) as container:
+                                        stream = container.streams.video[0]
+                                        src_w = stream.width or stream.codec_context.width
+                                        src_h = stream.height or stream.codec_context.height
+                                        found_dims = True
+                                        break
+                                except:
+                                    pass
+
+                # Create a dummy tensor of the exact source dimensions
+                tensor = torch.zeros((1, src_h, src_w, 3), dtype=torch.float32)
+
+                def snap(val, div):
+                    return max(div, (val // div) * div)
+
+                # Route the dummy tensor through the exact same resizing pipeline
                 if custom_width > 0 and custom_height > 0:
                     tensor = _resize_image(tensor, custom_width, custom_height, resize_method, divisible_by)
                 elif custom_width > 0:
                     tgt_w = snap(custom_width, divisible_by)
-                    tgt_h = snap(src_h * tgt_w / src_w, divisible_by)
+                    tgt_h = snap(int(src_h * tgt_w / src_w), divisible_by)
                     tensor = _resize_image(tensor, tgt_w, tgt_h, "stretch to fit", divisible_by)
                 elif custom_height > 0:
                     tgt_h = snap(custom_height, divisible_by)
-                    tgt_w = snap(src_w * tgt_h / src_h, divisible_by)
+                    tgt_w = snap(int(src_w * tgt_h / src_h), divisible_by)
                     tensor = _resize_image(tensor, tgt_w, tgt_h, "stretch to fit", divisible_by)
                 else:
                     tensor = _resize_image(tensor, src_w, src_h, "maintain aspect ratio", divisible_by)
-                tensor = _compress_image(tensor, int(img_compression))
-                if idx == 0:
-                    derived_h, derived_w = tensor.shape[1], tensor.shape[2]
+
                 guide_data["images"].append(tensor)
-                guide_data["insert_frames"].append(int(seg["start"]))
-                guide_data["strengths"].append(float(strengths[idx] if idx < len(strengths) else 1.0))
-            if not guide_data["images"]:
-                width = max(32, ((derived_w if derived_w > 0 else 768) // 32) * 32)
-                height = max(32, ((derived_h if derived_h > 0 else 512) // 32) * 32)
-                guide_data["images"].append(torch.zeros((1, height, width, 3), dtype=torch.float32))
                 guide_data["insert_frames"].append(0)
                 guide_data["strengths"].append(0.0)
-                derived_w, derived_h = width, height
-        except Exception as exc:
-            raise RuntimeError(f"构建 LTX Director guide 数据失败：{exc}") from exc
 
-        ltxv_length = int(duration_frames) + 1
+                derived_w = tensor.shape[2]
+                derived_h = tensor.shape[1]
+
+        except Exception as e:
+            log.warning("[PromptRelay] Could not build guide_data: %s", e)
+
+        # --- Auto-generate LTXV latent if none was provided ---
+        # Apply the community 8n+1 rule directly to the timeline's duration_frames:
+        # int(ceil(((duration_frames) - 1) / 8) * 8) + 1
+        # This ensures we get AT LEAST the requested frames, snapped to LTXV's requirements.
+        ltxv_length = int(math.ceil((duration_frames - 1) / 8.0) * 8) + 1
+
         if optional_latent is None:
-            latent_w = max(32, (int(derived_w or 768) // 32) * 32)
-            latent_h = max(32, (int(derived_h or 512) // 32) * 32)
+            latent_w = max(32, (derived_w // 32) * 32)
+            latent_h = max(32, (derived_h // 32) * 32)
+            # LTXV temporal: ((length - 1) // 8) + 1 latent frames; invert to get pixel frames -> length
             latent_t = ((ltxv_length - 1) // 8) + 1
             samples = torch.zeros(
                 [1, 128, latent_t, latent_h // 32, latent_w // 32],
                 device=comfy.model_management.intermediate_device(),
             )
             latent = {"samples": samples}
+            log.info(
+                "[PromptRelay] Auto-generated LTXV latent: %dx%d, %d pixel frames (%d latent frames)",
+                latent_w, latent_h, ltxv_length, latent_t,
+            )
         else:
             latent = optional_latent
 
-        patched, conditioning = _encode_relay(model, clip, latent, global_prompt, local_prompts, segment_lengths, float(epsilon))
-        audio_out = _build_combined_audio(timeline_data, ltxv_length, float(frame_rate))
+        patched, conditioning = _encode_relay(
+            model, clip, latent, global_prompt, local_prompts, segment_lengths, epsilon,
+        )
+
+        # --- Build Audio Output ---
+        audio_out = _build_combined_audio(timeline_data, start_frame, ltxv_length, float(frame_rate), override_audio=override_audio)
+
+        # --- Audio Latent Generation ---
         audio_latent = {}
+
         if audio_vae is not None:
+            # Helper to generate empty latent
             def get_empty_latent():
+                # Support both raw AudioVAE objects and ComfyUI VAE wrappers.
                 inner = getattr(audio_vae, "first_stage_model", audio_vae)
                 z_channels = audio_vae.latent_channels
                 audio_freq = inner.latent_frequency_bins
                 num_audio_latents = inner.num_of_latents_from_frames(ltxv_length, float(frame_rate))
-                audio_latents = torch.zeros((1, z_channels, num_audio_latents, audio_freq), device=comfy.model_management.intermediate_device())
-                return {"samples": audio_latents, "type": "audio"}
-
-            if use_custom_audio:
-                waveform = audio_out["waveform"]
-                if waveform.ndim == 2:
-                    waveform = waveform.unsqueeze(0)
-                if waveform.ndim != 3:
-                    raise RuntimeError(f"时间线音频波形维度不正确：{tuple(waveform.shape)}")
-                if hasattr(audio_vae, "first_stage_model"):
-                    latent_samples = audio_vae.encode(waveform.movedim(1, -1))
-                else:
-                    latent_samples = audio_vae.encode({"waveform": waveform, "sample_rate": audio_out["sample_rate"]})
-                if latent_samples.numel() == 0:
-                    raise RuntimeError("时间线音频编码得到空 latent。")
-                mask = torch.full(
-                    (1, latent_samples.shape[-2], latent_samples.shape[-1]),
-                    0.0,
-                    dtype=torch.float32,
+                audio_latents = torch.zeros(
+                    (1, z_channels, num_audio_latents, audio_freq),
                     device=comfy.model_management.intermediate_device(),
                 )
-                audio_latent = {"samples": latent_samples, "type": "audio", "noise_mask": mask.reshape((-1, 1, mask.shape[-2], mask.shape[-1]))}
+                return {"samples": audio_latents, "type": "audio"}
+
+            if use_custom_audio or override_audio or is_retake_active:
+                try:
+                    if audio_out is not None:
+                        # 1. Encode audio waveform into latent space
+                        waveform = audio_out["waveform"]
+                        if waveform.ndim == 2:
+                            waveform = waveform.unsqueeze(0)
+                        if waveform.ndim != 3:
+                            raise ValueError(
+                                f"Expected custom audio waveform with 2 or 3 dims, got shape {tuple(waveform.shape)}"
+                            )
+
+                        # Wrapped ComfyUI VAE expects (batch, samples, channels);
+                        # raw AudioVAE expects a dict with waveform in (batch, channels, samples).
+                        if hasattr(audio_vae, "first_stage_model"):
+                            latent_samples = audio_vae.encode(waveform.movedim(1, -1))
+                        else:
+                            latent_samples = audio_vae.encode({
+                                "waveform": waveform,
+                                "sample_rate": audio_out["sample_rate"],
+                            })
+
+                        if latent_samples.numel() == 0:
+                            raise ValueError("Encoded audio latent is empty (0 elements).")
+
+                        # 2. Create a 3D gap mask [B, F, H] to avoid accidental broadcasting to the 5D video latent
+                        # which also has 128 channels. A 4D audio mask [1, 128, F, H] confuses ComfyUI's KSampler
+                        # into masking the video latent as well, causing black frames.
+                        B, C, F_len, H_len = latent_samples.shape
+
+                        if is_retake_active:
+                            gap_mask = torch.zeros((B, F_len, H_len), dtype=torch.float32, device=latent_samples.device)
+
+                            retake_start = float(tdata.get("retakeStart", 0))
+                            retake_len = float(tdata.get("retakeLength", 0))
+
+                            overlap_start = max(start_frame, retake_start)
+                            overlap_end = min(start_frame + ltxv_length, retake_start + retake_len)
+
+                            if overlap_end > overlap_start:
+                                rel_start = overlap_start - start_frame
+                                rel_len = overlap_end - overlap_start
+
+                                start_sec = rel_start / float(frame_rate)
+                                len_sec = rel_len / float(frame_rate)
+                                total_sec = ltxv_length / float(frame_rate)
+
+                                start_idx = int((start_sec / total_sec) * F_len)
+                                end_idx = int(((start_sec + len_sec) / total_sec) * F_len)
+
+                                start_idx = max(0, min(F_len, start_idx))
+                                end_idx = max(0, min(F_len, end_idx))
+
+                                gap_mask[:, start_idx:end_idx, :] = 1.0
+                        else:
+                            gap_mask = torch.ones((B, F_len, H_len), dtype=torch.float32, device=latent_samples.device)
+
+                            audio_segs_key = "motionSegments" if override_audio else "audioSegments"
+                            file_key = "videoFile" if override_audio else "audioFile"
+                            for seg in tdata.get(audio_segs_key, []):
+                                if not seg.get(file_key):
+                                    continue
+
+                                seg_start = float(seg.get("start", 0))
+                                seg_len = float(seg.get("length", 1))
+
+                                if seg_start + seg_len <= start_frame or seg_start >= start_frame + ltxv_length:
+                                    continue
+
+                                offset = max(0, start_frame - seg_start)
+                                seg_len = max(1.0, seg_len - offset)
+                                seg_start = max(0, seg_start - start_frame)
+
+                                start_sec = seg_start / float(frame_rate)
+                                len_sec = seg_len / float(frame_rate)
+                                total_sec = ltxv_length / float(frame_rate)
+
+                                start_idx = int((start_sec / total_sec) * F_len)
+                                end_idx = int(((start_sec + len_sec) / total_sec) * F_len)
+                                gap_mask[:, start_idx:end_idx, :] = 0.0
+
+                        if inpaint_audio:
+                            # Generate new audio in the gaps, preserve custom audio segments
+                            mask = gap_mask
+                        else:
+                            # Preserve the entire audio latent (no generation).
+                            # We use a 3D zeros mask to prevent video blackouts.
+                            mask = torch.zeros((B, F_len, H_len), dtype=torch.float32, device=latent_samples.device)
+
+                        audio_latent = {
+                            "samples": latent_samples,
+                            "type": "audio",
+                            "noise_mask": mask
+                        }
+                        log.info("[PromptRelay] Generated custom audio latent with dynamic noise mask.")
+                    else:
+                        raise ValueError("No audio waveform to encode.")
+                except Exception as e:
+                    log.error("[PromptRelay] Failed to generate custom audio latent: %s", e)
+                    raise e
             else:
-                audio_latent = get_empty_latent()
+                # Generate empty latent
+                try:
+                    audio_latent = get_empty_latent()
+                    log.info("[PromptRelay] Auto-generated empty audio latent.")
+                except Exception as e:
+                    log.error("[PromptRelay] Could not generate empty audio latent: %s", e)
+                    raise e
 
-        return (patched, conditioning, latent, audio_latent, guide_data, float(frame_rate), audio_out)
+        # --- Motion guide output from timeline video segments ---
+        motion_guide_data = {"segments": [], "frame_rate": float(frame_rate), "duration_frames": int(duration_frames), "resize_method": resize_method}
+        try:
+            tdata = json.loads(timeline_data) if timeline_data else {}
+            if use_custom_motion:
+                motion_segments = tdata.get("motionSegments", [])
+            else:
+                motion_segments = []
+            for seg in motion_segments:
+                seg_start = int(seg.get("start", 0))
+                length = int(seg.get("length", 1))
+                if seg_start >= start_frame + duration_frames or seg_start + length <= start_frame:
+                    continue
+                if not seg.get("videoFile"):
+                    continue
 
+                offset = max(0, start_frame - seg_start)
+                new_start = max(0, seg_start - start_frame)
 
-class GJJLTXDirectorGuide:
-    CATEGORY = "GJJ/LTX"
-    FUNCTION = "execute"
-    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
-    RETURN_NAMES = ("正向条件", "负向条件", "Guide视频Latent")
-    OUTPUT_TOOLTIPS = (
-        "已追加 LTX guide keyframe 信息的正向条件。",
-        "已追加 LTX guide keyframe 信息的负向条件。",
-        "插入 guide latent 与 noise_mask 后的视频 latent。",
-    )
-    DESCRIPTION = "GJJ 版 LTX Director Guide：读取 LTX导演时间线 输出的 GUIDE_DATA，按时间线插入 guide 图像关键帧。"
-    SEARCH_ALIASES = [
-        "ltx director guide",
-        "director guide",
-        "ltx guide",
-        "LTX导演Guide",
-        "LTX导演引导",
-        "导演Guide",
-        "导演引导",
-        "引导",
-        "Guide数据",
-        "GUIDE_DATA",
-        "LTXVAddGuide",
-    ]
-    GJJ_HELP = {
-        "description": DESCRIPTION,
-        "notes": [
-            "连接 GJJ · 🎬 LTX导演时间线 的 Guide数据 输出。",
-            "逻辑复刻 LTX Director Guide，底层使用 ComfyUI 内置 LTXVAddGuide 的编码和 keyframe 方法。",
-            "支持按 scale_by 缩放 latent，并同步调整已有 noise_mask。",
-        ],
-    }
+                # Trim length so it doesn't extend beyond duration_frames
+                clipped_len = min(length - offset, duration_frames - new_start)
+                if clipped_len <= 0:
+                    continue
 
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "positive": ("CONDITIONING", {"display_name": "正向条件", "tooltip": "需要加入 guide keyframe 信息的正向 conditioning。"}),
-                "negative": ("CONDITIONING", {"display_name": "负向条件", "tooltip": "需要加入 guide keyframe 信息的负向 conditioning。"}),
-                "vae": ("VAE", {"display_name": "视频VAE", "tooltip": "用于把 guide 图片编码到 LTX 视频 latent 空间的 VAE。"}),
-                "latent": ("LATENT", {"display_name": "视频Latent", "tooltip": "要插入 guide 帧的视频 latent，通常来自 LTX导演时间线。"}),
-                "guide_data": (GUIDE_DATA_TYPE, {"display_name": "Guide数据", "tooltip": "来自 GJJ · 🎬 LTX导演时间线 的 GUIDE_DATA 输出。"}),
-                "scale_by": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 8.0, "step": 0.01, "display_name": "Latent缩放", "tooltip": "在写入 guide 前按比例缩放 latent 空间宽高。1 表示不缩放。"}),
-                "upscale_method": (["nearest-exact", "bilinear", "area", "bicubic", "bislerp"], {"default": "bicubic", "display_name": "缩放算法", "tooltip": "Latent 缩放使用的算法。"}),
-            }
-        }
+                clean = dict(seg)
+                clean["start"] = new_start
+                clean["length"] = clipped_len
+                clean["trimStart"] = float(seg.get("trimStart", 0)) + offset
+                motion_guide_data["segments"].append(clean)
+        except Exception as e:
+            log.warning("[LTXDirector] Could not build motion_guide_data: %s", e)
 
-    def execute(self, positive, negative, vae, latent, guide_data, scale_by=1.0, upscale_method="bicubic"):
-        from comfy_extras.nodes_lt import LTXVAddGuide
+        # Inject raw timeline details for downstream masking in Retake Mode
+        guide_data["timeline_data"] = timeline_data
+        guide_data["start_frame"] = start_frame
+        guide_data["duration_frames"] = duration_frames
+        guide_data["resize_method"] = resize_method
 
-        if not isinstance(guide_data, dict):
-            raise RuntimeError("Guide数据格式不正确，请连接 GJJ · 🎬 LTX导演时间线 的 Guide数据 输出。")
-
-        scale_factors = vae.downscale_index_formula
-        latent_image = latent["samples"].clone()
-
-        if "noise_mask" in latent:
-            noise_mask = latent["noise_mask"].clone()
-        else:
-            batch, _, latent_frames, _, _ = latent_image.shape
-            noise_mask = torch.ones(
-                (batch, 1, latent_frames, 1, 1),
-                dtype=torch.float32,
-                device=latent_image.device,
-            )
-
-        if float(scale_by) != 1.0:
-            batch, channels, frames, height, width = latent_image.shape
-            new_width = round(width * float(scale_by))
-            new_height = round(height * float(scale_by))
-            latent_4d = latent_image.permute(0, 2, 1, 3, 4).reshape(batch * frames, channels, height, width)
-            latent_resized_4d = comfy.utils.common_upscale(latent_4d, new_width, new_height, upscale_method, "disabled")
-            latent_image = latent_resized_4d.reshape(batch, frames, channels, new_height, new_width).permute(0, 2, 1, 3, 4)
-
-            if noise_mask.shape[-1] > 1 or noise_mask.shape[-2] > 1:
-                mask_4d = noise_mask.permute(0, 2, 1, 3, 4).reshape(batch * frames, 1, height, width)
-                mask_resized_4d = comfy.utils.common_upscale(mask_4d, new_width, new_height, upscale_method, "disabled")
-                noise_mask = mask_resized_4d.reshape(batch, frames, 1, new_height, new_width).permute(0, 2, 1, 3, 4)
-
-        _, _, latent_length, latent_height, latent_width = latent_image.shape
-        images = guide_data.get("images", [])
-        insert_frames = guide_data.get("insert_frames", [])
-        strengths = guide_data.get("strengths", [])
-
-        for idx, img_tensor in enumerate(images):
-            frame_idx = insert_frames[idx] if idx < len(insert_frames) else 0
-            strength = strengths[idx] if idx < len(strengths) else 1.0
-            _image_pixels, guiding_latent = LTXVAddGuide.encode(vae, latent_width, latent_height, img_tensor, scale_factors)
-            keyframe_frame_idx, latent_idx = LTXVAddGuide.get_latent_index(
-                positive,
-                latent_length,
-                len(_image_pixels),
-                int(frame_idx),
-                scale_factors,
-            )
-            if latent_idx + guiding_latent.shape[2] > latent_length:
-                raise RuntimeError(f"第 {idx + 1} 个 Guide 图像超出 latent 长度，请缩短时间线或调整插入帧。")
-            positive, negative, latent_image, noise_mask = LTXVAddGuide.append_keyframe(
-                positive,
-                negative,
-                keyframe_frame_idx,
-                latent_image,
-                noise_mask,
-                guiding_latent,
-                float(strength),
-                scale_factors,
-            )
-
-        return (positive, negative, {"samples": latent_image, "noise_mask": noise_mask})
+        return io.NodeOutput(
+            patched,
+            conditioning,
+            latent,
+            audio_latent,
+            guide_data,
+            motion_guide_data,
+            float(frame_rate),
+            audio_out,
+        )
 
 
 NODE_CLASS_MAPPINGS = {
     "GJJ_LTXDirector": GJJLTXDirector,
-    "GJJ_LTXDirectorGuide": GJJLTXDirectorGuide,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "GJJ_LTXDirector": "🎬 LTX导演时间线",
-    "GJJ_LTXDirectorGuide": "🧭 LTX导演Guide引导",
 }

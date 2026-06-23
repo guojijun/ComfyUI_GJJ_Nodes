@@ -423,6 +423,7 @@ class GJJ_LTXVVideoSampler:
                         "control_after_generate": True,
                         "display_name": "噪波种子",
                         "tooltip": "可直接输入种子，也可连接 RandomNoise 输出的 NOISE；外接 NOISE 时优先使用外部噪波对象。",
+                        "defaultInput": True,
                     },
                 ),
                 "cfg": (
@@ -452,6 +453,7 @@ class GJJ_LTXVVideoSampler:
                         "multiline": False,
                         "display_name": "Sigmas",
                         "tooltip": "可手填逗号/空格分隔的 Sigmas，也可连接基本调度器/BasicScheduler 输出的 SIGMAS。",
+                        "defaultInput": True,
                     },
                 ),
                 "auto_clean_memory": (

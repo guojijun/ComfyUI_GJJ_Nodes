@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import random
+from collections import OrderedDict
 
 import torch
 
@@ -168,6 +169,8 @@ class GJJ_OllamaAssistant:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("生成文本",)
     OUTPUT_TOOLTIPS = ("Ollama 根据当前模板、指令与可选图片生成的文本结果。",)
+    _IMAGE_BASE64_CACHE: OrderedDict[tuple, str] = OrderedDict()
+    _IMAGE_BASE64_CACHE_MAX = 12
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -335,6 +338,38 @@ class GJJ_OllamaAssistant:
             },
         }
 
+    @classmethod
+    def IS_CHANGED(cls, *args, seed_mode="每次随机", seed=0, **kwargs):
+        if str(seed_mode or "").strip() == "每次随机":
+            return random.randint(1, 2147483647)
+        return int(_coerce_int(seed, 0, minimum=0, maximum=2147483647))
+
+    @classmethod
+    def _image_cache_key(cls, image: torch.Tensor) -> tuple:
+        tensor = image.detach()
+        return (
+            str(tensor.device),
+            str(tensor.dtype),
+            tuple(int(item) for item in tensor.shape),
+            tuple(int(item) for item in tensor.stride()),
+            int(tensor.storage_offset()),
+            int(tensor.data_ptr()),
+        )
+
+    @classmethod
+    def _image_base64(cls, image: torch.Tensor) -> str:
+        key = cls._image_cache_key(image)
+        cached = cls._IMAGE_BASE64_CACHE.get(key)
+        if cached is not None:
+            cls._IMAGE_BASE64_CACHE.move_to_end(key)
+            return cached
+        encoded = tensor_to_png_base64(image)
+        cls._IMAGE_BASE64_CACHE[key] = encoded
+        cls._IMAGE_BASE64_CACHE.move_to_end(key)
+        while len(cls._IMAGE_BASE64_CACHE) > cls._IMAGE_BASE64_CACHE_MAX:
+            cls._IMAGE_BASE64_CACHE.popitem(last=False)
+        return encoded
+
     def run(
         self,
         ollama_host,
@@ -385,7 +420,7 @@ class GJJ_OllamaAssistant:
         total = len(task_items)
         has_images = bool(images)
         for index, item in enumerate(task_items, start=1):
-            image_b64 = tensor_to_png_base64(item) if isinstance(item, torch.Tensor) else None
+            image_b64 = self._image_base64(item) if isinstance(item, torch.Tensor) else None
             payload = {
                 "model": chosen_model,
                 "messages": build_messages(system_prompt, user_prompt, image_b64),
