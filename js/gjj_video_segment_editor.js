@@ -13,6 +13,8 @@ const DEFAULT_PREVIEW_ASPECT = 16 / 9;
 const FRAME_SNAP = 8;
 const MIN_VISIBLE_OUTPUTS = 2; // 1个分段列表 + 1个视频片段
 const SEGMENT_LIST_NAME = "分段列表";
+const VIDEO_LIST_API = "/gjj/video_segment_editor/videos";
+const VIDEO_META_API = "/gjj/video_segment_editor/meta";
 const HIDDEN_WIDGET_NAMES = ["video_file", "segments_json", "refresh_nonce", "preview_text", "preview_kind", "preview_video", "preview_frame_rate", "preview_total_frames", "segment_count"];
 
 function refreshNodeCanvas(node) {
@@ -190,6 +192,25 @@ function videoFileToUrl(filename, type = "input") {
 	return `/view?filename=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}&subfolder=${encodeURIComponent(subfolder)}&t=${encodeURIComponent(Date.now())}`;
 }
 
+function videoEntryValue(entry) {
+	if (!entry?.filename) return "";
+	return [entry.subfolder || "", entry.filename].filter(Boolean).join("/");
+}
+
+function videoEntryLabel(entry) {
+	if (!entry?.filename) return "";
+	const location = entry.type === "output" ? "output" : "input";
+	const path = videoEntryValue(entry);
+	return `${path} [${location}]`;
+}
+
+function videoEntryFromValue(value, type = "input") {
+	const normalized = String(value || "").replaceAll("\\", "/");
+	const parts = normalized.split("/").filter(Boolean);
+	const filename = parts.pop() || "";
+	return { filename, subfolder: parts.join("/"), type: type || "input" };
+}
+
 function hasExternalVideoConnection(node) {
 	const input = node?.inputs?.find(i => i?.name === "video" || i?.label === "外部视频" || i?.localized_name === "外部视频");
 	return !!(input && input.link != null);
@@ -317,6 +338,7 @@ class VideoSegmentEditorWidget {
 		this.totalFrames = 0;
 		this.previewImageUrl = null;
 		this._previewFallbackUrl = null;
+		this._selectedVideoFileType = "input";
 		this._pendingSeekFrame = null;
 		this._seekRaf = null;
 		this.previewAspect = Number(node.__gjjPreviewAspect || DEFAULT_PREVIEW_ASPECT);
@@ -368,18 +390,38 @@ class VideoSegmentEditorWidget {
 		return Math.max(1, 1 + Math.floor((total - 1) / FRAME_SNAP) * FRAME_SNAP);
 	}
 
+	getTimelineRange() {
+		const maxAnchor = this.getMaxAnchorFrame();
+		if (!this.segments.length || maxAnchor <= 1) {
+			return { start: 1, end: maxAnchor };
+		}
+
+		const starts = this.segments.map(seg => Number(seg?.start_frame || 1)).filter(Number.isFinite);
+		const ends = this.segments.map(seg => Number(seg?.end_frame || 1)).filter(Number.isFinite);
+		const first = Math.max(1, Math.min(...starts));
+		const last = Math.min(maxAnchor, Math.max(...ends, first + FRAME_SNAP));
+		const coversNearlyAll = first <= 1 && last >= maxAnchor - FRAME_SNAP;
+		if (coversNearlyAll) {
+			return { start: 1, end: maxAnchor };
+		}
+		return {
+			start: clamp(this.snapFrame(first), 1, Math.max(1, maxAnchor - FRAME_SNAP)),
+			end: clamp(this.snapFrame(last), Math.min(maxAnchor, first + FRAME_SNAP), maxAnchor),
+		};
+	}
+
 	frameToX(frame) {
 		const width = this._cssWidth || 1;
-		const maxAnchor = this.getMaxAnchorFrame();
-		if (maxAnchor <= 1) return 0;
-		return ((Math.max(1, Number(frame) || 1) - 1) / (maxAnchor - 1)) * width;
+		const range = this.getTimelineRange();
+		const span = Math.max(1, range.end - range.start);
+		return ((clamp(Number(frame) || range.start, range.start, range.end) - range.start) / span) * width;
 	}
 
 	xToFrame(x) {
 		const width = this._cssWidth || 1;
-		const maxAnchor = this.getMaxAnchorFrame();
-		if (width <= 0 || maxAnchor <= 1) return 1;
-		return this.snapFrame(1 + (clamp(x, 0, width) / width) * (maxAnchor - 1));
+		const range = this.getTimelineRange();
+		if (width <= 0 || range.end <= range.start) return range.start;
+		return this.snapFrame(range.start + (clamp(x, 0, width) / width) * (range.end - range.start));
 	}
 
 	normalizeSegmentFrames(seg) {
@@ -514,7 +556,15 @@ class VideoSegmentEditorWidget {
 		const controls = document.createElement('div');
 		controls.style.cssText = 'display: flex; gap: 6px; align-items: center; flex-wrap: wrap;';
 
-		this.openBtn = this.makeButton("📁 打开", "打开任意视频，并复制到 ComfyUI input 目录");
+		this.videoSelect = document.createElement("select");
+		this.videoSelect.title = "选择 ComfyUI input/output 目录中已有的视频，不会复制文件。";
+		this.videoSelect.style.cssText = `
+			min-width: 170px; flex: 1 1 180px; height: 24px;
+			background: #242424; color: #eee; border: 1px solid #555;
+			border-radius: 3px; padding: 2px 6px; font-size: 11px;
+		`;
+
+		this.openBtn = this.makeButton("📁 导入", "从电脑其他位置导入视频，并复制到 ComfyUI input 目录");
 		this.addBtn = this.makeButton("➕ 添加", "在末尾添加一个新分段");
 		this.distributeBtn = this.makeButton("⚖️ 均分", "将所有分段均匀分布到整个时长");
 		this.deleteBtn = this.makeButton("🗑️ 删除", "删除当前选中的分段（至少保留1个）");
@@ -525,6 +575,7 @@ class VideoSegmentEditorWidget {
 		this.totalLabel.style.cssText = 'color: #888; margin-left: 4px; flex: 1; text-align: right;';
 		this.totalLabel.textContent = '合计: --';
 
+		controls.appendChild(this.videoSelect);
 		controls.appendChild(this.openBtn);
 		controls.appendChild(this.addBtn);
 		controls.appendChild(this.distributeBtn);
@@ -556,6 +607,9 @@ class VideoSegmentEditorWidget {
 			if (hasExternalVideoConnection(this.node)) return;
 			this.fileInput.click();
 		});
+		this.videoSelect.addEventListener("pointerdown", e => e.stopPropagation());
+		this.videoSelect.addEventListener("click", e => e.stopPropagation());
+		this.videoSelect.addEventListener("change", () => this.handleSelectExistingVideo());
 
 		this.canvas.addEventListener("pointerdown", e => { e.stopPropagation(); this.onPointerDown(e); });
 		this.canvas.addEventListener("pointermove", e => { e.stopPropagation(); this.onPointerMove(e); });
@@ -612,6 +666,7 @@ class VideoSegmentEditorWidget {
 		this.resizeObserver = new ResizeObserver(() => this.resizeCanvas());
 		this.resizeObserver.observe(this.container);
 		this.updateOpenButtonState();
+		this.refreshVideoList();
 	}
 
 	updateOpenButtonState() {
@@ -620,7 +675,12 @@ class VideoSegmentEditorWidget {
 		this.openBtn.disabled = disabled;
 		this.openBtn.style.opacity = disabled ? "0.45" : "1";
 		this.openBtn.style.cursor = disabled ? "not-allowed" : "pointer";
-		this.openBtn.title = disabled ? "外部视频已连接，📁打开已禁用" : "打开任意视频，并复制到 ComfyUI input 目录";
+		this.openBtn.title = disabled ? "外部视频已连接，📁导入已禁用" : "从电脑其他位置导入视频，并复制到 ComfyUI input 目录";
+		if (this.videoSelect) {
+			this.videoSelect.disabled = disabled;
+			this.videoSelect.style.opacity = disabled ? "0.45" : "1";
+			this.videoSelect.title = disabled ? "外部视频已连接，已有视频选择已禁用" : "选择 ComfyUI input/output 目录中已有的视频，不会复制文件。";
+		}
 	}
 
 	resizeCanvas() {
@@ -719,6 +779,82 @@ class VideoSegmentEditorWidget {
 		scheduleStabilize(this.node, 1);
 	}
 
+	async refreshVideoList() {
+		if (!this.videoSelect) return;
+		const current = this.node.widgets?.find(w => w.name === "video_file")?.value || "";
+		this.videoSelect.innerHTML = "";
+		const placeholder = document.createElement("option");
+		placeholder.value = "";
+		placeholder.textContent = "选择已有视频...";
+		this.videoSelect.appendChild(placeholder);
+
+		try {
+			const response = await fetch(VIDEO_LIST_API, { cache: "no-store" });
+			const data = await response.json().catch(() => ({}));
+			const videos = Array.isArray(data?.videos) ? data.videos : [];
+			for (const video of videos) {
+				const value = videoEntryValue(video);
+				if (!value) continue;
+				const option = document.createElement("option");
+				option.value = value;
+				option.textContent = videoEntryLabel(video);
+				option.dataset.type = video.type || "input";
+				this.videoSelect.appendChild(option);
+			}
+			this.videoSelect.value = current || "";
+			const selectedOption = this.videoSelect.selectedOptions?.[0];
+			if (selectedOption?.dataset?.type) {
+				this._selectedVideoFileType = selectedOption.dataset.type;
+				if (current) {
+					this.applyVideoMetadata(await this.fetchVideoMetadata(current, this._selectedVideoFileType));
+				}
+			}
+		} catch (error) {
+			console.warn("[GJJ] 视频分段编辑器 - 读取已有视频列表失败:", error);
+			placeholder.textContent = "读取视频列表失败";
+		}
+	}
+
+	async fetchVideoMetadata(value, type = "input") {
+		const entry = videoEntryFromValue(value, type);
+		if (!entry.filename) return null;
+		try {
+			const url = `${VIDEO_META_API}?filename=${encodeURIComponent(entry.filename)}&subfolder=${encodeURIComponent(entry.subfolder || "")}&type=${encodeURIComponent(entry.type || "input")}`;
+			const response = await fetch(url, { cache: "no-store" });
+			const data = await response.json().catch(() => ({}));
+			if (!response.ok || data?.ok === false) throw new Error(data?.error || "读取视频信息失败");
+			return data.video || null;
+		} catch (error) {
+			console.warn("[GJJ] 视频分段编辑器 - 读取视频元数据失败:", error);
+			return null;
+		}
+	}
+
+	applyVideoMetadata(video) {
+		if (!video) return;
+		if (Number.isFinite(Number(video.fps)) && Number(video.fps) > 0) {
+			this.frameRate = Number(video.fps);
+		}
+		if (Number.isFinite(Number(video.frame_count)) && Number(video.frame_count) > 0) {
+			this.totalFrames = Math.round(Number(video.frame_count));
+		}
+		this.updateLabels();
+		this.updateTotalLabel();
+		this.render();
+	}
+
+	async handleSelectExistingVideo() {
+		if (!this.videoSelect || hasExternalVideoConnection(this.node)) return;
+		const value = this.videoSelect.value || "";
+		if (!value) return;
+		const option = this.videoSelect.selectedOptions?.[0];
+		this._selectedVideoFileType = option?.dataset?.type || "input";
+		this.setVideoFileValue(value);
+		this.applyVideoMetadata(await this.fetchVideoMetadata(value, this._selectedVideoFileType));
+		this.updatePreviewFromFile(value, true, this._selectedVideoFileType);
+		this.setRefreshNonce();
+	}
+
 	async handleOpenFile(e) {
 		const file = e?.target?.files?.[0];
 		if (!file) return;
@@ -730,7 +866,7 @@ class VideoSegmentEditorWidget {
 
 		const originalText = this.openBtn.textContent;
 		try {
-			this.openBtn.textContent = "📁 复制中...";
+			this.openBtn.textContent = "📁 导入中...";
 			this.openBtn.disabled = true;
 			this.openBtn.style.opacity = "0.65";
 
@@ -747,12 +883,11 @@ class VideoSegmentEditorWidget {
 
 			const video = data.video;
 			const value = [video.subfolder, video.filename].filter(Boolean).join("/");
-			if (Number.isFinite(Number(video.fps)) && Number(video.fps) > 0) this.frameRate = Number(video.fps);
-			if (Number.isFinite(Number(video.frame_count)) && Number(video.frame_count) > 0) {
-				this.totalFrames = Math.round(Number(video.frame_count));
-			}
+			this._selectedVideoFileType = video.type || "input";
+			this.applyVideoMetadata(video);
 			this.setVideoFileValue(value);
-			this.updatePreviewFromFile(value, true);
+			this.updatePreviewFromFile(value, true, this._selectedVideoFileType);
+			await this.refreshVideoList();
 		} catch (err) {
 			console.error("[GJJ] 打开视频失败:", err);
 			alert(`打开视频失败：${err?.message || err}`);
@@ -763,7 +898,7 @@ class VideoSegmentEditorWidget {
 		}
 	}
 
-	updatePreviewFromFile(filename, resetSegments = false) {
+	updatePreviewFromFile(filename, resetSegments = false, fileType = null) {
 		this.updateOpenButtonState();
 		if (hasExternalVideoConnection(this.node)) {
 			if (resetSegments) this.segments = [];
@@ -793,7 +928,9 @@ class VideoSegmentEditorWidget {
 			seg.thumbnail = null;
 			seg._thumbnailImage = null;
 		});
-		this.setPreviewSource(videoFileToUrl(filename, "input"), videoFileToUrl(filename, "output"));
+		const primaryType = fileType || this._selectedVideoFileType || "input";
+		const fallbackType = primaryType === "output" ? "input" : "output";
+		this.setPreviewSource(videoFileToUrl(filename, primaryType), videoFileToUrl(filename, fallbackType));
 	}
 
 	onPreviewMetadata() {
@@ -1000,7 +1137,7 @@ class VideoSegmentEditorWidget {
 
 	hitBoundary(mx) {
 		const rects = this.segmentRects();
-		for (let i = 0; i < rects.length; i++) {
+		for (let i = 0; i < rects.length - 1; i++) {
 			const right = rects[i].x + rects[i].w;
 			if (Math.abs(mx - right) <= HANDLE_HIT_PX) return i;
 		}
@@ -1370,15 +1507,16 @@ class VideoSegmentEditorWidget {
 		ctx.lineTo(width, RULER_HEIGHT);
 		ctx.stroke();
 
-		const maxFrame = this.getMaxAnchorFrame();
-		const tickFrameInterval = this._getTickFrameInterval(width, maxFrame);
+		const range = this.getTimelineRange();
+		const tickFrameInterval = this._getTickFrameInterval(width, range.end - range.start + 1);
 
 		ctx.fillStyle = "#aaa";
 		ctx.font = "10px sans-serif";
 		ctx.textAlign = "center";
 		ctx.textBaseline = "top";
 
-		for (let offset = 0; offset <= maxFrame - 1; offset += tickFrameInterval) {
+		const firstTickOffset = Math.ceil((range.start - 1) / tickFrameInterval) * tickFrameInterval;
+		for (let offset = firstTickOffset; offset <= range.end - 1; offset += tickFrameInterval) {
 			const frame = 1 + offset;
 			const x = this.frameToX(frame);
 			if (x > width) break;
@@ -1390,6 +1528,15 @@ class VideoSegmentEditorWidget {
 			ctx.stroke();
 
 			ctx.fillText(String(frame), x, 4);
+		}
+
+		if (range.start > 1) {
+			ctx.textAlign = "left";
+			ctx.fillText(String(range.start), 2, 4);
+		}
+		if (range.end < this.getMaxAnchorFrame()) {
+			ctx.textAlign = "right";
+			ctx.fillText(String(range.end), width - 2, 4);
 		}
 	}
 

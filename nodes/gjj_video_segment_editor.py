@@ -45,6 +45,93 @@ def _unique_path(directory: Path, filename: str) -> Path:
 	return target
 
 
+def _list_video_entries() -> list[dict[str, Any]]:
+	entries: list[dict[str, Any]] = []
+	seen: set[tuple[str, str, str]] = set()
+	for type_name, base_getter in (
+		("input", folder_paths.get_input_directory),
+		("output", folder_paths.get_output_directory),
+	):
+		try:
+			base = Path(base_getter()).resolve()
+		except Exception:
+			continue
+		if not base.exists():
+			continue
+		for path in base.rglob("*"):
+			if not path.is_file() or path.suffix.lower() not in VIDEO_EXTENSIONS:
+				continue
+			try:
+				relative = path.resolve().relative_to(base)
+			except Exception:
+				continue
+			subfolder = relative.parent.as_posix()
+			if subfolder == ".":
+				subfolder = ""
+			key = (type_name, subfolder, path.name)
+			if key in seen:
+				continue
+			seen.add(key)
+			try:
+				stat = path.stat()
+				mtime_ns = int(stat.st_mtime_ns)
+				size_bytes = int(stat.st_size)
+			except Exception:
+				mtime_ns = 0
+				size_bytes = 0
+			entries.append({
+				"filename": path.name,
+				"subfolder": subfolder,
+				"type": type_name,
+				"mtime_ns": mtime_ns,
+				"size_bytes": size_bytes,
+			})
+	entries.sort(key=lambda item: (str(item.get("type") or ""), str(item.get("subfolder") or ""), str(item.get("filename") or "").lower()))
+	return entries
+
+
+def _resolve_video_entry_path(filename: str, subfolder: str = "", type_name: str = "input") -> Path:
+	base_getter = folder_paths.get_output_directory if type_name == "output" else folder_paths.get_input_directory
+	base = Path(base_getter()).resolve()
+	candidate = (base / str(subfolder or "").replace("\\", "/") / str(filename or "")).resolve()
+	try:
+		candidate.relative_to(base)
+	except ValueError as error:
+		raise RuntimeError("视频路径越界") from error
+	if not candidate.is_file() or candidate.suffix.lower() not in VIDEO_EXTENSIONS:
+		raise RuntimeError(f"未找到视频：{filename}")
+	return candidate
+
+
+@PromptServer.instance.routes.get("/gjj/video_segment_editor/videos")
+async def list_video_segment_editor_videos(request):
+	return web.json_response({"ok": True, "videos": _list_video_entries()})
+
+
+@PromptServer.instance.routes.get("/gjj/video_segment_editor/meta")
+async def get_video_segment_editor_meta(request):
+	try:
+		path = _resolve_video_entry_path(
+			request.query.get("filename", ""),
+			request.query.get("subfolder", ""),
+			request.query.get("type", "input"),
+		)
+		stat = path.stat()
+		return web.json_response({
+			"ok": True,
+			"video": {
+				"filename": path.name,
+				"subfolder": request.query.get("subfolder", ""),
+				"type": request.query.get("type", "input"),
+				"mtime_ns": int(stat.st_mtime_ns),
+				"size_bytes": int(stat.st_size),
+				**get_video_metadata(str(path)),
+			},
+		})
+	except Exception as error:
+		return web.json_response({"ok": False, "error": str(error)}, status=400)
+
+
 @PromptServer.instance.routes.post("/gjj/video_segment_editor/upload")
 async def upload_video_segment_editor_video(request):
 	reader = await request.multipart()
@@ -188,6 +275,83 @@ def format_segments_list(segments: list[dict[str, Any]]) -> str:
 			entry["color"] = item.get("color")
 		frame_segments.append(entry)
 	return json.dumps(frame_segments, ensure_ascii=False, indent=2)
+
+
+def _segments_from_workflow_properties(extra_pnginfo: Any, unique_id: Any) -> list[dict[str, Any]]:
+	"""从 workflow properties 读取前端实时保存的分段，避免隐藏 widget 旧值覆盖面板状态。"""
+	if unique_id is None or not isinstance(extra_pnginfo, dict):
+		return []
+	try:
+		workflow = extra_pnginfo.get("workflow") or {}
+		nodes = workflow.get("nodes") or []
+		uid = str(unique_id)
+		for node in nodes:
+			if str(node.get("id")) != uid:
+				continue
+			props = node.get("properties") or {}
+			for key in ("segments", "segments_json"):
+				segments = parse_segments_list(props.get(key) or "")
+				if segments:
+					return segments
+			widget_values = node.get("widgets_values")
+			if isinstance(widget_values, list):
+				for value in widget_values:
+					segments = parse_segments_list(value) if isinstance(value, str) else []
+					if segments:
+						return segments
+	except Exception:
+		return []
+	return []
+
+
+def _segments_from_prompt_inputs(prompt: Any, unique_id: Any) -> list[dict[str, Any]]:
+	if unique_id is None or not isinstance(prompt, dict):
+		return []
+	node = prompt.get(str(unique_id)) or prompt.get(unique_id)
+	if not isinstance(node, dict):
+		return []
+	inputs = node.get("inputs") or {}
+	if not isinstance(inputs, dict):
+		return []
+	for key in ("segments_json", "分段列表JSON", "segments"):
+		value = inputs.get(key)
+		if isinstance(value, str):
+			segments = parse_segments_list(value)
+			if segments:
+				return segments
+	return []
+
+
+def _prompt_input_is_linked(prompt: Any, unique_id: Any, key_names: tuple[str, ...]) -> bool:
+	if unique_id is None or not isinstance(prompt, dict):
+		return False
+	node = prompt.get(str(unique_id)) or prompt.get(unique_id)
+	if not isinstance(node, dict):
+		return False
+	inputs = node.get("inputs") or {}
+	if not isinstance(inputs, dict):
+		return False
+	for key in key_names:
+		value = inputs.get(key)
+		if isinstance(value, (list, tuple)) and value:
+			return True
+	return False
+
+
+def _segments_for_execution(prompt: Any, extra_pnginfo: Any, unique_id: Any, segments_json: str) -> list[dict[str, Any]]:
+	widget_segments = parse_segments_list(segments_json)
+	if _prompt_input_is_linked(prompt, unique_id, ("segments_json", "分段列表JSON", "segments")) and widget_segments:
+		return widget_segments
+
+	property_segments = _segments_from_workflow_properties(extra_pnginfo, unique_id)
+	if property_segments:
+		return property_segments
+
+	prompt_segments = _segments_from_prompt_inputs(prompt, unique_id)
+	if prompt_segments:
+		return prompt_segments
+
+	return widget_segments
 
 
 def get_ffmpeg_executable() -> str:
@@ -1291,7 +1455,7 @@ class GJJ_VideoSegmentEditor:
 			raise RuntimeError("请连接外部视频或在节点内选择视频文件")
 
 		# 3. 解析或生成分段列表（默认3段）
-		segments = parse_segments_list(segments_json)
+		segments = _segments_for_execution(prompt, extra_pnginfo, unique_id, segments_json)
 		if not segments:
 			# 自动生成分段
 			segments = generate_auto_frame_segments(total_frames, 3)

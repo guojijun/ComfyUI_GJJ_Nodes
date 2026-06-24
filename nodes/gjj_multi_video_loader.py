@@ -391,6 +391,18 @@ def recover_selected_videos(raw_value: Any, extra_pnginfo: Any = None, unique_id
             from_property = parse_selected_videos(properties.get(SELECTED_VIDEOS_PROPERTY))
             if from_property:
                 candidates.append(from_property)
+                continue
+            from_widget_property = parse_selected_videos(properties.get("selected_videos_json"))
+            if from_widget_property:
+                candidates.append(from_widget_property)
+                continue
+        widget_values = node.get("widgets_values")
+        if isinstance(widget_values, list):
+            for value in widget_values:
+                from_widget = parse_selected_videos(value)
+                if from_widget:
+                    candidates.append(from_widget)
+                    break
     if unique_id is not None and candidates:
         return candidates[0]
     return candidates[0] if len(candidates) == 1 else []

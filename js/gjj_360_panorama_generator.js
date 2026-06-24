@@ -43,6 +43,38 @@ const SETTINGS_WIDGETS = [
 	"current_view_data",
 	"save_directory",
 ];
+const MODEL_FILE_RE = /\.(safetensors|ckpt|pt2?|pth|bin|gguf|sft)$/i;
+const CLIP_MODEL_RE = /(^|[\\/_\-.])(clip|text[_\s-]*encoder|t5|bert|qwen[_\s-]*2\.?5|vl)([\\/_\-.]|$)/i;
+const VAE_MODEL_RE = /(^|[\\/_\-.])vae([\\/_\-.]|$)/i;
+const LORA_MODEL_RE = /(^|[\\/_\-.])(lora|lightning|mickmumpitz|360)([\\/_\-.]|$)/i;
+const SHIFTED_WIDGETS = [
+	"clip_name",
+	"vae_name",
+	"lora_1_name",
+	"lora_1_strength",
+	"lora_2_name",
+	"lora_2_strength",
+	"seed",
+	"steps",
+	"cfg",
+	"sampler_name",
+	"scheduler",
+	"denoise",
+	"base_width",
+	"base_height",
+	"final_width",
+	"final_height",
+	"upscale_enabled",
+	"upscale_model_name",
+	"prompt_suffix",
+	"seam_prompt",
+	"seam_mask_width",
+	"seam_blur",
+	"repair_enabled",
+	"output_current_view",
+	"current_view_data",
+	"save_directory",
+];
 
 function isTarget(node) {
 	return TARGET_NODES.has(node?.comfyClass || node?.type);
@@ -76,6 +108,41 @@ function setWidgetValue(node, name, value) {
 function getWidgetValue(node, name, fallback = "") {
 	const widget = getWidget(node, name);
 	return widget?.value ?? fallback;
+}
+
+function looksLikeModel(value, pattern = MODEL_FILE_RE) {
+	const text = String(value ?? "").trim();
+	return MODEL_FILE_RE.test(text) && pattern.test(text);
+}
+
+function setWidgetValueQuiet(node, name, value) {
+	const widget = getWidget(node, name);
+	if (!widget) return false;
+	widget.value = value;
+	const index = node.widgets?.indexOf(widget) ?? -1;
+	if (Array.isArray(node.widgets_values) && index >= 0) node.widgets_values[index] = value;
+	return true;
+}
+
+function repairShiftedWidgetValues(node) {
+	if (!isTarget(node) || node.__gjj360ShiftedWidgetsRepaired) return;
+	const clip = String(getWidgetValue(node, "clip_name", "") ?? "").trim();
+	const vae = String(getWidgetValue(node, "vae_name", "") ?? "").trim();
+	const lora1 = String(getWidgetValue(node, "lora_1_name", "") ?? "").trim();
+	const lora1Strength = String(getWidgetValue(node, "lora_1_strength", "") ?? "").trim();
+	const obviousOneSlotShift = /^default$/i.test(clip)
+		&& looksLikeModel(vae, CLIP_MODEL_RE)
+		&& looksLikeModel(lora1, VAE_MODEL_RE)
+		&& looksLikeModel(lora1Strength, LORA_MODEL_RE);
+	if (!obviousOneSlotShift) return;
+
+	const previous = new Map(SHIFTED_WIDGETS.map((name) => [name, getWidgetValue(node, name, undefined)]));
+	for (let index = 0; index < SHIFTED_WIDGETS.length - 1; index += 1) {
+		setWidgetValueQuiet(node, SHIFTED_WIDGETS[index], previous.get(SHIFTED_WIDGETS[index + 1]));
+	}
+	if (typeof getWidgetValue(node, "repair_enabled") !== "boolean") setWidgetValueQuiet(node, "repair_enabled", true);
+	node.__gjj360ShiftedWidgetsRepaired = true;
+	app.graph?.setDirtyCanvas?.(true, true);
 }
 
 function settingsOpen(node) {
@@ -668,6 +735,7 @@ function configureInputs(node) {
 function patchNode(node) {
 	if (!isTarget(node)) return;
 	configureInputs(node);
+	repairShiftedWidgetValues(node);
 	if (!node.__gjj360ExecuteWidget && typeof node.addDOMWidget === "function") {
 		node.__gjj360ExecuteWidget = node.addDOMWidget(EXECUTE_WIDGET, "HTML", createButtonBar(node), { serialize: false });
 	}

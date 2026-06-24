@@ -9,7 +9,7 @@ import { app } from "/scripts/app.js";
 	const SETTING_CONFIRM_SECOND_TIER = "GJJ.SummonModel.SecondTierConfirm.Enabled";
 	const MODEL_EXT_RE = /\.(safetensors|ckpt|pt2?|pth|bin|gguf|sft|pkl|onnx|engine)$/i;
 	const MISSING_RE = /缺失模型|模型缺失|未找到模型|找不到.*模型|缺少.*模型|missing\s+model|model\s+missing/i;
-	const SKIP_VALUE_RE = /^(|none|null|undefined|nan|auto|自动|false|true|0|1|no|yes|off|on|disable|disabled|enable|enabled|禁用|关闭|关|启用|开启|开|不选择|未选择|不使用|\[未启用\]|\[未找到模型\]|\[none\])$/i;
+	const SKIP_VALUE_RE = /^(|none|null|undefined|nan|auto|default|自动|默认|false|true|0|1|no|yes|off|on|disable|disabled|enable|enabled|禁用|关闭|关|启用|开启|开|不选择|未选择|不使用|\[未启用\]|\[未找到模型\]|\[none\])$/i;
 	const MODEL_FIELD_RE = /模型|(^|[_\s-])(model(?:[_\s-]?name)?|ckpt|checkpoint|unet|diffusion|vae|clip|encoder|text[_\s-]*encoder|t5|bert|lora|controlnet|upscale|sam|yolo|bbox|gguf)($|[_\s-])/i;
 	const NON_MODEL_WIDGET_RE = /(^|[_\s-])(strength|weight|scale|ratio|factor|alpha|beta|sigma|cfg|steps?|seed|control[_\s-]*after[_\s-]*generate|after[_\s-]*generate|seed[_\s-]*control|width|height|size|batch|fps|frame|frames|start|end|count|percent|denoise|noise|guidance|shift|eta|temperature|top[_\s-]?[kp]|precision|dtype|quant(?:ization|ize)?|device|attention|norm|function|compile|backend|provider|algorithm|scheduler|format|mode|preset|cache|offload)($|[_\s-])/i;
 	const NODE_MODEL_WIDGET_ALLOWLIST = {
