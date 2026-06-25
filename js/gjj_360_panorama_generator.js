@@ -47,6 +47,19 @@ const MODEL_FILE_RE = /\.(safetensors|ckpt|pt2?|pth|bin|gguf|sft)$/i;
 const CLIP_MODEL_RE = /(^|[\\/_\-.])(clip|text[_\s-]*encoder|t5|bert|qwen[_\s-]*2\.?5|vl)([\\/_\-.]|$)/i;
 const VAE_MODEL_RE = /(^|[\\/_\-.])vae([\\/_\-.]|$)/i;
 const LORA_MODEL_RE = /(^|[\\/_\-.])(lora|lightning|mickmumpitz|360)([\\/_\-.]|$)/i;
+const UNET_DTYPE_VALUES = new Set([
+	"default",
+	"fp8_e4m3fn",
+	"fp8_e4m3fn_fast",
+	"fp8_e5m2",
+	"fp16",
+	"fp32",
+	"bf16",
+	"float16",
+	"float32",
+	"bfloat16",
+]);
+const NEGATIVE_PROMPT_INSERTED_SHIFT_WIDGETS = SETTINGS_WIDGETS.slice(1);
 const SHIFTED_WIDGETS = [
 	"clip_name",
 	"vae_name",
@@ -115,6 +128,18 @@ function looksLikeModel(value, pattern = MODEL_FILE_RE) {
 	return MODEL_FILE_RE.test(text) && pattern.test(text);
 }
 
+function looksLikeUnetDtype(value) {
+	const text = String(value ?? "").trim().toLowerCase();
+	return UNET_DTYPE_VALUES.has(text);
+}
+
+function looksNumeric(value) {
+	if (typeof value === "number") return Number.isFinite(value);
+	const text = String(value ?? "").trim();
+	if (!text) return false;
+	return Number.isFinite(Number(text));
+}
+
 function setWidgetValueQuiet(node, name, value) {
 	const widget = getWidget(node, name);
 	if (!widget) return false;
@@ -122,6 +147,36 @@ function setWidgetValueQuiet(node, name, value) {
 	const index = node.widgets?.indexOf(widget) ?? -1;
 	if (Array.isArray(node.widgets_values) && index >= 0) node.widgets_values[index] = value;
 	return true;
+}
+
+function repairNegativePromptInsertedWidgetValues(node) {
+	if (!isTarget(node) || node.__gjj360NegativePromptShiftRepaired) return;
+	const negative = String(getWidgetValue(node, "negative_prompt", "") ?? "").trim();
+	const unet = String(getWidgetValue(node, "unet_name", "") ?? "").trim();
+	const unetDtype = String(getWidgetValue(node, "unet_dtype", "") ?? "").trim();
+	const clip = String(getWidgetValue(node, "clip_name", "") ?? "").trim();
+	const vae = String(getWidgetValue(node, "vae_name", "") ?? "").trim();
+	const lora1 = String(getWidgetValue(node, "lora_1_name", "") ?? "").trim();
+
+	const obviousNegativePromptInsertion = looksLikeModel(negative)
+		&& looksLikeUnetDtype(unet)
+		&& looksLikeModel(unetDtype, CLIP_MODEL_RE)
+		&& looksLikeModel(clip, VAE_MODEL_RE)
+		&& looksLikeModel(vae, LORA_MODEL_RE)
+		&& looksNumeric(lora1);
+	if (!obviousNegativePromptInsertion) return;
+
+	const previous = new Map(NEGATIVE_PROMPT_INSERTED_SHIFT_WIDGETS.map((name) => [name, getWidgetValue(node, name, undefined)]));
+	for (let index = NEGATIVE_PROMPT_INSERTED_SHIFT_WIDGETS.length - 1; index > 0; index -= 1) {
+		setWidgetValueQuiet(
+			node,
+			NEGATIVE_PROMPT_INSERTED_SHIFT_WIDGETS[index],
+			previous.get(NEGATIVE_PROMPT_INSERTED_SHIFT_WIDGETS[index - 1])
+		);
+	}
+	setWidgetValueQuiet(node, "negative_prompt", "");
+	node.__gjj360NegativePromptShiftRepaired = true;
+	app.graph?.setDirtyCanvas?.(true, true);
 }
 
 function repairShiftedWidgetValues(node) {
@@ -735,6 +790,7 @@ function configureInputs(node) {
 function patchNode(node) {
 	if (!isTarget(node)) return;
 	configureInputs(node);
+	repairNegativePromptInsertedWidgetValues(node);
 	repairShiftedWidgetValues(node);
 	if (!node.__gjj360ExecuteWidget && typeof node.addDOMWidget === "function") {
 		node.__gjj360ExecuteWidget = node.addDOMWidget(EXECUTE_WIDGET, "HTML", createButtonBar(node), { serialize: false });
