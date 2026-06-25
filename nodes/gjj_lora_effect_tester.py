@@ -12,6 +12,15 @@ from PIL import Image, ImageColor, ImageDraw, ImageFont
 
 import folder_paths
 
+try:
+    from .gjj_multi_lora_chain import build_lora_trigger_text
+except Exception:  # pragma: no cover - 允许单文件语法检查
+    try:
+        from gjj_multi_lora_chain import build_lora_trigger_text
+    except Exception:
+        def build_lora_trigger_text(raw_value: Any) -> str:
+            return ""
+
 
 NODE_NAME = "GJJ_LoraEffectTester"
 MAX_INT = 0xFFFFFFFFFFFFFFFF
@@ -254,13 +263,14 @@ class GJJ_LoraEffectTester:
     FUNCTION = "build"
     DESCRIPTION = "按过滤后的 LoRA 列表和多选强度逐项输出 LoRA 串联配置、当前名称、列表状态和名称注解图。"
     SEARCH_ALIASES = ["lora test", "lora effect", "lora compare", "LoRA测试", "LoRA效果", "LoRA对比", "序列测试"]
-    RETURN_TYPES = ("LORA_CHAIN_CONFIG", "STRING", "STRING", "IMAGE")
-    RETURN_NAMES = ("当前LoRA串联配置", "当前LoRA名称", "过滤LoRA列表", "LoRA名称注解图")
+    RETURN_TYPES = ("LORA_CHAIN_CONFIG", "STRING", "STRING", "IMAGE", "STRING")
+    RETURN_NAMES = ("当前LoRA串联配置", "当前LoRA名称", "过滤LoRA列表", "LoRA名称注解图", "LoRA触发词")
     OUTPUT_TOOLTIPS = (
         "只包含当前序号对应 LoRA 的原始串联配置；不会带 ✅/❌、强度前缀或去扩展名显示名。",
         "当前序号对应的显示名称，格式为“(强度)名称”，去掉扩展名并把子目录分隔符替换为下划线。",
         "过滤后的 LoRA 与强度测试队列，每行一个测试项，带 ✅/❌ 状态。",
         "当前 LoRA 名称注解图，可与生成结果接入 GJJ · 🧩 图片拼版或任意对象预览器查看。",
+        "当前 LoRA 的触发词；变量广播会自动添加到支持的正向提示词节点。",
     )
 
     @classmethod
@@ -420,6 +430,7 @@ class GJJ_LoraEffectTester:
                 current_name,
                 "\n".join(str(item["display_name"]) for item in items),
                 label_image,
+                build_lora_trigger_text(chain_config),
             ),
         }
 

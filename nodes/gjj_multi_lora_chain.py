@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import re
 import sys
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import comfy.lora
 import comfy.lora_convert
@@ -21,13 +24,143 @@ from .gjj_model_name_resolver import model_basename, model_stem, pick_available_
 
 
 LORA_API_PATH = "/gjj/loras"
+LORA_METADATA_API_PATH = "/gjj/lora-metadata"
+LORA_PREVIEW_API_PATH = "/gjj/lora-preview/{lora_name:.*}"
 NODE_NAME = "GJJ_MultiLoraChainLoader"
 CONFIG_NODE_NAME = "GJJ_LoraChainConfig"
 LOGGER = logging.getLogger(__name__)
+LORA_METADATA_PRESET_PATH = Path(__file__).resolve().parents[1] / "presets" / "gjj_lora_metadata.tsv"
 STATUS_MARK_RE = re.compile(r"^\s*[✅✔✓❌✖✕×]\s*")
 STRENGTH_PREFIX_RE = re.compile(r"^\s*\([-+]?\d+(?:\.\d+)?\)\s*")
+FILENAME_TRIGGER_RE = re.compile(r"触发词\s*(.+?)(?:强度\s*[-+]?\d+(?:\.\d+)?|$)", re.IGNORECASE)
 LORA_NOT_LOADED_PREFIX = "lora key not loaded: "
 ICLORA_METADATA_KEYS = ("reference_downscale_factor", "latent_downscale_factor")
+PREVIEW_EXTENSIONS = (".preview.webp", ".preview.png", ".preview.jpg", ".preview.jpeg", ".webp", ".png", ".jpg", ".jpeg")
+KREA2_LORA_METADATA: list[dict[str, Any]] = [
+    {
+        "match": ["retroanime", "Krea-2-LoRA-retroanime"],
+        "title": "复古动画",
+        "trigger": "Purple retro anime style",
+        "strength": 1.0,
+        "summary": "紫色复古动画风格，适合角色、动作和蓝调夜景。",
+        "source": "https://huggingface.co/krea/Krea-2-LoRA-retroanime",
+    },
+    {
+        "match": ["sunsetblur", "Krea-2-LoRA-sunsetblur"],
+        "title": "夕照动感虚焦",
+        "trigger": "ethereal motion blur style",
+        "strength": 1.0,
+        "summary": "带梦幻运动模糊和夕照氛围，适合速度感和光晕画面。",
+        "source": "https://huggingface.co/krea/Krea-2-LoRA-sunsetblur",
+    },
+    {
+        "match": ["vintagetarot", "Krea-2-LoRA-vintagetarot"],
+        "title": "复古塔罗",
+        "trigger": "vintage tarot style",
+        "strength": 1.0,
+        "summary": "老式塔罗牌插画感，适合神秘、人物和象征性构图。",
+        "source": "https://huggingface.co/krea/Krea-2-LoRA-vintagetarot",
+    },
+    {
+        "match": ["rainywindow", "Krea-2-LoRA-rainywindow"],
+        "title": "雨窗氛围",
+        "trigger": "rainy window style",
+        "strength": 1.0,
+        "summary": "隔窗雨滴和朦胧玻璃质感，适合情绪化室内外场景。",
+        "source": "https://huggingface.co/krea/Krea-2-LoRA-rainywindow",
+    },
+    {
+        "match": ["darkbrush", "Krea-2-LoRA-darkbrush"],
+        "title": "单色水墨",
+        "trigger": "monochrome ink wash style",
+        "strength": 1.0,
+        "summary": "黑白水墨和浓淡笔触，适合武侠、自然和剪影场景。",
+        "source": "https://huggingface.co/krea/Krea-2-LoRA-darkbrush",
+    },
+    {
+        "match": ["dotmatrix", "Krea-2-LoRA-dotmatrix"],
+        "title": "单色点绘",
+        "trigger": "Monochrome stippling style",
+        "strength": 1.0,
+        "summary": "黑白点阵/点描版画质感，适合图案化和复古印刷效果。",
+        "source": "https://huggingface.co/krea/Krea-2-LoRA-dotmatrix",
+    },
+    {
+        "match": ["neondrip", "Krea-2-LoRA-neondrip"],
+        "title": "霓虹滴彩",
+        "trigger": "Textured abstract style",
+        "strength": 1.0,
+        "summary": "霓虹高光、滴落颜料和抽象纹理，适合强视觉冲击画面。",
+        "source": "https://huggingface.co/krea/Krea-2-LoRA-neondrip",
+    },
+    {
+        "match": ["kidsdrawing", "Krea-2-LoRA-kidsdrawing"],
+        "title": "童趣手绘",
+        "trigger": "naive expressive sketch style",
+        "strength": 1.0,
+        "summary": "稚拙、自由的手绘草图感，适合轻松和实验性画面。",
+        "source": "https://huggingface.co/krea/Krea-2-LoRA-kidsdrawing",
+    },
+    {
+        "match": ["softwatercolor", "Krea-2-LoRA-softwatercolor"],
+        "title": "柔和水彩装饰",
+        "trigger": "Art Deco watercolor style",
+        "strength": 1.0,
+        "summary": "柔和水彩与装饰艺术结合，适合优雅、复古和插画场景。",
+        "source": "https://huggingface.co/krea/Krea-2-LoRA-softwatercolor",
+    },
+    {
+        "match": ["coolblue", "Krea-2-LoRA-coolblue"],
+        "title": "冷蓝水彩",
+        "trigger": "teal watercolor illustration style",
+        "strength": 0.8,
+        "summary": "偏冷的蓝绿色水彩插画感，适合清爽、梦幻和轻柔场景。",
+        "source": "https://huggingface.co/collections/krea/krea-2-loras",
+    },
+    {
+        "match": ["plasmoid", "Krea-2-LoRA-plasmoid"],
+        "title": "微光流体",
+        "trigger": "Ethereal shimmering light style",
+        "strength": 0.8,
+        "summary": "带微光、流体和发亮边缘的梦幻效果，适合抽象光效与科幻感画面。",
+        "source": "https://huggingface.co/collections/krea/krea-2-loras",
+    },
+]
+
+
+def load_lora_metadata_config() -> list[dict[str, Any]]:
+    try:
+        lines = LORA_METADATA_PRESET_PATH.read_text(encoding="utf-8-sig").splitlines()
+    except Exception:
+        return KREA2_LORA_METADATA
+
+    header_index = next(
+        (index for index, line in enumerate(lines) if line.strip() and not line.lstrip().startswith("#")),
+        -1,
+    )
+    if header_index < 0:
+        return KREA2_LORA_METADATA
+
+    items: list[dict[str, Any]] = []
+    reader = csv.DictReader(lines[header_index:], delimiter="\t")
+    for row in reader:
+        matches = str(row.get("match", "") or "")
+        match_list = [
+            value.strip()
+            for value in re.split(r"[|,，、；;]", matches)
+            if value.strip()
+        ]
+        normalized = {
+            "match": match_list,
+            "title": str(row.get("title", "") or ""),
+            "trigger": str(row.get("trigger", "") or ""),
+            "strength": row.get("strength", 1.0) or 1.0,
+            "summary": str(row.get("summary", "") or ""),
+            "source": str(row.get("source", "") or ""),
+        }
+        if normalized["match"]:
+            items.append(normalized)
+    return items or KREA2_LORA_METADATA
 
 
 def hidden_lora_data_input() -> tuple[str, dict[str, Any]]:
@@ -66,8 +199,104 @@ async def get_gjj_lora_list(request):
     return web.json_response({"loras": loras})
 
 
+def _resolve_lora_path(lora_name: str) -> Path | None:
+    if not lora_name:
+        return None
+    try:
+        path = folder_paths.get_full_path("loras", lora_name)
+    except Exception:
+        path = None
+    return Path(path) if path else None
+
+
+def _find_lora_preview(lora_name: str) -> Path | None:
+    lora_path = _resolve_lora_path(lora_name)
+    if lora_path is None:
+        return None
+    base = lora_path.with_suffix("")
+    for extension in PREVIEW_EXTENSIONS:
+        candidate = Path(f"{base}{extension}")
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _normalize_lora_token(value: Any) -> str:
+    text = model_basename(str(value or "")).lower()
+    text = re.sub(r"\.(safetensors|ckpt|pt|bin)$", "", text)
+    text = re.sub(r"^krea-2-lora-", "", text)
+    text = re.sub(r"^krea2[_-]", "", text)
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", text)
+
+
+def _metadata_for_lora(lora_name: Any) -> dict[str, Any] | None:
+    selected = _normalize_lora_token(lora_name)
+    if not selected:
+        return None
+    for item in load_lora_metadata_config():
+        matches = item.get("match", [])
+        if not isinstance(matches, list):
+            continue
+        for keyword in matches:
+            token = _normalize_lora_token(keyword)
+            if token and (token in selected or selected in token):
+                return item
+    return None
+
+
+def _trigger_from_lora_name(lora_name: Any) -> str:
+    name = clean_lora_config_name(lora_name)
+    metadata = _metadata_for_lora(name)
+    trigger = str(metadata.get("trigger", "") if metadata else "").strip()
+    if trigger:
+        return trigger
+
+    stem = model_stem(model_basename(name))
+    match = FILENAME_TRIGGER_RE.search(stem)
+    if not match:
+        return ""
+    return re.sub(r"\s+", " ", match.group(1)).strip(" _-，,")
+
+
+def build_lora_trigger_text(raw_value: Any) -> str:
+    triggers: list[str] = []
+    seen: set[str] = set()
+    for item in parse_lora_data(raw_value):
+        if item.get("enabled", True) is False:
+            continue
+        trigger = _trigger_from_lora_name(item.get("name", ""))
+        key = trigger.lower()
+        if trigger and key not in seen:
+            seen.add(key)
+            triggers.append(trigger)
+    return ", ".join(triggers)
+
+
+async def get_gjj_lora_metadata(request):
+    loras = [str(item) for item in folder_paths.get_filename_list("loras")]
+    previews = {
+        lora_name: f"{LORA_PREVIEW_API_PATH.rsplit('/', 1)[0]}/{quote(lora_name, safe='')}"
+        for lora_name in loras
+        if _find_lora_preview(lora_name) is not None
+    }
+    return web.json_response({
+        "metadata": load_lora_metadata_config(),
+        "previews": previews,
+    })
+
+
+async def get_gjj_lora_preview(request):
+    lora_name = str(request.match_info.get("lora_name", "") or "")
+    preview_path = _find_lora_preview(lora_name)
+    if preview_path is None:
+        raise web.HTTPNotFound(text="LoRA preview image not found.")
+    return web.FileResponse(preview_path)
+
+
 if PromptServer is not None and getattr(PromptServer, "instance", None) is not None:
     PromptServer.instance.routes.get(LORA_API_PATH)(get_gjj_lora_list)
+    PromptServer.instance.routes.get(LORA_METADATA_API_PATH)(get_gjj_lora_metadata)
+    PromptServer.instance.routes.get(LORA_PREVIEW_API_PATH)(get_gjj_lora_preview)
 
 
 def parse_lora_data(raw_value: Any) -> list[dict[str, Any]]:
@@ -434,13 +663,14 @@ class GJJ_MultiLoraChain:
 - 检测到 Nunchaku Flux 模型时，会走 Nunchaku Flux LoRA 加载逻辑。
 """
     SEARCH_ALIASES = ["multi lora", "lora chain", "lora loader", "LoRA", "串联", "加载器"]
-    RETURN_TYPES = ("MODEL", "CLIP", "FLOAT", "INT")
-    RETURN_NAMES = ("叠加模型输出", "叠加编码输出", "IC-LoRA Latent缩放因子", "IC-LoRA像素倍数")
+    RETURN_TYPES = ("MODEL", "CLIP", "FLOAT", "INT", "STRING")
+    RETURN_NAMES = ("叠加模型输出", "叠加编码输出", "IC-LoRA Latent缩放因子", "IC-LoRA像素倍数", "LoRA触发词")
     OUTPUT_TOOLTIPS = (
         "按当前节点中的 LoRA 顺序串联加载后的模型输出。",
         "按当前节点中的 LoRA 顺序串联加载后的 CLIP 输出；未接入 CLIP 时这里返回空值。",
         "链中最后一个 IC-LoRA 的 latent_downscale_factor；没有 IC-LoRA 或 metadata 缺失时为 1.0，可接 IC-LoRA Guide。",
         "链中最后一个 IC-LoRA 的 round(latent_downscale_factor * 32)；可直接用于参考图预处理到对应像素整倍数。",
+        "当前启用 LoRA 的触发词，按串联顺序用英文逗号拼接；变量广播会自动添加到支持的正向提示词节点。",
     )
 
     def __init__(self):
@@ -488,6 +718,7 @@ class GJJ_MultiLoraChain:
             current_clip,
             iclora_latent_downscale_factor,
             latent_downscale_pixel_multiple(iclora_latent_downscale_factor),
+            build_lora_trigger_text(lora_data),
         )
 
 
@@ -515,9 +746,12 @@ class GJJ_LoraChainConfig:
 - 当前行命中互斥组后，下拉框会优先只显示该组内 LoRA，便于快速替换同类 LoRA。
 """
     SEARCH_ALIASES = ["lora config", "串联配置", "lora 串联", "多lora配置"]
-    RETURN_TYPES = ("LORA_CHAIN_CONFIG",)
-    RETURN_NAMES = ("LoRA串联配置",)
-    OUTPUT_TOOLTIPS = ("由前端动态界面维护的 LoRA 串联配置，可直接接到支持该输入的节点。",)
+    RETURN_TYPES = ("LORA_CHAIN_CONFIG", "STRING")
+    RETURN_NAMES = ("LoRA串联配置", "LoRA触发词")
+    OUTPUT_TOOLTIPS = (
+        "由前端动态界面维护的 LoRA 串联配置，可直接接到支持该输入的节点。",
+        "当前启用 LoRA 的触发词，按串联顺序用英文逗号拼接，可接入提示词拼接节点。",
+    )
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -529,7 +763,8 @@ class GJJ_LoraChainConfig:
 
     def build_config(self, lora_data="[]"):
         normalized = normalize_lora_chain_data(lora_data)
-        return (normalized,)
+        trigger_text = build_lora_trigger_text(normalized)
+        return (normalized, trigger_text)
 
 
 NODE_CLASS_MAPPINGS = {

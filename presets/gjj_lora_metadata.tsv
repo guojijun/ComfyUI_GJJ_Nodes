@@ -1,0 +1,13 @@
+# id	match	title	trigger	strength	summary	source
+id	match	title	trigger	strength	summary	source
+retroanime	retroanime|Krea-2-LoRA-retroanime	复古动画	Purple retro anime style	1.0	紫色复古动画风格，适合角色、动作和蓝调夜景。	https://huggingface.co/krea/Krea-2-LoRA-retroanime
+sunsetblur	sunsetblur|Krea-2-LoRA-sunsetblur	夕照动感虚焦	ethereal motion blur style	1.0	带梦幻运动模糊和夕照氛围，适合速度感和光晕画面。	https://huggingface.co/krea/Krea-2-LoRA-sunsetblur
+vintagetarot	vintagetarot|Krea-2-LoRA-vintagetarot	复古塔罗	vintage tarot style	1.0	老式塔罗牌插画感，适合神秘、人物和象征性构图。	https://huggingface.co/krea/Krea-2-LoRA-vintagetarot
+rainywindow	rainywindow|Krea-2-LoRA-rainywindow	雨窗氛围	rainy window style	1.0	隔窗雨滴和朦胧玻璃质感，适合情绪化室内外场景。	https://huggingface.co/krea/Krea-2-LoRA-rainywindow
+darkbrush	darkbrush|Krea-2-LoRA-darkbrush	单色水墨	monochrome ink wash style	1.0	黑白水墨和浓淡笔触，适合武侠、自然和剪影场景。	https://huggingface.co/krea/Krea-2-LoRA-darkbrush
+dotmatrix	dotmatrix|Krea-2-LoRA-dotmatrix	单色点绘	Monochrome stippling style	1.0	黑白点阵/点描版画质感，适合图案化和复古印刷效果。	https://huggingface.co/krea/Krea-2-LoRA-dotmatrix
+neondrip	neondrip|Krea-2-LoRA-neondrip	霓虹滴彩	Textured abstract style	1.0	霓虹高光、滴落颜料和抽象纹理，适合强视觉冲击画面。	https://huggingface.co/krea/Krea-2-LoRA-neondrip
+kidsdrawing	kidsdrawing|Krea-2-LoRA-kidsdrawing	童趣手绘	naive expressive sketch style	1.0	稚拙、自由的手绘草图感，适合轻松和实验性画面。	https://huggingface.co/krea/Krea-2-LoRA-kidsdrawing
+softwatercolor	softwatercolor|Krea-2-LoRA-softwatercolor	柔和水彩装饰	Art Deco watercolor style	1.0	柔和水彩与装饰艺术结合，适合优雅、复古和插画场景。	https://huggingface.co/krea/Krea-2-LoRA-softwatercolor
+coolblue	coolblue|Krea-2-LoRA-coolblue	冷蓝水彩	teal watercolor illustration style	0.8	偏冷的蓝绿色水彩插画感，适合清爽、梦幻和轻柔场景。	https://huggingface.co/krea/Krea-2-LoRA-coolblue
+plasmoid	plasmoid|Krea-2-LoRA-plasmoid	微光流体	Ethereal shimmering light style	0.8	带微光、流体和发亮边缘的梦幻效果，适合抽象光效与科幻感画面。	https://huggingface.co/krea/Krea-2-LoRA-plasmoid

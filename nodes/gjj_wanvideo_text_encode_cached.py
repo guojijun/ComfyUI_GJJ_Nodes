@@ -26,6 +26,7 @@ try:
         send_translated_prompt,
         translate_prompt_pair,
     )
+    from .common_utils.lora_triggers import append_lora_triggers_to_positive_prompt
 except ImportError:
     from common_utils.dependency_checker import (
         print_runtime_dependency_error,
@@ -44,6 +45,7 @@ except ImportError:
         send_translated_prompt,
         translate_prompt_pair,
     )
+    from common_utils.lora_triggers import append_lora_triggers_to_positive_prompt
 
 
 NODE_NAME = "GJJ_WanVideoTextEncodeCached"
@@ -395,6 +397,16 @@ class GJJ_WanVideoTextEncodeCached:
                         "tooltip": "可选。编码前先把视频模型移到卸载设备，为 T5 文本编码腾出显存；兼容旧版 Kijai WanVideo 工作流。",
                     },
                 ),
+                "lora_triggers": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "LoRA触发词",
+                        "tooltip": "由 GJJ_LoraChainConfig 自动广播的 LoRA 触发词；有值时会添加到正向提示词。",
+                    },
+                ),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -406,6 +418,7 @@ class GJJ_WanVideoTextEncodeCached:
     def IS_CHANGED(cls, *args, **kwargs):
         keys = [
             "positive_prompt",
+            "lora_triggers",
             "negative_prompt",
             "force_offload",
             "use_disk_cache",
@@ -430,6 +443,7 @@ class GJJ_WanVideoTextEncodeCached:
         translation_enabled=False,
         model_to_offload=None,
         negative_prompt=NEGATIVE_PROMPT,
+        lora_triggers="",
         extender_args=None,
         unique_id=None,
         extra_pnginfo=None,
@@ -439,6 +453,7 @@ class GJJ_WanVideoTextEncodeCached:
             text_encoder = kwargs.get("t5", None)
         negative_prompt = str(negative_prompt or "")
         positive_prompt = str(positive_prompt or "")
+        positive_prompt = append_lora_triggers_to_positive_prompt(positive_prompt, lora_triggers)
         force_offload = as_bool(force_offload)
         use_disk_cache = as_bool(use_disk_cache)
         device = _normalize_encode_device(device)

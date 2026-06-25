@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import csv
 import os
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -684,22 +683,15 @@ FLOAT_FIELDS = {
 BOOL_FIELDS = {"supports_multi_image_edit"}
 
 
-# 查找预设文件路径：从当前文件向上查找，直到找到包含 presets 目录的位置
 def _find_preset_root() -> Path:
-    """动态查找预设文件根目录。"""
-    current = Path(__file__).resolve().parent
-    # 向上最多查找5级目录
-    for _ in range(5):
-        presets_dir = current / "presets"
-        if presets_dir.exists() and presets_dir.is_dir():
-            return presets_dir
-        current = current.parent
-    # 如果找不到，回退到默认位置（相对于当前文件的三级父目录）
-    return Path(__file__).resolve().parent.parent.parent / "presets"
+    """统一读取仓库根目录 presets。"""
+    return Path(__file__).resolve().parents[2] / "presets"
 
 
 PRESET_ROOT = _find_preset_root()
 PRESET_TABLE_PATH = PRESET_ROOT / "model_family_presets.tsv"
+_PRESET_CACHE_KEY: tuple[str, int, int] | None = None
+_PRESET_CACHE_VALUE: list[dict[str, Any]] = []
 
 
 def _parse_bool(value: str) -> bool:
@@ -770,7 +762,6 @@ def _find_preset_header_index(lines: list[str]) -> int:
     raise RuntimeError(f"预设表缺少表头行：{PRESET_TABLE_PATH}")
 
 
-@lru_cache(maxsize=1)
 def gjjutils_load_model_family_presets() -> list[dict[str, Any]]:
     """加载模型族预设表（带缓存）。
 
@@ -781,10 +772,18 @@ def gjjutils_load_model_family_presets() -> list[dict[str, Any]]:
             >>> presets = gjjutils_load_model_family_presets()
             >>> print(len(presets))  # 预设数量
     """
+    global _PRESET_CACHE_KEY, _PRESET_CACHE_VALUE
+    stat = PRESET_TABLE_PATH.stat()
+    cache_key = (str(PRESET_TABLE_PATH), int(stat.st_mtime_ns), int(stat.st_size))
+    if _PRESET_CACHE_KEY == cache_key:
+        return list(_PRESET_CACHE_VALUE)
     lines = _read_preset_effective_lines()
     header_index = _find_preset_header_index(lines)
     reader = csv.DictReader(lines[header_index:], delimiter="\t")
-    return [_parse_preset_row(row) for row in reader]
+    presets = [_parse_preset_row(row) for row in reader]
+    _PRESET_CACHE_KEY = cache_key
+    _PRESET_CACHE_VALUE = presets
+    return list(presets)
 
 
 def gjjutils_match_model_family_preset(

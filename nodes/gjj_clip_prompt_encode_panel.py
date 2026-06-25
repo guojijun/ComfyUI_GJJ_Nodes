@@ -20,6 +20,7 @@ try:
         send_translated_prompt,
         translate_zh_to_en,
     )
+    from .common_utils.lora_triggers import append_lora_triggers_to_positive_prompt
 except ImportError:
     from common_utils.dependency_checker import (
         print_dependency_model_report,
@@ -38,6 +39,7 @@ except ImportError:
         send_translated_prompt,
         translate_zh_to_en,
     )
+    from common_utils.lora_triggers import append_lora_triggers_to_positive_prompt
 
 NODE_NAME = "GJJ_CLIPPromptEncodePanel"
 NODE_DISPLAY_NAME = "GJJ · 🧾 CLIP正负提示词编码"
@@ -287,6 +289,16 @@ class GJJ_CLIPPromptEncodePanel:
                         "tooltip": "外部正向提示词输入；连接后优先使用此文本。翻译开关开启时，本节点面板会显示译文。",
                     },
                 ),
+                "lora_triggers": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "display": "hidden",
+                        "hidden": True,
+                        "display_name": "LoRA触发词",
+                        "tooltip": "由 GJJ_LoraChainConfig 自动广播的 LoRA 触发词；有值时会添加到正向提示词。",
+                    },
+                ),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -296,6 +308,7 @@ class GJJ_CLIPPromptEncodePanel:
         keys = [
             "positive_text",
             "positive_prompt_input",
+            "lora_triggers",
             "negative_text",
             "zero_conditioning",
             "translation_device",
@@ -326,6 +339,7 @@ class GJJ_CLIPPromptEncodePanel:
             send_translated_prompt(unique_id, positive=positive_text, event_name=TRANSLATED_EVENT)
         else:
             positive_text = str(external_positive if external_positive is not None else kwargs.get("positive_text", "") or "")
+        positive_text = append_lora_triggers_to_positive_prompt(positive_text, kwargs.get("lora_triggers", ""))
         negative_text = str(kwargs.get("negative_text", "") or "")
         zero_conditioning = as_bool(kwargs.get("zero_conditioning", False))
 

@@ -24,6 +24,7 @@ try:
         send_translated_prompt,
         translate_prompt_pair,
     )
+    from .common_utils.lora_triggers import append_lora_triggers_to_positive_prompt
 except ImportError:
     from common_utils.dependency_checker import print_dependency_model_report
     from common_utils.prompt_translation import (
@@ -39,6 +40,7 @@ except ImportError:
         send_translated_prompt,
         translate_prompt_pair,
     )
+    from common_utils.lora_triggers import append_lora_triggers_to_positive_prompt
 
 
 NODE_NAME = "GJJ_TextEncodeQwenImageEditPlus"
@@ -643,6 +645,16 @@ class GJJ_TextEncodeQwenImageEditPlus:
                             "tooltip": "外部正向提示词输入；连接后优先使用此文本。",
                         },
                     ),
+                    "lora_triggers": (
+                        "STRING",
+                        {
+                            "forceInput": True,
+                            "display": "hidden",
+                            "hidden": True,
+                            "display_name": "LoRA触发词",
+                            "tooltip": "由 GJJ_LoraChainConfig 自动广播的 LoRA 触发词；有值时会添加到正向提示词。",
+                        },
+                    ),
                     "vae": (
                         "VAE",
                         {
@@ -670,6 +682,7 @@ class GJJ_TextEncodeQwenImageEditPlus:
         translation_enabled = as_bool(kwargs.get("translation_enabled", False))
         translation_device = str(kwargs.get("translation_device", "auto") or "auto")
         translation_unload_after_use = as_bool(kwargs.get("translation_unload_after_use", False))
+        lora_triggers = kwargs.get("lora_triggers", "")
         zero_conditioning = as_bool(kwargs.get("zero_conditioning", False))
         apply_kontext_scale = as_bool(kwargs.get("apply_kontext_scale", True))
         apply_reference_latents_method = as_bool(kwargs.get("apply_reference_latents_method", False))
@@ -726,6 +739,7 @@ class GJJ_TextEncodeQwenImageEditPlus:
             [source_positive_prompt, positive_prompt],
             len(images),
         )
+        positive_prompt = append_lora_triggers_to_positive_prompt(positive_prompt, lora_triggers)
         if background_index > 1:
             positive_prompt = _append_background_hint(positive_prompt, background_index, len(images))
 

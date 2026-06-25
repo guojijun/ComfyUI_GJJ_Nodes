@@ -16,6 +16,8 @@ const OUTPUT_CONFIG = 0;
 const OUTPUT_NAME = 1;
 const OUTPUT_LIST = 2;
 const OUTPUT_TOTAL = 3;
+const OUTPUT_TRIGGER = 4;
+const TRIGGER_OUTPUT_NAME = "LoRA触发词";
 const STRENGTH_CHOICES = [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.5];
 const PARAMS_PROPERTY = "gjj_lora_effect_tester_params";
 const PARAM_WIDGETS = [INDEX_WIDGET, "label_width", "label_height", "font_size", STATE_WIDGET];
@@ -639,6 +641,23 @@ function pushLivePreviews(node) {
 		}
 	}
 	dirty(node);
+}
+
+function hideTriggerOutput(node) {
+	const output = node?.outputs?.[OUTPUT_TRIGGER];
+	if (!output) return;
+	output.name = TRIGGER_OUTPUT_NAME;
+	output.label = TRIGGER_OUTPUT_NAME;
+	output.localized_name = TRIGGER_OUTPUT_NAME;
+	output.type = "STRING";
+	output.hidden = true;
+	output.visible = false;
+	output.disabled = true;
+	output.not_show = true;
+	output.__gjj_hidden = true;
+	output.gjj_lora_trigger_output = true;
+	output.tooltip = "当前 LoRA 的触发词；变量广播会自动添加到支持的正向提示词节点。";
+	output.options = { ...(output.options || {}), hidden: true };
 }
 
 function resetPool(node, statusText) {
@@ -1295,9 +1314,25 @@ app.registerExtension({
 		if (nodeData?.name !== NODE_NAME) {
 			return;
 		}
+		nodeData.output = ["LORA_CHAIN_CONFIG", "STRING", "STRING", "IMAGE", "STRING"];
+		nodeData.output_name = ["当前LoRA串联配置", "当前LoRA名称", "过滤LoRA列表", "LoRA名称注解图", TRIGGER_OUTPUT_NAME];
+		nodeData.output_tooltips = [
+			"只包含当前序号对应 LoRA 的原始串联配置。",
+			"当前序号对应的显示名称。",
+			"过滤后的 LoRA 与强度测试队列。",
+			"当前 LoRA 名称注解图。",
+			"当前 LoRA 的触发词；变量广播会自动添加到支持的正向提示词节点。",
+		];
+		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
+		nodeType.prototype.onNodeCreated = function (...args) {
+			const result = originalOnNodeCreated?.apply(this, args);
+			hideTriggerOutput(this);
+			return result;
+		};
 		const originalOnExecuted = nodeType.prototype.onExecuted;
 		nodeType.prototype.onExecuted = function (message) {
 			const result = originalOnExecuted?.apply(this, [message]);
+			hideTriggerOutput(this);
 			const data = Array.isArray(message?.[UI_KEY]) ? message[UI_KEY][0] : null;
 			if (data) {
 				activeRun = runFromBackend(this, data);
@@ -1321,6 +1356,7 @@ app.registerExtension({
 			applyParamsToWidgets(this, params);
 			setTimeout(() => {
 				applyParamsToWidgets(this, params);
+				hideTriggerOutput(this);
 				compactNode(this);
 				setupControls(this);
 				setupPanel(this);

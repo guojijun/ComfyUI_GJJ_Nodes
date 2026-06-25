@@ -14,6 +14,13 @@ const BROADCAST_OUTPUT_SOURCE_TYPES = new Set([
 	"GJJ_WanVideoTorchCompileSettings",
 	"GJJ_ModelBundleLoader",
 	"GJJ_LoraChainConfig",
+	"GJJ_MultiLoraChainLoader",
+	"GJJ_LoraEffectTester",
+]);
+const LORA_TRIGGER_SOURCE_TYPES = new Set([
+	"GJJ_LoraChainConfig",
+	"GJJ_MultiLoraChainLoader",
+	"GJJ_LoraEffectTester",
 ]);
 const TEMPLATE_FIELD_SCHEMA = "gjj_template_set_variables_fields";
 const TEMPLATE_SAVED_TEMPLATE = "gjj_template_set_variables_template";
@@ -1527,6 +1534,9 @@ function outputBroadcastAliases(output) {
 	if (broadcastTypeParts(output?.type).includes("LORA_CHAIN_CONFIG") || text.includes("lora")) {
 		aliases.push("lora_chain_config", "LoRA串联配置", "额外LoRA串联配置");
 	}
+	if (text.includes("触发词") || text.includes("trigger")) {
+		aliases.push("lora_triggers", "lora trigger", "lora triggers", "LoRA触发词");
+	}
 
 	const isHigh = /(^|[_\s-])high([_\s-]|$)/i.test(text) || text.includes("高");
 	const isLow = /(^|[_\s-])low([_\s-]|$)/i.test(text) || text.includes("低");
@@ -1575,10 +1585,21 @@ function outputTypeCounts(node) {
 }
 
 function collectOutputBroadcastEntries(node, graph) {
-	if (!broadcastEnabled(node) || !isOutputBroadcastSourceNode(node)) return [];
+	if (!isOutputBroadcastSourceNode(node)) return [];
 	const counts = outputTypeCounts(node);
 	return (node.outputs || []).map((output, index) => {
-		if (!output || output.hidden || output.gjj_hidden_unused) return null;
+		if (!output || output.gjj_hidden_unused) return null;
+		const text = [
+			output?.name,
+			output?.label,
+			output?.localized_name,
+			output?.display_name,
+		].join(" ").toLowerCase();
+		const autoLoraTrigger = LORA_TRIGGER_SOURCE_TYPES.has(nodeType(node))
+			&& String(output?.type || "").toUpperCase() === "STRING"
+			&& (text.includes("触发词") || text.includes("trigger"));
+		if ((output.hidden || output.__gjj_hidden) && !autoLoraTrigger) return null;
+		if (!broadcastEnabled(node) && !autoLoraTrigger) return null;
 		const type = output.type || "*";
 		const typeKey = normalizeBroadcastType(type);
 		const typeName = counts.get(typeKey) === 1 ? broadcastNameTypeCandidate(type) : "";
@@ -2932,15 +2953,46 @@ function installBroadcastDrawPatch() {
 	};
 }
 
+function hideAutoLoraTriggerInput(node) {
+	for (const input of node?.inputs || []) {
+		if (String(input?.name || "") !== "lora_triggers") continue;
+		input.hidden = true;
+		input.visible = false;
+		input.disabled = true;
+		input.not_show = true;
+		input.__gjj_hidden = true;
+		input.label = "";
+		input.localized_name = "";
+		if (input.options && typeof input.options === "object") {
+			input.options.hidden = true;
+		}
+	}
+}
+
 app.registerExtension({
 	name: "Comfy.GJJ.SetGetNode",
 
 	beforeRegisterNodeDef(nodeType, nodeData) {
-		if (![TEMPLATE_SET_TYPE, TEMPLATE_PARAMS_TYPE].includes(nodeData?.name)) return;
+		if (![TEMPLATE_SET_TYPE, TEMPLATE_PARAMS_TYPE].includes(nodeData?.name)) {
+			const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
+			nodeType.prototype.onNodeCreated = function (...args) {
+				const result = originalOnNodeCreated?.apply(this, args);
+				hideAutoLoraTriggerInput(this);
+				return result;
+			};
+			const originalOnConfigure = nodeType.prototype.onConfigure;
+			nodeType.prototype.onConfigure = function (...args) {
+				const result = originalOnConfigure?.apply(this, args);
+				hideAutoLoraTriggerInput(this);
+				return result;
+			};
+			return;
+		}
 		const originalOnDrawForeground = nodeType.prototype.onDrawForeground;
 		nodeType.prototype.onDrawForeground = function (ctx, ...args) {
 			const result = originalOnDrawForeground?.apply(this, [ctx, ...args]);
 			drawBroadcastLinksForNode(this, ctx);
+			hideAutoLoraTriggerInput(this);
 			return result;
 		};
 	},

@@ -111,7 +111,6 @@ function trimActiveGroupsForMode(node) {
 }
 
 function setGroupState(group, isActive, controllerNode) {
-	group?.recomputeInsideNodes?.();
 	const nodes = Array.isArray(group?._nodes) ? group._nodes : [];
 	nodes.forEach((item) => {
 		if (item === controllerNode) return;
@@ -625,14 +624,28 @@ app.registerExtension({
 		}
 
 		let rebuildTimer = null;
+		let pointerIsDown = false;
+		const markPointerDown = () => { pointerIsDown = true; };
+		const markPointerUp = () => { pointerIsDown = false; };
+		document.addEventListener("pointerdown", markPointerDown, true);
+		document.addEventListener("pointerup", markPointerUp, true);
+		document.addEventListener("pointercancel", markPointerUp, true);
+		document.addEventListener("mouseup", markPointerUp, true);
 		const scheduleRebuild = () => {
 			if (rebuildTimer) {
 				clearTimeout(rebuildTimer);
 			}
 			rebuildTimer = setTimeout(() => {
+				if (pointerIsDown) {
+					scheduleRebuild();
+					return;
+				}
+				for (const group of getGroups()) {
+					group?.recomputeInsideNodes?.();
+				}
 				refreshAllGroupBypassers();
 				rebuildTimer = null;
-			}, 100);
+			}, 800);
 		};
 
 		const originalOnNodeMoved = app.graph?.onNodeMoved;

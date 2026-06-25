@@ -49,6 +49,7 @@ CLIP_TYPE_OPTIONS = [
     "ace",
     "omnigen2",
     "qwen_image",
+    "krea2",
     "hunyuan_image",
     "flux2",
     "ovis",
@@ -596,6 +597,26 @@ def _preset_clip_names(preset: dict) -> list[str]:
     if isinstance(value, (list, tuple)):
         return _dedupe_keep_order([str(item or "").strip() for item in value if str(item or "").strip()])
     return []
+
+
+def _preset_model_aliases(preset: dict) -> list[str]:
+    values = [_preset_text(preset, "id")]
+    keywords = (preset or {}).get("keywords", [])
+    if isinstance(keywords, str):
+        values.extend([part.strip() for part in keywords.split("|")])
+    elif isinstance(keywords, (list, tuple)):
+        values.extend(str(item or "").strip() for item in keywords)
+    return _dedupe_keep_order(values)
+
+
+def _is_preset_model_placeholder(value: str, preset: dict) -> bool:
+    stem = _model_stem(str(value or "").strip())
+    if not stem:
+        return True
+    for alias in _preset_model_aliases(preset):
+        if stem == _model_stem(alias):
+            return True
+    return False
 
 
 def _preset_uses_split_bundle(preset: dict) -> bool:
@@ -1337,7 +1358,7 @@ class GJJ_ModelBundleLoader:
             clip_dtype = "default"
             clip_device = "default"
             vae_dtype = "default"
-        if preset_model_name and str(unet_name or "").strip() in {"", "0"}:
+        if preset_model_name and _is_preset_model_placeholder(str(unet_name or ""), preset):
             unet_name = preset_model_name
         if checkpoint_common and str(unet_name or "").strip() in {"", "0"}:
             unet_name = _default_value(list_checkpoint_models())
@@ -1345,14 +1366,8 @@ class GJJ_ModelBundleLoader:
             clip_name = "|".join(preset_clip_names)
         if not preset_is_checkpoint and preset_vae_name and not str(vae_name or "").strip():
             vae_name = preset_vae_name
-        if not preset_is_checkpoint and preset_clip_type and (
-            not str(clip_type or "").strip()
-            or (
-                _is_flux1_dual_clip(preset_clip_type, preset_clip_names)
-                and _normalize_text(clip_type) == "stable_diffusion"
-            )
-        ):
-            clip_type = preset_clip_type
+        if not preset_is_checkpoint and preset_clip_type:
+            clip_type = _option_value(preset_clip_type, CLIP_TYPE_OPTIONS, clip_type)
         flux1_dual_clip = (not preset_is_checkpoint) and _is_flux1_dual_clip(str(clip_type or preset_clip_type or ""), _split_clip_names(str(clip_name or "")) + preset_clip_names)
         if flux1_dual_clip:
             runtime_clip_names = _split_clip_names(str(clip_name or ""))
