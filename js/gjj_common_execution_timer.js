@@ -350,10 +350,15 @@ function ensureStyles() {
 			gap: 8px;
 			padding: 8px 9px;
 			border-bottom: 1px solid rgba(132, 164, 176, 0.18);
-			cursor: move;
-			touch-action: none;
 		}
 		#${PANEL_ID}.gjj-collapsed .gjj-exec-header { border-bottom: 0; }
+		#${PANEL_ID} .gjj-exec-drag {
+			cursor: grab;
+			touch-action: none;
+			font-size: 15px;
+			color: #aebfc5;
+		}
+		#${PANEL_ID} .gjj-exec-drag:active { cursor: grabbing; }
 		#${PANEL_ID} .gjj-exec-title {
 			font-weight: 700;
 			white-space: nowrap;
@@ -378,8 +383,6 @@ function ensureStyles() {
 			font-size: 14px;
 			line-height: 22px;
 		}
-		#${PANEL_ID} .gjj-exec-header button { cursor: grab; }
-		#${PANEL_ID} .gjj-exec-header button:active { cursor: grabbing; }
 		#${PANEL_ID} button:hover { background: rgba(255, 255, 255, 0.16); }
 		#${PANEL_ID} .gjj-exec-body {
 			display: flex;
@@ -534,6 +537,12 @@ function ensurePanel() {
 	const header = document.createElement("div");
 	header.className = "gjj-exec-header";
 
+	const dragHandle = document.createElement("button");
+	dragHandle.type = "button";
+	dragHandle.className = "gjj-exec-drag";
+	dragHandle.textContent = "⠿";
+	dragHandle.title = "拖动计时器面板";
+
 	const title = document.createElement("div");
 	title.className = "gjj-exec-title";
 	title.textContent = "⏱️ GJJ计时器";
@@ -560,7 +569,7 @@ function ensurePanel() {
 		root.style.display = "none";
 	});
 
-	header.append(title, summary, collapse, copy, clear, close);
+	header.append(dragHandle, title, summary, collapse, copy, clear, close);
 
 	const body = document.createElement("div");
 	body.className = "gjj-exec-body";
@@ -596,7 +605,7 @@ function ensurePanel() {
 		root.classList.add("gjj-collapsed");
 		collapse.textContent = "🔽";
 	}
-	enablePanelDrag(root, header);
+	enablePanelDrag(root, dragHandle);
 
 	document.body.appendChild(root);
 	panel = root;

@@ -1057,7 +1057,16 @@ function stopSlidingOutput(node) {
 
 function totalImageCount(node) {
 	const state = ensureState(node);
-	return Math.max(0, Number(state.mergedCount || 0) || (Number(state.selection?.length || 0) + Number(state.externalCount || 0)));
+	const selectedCount = Number(state.selection?.length || 0);
+	const externalCount = Number(state.externalCount || 0);
+	const mergedCount = Number(state.mergedCount || 0);
+	if (hasExternalImageLink(node)) {
+		return Math.max(0, externalCount > 0 ? selectedCount + externalCount : Math.max(selectedCount, mergedCount));
+	}
+	if (externalCount > 0) {
+		return Math.max(0, selectedCount + externalCount);
+	}
+	return Math.max(0, selectedCount);
 }
 
 function slidingSourceCount(node) {
@@ -1194,14 +1203,17 @@ function ensureOutputs(node, count) {
 	const imageCount = Math.max(0, Number(count || 0));
 	const individualCount = state.showIndividualOutputs ? Math.min(imageCount, MAX_OUTPUT_IMAGES) : 0;
 	const visibleCount = 1 + individualCount;
+	let changed = false;
 
 	while ((node.outputs?.length || 0) < visibleCount) {
 		const outputIndex = node.outputs?.length || 0;
 		if (outputIndex === 0) {
 			node.addOutput?.("批量图片队列", BATCH_IMAGE_OUTPUT_TYPE);
+			changed = true;
 			continue;
 		}
 		node.addOutput?.(`图片 ${outputIndex}`, "IMAGE");
+		changed = true;
 	}
 	while ((node.outputs?.length || 0) > visibleCount) {
 		const lastIndex = node.outputs.length - 1;
@@ -1213,9 +1225,13 @@ function ensureOutputs(node, count) {
 			break;
 		}
 		node.removeOutput?.(lastIndex);
+		changed = true;
 	}
 	(node.outputs || []).forEach((output, index) => {
 		if (index === 0) {
+			if (output.name !== "批量图片队列" || output.type !== BATCH_IMAGE_OUTPUT_TYPE) {
+				changed = true;
+			}
 			output.name = "批量图片队列";
 			output.label = output.name;
 			output.localized_name = output.name;
@@ -1224,6 +1240,9 @@ function ensureOutputs(node, count) {
 				? `已选择 ${imageCount} 张图片，单图输出最多展开 ${MAX_OUTPUT_IMAGES} 个；批量队列不限制。`
 				: "将所有已选图片按顺序打包成一个 GJJ 专用批量图片队列输出。";
 			return;
+		}
+		if (output.name !== `图片 ${index}` || output.type !== "IMAGE") {
+			changed = true;
 		}
 		output.name = `图片 ${index}`;
 		output.label = output.name;
@@ -1236,6 +1255,9 @@ function ensureOutputs(node, count) {
 	updateOutputButtonState(node);
 	updateSlideOutputButtonsState(node);
 	globalThis.GJJApplyTypeColorsToNode?.(node);
+	if (changed) {
+		markGraphChanged(node);
+	}
 }
 
 function isSelected(state, item) {
@@ -1250,6 +1272,11 @@ function toggleSelection(node, item) {
 	} else {
 		// 移除20张限制，允许选择任意数量的图片
 		state.selection.push(item);
+	}
+	if (!hasExternalImageLink(node)) {
+		state.executedImages = [];
+		state.externalCount = 0;
+		state.mergedCount = state.selection.length;
 	}
 	syncDataWidget(node);
 	ensureOutputs(node, totalImageCount(node));
@@ -1591,6 +1618,11 @@ function clearErrorImages(node) {
 	state.selection = state.selection.filter((item) => !item._error);
 	const removedCount = beforeCount - state.selection.length;
 	if (removedCount > 0) {
+		if (!hasExternalImageLink(node)) {
+			state.executedImages = [];
+			state.externalCount = 0;
+			state.mergedCount = state.selection.length;
+		}
 		syncDataWidget(node);
 		ensureOutputs(node, totalImageCount(node));
 		renderPreview(node);
@@ -1605,6 +1637,11 @@ function clearAllImages(node) {
 		return;
 	}
 	state.selection = [];
+	if (!hasExternalImageLink(node)) {
+		state.executedImages = [];
+		state.externalCount = 0;
+		state.mergedCount = 0;
+	}
 	syncDataWidget(node);
 	ensureOutputs(node, totalImageCount(node));
 	renderPreview(node);

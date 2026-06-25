@@ -337,6 +337,13 @@ class GJJ_VideoCombine:
             for key, value in kwargs.items()
             if str(key or "").startswith("video_") and value is not None
         }
+        if frame_rate is None:
+            frame_rate = images if _video_components(images) is not None else None
+            if frame_rate is None:
+                frame_rate = next(
+                    (value for value in legacy_video_inputs.values() if _video_components(value) is not None),
+                    DEFAULT_FRAME_RATE,
+                )
         try:
             resolved_frame_rate = float(_frame_rate_from_input(frame_rate))
         except Exception as exc:

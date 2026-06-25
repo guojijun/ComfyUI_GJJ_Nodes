@@ -988,6 +988,7 @@ class GJJ_BerniniStudio:
                 "prev_segment_ref_frames": ("INT", {"default": 1, "min": 0, "max": 32, "step": 1, "display_name": "上一段尾帧参考", "tooltip": "长视频分段时，从上一段生成结果取最后 N 帧，作为下一段的额外参考图。0 表示关闭。"}),
                 "randomize_seed": ("BOOLEAN", {"default": False, "display_name": "随机种子", "tooltip": "开启后每次执行自动生成新种子；关闭时保持当前种子，输入不变可复用缓存结果。"}),
                 "resize_to_panel": ("BOOLEAN", {"default": True, "display_name": "按面板尺寸", "tooltip": "开启时按面板宽高缩放裁剪；关闭时优先沿用源媒体尺寸。"}),
+                "use_prev_segment_latent": ("BOOLEAN", {"default": False, "display_name": "上一段Latent", "tooltip": "长视频分段时，把上一段最终 latent 的尾部写入下一段初始 latent 开头，用于增强段落衔接。"}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -1005,9 +1006,10 @@ class GJJ_BerniniStudio:
             "enable_sage_attention", "enable_fp16_accumulation", "frame_rate", "filename_prefix",
             "format_name", "vae_tiling", "high_model", "low_model", "vae_name", "clip_name", "high_lora", "low_lora",
             "segment_frames", "keep_model", "prev_segment_ref_frames", "randomize_seed", "resize_to_panel",
-            "translation_enabled", "batch_size",
+            "translation_enabled", "batch_size", "use_prev_segment_latent",
         ]
-        parts = [str(_first_value(kwargs.get(key), "")) for key in keys]
+        parts = ["bernini_studio_cache_v2"]
+        parts.extend(str(_first_value(kwargs.get(key), "")) for key in keys)
         if _as_bool(kwargs.get("randomize_seed"), False):
             parts.append(str(time.time_ns()))
         return "|".join(parts)
@@ -1089,11 +1091,14 @@ class GJJ_BerniniStudio:
         reference_entries = []
         for value in reference_values:
             is_video = _is_video_media(value)
+            frames, _audio, _fps = _media_components(value)
+            frame_count = int(frames.shape[0]) if frames is not None else 0
+            looks_like_video = is_video or _multiframe_source_looks_like_video(value, frame_count)
             reference_entries.append(
                 {
                     "value": value,
-                    "frames": _media_components(value)[0] if is_video else None,
-                    "is_video": is_video,
+                    "frames": frames,
+                    "is_video": looks_like_video,
                 }
             )
         reference_frames = [entry["frames"] for entry in reference_entries]
@@ -1156,6 +1161,7 @@ class GJJ_BerniniStudio:
             )
         segment_frames = _legal_segment_length(kwargs.get("segment_frames"))
         prev_segment_ref_frames = _as_int(kwargs.get("prev_segment_ref_frames"), 1, 0, 32)
+        use_prev_segment_latent = _as_bool(kwargs.get("use_prev_segment_latent"), False)
         source_image_batches = mode == "I2I" and source_image_batch_count > 1
         source_image_transitions = mode == "I2V" and source_image_batch_count > 1
         total_output_frames = (
@@ -1204,6 +1210,7 @@ class GJJ_BerniniStudio:
         cfg = _as_float(kwargs.get("cfg"), 1.0, 0.0, 30.0)
         generated_segments: list[torch.Tensor] = []
         latest_preview: list[dict[str, Any]] = []
+        previous_segment_latent: torch.Tensor | None = None
 
         for segment_index in range(segment_count):
             start = segment_index * segment_frames
@@ -1270,6 +1277,17 @@ class GJJ_BerniniStudio:
                 latent = latent.to(comfy.model_management.intermediate_device())
             except Exception:
                 pass
+            if (
+                use_prev_segment_latent
+                and segmented
+                and mode_output_kind == "video"
+                and previous_segment_latent is not None
+                and previous_segment_latent.ndim == latent.ndim
+            ):
+                tail = previous_segment_latent.to(device=latent.device, dtype=latent.dtype)
+                count = min(int(tail.shape[2]), int(latent.shape[2]))
+                if count > 0 and tuple(tail.shape[:2]) == tuple(latent.shape[:2]) and tuple(tail.shape[3:]) == tuple(latent.shape[3:]):
+                    latent[:, :, :count, :, :] = tail[:, :, -count:, :, :]
 
             context = []
             if source_segment is not None or segment_reference_video is not None or segment_reference_images:
@@ -1300,6 +1318,11 @@ class GJJ_BerniniStudio:
                 patched_low, positive, negative, sampler, low_sigmas, high_latent,
                 False, seed + segment_index, cfg,
             )
+            try:
+                samples = final_latent.get("samples") if isinstance(final_latent, dict) else None
+                previous_segment_latent = samples[:, :, -1:, :, :].detach().cpu().contiguous() if isinstance(samples, torch.Tensor) and samples.ndim == 5 else None
+            except Exception:
+                previous_segment_latent = None
             frames = _decode_bernini_frames(vae, final_latent, kwargs)
             frames = frames[:desired_length].detach().cpu().contiguous()
             if mode_output_kind == "image":
@@ -1325,7 +1348,7 @@ class GJJ_BerniniStudio:
         all_frames = torch.cat(generated_segments, dim=0)
         if mode_output_kind == "image":
             all_frames = all_frames[:1].contiguous()
-        effective_fps = source_fps or _as_float(kwargs.get("frame_rate"), 8.0, 1.0, 240.0)
+        effective_fps = source_media if callable(getattr(source_media, "get_components", None)) else (source_fps or _as_float(kwargs.get("frame_rate"), 8.0, 1.0, 240.0))
         audio_input = source_media if callable(getattr(source_media, "get_components", None)) else source_audio
         if mode_output_kind == "image":
             result_value = all_frames

@@ -489,10 +489,39 @@ def parse_enabled_outputs_from_workflow_outputs(outputs: Any) -> list[str]:
     return enabled
 
 
-def recover_enabled_outputs(raw_value: Any = None, extra_pnginfo: Any = None, unique_id: Any = None) -> list[str]:
+def parse_enabled_outputs_from_prompt_links(prompt: Any, unique_id: Any) -> list[str]:
+    node = _prompt_node(prompt, unique_id)
+    if not isinstance(node, dict):
+        return []
+    outputs = node.get("outputs")
+    if isinstance(outputs, list):
+        parsed = parse_enabled_outputs_from_workflow_outputs(outputs)
+        if parsed:
+            return parsed
+    links = node.get("links") or node.get("output_links")
+    if not isinstance(links, dict):
+        return []
+    enabled: list[str] = []
+    for slot, value in links.items():
+        try:
+            index = int(slot)
+        except Exception:
+            continue
+        if index <= 0 or not value:
+            continue
+        key = OPTIONAL_OUTPUT_KEYS[index - 1] if index - 1 < len(OPTIONAL_OUTPUT_KEYS) else ""
+        if key and key not in enabled:
+            enabled.append(key)
+    return enabled
+
+
+def recover_enabled_outputs(raw_value: Any = None, extra_pnginfo: Any = None, unique_id: Any = None, prompt: Any = None) -> list[str]:
     enabled = parse_enabled_outputs(raw_value)
     if enabled:
         return enabled
+    from_prompt = parse_enabled_outputs_from_prompt_links(prompt, unique_id)
+    if from_prompt:
+        return from_prompt
     if not isinstance(extra_pnginfo, dict):
         return []
     workflow = extra_pnginfo.get("workflow")
@@ -1406,7 +1435,7 @@ class GJJ_MultiVideoLoader:
         unique_id=None,
     ):
         selected = recover_selected_videos(selected_videos_json, extra_pnginfo, unique_id)
-        enabled_outputs = recover_enabled_outputs(None, extra_pnginfo, unique_id)
+        enabled_outputs = recover_enabled_outputs(None, extra_pnginfo, unique_id, prompt)
         enabled_output_set = set(enabled_outputs or [])
         audio_enabled = bool({"audio", "processed_video"} & enabled_output_set)
 

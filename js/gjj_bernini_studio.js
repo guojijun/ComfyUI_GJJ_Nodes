@@ -32,7 +32,7 @@ const SETTINGS_GROUPS = [
 	["运行优化", ["use_accel_lora", "enable_sage_attention", "enable_fp16_accumulation"]],
 	["模型参数", ["high_model", "low_model", "vae_name", "clip_name", "high_lora", "low_lora"]],
 	["提示词补充", ["extra_instruction", "negative_prompt"]],
-	["长视频衔接", ["prev_segment_ref_frames"]],
+	["长视频衔接", ["prev_segment_ref_frames", "use_prev_segment_latent"]],
 ];
 const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "prompt", label: "提示词", type: "STRING", aliases: ["prompt", "positive", "提示词", "正向"] },
@@ -68,6 +68,7 @@ const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "high_lora", label: "High LoRA", type: "STRING", aliases: ["high_lora"] },
 	{ name: "low_lora", label: "Low LoRA", type: "STRING", aliases: ["low_lora"] },
 	{ name: "prev_segment_ref_frames", label: "上一段尾帧参考", type: "INT", aliases: ["prev_segment", "tail_frames", "上一段", "尾帧", "参考帧"] },
+	{ name: "use_prev_segment_latent", label: "上一段Latent", type: "BOOLEAN", aliases: ["prev_latent", "latent", "上一段latent"] },
 ];
 const HIDDEN_WIDGETS = new Set(SETTINGS_GROUPS.flatMap(([, names]) => names).concat(["prompt", "translation_enabled", "keep_model", "randomize_seed", "resize_to_panel"]));
 const BACKEND_WIDGETS = [
@@ -108,6 +109,7 @@ const BACKEND_WIDGETS = [
 	"prev_segment_ref_frames",
 	"randomize_seed",
 	"resize_to_panel",
+	"use_prev_segment_latent",
 ];
 const LEGACY_BACKEND_WIDGETS = BACKEND_WIDGETS.slice(0, -1);
 const OLDER_BACKEND_WIDGETS = BACKEND_WIDGETS.slice(0, -2);
@@ -149,6 +151,7 @@ const DEFAULT_VALUES = {
 	prev_segment_ref_frames: 1,
 	randomize_seed: false,
 	resize_to_panel: true,
+	use_prev_segment_latent: false,
 };
 const NUMBER_RULES = {
 	width: [16, 8192, true],
@@ -176,6 +179,7 @@ const BOOLEAN_WIDGETS = new Set([
 	"keep_model",
 	"randomize_seed",
 	"resize_to_panel",
+	"use_prev_segment_latent",
 ]);
 const FIXED_CHOICES = {
 	mode: new Set(["auto", "T2I", "T2V", "I2I", "R2I", "I2V", "V2V", "R2V", "VI2V", "RV2V", "ADS2V", "VRC2V", "MV2V"]),
@@ -1127,6 +1131,11 @@ app.registerExtension({
 					setValue(node, "seed", Number(detail.seed || 0));
 				}
 			}
+		});
+		window.addEventListener("gjj-generation-template-sources-updated", (event) => {
+			const node = event?.detail?.node;
+			if (String(node?.comfyClass) !== NODE_TYPE) return;
+			syncPanel(node);
 		});
 		for (const node of app.graph?._nodes || []) {
 			if (String(node?.comfyClass) === NODE_TYPE) stabilize(node);

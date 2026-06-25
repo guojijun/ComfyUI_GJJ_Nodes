@@ -105,6 +105,7 @@ function setSelectedSource(node, fieldName, variableName) {
 	else delete sources[fieldName];
 	node.properties[TEMPLATE_SOURCE_PROPERTY] = sources;
 	updateTemplateSourcePanel(node);
+	window.dispatchEvent(new CustomEvent("gjj-generation-template-sources-updated", { detail: { node } }));
 }
 
 function setSelectedSources(node, sources) {
@@ -116,6 +117,7 @@ function setSelectedSources(node, sources) {
 	}
 	node.properties[TEMPLATE_SOURCE_PROPERTY] = clean;
 	updateTemplateSourcePanel(node);
+	window.dispatchEvent(new CustomEvent("gjj-generation-template-sources-updated", { detail: { node } }));
 }
 
 function variableOptions(node) {
@@ -278,12 +280,15 @@ function openVariablePicker(node, field = null) {
 	const sources = selectedSources(node);
 	const draftSources = { ...sources };
 	const allOptions = variableOptions(node);
+	let activeVariable = allOptions.find((option) => Object.values(draftSources).includes(option?.value))?.value
+		|| allOptions[0]?.value
+		|| "";
 
 	const popup = document.createElement("div");
 	popup.style.cssText = [
 		"position:fixed",
 		"z-index:100000",
-		"width:min(440px,calc(100vw - 28px))",
+		"width:min(720px,calc(100vw - 28px))",
 		"max-height:min(540px,calc(100vh - 40px))",
 		"display:flex",
 		"flex-direction:column",
@@ -300,7 +305,7 @@ function openVariablePicker(node, field = null) {
 
 	const anchor = node?.__gjjTemplateSourceButton || node?.__gjjTemplateSourcePanel;
 	const rect = anchor?.getBoundingClientRect?.();
-	const popupWidth = Math.min(440, Math.max(300, window.innerWidth - 28));
+	const popupWidth = Math.min(720, Math.max(360, window.innerWidth - 28));
 	const left = Math.min(window.innerWidth - popupWidth - 14, Math.max(14, rect?.left || 80));
 	const top = Math.min(window.innerHeight - 120, Math.max(14, (rect?.bottom || 80) + 6));
 	popup.style.left = `${Math.round(left)}px`;
@@ -334,76 +339,130 @@ function openVariablePicker(node, field = null) {
 	search.placeholder = "搜索变量，点击选择";
 	search.style.cssText = "height:30px;border:1px solid #3f5b66;border-radius:7px;background:#071015;color:#dce7e2;padding:0 10px;outline:none;";
 
-	const list = document.createElement("div");
-	list.style.cssText = "overflow:auto;display:flex;flex-direction:column;gap:5px;max-height:400px;padding-right:2px;";
+	const columns = document.createElement("div");
+	columns.style.cssText = "display:grid;grid-template-columns:minmax(220px,0.95fr) minmax(240px,1.05fr);gap:8px;min-height:0;max-height:400px;";
+	const variableColumn = document.createElement("div");
+	variableColumn.style.cssText = "min-width:0;overflow:auto;display:flex;flex-direction:column;gap:5px;border:1px solid #253842;border-radius:7px;padding:6px;background:#0b1418;";
+	const matchColumn = document.createElement("div");
+	matchColumn.style.cssText = "min-width:0;overflow:auto;display:flex;flex-direction:column;gap:5px;border:1px solid #253842;border-radius:7px;padding:6px;background:#0b1418;";
+	columns.append(variableColumn, matchColumn);
+
+	const columnHeader = (text) => {
+		const header = document.createElement("div");
+		header.textContent = text;
+		header.style.cssText = "position:sticky;top:0;z-index:1;background:#0b1418;color:#a9c7d0;font-weight:800;border-bottom:1px solid #253842;padding:4px 2px 6px;";
+		return header;
+	};
 
 	const render = () => {
 		const query = search.value.trim().toLowerCase();
-		list.replaceChildren();
-		let rendered = 0;
-		for (const sectionField of fields) {
-			let options = allOptions.filter((option) => optionMatchesField(option, sectionField));
-			if (!options.length) options = allOptions;
-			const visible = options.filter((option) => {
-				if (!query) return true;
-				return [sectionField.label, option?.value, option?.label, option?.source].join(" ").toLowerCase().includes(query);
-			});
-			if (!visible.length) continue;
-			const section = document.createElement("div");
-			section.style.cssText = "display:flex;flex-direction:column;gap:4px;";
-			const label = document.createElement("div");
-			label.textContent = sectionField.label;
-			label.style.cssText = "padding:5px 4px 2px;color:#a9c7d0;font-weight:800;border-bottom:1px solid #253842;";
-			section.appendChild(label);
-			const selected = draftSources[sectionField.name] || "";
-			for (const option of visible) {
-				const parts = optionDisplay(option);
-				const row = document.createElement("button");
-				row.type = "button";
-				row.style.cssText = [
-					"display:flex",
-					"align-items:center",
-					"gap:7px",
-					"width:100%",
-					"border:0",
-					"border-radius:7px",
-					"background:transparent",
-					"color:#dce7e2",
-					"text-align:left",
-					"padding:6px",
-					"cursor:pointer",
-				].join(";");
-				const mark = document.createElement("span");
-				mark.textContent = option.value === selected ? "✓" : "";
-				mark.style.cssText = "width:16px;color:#7de39b;font-weight:900;";
-				const text = document.createElement("span");
-				text.style.cssText = "min-width:0;display:flex;flex-direction:column;gap:1px;";
-				const main = document.createElement("span");
-				main.textContent = parts.title || option.value;
-				main.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:750;color:#f1fff5;";
-				const sub = document.createElement("span");
-				sub.textContent = [option.value, parts.source].filter(Boolean).join(" · ");
-				sub.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:#9fc7d0;";
-				text.append(main, sub);
-				row.append(mark, text);
-				const choose = (event) => {
-					event?.preventDefault?.();
-					event?.stopPropagation?.();
-					draftSources[sectionField.name] = option.value;
-					render();
-				};
-				row.addEventListener("pointerup", choose, true);
-				row.addEventListener("click", choose, true);
-				section.appendChild(row);
-				rendered += 1;
-			}
-			list.appendChild(section);
+		variableColumn.replaceChildren(columnHeader("模板参数"));
+		matchColumn.replaceChildren(columnHeader("匹配到的参数"));
+		const visibleOptions = allOptions.filter((option) => {
+			if (!query) return true;
+			return [option?.value, option?.label, option?.source].join(" ").toLowerCase().includes(query);
+		});
+		if (activeVariable && !visibleOptions.some((option) => option.value === activeVariable)) {
+			activeVariable = visibleOptions[0]?.value || "";
 		}
-		if (!rendered) {
+		for (const option of visibleOptions) {
+			const parts = optionDisplay(option);
+			const row = document.createElement("button");
+			row.type = "button";
+			const selected = option.value === activeVariable;
+			const boundCount = fields.filter((item) => draftSources[item.name] === option.value).length;
+			row.style.cssText = [
+				"display:flex",
+				"align-items:center",
+				"gap:7px",
+				"width:100%",
+				"border:1px solid " + (selected ? "#2f9a75" : "transparent"),
+				"border-radius:7px",
+				"background:" + (selected ? "rgba(16,122,92,.32)" : "transparent"),
+				"color:#dce7e2",
+				"text-align:left",
+				"padding:6px",
+				"cursor:pointer",
+			].join(";");
+			const mark = document.createElement("span");
+			mark.textContent = boundCount ? "✓" : "";
+			mark.style.cssText = "width:16px;color:#7de39b;font-weight:900;";
+			const text = document.createElement("span");
+			text.style.cssText = "min-width:0;display:flex;flex-direction:column;gap:1px;";
+			const main = document.createElement("span");
+			main.textContent = parts.title || option.value;
+			main.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:750;color:#f1fff5;";
+			const sub = document.createElement("span");
+			sub.textContent = [option.value, parts.source, boundCount ? `已绑定 ${boundCount} 项` : ""].filter(Boolean).join(" · ");
+			sub.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:#9fc7d0;";
+			text.append(main, sub);
+			row.append(mark, text);
+			const choose = (event) => {
+				event?.preventDefault?.();
+				event?.stopPropagation?.();
+				activeVariable = option.value;
+				render();
+			};
+			row.addEventListener("pointerup", choose, true);
+			row.addEventListener("click", choose, true);
+			variableColumn.appendChild(row);
+		}
+		if (!visibleOptions.length) {
 			const empty = document.createElement("div");
 			empty.textContent = allOptions.length ? "没有匹配的变量" : "当前工作流没有可选变量。请先添加 GJJ_SETNODE 或 GJJ_TemplateParams。";
 			empty.style.cssText = "color:#8da2ad;padding:8px;";
-			list.appendChild(empty);
+			variableColumn.appendChild(empty);
+		}
+		const activeOption = allOptions.find((option) => option.value === activeVariable);
+		const matchedFields = activeOption ? fields.filter((item) => optionMatchesField(activeOption, item)) : [];
+		for (const sectionField of matchedFields) {
+			const current = String(draftSources[sectionField.name] || "");
+			const selected = current === activeVariable;
+			const row = document.createElement("button");
+			row.type = "button";
+			row.style.cssText = [
+				"display:flex",
+				"align-items:center",
+				"gap:7px",
+				"width:100%",
+				"border:1px solid " + (selected ? "#2f9a75" : "transparent"),
+				"border-radius:7px",
+				"background:" + (selected ? "rgba(16,122,92,.32)" : "transparent"),
+				"color:#dce7e2",
+				"text-align:left",
+				"padding:7px",
+				"cursor:pointer",
+			].join(";");
+			const mark = document.createElement("span");
+			mark.textContent = selected ? "✓" : "";
+			mark.style.cssText = "width:16px;color:#7de39b;font-weight:900;";
+			const text = document.createElement("span");
+			text.style.cssText = "min-width:0;display:flex;flex-direction:column;gap:2px;";
+			const main = document.createElement("span");
+			main.textContent = sectionField.label;
+			main.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:800;color:#f1fff5;";
+			const sub = document.createElement("span");
+			sub.textContent = selected ? `使用 ${activeVariable}` : (current ? `当前：${current}` : "点击绑定左侧模板参数");
+			sub.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:#9fc7d0;";
+			text.append(main, sub);
+			row.append(mark, text);
+			const choose = (event) => {
+				event?.preventDefault?.();
+				event?.stopPropagation?.();
+				if (!activeVariable) return;
+				if (draftSources[sectionField.name] === activeVariable) delete draftSources[sectionField.name];
+				else draftSources[sectionField.name] = activeVariable;
+				render();
+			};
+			row.addEventListener("pointerup", choose, true);
+			row.addEventListener("click", choose, true);
+			matchColumn.appendChild(row);
+		}
+		if (activeOption && !matchedFields.length) {
+			const empty = document.createElement("div");
+			empty.textContent = "这个模板参数没有匹配到当前节点参数";
+			empty.style.cssText = "color:#8da2ad;padding:8px;";
+			matchColumn.appendChild(empty);
 		}
 	};
 	search.addEventListener("input", render);
@@ -426,7 +485,7 @@ function openVariablePicker(node, field = null) {
 		closePopup(popup);
 	};
 	footer.append(cancel, confirm);
-	popup.append(head, search, list, footer);
+	popup.append(head, search, columns, footer);
 	document.body.appendChild(popup);
 	render();
 	search.focus();
