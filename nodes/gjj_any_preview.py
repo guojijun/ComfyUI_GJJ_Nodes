@@ -1015,6 +1015,37 @@ def _held_preview_images(extra_pnginfo: Any, unique_id: Any) -> list[dict[str, A
     return []
 
 
+def _held_preview_media(extra_pnginfo: Any, unique_id: Any) -> tuple[str, list[dict[str, Any]], str]:
+    workflow = _workflow_from_extra_pnginfo(extra_pnginfo)
+    if not workflow:
+        return "", [], ""
+    target = str(unique_id or "").strip()
+    if not target:
+        return "", [], ""
+    for node in workflow.get("nodes") or []:
+        if not isinstance(node, dict) or str(node.get("id")) != target:
+            continue
+        props = node.get("properties") if isinstance(node.get("properties"), dict) else {}
+        media = props.get("gjj_any_preview_held_media")
+        if not isinstance(media, dict):
+            return "", [], ""
+        kind = str(media.get("kind") or "").strip().lower()
+        if kind not in {"audio", "video", "3d"}:
+            return "", [], ""
+        items = media.get("items")
+        if not isinstance(items, (list, tuple)):
+            return "", [], ""
+        result: list[dict[str, Any]] = []
+        for item in items:
+            if isinstance(item, dict) and str(item.get("filename") or "").strip():
+                result.append(dict(item))
+        if not result:
+            return "", [], ""
+        text = str(media.get("text") or "").strip()
+        return kind, result, text
+    return "", [], ""
+
+
 class GJJ_AnyPreview:
     CATEGORY = "GJJ"
     FUNCTION = "preview"
@@ -1411,6 +1442,9 @@ class GJJ_AnyPreview:
         raw_values = []
         using_cached_inputs = False
         held_images: list[dict[str, Any]] = []
+        held_media_kind = ""
+        held_media: list[dict[str, Any]] = []
+        held_media_text = ""
 
         # 优先处理 batch_image 参数
         if batch_image is not None and not is_none(batch_image):
@@ -1433,7 +1467,14 @@ class GJJ_AnyPreview:
             if not raw_values:
                 held_images = _held_preview_images(extra_pnginfo, unique_id)
                 if not held_images:
-                    held_text = _held_preview_text(extra_pnginfo, unique_id)
+                    held_media_kind, held_media, held_media_text = _held_preview_media(
+                        extra_pnginfo,
+                        unique_id,
+                    )
+                    if held_media:
+                        held_text = ""
+                    else:
+                        held_text = _held_preview_text(extra_pnginfo, unique_id)
                 else:
                     held_text = ""
                 if held_text:
@@ -1445,6 +1486,14 @@ class GJJ_AnyPreview:
             preview_kind = "image"
             preview_text = f"保持图片预览：{len(held_images)} 张"
             merged = held_images[0] if len(held_images) == 1 else held_images
+        if held_media and not preview_values:
+            preview_kind = held_media_kind
+            label = {"audio": "音频", "video": "视频", "3d": "3D 文件"}.get(
+                held_media_kind,
+                "媒体",
+            )
+            preview_text = held_media_text or f"保持{label}预览：{len(held_media)} 个"
+            merged = held_media[0] if len(held_media) == 1 else held_media
         if using_cached_inputs and preview_values:
             preview_text = f"使用断开前缓存：{preview_text}"
         sequence_media: list[dict[str, Any]] = []
@@ -1495,6 +1544,18 @@ class GJJ_AnyPreview:
             ui["preview_images"] = [dict(item) for item in held_images]
             if not queue_thumbnails:
                 ui["images"] = [dict(item) for item in held_images]
+        if held_media and not preview_values:
+            media_items = [dict(item) for item in held_media]
+            if held_media_kind == "audio":
+                ui["preview_audio"] = (media_items,)
+                ui["audio"] = media_items
+            elif held_media_kind == "video":
+                ui["preview_video"] = (media_items,)
+                ui["preview_media"] = media_items
+                ui["animated"] = [dict(item) for item in media_items]
+            elif held_media_kind == "3d":
+                ui["preview_files"] = (media_items,)
+                ui["files"] = media_items
 
         if sequence_media:
             ui["preview_images"] = sequence_media

@@ -304,10 +304,24 @@ def _scale_flux_kontext(image: torch.Tensor | None) -> tuple[torch.Tensor | None
 
 
 def _zero_conditioning(conditioning: Any):
+    def strip_reference_metadata(items: Any):
+        if not isinstance(items, list):
+            return items
+        cleaned = []
+        for item in items:
+            if isinstance(item, (list, tuple)) and len(item) >= 2 and isinstance(item[1], dict):
+                meta = item[1].copy()
+                for key in ("reference_latents", "reference_latents_method"):
+                    meta.pop(key, None)
+                cleaned.append([item[0], meta])
+            else:
+                cleaned.append(item)
+        return cleaned
+
     try:
         from nodes import ConditioningZeroOut
 
-        return ConditioningZeroOut().zero_out(conditioning)[0]
+        return strip_reference_metadata(ConditioningZeroOut().zero_out(conditioning)[0])
     except Exception:
         try:
             zeroed = []
@@ -320,6 +334,8 @@ def _zero_conditioning(conditioning: Any):
                     if hasattr(cond, "zero_"):
                         cond.zero_()
                     if isinstance(meta, dict):
+                        for key in ("reference_latents", "reference_latents_method"):
+                            meta.pop(key, None)
                         pooled_output = meta.get("pooled_output")
                         if pooled_output is not None and hasattr(pooled_output, "clone"):
                             meta["pooled_output"] = torch.zeros_like(pooled_output)

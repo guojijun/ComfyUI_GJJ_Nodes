@@ -17,6 +17,7 @@ import { api } from "/scripts/api.js";
 	const COLOR_THEME_PROPERTY = "gjj_color_theme";
 	const USER_SETTINGS_ENDPOINT = "/gjj/user_settings";
 	const NODE_COLOR_SETTINGS_SECTION = "node_color_theme";
+	const TOOLBAR_SETTINGS_SECTION = "workflow_screenshot_toolbar";
 	const CUSTOM_NODE_COLOR_STYLE_ID = "custom";
 	const CROP_MARGIN_PX = 52;
 	const FIT_MARGIN_PX = 112;
@@ -90,6 +91,9 @@ import { api } from "/scripts/api.js";
 	let nodeColorSelectedStyleId = "balanced";
 	let nodeColorSettingsPromise = null;
 	let nodeColorSettingsSaveTimer = null;
+	let toolbarSettingsPromise = null;
+	let toolbarSettingsSaveTimer = null;
+	let toolbarCustomPosition = null;
 	let crcTable = null;
 	let busy = false;
 	let previewItems = [];
@@ -427,6 +431,75 @@ import { api } from "/scripts/api.js";
 				values: compactNodeColorSettings(),
 			}),
 		});
+	}
+
+	function normalizeToolbarPosition(value) {
+		if (!value || typeof value !== "object") return null;
+		const left = Number(value.left);
+		const top = Number(value.top);
+		if (!Number.isFinite(left) || !Number.isFinite(top)) return null;
+		return { left, top };
+	}
+
+	function clampToolbarPosition(toolbar, position) {
+		const rect = toolbar?.getBoundingClientRect?.();
+		const width = Math.max(1, Number(rect?.width || 168));
+		const height = Math.max(1, Number(rect?.height || 34));
+		const margin = 6;
+		const left = Number(position?.left);
+		const top = Number(position?.top);
+		return {
+			left: Math.round(Math.max(margin, Math.min(window.innerWidth - width - margin, Number.isFinite(left) ? left : FALLBACK_TOOLBAR_LEFT_PX))),
+			top: Math.round(Math.max(margin, Math.min(window.innerHeight - height - margin, Number.isFinite(top) ? top : FALLBACK_TOOLBAR_TOP_PX))),
+		};
+	}
+
+	function applyToolbarCustomPosition(toolbar, position) {
+		if (!toolbar) return;
+		const next = clampToolbarPosition(toolbar, position || toolbarCustomPosition || {
+			left: FALLBACK_TOOLBAR_LEFT_PX,
+			top: FALLBACK_TOOLBAR_TOP_PX,
+		});
+		if (toolbar.parentElement !== document.body) document.body.appendChild(toolbar);
+		toolbar.classList.remove("gjj-workflow-toolbar-topbar");
+		toolbar.classList.add("gjj-workflow-toolbar-custom");
+		toolbar.style.left = `${next.left}px`;
+		toolbar.style.top = `${next.top}px`;
+		toolbar.style.right = "";
+		toolbar.style.bottom = "";
+		toolbar.style.transform = "none";
+		toolbarCustomPosition = next;
+	}
+
+	function saveToolbarSettingsSoon(values = null) {
+		clearTimeout(toolbarSettingsSaveTimer);
+		toolbarSettingsSaveTimer = setTimeout(() => {
+			apiJson(USER_SETTINGS_ENDPOINT, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					section: TOOLBAR_SETTINGS_SECTION,
+					values: values || { position: toolbarCustomPosition },
+				}),
+			}).catch((error) => {
+				console.warn("[GJJ] 顶部截图工具条位置保存失败：", error);
+			});
+		}, 180);
+	}
+
+	function loadToolbarSettings() {
+		if (!toolbarSettingsPromise) {
+			toolbarSettingsPromise = apiJson(USER_SETTINGS_ENDPOINT)
+				.then((data) => {
+					toolbarCustomPosition = normalizeToolbarPosition(data?.settings?.[TOOLBAR_SETTINGS_SECTION]?.position);
+					return toolbarCustomPosition;
+				})
+				.catch((error) => {
+					console.warn("[GJJ] 顶部截图工具条位置读取失败：", error);
+					return null;
+				});
+		}
+		return toolbarSettingsPromise;
 	}
 
 	function nodeSearchText(node) {
@@ -3611,6 +3684,33 @@ import { api } from "/scripts/api.js";
 #${TOOLBAR_ID}.gjj-workflow-toolbar-hidden {
 	display: none;
 }
+#${TOOLBAR_ID} .gjj-workflow-toolbar-drag-handle {
+	width: 18px;
+	height: 34px;
+	padding: 0;
+	border: 1px solid rgba(117, 137, 148, .42);
+	border-radius: 8px;
+	background: rgba(20, 23, 27, .78);
+	color: rgba(230, 237, 240, .82);
+	font: 18px/30px "Segoe UI Symbol", "Noto Sans Symbols", sans-serif;
+	cursor: grab;
+	box-sizing: border-box;
+	pointer-events: auto;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	box-shadow: 0 4px 14px rgba(0, 0, 0, .22);
+	touch-action: none;
+	user-select: none;
+}
+#${TOOLBAR_ID} .gjj-workflow-toolbar-drag-handle:hover {
+	border-color: rgba(105, 184, 139, .85);
+	background: rgba(36, 55, 44, .94);
+	color: #f7fbfa;
+}
+#${TOOLBAR_ID} .gjj-workflow-toolbar-drag-handle:active {
+	cursor: grabbing;
+}
 #${TOOLBAR_ID} .gjj-workflow-screenshot-button {
 	width: 34px;
 	height: 34px;
@@ -4469,6 +4569,11 @@ import { api } from "/scripts/api.js";
 		if (!toolbar) return;
 		toolbar.classList.remove("gjj-workflow-toolbar-hidden");
 
+		if (toolbarCustomPosition) {
+			applyToolbarCustomPosition(toolbar, toolbarCustomPosition);
+			return;
+		}
+
 		const insertPoint = findTopbarInsertPoint();
 		if (insertPoint?.row) {
 			const next = insertPoint.after?.nextSibling || null;
@@ -4476,6 +4581,7 @@ import { api } from "/scripts/api.js";
 				insertPoint.row.insertBefore(toolbar, next);
 			}
 			toolbar.classList.add("gjj-workflow-toolbar-topbar");
+			toolbar.classList.remove("gjj-workflow-toolbar-custom");
 			toolbar.style.left = "";
 			toolbar.style.top = "";
 			toolbar.style.right = "";
@@ -4486,6 +4592,7 @@ import { api } from "/scripts/api.js";
 
 		if (toolbar.parentElement !== document.body) document.body.appendChild(toolbar);
 		toolbar.classList.remove("gjj-workflow-toolbar-topbar");
+		toolbar.classList.remove("gjj-workflow-toolbar-custom");
 
 		toolbar.style.left = `${FALLBACK_TOOLBAR_LEFT_PX}px`;
 		toolbar.style.top = `${FALLBACK_TOOLBAR_TOP_PX}px`;
@@ -4774,6 +4881,64 @@ import { api } from "/scripts/api.js";
 		return button;
 	}
 
+	function makeToolbarDragHandle(toolbar) {
+		const handle = document.createElement("div");
+		handle.className = "gjj-workflow-toolbar-drag-handle";
+		handle.textContent = "⠿";
+		handle.title = "拖动截图工具条；双击恢复停靠到顶部";
+		handle.setAttribute("aria-label", "拖动截图工具条");
+		handle.addEventListener("dblclick", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			toolbarCustomPosition = null;
+			saveToolbarSettingsSoon({ position: null });
+			positionToolbar(toolbar);
+		}, true);
+		handle.addEventListener("pointerdown", (event) => {
+			if (event.button !== 0) return;
+			event.preventDefault();
+			event.stopPropagation();
+			closeArrangeMenu();
+			closeNodeColorPanel();
+			const rect = toolbar.getBoundingClientRect();
+			const start = {
+				x: event.clientX,
+				y: event.clientY,
+				left: rect.left,
+				top: rect.top,
+			};
+			applyToolbarCustomPosition(toolbar, { left: rect.left, top: rect.top });
+			try { handle.setPointerCapture?.(event.pointerId); } catch (_) {}
+
+			const move = (moveEvent) => {
+				moveEvent.preventDefault();
+				moveEvent.stopPropagation();
+				applyToolbarCustomPosition(toolbar, {
+					left: start.left + moveEvent.clientX - start.x,
+					top: start.top + moveEvent.clientY - start.y,
+				});
+			};
+			const up = (upEvent) => {
+				upEvent?.preventDefault?.();
+				upEvent?.stopPropagation?.();
+				window.removeEventListener("pointermove", move, true);
+				window.removeEventListener("pointerup", up, true);
+				window.removeEventListener("pointercancel", up, true);
+				saveToolbarSettingsSoon();
+			};
+			window.addEventListener("pointermove", move, true);
+			window.addEventListener("pointerup", up, true);
+			window.addEventListener("pointercancel", up, true);
+		}, true);
+		for (const eventName of ["mousedown", "pointerup", "mouseup", "click", "contextmenu"]) {
+			handle.addEventListener(eventName, (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+			}, true);
+		}
+		return handle;
+	}
+
 	function ensureToolbar() {
 		installStyle();
 		let toolbar = document.getElementById(TOOLBAR_ID);
@@ -4785,6 +4950,7 @@ import { api } from "/scripts/api.js";
 
 		toolbar.textContent = "";
 		toolbar.append(
+			makeToolbarDragHandle(toolbar),
 			makeToolbarButton(SAVE_BUTTON_ID, "💾", "保存工作流截图（Alt+Shift+S）", saveWorkflowScreenshot),
 			makeToolbarButton(OPEN_BUTTON_ID, "📁", "预览并打开工作流截图（Alt+Shift+O）", showScreenshotPreview),
 			makeToolbarButton(COLOR_BUTTON_ID, "🎨", "按节点类型设置辨识配色", toggleNodeColorPanel),
@@ -4800,6 +4966,7 @@ import { api } from "/scripts/api.js";
 		const sync = () => {
 			const toolbar = document.getElementById(TOOLBAR_ID) || ensureToolbar();
 			positionToolbar(toolbar);
+			if (toolbarCustomPosition) saveToolbarSettingsSoon();
 		};
 		window.addEventListener("resize", sync);
 		window.addEventListener("orientationchange", sync);
@@ -4810,7 +4977,8 @@ import { api } from "/scripts/api.js";
 	app.registerExtension({
 		name: EXTENSION_NAME,
 		setup() {
-			ensureToolbar();
+			const toolbar = ensureToolbar();
+			loadToolbarSettings().then(() => positionToolbar(toolbar));
 			loadBackendInfo().catch(() => updateSaveSettingsUI());
 			loadNodeColorSettings();
 			installKeyboardShortcuts();

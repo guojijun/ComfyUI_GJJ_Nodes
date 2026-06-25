@@ -590,16 +590,13 @@ def _concat_pair(base: torch.Tensor, other: torch.Tensor, direction: str, match_
 
 def _grid_shape(count: int, cell_height: int, cell_width: int) -> tuple[int, int]:
     count = max(1, int(count))
-    cell_height = max(1, int(cell_height))
-    cell_width = max(1, int(cell_width))
-    best_cols = 1
-    best_rows = count
+    best_rows = 1
+    best_cols = count
     best_score = float("inf")
     for cols in range(1, count + 1):
         rows = int(math.ceil(count / cols))
-        aspect = (cols * cell_width) / max(1.0, rows * cell_height)
         empty = rows * cols - count
-        score = abs(math.log(max(1e-9, aspect))) + empty * 0.05
+        score = abs(rows - cols) * 10 + empty
         if score < best_score:
             best_score = score
             best_cols = cols
@@ -634,8 +631,14 @@ def _write_grid_slot(
         for index in range(batch):
             src_index = min(index, int(tensor.shape[0]) - 1)
             frame = tensor[src_index:src_index + 1].to(device, non_blocking=True)
-            resized = _resize_frame(frame, target_height, target_width)
-            _write(slot[index:index + 1], resized, src_channels)
+            src_height, src_width = int(frame.shape[1]), int(frame.shape[2])
+            scale = min(target_width / max(1.0, float(src_width)), target_height / max(1.0, float(src_height)))
+            resize_height = max(1, min(target_height, int(round(src_height * scale))))
+            resize_width = max(1, min(target_width, int(round(src_width * scale))))
+            resized = _resize_frame(frame, resize_height, resize_width)
+            y = max(0, (target_height - resize_height) // 2)
+            x = max(0, (target_width - resize_width) // 2)
+            _write(slot[index:index + 1, y:y + resize_height, x:x + resize_width, :], resized, src_channels)
             if progress is not None:
                 progress.update(1)
         return

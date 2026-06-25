@@ -4,6 +4,8 @@ import { api } from "/scripts/api.js";
 const PANEL_ID = "gjj-common-execution-timer";
 const STYLE_ID = "gjj-common-execution-timer-style";
 const COLLAPSED_KEY = "gjj_common_execution_timer_collapsed";
+const USER_SETTINGS_ENDPOINT = "/gjj/user_settings";
+const USER_SETTINGS_SECTION = "execution_timer";
 const MAX_VISIBLE_ROWS = 80;
 const REFRESH_MS = 250;
 const MEMORY_REFRESH_MS = 500;
@@ -15,6 +17,8 @@ let memoryTimer = null;
 let memorySampleInFlight = false;
 let lastMemorySampleAt = 0;
 let panelClosedForRun = false;
+let positionSaveTimer = null;
+let positionLoaded = false;
 
 function nowMs() {
 	return performance.now();
@@ -171,6 +175,113 @@ function focusNode(id) {
 	return true;
 }
 
+function clampPanelPosition(left, top, root = panel) {
+	const rect = root?.getBoundingClientRect?.();
+	const width = Number(rect?.width || 380);
+	const height = Number(rect?.height || 220);
+	const margin = 8;
+	return {
+		left: Math.max(margin, Math.min(window.innerWidth - width - margin, Number(left) || margin)),
+		top: Math.max(margin, Math.min(window.innerHeight - height - margin, Number(top) || margin)),
+	};
+}
+
+function applyPanelPosition(root, position) {
+	if (!root || !position || typeof position !== "object") return;
+	const left = Number(position.left);
+	const top = Number(position.top);
+	if (!Number.isFinite(left) || !Number.isFinite(top)) return;
+	const next = clampPanelPosition(left, top, root);
+	root.style.left = `${next.left}px`;
+	root.style.top = `${next.top}px`;
+	root.style.right = "auto";
+	root.style.bottom = "auto";
+}
+
+async function loadPanelPosition(root) {
+	if (!root || positionLoaded) return;
+	positionLoaded = true;
+	try {
+		const response = api?.fetchApi ? await api.fetchApi(USER_SETTINGS_ENDPOINT) : await fetch(USER_SETTINGS_ENDPOINT);
+		const data = await response.json();
+		applyPanelPosition(root, data?.settings?.[USER_SETTINGS_SECTION]?.position);
+	} catch (_) {}
+}
+
+async function savePanelPosition(root) {
+	if (!root) return;
+	const rect = root.getBoundingClientRect();
+	const position = clampPanelPosition(rect.left, rect.top, root);
+	applyPanelPosition(root, position);
+	const body = JSON.stringify({ section: USER_SETTINGS_SECTION, values: { position } });
+	const options = { method: "POST", headers: { "Content-Type": "application/json" }, body };
+	try {
+		const response = api?.fetchApi ? await api.fetchApi(USER_SETTINGS_ENDPOINT, options) : await fetch(USER_SETTINGS_ENDPOINT, options);
+		if (!response?.ok) throw new Error("保存计时器位置失败");
+	} catch (error) {
+		console.warn("[GJJ ExecutionTimer] 保存位置失败", error);
+	}
+}
+
+function schedulePositionSave(root) {
+	clearTimeout(positionSaveTimer);
+	positionSaveTimer = setTimeout(() => void savePanelPosition(root), 180);
+}
+
+function enablePanelDrag(root, handle) {
+	if (!root || !handle || handle.__gjjTimerDragReady) return;
+	handle.__gjjTimerDragReady = true;
+	handle.addEventListener("pointerdown", (event) => {
+		if (event.button !== 0) return;
+		const rect = root.getBoundingClientRect();
+		const start = {
+			x: event.clientX,
+			y: event.clientY,
+			left: rect.left,
+			top: rect.top,
+		};
+		let dragging = false;
+		root.style.left = `${rect.left}px`;
+		root.style.top = `${rect.top}px`;
+		root.style.right = "auto";
+		root.style.bottom = "auto";
+		try { handle.setPointerCapture?.(event.pointerId); } catch (_) {}
+		event.stopPropagation();
+
+		const move = (moveEvent) => {
+			const dx = moveEvent.clientX - start.x;
+			const dy = moveEvent.clientY - start.y;
+			if (!dragging && Math.hypot(dx, dy) < 4) return;
+			dragging = true;
+			moveEvent.preventDefault();
+			moveEvent.stopPropagation();
+			const next = clampPanelPosition(
+				start.left + dx,
+				start.top + dy,
+				root,
+			);
+			root.style.left = `${next.left}px`;
+			root.style.top = `${next.top}px`;
+			root.style.right = "auto";
+			root.style.bottom = "auto";
+		};
+		const up = (upEvent) => {
+			window.removeEventListener("pointermove", move, true);
+			window.removeEventListener("pointerup", up, true);
+			window.removeEventListener("pointercancel", up, true);
+			if (dragging) {
+				upEvent?.preventDefault?.();
+				upEvent?.stopPropagation?.();
+				root.__gjjTimerSuppressClickUntil = nowMs() + 350;
+				schedulePositionSave(root);
+			}
+		};
+		window.addEventListener("pointermove", move, true);
+		window.addEventListener("pointerup", up, true);
+		window.addEventListener("pointercancel", up, true);
+	}, true);
+}
+
 function nodeLabel(id) {
 	const node = getNodeById(id);
 	const raw = (
@@ -239,6 +350,8 @@ function ensureStyles() {
 			gap: 8px;
 			padding: 8px 9px;
 			border-bottom: 1px solid rgba(132, 164, 176, 0.18);
+			cursor: move;
+			touch-action: none;
 		}
 		#${PANEL_ID}.gjj-collapsed .gjj-exec-header { border-bottom: 0; }
 		#${PANEL_ID} .gjj-exec-title {
@@ -265,6 +378,8 @@ function ensureStyles() {
 			font-size: 14px;
 			line-height: 22px;
 		}
+		#${PANEL_ID} .gjj-exec-header button { cursor: grab; }
+		#${PANEL_ID} .gjj-exec-header button:active { cursor: grabbing; }
 		#${PANEL_ID} button:hover { background: rgba(255, 255, 255, 0.16); }
 		#${PANEL_ID} .gjj-exec-body {
 			display: flex;
@@ -402,6 +517,8 @@ function button(label, title, onClick) {
 	element.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
+		const root = element.closest?.(`#${PANEL_ID}`);
+		if (Number(root?.__gjjTimerSuppressClickUntil || 0) > nowMs()) return;
 		onClick?.();
 	});
 	return element;
@@ -479,9 +596,11 @@ function ensurePanel() {
 		root.classList.add("gjj-collapsed");
 		collapse.textContent = "🔽";
 	}
+	enablePanelDrag(root, header);
 
 	document.body.appendChild(root);
 	panel = root;
+	void loadPanelPosition(root);
 	return panel;
 }
 
@@ -803,6 +922,12 @@ function setupListeners() {
 	api.addEventListener("execution_error", (event) => finishRun("error", event));
 	api.addEventListener("execution_interrupted", (event) => finishRun("interrupted", event));
 	api.addEventListener("gjj_memory_manager_stats", (event) => applyMemoryPayload(event?.detail || {}));
+	window.addEventListener("resize", () => {
+		if (!panel) return;
+		const rect = panel.getBoundingClientRect();
+		applyPanelPosition(panel, { left: rect.left, top: rect.top });
+		schedulePositionSave(panel);
+	});
 }
 
 app.registerExtension({

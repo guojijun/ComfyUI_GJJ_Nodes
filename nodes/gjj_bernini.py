@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import inspect
+import re
 from typing import Any
 
 import torch
@@ -15,8 +16,27 @@ log = logging.getLogger(__name__)
 MIXED_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
 REFERENCE_IMAGE_TYPE = MIXED_IMAGE_TYPE
 REF_PREFIX = "reference_image_"
-MAX_REFERENCE_IMAGES = 9
 FRAME_QUEUE_REQUIREMENT = "本节点只接收已经解码好的 IMAGE / GJJ_BATCH_IMAGE 帧队列；视频文件解码请放在上游视频加载节点完成。"
+
+
+class FlexibleReferenceInputs(dict):
+    def __getitem__(self, key):
+        if _reference_index(key) is not None:
+            return _ref_optional_input(_reference_index(key))
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        return _reference_index(key) is not None or super().__contains__(key)
+
+
+def _reference_index(name: Any) -> int | None:
+    match = re.match(rf"^{re.escape(REF_PREFIX)}(\d+)$", str(name or ""))
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except Exception:
+        return None
 
 
 def _conditioning_set_values(conditioning: Any, values: dict[str, Any]) -> Any:
@@ -80,8 +100,12 @@ def _image_frames(value: Any) -> list[torch.Tensor]:
 
 def _reference_inputs(kwargs: dict[str, Any]) -> list[torch.Tensor]:
     refs: list[torch.Tensor] = []
-    for index in range(1, MAX_REFERENCE_IMAGES + 1):
-        refs.extend(_image_frames(kwargs.get(f"{REF_PREFIX}{index:02d}")))
+    ref_keys = sorted(
+        (key for key in kwargs if _reference_index(key) is not None),
+        key=lambda key: _reference_index(key) or 0,
+    )
+    for key in ref_keys:
+        refs.extend(_image_frames(kwargs.get(key)))
     return refs
 
 
@@ -166,11 +190,23 @@ def _build_bernini_context(
 
     ref_video = _validate_connected_frame_input("参考视频帧", reference_video)
     if ref_video is not None:
-        ref_vid = _resize_long_edge(ref_video[: int(length)], int(ref_max_size))
+        ref_vid = comfy.utils.common_upscale(
+            ref_video[: int(length), :, :, :3].movedim(-1, 1),
+            int(width),
+            int(height),
+            "area",
+            "center",
+        ).movedim(1, -1)
         context["refs"].append(_encode_context_latent(vae, ref_vid[:, :, :, :3]))
 
     for img in reference_images or []:
-        ref_img = _resize_long_edge(img, int(ref_max_size))
+        ref_img = comfy.utils.common_upscale(
+            img[:, :, :, :3].movedim(-1, 1),
+            int(width),
+            int(height),
+            "area",
+            "center",
+        ).movedim(1, -1)
         context["refs"].append(_encode_context_latent(vae, ref_img[:, :, :, :3]))
 
     return context
@@ -180,7 +216,7 @@ def _ref_optional_input(index: int):
     return (
         REFERENCE_IMAGE_TYPE,
         {
-            "display_name": f"参考图 {index}",
+            "display_name": f"reference_image_{index}",
             "tooltip": f"可选参考图片或批量图片。支持 IMAGE 与 GJJ_BATCH_IMAGE；批量图片会在后台拆成多张参考图统一处理。{FRAME_QUEUE_REQUIREMENT}",
         },
     )
@@ -189,13 +225,12 @@ def _ref_optional_input(index: int):
 class GJJBerniniConditioning:
     CATEGORY = "GJJ/Bernini"
     FUNCTION = "build"
-    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT", "WANVIDIMAGE_EMBEDS")
-    RETURN_NAMES = ("正向条件", "负向条件", "视频Latent", "Wan图像条件")
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
+    RETURN_NAMES = ("正向条件", "负向条件", "latent")
     OUTPUT_TOOLTIPS = (
         "已附加 Bernini 上下文 latent 的正向条件。",
         "已附加同一 Bernini 上下文 latent 的负向条件，便于采样器兼容。",
         "按帧数、宽高和批次数创建的 Wan 视频 latent。",
-        "兼容 GJJ/WanVideo 采样器 image_embeds 输入的 Bernini 上下文条件；原版路径仍以正负 CONDITIONING 为主。",
     )
     DESCRIPTION = f"零依赖复刻 Bernini Conditioning：把已解码的视频帧和参考图片编码为上下文 latent，并写入正负条件。{FRAME_QUEUE_REQUIREMENT}"
     GJJ_HELP = (
@@ -211,6 +246,11 @@ class GJJBerniniConditioning:
 
     @classmethod
     def INPUT_TYPES(cls):
+        optional = FlexibleReferenceInputs({
+            "source_video": (MIXED_IMAGE_TYPE, {"display_name": "源视频帧", "tooltip": f"可选。作为要编辑或风格迁移的基础视频帧，会缩放到目标宽高。支持 IMAGE 与 GJJ_BATCH_IMAGE。{FRAME_QUEUE_REQUIREMENT}"}),
+            "reference_video": (MIXED_IMAGE_TYPE, {"display_name": "参考视频帧", "tooltip": f"可选。作为视频植入或运动内容参考，会保持宽高比并限制最长边。支持 IMAGE 与 GJJ_BATCH_IMAGE。{FRAME_QUEUE_REQUIREMENT}"}),
+            f"{REF_PREFIX}0": _ref_optional_input(0),
+        })
         return {
             "required": {
                 "positive": ("CONDITIONING", {"display_name": "正向条件", "tooltip": "来自 Wan 文本编码器的正向条件；节点会在其中附加 Bernini 上下文 latent。"}),
@@ -222,12 +262,7 @@ class GJJBerniniConditioning:
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096, "step": 1, "display_name": "批次数", "tooltip": "创建多少个 latent 样本用于采样。"}),
                 "ref_max_size": ("INT", {"default": 848, "min": 16, "max": 8192, "step": 16, "display_name": "参考最长边", "tooltip": "参考视频和参考图片的最长边上限；保持宽高比且不会放大。"}),
             },
-            "optional": {
-                "source_video": (MIXED_IMAGE_TYPE, {"display_name": "源视频帧", "tooltip": f"可选。作为要编辑或风格迁移的基础视频帧，会缩放到目标宽高。支持 IMAGE 与 GJJ_BATCH_IMAGE。{FRAME_QUEUE_REQUIREMENT}"}),
-                "reference_video": (MIXED_IMAGE_TYPE, {"display_name": "参考视频帧", "tooltip": f"可选。作为视频植入或运动内容参考，会保持宽高比并限制最长边。支持 IMAGE 与 GJJ_BATCH_IMAGE。{FRAME_QUEUE_REQUIREMENT}"}),
-                f"{REF_PREFIX}01": _ref_optional_input(1),
-                f"{REF_PREFIX}02": _ref_optional_input(2),
-            },
+            "optional": optional,
         }
 
     def build(self, positive, negative, vae, width, height, length, batch_size, ref_max_size=848, source_video=None, reference_video=None, **kwargs):
@@ -239,7 +274,7 @@ class GJJBerniniConditioning:
             device=comfy.model_management.intermediate_device(),
         )
         reference_images = _reference_inputs(kwargs)
-        if any(_has_value(kwargs.get(f"{REF_PREFIX}{index:02d}")) for index in range(1, MAX_REFERENCE_IMAGES + 1)) and not reference_images:
+        if any(_has_value(value) for key, value in kwargs.items() if _reference_index(key) is not None) and not reference_images:
             raise RuntimeError(f"参考图输入没有解析出有效图片。{FRAME_QUEUE_REQUIREMENT}")
         context_parts = _build_bernini_context(
             vae,
@@ -271,13 +306,7 @@ class GJJBerniniConditioning:
                 "Bernini 已收到参考帧，但没有生成 WanVideo 可用的 16/48 通道 context_latents。"
                 "请确认 VAE 输入是 Wan 视频 VAE，而不是 SD/FLUX 等图片 VAE。"
             )
-        image_embeds = {
-            "target_shape": (16, ((length - 1) // 4) + 1, height // 8, width // 8),
-            "num_frames": length,
-            "context_latents": wan_context or None,
-        }
-
-        return (positive, negative, {"samples": latent}, image_embeds)
+        return (positive, negative, {"samples": latent})
 
 
 NODE_CLASS_MAPPINGS = {

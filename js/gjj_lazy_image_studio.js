@@ -25,6 +25,7 @@ const EXECUTE_BUTTON_NAME = "__gjj_execute_button";
 const IMAGE_PREVIEW_NAME = "__gjj_image_preview";
 const LORA_CHAIN_CONFIG_INPUT = "lora_chain_config";
 const LORA_DATA_WIDGET_NAME = "lora_data";
+const KEEP_MODEL_WIDGET_NAME = "keep_model_loaded";
 const SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_settings_open";
 const TRANSLATE_ENABLED_PROPERTY = "gjj_lazy_image_studio_translate_enabled";
 const PARAM_VALUES_PROPERTY = "gjj_lazy_image_studio_param_values";
@@ -58,8 +59,24 @@ const TRANSLATE_BUTTON_STYLES = {
 		color: "#fee2e2",
 	},
 };
+const KEEP_MODEL_BUTTON_STYLES = {
+	off: {
+		bg: "linear-gradient(135deg, #1f2933, #374151)",
+		hover: "linear-gradient(135deg, #374151, #4b5563)",
+		border: "#55636f",
+		color: "#cbd5e1",
+		title: "模型保持已关闭：执行完成后按常规清理显存。",
+	},
+	on: {
+		bg: "linear-gradient(135deg, #7c3aed, #9333ea)",
+		hover: "linear-gradient(135deg, #9333ea, #a855f7)",
+		border: "#c084fc",
+		color: "#f5f3ff",
+		title: "模型保持已开启：执行后保留当前模型、CLIP 和 VAE，适合连续生成。",
+	},
+};
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
-const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME]);
+const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME, KEEP_MODEL_WIDGET_NAME]);
 const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "prompt", widget: "prompt", label: "提示词", type: "STRING", aliases: ["prompt", "positive", "正向", "提示词"] },
 	{ name: "width", widget: "width", label: "宽度", type: "INT", aliases: ["width", "宽", "宽度"] },
@@ -123,6 +140,7 @@ const PANEL_SYNC_WIDGETS = [
 	"scheduler",
 	"denoise",
 	"grow_mask_by",
+	KEEP_MODEL_WIDGET_NAME,
 ];
 
 const RESTORE_WIDGET_TYPES = {
@@ -143,6 +161,7 @@ const RESTORE_WIDGET_TYPES = {
 	scheduler: "combo",
 	denoise: "number",
 	grow_mask_by: "number",
+	[KEEP_MODEL_WIDGET_NAME]: "toggle",
 };
 const SEED_CONTROL_KEY = "__seed_control_after_generate";
 const SEED_CONTROL_VALUES = new Set(["fixed", "increment", "decrement", "randomize"]);
@@ -168,6 +187,7 @@ const SERIALIZED_PARAM_WIDGETS = [
 	"denoise",
 	"grow_mask_by",
 	BATCH_SOURCE_WIDGET,
+	KEEP_MODEL_WIDGET_NAME,
 ];
 const DEFAULT_PARAM_VALUES = {
 	prompt: "",
@@ -189,6 +209,7 @@ const DEFAULT_PARAM_VALUES = {
 	denoise: 1.0,
 	grow_mask_by: 6,
 	[BATCH_SOURCE_WIDGET]: "[]",
+	[KEEP_MODEL_WIDGET_NAME]: false,
 };
 
 let MODEL_PRESETS = getCachedModelFamilyPresets();
@@ -493,6 +514,57 @@ function settingsOpen(node) {
 
 function translationEnabled(node) {
 	return Boolean(node?.properties?.[TRANSLATE_ENABLED_PROPERTY]);
+}
+
+function boolValue(value) {
+	if (typeof value === "boolean") return value;
+	const text = String(value ?? "").trim().toLowerCase();
+	return ["true", "1", "yes", "on", "启用", "开启"].includes(text);
+}
+
+function keepModelEnabled(node) {
+	const widget = getWidget(node, KEEP_MODEL_WIDGET_NAME);
+	if (widget) return boolValue(widget.value);
+	const params = node?.properties?.[PARAM_VALUES_PROPERTY] || {};
+	return boolValue(params[KEEP_MODEL_WIDGET_NAME]);
+}
+
+function setKeepModelEnabled(node, enabled) {
+	if (!node) return;
+	const value = Boolean(enabled);
+	node.properties = node.properties || {};
+	node.properties[PARAM_VALUES_PROPERTY] = {
+		...(node.properties[PARAM_VALUES_PROPERTY] || {}),
+		[KEEP_MODEL_WIDGET_NAME]: value,
+	};
+	const widget = getWidget(node, KEEP_MODEL_WIDGET_NAME);
+	if (widget) {
+		widget.value = value;
+		const index = getWidgetIndex(node, KEEP_MODEL_WIDGET_NAME);
+		if (Array.isArray(node.widgets_values) && index >= 0) {
+			node.widgets_values[index] = value;
+		}
+		try { widget.callback?.(value); } catch (_) {}
+	}
+	applyKeepModelButtonState(node);
+	node.graph?.change?.();
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function applyKeepModelButtonState(node) {
+	const button = node?.__gjjKeepModelButton;
+	if (!button) return;
+	const enabled = keepModelEnabled(node);
+	const style = enabled ? KEEP_MODEL_BUTTON_STYLES.on : KEEP_MODEL_BUTTON_STYLES.off;
+	button.textContent = "🧠";
+	button.dataset.value = enabled ? "true" : "false";
+	button.setAttribute("aria-pressed", enabled ? "true" : "false");
+	button.title = style.title;
+	button.style.background = style.bg;
+	button.style.borderColor = style.border;
+	button.style.color = style.color;
+	button.__gjjLazyDefaultBg = style.bg;
+	button.__gjjLazyHoverBg = style.hover;
 }
 
 function setTranslationEnabled(node, enabled) {
@@ -838,6 +910,7 @@ function coerceParamValue(name, value, node) {
 	if (name === "grow_mask_by") return intValue(value, fallbackParamValue(node, name), 0, 64);
 	if (name === SEED_CONTROL_KEY) return isSeedControlValue(value) ? textValue(value) : fallbackParamValue(node, name);
 	if (name === BATCH_SOURCE_WIDGET) return String(value ?? "[]");
+	if (name === KEEP_MODEL_WIDGET_NAME) return boolValue(value);
 	return String(value ?? fallbackParamValue(node, name) ?? "");
 }
 
@@ -976,6 +1049,9 @@ function applyParamValues(node, params) {
 		seedControlWidget.value = params[SEED_CONTROL_KEY];
 		seedControlWidget.callback?.(seedControlWidget.value);
 		changed = true;
+	}
+	if (Object.prototype.hasOwnProperty.call(params, KEEP_MODEL_WIDGET_NAME)) {
+		applyKeepModelButtonState(node);
 	}
 	return changed;
 }
@@ -1602,6 +1678,22 @@ function createButtons(node) {
 	].join(";");
 	node.__gjjLazyTranslateButton = translateButton;
 
+	const keepModelButton = document.createElement("button");
+	keepModelButton.type = "button";
+	keepModelButton.textContent = "🧠";
+	keepModelButton.title = KEEP_MODEL_BUTTON_STYLES.off.title;
+	keepModelButton.setAttribute("aria-label", "保持模型开关");
+	keepModelButton.style.cssText = [
+		...sharedButtonStyle,
+		"padding:0",
+		`border:1px solid ${KEEP_MODEL_BUTTON_STYLES.off.border}`,
+		`background:${KEEP_MODEL_BUTTON_STYLES.off.bg}`,
+		`color:${KEEP_MODEL_BUTTON_STYLES.off.color}`,
+		"flex:0 0 34px",
+		"font-size:15px",
+	].join(";");
+	node.__gjjKeepModelButton = keepModelButton;
+
 	// 生成图片按钮
 	const generateButton = document.createElement("button");
 	generateButton.type = "button";
@@ -1779,19 +1871,28 @@ function createButtons(node) {
 		setSettingsOpen(node, !settingsOpen(node));
 	}
 
+	function handleKeepModel(event) {
+		protectEvent(event);
+		setKeepModelEnabled(node, !keepModelEnabled(node));
+	}
+
 	setupButtonHover(refreshButton, "linear-gradient(135deg, #1e3a5f, #1e40af)", "linear-gradient(135deg, #1e40af, #3b82f6)");
 	setupButtonHover(translateButton, TRANSLATE_BUTTON_STYLES.off.bg, TRANSLATE_BUTTON_STYLES.off.hover);
+	setupButtonHover(keepModelButton, KEEP_MODEL_BUTTON_STYLES.off.bg, KEEP_MODEL_BUTTON_STYLES.off.hover);
 	setupButtonHover(generateButton, "linear-gradient(135deg, #064e3b, #059669)", "linear-gradient(135deg, #059669, #10b981)");
 	setupButtonHover(settingsButton, "linear-gradient(135deg, #1f2933, #374151)", "linear-gradient(135deg, #374151, #4b5563)");
 	setupButtonEvents(refreshButton, handleRefresh);
 	setupButtonEvents(translateButton, handleTranslate);
+	setupButtonEvents(keepModelButton, handleKeepModel);
 	setupButtonEvents(generateButton, handleGenerate);
 	setupButtonEvents(settingsButton, handleSettings);
 	applyLazyTranslateButtonState(node);
+	applyKeepModelButtonState(node);
 	updateSettingsButtonState(node);
 
 	container.appendChild(refreshButton);
 	container.appendChild(translateButton);
+	container.appendChild(keepModelButton);
 	container.appendChild(generateButton);
 	container.appendChild(templateButton);
 	container.appendChild(settingsButton);

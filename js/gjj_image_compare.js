@@ -605,7 +605,8 @@ function buildCompareDom(node) {
 		"inset:0",
 		"width:100%",
 		"height:100%",
-		"object-fit:contain",
+		"object-fit:cover",
+		"object-position:center center",
 		"pointer-events:none",
 	].join(";");
 
@@ -616,7 +617,8 @@ function buildCompareDom(node) {
 		"inset:0",
 		"width:100%",
 		"height:100%",
-		"object-fit:contain",
+		"object-fit:cover",
+		"object-position:center center",
 		"clip-path:inset(0 50% 0 0)",
 		"pointer-events:none",
 	].join(";");

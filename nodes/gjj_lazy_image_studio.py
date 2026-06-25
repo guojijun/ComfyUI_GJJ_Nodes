@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import time
@@ -98,6 +99,14 @@ REFERENCE_IMAGE_RESOLUTION_STEPS = 1
 FLUX2_REFERENCE_RESOLUTION_STEPS = 16
 IMAGE_RATIO_EPSILON = 0.015
 GGUF_PACKAGE_SPEC = "gguf>=0.13.0"
+QWEN_IMAGE_EDIT_LLAMA_TEMPLATE = (
+    "<|im_start|>system\n"
+    "Describe the key features of the input image (color, shape, size, texture, objects, background), "
+    "then explain how the user's text instruction should alter or modify the image. Generate a new image "
+    "that meets the user's requirements while maintaining consistency with the original input where appropriate."
+    "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+)
+QWEN_IMAGE_EDIT_IMAGE_TOKEN = "<|vision_start|><|image_pad|><|vision_end|>"
 
 register_prompt_translation_api((COMMON_PROMPT_TRANSLATE_API_PATH,))
 
@@ -412,6 +421,55 @@ def _unwrap_list_input(value: Any) -> Any:
     return value
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    return text in {"true", "1", "yes", "on", "启用", "开启"}
+
+
+def _stable_json(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        return str(value)
+
+
+def _tensor_signature(value: Any, max_samples: int = 65536) -> str:
+    if not isinstance(value, torch.Tensor):
+        return f"{type(value).__name__}:{str(value)[:120]}"
+    with torch.no_grad():
+        tensor = value.detach()
+        shape = tuple(int(dim) for dim in tensor.shape)
+        if tensor.numel() == 0:
+            return f"{shape}:empty"
+        flat = tensor.reshape(-1)
+        step = max(1, flat.numel() // int(max_samples))
+        sample = flat[::step][:max_samples].detach().cpu().contiguous()
+        if sample.dtype != torch.float32:
+            sample = sample.float()
+        digest = hashlib.sha256(sample.numpy().tobytes()).hexdigest()[:24]
+        return f"{shape}:{sample.numel()}:{digest}"
+
+
+def _pairs_signature(pairs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "slot": int(pair.get("slot_index", index)),
+            "source_input": int(pair.get("source_input_index", 0)),
+            "source_batch": int(pair.get("source_batch_index", index)),
+            "image": _tensor_signature(pair.get("image")),
+        }
+        for index, pair in enumerate(pairs)
+    ]
+
+
+def _cache_digest(payload: Any) -> str:
+    return hashlib.sha256(_stable_json(payload).encode("utf-8", "ignore")).hexdigest()
+
+
 def _resolve_prompt_node(prompt_graph: Any, node_id: Any) -> dict[str, Any] | None:
     if not isinstance(prompt_graph, dict):
         return None
@@ -543,6 +601,8 @@ def zero_out_conditioning(conditioning):
     result = []
     for item in conditioning:
         payload = item[1].copy()
+        for key in ("reference_latents", "reference_latents_method"):
+            payload.pop(key, None)
         pooled_output = payload.get("pooled_output")
         if pooled_output is not None:
             payload["pooled_output"] = torch.zeros_like(pooled_output)
@@ -1063,6 +1123,29 @@ def _uses_equal_reference_canvas(preset: dict[str, Any], unet_name: str = "") ->
     )
 
 
+def _is_qwen_image_edit_family(preset: dict[str, Any], unet_name: str = "") -> bool:
+    text = _canonical_model_text(
+        "|".join(
+            [
+                str(preset.get("id", "")),
+                str(preset.get("keywords", "")),
+                str(unet_name or ""),
+            ]
+        )
+    )
+    return "qwenimageedit" in text
+
+
+def _empty_sd3_latent(width: int, height: int, batch_size: int) -> dict[str, Any]:
+    if EmptySD3LatentImage is not None:
+        return EmptySD3LatentImage().generate(
+            int(width), int(height), int(batch_size)
+        )[0]
+    return EmptyLatentImage().generate(
+        int(width), int(height), int(batch_size)
+    )[0]
+
+
 def _prepare_primary_image_for_target(
     image: torch.Tensor,
     target_width: int,
@@ -1193,10 +1276,48 @@ class GJJ_LazyImageStudio:
     INPUT_IS_LIST = True
     OUTPUT_NODE = True  # 设为True以确保节点可以作为有效输出节点
     OUTPUT_TOOLTIPS = ("节点内部完成条件编码、采样和解码后的最终图片。",)
+    _shared_runtime_cache: dict[str, tuple[Any, Any, Any]] = {}
+    _shared_result_cache: dict[str, dict[str, Any]] = {}
+    _shared_result_order: list[str] = []
+    _MAX_RESULT_CACHE = 8
 
     def __init__(self):
         self._lora_cache: dict[str, Any] = {}
+        self._kept_runtime: tuple[Any, Any, Any] | None = None
         self.preview_image = PreviewImage()
+
+    @classmethod
+    def _remember_result_cache(cls, key: str, image: torch.Tensor, preview_images: list[Any], effective_params: dict[str, Any]) -> None:
+        cls._shared_result_cache[key] = {
+            "image": image.detach().cpu().clone(),
+            "preview_images": list(preview_images or []),
+            "effective_params": dict(effective_params or {}),
+            "time": time.time(),
+        }
+        if key in cls._shared_result_order:
+            cls._shared_result_order.remove(key)
+        cls._shared_result_order.append(key)
+        while len(cls._shared_result_order) > cls._MAX_RESULT_CACHE:
+            old_key = cls._shared_result_order.pop(0)
+            cls._shared_result_cache.pop(old_key, None)
+
+    @classmethod
+    def _cached_result(cls, key: str) -> dict[str, Any] | None:
+        cached = cls._shared_result_cache.get(key)
+        if not cached:
+            return None
+        if key in cls._shared_result_order:
+            cls._shared_result_order.remove(key)
+        cls._shared_result_order.append(key)
+        return cached
+
+    @classmethod
+    def _cached_runtime(cls, key: str) -> tuple[Any, Any, Any] | None:
+        return cls._shared_runtime_cache.get(key)
+
+    @classmethod
+    def _remember_runtime(cls, key: str, model: Any, clip: Any, vae: Any) -> None:
+        cls._shared_runtime_cache[key] = (model, clip, vae)
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1429,6 +1550,17 @@ class GJJ_LazyImageStudio:
                             "forceInput": False,
                         },
                     ),
+                    "keep_model_loaded": (
+                        "BOOLEAN",
+                        {
+                            "default": False,
+                            "display_name": "🧠 保持模型",
+                            "tooltip": "开启后执行结束不主动释放当前模型、CLIP 和 VAE，并在节点内保留引用以加速连续生成。",
+                            "hidden": True,
+                            "display": "hidden",
+                            "forceInput": False,
+                        },
+                    ),
                 }
             ),
             "hidden": {
@@ -1575,7 +1707,7 @@ class GJJ_LazyImageStudio:
                 )
             )
             vl_images.append(vl_image[:, :, :, :3])
-            image_prompt += f"Picture {slot + 1}: "
+            image_prompt += f"Picture {slot + 1}: {QWEN_IMAGE_EDIT_IMAGE_TOKEN}"
 
             # 及时清理不需要的中间变量以释放显存
             del prepared_image, vl_image
@@ -1583,19 +1715,21 @@ class GJJ_LazyImageStudio:
         if not ref_latents:
             raise RuntimeError("平等参考模式至少需要一张有效参考图。")
         full_prompt = image_prompt + str(prompt or "")
-        tokens = clip.tokenize(full_prompt, images=vl_images)
+        tokens = clip.tokenize(
+            full_prompt,
+            images=vl_images,
+            llama_template=QWEN_IMAGE_EDIT_LLAMA_TEMPLATE,
+        )
         conditioning = clip.encode_from_tokens_scheduled(tokens)
         positive = node_helpers.conditioning_set_values(
             conditioning, {"reference_latents": ref_latents}, append=True
         )
         negative = self._encode_negative_conditioning(clip, positive, negative_prompt)
-        latent_samples = torch.zeros_like(ref_latents[0])
-        requested_batch = max(1, int(batch_size))
-        if int(latent_samples.shape[0]) != requested_batch:
-            latent_samples = latent_samples[:1].repeat(
-                requested_batch, 1, 1, 1
-            ).contiguous()
-        latent_out = {"samples": latent_samples}
+        latent_out = _empty_sd3_latent(
+            int(canvas_width),
+            int(canvas_height),
+            max(1, int(batch_size)),
+        )
 
         # 清理VL图像列表以释放显存
         del vl_images
@@ -1677,7 +1811,7 @@ class GJJ_LazyImageStudio:
                     )
                 )
             vl_images.append(vl_image[:, :, :, :3])
-            image_prompt += f"Picture {slot + 1}: "
+            image_prompt += f"Picture {slot + 1}: {QWEN_IMAGE_EDIT_IMAGE_TOKEN}"
 
             # 及时清理不需要的中间变量
             del vl_image
@@ -1685,7 +1819,11 @@ class GJJ_LazyImageStudio:
         if main_ref_latent is None:
             raise RuntimeError("主图参考 latent 生成失败，请检查主图输入是否有效。")
         full_prompt = image_prompt + str(prompt or "")
-        tokens = clip.tokenize(full_prompt, images=vl_images)
+        tokens = clip.tokenize(
+            full_prompt,
+            images=vl_images,
+            llama_template=QWEN_IMAGE_EDIT_LLAMA_TEMPLATE,
+        )
         conditioning = clip.encode_from_tokens_scheduled(tokens)
         positive = node_helpers.conditioning_set_values(
             conditioning, {"reference_latents": [main_ref_latent]}, append=True
@@ -1839,6 +1977,7 @@ class GJJ_LazyImageStudio:
         batch_source_images="[]",
         mask=None,
         disable_reference_auto_mask=False,
+        keep_model_loaded=False,
         prompt_graph=None,
         unique_id=None,
         extra_pnginfo=None,
@@ -1866,9 +2005,11 @@ class GJJ_LazyImageStudio:
         batch_source_images = _unwrap_list_input(batch_source_images)
         mask = _unwrap_list_input(mask)
         disable_reference_auto_mask = _unwrap_list_input(disable_reference_auto_mask)
+        keep_model_loaded = _unwrap_list_input(keep_model_loaded)
         prompt_graph = _unwrap_list_input(prompt_graph)
         unique_id = _unwrap_list_input(unique_id)
         extra_pnginfo = _unwrap_list_input(extra_pnginfo)
+        keep_model_loaded = _as_bool(keep_model_loaded)
 
         # 兼容旧工作流：如果隐藏输入未提交，再从 workflow properties 读取。
         if not str(lora_data or "").strip():
@@ -1923,6 +2064,7 @@ class GJJ_LazyImageStudio:
                 "scheduler": str(scheduler or ""),
                 "denoise": float(denoise),
                 "grow_mask_by": int(grow_mask_by),
+                "keep_model_loaded": bool(keep_model_loaded),
             }
             return {
                 "ui": {
@@ -2017,29 +2159,91 @@ class GJJ_LazyImageStudio:
                 + (f"，张量尺寸 {', '.join(input_shapes)}" if input_shapes else "")
             )
 
-            _send_status(unique_id, "2/6 加载主模型、CLIP 和 VAE...")
-            model, clip, vae = self._load_runtime_pipeline(
-                unet_name,
-                unet_dtype,
-                resolved_clip_names,
-                resolved_clip_type,
-                resolved_vae_name,
+            normalized_lora_parts = [
+                normalize_lora_chain_data(value)
+                for value in (lora_data, lora_chain_config)
+                if str(value or "").strip()
+            ]
+            runtime_key = _cache_digest(
+                {
+                    "unet_name": str(unet_name or ""),
+                    "unet_dtype": str(unet_dtype or ""),
+                    "clip_names": [str(item or "") for item in resolved_clip_names],
+                    "clip_type": str(resolved_clip_type or ""),
+                    "vae_name": str(resolved_vae_name or ""),
+                    "lora": normalized_lora_parts,
+                    "model_sampling": str(preset.get("model_sampling", "")),
+                    "model_shift": float(preset.get("model_shift", 0.0)),
+                    "cfg_norm_strength": float(preset.get("cfg_norm_strength", 0.0)),
+                }
             )
+            effective_steps_for_cache = _resolve_effective_steps(int(steps), preset)
+            result_key = _cache_digest(
+                {
+                    "runtime": runtime_key,
+                    "prompt": str(prompt or ""),
+                    "negative_prompt": str(negative_prompt or ""),
+                    "main_image_index": int(main_image_index),
+                    "width": int(width),
+                    "height": int(height),
+                    "batch_size": int(batch_size),
+                    "seed": int(seed),
+                    "steps": int(steps),
+                    "effective_steps": int(effective_steps_for_cache),
+                    "cfg": float(cfg),
+                    "sampler_name": str(sampler_name or ""),
+                    "scheduler": str(scheduler or ""),
+                    "denoise": float(denoise),
+                    "grow_mask_by": int(grow_mask_by),
+                    "disable_reference_auto_mask": _as_bool(disable_reference_auto_mask),
+                    "pairs": _pairs_signature(pairs),
+                    "mask": _tensor_signature(mask) if mask is not None else "",
+                }
+            )
+            if keep_model_loaded:
+                cached_result = self._cached_result(result_key)
+                if cached_result is not None:
+                    _send_status(unique_id, "缓存命中：参数未变化，直接返回上次结果。")
+                    return {
+                        "ui": {
+                            "gjj_images": cached_result.get("preview_images", []),
+                            "elapsed_time": [0.0],
+                            "effective_params": [cached_result.get("effective_params", {})],
+                            "cache_hit": [True],
+                        },
+                        "result": (cached_result["image"].clone(),),
+                    }
 
-            _send_status(unique_id, "3/6 应用 LoRA 与模型补丁...")
-            model, clip = self._apply_loras(
-                model,
-                clip,
-                resolved_clip_type,
-                lora_chain_config,
-                lora_data,
-            )
-            model = _patch_model_sampling(
-                model,
-                str(preset.get("model_sampling", "")),
-                float(preset.get("model_shift", 0.0)),
-            )
-            model = _apply_cfg_norm(model, float(preset.get("cfg_norm_strength", 0.0)))
+            _send_status(unique_id, "2/6 加载主模型、CLIP 和 VAE...")
+            cached_runtime = self._cached_runtime(runtime_key) if keep_model_loaded else None
+            if cached_runtime is not None:
+                model, clip, vae = cached_runtime
+                _send_status(unique_id, "2/6 复用已保持的模型、CLIP 和 VAE...")
+            else:
+                model, clip, vae = self._load_runtime_pipeline(
+                    unet_name,
+                    unet_dtype,
+                    resolved_clip_names,
+                    resolved_clip_type,
+                    resolved_vae_name,
+                )
+
+                _send_status(unique_id, "3/6 应用 LoRA 与模型补丁...")
+                model, clip = self._apply_loras(
+                    model,
+                    clip,
+                    resolved_clip_type,
+                    lora_chain_config,
+                    lora_data,
+                )
+                model = _patch_model_sampling(
+                    model,
+                    str(preset.get("model_sampling", "")),
+                    float(preset.get("model_shift", 0.0)),
+                )
+                model = _apply_cfg_norm(model, float(preset.get("cfg_norm_strength", 0.0)))
+                if keep_model_loaded:
+                    self._remember_runtime(runtime_key, model, clip, vae)
 
             _send_status(unique_id, "4/6 编码条件与 latent...")
             flux2_sample_size = None
@@ -2069,11 +2273,14 @@ class GJJ_LazyImageStudio:
                 pairs
                 and mask is None
                 and supports_reference_edit
-                and _uses_equal_reference_canvas(preset, unet_name)
+                and (
+                    _uses_equal_reference_canvas(preset, unet_name)
+                    or (len(pairs) > 1 and _is_qwen_image_edit_family(preset, unet_name))
+                )
             ):
                 _send_status(
                     unique_id,
-                    f"4/6 编码平等参考条件（{len(pairs)} 张，按最大图尺寸）...",
+                    f"4/6 编码平等参考条件（{len(pairs)} 张，按设置尺寸创建空 latent）...",
                 )
                 positive, negative, latent_out, equal_width, equal_height = (
                     self._encode_equal_reference_image_edit(
@@ -2200,6 +2407,7 @@ class GJJ_LazyImageStudio:
                 "scheduler": str(scheduler or ""),
                 "denoise": float(denoise),
                 "grow_mask_by": int(grow_mask_by),
+                "keep_model_loaded": bool(keep_model_loaded),
             }
 
             # 准备返回值（在清理资源之前）
@@ -2212,12 +2420,19 @@ class GJJ_LazyImageStudio:
                 "result": (image,),
             }
 
-            # 及时清理 GPU/CPU 缓存，释放显存供下次调用
-            del model, clip, vae, positive, negative, sampled_latent, image
-            import gc
-            gc.collect()
-            if hasattr(torch.cuda, 'empty_cache'):
-                torch.cuda.empty_cache()
+            if keep_model_loaded:
+                self._kept_runtime = (model, clip, vae)
+                self._remember_result_cache(result_key, image, preview_images, effective_params)
+                del positive, negative, sampled_latent, image
+                _send_status(unique_id, f"完成：模型保持中  耗时：{elapsed_str}")
+            else:
+                self._kept_runtime = None
+                # 及时清理 GPU/CPU 缓存，释放显存供下次调用
+                del model, clip, vae, positive, negative, sampled_latent, image
+                import gc
+                gc.collect()
+                if hasattr(torch.cuda, 'empty_cache'):
+                    torch.cuda.empty_cache()
 
             # 返回 UI 数据，包含图片和耗时
             return result_data

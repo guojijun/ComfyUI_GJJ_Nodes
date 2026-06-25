@@ -23,6 +23,7 @@ from .gjj_model_upscaler import _load_upscale_model, _list_upscale_models
 NODE_NAME = "GJJ_PanoramaBrowser"
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 TEMP_SUBFOLDER = "GJJ/panorama_browser"
+INPUT_SUBFOLDER = "GJJ/panorama_browser"
 
 
 def _hidden_widget(options: dict[str, Any]) -> dict[str, Any]:
@@ -134,7 +135,7 @@ def _load_path_image(path_text: str) -> torch.Tensor:
         return _pil_to_tensor(image)
 
 
-def _decode_screenshot(data_url: str) -> torch.Tensor:
+def _decode_screenshot_pil(data_url: str) -> Image.Image:
     text = str(data_url or "").strip()
     if not text:
         raise ValueError("请先在全景浏览器里框选截图或点击当前视角截图，再执行节点。")
@@ -147,9 +148,20 @@ def _decode_screenshot(data_url: str) -> torch.Tensor:
                 raise ValueError(
                     "截图尺寸像是整张全景原图，请在浏览器画面里框选局部后再执行。"
                 )
-            return _pil_to_tensor(image)
+            return ImageOps.exif_transpose(image).convert("RGB")
     except Exception as exc:
         raise ValueError(f"截图数据解析失败：{exc}") from exc
+
+
+def _decode_screenshot(data_url: str) -> torch.Tensor:
+    return _pil_to_tensor(_decode_screenshot_pil(data_url))
+
+
+def _load_screenshot_reference(value: str) -> torch.Tensor:
+    text = str(value or "").strip()
+    if text.lower().startswith("file:"):
+        return _load_path_image(text.split(":", 1)[1])
+    return _decode_screenshot(text)
 
 
 def _resize_lanczos(image: torch.Tensor, width: int, height: int) -> torch.Tensor:
@@ -240,6 +252,24 @@ def _save_temp_pil(image: Image.Image, prefix: str) -> dict[str, Any]:
     }
 
 
+def _save_input_pil(image: Image.Image, prefix: str) -> dict[str, Any]:
+    input_root = Path(folder_paths.get_input_directory()).resolve()
+    subfolder = INPUT_SUBFOLDER
+    target_dir = input_root / subfolder
+    target_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{prefix}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}.png"
+    image = ImageOps.exif_transpose(image).convert("RGB")
+    image.save(target_dir / filename, format="PNG")
+    return {
+        "filename": filename,
+        "subfolder": subfolder,
+        "type": "input",
+        "image_path": f"{subfolder}/{filename}",
+        "width": image.width,
+        "height": image.height,
+    }
+
+
 def _register_preview_api() -> None:
     server = getattr(PromptServer, "instance", None)
     if server is None or getattr(server, "_gjj_panorama_browser_api_registered", False):
@@ -251,6 +281,16 @@ def _register_preview_api() -> None:
             path = _resolve_image_path(request.query.get("path", ""))
             with Image.open(path) as image:
                 item = _save_temp_pil(image, "GJJ_PanoramaBrowser_path")
+            return web.json_response({"ok": True, "image": item})
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+    @server.routes.post("/gjj/panorama_browser/screenshot")
+    async def panorama_screenshot(request):
+        try:
+            payload = await request.json()
+            image = _decode_screenshot_pil(str(payload.get("data") or ""))
+            item = _save_input_pil(image, "GJJ_PanoramaBrowser_screenshot")
             return web.json_response({"ok": True, "image": item})
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
@@ -367,7 +407,7 @@ class GJJ_PanoramaBrowser:
         screenshot = None
         upscaled_screenshot = None
         if screenshot_text:
-            screenshot = _decode_screenshot(screenshot_text)
+            screenshot = _load_screenshot_reference(screenshot_text)
             upscaled_screenshot = _upscale_image(screenshot, bool(enable_upscale), upscale_model_name, int(max_output_edge))
             result_image = upscaled_screenshot
 

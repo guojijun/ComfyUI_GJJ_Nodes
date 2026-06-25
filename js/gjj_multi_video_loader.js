@@ -126,6 +126,22 @@ function parseEnabledOutputs(rawValue) {
 	return normalizeOutputKeys(parseJsonValue(rawValue, []));
 }
 
+function hasExplicitOutputSelection(rawValue) {
+	const text = String(rawValue || "").trim();
+	if (!text) return false;
+	const parsed = parseJsonValue(text, null);
+	if (Array.isArray(parsed)) return true;
+	return !!(
+		parsed
+		&& typeof parsed === "object"
+		&& (
+			parsed.version !== undefined
+			|| Array.isArray(parsed.outputs)
+			|| Array.isArray(parsed.enabled_outputs)
+		)
+	);
+}
+
 function parseEnabledInputs(rawValue) {
 	return normalizeInputKeys(parseJsonValue(rawValue, []));
 }
@@ -263,11 +279,11 @@ function selectedFromNode(node, serializedNode = null) {
 
 function outputsFromNode(node, serializedNode = null) {
 	const propertyValue = String(node?.properties?.[OUTPUTS_PROPERTY] || "");
-	if (parseEnabledOutputs(propertyValue).length > 0) {
+	if (hasExplicitOutputSelection(propertyValue)) {
 		return propertyValue;
 	}
 	const serializedProperty = String(serializedNode?.properties?.[OUTPUTS_PROPERTY] || "");
-	if (parseEnabledOutputs(serializedProperty).length > 0) {
+	if (hasExplicitOutputSelection(serializedProperty)) {
 		return serializedProperty;
 	}
 	const serializedOutputs = outputKeysFromSlots(serializedNode?.outputs);

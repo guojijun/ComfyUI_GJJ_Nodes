@@ -63,6 +63,38 @@ function getWidgetValue(node, name, fallback = "") {
 	return widget(node, name)?.value ?? fallback;
 }
 
+function widgetIndex(node, name) {
+	const item = widget(node, name);
+	return item && Array.isArray(node?.widgets) ? node.widgets.indexOf(item) : -1;
+}
+
+function serializedWidgetValue(node, serializedNode, name) {
+	const index = widgetIndex(node, name);
+	if (Array.isArray(serializedNode?.widgets_values) && index >= 0 && index < serializedNode.widgets_values.length) {
+		return serializedNode.widgets_values[index];
+	}
+	if (serializedNode?.widgets_values && typeof serializedNode.widgets_values === "object") {
+		return serializedNode.widgets_values[name];
+	}
+	return undefined;
+}
+
+function clearSerializedScreenshotData(node, serializedNode) {
+	if (!serializedNode) return;
+	const value = String(serializedWidgetValue(node, serializedNode, "screenshot_data") || "");
+	if (value && !value.startsWith("data:image/")) return;
+	const index = widgetIndex(node, "screenshot_data");
+	if (Array.isArray(serializedNode.widgets_values) && index >= 0 && index < serializedNode.widgets_values.length) {
+		serializedNode.widgets_values[index] = "";
+	}
+	if (serializedNode.widgets_values && typeof serializedNode.widgets_values === "object" && !Array.isArray(serializedNode.widgets_values)) {
+		serializedNode.widgets_values.screenshot_data = "";
+	}
+	if (serializedNode.properties && typeof serializedNode.properties === "object") {
+		delete serializedNode.properties.screenshot_data;
+	}
+}
+
 function imageDataToUrl(data) {
 	if (!data?.filename) return "";
 	const previewFormat = typeof app.getPreviewFormatParam === "function" ? app.getPreviewFormatParam() : "";
@@ -475,6 +507,20 @@ async function uploadChosenFile(node, ui, file) {
 	await ui.renderer.setImageUrl(imageDataToUrl({ filename, type: "input", subfolder: "" }), "已选择");
 }
 
+async function saveScreenshotToInput(node, dataUrl) {
+	const response = await fetch(api.apiURL("/gjj/panorama_browser/screenshot"), {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ data: dataUrl }),
+	});
+	const data = await response.json().catch(() => null);
+	if (!response.ok || !data?.ok || !data?.image?.image_path) {
+		throw new Error(data?.error || `截图保存失败：HTTP ${response.status}`);
+	}
+	setWidgetValue(node, "screenshot_data", `file:${data.image.image_path}`);
+	return data.image;
+}
+
 function outputSlotImages(node, slotIndex) {
 	const output = node?.outputs?.[Number(slotIndex || 0)] || null;
 	return collectImagePayloads(output, output?.widget, output?.value);
@@ -661,9 +707,13 @@ function createPanel(node) {
 		button.classList.toggle("is-on", ui.selectMode);
 		status.textContent = ui.selectMode ? "拖拽框选当前视角截图。" : "已退出框选。";
 	});
-	addButton("📸", () => {
-		setWidgetValue(node, "screenshot_data", ui.renderer.screenshotDataUrl());
-		status.textContent = "已截取当前完整视角，执行后输出放大图。";
+	addButton("📸", async () => {
+		try {
+			const image = await saveScreenshotToInput(node, ui.renderer.screenshotDataUrl());
+			status.textContent = `已保存截图 ${image.width} x ${image.height} 到 input，执行后输出放大图。`;
+		} catch (error) {
+			status.textContent = `截图失败：${error?.message || error}`;
+		}
 	});
 	addButton("⚙️", (button) => {
 		settings.settings.classList.toggle("is-open");
@@ -734,8 +784,13 @@ function createPanel(node) {
 			const width = clamp(Math.abs(x - ui.selectStart.x), 1, rect.width - left);
 			const height = clamp(Math.abs(y - ui.selectStart.y), 1, rect.height - top);
 			if (width > 4 && height > 4) {
-				setWidgetValue(node, "screenshot_data", ui.renderer.screenshotDataUrl({ x: left, y: top, w: width, h: height }));
-				status.textContent = `已框选 ${Math.round(width)} x ${Math.round(height)}，执行后输出放大图。`;
+				saveScreenshotToInput(node, ui.renderer.screenshotDataUrl({ x: left, y: top, w: width, h: height }))
+					.then((image) => {
+						status.textContent = `已保存框选 ${image.width} x ${image.height} 到 input，执行后输出放大图。`;
+					})
+					.catch((error) => {
+						status.textContent = `框选保存失败：${error?.message || error}`;
+					});
 			}
 			selection.style.display = "none";
 			ui.selectStart = null;
@@ -822,6 +877,12 @@ app.registerExtension({
 				updatePanelHeightFromNodeSize(this, ui);
 				refreshNodeSize(this);
 			}, 80);
+			return result;
+		};
+		const originalOnSerialize = nodeType.prototype.onSerialize;
+		nodeType.prototype.onSerialize = function (serializedNode, ...args) {
+			const result = originalOnSerialize?.apply(this, arguments);
+			clearSerializedScreenshotData(this, serializedNode);
 			return result;
 		};
 		const originalOnResize = nodeType.prototype.onResize;
