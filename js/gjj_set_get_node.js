@@ -22,6 +22,11 @@ const LORA_TRIGGER_SOURCE_TYPES = new Set([
 	"GJJ_MultiLoraChainLoader",
 	"GJJ_LoraEffectTester",
 ]);
+const LORA_TRIGGER_TARGET_TYPES = new Set([
+	"GJJ_CLIPPromptEncodePanel",
+	"GJJ_WanVideoTextEncodeCached",
+	"GJJ_TextEncodeQwenImageEditPlus",
+]);
 const TEMPLATE_FIELD_SCHEMA = "gjj_template_set_variables_fields";
 const TEMPLATE_SAVED_TEMPLATE = "gjj_template_set_variables_template";
 const TEMPLATE_PARAMS_SCHEMA = "gjj_template_params_schema";
@@ -38,6 +43,7 @@ const GET_STORAGE_WIDGET = "变量名";
 const GET_SELECTION_SEPARATOR = "\n";
 const SET_NAME_SEPARATOR = ", ";
 const BROADCAST_PROPERTY = "gjj_variable_broadcast_enabled";
+const LORA_TRIGGERS_PROPERTY = "gjj_lora_triggers";
 const BROADCAST_WIDGET = "gjj_variable_broadcast_toggle";
 const GET_STYLE_ID = "gjj-set-get-node-style";
 const SLOT_PREFIX = "value_";
@@ -1587,7 +1593,7 @@ function outputTypeCounts(node) {
 function collectOutputBroadcastEntries(node, graph) {
 	if (!isOutputBroadcastSourceNode(node)) return [];
 	const counts = outputTypeCounts(node);
-	return (node.outputs || []).map((output, index) => {
+	const entries = (node.outputs || []).map((output, index) => {
 		if (!output || output.gjj_hidden_unused) return null;
 		const text = [
 			output?.name,
@@ -1624,6 +1630,21 @@ function collectOutputBroadcastEntries(node, graph) {
 			resolve: () => node?.id == null ? null : [String(node.id), Number(index || 0)],
 		};
 	}).filter(Boolean);
+	const loraTriggers = String(node?.properties?.[LORA_TRIGGERS_PROPERTY] || "").trim();
+	if (LORA_TRIGGER_SOURCE_TYPES.has(nodeType(node)) && loraTriggers) {
+		entries.push({
+			kind: "literal",
+			node,
+			graph,
+			sourceSlot: -1,
+			type: "STRING",
+			role: "",
+			names: broadcastNameCandidates("lora_triggers", "LoRA触发词", "lora trigger", "lora triggers"),
+			literalValue: loraTriggers,
+			resolve: () => null,
+		});
+	}
+	return entries;
 }
 
 function collectSetBroadcastEntries(node, graph) {
@@ -1741,6 +1762,17 @@ function patchBroadcastConsumers(promptResult, graph) {
 			continue;
 		}
 		nodeInfo.inputs = nodeInfo.inputs || {};
+		if (LORA_TRIGGER_TARGET_TYPES.has(nodeType(target))) {
+			const triggerEntry = entries.find((entry) =>
+				entry
+				&& Object.prototype.hasOwnProperty.call(entry, "literalValue")
+				&& entry.node !== target
+				&& broadcastNamesMatch(entry.names, { name: "lora_triggers", type: "STRING" })
+			);
+			if (triggerEntry) {
+				nodeInfo.inputs.lora_triggers = triggerEntry.literalValue;
+			}
+		}
 		for (const input of target.inputs) {
 			if (!input?.name || hasRealInputLink(targetGraph, input) || promptInputHasRealConnection(nodeInfo, input)) {
 				continue;
@@ -1749,12 +1781,16 @@ function patchBroadcastConsumers(promptResult, graph) {
 			if (!entry) {
 				continue;
 			}
+			const promptInputName = promptInputNameForBroadcast(entry, target, input);
+			if (!promptInputName) continue;
+			if (Object.prototype.hasOwnProperty.call(entry, "literalValue")) {
+				nodeInfo.inputs[promptInputName] = entry.literalValue;
+				continue;
+			}
 			const resolved = resolveVirtualPromptInput(graph, entry.resolve());
 			if (!Array.isArray(resolved) || resolved.length !== 2 || String(resolved[0]) === String(target.id)) {
 				continue;
 			}
-			const promptInputName = promptInputNameForBroadcast(entry, target, input);
-			if (!promptInputName) continue;
 			nodeInfo.inputs[promptInputName] = [String(resolved[0]), Number(resolved[1] || 0)];
 		}
 	}

@@ -36,6 +36,7 @@ const MODEL_TREE_ICON_BY_KIND = {
 	wan_vae: "🔴",
 	clip_vision: "🔵",
 	audio_encoder: "🔵",
+	asr: "🔵",
 	loras: "🟠",
 	wan_lora: "🟠",
 	latent_upscale_model: "🟤",
@@ -68,6 +69,7 @@ const MODEL_TREE_FOLDER_BY_KIND = {
 	wan_vae: "vae",
 	clip_vision: "clip_vision",
 	audio_encoder: "audio_encoders",
+	asr: "ASR",
 	loras: "loras",
 	wan_lora: "loras",
 	latent_upscale_model: "latent_upscale_models",
@@ -92,6 +94,9 @@ const MODEL_TREE_FILE_EXTENSIONS = new Set([
 	".yaml",
 	".yml",
 	".spm",
+	".mvn",
+	".model",
+	".vocab",
 ]);
 const META_BY_CLASS = new Map();
 const FULLY_BYPASS_CLASSES = new Set([

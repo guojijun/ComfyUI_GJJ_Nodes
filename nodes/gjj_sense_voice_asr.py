@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import sys
 import time
+import types
 from typing import Any
 
 import folder_paths
@@ -38,6 +41,44 @@ PRECISION_OPTIONS = ["自动", "float16", "float32", "int8"]
 
 _DEPS = {}
 NODE_DISPLAY_NAME = "🎤 语音识别 (SenseVoice)"
+
+
+def _install_editdistance_fallback() -> None:
+    try:
+        import editdistance  # noqa: F401
+
+        return
+    except ModuleNotFoundError:
+        pass
+
+    def _levenshtein_eval(source: Any, target: Any) -> int:
+        source_seq = list(source)
+        target_seq = list(target)
+        if len(source_seq) < len(target_seq):
+            source_seq, target_seq = target_seq, source_seq
+
+        previous = list(range(len(target_seq) + 1))
+        for i, source_item in enumerate(source_seq, 1):
+            current = [i]
+            for j, target_item in enumerate(target_seq, 1):
+                current.append(
+                    min(
+                        previous[j] + 1,
+                        current[j - 1] + 1,
+                        previous[j - 1] + (source_item != target_item),
+                    )
+                )
+            previous = current
+        return previous[-1]
+
+    fallback = types.ModuleType("editdistance")
+    fallback.__version__ = "fallback"
+    fallback.eval = _levenshtein_eval
+    sys.modules["editdistance"] = fallback
+
+
+_install_editdistance_fallback()
+
 DEPENDENCY_SPECS = [
     {
         "module_name": "funasr",
@@ -46,10 +87,148 @@ DEPENDENCY_SPECS = [
         "description": "SenseVoice 运行时需要 funasr 加载和执行语音识别模型。",
     },
     {
+        "module_name": "funasr_onnx",
+        "package_name": "funasr-onnx",
+        "display_name": "funasr-onnx",
+        "description": "本地 SenseVoice-small-nonx 模型为 ONNX 格式时，需要 funasr-onnx 执行推理。",
+    },
+    {
+        "module_name": "kaldi_native_fbank",
+        "package_name": "kaldi-native-fbank",
+        "display_name": "kaldi-native-fbank",
+        "description": "funasr-onnx 需要 kaldi-native-fbank 提取音频特征。",
+    },
+    {
         "module_name": "soundfile",
         "package_name": "soundfile",
         "display_name": "soundfile",
         "description": "SenseVoice 需要 soundfile 读取示例音频文件。",
+    },
+    {
+        "module_name": "kaldiio",
+        "package_name": "kaldiio",
+        "display_name": "kaldiio",
+        "description": "funasr/SenseVoice 运行时会用 kaldiio 读取 Kaldi 格式特征和音频数据。",
+    },
+    {
+        "module_name": "pdm.backend",
+        "package_name": "pdm-backend",
+        "display_name": "pdm-backend",
+        "description": "安装 funasr 部分依赖时需要的 Python 构建后端；缺失时 pip 会报 Cannot import 'pdm.backend'。",
+    },
+    {
+        "module_name": "jaconv",
+        "package_name": "jaconv",
+        "display_name": "jaconv",
+        "description": "funasr 日文文本处理依赖。",
+    },
+    {
+        "module_name": "jamo",
+        "package_name": "jamo",
+        "display_name": "jamo",
+        "description": "funasr 韩文文本处理依赖。",
+    },
+    {
+        "module_name": "jieba",
+        "package_name": "jieba",
+        "display_name": "jieba",
+        "description": "funasr 中文分词依赖。",
+    },
+    {
+        "module_name": "oss2",
+        "package_name": "oss2",
+        "display_name": "oss2",
+        "description": "funasr 模型与资源访问依赖。",
+    },
+    {
+        "module_name": "tensorboardX",
+        "package_name": "tensorboardX",
+        "display_name": "tensorboardX",
+        "description": "funasr 运行依赖。",
+    },
+    {
+        "module_name": "torch_complex",
+        "package_name": "torch_complex",
+        "display_name": "torch_complex",
+        "description": "funasr 音频特征处理依赖。",
+    },
+    {
+        "module_name": "umap",
+        "package_name": "umap-learn",
+        "display_name": "umap-learn",
+        "description": "funasr 运行依赖，导入模块名为 umap。",
+    },
+]
+SENSEVOICE_EXTRA_PACKAGES = [
+    "kaldiio",
+    "funasr-onnx",
+    "kaldi-native-fbank",
+    "soundfile",
+    "huggingface_hub",
+    "pdm-backend",
+    "jaconv",
+    "jamo",
+    "jieba",
+    "oss2",
+    "tensorboardX",
+    "torch_complex",
+    "umap-learn",
+]
+MODEL_TREE = [
+    {
+        "label": "SenseVoice 配置",
+        "path": f"models/{MODEL_ROOT_NAME}/{MODEL_NAME}",
+        "folder": f"{MODEL_ROOT_NAME}/{MODEL_NAME}",
+        "subdir": f"{MODEL_ROOT_NAME}/{MODEL_NAME}",
+        "filename": "config.yaml",
+        "value": "config.yaml",
+        "kind": "audio_encoder",
+        "required": True,
+        "description": "SenseVoice ONNX 模型配置文件。",
+    },
+    {
+        "label": "SenseVoice ONNX 权重",
+        "path": f"models/{MODEL_ROOT_NAME}/{MODEL_NAME}",
+        "folder": f"{MODEL_ROOT_NAME}/{MODEL_NAME}",
+        "subdir": f"{MODEL_ROOT_NAME}/{MODEL_NAME}",
+        "filename": "model_quant.onnx",
+        "value": "model_quant.onnx",
+        "kind": "audio_encoder",
+        "required": True,
+        "description": "SenseVoice-small-nonx 量化 ONNX 权重；节点会优先使用该文件执行推理。",
+    },
+    {
+        "label": "SenseVoice CMVN",
+        "path": f"models/{MODEL_ROOT_NAME}/{MODEL_NAME}",
+        "folder": f"{MODEL_ROOT_NAME}/{MODEL_NAME}",
+        "subdir": f"{MODEL_ROOT_NAME}/{MODEL_NAME}",
+        "filename": "am.mvn",
+        "value": "am.mvn",
+        "kind": "audio_encoder",
+        "required": True,
+        "description": "音频前端归一化参数文件。",
+    },
+    {
+        "label": "SenseVoice BPE 模型",
+        "path": f"models/{MODEL_ROOT_NAME}/{MODEL_NAME}",
+        "folder": f"{MODEL_ROOT_NAME}/{MODEL_NAME}",
+        "subdir": f"{MODEL_ROOT_NAME}/{MODEL_NAME}",
+        "filename": "chn_jpn_yue_eng_ko_spectok.bpe.model",
+        "value": "chn_jpn_yue_eng_ko_spectok.bpe.model",
+        "kind": "audio_encoder",
+        "required": True,
+        "description": "多语言 SentencePiece/BPE 分词模型。",
+    },
+    {
+        "label": "SenseVoice 词表",
+        "path": f"models/{MODEL_ROOT_NAME}/{MODEL_NAME}",
+        "folder": f"{MODEL_ROOT_NAME}/{MODEL_NAME}",
+        "subdir": f"{MODEL_ROOT_NAME}/{MODEL_NAME}",
+        "filename": "tokenizer.vocab",
+        "value": "tokenizer.vocab",
+        "kind": "audio_encoder",
+        "required": True,
+        "description": "SenseVoice tokenizer 词表文件。",
     },
 ]
 REQUIRED_MODEL = make_missing_model_spec(
@@ -75,9 +254,22 @@ def _resolve_local_model_dir(model_name: str = MODEL_NAME) -> str:
 
 def _collect_model_state() -> tuple[bool, list[dict[str, str]]]:
     model_dir = _resolve_local_model_dir()
-    if os.path.isdir(model_dir):
-        return True, []
-    return False, [REQUIRED_MODEL]
+    if not os.path.isdir(model_dir):
+        return False, [REQUIRED_MODEL]
+
+    missing_files = []
+    for item in MODEL_TREE:
+        filename = item.get("filename", "")
+        if item.get("required", True) and filename and not os.path.exists(os.path.join(model_dir, filename)):
+            missing_files.append(
+                make_missing_model_spec(
+                    label=item.get("label", filename),
+                    subdir=f"{MODEL_ROOT_NAME}/{MODEL_NAME}",
+                    filename=filename,
+                    description=item.get("description", ""),
+                )
+            )
+    return (not missing_files), missing_files
 
 
 _DEPENDENCIES_AVAILABLE, _MISSING_DEPENDENCIES = _collect_dependency_state()
@@ -127,7 +319,15 @@ def _load_sense_voice_runtime(unique_id: Any = None) -> dict[str, Any]:
         node_name=NODE_DISPLAY_NAME,
         package_name="funasr",
         description="SenseVoice 运行时需要 funasr。",
-        extra_packages=["soundfile", "huggingface_hub"],
+        extra_packages=SENSEVOICE_EXTRA_PACKAGES,
+        unique_id=unique_id,
+    )
+    load_dependency_at_runtime(
+        module_name="kaldiio",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="kaldiio",
+        description="SenseVoice 运行时需要 kaldiio。",
+        extra_packages=["funasr", *SENSEVOICE_EXTRA_PACKAGES],
         unique_id=unique_id,
     )
     load_dependency_at_runtime(
@@ -135,7 +335,7 @@ def _load_sense_voice_runtime(unique_id: Any = None) -> dict[str, Any]:
         node_name=NODE_DISPLAY_NAME,
         package_name="soundfile",
         description="SenseVoice 读取示例音频需要 soundfile。",
-        extra_packages=["funasr"],
+        extra_packages=["funasr", *SENSEVOICE_EXTRA_PACKAGES],
         unique_id=unique_id,
     )
 
@@ -283,12 +483,40 @@ def _audio_to_numpy(audio: Any) -> tuple[np.ndarray, int]:
         if waveform.ndim == 3:
             waveform = waveform.squeeze(0)
 
+        if waveform.ndim == 2 and waveform.shape[0] == 1:
+            waveform = waveform[0]
+        elif waveform.ndim == 2 and waveform.shape[1] == 1:
+            waveform = waveform[:, 0]
+
         if waveform.ndim == 2 and waveform.shape[0] > 1:
             waveform = np.mean(waveform, axis=0)
 
         return waveform, int(sample_rate)
     else:
         raise ValueError("不支持的音频格式")
+
+
+def _has_onnx_sensevoice_model(model_dir: str) -> bool:
+    return os.path.exists(os.path.join(model_dir, "model_quant.onnx")) or os.path.exists(
+        os.path.join(model_dir, "model.onnx")
+    )
+
+
+def _language_to_onnx(language: str) -> str:
+    return {
+        "自动": "auto",
+        "中文": "zh",
+        "英文": "en",
+        "日文": "ja",
+        "韩文": "ko",
+        "粤语": "yue",
+    }.get(language, "auto")
+
+
+def _clean_sensevoice_text(text: Any) -> str:
+    cleaned = str(text or "").strip()
+    cleaned = re.sub(r"<\|[^|]+?\|>", "", cleaned)
+    return cleaned.strip()
 
 
 class GJJ_SenseVoiceASR:
@@ -309,11 +537,22 @@ class GJJ_SenseVoiceASR:
         "model_download_url": MODEL_DOWNLOAD_URL,
         "missing_dependencies": _MISSING_DEPENDENCIES,
         "missing_models": _MISSING_MODELS,
+        "model_tree": MODEL_TREE,
+        "models_tree": MODEL_TREE,
+        "static_model_tree_only": True,
+        "model_tree_priority": "static",
         "models": [REQUIRED_MODEL],
         "dependencies": [
             "funasr（SenseVoice 主运行库）",
+            "funasr-onnx（运行 SenseVoice-small-nonx 的 ONNX 模型）",
+            "kaldi-native-fbank（ONNX 模型音频特征提取依赖）",
+            "kaldiio（funasr 运行时音频/特征读取依赖）",
             "soundfile（读取示例音频）",
+            "pdm-backend（pip 安装部分依赖时需要的构建后端）",
             "huggingface_hub（模型自动下载时按需使用）",
+            "editdistance（节点内置兼容实现，避免 Python 3.13 环境编译失败）",
+            "jaconv / jamo / jieba（funasr 文本处理依赖）",
+            "oss2 / tensorboardX / torch_complex / umap-learn（funasr 运行依赖）",
         ],
         "tips": [
             "推荐优先把模型放到 models/ASR/SenseVoice-small-nonx/，避免首次执行时在线下载失败。",
@@ -466,11 +705,29 @@ class GJJ_SenseVoiceASR:
 
             # 步骤 6: 加载模型
             try:
-                deps = _load_sense_voice_runtime(unique_id)
-                AutoModel = deps["AutoModel"]
-                model = AutoModel(
-                    model=model_path, device=target_device, disable_update=True
-                )
+                if _has_onnx_sensevoice_model(model_path):
+                    funasr_onnx = load_dependency_at_runtime(
+                        module_name="funasr_onnx",
+                        node_name=NODE_DISPLAY_NAME,
+                        package_name="funasr-onnx",
+                        description="ONNX 格式 SenseVoice 模型需要 funasr-onnx。",
+                        extra_packages=["kaldi-native-fbank"],
+                        unique_id=unique_id,
+                    )
+                    quantize = os.path.exists(os.path.join(model_path, "model_quant.onnx"))
+                    device_id = 0 if target_device == "cuda" else "-1"
+                    model = funasr_onnx.SenseVoiceSmall(
+                        model_path,
+                        batch_size=1,
+                        device_id=device_id,
+                        quantize=quantize,
+                    )
+                else:
+                    deps = _load_sense_voice_runtime(unique_id)
+                    AutoModel = deps["AutoModel"]
+                    model = AutoModel(
+                        model=model_path, device=target_device, disable_update=True
+                    )
             except Exception as exc:
                 error_msg = str(exc)
 
@@ -491,16 +748,41 @@ class GJJ_SenseVoiceASR:
 
                     target_device = "cpu"
                     target_precision = "int8"
-                    model = AutoModel(
-                        model=model_path, device=target_device, disable_update=True
-                    )
+                    if _has_onnx_sensevoice_model(model_path):
+                        funasr_onnx = load_dependency_at_runtime(
+                            module_name="funasr_onnx",
+                            node_name=NODE_DISPLAY_NAME,
+                            package_name="funasr-onnx",
+                            description="ONNX 格式 SenseVoice 模型需要 funasr-onnx。",
+                            extra_packages=["kaldi-native-fbank"],
+                            unique_id=unique_id,
+                        )
+                        quantize = os.path.exists(os.path.join(model_path, "model_quant.onnx"))
+                        model = funasr_onnx.SenseVoiceSmall(
+                            model_path,
+                            batch_size=1,
+                            device_id="-1",
+                            quantize=quantize,
+                        )
+                    else:
+                        model = AutoModel(
+                            model=model_path, device=target_device, disable_update=True
+                        )
                 else:
                     raise
 
             # 步骤 7: 执行识别
             _send_status(unique_id, "正在执行语音识别...", 0.5)
 
-            result = model.generate(input=waveform_np, cache={})
+            if _has_onnx_sensevoice_model(model_path):
+                onnx_result = model(
+                    waveform_np.astype(np.float32),
+                    language=_language_to_onnx(language),
+                    textnorm="withitn",
+                )
+                result = [{"text": text} for text in onnx_result]
+            else:
+                result = model.generate(input=waveform_np, cache={})
 
             # 步骤 8: 处理结果
             _send_status(unique_id, "正在处理识别结果...", 0.8)
@@ -513,7 +795,7 @@ class GJJ_SenseVoiceASR:
             # 解析结果
             if result and len(result) > 0:
                 for res in result:
-                    text = res.get("text", "").strip()
+                    text = _clean_sensevoice_text(res.get("text", ""))
                     if text:
                         text_parts.append(text)
                         timestamps.append(

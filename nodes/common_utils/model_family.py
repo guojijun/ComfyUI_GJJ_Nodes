@@ -827,6 +827,7 @@ def gjjutils_match_model_family_preset(
 
 # CLIP 类型关键词映射
 CLIP_TYPE_KEYWORDS = [
+    (("krea2", "krea-2", "krea2_turbo", "krea2-turbo"), "krea2"),
     (("boogu", "boogu_image", "boogu-image"), "boogu"),
     (("flux2", "klein"), "flux2"),
     (("wan", "wan2.1", "wan2.2"), "wan"),

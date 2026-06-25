@@ -648,7 +648,8 @@ class GJJ_TextEncodeQwenImageEditPlus:
                     "lora_triggers": (
                         "STRING",
                         {
-                            "forceInput": True,
+                            "default": "",
+                            "forceInput": False,
                             "display": "hidden",
                             "hidden": True,
                             "display_name": "LoRA触发词",

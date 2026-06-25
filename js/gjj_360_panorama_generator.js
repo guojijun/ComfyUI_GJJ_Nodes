@@ -8,6 +8,7 @@ const OUTPUT_MODE_PROPERTY = "gjj_360_panorama_output_current_view_v1";
 const SAVE_DIRECTORY_PROPERTY = "gjj_360_panorama_save_directory_v1";
 const EXECUTE_WIDGET = "__gjj_360_panorama_execute";
 const PREVIEW_WIDGET = "__gjj_360_panorama_preview";
+const CURRENT_VIEW_SUBFOLDER = "gjj_360_panorama_views";
 let ACTIVE_360_NODE_ID = "";
 const ALWAYS_VISIBLE_WIDGETS = new Set(["positive_prompt"]);
 const HIDDEN_CONTROL_WIDGETS = new Set(["output_current_view", "current_view_data", "save_directory"]);
@@ -147,6 +148,71 @@ function setWidgetValueQuiet(node, name, value) {
 	const index = node.widgets?.indexOf(widget) ?? -1;
 	if (Array.isArray(node.widgets_values) && index >= 0) node.widgets_values[index] = value;
 	return true;
+}
+
+function uploadUrl(path) {
+	try {
+		if (api?.apiURL) return api.apiURL(path);
+	} catch (_) {}
+	return path;
+}
+
+function normalizeUploadItem(data, fallbackName) {
+	const filename = String(data?.name || data?.filename || data?.file || fallbackName || "").trim();
+	const subfolder = String(data?.subfolder || CURRENT_VIEW_SUBFOLDER).trim();
+	return { filename, subfolder, type: "input" };
+}
+
+function dataUrlToFile(dataUrl, filename) {
+	const [header, payload = ""] = String(dataUrl || "").split(",", 2);
+	const mime = /^data:([^;]+);/i.exec(header)?.[1] || "image/png";
+	const binary = atob(payload);
+	const bytes = new Uint8Array(binary.length);
+	for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+	return new File([bytes], filename, { type: mime });
+}
+
+async function uploadCurrentViewDataUrl(dataUrl) {
+	const filename = `current_view_${Date.now()}_${Math.random().toString(16).slice(2, 10)}.png`;
+	const file = dataUrlToFile(dataUrl, filename);
+	const endpoints = ["/upload/image", "/api/upload/image"];
+	let lastError = null;
+
+	for (const endpoint of endpoints) {
+		const form = new FormData();
+		form.append("image", file, file.name);
+		form.append("type", "input");
+		form.append("subfolder", CURRENT_VIEW_SUBFOLDER);
+		form.append("overwrite", "true");
+		try {
+			const response = await fetch(uploadUrl(endpoint), { method: "POST", body: form });
+			if (!response.ok) {
+				lastError = new Error(`HTTP ${response.status}`);
+				continue;
+			}
+			const data = await response.json().catch(() => ({}));
+			return JSON.stringify({ kind: "input_image", ...normalizeUploadItem(data, file.name) });
+		} catch (error) {
+			lastError = error;
+		}
+	}
+	throw lastError || new Error("当前视窗上传失败");
+}
+
+async function captureCurrentViewData(node) {
+	const dataUrl = node.__gjj360Viewer?.screenshotDataUrl?.() || "";
+	if (!dataUrl) return currentViewStateData(node);
+	try {
+		return await uploadCurrentViewDataUrl(dataUrl);
+	} catch (error) {
+		console.warn("[GJJ_360PanoramaGenerator] current view upload failed, using view state", error);
+		return currentViewStateData(node);
+	}
+}
+
+function currentViewStateData(node) {
+	const state = node.__gjj360Viewer?.viewState?.();
+	return state ? JSON.stringify({ kind: "view_state", ...state }) : "";
 }
 
 function repairNegativePromptInsertedWidgetValues(node) {
@@ -384,17 +450,18 @@ function createButtonBar(node) {
 		for (const name of HIDDEN_CONTROL_WIDGETS) ensureHiddenControlWidget(node, name);
 		setWidgetValue(node, "output_current_view", outputCurrentView);
 		setWidgetValue(node, "save_directory", String(node?.properties?.[SAVE_DIRECTORY_PROPERTY] || "").trim());
-		if (outputCurrentView) {
-			setWidgetValue(node, "current_view_data", node.__gjj360Viewer?.screenshotDataUrl?.() || "");
-		} else {
-			setWidgetValue(node, "current_view_data", "");
-		}
 		resetPreview(node);
 		if (node.__gjj360Status) node.__gjj360Status.textContent = `0% · 本次输出：${outputCurrentView ? "当前视窗" : "完整全景"}，准备提交...`;
 		const old = run.textContent;
 		run.textContent = "执行中...";
 		run.disabled = true;
 		try {
+			if (outputCurrentView) {
+				if (node.__gjj360Status) node.__gjj360Status.textContent = "0% · 正在保存当前视窗到 input...";
+				setWidgetValue(node, "current_view_data", await captureCurrentViewData(node));
+			} else {
+				setWidgetValue(node, "current_view_data", "");
+			}
 			const ok = await queueOnlyCurrentNode(node);
 			run.textContent = ok ? "已提交" : "提交失败";
 		} catch (error) {
@@ -411,14 +478,24 @@ function createButtonBar(node) {
 		protect(event);
 		setSettingsOpen(node, !settingsOpen(node));
 	});
-	camera.addEventListener("click", (event) => {
+	camera.addEventListener("click", async (event) => {
 		protect(event);
 		node.properties ||= {};
 		const next = !Boolean(node.properties[OUTPUT_MODE_PROPERTY]);
 		node.properties[OUTPUT_MODE_PROPERTY] = next;
 		for (const name of HIDDEN_CONTROL_WIDGETS) ensureHiddenControlWidget(node, name);
 		setWidgetValue(node, "output_current_view", next);
-		setWidgetValue(node, "current_view_data", next ? (node.__gjj360Viewer?.screenshotDataUrl?.() || "") : "");
+		if (next) {
+			if (node.__gjj360Status) node.__gjj360Status.textContent = "正在保存当前视窗到 input...";
+			try {
+				setWidgetValue(node, "current_view_data", await captureCurrentViewData(node));
+			} catch (error) {
+				console.error("[GJJ_360PanoramaGenerator] current view upload failed", error);
+				setWidgetValue(node, "current_view_data", "");
+			}
+		} else {
+			setWidgetValue(node, "current_view_data", "");
+		}
 		updateCameraButton(node);
 		if (node.__gjj360Status) {
 			node.__gjj360Status.textContent = next
@@ -615,7 +692,7 @@ function createPanoramaRenderer(canvas, status, node) {
 		state.syncTimer = window.setTimeout(() => {
 			for (const name of HIDDEN_CONTROL_WIDGETS) ensureHiddenControlWidget(node, name);
 			setWidgetValue(node, "output_current_view", true);
-			setWidgetValue(node, "current_view_data", screenshotDataUrl());
+			setWidgetValue(node, "current_view_data", currentViewStateData(node));
 		}, 120);
 	}
 	let dragging = false;

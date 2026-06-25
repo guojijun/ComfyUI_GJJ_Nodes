@@ -14,6 +14,7 @@ const GLOBAL_SEARCH_PROPERTY = "gjj_lora_global_search";
 const GROUP_RULES_PROPERTY = "gjj_lora_group_rules";
 const ADVANCED_OPEN_PROPERTY = "gjj_lora_advanced_open";
 const CLIP_PORTS_OPEN_PROPERTY = "gjj_lora_clip_ports_open";
+const LORA_TRIGGERS_PROPERTY = "gjj_lora_triggers";
 const BROADCAST_PROPERTY = "gjj_variable_broadcast_enabled";
 const BROADCAST_USER_SET_PROPERTY = "gjj_variable_broadcast_user_set";
 const MODEL_OUTPUT_NAME = "叠加模型输出";
@@ -463,11 +464,12 @@ function ensureLoaderOutputs(node) {
 
 function ensureConfigOutputs(node) {
 	if (!isConfigNode(node)) return;
-	const triggerText = buildSelectedLoraTriggerText(ensureNodeState(node));
 	ensureOutputAt(node, 0, CONFIG_OUTPUT_NAME, "LORA_CHAIN_CONFIG", "由前端动态界面维护的 LoRA 串联配置，可直接接到支持该输入的节点。");
-	ensureOutputAt(node, 1, TRIGGER_OUTPUT_NAME, "STRING", "当前启用 LoRA 的触发词；变量广播会自动添加到支持的正向提示词节点。");
 	setOutputVisible(node.outputs?.[0], true);
-	hideTriggerOutput(node, 1);
+	if (node.outputs?.length > 1) {
+		try { node.disconnectOutput?.(1); } catch (_) {}
+		node.outputs.splice(1);
+	}
 }
 
 function clipPortsHaveLinks(node) {
@@ -604,9 +606,11 @@ function updateDataWidget(node) {
 
 	const state = ensureNodeState(node);
 	const serialized = serializeRows(state.rows);
+	node.properties = node.properties || {};
 	dataWidget.value = serialized;
 	dataWidget.callback?.(serialized);
 	node.properties[DATA_WIDGET_NAME] = serialized;
+	node.properties[LORA_TRIGGERS_PROPERTY] = buildSelectedLoraTriggerText(state);
 	const widgetIndex = Array.isArray(node.widgets) ? node.widgets.indexOf(dataWidget) : -1;
 	if (widgetIndex >= 0) {
 		node.widgets_values = Array.isArray(node.widgets_values) ? node.widgets_values : [];
@@ -1806,6 +1810,7 @@ function setupUi(node) {
 		if (isConfigNode(this)) {
 			serializedNode.properties[BROADCAST_PROPERTY] = broadcastEnabled(this);
 			serializedNode.properties[BROADCAST_USER_SET_PROPERTY] = this.properties?.[BROADCAST_USER_SET_PROPERTY] === true;
+			serializedNode.properties[LORA_TRIGGERS_PROPERTY] = buildSelectedLoraTriggerText(ensureNodeState(this));
 		}
 		if (isLoaderNode(this)) {
 			serializedNode.properties[CLIP_PORTS_OPEN_PROPERTY] = Boolean(ensureNodeState(this).clipPortsOpen);
@@ -1844,14 +1849,12 @@ app.registerExtension({
 			];
 		}
 		if (nodeData?.name === CONFIG_NODE_NAME) {
-			nodeData.output = ["LORA_CHAIN_CONFIG", "STRING"];
+			nodeData.output = ["LORA_CHAIN_CONFIG"];
 			nodeData.output_name = [
 				CONFIG_OUTPUT_NAME,
-				TRIGGER_OUTPUT_NAME,
 			];
 			nodeData.output_tooltips = [
 				"由前端动态界面维护的 LoRA 串联配置，可直接接到支持该输入的节点。",
-				"当前启用 LoRA 的触发词；变量广播会自动添加到支持的正向提示词节点。",
 			];
 		}
 
@@ -1874,6 +1877,7 @@ app.registerExtension({
 				state.groupRulesText = String(this.properties?.[GROUP_RULES_PROPERTY] || DEFAULT_GROUP_RULES);
 				state.advancedOpen = Boolean(this.properties?.[ADVANCED_OPEN_PROPERTY]);
 				state.clipPortsOpen = normalizeBoolean(this.properties?.[CLIP_PORTS_OPEN_PROPERTY]);
+				this.properties[LORA_TRIGGERS_PROPERTY] = buildSelectedLoraTriggerText(state);
 				if (clipPortsHaveLinks(this)) {
 					state.clipPortsOpen = true;
 					this.properties[CLIP_PORTS_OPEN_PROPERTY] = true;

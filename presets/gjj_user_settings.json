@@ -5,7 +5,7 @@
     "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.jpg",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
-    "search_text": "风格",
+    "search_text": "人景融合",
     "page_size": 10,
     "image_format": "jpg",
     "jpeg_quality": 0.86
@@ -195,8 +195,8 @@
   },
   "execution_timer": {
     "position": {
-      "left": 1878,
-      "top": 642.25
+      "left": 1834.4444580078125,
+      "top": 537.3472290039062
     }
   },
   "workflow_screenshot_toolbar": {

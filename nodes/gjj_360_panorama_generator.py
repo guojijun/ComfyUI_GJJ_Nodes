@@ -178,6 +178,48 @@ def _decode_data_url_image(data_url: str) -> torch.Tensor | None:
     return torch.from_numpy(array).unsqueeze(0).contiguous()
 
 
+def _load_input_image_reference(data: dict[str, Any]) -> torch.Tensor | None:
+    filename = str(data.get("filename") or data.get("name") or data.get("file") or "").strip()
+    if not filename:
+        return None
+    subfolder = str(data.get("subfolder") or "").strip().strip("/\\")
+    image_type = str(data.get("type") or "input").strip().lower()
+    if image_type and image_type != "input":
+        return None
+
+    input_root = Path(folder_paths.get_input_directory()).resolve()
+    candidate = (input_root / subfolder / filename).resolve() if subfolder else (input_root / filename).resolve()
+    try:
+        candidate.relative_to(input_root)
+    except ValueError:
+        return None
+    if not candidate.is_file():
+        annotated = f"{subfolder}/{filename}" if subfolder else filename
+        if folder_paths.exists_annotated_filepath(annotated):
+            candidate = Path(folder_paths.get_annotated_filepath(annotated)).resolve()
+        else:
+            return None
+    with Image.open(candidate) as image:
+        image = image.convert("RGB")
+        array = np.asarray(image).astype(np.float32) / 255.0
+    return torch.from_numpy(array).unsqueeze(0).contiguous()
+
+
+def _decode_current_view_image(view_data: str) -> torch.Tensor | None:
+    text = str(view_data or "").strip()
+    if not text:
+        return None
+    if text.lower().startswith("data:image/"):
+        return _decode_data_url_image(text)
+    try:
+        data = json.loads(text)
+    except Exception:
+        return None
+    if isinstance(data, dict):
+        return _load_input_image_reference(data)
+    return None
+
+
 def _render_view_from_panorama(panorama: torch.Tensor, view_data: str) -> torch.Tensor | None:
     text = str(view_data or "").strip()
     if not text or text.lower().startswith("data:image/"):
@@ -702,7 +744,9 @@ class GJJ_360PanoramaGenerator:
         output_label = "全景图"
         if output_current_view:
             try:
-                current_view = _decode_data_url_image(current_view_data)
+                current_view = _decode_current_view_image(current_view_data)
+                if current_view is None:
+                    current_view = _render_view_from_panorama(final, current_view_data)
                 if current_view is not None:
                     output = current_view
                     output_label = "当前视窗"

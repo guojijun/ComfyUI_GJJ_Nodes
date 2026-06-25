@@ -350,6 +350,11 @@ def _clip_type_enum(name: str):
     normalized = _normalize_text(name)
     enum_name = str(name or "").upper()
     clip_type = getattr(comfy.sd.CLIPType, enum_name, None)
+    if clip_type is None and normalized in {"krea", "krea2", "krea2_turbo"}:
+        raise RuntimeError(
+            "当前 ComfyUI 缺少原生 KREA2 CLIP 类型，无法加载 krea2_turbo 的 Qwen3VL 文本编码器。"
+            "请更新到包含 CLIPType.KREA2 / Krea2 文本编码支持的 ComfyUI 版本后再使用。"
+        )
     if clip_type is None and normalized == "boogu":
         raise RuntimeError(
             "当前 ComfyUI 缺少原生 BOOGU CLIP 类型，无法加载 Boogu-Image 的 Qwen3VL 文本编码器。"
@@ -1322,7 +1327,7 @@ class GJJ_LazyImageStudio:
     @classmethod
     def INPUT_TYPES(cls):
         _raw_diffusion_models = _list_lazy_unet_models() or [DEFAULT_UNET_NAME]
-        _diffusion_keywords = ["flux", "f2k", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "gguf"]
+        _diffusion_keywords = ["flux", "f2k", "krea", "krea2", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "gguf"]
         _filtered = [
             m
             for m in _raw_diffusion_models

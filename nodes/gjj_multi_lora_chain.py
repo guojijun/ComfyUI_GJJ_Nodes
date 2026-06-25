@@ -746,11 +746,10 @@ class GJJ_LoraChainConfig:
 - 当前行命中互斥组后，下拉框会优先只显示该组内 LoRA，便于快速替换同类 LoRA。
 """
     SEARCH_ALIASES = ["lora config", "串联配置", "lora 串联", "多lora配置"]
-    RETURN_TYPES = ("LORA_CHAIN_CONFIG", "STRING")
-    RETURN_NAMES = ("LoRA串联配置", "LoRA触发词")
+    RETURN_TYPES = ("LORA_CHAIN_CONFIG",)
+    RETURN_NAMES = ("LoRA串联配置",)
     OUTPUT_TOOLTIPS = (
         "由前端动态界面维护的 LoRA 串联配置，可直接接到支持该输入的节点。",
-        "当前启用 LoRA 的触发词，按串联顺序用英文逗号拼接，可接入提示词拼接节点。",
     )
 
     @classmethod
@@ -763,8 +762,7 @@ class GJJ_LoraChainConfig:
 
     def build_config(self, lora_data="[]"):
         normalized = normalize_lora_chain_data(lora_data)
-        trigger_text = build_lora_trigger_text(normalized)
-        return (normalized, trigger_text)
+        return (normalized,)
 
 
 NODE_CLASS_MAPPINGS = {
