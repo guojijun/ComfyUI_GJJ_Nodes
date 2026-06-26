@@ -2,20 +2,17 @@ from __future__ import annotations
 
 import json
 import math
-import uuid
-from pathlib import Path
 from typing import Any
 
 import torch
 from PIL import Image, ImageChops, ImageColor, ImageFilter
-
-import folder_paths
 
 from .common_utils.dependency_checker import (
     build_dependency_model_report,
     make_missing_model_spec,
     raise_dependency_model_error,
 )
+from .common_utils.temp_files import gjjutils_write_temp_pil_image
 from .gjj_comprehensive_matting import (
     METHOD_RMBG14,
     MODEL_DOWNLOAD_URL,
@@ -34,7 +31,6 @@ MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
 BASE_DESCRIPTION = (
     "使用 RMBG1.4 自动抠出全部前景，并把每个可独立调整位置和大小的对象叠加到同一张背景上，最终只输出一张合成图。"
 )
-PREVIEW_SUBFOLDER = "GJJ/remove_bg_stitch"
 
 
 def _rmbg14_model_spec() -> dict[str, str]:
@@ -314,20 +310,7 @@ def _paste_mask_clipped(mask_canvas: Image.Image, mask: Image.Image, left: int, 
 
 
 def _save_temp_image(image: Image.Image, prefix: str, suffix: str = ".png") -> dict[str, Any]:
-    target_dir = Path(folder_paths.get_temp_directory()) / PREVIEW_SUBFOLDER
-    target_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{prefix}_{uuid.uuid4().hex[:12]}{suffix}"
-    path = target_dir / filename
-    image.save(path, format="PNG")
-    return {
-        "filename": filename,
-        "subfolder": PREVIEW_SUBFOLDER,
-        "type": "temp",
-        "format": "image/png",
-        "media_type": "image",
-        "width": int(image.width),
-        "height": int(image.height),
-    }
+    return gjjutils_write_temp_pil_image(image, format="PNG", suffix=suffix)
 
 
 def _apply_opacity(layer: Image.Image, opacity: float) -> Image.Image:

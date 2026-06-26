@@ -15,11 +15,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
 
-try:
-    from nodes import PreviewImage
-except Exception:
-    PreviewImage = None
-
+from .common_utils.temp_files import gjjutils_write_temp_tensor_images
 try:
     from .gjj_ollama_common import (
         DEFAULT_OLLAMA_HOST,
@@ -701,9 +697,6 @@ class GJJ_Ideogram4PromptBuilder:
     )
     FUNCTION = "build"
 
-    def __init__(self):
-        self.preview_image = PreviewImage() if PreviewImage is not None else None
-
     @classmethod
     def INPUT_TYPES(cls):
         model_options = model_options_with_fallback()
@@ -1001,15 +994,13 @@ class GJJ_Ideogram4PromptBuilder:
                 ui["image_element_preview"] = [f"data:image/png;base64,{tensor_to_png_base64(image)}"]
             except Exception:
                 pass
-        if self.preview_image is not None:
-            try:
-                preview_ui = self.preview_image.save_images(preview, filename_prefix="GJJ_Ideogram4PromptBuilder")
-                preview_entries = preview_ui.get("ui", {}).get("images", [])
-                if preview_entries:
-                    ui["preview_images"] = preview_entries
-                    ui["images"] = [dict(item) for item in preview_entries]
-            except Exception:
-                pass
+        try:
+            preview_entries = gjjutils_write_temp_tensor_images(preview)
+            if preview_entries:
+                ui["preview_images"] = preview_entries
+                ui["images"] = [dict(item) for item in preview_entries]
+        except Exception:
+            pass
         result = (_dumps(caption), preview)
         if ui:
             return {"ui": ui, "result": result}

@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
+from .common_utils.temp_files import gjjutils_write_temp_tensor_images
 
 NODE_NAME = "GJJ_WanFunCameraControl"
 NODE_DISPLAY_NAME = "GJJ · 🎥 Wan相机控制合成"
@@ -491,10 +492,7 @@ def _camera_preview_image(
 
 def _save_preview_entries(image: torch.Tensor) -> list[dict[str, Any]]:
     try:
-        from nodes import PreviewImage
-
-        payload = PreviewImage().save_images(image.detach().cpu(), filename_prefix="GJJ_WanFunCamera")
-        return list(payload.get("ui", {}).get("images", []) or [])
+        return gjjutils_write_temp_tensor_images(image.detach().cpu())
     except Exception:
         return []
 

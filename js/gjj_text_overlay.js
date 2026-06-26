@@ -3,8 +3,8 @@ import { api } from "../../../scripts/api.js";
 
 const TARGET = "GJJ_TextOverlay";
 const PANEL = "gjj_text_overlay_live_panel";
-const PANEL_MIN_HEIGHT = 360;
-const PANEL_MAX_HEIGHT = 760;
+const PANEL_MIN_HEIGHT = 220;
+const PANEL_MAX_HEIGHT = 620;
 const HIDDEN_WIDGETS = new Set([
 	"texts",
 	"split_char",
@@ -28,6 +28,17 @@ const HIDDEN_WIDGETS = new Set([
 	"stroke_color_hex",
 	"use_stroke",
 	"stroke_width",
+	"watermark_upload_name",
+	"logo_remove_bg",
+	"logo_shadow_enabled",
+	"logo_shadow_blur",
+	"logo_shadow_x",
+	"logo_shadow_y",
+	"logo_shadow_color_hex",
+	"logo_stroke_enabled",
+	"logo_stroke_width",
+	"logo_stroke_color_hex",
+	"logo_default_url",
 	"has_watermark_input",
 ]);
 const TEXT_WIDGETS = [
@@ -45,6 +56,17 @@ const TEXT_WIDGETS = [
 const WATERMARK_WIDGETS = [
 	"watermark_opacity",
 	"watermark_width",
+	"watermark_upload_name",
+	"logo_remove_bg",
+	"logo_shadow_enabled",
+	"logo_shadow_blur",
+	"logo_shadow_x",
+	"logo_shadow_y",
+	"logo_shadow_color_hex",
+	"logo_stroke_enabled",
+	"logo_stroke_width",
+	"logo_stroke_color_hex",
+	"logo_default_url",
 ];
 const PERSISTED_WIDGETS = new Set([
 	"font_size",
@@ -53,6 +75,8 @@ const PERSISTED_WIDGETS = new Set([
 	"watermark_x",
 	"watermark_y",
 	"watermark_width",
+	"watermark_upload_name",
+	"logo_default_url",
 ]);
 const SIZE_PROPERTIES = {
 	bgWidth: "gjj_text_overlay_bg_width",
@@ -60,6 +84,9 @@ const SIZE_PROPERTIES = {
 	watermarkWidth: "gjj_text_overlay_watermark_source_width",
 	watermarkHeight: "gjj_text_overlay_watermark_source_height",
 };
+const RMBG14_PREVIEW_API = "/gjj/text_overlay/rmbg14_preview";
+const FETCH_LOGO_API = "/gjj/text_overlay/fetch_logo_url";
+const DEFAULT_LOGO_URL = "https://mintcdn.com/dripart/QzWbjSCBG7w61rR3/logo/dark.svg";
 function widget(node, name) {
 	return node?.widgets?.find((item) => item?.name === name) || null;
 }
@@ -298,6 +325,123 @@ function readLocalFile(file) {
 	});
 }
 
+function dataUrlToBlob(dataUrl) {
+	const [header, body = ""] = String(dataUrl || "").split(",", 2);
+	const mime = header.match(/^data:([^;,]+)/)?.[1] || "application/octet-stream";
+	const binary = header.includes(";base64") ? atob(body) : decodeURIComponent(body);
+	const bytes = new Uint8Array(binary.length);
+	for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+	return new Blob([bytes], { type: mime });
+}
+
+function imageDataUrlToPngFile(dataUrl, filename = "logo.png") {
+	return new Promise((resolve, reject) => {
+		const image = new Image();
+		image.onload = () => {
+			const width = Math.max(1, image.naturalWidth || image.width || 512);
+			const height = Math.max(1, image.naturalHeight || image.height || 512);
+			const canvas = document.createElement("canvas");
+			canvas.width = width;
+			canvas.height = height;
+			const ctx = canvas.getContext("2d");
+			ctx.clearRect(0, 0, width, height);
+			ctx.drawImage(image, 0, 0, width, height);
+			canvas.toBlob((blob) => {
+				if (!blob) return reject(new Error("Logo 转 PNG 失败"));
+				resolve(new File([blob], filename.replace(/\.[^.]+$/, "") + ".png", { type: "image/png" }));
+			}, "image/png");
+		};
+		image.onerror = () => reject(new Error("Logo 图片解析失败"));
+		image.src = dataUrl;
+	});
+}
+
+async function fetchNetworkLogo(url) {
+	const response = await api.fetchApi(FETCH_LOGO_API, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ url }),
+	});
+	const data = await response.json().catch(() => ({}));
+	if (!response?.ok || !data?.ok || !data?.src) throw new Error(data?.error || "网络 logo 解析失败");
+	return data;
+}
+
+function normalizeUploadFilename(data, file, requestedSubfolder = "") {
+	const filename = String(data?.name || data?.filename || data?.file || file?.name || "").replace(/\\/g, "/");
+	if (!filename) return "";
+	if (filename.includes("/")) return filename;
+	const subfolder = String(data?.subfolder ?? requestedSubfolder ?? "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+	return subfolder ? `${subfolder}/${filename}` : filename;
+}
+
+async function uploadImageToInput(file, subfolder = "gjj_text_overlay_logo") {
+	const cleanSubfolder = String(subfolder || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+	const form = new FormData();
+	form.append("image", file, file.name);
+	form.append("type", "input");
+	form.append("overwrite", "true");
+	if (cleanSubfolder) form.append("subfolder", cleanSubfolder);
+	const response = api?.fetchApi
+		? await api.fetchApi("/upload/image", { method: "POST", body: form })
+		: await fetch(api.apiURL("/upload/image"), { method: "POST", body: form });
+	if (!response?.ok) {
+		let detail = "";
+		try { detail = await response.text(); } catch (_) {}
+		throw new Error(`上传失败：HTTP ${response?.status || "?"}${detail ? ` ${detail}` : ""}`);
+	}
+	const data = await response.json().catch(() => ({}));
+	const filename = normalizeUploadFilename(data, file, cleanSubfolder);
+	if (!filename) throw new Error("上传成功但没有返回文件名");
+	return filename;
+}
+
+function inputImageViewInfo(filename) {
+	const value = String(filename || "").replace(/\\/g, "/").trim();
+	if (!value) return null;
+	const parts = value.split("/");
+	const name = parts.pop() || value;
+	const subfolder = parts.join("/");
+	return {
+		src: api.apiURL(`/view?filename=${encodeURIComponent(name)}&type=input&subfolder=${encodeURIComponent(subfolder)}&rand=${Date.now()}`),
+		width: 0,
+		height: 0,
+	};
+}
+
+function viewUrlToImageInfo(src) {
+	if (!src) return null;
+	try {
+		const url = new URL(src, window.location.href);
+		const filename = url.searchParams.get("filename") || "";
+		if (!filename) return null;
+		return {
+			filename,
+			type: url.searchParams.get("type") || "input",
+			subfolder: url.searchParams.get("subfolder") || "",
+		};
+	} catch (_) {
+		return null;
+	}
+}
+
+async function requestRmbg14Preview(info) {
+	const parsed = typeof info === "string" ? viewUrlToImageInfo(info) : {
+		filename: info?.filename || info?.name || "",
+		type: info?.type || "input",
+		subfolder: info?.subfolder || "",
+	};
+	if (!parsed?.filename) return null;
+	const response = await api.fetchApi(RMBG14_PREVIEW_API, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(parsed),
+	});
+	const data = await response.json().catch(() => ({}));
+	if (!response?.ok || !data?.ok || !data?.src) throw new Error(data?.error || "RMBG1.4 预览失败");
+	return { src: data.src, width: Number(data.width || 0), height: Number(data.height || 0) };
+}
+
 function numberValue(node, name, fallback = 0) {
 	const value = Number(widget(node, name)?.value);
 	return Number.isFinite(value) ? value : fallback;
@@ -366,13 +510,23 @@ function persistPreviewSize(node, kind, width, height) {
 	}
 }
 
+function setStageAspect(node, width, height) {
+	const stage = node?.__gjjTextOverlayUI?.stage;
+	if (!stage) return;
+	const w = Math.max(1, Number(width || 0));
+	const h = Math.max(1, Number(height || 0));
+	stage.style.aspectRatio = `${w} / ${h}`;
+	stage.style.width = "100%";
+	stage.style.maxHeight = "none";
+}
+
 function restorePreviewSizes(node) {
 	const props = node?.properties || {};
 	const bgWidth = Number(props[SIZE_PROPERTIES.bgWidth] || 0);
 	const bgHeight = Number(props[SIZE_PROPERTIES.bgHeight] || 0);
 	if (bgWidth > 0 && bgHeight > 0) {
 		node.__gjjTextOverlayBgSize = { width: bgWidth, height: bgHeight };
-		node.__gjjTextOverlayUI?.stage?.style.setProperty("aspect-ratio", `${bgWidth} / ${bgHeight}`);
+		setStageAspect(node, bgWidth, bgHeight);
 	}
 	const wmWidth = Number(props[SIZE_PROPERTIES.watermarkWidth] || 0);
 	const wmHeight = Number(props[SIZE_PROPERTIES.watermarkHeight] || 0);
@@ -393,7 +547,7 @@ function syncBackgroundSizeFromImage(node) {
 		const old = node.__gjjTextOverlayBgSize || {};
 		if (old.width !== width || old.height !== height) {
 			node.__gjjTextOverlayBgSize = { width, height };
-			ui.stage?.style.setProperty("aspect-ratio", `${width} / ${height}`);
+			setStageAspect(node, width, height);
 		}
 		return true;
 	}
@@ -449,12 +603,17 @@ function installStyles() {
 	const style = document.createElement("style");
 	style.id = "gjj-text-overlay-live-style";
 	style.textContent = `
-		.gjj-text-overlay-panel{width:100%;display:flex;flex-direction:column;gap:8px;color:#dce7e2;font:12px system-ui,"Microsoft YaHei",sans-serif;box-sizing:border-box;overflow:hidden;padding:0 2px 4px;}
-		.gjj-text-overlay-toolbar{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px;min-width:0;}
-		.gjj-text-overlay-preview{position:relative;width:100%;min-width:0;border:1px solid #34484f;border-radius:8px;background:#10181c;overflow:hidden;}
+		.gjj-text-overlay-panel{width:100%;display:flex;flex-direction:column;gap:5px;color:#dce7e2;font:12px system-ui,"Microsoft YaHei",sans-serif;box-sizing:border-box;overflow:hidden;padding:0 2px 3px;}
+		.gjj-text-overlay-toolbar{display:flex;align-items:center;gap:4px;min-width:0;overflow:hidden;}
+		.gjj-text-overlay-settings{display:none;flex-wrap:wrap;align-items:flex-start;gap:5px;min-width:0;}
+		.gjj-text-overlay-settings[data-open="true"]{display:flex;}
+		.gjj-text-overlay-icon-button{width:26px;height:24px;min-width:26px;border:1px solid #3c5058;border-radius:6px;background:#17252b;color:#f3fbfb;font-size:14px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;}
+		.gjj-text-overlay-icon-button:hover{background:#213942;border-color:#63838d;}
+		.gjj-text-overlay-icon-button[data-active="true"]{background:#244850;border-color:#82b9c5;}
+		.gjj-text-overlay-preview{position:relative;width:100%;min-width:0;border:1px solid #34484f;border-radius:7px;background:#10181c;overflow:hidden;display:flex;justify-content:center;}
 		.gjj-text-overlay-status{position:absolute;left:8px;bottom:8px;max-width:calc(100% - 16px);padding:3px 7px;border-radius:6px;background:rgba(8,14,17,.72);color:#b7cbd0;font-size:11px;line-height:1.3;pointer-events:none;opacity:0;transition:opacity .15s ease;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 		.gjj-text-overlay-status[data-show="true"]{opacity:1;}
-		.gjj-text-overlay-stage{position:relative;width:100%;aspect-ratio:16/9;background:linear-gradient(45deg,#182126 25%,#121a1e 25%,#121a1e 50%,#182126 50%,#182126 75%,#121a1e 75%);background-size:22px 22px;overflow:hidden;}
+		.gjj-text-overlay-stage{position:relative;width:100%;aspect-ratio:16/9;background:linear-gradient(45deg,#182126 25%,#121a1e 25%,#121a1e 50%,#182126 50%,#182126 75%,#121a1e 75%);background-size:22px 22px;overflow:hidden;margin:0 auto;}
 		.gjj-text-overlay-base{position:absolute;inset:0;background:radial-gradient(circle at 30% 25%,rgba(112,151,163,.35),transparent 35%),linear-gradient(135deg,#202c32,#0d1418);opacity:.9;}
 		.gjj-text-overlay-bg{position:absolute;inset:0;width:100%;height:100%;object-fit:fill;display:none;}
 		.gjj-text-overlay-item{position:absolute;left:50%;top:50%;user-select:none;touch-action:none;cursor:grab;border:1px solid transparent;border-radius:5px;}
@@ -663,9 +822,12 @@ function makePanel(node) {
 	stage.append(base, bg, watermark, text);
 	preview.append(stage, status);
 
-	root.append(toolbar, preview);
+	const settings = document.createElement("div");
+	settings.className = "gjj-text-overlay-settings";
+	settings.dataset.open = node.properties?.gjj_text_overlay_settings_open ? "true" : "false";
+	root.append(toolbar, settings, preview);
 
-	for (const el of [root, toolbar, preview, stage]) {
+	for (const el of [root, toolbar, settings, preview, stage]) {
 		for (const name of ["pointerdown", "mousedown", "wheel"]) {
 			el.addEventListener(name, (event) => event.stopPropagation());
 		}
@@ -677,39 +839,112 @@ function makePanel(node) {
 	fileInput.style.display = "none";
 	document.body.appendChild(fileInput);
 
-	const addButton = (label, textValue, callback) => {
-		const wrap = document.createElement("div");
-		wrap.className = "gjj-text-overlay-section gjj-text-overlay-action";
-		const title = document.createElement("div");
-		title.className = "gjj-text-overlay-label";
-		title.textContent = label;
+	const logoFileInput = document.createElement("input");
+	logoFileInput.type = "file";
+	logoFileInput.accept = "image/png,image/jpeg,image/webp,image/bmp";
+	logoFileInput.style.display = "none";
+	document.body.appendChild(logoFileInput);
+
+	const addIconButton = (icon, title, callback) => {
 		const button = document.createElement("button");
 		button.type = "button";
-		button.className = "gjj-text-overlay-button";
-		button.textContent = textValue;
+		button.className = "gjj-text-overlay-icon-button";
+		button.textContent = icon;
+		button.title = title;
 		button.addEventListener("click", (event) => {
 			event.preventDefault();
 			event.stopPropagation();
-			callback();
+			callback(button);
 		});
-		wrap.append(title, button);
-		toolbar.appendChild(wrap);
+		toolbar.appendChild(button);
 		return button;
 	};
 
-	control(node, toolbar, "文本", "texts", "text", { wide: true });
-	control(node, toolbar, "字体", "font_path", "select");
-	control(node, toolbar, "文字透明度", "text_opacity", "range", { min: 0, max: 1, step: 0.01 });
-	segmentedControl(node, toolbar, "方向", "direction", ["横向", "纵向"]);
-	control(node, toolbar, "字间距", "spacing", "number", { step: 0.1 });
-	control(node, toolbar, "文字颜色", "color_hex", "color");
-	control(node, toolbar, "描边颜色", "stroke_color_hex", "color");
-	control(node, toolbar, "启用描边", "use_stroke", "checkbox");
-	control(node, toolbar, "描边宽度", "stroke_width", "number", { min: 0, step: 1 });
-	control(node, toolbar, "水印透明度", "watermark_opacity", "range", { min: 0, max: 1, step: 0.01 });
+	addIconButton("📂", "打开本地背景图", () => fileInput.click());
+	addIconButton("🧩", "打开本地 logo，并使用 RMBG1.4 抠图预览", () => logoFileInput.click());
+	addIconButton("🌏", "设置网络默认 logo", async () => {
+		const current = stringValue(node, "logo_default_url", "") || DEFAULT_LOGO_URL;
+		const url = window.prompt("网络默认 logo URL", current);
+		if (!url) return;
+		try {
+			if (status) {
+				status.textContent = "正在解析网络 logo...";
+				status.dataset.show = "true";
+			}
+			const data = await fetchNetworkLogo(url.trim());
+			setWatermarkPreviewImage(node, { src: data.src });
+			const file = await imageDataUrlToPngFile(data.src, data.filename || "logo.png");
+			const filename = await uploadImageToInput(file);
+			setWidgetValue(node, "logo_default_url", url.trim());
+			setWidgetValue(node, "watermark_upload_name", filename);
+			node.__gjjTextOverlayWatermarkSrc = data.src;
+			node.__gjjTextOverlayWatermarkSourceKey = `upload:${filename}`;
+			if (boolValue(node, "logo_remove_bg", true)) {
+				try {
+					const cutout = await requestRmbg14Preview({ filename, type: "input", subfolder: "" });
+					if (cutout?.src) {
+						node.__gjjTextOverlayWatermarkSrc = cutout.src;
+						setWatermarkPreviewImage(node, cutout);
+					}
+				} catch (error) {
+					console.warn("[GJJ_TextOverlay] RMBG1.4 网络 logo 预览失败", error);
+				}
+			}
+			if (status) {
+				status.textContent = "网络默认 logo 已设置";
+				clearTimeout(node.__gjjTextOverlayStatusTimer);
+				node.__gjjTextOverlayStatusTimer = setTimeout(() => { status.dataset.show = "false"; }, 1400);
+			}
+			renderPanel(node);
+		} catch (error) {
+			console.warn("[GJJ_TextOverlay] 网络 logo 设置失败", error);
+			if (status) {
+				status.textContent = `网络 logo 设置失败：${error?.message || error}`;
+				status.dataset.show = "true";
+			}
+		}
+	});
+	addIconButton("🌘", "开关 logo 阴影", (button) => {
+		const next = !boolValue(node, "logo_shadow_enabled", false);
+		setWidgetValue(node, "logo_shadow_enabled", next);
+		button.dataset.active = next ? "true" : "false";
+		renderPanel(node);
+	});
+	addIconButton("✒️", "开关 logo 描边", (button) => {
+		const next = !boolValue(node, "logo_stroke_enabled", false);
+		setWidgetValue(node, "logo_stroke_enabled", next);
+		button.dataset.active = next ? "true" : "false";
+		renderPanel(node);
+	});
+	const settingsButton = addIconButton("⚙️", "其它设置", (button) => {
+		const open = settings.dataset.open !== "true";
+		settings.dataset.open = open ? "true" : "false";
+		button.dataset.active = open ? "true" : "false";
+		node.properties ||= {};
+		node.properties.gjj_text_overlay_settings_open = open;
+		setStageAspect(node, node.__gjjTextOverlayBgSize?.width || 16, node.__gjjTextOverlayBgSize?.height || 9);
+		updatePanelHeight(node);
+	});
+	settingsButton.dataset.active = settings.dataset.open === "true" ? "true" : "false";
 
-	addButton("背景图", "从上游获取", () => refreshBackground(node, true));
-	addButton("打开图片", "选择图片", () => fileInput.click());
+	control(node, settings, "文本", "texts", "text", { wide: true });
+	control(node, settings, "字体", "font_path", "select");
+	control(node, settings, "文字透明度", "text_opacity", "range", { min: 0, max: 1, step: 0.01 });
+	segmentedControl(node, settings, "方向", "direction", ["横向", "纵向"]);
+	control(node, settings, "字间距", "spacing", "number", { step: 0.1 });
+	control(node, settings, "文字颜色", "color_hex", "color");
+	control(node, settings, "描边颜色", "stroke_color_hex", "color");
+	control(node, settings, "启用描边", "use_stroke", "checkbox");
+	control(node, settings, "描边宽度", "stroke_width", "number", { min: 0, step: 1 });
+	control(node, settings, "水印透明度", "watermark_opacity", "range", { min: 0, max: 1, step: 0.01 });
+	control(node, settings, "RMBG1.4抠图", "logo_remove_bg", "checkbox");
+	control(node, settings, "Logo阴影模糊", "logo_shadow_blur", "number", { min: 0, step: 0.5 });
+	control(node, settings, "Logo阴影X", "logo_shadow_x", "number", { step: 1 });
+	control(node, settings, "Logo阴影Y", "logo_shadow_y", "number", { step: 1 });
+	control(node, settings, "Logo阴影颜色", "logo_shadow_color_hex", "color");
+	control(node, settings, "Logo描边宽度", "logo_stroke_width", "number", { min: 0, step: 1 });
+	control(node, settings, "Logo描边颜色", "logo_stroke_color_hex", "color");
+
 	fileInput.addEventListener("change", async () => {
 		const file = fileInput.files?.[0];
 		if (!file) return;
@@ -719,6 +954,45 @@ function makePanel(node) {
 			console.warn("[GJJ_TextOverlay] 打开背景预览失败", error);
 		} finally {
 			fileInput.value = "";
+		}
+	});
+
+	logoFileInput.addEventListener("change", async () => {
+		const file = logoFileInput.files?.[0];
+		if (!file) return;
+		try {
+			const src = await readLocalFile(file);
+			setWatermarkPreviewImage(node, { src });
+			const filename = await uploadImageToInput(file);
+			setWidgetValue(node, "watermark_upload_name", filename);
+			node.__gjjTextOverlayWatermarkSrc = src;
+			node.__gjjTextOverlayWatermarkSourceKey = `upload:${filename}`;
+			if (boolValue(node, "logo_remove_bg", true)) {
+				try {
+					const cutout = await requestRmbg14Preview({ filename, type: "input", subfolder: "" });
+					if (cutout?.src) {
+						node.__gjjTextOverlayWatermarkSrc = cutout.src;
+						setWatermarkPreviewImage(node, cutout);
+					}
+				} catch (error) {
+					console.warn("[GJJ_TextOverlay] RMBG1.4 logo 预览失败", error);
+				}
+			}
+			if (status) {
+				status.textContent = boolValue(node, "logo_remove_bg", true) ? "Logo 已选择，执行时使用 RMBG1.4 抠图" : "Logo 已选择";
+				status.dataset.show = "true";
+				clearTimeout(node.__gjjTextOverlayStatusTimer);
+				node.__gjjTextOverlayStatusTimer = setTimeout(() => { status.dataset.show = "false"; }, 1400);
+			}
+			renderPanel(node);
+		} catch (error) {
+			console.warn("[GJJ_TextOverlay] 打开 logo 失败", error);
+			if (status) {
+				status.textContent = "Logo 打开失败";
+				status.dataset.show = "true";
+			}
+		} finally {
+			logoFileInput.value = "";
 		}
 	});
 
@@ -877,10 +1151,11 @@ function makePanel(node) {
 		}
 		resizeObserver.disconnect();
 		fileInput.remove();
+		logoFileInput.remove();
 		return originalRemoved?.apply(this, args);
 	};
 
-	node.__gjjTextOverlayUI = { root, toolbar, preview, status, stage, base, bg, text, textImg, textResizeNw, textResizeSe, watermark, watermarkImg, watermarkResizeNw, watermarkResizeSe, activate };
+	node.__gjjTextOverlayUI = { root, toolbar, settings, preview, status, stage, base, bg, text, textImg, textResizeNw, textResizeSe, watermark, watermarkImg, watermarkResizeNw, watermarkResizeSe, activate };
 	activate(node.__gjjTextOverlayActive || "text");
 	scheduleRenderPanel(node);
 	setTimeout(() => refreshBackground(node, false), 300);
@@ -894,6 +1169,23 @@ function updatePanelHeight(node) {
 	const height = Math.max(PANEL_MIN_HEIGHT, Math.min(PANEL_MAX_HEIGHT, Math.ceil(root.scrollHeight + 8)));
 	node.__gjjTextOverlayHeight = height;
 	node.__gjjTextOverlayPanelWidget?.callback?.();
+	if (!node.__gjjTextOverlaySizing) {
+		node.__gjjTextOverlaySizing = true;
+		requestAnimationFrame(() => {
+			try {
+				const computed = node.computeSize?.() || node.size || [];
+				const width = Math.round(Number(node.size?.[0] || computed[0] || 360));
+				const targetHeight = Math.max(PANEL_MIN_HEIGHT + 34, Math.round(Number(computed[1] || height + 34)));
+				if (Math.abs(Number(node.size?.[1] || 0) - targetHeight) > 2) {
+					node.setSize?.([width, targetHeight]);
+				}
+			} finally {
+				node.__gjjTextOverlaySizing = false;
+			}
+			node.setDirtyCanvas?.(true, true);
+			app.graph?.setDirtyCanvas?.(true, true);
+		});
+	}
 	node.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
 }
@@ -907,7 +1199,7 @@ function setBackgroundImage(node, info, label = "") {
 	if (preferredWidth > 0 && preferredHeight > 0) {
 		node.__gjjTextOverlayBgSize = { width: preferredWidth, height: preferredHeight };
 		persistPreviewSize(node, "background", preferredWidth, preferredHeight);
-		ui.stage.style.aspectRatio = `${preferredWidth} / ${preferredHeight}`;
+		setStageAspect(node, preferredWidth, preferredHeight);
 	}
 	const image = new Image();
 	image.crossOrigin = "anonymous";
@@ -919,7 +1211,7 @@ function setBackgroundImage(node, info, label = "") {
 		ui.bg.src = src;
 		ui.bg.style.display = "block";
 		ui.base.style.opacity = "0";
-		ui.stage.style.aspectRatio = `${width} / ${height}`;
+		setStageAspect(node, width, height);
 		ui.preview.title = label ? `${label} · ${width}×${height}` : `${width}×${height}`;
 		node.__gjjTextOverlayBgSrc = src;
 		updatePanelHeight(node);
@@ -946,6 +1238,7 @@ function setWatermarkPreviewImage(node, info) {
 		ui.watermarkImg.style.display = "block";
 		ui.watermark.style.background = "transparent";
 		ui.watermark.style.display = "flex";
+		updateWatermarkPreviewStyle(node);
 		scheduleRenderPanel(node, { fitText: false });
 	};
 	image.onerror = () => {
@@ -959,7 +1252,58 @@ function refreshWatermarkPreview(node, force = false) {
 	const src = info?.src || "";
 	const ui = node.__gjjTextOverlayUI;
 	if (!src) {
+		const uploaded = stringValue(node, "watermark_upload_name", "");
+		if (uploaded) {
+			const sourceKey = `upload:${uploaded}`;
+			if (!force && node.__gjjTextOverlayWatermarkSourceKey === sourceKey && ui?.watermarkImg?.src) return true;
+			node.__gjjTextOverlayWatermarkSourceKey = sourceKey;
+			if (!node.__gjjTextOverlayWatermarkSrc || force || !ui?.watermarkImg?.src) {
+				const uploadedInfo = inputImageViewInfo(uploaded);
+				if (uploadedInfo?.src) {
+					node.__gjjTextOverlayWatermarkSrc = uploadedInfo.src;
+					setWatermarkPreviewImage(node, uploadedInfo);
+					if (boolValue(node, "logo_remove_bg", true)) {
+						requestRmbg14Preview({ filename: uploaded, type: "input", subfolder: "" })
+							.then((cutout) => {
+								if (!cutout?.src || node.__gjjTextOverlayWatermarkSourceKey !== sourceKey) return;
+								node.__gjjTextOverlayWatermarkSrc = cutout.src;
+								setWatermarkPreviewImage(node, cutout);
+							})
+							.catch((error) => console.warn("[GJJ_TextOverlay] RMBG1.4 logo 预览失败", error));
+					}
+				}
+			}
+			return true;
+		}
+		const defaultUrl = stringValue(node, "logo_default_url", "");
+		if (defaultUrl) {
+			const sourceKey = `url:${defaultUrl}`;
+			if (!node.__gjjTextOverlayDefaultLogoLoading && (force || node.__gjjTextOverlayWatermarkSourceKey !== sourceKey)) {
+				node.__gjjTextOverlayDefaultLogoLoading = true;
+				fetchNetworkLogo(defaultUrl)
+					.then(async (data) => {
+						setWatermarkPreviewImage(node, { src: data.src });
+						const file = await imageDataUrlToPngFile(data.src, data.filename || "logo.png");
+						const filename = await uploadImageToInput(file);
+						setWidgetValue(node, "watermark_upload_name", filename);
+						node.__gjjTextOverlayWatermarkSourceKey = `upload:${filename}`;
+						node.__gjjTextOverlayWatermarkSrc = data.src;
+						if (boolValue(node, "logo_remove_bg", true)) {
+							const cutout = await requestRmbg14Preview({ filename, type: "input", subfolder: "" });
+							if (cutout?.src) {
+								node.__gjjTextOverlayWatermarkSrc = cutout.src;
+								setWatermarkPreviewImage(node, cutout);
+							}
+						}
+						renderPanel(node);
+					})
+					.catch((error) => console.warn("[GJJ_TextOverlay] 默认网络 logo 恢复失败", error))
+					.finally(() => { node.__gjjTextOverlayDefaultLogoLoading = false; });
+			}
+			return true;
+		}
 		node.__gjjTextOverlayWatermarkSrc = "";
+		node.__gjjTextOverlayWatermarkSourceKey = "";
 		if (ui?.watermarkImg) ui.watermarkImg.removeAttribute("src");
 		if (ui?.watermark) ui.watermark.style.display = "none";
 		if (force && ui?.status) {
@@ -970,14 +1314,29 @@ function refreshWatermarkPreview(node, force = false) {
 		}
 		return false;
 	}
-	if (!force && node.__gjjTextOverlayWatermarkSrc === src) return true;
+	const sourceKey = `src:${src}`;
+	if (!force && node.__gjjTextOverlayWatermarkSourceKey === sourceKey && ui?.watermarkImg?.src) return true;
+	node.__gjjTextOverlayWatermarkSourceKey = sourceKey;
 	node.__gjjTextOverlayWatermarkSrc = src;
 	setWatermarkPreviewImage(node, info);
+	if (boolValue(node, "logo_remove_bg", true)) {
+		const parsed = viewUrlToImageInfo(src);
+		if (parsed?.filename) {
+			requestRmbg14Preview(parsed)
+				.then((cutout) => {
+					if (!cutout?.src || node.__gjjTextOverlayWatermarkSourceKey !== sourceKey) return;
+					node.__gjjTextOverlayWatermarkSrc = cutout.src;
+					setWatermarkPreviewImage(node, cutout);
+				})
+				.catch((error) => console.warn("[GJJ_TextOverlay] RMBG1.4 logo 预览失败", error));
+		}
+	}
 	return true;
 }
 
 function drawTextPreviewImage(node) {
-	const rawText = stringValue(node, "texts", "文字预览").replace(/\s*\r?\n\s*/g, " ").trim() || "文字预览";
+	const rawText = stringValue(node, "texts", "").replace(/\s*\r?\n\s*/g, " ").trim();
+	if (!rawText) return null;
 	const lines = [rawText];
 	syncBackgroundSizeFromImage(node);
 	const stageWidth = Math.max(1, node.__gjjTextOverlayUI?.stage?.clientWidth || 1);
@@ -1089,6 +1448,38 @@ function refreshBackground(node, force = false) {
 	return true;
 }
 
+function updateWatermarkPreviewStyle(node) {
+	const ui = node.__gjjTextOverlayUI;
+	if (!ui?.watermarkImg) return;
+	const filters = [];
+	const displayScale = (() => {
+		const stageWidth = Math.max(1, ui.stage?.clientWidth || 1);
+		const bgWidth = Math.max(1, node.__gjjTextOverlayBgSize?.width || stageWidth);
+		return stageWidth / bgWidth;
+	})();
+	if (boolValue(node, "logo_stroke_enabled", false)) {
+		const width = Math.max(0, numberValue(node, "logo_stroke_width", 3) * displayScale);
+		const color = stringValue(node, "logo_stroke_color_hex", "#FFFFFF");
+		if (width > 0) {
+			const px = Math.max(1, Math.round(width));
+			filters.push(
+				`drop-shadow(${px}px 0 0 ${color})`,
+				`drop-shadow(${-px}px 0 0 ${color})`,
+				`drop-shadow(0 ${px}px 0 ${color})`,
+				`drop-shadow(0 ${-px}px 0 ${color})`,
+			);
+		}
+	}
+	if (boolValue(node, "logo_shadow_enabled", false)) {
+		const color = stringValue(node, "logo_shadow_color_hex", "#000000");
+		const dx = Math.round(numberValue(node, "logo_shadow_x", 4) * displayScale);
+		const dy = Math.round(numberValue(node, "logo_shadow_y", 4) * displayScale);
+		const blur = Math.max(0, numberValue(node, "logo_shadow_blur", 8) * displayScale);
+		filters.push(`drop-shadow(${dx}px ${dy}px ${blur}px ${color})`);
+	}
+	ui.watermarkImg.style.filter = filters.join(" ");
+}
+
 function renderPanel(node, options = {}) {
 	const ui = node.__gjjTextOverlayUI;
 	if (!ui) return;
@@ -1103,14 +1494,19 @@ function renderPanel(node, options = {}) {
 		updatePanelHeight(node);
 		return;
 	}
-	ui.text.style.display = "block";
 	let textImage = drawTextPreviewImage(node);
 	const textPos = clampStagePoint(textX, textY);
 	ui.text.style.left = `${textPos.x * 100}%`;
 	ui.text.style.top = `${textPos.y * 100}%`;
-	ui.textImg.src = textImage.src;
-	ui.text.style.width = `${textImage.width}px`;
-	ui.text.style.height = `${textImage.height}px`;
+	if (textImage) {
+		ui.text.style.display = "block";
+		ui.textImg.src = textImage.src;
+		ui.text.style.width = `${textImage.width}px`;
+		ui.text.style.height = `${textImage.height}px`;
+	} else {
+		ui.text.style.display = "none";
+		ui.textImg.removeAttribute("src");
+	}
 	ui.watermark.style.opacity = String(clamp01(numberValue(node, "watermark_opacity", 1), 1));
 	const scale = Math.max(0.1, Math.min(10, numberValue(node, "watermark_width", 1)));
 	const wmSize = node.__gjjTextOverlayWatermarkSize || { width: 72, height: 72 };
@@ -1126,7 +1522,8 @@ function renderPanel(node, options = {}) {
 	ui.watermark.style.top = `${wmPos.y * 100}%`;
 	ui.watermark.style.width = `${wmDisplayWidth}px`;
 	ui.watermark.style.height = `${wmDisplayHeight}px`;
-	ui.watermark.style.display = linkPresent(input(node, "watermark_image")) && ui.watermarkImg.src ? "flex" : "none";
+	updateWatermarkPreviewStyle(node);
+	ui.watermark.style.display = (linkPresent(input(node, "watermark_image")) || stringValue(node, "watermark_upload_name", "")) && ui.watermarkImg.src ? "flex" : "none";
 	if (linkPresent(input(node, "watermark_image"))) refreshWatermarkPreview(node, false);
 	updatePanelHeight(node);
 }
@@ -1192,10 +1589,14 @@ function applyBackendPreviewMeta(node, message) {
 	if (!meta) return;
 	const bgW = Number(meta.background_width || 0);
 	const bgH = Number(meta.background_height || 0);
+	if (linkPresent(input(node, "background_image"))) {
+		node.__gjjTextOverlayBgSrc = "";
+		refreshBackground(node, true);
+	}
 	if (bgW > 0 && bgH > 0) {
 		node.__gjjTextOverlayBgSize = { width: bgW, height: bgH };
 		persistPreviewSize(node, "background", bgW, bgH);
-		node.__gjjTextOverlayUI?.stage?.style.setProperty("aspect-ratio", `${bgW} / ${bgH}`);
+		setStageAspect(node, bgW, bgH);
 	}
 	const srcW = Number(meta.watermark_source_width || 0);
 	const srcH = Number(meta.watermark_source_height || 0);

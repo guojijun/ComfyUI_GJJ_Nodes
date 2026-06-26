@@ -256,6 +256,38 @@ def make_missing_model_spec(label="", subdir="", filename="", description=""):
 		"description": str(description or "").strip(),
 	}
 
+def make_model_tree_item(
+	label="",
+	folder="",
+	filename="",
+	description="",
+	*,
+	path="",
+	kind="diffusion",
+	icon="🟣",
+	type="",
+	input="",
+	required=True,
+):
+	clean_folder = str(folder or "").strip().strip("/\\")
+	clean_filename = str(filename or "").strip()
+	clean_path = str(path or "").strip()
+	if not clean_path and clean_folder and clean_filename:
+		clean_path = f"models/{clean_folder}/{clean_filename}"
+	return {
+		"label": str(label or clean_filename or "模型").strip(),
+		"path": clean_path,
+		"folder": clean_folder,
+		"filename": clean_filename,
+		"input": str(input or "").strip(),
+		"type": str(type or "").strip(),
+		"kind": str(kind or "").strip(),
+		"icon": str(icon or "").strip(),
+		"required": bool(required),
+		"tooltip": str(description or "").strip(),
+		"description": str(description or "").strip(),
+	}
+
 def build_node_help_payload(
 	*,
 	description="",

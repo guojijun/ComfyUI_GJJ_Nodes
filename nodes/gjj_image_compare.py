@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from nodes import PreviewImage
+from .common_utils.temp_files import gjjutils_write_temp_tensor_images
 
 
 NODE_NAME = "GJJ_ImageComparer"
@@ -26,14 +26,13 @@ def _image_dimensions(image):
     return []
 
 
-def _attach_dimensions(saved, image):
-    images = saved.get("ui", {}).get("images", [])
+def _attach_dimensions(images, image):
     for item, dims in zip(images, _image_dimensions(image)):
         item.update(dims)
     return images
 
 
-class GJJ_ImageComparer(PreviewImage):
+class GJJ_ImageComparer:
     CATEGORY = "GJJ"
     FUNCTION = "compare_images"
     OUTPUT_NODE = True
@@ -89,12 +88,10 @@ class GJJ_ImageComparer(PreviewImage):
         }
 
         if image_a is not None and len(image_a) > 0:
-            saved = self.save_images(image_a, "gjj.compare.a", prompt, extra_pnginfo)
-            result["ui"]["a_images"] = _attach_dimensions(saved, image_a)
+            result["ui"]["a_images"] = _attach_dimensions(gjjutils_write_temp_tensor_images(image_a), image_a)
 
         if image_b is not None and len(image_b) > 0:
-            saved = self.save_images(image_b, "gjj.compare.b", prompt, extra_pnginfo)
-            result["ui"]["b_images"] = _attach_dimensions(saved, image_b)
+            result["ui"]["b_images"] = _attach_dimensions(gjjutils_write_temp_tensor_images(image_b), image_b)
 
         return result
 

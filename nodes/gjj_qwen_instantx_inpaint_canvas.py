@@ -133,23 +133,23 @@ _TRANSLATION_ENVIRONMENT_REPORT = build_translation_environment_report(
 
 _QWEN_INPAINT_MODEL_TREE = [
     {
-        "label": "Qwen / FireRed UNET",
+        "label": "图片主模型 UNET",
         "path": "models/diffusion_models",
         "folder": "diffusion_models",
         "subdir": "models/diffusion_models",
         "filename": DEFAULT_UNET,
         "value": DEFAULT_UNET,
         "kind": "diffusion",
-        "description": "必需。工作流中的主模型；下拉列表会优先显示文件名包含 qwen 或 firered 的权重。",
+        "description": "必需。工作流中的主模型；下拉列表显示 diffusion_models 中的全部图片主模型。",
         "icon": "🟣",
     },
     {
-        "label": "Qwen / FireRed UNET GGUF",
+        "label": "图片主模型 UNET GGUF",
         "path": "models/unet_gguf",
         "folder": "unet_gguf",
         "subdir": "models/unet_gguf",
-        "filename": "qwen*.gguf / firered*.gguf",
-        "value": "qwen*.gguf / firered*.gguf",
+        "filename": "*.gguf",
+        "value": "*.gguf",
         "kind": "diffusion",
         "description": "可选。选择 .gguf 主模型时使用 GJJ 内置 GGUF UNET 加载器；只需安装 gguf Python 依赖。",
         "icon": "🟪",
@@ -258,7 +258,7 @@ _QWEN_INPAINT_HELP = build_node_help_payload(
         "图像输入口接线时优先使用上游图像；未接线时使用面板中上传/粘贴的图片；两者都没有时使用空白画布并全图生成。",
         "遮罩输入口接线时优先使用上游 MASK；未接线时使用面板绘制的遮罩；两者都没有时自动全图重绘。",
         "默认参数完全贴近工作流：steps=4、cfg=1、euler/simple、denoise=1、最大边=1536、mask blur radius=31、sigma=1。",
-        "UNET 下拉会筛选文件名包含 qwen 或 firered 的模型，默认仍优先 qwen_image_2512_fp8_e4m3fn.safetensors。",
+        "UNET 下拉显示全部图片主模型，默认仍优先 qwen_image_2512_fp8_e4m3fn.safetensors。",
     ],
     runtime=[
         "执行链路：GJJ 内置 UNET/CLIP GGUF Loader → VAELoader → LoraLoaderModelOnly → 可选 LoRA串联配置 → ModelSamplingAuraFlow(shift=3.1)。",
@@ -366,21 +366,7 @@ def _ensure_clip_gguf_folder() -> None:
         existing["clip_gguf"] = ([os.path.join(models_dir, "text_encoders")], {".gguf"})
 
 
-def _normalize_model_key(value: Any) -> str:
-    text = str(value or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
-    for char in ("-", ".", " ", "__"):
-        text = text.replace(char, "_")
-    while "__" in text:
-        text = text.replace("__", "_")
-    return text
-
-
-def _is_qwen_or_firered_unet(value: Any) -> bool:
-    key = _normalize_model_key(value)
-    return "qwen" in key or "firered" in key or "fire_red" in key
-
-
-def _list_qwen_or_firered_unets(preferred: str = DEFAULT_UNET) -> list[str]:
+def _list_image_unets(preferred: str = DEFAULT_UNET) -> list[str]:
     _ensure_unet_gguf_folder()
     values: list[str] = []
     for category in ("diffusion_models", "unet_gguf"):
@@ -391,10 +377,9 @@ def _list_qwen_or_firered_unets(preferred: str = DEFAULT_UNET) -> list[str]:
     preferred = str(preferred or "").strip()
     if preferred:
         values.insert(0, preferred)
-    filtered = [item for item in values if _is_qwen_or_firered_unet(item)]
     seen: set[str] = set()
     unique: list[str] = []
-    for item in filtered or ([preferred] if preferred else []):
+    for item in values or ([preferred] if preferred else []):
         key = item.replace("\\", "/").lower()
         if not item or key in seen:
             continue
@@ -1154,7 +1139,7 @@ class GJJ_QwenInstantXInpaintCanvas:
 
     @classmethod
     def INPUT_TYPES(cls):
-        unets = _list_qwen_or_firered_unets(DEFAULT_UNET)
+        unets = _list_image_unets(DEFAULT_UNET)
         clips = _list_qwen_clips(DEFAULT_CLIP)
         controlnets = _list_models("controlnet", DEFAULT_CONTROLNET)
         vaes = _list_models("vae", DEFAULT_VAE)
@@ -1200,8 +1185,8 @@ class GJJ_QwenInstantXInpaintCanvas:
                     unets,
                     {
                         "default": _preferred_default(unets, DEFAULT_UNET),
-                        "display_name": "Qwen / FireRed UNET",
-                        "tooltip": "只显示文件名包含 qwen 或 firered 的 UNET；支持 diffusion_models/unet_gguf 里的 safetensors 与 GGUF。",
+                        "display_name": "图片主模型 UNET",
+                        "tooltip": "显示 diffusion_models/unet_gguf 中的全部图片主模型；支持 safetensors 与 GGUF。",
                     },
                 ),
                 "clip_name": (

@@ -224,6 +224,23 @@ from .media_preview import (
 	register_common_media_preview_api,
 )
 
+from .temp_files import (
+	# 公共临时文件读写/去重
+	GJJ_TEMP_SUBFOLDER,
+	gjjutils_hash_bytes,
+	gjjutils_hash_file,
+	gjjutils_hash_pil_image,
+	gjjutils_read_temp_bytes,
+	gjjutils_read_temp_pil_image,
+	gjjutils_temp_path,
+	gjjutils_temp_root,
+	gjjutils_tensor_to_pil_images,
+	gjjutils_write_temp_bytes,
+	gjjutils_write_temp_file,
+	gjjutils_write_temp_pil_image,
+	gjjutils_write_temp_tensor_images,
+)
+
 from .network_media import (
 	# 公共网络媒体下载/缓存
 	AUDIO_EXTS,
@@ -244,6 +261,7 @@ from .network_media import (
 
 from .dependency_checker import (
 	build_node_help_payload,
+	make_model_tree_item,
 )
 
 from . import rmbg2_model
@@ -388,6 +406,20 @@ __all__ = [
 	"COMMON_MEDIA_OPEN_FOLDER_API",
 	"gjjutils_media_root",
 	"register_common_media_preview_api",
+	# temp_files
+	"GJJ_TEMP_SUBFOLDER",
+	"gjjutils_hash_bytes",
+	"gjjutils_hash_file",
+	"gjjutils_hash_pil_image",
+	"gjjutils_read_temp_bytes",
+	"gjjutils_read_temp_pil_image",
+	"gjjutils_temp_path",
+	"gjjutils_temp_root",
+	"gjjutils_tensor_to_pil_images",
+	"gjjutils_write_temp_bytes",
+	"gjjutils_write_temp_file",
+	"gjjutils_write_temp_pil_image",
+	"gjjutils_write_temp_tensor_images",
 	# network_media
 	"AUDIO_EXTS",
 	"IMAGE_EXTS",
@@ -405,4 +437,5 @@ __all__ = [
 	"gjjutils_url_media_relative_path",
 	# dependency/help
 	"build_node_help_payload",
+	"make_model_tree_item",
 ]

@@ -13,8 +13,8 @@ from nodes import (
     KSampler,
     VAEDecode,
     VAEEncode,
-    PreviewImage,
 )
+from .common_utils.temp_files import gjjutils_write_temp_tensor_images
 from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
 
 NODE_NAME = "GJJ_CheckpointDirectGenerator"
@@ -151,7 +151,6 @@ class GJJ_CheckpointDirectGenerator:
 
     def __init__(self):
         self.loaded_lora: tuple[str, Any] | None = None
-        self.preview_image = PreviewImage()
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -506,11 +505,7 @@ class GJJ_CheckpointDirectGenerator:
             )
 
             # 保存预览图片给 GJJ 自定义前端预览；避免使用 ui.images 触发 ComfyUI 原生重复预览。
-            preview_ui = self.preview_image.save_images(
-                image,
-                filename_prefix="GJJ_CheckpointDirectGenerator",
-            )
-            preview_images = preview_ui.get("ui", {}).get("images", [])
+            preview_images = gjjutils_write_temp_tensor_images(image)
 
             return {"ui": {"gjj_images": preview_images}, "result": (image,)}
         except RuntimeError as exc:

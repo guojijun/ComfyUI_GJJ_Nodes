@@ -23,6 +23,7 @@ from .common_utils.dependency_checker import (
     build_dependency_model_report,
     send_dependency_model_notice,
 )
+from .common_utils.temp_files import gjjutils_write_temp_pil_image
 from .gjj_lazy_image_studio import (
     DEFAULT_CLIP_NAME,
     DEFAULT_UNET_DTYPE,
@@ -46,7 +47,6 @@ from .gjj_batch_outpaint import (
 
 
 NODE_NAME = "GJJ_360PanoramaGenerator"
-PREVIEW_SUBFOLDER = "gjj_360_panorama_generator"
 IMAGE_INPUT_TYPE = "GJJ_BATCH__IMAGE,GJJ_BATCH_IMAGE,IMAGE"
 
 DEFAULT_UNET = "qwen_image_edit_2511_fp8mixed.safetensors"
@@ -141,11 +141,7 @@ def _send_preview(unique_id: Any, image: torch.Tensor, stage: str) -> list[dict[
     try:
         preview = _ensure_bhwc_rgb(image)[:1].detach().float().clamp(0.0, 1.0).cpu()[0]
         array = (preview.numpy() * 255.0).round().astype(np.uint8)
-        out_dir = os.path.join(folder_paths.get_temp_directory(), PREVIEW_SUBFOLDER)
-        os.makedirs(out_dir, exist_ok=True)
-        filename = f"panorama_{uuid.uuid4().hex[:12]}.png"
-        Image.fromarray(array, "RGB").save(os.path.join(out_dir, filename), compress_level=4)
-        item = {"filename": filename, "subfolder": PREVIEW_SUBFOLDER, "type": "temp"}
+        item = gjjutils_write_temp_pil_image(Image.fromarray(array, "RGB"), format="PNG", suffix=".png")
         if unique_id is not None and str(unique_id).strip():
             from server import PromptServer
 

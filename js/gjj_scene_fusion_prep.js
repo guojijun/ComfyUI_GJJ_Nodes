@@ -5,13 +5,53 @@ import { GJJ_Utils, queueOnlyCurrentNode } from "./gjj_utils.js";
 const NODE_TYPE = "GJJ_SceneFusionPrep";
 const PANEL_WIDGET = "gjj_scene_fusion_prep_panel";
 const CONFIG_WIDGET = "placement_config";
+const BACKGROUND_UPLOAD_WIDGET = "background_upload";
+const PERSON_UPLOADS_WIDGET = "person_uploads_json";
+const CUTOUT_PREVIEW_WIDGET = "cutout_preview_only";
+const PAUSED_LINKS_PROPERTY = "gjj_scene_fusion_paused_links";
+const MODEL_DEFAULTS = {
+	fusion_unet_name: "FireRed-Image-Edit-1.1_fp8mixed_comfy.safetensors",
+	fusion_clip_name: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+	fusion_vae_name: "qwen_image_vae.safetensors",
+	fusion_lora_1_name: "QWEN/FireRed-Image-Edit-1.0-Lightning-8steps-v1.1.safetensors",
+	fusion_lora_2_name: "QWEN/edit_2511人景色交互20-LORA+by_xiaodu.safetensors",
+};
+const DEFAULT_FUSION_PROMPT = "按颜色将图1中的角色精准放置到图2场景指定位置，保持角色外观、服装、随身道具不变，并匹配场景的光照遮挡与透视尺度，不改动背景与构图。";
 const PERSON_PREFIX = "person_";
 const MEDIA_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
 const MIN_PERSONS = 1;
 const MAX_PERSONS = 12;
-const HIDDEN_WIDGETS = new Set([CONFIG_WIDGET, "background_fit", "device", "process_res", "mask_blur"]);
-const PY_WIDGET_ORDER = ["width", "height", CONFIG_WIDGET, "background_fit", "device", "process_res", "mask_blur"];
+const HIDDEN_WIDGETS = new Set([
+	"width", "height", CONFIG_WIDGET, "background_fit", "device", "process_res", "mask_blur",
+	"positive_prompt", "negative_prompt", "seed", "steps", "cfg", "sampler_name", "scheduler", "denoise",
+	"model_shift", "cfg_norm_strength", "cfg_norm_pre_cfg",
+	"fusion_unet_name", "fusion_unet_dtype", "fusion_clip_name", "fusion_clip_dtype", "fusion_vae_name", "fusion_vae_dtype",
+	"fusion_lora_1_name", "fusion_lora_1_strength", "fusion_lora_2_name", "fusion_lora_2_strength",
+	BACKGROUND_UPLOAD_WIDGET, PERSON_UPLOADS_WIDGET, CUTOUT_PREVIEW_WIDGET,
+]);
+const PY_WIDGET_ORDER = [
+	"width", "height", CONFIG_WIDGET, "background_fit", "device", "process_res", "mask_blur",
+	"positive_prompt", "negative_prompt", "seed", "steps", "cfg", "sampler_name", "scheduler", "denoise",
+	"model_shift", "cfg_norm_strength", "cfg_norm_pre_cfg",
+	"fusion_unet_name", "fusion_unet_dtype", "fusion_clip_name", "fusion_clip_dtype", "fusion_vae_name", "fusion_vae_dtype",
+	"fusion_lora_1_name", "fusion_lora_1_strength", "fusion_lora_2_name", "fusion_lora_2_strength",
+	BACKGROUND_UPLOAD_WIDGET, PERSON_UPLOADS_WIDGET, CUTOUT_PREVIEW_WIDGET,
+];
+const SETTINGS_FIELDS = [
+	["width", "宽度", "number"],
+	["height", "高度", "number"],
+	["fusion_unet_name", "主模型", "model"],
+	["fusion_clip_name", "CLIP", "model"],
+	["fusion_vae_name", "VAE", "model"],
+	["fusion_lora_1_name", "LoRA 1", "model"],
+	["fusion_lora_2_name", "LoRA 2", "model"],
+];
 const DEFAULT_COLORS = ["#0000FF", "#FF0000", "#00FF00", "#FF00FF", "#00FFFF", "#FFFF00"];
+const RANDOM_COLOR_POOL = [
+	"#2563EB", "#DC2626", "#16A34A", "#C026D3", "#0891B2", "#CA8A04",
+	"#EA580C", "#7C3AED", "#059669", "#E11D48", "#0D9488", "#4F46E5",
+	"#65A30D", "#DB2777", "#0284C7", "#9333EA", "#B45309", "#BE123C",
+];
 const DEFAULT_POSE = {
 	head: [0, -0.43],
 	neck: [0, -0.25],
@@ -27,6 +67,135 @@ const DEFAULT_POSE = {
 	left_foot: [-0.13, 0.66],
 	right_foot: [0.13, 0.66],
 };
+const POSE_PRESETS = [
+	{
+		emoji: "🚶",
+		title: "走路",
+		pose: {
+			head: [0.02, -0.43], neck: [0.01, -0.25], pelvis: [0, 0.14],
+			left_shoulder: [-0.14, -0.21], right_shoulder: [0.16, -0.21],
+			left_elbow: [-0.25, -0.02], right_elbow: [0.28, 0.04],
+			left_hand: [-0.18, 0.22], right_hand: [0.12, 0.25],
+			left_knee: [-0.18, 0.41], right_knee: [0.18, 0.36],
+			left_foot: [-0.34, 0.65], right_foot: [0.34, 0.60],
+		},
+	},
+	{
+		emoji: "🧍",
+		title: "站立",
+		pose: structuredClone(DEFAULT_POSE),
+	},
+	{
+		emoji: "🧎",
+		title: "跪姿",
+		pose: {
+			head: [0, -0.43], neck: [0, -0.25], pelvis: [0.02, 0.18],
+			left_shoulder: [-0.15, -0.21], right_shoulder: [0.15, -0.21],
+			left_elbow: [-0.23, 0.02], right_elbow: [0.23, 0.02],
+			left_hand: [-0.12, 0.25], right_hand: [0.14, 0.25],
+			left_knee: [-0.28, 0.36], right_knee: [0.26, 0.50],
+			left_foot: [-0.52, 0.42], right_foot: [0.42, 0.74],
+		},
+	},
+	{
+		emoji: "🏃‍♂️",
+		title: "跑步",
+		pose: {
+			head: [0.05, -0.43], neck: [0.03, -0.25], pelvis: [0, 0.14],
+			left_shoulder: [-0.12, -0.21], right_shoulder: [0.18, -0.20],
+			left_elbow: [-0.30, -0.08], right_elbow: [0.31, 0.02],
+			left_hand: [-0.18, 0.09], right_hand: [0.13, 0.24],
+			left_knee: [-0.34, 0.28], right_knee: [0.26, 0.43],
+			left_foot: [-0.58, 0.42], right_foot: [0.55, 0.66],
+		},
+	},
+	{
+		emoji: "🕺",
+		title: "跳舞",
+		pose: {
+			head: [-0.02, -0.44], neck: [-0.01, -0.25], pelvis: [0.03, 0.14],
+			left_shoulder: [-0.17, -0.22], right_shoulder: [0.15, -0.20],
+			left_elbow: [-0.32, -0.38], right_elbow: [0.35, -0.02],
+			left_hand: [-0.18, -0.56], right_hand: [0.47, -0.15],
+			left_knee: [-0.18, 0.40], right_knee: [0.27, 0.34],
+			left_foot: [-0.36, 0.64], right_foot: [0.42, 0.54],
+		},
+	},
+	{
+		emoji: "🤺",
+		title: "击剑",
+		pose: {
+			head: [0.03, -0.43], neck: [0.02, -0.25], pelvis: [-0.02, 0.14],
+			left_shoulder: [-0.14, -0.21], right_shoulder: [0.18, -0.21],
+			left_elbow: [-0.27, -0.02], right_elbow: [0.40, -0.20],
+			left_hand: [-0.20, 0.22], right_hand: [0.65, -0.21],
+			left_knee: [-0.28, 0.42], right_knee: [0.28, 0.36],
+			left_foot: [-0.55, 0.64], right_foot: [0.58, 0.61],
+		},
+	},
+	{
+		emoji: "🏌",
+		title: "高尔夫",
+		pose: {
+			head: [0.06, -0.41], neck: [0.03, -0.24], pelvis: [0, 0.16],
+			left_shoulder: [-0.14, -0.20], right_shoulder: [0.18, -0.20],
+			left_elbow: [0.02, 0.00], right_elbow: [0.30, 0.05],
+			left_hand: [0.23, 0.20], right_hand: [0.30, 0.21],
+			left_knee: [-0.16, 0.41], right_knee: [0.18, 0.41],
+			left_foot: [-0.34, 0.64], right_foot: [0.36, 0.64],
+		},
+	},
+	{
+		emoji: "🏋",
+		title: "举重",
+		pose: {
+			head: [0, -0.43], neck: [0, -0.25], pelvis: [0, 0.16],
+			left_shoulder: [-0.16, -0.22], right_shoulder: [0.16, -0.22],
+			left_elbow: [-0.30, -0.45], right_elbow: [0.30, -0.45],
+			left_hand: [-0.32, -0.68], right_hand: [0.32, -0.68],
+			left_knee: [-0.30, 0.42], right_knee: [0.30, 0.42],
+			left_foot: [-0.58, 0.62], right_foot: [0.58, 0.62],
+		},
+	},
+	{
+		emoji: "🤸",
+		title: "倒立",
+		rotation: 180,
+		face_angle: 0,
+		pose: {
+			head: [0, -0.42], neck: [0, -0.24], pelvis: [0, 0.12],
+			left_shoulder: [-0.16, -0.21], right_shoulder: [0.16, -0.21],
+			left_elbow: [-0.31, -0.26], right_elbow: [0.23, -0.44],
+			left_hand: [-0.48, -0.10], right_hand: [0.14, -0.66],
+			left_knee: [-0.30, 0.38], right_knee: [0.30, 0.38],
+			left_foot: [-0.58, 0.66], right_foot: [0.58, 0.66],
+		},
+	},
+	{
+		emoji: "🤾",
+		title: "手球",
+		pose: {
+			head: [0.04, -0.44], neck: [0.02, -0.25], pelvis: [0, 0.14],
+			left_shoulder: [-0.15, -0.21], right_shoulder: [0.18, -0.22],
+			left_elbow: [-0.30, 0.02], right_elbow: [0.36, -0.42],
+			left_hand: [-0.18, 0.25], right_hand: [0.30, -0.66],
+			left_knee: [-0.32, 0.30], right_knee: [0.20, 0.44],
+			left_foot: [-0.55, 0.50], right_foot: [0.42, 0.66],
+		},
+	},
+	{
+		emoji: "🧘",
+		title: "打坐",
+		pose: {
+			head: [0, -0.43], neck: [0, -0.25], pelvis: [0, 0.22],
+			left_shoulder: [-0.15, -0.21], right_shoulder: [0.15, -0.21],
+			left_elbow: [-0.28, 0.02], right_elbow: [0.28, 0.02],
+			left_hand: [-0.14, 0.25], right_hand: [0.14, 0.25],
+			left_knee: [-0.38, 0.43], right_knee: [0.38, 0.43],
+			left_foot: [0.10, 0.56], right_foot: [-0.10, 0.56],
+		},
+	},
+];
 const FIGURE_ASPECT = 0.42;
 const IK_CHAINS = [
 	{ root: "left_shoulder", mid: "left_elbow", end: "left_hand", bend: 1 },
@@ -54,6 +223,9 @@ function injectStyles() {
 .gjj-sfp-buttons{display:flex;gap:6px;align-items:center;width:100%;box-sizing:border-box;overflow:hidden;white-space:nowrap;padding:2px 0 5px;}
 .gjj-sfp-btn{height:27px;min-width:0;flex:1 1 0;border:1px solid #3f525a;border-radius:6px;background:#172229;color:#dce8ec;font:700 12px/25px system-ui,sans-serif;cursor:pointer;padding:0 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .gjj-sfp-btn:hover{background:#21313a;border-color:#55707a;}
+.gjj-sfp-btn[data-active="true"]{background:#243b2e;border-color:#60a56f;color:#f2fff5;}
+.gjj-sfp-pose-buttons{display:flex;gap:4px;align-items:center;width:100%;box-sizing:border-box;overflow:hidden;white-space:nowrap;padding:0 0 5px;}
+.gjj-sfp-pose-buttons .gjj-sfp-btn{flex:1 1 0;height:24px;padding:0 2px;font-size:15px;line-height:22px;}
 .gjj-sfp-stage-wrap{width:100%;box-sizing:border-box;padding-top:4px;}
 .gjj-sfp-stage{position:relative;width:100%;overflow:hidden;border:1px solid #33454d;border-radius:7px;background:#081015;box-sizing:border-box;touch-action:none;}
 .gjj-sfp-bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;pointer-events:none;}
@@ -67,10 +239,29 @@ function injectStyles() {
 .gjj-sfp-handle{stroke:#071014;stroke-width:2;cursor:pointer;}
 .gjj-sfp-face-line{stroke-linecap:round;}
 .gjj-sfp-face-handle{stroke:#071014;stroke-width:2;cursor:pointer;}
-.gjj-sfp-previews{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding-top:7px;}
-.gjj-sfp-preview{min-width:0;border:1px solid #2f424a;border-radius:7px;background:#10181d;padding:5px;box-sizing:border-box;}
-.gjj-sfp-preview img{display:block;width:100%;height:98px;object-fit:contain;background:#071014;border-radius:5px;}
-.gjj-sfp-preview span{display:block;padding-top:4px;color:#9fb1b8;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center;}
+.gjj-sfp-previews{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:0;padding-top:3px;overflow:hidden;}
+.gjj-sfp-preview{flex:0 0 160px;width:160px;border:0;border-radius:0;background:transparent;padding:0;box-sizing:border-box;position:relative;overflow:hidden;}
+.gjj-sfp-preview.person{flex:0 0 auto;width:auto;background:#e9ecef;}
+.gjj-sfp-preview.person{border:5px solid var(--gjj-person-color,#2f424a);}
+.gjj-sfp-preview.person.selected{box-shadow:inset 0 0 0 3px #f4fbff;}
+.gjj-sfp-preview img{display:block;width:100%;height:92px;object-fit:contain;background:#071014;border-radius:0;}
+.gjj-sfp-preview.person img{width:auto;max-width:none;background:#e9ecef;}
+.gjj-sfp-preview span{position:absolute;left:0;right:0;bottom:0;display:block;padding:2px 3px;color:#d7e6e8;background:rgba(7,16,20,.72);font-size:10px;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center;}
+.gjj-sfp-settings{display:none;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;padding:5px 0;}
+.gjj-sfp-settings.open{display:grid;}
+.gjj-sfp-field{display:flex;flex-direction:column;gap:3px;min-width:0;}
+.gjj-sfp-field.wide{grid-column:1/-1;}
+.gjj-sfp-field span{color:#9fb1b8;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.gjj-sfp-input{width:100%;min-width:0;height:26px;border:1px solid #3f525a;border-radius:6px;background:#10191f;color:#e8f1f2;padding:2px 7px;box-sizing:border-box;font-size:12px;}
+.gjj-sfp-progress{display:flex;align-items:center;gap:6px;height:13px;padding:0 1px 3px;box-sizing:border-box;}
+.gjj-sfp-progress-track{position:relative;flex:1 1 auto;min-width:0;height:3px;border-radius:999px;background:#1b2a31;overflow:hidden;}
+.gjj-sfp-progress-fill{position:absolute;left:0;top:0;height:100%;width:0%;border-radius:999px;background:#65d6ff;transition:width .16s ease;}
+.gjj-sfp-progress-text{flex:0 1 auto;max-width:42%;min-width:0;color:#9fb1b8;font-size:10px;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.gjj-sfp-var-popup{position:fixed;z-index:100000;width:min(560px,calc(100vw - 24px));max-height:min(560px,calc(100vh - 32px));display:flex;flex-direction:column;gap:7px;padding:9px;border:1px solid #486575;border-radius:8px;background:#08151a;color:#dce7e2;box-shadow:0 18px 46px rgba(0,0,0,.55);font:12px system-ui,"Microsoft YaHei",sans-serif;}
+.gjj-sfp-var-grid{display:grid;grid-template-columns:minmax(120px,.75fr) minmax(0,1fr);gap:6px;overflow:hidden;min-height:160px;}
+.gjj-sfp-var-list{overflow:auto;display:flex;flex-direction:column;gap:4px;border:1px solid #243941;border-radius:7px;padding:5px;}
+.gjj-sfp-var-item{border:0;border-radius:6px;background:transparent;color:#dce7e2;text-align:left;padding:6px 7px;cursor:pointer;}
+.gjj-sfp-var-item:hover,.gjj-sfp-var-item.active{background:#223741;}
 `;
 	document.head.appendChild(style);
 }
@@ -92,6 +283,123 @@ function viewUrl(item) {
 	return item.__gjjSceneFusionCachedUrl;
 }
 
+function inputImageRef(value) {
+	const text = String(value || "").replace(/\\/g, "/").trim();
+	if (!text) return null;
+	const parts = text.split("/");
+	const filename = parts.pop() || text;
+	return {
+		filename,
+		subfolder: parts.join("/"),
+		type: "input",
+		media_type: "image",
+	};
+}
+
+function parseUploadList(value) {
+	try {
+		const parsed = JSON.parse(String(value || "[]"));
+		return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [];
+	} catch (_) {
+		return [];
+	}
+}
+
+function loadImageSize(ref) {
+	const src = viewUrl(ref);
+	if (!src) return Promise.resolve({ width: 0, height: 0 });
+	return new Promise((resolve) => {
+		const image = new Image();
+		image.onload = () => resolve({ width: Number(image.naturalWidth || image.width || 0), height: Number(image.naturalHeight || image.height || 0) });
+		image.onerror = () => resolve({ width: 0, height: 0 });
+		image.src = src;
+	});
+}
+
+function uploadedPersonCount(node) {
+	return parseUploadList(widget(node, PERSON_UPLOADS_WIDGET)?.value || node?.properties?.[PERSON_UPLOADS_WIDGET]).length;
+}
+
+function uploadedPersonRefs(node) {
+	return parseUploadList(widget(node, PERSON_UPLOADS_WIDGET)?.value || node?.properties?.[PERSON_UPLOADS_WIDGET])
+		.map((name, index) => ({
+			...inputImageRef(name),
+			id: personName(index + 1),
+			label: `人物 ${index + 1}`,
+			color: DEFAULT_COLORS[index % DEFAULT_COLORS.length],
+		}))
+		.filter((item) => item?.filename);
+}
+
+function backgroundInputLinked(node) {
+	return hasLink(findInput(node, "background"));
+}
+
+function personInputLinked(node) {
+	return personInputs(node).some(hasLink);
+}
+
+function mediaSourceSignature(node) {
+	const bgLink = linkIds(findInput(node, "background")).join(",");
+	const bgUpload = backgroundInputLinked(node) ? "" : String(widget(node, BACKGROUND_UPLOAD_WIDGET)?.value || node?.properties?.[BACKGROUND_UPLOAD_WIDGET] || "");
+	return `bg:${bgLink}:${bgUpload}|person:${personSourceSignature(node)}`;
+}
+
+function invalidatePayloadOnSourceChange(node) {
+	const signature = mediaSourceSignature(node);
+	if (node.__gjjSceneFusionMediaSourceSignature == null) {
+		node.__gjjSceneFusionMediaSourceSignature = signature;
+		return false;
+	}
+	if (node.__gjjSceneFusionMediaSourceSignature === signature) return false;
+	node.__gjjSceneFusionMediaSourceSignature = signature;
+	node.__gjjSceneFusionPayload = null;
+	return true;
+}
+
+async function updateLocalPreview(node) {
+	const hasExternalBackground = backgroundInputLinked(node);
+	const hasExternalPersons = personInputLinked(node);
+	const bgRef = hasExternalBackground ? null : inputImageRef(widget(node, BACKGROUND_UPLOAD_WIDGET)?.value || node?.properties?.[BACKGROUND_UPLOAD_WIDGET]);
+	const existing = node.__gjjSceneFusionPayload;
+	const background = bgRef || existing?.background;
+	if (!background?.filename) return;
+	const size = await loadImageSize(background);
+	const widthWidget = Number(widget(node, "width")?.value || 0);
+	const heightWidget = Number(widget(node, "height")?.value || 0);
+	const backgroundW = align16(size.width);
+	const backgroundH = align16(size.height);
+	const staleSquare = align16(widthWidget) === 2048 && align16(heightWidget) === 2048 && (backgroundW !== 2048 || backgroundH !== 2048);
+	if ((!align16(widthWidget) || staleSquare) && backgroundW) setWidgetValue(node, "width", backgroundW);
+	if ((!align16(heightWidget) || staleSquare) && backgroundH) setWidgetValue(node, "height", backgroundH);
+	const canvasW = align16(widget(node, "width")?.value) || backgroundW || Number(existing?.canvas?.width || 1024);
+	const canvasH = align16(widget(node, "height")?.value) || backgroundH || Number(existing?.canvas?.height || 1024);
+	const personRefs = hasExternalPersons ? [] : uploadedPersonRefs(node);
+	const linkedPersonCount = personInputs(node).filter(hasLink).length;
+	const existingCount = hasExternalPersons && existing?.__sourceSignature === mediaSourceSignature(node) ? existing?.persons?.length || 0 : 0;
+	const count = hasExternalPersons
+		? Math.max(linkedPersonCount, existingCount)
+		: Math.max(personRefs.length, existing?.persons?.length || 0);
+	const saved = parseConfig(node);
+	const persons = Array.from({ length: count }, (_, index) => ({
+		...defaultPerson(index, count),
+		...(saved[index] || {}),
+		id: personName(index + 1),
+		color: validColor(saved[index]?.color, DEFAULT_COLORS[index % DEFAULT_COLORS.length]),
+	}));
+	node.__gjjSceneFusionPayload = {
+		__sourceSignature: mediaSourceSignature(node),
+		canvas: { width: canvasW, height: canvasH, background_fit: widget(node, "background_fit")?.value || "裁切填满" },
+		background,
+		persons,
+		person_refs: [],
+		placement_config: { version: 1, persons },
+		merged: null,
+	};
+	writeConfig(node, persons);
+	renderPayload(node);
+}
+
 function parsePayload(message) {
 	const direct = Array.isArray(message?.gjj_scene_fusion_prep) ? message.gjj_scene_fusion_prep[0] : message?.gjj_scene_fusion_prep;
 	if (direct?.canvas) return direct;
@@ -110,7 +418,7 @@ function clamp(value, lower, upper) {
 
 function align16(value) {
 	const number = Number(value);
-	if (!Number.isFinite(number)) return 1024;
+	if (!Number.isFinite(number) || number <= 0) return 0;
 	return Math.max(16, Math.floor(Math.max(16, Math.round(number)) / 16) * 16);
 }
 
@@ -131,6 +439,123 @@ function personInputs(node) {
 
 function hasLink(input) {
 	return input?.link != null || (Array.isArray(input?.links) && input.links.length > 0);
+}
+
+function linkIds(input) {
+	if (!input) return [];
+	if (Array.isArray(input.links)) return input.links.filter((id) => id != null);
+	return input.link != null ? [input.link] : [];
+}
+
+function getGraphLink(graph, linkId) {
+	if (!graph || linkId == null) return null;
+	if (typeof graph.links?.get === "function") return graph.links.get(linkId);
+	return graph.links?.[linkId] || null;
+}
+
+function pausedExternalLinks(node) {
+	const value = node?.properties?.[PAUSED_LINKS_PROPERTY];
+	return Array.isArray(value) ? value : [];
+}
+
+function managedExternalInputs(node) {
+	const inputs = [findInput(node, "background"), ...personInputs(node)];
+	return inputs.filter(Boolean);
+}
+
+function currentExternalLinks(node) {
+	const graph = node?.graph || app.graph;
+	const result = [];
+	for (const input of managedExternalInputs(node)) {
+		const targetSlot = node.inputs.indexOf(input);
+		for (const linkId of linkIds(input)) {
+			const link = getGraphLink(graph, linkId);
+			if (!link) continue;
+			result.push({
+				origin_id: link.origin_id,
+				origin_slot: link.origin_slot,
+				target_name: input.name,
+				target_slot: targetSlot,
+			});
+		}
+	}
+	return result;
+}
+
+function ensureInputName(node, name) {
+	if (name === "background") return ensureInput(node, "background", MEDIA_TYPE);
+	if (String(name || "").startsWith(PERSON_PREFIX)) {
+		const target = personIndex(name);
+		while (personInputs(node).length < target && personInputs(node).length < MAX_PERSONS) addPersonInput(node);
+		return findInput(node, name);
+	}
+	return null;
+}
+
+function setPausedExternalLinks(node, links) {
+	node.properties ||= {};
+	node.properties[PAUSED_LINKS_PROPERTY] = Array.isArray(links) ? links : [];
+	node.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function updateLinkToggleButton(node) {
+	const ui = node.__gjjSceneFusionUI;
+	if (!ui?.linkToggle) return;
+	const activeLinks = currentExternalLinks(node);
+	const pausedLinks = pausedExternalLinks(node);
+	const visible = activeLinks.length > 0 || pausedLinks.length > 0;
+	ui.linkToggle.style.display = visible ? "" : "none";
+	ui.linkToggle.dataset.active = pausedLinks.length > 0 && activeLinks.length === 0 ? "true" : "false";
+	ui.linkToggle.title = activeLinks.length > 0
+		? "断开外部背景/人物链接，并记住来源节点和插槽。"
+		: "恢复上次断开的外部背景/人物链接。";
+}
+
+function disconnectExternalLinks(node) {
+	const links = currentExternalLinks(node);
+	if (!links.length) return false;
+	setPausedExternalLinks(node, links);
+	for (const input of managedExternalInputs(node)) {
+		const slot = node.inputs.indexOf(input);
+		if (slot < 0 || !hasLink(input)) continue;
+		if (typeof node.disconnectInput === "function") node.disconnectInput(slot);
+		else {
+			for (const linkId of linkIds(input)) node.graph?.removeLink?.(linkId);
+			input.link = null;
+			input.links = null;
+		}
+	}
+	node.graph?.change?.();
+	normalizeInputs(node);
+	updateLinkToggleButton(node);
+	scheduleRefresh(node);
+	return true;
+}
+
+function restoreExternalLinks(node) {
+	const links = pausedExternalLinks(node);
+	if (!links.length) return false;
+	const graph = node?.graph || app.graph;
+	for (const item of links) {
+		const source = graph?.getNodeById?.(item.origin_id) || graph?._nodes?.find((candidate) => String(candidate?.id) === String(item.origin_id));
+		const input = ensureInputName(node, item.target_name);
+		const targetSlot = node.inputs.indexOf(input);
+		if (!source || targetSlot < 0) continue;
+		source.connect?.(item.origin_slot, node, targetSlot);
+	}
+	setPausedExternalLinks(node, []);
+	node.graph?.change?.();
+	normalizeInputs(node);
+	updateLinkToggleButton(node);
+	scheduleRefresh(node);
+	schedulePersonCutoutPreview(node, true);
+	return true;
+}
+
+function toggleExternalLinks(node) {
+	if (currentExternalLinks(node).length) return disconnectExternalLinks(node);
+	return restoreExternalLinks(node);
 }
 
 function defaultPerson(index, count) {
@@ -165,7 +590,7 @@ function writeConfig(node, persons) {
 		scale: clamp(finite(item.scale, 1), 0.08, 4),
 		rotation: clamp(finite(item.rotation, 0), -180, 180),
 		face_angle: clamp(finite(item.face_angle, 0), -180, 180),
-		color: DEFAULT_COLORS[index % DEFAULT_COLORS.length],
+		color: validColor(item.color, DEFAULT_COLORS[index % DEFAULT_COLORS.length]),
 		z: finite(item.z, index),
 		pose: normalizePose(item.pose),
 	}));
@@ -367,6 +792,95 @@ function validColor(value, fallback) {
 	return /^#[0-9a-fA-F]{6}$/.test(text) ? text.toUpperCase() : fallback;
 }
 
+function colorRgb(hex) {
+	const text = validColor(hex, "#000000").slice(1);
+	return [0, 2, 4].map((index) => parseInt(text.slice(index, index + 2), 16));
+}
+
+function colorDistance(a, b) {
+	const ar = colorRgb(a);
+	const br = colorRgb(b);
+	const rgb = Math.hypot(ar[0] - br[0], ar[1] - br[1], ar[2] - br[2]);
+	const al = (ar[0] * 0.299 + ar[1] * 0.587 + ar[2] * 0.114);
+	const bl = (br[0] * 0.299 + br[1] * 0.587 + br[2] * 0.114);
+	return rgb + Math.abs(al - bl) * 1.8;
+}
+
+function rgbToHex(rgb) {
+	return `#${rgb.map((value) => clamp(Math.round(value), 0, 255).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
+}
+
+async function averageImageColor(ref) {
+	const src = viewUrl(ref);
+	if (!src) return null;
+	return await new Promise((resolve) => {
+		const image = new Image();
+		image.onload = () => {
+			try {
+				const canvas = document.createElement("canvas");
+				canvas.width = 24;
+				canvas.height = 24;
+				const ctx = canvas.getContext("2d", { willReadFrequently: true });
+				ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+				const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+				const total = [0, 0, 0];
+				let count = 0;
+				for (let index = 0; index < data.length; index += 4) {
+					const alpha = data[index + 3] / 255;
+					if (alpha <= 0.02) continue;
+					total[0] += data[index] * alpha;
+					total[1] += data[index + 1] * alpha;
+					total[2] += data[index + 2] * alpha;
+					count += alpha;
+				}
+				resolve(count ? rgbToHex(total.map((value) => value / count)) : null);
+			} catch (_) {
+				resolve(null);
+			}
+		};
+		image.onerror = () => resolve(null);
+		image.src = src;
+	});
+}
+
+function pickPersonColors(count, backgroundColor) {
+	const pool = [...RANDOM_COLOR_POOL].sort(() => Math.random() - 0.5);
+	const colors = [];
+	for (let index = 0; index < count; index += 1) {
+		let best = pool[0] || DEFAULT_COLORS[index % DEFAULT_COLORS.length];
+		let bestScore = -Infinity;
+		for (const color of pool) {
+			if (colors.includes(color)) continue;
+			const bgScore = backgroundColor ? colorDistance(color, backgroundColor) : 0;
+			const personScore = colors.length ? Math.min(...colors.map((used) => colorDistance(color, used))) : 180;
+			const score = bgScore * 1.2 + personScore + Math.random() * 20;
+			if (score > bestScore) {
+				best = color;
+				bestScore = score;
+			}
+		}
+		colors.push(best);
+	}
+	return colors;
+}
+
+async function randomizePersonColors(node) {
+	const persons = configFromPayload(node);
+	if (!persons.length) return;
+	const backgroundColor = await averageImageColor(node.__gjjSceneFusionPayload?.background);
+	const colors = pickPersonColors(persons.length, backgroundColor);
+	const nextPersons = persons.map((person, index) => ({ ...person, color: colors[index] || DEFAULT_COLORS[index % DEFAULT_COLORS.length] }));
+	writeConfig(node, nextPersons);
+	if (node.__gjjSceneFusionPayload?.canvas) {
+		node.__gjjSceneFusionPayload = {
+			...node.__gjjSceneFusionPayload,
+			persons: nextPersons,
+			placement_config: { version: 1, persons: nextPersons },
+		};
+	}
+	renderPayload(node);
+}
+
 function configFromPayload(node) {
 	const payload = node.__gjjSceneFusionPayload;
 	const persons = Array.isArray(payload?.persons) ? payload.persons : [];
@@ -380,7 +894,7 @@ function configFromPayload(node) {
 			...person,
 			...savedPerson,
 			id,
-			color: DEFAULT_COLORS[index % DEFAULT_COLORS.length],
+			color: validColor(savedPerson.color ?? person?.color, DEFAULT_COLORS[index % DEFAULT_COLORS.length]),
 			face_angle: finite(savedPerson.face_angle ?? person?.face_angle, 0),
 			pose: normalizePose((savedPerson || person)?.pose),
 		};
@@ -777,15 +1291,34 @@ function bindHandleDrag(node, handle, person, persons, canvasW, canvasH) {
 function renderOutputPreviews(ui, payload) {
 	if (!ui?.previews) return;
 	ui.previews.replaceChildren();
-	for (const [item, label] of [[payload.stick, "背景火柴棍"], [payload.white, "白底人物框"]]) {
+	const cards = [];
+	for (const person of (payload.persons || []).filter((item) => item?.filename)) {
+		cards.push({ item: person, label: person.label || person.id || "人物", personId: person.id, color: person.color });
+	}
+	for (const { item, label, personId, color } of cards) {
 		if (!item?.filename) continue;
 		const card = document.createElement("div");
 		card.className = "gjj-sfp-preview";
+		if (personId) {
+			card.classList.add("person");
+			card.style.setProperty("--gjj-person-color", validColor(color, "#2f424a"));
+			if (ui?.node?.__gjjSceneFusionSelected === personId) card.classList.add("selected");
+		}
 		const image = document.createElement("img");
 		image.src = viewUrl(item);
 		const text = document.createElement("span");
 		text.textContent = label;
 		card.append(image, text);
+		if (personId) {
+			card.title = `${label}：点击选择对应火柴人`;
+			card.style.cursor = "pointer";
+			card.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				ui.node.__gjjSceneFusionSelected = personId;
+				renderPayload(ui.node);
+			});
+		}
 		ui.previews.appendChild(card);
 	}
 }
@@ -793,6 +1326,7 @@ function renderOutputPreviews(ui, payload) {
 function ensurePreview(node) {
 	const ui = node.__gjjSceneFusionUI;
 	if (!ui?.root) return null;
+	ui.node = node;
 	if (!ui.stageWrap) {
 		const stageWrap = document.createElement("div");
 		stageWrap.className = "gjj-sfp-stage-wrap";
@@ -805,6 +1339,7 @@ function ensurePreview(node) {
 		ui.stageWrap = stageWrap;
 		ui.stage = stage;
 		ui.previews = previews;
+		ui.node = node;
 	}
 	return ui;
 }
@@ -813,7 +1348,7 @@ async function runCurrentNode(node, button = null) {
 	const oldText = button?.textContent;
 	if (button) {
 		button.disabled = true;
-		button.textContent = "刷新中";
+		button.textContent = "⏳";
 	}
 	try {
 		return await queueOnlyCurrentNode(node);
@@ -823,9 +1358,51 @@ async function runCurrentNode(node, button = null) {
 	} finally {
 		if (button) {
 			button.disabled = false;
-			button.textContent = oldText || "🔄 刷新";
+			button.textContent = oldText || "🔄";
 		}
 	}
+}
+
+function personSourceSignature(node) {
+	const uploads = parseUploadList(widget(node, PERSON_UPLOADS_WIDGET)?.value || node?.properties?.[PERSON_UPLOADS_WIDGET]).join(",");
+	const links = personInputs(node)
+		.map((input) => `${input.name}:${input.link ?? ""}:${Array.isArray(input.links) ? input.links.join(",") : ""}`)
+		.join("|");
+	return `${uploads}|${links}`;
+}
+
+function hasPersonSource(node) {
+	return uploadedPersonCount(node) > 0 || personInputs(node).some(hasLink);
+}
+
+async function runPersonCutoutPreview(node) {
+	if (!node || !hasPersonSource(node)) return false;
+	if (node.__gjjSceneFusionCutoutRunning) {
+		node.__gjjSceneFusionCutoutPending = true;
+		return false;
+	}
+	node.__gjjSceneFusionCutoutRunning = true;
+	setProgress(node, "抠图", 0.01);
+	setWidgetValue(node, CUTOUT_PREVIEW_WIDGET, true);
+	try {
+		return await runCurrentNode(node);
+	} finally {
+		setWidgetValue(node, CUTOUT_PREVIEW_WIDGET, false);
+		node.__gjjSceneFusionCutoutRunning = false;
+		if (node.__gjjSceneFusionCutoutPending) {
+			node.__gjjSceneFusionCutoutPending = false;
+			schedulePersonCutoutPreview(node, true);
+		}
+	}
+}
+
+function schedulePersonCutoutPreview(node, force = false) {
+	if (!node) return;
+	const signature = personSourceSignature(node);
+	if (!force && node.__gjjSceneFusionLastPersonSourceSignature === signature) return;
+	node.__gjjSceneFusionLastPersonSourceSignature = signature;
+	clearTimeout(node.__gjjSceneFusionCutoutTimer);
+	node.__gjjSceneFusionCutoutTimer = setTimeout(() => runPersonCutoutPreview(node), 180);
 }
 
 function resetPersons(node) {
@@ -833,6 +1410,73 @@ function resetPersons(node) {
 	const count = Array.isArray(payload?.persons) ? payload.persons.length : personInputs(node).filter(hasLink).length;
 	const persons = Array.from({ length: Math.max(1, count) }, (_, index) => defaultPerson(index, Math.max(1, count)));
 	writeConfig(node, persons);
+	renderPayload(node);
+}
+
+function applyPosePreset(node, preset) {
+	const payload = node.__gjjSceneFusionPayload;
+	const persons = configFromPayload(node);
+	if (!persons.length || !preset?.pose) return;
+	const selected = String(node.__gjjSceneFusionSelected || persons[0]?.id || "");
+	let index = persons.findIndex((item) => String(item?.id || "") === selected);
+	if (index < 0) index = 0;
+	const nextPersons = persons.map((person, personIndex) => personIndex === index
+		? {
+			...person,
+			pose: normalizeIkPose(normalizePose(preset.pose)),
+			rotation: finite(preset.rotation ?? 0, 0),
+			face_angle: finite(preset.face_angle ?? 0, 0),
+		}
+		: person);
+	node.__gjjSceneFusionSelected = nextPersons[index]?.id || "";
+	writeConfig(node, nextPersons);
+	if (payload?.canvas) {
+		node.__gjjSceneFusionPayload = {
+			...payload,
+			persons: nextPersons,
+			placement_config: { version: 1, persons: nextPersons },
+		};
+	}
+	renderPayload(node);
+}
+
+function reindexPersons(persons) {
+	const count = Array.isArray(persons) ? persons.length : 0;
+	return (persons || []).map((item, index) => ({
+		...defaultPerson(index, count),
+		...item,
+		id: personName(index + 1),
+		label: `人物 ${index + 1}`,
+		color: DEFAULT_COLORS[index % DEFAULT_COLORS.length],
+		z: finite(item?.z, index),
+	}));
+}
+
+async function deleteSelectedPerson(node) {
+	const payload = node.__gjjSceneFusionPayload;
+	const persons = configFromPayload(node);
+	if (!persons.length) return;
+	const selected = String(node.__gjjSceneFusionSelected || persons[0]?.id || "");
+	let index = persons.findIndex((item) => String(item?.id || "") === selected);
+	if (index < 0) {
+		const parsedIndex = personIndex(selected) - 1;
+		index = Number.isFinite(parsedIndex) ? parsedIndex : 0;
+	}
+	index = clamp(index, 0, persons.length - 1);
+	const uploads = parseUploadList(widget(node, PERSON_UPLOADS_WIDGET)?.value || node?.properties?.[PERSON_UPLOADS_WIDGET]);
+	if (uploads.length && index < uploads.length) {
+		setWidgetValue(node, PERSON_UPLOADS_WIDGET, JSON.stringify(uploads.filter((_, itemIndex) => itemIndex !== index)));
+	}
+	const nextPersons = reindexPersons(persons.filter((_, itemIndex) => itemIndex !== index));
+	node.__gjjSceneFusionSelected = nextPersons[Math.min(index, nextPersons.length - 1)]?.id || "";
+	writeConfig(node, nextPersons);
+	if (payload?.canvas) {
+		node.__gjjSceneFusionPayload = {
+			...payload,
+			persons: nextPersons,
+			placement_config: { version: 1, persons: nextPersons },
+		};
+	}
 	renderPayload(node);
 }
 
@@ -847,6 +1491,189 @@ function makeButton(label, title) {
 	return button;
 }
 
+function normalizeUploadFilename(data, file, requestedSubfolder = "") {
+	const filename = String(data?.name || data?.filename || data?.file || file?.name || "").replace(/\\/g, "/");
+	if (!filename) return "";
+	if (filename.includes("/")) return filename;
+	const subfolder = String(data?.subfolder ?? requestedSubfolder ?? "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+	return subfolder ? `${subfolder}/${filename}` : filename;
+}
+
+async function uploadImageFile(file, subfolder = "gjj_scene_fusion_prep") {
+	const cleanSubfolder = String(subfolder || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+	const form = new FormData();
+	form.append("image", file, file.name);
+	form.append("type", "input");
+	form.append("overwrite", "true");
+	if (cleanSubfolder) form.append("subfolder", cleanSubfolder);
+	const response = api?.fetchApi
+		? await api.fetchApi("/upload/image", { method: "POST", body: form })
+		: await fetch(api.apiURL("/upload/image"), { method: "POST", body: form });
+	if (!response?.ok) throw new Error(`上传失败：HTTP ${response?.status || "?"}`);
+	const data = await response.json().catch(() => ({}));
+	const filename = normalizeUploadFilename(data, file, cleanSubfolder);
+	if (!filename) throw new Error("上传成功但没有返回文件名");
+	return filename;
+}
+
+async function openImagesForNode(node, kind, files) {
+	const list = Array.from(files || []).filter((file) => file?.type?.startsWith("image/"));
+	if (!list.length) return;
+	const uploaded = [];
+	for (let index = 0; index < list.length; index += 1) {
+		uploaded.push(await uploadImageFile(list[index]));
+	}
+	if (kind === "background") {
+		setWidgetValue(node, BACKGROUND_UPLOAD_WIDGET, uploaded[0] || "");
+	} else {
+		setWidgetValue(node, PERSON_UPLOADS_WIDGET, JSON.stringify(uploaded));
+	}
+	normalizeInputs(node);
+	await updateLocalPreview(node);
+	if (kind === "person") {
+		schedulePersonCutoutPreview(node, true);
+	}
+}
+
+function setWidgetValue(node, name, value) {
+	const item = widget(node, name);
+	if (!item) return;
+	const oldValue = item.value;
+	item.value = value;
+	if (item.inputEl && "value" in item.inputEl) item.inputEl.value = value;
+	if (item.element && "value" in item.element) item.element.value = value;
+	if (item.__gjjSceneFusionFieldEl && "value" in item.__gjjSceneFusionFieldEl) item.__gjjSceneFusionFieldEl.value = value;
+	item.callback?.(value);
+	node.properties ||= {};
+	node.properties[name] = validParamValue(name, value);
+	node.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+	if ((name === BACKGROUND_UPLOAD_WIDGET || name === PERSON_UPLOADS_WIDGET) && String(oldValue ?? "") !== String(value ?? "")) {
+		invalidatePayloadOnSourceChange(node);
+	}
+	if (name === PERSON_UPLOADS_WIDGET && String(oldValue ?? "") !== String(value ?? "")) {
+		schedulePersonCutoutPreview(node, true);
+	}
+}
+
+function modelSelectValues(name, currentValue) {
+	const values = [];
+	const current = String(currentValue ?? "").trim();
+	const preset = String(MODEL_DEFAULTS[name] || "").trim();
+	if (current && current !== "自动") values.push(current);
+	if (preset && !values.includes(preset)) values.push(preset);
+	return values.length ? values : [preset || current || ""];
+}
+
+function makeSettingField(node, name, label, kind) {
+	const item = widget(node, name);
+	if (!item) return null;
+	const wrap = document.createElement("label");
+	wrap.className = "gjj-sfp-field";
+	if (kind === "model") wrap.classList.add("wide");
+	const title = document.createElement("span");
+	title.textContent = label;
+	let field;
+	const currentValue = item.value ?? "";
+	if (kind === "select" || kind === "model") {
+		field = document.createElement("select");
+		field.className = "gjj-sfp-input";
+		const values = kind === "model"
+			? modelSelectValues(name, currentValue)
+			: (item.options?.values || item.values || ["裁切填满", "等比留边", "拉伸填满"]);
+		for (const value of values) {
+			const opt = document.createElement("option");
+			opt.value = value;
+			opt.textContent = value;
+			field.appendChild(opt);
+		}
+	} else {
+		field = document.createElement("input");
+		field.className = "gjj-sfp-input";
+		field.type = kind === "number" ? "number" : "text";
+	}
+	field.value = (kind === "model" && (!String(currentValue).trim() || String(currentValue).trim() === "自动"))
+		? (MODEL_DEFAULTS[name] || "")
+		: currentValue;
+	if (kind === "model" && field.value && (!String(item.value ?? "").trim() || String(item.value ?? "").trim() === "自动")) {
+		setWidgetValue(node, name, field.value);
+	}
+	item.__gjjSceneFusionFieldEl = field;
+	field.addEventListener("change", () => {
+		setWidgetValue(node, name, kind === "number" ? Number(field.value) : field.value);
+	});
+	for (const eventName of ["pointerdown", "mousedown", "wheel"]) field.addEventListener(eventName, (event) => event.stopPropagation());
+	wrap.append(title, field);
+	return wrap;
+}
+
+function variableOptions(node) {
+	const apiObject = globalThis.GJJ_VariableBroadcast;
+	const graph = node?.graph || app.graph;
+	return typeof apiObject?.getVisibleSetOptions === "function" ? (apiObject.getVisibleSetOptions(graph) || []) : [];
+}
+
+function openTemplateParamPicker(node, sourceButton) {
+	node.__gjjSceneFusionVariablePopup?.remove?.();
+	const popup = document.createElement("div");
+	popup.className = "gjj-sfp-var-popup";
+	const rect = sourceButton?.getBoundingClientRect?.() || { left: 24, bottom: 80 };
+	popup.style.left = `${Math.round(Math.max(12, Math.min(window.innerWidth - 580, rect.left || 24)))}px`;
+	popup.style.top = `${Math.round(Math.max(12, Math.min(window.innerHeight - 580, (rect.bottom || 80) + 6)))}px`;
+	const head = document.createElement("div");
+	head.textContent = "⚡ TemplateParams 对齐参考";
+	head.style.cssText = "font-weight:800;";
+	const hint = document.createElement("div");
+	hint.textContent = "左列是本节点可广播参数名；右列是当前工作流变量。变量名同名且没有真实连线时，执行会自动优先使用外部值。";
+	hint.style.cssText = "color:#96a8af;font-size:11px;line-height:1.35;";
+	const grid = document.createElement("div");
+	grid.className = "gjj-sfp-var-grid";
+	const left = document.createElement("div");
+	left.className = "gjj-sfp-var-list";
+	const right = document.createElement("div");
+	right.className = "gjj-sfp-var-list";
+	for (const [name, label] of [["width", "宽度"], ["height", "高度"], ["seed", "种子"], ["steps", "步数"], ["cfg", "CFG"], ["denoise", "降噪"]]) {
+		const item = document.createElement("button");
+		item.type = "button";
+		item.className = "gjj-sfp-var-item";
+		item.textContent = `${label}  (${name})`;
+		left.appendChild(item);
+	}
+	const options = variableOptions(node);
+	for (const option of options) {
+		const value = String(option?.value || "").trim();
+		if (!value) continue;
+		const item = document.createElement("button");
+		item.type = "button";
+		item.className = "gjj-sfp-var-item";
+		item.innerHTML = `<b>${String(option?.label || value)}</b><br><span style="color:#8fa3ad">${value}</span>`;
+		right.appendChild(item);
+	}
+	if (!right.children.length) {
+		const empty = document.createElement("div");
+		empty.textContent = "当前没有可见变量";
+		empty.style.cssText = "padding:12px;color:#8fa3ad;text-align:center;";
+		right.appendChild(empty);
+	}
+	const close = makeButton("关闭", "关闭");
+	close.addEventListener("click", () => popup.remove());
+	grid.append(left, right);
+	popup.append(head, hint, grid, close);
+	for (const eventName of ["pointerdown", "mousedown", "wheel"]) popup.addEventListener(eventName, (event) => event.stopPropagation());
+	document.body.appendChild(popup);
+	node.__gjjSceneFusionVariablePopup = popup;
+}
+
+function setProgress(node, text, progress) {
+	const ui = node.__gjjSceneFusionUI;
+	if (!ui?.progressFill || !ui?.progressText) return;
+	const pct = Number.isFinite(Number(progress)) ? clamp(Number(progress), 0, 1) : 0;
+	node.__gjjSceneFusionLastProgressText = String(text || "待执行");
+	ui.progressFill.style.width = `${Math.round(pct * 100)}%`;
+	ui.progressText.textContent = `${String(text || "待执行")} ${Math.round(pct * 100)}%`;
+	refreshSize(node);
+}
+
 function makePanel(node) {
 	const root = document.createElement("div");
 	root.className = "gjj-sfp-root";
@@ -854,21 +1681,122 @@ function makePanel(node) {
 	root.addEventListener("mousedown", (event) => event.stopPropagation());
 	const buttons = document.createElement("div");
 	buttons.className = "gjj-sfp-buttons";
-	const refresh = makeButton("🔄 刷新", "重新执行当前节点，更新抠图和预览。");
+	const backgroundFile = document.createElement("input");
+	backgroundFile.type = "file";
+	backgroundFile.accept = "image/*";
+	backgroundFile.style.display = "none";
+	const personFile = document.createElement("input");
+	personFile.type = "file";
+	personFile.accept = "image/*";
+	personFile.multiple = true;
+	personFile.style.display = "none";
+	root.append(backgroundFile, personFile);
+	const background = makeButton("🖼️", "在当前节点内部打开背景图。");
+	background.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		backgroundFile.click();
+	});
+	const person = makeButton("👤", "打开人物图并只执行抠图预览。");
+	person.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		personFile.click();
+	});
+	const params = makeButton("⚡", "查看 GJJ_TemplateParams 变量与本节点参数的两列式对齐。");
+	params.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		openTemplateParamPicker(node, params);
+	});
+	const removePerson = makeButton("🗑", "删除当前选中的人物。");
+	removePerson.addEventListener("click", async (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		await deleteSelectedPerson(node);
+	});
+	const randomColor = makeButton("🎲", "随机人物颜色，并尽量避开背景主色。");
+	randomColor.addEventListener("click", async (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		await randomizePersonColors(node);
+	});
+	const linkToggle = makeButton("🔗", "断开或恢复外部背景/人物链接。");
+	linkToggle.style.display = "none";
+	linkToggle.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		toggleExternalLinks(node);
+	});
+	const settingsButton = makeButton("⚙️", "展开或收起融合参数。");
+	const refresh = makeButton("🔄", "重新执行当前节点，更新抠图和预览。");
 	refresh.addEventListener("click", async (event) => {
 		event.preventDefault();
 		event.stopPropagation();
+		setProgress(node, "排队", 0.01);
 		await runCurrentNode(node, refresh);
 	});
-	const reset = makeButton("↺ 重置", "重置人物位置、颜色和火柴棍姿势。");
+	const reset = makeButton("↺", "重置人物位置、颜色和火柴棍姿势。");
 	reset.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
 		resetPersons(node);
 	});
-	buttons.append(refresh, reset);
+	buttons.append(background, person, params, removePerson, randomColor, linkToggle, settingsButton, refresh, reset);
+	const poseButtons = document.createElement("div");
+	poseButtons.className = "gjj-sfp-pose-buttons";
+	for (const preset of POSE_PRESETS) {
+		const button = makeButton(preset.emoji, `动作预设：${preset.title}`);
+		button.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			applyPosePreset(node, preset);
+		});
+		poseButtons.appendChild(button);
+	}
+	const progress = document.createElement("div");
+	progress.className = "gjj-sfp-progress";
+	const progressTrack = document.createElement("div");
+	progressTrack.className = "gjj-sfp-progress-track";
+	const progressFill = document.createElement("div");
+	progressFill.className = "gjj-sfp-progress-fill";
+	const progressText = document.createElement("div");
+	progressText.className = "gjj-sfp-progress-text";
+	progressText.textContent = "待执行 0%";
+	progressTrack.appendChild(progressFill);
+	progress.append(progressTrack, progressText);
+	const settings = document.createElement("div");
+	settings.className = "gjj-sfp-settings";
+	settings.classList.toggle("open", Boolean(node.properties?.gjj_scene_fusion_settings_open));
+	settingsButton.dataset.active = settings.classList.contains("open") ? "true" : "false";
+	settingsButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const open = !settings.classList.contains("open");
+		settings.classList.toggle("open", open);
+		node.properties ||= {};
+		node.properties.gjj_scene_fusion_settings_open = open;
+		settingsButton.dataset.active = open ? "true" : "false";
+		refreshSize(node);
+	});
+	for (const [name, label, kind] of SETTINGS_FIELDS) {
+		const field = makeSettingField(node, name, label, kind);
+		if (field) settings.appendChild(field);
+	}
+	backgroundFile.addEventListener("change", async () => {
+		try { await openImagesForNode(node, "background", backgroundFile.files); }
+		finally { backgroundFile.value = ""; }
+	});
+	personFile.addEventListener("change", async () => {
+		try { await openImagesForNode(node, "person", personFile.files); }
+		finally { personFile.value = ""; }
+	});
 	root.appendChild(buttons);
-	node.__gjjSceneFusionUI = { root, buttons, refresh, reset, stageWrap: null, stage: null, controls: null, previews: null };
+	root.appendChild(poseButtons);
+	root.appendChild(progress);
+	root.appendChild(settings);
+	node.__gjjSceneFusionUI = { root, buttons, poseButtons, background, person, params, removePerson, randomColor, linkToggle, settingsButton, refresh, reset, progress, progressFill, progressText, settings, stageWrap: null, stage: null, controls: null, previews: null };
+	updateLinkToggleButton(node);
 	return root;
 }
 
@@ -945,8 +1873,6 @@ function reorderInputs(node) {
 	};
 	push(findInput(node, "background"));
 	for (const input of personInputs(node)) push(input);
-	push(findInput(node, "width"));
-	push(findInput(node, "height"));
 	for (const input of node.inputs) push(input);
 	node.inputs.splice(0, node.inputs.length, ...ordered);
 }
@@ -967,17 +1893,12 @@ function normalizeInputs(node) {
 
 function normalizeOutputs(node) {
 	if (!Array.isArray(node?.outputs)) return;
-	while (node.outputs.length > 2) node.removeOutput?.(node.outputs.length - 1);
-	if (!node.outputs[0]) node.addOutput?.("背景火柴棍标注图", "IMAGE");
-	if (!node.outputs[1]) node.addOutput?.("白底人物色框图", "IMAGE");
-	node.outputs[0].name = "背景火柴棍标注图";
-	node.outputs[0].label = "背景火柴棍标注图";
-	node.outputs[0].localized_name = "背景火柴棍标注图";
+	while (node.outputs.length > 1) node.removeOutput?.(node.outputs.length - 1);
+	if (!node.outputs[0]) node.addOutput?.("合并图片", "IMAGE");
+	node.outputs[0].name = "合并图片";
+	node.outputs[0].label = "合并图片";
+	node.outputs[0].localized_name = "合并图片";
 	node.outputs[0].type = "IMAGE";
-	node.outputs[1].name = "白底人物色框图";
-	node.outputs[1].label = "白底人物色框图";
-	node.outputs[1].localized_name = "白底人物色框图";
-	node.outputs[1].type = "IMAGE";
 }
 
 function validParamValue(name, value) {
@@ -1003,6 +1924,18 @@ function validParamValue(name, value) {
 		const number = Number(value);
 		return Number.isFinite(number) && number >= 0 && number <= 32 ? number : 0.8;
 	}
+	if (["positive_prompt", "negative_prompt", "sampler_name", "scheduler", "fusion_unet_name", "fusion_unet_dtype", "fusion_clip_name", "fusion_clip_dtype", "fusion_vae_name", "fusion_vae_dtype", "fusion_lora_1_name", "fusion_lora_1_strength", "fusion_lora_2_name", "fusion_lora_2_strength"].includes(name)) {
+		return String(value ?? "");
+	}
+	if (["seed", "steps", "process_res"].includes(name)) {
+		const number = Number(value);
+		return Number.isFinite(number) ? Math.round(number) : (name === "steps" ? 8 : 0);
+	}
+	if (["cfg", "denoise", "model_shift", "cfg_norm_strength"].includes(name)) {
+		const number = Number(value);
+		return Number.isFinite(number) ? number : (name === "model_shift" ? 3.1 : 1);
+	}
+	if (name === "cfg_norm_pre_cfg" || name === CUTOUT_PREVIEW_WIDGET) return Boolean(value);
 	return value ?? "";
 }
 
@@ -1014,7 +1947,11 @@ function restoreProperties(node) {
 	node.properties ||= {};
 	for (const name of PY_WIDGET_ORDER) {
 		const item = widget(node, name);
-		const value = validParamValue(name, node.properties[name] ?? item?.value);
+		let value = validParamValue(name, node.properties[name] ?? item?.value);
+		if (name === "steps" && Number(value) === 6) value = 8;
+		if (name === "positive_prompt" && !String(value || "").trim()) {
+			value = DEFAULT_FUSION_PROMPT;
+		}
 		node.properties[name] = value;
 		if (item) item.value = value;
 	}
@@ -1026,7 +1963,12 @@ function prepareSerialized(serializedNode) {
 	const raw = Array.isArray(serializedNode.widgets_values) ? serializedNode.widgets_values : [];
 	for (let index = 0; index < PY_WIDGET_ORDER.length; index++) {
 		const name = PY_WIDGET_ORDER[index];
-		serializedNode.properties[name] = validParamValue(name, serializedNode.properties[name] ?? raw[index]);
+		let value = validParamValue(name, serializedNode.properties[name] ?? raw[index]);
+		if (name === "steps" && Number(value) === 6) value = 8;
+		if (name === "positive_prompt" && !String(value || "").trim()) {
+			value = DEFAULT_FUSION_PROMPT;
+		}
+		serializedNode.properties[name] = value;
 	}
 	serializedNode.widgets_values = canonicalValues(serializedNode.properties);
 }
@@ -1057,9 +1999,20 @@ function stabilize(node) {
 	restoreProperties(node);
 	hideWidgets(node);
 	normalizeInputs(node);
+	if (node.__gjjSceneFusionMediaSourceSignature == null) {
+		node.__gjjSceneFusionMediaSourceSignature = mediaSourceSignature(node);
+	}
+	if (node.__gjjSceneFusionLastPersonSourceSignature == null) {
+		node.__gjjSceneFusionLastPersonSourceSignature = personSourceSignature(node);
+	}
+	if (node.__gjjSceneFusionPayload && node.__gjjSceneFusionPayload.__sourceSignature == null && (backgroundInputLinked(node) || personInputLinked(node))) {
+		node.__gjjSceneFusionPayload = null;
+	}
 	normalizeOutputs(node);
 	mountPanel(node);
 	if (node.__gjjSceneFusionPayload) renderPayload(node);
+	else updateLocalPreview(node);
+	updateLinkToggleButton(node);
 	refreshSize(node);
 }
 
@@ -1070,9 +2023,7 @@ function scheduleStabilize(node, ms = 32) {
 
 function scheduleRefresh(node) {
 	clearTimeout(node.__gjjSceneFusionRefreshTimer);
-	node.__gjjSceneFusionRefreshTimer = setTimeout(() => {
-		if (hasLink(findInput(node, "background")) && personInputs(node).some(hasLink)) runCurrentNode(node);
-	}, 280);
+	node.__gjjSceneFusionRefreshTimer = setTimeout(() => updateLocalPreview(node), 120);
 }
 
 app.registerExtension({
@@ -1119,8 +2070,11 @@ app.registerExtension({
 		const originalConnectionsChange = nodeType.prototype.onConnectionsChange;
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalConnectionsChange?.apply(this, args);
+			invalidatePayloadOnSourceChange(this);
 			scheduleStabilize(this);
 			scheduleRefresh(this);
+			setTimeout(() => updateLinkToggleButton(this), 0);
+			setTimeout(() => schedulePersonCutoutPreview(this), 0);
 			return result;
 		};
 
@@ -1129,9 +2083,13 @@ app.registerExtension({
 			const result = originalExecuted?.apply(this, [message, ...args]);
 			const payload = parsePayload(message);
 			if (payload) {
+				payload.__sourceSignature = mediaSourceSignature(this);
+				this.__gjjSceneFusionMediaSourceSignature = payload.__sourceSignature;
 				this.__gjjSceneFusionPayload = payload;
 				if (payload.placement_config) writeConfig(this, payload.placement_config.persons || []);
 				renderPayload(this);
+				const lastText = this.__gjjSceneFusionLastProgressText || "完成";
+				setProgress(this, lastText === "完成" ? "完成" : `完成:${lastText}`, 1);
 			}
 			setTimeout(() => stabilize(this), 0);
 			return result;
@@ -1141,6 +2099,13 @@ app.registerExtension({
 		if (node?.comfyClass === NODE_TYPE) setTimeout(() => stabilize(node), 0);
 	},
 	setup() {
+		api.addEventListener("gjj_node_progress", (event) => {
+			const detail = event.detail || {};
+			const nodeId = String(detail.node || "");
+			const node = app.graph?._nodes?.find((item) => String(item?.id) === nodeId);
+			if (!node || node.comfyClass !== NODE_TYPE) return;
+			setProgress(node, String(detail.text || "处理中"), detail.progress);
+		});
 		for (const node of app.graph?._nodes || []) {
 			if (node?.comfyClass === NODE_TYPE) stabilize(node);
 		}

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-import uuid
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -10,9 +10,9 @@ import torch.nn.functional as F
 
 import comfy.model_management
 import comfy.utils
-import folder_paths
 from PIL import Image
 
+from .common_utils.temp_files import gjjutils_write_temp_bytes
 from .gjj_latent_file_io import (
     _file_signature,
     _load_safetensor_file,
@@ -456,14 +456,11 @@ def _save_mask_webp_preview(tensor: torch.Tensor, prefix: str, title: str, fps: 
         return None
     try:
         preview = tensor.detach().cpu().float().clamp(0.0, 1.0).contiguous()
-        target_dir = Path(folder_paths.get_temp_directory()) / "GJJ" / "scail2_colored_mask"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{prefix}_{uuid.uuid4().hex[:12]}.webp"
-        filepath = target_dir / filename
         arrays = torch.round(preview[..., :3] * 255.0).to(torch.uint8).numpy()
         pil_frames = [Image.fromarray(array, mode="RGB") for array in arrays]
+        buffer = BytesIO()
         pil_frames[0].save(
-            filepath,
+            buffer,
             format="WEBP",
             save_all=len(pil_frames) > 1,
             append_images=pil_frames[1:],
@@ -473,21 +470,22 @@ def _save_mask_webp_preview(tensor: torch.Tensor, prefix: str, title: str, fps: 
             quality=90,
             method=4,
         )
-        return {
-            "filename": filename,
-            "subfolder": "GJJ/scail2_colored_mask",
-            "type": "temp",
-            "format": "image/webp",
-            "media_type": "image",
-            "title": title,
-            "is_sequence": len(pil_frames) > 1,
-            "autoplay": len(pil_frames) > 1,
-            "loop": len(pil_frames) > 1,
-            "frame_rate": float(fps),
-            "frame_count": int(preview.shape[0]),
-            "width": int(preview.shape[2]),
-            "height": int(preview.shape[1]),
-        }
+        info = gjjutils_write_temp_bytes(buffer.getvalue(), suffix=".webp")
+        info.update(
+            {
+                "format": "image/webp",
+                "media_type": "image",
+                "title": title,
+                "is_sequence": len(pil_frames) > 1,
+                "autoplay": len(pil_frames) > 1,
+                "loop": len(pil_frames) > 1,
+                "frame_rate": float(fps),
+                "frame_count": int(preview.shape[0]),
+                "width": int(preview.shape[2]),
+                "height": int(preview.shape[1]),
+            }
+        )
+        return info
     except Exception as exc:
         log.warning("SCAIL-2 彩色遮罩预览保存失败：%s", exc)
         return None

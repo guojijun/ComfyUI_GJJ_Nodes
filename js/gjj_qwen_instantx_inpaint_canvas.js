@@ -223,11 +223,6 @@ function normalizeModelKey(value) {
 	return text;
 }
 
-function isQwenOrFireRedUnet(value) {
-	const key = normalizeModelKey(value);
-	return key.includes("qwen") || key.includes("firered") || key.includes("fire_red");
-}
-
 function asDataUrl(value) {
 	const text = String(value || "").trim();
 	if (!text) return "";
@@ -844,16 +839,15 @@ class QwenInpaintEditor {
 	widgetOptions(name, currentValue = "") {
 		const w = widget(this.node, name);
 		let values = Array.isArray(w?.options?.values) ? w.options.values.map(String) : [];
-		if (name === FIELD.unet) values = values.filter(isQwenOrFireRedUnet);
 		const current = String(currentValue || w?.value || "");
-		if (current && !values.includes(current) && (name !== FIELD.unet || isQwenOrFireRedUnet(current))) values.unshift(current);
+		if (current && !values.includes(current)) values.unshift(current);
 		return values;
 	}
 
 	filterSelectOptions(name, values, currentValue = "", searchText = "") {
 		const filter = String(searchText || "").trim().toLowerCase();
 		const terms = filter.split(/\s+/).filter(Boolean);
-		const source = (values || []).filter((value) => name !== FIELD.unet || isQwenOrFireRedUnet(value));
+		const source = values || [];
 		let filtered = source;
 		if (terms.length) {
 			filtered = source.filter((value) => {
@@ -863,7 +857,7 @@ class QwenInpaintEditor {
 			});
 		}
 		const current = String(currentValue || "");
-		if (current && (name !== FIELD.unet || isQwenOrFireRedUnet(current)) && !filtered.includes(current)) {
+		if (current && !filtered.includes(current)) {
 			filtered = [current, ...filtered];
 		}
 		return filtered;
@@ -908,7 +902,7 @@ class QwenInpaintEditor {
 		const values = this.selectOptionLists.get(name) || this.widgetOptions(name, select.value);
 		popup.open({
 			anchorEl: picker,
-			placeholder: name === FIELD.unet ? "搜索 qwen / firered / gguf" : "搜索模型",
+			placeholder: name === FIELD.unet ? "搜索图片主模型 / gguf" : "搜索模型",
 			getSelectedValue: () => String(select.value || ""),
 			getOptions: (searchText) => this.filterSelectOptions(name, values, select.value, searchText).map((value) => ({ value, label: value || "未选择" })),
 			onSelect: (value) => {

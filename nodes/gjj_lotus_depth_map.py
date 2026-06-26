@@ -6,7 +6,7 @@ import torch
 import folder_paths
 import comfy.samplers
 import comfy.utils
-from nodes import ImageInvert, PreviewImage, UNETLoader, VAEDecode, VAEEncode, VAELoader
+from nodes import ImageInvert, UNETLoader, VAEDecode, VAEEncode, VAELoader
 from comfy_extras.nodes_custom_sampler import (
     BasicGuider,
     BasicScheduler,
@@ -18,6 +18,7 @@ from comfy_extras.nodes_custom_sampler import (
 from comfy_extras.nodes_lotus import LotusConditioning
 
 from .common_utils.dependency_checker import make_missing_model_spec, raise_dependency_model_error
+from .common_utils.temp_files import gjjutils_write_temp_tensor_images
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
 
@@ -262,7 +263,6 @@ class GJJ_LotusDepthMap:
     }
 
     def __init__(self):
-        self.preview_image = PreviewImage()
         self._cache_key: tuple[str, str, str] | None = None
         self._cached_model = None
         self._cached_vae = None
@@ -428,13 +428,7 @@ class GJJ_LotusDepthMap:
         preview_entries: list[dict[str, Any]] = []
         preview_items: list[dict[str, Any]] = []
         for index, image in enumerate(images, start=1):
-            ui = self.preview_image.save_images(
-                image,
-                filename_prefix="GJJ_LotusDepth",
-                prompt=prompt,
-                extra_pnginfo=extra_pnginfo,
-            )
-            entries = list(ui.get("ui", {}).get("images", []) or [])
+            entries = gjjutils_write_temp_tensor_images(image)
             preview_entries.extend(entries)
             if entries:
                 preview_items.append(_preview_item_from_image_entry(entries[-1], index, image))

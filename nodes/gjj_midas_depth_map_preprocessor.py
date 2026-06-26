@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import os
-import uuid
-from pathlib import Path
+from io import BytesIO
 from typing import Any
 
 import numpy as np
@@ -10,19 +9,19 @@ import torch
 import comfy.utils
 import folder_paths
 from comfy import model_management as mm
-from nodes import PreviewImage
 
 from .common_utils.dependency_checker import (
     make_missing_model_spec,
     raise_dependency_model_error,
 )
+from .common_utils.temp_files import gjjutils_write_temp_bytes, gjjutils_write_temp_tensor_images
 
 
 NODE_NAME = "GJJ_MidasDepthMapPreprocessor"
 NODE_DISPLAY_NAME = "🕳️ 米达斯深度图预处理器"
 DESCRIPTION = (
     "复刻米达斯深度图预处理器的 GJJ 零外部自定义节点版本。"
-    "节点内加载米达斯深度模型，把图片、批量图片或 VIDEO 逐帧转换为深度视频帧序列，并调用 ComfyUI 原生图片预览。"
+    "节点内加载米达斯深度模型，把图片、批量图片或 VIDEO 逐帧转换为深度视频帧序列，并使用 GJJ 公共临时文件缓存生成预览。"
 )
 MAX_RESOLUTION = 16384
 MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
@@ -222,11 +221,6 @@ def _save_depth_webp_preview(frames: torch.Tensor, fps: float = WEBP_PREVIEW_FPS
             preview_height = max(1, int(round(height * scale)))
             preview = _resize_preview_frames(preview, preview_width, preview_height)
 
-        target_dir = Path(folder_paths.get_temp_directory()) / "GJJ" / "midas_depth_preview"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"GJJ_MidasDepth_{uuid.uuid4().hex[:12]}.webp"
-        filepath = target_dir / filename
-
         arrays = torch.round(preview * 255.0).to(torch.uint8).numpy()
         pil_frames: list[Image.Image] = []
         for array in arrays:
@@ -241,8 +235,9 @@ def _save_depth_webp_preview(frames: torch.Tensor, fps: float = WEBP_PREVIEW_FPS
             else:
                 pil_frames.append(Image.fromarray(array[..., :3], mode="RGB"))
 
+        buffer = BytesIO()
         pil_frames[0].save(
-            filepath,
+            buffer,
             format="WEBP",
             save_all=True,
             append_images=pil_frames[1:],
@@ -252,11 +247,9 @@ def _save_depth_webp_preview(frames: torch.Tensor, fps: float = WEBP_PREVIEW_FPS
             quality=88,
             method=4,
         )
-        return [
+        info = gjjutils_write_temp_bytes(buffer.getvalue(), suffix=".webp")
+        info.update(
             {
-                "filename": filename,
-                "subfolder": "GJJ/midas_depth_preview",
-                "type": "temp",
                 "format": "image/webp",
                 "media_type": "image",
                 "is_sequence": True,
@@ -268,7 +261,8 @@ def _save_depth_webp_preview(frames: torch.Tensor, fps: float = WEBP_PREVIEW_FPS
                 "width": int(preview.shape[2]),
                 "height": int(preview.shape[1]),
             }
-        ]
+        )
+        return [info]
     except Exception as error:
         print(f"[GJJ 米达斯深度图] WebP 序列预览保存失败：{error}")
         return []
@@ -430,12 +424,11 @@ class GJJ_MidasDepthMapPreprocessor:
             "输入支持 GJJ_BATCH_IMAGE、普通 IMAGE batch 和官方 VIDEO；VIDEO 会自动解包为图片帧。",
             "节点会按输入顺序逐帧估计深度图，并输出 GJJ_BATCH_IMAGE,IMAGE 视频帧序列。",
             "检测分辨率与原版预处理器一致：以原图短边缩放到该尺寸，再补齐到 64 的倍数进行推理。",
-            "执行后会调用 ComfyUI 原生图片预览；多张深度图会合成一个 WebP 序列预览，避免预览区铺满单帧图片。",
+            "执行后会使用 GJJ 公共临时文件缓存生成预览；多张深度图会合成一个 WebP 序列预览，避免预览区铺满单帧图片。",
         ],
     }
 
     def __init__(self):
-        self.preview_image = PreviewImage()
         self._cache_key: tuple[str, str] | None = None
         self._cached_processor = None
         self._cached_model = None
@@ -590,22 +583,10 @@ class GJJ_MidasDepthMapPreprocessor:
             preview_images = _save_depth_webp_preview(depth_batch, fps=WEBP_PREVIEW_FPS)
             preview_mode = "WebP序列预览"
             if not preview_images:
-                preview_ui = self.preview_image.save_images(
-                    depth_batch[:1],
-                    filename_prefix="GJJ_MidasDepth",
-                    prompt=prompt,
-                    extra_pnginfo=extra_pnginfo,
-                )
-                preview_images = list(preview_ui.get("ui", {}).get("images", []) or [])
+                preview_images = gjjutils_write_temp_tensor_images(depth_batch[:1])
                 preview_mode = "首帧预览"
         else:
-            preview_ui = self.preview_image.save_images(
-                depth_batch,
-                filename_prefix="GJJ_MidasDepth",
-                prompt=prompt,
-                extra_pnginfo=extra_pnginfo,
-            )
-            preview_images = list(preview_ui.get("ui", {}).get("images", []) or [])
+            preview_images = gjjutils_write_temp_tensor_images(depth_batch)
             preview_mode = "单图预览"
         summary = f"米达斯深度图完成：{frame_count} 张；{preview_mode}；检测分辨率 {resolution_value}；模型来源 {source}"
         return {

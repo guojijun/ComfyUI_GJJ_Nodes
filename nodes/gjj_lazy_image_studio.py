@@ -24,7 +24,6 @@ from nodes import (
     VAEEncode,
     VAEEncodeForInpaint,
     common_ksampler,
-    PreviewImage,
 )
 
 try:
@@ -38,6 +37,7 @@ from .common_utils.text_tools import (
     gjjutils_canonical_model_text as _canonical_model_text,
     gjjutils_dedupe_keep_order as _dedupe_keep_order,
 )
+from .common_utils.temp_files import gjjutils_write_temp_tensor_images
 
 from .common_utils.sampler_tools import (
     EmptyFlux2LatentImage_execute as EmptyFlux2LatentImage,
@@ -54,6 +54,8 @@ from .common_utils.prompt_translation import (
 from .gjj_model_bundle_loader import (
     UNET_DTYPE_OPTIONS,
     _build_unet_model_options,
+    _load_boogu_clip_compatible,
+    _raise_if_unsupported_boogu_diffusion,
     _resolve_full_path,
     list_clip_models,
     list_unet_models,
@@ -775,7 +777,7 @@ def _load_model_gguf(unet_name: str):
         raise _format_runtime_error("GGUF UNET 加载", exc) from exc
 
 
-def _load_model(unet_name: str, unet_dtype: str):
+def _load_model(unet_name: str, unet_dtype: str, clip_type: str = ""):
     if _is_gguf_model(unet_name):
         return _load_model_gguf(unet_name)
     try:
@@ -788,6 +790,7 @@ def _load_model(unet_name: str, unet_dtype: str):
             "UNET", unet_name, ("diffusion_models", "checkpoints"), exc
         ) from exc
     try:
+        _raise_if_unsupported_boogu_diffusion(unet_path, clip_type)
         model = comfy.sd.load_diffusion_model(
             unet_path, model_options=_build_unet_model_options(unet_dtype)
         )
@@ -877,7 +880,9 @@ def _load_clip_from_names(clip_names: list[str], clip_type: str):
         embedding_directory = []
     normalized_type = _normalize_text(clip_type)
     try:
-        if normalized_type == "hidream":
+        if normalized_type == "boogu":
+            clip = _load_boogu_clip_compatible(clip_paths, "default", "default")
+        elif normalized_type == "hidream":
             clip = comfy.sd.load_clip(
                 ckpt_paths=clip_paths,
                 embedding_directory=embedding_directory,
@@ -1289,7 +1294,6 @@ class GJJ_LazyImageStudio:
     def __init__(self):
         self._lora_cache: dict[str, Any] = {}
         self._kept_runtime: tuple[Any, Any, Any] | None = None
-        self.preview_image = PreviewImage()
 
     @classmethod
     def _remember_result_cache(cls, key: str, image: torch.Tensor, preview_images: list[Any], effective_params: dict[str, Any]) -> None:
@@ -1953,7 +1957,7 @@ class GJJ_LazyImageStudio:
         clip_type: str,
         vae_name: str,
     ):
-        model = _load_model(unet_name, unet_dtype)
+        model = _load_model(unet_name, unet_dtype, clip_type)
         clip = _load_clip_from_names(clip_names, clip_type)
         vae = _load_vae(vae_name)
         return model, clip, vae
@@ -2386,13 +2390,7 @@ class GJJ_LazyImageStudio:
             _send_status(unique_id, f"完成：{image.shape[2]} x {image.shape[1]}  耗时：{elapsed_str}")
 
             # 保存预览图片给 GJJ 自定义前端预览；避免使用 ui.images 触发 ComfyUI 原生重复预览。
-            preview_ui = self.preview_image.save_images(
-                image,
-                filename_prefix="GJJ_LazyImageStudio",
-                prompt=prompt,
-                extra_pnginfo=extra_pnginfo,
-            )
-            preview_images = preview_ui.get("ui", {}).get("images", [])
+            preview_images = gjjutils_write_temp_tensor_images(image)
 
             effective_params = {
                 "prompt": str(prompt or ""),

@@ -11,8 +11,9 @@ from typing import Any
 import comfy.utils
 import folder_paths
 import torch
-from nodes import PreviewImage, SaveImage
 from PIL import Image
+
+from .common_utils.temp_files import gjjutils_write_temp_tensor_images
 
 NODE_NAME = "GJJ_AnyPreview"
 ANY_PREVIEW_INPUT_TYPE = "*"
@@ -502,7 +503,7 @@ def annotate_preview_image_dimensions(
     items: list[dict[str, Any]],
     images: torch.Tensor,
 ) -> list[dict[str, Any]]:
-    """给 PreviewImage 返回项补上宽高，前端可据此算出无滚动条的单图高度。"""
+    """给预览返回项补上宽高，前端可据此算出无滚动条的单图高度。"""
     if not items or not isinstance(images, torch.Tensor):
         return items
     try:
@@ -1174,7 +1175,7 @@ class GJJ_AnyPreview:
         ],
         "technical_notes": [
             "音频/视频预览会在首次执行时生成临时文件（位于 ComfyUI temp 目录）",
-            "图片预览使用 ComfyUI 原生 PreviewImage 节点的能力",
+            "图片预览使用 GJJ 公共 temp_files 哈希缓存，避免重复临时文件",
             "文本预览支持基本的 Markdown 语法（标题、列表、代码块等）",
             "动态插槽数量根据连接情况自动调整，最多支持 99 个输入",
             "所有预览数据通过 ui 字典返回，遵循 ComfyUI 规范",
@@ -1264,8 +1265,7 @@ class GJJ_AnyPreview:
         }
 
     def __init__(self):
-        self.preview_image = PreviewImage()
-        self.queue_image = SaveImage()
+        pass
 
     @classmethod
     def _cache_key(cls, unique_id: Any, prompt: Any = None) -> str:
@@ -1310,14 +1310,8 @@ class GJJ_AnyPreview:
         if thumbnail is None:
             return []
         try:
-            image_ui = self.queue_image.save_images(
-                thumbnail,
-                filename_prefix=_queue_thumbnail_prefix(extra_pnginfo),
-                prompt=prompt,
-                extra_pnginfo=extra_pnginfo,
-            )
             return annotate_preview_image_dimensions(
-                image_ui.get("ui", {}).get("images", []),
+                gjjutils_write_temp_tensor_images(thumbnail),
                 thumbnail,
             )
         except Exception as error:
@@ -1349,14 +1343,8 @@ class GJJ_AnyPreview:
         is_mask: bool = False,
     ) -> list[dict[str, Any]]:
         preview_tensor = mask_to_preview_image(value) if is_mask else normalize_image_tensor(value)
-        image_ui = self.preview_image.save_images(
-            preview_tensor,
-            filename_prefix="GJJ_AnyPreview",
-            prompt=prompt,
-            extra_pnginfo=extra_pnginfo,
-        )
         return annotate_preview_image_dimensions(
-            image_ui.get("ui", {}).get("images", []),
+            gjjutils_write_temp_tensor_images(preview_tensor),
             preview_tensor,
         )
 

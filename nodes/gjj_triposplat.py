@@ -19,6 +19,7 @@ import folder_paths
 
 from .common_utils.model_manager import gjjutils_resolve_model_by_extensionless_seed
 from .common_utils.progress import send_node_progress
+from .common_utils.temp_files import gjjutils_write_temp_tensor_images
 
 NODE_AIO = "GJJ_TripoSplatImageToSplat"
 NODE_RENDER = "GJJ_TripoSplatRenderSequence"
@@ -393,8 +394,7 @@ def _coerce_image_tensor(media: Any) -> torch.Tensor:
 
 def _preview_ui(images: torch.Tensor, prefix: str) -> dict[str, Any]:
     try:
-        preview = _core_nodes().PreviewImage()
-        return preview.save_images(images[..., :3].detach().cpu(), filename_prefix=prefix).get("ui", {})
+        return {"images": gjjutils_write_temp_tensor_images(images[..., :3].detach().cpu())}
     except Exception:
         return {}
 

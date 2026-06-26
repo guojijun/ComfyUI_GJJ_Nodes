@@ -6,8 +6,8 @@ from typing import Any
 
 import folder_paths
 import torch
-from nodes import PreviewImage
 
+from .common_utils.temp_files import gjjutils_write_temp_tensor_images
 from .gjj_bernini import (
     FRAME_QUEUE_REQUIREMENT,
     _as_bhwc_tensor,
@@ -1329,13 +1329,7 @@ class GJJ_BerniniStudio:
                 frames = frames[:1]
             generated_segments.append(frames)
 
-            preview_ui = PreviewImage().save_images(
-                frames[-1:],
-                filename_prefix=f"GJJ_BerniniStudio_segment_{segment_index + 1:03d}",
-                prompt=prompt_info,
-                extra_pnginfo=extra_pnginfo,
-            )
-            latest_preview = preview_ui.get("ui", {}).get("images", [])
+            latest_preview = gjjutils_write_temp_tensor_images(frames[-1:])
             _send_segment_preview(unique_id, latest_preview, segment_index + 1, segment_count, "tail_frame")
             try:
                 del latent, latent_dict, high_latent, final_latent, positive, negative, context

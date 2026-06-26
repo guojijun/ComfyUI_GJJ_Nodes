@@ -19,7 +19,6 @@ except Exception:
     PromptServer = None
 
 import folder_paths
-from nodes import PreviewImage
 
 from .common_utils.network_media import (
     gjjutils_detect_media_type,
@@ -27,6 +26,11 @@ from .common_utils.network_media import (
     gjjutils_input_relative_media_path,
     gjjutils_is_network_url,
     gjjutils_media_file_starts_like_html,
+)
+from .common_utils.temp_files import (
+    gjjutils_temp_root,
+    gjjutils_write_temp_file,
+    gjjutils_write_temp_pil_image,
 )
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
@@ -321,10 +325,10 @@ def _safe_int(value: Any, default: int, min_value: int, max_value: int) -> int:
 
 def _thumbnail_cache_dir() -> Path:
     try:
-        base = Path(folder_paths.get_temp_directory()).resolve()
+        base = gjjutils_temp_root().resolve()
     except Exception:
         base = Path(folder_paths.get_input_directory()).resolve() / ".gjj_thumb_cache"
-    path = base / "gjj_multi_image_loader_thumbs"
+    path = base / "multi_image_loader_thumbs"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -557,6 +561,48 @@ def load_image_tensor(path: Path) -> torch.Tensor:
         raise RuntimeError(f"图片文件无法识别或已损坏：{_display_image_path(path)}。请删除、重新导出或换一张图片。原始错误：{error}") from error
 
     return torch.from_numpy(array)[None, ...]
+
+
+def _format_from_suffix(suffix: str) -> str:
+    ext = str(suffix or "").lower().lstrip(".")
+    if ext == "jpg":
+        ext = "jpeg"
+    return f"image/{ext or 'png'}"
+
+
+def _image_tensor_to_pil(image: torch.Tensor) -> Image.Image:
+    tensor = image.detach().cpu().float()
+    if tensor.ndim == 4:
+        tensor = tensor[0]
+    if tensor.ndim != 3:
+        raise RuntimeError(f"无法预览非图片 Tensor：shape={tuple(image.shape)}")
+    array = tensor.clamp(0.0, 1.0).numpy()
+    if array.shape[2] == 1:
+        array = np.repeat(array, 3, axis=2)
+    channels = int(array.shape[2])
+    if channels >= 4:
+        mode = "RGBA"
+        array = array[:, :, :4]
+    else:
+        mode = "RGB"
+        array = array[:, :, :3]
+    return Image.fromarray((array * 255.0).round().astype(np.uint8), mode=mode)
+
+
+def _preview_from_tensor(image: torch.Tensor) -> list[dict[str, Any]]:
+    pil_image = _image_tensor_to_pil(image)
+    return [gjjutils_write_temp_pil_image(pil_image, format="PNG", suffix=".png")]
+
+
+def _preview_from_input_path(path: Path) -> list[dict[str, Any]]:
+    info = gjjutils_write_temp_file(path, suffix=path.suffix or ".png")
+    try:
+        width, height = _probe_image_size(path)
+        info.update({"width": int(width), "height": int(height)})
+    except Exception:
+        pass
+    info.update({"format": _format_from_suffix(path.suffix), "media_type": "image"})
+    return [info]
 
 
 def empty_image_tensor(num_channels: int = 3) -> torch.Tensor:
@@ -829,9 +875,6 @@ class GJJ_MultiImageLoader:
             },
         }
 
-    def __init__(self):
-        self.preview_image = PreviewImage()
-
     @classmethod
     def IS_CHANGED(cls, selected_images="[]", sequence_range="", input_images=None, slide_start_index=None, prompt=None, extra_pnginfo=None, unique_id=None):
         # 这个节点的图片选择主要由前端面板属性维护。始终重新执行可确保上游面板换图后，
@@ -849,16 +892,10 @@ class GJJ_MultiImageLoader:
                 batch = batch.unsqueeze(0)
             for index in range(int(batch.shape[0])):
                 image_tensor = batch[index:index + 1].contiguous()
-                preview_ui = self.preview_image.save_images(
-                    image_tensor,
-                    filename_prefix="GJJ_MultiImageLoader",
-                    prompt=prompt,
-                    extra_pnginfo=extra_pnginfo,
-                )
                 collected.append(
                     {
                         "image": image_tensor,
-                        "preview": preview_ui.get("ui", {}).get("images", []),
+                        "preview": _preview_from_tensor(image_tensor),
                         "source": "external",
                     }
                 )
@@ -866,7 +903,8 @@ class GJJ_MultiImageLoader:
         skipped_errors: list[str] = []
         for entry in selected:
             try:
-                image_tensor = load_image_tensor(resolve_input_image_path(entry))
+                image_path = resolve_input_image_path(entry)
+                image_tensor = load_image_tensor(image_path)
             except Exception as error:
                 subfolder_label = str(entry.get("subfolder") or "").strip().replace("\\", "/")
                 filename_label = str(entry.get("filename") or "").strip()
@@ -877,16 +915,10 @@ class GJJ_MultiImageLoader:
                 except Exception:
                     pass
                 continue
-            preview_ui = self.preview_image.save_images(
-                image_tensor,
-                filename_prefix="GJJ_MultiImageLoader",
-                prompt=prompt,
-                extra_pnginfo=extra_pnginfo,
-            )
             collected.append(
                 {
                     "image": image_tensor,
-                    "preview": preview_ui.get("ui", {}).get("images", []),
+                    "preview": _preview_from_input_path(image_path),
                     "source": "selected",
                 }
             )

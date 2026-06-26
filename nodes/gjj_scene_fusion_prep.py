@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import math
-import uuid
+import sys
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
 import torch
-from PIL import Image, ImageColor, ImageDraw, ImageFilter
+from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageOps
 
 import folder_paths
 
@@ -33,11 +34,17 @@ from .gjj_remove_bg_stitch import (
     _run_rmbg14_all_masks,
     _tensor_signature,
 )
+from .gjj_model_bundle_loader import GJJ_ModelBundleLoader
+from .gjj_qwen_image_edit_plus import GJJ_TextEncodeQwenImageEditPlus
+from .common_utils import gjjutils_read_temp_pil_image, gjjutils_write_temp_pil_image, make_model_tree_item
+from .common_utils.model_manager import gjjutils_resolve_model_name
 
 
 NODE_NAME = "GJJ_SceneFusionPrep"
 NODE_DISPLAY_NAME = "GJJ · 🧍 人景融合准备"
-PREVIEW_SUBFOLDER = "GJJ/scene_fusion_prep"
+BACKGROUND_UPLOAD_WIDGET = "background_upload"
+PERSON_UPLOADS_WIDGET = "person_uploads_json"
+CUTOUT_PREVIEW_WIDGET = "cutout_preview_only"
 
 DEFAULT_COLORS = (
     "#0000FF",
@@ -47,6 +54,60 @@ DEFAULT_COLORS = (
     "#00FFFF",
     "#FFFF00",
 )
+
+DEFAULT_FUSION_PROMPT = "按颜色将图1中的角色精准放置到图2场景指定位置，保持角色外观与随身道具不变，并匹配场景的光照遮挡与透视尺度，不改动背景与构图。"
+DEFAULT_TEMPLATE_ID = "FireRed-Image-Edit-1.1"
+DEFAULT_UNET_SEEDS = ("FireRed-Image-Edit-1.1_fp8mixed_comfy.safetensors", "FireRed Image Edit 1.1")
+DEFAULT_CLIP_SEEDS = ("qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen 2.5 vl 7b fp8 scaled")
+DEFAULT_VAE_SEEDS = ("qwen_image_vae.safetensors", "qwen image vae")
+DEFAULT_LORA_1_SEEDS = ("QWEN/FireRed-Image-Edit-1.0-Lightning-8steps-v1.1.safetensors", "FireRed Image Edit Lightning 8steps")
+DEFAULT_LORA_2_SEEDS = ("QWEN/edit_2511人景色交互20-LORA+by_xiaodu.safetensors", "人景色交互")
+DEFAULT_FUSION_CFG = 1.0
+DEFAULT_FUSION_DENOISE = 1.0
+DEFAULT_FUSION_SAMPLER = "euler"
+DEFAULT_FUSION_SCHEDULER = "simple"
+TTT_SEED = 397815496732818
+TTT_STEPS = 8
+TTT_CFG = 1.0
+TTT_DENOISE = 1.0
+TTT_SAMPLER = "euler"
+TTT_SCHEDULER = "simple"
+TTT_MODEL_SHIFT = 3.1
+TTT_CFG_NORM_STRENGTH = 1.0
+TTT_CFG_NORM_PRE_CFG = False
+
+FUSION_MODEL_TREE = [
+    make_model_tree_item(
+        label="FireRed Image Edit 主模型",
+        folder="diffusion_models",
+        filename=DEFAULT_UNET_SEEDS[0],
+        description="内部单节点融合默认使用的主扩散模型；支持 safetensors / gguf 等 ComfyUI 可加载格式，执行时用公共模糊搜索匹配。",
+    ),
+    make_model_tree_item(
+        label="Qwen Image CLIP",
+        folder="text_encoders",
+        filename=DEFAULT_CLIP_SEEDS[0],
+        description="Qwen Image Edit 文本/视觉编码器；也会兼容 models/clip。",
+    ),
+    make_model_tree_item(
+        label="Qwen Image VAE",
+        folder="vae",
+        filename=DEFAULT_VAE_SEEDS[0],
+        description="内部 VAE 编码/解码使用。",
+    ),
+    make_model_tree_item(
+        label="Lightning LoRA",
+        folder="loras",
+        filename=DEFAULT_LORA_1_SEEDS[0],
+        description="默认 8 步加速 LoRA。",
+    ),
+    make_model_tree_item(
+        label="人景融合 LoRA",
+        folder="loras",
+        filename=DEFAULT_LORA_2_SEEDS[0],
+        description="默认人景色交互 LoRA。",
+    ),
+]
 
 DEFAULT_POSE = {
     "head": [0.0, -0.43],
@@ -169,6 +230,20 @@ def _int(value: Any, fallback: int) -> int:
         return fallback
 
 
+def _bool(value: Any, fallback: bool = False) -> bool:
+    raw = _unwrap(value, fallback)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    text = str(raw or "").strip().lower()
+    if text in {"1", "true", "yes", "on", "启用", "是"}:
+        return True
+    if text in {"0", "false", "no", "off", "禁用", "否", ""}:
+        return False
+    return fallback
+
+
 def _align16(value: int) -> int:
     value = max(16, int(value or 16))
     return max(16, (value // 16) * 16)
@@ -277,19 +352,7 @@ def _resample_lanczos():
 
 
 def _save_temp_image(image: Image.Image, prefix: str) -> dict[str, Any]:
-    target_dir = Path(folder_paths.get_temp_directory()) / PREVIEW_SUBFOLDER
-    target_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{prefix}_{uuid.uuid4().hex[:12]}.png"
-    image.save(target_dir / filename, format="PNG")
-    return {
-        "filename": filename,
-        "subfolder": PREVIEW_SUBFOLDER,
-        "type": "temp",
-        "format": "image/png",
-        "media_type": "image",
-        "width": int(image.width),
-        "height": int(image.height),
-    }
+    return gjjutils_write_temp_pil_image(image, format="PNG", suffix=".png")
 
 
 def _parse_config(value: str) -> dict[str, dict[str, Any]]:
@@ -476,11 +539,27 @@ def _trim_cutout_alpha(cutout: Image.Image, padding: int = 2) -> Image.Image:
 
 def _white_layout_slots(cutouts: list[Image.Image], canvas_w: int, canvas_h: int) -> list[tuple[int, int, int, int]]:
     count = max(1, len(cutouts))
-    margin = max(4, int(round(min(canvas_w, canvas_h) * 0.012)))
-    gap = max(4, int(round(min(canvas_w, canvas_h) * 0.012)))
+    margin = 3
+    gap = 3 if count > 1 else 0
+    inset = max(3, min(10, int(round(canvas_h * 0.006)))) + 3
     work_w = max(1, canvas_w - margin * 2)
     work_h = max(1, canvas_h - margin * 2)
     aspects = [max(0.05, min(8.0, item.width / max(1, item.height))) for item in cutouts] or [1.0]
+    total_aspect = max(0.05, sum(aspects))
+    content_w_limit = max(1, work_w - gap * (count - 1) - inset * 2 * count)
+    content_h_limit = max(1, work_h - inset * 2)
+    content_h = max(1, int(min(content_h_limit, content_w_limit / total_aspect)))
+    item_h = max(1, content_h + inset * 2)
+    item_widths = [max(1, int(round(aspect * content_h)) + inset * 2) for aspect in aspects]
+    used_w = sum(item_widths) + gap * (count - 1)
+    cursor = margin + max(0, int(round((work_w - used_w) / 2)))
+    top = margin + max(0, int(round((work_h - item_h) / 2)))
+    slots: list[tuple[int, int, int, int]] = []
+    for item_w in item_widths:
+        slots.append((cursor, top, cursor + item_w, top + item_h))
+        cursor += item_w + gap
+    if len(slots) == count:
+        return slots
 
     best_slots: list[tuple[int, int, int, int]] = []
     best_score = -1.0
@@ -488,32 +567,47 @@ def _white_layout_slots(cutouts: list[Image.Image], canvas_w: int, canvas_h: int
         columns = int(math.ceil(count / rows))
         if columns <= 0:
             continue
-        row_h = (work_h - gap * (rows - 1)) / rows
+        outer_row_h = (work_h - gap * (rows - 1)) / rows
+        row_h = outer_row_h - inset * 2
         if row_h <= 1:
             continue
         slots: list[tuple[int, int, int, int]] = []
+        row_slots: list[list[tuple[int, int, int, int]]] = []
         score = 0.0
         index = 0
+        used_h = 0
         for row in range(rows):
             remaining = count - index
             if remaining <= 0:
                 break
             row_count = min(columns, remaining)
             row_aspects = aspects[index : index + row_count]
-            max_row_w = work_w - gap * (row_count - 1)
+            max_row_w = work_w - gap * (row_count - 1) - inset * 2 * row_count
             natural_w = sum(row_aspects) * row_h
-            scale = min(1.0, max_row_w / max(1.0, natural_w))
-            item_h = max(1, int(round(row_h * scale)))
-            item_widths = [max(1, int(round(aspect * item_h))) for aspect in row_aspects]
+            scale = max_row_w / max(1.0, natural_w)
+            content_h = max(1, int(round(row_h * scale)))
+            item_h = content_h + inset * 2
+            if item_h > row_h:
+                item_h = max(1, int(row_h)) + inset * 2
+                content_h = max(1, item_h - inset * 2)
+            item_widths = [max(1, int(round(aspect * content_h)) + inset * 2) for aspect in row_aspects]
             used_w = sum(item_widths) + gap * (row_count - 1)
             row_left = margin + max(0, int(round((work_w - used_w) / 2)))
-            row_top = margin + int(round(row * (row_h + gap) + max(0.0, (row_h - item_h) / 2.0)))
+            row_top = used_h
             cursor = row_left
+            current_row_slots: list[tuple[int, int, int, int]] = []
             for item_w in item_widths:
-                slots.append((cursor, row_top, cursor + item_w, row_top + item_h))
+                current_row_slots.append((cursor, row_top, cursor + item_w, row_top + item_h))
                 score += float(item_w * item_h)
                 cursor += item_w + gap
+            row_slots.append(current_row_slots)
+            used_h += item_h + gap
             index += row_count
+        used_h = max(0, used_h - gap)
+        top_offset = margin + max(0, int(round((work_h - used_h) / 2)))
+        for current_row_slots in row_slots:
+            for left, top, right, bottom in current_row_slots:
+                slots.append((left, top + top_offset, right, bottom + top_offset))
         fill_penalty = abs((columns / max(1, rows)) - (canvas_w / max(1, canvas_h))) * 0.01
         score -= fill_penalty * float(canvas_w * canvas_h)
         if len(slots) == count and score > best_score:
@@ -524,22 +618,366 @@ def _white_layout_slots(cutouts: list[Image.Image], canvas_w: int, canvas_h: int
     return [(margin, margin, max(margin + 1, canvas_w - margin), max(margin + 1, canvas_h - margin))]
 
 
-def _place_cutout_in_slot(canvas: Image.Image, cutout: Image.Image, slot: tuple[int, int, int, int]) -> dict[str, int]:
+def _place_cutout_in_slot(canvas: Image.Image, cutout: Image.Image, slot: tuple[int, int, int, int], border_width: int = 0, inner_gap: int = 3) -> dict[str, int]:
     left, top, right, bottom = slot
     slot_w = max(1, right - left)
     slot_h = max(1, bottom - top)
-    ratio = min(slot_w / max(1, cutout.width), slot_h / max(1, cutout.height))
+    inset = max(0, int(border_width)) + max(0, int(inner_gap))
+    content_left = min(right - 1, left + inset)
+    content_top = min(bottom - 1, top + inset)
+    content_right = max(content_left + 1, right - inset)
+    content_bottom = max(content_top + 1, bottom - inset)
+    content_w = max(1, content_right - content_left)
+    content_h = max(1, content_bottom - content_top)
+    ratio = min(content_w / max(1, cutout.width), content_h / max(1, cutout.height))
     target_w = max(1, int(round(cutout.width * ratio)))
     target_h = max(1, int(round(cutout.height * ratio)))
     layer = cutout.convert("RGBA").resize((target_w, target_h), _resample_lanczos())
-    paste_left = left + (slot_w - target_w) // 2
-    paste_top = top + (slot_h - target_h) // 2
+    paste_left = content_left + (content_w - target_w) // 2
+    paste_top = content_top + (content_h - target_h) // 2
     _paste_rgba(canvas, layer, paste_left, paste_top)
-    return {"left": paste_left, "top": paste_top, "right": paste_left + target_w, "bottom": paste_top + target_h}
+    return {"left": left, "top": top, "right": right, "bottom": bottom, "content_left": paste_left, "content_top": paste_top, "content_right": paste_left + target_w, "content_bottom": paste_top + target_h}
 
 
 def _to_tensor(image: Image.Image) -> torch.Tensor:
     return _pil_list_to_tensor([image.convert("RGB")]).contiguous()
+
+
+def _load_temp_tensor(info: dict[str, Any]) -> torch.Tensor:
+    return _to_tensor(gjjutils_read_temp_pil_image(info).convert("RGB"))
+
+
+def _input_image_path(ref: Any) -> Path | None:
+    text = str(ref or "").replace("\\", "/").strip()
+    if not text:
+        return None
+    try:
+        path = folder_paths.get_annotated_filepath(text)
+        if path and Path(path).is_file():
+            return Path(path)
+    except Exception:
+        pass
+    try:
+        base = Path(folder_paths.get_input_directory())
+        path = (base / text).resolve()
+        if path.is_file() and str(path).lower().startswith(str(base.resolve()).lower()):
+            return path
+    except Exception:
+        pass
+    return None
+
+
+def _load_uploaded_images(value: Any) -> list[Image.Image]:
+    raw = _unwrap(value, "")
+    refs: list[Any]
+    try:
+        parsed = json.loads(str(raw or "[]"))
+        refs = parsed if isinstance(parsed, list) else [parsed]
+    except Exception:
+        refs = [raw]
+    images: list[Image.Image] = []
+    for ref in refs:
+        filename = ref.get("filename") if isinstance(ref, dict) else ref
+        path = _input_image_path(filename)
+        if path is None:
+            continue
+        try:
+            with Image.open(path) as image:
+                images.append(ImageOps.exif_transpose(image).convert("RGB"))
+        except Exception:
+            continue
+    return images
+
+
+def _send_status(unique_id: Any, text: str, progress: float | None = None) -> None:
+    if not unique_id:
+        return
+    try:
+        from server import PromptServer
+
+        payload: dict[str, Any] = {"node": str(unique_id), "text": str(text or "")}
+        if progress is not None:
+            payload["progress"] = max(0.0, min(1.0, float(progress)))
+        PromptServer.instance.send_sync("gjj_node_progress", payload)
+    except Exception:
+        pass
+
+
+def _try_node_class(class_name: str, modules: tuple[str, ...] = ("nodes", "comfy_extras.nodes_model_advanced")):
+    for module_name in modules:
+        try:
+            module = import_module(module_name)
+            mappings = getattr(module, "NODE_CLASS_MAPPINGS", None)
+            if isinstance(mappings, dict) and class_name in mappings:
+                return mappings[class_name]
+            value = getattr(module, class_name, None)
+            if value is not None:
+                return value
+        except Exception:
+            continue
+    for module in list(sys.modules.values()):
+        mappings = getattr(module, "NODE_CLASS_MAPPINGS", None)
+        if isinstance(mappings, dict) and class_name in mappings:
+            return mappings[class_name]
+    return None
+
+
+def _resolve_seeded_model_name(selection: Any, folder_type: str, seeds: tuple[str, ...], label: str, *, relative_dir: str | None = None) -> str:
+    return gjjutils_resolve_model_name(
+        selection,
+        folder_type,
+        relative_dir=relative_dir,
+        candidates=seeds,
+        label=label,
+        auto_values=("", "auto", "自动", "锁定", "主关键词"),
+    )
+
+
+def _call_node_method(node: Any, method_name: str, **kwargs):
+    method = getattr(node, method_name, None)
+    if method is None:
+        raise RuntimeError(f"当前 ComfyUI 环境缺少 {node.__class__.__name__}.{method_name}。")
+    try:
+        return _unpack_node_output(method(**kwargs))
+    except TypeError:
+        ordered = {
+            "encode": ("vae", "pixels"),
+            "decode": ("vae", "samples"),
+            "sample": ("model", "seed", "steps", "cfg", "sampler_name", "scheduler", "positive", "negative", "latent_image", "denoise"),
+            "patch": ("model", "strength", "pre_cfg"),
+        }.get(method_name, tuple(kwargs.keys()))
+        return _unpack_node_output(method(*[kwargs[key] for key in ordered if key in kwargs]))
+
+
+def _looks_like_node_output(value: Any) -> bool:
+    name = value.__class__.__name__ if value is not None else ""
+    return name == "NodeOutput" or (hasattr(value, "node") and hasattr(value, "output_index"))
+
+
+def _unpack_node_output(value: Any) -> tuple[Any, ...]:
+    if value is None:
+        return (None,)
+    if isinstance(value, tuple):
+        return value
+    if _looks_like_node_output(value) and hasattr(value, "args"):
+        args = getattr(value, "args", ())
+        if isinstance(args, tuple):
+            return args
+        if isinstance(args, list):
+            return tuple(args)
+        return (args,)
+    return (value,)
+
+
+def _workflow_method_name(node: Any, preferred: str, *fallbacks: str) -> str:
+    for name in (str(getattr(node, "FUNCTION", "") or ""), preferred, *fallbacks):
+        if name and hasattr(node, name):
+            return name
+    candidates = [name for name in (preferred, *fallbacks) if name]
+    raise RuntimeError(f"当前 ComfyUI 环境缺少 {node.__class__.__name__}.{candidates[0] if candidates else preferred}。")
+
+
+def _call_workflow_node_method(node: Any, method_name: str, *fallbacks: str, **kwargs):
+    actual_method_name = _workflow_method_name(node, method_name, *fallbacks)
+    method = getattr(node, actual_method_name, None)
+    if method is None:
+        raise RuntimeError(f"当前 ComfyUI 环境缺少 {node.__class__.__name__}.{actual_method_name}。")
+    return _unpack_node_output(method(**kwargs))
+
+
+def _is_model_like(value: Any) -> bool:
+    return value is not None and (
+        hasattr(value, "get_model_object")
+        or hasattr(value, "model")
+        or value.__class__.__name__ == "ModelPatcher"
+    )
+
+
+def _use_model_result(original_model: Any, result: Any, node_name: str, unique_id: Any = None) -> Any:
+    candidate = _unpack_node_output(result)[0]
+    if _is_model_like(candidate):
+        return candidate
+    if candidate is not None:
+        _send_status(unique_id, f"{node_name}:保留", None)
+    return original_model
+
+
+def _apply_model_sampling_aura_flow(model: Any, shift: float, unique_id: Any = None):
+    node_class = _try_node_class("ModelSamplingAuraFlow", ("comfy_extras.nodes_model_advanced", "nodes"))
+    if node_class is None:
+        raise RuntimeError("当前 ComfyUI 环境缺少标准 ModelSamplingAuraFlow 节点，无法按 TTT 工作流执行二阶段。")
+    patched = _use_model_result(
+        model,
+        _call_workflow_node_method(node_class(), "patch", "execute", "apply", model=model, shift=float(shift)),
+        "AuraFlow",
+        unique_id,
+    )
+    _send_status(unique_id, "AuraFlow:ModelSamplingAuraFlow", 0.60)
+    return patched
+
+
+def _apply_cfg_norm(model: Any, strength: float, pre_cfg: bool, unique_id: Any = None):
+    strength = float(strength)
+    node_class = _try_node_class("CFGNorm", ("comfy_extras.nodes_cfg", "comfy_extras.nodes_model_advanced", "nodes"))
+    if node_class is None:
+        raise RuntimeError("当前 ComfyUI 环境缺少标准 CFGNorm 节点，无法按 TTT 工作流执行二阶段。")
+    result = _call_workflow_node_method(
+        node_class(),
+        "patch",
+        "execute",
+        "apply",
+        model=model,
+        strength=strength,
+        pre_cfg=bool(pre_cfg),
+    )
+    patched = _use_model_result(model, result, "CFGNorm", unique_id)
+    _send_status(unique_id, "CFGNorm:CFGNorm", 0.63)
+    return patched
+
+
+def _vae_encode_image(vae: Any, image: torch.Tensor, unique_id: Any = None) -> dict[str, Any]:
+    node_class = _try_node_class("VAEEncode", ("nodes",))
+    if node_class is None:
+        raise RuntimeError("当前 ComfyUI 环境缺少标准 VAEEncode 节点，无法按 TTT 工作流执行二阶段。")
+    _send_status(unique_id, "VAE入:VAEEncode", 0.73)
+    return _call_workflow_node_method(node_class(), "encode", vae=vae, pixels=image[:, :, :, :3])[0]
+
+
+def _vae_decode_latent(vae: Any, latent: dict[str, Any], unique_id: Any = None) -> torch.Tensor:
+    node_class = _try_node_class("VAEDecode", ("nodes",))
+    if node_class is None:
+        raise RuntimeError("当前 ComfyUI 环境缺少标准 VAEDecode 节点，无法按 TTT 工作流执行二阶段。")
+    _send_status(unique_id, "VAE出:VAEDecode", 0.94)
+    return _call_workflow_node_method(node_class(), "decode", vae=vae, samples=latent)[0]
+
+
+def _sample_latent_standard(
+    model: Any,
+    latent: dict[str, Any],
+    positive: Any,
+    negative: Any,
+    *,
+    seed: int,
+    steps: int,
+    cfg: float,
+    sampler_name: str,
+    scheduler: str,
+    denoise: float,
+    unique_id: Any = None,
+) -> dict[str, Any]:
+    node_class = _try_node_class("KSampler", ("nodes",))
+    if node_class is None:
+        raise RuntimeError("当前 ComfyUI 环境缺少标准 KSampler 节点，无法按 TTT 工作流执行二阶段。")
+    _send_status(unique_id, "采样:KSampler", 0.80)
+    return _call_workflow_node_method(
+        node_class(),
+        "sample",
+        model=model,
+        seed=seed,
+        steps=steps,
+        cfg=cfg,
+        sampler_name=sampler_name,
+        scheduler=scheduler,
+        positive=positive,
+        negative=negative,
+        latent_image=latent,
+        denoise=denoise,
+    )[0]
+
+
+def _load_internal_bundle(kwargs: dict[str, Any]) -> tuple[Any, Any, Any]:
+    unique_id = kwargs.get("unique_id")
+    _send_status(unique_id, "模型", 0.48)
+    unet_name = _resolve_seeded_model_name(DEFAULT_UNET_SEEDS[0], "diffusion_models", DEFAULT_UNET_SEEDS, "FireRed Image Edit 主模型")
+    clip_name = _resolve_seeded_model_name(DEFAULT_CLIP_SEEDS[0], "text_encoders", DEFAULT_CLIP_SEEDS, "Qwen Image CLIP")
+    vae_name = _resolve_seeded_model_name(DEFAULT_VAE_SEEDS[0], "vae", DEFAULT_VAE_SEEDS, "Qwen Image VAE")
+    lora_1_name = _resolve_seeded_model_name(DEFAULT_LORA_1_SEEDS[0], "loras", DEFAULT_LORA_1_SEEDS, "Lightning LoRA")
+    lora_2_name = _resolve_seeded_model_name(DEFAULT_LORA_2_SEEDS[0], "loras", DEFAULT_LORA_2_SEEDS, "人景融合 LoRA")
+
+    loader = GJJ_ModelBundleLoader()
+    loaded = loader.load_models(
+        unet_name=unet_name,
+        unet_dtype="default",
+        clip_name=clip_name,
+        clip_type="qwen_image",
+        clip_dtype="default",
+        vae_name=vae_name,
+        vae_dtype="default",
+        use_separate_vae=False,
+        steps=TTT_STEPS,
+        cfg=TTT_CFG,
+        denoise=TTT_DENOISE,
+        template_id=DEFAULT_TEMPLATE_ID,
+        preset_lora_1_enabled=True,
+        preset_lora_1_name=lora_1_name,
+        preset_lora_1_strength="1",
+        preset_lora_2_enabled=True,
+        preset_lora_2_name=lora_2_name,
+        preset_lora_2_strength="1.00",
+        model_patch_enabled=False,
+        clip_vision_name="",
+        control_net_name="",
+        lora_chain_config="",
+    )
+    _send_status(unique_id, "模型完成", 0.58)
+    return loaded[0], loaded[1], loaded[2]
+
+
+def _generate_fusion_image(stick: torch.Tensor, white: torch.Tensor, kwargs: dict[str, Any]) -> torch.Tensor:
+    unique_id = kwargs.get("unique_id")
+    _send_status(unique_id, "融合", 0.45)
+    model, clip, vae = _load_internal_bundle(kwargs)
+
+    model = _apply_model_sampling_aura_flow(model, TTT_MODEL_SHIFT, unique_id)
+    model = _apply_cfg_norm(
+        model,
+        TTT_CFG_NORM_STRENGTH,
+        TTT_CFG_NORM_PRE_CFG,
+        unique_id,
+    )
+
+    qwen = GJJ_TextEncodeQwenImageEditPlus()
+    _send_status(unique_id, "编码:图1人物/图2背景", 0.66)
+    _main_image, positive, negative = qwen.encode(
+        clip=clip,
+        positive_prompt=DEFAULT_FUSION_PROMPT,
+        negative_prompt="",
+        zero_conditioning=True,
+        apply_kontext_scale=False,
+        apply_reference_latents_method=False,
+        reference_latents_method="index_timestep_zero",
+        translation_device="auto",
+        translation_unload_after_use=True,
+        translation_enabled=False,
+        vae=vae,
+        lora_triggers="",
+        image_01=white,
+        image_02=stick,
+    )
+
+    _send_status(unique_id, "VAE入:背景", 0.72)
+    latent = _vae_encode_image(vae, stick, unique_id)
+    _send_status(unique_id, "采样", 0.78)
+
+    sampled = _sample_latent_standard(
+        model=model,
+        seed=TTT_SEED,
+        steps=TTT_STEPS,
+        cfg=TTT_CFG,
+        sampler_name=TTT_SAMPLER,
+        scheduler=TTT_SCHEDULER,
+        positive=positive,
+        negative=negative,
+        latent=latent,
+        denoise=TTT_DENOISE,
+        unique_id=unique_id,
+    )
+    _send_status(unique_id, "VAE出", 0.93)
+    output = _vae_decode_latent(vae, sampled, unique_id)
+    if hasattr(output, "shape") and len(output.shape) == 5:
+        output = output.reshape(-1, output.shape[-3], output.shape[-2], output.shape[-1])
+    _send_status(unique_id, "融合完成", 0.97)
+    return output
 
 
 def _collect_person_images(kwargs: dict[str, Any]) -> list[Image.Image]:
@@ -565,11 +1003,10 @@ class GJJ_SceneFusionPrep:
         else f"{_ENVIRONMENT_REPORT['warning_message']}\n\n用于人景融合工作流的准备节点：把多个人物抠图后按自动颜色、位置、大小和火柴棍姿势标注到背景上，同时输出白底人物色框参考图。"
     )
     SEARCH_ALIASES = ["人景融合准备", "人物位置标注", "火柴棍姿势", "scene fusion prep", "character placement"]
-    RETURN_TYPES = ("IMAGE", "IMAGE")
-    RETURN_NAMES = ("背景火柴棍标注图", "白底人物色框图")
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("合并图片",)
     OUTPUT_TOOLTIPS = (
-        "背景图上叠加带颜色的人物火柴棍、面部朝向十字和色框，用作后续人景融合的场景位置/姿势参考。",
-        "白色背景上按相同位置合成人物抠图，并给每个人物添加同色方框，用作角色外观和颜色编号参考。",
+        "内部完整执行 Qwen/FireRed 人景融合链路后得到的最终图片。",
     )
     GJJ_HELP = {
         "notice": _ENVIRONMENT_REPORT["help_message"] if not _MODELS_AVAILABLE else "",
@@ -579,6 +1016,19 @@ class GJJ_SceneFusionPrep:
         "warning_message": _ENVIRONMENT_REPORT["warning_message"],
         "notice_level": _ENVIRONMENT_REPORT["notice_level"],
         "model_download_url": MODEL_DOWNLOAD_URL,
+        "static_model_tree_only": True,
+        "model_tree_priority": "static",
+        "model_tree": [
+            {
+                "label": "RMBG1.4 模型",
+                "path": "models/RMBG/rmbg1.4.pth",
+                "folder": "RMBG",
+                "filename": "rmbg1.4.pth",
+                "kind": "background_removal",
+                "tooltip": "用于自动去除人物背景，生成白底人物色框参考图。",
+            },
+            *FUSION_MODEL_TREE,
+        ],
         "models": [
             {
                 "label": "RMBG1.4 模型",
@@ -586,12 +1036,13 @@ class GJJ_SceneFusionPrep:
                 "folder": "RMBG",
                 "kind": "background_removal",
                 "tooltip": "用于自动去除人物背景，生成白底人物色框参考图。",
-            }
+            },
+            *FUSION_MODEL_TREE,
         ],
         "usage": [
             "连接背景图和人物 1；人物口可接单张、批量或多图对象，节点会拆成多个人物并按蓝、红、绿、品红、青、黄循环分配颜色。",
             "执行一次后，在节点预览里选中人物，直接拖控制点调整位置、大小、整体方向、肢体姿势和头部十字朝向。",
-            "第一个输出接给场景/ControlNet/融合参考，第二个输出接给人物外观参考或多参考图输入。",
+            "节点只输出合并后的图片；模型、CLIP、VAE、LoRA、编码、采样和解码都在节点内部完成。",
         ],
     }
 
@@ -599,33 +1050,34 @@ class GJJ_SceneFusionPrep:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "background": (
-                    MEDIA_INPUT_TYPE,
-                    {
-                        "display_name": "背景图",
-                        "tooltip": "最终场景背景；节点会使用第一张图片，并按画布尺寸适配。",
-                    },
-                ),
                 "width": (
                     "INT",
                     {
-                        "default": 1024,
-                        "min": 16,
+                        "default": 0,
+                        "min": 0,
                         "max": 8192,
                         "step": 16,
                         "display_name": "宽度",
-                        "tooltip": "输出准备图宽度；执行时会向下对齐到 16 的倍数。",
+                        "tooltip": "输出宽度；0 表示使用背景图宽度，执行时会向下对齐到 16 的倍数。",
+                        "widget": "hidden",
+                        "hidden": True,
+                        "display": "hidden",
+                        "advanced": True,
                     },
                 ),
                 "height": (
                     "INT",
                     {
-                        "default": 1024,
-                        "min": 16,
+                        "default": 0,
+                        "min": 0,
                         "max": 8192,
                         "step": 16,
                         "display_name": "高度",
-                        "tooltip": "输出准备图高度；执行时会向下对齐到 16 的倍数。",
+                        "tooltip": "输出高度；0 表示使用背景图高度，执行时会向下对齐到 16 的倍数。",
+                        "widget": "hidden",
+                        "hidden": True,
+                        "display": "hidden",
+                        "advanced": True,
                     },
                 ),
                 "placement_config": (
@@ -695,17 +1147,202 @@ class GJJ_SceneFusionPrep:
                         "advanced": True,
                     },
                 ),
+                "positive_prompt": (
+                    "STRING",
+                    {
+                        "default": DEFAULT_FUSION_PROMPT,
+                        "multiline": True,
+                        "display_name": "融合提示词",
+                        "tooltip": "内部 Qwen Image Edit 使用的正向提示词；前端保持隐藏。",
+                        "display": "hidden",
+                        "hidden": True,
+                        "advanced": True,
+                    },
+                ),
+                "negative_prompt": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": True,
+                        "display_name": "负向提示词",
+                        "tooltip": "内部 Qwen Image Edit/KSampler 使用的负向提示词。",
+                        "display": "hidden",
+                        "hidden": True,
+                        "advanced": True,
+                    },
+                ),
+                "seed": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 0xffffffffffffffff,
+                        "display_name": "种子",
+                        "tooltip": "内部采样种子；可由 GJJ_TemplateParams 广播或外部转换输入覆盖。",
+                        "display": "hidden",
+                        "hidden": True,
+                        "advanced": True,
+                    },
+                ),
+                "steps": (
+                    "INT",
+                    {
+                        "default": 8,
+                        "min": 1,
+                        "max": 1000,
+                        "display_name": "步数",
+                        "display": "hidden",
+                        "hidden": True,
+                        "advanced": True,
+                    },
+                ),
+                "cfg": (
+                    "FLOAT",
+                    {
+                        "default": DEFAULT_FUSION_CFG,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "step": 0.1,
+                        "display_name": "CFG",
+                        "display": "hidden",
+                        "hidden": True,
+                        "advanced": True,
+                    },
+                ),
+                "sampler_name": (
+                    "STRING",
+                    {
+                        "default": DEFAULT_FUSION_SAMPLER,
+                        "display_name": "采样器",
+                        "display": "hidden",
+                        "hidden": True,
+                        "advanced": True,
+                    },
+                ),
+                "scheduler": (
+                    "STRING",
+                    {
+                        "default": DEFAULT_FUSION_SCHEDULER,
+                        "display_name": "调度器",
+                        "display": "hidden",
+                        "hidden": True,
+                        "advanced": True,
+                    },
+                ),
+                "denoise": (
+                    "FLOAT",
+                    {
+                        "default": DEFAULT_FUSION_DENOISE,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.01,
+                        "display_name": "降噪",
+                        "display": "hidden",
+                        "hidden": True,
+                        "advanced": True,
+                    },
+                ),
+                "model_shift": (
+                    "FLOAT",
+                    {
+                        "default": 3.1,
+                        "min": -100.0,
+                        "max": 100.0,
+                        "step": 0.1,
+                        "display_name": "AuraFlow Shift",
+                        "display": "hidden",
+                        "hidden": True,
+                        "advanced": True,
+                    },
+                ),
+                "cfg_norm_strength": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "step": 0.1,
+                        "display_name": "CFGNorm 强度",
+                        "display": "hidden",
+                        "hidden": True,
+                        "advanced": True,
+                    },
+                ),
+                "cfg_norm_pre_cfg": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display_name": "CFGNorm Pre CFG",
+                        "display": "hidden",
+                        "hidden": True,
+                        "advanced": True,
+                    },
+                ),
+                "fusion_unet_name": (
+                    "STRING",
+                    {"default": DEFAULT_UNET_SEEDS[0], "display_name": "主模型关键词", "tooltip": "锁定主模型关键词；执行时用公共模糊搜索匹配本地文件，支持 GGUF。", "display": "hidden", "hidden": True, "advanced": True},
+                ),
+                "fusion_unet_dtype": ("STRING", {"default": "default", "display_name": "主模型精度", "display": "hidden", "hidden": True, "advanced": True}),
+                "fusion_clip_name": ("STRING", {"default": DEFAULT_CLIP_SEEDS[0], "display_name": "CLIP关键词", "display": "hidden", "hidden": True, "advanced": True}),
+                "fusion_clip_dtype": ("STRING", {"default": "default", "display_name": "CLIP精度", "display": "hidden", "hidden": True, "advanced": True}),
+                "fusion_vae_name": ("STRING", {"default": DEFAULT_VAE_SEEDS[0], "display_name": "VAE关键词", "display": "hidden", "hidden": True, "advanced": True}),
+                "fusion_vae_dtype": ("STRING", {"default": "default", "display_name": "VAE精度", "display": "hidden", "hidden": True, "advanced": True}),
+                "fusion_lora_1_name": ("STRING", {"default": DEFAULT_LORA_1_SEEDS[0], "display_name": "LoRA 1关键词", "display": "hidden", "hidden": True, "advanced": True}),
+                "fusion_lora_1_strength": ("STRING", {"default": "1", "display_name": "LoRA 1强度", "display": "hidden", "hidden": True, "advanced": True}),
+                "fusion_lora_2_name": ("STRING", {"default": DEFAULT_LORA_2_SEEDS[0], "display_name": "LoRA 2关键词", "display": "hidden", "hidden": True, "advanced": True}),
+                "fusion_lora_2_strength": ("STRING", {"default": "1.00", "display_name": "LoRA 2强度", "display": "hidden", "hidden": True, "advanced": True}),
+                BACKGROUND_UPLOAD_WIDGET: (
+                    "STRING",
+                    {
+                        "default": "",
+                        "display_name": "内部背景文件",
+                        "tooltip": "🖼️ 按钮写入的内部背景文件名。",
+                        "display": "hidden",
+                        "hidden": True,
+                        "advanced": True,
+                    },
+                ),
+                PERSON_UPLOADS_WIDGET: (
+                    "STRING",
+                    {
+                        "default": "[]",
+                        "display_name": "内部人物文件",
+                        "tooltip": "👤 按钮写入的内部人物文件列表。",
+                        "display": "hidden",
+                        "hidden": True,
+                        "advanced": True,
+                    },
+                ),
+                CUTOUT_PREVIEW_WIDGET: (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display_name": "仅抠图预览",
+                        "tooltip": "前端抠图按钮临时启用；只更新人物抠图卡，不生成火柴棍、白底参考图或执行二阶段采样。",
+                        "display": "hidden",
+                        "hidden": True,
+                        "advanced": True,
+                    },
+                ),
             },
             "optional": FlexiblePersonInputs(
                 {
+                    "background": (
+                        MEDIA_INPUT_TYPE,
+                        {
+                            "forceInput": True,
+                            "display_name": "背景图",
+                            "tooltip": "可选外部背景输入；不连接时使用 🖼️ 按钮在节点内部选择的背景。",
+                        },
+                    ),
                     "person_01": (
                         MEDIA_INPUT_TYPE,
                         {
                             "forceInput": True,
-                            "display_name": "人物 1",
-                            "tooltip": "第 1 组需要标注和抠图的人物；可接单张、批量或多图对象，节点会拆成多个人物并自动分配颜色。连接后前端会自动扩展人物 2。",
+                            "display_name": "人物",
+                            "tooltip": "可选外部人物输入；不连接时使用 👤 按钮在节点内部选择的人物。",
                         },
-                    )
+                    ),
                 }
             ),
             "hidden": {
@@ -723,6 +1360,30 @@ class GJJ_SceneFusionPrep:
             "device",
             "process_res",
             "mask_blur",
+            "positive_prompt",
+            "negative_prompt",
+            "seed",
+            "steps",
+            "cfg",
+            "sampler_name",
+            "scheduler",
+            "denoise",
+            "model_shift",
+            "cfg_norm_strength",
+            "cfg_norm_pre_cfg",
+            "fusion_unet_name",
+            "fusion_unet_dtype",
+            "fusion_clip_name",
+            "fusion_clip_dtype",
+            "fusion_vae_name",
+            "fusion_vae_dtype",
+            "fusion_lora_1_name",
+            "fusion_lora_1_strength",
+            "fusion_lora_2_name",
+            "fusion_lora_2_strength",
+            BACKGROUND_UPLOAD_WIDGET,
+            PERSON_UPLOADS_WIDGET,
+            CUTOUT_PREVIEW_WIDGET,
         ]
         parts = [str(_unwrap(kwargs.get(key), "")) for key in keys]
         parts.append(_tensor_signature(_unwrap(kwargs.get("background")), sample_video=False))
@@ -733,21 +1394,34 @@ class GJJ_SceneFusionPrep:
 
     def prepare(self, **kwargs):
         background = _unwrap(kwargs.get("background"))
-        width = _align16(_int(_unwrap(kwargs.get("width"), 1024), 1024))
-        height = _align16(_int(_unwrap(kwargs.get("height"), 1024), 1024))
         placement_config = str(_unwrap(kwargs.get("placement_config"), "") or "")
         background_fit = str(_unwrap(kwargs.get("background_fit"), "裁切填满") or "裁切填满")
         device = str(_unwrap(kwargs.get("device"), "自动") or "自动")
         process_res = max(64, _int(_unwrap(kwargs.get("process_res"), 1024), 1024))
         mask_blur = max(0.0, _float(_unwrap(kwargs.get("mask_blur"), 0.8), 0.8))
+        cutout_preview_only = _bool(kwargs.get(CUTOUT_PREVIEW_WIDGET), False)
         unique_id = _unwrap(kwargs.get("unique_id"))
+        _send_status(unique_id, "读图", 0.02)
 
         bg_images = _collect_media_images(background, "人景融合准备背景", sample_video=False)
         if not bg_images:
-            raise RuntimeError("人景融合准备节点需要连接背景图。")
+            bg_images = _load_uploaded_images(kwargs.get(BACKGROUND_UPLOAD_WIDGET))
+        if not bg_images:
+            raise RuntimeError("人景融合准备节点需要背景图。请点击节点内 🖼️ 按钮选择背景，或连接背景输入。")
+        requested_width = _int(_unwrap(kwargs.get("width"), 0), 0)
+        requested_height = _int(_unwrap(kwargs.get("height"), 0), 0)
+        bg_width = int(bg_images[0].width)
+        bg_height = int(bg_images[0].height)
+        stale_square = requested_width == 2048 and requested_height == 2048 and (bg_width != 2048 or bg_height != 2048)
+        width = _align16(bg_width if requested_width <= 0 or stale_square else requested_width)
+        height = _align16(bg_height if requested_height <= 0 or stale_square else requested_height)
+        _send_status(unique_id, f"尺寸 {width}x{height}", 0.08)
         person_images = _collect_person_images(kwargs)
         if not person_images:
-            raise RuntimeError("人景融合准备节点至少需要连接 1 张人物图。")
+            person_images = _load_uploaded_images(kwargs.get(PERSON_UPLOADS_WIDGET))
+        if not person_images:
+            raise RuntimeError("人景融合准备节点至少需要 1 张人物图。请点击节点内 👤 按钮选择人物，或连接人物输入。")
+        _send_status(unique_id, "读图完成", 0.10)
 
         bg = _fit_background(bg_images[0], width, height, background_fit, (255, 255, 255))
         config_map = _parse_config(placement_config)
@@ -756,8 +1430,9 @@ class GJJ_SceneFusionPrep:
             person_id = f"person_{index + 1:02d}"
             config = {"id": person_id, **_default_person(index, len(person_images)), **config_map.get(person_id, {})}
             config["id"] = person_id
-            config["color"] = DEFAULT_COLORS[index % len(DEFAULT_COLORS)]
+            config["color"] = _hex(str(config.get("color") or ""), DEFAULT_COLORS[index % len(DEFAULT_COLORS)])
             person_configs.append(config)
+        _send_status(unique_id, "布局", 0.18)
 
         try:
             weight_path = _resolve_model_path(METHOD_RMBG14)
@@ -773,38 +1448,19 @@ class GJJ_SceneFusionPrep:
             )
 
         target_device = _select_device(device)
+        _send_status(unique_id, "抠图模型", 0.22)
         model = _load_rmbg14_model(weight_path, target_device)
+        _send_status(unique_id, "抠图", 0.28)
         masks = _run_rmbg14_all_masks(model, person_images, target_device, process_res)
+        del model
+        if target_device == "cuda":
+            torch.cuda.empty_cache()
         cutouts: list[Image.Image] = []
         for image, mask in zip(person_images, masks):
             processed = _postprocess_mask_local(mask, 0.0, mask_blur)
             rgba, _ = _make_rgba_and_mask(image, processed)
             cutouts.append(rgba)
-
-        stick = bg.convert("RGB")
-        stick_draw = ImageDraw.Draw(stick)
-        for config in sorted(person_configs, key=lambda item: _float(item.get("z"), 0.0)):
-            _draw_stick_person(stick_draw, config, width, height)
-
-        white = Image.new("RGBA", (width, height), (255, 255, 255, 255))
-        placed_boxes: list[tuple[dict[str, Any], dict[str, int]]] = []
-        white_cutouts = [
-            _trim_cutout_alpha(cutout, max(2, int(round(min(cutout.width, cutout.height) * 0.006))))
-            for cutout in cutouts
-        ]
-        white_items = list(zip(person_configs, white_cutouts))
-        slots = _white_layout_slots(white_cutouts, width, height)
-        for slot, (config, cutout) in zip(slots, white_items):
-            placed_boxes.append((config, _place_cutout_in_slot(white, cutout, slot)))
-        white_rgb = white.convert("RGB")
-        white_draw = ImageDraw.Draw(white_rgb)
-        for config, box in placed_boxes:
-            color = _rgb(str(config.get("color") or "#0000FF"), (0, 0, 255))
-            line_w = max(5, int(round(height * 0.01)))
-            white_draw.rectangle((box["left"], box["top"], box["right"], box["bottom"]), outline=color, width=line_w)
-
-        output_a = _to_tensor(stick)
-        output_b = _to_tensor(white_rgb)
+        _send_status(unique_id, "抠图完成", 0.36)
 
         payload_persons = []
         for index, (config, cutout) in enumerate(zip(person_configs, cutouts)):
@@ -823,32 +1479,71 @@ class GJJ_SceneFusionPrep:
                     **_save_temp_image(cutout, f"{NODE_NAME}_{config['id']}"),
                 }
             )
+        placement_payload = {
+            "version": 1,
+            "persons": [
+                {
+                    "id": item["id"],
+                    "x": item["x"],
+                    "y": item["y"],
+                    "scale": item["scale"],
+                    "rotation": item["rotation"],
+                    "face_angle": item["face_angle"],
+                    "color": item["color"],
+                    "z": item["z"],
+                    "pose": item["pose"],
+                }
+                for item in person_configs
+            ],
+        }
+        if cutout_preview_only:
+            payload = {
+                "canvas": {"width": width, "height": height, "background_fit": background_fit},
+                "background": _save_temp_image(bg, f"{NODE_NAME}_background"),
+                "persons": payload_persons,
+                "placement_config": placement_payload,
+            }
+            _send_status(unique_id, "抠图预览完成", 1.0)
+            return {"ui": {"gjj_scene_fusion_prep": [payload]}, "result": (_to_tensor(bg),)}
+
+        stick = bg.convert("RGB")
+        stick_draw = ImageDraw.Draw(stick)
+        for config in sorted(person_configs, key=lambda item: _float(item.get("z"), 0.0)):
+            _draw_stick_person(stick_draw, config, width, height)
+        _send_status(unique_id, "火柴棍", 0.39)
+
+        white = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+        placed_boxes: list[tuple[dict[str, Any], dict[str, int]]] = []
+        white_cutouts = [_trim_cutout_alpha(cutout, 0) for cutout in cutouts]
+        white_items = list(zip(person_configs, white_cutouts))
+        slots = _white_layout_slots(white_cutouts, width, height)
+        line_w = max(3, min(10, int(round(height * 0.006))))
+        for slot, (config, cutout) in zip(slots, white_items):
+            placed_boxes.append((config, _place_cutout_in_slot(white, cutout, slot, line_w, 3)))
+        white_rgb = white.convert("RGB")
+        white_draw = ImageDraw.Draw(white_rgb)
+        for config, box in placed_boxes:
+            color = _rgb(str(config.get("color") or "#0000FF"), (0, 0, 255))
+            white_draw.rectangle((box["left"], box["top"], box["right"], box["bottom"]), outline=color, width=line_w)
+        _send_status(unique_id, "人物拼图", 0.42)
+
+        stick_info = _save_temp_image(stick, f"{NODE_NAME}_stick")
+        white_info = _save_temp_image(white_rgb, f"{NODE_NAME}_white")
+        output_a = _load_temp_tensor(stick_info)
+        output_b = _load_temp_tensor(white_info)
+
+        output_c = _generate_fusion_image(output_a, output_b, kwargs)
 
         payload = {
             "canvas": {"width": width, "height": height, "background_fit": background_fit},
             "background": _save_temp_image(bg, f"{NODE_NAME}_background"),
-            "stick": _save_temp_image(stick, f"{NODE_NAME}_stick"),
-            "white": _save_temp_image(white_rgb, f"{NODE_NAME}_white"),
+            "stick": stick_info,
+            "white": white_info,
             "persons": payload_persons,
-            "placement_config": {
-                "version": 1,
-                "persons": [
-                    {
-                        "id": item["id"],
-                        "x": item["x"],
-                        "y": item["y"],
-                        "scale": item["scale"],
-                        "rotation": item["rotation"],
-                        "face_angle": item["face_angle"],
-                        "color": item["color"],
-                        "z": item["z"],
-                        "pose": item["pose"],
-                    }
-                    for item in person_configs
-                ],
-            },
+            "placement_config": placement_payload,
         }
-        return {"ui": {"gjj_scene_fusion_prep": [payload]}, "result": (output_a, output_b)}
+        _send_status(unique_id, "完成", 1.0)
+        return {"ui": {"gjj_scene_fusion_prep": [payload]}, "result": (output_c,)}
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_SceneFusionPrep}
