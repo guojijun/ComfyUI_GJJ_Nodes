@@ -544,8 +544,6 @@ def _comfy_supports_native_boogu_diffusion() -> bool:
 
 
 def _raise_if_unsupported_boogu_diffusion(unet_path: str, clip_type: str):
-    if _normalize_text(clip_type) != "boogu" and "boogu" not in _normalize_text(os.path.basename(str(unet_path or ""))):
-        return
     header = _read_safetensors_header(unet_path)
     if not _is_boogu_diffusion_header(header) or _comfy_supports_native_boogu_diffusion():
         return

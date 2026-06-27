@@ -1146,7 +1146,7 @@ function buildSettings(node) {
 	});
 	numeric.append(
 		parameterField("🌡 温度", temperature),
-		parameterField("📏 最大长度", maxTokens),
+		parameterField("📐 最大长度", maxTokens),
 		parameterField("🎲 种子模式", seedMode),
 		parameterField("🔢 固定种子", seed),
 		parameterField("🎯 Top K", topK),

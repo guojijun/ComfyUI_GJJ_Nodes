@@ -24,7 +24,7 @@ const BOOLEAN_WIDGETS = [
 ];
 const SLIDER_WIDGETS = [
 	["width", "📏 输出宽度", 128, 4096, 64],
-	["height", "📏 输出高度", 128, 4096, 64],
+	["height", "📐 输出高度", 128, 4096, 64],
 	["fps", "🎞️ 视频帧率", 1, 120, 1],
 ];
 const STATE_KEYS = {

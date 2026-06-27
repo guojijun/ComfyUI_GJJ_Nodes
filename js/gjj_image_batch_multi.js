@@ -881,7 +881,7 @@ function buildCustomPanel(node, state) {
 	);
 
 	panel.append(
-		makeCustomField("📏 尺寸", sizeInput),
+		makeCustomField("📐 尺寸", sizeInput),
 		makeCustomField("🔢 比例", ratioInput),
 		makeCustomField("↔️ 宽", widthInput),
 		makeCustomField("↕️ 高", heightInput),

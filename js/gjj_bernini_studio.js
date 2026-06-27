@@ -606,7 +606,7 @@ function updateResizeButton(node) {
 	const button = node?.__gjjBerniniPanel?.resize;
 	if (!button) return;
 	const enabled = Boolean(value(node, "resize_to_panel", DEFAULT_VALUES.resize_to_panel));
-	button.textContent = "📏";
+	button.textContent = "📐";
 	button.title = enabled ? "按面板尺寸：开启，按宽高缩放裁剪" : "按面板尺寸：关闭，优先沿用源媒体尺寸";
 	button.classList.toggle("active", enabled);
 }
@@ -874,7 +874,7 @@ function createPanel(node) {
 	const keepModel = makeButton("🧠", "保持模型：开启，复用已加载模型", "gjj-bs-cache", () => {
 		setValue(node, "keep_model", !Boolean(value(node, "keep_model", DEFAULT_VALUES.keep_model)));
 	});
-	const resize = makeButton("📏", "按面板尺寸：开启，按宽高缩放裁剪", "gjj-bs-resize", () => {
+	const resize = makeButton("📐", "按面板尺寸：开启，按宽高缩放裁剪", "gjj-bs-resize", () => {
 		setValue(node, "resize_to_panel", !Boolean(value(node, "resize_to_panel", DEFAULT_VALUES.resize_to_panel)));
 	});
 	const mediaLink = makeButton("🔗", "记住并断开/恢复媒体输入连接", "gjj-bs-link", () => {

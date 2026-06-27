@@ -19,6 +19,9 @@ let lastMemorySampleAt = 0;
 let panelClosedForRun = false;
 let positionSaveTimer = null;
 let positionLoaded = false;
+let positionLoadPromise = null;
+let panelHasCustomPosition = false;
+let panelPositionTouched = false;
 
 function nowMs() {
 	return performance.now();
@@ -186,12 +189,28 @@ function clampPanelPosition(left, top, root = panel) {
 	};
 }
 
+function isLegacyTopLeftPosition(position) {
+	const left = Number(position?.left);
+	const top = Number(position?.top);
+	return Number.isFinite(left) && Number.isFinite(top) && left <= 8 && top <= 8;
+}
+
+function resetPanelPosition(root) {
+	if (!root) return;
+	panelHasCustomPosition = false;
+	root.style.left = "auto";
+	root.style.top = "auto";
+	root.style.right = "14px";
+	root.style.bottom = "14px";
+}
+
 function applyPanelPosition(root, position) {
 	if (!root || !position || typeof position !== "object") return;
 	const left = Number(position.left);
 	const top = Number(position.top);
 	if (!Number.isFinite(left) || !Number.isFinite(top)) return;
 	const next = clampPanelPosition(left, top, root);
+	panelHasCustomPosition = true;
 	root.style.left = `${next.left}px`;
 	root.style.top = `${next.top}px`;
 	root.style.right = "auto";
@@ -199,28 +218,51 @@ function applyPanelPosition(root, position) {
 }
 
 async function loadPanelPosition(root) {
-	if (!root || positionLoaded) return;
-	positionLoaded = true;
-	try {
-		const response = api?.fetchApi ? await api.fetchApi(USER_SETTINGS_ENDPOINT) : await fetch(USER_SETTINGS_ENDPOINT);
-		const data = await response.json();
-		applyPanelPosition(root, data?.settings?.[USER_SETTINGS_SECTION]?.position);
-	} catch (_) {}
+	if (!root) return;
+	if (positionLoadPromise) return positionLoadPromise;
+	positionLoadPromise = (async () => {
+		if (positionLoaded) return;
+		positionLoaded = true;
+		let loaded = false;
+		try {
+			const response = api?.fetchApi ? await api.fetchApi(USER_SETTINGS_ENDPOINT) : await fetch(USER_SETTINGS_ENDPOINT);
+			const data = await response.json();
+			const position = data?.settings?.[USER_SETTINGS_SECTION]?.position;
+			if (!panelPositionTouched && position && !isLegacyTopLeftPosition(position)) {
+				applyPanelPosition(root, position);
+				loaded = true;
+			}
+		} catch (_) {}
+		if (!loaded && !panelPositionTouched) resetPanelPosition(root);
+	})();
+	return positionLoadPromise;
 }
 
-async function savePanelPosition(root) {
-	if (!root) return;
-	const rect = root.getBoundingClientRect();
-	const position = clampPanelPosition(rect.left, rect.top, root);
-	applyPanelPosition(root, position);
-	const body = JSON.stringify({ section: USER_SETTINGS_SECTION, values: { position } });
-	const options = { method: "POST", headers: { "Content-Type": "application/json" }, body };
+async function savePanelPositionValue(root, position) {
 	try {
+		const body = JSON.stringify({ section: USER_SETTINGS_SECTION, values: { position } });
+		const options = { method: "POST", headers: { "Content-Type": "application/json" }, body };
 		const response = api?.fetchApi ? await api.fetchApi(USER_SETTINGS_ENDPOINT, options) : await fetch(USER_SETTINGS_ENDPOINT, options);
 		if (!response?.ok) throw new Error("保存计时器位置失败");
 	} catch (error) {
 		console.warn("[GJJ ExecutionTimer] 保存位置失败", error);
 	}
+}
+
+async function resetSavedPanelPosition(root) {
+	clearTimeout(positionSaveTimer);
+	panelPositionTouched = true;
+	resetPanelPosition(root);
+	await savePanelPositionValue(root, null);
+}
+
+async function savePanelPosition(root) {
+	if (!root) return;
+	await loadPanelPosition(root);
+	const rect = root.getBoundingClientRect();
+	const position = clampPanelPosition(rect.left, rect.top, root);
+	applyPanelPosition(root, position);
+	await savePanelPositionValue(root, position);
 }
 
 function schedulePositionSave(root) {
@@ -231,8 +273,16 @@ function schedulePositionSave(root) {
 function enablePanelDrag(root, handle) {
 	if (!root || !handle || handle.__gjjTimerDragReady) return;
 	handle.__gjjTimerDragReady = true;
+	handle.addEventListener("dblclick", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		root.__gjjTimerSuppressClickUntil = nowMs() + 350;
+		void resetSavedPanelPosition(root);
+	}, true);
 	handle.addEventListener("pointerdown", (event) => {
 		if (event.button !== 0) return;
+		if (event.detail > 1) return;
+		panelPositionTouched = true;
 		const rect = root.getBoundingClientRect();
 		const start = {
 			x: event.clientX,
@@ -605,6 +655,7 @@ function ensurePanel() {
 		root.classList.add("gjj-collapsed");
 		collapse.textContent = "🔽";
 	}
+	resetPanelPosition(root);
 	enablePanelDrag(root, dragHandle);
 
 	document.body.appendChild(root);
@@ -932,7 +983,7 @@ function setupListeners() {
 	api.addEventListener("execution_interrupted", (event) => finishRun("interrupted", event));
 	api.addEventListener("gjj_memory_manager_stats", (event) => applyMemoryPayload(event?.detail || {}));
 	window.addEventListener("resize", () => {
-		if (!panel) return;
+		if (!panel || !panelHasCustomPosition) return;
 		const rect = panel.getBoundingClientRect();
 		applyPanelPosition(panel, { left: rect.left, top: rect.top });
 		schedulePositionSave(panel);

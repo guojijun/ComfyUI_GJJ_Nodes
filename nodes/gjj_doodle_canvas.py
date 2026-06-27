@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import base64
+import gc
 import hashlib
 import io
 import json
 import re
+import secrets
+import time
 from typing import Any
 
 import numpy as np
@@ -35,6 +38,7 @@ from .gjj_scribble_controlnet_generator import (
     _send_status,
 )
 try:
+    from .common_utils.temp_files import gjjutils_read_temp_pil_image, gjjutils_write_temp_pil_image
     from .common_utils.dependency_checker import build_node_help_payload
     from .common_utils.prompt_translation import (
         COMMON_PROMPT_TRANSLATE_API_PATH,
@@ -48,6 +52,7 @@ try:
         translate_zh_to_en,
     )
 except ImportError:
+    from common_utils.temp_files import gjjutils_read_temp_pil_image, gjjutils_write_temp_pil_image
     from common_utils.dependency_checker import build_node_help_payload
     from common_utils.prompt_translation import (
         COMMON_PROMPT_TRANSLATE_API_PATH,
@@ -199,12 +204,31 @@ _DOODLE_HELP = build_node_help_payload(
 )
 
 
+def _filter_control_named_models(names: list[str]) -> list[str]:
+    return [
+        name
+        for name in names
+        if "control" in str(name or "").lower() and "sd" in str(name or "").lower()
+    ]
+
+
 def _coerce_int(value: Any, fallback: int, minimum: int, maximum: int) -> int:
     try:
         number = int(round(float(value)))
     except Exception:
         number = int(fallback)
     return max(minimum, min(maximum, number))
+
+
+def _coerce_bool(value: Any, fallback: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value if value is not None else "").strip().lower()
+    if text in {"true", "1", "yes", "on"}:
+        return True
+    if text in {"false", "0", "no", "off"}:
+        return False
+    return fallback
 
 
 def _safe_json_loads(value: Any, fallback: Any) -> Any:
@@ -259,6 +283,17 @@ def _image_payload_from_state(
     return str(value or "").strip()
 
 
+def _image_ref_from_state(value: Any, keys: tuple[str, ...]) -> dict[str, Any] | None:
+    state = _safe_json_loads(value, {})
+    if not isinstance(state, dict):
+        return None
+    for key in keys:
+        ref = state.get(key)
+        if isinstance(ref, dict) and ref.get("filename"):
+            return ref
+    return None
+
+
 def _decode_data_url(value: str) -> bytes | None:
     text = str(value or "").strip()
     if not text:
@@ -300,23 +335,35 @@ def _load_doodle_image(doodle_data: Any, width: int, height: int, background_col
     return result
 
 
-def _load_generated_image(doodle_data: Any, width: int, height: int, background_color: str) -> Image.Image | None:
-    raw = _decode_data_url(_image_payload_from_state(doodle_data, ("generatedImage", "generated_image")))
-    if not raw:
-        return None
-    try:
-        with Image.open(io.BytesIO(raw)) as image:
-            image.load()
-            image = image.convert("RGBA")
-    except Exception as exc:
-        print(f"[GJJ_DoodleCanvas] 生成图缓存解码失败，已回退到涂鸦输出：{exc}")
-        return None
+def _finish_loaded_image(image: Image.Image, width: int, height: int, background_color: str) -> Image.Image:
+    image = image.convert("RGBA")
     background = Image.new("RGBA", image.size, (*_parse_color(background_color), 255))
     background.alpha_composite(image)
     result = background.convert("RGB")
     if result.size != (width, height):
         result = result.resize((width, height), _resampling_filter())
     return result
+
+
+def _load_generated_image(doodle_data: Any, width: int, height: int, background_color: str) -> Image.Image | None:
+    image_ref = _image_ref_from_state(doodle_data, ("generatedImageRef", "generated_image_ref"))
+    if image_ref:
+        try:
+            image = gjjutils_read_temp_pil_image(image_ref)
+            return _finish_loaded_image(image, width, height, background_color)
+        except Exception as exc:
+            print(f"[GJJ_DoodleCanvas] 生成图临时缓存读取失败，尝试旧缓存：{exc}")
+
+    raw = _decode_data_url(_image_payload_from_state(doodle_data, ("generatedImage", "generated_image")))
+    if not raw:
+        return None
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+            return _finish_loaded_image(image, width, height, background_color)
+    except Exception as exc:
+        print(f"[GJJ_DoodleCanvas] 生成图缓存解码失败，已回退到涂鸦输出：{exc}")
+        return None
 
 
 def _image_to_tensor(image: Image.Image) -> torch.Tensor:
@@ -353,6 +400,10 @@ def _tensor_to_base64(image: torch.Tensor) -> str:
     return _image_to_base64(_tensor_to_pil(image))
 
 
+def _image_to_temp_ref(image: Image.Image) -> dict[str, Any]:
+    return gjjutils_write_temp_pil_image(image.convert("RGB"), format="PNG", suffix=".png", media_type="image")
+
+
 def _connected_image_to_pil(image: Any, width: int, height: int) -> Image.Image | None:
     if image is None or not torch.is_tensor(image):
         return None
@@ -364,6 +415,30 @@ def _connected_image_to_pil(image: Any, width: int, height: int) -> Image.Image 
     if pil_image.size != (width, height):
         pil_image = pil_image.resize((width, height), _resampling_filter())
     return pil_image
+
+
+def _image_dimensions_from_tensor(image: Any) -> tuple[int, int] | None:
+    if image is None or not torch.is_tensor(image):
+        return None
+    try:
+        shape = tuple(int(part) for part in image.shape)
+    except Exception:
+        return None
+    if len(shape) == 4:
+        shape = shape[1:]
+    if len(shape) == 3:
+        if shape[0] in (1, 3, 4) and shape[-1] not in (1, 3, 4):
+            height, width = shape[1], shape[2]
+        else:
+            height, width = shape[0], shape[1]
+    elif len(shape) == 2:
+        height, width = shape
+    else:
+        return None
+    return (
+        _coerce_int(width, DEFAULT_WIDTH, 16, 4096),
+        _coerce_int(height, DEFAULT_HEIGHT, 16, 4096),
+    )
 
 
 def _tensor_signature(value: Any) -> str:
@@ -441,7 +516,7 @@ class GJJ_DoodleCanvas:
     @classmethod
     def INPUT_TYPES(cls):
         checkpoints = _list_checkpoints() or [DEFAULT_CHECKPOINT]
-        controlnets = _list_controlnets() or [DEFAULT_CONTROLNET]
+        controlnets = _filter_control_named_models(_list_controlnets()) or [DEFAULT_CONTROLNET]
         return {
             "required": {
                 "doodle_data": (
@@ -564,7 +639,7 @@ class GJJ_DoodleCanvas:
                         "default": 240272355371031,
                         "min": 0,
                         "max": 0xFFFFFFFFFFFFFFFF,
-                        "control_after_generate": True,
+                        "control_after_generate": False,
                         "display_name": "种子",
                         "tooltip": "点击 ✔ 原地生成时使用的采样随机种子。",
                     },
@@ -579,6 +654,42 @@ class GJJ_DoodleCanvas:
                         "advanced": True,
                         "display_name": "输出模式",
                         "tooltip": "前端输出按钮内部使用。doodle 输出涂鸦；generated 输出最近一次生成图。",
+                    },
+                ),
+                "auto_upstream_size": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "hidden": True,
+                        "display": "hidden",
+                        "socketless": True,
+                        "advanced": True,
+                        "display_name": "上游图尺寸",
+                        "tooltip": "📐 按钮内部使用。开启后，连接上游图像时画布尺寸自动使用上游图像宽高。",
+                    },
+                ),
+                "randomize_seed": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "hidden": True,
+                        "display": "hidden",
+                        "socketless": True,
+                        "advanced": True,
+                        "display_name": "随机种子",
+                        "tooltip": "🎲 按钮内部使用。开启后，每次提交运行前自动更换种子；关闭时固定当前种子。",
+                    },
+                ),
+                "keep_model": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "hidden": True,
+                        "display": "hidden",
+                        "socketless": True,
+                        "advanced": True,
+                        "display_name": "保留模型",
+                        "tooltip": "🧠 按钮内部使用。开启后保留 Scribble 生成模型缓存；关闭后每次执行完成都会卸载缓存模型。",
                     },
                 ),
             },
@@ -611,12 +722,18 @@ class GJJ_DoodleCanvas:
         controlnet_name,
         seed,
         output_mode,
+        auto_upstream_size=True,
+        randomize_seed=False,
+        keep_model=True,
         image=None,
         unique_id=None,
     ):
+        randomize_seed = _coerce_bool(randomize_seed, False)
+        keep_model = _coerce_bool(keep_model, True)
         payload = json.dumps(
             {
                 "auto_generate_contract": 2,
+                "random_tick": f"{time.time_ns()}:{secrets.randbits(64)}" if randomize_seed else "",
                 "doodle_data": str(doodle_data or ""),
                 "width": width,
                 "height": height,
@@ -629,6 +746,9 @@ class GJJ_DoodleCanvas:
                 "controlnet_name": controlnet_name,
                 "seed": seed,
                 "output_mode": output_mode,
+                "auto_upstream_size": _coerce_bool(auto_upstream_size, True),
+                "randomize_seed": randomize_seed,
+                "keep_model": keep_model,
                 "image": _tensor_signature(image),
             },
             ensure_ascii=False,
@@ -648,6 +768,29 @@ class GJJ_DoodleCanvas:
         self._scribble_runtime_cache_key = cache_key
         self._scribble_runtime_cache_value = (model, clip, vae, controlnet)
         return model, clip, vae, controlnet
+
+    def _clear_scribble_runtime_cache(self, unique_id: Any = None) -> None:
+        self._scribble_runtime_cache_key = None
+        self._scribble_runtime_cache_value = None
+        gc.collect()
+        try:
+            import comfy.model_management as model_management
+            for name in ("unload_all_models", "cleanup_models", "cleanup_models_gc"):
+                cleanup = getattr(model_management, name, None)
+                if callable(cleanup):
+                    try:
+                        cleanup()
+                    except Exception:
+                        pass
+            empty_cache = getattr(model_management, "soft_empty_cache", None)
+            if callable(empty_cache):
+                try:
+                    empty_cache(force=True)
+                except TypeError:
+                    empty_cache()
+        except Exception:
+            pass
+        _send_status(unique_id, "🧠 模型保留已关闭：已请求卸载 Scribble 生成模型")
 
     def _generate_scribble(
         self,
@@ -725,11 +868,23 @@ class GJJ_DoodleCanvas:
         controlnet_name: str,
         seed: int,
         output_mode: str,
+        auto_upstream_size: bool = True,
+        randomize_seed: bool = False,
+        keep_model: bool = True,
         image=None,
         unique_id=None,
     ):
         width = _coerce_int(width, DEFAULT_WIDTH, 16, 4096)
         height = _coerce_int(height, DEFAULT_HEIGHT, 16, 4096)
+        auto_upstream_size = _coerce_bool(auto_upstream_size, True)
+        randomize_seed = _coerce_bool(randomize_seed, False)
+        keep_model = _coerce_bool(keep_model, True)
+        if randomize_seed:
+            seed = secrets.randbits(64)
+        if auto_upstream_size:
+            upstream_dimensions = _image_dimensions_from_tensor(image)
+            if upstream_dimensions is not None:
+                width, height = upstream_dimensions
         background = background_color or DEFAULT_BACKGROUND
         connected_image = _connected_image_to_pil(image, width, height)
         has_connected_image = connected_image is not None
@@ -753,38 +908,45 @@ class GJJ_DoodleCanvas:
         )
         wants_generated_output = output_mode_key == "generated"
         cached_generated_image = None
-        if wants_generated_output and generation_mode_key != "generate" and not has_connected_image:
+        if wants_generated_output and not randomize_seed and not has_connected_image:
             cached_generated_image = _load_generated_image(doodle_data, width, height, background)
 
-        if generation_mode_key == "generate" or (wants_generated_output and cached_generated_image is None):
-            if wants_generated_output and generation_mode_key != "generate":
-                _send_status(unique_id, "已选择输出生成图，自动执行 Scribble 生成...")
-            generated_tensor = self._generate_scribble(
-                doodle_tensor,
-                width,
-                height,
-                positive_prompt,
-                ckpt_name,
-                controlnet_name,
-                seed,
-                unique_id=unique_id,
-            )
-            generated_image = _tensor_to_pil(generated_tensor)
-            ui["generated_image"] = [_tensor_to_base64(generated_tensor)]
-            if wants_generated_output:
-                selected_tensor = generated_tensor
-                selected_image = generated_image
-        elif wants_generated_output and cached_generated_image is not None:
-            selected_image = cached_generated_image
-            selected_tensor = _image_to_tensor(cached_generated_image)
-            ui["generated_image"] = [_image_to_base64(cached_generated_image)]
-        elif wants_generated_output:
-            ui["generated_image"] = []
-        return {
-            "ui": {**ui, "selected_image": [_image_to_base64(selected_image)]},
-            "result": (selected_tensor,),
-        }
+        try:
+            if wants_generated_output and cached_generated_image is not None:
+                selected_image = cached_generated_image
+                selected_tensor = _image_to_tensor(cached_generated_image)
+                ui["generated_image"] = [_image_to_base64(cached_generated_image)]
+                ui["generated_image_ref"] = [_image_to_temp_ref(cached_generated_image)]
+            elif generation_mode_key == "generate" or (wants_generated_output and cached_generated_image is None):
+                if wants_generated_output and generation_mode_key != "generate":
+                    _send_status(unique_id, "已选择输出生成图，自动执行 Scribble 生成...")
+                generated_tensor = self._generate_scribble(
+                    doodle_tensor,
+                    width,
+                    height,
+                    positive_prompt,
+                    ckpt_name,
+                    controlnet_name,
+                    seed,
+                    unique_id=unique_id,
+                )
+                generated_image = _tensor_to_pil(generated_tensor)
+                generated_ref = _image_to_temp_ref(generated_image)
+                ui["generated_image"] = [_tensor_to_base64(generated_tensor)]
+                ui["generated_image_ref"] = [generated_ref]
+                if wants_generated_output:
+                    selected_tensor = generated_tensor
+                    selected_image = generated_image
+            elif wants_generated_output:
+                ui["generated_image"] = []
+            return {
+                "ui": {**ui, "selected_image": [_image_to_base64(selected_image)]},
+                "result": (selected_tensor,),
+            }
+        finally:
+            if not keep_model:
+                self._clear_scribble_runtime_cache(unique_id)
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_DoodleCanvas}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 涂鸦画板"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🖌 涂鸦画板"}

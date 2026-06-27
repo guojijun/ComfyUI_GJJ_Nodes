@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import inspect
 from typing import Any
 
 try:
@@ -51,7 +53,7 @@ except Exception:
 NODE_NAME = "GJJ_GemmaTextGenerate"
 NODE_DISPLAY_NAME = "GJJ · 🧠 图像反推文本生成（Gemma）"
 NODE_DESCRIPTION = "把官方“加载CLIP + TextGenerate”合并成一个 GJJ 零第三方依赖节点；适合 Ideogram4 / Gemma 文本生成、提示词扩写和多模态文本生成。"
-DEFAULT_CLIP_NAME = "gemma_3_12B_it_fp8_e4m3fn.safetensors"
+DEFAULT_CLIP_NAME = "qwen3.5_4b_fp8_mixed.safetensors"
 MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 
 
@@ -90,10 +92,10 @@ CLIP_TYPES = [
 
 GEMMA_TEXT_ENCODER_MODELS = [
     {
-        "label": "推荐 Gemma 3 12B FP8 E4M3FN",
-        "path": "models/text_encoders/gemma_3_12B_it_fp8_e4m3fn.safetensors",
+        "label": "推荐 Qwen3.5 4B FP8 mixed",
+        "path": "models/text_encoders/qwen3.5_4b_fp8_mixed.safetensors",
         "required": True,
-        "description": "截图中加载 CLIP 使用的 Ideogram4/Gemma 文本生成模型；推荐作为默认。",
+        "description": "默认加载的 Qwen3.5 / Gemma 兼容文本生成模型；推荐作为默认。",
     },
     {
         "label": "兼容 Gemma 3 12B FP8 scaled",
@@ -170,6 +172,46 @@ def _find_text_encoder_path(clip_name: str) -> str | None:
         return None
 
 
+def _qwen35_runtime_issue(clip_name: str) -> str:
+    normalized_name = _basename(clip_name).lower().replace("_", "").replace("-", "")
+    if "qwen3.5" not in normalized_name and "qwen35" not in normalized_name:
+        return ""
+
+    missing = []
+    try:
+        import comfy.sd as comfy_sd
+        te_model = getattr(comfy_sd, "TEModel", None)
+        if te_model is None or not hasattr(te_model, "QWEN35_4B"):
+            missing.append("ComfyUI sd.py 未注册 QWEN35 文本编码器")
+    except Exception as exc:
+        missing.append(f"无法导入 ComfyUI 文本编码器注册表：{exc}")
+
+    try:
+        import comfy.text_encoders.qwen35  # noqa: F401
+    except Exception as exc:
+        missing.append(f"缺少 comfy.text_encoders.qwen35：{exc}")
+
+    try:
+        import comfy.text_encoders.qwen3vl  # noqa: F401
+    except Exception as exc:
+        missing.append(f"缺少 comfy.text_encoders.qwen3vl：{exc}")
+
+    try:
+        import accelerate  # noqa: F401
+    except Exception as exc:
+        missing.append(f"缺少 Python 依赖 accelerate：{exc}")
+
+    if not missing:
+        return ""
+    details = "\n".join(f"- {item}" for item in missing)
+    return (
+        f"当前 ComfyUI 运行环境不支持 {clip_name}。\n"
+        "该模型需要较新的 ComfyUI Qwen3.5/Qwen3VL 文本编码器实现和配套 Python 依赖；"
+        "请更新 CUI77 的 ComfyUI 本体与 python_embeded 依赖，或改用 CUI78 运行。\n"
+        f"{details}"
+    )
+
+
 def _available_runtime_report() -> dict[str, Any]:
     missing_models = []
     files = _filename_list("text_encoders")
@@ -194,6 +236,29 @@ if not (_DEPENDENCIES_AVAILABLE and _MODELS_AVAILABLE):
 
 
 def _load_merged_clip(clip_name: str, clip_type: str, device: str = "default"):
+    normalized_name = _basename(clip_name).lower()
+    use_forced_fp8_e4m3fn = "gemma" in normalized_name and "fp8_e4m3fn" in normalized_name
+    if use_forced_fp8_e4m3fn:
+        try:
+            import torch
+            import comfy.sd
+        except Exception as exc:
+            raise RuntimeError(f"无法导入 ComfyUI fp8 CLIP 加载运行时：{exc}") from exc
+        if folder_paths is None:
+            raise RuntimeError("无法访问 ComfyUI 模型路径管理器。")
+        clip_path = folder_paths.get_full_path("text_encoders", clip_name)
+        if not clip_path:
+            raise RuntimeError(f"未找到文本编码器：{clip_name}")
+        clip_type_value = getattr(comfy.sd.CLIPType, str(clip_type or "ideogram4").upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
+        model_options = {"dtype": torch.float8_e4m3fn}
+        if device == "cpu":
+            model_options["load_device"] = model_options["offload_device"] = torch.device("cpu")
+        return comfy.sd.load_clip(
+            ckpt_paths=[clip_path],
+            embedding_directory=folder_paths.get_folder_paths("embeddings"),
+            clip_type=clip_type_value,
+            model_options=model_options,
+        )
     try:
         from nodes import CLIPLoader
     except Exception as exc:
@@ -229,7 +294,8 @@ def _generate_text(
         audio=audio,
     )
     do_sample = str(sampling_mode or "on") == "on"
-    generated_ids = clip.generate(
+    generated_ids = _clip_generate_compat(
+        clip,
         tokens,
         do_sample=do_sample,
         max_length=max(1, min(2048, int(max_length or 256))),
@@ -241,7 +307,109 @@ def _generate_text(
         presence_penalty=float(presence_penalty),
         seed=int(seed),
     )
-    return str(clip.decode(generated_ids) or "")
+    text = str(clip.decode(generated_ids) or "")
+    if not bool(thinking):
+        text = _clean_no_think_output(text, prompt)
+    return text
+
+
+def _clip_generate_compat(clip: Any, tokens: Any, **kwargs: Any) -> Any:
+    generate = getattr(clip, "generate")
+    usable_kwargs = dict(kwargs)
+    try:
+        signature = inspect.signature(generate)
+        if not any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
+            usable_kwargs = {key: value for key, value in usable_kwargs.items() if key in signature.parameters}
+    except (TypeError, ValueError):
+        pass
+
+    while True:
+        try:
+            return generate(tokens, **usable_kwargs)
+        except TypeError as exc:
+            match = re.search(r"unexpected keyword argument ['\"]([^'\"]+)['\"]", str(exc))
+            if not match or match.group(1) not in usable_kwargs:
+                raise
+            usable_kwargs.pop(match.group(1), None)
+
+
+def _clean_no_think_output(text: str, prompt: str = "") -> str:
+    cleaned = str(text or "")
+    cleaned = re.sub(r"<think\b[^>]*>.*?</think>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    if re.search(r"</think>", cleaned, flags=re.IGNORECASE):
+        cleaned = re.sub(r"^.*?</think>\s*", "", cleaned, count=1, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"</?think\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<thinking\b[^>]*>.*?</thinking>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"</?thinking\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<\|im_(?:start|end)\|>", "", cleaned)
+    cleaned = re.sub(r"^\s*\[\d+\]\s*", "", cleaned)
+
+    prompt_text = str(prompt or "").strip()
+    if prompt_text and cleaned.lstrip().startswith(prompt_text):
+        cleaned = cleaned.lstrip()[len(prompt_text):]
+
+    prompt_lines = {line.strip() for line in prompt_text.splitlines() if line.strip()}
+    lines = cleaned.splitlines()
+    while lines and lines[0].strip() in prompt_lines:
+        lines.pop(0)
+    cleaned = "\n".join(lines).strip()
+    return _strip_labeled_thinking_block(cleaned)
+
+
+def _strip_labeled_thinking_block(text: str) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+
+    thinking_label = (
+        r"(?:思考过程|思考|推理过程|推理|分析过程|分析|reasoning|thought process|thinking|analysis)"
+    )
+    final_label = (
+        r"(?:最终答案|答案|回答|回复|结果|输出|final answer|answer|response|result|output)"
+    )
+
+    starts_with_thinking = re.match(rf"^\s*(?:#+\s*)?{thinking_label}\s*[:：\n]", cleaned, flags=re.IGNORECASE)
+    final_matches = list(re.finditer(rf"(?im)^\s*(?:#+\s*)?{final_label}\s*[:：]\s*", cleaned))
+    if final_matches and final_matches[0].start() == 0:
+        return cleaned[final_matches[0].end():].strip()
+    if final_matches and (starts_with_thinking or final_matches[0].start() > 0):
+        final = final_matches[-1]
+        return cleaned[final.end():].strip()
+
+    if starts_with_thinking:
+        without_label = re.sub(rf"^\s*(?:#+\s*)?{thinking_label}\s*[:：]?\s*", "", cleaned, count=1, flags=re.IGNORECASE)
+        parts = re.split(r"\n\s*\n", without_label, maxsplit=1)
+        if len(parts) == 2 and parts[1].strip():
+            return parts[1].strip()
+    return cleaned
+
+
+def _coerce_float(value: Any, default: float, minimum: float | None = None, maximum: float | None = None) -> float:
+    if isinstance(value, bool):
+        number = default
+    else:
+        text = str(value).strip().lower()
+        if text in {"", "none", "null", "false", "true"}:
+            number = default
+        else:
+            try:
+                number = float(value)
+            except Exception:
+                number = default
+    if minimum is not None:
+        number = max(minimum, number)
+    if maximum is not None:
+        number = min(maximum, number)
+    return number
+
+
+def _coerce_int(value: Any, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+    number = int(_coerce_float(value, float(default), None, None))
+    if minimum is not None:
+        number = max(minimum, number)
+    if maximum is not None:
+        number = min(maximum, number)
+    return number
 
 
 def _merged_generation_prompt(system_prompt: str, user_prompt: str) -> str:
@@ -411,7 +579,7 @@ class GJJ_GemmaTextGenerate:
                 "clip_name": (clip_options, {
                     "default": default_clip,
                     "display_name": "CLIP 名称",
-                    "tooltip": "选择 text_encoders 目录下的 Gemma / Ideogram4 文本编码器。默认优先 gemma_3_12B_it_fp8_e4m3fn.safetensors。",
+                    "tooltip": "选择 text_encoders 目录下的 Gemma / Ideogram4 文本编码器。默认优先 qwen3.5_4b_fp8_mixed.safetensors。",
                 }),
                 "clip_type": (CLIP_TYPES, {
                     "default": "ideogram4",
@@ -511,11 +679,8 @@ class GJJ_GemmaTextGenerate:
                     "display_name": "种子",
                     "tooltip": "随机采样种子。",
                 }),
-                "presence_penalty": ("FLOAT", {
-                    "default": 0.0,
-                    "min": 0.0,
-                    "max": 5.0,
-                    "step": 0.01,
+                "presence_penalty": ("STRING", {
+                    "default": "0.0",
                     "display": "hidden",
                     "hidden": True,
                     "display_name": "出现惩罚",
@@ -585,7 +750,7 @@ class GJJ_GemmaTextGenerate:
         min_p: float,
         repetition_penalty: float,
         seed: int,
-        presence_penalty: float,
+        presence_penalty: Any,
         thinking: bool,
         use_default_template: bool,
         media: Any = None,
@@ -608,6 +773,9 @@ class GJJ_GemmaTextGenerate:
                 copy_text=MODEL_DOWNLOAD_URL,
                 copy_label="🌏 复制模型下载地址",
             )
+        runtime_issue = _qwen35_runtime_issue(clip_name)
+        if runtime_issue:
+            raise RuntimeError(runtime_issue)
         try:
             media_image = _coerce_media_for_textgen(media)
             if image is None:
@@ -623,20 +791,20 @@ class GJJ_GemmaTextGenerate:
             text = _generate_text(
                 clip,
                 _merged_generation_prompt(system_prompt, prompt),
-                max_length,
+                _coerce_int(max_length, 2048, 1, 2048),
                 sampling_mode,
                 image=image,
                 video=video,
                 audio=audio,
                 thinking=thinking,
                 use_default_template=use_default_template,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                min_p=min_p,
-                repetition_penalty=repetition_penalty,
-                seed=seed,
-                presence_penalty=presence_penalty,
+                temperature=_coerce_float(temperature, 0.7, 0.01, 2.0),
+                top_k=_coerce_int(top_k, 64, 0, 1000),
+                top_p=_coerce_float(top_p, 0.95, 0.0, 1.0),
+                min_p=_coerce_float(min_p, 0.05, 0.0, 1.0),
+                repetition_penalty=_coerce_float(repetition_penalty, 1.05, 0.0, 5.0),
+                seed=_coerce_int(seed, 0, 0, 0xFFFFFFFFFFFFFFFF),
+                presence_penalty=_coerce_float(presence_penalty, 0.0, 0.0, 5.0),
             )
             return (text,)
         except Exception as exc:

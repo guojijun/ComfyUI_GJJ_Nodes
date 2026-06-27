@@ -131,7 +131,7 @@ const OPS = [
 	]),
 	op("pixel", "binary", "◼黑白二值", [{ k: "threshold", l: "阈值", min: 0, max: 1, step: 0.01, d: 0.5 }]),
 	op("pixel", "despeckle", "🧽噪点去除", [{ k: "amount", l: "强度", min: 0, max: 1, step: 0.01, d: 0 }]),
-	op("pixel", "resample", "📏像素重采样", [
+	op("pixel", "resample", "📐像素重采样", [
 		{ k: "scale", l: "缩放", min: 0.1, max: 3, step: 0.01, d: 1 },
 		{ k: "mode", l: "模式 0近邻 1双线 2三次", min: 0, max: 2, step: 1, d: 1 },
 	]),
@@ -187,7 +187,7 @@ const OPS = [
 	op("channel", "single_channel_gray", "📺单通道灰度", [{ k: "channel", l: "0红 1绿 2蓝", min: 0, max: 2, step: 1, d: 0 }]),
 
 	op("crop", "center_trim", "🎯居中裁切", [{ k: "amount", l: "裁除比例", min: 0, max: 0.95, step: 0.01, d: 0 }]),
-	op("crop", "fixed_crop", "📏固定宽高裁剪", [
+	op("crop", "fixed_crop", "📐固定宽高裁剪", [
 		{ k: "width", l: "宽度比例", min: 0.05, max: 1, step: 0.01, d: 1 },
 		{ k: "height", l: "高度比例", min: 0.05, max: 1, step: 0.01, d: 1 },
 	]),

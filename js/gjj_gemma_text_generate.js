@@ -56,6 +56,26 @@ const REORDERED_WIDGETS = [
 	PROMPT_WIDGET,
 	...BACKEND_WIDGETS.filter((name) => name !== PROMPT_WIDGET),
 ];
+const NUMERIC_WIDGETS = new Set([
+	"max_length",
+	"temperature",
+	"top_k",
+	"top_p",
+	"min_p",
+	"repetition_penalty",
+	"seed",
+	"presence_penalty",
+]);
+const NUMERIC_DEFAULTS = {
+	max_length: 2048,
+	temperature: 0.7,
+	top_k: 64,
+	top_p: 0.95,
+	min_p: 0.05,
+	repetition_penalty: 1.05,
+	seed: 0,
+	presence_penalty: 0,
+};
 let sharedSettingsPromise = null;
 
 function widget(node, name) {
@@ -172,7 +192,10 @@ function restoreWorkflowValues(node, serializedNode) {
 			const target = widget(node, name);
 			if (!target || values[name] === undefined) continue;
 			let value = values[name];
-			if (typeof target.value === "number") {
+			if (NUMERIC_WIDGETS.has(name)) {
+				const parsed = Number(value);
+				value = Number.isFinite(parsed) ? parsed : NUMERIC_DEFAULTS[name];
+			} else if (typeof target.value === "number") {
 				const parsed = Number(value);
 				if (Number.isFinite(parsed)) value = parsed;
 			} else if (typeof target.value === "boolean") {
@@ -641,7 +664,7 @@ function buildSettings(node) {
 	const presencePenalty = numericControl(node, "presence_penalty", "出现惩罚", 0, 5, 0.01);
 	const seed = numericControl(node, "seed", "随机采样种子", 0, Number.MAX_SAFE_INTEGER, 1, true);
 	numeric.append(
-		parameterField("📏 最大长度", maxLength),
+		parameterField("📐 最大长度", maxLength),
 		parameterField("🌡 温度", temperature),
 		parameterField("🎯 Top K", topK),
 		parameterField("🧭 Top P", topP),

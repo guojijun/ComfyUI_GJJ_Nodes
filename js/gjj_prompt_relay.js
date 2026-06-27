@@ -376,7 +376,7 @@ class TimelineEditor {
       this.unitsSelect.appendChild(opt);
     }
     bindNativeSelect(this.unitsSelect, this.timeUnitsWidget, this.node);
-    panel.appendChild(makeField("📏", "显示单位：选择时间轴标尺显示为帧或秒；内部仍按帧保存。", this.unitsSelect));
+    panel.appendChild(makeField("📐", "显示单位：选择时间轴标尺显示为帧或秒；内部仍按帧保存。", this.unitsSelect));
 
     return panel;
   }

@@ -17,13 +17,19 @@ const CKPT_WIDGET = "ckpt_name";
 const CONTROLNET_WIDGET = "controlnet_name";
 const SEED_WIDGET = "seed";
 const OUTPUT_MODE_WIDGET = "output_mode";
+const AUTO_SIZE_WIDGET = "auto_upstream_size";
+const RANDOM_SEED_WIDGET = "randomize_seed";
+const KEEP_MODEL_WIDGET = "keep_model";
 const PROP_STATE = "gjj_doodle_canvas_state";
 const PROP_NODE_SIZE = "gjj_doodle_canvas_node_size";
 const PROP_SETTINGS_OPEN = "gjj_doodle_canvas_settings_open";
+const PROP_UPSTREAM_LINK = "gjj_doodle_canvas_upstream_link";
 const DEFAULT_WIDTH = 512;
 const DEFAULT_HEIGHT = 512;
 const DEFAULT_NODE_WIDTH = 560;
 const MIN_NODE_WIDTH = 420;
+const MIN_CANVAS_DISPLAY_WIDTH = 96;
+const MIN_CANVAS_DISPLAY_HEIGHT = 96;
 const MAX_HISTORY = 30;
 const TOOL_ICONS = Object.freeze({
 	brush: `<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M40.044693 966.793296h572.067039v57.206704H40.044693z" fill="#1afa29"></path><path d="M566.346369 966.793296H986.815642v57.206704H566.346369zM655.01676 120.134078l240.268156 240.268157-526.301676 526.301676-240.268156-240.268157zM752.268156 25.743017l240.268157 240.268156L921.027933 337.519553l-240.268156-240.268156zM105.832402 672.178771l240.268157 240.268156L8.581006 1006.837989l97.251396-334.659218z" fill="#1afa29"></path><path d="M843.798883 22.882682l148.73743 148.73743c25.743017 25.743017 22.882682 65.787709-2.860335 91.530726s-68.648045 28.603352-91.530727 2.860335l-148.73743-148.73743c-25.743017-22.882682-25.743017-65.787709 2.860335-91.530726 25.743017-25.743017 65.787709-28.603352 91.530727-2.860335z" fill="#1afa29"></path></svg>`,
@@ -36,12 +42,17 @@ const TOOL_ICONS = Object.freeze({
 	undo: "↩️",
 	redo: "↪️",
 	clear: "🧹",
+	open: "📁",
+	link: "🔗",
 	download: "📥",
+	randomSeed: "🎲",
+	keepModel: "🧠",
 	settings: "⚙️",
 	outputDoodle: "🎨",
 	outputGenerated: "🖼️",
 	generate: "🚀",
 	translate: "🌐",
+	autoSize: "📐",
 });
 const HIDDEN_WIDGETS = new Set([
 	DATA_WIDGET,
@@ -56,6 +67,9 @@ const HIDDEN_WIDGETS = new Set([
 	CONTROLNET_WIDGET,
 	SEED_WIDGET,
 	OUTPUT_MODE_WIDGET,
+	AUTO_SIZE_WIDGET,
+	RANDOM_SEED_WIDGET,
+	KEEP_MODEL_WIDGET,
 ]);
 
 function setButtonContent(button, content) {
@@ -98,6 +112,203 @@ function hasLinkedImageInput(node) {
 		}
 	}
 	return false;
+}
+
+function imageInput(node) {
+	return (node?.inputs || []).find((input) => {
+		const name = String(input?.name || input?.localized_name || input?.label || input?.display_name || "").toLowerCase();
+		const type = String(input?.type || "").toLowerCase();
+		return name === "image" || name === "图像" || type.includes("image");
+	}) || null;
+}
+
+function imageInputIndex(node) {
+	const input = imageInput(node);
+	return input ? node?.inputs?.indexOf(input) ?? -1 : -1;
+}
+
+function graphLink(linkId) {
+	if (linkId === undefined || linkId === null || !app.graph?.links) return null;
+	return typeof app.graph.links.get === "function" ? app.graph.links.get(linkId) : app.graph.links[linkId];
+}
+
+function sourceNodeFromImageInput(node) {
+	const input = imageInput(node);
+	const link = graphLink(input?.link);
+	if (!link) return null;
+	const originId = Array.isArray(link) ? link[1] : link.origin_id ?? link.source_id ?? link.from_id;
+	return originId !== undefined && originId !== null ? app.graph?.getNodeById?.(originId) || null : null;
+}
+
+function currentImageLinkRecord(node) {
+	const targetSlot = imageInputIndex(node);
+	const input = targetSlot >= 0 ? node?.inputs?.[targetSlot] : null;
+	const link = graphLink(input?.link);
+	if (!link) return null;
+	const originId = Array.isArray(link) ? link[1] : link.origin_id ?? link.source_id ?? link.from_id;
+	const originSlot = Number(Array.isArray(link) ? link[2] : link.origin_slot ?? link.source_slot ?? 0);
+	const source = originId !== undefined && originId !== null ? app.graph?.getNodeById?.(originId) || null : null;
+	const output = source?.outputs?.[originSlot] || null;
+	return {
+		origin_id: originId,
+		origin_slot: originSlot,
+		origin_name: String(source?.title || source?.name || source?.comfyClass || source?.type || ""),
+		origin_output: String(output?.name || output?.localized_name || output?.label || ""),
+		target_slot: targetSlot,
+		target_input: String(input?.name || input?.localized_name || input?.label || "image"),
+		type: String(link?.type || output?.type || input?.type || "IMAGE"),
+	};
+}
+
+function viewUrlFromImageRef(item, fallbackType = "output", includeRand = true) {
+	if (!item || typeof item !== "object") return "";
+	const filename = item.filename || item.name || item.file;
+	if (!filename) return "";
+	const type = item.type || fallbackType;
+	const subfolder = item.subfolder || "";
+	const rand = includeRand ? `&rand=${Date.now()}` : "";
+	return `/api/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(type)}&subfolder=${encodeURIComponent(subfolder)}${rand}`;
+}
+
+function parseMultiImageLoaderSelection(sourceNode) {
+	const stateSelection = sourceNode?.__gjjMultiImageState?.selection;
+	if (Array.isArray(stateSelection) && stateSelection.length > 0) return stateSelection;
+	const raw = sourceNode?.properties?.selected_images || widget(sourceNode, "selected_images")?.value || "[]";
+	try {
+		const parsed = JSON.parse(String(raw || "[]"));
+		return Array.isArray(parsed) ? parsed : [];
+	} catch (_) {
+		return [];
+	}
+}
+
+function firstMultiImageLoaderInfo(sourceNode, includeRand = true) {
+	if (!sourceNode || (sourceNode.comfyClass !== "GJJ_MultiImageLoader" && sourceNode.type !== "GJJ_MultiImageLoader")) return null;
+	const executed = sourceNode.__gjjMultiImageState?.executedImages;
+	const items = Array.isArray(executed) && executed.length > 0 ? executed : parseMultiImageLoaderSelection(sourceNode);
+	const item = items.find((entry) => entry?.src || entry?.url || entry?.filename || entry?.name || entry?.file);
+	if (!item) return null;
+	const src = item.src || item.url || viewUrlFromImageRef(item, item.type || "input", includeRand);
+	if (!src) return null;
+	return {
+		src,
+		width: Number(item.width || item.w || 0),
+		height: Number(item.height || item.h || 0),
+	};
+}
+
+function firstDomImageInfo(node) {
+	const element = node?.canvas || node?.imageElement || node?.imgElement || node?.previewElement || null;
+	const candidates = [];
+	if (element?.querySelectorAll) candidates.push(...element.querySelectorAll("img"));
+	if (node?.widgets) {
+		for (const item of node.widgets) {
+			const root = item?.element || item?.inputEl || item?.widget;
+			if (root?.querySelectorAll) candidates.push(...root.querySelectorAll("img"));
+		}
+	}
+	for (const image of candidates) {
+		if (image?.src) {
+			return {
+				src: image.src,
+				width: Number(image.naturalWidth || image.width || 0),
+				height: Number(image.naturalHeight || image.height || 0),
+			};
+		}
+	}
+	return null;
+}
+
+function firstSourceImageInfo(sourceNode, options = {}) {
+	if (!sourceNode) return null;
+	const includeRand = options.includeRand !== false;
+	const multiImageInfo = firstMultiImageLoaderInfo(sourceNode, includeRand);
+	if (multiImageInfo?.src) return multiImageInfo;
+	if (Array.isArray(sourceNode.imgs)) {
+		const image = sourceNode.imgs.find((item) => item?.src);
+		if (image?.src) {
+			return {
+				src: image.src,
+				width: Number(image.naturalWidth || image.width || 0),
+				height: Number(image.naturalHeight || image.height || 0),
+			};
+		}
+	}
+	for (const image of [sourceNode.image, sourceNode.preview, sourceNode.__gjjPreviewImage]) {
+		if (image?.src) {
+			return {
+				src: image.src,
+				width: Number(image.naturalWidth || image.width || 0),
+				height: Number(image.naturalHeight || image.height || 0),
+			};
+		}
+	}
+	const domInfo = firstDomImageInfo(sourceNode);
+	if (domInfo?.src) return domInfo;
+	if (Array.isArray(sourceNode.images)) {
+		const item = sourceNode.images.find((entry) => entry?.src || entry?.url || entry?.filename);
+		if (item?.src || item?.url) {
+			return {
+				src: item.src || item.url,
+				width: Number(item.width || item.w || 0),
+				height: Number(item.height || item.h || 0),
+			};
+		}
+		const src = viewUrlFromImageRef(item, "output", includeRand);
+		if (src) {
+			return {
+				src,
+				width: Number(item?.width || item?.w || 0),
+				height: Number(item?.height || item?.h || 0),
+			};
+		}
+	}
+	if (sourceNode.comfyClass === "LoadImage" || sourceNode.type === "LoadImage" || sourceNode.comfyClass === "LoadImageOutput") {
+		const fileWidget = widget(sourceNode, "image") || widget(sourceNode, "file") || widget(sourceNode, "filename");
+		const filename = String(fileWidget?.value || "").trim();
+		if (filename) {
+			const type = sourceNode.comfyClass === "LoadImageOutput" || sourceNode.type === "LoadImageOutput" ? "output" : "input";
+			const rand = includeRand ? `&rand=${Date.now()}` : "";
+			return {
+				src: `/api/view?filename=${encodeURIComponent(filename)}&type=${type}&subfolder=${rand}`,
+				width: 0,
+				height: 0,
+			};
+		}
+	}
+	return null;
+}
+
+function imageLinkSignature(node) {
+	const input = imageInput(node);
+	const link = graphLink(input?.link);
+	if (!link) return "none";
+	const originId = Array.isArray(link) ? link[1] : link.origin_id ?? link.source_id ?? link.from_id;
+	const originSlot = Array.isArray(link) ? link[2] : link.origin_slot ?? link.source_slot ?? "";
+	const source = originId !== undefined && originId !== null ? app.graph?.getNodeById?.(originId) : null;
+	const fileValue = widget(source, "image")?.value || widget(source, "file")?.value || widget(source, "filename")?.value || "";
+	const info = firstSourceImageInfo(source, { includeRand: false });
+	return [input?.link, originId, originSlot, fileValue, info?.src || "", info?.width || 0, info?.height || 0].join("|");
+}
+
+function patchSourceImageNode(sourceNode) {
+	if (!sourceNode || sourceNode.__gjjDoodleSourcePatched) return;
+	const imageWidget = widget(sourceNode, "image") || widget(sourceNode, "file") || widget(sourceNode, "filename");
+	if (!imageWidget) return;
+	const originalCallback = imageWidget.callback;
+	imageWidget.callback = function (value, ...args) {
+		const result = originalCallback?.call(this, value, ...args);
+		setTimeout(() => {
+			for (const node of app.graph?._nodes || []) {
+				if (node?.comfyClass === TARGET || node?.type === TARGET) {
+					const source = sourceNodeFromImageInput(node);
+					if (source?.id === sourceNode.id) node.__gjjDoodleEditor?.syncUpstreamImageFromConnection();
+				}
+			}
+		}, 0);
+		return result;
+	};
+	sourceNode.__gjjDoodleSourcePatched = true;
 }
 
 function collapseElement(element) {
@@ -180,6 +391,13 @@ function compactStateForStorage(text) {
 	return JSON.stringify(compact);
 }
 
+function tempImageRefToUrl(ref) {
+	if (!ref || typeof ref !== "object" || !ref.filename) return "";
+	const type = ref.type || "temp";
+	const subfolder = ref.subfolder || "";
+	return `/api/view?filename=${encodeURIComponent(ref.filename)}&type=${encodeURIComponent(type)}&subfolder=${encodeURIComponent(subfolder)}&rand=${Date.now()}`;
+}
+
 function firstMessageValue(...candidates) {
 	for (const candidate of candidates) {
 		if (Array.isArray(candidate)) {
@@ -194,6 +412,18 @@ function firstMessageValue(...candidates) {
 	return "";
 }
 
+function firstMessageObject(...candidates) {
+	for (const candidate of candidates) {
+		if (Array.isArray(candidate)) {
+			const value = candidate.find((item) => item && typeof item === "object");
+			if (value) return value;
+			continue;
+		}
+		if (candidate && typeof candidate === "object") return candidate;
+	}
+	return null;
+}
+
 function clamp(value, min, max) {
 	return Math.max(min, Math.min(max, value));
 }
@@ -206,6 +436,15 @@ function coerceDimension(value, fallback) {
 function coerceBrushSize(value, fallback = 6) {
 	const number = Math.round(Number(value));
 	return Number.isFinite(number) ? clamp(number, 1, 256) : fallback;
+}
+
+function randomSeedValue() {
+	if (globalThis.crypto?.getRandomValues) {
+		const values = new Uint32Array(2);
+		globalThis.crypto.getRandomValues(values);
+		return String((BigInt(values[0]) << 32n) | BigInt(values[1]));
+	}
+	return String(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
 }
 
 function normalizeHex(value, fallback = "#000000") {
@@ -259,6 +498,8 @@ function ensureStyles() {
 		.gjj-doodle button svg { width:25px; height:25px; display:block; pointer-events:none; }
 		.gjj-doodle button:hover { background:#2d3a42; border-color:#6aa6b8; }
 		.gjj-doodle button.on { border-color:#54c78b; background:#20382f; color:#dff8ea; }
+		.gjj-doodle button:disabled { opacity:.38; cursor:not-allowed; filter:grayscale(1); }
+		.gjj-doodle button:disabled:hover { background:#202b31; border-color:#3a4d55; }
 		.gjj-doodle-color { width:30px; height:26px; padding:0; border:1px solid #3a4d55; border-radius:6px; background:#202b31; cursor:pointer; }
 		.gjj-doodle-range { width:112px; height:26px; accent-color:#54c78b; }
 		.gjj-doodle-size { min-width:32px; color:#b9c7ca; text-align:right; font-size:11px; }
@@ -295,12 +536,17 @@ class DoodleEditor {
 		this.outputMode = "doodle";
 		this.doodleImageData = "";
 		this.generatedImageData = "";
+		this.generatedImageRef = null;
 		this.activeImageKind = "doodle";
+		this.autoUpstreamSize = true;
+		this.randomizeSeed = false;
+		this.keepModel = true;
 		this.displayWidth = 480;
 		this.displayHeight = 480;
 		this.buildDom();
 		this.loadInitialState();
 		this.bindEvents();
+		this.updateUpstreamButtons();
 		this.layout();
 		this.renderStatus();
 	}
@@ -311,7 +557,13 @@ class DoodleEditor {
 
 		this.toolbar = document.createElement("div");
 		this.toolbar.className = "gjj-doodle-toolbar";
+		this.fileInput = document.createElement("input");
+		this.fileInput.type = "file";
+		this.fileInput.accept = "image/png,image/jpeg,image/webp,image/bmp";
+		this.fileInput.style.display = "none";
 		this.buttons = {
+			open: this.makeButton(TOOL_ICONS.open, "打开涂鸦图片文件", () => this.openDoodleFile()),
+			link: this.makeButton(TOOL_ICONS.link, "断开/恢复上游图片连接", () => this.toggleUpstreamLink()),
 			brush: this.makeButton(TOOL_ICONS.brush, "自由线：拖动绘制自由线条", () => this.setTool("brush")),
 			eraser: this.makeButton(TOOL_ICONS.eraser, "橡皮擦：用背景色擦除", () => this.setTool("eraser")),
 			line: this.makeButton(TOOL_ICONS.line, "直线：拖动绘制线条", () => this.setTool("line")),
@@ -323,11 +575,16 @@ class DoodleEditor {
 			redo: this.makeButton(TOOL_ICONS.redo, "重做", () => this.restoreHistory(1)),
 			clear: this.makeButton(TOOL_ICONS.clear, "清空画布并填充背景色", () => this.clearCanvas()),
 			download: this.makeButton(TOOL_ICONS.download, "下载当前涂鸦 PNG", () => this.downloadPng()),
+			randomSeed: this.makeButton(TOOL_ICONS.randomSeed, "随机种子：关闭，固定当前种子", () => this.toggleRandomizeSeed()),
+			keepModel: this.makeButton(TOOL_ICONS.keepModel, "保留模型：开启，复用 UNET 主模型", () => this.toggleKeepModel()),
+			autoSize: this.makeButton(TOOL_ICONS.autoSize, "上游图片接入时自动使用原图尺寸", () => this.toggleAutoUpstreamSize()),
 			settings: this.makeButton(TOOL_ICONS.settings, "设置", () => this.toggleSettings()),
 			output: this.makeButton(TOOL_ICONS.outputDoodle, "当前输出：涂鸦。点击切换为生成图", () => this.toggleOutputMode()),
 			generate: this.makeButton(TOOL_ICONS.generate, "用当前涂鸦直接原地生成图片", () => this.generateInPlace()),
 		};
 		this.toolbar.append(
+			this.buttons.open,
+			this.buttons.link,
 			this.buttons.brush,
 			this.buttons.eraser,
 			this.buttons.line,
@@ -339,9 +596,13 @@ class DoodleEditor {
 			this.buttons.redo,
 			this.buttons.clear,
 			this.buttons.download,
+			this.buttons.randomSeed,
+			this.buttons.keepModel,
+			this.buttons.autoSize,
 			this.buttons.settings,
 			this.buttons.output,
 			this.buttons.generate,
+			this.fileInput,
 		);
 
 		this.controls = document.createElement("div");
@@ -494,6 +755,7 @@ class DoodleEditor {
 			const next = coerceBrushSize(Number(this.sizeRange.value || 6) + (event.deltaY < 0 ? 1 : -1), 6);
 			this.setBrushSize(next);
 		}, { passive: false });
+		this.fileInput.addEventListener("change", () => this.loadDoodleFile());
 		this.brushColor.addEventListener("input", () => this.setBrushColor(this.brushColor.value, false));
 		this.bgColor.addEventListener("input", () => this.setBackgroundColor(this.bgColor.value, false));
 		this.sizeRange.addEventListener("input", () => this.setBrushSize(this.sizeRange.value, false));
@@ -513,6 +775,18 @@ class DoodleEditor {
 		return values;
 	}
 
+	controlnetWidgetOptions(currentValue = "") {
+		const values = this.widgetOptions(CONTROLNET_WIDGET, "")
+			.filter((value) => {
+				const text = value.toLowerCase();
+				return text.includes("control") && text.includes("sd");
+			});
+		const current = String(currentValue || "").trim();
+		const currentText = current.toLowerCase();
+		if (currentText.includes("control") && currentText.includes("sd") && !values.includes(current)) values.unshift(current);
+		return values;
+	}
+
 	populateSelect(select, values, currentValue) {
 		select.innerHTML = "";
 		for (const value of values) {
@@ -521,7 +795,11 @@ class DoodleEditor {
 			option.textContent = value;
 			select.appendChild(option);
 		}
-		if (currentValue) select.value = String(currentValue);
+		if (currentValue && values.includes(String(currentValue))) {
+			select.value = String(currentValue);
+		} else if (values.length) {
+			select.value = values[0];
+		}
 	}
 
 	setSettingsOpen(open) {
@@ -540,6 +818,130 @@ class DoodleEditor {
 		this.setSettingsOpen(!this.settingsPanel.classList.contains("open"));
 	}
 
+	rememberedUpstreamLink() {
+		const record = this.node.__gjjDoodleRememberedImageLink || this.node.properties?.[PROP_UPSTREAM_LINK] || null;
+		return record && typeof record === "object" ? record : null;
+	}
+
+	setRememberedUpstreamLink(record) {
+		this.node.__gjjDoodleRememberedImageLink = record || null;
+		this.node.properties = this.node.properties || {};
+		if (record) this.node.properties[PROP_UPSTREAM_LINK] = record;
+		else delete this.node.properties[PROP_UPSTREAM_LINK];
+	}
+
+	updateUpstreamButtons() {
+		const hasLink = this.hasUpstreamImage();
+		const memory = this.rememberedUpstreamLink();
+		if (this.buttons?.open) {
+			this.buttons.open.disabled = hasLink;
+			this.buttons.open.title = hasLink ? "已连接上游图像，以上游优先；断开后可打开涂鸦文件" : "打开涂鸦图片文件";
+		}
+		if (this.buttons?.link) {
+			this.buttons.link.style.display = hasLink || memory ? "inline-flex" : "none";
+			this.buttons.link.classList.toggle("on", Boolean(hasLink));
+			this.buttons.link.title = hasLink
+				? "记住当前上游节点和接口，并断开图片连接"
+				: memory
+				? `重新连接：${memory.origin_name || "上游节点"} ${memory.origin_output || ""}`
+				: "没有上游连接记录";
+		}
+	}
+
+	openDoodleFile() {
+		if (this.hasUpstreamImage()) {
+			this.renderStatus("已连接上游图像，以上游优先");
+			this.updateUpstreamButtons();
+			return;
+		}
+		this.fileInput.value = "";
+		this.fileInput.click();
+	}
+
+	loadDoodleFile() {
+		const file = this.fileInput?.files?.[0];
+		if (!file || this.hasUpstreamImage()) {
+			this.updateUpstreamButtons();
+			return;
+		}
+		const reader = new FileReader();
+		reader.onload = () => {
+			const src = String(reader.result || "");
+			if (!src) return;
+			this.generatedImageData = "";
+			this.generatedImageRef = null;
+			this.activeImageKind = "doodle";
+			this.loadImage(src, true, "已打开涂鸦文件", null, "doodle", true);
+		};
+		reader.onerror = () => this.renderStatus("涂鸦文件读取失败");
+		reader.readAsDataURL(file);
+	}
+
+	disconnectUpstreamLink() {
+		const record = currentImageLinkRecord(this.node);
+		const targetSlot = record?.target_slot ?? imageInputIndex(this.node);
+		if (!record || targetSlot < 0) {
+			this.updateUpstreamButtons();
+			return false;
+		}
+		this.setRememberedUpstreamLink(record);
+		try {
+			this.node.disconnectInput?.(targetSlot);
+		} catch (_) {
+			const input = this.node.inputs?.[targetSlot];
+			if (input) input.link = null;
+		}
+		delete this.node.__gjjDoodleAppliedUpstreamSignature;
+		this.node.setDirtyCanvas?.(true, true);
+		app.graph?.setDirtyCanvas?.(true, true);
+		this.updateUpstreamButtons();
+		this.syncState();
+		this.renderStatus(`已断开：${record.origin_name || "上游节点"}`);
+		return true;
+	}
+
+	reconnectUpstreamLink() {
+		const record = this.rememberedUpstreamLink();
+		if (!record) {
+			this.updateUpstreamButtons();
+			this.renderStatus("没有上游连接记录");
+			return false;
+		}
+		const source = app.graph?.getNodeById?.(record.origin_id);
+		const sourceSlot = Number(record.origin_slot);
+		const targetSlot = imageInputIndex(this.node);
+		if (!source || !source.outputs?.[sourceSlot] || targetSlot < 0) {
+			this.renderStatus("上游节点或接口不存在");
+			this.updateUpstreamButtons();
+			return false;
+		}
+		try {
+			if (this.node.inputs?.[targetSlot]?.link != null) this.node.disconnectInput?.(targetSlot);
+			source.connect(sourceSlot, this.node, targetSlot);
+			this.setRememberedUpstreamLink(record);
+			delete this.node.__gjjDoodleAppliedUpstreamSignature;
+			this.node.setDirtyCanvas?.(true, true);
+			app.graph?.setDirtyCanvas?.(true, true);
+			this.updateUpstreamButtons();
+			this.syncUpstreamImageFromConnection();
+			this.renderStatus(`已连接：${record.origin_name || "上游节点"}`);
+			return true;
+		} catch (error) {
+			console.warn("[GJJ] 涂鸦画板恢复上游连接失败:", error);
+			this.renderStatus("恢复上游连接失败");
+			this.updateUpstreamButtons();
+			return false;
+		}
+	}
+
+	toggleUpstreamLink() {
+		if (this.hasUpstreamImage()) {
+			this.disconnectUpstreamLink();
+		} else {
+			this.reconnectUpstreamLink();
+		}
+	}
+
 	syncSettingsPanelFromWidgets(state = {}) {
 		const width = coerceDimension(getWidgetValue(this.node, WIDTH_WIDGET, state.width || DEFAULT_WIDTH), DEFAULT_WIDTH);
 		const height = coerceDimension(getWidgetValue(this.node, HEIGHT_WIDGET, state.height || DEFAULT_HEIGHT), DEFAULT_HEIGHT);
@@ -548,17 +950,23 @@ class DoodleEditor {
 		const controlnet = state.controlnetName ?? getWidgetValue(this.node, CONTROLNET_WIDGET, "");
 		const seed = state.seed ?? getWidgetValue(this.node, SEED_WIDGET, "240272355371031");
 		const outputMode = state.outputMode ?? getWidgetValue(this.node, OUTPUT_MODE_WIDGET, "doodle");
+		const autoUpstreamSize = state.autoUpstreamSize ?? getWidgetValue(this.node, AUTO_SIZE_WIDGET, true);
+		const randomizeSeed = state.randomizeSeed ?? getWidgetValue(this.node, RANDOM_SEED_WIDGET, false);
+		const keepModel = state.keepModel ?? getWidgetValue(this.node, KEEP_MODEL_WIDGET, true);
 		this.widthInput.value = String(width);
 		this.heightInput.value = String(height);
 		this.promptInput.value = String(prompt || "");
 		this.populateSelect(this.ckptSelect, this.widgetOptions(CKPT_WIDGET, ckpt), ckpt);
-		this.populateSelect(this.controlnetSelect, this.widgetOptions(CONTROLNET_WIDGET, controlnet), controlnet);
+		this.populateSelect(this.controlnetSelect, this.controlnetWidgetOptions(controlnet), controlnet);
 		this.seedInput.value = String(seed || "");
 		setWidgetValue(this.node, PROMPT_WIDGET, this.promptInput.value, false);
 		setWidgetValue(this.node, CKPT_WIDGET, this.ckptSelect.value, false);
 		setWidgetValue(this.node, CONTROLNET_WIDGET, this.controlnetSelect.value, false);
 		setWidgetValue(this.node, SEED_WIDGET, this.seedInput.value, false);
 		setWidgetValue(this.node, MODE_WIDGET, "doodle", false);
+		this.setAutoUpstreamSize(autoUpstreamSize, false);
+		this.setRandomizeSeed(randomizeSeed, false);
+		this.setKeepModel(keepModel, false);
 		this.setOutputMode(outputMode, false);
 		const open = state.settingsOpen ?? this.node.properties?.[PROP_SETTINGS_OPEN] ?? false;
 		this.setSettingsOpen(open);
@@ -577,6 +985,84 @@ class DoodleEditor {
 
 	toggleOutputMode() {
 		this.setOutputMode(this.outputMode === "generated" ? "doodle" : "generated");
+	}
+
+	normalizeBoolean(value, fallback = true) {
+		if (typeof value === "boolean") return value;
+		const text = String(value ?? "").trim().toLowerCase();
+		if (["true", "1", "yes", "on"].includes(text)) return true;
+		if (["false", "0", "no", "off"].includes(text)) return false;
+		return fallback;
+	}
+
+	setAutoUpstreamSize(value, shouldSync = true) {
+		this.autoUpstreamSize = this.normalizeBoolean(value, true);
+		setWidgetValue(this.node, AUTO_SIZE_WIDGET, this.autoUpstreamSize, false);
+		this.updateAutoSizeButton();
+		if (this.autoUpstreamSize) this.syncUpstreamImageFromConnection();
+		if (shouldSync) this.syncState();
+	}
+
+	toggleAutoUpstreamSize() {
+		this.setAutoUpstreamSize(!this.autoUpstreamSize);
+	}
+
+	updateAutoSizeButton() {
+		const button = this.buttons?.autoSize;
+		if (!button) return;
+		button.classList.toggle("on", this.autoUpstreamSize);
+		button.title = this.autoUpstreamSize
+			? "已开启：上游图片接入时自动使用原图尺寸"
+			: "已关闭：上游图片按当前画布尺寸显示";
+	}
+
+	setRandomizeSeed(value, shouldSync = true) {
+		this.randomizeSeed = this.normalizeBoolean(value, false);
+		setWidgetValue(this.node, RANDOM_SEED_WIDGET, this.randomizeSeed, false);
+		this.updateRandomSeedButton();
+		if (shouldSync) this.syncState();
+	}
+
+	toggleRandomizeSeed() {
+		this.setRandomizeSeed(!this.randomizeSeed);
+	}
+
+	updateRandomSeedButton() {
+		const button = this.buttons?.randomSeed;
+		if (!button) return;
+		button.classList.toggle("on", this.randomizeSeed);
+		button.title = this.randomizeSeed
+			? "随机种子：开启，每次运行前自动更换种子"
+			: "随机种子：关闭，固定当前种子";
+	}
+
+	setKeepModel(value, shouldSync = true) {
+		this.keepModel = this.normalizeBoolean(value, true);
+		setWidgetValue(this.node, KEEP_MODEL_WIDGET, this.keepModel, false);
+		this.updateKeepModelButton();
+		if (shouldSync) this.syncState();
+	}
+
+	toggleKeepModel() {
+		this.setKeepModel(!this.keepModel);
+		this.renderStatus(this.keepModel ? "🧠 保留 UNET 主模型" : "🧠 执行后卸载 UNET 主模型");
+	}
+
+	updateKeepModelButton() {
+		const button = this.buttons?.keepModel;
+		if (!button) return;
+		button.classList.toggle("on", this.keepModel);
+		button.title = this.keepModel
+			? "保留模型：开启，生成后保留 UNET 主模型缓存"
+			: "保留模型：关闭，生成后卸载 UNET 主模型缓存";
+	}
+
+	randomizeSeedIfNeeded() {
+		if (!this.randomizeSeed) return;
+		const seed = randomSeedValue();
+		if (this.seedInput) this.seedInput.value = seed;
+		setWidgetValue(this.node, SEED_WIDGET, seed, false);
+		setWidgetValue(this.node, RANDOM_SEED_WIDGET, true, false);
 	}
 
 	shouldGenerateOnQueue() {
@@ -610,6 +1096,7 @@ class DoodleEditor {
 		setWidgetValue(this.node, CONTROLNET_WIDGET, this.controlnetSelect.value, false);
 		setWidgetValue(this.node, SEED_WIDGET, this.seedInput.value, false);
 		setWidgetValue(this.node, OUTPUT_MODE_WIDGET, this.outputMode, false);
+		setWidgetValue(this.node, KEEP_MODEL_WIDGET, this.keepModel, false);
 		this.syncState();
 	}
 
@@ -683,8 +1170,12 @@ class DoodleEditor {
 		if (this.activeImageKind === "doodle") {
 			this.doodleImageData = this.canvas.toDataURL("image/png");
 		}
+		this.randomizeSeedIfNeeded();
 		this.syncGenerationSettings();
 		this.syncState();
+		setWidgetValue(this.node, AUTO_SIZE_WIDGET, this.autoUpstreamSize, false);
+		setWidgetValue(this.node, RANDOM_SEED_WIDGET, this.randomizeSeed, false);
+		setWidgetValue(this.node, KEEP_MODEL_WIDGET, this.keepModel, false);
 		setWidgetValue(this.node, MODE_WIDGET, "doodle", false);
 		delete this.node.__gjjDoodleQueueGeneration;
 	}
@@ -693,8 +1184,12 @@ class DoodleEditor {
 		if (this.activeImageKind !== "upstream") {
 			this.doodleImageData = this.canvas.toDataURL("image/png");
 		}
+		this.randomizeSeedIfNeeded();
 		this.node.__gjjDoodleQueueGeneration = true;
 		setWidgetValue(this.node, MODE_WIDGET, "generate", false);
+		setWidgetValue(this.node, AUTO_SIZE_WIDGET, this.autoUpstreamSize, false);
+		setWidgetValue(this.node, RANDOM_SEED_WIDGET, this.randomizeSeed, false);
+		setWidgetValue(this.node, KEEP_MODEL_WIDGET, this.keepModel, false);
 		this.syncGenerationSettings();
 		this.syncState();
 		if (statusMessage) this.renderStatus(statusMessage);
@@ -729,11 +1224,13 @@ class DoodleEditor {
 		else this.renderStatus();
 	}
 
-	applyGeneratedImage(value) {
+	applyGeneratedImage(value, ref = null) {
 		const text = String(value || "").trim();
-		if (!text) return false;
-		const src = text.startsWith("data:") ? text : `data:image/png;base64,${text}`;
+		const refSrc = tempImageRefToUrl(ref);
+		if (!text && !refSrc) return false;
+		const src = refSrc || (text.startsWith("data:") ? text : `data:image/png;base64,${text}`);
 		this.generatedImageData = src;
+		this.generatedImageRef = ref || null;
 		this.activeImageKind = "generated";
 		const previousSnapshot = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
 		this.loadImage(src, true, "生成完成", previousSnapshot, "generated");
@@ -750,7 +1247,21 @@ class DoodleEditor {
 		if (!text) return false;
 		const src = text.startsWith("data:") ? text : `data:image/png;base64,${text}`;
 		this.activeImageKind = "upstream";
-		this.loadImage(src, false, "已使用上游图像", null, "upstream");
+		this.loadImage(src, false, "已使用上游图像", null, "upstream", this.autoUpstreamSize);
+		return true;
+	}
+
+	syncUpstreamImageFromConnection() {
+		if (!this.autoUpstreamSize || !this.hasUpstreamImage()) return false;
+		const sourceNode = sourceNodeFromImageInput(this.node);
+		patchSourceImageNode(sourceNode);
+		const info = firstSourceImageInfo(sourceNode);
+		if (!info?.src) return false;
+		const signature = `${sourceNode?.id || ""}|${info.src}|${info.width || 0}|${info.height || 0}`;
+		if (signature === this.node.__gjjDoodleAppliedUpstreamSignature) return true;
+		this.node.__gjjDoodleAppliedUpstreamSignature = signature;
+		this.activeImageKind = "upstream";
+		this.loadImage(info.src, false, "已按上游图尺寸", null, "upstream", true);
 		return true;
 	}
 
@@ -771,20 +1282,25 @@ class DoodleEditor {
 		const storedVisibleImage = typeof state.image === "string" ? String(state.image || "") : "";
 		const storedDoodleImage = String(state.doodleImage || storedVisibleImage || "");
 		const storedGeneratedImage = String(state.generatedImage || state.generated_image || "");
+		const storedGeneratedRef = state.generatedImageRef || state.generated_image_ref || null;
+		this.autoUpstreamSize = this.normalizeBoolean(state.autoUpstreamSize ?? getWidgetValue(this.node, AUTO_SIZE_WIDGET, true), true);
+		this.randomizeSeed = this.normalizeBoolean(state.randomizeSeed ?? getWidgetValue(this.node, RANDOM_SEED_WIDGET, false), false);
+		this.keepModel = this.normalizeBoolean(state.keepModel ?? getWidgetValue(this.node, KEEP_MODEL_WIDGET, true), true);
 		this.doodleImageData = storedDoodleImage;
-		this.generatedImageData = storedGeneratedImage;
+		this.generatedImageRef = storedGeneratedRef && typeof storedGeneratedRef === "object" ? storedGeneratedRef : null;
+		this.generatedImageData = storedGeneratedImage || tempImageRefToUrl(this.generatedImageRef);
 		const requestedDisplay = String(state.displayImage || "").toLowerCase();
-		if (requestedDisplay === "generated" && storedGeneratedImage) {
+		if (requestedDisplay === "generated" && this.generatedImageData) {
 			this.activeImageKind = "generated";
-		} else if (!requestedDisplay && storedVisibleImage && storedDoodleImage && storedVisibleImage !== storedDoodleImage && storedGeneratedImage) {
+		} else if (!requestedDisplay && storedVisibleImage && storedDoodleImage && storedVisibleImage !== storedDoodleImage && this.generatedImageData) {
 			this.activeImageKind = "generated";
 		} else {
 			this.activeImageKind = "doodle";
 		}
 		const initialImage = !requestedDisplay && storedVisibleImage
 			? storedVisibleImage
-			: this.activeImageKind === "generated" && storedGeneratedImage
-			? storedGeneratedImage
+			: this.activeImageKind === "generated" && this.generatedImageData
+			? this.generatedImageData
 			: storedDoodleImage;
 		this.brushColor.value = brush;
 		this.bgColor.value = bg;
@@ -796,6 +1312,12 @@ class DoodleEditor {
 		setWidgetValue(this.node, BG_WIDGET, bg, false);
 		setWidgetValue(this.node, BRUSH_WIDGET, brush, false);
 		setWidgetValue(this.node, SIZE_WIDGET, size, false);
+		setWidgetValue(this.node, AUTO_SIZE_WIDGET, this.autoUpstreamSize, false);
+		setWidgetValue(this.node, RANDOM_SEED_WIDGET, this.randomizeSeed, false);
+		setWidgetValue(this.node, KEEP_MODEL_WIDGET, this.keepModel, false);
+		this.updateAutoSizeButton();
+		this.updateRandomSeedButton();
+		this.updateKeepModelButton();
 		this.syncSettingsPanelFromWidgets(state);
 
 		if (initialImage) {
@@ -848,13 +1370,24 @@ class DoodleEditor {
 		this.ctx.restore();
 	}
 
-	loadImage(src, shouldSync = true, statusMessage = "", previousSnapshot = null, imageKind = null) {
+	loadImage(src, shouldSync = true, statusMessage = "", previousSnapshot = null, imageKind = null, useNaturalSize = false) {
 		const image = new Image();
 		this.loadingImage = true;
 		image.onload = () => {
 			if (imageKind) this.activeImageKind = imageKind;
-			this.setCanvasSize(this.canvas.width || image.naturalWidth || DEFAULT_WIDTH, this.canvas.height || image.naturalHeight || DEFAULT_HEIGHT, false);
+			const width = useNaturalSize ? image.naturalWidth : this.canvas.width || image.naturalWidth || DEFAULT_WIDTH;
+			const height = useNaturalSize ? image.naturalHeight : this.canvas.height || image.naturalHeight || DEFAULT_HEIGHT;
+			this.setCanvasSize(width, height, false);
+			if (useNaturalSize) {
+				if (this.widthInput) this.widthInput.value = String(this.canvas.width);
+				if (this.heightInput) this.heightInput.value = String(this.canvas.height);
+				setWidgetValue(this.node, WIDTH_WIDGET, this.canvas.width, false);
+				setWidgetValue(this.node, HEIGHT_WIDGET, this.canvas.height, false);
+			}
 			this.ctx.drawImage(image, 0, 0, this.canvas.width, this.canvas.height);
+			if (imageKind === "doodle") {
+				this.doodleImageData = this.canvas.toDataURL("image/png");
+			}
 			this.loadingImage = false;
 			this.pendingStateText = "";
 			if (previousSnapshot) {
@@ -868,6 +1401,7 @@ class DoodleEditor {
 			this.layout();
 			if (shouldSync) this.syncState();
 			else this.renderStatus();
+			this.updateUpstreamButtons();
 			if (statusMessage) this.renderStatus(statusMessage);
 		};
 		image.onerror = () => {
@@ -876,6 +1410,7 @@ class DoodleEditor {
 			this.fillBackground();
 			this.resetHistory();
 			this.syncState();
+			this.updateUpstreamButtons();
 		};
 		image.src = src;
 	}
@@ -1162,6 +1697,9 @@ class DoodleEditor {
 			version: 1,
 			width,
 			height,
+			autoUpstreamSize: this.autoUpstreamSize,
+			randomizeSeed: this.randomizeSeed,
+			keepModel: this.keepModel,
 			backgroundColor: this.currentBackgroundColor(),
 			brushColor: this.currentBrushColor(),
 			brushSize: this.currentBrushSize(),
@@ -1175,11 +1713,15 @@ class DoodleEditor {
 			displayImage: this.activeImageKind === "generated" && this.generatedImageData ? "generated" : "doodle",
 			doodleImage: this.doodleImageData || fallbackDoodleImage,
 			generatedImage: this.generatedImageData || "",
+			generatedImageRef: this.generatedImageRef || null,
 		};
 		const text = JSON.stringify(payload);
 		setWidgetValue(this.node, DATA_WIDGET, text, false);
 		setWidgetValue(this.node, WIDTH_WIDGET, width, false);
 		setWidgetValue(this.node, HEIGHT_WIDGET, height, false);
+		setWidgetValue(this.node, AUTO_SIZE_WIDGET, payload.autoUpstreamSize, false);
+		setWidgetValue(this.node, RANDOM_SEED_WIDGET, payload.randomizeSeed, false);
+		setWidgetValue(this.node, KEEP_MODEL_WIDGET, payload.keepModel, false);
 		setWidgetValue(this.node, BG_WIDGET, payload.backgroundColor, false);
 		setWidgetValue(this.node, BRUSH_WIDGET, payload.brushColor, false);
 		setWidgetValue(this.node, SIZE_WIDGET, payload.brushSize, false);
@@ -1230,9 +1772,12 @@ class DoodleEditor {
 		const chromeHeight = this.measureChromeHeight();
 		const nodeHeight = Math.max(320, Number(this.node.size?.[1] || 0));
 		const maxHeight = Math.max(180, nodeHeight - chromeHeight);
-		const widthByHeight = Math.round(maxHeight / Math.max(0.0001, ratio));
-		this.displayWidth = Math.max(180, Math.min(maxWidth, widthByHeight));
-		this.displayHeight = Math.max(140, Math.round(this.displayWidth * ratio));
+		const widthByHeight = Math.max(MIN_CANVAS_DISPLAY_WIDTH, Math.round(maxHeight / Math.max(0.0001, ratio)));
+		this.displayWidth = Math.min(maxWidth, widthByHeight);
+		this.displayHeight = Math.min(maxHeight, Math.max(MIN_CANVAS_DISPLAY_HEIGHT, Math.round(this.displayWidth * ratio)));
+		if (this.displayHeight >= maxHeight && ratio > 0) {
+			this.displayWidth = Math.max(MIN_CANVAS_DISPLAY_WIDTH, Math.round(this.displayHeight / ratio));
+		}
 		this.canvas.style.width = `${this.displayWidth}px`;
 		this.canvas.style.height = `${this.displayHeight}px`;
 		this.canvasWrap.style.height = `${this.displayHeight}px`;
@@ -1243,15 +1788,16 @@ class DoodleEditor {
 	scheduleSize() {
 		clearTimeout(this.sizeTimer);
 		this.sizeTimer = setTimeout(() => {
-			const minHeight = Math.ceil(this.measureChromeHeight() + 180);
-			const desiredHeight = Math.max(minHeight, Math.ceil(this.measureChromeHeight() + this.displayHeight + 8));
+			const chromeHeight = this.measureChromeHeight();
+			const minHeight = Math.ceil(chromeHeight + 148);
+			const desiredHeight = Math.max(minHeight, Math.ceil(chromeHeight + this.displayHeight + 8));
 			const currentHeight = Math.round(Number(this.node.size?.[1] || 0));
 			const currentWidth = Math.max(MIN_NODE_WIDTH, Math.round(Number(this.node.size?.[0] || DEFAULT_NODE_WIDTH)));
 			this.node.min_width = MIN_NODE_WIDTH;
 			this.node.minWidth = MIN_NODE_WIDTH;
-			if (currentHeight >= desiredHeight && currentWidth >= MIN_NODE_WIDTH) return;
+			if (Math.abs(currentHeight - desiredHeight) <= 2 && currentWidth >= MIN_NODE_WIDTH) return;
 			this.node.__gjjDoodleSizing = true;
-			this.node.setSize?.([Math.max(currentWidth, MIN_NODE_WIDTH), Math.max(currentHeight, desiredHeight)]);
+			this.node.setSize?.([Math.max(currentWidth, MIN_NODE_WIDTH), desiredHeight]);
 			this.node.__gjjDoodleSizing = false;
 		}, 0);
 	}
@@ -1302,16 +1848,17 @@ function ensureEditor(node) {
 	const container = node.__gjjDoodleContainer || createContainer(node);
 	node.__gjjDoodleEditor = new DoodleEditor(node, container);
 	patchWidgetCallbacks(node);
+	setTimeout(() => node.__gjjDoodleEditor?.syncUpstreamImageFromConnection(), 0);
 	const savedSize = node.properties?.[PROP_NODE_SIZE];
 	if (Array.isArray(savedSize)) {
 		node.setSize?.([
 			Math.max(MIN_NODE_WIDTH, Number(savedSize[0]) || DEFAULT_NODE_WIDTH),
-			Math.max(360, Number(savedSize[1]) || 460),
+			Math.max(360, Math.min(Number(savedSize[1]) || 460, 560)),
 		]);
 	} else {
 		node.setSize?.([
 			Math.max(MIN_NODE_WIDTH, Number(node.size?.[0] || DEFAULT_NODE_WIDTH)),
-			Math.max(420, Number(node.size?.[1] || 0)),
+			Math.max(420, Math.min(Number(node.size?.[1] || 0), 560)),
 		]);
 	}
 	requestAnimationFrame(() => node.__gjjDoodleEditor?.layout());
@@ -1373,6 +1920,10 @@ app.registerExtension({
 			delete this.properties[PROP_STATE];
 			if (Array.isArray(props[PROP_NODE_SIZE])) this.properties[PROP_NODE_SIZE] = props[PROP_NODE_SIZE];
 			if (props[PROP_SETTINGS_OPEN] !== undefined) this.properties[PROP_SETTINGS_OPEN] = Boolean(props[PROP_SETTINGS_OPEN]);
+			if (props[PROP_UPSTREAM_LINK]) {
+				this.properties[PROP_UPSTREAM_LINK] = props[PROP_UPSTREAM_LINK];
+				this.__gjjDoodleRememberedImageLink = props[PROP_UPSTREAM_LINK];
+			}
 			scheduleEnsure(this, 0);
 			return result;
 		};
@@ -1390,11 +1941,19 @@ app.registerExtension({
 				setSerializedWidgetValue(this, serializedNode, DATA_WIDGET, compactState);
 				setSerializedWidgetValue(this, serializedNode, MODE_WIDGET, queueMode);
 				setSerializedWidgetValue(this, serializedNode, OUTPUT_MODE_WIDGET, getWidgetValue(this, OUTPUT_MODE_WIDGET, "doodle"));
+				setSerializedWidgetValue(this, serializedNode, AUTO_SIZE_WIDGET, getWidgetValue(this, AUTO_SIZE_WIDGET, true));
+				setSerializedWidgetValue(this, serializedNode, RANDOM_SEED_WIDGET, getWidgetValue(this, RANDOM_SEED_WIDGET, false));
+				setSerializedWidgetValue(this, serializedNode, KEEP_MODEL_WIDGET, getWidgetValue(this, KEEP_MODEL_WIDGET, true));
 				serializedNode.properties[PROP_NODE_SIZE] = [
 					Math.round(Number(this.size?.[0] || DEFAULT_NODE_WIDTH)),
 					Math.round(Number(this.size?.[1] || 460)),
 				];
 				serializedNode.properties[PROP_SETTINGS_OPEN] = Boolean(this.properties?.[PROP_SETTINGS_OPEN]);
+				if (this.__gjjDoodleRememberedImageLink || this.properties?.[PROP_UPSTREAM_LINK]) {
+					serializedNode.properties[PROP_UPSTREAM_LINK] = this.__gjjDoodleRememberedImageLink || this.properties[PROP_UPSTREAM_LINK];
+				} else {
+					delete serializedNode.properties[PROP_UPSTREAM_LINK];
+				}
 			}
 			return result;
 		};
@@ -1413,6 +1972,26 @@ app.registerExtension({
 			return result;
 		};
 
+		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+		nodeType.prototype.onConnectionsChange = function (...args) {
+			const result = originalOnConnectionsChange?.apply(this, args);
+			setTimeout(() => {
+				this.__gjjDoodleEditor?.updateUpstreamButtons();
+				this.__gjjDoodleEditor?.syncUpstreamImageFromConnection();
+			}, 0);
+			return result;
+		};
+
+		const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
+		nodeType.prototype.onDrawBackground = function (...args) {
+			const signature = imageLinkSignature(this);
+			if (signature !== this.__gjjDoodleImageLinkSignature) {
+				this.__gjjDoodleImageLinkSignature = signature;
+				setTimeout(() => this.__gjjDoodleEditor?.syncUpstreamImageFromConnection(), 0);
+			}
+			return originalOnDrawBackground?.apply(this, args);
+		};
+
 		const originalOnExecuted = nodeType.prototype.onExecuted;
 		nodeType.prototype.onExecuted = function (message, ...args) {
 			const result = originalOnExecuted?.apply(this, [message, ...args]);
@@ -1422,6 +2001,12 @@ app.registerExtension({
 				message?.ui?.generated_image,
 				message?.output?.generated_image,
 				message?.result?.generated_image,
+			);
+			const generatedRef = firstMessageObject(
+				message?.generated_image_ref,
+				message?.ui?.generated_image_ref,
+				message?.output?.generated_image_ref,
+				message?.result?.generated_image_ref,
 			);
 			const selected = firstMessageValue(
 				message?.selected_image,
@@ -1435,13 +2020,13 @@ app.registerExtension({
 				message?.output?.doodle_image,
 				message?.result?.doodle_image,
 			);
-			if (generated && (!editor?.hasUpstreamImage?.() || editor?.generating)) {
-				editor?.applyGeneratedImage(generated);
+			if ((generated || generatedRef) && (!editor?.hasUpstreamImage?.() || editor?.generating)) {
+				editor?.applyGeneratedImage(generated, generatedRef);
 			} else if (editor?.hasUpstreamImage?.() && (selected || doodle)) {
 				editor?.applyUpstreamImage(selected || doodle);
 				if (editor?.generating) editor.finishGenerating("已使用上游图像");
-			} else if (generated) {
-				editor?.applyGeneratedImage(generated);
+			} else if (generated || generatedRef) {
+				editor?.applyGeneratedImage(generated, generatedRef);
 			} else if (this.__gjjDoodleEditor?.generating) {
 				this.__gjjDoodleEditor?.finishGenerating("执行完成");
 			}

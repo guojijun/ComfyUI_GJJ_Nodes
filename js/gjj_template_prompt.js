@@ -250,6 +250,15 @@ function hideElement(el) {
 
 function hideWidget(widget) {
 	if (!widget) return;
+	if (!widget.__gjjTemplatePromptOriginal) {
+		widget.__gjjTemplatePromptOriginal = {
+			type: widget.type,
+			computeSize: widget.computeSize,
+			getHeight: widget.getHeight,
+			draw: widget.draw,
+			mouse: widget.mouse,
+		};
+	}
 	widget.hidden = true;
 	widget.disabled = true;
 	widget.type = `converted-widget:${widget.name || "hidden"}`;
@@ -265,6 +274,83 @@ function hideInternalWidgets(node) {
 	for (const name of [TEMPLATE_WIDGET, VALUES_WIDGET, BINDINGS_WIDGET, SCHEMA_WIDGET]) {
 		hideWidget(getWidget(node, name));
 	}
+}
+
+function restoreWidget(widget, fallbackType = "text") {
+	if (!widget) return null;
+	const original = widget.__gjjTemplatePromptOriginal || {};
+	widget.hidden = false;
+	widget.disabled = false;
+	widget.serialize = true;
+	widget.type = String(widget.type || "").startsWith("converted-widget:") ? (original.type || fallbackType) : (widget.type || fallbackType);
+	if (original.computeSize) widget.computeSize = original.computeSize;
+	else delete widget.computeSize;
+	if (original.getHeight) widget.getHeight = original.getHeight;
+	else delete widget.getHeight;
+	if (original.draw) widget.draw = original.draw;
+	else delete widget.draw;
+	if (original.mouse) widget.mouse = original.mouse;
+	else delete widget.mouse;
+	widget.options = widget.options || {};
+	delete widget.options.hidden;
+	delete widget.options.display;
+	for (const el of [widget.inputEl, widget.element, widget.widget]) {
+		if (!el?.style) continue;
+		el.style.display = "";
+		el.style.pointerEvents = "";
+		el.style.height = "";
+		el.style.minHeight = "";
+		el.style.maxHeight = "";
+		el.style.margin = "";
+		el.style.padding = "";
+		el.style.border = "";
+		el.style.overflow = "";
+	}
+	return widget;
+}
+
+function removeWidgetByName(node, name) {
+	if (!Array.isArray(node?.widgets)) return false;
+	const index = node.widgets.findIndex((widget) => widget?.name === name);
+	if (index < 0) return false;
+	node.widgets.splice(index, 1);
+	return true;
+}
+
+function ensureParamWidget(node, field, value) {
+	let widget = getWidget(node, field.inputName);
+	if (!widget) {
+		widget = node.addWidget?.("text", field.inputName, String(value ?? field.defaultValue ?? ""), () => {
+			const fields = parseTemplate(getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE));
+			const nextValues = valuesFromDom(node, fields);
+			saveState(node, getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE), fields, nextValues, bindingsForNode(node));
+		}, {
+			serialize: true,
+			multiline: false,
+			display_name: field.label,
+			tooltip: `模板参数：{{${field.expr || field.label}}}`,
+		});
+	}
+	if (!widget) return null;
+	restoreWidget(widget, "text");
+	widget.name = field.inputName;
+	widget.label = field.label;
+	widget.localized_name = field.label;
+	widget.display_name = field.label;
+	widget.tooltip = `模板参数：{{${field.expr || field.label}}}`;
+	widget.options = widget.options || {};
+	widget.options.display_name = field.label;
+	widget.options.tooltip = widget.tooltip;
+	widget.options.multiline = false;
+	widget.value = String(value ?? field.defaultValue ?? "");
+	widget.callback = () => {
+		const fields = parseTemplate(getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE));
+		const nextValues = valuesFromDom(node, fields);
+		saveState(node, getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE), fields, nextValues, bindingsForNode(node));
+	};
+	if (widget.inputEl) widget.inputEl.value = widget.value;
+	if (widget.element && "value" in widget.element) widget.element.value = widget.value;
+	return widget;
 }
 
 function ensureStyles() {
@@ -284,8 +370,6 @@ function ensureStyles() {
 .gjj-template-prompt-rows{display:flex;flex-direction:column;gap:4px;margin-top:4px;}
 .gjj-template-prompt-row{display:grid;grid-template-columns:72px minmax(0,1fr);gap:5px;align-items:center;}
 .gjj-template-prompt-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#b9c8cc;font-size:12px;}
-.gjj-template-prompt-input{width:100%;height:30px;border:1px solid #33464e;border-radius:7px;background:#2b2d30;color:#f1f5f5;padding:4px 8px;outline:none;font-size:13px;}
-.gjj-template-prompt-input:focus{border-color:#6aa6b8;background:#22282c;}
 .gjj-template-prompt-choice{display:flex;flex-wrap:wrap;gap:5px;min-width:0;}
 .gjj-template-prompt-choice-row{display:flex;flex-wrap:wrap;gap:4px 5px;align-items:center;}
 .gjj-template-prompt-choice-row .gjj-template-prompt-label{flex:0 0 auto;width:auto;max-width:100%;font-weight:800;color:#c8d7dc;}
@@ -333,10 +417,10 @@ function valuesFromDom(node, fields = null) {
 			result[field.key] = choiceSelections(field, result);
 			continue;
 		}
-		const input = node?.__gjjTemplatePromptInputs?.get(field.key);
-		if (input) {
-			const inputValue = String(input.value ?? "");
-			result[field.key] = inputValue || String(field.defaultValue ?? "");
+		const widget = getWidget(node, field.inputName);
+		if (widget && !widget.hidden) {
+			const widgetValue = String(widget.value ?? "");
+			result[field.key] = widgetValue || String(field.defaultValue ?? "");
 		}
 		else if (field.expr && field.expr in result) result[field.key] = result[field.expr];
 		else if (field.expr && slugKey(field.expr) in result) result[field.key] = result[slugKey(field.expr)];
@@ -392,7 +476,8 @@ function removeInputByName(node, name) {
 	const index = node.inputs?.findIndex((input) => input?.name === name) ?? -1;
 	if (index < 0) return;
 	disconnectInput(node, index);
-	node.removeInput?.(index);
+	try { node.removeInput?.(index); }
+	catch (_) { node.inputs?.splice?.(index, 1); }
 }
 
 function repairInputLinkSlots(node) {
@@ -430,7 +515,6 @@ function renderRows(node) {
 	for (const key of Object.keys(bindings)) {
 		if (!bindableKeys.has(key)) delete bindings[key];
 	}
-	node.__gjjTemplatePromptInputs = new Map();
 	rows.replaceChildren();
 	if (!fields.length) {
 		const empty = document.createElement("div");
@@ -522,17 +606,7 @@ function renderRows(node) {
 			bound.append(text, clear);
 			row.append(bound);
 		} else {
-			const input = document.createElement("input");
-			input.className = "gjj-template-prompt-input";
-			input.value = String(values[field.key] ?? "");
-			input.placeholder = field.label;
-			input.addEventListener("input", () => {
-				const nextValues = valuesFromDom(node, fields);
-				nextValues[field.key] = input.value;
-				saveState(node, template, fields, nextValues, bindingsForNode(node));
-			});
-			node.__gjjTemplatePromptInputs.set(field.key, input);
-			row.append(label, input);
+			continue;
 		}
 		rows.appendChild(row);
 	}
@@ -559,18 +633,29 @@ function renderRows(node) {
 function ensureInputs(node, fields) {
 	const keep = fieldNames(fields);
 	const bindings = bindingsForNode(node);
+	const values = valuesFromDom(node, fields);
 	for (let index = (node.inputs?.length || 0) - 1; index >= 0; index -= 1) {
 		const input = node.inputs[index];
 		const name = String(input?.name || "");
 		if (!name.startsWith("param_")) continue;
 		const boundField = fields.find((field) => field.inputName === name && bindings[field.key]);
 		if (!keep.has(name) || boundField) {
-			disconnectInput(node, index);
-			node.removeInput?.(index);
+			removeInputByName(node, name);
 		}
 	}
+	for (const widget of [...(node.widgets || [])]) {
+		const name = String(widget?.name || "");
+		if (!name.startsWith("param_")) continue;
+		const field = fields.find((item) => item.inputName === name);
+		if (!field || bindings[field.key]) removeWidgetByName(node, name);
+	}
 	for (const field of bindableFields(fields)) {
-		if (bindings[field.key]) continue;
+		if (bindings[field.key]) {
+			removeInputByName(node, field.inputName);
+			removeWidgetByName(node, field.inputName);
+			continue;
+		}
+		ensureParamWidget(node, field, values[field.key]);
 		let input = node.inputs?.find((item) => item?.name === field.inputName);
 		if (!input) {
 			node.addInput?.(field.inputName, "STRING");
@@ -580,12 +665,18 @@ function ensureInputs(node, fields) {
 			input.type = "STRING";
 			input.label = field.label;
 			input.localized_name = field.label;
+			input.display_name = field.label;
 			input.tooltip = `模板参数：{{${field.label}}}`;
+			input.widget = { name: field.inputName };
+			input.hidden = false;
+			input.visible = true;
+			delete input.widget_name;
+			delete input.forceInput;
 		}
 	}
 	node.inputs = [
 		...(node.inputs || []).filter((input) => !String(input?.name || "").startsWith("param_")),
-		...fields.map((field) => node.inputs?.find((input) => input?.name === field.inputName)).filter(Boolean),
+		...bindableFields(fields).map((field) => node.inputs?.find((input) => input?.name === field.inputName)).filter(Boolean),
 	];
 	repairInputLinkSlots(node);
 }
@@ -599,7 +690,7 @@ function refreshNode(node, force = false) {
 		widget.getHeight = () => domHeight(node);
 	}
 	const width = currentNodeWidth(node);
-	const height = Math.round(Math.max(MIN_HEIGHT, Math.ceil(root?.scrollHeight || MIN_HEIGHT) + 8));
+	const height = Math.round(Math.max(MIN_HEIGHT, Math.ceil(root?.scrollHeight || MIN_HEIGHT) + paramWidgetsHeight(node) + 8));
 	if (force || Math.abs(Number(node.size?.[1] || 0) - height) > 2) {
 		node.__gjjTemplatePromptSizing = true;
 		try { node.setSize?.([width, height]); } finally { requestAnimationFrame(() => { node.__gjjTemplatePromptSizing = false; }); }
@@ -609,6 +700,17 @@ function refreshNode(node, force = false) {
 
 function domHeight(node) {
 	return Math.round(Math.max(36, Math.ceil(node?.__gjjTemplatePromptRoot?.scrollHeight || 36) + 4));
+}
+
+function paramWidgetsHeight(node) {
+	const visible = (node?.widgets || []).filter((widget) =>
+		String(widget?.name || "").startsWith("param_") && !widget.hidden && !String(widget.type || "").startsWith("converted-widget:"));
+	if (!visible.length) return 0;
+	return visible.reduce((total, widget) => {
+		const size = typeof widget.computeSize === "function" ? widget.computeSize(currentNodeWidth(node)) : null;
+		const height = Array.isArray(size) ? Number(size[1]) : Number(widget.getHeight?.() || 24);
+		return total + (Number.isFinite(height) && height > 0 ? height : 24) + 4;
+	}, 0);
 }
 
 function closeParamPopup() {

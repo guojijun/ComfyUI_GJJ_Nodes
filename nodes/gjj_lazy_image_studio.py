@@ -799,6 +799,14 @@ def _load_model(unet_name: str, unet_dtype: str, clip_type: str = ""):
         print(f"\033[95m🟣 UNET: {unet_name}\033[0m")
         return model
     except Exception as exc:
+        error_text = str(exc)
+        if "shape '[13568, 3360]'" in error_text or ("3360" in error_text and "invalid for input of size" in error_text):
+            raise RuntimeError(
+                "检测到 Boogu-Image 主扩散模型加载不兼容。\n"
+                f"当前 UNET：{unet_name}\n"
+                "这个权重是 Boogu 新结构，不能按旧 OmniGen2/普通扩散模型方式加载；"
+                "请使用已包含 comfy.ldm.boogu.model、supported_models.Boogu、CLIPType.BOOGU 的 ComfyUI 版本。"
+            ) from exc
         raise _format_runtime_error("UNET 加载", exc) from exc
 
 

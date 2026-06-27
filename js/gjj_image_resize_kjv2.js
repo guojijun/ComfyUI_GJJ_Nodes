@@ -14,7 +14,7 @@ const PARAM_INPUTS = [
   { name: "border_right", cfgKey: "border_right", label: "➡️ 右", mode: "宽高", fitMode: "补边", type: "INT", min: 0, max: 16384, sliderMax: 2048, step: 8, defaultValue: 0 },
   { name: "border_bottom", cfgKey: "border_bottom", label: "⬇️ 下", mode: "宽高", fitMode: "补边", type: "INT", min: 0, max: 16384, sliderMax: 2048, step: 8, defaultValue: 0 },
   { name: "scale_percent", cfgKey: "scale_percent", label: "📊 缩放百分比", mode: "等比", type: "FLOAT", min: 0.1, max: 10000, sliderMax: 400, step: 1, defaultValue: 100 },
-  { name: "long_side_length", cfgKey: "long_side_length", label: "📏 长边长度", mode: "长边", type: "INT", min: 1, max: 16384, sliderMax: 4096, step: 8, defaultValue: 1024 },
+  { name: "long_side_length", cfgKey: "long_side_length", label: "📐 长边长度", mode: "长边", type: "INT", min: 1, max: 16384, sliderMax: 4096, step: 8, defaultValue: 1024 },
   { name: "total_pixel_k", cfgKey: "total_pixel_k", label: "🧮 总像素/K", mode: "像素", type: "INT", min: 1, max: 1000000, sliderMax: 4096, step: 1, defaultValue: 260 },
   { name: "aspect_ratio", cfgKey: "aspect_ratio", label: "🖼️ 输出比例", mode: "像素", type: "STRING", widgetType: "combo", values: ["原始比例", "自定义", "1:1", "3:2", "4:3", "16:9", "2:3", "3:4", "9:16"], defaultValue: "1:1" },
 ];
