@@ -1824,14 +1824,14 @@ function createButtons(node) {
 	// 刷新Lora按钮
 	const refreshButton = document.createElement("button");
 	refreshButton.type = "button";
-	refreshButton.innerHTML = "🔄 刷新LoRA";
+	refreshButton.innerHTML = "🔄";
 	refreshButton.title = "刷新LoRA选项列表";
 	refreshButton.style.cssText = [
 		...sharedButtonStyle,
 		"border:1px solid #3b82f6",
 		"background:linear-gradient(135deg, #1e3a5f, #1e40af)",
 		"color:#e0e7ff",
-		"flex:1 1 82px",
+		"flex:1px",
 	].join(";");
 
 	const translateButton = document.createElement("button");

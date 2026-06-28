@@ -81,6 +81,9 @@ from .gjj_multi_image_loader import (
     parse_selected_images,
     resolve_input_image_path,
 )
+from .gjj_krea2_edit_rebalance import (
+    GJJ_Krea2EditRebalance as _GJJKrea2EditRebalance,
+)
 
 try:
     from .gjj_wanvideo_runtime_shims import ensure_optional_gguf_module
@@ -1823,6 +1826,44 @@ class GJJ_LazyImageStudio:
         # 将输出的 tensor 包装成字典格式，以兼容 VAEDecode
         return {"samples": result["output"]}
 
+    def _encode_krea2_image_edit(
+        self,
+        clip,
+        prompt: str,
+        pairs: list[dict[str, Any]],
+        width: int,
+        height: int,
+        batch_size: int,
+        image_tokens: str = "normal",
+    ):
+        if not pairs:
+            raise RuntimeError("Krea2 图生图分支至少需要一张有效参考图。")
+
+        reference_images = [
+            pair["image"]
+            for pair in pairs
+            if isinstance(pair.get("image"), torch.Tensor)
+        ]
+        if not reference_images:
+            raise RuntimeError("Krea2 图生图分支没有解析到有效参考图张量。")
+
+        positive = _GJJKrea2EditRebalance().main(
+            text=str(prompt or ""),
+            clip=clip,
+            refocus_strength=0.80,
+            guidance_strength=0.500,
+            enable_split=True,
+            image=reference_images,
+            image_tokens=image_tokens,
+        )[0]
+        negative = zero_out_conditioning(positive)
+        latent_out = EmptyLatentImage().generate(
+            int(width),
+            int(height),
+            max(1, int(batch_size)),
+        )[0]
+        return positive, negative, latent_out
+
     def _encode_equal_reference_image_edit(
         self,
         clip,
@@ -2429,9 +2470,25 @@ class GJJ_LazyImageStudio:
                 local_width = int(width)
                 local_height = int(height)
                 flux2_sample_size = None
+                krea2_reference_sample = False
 
                 _send_status(unique_id, f"4/6 编码条件与 latent{status_suffix}...")
-                if pairs and resolved_clip_type == "flux2":
+                if pairs and _is_krea2_family(unet_name, resolved_clip_type):
+                    _send_status(
+                        unique_id,
+                        f"4/6 编码 Krea2 图生图条件{status_suffix}（{len(pairs)} 张，溶图模式）...",
+                    )
+                    positive, negative, latent_out = self._encode_krea2_image_edit(
+                        clip=clip,
+                        prompt=prompt_text,
+                        pairs=pairs,
+                        width=local_width,
+                        height=local_height,
+                        batch_size=int(batch_size),
+                        image_tokens="normal",
+                    )
+                    krea2_reference_sample = True
+                elif pairs and resolved_clip_type == "flux2":
                     _send_status(
                         unique_id,
                         f"4/6 编码 Flux2 图片编辑条件{status_suffix}（{len(pairs)} 张）...",
@@ -2533,6 +2590,23 @@ class GJJ_LazyImageStudio:
                         cfg=float(cfg),
                         sampler_name=str(preset.get("sampler_name", "lcm") or "lcm"),
                     )
+                elif krea2_reference_sample:
+                    _send_status(
+                        unique_id,
+                        f"5/6 按 Krea2 图生图工作流采样{status_suffix}（BasicGuider 等价，CFG=1）...",
+                    )
+                    sampled_latent = common_ksampler(
+                        model,
+                        sample_seed,
+                        effective_steps,
+                        1.0,
+                        sampler_name,
+                        scheduler,
+                        positive,
+                        negative,
+                        latent_out,
+                        denoise=float(denoise),
+                    )[0]
                 else:
                     sampled_latent = common_ksampler(
                         model,

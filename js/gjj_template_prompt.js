@@ -840,19 +840,20 @@ function renderRows(node) {
 function ensureInputs(node, fields) {
 	ensureExternalTemplateInputLast(node);
 	const keep = fieldNames(fields);
+	const bindableByInput = new Map(bindableFields(fields).map((field) => [field.inputName, field]));
 	const bindings = bindingsForNode(node);
 	const values = valuesFromDom(node, fields);
 	for (let index = (node.inputs?.length || 0) - 1; index >= 0; index -= 1) {
 		const input = node.inputs[index];
 		const name = String(input?.name || "");
 		if (!name.startsWith("param_")) continue;
-		const field = fields.find((item) => item.inputName === name);
+		const field = bindableByInput.get(name);
 		if (!keep.has(name) || (field && bindings[field.key])) removeInputByName(node, name);
 	}
 	for (const widget of [...(node.widgets || [])]) {
 		const name = String(widget?.name || "");
 		if (!name.startsWith("param_")) continue;
-		const field = fields.find((item) => item.inputName === name);
+		const field = bindableByInput.get(name);
 		if (!field || bindings[field.key]) removeWidgetByName(node, name);
 	}
 	for (const field of bindableFields(fields)) {
