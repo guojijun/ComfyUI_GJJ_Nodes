@@ -32,6 +32,7 @@ const BACKEND_WIDGETS = [
 	TEMPLATE_WIDGET,
 	OUTPUT_RULE_WIDGET,
 	USER_PROMPT_WIDGET,
+	"clear_memory_before_run",
 ];
 const LEGACY_WIDGET_ORDERS = [
 	BACKEND_WIDGETS,
@@ -60,6 +61,17 @@ const LEGACY_WIDGET_ORDERS = [
 const USER_PROMPT_INPUT_TYPE = "STRING";
 const USER_PROMPT_HIDDEN_NAMES = new Set(["user_prompt", "指令 / 原文"]);
 const HIDDEN_WIDGETS = new Set(BACKEND_WIDGETS.filter((name) => name !== USER_PROMPT_WIDGET));
+const TEXT_WIDGETS = new Set([
+	"ollama_host",
+	"model",
+	"model_keep_alive",
+	"thinking_mode",
+	"seed_mode",
+	"system_prompt",
+	TEMPLATE_WIDGET,
+	OUTPUT_RULE_WIDGET,
+	USER_PROMPT_WIDGET,
+]);
 const DEFAULT_TEMPLATE_TEXT = "";
 const DEFAULT_OUTPUT_RULE = "";
 const DEFAULT_SAMPLING = {
@@ -74,6 +86,19 @@ const DEFAULT_SAMPLING = {
 	frequency_penalty: 0.2,
 	repeat_penalty: 1.15,
 };
+const FLOAT_WIDGET_DEFAULTS = new Map([
+	["temperature", { fallback: DEFAULT_SAMPLING.temperature, min: 0, max: 2 }],
+	["top_p", { fallback: DEFAULT_SAMPLING.top_p, min: 0, max: 1 }],
+	["min_p", { fallback: DEFAULT_SAMPLING.min_p, min: 0, max: 1 }],
+	["presence_penalty", { fallback: DEFAULT_SAMPLING.presence_penalty, min: -2, max: 2 }],
+	["frequency_penalty", { fallback: DEFAULT_SAMPLING.frequency_penalty, min: -2, max: 2 }],
+	["repeat_penalty", { fallback: DEFAULT_SAMPLING.repeat_penalty, min: 0, max: 3 }],
+]);
+const INT_WIDGET_DEFAULTS = new Map([
+	["max_tokens", { fallback: DEFAULT_SAMPLING.max_tokens, min: 16, max: 8192 }],
+	["seed", { fallback: DEFAULT_SAMPLING.seed, min: 0, max: 2147483647 }],
+	["top_k", { fallback: DEFAULT_SAMPLING.top_k, min: 1, max: 1000 }],
+]);
 const SAMPLING_FIELDS = [
 	"temperature",
 	"max_tokens",
@@ -201,6 +226,35 @@ function hasOwn(object, key) {
 	return Object.prototype.hasOwnProperty.call(object || {}, key);
 }
 
+function clampSavedNumber(value, fallback, min, max, integer = false) {
+	const parsed = Number(value);
+	const number = Number.isFinite(parsed) ? parsed : fallback;
+	const clamped = Math.min(max, Math.max(min, number));
+	return integer ? Math.round(clamped) : clamped;
+}
+
+function coerceSavedValue(name, value) {
+	const floatSpec = FLOAT_WIDGET_DEFAULTS.get(name);
+	if (floatSpec) {
+		return clampSavedNumber(value, floatSpec.fallback, floatSpec.min, floatSpec.max, false);
+	}
+	const intSpec = INT_WIDGET_DEFAULTS.get(name);
+	if (intSpec) {
+		return clampSavedNumber(value, intSpec.fallback, intSpec.min, intSpec.max, true);
+	}
+	return value;
+}
+
+function sanitizeSavedValue(name, value) {
+	if (FLOAT_WIDGET_DEFAULTS.has(name) || INT_WIDGET_DEFAULTS.has(name)) {
+		return coerceSavedValue(name, value);
+	}
+	if (TEXT_WIDGETS.has(name) && typeof value === "boolean") {
+		return undefined;
+	}
+	return value;
+}
+
 function fixedChoicesFor(name) {
 	if (name === "model_keep_alive") {
 		return new Set(["保持模型", "卸载模型"]);
@@ -224,6 +278,9 @@ function coerceWorkflowValue(node, name, value) {
 		const text = String(value ?? "").trim();
 		return choices.has(text) ? text : target.value;
 	}
+	if (FLOAT_WIDGET_DEFAULTS.has(name) || INT_WIDGET_DEFAULTS.has(name)) {
+		return coerceSavedValue(name, value);
+	}
 	if (typeof target.value === "number") {
 		const parsed = Number(value);
 		return Number.isFinite(parsed) ? parsed : target.value;
@@ -239,7 +296,8 @@ function collectWorkflowValues(node) {
 	for (const name of BACKEND_WIDGETS) {
 		const target = widget(node, name);
 		if (target) {
-			values[name] = target.value ?? "";
+			const value = sanitizeSavedValue(name, target.value);
+			values[name] = value ?? "";
 		}
 	}
 	return values;
@@ -293,6 +351,7 @@ function valuesFromProperties(props) {
 		if (value === undefined && name === OUTPUT_RULE_WIDGET && hasOwn(props, WORKFLOW_OUTPUT_RULE_PROPERTY)) {
 			value = props[WORKFLOW_OUTPUT_RULE_PROPERTY];
 		}
+		value = sanitizeSavedValue(name, value);
 		if (value !== undefined) {
 			values[name] = value;
 		}
@@ -309,7 +368,8 @@ function serializedValuesForOrder(rawValues, order, offset = 0) {
 	for (let index = 0; index < count; index += 1) {
 		const name = order[index];
 		if (BACKEND_WIDGETS.includes(name)) {
-			values[name] = rawValues[index + offset];
+			const value = sanitizeSavedValue(name, rawValues[index + offset]);
+			if (value !== undefined) values[name] = value;
 		}
 	}
 	return values;
@@ -421,10 +481,12 @@ function workflowHasSavedValue(node, name) {
 	}
 	const props = node?.properties || {};
 	const saved = props[WORKFLOW_VALUES_PROPERTY];
-	return hasOwn(saved, name)
-		|| hasOwn(props, `gjj_ollama_assistant_value_${name}`)
-		|| (name === TEMPLATE_WIDGET && hasOwn(props, WORKFLOW_TEMPLATE_PROPERTY))
-		|| (name === OUTPUT_RULE_WIDGET && hasOwn(props, WORKFLOW_OUTPUT_RULE_PROPERTY));
+	return (
+		(hasOwn(saved, name) && sanitizeSavedValue(name, saved?.[name]) !== undefined)
+		|| (hasOwn(props, `gjj_ollama_assistant_value_${name}`) && sanitizeSavedValue(name, props?.[`gjj_ollama_assistant_value_${name}`]) !== undefined)
+		|| (name === TEMPLATE_WIDGET && hasOwn(props, WORKFLOW_TEMPLATE_PROPERTY) && sanitizeSavedValue(name, props?.[WORKFLOW_TEMPLATE_PROPERTY]) !== undefined)
+		|| (name === OUTPUT_RULE_WIDGET && hasOwn(props, WORKFLOW_OUTPUT_RULE_PROPERTY) && sanitizeSavedValue(name, props?.[WORKFLOW_OUTPUT_RULE_PROPERTY]) !== undefined)
+	);
 }
 
 function restoreWorkflowValues(node, serializedNode = null) {
@@ -689,7 +751,7 @@ function hideBackerWidgets(node) {
 		GJJ_Utils.hideWidget(widget(node, name));
 	}
 	GJJ_Utils.removeHiddenInputSockets(node, HIDDEN_WIDGETS);
-	GJJ_Utils.reorderWidgets(node, HIDDEN_WIDGETS);
+	orderWidgetsForSerialization(node);
 }
 
 function restoreUserPromptWidget(node) {
@@ -779,27 +841,34 @@ function ensureUserPromptInput(node) {
 	promptInput.widget = { name: USER_PROMPT_WIDGET };
 }
 
-function placeUserPromptWidget(node) {
+function orderWidgetsForSerialization(node) {
 	if (!Array.isArray(node?.widgets)) {
 		return;
 	}
-	const prompt = widget(node, USER_PROMPT_WIDGET);
 	const panel = widget(node, PANEL_WIDGET);
-	if (!prompt || !panel) {
-		return;
+	const seen = new Set();
+	const ordered = [];
+	if (panel) {
+		ordered.push(panel);
+		seen.add(panel);
 	}
-	const promptIndex = node.widgets.indexOf(prompt);
-	if (promptIndex >= 0) {
-		node.widgets.splice(promptIndex, 1);
+	for (const name of BACKEND_WIDGETS) {
+		const target = widget(node, name);
+		if (target && !seen.has(target)) {
+			ordered.push(target);
+			seen.add(target);
+		}
 	}
-	const panelIndex = Math.max(0, node.widgets.indexOf(panel));
-	node.widgets.splice(panelIndex + 1, 0, prompt);
+	for (const item of node.widgets) {
+		if (!seen.has(item)) ordered.push(item);
+	}
+	node.widgets = ordered;
 }
 
 function stabilizeUserPromptInput(node) {
 	restoreUserPromptWidget(node);
 	ensureUserPromptInput(node);
-	placeUserPromptWidget(node);
+	orderWidgetsForSerialization(node);
 }
 
 function button(label, title, handler) {

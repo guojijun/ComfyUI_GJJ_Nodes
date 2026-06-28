@@ -139,16 +139,21 @@ function pruneMissingActiveNodeIds(node) {
 	return nextIds;
 }
 
-function getActiveNodeRefs(node) {
+function getActiveNodeRefs(node, scopeNodes = null) {
 	// 从 node.properties 读取激活的节点 ID 列表
 	const activeIds = node.properties?.__activeNodeIds || [];
 	if (!Array.isArray(activeIds)) return new Set();
+
+	const scopeIds = Array.isArray(scopeNodes)
+		? new Set(scopeNodes.map(n => n?.id).filter(id => id !== undefined))
+		: null;
 
 	// 返回节点对象集合（根据 ID 查找）
 	const allNodes = getNodes();
 	return new Set(
 		activeIds
 			.map(id => allNodes.find(n => n.id === id))
+			.filter(n => !scopeIds || scopeIds.has(n?.id))
 			.filter(n => n !== undefined)
 	);
 }
@@ -174,8 +179,8 @@ function setActiveNodeRefs(node, nodes) {
 	node.graph?.change?.();
 }
 
-function trimActiveNodesForMode(node) {
-	const activeNodes = [...getActiveNodeRefs(node)];
+function trimActiveNodesForMode(node, scopeNodes = null) {
+	const activeNodes = [...getActiveNodeRefs(node, scopeNodes)];
 	if (getSelectionMode(node) === MODE_SINGLE && activeNodes.length > 1) {
 		setActiveNodeRefs(node, [activeNodes[0]]);
 	}
@@ -192,18 +197,7 @@ function setNodeState(targetNode, isActive, controllerNode) {
 }
 
 function releaseManagedNodes(node, nextNodes = []) {
-	const nextNodeSet = new Set(nextNodes);
-	const previousNodes = Array.isArray(node.__gjjManagedNodes) ? node.__gjjManagedNodes : [];
-	previousNodes.forEach((n) => {
-		if (!n) return;
-
-		// 不处理其它 NodeRouter
-		if (TARGET_NODES.has(n.comfyClass)) return;
-
-		if (!nextNodeSet.has(n)) {
-			setNodeState(n, false, node);
-		}
-	});
+	// 过滤范围外的节点不再由当前 Router 控制，保留它们原本的启用/禁用状态。
 	node.__gjjManagedNodes = [...nextNodes].filter(
 		(n) => n && !TARGET_NODES.has(n.comfyClass)
 	);
@@ -214,8 +208,8 @@ function applyMatchedNodeModes(node, nodes = getMatchedNodes(node)) {
 		return;
 	}
 
-	trimActiveNodesForMode(node);
-	const activeNodes = getActiveNodeRefs(node);
+	trimActiveNodesForMode(node, nodes);
+	const activeNodes = getActiveNodeRefs(node, nodes);
 	nodes.forEach((n) => {
 		setNodeState(n, activeNodes.has(n), node);
 	});
@@ -284,7 +278,7 @@ function renderRouterPanel(node) {
 	if (!(panel instanceof HTMLElement)) return;
 
 	const matchedNodes = getMatchedNodes(node);
-	const activeNodes = getActiveNodeRefs(node);
+	const activeNodes = getActiveNodeRefs(node, matchedNodes);
 	const currentMode = getSelectionMode(node);
 	const filterValue = String(node.properties?.[FILTER_NAME] || "");
 
@@ -321,7 +315,7 @@ function renderRouterPanel(node) {
 
 			updateSelectionMode(node, modeValue);
 
-			let selected = getActiveNodeRefs(node);
+			let selected = getActiveNodeRefs(node, matchedNodes);
 			if (modeValue === MODE_SINGLE && selected.size > 1) {
 				const first = [...selected][0];
 				selected = new Set(first ? [first] : []);
@@ -519,7 +513,7 @@ function renderRouterPanel(node) {
 				event.preventDefault();
 				event.stopPropagation();
 
-				const selected = getActiveNodeRefs(node);
+				const selected = getActiveNodeRefs(node, matchedNodes);
 				const nowActive = selected.has(targetNode);
 
 				if (nowActive) {
@@ -834,4 +828,3 @@ function clearNodeWidgets(node) {
 	// 单 DOMWidget 方案下，不再暴力删除 widgets。
 	// 保留函数，避免其它地方调用时报错。
 }
-

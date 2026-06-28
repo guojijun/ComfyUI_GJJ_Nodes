@@ -99,12 +99,169 @@ function linkPresent(slot) {
 	return slot?.link != null || (Array.isArray(slot?.links) && slot.links.length > 0);
 }
 
+function graphLink(linkId) {
+	const links = app.graph?.links;
+	if (linkId == null || !links) return null;
+	if (typeof links.get === "function") return links.get(linkId) || links.get(String(linkId)) || null;
+	return links[linkId] || links[String(linkId)] || null;
+}
+
+function linkField(link, name) {
+	if (!link) return null;
+	if (!Array.isArray(link)) return link[name];
+	const indexes = { id: 0, origin_id: 1, origin_slot: 2, target_id: 3, target_slot: 4, type: 5 };
+	return link[indexes[name]];
+}
+
+function inputIndex(node, name) {
+	const list = node?.inputs || [];
+	return list.findIndex((item) => item?.name === name);
+}
+
 function sourceNodeFromInput(node, name) {
 	const slot = input(node, name);
 	if (!slot || slot.link == null || !app.graph?.links) return null;
-	const link = app.graph.links[slot.link];
-	const sourceId = link?.origin_id ?? link?.source_id ?? link?.from_id;
-	return sourceId == null ? null : app.graph.getNodeById(sourceId);
+	const link = graphLink(slot.link);
+	const sourceId = linkField(link, "origin_id") ?? linkField(link, "source_id") ?? linkField(link, "from_id");
+	return sourceId == null ? null : findNodeById(sourceId);
+}
+
+function linkMemory(node, create = false) {
+	if (!create && (!node?.properties || !node.properties.gjj_text_overlay_link_memory)) return {};
+	node.properties ||= {};
+	const memory = node.properties.gjj_text_overlay_link_memory;
+	if (memory && typeof memory === "object" && !Array.isArray(memory)) return memory;
+	if (!create) return {};
+	node.properties.gjj_text_overlay_link_memory = {};
+	return node.properties.gjj_text_overlay_link_memory;
+}
+
+function findNodeById(id) {
+	const found = app.graph?.getNodeById?.(id);
+	if (found) return found;
+	return (app.graph?._nodes || []).find((item) => String(item?.id) === String(id)) || null;
+}
+
+function currentInputLinkRecord(node, inputName) {
+	const slotIndex = inputIndex(node, inputName);
+	const slot = slotIndex >= 0 ? node.inputs?.[slotIndex] : null;
+	const linkId = slot?.link;
+	const link = graphLink(linkId);
+	if (slotIndex < 0 || linkId == null || !link) return null;
+	const originId = linkField(link, "origin_id") ?? linkField(link, "source_id") ?? linkField(link, "from_id");
+	const originSlot = linkField(link, "origin_slot") ?? linkField(link, "source_slot") ?? linkField(link, "from_slot");
+	const source = findNodeById(originId);
+	return {
+		input_name: inputName,
+		origin_id: originId,
+		origin_slot: originSlot,
+		target_slot: linkField(link, "target_slot") ?? slotIndex,
+		type: linkField(link, "type") || slot?.type || "",
+		origin_name: source?.title || source?.comfyClass || source?.type || "",
+	};
+}
+
+function rememberedInputLink(node, inputName) {
+	const record = linkMemory(node)[inputName];
+	return record && typeof record === "object" ? record : null;
+}
+
+function markGraphChanged(node) {
+	try { node.graph?.change?.(); } catch (_) {}
+	node.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function showPanelStatus(node, message, delay = 1600) {
+	const status = node?.__gjjTextOverlayUI?.status;
+	if (!status || !message) return;
+	status.textContent = message;
+	status.dataset.show = "true";
+	clearTimeout(node.__gjjTextOverlayStatusTimer);
+	node.__gjjTextOverlayStatusTimer = setTimeout(() => { status.dataset.show = "false"; }, delay);
+}
+
+function refreshInputPreviewAfterLinkChange(node, inputName) {
+	if (inputName === "background_image") {
+		if (linkPresent(input(node, inputName))) refreshBackground(node, true);
+	} else if (inputName === "watermark_image") {
+		refreshWatermarkPreview(node, true);
+	}
+	renderPanel(node, { fitText: false });
+	updateLinkToggleButtons(node);
+}
+
+function disconnectRememberedInputLink(node, inputName) {
+	const record = currentInputLinkRecord(node, inputName);
+	if (!record) {
+		updateLinkToggleButtons(node);
+		return false;
+	}
+	linkMemory(node, true)[inputName] = record;
+	const targetSlot = Number.isFinite(Number(record.target_slot)) ? Number(record.target_slot) : inputIndex(node, inputName);
+	try {
+		node.disconnectInput?.(targetSlot);
+	} catch (_) {
+		const slot = node.inputs?.[targetSlot];
+		if (slot) slot.link = null;
+	}
+	markGraphChanged(node);
+	refreshInputPreviewAfterLinkChange(node, inputName);
+	showPanelStatus(node, `已断开：${record.origin_name || "上游节点"}`);
+	return true;
+}
+
+function reconnectRememberedInputLink(node, inputName) {
+	const record = rememberedInputLink(node, inputName);
+	if (!record) {
+		updateLinkToggleButtons(node);
+		showPanelStatus(node, "没有上游连接记录");
+		return false;
+	}
+	const source = findNodeById(record.origin_id);
+	const sourceSlot = Number(record.origin_slot);
+	const targetSlot = inputIndex(node, inputName);
+	if (!source || !source.outputs?.[sourceSlot] || targetSlot < 0) {
+		showPanelStatus(node, "上游节点或接口不存在", 2200);
+		updateLinkToggleButtons(node);
+		return false;
+	}
+	try {
+		if (node.inputs?.[targetSlot]?.link != null) node.disconnectInput?.(targetSlot);
+		source.connect(sourceSlot, node, targetSlot);
+		linkMemory(node, true)[inputName] = { ...record, target_slot: targetSlot };
+		markGraphChanged(node);
+		refreshInputPreviewAfterLinkChange(node, inputName);
+		showPanelStatus(node, `已连接：${record.origin_name || "上游节点"}`);
+		return true;
+	} catch (error) {
+		console.warn("[GJJ_TextOverlay] 恢复上游连接失败", error);
+		showPanelStatus(node, "恢复上游连接失败", 2200);
+		updateLinkToggleButtons(node);
+		return false;
+	}
+}
+
+function toggleRememberedInputLink(node, inputName) {
+	if (currentInputLinkRecord(node, inputName)) return disconnectRememberedInputLink(node, inputName);
+	return reconnectRememberedInputLink(node, inputName);
+}
+
+function updateLinkToggleButtons(node) {
+	const ui = node?.__gjjTextOverlayUI;
+	if (!ui) return;
+	const defs = [
+		["background_image", ui.backgroundLinkButton, "背景图"],
+		["watermark_image", ui.watermarkLinkButton, "水印图"],
+	];
+	for (const [inputName, button, label] of defs) {
+		if (!button) continue;
+		const active = Boolean(currentInputLinkRecord(node, inputName));
+		const remembered = Boolean(rememberedInputLink(node, inputName));
+		button.style.display = active || remembered ? "flex" : "none";
+		button.dataset.active = active ? "true" : "false";
+		button.title = active ? `断开${label}上游链接` : `恢复${label}上游链接`;
+	}
 }
 
 function imageRefToViewUrl(item) {
@@ -861,7 +1018,11 @@ function makePanel(node) {
 	};
 
 	addIconButton("📂", "打开本地背景图", () => fileInput.click());
+	const backgroundLinkButton = addIconButton("🔗", "断开背景图上游链接", () => toggleRememberedInputLink(node, "background_image"));
+	backgroundLinkButton.style.display = "none";
 	addIconButton("🧩", "打开本地 logo，并使用 RMBG1.4 抠图预览", () => logoFileInput.click());
+	const watermarkLinkButton = addIconButton("🔗", "断开水印图上游链接", () => toggleRememberedInputLink(node, "watermark_image"));
+	watermarkLinkButton.style.display = "none";
 	addIconButton("🌏", "设置网络默认 logo", async () => {
 		const current = stringValue(node, "logo_default_url", "") || DEFAULT_LOGO_URL;
 		const url = window.prompt("网络默认 logo URL", current);
@@ -1155,8 +1316,9 @@ function makePanel(node) {
 		return originalRemoved?.apply(this, args);
 	};
 
-	node.__gjjTextOverlayUI = { root, toolbar, settings, preview, status, stage, base, bg, text, textImg, textResizeNw, textResizeSe, watermark, watermarkImg, watermarkResizeNw, watermarkResizeSe, activate };
+	node.__gjjTextOverlayUI = { root, toolbar, settings, preview, status, stage, base, bg, text, textImg, textResizeNw, textResizeSe, watermark, watermarkImg, watermarkResizeNw, watermarkResizeSe, backgroundLinkButton, watermarkLinkButton, activate };
 	activate(node.__gjjTextOverlayActive || "text");
+	updateLinkToggleButtons(node);
 	scheduleRenderPanel(node);
 	setTimeout(() => refreshBackground(node, false), 300);
 	setTimeout(() => refreshWatermarkPreview(node, true), 450);
@@ -1525,6 +1687,7 @@ function renderPanel(node, options = {}) {
 	updateWatermarkPreviewStyle(node);
 	ui.watermark.style.display = (linkPresent(input(node, "watermark_image")) || stringValue(node, "watermark_upload_name", "")) && ui.watermarkImg.src ? "flex" : "none";
 	if (linkPresent(input(node, "watermark_image"))) refreshWatermarkPreview(node, false);
+	updateLinkToggleButtons(node);
 	updatePanelHeight(node);
 }
 
@@ -1633,6 +1796,7 @@ app.registerExtension({
 				refreshBackground(this, false);
 				refreshWatermarkPreview(this, true);
 				renderPanel(this, { fitText: false });
+				updateLinkToggleButtons(this);
 			}, 150);
 			return result;
 		};

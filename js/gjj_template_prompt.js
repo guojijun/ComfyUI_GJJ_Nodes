@@ -6,6 +6,7 @@ const TEMPLATE_WIDGET = "template_text";
 const VALUES_WIDGET = "values_json";
 const BINDINGS_WIDGET = "bindings_json";
 const SCHEMA_WIDGET = "schema_json";
+const EXTERNAL_TEMPLATE_INPUT = "external_template";
 const DOM_WIDGET = "gjj_template_prompt_dom";
 const DEFAULT_TEMPLATE = "一张{{主体}}的照片，{{风格}}，细节丰富";
 const DEFAULT_WIDTH = 320;
@@ -70,24 +71,21 @@ function parseDefaultExpression(expr) {
 
 function parsePlaceholderExpression(expr) {
 	const source = String(expr || "").trim();
-	for (const separator of ["：", ":"]) {
-		if (!source.includes(separator)) continue;
-		const [rawLabel, ...rest] = source.split(separator);
+	if (source.includes(":")) {
+		const [rawLabel, ...rest] = source.split(":");
 		const parsedLabel = parseDefaultExpression(rawLabel);
 		const label = parsedLabel.label;
-		const optionText = rest.join(separator);
+		const optionText = rest.join(":");
 		const options = optionText.split(/[,，、|]+/).map((item) => item.trim()).filter(Boolean);
-		if (label && options.length >= 2) {
-			return {
-				expr: source,
-				label,
-				outputLabel: outputLabel(label),
-				keySource: label,
-				kind: "choice",
-				options,
-				defaultValue: options.includes(parsedLabel.defaultValue) ? parsedLabel.defaultValue : options[0],
-			};
-		}
+		if (label && options.length >= 2) return {
+			expr: source,
+			label,
+			outputLabel: outputLabel(label),
+			keySource: label,
+			kind: "choice",
+			options,
+			defaultValue: options.includes(parsedLabel.defaultValue) ? parsedLabel.defaultValue : options[0],
+		};
 	}
 	const parsed = parseDefaultExpression(source);
 	return {
@@ -224,6 +222,19 @@ function fieldNames(fields) {
 	return new Set(bindableFields(fields).map((field) => field.inputName));
 }
 
+function isExternalTemplateInput(input) {
+	return input?.name === EXTERNAL_TEMPLATE_INPUT;
+}
+
+function externalTemplateInput(node) {
+	return node?.inputs?.find(isExternalTemplateInput) || null;
+}
+
+function externalTemplateLinked(node) {
+	syncInputLinksFromGraph(node);
+	return inputHasLink(externalTemplateInput(node));
+}
+
 function currentNodeWidth(node) {
 	const width = Number(node?.size?.[0]);
 	return Number.isFinite(width) && width > 0 ? Math.round(width) : DEFAULT_WIDTH;
@@ -233,6 +244,41 @@ function setDirty(node) {
 	node?.setDirtyCanvas?.(true, true);
 	node?.graph?.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
+	app.canvas?.setDirty?.(true, true);
+}
+
+function resetDomElementSize(el) {
+	if (!el?.style) return;
+	el.style.height = "";
+	el.style.minHeight = "";
+	el.style.maxHeight = "";
+}
+
+function visibleElementHeight(el) {
+	if (!el) return 0;
+	const style = window.getComputedStyle?.(el);
+	if (style?.display === "none") return 0;
+	const marginTop = Number.parseFloat(style?.marginTop || "0") || 0;
+	const marginBottom = Number.parseFloat(style?.marginBottom || "0") || 0;
+	return Math.ceil(Math.max(el.scrollHeight || 0, el.offsetHeight || 0, el.clientHeight || 0) + marginTop + marginBottom);
+}
+
+function templatePromptContentHeight(node) {
+	const root = node?.__gjjTemplatePromptRoot;
+	if (!root) return 36;
+	resetDomElementSize(root);
+	let height = 0;
+	for (const child of root.children || []) height += visibleElementHeight(child);
+	if (!height) height = Math.max(0, root.scrollHeight || 0);
+	return Math.round(Math.max(0, height) + 4);
+}
+
+function invalidateWidgetLayout(node) {
+	for (const widget of node?.widgets || []) {
+		if (!widget) continue;
+		delete widget.last_y;
+		delete widget.y;
+	}
 }
 
 function hideElement(el) {
@@ -273,6 +319,20 @@ function hideWidget(widget) {
 function hideInternalWidgets(node) {
 	for (const name of [TEMPLATE_WIDGET, VALUES_WIDGET, BINDINGS_WIDGET, SCHEMA_WIDGET]) {
 		hideWidget(getWidget(node, name));
+	}
+}
+
+function hideParamWidgets(node) {
+	for (const widget of node?.widgets || []) {
+		if (String(widget?.name || "").startsWith("param_")) hideWidget(widget);
+	}
+}
+
+function hideParamInputs(node) {
+	for (const input of node?.inputs || []) {
+		if (!String(input?.name || "").startsWith("param_")) continue;
+		input.hidden = true;
+		input.visible = false;
 	}
 }
 
@@ -321,9 +381,10 @@ function ensureParamWidget(node, field, value) {
 	let widget = getWidget(node, field.inputName);
 	if (!widget) {
 		widget = node.addWidget?.("text", field.inputName, String(value ?? field.defaultValue ?? ""), () => {
-			const fields = parseTemplate(getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE));
+			const template = activeTemplateForNode(node);
+			const fields = parseTemplate(template);
 			const nextValues = valuesFromDom(node, fields);
-			saveState(node, getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE), fields, nextValues, bindingsForNode(node));
+			saveState(node, template, fields, nextValues, bindingsForNode(node), { saveTemplate: shouldSaveInternalTemplate(node) });
 		}, {
 			serialize: true,
 			multiline: false,
@@ -344,9 +405,10 @@ function ensureParamWidget(node, field, value) {
 	widget.options.multiline = false;
 	widget.value = String(value ?? field.defaultValue ?? "");
 	widget.callback = () => {
-		const fields = parseTemplate(getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE));
+		const template = activeTemplateForNode(node);
+		const fields = parseTemplate(template);
 		const nextValues = valuesFromDom(node, fields);
-		saveState(node, getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE), fields, nextValues, bindingsForNode(node));
+		saveState(node, template, fields, nextValues, bindingsForNode(node), { saveTemplate: shouldSaveInternalTemplate(node) });
 	};
 	if (widget.inputEl) widget.inputEl.value = widget.value;
 	if (widget.element && "value" in widget.element) widget.element.value = widget.value;
@@ -360,6 +422,8 @@ function ensureStyles() {
 	style.textContent = `
 .gjj-template-prompt{box-sizing:border-box;width:100%;padding:1px 0 2px 0;color:#dce7e2;font-family:system-ui,"Microsoft YaHei",sans-serif;pointer-events:auto;}
 .gjj-template-prompt *{box-sizing:border-box;}
+.gjj-template-prompt.external-template-linked .gjj-template-prompt-toolbar,
+.gjj-template-prompt.external-template-linked .gjj-template-prompt-panel{display:none!important;}
 .gjj-template-prompt-toolbar{display:flex;align-items:center;gap:4px;min-width:0;flex-wrap:wrap;}
 .gjj-template-prompt-btn{height:23px;border:1px solid #44565f;border-radius:6px;background:#202b31;color:#dce7e2;cursor:pointer;padding:0 6px;font-size:11px;font-weight:650;white-space:nowrap;}
 .gjj-template-prompt-btn:hover{background:#2c3b43;border-color:#6aa6b8;}
@@ -409,12 +473,13 @@ function ensureStyles() {
 }
 
 function valuesFromDom(node, fields = null) {
-	const parsedFields = fields || parseTemplate(getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE));
+	const parsedFields = fields || parseTemplate(activeTemplateForNode(node));
 	const values = safeJsonParse(getWidgetValue(node, VALUES_WIDGET, "{}"), {});
-	const result = values && typeof values === "object" && !Array.isArray(values) ? { ...values } : {};
+	const stored = values && typeof values === "object" && !Array.isArray(values) ? values : {};
+	const result = {};
 	for (const field of parsedFields) {
 		if (isChoiceField(field)) {
-			result[field.key] = choiceSelections(field, result);
+			result[field.key] = choiceSelections(field, stored);
 			continue;
 		}
 		const widget = getWidget(node, field.inputName);
@@ -422,11 +487,40 @@ function valuesFromDom(node, fields = null) {
 			const widgetValue = String(widget.value ?? "");
 			result[field.key] = widgetValue || String(field.defaultValue ?? "");
 		}
-		else if (field.expr && field.expr in result) result[field.key] = result[field.expr];
-		else if (field.expr && slugKey(field.expr) in result) result[field.key] = result[slugKey(field.expr)];
+		else if (field.expr && field.expr in stored) result[field.key] = stored[field.expr];
+		else if (field.expr && slugKey(field.expr) in stored) result[field.key] = stored[slugKey(field.expr)];
+		else if (field.label && field.label in stored) result[field.key] = stored[field.label];
+		else if (field.outputLabel && field.outputLabel in stored) result[field.key] = stored[field.outputLabel];
+		else if (field.key in stored) result[field.key] = stored[field.key];
 		else if (!(field.key in result)) result[field.key] = String(field.defaultValue ?? "");
 	}
 	return result;
+}
+
+function defaultValuesForFields(fields) {
+	const result = {};
+	for (const field of fields || []) {
+		if (isChoiceField(field)) {
+			const fallback = String(field.defaultValue ?? field.options?.[0] ?? "").trim();
+			result[field.key] = fallback ? [fallback] : [];
+		} else {
+			result[field.key] = String(field.defaultValue ?? "");
+		}
+	}
+	return result;
+}
+
+function resetStateForTemplate(node, template, fields, saveTemplate) {
+	const values = defaultValuesForFields(fields);
+	saveState(node, template, fields, values, {}, { saveTemplate });
+	for (const field of bindableFields(fields)) {
+		const widget = getWidget(node, field.inputName);
+		if (!widget) continue;
+		widget.value = String(values[field.key] ?? "");
+		if (widget.inputEl) widget.inputEl.value = widget.value;
+		if (widget.element && "value" in widget.element) widget.element.value = widget.value;
+	}
+	return values;
 }
 
 function bindingsForNode(node) {
@@ -434,26 +528,52 @@ function bindingsForNode(node) {
 	return bindings && typeof bindings === "object" && !Array.isArray(bindings) ? bindings : {};
 }
 
-function saveState(node, template, fields, values, bindings = null) {
-	setWidgetValue(node, TEMPLATE_WIDGET, template || DEFAULT_TEMPLATE);
+function saveState(node, template, fields, values, bindings = null, options = {}) {
+	const saveTemplate = options.saveTemplate !== false;
+	if (saveTemplate) setWidgetValue(node, TEMPLATE_WIDGET, template || DEFAULT_TEMPLATE);
 	setWidgetValue(node, VALUES_WIDGET, JSON.stringify(values || {}, null, 2));
 	if (bindings) setWidgetValue(node, BINDINGS_WIDGET, JSON.stringify(bindings, null, 2));
 	setWidgetValue(node, SCHEMA_WIDGET, JSON.stringify(fields, null, 2));
 	node.properties = node.properties || {};
-	node.properties.gjj_template_prompt_template = template || DEFAULT_TEMPLATE;
+	if (saveTemplate) node.properties.gjj_template_prompt_template = template || DEFAULT_TEMPLATE;
 	node.properties.gjj_template_prompt_values = values || {};
 	node.properties.gjj_template_prompt_bindings = bindings || bindingsForNode(node);
 	node.properties.gjj_template_prompt_fields = fields;
 }
 
 function inputHasLink(input) {
-	return input?.link != null || (Array.isArray(input?.link) && input.link.length > 0);
+	return Array.isArray(input?.link) ? input.link.length > 0 : input?.link != null;
+}
+
+function graphLinks(node) {
+	return node?.graph?.links || app.graph?.links || null;
+}
+
+function linkId(link) {
+	return Array.isArray(link) ? link[0] : link?.id;
+}
+
+function linkOriginId(link) {
+	return Array.isArray(link) ? link[1] : link?.origin_id;
+}
+
+function linkOriginSlot(link) {
+	return Array.isArray(link) ? link[2] : link?.origin_slot;
+}
+
+function linkTargetId(link) {
+	return Array.isArray(link) ? link[3] : link?.target_id;
+}
+
+function linkTargetSlot(link) {
+	return Array.isArray(link) ? link[4] : link?.target_slot;
 }
 
 function getGraphLink(node, linkId) {
-	const links = node?.graph?.links || app.graph?.links;
+	const links = graphLinks(node);
 	if (!links || linkId == null) return null;
 	if (Array.isArray(links)) return links.find((link) => String(link?.id ?? link?.[0]) === String(linkId)) || null;
+	if (links instanceof Map) return links.get(linkId) || links.get(String(linkId)) || null;
 	return links[linkId] || links[String(linkId)] || null;
 }
 
@@ -465,6 +585,31 @@ function getGraphNodeById(graph, id) {
 	return graph?.getNodeById?.(Number(id)) || graph?._nodes?.find((node) => String(node?.id) === String(id)) || null;
 }
 
+function externalTemplateText(node) {
+	const input = externalTemplateInput(node);
+	if (!inputHasLink(input)) return "";
+	const link = getGraphLink(node, Array.isArray(input.link) ? input.link[0] : input.link);
+	const origin = getGraphNodeById(node?.graph || app.graph, linkOriginId(link));
+	if (!origin) return "";
+	const selector = globalThis.GJJ_PromptTemplateSelector;
+	if (nodeType(origin) === "GJJ_PromptTemplateSelector" && selector?.selectedTemplateBody) {
+		return String(selector.selectedTemplateBody(origin) || "");
+	}
+	return "";
+}
+
+function activeTemplateForNode(node) {
+	if (externalTemplateLinked(node)) {
+		const external = externalTemplateText(node).trim();
+		if (external) return external;
+	}
+	return getWidgetValue(node, TEMPLATE_WIDGET, node?.properties?.gjj_template_prompt_template || DEFAULT_TEMPLATE);
+}
+
+function shouldSaveInternalTemplate(node) {
+	return !externalTemplateLinked(node);
+}
+
 function disconnectInput(node, index) {
 	try {
 		if (typeof node.disconnectInput === "function") node.disconnectInput(index);
@@ -472,16 +617,35 @@ function disconnectInput(node, index) {
 	} catch (_) {}
 }
 
-function removeInputByName(node, name) {
-	const index = node.inputs?.findIndex((input) => input?.name === name) ?? -1;
+function removeInputAtIndex(node, index) {
 	if (index < 0) return;
 	disconnectInput(node, index);
 	try { node.removeInput?.(index); }
 	catch (_) { node.inputs?.splice?.(index, 1); }
 }
 
+function removeInputByName(node, name) {
+	const index = node.inputs?.findIndex((input) => input?.name === name) ?? -1;
+	removeInputAtIndex(node, index);
+}
+
+function syncInputLinksFromGraph(node) {
+	if (!Array.isArray(node?.inputs)) return;
+	const links = graphLinks(node);
+	if (!links) return;
+	const entries = links instanceof Map ? [...links.values()] : Array.isArray(links) ? links : Object.values(links);
+	for (const input of node.inputs) {
+		if (Array.isArray(input?.link) && input.link.length) continue;
+		if (!Array.isArray(input?.link) && input?.link != null) continue;
+		const index = node.inputs.indexOf(input);
+		const link = entries.find((item) => String(linkTargetId(item)) === String(node.id) && Number(linkTargetSlot(item)) === index);
+		if (link) input.link = linkId(link);
+	}
+}
+
 function repairInputLinkSlots(node) {
 	if (!Array.isArray(node?.inputs)) return;
+	syncInputLinksFromGraph(node);
 	for (let index = 0; index < node.inputs.length; index += 1) {
 		const input = node.inputs[index];
 		const link = getGraphLink(node, input?.link);
@@ -498,6 +662,44 @@ function repairInputLinkSlots(node) {
 	}
 }
 
+function ensureExternalTemplateInput(node) {
+	let input = externalTemplateInput(node);
+	if (!input) {
+		node.addInput?.(EXTERNAL_TEMPLATE_INPUT, "GJJ_PROMPT");
+		input = externalTemplateInput(node);
+	}
+	if (!input) return null;
+	input.type = "GJJ_PROMPT";
+	input.label = "外接模板";
+	input.localized_name = "外接模板";
+	input.display_name = "外接模板";
+	input.tooltip = "可选。连接后优先使用外部模板，并隐藏节点内部设置和按钮；断开后恢复。";
+	input.hidden = false;
+	input.visible = true;
+	delete input.widget;
+	delete input.widget_name;
+	input.forceInput = true;
+	return input;
+}
+
+function ensureExternalTemplateInputLast(node) {
+	const input = ensureExternalTemplateInput(node);
+	if (!input || !Array.isArray(node?.inputs)) return input;
+	const currentIndex = node.inputs.indexOf(input);
+	if (currentIndex >= 0 && currentIndex !== node.inputs.length - 1 && !inputHasLink(input)) {
+		node.inputs.splice(currentIndex, 1);
+		node.inputs.push(input);
+	}
+	return input;
+}
+
+function setExternalTemplateMode(node, enabled) {
+	const root = node?.__gjjTemplatePromptRoot;
+	if (root) root.classList.toggle("external-template-linked", !!enabled);
+	if (node?.__gjjTemplatePromptPanel && enabled) node.__gjjTemplatePromptPanel.style.display = "none";
+	if (enabled) closeParamPopup();
+}
+
 function sourceLabelForBinding(node, name) {
 	const options = globalThis.GJJ_VariableBroadcast?.getVisibleSetOptions?.(node?.graph) || [];
 	const found = options.find((item) => item.value === name);
@@ -507,10 +709,13 @@ function sourceLabelForBinding(node, name) {
 function renderRows(node) {
 	const rows = node?.__gjjTemplatePromptRows;
 	if (!rows) return;
-	const template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
+	const externalMode = externalTemplateLinked(node);
+	setExternalTemplateMode(node, externalMode);
+	const template = activeTemplateForNode(node);
 	const fields = parseTemplate(template);
 	const values = valuesFromDom(node, fields);
 	const bindings = bindingsForNode(node);
+	const saveOptions = { saveTemplate: !externalMode };
 	const bindableKeys = new Set(bindableFields(fields).map((field) => field.key));
 	for (const key of Object.keys(bindings)) {
 		if (!bindableKeys.has(key)) delete bindings[key];
@@ -544,7 +749,7 @@ function renderRows(node) {
 			const saveChoiceValues = (selection) => {
 				const nextValues = valuesFromDom(node, fields);
 				nextValues[field.key] = selection;
-				saveState(node, template, fields, nextValues, bindingsForNode(node));
+				saveState(node, template, fields, nextValues, bindingsForNode(node), saveOptions);
 				renderRows(node);
 			};
 			row.appendChild(label);
@@ -581,7 +786,7 @@ function renderRows(node) {
 					event.stopPropagation();
 					const nextValues = valuesFromDom(node, fields);
 					nextValues[field.key] = updateChoiceSelection(field, nextValues, option, event.ctrlKey || event.shiftKey);
-					saveState(node, template, fields, nextValues, bindingsForNode(node));
+					saveState(node, template, fields, nextValues, bindingsForNode(node), saveOptions);
 					renderRows(node);
 				});
 				row.appendChild(btn);
@@ -600,7 +805,7 @@ function renderRows(node) {
 				event.stopPropagation();
 				const next = bindingsForNode(node);
 				delete next[field.key];
-				saveState(node, template, fields, valuesFromDom(node, fields), next);
+				saveState(node, template, fields, valuesFromDom(node, fields), next, saveOptions);
 				stabilizeNode(node);
 			});
 			bound.append(text, clear);
@@ -626,11 +831,12 @@ function renderRows(node) {
 		batchButton.textContent = "🚀批量";
 		batchButton.title = choiceCount > 0 ? `按已选按钮组合逐条加入队列：${Math.max(1, comboCount)} 条` : "模板中没有按钮组选项";
 	}
-	saveState(node, template, fields, values, bindings);
+	saveState(node, template, fields, values, bindings, saveOptions);
 	refreshNode(node);
 }
 
 function ensureInputs(node, fields) {
+	ensureExternalTemplateInputLast(node);
 	const keep = fieldNames(fields);
 	const bindings = bindingsForNode(node);
 	const values = valuesFromDom(node, fields);
@@ -638,10 +844,8 @@ function ensureInputs(node, fields) {
 		const input = node.inputs[index];
 		const name = String(input?.name || "");
 		if (!name.startsWith("param_")) continue;
-		const boundField = fields.find((field) => field.inputName === name && bindings[field.key]);
-		if (!keep.has(name) || boundField) {
-			removeInputByName(node, name);
-		}
+		const field = fields.find((item) => item.inputName === name);
+		if (!keep.has(name) || (field && bindings[field.key])) removeInputByName(node, name);
 	}
 	for (const widget of [...(node.widgets || [])]) {
 		const name = String(widget?.name || "");
@@ -651,7 +855,6 @@ function ensureInputs(node, fields) {
 	}
 	for (const field of bindableFields(fields)) {
 		if (bindings[field.key]) {
-			removeInputByName(node, field.inputName);
 			removeWidgetByName(node, field.inputName);
 			continue;
 		}
@@ -674,32 +877,42 @@ function ensureInputs(node, fields) {
 			delete input.forceInput;
 		}
 	}
-	node.inputs = [
-		...(node.inputs || []).filter((input) => !String(input?.name || "").startsWith("param_")),
-		...bindableFields(fields).map((field) => node.inputs?.find((input) => input?.name === field.inputName)).filter(Boolean),
-	];
 	repairInputLinkSlots(node);
+	ensureExternalTemplateInputLast(node);
 }
 
 function refreshNode(node, force = false) {
 	if (!node) return;
 	const widget = node.__gjjTemplatePromptDomWidget;
 	const root = node.__gjjTemplatePromptRoot;
+	const contentHeight = templatePromptContentHeight(node);
 	if (widget && root) {
+		resetDomElementSize(widget.element);
+		resetDomElementSize(widget.inputEl);
 		widget.computeSize = (width) => [Math.round(Number(width || currentNodeWidth(node))), domHeight(node)];
 		widget.getHeight = () => domHeight(node);
 	}
 	const width = currentNodeWidth(node);
-	const height = Math.round(Math.max(MIN_HEIGHT, Math.ceil(root?.scrollHeight || MIN_HEIGHT) + paramWidgetsHeight(node) + 8));
+	const minHeight = MIN_HEIGHT;
+	const height = Math.round(Math.max(minHeight, contentHeight + paramWidgetsHeight(node) + 8));
+	invalidateWidgetLayout(node);
 	if (force || Math.abs(Number(node.size?.[1] || 0) - height) > 2) {
 		node.__gjjTemplatePromptSizing = true;
 		try { node.setSize?.([width, height]); } finally { requestAnimationFrame(() => { node.__gjjTemplatePromptSizing = false; }); }
 	}
 	setDirty(node);
+	if (!node.__gjjTemplatePromptRefreshFrame) {
+		node.__gjjTemplatePromptRefreshFrame = requestAnimationFrame(() => {
+			node.__gjjTemplatePromptRefreshFrame = null;
+			resetDomElementSize(root);
+			invalidateWidgetLayout(node);
+			setDirty(node);
+		});
+	}
 }
 
 function domHeight(node) {
-	return Math.round(Math.max(36, Math.ceil(node?.__gjjTemplatePromptRoot?.scrollHeight || 36) + 4));
+	return Math.round(Math.max(4, templatePromptContentHeight(node)));
 }
 
 function paramWidgetsHeight(node) {
@@ -778,8 +991,8 @@ function resolveLocalTemplateParamsSource(graph, name) {
 			const input = source.inputs?.find((item) => item?.name === field.inputName);
 			const link = getGraphLink(source, input?.link);
 			if (link) {
-				const originId = Array.isArray(link) ? link[1] : link.origin_id;
-				const originSlot = Array.isArray(link) ? link[2] : link.origin_slot;
+				const originId = linkOriginId(link);
+				const originSlot = linkOriginSlot(link);
 				return [String(originId), Number(originSlot || 0)];
 			}
 			return [String(source.id), Number(field.outputIndex || 0)];
@@ -796,7 +1009,7 @@ function resolveBindingSource(graph, name) {
 
 function openParamPopup(node, event) {
 	closeParamPopup();
-	const fields = bindableFields(parseTemplate(getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE)));
+	const fields = bindableFields(parseTemplate(activeTemplateForNode(node)));
 	const options = getVariableOptions(node);
 	const bindings = bindingsForNode(node);
 	const popup = document.createElement("div");
@@ -860,7 +1073,8 @@ function openParamPopup(node, event) {
 	let selectedFieldKey = firstUnmatchedField?.key || fields[0]?.key || "";
 
 	function commit(nextBindings) {
-		saveState(node, getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE), fields, valuesFromDom(node, fields), nextBindings);
+		const template = activeTemplateForNode(node);
+		saveState(node, template, fields, valuesFromDom(node, fields), nextBindings, { saveTemplate: shouldSaveInternalTemplate(node) });
 		stabilizeNode(node);
 	}
 
@@ -1056,7 +1270,7 @@ async function queueCurrentWorkflowOnce() {
 }
 
 async function queueChoiceBatchPrompts(node, button) {
-	const template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
+	const template = activeTemplateForNode(node);
 	const fields = parseTemplate(template);
 	const choices = choiceFields(fields);
 	if (!choices.length) return 0;
@@ -1080,7 +1294,7 @@ async function queueChoiceBatchPrompts(node, button) {
 	try {
 		for (const combination of combinations) {
 			const nextValues = { ...originalValues, ...combination };
-			saveState(node, template, fields, nextValues, originalBindings);
+			saveState(node, template, fields, nextValues, originalBindings, { saveTemplate: shouldSaveInternalTemplate(node) });
 			await queueCurrentWorkflowOnce();
 			queued += 1;
 			if (button) {
@@ -1090,7 +1304,7 @@ async function queueChoiceBatchPrompts(node, button) {
 		}
 		return queued;
 	} finally {
-		saveState(node, template, fields, originalValues, originalBindings);
+		saveState(node, template, fields, originalValues, originalBindings, { saveTemplate: shouldSaveInternalTemplate(node) });
 		node.__gjjTemplatePromptBatchBusy = false;
 		renderRows(node);
 	}
@@ -1127,7 +1341,7 @@ function buildDom(node) {
 	const textarea = document.createElement("textarea");
 	textarea.className = "gjj-template-prompt-template";
 	textarea.value = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE) || DEFAULT_TEMPLATE;
-	textarea.placeholder = "在这里写模板，例如：一张{{主体}}照片，{{背景(白色)}}背景，{{风格：真实,影视}}";
+	textarea.placeholder = "在这里写模板，例如：一张{{主体}}照片，{{背景(白色)}}背景，{{风格:真实,影视}}";
 	const actions = document.createElement("div");
 	actions.className = "gjj-template-prompt-actions";
 	const cancel = document.createElement("button");
@@ -1222,6 +1436,7 @@ function buildDom(node) {
 	node.__gjjTemplatePromptRows = rows;
 	node.__gjjTemplatePromptCount = count;
 	node.__gjjTemplatePromptBatchButton = batch;
+	node.__gjjTemplatePromptPanel = panel;
 	return root;
 }
 
@@ -1248,7 +1463,12 @@ function stabilizeNode(node) {
 		if (!getWidgetValue(node, TEMPLATE_WIDGET, "")) setWidgetValue(node, TEMPLATE_WIDGET, node.properties?.gjj_template_prompt_template || DEFAULT_TEMPLATE);
 		if (!getWidgetValue(node, VALUES_WIDGET, "")) setWidgetValue(node, VALUES_WIDGET, JSON.stringify(node.properties?.gjj_template_prompt_values || {}, null, 2));
 		if (!getWidgetValue(node, BINDINGS_WIDGET, "")) setWidgetValue(node, BINDINGS_WIDGET, JSON.stringify(node.properties?.gjj_template_prompt_bindings || {}, null, 2));
-		const fields = parseTemplate(getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE));
+		const fields = parseTemplate(activeTemplateForNode(node));
+		const template = activeTemplateForNode(node);
+		const previousTemplate = node.__gjjTemplatePromptActiveTemplate;
+		const templateChanged = previousTemplate !== undefined && previousTemplate !== template;
+		node.__gjjTemplatePromptActiveTemplate = template;
+		if (templateChanged) resetStateForTemplate(node, template, fields, shouldSaveInternalTemplate(node));
 		ensureInputs(node, fields);
 		renderRows(node);
 		loadDefaultTemplate(node);
@@ -1268,7 +1488,7 @@ function patchPromptBindings(promptResult, graph) {
 	for (const [nodeId, nodeInfo] of Object.entries(output)) {
 		const node = graph.getNodeById?.(Number(nodeId)) || graph._nodes?.find((item) => String(item?.id) === String(nodeId));
 		if (!node || node.type !== TARGET_NODE) continue;
-		const fields = parseTemplate(getWidgetValue(node, TEMPLATE_WIDGET, node.properties?.gjj_template_prompt_template || DEFAULT_TEMPLATE));
+		const fields = parseTemplate(activeTemplateForNode(node));
 		const bindings = bindingsForNode(node);
 		nodeInfo.inputs = nodeInfo.inputs || {};
 		for (const field of fields) {
@@ -1303,6 +1523,12 @@ function installPromptPatch() {
 	}
 }
 
+function refreshAllTemplatePrompts() {
+	for (const node of app.graph?._nodes || []) {
+		if (node?.type === TARGET_NODE || node?.comfyClass === TARGET_NODE) scheduleStabilize(node, 0);
+	}
+}
+
 app.registerExtension({
 	name: "Comfy.GJJ.TemplatePrompt",
 	beforeRegisterNodeDef(nodeType, nodeData) {
@@ -1323,16 +1549,19 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
 			const result = originalOnConfigure?.apply(this, [serializedNode, ...args]);
 			const props = serializedNode?.properties || this.properties || {};
-			if (props.gjj_template_prompt_template) setTimeout(() => setWidgetValue(this, TEMPLATE_WIDGET, props.gjj_template_prompt_template), 0);
-			if (props.gjj_template_prompt_values !== undefined) setTimeout(() => setWidgetValue(this, VALUES_WIDGET, JSON.stringify(props.gjj_template_prompt_values || {}, null, 2)), 0);
-			if (props.gjj_template_prompt_bindings !== undefined) setTimeout(() => setWidgetValue(this, BINDINGS_WIDGET, JSON.stringify(props.gjj_template_prompt_bindings || {}, null, 2)), 0);
+			if (props.gjj_template_prompt_template) setWidgetValue(this, TEMPLATE_WIDGET, props.gjj_template_prompt_template);
+			if (props.gjj_template_prompt_values !== undefined) setWidgetValue(this, VALUES_WIDGET, JSON.stringify(props.gjj_template_prompt_values || {}, null, 2));
+			if (props.gjj_template_prompt_bindings !== undefined) setWidgetValue(this, BINDINGS_WIDGET, JSON.stringify(props.gjj_template_prompt_bindings || {}, null, 2));
+			if (Array.isArray(props.gjj_template_prompt_fields)) setWidgetValue(this, SCHEMA_WIDGET, JSON.stringify(props.gjj_template_prompt_fields, null, 2));
 			scheduleStabilize(this, 0);
+			setTimeout(() => stabilizeNode(this), 80);
 			return result;
 		};
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode) {
-			const fields = parseTemplate(getWidgetValue(this, TEMPLATE_WIDGET, DEFAULT_TEMPLATE));
-			saveState(this, getWidgetValue(this, TEMPLATE_WIDGET, DEFAULT_TEMPLATE), fields, valuesFromDom(this, fields), bindingsForNode(this));
+			const template = activeTemplateForNode(this);
+			const fields = parseTemplate(template);
+			saveState(this, template, fields, valuesFromDom(this, fields), bindingsForNode(this), { saveTemplate: shouldSaveInternalTemplate(this) });
 			const result = originalOnSerialize?.apply(this, [serializedNode]);
 			if (serializedNode) {
 				serializedNode.properties = serializedNode.properties || {};
@@ -1366,4 +1595,9 @@ if (!window.__gjjTemplatePromptPopupCloser) {
 	document.addEventListener("pointerdown", (event) => {
 		if (activeParamPopup && !activeParamPopup.contains(event.target)) closeParamPopup();
 	});
+}
+
+if (!window.__gjjTemplatePromptSelectorListener) {
+	window.__gjjTemplatePromptSelectorListener = true;
+	window.addEventListener("gjj-prompt-template-selector-changed", refreshAllTemplatePrompts);
 }

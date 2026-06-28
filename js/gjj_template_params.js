@@ -1504,6 +1504,7 @@ function splitEnumOptions(inner) {
 	const options = [];
 	let escaped = false;
 	let quote = "";
+	let depth = 0;
 	let current = "";
 	for (const ch of String(inner || "")) {
 		if (escaped) {
@@ -1525,7 +1526,9 @@ function splitEnumOptions(inner) {
 				continue;
 			}
 		}
-		if ((ch === "," || ch === "，" || ch === "、" || ch === "|") && !quote) {
+		if (!quote && "([{（｛【".includes(ch)) depth += 1;
+		if (!quote && ")]}）｝】".includes(ch)) depth = Math.max(0, depth - 1);
+		if ((ch === "," || ch === "，" || ch === "、" || ch === "|") && !quote && depth === 0) {
 			const option = stripQuotes(current);
 			if (option) options.push(option);
 			current = "";
@@ -1578,8 +1581,10 @@ function selectedPromptGroupLines(fields, values) {
 			const group = byKey.get(String(key || ""));
 			if (!group) continue;
 			const rawValue = values?.[group.key] ?? values?.[group.label] ?? group.default ?? "";
-			const selected = normalizeEnumValue(group, rawValue);
-			if (group.label && selected) lines.push(`${group.label}：${selected}`);
+			const selected = normalizeEnumSelection(group, rawValue);
+			for (const item of selected) {
+				if (group.label && item) lines.push(`${group.label}：${item}`);
+			}
 		}
 	}
 	return lines;
@@ -1645,6 +1650,59 @@ function normalizeEnumValue(field, value) {
 	const text = String(value ?? "").trim();
 	const matched = options.find((item) => text === optionValue(item) || text === optionLabel(item));
 	return matched ? optionValue(matched) : fallback;
+}
+
+function normalizeEnumSelection(field, value) {
+	const options = Array.isArray(field?.options) ? field.options : [];
+	const fallback = optionValue(options[0] || "");
+	const rawItems = [];
+	if (Array.isArray(value)) {
+		rawItems.push(...value);
+	} else if (typeof value === "string") {
+		const text = value.trim();
+		const exact = options.find((option) => text === optionValue(option) || text === optionLabel(option));
+		if (exact) {
+			rawItems.push(text);
+		} else if (text.startsWith("[") && text.endsWith("]")) {
+			try {
+				const parsed = JSON.parse(text);
+				if (Array.isArray(parsed)) rawItems.push(...parsed);
+				else rawItems.push(value);
+			} catch (_) {
+				rawItems.push(value);
+			}
+		} else {
+			rawItems.push(value);
+		}
+	} else {
+		rawItems.push(value);
+	}
+	const result = [];
+	for (const item of rawItems) {
+		const text = String(item ?? "").trim();
+		const matched = options.find((option) => text === optionValue(option) || text === optionLabel(option));
+		const valueText = matched ? optionValue(matched) : "";
+		if (valueText && !result.includes(valueText)) result.push(valueText);
+	}
+	return result.length ? result : (fallback ? [fallback] : []);
+}
+
+function enumStoredValue(selected) {
+	const values = Array.isArray(selected) ? selected.filter((item) => String(item ?? "").trim()) : [];
+	return values.length > 1 ? values : (values[0] || "");
+}
+
+function enumValueOutputsList(field, value) {
+	const selected = normalizeEnumSelection(field, value);
+	return selected.length > 1 || selected.some((item) => {
+		const text = String(item ?? "").trim();
+		if (!text.startsWith("[") || !text.endsWith("]")) return false;
+		try {
+			return Array.isArray(JSON.parse(text));
+		} catch (_) {
+			return false;
+		}
+	});
 }
 
 function parseEnumOptions(defaultText, tooltip = "") {
@@ -1761,7 +1819,7 @@ function parseTemplate(template) {
 			broadcast_key: "",
 			broadcast_keys: [],
 			default: optionValue(group.options[0]),
-			tooltip: group.tooltip || "同一分组内选择一个选项；提示词输出会自动附加“名称：选项”。",
+			tooltip: group.tooltip || "普通点击单选，Ctrl/Shift 点击多选；提示词输出会自动附加“名称：选项”。",
 			socket_type: "",
 			type: "ENUM",
 			options: group.options,
@@ -2158,6 +2216,11 @@ function updateOutputs(node, fields, values) {
 	}
 	const enabledFields = fields;
 	const previousOutputs = Array.isArray(node.outputs) ? [...node.outputs] : [];
+	if (!enabledFields.length && previousOutputs.length) {
+		repairOutputLinkSlots(node);
+		refreshNode(node);
+		return;
+	}
 	const previous = { outputs: previousOutputs, ...collectPreviousOutputs(previousOutputs) };
 	const usedPreviousOutputs = new Set();
 	const nextOutputs = [];
@@ -2170,7 +2233,9 @@ function updateOutputs(node, fields, values) {
 		// 输出类型必须按“当前输入文本”实时推断。
 		// JS 的 Number.isInteger(5.0) 会返回 true，所以 5.0 不能只看 parsed number。
 		const nextType = field.type === "ENUM"
-			? (enumOutputsNumber(field) ? "INT,FLOAT,STRING" : "COMBO")
+			? (field.socket_type
+				? normalizeSocketType(field.socket_type)
+				: (enumValueOutputsList(field, rawValue) ? "*" : (enumOutputsNumber(field) ? "INT,FLOAT,STRING" : "COMBO,STRING")))
 			: (field.socket_type ? normalizeSocketType(field.socket_type) : inferTypeFromRaw(rawValue, value));
 		output.name = field.label || `输出${i + 1}`;
 		output.label = output.name;
@@ -2197,18 +2262,23 @@ function updateOutputs(node, fields, values) {
 	}
 	const kept = new Set(nextOutputs);
 	for (const output of previousOutputs) {
-		if (!kept.has(output)) removeOutputLinks(node, output);
+		if (!kept.has(output) && !(Array.isArray(output?.links) && output.links.length)) removeOutputLinks(node, output);
 	}
-	node.outputs = nextOutputs;
+	node.outputs = [
+		...nextOutputs,
+		...previousOutputs.filter((output) => !kept.has(output) && Array.isArray(output?.links) && output.links.length),
+	];
 	repairOutputLinkSlots(node);
 	refreshNode(node);
 }
 
 function displayValueForField(field, rawValue) {
 	if (field?.type === "ENUM") {
-		const normalized = normalizeEnumValue(field, rawValue);
-		const option = (Array.isArray(field.options) ? field.options : []).find((item) => normalized === optionValue(item));
-		return option ? `${optionLabel(option)} (${optionValue(option)})` : normalized;
+		const selected = normalizeEnumSelection(field, rawValue);
+		return selected.map((value) => {
+			const option = (Array.isArray(field.options) ? field.options : []).find((item) => value === optionValue(item));
+			return option ? `${optionLabel(option)} (${optionValue(option)})` : value;
+		}).join(" + ");
 	}
 	if (field?.type === "BOOLEAN") {
 		const enabled = parseValue(rawValue) === true;
@@ -2302,28 +2372,39 @@ function buildEnumSelectForField(node, field, values) {
 	if (!options.length) return null;
 
 	const wrap = document.createElement("div");
-	wrap.className = "gjj-template-param-row";
+	wrap.className = "gjj-template-param-row gjj-template-param-row-enum-flow";
 
 	const label = buildFieldLabel(node, field, "ENUM");
 
 	const box = document.createElement("div");
 	box.className = "gjj-template-param-enum";
-	box.title = field.tooltip || "枚举参数：点击选择输出值";
+	box.title = field.tooltip || "枚举参数：点击单选，Ctrl/Shift 点击多选";
 
-	const normalizeCurrent = (value) => normalizeEnumValue(field, value);
-	values[field.key] = normalizeCurrent(values[field.key] ?? field.default ?? optionValue(options[0] || ""));
+	const normalizeCurrent = (value) => normalizeEnumSelection(field, value);
+	values[field.key] = enumStoredValue(normalizeCurrent(values[field.key] ?? field.default ?? optionValue(options[0] || "")));
 
 	const buttons = [];
 	const sync = () => {
 		const current = normalizeCurrent(values[field.key]);
-		values[field.key] = current;
+		values[field.key] = enumStoredValue(current);
 		for (const button of buttons) {
-			button.dataset.value = button.dataset.optionValue === current ? "true" : "false";
-			button.classList.toggle("active", button.dataset.optionValue === current);
+			const active = current.includes(button.dataset.optionValue);
+			button.dataset.value = active ? "true" : "false";
+			button.classList.toggle("active", active);
+			button.setAttribute("aria-pressed", String(active));
 		}
 	};
-	const commit = (nextValue) => {
-		values[field.key] = normalizeCurrent(nextValue);
+	const commit = (nextValue, additive = false) => {
+		let selected = additive ? normalizeCurrent(values[field.key]) : [];
+		if (additive) {
+			selected = selected.includes(nextValue)
+				? selected.filter((item) => item !== nextValue)
+				: [...selected, nextValue];
+		} else {
+			selected = [nextValue];
+		}
+		if (!selected.length) selected = [nextValue];
+		values[field.key] = enumStoredValue(normalizeCurrent(selected));
 		sync();
 		const template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
 		const fields = parseTemplate(template);
@@ -2337,13 +2418,13 @@ function buildEnumSelectForField(node, field, values) {
 		button.className = "gjj-template-param-enum-button";
 		button.textContent = optionLabel(option);
 		button.dataset.optionValue = optionValue(option);
-		button.title = `${optionLabel(option)} → ${optionValue(option)}`;
+		button.title = `${optionLabel(option)} → ${optionValue(option)}；点击单选，Ctrl/Shift 点击多选`;
 		button.addEventListener("pointerdown", (event) => event.stopPropagation());
 		button.addEventListener("mousedown", (event) => event.stopPropagation());
 		button.addEventListener("click", (event) => {
 			event.preventDefault();
 			event.stopPropagation();
-			commit(button.dataset.optionValue || "");
+			commit(button.dataset.optionValue || "", event.ctrlKey || event.shiftKey);
 		});
 		buttons.push(button);
 		box.appendChild(button);
@@ -2352,8 +2433,8 @@ function buildEnumSelectForField(node, field, values) {
 	wrap.append(label, box);
 	sync();
 	node.__gjjTemplateParamsRows.set(field.key, {
-		get value() { return normalizeCurrent(values[field.key]); },
-		set value(next) { values[field.key] = normalizeCurrent(next); sync(); },
+		get value() { return enumStoredValue(normalizeCurrent(values[field.key])); },
+		set value(next) { values[field.key] = enumStoredValue(normalizeCurrent(next)); sync(); },
 	});
 	return wrap;
 }
@@ -2383,7 +2464,7 @@ function buildCompactPromptGroupForField(node, field, values) {
 
 	const wrap = document.createElement("div");
 	wrap.className = "gjj-template-param-prompt-group";
-	wrap.title = field.tooltip || "同一分组内选择一个选项；会自动拼到提示词输出后面。";
+	wrap.title = field.tooltip || "点击单选，Ctrl/Shift 点击多选；会自动拼到提示词输出后面。";
 
 	const label = document.createElement("span");
 	label.className = "gjj-template-param-prompt-group-label";
@@ -2391,19 +2472,29 @@ function buildCompactPromptGroupForField(node, field, values) {
 	label.title = field.tooltip || label.textContent;
 
 	const buttons = [];
-	const normalizeCurrent = (value) => normalizeEnumValue(field, value);
-	values[field.key] = normalizeCurrent(values[field.key] ?? field.default ?? optionValue(options[0] || ""));
+	const normalizeCurrent = (value) => normalizeEnumSelection(field, value);
+	values[field.key] = enumStoredValue(normalizeCurrent(values[field.key] ?? field.default ?? optionValue(options[0] || "")));
 	const sync = () => {
 		const current = normalizeCurrent(values[field.key]);
-		values[field.key] = current;
+		values[field.key] = enumStoredValue(current);
 		for (const button of buttons) {
-			const active = button.dataset.optionValue === current;
+			const active = current.includes(button.dataset.optionValue);
 			button.dataset.value = active ? "true" : "false";
 			button.classList.toggle("active", active);
+			button.setAttribute("aria-pressed", String(active));
 		}
 	};
-	const commit = (nextValue) => {
-		values[field.key] = normalizeCurrent(nextValue);
+	const commit = (nextValue, additive = false) => {
+		let selected = additive ? normalizeCurrent(values[field.key]) : [];
+		if (additive) {
+			selected = selected.includes(nextValue)
+				? selected.filter((item) => item !== nextValue)
+				: [...selected, nextValue];
+		} else {
+			selected = [nextValue];
+		}
+		if (!selected.length) selected = [nextValue];
+		values[field.key] = enumStoredValue(normalizeCurrent(selected));
 		sync();
 		const template = getWidgetValue(node, TEMPLATE_WIDGET, DEFAULT_TEMPLATE);
 		const fields = parseTemplate(template);
@@ -2418,13 +2509,13 @@ function buildCompactPromptGroupForField(node, field, values) {
 		button.className = "gjj-template-param-enum-button gjj-template-param-prompt-group-button";
 		button.textContent = optionLabel(option);
 		button.dataset.optionValue = optionValue(option);
-		button.title = `${field.label || "选项"}：${optionLabel(option)}`;
+		button.title = `${field.label || "选项"}：${optionLabel(option)}；点击单选，Ctrl/Shift 点击多选`;
 		button.addEventListener("pointerdown", (event) => event.stopPropagation());
 		button.addEventListener("mousedown", (event) => event.stopPropagation());
 		button.addEventListener("click", (event) => {
 			event.preventDefault();
 			event.stopPropagation();
-			commit(button.dataset.optionValue || "");
+			commit(button.dataset.optionValue || "", event.ctrlKey || event.shiftKey);
 		});
 		buttons.push(button);
 		wrap.appendChild(button);
@@ -2432,8 +2523,8 @@ function buildCompactPromptGroupForField(node, field, values) {
 
 	sync();
 	node.__gjjTemplateParamsRows.set(field.key, {
-		get value() { return normalizeCurrent(values[field.key]); },
-		set value(next) { values[field.key] = normalizeCurrent(next); sync(); },
+		get value() { return enumStoredValue(normalizeCurrent(values[field.key])); },
+		set value(next) { values[field.key] = enumStoredValue(normalizeCurrent(next)); sync(); },
 	});
 	return wrap;
 }
@@ -2702,6 +2793,9 @@ function buildDom(node) {
 		.gjj-template-param-warning { display:none; padding:6px 8px; border:1px solid #8a5a08; border-radius:8px; background:#2a2111; color:#ffcf86; font-size:11px; line-height:1.45; white-space:pre-wrap; }
 		.gjj-template-param-rows { display:flex; flex-direction:column; gap:6px; }
 		.gjj-template-param-row { display:grid; grid-template-columns:74px minmax(0,1fr); gap:7px; align-items:center; }
+		.gjj-template-param-row-enum-flow { display:flex; flex-wrap:wrap; align-items:center; gap:6px 7px; }
+		.gjj-template-param-row-enum-flow .gjj-template-param-label { flex:0 0 auto; max-width:100%; align-self:center; }
+		.gjj-template-param-row-enum-flow .gjj-template-param-enum { display:contents; }
 		.gjj-template-param-row-full { grid-template-columns:1fr; gap:4px; align-items:stretch; }
 		.gjj-template-param-row-full .gjj-template-param-label { width:100%; }
 		.gjj-template-param-row-full > div { width:100%; }
@@ -2780,7 +2874,7 @@ function buildDom(node) {
 		"⚡ 默认关闭；开启后只广播写了 (变量名) 的字段，括号内只使用一个严格变量名。",
 		"🔌 控制本节点是否显示输出口；变量读取可不依赖输出口和广播开关。",
 		"布尔按钮：true{开启文案|关闭文案}；简写 {开启文案|关闭文案} 默认开启。",
-		"枚举按钮：[显示=输出值, 显示2=输出值2]；兼容 [显示(输出值), ...]。",
+		"枚举按钮：[显示=输出值, 显示2=输出值2]；普通点击单选，Ctrl/Shift 点击多选，多选会输出数组。",
 		"空行、整行 # 注释、.... 会被忽略；如果值里要写 #，请用 \\#，三引号内部可直接写 #。",
 	].join("\n");
 	const actions = document.createElement("div");

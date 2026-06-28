@@ -23,6 +23,8 @@ const MASK_TOOLTIP = "主图可选遮罩；存在时会走带 noise_mask 的局�
 
 const EXECUTE_BUTTON_NAME = "__gjj_execute_button";
 const IMAGE_PREVIEW_NAME = "__gjj_image_preview";
+const NATIVE_CANVAS_PREVIEW_WIDGET = "$$canvas-image-preview";
+const NATIVE_PREVIEW_WIDGET_PATTERN = /(?:preview|image|images|img|预览|图像|图片)/i;
 const LORA_CHAIN_CONFIG_INPUT = "lora_chain_config";
 const LORA_DATA_WIDGET_NAME = "lora_data";
 const KEEP_MODEL_WIDGET_NAME = "keep_model_loaded";
@@ -77,6 +79,32 @@ const KEEP_MODEL_BUTTON_STYLES = {
 };
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
 const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME, KEEP_MODEL_WIDGET_NAME]);
+const PROTECTED_WIDGET_NAMES = new Set([
+	EXECUTE_BUTTON_NAME,
+	IMAGE_PREVIEW_NAME,
+	BATCH_SOURCE_WIDGET,
+	MAIN_MASK_INPUT,
+	LORA_CHAIN_CONFIG_INPUT,
+	LORA_DATA_WIDGET_NAME,
+	KEEP_MODEL_WIDGET_NAME,
+	"prompt",
+	"negative_prompt",
+	"main_image_index",
+	"width",
+	"height",
+	"batch_size",
+	"unet_name",
+	"unet_dtype",
+	"clip_name1",
+	"vae_name",
+	"seed",
+	"steps",
+	"cfg",
+	"sampler_name",
+	"scheduler",
+	"denoise",
+	"grow_mask_by",
+]);
 const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "prompt", widget: "prompt", label: "提示词", type: "STRING", aliases: ["prompt", "positive", "正向", "提示词"] },
 	{ name: "width", widget: "width", label: "宽度", type: "INT", aliases: ["width", "宽", "宽度"] },
@@ -91,15 +119,156 @@ function clearNativePreview(node) {
 	if (!node) {
 		return;
 	}
-	node.imgs = null;
-	node.images = null;
+	suppressNativePreviewProperties(node);
+	node.imgs = [];
+	node.images = [];
+	node.image = null;
 	node.imageIndex = null;
 	node.overIndex = null;
-	node._imgs = null;
-	node._images = null;
-	node.imageRects = null;
-	node.animatedImages = null;
+	node._imgs = [];
+	node._images = [];
+	node.imageRects = [];
+	node.animatedImages = [];
 	node.preview = null;
+	node.previews = null;
+	node.hideOutputImages = true;
+	hideLegacyPreviewWidgets(node);
+	node?.graph?.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function hideNativeWidget(widget) {
+	if (!widget) {
+		return widget;
+	}
+	widget.type = "hidden";
+	widget.hidden = true;
+	widget.serialize = false;
+	widget.serializeValue = () => undefined;
+	widget.computeLayoutSize = () => ({ minHeight: 0, minWidth: 0 });
+	widget.computeSize = () => [0, 0];
+	widget.drawWidget = () => {};
+	widget.draw = () => {};
+	for (const key of ["element", "inputEl", "container", "dom", "root"]) {
+		const element = widget?.[key];
+		if (element?.style) {
+			element.style.display = "none";
+		}
+		if (typeof element?.remove === "function") {
+			element.remove();
+		}
+	}
+	return widget;
+}
+
+function isNativePreviewWidget(node, widget) {
+	if (!widget || widget === node?.__gjjImagePreviewWidget) {
+		return false;
+	}
+	const name = String(widget?.name || "");
+	if (PROTECTED_WIDGET_NAMES.has(name) || name.startsWith(IMAGE_PREFIX)) {
+		return false;
+	}
+	if (name === NATIVE_CANVAS_PREVIEW_WIDGET) {
+		return true;
+	}
+	const label = String(widget?.label || "");
+	const type = String(widget?.type || "");
+	const optionsType = String(widget?.options?.type || "");
+	const optionsName = String(widget?.options?.name || "");
+	const constructorName = String(widget?.constructor?.name || "");
+	const text = `${name} ${label} ${type} ${optionsType} ${optionsName} ${constructorName}`;
+	if (NATIVE_PREVIEW_WIDGET_PATTERN.test(text) && !/^(number|combo|text|string|customtext|toggle|boolean|slider)$/i.test(type)) {
+		return true;
+	}
+	for (const key of ["element", "inputEl", "container", "dom", "root"]) {
+		const element = widget?.[key];
+		if (typeof element?.querySelector === "function" && element.querySelector("img, canvas, video")) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function hideLegacyPreviewWidgets(node) {
+	if (!Array.isArray(node?.widgets)) {
+		return false;
+	}
+	let changed = false;
+	for (let index = node.widgets.length - 1; index >= 0; index--) {
+		const widget = node.widgets[index];
+		if (!isNativePreviewWidget(node, widget)) {
+			continue;
+		}
+		hideNativeWidget(widget);
+		node.widgets.splice(index, 1);
+		changed = true;
+	}
+	return changed;
+}
+
+function nativePreviewEmptyArray(node, key) {
+	if (!node.__gjjLazyNativeEmptyArrays) {
+		Object.defineProperty(node, "__gjjLazyNativeEmptyArrays", {
+			configurable: true,
+			enumerable: false,
+			writable: true,
+			value: {},
+		});
+	}
+	if (!Array.isArray(node.__gjjLazyNativeEmptyArrays[key])) {
+		node.__gjjLazyNativeEmptyArrays[key] = [];
+	}
+	node.__gjjLazyNativeEmptyArrays[key].length = 0;
+	return node.__gjjLazyNativeEmptyArrays[key];
+}
+
+function defineSuppressedNativePreviewProperty(node, key, emptyValue) {
+	const descriptor = Object.getOwnPropertyDescriptor(node, key);
+	if (descriptor?.get?.__gjjLazySuppressNativePreview) {
+		return;
+	}
+	const getter = function () {
+		return Array.isArray(emptyValue) ? nativePreviewEmptyArray(this, key) : emptyValue;
+	};
+	getter.__gjjLazySuppressNativePreview = true;
+	try {
+		Object.defineProperty(node, key, {
+			configurable: true,
+			enumerable: false,
+			get: getter,
+			set() {
+				if (Array.isArray(emptyValue)) {
+					nativePreviewEmptyArray(this, key);
+				}
+			},
+		});
+	} catch (_error) {
+		try {
+			node[key] = Array.isArray(emptyValue) ? [] : emptyValue;
+		} catch (_fallbackError) {}
+	}
+}
+
+function suppressNativePreviewProperties(node) {
+	if (!node) {
+		return;
+	}
+	defineSuppressedNativePreviewProperty(node, "imgs", []);
+	defineSuppressedNativePreviewProperty(node, "images", []);
+	defineSuppressedNativePreviewProperty(node, "_imgs", []);
+	defineSuppressedNativePreviewProperty(node, "_images", []);
+	defineSuppressedNativePreviewProperty(node, "imageRects", []);
+	defineSuppressedNativePreviewProperty(node, "animatedImages", []);
+	defineSuppressedNativePreviewProperty(node, "preview", null);
+	defineSuppressedNativePreviewProperty(node, "previews", null);
+	defineSuppressedNativePreviewProperty(node, "image", null);
+	defineSuppressedNativePreviewProperty(node, "imageIndex", null);
+	defineSuppressedNativePreviewProperty(node, "overIndex", null);
+	defineSuppressedNativePreviewProperty(node, "hideOutputImages", true);
+	if (node.constructor?.nodeData) {
+		node.constructor.nodeData.output_preview = false;
+	}
 }
 
 function scheduleNativePreviewClear(node) {
@@ -107,7 +276,7 @@ function scheduleNativePreviewClear(node) {
 	if (typeof requestAnimationFrame === "function") {
 		requestAnimationFrame(() => clearNativePreview(node));
 	}
-	for (const delay of [80, 180, 360, 720, 1400, 2400]) {
+	for (const delay of [80, 180, 360, 720, 1400, 2400, 4200, 6500]) {
 		setTimeout(() => clearNativePreview(node), delay);
 	}
 	clearInterval(node.__gjjNativePreviewClearInterval);
@@ -115,7 +284,7 @@ function scheduleNativePreviewClear(node) {
 	node.__gjjNativePreviewClearInterval = setInterval(() => {
 		clearNativePreview(node);
 		node?.graph?.setDirtyCanvas?.(true, true);
-		if (Date.now() - startedAt > 2600) {
+		if (Date.now() - startedAt > 7000) {
 			clearInterval(node.__gjjNativePreviewClearInterval);
 			node.__gjjNativePreviewClearInterval = null;
 		}
@@ -1620,6 +1789,7 @@ function createButtons(node) {
 	container.style.cssText = [
 		"display:flex",
 		"flex-direction:row",
+		"flex-wrap:wrap",
 		"gap:6px",
 		"width:100%",
 		"box-sizing:border-box",
@@ -1646,7 +1816,9 @@ function createButtons(node) {
 		"align-items:center",
 		"justify-content:center",
 		"gap:4px",
-		"white-space:nowrap",
+		"white-space:normal",
+		"line-height:1.15",
+		"text-align:center",
 		"min-width:0",
 	];
 	// 刷新Lora按钮
@@ -1659,7 +1831,7 @@ function createButtons(node) {
 		"border:1px solid #3b82f6",
 		"background:linear-gradient(135deg, #1e3a5f, #1e40af)",
 		"color:#e0e7ff",
-		"flex:1",
+		"flex:1 1 82px",
 	].join(";");
 
 	const translateButton = document.createElement("button");
@@ -1704,7 +1876,7 @@ function createButtons(node) {
 		"border:1px solid #10b981",
 		"background:linear-gradient(135deg, #064e3b, #059669)",
 		"color:#a7f3d0",
-		"flex:1",
+		"flex:1 1 82px",
 	].join(";");
 
 	const settingsButton = document.createElement("button");
@@ -1897,6 +2069,24 @@ function createButtons(node) {
 	container.appendChild(templateButton);
 	container.appendChild(settingsButton);
 	return container;
+}
+
+function lazyButtonsHeight(width) {
+	const availableWidth = Math.max(120, Number(width || 260));
+	const buttonWidths = [82, 34, 34, 82, 34, 74];
+	const gap = 6;
+	let rows = 1;
+	let rowWidth = 0;
+	for (const buttonWidth of buttonWidths) {
+		const nextWidth = rowWidth ? rowWidth + gap + buttonWidth : buttonWidth;
+		if (nextWidth > availableWidth && rowWidth) {
+			rows += 1;
+			rowWidth = buttonWidth;
+		} else {
+			rowWidth = nextWidth;
+		}
+	}
+	return rows * 32 + (rows - 1) * gap;
 }
 
 function createImagePreview(node) {
@@ -3071,6 +3261,11 @@ function stabilizeNode(node, forcePreset = false) {
 	if (!node.__gjjExecuteButtonWidget) {
 		const buttonsContainer = createButtons(node);
 		node.__gjjExecuteButtonWidget = node.addDOMWidget(EXECUTE_BUTTON_NAME, "HTML", buttonsContainer, { serialize: false });
+		node.__gjjExecuteButtonWidget.computeSize = (width) => [
+			Math.round(Number(width || node.size?.[0] || 260)),
+			lazyButtonsHeight(width || node.size?.[0]),
+		];
+		node.__gjjExecuteButtonWidget.getHeight = () => lazyButtonsHeight(node.size?.[0]);
 	}
 
 	setupLoraUi(node);
@@ -3143,11 +3338,22 @@ app.registerExtension({
 		}
 
 		nodeData.output_preview = false;
+		nodeType.prototype.hideOutputImages = true;
 		if (nodeData.outputs && Array.isArray(nodeData.outputs)) {
 			for (const output of nodeData.outputs) {
 				output.preview = false;
 			}
 		}
+
+		const originalAddCustomWidget = nodeType.prototype.addCustomWidget;
+		nodeType.prototype.addCustomWidget = function (widget, ...args) {
+			if (isNativePreviewWidget(this, widget)) {
+				return hideNativeWidget(widget);
+			}
+			return typeof originalAddCustomWidget === "function"
+				? originalAddCustomWidget.call(this, widget, ...args)
+				: widget;
+		};
 
 		const originalCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
@@ -3234,7 +3440,6 @@ app.registerExtension({
 			return undefined;
 		};
 
-		const originalExecuted = nodeType.prototype.onExecuted;
 		nodeType.prototype.onExecuted = function (message) {
 			let images = null;
 			if (message?.gjj_images) {
@@ -3271,7 +3476,7 @@ app.registerExtension({
 				: (Array.isArray(message?.ui?.effective_params) ? message.ui.effective_params[0] : null);
 			applyEffectiveParamsToPanel(this, effectiveParams, true);
 			updateTemplateSourcePanel(this, TEMPLATE_SOURCE_FIELDS);
-			return;
+			return undefined;
 		};
 	},
 

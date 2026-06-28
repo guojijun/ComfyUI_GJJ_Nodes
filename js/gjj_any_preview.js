@@ -1472,12 +1472,20 @@ function renameInputsSequentially(node) {
 }
 
 function resolveOutputMode(node) {
-	const firstLinked = getInputs(node).find((input) => input?.link);
+	const linkedInputs = getInputs(node).filter((input) => input?.link);
+	const firstLinked = linkedInputs[0];
 	const info = firstLinked ? getLinkedOutputInfo(firstLinked) : null;
+	if (linkedInputs.length > 1) {
+		return {
+			type: "*",
+			name: "透传输出",
+			tooltip: "多口输入时按端口顺序包装成列表序列传给下游。",
+		};
+	}
 	return {
 		type: info?.type || "*",
 		name: "透传输出",
-		tooltip: "透传第一个有效输入；预览区会照常浏览所有输入对象。",
+		tooltip: "单口输入原样透传；预览区会照常显示输入对象。",
 	};
 }
 

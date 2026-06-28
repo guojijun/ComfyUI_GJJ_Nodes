@@ -6,6 +6,10 @@ from tqdm import tqdm
 
 TORCH_COMPATIBLE_QTYPES = (None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16)
 
+
+def _gguf_qtype(name):
+    return getattr(gguf.GGMLQuantizationType, name, None)
+
 def is_torch_compatible(tensor):
     return tensor is None or getattr(tensor, "tensor_type", None) in TORCH_COMPATIBLE_QTYPES
 
@@ -285,17 +289,21 @@ def dequantize_blocks_IQ4_XS(blocks, block_size, type_size, dtype=None):
     return (dl * qs).reshape((n_blocks, -1))
 
 dequantize_functions = {
-    gguf.GGMLQuantizationType.BF16: dequantize_blocks_BF16,
-    gguf.GGMLQuantizationType.Q8_0: dequantize_blocks_Q8_0,
-    gguf.GGMLQuantizationType.Q5_1: dequantize_blocks_Q5_1,
-    gguf.GGMLQuantizationType.Q5_0: dequantize_blocks_Q5_0,
-    gguf.GGMLQuantizationType.Q4_1: dequantize_blocks_Q4_1,
-    gguf.GGMLQuantizationType.Q4_0: dequantize_blocks_Q4_0,
-    gguf.GGMLQuantizationType.Q6_K: dequantize_blocks_Q6_K,
-    gguf.GGMLQuantizationType.Q5_K: dequantize_blocks_Q5_K,
-    gguf.GGMLQuantizationType.Q4_K: dequantize_blocks_Q4_K,
-    gguf.GGMLQuantizationType.Q3_K: dequantize_blocks_Q3_K,
-    gguf.GGMLQuantizationType.Q2_K: dequantize_blocks_Q2_K,
-    gguf.GGMLQuantizationType.IQ4_NL: dequantize_blocks_IQ4_NL,
-    gguf.GGMLQuantizationType.IQ4_XS: dequantize_blocks_IQ4_XS,
+    qtype: fn
+    for qtype, fn in (
+        (_gguf_qtype("BF16"), dequantize_blocks_BF16),
+        (_gguf_qtype("Q8_0"), dequantize_blocks_Q8_0),
+        (_gguf_qtype("Q5_1"), dequantize_blocks_Q5_1),
+        (_gguf_qtype("Q5_0"), dequantize_blocks_Q5_0),
+        (_gguf_qtype("Q4_1"), dequantize_blocks_Q4_1),
+        (_gguf_qtype("Q4_0"), dequantize_blocks_Q4_0),
+        (_gguf_qtype("Q6_K"), dequantize_blocks_Q6_K),
+        (_gguf_qtype("Q5_K"), dequantize_blocks_Q5_K),
+        (_gguf_qtype("Q4_K"), dequantize_blocks_Q4_K),
+        (_gguf_qtype("Q3_K"), dequantize_blocks_Q3_K),
+        (_gguf_qtype("Q2_K"), dequantize_blocks_Q2_K),
+        (_gguf_qtype("IQ4_NL"), dequantize_blocks_IQ4_NL),
+        (_gguf_qtype("IQ4_XS"), dequantize_blocks_IQ4_XS),
+    )
+    if qtype is not None
 }

@@ -11,7 +11,7 @@ const USER_SETTINGS_ENDPOINT = "/gjj/user_settings";
 const USER_SETTINGS_SECTION = "ollama_assistant";
 const WORKFLOW_VALUES_PROPERTY = "gjj_gemma_text_generate_values";
 const MEDIA_INPUT = "media";
-const MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO,*";
+const MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
 const LEGACY_MEDIA_INPUTS = new Set(["image", "video", "图像", "视频帧", "媒体", "图片/视频"]);
 const HIDDEN_WIDGETS = new Set([
 	"clip_name",

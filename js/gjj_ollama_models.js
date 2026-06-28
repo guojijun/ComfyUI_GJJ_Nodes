@@ -33,6 +33,7 @@ const NODE_WIDGET_LABELS = {
 		repeat_penalty: "重复惩罚",
 		system_prompt: "系统提示词",
 		user_prompt: "指令 / 原文",
+		clear_memory_before_run: "执行前清理记忆",
 	},
 };
 

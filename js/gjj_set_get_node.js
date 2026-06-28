@@ -420,16 +420,34 @@ function getLink(graph, linkId) {
 		return null;
 	}
 	if (graph?.getLink) {
-		return graph.getLink(linkId);
+		const link = graph.getLink(linkId) || graph.getLink(String(linkId));
+		if (link) return link;
 	}
 	const links = getGraphLinks(graph);
-	return links instanceof Map ? links.get(linkId) : links?.[linkId] ?? null;
+	if (links instanceof Map) {
+		return links.get(linkId) || links.get(String(linkId)) || null;
+	}
+	if (Array.isArray(links)) {
+		return links.find((link) => String(graphLinkId(link)) === String(linkId)) || null;
+	}
+	return links?.[linkId] || links?.[String(linkId)] || null;
 }
 
 function outputHasLinks(output) {
 	if (!output) return false;
 	if (Array.isArray(output.links)) return output.links.length > 0;
 	return output.link != null;
+}
+
+function graphLinkValues(graph) {
+	const links = getGraphLinks(graph);
+	if (links instanceof Map) return Array.from(links.values());
+	if (Array.isArray(links)) return links;
+	return Object.values(links || {});
+}
+
+function graphLinkId(link) {
+	return Array.isArray(link) ? link[0] : link?.id;
 }
 
 function setGraphLinkSlot(link, side, nodeId, slot, type) {
@@ -455,6 +473,22 @@ function setGraphLinkSlot(link, side, nodeId, slot, type) {
 	if (type) link.type = type;
 }
 
+function syncOutputLinksFromGraph(node) {
+	if (!node?.graph) return;
+	for (let index = 0; index < (node.outputs?.length || 0); index += 1) {
+		const output = node.outputs[index];
+		if (!output) continue;
+		const ids = new Set(Array.isArray(output.links) ? output.links.filter((id) => id != null) : []);
+		if (output.link != null) ids.add(output.link);
+		for (const link of graphLinkValues(node.graph)) {
+			if (String(linkOriginId(link)) !== String(node.id) || Number(linkOriginSlot(link) || 0) !== index) continue;
+			const id = graphLinkId(link);
+			if (id != null) ids.add(id);
+		}
+		output.links = Array.from(ids);
+	}
+}
+
 function repairSetNodeLinkSlots(node) {
 	if (!node?.graph) return;
 	for (let index = 0; index < (node.inputs?.length || 0); index += 1) {
@@ -468,6 +502,11 @@ function repairSetNodeLinkSlots(node) {
 			setGraphLinkSlot(getLink(node.graph, linkId), "output", node.id, index, output.type);
 		}
 	}
+}
+
+function repairGetNodeLinkSlots(node) {
+	if (!node?.graph) return;
+	syncOutputLinksFromGraph(node);
 }
 
 function highestLinkedOutputIndex(node) {
@@ -750,11 +789,12 @@ function templateFieldsForNode(node) {
 				: [String(field?.broadcast_key || field?.broadcastKey || "").trim()].filter(Boolean);
 			const broadcastKey = broadcastKeys[0] || "";
 			const outputType = node?.outputs?.[outputIndex]?.type || "";
+			const declaredType = String(field?.type || "").toUpperCase();
+			const enumOutputType = String(outputType || "").toUpperCase().includes("STRING") ? outputType : "STRING";
 			const type = normalizeTemplateSocketType(
 				field?.socket_type
 				|| field?.output_type
-				|| (String(field?.type || "").toUpperCase() === "ENUM" ? "COMBO" : "")
-				|| outputType
+				|| (declaredType === "ENUM" ? enumOutputType : outputType)
 				|| field?.type
 				|| "*"
 			) || "*";
@@ -975,8 +1015,8 @@ function selectionSummary(node) {
 
 function getLinkedOutputInfo(node, input) {
 	const link = getLink(node.graph, input?.link);
-	const sourceNode = link?.origin_id != null ? node.graph?.getNodeById?.(link.origin_id) : null;
-	const sourceSlot = sourceNode?.outputs?.[link?.origin_slot];
+	const sourceNode = linkOriginId(link) != null ? node.graph?.getNodeById?.(linkOriginId(link)) : null;
+	const sourceSlot = sourceNode?.outputs?.[linkOriginSlot(link)];
 	if (!sourceSlot) {
 		return null;
 	}
@@ -993,8 +1033,8 @@ function getLinkedOutputInfo(node, input) {
 function getLinkedTargetInfo(node, output) {
 	for (const linkId of output?.links || []) {
 		const link = getLink(node.graph, linkId);
-		const targetNode = link?.target_id != null ? node.graph?.getNodeById?.(link.target_id) : null;
-		const targetSlot = targetNode?.inputs?.[link?.target_slot];
+		const targetNode = linkTargetId(link) != null ? node.graph?.getNodeById?.(linkTargetId(link)) : null;
+		const targetSlot = targetNode?.inputs?.[linkTargetSlot(link)];
 		if (targetSlot) {
 			const type = targetSlot.type || "*";
 			const name = preferredSlotSetName(targetSlot)
@@ -1153,8 +1193,23 @@ function sourceSlotsForGetNode(node) {
 	const names = getSelectedNames(node);
 	const multiMode = names.length > 1;
 	const slots = [];
-	for (const name of names) {
-		slots.push(...sourceSlotsForName(node.graph, name, multiMode));
+	for (let index = 0; index < names.length; index += 1) {
+		const name = names[index];
+		const found = sourceSlotsForName(node.graph, name, multiMode);
+		if (found.length) {
+			slots.push(...found);
+			continue;
+		}
+		const output = node?.outputs?.[slots.length] || node?.outputs?.[index];
+		slots.push({
+			entry: null,
+			sourceSlot: index,
+			missing: true,
+			info: {
+				type: output?.type || "*",
+				name: output?.label || output?.localized_name || output?.name || String(name || `值 ${index + 1}`),
+			},
+		});
 	}
 	return slots;
 }
@@ -1165,7 +1220,7 @@ function resolveSetPromptSource(setter, slotIndex) {
 	if (!link) {
 		return null;
 	}
-	return [String(link.origin_id), Number(link.origin_slot || 0)];
+	return [String(linkOriginId(link)), Number(linkOriginSlot(link) || 0)];
 }
 
 function resolveTemplatePromptSource(source) {
@@ -1177,7 +1232,7 @@ function resolveTemplatePromptSource(source) {
 	const input = setter.inputs?.find((item) => item?.name === source.inputName);
 	const link = getLink(setterGraph, input?.link);
 	if (link) {
-		return [String(link.origin_id), Number(link.origin_slot || 0)];
+		return [String(linkOriginId(link)), Number(linkOriginSlot(link) || 0)];
 	}
 	return [String(setter.id), Number(source.sourceSlot || 0)];
 }
@@ -1264,11 +1319,11 @@ function patchDirectGetNodeConsumers(promptResult, graph) {
 			if (!link) {
 				continue;
 			}
-			const origin = findNodeForPromptId(node.graph || found.graph || graph, link.origin_id)?.node;
+			const origin = findNodeForPromptId(node.graph || found.graph || graph, linkOriginId(link))?.node;
 			if (origin?.type !== GET_TYPE) {
 				continue;
 			}
-			const resolved = resolveGetterOutputForPrompt(origin, link.origin_slot);
+			const resolved = resolveGetterOutputForPrompt(origin, linkOriginSlot(link));
 			if (resolved === null) {
 				delete inputs[input.name];
 			} else if (Array.isArray(resolved) && resolved.length === 2) {
@@ -1968,6 +2023,7 @@ function stabilizeGetNode(node) {
 	if (!node) {
 		return;
 	}
+	repairGetNodeLinkSlots(node);
 	if (props(node)[GET_SELECTION_PROPERTY] === undefined) {
 		props(node)[GET_SELECTION_PROPERTY] = getSelectedNames(node);
 	}
@@ -1977,6 +2033,7 @@ function stabilizeGetNode(node) {
 		node.addOutput?.("输出", "*");
 	}
 	while ((node.outputs || []).length > desiredCount) {
+		if (outputHasLinks(node.outputs[node.outputs.length - 1])) break;
 		node.removeOutput?.(node.outputs.length - 1);
 	}
 	for (let index = 0; index < desiredCount; index += 1) {
@@ -1996,6 +2053,7 @@ function stabilizeGetNode(node) {
 			? "从 GJJ 模板变量或模板参数节点读取对应变量；模板变量会优先使用行左侧小圆点的外部连接。"
 			: GET_OUTPUT_TOOLTIP;
 	}
+	repairGetNodeLinkSlots(node);
 	const names = getSelectedNames(node);
 	node.title = compactVariableTitle("➡️", names.map((name) => displayNameForSelectedName(node, name)), GET_TITLE);
 	applyNodeDescription(node, GET_DESCRIPTION);
@@ -2624,8 +2682,9 @@ function isCompatibleType(sourceType, targetType) {
 	if (!sourceType || !targetType || sourceType === "*" || targetType === "*") {
 		return true;
 	}
-	const sourceTypes = String(sourceType).split(",");
-	const targetTypes = String(targetType).split(",");
+	const sourceTypes = String(sourceType).split(",").map((type) => type.trim()).filter(Boolean);
+	const targetTypes = String(targetType).split(",").map((type) => type.trim()).filter(Boolean);
+	if (!sourceTypes.length || !targetTypes.length) return true;
 	return sourceTypes.some((type) => targetTypes.includes(type));
 }
 
@@ -3254,24 +3313,16 @@ app.registerExtension({
 				}
 				const input = sortedInputs(setterEntry.node)[source.sourceSlot];
 				const link = getLink(setterEntry.graph, input?.link);
-				const sourceNode = link?.origin_id != null ? setterEntry.graph.getNodeById?.(link.origin_id) : null;
+				const sourceNode = linkOriginId(link) != null ? setterEntry.graph.getNodeById?.(linkOriginId(link)) : null;
 				if (!sourceNode) {
 					return undefined;
 				}
-				return { node: sourceNode, slot: link.origin_slot };
+				return { node: sourceNode, slot: linkOriginSlot(link) };
 			}
 
 			validateLinks() {
-				for (const output of this.outputs || []) {
-					for (const linkId of [...(output.links || [])]) {
-						const link = getLink(this.graph, linkId);
-						const targetNode = link?.target_id != null ? this.graph?.getNodeById?.(link.target_id) : null;
-						const targetType = targetNode?.inputs?.[link?.target_slot]?.type;
-						if (!isCompatibleType(output.type, targetType)) {
-							this.graph?.removeLink?.(linkId);
-						}
-					}
-				}
+				if (app.configuringGraph) return;
+				repairGetNodeLinkSlots(this);
 			}
 
 			getExtraMenuOptions(_, options) {

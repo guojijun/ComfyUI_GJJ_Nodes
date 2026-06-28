@@ -7,6 +7,7 @@ from typing import Any
 
 NODE_NAME = "GJJ_TemplatePrompt"
 DEFAULT_TEMPLATE = "一张{{主体}}的照片，{{风格}}，细节丰富"
+EXTERNAL_TEMPLATE_INPUT = "external_template"
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
 CHOICE_SPLIT_RE = re.compile(r"[,，、|]+")
 
@@ -17,11 +18,13 @@ class AnyType(str):
 
 
 class FlexibleOptionalInputType(dict):
-    def __init__(self, input_type: Any):
-        super().__init__()
+    def __init__(self, input_type: Any, fixed: dict[str, Any] | None = None):
+        super().__init__(fixed or {})
         self.input_type = input_type
 
     def __getitem__(self, key):
+        if dict.__contains__(self, key):
+            return dict.__getitem__(self, key)
         return (self.input_type,)
 
     def __contains__(self, key):
@@ -87,10 +90,8 @@ def _parse_default_expr(expr: Any) -> dict[str, str]:
 
 def _parse_placeholder_expr(expr: Any) -> dict[str, Any]:
     source = _normalize_text(expr).strip()
-    for separator in ("：", ":"):
-        if separator not in source:
-            continue
-        label, option_text = source.split(separator, 1)
+    if ":" in source:
+        label, option_text = source.split(":", 1)
         parsed_label = _parse_default_expr(label)
         label = parsed_label["label"]
         options = [item.strip() for item in CHOICE_SPLIT_RE.split(option_text) if item.strip()]
@@ -159,7 +160,7 @@ class GJJ_TemplatePrompt:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("完整提示词",)
     OUTPUT_TOOLTIPS = ("把模板中的 {{参数}} 替换为面板值、外部连线值或 GJJ 参数绑定值后的完整文本。",)
-    DESCRIPTION = "模板提示词节点。使用 {{参数名}} 声明动态参数；使用 {{参数名(默认值)}} 声明默认值；使用 {{名称：选项1,选项2}} 声明按钮组选项，默认单选，按 Ctrl/Shift 可多选，输出会自动带“名称：”前缀。普通参数可在面板输入，也可通过左侧插口外接。前端可从 GJJ_TemplateParams 和 GJJ_SETNODE 选择参数并隐藏对应插槽。"
+    DESCRIPTION = "模板提示词节点。使用 {{参数名}} 声明动态参数；使用 {{参数名(默认值)}} 声明默认值；使用 {{名称:选项1,选项2}} 声明按钮组选项，默认单选，按 Ctrl/Shift 可多选，输出会自动带“名称：”前缀。全角冒号 {{名称：正文}} 会按普通文本参数处理。普通参数可在面板输入，也可通过左侧插口外接。前端可从 GJJ_TemplateParams 和 GJJ_SETNODE 选择参数并隐藏对应插槽。可选外接模板输入连线后优先使用外部模板。"
     SEARCH_ALIASES = ["template prompt", "提示词模板", "模板提示词", "prompt template"]
 
     @classmethod
@@ -174,7 +175,7 @@ class GJJ_TemplatePrompt:
                         "hidden": True,
                         "display": "hidden",
                         "display_name": "隐藏模板",
-                        "tooltip": "由前端 ⚙️ 设置按钮维护。写 {{参数名}} 会自动生成对应参数插槽；写 {{参数名(默认值)}} 可设置默认值；写 {{名称：选项1,选项2}} 会生成按钮组，默认单选，按 Ctrl/Shift 可多选，输出自动带“名称：”前缀。",
+                        "tooltip": "由前端 ⚙️ 设置按钮维护。写 {{参数名}} 会自动生成对应参数插槽；写 {{参数名(默认值)}} 可设置默认值；写 {{名称:选项1,选项2}} 会生成按钮组，默认单选，按 Ctrl/Shift 可多选，输出自动带“名称：”前缀。全角冒号不触发按钮组。",
                     },
                 ),
                 "values_json": (
@@ -211,7 +212,19 @@ class GJJ_TemplatePrompt:
                     },
                 ),
             },
-            "optional": FlexibleOptionalInputType(any_type),
+            "optional": FlexibleOptionalInputType(
+                any_type,
+                {
+                    EXTERNAL_TEMPLATE_INPUT: (
+                        "GJJ_PROMPT",
+                        {
+                            "forceInput": True,
+                            "display_name": "外接模板",
+                            "tooltip": "可选。连接后优先使用外部模板文本，并隐藏节点内部模板设置、按钮和参数面板；断开后恢复内部模板。",
+                        },
+                    ),
+                },
+            ),
         }
 
     @classmethod
@@ -223,7 +236,11 @@ class GJJ_TemplatePrompt:
         schema_json: str = "[]",
         **kwargs,
     ):
-        dynamic = {str(k): repr(v) for k, v in sorted(kwargs.items()) if str(k).startswith("param_")}
+        dynamic = {
+            str(k): repr(v)
+            for k, v in sorted(kwargs.items())
+            if str(k) == EXTERNAL_TEMPLATE_INPUT or str(k).startswith("param_")
+        }
         return json.dumps(
             [_normalize_text(template_text), _normalize_text(values_json), _normalize_text(bindings_json), _normalize_text(schema_json), dynamic],
             ensure_ascii=False,
@@ -238,7 +255,8 @@ class GJJ_TemplatePrompt:
         schema_json: str = "[]",
         **kwargs,
     ):
-        template = _normalize_text(template_text or DEFAULT_TEMPLATE)
+        external_template = _normalize_text(kwargs.get(EXTERNAL_TEMPLATE_INPUT)).strip()
+        template = external_template or _normalize_text(template_text or DEFAULT_TEMPLATE)
         values = _safe_json_loads(values_json, {})
         if not isinstance(values, dict):
             values = {}

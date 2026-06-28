@@ -10,6 +10,24 @@ const GJJ_THEME = {
 };
 
 const NODE_THEME_OVERRIDES = {
+	GJJ_GemmaTextGenerate: {
+		header: "#2B5D72",
+		panel: "#111B22",
+		outline: "#5EA9C6",
+		text: "#E8F6FB",
+	},
+	GJJ_LlamaAssistant: {
+		header: "#2B5D72",
+		panel: "#111B22",
+		outline: "#5EA9C6",
+		text: "#E8F6FB",
+	},
+	GJJ_OllamaAssistant: {
+		header: "#2B5D72",
+		panel: "#111B22",
+		outline: "#5EA9C6",
+		text: "#E8F6FB",
+	},
 	GJJ_VideoUniversalModelLoader: {
 		header: "#A87818",
 		panel: "#211B10",

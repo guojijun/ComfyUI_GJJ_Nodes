@@ -20,6 +20,8 @@ _GGUF_QUANTIZATION_VALUES = {
     "Q4_K": 10,
     "Q3_K": 11,
     "Q2_K": 12,
+    "IQ4_NL": 13,
+    "IQ4_XS": 14,
 }
 
 

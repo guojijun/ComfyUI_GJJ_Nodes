@@ -51,18 +51,16 @@ except Exception:
 
 
 NODE_NAME = "GJJ_GemmaTextGenerate"
-NODE_DISPLAY_NAME = "GJJ · 🧠 图像反推文本生成（Gemma）"
+NODE_DISPLAY_NAME = "GJJ·💙图片反推提示词推理🧠Gemma"
 NODE_DESCRIPTION = "把官方“加载CLIP + TextGenerate”合并成一个 GJJ 零第三方依赖节点；适合 Ideogram4 / Gemma 文本生成、提示词扩写和多模态文本生成。"
 DEFAULT_CLIP_NAME = "qwen3.5_4b_fp8_mixed.safetensors"
 MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
-
-
 class AnyMediaType(str):
     def __ne__(self, _other: object) -> bool:
         return False
 
 
-MEDIA_INPUT_TYPE = AnyMediaType("GJJ_BATCH_IMAGE,IMAGE,VIDEO,*")
+MEDIA_INPUT_TYPE = AnyMediaType("GJJ_BATCH_IMAGE,IMAGE,VIDEO")
 
 CLIP_TYPES = [
     "ideogram4",
@@ -284,21 +282,27 @@ def _generate_text(
     seed: int = 0,
     presence_penalty: float = 0.0,
 ) -> str:
-    tokens = clip.tokenize(
-        str(prompt or ""),
+    generation_prompt = str(prompt or "")
+    tokens = _clip_tokenize_compat(
+        clip,
+        generation_prompt,
         image=image,
         skip_template=not bool(use_default_template),
         min_length=1,
         thinking=bool(thinking),
+        enable_thinking=bool(thinking),
+        force_reasoning=bool(thinking),
+        use_think_prompt=bool(thinking),
         video=video,
         audio=audio,
     )
     do_sample = str(sampling_mode or "on") == "on"
+    effective_max_length = max(1, min(2048, int(max_length or 256)))
     generated_ids = _clip_generate_compat(
         clip,
         tokens,
         do_sample=do_sample,
-        max_length=max(1, min(2048, int(max_length or 256))),
+        max_length=effective_max_length,
         temperature=float(temperature),
         top_k=int(top_k),
         top_p=float(top_p),
@@ -309,8 +313,29 @@ def _generate_text(
     )
     text = str(clip.decode(generated_ids) or "")
     if not bool(thinking):
-        text = _clean_no_think_output(text, prompt)
+        text = _clean_no_think_output(text, generation_prompt)
     return text
+
+
+def _clip_tokenize_compat(clip: Any, text: str, **kwargs: Any) -> Any:
+    tokenize = getattr(clip, "tokenize")
+    usable_kwargs = dict(kwargs)
+    try:
+        signature = inspect.signature(tokenize)
+        if not any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
+            parameters = set(signature.parameters)
+            usable_kwargs = {key: value for key, value in usable_kwargs.items() if key in parameters}
+    except (TypeError, ValueError):
+        pass
+
+    while True:
+        try:
+            return tokenize(text, **usable_kwargs)
+        except TypeError as exc:
+            match = re.search(r"unexpected keyword argument ['\"]([^'\"]+)['\"]", str(exc))
+            if not match or match.group(1) not in usable_kwargs:
+                raise
+            usable_kwargs.pop(match.group(1), None)
 
 
 def _clip_generate_compat(clip: Any, tokens: Any, **kwargs: Any) -> Any:
@@ -365,7 +390,7 @@ def _strip_labeled_thinking_block(text: str) -> str:
         r"(?:思考过程|思考|推理过程|推理|分析过程|分析|reasoning|thought process|thinking|analysis)"
     )
     final_label = (
-        r"(?:最终答案|答案|回答|回复|结果|输出|final answer|answer|response|result|output)"
+        r"(?:最终答案|直接答案|最终提示词|提示词|答案|回答|回复|结果|输出|final answer|answer|response|result|output|prompt)"
     )
 
     starts_with_thinking = re.match(rf"^\s*(?:#+\s*)?{thinking_label}\s*[:：\n]", cleaned, flags=re.IGNORECASE)
@@ -378,6 +403,10 @@ def _strip_labeled_thinking_block(text: str) -> str:
 
     if starts_with_thinking:
         without_label = re.sub(rf"^\s*(?:#+\s*)?{thinking_label}\s*[:：]?\s*", "", cleaned, count=1, flags=re.IGNORECASE)
+        inline_final = list(re.finditer(rf"{final_label}\s*[:：]\s*", without_label, flags=re.IGNORECASE))
+        if inline_final:
+            final = inline_final[-1]
+            return without_label[final.end():].strip()
         parts = re.split(r"\n\s*\n", without_label, maxsplit=1)
         if len(parts) == 2 and parts[1].strip():
             return parts[1].strip()
@@ -420,6 +449,17 @@ def _merged_generation_prompt(system_prompt: str, user_prompt: str) -> str:
     if not user_text:
         return system_text
     return f"{system_text}\n\n{user_text}"
+
+
+def _media_text_fallback(media: Any) -> str:
+    if isinstance(media, bytes):
+        try:
+            return media.decode("utf-8", errors="ignore").strip()
+        except Exception:
+            return ""
+    if isinstance(media, str):
+        return media.strip()
+    return ""
 
 
 def _component_value(value: Any, key: str) -> Any:
@@ -493,38 +533,61 @@ def _coerce_media_for_textgen(media: Any | None):
         return None
 
     source = media
+    if isinstance(source, (str, bytes, int, float, bool)):
+        return None
+
     if hasattr(source, "get_components"):
         try:
             source = source.get_components()
         except Exception as exc:
             raise RuntimeError(f"读取 VIDEO 视频帧失败：{exc}") from exc
-        source = _component_value(source, "images")
-        if source is None:
-            raise RuntimeError("输入 VIDEO 没有解析出可用图片帧。")
-    elif hasattr(source, "images"):
-        source = getattr(source, "images", None)
-
-    tensor = source
-    if isinstance(source, dict):
-        tensor = None
-        for key in ("images", "frames", "samples"):
-            candidate = source.get(key)
+        for key in ("images", "image", "frames", "frame", "samples"):
+            candidate = _component_value(source, key)
             if candidate is not None:
-                tensor = candidate
+                source = candidate
                 break
-    elif isinstance(source, (list, tuple)) and source:
+        else:
+            return None
+        return _coerce_media_for_textgen(source)
+    try:
         import torch
-        if all(isinstance(item, torch.Tensor) for item in source):
-            converted = [_coerce_tensor_to_images(item, "媒体列表") for item in source]
-            tensor = torch.cat(converted, dim=0)
-    else:
-        for key in ("images", "frames", "samples"):
-            candidate = getattr(source, key, None)
-            if candidate is not None:
-                tensor = candidate
-                break
+    except Exception as exc:
+        raise RuntimeError(f"统一媒体输入转换图片需要 PyTorch：{exc}") from exc
 
-    return _coerce_tensor_to_images(tensor, "统一媒体输入")
+    if isinstance(source, torch.Tensor):
+        return _coerce_tensor_to_images(source, "统一媒体输入")
+
+    if isinstance(source, dict):
+        for key in ("images", "image", "frames", "frame", "samples", "batch", "items", "values"):
+            candidate = source.get(key)
+            converted = _coerce_media_for_textgen(candidate)
+            if converted is not None:
+                return converted
+        return None
+
+    if isinstance(source, (list, tuple)):
+        converted = [_coerce_media_for_textgen(item) for item in source]
+        converted = [item for item in converted if item is not None]
+        if converted:
+            return torch.cat(converted, dim=0)
+        return None
+
+    if hasattr(source, "images"):
+        source = getattr(source, "images", None)
+        if source is None:
+            return None
+        return _coerce_media_for_textgen(source)
+
+    for key in ("images", "image", "frames", "frame", "samples", "batch", "items", "values"):
+        try:
+            candidate = getattr(source, key, None)
+        except Exception:
+            candidate = None
+        converted = _coerce_media_for_textgen(candidate)
+        if converted is not None:
+            return converted
+
+    return None
 
 
 class GJJ_GemmaTextGenerate:
@@ -777,6 +840,17 @@ class GJJ_GemmaTextGenerate:
         if runtime_issue:
             raise RuntimeError(runtime_issue)
         try:
+            import time
+            start_total = time.time()
+
+            prompt_source = "prompt"
+            if not str(prompt or "").strip():
+                media_text = _media_text_fallback(media)
+                if media_text:
+                    prompt = media_text
+                    media = None
+                    prompt_source = "media_text_fallback"
+
             media_image = _coerce_media_for_textgen(media)
             if image is None:
                 image = media_image
@@ -787,7 +861,15 @@ class GJJ_GemmaTextGenerate:
             elif image is not None:
                 image = _coerce_media_for_textgen(image)
             video = None
+
+            start_load = time.time()
             clip = _load_merged_clip(str(clip_name), str(clip_type or "ideogram4"), str(clip_device or "default"))
+            load_time = time.time() - start_load
+            print(f"[GJJ GemmaTextGenerate] CLIP 模型加载耗时: {load_time:.2f} 秒", flush=True)
+
+            start_gen = time.time()
+            prompt_preview = str(prompt or "").strip().replace("\n", " ")[:80]
+            print(f"[GJJ GemmaTextGenerate] prompt_source={prompt_source} | prompt_preview={prompt_preview}", flush=True)
             text = _generate_text(
                 clip,
                 _merged_generation_prompt(system_prompt, prompt),
@@ -806,6 +888,9 @@ class GJJ_GemmaTextGenerate:
                 seed=_coerce_int(seed, 0, 0, 0xFFFFFFFFFFFFFFFF),
                 presence_penalty=_coerce_float(presence_penalty, 0.0, 0.0, 5.0),
             )
+            gen_time = time.time() - start_gen
+            total_time = time.time() - start_total
+            print(f"[GJJ GemmaTextGenerate] 文本生成耗时: {gen_time:.2f} 秒 | 总耗时: {total_time:.2f} 秒 | thinking={thinking}", flush=True)
             return (text,)
         except Exception as exc:
             report = getattr(exc, "gjj_report", None)

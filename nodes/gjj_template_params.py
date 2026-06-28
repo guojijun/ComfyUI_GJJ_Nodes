@@ -641,6 +641,7 @@ def _split_enum_options(inner: str) -> list[str]:
     options: list[str] = []
     escaped = False
     quote: str | None = None
+    depth = 0
     current: list[str] = []
     for ch in str(inner or ""):
         if escaped:
@@ -657,7 +658,11 @@ def _split_enum_options(inner: str) -> list[str]:
             if quote is None:
                 quote = ch
                 continue
-        if ch in {",", "，", "、", "|"} and quote is None:
+        if quote is None and ch in "([{（｛【":
+            depth += 1
+        if quote is None and ch in ")]}）｝】":
+            depth = max(0, depth - 1)
+        if ch in {",", "，", "、", "|"} and quote is None and depth == 0:
             option = "".join(current).strip()
             if option:
                 options.append(_strip_quotes(option))
@@ -716,8 +721,10 @@ def _selected_prompt_group_lines(fields: list[dict[str, Any]], value_map: dict[s
             raw_value = value_map.get(key, value_map.get(group.get("label"), group.get("default", "")))
             selected = _coerce_enum_value(raw_value, list(group.get("options", [])))
             label = _normalize_text(group.get("label")).strip()
-            if label and selected:
-                lines.append(f"{label}：{selected}")
+            selected_values = selected if isinstance(selected, list) else [selected]
+            for item in selected_values:
+                if label and item:
+                    lines.append(f"{label}：{item}")
     return lines
 
 
@@ -816,16 +823,52 @@ def _coerce_enum_value(raw_value: Any, options: list[Any]) -> Any:
             return int(text)
         if output_number and _is_number_text(text):
             return float(text)
+        parsed = parse_value(text)
+        if isinstance(parsed, list):
+            return parsed
         return text
 
-    text = _normalize_text(raw_value).strip()
-    for option in options:
-        if text in {_option_value(option), _option_label(option)}:
-            return finalize(_option_value(option))
-    nested_options = _parse_enum_options(text, "枚举")
-    if nested_options:
-        return finalize(_option_value(nested_options[0]))
-    return finalize(_option_value(options[0]))
+    def raw_items(value: Any) -> list[Any]:
+        if isinstance(value, (list, tuple, set)):
+            return list(value)
+        text = _normalize_text(value).strip()
+        if any(text in {_option_value(option), _option_label(option)} for option in options):
+            return [value]
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                try:
+                    parsed = ast.literal_eval(text)
+                except Exception:
+                    parsed = None
+            if isinstance(parsed, list):
+                return parsed
+        return [value]
+
+    def coerce_one(value: Any) -> Any | None:
+        text = _normalize_text(value).strip()
+        for option in options:
+            if text in {_option_value(option), _option_label(option)}:
+                return finalize(_option_value(option))
+        nested_options = _parse_enum_options(text, "枚举")
+        if nested_options:
+            return finalize(_option_value(nested_options[0]))
+        return None
+
+    items = raw_items(raw_value)
+    values: list[Any] = []
+    for item in items:
+        coerced = coerce_one(item)
+        if isinstance(coerced, list):
+            for sub_item in coerced:
+                if sub_item not in values:
+                    values.append(sub_item)
+        elif coerced is not None and coerced not in values:
+            values.append(coerced)
+    if len(items) > 1:
+        return values or [finalize(_option_value(options[0]))]
+    return values[0] if values else finalize(_option_value(options[0]))
 
 
 def _coerce_bool_value(raw_value: Any, bool_labels: dict[str, str] | None = None) -> bool:
@@ -1177,7 +1220,7 @@ def parse_template(template_text: Any) -> list[dict[str, Any]]:
             "socket_type": "",
             "type": "ENUM",
             "options": enum_options,
-            "tooltip": tooltip or "同一分组内选择一个选项；提示词输出会自动附加“名称：选项”。",
+            "tooltip": tooltip or "普通点击单选，Ctrl/Shift 点击多选；提示词输出会自动附加“名称：选项”。",
             "prompt_group": True,
         }
         fields.append(field)

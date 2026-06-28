@@ -1138,7 +1138,7 @@ class GJJ_AnyPreview:
         "outputs": {
             "透传输出": {
                 "type": "*",
-                "description": "透传第一个有效输入；多路输入只用于浏览平铺，不会被强行合并或改尺寸。",
+                "description": "单路输入原样透传；多路输入会按端口顺序包装成列表序列传给下游。",
             },
         },
         "usage_examples": [
@@ -1241,7 +1241,7 @@ class GJJ_AnyPreview:
     ]
     RETURN_TYPES = (any_type,)
     RETURN_NAMES = ("透传输出",)
-    OUTPUT_TOOLTIPS = ("透传第一个有效输入；多路输入只用于浏览平铺。",)
+    OUTPUT_TOOLTIPS = ("单路输入原样透传；多路输入按端口顺序包装成列表序列。",)
     _LAST_INPUT_CACHE: dict[str, list[Any]] = {}
     _LAST_INPUT_CACHE_ORDER: list[str] = []
     _LAST_INPUT_CACHE_MAX = 64
@@ -1319,21 +1319,21 @@ class GJJ_AnyPreview:
             return []
 
     def check_lazy_status(self, batch_image=None, **kwargs):
-        if batch_image is not None and not is_none(batch_image):
-            return []
-
         input_keys = sorted(
             [key for key in kwargs.keys() if str(key).startswith("any_")],
             key=extract_input_index,
         )
-        for key in input_keys:
-            value = kwargs.get(key)
-            if value is not None and not is_none(value):
-                return []
-
         if not input_keys:
             return []
-        return [input_keys[0]]
+        missing_keys = [
+            key for key in input_keys
+            if kwargs.get(key) is None or is_none(kwargs.get(key))
+        ]
+        if len(input_keys) > 1:
+            return missing_keys
+        if batch_image is not None and not is_none(batch_image):
+            return []
+        return missing_keys
 
     def _save_image_preview(
         self,
@@ -1618,9 +1618,8 @@ class GJJ_AnyPreview:
         print(f"[GJJ] 最终返回的ui数据: {ui}")
         print(f"[GJJ] ui.keys: {list(ui.keys())}")
 
-        # 预览节点只做浏览，不改变数据形态。多路输入时输出第一个有效来路，
-        # 避免不同尺寸/维度/类型被误合并后影响下游。
-        result_output = raw_values[0] if raw_values else merged
+        # 单口保持原对象；多口按端口顺序包装成普通 Python list，作为一个序列对象传给下游。
+        result_output = list(raw_values) if len(raw_values) > 1 else (raw_values[0] if raw_values else merged)
 
         return {
             "ui": ui,

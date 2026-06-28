@@ -108,6 +108,54 @@ def _register_model_folder_path(folder_name: str, subdir: str) -> None:
 _register_model_folder_path("clip_vision", "clip_visions")
 
 
+def _merge_model_folder_path(folder_name: str, path: str, extensions: set[str]) -> None:
+    if not path:
+        return
+    existing = getattr(folder_paths, "folder_names_and_paths", {})
+    current = existing.get(folder_name)
+    if current:
+        paths, exts = current
+        path_list = list(paths) if isinstance(paths, (list, tuple, set)) else [paths]
+        if path not in path_list:
+            path_list.append(path)
+        existing[folder_name] = (path_list, set(exts or set()) | set(extensions))
+        return
+    existing[folder_name] = ([path], set(extensions))
+
+
+def _ensure_gguf_model_folders() -> None:
+    existing = getattr(folder_paths, "folder_names_and_paths", {})
+    models_dir = str(getattr(folder_paths, "models_dir", "") or "").strip()
+
+    for target in ("diffusion_models", "unet", "text_encoders", "clip"):
+        current = existing.get(target)
+        if not current:
+            continue
+        paths, exts = current
+        existing[target] = (paths, set(exts or set()) | {".gguf"})
+
+    if models_dir:
+        _merge_model_folder_path("unet_gguf", os.path.join(models_dir, "unet_gguf"), {".gguf"})
+        _merge_model_folder_path("clip_gguf", os.path.join(models_dir, "clip_gguf"), {".gguf"})
+
+    for source, target in (
+        ("diffusion_models", "unet_gguf"),
+        ("unet", "unet_gguf"),
+        ("text_encoders", "clip_gguf"),
+        ("clip", "clip_gguf"),
+    ):
+        current = existing.get(source)
+        if not current:
+            continue
+        paths, _exts = current
+        path_list = list(paths) if isinstance(paths, (list, tuple, set)) else [paths]
+        for path in path_list:
+            _merge_model_folder_path(target, str(path), {".gguf"})
+
+
+_ensure_gguf_model_folders()
+
+
 def _dedupe_keep_order(values: list[str]) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
@@ -121,6 +169,7 @@ def _dedupe_keep_order(values: list[str]) -> list[str]:
 
 
 def _safe_filename_list(category: str) -> list[str]:
+    _ensure_gguf_model_folders()
     try:
         return _dedupe_keep_order(list(folder_paths.get_filename_list(category)))
     except Exception:
@@ -150,12 +199,24 @@ def _model_stem(name: str) -> str:
     return text
 
 
+def _model_extension(name: str) -> str:
+    text = str(name or "").replace("\\", "/").rsplit("/", 1)[-1].strip().lower()
+    for suffix in MODEL_EXTENSIONS:
+        if text.endswith(suffix):
+            return suffix
+    return ""
+
+
 def _model_basename(name: str) -> str:
     return str(name or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
 
 
 def _model_has_subdir(name: str) -> bool:
     return "/" in str(name or "") or "\\" in str(name or "")
+
+
+def _is_gguf_model(value: str | None) -> bool:
+    return str(value or "").replace("\\", "/").lower().endswith(".gguf")
 
 
 def _model_match_tokens(value: str) -> list[str]:
@@ -203,6 +264,7 @@ def _pick_short_model_name(requested: str, available: list[str], fallback: str =
 
     query_base = query.rsplit("/", 1)[-1]
     query_stem = _model_stem(query_base)
+    query_extension = _model_extension(query_base)
     query_key = _model_match_key(query_base)
     query_tokens = _model_match_tokens(query_base)
     query_relaxed_key = _relaxed_model_match_key(query_base)
@@ -219,6 +281,9 @@ def _pick_short_model_name(requested: str, available: list[str], fallback: str =
     def rank(name: str) -> tuple[int, int, int, str]:
         text = str(name or "").replace("\\", "/").lower()
         filename = text.rsplit("/", 1)[-1]
+        filename_extension = _model_extension(filename)
+        if query_extension and filename_extension and filename_extension != query_extension:
+            return (999, 0, len(filename), len(text), text)
         stem = _model_stem(filename)
         key = _model_match_key(filename)
         tokens = _model_match_tokens(filename)
@@ -338,7 +403,11 @@ def _resolve_full_path(categories: tuple[str, ...], filename: str) -> str:
 
 
 def list_unet_models() -> list[str]:
-    return _dedupe_keep_order(_safe_filename_list("diffusion_models") + _safe_filename_list("checkpoints"))
+    return _dedupe_keep_order(
+        _safe_filename_list("unet_gguf")
+        + _safe_filename_list("diffusion_models")
+        + _safe_filename_list("checkpoints")
+    )
 
 
 def list_checkpoint_models() -> list[str]:
@@ -346,7 +415,11 @@ def list_checkpoint_models() -> list[str]:
 
 
 def list_clip_models() -> list[str]:
-    return _dedupe_keep_order(_safe_filename_list("text_encoders") + _safe_filename_list("clip"))
+    return _dedupe_keep_order(
+        _safe_filename_list("clip_gguf")
+        + _safe_filename_list("text_encoders")
+        + _safe_filename_list("clip")
+    )
 
 
 def list_vae_models() -> list[str]:
@@ -375,8 +448,10 @@ async def get_gjj_model_bundle_loader_lists(request):
         {
             "folders": {
                 "diffusion_models": list_unet_models(),
+                "unet_gguf": _safe_filename_list("unet_gguf"),
                 "checkpoints": list_checkpoint_models(),
                 "clip": list_clip_models(),
+                "clip_gguf": _safe_filename_list("clip_gguf"),
                 "vae": list_vae_models(),
                 "loras": list_lora_models(),
                 "model_patches": list_model_patch_models(),
@@ -437,6 +512,22 @@ def _build_clip_model_options(dtype_name: str, device: str = "default") -> dict:
         model_options["load_device"] = cpu
         model_options["offload_device"] = cpu
     return model_options
+
+
+def _load_unet_gguf(unet_name: str):
+    try:
+        from ..vendor.gjj_gguf_runtime import load_unet_gguf as load_gjj_gguf_unet
+    except ImportError:
+        from vendor.gjj_gguf_runtime import load_unet_gguf as load_gjj_gguf_unet
+    return load_gjj_gguf_unet(unet_name)
+
+
+def _load_clip_gguf(clip_name: str, clip_type: str):
+    try:
+        from ..vendor.gjj_gguf_runtime import load_clip_gguf as load_gjj_gguf_clip
+    except ImportError:
+        from vendor.gjj_gguf_runtime import load_clip_gguf as load_gjj_gguf_clip
+    return load_gjj_gguf_clip(clip_name, clip_type)
 
 
 def _split_clip_names(value: str) -> list[str]:
@@ -1207,15 +1298,23 @@ class GJJ_ModelBundleLoader:
             clip_type = "flux"
             if len(clip_names) < 2:
                 raise RuntimeError("Flux 1 双 CLIP 需要同时提供 clip_l 与 T5 XXL 编码器。")
-        clip_names = [_resolve_model_name(("text_encoders", "clip"), name) for name in clip_names]
+        clip_categories = ("clip_gguf", "text_encoders", "clip")
+        clip_names = [_resolve_model_name(clip_categories, name) for name in clip_names]
         vae_name = _resolve_model_name(("vae",), vae_name)
 
         unet_path = _resolve_full_path(unet_categories, unet_name)
         _raise_if_unsupported_boogu_diffusion(unet_path, clip_type)
-        model = comfy.sd.load_diffusion_model(unet_path, model_options=_build_unet_model_options(unet_dtype))
+        if _is_gguf_model(unet_name):
+            model = _load_unet_gguf(unet_name)
+        else:
+            model = comfy.sd.load_diffusion_model(unet_path, model_options=_build_unet_model_options(unet_dtype))
 
-        clip_paths = [_resolve_full_path(("text_encoders", "clip"), name) for name in clip_names]
-        if _normalize_text(clip_type) == "boogu":
+        clip_paths = [_resolve_full_path(clip_categories, name) for name in clip_names]
+        if any(_is_gguf_model(name) for name in clip_names):
+            if len(clip_names) != 1:
+                raise RuntimeError("当前模型包加载器暂不支持多个 CLIP 中混用 GGUF；请使用单个 GGUF 文本编码器，或改用 safetensors 双 CLIP。")
+            clip = _load_clip_gguf(clip_names[0], clip_type)
+        elif _normalize_text(clip_type) == "boogu":
             clip = _load_boogu_clip_compatible(clip_paths, clip_dtype, clip_device)
         else:
             clip = comfy.sd.load_clip(
@@ -1378,7 +1477,11 @@ class GJJ_ModelBundleLoader:
                 vae_name = preset_vae_name
         if not str(unet_name or "").strip():
             raise RuntimeError("扩散模型不能为空。")
-        categories = ("checkpoints", "diffusion_models") if model_category == "checkpoints" else ("diffusion_models", "checkpoints")
+        categories = (
+            ("checkpoints", "unet_gguf", "diffusion_models")
+            if model_category == "checkpoints"
+            else ("unet_gguf", "diffusion_models", "checkpoints")
+        )
         main_category, resolved_unet_name = _resolve_model_name_and_category(categories, unet_name)
         manual_flux_split = (
             main_category != "checkpoints"

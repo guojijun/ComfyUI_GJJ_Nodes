@@ -4,6 +4,7 @@ import { queueOnlyCurrentNode } from "./gjj_utils.js";
 import { translatePromptText } from "./gjj_common_prompt_translation.js";
 
 const TARGET = "GJJ_QwenInstantXInpaintCanvas";
+const TARGET_IMAGE_EDIT = "GJJ_QwenImageEditInpaintCanvas";
 const NODE_DISPLAY_NAME = "GJJ · 千问2512局部重绘画布";
 const DOM_WIDGET = "gjj_qwen_instantx_inpaint_canvas_dom";
 const PROP_NODE_SIZE = "gjj_qwen_instantx_inpaint_canvas_node_size";
@@ -58,6 +59,8 @@ const TOOL_ICONS = Object.freeze({
 	layerAdd: "➕",
 	layerUp: "🔼",
 	layerDown: "🔽",
+	layerVisible: "👁️",
+	layerHidden: "🙈",
 	layerDelete: "🗑️",
 });
 
@@ -89,6 +92,18 @@ const SELECT_FIELDS = Object.freeze([
 	FIELD.sampler,
 	FIELD.scheduler,
 ]);
+
+function isTargetNode(node) {
+	return node?.comfyClass === TARGET || node?.type === TARGET || node?.comfyClass === TARGET_IMAGE_EDIT || node?.type === TARGET_IMAGE_EDIT;
+}
+
+function isTargetNodeData(nodeData) {
+	return nodeData?.name === TARGET || nodeData?.name === TARGET_IMAGE_EDIT;
+}
+
+function isImageEditNode(node) {
+	return node?.comfyClass === TARGET_IMAGE_EDIT || node?.type === TARGET_IMAGE_EDIT;
+}
 
 function setButtonContent(button, content) {
 	if (!button) return;
@@ -450,7 +465,7 @@ function ensureStyles() {
 		.gjj-qwen-inpaint-layer-shortcuts { display:flex; align-items:center; gap:2px; flex:0 1 auto; max-width:220px; overflow:hidden; flex-wrap:wrap; }
 		.gjj-qwen-inpaint .gjj-qwen-inpaint-layer-shortcut { flex:0 0 26px; width:26px; min-width:26px; height:26px; border-radius:6px; font-size:16px; background:#151f25; border-color:#354852; opacity:.92; }
 		.gjj-qwen-inpaint .gjj-qwen-inpaint-layer-shortcut.active { background:#21332d; box-shadow:0 0 0 1px rgba(84,199,139,.55) inset; }
-		.gjj-qwen-inpaint .gjj-qwen-inpaint-layer-shortcut.hidden { opacity:.34; filter:grayscale(1); background:#12181c; border-color:#27343a; }
+		.gjj-qwen-inpaint .gjj-qwen-inpaint-layer-shortcut.hidden { opacity:.72; filter:grayscale(.75); background:#12181c; border-color:#43535b; }
 		.gjj-qwen-inpaint-prompt { display:grid; grid-template-columns:minmax(78px, 92px) minmax(0, 1fr) 32px; gap:6px; align-items:stretch; }
 		.gjj-qwen-inpaint-label { color:#b8c7ca; font-size:12px; display:flex; align-items:center; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 		.gjj-qwen-inpaint textarea { width:100%; min-width:0; height:46px; min-height:46px; max-height:120px; resize:vertical; border:1px solid #354852; border-radius:6px; background:#151f25; color:#e5edf2; padding:6px 8px; font:12px/1.35 Arial, sans-serif; outline:none; }
@@ -472,7 +487,7 @@ function ensureStyles() {
 		.gjj-qwen-model-popup-item.selected { background:#18352f; border-color:#2f7d67; color:#e8fff6; }
 		.gjj-qwen-model-popup-empty { color:#8da2ad; font-size:11px; padding:4px 2px; }
 		.gjj-qwen-inpaint-pair { display:grid; grid-template-columns:1fr 1fr; gap:6px; min-width:0; }
-		.gjj-qwen-inpaint-layers { display:grid; grid-template-columns:minmax(0, 1fr) repeat(4, 32px); gap:4px; align-items:center; }
+		.gjj-qwen-inpaint-layers { display:grid; grid-template-columns:minmax(0, 1fr) repeat(5, 32px); gap:4px; align-items:center; }
 		.gjj-qwen-inpaint-layer-select { width:100%; min-width:0; height:30px; border:1px solid #354852; border-radius:7px; background:#151f25; color:#dcecee; padding:0 8px; font:12px Arial, sans-serif; outline:none; }
 		.gjj-qwen-inpaint-layer-select:focus { border-color:#54c78b; }
 		.gjj-qwen-inpaint-canvas-wrap { width:100%; position:relative; overflow:hidden; border:1px solid #33464e; border-radius:8px; background:#071014; display:flex; align-items:center; justify-content:center; touch-action:none; }
@@ -611,6 +626,7 @@ class QwenInpaintEditor {
 			add: this.makeButton(TOOL_ICONS.layerAdd, "新建透明图层", () => this.addLayer()),
 			up: this.makeButton(TOOL_ICONS.layerUp, "当前图层上移", () => this.moveActiveLayer(1)),
 			down: this.makeButton(TOOL_ICONS.layerDown, "当前图层下移", () => this.moveActiveLayer(-1)),
+			visible: this.makeButton(TOOL_ICONS.layerVisible, "隐藏当前图层", () => this.toggleActiveLayerVisible()),
 			delete: this.makeButton(TOOL_ICONS.layerDelete, "删除当前图层", () => this.deleteActiveLayer()),
 		};
 		this.layerPanel.append(
@@ -618,6 +634,7 @@ class QwenInpaintEditor {
 			this.layerButtons.add,
 			this.layerButtons.up,
 			this.layerButtons.down,
+			this.layerButtons.visible,
 			this.layerButtons.delete,
 		);
 	}
@@ -627,8 +644,8 @@ class QwenInpaintEditor {
 		this.promptPanel.className = "gjj-qwen-inpaint-prompt";
 		const label = document.createElement("div");
 		label.className = "gjj-qwen-inpaint-label";
-		label.textContent = "正向提示词";
-		this.promptInput = this.makeTextarea("正向提示词");
+		label.textContent = isImageEditNode(this.node) ? "修改内容" : "正向提示词";
+		this.promptInput = this.makeTextarea(isImageEditNode(this.node) ? "只填写灰色遮罩区域要改成的内容" : "正向提示词");
 		this.buttons.translate = this.makeButton(TOOL_ICONS.translate, "翻译正向提示词", () => this.translatePrompt());
 		this.promptPanel.append(label, this.promptInput, this.buttons.translate);
 	}
@@ -1181,7 +1198,7 @@ class QwenInpaintEditor {
 			button.type = "button";
 			button.className = "gjj-qwen-inpaint-layer-shortcut";
 			button.textContent = layerNumberEmoji(index);
-			button.title = `${this.layerLabel(layer, index)}；点击选择并切换显示/隐藏`;
+			button.title = `${this.layerLabel(layer, index)}；点击选择图层，右键切换显示/隐藏`;
 			button.style.color = this.layerColor(index, layer);
 			button.style.borderColor = this.layerColor(index, layer);
 			button.classList.toggle("active", layer.id === this.activeLayerId);
@@ -1193,6 +1210,11 @@ class QwenInpaintEditor {
 				event.preventDefault();
 				event.stopPropagation();
 				this.handleLayerShortcut(layer.id);
+			});
+			button.addEventListener("contextmenu", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				this.handleLayerShortcutVisibility(layer.id);
 			});
 			this.layerShortcutBar.appendChild(button);
 		});
@@ -1249,12 +1271,26 @@ class QwenInpaintEditor {
 		this.layerSelect.style.opacity = active?.visible === false ? "0.56" : "1";
 		this.layerSelect.title = `${active ? this.layerLabel(active, Math.max(0, index)) : "选择图层"}；右键切换显示/隐藏`;
 		this.updateLayerShortcuts();
+		setButtonContent(this.layerButtons.visible, active?.visible === false ? TOOL_ICONS.layerHidden : TOOL_ICONS.layerVisible);
+		this.layerButtons.visible.title = active?.visible === false ? "显示当前图层" : "隐藏当前图层";
+		this.layerButtons.visible.classList.toggle("on", active?.visible !== false);
 		this.layerButtons.up.disabled = index < 0 || index >= this.layers.length - 1;
 		this.layerButtons.down.disabled = index <= 0;
 		this.layerButtons.delete.disabled = this.layers.length <= 1;
 	}
 
 	handleLayerShortcut(id) {
+		const layer = this.layers.find((item) => item.id === id);
+		if (!layer) return;
+		this.storeActiveLayerState();
+		this.activeLayerId = id;
+		this.activateLayerMask(layer, false);
+		this.updateLayerPanel();
+		this.syncState();
+		this.renderStatus("已选择图层");
+	}
+
+	handleLayerShortcutVisibility(id) {
 		const layer = this.layers.find((item) => item.id === id);
 		if (!layer) return;
 		this.storeActiveLayerState();
@@ -2168,7 +2204,7 @@ function scheduleEnsure(node, delay = 0) {
 }
 
 function syncAllInpaintNodes(options = {}) {
-	const nodes = (app.graph?._nodes || []).filter((node) => node?.comfyClass === TARGET || node?.type === TARGET);
+	const nodes = (app.graph?._nodes || []).filter((node) => isTargetNode(node));
 	const mark = Boolean(options?.markGenerating);
 	for (const node of nodes) {
 		ensureEditor(node);
@@ -2189,7 +2225,7 @@ app.registerExtension({
 		syncAllInpaintNodes({ markGenerating: true });
 	},
 	beforeRegisterNodeDef(nodeType, nodeData) {
-		if (nodeData?.name !== TARGET) return;
+		if (!isTargetNodeData(nodeData)) return;
 
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
@@ -2310,11 +2346,11 @@ app.registerExtension({
 		};
 	},
 	nodeCreated(node) {
-		if (node?.comfyClass === TARGET || node?.type === TARGET) scheduleEnsure(node, 0);
+		if (isTargetNode(node)) scheduleEnsure(node, 0);
 	},
 	setup() {
 		for (const node of app.graph?._nodes || []) {
-			if (node?.comfyClass === TARGET || node?.type === TARGET) scheduleEnsure(node, 0);
+			if (isTargetNode(node)) scheduleEnsure(node, 0);
 		}
 	},
 });

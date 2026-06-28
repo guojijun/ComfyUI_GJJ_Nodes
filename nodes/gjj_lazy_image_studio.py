@@ -174,6 +174,51 @@ def _format_runtime_error(stage: str, exc: Exception) -> RuntimeError:
     return RuntimeError(f"{stage}失败。\n详细错误：{exc}")
 
 
+def _clear_torch_and_comfy_cache() -> None:
+    import gc
+
+    gc.collect()
+    try:
+        comfy.model_management.soft_empty_cache()
+    except Exception:
+        pass
+    if hasattr(torch.cuda, "empty_cache"):
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+    if hasattr(torch.cuda, "ipc_collect"):
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+
+
+def _is_memory_allocation_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        needle in text
+        for needle in (
+            "vbar allocation failed",
+            "out of memory",
+            "cuda error: out of memory",
+            "allocation failed",
+            "failed to allocate",
+        )
+    )
+
+
+def _format_memory_allocation_error(exc: Exception, *, unet_name: str, width: Any, height: Any, batch_size: Any) -> RuntimeError:
+    return RuntimeError(
+        "显存/内存分配失败，已尝试释放 LazyImageStudio 缓存。\n"
+        f"UNET：{unet_name}\n"
+        f"输出尺寸：{width} x {height}，批次数：{batch_size}\n"
+        "建议：关闭其它占显存的节点或工作流、降低宽高/批次数、关闭“保持模型”，"
+        "或重启 ComfyUI 后优先运行当前节点。\n"
+        f"详细错误：{exc}"
+    )
+
+
 def _is_flux2_family(unet_name: str | None = "", clip_type: str | None = "") -> bool:
     normalized_unet = _normalize_text(unet_name)
     normalized_clip = _normalize_text(clip_type)
@@ -183,6 +228,16 @@ def _is_flux2_family(unet_name: str | None = "", clip_type: str | None = "") -> 
         or "f2k" in normalized_unet
         or "flux-2" in str(unet_name or "").lower()
         or "klein" in normalized_unet
+    )
+
+
+def _is_krea2_family(unet_name: str | None = "", clip_type: str | None = "") -> bool:
+    normalized_unet = _normalize_text(unet_name)
+    normalized_clip = _normalize_text(clip_type)
+    return (
+        normalized_clip in {"krea", "krea2", "krea2turbo"}
+        or "krea2" in normalized_unet
+        or "krea2turbo" in normalized_unet
     )
 
 
@@ -350,9 +405,24 @@ def _preferred_default(values: list[str], preferred: str) -> str:
 
 def _clip_type_enum(name: str):
     normalized = _normalize_text(name)
-    enum_name = str(name or "").upper()
+    aliases = {
+        "krea": "krea2",
+        "krea2turbo": "krea2",
+    }
+    enum_key = aliases.get(normalized, normalized)
+    enum_name = enum_key.upper()
     clip_type = getattr(comfy.sd.CLIPType, enum_name, None)
-    if clip_type is None and normalized in {"krea", "krea2", "krea2_turbo"}:
+    if clip_type is None:
+        for member_name in dir(comfy.sd.CLIPType):
+            if _normalize_text(member_name) == enum_key:
+                clip_type = getattr(comfy.sd.CLIPType, member_name, None)
+                break
+    if clip_type is None:
+        for candidate in getattr(comfy.sd.CLIPType, "__members__", {}).values():
+            if _normalize_text(getattr(candidate, "name", "")) == enum_key or _normalize_text(getattr(candidate, "value", "")) == enum_key:
+                clip_type = candidate
+                break
+    if clip_type is None and normalized in {"krea", "krea2", "krea2turbo"}:
         raise RuntimeError(
             "当前 ComfyUI 缺少原生 KREA2 CLIP 类型，无法加载 krea2_turbo 的 Qwen3VL 文本编码器。"
             "请更新到包含 CLIPType.KREA2 / Krea2 文本编码支持的 ComfyUI 版本后再使用。"
@@ -426,6 +496,20 @@ def _unwrap_list_input(value: Any) -> Any:
     while isinstance(value, (list, tuple)) and len(value) == 1:
         value = value[0]
     return value
+
+
+def _prompt_batch_items(value: Any) -> list[str]:
+    value = _unwrap_list_input(value)
+    if isinstance(value, (list, tuple)):
+        items: list[str] = []
+        for item in value:
+            item = _unwrap_list_input(item)
+            if isinstance(item, (list, tuple)):
+                items.extend(_prompt_batch_items(item))
+            else:
+                items.append(str(item or ""))
+        return items or [""]
+    return [str(value or "")]
 
 
 def _as_bool(value: Any) -> bool:
@@ -777,6 +861,28 @@ def _load_model_gguf(unet_name: str):
         raise _format_runtime_error("GGUF UNET 加载", exc) from exc
 
 
+def _is_boogu_runtime(unet_name: str, clip_type: str = "") -> bool:
+    return "boogu" in _normalize_text(unet_name) or _normalize_text(clip_type) == "boogu"
+
+
+def _load_model_with_native_unet_loader(unet_name: str, unet_dtype: str):
+    from nodes import UNETLoader
+
+    loader = UNETLoader()
+    for method_name in ("load_unet", "execute"):
+        method = getattr(loader, method_name, None) or getattr(UNETLoader, method_name, None)
+        if method is None:
+            continue
+        try:
+            result = method(unet_name, unet_dtype)
+        except TypeError:
+            result = method(unet_name=unet_name, weight_dtype=unet_dtype)
+        if isinstance(result, (list, tuple)):
+            return result[0]
+        return result
+    raise RuntimeError("当前 ComfyUI 环境缺少可用的 UNETLoader.load_unet。")
+
+
 def _load_model(unet_name: str, unet_dtype: str, clip_type: str = ""):
     if _is_gguf_model(unet_name):
         return _load_model_gguf(unet_name)
@@ -790,17 +896,23 @@ def _load_model(unet_name: str, unet_dtype: str, clip_type: str = ""):
             "UNET", unet_name, ("diffusion_models", "checkpoints"), exc
         ) from exc
     try:
-        _raise_if_unsupported_boogu_diffusion(unet_path, clip_type)
-        model = comfy.sd.load_diffusion_model(
-            unet_path, model_options=_build_unet_model_options(unet_dtype)
-        )
+        if _is_boogu_runtime(unet_name, clip_type):
+            model = _load_model_with_native_unet_loader(unet_name, unet_dtype)
+        else:
+            _raise_if_unsupported_boogu_diffusion(unet_path, clip_type)
+            model = comfy.sd.load_diffusion_model(
+                unet_path, model_options=_build_unet_model_options(unet_dtype)
+            )
         print(f"[DEBUG] Successfully loaded UNET model: {unet_name}")
         # 彩色打印 UNET 信息
         print(f"\033[95m🟣 UNET: {unet_name}\033[0m")
         return model
     except Exception as exc:
         error_text = str(exc)
-        if "shape '[13568, 3360]'" in error_text or ("3360" in error_text and "invalid for input of size" in error_text):
+        if (not _is_boogu_runtime(unet_name, clip_type)) and (
+            "shape '[13568, 3360]'" in error_text
+            or ("3360" in error_text and "invalid for input of size" in error_text)
+        ):
             raise RuntimeError(
                 "检测到 Boogu-Image 主扩散模型加载不兼容。\n"
                 f"当前 UNET：{unet_name}\n"
@@ -1262,6 +1374,23 @@ def _resolve_effective_steps(
     return int(requested_steps)
 
 
+def _standard_queue_images(images: list[Any]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for item in images or []:
+        if not isinstance(item, dict):
+            continue
+        image: dict[str, Any] = {
+            "filename": item.get("filename", ""),
+            "subfolder": item.get("subfolder", ""),
+            "type": item.get("type", "temp"),
+        }
+        for key in ("width", "height", "format"):
+            if item.get(key) not in (None, ""):
+                image[key] = item.get(key)
+        result.append(image)
+    return result
+
+
 class GJJ_LazyImageStudio:
     CATEGORY = "GJJ/Image"
     FUNCTION = "create_image"
@@ -1335,6 +1464,24 @@ class GJJ_LazyImageStudio:
     @classmethod
     def _remember_runtime(cls, key: str, model: Any, clip: Any, vae: Any) -> None:
         cls._shared_runtime_cache[key] = (model, clip, vae)
+
+    @classmethod
+    def _clear_shared_caches(cls, *, runtime: bool = False, results: bool = False) -> None:
+        if runtime:
+            cls._shared_runtime_cache.clear()
+        if results:
+            cls._shared_result_cache.clear()
+            cls._shared_result_order.clear()
+
+    def _release_instance_caches(self, *, runtime: bool = False, loras: bool = False, results: bool = False) -> None:
+        if runtime:
+            self._kept_runtime = None
+            self._clear_shared_caches(runtime=True, results=results)
+        elif results:
+            self._clear_shared_caches(results=True)
+        if loras:
+            self._lora_cache.clear()
+        _clear_torch_and_comfy_cache()
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -2000,7 +2147,8 @@ class GJJ_LazyImageStudio:
         extra_pnginfo=None,
         **kwargs,
     ):
-        prompt = _unwrap_list_input(prompt)
+        prompt_items = _prompt_batch_items(prompt)
+        prompt = prompt_items[0] if prompt_items else ""
         negative_prompt = _unwrap_list_input(negative_prompt)
         main_image_index = _unwrap_list_input(main_image_index)
         width = _unwrap_list_input(width)
@@ -2063,8 +2211,9 @@ class GJJ_LazyImageStudio:
             _send_status(unique_id, f"测试跳过：{first_line}")
             _send_soft_test_error(unique_id, first_line)
             image = _make_soft_error_image(width, height)
+            preview_images = gjjutils_write_temp_tensor_images(image)
             effective_params = {
-                "prompt": str(prompt or ""),
+                "prompt": prompt_items if len(prompt_items) > 1 else str(prompt or ""),
                 "negative_prompt": str(negative_prompt or ""),
                 "main_image_index": int(main_image_index),
                 "width": int(width),
@@ -2086,6 +2235,8 @@ class GJJ_LazyImageStudio:
             return {
                 "ui": {
                     "gjj_lazy_soft_error": [{"message": first_line}],
+                    "gjj_images": preview_images,
+                    "images": _standard_queue_images(preview_images),
                     "effective_params": [effective_params],
                 },
                 "result": (image,),
@@ -2147,15 +2298,14 @@ class GJJ_LazyImageStudio:
                 resolved_clip_names,
                 str(preset.get("clip_type", "stable_diffusion")),
             )
+            if _is_krea2_family(unet_name, resolved_clip_type):
+                resolved_clip_type = "krea2"
             is_flux2_runtime = _is_flux2_family(
                 unet_name,
                 str(resolved_clip_type or preset.get("clip_type", "")),
             )
             if is_flux2_runtime:
                 resolved_clip_type = "flux2"
-            preset = dict(preset)
-            preset["resolved_unet_name"] = str(unet_name or "")
-            preset["resolved_clip_type"] = str(resolved_clip_type or "")
             pairs = [
                 pair
                 for pair in collect_image_pairs(
@@ -2175,6 +2325,9 @@ class GJJ_LazyImageStudio:
                 f"[GJJ] LazyImageStudio 实际接收图片：{len(pairs)} 张"
                 + (f"，张量尺寸 {', '.join(input_shapes)}" if input_shapes else "")
             )
+            preset = dict(preset)
+            preset["resolved_unet_name"] = str(unet_name or "")
+            preset["resolved_clip_type"] = str(resolved_clip_type or "")
 
             normalized_lora_parts = [
                 normalize_lora_chain_data(value)
@@ -2198,7 +2351,7 @@ class GJJ_LazyImageStudio:
             result_key = _cache_digest(
                 {
                     "runtime": runtime_key,
-                    "prompt": str(prompt or ""),
+                    "prompt": prompt_items,
                     "negative_prompt": str(negative_prompt or ""),
                     "main_image_index": int(main_image_index),
                     "width": int(width),
@@ -2224,6 +2377,7 @@ class GJJ_LazyImageStudio:
                     return {
                         "ui": {
                             "gjj_images": cached_result.get("preview_images", []),
+                            "images": _standard_queue_images(cached_result.get("preview_images", [])),
                             "elapsed_time": [0.0],
                             "effective_params": [cached_result.get("effective_params", {})],
                             "cache_hit": [True],
@@ -2237,6 +2391,8 @@ class GJJ_LazyImageStudio:
                 model, clip, vae = cached_runtime
                 _send_status(unique_id, "2/6 复用已保持的模型、CLIP 和 VAE...")
             else:
+                if not keep_model_loaded:
+                    self._release_instance_caches(runtime=True)
                 model, clip, vae = self._load_runtime_pipeline(
                     unet_name,
                     unet_dtype,
@@ -2262,132 +2418,149 @@ class GJJ_LazyImageStudio:
                 if keep_model_loaded:
                     self._remember_runtime(runtime_key, model, clip, vae)
 
-            _send_status(unique_id, "4/6 编码条件与 latent...")
-            flux2_sample_size = None
+            prompt_count = len(prompt_items)
             supports_reference_edit = _supports_multi_reference_edit(
                 preset, unet_name, resolved_clip_type
             )
-            if pairs and resolved_clip_type == "flux2":
-                _send_status(
-                    unique_id, f"4/6 编码 Flux2 图片编辑条件（{len(pairs)} 张）..."
-                )
-                positive, negative, latent_out, flux2_width, flux2_height = (
-                    self._encode_flux2_multi_reference(
+            effective_steps = _resolve_effective_steps(int(steps), preset)
+
+            def generate_one_prompt(prompt_text: str, prompt_index: int) -> tuple[torch.Tensor, int, int]:
+                status_suffix = f"（{prompt_index + 1}/{prompt_count}）" if prompt_count > 1 else ""
+                local_width = int(width)
+                local_height = int(height)
+                flux2_sample_size = None
+
+                _send_status(unique_id, f"4/6 编码条件与 latent{status_suffix}...")
+                if pairs and resolved_clip_type == "flux2":
+                    _send_status(
+                        unique_id,
+                        f"4/6 编码 Flux2 图片编辑条件{status_suffix}（{len(pairs)} 张）...",
+                    )
+                    positive, negative, latent_out, flux2_width, flux2_height = (
+                        self._encode_flux2_multi_reference(
+                            clip=clip,
+                            vae=vae,
+                            prompt=prompt_text,
+                            negative_prompt=negative_prompt,
+                            main_image_index=main_image_index,
+                            pairs=pairs,
+                            width=local_width,
+                            height=local_height,
+                            batch_size=int(batch_size),
+                            preset=preset,
+                        )
+                    )
+                    flux2_sample_size = (int(flux2_width), int(flux2_height))
+                elif (
+                    pairs
+                    and mask is None
+                    and supports_reference_edit
+                    and (
+                        _uses_equal_reference_canvas(preset, unet_name)
+                        or (len(pairs) > 1 and _is_qwen_image_edit_family(preset, unet_name))
+                    )
+                ):
+                    _send_status(
+                        unique_id,
+                        f"4/6 编码平等参考条件{status_suffix}（{len(pairs)} 张，按设置尺寸创建空 latent）...",
+                    )
+                    positive, negative, latent_out, equal_width, equal_height = (
+                        self._encode_equal_reference_image_edit(
+                            clip=clip,
+                            vae=vae,
+                            prompt=prompt_text,
+                            negative_prompt=negative_prompt,
+                            pairs=pairs,
+                            vl_long_edge=int(preset.get("vl_long_edge", 512)),
+                            target_width=local_width,
+                            target_height=local_height,
+                            batch_size=int(batch_size),
+                        )
+                    )
+                    local_width = int(equal_width)
+                    local_height = int(equal_height)
+                elif pairs and supports_reference_edit:
+                    positive, negative, latent_out = self._encode_multi_image_edit(
                         clip=clip,
                         vae=vae,
-                        prompt=prompt,
+                        prompt=prompt_text,
                         negative_prompt=negative_prompt,
                         main_image_index=main_image_index,
                         pairs=pairs,
-                        width=int(width),
-                        height=int(height),
-                        batch_size=int(batch_size),
-                        preset=preset,
-                    )
-                )
-                flux2_sample_size = (int(flux2_width), int(flux2_height))
-            elif (
-                pairs
-                and mask is None
-                and supports_reference_edit
-                and (
-                    _uses_equal_reference_canvas(preset, unet_name)
-                    or (len(pairs) > 1 and _is_qwen_image_edit_family(preset, unet_name))
-                )
-            ):
-                _send_status(
-                    unique_id,
-                    f"4/6 编码平等参考条件（{len(pairs)} 张，按设置尺寸创建空 latent）...",
-                )
-                positive, negative, latent_out, equal_width, equal_height = (
-                    self._encode_equal_reference_image_edit(
-                        clip=clip,
-                        vae=vae,
-                        prompt=prompt,
-                        negative_prompt=negative_prompt,
-                        pairs=pairs,
+                        main_mask=mask,
+                        main_long_edge=int(preset.get("main_long_edge", 1024)),
                         vl_long_edge=int(preset.get("vl_long_edge", 512)),
-                        target_width=int(width),
-                        target_height=int(height),
-                        batch_size=int(batch_size),
+                        target_width=local_width,
+                        target_height=local_height,
+                        disable_auto_noise_mask=bool(disable_reference_auto_mask),
                     )
-                )
-                width = int(equal_width)
-                height = int(equal_height)
-            elif pairs and supports_reference_edit:
-                positive, negative, latent_out = self._encode_multi_image_edit(
-                    clip=clip,
-                    vae=vae,
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
-                    main_image_index=main_image_index,
-                    pairs=pairs,
-                    main_mask=mask,
-                    main_long_edge=int(preset.get("main_long_edge", 1024)),
-                    vl_long_edge=int(preset.get("vl_long_edge", 512)),
-                    target_width=int(width),
-                    target_height=int(height),
-                    disable_auto_noise_mask=bool(disable_reference_auto_mask),
-                )
-            else:
-                positive = self._encode_text_conditioning(clip, prompt)
-                negative = self._encode_negative_conditioning(
-                    clip, positive, negative_prompt
-                )
-                latent_out = self._build_latent(
-                    vae=vae,
-                    width=width,
-                    height=height,
-                    batch_size=batch_size,
-                    image_pairs=pairs,
-                    mask=mask,
-                    grow_mask_by=grow_mask_by,
-                    preset=preset,
-                    disable_auto_mask=bool(disable_reference_auto_mask),
-                )
+                else:
+                    positive = self._encode_text_conditioning(clip, prompt_text)
+                    negative = self._encode_negative_conditioning(
+                        clip, positive, negative_prompt
+                    )
+                    latent_out = self._build_latent(
+                        vae=vae,
+                        width=local_width,
+                        height=local_height,
+                        batch_size=batch_size,
+                        image_pairs=pairs,
+                        mask=mask,
+                        grow_mask_by=grow_mask_by,
+                        preset=preset,
+                        disable_auto_mask=bool(disable_reference_auto_mask),
+                    )
 
-            _send_status(unique_id, "5/6 采样生成图像...")
-            positive = _limit_conditioning_batch(positive, int(batch_size))
-            negative = _limit_conditioning_batch(negative, int(batch_size))
-            effective_steps = _resolve_effective_steps(
-                int(steps),
-                preset,
-            )
-            if flux2_sample_size is not None:
-                flux2_width, flux2_height = flux2_sample_size
-                _send_status(
-                    unique_id,
-                    f"5/6 按 Flux2 工作流采样（{flux2_width} x {flux2_height}）...",
-                )
-                sampled_latent = self._sample_flux2_reference_workflow(
-                    model=model,
-                    positive=positive,
-                    negative=negative,
-                    latent_out=latent_out,
-                    width=flux2_width,
-                    height=flux2_height,
-                    steps=effective_steps,
-                    seed=int(seed),
-                    cfg=float(cfg),
-                    sampler_name=str(preset.get("sampler_name", "lcm") or "lcm"),
-                )
-            else:
-                sampled_latent = common_ksampler(
-                    model,
-                    int(seed),
-                    effective_steps,
-                    float(cfg),
-                    sampler_name,
-                    scheduler,
-                    positive,
-                    negative,
-                    latent_out,
-                    denoise=float(denoise),
-                )[0]
+                _send_status(unique_id, f"5/6 采样生成图像{status_suffix}...")
+                positive = _limit_conditioning_batch(positive, int(batch_size))
+                negative = _limit_conditioning_batch(negative, int(batch_size))
+                sample_seed = int(seed) + prompt_index if prompt_count > 1 else int(seed)
+                if flux2_sample_size is not None:
+                    flux2_width, flux2_height = flux2_sample_size
+                    _send_status(
+                        unique_id,
+                        f"5/6 按 Flux2 工作流采样{status_suffix}（{flux2_width} x {flux2_height}）...",
+                    )
+                    sampled_latent = self._sample_flux2_reference_workflow(
+                        model=model,
+                        positive=positive,
+                        negative=negative,
+                        latent_out=latent_out,
+                        width=flux2_width,
+                        height=flux2_height,
+                        steps=effective_steps,
+                        seed=sample_seed,
+                        cfg=float(cfg),
+                        sampler_name=str(preset.get("sampler_name", "lcm") or "lcm"),
+                    )
+                else:
+                    sampled_latent = common_ksampler(
+                        model,
+                        sample_seed,
+                        effective_steps,
+                        float(cfg),
+                        sampler_name,
+                        scheduler,
+                        positive,
+                        negative,
+                        latent_out,
+                        denoise=float(denoise),
+                    )[0]
 
-            _send_status(unique_id, "6/6 解码输出图像...")
-            sampled_latent = _limit_latent_batch(sampled_latent, int(batch_size))
-            image = VAEDecode().decode(vae, sampled_latent)[0]
+                _send_status(unique_id, f"6/6 解码输出图像{status_suffix}...")
+                sampled_latent = _limit_latent_batch(sampled_latent, int(batch_size))
+                output_image = VAEDecode().decode(vae, sampled_latent)[0]
+                return output_image, local_width, local_height
+
+            generated_images: list[torch.Tensor] = []
+            final_width = int(width)
+            final_height = int(height)
+            for prompt_index, prompt_text in enumerate(prompt_items):
+                generated_image, final_width, final_height = generate_one_prompt(prompt_text, prompt_index)
+                generated_images.append(generated_image)
+            image = torch.cat(generated_images, dim=0) if len(generated_images) > 1 else generated_images[0]
+            width = int(final_width)
+            height = int(final_height)
 
             # 计算耗时
             end_time = time.time()
@@ -2397,16 +2570,18 @@ class GJJ_LazyImageStudio:
             # 更新状态，显示尺寸和耗时
             _send_status(unique_id, f"完成：{image.shape[2]} x {image.shape[1]}  耗时：{elapsed_str}")
 
-            # 保存预览图片给 GJJ 自定义前端预览；避免使用 ui.images 触发 ComfyUI 原生重复预览。
+            # gjj_images 给节点内自定义预览；images 给 ComfyUI 任务队列/历史缩略图。
             preview_images = gjjutils_write_temp_tensor_images(image)
 
             effective_params = {
-                "prompt": str(prompt or ""),
+                "prompt": prompt_items if len(prompt_items) > 1 else str(prompt or ""),
+                "prompt_batch_count": len(prompt_items),
                 "negative_prompt": str(negative_prompt or ""),
                 "main_image_index": int(main_image_index),
                 "width": int(width),
                 "height": int(height),
                 "batch_size": int(batch_size),
+                "output_batch_size": int(image.shape[0]) if isinstance(image, torch.Tensor) and image.ndim >= 1 else int(batch_size),
                 "unet_name": str(unet_name or ""),
                 "unet_dtype": str(unet_dtype or ""),
                 "clip_name1": str(resolved_clip_names[0] if resolved_clip_names else clip_name1 or ""),
@@ -2425,6 +2600,7 @@ class GJJ_LazyImageStudio:
             result_data = {
                 "ui": {
                     "gjj_images": preview_images,
+                    "images": _standard_queue_images(preview_images),
                     "elapsed_time": [elapsed_time],
                     "effective_params": [effective_params],
                 },
@@ -2434,16 +2610,13 @@ class GJJ_LazyImageStudio:
             if keep_model_loaded:
                 self._kept_runtime = (model, clip, vae)
                 self._remember_result_cache(result_key, image, preview_images, effective_params)
-                del positive, negative, sampled_latent, image
+                del image, generated_images
                 _send_status(unique_id, f"完成：模型保持中  耗时：{elapsed_str}")
             else:
                 self._kept_runtime = None
                 # 及时清理 GPU/CPU 缓存，释放显存供下次调用
-                del model, clip, vae, positive, negative, sampled_latent, image
-                import gc
-                gc.collect()
-                if hasattr(torch.cuda, 'empty_cache'):
-                    torch.cuda.empty_cache()
+                del model, clip, vae, image, generated_images
+                _clear_torch_and_comfy_cache()
 
             # 返回 UI 数据，包含图片和耗时
             return result_data
@@ -2451,11 +2624,34 @@ class GJJ_LazyImageStudio:
             first_line = str(exc).splitlines()[0]
             if soft_test_mode:
                 return soft_error_result(exc)
+            if _is_memory_allocation_error(exc):
+                self._release_instance_caches(runtime=True, loras=True, results=True)
+                formatted = _format_memory_allocation_error(
+                    exc,
+                    unet_name=str(unet_name or ""),
+                    width=width,
+                    height=height,
+                    batch_size=batch_size,
+                )
+                first_line = str(formatted).splitlines()[0]
+                _send_status(unique_id, f"执行失败：{first_line}")
+                raise formatted from exc
             _send_status(unique_id, f"执行失败：{first_line}")
             raise
         except Exception as exc:
             if soft_test_mode:
                 return soft_error_result(exc)
+            if _is_memory_allocation_error(exc):
+                self._release_instance_caches(runtime=True, loras=True, results=True)
+                formatted = _format_memory_allocation_error(
+                    exc,
+                    unet_name=str(unet_name or ""),
+                    width=width,
+                    height=height,
+                    batch_size=batch_size,
+                )
+                _send_status(unique_id, str(formatted).splitlines()[0])
+                raise formatted from exc
             _send_status(unique_id, "执行失败")
             raise RuntimeError(
                 f"懒人图文集成一键生图执行失败。\n"

@@ -1,5 +1,6 @@
 # id	match	title	trigger	strength	summary	source
 id	match	title	trigger	strength	summary	source
+Krea2-realism	Krea2-realism	逼真皮肤		1.0	逼真的皮肤、解剖结构和服装。这台LoRA涵盖所有种族、年龄和体型。它适用于适合适合工作内容和成人内容。权重1.0：通用。1.5到2.0：NSFW。	https://huggingface.co/RudySen/Krea2-realism-V1
 retroanime	retroanime|Krea-2-LoRA-retroanime	复古动画	Purple retro anime style	1.0	紫色复古动画风格，适合角色、动作和蓝调夜景。	https://huggingface.co/krea/Krea-2-LoRA-retroanime
 sunsetblur	sunsetblur|Krea-2-LoRA-sunsetblur	夕照动感虚焦	ethereal motion blur style	1.0	带梦幻运动模糊和夕照氛围，适合速度感和光晕画面。	https://huggingface.co/krea/Krea-2-LoRA-sunsetblur
 vintagetarot	vintagetarot|Krea-2-LoRA-vintagetarot	复古塔罗	vintage tarot style	1.0	老式塔罗牌插画感，适合神秘、人物和象征性构图。	https://huggingface.co/krea/Krea-2-LoRA-vintagetarot
