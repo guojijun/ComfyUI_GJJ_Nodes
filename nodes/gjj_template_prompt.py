@@ -78,11 +78,16 @@ def _placeholder_names(template: Any) -> list[str]:
 
 def _parse_default_expr(expr: Any) -> dict[str, str]:
     source = _normalize_text(expr).strip()
-    match = re.match(r"^(.*?)[(（]\s*([^()（）]+?)\s*[)）]\s*$", source)
-    if not match:
+    if not source.endswith((")", "）")):
         return {"label": source, "default": ""}
-    label = match.group(1).strip()
-    default = match.group(2).strip()
+    open_indexes = [index for index in (source.find("("), source.find("（")) if index >= 0]
+    if not open_indexes:
+        return {"label": source, "default": ""}
+    open_index = min(open_indexes)
+    if open_index <= 0:
+        return {"label": source, "default": ""}
+    label = source[:open_index].strip()
+    default = source[open_index + 1 : -1].strip()
     if not label or not default:
         return {"label": source, "default": ""}
     return {"label": label, "default": default}

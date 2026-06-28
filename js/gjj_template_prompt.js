@@ -61,10 +61,12 @@ function outputLabel(value) {
 
 function parseDefaultExpression(expr) {
 	const source = String(expr || "").trim();
-	const match = source.match(/^(.*?)[(（]\s*([^()（）]+?)\s*[)）]\s*$/);
-	if (!match) return { label: source, defaultValue: "" };
-	const label = String(match[1] || "").trim();
-	const defaultValue = String(match[2] || "").trim();
+	const close = source.endsWith(")") ? ")" : (source.endsWith("）") ? "）" : "");
+	if (!close) return { label: source, defaultValue: "" };
+	const openIndex = [...source].findIndex((char) => char === "(" || char === "（");
+	if (openIndex <= 0) return { label: source, defaultValue: "" };
+	const label = source.slice(0, openIndex).trim();
+	const defaultValue = source.slice(openIndex + 1, -1).trim();
 	if (!label || !defaultValue) return { label: source, defaultValue: "" };
 	return { label, defaultValue };
 }
