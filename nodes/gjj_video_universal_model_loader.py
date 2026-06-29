@@ -50,9 +50,11 @@ except Exception:  # pragma: no cover - keeps standalone syntax checks lightweig
     get_report_from_exception = None
 
 NODE_NAME = "GJJ_VideoUniversalModelLoader"
+NODE_DISPLAY_NAME = "GJJ·🔵🟡🔴 智能视频模型加载🎞️官方流"
 LIST_API = "/gjj/video_universal_loader_lists"
 MAX_SLOTS = 12
 WAN_RUNTIME_ARGS_TYPE = "WANCOMPILEARGS,BLOCKSWAPARGS,VRAM_MANAGEMENTARGS"
+GGUF_PACKAGE_SPEC = "gguf>=0.13.0"
 
 DTYPES = ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"]
 WEIGHT_DTYPES = ["bf16", "fp16", "fp32"]
@@ -206,6 +208,18 @@ def _ensure_model_folder(folder_name: str) -> None:
         existing[folder_name] = (paths, MODEL_EXTENSIONS)
 
 
+def _ensure_folder_extensions(folder_name: str, extensions: set[str]) -> None:
+    existing = getattr(folder_paths, "folder_names_and_paths", {})
+    current = existing.get(folder_name)
+    if not current:
+        return
+    paths, exts = current
+    ext_set = set(exts or [])
+    merged = ext_set | set(extensions or set())
+    if merged != ext_set:
+        existing[folder_name] = (paths, merged)
+
+
 def _ensure_unet_gguf_folder() -> None:
     existing = getattr(folder_paths, "folder_names_and_paths", {})
     for target in ("diffusion_models", "unet"):
@@ -229,6 +243,7 @@ def _ensure_unet_gguf_folder() -> None:
         existing["unet_gguf"] = ([os.path.join(models_dir, "diffusion_models")], {".gguf"})
 
 
+_ensure_folder_extensions("checkpoints", {".gguf"})
 _ensure_unet_gguf_folder()
 _ensure_model_folder("sam2")
 
@@ -893,6 +908,66 @@ def _raise_wanvideo_runtime_dependency_error(original_error: Any = "", unique_id
     raise RuntimeError("\n".join(lines))
 
 
+def _build_gguf_dependency_report(model_name: str, original_error: Any = "", model_kind: str = "模型") -> dict[str, Any]:
+    if callable(build_dependency_model_report):
+        report = build_dependency_model_report(
+            node_name=NODE_DISPLAY_NAME,
+            missing_dependencies=[
+                {
+                    "module_name": "gguf",
+                    "package_name": GGUF_PACKAGE_SPEC,
+                    "display_name": "gguf",
+                    "description": f"读取 .gguf {model_kind} 权重时需要；safetensors 模型不需要此依赖。",
+                }
+            ],
+            install_packages=[GGUF_PACKAGE_SPEC],
+            description=(
+                f"当前 {model_kind} 选择的是 GGUF 模型：{model_name}\n"
+                "GJJ 已内置 GGUF UNET 加载器，不需要安装 ComfyUI-GGUF 第三方节点。\n"
+                "只需要安装/升级 gguf Python 依赖；或者改用 safetensors 模型。"
+            ),
+            original_error=str(original_error or ""),
+        )
+    else:
+        report = {
+            "panel_message": (
+                f"检测到 GGUF {model_kind}：{model_name}\n"
+                f"当前 ComfyUI Python 缺少 gguf 依赖，请安装 {GGUF_PACKAGE_SPEC} 后重启 ComfyUI。"
+            ),
+            "original_error": str(original_error or ""),
+        }
+    report["warning_message"] = "⚠️缺失 gguf 依赖，点击按钮复制安装命令。"
+    report["description_message"] = report["warning_message"]
+    report["copy_label"] = "📋 复制安装 gguf 依赖命令"
+    report["model_download_url"] = ""
+    return report
+
+
+def _raise_gguf_dependency_missing(
+    model_name: str,
+    unique_id: Any = None,
+    original_error: Any = "",
+    model_kind: str = "模型",
+) -> None:
+    report = _build_gguf_dependency_report(model_name, original_error, model_kind=model_kind)
+    if callable(print_dependency_model_report):
+        print_dependency_model_report(report, title="GJJ 视频通用加载器 GGUF 依赖缺失！")
+    if callable(send_dependency_model_notice):
+        send_dependency_model_notice(report, unique_id=unique_id)
+    err = RuntimeError(
+        f"检测到 GGUF {model_kind}，但当前 ComfyUI Python 缺少 gguf 依赖。"
+        "请点击面板按钮复制安装命令，或改用 safetensors 模型。"
+    )
+    setattr(err, "gjj_report", report)
+    raise err
+
+
+def _ensure_gguf_dependency(model_name: str, unique_id: Any = None, model_kind: str = "模型") -> None:
+    gguf_module = ensure_optional_gguf_module()
+    if getattr(gguf_module, "_GJJ_OPTIONAL_RUNTIME_STUB", False):
+        _raise_gguf_dependency_missing(model_name, unique_id=unique_id, model_kind=model_kind)
+
+
 def _format_slot_runtime_error(
     cfg_label: str,
     slot: dict[str, Any],
@@ -946,8 +1021,32 @@ def _filename_list(kind: str) -> list[str]:
         except Exception:
             return []
 
+    def scan_ext(folder: str, extensions: tuple[str, ...]) -> list[str]:
+        found: list[str] = []
+        try:
+            roots = folder_paths.get_folder_paths(folder)
+        except Exception:
+            roots = []
+        for root in roots or []:
+            root_path = os.path.normpath(str(root or ""))
+            if not root_path or not os.path.isdir(root_path):
+                continue
+            for dirpath, _, filenames in os.walk(root_path):
+                for filename in filenames:
+                    if not filename.lower().endswith(extensions):
+                        continue
+                    full_path = os.path.join(dirpath, filename)
+                    try:
+                        rel = os.path.relpath(full_path, root_path)
+                    except Exception:
+                        rel = filename
+                    found.append(rel.replace(os.sep, "/"))
+        return found
+
     if kind == "diffusion_models":
-        return _dedupe(read("unet_gguf") + read("diffusion_models"))
+        return _dedupe(read("unet_gguf") + read("diffusion_models") + scan_ext("diffusion_models", (".gguf",)))
+    if kind == "checkpoints":
+        return _dedupe(read("checkpoints") + scan_ext("checkpoints", (".gguf",)))
     return read(kind)
 
 
@@ -963,6 +1062,10 @@ def _filename_list_for_folders(folders: list[str] | tuple[str, ...] | str) -> li
                 result.append(name)
                 seen.add(key)
     return result
+
+
+def _is_gguf_model(value: Any) -> bool:
+    return str(value or "").replace("\\", "/").lower().endswith(".gguf")
 
 
 def _is_usable_file(name: str, allow_any: bool = False) -> bool:
@@ -1298,7 +1401,66 @@ def _torch_dtype(dtype: str):
     }.get(value)
 
 
-def _load_diffusion_model(model_name: str, weight_dtype: str = "default"):
+def _load_unet_gguf(model_name: str, unique_id: Any = None):
+    _ensure_gguf_dependency(model_name, unique_id=unique_id, model_kind="UNET")
+    try:
+        from ..vendor.gjj_gguf_runtime import load_unet_gguf as load_gjj_gguf_unet
+    except ImportError:
+        from vendor.gjj_gguf_runtime import load_unet_gguf as load_gjj_gguf_unet
+    try:
+        return load_gjj_gguf_unet(model_name)
+    except ModuleNotFoundError as exc:
+        if getattr(exc, "name", "") == "gguf":
+            _raise_gguf_dependency_missing(model_name, unique_id=unique_id, original_error=exc, model_kind="UNET")
+        raise
+    except Exception as exc:
+        error_text = str(exc)
+        if "No module named 'gguf'" in error_text or "需要先安装 gguf" in error_text:
+            _raise_gguf_dependency_missing(model_name, unique_id=unique_id, original_error=exc, model_kind="UNET")
+        raise RuntimeError(f"GJJ 内置 GGUF UNET 加载失败：{model_name}\n{exc}") from exc
+
+
+def _load_ltx_checkpoint_gguf(ckpt_name: str, unique_id: Any = None) -> tuple[Any, Any, Any]:
+    _ensure_gguf_dependency(ckpt_name, unique_id=unique_id, model_kind="LTX checkpoint")
+    try:
+        from ..vendor.gjj_gguf_runtime import load_ltx_checkpoint_gguf as load_gjj_ltx_checkpoint_gguf
+    except ImportError:
+        from vendor.gjj_gguf_runtime import load_ltx_checkpoint_gguf as load_gjj_ltx_checkpoint_gguf
+    try:
+        return load_gjj_ltx_checkpoint_gguf(ckpt_name)
+    except ModuleNotFoundError as exc:
+        if getattr(exc, "name", "") == "gguf":
+            _raise_gguf_dependency_missing(ckpt_name, unique_id=unique_id, original_error=exc, model_kind="LTX checkpoint")
+        raise
+    except Exception as exc:
+        error_text = str(exc)
+        if "No module named 'gguf'" in error_text or "需要先安装 gguf" in error_text:
+            _raise_gguf_dependency_missing(ckpt_name, unique_id=unique_id, original_error=exc, model_kind="LTX checkpoint")
+        raise RuntimeError(f"GJJ 内置 GGUF LTX checkpoint 加载失败：{ckpt_name}\n{exc}") from exc
+
+
+def _load_ltxav_text_encoder_gguf(text_encoder_name: str, ckpt_name: str, device: str = "default", unique_id: Any = None):
+    _ensure_gguf_dependency(ckpt_name, unique_id=unique_id, model_kind="LTXAV text encoder checkpoint")
+    try:
+        from ..vendor.gjj_gguf_runtime import load_ltxav_text_encoder_gguf as load_gjj_ltxav_text_encoder_gguf
+    except ImportError:
+        from vendor.gjj_gguf_runtime import load_ltxav_text_encoder_gguf as load_gjj_ltxav_text_encoder_gguf
+    try:
+        return load_gjj_ltxav_text_encoder_gguf(text_encoder_name, ckpt_name, device)
+    except ModuleNotFoundError as exc:
+        if getattr(exc, "name", "") == "gguf":
+            _raise_gguf_dependency_missing(ckpt_name, unique_id=unique_id, original_error=exc, model_kind="LTXAV text encoder checkpoint")
+        raise
+    except Exception as exc:
+        error_text = str(exc)
+        if "No module named 'gguf'" in error_text or "需要先安装 gguf" in error_text:
+            _raise_gguf_dependency_missing(ckpt_name, unique_id=unique_id, original_error=exc, model_kind="LTXAV text encoder checkpoint")
+        raise RuntimeError(f"GJJ 内置 GGUF LTXAV 文本编码器加载失败：{text_encoder_name} + {ckpt_name}\n{exc}") from exc
+
+
+def _load_diffusion_model(model_name: str, weight_dtype: str = "default", unique_id: Any = None):
+    if _is_gguf_model(model_name):
+        return _load_unet_gguf(model_name, unique_id=unique_id)
     path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
     dtype = _torch_dtype(weight_dtype)
     if dtype is not None:
@@ -1312,8 +1474,10 @@ def _load_diffusion_model(model_name: str, weight_dtype: str = "default"):
     return comfy.sd.load_diffusion_model(path)
 
 
-def _load_unet_model(model_name: str, weight_dtype: str = "default"):
+def _load_unet_model(model_name: str, weight_dtype: str = "default", unique_id: Any = None):
     """Prefer the official UNETLoader shape used by the KJ workflow."""
+    if _is_gguf_model(model_name):
+        return _load_unet_gguf(model_name, unique_id=unique_id)
     import importlib
 
     official_dtype = str(weight_dtype or "default").strip()
@@ -1329,11 +1493,18 @@ def _load_unet_model(model_name: str, weight_dtype: str = "default"):
                 return _unwrap_loader_output(fn(model_name))
     except Exception:
         pass
-    return _load_diffusion_model(model_name, weight_dtype)
+    return _load_diffusion_model(model_name, weight_dtype, unique_id=unique_id)
 
 
-def _load_checkpoint_parts(ckpt_name: str, cache: dict[str, tuple[Any, Any, Any]]) -> tuple[Any, Any, Any]:
+def _load_checkpoint_parts(
+    ckpt_name: str,
+    cache: dict[str, tuple[Any, Any, Any]],
+    unique_id: Any = None,
+) -> tuple[Any, Any, Any]:
     if ckpt_name in cache:
+        return cache[ckpt_name]
+    if _is_gguf_model(ckpt_name):
+        cache[ckpt_name] = _load_ltx_checkpoint_gguf(ckpt_name, unique_id=unique_id)
         return cache[ckpt_name]
     path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
     try:
@@ -2184,6 +2355,8 @@ def _load_ltx_audio_vae(ckpt_name: str):
     universal loader does not hard-fail just because the optional official
     loader module is missing.
     """
+    if _is_gguf_model(ckpt_name):
+        return _load_ltx_checkpoint_gguf(ckpt_name)[2]
     try:
         return _call_loader_class([
             "comfy_extras.nodes_lt_audio",
@@ -2233,6 +2406,8 @@ def _load_ltxav_text_encoder(text_encoder_name: str, ckpt_name: str, device: str
     """
     import importlib
     errors: list[str] = []
+    if _is_gguf_model(ckpt_name):
+        return _load_ltxav_text_encoder_gguf(text_encoder_name, ckpt_name, device)
     for mod_name in ["comfy_extras.nodes_lt_audio", "nodes"]:
         try:
             mod = importlib.import_module(mod_name)
@@ -2666,7 +2841,8 @@ class GJJ_VideoUniversalModelLoader:
                     selected_name=selected,
                 )
 
-            resolved_names[str(slot.get("id", f"slot_{index}"))] = name
+            slot_id = str(slot.get("id", f"slot_{index}"))
+            resolved_names[slot_id] = name
             slot, dtype = _apply_name_derived_settings(slot, kind, name, dtype)
 
             if _is_lora_slot(slot):
@@ -2684,9 +2860,9 @@ class GJJ_VideoUniversalModelLoader:
             try:
                 if kind == "diffusion":
                     if loader_kind == "unet":
-                        value = _load_unet_model(name, dtype)
+                        value = _load_unet_model(name, dtype, unique_id=unique_id)
                     else:
-                        value = _load_diffusion_model(name, dtype)
+                        value = _load_diffusion_model(name, dtype, unique_id=unique_id)
                 elif kind == "wanvideo_model":
                     value = _load_wanvideo_model(
                         name,
@@ -2699,11 +2875,11 @@ class GJJ_VideoUniversalModelLoader:
                         unique_id=unique_id,
                     )
                 elif kind == "checkpoint_model":
-                    value = _load_checkpoint_parts(name, ckpt_cache)[0]
+                    value = _load_checkpoint_parts(name, ckpt_cache, unique_id=unique_id)[0]
                 elif kind == "checkpoint_clip":
-                    value = _load_checkpoint_parts(name, ckpt_cache)[1]
+                    value = _load_checkpoint_parts(name, ckpt_cache, unique_id=unique_id)[1]
                 elif kind == "checkpoint_vae":
-                    value = _load_checkpoint_parts(name, ckpt_cache)[2]
+                    value = _load_checkpoint_parts(name, ckpt_cache, unique_id=unique_id)[2]
                 elif kind == "vae":
                     loader_kind = str(slot.get("loader", "") or "").lower()
                     if loader_kind == "gjj_vae":
@@ -2861,4 +3037,4 @@ class GJJ_VideoUniversalModelLoader:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_VideoUniversalModelLoader}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ·🔵🟡🔴 智能视频模型加载🎞️官方流"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: NODE_DISPLAY_NAME}

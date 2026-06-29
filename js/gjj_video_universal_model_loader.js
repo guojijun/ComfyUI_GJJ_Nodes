@@ -841,6 +841,7 @@ function slotSearchFolders(slot, fallbackFolder = "") {
 	const extra = slot?.search_folders;
 	if (typeof extra === "string") values.push(extra);
 	else if (Array.isArray(extra)) values.push(...extra);
+	if (values.includes("diffusion_models")) values.push("unet_gguf");
 	if (String(slot?.kind || "").toLowerCase() === "latent_upscale_model") {
 		values.push("latent_upscale_models", "upscale_models");
 	}

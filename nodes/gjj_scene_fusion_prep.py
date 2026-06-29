@@ -41,7 +41,7 @@ from .common_utils.model_manager import gjjutils_resolve_model_name
 
 
 NODE_NAME = "GJJ_SceneFusionPrep"
-NODE_DISPLAY_NAME = "GJJ · 🧍 人景融合准备"
+NODE_DISPLAY_NAME = "GJJ · 🧍 人景融合单节点"
 BACKGROUND_UPLOAD_WIDGET = "background_upload"
 PERSON_UPLOADS_WIDGET = "person_uploads_json"
 CUTOUT_PREVIEW_WIDGET = "cutout_preview_only"
@@ -182,7 +182,7 @@ def _rmbg14_model_spec() -> dict[str, str]:
     return make_missing_model_spec(
         label="RMBG1.4 模型",
         subdir="RMBG",
-        filename="rmbg1.4.pth",
+        filename="rmbg1.4.safetensors",
         description="节点内部给人物去背景使用的默认模型。",
     )
 
@@ -821,15 +821,28 @@ def _apply_cfg_norm(model: Any, strength: float, pre_cfg: bool, unique_id: Any =
     node_class = _try_node_class("CFGNorm", ("comfy_extras.nodes_cfg", "comfy_extras.nodes_model_advanced", "nodes"))
     if node_class is None:
         raise RuntimeError("当前 ComfyUI 环境缺少标准 CFGNorm 节点，无法按 TTT 工作流执行二阶段。")
-    result = _call_workflow_node_method(
-        node_class(),
-        "patch",
-        "execute",
-        "apply",
-        model=model,
-        strength=strength,
-        pre_cfg=bool(pre_cfg),
-    )
+    node = node_class()
+    try:
+        result = _call_workflow_node_method(
+            node,
+            "patch",
+            "execute",
+            "apply",
+            model=model,
+            strength=strength,
+            pre_cfg=bool(pre_cfg),
+        )
+    except TypeError as exc:
+        if "pre_cfg" not in str(exc):
+            raise
+        result = _call_workflow_node_method(
+            node,
+            "patch",
+            "execute",
+            "apply",
+            model=model,
+            strength=strength,
+        )
     patched = _use_model_result(model, result, "CFGNorm", unique_id)
     _send_status(unique_id, "CFGNorm:CFGNorm", 0.63)
     return patched
@@ -1021,9 +1034,9 @@ class GJJ_SceneFusionPrep:
         "model_tree": [
             {
                 "label": "RMBG1.4 模型",
-                "path": "models/RMBG/rmbg1.4.pth",
+                "path": "models/RMBG/rmbg1.4.safetensors",
                 "folder": "RMBG",
-                "filename": "rmbg1.4.pth",
+                "filename": "rmbg1.4.safetensors",
                 "kind": "background_removal",
                 "tooltip": "用于自动去除人物背景，生成白底人物色框参考图。",
             },
@@ -1032,7 +1045,7 @@ class GJJ_SceneFusionPrep:
         "models": [
             {
                 "label": "RMBG1.4 模型",
-                "path": "models/RMBG/rmbg1.4.pth",
+                "path": "models/RMBG/rmbg1.4.safetensors",
                 "folder": "RMBG",
                 "kind": "background_removal",
                 "tooltip": "用于自动去除人物背景，生成白底人物色框参考图。",

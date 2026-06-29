@@ -23,7 +23,7 @@ ltx23_distilled_dynamic_fro09_avg_hyphen	ltx-2.3-22b-distilled-1.1_lora-dynamic_
 ltx23_distilled_384	ltx-2.3-22b-distilled-lora-384-1.1|蒸馏加速|强度0.6	LTX 2.3 蒸馏加速 384		0.6	LTX 2.3 22B 384 蒸馏加速 LoRA，文件名建议强度 0.6。	local:LTX/ltx-2.3-22b-distilled-lora-384-1.1-蒸馏加速-强度0.6.safetensors
 ltx23_ic_hdr	ltx-2.3-22b-ic-lora-hdr-0.9|hdr	LTX IC HDR		0.9	HDR 画面增强 LoRA，适合提升高动态范围、亮暗层次和光影质感。	local:LTX/ltx-2.3-22b-ic-lora-hdr-0.9.safetensors
 ltx23_ic_hdr_scene_emb	ltx-2.3-22b-ic-lora-hdr-scene-emb|hdr-scene-emb	LTX IC HDR 场景嵌入		1.0	HDR 场景嵌入 LoRA，适合增强场景级光影、环境氛围和整体曝光。	local:LTX/ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors
-ltx23_ic_ingredients	ltx-2.3-22b-ic-lora-ingredients-0.9|ingredients	LTX IC 食材/材质		0.9	食材和物体材质增强 LoRA，适合美食、材料细节和质感镜头。	local:LTX/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors
+ltx23_ic_ingredients	ltx-2.3-22b-ic-lora-ingredients-0.9|ingredients	LTX宫格多参		1.0	用于生成短视频，以根据参考表保持角色、道具和位置的视觉一致性。	https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients
 ltx23_ic_lipdub	ltx-2.3-22b-ic-lora-lipdub-0.9|lipdub	LTX IC 对口型		0.9	对口型/唇动 LoRA，适合音乐口播、演唱和讲话同步画面。	local:LTX/ltx-2.3-22b-ic-lora-lipdub-0.9.safetensors
 ltx23_ic_motion_track	ltx-2.3-22b-ic-lora-motion-track-control-ref0.5|motion-track-control|ref0.5	LTX IC 运动跟踪控制		0.5	运动跟踪控制 LoRA，适合参考运动、轨迹约束和镜头动作复刻。	local:LTX/ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors
 ltx23_ic_outpaint	ltx-2.3-22b-ic-lora-outpaint|outpaint|外扩	LTX IC 外扩		1.0	外扩/扩图 LoRA，适合延展画面边界、补全场景和扩展构图。	local:LTX/ltx-2.3-22b-ic-lora-outpaint-外扩.safetensors

@@ -22,15 +22,15 @@ RMBG14_MODEL_TREE = [
     make_model_tree_item(
         label="RMBG1.4 模型",
         folder="RMBG",
-        filename="rmbg1.4.pth",
-        description="Logo 自动抠图使用的本地 RMBG1.4 模型；默认读取 models/RMBG/rmbg1.4.pth，也会沿用综合抠图节点的模糊搜索。",
+        filename="rmbg1.4.safetensors",
+        description="Logo 自动抠图使用的本地 RMBG1.4 模型；默认读取 models/RMBG/rmbg1.4.safetensors，也会沿用综合抠图节点的模糊搜索。",
         kind="diffusion",
     )
 ]
 RMBG14_MODEL_SPEC = make_missing_model_spec(
     label="RMBG1.4 模型",
     subdir="RMBG",
-    filename="rmbg1.4.pth",
+    filename="rmbg1.4.safetensors",
     description="Logo 自动抠图使用的本地 RMBG1.4 模型。",
 )
 RMBG14_PREVIEW_API = "/gjj/text_overlay/rmbg14_preview"
@@ -465,7 +465,7 @@ class GJJ_TextOverlay:
         usage=[
             "背景图必填；文本为空时不会在画布上显示文字预览。",
             "Logo 可连接水印图输入，也可通过面板按钮选择本地图片。",
-            "启用 RMBG1.4 抠图后，执行时会用 models/RMBG/rmbg1.4.pth 生成 logo 透明通道。",
+            "启用 RMBG1.4 抠图后，执行时会用 models/RMBG/rmbg1.4.safetensors 生成 logo 透明通道。",
         ],
         runtime=[
             "Logo 阴影和描边会在 RMBG1.4 抠图之后应用。",

@@ -13,6 +13,7 @@ const SEARCH_BY_ROW_PROPERTY = "gjj_lora_search_by_row";
 const GLOBAL_SEARCH_PROPERTY = "gjj_lora_global_search";
 const GROUP_RULES_PROPERTY = "gjj_lora_group_rules";
 const ADVANCED_OPEN_PROPERTY = "gjj_lora_advanced_open";
+const ENABLED_OUTPUTS_PROPERTY = "enabled_outputs";
 const CLIP_PORTS_OPEN_PROPERTY = "gjj_lora_clip_ports_open";
 const LORA_TRIGGERS_PROPERTY = "gjj_lora_triggers";
 const BROADCAST_PROPERTY = "gjj_variable_broadcast_enabled";
@@ -30,6 +31,13 @@ const ICLORA_MULTIPLE_OUTPUT_INDEX = 3;
 const LOADER_TRIGGER_OUTPUT_INDEX = 4;
 const DEFAULT_EMPTY_OPTION = { value: "", label: "未选择" };
 const DEFAULT_ROW = { enabled: false, name: "", strength: 1.0 };
+const OUTPUT_DEFS = [
+	{ key: "clip", name: CLIP_OUTPUT_NAME, type: "CLIP", tooltip: "输出叠加 LoRA 后的 CLIP；未接入 CLIP 时这里会返回空值。" },
+	{ key: "iclora_factor", name: ICLORA_FACTOR_OUTPUT_NAME, type: "FLOAT", tooltip: "链中最后一个 IC-LoRA 的 latent_downscale_factor；没有 IC-LoRA 或 metadata 缺失时为 1.0。" },
+	{ key: "iclora_multiple", name: ICLORA_MULTIPLE_OUTPUT_NAME, type: "INT", tooltip: "round(latent_downscale_factor * 32)，可直接用于参考图预处理到像素整倍数。" },
+	{ key: "lora_triggers", name: TRIGGER_OUTPUT_NAME, type: "STRING", tooltip: "当前启用 LoRA 的触发词；变量广播会自动添加到支持的正向提示词节点。" },
+];
+const OUTPUT_DEF_BY_KEY = new Map(OUTPUT_DEFS.map((def) => [def.key, def]));
 const DEFAULT_GROUP_RULES = [
 	"👤 人物角色 = 紫灵,韩立,南宫婉,梅凝,慕沛灵,沛灵,宋玉,如嫣",
 	"🎨 画风风格 = 国风,古风,动画变真实,真实变动画,奇幻木偶,剪纸,像素,真实幻想,极致真实",
@@ -181,6 +189,35 @@ function serializeRows(rows) {
 			};
 		});
 	return JSON.stringify(cleaned);
+}
+
+function normalizeOutputKeys(value) {
+	const source = Array.isArray(value)
+		? value
+		: Array.isArray(value?.outputs)
+			? value.outputs
+			: Array.isArray(value?.enabled_outputs)
+				? value.enabled_outputs
+				: [];
+	const result = [];
+	for (const item of source) {
+		const key = String(typeof item === "object" && item ? item.key : item || "");
+		if (OUTPUT_DEF_BY_KEY.has(key) && !result.includes(key)) result.push(key);
+	}
+	return result;
+}
+
+function serializeOutputs(keys) {
+	const outputDefs = normalizeOutputKeys(keys).map((key, index) => {
+		const def = OUTPUT_DEF_BY_KEY.get(key);
+		return {
+			key: def.key,
+			name: def.name,
+			type: def.type,
+			index: index + 1,
+		};
+	});
+	return JSON.stringify({ version: 1, outputs: outputDefs });
 }
 
 async function fetchLoraOptions() {
@@ -393,6 +430,17 @@ function normalizeOutputSlot(output, name, type, tooltip = "") {
 	if (tooltip) output.tooltip = tooltip;
 }
 
+function ensureOutputAt(node, index, name, type, tooltip = "") {
+	while ((node.outputs || []).length <= index) {
+		node.addOutput?.(name, type);
+		if (!node.addOutput) {
+			node.outputs = node.outputs || [];
+			node.outputs.push({ name, type, links: [] });
+		}
+	}
+	normalizeOutputSlot(node.outputs?.[index], name, type, tooltip);
+}
+
 function setOutputVisible(output, visible) {
 	if (!output) return;
 	output.hidden = !visible;
@@ -400,35 +448,191 @@ function setOutputVisible(output, visible) {
 	output.disabled = !visible;
 	output.not_show = !visible;
 	output.__gjj_hidden = !visible;
-	if (output.options && typeof output.options === "object") output.options.hidden = !visible;
+	output.options = { ...(output.options || {}), hidden: !visible };
 }
 
-function hideTriggerOutput(node, index) {
-	const output = node?.outputs?.[index];
-	if (!output) return;
-	normalizeOutputSlot(output, TRIGGER_OUTPUT_NAME, "STRING", "当前启用 LoRA 的触发词；变量广播会自动添加到支持的正向提示词节点。");
-	setOutputVisible(output, false);
-	output.gjj_lora_trigger_output = true;
-}
-
-function ensureOutputAt(node, index, name, type, tooltip = "") {
-	while ((node.outputs || []).length <= index) {
-		node.addOutput?.(name, type);
-		if (!node.addOutput) {
-			node.outputs = node.outputs || [];
-			node.outputs.push({ name, type, links: null });
-		}
+function outputSlotKey(output, index) {
+	if (index === 0) return "model";
+	const explicit = String(output?.__gjj_key || "");
+	if (OUTPUT_DEF_BY_KEY.has(explicit)) return explicit;
+	const serializedKey = String(output?.gjj_key || output?.key || "");
+	if (OUTPUT_DEF_BY_KEY.has(serializedKey)) return serializedKey;
+	const label = String(output?.name || output?.label || output?.localized_name || "");
+	for (const def of OUTPUT_DEFS) {
+		if (label === def.name) return def.key;
 	}
-	normalizeOutputSlot(node.outputs?.[index], name, type, tooltip);
+	return "";
 }
 
-function normalizeModelOutput(node) {
-	ensureOutputAt(node, 0, MODEL_OUTPUT_NAME, "MODEL", "按当前节点中的 LoRA 顺序串联加载后的模型输出。");
+function desiredOutputKeys(node) {
+	const state = ensureNodeState(node);
+	const triggerText = buildSelectedLoraTriggerText(state);
+	node.properties = node.properties || {};
+	node.properties[LORA_TRIGGERS_PROPERTY] = triggerText;
+	const keys = [];
+	if (state.clipPortsOpen) keys.push("clip");
+	if (loaderHasIcloraSelection(node)) keys.push("iclora_factor", "iclora_multiple");
+	if (triggerText) keys.push("lora_triggers");
+	return keys;
 }
 
-function outputHasLinks(node, index) {
-	const output = node.outputs?.[index];
-	return Array.isArray(output?.links) && output.links.length > 0;
+function currentLoaderOutputDefs(node) {
+	return [
+		{ key: "model", name: MODEL_OUTPUT_NAME, type: "MODEL", tooltip: "按当前节点中的 LoRA 顺序串联加载后的模型输出。" },
+		...desiredOutputKeys(node).map((key) => OUTPUT_DEF_BY_KEY.get(key)).filter(Boolean),
+	];
+}
+
+function applyOutputSpec(output, def, index) {
+	if (!output || !def) return;
+	normalizeOutputSlot(output, def.name, def.type, def.tooltip || "");
+	output.display_name = def.name;
+	output.__gjj_key = def.key;
+	output.gjj_key = def.key;
+	output.hidden = false;
+	output.visible = true;
+	output.disabled = false;
+	output.not_show = false;
+	output.__gjj_hidden = false;
+	output.slot_index = index;
+	if (def.key === "lora_triggers") output.gjj_lora_trigger_output = true;
+	if (!Array.isArray(output.links)) output.links = [];
+}
+
+function outputShapeMatches(node, defs) {
+	if (!Array.isArray(node?.outputs) || node.outputs.length !== defs.length) return false;
+	for (let index = 0; index < defs.length; index++) {
+		const output = node.outputs[index];
+		const def = defs[index];
+		if (!output || outputSlotKey(output, index) !== def.key) return false;
+		if (String(output.name || output.label || "") !== def.name) return false;
+		if (String(output.type || "") !== def.type) return false;
+	}
+	return true;
+}
+
+function collectOutputLinksByKey(node) {
+	const saved = [];
+	for (let index = 0; index < (node.outputs || []).length; index++) {
+		const output = node.outputs[index];
+		const key = outputSlotKey(output, index);
+		if (!key) continue;
+		for (const linkId of Array.isArray(output?.links) ? output.links.slice() : []) {
+			const link = app.graph?.links?.[linkId];
+			if (!link) continue;
+			saved.push({
+				id: linkId,
+				key,
+				link,
+				target_id: link.target_id,
+				target_slot: link.target_slot,
+			});
+		}
+		output.links = [];
+	}
+	return saved;
+}
+
+function restoreOutputLinksByKey(node, savedLinks, defs) {
+	const byKey = new Map(defs.map((def, index) => [def.key, { def, index }]));
+	const restored = new Set();
+	for (const item of savedLinks || []) {
+		const target = byKey.get(item.key);
+		if (!target) continue;
+		const output = node.outputs?.[target.index];
+		if (!output) continue;
+		const link = app.graph?.links?.[item.id] || item.link;
+		if (!link) continue;
+		link.id = item.id;
+		link.origin_id = node.id;
+		link.origin_slot = target.index;
+		link.type = target.def.type;
+		app.graph.links = app.graph.links || {};
+		app.graph.links[item.id] = link;
+		if (!Array.isArray(output.links)) output.links = [];
+		if (!output.links.includes(item.id)) output.links.push(item.id);
+		const targetNode = app.graph?.getNodeById?.(item.target_id) || app.graph?._nodes_by_id?.[item.target_id];
+		const targetInput = targetNode?.inputs?.[item.target_slot];
+		if (targetInput) targetInput.link = item.id;
+		restored.add(item.id);
+	}
+	return restored;
+}
+
+function deleteUnrestoredOutputLinks(savedLinks, restoredIds) {
+	for (const item of savedLinks || []) {
+		if (restoredIds?.has?.(item.id)) continue;
+		const targetNode = app.graph?.getNodeById?.(item.target_id) || app.graph?._nodes_by_id?.[item.target_id];
+		const targetInput = targetNode?.inputs?.[item.target_slot];
+		if (targetInput?.link === item.id) targetInput.link = null;
+		try { app.graph?.removeLink?.(item.id); } catch (_) {}
+		try { if (app.graph?.links?.[item.id]) delete app.graph.links[item.id]; } catch (_) {}
+	}
+}
+
+function rebuildOutputSlots(node, defs) {
+	if (!Array.isArray(node.outputs)) node.outputs = [];
+	const savedLinks = collectOutputLinksByKey(node);
+	while (node.outputs.length > 0) {
+		try { node.removeOutput?.(node.outputs.length - 1); }
+		catch (_) { node.outputs.pop(); }
+	}
+	for (const def of defs) {
+		try { node.addOutput?.(def.name, def.type); }
+		catch (_) { node.outputs.push({ name: def.name, type: def.type, links: [] }); }
+	}
+	defs.forEach((def, index) => applyOutputSpec(node.outputs?.[index], def, index));
+	const restored = restoreOutputLinksByKey(node, savedLinks, defs);
+	deleteUnrestoredOutputLinks(savedLinks, restored);
+}
+
+function writeSerializedOutputSlots(serializedNode, defs) {
+	if (!serializedNode) return;
+	const existing = Array.isArray(serializedNode.outputs) ? serializedNode.outputs : [];
+	serializedNode.outputs = defs.map((def, index) => ({
+		...(existing[index] && typeof existing[index] === "object" ? existing[index] : {}),
+		name: def.name,
+		label: def.name,
+		localized_name: def.name,
+		display_name: def.name,
+		type: def.type,
+		links: Array.isArray(existing[index]?.links) ? [...existing[index].links] : [],
+		slot_index: index,
+		tooltip: def.tooltip || "",
+		gjj_key: def.key,
+		hidden: false,
+		visible: true,
+		disabled: false,
+		not_show: false,
+		__gjj_hidden: false,
+	}));
+}
+
+function refreshNodeAfterOutputChange(node) {
+	if (typeof node?.computeSize === "function") {
+		try {
+			const size = node.computeSize();
+			if (Array.isArray(size) && size.length >= 2) {
+				node.size = [Math.max(node.size?.[0] || 420, size[0]), Math.max(node.size?.[1] || 160, size[1])];
+			}
+		} catch (_) {}
+	}
+	markNodeDirty(node);
+}
+
+function applyDynamicOutputs(node) {
+	if (!isLoaderNode(node)) return;
+	const defs = currentLoaderOutputDefs(node);
+	const enabledKeys = defs.slice(1).map((def) => def.key);
+	node.properties = node.properties || {};
+	node.properties[ENABLED_OUTPUTS_PROPERTY] = serializeOutputs(enabledKeys);
+	if (!outputShapeMatches(node, defs)) {
+		rebuildOutputSlots(node, defs);
+	} else {
+		defs.forEach((def, index) => applyOutputSpec(node.outputs?.[index], def, index));
+	}
+	globalThis.GJJApplyTypeColorsToNode?.(node);
+	refreshNodeAfterOutputChange(node);
 }
 
 function loaderHasIcloraSelection(node) {
@@ -436,30 +640,9 @@ function loaderHasIcloraSelection(node) {
 	return state.rows.some((row) => row?.enabled !== false && loraNameLooksLikeIclora(row?.name));
 }
 
-function ensureIcloraOutputs(node) {
-	ensureOutputAt(node, ICLORA_FACTOR_OUTPUT_INDEX, ICLORA_FACTOR_OUTPUT_NAME, "FLOAT", "链中最后一个 IC-LoRA 的 latent_downscale_factor；没有 IC-LoRA 或 metadata 缺失时为 1.0。");
-	ensureOutputAt(node, ICLORA_MULTIPLE_OUTPUT_INDEX, ICLORA_MULTIPLE_OUTPUT_NAME, "INT", "round(latent_downscale_factor * 32)，可直接用于参考图预处理到像素整倍数。");
-}
-
-function applyIcloraOutputVisibility(node) {
-	if (!isLoaderNode(node)) return;
-	const shouldShow = loaderHasIcloraSelection(node)
-		|| outputHasLinks(node, ICLORA_FACTOR_OUTPUT_INDEX)
-		|| outputHasLinks(node, ICLORA_MULTIPLE_OUTPUT_INDEX);
-	ensureIcloraOutputs(node);
-	setOutputVisible(node.outputs?.[ICLORA_FACTOR_OUTPUT_INDEX], shouldShow);
-	setOutputVisible(node.outputs?.[ICLORA_MULTIPLE_OUTPUT_INDEX], shouldShow);
-}
-
 function ensureLoaderOutputs(node) {
 	if (!isLoaderNode(node)) return;
-	ensureOutputAt(node, 0, MODEL_OUTPUT_NAME, "MODEL", "按当前节点中的 LoRA 顺序串联加载后的模型输出。");
-	ensureOutputAt(node, 1, CLIP_OUTPUT_NAME, "CLIP", "输出叠加 LoRA 后的 CLIP；未接入 CLIP 时这里会返回空值。");
-	ensureOutputAt(node, LOADER_TRIGGER_OUTPUT_INDEX, TRIGGER_OUTPUT_NAME, "STRING", "当前启用 LoRA 的触发词；变量广播会自动添加到支持的正向提示词节点。");
-	setOutputVisible(node.outputs?.[0], true);
-	setOutputVisible(node.outputs?.[1], Boolean(ensureNodeState(node).clipPortsOpen));
-	applyIcloraOutputVisibility(node);
-	hideTriggerOutput(node, LOADER_TRIGGER_OUTPUT_INDEX);
+	applyDynamicOutputs(node);
 }
 
 function ensureConfigOutputs(node) {
@@ -542,16 +725,6 @@ function ensureClipInput(node) {
 	normalizeClipInput(node.inputs?.[index]);
 }
 
-function ensureClipOutput(node) {
-	normalizeModelOutput(node);
-	let index = findClipOutputIndex(node);
-	if (index < 0) {
-		node.addOutput?.(CLIP_OUTPUT_NAME, "CLIP");
-		index = findClipOutputIndex(node);
-	}
-	normalizeClipOutput(node.outputs?.[index]);
-}
-
 function updateClipPortsButton(node) {
 	const button = node.__gjjLoraClipPortsButton;
 	if (!button) {
@@ -616,7 +789,7 @@ function updateDataWidget(node) {
 		node.widgets_values = Array.isArray(node.widgets_values) ? node.widgets_values : [];
 		node.widgets_values[widgetIndex] = serialized;
 	}
-	applyIcloraOutputVisibility(node);
+	applyDynamicOutputs(node);
 }
 
 function ensureTrailingEmptyRow(node) {
@@ -634,7 +807,7 @@ function ensureTrailingEmptyRow(node) {
 			strength: normalizeStrength(item.strength, 1.0),
 		};
 	});
-	applyIcloraOutputVisibility(node);
+	applyDynamicOutputs(node);
 }
 
 function applyHighLowPairToNextRow(node, rowIndex, selectedName) {
@@ -1813,7 +1986,11 @@ function setupUi(node) {
 			serializedNode.properties[LORA_TRIGGERS_PROPERTY] = buildSelectedLoraTriggerText(ensureNodeState(this));
 		}
 		if (isLoaderNode(this)) {
+			const defs = currentLoaderOutputDefs(this);
+			const enabledKeys = defs.slice(1).map((def) => def.key);
 			serializedNode.properties[CLIP_PORTS_OPEN_PROPERTY] = Boolean(ensureNodeState(this).clipPortsOpen);
+			serializedNode.properties[ENABLED_OUTPUTS_PROPERTY] = serializeOutputs(enabledKeys);
+			writeSerializedOutputSlots(serializedNode, defs);
 		}
 	};
 	node.addDOMWidget("LoRA 串联", "HTML", container, { serialize: false });

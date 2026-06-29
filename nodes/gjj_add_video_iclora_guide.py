@@ -110,6 +110,28 @@ def _collect_single_frames(value, _seen=None):
     return frames
 
 
+def _direct_image_batch_tensor(value):
+    if isinstance(value, torch.Tensor):
+        return _normalize_image_tensor(value)
+
+    components = _video_components(value)
+    if components is not None:
+        for key in ("images", "frames"):
+            tensor = components.get(key, None)
+            if isinstance(tensor, torch.Tensor):
+                return _normalize_image_tensor(tensor)
+
+    for name in ("images", "image", "frames", "batch", "samples"):
+        try:
+            tensor = getattr(value, name, None)
+        except Exception:
+            tensor = None
+        if isinstance(tensor, torch.Tensor):
+            return _normalize_image_tensor(tensor)
+
+    return None
+
+
 def _resize_frame(frame, target_width, target_height):
     if int(frame.shape[1]) == int(target_height) and int(frame.shape[2]) == int(target_width):
         return frame.contiguous()
@@ -143,6 +165,20 @@ def _normalize_frame_count(value):
     if count not in (1, 9, 17, 25, 33, 41):
         count = 33
     return count
+
+
+def _as_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"true", "1", "yes", "on", "开启", "是"}:
+            return True
+        if text in {"false", "0", "no", "off", "关闭", "否"}:
+            return False
+    return default
 
 
 def _get_guide_attention_entries(conditioning):
@@ -395,9 +431,15 @@ class GJJ_AddVideoICLoRAGuide:
 
     def _build_msr_guide_frames(self, image, background, target_width, target_height, frame_count):
         """按 LiconMSR 的分帧方式，把输入媒体整理为固定帧数的 guide 视频帧。"""
+        background_frames = _collect_single_frames(background)
+        direct_image_batch = _direct_image_batch_tensor(image)
+        if direct_image_batch is not None and not background_frames:
+            return direct_image_batch
+
+        image_frames = _collect_single_frames(image)
         source_frames = []
-        source_frames.extend(_collect_single_frames(image))
-        source_frames.extend(_collect_single_frames(background))
+        source_frames.extend(image_frames)
+        source_frames.extend(background_frames)
         if not source_frames:
             return None
 
@@ -438,7 +480,7 @@ class GJJ_AddVideoICLoRAGuide:
         返回：
             (positive, negative, latent)
         """
-        if bypass:
+        if _as_bool(bypass, False):
             return (positive, negative, latent)
 
         scale_factors = vae.downscale_index_formula
@@ -460,7 +502,7 @@ class GJJ_AddVideoICLoRAGuide:
         )
         if image is None:
             return (positive, negative, latent)
-        
+
         # 计算要保留的帧数
         num_frames_to_keep = ((image.shape[0] - 1) // time_scale_factor) * time_scale_factor + 1
         causal_fix = frame_idx == 0 or num_frames_to_keep == 1
@@ -511,30 +553,23 @@ class GJJ_AddVideoICLoRAGuide:
         assert latent_idx + guide_latent.shape[2] <= latent_length, \
             "条件帧超过了 latent 序列的长度。"
 
-        if str(guide_mode or "写入Latent") != "仅注意力引导":
-            # 追加关键帧：原始行为，会把 guide latent 写入视频 latent。
-            positive, negative, latent_image, noise_mask = self.append_keyframe(
-                positive, negative, frame_idx, latent_image, noise_mask,
-                guide_latent, strength, scale_factors,
-                guide_mask=guide_mask,
-                latent_downscale_factor=latent_downscale_factor,
-                causal_fix=causal_fix,
-            )
+        # IC-LoRA 的参考信息需要 append_keyframe 写入 guide token。
+        # 只登记 guide_attention_entries 没有可供注意力读取的 guide token，会表现为完全不看参考。
+        positive, negative, latent_image, noise_mask = self.append_keyframe(
+            positive, negative, frame_idx, latent_image, noise_mask,
+            guide_latent, strength, scale_factors,
+            guide_mask=guide_mask,
+            latent_downscale_factor=latent_downscale_factor,
+            causal_fix=causal_fix,
+        )
 
         # 跟踪 guide attention entry
         positive = append_guide_attention_entry(
-            positive, iclora_tokens_added, guide_orig_shape, attention_strength=float(strength)
+            positive, iclora_tokens_added, guide_orig_shape
         )
         negative = append_guide_attention_entry(
-            negative, iclora_tokens_added, guide_orig_shape, attention_strength=float(strength)
+            negative, iclora_tokens_added, guide_orig_shape
         )
-
-        if str(guide_mode or "写入Latent") == "仅注意力引导":
-            return (
-                positive,
-                negative,
-                latent,
-            )
 
         return (
             positive,

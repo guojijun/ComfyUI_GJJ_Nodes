@@ -36,6 +36,22 @@ FILENAME_TRIGGER_RE = re.compile(r"触发词\s*(.+?)(?:强度\s*[-+]?\d+(?:\.\d+
 LORA_NOT_LOADED_PREFIX = "lora key not loaded: "
 ICLORA_METADATA_KEYS = ("reference_downscale_factor", "latent_downscale_factor")
 PREVIEW_EXTENSIONS = (".preview.webp", ".preview.png", ".preview.jpg", ".preview.jpeg", ".webp", ".png", ".jpg", ".jpeg")
+ENABLED_OUTPUTS_PROPERTY = "enabled_outputs"
+OPTIONAL_OUTPUT_DEFS = {
+    "clip": {"name": "叠加编码输出", "type": "CLIP"},
+    "iclora_factor": {"name": "IC-LoRA Latent缩放因子", "type": "FLOAT"},
+    "iclora_multiple": {"name": "IC-LoRA像素倍数", "type": "INT"},
+    "lora_triggers": {"name": "LoRA触发词", "type": "STRING"},
+}
+OPTIONAL_OUTPUT_KEYS = list(OPTIONAL_OUTPUT_DEFS.keys())
+
+
+class AnyType(str):
+    def __ne__(self, __value: object) -> bool:
+        return False
+
+
+any_type = AnyType("*")
 KREA2_LORA_METADATA: list[dict[str, Any]] = [
     {
         "match": ["retroanime", "Krea-2-LoRA-retroanime"],
@@ -270,6 +286,133 @@ def build_lora_trigger_text(raw_value: Any) -> str:
             seen.add(key)
             triggers.append(trigger)
     return ", ".join(triggers)
+
+
+def _prompt_node(prompt: Any, unique_id: Any) -> dict[str, Any] | None:
+    if not isinstance(prompt, dict) or unique_id is None:
+        return None
+    for key in (unique_id, str(unique_id)):
+        node = prompt.get(key)
+        if isinstance(node, dict):
+            return node
+    try:
+        node = prompt.get(int(unique_id))
+        if isinstance(node, dict):
+            return node
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def parse_enabled_outputs(raw_value: Any) -> list[str]:
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, (dict, list)):
+        parsed = raw_value
+    else:
+        try:
+            parsed = json.loads(str(raw_value or "[]"))
+        except json.JSONDecodeError:
+            return []
+    if isinstance(parsed, dict):
+        items = parsed.get("outputs") or parsed.get("enabled_outputs") or []
+    elif isinstance(parsed, list):
+        items = parsed
+    else:
+        return []
+    enabled: list[str] = []
+    for item in items:
+        key = str(item.get("key") if isinstance(item, dict) else item or "")
+        if key in OPTIONAL_OUTPUT_KEYS and key not in enabled:
+            enabled.append(key)
+    return enabled
+
+
+def parse_enabled_outputs_from_workflow_outputs(outputs: Any) -> list[str]:
+    if not isinstance(outputs, list):
+        return []
+    enabled: list[str] = []
+    name_to_key = {
+        str(definition.get("name") or ""): key
+        for key, definition in OPTIONAL_OUTPUT_DEFS.items()
+    }
+    for index, item in enumerate(outputs):
+        if index == 0 or not isinstance(item, dict):
+            continue
+        key = str(item.get("gjj_key") or item.get("key") or "")
+        if key not in OPTIONAL_OUTPUT_DEFS:
+            label = str(
+                item.get("name")
+                or item.get("label")
+                or item.get("localized_name")
+                or ""
+            )
+            key = name_to_key.get(label, "")
+        if key in OPTIONAL_OUTPUT_DEFS and key not in enabled:
+            enabled.append(key)
+    return enabled
+
+
+def parse_enabled_outputs_from_prompt_links(prompt: Any, unique_id: Any) -> list[str]:
+    node = _prompt_node(prompt, unique_id)
+    if not isinstance(node, dict):
+        return []
+    outputs = node.get("outputs")
+    if isinstance(outputs, list):
+        parsed = parse_enabled_outputs_from_workflow_outputs(outputs)
+        if parsed:
+            return parsed
+    links = node.get("links") or node.get("output_links")
+    if not isinstance(links, dict):
+        return []
+    enabled: list[str] = []
+    for slot, value in links.items():
+        try:
+            index = int(slot)
+        except Exception:
+            continue
+        if index <= 0 or not value:
+            continue
+        key = OPTIONAL_OUTPUT_KEYS[index - 1] if index - 1 < len(OPTIONAL_OUTPUT_KEYS) else ""
+        if key and key not in enabled:
+            enabled.append(key)
+    return enabled
+
+
+def recover_enabled_outputs(raw_value: Any = None, extra_pnginfo: Any = None, unique_id: Any = None, prompt: Any = None) -> list[str]:
+    enabled = parse_enabled_outputs(raw_value)
+    if enabled:
+        return enabled
+    from_prompt = parse_enabled_outputs_from_prompt_links(prompt, unique_id)
+    if from_prompt:
+        return from_prompt
+    if not isinstance(extra_pnginfo, dict):
+        return []
+    workflow = extra_pnginfo.get("workflow")
+    if not isinstance(workflow, dict):
+        return []
+    nodes = workflow.get("nodes")
+    if not isinstance(nodes, list):
+        return []
+
+    candidates: list[list[str]] = []
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("type") != NODE_NAME:
+            continue
+        if unique_id is not None and str(node.get("id")) != str(unique_id):
+            continue
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            from_property = parse_enabled_outputs(properties.get(ENABLED_OUTPUTS_PROPERTY))
+            if from_property:
+                candidates.append(from_property)
+                continue
+        from_outputs = parse_enabled_outputs_from_workflow_outputs(node.get("outputs"))
+        if from_outputs:
+            candidates.append(from_outputs)
+    if unique_id is not None and candidates:
+        return candidates[0]
+    return candidates[0] if len(candidates) == 1 else []
 
 
 async def get_gjj_lora_metadata(request):
@@ -663,7 +806,7 @@ class GJJ_MultiLoraChain:
 - 检测到 Nunchaku Flux 模型时，会走 Nunchaku Flux LoRA 加载逻辑。
 """
     SEARCH_ALIASES = ["multi lora", "lora chain", "lora loader", "LoRA", "串联", "加载器"]
-    RETURN_TYPES = ("MODEL", "CLIP", "FLOAT", "INT", "STRING")
+    RETURN_TYPES = ("MODEL", any_type, any_type, any_type, any_type)
     RETURN_NAMES = ("叠加模型输出", "叠加编码输出", "IC-LoRA Latent缩放因子", "IC-LoRA像素倍数", "LoRA触发词")
     OUTPUT_TOOLTIPS = (
         "按当前节点中的 LoRA 顺序串联加载后的模型输出。",
@@ -692,9 +835,14 @@ class GJJ_MultiLoraChain:
                     "tooltip": "可选接入与模型配套的 CLIP 编码器；有输入时 LoRA 会一起作用到这里，没有输入时只做模型串联。",
                 }),
             },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+                "unique_id": "UNIQUE_ID",
+            },
         }
 
-    def apply_loras(self, model, lora_data="[]", clip=None):
+    def apply_loras(self, model, lora_data="[]", clip=None, prompt=None, extra_pnginfo=None, unique_id=None):
         iclora_latent_downscale_factor = 1.0
 
         def remember_iclora_metadata(payload: dict[str, Any]) -> None:
@@ -713,13 +861,17 @@ class GJJ_MultiLoraChain:
             loaded_lora_cache=self.loaded_lora,
             on_lora_applied=remember_iclora_metadata,
         )
-        return (
-            current_model,
-            current_clip,
-            iclora_latent_downscale_factor,
-            latent_downscale_pixel_multiple(iclora_latent_downscale_factor),
-            build_lora_trigger_text(lora_data),
-        )
+        optional_values = {
+            "clip": current_clip,
+            "iclora_factor": iclora_latent_downscale_factor,
+            "iclora_multiple": latent_downscale_pixel_multiple(iclora_latent_downscale_factor),
+            "lora_triggers": build_lora_trigger_text(lora_data),
+        }
+        result = [current_model]
+        for key in recover_enabled_outputs(None, extra_pnginfo, unique_id, prompt):
+            if key in optional_values:
+                result.append(optional_values[key])
+        return {"result": tuple(result)}
 
 
 class GJJ_LoraChainConfig:

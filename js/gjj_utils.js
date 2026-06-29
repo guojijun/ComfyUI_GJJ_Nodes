@@ -1106,6 +1106,42 @@ function clonePlain(value) {
 	}
 }
 
+function rewritePromptInputSourceIds(value, output, remap) {
+	if (Array.isArray(value)) {
+		if (
+			value.length >= 2
+			&& (typeof value[0] === "string" || typeof value[0] === "number")
+			&& Number.isFinite(Number(value[1]))
+		) {
+			const sourceKey = promptKeyById(output, value[0]);
+			if (sourceKey && remap.has(sourceKey)) value[0] = remap.get(sourceKey);
+			return value;
+		}
+		for (const item of value) rewritePromptInputSourceIds(item, output, remap);
+		return value;
+	}
+	if (value && typeof value === "object") {
+		for (const item of Object.values(value)) rewritePromptInputSourceIds(item, output, remap);
+	}
+	return value;
+}
+
+function freshenPromptAncestors(output, keep, rootKey) {
+	const nonce = `${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
+	const remap = new Map();
+	for (const key of keep) {
+		if (String(key) !== String(rootKey)) remap.set(String(key), `${key}_gjj_refresh_${nonce}`);
+	}
+	const freshOutput = {};
+	for (const key of keep) {
+		const nextKey = remap.get(String(key)) || String(key);
+		const item = clonePlain(output[key]);
+		rewritePromptInputSourceIds(item?.inputs, output, remap);
+		freshOutput[nextKey] = item;
+	}
+	return freshOutput;
+}
+
 function workflowNodeId(node) {
 	if (!node || typeof node !== "object") return "";
 	return String(node.id ?? node.node_id ?? "");
@@ -1160,6 +1196,34 @@ async function queuePrunedCurrentNodePrompt(node) {
 	};
 	if (promptData?.prompt && promptData.prompt !== promptData.output) {
 		nextPromptData.prompt = prunedOutput;
+	}
+	if (promptData?.workflow) {
+		nextPromptData.workflow = pruneWorkflowToNode(promptData.workflow, keep);
+	}
+
+	await api.queuePrompt(0, nextPromptData);
+	return true;
+}
+
+export async function queueCurrentNodeWithFreshAncestors(node) {
+	if (!node || !node.graph || typeof app.graphToPrompt !== "function" || typeof api?.queuePrompt !== "function") {
+		return false;
+	}
+	const promptData = await app.graphToPrompt();
+	const output = promptData?.output || promptData?.prompt;
+	const rootKey = promptNodeKey(output, node);
+	if (!output || !rootKey) return false;
+
+	const keep = collectPromptAncestors(output, rootKey);
+	if (!keep.has(rootKey)) return false;
+
+	const freshOutput = freshenPromptAncestors(output, keep, rootKey);
+	const nextPromptData = {
+		...promptData,
+		output: freshOutput,
+	};
+	if (promptData?.prompt && promptData.prompt !== promptData.output) {
+		nextPromptData.prompt = freshOutput;
 	}
 	if (promptData?.workflow) {
 		nextPromptData.workflow = pruneWorkflowToNode(promptData.workflow, keep);

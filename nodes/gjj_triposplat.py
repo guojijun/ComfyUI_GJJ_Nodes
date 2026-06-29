@@ -600,7 +600,7 @@ class GJJ_TripoSplatImageToSplat:
             "models/clip_vision/dino_v3_vit_h.safetensors",
             "models/vae/triposplat_vae_decoder_fp16.safetensors",
             "models/vae/flux2-vae.safetensors",
-            "models/RMBG/rmbg1.4.pth",
+            "models/RMBG/rmbg1.4.safetensors",
         ],
         "notice": "默认隐藏高级参数，点击节点上的 ⚙️设置 展开。",
     }

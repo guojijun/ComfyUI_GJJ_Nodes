@@ -223,7 +223,7 @@ def _model_spec_for_method(method: str) -> dict[str, str]:
         METHOD_RMBG14: make_missing_model_spec(
             label="RMBG1.4 模型",
             subdir="RMBG",
-            filename="rmbg1.4.pth",
+            filename="rmbg1.4.safetensors",
             description="默认抠图模型。",
         ),
         METHOD_RMBG2: make_missing_model_spec(
@@ -497,7 +497,7 @@ def _resolve_model_path(method: str, unique_id=None, notify_missing: bool = Fals
             return _find_model_file(
                 "RMBG1.4",
                 (("rmbg1.4",), ("rmbg-1.4",), ("bria", "rmbg")),
-                (".pth",),
+                (".safetensors", ".pth"),
                 excludes=("rmbg2", "rmbg-2"),
             )
         if method == METHOD_RMBG2:
@@ -802,7 +802,11 @@ def _load_rmbg14_model(weight_path: Path, device: torch.device) -> torch.nn.Modu
 
     BriaRMBG = _load_bria_rmbg_class()
     model = BriaRMBG()
-    state_dict = torch.load(str(weight_path), map_location="cpu")
+    if weight_path.suffix == ".safetensors":
+        safetensors_torch = _dependency("safetensors")
+        state_dict = safetensors_torch.load_file(str(weight_path), device="cpu")
+    else:
+        state_dict = torch.load(str(weight_path), map_location="cpu", weights_only=False)
     model.load_state_dict(_normalize_state_dict_keys(state_dict), strict=True)
     model.to(device=device, dtype=torch.float32)
     model.eval()
@@ -1362,11 +1366,11 @@ class GJJ_ComprehensiveMatting:
             },
             {
                 "label": "🟣RMBG1.4 模型",
-                "path": "models/RMBG/rmbg1.4.pth",
+                "path": "models/RMBG/rmbg1.4.safetensors",
                 "folder": "RMBG",
                 "kind": "diffusion",
                 "icon": "🟣",
-                "tooltip": "📘RMBG1.4 默认抠图模型；默认读取 models/RMBG/rmbg1.4.pth，也会模糊搜索 rmbg1.4 相关 pth 文件。",
+                "tooltip": "📘RMBG1.4 默认抠图模型；默认读取 models/RMBG/rmbg1.4.safetensors，也会模糊搜索 rmbg1.4 相关 pth 文件。",
             },
             {
                 "label": "🟣RMBG2 模型",

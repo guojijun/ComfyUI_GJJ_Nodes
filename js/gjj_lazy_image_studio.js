@@ -27,6 +27,8 @@ const NATIVE_CANVAS_PREVIEW_WIDGET = "$$canvas-image-preview";
 const NATIVE_PREVIEW_WIDGET_PATTERN = /(?:preview|image|images|img|预览|图像|图片)/i;
 const LORA_CHAIN_CONFIG_INPUT = "lora_chain_config";
 const LORA_DATA_WIDGET_NAME = "lora_data";
+const LORA_METADATA_API_PATH = "/gjj/lora-metadata";
+const LORA_PREVIEW_API_PREFIX = "/gjj/lora-preview/";
 const KEEP_MODEL_WIDGET_NAME = "keep_model_loaded";
 const SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_settings_open";
 const TRANSLATE_ENABLED_PROPERTY = "gjj_lazy_image_studio_translate_enabled";
@@ -2504,6 +2506,56 @@ function formatStrength(value, fallback = 1.0) {
 	return normalizeStrength(value, fallback).toFixed(2);
 }
 
+function loraPreviewUrl(loraName, previews = {}) {
+	const name = String(loraName || "");
+	if (!name) {
+		return "";
+	}
+	if (previews[name]) {
+		return String(previews[name]);
+	}
+	return `${LORA_PREVIEW_API_PREFIX}${encodeURIComponent(name)}`;
+}
+
+function normalizeLoraKeyword(value) {
+	return String(value || "").trim().toLowerCase();
+}
+
+function normalizeLoraToken(value) {
+	return normalizeLoraKeyword(value)
+		.split(/[\\/]/)
+		.pop()
+		.replace(/\.(safetensors|ckpt|pt|bin)$/i, "")
+		.replace(/^krea-2-lora-/i, "")
+		.replace(/^krea2[_-]/i, "")
+		.replace(/[^a-z0-9\u4e00-\u9fff]+/g, "");
+}
+
+function getLoraMetadata(state, loraName) {
+	const selected = normalizeLoraToken(loraName);
+	if (!selected) {
+		return null;
+	}
+	return (state.metadata || []).find((item) => {
+		const matches = Array.isArray(item?.match) ? item.match : [];
+		return matches.some((keyword) => {
+			const token = normalizeLoraToken(keyword);
+			return token && (selected.includes(token) || token.includes(selected));
+		});
+	}) || null;
+}
+
+function loraSearchHaystack(option, metadata) {
+	return [
+		option?.value,
+		option?.label,
+		metadata?.title,
+		metadata?.trigger,
+		metadata?.summary,
+		...(Array.isArray(metadata?.match) ? metadata.match : []),
+	].map((item) => normalizeLoraKeyword(item)).filter(Boolean).join(" ");
+}
+
 function normalizeRows(value) {
 	let parsed = [];
 	try {
@@ -2620,6 +2672,22 @@ async function fetchLoraOptions() {
 	}
 }
 
+async function fetchLoraMetadata() {
+	try {
+		const response = await fetch(LORA_METADATA_API_PATH);
+		if (!response.ok) {
+			return { metadata: [], previews: {} };
+		}
+		const data = await response.json();
+		return {
+			metadata: Array.isArray(data?.metadata) ? data.metadata : [],
+			previews: data?.previews && typeof data.previews === "object" ? data.previews : {},
+		};
+	} catch (error) {
+		return { metadata: [], previews: {} };
+	}
+}
+
 function hideLoraDataWidget(node, widget) {
 	if (!widget) {
 		return;
@@ -2664,13 +2732,15 @@ function ensureLoraNodeState(node) {
 	node.__gjjLoraState = {
 		rows: normalizeRows(readStoredLoraData(node)),
 		options: [{ ...DEFAULT_EMPTY_OPTION }],
+		metadata: [],
+		previews: {},
 	};
 	return node.__gjjLoraState;
 }
 
 function updateLoraNodeHeight(node, rowCount) {
 	const baseHeight = 78;
-	const rowHeight = 50;
+	const rowHeight = 64;
 	const targetHeight = baseHeight + rowCount * rowHeight;
 	node.size = [Math.max(node.size?.[0] || 420, 420), targetHeight];
 	node.setDirtyCanvas?.(true, true);
@@ -2853,8 +2923,9 @@ function ensureGlobalLoraPopup() {
 			}
 
 			for (const option of options) {
-				const item = document.createElement("button");
-				item.type = "button";
+				const item = document.createElement("div");
+				item.setAttribute("role", "button");
+				item.tabIndex = 0;
 				item.className = "gjj-lora-popup-item";
 				item.style.cssText = [
 					"pointer-events:auto",
@@ -2863,12 +2934,111 @@ function ensureGlobalLoraPopup() {
 				const isSelected = String(option.value || "") === selectedValue;
 				if (isSelected) {
 					item.classList.add("selected");
-					item.textContent = `✔ ${option.label}`;
+				}
+
+				const name = document.createElement("div");
+				name.className = "gjj-lora-popup-name";
+				name.textContent = `${isSelected ? "✔ " : ""}${option.label}`;
+				item.appendChild(name);
+
+				const metadata = this.state.getMetadata?.(String(option.value || ""));
+				if (metadata) {
+					const previewUrl = this.state.getPreviewUrl?.(String(option.value || "")) || "";
+					const hasLocalPreview = Boolean(previewUrl && this.state.hasPreview?.(String(option.value || "")));
+					if (hasLocalPreview) {
+						item.classList.add("with-thumb");
+						const thumb = document.createElement("img");
+						thumb.className = "gjj-lora-popup-thumb";
+						thumb.alt = String(metadata.title || option.label || "LoRA preview");
+						thumb.loading = "lazy";
+						thumb.decoding = "async";
+						thumb.src = previewUrl;
+						thumb.addEventListener("error", () => {
+							item.classList.remove("with-thumb");
+							thumb.remove();
+						}, { once: true });
+						item.insertBefore(thumb, name);
+					}
+
+					const meta = document.createElement("div");
+					meta.className = "gjj-lora-popup-meta";
+
+					const title = document.createElement("span");
+					title.className = "gjj-lora-popup-title";
+					title.textContent = String(metadata.title || "");
+
+					const trigger = document.createElement("span");
+					trigger.className = "gjj-lora-popup-trigger";
+					trigger.textContent = String(metadata.trigger || "");
+					trigger.title = `触发词：${metadata.trigger || ""}`;
+
+					const recommendedStrength = document.createElement("span");
+					recommendedStrength.className = "gjj-lora-popup-strength";
+					recommendedStrength.textContent = formatStrength(metadata.strength, 1.0);
+
+					const previewButton = document.createElement("button");
+					previewButton.type = "button";
+					previewButton.className = "gjj-lora-popup-preview";
+					previewButton.textContent = "▣";
+					previewButton.title = "展开缩略图和简介。";
+
+					const previewCard = document.createElement("div");
+					previewCard.className = "gjj-lora-preview-card";
+
+					const image = document.createElement("img");
+					image.alt = String(metadata.title || option.label || "LoRA preview");
+					image.loading = "lazy";
+					image.decoding = "async";
+					image.dataset.src = previewUrl;
+					image.addEventListener("error", () => {
+						const fallback = document.createElement("div");
+						fallback.className = "gjj-lora-preview-fallback";
+						fallback.textContent = "可放同名 preview 小图";
+						image.replaceWith(fallback);
+					}, { once: true });
+
+					const copy = document.createElement("div");
+					copy.className = "gjj-lora-preview-copy";
+					copy.innerHTML = `
+						<strong></strong>
+						<span></span>
+						<code></code>
+						<span></span>
+					`;
+					copy.children[0].textContent = String(metadata.title || option.label || "");
+					copy.children[1].textContent = String(metadata.summary || "");
+					copy.children[2].textContent = String(metadata.trigger || "");
+					copy.children[3].textContent = `推荐强度 ${formatStrength(metadata.strength, 1.0)}`;
+
+					previewCard.appendChild(image);
+					previewCard.appendChild(copy);
+
+					previewButton.addEventListener("click", (event) => {
+						event.preventDefault();
+						event.stopPropagation();
+						const open = !previewCard.classList.contains("open");
+						if (open && image.dataset.src && !image.src) {
+							image.src = image.dataset.src;
+						}
+						previewCard.classList.toggle("open", open);
+						previewButton.classList.toggle("open", open);
+						this.reposition();
+					});
+
+					meta.appendChild(title);
+					meta.appendChild(trigger);
+					meta.appendChild(recommendedStrength);
+					meta.appendChild(previewButton);
+					item.appendChild(meta);
+					item.appendChild(previewCard);
 				} else {
-					item.textContent = option.label;
+					item.title = String(option.label || "");
 				}
 
 				function runItemClick(event) {
+					if (event.target?.closest?.(".gjj-lora-popup-preview, .gjj-lora-preview-card")) {
+						return;
+					}
 					event.preventDefault();
 					event.stopPropagation();
 					console.log("[GJJ] LoRA 弹出窗口选项被点击", option.value);
@@ -2884,6 +3054,11 @@ function ensureGlobalLoraPopup() {
 				for (const eventName of ["pointerup", "click"]) {
 					item.addEventListener(eventName, runItemClick, true);
 				}
+				item.addEventListener("keydown", (event) => {
+					if (event.key === "Enter" || event.key === " ") {
+						runItemClick(event);
+					}
+				}, true);
 
 				list.appendChild(item);
 			}
@@ -2938,6 +3113,7 @@ function ensureGlobalLoraPopup() {
 
 function buildLoraRow(node, row, index, rowsContainer) {
 	const state = ensureLoraNodeState(node);
+	const metadata = getLoraMetadata(state, row.name);
 	const rowElement = document.createElement("div");
 	rowElement.className = `gjj-lora-row${row.enabled ? "" : " off"}`;
 
@@ -2993,6 +3169,15 @@ function buildLoraRow(node, row, index, rowsContainer) {
 			getSelectedValue() {
 				return String(state.rows[index]?.name || "");
 			},
+			getMetadata(value) {
+				return getLoraMetadata(state, value);
+			},
+			getPreviewUrl(value) {
+				return loraPreviewUrl(value, state.previews);
+			},
+			hasPreview(value) {
+				return Boolean(state.previews?.[String(value || "")]);
+			},
 			getOptions(searchText) {
 				let options = state.options;
 				if (state.rows[index]?.name && !options.some((option) => option.value === state.rows[index].name)) {
@@ -3004,12 +3189,23 @@ function buildLoraRow(node, row, index, rowsContainer) {
 				const terms = searchText.toLowerCase().split(/[,\s]+/).filter(Boolean);
 				return options.filter((opt) => {
 					if (!opt.value) return true;
-					const lowerValue = opt.value.toLowerCase();
-					return terms.every((term) => lowerValue.includes(term));
+					const haystack = loraSearchHaystack(opt, getLoraMetadata(state, opt.value));
+					return terms.every((term) => haystack.includes(term));
 				});
 			},
 			onSelect(value) {
+				const previousName = String(state.rows[index]?.name || "");
+				const previousStrength = normalizeStrength(state.rows[index]?.strength, 1.0);
 				state.rows[index].name = value;
+				const selectedMetadata = getLoraMetadata(state, value);
+				const shouldUseRecommendedStrength = value
+					&& value !== previousName
+					&& selectedMetadata
+					&& !previousName
+					&& Math.abs(previousStrength - 1.0) < 0.0001;
+				if (shouldUseRecommendedStrength) {
+					state.rows[index].strength = normalizeStrength(selectedMetadata.strength, previousStrength);
+				}
 				ensureTrailingEmptyRow(node);
 				updateLoraDataWidget(node);
 				popup.close();
@@ -3062,6 +3258,78 @@ function buildLoraRow(node, row, index, rowsContainer) {
 
 	updatePickerLabel();
 	mainColumn.appendChild(picker);
+	if (metadata) {
+		const meta = document.createElement("div");
+		meta.className = "gjj-lora-meta";
+
+		const title = document.createElement("span");
+		title.className = "gjj-lora-meta-title";
+		title.textContent = String(metadata.title || "");
+
+		const trigger = document.createElement("span");
+		trigger.className = "gjj-lora-meta-trigger";
+		trigger.textContent = String(metadata.trigger || "");
+		trigger.title = `触发词：${metadata.trigger || ""}`;
+
+		const recommendedStrength = document.createElement("span");
+		recommendedStrength.className = "gjj-lora-meta-strength";
+		recommendedStrength.textContent = formatStrength(metadata.strength, 1.0);
+
+		const previewButton = document.createElement("button");
+		previewButton.type = "button";
+		previewButton.className = "gjj-lora-preview-btn";
+		previewButton.textContent = "▣";
+		previewButton.title = "展开缩略图和简介。";
+
+		const previewCard = document.createElement("div");
+		previewCard.className = "gjj-lora-preview-card";
+
+		const image = document.createElement("img");
+		image.alt = String(metadata.title || row.name || "LoRA preview");
+		image.loading = "lazy";
+		image.decoding = "async";
+		image.dataset.src = loraPreviewUrl(row.name, state.previews);
+		image.addEventListener("error", () => {
+			const fallback = document.createElement("div");
+			fallback.className = "gjj-lora-preview-fallback";
+			fallback.textContent = "可放同名 preview 小图";
+			image.replaceWith(fallback);
+		}, { once: true });
+
+		const copy = document.createElement("div");
+		copy.className = "gjj-lora-preview-copy";
+		copy.innerHTML = `
+			<strong></strong>
+			<span></span>
+			<code></code>
+			<span></span>
+		`;
+		copy.children[0].textContent = String(metadata.title || row.name || "");
+		copy.children[1].textContent = String(metadata.summary || "");
+		copy.children[2].textContent = String(metadata.trigger || "");
+		copy.children[3].textContent = `推荐强度 ${formatStrength(metadata.strength, 1.0)}`;
+
+		previewCard.appendChild(image);
+		previewCard.appendChild(copy);
+
+		previewButton.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			const open = !previewCard.classList.contains("open");
+			if (open && image.dataset.src && !image.src) {
+				image.src = image.dataset.src;
+			}
+			previewCard.classList.toggle("open", open);
+			previewButton.classList.toggle("open", open);
+		});
+
+		meta.appendChild(title);
+		meta.appendChild(trigger);
+		meta.appendChild(recommendedStrength);
+		meta.appendChild(previewButton);
+		mainColumn.appendChild(meta);
+		mainColumn.appendChild(previewCard);
+	}
 
 	const sideColumn = document.createElement("div");
 	sideColumn.className = "gjj-lora-side";
@@ -3098,7 +3366,13 @@ function renderLoraUi(node) {
 
 async function refreshLoraOptions(node, rerender = true) {
 	const state = ensureLoraNodeState(node);
-	state.options = await fetchLoraOptions();
+	const [options, metadata] = await Promise.all([
+		fetchLoraOptions(),
+		fetchLoraMetadata(),
+	]);
+	state.options = options;
+	state.metadata = metadata.metadata;
+	state.previews = metadata.previews;
 	if (rerender) {
 		renderLoraUi(node);
 	}
@@ -3137,14 +3411,39 @@ function setupLoraUi(node) {
 		.gjj-lora-row.off { opacity:0.65; }
 		.gjj-lora-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:6px; position:relative; }
 		.gjj-lora-picker { width:100%; min-width:0; background:#11181c; color:#dce7e2; border:1px solid #41535b; border-radius:6px; padding:4px 8px; box-sizing:border-box; text-align:left; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; pointer-events:auto; }
+		.gjj-lora-meta { display:flex; align-items:center; gap:6px; min-height:20px; color:#b9c9cf; font-size:11px; line-height:1.25; }
+		.gjj-lora-meta-title { color:#eef8f4; font-weight:600; white-space:nowrap; }
+		.gjj-lora-meta-trigger { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#9fd4c3; }
+		.gjj-lora-meta-strength { flex:0 0 auto; color:#d7c587; }
+		.gjj-lora-preview-btn { width:24px; height:22px; flex:0 0 24px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:13px; line-height:18px; padding:0; text-align:center; }
+		.gjj-lora-preview-btn:hover, .gjj-lora-preview-btn.open { border-color:#6aa6b8; background:#26363d; }
+		.gjj-lora-preview-card { display:none; position:absolute; left:0; top:calc(100% + 6px); width:min(360px, 100%); padding:8px; border:1px solid #41535b; border-radius:8px; background:#10171b; box-shadow:0 8px 24px rgba(0,0,0,0.38); z-index:9998; box-sizing:border-box; }
+		.gjj-lora-preview-card.open { display:grid; grid-template-columns:92px minmax(0,1fr); gap:8px; }
+		.gjj-lora-preview-card img { width:92px; height:92px; object-fit:cover; border-radius:6px; background:#172026; border:1px solid #2e4149; }
+		.gjj-lora-preview-fallback { width:92px; height:92px; display:flex; align-items:center; justify-content:center; text-align:center; padding:8px; box-sizing:border-box; border-radius:6px; background:#1b252b; color:#9fb0b7; border:1px solid #2e4149; font-size:11px; }
+		.gjj-lora-preview-copy { min-width:0; display:flex; flex-direction:column; gap:5px; font-size:11px; color:#c7d5d8; line-height:1.35; }
+		.gjj-lora-preview-copy strong { color:#eef8f4; font-size:12px; }
+		.gjj-lora-preview-copy code { color:#9fd4c3; white-space:normal; word-break:break-word; }
 		.gjj-lora-popup { display:none; flex-direction:column; gap:6px; position:absolute; top:calc(100% + 6px); left:0; min-width:max(100%, 420px); max-width:680px; width:max-content; padding:6px; border:1px solid #41535b; border-radius:8px; background:#10171b; box-sizing:border-box; z-index:9999; box-shadow:0 8px 24px rgba(0,0,0,0.35); }
 		.gjj-lora-popup.open { display:flex; }
 		.gjj-lora-popup-search { width:100%; min-width:0; background:#11181c; color:#dce7e2; border:1px solid #41535b; border-radius:6px; padding:4px 6px; box-sizing:border-box; pointer-events:auto; }
-		.gjj-lora-popup-list { display:flex; flex-direction:column; gap:4px; max-height:180px; overflow:auto; }
-		.gjj-lora-popup-item { width:100%; background:#182127; color:#dce7e2; border:1px solid #33454c; border-radius:6px; padding:5px 8px; text-align:left; cursor:pointer; box-sizing:border-box; white-space:normal; overflow-wrap:anywhere; word-break:break-word; line-height:1.3; pointer-events:auto; }
+		.gjj-lora-popup-list { display:flex; flex-direction:column; gap:4px; max-height:300px; overflow:auto; }
+		.gjj-lora-popup-item { width:100%; display:flex; flex-direction:column; gap:4px; background:#182127; color:#dce7e2; border:1px solid #33454c; border-radius:6px; padding:5px 8px; text-align:left; cursor:pointer; box-sizing:border-box; white-space:normal; overflow-wrap:anywhere; word-break:break-word; line-height:1.3; pointer-events:auto; }
+		.gjj-lora-popup-item.with-thumb { display:grid; grid-template-columns:48px minmax(0,1fr); grid-template-rows:auto auto; column-gap:8px; row-gap:3px; align-items:center; min-height:60px; }
 		.gjj-lora-popup-item:hover { background:#223039; }
 		.gjj-lora-popup-item.selected { background:#18352f; border-color:#2f7d67; color:#e8fff6; }
 		.gjj-lora-popup-item.selected:hover { background:#1d433a; }
+		.gjj-lora-popup-name { font-size:12px; color:inherit; }
+		.gjj-lora-popup-item.with-thumb .gjj-lora-popup-name { grid-column:2; grid-row:1; align-self:end; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+		.gjj-lora-popup-meta { display:flex; align-items:center; gap:6px; min-width:0; color:#aebfc5; font-size:11px; }
+		.gjj-lora-popup-item.with-thumb .gjj-lora-popup-meta { grid-column:2; grid-row:2; align-self:start; }
+		.gjj-lora-popup-thumb { grid-column:1; grid-row:1 / span 2; width:48px; height:48px; border-radius:6px; border:1px solid #2e4149; background:#10171b; object-fit:cover; align-self:center; justify-self:center; }
+		.gjj-lora-popup-title { flex:0 0 auto; color:#eef8f4; font-weight:600; }
+		.gjj-lora-popup-trigger { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#9fd4c3; }
+		.gjj-lora-popup-strength { flex:0 0 auto; color:#d7c587; }
+		.gjj-lora-popup-preview { width:24px; height:20px; flex:0 0 24px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:12px; line-height:16px; padding:0; text-align:center; }
+		.gjj-lora-popup-item .gjj-lora-preview-card { position:static; width:100%; margin-top:4px; box-shadow:none; }
+		.gjj-lora-popup-item.with-thumb .gjj-lora-preview-card { grid-column:1 / -1; }
 		.gjj-lora-popup-empty { color:#8da2ad; font-size:11px; padding:4px 2px; }
 		.gjj-lora-side { display:flex; align-items:center; gap:6px; padding-top:2px; flex:0 0 auto; white-space:nowrap; pointer-events:auto; }
 		.gjj-lora-toggle-wrap { display:flex; align-items:center; gap:4px; color:#dce7e2; font-size:11px; white-space:nowrap; flex:0 0 auto; pointer-events:auto; }

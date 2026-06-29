@@ -37,7 +37,7 @@ def _rmbg14_model_spec() -> dict[str, str]:
     return make_missing_model_spec(
         label="RMBG1.4 模型",
         subdir="RMBG",
-        filename="rmbg1.4.pth",
+        filename="rmbg1.4.safetensors",
         description="节点内部去背景使用的默认模型。",
     )
 
@@ -488,7 +488,7 @@ class GJJ_RemoveBgStitch:
         "models": [
             {
                 "label": "🟣RMBG1.4 模型",
-                "path": "models/RMBG/rmbg1.4.pth",
+                "path": "models/RMBG/rmbg1.4.safetensors",
                 "folder": "RMBG",
                 "kind": "diffusion",
                 "icon": "🟣",

@@ -995,6 +995,35 @@ function currentNodeWidth(node) {
 	return Number.isFinite(width) && width > 0 ? Math.round(width) : DEFAULT_WIDTH;
 }
 
+function domContentWidth(node) {
+	return Math.max(180, currentNodeWidth(node) - 24);
+}
+
+function syncDomControlSize(node) {
+	const container = node?.__gjjTemplateParamsContainer;
+	if (!container?.style) return;
+	const width = domContentWidth(node);
+	container.style.width = `${width}px`;
+	container.style.minWidth = `${width}px`;
+	container.style.maxWidth = `${width}px`;
+	container.querySelectorAll?.(".gjj-template-param-input, .gjj-template-param-template").forEach((el) => {
+		el.style.maxWidth = "100%";
+		el.style.minWidth = "0";
+		if (el.tagName === "TEXTAREA") {
+			el.style.width = "100%";
+		}
+	});
+}
+
+function scheduleDomControlSizeSync(node) {
+	syncDomControlSize(node);
+	requestAnimationFrame(() => {
+		syncDomControlSize(node);
+		node?.setDirtyCanvas?.(true, true);
+		app.graph?.setDirtyCanvas?.(true, true);
+	});
+}
+
 function inputHasLink(input) {
 	if (!input) return false;
 	if (Array.isArray(input.link)) return input.link.length > 0;
@@ -1867,6 +1896,7 @@ function parseTemplate(template) {
 function refreshNode(node, options = {}) {
 	if (!node) return;
 	const allowResize = options.resize !== false;
+	syncDomControlSize(node);
 
 	// 工作流加载后优先尊重保存的节点尺寸，避免 DOM 重建时按 scrollHeight 把节点拉长。
 	if (allowResize && node.__gjjTemplateParamsPreferSavedSize && Array.isArray(node.__gjjTemplateParamsSavedSize)) {
@@ -1886,6 +1916,7 @@ function refreshNode(node, options = {}) {
 		}
 		node.setDirtyCanvas?.(true, true);
 		app.graph?.setDirtyCanvas?.(true, true);
+		scheduleDomControlSizeSync(node);
 		return;
 	}
 
@@ -1905,6 +1936,7 @@ function refreshNode(node, options = {}) {
 	}
 	node.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
+	scheduleDomControlSizeSync(node);
 }
 
 function broadcastEnabled(node) {
@@ -2605,6 +2637,8 @@ function buildInputForField(node, field, values, options = {}) {
 	inputWrap.style.display = "flex";
 	inputWrap.style.gap = "6px";
 	inputWrap.style.alignItems = multiline ? "stretch" : "center";
+	inputWrap.style.minWidth = "0";
+	inputWrap.style.width = "100%";
 
 	const input = document.createElement(multiline ? "textarea" : "input");
 	input.className = multiline ? "gjj-template-param-input gjj-template-param-textarea" : "gjj-template-param-input";
@@ -2613,6 +2647,8 @@ function buildInputForField(node, field, values, options = {}) {
 	input.spellcheck = false;
 	input.title = field.tooltip || field.type || "STRING";
 	input.style.flex = "1";
+	input.style.minWidth = "0";
+	input.style.maxWidth = "100%";
 	let savedTextareaHeight = 0;
 	if (multiline) {
 		savedTextareaHeight = getSavedTextareaHeight(node, field);
@@ -2775,10 +2811,11 @@ function renderRows(node) {
 function buildDom(node) {
 	const container = document.createElement("div");
 	container.className = "gjj-template-params";
-	container.style.cssText = "width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:6px;padding:0;";
+	container.style.cssText = "width:100%;min-width:0;box-sizing:border-box;display:flex;flex-direction:column;gap:6px;padding:0;overflow:visible;";
 	const style = document.createElement("style");
 	style.textContent = `
 		.gjj-template-params * { box-sizing: border-box; }
+		.gjj-template-params { min-width:0; overflow:visible; }
 		.gjj-template-param-toolbar { display:flex; align-items:center; gap:6px; }
 		.gjj-template-param-gear, .gjj-template-param-refresh, .gjj-template-param-broadcast, .gjj-template-param-output-plug, .gjj-template-param-ok, .gjj-template-param-cancel { border:1px solid #44565f; border-radius:7px; background:#202b31; color:#dce7e2; cursor:pointer; height:24px; padding:0 8px; font-size:12px; }
 		.gjj-template-param-broadcast, .gjj-template-param-output-plug { width:26px; flex:0 0 26px; padding:0; font-size:14px; line-height:20px; }
@@ -2792,7 +2829,7 @@ function buildDom(node) {
 		.gjj-template-param-actions { display:flex; gap:6px; justify-content:flex-end; }
 		.gjj-template-param-warning { display:none; padding:6px 8px; border:1px solid #8a5a08; border-radius:8px; background:#2a2111; color:#ffcf86; font-size:11px; line-height:1.45; white-space:pre-wrap; }
 		.gjj-template-param-rows { display:flex; flex-direction:column; gap:6px; }
-		.gjj-template-param-row { display:grid; grid-template-columns:74px minmax(0,1fr); gap:7px; align-items:center; }
+		.gjj-template-param-row { display:grid; grid-template-columns:74px minmax(0,1fr); gap:7px; align-items:center; min-width:0; width:100%; }
 		.gjj-template-param-row-enum-flow { display:flex; flex-wrap:wrap; align-items:center; gap:6px 7px; }
 		.gjj-template-param-row-enum-flow .gjj-template-param-label { flex:0 0 auto; max-width:100%; align-self:center; }
 		.gjj-template-param-row-enum-flow .gjj-template-param-enum { display:contents; }
@@ -2802,8 +2839,8 @@ function buildDom(node) {
 		.gjj-template-param-label { color:#b9c8cc; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 		.gjj-template-param-label-wrap { display:flex; align-items:center; gap:4px; min-width:0; }
 		.gjj-template-param-label-text { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-		.gjj-template-param-input { width:100%; height:30px; padding:4px 8px; border:1px solid #33464e; border-radius:8px; outline:none; background:#2b2d30; color:#f1f5f5; font-size:13px; }
-		.gjj-template-param-textarea { min-height:58px; height:auto; resize:vertical; line-height:1.45; white-space:pre-wrap; overflow:auto; }
+		.gjj-template-param-input { width:100%; min-width:0; max-width:100%; height:30px; padding:4px 8px; border:1px solid #33464e; border-radius:8px; outline:none; background:#2b2d30; color:#f1f5f5; font-size:13px; }
+		.gjj-template-param-textarea { min-height:58px; height:auto; resize:vertical; line-height:1.45; white-space:pre-wrap; overflow:auto; display:block; }
 		.gjj-template-param-template.gjj-template-param-textarea { min-height:108px; height:118px; font:12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
 		.gjj-template-param-input:focus { border-color:#6aa6b8; background:#22282c; }
 		.gjj-template-param-file-button { height:30px; width:36px; padding:0; border:1px solid #33464e; border-radius:8px; background:#2b2d30; color:#f1f5f5; cursor:pointer; font-size:14px; display:flex; align-items:center; justify-content:center; }
@@ -2990,7 +3027,9 @@ function ensureDom(node) {
 			Math.round(Number(width || currentNodeWidth(node))),
 			Math.round(Math.max(40, Math.ceil(container.scrollHeight || 40))),
 		];
+		widget.getHeight = () => Math.round(Math.max(40, Math.ceil(container.scrollHeight || 40)));
 		node.__gjjTemplateParamsWidget = widget;
+		scheduleDomControlSizeSync(node);
 	}
 }
 
@@ -3009,6 +3048,7 @@ function stabilize(node) {
 	if (!getWidgetValue(node, SCHEMA_WIDGET, "")) setWidgetValue(node, SCHEMA_WIDGET, node?.properties?.[SAVED_SCHEMA] || "[]");
 	renderRows(node);
 	node.__gjjTemplateParamsUpdateCount?.();
+	scheduleDomControlSizeSync(node);
 	if (node.__gjjTemplateParamsPreferSavedSize && Array.isArray(node.__gjjTemplateParamsSavedSize)) {
 		requestAnimationFrame(() => {
 			if (Array.isArray(node.__gjjTemplateParamsSavedSize)) {
@@ -3111,6 +3151,7 @@ app.registerExtension({
 		const originalOnResize = nodeType.prototype.onResize;
 		nodeType.prototype.onResize = function (...args) {
 			const result = originalOnResize?.apply(this, args);
+			scheduleDomControlSizeSync(this);
 			if (!this.__gjjTemplateParamsSizing) {
 				this.properties = this.properties || {};
 				this.properties[SAVED_SIZE] = [Math.round(Number(this.size?.[0] || DEFAULT_WIDTH)), Math.round(Number(this.size?.[1] || 80))];
@@ -3118,6 +3159,7 @@ app.registerExtension({
 				this.__gjjTemplateParamsPreferSavedSize = true;
 			}
 			refreshNode(this, { resize: false });
+			setTimeout(() => scheduleDomControlSizeSync(this), 50);
 			return result;
 		};
 	},

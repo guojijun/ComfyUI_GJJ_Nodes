@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import collections
 import inspect
+import json
 import logging
 from typing import Any
 
@@ -17,7 +18,7 @@ import comfy.utils
 import folder_paths
 import torch
 
-from .dequant import is_quantized, is_torch_compatible
+from .dequant import dequantize_tensor, is_quantized, is_torch_compatible
 from .loader import gguf_clip_loader, gguf_sd_loader
 from .ops import GGMLOps, move_patch_to_device
 
@@ -140,7 +141,7 @@ def load_unet_gguf(
     patch_on_device: bool | None = False,
 ) -> Any:
     ops = _gguf_ops(dequant_dtype, patch_dtype)
-    unet_path = _full_path_or_raise(("unet", "unet_gguf", "diffusion_models"), unet_name)
+    unet_path = _full_path_or_raise(("unet", "unet_gguf", "diffusion_models", "checkpoints"), unet_name)
     sd, extra = gguf_sd_loader(unet_path)
 
     kwargs = {}
@@ -153,6 +154,153 @@ def load_unet_gguf(
     model = GGUFModelPatcher.clone(model)
     model.patch_on_device = bool(patch_on_device)
     return model
+
+
+def _real_tensor_for_aux(tensor: Any) -> Any:
+    if is_quantized(tensor):
+        return dequantize_tensor(tensor, dtype=torch.float32)
+    return tensor
+
+
+def _materialize_aux_tensors(sd: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in sd.items():
+        if not _is_ltx_checkpoint_aux_key(key):
+            result[key] = value
+        else:
+            result[key] = _real_tensor_for_aux(value)
+    return result
+
+
+def _is_ltx_checkpoint_aux_key(key: str) -> bool:
+    return str(key).startswith(("vae.", "audio_vae.", "vocoder.", "text_encoders."))
+
+
+def _diffusion_state_dict_from_checkpoint(sd: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in sd.items() if not _is_ltx_checkpoint_aux_key(key)}
+
+
+def _shape_dim(sd: dict[str, Any], key: str, index: int, default: int | None = None) -> int | None:
+    tensor = sd.get(key)
+    if tensor is None:
+        return default
+    try:
+        return int(tensor.shape[index])
+    except Exception:
+        return default
+
+
+def _ensure_ltxav_metadata(metadata: dict[str, Any], sd: dict[str, Any]) -> dict[str, Any]:
+    result = dict(metadata or {})
+    try:
+        config = json.loads(str(result.get("config") or "{}"))
+    except Exception:
+        config = {}
+    transformer = dict(config.get("transformer") or {})
+    if str(transformer.get("_class_name") or "") != "AVTransformer3DModel":
+        if not any(
+            str(key).startswith(("model.diffusion_model.audio_embeddings_connector.", "audio_embeddings_connector."))
+            for key in sd
+        ):
+            return result
+        transformer["_class_name"] = "AVTransformer3DModel"
+
+    audio_dim = _shape_dim(sd, "model.diffusion_model.audio_embeddings_connector.learnable_registers", 1)
+    audio_dim = _shape_dim(sd, "audio_embeddings_connector.learnable_registers", 1, audio_dim)
+    video_dim = _shape_dim(sd, "model.diffusion_model.video_embeddings_connector.learnable_registers", 1)
+    video_dim = _shape_dim(sd, "video_embeddings_connector.learnable_registers", 1, video_dim)
+    scale_shift_count = _shape_dim(sd, "model.diffusion_model.transformer_blocks.0.scale_shift_table", 0)
+    scale_shift_count = _shape_dim(sd, "transformer_blocks.0.scale_shift_table", 0, scale_shift_count)
+    if audio_dim:
+        transformer["audio_cross_attention_dim"] = audio_dim
+        transformer["audio_connector_attention_head_dim"] = 64 if audio_dim == 2048 else min(128, audio_dim)
+    if video_dim:
+        transformer["cross_attention_dim"] = video_dim
+    transformer.setdefault("caption_channels", 3840)
+    if scale_shift_count == 9:
+        transformer["cross_attention_adaln"] = True
+    transformer.setdefault("audio_connector_num_attention_heads", 32)
+    transformer.setdefault("connector_num_attention_heads", 32)
+    transformer.setdefault("connector_num_layers", 8)
+    transformer.setdefault("connector_num_learnable_registers", 128)
+    transformer.setdefault("connector_attention_head_dim", 128)
+    transformer.setdefault("connector_learnable_registers_std", 1)
+    transformer.setdefault("connector_positional_embedding_max_pos", [4096])
+    transformer.setdefault("connector_norm_output", True)
+    transformer.setdefault("use_embeddings_connector", True)
+    transformer.setdefault("caption_proj_before_connector", True)
+    transformer.setdefault("use_middle_indices_grid", True)
+    transformer.setdefault("apply_gated_attention", True)
+    transformer.setdefault("connector_apply_gated_attention", True)
+    transformer.setdefault("rope_type", "split")
+    transformer.setdefault("frequencies_precision", "float64")
+
+    config["transformer"] = transformer
+    result["config"] = json.dumps(config)
+    return result
+
+
+def _audio_vae_state_dict_from_checkpoint(sd: dict[str, Any]) -> dict[str, Any]:
+    audio_sd: dict[str, Any] = {}
+    for key, value in sd.items():
+        if key.startswith("audio_vae."):
+            audio_sd["autoencoder." + key[len("audio_vae."):]] = _real_tensor_for_aux(value)
+        elif key.startswith("vocoder."):
+            audio_sd[key] = _real_tensor_for_aux(value)
+    return audio_sd
+
+
+def _video_vae_state_dict_from_checkpoint(sd: dict[str, Any]) -> dict[str, Any]:
+    video_sd: dict[str, Any] = {}
+    for key, value in sd.items():
+        if key.startswith("vae."):
+            video_sd[key[len("vae."):]] = _real_tensor_for_aux(value)
+    return video_sd
+
+
+def load_ltx_checkpoint_gguf(
+    ckpt_name: str,
+    *,
+    dequant_dtype: str | None = None,
+    patch_dtype: str | None = None,
+    patch_on_device: bool | None = False,
+) -> tuple[Any, Any, Any]:
+    ops = _gguf_ops(dequant_dtype, patch_dtype)
+    ckpt_path = _full_path_or_raise(("checkpoints", "unet", "unet_gguf", "diffusion_models"), ckpt_name)
+    sd, extra = gguf_sd_loader(ckpt_path, handle_prefix=None)
+    metadata = _ensure_ltxav_metadata(extra.get("metadata", {}), sd)
+    video_sd = _video_vae_state_dict_from_checkpoint(sd)
+    audio_sd = _audio_vae_state_dict_from_checkpoint(sd)
+    if not video_sd or not audio_sd:
+        missing = []
+        if not video_sd:
+            missing.append("video VAE")
+        if not audio_sd:
+            missing.append("audio VAE/vocoder")
+        raise RuntimeError(
+            "当前 GGUF 文件不是完整的 LTX checkpoint，无法从同一个文件拆出"
+            f"{'、'.join(missing)} 权重：{ckpt_path}"
+        )
+
+    model_sd = _diffusion_state_dict_from_checkpoint(sd)
+
+    model = comfy.sd.load_diffusion_model_state_dict(
+        model_sd,
+        model_options={"custom_operations": ops},
+        metadata=metadata,
+    )
+    if model is None:
+        raise RuntimeError(f"无法识别 GGUF LTX checkpoint 主模型：{ckpt_path}")
+    model = GGUFModelPatcher.clone(model)
+    model.patch_on_device = bool(patch_on_device)
+
+    video_vae = comfy.sd.VAE(sd=video_sd, metadata=metadata)
+    video_vae.throw_exception_if_invalid()
+
+    audio_vae = comfy.sd.VAE(sd=audio_sd, metadata=metadata)
+    audio_vae.throw_exception_if_invalid()
+
+    return model, video_vae, audio_vae
 
 
 def _clip_type(value: str):
@@ -169,6 +317,28 @@ def load_clip_gguf(clip_name: str, clip_type: str = "stable_diffusion") -> Any:
             "custom_operations": GGMLOps,
             "initial_device": comfy.model_management.text_encoder_offload_device(),
         },
+        embedding_directory=folder_paths.get_folder_paths("embeddings"),
+    )
+    clip.patcher = GGUFModelPatcher.clone(clip.patcher)
+    return clip
+
+
+def load_ltxav_text_encoder_gguf(text_encoder_name: str, ckpt_name: str, device: str = "default") -> Any:
+    text_encoder_path = _full_path_or_raise(("text_encoders", "clip"), text_encoder_name)
+    ckpt_path = _full_path_or_raise(("checkpoints", "unet", "unet_gguf", "diffusion_models"), ckpt_name)
+    text_sd = comfy.utils.load_torch_file(text_encoder_path, safe_load=True)
+    ckpt_sd, _extra = gguf_sd_loader(ckpt_path, handle_prefix=None)
+
+    model_options: dict[str, Any] = {"custom_operations": GGMLOps}
+    if str(device or "default") == "cpu":
+        cpu = torch.device("cpu")
+        model_options["load_device"] = cpu
+        model_options["offload_device"] = cpu
+
+    clip = comfy.sd.load_text_encoder_state_dicts(
+        clip_type=comfy.sd.CLIPType.LTXV,
+        state_dicts=[text_sd, ckpt_sd],
+        model_options=model_options,
         embedding_directory=folder_paths.get_folder_paths("embeddings"),
     )
     clip.patcher = GGUFModelPatcher.clone(clip.patcher)
