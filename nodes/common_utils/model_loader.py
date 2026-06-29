@@ -30,6 +30,11 @@ import comfy.utils
 import folder_paths
 import torch
 
+from .dependency_checker import (
+    is_comfyui_model_compatibility_error,
+    raise_comfyui_model_compatibility_error,
+)
+
 
 # ============================================================================
 # LTX 2.3 模型加载
@@ -505,6 +510,12 @@ def gjjutils_load_model(unet_name: str, unet_dtype: str = DEFAULT_UNET_DTYPE):
             unet_path, model_options=_build_unet_model_options(unet_dtype)
         )
     except Exception as exc:
+        if is_comfyui_model_compatibility_error(exc, model_name=unet_name):
+            raise_comfyui_model_compatibility_error(
+                "GJJ 模型加载",
+                model_name=unet_name,
+                original_error=exc,
+            )
         raise _format_runtime_error("UNET 加载", exc) from exc
 
 

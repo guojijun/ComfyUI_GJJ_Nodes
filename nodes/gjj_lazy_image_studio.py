@@ -38,6 +38,10 @@ from .common_utils.text_tools import (
     gjjutils_dedupe_keep_order as _dedupe_keep_order,
 )
 from .common_utils.temp_files import gjjutils_write_temp_tensor_images
+from .common_utils.dependency_checker import (
+    is_comfyui_model_compatibility_error,
+    raise_comfyui_model_compatibility_error,
+)
 
 from .common_utils.sampler_tools import (
     EmptyFlux2LatentImage_execute as EmptyFlux2LatentImage,
@@ -886,7 +890,9 @@ def _load_model_with_native_unet_loader(unet_name: str, unet_dtype: str):
     raise RuntimeError("当前 ComfyUI 环境缺少可用的 UNETLoader.load_unet。")
 
 
-def _load_model(unet_name: str, unet_dtype: str, clip_type: str = ""):
+def _load_model(
+    unet_name: str, unet_dtype: str, clip_type: str = "", unique_id: Any = None
+):
     if _is_gguf_model(unet_name):
         return _load_model_gguf(unet_name)
     try:
@@ -912,6 +918,16 @@ def _load_model(unet_name: str, unet_dtype: str, clip_type: str = ""):
         return model
     except Exception as exc:
         error_text = str(exc)
+        if is_comfyui_model_compatibility_error(
+            exc, model_name=unet_name, clip_type=clip_type
+        ):
+            raise_comfyui_model_compatibility_error(
+                NODE_NAME,
+                model_name=unet_name,
+                clip_type=clip_type,
+                original_error=exc,
+                unique_id=unique_id,
+            )
         if (not _is_boogu_runtime(unet_name, clip_type)) and (
             "shape '[13568, 3360]'" in error_text
             or ("3360" in error_text and "invalid for input of size" in error_text)
@@ -2152,8 +2168,9 @@ class GJJ_LazyImageStudio:
         clip_names: list[str],
         clip_type: str,
         vae_name: str,
+        unique_id: Any = None,
     ):
-        model = _load_model(unet_name, unet_dtype, clip_type)
+        model = _load_model(unet_name, unet_dtype, clip_type, unique_id=unique_id)
         clip = _load_clip_from_names(clip_names, clip_type)
         vae = _load_vae(vae_name)
         return model, clip, vae
@@ -2440,6 +2457,7 @@ class GJJ_LazyImageStudio:
                     resolved_clip_names,
                     resolved_clip_type,
                     resolved_vae_name,
+                    unique_id=unique_id,
                 )
 
                 _send_status(unique_id, "3/6 应用 LoRA 与模型补丁...")

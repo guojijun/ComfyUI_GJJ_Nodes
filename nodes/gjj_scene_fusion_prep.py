@@ -59,9 +59,14 @@ DEFAULT_FUSION_PROMPT = "按颜色将图1中的角色精准放置到图2场景�
 DEFAULT_TEMPLATE_ID = "FireRed-Image-Edit-1.1"
 DEFAULT_UNET_SEEDS = ("FireRed-Image-Edit-1.1_fp8mixed_comfy.safetensors", "FireRed Image Edit 1.1")
 DEFAULT_CLIP_SEEDS = ("qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen 2.5 vl 7b fp8 scaled")
-DEFAULT_VAE_SEEDS = ("qwen_image_vae.safetensors", "qwen image vae")
+DEFAULT_VAE_SEEDS = (
+    "qwen_image_vae.safetensors",
+    "qwen image vae",
+    "qwen_image_HDR_vae_fp32_comfy.safetensors",
+)
 DEFAULT_LORA_1_SEEDS = ("QWEN/FireRed-Image-Edit-1.0-Lightning-8steps-v1.1.safetensors", "FireRed Image Edit Lightning 8steps")
 DEFAULT_LORA_2_SEEDS = ("QWEN/edit_2511人景色交互20-LORA+by_xiaodu.safetensors", "人景色交互")
+ALIGN_TO_BACKGROUND_WIDGET = "align_to_background"
 DEFAULT_FUSION_CFG = 1.0
 DEFAULT_FUSION_DENOISE = 1.0
 DEFAULT_FUSION_SAMPLER = "euler"
@@ -1337,6 +1342,17 @@ class GJJ_SceneFusionPrep:
                         "advanced": True,
                     },
                 ),
+                ALIGN_TO_BACKGROUND_WIDGET: (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "display_name": "按背景尺寸对齐",
+                        "tooltip": "开启时输出画布使用背景图尺寸；关闭时使用节点面板设置的宽度和高度。",
+                        "display": "hidden",
+                        "hidden": True,
+                        "advanced": True,
+                    },
+                ),
             },
             "optional": FlexiblePersonInputs(
                 {
@@ -1397,6 +1413,7 @@ class GJJ_SceneFusionPrep:
             BACKGROUND_UPLOAD_WIDGET,
             PERSON_UPLOADS_WIDGET,
             CUTOUT_PREVIEW_WIDGET,
+            ALIGN_TO_BACKGROUND_WIDGET,
         ]
         parts = [str(_unwrap(kwargs.get(key), "")) for key in keys]
         parts.append(_tensor_signature(_unwrap(kwargs.get("background")), sample_video=False))
@@ -1425,9 +1442,14 @@ class GJJ_SceneFusionPrep:
         requested_height = _int(_unwrap(kwargs.get("height"), 0), 0)
         bg_width = int(bg_images[0].width)
         bg_height = int(bg_images[0].height)
+        align_to_background = _bool(kwargs.get(ALIGN_TO_BACKGROUND_WIDGET), True)
         stale_square = requested_width == 2048 and requested_height == 2048 and (bg_width != 2048 or bg_height != 2048)
-        width = _align16(bg_width if requested_width <= 0 or stale_square else requested_width)
-        height = _align16(bg_height if requested_height <= 0 or stale_square else requested_height)
+        if align_to_background:
+            width = _align16(bg_width)
+            height = _align16(bg_height)
+        else:
+            width = _align16(bg_width if requested_width <= 0 or stale_square else requested_width)
+            height = _align16(bg_height if requested_height <= 0 or stale_square else requested_height)
         _send_status(unique_id, f"尺寸 {width}x{height}", 0.08)
         person_images = _collect_person_images(kwargs)
         if not person_images:

@@ -69,6 +69,14 @@ def _coerce_int(value: Any, fallback: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, number))
 
 
+def _coerce_float(value: Any, fallback: float, minimum: float, maximum: float) -> float:
+    try:
+        number = float(_first_scalar(value))
+    except Exception:
+        number = float(fallback)
+    return max(minimum, min(maximum, number))
+
+
 def _align32(value: int) -> int:
     return max(32, int(round(value / 32.0)) * 32)
 
@@ -202,6 +210,20 @@ def _images_from_temp_refs(value: Any) -> list[torch.Tensor]:
     return result
 
 
+def _indexed_images_from_temp_refs(value: Any) -> dict[int, torch.Tensor]:
+    if not isinstance(value, list):
+        return {}
+    result: dict[int, torch.Tensor] = {}
+    for index, item in enumerate(value):
+        if not isinstance(item, dict) or not item.get("filename"):
+            continue
+        try:
+            result[index] = _pil_to_tensor(gjjutils_read_temp_pil_image(item).convert("RGB"))
+        except Exception:
+            continue
+    return result
+
+
 def _cell_temp_refs(images: list[torch.Tensor]) -> list[dict[str, Any]]:
     return [_tensor_to_temp_ref(image) for image in images]
 
@@ -310,11 +332,38 @@ def _grid_label_keyword(label: str) -> str:
         "bottomleft", "bottommiddle", "bottomcenter", "bottomright", "frontrow", "backrow", "toprow", "bottomrow",
         "top", "middle", "center", "bottom", "front", "back",
         "左上", "上左", "中上", "上中", "右上", "上右",
-        "左中", "中左", "正中", "中心", "右中", "中右",
+        "左中", "中左", "正中", "中心", "中间", "右中", "中右",
         "左下", "下左", "中下", "下中", "右下", "下右",
         "顶部", "顶", "中部", "中", "底部", "底", "前排", "后排",
     )
     return next((keyword for keyword in keywords if normalized.startswith(keyword)), "")
+
+
+def _grid_label_row(label: str) -> int | None:
+    keyword = _grid_label_keyword(label)
+    if keyword in {"topleft", "topmiddle", "topcenter", "topright", "toprow", "top", "frontrow", "front", "左上", "上左", "中上", "上中", "右上", "上右", "顶部", "顶", "前排"}:
+        return 0
+    if keyword in {"middleleft", "middlecenter", "middleright", "middlerow", "middle", "center", "左中", "中左", "正中", "中心", "中间", "右中", "中右", "中部", "中"}:
+        return 1
+    if keyword in {"bottomleft", "bottommiddle", "bottomcenter", "bottomright", "bottomrow", "bottom", "backrow", "back", "左下", "下左", "中下", "下中", "右下", "下右", "底部", "底", "后排"}:
+        return 2
+    return None
+
+
+def _keyword_row_counts(parts: list[str]) -> list[int]:
+    rows: list[int] = []
+    current_row: int | None = None
+    for part in parts:
+        label = str(part or "").split(":", 1)[0].strip()
+        row = _grid_label_row(label)
+        if row is None:
+            return []
+        if current_row is None or row != current_row:
+            rows.append(1)
+            current_row = row
+        else:
+            rows[-1] += 1
+    return rows
 
 
 def _keyword_label_line(line: str) -> tuple[str, str] | None:
@@ -340,21 +389,25 @@ def _keyword_label_line(line: str) -> tuple[str, str] | None:
 
 def _keyword_prompt_parts(reference_text: str) -> list[str]:
     parts: list[str] = []
+    saw_marker = False
     current_label = ""
     current_lines: list[str] = []
     for line in str(reference_text or "").splitlines():
         marker = _keyword_label_line(line)
         if marker:
-            if current_label and "\n".join(current_lines).strip():
+            saw_marker = True
+            if current_label:
                 body_text = "\n".join(current_lines).strip()
                 parts.append(f"{current_label}: {body_text}")
             current_label, body = marker
             current_lines = [body] if body else []
         elif current_label:
             current_lines.append(line)
-    if current_label and "\n".join(current_lines).strip():
+    if current_label:
         body_text = "\n".join(current_lines).strip()
         parts.append(f"{current_label}: {body_text}")
+    if saw_marker and len(parts) >= 2:
+        return parts
     return parts
 
 
@@ -535,7 +588,7 @@ def _layout_rects_from_state(state: dict[str, Any], count: int, width: int, heig
     layout = state.get("variableLayout") if isinstance(state, dict) else None
     if not isinstance(layout, dict):
         layout = {}
-    rows = _parse_row_counts(layout.get("rows") or state.get("rowTemplate"), count)
+    rows = _parse_row_counts(state.get("rowTemplate") or layout.get("rows"), count)
     row_heights = _normalize_weights(layout.get("rowHeights") or state.get("rowHeights"), len(rows))
     row_weights = layout.get("rowWeights")
     if not isinstance(row_weights, list):
@@ -648,25 +701,65 @@ def _resize_exact(image: torch.Tensor, width: int, height: int, method: str = "l
     return resized.movedim(1, -1).clamp(0.0, 1.0).contiguous()
 
 
-def _fit_cell(image: torch.Tensor, width: int, height: int, fit_mode: str, method: str) -> torch.Tensor:
+def _cell_transform(transforms: Any, index: int) -> dict[str, float]:
+    if not isinstance(transforms, list) or index < 0 or index >= len(transforms):
+        return {"scale": 1.0, "offsetX": 0.0, "offsetY": 0.0}
+    item = transforms[index]
+    if not isinstance(item, dict):
+        return {"scale": 1.0, "offsetX": 0.0, "offsetY": 0.0}
+    return {
+        "scale": _coerce_float(item.get("scale"), 1.0, 0.1, 8.0),
+        "offsetX": _coerce_float(item.get("offsetX"), 0.0, -4.0, 4.0),
+        "offsetY": _coerce_float(item.get("offsetY"), 0.0, -4.0, 4.0),
+    }
+
+
+def _paste_clipped(canvas: torch.Tensor, image: torch.Tensor, left: int, top: int, width: int, height: int) -> torch.Tensor:
+    src_h = int(image.shape[1])
+    src_w = int(image.shape[2])
+    dst_left = max(0, left)
+    dst_top = max(0, top)
+    dst_right = min(width, left + src_w)
+    dst_bottom = min(height, top + src_h)
+    if dst_right <= dst_left or dst_bottom <= dst_top:
+        return canvas
+    src_left = dst_left - left
+    src_top = dst_top - top
+    canvas[:, dst_top:dst_bottom, dst_left:dst_right, :] = image[
+        :,
+        src_top : src_top + (dst_bottom - dst_top),
+        src_left : src_left + (dst_right - dst_left),
+        :,
+    ]
+    return canvas
+
+
+def _fit_cell(image: torch.Tensor, width: int, height: int, fit_mode: str, method: str, transform: dict[str, float] | None = None) -> torch.Tensor:
     source = _normalize_bhwc_tensor(image)[:1]
-    if str(fit_mode) == "拉伸":
+    transform = transform or {"scale": 1.0, "offsetX": 0.0, "offsetY": 0.0}
+    zoom = _coerce_float(transform.get("scale"), 1.0, 0.1, 8.0)
+    offset_x = _coerce_float(transform.get("offsetX"), 0.0, -4.0, 4.0)
+    offset_y = _coerce_float(transform.get("offsetY"), 0.0, -4.0, 4.0)
+    has_transform = abs(zoom - 1.0) > 0.001 or abs(offset_x) > 0.001 or abs(offset_y) > 0.001
+    if str(fit_mode) == "拉伸" and not has_transform:
         return _resize_exact(source, width, height, method)
     src_h = max(1, int(source.shape[1]))
     src_w = max(1, int(source.shape[2]))
     cover = str(fit_mode) != "完整留白"
-    scale = max(width / src_w, height / src_h) if cover else min(width / src_w, height / src_h)
+    scale = (max(width / src_w, height / src_h) if cover else min(width / src_w, height / src_h)) * zoom
     new_w = max(1, int(round(src_w * scale)))
     new_h = max(1, int(round(src_h * scale)))
     resized = _resize_exact(source, new_w, new_h, method)
     if cover:
-        left = max(0, (new_w - width) // 2)
-        top = max(0, (new_h - height) // 2)
+        left = int(round((new_w - width) / 2 - offset_x * width))
+        top = int(round((new_h - height) / 2 - offset_y * height))
+        left = max(0, min(max(0, new_w - width), left))
+        top = max(0, min(max(0, new_h - height), top))
         return resized[:, top : top + height, left : left + width, :].contiguous()
     canvas = torch.ones((1, height, width, 3), dtype=torch.float32)
-    left = max(0, (width - new_w) // 2)
-    top = max(0, (height - new_h) // 2)
-    canvas[:, top : top + new_h, left : left + new_w, :] = resized[:, :height, :width, :]
+    left = int(round((width - new_w) / 2 + offset_x * width))
+    top = int(round((height - new_h) / 2 + offset_y * height))
+    canvas = _paste_clipped(canvas, resized, left, top, width, height)
     return canvas.clamp(0.0, 1.0).contiguous()
 
 
@@ -683,6 +776,7 @@ def _make_grid(
         return torch.zeros((1, height, width, 3), dtype=torch.float32)
     line_px = max(0, int(line_px))
     canvas = torch.zeros((1, height, width, 3), dtype=torch.float32)
+    transforms = (state or {}).get("cellTransforms") if isinstance(state, dict) else None
     rects = _layout_rects_from_state(state or {}, len(images), width, height, line_px)
     if not rects:
         cols, rows = _parse_layout(layout_mode, len(images), width, height)
@@ -697,8 +791,8 @@ def _make_grid(
             right = width - line_px if col == cols - 1 else left + cell_w
             bottom = height - line_px if row == rows - 1 else top + cell_h
             rects.append((left, top, right, bottom))
-    for image, (left, top, right, bottom) in zip(images, rects):
-        fitted = _fit_cell(image, right - left, bottom - top, fit_mode, "lanczos")
+    for index, (image, (left, top, right, bottom)) in enumerate(zip(images, rects)):
+        fitted = _fit_cell(image, right - left, bottom - top, fit_mode, "lanczos", _cell_transform(transforms, index))
         canvas[:, top:bottom, left:right, :] = fitted
     return canvas.clamp(0.0, 1.0).contiguous()
 
@@ -771,7 +865,7 @@ def _generate_f2k_image(
         else gjjutils_zero_out_conditioning(gjjutils_encode_text(clip, prompt))
     )
     if reference_image is not None:
-        ref = _resize_exact(_normalize_bhwc_tensor(reference_image)[:1], width, height, "lanczos")
+        ref = _fit_cell(reference_image, width, height, "铺满裁切", "lanczos")
         reference_latent = VAEEncode().encode(vae, ref)[0]["samples"]
         positive = gjjutils_append_reference_latent(positive, reference_latent)
         negative = gjjutils_append_reference_latent(negative, reference_latent)
@@ -848,7 +942,7 @@ class GJJ_VisualGridBoard:
                 "steps": ("INT", {"default": 4, "min": 1, "max": 100, "step": 1, "display_name": "采样步数"}),
                 "cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 20.0, "step": 0.1, "display_name": "CFG"}),
                 "seed": ("INT", {"default": 352628917855609, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "control_after_generate": True, "display_name": "种子"}),
-                "keep_models_loaded": ("BOOLEAN", {"default": False, "display_name": "模型常驻", "label_on": "常驻", "label_off": "释放"}),
+                "keep_models_loaded": ("BOOLEAN", {"default": True, "display_name": "模型常驻", "label_on": "常驻", "label_off": "释放"}),
             },
             "optional": {
                 "reference_image": (IMAGE_INPUT_TYPE, {"display_name": "参考图片", "tooltip": "支持 GJJ_BATCH_IMAGE、IMAGE；连接时以外部输入为准，📁 导入按钮失效。"}),
@@ -898,10 +992,12 @@ class GJJ_VisualGridBoard:
         fit = str(state.get("cellFit") or _first_scalar(cell_fit) or "铺满裁切")
 
         images = _split_media(reference_image)
+        single_reference_fallback = images[0] if len(images) == 1 else None
         if not images:
             loaded = _image_from_local_image_data(str(_first_scalar(local_image_data) or ""))
             if loaded is not None:
                 images = [loaded]
+                single_reference_fallback = loaded
         if not images:
             images = _images_from_temp_refs(state.get("generatedCellRefs"))
 
@@ -909,16 +1005,60 @@ class GJJ_VisualGridBoard:
             detected = _detect_cells_from_black_lines(images[0])
             if detected:
                 images = detected
+        actual_reference_indexes = set(range(len(images)))
 
         mode = str(_first_scalar(generation_mode) or "只拼图")
         parts = _prompt_parts(script)
         source_image_count = len(images)
+        cell_ref_images = _indexed_images_from_temp_refs(state.get("cellImageRefs"))
+        generated_ref_images = _indexed_images_from_temp_refs(state.get("generatedCellRefs"))
+        generated_indexes = {
+            _coerce_int(item, -1, -1, 255)
+            for item in state.get("generatedCellIndexes", [])
+            if _coerce_int(item, -1, -1, 255) >= 0
+        } if isinstance(state.get("generatedCellIndexes"), list) else set()
+        cell_ref_count = max(cell_ref_images.keys(), default=-1) + 1
+        generated_ref_count = max((index for index in generated_ref_images if index in generated_indexes), default=-1) + 1
         if mode == "只拼图" and source_image_count > 0:
-            target_count = source_image_count
+            target_count = max(source_image_count, cell_ref_count, generated_ref_count)
         else:
-            target_count = max(1, source_image_count, len(parts))
+            target_count = max(1, source_image_count, len(parts), cell_ref_count, generated_ref_count)
+        keyword_rows = _keyword_row_counts(parts)
+        if (
+            keyword_rows
+            and sum(keyword_rows) == target_count
+            and layout == "自动"
+            and not state.get("manualLayout")
+            and not state.get("rowTemplate")
+        ):
+            state["variableLayout"] = {
+                "rows": keyword_rows,
+                "rowHeights": [1.0 for _ in keyword_rows],
+                "rowWeights": [[1.0 for _ in range(cols)] for cols in keyword_rows],
+            }
         rects = _grid_rects(width, height, layout, target_count, line, state)
         images = _ensure_cell_images(images, parts, rects)
+        selected = max(0, int(_first_scalar(selected_cell) or 1) - 1)
+        requested_indexes = state.get("regenerateCellIndexes")
+        if mode != "只拼图" and isinstance(requested_indexes, list):
+            skip_generated_overlay = {
+                max(0, min(target_count - 1, _coerce_int(item, 0, 0, target_count - 1)))
+                for item in requested_indexes
+            }
+        elif mode != "只拼图" and str(_first_scalar(generation_scope) or "选中宫格") == "全部宫格":
+            skip_generated_overlay = set(range(target_count))
+        elif mode != "只拼图":
+            skip_generated_overlay = {min(selected, target_count - 1)}
+        else:
+            skip_generated_overlay = set()
+        for index, image in generated_ref_images.items():
+            if index in generated_indexes and index not in skip_generated_overlay and 0 <= index < len(images):
+                images[index] = image
+        for index, image in cell_ref_images.items():
+            if 0 <= index < len(images):
+                images[index] = image
+                actual_reference_indexes.add(index)
+        source_image_count = max(source_image_count, cell_ref_count)
 
         if mode != "只拼图":
             if not parts:
@@ -935,8 +1075,6 @@ class GJJ_VisualGridBoard:
                 _pick_available_name(str(_first_scalar(vae_name) or DEFAULT_VAE), list_vae_models() or [DEFAULT_VAE], DEFAULT_VAE),
                 bool(_first_scalar(keep_models_loaded)),
             )
-            selected = max(0, int(_first_scalar(selected_cell) or 1) - 1)
-            requested_indexes = state.get("regenerateCellIndexes")
             if isinstance(requested_indexes, list):
                 indexes = sorted({
                     max(0, min(target_count - 1, _coerce_int(item, 0, 0, target_count - 1)))
@@ -951,7 +1089,12 @@ class GJJ_VisualGridBoard:
                 cell_w = max(8, int(right - left))
                 cell_h = max(8, int(bottom - top))
                 prompt = parts[index] if index < len(parts) else parts[-1]
-                reference = images[index] if mode != "文生图" and index < source_image_count else None
+                reference = None
+                if mode != "文生图":
+                    if index in actual_reference_indexes and index < len(images):
+                        reference = images[index]
+                    elif single_reference_fallback is not None:
+                        reference = single_reference_fallback
                 images[index] = _generate_f2k_image(
                     model=model,
                     clip=clip,

@@ -92,20 +92,24 @@ function isTextEditingElement(element) {
 	return tag === "input" || tag === "textarea" || tag === "select" || Boolean(element?.isContentEditable);
 }
 
-function clearFinalPreview(node) {
+function clearFinalPreview(node, options = {}) {
+	const clearCellCache = Boolean(options.clearCellCache);
 	if (node.__gjjVisualGridPanel) {
 		node.__gjjVisualGridPanel.finalImageBase64 = "";
 		node.__gjjVisualGridPanel.finalImageRef = null;
 		node.__gjjVisualGridPanel.finalImageLayout = null;
 		node.__gjjVisualGridPanel.cellCount = null;
-		node.__gjjVisualGridPanel.generatedCellRefs = [];
+		if (clearCellCache) node.__gjjVisualGridPanel.generatedCellRefs = [];
 	}
 	const state = readState(node);
 	if (state && typeof state === "object") {
 		delete state.generatedImageRef;
 		delete state.generatedImageLayout;
 		delete state.cellCount;
-		delete state.generatedCellRefs;
+		if (clearCellCache) {
+			delete state.generatedCellRefs;
+			delete state.generatedCellIndexes;
+		}
 		delete state.regenerateCellIndexes;
 		setWidget(node, "grid_state", JSON.stringify(state));
 	}
@@ -188,8 +192,13 @@ function hasLocalImage(node) {
 	return Boolean(raw);
 }
 
+function hasCellImageRefs(node) {
+	const refs = readState(node).cellImageRefs;
+	return Array.isArray(refs) && refs.some((item) => item?.filename);
+}
+
 function smartGenerationMode(node) {
-	return hasReferenceLink(node) || hasLocalImage(node) ? "图生图" : "文生图";
+	return hasReferenceLink(node) || hasLocalImage(node) || hasCellImageRefs(node) ? "图生图" : "文生图";
 }
 
 async function uploadLocalImage(file) {
@@ -242,11 +251,44 @@ function gridLabelKeyword(label) {
 		"bottomleft", "bottommiddle", "bottomcenter", "bottomright", "frontrow", "backrow", "toprow", "bottomrow",
 		"top", "middle", "center", "bottom", "front", "back",
 		"左上", "上左", "中上", "上中", "右上", "上右",
-		"左中", "中左", "正中", "中心", "右中", "中右",
+		"左中", "中左", "正中", "中心", "中间", "右中", "中右",
 		"左下", "下左", "中下", "下中", "右下", "下右",
 		"顶部", "顶", "中部", "中", "底部", "底", "前排", "后排",
 	];
 	return keywords.find((keyword) => normalized.startsWith(keyword)) || "";
+}
+
+function gridLabelRow(label) {
+	const keyword = gridLabelKeyword(label);
+	if ([
+		"topleft", "topmiddle", "topcenter", "topright", "toprow", "top", "frontrow", "front",
+		"左上", "上左", "中上", "上中", "右上", "上右", "顶部", "顶", "前排",
+	].includes(keyword)) return 0;
+	if ([
+		"middleleft", "middlecenter", "middleright", "middlerow", "middle", "center",
+		"左中", "中左", "正中", "中心", "中间", "右中", "中右", "中部", "中",
+	].includes(keyword)) return 1;
+	if ([
+		"bottomleft", "bottommiddle", "bottomcenter", "bottomright", "bottomrow", "bottom", "backrow", "back",
+		"左下", "下左", "中下", "下中", "右下", "下右", "底部", "底", "后排",
+	].includes(keyword)) return 2;
+	return null;
+}
+
+function keywordRowCounts(parts) {
+	const rows = [];
+	let currentRow = null;
+	for (const part of parts || []) {
+		const row = gridLabelRow(part?.label || "");
+		if (row === null) return [];
+		if (currentRow === null || row !== currentRow) {
+			rows.push(1);
+			currentRow = row;
+		} else {
+			rows[rows.length - 1] += 1;
+		}
+	}
+	return rows;
 }
 
 function keywordLabelLine(line) {
@@ -275,10 +317,12 @@ function parseKeywordPromptParts(reference) {
 	const lines = String(reference || "").split(/\r?\n/);
 	const parts = [];
 	let current = null;
+	let sawMarker = false;
 	for (const line of lines) {
 		const marker = keywordLabelLine(line);
 		if (marker) {
-			if (current && current.bodyLines.join("\n").trim()) {
+			sawMarker = true;
+			if (current) {
 				parts.push({ label: current.label, body: current.bodyLines.join("\n").trim() });
 			}
 			current = { label: marker.label, bodyLines: [] };
@@ -289,6 +333,10 @@ function parseKeywordPromptParts(reference) {
 	}
 	if (current && current.bodyLines.join("\n").trim()) {
 		parts.push({ label: current.label, body: current.bodyLines.join("\n").trim() });
+	}
+	if (sawMarker && current && !parts.includes(current)) {
+		const last = parts[parts.length - 1];
+		if (!last || last.label !== current.label) parts.push({ label: current.label, body: current.bodyLines.join("\n").trim() });
 	}
 	return parts;
 }
@@ -318,6 +366,91 @@ function updatePromptPart(node, index, body) {
 	writeState(node);
 	drawPreview(node);
 	refresh(node);
+}
+
+function selectedCellIndex(node) {
+	return Math.max(0, Math.min(255, Math.round(Number(getWidget(node, "selected_cell", 1)) || 1) - 1));
+}
+
+function setSelectedCellImageRef(node, imageRef) {
+	const state = readState(node);
+	const index = selectedCellIndex(node);
+	const refs = Array.isArray(state.cellImageRefs) ? state.cellImageRefs.slice() : [];
+	while (refs.length <= index) refs.push(null);
+	refs[index] = imageRef;
+	state.cellImageRefs = refs;
+	const generatedRefs = Array.isArray(state.generatedCellRefs) ? state.generatedCellRefs.slice() : [];
+	while (generatedRefs.length <= index) generatedRefs.push(null);
+	generatedRefs[index] = imageRef;
+	state.generatedCellRefs = generatedRefs;
+	const transforms = Array.isArray(state.cellTransforms) ? state.cellTransforms.slice() : [];
+	while (transforms.length <= index) transforms.push(null);
+	transforms[index] = { scale: 1, offsetX: 0, offsetY: 0 };
+	state.cellTransforms = transforms;
+	setWidget(node, "local_image_data", "");
+	setWidget(node, "grid_state", JSON.stringify(state));
+	if (node.__gjjVisualGridPanel) {
+		node.__gjjVisualGridPanel.generatedCellRefs = generatedRefs;
+	}
+}
+
+function selectedCellTransform(node) {
+	const state = readState(node);
+	const index = selectedCellIndex(node);
+	const current = Array.isArray(state.cellTransforms) ? state.cellTransforms[index] : null;
+	return {
+		scale: Math.max(0.1, Math.min(8, Number(current?.scale) || 1)),
+		offsetX: Math.max(-4, Math.min(4, Number(current?.offsetX) || 0)),
+		offsetY: Math.max(-4, Math.min(4, Number(current?.offsetY) || 0)),
+	};
+}
+
+function setSelectedCellTransform(node, transform) {
+	const state = readState(node);
+	const index = selectedCellIndex(node);
+	const transforms = Array.isArray(state.cellTransforms) ? state.cellTransforms.slice() : [];
+	while (transforms.length <= index) transforms.push(null);
+	transforms[index] = {
+		scale: Math.max(0.1, Math.min(8, Number(transform?.scale) || 1)),
+		offsetX: Math.max(-4, Math.min(4, Number(transform?.offsetX) || 0)),
+		offsetY: Math.max(-4, Math.min(4, Number(transform?.offsetY) || 0)),
+	};
+	state.cellTransforms = transforms;
+	setWidget(node, "grid_state", JSON.stringify(state));
+}
+
+function selectedCellHasImage(node) {
+	const state = readState(node);
+	const index = selectedCellIndex(node);
+	return Boolean(
+		(Array.isArray(state.cellImageRefs) && state.cellImageRefs[index]?.filename)
+		|| (Array.isArray(state.generatedCellRefs) && state.generatedCellRefs[index]?.filename)
+		|| node.__gjjVisualGridPanel?.finalImageBase64
+	);
+}
+
+function scheduleCellRecompose(node, delay = 420) {
+	clearTimeout(node.__gjjVisualGridCellRecomposeTimer);
+	node.__gjjVisualGridCellRecomposeTimer = setTimeout(() => {
+		recomposeGeneratedCells(node);
+	}, delay);
+}
+
+function setPendingGeneratedCellIndexes(node, indexes) {
+	const state = readState(node);
+	state.pendingGeneratedCellIndexes = [...new Set((indexes || [])
+		.map((item) => Number(item))
+		.filter((item) => Number.isInteger(item) && item >= 0 && item < 256))];
+	setWidget(node, "grid_state", JSON.stringify(state));
+}
+
+function currentCellCount(node) {
+	return Math.max(
+		1,
+		Number(node.__gjjVisualGridPanel?.cellCount || 0) || 0,
+		(node.__gjjVisualGridRects || []).length,
+		parsePromptParts(getWidget(node, "visual_script", "")).length,
+	);
 }
 
 function wrapCanvasText(ctx, text, maxWidth, maxLines) {
@@ -452,8 +585,10 @@ function layoutFor(count, width, height, mode) {
 	return best;
 }
 
-function defaultRowCounts(count) {
+function defaultRowCounts(count, parts = null) {
 	const total = Math.max(1, Number(count) || 1);
+	const keywordRows = keywordRowCounts(parts);
+	if (keywordRows.length && keywordRows.reduce((sum, value) => sum + value, 0) === total) return keywordRows;
 	if (total <= 3) return [total];
 	if (total <= 5) {
 		const first = Math.ceil(total / 2);
@@ -496,7 +631,7 @@ function normalizeWeights(values, expected) {
 function currentVariableLayout(node, count, stateOverride = null) {
 	const state = stateOverride || readState(node);
 	const layout = state.variableLayout && typeof state.variableLayout === "object" ? state.variableLayout : {};
-	const rows = parseRowCounts(layout.rows || state.rowTemplate, count);
+	const rows = parseRowCounts(state.rowTemplate || layout.rows, count);
 	const rowHeights = normalizeWeights(layout.rowHeights || state.rowHeights, rows.length);
 	const rowWeights = rows.map((cols, index) => normalizeWeights(Array.isArray(layout.rowWeights) ? layout.rowWeights[index] : null, cols));
 	return { rows, rowHeights, rowWeights };
@@ -540,10 +675,14 @@ function setVariableLayout(node, layout) {
 		rowHeights: layout.rowHeights,
 		rowWeights: layout.rowWeights,
 	};
+	state.rowTemplate = layout.rows.join(",");
+	state.manualLayout = true;
 	if (node.__gjjVisualGridPanel?.finalImageBase64) {
 		node.__gjjVisualGridPanel.finalImageLayout = {
 			linePx: Number(getWidget(node, "line_px", 2)) || 2,
 			variableLayout: state.variableLayout,
+			rowTemplate: state.rowTemplate,
+			manualLayout: true,
 		};
 		state.generatedImageLayout = node.__gjjVisualGridPanel.finalImageLayout;
 	}
@@ -570,7 +709,8 @@ function addManualLayoutControls(node, settings) {
 	rowTemplate.value = layout.rows.join(",");
 	rowTemplate.style.cssText = "min-width:0;background:#0f171b;color:#e8f1ed;border:1px solid #34444b;border-radius:6px;padding:4px 6px;";
 	rowTemplate.title = "例如 3,2,2 表示三行；3,3 表示两行。";
-	rowTemplate.addEventListener("change", async () => {
+	let rowTemplateTimer = null;
+	const applyRowTemplate = async (shouldRecompose = false) => {
 		const rows = parseRowCounts(rowTemplate.value, count);
 		const next = {
 			rows,
@@ -578,7 +718,25 @@ function addManualLayoutControls(node, settings) {
 			rowWeights: rows.map((cols) => normalizeWeights(null, cols)),
 		};
 		setVariableLayout(node, next);
-		await recomposeGeneratedCells(node);
+		drawPreview(node);
+		refresh(node);
+		if (shouldRecompose) await recomposeGeneratedCells(node);
+	};
+	rowTemplate.addEventListener("input", () => {
+		clearTimeout(rowTemplateTimer);
+		applyRowTemplate(false);
+		rowTemplateTimer = setTimeout(() => applyRowTemplate(true), 650);
+	});
+	rowTemplate.addEventListener("change", async () => {
+		clearTimeout(rowTemplateTimer);
+		await applyRowTemplate(true);
+	});
+	rowTemplate.addEventListener("keydown", async (event) => {
+		if (event.key !== "Enter") return;
+		event.preventDefault();
+		event.stopPropagation();
+		clearTimeout(rowTemplateTimer);
+		await applyRowTemplate(true);
 	});
 	settings.appendChild(field("行结构", rowTemplate));
 
@@ -764,6 +922,27 @@ function dragHit(node, x, y) {
 	return null;
 }
 
+function selectedCellHit(node, x, y) {
+	const rect = (node.__gjjVisualGridRects || [])[selectedCellIndex(node)];
+	if (!rect) return null;
+	return x >= rect.leftPx && x <= rect.rightPx && y >= rect.topPx && y <= rect.bottomPx ? rect : null;
+}
+
+function applyCellImageDrag(node, drag, x, y) {
+	const rect = drag?.rect;
+	if (!rect) return;
+	const cellW = Math.max(1, rect.rightPx - rect.leftPx);
+	const cellH = Math.max(1, rect.bottomPx - rect.topPx);
+	const next = {
+		...drag.startTransform,
+		offsetX: drag.startTransform.offsetX + (x - drag.startX) / cellW,
+		offsetY: drag.startTransform.offsetY + (y - drag.startY) / cellH,
+	};
+	setSelectedCellTransform(node, next);
+	const status = node.__gjjVisualGridPanel?.status;
+	if (status) status.textContent = `移动宫格 ${selectedCellIndex(node) + 1} · 缩放 ${next.scale.toFixed(2)}x`;
+}
+
 function applyDrag(node, drag, x, y) {
 	const rects = node.__gjjVisualGridRects || [];
 	const scale = node.__gjjVisualGridCanvasScale || { scaleX: 1, scaleY: 1, width: 1024, height: 672 };
@@ -900,6 +1079,7 @@ async function runNodeWithFreshAncestors(node, statusText = "正在更新上游�
 async function generateSelectedCell(node) {
 	randomizeSeedIfEnabled(node);
 	const mode = smartGenerationMode(node);
+	setPendingGeneratedCellIndexes(node, [selectedCellIndex(node)]);
 	setWidget(node, "generation_mode", mode);
 	setWidget(node, "generation_scope", "选中宫格");
 	await runNode(node, `f2k ${mode}：生成选中宫格...`);
@@ -908,6 +1088,7 @@ async function generateSelectedCell(node) {
 async function generateAllCells(node) {
 	randomizeSeedIfEnabled(node);
 	const mode = smartGenerationMode(node);
+	setPendingGeneratedCellIndexes(node, Array.from({ length: currentCellCount(node) }, (_, index) => index));
 	setWidget(node, "generation_mode", mode);
 	setWidget(node, "generation_scope", "全部宫格");
 	await runNode(node, `f2k ${mode}：生成全部宫格...`);
@@ -923,6 +1104,7 @@ async function generateChangedCells(node, indexes) {
 	const mode = smartGenerationMode(node);
 	const state = readState(node);
 	state.regenerateCellIndexes = unique;
+	state.pendingGeneratedCellIndexes = unique;
 	setWidget(node, "grid_state", JSON.stringify(state));
 	setWidget(node, "generation_mode", mode);
 	setWidget(node, "generation_scope", "选中宫格");
@@ -937,7 +1119,6 @@ async function refreshUpstreamData(node) {
 	clearFinalPreview(node);
 	const state = readState(node);
 	state.upstreamRefreshNonce = Date.now();
-	delete state.generatedCellRefs;
 	delete state.generatedImageRef;
 	delete state.generatedImageLayout;
 	setWidget(node, "grid_state", JSON.stringify(state));
@@ -1085,10 +1266,10 @@ function button(label, title, onClick) {
 	btn.textContent = label;
 	btn.title = title;
 	btn.style.cssText = [
-		"width:30px",
-		"height:28px",
+		"width:28px",
+		"height:26px",
 		"border:1px solid #38464d",
-		"border-radius:8px",
+		"border-radius:7px",
 		"background:#121a1f",
 		"color:#eef7f2",
 		"font-size:16px",
@@ -1152,6 +1333,8 @@ function readState(node) {
 }
 
 function writeState(node) {
+	const parts = parsePromptParts(getWidget(node, "visual_script", ""));
+	const scriptCacheKey = String(getWidget(node, "visual_script", "") || "");
 	const state = {
 		...readState(node),
 		totalWidth: Number(getWidget(node, "total_width", 1024)),
@@ -1161,6 +1344,23 @@ function writeState(node) {
 		cellFit: String(getWidget(node, "cell_fit", "铺满裁切")),
 		selectedCell: Number(getWidget(node, "selected_cell", 1)),
 	};
+	if (state.generatedPromptKey !== undefined && state.generatedPromptKey !== scriptCacheKey) {
+		delete state.generatedCellRefs;
+		delete state.generatedCellIndexes;
+		delete state.pendingGeneratedCellIndexes;
+		if (node.__gjjVisualGridPanel) node.__gjjVisualGridPanel.generatedCellRefs = [];
+	}
+	state.generatedPromptKey = scriptCacheKey;
+	if (!state.manualLayout && !state.rowTemplate) {
+		const keywordRows = keywordRowCounts(parts);
+		if (keywordRows.length && keywordRows.reduce((sum, value) => sum + value, 0) === Math.max(1, parts.length)) {
+			state.variableLayout = {
+				rows: keywordRows,
+				rowHeights: normalizeWeights(null, keywordRows.length),
+				rowWeights: keywordRows.map((cols) => normalizeWeights(null, cols)),
+			};
+		}
+	}
 	const generatedImageRef = node.__gjjVisualGridPanel?.finalImageRef;
 	if (generatedImageRef?.filename) state.generatedImageRef = generatedImageRef;
 	const generatedImageLayout = node.__gjjVisualGridPanel?.finalImageLayout;
@@ -1170,8 +1370,8 @@ function writeState(node) {
 	const generatedCellRefs = node.__gjjVisualGridPanel?.generatedCellRefs;
 	if (Array.isArray(generatedCellRefs) && generatedCellRefs.length) state.generatedCellRefs = generatedCellRefs;
 	if (!state.variableLayout) {
-		const count = Math.max(1, parsePromptParts(getWidget(node, "visual_script", "")).length);
-		const rows = defaultRowCounts(count);
+		const count = Math.max(1, parts.length);
+		const rows = defaultRowCounts(count, parts);
 		state.variableLayout = {
 			rows,
 			rowHeights: normalizeWeights(null, rows.length),
@@ -1200,25 +1400,34 @@ function updateToggleButtons(node) {
 			? "随机种：开。每次生成前更新随机种"
 			: "随机种：关。保持当前种子";
 	}
+	const keepModelsBtn = node.__gjjVisualGridKeepModelsButton;
+	if (keepModelsBtn) {
+		const enabled = Boolean(getWidget(node, "keep_models_loaded", true));
+		keepModelsBtn.style.borderColor = enabled ? "#4da3ff" : "#38464d";
+		keepModelsBtn.style.background = enabled ? "#173244" : "#162228";
+		keepModelsBtn.title = enabled
+			? "模型常驻：开。生成后保留 f2k 模型"
+			: "模型常驻：关。生成后释放 f2k 模型";
+	}
 }
 
 function updateOpenButton(node) {
-	const disabled = hasReferenceLink(node);
-	if (disabled) syncCurrentReferenceLinkMemory(node);
+	const linked = hasReferenceLink(node);
+	if (linked) syncCurrentReferenceLinkMemory(node);
 	const btn = node.__gjjVisualGridOpenButton;
 	if (btn) {
-		btn.disabled = disabled;
-		btn.style.opacity = disabled ? "0.38" : "1";
-		btn.style.cursor = disabled ? "not-allowed" : "pointer";
-		btn.title = disabled ? "参考图片输入口已连接，以上游为准" : "打开参考图片";
+		btn.disabled = false;
+		btn.style.opacity = "1";
+		btn.style.cursor = "pointer";
+		btn.title = linked ? "替换当前选中宫格；其余宫格使用当前外部参考图" : "替换当前选中宫格图片";
 	}
 	const linkBtn = node.__gjjVisualGridLinkButton;
 	if (linkBtn) {
 		const memory = rememberedReferenceLink(node);
 		const oldDisplay = linkBtn.style.display;
-		linkBtn.style.display = disabled || memory ? "inline-flex" : "none";
-		linkBtn.style.borderColor = disabled ? "#4da3ff" : "#38464d";
-		linkBtn.title = disabled
+		linkBtn.style.display = linked || memory ? "inline-flex" : "none";
+		linkBtn.style.borderColor = linked ? "#4da3ff" : "#38464d";
+		linkBtn.title = linked
 			? "记住当前参考图片连接并断开"
 			: memory
 			? `恢复连接：${memory.origin_name || "上游节点"} ${memory.origin_output || ""}`
@@ -1243,26 +1452,25 @@ function ensurePanel(node) {
 		if (!file) return;
 		const status = node.__gjjVisualGridPanel?.status;
 		try {
-			if (status) status.textContent = "正在写入临时参考图...";
+			const selected = selectedCellIndex(node) + 1;
+			if (status) status.textContent = `正在替换宫格 ${selected}...`;
 			const imageRef = await uploadLocalImage(file);
-			setWidget(node, "local_image_data", JSON.stringify(imageRef));
+			setSelectedCellImageRef(node, imageRef);
 			setWidget(node, "generation_mode", "只拼图");
 			clearFinalPreview(node);
-			writeState(node);
-			drawPreview(node);
-			refresh(node);
-			if (status) status.textContent = "参考图已写入临时文件。";
+			await runNode(node, `正在重拼宫格 ${selected}...`);
+			if (status) status.textContent = `已替换宫格 ${selected}。`;
 		} catch (error) {
-			if (status) status.textContent = `参考图导入失败：${error?.message || error}`;
+			if (status) status.textContent = `宫格图片替换失败：${error?.message || error}`;
 		} finally {
 			fileInput.value = "";
 		}
 	});
 
 	const toolbar = document.createElement("div");
-	toolbar.style.cssText = "display:flex;gap:6px;align-items:center;align-content:flex-start;flex-wrap:wrap;";
-	const open = button("📁", "打开参考图片", () => {
-		if (!hasReferenceLink(node)) fileInput.click();
+	toolbar.style.cssText = "display:flex;gap:2px;align-items:center;align-content:flex-start;flex-wrap:wrap;";
+	const open = button("📁", "替换当前选中宫格图片", () => {
+		fileInput.click();
 	});
 	node.__gjjVisualGridOpenButton = open;
 	toolbar.appendChild(open);
@@ -1287,6 +1495,14 @@ function ensurePanel(node) {
 	});
 	node.__gjjVisualGridRandomSeedButton = randomSeed;
 	toolbar.appendChild(randomSeed);
+	const keepModels = button("🧠", "模型常驻：开。生成后保留 f2k 模型", () => {
+		setWidget(node, "keep_models_loaded", !Boolean(getWidget(node, "keep_models_loaded", true)));
+		updateToggleButtons(node);
+		writeState(node);
+		refresh(node);
+	});
+	node.__gjjVisualGridKeepModelsButton = keepModels;
+	toolbar.appendChild(keepModels);
 	toolbar.appendChild(button("📝", "只拼图 / 刷新宫格", async () => {
 		setWidget(node, "generation_mode", "只拼图");
 		await runNode(node, "只拼图：刷新宫格...");
@@ -1305,18 +1521,11 @@ function ensurePanel(node) {
 		drawPreview(node);
 		refresh(node);
 	}));
-	toolbar.appendChild(button("✨", "智能生成选中宫格：有输入图则图生图，否则文生图", async () => {
+	toolbar.appendChild(button("🖼️", "生成当前选中宫格：有输入图则图生图，否则文生图", async () => {
 		await generateSelectedCell(node);
 	}));
-	toolbar.appendChild(button("✦", "智能生成全部宫格：有输入图则图生图，否则文生图", async () => {
+	toolbar.appendChild(button("🪟", "生成全部宫格：有输入图则图生图，否则文生图", async () => {
 		await generateAllCells(node);
-	}));
-	toolbar.appendChild(button("🔢", "切换到全部宫格生成", () => {
-		const current = String(getWidget(node, "generation_scope", "选中宫格"));
-		setWidget(node, "generation_scope", current === "全部宫格" ? "选中宫格" : "全部宫格");
-		writeState(node);
-		drawPreview(node);
-		refresh(node);
 	}));
 
 	const settings = document.createElement("div");
@@ -1334,7 +1543,6 @@ function ensurePanel(node) {
 		["黑线", "line_px", "number"],
 		["适配", "cell_fit", "text"],
 		["选中", "selected_cell", "number"],
-		["范围", "generation_scope", "text"],
 		["步数", "steps", "number"],
 		["CFG", "cfg", "number"],
 		["种子", "seed", "number"],
@@ -1388,14 +1596,40 @@ function ensurePanel(node) {
 		setWidget(node, "selected_cell", hit.index + 1);
 		editCellPrompt(node, hit.index);
 	});
+	canvas.addEventListener("wheel", (event) => {
+		const { x, y } = canvasEventPoint(canvas, event);
+		if (!selectedCellHit(node, x, y) || !selectedCellHasImage(node)) return;
+		event.preventDefault();
+		event.stopPropagation();
+		const current = selectedCellTransform(node);
+		const factor = event.deltaY < 0 ? 1.08 : 1 / 1.08;
+		const next = { ...current, scale: current.scale * factor };
+		setSelectedCellTransform(node, next);
+		const status = node.__gjjVisualGridPanel?.status;
+		if (status) status.textContent = `缩放宫格 ${selectedCellIndex(node) + 1} · ${Math.max(0.1, Math.min(8, next.scale)).toFixed(2)}x`;
+		scheduleCellRecompose(node);
+		refresh(node);
+	}, { passive: false });
 	canvas.addEventListener("pointerdown", (event) => {
 		event.stopPropagation();
 		rememberActiveNode(node);
 		const { x, y } = canvasEventPoint(canvas, event);
 		const hit = dragHit(node, x, y);
-		if (!hit) return;
-		node.__gjjVisualGridDrag = hit;
-		node.__gjjVisualGridDragSizes = cellSizeSnapshot(node);
+		if (hit) {
+			node.__gjjVisualGridDrag = hit;
+			node.__gjjVisualGridDragSizes = cellSizeSnapshot(node);
+		} else {
+			const cellHit = selectedCellHit(node, x, y);
+			if (!cellHit || !selectedCellHasImage(node)) return;
+			node.__gjjVisualGridDrag = {
+				kind: "cell",
+				rect: cellHit,
+				startX: x,
+				startY: y,
+				startTransform: selectedCellTransform(node),
+			};
+			node.__gjjVisualGridDragSizes = null;
+		}
 		node.__gjjVisualGridDragged = false;
 		canvas.setPointerCapture?.(event.pointerId);
 		event.preventDefault();
@@ -1404,26 +1638,40 @@ function ensurePanel(node) {
 		event.stopPropagation();
 		const { x, y } = canvasEventPoint(canvas, event);
 		const hover = dragHit(node, x, y);
-		canvas.style.cursor = hover ? (hover.kind === "row" ? "ns-resize" : "ew-resize") : "default";
 		const drag = node.__gjjVisualGridDrag;
-		if (!drag) return;
+		if (!drag) {
+			canvas.style.cursor = hover
+				? (hover.kind === "row" ? "ns-resize" : "ew-resize")
+				: (selectedCellHit(node, x, y) && selectedCellHasImage(node) ? "grab" : "default");
+			return;
+		}
+		canvas.style.cursor = drag.kind === "cell" ? "grabbing" : (drag.kind === "row" ? "ns-resize" : "ew-resize");
 		node.__gjjVisualGridDragged = true;
-		applyDrag(node, drag, x, y);
+		if (drag.kind === "cell") {
+			applyCellImageDrag(node, drag, x, y);
+		} else {
+			applyDrag(node, drag, x, y);
+		}
 		refresh(node);
 		event.preventDefault();
 	});
 	canvas.addEventListener("pointerup", async (event) => {
 		event.stopPropagation();
 		if (node.__gjjVisualGridDrag) {
+			const drag = node.__gjjVisualGridDrag;
 			canvas.releasePointerCapture?.(event.pointerId);
 			node.__gjjVisualGridDrag = null;
-			writeState(node);
-			const changed = changedGeneratedCellIndexes(node, node.__gjjVisualGridDragSizes);
-			node.__gjjVisualGridDragSizes = null;
-			if (stateFlag(node, "autoResizeRegenerate", false)) {
-				await generateChangedCells(node, changed);
-			} else {
+			if (drag.kind === "cell") {
 				await recomposeGeneratedCells(node);
+			} else {
+				writeState(node);
+				const changed = changedGeneratedCellIndexes(node, node.__gjjVisualGridDragSizes);
+				node.__gjjVisualGridDragSizes = null;
+				if (stateFlag(node, "autoResizeRegenerate", false)) {
+					await generateChangedCells(node, changed);
+				} else {
+					await recomposeGeneratedCells(node);
+				}
 			}
 		}
 	});
@@ -1528,9 +1776,26 @@ function patchNode(node) {
 		if (selectedSrc && this.__gjjVisualGridPanel) {
 			const count = Math.max(1, cellCount || (Array.isArray(cellRefs) ? cellRefs.length : 0) || parsePromptParts(getWidget(this, "visual_script", "")).length);
 			const currentLayout = currentVariableLayout(this, count);
+			const previousState = readState(this);
+			const pendingIndexes = Array.isArray(previousState.pendingGeneratedCellIndexes)
+				? previousState.pendingGeneratedCellIndexes
+					.map((item) => Number(item))
+					.filter((item) => Number.isInteger(item) && item >= 0 && item < count)
+				: [];
+			let nextCellRefs = Array.isArray(cellRefs) ? cellRefs : null;
+			if (nextCellRefs && pendingIndexes.length > 0 && pendingIndexes.length < count) {
+				const mergedRefs = Array.isArray(previousState.generatedCellRefs) ? previousState.generatedCellRefs.slice() : [];
+				while (mergedRefs.length < count) mergedRefs.push(null);
+				for (let order = 0; order < pendingIndexes.length; order += 1) {
+					const index = pendingIndexes[order];
+					const ref = nextCellRefs[index]?.filename ? nextCellRefs[index] : nextCellRefs[order];
+					if (ref?.filename) mergedRefs[index] = ref;
+				}
+				nextCellRefs = mergedRefs;
+			}
 			this.__gjjVisualGridPanel.finalImageBase64 = selectedSrc;
 			this.__gjjVisualGridPanel.finalImageRef = selectedRef || null;
-			if (Array.isArray(cellRefs)) this.__gjjVisualGridPanel.generatedCellRefs = cellRefs;
+			if (Array.isArray(nextCellRefs)) this.__gjjVisualGridPanel.generatedCellRefs = nextCellRefs;
 			this.__gjjVisualGridPanel.cellCount = count;
 			this.__gjjVisualGridPanel.finalImageLayout = {
 				linePx: Number(getWidget(this, "line_px", 2)) || 2,
@@ -1538,19 +1803,29 @@ function patchNode(node) {
 			};
 			writeState(this);
 			const state = readState(this);
+			if (Array.isArray(nextCellRefs) && Array.isArray(state.pendingGeneratedCellIndexes)) {
+				const merged = new Set(Array.isArray(state.generatedCellIndexes) ? state.generatedCellIndexes : []);
+				for (const index of state.pendingGeneratedCellIndexes) {
+					const numeric = Number(index);
+					if (Number.isInteger(numeric) && numeric >= 0 && numeric < count) merged.add(numeric);
+				}
+				state.generatedCellIndexes = [...merged].sort((a, b) => a - b);
+				delete state.pendingGeneratedCellIndexes;
+			}
 			if (Array.isArray(state.regenerateCellIndexes)) {
 				delete state.regenerateCellIndexes;
-				setWidget(this, "grid_state", JSON.stringify(state));
 			}
+			setWidget(this, "grid_state", JSON.stringify(state));
 			updateToggleButtons(this);
 			drawBase64Preview(this, selectedSrc);
 		} else {
 			if (status) status.textContent = "完成。输出口已有最终宫格图。";
 			const state = readState(this);
+			if (Array.isArray(state.pendingGeneratedCellIndexes)) delete state.pendingGeneratedCellIndexes;
 			if (Array.isArray(state.regenerateCellIndexes)) {
 				delete state.regenerateCellIndexes;
-				setWidget(this, "grid_state", JSON.stringify(state));
 			}
+			setWidget(this, "grid_state", JSON.stringify(state));
 			updateToggleButtons(this);
 			drawPreview(this);
 		}

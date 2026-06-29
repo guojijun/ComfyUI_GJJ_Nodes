@@ -8,6 +8,7 @@ const CONFIG_WIDGET = "placement_config";
 const BACKGROUND_UPLOAD_WIDGET = "background_upload";
 const PERSON_UPLOADS_WIDGET = "person_uploads_json";
 const CUTOUT_PREVIEW_WIDGET = "cutout_preview_only";
+const ALIGN_TO_BACKGROUND_WIDGET = "align_to_background";
 const PAUSED_LINKS_PROPERTY = "gjj_scene_fusion_paused_links";
 const MODEL_DEFAULTS = {
 	fusion_unet_name: "FireRed-Image-Edit-1.1_fp8mixed_comfy.safetensors",
@@ -15,6 +16,9 @@ const MODEL_DEFAULTS = {
 	fusion_vae_name: "qwen_image_vae.safetensors",
 	fusion_lora_1_name: "QWEN/FireRed-Image-Edit-1.0-Lightning-8steps-v1.1.safetensors",
 	fusion_lora_2_name: "QWEN/edit_2511人景色交互20-LORA+by_xiaodu.safetensors",
+};
+const MODEL_FALLBACKS = {
+	fusion_vae_name: ["qwen_image_HDR_vae_fp32_comfy.safetensors"],
 };
 const DEFAULT_FUSION_PROMPT = "按颜色将图1中的角色精准放置到图2场景指定位置，保持角色外观、服装、随身道具不变，并匹配场景的光照遮挡与透视尺度，不改动背景与构图。";
 const PERSON_PREFIX = "person_";
@@ -27,7 +31,7 @@ const HIDDEN_WIDGETS = new Set([
 	"model_shift", "cfg_norm_strength", "cfg_norm_pre_cfg",
 	"fusion_unet_name", "fusion_unet_dtype", "fusion_clip_name", "fusion_clip_dtype", "fusion_vae_name", "fusion_vae_dtype",
 	"fusion_lora_1_name", "fusion_lora_1_strength", "fusion_lora_2_name", "fusion_lora_2_strength",
-	BACKGROUND_UPLOAD_WIDGET, PERSON_UPLOADS_WIDGET, CUTOUT_PREVIEW_WIDGET,
+	BACKGROUND_UPLOAD_WIDGET, PERSON_UPLOADS_WIDGET, CUTOUT_PREVIEW_WIDGET, ALIGN_TO_BACKGROUND_WIDGET,
 ]);
 const PY_WIDGET_ORDER = [
 	"width", "height", CONFIG_WIDGET, "background_fit", "device", "process_res", "mask_blur",
@@ -35,7 +39,7 @@ const PY_WIDGET_ORDER = [
 	"model_shift", "cfg_norm_strength", "cfg_norm_pre_cfg",
 	"fusion_unet_name", "fusion_unet_dtype", "fusion_clip_name", "fusion_clip_dtype", "fusion_vae_name", "fusion_vae_dtype",
 	"fusion_lora_1_name", "fusion_lora_1_strength", "fusion_lora_2_name", "fusion_lora_2_strength",
-	BACKGROUND_UPLOAD_WIDGET, PERSON_UPLOADS_WIDGET, CUTOUT_PREVIEW_WIDGET,
+	BACKGROUND_UPLOAD_WIDGET, PERSON_UPLOADS_WIDGET, CUTOUT_PREVIEW_WIDGET, ALIGN_TO_BACKGROUND_WIDGET,
 ];
 const SETTINGS_FIELDS = [
 	["width", "宽度", "number"],
@@ -241,12 +245,13 @@ function injectStyles() {
 .gjj-sfp-face-handle{stroke:#071014;stroke-width:2;cursor:pointer;}
 .gjj-sfp-previews{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:0;padding-top:3px;overflow:hidden;}
 .gjj-sfp-preview{flex:0 0 160px;width:160px;border:0;border-radius:0;background:transparent;padding:0;box-sizing:border-box;position:relative;overflow:hidden;}
-.gjj-sfp-preview.person{flex:0 0 auto;width:auto;background:#e9ecef;}
+.gjj-sfp-preview.person{flex:0 0 auto;width:auto;background:var(--gjj-person-color,#2f424a);}
 .gjj-sfp-preview.person{border:5px solid var(--gjj-person-color,#2f424a);}
 .gjj-sfp-preview.person.selected{box-shadow:inset 0 0 0 3px #f4fbff;}
 .gjj-sfp-preview img{display:block;width:100%;height:92px;object-fit:contain;background:#071014;border-radius:0;}
-.gjj-sfp-preview.person img{width:auto;max-width:none;background:#e9ecef;}
+.gjj-sfp-preview.person img{width:auto;max-width:none;background:var(--gjj-person-color,#2f424a);}
 .gjj-sfp-preview span{position:absolute;left:0;right:0;bottom:0;display:block;padding:2px 3px;color:#d7e6e8;background:rgba(7,16,20,.72);font-size:10px;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center;}
+.gjj-sfp-preview.person span{color:var(--gjj-person-text,#ffffff);background:var(--gjj-person-color,#2f424a);font-weight:800;text-shadow:0 1px 1px rgba(0,0,0,.35);}
 .gjj-sfp-settings{display:none;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;padding:5px 0;}
 .gjj-sfp-settings.open{display:grid;}
 .gjj-sfp-field{display:flex;flex-direction:column;gap:3px;min-width:0;}
@@ -372,8 +377,9 @@ async function updateLocalPreview(node) {
 	const staleSquare = align16(widthWidget) === 2048 && align16(heightWidget) === 2048 && (backgroundW !== 2048 || backgroundH !== 2048);
 	if ((!align16(widthWidget) || staleSquare) && backgroundW) setWidgetValue(node, "width", backgroundW);
 	if ((!align16(heightWidget) || staleSquare) && backgroundH) setWidgetValue(node, "height", backgroundH);
-	const canvasW = align16(widget(node, "width")?.value) || backgroundW || Number(existing?.canvas?.width || 1024);
-	const canvasH = align16(widget(node, "height")?.value) || backgroundH || Number(existing?.canvas?.height || 1024);
+	const alignToBackground = alignToBackgroundEnabled(node);
+	const canvasW = alignToBackground ? (backgroundW || Number(existing?.canvas?.width || 1024)) : (align16(widget(node, "width")?.value) || backgroundW || Number(existing?.canvas?.width || 1024));
+	const canvasH = alignToBackground ? (backgroundH || Number(existing?.canvas?.height || 1024)) : (align16(widget(node, "height")?.value) || backgroundH || Number(existing?.canvas?.height || 1024));
 	const personRefs = hasExternalPersons ? [] : uploadedPersonRefs(node);
 	const linkedPersonCount = personInputs(node).filter(hasLink).length;
 	const existingCount = hasExternalPersons && existing?.__sourceSignature === mediaSourceSignature(node) ? existing?.persons?.length || 0 : 0;
@@ -795,6 +801,15 @@ function validColor(value, fallback) {
 function colorRgb(hex) {
 	const text = validColor(hex, "#000000").slice(1);
 	return [0, 2, 4].map((index) => parseInt(text.slice(index, index + 2), 16));
+}
+
+function contrastTextColor(hex) {
+	const [red, green, blue] = colorRgb(hex).map((value) => {
+		const channel = value / 255;
+		return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+	});
+	const luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+	return luminance > 0.46 ? "#071014" : "#FFFFFF";
 }
 
 function colorDistance(a, b) {
@@ -1301,7 +1316,9 @@ function renderOutputPreviews(ui, payload) {
 		card.className = "gjj-sfp-preview";
 		if (personId) {
 			card.classList.add("person");
-			card.style.setProperty("--gjj-person-color", validColor(color, "#2f424a"));
+			const personColor = validColor(color, "#2f424a");
+			card.style.setProperty("--gjj-person-color", personColor);
+			card.style.setProperty("--gjj-person-text", contrastTextColor(personColor));
 			if (ui?.node?.__gjjSceneFusionSelected === personId) card.classList.add("selected");
 		}
 		const image = document.createElement("img");
@@ -1554,6 +1571,36 @@ function setWidgetValue(node, name, value) {
 	if (name === PERSON_UPLOADS_WIDGET && String(oldValue ?? "") !== String(value ?? "")) {
 		schedulePersonCutoutPreview(node, true);
 	}
+	if (name === ALIGN_TO_BACKGROUND_WIDGET) {
+		updateAlignButton(node);
+		updateLocalPreview(node);
+	}
+}
+
+function alignToBackgroundEnabled(node) {
+	const item = widget(node, ALIGN_TO_BACKGROUND_WIDGET);
+	const value = item?.value ?? node?.properties?.[ALIGN_TO_BACKGROUND_WIDGET];
+	return value == null ? true : booleanParamValue(value, true);
+}
+
+function booleanParamValue(value, fallback = false) {
+	if (value == null) return fallback;
+	if (typeof value === "string") {
+		const text = value.trim().toLowerCase();
+		if (["false", "0", "no", "off", "关闭"].includes(text)) return false;
+		if (["true", "1", "yes", "on", "开启"].includes(text)) return true;
+	}
+	return Boolean(value);
+}
+
+function updateAlignButton(node) {
+	const button = node?.__gjjSceneFusionUI?.alignToBackground;
+	if (!button) return;
+	const enabled = alignToBackgroundEnabled(node);
+	button.dataset.active = enabled ? "true" : "false";
+	button.title = enabled
+		? "📐 已开启：按背景图片尺寸对齐。点击后改用节点面板宽度和高度。"
+		: "📐 已关闭：按节点面板宽度和高度对齐。点击后改用背景图片尺寸。";
 }
 
 function modelSelectValues(name, currentValue) {
@@ -1562,6 +1609,10 @@ function modelSelectValues(name, currentValue) {
 	const preset = String(MODEL_DEFAULTS[name] || "").trim();
 	if (current && current !== "自动") values.push(current);
 	if (preset && !values.includes(preset)) values.push(preset);
+	for (const fallback of MODEL_FALLBACKS[name] || []) {
+		const text = String(fallback || "").trim();
+		if (text && !values.includes(text)) values.push(text);
+	}
 	return values.length ? values : [preset || current || ""];
 }
 
@@ -1729,6 +1780,15 @@ function makePanel(node) {
 		toggleExternalLinks(node);
 	});
 	const settingsButton = makeButton("⚙️", "展开或收起融合参数。");
+	const alignToBackground = makeButton("📐", "按背景图片尺寸对齐。");
+	if (widget(node, ALIGN_TO_BACKGROUND_WIDGET)?.value == null && node.properties?.[ALIGN_TO_BACKGROUND_WIDGET] == null) {
+		setWidgetValue(node, ALIGN_TO_BACKGROUND_WIDGET, true);
+	}
+	alignToBackground.addEventListener("click", async (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		setWidgetValue(node, ALIGN_TO_BACKGROUND_WIDGET, !alignToBackgroundEnabled(node));
+	});
 	const refresh = makeButton("🔄", "重新执行当前节点，更新抠图和预览。");
 	refresh.addEventListener("click", async (event) => {
 		event.preventDefault();
@@ -1742,7 +1802,7 @@ function makePanel(node) {
 		event.stopPropagation();
 		resetPersons(node);
 	});
-	buttons.append(background, person, params, removePerson, randomColor, linkToggle, settingsButton, refresh, reset);
+	buttons.append(background, person, params, removePerson, randomColor, linkToggle, settingsButton, alignToBackground, refresh, reset);
 	const poseButtons = document.createElement("div");
 	poseButtons.className = "gjj-sfp-pose-buttons";
 	for (const preset of POSE_PRESETS) {
@@ -1795,8 +1855,9 @@ function makePanel(node) {
 	root.appendChild(poseButtons);
 	root.appendChild(progress);
 	root.appendChild(settings);
-	node.__gjjSceneFusionUI = { root, buttons, poseButtons, background, person, params, removePerson, randomColor, linkToggle, settingsButton, refresh, reset, progress, progressFill, progressText, settings, stageWrap: null, stage: null, controls: null, previews: null };
+	node.__gjjSceneFusionUI = { root, buttons, poseButtons, background, person, params, removePerson, randomColor, linkToggle, settingsButton, alignToBackground, refresh, reset, progress, progressFill, progressText, settings, stageWrap: null, stage: null, controls: null, previews: null };
 	updateLinkToggleButton(node);
+	updateAlignButton(node);
 	return root;
 }
 
@@ -1935,7 +1996,7 @@ function validParamValue(name, value) {
 		const number = Number(value);
 		return Number.isFinite(number) ? number : (name === "model_shift" ? 3.1 : 1);
 	}
-	if (name === "cfg_norm_pre_cfg" || name === CUTOUT_PREVIEW_WIDGET) return Boolean(value);
+	if (name === "cfg_norm_pre_cfg" || name === CUTOUT_PREVIEW_WIDGET || name === ALIGN_TO_BACKGROUND_WIDGET) return booleanParamValue(value, name === ALIGN_TO_BACKGROUND_WIDGET);
 	return value ?? "";
 }
 

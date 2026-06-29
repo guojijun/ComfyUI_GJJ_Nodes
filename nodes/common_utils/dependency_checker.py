@@ -410,6 +410,107 @@ def raise_dependency_model_error(
 
 def get_report_from_exception(exc):
 	return getattr(exc, "gjj_report", None)
+
+def is_comfyui_model_compatibility_error(error, model_name="", clip_type=""):
+	text = " ".join(str(item or "") for item in (error, model_name, clip_type)).lower()
+	model_tokens = (
+		"boogu",
+		"boogu_image",
+		"boogu-image",
+		"krea2",
+		"krea-2",
+		"krea2_turbo",
+		"krea2-turbo",
+		"omnigen2",
+		"omni-gen2",
+	)
+	new_model = any(token in text for token in model_tokens)
+	structure_mismatch = (
+		("size mismatch" in text and "image_index_embedding" in text)
+		or ("omnigen2transformer2dmodel" in text and "size mismatch" in text)
+		or ("shape '[13568, 3360]'" in text)
+		or ("3360" in text and "invalid for input of size" in text)
+	)
+	version_gap = (
+		("has no attribute" in text and ("cliptype" in text or "supported_models" in text or "unetloader" in text))
+		or ("no module named" in text and ("comfy.ldm.boogu" in text or "comfy.ldm.krea" in text))
+		or "当前 comfyui 环境缺少可用的 unetloader" in text
+	)
+	return bool(new_model and (structure_mismatch or version_gap))
+
+def build_comfyui_model_compatibility_report(
+	node_name="",
+	model_name="",
+	clip_type="",
+	original_error="",
+	description="",
+):
+	family_text = str(clip_type or "").strip()
+	model_text = str(model_name or "").strip() or "[未选择]"
+	suggestion = (
+		description
+		or "当前 ComfyUI 的模型结构代码偏旧，不能加载这个新版 UNET 权重。"
+		"选择 boogu、krea2 等新版模型时，请更新 ComfyUI 到支持该模型的版本并重启；"
+		"如果暂时不更新，请换用当前 ComfyUI 可加载的旧版兼容模型。"
+	)
+	panel_lines = [
+		"⚠️模型与当前 ComfyUI 版本不兼容，点击❓按钮了解详情。",
+		"",
+		suggestion,
+		"",
+		f"当前 UNET：{model_text}",
+	]
+	if family_text:
+		panel_lines.append(f"模型类型：{family_text}")
+	if original_error:
+		panel_lines += ["", f"原始错误:{original_error}"]
+	copy_text = "请更新 ComfyUI 到支持 boogu/krea2/OmniGen2 新结构模型的版本，然后重启 ComfyUI；或临时改用旧版兼容模型。"
+	return {
+		"available": False,
+		"dependencies_available": False,
+		"models_available": True,
+		"missing_dependencies": [],
+		"optional_dependencies": [],
+		"optional_dependencies_available": True,
+		"missing_models": [],
+		"notice_level": "error",
+		"warning_message": "⚠️模型与当前 ComfyUI 版本不兼容，点击❓按钮了解详情。",
+		"description_message": "⚠️模型与当前 ComfyUI 版本不兼容，点击❓按钮了解详情。",
+		"panel_message": "\n".join(panel_lines),
+		"help_message": "\n".join(panel_lines),
+		"console_message": "\n".join(panel_lines),
+		"install_cmd": "",
+		"optional_install_cmd": "",
+		"copy_text": copy_text,
+		"copy_label": "📋 复制处理建议",
+		"model_download_url": "",
+		"original_error": str(original_error or ""),
+	}
+
+def raise_comfyui_model_compatibility_error(
+	node_name="",
+	*,
+	model_name="",
+	clip_type="",
+	original_error="",
+	unique_id=None,
+	description="",
+	title="GJJ 节点模型版本不兼容！",
+):
+	report = build_comfyui_model_compatibility_report(
+		node_name=node_name,
+		model_name=model_name,
+		clip_type=clip_type,
+		original_error=str(original_error or ""),
+		description=description,
+	)
+	print_dependency_model_report(report, title=title)
+	send_dependency_model_notice(report, unique_id=unique_id)
+	err = RuntimeError(report.get("panel_message") or report.get("warning_message") or "模型与当前 ComfyUI 版本不兼容")
+	setattr(err, "gjj_report", report)
+	if isinstance(original_error, BaseException):
+		raise err from original_error
+	raise err
 # ========= 外部API =========
 def check_dependencies(required_packages,node_name,optional_packages=None):
 	req=_norm(required_packages)
