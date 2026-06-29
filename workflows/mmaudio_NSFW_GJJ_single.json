@@ -1,0 +1,306 @@
+{
+  "id": "gjj-mmaudio-nsfw-single",
+  "revision": 0,
+  "last_node_id": 1,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "GJJ_MMAudioNSFWSingle",
+      "pos": [
+        640,
+        260
+      ],
+      "size": [
+        560,
+        760
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "COMBO",
+          "widget": {
+            "name": "video"
+          },
+          "link": null
+        },
+        {
+          "name": "mmaudio_model",
+          "type": "COMBO",
+          "widget": {
+            "name": "mmaudio_model"
+          },
+          "link": null
+        },
+        {
+          "name": "vae_model",
+          "type": "COMBO",
+          "widget": {
+            "name": "vae_model"
+          },
+          "link": null
+        },
+        {
+          "name": "synchformer_model",
+          "type": "COMBO",
+          "widget": {
+            "name": "synchformer_model"
+          },
+          "link": null
+        },
+        {
+          "name": "clip_model",
+          "type": "COMBO",
+          "widget": {
+            "name": "clip_model"
+          },
+          "link": null
+        },
+        {
+          "name": "force_rate",
+          "type": "FLOAT",
+          "widget": {
+            "name": "force_rate"
+          },
+          "link": null
+        },
+        {
+          "name": "custom_width",
+          "type": "INT",
+          "widget": {
+            "name": "custom_width"
+          },
+          "link": null
+        },
+        {
+          "name": "custom_height",
+          "type": "INT",
+          "widget": {
+            "name": "custom_height"
+          },
+          "link": null
+        },
+        {
+          "name": "frame_load_cap",
+          "type": "INT",
+          "widget": {
+            "name": "frame_load_cap"
+          },
+          "link": null
+        },
+        {
+          "name": "skip_first_frames",
+          "type": "INT",
+          "widget": {
+            "name": "skip_first_frames"
+          },
+          "link": null
+        },
+        {
+          "name": "select_every_nth",
+          "type": "INT",
+          "widget": {
+            "name": "select_every_nth"
+          },
+          "link": null
+        },
+        {
+          "name": "duration_mode",
+          "type": "COMBO",
+          "widget": {
+            "name": "duration_mode"
+          },
+          "link": null
+        },
+        {
+          "name": "duration",
+          "type": "FLOAT",
+          "widget": {
+            "name": "duration"
+          },
+          "link": null
+        },
+        {
+          "name": "steps",
+          "type": "INT",
+          "widget": {
+            "name": "steps"
+          },
+          "link": null
+        },
+        {
+          "name": "cfg",
+          "type": "FLOAT",
+          "widget": {
+            "name": "cfg"
+          },
+          "link": null
+        },
+        {
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "name": "prompt",
+          "type": "STRING",
+          "widget": {
+            "name": "prompt"
+          },
+          "link": null
+        },
+        {
+          "name": "negative_prompt",
+          "type": "STRING",
+          "widget": {
+            "name": "negative_prompt"
+          },
+          "link": null
+        },
+        {
+          "name": "mask_away_clip",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "mask_away_clip"
+          },
+          "link": null
+        },
+        {
+          "name": "force_offload",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "force_offload"
+          },
+          "link": null
+        },
+        {
+          "name": "base_precision",
+          "type": "COMBO",
+          "widget": {
+            "name": "base_precision"
+          },
+          "link": null
+        },
+        {
+          "name": "feature_precision",
+          "type": "COMBO",
+          "widget": {
+            "name": "feature_precision"
+          },
+          "link": null
+        },
+        {
+          "name": "filename_prefix",
+          "type": "STRING",
+          "widget": {
+            "name": "filename_prefix"
+          },
+          "link": null
+        },
+        {
+          "name": "format_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "format_name"
+          },
+          "link": null
+        },
+        {
+          "name": "save_output",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "save_output"
+          },
+          "link": null
+        },
+        {
+          "name": "pix_fmt",
+          "type": "COMBO",
+          "widget": {
+            "name": "pix_fmt"
+          },
+          "link": null
+        },
+        {
+          "name": "crf",
+          "type": "STRING",
+          "widget": {
+            "name": "crf"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "视频",
+          "type": "VIDEO",
+          "slot_index": 0,
+          "links": null
+        },
+        {
+          "name": "生成音频",
+          "type": "AUDIO",
+          "slot_index": 1,
+          "links": null
+        },
+        {
+          "name": "输出文件",
+          "type": "STRING",
+          "slot_index": 2,
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "GJJ_MMAudioNSFWSingle"
+      },
+      "widgets_values": [
+        "1 (27).mp4",
+        "mmaudio_large_44k_nsfw_gold_8.5k_final_fp16.safetensors",
+        "mmaudio_vae_44k_fp16.safetensors",
+        "mmaudio_synchformer_fp16.safetensors",
+        "apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors",
+        24,
+        0,
+        0,
+        0,
+        0,
+        1,
+        "源视频时长",
+        16,
+        150,
+        9,
+        184852840990216,
+        "intense rhythmic motion sounds, wet close Foley, adult anime-style feminine voice",
+        "music, singing, talking, speech, dialogue, male voice, background noise, dry sounds, quiet, calm",
+        false,
+        true,
+        "fp16",
+        "fp16",
+        "MMaudio",
+        "video/h264-mp4",
+        false,
+        "yuv420p",
+        "19"
+      ]
+    }
+  ],
+  "links": [],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 1,
+      "offset": [
+        0,
+        0
+      ]
+    }
+  },
+  "version": 0.4
+}

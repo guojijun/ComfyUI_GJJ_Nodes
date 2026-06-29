@@ -27,6 +27,7 @@ else:
     _FLUX_IMPORT_ERROR = None
 
 from .gjj_model_name_resolver import pick_available_model_name, model_lookup_stem
+from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
 
 
 NODE_NAME = "GJJ_Ideogram4DirectGenerator"
@@ -221,6 +222,9 @@ class GJJ_Ideogram4DirectGenerator:
         "model_download_url": "https://huggingface.co/Comfy-Org/Ideogram-4",
     }
 
+    def __init__(self):
+        self.loaded_lora: tuple[str, Any] | tuple[str, Any, dict[str, Any]] | None = None
+
     @classmethod
     def INPUT_TYPES(cls):
         unets = _related_model_choices("diffusion_models", MODEL_SLOTS["unet_name"]["seed"])
@@ -247,6 +251,15 @@ class GJJ_Ideogram4DirectGenerator:
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1, "display_name": "批次数", "tooltip": "一次生成的图片数量。"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "control_after_generate": True, "display_name": "种子", "tooltip": "随机噪声种子；可设为生成后随机。"}),
             },
+            "optional": {
+                "lora_chain_config": (
+                    "LORA_CHAIN_CONFIG",
+                    {
+                        "display_name": "🔗 LoRA串联配置",
+                        "tooltip": "可选。接入 GJJ · 额外LoRA串联配置 后，会按顺序把多组 LoRA 应用到主扩散模型、无条件扩散模型与 CLIP。",
+                    },
+                ),
+            },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
@@ -268,6 +281,7 @@ class GJJ_Ideogram4DirectGenerator:
         height: int,
         batch_size: int,
         seed: int,
+        lora_chain_config="",
         unique_id=None,
     ):
         _missing_core_error()
@@ -288,6 +302,33 @@ class GJJ_Ideogram4DirectGenerator:
             vae = _unwrap(VAELoader().load_vae(vae_name))
         except Exception as exc:
             raise _stage_error("模型加载", exc) from exc
+
+        normalized_lora_chain_config = normalize_lora_chain_data(lora_chain_config)
+        if str(normalized_lora_chain_config or "").strip() and normalized_lora_chain_config != "[]":
+            try:
+                _send_status(unique_id, "应用 LoRA 串联配置...")
+
+                def send_lora_applied(payload: dict[str, Any]) -> None:
+                    name = str(payload.get("name") or "").strip()
+                    strength = payload.get("strength", "")
+                    if name:
+                        _send_status(unique_id, f"已应用 LoRA串联：{name} ({strength})")
+
+                main_model, clip, self.loaded_lora = apply_lora_chain_config(
+                    main_model,
+                    clip,
+                    lora_data=normalized_lora_chain_config,
+                    loaded_lora_cache=self.loaded_lora,
+                    on_lora_applied=send_lora_applied,
+                )
+                uncond_model, _, self.loaded_lora = apply_lora_chain_config(
+                    uncond_model,
+                    None,
+                    lora_data=normalized_lora_chain_config,
+                    loaded_lora_cache=self.loaded_lora,
+                )
+            except Exception as exc:
+                raise _stage_error("LoRA 串联应用", exc) from exc
 
         try:
             _send_status(unique_id, "编码提示词...")

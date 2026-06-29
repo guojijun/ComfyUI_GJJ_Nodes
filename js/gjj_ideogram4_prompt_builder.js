@@ -99,11 +99,16 @@ function textOn(hex) {
   return (0.299 * r + 0.587 * g + 0.114 * b) > 140 ? "#000" : "#fff";
 }
 
-function injectStyle() {
-  if (document.getElementById("kjideo-style")) return;
-  const s = document.createElement("style");
-  s.id = "kjideo-style";
-  s.textContent = `
+const KJIDEO_STYLE = `
+    :host {
+      all: initial;
+      display: block;
+      width: 100%;
+      contain: content;
+      color-scheme: dark;
+      font-family: system-ui, "Microsoft YaHei", sans-serif;
+    }
+    *, *::before, *::after { box-sizing:border-box; }
     .kjideo-wrap { display:flex; flex-direction:column; overflow:hidden; position:relative; pointer-events:auto; gap:4px; }
     .kjideo-canvas { cursor:crosshair; display:block; width:100%; height:auto; flex:0 0 auto; background:#1a1a1a; border-radius:4px; outline:none; }
     .kjideo-bar { display:flex; align-items:center; gap:6px; font:11px sans-serif; color:#aaa; user-select:none; padding:0 2px; flex:0 0 auto; flex-wrap:wrap; }
@@ -129,7 +134,33 @@ function injectStyle() {
     .kjideo-preset span { flex:1 1 0; min-width:0; border-radius:2px; }
     .kjideo-inline { position:absolute; box-sizing:border-box; background:rgba(18,18,18,0.92); border:2px solid #46b4e6; border-radius:3px; color:#fff; font:13px monospace; padding:3px 4px; resize:none; outline:none; z-index:10; }
   `;
+
+function makeStyleElement(id = "") {
+  const s = document.createElement("style");
+  if (id) s.id = id;
+  s.textContent = KJIDEO_STYLE;
+  return s;
+}
+
+function injectStyle() {
+  if (document.getElementById("kjideo-style")) return;
+  const s = makeStyleElement("kjideo-style");
   document.head.appendChild(s);
+}
+
+function createIsolatedEditorHost(wrap) {
+  const host = document.createElement("div");
+  host.className = "kjideo-host";
+  host.style.cssText = "display:block;width:100%;pointer-events:auto;contain:content;";
+  if (typeof host.attachShadow === "function") {
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.appendChild(makeStyleElement());
+    shadow.appendChild(wrap);
+  } else {
+    injectStyle();
+    host.appendChild(wrap);
+  }
+  return host;
 }
 
 app.registerExtension({
@@ -265,6 +296,7 @@ app.registerExtension({
       // ── DOM ──
       const wrap = document.createElement("div");
       wrap.className = "kjideo-wrap";
+      const widgetHost = createIsolatedEditorHost(wrap);
       const bar = document.createElement("div");
       bar.className = "kjideo-bar";
       const hint = document.createElement("span");
@@ -415,7 +447,7 @@ app.registerExtension({
 
       const TOOLBAR_H = 22;
       node._widgetHeight = 360;
-      node.ideoEditor = node.addDOMWidget("ideo_editor", "Ideogram4Editor", wrap, {
+      node.ideoEditor = node.addDOMWidget("ideo_editor", "Ideogram4Editor", widgetHost, {
         serialize: false, hideOnZoom: false,
         getMinHeight: () => node._widgetHeight,
       });

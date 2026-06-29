@@ -11,6 +11,7 @@ const PARAM_ENABLED_PROPERTY = "gjj_ideogram4_direct_template_enabled";
 const PARAM_SOURCE_PROPERTY = "gjj_ideogram4_direct_template_source";
 const PARAM_BACKUP_PROPERTY = "gjj_ideogram4_direct_param_backup";
 const PARAM_WIDGETS = ["width", "height"];
+const LORA_CHAIN_INPUT = "lora_chain_config";
 const SETTINGS_WIDGETS = [
   "mode",
   "unet_name",
@@ -56,6 +57,53 @@ function setWidgetValue(node, name, value) {
 
 function getWidgetValue(node, name) {
   return findWidget(node, name)?.value;
+}
+
+function inputLinked(node, name) {
+  const input = node?.inputs?.find((item) => String(item?.name || "") === name);
+  return Boolean(input?.link != null);
+}
+
+function normalizedWidgetValue(node, name) {
+  const widget = findWidget(node, name);
+  const clean = (value) => {
+    if (value == null) return "";
+    if (typeof value === "object") return String(value.value ?? value.name ?? value.content ?? value.label ?? "").trim();
+    return String(value).trim();
+  };
+  const values = Array.isArray(widget?.options?.values) ? widget.options.values : [];
+  let value = clean(widget?.value);
+  if (/^\d+$/.test(value) && values[Number(value)] != null) value = clean(values[Number(value)]);
+  return value || clean(values[0]);
+}
+
+function installModelHelpProvider(node) {
+  if (!node || node.__gjjIdeogram4DirectHelpProviderInstalled) return;
+  node.__gjjIdeogram4DirectHelpProviderInstalled = true;
+  node.__gjjHelpModelTreeEntries = function () {
+    const entries = [];
+    for (const [widgetName, folder, label, tooltip] of [
+      ["unet_name", "diffusion_models", "主扩散模型", "调用方法：节点内部走官方 UNETLoader 加载 Ideogram 4 主扩散模型。"],
+      ["uncond_unet_name", "diffusion_models", "无条件扩散模型", "调用方法：节点内部走官方 UNETLoader 加载 Ideogram 4 unconditional 模型。"],
+      ["clip_name", "text_encoders", "文本编码器", "调用方法：节点内部走官方 CLIPLoader 按 ideogram4 类型加载文本编码器。"],
+      ["vae_name", "vae", "VAE", "调用方法：节点内部走官方 VAELoader 加载 VAE。"],
+    ]) {
+      const value = normalizedWidgetValue(this, widgetName);
+      if (!value) continue;
+      entries.push({ label, value, folder, kind: folder, name: widgetName, tooltip });
+    }
+    if (inputLinked(this, LORA_CHAIN_INPUT)) {
+      entries.push({
+        label: "🔗 LoRA串联配置",
+        value: "已连接外部输入",
+        folder: "loras",
+        kind: "loras",
+        name: LORA_CHAIN_INPUT,
+        tooltip: "调用方法：执行时读取 GJJ · 额外LoRA串联配置，按顺序应用到主扩散模型、无条件扩散模型与 CLIP。",
+      });
+    }
+    return entries;
+  };
 }
 
 function hideWidget(widget) {
@@ -748,6 +796,7 @@ app.registerExtension({
     injectStyle();
 
     chainCallback(nodeType.prototype, "onNodeCreated", function () {
+      installModelHelpProvider(this);
       addPanel(this);
       applySettingsVisibility(this);
       refreshButtons(this);
@@ -760,6 +809,7 @@ app.registerExtension({
 
     chainCallback(nodeType.prototype, "onConfigure", function () {
       setTimeout(() => {
+        installModelHelpProvider(this);
         addPanel(this);
         applySettingsVisibility(this);
         refreshButtons(this);

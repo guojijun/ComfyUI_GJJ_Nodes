@@ -1,0 +1,21 @@
+BigVGAN v2 third-party notices
+
+This vendored runtime keeps only the files needed by the GJJ MMAudio node.
+The original upstream package included separate files under incl_licenses/.
+Those duplicate license files were consolidated here to reduce vendor size.
+
+BigVGAN v2:
+- Copyright (c) 2024 NVIDIA CORPORATION.
+- License: MIT. See LICENSE in this directory.
+
+Included/adapted components referenced by the vendored source:
+- HiFi-GAN components: Copyright (c) 2020 Jungil Kong, MIT.
+- Snake activation: Copyright (c) 2020 Edward Dixon, MIT.
+- Alias-free / anti-aliased activation CUDA reference code: Apache-2.0.
+- Descript components: Copyright (c) 2023-present, Descript, MIT.
+- Charactr components: Copyright (c) 2023 Charactr Inc., MIT.
+- Amphion components: Copyright (c) 2023 Amphion, MIT.
+- EnCodec reference components: Copyright 2020 Alexandre Defossez, MIT.
+
+The CUDA extension source is not used by this node because BigVGAN is loaded
+with use_cuda_kernel=False.

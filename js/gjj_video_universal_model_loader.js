@@ -284,6 +284,7 @@ function officialMatchKey(value) {
 		if (!token || OFFICIAL_DROP_TOKENS.has(token)) continue;
 		if (/^(?:fp|bf|int)\d+(?:[_a-z0-9]*)?$/.test(token)) continue;
 		if (/^e[45]m[23]fn?$/.test(token)) continue;
+		if (/^q\d(?:[_a-z0-9]*)?$/.test(token) || ["k", "m", "s", "xl", "xs", "xxl"].includes(token)) continue;
 		kept.push(token);
 	}
 	return kept.join("");

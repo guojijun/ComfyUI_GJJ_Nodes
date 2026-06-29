@@ -322,6 +322,11 @@ LTX23_KJ_GEMMA_NAMES = ["gemma_3_12B_it_fp8_e4m3fn.safetensors"]
 LTX23_TEXT_PROJECTION_NAMES = ["ltx-2.3_text_projection_bf16.safetensors"]
 LTX23_VIDEO_VAE_NAMES = ["LTX23_video_vae_bf16.safetensors"]
 LTX23_AUDIO_VAE_NAMES = ["LTX23_audio_vae_bf16.safetensors"]
+LTX23_GGUF_MODEL_NAMES = ["ltx-2.3-22b-dev.gguf", "ltx-2.3-22b.gguf"]
+LTX23_GGUF_GEMMA_NAMES = ["gemma-3-12b-it-Q2_K.gguf", "gemma-3-12b-it.gguf"]
+LTX23_GGUF_TEXT_CONNECTOR_NAMES = ["ltx-2.3-22b-dev_embeddings_connectors.safetensors"]
+LTX23_GGUF_VIDEO_VAE_NAMES = ["ltx-2.3-22b-dev_video_vae.safetensors"]
+LTX23_GGUF_AUDIO_VAE_NAMES = ["ltx-2.3-22b-dev_audio_vae.safetensors"]
 
 
 VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
@@ -740,6 +745,84 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 "latent_upscale_models",
                 "latent_upscale_model",
                 ["ltx-2.3-spatial-upscaler-x2-1.0"],
+                search_folders=["upscale_models"],
+                required_name="ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+                preferred_name=LTX23_SPATIAL_UPSCALER_NAMES[0],
+                official_names=LTX23_SPATIAL_UPSCALER_NAMES,
+                download_url="https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+            ),
+        ],
+    },
+    "ltx23_i2v_t2v_gguf": {
+        "label": "LTX23 T2V/I2V GGUF 低显存配置",
+        "clip_type": "ltxv",
+        "slots": [
+            S(
+                "model",
+                "GGUF主模型",
+                "diffusion_models",
+                "diffusion",
+                ["ltx2.3", "gguf"],
+                loader="unet",
+                preferred_name=LTX23_GGUF_MODEL_NAMES[0],
+                official_names=LTX23_GGUF_MODEL_NAMES,
+            ),
+            S(
+                "distill_lora",
+                "Distill LoRA名称",
+                "loras",
+                "name",
+                ["ltx2.3", "distilled", "lora"],
+                preferred_name=LTX23_DISTILL_LORA_NAMES[0],
+                official_names=LTX23_DISTILL_LORA_NAMES,
+            ),
+            S(
+                "clip",
+                "GGUF双CLIP编码器",
+                "text_encoders",
+                "clip",
+                ["gemma","gguf"],
+                loader="dual_clip",
+                search_folders=["clip_gguf"],
+                preferred_name=LTX23_GGUF_GEMMA_NAMES[0],
+                official_names=LTX23_GGUF_GEMMA_NAMES,
+                secondary_label="Embeddings Connectors",
+                secondary_name="ltx-2.3-22b-dev_embeddings_connectors.safetensors",
+                secondary_official_names=LTX23_GGUF_TEXT_CONNECTOR_NAMES,
+                device="default",
+            ),
+            S(
+                "video_vae",
+                "视频VAE",
+                "vae",
+                "vae",
+                ["ltx","video", "vae"],
+                loader="gjj_vae",
+                device="main_device",
+                weight_dtype="bf16",
+                required_name="ltx-2.3-22b-dev_video_vae.safetensors",
+                preferred_name=LTX23_GGUF_VIDEO_VAE_NAMES[0],
+                official_names=LTX23_GGUF_VIDEO_VAE_NAMES,
+            ),
+            S(
+                "audio_vae",
+                "音频VAE",
+                "vae",
+                "vae",
+                ["ltx","audio", "vae"],
+                loader="gjj_vae",
+                device="main_device",
+                weight_dtype="bf16",
+                required_name="ltx-2.3-22b-dev_audio_vae.safetensors",
+                preferred_name=LTX23_GGUF_AUDIO_VAE_NAMES[0],
+                official_names=LTX23_GGUF_AUDIO_VAE_NAMES,
+            ),
+            S(
+                "spatial_upscaler",
+                "空间放大模型",
+                "latent_upscale_models",
+                "latent_upscale_model",
+                ["ltx-2.3-spatial-upscaler"],
                 search_folders=["upscale_models"],
                 required_name="ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
                 preferred_name=LTX23_SPATIAL_UPSCALER_NAMES[0],
@@ -1235,6 +1318,8 @@ def _official_match_key(value: Any) -> str:
             continue
         if re.fullmatch(r"e[45]m[23]fn?", token):
             continue
+        if re.fullmatch(r"q\d(?:[_a-z0-9]*)?", token) or token in {"k", "m", "s", "xl", "xs", "xxl"}:
+            continue
         kept.append(token)
     return "".join(kept)
 
@@ -1458,6 +1543,26 @@ def _load_ltxav_text_encoder_gguf(text_encoder_name: str, ckpt_name: str, device
         raise RuntimeError(f"GJJ 内置 GGUF LTXAV 文本编码器加载失败：{text_encoder_name} + {ckpt_name}\n{exc}") from exc
 
 
+def _load_dual_clip_gguf(clip_name1: str, clip_name2: str, clip_type: str = "ltxv", device: str = "default", unique_id: Any = None):
+    gguf_name = clip_name1 if _is_gguf_model(clip_name1) else clip_name2
+    _ensure_gguf_dependency(gguf_name, unique_id=unique_id, model_kind="CLIP")
+    try:
+        from ..vendor.gjj_gguf_runtime import load_dual_clip_gguf as load_gjj_dual_clip_gguf
+    except ImportError:
+        from vendor.gjj_gguf_runtime import load_dual_clip_gguf as load_gjj_dual_clip_gguf
+    try:
+        return load_gjj_dual_clip_gguf(clip_name1, clip_name2, clip_type, device)
+    except ModuleNotFoundError as exc:
+        if getattr(exc, "name", "") == "gguf":
+            _raise_gguf_dependency_missing(gguf_name, unique_id=unique_id, original_error=exc, model_kind="CLIP")
+        raise
+    except Exception as exc:
+        error_text = str(exc)
+        if "No module named 'gguf'" in error_text or "需要先安装 gguf" in error_text:
+            _raise_gguf_dependency_missing(gguf_name, unique_id=unique_id, original_error=exc, model_kind="CLIP")
+        raise RuntimeError(f"GJJ 内置 GGUF 双CLIP加载失败：{clip_name1} + {clip_name2}\n{exc}") from exc
+
+
 def _load_diffusion_model(model_name: str, weight_dtype: str = "default", unique_id: Any = None):
     if _is_gguf_model(model_name):
         return _load_unet_gguf(model_name, unique_id=unique_id)
@@ -1557,7 +1662,10 @@ def _load_clip(name: str, clip_type: str = "wan", weight_dtype: str = "default")
         return comfy.sd.load_clip([path], **kwargs)
 
 
-def _load_dual_clip(clip_name1: str, clip_name2: str, clip_type: str = "ltxv", device: str = "default"):
+def _load_dual_clip(clip_name1: str, clip_name2: str, clip_type: str = "ltxv", device: str = "default", unique_id: Any = None):
+    if _is_gguf_model(clip_name1) or _is_gguf_model(clip_name2):
+        return _load_dual_clip_gguf(clip_name1, clip_name2, clip_type, device, unique_id=unique_id)
+
     import importlib
 
     try:
@@ -2922,6 +3030,7 @@ class GJJ_VideoUniversalModelLoader:
                             secondary_name,
                             str(slot.get("clip_type", clip_type) or clip_type),
                             str(slot.get("device", "default") or "default"),
+                            unique_id=unique_id,
                         )
                     elif loader_kind == "ltxav_text_encoder":
                         ckpt_name = resolved_names.get("ckpt_model", "")

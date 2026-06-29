@@ -323,6 +323,36 @@ def load_clip_gguf(clip_name: str, clip_type: str = "stable_diffusion") -> Any:
     return clip
 
 
+def load_dual_clip_gguf(clip_name1: str, clip_name2: str, clip_type: str = "ltxv", device: str = "default") -> Any:
+    state_dicts: list[dict[str, Any]] = []
+    has_gguf = False
+    for clip_name in (clip_name1, clip_name2):
+        clip_path = _full_path_or_raise(("clip", "clip_gguf", "text_encoders"), clip_name)
+        if str(clip_name or "").lower().endswith(".gguf"):
+            state_dicts.append(gguf_clip_loader(clip_path))
+            has_gguf = True
+        else:
+            state_dicts.append(comfy.utils.load_torch_file(clip_path, safe_load=True))
+
+    model_options: dict[str, Any] = {}
+    if has_gguf:
+        model_options["custom_operations"] = GGMLOps
+    if str(device or "default") == "cpu":
+        cpu = torch.device("cpu")
+        model_options["load_device"] = cpu
+        model_options["offload_device"] = cpu
+
+    clip = comfy.sd.load_text_encoder_state_dicts(
+        clip_type=_clip_type(clip_type),
+        state_dicts=state_dicts,
+        model_options=model_options,
+        embedding_directory=folder_paths.get_folder_paths("embeddings"),
+    )
+    if has_gguf:
+        clip.patcher = GGUFModelPatcher.clone(clip.patcher)
+    return clip
+
+
 def load_ltxav_text_encoder_gguf(text_encoder_name: str, ckpt_name: str, device: str = "default") -> Any:
     text_encoder_path = _full_path_or_raise(("text_encoders", "clip"), text_encoder_name)
     ckpt_path = _full_path_or_raise(("checkpoints", "unet", "unet_gguf", "diffusion_models"), ckpt_name)
