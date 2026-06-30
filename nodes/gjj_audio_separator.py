@@ -39,7 +39,12 @@ _COMPAT_VALUES = [_COMPAT_AUTO, _COMPAT_ORIGINAL, _COMPAT_EXPLICIT]
 NODE_NAME = "GJJ · Mel-Band RoFormer采样器"
 NODE_DISPLAY_NAME = "GJJ · 🎵 Mel-Band RoFormer人声分离采样器"
 SAMPLER_NODE_DISPLAY_NAME = "GJJ · 🎚️ Mel-Band RoFormer整段音频响度"
-MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
+try:
+    from .common_utils.dependency_checker import DEFAULT_MODEL_URL
+except ImportError:
+    from common_utils.dependency_checker import DEFAULT_MODEL_URL
+
+MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 REQUIRED_DEPENDENCIES = (
     {
         "module_name": "numpy",

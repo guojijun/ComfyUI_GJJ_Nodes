@@ -12,6 +12,7 @@ import folder_paths
 import numpy as np
 import torch
 from .common_utils.dependency_checker import (
+    DEFAULT_MODEL_URL,
     build_dependency_model_report,
     check_dependencies,
     get_report_from_exception,
@@ -24,7 +25,7 @@ from .common_utils.dependency_checker import (
 NODE_NAME = "GJJ_SenseVoiceASR"
 MODEL_ROOT_NAME = "ASR"
 MODEL_NAME = "SenseVoice-small-nonx"
-MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
+MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 
 LANGUAGES = [
     "自动",
@@ -286,7 +287,7 @@ _HELP_NOTICE = (
     if not _ENV_REPORT.get("available", True)
     else ""
 )
-_DESCRIPTION_READY = """
+_DESCRIPTION_READY = f"""
 🎤 语音识别 (SenseVoice)
 
 基于阿里巴巴达摩院 SenseVoice 的语音识别节点。
@@ -295,7 +296,7 @@ _DESCRIPTION_READY = """
 models/ASR/SenseVoice-small-nonx/
 
 🌏模型下载：
-https://pan.quark.cn/s/6ec846f1f58d
+{MODEL_DOWNLOAD_URL}
 
 💡 使用提示：
 - 支持中文、英文、日文、韩文、粤语等多种语言

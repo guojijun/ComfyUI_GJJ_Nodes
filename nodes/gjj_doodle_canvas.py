@@ -40,6 +40,7 @@ from .gjj_scribble_controlnet_generator import (
 try:
     from .common_utils.temp_files import gjjutils_read_temp_pil_image, gjjutils_write_temp_pil_image
     from .common_utils.dependency_checker import build_node_help_payload
+    from .common_utils.dependency_checker import DEFAULT_MODEL_URL
     from .common_utils.prompt_translation import (
         COMMON_PROMPT_TRANSLATE_API_PATH,
         TRANSLATION_BUNDLE_FILENAME,
@@ -54,6 +55,7 @@ try:
 except ImportError:
     from common_utils.temp_files import gjjutils_read_temp_pil_image, gjjutils_write_temp_pil_image
     from common_utils.dependency_checker import build_node_help_payload
+    from common_utils.dependency_checker import DEFAULT_MODEL_URL
     from common_utils.prompt_translation import (
         COMMON_PROMPT_TRANSLATE_API_PATH,
         TRANSLATION_BUNDLE_FILENAME,
@@ -75,7 +77,7 @@ DEFAULT_HEIGHT = 512
 DEFAULT_BACKGROUND = "#000000"
 DEFAULT_BRUSH = "#ffffff"
 MIXED_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
-MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
+MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 
 register_prompt_translation_api((COMMON_PROMPT_TRANSLATE_API_PATH,))
 

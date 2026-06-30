@@ -9,7 +9,7 @@ import torch
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 import folder_paths
-from .common_utils import build_node_help_payload, make_model_tree_item
+from .common_utils import DEFAULT_MODEL_URL, build_node_help_payload, make_model_tree_item
 from .common_utils.dependency_checker import make_missing_model_spec, raise_dependency_model_error
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
@@ -17,7 +17,7 @@ FONT_EXTENSIONS = {".ttf", ".otf", ".ttc", ".otc"}
 NODE_NAME = "GJJ_TextOverlay"
 NODE_DISPLAY_NAME = "GJJ · 👣 批量文本图片水印叠加"
 MIXED_BATCH_IMAGE_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
-MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
+MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 RMBG14_MODEL_TREE = [
     make_model_tree_item(
         label="RMBG1.4 模型",

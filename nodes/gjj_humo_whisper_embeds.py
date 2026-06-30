@@ -18,6 +18,7 @@ except Exception:
 
 try:
     from .common_utils.dependency_checker import (
+        DEFAULT_MODEL_URL,
         build_dependency_model_report,
         load_dependency_at_runtime,
         print_dependency_model_report,
@@ -26,6 +27,7 @@ try:
     from .common_utils.progress import send_node_progress
 except ImportError:
     from common_utils.dependency_checker import (
+        DEFAULT_MODEL_URL,
         build_dependency_model_report,
         load_dependency_at_runtime,
         print_dependency_model_report,
@@ -37,7 +39,7 @@ except ImportError:
 NODE_NAME = "GJJ_HuMoWhisperEmbeds"
 NODE_DISPLAY_NAME = "🎭 HuMo音频条件"
 CATEGORY = "GJJ/视频生成"
-MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
+MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 DEFAULT_WHISPER_MODEL = "whisper_large_v3_encoder_fp16.safetensors"
 NO_WHISPER_MODEL = "[未找到 Whisper Encoder 模型]"
 

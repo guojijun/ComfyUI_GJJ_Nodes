@@ -4,7 +4,6 @@ from typing import Any
 import json
 import os
 import re
-from urllib.parse import quote_plus
 
 import folder_paths
 from aiohttp import web
@@ -15,6 +14,7 @@ except Exception:  # pragma: no cover
     PromptServer = None
 
 from .gjj_video_universal_model_loader import (
+    MODEL_DOWNLOAD_URL,
     _choice,
     _format_slot_runtime_error,
     _get_full_path_any,
@@ -365,10 +365,7 @@ def _find_preferred_fuzzy_file(
 
 
 def _model_download_search_url(filename: str) -> str:
-    text = str(filename or "").strip()
-    if not text:
-        return ""
-    return f"https://huggingface.co/models?search={quote_plus(text)}"
+    return MODEL_DOWNLOAD_URL
 
 
 def _is_sageattention_mode(value: str) -> bool:
@@ -1482,7 +1479,7 @@ class GJJ_VideoKijaiModelLoader:
     ]
     GJJ_HELP = {
         "model_tree": True,
-        "model_download_url": "https://pan.quark.cn/s/6ec846f1f58d",
+        "model_download_url": MODEL_DOWNLOAD_URL,
         "models": [
             {"label": "主模型", "value": "models/diffusion_models/...", "tooltip": "按当前预设从 Kijai/WanVideoWrapper 工作流模型族中自动匹配。"},
             {"label": "VAE", "value": "models/vae/Wan2_1_VAE_bf16.safetensors 或 Wan2_2_VAE_bf16.safetensors", "tooltip": "输出 WANVAE，可直连 KJ 系 WanVideo 节点。"},

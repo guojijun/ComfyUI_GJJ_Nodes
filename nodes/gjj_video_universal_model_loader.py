@@ -36,18 +36,22 @@ except Exception:  # pragma: no cover - keeps standalone syntax checks lightweig
 
 try:
     from .common_utils.dependency_checker import (
+        DEFAULT_MODEL_URL,
         build_dependency_model_report,
         print_dependency_model_report,
         raise_dependency_model_error,
         send_dependency_model_notice,
         get_report_from_exception,
+        load_dependency_at_runtime,
     )
 except Exception:  # pragma: no cover - keeps standalone syntax checks lightweight
     build_dependency_model_report = None
+    DEFAULT_MODEL_URL = ""
     print_dependency_model_report = None
     raise_dependency_model_error = None
     send_dependency_model_notice = None
     get_report_from_exception = None
+    load_dependency_at_runtime = None
 
 NODE_NAME = "GJJ_VideoUniversalModelLoader"
 NODE_DISPLAY_NAME = "GJJ·🔵🟡🔴 智能视频模型加载🎞️官方流"
@@ -55,6 +59,7 @@ LIST_API = "/gjj/video_universal_loader_lists"
 MAX_SLOTS = 12
 WAN_RUNTIME_ARGS_TYPE = "WANCOMPILEARGS,BLOCKSWAPARGS,VRAM_MANAGEMENTARGS"
 GGUF_PACKAGE_SPEC = "gguf>=0.13.0"
+MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 
 DTYPES = ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"]
 WEIGHT_DTYPES = ["bf16", "fp16", "fp32"]
@@ -661,7 +666,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 required_name="sam2_hiera_base_plus.safetensors",
                 preferred_name=SAM2_BASE_PLUS_NAMES[0],
                 official_names=SAM2_BASE_PLUS_NAMES,
-                download_url="https://huggingface.co/Kijai/sam2-safetensors/resolve/main/sam2_hiera_base_plus.safetensors",
+                download_url=MODEL_DOWNLOAD_URL,
             ),
         ],
     },
@@ -692,7 +697,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 required_name="ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v2.safetensors",
                 preferred_name=LTX23_KJ_MODEL_NAMES[0],
                 official_names=LTX23_KJ_MODEL_NAMES,
-                download_url="https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/diffusion_models/ltx-2.3-22b-distilled_transformer_only_fp8_input_scaled_v2.safetensors",
+                download_url=MODEL_DOWNLOAD_URL,
             ),
             S(
                 "clip",
@@ -704,11 +709,11 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 required_name="gemma_3_12B_it_fp8_e4m3fn.safetensors",
                 preferred_name=LTX23_KJ_GEMMA_NAMES[0],
                 official_names=LTX23_KJ_GEMMA_NAMES,
-                download_url="https://huggingface.co/GitMylo/LTX-2-comfy_gemma_fp8_e4m3fn/resolve/main/gemma_3_12B_it_fp8_e4m3fn.safetensors",
+                download_url=MODEL_DOWNLOAD_URL,
                 secondary_label="另一个模型",
                 secondary_name="ltx-2.3_text_projection_bf16.safetensors",
                 secondary_official_names=LTX23_TEXT_PROJECTION_NAMES,
-                secondary_download_url="https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/text_encoders/ltx-2.3_text_projection_bf16.safetensors",
+                secondary_download_url=MODEL_DOWNLOAD_URL,
                 device="default",
             ),
             S(
@@ -723,7 +728,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 required_name="LTX23_video_vae_bf16.safetensors",
                 preferred_name=LTX23_VIDEO_VAE_NAMES[0],
                 official_names=LTX23_VIDEO_VAE_NAMES,
-                download_url="https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_video_vae_bf16.safetensors",
+                download_url=MODEL_DOWNLOAD_URL,
             ),
             S(
                 "audio_vae",
@@ -737,7 +742,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 required_name="LTX23_audio_vae_bf16.safetensors",
                 preferred_name=LTX23_AUDIO_VAE_NAMES[0],
                 official_names=LTX23_AUDIO_VAE_NAMES,
-                download_url="https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_audio_vae_bf16.safetensors",
+                download_url=MODEL_DOWNLOAD_URL,
             ),
             S(
                 "spatial_upscaler",
@@ -749,7 +754,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 required_name="ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
                 preferred_name=LTX23_SPATIAL_UPSCALER_NAMES[0],
                 official_names=LTX23_SPATIAL_UPSCALER_NAMES,
-                download_url="https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+                download_url=MODEL_DOWNLOAD_URL,
             ),
         ],
     },
@@ -762,7 +767,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 "GGUF主模型",
                 "diffusion_models",
                 "diffusion",
-                ["ltx2.3", "gguf"],
+                ["ltx","gguf"],
                 loader="unet",
                 preferred_name=LTX23_GGUF_MODEL_NAMES[0],
                 official_names=LTX23_GGUF_MODEL_NAMES,
@@ -827,7 +832,7 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
                 required_name="ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
                 preferred_name=LTX23_SPATIAL_UPSCALER_NAMES[0],
                 official_names=LTX23_SPATIAL_UPSCALER_NAMES,
-                download_url="https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+                download_url=MODEL_DOWNLOAD_URL,
             ),
         ],
     },
@@ -1045,6 +1050,86 @@ def _raise_gguf_dependency_missing(
     raise err
 
 
+def _is_gguf_tokenizer_dependency_error(exc: BaseException | str) -> bool:
+    module_name = str(getattr(exc, "name", "") or "").lower()
+    if module_name in {"sentencepiece", "protobuf", "google.protobuf"}:
+        return True
+    error_text = str(exc or "").lower()
+    return (
+        "sentencepiece" in error_text
+        or "protobuf" in error_text
+        or "sentencepiece_model_pb2" in error_text
+    )
+
+
+def _raise_gguf_tokenizer_runtime_dependency(
+    clip_name1: str,
+    clip_name2: str,
+    unique_id: Any = None,
+    original_error: Any = "",
+) -> None:
+    description = (
+        "当前 GGUF 双 CLIP 编码器需要从 Gemma GGUF 元数据重建 tokenizer。\n"
+        f"Gemma GGUF：{clip_name1}\n"
+        f"Embeddings Connectors：{clip_name2}\n"
+        "请在 ComfyUI 使用的 Python 环境安装 sentencepiece 和 protobuf，安装后重启 ComfyUI。"
+    )
+    if callable(raise_dependency_model_error):
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_dependencies=[
+                {
+                    "module_name": "sentencepiece",
+                    "package_name": "sentencepiece",
+                    "display_name": "sentencepiece",
+                    "description": "用于解析 GGUF 内的 Gemma sentencepiece tokenizer。",
+                },
+                {
+                    "module_name": "google.protobuf",
+                    "package_name": "protobuf",
+                    "display_name": "protobuf",
+                    "description": "sentencepiece tokenizer proto 解析依赖。",
+                },
+            ],
+            install_packages=["sentencepiece", "protobuf"],
+            description=description,
+            original_error=str(original_error or ""),
+            unique_id=unique_id,
+            title="GJJ 节点运行时依赖缺失！",
+            copy_label="📋 复制安装 sentencepiece/protobuf 命令",
+        )
+    raise RuntimeError(f"{description}\n\npip install sentencepiece protobuf")
+
+
+def _ensure_gguf_tokenizer_runtime_dependencies(clip_name1: str, clip_name2: str, unique_id: Any = None) -> None:
+    description = (
+        "GGUF 双 CLIP 编码器需要从 Gemma GGUF 元数据重建 tokenizer。"
+        "缺少该依赖时会在读取 gemma GGUF tokenizer 阶段失败。"
+    )
+    if callable(load_dependency_at_runtime):
+        load_dependency_at_runtime(
+            "sentencepiece",
+            node_name=NODE_DISPLAY_NAME,
+            package_name="sentencepiece",
+            description=description,
+            extra_packages=["protobuf"],
+            unique_id=unique_id,
+        )
+        load_dependency_at_runtime(
+            "google.protobuf",
+            node_name=NODE_DISPLAY_NAME,
+            package_name="protobuf",
+            description=description,
+            unique_id=unique_id,
+        )
+        return
+    try:
+        importlib.import_module("sentencepiece")
+        importlib.import_module("google.protobuf")
+    except Exception as exc:
+        _raise_gguf_tokenizer_runtime_dependency(clip_name1, clip_name2, unique_id=unique_id, original_error=exc)
+
+
 def _ensure_gguf_dependency(model_name: str, unique_id: Any = None, model_kind: str = "模型") -> None:
     gguf_module = ensure_optional_gguf_module()
     if getattr(gguf_module, "_GJJ_OPTIONAL_RUNTIME_STUB", False):
@@ -1251,9 +1336,22 @@ def _normalize_fallback_keywords(value: Any) -> Any:
     return result
 
 
+def _slot_file_extension_filter(slot: dict[str, Any]) -> str:
+    values: list[Any] = []
+    values.extend(list(slot.get("keywords", []) or []))
+    values.extend(list(slot.get("official_names", []) or []))
+    values.append(slot.get("required_name", ""))
+    values.append(slot.get("preferred_name", ""))
+    text = " ".join(str(value or "") for value in values).lower()
+    return "gguf" if re.search(r"\bgguf\b|\.gguf(?:$|[?#])", text) else ""
+
+
 def _slot_payload(slot: dict[str, Any]) -> dict[str, Any]:
     result = dict(slot)
     result["keywords"] = _normalize_search_keywords(list(slot.get("keywords", []) or []))
+    file_extension = _slot_file_extension_filter(slot)
+    if file_extension:
+        result["file_extension"] = file_extension
     if "fallback_keywords" in result:
         result["fallback_keywords"] = _normalize_fallback_keywords(result.get("fallback_keywords"))
     return result
@@ -1273,9 +1371,16 @@ def _normalize_weight_dtype(value: Any, default: str = "bf16") -> str:
     return text if text in set(WEIGHT_DTYPES) else default
 
 
-def _filter_names(names: list[str], keywords: list[str] | tuple[str, ...], allow_any: bool = False) -> list[str]:
+def _filter_names(
+    names: list[str],
+    keywords: list[str] | tuple[str, ...],
+    allow_any: bool = False,
+    file_extension: str = "",
+) -> list[str]:
     words = _normalize_search_keywords(keywords)
     source = [n for n in names if _is_usable_file(n, allow_any=allow_any)]
+    if str(file_extension or "").lower() == "gguf":
+        source = [n for n in source if _is_gguf_model(n)]
     if not words:
         return source
     result: list[str] = []
@@ -1440,8 +1545,11 @@ def _resolve_selected(
     strict: bool = False,
     preferred: str = "",
     official_names: list[str] | tuple[str, ...] | None = None,
+    file_extension: str = "",
 ) -> str:
     names = _filename_list_for_folders(folder)
+    if str(file_extension or "").lower() == "gguf":
+        names = [name for name in names if _is_gguf_model(name)]
     selected = str(selected or "").strip()
     if selected and selected in names and (not strict or _name_matches_keywords(selected, keywords, allow_any=allow_any)):
         return selected
@@ -1460,7 +1568,7 @@ def _resolve_selected(
     official_match = _best_official_name_match(names, seeds, keywords, allow_any=allow_any, strict=strict)
     if official_match:
         return official_match
-    matches = _sort_matches(_filter_names(names, keywords, allow_any=allow_any), keywords)
+    matches = _sort_matches(_filter_names(names, keywords, allow_any=allow_any, file_extension=file_extension), keywords)
     return matches[0] if matches else ""
 
 
@@ -1546,6 +1654,7 @@ def _load_ltxav_text_encoder_gguf(text_encoder_name: str, ckpt_name: str, device
 def _load_dual_clip_gguf(clip_name1: str, clip_name2: str, clip_type: str = "ltxv", device: str = "default", unique_id: Any = None):
     gguf_name = clip_name1 if _is_gguf_model(clip_name1) else clip_name2
     _ensure_gguf_dependency(gguf_name, unique_id=unique_id, model_kind="CLIP")
+    _ensure_gguf_tokenizer_runtime_dependencies(clip_name1, clip_name2, unique_id=unique_id)
     try:
         from ..vendor.gjj_gguf_runtime import load_dual_clip_gguf as load_gjj_dual_clip_gguf
     except ImportError:
@@ -1555,11 +1664,15 @@ def _load_dual_clip_gguf(clip_name1: str, clip_name2: str, clip_type: str = "ltx
     except ModuleNotFoundError as exc:
         if getattr(exc, "name", "") == "gguf":
             _raise_gguf_dependency_missing(gguf_name, unique_id=unique_id, original_error=exc, model_kind="CLIP")
+        if _is_gguf_tokenizer_dependency_error(exc):
+            _raise_gguf_tokenizer_runtime_dependency(clip_name1, clip_name2, unique_id=unique_id, original_error=exc)
         raise
     except Exception as exc:
         error_text = str(exc)
         if "No module named 'gguf'" in error_text or "需要先安装 gguf" in error_text:
             _raise_gguf_dependency_missing(gguf_name, unique_id=unique_id, original_error=exc, model_kind="CLIP")
+        if _is_gguf_tokenizer_dependency_error(exc):
+            _raise_gguf_tokenizer_runtime_dependency(clip_name1, clip_name2, unique_id=unique_id, original_error=exc)
         raise RuntimeError(f"GJJ 内置 GGUF 双CLIP加载失败：{clip_name1} + {clip_name2}\n{exc}") from exc
 
 
@@ -2747,7 +2860,7 @@ class GJJ_VideoUniversalModelLoader:
     GJJ_HELP = {
         "model_tree": True,
         "dynamic_model_tree_only": True,
-        "model_download_url": "https://pan.quark.cn/s/6ec846f1f58d",
+        "model_download_url": MODEL_DOWNLOAD_URL,
         "notice": "模型树按当前选择的官方流和面板下拉动态生成；若刚刷新页面还没读取到模型列表，请先点一次节点或刷新模型列表。",
         "dependencies": [
             "ComfyUI 官方节点：UNETLoader / DualCLIPLoader / LTXAVTextEncoderLoader",
@@ -2926,6 +3039,7 @@ class GJJ_VideoUniversalModelLoader:
             keywords = _normalize_search_keywords(list(slot.get("keywords", []) or []))
             selected = str(kwargs.get(f"file_{index}", "") or "")
             dtype = str(kwargs.get(f"dtype_{index}", "default") or "default")
+            file_extension = _slot_file_extension_filter(slot)
 
             if kind == "empty":
                 continue
@@ -2939,6 +3053,7 @@ class GJJ_VideoUniversalModelLoader:
                 strict=bool(slot.get("strict", False)),
                 preferred=str(slot.get("preferred_name", "") or slot.get("required_name", "") or ""),
                 official_names=list(slot.get("official_names", []) or []),
+                file_extension=file_extension,
             )
 
             if not name:

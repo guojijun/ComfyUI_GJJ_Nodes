@@ -17,6 +17,7 @@ import torch
 from PIL import Image, PngImagePlugin
 from nodes import ImagePadForOutpaint, VAEDecode, VAEEncode
 
+from .common_utils import DEFAULT_MODEL_URL
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
 NODE_NAME = "GJJ_BatchOutpaint"
@@ -1775,7 +1776,7 @@ class GJJ_BatchOutpaint:
         "models": [
             {
                 "label": "📌 模型下载",
-                "value": "夸克网盘: https://pan.quark.cn/s/6ec846f1f58d",
+                "value": f"夸克网盘: {DEFAULT_MODEL_URL}",
                 "tooltip": "所有模型打包下载，解压后按目录结构放置到 models/ 文件夹",
             },
             {

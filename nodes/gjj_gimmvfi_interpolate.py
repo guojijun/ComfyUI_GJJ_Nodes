@@ -11,6 +11,7 @@ from comfy.utils import ProgressBar, load_torch_file
 
 try:
     from .common_utils.dependency_checker import (
+        DEFAULT_MODEL_URL,
         load_dependency_at_runtime,
         make_missing_model_spec,
         raise_dependency_model_error,
@@ -18,6 +19,7 @@ try:
     from .gjj_model_name_resolver import pick_available_model_name
 except ImportError:
     from common_utils.dependency_checker import (
+        DEFAULT_MODEL_URL,
         load_dependency_at_runtime,
         make_missing_model_spec,
         raise_dependency_model_error,
@@ -106,7 +108,7 @@ def _resolve_model_name(selected: str, *, preferred: str = "", label: str = "GIM
         unique_id=unique_id,
         copy_text=MODEL_SUBDIR,
         copy_label="📋 复制模型目录",
-        model_download_url="https://pan.quark.cn/s/6ec846f1f58d",
+        model_download_url=DEFAULT_MODEL_URL,
     )
 
 
@@ -293,7 +295,7 @@ class GJJ_GIMMVFIInterpolate:
         ],
         "notice": "节点不会自动下载模型；请把已有 safetensors 放到 models/interpolation，可放子目录。",
         "dependencies": ["cupy-cuda12x", "timm", "omegaconf", "yacs", "easydict"],
-        "model_download_url": "https://pan.quark.cn/s/6ec846f1f58d",
+        "model_download_url": DEFAULT_MODEL_URL,
     }
 
     @classmethod

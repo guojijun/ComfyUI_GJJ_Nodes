@@ -6,6 +6,7 @@ import comfy.utils
 from comfy import model_management
 
 from .common_utils.dependency_checker import (
+    DEFAULT_MODEL_URL,
     build_dependency_model_report,
     build_node_help_payload,
     make_missing_model_spec,
@@ -32,7 +33,7 @@ NODE_DESCRIPTION = (
     "使用 models/upscale_models 目录中的 .pth 单图超分模型放大图像，"
     "可按开关选择直接透传原图。"
 )
-MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
+MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 UPSCALE_MODEL_SUBDIR = "models/upscale_models"
 UPSCALE_MODEL_PATTERN = "*.pth"
 

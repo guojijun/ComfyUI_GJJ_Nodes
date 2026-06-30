@@ -21,6 +21,7 @@ except Exception:
 
 try:
     from .dependency_checker import (
+        DEFAULT_MODEL_URL,
         build_dependency_model_report,
         get_report_from_exception,
         make_missing_model_spec,
@@ -28,6 +29,7 @@ try:
     )
 except ImportError:
     from dependency_checker import (
+        DEFAULT_MODEL_URL,
         build_dependency_model_report,
         get_report_from_exception,
         make_missing_model_spec,
@@ -43,7 +45,7 @@ TRANSLATION_MODEL_SUBDIR = "models/translation"
 TRANSLATION_LEGACY_MODEL_SUBDIR = f"{TRANSLATION_MODEL_SUBDIR}/{TRANSLATION_MODEL_NAME}"
 TRANSLATION_BUNDLE_FILENAME = f"{TRANSLATION_MODEL_NAME}.safetensors"
 TRANSLATION_BUNDLE_RELATIVE_PATH = f"{TRANSLATION_MODEL_SUBDIR}/{TRANSLATION_BUNDLE_FILENAME}"
-TRANSLATION_MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
+TRANSLATION_MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 
 TRANSLATION_BUNDLE_SCHEMA = "gjj.prompt_translation.bundle.v1"
 _BUNDLE_SCHEMA_KEY = "gjj_bundle_schema"

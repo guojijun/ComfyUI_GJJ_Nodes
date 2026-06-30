@@ -1,10 +1,16 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
+import { GJJ_MODEL_DOWNLOAD_URL } from "./gjj_model_download_url.js";
 
 const STATUS_WIDGET_NAME = "gjj_standard_status";
 const HELP_WIDGET_NAME = "gjj_help_button";
-const DEFAULT_MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d";
+const PRESET_DYNAMIC_MODEL_TREE_CLASSES = new Set([
+	"GJJ_ModelBundleLoader",
+	"GJJ_VideoKijaiModelLoader",
+	"GJJ_VideoUniversalModelLoader",
+]);
+const DEFAULT_MODEL_DOWNLOAD_URL = GJJ_MODEL_DOWNLOAD_URL;
 const HELP_MODEL_KEYWORDS = [
 	"模型",
 	"UNET",
@@ -689,6 +695,10 @@ function modelTreePriority(meta) {
 	return "auto";
 }
 
+function presetDynamicModelTreeNode(node) {
+	return PRESET_DYNAMIC_MODEL_TREE_CLASSES.has(String(node?.comfyClass || node?.type || ""));
+}
+
 function firstWarningLine(text) {
 	const line = String(text || "").split(/\r?\n/).map((item) => item.trim()).find(Boolean) || "";
 	return line.startsWith("⚠️") ? line : "";
@@ -1032,7 +1042,7 @@ function createHelpList(items, emptyText) {
 function createModelDownloadLink(url = DEFAULT_MODEL_DOWNLOAD_URL) {
 	const link = document.createElement("a");
 	link.className = "gjj-help-model-download";
-	link.href = String(url || DEFAULT_MODEL_DOWNLOAD_URL);
+	link.href = DEFAULT_MODEL_DOWNLOAD_URL;
 	link.target = "_blank";
 	link.rel = "noopener noreferrer";
 	link.textContent = `🌏 下载网址 ${link.href}`;
@@ -1070,6 +1080,9 @@ function dynamicModelEntries(node, meta) {
 
 function currentHelpModelEntries(node, meta) {
 	const priority = modelTreePriority(meta);
+	if (presetDynamicModelTreeNode(node)) {
+		return dynamicModelEntries(node, meta);
+	}
 	if (priority === "static") {
 		return hasDeclaredModelInfo(meta) ? currentModelEntries(node, meta) : [];
 	}
@@ -1317,7 +1330,7 @@ function modelTreeItems(items) {
 }
 
 function createModelTreeDownloadLink(url = DEFAULT_MODEL_DOWNLOAD_URL) {
-	const link = createModelDownloadLink(url);
+	const link = createModelDownloadLink(DEFAULT_MODEL_DOWNLOAD_URL);
 	link.className = "gjj-help-model-tree-link";
 	link.textContent = "🌏 模型下载";
 	link.title = link.href;
@@ -1566,6 +1579,8 @@ function showHelpDialog(node) {
 
 	const overlay = document.createElement("div");
 	overlay.className = "gjj-help-overlay";
+	overlay.dataset.gjjHelpNodeId = String(node?.id ?? "");
+	overlay.dataset.gjjHelpNodeClass = String(className || "");
 	const dialog = document.createElement("div");
 	dialog.className = "gjj-help-dialog";
 	const header = document.createElement("div");
@@ -1619,16 +1634,14 @@ function showHelpDialog(node) {
 		|| meta?.help?.["🌏模型下载："]
 		|| ""
 	).trim();
-	const modelDownloadUrl = isHttpUrl(modelDownloadInfo) ? modelDownloadInfo : "";
+	const modelDownloadUrl = DEFAULT_MODEL_DOWNLOAD_URL;
 	if (modelEntries.length) {
 		body.appendChild(createHelpSection(
 			"用到的模型",
-			createModelHelpContent(modelEntries, "", modelDownloadUrl || DEFAULT_MODEL_DOWNLOAD_URL)
+			createModelHelpContent(modelEntries, "", modelDownloadUrl)
 		));
-	} else if (modelDownloadUrl) {
+	} else if (modelDownloadInfo || hasDeclaredModelInfo(meta)) {
 		body.appendChild(createHelpSection("用到的模型", createModelDownloadLink(modelDownloadUrl)));
-	} else if (modelDownloadInfo) {
-		body.appendChild(createHelpSection("用到的模型", formatHelpText(modelDownloadInfo)));
 	}
 
 	const dependencies = hasDeclaredDependencyInfo(meta) ? dependencyEntries(meta) : [];
@@ -1654,6 +1667,16 @@ function showHelpDialog(node) {
 		}
 	};
 	window.addEventListener("keydown", keyHandler);
+}
+
+function refreshHelpDialog(node) {
+	const overlay = document.querySelector(".gjj-help-overlay");
+	if (!overlay || !node) return false;
+	const sameNode = String(overlay.dataset.gjjHelpNodeId || "") === String(node.id ?? "")
+		&& String(overlay.dataset.gjjHelpNodeClass || "") === String(nodeClassName(node) || "");
+	if (!sameNode) return false;
+	showHelpDialog(node);
+	return true;
 }
 
 async function loadBackendHelpMetadata() {
@@ -2137,6 +2160,7 @@ globalThis.GJJ_CommonNodeStandardizer = {
 	patchNode,
 	applyNodeMetadata,
 	showHelpDialog,
+	refreshHelpDialog,
 	ensureStatusWidget,
 	updateStatus: (node, detail = {}, options = {}) => {
 		if (!shouldAttachStatus(node)) {

@@ -95,7 +95,7 @@ pip install -r requirements-accelerate.txt # 推理加速
 
 部分节点需要配套模型才能运行。所有模型文件请从以下地址统一下载：
 
-🔗 **模型下载地址：** [https://pan.quark.cn/s/6ec846f1f58d](https://pan.quark.cn/s/6ec846f1f58d)
+🔗 **模型下载地址：** [https://pan.quark.cn/s/4b5a36d50e9c](https://pan.quark.cn/s/4b5a36d50e9c)
 
 #### 各节点所需模型及放置路径一览
 

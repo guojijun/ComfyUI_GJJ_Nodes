@@ -4,6 +4,7 @@ import {
 	getModelFamilyPresets,
 	matchModelFamilyPreset,
 } from "./gjj_model_family_preset_table.js";
+import { GJJ_MODEL_DOWNLOAD_URL } from "./gjj_model_download_url.js";
 
 const TARGET_NODE = "GJJ_ModelBundleLoader";
 const LIST_API = "/gjj/model_bundle_loader_lists";
@@ -319,8 +320,7 @@ function modelRelPath(folder, filename) {
 	return `models/${normalized}/${name}`;
 }
 function downloadUrlForExpected(expectedName) {
-	const filename = String(expectedName || "").trim();
-	return filename ? `https://huggingface.co/models?search=${encodeURIComponent(filename)}` : "";
+	return GJJ_MODEL_DOWNLOAD_URL;
 }
 
 function currentNodeWidth(node) {
@@ -1377,6 +1377,10 @@ function modelBundleHelpEntries(node) {
 function attachHelpModelProvider(node) {
 	node.__gjjHelpModelEntries = () => modelBundleHelpEntries(node);
 	node.__gjjHelpModelTreeEntries = node.__gjjHelpModelEntries;
+}
+
+function refreshOpenHelpDialog(node) {
+	globalThis.GJJ_CommonNodeStandardizer?.refreshHelpDialog?.(node);
 }
 
 function formatLoraStrength(value) {
@@ -2568,6 +2572,7 @@ function renderPanel(node) {
 	const templateSelect = createSearchableSelect(node, TEMPLATE_WIDGET, templates, () => {
 		applyPreset(node, true);
 		renderPanel(node);
+		refreshOpenHelpDialog(node);
 	}, {
 		placeholder: "过滤模板",
 		format: (value) => templateLabel(presetById(node, value) || { id: value }),
@@ -2584,6 +2589,7 @@ function renderPanel(node) {
 		refreshBackendLists(node, false).then(() => {
 			applyPreset(node, true);
 			renderPanel(node);
+			refreshOpenHelpDialog(node);
 		});
 	});
 	protect(refresh);

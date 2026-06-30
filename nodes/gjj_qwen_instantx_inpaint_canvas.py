@@ -16,6 +16,7 @@ from PIL import Image, ImageFilter
 
 try:
     from .common_utils.dependency_checker import (
+        DEFAULT_MODEL_URL,
         build_dependency_model_report,
         build_node_help_payload,
         get_pip_install_command_text,
@@ -49,6 +50,7 @@ try:
     from .gjj_wanvideo_runtime_shims import ensure_optional_gguf_module
 except ImportError:
     from common_utils.dependency_checker import (
+        DEFAULT_MODEL_URL,
         build_dependency_model_report,
         build_node_help_payload,
         get_pip_install_command_text,
@@ -90,7 +92,7 @@ DESCRIPTION = (
 )
 INPUT_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
 OUTPUT_IMAGE_TYPE = "IMAGE"
-MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
+MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 GGUF_PACKAGE_SPEC = "gguf>=0.13.0"
 
 DEFAULT_WIDTH = 512

@@ -15,6 +15,7 @@ from nodes import (
     VAEEncode,
 )
 from .common_utils.temp_files import gjjutils_write_temp_tensor_images
+from .common_utils import DEFAULT_MODEL_URL
 from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
 
 NODE_NAME = "GJJ_CheckpointDirectGenerator"
@@ -129,7 +130,7 @@ class GJJ_CheckpointDirectGenerator:
         "description": DESCRIPTION,
         "model_tree": True,
         "dynamic_model_tree_only": True,
-        "model_download_url": "https://pan.quark.cn/s/6ec846f1f58d",
+        "model_download_url": DEFAULT_MODEL_URL,
         "notice": (
             "模型树会按当前面板选择动态生成：底模来自 models/checkpoints；"
             "若接入 LoRA串联配置，帮助里会显示该输入口的连接状态。"

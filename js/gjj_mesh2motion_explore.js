@@ -1,6 +1,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
+import { GJJ_MODEL_DOWNLOAD_URL } from "./gjj_model_download_url.js";
 
 const NODE_CLASS = "GJJ_Mesh2MotionExplore";
 const ROUTE_BASE = "/gjj/mesh2motion";
@@ -890,11 +891,11 @@ app.registerExtension({
 				const response = await api.fetchApi(`${ROUTE_BASE}/index-comfyui.html`);
 				if (response.status !== 200) {
 					console.warn("[GJJ Mesh2Motion] ⚠️ Mesh2Motion 资源未找到！");
-					console.warn("🌏模型下载：https://pan.quark.cn/s/6ec846f1f58d");
+					console.warn(`🌏模型下载：${GJJ_MODEL_DOWNLOAD_URL}`);
 				}
 			} catch (error) {
 				console.warn("[GJJ Mesh2Motion] ⚠️ Mesh2Motion 资源未找到！");
-				console.warn("🌏模型下载：https://pan.quark.cn/s/6ec846f1f58d");
+				console.warn(`🌏模型下载：${GJJ_MODEL_DOWNLOAD_URL}`);
 			}
 		};
 

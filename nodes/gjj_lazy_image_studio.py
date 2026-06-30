@@ -39,6 +39,7 @@ from .common_utils.text_tools import (
 )
 from .common_utils.temp_files import gjjutils_write_temp_tensor_images
 from .common_utils.dependency_checker import (
+    DEFAULT_MODEL_URL,
     is_comfyui_model_compatibility_error,
     raise_comfyui_model_compatibility_error,
 )
@@ -1418,7 +1419,7 @@ class GJJ_LazyImageStudio:
         "description": DESCRIPTION,
         "model_tree": True,
         "dynamic_model_tree_only": True,
-        "model_download_url": "https://pan.quark.cn/s/6ec846f1f58d",
+        "model_download_url": DEFAULT_MODEL_URL,
         "notice": (
             "模型树会按当前面板选择动态生成：UNET、CLIP、VAE 来自对应模型目录；"
             "节点内置 LoRA 行和外部 LoRA串联配置也会一并显示。"

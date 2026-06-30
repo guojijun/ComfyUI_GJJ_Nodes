@@ -12,6 +12,11 @@ import folder_paths
 import torch
 from comfy_api.latest import InputImpl, Types
 
+try:
+    from .common_utils.dependency_checker import DEFAULT_MODEL_URL
+except ImportError:
+    from common_utils.dependency_checker import DEFAULT_MODEL_URL
+
 
 NODE_NAME = "GJJ_SeedVR2ImageUpscaler"
 NODE_DISPLAY_NAME = "GJJ · 🔍 SeedVR2图像视频放大器"
@@ -20,7 +25,7 @@ DEFAULT_VAE_MODEL = "ema_vae_fp16.safetensors"
 MODEL_CATEGORY = "seedvr2"
 MODEL_SUBDIR = "models/seedvr2"
 MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO"
-MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
+MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 COMMON_VIDEO_HEIGHT_OPTIONS = [
     "手动输入",
     "480",

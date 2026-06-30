@@ -1,7 +1,7 @@
 import sys, os, site, traceback, importlib, re
 from typing import List, Optional
 DEFAULT_PYPI = "https://pypi.tuna.tsinghua.edu.cn/simple"
-DEFAULT_MODEL_URL = "https://pan.quark.cn/s/6ec846f1f58d"
+DEFAULT_MODEL_URL = "https://pan.quark.cn/s/4b5a36d50e9c"
 def _console_dependency_warnings_enabled():
 	value = str(os.environ.get("GJJ_SHOW_STARTUP_DEPENDENCY_WARNINGS", "") or "").strip().lower()
 	return value in {"1", "true", "yes", "on", "debug"}

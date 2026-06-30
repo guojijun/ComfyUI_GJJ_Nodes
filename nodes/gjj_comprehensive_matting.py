@@ -16,6 +16,7 @@ from PIL import Image, ImageFilter
 import folder_paths
 
 from .common_utils.dependency_checker import (
+    DEFAULT_MODEL_URL,
     build_dependency_model_report,
     load_dependency_at_runtime,
     make_missing_model_spec,
@@ -66,7 +67,7 @@ _INSPYRENET_REMOVER_CACHE: dict[tuple[str, str, bool], object] = {}
 _OFFICIAL_BACKGROUND_CACHE: dict[str, object] = {}
 
 NODE_DISPLAY_NAME = "GJJ · ✂️ 批量多功能综合抠图"
-MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
+MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 DEPENDENCY_SPECS = {
     "numpy": {
         "module_name": "numpy",

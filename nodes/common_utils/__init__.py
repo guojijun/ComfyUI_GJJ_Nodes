@@ -79,6 +79,10 @@ from .model_family import (
 	DEFAULT_VAE_NAME,
 )
 
+from .dependency_checker import (
+	DEFAULT_MODEL_URL,
+)
+
 from .sampler_tools import (
 	# Flux2 相关
 	gjjutils_EmptyFlux2LatentImage,
@@ -436,6 +440,7 @@ __all__ = [
 	"gjjutils_url_media_basename",
 	"gjjutils_url_media_relative_path",
 	# dependency/help
+	"DEFAULT_MODEL_URL",
 	"build_node_help_payload",
 	"make_model_tree_item",
 ]

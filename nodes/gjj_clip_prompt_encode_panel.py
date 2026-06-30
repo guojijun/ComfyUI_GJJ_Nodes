@@ -139,6 +139,13 @@ def _encode_clip(clip: Any, text: str):
         from nodes import CLIPTextEncode
         return CLIPTextEncode().encode(clip, str(text or ""))[0]
     except Exception as exc:
+        error_text = str(exc or "")
+        if "Cannot copy out of meta tensor" in error_text or "meta tensor" in error_text:
+            raise RuntimeError(
+                "CLIP 编码失败：上游 CLIP 还停留在 meta 空权重状态，没有真实权重数据可用于编码。\n"
+                "请检查连接到本节点 clip 输入口的加载器：CLIP 类型是否选对、模型文件是否完整、GGUF/低显存加载器是否支持当前文本编码器；"
+                "修改后建议重启 ComfyUI 并重新加载模型。"
+            ) from exc
         raise RuntimeError(f"CLIP 编码失败：{exc}") from exc
 
 

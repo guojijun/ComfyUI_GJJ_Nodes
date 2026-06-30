@@ -37,6 +37,7 @@ from .gjj_model_bundle_loader import (
 )
 from .gjj_model_upscaler import _load_upscale_model, _list_upscale_models
 from .common_utils.dependency_checker import (
+	DEFAULT_MODEL_URL,
 	build_dependency_model_report,
 	get_report_from_exception,
 	make_missing_model_spec,
@@ -65,7 +66,7 @@ DEFAULT_SHIFT = 3.1
 DEFAULT_CFG_NORM = 1.0
 DEFAULT_MEGAPIXELS = 1.0
 DEFAULT_UPSCALE_MODEL = "1xSkinContrast-SuperUltraCompact.pth"
-MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
+MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 COMPAT_BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
 _DESCRIPTION_READY = (
 	"将 FireRed Image Edit 老照片修复工作流封装为单节点。"

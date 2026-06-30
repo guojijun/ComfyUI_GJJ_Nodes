@@ -13,6 +13,8 @@ import comfy.sd
 import comfy.utils
 from aiohttp import web
 
+from .common_utils import DEFAULT_MODEL_URL
+
 try:
     from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
 except Exception:  # pragma: no cover - 允许单文件语法检查
@@ -832,7 +834,7 @@ class GJJ_ModelBundleLoader:
     SEARCH_ALIASES = ["MMM", "简易加载器", "model loader", "easy loader", "UNET", "Checkpoint", "CLIP", "VAE", "MODEL_PATCH", "CLIP_VISION", "CONTROL_NET", "ControlNet", "KSampler", "采样参数"]
     GJJ_HELP = {
         "model_tree": True,
-        "model_download_url": "https://pan.quark.cn/s/6ec846f1f58d",
+        "model_download_url": DEFAULT_MODEL_URL,
         "notice": "按当前模型族模板显示需要放入 ComfyUI/models 下的模型文件；刷新按钮会重新读取本地模型列表。",
         "dependencies": ["ComfyUI 基础模型加载器", "ControlNet 仅在当前模板声明时加载"],
     }

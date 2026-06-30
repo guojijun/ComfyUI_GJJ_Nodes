@@ -1,6 +1,7 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { GJJ_Utils } from "./gjj_utils.js";
+import { GJJ_MODEL_DOWNLOAD_URL } from "./gjj_model_download_url.js";
 
 const TARGET_NODE_APIS = {
 	GJJ_VideoUniversalModelLoader: "/gjj/video_universal_loader_lists",
@@ -439,9 +440,27 @@ function normalizeKeywords(keywords = []) {
 	}
 	return result;
 }
-function filterList(list, keywords = [], allowAny = false, fallbackKeywords = []) {
+
+function wantsGgufOnly(keywords = [], fileExtension = "") {
+	if (String(fileExtension || "").trim().toLowerCase() === "gguf") return true;
+	return (keywords || []).some((value) => /\bgguf\b|\.gguf(?:$|[?#])/i.test(String(value || "")));
+}
+
+function applyExtensionConstraints(values, keywords = [], fileExtension = "") {
+	const list = Array.isArray(values) ? values : [];
+	if (wantsGgufOnly(keywords, fileExtension)) {
+		return list.filter((name) => lower(name).endsWith(".gguf"));
+	}
+	return list;
+}
+
+function filterList(list, keywords = [], allowAny = false, fallbackKeywords = [], fileExtension = "") {
 	const words = normalizeKeywords(keywords);
-	const source = Array.isArray(list) ? list.filter((name) => isUsable(name, allowAny)) : [];
+	const source = applyExtensionConstraints(
+		Array.isArray(list) ? list.filter((name) => isUsable(name, allowAny)) : [],
+		keywords,
+		fileExtension
+	);
 	const findMatches = (group) => group.length ? source.filter((name) => {
 		const text = matchText(name);
 		return group.every((word) => text.includes(word));
@@ -801,7 +820,8 @@ function syncPairedLowModelFromHigh(node, cfg, highSlot, highIndex, highValue, s
 		sourceList,
 		lowSlot.keywords || [],
 		String(lowSlot.kind || "") === "name_any",
-		lowSlot.fallback_keywords || []
+		lowSlot.fallback_keywords || [],
+		lowSlot.file_extension || ""
 	);
 	const matched = matchingLowModelForHigh(highValue, lowValues);
 	if (!matched || String(lowWidget.value ?? "") === matched) return;
@@ -813,14 +833,6 @@ function syncPairedLowModelFromHigh(node, cfg, highSlot, highIndex, highValue, s
 	}
 	syncDerivedSettingsFromModelName(node, lowSlot, pair.index + 1, matched);
 	saveWidgetValues(node);
-}
-
-function expectedModelName(slot) {
-	const preferred = String(slot?.required_name || slot?.preferred_name || preferredNamesForSlot(slot)[0] || slot?.secondary_name || "").trim();
-	if (preferred) return preferred;
-	const words = Array.isArray(slot?.keywords) ? slot.keywords.map(String).filter(Boolean) : [];
-	if (words.length) return words.join(" ");
-	return String(slot?.label || slot?.id || "模型").trim();
 }
 
 function uniqueList(values) {
@@ -871,10 +883,15 @@ function slotListForState(state, slot, fallbackFolder = "") {
 }
 
 function downloadUrlForSlot(slot, expectedName) {
-	const explicit = String(slot?.download_url || "").trim();
-	if (explicit) return explicit;
-	const filename = String(expectedName || "").trim();
-	return filename ? `https://huggingface.co/models?search=${encodeURIComponent(filename)}` : "";
+	return GJJ_MODEL_DOWNLOAD_URL;
+}
+
+function missingModelForSlot(slot, values, secondary = false) {
+	const seeds = preferredNamesForSlot(slot, secondary).filter(looksLikeHelpModelFile);
+	if (!seeds.length) return "";
+	const list = Array.isArray(values) ? values.map(String) : [];
+	if (bestOfficialNameMatch(list, seeds, true)) return "";
+	return firstHelpModelFile(...seeds);
 }
 
 function addVideoHelpModelEntry(entries, slot, index, filename, labelOverride = "") {
@@ -891,11 +908,35 @@ function addVideoHelpModelEntry(entries, slot, index, filename, labelOverride = 
 
 function currentHelpConfigKey(node, state) {
 	const configKeys = Object.keys(state.configs || {});
+	let key = currentConfigKey(node).trim();
 	const appliedKey = String(node?.__gjjVUAppliedConfigKey || node?.properties?.gjj_vu_applied_config_key || "").trim();
-	let key = helpValueOf(node, "config", appliedKey || configKeys[0] || "").trim();
+	if (!state.configs?.[key]) key = helpValueOf(node, "config", appliedKey || configKeys[0] || "").trim();
 	if (!state.configs?.[key] && appliedKey && state.configs?.[appliedKey]) key = appliedKey;
 	if (!state.configs?.[key]) key = configKeys[0] || "";
 	return key;
+}
+
+function helpModelFileForSlot(node, state, slot, index, secondary = false) {
+	const folder = String(slot?.folder || "");
+	const allowAny = String(slot?.kind || "") === "name_any";
+	const sourceList = slotListForState(state, slot, folder);
+	const values = secondary
+		? sourceList.map(String)
+		: filterList(sourceList, slot?.keywords || [], allowAny, slot?.fallback_keywords || [], slot?.file_extension || "");
+	const current = firstHelpModelFile(helpValueOf(node, `${secondary ? "secondary_file" : "file"}_${index + 1}`));
+	const normalizedValues = new Set(values.map((value) => String(value).replaceAll("\\", "/").toLowerCase()));
+	const currentKey = current.replaceAll("\\", "/").toLowerCase();
+	if (current && (!values.length || normalizedValues.has(currentKey))) return current;
+	if (current) {
+		const currentBase = currentKey.split("/").pop();
+		const matched = values.find((value) => String(value).replaceAll("\\", "/").toLowerCase().split("/").pop() === currentBase);
+		if (matched) return matched;
+	}
+	const seeds = secondary
+		? preferredNamesForSlot(slot, true)
+		: preferredNamesForSlot(slot);
+	const matched = bestOfficialNameMatch(values, seeds, true);
+	return firstHelpModelFile(matched, ...seeds);
 }
 
 function videoLoaderHelpEntries(node) {
@@ -910,7 +951,7 @@ function videoLoaderHelpEntries(node) {
 		if (!slot || String(slot.kind || "") === "empty") return;
 		if (isLoraSlot(slot) && !loraEnabled) return;
 		const fileName = firstHelpModelFile(
-			helpValueOf(node, `file_${index + 1}`),
+			helpModelFileForSlot(node, state, slot, index),
 			slot.required_name,
 			slot.preferred_name,
 			...(Array.isArray(slot.official_names) ? slot.official_names : [])
@@ -918,7 +959,7 @@ function videoLoaderHelpEntries(node) {
 		addVideoHelpModelEntry(entries, slot, index, fileName);
 		if (isDualClipSlot(slot)) {
 			const secondaryName = firstHelpModelFile(
-				helpValueOf(node, `secondary_file_${index + 1}`),
+				helpModelFileForSlot(node, state, slot, index, true),
 				slot.secondary_name,
 				...(Array.isArray(slot.secondary_official_names) ? slot.secondary_official_names : [])
 			);
@@ -932,6 +973,10 @@ function attachHelpModelProvider(node) {
 	node.__gjjHelpModelEntries = () => videoLoaderHelpEntries(node);
 	node.__gjjHelpModelTreeEntries = node.__gjjHelpModelEntries;
 	node.__gjjModelHelpEntries = node.__gjjHelpModelEntries;
+}
+
+function refreshOpenHelpDialog(node) {
+	globalThis.GJJ_CommonNodeStandardizer?.refreshHelpDialog?.(node);
 }
 
 async function copyAndFlash(button, text, restoreLabel) {
@@ -948,12 +993,14 @@ async function copyAndFlash(button, text, restoreLabel) {
 
 function createMissingModelHint(node, slot, folder, expectedName) {
 	const url = downloadUrlForSlot(slot, expectedName);
+	const folderLabel = slotSearchFolderLabel(slot, folder);
+	const solution = `解决方案：从统一模型地址下载 ${expectedName}，放到 ComfyUI 已配置的模型分类 ${folderLabel}，然后点击刷新按钮或刷新模型列表。`;
 	const row = document.createElement("div");
 	row.className = "gjj-vu-missing-row";
 	const message = document.createElement("div");
 	message.className = "gjj-vu-missing-text";
 	message.textContent = `缺失：${expectedName}`;
-	message.title = `请放到 ComfyUI 已配置的模型分类：${slotSearchFolderLabel(slot, folder)}\n文件名：${expectedName}`;
+	message.title = `${solution}\n文件名：${expectedName}`;
 
 	const copyName = document.createElement("button");
 	copyName.type = "button";
@@ -1534,7 +1581,11 @@ function buildDom(node) {
 	refresh.textContent = "↻";
 	refresh.title = "重新读取 models 目录和配置";
 	protect(refresh);
-	refresh.addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); refreshBackendLists(node, true); });
+	refresh.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		refreshBackendLists(node, true).finally(() => refreshOpenHelpDialog(node));
+	});
 	top.append(configBox, refresh, createBroadcastButton(node));
 	wrap.appendChild(top);
 
@@ -2346,7 +2397,7 @@ function currentConfig(node, state) {
 
 function applyConfig(node, opts = {}) {
 	const state = ensureState(node);
-	if (!state.configs || !state.folders) { refreshBackendLists(node, false).finally(() => applyConfig(node)); return; }
+	if (!state.configs || !state.folders) { refreshBackendLists(node, false).finally(() => applyConfig(node, opts)); return; }
 	const cfg = currentConfig(node, state);
 	updateInputs(node, cfg);
 	const rows = node.__gjjVURows; if (!rows) return;
@@ -2377,10 +2428,9 @@ function applyConfig(node, opts = {}) {
 		const folder = String(slot.folder || "");
 		const list = slotListForState(state, slot, folder);
 		const allowAny = String(slot.kind || "") === "name_any";
-		const values = filterList(list, slot.keywords || [], allowAny, slot.fallback_keywords || []);
+		const values = filterList(list, slot.keywords || [], allowAny, slot.fallback_keywords || [], slot.file_extension || "");
 		const secondaryValues = Array.isArray(list) ? list.map(String) : [];
-		const expectedName = expectedModelName(slot);
-		const missingModel = isKijaiNode(node) && !values.length && !!expectedName;
+		const missingModel = missingModelForSlot(slot, values);
 		const fileName = `file_${i}`;
 		const secondaryFileName = `secondary_file_${i}`;
 		const dtypeName = `dtype_${i}`;
@@ -2418,9 +2468,9 @@ function applyConfig(node, opts = {}) {
 		}, null, {
 			placeholder: "输入关键词实时过滤",
 			title: missingModel
-				? `${label.title}\n缺失：${expectedName}\n请放到 ComfyUI 已配置的模型分类：${slotSearchFolderLabel(slot, folder)}`
+				? `${label.title}\n缺失：${missingModel}\n解决方案：从统一模型地址下载后放到 ComfyUI 已配置的模型分类：${slotSearchFolderLabel(slot, folder)}`
 				: label.title,
-			missingText: missingModel ? `缺失：${expectedName}` : "",
+			missingText: missingModel ? `缺失：${missingModel}` : "",
 		});
 		row.append(label, select);
 		if (showInlineDtype) {
@@ -2432,7 +2482,7 @@ function applyConfig(node, opts = {}) {
 		rows.appendChild(row);
 		node.__gjjVUVisibleRowCount += 1;
 		if (missingModel && !(isLoraSlot(slot) && !loraEnabled)) {
-			rows.appendChild(createMissingModelHint(node, slot, folder, expectedName));
+			rows.appendChild(createMissingModelHint(node, slot, folder, missingModel));
 			node.__gjjVUVisibleRowCount += 1;
 		}
 		if (hasParams && !(isLoraSlot(slot) && !loraEnabled) && isSettingsOpen(node, slot, i)) {
@@ -2440,18 +2490,30 @@ function applyConfig(node, opts = {}) {
 			node.__gjjVUVisibleRowCount += Math.max(1, Math.ceil(params.length / 2));
 		}
 		if (isDualClipSlot(slot)) {
+			const missingSecondary = missingModelForSlot(slot, secondaryValues, true);
 			const secondaryRow = document.createElement("div");
 			secondaryRow.className = "gjj-vu-row no-dtype";
+			secondaryRow.classList.toggle("missing", !!missingSecondary);
 			const secondaryLabel = document.createElement("div");
 			secondaryLabel.className = "gjj-vu-label";
 			const secondaryIcon = officialIconFor(slot);
 			const secondaryLabelText = String(slot.secondary_label || "另一个模型");
 			secondaryLabel.textContent = `${secondaryIcon} ${secondaryLabelText}`;
 			secondaryLabel.title = `模型分类: ${slotSearchFolderLabel(slot, folder)}\n类型: 另一个模型\n默认值: ${String(slot.secondary_name || "").trim() || "未设置"}`;
-			const secondarySelect = createSearchableSelect(node, secondaryFileName, secondaryValues, () => saveWidgetValues(node), null, { placeholder: "输入关键词实时过滤", title: secondaryLabel.title });
+			const secondarySelect = createSearchableSelect(node, secondaryFileName, secondaryValues, () => saveWidgetValues(node), null, {
+				placeholder: "输入关键词实时过滤",
+				title: missingSecondary
+					? `${secondaryLabel.title}\n缺失：${missingSecondary}\n解决方案：从统一模型地址下载后放到 ComfyUI 已配置的模型分类：${slotSearchFolderLabel(slot, folder)}`
+					: secondaryLabel.title,
+				missingText: missingSecondary ? `缺失：${missingSecondary}` : "",
+			});
 			secondaryRow.append(secondaryLabel, secondarySelect);
 			rows.appendChild(secondaryRow);
 			node.__gjjVUVisibleRowCount += 1;
+			if (missingSecondary) {
+				rows.appendChild(createMissingModelHint(node, slot, folder, missingSecondary));
+				node.__gjjVUVisibleRowCount += 1;
+			}
 		}
 	});
 	for (let i = (cfg.slots || []).length + 1; i <= MAX_SLOTS; i++) { syncWidget(node, `file_${i}`, ""); syncWidget(node, `secondary_file_${i}`, ""); syncWidget(node, `dtype_${i}`, "default"); syncWidget(node, `weight_dtype_${i}`, "bf16"); }
@@ -2460,6 +2522,7 @@ function applyConfig(node, opts = {}) {
 	node.__gjjVULoraToggleSync?.();
 	updateLoaderMetadata(node, cfg);
 	saveWidgetValues(node);
+	refreshOpenHelpDialog(node);
 	scheduleLayoutRefresh(node, [0, 48, 160]);
 	if (opts?.userConfigChanged) scheduleAutoReloadAfterPresetChange(node);
 }

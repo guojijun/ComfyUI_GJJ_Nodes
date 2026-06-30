@@ -42,6 +42,7 @@ import torch
 
 try:
     from .common_utils.dependency_checker import (
+        DEFAULT_MODEL_URL,
         build_dependency_model_report,
         load_dependency_at_runtime,
         make_missing_model_spec,
@@ -50,6 +51,7 @@ try:
     from .common_utils.progress import send_node_progress
 except ImportError:
     from common_utils.dependency_checker import (
+        DEFAULT_MODEL_URL,
         build_dependency_model_report,
         load_dependency_at_runtime,
         make_missing_model_spec,
@@ -68,7 +70,7 @@ if vendor_path not in sys.path:
 NODE_NAME = "GJJ_FaceAnalysis"
 NODE_DISPLAY_NAME = "GJJ · 🎭 一键批量换脸"
 CATEGORY = "GJJ/图像"
-MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
+MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 IDENTITY_SWAP_MODEL_OPTIONS = ["inswapper_128.onnx", "inswapper_128_fp16.onnx"]
 RESTORE_MODEL_NONE = "无"
 FACE_RESTORE_MODEL_OPTIONS = [RESTORE_MODEL_NONE, "GPEN-BFR-256.onnx", "GPEN-BFR-512.onnx"]

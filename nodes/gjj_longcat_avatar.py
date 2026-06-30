@@ -26,6 +26,7 @@ except Exception:
 
 try:
     from .common_utils.dependency_checker import (
+        DEFAULT_MODEL_URL,
         build_dependency_model_report,
         load_dependency_at_runtime,
         make_missing_model_spec,
@@ -35,6 +36,7 @@ try:
     from .common_utils.progress import send_node_progress
 except ImportError:
     from common_utils.dependency_checker import (
+        DEFAULT_MODEL_URL,
         build_dependency_model_report,
         load_dependency_at_runtime,
         make_missing_model_spec,
@@ -51,7 +53,7 @@ DISPLAY_GENERATOR = "GJJ · 🎭 LongCat数字人生成"
 GJJ_ROOT = Path(__file__).resolve().parents[1]
 VENDOR_ROOT = GJJ_ROOT / "vendor" / "longcat_video_runtime"
 AUTO = "自动检测"
-MODEL_DOWNLOAD_URL = "https://pan.quark.cn/s/6ec846f1f58d"
+MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 LONGCAT_AVATAR_MODEL = "LongCat-Avatar-15_bf16.safetensors"
 LONGCAT_DMD_LORA = "LongCat-Avatar-15_dmd_distill_lora_rank128_bf16.safetensors"
 LONGCAT_WHISPER_MODEL = "whisper_large_v3_encoder_fp16.safetensors"
