@@ -274,11 +274,13 @@ function setRangeStart(data, frame) {
 	data.range_start = start;
 	data.range_end = lockRangeEnd(start, data.range_end ?? data.frame_count - 1, data.frame_count);
 	data.output_frame_count = data.range_end - data.range_start + 1;
+	data.range_user_set = true;
 }
 
 function setRangeEnd(data, frame) {
 	data.range_end = lockRangeEnd(data.range_start ?? 0, frame, data.frame_count);
 	data.output_frame_count = data.range_end - data.range_start + 1;
+	data.range_user_set = true;
 }
 
 function renderKeyframeMarks(state) {
@@ -336,7 +338,17 @@ function normalizeData(data, sourceWidth = 0, sourceHeight = 0, frameCount = 0) 
 	const frames = Math.max(1, Math.round(positiveNumber(frameCount) || positiveNumber(data?.frame_count) || fallback.frame_count));
 	const width = alignDown(data?.width || fallback.width, srcW);
 	const height = alignDown(data?.height || fallback.height, srcH);
-	const range = normalizeFrameRange(data || fallback, frames);
+	const rangeUserSet = data?.range_user_set === true || data?.range_user_set === 1 || data?.range_user_set === "true";
+	const legacyFirstFrameDefault = !rangeUserSet
+		&& data
+		&& Number(data.range_start ?? 0) === 0
+		&& Number(data.range_end ?? 0) === 0;
+	const missingRange = !data || data.range_start == null || data.range_end == null;
+	const rangeSource = (missingRange || legacyFirstFrameDefault)
+		? { ...(data || fallback), range_start: 0, range_end: frames - 1 }
+		: data;
+	const range = normalizeFrameRange(rangeSource || fallback, frames);
+	const fullRange = range.range_start === 0 && range.range_end === lockRangeEnd(0, frames - 1, frames);
 	const maxX = Math.max(0, srcW - width);
 	const maxY = Math.max(0, srcH - height);
 	const byFrame = new Map();
@@ -359,6 +371,7 @@ function normalizeData(data, sourceWidth = 0, sourceHeight = 0, frameCount = 0) 
 		width,
 		height,
 		keyframes: [...byFrame.values()].sort((a, b) => a.frame - b.frame),
+		range_user_set: rangeUserSet || (!missingRange && !legacyFirstFrameDefault && !fullRange),
 	};
 }
 
@@ -420,6 +433,7 @@ function serializeData(data) {
 		width: data.width,
 		height: data.height,
 		keyframes: data.keyframes,
+		range_user_set: Boolean(data.range_user_set),
 	});
 }
 

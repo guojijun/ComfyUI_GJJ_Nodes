@@ -387,13 +387,13 @@ function preferredNamesForSlot(slot, secondary = false) {
 	return officialNameSeeds(slot?.required_name, slot?.preferred_name, slot?.official_names || []);
 }
 
-function selectFirstIfInvalid(node, name, values, preferred = "") {
+function selectFirstIfInvalid(node, name, values, preferred = "", forcePreferred = false) {
 	const w = getWidget(node, name); if (!w) return;
 	const list = Array.isArray(values) ? values.map(String) : [];
 	const cur = String(w.value ?? "");
 	const preferredSeeds = officialNameSeeds(preferred);
-	if (!cur || !list.includes(cur)) {
-		const matched = bestOfficialNameMatch(list, preferredSeeds, true);
+	const matched = bestOfficialNameMatch(list, preferredSeeds, true);
+	if ((forcePreferred && matched && cur !== matched) || !cur || !list.includes(cur)) {
 		if (matched) w.value = matched;
 		else w.value = list[0] || "";
 		w.callback?.(w.value);
@@ -2414,6 +2414,8 @@ function applyConfig(node, opts = {}) {
 	const configKey = currentConfigKey(node);
 	node.properties = node.properties || {};
 	const previousSettingsConfig = String(node.properties[SETTINGS_CONFIG_PROPERTY] || "");
+	const previousAppliedConfig = String(node.__gjjVUAppliedConfigKey || node.properties?.gjj_vu_applied_config_key || "");
+	const resetSlotValues = Boolean(opts?.userConfigChanged || (previousAppliedConfig && configKey && previousAppliedConfig !== configKey));
 	const resetSlotSettings = isKijaiNode(node) && previousSettingsConfig && previousSettingsConfig !== configKey;
 	if (resetSlotSettings) node.properties[SETTINGS_OPEN_PROPERTY] = {};
 	(cfg.slots || []).slice(0, MAX_SLOTS).forEach((slot, index) => {
@@ -2436,11 +2438,11 @@ function applyConfig(node, opts = {}) {
 		const dtypeName = `dtype_${i}`;
 		setComboOptions(getWidget(node, fileName), values);
 		const preferredName = preferredNamesForSlot(slot);
-		selectFirstIfInvalid(node, fileName, values, preferredName);
+		selectFirstIfInvalid(node, fileName, values, preferredName, resetSlotValues);
 		if (isDualClipSlot(slot)) {
 			setComboOptions(getWidget(node, secondaryFileName), secondaryValues);
 			const preferredSecondary = preferredNamesForSlot(slot, true);
-			selectFirstIfInvalid(node, secondaryFileName, secondaryValues, preferredSecondary);
+			selectFirstIfInvalid(node, secondaryFileName, secondaryValues, preferredSecondary, resetSlotValues);
 		} else {
 			syncWidget(node, secondaryFileName, "");
 		}

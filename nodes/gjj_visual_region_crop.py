@@ -535,7 +535,12 @@ def _normalize_keyframes(data: dict[str, Any], frame_count: int, src_w: int, src
 def _normalize_frame_range(data: dict[str, Any], frame_count: int) -> tuple[int, int]:
     max_frame = max(0, int(frame_count) - 1)
     start = max(0, min(max_frame, _as_int(data.get("range_start"), 0)))
-    raw_end = max(start, min(max_frame, _as_int(data.get("range_end"), max_frame)))
+    range_flag = data.get("range_user_set")
+    range_user_set = range_flag is True or range_flag == 1 or str(range_flag).strip().lower() == "true"
+    if not range_user_set and start == 0 and _as_int(data.get("range_end"), 0) == 0:
+        raw_end = max_frame
+    else:
+        raw_end = max(start, min(max_frame, _as_int(data.get("range_end"), max_frame)))
     end = start + ((raw_end - start) // 8) * 8
     return int(start), int(max(start, min(max_frame, end)))
 
@@ -704,6 +709,7 @@ class GJJ_VisualRegionCrop:
             "width": int(crop_w),
             "height": int(crop_h),
             "keyframes": keyframes,
+            "range_user_set": bool(data.get("range_user_set")),
         }
         preview_payload = {**normalized_data, "preview_frame": int(preview_index)}
         digest = hashlib.sha1(json.dumps(preview_payload, sort_keys=True).encode("utf-8")).hexdigest()[:10]
@@ -727,4 +733,4 @@ class GJJ_VisualRegionCrop:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_VisualRegionCrop}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · ✂️ 可视化区域裁切"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · ✂️ 视频可视化区域裁切"}

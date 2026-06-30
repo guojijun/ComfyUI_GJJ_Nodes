@@ -1,6 +1,10 @@
 import { app } from "/scripts/app.js";
 
 const NODE_TYPE = "GJJ_ImageBatchMulti";
+const TEMPLATE_PARAMS_NODE = "GJJ_TemplateParams";
+const TEMPLATE_WIDGET = "template_text";
+const VALUES_WIDGET = "values_json";
+const SCHEMA_WIDGET = "schema_json";
 const IMAGE_PREFIX = "image_";
 const OUTPUT_COMPAT_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
 const INPUT_MEDIA_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
@@ -12,6 +16,8 @@ const CONTROL_WIDGET = "gjj_image_batch_multi_controls";
 const EXTRA_OUTPUTS_PROPERTY = "gjj_image_batch_multi_show_extra_outputs";
 const INPUT_COUNT_PROPERTY = "gjj_image_batch_multi_input_count";
 const SETTINGS_OPEN_PROPERTY = "gjj_image_batch_multi_settings_open";
+const TEMPLATE_ENABLED_PROPERTY = "gjj_image_batch_multi_template_enabled";
+const TEMPLATE_SOURCE_PROPERTY = "gjj_image_batch_multi_template_source";
 const OUTPUT_DEFS = [
 	{ name: "批量图像", type: OUTPUT_COMPAT_TYPE, tooltip: "兼容 GJJ 批量图片和普通 IMAGE batch 的输出。" },
 	{ name: "宽度", type: "INT", tooltip: "最终输出图像的宽度。点击 🔌 可显示或收起。" },
@@ -89,6 +95,7 @@ function injectStyles() {
 	style.textContent = `
 		.gjj-ibm-controls{display:flex;flex-wrap:wrap;align-items:center;gap:4px;width:100%;box-sizing:border-box;padding:3px 0 2px}
 		.gjj-ibm-controls.settings-open .gjj-ibm-preset-control{display:none}
+		.gjj-ibm-controls.template-active .gjj-ibm-template-size-control{display:none}
 		.gjj-ibm-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:24px;padding:0;border:1px solid #3b5360;border-radius:6px;background:#18242b;color:#dce7e2;font:14px/1 "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif;font-variant-emoji:emoji;cursor:pointer;box-sizing:border-box}
 		.gjj-ibm-icon{display:inline-flex;align-items:center;justify-content:center;font-family:"Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif;font-variant-emoji:emoji;line-height:1}
 		.gjj-ibm-btn:hover{background:#22333d;border-color:#5d7c8e}
@@ -106,6 +113,10 @@ function injectStyles() {
 		.gjj-ibm-mini:hover{background:#24343d;border-color:#5d7c8e}
 		.gjj-ibm-mini.primary{background:#1f6b43;border-color:#48ad73;color:#fff}
 		.gjj-ibm-hidden-input{display:none !important}
+		.gjj-ibm-template-menu{position:fixed;z-index:10000;min-width:220px;max-width:320px;padding:6px;border:1px solid #3e4d54;border-radius:8px;background:#10191d;box-shadow:0 10px 28px rgba(0,0,0,.38);color:#d8e6df;font:12px system-ui,"Microsoft YaHei",sans-serif}
+		.gjj-ibm-template-item{display:block;width:100%;margin:0 0 4px;padding:6px 8px;border:1px solid #34464d;border-radius:6px;background:#172126;color:#e8f3ee;text-align:left;cursor:pointer;box-sizing:border-box}
+		.gjj-ibm-template-item:hover{border-color:#59c38f;color:#fff}
+		.gjj-ibm-template-item.on{background:#1d4930;border-color:#6bd68d}
 	`;
 	document.head.appendChild(style);
 }
@@ -294,6 +305,119 @@ function readNumberWidget(node, name, fallback = 0) {
 	return Number.isFinite(value) ? value : fallback;
 }
 
+function safeJsonParse(text, fallback) {
+	try {
+		return JSON.parse(String(text || "")) ?? fallback;
+	} catch (_) {
+		return fallback;
+	}
+}
+
+function parseScalar(value) {
+	if (typeof value !== "string") return value;
+	const raw = value.trim();
+	if (/^[-+]?\d+$/.test(raw)) return Number.parseInt(raw, 10);
+	if (/^[-+]?(?:\d+\.\d*|\.\d+)(?:[eE][-+]?\d+)?$/.test(raw)) return Number.parseFloat(raw);
+	return value;
+}
+
+function splitTemplateLine(line) {
+	const raw = String(line || "").trim();
+	if (!raw || raw.startsWith("#") || raw.startsWith("//") || raw.startsWith(";")) return null;
+	const match = raw.match(/^([^:=：=]+?)\s*[:：=]\s*([\s\S]*)$/);
+	if (!match) return null;
+	let label = match[1].trim().replace(/\s*(?:\[[^\]]+?\]|【[^】]+?】)\s*$/, "").trim();
+	let key = "";
+	const explicit = label.match(/^(.+?)[（(]\s*([^（）()]+?)\s*[）)]$/);
+	if (explicit) {
+		label = explicit[1].trim();
+		key = String(explicit[2] || "").split(/\s*(?:\||,|，|；|;|\bor\b|或)\s*/i)[0].trim();
+	}
+	let value = match[2].trim();
+	const hashIndex = value.indexOf("#");
+	if (hashIndex >= 0) value = value.slice(0, hashIndex).trim();
+	return { key, label, value: parseScalar(value) };
+}
+
+function templateParamEntries(templateNode) {
+	const entries = new Map();
+	const add = (key, value) => {
+		const clean = String(key || "").trim();
+		if (!clean) return;
+		entries.set(clean, value);
+		entries.set(clean.toLowerCase(), value);
+	};
+	const values = safeJsonParse(findWidget(templateNode, VALUES_WIDGET)?.value, {});
+	const schema = safeJsonParse(findWidget(templateNode, SCHEMA_WIDGET)?.value, []);
+	if (Array.isArray(schema)) {
+		for (const field of schema) {
+			if (!field || typeof field !== "object") continue;
+			const key = String(field.key || "").trim();
+			const label = String(field.label || "").trim();
+			const raw = values[key] ?? values[label] ?? field.default ?? "";
+			add(key, parseScalar(raw));
+			add(label, parseScalar(raw));
+		}
+	}
+	const template = String(findWidget(templateNode, TEMPLATE_WIDGET)?.value || "");
+	for (const line of template.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")) {
+		const parsed = splitTemplateLine(line);
+		if (!parsed) continue;
+		const raw = values[parsed.key] ?? values[parsed.label] ?? parsed.value;
+		add(parsed.key, parseScalar(raw));
+		add(parsed.label, parseScalar(raw));
+	}
+	for (const [key, value] of Object.entries(values || {})) add(key, parseScalar(value));
+	return entries;
+}
+
+function getTemplateParam(entries, names) {
+	for (const name of names) {
+		if (entries.has(name)) return entries.get(name);
+		const lower = String(name || "").toLowerCase();
+		if (entries.has(lower)) return entries.get(lower);
+	}
+	return undefined;
+}
+
+function templateNodes() {
+	return (app.graph?._nodes || []).filter((node) => String(node?.comfyClass || node?.type || "") === TEMPLATE_PARAMS_NODE);
+}
+
+function templateNodeLabel(node) {
+	return String(node?.title || "").trim() || `模板参数 #${node?.id ?? "?"}`;
+}
+
+function getTemplateSourceNode(node) {
+	const sourceId = String(node?.properties?.[TEMPLATE_SOURCE_PROPERTY] || "").trim();
+	if (!sourceId) return null;
+	return (app.graph?._nodes || []).find((item) => String(item?.id ?? "") === sourceId) || null;
+}
+
+function templateModeEnabled(node) {
+	return Boolean(node?.properties?.[TEMPLATE_ENABLED_PROPERTY] && node?.properties?.[TEMPLATE_SOURCE_PROPERTY]);
+}
+
+function applyTemplateParams(node, templateNode) {
+	const entries = templateParamEntries(templateNode);
+	const width = Number(getTemplateParam(entries, ["width", "宽度"]));
+	const height = Number(getTemplateParam(entries, ["height", "高度"]));
+	if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return false;
+	writeWidget(node, "width", alignNodeSize(node, width));
+	writeWidget(node, "height", alignNodeSize(node, height));
+	writeWidget(node, "custom_size", 0);
+	writeWidget(node, "custom_ratio", DEFAULT_VALUES.custom_ratio);
+	if (originalSizeActive(node)) writeWidget(node, "size_preset", FALLBACK_SIZE_VALUE);
+	return true;
+}
+
+function syncActiveTemplateParams(node) {
+	if (!templateModeEnabled(node)) return false;
+	const sourceNode = getTemplateSourceNode(node);
+	if (!sourceNode) return false;
+	return applyTemplateParams(node, sourceNode);
+}
+
 function readAlignMultiple(node) {
 	const value = String(readWidget(node, "align_multiple") || DEFAULT_VALUES.align_multiple).trim();
 	return ["2", "4", "8", "16", "32", "64"].includes(value) ? Number(value) : 16;
@@ -472,6 +596,26 @@ function setSettingsOpen(node, open) {
 	node.properties[SETTINGS_OPEN_PROPERTY] = Boolean(open);
 }
 
+function setTemplateMode(node, enabled, templateNode = null) {
+	node.properties = node.properties || {};
+	if (enabled) {
+		if (!templateNode || !applyTemplateParams(node, templateNode)) return false;
+		node.properties[TEMPLATE_ENABLED_PROPERTY] = true;
+		node.properties[TEMPLATE_SOURCE_PROPERTY] = String(templateNode.id ?? "");
+		node.properties[SETTINGS_OPEN_PROPERTY] = false;
+		removeInputByName(node, "width");
+		removeInputByName(node, "height");
+	} else {
+		node.properties[TEMPLATE_ENABLED_PROPERTY] = false;
+		delete node.properties[TEMPLATE_SOURCE_PROPERTY];
+	}
+	syncNativeSizeWidgets(node);
+	syncControlButtons(node);
+	refreshControlSize(node);
+	setDirty(node);
+	return true;
+}
+
 function setExtraOutputsVisible(node, visible) {
 	node.properties = node.properties || {};
 	node.properties[EXTRA_OUTPUTS_PROPERTY] = Boolean(visible);
@@ -514,6 +658,12 @@ function ensureWidgetInput(node, name, type = "INT") {
 }
 
 function syncNativeSizeWidgets(node) {
+	if (templateModeEnabled(node)) {
+		for (const name of SETTINGS_NATIVE_WIDGETS) hideWidget(findWidget(node, name));
+		removeInputByName(node, "width");
+		removeInputByName(node, "height");
+		return;
+	}
 	const open = settingsOpen(node);
 	for (const name of SETTINGS_NATIVE_WIDGETS) {
 		const widget = findWidget(node, name);
@@ -666,6 +816,7 @@ function populateCustomPanel(node) {
 function setCustomPanelOpen(node, open) {
 	const state = node?.__gjjImageBatchMultiControls;
 	if (!state) return;
+	if (templateModeEnabled(node)) open = false;
 	setSettingsOpen(node, open);
 	if (open) writeAlignedNativeSize(node, { fillDefault: true });
 	if (state.customPanel) state.customPanel.hidden = true;
@@ -730,20 +881,29 @@ function syncControlButtons(node) {
 	const selectedOrientation = normalizeOrientation(readWidget(node, "orientation"));
 	const selectedPrepend = normalizePrepend(readWidget(node, "prepend_frame"));
 	const selectedCustom = customActive(node);
+	const templateActive = templateModeEnabled(node);
+	if (templateActive) syncActiveTemplateParams(node);
 	for (const item of state.buttons) {
 		const active =
-			(item.group === "size_preset" && !selectedCustom && item.value === selectedSize) ||
-			(item.group === "orientation" && !selectedCustom && item.value === selectedOrientation) ||
+			(item.group === "size_preset" && !templateActive && !selectedCustom && item.value === selectedSize) ||
+			(item.group === "orientation" && !templateActive && !selectedCustom && item.value === selectedOrientation) ||
 			(item.group === "prepend_frame" && item.value === selectedPrepend);
 		item.button.classList.toggle("on", active);
 	}
 	state.wrap?.classList.toggle("settings-open", settingsOpen(node));
-	state.customButton?.classList.toggle("open", settingsOpen(node));
-	state.customButton?.classList.toggle("on", settingsOpen(node) || selectedCustom);
+	state.wrap?.classList.toggle("template-active", templateActive);
+	state.customButton?.classList.toggle("open", !templateActive && settingsOpen(node));
+	state.customButton?.classList.toggle("on", !templateActive && (settingsOpen(node) || selectedCustom));
+	state.templateButton?.classList.toggle("on", templateActive);
 	state.extraButton?.classList.toggle("on", showExtraOutputs(node));
 	if (state.summary) {
 		const frameText = selectedPrepend === "无" ? "无帧" : selectedPrepend;
-		if (settingsOpen(node)) {
+		if (templateActive) {
+			const [width, height] = customDimensions(node) || effectiveDimensions(node);
+			const sourceNode = getTemplateSourceNode(node);
+			state.summary.textContent = `${frameText} 模板 ${width}x${height}`;
+			state.summary.title = `宽度和高度由 ${sourceNode ? templateNodeLabel(sourceNode) : "GJJ_TemplateParams"} 接管；尺寸档位、画幅方向和自定义比例已隐藏。`;
+		} else if (settingsOpen(node)) {
 			const [width, height] = effectiveDimensions(node);
 			const align = readAlignMultiple(node);
 			state.summary.textContent = `${frameText} 宽高 ${width}x${height} / ${align}`;
@@ -768,7 +928,7 @@ function addButton(node, wrap, state, group, option) {
 	button.type = "button";
 	button.className = "gjj-ibm-btn";
 	if (group === "size_preset" || group === "orientation") {
-		button.classList.add("gjj-ibm-preset-control");
+		button.classList.add("gjj-ibm-preset-control", "gjj-ibm-template-size-control");
 	}
 	const icon = document.createElement("span");
 	icon.className = "gjj-ibm-icon";
@@ -778,6 +938,9 @@ function addButton(node, wrap, state, group, option) {
 	shieldControlEvents(button);
 	button.addEventListener("click", (event) => {
 		stopCanvasEvent(event);
+		if (templateModeEnabled(node) && (group === "size_preset" || group === "orientation")) {
+			return;
+		}
 		if (group === "size_preset" || group === "orientation") {
 			exitCustomMode(node, false);
 		}
@@ -890,6 +1053,53 @@ function buildCustomPanel(node, state) {
 	return panel;
 }
 
+function openTemplateMenu(node, anchor) {
+	const nodes = templateNodes();
+	if (!nodes.length && !templateModeEnabled(node)) {
+		alert("当前工作流里没有 GJJ_TemplateParams 节点。请先添加并设置宽度、高度。");
+		return;
+	}
+	document.querySelector(".gjj-ibm-template-menu")?.remove?.();
+	const menu = document.createElement("div");
+	menu.className = "gjj-ibm-template-menu";
+	const addItem = (label, title, handler, active = false) => {
+		const item = document.createElement("button");
+		item.type = "button";
+		item.className = `gjj-ibm-template-item${active ? " on" : ""}`;
+		item.textContent = label;
+		item.title = title || "";
+		shieldControlEvents(item);
+		item.addEventListener("click", (event) => {
+			stopCanvasEvent(event);
+			handler?.();
+			menu.remove();
+		});
+		menu.appendChild(item);
+	};
+	if (templateModeEnabled(node)) {
+		addItem("关闭模板尺寸", "恢复尺寸档位、画幅方向和自定义宽高设置。", () => setTemplateMode(node, false), false);
+	}
+	for (const templateNode of nodes) {
+		const active = templateModeEnabled(node) && String(templateNode.id ?? "") === String(node.properties?.[TEMPLATE_SOURCE_PROPERTY] || "");
+		addItem(`使用 ${templateNodeLabel(templateNode)}`, "读取 GJJ_TemplateParams 的 width/宽度 与 height/高度。", () => {
+			if (!setTemplateMode(node, true, templateNode)) alert("GJJ_TemplateParams 缺少 width/宽度 或 height/高度。");
+		}, active);
+	}
+	document.body.appendChild(menu);
+	const rect = anchor?.getBoundingClientRect?.();
+	const left = Math.max(8, Math.min((rect?.left ?? 20), window.innerWidth - menu.offsetWidth - 8));
+	const top = Math.max(8, Math.min((rect?.bottom ?? 20) + 4, window.innerHeight - menu.offsetHeight - 8));
+	menu.style.left = `${Math.round(left)}px`;
+	menu.style.top = `${Math.round(top)}px`;
+	const close = (event) => {
+		if (!menu.contains(event.target)) {
+			menu.remove();
+			document.removeEventListener("mousedown", close, true);
+		}
+	};
+	setTimeout(() => document.addEventListener("mousedown", close, true), 0);
+}
+
 function ensureControls(node) {
 	if (!node || node.__gjjImageBatchMultiControls || typeof node.addDOMWidget !== "function") {
 		syncControlButtons(node);
@@ -903,14 +1113,29 @@ function ensureControls(node) {
 
 	for (const option of PREPEND_OPTIONS) addButton(node, wrap, state, "prepend_frame", option);
 	const sizeSep = addSeparator(wrap);
-	sizeSep.classList.add("gjj-ibm-preset-control");
+	sizeSep.classList.add("gjj-ibm-preset-control", "gjj-ibm-template-size-control");
 	for (const option of SIZE_OPTIONS) addButton(node, wrap, state, "size_preset", option);
 	const orientationSep = addSeparator(wrap);
-	orientationSep.classList.add("gjj-ibm-preset-control");
+	orientationSep.classList.add("gjj-ibm-preset-control", "gjj-ibm-template-size-control");
 	for (const option of ORIENTATION_OPTIONS) addButton(node, wrap, state, "orientation", option);
+	const templateButton = document.createElement("button");
+	templateButton.type = "button";
+	templateButton.className = "gjj-ibm-btn";
+	const templateIcon = document.createElement("span");
+	templateIcon.className = "gjj-ibm-icon";
+	templateIcon.textContent = "⚡";
+	templateButton.appendChild(templateIcon);
+	templateButton.title = "从 GJJ_TemplateParams 读取 width/宽度、height/高度，并隐藏尺寸档位、画幅方向和自定义比例。";
+	shieldControlEvents(templateButton);
+	templateButton.addEventListener("click", (event) => {
+		stopCanvasEvent(event);
+		openTemplateMenu(node, templateButton);
+	});
+	wrap.appendChild(templateButton);
+	state.templateButton = templateButton;
 	const customButton = document.createElement("button");
 	customButton.type = "button";
-	customButton.className = "gjj-ibm-btn";
+	customButton.className = "gjj-ibm-btn gjj-ibm-template-size-control";
 	const customIcon = document.createElement("span");
 	customIcon.className = "gjj-ibm-icon";
 	customIcon.textContent = "⚙️";
@@ -1084,6 +1309,7 @@ function stabilizeImageInputs(node) {
 function stabilize(node) {
 	if (!isTarget(node)) return;
 	ensureBackingWidgets(node);
+	syncActiveTemplateParams(node);
 	hideNativeWidgets(node);
 	ensureControls(node);
 	stabilizeImageInputs(node);
@@ -1106,6 +1332,7 @@ function currentSignature(node) {
 		`orient:${normalizeOrientation(readWidget(node, "orientation"))}`,
 		`prepend:${normalizePrepend(readWidget(node, "prepend_frame"))}`,
 		`extra:${showExtraOutputs(node) ? 1 : 0}`,
+		`template:${templateModeEnabled(node) ? 1 : 0}:${node?.properties?.[TEMPLATE_SOURCE_PROPERTY] || ""}`,
 		`custom:${readNumberWidget(node, "width", 0)}x${readNumberWidget(node, "height", 0)}:${readNumberWidget(node, "custom_size", 0)}:${readWidget(node, "custom_ratio")}`,
 		`align:${readWidget(node, "align_multiple")}`,
 	].join("|");
@@ -1156,6 +1383,7 @@ app.registerExtension({
 
 		const originalSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode, ...args) {
+			syncActiveTemplateParams(this);
 			stabilize(this);
 			const result = originalSerialize?.apply(this, [serializedNode, ...args]);
 			if (serializedNode && Array.isArray(serializedNode.inputs)) {
@@ -1179,12 +1407,19 @@ app.registerExtension({
 			serializedNode.properties = serializedNode.properties || {};
 			serializedNode.properties[INPUT_COUNT_PROPERTY] = imageInputs(this).length;
 			serializedNode.properties[EXTRA_OUTPUTS_PROPERTY] = showExtraOutputs(this);
+			serializedNode.properties[TEMPLATE_ENABLED_PROPERTY] = templateModeEnabled(this);
+			if (templateModeEnabled(this)) {
+				serializedNode.properties[TEMPLATE_SOURCE_PROPERTY] = String(this.properties?.[TEMPLATE_SOURCE_PROPERTY] || "");
+			} else {
+				delete serializedNode.properties[TEMPLATE_SOURCE_PROPERTY];
+			}
 			return result;
 		};
 
 		const originalDrawBackground = nodeType.prototype.onDrawBackground;
 		nodeType.prototype.onDrawBackground = function (...args) {
 			const result = originalDrawBackground?.apply(this, args);
+			syncActiveTemplateParams(this);
 			const signature = currentSignature(this);
 			if (signature !== this.__gjjImageBatchMultiSignature) {
 				this.__gjjImageBatchMultiSignature = signature;
