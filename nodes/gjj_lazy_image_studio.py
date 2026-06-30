@@ -91,6 +91,11 @@ from .gjj_krea2_edit_rebalance import (
 )
 
 try:
+    from .gjj_ltx2_nag import GJJ_LTX2NAG as _GJJLTX2NAG
+except Exception:  # pragma: no cover - 允许单文件语法检查环境缺少运行时依赖
+    _GJJLTX2NAG = None
+
+try:
     from .gjj_wanvideo_runtime_shims import ensure_optional_gguf_module
 except Exception:  # pragma: no cover - 单文件语法检查兜底
     def ensure_optional_gguf_module():
@@ -104,6 +109,10 @@ DEFAULT_UNET_NAME = "flux-2-klein-9b-nvfp4.safetensors"
 DEFAULT_UNET_DTYPE = "default"
 DEFAULT_LIGHTNING_LORA = ""
 DEFAULT_NSFW_LORA = ""
+LTX_NAG_NEGATIVE_PROMPT = "text, subtitles, logo, watermark, signature"
+LTX_NAG_SCALE = 11.0
+LTX_NAG_ALPHA = 0.25
+LTX_NAG_TAU = 2.5
 REFERENCE_IMAGE_MEGAPIXELS = 1.0
 REFERENCE_IMAGE_RESOLUTION_STEPS = 1
 FLUX2_REFERENCE_RESOLUTION_STEPS = 16
@@ -247,6 +256,32 @@ def _is_krea2_family(unet_name: str | None = "", clip_type: str | None = "") -> 
         or "krea2" in normalized_unet
         or "krea2turbo" in normalized_unet
     )
+
+
+def _is_ltx_family(
+    unet_name: str | None = "",
+    clip_type: str | None = "",
+    preset: dict[str, Any] | None = None,
+) -> bool:
+    normalized_unet = _normalize_text(unet_name)
+    normalized_clip = _normalize_text(clip_type)
+    preset_id = _normalize_text((preset or {}).get("id", ""))
+    preset_clip = _normalize_text((preset or {}).get("clip_type", ""))
+    return (
+        normalized_clip in {"ltx", "ltxv"}
+        or preset_clip in {"ltx", "ltxv"}
+        or preset_id.startswith("ltx")
+        or "ltx" in normalized_unet
+    )
+
+
+def _ltx_negative_prompt_text(negative_prompt: str | None) -> str:
+    text = str(negative_prompt or "").strip()
+    if not text:
+        return LTX_NAG_NEGATIVE_PROMPT
+    if LTX_NAG_NEGATIVE_PROMPT.casefold() in text.casefold():
+        return text
+    return f"{text}, {LTX_NAG_NEGATIVE_PROMPT}"
 
 
 def _apply_f2k_fallback_preset(preset: dict[str, Any], unet_name: str) -> dict[str, Any]:
@@ -1821,6 +1856,21 @@ class GJJ_LazyImageStudio:
             return self._encode_text_conditioning(clip, negative_prompt)
         return zero_out_conditioning(positive)
 
+    def _apply_ltx_nag_model(self, model, nag_conditioning, *, enabled: bool):
+        if not enabled:
+            return model
+        if _GJJLTX2NAG is None:
+            raise RuntimeError("GJJ_LTX2NAG 不可用，无法应用 LTX NAG 流程。")
+        return _GJJLTX2NAG().apply_nag(
+            model,
+            LTX_NAG_SCALE,
+            LTX_NAG_ALPHA,
+            LTX_NAG_TAU,
+            nag_cond_video=nag_conditioning,
+            nag_cond_audio=None,
+            inplace=True,
+        )[0]
+
     def _sample_flux2_reference_workflow(
         self,
         model,
@@ -2365,6 +2415,7 @@ class GJJ_LazyImageStudio:
             )
             if is_flux2_runtime:
                 resolved_clip_type = "flux2"
+            is_ltx_runtime = _is_ltx_family(unet_name, resolved_clip_type, preset)
             pairs = [
                 pair
                 for pair in collect_image_pairs(
@@ -2412,6 +2463,7 @@ class GJJ_LazyImageStudio:
                     "runtime": runtime_key,
                     "prompt": prompt_items,
                     "negative_prompt": str(negative_prompt or ""),
+                    "ltx_auto_negative_prompt": LTX_NAG_NEGATIVE_PROMPT if is_ltx_runtime else "",
                     "main_image_index": int(main_image_index),
                     "width": int(width),
                     "height": int(height),
@@ -2490,6 +2542,11 @@ class GJJ_LazyImageStudio:
                 local_height = int(height)
                 flux2_sample_size = None
                 krea2_reference_sample = False
+                effective_negative_prompt = (
+                    _ltx_negative_prompt_text(negative_prompt)
+                    if is_ltx_runtime
+                    else str(negative_prompt or "")
+                )
 
                 _send_status(unique_id, f"4/6 编码条件与 latent{status_suffix}...")
                 if pairs and _is_krea2_family(unet_name, resolved_clip_type):
@@ -2517,7 +2574,7 @@ class GJJ_LazyImageStudio:
                             clip=clip,
                             vae=vae,
                             prompt=prompt_text,
-                            negative_prompt=negative_prompt,
+                            negative_prompt=effective_negative_prompt,
                             main_image_index=main_image_index,
                             pairs=pairs,
                             width=local_width,
@@ -2545,7 +2602,7 @@ class GJJ_LazyImageStudio:
                             clip=clip,
                             vae=vae,
                             prompt=prompt_text,
-                            negative_prompt=negative_prompt,
+                            negative_prompt=effective_negative_prompt,
                             pairs=pairs,
                             vl_long_edge=int(preset.get("vl_long_edge", 512)),
                             target_width=local_width,
@@ -2560,7 +2617,7 @@ class GJJ_LazyImageStudio:
                         clip=clip,
                         vae=vae,
                         prompt=prompt_text,
-                        negative_prompt=negative_prompt,
+                        negative_prompt=effective_negative_prompt,
                         main_image_index=main_image_index,
                         pairs=pairs,
                         main_mask=mask,
@@ -2573,7 +2630,7 @@ class GJJ_LazyImageStudio:
                 else:
                     positive = self._encode_text_conditioning(clip, prompt_text)
                     negative = self._encode_negative_conditioning(
-                        clip, positive, negative_prompt
+                        clip, positive, effective_negative_prompt
                     )
                     latent_out = self._build_latent(
                         vae=vae,
@@ -2590,6 +2647,18 @@ class GJJ_LazyImageStudio:
                 _send_status(unique_id, f"5/6 采样生成图像{status_suffix}...")
                 positive = _limit_conditioning_batch(positive, int(batch_size))
                 negative = _limit_conditioning_batch(negative, int(batch_size))
+                sample_model = model
+                if is_ltx_runtime:
+                    _send_status(unique_id, f"5/6 应用 LTX NAG 引导{status_suffix}...")
+                    nag_conditioning = self._encode_text_conditioning(
+                        clip,
+                        effective_negative_prompt,
+                    )
+                    sample_model = self._apply_ltx_nag_model(
+                        model,
+                        nag_conditioning,
+                        enabled=True,
+                    )
                 sample_seed = int(seed) + prompt_index if prompt_count > 1 else int(seed)
                 if flux2_sample_size is not None:
                     flux2_width, flux2_height = flux2_sample_size
@@ -2598,7 +2667,7 @@ class GJJ_LazyImageStudio:
                         f"5/6 按 Flux2 工作流采样{status_suffix}（{flux2_width} x {flux2_height}）...",
                     )
                     sampled_latent = self._sample_flux2_reference_workflow(
-                        model=model,
+                        model=sample_model,
                         positive=positive,
                         negative=negative,
                         latent_out=latent_out,
@@ -2615,7 +2684,7 @@ class GJJ_LazyImageStudio:
                         f"5/6 按 Krea2 图生图工作流采样{status_suffix}（BasicGuider 等价，CFG=1）...",
                     )
                     sampled_latent = common_ksampler(
-                        model,
+                        sample_model,
                         sample_seed,
                         effective_steps,
                         1.0,
@@ -2628,7 +2697,7 @@ class GJJ_LazyImageStudio:
                     )[0]
                 else:
                     sampled_latent = common_ksampler(
-                        model,
+                        sample_model,
                         sample_seed,
                         effective_steps,
                         float(cfg),

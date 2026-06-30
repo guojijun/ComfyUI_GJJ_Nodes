@@ -31,14 +31,6 @@ _GJJ_HELP = build_node_help_payload(
             "description": "ComfyUI 自带，用于音频张量处理、能量检测、交叉淡化和队列切片。",
         },
     ],
-    model_tree=[
-        {
-            "label": "无需模型",
-            "path": "",
-            "required": False,
-            "description": "本节点不加载任何模型文件。",
-        },
-    ],
     usage=[
         "阈值越高，越容易把低音量区域判为静音。",
         "最短静音秒决定多长的连续静音才会被压缩。",
@@ -51,7 +43,7 @@ _GJJ_HELP = build_node_help_payload(
         "外接“当前分段”输入后，节点会交出自动队列控制权，由外部序号控制。",
         "“空行”模式会输出一个短静音占位段，适合批处理占位。",
     ],
-    notice="零额外模型依赖；无需下载模型。",
+    notice="本节点直接处理后端传入的 AUDIO 张量；当前节点本身不直接加载具体模型文件。",
 )
 
 

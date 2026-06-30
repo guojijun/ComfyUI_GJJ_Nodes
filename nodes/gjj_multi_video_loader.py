@@ -40,7 +40,7 @@ OPTIONAL_OUTPUT_DEFS = {
     "first_frame": {"name": "首帧预览", "type": "IMAGE"},
     "last_frame": {"name": "尾帧预览", "type": "IMAGE"},
     "info_json": {"name": "视频信息JSON", "type": "STRING"},
-    "frame_rate": {"name": "帧率", "type": "FLOAT"},
+    "frame_rate": {"name": "帧率", "type": "INT,FLOAT"},
     "frame_count": {"name": "输出帧数", "type": "INT"},
     "source_duration": {"name": "源时长", "type": "FLOAT"},
     "width": {"name": "宽度", "type": "INT"},
@@ -1085,138 +1085,140 @@ class GJJ_MultiVideoLoader:
 
     @classmethod
     def INPUT_TYPES(cls):
+        panel_inputs = {
+            "frame_rate": (
+                "INT,FLOAT",
+                _hidden_panel_widget({
+                    "default": 24.0,
+                    "min": 1.0,
+                    "max": 240.0,
+                    "step": 0.01,
+                    "display_name": "帧率",
+                    "tooltip": "最终输出帧率参数；选择视频时会自动读取源帧率，可手动修改或转成外部输入。",
+                }),
+            ),
+            "width": (
+                "INT",
+                _hidden_panel_widget({
+                    "default": 0,
+                    "min": 0,
+                    "max": 16384,
+                    "step": 1,
+                    "display_name": "宽度",
+                    "tooltip": "最终输出宽度；0 表示跟随源视频；只填宽度会按比例计算高度。",
+                }),
+            ),
+            "height": (
+                "INT",
+                _hidden_panel_widget({
+                    "default": 0,
+                    "min": 0,
+                    "max": 16384,
+                    "step": 1,
+                    "display_name": "高度",
+                    "tooltip": "最终输出高度；0 表示跟随源视频；只填高度会按比例计算宽度。",
+                }),
+            ),
+            "video_format": (
+                VIDEO_FORMATS,
+                _hidden_panel_widget({
+                    "default": "video/h264-mp4",
+                    "display_name": "视频格式",
+                    "tooltip": "格式参数命名参考 VHS_VideoCombine，方便接到后续合成/保存节点。",
+                }),
+            ),
+            "start_frame": (
+                "INT",
+                _hidden_panel_widget({
+                    "default": 0,
+                    "min": 0,
+                    "max": 999999,
+                    "step": 1,
+                    "display_name": "起始帧",
+                    "tooltip": "从第几帧开始读取；0 表示从第一帧开始。",
+                }),
+            ),
+            "end_frame": (
+                "INT",
+                _hidden_panel_widget({
+                    "default": 0,
+                    "min": 0,
+                    "max": 999999,
+                    "step": 1,
+                    "display_name": "结束帧",
+                    "tooltip": "读取到第几帧结束；0 表示读取到视频末尾或达到最大帧数。",
+                }),
+            ),
+            "frame_stride": (
+                "INT",
+                _hidden_panel_widget({
+                    "default": 1,
+                    "min": 1,
+                    "max": 1000,
+                    "step": 1,
+                    "display_name": "抽帧间隔",
+                    "tooltip": "每隔多少帧取一帧；1 表示不跳帧。",
+                }),
+            ),
+            "max_frames": (
+                "INT",
+                _hidden_panel_widget({
+                    "default": 240,
+                    "min": 1,
+                    "max": 100000,
+                    "step": 1,
+                    "display_name": "最大帧数",
+                    "tooltip": "每个视频最多解码多少帧，防止超长视频一次占用过多内存。",
+                }),
+            ),
+            "filter_keyword": (
+                "STRING",
+                _hidden_panel_widget({
+                    "default": "",
+                    "display_name": "过滤关键词",
+                    "tooltip": "只在【视频】下拉列表中显示文件名或目录包含该关键词的视频；留空不过滤。",
+                }),
+            ),
+            "filter_directory": (
+                "STRING",
+                _hidden_panel_widget({
+                    "default": "",
+                    "display_name": "过滤目录",
+                    "tooltip": "只在【视频】下拉列表中显示 input 下相对目录包含该文本的视频；留空不过滤。",
+                }),
+            ),
+            "refresh_interval": (
+                "FLOAT",
+                _hidden_panel_widget({
+                    "default": 5.0,
+                    "min": 1.0,
+                    "max": 3600.0,
+                    "step": 0.5,
+                    "display_name": "刷新时间",
+                    "tooltip": "开启定时刷新后，每隔多少秒重新扫描视频列表。",
+                }),
+            ),
+            "auto_refresh": (
+                "BOOLEAN",
+                _hidden_panel_widget({
+                    "default": False,
+                    "display_name": "定时刷新",
+                    "tooltip": "开启后前端按刷新时间自动重新扫描视频列表，适合监控分段生成的视频。",
+                }),
+            ),
+            "selected_videos_json": (
+                "STRING",
+                _hidden_panel_widget({
+                    "default": "[]",
+                    "display_name": "已选视频JSON",
+                    "tooltip": "内部保存用：记录面板中选择的视频，重新打开工作流后用于恢复真实源视频。",
+                }),
+            ),
+        }
         return {
-            "required": {
-                "frame_rate": (
-                    "FLOAT",
-                    _hidden_panel_widget({
-                        "default": 24.0,
-                        "min": 1.0,
-                        "max": 240.0,
-                        "step": 0.01,
-                        "display_name": "帧率",
-                        "tooltip": "最终输出帧率参数；选择视频时会自动读取源帧率，可手动修改或转成外部输入。",
-                    }),
-                ),
-                "width": (
-                    "INT",
-                    _hidden_panel_widget({
-                        "default": 0,
-                        "min": 0,
-                        "max": 16384,
-                        "step": 1,
-                        "display_name": "宽度",
-                        "tooltip": "最终输出宽度；0 表示跟随源视频；只填宽度会按比例计算高度。",
-                    }),
-                ),
-                "height": (
-                    "INT",
-                    _hidden_panel_widget({
-                        "default": 0,
-                        "min": 0,
-                        "max": 16384,
-                        "step": 1,
-                        "display_name": "高度",
-                        "tooltip": "最终输出高度；0 表示跟随源视频；只填高度会按比例计算宽度。",
-                    }),
-                ),
-                "video_format": (
-                    VIDEO_FORMATS,
-                    _hidden_panel_widget({
-                        "default": "video/h264-mp4",
-                        "display_name": "视频格式",
-                        "tooltip": "格式参数命名参考 VHS_VideoCombine，方便接到后续合成/保存节点。",
-                    }),
-                ),
-                "start_frame": (
-                    "INT",
-                    _hidden_panel_widget({
-                        "default": 0,
-                        "min": 0,
-                        "max": 999999,
-                        "step": 1,
-                        "display_name": "起始帧",
-                        "tooltip": "从第几帧开始读取；0 表示从第一帧开始。",
-                    }),
-                ),
-                "end_frame": (
-                    "INT",
-                    _hidden_panel_widget({
-                        "default": 0,
-                        "min": 0,
-                        "max": 999999,
-                        "step": 1,
-                        "display_name": "结束帧",
-                        "tooltip": "读取到第几帧结束；0 表示读取到视频末尾或达到最大帧数。",
-                    }),
-                ),
-                "frame_stride": (
-                    "INT",
-                    _hidden_panel_widget({
-                        "default": 1,
-                        "min": 1,
-                        "max": 1000,
-                        "step": 1,
-                        "display_name": "抽帧间隔",
-                        "tooltip": "每隔多少帧取一帧；1 表示不跳帧。",
-                    }),
-                ),
-                "max_frames": (
-                    "INT",
-                    _hidden_panel_widget({
-                        "default": 240,
-                        "min": 1,
-                        "max": 100000,
-                        "step": 1,
-                        "display_name": "最大帧数",
-                        "tooltip": "每个视频最多解码多少帧，防止超长视频一次占用过多内存。",
-                    }),
-                ),
-                "filter_keyword": (
-                    "STRING",
-                    _hidden_panel_widget({
-                        "default": "",
-                        "display_name": "过滤关键词",
-                        "tooltip": "只在【视频】下拉列表中显示文件名或目录包含该关键词的视频；留空不过滤。",
-                    }),
-                ),
-                "filter_directory": (
-                    "STRING",
-                    _hidden_panel_widget({
-                        "default": "",
-                        "display_name": "过滤目录",
-                        "tooltip": "只在【视频】下拉列表中显示 input 下相对目录包含该文本的视频；留空不过滤。",
-                    }),
-                ),
-                "refresh_interval": (
-                    "FLOAT",
-                    _hidden_panel_widget({
-                        "default": 5.0,
-                        "min": 1.0,
-                        "max": 3600.0,
-                        "step": 0.5,
-                        "display_name": "刷新时间",
-                        "tooltip": "开启定时刷新后，每隔多少秒重新扫描视频列表。",
-                    }),
-                ),
-                "auto_refresh": (
-                    "BOOLEAN",
-                    _hidden_panel_widget({
-                        "default": False,
-                        "display_name": "定时刷新",
-                        "tooltip": "开启后前端按刷新时间自动重新扫描视频列表，适合监控分段生成的视频。",
-                    }),
-                ),
-                "selected_videos_json": (
-                    "STRING",
-                    _hidden_panel_widget({
-                        "default": "[]",
-                        "display_name": "已选视频JSON",
-                        "tooltip": "内部保存用：记录面板中选择的视频，重新打开工作流后用于恢复真实源视频。",
-                    }),
-                ),
-            },
+            "required": {},
             "optional": {
+                **panel_inputs,
                 "input_frames": ("GJJ_BATCH_IMAGE,IMAGE,VIDEO", {"display_name": "视频帧队列", "tooltip": "非必选：可直接输入上游帧队列。接入后优先使用输入帧，未接入时读取下拉选择的视频。"}),
             },
             "hidden": {

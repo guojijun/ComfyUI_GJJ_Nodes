@@ -134,6 +134,7 @@ MAX_AUDIO_SAFE_PIXEL_FRAMES = 240_000_000
 MIN_AUDIO_SAFE_FRAME_CAP = 97
 MAX_AUDIO_SAFE_FRAME_CAP = 385
 DEFAULT_AUDIO_SAFE_WARNING_RATIO = 0.85
+DEFAULT_AUDIO_SILENCE_SEGMENT_SECONDS = 10.0
 DEFAULT_AUDIO_SPEED_TARGET_RATIO = 0.6
 DEFAULT_AUDIO_FAST_LONG_EDGE_AT_32GB = 896
 MIN_AUDIO_FAST_LONG_EDGE = 640
@@ -1747,6 +1748,61 @@ def _trim_audio(audio: dict[str, Any], start_seconds: float = DEFAULT_AUDIO_STAR
 	return result
 
 
+def _audio_dict_from_waveform(waveform: torch.Tensor, sample_rate: int, source: dict[str, Any] | None = None) -> dict[str, Any]:
+	result = dict(source or {})
+	result["waveform"] = waveform.contiguous().clamp(-1.0, 1.0)
+	result["sample_rate"] = int(sample_rate)
+	return result
+
+
+def _pad_audio_to_ltx_8n1_frames(audio: dict[str, Any], fps: int) -> dict[str, Any]:
+	waveform, sample_rate = _audio_waveform_and_rate(audio)
+	current_samples = int(waveform.shape[-1])
+	current_seconds = float(current_samples) / float(max(1, sample_rate))
+	current_frames = _requested_frame_count(current_seconds, fps)
+	target_frames = max(1, int(math.ceil(float(max(0, current_frames - 1)) / 8.0) * 8 + 1))
+	target_samples = max(current_samples, int(round((float(target_frames - 1) / float(max(1, int(fps)))) * float(sample_rate))))
+	if target_samples <= current_samples:
+		return _audio_dict_from_waveform(waveform, sample_rate, audio)
+	silence = torch.zeros((*waveform.shape[:-1], target_samples - current_samples), device=waveform.device, dtype=waveform.dtype)
+	return _audio_dict_from_waveform(torch.cat([waveform.contiguous(), silence], dim=-1), sample_rate, audio)
+
+
+def _segment_audio_by_silence_for_ltx(
+	audio: dict[str, Any],
+	*,
+	fps: int,
+	max_frame_count: int,
+	threshold_db: float = -40.0,
+	min_silence_duration: float = 0.1,
+	keep_silence: float = 0.4,
+) -> list[dict[str, Any]]:
+	waveform, sample_rate = _audio_waveform_and_rate(audio)
+	total_samples = int(waveform.shape[-1])
+	if total_samples <= 0:
+		return [_pad_audio_to_ltx_8n1_frames(audio, fps)]
+	max_aligned_frames = max(9, ((max(9, int(max_frame_count)) - 1) // 8) * 8 + 1)
+	max_duration = max(0.25, float(max_aligned_frames - 1) / float(max(1, int(fps))))
+	try:
+		trimmer = importlib.import_module(".gjj_audio_silence_trimmer", __package__)
+		find_regions = getattr(trimmer, "_find_non_silent_regions")
+		build_intervals = getattr(trimmer, "_build_kept_intervals_from_regions")
+		segment_from_boundaries = getattr(trimmer, "_segment_audio_queue_from_boundaries")
+		min_silence_samples = max(1, int(round(float(min_silence_duration) * sample_rate)))
+		keep_samples = max(0, int(round(float(keep_silence) * sample_rate)))
+		min_segment_samples = max(int(round(2.0 * sample_rate)), int(round(float(min_silence_duration) * sample_rate * 0.5)))
+		regions = find_regions(waveform, float(threshold_db), min_silence_samples, sample_rate)
+		kept_intervals = build_intervals(regions, total_samples, keep_samples)
+		safe_cut_points = [int(end) for _, end in kept_intervals if 0 < int(end) < total_samples]
+		if total_samples not in safe_cut_points:
+			safe_cut_points.append(total_samples)
+		raw_segments = segment_from_boundaries(waveform, safe_cut_points, max_duration, sample_rate, min_segment_samples)
+	except Exception:
+		raw_segments = [_audio_dict_from_waveform(waveform, sample_rate, audio)]
+	segments = [_pad_audio_to_ltx_8n1_frames(segment, fps) for segment in raw_segments if isinstance(segment, dict)]
+	return segments or [_pad_audio_to_ltx_8n1_frames(audio, fps)]
+
+
 def _normalize_audio_rms(audio: dict[str, Any], target_db: float = DEFAULT_AUDIO_TARGET_DB) -> dict[str, Any]:
 	waveform, sample_rate = _audio_waveform_and_rate(audio)
 	rms = waveform.pow(2).mean(dim=-1, keepdim=True).sqrt().clamp(min=1e-8)
@@ -2533,11 +2589,18 @@ def _check_audio_conditioned_budget(
 	audio_duration: float,
 	route_label: str,
 	guide_count: int,
+	allow_ltx_8n1_alignment: bool = False,
 ):
 	safe_frame_count, pixel_frame_budget, safe_seconds = _resolve_audio_conditioned_budget(width, height, fps)
 	estimated_pixel_frames = int(width) * int(height) * int(frame_count)
+	aligned_overflow_ok = (
+		bool(allow_ltx_8n1_alignment)
+		and int(frame_count) > 1
+		and (int(frame_count) - 1) % 8 == 0
+		and int(frame_count) - 1 <= int(safe_frame_count)
+	)
 
-	if int(frame_count) > int(safe_frame_count):
+	if int(frame_count) > int(safe_frame_count) and not aligned_overflow_ok:
 		raise RuntimeError(
 			f"当前 {route_label} + 音频驱动任务预计显存压力过高：采样尺寸 {int(width)}x{int(height)}，"
 			f"{int(fps)}fps，音频时长 {_format_seconds(audio_duration)}，约 {int(frame_count)} 帧，"
@@ -2856,6 +2919,7 @@ def run_ltx23_multiref_video(
 						audio_duration=audio_duration,
 						route_label=render_route_label,
 						guide_count=len(guides),
+						allow_ltx_8n1_alignment=bool(render_segment_index is not None and "音频分段" in str(render_route_label)),
 					)
 					if pressure_notice:
 						_send_status(unique_id, pressure_notice)
@@ -3174,7 +3238,109 @@ def run_ltx23_multiref_video(
 		auto_workflow_multiframe = mode == MODE_GENERATED_AUDIO and len(scene_images) >= 3
 		use_segmented = (bool(segmented_execution) and mode == MODE_GENERATED_AUDIO and len(scene_images) >= 2) or auto_workflow_multiframe
 		if bool(segmented_execution) and mode == MODE_AUDIO_CONDITIONED:
-			_send_status(unique_id, "提示：接入驱动音频时已自动关闭分段执行，避免外部音频被错误切段。")
+			_send_status(unique_id, "提示：接入驱动音频时将按显存预算自动切成多段，再合并输出。")
+			if input_audio is None:
+				raise RuntimeError("音频分段执行需要接入音频。")
+			audio_for_segments = _trim_audio(input_audio, DEFAULT_AUDIO_START_SECONDS, DEFAULT_AUDIO_MAX_SECONDS)
+			total_audio_duration = _audio_duration_seconds(audio_for_segments)
+			probe_guides, probe_sample_width, probe_sample_height, probe_output_width, probe_output_height = _prepare_guides(
+				main_image,
+				base_guide_images,
+				base_guide_times,
+				None,
+				output_long_edge,
+				fallback_width=target_width,
+				fallback_height=target_height,
+			)
+			probe_frame_count = _requested_frame_count(total_audio_duration, fps)
+			tuned_probe_width, tuned_probe_height = _resolve_audio_speed_sampling_size(
+				probe_sample_width,
+				probe_sample_height,
+				fps,
+				probe_frame_count,
+				len(probe_guides),
+			)
+			safe_frame_count, _, safe_seconds = _resolve_audio_conditioned_budget(tuned_probe_width, tuned_probe_height, fps)
+			ten_second_frame_count = _requested_frame_count(DEFAULT_AUDIO_SILENCE_SEGMENT_SECONDS, fps)
+			aligned_safe_frame_count = max(
+				9,
+				((max(9, int(safe_frame_count), int(ten_second_frame_count)) - 1) // 8) * 8 + 1,
+			)
+			segment_audio_queue = _segment_audio_by_silence_for_ltx(
+				audio_for_segments,
+				fps=fps,
+				max_frame_count=aligned_safe_frame_count,
+			)
+			audio_segment_count = len(segment_audio_queue)
+			_send_status(
+				unique_id,
+				f"准备音频分段执行：音频 {_format_seconds(total_audio_duration)}，"
+				f"约 {probe_frame_count} 帧；按静音边界分为 {audio_segment_count} 段，"
+				f"目标每段对齐 {aligned_safe_frame_count} 帧以内（8n+1）。",
+			)
+			segment_frames: list[torch.Tensor] = []
+			segment_audios: list[dict[str, Any] | None] = []
+			segment_previews: list[dict[str, Any]] = []
+			segment_start_frame = 0
+			for segment_index, segment_audio in enumerate(segment_audio_queue, start=1):
+				segment_duration = _audio_duration_seconds(segment_audio)
+				segment_output_frames = _requested_frame_count(segment_duration, fps)
+				segment_label = f"音频分段 第{segment_index}段（共{audio_segment_count}段）"
+				_send_status(
+					unique_id,
+					f"{segment_label}：静音边界切分，时长 {_format_seconds(segment_duration)}，"
+					f"{segment_output_frames} 帧（8n+1 对齐）。",
+				)
+				result = _render_once(
+					render_main_image=main_image,
+					render_guide_images=base_guide_images,
+					render_guide_times=base_guide_times,
+					render_duration_seconds=segment_duration,
+					render_mode=mode,
+					render_input_audio=segment_audio,
+					render_seed=int(seed) + (segment_index - 1) * 2,
+					render_frame_trim_start=frame_trim_start,
+					render_route_label=f"{route_label}音频分段",
+					render_branch_kind="default",
+					render_segment_index=segment_index,
+					status_prefix=segment_label,
+				)
+				segment_frames.append(result["frames"])
+				segment_audios.append(result["audio"])
+				preview = _save_segment_video_preview(
+					frames=result["frames"],
+					audio=result["audio"],
+					fps=fps,
+					save_preset=segment_save_preset,
+					format_name=segment_video_format,
+					unique_id=unique_id,
+					segment_index=segment_index,
+					segment_count=audio_segment_count,
+					start_index=segment_start_frame,
+					end_index=segment_start_frame + max(0, segment_output_frames - 1),
+					output_width=result["output_width"],
+					output_height=result["output_height"],
+				)
+				segment_start_frame += max(0, segment_output_frames - 1)
+				segment_previews.append(preview)
+				_send_status(unique_id, f"已保存音频第 {segment_index} 段（共 {audio_segment_count} 段）：{preview.get('path') or '输出文件'}")
+				_maybe_purge_vram()
+			if not segment_frames:
+				raise RuntimeError("音频分段执行没有生成任何视频帧。")
+			combined_frames = torch.cat(segment_frames, dim=0).contiguous()
+			combined_audio = _concat_audio_segments(segment_audios) or audio_for_segments
+			final_video = _create_video(combined_frames, float(fps), combined_audio)
+			output_width = int(combined_frames.shape[2])
+			output_height = int(combined_frames.shape[1])
+			_send_status(unique_id, f"完成：{route_label}（音频分段 {len(segment_frames)} 段）/ 合并输出 {output_width}x{output_height} / {int(combined_frames.shape[0])} 帧 / 外部音频驱动")
+			_send_status(unique_id, f"最终输出尺寸：{output_width}x{output_height}")
+			return {
+				"ui": {
+					"segment_videos": segment_previews,
+					"preview_segments": segment_previews,
+				},
+				"result": (final_video, combined_frames.detach().float().cpu().clamp(0.0, 1.0).contiguous()),
+			}
 		if auto_workflow_multiframe:
 			_send_status(unique_id, f"Clean v40 多图参考：检测到 {len(scene_images)} 张去重后场景图，自动按相邻两图分段；每段强制走首尾帧源工作流，并自动启用转场 LoRA（共 {len(scene_images)-1} 段）。")
 			try:

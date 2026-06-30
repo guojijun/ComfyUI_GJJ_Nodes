@@ -250,20 +250,20 @@ def _register_gjj_workflow_screenshot_api():
 
 	def filename_template() -> str:
 		value = _gjj_workflow_screenshot_settings().get("filename_template") or ""
-		if not value or value in {"GJJ_workflow_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png", "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png"}:
-			return "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.jpg"
+		if not value or value in {"GJJ_workflow_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png", "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.jpg"}:
+			return "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png"
 		return value
 
 	def legacy_default_directory() -> str:
 		return os.path.abspath(os.path.join(folder_paths.get_output_directory(), LEGACY_DEFAULT_SUBDIR))
 
 	def clean_filename(value: str) -> str:
-		name = os.path.basename(str(value or "").strip()) or "GJJ_workflow.jpg"
+		name = os.path.basename(str(value or "").strip()) or "GJJ_workflow.png"
 		name = SAFE_FILENAME_RE.sub("_", name).strip(" .")
 		if not name:
-			name = "GJJ_workflow.jpg"
+			name = "GJJ_workflow.png"
 		if not re.search(r"\.(png|jpe?g)$", name, re.IGNORECASE):
-			name += ".jpg"
+			name += ".png"
 		return name[:180]
 
 	def resolve_directory(value: str | None) -> str:

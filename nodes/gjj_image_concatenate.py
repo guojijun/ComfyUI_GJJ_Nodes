@@ -367,7 +367,7 @@ def _as_media_tensor(value: Any) -> torch.Tensor | None:
     value = _extract_video_frames(value)
     if not torch.is_tensor(value):
         return None
-    tensor = value
+    tensor = value.detach()
     if tensor.dim() == 2:
         tensor = tensor.unsqueeze(0)
     if tensor.dim() == 3 and int(tensor.shape[-1]) in (1, 2, 3, 4) and int(tensor.shape[0]) not in (1, 2, 3, 4):
@@ -376,7 +376,7 @@ def _as_media_tensor(value: Any) -> torch.Tensor | None:
         tensor = tensor.permute(0, 2, 3, 1)
     if tensor.dim() not in (3, 4):
         return None
-    return tensor.float().clamp(0.0, 1.0)
+    return tensor.to(device=torch.device("cpu"), dtype=torch.float32, copy=False).clamp(0.0, 1.0)
 
 
 def _media_tensors_recursive(value: Any, seen: set[int] | None = None, depth: int = 0) -> list[torch.Tensor]:
@@ -449,48 +449,40 @@ def _is_black_placeholder(tensor: torch.Tensor) -> bool:
 
 
 def _intermediate_device():
-    if model_management is not None:
-        try:
-            return model_management.intermediate_device()
-        except Exception:
-            pass
     return torch.device("cpu")
 
 
 def _intermediate_dtype():
-    if model_management is not None:
-        try:
-            return model_management.intermediate_dtype()
-        except Exception:
-            pass
     return torch.float32
 
 
 def _concat_device(input_numel: int, output_numel: int):
-    if torch.cuda.is_available():
-        try:
-            free_bytes, _total_bytes = torch.cuda.mem_get_info()
-            needed_bytes = max(1, int(input_numel) + int(output_numel)) * 4
-            if needed_bytes < int(free_bytes * CUDA_HEADROOM):
-                return torch.device("cuda")
-        except Exception:
-            pass
-    return _intermediate_device()
+    return torch.device("cpu")
 
 
 def _torch_device():
-    if model_management is not None:
-        try:
-            return model_management.get_torch_device()
-        except Exception:
-            pass
-    return _intermediate_device()
+    return torch.device("cpu")
 
 
 def _resize_frame(frame: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    frame = frame.detach().to(device=torch.device("cpu"), dtype=torch.float32, copy=False)
     frame = frame.permute(0, 3, 1, 2)
     resized = F.interpolate(frame, size=(height, width), mode="bicubic", antialias=True)
     return resized.permute(0, 2, 3, 1).clamp(0.0, 1.0)
+
+
+def _release_cuda_cache():
+    if not torch.cuda.is_available():
+        return
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+    if model_management is not None:
+        try:
+            model_management.soft_empty_cache()
+        except Exception:
+            pass
 
 
 def _convert_to_base_type(base: torch.Tensor, other: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, bool]:
@@ -743,31 +735,33 @@ class GJJ_ImageConcanate:
         match_image_size = bool(_single_value(match_image_size, True))
         raw_items: list[Any] = []
         media_items: list[torch.Tensor] = []
-        for key in sorted(kwargs.keys(), key=_input_index):
-            if not str(key).startswith(IMAGE_PREFIX):
-                continue
-            raw_value = kwargs.get(key)
-            if raw_value is None:
-                continue
-            raw_items.append(raw_value)
-            media_items.extend(_media_frames(raw_value))
+        with torch.inference_mode():
+            for key in sorted(kwargs.keys(), key=_input_index):
+                if not str(key).startswith(IMAGE_PREFIX):
+                    continue
+                raw_value = kwargs.get(key)
+                if raw_value is None:
+                    continue
+                raw_items.append(raw_value)
+                media_items.extend(_media_frames(raw_value))
+            _release_cuda_cache()
 
-        if direction != "square":
-            video_result = _concat_video_files(raw_items, str(direction), bool(match_image_size))
-            if video_result is not None:
-                return (video_result,)
+            if direction != "square":
+                video_result = _concat_video_files(raw_items, str(direction), bool(match_image_size))
+                if video_result is not None:
+                    return (video_result,)
 
-        if not media_items:
-            raise RuntimeError("GJJ 图片/视频拼接失败：未解析到可用媒体。若输入是 VIDEO，请确认它来自 Load Video 或包含可访问的视频文件路径。")
+            if not media_items:
+                raise RuntimeError("GJJ 图片/视频拼接失败：未解析到可用媒体。若输入是 VIDEO，请确认它来自 Load Video 或包含可访问的视频文件路径。")
 
-        if direction == "square":
-            return (_concat_square(media_items, bool(match_image_size)),)
+            if direction == "square":
+                return (_concat_square(media_items, bool(match_image_size)),)
 
-        result = media_items[0]
-        first_shape = result.shape
-        for tensor in media_items[1:]:
-            result = _concat_pair(result, tensor, str(direction), bool(match_image_size), first_shape=first_shape)
-        return (result,)
+            result = media_items[0]
+            first_shape = result.shape
+            for tensor in media_items[1:]:
+                result = _concat_pair(result, tensor, str(direction), bool(match_image_size), first_shape=first_shape)
+            return (result,)
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_ImageConcanate}

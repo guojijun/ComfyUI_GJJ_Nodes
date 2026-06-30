@@ -46,7 +46,7 @@ register_prompt_translation_api((COMMON_PROMPT_TRANSLATE_API_PATH,))
 
 
 NODE_NAME = "GJJ_MMAudioNSFWSingle"
-NODE_DISPLAY_NAME = "GJJ · MMAudio 视频配音单节点"
+NODE_DISPLAY_NAME = "GJJ ·📢 视频配音(MMAudio)"
 MMAUDIO_CATEGORY = "mmaudio"
 _MODEL_CACHE: dict[tuple[Any, ...], Any] = {}
 _FEATURE_CACHE: dict[tuple[Any, ...], Any] = {}
@@ -759,7 +759,7 @@ class GJJ_MMAudioNSFWSingle:
             },
         ],
         "usage": [
-            "默认只显示按钮行；点击 ⚙️ 后显示模型、采样和输出参数。",
+            "默认显示按钮行、正向提示词和模型参数；点击 🧠 可收起模型，点击 🎬 / 🔊 分别显示视频参数和配音参数。",
             "正向提示词始终显示；开启 🌏 后会使用 translation\\opus-mt-zh-en.safetensors 翻译正向提示词。",
             "把 IMAGE、GJJ_BATCH_IMAGE 或 VIDEO 接到“媒体输入”时，📁 会禁用并以输入口为准。",
             "没有输入口连接时，点击 📁 选择本机视频；如果文件名已在 input 目录中，节点会直接使用该文件名。",
@@ -782,11 +782,6 @@ class GJJ_MMAudioNSFWSingle:
         formats = list_supported_formats()
         return {
             "required": {
-                "video": ("STRING", {"default": "", "display_name": "📁 打开的视频", "tooltip": "由 📁 按钮写入。媒体输入口没有连接时才使用这里的 input 视频文件名或绝对路径。"}),
-                "mmaudio_model": (main_models, {"default": _prefer_main_model(main_models), "display_name": "MMAudio 主模型", "tooltip": "放在 models/mmaudio。默认优先选择非成人版的 44k 主模型。"}),
-                "vae_model": (vae_models, {"default": _prefer_model(vae_models, ("vae", "44k")), "display_name": "VAE 模型", "tooltip": "MMAudio VAE，通常是 mmaudio_vae_44k_fp16.safetensors。"}),
-                "synchformer_model": (synchformer_models, {"default": _prefer_model(synchformer_models, ("synchformer",)), "display_name": "Synchformer 模型", "tooltip": "视频同步特征模型，通常是 mmaudio_synchformer_fp16.safetensors。"}),
-                "clip_model": (clip_models, {"default": _prefer_model(clip_models, ("clip",)), "display_name": "CLIP/DFN 模型", "tooltip": "CLIP/DFN 条件模型。没有 open_clip 时会自动跳过该条件。"}),
                 "force_rate": ("FLOAT", {"default": 24.0, "min": 0.0, "max": 240.0, "step": 0.01, "display_name": "读取帧率", "tooltip": "读取磁盘视频时使用的帧率；0 表示使用源视频帧率。"}),
                 "custom_width": ("INT", {"default": 0, "min": 0, "max": 8192, "display_name": "自定义宽", "tooltip": "读取磁盘视频时缩放到指定宽度；0 表示使用源宽度。"}),
                 "custom_height": ("INT", {"default": 0, "min": 0, "max": 8192, "display_name": "自定义高", "tooltip": "读取磁盘视频时缩放到指定高度；0 表示使用源高度。"}),
@@ -812,6 +807,11 @@ class GJJ_MMAudioNSFWSingle:
                 "translation_enabled": ("BOOLEAN", {"default": False, "display_name": "翻译开关", "tooltip": "按钮状态。开启 🌏 后执行时把正向提示词翻译为英文。"}),
                 "translation_device": (["auto", "cpu", "gpu"], {"default": "auto", "display_name": "翻译设备", "tooltip": "Opus-MT 翻译使用的设备。auto 自动选择。"}),
                 "translation_unload_after_use": ("BOOLEAN", {"default": False, "display_name": "翻译后卸载", "tooltip": "翻译完成后卸载 Opus-MT 模型，节省显存。"}),
+                "video": ("STRING", {"default": "", "display_name": "📁 打开的视频", "tooltip": "由 📁 按钮写入。媒体输入口没有连接时才使用这里的 input 视频文件名或绝对路径。"}),
+                "mmaudio_model": (main_models, {"default": _prefer_main_model(main_models), "display_name": "MMAudio 主模型", "tooltip": "放在 models/mmaudio。默认优先选择非成人版的 44k 主模型。"}),
+                "vae_model": (vae_models, {"default": _prefer_model(vae_models, ("vae", "44k")), "display_name": "VAE 模型", "tooltip": "MMAudio VAE，通常是 mmaudio_vae_44k_fp16.safetensors。"}),
+                "synchformer_model": (synchformer_models, {"default": _prefer_model(synchformer_models, ("synchformer",)), "display_name": "Synchformer 模型", "tooltip": "视频同步特征模型，通常是 mmaudio_synchformer_fp16.safetensors。"}),
+                "clip_model": (clip_models, {"default": _prefer_model(clip_models, ("clip",)), "display_name": "CLIP/DFN 模型", "tooltip": "CLIP/DFN 条件模型。没有 open_clip 时会自动跳过该条件。"}),
             },
             "optional": {
                 "source_media": ("GJJ_BATCH_IMAGE,IMAGE,VIDEO", {"display_name": "媒体输入", "tooltip": "优先级最高。连接 IMAGE、GJJ_BATCH_IMAGE 或 VIDEO 后，将忽略 📁 打开的视频，且 📁 按钮会灰色禁用。"}),
@@ -825,11 +825,6 @@ class GJJ_MMAudioNSFWSingle:
 
     def generate(
         self,
-        video,
-        mmaudio_model,
-        vae_model,
-        synchformer_model,
-        clip_model,
         force_rate,
         custom_width,
         custom_height,
@@ -855,6 +850,11 @@ class GJJ_MMAudioNSFWSingle:
         translation_enabled=False,
         translation_device="auto",
         translation_unload_after_use=False,
+        video="",
+        mmaudio_model=None,
+        vae_model=None,
+        synchformer_model=None,
+        clip_model=None,
         source_media=None,
         prompt_data=None,
         extra_pnginfo=None,
@@ -876,6 +876,12 @@ class GJJ_MMAudioNSFWSingle:
             )
             prompt = str(translated.get("positive", "") or prompt)
             send_translated_prompt(unique_id, positive=prompt)
+        if not all(str(value or "").strip() for value in (mmaudio_model, vae_model, synchformer_model, clip_model)):
+            models = _mmaudio_models()
+            mmaudio_model = str(mmaudio_model or "").strip() or _prefer_main_model(_mmaudio_main_models(models))
+            vae_model = str(vae_model or "").strip() or _prefer_model(_mmaudio_vae_models(models), ("vae", "44k"))
+            synchformer_model = str(synchformer_model or "").strip() or _prefer_model(_mmaudio_synchformer_models(models), ("synchformer",))
+            clip_model = str(clip_model or "").strip() or _prefer_model(_mmaudio_clip_models(models), ("clip",))
         frames, fps, source_duration = _extract_frames_from_media(source_media, force_rate)
         if frames is None:
             video_path = _resolve_video_path(video)

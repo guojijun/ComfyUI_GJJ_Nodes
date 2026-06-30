@@ -34,9 +34,9 @@ import { api } from "/scripts/api.js";
 	const JPEG_METADATA_CHUNK_SIZE = 60000;
 	const SETTINGS_KEY = "gjj_workflow_screenshot_settings";
 	const LEGACY_FILENAME_TEMPLATE = "GJJ_workflow_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png";
-	const DEFAULT_FILENAME_TEMPLATE = "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.jpg";
+	const DEFAULT_FILENAME_TEMPLATE = "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png";
 	const DEFAULT_JPEG_QUALITY = 0.86;
-	const MAX_SAVED_IMAGE_DIMENSION = 1080;
+	const SAVED_WORKFLOW_IMAGE_SIZE = 256;
 	const DEFAULT_SORT_MODE = "mtime_desc";
 	const DEFAULT_FILTER_MODE = "openable";
 	const DEFAULT_PAGE_SIZE = 12;
@@ -841,7 +841,7 @@ import { api } from "/scripts/api.js";
 
 	function normalizeSettings(value = {}) {
 		return {
-			filenameTemplate: String(value?.filenameTemplate || value?.filename_template || DEFAULT_FILENAME_TEMPLATE),
+			filenameTemplate: normalizeFilenameTemplate(value?.filenameTemplate || value?.filename_template || DEFAULT_FILENAME_TEMPLATE),
 			directoryPath: String(value?.directoryPath || value?.directory || ""),
 			sortMode: choice(value?.sortMode || value?.sort_mode, SORT_MODE_LABELS, DEFAULT_SORT_MODE),
 			filterMode: DEFAULT_FILTER_MODE,
@@ -861,6 +861,7 @@ import { api } from "/scripts/api.js";
 
 	function saveSettings() {
 		try {
+			settings.filenameTemplate = normalizeFilenameTemplate(settings.filenameTemplate || DEFAULT_FILENAME_TEMPLATE);
 			settings.filterMode = DEFAULT_FILTER_MODE;
 			settings.pageSize = pageSizeValue(settings.pageSize);
 			localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -878,8 +879,8 @@ import { api } from "/scripts/api.js";
 	function backendWorkflowSettingsPayload() {
 		return {
 			directory: directoryPathForBackendSettings(),
-			filename_template: String(settings.filenameTemplate || DEFAULT_FILENAME_TEMPLATE),
-			image_format: screenshotFormatFromFilename(settings.filenameTemplate || DEFAULT_FILENAME_TEMPLATE),
+			filename_template: normalizeFilenameTemplate(settings.filenameTemplate || DEFAULT_FILENAME_TEMPLATE),
+			image_format: "png",
 			jpeg_quality: DEFAULT_JPEG_QUALITY,
 			sort_mode: choice(settings.sortMode, SORT_MODE_LABELS, DEFAULT_SORT_MODE),
 			filter_mode: DEFAULT_FILTER_MODE,
@@ -967,9 +968,9 @@ import { api } from "/scripts/api.js";
 		backendSettingsPath = String(data.settings_path || backendSettingsPath || "").trim();
 		const workflowSettings = data.workflow_screenshot || {};
 		if (workflowSettings.filename_template) {
-			settings.filenameTemplate = normalizeDefaultFilenameTemplate(workflowSettings.filename_template || DEFAULT_FILENAME_TEMPLATE);
+			settings.filenameTemplate = normalizeFilenameTemplate(workflowSettings.filename_template || DEFAULT_FILENAME_TEMPLATE);
 		} else {
-			settings.filenameTemplate = normalizeDefaultFilenameTemplate(settings.filenameTemplate || DEFAULT_FILENAME_TEMPLATE);
+			settings.filenameTemplate = normalizeFilenameTemplate(settings.filenameTemplate || DEFAULT_FILENAME_TEMPLATE);
 		}
 		settings.sortMode = choice(workflowSettings.sort_mode || workflowSettings.sortMode || settings.sortMode, SORT_MODE_LABELS, DEFAULT_SORT_MODE);
 		settings.filterMode = DEFAULT_FILTER_MODE;
@@ -999,28 +1000,37 @@ import { api } from "/scripts/api.js";
 
 	function normalizeDefaultFilenameTemplate(value) {
 		const text = String(value || "").trim();
-		if (!text || text === LEGACY_FILENAME_TEMPLATE || text === "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png") {
+		if (!text || text === LEGACY_FILENAME_TEMPLATE || text === "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.jpg") {
 			return DEFAULT_FILENAME_TEMPLATE;
 		}
 		return text;
 	}
 
+	function normalizeFilenameTemplate(value) {
+		return pngFilename(normalizeDefaultFilenameTemplate(value), DEFAULT_FILENAME_TEMPLATE);
+	}
+
 	function screenshotFormatFromFilename(value) {
-		return /\.png$/i.test(String(value || "")) ? "png" : "jpg";
+		return /\.jpe?g$/i.test(String(value || "")) ? "jpg" : "png";
 	}
 
 	function mimeTypeForFilename(value) {
 		return screenshotFormatFromFilename(value) === "png" ? "image/png" : "image/jpeg";
 	}
 
-	function sanitizeFilename(value, fallback = "GJJ_workflow.jpg") {
+	function sanitizeFilename(value, fallback = "GJJ_workflow.png") {
 		let text = String(value || "").trim();
 		if (!text) text = fallback;
 		text = text.replace(/[<>:"/\\|?*\x00-\x1F]+/g, "_").replace(/\s+/g, " ").trim();
 		text = text.replace(/[. ]+$/g, "");
 		if (!text) text = fallback;
-		if (!/\.(png|jpe?g)$/i.test(text)) text += ".jpg";
+		if (!/\.(png|jpe?g)$/i.test(text)) text += ".png";
 		return text.slice(0, 180);
+	}
+
+	function pngFilename(value, fallback = "GJJ_workflow.png") {
+		const filename = sanitizeFilename(value, fallback);
+		return filename.replace(/\.(jpe?g)$/i, ".png");
 	}
 
 	function dateParts(now = new Date()) {
@@ -1206,7 +1216,7 @@ import { api } from "/scripts/api.js";
 		};
 		const template = normalizeDefaultFilenameTemplate(settings.filenameTemplate || DEFAULT_FILENAME_TEMPLATE);
 		const effectiveTemplate = template === LEGACY_FILENAME_TEMPLATE && (workflowTitle || sourceWorkflowName) ? DEFAULT_FILENAME_TEMPLATE : template;
-		return sanitizeFilename(effectiveTemplate.replace(/\{([A-Za-z0-9_]+)\}/g, (_match, key) => replacements[key] ?? ""), "GJJ_workflow.jpg");
+		return pngFilename(effectiveTemplate.replace(/\{([A-Za-z0-9_]+)\}/g, (_match, key) => replacements[key] ?? ""), "GJJ_workflow.png");
 	}
 
 	function number(value, fallback = 0) {
@@ -2476,22 +2486,60 @@ import { api } from "/scripts/api.js";
 		});
 	}
 
-	function constrainCanvasDimensions(canvas, maxDimension = MAX_SAVED_IMAGE_DIMENSION) {
+	function squareWorkflowImageCanvas(canvas, size = SAVED_WORKFLOW_IMAGE_SIZE) {
 		const width = Number(canvas?.width || 0);
 		const height = Number(canvas?.height || 0);
-		const limit = Math.max(1, Number(maxDimension) || MAX_SAVED_IMAGE_DIMENSION);
-		if (!canvas || width <= 0 || height <= 0 || (width <= limit && height <= limit)) return canvas;
+		const outputSize = Math.max(1, Math.round(Number(size) || SAVED_WORKFLOW_IMAGE_SIZE));
+		if (!canvas || width <= 0 || height <= 0) return canvas;
 
-		const scale = Math.min(limit / width, limit / height);
 		const output = document.createElement("canvas");
-		output.width = Math.max(1, Math.round(width * scale));
-		output.height = Math.max(1, Math.round(height * scale));
+		output.width = outputSize;
+		output.height = outputSize;
 		const ctx = output.getContext("2d");
 		if (!ctx) return canvas;
 		ctx.imageSmoothingEnabled = true;
 		ctx.imageSmoothingQuality = "high";
-		ctx.drawImage(canvas, 0, 0, output.width, output.height);
+		ctx.fillStyle = "#11181d";
+		ctx.fillRect(0, 0, outputSize, outputSize);
+		const scale = Math.min(outputSize / width, outputSize / height);
+		const drawWidth = Math.max(1, Math.round(width * scale));
+		const drawHeight = Math.max(1, Math.round(height * scale));
+		const drawX = Math.round((outputSize - drawWidth) / 2);
+		const drawY = Math.round((outputSize - drawHeight) / 2);
+		ctx.drawImage(canvas, drawX, drawY, drawWidth, drawHeight);
 		return output;
+	}
+
+	async function imageBlobToCanvas(blob) {
+		if (!blob || !String(blob.type || "").startsWith("image/")) return null;
+		const bitmap = await createImageBitmap(blob);
+		try {
+			const canvas = document.createElement("canvas");
+			canvas.width = Math.max(1, bitmap.width || 1);
+			canvas.height = Math.max(1, bitmap.height || 1);
+			const ctx = canvas.getContext("2d");
+			if (!ctx) return null;
+			ctx.drawImage(bitmap, 0, 0);
+			return canvas;
+		} finally {
+			try { bitmap.close?.(); } catch (_) {}
+		}
+	}
+
+	async function clipboardImageCanvas() {
+		if (!navigator.clipboard?.read || typeof ClipboardItem === "undefined" || typeof createImageBitmap !== "function") return null;
+		try {
+			const items = await navigator.clipboard.read();
+			for (const item of items || []) {
+				const type = (item.types || []).find((value) => String(value || "").startsWith("image/"));
+				if (!type) continue;
+				const canvas = await imageBlobToCanvas(await item.getType(type));
+				if (canvas) return canvas;
+			}
+		} catch (error) {
+			console.debug("[GJJ] 未使用剪贴板图片：", error);
+		}
+		return null;
 	}
 
 	function jsonReplacer(_key, value) {
@@ -3143,6 +3191,12 @@ import { api } from "/scripts/api.js";
 		return /^(unsaved workflow|untitled|未命名|未保存工作流)$/i.test(text) ? "" : text;
 	}
 
+	function workflowFilenameForTitle(title) {
+		const text = cleanWorkflowDisplayTitle(title).replace(/[<>:"/\\|?*\x00-\x1F]+/g, "_").replace(/[. ]+$/g, "");
+		const name = text || "GJJ_workflow";
+		return /\.json$/i.test(name) ? name : `${name}.json`;
+	}
+
 	function previewItemDisplayTitle(item) {
 		const imageName = previewItemName(item).replace(/\.(png|webp|jpe?g|bmp|gif)$/i, "");
 		return cleanWorkflowDisplayTitle(previewItemTitle(item)) ||
@@ -3174,29 +3228,41 @@ import { api } from "/scripts/api.js";
 	function applyLoadedWorkflowTitle(title) {
 		const text = cleanWorkflowDisplayTitle(title);
 		if (!text) return;
+		const filename = workflowFilenameForTitle(text);
 		const graph = app?.graph;
 		if (graph && typeof graph === "object") {
 			graph.name = text;
 			graph.title = text;
 			graph.workflow_name = text;
 			graph.workflowName = text;
+			graph.filename = filename;
+			graph.path = filename;
 			graph.extra = graph.extra && typeof graph.extra === "object" ? graph.extra : {};
 			graph.extra.name = text;
 			graph.extra.title = text;
 			graph.extra.workflow_name = text;
 			graph.extra.workflowName = text;
+			graph.extra.filename = filename;
+			graph.extra.path = filename;
 		}
 		const manager = app?.workflowManager;
-		for (const target of [manager?.activeWorkflow, manager?.currentWorkflow, manager?.workflow, app?.ui]) {
+		for (const target of [manager?.activeWorkflow, manager?.activeWorkflowInfo, manager?.currentWorkflow, manager?.workflow, app?.ui]) {
 			if (!target || typeof target !== "object") continue;
 			target.name = text;
 			target.title = text;
 			target.workflow_name = text;
 			target.workflowName = text;
+			target.filename = filename;
+			target.fileName = filename;
+			target.path = filename;
 		}
 		for (const method of ["setWorkflowName", "setWorkflowTitle", "setActiveWorkflowName"]) {
 			if (typeof manager?.[method] !== "function") continue;
 			try { manager[method](text); } catch (_) {}
+		}
+		for (const method of ["updateTopbar", "updateTopBar", "updateWorkflowName", "refresh", "update"]) {
+			if (typeof manager?.[method] !== "function") continue;
+			try { manager[method](); } catch (_) {}
 		}
 		if (typeof document !== "undefined") {
 			document.title = `ComfyUI - ${text}`;
@@ -3425,8 +3491,10 @@ import { api } from "/scripts/api.js";
 		try {
 			const title = previewItemDisplayTitle(item);
 			closePreviewOverlay();
-			await app.loadGraphData(workflowWithDisplayTitle(item.workflow, title));
+			const workflow = workflowWithDisplayTitle(item.workflow, title);
+			await app.loadGraphData(workflow, true, true, cleanWorkflowDisplayTitle(title));
 			applyLoadedWorkflowTitle(title);
+			setTimeout(() => applyLoadedWorkflowTitle(title), 80);
 			app?.canvas?.setDirty?.(true, true);
 			app?.graph?.setDirtyCanvas?.(true, true);
 		} catch (error) {
@@ -3554,15 +3622,19 @@ import { api } from "/scripts/api.js";
 			const metadata = await buildMetadata();
 			const snapshot = buildGraphSnapshot(lastWorkflowObject);
 			const filename = buildFilename(snapshot);
-			if (!snapshot.bounds || !snapshot.nodes.length) {
+			const clipboardCanvas = await clipboardImageCanvas();
+			if (!clipboardCanvas && (!snapshot.bounds || !snapshot.nodes.length)) {
 				alert("当前工作流没有可截图的节点。");
 				return;
 			}
-			await cacheVideoCombineFrames(snapshot);
-			const cropped = await captureWorkflowCanvas(snapshot);
-			if (!cropped) throw new Error("截图画布创建失败");
-			const exportCanvas = constrainCanvasDimensions(cropped);
-			const imageBytes = await canvasToImageBytes(exportCanvas, filename);
+			let sourceCanvas = clipboardCanvas;
+			if (!sourceCanvas) {
+				await cacheVideoCombineFrames(snapshot);
+				sourceCanvas = await captureWorkflowCanvas(snapshot);
+			}
+			if (!sourceCanvas) throw new Error("截图画布创建失败");
+			const exportCanvas = squareWorkflowImageCanvas(sourceCanvas);
+			const imageBytes = await canvasToPngBytes(exportCanvas);
 			const finalBytes = injectImageMetadata(imageBytes, metadata, filename);
 			const saved = await saveImageBytes(finalBytes, filename);
 			rememberSavedScreenshot(finalBytes, metadata, saved);

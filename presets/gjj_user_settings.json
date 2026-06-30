@@ -2,12 +2,12 @@
   "version": 1,
   "workflow_screenshot": {
     "directory": "workflows",
-    "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.jpg",
+    "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
-    "search_text": "",
+    "search_text": "nsfw",
     "page_size": 10,
-    "image_format": "jpg",
+    "image_format": "png",
     "jpeg_quality": 0.86
   },
   "workflow_title": {

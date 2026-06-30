@@ -68,7 +68,7 @@ const AUTO_MEDIA_INFO_DEFAULTS = new Map([
 ]);
 const INPUT_DEFS = [
 	{ key: "input_frames", name: "input_frames", label: "视频帧队列", type: OPTIONAL_INPUT_TYPE },
-	{ key: "frame_rate", name: "frame_rate", label: "帧率", type: "FLOAT" },
+	{ key: "frame_rate", name: "frame_rate", label: "帧率", type: "INT,FLOAT" },
 	{ key: "width", name: "width", label: "宽度", type: "INT" },
 	{ key: "height", name: "height", label: "高度", type: "INT" },
 	{ key: "video_format", name: "video_format", label: "视频格式", type: "STRING" },
@@ -93,7 +93,7 @@ const OUTPUT_DEFS = [
 	{ key: "first_frame", name: "首帧预览", type: "IMAGE" },
 	{ key: "last_frame", name: "尾帧预览", type: "IMAGE" },
 	{ key: "info_json", name: "视频信息JSON", type: "STRING" },
-	{ key: "frame_rate", name: "帧率", type: "FLOAT" },
+	{ key: "frame_rate", name: "帧率", type: "INT,FLOAT" },
 	{ key: "frame_count", name: "输出帧数", type: "INT" },
 	{ key: "source_duration", name: "源时长", type: "FLOAT" },
 	{ key: "width", name: "宽度", type: "INT" },
@@ -2342,6 +2342,50 @@ function writeSerializedOutputSlots(serializedNode, defs) {
 	serializedNode.outputs = defs.map((def, index) => serializedOutputObject(existing[index], def, index));
 }
 
+function findPromptNodeInfo(promptResult, nodeId) {
+	const output = promptResult?.output || promptResult?.prompt?.output || promptResult?.prompt || promptResult;
+	if (!output || typeof output !== "object") return null;
+	return output[String(nodeId)] || output[Number(nodeId)] || null;
+}
+
+function patchPromptUnlinkedParamInputs(promptResult, graph = app.graph) {
+	if (!promptResult || !graph) return promptResult;
+	for (const node of graph._nodes || []) {
+		if (!TARGET_NODES.has(node?.comfyClass || node?.type)) continue;
+		const nodeInfo = findPromptNodeInfo(promptResult, node.id);
+		if (!nodeInfo || typeof nodeInfo !== "object") continue;
+		nodeInfo.inputs = nodeInfo.inputs || {};
+		for (const input of node.inputs || []) {
+			const key = inputSlotKey(input);
+			if (!key || key === OPTIONAL_INPUT_NAME || !PARAM_WIDGET_NAMES.has(key)) continue;
+			if (input.link !== null && input.link !== undefined) continue;
+			const widgetValue = getWidgetValue(node, key);
+			if (widgetValue !== undefined) nodeInfo.inputs[key] = widgetValue;
+		}
+	}
+	return promptResult;
+}
+
+function installPromptPatch() {
+	if (!api.__gjjMultiVideoLoaderPromptPatchInstalled && typeof api.queuePrompt === "function") {
+		api.__gjjMultiVideoLoaderPromptPatchInstalled = true;
+		const originalQueuePrompt = api.queuePrompt.bind(api);
+		api.queuePrompt = async function (number, promptData, ...args) {
+			patchPromptUnlinkedParamInputs(promptData, app.rootGraph || app.graph);
+			return originalQueuePrompt(number, promptData, ...args);
+		};
+	}
+	if (!app.__gjjMultiVideoLoaderPromptPatchInstalled && typeof app.graphToPrompt === "function") {
+		app.__gjjMultiVideoLoaderPromptPatchInstalled = true;
+		const originalGraphToPrompt = app.graphToPrompt.bind(app);
+		app.graphToPrompt = async function (...args) {
+			const result = await originalGraphToPrompt(...args);
+			const graph = args[0] || this.rootGraph || this.graph || app.rootGraph || app.graph;
+			return patchPromptUnlinkedParamInputs(result, graph);
+		};
+	}
+}
+
 function applyDynamicOutputs(node) {
 	if (!node) return;
 	const defs = currentOutputDefs(node);
@@ -2870,6 +2914,7 @@ app.registerExtension({
 	},
 
 	setup() {
+		installPromptPatch();
 		for (const node of app.graph?._nodes || []) {
 			if (TARGET_NODES.has(node?.comfyClass)) {
 				stabilizeNode(node);

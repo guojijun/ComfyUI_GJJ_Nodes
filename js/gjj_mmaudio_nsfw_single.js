@@ -5,18 +5,33 @@ import { GJJ_Utils } from "./gjj_utils.js";
 const TARGET = "GJJ_MMAudioNSFWSingle";
 const TOOLBAR_NAME = "gjj_mmaudio_nsfw_toolbar";
 const ADVANCED_PROPERTY = "gjj_mmaudio_nsfw_show_advanced";
+const MODEL_PANEL_PROPERTY = "gjj_mmaudio_nsfw_show_model_panel";
+const VIDEO_PANEL_PROPERTY = "gjj_mmaudio_nsfw_show_video_panel";
+const AUDIO_PANEL_PROPERTY = "gjj_mmaudio_nsfw_show_audio_panel";
 const VIDEO_EXTENSIONS = ".mp4,.webm,.mov,.mkv,.avi,.m4v,.flv,.wmv,.mpeg,.mpg";
-const PARAM_WIDGETS = new Set([
+const MODEL_WIDGETS = new Set([
 	"mmaudio_model",
 	"vae_model",
 	"synchformer_model",
 	"clip_model",
+	"force_offload",
+	"base_precision",
+	"feature_precision",
+]);
+const VIDEO_WIDGETS = new Set([
 	"force_rate",
 	"custom_width",
 	"custom_height",
 	"frame_load_cap",
 	"skip_first_frames",
 	"select_every_nth",
+	"filename_prefix",
+	"format_name",
+	"save_output",
+	"pix_fmt",
+	"crf",
+]);
+const AUDIO_WIDGETS = new Set([
 	"duration_mode",
 	"duration",
 	"steps",
@@ -24,14 +39,6 @@ const PARAM_WIDGETS = new Set([
 	"seed",
 	"negative_prompt",
 	"mask_away_clip",
-	"force_offload",
-	"base_precision",
-	"feature_precision",
-	"filename_prefix",
-	"format_name",
-	"save_output",
-	"pix_fmt",
-	"crf",
 ]);
 const ALWAYS_HIDDEN_WIDGETS = new Set(["video", "translation_enabled", "translation_device", "translation_unload_after_use"]);
 const RESTORE_WIDGET_TYPES = {
@@ -98,8 +105,27 @@ function scheduleRefreshNode(node) {
 	setTimeout(() => refreshNode(node), 40);
 }
 
-function advancedOpen(node) {
-	return Boolean(node?.properties?.[ADVANCED_PROPERTY]);
+function migrateLegacyAdvancedState(node) {
+	if (!node?.properties) return;
+	if (node.properties[ADVANCED_PROPERTY] !== true) return;
+	if (node.properties[VIDEO_PANEL_PROPERTY] === undefined) {
+		node.properties[VIDEO_PANEL_PROPERTY] = true;
+	}
+	if (node.properties[AUDIO_PANEL_PROPERTY] === undefined) {
+		node.properties[AUDIO_PANEL_PROPERTY] = true;
+	}
+}
+
+function modelPanelOpen(node) {
+	return node?.properties?.[MODEL_PANEL_PROPERTY] !== false;
+}
+
+function videoPanelOpen(node) {
+	return Boolean(node?.properties?.[VIDEO_PANEL_PROPERTY]);
+}
+
+function audioPanelOpen(node) {
+	return Boolean(node?.properties?.[AUDIO_PANEL_PROPERTY]);
 }
 
 function getWidget(node, name) {
@@ -232,8 +258,16 @@ function toggleTranslation(node) {
 	updateToolbar(node);
 }
 
-function toggleAdvanced(node) {
-	setAdvancedOpen(node, !advancedOpen(node));
+function toggleModelPanel(node) {
+	setPanelOpen(node, MODEL_PANEL_PROPERTY, !modelPanelOpen(node));
+}
+
+function toggleVideoPanel(node) {
+	setPanelOpen(node, VIDEO_PANEL_PROPERTY, !videoPanelOpen(node));
+}
+
+function toggleAudioPanel(node) {
+	setPanelOpen(node, AUDIO_PANEL_PROPERTY, !audioPanelOpen(node));
 }
 
 function makeButton(label, title, onClick) {
@@ -329,10 +363,24 @@ function updateToolbar(node) {
 			? "提示词翻译：开启。执行时使用 translation\\opus-mt-zh-en.safetensors 把正向提示词翻译为英文。"
 			: "提示词翻译：关闭。点击开启 🌏 翻译正向提示词。";
 	}
-	buttons.advanced.classList.toggle("gjj-active", !!node.properties?.[ADVANCED_PROPERTY]);
-	buttons.advanced.title = node.properties?.[ADVANCED_PROPERTY]
-		? "收起材料/参数，只保留按钮。"
-		: "显示材料/参数：模型、采样、提示词和输出设置。";
+	buttons.model?.classList.toggle("gjj-active", modelPanelOpen(node));
+	if (buttons.model) {
+		buttons.model.title = modelPanelOpen(node)
+			? "模型参数：显示。点击收起模型选择。"
+			: "模型参数：隐藏。点击显示模型选择。";
+	}
+	buttons.video?.classList.toggle("gjj-active", videoPanelOpen(node));
+	if (buttons.video) {
+		buttons.video.title = videoPanelOpen(node)
+			? "视频参数：显示。点击收起视频读取和输出设置。"
+			: "视频参数：隐藏。点击显示视频读取和输出设置。";
+	}
+	buttons.audio?.classList.toggle("gjj-active", audioPanelOpen(node));
+	if (buttons.audio) {
+		buttons.audio.title = audioPanelOpen(node)
+			? "配音参数：显示。点击收起采样和反向提示词设置。"
+			: "配音参数：隐藏。点击显示采样和反向提示词设置。";
+	}
 }
 
 function rememberWidgetState(widget) {
@@ -407,12 +455,15 @@ function setWidgetHidden(widget, hidden) {
 	if (widget.inputEl) widget.inputEl.style.display = "";
 }
 
-function applyAdvancedVisibility(node) {
+function applyPanelVisibility(node) {
 	if (!node || !Array.isArray(node.widgets)) {
 		return;
 	}
 	node.properties = node.properties || {};
-	const show = advancedOpen(node);
+	migrateLegacyAdvancedState(node);
+	const showModel = modelPanelOpen(node);
+	const showVideo = videoPanelOpen(node);
+	const showAudio = audioPanelOpen(node);
 	for (const widget of node.widgets) {
 		if (!widget.__gjjMMAudioVisibilityState) {
 			rememberWidgetState(widget);
@@ -422,21 +473,28 @@ function applyAdvancedVisibility(node) {
 		const name = String(widget?.name || "");
 		if (ALWAYS_HIDDEN_WIDGETS.has(name)) {
 			setWidgetHidden(widget, true);
-		} else if (PARAM_WIDGETS.has(name)) {
-			setWidgetHidden(widget, !show);
+		} else if (MODEL_WIDGETS.has(name)) {
+			setWidgetHidden(widget, !showModel);
+		} else if (VIDEO_WIDGETS.has(name)) {
+			setWidgetHidden(widget, !showVideo);
+		} else if (AUDIO_WIDGETS.has(name)) {
+			setWidgetHidden(widget, !showAudio);
 		}
 	}
 	updateToolbar(node);
 	refreshNode(node);
 }
 
-function setAdvancedOpen(node, open) {
+function setPanelOpen(node, property, open) {
 	if (!node) {
 		return;
 	}
 	node.properties = node.properties || {};
-	node.properties[ADVANCED_PROPERTY] = Boolean(open);
-	applyAdvancedVisibility(node);
+	node.properties[property] = Boolean(open);
+	if (property === VIDEO_PANEL_PROPERTY || property === AUDIO_PANEL_PROPERTY) {
+		node.properties[ADVANCED_PROPERTY] = Boolean(node.properties[VIDEO_PANEL_PROPERTY] || node.properties[AUDIO_PANEL_PROPERTY]);
+	}
+	applyPanelVisibility(node);
 }
 
 function moveToolbarToTop(node) {
@@ -451,9 +509,9 @@ function moveToolbarToTop(node) {
 	}
 }
 
-function scheduleAdvancedVisibility(node) {
+function schedulePanelVisibility(node) {
 	for (const delay of [0, 30, 120, 300]) {
-		setTimeout(() => applyAdvancedVisibility(node), delay);
+		setTimeout(() => applyPanelVisibility(node), delay);
 	}
 }
 
@@ -470,9 +528,11 @@ function ensureToolbar(node) {
 	const seed = makeButton("🎲", "随机种子。", () => randomizeSeed(node));
 	const save = makeButton("💾", "切换保存到输出目录/临时目录。", () => toggleSaveOutput(node));
 	const translate = makeButton("🌏", "提示词翻译：关闭。点击开启 🌏 翻译正向提示词。", () => toggleTranslation(node));
-	const advanced = makeButton("⚙️", "显示/隐藏参数。", () => toggleAdvanced(node));
-	row.append(open, seed, save, translate, advanced);
-	node.__gjjMMAudioToolbarButtons = { open, seed, save, translate, advanced };
+	const model = makeButton("🧠", "模型参数：显示。点击收起模型选择。", () => toggleModelPanel(node));
+	const video = makeButton("🎬", "视频参数：点击显示视频读取和输出设置。", () => toggleVideoPanel(node));
+	const audio = makeButton("🔊", "配音参数：点击显示采样和反向提示词设置。", () => toggleAudioPanel(node));
+	row.append(open, seed, save, translate, model, video, audio);
+	node.__gjjMMAudioToolbarButtons = { open, seed, save, translate, model, video, audio };
 	const widget = node.addDOMWidget?.(TOOLBAR_NAME, "HTML", row, {
 		serialize: false,
 		hideOnZoom: false,
@@ -486,7 +546,7 @@ function ensureToolbar(node) {
 		node.__gjjMMAudioToolbarWidget = widget;
 		moveToolbarToTop(node);
 	} else {
-		const fallback = node.addWidget?.("button", "📁 🎲 💾 🌏 ⚙️", null, () => openVideoPicker(node), { serialize: false });
+		const fallback = node.addWidget?.("button", "📁 🎲 💾 🌏 🧠 🎬 🔊", null, () => openVideoPicker(node), { serialize: false });
 		if (fallback) {
 			fallback.serialize = false;
 			fallback.options ||= {};
@@ -503,9 +563,9 @@ function patchNode(node) {
 	if (!node) return;
 	ensureToolbar(node);
 	moveToolbarToTop(node);
-	applyAdvancedVisibility(node);
+	applyPanelVisibility(node);
 	updateToolbar(node);
-	scheduleAdvancedVisibility(node);
+	schedulePanelVisibility(node);
 }
 
 app.registerExtension({
@@ -517,7 +577,7 @@ app.registerExtension({
 		nodeType.prototype.onNodeCreated = function (...args) {
 			const result = originalOnNodeCreated?.apply(this, args);
 			ensureToolbar(this);
-			scheduleAdvancedVisibility(this);
+			schedulePanelVisibility(this);
 			return result;
 		};
 
@@ -525,7 +585,7 @@ app.registerExtension({
 		nodeType.prototype.onConfigure = function (...args) {
 			const result = originalOnConfigure?.apply(this, args);
 			ensureToolbar(this);
-			scheduleAdvancedVisibility(this);
+			schedulePanelVisibility(this);
 			return result;
 		};
 
