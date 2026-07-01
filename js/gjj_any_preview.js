@@ -29,6 +29,7 @@ const NATIVE_PREVIEW_CLEANUP_DELAYS = [0, 16, 60, 150, 300, 800, 1600, 3200];
 const NATIVE_PREVIEW_WIDGET_PATTERN = /(?:preview|image|images|img|图像|图片|预览)/i;
 const LORA_EFFECT_LIVE_TEXT_MAP_KEY = "__gjjLoraEffectTesterLiveTextByNodeId";
 const LIVE_PREVIEW_STATE_KEY = "__gjjAnyPreviewLiveState";
+const CONNECTION_PREVIEW_MENU_LABEL = "预览结果";
 const IMAGE_SEQUENCE_MIN_FRAMES = 16;
 const IMAGE_SEQUENCE_PREVIEW_FPS = 12;
 const MODE_EDIT = "edit";
@@ -4361,6 +4362,193 @@ function scheduleStabilize(node, ms = 32) {
 	node.__gjjAnyPreviewTimer = setTimeout(() => stabilizeNode(node), ms);
 }
 
+function slotIndex(node, slot, isOutput) {
+	if (!node || slot == null) return -1;
+	if (typeof slot === "number") return slot;
+	if (typeof slot === "string") {
+		const found = isOutput
+			? node.findOutputSlot?.(slot, false)
+			: node.findInputSlot?.(slot, false);
+		return Number.isInteger(found) ? found : -1;
+	}
+	if (typeof slot === "object") {
+		const slots = isOutput ? node.outputs : node.inputs;
+		const index = slots?.indexOf?.(slot);
+		if (Number.isInteger(index) && index >= 0) return index;
+		const found = isOutput
+			? node.findOutputSlot?.(slot.name, false)
+			: node.findInputSlot?.(slot.name, false);
+		return Number.isInteger(found) ? found : -1;
+	}
+	return -1;
+}
+
+function centerPreviewNodeAtPointer(node, event) {
+	const x = Number(event?.canvasX);
+	const y = Number(event?.canvasY);
+	if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+	const width = Number(node?.size?.[0] || MIN_WIDTH);
+	const height = Number(node?.size?.[1] || MIN_PREVIEW_HEIGHT);
+	node.pos = [Math.round(x - width / 2), Math.round(y - Math.min(80, height / 2))];
+}
+
+function graphNodeById(graph, id) {
+	if (!graph || id == null) return null;
+	return graph.getNodeById?.(id) || graph._nodes_by_id?.[id] || graph._nodes?.find?.((node) => String(node.id) === String(id)) || null;
+}
+
+function linkById(graph, id) {
+	if (!graph || id == null) return null;
+	const links = graph.links;
+	if (links instanceof Map) return links.get(id) || links.get(String(id)) || null;
+	if (links && typeof links === "object") return links[id] || links[String(id)] || null;
+	return null;
+}
+
+function connectionFromMenuOptions(opts = {}) {
+	const graph = app.canvas?.graph || app.graph;
+	const direct = {
+		source: opts.nodeFrom,
+		target: opts.nodeTo,
+		sourceSlot: slotIndex(opts.nodeFrom, opts.slotFrom, true),
+		targetSlot: slotIndex(opts.nodeTo, opts.slotTo, false),
+	};
+	if (direct.source && direct.target && direct.sourceSlot >= 0 && direct.targetSlot >= 0) {
+		return direct;
+	}
+
+	const link = (typeof opts.link === "object" && opts.link) || linkById(graph, opts.afterRerouteId ?? opts.linkId ?? opts.link_id ?? opts.link?.id);
+	if (!link) return direct;
+	const source = graphNodeById(graph, link.origin_id ?? link.originId ?? link.source_id ?? link.sourceId);
+	const target = graphNodeById(graph, link.target_id ?? link.targetId);
+	return {
+		source,
+		target,
+		sourceSlot: Number(link.origin_slot ?? link.originSlot ?? link.source_slot ?? link.sourceSlot),
+		targetSlot: Number(link.target_slot ?? link.targetSlot),
+		link,
+	};
+}
+
+function insertAnyPreviewOnConnection(opts = {}) {
+	const graph = app.canvas?.graph || app.graph;
+	const connection = connectionFromMenuOptions(opts);
+	const source = connection.source;
+	const target = connection.target;
+	const sourceSlot = connection.sourceSlot;
+	const targetSlot = connection.targetSlot;
+	const preview = globalThis.LiteGraph?.createNode?.("GJJ_AnyPreview");
+	if (!graph || !source || !target || sourceSlot < 0 || targetSlot < 0 || !preview) {
+		console.warn("[GJJ AnyPreview] 无法在连线中插入预览节点", opts);
+		return false;
+	}
+
+	centerPreviewNodeAtPointer(preview, opts.e);
+	graph.add(preview);
+
+	const targetInput = target.inputs?.[targetSlot];
+	if (targetInput?.link != null) {
+		if (typeof target.disconnectInput === "function") {
+			target.disconnectInput(targetSlot);
+		} else {
+			graph.removeLink?.(targetInput.link);
+		}
+	}
+
+	source.connect(sourceSlot, preview, 0);
+	preview.connect(0, target, targetSlot);
+	stabilizeNode(preview);
+	graph.change?.();
+	graph.setDirtyCanvas?.(true, true);
+	app.canvas?.setDirty?.(true, true);
+	return true;
+}
+
+function closeLiteGraphMenus() {
+	for (const menu of document.querySelectorAll(".litecontextmenu")) {
+		menu.remove();
+	}
+}
+
+function installConnectionPreviewMenuDomFallback(opts = {}) {
+	setTimeout(() => {
+		const menus = Array.from(document.querySelectorAll(".litecontextmenu"));
+		const menu = menus.at(-1);
+		if (!menu || menu.__gjjAnyPreviewInjected) return;
+		const entries = Array.from(menu.children || []);
+		if (entries.some((entry) => String(entry.textContent || "").trim() === CONNECTION_PREVIEW_MENU_LABEL)) return;
+		const rerouteEntry = entries.find((entry) => String(entry.textContent || "").trim() === "Add Reroute");
+		if (!rerouteEntry) return;
+
+		const previewEntry = rerouteEntry.cloneNode(false);
+		previewEntry.textContent = CONNECTION_PREVIEW_MENU_LABEL;
+		previewEntry.dataset.gjjAnyPreviewMenu = "true";
+		const activate = (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			insertAnyPreviewOnConnection(opts);
+			closeLiteGraphMenus();
+		};
+		previewEntry.addEventListener("pointerdown", activate);
+		previewEntry.addEventListener("mousedown", activate);
+		previewEntry.addEventListener("click", activate);
+		rerouteEntry.insertAdjacentElement("afterend", previewEntry);
+		menu.__gjjAnyPreviewInjected = true;
+	}, 0);
+}
+
+function installConnectionPreviewMenu() {
+	const canvas = app.canvas;
+	if (!canvas || canvas.__gjjAnyPreviewConnectionMenuPatched) return;
+	const originalShowConnectionMenu = canvas.showConnectionMenu?.bind(canvas);
+	if (typeof originalShowConnectionMenu !== "function") return;
+
+	canvas.__gjjAnyPreviewConnectionMenuPatched = true;
+	canvas.showConnectionMenu = function (optPass) {
+		const opts = optPass || {};
+		const connection = connectionFromMenuOptions(opts);
+		const canInsert = connection.source && connection.target && connection.sourceSlot >= 0 && connection.targetSlot >= 0;
+		if (!canInsert) return originalShowConnectionMenu(optPass);
+		installConnectionPreviewMenuDomFallback(opts);
+
+		const OriginalContextMenu = globalThis.LiteGraph?.ContextMenu;
+		if (typeof OriginalContextMenu !== "function") return originalShowConnectionMenu(optPass);
+
+		let interceptActive = true;
+		globalThis.LiteGraph.ContextMenu = function (options, menuOptions = {}) {
+			globalThis.LiteGraph.ContextMenu = OriginalContextMenu;
+			if (!interceptActive || !Array.isArray(options)) {
+				return new OriginalContextMenu(options, menuOptions);
+			}
+			interceptActive = false;
+
+			const rerouteIndex = options.indexOf("Add Reroute");
+			if (rerouteIndex >= 0 && !options.includes(CONNECTION_PREVIEW_MENU_LABEL)) {
+				options.splice(rerouteIndex + 1, 0, CONNECTION_PREVIEW_MENU_LABEL);
+			}
+
+			const originalCallback = menuOptions.callback;
+			menuOptions.callback = function (value, callbackOptions, event) {
+				if (value === CONNECTION_PREVIEW_MENU_LABEL) {
+					insertAnyPreviewOnConnection(opts);
+					return;
+				}
+				return originalCallback?.call(this, value, callbackOptions, event);
+			};
+
+			return new OriginalContextMenu(options, menuOptions);
+		};
+		globalThis.LiteGraph.ContextMenu.prototype = OriginalContextMenu.prototype;
+
+		try {
+			return originalShowConnectionMenu(optPass);
+		} finally {
+			globalThis.LiteGraph.ContextMenu = OriginalContextMenu;
+			interceptActive = false;
+		}
+	};
+}
+
 installNativePreviewEventFilter();
 ensureMotionGuardStyle();
 
@@ -4596,6 +4784,7 @@ app.registerExtension({
 	},
 
 	setup() {
+		installConnectionPreviewMenu();
 		installCanvasMotionGuard();
 		installLiveVirtualPreviewPromptPatch();
 		for (const node of app.graph?._nodes || []) {

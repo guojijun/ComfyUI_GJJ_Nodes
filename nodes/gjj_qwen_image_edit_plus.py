@@ -57,6 +57,7 @@ _DESCRIPTION = (
 REFERENCE_LATENTS_METHODS = ["offset", "index", "uxo/uno", "index_timestep_zero"]
 DEFAULT_REFERENCE_LATENTS_METHOD = "index_timestep_zero"
 MAX_REFERENCE_IMAGES = 3
+QWEN_IMAGE_EDIT_IMAGE_TOKEN = "<|vision_start|><|image_pad|><|vision_end|>"
 LAZY_REFERENCE_VL_SIZE = 384
 
 PREFERED_KONTEXT_RESOLUTIONS = [
@@ -372,6 +373,23 @@ def _apply_reference_latents_method(conditioning: Any, method: Any):
         raise RuntimeError(f"FluxKontext 多参考潜在方法设置失败：{exc}") from exc
 
 
+def _rewrite_qwen_image_references(prompt: str, image_count: int = MAX_REFERENCE_IMAGES) -> str:
+    text = str(prompt or "")
+    max_index = max(1, min(MAX_REFERENCE_IMAGES, int(image_count or 1)))
+    for index in range(1, max_index + 1):
+        text = re.sub(
+            rf"(?i)\b(?:picture|image|img)\s*#?\s*{index}\b",
+            f"image{index}",
+            text,
+        )
+        text = re.sub(
+            rf"(?:第\s*{index}\s*[张个幅]?\s*(?:图|图片|参考图)|图\s*{index}|图片\s*{index}|参考图\s*{index})",
+            f"image{index}",
+            text,
+        )
+    return text
+
+
 def _encode_qwen_image_edit_plus(
     clip: Any,
     prompt: str,
@@ -407,7 +425,7 @@ def _encode_qwen_image_edit_plus(
             )
             images_vl.append(vl_image[:, :, :, :3])
             ref_latents.append(vae.encode(vae_image[:, :, :, :3]))
-            image_prompt += f"Picture {index}: <|vision_start|><|image_pad|><|vision_end|>"
+            image_prompt += f"image{index}: {QWEN_IMAGE_EDIT_IMAGE_TOKEN}\n"
             continue
 
         total = int(384 * 384)
@@ -428,9 +446,9 @@ def _encode_qwen_image_edit_plus(
                 vae_image = comfy.utils.common_upscale(samples, width, height, "area", "disabled").movedim(1, -1)
             ref_latents.append(vae.encode(vae_image[:, :, :, :3]))
 
-        image_prompt += f"Picture {index}: <|vision_start|><|image_pad|><|vision_end|>"
+        image_prompt += f"image{index}: {QWEN_IMAGE_EDIT_IMAGE_TOKEN}\n"
 
-    tokens = clip.tokenize(image_prompt + str(prompt or ""), images=images_vl, llama_template=DEFAULT_LLAMA_TEMPLATE)
+    tokens = clip.tokenize(_rewrite_qwen_image_references(image_prompt + str(prompt or ""), len(images_vl)), images=images_vl, llama_template=DEFAULT_LLAMA_TEMPLATE)
     conditioning = clip.encode_from_tokens_scheduled(tokens)
     if ref_latents:
         conditioning = node_helpers.conditioning_set_values(

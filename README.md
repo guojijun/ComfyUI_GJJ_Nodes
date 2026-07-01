@@ -327,9 +327,9 @@ ComfyUI_GJJ_Nodes/
 ├── requirements-accelerate.txt    # 推理加速依赖
 ├── js/                            # 前端 JS（每个节点独立文件）
 ├── nodes/                         # 后端 Python（每个节点独立文件）
-│   └── common_utils/              # 共享工具模块
+│　　 ├── common_utils/              # 共享工具模块
 ├── locales/                       # 国际化
-│   └── zh/                        # 中文语言包
+│　　 ├── zh/                        # 中文语言包
 ├── examples/                      # 工作流 JSON 示例
 ├── presets/                       # 预设文件
 ├── utils/                         # 通用工具脚本

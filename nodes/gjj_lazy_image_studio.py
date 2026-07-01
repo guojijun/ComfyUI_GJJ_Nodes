@@ -4,6 +4,7 @@ import json
 import hashlib
 import math
 import os
+import re
 import time
 from typing import Any
 
@@ -126,6 +127,7 @@ QWEN_IMAGE_EDIT_LLAMA_TEMPLATE = (
     "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
 )
 QWEN_IMAGE_EDIT_IMAGE_TOKEN = "<|vision_start|><|image_pad|><|vision_end|>"
+QWEN_IMAGE_EDIT_MAX_PLUS_IMAGES = 3
 
 register_prompt_translation_api((COMMON_PROMPT_TRANSLATE_API_PATH,))
 
@@ -1931,6 +1933,22 @@ class GJJ_LazyImageStudio:
         )[0]
         return positive, negative, latent_out
 
+    def _rewrite_qwen_image_references(self, prompt: str, image_count: int = QWEN_IMAGE_EDIT_MAX_PLUS_IMAGES) -> str:
+        text = str(prompt or "")
+        max_index = max(1, min(QWEN_IMAGE_EDIT_MAX_PLUS_IMAGES, int(image_count or 1)))
+        for index in range(1, max_index + 1):
+            text = re.sub(
+                rf"(?i)\b(?:picture|image|img)\s*#?\s*{index}\b",
+                f"image{index}",
+                text,
+            )
+            text = re.sub(
+                rf"(?:第\s*{index}\s*[张个幅]?\s*(?:图|图片|参考图)|图\s*{index}|图片\s*{index}|参考图\s*{index})",
+                f"image{index}",
+                text,
+            )
+        return text
+
     def _encode_equal_reference_image_edit(
         self,
         clip,
@@ -1944,7 +1962,7 @@ class GJJ_LazyImageStudio:
         batch_size: int = 1,
     ):
         # 限制最大参考图数量以避免OOM，特别是对于FireRed和qwen-image-edit模型
-        MAX_REFERENCE_IMAGES = 3
+        MAX_REFERENCE_IMAGES = QWEN_IMAGE_EDIT_MAX_PLUS_IMAGES
         if len(pairs) > MAX_REFERENCE_IMAGES:
             print(
                 f"[WARNING] 参考图数量 ({len(pairs)}) 超过最大限制 ({MAX_REFERENCE_IMAGES})，仅使用前 {MAX_REFERENCE_IMAGES} 张"
@@ -1979,14 +1997,14 @@ class GJJ_LazyImageStudio:
                 )
             )
             vl_images.append(vl_image[:, :, :, :3])
-            image_prompt += f"Picture {slot + 1}: {QWEN_IMAGE_EDIT_IMAGE_TOKEN}"
+            image_prompt += f"image{slot + 1}: {QWEN_IMAGE_EDIT_IMAGE_TOKEN}\n"
 
             # 及时清理不需要的中间变量以释放显存
             del prepared_image, vl_image
 
         if not ref_latents:
             raise RuntimeError("平等参考模式至少需要一张有效参考图。")
-        full_prompt = image_prompt + str(prompt or "")
+        full_prompt = self._rewrite_qwen_image_references(image_prompt + str(prompt or ""), len(vl_images))
         tokens = clip.tokenize(
             full_prompt,
             images=vl_images,
@@ -2250,6 +2268,7 @@ class GJJ_LazyImageStudio:
         batch_source_images="[]",
         mask=None,
         disable_reference_auto_mask=False,
+        force_empty_latent_reference=False,
         keep_model_loaded=False,
         prompt_graph=None,
         unique_id=None,
@@ -2279,6 +2298,7 @@ class GJJ_LazyImageStudio:
         batch_source_images = _unwrap_list_input(batch_source_images)
         mask = _unwrap_list_input(mask)
         disable_reference_auto_mask = _unwrap_list_input(disable_reference_auto_mask)
+        force_empty_latent_reference = _unwrap_list_input(force_empty_latent_reference)
         keep_model_loaded = _unwrap_list_input(keep_model_loaded)
         prompt_graph = _unwrap_list_input(prompt_graph)
         unique_id = _unwrap_list_input(unique_id)
@@ -2477,6 +2497,7 @@ class GJJ_LazyImageStudio:
                     "denoise": float(denoise),
                     "grow_mask_by": int(grow_mask_by),
                     "disable_reference_auto_mask": _as_bool(disable_reference_auto_mask),
+                    "force_empty_latent_reference": _as_bool(force_empty_latent_reference),
                     "pairs": _pairs_signature(pairs),
                     "mask": _tensor_signature(mask) if mask is not None else "",
                 }
@@ -2590,6 +2611,7 @@ class GJJ_LazyImageStudio:
                     and supports_reference_edit
                     and (
                         _uses_equal_reference_canvas(preset, unet_name)
+                        or _as_bool(force_empty_latent_reference)
                         or (len(pairs) > 1 and _is_qwen_image_edit_family(preset, unet_name))
                     )
                 ):

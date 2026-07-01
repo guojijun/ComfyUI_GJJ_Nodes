@@ -41,7 +41,7 @@ ComfyUI/
         └── LatentSync-1.6/          ← create this folder
             ├── latentsync_unet.pt
             ├── whisper/
-            │   └── tiny.pt
+            │　　 ├── tiny.pt
             └── vae/
                 ├── config.json
                 └── diffusion_pytorch_model.safetensors

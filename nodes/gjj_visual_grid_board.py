@@ -1147,4 +1147,4 @@ _register_visual_grid_board_api()
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_VisualGridBoard}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🔳 通用可视化宫格"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🔳 可视化宫格生成（F2K）"}

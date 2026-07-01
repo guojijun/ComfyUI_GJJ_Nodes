@@ -18,6 +18,11 @@ const MULTI_IMAGE_MIN_WIDTH = 104;
 const BUTTON_WIDGET_NAME = "gjj_save_any_object_output_button";
 const FOLDER_WIDGET_NAME = "gjj_save_any_object_folder_button";
 const FILENAME_VARIABLES_PROPERTY = "gjj_save_any_object_filename_prefix_variables";
+const SAVE_FORMAT_CONFIG_WIDGET = "save_format_config";
+const SAVE_FORMAT_CONFIG_PROPERTY = "gjj_save_any_object_format_config";
+const DEFAULT_SAVE_FORMAT_CONFIG = { image_format: "PNG", audio_format: "WAV" };
+const IMAGE_FORMATS = ["PNG", "JPG", "WEBP", "BMP"];
+const AUDIO_FORMATS = ["WAV", "MP3"];
 
 function previewDataToUrl(data, includePreviewFormat = true) {
 	if (!data?.filename) {
@@ -258,6 +263,50 @@ function setWidgetValue(node, name, value) {
 	return true;
 }
 
+function normalizeSaveFormatConfig(value) {
+	let parsed = {};
+	if (typeof value === "string" && value.trim()) {
+		try {
+			parsed = JSON.parse(value);
+		} catch (_) {
+			parsed = {};
+		}
+	} else if (value && typeof value === "object") {
+		parsed = value;
+	}
+	const image = String(parsed.image_format || DEFAULT_SAVE_FORMAT_CONFIG.image_format).trim().toUpperCase();
+	const audio = String(parsed.audio_format || DEFAULT_SAVE_FORMAT_CONFIG.audio_format).trim().toUpperCase();
+	return {
+		image_format: IMAGE_FORMATS.includes(image) ? image : DEFAULT_SAVE_FORMAT_CONFIG.image_format,
+		audio_format: AUDIO_FORMATS.includes(audio) ? audio : DEFAULT_SAVE_FORMAT_CONFIG.audio_format,
+	};
+}
+
+function saveFormatConfig(node) {
+	const widgetText = String(getWidget(node, SAVE_FORMAT_CONFIG_WIDGET)?.value || "").trim();
+	const propertyValue = node?.properties?.[SAVE_FORMAT_CONFIG_PROPERTY];
+	return normalizeSaveFormatConfig(widgetText || propertyValue || DEFAULT_SAVE_FORMAT_CONFIG);
+}
+
+function applySaveFormatConfig(node, config) {
+	const normalized = normalizeSaveFormatConfig(config);
+	node.properties ||= {};
+	node.properties[SAVE_FORMAT_CONFIG_PROPERTY] = normalized;
+	setWidgetValue(node, SAVE_FORMAT_CONFIG_WIDGET, JSON.stringify(normalized));
+	updateButtonState(node);
+	return normalized;
+}
+
+function syncSaveFormatConfig(node) {
+	const widget = getWidget(node, SAVE_FORMAT_CONFIG_WIDGET);
+	if (widget) {
+		widget.hidden = true;
+		widget.type = "hidden";
+		widget.computeSize = () => [0, -4];
+	}
+	applySaveFormatConfig(node, saveFormatConfig(node));
+}
+
 function variableOptions(node) {
 	const apiObject = globalThis.GJJ_VariableBroadcast;
 	const graph = node?.graph || app.graph;
@@ -289,6 +338,105 @@ function protectButton(button) {
 function closeVariablePicker(node) {
 	node?.__gjjSaveAnyObjectVariablePicker?.remove?.();
 	node.__gjjSaveAnyObjectVariablePicker = null;
+	updateButtonState(node);
+}
+
+function closeFormatPicker(node) {
+	node?.__gjjSaveAnyObjectFormatPicker?.remove?.();
+	node.__gjjSaveAnyObjectFormatPicker = null;
+	updateButtonState(node);
+}
+
+function createFormatButton(node, kind, value) {
+	const button = document.createElement("button");
+	button.type = "button";
+	button.textContent = value;
+	button.style.cssText = [
+		"padding:5px 8px",
+		"border:1px solid #33434a",
+		"border-radius:6px",
+		"background:#172127",
+		"color:#d9e4df",
+		"cursor:pointer",
+		"font-size:12px",
+	].join(";");
+	const refresh = () => {
+		const config = saveFormatConfig(node);
+		const active = (kind === "image" ? config.image_format : config.audio_format) === value;
+		button.style.background = active ? "#1f6b43" : "#172127";
+		button.style.borderColor = active ? "#65c783" : "#33434a";
+	};
+	button.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const config = saveFormatConfig(node);
+		if (kind === "image") config.image_format = value;
+		else config.audio_format = value;
+		applySaveFormatConfig(node, config);
+		const picker = node.__gjjSaveAnyObjectFormatPicker;
+		picker?.querySelectorAll?.("button[data-format-kind]")?.forEach((item) => item.__refresh?.());
+	});
+	button.dataset.formatKind = kind;
+	button.__refresh = refresh;
+	refresh();
+	return button;
+}
+
+function openFormatPicker(node, anchor) {
+	closeVariablePicker(node);
+	if (node.__gjjSaveAnyObjectFormatPicker) {
+		closeFormatPicker(node);
+		return;
+	}
+	const rect = anchor?.getBoundingClientRect?.() || { left: 0, bottom: 0 };
+	const popup = document.createElement("div");
+	popup.style.cssText = [
+		"position:fixed",
+		`left:${Math.max(8, rect.left)}px`,
+		`top:${Math.max(8, rect.bottom + 6)}px`,
+		"z-index:10000",
+		"width:220px",
+		"padding:10px",
+		"box-sizing:border-box",
+		"border:1px solid #33434a",
+		"border-radius:8px",
+		"background:#0f1418",
+		"box-shadow:0 12px 32px rgba(0,0,0,0.35)",
+		"color:#d9e4df",
+		"font:12px/1.45 sans-serif",
+	].join(";");
+	for (const eventName of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "wheel"]) {
+		popup.addEventListener(eventName, (event) => event.stopPropagation());
+	}
+	const title = document.createElement("div");
+	title.textContent = "默认保存格式";
+	title.style.cssText = "font-weight:700;margin-bottom:8px;color:#e8f1ed;";
+	popup.appendChild(title);
+	const addGroup = (label, kind, values) => {
+		const groupLabel = document.createElement("div");
+		groupLabel.textContent = label;
+		groupLabel.style.cssText = "margin:8px 0 5px;color:#9fb3b8;";
+		const row = document.createElement("div");
+		row.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;";
+		for (const value of values) row.appendChild(createFormatButton(node, kind, value));
+		popup.appendChild(groupLabel);
+		popup.appendChild(row);
+	};
+	addGroup("图片", "image", IMAGE_FORMATS);
+	addGroup("音频", "audio", AUDIO_FORMATS);
+	const note = document.createElement("div");
+	note.textContent = "MP3 需要 ffmpeg；不可用时自动回退 WAV。";
+	note.style.cssText = "margin-top:8px;color:#8ea0a8;";
+	popup.appendChild(note);
+	document.body.appendChild(popup);
+	node.__gjjSaveAnyObjectFormatPicker = popup;
+	const closeOnOutside = (event) => {
+		if (!popup.contains(event.target) && event.target !== anchor) {
+			document.removeEventListener("pointerdown", closeOnOutside, true);
+			closeFormatPicker(node);
+		}
+	};
+	setTimeout(() => document.addEventListener("pointerdown", closeOnOutside, true), 0);
 	updateButtonState(node);
 }
 
@@ -784,8 +932,22 @@ function ensureButtonWidget(node) {
 		openVariablePicker(node, variableButton);
 	});
 
+	const formatButton = document.createElement("button");
+	formatButton.textContent = "⚙️";
+	formatButton.title = "设置默认保存格式";
+	formatButton.style.cssText = folderButton.style.cssText;
+	formatButton.onmouseover = () => { formatButton.style.background = "#3a4a52"; };
+	formatButton.onmouseout = () => updateButtonState(node);
+	protectButton(formatButton);
+	formatButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		openFormatPicker(node, formatButton);
+	});
+
 	container.appendChild(outputButton);
 	container.appendChild(variableButton);
+	container.appendChild(formatButton);
 	container.appendChild(folderButton);
 
 	const widget = node.addDOMWidget?.(BUTTON_WIDGET_NAME, "操作按钮", container, {
@@ -804,6 +966,7 @@ function ensureButtonWidget(node) {
 	node.__gjjSaveAnyObjectButtonContainer = container;
 	node.__gjjSaveAnyObjectButton = outputButton;
 	node.__gjjSaveAnyObjectVariableButton = variableButton;
+	node.__gjjSaveAnyObjectFormatButton = formatButton;
 	node.__gjjSaveAnyObjectFolderButton = folderButton;
 	updateButtonState(node);
 }
@@ -828,6 +991,14 @@ function updateButtonState(node) {
 		variableButton.title = hasVariables
 			? `文件名变量：${selectedFilenameVariables(node).map((item) => `{${item}}`).join(" ")}`
 			: "选择 GJJ_SETNODE / 模板参数变量，插入到文件名前缀";
+	}
+	const formatButton = node.__gjjSaveAnyObjectFormatButton;
+	if (formatButton) {
+		const config = saveFormatConfig(node);
+		const active = config.image_format !== DEFAULT_SAVE_FORMAT_CONFIG.image_format || config.audio_format !== DEFAULT_SAVE_FORMAT_CONFIG.audio_format || Boolean(node.__gjjSaveAnyObjectFormatPicker);
+		formatButton.style.background = active ? "#1f4f6b" : "#2a3a42";
+		formatButton.style.borderColor = active ? "#65a8c7" : "#33434a";
+		formatButton.title = `默认保存格式：图片 ${config.image_format}，音频 ${config.audio_format}`;
 	}
 }
 
@@ -960,6 +1131,7 @@ function stabilizeNode(node) {
 		removeAllOutputs(node);
 	}
 	maybeUpdateFilenamePrefix(node);
+	syncSaveFormatConfig(node);
 	ensureButtonWidget(node);
 	ensurePreviewWidget(node);
 	setDirty(node);
@@ -1002,6 +1174,8 @@ app.registerExtension({
 				this.properties ||= {};
 				this.properties[FILENAME_VARIABLES_PROPERTY] = props[FILENAME_VARIABLES_PROPERTY].map((item) => String(item || "").trim()).filter(Boolean);
 			}
+			this.properties ||= {};
+			this.properties[SAVE_FORMAT_CONFIG_PROPERTY] = normalizeSaveFormatConfig(props[SAVE_FORMAT_CONFIG_PROPERTY] || props[SAVE_FORMAT_CONFIG_WIDGET]);
 			if (this.__gjjSaveAnyObjectHasOutput === undefined) {
 				this.__gjjSaveAnyObjectHasOutput = false;
 			}
@@ -1020,6 +1194,7 @@ app.registerExtension({
 				} else {
 					delete serializedNode.properties[FILENAME_VARIABLES_PROPERTY];
 				}
+				serializedNode.properties[SAVE_FORMAT_CONFIG_PROPERTY] = saveFormatConfig(this);
 			}
 			return result;
 		};

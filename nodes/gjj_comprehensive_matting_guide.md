@@ -452,13 +452,13 @@ GJJ_HELP = {
 ```
 models/
 ├── rmbg/
-│   └── rmbg-2.0.safetensors
+│　　 ├── rmbg-2.0.safetensors
 ├── birefnet/
 │   ├── general.safetensors
-│   └── matting.safetensors
+│　　 ├── matting.safetensors
 ├── ben2/
 │   ├── ben2_base.pth
-│   └── BEN2.py
+│　　 ├── BEN2.py
 └── inspyrenet/
     └── inspyrenet.pth
 ```

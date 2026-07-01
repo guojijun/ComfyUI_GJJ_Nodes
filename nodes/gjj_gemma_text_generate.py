@@ -55,6 +55,11 @@ NODE_DISPLAY_NAME = "GJJ · 🧠 图像反推文本生成（Gemma）"
 NODE_DESCRIPTION = "把官方“加载CLIP + TextGenerate”合并成一个 GJJ 零第三方依赖节点；适合 Ideogram4 / Gemma 文本生成、提示词扩写和多模态文本生成。"
 DEFAULT_CLIP_NAME = "qwen3.5_4b_fp8_mixed.safetensors"
 MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
+NO_THINK_OUTPUT_RULE = (
+    "严格输出规则：不要输出思考过程、推理过程、分析过程、草稿、步骤说明、内心独白、"
+    "<think> 标签或 thinking 内容。不要解释你如何理解任务，不要复述用户要求，不要写“我需要/首先/接下来”。"
+    "如果必须组织答案，只输出最终正文。"
+)
 
 
 class AnyMediaType(str):
@@ -284,8 +289,12 @@ def _generate_text(
     seed: int = 0,
     presence_penalty: float = 0.0,
 ) -> str:
+    effective_prompt = str(prompt or "")
+    if not bool(thinking):
+        assistant_rule = ollama_assistant_output_rule() or DEFAULT_OLLAMA_ASSISTANT_OUTPUT_RULE
+        effective_prompt = f"{NO_THINK_OUTPUT_RULE}\n{assistant_rule}\n\n{effective_prompt}".strip()
     tokens = clip.tokenize(
-        str(prompt or ""),
+        effective_prompt,
         image=image,
         skip_template=not bool(use_default_template),
         min_length=1,
@@ -309,7 +318,7 @@ def _generate_text(
     )
     text = str(clip.decode(generated_ids) or "")
     if not bool(thinking):
-        text = _clean_no_think_output(text, prompt)
+        text = _clean_no_think_output(text, effective_prompt)
     return text
 
 
@@ -341,7 +350,12 @@ def _clean_no_think_output(text: str, prompt: str = "") -> str:
     cleaned = re.sub(r"</?think\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"<thinking\b[^>]*>.*?</thinking>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"</?thinking\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<(?:analysis|reasoning|scratchpad)\b[^>]*>.*?</(?:analysis|reasoning|scratchpad)>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"</?(?:analysis|reasoning|scratchpad)\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"<\|im_(?:start|end)\|>", "", cleaned)
+    cleaned = re.sub(r"<start_of_turn>\s*(?:model|assistant|user)?", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<end_of_turn>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\s*(?:assistant|model)\s*[:：]\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"^\s*\[\d+\]\s*", "", cleaned)
 
     prompt_text = str(prompt or "").strip()
@@ -353,7 +367,9 @@ def _clean_no_think_output(text: str, prompt: str = "") -> str:
     while lines and lines[0].strip() in prompt_lines:
         lines.pop(0)
     cleaned = "\n".join(lines).strip()
-    return _strip_labeled_thinking_block(cleaned)
+    cleaned = _strip_labeled_thinking_block(cleaned)
+    cleaned = _strip_common_preface(cleaned)
+    return cleaned.strip()
 
 
 def _strip_labeled_thinking_block(text: str) -> str:
@@ -362,10 +378,12 @@ def _strip_labeled_thinking_block(text: str) -> str:
         return ""
 
     thinking_label = (
-        r"(?:思考过程|思考|推理过程|推理|分析过程|分析|reasoning|thought process|thinking|analysis)"
+        r"(?:思考过程|思考|推理过程|推理|分析过程|分析|思路|草稿|内心独白|"
+        r"reasoning|thought process|thinking|analysis|scratchpad|chain of thought)"
     )
     final_label = (
-        r"(?:最终答案|答案|回答|回复|结果|输出|final answer|answer|response|result|output)"
+        r"(?:最终答案|最终结果|最终输出|答案|回答|回复|结果|输出|正文|改写结果|提示词|"
+        r"final answer|final result|answer|response|result|output)"
     )
 
     starts_with_thinking = re.match(rf"^\s*(?:#+\s*)?{thinking_label}\s*[:：\n]", cleaned, flags=re.IGNORECASE)
@@ -378,10 +396,67 @@ def _strip_labeled_thinking_block(text: str) -> str:
 
     if starts_with_thinking:
         without_label = re.sub(rf"^\s*(?:#+\s*)?{thinking_label}\s*[:：]?\s*", "", cleaned, count=1, flags=re.IGNORECASE)
-        parts = re.split(r"\n\s*\n", without_label, maxsplit=1)
-        if len(parts) == 2 and parts[1].strip():
-            return parts[1].strip()
+        stripped = _strip_to_last_final_marker(without_label)
+        if stripped != without_label:
+            return stripped.strip()
+        parts = [part.strip() for part in re.split(r"\n\s*\n", without_label) if part.strip()]
+        if len(parts) >= 2:
+            return "\n\n".join(parts[1:]).strip()
+    return _strip_unlabeled_thinking_prefix(cleaned)
+
+
+def _strip_unlabeled_thinking_prefix(text: str) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+    intro_patterns = (
+        r"^\s*(?:好的|好|嗯|让我|我需要|我们需要|首先|先来|接下来|现在需要|用户(?:想|要|希望)|"
+        r"Okay|Ok|Sure|Let me|I need to|We need to|First,|First I)\b"
+    )
+    if not re.search(intro_patterns, cleaned, flags=re.IGNORECASE):
+        return cleaned
+    stripped = _strip_to_last_final_marker(cleaned)
+    if stripped != cleaned:
+        return stripped.strip()
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", cleaned) if part.strip()]
+    if len(paragraphs) >= 2:
+        first = paragraphs[0]
+        thinky = re.search(
+            r"(?:我需要|我们需要|用户|任务|要求|分析|推理|思考|先|然后|应该|不能|需要确保|"
+            r"让我|接下来|目标是|可以这样|Let's|I need|user wants|need to|the task)",
+            first,
+            flags=re.IGNORECASE,
+        )
+        if thinky and len(first) >= 20:
+            return "\n\n".join(paragraphs[1:]).strip()
     return cleaned
+
+
+def _strip_to_last_final_marker(text: str) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+    final_markers = (
+        r"(?:最终答案|最终结果|最终输出|答案|回答|回复|结果|输出|正文|改写结果|提示词|"
+        r"final answer|final result|answer|response|result|output)\s*[:：]"
+    )
+    matches = list(re.finditer(final_markers, cleaned, flags=re.IGNORECASE))
+    if matches:
+        return cleaned[matches[-1].end():].strip()
+    return cleaned
+
+
+def _strip_common_preface(text: str) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(
+        r"^\s*(?:好的|好|可以|当然|没问题|下面是|以下是|这里是|Sure|Okay|Ok)\s*[，,。:：-]*\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return cleaned.strip()
 
 
 def _coerce_float(value: Any, default: float, minimum: float | None = None, maximum: float | None = None) -> float:

@@ -22,7 +22,7 @@ vendor/
     │   ├── __init__.py
     │   ├── common.py
     │   ├── face_analysis.py
-    │   └── face_onnx_handler.py
+    │　　 ├── face_onnx_handler.py
     ├── model_zoo/
     │   ├── __init__.py
     │   ├── arcface_onnx.py
@@ -30,7 +30,7 @@ vendor/
     │   ├── landmark.py
     │   ├── model_store.py
     │   ├── model_zoo.py  ← 已修复 bug
-    │   └── retinaface.py
+    │　　 ├── retinaface.py
     └── utils/
         ├── __init__.py
         ├── common.py

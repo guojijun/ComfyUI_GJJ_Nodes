@@ -1348,7 +1348,7 @@ function modelTreeText(items, emptyText) {
 	}
 	const lines = ["ComfyUI/", "├──📁 models/"];
 	if (!folders.size) {
-		lines.push(`│   └──⚫ ${emptyText}`);
+		lines.push(`│　　 ├──⚫ ${emptyText}`);
 		return lines.join("\n");
 	}
 	const folderEntries = Array.from(folders.entries());

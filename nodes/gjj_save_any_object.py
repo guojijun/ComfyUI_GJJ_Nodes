@@ -4,6 +4,7 @@ import json
 import mimetypes
 import os
 import re
+import subprocess
 import wave
 from datetime import datetime
 from pathlib import Path
@@ -20,12 +21,14 @@ try:
         DEFAULT_FORMAT,
         _render_filename_prefix_template,
         combine_video,
+        get_ffmpeg_path,
     )
 except Exception:
     DEFAULT_FRAME_RATE = 24
     DEFAULT_FORMAT = "video/h264-mp4"
     _render_filename_prefix_template = None
     combine_video = None
+    get_ffmpeg_path = None
 
 try:
     import folder_paths
@@ -45,6 +48,9 @@ NODE_NAME = "GJJ_SaveAnyObject"
 INPUT_PREFIX = "any_"
 DEFAULT_FILENAME_PREFIX = "GJJ/工作流"
 LEGACY_FILENAME_PREFIX = "GJJ/任意对象"
+DEFAULT_SAVE_FORMAT_CONFIG = {"image_format": "PNG", "audio_format": "WAV"}
+IMAGE_FORMATS = {"PNG", "JPG", "JPEG", "WEBP", "BMP"}
+AUDIO_FORMATS = {"WAV", "MP3"}
 
 
 class AnyType(str):
@@ -302,6 +308,27 @@ def _write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
 
 
+def _save_format_config(value: Any) -> dict[str, str]:
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value) if value.strip() else {}
+        except Exception:
+            parsed = {}
+    elif isinstance(value, dict):
+        parsed = value
+    else:
+        parsed = {}
+    image_format = str(parsed.get("image_format") or DEFAULT_SAVE_FORMAT_CONFIG["image_format"]).strip().upper()
+    audio_format = str(parsed.get("audio_format") or DEFAULT_SAVE_FORMAT_CONFIG["audio_format"]).strip().upper()
+    if image_format == "JPEG":
+        image_format = "JPG"
+    if image_format not in IMAGE_FORMATS:
+        image_format = DEFAULT_SAVE_FORMAT_CONFIG["image_format"]
+    if audio_format not in AUDIO_FORMATS:
+        audio_format = DEFAULT_SAVE_FORMAT_CONFIG["audio_format"]
+    return {"image_format": image_format, "audio_format": audio_format}
+
+
 def _png_metadata(prompt: Any = None, extra_pnginfo: Any = None) -> PngInfo | None:
     if getattr(args, "disable_metadata", False):
         return None
@@ -361,13 +388,26 @@ def _save_image_tensor(
     input_index: int,
     prompt: Any = None,
     extra_pnginfo: Any = None,
+    save_config: dict[str, str] | None = None,
 ) -> list[str]:
     paths: list[str] = []
     frames = _split_image_tensor(value)
-    metadata = _png_metadata(prompt, extra_pnginfo)
+    image_format = _save_format_config(save_config).get("image_format", "PNG")
+    suffix = ".jpg" if image_format in {"JPG", "JPEG"} else f".{image_format.lower()}"
+    metadata = _png_metadata(prompt, extra_pnginfo) if image_format == "PNG" else None
     for frame_index, frame in enumerate(frames, start=1):
-        path = _indexed_path(directory, base_name, input_index, ".png", frame_index if len(frames) > 1 else None)
-        Image.fromarray(_tensor_to_uint8_image(frame)).save(path, pnginfo=metadata)
+        path = _indexed_path(directory, base_name, input_index, suffix, frame_index if len(frames) > 1 else None)
+        image = Image.fromarray(_tensor_to_uint8_image(frame))
+        if image_format in {"JPG", "JPEG"}:
+            if image.mode not in {"RGB", "L"}:
+                image = image.convert("RGB")
+            image.save(path, format="JPEG", quality=95, subsampling=0, optimize=True)
+        elif image_format == "WEBP":
+            image.save(path, format="WEBP", quality=95, method=6)
+        elif image_format == "BMP":
+            image.save(path, format="BMP")
+        else:
+            image.save(path, pnginfo=metadata)
         paths.append(str(path))
     return paths
 
@@ -413,11 +453,11 @@ def _save_tensor(value: torch.Tensor, directory: Path, base_name: str, input_ind
     return [str(tensor_path), str(info_path)]
 
 
-def _save_audio(value: dict[str, Any], directory: Path, base_name: str, input_index: int) -> list[str]:
+def _audio_to_i16(value: dict[str, Any]) -> tuple[np.ndarray, int]:
     waveform = value.get("waveform")
     sample_rate = int(value.get("sample_rate") or value.get("frame_rate") or 44100)
     if not isinstance(waveform, torch.Tensor):
-        return []
+        raise RuntimeError("AUDIO 输入缺少 waveform。")
     audio = waveform.detach().cpu().float()
     while audio.ndim > 2:
         audio = audio[0]
@@ -427,12 +467,45 @@ def _save_audio(value: dict[str, Any], directory: Path, base_name: str, input_in
         audio = audio.movedim(0, 1)
     audio_np = np.clip(audio.numpy(), -1.0, 1.0)
     audio_i16 = (audio_np.T * 32767.0).astype(np.int16)
-    path = _indexed_path(directory, base_name, input_index, ".wav")
+    return audio_i16, sample_rate
+
+
+def _write_wav_audio(path: Path, audio_i16: np.ndarray, sample_rate: int) -> None:
     with wave.open(str(path), "wb") as handle:
         handle.setnchannels(int(audio_i16.shape[1]) if audio_i16.ndim == 2 else 1)
         handle.setsampwidth(2)
         handle.setframerate(sample_rate)
         handle.writeframes(audio_i16.tobytes())
+
+
+def _save_audio(value: dict[str, Any], directory: Path, base_name: str, input_index: int, save_config: dict[str, str] | None = None) -> list[str]:
+    audio_i16, sample_rate = _audio_to_i16(value)
+    audio_format = _save_format_config(save_config).get("audio_format", "WAV")
+    if audio_format == "MP3":
+        mp3_path = _indexed_path(directory, base_name, input_index, ".mp3")
+        wav_path = mp3_path.with_suffix(".tmp.wav")
+        _write_wav_audio(wav_path, audio_i16, sample_rate)
+        try:
+            ffmpeg = get_ffmpeg_path() if get_ffmpeg_path is not None else None
+            if not ffmpeg:
+                raise RuntimeError("未找到 ffmpeg")
+            command = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(wav_path), "-codec:a", "libmp3lame", "-q:a", "2", str(mp3_path)]
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode != 0 or not mp3_path.exists():
+                raise RuntimeError((result.stderr or result.stdout or "ffmpeg MP3 编码失败").strip())
+            return [str(mp3_path)]
+        except Exception as exc:
+            fallback_path = _indexed_path(directory, base_name, input_index, ".wav")
+            _write_wav_audio(fallback_path, audio_i16, sample_rate)
+            print(f"[GJJ SaveAnyObject] MP3 保存失败，已回退 WAV：{exc}")
+            return [str(fallback_path)]
+        finally:
+            try:
+                wav_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+    path = _indexed_path(directory, base_name, input_index, ".wav")
+    _write_wav_audio(path, audio_i16, sample_rate)
     return [str(path)]
 
 
@@ -511,6 +584,7 @@ def _save_video_components(
     prompt: Any = None,
     extra_pnginfo: Any = None,
     unique_id: Any = None,
+    save_config: dict[str, str] | None = None,
 ) -> list[str]:
     if not hasattr(value, "get_components"):
         return []
@@ -528,6 +602,7 @@ def _save_video_components(
                 input_index,
                 prompt,
                 extra_pnginfo,
+                save_config,
             )
         )
     if audio is not None:
@@ -539,6 +614,7 @@ def _save_video_components(
             prompt,
             extra_pnginfo,
             unique_id,
+            save_config,
         )
         paths.extend(audio_paths)
     info_path = _indexed_path(directory, base_name, input_index, ".video.json")
@@ -563,12 +639,13 @@ def _save_any_value(
     prompt: Any = None,
     extra_pnginfo: Any = None,
     unique_id: Any = None,
+    save_config: dict[str, str] | None = None,
 ) -> list[str]:
     if _is_none(value):
         return []
     if _is_video_object(value):
         return _save_video_object(value, directory, base_name, input_index, prompt, extra_pnginfo, unique_id)
-    video_paths = _save_video_components(value, directory, base_name, input_index, prompt, extra_pnginfo, unique_id)
+    video_paths = _save_video_components(value, directory, base_name, input_index, prompt, extra_pnginfo, unique_id, save_config)
     if video_paths:
         return video_paths
     if isinstance(value, str):
@@ -584,9 +661,9 @@ def _save_any_value(
         _write_text(path, str(value))
         return [str(path)]
     if isinstance(value, dict) and isinstance(value.get("waveform"), torch.Tensor):
-        return _save_audio(value, directory, base_name, input_index)
+        return _save_audio(value, directory, base_name, input_index, save_config)
     if _is_image_tensor(value):
-        return _save_image_tensor(value, directory, base_name, input_index, prompt, extra_pnginfo)
+        return _save_image_tensor(value, directory, base_name, input_index, prompt, extra_pnginfo, save_config)
     if _is_mask_tensor(value):
         return _save_mask_tensor(value, directory, base_name, input_index, prompt, extra_pnginfo)
     if isinstance(value, torch.Tensor):
@@ -779,6 +856,17 @@ class GJJ_SaveAnyObject:
                         "tooltip": "保存到 output 目录下，支持子目录。保持默认值时会自动改用当前工作流名称；支持 GJJ_SETNODE / 模板参数变量占位，例如 GJJ/第{当前分段}段。",
                     },
                 ),
+                "save_format_config": (
+                    "STRING",
+                    {
+                        "default": json.dumps(DEFAULT_SAVE_FORMAT_CONFIG, ensure_ascii=False),
+                        "multiline": False,
+                        "display_name": "保存格式配置",
+                        "tooltip": "前端 ⚙️ 使用的隐藏配置，控制图片/音频默认保存格式。",
+                        "hidden": True,
+                        "display": "hidden",
+                    },
+                ),
             },
             "optional": FlexibleOptionalInputType(
                 any_type,
@@ -799,7 +887,8 @@ class GJJ_SaveAnyObject:
             },
         }
 
-    def save(self, filename_prefix=DEFAULT_FILENAME_PREFIX, prompt=None, extra_pnginfo=None, unique_id=None, **kwargs):
+    def save(self, filename_prefix=DEFAULT_FILENAME_PREFIX, save_format_config="", prompt=None, extra_pnginfo=None, unique_id=None, **kwargs):
+        save_config = _save_format_config(save_format_config)
         source_names = _resolve_input_source_names(prompt, extra_pnginfo, unique_id)
         normalized_prefix = _normalize_default_prefix(filename_prefix or "")
         old_source_prefixes = {_normalize_default_prefix(_source_prefix(name)) for name in source_names.values() if name}
@@ -819,7 +908,7 @@ class GJJ_SaveAnyObject:
             if _is_none(value):
                 continue
             input_index = _extract_input_index(key)
-            saved_paths.extend(_save_any_value(value, directory, base_name, input_index, prompt, extra_pnginfo, unique_id))
+            saved_paths.extend(_save_any_value(value, directory, base_name, input_index, prompt, extra_pnginfo, unique_id, save_config))
 
         paths_json = json.dumps(saved_paths, ensure_ascii=False, indent=2)
         first_path = saved_paths[0] if saved_paths else ""
