@@ -1234,14 +1234,12 @@ def _register_gjj_character_library_api():
 				{
 					"name": "🪄 抠图",
 					"items": [
-						{"label": "GJJ_ComprehensiveMatting", "path": "custom_nodes/ComfyUI_GJJ_Nodes/nodes/gjj_comprehensive_matting.py"},
 						{"label": "RMBG1.4", "path": "models/RMBG/rmbg1.4.safetensors"},
 					],
 				},
 				{
 					"name": "🚀 生成多视图",
 					"items": [
-						{"label": "GJJ_CharacterMultiViewStudio", "path": "custom_nodes/ComfyUI_GJJ_Nodes/nodes/gjj_character_multiview_studio.py"},
 						{"label": "UNET", "path": "models/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors"},
 						{"label": "CLIP / VL", "path": "models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors"},
 						{"label": "VAE", "path": "models/vae/qwen_image_vae.safetensors"},
@@ -1252,14 +1250,13 @@ def _register_gjj_character_library_api():
 				{
 					"name": "🧠 备注/性别推理",
 					"items": [
-						{"label": "GJJ_GemmaTextGenerate", "path": "custom_nodes/ComfyUI_GJJ_Nodes/nodes/gjj_gemma_text_generate.py"},
 						{"label": "Gemma / Qwen VL 文本编码器", "path": "models/text_encoders/qwen3.5_4b_fp8_mixed.safetensors"},
 					],
 				},
 				{
 					"name": "👤 人物库存储",
 					"items": [
-						{"label": "角色库", "path": str(root_dir())},
+						{"label": "角色库", "path": str(root_dir()), "folder": True},
 					],
 				},
 			],
@@ -1819,6 +1816,2109 @@ def _register_gjj_character_library_api():
 
 	server._gjj_character_library_api_registered = True
 _register_gjj_character_library_api()
+
+def _gjj_scene_library_directory():
+	from pathlib import Path
+	try:
+		import folder_paths
+		models_dir = Path(getattr(folder_paths, "models_dir", "") or "")
+	except Exception:
+		models_dir = Path()
+	if not str(models_dir):
+		models_dir = _gjj_package_root().parent.parent / "models"
+	return models_dir / "GJJ" / "scene_library"
+
+def _gjj_legacy_scene_library_directory():
+	return _gjj_package_root() / "presets" / "scene_library"
+
+def _register_gjj_scene_library_api():
+	try:
+		import json
+		import mimetypes
+		import os
+		import re
+		import shutil
+		import subprocess
+		import sys
+		import time
+		import uuid
+		from pathlib import Path
+		from urllib.parse import urlencode
+		from PIL import Image
+		from aiohttp import web
+		from server import PromptServer
+	except Exception as exc:
+		print(f"[GJJ] 场景库接口注册失败：{exc}")
+		return
+
+	server = getattr(PromptServer, "instance", None)
+	if server is None or getattr(server, "_gjj_scene_library_api_registered", False):
+		return
+
+	SAFE_TEXT_RE = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff._-]+")
+	SCENE_TYPES = {"360"}
+	ASSET_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".hdr", ".exr"}
+	PREVIEW_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+
+	def now_ms() -> int:
+		return int(time.time() * 1000)
+
+	def root_dir() -> Path:
+		path = _gjj_scene_library_directory()
+		path.mkdir(parents=True, exist_ok=True)
+		legacy = _gjj_legacy_scene_library_directory()
+		if legacy.exists() and legacy.is_dir():
+			try:
+				has_new_items = any(path.iterdir())
+			except Exception:
+				has_new_items = False
+			if not has_new_items:
+				for entry in legacy.iterdir():
+					target = path / entry.name
+					if target.exists():
+						continue
+					if entry.is_dir():
+						shutil.move(str(entry), str(target))
+					elif entry.is_file():
+						shutil.move(str(entry), str(target))
+		return path
+
+	def clean_key(value: str, fallback: str = "item") -> str:
+		text = SAFE_TEXT_RE.sub("_", str(value or "").strip()).strip("._- ")
+		return (text or fallback)[:96]
+
+	def clean_scene_type(value: str, fallback: str = "360") -> str:
+		return "360"
+
+	def split_keywords(value) -> list[str]:
+		if isinstance(value, list):
+			raw = value
+		else:
+			raw = re.split(r"[,，\n;；]+", str(value or ""))
+		items = []
+		for item in raw:
+			text = str(item or "").strip()
+			if text and text not in items:
+				items.append(text[:48])
+		return items[:80]
+
+	def unique_scene_id(preferred: str, current_id: str = "") -> str:
+		base_id = clean_key(preferred or current_id, "scene")
+		current_id = clean_key(current_id, "")
+		if current_id and base_id == current_id:
+			return current_id
+		if not (root_dir() / base_id).exists():
+			return base_id
+		for index in range(2, 1000):
+			candidate = clean_key(f"{base_id}_{index}", "scene")
+			if current_id and candidate == current_id:
+				return current_id
+			if not (root_dir() / candidate).exists():
+				return candidate
+		return clean_key(f"{base_id}_{uuid.uuid4().hex[:6]}", "scene")
+
+	def scene_dir(scene_id: str) -> Path:
+		scene_id = clean_key(scene_id, "")
+		if not scene_id:
+			raise ValueError("缺少场景 ID。")
+		base = root_dir().resolve()
+		path = (base / scene_id).resolve()
+		if base not in path.parents and path != base:
+			raise ValueError("场景路径不安全。")
+		return path
+
+	def manifest_path(scene_id: str) -> Path:
+		return scene_dir(scene_id) / "manifest.json"
+
+	def default_manifest(scene_id: str, name: str = "") -> dict:
+		t = now_ms()
+		return {
+			"id": scene_id,
+			"name": str(name or scene_id),
+			"type": "360",
+			"keywords": [],
+			"notes": "",
+			"created_at": t,
+			"updated_at": t,
+			"assets": [],
+			"annotations": [],
+		}
+
+	def clean_asset_item(item: dict, created_at: int, updated_at: int) -> dict | None:
+		file_name = clean_key(item.get("file") or "", "")
+		ext = Path(file_name).suffix.lower()
+		if ext not in ASSET_EXTS:
+			return None
+		asset_id = clean_key(item.get("id") or Path(file_name).stem, "asset")
+		scene_type = clean_scene_type(item.get("type"), "hdr" if ext in {".hdr", ".exr"} else "360")
+		return {
+			"id": asset_id,
+			"label": str(item.get("label") or asset_id),
+			"type": scene_type,
+			"file": file_name,
+			"created_at": int(item.get("created_at") or created_at),
+			"updated_at": int(item.get("updated_at") or updated_at),
+		}
+
+	def clean_annotation(item: dict) -> dict | None:
+		keyword = str(item.get("keyword") or item.get("name") or "").strip()[:48]
+		if not keyword:
+			return None
+		try:
+			x = float(item.get("x"))
+			y = float(item.get("y"))
+		except Exception:
+			return None
+		x = min(1.0, max(0.0, x))
+		y = min(1.0, max(0.0, y))
+		return {
+			"id": clean_key(item.get("id") or f"{keyword}_{int(x * 1000)}_{int(y * 1000)}", "mark"),
+			"keyword": keyword,
+			"x": x,
+			"y": y,
+			"asset_id": clean_key(item.get("asset_id") or "", ""),
+			"notes": str(item.get("notes") or "")[:200],
+			"created_at": int(item.get("created_at") or now_ms()),
+		}
+
+	def fit_scene_inference_canvas(image: Image.Image, width: int = 1344, height: int = 768) -> Image.Image:
+		src = image.convert("RGB")
+		resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+		src.thumbnail((int(width), int(height)), resample)
+		canvas = Image.new("RGB", (int(width), int(height)), (245, 245, 245))
+		left = (canvas.width - src.width) // 2
+		top = (canvas.height - src.height) // 2
+		canvas.paste(src, (left, top))
+		return canvas
+
+	def parse_scene_coord_value(value):
+		if value is None:
+			return None
+		if isinstance(value, (int, float)):
+			return float(value)
+		text = str(value or "").strip()
+		if not text:
+			return None
+		text = text.replace("％", "%")
+		match = re.search(r"-?\d+(?:\.\d+)?", text)
+		if not match:
+			return None
+		return float(match.group(0))
+
+	def scene_xy_from_item(item: dict):
+		x_keys = ("x", "cx", "center_x", "centerX", "横坐标", "中心x", "中心X")
+		y_keys = ("y", "cy", "center_y", "centerY", "纵坐标", "中心y", "中心Y")
+		x = next((parse_scene_coord_value(item.get(key)) for key in x_keys if parse_scene_coord_value(item.get(key)) is not None), None)
+		y = next((parse_scene_coord_value(item.get(key)) for key in y_keys if parse_scene_coord_value(item.get(key)) is not None), None)
+		if x is not None and y is not None:
+			return x, y
+		for key in ("point", "position", "center", "coord", "coords", "coordinate", "coordinates", "中心点", "坐标", "位置"):
+			value = item.get(key)
+			if isinstance(value, dict):
+				nested = scene_xy_from_item(value)
+				if nested:
+					return nested
+			elif isinstance(value, (list, tuple)) and len(value) >= 2:
+				x = parse_scene_coord_value(value[0])
+				y = parse_scene_coord_value(value[1])
+				if x is not None and y is not None:
+					return x, y
+			elif isinstance(value, str):
+				values = re.findall(r"-?\d+(?:\.\d+)?", value.replace("％", "%"))
+				if len(values) >= 2:
+					return float(values[0]), float(values[1])
+		for key in ("bbox", "box", "rect", "rectangle", "bounding_box", "框", "边框"):
+			value = item.get(key)
+			if isinstance(value, dict):
+				x1 = parse_scene_coord_value(value.get("x1", value.get("left")))
+				y1 = parse_scene_coord_value(value.get("y1", value.get("top")))
+				x2 = parse_scene_coord_value(value.get("x2", value.get("right")))
+				y2 = parse_scene_coord_value(value.get("y2", value.get("bottom")))
+				w = parse_scene_coord_value(value.get("w", value.get("width")))
+				h = parse_scene_coord_value(value.get("h", value.get("height")))
+				if x1 is not None and y1 is not None and x2 is None and w is not None:
+					x2 = x1 + w
+				if x1 is not None and y1 is not None and y2 is None and h is not None:
+					y2 = y1 + h
+			elif isinstance(value, (list, tuple)) and len(value) >= 4:
+				x1, y1, x2, y2 = [parse_scene_coord_value(v) for v in value[:4]]
+			else:
+				values = re.findall(r"-?\d+(?:\.\d+)?", str(value or ""))
+				x1, y1, x2, y2 = [float(v) for v in values[:4]] if len(values) >= 4 else (None, None, None, None)
+			if None not in (x1, y1, x2, y2):
+				return (float(x1) + float(x2)) * 0.5, (float(y1) + float(y2)) * 0.5
+		return None
+
+	def parse_scene_annotations(text: str, asset_id: str = "") -> list[dict]:
+		raw = str(text or "").strip()
+		match = re.search(r"```(?:json)?\s*(.*?)```", raw, flags=re.S | re.I)
+		if match:
+			raw = match.group(1).strip()
+		else:
+			match = re.search(r"(\[[\s\S]*\]|\{[\s\S]*\})", raw)
+			if match:
+				raw = match.group(1).strip()
+		try:
+			parsed = json.loads(raw)
+		except Exception:
+			parsed = []
+		if isinstance(parsed, dict):
+			parsed = parsed.get("items") or parsed.get("annotations") or parsed.get("objects") or []
+		if not isinstance(parsed, list):
+			return []
+		result = []
+		seen = set()
+		for item in parsed:
+			if not isinstance(item, dict):
+				continue
+			keyword = str(item.get("keyword") or item.get("name") or item.get("label") or item.get("物品") or "").strip()[:48]
+			if not keyword:
+				continue
+			xy = scene_xy_from_item(item)
+			if not xy:
+				continue
+			x, y = xy
+			if x > 1.0 or y > 1.0:
+				x /= 100.0
+				y /= 100.0
+			x = min(1.0, max(0.0, x))
+			y = min(1.0, max(0.0, y))
+			key = keyword.lower()
+			if key in seen:
+				continue
+			seen.add(key)
+			clean = clean_annotation({
+				"id": f"{keyword}_{int(x * 1000)}_{int(y * 1000)}",
+				"keyword": keyword,
+				"x": x,
+				"y": y,
+				"asset_id": asset_id,
+				"notes": str(item.get("notes") or item.get("description") or item.get("备注") or "")[:200],
+			})
+			if clean:
+				result.append(clean)
+			if len(result) >= 16:
+				break
+		return result
+
+	def parse_scene_ai_payload(text: str, asset_id: str = "") -> tuple[list[dict], list[str], str]:
+		raw = str(text or "").strip()
+		match = re.search(r"```(?:json)?\s*(.*?)```", raw, flags=re.S | re.I)
+		if match:
+			raw = match.group(1).strip()
+		else:
+			match = re.search(r"(\[[\s\S]*\]|\{[\s\S]*\})", raw)
+			if match:
+				raw = match.group(1).strip()
+		try:
+			parsed = json.loads(raw)
+		except Exception:
+			return parse_scene_annotations(text, asset_id), [], ""
+		if isinstance(parsed, list):
+			return parse_scene_annotations(raw, asset_id), [], ""
+		if not isinstance(parsed, dict):
+			return [], [], ""
+		annotations_text = json.dumps(
+			parsed.get("annotations") or parsed.get("items") or parsed.get("objects") or [],
+			ensure_ascii=False,
+		)
+		keywords = split_keywords(parsed.get("keywords") or parsed.get("关键词") or [])
+		notes = str(
+			parsed.get("notes")
+			or parsed.get("description")
+			or parsed.get("summary")
+			or parsed.get("备注")
+			or parsed.get("场景备注")
+			or ""
+		).strip()[:300]
+		return parse_scene_annotations(annotations_text, asset_id), keywords, notes
+
+	def fallback_scene_annotations(manifest: dict, asset_id: str = "") -> tuple[list[dict], list[str], str]:
+		name = str(manifest.get("name") or manifest.get("id") or "场景").strip()
+		lowered = name.lower()
+		if any(word in name for word in ("大厅", "厅堂", "殿堂", "礼堂", "商店", "工厂", "建筑")):
+			points = [
+				("大厅中央" if "大厅" in name else "中央区域", 0.50, 0.55),
+				("门", 0.56, 0.48),
+				("窗户", 0.82, 0.43),
+				("墙面", 0.46, 0.34),
+				("地面", 0.50, 0.76),
+				("天花板", 0.50, 0.18),
+				("柱子", 0.22, 0.48),
+				("装饰物", 0.66, 0.42),
+			]
+			keywords = split_keywords([name, "大厅", "门", "窗户", "墙面", "地面", "天花板", "柱子"])
+			notes = f"{name}，自动生成基础空间标注；大模型未返回可解析坐标。"
+		elif any(word in name for word in ("卧室", "房", "儿童房", "主卧")):
+			points = [("床", 0.50, 0.62), ("窗户", 0.78, 0.42), ("门", 0.36, 0.50), ("墙面", 0.50, 0.34), ("地面", 0.50, 0.78), ("天花板", 0.50, 0.18)]
+			keywords = split_keywords([name, "房间", "床", "窗户", "门", "墙面", "地面"])
+			notes = f"{name}，自动生成基础房间标注；大模型未返回可解析坐标。"
+		else:
+			points = [("中央区域", 0.50, 0.55), ("左侧区域", 0.25, 0.50), ("右侧区域", 0.75, 0.50), ("背景墙", 0.50, 0.35), ("地面", 0.50, 0.78), ("天花板", 0.50, 0.18)]
+			keywords = split_keywords([name, "场景", "中央区域", "背景墙", "地面", "天花板"])
+			notes = f"{name}，自动生成基础场景标注；大模型未返回可解析坐标。"
+		annotations = []
+		for keyword, x, y in points:
+			clean = clean_annotation({
+				"id": f"{keyword}_{int(x * 1000)}_{int(y * 1000)}",
+				"keyword": keyword,
+				"x": x,
+				"y": y,
+				"asset_id": asset_id,
+				"notes": "fallback",
+			})
+			if clean:
+				annotations.append(clean)
+		return annotations, keywords, notes
+
+	def read_manifest(scene_id: str) -> dict:
+		path = manifest_path(scene_id)
+		if not path.is_file():
+			return default_manifest(scene_id)
+		try:
+			data = json.loads(path.read_text(encoding="utf-8"))
+		except Exception:
+			data = {}
+		if not isinstance(data, dict):
+			data = {}
+		data["id"] = str(scene_id)
+		data["name"] = str(data.get("name") or scene_id)
+		data["type"] = clean_scene_type(data.get("type"), "360")
+		data["keywords"] = split_keywords(data.get("keywords") or "")
+		data["notes"] = str(data.get("notes") or "")
+		data["created_at"] = int(data.get("created_at") or now_ms())
+		data["updated_at"] = int(data.get("updated_at") or data["created_at"])
+		assets = []
+		for item in data.get("assets") if isinstance(data.get("assets"), list) else []:
+			if isinstance(item, dict):
+				clean = clean_asset_item(item, data["created_at"], data["updated_at"])
+				if clean:
+					assets.append(clean)
+		data["assets"] = assets
+		annotations = []
+		for item in data.get("annotations") if isinstance(data.get("annotations"), list) else []:
+			if isinstance(item, dict):
+				clean = clean_annotation(item)
+				if clean:
+					annotations.append(clean)
+		data["annotations"] = annotations
+		return data
+
+	def write_manifest(data: dict) -> dict:
+		scene_id = clean_key(data.get("id"), "")
+		if not scene_id:
+			raise ValueError("缺少场景 ID。")
+		data["id"] = scene_id
+		data["name"] = str(data.get("name") or scene_id).strip()[:96] or scene_id
+		data["type"] = clean_scene_type(data.get("type"), "360")
+		data["keywords"] = split_keywords(data.get("keywords") or "")
+		data["notes"] = str(data.get("notes") or "")
+		data["updated_at"] = now_ms()
+		path = manifest_path(scene_id)
+		path.parent.mkdir(parents=True, exist_ok=True)
+		tmp = path.with_suffix(".json.tmp")
+		tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+		os.replace(tmp, path)
+		return read_manifest(scene_id)
+
+	def file_url(scene_id: str, file_name: str, mtime: float = 0) -> str:
+		return "/gjj/scene_library/file?" + urlencode({
+			"id": scene_id,
+			"file": file_name,
+			"mtime": int(mtime or time.time()),
+		})
+
+	def read_radiance_rgbe(path: Path):
+		import io
+		import numpy as np
+		with path.open("rb") as handle:
+			stream = io.BytesIO(handle.read())
+		width = height = 0
+		x_sign = "+"
+		y_sign = "-"
+		while True:
+			line = stream.readline()
+			if not line:
+				break
+			text = line.decode("ascii", errors="ignore").strip()
+			match = re.match(r"([+-])Y\s+(\d+)\s+([+-])X\s+(\d+)", text)
+			if match:
+				y_sign, height_text, x_sign, width_text = match.groups()
+				height = int(height_text)
+				width = int(width_text)
+				break
+		if width <= 0 or height <= 0:
+			raise RuntimeError("HDR 文件缺少 Radiance 分辨率行。")
+		data = np.zeros((height, width, 4), dtype=np.uint8)
+		for y in range(height):
+			header = stream.read(4)
+			if len(header) < 4:
+				raise RuntimeError("HDR 像素数据不完整。")
+			if width < 8 or width > 0x7FFF or header[0] != 2 or header[1] != 2 or ((header[2] << 8) | header[3]) != width:
+				rest = stream.read(width * height * 4 - 4)
+				raw = header + rest
+				if len(raw) < width * height * 4:
+					raise RuntimeError("HDR 非 RLE 像素数据不完整。")
+				data = np.frombuffer(raw[: width * height * 4], dtype=np.uint8).reshape((height, width, 4)).copy()
+				break
+			scanline = np.zeros((4, width), dtype=np.uint8)
+			for channel in range(4):
+				x = 0
+				while x < width:
+					pair = stream.read(2)
+					if len(pair) < 2:
+						raise RuntimeError("HDR RLE 扫描线不完整。")
+					count = pair[0]
+					value = pair[1]
+					if count > 128:
+						run = count - 128
+						scanline[channel, x : x + run] = value
+						x += run
+					else:
+						run = count
+						scanline[channel, x] = value
+						if run > 1:
+							values = stream.read(run - 1)
+							if len(values) < run - 1:
+								raise RuntimeError("HDR RLE literal 不完整。")
+							scanline[channel, x + 1 : x + run] = np.frombuffer(values, dtype=np.uint8)
+						x += run
+			data[y] = scanline.T
+		if y_sign == "+":
+			data = data[::-1, :, :]
+		if x_sign == "-":
+			data = data[:, ::-1, :]
+		exponent = data[..., 3].astype(np.int16)
+		rgb = np.zeros((height, width, 3), dtype=np.float32)
+		mask = exponent > 0
+		if np.any(mask):
+			scale = np.exp2(exponent[mask].astype(np.float32) - 136.0)
+			rgb[mask] = data[..., :3][mask].astype(np.float32) * scale[:, None]
+		return rgb
+
+	def read_hdr_preview_array(path: Path):
+		errors = []
+		if path.suffix.lower() == ".hdr":
+			try:
+				return read_radiance_rgbe(path)
+			except Exception as exc:
+				errors.append(exc)
+		try:
+			import numpy as np
+			image = Image.open(path)
+			array = np.asarray(image)
+			if array.size:
+				return array
+		except Exception as exc:
+			errors.append(exc)
+		try:
+			import imageio.v3 as iio
+			array = iio.imread(path)
+			if getattr(array, "size", 0):
+				return array
+		except Exception as exc:
+			errors.append(exc)
+		try:
+			import imageio
+			array = imageio.imread(path)
+			if getattr(array, "size", 0):
+				return array
+		except Exception as exc:
+			errors.append(exc)
+		try:
+			os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
+			import cv2
+			array = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+			if array is not None and getattr(array, "size", 0):
+				if len(array.shape) == 3 and array.shape[2] >= 3:
+					array = cv2.cvtColor(array[:, :, :3], cv2.COLOR_BGR2RGB)
+				return array
+		except Exception as exc:
+			errors.append(exc)
+		if errors:
+			raise errors[-1]
+		raise ValueError("无法读取 HDR/EXR。")
+
+	def write_hdr_placeholder_preview(path: Path, target: Path, message: str = "") -> bool:
+		try:
+			from PIL import ImageDraw, ImageFont
+			target.parent.mkdir(parents=True, exist_ok=True)
+			image = Image.new("RGB", (960, 540), (11, 18, 24))
+			draw = ImageDraw.Draw(image)
+			for y in range(image.height):
+				t = y / max(1, image.height - 1)
+				color = (
+					int(16 + 28 * t),
+					int(25 + 36 * t),
+					int(34 + 48 * t),
+				)
+				draw.line([(0, y), (image.width, y)], fill=color)
+			try:
+				font_big = ImageFont.truetype("arial.ttf", 44)
+				font = ImageFont.truetype("arial.ttf", 22)
+				font_small = ImageFont.truetype("arial.ttf", 16)
+			except Exception:
+				font_big = ImageFont.load_default()
+				font = ImageFont.load_default()
+				font_small = ImageFont.load_default()
+			draw.rounded_rectangle((40, 40, image.width - 40, image.height - 40), radius=18, outline=(78, 106, 118), width=2)
+			draw.text((72, 78), "HDR / EXR", fill=(234, 245, 247), font=font_big)
+			draw.text((72, 150), path.name[:80], fill=(184, 205, 212), font=font)
+			draw.text((72, 206), "preview placeholder", fill=(121, 151, 162), font=font_small)
+			if message:
+				text = str(message).replace("\n", " ")[:150]
+				draw.text((72, 242), text, fill=(121, 151, 162), font=font_small)
+			image.save(target, "PNG")
+			return True
+		except Exception as exc:
+			print(f"[GJJ] HDR 占位预览生成失败：{path.name}: {exc}")
+			return False
+
+	def hdr_array_to_display_image(array) -> Image.Image:
+		import numpy as np
+		array = np.asarray(array)
+		if array.ndim == 2:
+			array = np.stack([array, array, array], axis=-1)
+		if array.ndim != 3:
+			raise ValueError("HDR/EXR 图像维度无效。")
+		if array.shape[2] > 3:
+			array = array[:, :, :3]
+		array = array.astype("float32")
+		array = np.nan_to_num(array, nan=0.0, posinf=0.0, neginf=0.0)
+		array = np.maximum(array, 0.0)
+		high = float(np.percentile(array, 99.7)) if array.size else 1.0
+		if high <= 0:
+			high = float(array.max()) if array.size else 1.0
+		if high <= 0:
+			high = 1.0
+		array = np.clip(array / high, 0.0, 1.0)
+		luma = 0.2126 * array[..., 0] + 0.7152 * array[..., 1] + 0.0722 * array[..., 2]
+		mid = float(np.percentile(luma, 55)) if luma.size else 0.3
+		if mid > 0 and mid < 0.30:
+			array = np.clip(array * min(3.2, 0.36 / mid), 0.0, 1.0)
+		array = np.power(array, 1.0 / 2.2)
+		luma2 = 0.2126 * array[..., 0] + 0.7152 * array[..., 1] + 0.0722 * array[..., 2]
+		mean = float(np.mean(luma2)) if luma2.size else 0.45
+		if mean < 0.38:
+			array = np.clip(array * min(1.8, 0.46 / max(0.01, mean)), 0.0, 1.0)
+		out = (array * 255.0 + 0.5).astype("uint8")
+		return Image.fromarray(out, "RGB")
+
+	def tonemap_hdr_preview(path: Path, target: Path) -> bool:
+		try:
+			array = read_hdr_preview_array(path)
+			image = hdr_array_to_display_image(array)
+			resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+			image.thumbnail((1280, 720), resample)
+			target.parent.mkdir(parents=True, exist_ok=True)
+			image.save(target, "PNG")
+			return True
+		except Exception as exc:
+			print(f"[GJJ] HDR 场景预览生成失败：{path.name}: {exc}")
+			return write_hdr_placeholder_preview(path, target, str(exc))
+
+	def ensure_scene_asset_preview(base: Path, path: Path) -> Path | None:
+		ext = path.suffix.lower()
+		if ext in PREVIEW_EXTS:
+			return path
+		if ext not in {".hdr", ".exr"}:
+			return None
+		preview = base / f"__preview_rgbe_{path.stem}.png"
+		try:
+			if preview.is_file() and preview.stat().st_size > 0 and preview.stat().st_mtime >= path.stat().st_mtime:
+				return preview
+		except Exception:
+			pass
+		return preview if tonemap_hdr_preview(path, preview) and preview.is_file() else None
+
+	def scene_pil_from_hdr(path: Path) -> Image.Image:
+		return hdr_array_to_display_image(read_hdr_preview_array(path))
+
+	def is_360_ratio(image: Image.Image) -> bool:
+		width, height = image.size
+		if width <= 0 or height <= 0:
+			return False
+		return abs((width / height) - 2.0) <= 0.08
+
+	def fit_to_360_png_canvas(image: Image.Image, width: int = 2048, height: int = 1024) -> Image.Image:
+		src = image.convert("RGB")
+		resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+		if src.width != width or src.height != height:
+			scale = max(width / max(1, src.width), height / max(1, src.height))
+			next_size = (max(1, int(round(src.width * scale))), max(1, int(round(src.height * scale))))
+			src = src.resize(next_size, resample)
+			left = max(0, (src.width - width) // 2)
+			top = max(0, (src.height - height) // 2)
+			src = src.crop((left, top, left + width, top + height))
+		return src
+
+	def pil_to_scene_tensor(image: Image.Image):
+		import numpy as np
+		import torch
+		array = np.asarray(image.convert("RGB")).astype("float32") / 255.0
+		return torch.from_numpy(array).unsqueeze(0).contiguous()
+
+	def generate_360_from_scene_image(image: Image.Image, scene_name: str, unique_id: str = "") -> Image.Image:
+		try:
+			from .nodes.gjj_360_panorama_generator import (
+				DEFAULT_PROMPT_SUFFIX,
+				DEFAULT_SEAM_PROMPT,
+				GJJ_360PanoramaGenerator,
+				_tensor_to_pil,
+			)
+		except Exception as exc:
+			raise RuntimeError(f"加载 GJJ_360PanoramaGenerator 失败：{exc}") from exc
+
+		def default_for(required: dict, key: str, fallback):
+			spec = required.get(key)
+			if isinstance(spec, tuple) and len(spec) > 1 and isinstance(spec[1], dict):
+				value = spec[1].get("default")
+				return fallback if value is None else value
+			if isinstance(spec, tuple) and spec and isinstance(spec[0], list) and spec[0]:
+				return spec[0][0]
+			return fallback
+
+		required = {}
+		try:
+			required = GJJ_360PanoramaGenerator.INPUT_TYPES().get("required") or {}
+		except Exception:
+			required = {}
+		generator = GJJ_360PanoramaGenerator()
+		result = generator.generate(
+			positive_prompt=f"Convert this scene image into a natural seamless 360-degree equirectangular panorama. Scene name: {scene_name}",
+			negative_prompt="low quality, distorted, text, watermark",
+			unet_name=default_for(required, "unet_name", ""),
+			unet_dtype=default_for(required, "unet_dtype", "default"),
+			clip_name=default_for(required, "clip_name", ""),
+			vae_name=default_for(required, "vae_name", ""),
+			lora_1_name=default_for(required, "lora_1_name", ""),
+			lora_1_strength=1.0,
+			lora_2_name=default_for(required, "lora_2_name", ""),
+			lora_2_strength=1.0,
+			seed=0,
+			steps=4,
+			cfg=1.0,
+			sampler_name=default_for(required, "sampler_name", "euler"),
+			scheduler=default_for(required, "scheduler", "simple"),
+			denoise=1.0,
+			base_width=1024,
+			base_height=512,
+			final_width=2048,
+			final_height=1024,
+			upscale_enabled=False,
+			upscale_model_name=default_for(required, "upscale_model_name", ""),
+			prompt_suffix=DEFAULT_PROMPT_SUFFIX,
+			seam_prompt=DEFAULT_SEAM_PROMPT,
+			seam_mask_width=256,
+			seam_blur=24,
+			repair_enabled=True,
+			image=pil_to_scene_tensor(image),
+			output_current_view=False,
+			current_view_data="",
+			save_directory="",
+			unique_id=unique_id or f"gjj_scene_import_{uuid.uuid4().hex[:10]}",
+		)
+		output = None
+		if isinstance(result, dict):
+			values = result.get("result") or []
+			output = values[0] if values else None
+		elif isinstance(result, (tuple, list)) and result:
+			output = result[0]
+		if output is None:
+			raise RuntimeError("GJJ_360PanoramaGenerator 没有返回图像。")
+		return fit_to_360_png_canvas(_tensor_to_pil(output), 2048, 1024)
+
+	def save_360_png_asset(manifest: dict, image: Image.Image, label: str, method: str = "direct") -> dict:
+		scene_id = clean_key(manifest.get("id") or "", "")
+		if not scene_id:
+			raise ValueError("缺少场景 ID。")
+		base = scene_dir(scene_id)
+		base.mkdir(parents=True, exist_ok=True)
+		stem = clean_key(label or "scene", "scene")
+		target_name = f"{stem}_360.png"
+		if (base / target_name).exists():
+			target_name = f"{stem}_360_{now_ms()}.png"
+		final = fit_to_360_png_canvas(image, 2048, 1024)
+		final.save(base / target_name, "PNG")
+		timestamp = now_ms()
+		asset = {
+			"id": clean_key(Path(target_name).stem, "asset"),
+			"label": label or Path(target_name).stem,
+			"type": "360",
+			"file": target_name,
+			"created_at": timestamp,
+			"updated_at": timestamp,
+			"import_method": method,
+		}
+		manifest["type"] = "360"
+		manifest["assets"] = [item for item in manifest.get("assets") or [] if item.get("id") != asset["id"]]
+		manifest["assets"].append(asset)
+		return asset
+
+	def enrich_manifest(data: dict) -> dict:
+		scene_id = data.get("id") or ""
+		base = scene_dir(scene_id)
+		enriched_assets = []
+		for item in data.get("assets") or []:
+			next_item = dict(item)
+			path = base / item.get("file", "")
+			try:
+				stat = path.stat()
+				next_item["size"] = stat.st_size
+				next_item["url"] = file_url(scene_id, item.get("file", ""), stat.st_mtime)
+				preview = ensure_scene_asset_preview(base, path)
+				if preview:
+					try:
+						next_item["preview_url"] = file_url(scene_id, preview.name, preview.stat().st_mtime)
+						next_item["preview_file"] = preview.name
+					except Exception:
+						pass
+			except Exception:
+				next_item["missing"] = True
+			enriched_assets.append(next_item)
+		data["assets"] = enriched_assets
+		data["reference"] = f"@{data.get('name') or scene_id}"
+		return data
+
+	def list_scenes() -> list[dict]:
+		items = []
+		for entry in root_dir().iterdir():
+			if entry.is_dir():
+				try:
+					items.append(enrich_manifest(read_manifest(entry.name)))
+				except Exception:
+					continue
+		return items
+
+	def scene_total_size(data: dict) -> int:
+		base = scene_dir(data.get("id") or "")
+		total = 0
+		for item in data.get("assets") or []:
+			try:
+				total += (base / item.get("file", "")).stat().st_size
+			except Exception:
+				pass
+		return total
+
+	def sort_scenes(items: list[dict], sort_mode: str) -> list[dict]:
+		def name_key(item):
+			return str(item.get("name") or item.get("id") or "").lower()
+		if sort_mode == "updated_asc":
+			return sorted(items, key=lambda item: (int(item.get("updated_at") or 0), name_key(item)))
+		if sort_mode == "name_asc":
+			return sorted(items, key=name_key)
+		if sort_mode == "name_desc":
+			return sorted(items, key=name_key, reverse=True)
+		if sort_mode == "size_desc":
+			return sorted(items, key=lambda item: (-scene_total_size(item), name_key(item)))
+		if sort_mode == "size_asc":
+			return sorted(items, key=lambda item: (scene_total_size(item), name_key(item)))
+		return sorted(items, key=lambda item: (-int(item.get("updated_at") or 0), name_key(item)))
+
+	def list_scene_page(page: int = 1, page_size: int = 15, search: str = "", scene_type: str = "all", sort_mode: str = "updated_desc") -> dict:
+		search_text = str(search or "").strip().lower()
+		items = []
+		for data in list_scenes():
+			if scene_type in SCENE_TYPES and data.get("type") != scene_type:
+				continue
+			haystack = " ".join([
+				str(data.get("id") or ""),
+				str(data.get("name") or ""),
+				str(data.get("notes") or ""),
+				" ".join(data.get("keywords") or []),
+				" ".join(str(mark.get("keyword") or "") for mark in data.get("annotations") or []),
+			]).lower()
+			if search_text and search_text not in haystack:
+				continue
+			items.append(data)
+		items = sort_scenes(items, sort_mode)
+		total = len(items)
+		page_size = max(1, min(80, int(page_size or 15)))
+		page_count = max(1, (total + page_size - 1) // page_size)
+		page = max(1, min(int(page or 1), page_count))
+		start = (page - 1) * page_size
+		return {
+			"ok": True,
+			"scenes": items[start:start + page_size],
+			"total": total,
+			"page": page,
+			"page_size": page_size,
+			"page_count": page_count,
+		}
+
+	def find_scene(key: str) -> dict | None:
+		text = str(key or "").strip()
+		if not text:
+			return None
+		lowered = text.lower().lstrip("@")
+		for item in list_scenes():
+			if lowered in {str(item.get("id") or "").lower(), str(item.get("name") or "").lower()}:
+				return item
+		for item in list_scenes():
+			keywords = [str(value or "").lower() for value in item.get("keywords") or []]
+			marks = [str(value.get("keyword") or "").lower() for value in item.get("annotations") or []]
+			if lowered in keywords or lowered in marks:
+				return item
+		return None
+
+	@server.routes.get("/gjj/scene_library/list")
+	async def gjj_scene_library_list(request):
+		try:
+			result = list_scene_page(
+				page=int(request.query.get("page") or 1),
+				page_size=int(request.query.get("page_size") or 15),
+				search=request.query.get("search") or "",
+				scene_type=request.query.get("type") or "all",
+				sort_mode=request.query.get("sort") or "updated_desc",
+			)
+			return web.json_response(result)
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.get("/gjj/scene_library/model_tree")
+	async def gjj_scene_library_model_tree(_request):
+		def model_item_path(item: dict) -> str:
+			base = str(item.get("path") or "").replace("\\", "/").rstrip("/")
+			filename = str(item.get("filename") or "").replace("\\", "/").strip("/")
+			return f"{base}/{filename}" if filename else base
+		try:
+			from .nodes.gjj_360_panorama_generator import MODEL_TREE as PANORAMA_MODEL_TREE
+		except Exception:
+			PANORAMA_MODEL_TREE = []
+		panorama_items = [
+			{"label": str(item.get("label") or ""), "path": model_item_path(item)}
+			for item in PANORAMA_MODEL_TREE
+			if isinstance(item, dict) and "models" in model_item_path(item).replace("\\", "/").split("/")
+		]
+		return web.json_response({
+			"ok": True,
+			"title": "场景库依赖目录树",
+			"groups": [
+				{
+					"name": "🌏 360 场景生成",
+					"items": panorama_items,
+				},
+				{
+					"name": "🧠 自动打标",
+					"items": [
+						{"label": "Gemma / Qwen VL 文本编码器", "path": "models/text_encoders/qwen3.5_4b_fp8_mixed.safetensors"},
+					],
+				},
+				{
+					"name": "🗂 场景库存储",
+					"items": [
+						{"label": "场景库", "path": str(root_dir()), "folder": True},
+					],
+				},
+			],
+		})
+
+	@server.routes.post("/gjj/scene_library/scene")
+	async def gjj_scene_library_scene(request):
+		try:
+			data = await request.json()
+			requested_id = clean_key(data.get("id") or "", "")
+			name = str(data.get("name") or requested_id or "新场景").strip()[:96]
+			scene_id = requested_id or unique_scene_id(name or uuid.uuid4().hex[:10])
+			manifest = read_manifest(scene_id)
+			manifest["name"] = name or manifest.get("name") or scene_id
+			manifest["type"] = clean_scene_type(data.get("type") or manifest.get("type"), "360")
+			manifest["keywords"] = split_keywords(data.get("keywords") if "keywords" in data else manifest.get("keywords"))
+			manifest["notes"] = str(data.get("notes") if "notes" in data else manifest.get("notes") or "")
+			if data.get("sync_id") and requested_id:
+				next_id = unique_scene_id(name, requested_id)
+				if next_id != requested_id:
+					old_path = scene_dir(requested_id)
+					new_path = scene_dir(next_id)
+					if old_path.exists() and not new_path.exists():
+						shutil.move(str(old_path), str(new_path))
+					scene_id = next_id
+					manifest["id"] = scene_id
+			return web.json_response({"ok": True, "scene": enrich_manifest(write_manifest(manifest))})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.delete("/gjj/scene_library/scene")
+	async def gjj_scene_library_delete_scene(request):
+		try:
+			scene_id = request.query.get("id") or ""
+			path = scene_dir(scene_id)
+			if path.exists():
+				shutil.rmtree(path)
+			return web.json_response({"ok": True})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.post("/gjj/scene_library/import_auto")
+	async def gjj_scene_library_import_auto(request):
+		try:
+			reader = await request.multipart()
+			fields = {}
+			raw = b""
+			file_name = ""
+			async for part in reader:
+				if part.name == "file":
+					file_name = part.filename or "scene.png"
+					raw = await part.read(decode=False)
+				else:
+					fields[part.name] = (await part.text()).strip()
+			if not raw:
+				raise ValueError("没有收到场景文件。")
+			ext = Path(file_name).suffix.lower()
+			if ext not in ASSET_EXTS:
+				raise ValueError("只支持 png/jpg/webp/gif/bmp/hdr/exr 场景文件。")
+			label = fields.get("label") or Path(file_name).stem or "场景"
+			name = fields.get("name") or label or "新场景"
+			import_unique_id = clean_key(fields.get("unique_id") or "", "")
+			scene_id = clean_key(fields.get("id") or "", "") or unique_scene_id(name)
+			manifest = read_manifest(scene_id)
+			manifest["name"] = name or manifest.get("name") or scene_id
+			manifest["type"] = "360"
+			base = scene_dir(scene_id)
+			base.mkdir(parents=True, exist_ok=True)
+			method = "direct_360"
+			if ext in {".hdr", ".exr"}:
+				source_name = f"__import_source_{uuid.uuid4().hex[:10]}{ext}"
+				source_path = base / source_name
+				source_path.write_bytes(raw)
+				try:
+					image = scene_pil_from_hdr(source_path)
+					method = "hdr_to_png"
+				finally:
+					try:
+						source_path.unlink(missing_ok=True)
+					except Exception:
+						pass
+			else:
+				import io
+				with Image.open(io.BytesIO(raw)) as opened:
+					image = opened.convert("RGB")
+				if is_360_ratio(image):
+					method = "direct_360"
+				else:
+					method = "generated_360"
+					image = generate_360_from_scene_image(image, name, import_unique_id)
+			asset = save_360_png_asset(manifest, image, label, method)
+			scene = enrich_manifest(write_manifest(manifest))
+			return web.json_response({"ok": True, "scene": scene, "asset": asset, "method": method})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.post("/gjj/scene_library/asset")
+	async def gjj_scene_library_asset(request):
+		try:
+			reader = await request.multipart()
+			fields = {}
+			raw = b""
+			file_name = ""
+			async for part in reader:
+				if part.name == "file":
+					file_name = part.filename or "scene.png"
+					raw = await part.read(decode=False)
+				else:
+					fields[part.name] = (await part.text()).strip()
+			if not raw:
+				raise ValueError("没有收到场景文件。")
+			ext = Path(file_name).suffix.lower()
+			if ext not in ASSET_EXTS:
+				raise ValueError("只支持 png/jpg/webp/gif/bmp/hdr/exr 场景文件。")
+			name = fields.get("name") or Path(file_name).stem or "新场景"
+			scene_type = clean_scene_type(fields.get("type"), "hdr" if ext in {".hdr", ".exr"} else "360")
+			scene_id = clean_key(fields.get("id") or "", "") or unique_scene_id(name)
+			manifest = read_manifest(scene_id)
+			manifest["name"] = fields.get("name") or manifest.get("name") or name
+			manifest["type"] = scene_type
+			base = scene_dir(scene_id)
+			base.mkdir(parents=True, exist_ok=True)
+			stem = clean_key(fields.get("label") or Path(file_name).stem or scene_type, "scene")
+			target_name = f"{stem}{ext}"
+			if (base / target_name).exists():
+				target_name = f"{stem}_{now_ms()}{ext}"
+			(base / target_name).write_bytes(raw)
+			asset = {
+				"id": clean_key(Path(target_name).stem, "asset"),
+				"label": fields.get("label") or Path(file_name).stem or scene_type,
+				"type": scene_type,
+				"file": target_name,
+				"created_at": now_ms(),
+				"updated_at": now_ms(),
+			}
+			manifest["assets"] = [item for item in manifest.get("assets") or [] if item.get("id") != asset["id"]]
+			manifest["assets"].append(asset)
+			return web.json_response({"ok": True, "scene": enrich_manifest(write_manifest(manifest))})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.post("/gjj/scene_library/annotations")
+	async def gjj_scene_library_annotations(request):
+		try:
+			data = await request.json()
+			scene_id = clean_key(data.get("id") or "", "")
+			manifest = read_manifest(scene_id)
+			annotations = []
+			for item in data.get("annotations") if isinstance(data.get("annotations"), list) else []:
+				if isinstance(item, dict):
+					clean = clean_annotation(item)
+					if clean:
+						annotations.append(clean)
+			manifest["annotations"] = annotations
+			return web.json_response({"ok": True, "scene": enrich_manifest(write_manifest(manifest))})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.post("/gjj/scene_library/annotate_missing")
+	async def gjj_scene_library_annotate_missing(request):
+		try:
+			try:
+				data = await request.json()
+			except Exception:
+				data = {}
+			limit = int(data.get("limit") or 9999)
+			requested_ids = data.get("ids") if isinstance(data.get("ids"), list) else []
+			requested_ids = [clean_key(item, "") for item in requested_ids]
+			requested_ids = [item for item in requested_ids if item]
+			clip_name = str(data.get("clip_name") or "qwen3.5_4b_fp8_mixed.safetensors")
+			progress_id = clean_key(data.get("unique_id") or "", "")
+			def send_scene_progress(current: int, total: int, text: str) -> None:
+				if not progress_id:
+					return
+				try:
+					server.send_sync("gjj_scene_library_progress", {
+						"node": progress_id,
+						"current": max(0, int(current)),
+						"total": max(1, int(total or 1)),
+						"text": str(text or ""),
+					})
+				except Exception:
+					pass
+			try:
+				from .nodes.gjj_comprehensive_matting import _pil_list_to_tensor
+				from .nodes.gjj_gemma_text_generate import (
+					DEFAULT_CLIP_NAME,
+					_generate_text,
+					_load_merged_clip,
+					_merged_generation_prompt,
+				)
+			except Exception as exc:
+				raise RuntimeError(f"加载 GJJ_GemmaTextGenerate 运行时失败：{exc}") from exc
+
+			model_name = clip_name or DEFAULT_CLIP_NAME
+			clip = _load_merged_clip(model_name, "ideogram4", "default")
+			processed = []
+			skipped = []
+			skipped_details = []
+			scene_ids = requested_ids or [str(scene.get("id") or "") for scene in list_scenes()]
+			total_count = max(1, len(scene_ids))
+			send_scene_progress(0, total_count, "正在准备自动打标...")
+			for scene_index, scene_id in enumerate(scene_ids, start=1):
+				if len(processed) >= limit:
+					break
+				if not scene_id:
+					send_scene_progress(scene_index, total_count, f"跳过空场景 {scene_index}/{total_count}")
+					skipped_details.append({"id": "", "name": "", "reason": "场景 ID 为空"})
+					continue
+				manifest = read_manifest(scene_id)
+				scene_label = str(manifest.get("name") or scene_id)
+				send_scene_progress(scene_index - 1, total_count, f"正在分析 {scene_index}/{total_count}：{scene_label}")
+				has_annotations = bool(manifest.get("annotations"))
+				has_keywords = bool(manifest.get("keywords"))
+				has_notes = bool(str(manifest.get("notes") or "").strip())
+				if has_annotations and has_keywords and has_notes:
+					skipped.append(scene_id)
+					skipped_details.append({"id": scene_id, "name": scene_label, "reason": "已有坐标、关键词和备注"})
+					send_scene_progress(scene_index, total_count, f"已跳过 {scene_index}/{total_count}：{scene_label}")
+					continue
+				asset = None
+				for item in manifest.get("assets") or []:
+					file_name = str(item.get("file") or "")
+					if Path(file_name).suffix.lower() in PREVIEW_EXTS:
+						asset = item
+						break
+				if not asset:
+					skipped.append(scene_id)
+					skipped_details.append({"id": scene_id, "name": scene_label, "reason": "没有可用于识别的 PNG/JPG 预览图"})
+					send_scene_progress(scene_index, total_count, f"无可用图片，跳过 {scene_index}/{total_count}：{scene_label}")
+					continue
+				path = scene_dir(scene_id) / str(asset.get("file") or "")
+				if not path.is_file():
+					skipped.append(scene_id)
+					skipped_details.append({"id": scene_id, "name": scene_label, "reason": "图片文件缺失"})
+					send_scene_progress(scene_index, total_count, f"图片缺失，跳过 {scene_index}/{total_count}：{scene_label}")
+					continue
+				try:
+					image = Image.open(path).convert("RGB")
+				except Exception:
+					skipped.append(scene_id)
+					skipped_details.append({"id": scene_id, "name": scene_label, "reason": "图片读取失败"})
+					send_scene_progress(scene_index, total_count, f"图片读取失败，跳过 {scene_index}/{total_count}：{scene_label}")
+					continue
+				system_prompt = (
+					"你是360场景资产库的中文物品坐标标注助手。"
+					"根据输入的场景图片，识别清晰、可检索、适合后续关键词定位的主要物品或区域。"
+					"坐标必须是原图上的归一化中心点，x/y 都在 0 到 1 之间；x 从左到右，y 从上到下。"
+					"不要标注人物、光影、风格或抽象概念。不要输出解释。"
+					"必须只输出 JSON 对象，格式为 {\"keywords\":[\"卧室\",\"床\"],\"notes\":\"一句中文场景备注\",\"annotations\":[{\"keyword\":\"物品名\",\"x\":0.5,\"y\":0.5}]}。"
+				)
+				user_prompt = (
+					f"场景名：{manifest.get('name') or scene_id}\n"
+					f"场景类型：{manifest.get('type') or '360'}\n"
+					"请标注 6 到 12 个最明显的物品或空间区域，例如：沙发、床、窗户、桌子、门、电视、地毯、柜子、阳台。"
+					"同时给出 4 到 10 个检索关键词，并写一句简短场景备注，概括空间类型、氛围和主要物件。"
+					"如果图片是360等距全景图，坐标仍按整张展开图的位置返回。"
+				)
+				tensor = _pil_list_to_tensor([fit_scene_inference_canvas(image)])
+				context_unique_id = f"gjj_scene_library_gemma_{scene_id}"
+				had_last_prompt_id = hasattr(server, "last_prompt_id")
+				if not had_last_prompt_id:
+					try:
+						setattr(server, "last_prompt_id", context_unique_id)
+					except Exception:
+						pass
+				try:
+					text = _generate_text(
+						clip,
+						_merged_generation_prompt(system_prompt, user_prompt),
+						420,
+						"off",
+						image=tensor,
+						thinking=False,
+						use_default_template=True,
+						temperature=0.25,
+						top_k=32,
+						top_p=0.9,
+						min_p=0.05,
+						repetition_penalty=1.05,
+						seed=0,
+						presence_penalty=0.0,
+					)
+				finally:
+					if not had_last_prompt_id and hasattr(server, "last_prompt_id"):
+						try:
+							delattr(server, "last_prompt_id")
+						except Exception:
+							pass
+				asset_id = str(asset.get("id") or "")
+				annotations, keywords, notes = parse_scene_ai_payload(text, asset_id)
+				fallback_annotations, fallback_keywords, fallback_notes = fallback_scene_annotations(manifest, asset_id)
+				if not annotations and has_annotations:
+					annotations = manifest.get("annotations") or []
+				if not annotations:
+					send_scene_progress(scene_index, total_count, f"模型未返回坐标，已生成基础标注 {scene_index}/{total_count}：{scene_label}")
+					annotations = fallback_annotations
+				if not keywords:
+					keywords = fallback_keywords
+				if not notes:
+					notes = fallback_notes
+				manifest["annotations"] = annotations
+				if keywords and not manifest.get("keywords"):
+					manifest["keywords"] = keywords
+				if notes and not str(manifest.get("notes") or "").strip():
+					manifest["notes"] = notes
+				write_manifest(manifest)
+				processed.append({
+					"id": scene_id,
+					"name": manifest.get("name") or scene_id,
+					"count": len(annotations),
+					"annotations": annotations,
+					"keywords": manifest.get("keywords") or [],
+					"notes": manifest.get("notes") or "",
+				})
+				send_scene_progress(scene_index, total_count, f"已完成 {scene_index}/{total_count}：{scene_label}")
+			send_scene_progress(total_count, total_count, "自动打标完成")
+			return web.json_response({
+				"ok": True,
+				"model": model_name,
+				"processed": processed,
+				"skipped": skipped_details,
+				"processed_count": len(processed),
+				"skipped_count": len(skipped),
+				"scenes": list_scenes(),
+			})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.get("/gjj/scene_library/file")
+	async def gjj_scene_library_file(request):
+		try:
+			scene_id = request.query.get("id") or ""
+			file_name = clean_key(request.query.get("file") or "", "")
+			ext = Path(file_name).suffix.lower()
+			if ext not in ASSET_EXTS:
+				raise ValueError("场景文件类型无效。")
+			base = scene_dir(scene_id).resolve()
+			path = (base / file_name).resolve()
+			if base not in path.parents or not path.is_file():
+				return web.Response(status=404, text="not found")
+			content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+			return web.FileResponse(path, headers={"Cache-Control": "no-store", "Content-Type": content_type})
+		except Exception as exc:
+			return web.Response(status=400, text=str(exc))
+
+	@server.routes.get("/gjj/scene_library/resolve")
+	async def gjj_scene_library_resolve(request):
+		try:
+			scene = find_scene(request.query.get("name") or request.query.get("id") or request.query.get("keyword") or "")
+			if not scene:
+				return web.json_response({"ok": False, "error": "未找到场景。"}, status=404)
+			keyword = str(request.query.get("keyword") or "").strip().lower()
+			positions = []
+			if keyword:
+				for item in scene.get("annotations") or []:
+					mark = str(item.get("keyword") or "").lower()
+					if keyword == mark or keyword in mark or mark in keyword:
+						positions.append(item)
+			return web.json_response({"ok": True, "scene": scene, "positions": positions})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.post("/gjj/scene_library/open_dir")
+	async def gjj_scene_library_open_dir(request):
+		try:
+			data = await request.json()
+			scene_id = str(data.get("id") or "").strip()
+			directory = str(scene_dir(scene_id) if scene_id else root_dir())
+			if sys.platform.startswith("win"):
+				flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+				subprocess.Popen(["cmd.exe", "/c", "start", "", "/max", "explorer.exe", "/n,", directory], creationflags=flags)
+			elif sys.platform == "darwin":
+				subprocess.Popen(["open", directory])
+			else:
+				subprocess.Popen(["xdg-open", directory])
+			return web.json_response({"ok": True, "directory": directory})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	server._gjj_scene_library_api_registered = True
+_register_gjj_scene_library_api()
+
+def _gjj_costume_library_directory():
+	from pathlib import Path
+	try:
+		import folder_paths
+		models_dir = Path(getattr(folder_paths, "models_dir", "") or "")
+	except Exception:
+		models_dir = Path()
+	if not str(models_dir):
+		models_dir = _gjj_package_root().parent.parent / "models"
+	return models_dir / "GJJ" / "costume_library"
+
+def _gjj_legacy_costume_library_directory():
+	return _gjj_package_root() / "presets" / "costume_library"
+
+def _register_gjj_costume_library_api():
+	try:
+		import json
+		import mimetypes
+		import os
+		import re
+		import shutil
+		import subprocess
+		import sys
+		import time
+		import uuid
+		from pathlib import Path
+		from urllib.parse import urlencode
+		from PIL import Image, ImageFilter
+		from aiohttp import web
+		from server import PromptServer
+	except Exception as exc:
+		print(f"[GJJ] 服化道接口注册失败：{exc}")
+		return
+
+	server = getattr(PromptServer, "instance", None)
+	if server is None or getattr(server, "_gjj_costume_library_api_registered", False):
+		return
+
+	SAFE_TEXT_RE = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff._-]+")
+	ASSET_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+	CATEGORIES = {"all", "clothing", "prop"}
+	CLOTHING_SAM3_PROMPT = (
+		"armor, cuirass, pauldron, vambrace, gauntlet, greave, helmet, robe, gown, tunic, "
+		"mantle, cloak, sash, collar, sleeve, hem, lining, uniform, outfit, attire, garment, "
+		"costume, boot, war boot, belt, waistband, coat, jacket, blazer, shirt, sweater, "
+		"pants, skirt, dress, hoodie"
+	)
+	CLOTHING_SAM3_CONFIDENCE = 0.5
+
+	def now_ms() -> int:
+		return int(time.time() * 1000)
+
+	def root_dir() -> Path:
+		path = _gjj_costume_library_directory()
+		path.mkdir(parents=True, exist_ok=True)
+		legacy = _gjj_legacy_costume_library_directory()
+		if legacy.exists() and legacy.is_dir():
+			try:
+				has_new_items = any(path.iterdir())
+			except Exception:
+				has_new_items = False
+			if not has_new_items:
+				for entry in legacy.iterdir():
+					target = path / entry.name
+					if target.exists():
+						continue
+					if entry.is_dir():
+						shutil.move(str(entry), str(target))
+					elif entry.is_file():
+						shutil.move(str(entry), str(target))
+		return path
+
+	def clean_key(value: str, fallback: str = "item") -> str:
+		text = SAFE_TEXT_RE.sub("_", str(value or "").strip()).strip("._- ")
+		return (text or fallback)[:96]
+
+	def split_tags(value) -> list[str]:
+		if isinstance(value, list):
+			raw = value
+		else:
+			raw = re.split(r"[,，\n;；#]+", str(value or ""))
+		items = []
+		for item in raw:
+			text = str(item or "").strip()
+			if text and text not in items:
+				items.append(text[:32])
+		return items[:80]
+
+	def clean_category(value: str) -> str:
+		text = str(value or "").strip().lower()
+		if text in {"prop", "道具", "props"}:
+			return "prop"
+		return "clothing"
+
+	def unique_item_id(preferred: str, current_id: str = "") -> str:
+		base_id = clean_key(preferred or current_id, "costume")
+		current_id = clean_key(current_id, "")
+		if current_id and base_id == current_id:
+			return current_id
+		if not (root_dir() / base_id).exists():
+			return base_id
+		for index in range(2, 1000):
+			candidate = clean_key(f"{base_id}_{index}", "costume")
+			if current_id and candidate == current_id:
+				return current_id
+			if not (root_dir() / candidate).exists():
+				return candidate
+		return clean_key(f"{base_id}_{uuid.uuid4().hex[:6]}", "costume")
+
+	def unique_item_name(preferred: str, current_id: str = "") -> str:
+		base_name = str(preferred or current_id or "服装").strip()[:80] or "服装"
+		current_id = clean_key(current_id, "")
+		used = set()
+		for entry in root_dir().iterdir():
+			if not entry.is_dir() or (current_id and entry.name == current_id):
+				continue
+			try:
+				data = read_manifest(entry.name)
+				name = str(data.get("name") or "").strip().lower()
+				if name:
+					used.add(name)
+			except Exception:
+				continue
+		if base_name.lower() not in used:
+			return base_name
+		for index in range(2, 1000):
+			candidate = f"{base_name}_{index}"
+			if candidate.lower() not in used:
+				return candidate[:96]
+		return f"{base_name}_{uuid.uuid4().hex[:6]}"[:96]
+
+	def item_dir(item_id: str) -> Path:
+		item_id = clean_key(item_id, "")
+		if not item_id:
+			raise ValueError("缺少服化道 ID。")
+		base = root_dir().resolve()
+		path = (base / item_id).resolve()
+		if base not in path.parents and path != base:
+			raise ValueError("服化道路径不安全。")
+		return path
+
+	def manifest_path(item_id: str) -> Path:
+		return item_dir(item_id) / "manifest.json"
+
+	def default_manifest(item_id: str, name: str = "") -> dict:
+		t = now_ms()
+		return {
+			"id": item_id,
+			"name": str(name or item_id),
+			"category": "clothing",
+			"tags": [],
+			"notes": "",
+			"created_at": t,
+			"updated_at": t,
+			"assets": [],
+		}
+
+	def clean_asset_item(item: dict, created_at: int, updated_at: int) -> dict | None:
+		file_name = clean_key(item.get("file") or "", "")
+		if Path(file_name).suffix.lower() not in ASSET_EXTS:
+			return None
+		asset_id = clean_key(item.get("id") or Path(file_name).stem, "asset")
+		clean = {
+			"id": asset_id,
+			"label": str(item.get("label") or asset_id),
+			"file": file_name,
+			"created_at": int(item.get("created_at") or created_at),
+			"updated_at": int(item.get("updated_at") or updated_at),
+		}
+		for key in ("source_file", "sam3_prompt", "sam3_confidence", "sam3_status", "sam3_scores"):
+			if key in item:
+				clean[key] = item.get(key)
+		return clean
+
+	def read_manifest(item_id: str) -> dict:
+		path = manifest_path(item_id)
+		if not path.is_file():
+			return default_manifest(item_id)
+		try:
+			data = json.loads(path.read_text(encoding="utf-8"))
+		except Exception:
+			data = {}
+		if not isinstance(data, dict):
+			data = {}
+		data["id"] = str(item_id)
+		data["name"] = str(data.get("name") or item_id)
+		data["category"] = clean_category(data.get("category"))
+		data["tags"] = split_tags(data.get("tags") or data.get("keywords") or "")
+		data["notes"] = str(data.get("notes") or "")
+		data["created_at"] = int(data.get("created_at") or now_ms())
+		data["updated_at"] = int(data.get("updated_at") or data["created_at"])
+		assets = []
+		for item in data.get("assets") if isinstance(data.get("assets"), list) else []:
+			if isinstance(item, dict):
+				clean = clean_asset_item(item, data["created_at"], data["updated_at"])
+				if clean:
+					assets.append(clean)
+		data["assets"] = assets
+		return data
+
+	def write_manifest(data: dict) -> dict:
+		item_id = clean_key(data.get("id"), "")
+		if not item_id:
+			raise ValueError("缺少服化道 ID。")
+		data["id"] = item_id
+		data["name"] = str(data.get("name") or item_id).strip()[:96] or item_id
+		data["category"] = clean_category(data.get("category"))
+		data["tags"] = split_tags(data.get("tags") or "")
+		data["notes"] = str(data.get("notes") or "")
+		data["updated_at"] = now_ms()
+		path = manifest_path(item_id)
+		path.parent.mkdir(parents=True, exist_ok=True)
+		tmp = path.with_suffix(".json.tmp")
+		tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+		os.replace(str(tmp), str(path))
+		return read_manifest(item_id)
+
+	def file_url(item_id: str, file_name: str, mtime: float = 0) -> str:
+		return "/gjj/costume_library/file?" + urlencode({
+			"id": item_id,
+			"file": file_name,
+			"mtime": int(mtime or time.time()),
+		})
+
+	def costume_png_bytes(image: Image.Image) -> bytes:
+		import io
+		buffer = io.BytesIO()
+		image.convert("RGBA").save(buffer, format="PNG")
+		return buffer.getvalue()
+
+	def fit_costume_inference_canvas(image: Image.Image, max_side: int = 768) -> Image.Image:
+		canvas = image.convert("RGB")
+		canvas.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+		return canvas
+
+	def extract_json_object(text: str) -> dict:
+		try:
+			data = json.loads(str(text or "").strip())
+			return data if isinstance(data, dict) else {}
+		except Exception:
+			pass
+		match = re.search(r"\{.*\}", str(text or ""), flags=re.DOTALL)
+		if not match:
+			return {}
+		try:
+			data = json.loads(match.group(0))
+			return data if isinstance(data, dict) else {}
+		except Exception:
+			return {}
+
+	def parse_costume_ai_payload(text: str, fallback_name: str = "") -> tuple[str, list[str], str]:
+		data = extract_json_object(text)
+		name = str(data.get("name") or data.get("名称") or fallback_name or "").strip()[:96]
+		tags = split_tags(data.get("tags") or data.get("标签") or data.get("keywords") or data.get("关键词") or "")
+		notes = str(data.get("notes") or data.get("备注") or data.get("description") or data.get("描述") or "").strip()[:300]
+		return name, tags, notes
+
+	def costume_foreground_bbox(image: Image.Image, padding: int = 8) -> tuple[int, int, int, int] | None:
+		alpha = image.convert("RGBA").getchannel("A")
+		bbox = alpha.point(lambda value: 255 if value > 10 else 0).getbbox()
+		if not bbox:
+			return None
+		left, top, right, bottom = bbox
+		return (
+			max(0, left - padding),
+			max(0, top - padding),
+			min(image.width, right + padding),
+			min(image.height, bottom + padding),
+		)
+
+	def sam3_clothing_cutout(image: Image.Image) -> tuple[Image.Image, dict]:
+		try:
+			import gc
+			import torch
+			import comfy.model_management
+			from .nodes.gjj_sam3_runtime import get_or_build_model, list_sam3_models, pick_available_name
+		except Exception as exc:
+			raise RuntimeError(f"加载 SAM3 运行时失败：{exc}") from exc
+		available = list_sam3_models()
+		sam3_model = pick_available_name("sam3.safetensors", available, "") or (available[0] if available else "")
+		if not sam3_model:
+			raise RuntimeError("未找到 SAM3 模型：请将 sam3.safetensors 放到 ComfyUI/models/sam3。")
+		pil_image = image.convert("RGB")
+		try:
+			sam3 = get_or_build_model(sam3_model, precision="auto", compile_model=False)
+			comfy.model_management.load_models_gpu([sam3])
+			processor = sam3.processor
+			if hasattr(processor, "sync_device_with_model"):
+				processor.sync_device_with_model()
+			processor.set_confidence_threshold(CLOTHING_SAM3_CONFIDENCE)
+			state = processor.set_image(pil_image)
+			state = processor.set_text_prompt(CLOTHING_SAM3_PROMPT, state)
+			masks = state.get("masks", None)
+			scores = state.get("scores", None)
+			if masks is None or len(masks) == 0:
+				return image.convert("RGBA"), {
+					"sam3_prompt": CLOTHING_SAM3_PROMPT,
+					"sam3_confidence": CLOTHING_SAM3_CONFIDENCE,
+					"sam3_status": "no_detection",
+					"sam3_scores": [],
+				}
+			if not isinstance(masks, torch.Tensor):
+				masks = torch.as_tensor(masks)
+			mask_tensor = masks.detach().float().cpu()
+			if mask_tensor.ndim == 2:
+				mask_tensor = mask_tensor.unsqueeze(0)
+			combined = torch.any(mask_tensor > 0.5, dim=0).numpy().astype("uint8") * 255
+			mask = Image.fromarray(combined, mode="L")
+			alpha = mask.filter(ImageFilter.GaussianBlur(radius=0.6))
+			rgba = image.convert("RGBA")
+			rgba.putalpha(alpha)
+			box = costume_foreground_bbox(rgba, padding=8)
+			if box:
+				rgba = rgba.crop(box)
+			score_values = []
+			if scores is not None:
+				if not isinstance(scores, torch.Tensor):
+					scores = torch.as_tensor(scores)
+				score_values = [float(value) for value in scores.detach().float().cpu().flatten().tolist()]
+			return rgba, {
+				"sam3_prompt": CLOTHING_SAM3_PROMPT,
+				"sam3_confidence": CLOTHING_SAM3_CONFIDENCE,
+				"sam3_status": "cutout",
+				"sam3_scores": score_values,
+			}
+		except Exception as exc:
+			raise RuntimeError(f"SAM3 服装抠取失败：{exc}") from exc
+		finally:
+			try:
+				del state
+			except Exception:
+				pass
+			try:
+				gc.collect()
+				comfy.model_management.soft_empty_cache()
+			except Exception:
+				pass
+
+	def sam3_model_hint_path() -> str:
+		try:
+			paths = folder_paths.get_folder_paths("sam3")
+			if paths:
+				return str(Path(paths[0]) / "sam3.safetensors")
+		except Exception:
+			pass
+		return "models/sam3/sam3.safetensors"
+
+	def enrich_manifest(data: dict) -> dict:
+		item_id = data.get("id") or ""
+		base = item_dir(item_id)
+		assets = []
+		for item in data.get("assets") or []:
+			path = base / item.get("file", "")
+			if not path.is_file():
+				continue
+			stat = path.stat()
+			next_item = dict(item)
+			next_item["size"] = stat.st_size
+			next_item["url"] = file_url(item_id, item.get("file", ""), stat.st_mtime)
+			assets.append(next_item)
+		data = dict(data)
+		data["assets"] = assets
+		data["cover"] = assets[0]["url"] if assets else ""
+		data["reference"] = f"@{data.get('name') or item_id}"
+		return data
+
+	def list_items() -> list[dict]:
+		items = []
+		for entry in root_dir().iterdir():
+			if entry.is_dir():
+				try:
+					data = enrich_manifest(read_manifest(entry.name))
+					if data.get("assets") or (entry / "manifest.json").is_file():
+						items.append(data)
+				except Exception:
+					continue
+		return items
+
+	def item_total_size(data: dict) -> int:
+		base = item_dir(data.get("id") or "")
+		total = 0
+		for item in data.get("assets") or []:
+			try:
+				total += (base / item.get("file", "")).stat().st_size
+			except Exception:
+				pass
+		return total
+
+	def sort_items(items: list[dict], sort_mode: str) -> list[dict]:
+		def name_key(item):
+			return str(item.get("name") or item.get("id") or "").lower()
+		if sort_mode == "name_asc":
+			return sorted(items, key=name_key)
+		if sort_mode == "name_desc":
+			return sorted(items, key=name_key, reverse=True)
+		if sort_mode == "size_desc":
+			return sorted(items, key=lambda item: (-item_total_size(item), name_key(item)))
+		return sorted(items, key=lambda item: (-int(item.get("updated_at") or 0), name_key(item)))
+
+	def normalize_search_text(value: str) -> str:
+		return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+	def parse_search_groups(value: str) -> list[list[str]]:
+		text = normalize_search_text(value)
+		if not text:
+			return []
+		groups = []
+		for group in re.split(r"\s+", text):
+			parts = [part.strip() for part in re.split(r"[|｜]+", group) if part.strip()]
+			if parts:
+				groups.append(parts)
+		return groups
+
+	def fuzzy_contains(haystack: str, needle: str) -> bool:
+		if not needle:
+			return True
+		if needle in haystack:
+			return True
+		position = 0
+		for char in needle:
+			position = haystack.find(char, position)
+			if position < 0:
+				return False
+			position += 1
+		return True
+
+	def matches_search(haystack: str, groups: list[list[str]]) -> bool:
+		if not groups:
+			return True
+		return all(any(fuzzy_contains(haystack, part) for part in group) for group in groups)
+
+	def list_item_page(page: int = 1, page_size: int = 15, search: str = "", category: str = "all", tag: str = "", sort_mode: str = "updated_desc") -> dict:
+		search_groups = parse_search_groups(search)
+		tag_text = str(tag or "").strip().lower()
+		items = []
+		all_tags = []
+		for data in list_items():
+			for item_tag in data.get("tags") or []:
+				if item_tag not in all_tags:
+					all_tags.append(item_tag)
+			if category in CATEGORIES and category != "all" and data.get("category") != category:
+				continue
+			tags = [str(value or "").lower() for value in data.get("tags") or []]
+			if tag_text and tag_text not in tags:
+				continue
+			haystack = " ".join([
+				str(data.get("id") or ""),
+				str(data.get("name") or ""),
+				str(data.get("notes") or ""),
+				" ".join(data.get("tags") or []),
+				" ".join(str(asset.get("label") or "") for asset in data.get("assets") or []),
+			]).lower()
+			if not matches_search(haystack, search_groups):
+				continue
+			items.append(data)
+		items = sort_items(items, sort_mode)
+		all_tags = sorted(all_tags, key=lambda value: str(value).lower())
+		total = len(items)
+		page_size = max(1, min(80, int(page_size or 15)))
+		page_count = max(1, (total + page_size - 1) // page_size)
+		page = max(1, min(int(page or 1), page_count))
+		start = (page - 1) * page_size
+		return {
+			"ok": True,
+			"items": items[start:start + page_size],
+			"tags": all_tags,
+			"total": total,
+			"page": page,
+			"page_size": page_size,
+			"page_count": page_count,
+		}
+
+	def find_item(key: str) -> dict | None:
+		text = str(key or "").strip().lower().lstrip("@")
+		if not text:
+			return None
+		for item in list_items():
+			if text in {str(item.get("id") or "").lower(), str(item.get("name") or "").lower()}:
+				return item
+		for item in list_items():
+			if text in [str(value or "").lower() for value in item.get("tags") or []]:
+				return item
+		return None
+
+	@server.routes.get("/gjj/costume_library/list")
+	async def gjj_costume_library_list(request):
+		try:
+			return web.json_response(list_item_page(
+				page=int(request.query.get("page") or 1),
+				page_size=int(request.query.get("page_size") or 15),
+				search=request.query.get("search") or "",
+				category=request.query.get("category") or "all",
+				tag=request.query.get("tag") or "",
+				sort_mode=request.query.get("sort") or "updated_desc",
+			))
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.get("/gjj/costume_library/model_tree")
+	async def gjj_costume_library_model_tree(_request):
+		return web.json_response({
+			"ok": True,
+			"title": "服化道存储目录树",
+			"groups": [
+				{
+					"name": "💼 服化道存储",
+					"items": [
+						{"label": "服化道", "path": str(root_dir()), "folder": True},
+					],
+				},
+				{
+					"name": "✂️ 服装 SAM3 抠取",
+					"items": [
+						{"label": "SAM3", "path": sam3_model_hint_path()},
+					],
+				},
+			],
+		})
+
+	@server.routes.post("/gjj/costume_library/item")
+	async def gjj_costume_library_item(request):
+		try:
+			data = await request.json()
+			requested_id = clean_key(data.get("id") or "", "")
+			name = str(data.get("name") or requested_id or "新服化道").strip()[:96]
+			item_id = requested_id or unique_item_id(name or uuid.uuid4().hex[:10])
+			manifest = read_manifest(item_id)
+			manifest["name"] = name or manifest.get("name") or item_id
+			manifest["category"] = clean_category(data.get("category") or manifest.get("category"))
+			manifest["tags"] = split_tags(data.get("tags") if "tags" in data else manifest.get("tags"))
+			manifest["notes"] = str(data.get("notes") if "notes" in data else manifest.get("notes") or "")
+			if data.get("sync_id") and requested_id:
+				next_id = unique_item_id(name, requested_id)
+				if next_id != requested_id:
+					old_path = item_dir(requested_id)
+					new_path = item_dir(next_id)
+					if old_path.exists() and not new_path.exists():
+						shutil.move(str(old_path), str(new_path))
+					item_id = next_id
+					manifest["id"] = item_id
+			return web.json_response({"ok": True, "item": enrich_manifest(write_manifest(manifest))})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.delete("/gjj/costume_library/item")
+	async def gjj_costume_library_delete_item(request):
+		try:
+			item_id = request.query.get("id") or ""
+			path = item_dir(item_id)
+			if path.exists():
+				shutil.rmtree(path)
+			return web.json_response({"ok": True})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.post("/gjj/costume_library/asset")
+	async def gjj_costume_library_asset(request):
+		try:
+			reader = await request.multipart()
+			fields = {}
+			file_part = None
+			while True:
+				part = await reader.next()
+				if part is None:
+					break
+				if part.filename:
+					file_part = part
+					break
+				fields[part.name] = await part.text()
+			if file_part is None:
+				raise ValueError("缺少素材文件。")
+			name = str(fields.get("name") or "").strip()[:96]
+			item_id = clean_key(fields.get("id") or "", "")
+			is_new_item = not bool(item_id)
+			if not item_id:
+				item_id = unique_item_id(name or Path(file_part.filename).stem or uuid.uuid4().hex[:10])
+			manifest = read_manifest(item_id)
+			if name:
+				manifest["name"] = unique_item_name(name, item_id) if is_new_item else name
+			manifest["category"] = clean_category(fields.get("category") or manifest.get("category"))
+			if "tags" in fields:
+				manifest["tags"] = split_tags(fields.get("tags"))
+			if "notes" in fields:
+				manifest["notes"] = str(fields.get("notes") or "")
+			base = item_dir(item_id)
+			base.mkdir(parents=True, exist_ok=True)
+			original = clean_key(Path(file_part.filename or "asset.png").name, "asset.png")
+			ext = Path(original).suffix.lower()
+			if ext not in ASSET_EXTS:
+				raise ValueError("仅支持 PNG/JPG/WEBP/GIF/BMP 素材。")
+			stem = clean_key(Path(original).stem, "asset")
+			is_clothing = clean_category(manifest.get("category")) == "clothing"
+			file_ext = ".png" if is_clothing else ext
+			file_name = f"{stem}{file_ext}"
+			index = 2
+			while (base / file_name).exists():
+				file_name = f"{stem}_{index}{file_ext}"
+				index += 1
+			raw = bytearray()
+			while True:
+				chunk = await file_part.read_chunk()
+				if not chunk:
+					break
+				raw.extend(chunk)
+			if is_clothing:
+				import io
+				source_image = Image.open(io.BytesIO(bytes(raw))).convert("RGBA")
+				output_image, sam3_meta = sam3_clothing_cutout(source_image)
+				output_bytes = costume_png_bytes(output_image)
+			else:
+				sam3_meta = {}
+				output_bytes = bytes(raw)
+			with (base / file_name).open("wb") as handle:
+				handle.write(output_bytes)
+			t = now_ms()
+			asset_info = {
+				"id": clean_key(Path(file_name).stem, "asset"),
+				"label": str(fields.get("label") or Path(original).stem or "素材")[:96],
+				"file": file_name,
+				"created_at": t,
+				"updated_at": t,
+			}
+			if is_clothing:
+				asset_info.update({
+					"source_file": original,
+					"sam3_prompt": sam3_meta.get("sam3_prompt", CLOTHING_SAM3_PROMPT),
+					"sam3_confidence": sam3_meta.get("sam3_confidence", CLOTHING_SAM3_CONFIDENCE),
+					"sam3_status": sam3_meta.get("sam3_status", "cutout"),
+					"sam3_scores": sam3_meta.get("sam3_scores", []),
+				})
+			manifest.setdefault("assets", []).append(asset_info)
+			return web.json_response({"ok": True, "item": enrich_manifest(write_manifest(manifest))})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.post("/gjj/costume_library/annotate_missing")
+	async def gjj_costume_library_annotate_missing(request):
+		try:
+			try:
+				data = await request.json()
+			except Exception:
+				data = {}
+			limit = int(data.get("limit") or 9999)
+			requested_ids = data.get("ids") if isinstance(data.get("ids"), list) else []
+			requested_ids = [clean_key(item, "") for item in requested_ids]
+			requested_ids = [item for item in requested_ids if item]
+			clip_name = str(data.get("clip_name") or "qwen3.5_4b_fp8_mixed.safetensors")
+			progress_id = clean_key(data.get("unique_id") or "", "")
+
+			def send_costume_progress(current: int, total: int, text: str) -> None:
+				if not progress_id:
+					return
+				try:
+					server.send_sync("gjj_costume_library_progress", {
+						"node": progress_id,
+						"current": max(0, int(current)),
+						"total": max(1, int(total or 1)),
+						"text": str(text or ""),
+					})
+				except Exception:
+					pass
+
+			try:
+				from .nodes.gjj_comprehensive_matting import _pil_list_to_tensor
+				from .nodes.gjj_gemma_text_generate import (
+					DEFAULT_CLIP_NAME,
+					_generate_text,
+					_load_merged_clip,
+					_merged_generation_prompt,
+				)
+			except Exception as exc:
+				raise RuntimeError(f"加载 GJJ_GemmaTextGenerate 运行时失败：{exc}") from exc
+
+			model_name = clip_name or DEFAULT_CLIP_NAME
+			clip = _load_merged_clip(model_name, "ideogram4", "default")
+			processed = []
+			skipped = []
+			item_ids = requested_ids or [str(item.get("id") or "") for item in list_items() if item.get("category") == "clothing"]
+			total_count = max(1, len(item_ids))
+			send_costume_progress(0, total_count, "正在准备服装自动打标...")
+			for item_index, item_id in enumerate(item_ids, start=1):
+				if len(processed) >= limit:
+					break
+				if not item_id:
+					continue
+				manifest = read_manifest(item_id)
+				label = str(manifest.get("name") or item_id)
+				send_costume_progress(item_index - 1, total_count, f"正在分析 {item_index}/{total_count}：{label}")
+				if clean_category(manifest.get("category")) != "clothing":
+					skipped.append({"id": item_id, "name": label, "reason": "不是服装"})
+					continue
+				if manifest.get("tags") and str(manifest.get("notes") or "").strip():
+					skipped.append({"id": item_id, "name": label, "reason": "已有标签和备注"})
+					send_costume_progress(item_index, total_count, f"已跳过 {item_index}/{total_count}：{label}")
+					continue
+				asset = None
+				for item in manifest.get("assets") or []:
+					file_name = str(item.get("file") or "")
+					if Path(file_name).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+						asset = item
+						break
+				if not asset:
+					skipped.append({"id": item_id, "name": label, "reason": "没有可识别图片"})
+					continue
+				path = item_dir(item_id) / str(asset.get("file") or "")
+				if not path.is_file():
+					skipped.append({"id": item_id, "name": label, "reason": "图片文件缺失"})
+					continue
+				try:
+					image = Image.open(path).convert("RGB")
+				except Exception:
+					skipped.append({"id": item_id, "name": label, "reason": "图片读取失败"})
+					continue
+				system_prompt = (
+					"你是服装资产库的中文自动打标助手。"
+					"根据输入的服装图片，识别服装类型、材质、颜色、风格、时代、用途和显著部件。"
+					"不要翻译成英文，不要输出解释。"
+					"必须只输出 JSON 对象，格式为 {\"name\":\"唯一、简短、可检索的中文服装名\",\"tags\":[\"盔甲\",\"金属\",\"披风\"],\"notes\":\"一句中文备注\"}。"
+				)
+				user_prompt = (
+					f"当前文件名/名称：{manifest.get('name') or item_id}\n"
+					"请给出一个不笼统的服装名，避免只写“服装”“衣服”“新服装”。"
+					"标签 4 到 10 个，优先包含：服装类型、主色、材质、风格、用途、关键部件。"
+				)
+				tensor = _pil_list_to_tensor([fit_costume_inference_canvas(image)])
+				context_unique_id = f"gjj_costume_library_gemma_{item_id}"
+				had_last_prompt_id = hasattr(server, "last_prompt_id")
+				if not had_last_prompt_id:
+					try:
+						setattr(server, "last_prompt_id", context_unique_id)
+					except Exception:
+						pass
+				try:
+					text = _generate_text(
+						clip,
+						_merged_generation_prompt(system_prompt, user_prompt),
+						260,
+						"off",
+						image=tensor,
+						thinking=False,
+						use_default_template=True,
+						temperature=0.25,
+						top_k=32,
+						top_p=0.9,
+						min_p=0.05,
+						repetition_penalty=1.05,
+						seed=0,
+						presence_penalty=0.0,
+					)
+				finally:
+					if not had_last_prompt_id and hasattr(server, "last_prompt_id"):
+						try:
+							delattr(server, "last_prompt_id")
+						except Exception:
+							pass
+				ai_name, tags, notes = parse_costume_ai_payload(text, label)
+				if ai_name and ai_name not in {"服装", "衣服", "新服装"}:
+					manifest["name"] = unique_item_name(ai_name, item_id)
+				if tags and not manifest.get("tags"):
+					manifest["tags"] = tags
+				if notes and not str(manifest.get("notes") or "").strip():
+					manifest["notes"] = notes
+				write_manifest(manifest)
+				processed.append({
+					"id": item_id,
+					"name": manifest.get("name") or item_id,
+					"tags": manifest.get("tags") or [],
+					"notes": manifest.get("notes") or "",
+				})
+				send_costume_progress(item_index, total_count, f"已完成 {item_index}/{total_count}：{manifest.get('name') or item_id}")
+			send_costume_progress(total_count, total_count, "服装自动打标完成")
+			return web.json_response({
+				"ok": True,
+				"model": model_name,
+				"processed": processed,
+				"skipped": skipped,
+				"processed_count": len(processed),
+				"skipped_count": len(skipped),
+				"items": list_items(),
+			})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.get("/gjj/costume_library/file")
+	async def gjj_costume_library_file(request):
+		try:
+			item_id = request.query.get("id") or ""
+			file_name = clean_key(request.query.get("file") or "", "")
+			if Path(file_name).suffix.lower() not in ASSET_EXTS:
+				raise ValueError("素材文件类型无效。")
+			base = item_dir(item_id).resolve()
+			path = (base / file_name).resolve()
+			if base not in path.parents or not path.is_file():
+				return web.Response(status=404, text="not found")
+			content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+			return web.FileResponse(path, headers={"Cache-Control": "no-store", "Content-Type": content_type})
+		except Exception as exc:
+			return web.Response(status=400, text=str(exc))
+
+	@server.routes.get("/gjj/costume_library/resolve")
+	async def gjj_costume_library_resolve(request):
+		try:
+			item = find_item(request.query.get("name") or request.query.get("id") or request.query.get("tag") or "")
+			if not item:
+				return web.json_response({"ok": False, "error": "未找到服化道。"}, status=404)
+			return web.json_response({"ok": True, "item": item})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.post("/gjj/costume_library/open_dir")
+	async def gjj_costume_library_open_dir(request):
+		try:
+			data = await request.json()
+			item_id = str(data.get("id") or "").strip()
+			directory = str(item_dir(item_id) if item_id else root_dir())
+			if sys.platform.startswith("win"):
+				flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+				subprocess.Popen(["cmd.exe", "/c", "start", "", "/max", "explorer.exe", "/n,", directory], creationflags=flags)
+			elif sys.platform == "darwin":
+				subprocess.Popen(["open", directory])
+			else:
+				subprocess.Popen(["xdg-open", directory])
+			return web.json_response({"ok": True, "directory": directory})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	server._gjj_costume_library_api_registered = True
+_register_gjj_costume_library_api()
 
 def _register_gjj_summon_model_api():
 	try:

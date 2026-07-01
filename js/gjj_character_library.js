@@ -13,6 +13,7 @@ import { api } from "/scripts/api.js";
 	const STYLE_ID = "gjj-character-library-style";
 	const ENDPOINT = "/gjj/character_library";
 	const VIEW_LABELS = ["大头照", "正面", "左侧", "右侧", "背面", "45度", "半身", "表情", "动作"];
+	const SHARED_PANEL_LAYOUT_KEY = "gjj.libraryPanel.layout";
 	let state = {
 		characters: [],
 		selectedId: "",
@@ -28,11 +29,29 @@ import { api } from "/scripts/api.js";
 		progressVisible: false,
 		progressTimer: null,
 		panelPosition: null,
+		panelSize: null,
 		lastAnchor: null,
 	};
 
 	function apiUrl(path) {
 		return api?.apiURL ? api.apiURL(path) : path;
+	}
+
+	function loadSharedPanelLayout() {
+		try {
+			const data = JSON.parse(localStorage.getItem(SHARED_PANEL_LAYOUT_KEY) || "{}");
+			if (data.position) state.panelPosition = data.position;
+			if (data.size) state.panelSize = data.size;
+		} catch (_) {}
+	}
+
+	function saveSharedPanelLayout() {
+		try {
+			localStorage.setItem(SHARED_PANEL_LAYOUT_KEY, JSON.stringify({
+				position: state.panelPosition,
+				size: state.panelSize,
+			}));
+		} catch (_) {}
 	}
 
 	async function apiJson(path, options = {}) {
@@ -42,6 +61,51 @@ import { api } from "/scripts/api.js";
 			throw new Error(data?.error || `请求失败：${response.status}`);
 		}
 		return data;
+	}
+
+	function modelTreeParts(path) {
+		const parts = String(path || "").replace(/\\/g, "/").split("/").map((item) => item.trim()).filter(Boolean);
+		const modelsIndex = parts.findIndex((item) => item.toLowerCase() === "models");
+		return modelsIndex >= 0 ? parts.slice(modelsIndex) : [];
+	}
+
+	function insertModelTreePath(root, parts, forceDirectory = false) {
+		let node = root;
+		for (let index = 0; index < parts.length; index += 1) {
+			const part = parts[index];
+			if (!node.children.has(part)) node.children.set(part, { name: part, children: new Map(), directory: false });
+			node = node.children.get(part);
+			if (forceDirectory && index === parts.length - 1) node.directory = true;
+		}
+	}
+
+	function renderModelTreeNode(node, prefix = "") {
+		const entries = Array.from(node.children.values()).sort((a, b) => {
+			const aDir = a.children.size > 0;
+			const bDir = b.children.size > 0;
+			if (aDir !== bDir) return aDir ? -1 : 1;
+			return a.name.localeCompare(b.name, "zh-Hans-CN");
+		});
+		const lines = [];
+		for (let index = 0; index < entries.length; index += 1) {
+			const child = entries[index];
+			const last = index === entries.length - 1;
+			const isDir = child.directory || child.children.size > 0;
+			lines.push(`${prefix}${last ? "└──" : "├──"}${isDir ? "📁 " : "🧠 "}${child.name}${isDir ? "/" : ""}`);
+			lines.push(...renderModelTreeNode(child, `${prefix}${last ? "    " : "│   "}`));
+		}
+		return lines;
+	}
+
+	function buildModelTreeText(items = []) {
+		const root = { name: "ComfyUI", children: new Map() };
+		for (const item of items || []) {
+			const parts = modelTreeParts(item?.path || item);
+			const last = parts[parts.length - 1] || "";
+			const forceDirectory = Boolean(item?.folder || item?.directory || (last && !/\.[^/.]+$/.test(last)));
+			if (parts.length) insertModelTreePath(root, parts, forceDirectory);
+		}
+		return ["ComfyUI/", ...renderModelTreeNode(root)].join("\n");
 	}
 
 	function stop(event) {
@@ -67,7 +131,7 @@ import { api } from "/scripts/api.js";
 		style.textContent = `
 #${BUTTON_ID}{width:34px;height:34px;padding:0;border:1px solid rgba(117,137,148,.5);border-radius:8px;background:rgba(28,32,36,.92);color:#f2f6f4;font:19px/32px "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif;cursor:pointer;box-sizing:border-box;pointer-events:auto;box-shadow:0 4px 14px rgba(0,0,0,.28);transition:border-color .16s ease,background .16s ease,transform .16s ease;}
 #${BUTTON_ID}:hover,#${BUTTON_ID}.active{border-color:rgba(105,184,139,.85);background:rgba(36,55,44,.96);}
-#${PANEL_ID}{position:fixed;z-index:100000;width:min(920px,calc(100vw - 20px));height:min(680px,calc(100vh - 20px));display:none;grid-template-columns:minmax(300px,320px) 1fr;gap:0;border:1px solid #40525b;border-radius:8px;background:#0f171b;color:#e7f2f4;box-shadow:0 18px 46px rgba(0,0,0,.54);font-family:system-ui,"Microsoft YaHei",sans-serif;overflow:hidden;}
+#${PANEL_ID}{position:fixed;z-index:100000;width:min(920px,calc(100vw - 20px));height:min(680px,calc(100vh - 20px));min-width:min(560px,calc(100vw - 20px));min-height:min(420px,calc(100vh - 20px));max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);resize:both;display:none;grid-template-columns:minmax(260px,320px) 1fr;gap:0;border:1px solid #40525b;border-radius:8px;background:#0f171b;color:#e7f2f4;box-shadow:0 18px 46px rgba(0,0,0,.54);font-family:system-ui,"Microsoft YaHei",sans-serif;overflow:auto;}
 #${PANEL_ID}.open{display:grid;}
 .gjj-cl-sidebar{min-width:0;min-height:0;border-right:1px solid #263842;background:#111a1f;display:flex;flex-direction:column;}
 .gjj-cl-main{min-width:0;min-height:0;display:flex;flex-direction:column;background:#0c1418;}
@@ -147,10 +211,7 @@ import { api } from "/scripts/api.js";
 .gjj-cl-model-body{display:flex;flex-direction:column;gap:10px;padding:10px;}
 .gjj-cl-model-group{border:1px solid #2d4149;border-radius:8px;background:#131d22;padding:8px;}
 .gjj-cl-model-group-title{font-size:13px;font-weight:800;margin-bottom:6px;color:#f0faf4;}
-.gjj-cl-model-item{display:grid;grid-template-columns:128px 1fr;gap:8px;padding:5px 0;border-top:1px solid rgba(64,83,91,.45);font-size:12px;}
-.gjj-cl-model-item:first-of-type{border-top:0;}
-.gjj-cl-model-label{color:#9fc0c8;font-weight:700;}
-.gjj-cl-model-path{color:#dce7e2;word-break:break-all;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;}
+.gjj-cl-model-tree{margin:0;white-space:pre-wrap;color:#dce7e2;font-family:Consolas,"Microsoft YaHei",monospace;font-size:12px;line-height:1.55;}
 #${LIGHTBOX_ID}{position:fixed;inset:0;z-index:100001;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.72);cursor:zoom-out;padding:28px;overflow:hidden;touch-action:none;}
 #${LIGHTBOX_ID}.open{display:flex;}
 #${LIGHTBOX_ID} img{max-width:min(92vw,1200px);max-height:92vh;object-fit:contain;border-radius:8px;background-image:linear-gradient(45deg,#101820 25%,#1b2730 25%,#1b2730 50%,#101820 50%,#101820 75%,#1b2730 75%);background-size:22px 22px;box-shadow:0 18px 60px rgba(0,0,0,.62);transform-origin:center center;will-change:transform;cursor:grab;user-select:none;}
@@ -634,18 +695,10 @@ import { api } from "/scripts/api.js";
 			groupTitle.className = "gjj-cl-model-group-title";
 			groupTitle.textContent = group.name || "模型";
 			groupEl.appendChild(groupTitle);
-			for (const item of group.items || []) {
-				const row = document.createElement("div");
-				row.className = "gjj-cl-model-item";
-				const label = document.createElement("div");
-				label.className = "gjj-cl-model-label";
-				label.textContent = item.label || "";
-				const path = document.createElement("div");
-				path.className = "gjj-cl-model-path";
-				path.textContent = item.path || "";
-				row.append(label, path);
-				groupEl.appendChild(row);
-			}
+			const tree = document.createElement("pre");
+			tree.className = "gjj-cl-model-tree";
+			tree.textContent = buildModelTreeText(group.items || []);
+			groupEl.appendChild(tree);
 			body.appendChild(groupEl);
 		}
 		dialog.append(head, body);
@@ -1057,12 +1110,45 @@ import { api } from "/scripts/api.js";
 		};
 	}
 
+	function panelBoundsSize(width, height) {
+		return {
+			width: Math.round(Math.min(Math.max(560, Number(width) || 920), Math.max(560, window.innerWidth - 16))),
+			height: Math.round(Math.min(Math.max(420, Number(height) || 680), Math.max(420, window.innerHeight - 16))),
+		};
+	}
+
+	function applyPanelSize(panel, size) {
+		if (!panel || !size) return;
+		const next = panelBoundsSize(size.width, size.height);
+		panel.style.width = `${next.width}px`;
+		panel.style.height = `${next.height}px`;
+		state.panelSize = next;
+		saveSharedPanelLayout();
+	}
+
 	function applyPanelPosition(panel, position) {
 		if (!panel || !position) return;
 		const next = panelBoundsPosition(panel, position.left, position.top);
 		panel.style.left = `${next.left}px`;
 		panel.style.top = `${next.top}px`;
 		state.panelPosition = next;
+		saveSharedPanelLayout();
+	}
+
+	function installPanelResizeMemory(panel) {
+		let last = "";
+		const observer = new ResizeObserver(() => {
+			if (!panel.classList.contains("open")) return;
+			const rect = panel.getBoundingClientRect();
+			const next = panelBoundsSize(rect.width, rect.height);
+			const key = `${next.width}x${next.height}`;
+			if (key === last) return;
+			last = key;
+			state.panelSize = next;
+			applyPanelPosition(panel, panelBoundsPosition(panel, rect.left, rect.top));
+			saveSharedPanelLayout();
+		});
+		observer.observe(panel);
 	}
 
 	function makePanelDragHandle(panel) {
@@ -1074,6 +1160,10 @@ import { api } from "/scripts/api.js";
 		handle.addEventListener("dblclick", (event) => {
 			stopBubble(event);
 			state.panelPosition = null;
+			state.panelSize = null;
+			panel.style.width = "";
+			panel.style.height = "";
+			saveSharedPanelLayout();
 			positionPanel(state.lastAnchor || document.getElementById(BUTTON_ID));
 		});
 		handle.addEventListener("pointerdown", (event) => {
@@ -1116,6 +1206,7 @@ import { api } from "/scripts/api.js";
 		panel.addEventListener("pointerdown", (event) => event.stopPropagation());
 		panel.addEventListener("mousedown", (event) => event.stopPropagation());
 		panel.addEventListener("click", (event) => event.stopPropagation());
+		installPanelResizeMemory(panel);
 
 		const sidebar = document.createElement("div");
 		sidebar.className = "gjj-cl-sidebar";
@@ -1224,6 +1315,8 @@ import { api } from "/scripts/api.js";
 	function positionPanel(anchor) {
 		const panel = buildPanel();
 		state.lastAnchor = anchor || state.lastAnchor || document.getElementById(BUTTON_ID);
+		loadSharedPanelLayout();
+		if (state.panelSize) applyPanelSize(panel, state.panelSize);
 		if (state.panelPosition) {
 			applyPanelPosition(panel, state.panelPosition);
 			return;
@@ -1245,6 +1338,8 @@ import { api } from "/scripts/api.js";
 			closePanel();
 			return;
 		}
+		try { globalThis.GJJ_SceneLibrary?.close?.(); } catch (_) {}
+		try { globalThis.GJJ_CostumeLibrary?.close?.(); } catch (_) {}
 		panel.classList.add("open");
 		document.getElementById(BUTTON_ID)?.classList.add("active");
 		positionPanel(anchor);

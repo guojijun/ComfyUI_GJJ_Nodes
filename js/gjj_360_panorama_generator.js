@@ -561,6 +561,12 @@ function createPanoramaRenderer(canvas, status, node) {
 	function setStatus(text) {
 		if (status) status.textContent = text || "";
 	}
+	function viewStatusText(prefix = "3D 预览") {
+		const yaw = Math.round(state.yaw * 180 / Math.PI);
+		const pitch = Math.round(state.pitch * 180 / Math.PI);
+		const zoom = Math.round((Math.PI / state.fov) * 36);
+		return `${prefix} · 视角 ${yaw}° / ${pitch}° · 缩放 ${zoom}% · 拖动查看，滚轮缩放`;
+	}
 	function resizeBacking() {
 		const rect = canvas.getBoundingClientRect();
 		const width = Math.max(180, Math.round(rect.width * state.renderScale));
@@ -640,7 +646,7 @@ function createPanoramaRenderer(canvas, status, node) {
 		state.imageData = sampleCtx.getImageData(0, 0, sampleCanvas.width, sampleCanvas.height);
 		state.dirty = true;
 		render();
-		setStatus(`${label || "3D 预览"} ${image.width} x ${image.height}`);
+		setStatus(`${viewStatusText(label || "3D 预览")} · ${image.width} x ${image.height}`);
 	}
 	function reset() {
 		state.imageData = null;
@@ -655,11 +661,13 @@ function createPanoramaRenderer(canvas, status, node) {
 		state.pitch = clamp(state.pitch + dy, -Math.PI / 2 + 0.03, Math.PI / 2 - 0.03);
 		state.dirty = true;
 		render();
+		setStatus(viewStatusText());
 	}
 	function zoom(delta) {
 		state.fov = clamp(state.fov * (delta > 0 ? 1.08 : 0.92), Math.PI / 8, Math.PI * 0.92);
 		state.dirty = true;
 		render();
+		setStatus(viewStatusText());
 		scheduleViewSync();
 	}
 	function screenshotDataUrl() {
@@ -754,6 +762,7 @@ function createPreview(node) {
 	].join(";");
 	progressOuter.append(progressInner);
 	const canvas = document.createElement("canvas");
+	canvas.title = "拖动查看 360 全景；滚轮缩放预览视角。";
 	canvas.style.cssText = [
 		"display:block",
 		"width:100%",

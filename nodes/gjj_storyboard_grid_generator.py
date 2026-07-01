@@ -51,6 +51,27 @@ SCENE_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 CHARACTER_REF_RE = re.compile(r"@([0-9A-Za-z\u4e00-\u9fff._-]+)(?:/([0-9A-Za-z\u4e00-\u9fff._-]+))?")
+SCENE_REF_RE = re.compile(
+    r"(?:🌏|🌍|🌎)([0-9A-Za-z\u4e00-\u9fff._-]+)(?:/([0-9A-Za-z\u4e00-\u9fff._-]+))?"
+    r"|\[场景[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)(?:/([0-9A-Za-z\u4e00-\u9fff._-]+))?\]"
+)
+SCENE_VIEW_REF_RE = re.compile(
+    r"\[\s*([^\[\]/:：]+?)\s*[:：]\s*"
+    r"(-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*"
+    r"(-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*"
+    r"(-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*"
+    r"(-?(?:\d+(?:\.\d+)?|\.\d+))\s*\]",
+    re.IGNORECASE,
+)
+COSTUME_REF_RE = re.compile(
+    r"(?:💼|👗)([0-9A-Za-z\u4e00-\u9fff._-]+)"
+    r"|\[服装[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]"
+    r"|\[道具[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]"
+    r"|\[prop[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]"
+    r"|\[costume[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]",
+    re.IGNORECASE,
+)
+SCENE_BRACKET_REF_RE = re.compile(r"\[([0-9A-Za-z\u4e00-\u9fff._-]+)(?:/([0-9A-Za-z\u4e00-\u9fff._-]+))?\]")
 CHARACTER_VIEW_SUFFIX_RE = re.compile(r"^(.+?)([a-gA-G])$")
 CHARACTER_SPACED_VIEW_RE = re.compile(r"^[ \t　]+([a-gA-G])(?=$|[\s,，.。;；!！?？]|[\u4e00-\u9fff])")
 MULTI_PERSON_KEYWORDS = (
@@ -297,6 +318,23 @@ def _resize_fit_reference(image: torch.Tensor, target_width: int, target_height:
     return canvas.clamp(0.0, 1.0).contiguous()
 
 
+def _pil_resize_crop_short_edge(image: Image.Image, target_width: int, target_height: int) -> Image.Image:
+    source = image.convert("RGB")
+    target_width = max(64, int(target_width))
+    target_height = max(64, int(target_height))
+    sw, sh = source.size
+    if sw <= 0 or sh <= 0:
+        return Image.new("RGB", (target_width, target_height), (255, 255, 255))
+    scale = max(target_width / sw, target_height / sh)
+    resized_w = max(target_width, int(round(sw * scale)))
+    resized_h = max(target_height, int(round(sh * scale)))
+    resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+    resized = source.resize((resized_w, resized_h), resampling)
+    left = max(0, (resized_w - target_width) // 2)
+    top = max(0, (resized_h - target_height) // 2)
+    return resized.crop((left, top, left + target_width, top + target_height))
+
+
 def _character_library_root() -> Path:
     models_dir = Path(getattr(folder_paths, "models_dir", "") or "")
     if not str(models_dir):
@@ -343,6 +381,168 @@ def _character_library_signature() -> str:
     except Exception:
         return ""
     return "|".join(sorted(parts))
+
+
+def _scene_library_root() -> Path:
+    models_dir = Path(getattr(folder_paths, "models_dir", "") or "")
+    if not str(models_dir):
+        models_dir = Path(__file__).resolve().parents[2] / "models"
+    return models_dir / "GJJ" / "scene_library"
+
+
+def _scene_library_items() -> list[dict[str, Any]]:
+    root = _scene_library_root()
+    if not root.is_dir():
+        return []
+    items: list[dict[str, Any]] = []
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        path = entry / "manifest.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data["id"] = _safe_text(data.get("id") or entry.name).strip()
+        data["name"] = _safe_text(data.get("name") or data["id"]).strip()
+        data["type"] = _safe_text(data.get("type") or "360").strip().lower() or "360"
+        data["_dir"] = str(entry)
+        data["_folder_id"] = entry.name
+        assets = data.get("assets") if isinstance(data.get("assets"), list) else []
+        annotations = data.get("annotations") if isinstance(data.get("annotations"), list) else []
+        data["assets"] = [asset for asset in assets if isinstance(asset, dict)]
+        data["annotations"] = [mark for mark in annotations if isinstance(mark, dict)]
+        items.append(data)
+    return items
+
+
+def _scene_library_signature() -> str:
+    root = _scene_library_root()
+    if not root.is_dir():
+        return ""
+    parts: list[str] = []
+    try:
+        for path in root.glob("*/*"):
+            if path.is_file() and path.suffix.lower() in {".json", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".hdr", ".exr"}:
+                stat = path.stat()
+                parts.append(f"{path.parent.name}/{path.name}:{int(stat.st_mtime_ns)}:{int(stat.st_size)}")
+    except Exception:
+        return ""
+    return "|".join(sorted(parts))
+
+
+def _costume_library_root() -> Path:
+    models_dir = Path(getattr(folder_paths, "models_dir", "") or "")
+    if not str(models_dir):
+        models_dir = Path(__file__).resolve().parents[2] / "models"
+    return models_dir / "GJJ" / "costume_library"
+
+
+def _costume_library_items() -> list[dict[str, Any]]:
+    root = _costume_library_root()
+    if not root.is_dir():
+        return []
+    items: list[dict[str, Any]] = []
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        path = entry / "manifest.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data["id"] = _safe_text(data.get("id") or entry.name).strip()
+        data["name"] = _safe_text(data.get("name") or data["id"]).strip()
+        data["category"] = _safe_text(data.get("category") or "clothing").strip().lower() or "clothing"
+        data["notes"] = _safe_text(data.get("notes") or "").strip()
+        tags = data.get("tags") if isinstance(data.get("tags"), list) else []
+        assets = data.get("assets") if isinstance(data.get("assets"), list) else []
+        data["tags"] = [_safe_text(tag).strip() for tag in tags if _safe_text(tag).strip()]
+        data["assets"] = [asset for asset in assets if isinstance(asset, dict)]
+        data["_dir"] = str(entry)
+        data["_folder_id"] = entry.name
+        items.append(data)
+    return items
+
+
+def _costume_library_signature() -> str:
+    root = _costume_library_root()
+    if not root.is_dir():
+        return ""
+    parts: list[str] = []
+    try:
+        for path in root.glob("*/*"):
+            if path.is_file() and path.suffix.lower() in {".json", ".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+                stat = path.stat()
+                parts.append(f"{path.parent.name}/{path.name}:{int(stat.st_mtime_ns)}:{int(stat.st_size)}")
+    except Exception:
+        return ""
+    return "|".join(sorted(parts))
+
+
+def _normalize_costume_key(value: Any) -> str:
+    return _safe_text(value).strip().lstrip("@").casefold()
+
+
+def _costume_alias_keys(costume: dict[str, Any]) -> list[tuple[str, str]]:
+    aliases: list[tuple[str, str]] = []
+    for value in (costume.get("name"), costume.get("id"), costume.get("_folder_id"), *(costume.get("tags") or [])):
+        text = _safe_text(value).strip()
+        key = _normalize_costume_key(text)
+        if text and key:
+            aliases.append((text, key))
+    return aliases
+
+
+def _find_costume(name: str, category: str = "clothing") -> dict[str, Any] | None:
+    key = _normalize_costume_key(name)
+    if not key:
+        return None
+    wanted = _safe_text(category).strip().lower()
+    items = [item for item in _costume_library_items() if not wanted or _safe_text(item.get("category")).lower() == wanted]
+    for item in items:
+        if any(alias_key == key for _alias, alias_key in _costume_alias_keys(item)):
+            return item
+    for item in items:
+        if any(key in alias_key or alias_key in key for _alias, alias_key in _costume_alias_keys(item)):
+            return item
+    return None
+
+
+def _normalize_scene_key(value: Any) -> str:
+    return _safe_text(value).strip().lstrip("@").casefold()
+
+
+def _scene_alias_keys(scene: dict[str, Any]) -> list[tuple[str, str]]:
+    aliases: list[tuple[str, str]] = []
+    for value in (scene.get("name"), scene.get("id"), scene.get("_folder_id")):
+        text = _safe_text(value).strip()
+        key = _normalize_scene_key(text)
+        if text and key:
+            aliases.append((text, key))
+    return aliases
+
+
+def _find_scene(name: str) -> dict[str, Any] | None:
+    key = _normalize_scene_key(name)
+    if not key:
+        return None
+    items = _scene_library_items()
+    for item in items:
+        if any(alias_key == key for _alias, alias_key in _scene_alias_keys(item)):
+            return item
+    for item in items:
+        if any(key in alias_key or alias_key in key for _alias, alias_key in _scene_alias_keys(item)):
+            return item
+    for item in items:
+        for mark in item.get("annotations") or []:
+            if key == _normalize_scene_key(mark.get("keyword")):
+                return item
+    return None
 
 
 def _normalize_character_key(value: Any) -> str:
@@ -542,6 +742,18 @@ def _view_orientation_instruction(view: dict[str, Any]) -> str:
 
 
 def _open_character_view(character: dict[str, Any], view: dict[str, Any]) -> Image.Image | None:
+    image = _open_character_view_rgba(character, view)
+    if image is None:
+        return None
+    try:
+        background = Image.new("RGBA", image.size, (255, 255, 255, 255))
+        background.alpha_composite(image)
+        return background.convert("RGB")
+    except Exception:
+        return None
+
+
+def _open_character_view_rgba(character: dict[str, Any], view: dict[str, Any]) -> Image.Image | None:
     path = _view_file(character, view)
     if path is None:
         return None
@@ -549,9 +761,7 @@ def _open_character_view(character: dict[str, Any], view: dict[str, Any]) -> Ima
         image = Image.open(path).convert("RGBA")
         image = _remove_checkerboard_background(image)
         image = _crop_character_reference_alpha(image)
-        background = Image.new("RGBA", image.size, (255, 255, 255, 255))
-        background.alpha_composite(image)
-        return background.convert("RGB")
+        return image
     except Exception:
         return None
 
@@ -698,10 +908,63 @@ def _select_character_view(character: dict[str, Any], prompt_text: str, explicit
     return selected
 
 
+def _same_character_view(left: dict[str, Any] | None, right: dict[str, Any] | None) -> bool:
+    if left is None or right is None:
+        return False
+    left_file = _safe_text(left.get("file")).strip()
+    right_file = _safe_text(right.get("file")).strip()
+    if left_file and right_file:
+        return left_file == right_file
+    left_label = _view_label(left).casefold()
+    right_label = _view_label(right).casefold()
+    return bool(left_label and right_label and left_label == right_label)
+
+
+def _select_character_face_view(character: dict[str, Any]) -> dict[str, Any] | None:
+    selected = _find_view(character, HEAD_LABEL_KEYWORDS)
+    if selected is not None:
+        return selected
+    views = character.get("views") if isinstance(character.get("views"), list) else []
+    return views[0] if views else None
+
+
+def _select_character_pose_view(character: dict[str, Any], prompt_text: str, explicit_label: str = "") -> dict[str, Any] | None:
+    if explicit_label:
+        return _find_view(character, (), explicit_label)
+    if _prompt_wants_back(prompt_text):
+        selected = _find_view(character, BACK_LABEL_KEYWORDS)
+    elif _prompt_wants_side(prompt_text):
+        selected = _find_view(character, _side_view_keywords(prompt_text))
+    else:
+        selected = _find_view(character, FRONT_LABEL_KEYWORDS)
+    if selected is None:
+        views = character.get("views") if isinstance(character.get("views"), list) else []
+        selected = views[0] if views else None
+    return selected
+
+
+def _character_reference_views(
+    character: dict[str, Any],
+    prompt_text: str,
+    explicit_label: str = "",
+) -> list[tuple[str, dict[str, Any]]]:
+    face_view = _select_character_face_view(character)
+    pose_view = _select_character_pose_view(character, prompt_text, explicit_label)
+    result: list[tuple[str, dict[str, Any]]] = []
+    if face_view is not None:
+        result.append(("face", face_view))
+    if pose_view is not None and not _same_character_view(face_view, pose_view):
+        result.append(("pose", pose_view))
+    return result
+
+
 def _character_reference_images(character: dict[str, Any], prompt_text: str, explicit_label: str = "") -> list[Image.Image]:
-    selected = _select_character_view(character, prompt_text, explicit_label)
-    image = _open_character_view(character, selected) if selected is not None else None
-    return [image] if image is not None else []
+    images: list[Image.Image] = []
+    for _role, view in _character_reference_views(character, prompt_text, explicit_label):
+        image = _open_character_view(character, view)
+        if image is not None:
+            images.append(image)
+    return images
 
 
 def _pil_fit_cell(image: Image.Image, width: int, height: int, contain: bool = False) -> Image.Image:
@@ -728,6 +991,649 @@ def _make_character_reference_tensor(images: list[Image.Image], contain_images: 
         array = np.asarray(cell).astype(np.float32) / 255.0
         tensors.append(torch.from_numpy(array).unsqueeze(0))
     return torch.cat(tensors, dim=0).contiguous()
+
+
+def _extract_scene_refs(text: str) -> list[tuple[str, str]]:
+    refs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    source = _safe_text(text)
+    for match in SCENE_VIEW_REF_RE.finditer(source):
+        name = _safe_text(match.group(1)).strip(" 　.,，;；。!！?？")
+        place = f"视窗@{match.group(2)},{match.group(3)},{match.group(4)},{match.group(5)}"
+        if not name or not place:
+            continue
+        key = (name.casefold(), place.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append((name, place))
+    for match in SCENE_REF_RE.finditer(source):
+        name = _safe_text(match.group(1) or match.group(3)).strip(" 　.,，;；。!！?？")
+        place = _safe_text(match.group(2) or match.group(4)).strip(" 　.,，;；。!！?？")
+        if not name:
+            continue
+        key = (name.casefold(), place.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append((name, place))
+    for match in SCENE_BRACKET_REF_RE.finditer(source):
+        raw_name = _safe_text(match.group(1)).strip(" 　.,，;；。!！?？")
+        place = _safe_text(match.group(2)).strip(" 　.,，;；。!！?？")
+        name = raw_name
+        if raw_name in {"场景", "scene", "Scene"}:
+            continue
+        if place.lower().startswith(("视窗@", "view@", "viewport@")):
+            continue
+        if ":" in raw_name or "：" in raw_name:
+            continue
+        if not _find_scene(name):
+            continue
+        key = (name.casefold(), place.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append((name, place))
+    return refs
+
+
+def _scene_asset_path(scene: dict[str, Any], asset: dict[str, Any]) -> Path | None:
+    file_name = _safe_text(asset.get("file") or asset.get("preview_file")).strip()
+    if not file_name:
+        return None
+    base = Path(_safe_text(scene.get("_dir"))).resolve()
+    path = (base / file_name).resolve()
+    try:
+        if base != path and base not in path.parents:
+            return None
+    except Exception:
+        return None
+    return path if path.is_file() else None
+
+
+def _read_radiance_rgbe(path: Path) -> np.ndarray:
+    import io
+
+    with path.open("rb") as handle:
+        stream = io.BytesIO(handle.read())
+    width = height = 0
+    x_sign = "+"
+    y_sign = "-"
+    while True:
+        line = stream.readline()
+        if not line:
+            break
+        text = line.decode("ascii", errors="ignore").strip()
+        match = re.match(r"([+-])Y\s+(\d+)\s+([+-])X\s+(\d+)", text)
+        if match:
+            y_sign, height_text, x_sign, width_text = match.groups()
+            height = int(height_text)
+            width = int(width_text)
+            break
+    if width <= 0 or height <= 0:
+        raise RuntimeError("HDR 文件缺少 Radiance 分辨率行。")
+
+    data = np.zeros((height, width, 4), dtype=np.uint8)
+    for y in range(height):
+        header = stream.read(4)
+        if len(header) < 4:
+            raise RuntimeError("HDR 像素数据不完整。")
+        if width < 8 or width > 0x7FFF or header[0] != 2 or header[1] != 2 or ((header[2] << 8) | header[3]) != width:
+            rest = stream.read(width * height * 4 - 4)
+            raw = header + rest
+            if len(raw) < width * height * 4:
+                raise RuntimeError("HDR 非 RLE 像素数据不完整。")
+            data = np.frombuffer(raw[: width * height * 4], dtype=np.uint8).reshape((height, width, 4)).copy()
+            break
+        scanline = np.zeros((4, width), dtype=np.uint8)
+        for channel in range(4):
+            x = 0
+            while x < width:
+                pair = stream.read(2)
+                if len(pair) < 2:
+                    raise RuntimeError("HDR RLE 扫描线不完整。")
+                count = pair[0]
+                value = pair[1]
+                if count > 128:
+                    run = count - 128
+                    scanline[channel, x : x + run] = value
+                    x += run
+                else:
+                    run = count
+                    scanline[channel, x] = value
+                    if run > 1:
+                        values = stream.read(run - 1)
+                        if len(values) < run - 1:
+                            raise RuntimeError("HDR RLE literal 不完整。")
+                        scanline[channel, x + 1 : x + run] = np.frombuffer(values, dtype=np.uint8)
+                    x += run
+        data[y] = scanline.T
+
+    if y_sign == "+":
+        data = data[::-1, :, :]
+    if x_sign == "-":
+        data = data[:, ::-1, :]
+
+    exponent = data[..., 3].astype(np.int16)
+    rgb = np.zeros((height, width, 3), dtype=np.float32)
+    mask = exponent > 0
+    if np.any(mask):
+        scale = np.exp2(exponent[mask].astype(np.float32) - 136.0)
+        rgb[mask] = data[..., :3][mask].astype(np.float32) * scale[:, None]
+    return rgb
+
+
+def _read_hdr_scene_array(path: Path):
+    errors = []
+    if path.suffix.lower() == ".hdr":
+        try:
+            return _read_radiance_rgbe(path)
+        except Exception as exc:
+            errors.append(exc)
+    try:
+        image = Image.open(path)
+        array = np.asarray(image)
+        if array.size:
+            return array
+    except Exception as exc:
+        errors.append(exc)
+    try:
+        import imageio.v3 as iio
+
+        array = iio.imread(path)
+        if getattr(array, "size", 0):
+            return array
+    except Exception as exc:
+        errors.append(exc)
+    try:
+        import imageio
+
+        array = imageio.imread(path)
+        if getattr(array, "size", 0):
+            return array
+    except Exception as exc:
+        errors.append(exc)
+    try:
+        os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
+        import cv2
+
+        array = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        if array is not None and getattr(array, "size", 0):
+            if len(array.shape) == 3 and array.shape[2] >= 3:
+                array = cv2.cvtColor(array[:, :, :3], cv2.COLOR_BGR2RGB)
+            return array
+    except Exception as exc:
+        errors.append(exc)
+    if errors:
+        raise errors[-1]
+    raise RuntimeError("无法读取 HDR/EXR 场景。")
+
+
+def _write_hdr_scene_placeholder(path: Path, target: Path, message: str = "") -> bool:
+    try:
+        from PIL import ImageDraw, ImageFont
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        image = Image.new("RGB", (960, 540), (11, 18, 24))
+        draw = ImageDraw.Draw(image)
+        for y in range(image.height):
+            t = y / max(1, image.height - 1)
+            draw.line(
+                [(0, y), (image.width, y)],
+                fill=(int(16 + 26 * t), int(25 + 34 * t), int(34 + 44 * t)),
+            )
+        try:
+            font_big = ImageFont.truetype("arial.ttf", 44)
+            font = ImageFont.truetype("arial.ttf", 22)
+            font_small = ImageFont.truetype("arial.ttf", 16)
+        except Exception:
+            font_big = ImageFont.load_default()
+            font = ImageFont.load_default()
+            font_small = ImageFont.load_default()
+        draw.rounded_rectangle((40, 40, image.width - 40, image.height - 40), radius=18, outline=(78, 106, 118), width=2)
+        draw.text((72, 78), "HDR / EXR", fill=(234, 245, 247), font=font_big)
+        draw.text((72, 150), path.name[:80], fill=(184, 205, 212), font=font)
+        draw.text((72, 206), "storyboard preview placeholder", fill=(121, 151, 162), font=font_small)
+        if message:
+            draw.text((72, 242), str(message).replace("\n", " ")[:150], fill=(121, 151, 162), font=font_small)
+        image.save(target, "PNG")
+        return True
+    except Exception:
+        return False
+
+
+def _tonemap_hdr_scene_preview(path: Path, target: Path) -> Path | None:
+    try:
+        array = np.asarray(_read_hdr_scene_array(path))
+        if array.ndim == 2:
+            array = np.stack([array, array, array], axis=-1)
+        if array.ndim != 3:
+            raise RuntimeError(f"HDR 维度不支持：{tuple(array.shape)}")
+        if array.shape[2] > 3:
+            array = array[:, :, :3]
+        array = array.astype("float32")
+        array = np.nan_to_num(array, nan=0.0, posinf=0.0, neginf=0.0)
+        array = np.maximum(array, 0.0)
+        high = float(np.percentile(array, 99.5)) if array.size else 1.0
+        if high <= 0:
+            high = float(array.max()) if array.size else 1.0
+        if high <= 0:
+            high = 1.0
+        array = np.clip(array / high, 0.0, 1.0)
+        luma = 0.2126 * array[..., 0] + 0.7152 * array[..., 1] + 0.0722 * array[..., 2]
+        mid = float(np.percentile(luma, 55)) if luma.size else 0.3
+        if mid > 0 and mid < 0.30:
+            array = np.clip(array * min(3.2, 0.36 / mid), 0.0, 1.0)
+        array = np.power(array, 1.0 / 2.2)
+        luma2 = 0.2126 * array[..., 0] + 0.7152 * array[..., 1] + 0.0722 * array[..., 2]
+        mean = float(np.mean(luma2)) if luma2.size else 0.45
+        if mean < 0.38:
+            array = np.clip(array * min(1.8, 0.46 / max(0.01, mean)), 0.0, 1.0)
+        out = (array * 255.0 + 0.5).astype("uint8")
+        image = Image.fromarray(out, "RGB")
+        resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+        image.thumbnail((1600, 900), resampling)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        image.save(target, "PNG")
+        return target if target.is_file() else None
+    except Exception as exc:
+        print(f"[GJJ StoryboardGridGenerator] HDR 预览生成失败: {path.name}: {exc}")
+        return target if _write_hdr_scene_placeholder(path, target, str(exc)) and target.is_file() else None
+
+
+def _ensure_storyboard_scene_preview(path: Path) -> Path | None:
+    if path.suffix.lower() not in {".hdr", ".exr"}:
+        return path
+    target = path.parent / f"__storyboard_rgbe_preview_{path.stem}.png"
+    try:
+        if target.is_file() and target.stat().st_size > 0 and target.stat().st_mtime >= path.stat().st_mtime:
+            return target
+    except Exception:
+        pass
+    return _tonemap_hdr_scene_preview(path, target)
+
+
+def _scene_preview_path(scene: dict[str, Any], asset: dict[str, Any]) -> Path | None:
+    base = Path(_safe_text(scene.get("_dir"))).resolve()
+    candidates = []
+    preview_file = _safe_text(asset.get("preview_file")).strip()
+    file_name = _safe_text(asset.get("file")).strip()
+    if preview_file:
+        candidates.append(preview_file)
+    if file_name:
+        stem = Path(file_name).stem
+        candidates.append(f"__preview_{stem}.png")
+        candidates.append(file_name)
+    for name in candidates:
+        path = (base / name).resolve()
+        try:
+            if (base == path or base in path.parents) and path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+                return path
+        except Exception:
+            continue
+    raw = _scene_asset_path(scene, asset)
+    if raw is not None and raw.suffix.lower() in {".hdr", ".exr"}:
+        return _ensure_storyboard_scene_preview(raw)
+    return None
+
+
+def _parse_scene_viewport_place(place: str) -> dict[str, Any] | None:
+    text = _safe_text(place).strip()
+    lowered = text.casefold()
+    for prefix in ("视窗@", "view@", "viewport@"):
+        if lowered.startswith(prefix):
+            payload = text[len(prefix):].strip()
+            break
+    else:
+        return None
+    asset_id = ""
+    coord_text = payload
+    colon = payload.find(":")
+    comma = payload.find(",")
+    if colon > 0 and (comma < 0 or colon < comma):
+        asset_id = payload[:colon].strip()
+        coord_text = payload[colon + 1 :].strip()
+    numbers = re.findall(r"-?\d+(?:\.\d+)?", coord_text)
+    if len(numbers) < 4:
+        return None
+    x, y, w, h = [float(value) for value in numbers[:4]]
+    w = max(0.02, min(1.0, w))
+    h = max(0.02, min(1.0, h))
+    x = x % 1.0
+    y = max(0.0, min(1.0 - h, y))
+    return {"asset_id": asset_id, "x": x, "y": y, "w": w, "h": h}
+
+
+def _select_scene_asset(scene: dict[str, Any], place: str = "") -> dict[str, Any] | None:
+    assets = scene.get("assets") if isinstance(scene.get("assets"), list) else []
+    viewport = _parse_scene_viewport_place(place)
+    mark = None if viewport else (_scene_annotation(scene, place) if place else None)
+    mark_asset_id = _safe_text((viewport or {}).get("asset_id") or (mark.get("asset_id") if mark else "")).strip()
+    if mark_asset_id:
+        for asset in assets:
+            if _safe_text(asset.get("id")).strip() == mark_asset_id:
+                return asset
+    for asset in assets:
+        if _scene_preview_path(scene, asset) is not None:
+            return asset
+    for asset in assets:
+        path = _scene_asset_path(scene, asset)
+        if path is not None and path.suffix.lower() in {".hdr", ".exr"}:
+            return asset
+    return assets[0] if assets else None
+
+
+def _crop_scene_viewport_background(image: Image.Image, width: int, height: int, viewport: dict[str, Any]) -> Image.Image:
+    source = image.convert("RGB")
+    sw, sh = source.size
+    view_w = max(8, min(sw, int(round(float(viewport.get("w") or 1.0) * sw))))
+    view_h = max(8, min(sh, int(round(float(viewport.get("h") or 1.0) * sh))))
+    view_left = int(round(float(viewport.get("x") or 0.0) * sw)) % max(1, sw)
+    view_top = max(0, min(sh - view_h, int(round(float(viewport.get("y") or 0.0) * sh))))
+    target_aspect = max(1, int(width)) / max(1, int(height))
+    crop_w = view_w
+    crop_h = view_h
+    if crop_w / max(1, crop_h) < target_aspect:
+        crop_w = min(sw, max(crop_w, int(round(crop_h * target_aspect))))
+    else:
+        crop_h = min(sh, max(crop_h, int(round(crop_w / target_aspect))))
+    center_x = (view_left + view_w * 0.5) % max(1, sw)
+    center_y = view_top + view_h * 0.5
+    left = int(round(center_x - crop_w * 0.5)) % max(1, sw)
+    top = max(0, min(sh - crop_h, int(round(center_y - crop_h * 0.5))))
+    if left + crop_w <= sw:
+        crop = source.crop((left, top, left + crop_w, top + crop_h))
+    else:
+        doubled = Image.new("RGB", (sw * 2, sh))
+        doubled.paste(source, (0, 0))
+        doubled.paste(source, (sw, 0))
+        crop = doubled.crop((left, top, left + crop_w, top + crop_h))
+    resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+    return crop.resize((max(64, int(width)), max(64, int(height))), resampling)
+
+
+def _scene_annotation(scene: dict[str, Any], place: str, asset_id: str = "") -> dict[str, Any] | None:
+    key = _normalize_scene_key(place)
+    if not key:
+        return None
+    fallback: dict[str, Any] | None = None
+    for mark in scene.get("annotations") or []:
+        if asset_id and _safe_text(mark.get("asset_id")).strip() not in {"", asset_id}:
+            continue
+        mark_key = _normalize_scene_key(mark.get("keyword"))
+        if key == mark_key:
+            return mark
+        if not fallback and mark_key and (key in mark_key or mark_key in key):
+            fallback = mark
+    return fallback
+
+
+def _crop_scene_background(
+    image: Image.Image,
+    width: int,
+    height: int,
+    center_x: float = 0.5,
+    center_y: float = 0.5,
+    is_panorama: bool = False,
+    focus_anchor: bool = False,
+) -> Image.Image:
+    source = image.convert("RGB")
+    width = max(64, int(width))
+    height = max(64, int(height))
+    cx = max(0.0, min(1.0, float(center_x)))
+    cy = max(0.0, min(1.0, float(center_y)))
+    aspect = width / max(1, height)
+    sw, sh = source.size
+    if is_panorama and sw >= sh * 1.7:
+        cy = max(0.44, min(0.56, 0.5 + (cy - 0.5) * 0.25))
+        min_ratio = 0.16 if focus_anchor else 0.22
+        max_ratio = 0.30 if focus_anchor else 0.42
+        crop_w = max(64, int(round(sw * min_ratio)))
+        crop_h = max(64, int(round(crop_w / aspect)))
+        if crop_h > sh:
+            crop_h = sh
+            crop_w = max(64, int(round(crop_h * aspect)))
+        if crop_w > int(round(sw * max_ratio)):
+            crop_w = max(64, int(round(sw * max_ratio)))
+            crop_h = max(64, int(round(crop_w / aspect)))
+            if crop_h > sh:
+                crop_h = sh
+                crop_w = max(64, int(round(crop_h * aspect)))
+        center_px = int(round(cx * sw))
+        top = max(0, min(sh - crop_h, int(round(cy * sh - crop_h * 0.5))))
+        left = center_px - crop_w // 2
+        if left < 0 or left + crop_w > sw:
+            doubled = Image.new("RGB", (sw * 3, sh))
+            doubled.paste(source, (0, 0))
+            doubled.paste(source, (sw, 0))
+            doubled.paste(source, (sw * 2, 0))
+            crop = doubled.crop((left + sw, top, left + sw + crop_w, top + crop_h))
+        else:
+            crop = source.crop((left, top, left + crop_w, top + crop_h))
+    else:
+        crop_w = sw
+        crop_h = int(round(crop_w / aspect))
+        if crop_h > sh:
+            crop_h = sh
+            crop_w = int(round(crop_h * aspect))
+        left = max(0, min(sw - crop_w, int(round(cx * sw - crop_w * 0.5))))
+        top = max(0, min(sh - crop_h, int(round(cy * sh - crop_h * 0.5))))
+        crop = source.crop((left, top, left + crop_w, top + crop_h))
+    resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+    return crop.resize((width, height), resampling)
+
+
+def _scene_background_image(scene: dict[str, Any], place: str, width: int, height: int) -> tuple[Image.Image | None, str]:
+    asset = _select_scene_asset(scene, place)
+    if not asset:
+        return None, ""
+    image_path = _scene_preview_path(scene, asset) or _scene_asset_path(scene, asset)
+    if image_path is None:
+        return None, ""
+    try:
+        image = Image.open(image_path).convert("RGB")
+    except Exception:
+        return None, ""
+    viewport = _parse_scene_viewport_place(place)
+    if viewport is not None:
+        label = _safe_text(scene.get("name") or scene.get("id")).strip()
+        return _crop_scene_viewport_background(image, width, height, viewport), label
+    mark = _scene_annotation(scene, place, _safe_text(asset.get("id")).strip()) if place else None
+    try:
+        center_x = float(mark.get("x")) if mark and mark.get("x") is not None else 0.5
+        center_y = float(mark.get("y")) if mark and mark.get("y") is not None else 0.5
+    except Exception:
+        center_x, center_y = 0.5, 0.5
+    is_panorama = _safe_text(scene.get("type")).lower() == "360" or image.width >= image.height * 1.7
+    label = _safe_text(place or scene.get("name") or scene.get("id")).strip()
+    return _crop_scene_background(image, width, height, center_x, center_y, is_panorama, focus_anchor=mark is not None), label
+
+
+def _paste_character_on_background(background: Image.Image, character_image: Image.Image, slot: str = "center") -> Image.Image:
+    bg = background.convert("RGBA")
+    char = character_image.convert("RGBA")
+    if char.width <= 0 or char.height <= 0:
+        return bg.convert("RGB")
+    resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+    target_h = int(round(bg.height * 0.82))
+    if slot == "center":
+        target_h = int(round(bg.height * 0.76))
+    scale = target_h / max(1, char.height)
+    target_w = int(round(char.width * scale))
+    if target_w > bg.width * 0.62:
+        scale = (bg.width * 0.62) / max(1, char.width)
+        target_w = int(round(char.width * scale))
+        target_h = int(round(char.height * scale))
+    char = char.resize((max(1, target_w), max(1, target_h)), resampling)
+    if slot == "left":
+        x = int(round(bg.width * 0.08))
+    elif slot == "right":
+        x = int(round(bg.width * 0.92 - char.width))
+    else:
+        x = int(round((bg.width - char.width) * 0.5))
+    y = int(round(bg.height * 0.95 - char.height))
+    x = max(0, min(bg.width - char.width, x))
+    y = max(0, min(bg.height - char.height, y))
+    bg.alpha_composite(char, (x, y))
+    return bg.convert("RGB")
+
+
+def _character_slot_label(slot: str, index: int = 0) -> str:
+    if slot == "left":
+        return "画面左侧"
+    if slot == "right":
+        return "画面右侧"
+    if slot == "center":
+        return "画面中间"
+    return ["画面左侧", "画面右侧", "画面中间"][min(max(0, index), 2)]
+
+
+def _character_note_for_scene_prompt(character: dict[str, Any], name: str) -> str:
+    notes = _safe_text(character.get("notes") or "").strip()
+    if notes:
+        return notes
+    display = _character_display_name(character, name)
+    return f"{display}，保持人物五官、发型、服装配色和身份一致"
+
+
+def _select_scene_character_view(character: dict[str, Any], prompt_text: str, explicit_label: str = "") -> dict[str, Any] | None:
+    selected = _select_character_pose_view(character, prompt_text, explicit_label)
+    if selected is None:
+        selected = _select_character_face_view(character)
+    return selected
+
+
+def _make_scene_character_board(
+    prompt_text: str,
+    character_refs: list[tuple[str, str]],
+    width: int,
+    height: int,
+    background: Image.Image | None = None,
+) -> tuple[Image.Image | None, list[str], list[str]]:
+    if not character_refs:
+        return None, [], []
+    hints = _character_position_hints(prompt_text)
+    resolved: list[tuple[str, dict[str, Any], Image.Image, str, str]] = []
+    used_slots: set[str] = set()
+    default_slots = ["left", "right", "center"]
+    for index, (char_name, explicit_view) in enumerate(character_refs[:3]):
+        character = _find_character(char_name)
+        if not character:
+            continue
+        selected_view = _select_scene_character_view(character, prompt_text, explicit_view)
+        if selected_view is None:
+            continue
+        char_image = _open_character_view_rgba(character, selected_view)
+        if char_image is None:
+            continue
+        slot = hints.get(char_name.casefold()) or hints.get((char_name + "/" + explicit_view).casefold()) or ""
+        if slot not in {"left", "right", "center"} or slot in used_slots:
+            slot = ""
+            for candidate in default_slots:
+                if candidate not in used_slots:
+                    slot = candidate
+                    break
+        if not slot:
+            slot = default_slots[min(index, len(default_slots) - 1)]
+        used_slots.add(slot)
+        resolved.append((char_name, character, char_image, slot, explicit_view))
+    if not resolved:
+        return None, [], []
+    if background is not None:
+        board = background.convert("RGBA").resize((max(64, int(width)), max(64, int(height))))
+    else:
+        board = Image.new("RGBA", (max(64, int(width)), max(64, int(height))), (255, 255, 255, 255))
+    resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+    slot_x = {
+        "left": 0.24,
+        "center": 0.50,
+        "right": 0.76,
+    }
+    prompt_parts: list[str] = []
+    binding_lines: list[str] = []
+    for index, (char_name, character, char_image, slot, _explicit_view) in enumerate(resolved):
+        char = char_image.convert("RGBA")
+        closeup = _prompt_wants_closeup(prompt_text)
+        target_h = int(round(board.height * (0.76 if closeup else 0.62)))
+        scale = target_h / max(1, char.height)
+        target_w = int(round(char.width * scale))
+        max_w = int(round(board.width * ((0.40 if len(resolved) <= 2 else 0.30) if closeup else (0.32 if len(resolved) <= 2 else 0.24))))
+        if target_w > max_w:
+            scale = max_w / max(1, char.width)
+            target_w = int(round(char.width * scale))
+            target_h = int(round(char.height * scale))
+        char = char.resize((max(1, target_w), max(1, target_h)), resampling)
+        center_x = int(round(board.width * slot_x.get(slot, 0.5)))
+        x = max(0, min(board.width - char.width, center_x - char.width // 2))
+        y = max(0, min(board.height - char.height, int(round(board.height * 0.96 - char.height))))
+        board.alpha_composite(char, (x, y))
+        label = _character_slot_label(slot, index)
+        display_name = _character_display_name(character, char_name)
+        note = _character_note_for_scene_prompt(character, char_name)
+        prompt_parts.append(f"{label}({note})的{display_name}")
+        binding_lines.append(f"{display_name}=观众视角最终画面的{label}=image1中同一侧的人物")
+    return board.convert("RGB"), prompt_parts, binding_lines
+
+
+def _pil_list_to_reference_tensor(images: list[Image.Image]) -> torch.Tensor | None:
+    tensors: list[torch.Tensor] = []
+    for image in images:
+        array = np.asarray(image.convert("RGB")).astype(np.float32) / 255.0
+        tensors.append(torch.from_numpy(array).unsqueeze(0))
+    if not tensors:
+        return None
+    return torch.cat(tensors, dim=0).contiguous()
+
+
+def _scene_reference_tensor_for_prompt(prompt_text: str, width: int, height: int) -> tuple[str, torch.Tensor | None, bool]:
+    scene_refs = _extract_scene_refs(prompt_text)
+    if not scene_refs:
+        return prompt_text, None, False
+    reference_images: list[Image.Image] = []
+    prompt_lines: list[str] = []
+    character_refs = _extract_character_refs(prompt_text)
+    for scene_name, place in scene_refs[:1]:
+        scene = _find_scene(scene_name)
+        if not scene:
+            continue
+        background, label = _scene_background_image(scene, place, width, height)
+        if background is None:
+            continue
+        character_board, character_parts, character_bindings = _make_scene_character_board(prompt_text, character_refs, width, height, background)
+        if character_board is not None:
+            reference_images.append(character_board)
+        reference_images.append(background)
+        display = _safe_text(scene.get("name") or scene.get("id") or scene_name).strip()
+        if character_parts:
+            anchor_rule = f"本格指定的场景锚点是“{label}”，最终画面的主要空间和人物互动位置必须围绕“{label}”，不要漂移到同一场景的床、椅子、窗户或其它未指定物品旁边。" if label else ""
+            prompt_lines.append(
+                f"参考图使用规则：image1 是人物与场景的合成构图参考，"
+                f"必须按 image1 中{' 和 '.join(character_parts)}的身份、左右站位、人物比例和背景空间生成。"
+                f"人物身份位置绑定：{'；'.join(character_bindings)}。"
+                f"{anchor_rule}"
+                "这里的左/右一律以观众看最终画面时的屏幕坐标为准，不是角色自身左右，也不是镜像后的左右；"
+                "严禁左右镜像、严禁交换两个人的位置。"
+                "后续所有表情、视线、手部动作和台词都必须按这个姓名绑定执行；"
+                "如果原文写某个名字在笑、看、拿、说话，只允许该名字对应的位置人物执行，禁止把动作转移给另一侧人物。"
+                "image2 是场景库按标注位置裁切的干净背景参考，必须作为最终画面的真实背景和主要空间来源；"
+                "保留 image2 的空间结构、透视、光线、建筑轮廓、地面和主要物件位置。"
+                "人物只能作为前景角色放入 image2，默认使用正面全身比例；除非原提示明确写大头照、头像、特写、近景，否则不要放大成半身或大头。"
+                "如果后续还有单独人物参考图，必须用它们校准人物脸型、胡须、发型、服饰配色和身份特征。"
+                "不要把透明预览底色、裁切边缘或人物参考图背景当作最终背景。"
+                "最终构图必须给背景留出足够可见空间，人物不要铺满画面、不要遮挡大部分背景，人物总占画面高度不超过约 65%。"
+            )
+        else:
+            anchor_rule = f"最终画面的主要空间必须围绕“{label}”这个标注点，不要漂移到同一场景其它未指定物品旁边。" if label else ""
+            prompt_lines.append(
+                f"参考图使用规则：image1 是场景库“{display}”{('的“' + label + '”位置') if label else ''}背景参考，"
+                f"必须优先作为最终画面的背景使用。{anchor_rule}"
+            )
+    if not reference_images:
+        return prompt_text, None, False
+    tensor = _pil_list_to_reference_tensor(reference_images)
+    if prompt_lines:
+        prompt_text = f"{prompt_text}\n\n场景库参考要求：\n" + "\n".join(prompt_lines)
+    return prompt_text, tensor, False
 
 
 def _extract_character_refs(text: str) -> list[tuple[str, str]]:
@@ -823,26 +1729,51 @@ def _character_position_hints(text: str) -> dict[str, str]:
         name, view = _resolve_character_ref_name_view(raw_name, raw_view)
         if not name:
             continue
-        prefix = source[max(0, match.start() - 12) : match.start()].casefold()
-        left_at = max((prefix.rfind(keyword.casefold()) for keyword in LEFT_KEYWORDS), default=-1)
-        right_at = max((prefix.rfind(keyword.casefold()) for keyword in RIGHT_KEYWORDS), default=-1)
-        if left_at < 0 and right_at < 0:
+        hint = _position_hint_near_reference(source, match.start(), match.end())
+        if not hint:
             continue
         key = name.casefold()
-        hint = "right" if right_at > left_at else "left"
         hints[key] = hint
         if view:
             hints[(name + "/" + view).casefold()] = hint
     return hints
 
 
+def _position_hint_near_reference(source: str, start: int, end: int) -> str:
+    before = _safe_text(source[max(0, start - 32) : start]).casefold()
+    after = _safe_text(source[end : min(len(source), end + 32)]).casefold()
+    nearby = f"{before} @ {after}"
+    markers: list[tuple[int, str]] = []
+    for keyword in LEFT_KEYWORDS + LEFT_LABEL_KEYWORDS:
+        key = keyword.casefold()
+        for text, offset in ((before, 0), (after, len(before) + 3)):
+            pos = text.rfind(key)
+            if pos >= 0:
+                markers.append((offset + pos, "left"))
+    for keyword in RIGHT_KEYWORDS + RIGHT_LABEL_KEYWORDS:
+        key = keyword.casefold()
+        for text, offset in ((before, 0), (after, len(before) + 3)):
+            pos = text.rfind(key)
+            if pos >= 0:
+                markers.append((offset + pos, "right"))
+    if not markers:
+        return ""
+    reference_pos = len(before) + 1
+    _distance, hint = min(((abs(pos - reference_pos), hint) for pos, hint in markers), key=lambda item: item[0])
+    if re.search(r"(?:左手|右手|左眼|右眼|左脸|右脸|左肩|右肩|左臂|右臂|左腿|右腿)", nearby):
+        side_words = re.search(r"(?:画面|镜头|构图|站位|位置|左侧|右侧|左边|右边|left|right)", nearby, flags=re.IGNORECASE)
+        if not side_words:
+            return ""
+    return hint
+
+
 def _character_layout_lines(characters: list[tuple[str, dict[str, Any]]], position_hints: dict[str, str] | None = None) -> list[str]:
     if len(characters) <= 1:
         return []
     positions = {
-        "left": ("画面左侧", "右侧用场景、道具、光影或背景空间自然填充，不要复制或挤入其他人物"),
-        "right": ("画面右侧", "左侧用场景、道具、光影或背景空间自然填充，不要复制或挤入其他人物"),
-        "center": ("画面中间", "左右两侧用场景、道具、光影或背景空间自然填充，保持主体居中清晰"),
+        "left": ("画面左侧 1/3 区域", "右侧不要挤占该角色位置"),
+        "right": ("画面右侧 1/3 区域", "左侧不要挤占该角色位置"),
+        "center": ("画面中间 1/3 区域", "左右两侧用场景、道具、光影或背景空间自然填充"),
     }
     default_order = ("left", "right", "center")
     used: set[str] = set()
@@ -866,10 +1797,11 @@ def _character_layout_lines(characters: list[tuple[str, dict[str, Any]]], positi
         if not assigned[index]:
             assigned[index] = default_order[min(index, len(default_order) - 1)]
     lines: list[str] = []
+    lines.append("以下站位是硬约束，以观众看到的最终画面坐标为准，不是人物自身左右；禁止交换左右位置，禁止因为参考图构图改变站位。")
     for index, (name, character) in enumerate(characters[:3]):
         display_name = _character_display_name(character, name)
         position, fill_rule = positions[assigned[index]]
-        lines.append(f"{index + 1}. {display_name} 默认位于{position}；{fill_rule}。")
+        lines.append(f"{index + 1}. {display_name} 必须固定在{position}；{fill_rule}。")
     if len(characters) > 3:
         extra_names = "、".join(_character_display_name(character, name) for name, character in characters[3:])
         if extra_names:
@@ -882,6 +1814,7 @@ def _character_prompt_and_reference(
     storyboard_refs: list[tuple[str, str]] | None = None,
     contain_reference_images: bool = False,
     first_reference_image_index: int = 1,
+    include_reference_images: bool = True,
 ) -> tuple[str, torch.Tensor | None]:
     refs = _resolved_character_refs(prompt_text, storyboard_refs or [])
     if not refs:
@@ -902,11 +1835,26 @@ def _character_prompt_and_reference(
         else:
             prompt_lines.append(f"{display_name}：保持该人物的五官、发型、服装配色和身份一致。")
         selected_view = _select_character_view(character, prompt_text, explicit_view)
-        character_images = _character_reference_images(character, prompt_text, explicit_view)
-        if character_images:
+        character_images: list[Image.Image] = []
+        reference_view_roles = _character_reference_views(character, prompt_text, explicit_view) if include_reference_images else []
+        for role, view in reference_view_roles:
+            image = _open_character_view(character, view)
+            if image is None:
+                continue
+            character_images.append(image)
             image_ref = f"image{image_slot}"
-            prompt_lines.append(f"{display_name}：对应参考图为 {image_ref}，生成时必须使用这张图作为该角色参考。")
-            image_slot += len(character_images)
+            view_label = _view_label(view)
+            if role == "face":
+                prompt_lines.append(
+                    f"{display_name}：{image_ref} 是脸部特写/头像身份参考，必须优先用于锁定五官、胡须、发型、年龄感和神态。"
+                )
+            else:
+                prompt_lines.append(
+                    f"{display_name}：{image_ref} 是全身/姿态/朝向参考，必须用于锁定服装配色、身形、站姿和{view_label or '当前视角'}。"
+                )
+            image_slot += 1
+        if character_images:
+            prompt_lines.append(f"{display_name}：生成时必须同时参考该角色的大头身份图和全身姿态图；脸按大头图，身体和朝向按全身图。")
         if explicit_view and selected_view is not None:
             view_index = _character_view_position(character, selected_view)
             view_label = _view_label(selected_view)
@@ -922,7 +1870,7 @@ def _character_prompt_and_reference(
                     f"{orientation}，不要自动改成正面。"
                 )
         images.extend(character_images)
-    reference_tensor = _make_character_reference_tensor(images, contain_images=contain_reference_images)
+    reference_tensor = _make_character_reference_tensor(images, contain_images=contain_reference_images) if include_reference_images else None
     if prompt_lines:
         detail = "\n".join(prompt_lines)
         role_names = "、".join(_character_display_name(character, name) for name, character in resolved_characters)
@@ -933,6 +1881,120 @@ def _character_prompt_and_reference(
             f"角色库参考要求：本格涉及角色为 {role_names}。生成画面必须严格保持下列人物特色；如果原文写“两人/二人/双方”，默认指这些角色。不要把参考图的构图、背景或裁切直接照搬；忽略参考图里的透明棋盘格、灰白方格、透明背景预览、文字、标签、水印和说明字样，最终画面禁止出现这些内容。\n"
             f"{detail}{layout_text}"
         )
+    return prompt_text, reference_tensor
+
+
+def _extract_costume_refs(text: str) -> list[tuple[str, str]]:
+    refs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    source = _safe_text(text)
+    for match in COSTUME_REF_RE.finditer(source):
+        groups = match.groups()
+        name = next((_safe_text(group).strip(" 　.,，;；。!！?？") for group in groups if group), "")
+        if not name:
+            continue
+        category = "prop" if (groups[2] or groups[3]) else "clothing"
+        key = (category, name.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append((name, category))
+    for match in CHARACTER_REF_RE.finditer(source):
+        name = _safe_text(match.group(1)).strip(" 　.,，;；。!！?？")
+        if not name or _find_character(name):
+            continue
+        costume = _find_costume(name, "clothing") or _find_costume(name, "prop")
+        if not costume:
+            continue
+        category = _safe_text(costume.get("category") or "clothing").strip().lower() or "clothing"
+        key = (category, name.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append((name, category))
+    return refs
+
+
+def _costume_asset_path(costume: dict[str, Any]) -> Path | None:
+    base = Path(_safe_text(costume.get("_dir"))).resolve()
+    assets = costume.get("assets") if isinstance(costume.get("assets"), list) else []
+    for asset in assets:
+        file_name = _safe_text(asset.get("file") if isinstance(asset, dict) else "").strip()
+        if not file_name:
+            continue
+        path = (base / file_name).resolve()
+        try:
+            if base not in path.parents or not path.is_file():
+                continue
+        except Exception:
+            continue
+        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+            return path
+    return None
+
+
+def _open_costume_image(costume: dict[str, Any]) -> Image.Image | None:
+    path = _costume_asset_path(costume)
+    if path is None:
+        return None
+    try:
+        image = Image.open(path).convert("RGBA")
+    except Exception:
+        return None
+    background = Image.new("RGBA", image.size, (255, 255, 255, 255))
+    background.alpha_composite(image)
+    return background.convert("RGB")
+
+
+def _costume_prompt_and_reference(
+    prompt_text: str,
+    contain_reference_images: bool = False,
+    first_reference_image_index: int = 1,
+) -> tuple[str, torch.Tensor | None]:
+    refs = _extract_costume_refs(prompt_text)
+    if not refs:
+        return prompt_text, None
+    prompt_lines: list[str] = []
+    images: list[Image.Image] = []
+    image_slot = max(1, int(first_reference_image_index or 1))
+    resolved_names: list[str] = []
+    for name, category in refs[:6]:
+        costume = _find_costume(name, category)
+        if not costume:
+            continue
+        image = _open_costume_image(costume)
+        display = _safe_text(costume.get("name") or costume.get("id") or name).strip()
+        item_category = _safe_text(costume.get("category") or category or "clothing").strip().lower() or "clothing"
+        is_prop = item_category == "prop"
+        tags = "、".join(_safe_text(tag).strip() for tag in costume.get("tags") or [] if _safe_text(tag).strip())
+        notes = _safe_text(costume.get("notes") or "").strip()
+        resolved_names.append(display)
+        detail = []
+        if tags:
+            detail.append(f"标签：{tags}")
+        if notes:
+            detail.append(f"备注：{notes}")
+        if image is not None:
+            images.append(image)
+            if is_prop:
+                prompt_lines.append(f"{display}：对应道具参考图为 image{image_slot}，生成时必须采用这个道具的形状、主色、材质、尺寸感和关键部件；按原文语义作为手持物、摆件或场景物品出现。")
+            else:
+                prompt_lines.append(f"{display}：对应服装参考图为 image{image_slot}，生成时必须采用这套服装的轮廓、主色、材质和关键部件。")
+            image_slot += 1
+        else:
+            prompt_lines.append(f"{display}：按{'道具' if is_prop else '服装'}库文字信息使用这个{'道具' if is_prop else '服装'}。")
+        if detail:
+            prompt_lines.append(f"{display}：" + "；".join(detail))
+    if not prompt_lines:
+        return prompt_text, None
+    reference_tensor = _make_character_reference_tensor(images, contain_images=contain_reference_images) if images else None
+    role_text = "、".join(resolved_names)
+    prompt_text = (
+        f"{prompt_text}\n\n"
+        f"服化道参考要求：本格调用服装/道具为 {role_text}。服装参考只约束衣物/盔甲/配饰，不改变角色身份、五官和场景；道具参考只约束物品本身，不替换人物或背景；"
+        "不要把参考图里的透明底、白底、裁切边缘、文字或水印画进最终画面。\n"
+        + "\n".join(prompt_lines)
+    )
     return prompt_text, reference_tensor
 
 
@@ -1041,6 +2103,101 @@ def _normalize_storyboard_cell(image: torch.Tensor, cell_w: int, cell_h: int) ->
     return _resize_crop_short_edge(source, cell_w, cell_h)
 
 
+def _preview_image_directories() -> dict[str, Path]:
+    directories: dict[str, Path] = {}
+    try:
+        directories["temp"] = Path(folder_paths.get_temp_directory()).resolve()
+    except Exception:
+        pass
+    try:
+        directories["input"] = Path(folder_paths.get_input_directory()).resolve()
+    except Exception:
+        pass
+    try:
+        directories["output"] = Path(folder_paths.get_output_directory()).resolve()
+    except Exception:
+        pass
+    return directories
+
+
+def _load_storyboard_preview_cells(preview_images: Any, cell_w: int, cell_h: int) -> dict[int, torch.Tensor]:
+    text = _safe_text(preview_images).strip()
+    if not text:
+        return {}
+    try:
+        items = json.loads(text)
+    except Exception:
+        return {}
+    if not isinstance(items, list):
+        return {}
+    directories = _preview_image_directories()
+    loaded: dict[int, torch.Tensor] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index") or 0)
+        except Exception:
+            continue
+        if index <= 0:
+            continue
+        filename = _safe_text(item.get("filename")).replace("\\", "/").strip("/")
+        subfolder = _safe_text(item.get("subfolder")).replace("\\", "/").strip("/")
+        image_type = _safe_text(item.get("type"), "temp").strip().lower() or "temp"
+        base = directories.get(image_type)
+        if base is None or not filename:
+            continue
+        path = (base / subfolder / filename).resolve()
+        try:
+            if base != path and base not in path.parents:
+                continue
+            if not path.is_file():
+                continue
+            image = Image.open(path).convert("RGB")
+            array = np.asarray(image).astype(np.float32) / 255.0
+            tensor = torch.from_numpy(array).unsqueeze(0)
+            loaded[index] = _normalize_storyboard_cell(tensor, cell_w, cell_h)
+        except Exception:
+            continue
+    return loaded
+
+
+def _load_recent_storyboard_preview_cells(cell_w: int, cell_h: int, expected_count: int) -> dict[int, torch.Tensor]:
+    try:
+        directory = (Path(folder_paths.get_temp_directory()) / PREVIEW_SUBFOLDER).resolve()
+    except Exception:
+        return {}
+    if not directory.is_dir():
+        return {}
+    pattern = re.compile(r"^storyboard_[0-9a-f]+_(\d{3})\.png$", re.IGNORECASE)
+    candidates: dict[int, Path] = {}
+    mtimes: dict[int, float] = {}
+    try:
+        for path in directory.glob("storyboard_*.png"):
+            match = pattern.match(path.name)
+            if not match:
+                continue
+            index = int(match.group(1))
+            if index <= 0 or index > max(1, int(expected_count or 1)):
+                continue
+            stat = path.stat()
+            if stat.st_mtime >= mtimes.get(index, 0.0):
+                candidates[index] = path
+                mtimes[index] = stat.st_mtime
+    except Exception:
+        return {}
+    loaded: dict[int, torch.Tensor] = {}
+    for index, path in candidates.items():
+        try:
+            image = Image.open(path).convert("RGB")
+            array = np.asarray(image).astype(np.float32) / 255.0
+            tensor = torch.from_numpy(array).unsqueeze(0)
+            loaded[index] = _normalize_storyboard_cell(tensor, cell_w, cell_h)
+        except Exception:
+            continue
+    return loaded
+
+
 def _dark_border_limit(values: torch.Tensor, max_scan: int) -> int:
     limit = 0
     for index in range(max(0, int(max_scan))):
@@ -1129,6 +2286,8 @@ def _storyboard_cache_signature(
         "lora_chain_config": _safe_text(lora_chain_config),
         "lora_data": _safe_text(lora_data),
         "characters": _character_library_signature(),
+        "scenes": _scene_library_signature(),
+        "costumes": _costume_library_signature(),
     }
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -1136,7 +2295,7 @@ def _storyboard_cache_signature(
 
 def _lazy_optional_images(scene: Any, reference: Any, width: int, height: int) -> dict[str, torch.Tensor]:
     scene_images = [_resize_crop_short_edge(image, width, height) for image in _split_media(scene)]
-    reference_images = [_resize_fit_reference(image, width, height) for image in _split_media(reference)]
+    reference_images = [_resize_crop_short_edge(image, width, height) for image in _split_media(reference)]
     images = [*scene_images, *reference_images]
     if not images:
         return {}
@@ -1445,6 +2604,10 @@ class GJJ_StoryboardGridGenerator:
                     "STRING",
                     {"default": "false", "multiline": False, "display_name": "强制全部生成", "hidden": True, "display": "hidden"},
                 ),
+                "storyboard_preview_images": (
+                    "STRING",
+                    {"default": "[]", "multiline": False, "display_name": "分镜预览缓存", "hidden": True, "display": "hidden"},
+                ),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "prompt_graph": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -1458,6 +2621,10 @@ class GJJ_StoryboardGridGenerator:
             + "|".join(shapes)
             + "|characters="
             + _character_library_signature()
+            + "|scenes="
+            + _scene_library_signature()
+            + "|costumes="
+            + _costume_library_signature()
         )
 
     @classmethod
@@ -1497,6 +2664,7 @@ class GJJ_StoryboardGridGenerator:
         selected_cell_indices="[]",
         storyboard_full_prompt="",
         force_generate_all="false",
+        storyboard_preview_images="[]",
         unique_id=None,
         prompt_graph=None,
         extra_pnginfo=None,
@@ -1530,6 +2698,7 @@ class GJJ_StoryboardGridGenerator:
         selected_cell_indices = _first_scalar(selected_cell_indices)
         storyboard_full_prompt = _first_scalar(storyboard_full_prompt)
         force_generate_all = _parse_bool(_first_scalar(force_generate_all), False)
+        storyboard_preview_images = _first_scalar(storyboard_preview_images)
         unique_id = _first_scalar(unique_id)
         if not _has_configured_lora_data(lora_data):
             lora_data = _preset_lora_data(unet_name)
@@ -1601,6 +2770,18 @@ class GJJ_StoryboardGridGenerator:
         cached_cells = cache.get("cells", {}) if isinstance(cache.get("cells"), dict) else {}
         stitched_cells = [cached_cells.get(index) for index in range(1, geometry_count + 1)]
         if not force_generate_all and not single_cell_mode and not selected_cell_mode:
+            cached_count_before_preview = sum(1 for item in stitched_cells if isinstance(item, torch.Tensor))
+            preview_cells = _load_storyboard_preview_cells(storyboard_preview_images, cell_w, cell_h)
+            recent_preview_cells = _load_recent_storyboard_preview_cells(cell_w, cell_h, geometry_count)
+            if preview_cells or cached_count_before_preview > 0 or len(recent_preview_cells) >= geometry_count:
+                for preview_index, preview_cell in recent_preview_cells.items():
+                    preview_cells.setdefault(preview_index, preview_cell)
+            if preview_cells:
+                for preview_index, preview_cell in preview_cells.items():
+                    if 1 <= preview_index <= geometry_count and not isinstance(cached_cells.get(preview_index), torch.Tensor):
+                        cache["cells"][int(preview_index)] = preview_cell.detach().contiguous()
+                cached_cells = cache.get("cells", {}) if isinstance(cache.get("cells"), dict) else {}
+                stitched_cells = [cached_cells.get(index) for index in range(1, geometry_count + 1)]
             if all(isinstance(item, torch.Tensor) for item in stitched_cells):
                 output_images = [
                     _normalize_storyboard_cell(item, cell_w, cell_h) for item in stitched_cells if isinstance(item, torch.Tensor)
@@ -1611,9 +2792,12 @@ class GJJ_StoryboardGridGenerator:
                 return (grid, cells)
             cached_count = sum(1 for item in stitched_cells if isinstance(item, torch.Tensor))
             if cached_count > 0:
-                _send_status(unique_id, f"当前缓存只有 {cached_count}/{geometry_count} 格，下游请求自动补齐完整分镜。")
-            else:
-                _send_status(unique_id, "缓存为空，下游首次请求自动生成完整分镜。")
+                missing = [str(index) for index, item in enumerate(stitched_cells, start=1) if not isinstance(item, torch.Tensor)]
+                raise RuntimeError(
+                    f"当前只找到 {cached_count}/{geometry_count} 格已生成分镜，缺少第 {'、'.join(missing)} 格；"
+                    "请不要清空预览，或先用“单格/全部”把缺失格生成出来，再运行下游拼图。"
+                )
+            _send_status(unique_id, "缓存为空，下游首次请求自动生成完整分镜。")
         storyboard_character_refs = _storyboard_character_context(prompts)
         is_qwen_image_edit = _is_qwen_image_edit_unet(unet_name)
         generated: list[torch.Tensor] = []
@@ -1625,25 +2809,45 @@ class GJJ_StoryboardGridGenerator:
         else:
             _send_status(unique_id, f"准备生成 {len(prompts)} 张分镜图片...")
 
-        scene_reference_count = _media_count(scene)
-        plain_reference_count = _media_count(reference)
-        character_reference_start = scene_reference_count + plain_reference_count + 1
         for index, line in enumerate(prompts, start=1):
             if selected_cell_mode:
                 preview_index = selected_indices[index - 1]
             else:
                 preview_index = seed_offset + index if single_cell_mode else index
-            line = _append_scene_reference_prompt(line, scene_reference_count)
+            line, library_scene_reference, scene_consumed_characters = _scene_reference_tensor_for_prompt(line, cell_w, cell_h)
+            scene_source = None if library_scene_reference is not None else scene
+            library_scene_reference_count = _media_count(library_scene_reference)
+            plain_reference_count = _media_count(reference) + library_scene_reference_count
+            scene_reference_count = _media_count(scene_source)
+            character_reference_start = scene_reference_count + plain_reference_count + 1
+            if library_scene_reference is None:
+                line = _append_scene_reference_prompt(line, scene_reference_count)
             line, character_reference = _character_prompt_and_reference(
                 line,
                 storyboard_character_refs,
                 contain_reference_images=is_qwen_image_edit,
                 first_reference_image_index=character_reference_start,
+                include_reference_images=not scene_consumed_characters,
+            )
+            costume_reference_start = character_reference_start + _media_count(character_reference)
+            line, costume_reference = _costume_prompt_and_reference(
+                line,
+                contain_reference_images=is_qwen_image_edit,
+                first_reference_image_index=costume_reference_start,
             )
             line = _prefix_qwen_next_scene_prompt(line, unet_name)
             line = f"{line}\n\n{CELL_BLEED_PROMPT}"
-            combined_reference = [reference, character_reference] if character_reference is not None else reference
-            refs = _lazy_optional_images(scene, combined_reference, cell_w, cell_h)
+            combined_reference_parts = []
+            if library_scene_reference is not None:
+                combined_reference_parts.append(library_scene_reference)
+            if reference is not None:
+                combined_reference_parts.append(reference)
+            if character_reference is not None:
+                combined_reference_parts.append(character_reference)
+            if costume_reference is not None:
+                combined_reference_parts.append(costume_reference)
+            combined_reference = combined_reference_parts if combined_reference_parts else None
+            refs = _lazy_optional_images(scene_source, combined_reference, cell_w, cell_h)
             _send_status(unique_id, f"按懒人一键生图流程生成分镜 {preview_index}/{preview_total}")
             result = self._lazy.create_image(
                 prompt=line,

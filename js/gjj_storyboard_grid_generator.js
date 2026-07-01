@@ -16,11 +16,12 @@ const SINGLE_CELL_TOTAL_INPUT = "single_cell_total";
 const SELECTED_CELL_INDICES_INPUT = "selected_cell_indices";
 const FULL_PROMPT_INPUT = "storyboard_full_prompt";
 const FORCE_GENERATE_INPUT = "force_generate_all";
+const PREVIEW_IMAGES_INPUT = "storyboard_preview_images";
 const SEED_CONTROL_KEY = "__seed_control_after_generate";
 const SEED_CONTROL_VALUES = new Set(["fixed", "increment", "decrement", "randomize"]);
 const JS_SAFE_MAX_SEED_VALUE = Number.MAX_SAFE_INTEGER;
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
-const ALWAYS_HIDDEN_WIDGETS = new Set(["lora_data", SINGLE_CELL_INDEX_INPUT, SINGLE_CELL_TOTAL_INPUT, SELECTED_CELL_INDICES_INPUT, FULL_PROMPT_INPUT, FORCE_GENERATE_INPUT]);
+const ALWAYS_HIDDEN_WIDGETS = new Set(["lora_data", SINGLE_CELL_INDEX_INPUT, SINGLE_CELL_TOTAL_INPUT, SELECTED_CELL_INDICES_INPUT, FULL_PROMPT_INPUT, FORCE_GENERATE_INPUT, PREVIEW_IMAGES_INPUT]);
 const PANEL_SYNC_WIDGETS = [
 	"prompt",
 	"negative_prompt",
@@ -315,6 +316,7 @@ function patchStoryboardSeedIntoPromptData(promptData) {
 			inputs[SELECTED_CELL_INDICES_INPUT] = clampedIndices.length ? JSON.stringify(clampedIndices.map((value) => value + 1)) : "[]";
 			inputs[FULL_PROMPT_INPUT] = clampedIndices.length ? fullPrompt : "";
 			inputs[FORCE_GENERATE_INPUT] = node.__gjjStoryboardForceGenerateAll ? "true" : "false";
+			inputs[PREVIEW_IMAGES_INPUT] = JSON.stringify(storyboardPreviewImageItems(node));
 			if (clampedIndices.length) {
 				inputs.prompt = serializePromptParts(clampedIndices.map((value) => parts[value]).filter(Boolean));
 			}
@@ -1022,6 +1024,33 @@ function previewImageUrl(item) {
 	return api?.apiURL ? api.apiURL(path) : path;
 }
 
+function storyboardPreviewImageItems(node) {
+	const items = node?.__gjjStoryboardCellPreviewItems || [];
+	const fromItems = items
+		.map((item, index) => ({
+			index: index + 1,
+			filename: String(item?.filename || ""),
+			subfolder: String(item?.subfolder || ""),
+			type: String(item?.type || "temp"),
+		}))
+		.filter((item) => item.filename);
+	if (fromItems.length) return fromItems;
+	const urls = node?.__gjjStoryboardCellPreviewUrls || [];
+	return urls.map((url, index) => {
+		try {
+			const parsed = new URL(String(url || ""), window.location.href);
+			return {
+				index: index + 1,
+				filename: parsed.searchParams.get("filename") || "",
+				subfolder: parsed.searchParams.get("subfolder") || "",
+				type: parsed.searchParams.get("type") || "temp",
+			};
+		} catch (_) {
+			return { index: index + 1, filename: "", subfolder: "", type: "temp" };
+		}
+	}).filter((item) => item.filename);
+}
+
 function updateLivePreview(node, detail) {
 	if (!isTarget(node)) return;
 	if (!node.__gjjStoryboardPreviewWidget && typeof node.addDOMWidget === "function") {
@@ -1038,7 +1067,9 @@ function updateLivePreview(node, detail) {
 	if (url && index > 0) {
 		node.__gjjStoryboardCellPreviewUrls ||= [];
 		node.__gjjStoryboardCellPreviewImages ||= [];
+		node.__gjjStoryboardCellPreviewItems ||= [];
 		node.__gjjStoryboardCellPreviewUrls[index - 1] = url;
+		node.__gjjStoryboardCellPreviewItems[index - 1] = detail?.image || null;
 		const cellImage = new Image();
 		cellImage.onload = () => drawPromptGridPreview(node);
 		cellImage.src = url;
@@ -1068,13 +1099,16 @@ function resetLivePreview(node, options = {}) {
 	if (onlyIndices.length) {
 		node.__gjjStoryboardCellPreviewUrls ||= [];
 		node.__gjjStoryboardCellPreviewImages ||= [];
+		node.__gjjStoryboardCellPreviewItems ||= [];
 		for (const index of onlyIndices) {
 			node.__gjjStoryboardCellPreviewUrls[index] = "";
 			node.__gjjStoryboardCellPreviewImages[index] = null;
+			node.__gjjStoryboardCellPreviewItems[index] = null;
 		}
 	} else {
 		node.__gjjStoryboardCellPreviewUrls = [];
 		node.__gjjStoryboardCellPreviewImages = [];
+		node.__gjjStoryboardCellPreviewItems = [];
 	}
 	drawPromptGridPreview(node);
 	GJJ_Utils.refreshNode?.(node);

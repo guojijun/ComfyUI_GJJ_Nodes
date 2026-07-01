@@ -723,6 +723,32 @@ def _multiview_allowed_unets() -> list[str]:
 	return filtered or models
 
 
+def _pick_default_multiview_unet(unet_models: list[str]) -> str:
+	"""多视图默认优先落到 safetensors，避免未指定时被 GGUF 候选抢占。"""
+	models = [str(item or "").strip() for item in (unet_models or []) if str(item or "").strip()]
+	if not models:
+		return DEFAULT_QWEN2511_UNET
+
+	def normalized(value: str) -> str:
+		return value.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+	preferred = DEFAULT_QWEN2511_UNET.lower()
+	for model_name in models:
+		if normalized(model_name) == preferred:
+			return model_name
+
+	safetensor_models = [model_name for model_name in models if normalized(model_name).endswith(".safetensors")]
+	for model_name in safetensor_models:
+		text = normalized(model_name)
+		if "qwen" in text and "edit" in text and "2511" in text:
+			return model_name
+	for model_name in safetensor_models:
+		text = normalized(model_name)
+		if "qwen" in text and "edit" in text:
+			return model_name
+	return safetensor_models[0] if safetensor_models else models[0]
+
+
 def _match_multiview_family(unet_name: str) -> dict[str, Any]:
 	preset = match_model_family(unet_name)
 	if preset is None:
@@ -1708,7 +1734,8 @@ class GJJ_CharacterMultiViewStudio:
 		clip_models = list_clip_models() or [DEFAULT_CLIP_NAME]
 		vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
 		lora_models = [""] + (_safe_filename_list("loras") or [])
-		default_preset = _match_multiview_family(DEFAULT_UNET_NAME)
+		default_unet_name = _pick_default_multiview_unet(unet_models)
+		default_preset = _match_multiview_family(default_unet_name)
 		return {
 			"required": {
 				"base_prompt": (
@@ -1744,7 +1771,7 @@ class GJJ_CharacterMultiViewStudio:
 				"unet_name": (
 					unet_models,
 					{
-						"default": DEFAULT_UNET_NAME if DEFAULT_UNET_NAME in unet_models else unet_models[0],
+						"default": default_unet_name,
 						"display_name": "🟣 UNET 主模型",
 						"tooltip": "只显示图生图 / 编辑型主模型，不显示纯文生图底模。",
 					},

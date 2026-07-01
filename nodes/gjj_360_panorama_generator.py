@@ -345,6 +345,14 @@ def _center_crop(image: torch.Tensor, width: int, height: int) -> torch.Tensor:
     return tensor[:, top : top + int(height), left : left + int(width), :].contiguous()
 
 
+def _horizontal_center_wrap(image: torch.Tensor, width: int, height: int) -> torch.Tensor:
+    tensor = _ensure_bhwc_rgb(image)
+    if int(tensor.shape[2]) != int(width) or int(tensor.shape[1]) != int(height):
+        tensor = _resize_exact(tensor, int(width), int(height))
+    doubled = torch.cat([tensor, tensor], dim=2)
+    return _center_crop(doubled, int(width), int(height))
+
+
 def _blur_mask(mask: torch.Tensor, radius: int) -> torch.Tensor:
     if int(radius) <= 0:
         return mask.float().clamp(0.0, 1.0)
@@ -974,6 +982,9 @@ class GJJ_360PanoramaGenerator:
             )
         else:
             _send_status(unique_id, "4/5 已跳过中缝修复。", 0.94, stage_index=4, stage_total=stage_total)
+
+        final = _horizontal_center_wrap(final, final_width, final_height)
+        _send_preview(unique_id, final, "居中")
 
         self._cache_put(generation_key, final)
         return self._finish_output(
