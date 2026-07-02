@@ -36,6 +36,7 @@ const MODE_EDIT = "edit";
 const MODE_PREVIEW = "preview";
 const DOUBLE_CLICK_MS = 420;
 const MODE_PROPERTY = "__gjjAnyPreviewMode";
+const TILE_PROPERTY = "__gjjAnyPreviewTileMode";
 const WIDTH_PROPERTY = "gjj_any_preview_width";
 const HELD_TEXT_PROPERTY = "gjj_any_preview_held_text";
 const HELD_IMAGES_PROPERTY = "gjj_any_preview_held_images";
@@ -197,6 +198,19 @@ function previewItemDisplayTitle(item, index = 0) {
 function getMode(node) {
 	const mode = String(node?.properties?.[MODE_PROPERTY] || MODE_PREVIEW);
 	return mode === MODE_PREVIEW ? MODE_PREVIEW : MODE_EDIT;
+}
+
+function isTileMode(node) {
+	return Boolean(node?.properties?.[TILE_PROPERTY]);
+}
+
+function setTileMode(node, enabled) {
+	node.properties = node.properties || {};
+	node.properties[TILE_PROPERTY] = Boolean(enabled);
+	applyPreviewContent(node);
+	updatePreviewActionButtons(node);
+	scheduleLayout(node);
+	setDirty(node);
 }
 
 function handlePreviewPointer(node, event) {
@@ -1802,6 +1816,14 @@ function hasCurrentPreviewContent(node) {
 	return false;
 }
 
+function previewTileCandidateCount(node) {
+	const items = Array.isArray(node?.__gjjAnyPreviewItems) ? node.__gjjAnyPreviewItems : [];
+	if (items.length) {
+		return items.reduce((total, item) => total + normalizeMediaPayload(item?.images).length, 0);
+	}
+	return currentPreviewImages(node).length;
+}
+
 function updatePreviewActionButtons(node) {
 	const copyBar = node?.__gjjAnyPreviewCopyBar;
 	if (!copyBar) return;
@@ -1809,10 +1831,19 @@ function updatePreviewActionButtons(node) {
 	const reconnect = hasReconnectTargets(node);
 	copyBar.style.display = hasContent || reconnect ? "flex" : "none";
 	updateReconnectButton(node);
+	const tileButton = node.__gjjAnyPreviewTileButton;
+	const canTile = previewTileCandidateCount(node) > 1;
+	if (tileButton) {
+		tileButton.style.display = hasContent && canTile ? "" : "none";
+		tileButton.textContent = isTileMode(node) ? "列表" : "平铺";
+		tileButton.title = isTileMode(node) ? "切回列表预览" : "切换为紧凑平铺预览";
+		tileButton.dataset.originalTitle = tileButton.title;
+	}
 	if (!hasContent) {
 		for (const button of [
 			node.__gjjAnyPreviewHoldButton,
 			node.__gjjAnyPreviewRunButton,
+			node.__gjjAnyPreviewTileButton,
 			node.__gjjAnyPreviewCopyNodeButton,
 			node.__gjjAnyPreviewCopyClipboardButton,
 		]) {
@@ -2986,6 +3017,47 @@ function appendPreviewTileImage(node, parent, item, badgeText = "", imageItems =
 	});
 }
 
+function renderCompactImageTiles(node, grid, entries) {
+	const images = entries
+		.map((entry) => ({
+			item: entry?.item || entry,
+			label: String(entry?.label || ""),
+		}))
+		.filter((entry) => entry.item);
+	grid.style.display = "flex";
+	grid.style.flexDirection = "row";
+	grid.style.flexWrap = "wrap";
+	grid.style.gridTemplateColumns = "";
+	grid.style.gap = "2px";
+	grid.style.height = "auto";
+	grid.style.alignItems = "flex-start";
+	grid.replaceChildren();
+	for (const [index, entry] of images.entries()) {
+		const card = document.createElement("div");
+		card.style.cssText = [
+			"position:relative",
+			"width:96px",
+			`aspect-ratio:${mediaItemAspectRatioCss(entry.item)}`,
+			"min-height:54px",
+			"max-height:124px",
+			"overflow:hidden",
+			"border:none",
+			"border-radius:0",
+			"background:transparent",
+			"box-sizing:border-box",
+			"cursor:pointer",
+			"flex:0 0 auto",
+		].join(";");
+		appendPreviewTileImage(node, card, entry.item, entry.label || `${index + 1}`);
+		grid.appendChild(card);
+	}
+	node.__gjjAnyPreviewHeight = Math.max(MIN_PREVIEW_HEIGHT, Number(grid.scrollHeight || 0) + 16);
+	requestAnimationFrame(() => {
+		node.__gjjAnyPreviewHeight = Math.max(MIN_PREVIEW_HEIGHT, Number(grid.scrollHeight || 0) + 16);
+		scheduleLayout(node);
+	});
+}
+
 function protectTextareaEvents(textarea) {
 	const stop = (event) => event.stopPropagation();
 	for (const eventName of ["pointerdown", "mousedown", "click", "dblclick", "wheel", "keydown", "keyup", "contextmenu"]) {
@@ -3440,6 +3512,9 @@ function renderPreviewItems(node, items) {
 		previewWrap.style.overflow = "visible";
 		previewWrap.style.height = "auto";
 		previewWrap.style.minHeight = "96px";
+		previewWrap.style.border = "1px solid #33434a";
+		previewWrap.style.background = "#0f1418";
+		previewWrap.style.padding = "8px";
 	}
 
 	grid.style.display = "grid";
@@ -3450,6 +3525,23 @@ function renderPreviewItems(node, items) {
 	grid.style.alignItems = "start";
 	clearImageSequenceTimers(node);
 	grid.replaceChildren();
+
+	if (isTileMode(node)) {
+		const imageEntries = [];
+		for (const [index, item] of items.entries()) {
+			for (const image of normalizeMediaPayload(item.images)) {
+				imageEntries.push({
+					item: image,
+					label: "",
+					sourceTitle: previewItemDisplayTitle(item, index),
+				});
+			}
+		}
+		if (imageEntries.length > 1) {
+			renderCompactImageTiles(node, grid, imageEntries);
+			return;
+		}
+	}
 
 	for (const [index, item] of items.entries()) {
 		const card = document.createElement("div");
@@ -3544,7 +3636,7 @@ function applyPreviewContent(node) {
 	const availableHeight = getWidgetHeight(node, node.__gjjAnyPreviewWidget);
 
 	const isMediaPreview = showImage || showAudio || showVideo || showFiles;
-	const useEstimatedImageLayout = showImage && shouldUseEstimatedImageLayout(node);
+	const useEstimatedImageLayout = showImage && shouldUseEstimatedImageLayout(node) && !isTileMode(node);
 
 	grid.style.display = isMediaPreview ? (showImage ? "grid" : "flex") : "none";
 	grid.style.flexDirection = "";
@@ -3579,19 +3671,27 @@ function applyPreviewContent(node) {
 		if (editor) editor.style.display = "none";
 	}
 
-	empty.style.display = (!isMediaPreview && !hasText) ? "flex" : "none";
+	const isEmptyPreview = !isMediaPreview && !hasText;
+	empty.style.display = isEmptyPreview ? "flex" : "none";
 
 	container.style.height = "auto";
-	container.style.minHeight = `${MIN_PREVIEW_HEIGHT}px`;
+	container.style.minHeight = isEmptyPreview ? "0" : `${MIN_PREVIEW_HEIGHT}px`;
 
 	if (previewWrap) {
 		previewWrap.style.overflow = "visible";
 		previewWrap.style.height = useEstimatedImageLayout ? `${availableHeight}px` : "auto";
-		previewWrap.style.minHeight = useEstimatedImageLayout ? `${availableHeight}px` : "96px";
+		previewWrap.style.minHeight = isEmptyPreview ? "24px" : (useEstimatedImageLayout ? `${availableHeight}px` : "96px");
+		previewWrap.style.border = isEmptyPreview ? "none" : "1px solid #33434a";
+		previewWrap.style.background = isEmptyPreview ? "transparent" : "#0f1418";
+		previewWrap.style.padding = isEmptyPreview ? "0" : "8px";
 	}
 
 	const sequenceImage = images.find(isSequenceMediaItem);
-	if (showImage && sequenceImage) {
+	if (showImage && isTileMode(node) && images.length > 1) {
+		clearImageSequenceTimers(node);
+		body.style.display = "none";
+		renderCompactImageTiles(node, grid, images.map((item) => ({ item })));
+	} else if (showImage && sequenceImage) {
 		clearImageSequenceTimers(node);
 		grid.style.display = "flex";
 		grid.style.flexDirection = "column";
@@ -4055,6 +4155,13 @@ function ensurePreviewWidget(node) {
 	runButton.title = "运行当前 GJJ_AnyPreview 节点";
 	runButton.setAttribute("aria-label", runButton.title);
 	runButton.dataset.originalTitle = runButton.title;
+	const tileButton = document.createElement("button");
+	tileButton.type = "button";
+	tileButton.style.cssText = `${buttonStyle};width:auto;min-width:42px;padding:3px 8px;font-size:11px;font-weight:700;display:none`;
+	tileButton.textContent = "平铺";
+	tileButton.title = "切换为紧凑平铺预览";
+	tileButton.setAttribute("aria-label", tileButton.title);
+	tileButton.dataset.originalTitle = tileButton.title;
 	const copyNodeButton = document.createElement("button");
 	copyNodeButton.type = "button";
 	copyNodeButton.style.cssText = buttonStyle;
@@ -4064,7 +4171,7 @@ function ensurePreviewWidget(node) {
 	copyClipboardButton.style.cssText = buttonStyle;
 	setupIconButton(copyClipboardButton, "复制到剪贴板", CLIPBOARD_ICON_SVG);
 
-	for (const button of [holdButton, reconnectButton, runButton, copyNodeButton, copyClipboardButton]) {
+	for (const button of [holdButton, reconnectButton, runButton, tileButton, copyNodeButton, copyClipboardButton]) {
 		button.className = "gjj-any-preview-action-icon";
 		button.addEventListener("pointerdown", (event) => {
 			event.preventDefault();
@@ -4102,6 +4209,11 @@ function ensurePreviewWidget(node) {
 		event.stopPropagation();
 		runCurrentAnyPreviewNode(node);
 	});
+	tileButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		setTileMode(node, !isTileMode(node));
+	});
 	copyNodeButton.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
@@ -4115,6 +4227,7 @@ function ensurePreviewWidget(node) {
 	copyBar.appendChild(holdButton);
 	copyBar.appendChild(reconnectButton);
 	copyBar.appendChild(runButton);
+	copyBar.appendChild(tileButton);
 	copyBar.appendChild(copyNodeButton);
 	copyBar.appendChild(copyClipboardButton);
 
@@ -4264,15 +4377,46 @@ function ensurePreviewWidget(node) {
 	previewWrap.appendChild(grid);
 
 	const empty = document.createElement("div");
-	empty.textContent = EMPTY_PREVIEW;
 	empty.style.cssText = [
 		"display:flex",
 		"align-items:center",
 		"justify-content:flex-start",
-		"min-height:56px",
+		"min-height:28px",
 		"color:#8ea0a8",
 		"font-size:12px",
 	].join(";");
+	const emptyRunButton = document.createElement("button");
+	emptyRunButton.type = "button";
+	emptyRunButton.textContent = "▶";
+	emptyRunButton.title = "运行当前 GJJ_AnyPreview 节点";
+	emptyRunButton.setAttribute("aria-label", emptyRunButton.title);
+	emptyRunButton.style.cssText = [
+		"width:24px",
+		"height:24px",
+		"padding:0",
+		"border:1px solid #3a4f58",
+		"border-radius:5px",
+		"background:#10191e",
+		"color:#cdd9d7",
+		"display:inline-flex",
+		"align-items:center",
+		"justify-content:center",
+		"cursor:pointer",
+		"font-size:13px",
+		"line-height:1",
+	].join(";");
+	for (const eventName of ["pointerdown", "mousedown", "dblclick", "wheel", "contextmenu"]) {
+		emptyRunButton.addEventListener(eventName, (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+		});
+	}
+	emptyRunButton.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		runCurrentAnyPreviewNode(node);
+	});
+	empty.appendChild(emptyRunButton);
 	previewWrap.appendChild(empty);
 
 	body.style.order = "2";
@@ -4320,6 +4464,8 @@ function ensurePreviewWidget(node) {
 	node.__gjjAnyPreviewHoldButton = holdButton;
 	node.__gjjAnyPreviewReconnectButton = reconnectButton;
 	node.__gjjAnyPreviewRunButton = runButton;
+	node.__gjjAnyPreviewTileButton = tileButton;
+	node.__gjjAnyPreviewEmptyRunButton = emptyRunButton;
 	node.__gjjAnyPreviewCopyNodeButton = copyNodeButton;
 	node.__gjjAnyPreviewCopyClipboardButton = copyClipboardButton;
 	node.__gjjAnyPreviewBody = body;

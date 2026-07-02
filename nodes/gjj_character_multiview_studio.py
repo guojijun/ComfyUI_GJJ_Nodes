@@ -1670,12 +1670,27 @@ class FlexibleMultiViewInputType(dict):
 		text = str(key or "")
 		if text.startswith("action_image_"):
 			# 与 action_image_01 保持一致的类型
-			return ("GJJ_BATCH_IMAGE,IMAGE",)
+			return (
+				"GJJ_BATCH_IMAGE,IMAGE",
+				_hidden_multiview_param(
+					{
+						"display_name": f"动作图 {text.rsplit('_', 1)[-1]}",
+						"tooltip": "动作 / 姿势参考图。支持 GJJ_BATCH_IMAGE 和 IMAGE 两种类型。",
+					}
+				),
+			)
 		raise KeyError(key)
 
 	def __contains__(self, key):
 		text = str(key or "")
 		return key in self.data or text.startswith("action_image_")
+
+
+def _hidden_multiview_param(options: dict[str, Any]) -> dict[str, Any]:
+	result = dict(options)
+	result["hidden"] = True
+	result["display"] = "hidden"
+	return result
 
 
 class GJJ_CharacterMultiViewStudio:
@@ -1740,23 +1755,27 @@ class GJJ_CharacterMultiViewStudio:
 			"required": {
 				"base_prompt": (
 					"STRING",
+					_hidden_multiview_param(
 					{
 						"default": DEFAULT_EXTRA_PROMPT,
 						"multiline": False,
 						"dynamicPrompts": True,
 						"display_name": "主体补充提示词",
 						"tooltip": "可补充主体的材质、结构、颜色、风格或背景氛围描述。",
-					},
+					}
+					),
 				),
 				"negative_prompt": (
 					"STRING",
+					_hidden_multiview_param(
 					{
 						"default": DEFAULT_NEGATIVE_PROMPT,
 						"multiline": False,
 						"dynamicPrompts": True,
 						"display_name": "反向提示词",
 						"tooltip": "反向提示词；留空时会自动生成零反向条件。",
-					},
+					}
+					),
 				),
 				"action_prompts": (
 					"STRING",
@@ -1770,22 +1789,27 @@ class GJJ_CharacterMultiViewStudio:
 				),
 				"unet_name": (
 					unet_models,
+					_hidden_multiview_param(
 					{
 						"default": default_unet_name,
 						"display_name": "🟣 UNET 主模型",
 						"tooltip": "只显示图生图 / 编辑型主模型，不显示纯文生图底模。",
-					},
+					}
+					),
 				),
 				"lora_1_name": (
 					lora_models,
+					_hidden_multiview_param(
 					{
 						"default": _pick_available_name(default_preset.get("lora_1_name", DEFAULT_LIGHTNING_LORA), lora_models, DEFAULT_LIGHTNING_LORA),
 						"display_name": "🟢 第1组 LoRA",
 						"tooltip": "推荐的加速或编辑 LoRA；强度为 0 或未选择时不参与运算。",
-					},
+					}
+					),
 				),
 				"lora_1_strength": (
 					"FLOAT",
+					_hidden_multiview_param(
 					{
 						"default": float(default_preset.get("lora_1_strength", 1.0)),
 						"min": 0.0,
@@ -1793,10 +1817,12 @@ class GJJ_CharacterMultiViewStudio:
 						"step": 0.01,
 						"display_name": "LoRA 1 强度",
 						"tooltip": "第一组 LoRA 强度。",
-					},
+					}
+					),
 				),
 				"lora_2_name": (
 					lora_models,
+					_hidden_multiview_param(
 					{
 						"default": _pick_available_lora_name(
 							lora_models,
@@ -1805,10 +1831,12 @@ class GJJ_CharacterMultiViewStudio:
 						),
 						"display_name": "🟢 第2组 LoRA",
 						"tooltip": "第二组 LoRA；多视图节点默认推荐多角度 LoRA，支持从 loras 子目录自动匹配。",
-					},
+					}
+					),
 				),
 				"lora_2_strength": (
 					"FLOAT",
+					_hidden_multiview_param(
 					{
 						"default": 1.0,
 						"min": 0.0,
@@ -1816,10 +1844,12 @@ class GJJ_CharacterMultiViewStudio:
 						"step": 0.01,
 						"display_name": "LoRA 2 强度",
 						"tooltip": "第二组 LoRA 强度。",
-					},
+					}
+					),
 				),
 				"seed": (
 					"INT",
+					_hidden_multiview_param(
 					{
 						"default": DEFAULT_SEED,
 						"min": 0,
@@ -1827,41 +1857,50 @@ class GJJ_CharacterMultiViewStudio:
 						"control_after_generate": False,
 						"display_name": "种子",
 						"tooltip": "基础随机种子。每个视图会在此基础上顺延 +1。",
-					},
+					}
+					),
 				),
 				"save_each_image": (
 					"BOOLEAN",
+					_hidden_multiview_param(
 					{
 						"default": True,
 						"display_name": "保存每张图片",
 						"label_on": "保存",
 						"label_off": "不保存",
 						"tooltip": "开启后会把每张单图保存到输出目录，并把当前工作流元数据写进 PNG。",
-					},
+					}
+					),
 				),
 			},
 			"optional": FlexibleMultiViewInputType(
 				{
 					"main_image": (
 						"GJJ_BATCH_IMAGE,IMAGE",
+						_hidden_multiview_param(
 						{
 							"display_name": "👤 主图",
 							"tooltip": "主体主参考图，可选。接入时以这张图作为类别、外观与风格一致性的主参考；未接入时按动作文本每行一张直接文生图。",
-						},
+						}
+						),
 					),
 					"lora_chain_config": (
 						"LORA_CHAIN_CONFIG",
+						_hidden_multiview_param(
 						{
 							"display_name": "LoRA串联配置",
 							"tooltip": "可选接入 GJJ · LoRA串联配置 的输出；会在面板 LoRA 1 / LoRA 2 之后继续按顺序串联应用多组 LoRA。",
-						},
+						}
+						),
 					),
 					"action_image_01": (
 						"GJJ_BATCH_IMAGE,IMAGE",
+						_hidden_multiview_param(
 						{
 							"display_name": "动作图 1",
 							"tooltip": "第一张动作 / 姿势参考图。支持 GJJ_BATCH_IMAGE 和 IMAGE 两种类型。连上后会自动扩展出下一张动作图输入。",
-						},
+						}
+						),
 					),
 
 				}
