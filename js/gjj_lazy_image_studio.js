@@ -36,6 +36,7 @@ const TRANSLATE_ENABLED_PROPERTY = "gjj_lazy_image_studio_translate_enabled";
 const PARAM_VALUES_PROPERTY = "gjj_lazy_image_studio_param_values";
 const IMAGE_SIZE_SIGNATURE_PROPERTY = "gjj_lazy_image_studio_image_size_signature";
 const TEST_FILTER_PROPERTY = "gjj_lazy_image_studio_test_filters";
+const TEST_SORT_PROPERTY = "gjj_lazy_image_studio_test_sorts";
 const TRANSLATE_BUTTON_STYLES = {
 	off: {
 		bg: "linear-gradient(135deg, #1f2933, #374151)",
@@ -1381,6 +1382,7 @@ function writeSerializedWidgetValues(node, serializedNode) {
 	serializedNode.properties = serializedNode.properties || {};
 	serializedNode.properties[PARAM_VALUES_PROPERTY] = { ...params };
 	serializedNode.properties[TEST_FILTER_PROPERTY] = lazyTestFilters(node);
+	serializedNode.properties[TEST_SORT_PROPERTY] = lazyTestSorts(node);
 	persistLoraRows(node, ensureLoraNodeState(node).rows, serializedNode);
 	const fixed = serializedParamValues(params, node);
 	serializedNode.widgets_values = fixed;
@@ -1876,6 +1878,46 @@ function saveLazyTestFilter(node, kind, value) {
 	node.graph?.change?.();
 }
 
+function lazyTestSorts(node) {
+	const sorts = node?.properties?.[TEST_SORT_PROPERTY];
+	if (sorts && typeof sorts === "object" && !Array.isArray(sorts)) {
+		return {
+			unet: String(sorts.unet || "name_asc"),
+			lora: String(sorts.lora || "name_asc"),
+		};
+	}
+	return { unet: "name_asc", lora: "name_asc" };
+}
+
+function saveLazyTestSort(node, kind, value) {
+	if (!node || !["unet", "lora"].includes(kind)) {
+		return;
+	}
+	node.properties = node.properties || {};
+	const sorts = lazyTestSorts(node);
+	sorts[kind] = String(value || "name_asc");
+	node.properties[TEST_SORT_PROPERTY] = sorts;
+	node.setDirtyCanvas?.(true, true);
+	node.graph?.setDirtyCanvas?.(true, true);
+	node.graph?.change?.();
+}
+
+function sortedLazyTestModels(items, sortKey) {
+	const list = Array.isArray(items) ? [...items] : [];
+	const name = (item) => String(item?.name || "").toLowerCase();
+	const bytes = (item) => Number(item?.bytes || 0);
+	if (sortKey === "name_desc") {
+		list.sort((a, b) => name(b).localeCompare(name(a), "zh-Hans") || bytes(b) - bytes(a));
+	} else if (sortKey === "size_desc") {
+		list.sort((a, b) => bytes(b) - bytes(a) || name(a).localeCompare(name(b), "zh-Hans"));
+	} else if (sortKey === "size_asc") {
+		list.sort((a, b) => bytes(a) - bytes(b) || name(a).localeCompare(name(b), "zh-Hans"));
+	} else {
+		list.sort((a, b) => name(a).localeCompare(name(b), "zh-Hans") || bytes(b) - bytes(a));
+	}
+	return list;
+}
+
 function selectedLazyTestModels(panel) {
 	return [...panel.querySelectorAll("input[data-model-name]:checked")]
 		.map((input) => input.dataset.modelName)
@@ -1906,6 +1948,9 @@ function openLazyTestDialog(node, testButton, generateButton) {
 			<button data-select-all style="height:30px;border:1px solid #40535b;border-radius:6px;background:#1b2730;color:#dce7e2;cursor:pointer;padding:0 9px;font-weight:700;">全选</button>
 			<button data-clear style="height:30px;border:1px solid #40535b;border-radius:6px;background:#1b2730;color:#dce7e2;cursor:pointer;padding:0 9px;font-weight:700;">清空</button>
 		</div>
+		<div data-sort-tools style="display:flex;align-items:center;gap:6px;padding:0 12px 8px;flex-wrap:wrap;">
+			<span style="color:#91a7ad;font-weight:700;">排序</span>
+		</div>
 		<div data-status style="padding:0 12px 6px;color:#91a7ad;min-height:18px;"></div>
 		<div data-list style="flex:1 1 auto;overflow:auto;padding:0 12px 12px;display:flex;flex-direction:column;gap:5px;"></div>
 		<div style="display:flex;justify-content:flex-end;gap:8px;padding:10px 12px;border-top:1px solid #2c3e45;">
@@ -1917,15 +1962,18 @@ function openLazyTestDialog(node, testButton, generateButton) {
 	document.body.appendChild(overlay);
 
 	const savedFilters = lazyTestFilters(node);
+	const savedSorts = lazyTestSorts(node);
 	const state = {
 		kind: "unet",
 		models: { unet: [], lora: [] },
 		filters: { unet: savedFilters.unet, lora: savedFilters.lora },
+		sorts: { unet: savedSorts.unet, lora: savedSorts.lora },
 	};
 	const list = panel.querySelector("[data-list]");
 	const status = panel.querySelector("[data-status]");
 	const filterInput = panel.querySelector("[data-filter]");
 	const tabs = panel.querySelector("[data-tabs]");
+	const sortTools = panel.querySelector("[data-sort-tools]");
 	filterInput.value = state.filters[state.kind] || "";
 
 	function renderTabs() {
@@ -1944,10 +1992,38 @@ function openLazyTestDialog(node, testButton, generateButton) {
 				state.kind = tab.kind;
 				filterInput.value = state.filters[state.kind] || "";
 				renderTabs();
+				renderSortButtons();
 				await ensureModels();
 				renderList();
 			};
 			tabs.appendChild(button);
+		}
+	}
+
+	function renderSortButtons() {
+		sortTools.querySelectorAll("button[data-sort]").forEach((button) => button.remove());
+		const options = [
+			{ value: "name_asc", label: "名称↑" },
+			{ value: "name_desc", label: "名称↓" },
+			{ value: "size_desc", label: "大小↓" },
+			{ value: "size_asc", label: "大小↑" },
+		];
+		for (const option of options) {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.dataset.sort = option.value;
+			button.textContent = option.label;
+			const active = state.sorts[state.kind] === option.value;
+			button.style.cssText = `height:26px;border:1px solid ${active ? "#65d189" : "#40535b"};border-radius:6px;background:${active ? "#1d5d39" : "#1b2730"};color:${active ? "#ffffff" : "#dce7e2"};cursor:pointer;padding:0 8px;font-weight:700;white-space:nowrap;`;
+			button.onclick = (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				state.sorts[state.kind] = option.value;
+				saveLazyTestSort(node, state.kind, option.value);
+				renderSortButtons();
+				renderList();
+			};
+			sortTools.appendChild(button);
 		}
 	}
 
@@ -1961,7 +2037,10 @@ function openLazyTestDialog(node, testButton, generateButton) {
 
 	function renderList() {
 		const selected = new Set(selectedLazyTestModels(panel));
-		const filtered = state.models[state.kind].filter((item) => modelMatchesTestFilter(item, state.filters[state.kind]));
+		const filtered = sortedLazyTestModels(
+			state.models[state.kind].filter((item) => modelMatchesTestFilter(item, state.filters[state.kind])),
+			state.sorts[state.kind],
+		);
 		list.innerHTML = "";
 		for (const item of filtered) {
 			const row = document.createElement("label");
@@ -2031,6 +2110,7 @@ function openLazyTestDialog(node, testButton, generateButton) {
 	};
 
 	renderTabs();
+	renderSortButtons();
 	void ensureModels().then(renderList);
 }
 

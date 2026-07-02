@@ -516,7 +516,7 @@ def _remove_background_rmbg14(image: torch.Tensor, unique_id=None) -> tuple[torc
     except Exception as exc:
         raise RuntimeError(f"RMBG1.4 抠图模块加载失败：{exc}") from exc
     send_node_progress(unique_id, "RMBG1.4 正在去除背景...", 0.08)
-    rgba, mask = GJJ_ComprehensiveMatting().remove_background(
+    result = GJJ_ComprehensiveMatting().remove_background(
         matting_method=METHOD_RMBG14,
         background="透明",
         device="自动",
@@ -527,6 +527,10 @@ def _remove_background_rmbg14(image: torch.Tensor, unique_id=None) -> tuple[torc
         media=image,
         unique_id=unique_id,
     )
+    rgba = _node_output_value(result, 0)
+    mask = _node_output_value(result, 1)
+    if not isinstance(rgba, torch.Tensor) or not isinstance(mask, torch.Tensor):
+        raise RuntimeError("RMBG1.4 抠图输出异常：未返回图片和遮罩张量。")
     return rgba, mask
 
 
