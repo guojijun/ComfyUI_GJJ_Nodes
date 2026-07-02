@@ -19,6 +19,7 @@ import folder_paths
 import node_helpers
 import torch
 import torch.nn.functional as F
+from PIL import Image, ImageDraw, ImageFont
 from nodes import (
     EmptyLatentImage,
     VAEDecode,
@@ -90,6 +91,7 @@ from .gjj_multi_image_loader import (
 from .gjj_krea2_edit_rebalance import (
     GJJ_Krea2EditRebalance as _GJJKrea2EditRebalance,
 )
+from .gjj_text_encode_boogu_edit import GJJ_TextEncodeBooguEdit
 
 try:
     from .gjj_ltx2_nag import GJJ_LTX2NAG as _GJJLTX2NAG
@@ -175,6 +177,170 @@ def _send_soft_test_error(unique_id: Any, text: str) -> None:
         )
     except Exception:
         pass
+
+
+def _send_test_preview(unique_id: Any, image: torch.Tensor) -> None:
+    if not unique_id:
+        return
+    try:
+        from server import PromptServer
+
+        preview_images = gjjutils_write_temp_tensor_images(image)
+        PromptServer.instance.send_sync(
+            "gjj_lazy_image_studio_test_preview",
+            {
+                "node": str(unique_id),
+                "gjj_images": preview_images,
+                "images": _standard_queue_images(preview_images),
+            },
+        )
+    except Exception:
+        pass
+
+
+def _format_bytes(size: int | float | None) -> str:
+    try:
+        value = float(size or 0)
+    except Exception:
+        value = 0.0
+    if value <= 0:
+        return "未知"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    index = 0
+    while value >= 1024 and index < len(units) - 1:
+        value /= 1024.0
+        index += 1
+    return f"{value:.1f}{units[index]}" if index else f"{int(value)}{units[index]}"
+
+
+def _model_full_path(kind: str, name: str) -> str | None:
+    categories = ("loras",) if kind == "lora" else ("diffusion_models", "unet_gguf")
+    for category in categories:
+        try:
+            path = folder_paths.get_full_path(category, name)
+        except Exception:
+            path = None
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
+def _model_size_text(kind: str, name: str) -> str:
+    path = _model_full_path(kind, name)
+    if not path:
+        return "未知"
+    try:
+        return _format_bytes(os.path.getsize(path))
+    except Exception:
+        return "未知"
+
+
+def _load_caption_font(size: int) -> ImageFont.ImageFont:
+    windir = os.environ.get("WINDIR", "C:\\Windows")
+    candidates = [
+        os.path.join(windir, "Fonts", "msyh.ttc"),
+        os.path.join(windir, "Fonts", "simhei.ttf"),
+        os.path.join(windir, "Fonts", "seguiemj.ttf"),
+        "arial.ttf",
+    ]
+    for path in candidates:
+        try:
+            if os.path.isfile(path):
+                return ImageFont.truetype(path, size=size)
+        except Exception:
+            pass
+    try:
+        return ImageFont.load_default(size=size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def _tensor_to_pil_rgb(image: torch.Tensor) -> Image.Image:
+    tensor = image.detach().cpu()
+    if tensor.ndim == 4:
+        tensor = tensor[0]
+    tensor = tensor.clamp(0.0, 1.0)
+    array = (tensor.numpy() * 255.0).round().astype("uint8")
+    return Image.fromarray(array, mode="RGB")
+
+
+def _pil_rgb_to_tensor(image: Image.Image) -> torch.Tensor:
+    import numpy as np
+
+    array = np.asarray(image.convert("RGB")).astype("float32") / 255.0
+    return torch.from_numpy(array).unsqueeze(0)
+
+
+def _wrap_caption_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> list[str]:
+    words = re.split(r"([\\/_\-.|\s])", str(text or ""))
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = current + word
+        try:
+            width = draw.textbbox((0, 0), candidate, font=font)[2]
+        except Exception:
+            width = len(candidate) * 8
+        if current and width > max_width:
+            lines.append(current.strip())
+            current = word.strip()
+        else:
+            current = candidate
+    if current.strip():
+        lines.append(current.strip())
+    return lines or [str(text or "")]
+
+
+def _caption_test_image(image: torch.Tensor, label: str) -> torch.Tensor:
+    pil = _tensor_to_pil_rgb(image)
+    width, height = pil.size
+    font_size = max(14, min(28, width // 34))
+    font = _load_caption_font(font_size)
+    scratch = Image.new("RGB", (width, 80), (10, 16, 20))
+    draw = ImageDraw.Draw(scratch)
+    lines = _wrap_caption_text(draw, label, font, max(20, width - 24))[:3]
+    line_height = max(font_size + 6, 20)
+    caption_height = max(42, 14 + line_height * len(lines))
+    output = Image.new("RGB", (width, height + caption_height), (10, 16, 20))
+    output.paste(pil, (0, 0))
+    draw = ImageDraw.Draw(output)
+    draw.rectangle((0, height, width, height + caption_height), fill=(10, 16, 20))
+    y = height + 8
+    for line in lines:
+        draw.text((12, y), line, fill=(229, 237, 242), font=font)
+        y += line_height
+    return _pil_rgb_to_tensor(output)
+
+
+def _resize_test_image_to_target(image: torch.Tensor, target_width: int, target_height: int) -> torch.Tensor:
+    width = max(8, int(target_width))
+    height = max(8, int(target_height))
+    pil = _tensor_to_pil_rgb(image)
+    if pil.size != (width, height):
+        resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.BICUBIC)
+        pil = pil.resize((width, height), resampling)
+    return _pil_rgb_to_tensor(pil)
+
+
+def _pad_images_to_common_size(images: list[torch.Tensor]) -> list[torch.Tensor]:
+    if not images:
+        return []
+    valid = [item for item in images if isinstance(item, torch.Tensor) and item.ndim == 4]
+    if not valid:
+        return images
+    max_height = max(int(item.shape[1]) for item in valid)
+    max_width = max(int(item.shape[2]) for item in valid)
+    padded: list[torch.Tensor] = []
+    for item in images:
+        if not isinstance(item, torch.Tensor) or item.ndim != 4:
+            continue
+        if int(item.shape[1]) == max_height and int(item.shape[2]) == max_width:
+            padded.append(item)
+            continue
+        pad_h = max_height - int(item.shape[1])
+        pad_w = max_width - int(item.shape[2])
+        padded.append(F.pad(item, (0, 0, 0, pad_w, 0, pad_h), value=0.04))
+    return padded
 
 
 def _format_model_missing_error(
@@ -1115,6 +1281,22 @@ def _scale_image_to_total_pixels(
     ).movedim(1, -1)
 
 
+def _scale_image_to_workflow_megapixels(
+    image: torch.Tensor,
+    megapixels: float = 1.0,
+    upscale: str = "lanczos",
+) -> torch.Tensor:
+    samples = image.movedim(-1, 1)
+    total = max(0.01, float(megapixels)) * 1_000_000.0
+    current_total = max(1, int(samples.shape[2]) * int(samples.shape[3]))
+    scale_by = math.sqrt(total / float(current_total))
+    target_width = max(1, int(round(samples.shape[3] * scale_by)))
+    target_height = max(1, int(round(samples.shape[2] * scale_by)))
+    return comfy.utils.common_upscale(
+        samples, target_width, target_height, upscale, "disabled"
+    ).movedim(1, -1)
+
+
 def _scale_image_to_short_edge(
     image: torch.Tensor,
     short_edge: int,
@@ -1323,6 +1505,20 @@ def _is_qwen_image_edit_family(preset: dict[str, Any], unet_name: str = "") -> b
     return "qwenimageedit" in text
 
 
+def _is_boogu_image_edit_turbo_family(preset: dict[str, Any], unet_name: str = "") -> bool:
+    text = _canonical_model_text(
+        "|".join(
+            [
+                str(preset.get("id", "")),
+                str(preset.get("keywords", "")),
+                str(unet_name or ""),
+                str(preset.get("model_name", "")),
+            ]
+        )
+    )
+    return "booguimageeditturbo" in text
+
+
 def _empty_sd3_latent(width: int, height: int, batch_size: int) -> dict[str, Any]:
     if EmptySD3LatentImage is not None:
         return EmptySD3LatentImage().generate(
@@ -1403,6 +1599,18 @@ def _patch_model_sampling(model, sampling_mode: str, shift: float):
     model_sampling.set_parameters(shift=float(shift), multiplier=multiplier)
     patched.add_object_patch("model_sampling", model_sampling)
     return patched
+
+
+def _basic_scheduler_sigmas(model, scheduler: str, steps: int, denoise: float) -> torch.Tensor:
+    steps = max(1, int(steps))
+    denoise = max(0.0, min(1.0, float(denoise)))
+    if denoise <= 0.0:
+        return torch.empty((0,), dtype=torch.float32)
+    scheduler = str(scheduler or "simple").strip() or "simple"
+    total_steps = steps if denoise >= 1.0 else max(steps, int(steps / denoise))
+    model_sampling = model.get_model_object("model_sampling")
+    sigmas = comfy.samplers.calculate_sigmas(model_sampling, scheduler, total_steps).cpu()
+    return sigmas[-(steps + 1):]
 
 
 def _is_lora_enabled(name: str, strength: float) -> bool:
@@ -1782,6 +1990,18 @@ class GJJ_LazyImageStudio:
                             "forceInput": False,
                         },
                     ),
+                    "test_config": (
+                        "STRING",
+                        {
+                            "default": "",
+                            "multiline": False,
+                            "display_name": "模型测试配置",
+                            "tooltip": "前端 🧪 测试窗口自动维护的隐藏配置。",
+                            "hidden": True,
+                            "display": "hidden",
+                            "forceInput": False,
+                        },
+                    ),
                 }
             ),
             "hidden": {
@@ -1894,6 +2114,121 @@ class GJJ_LazyImageStudio:
         result = SamplerCustomAdvanced(noise, guider, sampler, sigmas, latent_out)
         # 将输出的 tensor 包装成字典格式，以兼容 VAEDecode
         return {"samples": result["output"]}
+
+    def _encode_boogu_image_edit_turbo_workflow(
+        self,
+        clip,
+        vae,
+        prompt: str,
+        negative_prompt: str,
+        pairs: list[dict[str, Any]],
+        batch_size: int,
+        target_width: int | None = None,
+        target_height: int | None = None,
+    ):
+        if not pairs:
+            raise RuntimeError("Boogu Image Edit Turbo 分支至少需要一张有效参考图。")
+
+        encoder_kwargs: dict[str, Any] = {}
+        scaled_images: list[torch.Tensor] = []
+        for index, pair in enumerate(pairs[:16], start=1):
+            image = pair.get("image")
+            if not isinstance(image, torch.Tensor):
+                continue
+            encoder_kwargs[f"image_{index}"] = image[:, :, :, :3].float().clamp(0.0, 1.0).contiguous()
+            scaled = _scale_image_to_workflow_megapixels(
+                image[:, :, :, :3],
+                1.0,
+                "lanczos",
+            ).float().clamp(0.0, 1.0).contiguous()
+            scaled_images.append(scaled)
+
+        if not scaled_images:
+            raise RuntimeError("Boogu Image Edit Turbo 分支未收到可用图片张量。")
+
+        positive, negative = GJJ_TextEncodeBooguEdit().encode(
+            clip,
+            str(prompt or ""),
+            negative_prompt=str(negative_prompt or ""),
+            vae=vae,
+            **encoder_kwargs,
+        )
+        first_image = scaled_images[0]
+        latent_width = int(target_width) if target_width else int(first_image.shape[2])
+        latent_height = int(target_height) if target_height else int(first_image.shape[1])
+        latent_out = EmptyLatentImage().generate(
+            max(8, latent_width),
+            max(8, latent_height),
+            max(1, int(batch_size)),
+        )[0]
+        return positive, negative, latent_out, max(8, latent_width), max(8, latent_height)
+
+    def _sample_boogu_image_edit_turbo_workflow(
+        self,
+        model,
+        positive,
+        negative,
+        latent_out,
+        seed: int,
+        steps: int,
+        cfg: float,
+        sampler_name: str,
+        scheduler: str,
+        denoise: float,
+        model_sampling: str,
+        model_shift: float,
+    ):
+        sigma_model = _patch_model_sampling(model, str(model_sampling or ""), float(model_shift or 0.0))
+        sigmas = _basic_scheduler_sigmas(sigma_model, scheduler, int(steps), float(denoise))
+        try:
+            from comfy_extras.nodes_custom_sampler import KSamplerSelect as OfficialKSamplerSelect
+            from comfy_extras.nodes_custom_sampler import Noise_RandomNoise
+            import comfy.sample
+            import latent_preview
+        except Exception as exc:
+            print(f"[GJJ_LazyImageStudio] Boogu Turbo 官方 SamplerCustom 路径不可用，回退兼容采样：{exc}")
+            noise = RandomNoise(int(seed))
+            sampler = KSamplerSelect(str(sampler_name or "dpmpp_2m") or "dpmpp_2m")
+            guider = CFGGuider(model, positive, negative, float(cfg))
+            result = SamplerCustomAdvanced(noise, guider, sampler, sigmas, latent_out)
+            return {"samples": result["output"]}
+
+        latent = latent_out.copy()
+        latent_image = latent["samples"]
+        latent_image = comfy.sample.fix_empty_latent_channels(
+            model,
+            latent_image,
+            latent.get("downscale_ratio_spacial", None),
+            latent.get("downscale_ratio_temporal", None),
+        )
+        latent["samples"] = latent_image
+        noise = Noise_RandomNoise(int(seed)).generate_noise(latent)
+        noise_mask = latent.get("noise_mask")
+        sampler = OfficialKSamplerSelect().get_sampler(
+            str(sampler_name or "dpmpp_2m") or "dpmpp_2m"
+        )[0]
+        x0_output = {}
+        callback = latent_preview.prepare_callback(model, sigmas.shape[-1] - 1, x0_output)
+        disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+        samples = comfy.sample.sample_custom(
+            model,
+            noise,
+            float(cfg),
+            sampler,
+            sigmas,
+            positive,
+            negative,
+            latent_image,
+            noise_mask=noise_mask,
+            callback=callback,
+            disable_pbar=disable_pbar,
+            seed=int(seed),
+        )
+        out = latent.copy()
+        out.pop("downscale_ratio_spacial", None)
+        out.pop("downscale_ratio_temporal", None)
+        out["samples"] = samples
+        return out
 
     def _encode_krea2_image_edit(
         self,
@@ -2270,6 +2605,7 @@ class GJJ_LazyImageStudio:
         disable_reference_auto_mask=False,
         force_empty_latent_reference=False,
         keep_model_loaded=False,
+        test_config="",
         prompt_graph=None,
         unique_id=None,
         extra_pnginfo=None,
@@ -2300,10 +2636,20 @@ class GJJ_LazyImageStudio:
         disable_reference_auto_mask = _unwrap_list_input(disable_reference_auto_mask)
         force_empty_latent_reference = _unwrap_list_input(force_empty_latent_reference)
         keep_model_loaded = _unwrap_list_input(keep_model_loaded)
+        test_config = _unwrap_list_input(test_config)
         prompt_graph = _unwrap_list_input(prompt_graph)
         unique_id = _unwrap_list_input(unique_id)
         extra_pnginfo = _unwrap_list_input(extra_pnginfo)
         keep_model_loaded = _as_bool(keep_model_loaded)
+
+        test_config_data: dict[str, Any] = {}
+        if str(test_config or "").strip():
+            try:
+                parsed_test_config = json.loads(str(test_config))
+                if isinstance(parsed_test_config, dict):
+                    test_config_data = parsed_test_config
+            except Exception:
+                test_config_data = {}
 
         # 兼容旧工作流：如果隐藏输入未提交，再从 workflow properties 读取。
         if not str(lora_data or "").strip():
@@ -2327,6 +2673,127 @@ class GJJ_LazyImageStudio:
 
         # 记录开始时间
         start_time = time.time()
+
+        if test_config_data.get("mode") in {"unet", "lora"}:
+            mode = str(test_config_data.get("mode") or "")
+            selected_models = [
+                str(item or "").strip()
+                for item in test_config_data.get("models", [])
+                if str(item or "").strip()
+            ]
+            if selected_models:
+                test_started = time.time()
+                test_width = max(8, int(width))
+                test_height = max(8, int(height))
+                test_seed = int(seed)
+                _send_status(unique_id, f"模型测试开始：{len(selected_models)} 项")
+                progress = comfy.utils.ProgressBar(len(selected_models))
+                captioned_images: list[torch.Tensor] = []
+                effective_params_list: list[dict[str, Any]] = []
+                for index, model_name in enumerate(selected_models, start=1):
+                    item_started = time.time()
+                    _send_status(unique_id, f"测试 {index}/{len(selected_models)}：{model_name}")
+                    try:
+                        item_lora_data = lora_data
+                        item_unet_name = unet_name
+                        if mode == "unet":
+                            item_unet_name = model_name
+                        else:
+                            item_lora_data = json.dumps(
+                                [{"enabled": True, "name": model_name, "strength": 1.0}],
+                                ensure_ascii=False,
+                            )
+                        item_result = self.create_image(
+                            prompt,
+                            negative_prompt,
+                            main_image_index,
+                            width,
+                            height,
+                            batch_size,
+                            item_unet_name,
+                            unet_dtype,
+                            clip_name1,
+                            vae_name,
+                            test_seed,
+                            steps,
+                            cfg,
+                            sampler_name,
+                            scheduler,
+                            denoise,
+                            grow_mask_by,
+                            lora_chain_config=lora_chain_config,
+                            lora_data=item_lora_data,
+                            batch_source_images=batch_source_images,
+                            mask=mask,
+                            disable_reference_auto_mask=disable_reference_auto_mask,
+                            force_empty_latent_reference=force_empty_latent_reference,
+                            keep_model_loaded=keep_model_loaded,
+                            test_config="",
+                            prompt_graph=prompt_graph,
+                            unique_id=unique_id,
+                            extra_pnginfo=extra_pnginfo,
+                            **kwargs,
+                        )
+                        item_image = item_result["result"][0]
+                        item_elapsed = time.time() - item_started
+                        model_size = _model_size_text(mode, model_name)
+                        if (
+                            isinstance(item_image, torch.Tensor)
+                            and item_image.ndim == 4
+                            and (int(item_image.shape[2]) != test_width or int(item_image.shape[1]) != test_height)
+                        ):
+                            _send_status(
+                                unique_id,
+                                f"测试 {index}/{len(selected_models)} 尺寸校正："
+                                f"{int(item_image.shape[2])}x{int(item_image.shape[1])} -> {test_width}x{test_height}",
+                            )
+                            item_image = _resize_test_image_to_target(item_image, test_width, test_height)
+                        label = f"模型：{model_name}  大小：{model_size}  耗时：{item_elapsed:.1f}秒  种子：{test_seed}"
+                        captioned = _caption_test_image(item_image, label)
+                        captioned_images.append(captioned)
+                        ui_params = item_result.get("ui", {}).get("effective_params", [{}])
+                        effective_params = dict(ui_params[0] if ui_params else {})
+                        effective_params.update(
+                            {
+                                "test_mode": mode,
+                                "test_model": model_name,
+                                "test_model_size": model_size,
+                                "test_elapsed_time": item_elapsed,
+                            }
+                        )
+                        effective_params_list.append(effective_params)
+                        preview_batch = torch.cat(_pad_images_to_common_size(captioned_images), dim=0)
+                        _send_test_preview(unique_id, preview_batch)
+                    except Exception as exc:
+                        _send_status(unique_id, f"测试失败 {index}/{len(selected_models)}：{str(exc).splitlines()[0]}")
+                        if mode in {"unet", "lora"}:
+                            error_image = _caption_test_image(
+                                _make_soft_error_image(test_width, test_height),
+                                f"模型：{model_name}  大小：{_model_size_text(mode, model_name)}  耗时：失败  种子：{test_seed}",
+                            )
+                            captioned_images.append(error_image)
+                    finally:
+                        try:
+                            progress.update(1)
+                        except Exception:
+                            pass
+                if not captioned_images:
+                    raise RuntimeError("模型测试没有生成任何图片。")
+                image = torch.cat(_pad_images_to_common_size(captioned_images), dim=0)
+                elapsed_time = time.time() - test_started
+                preview_images = gjjutils_write_temp_tensor_images(image)
+                _send_status(unique_id, f"模型测试完成：{len(captioned_images)} 项  耗时：{elapsed_time:.1f}s")
+                return {
+                    "ui": {
+                        "gjj_images": preview_images,
+                        "images": _standard_queue_images(preview_images),
+                        "elapsed_time": [elapsed_time],
+                        "effective_params": effective_params_list or [{}],
+                        "test_mode": [mode],
+                    },
+                    "result": (image,),
+                }
+
         unet_name_is_linked = _is_prompt_input_linked(prompt_graph, unique_id, "unet_name")
         clip_name_is_linked = _is_prompt_input_linked(prompt_graph, unique_id, "clip_name1")
         vae_name_is_linked = _is_prompt_input_linked(prompt_graph, unique_id, "vae_name")
@@ -2458,6 +2925,7 @@ class GJJ_LazyImageStudio:
             preset = dict(preset)
             preset["resolved_unet_name"] = str(unet_name or "")
             preset["resolved_clip_type"] = str(resolved_clip_type or "")
+            is_boogu_image_edit_turbo = _is_boogu_image_edit_turbo_family(preset, unet_name)
 
             normalized_lora_parts = [
                 normalize_lora_chain_data(value)
@@ -2542,12 +3010,13 @@ class GJJ_LazyImageStudio:
                     lora_chain_config,
                     lora_data,
                 )
-                model = _patch_model_sampling(
-                    model,
-                    str(preset.get("model_sampling", "")),
-                    float(preset.get("model_shift", 0.0)),
-                )
-                model = _apply_cfg_norm(model, float(preset.get("cfg_norm_strength", 0.0)))
+                if not is_boogu_image_edit_turbo:
+                    model = _patch_model_sampling(
+                        model,
+                        str(preset.get("model_sampling", "")),
+                        float(preset.get("model_shift", 0.0)),
+                    )
+                    model = _apply_cfg_norm(model, float(preset.get("cfg_norm_strength", 0.0)))
                 if keep_model_loaded:
                     self._remember_runtime(runtime_key, model, clip, vae)
 
@@ -2563,6 +3032,7 @@ class GJJ_LazyImageStudio:
                 local_height = int(height)
                 flux2_sample_size = None
                 krea2_reference_sample = False
+                boogu_turbo_sample = False
                 effective_negative_prompt = (
                     _ltx_negative_prompt_text(negative_prompt)
                     if is_ltx_runtime
@@ -2570,7 +3040,29 @@ class GJJ_LazyImageStudio:
                 )
 
                 _send_status(unique_id, f"4/6 编码条件与 latent{status_suffix}...")
-                if pairs and _is_krea2_family(unet_name, resolved_clip_type):
+                if is_boogu_image_edit_turbo:
+                    if not pairs:
+                        raise RuntimeError("Boogu Image Edit Turbo 工作流需要至少连接一张参考图。")
+                    _send_status(
+                        unique_id,
+                        f"4/6 按 Boogu Image Edit Turbo 工作流编码{status_suffix}（缩放参考图到 1MP）...",
+                    )
+                    positive, negative, latent_out, boogu_width, boogu_height = (
+                        self._encode_boogu_image_edit_turbo_workflow(
+                            clip=clip,
+                            vae=vae,
+                            prompt=prompt_text,
+                            negative_prompt=effective_negative_prompt,
+                            pairs=pairs,
+                            batch_size=int(batch_size),
+                            target_width=local_width,
+                            target_height=local_height,
+                        )
+                    )
+                    local_width = int(boogu_width)
+                    local_height = int(boogu_height)
+                    boogu_turbo_sample = True
+                elif pairs and _is_krea2_family(unet_name, resolved_clip_type):
                     _send_status(
                         unique_id,
                         f"4/6 编码 Krea2 图生图条件{status_suffix}（{len(pairs)} 张，溶图模式）...",
@@ -2682,7 +3174,26 @@ class GJJ_LazyImageStudio:
                         enabled=True,
                     )
                 sample_seed = int(seed) + prompt_index if prompt_count > 1 else int(seed)
-                if flux2_sample_size is not None:
+                if boogu_turbo_sample:
+                    _send_status(
+                        unique_id,
+                        f"5/6 按 Boogu Image Edit Turbo 工作流采样{status_suffix}（AuraFlow Sigmas，SamplerCustom）...",
+                    )
+                    sampled_latent = self._sample_boogu_image_edit_turbo_workflow(
+                        model=sample_model,
+                        positive=positive,
+                        negative=negative,
+                        latent_out=latent_out,
+                        seed=sample_seed,
+                        steps=int(preset.get("steps", effective_steps) or effective_steps),
+                        cfg=float(preset.get("cfg", cfg) or cfg),
+                        sampler_name=str(preset.get("sampler_name", "dpmpp_2m") or "dpmpp_2m"),
+                        scheduler=str(preset.get("scheduler", "simple") or "simple"),
+                        denoise=float(preset.get("denoise", denoise) or denoise),
+                        model_sampling=str(preset.get("model_sampling", "aura") or "aura"),
+                        model_shift=float(preset.get("model_shift", 3.16) or 3.16),
+                    )
+                elif flux2_sample_size is not None:
                     flux2_width, flux2_height = flux2_sample_size
                     _send_status(
                         unique_id,
@@ -2860,6 +3371,32 @@ try:
             return web.json_response({"loras": lora_list})
         except Exception as e:
             return web.json_response({"loras": [], "error": str(e)}, status=500)
+
+    @PromptServer.instance.routes.get("/gjj/lazy-image-studio/test-models")
+    async def get_lazy_image_studio_test_models_api(request):
+        try:
+            kind = str(request.query.get("kind", "unet") or "unet").lower()
+            if kind == "lora":
+                names = [str(f) for f in folder_paths.get_filename_list("loras") if str(f or "").strip()]
+            else:
+                raw_models = _list_lazy_unet_models() or [DEFAULT_UNET_NAME]
+                keywords = ["flux", "f2k", "krea", "krea2", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "gguf"]
+                filtered = [m for m in raw_models if any(k in str(m).lower() for k in keywords)]
+                names = filtered if filtered else raw_models
+                kind = "unet"
+            models = []
+            for name in names:
+                path = _model_full_path(kind, name)
+                size = 0
+                if path:
+                    try:
+                        size = os.path.getsize(path)
+                    except Exception:
+                        size = 0
+                models.append({"name": name, "bytes": size, "size": _format_bytes(size)})
+            return web.json_response({"kind": kind, "models": models})
+        except Exception as e:
+            return web.json_response({"kind": "unet", "models": [], "error": str(e)}, status=500)
 
 except Exception:
     pass

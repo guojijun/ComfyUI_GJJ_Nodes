@@ -127,10 +127,21 @@ MODEL_TREE = [
     },
 ]
 
-REQUIRED_MODELS = [
-    make_missing_model_spec(item["label"], item["path"], item["filename"], item["description"])
-    for item in MODEL_TREE
-]
+def _model_spec(item: dict[str, Any]) -> dict[str, Any]:
+    spec = make_missing_model_spec(
+        label=item["label"],
+        subdir=item["path"],
+        filename=item["filename"],
+        description=item["description"],
+    )
+    spec["folder"] = item.get("folder", "")
+    spec["value"] = item.get("value") or item.get("filename", "")
+    spec["kind"] = item.get("kind", "")
+    spec["required"] = bool(item.get("required", True))
+    return spec
+
+
+REQUIRED_MODELS = [_model_spec(item) for item in MODEL_TREE]
 
 
 def _filename_list(folder_type: str) -> list[str]:
@@ -1392,4 +1403,4 @@ class GJJ_BerniniStudio:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_BerniniStudio}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🧠Bernini多模态视频编辑器"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🧠Bernini多模态视频编辑器（一键生成）"}

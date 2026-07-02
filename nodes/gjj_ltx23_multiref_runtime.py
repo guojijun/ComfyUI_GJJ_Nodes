@@ -102,7 +102,7 @@ def _ensure_runtime_dependencies() -> None:
 		) from exc
 	_RUNTIME_DEPS_READY = True
 
-GJJ_LTX23_RUNTIME_PATCH_VERSION = "workflow_v40_switch_fix_description"
+GJJ_LTX23_RUNTIME_PATCH_VERSION = "workflow_v40_gguf_loader_fix"
 
 DEFAULT_NEGATIVE_PROMPT = (
 	"titles, subtitles, text, watermark, logo, blurry text, distorted text, overexposed, underexposed, "
@@ -493,12 +493,29 @@ def _load_ltx_main_model(model_name: str):
 	"""Load LTX main model from diffusion_models.
 
 	ComfyUI versions expose different loader class names/methods, so this helper first
-	tries the public node loader and then falls back to comfy.sd.load_diffusion_model_guess_config.
+	tries the public node loader and then falls back to direct comfy.sd APIs.
+	GGUF files must bypass ComfyUI's PyTorch/safetensors loaders, otherwise torch.load may
+	treat them as pickle payloads and fail under PyTorch 2.6 weights_only=True.
 	"""
 	name = str(model_name or "").strip()
 	if not name:
 		raise RuntimeError("未指定 LTX 主模型。")
 	errors: list[str] = []
+
+	if name.lower().replace("\\", "/").endswith(".gguf"):
+		try:
+			try:
+				gguf_runtime = importlib.import_module("..vendor.gjj_gguf_runtime", __package__)
+			except Exception:
+				gguf_runtime = importlib.import_module("vendor.gjj_gguf_runtime")
+			model = gguf_runtime.load_unet_gguf(name, dequant_dtype=None, patch_dtype=None, patch_on_device=False)
+			if model is not None:
+				print(f"[GJJ LTX2.3] 已使用内置 GGUF 加载器加载 LTX 主模型：{name}")
+				return model
+			errors.append("GJJ 内置 GGUF 加载器返回空模型")
+		except Exception as exc:
+			errors.append(f"GJJ 内置 GGUF 加载器：{exc}")
+		raise RuntimeError("LTX 主模型加载失败：" + "；".join(errors[-8:]))
 
 	# Preferred: use ComfyUI's diffusion-model loader node when available.
 	for class_name in ("UNETLoader", "DiffusionModelLoader", "LoadDiffusionModel"):
@@ -538,24 +555,28 @@ def _load_ltx_main_model(model_name: str):
 		path = folder_paths.get_full_path("diffusion_models", name)
 		if not path:
 			raise RuntimeError(f"未在 diffusion_models 中找到：{name}")
-		embedding_directory = None
-		try:
-			embedding_directory = folder_paths.get_folder_paths("embeddings")
-		except Exception:
+
+		guess_loader = getattr(comfy.sd, "load_diffusion_model_guess_config", None)
+		if callable(guess_loader):
 			embedding_directory = None
-		kwargs = {
-			"output_vae": False,
-			"output_clip": False,
-			"embedding_directory": embedding_directory,
-		}
-		try:
-			return comfy.sd.load_diffusion_model_guess_config(path, **kwargs)
-		except TypeError:
-			kwargs.pop("embedding_directory", None)
 			try:
-				return comfy.sd.load_diffusion_model_guess_config(path, **kwargs)
+				embedding_directory = folder_paths.get_folder_paths("embeddings")
+			except Exception:
+				embedding_directory = None
+			kwargs = {
+				"output_vae": False,
+				"output_clip": False,
+				"embedding_directory": embedding_directory,
+			}
+			try:
+				return guess_loader(path, **kwargs)
 			except TypeError:
-				return comfy.sd.load_diffusion_model_guess_config(path)
+				kwargs.pop("embedding_directory", None)
+				try:
+					return guess_loader(path, **kwargs)
+				except TypeError:
+					return guess_loader(path)
+		errors.append("comfy.sd.load_diffusion_model_guess_config：当前 ComfyUI 版本未提供该旧接口")
 	except Exception as exc:
 		errors.append(f"comfy.sd.load_diffusion_model_guess_config：{exc}")
 

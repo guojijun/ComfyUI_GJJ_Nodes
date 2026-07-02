@@ -249,12 +249,12 @@ import { api } from "/scripts/api.js";
 		}
 	}
 
-	function annotateButton(ids = [], scopeLabel = "服装") {
+	function annotateButton(ids = [], scopeLabel = "服化道") {
 		let clickTimer = 0;
 		const runNow = () => {
 			window.clearTimeout(clickTimer);
 			clickTimer = 0;
-			annotateMissingCostumes(ids).catch((error) => setStatus(error.message));
+			annotateMissingCostumes(ids, scopeLabel).catch((error) => setStatus(error.message));
 		};
 		const toggle = () => {
 			window.clearTimeout(clickTimer);
@@ -380,7 +380,7 @@ import { api } from "/scripts/api.js";
 		await uploadFilesAsAssets(files, item);
 	}
 
-	async function annotateMissingCostumes(ids = []) {
+	async function annotateMissingCostumes(ids = [], scopeLabel = "服化道") {
 		if (state.annotating) return;
 		state.annotating = true;
 		state.annotateNodeId = `gjj_costume_annotate_${Date.now()}`;
@@ -390,12 +390,13 @@ import { api } from "/scripts/api.js";
 			const data = await apiJson(`${ENDPOINT}/annotate_missing`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ ids: targetIds, unique_id: state.annotateNodeId }),
+				body: JSON.stringify({ ids: targetIds, category: state.category || "all", unique_id: state.annotateNodeId }),
 			});
 			await refreshItems(true);
 			const done = Number(data.processed_count || 0);
 			const skipped = Number(data.skipped_count || 0);
-			setStatus(done ? `🧠 已完成 ${done} 个服装打标${skipped ? `，跳过 ${skipped} 个` : ""}` : `没有需要打标的服装${skipped ? `，跳过 ${skipped} 个` : ""}`);
+			const label = String(data.scope_label || scopeLabel || "服化道");
+			setStatus(done ? `🧠 已完成 ${done} 个${label}打标${skipped ? `，跳过 ${skipped} 个` : ""}` : `没有需要打标的${label}${skipped ? `，跳过 ${skipped} 个` : ""}`);
 		} finally {
 			state.annotating = false;
 			state.annotateNodeId = "";
@@ -612,7 +613,7 @@ import { api } from "/scripts/api.js";
 		actions.append(
 			button("导入素材", "给当前条目导入图片素材", "gjj-ct-btn", () => uploadAssets(item).catch((error) => setStatus(error.message))),
 			button("引用", "插入或复制当前服装/道具引用", "gjj-ct-btn", (event) => copyOrInsertItemReference(item, event?.currentTarget).catch((error) => setStatus(error.message))),
-			annotateButton([item.id], "当前服装"),
+			annotateButton([item.id], item.category === "prop" ? "当前道具" : "当前服装"),
 			button("删除", "删除当前服化道条目", "gjj-ct-btn danger", () => deleteItem(item).catch((error) => setStatus(error.message)))
 		);
 		body.appendChild(actions);
@@ -770,7 +771,7 @@ import { api } from "/scripts/api.js";
 			button("👗", "新增服装", "gjj-ct-btn gjj-ct-icon", () => createItem("clothing").catch((error) => setStatus(error.message))),
 			button("🎒", "新增道具", "gjj-ct-btn gjj-ct-icon", () => createItem("prop").catch((error) => setStatus(error.message))),
 			button("⬆", "导入素材", "gjj-ct-btn gjj-ct-icon", () => uploadAssets(selectedItem()).catch((error) => setStatus(error.message))),
-			annotateButton([], "全库服装"),
+			annotateButton([], "全库服化道"),
 			button("?", "查看服化道存储目录", "gjj-ct-btn gjj-ct-icon", () => showModelTree().catch((error) => setStatus(error.message)))
 		);
 		const search = document.createElement("input");

@@ -27,6 +27,7 @@ const NATIVE_CANVAS_PREVIEW_WIDGET = "$$canvas-image-preview";
 const NATIVE_PREVIEW_WIDGET_PATTERN = /(?:preview|image|images|img|预览|图像|图片)/i;
 const LORA_CHAIN_CONFIG_INPUT = "lora_chain_config";
 const LORA_DATA_WIDGET_NAME = "lora_data";
+const TEST_CONFIG_WIDGET_NAME = "test_config";
 const LORA_METADATA_API_PATH = "/gjj/lora-metadata";
 const LORA_PREVIEW_API_PREFIX = "/gjj/lora-preview/";
 const KEEP_MODEL_WIDGET_NAME = "keep_model_loaded";
@@ -34,6 +35,7 @@ const SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_settings_open";
 const TRANSLATE_ENABLED_PROPERTY = "gjj_lazy_image_studio_translate_enabled";
 const PARAM_VALUES_PROPERTY = "gjj_lazy_image_studio_param_values";
 const IMAGE_SIZE_SIGNATURE_PROPERTY = "gjj_lazy_image_studio_image_size_signature";
+const TEST_FILTER_PROPERTY = "gjj_lazy_image_studio_test_filters";
 const TRANSLATE_BUTTON_STYLES = {
 	off: {
 		bg: "linear-gradient(135deg, #1f2933, #374151)",
@@ -80,7 +82,7 @@ const KEEP_MODEL_BUTTON_STYLES = {
 	},
 };
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
-const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME, KEEP_MODEL_WIDGET_NAME]);
+const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME, KEEP_MODEL_WIDGET_NAME, TEST_CONFIG_WIDGET_NAME]);
 const PROTECTED_WIDGET_NAMES = new Set([
 	EXECUTE_BUTTON_NAME,
 	IMAGE_PREVIEW_NAME,
@@ -89,6 +91,7 @@ const PROTECTED_WIDGET_NAMES = new Set([
 	LORA_CHAIN_CONFIG_INPUT,
 	LORA_DATA_WIDGET_NAME,
 	KEEP_MODEL_WIDGET_NAME,
+	TEST_CONFIG_WIDGET_NAME,
 	"prompt",
 	"negative_prompt",
 	"main_image_index",
@@ -359,6 +362,7 @@ const SERIALIZED_PARAM_WIDGETS = [
 	"grow_mask_by",
 	BATCH_SOURCE_WIDGET,
 	KEEP_MODEL_WIDGET_NAME,
+	TEST_CONFIG_WIDGET_NAME,
 ];
 const DEFAULT_PARAM_VALUES = {
 	prompt: "",
@@ -381,6 +385,7 @@ const DEFAULT_PARAM_VALUES = {
 	grow_mask_by: 6,
 	[BATCH_SOURCE_WIDGET]: "[]",
 	[KEEP_MODEL_WIDGET_NAME]: false,
+	[TEST_CONFIG_WIDGET_NAME]: "",
 };
 
 let MODEL_PRESETS = getCachedModelFamilyPresets();
@@ -900,7 +905,7 @@ function updateSettingsButtonState(node) {
 		return;
 	}
 	const open = settingsOpen(node);
-	button.textContent = open ? "⚙️收起" : "⚙️设置";
+	button.textContent = open ? "⚙️" : "⚙️设置";
 	button.title = open ? "收起更多设置，只保留正向提示词。" : "展开更多设置，显示反向提示词、模型、尺寸、采样和 LoRA。";
 	button.classList.toggle("on", open);
 	button.style.background = open ? "linear-gradient(135deg, #4b5563, #64748b)" : "linear-gradient(135deg, #1f2933, #374151)";
@@ -1082,6 +1087,7 @@ function coerceParamValue(name, value, node) {
 	if (name === SEED_CONTROL_KEY) return isSeedControlValue(value) ? textValue(value) : fallbackParamValue(node, name);
 	if (name === BATCH_SOURCE_WIDGET) return String(value ?? "[]");
 	if (name === KEEP_MODEL_WIDGET_NAME) return boolValue(value);
+	if (name === TEST_CONFIG_WIDGET_NAME) return String(value ?? "");
 	return String(value ?? fallbackParamValue(node, name) ?? "");
 }
 
@@ -1374,6 +1380,7 @@ function writeSerializedWidgetValues(node, serializedNode) {
 	saveParamSnapshot(node, params);
 	serializedNode.properties = serializedNode.properties || {};
 	serializedNode.properties[PARAM_VALUES_PROPERTY] = { ...params };
+	serializedNode.properties[TEST_FILTER_PROPERTY] = lazyTestFilters(node);
 	persistLoraRows(node, ensureLoraNodeState(node).rows, serializedNode);
 	const fixed = serializedParamValues(params, node);
 	serializedNode.widgets_values = fixed;
@@ -1786,6 +1793,247 @@ async function syncSizeFromPrimaryInput(node) {
 	}
 }
 
+function parseTestFilterGroups(query) {
+	return String(query || "")
+		.split("|")
+		.map((group) => group.trim().toLowerCase().split(/\s+/).filter(Boolean))
+		.filter((tokens) => tokens.length);
+}
+
+function modelMatchesTestFilter(item, query) {
+	const groups = parseTestFilterGroups(query);
+	if (!groups.length) {
+		return true;
+	}
+	const haystack = `${item?.name || ""} ${item?.size || ""}`.toLowerCase();
+	return groups.some((tokens) => tokens.every((token) => haystack.includes(token)));
+}
+
+async function fetchLazyTestModels(kind, node) {
+	try {
+		const response = await api.fetchApi(`/gjj/lazy-image-studio/test-models?kind=${encodeURIComponent(kind)}`);
+		if (response?.ok) {
+			const data = await response.json();
+			const models = Array.isArray(data?.models) ? data.models : [];
+			if (models.length) {
+				return models.map((item) => ({
+					name: String(item?.name || ""),
+					size: String(item?.size || ""),
+					bytes: Number(item?.bytes || 0),
+				})).filter((item) => item.name);
+			}
+		}
+	} catch (error) {
+		console.warn("[GJJ LazyImageStudio] 测试模型列表接口不可用，改用本地选项", error);
+	}
+	if (kind === "lora") {
+		await refreshLoraOptions(node, false);
+		const names = getLoraOptions().map((item) => String(item?.value || item?.name || "")).filter(Boolean);
+		return names.map((name) => ({ name, size: "", bytes: 0 }));
+	}
+	return optionValues(node, "unet_name").filter(Boolean).map((name) => ({ name, size: "", bytes: 0 }));
+}
+
+function writeLazyTestConfig(node, config) {
+	const widget = getWidget(node, TEST_CONFIG_WIDGET_NAME);
+	if (widget) {
+		setWidgetValue(widget, JSON.stringify(config || {}));
+	}
+	node.properties = node.properties || {};
+	node.properties[`${TEST_CONFIG_WIDGET_NAME}_last`] = config || {};
+	writeLiveParamSnapshot(node);
+}
+
+function clearLazyTestConfig(node) {
+	const widget = getWidget(node, TEST_CONFIG_WIDGET_NAME);
+	if (widget) {
+		setWidgetValue(widget, "");
+	}
+	writeLiveParamSnapshot(node);
+}
+
+function lazyTestFilters(node) {
+	const filters = node?.properties?.[TEST_FILTER_PROPERTY];
+	if (filters && typeof filters === "object" && !Array.isArray(filters)) {
+		return {
+			unet: String(filters.unet || ""),
+			lora: String(filters.lora || ""),
+		};
+	}
+	return { unet: "", lora: "" };
+}
+
+function saveLazyTestFilter(node, kind, value) {
+	if (!node || !["unet", "lora"].includes(kind)) {
+		return;
+	}
+	node.properties = node.properties || {};
+	const filters = lazyTestFilters(node);
+	filters[kind] = String(value || "");
+	node.properties[TEST_FILTER_PROPERTY] = filters;
+	node.setDirtyCanvas?.(true, true);
+	node.graph?.setDirtyCanvas?.(true, true);
+	node.graph?.change?.();
+}
+
+function selectedLazyTestModels(panel) {
+	return [...panel.querySelectorAll("input[data-model-name]:checked")]
+		.map((input) => input.dataset.modelName)
+		.filter(Boolean);
+}
+
+function escapeHtml(value) {
+	return String(value ?? "")
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;");
+}
+
+function openLazyTestDialog(node, testButton, generateButton) {
+	const overlay = document.createElement("div");
+	overlay.style.cssText = "position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.62);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:14px;box-sizing:border-box;";
+	const panel = document.createElement("div");
+	panel.style.cssText = "width:min(760px,calc(100vw - 28px));height:min(640px,calc(100vh - 28px));border:1px solid #40525b;border-radius:8px;background:#0f171b;color:#e7f2f4;box-shadow:0 22px 60px rgba(0,0,0,.56);display:flex;flex-direction:column;font:12px/1.4 system-ui,'Microsoft YaHei',sans-serif;overflow:hidden;";
+	panel.innerHTML = `
+		<div style="display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #2c3e45;">
+			<div style="font-weight:800;font-size:14px;flex:1 1 auto;">🧪 模型测试</div>
+			<button data-close style="width:28px;height:28px;border:1px solid #465a62;border-radius:6px;background:#17242a;color:#e7f2f4;cursor:pointer;">×</button>
+		</div>
+		<div data-tabs style="display:flex;gap:6px;padding:9px 12px 0;"></div>
+		<div style="display:flex;gap:8px;padding:9px 12px;">
+			<input data-filter placeholder="关键词过滤，支持 | 和空格" style="flex:1 1 auto;height:30px;border:1px solid #3f535b;border-radius:6px;background:#071014;color:#dce7e2;padding:0 9px;outline:none;">
+			<button data-select-all style="height:30px;border:1px solid #40535b;border-radius:6px;background:#1b2730;color:#dce7e2;cursor:pointer;padding:0 9px;font-weight:700;">全选</button>
+			<button data-clear style="height:30px;border:1px solid #40535b;border-radius:6px;background:#1b2730;color:#dce7e2;cursor:pointer;padding:0 9px;font-weight:700;">清空</button>
+		</div>
+		<div data-status style="padding:0 12px 6px;color:#91a7ad;min-height:18px;"></div>
+		<div data-list style="flex:1 1 auto;overflow:auto;padding:0 12px 12px;display:flex;flex-direction:column;gap:5px;"></div>
+		<div style="display:flex;justify-content:flex-end;gap:8px;padding:10px 12px;border-top:1px solid #2c3e45;">
+			<button data-cancel style="height:32px;border:1px solid #4b5f67;border-radius:6px;background:#17242a;color:#dce7e2;cursor:pointer;padding:0 12px;font-weight:700;">取消</button>
+			<button data-ok style="height:32px;border:1px solid #10b981;border-radius:6px;background:linear-gradient(135deg,#064e3b,#059669);color:#d1fae5;cursor:pointer;padding:0 14px;font-weight:800;">确定</button>
+		</div>
+	`;
+	overlay.appendChild(panel);
+	document.body.appendChild(overlay);
+
+	const savedFilters = lazyTestFilters(node);
+	const state = {
+		kind: "unet",
+		models: { unet: [], lora: [] },
+		filters: { unet: savedFilters.unet, lora: savedFilters.lora },
+	};
+	const list = panel.querySelector("[data-list]");
+	const status = panel.querySelector("[data-status]");
+	const filterInput = panel.querySelector("[data-filter]");
+	const tabs = panel.querySelector("[data-tabs]");
+	filterInput.value = state.filters[state.kind] || "";
+
+	function renderTabs() {
+		tabs.innerHTML = "";
+		for (const tab of [{ kind: "unet", label: "UNET测试" }, { kind: "lora", label: "Lora测试" }]) {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.textContent = tab.label;
+			const active = state.kind === tab.kind;
+			button.style.cssText = `height:28px;border:1px solid ${active ? "#38bdf8" : "#40535b"};border-radius:6px;background:${active ? "#123347" : "#17242a"};color:${active ? "#e0f2fe" : "#cbdce0"};cursor:pointer;padding:0 10px;font-weight:800;`;
+			button.onclick = async (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				state.filters[state.kind] = filterInput.value;
+				saveLazyTestFilter(node, state.kind, filterInput.value);
+				state.kind = tab.kind;
+				filterInput.value = state.filters[state.kind] || "";
+				renderTabs();
+				await ensureModels();
+				renderList();
+			};
+			tabs.appendChild(button);
+		}
+	}
+
+	async function ensureModels() {
+		if (state.models[state.kind].length) {
+			return;
+		}
+		status.textContent = "正在读取模型列表...";
+		state.models[state.kind] = await fetchLazyTestModels(state.kind, node);
+	}
+
+	function renderList() {
+		const selected = new Set(selectedLazyTestModels(panel));
+		const filtered = state.models[state.kind].filter((item) => modelMatchesTestFilter(item, state.filters[state.kind]));
+		list.innerHTML = "";
+		for (const item of filtered) {
+			const row = document.createElement("label");
+			row.style.cssText = "display:grid;grid-template-columns:22px minmax(0,1fr) auto;align-items:center;gap:6px;min-height:30px;padding:5px 7px;border:1px solid #263940;border-radius:6px;background:#111d22;cursor:pointer;";
+			row.innerHTML = `
+				<input type="checkbox" data-model-name="${escapeHtml(item.name)}" ${selected.has(item.name) ? "checked" : ""}>
+				<span title="${escapeHtml(item.name)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650;">${escapeHtml(item.name)}</span>
+				<span style="color:#92a7ad;font-variant-numeric:tabular-nums;">${escapeHtml(item.size || "")}</span>
+			`;
+			list.appendChild(row);
+		}
+		status.textContent = `${state.kind === "unet" ? "UNET" : "LoRA"}：${filtered.length} / ${state.models[state.kind].length}，已选 ${selectedLazyTestModels(panel).length}`;
+	}
+
+	list.addEventListener("change", renderList);
+	filterInput.addEventListener("input", () => {
+		state.filters[state.kind] = filterInput.value;
+		saveLazyTestFilter(node, state.kind, filterInput.value);
+		renderList();
+	});
+	panel.querySelector("[data-select-all]").onclick = () => {
+		for (const input of panel.querySelectorAll("input[data-model-name]")) input.checked = true;
+		renderList();
+	};
+	panel.querySelector("[data-clear]").onclick = () => {
+		for (const input of panel.querySelectorAll("input[data-model-name]")) input.checked = false;
+		renderList();
+	};
+	const close = () => {
+		state.filters[state.kind] = filterInput.value;
+		saveLazyTestFilter(node, state.kind, filterInput.value);
+		overlay.remove();
+	};
+	panel.querySelector("[data-close]").onclick = close;
+	panel.querySelector("[data-cancel]").onclick = close;
+	overlay.addEventListener("click", (event) => {
+		if (event.target === overlay) close();
+	});
+	panel.querySelector("[data-ok]").onclick = async () => {
+		const models = selectedLazyTestModels(panel);
+		if (!models.length) {
+			status.textContent = "请至少选择一个模型。";
+			return;
+		}
+		state.filters[state.kind] = filterInput.value;
+		saveLazyTestFilter(node, state.kind, filterInput.value);
+		writeLazyTestConfig(node, { mode: state.kind, models, filter: state.filters[state.kind], requested_at: new Date().toISOString() });
+		close();
+		const originalText = testButton.innerHTML;
+		testButton.innerHTML = "⏳ 测试中";
+		testButton.disabled = true;
+		if (generateButton) generateButton.disabled = true;
+		try {
+			const ok = await queueOnlyCurrentNode(node);
+			testButton.innerHTML = ok ? "✅ 已提交" : "❌ 提交失败";
+		} catch (error) {
+			console.error("[GJJ] 模型测试提交失败:", error);
+			testButton.innerHTML = "❌ 错误";
+		} finally {
+			setTimeout(() => {
+				clearLazyTestConfig(node);
+				testButton.innerHTML = originalText;
+				testButton.disabled = false;
+				if (generateButton) generateButton.disabled = false;
+			}, 1000);
+		}
+	};
+
+	renderTabs();
+	void ensureModels().then(renderList);
+}
+
 function createButtons(node) {
 	const container = document.createElement("div");
 	container.style.cssText = [
@@ -1867,6 +2115,21 @@ function createButtons(node) {
 		"font-size:15px",
 	].join(";");
 	node.__gjjKeepModelButton = keepModelButton;
+
+	const testButton = document.createElement("button");
+	testButton.type = "button";
+	testButton.textContent = "🧪";
+	testButton.title = "打开 UNET / LoRA 批量测试窗口";
+	testButton.setAttribute("aria-label", "模型测试");
+	testButton.style.cssText = [
+		...sharedButtonStyle,
+		"padding:0",
+		"border:1px solid #f59e0b",
+		"background:linear-gradient(135deg, #4a2f08, #b45309)",
+		"color:#fffbeb",
+		"flex:0 0 34px",
+		"font-size:15px",
+	].join(";");
 
 	// 生成图片按钮
 	const generateButton = document.createElement("button");
@@ -2050,14 +2313,21 @@ function createButtons(node) {
 		setKeepModelEnabled(node, !keepModelEnabled(node));
 	}
 
+	function handleTest(event) {
+		protectEvent(event);
+		openLazyTestDialog(node, testButton, generateButton);
+	}
+
 	setupButtonHover(refreshButton, "linear-gradient(135deg, #1e3a5f, #1e40af)", "linear-gradient(135deg, #1e40af, #3b82f6)");
 	setupButtonHover(translateButton, TRANSLATE_BUTTON_STYLES.off.bg, TRANSLATE_BUTTON_STYLES.off.hover);
 	setupButtonHover(keepModelButton, KEEP_MODEL_BUTTON_STYLES.off.bg, KEEP_MODEL_BUTTON_STYLES.off.hover);
+	setupButtonHover(testButton, "linear-gradient(135deg, #4a2f08, #b45309)", "linear-gradient(135deg, #b45309, #d97706)");
 	setupButtonHover(generateButton, "linear-gradient(135deg, #064e3b, #059669)", "linear-gradient(135deg, #059669, #10b981)");
 	setupButtonHover(settingsButton, "linear-gradient(135deg, #1f2933, #374151)", "linear-gradient(135deg, #374151, #4b5563)");
 	setupButtonEvents(refreshButton, handleRefresh);
 	setupButtonEvents(translateButton, handleTranslate);
 	setupButtonEvents(keepModelButton, handleKeepModel);
+	setupButtonEvents(testButton, handleTest);
 	setupButtonEvents(generateButton, handleGenerate);
 	setupButtonEvents(settingsButton, handleSettings);
 	applyLazyTranslateButtonState(node);
@@ -2067,6 +2337,7 @@ function createButtons(node) {
 	container.appendChild(refreshButton);
 	container.appendChild(translateButton);
 	container.appendChild(keepModelButton);
+	container.appendChild(testButton);
 	container.appendChild(generateButton);
 	container.appendChild(templateButton);
 	container.appendChild(settingsButton);
@@ -2075,7 +2346,7 @@ function createButtons(node) {
 
 function lazyButtonsHeight(width) {
 	const availableWidth = Math.max(120, Number(width || 260));
-	const buttonWidths = [82, 34, 34, 82, 34, 74];
+	const buttonWidths = [82, 34, 34, 34, 82, 34, 74];
 	const gap = 6;
 	let rows = 1;
 	let rowWidth = 0;
@@ -3627,6 +3898,22 @@ globalThis.GJJLazyImageStudioSyncImageSources = function (sourceNode) {
 		}
 	}
 };
+
+api.addEventListener("gjj_lazy_image_studio_test_preview", (event) => {
+	const detail = event?.detail || {};
+	const nodeId = String(detail.node || detail.node_id || "");
+	if (!nodeId) {
+		return;
+	}
+	const node = app.graph?.getNodeById?.(Number(nodeId)) || app.graph?._nodes?.find((item) => String(item?.id) === nodeId);
+	if (!node || !TARGET_NODES.has(node?.comfyClass || node?.type)) {
+		return;
+	}
+	const images = detail.gjj_images || detail.images || detail.ui?.gjj_images || detail.ui?.images;
+	if (images) {
+		updateImagePreview(node, images);
+	}
+});
 
 app.registerExtension({
 	name: "Comfy.GJJ.LazyImageStudio",

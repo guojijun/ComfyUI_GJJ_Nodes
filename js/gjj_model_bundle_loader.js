@@ -269,6 +269,7 @@ const TEMPLATE_CHINESE_DESCRIPTIONS = {
 	qwen_image: "Qwen 文生图通用",
 	qwen_image_layered: "Qwen 分层图像",
 	boogu_image: "Boogu 图像编辑",
+	boogu_image_edit_turbo: "Boogu 图像编辑 Turbo",
 	lotus_depth: "Lotus 深度图",
 	architecturerealmix_v11_depth: "建筑写实 SD1.5 + 深度 ControlNet",
 	flux2_klein_9b: "Flux2 Klein 9B 快速",

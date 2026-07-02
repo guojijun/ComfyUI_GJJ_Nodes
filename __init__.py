@@ -3737,6 +3737,7 @@ def _register_gjj_costume_library_api():
 			requested_ids = data.get("ids") if isinstance(data.get("ids"), list) else []
 			requested_ids = [clean_key(item, "") for item in requested_ids]
 			requested_ids = [item for item in requested_ids if item]
+			requested_category = clean_category(data.get("category") or "all")
 			clip_name = str(data.get("clip_name") or "qwen3.5_4b_fp8_mixed.safetensors")
 			progress_id = clean_key(data.get("unique_id") or "", "")
 
@@ -3768,9 +3769,19 @@ def _register_gjj_costume_library_api():
 			clip = _load_merged_clip(model_name, "ideogram4", "default")
 			processed = []
 			skipped = []
-			item_ids = requested_ids or [str(item.get("id") or "") for item in list_items() if item.get("category") == "clothing"]
+			item_ids = requested_ids or [
+				str(item.get("id") or "")
+				for item in list_items()
+				if requested_category == "all" or clean_category(item.get("category")) == requested_category
+			]
 			total_count = max(1, len(item_ids))
-			send_costume_progress(0, total_count, "正在准备服装自动打标...")
+			scope_category = requested_category
+			if requested_ids:
+				item_categories = {clean_category(read_manifest(item_id).get("category")) for item_id in item_ids if item_id}
+				if len(item_categories) == 1:
+					scope_category = next(iter(item_categories))
+			scope_label = "道具" if scope_category == "prop" else ("服装" if scope_category == "clothing" else "服化道")
+			send_costume_progress(0, total_count, f"正在准备{scope_label}自动打标...")
 			for item_index, item_id in enumerate(item_ids, start=1):
 				if len(processed) >= limit:
 					break
@@ -3779,8 +3790,9 @@ def _register_gjj_costume_library_api():
 				manifest = read_manifest(item_id)
 				label = str(manifest.get("name") or item_id)
 				send_costume_progress(item_index - 1, total_count, f"正在分析 {item_index}/{total_count}：{label}")
-				if clean_category(manifest.get("category")) != "clothing":
-					skipped.append({"id": item_id, "name": label, "reason": "不是服装"})
+				item_category = clean_category(manifest.get("category"))
+				if not requested_ids and requested_category != "all" and item_category != requested_category:
+					skipped.append({"id": item_id, "name": label, "reason": f"不是{scope_label}"})
 					continue
 				if manifest.get("tags") and str(manifest.get("notes") or "").strip():
 					skipped.append({"id": item_id, "name": label, "reason": "已有标签和备注"})
@@ -3804,17 +3816,32 @@ def _register_gjj_costume_library_api():
 				except Exception:
 					skipped.append({"id": item_id, "name": label, "reason": "图片读取失败"})
 					continue
-				system_prompt = (
-					"你是服装资产库的中文自动打标助手。"
-					"根据输入的服装图片，识别服装类型、材质、颜色、风格、时代、用途和显著部件。"
-					"不要翻译成英文，不要输出解释。"
-					"必须只输出 JSON 对象，格式为 {\"name\":\"唯一、简短、可检索的中文服装名\",\"tags\":[\"盔甲\",\"金属\",\"披风\"],\"notes\":\"一句中文备注\"}。"
-				)
-				user_prompt = (
-					f"当前文件名/名称：{manifest.get('name') or item_id}\n"
-					"请给出一个不笼统的服装名，避免只写“服装”“衣服”“新服装”。"
-					"标签 4 到 10 个，优先包含：服装类型、主色、材质、风格、用途、关键部件。"
-				)
+				if item_category == "prop":
+					system_prompt = (
+						"你是道具资产库的中文自动打标助手。"
+						"根据输入的道具图片，识别物品类型、材质、颜色、风格、用途、时代和显著部件。"
+						"不要把武器、器物、工具、饰品、家具、摆件识别成服装；不要翻译成英文，不要输出解释。"
+						"必须只输出 JSON 对象，格式为 {\"name\":\"唯一、简短、可检索的中文道具名\",\"tags\":[\"长柄武器\",\"青蓝色\",\"金属\"],\"notes\":\"一句中文备注\"}。"
+					)
+					user_prompt = (
+						f"当前文件名/名称：{manifest.get('name') or item_id}\n"
+						"请给出一个不笼统的道具名，避免只写“道具”“物品”“新道具”。"
+						"标签 4 到 10 个，优先包含：道具类型、主色、材质、用途、风格、关键部件。"
+					)
+					generic_names = {"道具", "物品", "新道具", "素材", "器物"}
+				else:
+					system_prompt = (
+						"你是服装资产库的中文自动打标助手。"
+						"根据输入的服装图片，识别服装类型、材质、颜色、风格、时代、用途和显著部件。"
+						"不要翻译成英文，不要输出解释。"
+						"必须只输出 JSON 对象，格式为 {\"name\":\"唯一、简短、可检索的中文服装名\",\"tags\":[\"盔甲\",\"金属\",\"披风\"],\"notes\":\"一句中文备注\"}。"
+					)
+					user_prompt = (
+						f"当前文件名/名称：{manifest.get('name') or item_id}\n"
+						"请给出一个不笼统的服装名，避免只写“服装”“衣服”“新服装”。"
+						"标签 4 到 10 个，优先包含：服装类型、主色、材质、风格、用途、关键部件。"
+					)
+					generic_names = {"服装", "衣服", "新服装"}
 				tensor = _pil_list_to_tensor([fit_costume_inference_canvas(image)])
 				context_unique_id = f"gjj_costume_library_gemma_{item_id}"
 				had_last_prompt_id = hasattr(server, "last_prompt_id")
@@ -3847,7 +3874,7 @@ def _register_gjj_costume_library_api():
 						except Exception:
 							pass
 				ai_name, tags, notes = parse_costume_ai_payload(text, label)
-				if ai_name and ai_name not in {"服装", "衣服", "新服装"}:
+				if ai_name and ai_name not in generic_names:
 					manifest["name"] = unique_item_name(ai_name, item_id)
 				if tags and not manifest.get("tags"):
 					manifest["tags"] = tags
@@ -3857,14 +3884,16 @@ def _register_gjj_costume_library_api():
 				processed.append({
 					"id": item_id,
 					"name": manifest.get("name") or item_id,
+					"category": item_category,
 					"tags": manifest.get("tags") or [],
 					"notes": manifest.get("notes") or "",
 				})
 				send_costume_progress(item_index, total_count, f"已完成 {item_index}/{total_count}：{manifest.get('name') or item_id}")
-			send_costume_progress(total_count, total_count, "服装自动打标完成")
+			send_costume_progress(total_count, total_count, f"{scope_label}自动打标完成")
 			return web.json_response({
 				"ok": True,
 				"model": model_name,
+				"scope_label": scope_label,
 				"processed": processed,
 				"skipped": skipped,
 				"processed_count": len(processed),

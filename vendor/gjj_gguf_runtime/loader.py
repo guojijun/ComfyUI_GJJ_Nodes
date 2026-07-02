@@ -135,8 +135,12 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
             torch_tensor = torch_tensor.view(*shape)
         state_dict[sd_key] = GGMLTensor(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
 
-        # 1D tensors shouldn't be quantized, this is a fix for BF16
-        if len(shape) <= 1 and tensor.tensor_type == gguf.GGMLQuantizationType.BF16:
+        # Small BF16 parameters that are not owned by GGML-aware layers must be real
+        # floating tensors before PyTorch's default load_state_dict copies them.
+        if (
+            tensor.tensor_type == gguf.GGMLQuantizationType.BF16
+            and (len(shape) <= 1 or sd_key == "image_index_embedding" or state_dict[sd_key].numel() <= 65536)
+        ):
             state_dict[sd_key] = dequantize_tensor(state_dict[sd_key], dtype=torch.float32)
 
         # keep track of loaded tensor types
