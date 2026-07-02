@@ -431,6 +431,40 @@ def _format_runtime_error(stage: str, exc: Exception) -> RuntimeError:
     return RuntimeError(f"{stage}失败。\n详细错误：{exc}")
 
 
+def _is_gguf_model(filename: str) -> bool:
+    """判断是否为 GGUF 模型文件。"""
+    return str(filename or "").strip().lower().endswith(".gguf")
+
+
+def _load_unet_gguf(unet_name: str):
+    """使用 GJJ 内置 GGUF 运行时加载 UNET。"""
+    try:
+        from ...vendor.gjj_gguf_runtime import load_unet_gguf as load_gjj_gguf_unet
+    except ImportError:
+        try:
+            from ..vendor.gjj_gguf_runtime import load_unet_gguf as load_gjj_gguf_unet
+        except ImportError:
+            from vendor.gjj_gguf_runtime import load_unet_gguf as load_gjj_gguf_unet
+
+    try:
+        return load_gjj_gguf_unet(unet_name)
+    except ModuleNotFoundError as exc:
+        if getattr(exc, "name", "") == "gguf":
+            raise RuntimeError(
+                "加载 GGUF UNET 需要安装 gguf Python 依赖。"
+                "请安装 requirements-optional.txt 中的可选依赖后重启 ComfyUI。"
+            ) from exc
+        raise
+    except Exception as exc:
+        error_text = str(exc)
+        if "No module named 'gguf'" in error_text or "需要先安装 gguf" in error_text:
+            raise RuntimeError(
+                "加载 GGUF UNET 需要安装 gguf Python 依赖。"
+                "请安装 requirements-optional.txt 中的可选依赖后重启 ComfyUI。"
+            ) from exc
+        raise _format_runtime_error("GGUF UNET 加载", exc) from exc
+
+
 def _clip_type_enum(name: str):
     """获取 CLIP 类型枚举值。"""
     return getattr(
@@ -498,6 +532,9 @@ def gjjutils_load_model(unet_name: str, unet_dtype: str = DEFAULT_UNET_DTYPE):
     Example:
         >>> model = gjjutils_load_model("flux-2-klein-9b-nvfp4.safetensors", "default")
     """
+    if _is_gguf_model(unet_name):
+        return _load_unet_gguf(unet_name)
+
     try:
         unet_path = _resolve_full_path(("diffusion_models", "checkpoints"), unet_name)
     except Exception as exc:
