@@ -298,8 +298,15 @@ import { api } from "/scripts/api.js";
 .gjj-sl-stage-delete{position:absolute;right:8px;top:8px;z-index:3;background:rgba(72,26,34,.92);border-color:#b85e68;}
 .gjj-sl-stage-delete:hover{background:#642632;border-color:#e48590;}
 .gjj-sl-mark{position:absolute;width:16px;height:16px;margin:-8px 0 0 -8px;border:2px solid #f6d365;border-radius:999px;background:rgba(0,0,0,.5);box-shadow:0 0 0 2px rgba(0,0,0,.5);pointer-events:auto;cursor:pointer;}
+.gjj-sl-mark.active{background:rgba(246,211,101,.28);box-shadow:0 0 0 2px rgba(0,0,0,.58),0 0 14px rgba(246,211,101,.42);}
 .gjj-sl-mark span{position:absolute;left:12px;top:-7px;max-width:120px;padding:2px 5px;border-radius:5px;background:rgba(8,13,16,.9);color:#ffe9a8;font-size:11px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:auto;}
-.gjj-sl-mark-edit{position:absolute;left:calc(100% + 12px);top:10px;width:20px;height:20px;border:1px solid rgba(246,211,101,.75);border-radius:5px;background:rgba(8,13,16,.92);color:#ffe9a8;font-size:11px;font-weight:900;line-height:16px;padding:0;cursor:pointer;pointer-events:auto;}
+.gjj-sl-mark-tools{position:absolute;left:calc(100% + 12px);top:10px;display:none;gap:4px;pointer-events:auto;}
+.gjj-sl-mark.active .gjj-sl-mark-tools{display:flex;}
+.gjj-sl-mark-tool{width:20px;height:20px;border:1px solid rgba(246,211,101,.75);border-radius:5px;background:rgba(8,13,16,.92);color:#ffe9a8;font-size:11px;font-weight:900;line-height:16px;padding:0;cursor:pointer;}
+.gjj-sl-mark-tool.flash{width:auto;min-width:42px;padding:0 5px;}
+.gjj-sl-mark-tool.danger{border-color:rgba(216,109,124,.82);color:#ffc7d0;background:rgba(72,26,34,.92);}
+.gjj-sl-mark-tool:hover{border-color:#ffe9a8;background:#152329;}
+.gjj-sl-mark-tool.danger:hover{border-color:#ff9faf;background:#642632;}
 .gjj-sl-viewer-status{position:absolute;left:8px;bottom:8px;max-width:calc(100% - 16px);padding:4px 7px;border-radius:6px;background:rgba(7,16,20,.72);color:#b8cbd1;font-size:11px;font-weight:700;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .gjj-sl-marks{display:flex;align-items:flex-start;gap:6px;flex-wrap:wrap;}
 .gjj-sl-mark-row{display:inline-flex;flex-direction:column;align-items:stretch;gap:4px;max-width:150px;border:1px solid #263842;border-radius:6px;background:#121d22;padding:3px;font-size:12px;min-width:0;}
@@ -358,10 +365,19 @@ import { api } from "/scripts/api.js";
 	function loadImage(url) {
 		return new Promise((resolve, reject) => {
 			const image = new Image();
-			image.crossOrigin = "anonymous";
-			image.onload = () => resolve(image);
+			const src = apiUrl(url);
+			try {
+				const parsed = new URL(src, window.location.href);
+				if (parsed.origin !== window.location.origin) image.crossOrigin = "anonymous";
+			} catch (_) {}
+			image.onload = async () => {
+				try {
+					if (image.decode) await image.decode();
+				} catch (_) {}
+				resolve(image);
+			};
 			image.onerror = () => reject(new Error("全景图加载失败"));
-			image.src = apiUrl(url);
+			image.src = src;
 		});
 	}
 
@@ -390,9 +406,12 @@ import { api } from "/scripts/api.js";
 		}
 	}
 
-	function copyText(text) {
+	async function copyText(text) {
 		if (navigator.clipboard?.writeText) {
-			return navigator.clipboard.writeText(text);
+			try {
+				await navigator.clipboard.writeText(text);
+				return;
+			} catch (_) {}
 		}
 		const area = document.createElement("textarea");
 		area.value = text;
@@ -400,7 +419,6 @@ import { api } from "/scripts/api.js";
 		area.select();
 		document.execCommand("copy");
 		area.remove();
-		return Promise.resolve();
 	}
 
 	function insertAtRememberedText(text) {
@@ -812,6 +830,26 @@ import { api } from "/scripts/api.js";
 		setStatus(`已复制当前视窗引用：${text}`);
 	}
 
+	async function copyOrInsertSceneMarkReference(scene, mark, buttonEl = null) {
+		const text = referenceText(scene, mark);
+		if (!text) return;
+		if (insertAtRememberedText(text)) {
+			await copyText(text);
+			flashButton(buttonEl, "已插入+复制");
+			setStatus(`已插入并复制标签引用：${text}`);
+			return;
+		}
+		await copyText(text);
+		flashButton(buttonEl, "已复制");
+		setStatus(`已复制标签引用：${text}`);
+	}
+
+	function deleteSceneMark(scene, mark) {
+		state.selectedMarkId = "";
+		const next = (scene.annotations || []).filter((item) => item.id !== mark.id);
+		return saveAnnotations(scene, next);
+	}
+
 	async function annotateMissingScenes(ids = []) {
 		if (state.annotating) return;
 		state.annotating = true;
@@ -876,6 +914,8 @@ import { api } from "/scripts/api.js";
 			renderScale: 0.75,
 			loadToken: 0,
 			ready: false,
+			statusText: "正在加载 360 全景预览",
+			errorText: "",
 		};
 		function setViewerStatus(text) {
 			if (status) status.textContent = text || "";
@@ -894,10 +934,10 @@ import { api } from "/scripts/api.js";
 			if (!viewer.imageData) {
 				targetCtx.fillStyle = "#071014";
 				targetCtx.fillRect(0, 0, width, height);
-				targetCtx.fillStyle = "#8fa5ad";
+				targetCtx.fillStyle = viewer.errorText ? "#ff9fb4" : "#8fa5ad";
 				targetCtx.font = "700 13px system-ui";
 				targetCtx.textAlign = "center";
-				targetCtx.fillText("正在加载 360 全景预览", width / 2, height / 2);
+				targetCtx.fillText(viewer.errorText || viewer.statusText || "正在加载 360 全景预览", width / 2, height / 2);
 				return;
 			}
 			const out = targetCtx.createImageData(width, height);
@@ -947,31 +987,46 @@ import { api } from "/scripts/api.js";
 			if (!viewer.dirty) return;
 			viewer.dirty = false;
 			paintProjection(ctx, canvas.width, canvas.height);
-			setViewerStatus(`360视角 ${Math.round(viewer.yaw * 180 / Math.PI)}° · 缩放 ${Math.round((Math.PI / viewer.fov) * 36)}%`);
+			if (viewer.ready) {
+				setViewerStatus(`360视角 ${Math.round(viewer.yaw * 180 / Math.PI)}° · 缩放 ${Math.round((Math.PI / viewer.fov) * 36)}%`);
+			} else {
+				setViewerStatus(viewer.errorText || viewer.statusText || "");
+			}
 			onRender?.();
 		}
 		async function setImageUrl(url, label = "") {
 			const token = ++viewer.loadToken;
 			viewer.ready = false;
 			viewer.imageData = null;
+			viewer.errorText = "";
+			viewer.statusText = "正在加载 360 全景预览...";
 			viewer.dirty = true;
 			render();
-			setViewerStatus("正在加载 360 全景预览...");
-			const image = await loadImage(url);
-			if (token !== viewer.loadToken) return false;
-			const maxSource = 4096;
-			const scale = Math.min(1, maxSource / Math.max(image.width, image.height));
-			sampleCanvas.width = Math.max(1, Math.round(image.width * scale));
-			sampleCanvas.height = Math.max(1, Math.round(image.height * scale));
-			sampleCtx.drawImage(image, 0, 0, sampleCanvas.width, sampleCanvas.height);
-			viewer.imageData = sampleCtx.getImageData(0, 0, sampleCanvas.width, sampleCanvas.height);
-			viewer.imageWidth = image.width;
-			viewer.imageHeight = image.height;
-			viewer.ready = true;
-			viewer.dirty = true;
-			render();
-			setViewerStatus(`${label || "360全景"} ${image.width} x ${image.height} · 拖动查看，滚轮缩放`);
-			return true;
+			try {
+				const image = await loadImage(url);
+				if (token !== viewer.loadToken) return false;
+				const maxSource = 4096;
+				const scale = Math.min(1, maxSource / Math.max(image.width, image.height));
+				sampleCanvas.width = Math.max(1, Math.round(image.width * scale));
+				sampleCanvas.height = Math.max(1, Math.round(image.height * scale));
+				sampleCtx.drawImage(image, 0, 0, sampleCanvas.width, sampleCanvas.height);
+				viewer.imageData = sampleCtx.getImageData(0, 0, sampleCanvas.width, sampleCanvas.height);
+				viewer.imageWidth = image.width;
+				viewer.imageHeight = image.height;
+				viewer.ready = true;
+				viewer.dirty = true;
+				render();
+				setViewerStatus(`${label || "360全景"} ${image.width} x ${image.height} · 拖动查看，滚轮缩放`);
+				return true;
+			} catch (error) {
+				if (token !== viewer.loadToken) return false;
+				viewer.ready = false;
+				viewer.imageData = null;
+				viewer.errorText = error?.message || "360 全景预览加载失败";
+				viewer.dirty = true;
+				render();
+				throw error;
+			}
 		}
 		function nudge(dx, dy) {
 			viewer.yaw += dx;
@@ -1201,30 +1256,26 @@ import { api } from "/scripts/api.js";
 		const addAnnotationAt = (point, clientX, clientY) => {
 			openAnnotationNameEditor(scene, asset, null, point, clientX, clientY);
 		};
-		if (asset?.preview_url) {
-			stage.classList.add("is-panorama");
-			const canvas = document.createElement("canvas");
-			const viewerStatus = document.createElement("div");
-			viewerStatus.className = "gjj-sl-viewer-status";
-			stage.append(canvas, viewerStatus);
-			viewer = createScenePanoramaRenderer(canvas, viewerStatus, () => renderMarks(), addAnnotationAt);
-			state.activeViewer = viewer;
-			viewer.setImageUrl(asset.preview_url, asset.label || scene.name || "360全景").catch((error) => setStatus(error.message));
-		} else {
-			const empty = document.createElement("div");
-			empty.className = "gjj-sl-stage-empty";
-			empty.textContent = "点击 ➕ 导入场景后可在 360 预览中标注物品位置";
-			stage.appendChild(empty);
-		}
-		const removeScene = button("删除", "删除当前场景", "gjj-sl-btn danger gjj-sl-stage-delete", () => deleteScene(scene).catch((error) => setStatus(error.message)));
-		stage.appendChild(removeScene);
+		const activateMark = (mark) => {
+			state.selectedMarkId = mark?.id || "";
+			for (const item of stage.querySelectorAll(".gjj-sl-mark")) {
+				item.classList.toggle("active", !!state.selectedMarkId && item.dataset.slMarkId === state.selectedMarkId);
+			}
+			const marks = stage.parentElement?.querySelector(".gjj-sl-marks");
+			if (marks) {
+				for (const row of marks.querySelectorAll(".gjj-sl-mark-row")) {
+					row.classList.toggle("active", !!state.selectedMarkId && row.dataset.slMarkId === state.selectedMarkId);
+				}
+			}
+		};
 		const renderMarks = () => {
 			stage.querySelectorAll(".gjj-sl-mark").forEach((node) => node.remove());
 			if (!asset?.preview_url) return;
 			for (const mark of scene.annotations || []) {
 				if (mark.asset_id && mark.asset_id !== asset.id) continue;
 				const el = document.createElement("div");
-				el.className = "gjj-sl-mark";
+				el.className = `gjj-sl-mark${state.selectedMarkId === mark.id ? " active" : ""}`;
+				el.dataset.slMarkId = mark.id || "";
 				if (viewer) {
 					const point = viewer.panoramaToScreen(mark.x, mark.y);
 					if (!point) continue;
@@ -1236,27 +1287,52 @@ import { api } from "/scripts/api.js";
 				}
 				const label = document.createElement("span");
 				label.textContent = mark.keyword || "";
-				const edit = document.createElement("button");
-				edit.type = "button";
-				edit.className = "gjj-sl-mark-edit";
-				edit.textContent = "✎";
-				edit.title = "编辑物品名";
+				const tools = document.createElement("div");
+				tools.className = "gjj-sl-mark-tools";
+				const edit = button("✎", "编辑物品名", "gjj-sl-mark-tool", (event) => {
+					openAnnotationNameEditor(scene, asset, mark, { x: mark.x, y: mark.y }, event.clientX, event.clientY);
+				});
+				const ref = button("@", "引用标签", "gjj-sl-mark-tool", (event) => {
+					copyOrInsertSceneMarkReference(scene, mark, event.currentTarget).catch((error) => setStatus(error.message));
+				});
+				const del = button("×", "删除坐标", "gjj-sl-mark-tool danger", () => {
+					deleteSceneMark(scene, mark).catch((error) => setStatus(error.message));
+				});
 				const editAt = (event) => {
 					event.preventDefault();
 					event.stopPropagation();
 					openAnnotationNameEditor(scene, asset, mark, { x: mark.x, y: mark.y }, event.clientX, event.clientY);
 				};
-				edit.addEventListener("click", editAt);
 				label.addEventListener("dblclick", editAt);
 				el.addEventListener("dblclick", editAt);
 				el.addEventListener("click", (event) => {
 					event.preventDefault();
 					event.stopPropagation();
+					activateMark(mark);
+					if (viewer?.centerOn) viewer.centerOn(mark.x, mark.y);
 				});
-				el.append(label, edit);
+				tools.append(edit, ref, del);
+				el.append(label, tools);
 				stage.appendChild(el);
 			}
 		};
+		if (asset?.preview_url) {
+			stage.classList.add("is-panorama");
+			const canvas = document.createElement("canvas");
+			const viewerStatus = document.createElement("div");
+			viewerStatus.className = "gjj-sl-viewer-status";
+			stage.append(canvas, viewerStatus);
+			viewer = createScenePanoramaRenderer(canvas, viewerStatus, renderMarks, addAnnotationAt);
+			state.activeViewer = viewer;
+			viewer.setImageUrl(asset.preview_url, asset.label || scene.name || "360全景").catch((error) => setStatus(error.message));
+		} else {
+			const empty = document.createElement("div");
+			empty.className = "gjj-sl-stage-empty";
+			empty.textContent = "点击 ➕ 导入场景后可在 360 预览中标注物品位置";
+			stage.appendChild(empty);
+		}
+		const removeScene = button("删除", "删除当前场景", "gjj-sl-btn danger gjj-sl-stage-delete", () => deleteScene(scene).catch((error) => setStatus(error.message)));
+		stage.appendChild(removeScene);
 		stage.addEventListener("click", (event) => {
 			if (!asset?.preview_url) return;
 			let point = null;
@@ -1350,6 +1426,7 @@ import { api } from "/scripts/api.js";
 			const row = document.createElement("div");
 			const isActive = state.selectedMarkId === mark.id;
 			row.className = `gjj-sl-mark-row${isActive ? " active" : ""}`;
+			row.dataset.slMarkId = mark.id || "";
 			const label = document.createElement("button");
 			label.type = "button";
 			label.className = "gjj-sl-mark-name";
@@ -1361,6 +1438,9 @@ import { api } from "/scripts/api.js";
 				state.selectedMarkId = mark.id;
 				for (const item of marks.querySelectorAll(".gjj-sl-mark-row")) item.classList.remove("active");
 				row.classList.add("active");
+				for (const item of body.querySelectorAll(".gjj-sl-mark")) {
+					item.classList.toggle("active", item.dataset.slMarkId === mark.id);
+				}
 				if (state.activeViewer?.centerOn) {
 					state.activeViewer.centerOn(mark.x, mark.y);
 					setStatus(`已转到：${mark.keyword || "标注点"}`);
@@ -1374,12 +1454,13 @@ import { api } from "/scripts/api.js";
 			const edit = button("✎", "编辑物品名", "gjj-sl-btn gjj-sl-icon", (event) => {
 				openAnnotationNameEditor(scene, sceneCover(scene), mark, { x: mark.x, y: mark.y }, event.clientX, event.clientY);
 			});
-			const del = button("×", "删除坐标", "gjj-sl-btn gjj-sl-icon", () => {
-				state.selectedMarkId = "";
-				const next = (scene.annotations || []).filter((item) => item.id !== mark.id);
-				saveAnnotations(scene, next).catch((error) => setStatus(error.message));
+			const ref = button("@", "引用标签", "gjj-sl-btn gjj-sl-icon", (event) => {
+				copyOrInsertSceneMarkReference(scene, mark, event.currentTarget).catch((error) => setStatus(error.message));
 			});
-			tools.append(edit, del);
+			const del = button("×", "删除坐标", "gjj-sl-btn gjj-sl-icon", () => {
+				deleteSceneMark(scene, mark).catch((error) => setStatus(error.message));
+			});
+			tools.append(edit, ref, del);
 			row.appendChild(tools);
 			marks.appendChild(row);
 		}
@@ -1704,8 +1785,10 @@ import { api } from "/scripts/api.js";
 	}
 
 	function referenceText(scene, mark = null) {
-		const name = scene?.name || scene?.id || "";
-		return mark?.keyword ? `@${name}/${mark.keyword}` : `@${name}`;
+		const name = String(scene?.name || scene?.id || "").trim();
+		const keyword = String(mark?.keyword || "").trim();
+		if (!name) return "";
+		return keyword ? `[场景:${name}/${keyword}]` : `[场景:${name}]`;
 	}
 
 	function installPublicApi() {

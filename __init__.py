@@ -30,6 +30,44 @@ def _build_node_help_payload():
 			"ui": _serialize_help_value(ui_data or {}),
 		}
 	return payload
+
+class _GJJTemporaryPromptId:
+	def __init__(self, server, prompt_id):
+		self.server = server
+		self.prompt_id = str(prompt_id or "")
+		self.had_value = False
+		self.previous_value = None
+		self.applied = False
+
+	def __enter__(self):
+		if self.server is None or not self.prompt_id:
+			return self
+		try:
+			self.previous_value = getattr(self.server, "last_prompt_id")
+			self.had_value = True
+		except AttributeError:
+			self.had_value = False
+		except Exception:
+			self.had_value = False
+		try:
+			setattr(self.server, "last_prompt_id", self.prompt_id)
+			self.applied = True
+		except Exception:
+			self.applied = False
+		return self
+
+	def __exit__(self, _exc_type, _exc, _traceback):
+		if self.server is None or not self.applied:
+			return False
+		try:
+			if self.had_value:
+				setattr(self.server, "last_prompt_id", self.previous_value)
+			elif hasattr(self.server, "last_prompt_id"):
+				delattr(self.server, "last_prompt_id")
+		except Exception:
+			pass
+		return False
+
 def _register_gjj_help_api():
 	try:
 		from aiohttp import web
@@ -2484,40 +2522,42 @@ def _register_gjj_scene_library_api():
 		except Exception:
 			required = {}
 		generator = GJJ_360PanoramaGenerator()
-		result = generator.generate(
-			positive_prompt=f"Convert this scene image into a natural seamless 360-degree equirectangular panorama. Scene name: {scene_name}",
-			negative_prompt="low quality, distorted, text, watermark",
-			unet_name=default_for(required, "unet_name", ""),
-			unet_dtype=default_for(required, "unet_dtype", "default"),
-			clip_name=default_for(required, "clip_name", ""),
-			vae_name=default_for(required, "vae_name", ""),
-			lora_1_name=default_for(required, "lora_1_name", ""),
-			lora_1_strength=1.0,
-			lora_2_name=default_for(required, "lora_2_name", ""),
-			lora_2_strength=1.0,
-			seed=0,
-			steps=4,
-			cfg=1.0,
-			sampler_name=default_for(required, "sampler_name", "euler"),
-			scheduler=default_for(required, "scheduler", "simple"),
-			denoise=1.0,
-			base_width=1024,
-			base_height=512,
-			final_width=2048,
-			final_height=1024,
-			upscale_enabled=False,
-			upscale_model_name=default_for(required, "upscale_model_name", ""),
-			prompt_suffix=DEFAULT_PROMPT_SUFFIX,
-			seam_prompt=DEFAULT_SEAM_PROMPT,
-			seam_mask_width=256,
-			seam_blur=24,
-			repair_enabled=True,
-			image=pil_to_scene_tensor(image),
-			output_current_view=False,
-			current_view_data="",
-			save_directory="",
-			unique_id=unique_id or f"gjj_scene_import_{uuid.uuid4().hex[:10]}",
-		)
+		context_unique_id = unique_id or f"gjj_scene_import_{uuid.uuid4().hex[:10]}"
+		with _GJJTemporaryPromptId(server, context_unique_id):
+			result = generator.generate(
+				positive_prompt=f"Convert this scene image into a natural seamless 360-degree equirectangular panorama. Scene name: {scene_name}",
+				negative_prompt="low quality, distorted, text, watermark",
+				unet_name=default_for(required, "unet_name", ""),
+				unet_dtype=default_for(required, "unet_dtype", "default"),
+				clip_name=default_for(required, "clip_name", ""),
+				vae_name=default_for(required, "vae_name", ""),
+				lora_1_name=default_for(required, "lora_1_name", ""),
+				lora_1_strength=1.0,
+				lora_2_name=default_for(required, "lora_2_name", ""),
+				lora_2_strength=1.0,
+				seed=0,
+				steps=4,
+				cfg=1.0,
+				sampler_name=default_for(required, "sampler_name", "euler"),
+				scheduler=default_for(required, "scheduler", "simple"),
+				denoise=1.0,
+				base_width=1024,
+				base_height=512,
+				final_width=2048,
+				final_height=1024,
+				upscale_enabled=False,
+				upscale_model_name=default_for(required, "upscale_model_name", ""),
+				prompt_suffix=DEFAULT_PROMPT_SUFFIX,
+				seam_prompt=DEFAULT_SEAM_PROMPT,
+				seam_mask_width=256,
+				seam_blur=24,
+				repair_enabled=True,
+				image=pil_to_scene_tensor(image),
+				output_current_view=False,
+				current_view_data="",
+				save_directory="",
+				unique_id=context_unique_id,
+			)
 		output = None
 		if isinstance(result, dict):
 			values = result.get("result") or []

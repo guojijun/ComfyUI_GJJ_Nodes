@@ -42,8 +42,10 @@ class gjjutils_EmptyFlux2LatentImage:
 		height = max(16, int(height))
 		batch_size = max(1, int(batch_size))
 
-		# Flux2 使用 128 通道（不是 32）
-		samples = torch.zeros([batch_size, 128, height // 8, width // 8])
+		# Flux2 使用 128 通道，VAE 空间倍率为 16。
+		latent_height = max(1, (height + 15) // 16)
+		latent_width = max(1, (width + 15) // 16)
+		samples = torch.zeros([batch_size, 128, latent_height, latent_width])
 		return {"samples": samples}
 
 

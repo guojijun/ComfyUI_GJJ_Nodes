@@ -11,17 +11,24 @@ const IMAGE_PREVIEW_NAME = "__gjj_storyboard_image_preview";
 const PARAM_VALUES_PROPERTY = "gjj_storyboard_grid_param_values_v3";
 const SELECTED_CELL_PROPERTY = "gjj_storyboard_selected_cell_v1";
 const SELECTED_CELLS_PROPERTY = "gjj_storyboard_selected_cells_v1";
+const UNET_FILTER_PROPERTY = "gjj_storyboard_unet_filter_v1";
+const UNET_FILTER_WIDGET_NAME = "__gjj_storyboard_unet_filter";
 const SINGLE_CELL_INDEX_INPUT = "single_cell_index";
 const SINGLE_CELL_TOTAL_INPUT = "single_cell_total";
 const SELECTED_CELL_INDICES_INPUT = "selected_cell_indices";
 const FULL_PROMPT_INPUT = "storyboard_full_prompt";
 const FORCE_GENERATE_INPUT = "force_generate_all";
 const PREVIEW_IMAGES_INPUT = "storyboard_preview_images";
+const STORYBOARD_LORA_NAME = "storyboard_lora_name";
+const DEFAULT_UNET_FILTER = "flux|f2k|edit";
 const SEED_CONTROL_KEY = "__seed_control_after_generate";
 const SEED_CONTROL_VALUES = new Set(["fixed", "increment", "decrement", "randomize"]);
 const JS_SAFE_MAX_SEED_VALUE = Number.MAX_SAFE_INTEGER;
+const CHARACTER_REF_PATTERN = /@([0-9A-Za-z\u4e00-\u9fff._-]+)(?:\/([0-9A-Za-z\u4e00-\u9fff._-]+))?/g;
+const SCENE_REF_PATTERN = /(?:🌏|🌍|🌎)([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?|\[场景[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?\]|\[([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?\]/g;
+const COSTUME_REF_PATTERN = /(?:💼|👗)([0-9A-Za-z\u4e00-\u9fff._-]+)|\[(?:服装|道具|prop|costume)[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]/gi;
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
-const ALWAYS_HIDDEN_WIDGETS = new Set(["lora_data", SINGLE_CELL_INDEX_INPUT, SINGLE_CELL_TOTAL_INPUT, SELECTED_CELL_INDICES_INPUT, FULL_PROMPT_INPUT, FORCE_GENERATE_INPUT, PREVIEW_IMAGES_INPUT]);
+const ALWAYS_HIDDEN_WIDGETS = new Set(["unet_name", "lora_data", SINGLE_CELL_INDEX_INPUT, SINGLE_CELL_TOTAL_INPUT, SELECTED_CELL_INDICES_INPUT, FULL_PROMPT_INPUT, FORCE_GENERATE_INPUT, PREVIEW_IMAGES_INPUT]);
 const PANEL_SYNC_WIDGETS = [
 	"prompt",
 	"negative_prompt",
@@ -29,10 +36,12 @@ const PANEL_SYNC_WIDGETS = [
 	"width",
 	"height",
 	"batch_size",
+	UNET_FILTER_WIDGET_NAME,
 	"unet_name",
 	"unet_dtype",
 	"clip_name1",
 	"vae_name",
+	STORYBOARD_LORA_NAME,
 	"seed",
 	"steps",
 	"cfg",
@@ -53,7 +62,7 @@ const TEMPLATE_SOURCE_FIELDS = [
 	{ name: "height", widget: "height", label: "高度", type: "INT", aliases: ["height", "高", "高度"] },
 ];
 const DEFAULT_LORA_ROW = { enabled: true, name: "", strength: 1.0 };
-const QWEN_NEXT_SCENE_LORA = "next-scene_lora-v2-3000.safetensors";
+const NEXT_SCENE_LORA = "next-scene_lora-v2-3000.safetensors";
 
 function isTarget(node) {
 	return TARGET_NODES.has(node?.comfyClass || node?.type);
@@ -79,8 +88,350 @@ function setWidgetValue(widget, value) {
 	widget.callback?.(value);
 }
 
+function widgetOptions(widget) {
+	const values = widget?.options?.values;
+	if (Array.isArray(values)) return values.map((item) => String(item ?? ""));
+	if (values && typeof values === "object") return Object.keys(values);
+	return [];
+}
+
+function allWidgetOptions(widget) {
+	if (!widget) return [];
+	const current = widgetOptions(widget);
+	if (!Array.isArray(widget.__gjjStoryboardAllValues) || (!widget.__gjjStoryboardAllValues.length && current.length)) {
+		widget.__gjjStoryboardAllValues = current;
+	} else if (current.length) {
+		const merged = [...widget.__gjjStoryboardAllValues];
+		for (const value of current) {
+			if (!merged.includes(value)) merged.push(value);
+		}
+		widget.__gjjStoryboardAllValues = merged;
+	}
+	return widget.__gjjStoryboardAllValues;
+}
+
+function resolveWidgetOption(widget, preferred, fallback = "") {
+	const target = String(preferred || "").trim();
+	if (!target) return fallback;
+	const options = widgetOptions(widget);
+	if (!options.length) return target;
+	const targetKey = target.replace(/\\/g, "/").toLowerCase();
+	const targetBase = targetKey.split("/").pop();
+	return options.find((item) => item.replace(/\\/g, "/").toLowerCase() === targetKey)
+		|| options.find((item) => item.replace(/\\/g, "/").toLowerCase().split("/").pop() === targetBase)
+		|| options.find((item) => item.replace(/\\/g, "/").toLowerCase().includes(targetBase))
+		|| fallback;
+}
+
+function resolveWidgetOptionByKeyword(widget, keyword, fallback = "") {
+	const target = String(keyword || "").trim().toLowerCase();
+	if (!target) return fallback;
+	return widgetOptions(widget).find((item) => item.toLowerCase().includes(target)) || fallback;
+}
+
 function textValue(value) {
 	return String(value ?? "").trim();
+}
+
+function filterTokens(query) {
+	return String(query || "")
+		.toLowerCase()
+		.split(/[|\s,，;；]+/g)
+		.map((item) => item.trim())
+		.filter(Boolean);
+}
+
+function modelMatchesFilter(name, query) {
+	const tokens = filterTokens(query);
+	if (!tokens.length) return true;
+	const text = String(name || "").toLowerCase();
+	return tokens.some((token) => text.includes(token));
+}
+
+function filteredModelValues(values, query, current = "", keepCurrent = true) {
+	const filtered = values.filter((item) => modelMatchesFilter(item, query));
+	if (keepCurrent && current && !filtered.includes(current)) return [current, ...filtered];
+	return filtered;
+}
+
+function unetFilterValue(node) {
+	if (node?.properties && Object.prototype.hasOwnProperty.call(node.properties, UNET_FILTER_PROPERTY)) {
+		return String(node.properties[UNET_FILTER_PROPERTY] ?? "");
+	}
+	return DEFAULT_UNET_FILTER;
+}
+
+function closeUnetFilterPopup(node) {
+	const state = node?.__gjjStoryboardUnetPopup;
+	if (!state) return;
+	state.cleanup?.();
+	state.root?.remove();
+	node.__gjjStoryboardUnetPopup = null;
+}
+
+function positionPopup(root, event, anchorEl = null) {
+	const width = 420;
+	const height = Math.min(520, Math.max(280, window.innerHeight - 32));
+	const rect = anchorEl?.getBoundingClientRect?.();
+	const baseLeft = rect ? rect.left : (event?.clientX ?? 80) - 12;
+	const baseTop = rect ? rect.bottom + 6 : (event?.clientY ?? 80) + 8;
+	const left = Math.max(8, Math.min(baseLeft, window.innerWidth - width - 8));
+	const top = Math.max(8, Math.min(baseTop, window.innerHeight - height - 8));
+	root.style.left = `${left}px`;
+	root.style.top = `${top}px`;
+	root.style.width = `${width}px`;
+	root.style.maxHeight = `${height}px`;
+}
+
+function openUnetFilterPopup(node, widget, event, anchorEl = null) {
+	if (!node || !widget) return true;
+	closeUnetFilterPopup(node);
+	const allValues = allWidgetOptions(widget);
+	if (!allValues.length) return false;
+	node.properties ||= {};
+	const root = document.createElement("div");
+	root.style.cssText = [
+		"position:fixed",
+		"z-index:100000",
+		"display:flex",
+		"flex-direction:column",
+		"gap:4px",
+		"box-sizing:border-box",
+		"padding:5px",
+		"border:1px solid #3b5560",
+		"border-radius:6px",
+		"background:#071014",
+		"box-shadow:0 12px 36px rgba(0,0,0,.45)",
+		"font:12px/1.35 sans-serif",
+		"color:#dce7e2",
+		"pointer-events:auto",
+	].join(";");
+	positionPopup(root, event, anchorEl);
+
+	const input = document.createElement("input");
+	input.type = "text";
+	input.value = unetFilterValue(node);
+	input.placeholder = DEFAULT_UNET_FILTER;
+	input.title = "过滤主模型列表，支持 | 分隔关键词";
+	input.style.cssText = [
+		"height:28px",
+		"box-sizing:border-box",
+		"width:100%",
+		"border:1px solid #78909b",
+		"border-radius:3px",
+		"background:#061014",
+		"color:#f1f7f5",
+		"padding:0 8px",
+		"outline:none",
+		"font:13px/28px sans-serif",
+	].join(";");
+
+	const list = document.createElement("div");
+	list.style.cssText = [
+		"display:flex",
+		"flex-direction:column",
+		"gap:1px",
+		"overflow:auto",
+		"max-height:460px",
+		"border-radius:4px",
+	].join(";");
+
+	const chooseValue = (value) => {
+		setWidgetValue(widget, value);
+		refreshUnetPickerControl(node);
+		saveParamValues(node);
+		node.setDirtyCanvas?.(true, true);
+		node.graph?.setDirtyCanvas?.(true, true);
+		closeUnetFilterPopup(node);
+	};
+
+	const render = () => {
+		const current = String(widget.value || "");
+		const values = filteredModelValues(allValues, input.value, current, true);
+		list.replaceChildren();
+		for (const value of values) {
+			const row = document.createElement("button");
+			row.type = "button";
+			row.textContent = `${value === current ? "✓ " : ""}${value || "未选择"}`;
+			row.title = value || "未选择";
+			row.style.cssText = [
+				"display:block",
+				"width:100%",
+				"box-sizing:border-box",
+				"border:1px solid #253941",
+				"border-radius:2px",
+				"background:#142329",
+				"color:#dce7e2",
+				"text-align:left",
+				"padding:7px 8px",
+				"font:12px/1.35 sans-serif",
+				"white-space:normal",
+				"word-break:break-word",
+				"cursor:pointer",
+			].join(";");
+			if (value === current) {
+				row.style.background = "#174335";
+				row.style.borderColor = "#3b7d66";
+			}
+			row.addEventListener("mouseenter", () => {
+				if (value !== current) row.style.background = "#20333b";
+			});
+			row.addEventListener("mouseleave", () => {
+				row.style.background = value === current ? "#174335" : "#142329";
+			});
+			row.addEventListener("click", (clickEvent) => {
+				clickEvent.preventDefault();
+				clickEvent.stopPropagation();
+				chooseValue(value);
+			});
+			list.append(row);
+		}
+		if (!values.length) {
+			const empty = document.createElement("div");
+			empty.textContent = "没有匹配的主模型";
+			empty.style.cssText = "padding:14px 8px;color:#9db0b7;text-align:center;";
+			list.append(empty);
+		}
+	};
+
+	const stop = (popupEvent) => popupEvent.stopPropagation();
+	for (const name of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "wheel"]) {
+		root.addEventListener(name, stop);
+	}
+	input.addEventListener("input", () => {
+		node.properties[UNET_FILTER_PROPERTY] = input.value;
+		render();
+		saveParamValues(node);
+		node.setDirtyCanvas?.(true, true);
+		node.graph?.setDirtyCanvas?.(true, true);
+	});
+	input.addEventListener("keydown", (keyEvent) => {
+		keyEvent.stopPropagation();
+		if (keyEvent.key === "Escape") {
+			keyEvent.preventDefault();
+			closeUnetFilterPopup(node);
+			return;
+		}
+		if (keyEvent.key === "Enter") {
+			const first = filteredModelValues(allValues, input.value, String(widget.value || ""), true)[0];
+			if (first !== undefined) {
+				keyEvent.preventDefault();
+				chooseValue(first);
+			}
+		}
+	});
+
+	root.append(input, list);
+	document.body.append(root);
+	render();
+	requestAnimationFrame(() => {
+		input.focus();
+		input.select();
+	});
+	const onDocumentPointerDown = (docEvent) => {
+		if (!root.contains(docEvent.target) && !anchorEl?.contains?.(docEvent.target)) closeUnetFilterPopup(node);
+	};
+	const onDocumentKeyDown = (docEvent) => {
+		if (docEvent.key === "Escape") closeUnetFilterPopup(node);
+	};
+	const pointerTimer = setTimeout(() => document.addEventListener("pointerdown", onDocumentPointerDown, true), 0);
+	document.addEventListener("keydown", onDocumentKeyDown, true);
+	node.__gjjStoryboardUnetPopup = {
+		root,
+		cleanup: () => {
+			clearTimeout(pointerTimer);
+			document.removeEventListener("pointerdown", onDocumentPointerDown, true);
+			document.removeEventListener("keydown", onDocumentKeyDown, true);
+		},
+	};
+	event?.preventDefault?.();
+	event?.stopPropagation?.();
+	return true;
+}
+
+function cacheUnetOptions(node) {
+	const widget = getWidget(node, "unet_name");
+	if (!widget?.options) return;
+	node.properties ||= {};
+	if (!Object.prototype.hasOwnProperty.call(node.properties, UNET_FILTER_PROPERTY)) {
+		node.properties[UNET_FILTER_PROPERTY] = DEFAULT_UNET_FILTER;
+	}
+	allWidgetOptions(widget);
+}
+
+function refreshUnetPickerControl(node) {
+	const button = node?.__gjjStoryboardUnetPickerButton;
+	const widget = getWidget(node, "unet_name");
+	if (!button || !widget) return;
+	const value = String(widget.value || "");
+	const text = button.__gjjStoryboardUnetLabel;
+	if (text) text.textContent = value || "未选择";
+	else button.textContent = value || "未选择";
+	button.title = value || "点击选择主模型";
+}
+
+function createUnetPickerControl(node) {
+	const container = document.createElement("div");
+	container.style.cssText = [
+		"display:grid",
+		"grid-template-columns:92px minmax(0,1fr)",
+		"align-items:center",
+		"gap:8px",
+		"width:100%",
+		"box-sizing:border-box",
+		"pointer-events:auto",
+		"font:12px system-ui,'Microsoft YaHei',sans-serif",
+	].join(";");
+	const label = document.createElement("div");
+	label.textContent = "🟣 UNET 主模型";
+	label.style.cssText = "color:#b8c7cf;white-space:nowrap;font-size:12px;";
+	const button = document.createElement("button");
+	button.type = "button";
+	button.style.cssText = [
+		"height:32px",
+		"min-width:0",
+		"width:100%",
+		"box-sizing:border-box",
+		"border:1px solid #5c6f78",
+		"border-radius:8px",
+		"background:#33383d",
+		"color:#f1f5f5",
+		"padding:0 30px 0 12px",
+		"text-align:left",
+		"font:600 14px system-ui,'Microsoft YaHei',sans-serif",
+		"overflow:hidden",
+		"text-overflow:ellipsis",
+		"white-space:nowrap",
+		"cursor:pointer",
+		"position:relative",
+	].join(";");
+	const text = document.createElement("span");
+	text.style.cssText = "display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+	const arrow = document.createElement("span");
+	arrow.textContent = "⌄";
+	arrow.style.cssText = "position:absolute;right:10px;top:5px;color:#cfd8dc;font-size:18px;pointer-events:none;";
+	button.append(text, arrow);
+	button.__gjjStoryboardUnetLabel = text;
+	const stop = (event) => event.stopPropagation();
+	for (const eventName of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "wheel"]) {
+		container.addEventListener(eventName, stop, { passive: eventName === "wheel" });
+	}
+	button.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const widget = getWidget(node, "unet_name");
+		if (!widget) return;
+		const state = node.__gjjStoryboardUnetPopup;
+		if (state?.root) {
+			closeUnetFilterPopup(node);
+			return;
+		}
+		openUnetFilterPopup(node, widget, event, button);
+	});
+	container.append(label, button);
+	node.__gjjStoryboardUnetPickerButton = button;
+	setTimeout(() => refreshUnetPickerControl(node), 0);
+	return container;
 }
 
 function parsePromptParts(text) {
@@ -136,6 +487,7 @@ function setSelectedCellIndex(node, index) {
 	node.properties[SELECTED_CELL_PROPERTY] = value;
 	node.properties[SELECTED_CELLS_PROPERTY] = [value];
 	node.__gjjStoryboardSelectionAnchor = value - 1;
+	updateSelectedPreviewImage(node);
 	drawPromptGridPreview(node);
 	GJJ_Utils.refreshNode?.(node);
 }
@@ -152,6 +504,7 @@ function setSelectedCellIndices(node, indices, primaryIndex = null) {
 	node.properties[SELECTED_CELL_PROPERTY] = primary + 1;
 	node.properties[SELECTED_CELLS_PROPERTY] = safe.map((value) => value + 1);
 	node.__gjjStoryboardSelectionAnchor = primary;
+	updateSelectedPreviewImage(node);
 	drawPromptGridPreview(node);
 	GJJ_Utils.refreshNode?.(node);
 }
@@ -350,9 +703,32 @@ function normalizedModelText(value) {
 	return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
-function isQwenImageEdit(unetName, preset) {
+function isNextSceneImageEdit(unetName, preset) {
 	const text = normalizedModelText(`${unetName || ""} ${preset?.id || ""} ${(preset?.keywords || []).join(" ")}`);
-	return text.includes("qwen") && text.includes("image") && text.includes("edit");
+	return (text.includes("qwen") || text.includes("firered")) && text.includes("image") && text.includes("edit");
+}
+
+function fireredImageEditFallbackPreset(node, unetName) {
+	const text = normalizedModelText(unetName);
+	if (!(text.includes("firered") && text.includes("image") && text.includes("edit"))) return null;
+	const clipWidget = getWidget(node, "clip_name1");
+	const vaeWidget = getWidget(node, "vae_name");
+	return {
+		id: "firered_image_edit",
+		keywords: ["firered", "image", "edit"],
+		clipNames: [
+			resolveWidgetOptionByKeyword(clipWidget, "qwen_2.5_vl")
+				|| resolveWidgetOptionByKeyword(clipWidget, "qwen25vl")
+				|| resolveWidgetOptionByKeyword(clipWidget, "qwen")
+				|| "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+		],
+		vaeName: resolveWidgetOptionByKeyword(vaeWidget, "qwen_image_vae")
+			|| resolveWidgetOptionByKeyword(vaeWidget, "qwenimagevae")
+			|| resolveWidgetOptionByKeyword(vaeWidget, "qwen")
+			|| "qwen_image_vae.safetensors",
+		lora1: "",
+		lora2: "",
+	};
 }
 
 function appendLoraRow(rows, name, strength = 1.0) {
@@ -387,7 +763,7 @@ function presetLoraRows(preset, unetName = "") {
 			strength: normalizeStrength(preset.lora2Strength, 0.7),
 		});
 	}
-	if (isQwenImageEdit(unetName, preset)) appendLoraRow(rows, QWEN_NEXT_SCENE_LORA, 1.0);
+	if (isNextSceneImageEdit(unetName, preset)) appendLoraRow(rows, NEXT_SCENE_LORA, 1.0);
 	if (rows.length) rows.push({ ...DEFAULT_LORA_ROW });
 	return rows;
 }
@@ -397,6 +773,22 @@ function setPresetLoraData(node, preset, unetName = "") {
 	if (!widget) return;
 	const rows = presetLoraRows(preset, unetName);
 	setWidgetValue(widget, JSON.stringify(rows.length ? rows : []));
+}
+
+function setStoryboardLoraForModel(node, preset, unetName = "", force = false) {
+	const widget = getWidget(node, STORYBOARD_LORA_NAME);
+	if (!widget) return;
+	const usesNextScene = isNextSceneImageEdit(unetName, preset);
+	const current = String(widget.value || "").trim();
+	if (usesNextScene) {
+		const nextScene = resolveWidgetOptionByKeyword(widget, "next-scene")
+			|| resolveWidgetOption(widget, NEXT_SCENE_LORA);
+		if (nextScene && (force || !current)) setWidgetValue(widget, nextScene);
+		return;
+	}
+	if (force || resolveWidgetOption(widget, current) === resolveWidgetOption(widget, NEXT_SCENE_LORA)) {
+		setWidgetValue(widget, "");
+	}
 }
 
 function hasConfiguredLoraData(node) {
@@ -480,13 +872,15 @@ function updateSettingsButtonState(node) {
 
 function orderWidgets(node) {
 	if (!Array.isArray(node?.widgets)) return;
+	const panelOrder = new Map(PANEL_SYNC_WIDGETS.map((name, index) => [name, index]));
 	const rank = (widget) => {
 		const name = String(widget?.name || "");
 		if (widget === node.__gjjStoryboardExecuteWidget || name === EXECUTE_BUTTON_NAME) return 0;
 		if (name === "prompt") return 10;
 		if (widget === node.__gjjStoryboardPreviewWidget || name === IMAGE_PREVIEW_NAME) return 100;
 		if (ALWAYS_HIDDEN_WIDGETS.has(name) || widget?.hidden) return 900;
-		return 50;
+		if (panelOrder.has(name)) return 50 + panelOrder.get(name) / 100;
+		return 80;
 	};
 	node.widgets = node.widgets
 		.map((widget, index) => ({ widget, index }))
@@ -793,12 +1187,22 @@ function createImagePreview(node) {
 	canvas.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
+		const iconHit = storyboardReferenceIconHit(node, event);
+		if (iconHit?.icon) {
+			setSelectedCellIndex(node, iconHit.icon.cellIndex ?? selectedCellIndex(node));
+			openReferencePicker(node, iconHit.icon, event);
+			return;
+		}
 		const hit = storyboardCellHit(node, event);
 		if (hit >= 0) updateCellSelectionFromEvent(node, hit, event);
+	});
+	canvas.addEventListener("mousemove", (event) => {
+		canvas.style.cursor = storyboardReferenceIconHit(node, event) ? "pointer" : "pointer";
 	});
 	canvas.addEventListener("dblclick", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
+		if (storyboardReferenceIconHit(node, event)) return;
 		const hit = storyboardCellHit(node, event);
 		if (hit < 0) return;
 		setSelectedCellIndex(node, hit);
@@ -822,6 +1226,7 @@ function createImagePreview(node) {
 	node.__gjjStoryboardGridCanvas = canvas;
 	node.__gjjStoryboardPreviewImage = image;
 	setTimeout(() => drawPromptGridPreview(node), 0);
+	for (const delay of [350, 1200, 2600]) setTimeout(() => drawPromptGridPreview(node), delay);
 	return container;
 }
 
@@ -856,19 +1261,361 @@ function storyboardGridGeometry(count, width, height) {
 function wrapCanvasText(ctx, text, maxWidth, maxLines) {
 	const lines = [];
 	let current = "";
+	let truncated = false;
 	for (const char of String(text || "")) {
 		const next = current + char;
 		if (current && ctx.measureText(next).width > maxWidth) {
 			lines.push(current);
 			current = char;
-			if (lines.length >= maxLines) break;
+			if (lines.length >= maxLines) {
+				truncated = true;
+				break;
+			}
 		} else {
 			current = next;
 		}
 	}
 	if (current && lines.length < maxLines) lines.push(current);
-	if (lines.length === maxLines) lines[lines.length - 1] = `${lines[lines.length - 1].replace(/\s+$/g, "")}...`;
+	if (truncated && lines.length === maxLines) lines[lines.length - 1] = `${lines[lines.length - 1].replace(/\s+$/g, "")}……`;
 	return lines;
+}
+
+function apiMediaUrl(url) {
+	const text = String(url || "").trim();
+	if (!text) return "";
+	if (/^(?:https?:|data:|blob:)/i.test(text)) return text;
+	return api?.apiURL ? api.apiURL(text) : text;
+}
+
+function refKey(value) {
+	return String(value || "")
+		.trim()
+		.replace(/^@/, "")
+		.replace(/\\/g, "/")
+		.toLowerCase();
+}
+
+function itemAliasKeys(item) {
+	const values = [item?.name, item?.id, item?._folder_id, ...(Array.isArray(item?.tags) ? item.tags : [])];
+	return values.map(refKey).filter(Boolean);
+}
+
+function findLibraryItem(items, name) {
+	const key = refKey(name);
+	if (!key) return null;
+	return (items || []).find((item) => itemAliasKeys(item).includes(key))
+		|| (items || []).find((item) => itemAliasKeys(item).some((alias) => alias.includes(key) || key.includes(alias)))
+		|| null;
+}
+
+function splitCharacterViewSuffix(name) {
+	const text = String(name || "").trim();
+	if (!text) return ["", ""];
+	const exact = findLibraryItem(globalThis.GJJ_CharacterLibrary?.characters || [], text);
+	if (exact) return [text, ""];
+	const match = text.match(/^(.+?)([a-gA-G])$/);
+	if (!match) return [text, ""];
+	const base = match[1].trim();
+	return findLibraryItem(globalThis.GJJ_CharacterLibrary?.characters || [], base) ? [base, match[2].toLowerCase()] : [text, ""];
+}
+
+function sceneCoverUrl(scene) {
+	const asset = (scene?.assets || []).find((item) => item?.preview_url);
+	return asset?.preview_url || scene?.cover || "";
+}
+
+function itemCoverUrl(item) {
+	return item?.cover || (item?.assets || []).find((asset) => asset?.preview_url)?.preview_url || "";
+}
+
+function addUniqueReferenceIcon(icons, kind, name, url = "", fallback = "") {
+	const key = `${kind}:${refKey(name)}`;
+	if (!name) return null;
+	const existing = icons.find((item) => item.key === key);
+	if (existing) return existing;
+	const item = { key, kind, name, url: apiMediaUrl(url), fallback };
+	icons.push(item);
+	return item;
+}
+
+function characterReferenceName(character, fallback = "") {
+	return String(character?.reference_name || character?.name || character?.id || fallback || "").replace(/^\s*(?:♀️|♂️|♀|♂)\s*/, "").trim();
+}
+
+function promptReferenceIcons(promptText) {
+	const text = String(promptText || "");
+	const icons = [];
+	const scenes = globalThis.GJJ_SceneLibrary?.scenes || [];
+	const characters = globalThis.GJJ_CharacterLibrary?.characters || [];
+	const costumes = globalThis.GJJ_CostumeLibrary?.items || [];
+	for (const match of text.matchAll(SCENE_REF_PATTERN)) {
+		const rawName = match[1] || match[3] || match[5] || "";
+		if (!rawName || rawName === "场景" || /[:：]/.test(rawName)) continue;
+		const scene = findLibraryItem(scenes, rawName);
+		if (scene) {
+			const place = match[2] || match[4] || match[6] || "";
+			const icon = addUniqueReferenceIcon(icons, "scene", scene.name || scene.id || rawName, sceneCoverUrl(scene), "🏞");
+			if (icon) icon.source = { pattern: match[0], scene, place };
+		}
+	}
+	for (const match of text.matchAll(CHARACTER_REF_PATTERN)) {
+		const [name, suffixView] = splitCharacterViewSuffix(match[1] || "");
+		const character = findLibraryItem(characters, name);
+		if (character) {
+			const icon = addUniqueReferenceIcon(icons, "character", character.name || character.id || name, character.cover, "👤");
+			if (icon) icon.source = { pattern: match[0], character, view: match[2] || suffixView || "" };
+			continue;
+		}
+		const costume = findLibraryItem(costumes, match[1] || "");
+		if (costume) addUniqueReferenceIcon(icons, "costume", costume.name || costume.id || match[1], itemCoverUrl(costume), costume.category === "prop" ? "🎒" : "👗");
+	}
+	for (const match of text.matchAll(COSTUME_REF_PATTERN)) {
+		const rawName = match[1] || match[2] || "";
+		const costume = findLibraryItem(costumes, rawName);
+		if (costume) addUniqueReferenceIcon(icons, "costume", costume.name || costume.id || rawName, itemCoverUrl(costume), costume.category === "prop" ? "🎒" : "👗");
+	}
+	return icons.slice(0, 5);
+}
+
+function referenceIconImage(node, url) {
+	if (!url) return null;
+	node.__gjjStoryboardReferenceIconImages ||= new Map();
+	const cache = node.__gjjStoryboardReferenceIconImages;
+	if (cache.has(url)) return cache.get(url);
+	const image = new Image();
+	image.crossOrigin = "anonymous";
+	image.onload = () => drawPromptGridPreview(node);
+	image.onerror = () => drawPromptGridPreview(node);
+	image.src = url;
+	cache.set(url, image);
+	return image;
+}
+
+function drawReferenceIcons(ctx, node, icons, left, top, width, height) {
+	if (!icons.length) return;
+	const size = Math.max(18, Math.min(26, Math.floor(Math.min(width, height) / 5)));
+	const gap = 4;
+	let x = left + gap;
+	const y = top + gap;
+	for (const icon of icons) {
+		if (x + size > left + width - gap) break;
+		node.__gjjStoryboardReferenceIconRects ||= [];
+		node.__gjjStoryboardReferenceIconRects.push({ left: x, top: y, right: x + size, bottom: y + size, icon });
+		ctx.save();
+		ctx.fillStyle = "rgba(0,0,0,.52)";
+		ctx.strokeStyle = icon.kind === "scene" ? "rgba(56,189,248,.9)" : (icon.kind === "character" ? "rgba(250,204,21,.9)" : "rgba(167,139,250,.9)");
+		ctx.lineWidth = 1.5;
+		ctx.beginPath();
+		ctx.roundRect?.(x, y, size, size, 5);
+		if (!ctx.roundRect) ctx.rect(x, y, size, size);
+		ctx.fill();
+		ctx.stroke();
+		const image = referenceIconImage(node, icon.url);
+		if (image?.complete && image.naturalWidth > 0) {
+			drawImageCover(ctx, image, x + 2, y + 2, size - 4, size - 4, 1);
+		} else {
+			ctx.fillStyle = "rgba(255,255,255,.92)";
+			ctx.font = `${Math.max(12, size - 8)}px sans-serif`;
+			ctx.textAlign = "center";
+			ctx.textBaseline = "middle";
+			ctx.fillText(icon.fallback || "✓", x + size / 2, y + size / 2 + 0.5);
+		}
+		ctx.restore();
+		x += size + gap;
+	}
+}
+
+function storyboardReferenceIconHit(node, event) {
+	const canvas = node?.__gjjStoryboardGridCanvas;
+	const rect = canvas?.getBoundingClientRect?.();
+	if (!canvas || !rect) return null;
+	const x = (event.clientX - rect.left) * (canvas.width / Math.max(1, rect.width));
+	const y = (event.clientY - rect.top) * (canvas.height / Math.max(1, rect.height));
+	return (node.__gjjStoryboardReferenceIconRects || []).find((item) => x >= item.left && x <= item.right && y >= item.top && y <= item.bottom) || null;
+}
+
+function drawPromptOverlay(ctx, text, left, top, width, height) {
+	const pad = Math.max(5, Math.min(9, Math.floor(Math.min(width, height) / 18)));
+	const fontSize = Math.max(10, Math.min(13, Math.floor(height / 8)));
+	ctx.save();
+	ctx.font = `700 ${fontSize}px sans-serif`;
+	const lines = wrapCanvasText(ctx, text, Math.max(24, width - pad * 2), 2);
+	if (!lines.length) {
+		ctx.restore();
+		return;
+	}
+	const lineH = Math.round(fontSize * 1.28);
+	const boxH = pad * 2 + lineH * lines.length;
+	const y = Math.max(top, top + height - boxH);
+	ctx.fillStyle = "rgba(0, 0, 0, .46)";
+	ctx.fillRect(left, y, width, boxH);
+	ctx.fillStyle = "rgba(255, 255, 255, .88)";
+	ctx.textBaseline = "top";
+	for (let index = 0; index < lines.length; index += 1) {
+		ctx.fillText(lines[index], left + pad, y + pad + index * lineH);
+	}
+	ctx.restore();
+}
+
+function updateSelectedPreviewImage(node) {
+	const image = node?.__gjjStoryboardPreviewImage;
+	if (!image) return;
+	const selected = selectedCellIndex(node);
+	const url = node.__gjjStoryboardCellPreviewUrls?.[selected] || "";
+	if (!url) {
+		image.removeAttribute("src");
+		image.style.display = "none";
+		return;
+	}
+	if ((image.getAttribute("src") || "") !== url) image.src = url;
+	image.style.display = "block";
+}
+
+function replaceCurrentCellReference(node, icon, nextText) {
+	if (!icon?.source?.pattern || !nextText) return;
+	const parts = parsePromptParts(getWidget(node, "prompt")?.value || "");
+	const index = selectedCellIndex(node);
+	if (!parts[index]) return;
+	parts[index] = parts[index].replace(icon.source.pattern, nextText);
+	setWidgetValue(getWidget(node, "prompt"), serializePromptParts(parts));
+	saveParamValues(node);
+	drawPromptGridPreview(node);
+}
+
+function closeReferencePicker(node) {
+	const popup = node?.__gjjStoryboardReferencePicker;
+	if (!popup) return;
+	popup.cleanup?.();
+	popup.root?.remove();
+	node.__gjjStoryboardReferencePicker = null;
+}
+
+function referenceOptionPreviewUrl(option) {
+	return option.url ? apiMediaUrl(option.url) : "";
+}
+
+function characterViewReference(character, view) {
+	const name = characterReferenceName(character, character?.id);
+	const label = String(view?.label || view?.id || "").trim();
+	return label ? `@${name}/${label}` : `@${name}`;
+}
+
+function sceneViewReference(scene, mark = null) {
+	const name = String(scene?.name || scene?.id || "").trim();
+	const keyword = String(mark?.keyword || "").trim();
+	return keyword ? `[场景:${name}/${keyword}]` : `[场景:${name}]`;
+}
+
+function referencePickerOptions(icon) {
+	if (icon.kind === "character") {
+		const character = icon.source?.character;
+		const views = Array.isArray(character?.views) ? character.views : [];
+		return views.map((view) => ({
+			label: view.label || view.id || "视图",
+			url: view.url || character.cover || "",
+			value: characterViewReference(character, view),
+		}));
+	}
+	if (icon.kind === "scene") {
+		const scene = icon.source?.scene;
+		const cover = sceneCoverUrl(scene);
+		const options = [{ label: "整个场景", url: cover, value: sceneViewReference(scene) }];
+		for (const mark of scene?.annotations || []) {
+			options.push({ label: mark.keyword || "标注点", url: cover, value: sceneViewReference(scene, mark) });
+		}
+		return options;
+	}
+	return [];
+}
+
+function openReferencePicker(node, icon, event) {
+	closeReferencePicker(node);
+	const options = referencePickerOptions(icon);
+	if (!options.length) return;
+	const root = document.createElement("div");
+	root.style.cssText = [
+		"position:fixed",
+		"z-index:100000",
+		"width:240px",
+		"max-height:360px",
+		"overflow:auto",
+		"box-sizing:border-box",
+		"padding:6px",
+		"border:1px solid #3b5560",
+		"border-radius:7px",
+		"background:#071014",
+		"box-shadow:0 12px 36px rgba(0,0,0,.45)",
+		"display:flex",
+		"flex-direction:column",
+		"gap:4px",
+	].join(";");
+	const left = Math.max(8, Math.min(event.clientX + 8, window.innerWidth - 248));
+	const top = Math.max(8, Math.min(event.clientY + 8, window.innerHeight - 368));
+	root.style.left = `${left}px`;
+	root.style.top = `${top}px`;
+	for (const option of options) {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.style.cssText = [
+			"display:grid",
+			"grid-template-columns:34px 1fr",
+			"align-items:center",
+			"gap:7px",
+			"width:100%",
+			"min-height:38px",
+			"border:1px solid #253941",
+			"border-radius:5px",
+			"background:#142329",
+			"color:#dce7e2",
+			"text-align:left",
+			"padding:4px",
+			"cursor:pointer",
+			"font:12px/1.25 sans-serif",
+		].join(";");
+		const preview = document.createElement("div");
+		preview.style.cssText = "width:32px;height:32px;border-radius:4px;background:#0b1519;overflow:hidden;display:flex;align-items:center;justify-content:center;";
+		const url = referenceOptionPreviewUrl(option);
+		if (url) {
+			const img = document.createElement("img");
+			img.src = url;
+			img.style.cssText = "width:100%;height:100%;object-fit:cover;";
+			preview.append(img);
+		} else {
+			preview.textContent = icon.fallback || "✓";
+		}
+		const label = document.createElement("div");
+		label.textContent = option.label || option.value;
+		label.style.cssText = "min-width:0;white-space:normal;word-break:break-word;";
+		button.append(preview, label);
+		button.addEventListener("mouseenter", () => button.style.background = "#20333b");
+		button.addEventListener("mouseleave", () => button.style.background = "#142329");
+		button.addEventListener("click", (clickEvent) => {
+			clickEvent.preventDefault();
+			clickEvent.stopPropagation();
+			replaceCurrentCellReference(node, icon, option.value);
+			closeReferencePicker(node);
+		});
+		root.append(button);
+	}
+	const stop = (popupEvent) => popupEvent.stopPropagation();
+	for (const name of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "wheel"]) root.addEventListener(name, stop);
+	document.body.append(root);
+	const onPointerDown = (docEvent) => {
+		if (!root.contains(docEvent.target)) closeReferencePicker(node);
+	};
+	const onKeyDown = (docEvent) => {
+		if (docEvent.key === "Escape") closeReferencePicker(node);
+	};
+	const timer = setTimeout(() => document.addEventListener("pointerdown", onPointerDown, true), 0);
+	document.addEventListener("keydown", onKeyDown, true);
+	node.__gjjStoryboardReferencePicker = {
+		root,
+		cleanup: () => {
+			clearTimeout(timer);
+			document.removeEventListener("pointerdown", onPointerDown, true);
+			document.removeEventListener("keydown", onKeyDown, true);
+		},
+	};
 }
 
 function drawImageCover(ctx, image, left, top, width, height, bleedScale = 1) {
@@ -911,6 +1658,7 @@ function drawPromptGridPreview(node) {
 	ctx.fillRect(0, 0, canvas.width, canvas.height);
 	const { rects } = storyboardGridGeometry(count, canvas.width, canvas.height);
 	node.__gjjStoryboardGridRects = rects;
+	node.__gjjStoryboardReferenceIconRects = [];
 	const selected = selectedCellIndex(node);
 	const selectedSet = new Set(selectedCellIndices(node));
 	for (const rect of rects) {
@@ -922,17 +1670,6 @@ function drawPromptGridPreview(node) {
 		ctx.strokeStyle = isSelected ? "#38bdf8" : "#000000";
 		ctx.lineWidth = isSelected ? 3 : 2;
 		ctx.strokeRect(rect.left + 1, rect.top + 1, Math.max(1, width - 2), Math.max(1, height - 2));
-		const text = parts[rect.index] || `宫格 ${rect.index + 1}`;
-		ctx.fillStyle = "#102027";
-		ctx.font = "700 12px sans-serif";
-		const pad = Math.max(7, Math.min(12, Math.floor(Math.min(width, height) / 14)));
-		ctx.fillText(`宫格 ${rect.index + 1}`, rect.left + pad, rect.top + pad + 12);
-		ctx.fillStyle = "#40515a";
-		ctx.font = "11px sans-serif";
-		const lines = wrapCanvasText(ctx, text, Math.max(30, width - pad * 2), Math.max(2, Math.floor((height - pad * 2 - 22) / 14)));
-		for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-			ctx.fillText(lines[lineIndex], rect.left + pad, rect.top + pad + 30 + lineIndex * 14);
-		}
 	}
 	const previewUrls = node.__gjjStoryboardCellPreviewUrls || [];
 	for (const rect of rects) {
@@ -942,6 +1679,20 @@ function drawPromptGridPreview(node) {
 		if (cached?.complete && cached.naturalWidth > 0) {
 			drawImageCover(ctx, cached, rect.left + 2, rect.top + 2, Math.max(1, rect.right - rect.left - 4), Math.max(1, rect.bottom - rect.top - 4), 1.05);
 		}
+	}
+	for (const rect of rects) {
+		const text = parts[rect.index] || `宫格 ${rect.index + 1}`;
+		const icons = promptReferenceIcons(text).map((icon) => ({ ...icon, cellIndex: rect.index }));
+		drawReferenceIcons(
+			ctx,
+			node,
+			icons,
+			rect.left + 2,
+			rect.top + 2,
+			Math.max(1, rect.right - rect.left - 4),
+			Math.max(1, rect.bottom - rect.top - 4),
+		);
+		drawPromptOverlay(ctx, text, rect.left + 2, rect.top + 2, Math.max(1, rect.right - rect.left - 4), Math.max(1, rect.bottom - rect.top - 4));
 	}
 	for (const rect of rects) {
 		const isSelected = selectedSet.has(rect.index);
@@ -955,6 +1706,7 @@ function drawPromptGridPreview(node) {
 			ctx.fill();
 		}
 	}
+	updateSelectedPreviewImage(node);
 	const status = node.__gjjStoryboardPreviewStatus;
 	if (status) {
 		const selectedText = selectedSet.size > 1
@@ -1075,11 +1827,8 @@ function updateLivePreview(node, detail) {
 		cellImage.src = url;
 		node.__gjjStoryboardCellPreviewImages[index - 1] = cellImage;
 	}
-	if (image && url) {
-		image.src = url;
-		image.style.display = "block";
-	}
 	drawPromptGridPreview(node);
+	updateSelectedPreviewImage(node);
 	GJJ_Utils.refreshNode?.(node);
 }
 
@@ -1134,6 +1883,7 @@ function configureInputs(node) {
 async function applyModelFamilyPreset(node, force = false) {
 	const unetWidget = getWidget(node, "unet_name");
 	if (!unetWidget || node.__gjjStoryboardApplyingPreset) return;
+	cacheUnetOptions(node);
 	const unetName = String(unetWidget.value || "").trim();
 	if (!unetName) return;
 	node.properties ||= {};
@@ -1141,10 +1891,11 @@ async function applyModelFamilyPreset(node, force = false) {
 	node.__gjjStoryboardApplyingPreset = true;
 	try {
 		const presets = await getModelFamilyPresets();
-		const preset = matchModelFamilyPreset(unetName, presets);
+		const preset = matchModelFamilyPreset(unetName, presets) || fireredImageEditFallbackPreset(node, unetName);
 		node.properties.__gjjStoryboardLastPresetUnet = unetName;
 		if (!preset) {
 			setPresetLoraData(node, null, unetName);
+			setStoryboardLoraForModel(node, null, unetName, force);
 			return;
 		}
 		const updates = {
@@ -1162,6 +1913,7 @@ async function applyModelFamilyPreset(node, force = false) {
 			setWidgetValue(getWidget(node, name), value);
 		}
 		setPresetLoraData(node, preset, unetName);
+		setStoryboardLoraForModel(node, preset, unetName, force);
 		GJJ_Utils.refreshNode?.(node);
 	} finally {
 		node.__gjjStoryboardApplyingPreset = false;
@@ -1172,9 +1924,12 @@ function hookUnetWidget(node) {
 	const widget = getWidget(node, "unet_name");
 	if (!widget || widget.__gjjStoryboardPresetHooked) return;
 	widget.__gjjStoryboardPresetHooked = true;
+	allWidgetOptions(widget);
+	cacheUnetOptions(node);
 	const original = widget.callback;
 	widget.callback = function (value, ...args) {
 		const result = original?.apply(this, [value, ...args]);
+		refreshUnetPickerControl(node);
 		setTimeout(() => applyModelFamilyPreset(node, true), 0);
 		return result;
 	};
@@ -1247,10 +2002,16 @@ function patchNode(node) {
 	if (!node.__gjjStoryboardExecuteWidget && typeof node.addDOMWidget === "function") {
 		node.__gjjStoryboardExecuteWidget = node.addDOMWidget(EXECUTE_BUTTON_NAME, "HTML", createButtons(node), { serialize: false });
 	}
+	if (!node.__gjjStoryboardUnetPickerWidget && typeof node.addDOMWidget === "function") {
+		node.__gjjStoryboardUnetPickerWidget = node.addDOMWidget(UNET_FILTER_WIDGET_NAME, "HTML", createUnetPickerControl(node), { serialize: false });
+	}
 	if (!node.__gjjStoryboardPreviewWidget && typeof node.addDOMWidget === "function") {
 		node.__gjjStoryboardPreviewWidget = node.addDOMWidget(IMAGE_PREVIEW_NAME, "HTML", createImagePreview(node), { serialize: false });
 	}
 	applySettingsVisibility(node);
+	setWidgetHidden(getWidget(node, "unet_name"), true);
+	cacheUnetOptions(node);
+	refreshUnetPickerControl(node);
 	updateTemplateSourcePanel(node, TEMPLATE_SOURCE_FIELDS);
 	void applyModelFamilyPreset(node, false);
 	if (node.__gjjStoryboardPatched) return;

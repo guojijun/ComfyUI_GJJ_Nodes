@@ -2360,6 +2360,44 @@ function rememberCurrentMediaPreview(node) {
 	return true;
 }
 
+function rememberCurrentPreviewAsHeld(node) {
+	if (!node) {
+		return false;
+	}
+	const images = currentPreviewImages(node);
+	if (images.length) {
+		node.properties = node.properties || {};
+		node.properties[HELD_IMAGES_PROPERTY] = images.map((item) => ({ ...item }));
+		delete node.properties[HELD_TEXT_PROPERTY];
+		delete node.properties[HELD_MEDIA_PROPERTY];
+		setDirty(node);
+		return true;
+	}
+	const { kind, items } = currentPreviewMedia(node);
+	if (kind && items.length) {
+		node.properties = node.properties || {};
+		node.properties[HELD_MEDIA_PROPERTY] = {
+			kind,
+			items: items.map((item) => ({ ...item })),
+			text: String(node.__gjjAnyPreviewText || "").trim(),
+		};
+		delete node.properties[HELD_TEXT_PROPERTY];
+		delete node.properties[HELD_IMAGES_PROPERTY];
+		setDirty(node);
+		return true;
+	}
+	const text = String(node.__gjjAnyPreviewText || "").trim();
+	if (text) {
+		node.properties = node.properties || {};
+		node.properties[HELD_TEXT_PROPERTY] = text;
+		delete node.properties[HELD_IMAGES_PROPERTY];
+		delete node.properties[HELD_MEDIA_PROPERTY];
+		setDirty(node);
+		return true;
+	}
+	return false;
+}
+
 function holdCurrentPreview(node) {
 	if (String(node?.__gjjAnyPreviewKind || "") === "image" && currentPreviewImages(node).length) {
 		return holdCurrentImagePreview(node);
@@ -4775,11 +4813,15 @@ app.registerExtension({
 
 		const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
 		nodeType.prototype.onConnectionsChange = function (...args) {
+			const [, , connected] = args || [];
+			if (!connected) {
+				rememberCurrentPreviewAsHeld(this);
+			}
 			recordAnyPreviewLinkFromConnectionEvent(this, args);
 			const result = originalOnConnectionsChange?.apply(this, args);
 			recordCurrentAnyPreviewLinks(this);
 			if (!hasLinkedInputs(this)) {
-				rememberCurrentMediaPreview(this);
+				rememberCurrentPreviewAsHeld(this);
 			}
 			resetLivePreviewState(this);
 			if (!hasLinkedInputs(this)) {

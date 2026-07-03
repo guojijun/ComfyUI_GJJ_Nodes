@@ -275,6 +275,20 @@ def _wrap_caption_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.Ima
     words = re.split(r"([\\/_\-.|\s])", str(text or ""))
     lines: list[str] = []
     current = ""
+    def append_long_word(value: str) -> str:
+        chunk = ""
+        for char in value:
+            candidate = chunk + char
+            try:
+                width = draw.textbbox((0, 0), candidate, font=font)[2]
+            except Exception:
+                width = len(candidate) * 8
+            if chunk and width > max_width:
+                lines.append(chunk.strip())
+                chunk = char
+            else:
+                chunk = candidate
+        return chunk
     for word in words:
         candidate = current + word
         try:
@@ -283,7 +297,9 @@ def _wrap_caption_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.Ima
             width = len(candidate) * 8
         if current and width > max_width:
             lines.append(current.strip())
-            current = word.strip()
+            current = append_long_word(word.strip())
+        elif not current and width > max_width:
+            current = append_long_word(word.strip())
         else:
             current = candidate
     if current.strip():
@@ -416,13 +432,29 @@ def _is_flux2_family(unet_name: str | None = "", clip_type: str | None = "") -> 
     )
 
 
-def _is_krea2_family(unet_name: str | None = "", clip_type: str | None = "") -> bool:
+def _is_krea2_family(
+    unet_name: str | None = "",
+    clip_type: str | None = "",
+    preset: dict[str, Any] | None = None,
+) -> bool:
     normalized_unet = _normalize_text(unet_name)
     normalized_clip = _normalize_text(clip_type)
+    preset_text = _canonical_model_text(
+        "|".join(
+            [
+                str((preset or {}).get("id", "")),
+                str((preset or {}).get("keywords", "")),
+                str((preset or {}).get("model_name", "")),
+                str((preset or {}).get("clip_type", "")),
+            ]
+        )
+    )
     return (
         normalized_clip in {"krea", "krea2", "krea2turbo"}
         or "krea2" in normalized_unet
         or "krea2turbo" in normalized_unet
+        or "krea2" in preset_text
+        or "krea2turbo" in preset_text
     )
 
 
@@ -499,6 +531,29 @@ def _apply_zit_fallback_preset(preset: dict[str, Any], unet_name: str) -> dict[s
         "model_sampling": "aura",
         "model_shift": 3.0,
         "cfg_norm_strength": 0.0,
+        "supports_multi_image_edit": False,
+        "width": 1024,
+        "height": 1024,
+    }
+
+
+def _apply_krea2_fallback_preset(preset: dict[str, Any], unet_name: str) -> dict[str, Any]:
+    if str(preset.get("id", "")) != "generic":
+        return preset
+    if not _is_krea2_family(unet_name, preset=preset):
+        return preset
+    return {
+        **preset,
+        "id": "krea2_turbo",
+        "keywords": ["krea2", "krea2_turbo", "krea2-turbo"],
+        "clip_type": "krea2",
+        "clip_names": ["qwen3vl_4b_fp8_scaled.safetensors"],
+        "vae_name": "qwen_image_vae.safetensors",
+        "steps": 8,
+        "cfg": 1.0,
+        "sampler_name": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
         "supports_multi_image_edit": False,
         "width": 1024,
         "height": 1024,
@@ -814,18 +869,52 @@ def _is_model_effect_tester_input(prompt_graph: Any, node_id: Any, input_name: s
     return _prompt_input_source_class(prompt_graph, node_id, input_name) == "GJJ_ModelEffectTester"
 
 
-def _make_soft_error_image(width: Any, height: Any) -> torch.Tensor:
+def _make_soft_error_image(width: Any, height: Any, message: Any = "") -> torch.Tensor:
     w = max(64, min(2048, int(float(width or 512))))
     h = max(64, min(2048, int(float(height or 512))))
-    image = torch.zeros((1, h, w, 3), dtype=torch.float32)
-    image[..., 0] = 0.24
-    image[..., 1] = 0.04
-    image[..., 2] = 0.06
-    band_h = max(4, min(32, h // 20))
-    image[:, :band_h, :, 0] = 0.95
-    image[:, :band_h, :, 1] = 0.12
-    image[:, :band_h, :, 2] = 0.18
-    return image
+    text = str(message or "").strip()
+    if not text:
+        image = torch.zeros((1, h, w, 3), dtype=torch.float32)
+        image[..., 0] = 0.24
+        image[..., 1] = 0.04
+        image[..., 2] = 0.06
+        band_h = max(4, min(32, h // 20))
+        image[:, :band_h, :, 0] = 0.95
+        image[:, :band_h, :, 1] = 0.12
+        image[:, :band_h, :, 2] = 0.18
+        return image
+    try:
+        pil = Image.new("RGB", (w, h), (61, 10, 15))
+        draw = ImageDraw.Draw(pil)
+        band_h = max(4, min(32, h // 20))
+        draw.rectangle((0, 0, w, band_h), fill=(242, 31, 46))
+        title_font = _load_caption_font(max(16, min(34, w // 18)))
+        body_font = _load_caption_font(max(12, min(24, w // 28)))
+        margin = max(12, min(42, w // 16))
+        title = "生成失败"
+        title_box = draw.textbbox((0, 0), title, font=title_font)
+        title_h = title_box[3] - title_box[1]
+        max_text_width = max(40, w - margin * 2)
+        lines: list[str] = []
+        for raw_line in text.replace("\r", "\n").split("\n"):
+            wrapped = _wrap_caption_text(draw, raw_line, body_font, max_text_width)
+            lines.extend(wrapped)
+        body_font_size = int(getattr(body_font, "size", max(12, min(24, w // 28))))
+        max_lines = max(2, (h - band_h - title_h - margin * 2) // max(16, body_font_size + 6))
+        lines = lines[:max_lines]
+        if len(lines) == max_lines and len(text) > sum(len(line) for line in lines):
+            lines[-1] = lines[-1].rstrip(".。 ") + "..."
+        line_height = max(16, body_font_size + 6)
+        block_h = title_h + 10 + line_height * len(lines)
+        y = max(band_h + 8, (h - block_h) // 2)
+        draw.text((margin, y), title, fill=(255, 244, 244), font=title_font)
+        y += title_h + 10
+        for line in lines:
+            draw.text((margin, y), line, fill=(255, 214, 219), font=body_font)
+            y += line_height
+        return _pil_rgb_to_tensor(pil)
+    except Exception:
+        return _make_soft_error_image(w, h)
 
 
 def _recover_serialized_image_entries(raw_value: Any) -> list[torch.Tensor]:
@@ -874,20 +963,36 @@ def collect_image_pairs(
     unique_id: Any = None,
     batch_source_images: Any = None,
 ) -> list[dict[str, Any]]:
-    primary_value = kwargs.get("image_01")
-    primary_images = [
-        image
-        for image in _split_image_batch(primary_value)
-        if isinstance(image, torch.Tensor) and image.ndim in (3, 4)
+    image_input_names = [
+        name
+        for name in kwargs
+        if re.match(r"^image_\d+$", str(name or "")) and kwargs.get(name) is not None
     ]
-    recovered_primary_images: list[torch.Tensor] = []
-    if not primary_images:
-        recovered_primary_images = _recover_serialized_image_entries(
-            batch_source_images
-        ) or _recover_multi_image_loader_primary_batch(prompt_graph, unique_id)
+    image_input_names.sort(key=lambda name: int(str(name).rsplit("_", 1)[-1]))
     pairs: list[dict[str, Any]] = []
-    source_images = primary_images or recovered_primary_images
-    for batch_index, image in enumerate(source_images):
+    for source_input_index, input_name in enumerate(image_input_names):
+        images = [
+            image
+            for image in _split_image_batch(kwargs.get(input_name))
+            if isinstance(image, torch.Tensor) and image.ndim in (3, 4)
+        ]
+        for batch_index, image in enumerate(images):
+            pairs.append(
+                {
+                    "slot_index": len(pairs),
+                    "source_input_index": source_input_index,
+                    "source_batch_index": batch_index,
+                    "image": image,
+                }
+            )
+    if pairs:
+        return pairs
+
+    recovered_primary_images: list[torch.Tensor] = []
+    recovered_primary_images = _recover_serialized_image_entries(
+        batch_source_images
+    ) or _recover_multi_image_loader_primary_batch(prompt_graph, unique_id)
+    for batch_index, image in enumerate(recovered_primary_images):
         pairs.append(
             {
                 "slot_index": len(pairs),
@@ -1516,7 +1621,7 @@ def _is_boogu_image_edit_turbo_family(preset: dict[str, Any], unet_name: str = "
             ]
         )
     )
-    return "booguimageeditturbo" in text
+    return "booguimageedit" in text
 
 
 def _empty_sd3_latent(width: int, height: int, batch_size: int) -> dict[str, Any]:
@@ -2527,19 +2632,21 @@ class GJJ_LazyImageStudio:
             raise RuntimeError("Flux2 多图参考模式至少需要一张有效参考图。")
         positive = self._encode_text_conditioning(clip, prompt)
         negative = self._encode_negative_conditioning(clip, positive, negative_prompt)
-        resolved_width = max(16, int(width))
-        resolved_height = max(16, int(height))
+        resolved_width, resolved_height = _largest_pair_canvas_size(
+            ordered_pairs, width, height
+        )
         reference_latents: list[torch.Tensor] = []
         reference_sizes: list[str] = []
-        reference_short_edge = min(resolved_width, resolved_height)
         for pair in ordered_pairs:
             image = pair["image"]
-            # 所有参考图统一按输出画布短边等比缩放。
-            # 不裁切、不拉伸、不补边，也不再把辅助图压缩到较小像素预算。
-            scaled_image = _scale_image_to_short_edge(
-                image,
-                short_edge=reference_short_edge,
-                resolution_steps=FLUX2_REFERENCE_RESOLUTION_STEPS,
+            # F2K/Flux2 多图参考统一使用等比缩放补边，避免不同宽高比参考图被拉伸。
+            scaled_image, _ignore_mask, _ignore_outpaint = (
+                _prepare_primary_image_for_target(
+                    image,
+                    int(resolved_width),
+                    int(resolved_height),
+                    None,
+                )
             )
 
             reference_latent = VAEEncode().encode(vae, scaled_image)[0]["samples"]
@@ -2551,16 +2658,13 @@ class GJJ_LazyImageStudio:
             positive = node_helpers.conditioning_set_values(
                 positive, {"reference_latents": reference_latents}, append=True
             )
-            negative = node_helpers.conditioning_set_values(
-                negative, {"reference_latents": reference_latents}, append=True
-            )
         latent_out = EmptyFlux2LatentImage(
             int(resolved_width), int(resolved_height), int(batch_size)
         )
         print(
             "[GJJ] Flux2/F2K 多图参考："
             f"主图+参考图 {len(reference_latents)} 张，"
-            f"编码尺寸 {', '.join(reference_sizes)}，"
+            f"等比补边编码尺寸 {', '.join(reference_sizes)}，"
             f"输出 {resolved_width}x{resolved_height}，batch={max(1, int(batch_size))}"
         )
         return positive, negative, latent_out, resolved_width, resolved_height
@@ -2604,6 +2708,7 @@ class GJJ_LazyImageStudio:
         mask=None,
         disable_reference_auto_mask=False,
         force_empty_latent_reference=False,
+        disable_equal_reference_canvas=False,
         keep_model_loaded=False,
         test_config="",
         prompt_graph=None,
@@ -2635,12 +2740,14 @@ class GJJ_LazyImageStudio:
         mask = _unwrap_list_input(mask)
         disable_reference_auto_mask = _unwrap_list_input(disable_reference_auto_mask)
         force_empty_latent_reference = _unwrap_list_input(force_empty_latent_reference)
+        disable_equal_reference_canvas = _unwrap_list_input(disable_equal_reference_canvas)
         keep_model_loaded = _unwrap_list_input(keep_model_loaded)
         test_config = _unwrap_list_input(test_config)
         prompt_graph = _unwrap_list_input(prompt_graph)
         unique_id = _unwrap_list_input(unique_id)
         extra_pnginfo = _unwrap_list_input(extra_pnginfo)
         keep_model_loaded = _as_bool(keep_model_loaded)
+        disable_equal_reference_canvas = _as_bool(disable_equal_reference_canvas)
 
         test_config_data: dict[str, Any] = {}
         if str(test_config or "").strip():
@@ -2696,8 +2803,26 @@ class GJJ_LazyImageStudio:
                     try:
                         item_lora_data = lora_data
                         item_unet_name = unet_name
+                        item_clip_name1 = clip_name1
+                        item_vae_name = vae_name
+                        item_steps = steps
+                        item_cfg = cfg
+                        item_sampler_name = sampler_name
+                        item_scheduler = scheduler
+                        item_denoise = denoise
                         if mode == "unet":
                             item_unet_name = model_name
+                            item_clip_name1 = ""
+                            item_vae_name = ""
+                            item_preset = match_model_family(item_unet_name)
+                            item_preset = _apply_f2k_fallback_preset(item_preset, item_unet_name)
+                            item_preset = _apply_zit_fallback_preset(item_preset, item_unet_name)
+                            item_preset = _apply_krea2_fallback_preset(item_preset, item_unet_name)
+                            item_steps = int(item_preset.get("steps", steps) or steps)
+                            item_cfg = float(item_preset.get("cfg", cfg) or cfg)
+                            item_sampler_name = str(item_preset.get("sampler_name", sampler_name) or sampler_name)
+                            item_scheduler = str(item_preset.get("scheduler", scheduler) or scheduler)
+                            item_denoise = float(item_preset.get("denoise", denoise) or denoise)
                         else:
                             item_lora_data = json.dumps(
                                 [{"enabled": True, "name": model_name, "strength": 1.0}],
@@ -2712,14 +2837,14 @@ class GJJ_LazyImageStudio:
                             batch_size,
                             item_unet_name,
                             unet_dtype,
-                            clip_name1,
-                            vae_name,
+                            item_clip_name1,
+                            item_vae_name,
                             test_seed,
-                            steps,
-                            cfg,
-                            sampler_name,
-                            scheduler,
-                            denoise,
+                            item_steps,
+                            item_cfg,
+                            item_sampler_name,
+                            item_scheduler,
+                            item_denoise,
                             grow_mask_by,
                             lora_chain_config=lora_chain_config,
                             lora_data=item_lora_data,
@@ -2843,6 +2968,7 @@ class GJJ_LazyImageStudio:
             preset = match_model_family(unet_name)
             preset = _apply_f2k_fallback_preset(preset, unet_name)
             preset = _apply_zit_fallback_preset(preset, unet_name)
+            preset = _apply_krea2_fallback_preset(preset, unet_name)
             clip_models = _list_lazy_clip_models() or [DEFAULT_CLIP_NAME]
             vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
             # 确保 loras 目录存在并获取文件列表
@@ -2894,7 +3020,7 @@ class GJJ_LazyImageStudio:
                 resolved_clip_names,
                 str(preset.get("clip_type", "stable_diffusion")),
             )
-            if _is_krea2_family(unet_name, resolved_clip_type):
+            if _is_krea2_family(unet_name, resolved_clip_type, preset):
                 resolved_clip_type = "krea2"
             is_flux2_runtime = _is_flux2_family(
                 unet_name,
@@ -3062,7 +3188,7 @@ class GJJ_LazyImageStudio:
                     local_width = int(boogu_width)
                     local_height = int(boogu_height)
                     boogu_turbo_sample = True
-                elif pairs and _is_krea2_family(unet_name, resolved_clip_type):
+                elif pairs and _is_krea2_family(unet_name, resolved_clip_type, preset):
                     _send_status(
                         unique_id,
                         f"4/6 编码 Krea2 图生图条件{status_suffix}（{len(pairs)} 张，溶图模式）...",
@@ -3197,7 +3323,7 @@ class GJJ_LazyImageStudio:
                     flux2_width, flux2_height = flux2_sample_size
                     _send_status(
                         unique_id,
-                        f"5/6 按 Flux2 工作流采样{status_suffix}（{flux2_width} x {flux2_height}）...",
+                        f"5/6 按 Flux2 工作流采样{status_suffix}（{flux2_width} x {flux2_height}，heun）...",
                     )
                     sampled_latent = self._sample_flux2_reference_workflow(
                         model=sample_model,
@@ -3209,7 +3335,7 @@ class GJJ_LazyImageStudio:
                         steps=effective_steps,
                         seed=sample_seed,
                         cfg=float(cfg),
-                        sampler_name=str(preset.get("sampler_name", "lcm") or "lcm"),
+                        sampler_name="heun",
                     )
                 elif krea2_reference_sample:
                     _send_status(
@@ -3251,7 +3377,21 @@ class GJJ_LazyImageStudio:
             final_width = int(width)
             final_height = int(height)
             for prompt_index, prompt_text in enumerate(prompt_items):
-                generated_image, final_width, final_height = generate_one_prompt(prompt_text, prompt_index)
+                try:
+                    generated_image, final_width, final_height = generate_one_prompt(prompt_text, prompt_index)
+                except Exception as exc:
+                    if _is_memory_allocation_error(exc):
+                        raise
+                    first_line = str(exc).splitlines()[0] if str(exc).splitlines() else str(exc)
+                    _send_status(
+                        unique_id,
+                        f"第 {prompt_index + 1}/{len(prompt_items)} 张生成失败，已输出错误占位图：{first_line}",
+                    )
+                    error_text = f"第 {prompt_index + 1}/{len(prompt_items)} 张\n{first_line}"
+                    generated_image = _make_soft_error_image(final_width, final_height, error_text)
+                    repeat_count = max(1, int(batch_size))
+                    if repeat_count > 1:
+                        generated_image = generated_image.repeat(repeat_count, 1, 1, 1)
                 generated_images.append(generated_image)
             image = torch.cat(generated_images, dim=0) if len(generated_images) > 1 else generated_images[0]
             width = int(final_width)

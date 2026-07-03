@@ -52,8 +52,8 @@ SCENE_LINE_RE = re.compile(
 )
 CHARACTER_REF_RE = re.compile(r"@([0-9A-Za-z\u4e00-\u9fff._-]+)(?:/([0-9A-Za-z\u4e00-\u9fff._-]+))?")
 SCENE_REF_RE = re.compile(
-    r"(?:🌏|🌍|🌎)([0-9A-Za-z\u4e00-\u9fff._-]+)(?:/([0-9A-Za-z\u4e00-\u9fff._-]+))?"
-    r"|\[场景[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)(?:/([0-9A-Za-z\u4e00-\u9fff._-]+))?\]"
+    r"(?:🌏|🌍|🌎)([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?"
+    r"|\[场景[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?\]"
 )
 SCENE_VIEW_REF_RE = re.compile(
     r"\[\s*([^\[\]/:：]+?)\s*[:：]\s*"
@@ -71,7 +71,7 @@ COSTUME_REF_RE = re.compile(
     r"|\[costume[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]",
     re.IGNORECASE,
 )
-SCENE_BRACKET_REF_RE = re.compile(r"\[([0-9A-Za-z\u4e00-\u9fff._-]+)(?:/([0-9A-Za-z\u4e00-\u9fff._-]+))?\]")
+SCENE_BRACKET_REF_RE = re.compile(r"\[([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?\]")
 CHARACTER_VIEW_SUFFIX_RE = re.compile(r"^(.+?)([a-gA-G])$")
 CHARACTER_SPACED_VIEW_RE = re.compile(r"^[ \t　]+([a-gA-G])(?=$|[\s,，.。;；!！?？]|[\u4e00-\u9fff])")
 MULTI_PERSON_KEYWORDS = (
@@ -115,8 +115,9 @@ BACK_LABEL_KEYWORDS = ("背面", "后视", "背", "背部", "背影", "后背", 
 ANGLE_LABEL_KEYWORDS = ("45", "斜侧", "侧身", "angle")
 CELL_BLEED_PROMPT = "按当前宫格画幅构图，画面铺满宫格；主体和关键文字/道具不要贴边，四边保留约5%的安全出血空间。"
 GENDER_PREFIX_RE = re.compile(r"^\s*(?:♀️|♂️|♀|♂)\s*")
-QWEN_NEXT_SCENE_LORA = "next-scene_lora-v2-3000.safetensors"
-QWEN_NEXT_SCENE_PROMPT_PREFIX = "下一个场景："
+NEXT_SCENE_LORA = "next-scene_lora-v2-3000.safetensors"
+NEXT_SCENE_PROMPT_PREFIX = "下一个场景："
+STORYBOARD_LORA_NONE = ""
 
 
 def _send_status(unique_id: Any, text: str) -> None:
@@ -709,6 +710,17 @@ def _prompt_wants_back(text: str) -> bool:
     return any(keyword.casefold() in lowered for keyword in BACK_KEYWORDS)
 
 
+def _prompt_without_character_refs(text: str) -> str:
+    return CHARACTER_REF_RE.sub("", _safe_text(text))
+
+
+def _reference_wants_back(prompt_text: str, explicit_label: str = "") -> bool:
+    label = _safe_text(explicit_label).casefold()
+    if label:
+        return any(keyword.casefold() in label for keyword in BACK_KEYWORDS + BACK_LABEL_KEYWORDS)
+    return _prompt_wants_back(_prompt_without_character_refs(prompt_text))
+
+
 def _prompt_wants_side(text: str) -> bool:
     lowered = text.casefold()
     return any(keyword.casefold() in lowered for keyword in SIDE_KEYWORDS)
@@ -717,6 +729,13 @@ def _prompt_wants_side(text: str) -> bool:
 def _prompt_wants_closeup(text: str) -> bool:
     lowered = text.casefold()
     return any(keyword.casefold() in lowered for keyword in CLOSEUP_KEYWORDS)
+
+
+def _reference_wants_closeup(prompt_text: str, explicit_label: str = "") -> bool:
+    label = _safe_text(explicit_label).casefold()
+    if label:
+        return any(keyword.casefold() in label for keyword in HEAD_LABEL_KEYWORDS + CLOSEUP_KEYWORDS)
+    return _prompt_wants_closeup(_prompt_without_character_refs(prompt_text))
 
 
 def _side_view_keywords(text: str) -> tuple[str, ...]:
@@ -881,10 +900,13 @@ def _crop_character_reference_alpha(image: Image.Image) -> Image.Image:
         and ((comp[3] - comp[1]) > image.height * 0.08 or comp[4] > image_area * 0.01)
     ]
     keep = upper or useful
-    left = max(0, min(comp[0] for comp in keep) - 8)
-    top = max(0, min(comp[1] for comp in keep) - 8)
-    right = min(image.width, max(comp[2] for comp in keep) + 8)
-    bottom = min(image.height, max(comp[3] for comp in keep) + 8)
+    pad_x = max(12, int(round(image.width * 0.025)))
+    pad_top = max(20, int(round(image.height * 0.04)))
+    pad_bottom = max(16, int(round(image.height * 0.025)))
+    left = max(0, min(comp[0] for comp in keep) - pad_x)
+    top = max(0, min(comp[1] for comp in keep) - pad_top)
+    right = min(image.width, max(comp[2] for comp in keep) + pad_x)
+    bottom = min(image.height, max(comp[3] for comp in keep) + pad_bottom)
     if right <= left or bottom <= top:
         return image
     return image.crop((left, top, right, bottom))
@@ -892,14 +914,15 @@ def _crop_character_reference_alpha(image: Image.Image) -> Image.Image:
 
 def _select_character_view(character: dict[str, Any], prompt_text: str, explicit_label: str = "") -> dict[str, Any] | None:
     selected: dict[str, Any] | None = None
+    global_prompt = _prompt_without_character_refs(prompt_text)
     if explicit_label:
         return _find_view(character, (), explicit_label)
-    elif _prompt_wants_closeup(prompt_text):
+    elif _prompt_wants_closeup(global_prompt):
         selected = _find_view(character, HEAD_LABEL_KEYWORDS)
-    elif _prompt_wants_back(prompt_text):
+    elif _prompt_wants_back(global_prompt):
         selected = _find_view(character, BACK_LABEL_KEYWORDS)
-    elif _prompt_wants_side(prompt_text):
-        selected = _find_view(character, _side_view_keywords(prompt_text))
+    elif _prompt_wants_side(global_prompt):
+        selected = _find_view(character, _side_view_keywords(global_prompt))
     else:
         selected = _find_view(character, FRONT_LABEL_KEYWORDS)
     if selected is None:
@@ -931,10 +954,11 @@ def _select_character_face_view(character: dict[str, Any]) -> dict[str, Any] | N
 def _select_character_pose_view(character: dict[str, Any], prompt_text: str, explicit_label: str = "") -> dict[str, Any] | None:
     if explicit_label:
         return _find_view(character, (), explicit_label)
-    if _prompt_wants_back(prompt_text):
+    global_prompt = _prompt_without_character_refs(prompt_text)
+    if _prompt_wants_back(global_prompt):
         selected = _find_view(character, BACK_LABEL_KEYWORDS)
-    elif _prompt_wants_side(prompt_text):
-        selected = _find_view(character, _side_view_keywords(prompt_text))
+    elif _prompt_wants_side(global_prompt):
+        selected = _find_view(character, _side_view_keywords(global_prompt))
     else:
         selected = _find_view(character, FRONT_LABEL_KEYWORDS)
     if selected is None:
@@ -948,8 +972,13 @@ def _character_reference_views(
     prompt_text: str,
     explicit_label: str = "",
 ) -> list[tuple[str, dict[str, Any]]]:
-    face_view = _select_character_face_view(character)
     pose_view = _select_character_pose_view(character, prompt_text, explicit_label)
+    if _reference_wants_back(prompt_text, explicit_label):
+        return [("pose", pose_view)] if pose_view is not None else []
+    if not _reference_wants_closeup(prompt_text, explicit_label):
+        face_view = _select_character_face_view(character)
+        return [("identity", face_view)] if face_view is not None else ([("pose", pose_view)] if pose_view is not None else [])
+    face_view = _select_character_face_view(character)
     result: list[tuple[str, dict[str, Any]]] = []
     if face_view is not None:
         result.append(("face", face_view))
@@ -967,17 +996,24 @@ def _character_reference_images(character: dict[str, Any], prompt_text: str, exp
     return images
 
 
-def _pil_fit_cell(image: Image.Image, width: int, height: int, contain: bool = False) -> Image.Image:
+def _pil_fit_cell(image: Image.Image, width: int, height: int, contain: bool = False, top_bias: bool = False) -> Image.Image:
     source = image.convert("RGB")
     if contain:
-        scale = min(width / max(1, source.width), height / max(1, source.height))
+        safe_w = max(1, width - 28)
+        safe_h = max(1, height - 40)
+        scale = min(safe_w / max(1, source.width), safe_h / max(1, source.height))
     else:
         scale = max(width / max(1, source.width), height / max(1, source.height)) * 1.02
     new_size = (max(1, int(round(source.width * scale))), max(1, int(round(source.height * scale))))
     resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
     resized = source.resize(new_size, resampling)
     canvas = Image.new("RGB", (width, height), (255, 255, 255))
-    canvas.paste(resized, ((width - resized.width) // 2, (height - resized.height) // 2))
+    x = (width - resized.width) // 2
+    if contain and top_bias:
+        y = min(max(18, int(round(height * 0.055))), max(0, height - resized.height))
+    else:
+        y = (height - resized.height) // 2
+    canvas.paste(resized, (x, y))
     return canvas
 
 
@@ -987,7 +1023,7 @@ def _make_character_reference_tensor(images: list[Image.Image], contain_images: 
     cell_w, cell_h = 512, 640
     tensors: list[torch.Tensor] = []
     for image in images:
-        cell = _pil_fit_cell(image, cell_w, cell_h, contain=contain_images)
+        cell = _pil_fit_cell(image, cell_w, cell_h, contain=True, top_bias=True)
         array = np.asarray(cell).astype(np.float32) / 255.0
         tensors.append(torch.from_numpy(array).unsqueeze(0))
     return torch.cat(tensors, dim=0).contiguous()
@@ -1592,6 +1628,7 @@ def _scene_reference_tensor_for_prompt(prompt_text: str, width: int, height: int
     reference_images: list[Image.Image] = []
     prompt_lines: list[str] = []
     character_refs = _extract_character_refs(prompt_text)
+    consumed_characters = False
     for scene_name, place in scene_refs[:1]:
         scene = _find_scene(scene_name)
         if not scene:
@@ -1599,12 +1636,27 @@ def _scene_reference_tensor_for_prompt(prompt_text: str, width: int, height: int
         background, label = _scene_background_image(scene, place, width, height)
         if background is None:
             continue
-        character_board, character_parts, character_bindings = _make_scene_character_board(prompt_text, character_refs, width, height, background)
+        use_separate_references = len(character_refs) <= 2
+        character_board, character_parts, character_bindings = (
+            (None, [], [])
+            if use_separate_references
+            else _make_scene_character_board(prompt_text, character_refs, width, height, background)
+        )
         if character_board is not None:
             reference_images.append(character_board)
+            consumed_characters = True
         reference_images.append(background)
         display = _safe_text(scene.get("name") or scene.get("id") or scene_name).strip()
-        if character_parts:
+        if use_separate_references:
+            anchor_rule = f"本格指定的场景锚点是“{label}”，最终画面的主要空间和人物互动位置必须围绕“{label}”，不要漂移到同一场景其它未指定物品旁边。" if label else ""
+            prompt_lines.append(
+                f"参考图使用规则：image1 是场景库“{display}”{('的“' + label + '”位置') if label else ''}背景参考，"
+                f"必须优先作为最终画面的背景使用。{anchor_rule}"
+                "Strict binding: image1 is the background/environment only. All characters from later reference images must be placed into image1's environment."
+                "后续角色参考图必须作为人物身份、服装、姿态和朝向参考放入 image1 背景中；"
+                "不要把角色参考图的原背景当作最终背景，不要把参考图裁切、大头照或多余人物复制进画面。"
+            )
+        elif character_parts:
             anchor_rule = f"本格指定的场景锚点是“{label}”，最终画面的主要空间和人物互动位置必须围绕“{label}”，不要漂移到同一场景的床、椅子、窗户或其它未指定物品旁边。" if label else ""
             prompt_lines.append(
                 f"参考图使用规则：image1 是人物与场景的合成构图参考，"
@@ -1633,7 +1685,7 @@ def _scene_reference_tensor_for_prompt(prompt_text: str, width: int, height: int
     tensor = _pil_list_to_reference_tensor(reference_images)
     if prompt_lines:
         prompt_text = f"{prompt_text}\n\n场景库参考要求：\n" + "\n".join(prompt_lines)
-    return prompt_text, tensor, False
+    return prompt_text, tensor, consumed_characters
 
 
 def _extract_character_refs(text: str) -> list[tuple[str, str]]:
@@ -1713,7 +1765,7 @@ def _storyboard_character_context(prompts: list[str]) -> list[tuple[str, str]]:
 
 def _resolved_character_refs(prompt_text: str, storyboard_refs: list[tuple[str, str]]) -> list[tuple[str, str]]:
     refs = _extract_character_refs(prompt_text)
-    if _prompt_mentions_multi_person(prompt_text) and storyboard_refs:
+    if not refs and _prompt_mentions_multi_person(prompt_text) and storyboard_refs:
         refs = _merge_character_refs(refs, storyboard_refs, 2)
     if not refs:
         return []
@@ -1815,6 +1867,8 @@ def _character_prompt_and_reference(
     contain_reference_images: bool = False,
     first_reference_image_index: int = 1,
     include_reference_images: bool = True,
+    qwen_reference_binding: bool = False,
+    max_reference_images: int | None = None,
 ) -> tuple[str, torch.Tensor | None]:
     refs = _resolved_character_refs(prompt_text, storyboard_refs or [])
     if not refs:
@@ -1822,11 +1876,15 @@ def _character_prompt_and_reference(
     prompt_lines: list[str] = []
     images: list[Image.Image] = []
     resolved_characters: list[tuple[str, dict[str, Any]]] = []
+    qwen_bindings: list[str] = []
     image_slot = max(1, int(first_reference_image_index or 1))
+    remaining_reference_images = None if max_reference_images is None else max(0, int(max_reference_images or 0))
     for name, explicit_view in refs:
         character = _find_character(name)
         if not character:
             continue
+        if remaining_reference_images is not None and remaining_reference_images <= 0:
+            break
         resolved_characters.append((name, character))
         display_name = _character_display_name(character, name)
         notes = _safe_text(character.get("notes") or "").strip()
@@ -1838,23 +1896,45 @@ def _character_prompt_and_reference(
         character_images: list[Image.Image] = []
         reference_view_roles = _character_reference_views(character, prompt_text, explicit_view) if include_reference_images else []
         for role, view in reference_view_roles:
+            if remaining_reference_images is not None and remaining_reference_images <= 0:
+                break
             image = _open_character_view(character, view)
             if image is None:
                 continue
             character_images.append(image)
+            if remaining_reference_images is not None:
+                remaining_reference_images -= 1
             image_ref = f"image{image_slot}"
             view_label = _view_label(view)
-            if role == "face":
+            qwen_bindings.append(
+                f"- {image_ref} = character \"{display_name}\" ONLY. Use this image to lock this exact person's identity, gender, age, hair, beard, headwear, clothing identity and facial features. Do not replace {display_name} with another person or a woman."
+            )
+            if role == "identity":
                 prompt_lines.append(
-                    f"{display_name}：{image_ref} 是脸部特写/头像身份参考，必须优先用于锁定五官、胡须、发型、年龄感和神态。"
+                    f"{display_name}：{image_ref} 是“{display_name}”的身份锁定参考，只用于锁定五官、头部轮廓、发型、胡须、帽子/头盔、年龄感和神态；"
+                    "最终画面的身体姿态、远近、左右位置和朝向必须服从本格文字描述，不要照搬这张身份图的头像裁切、背景或构图。"
+                )
+            elif role == "face":
+                prompt_lines.append(
+                    f"{display_name}：{image_ref} 是“{display_name}”的脸部特写/头像身份参考，只用于锁定五官、胡须、发型、年龄感和神态。"
                 )
             else:
                 prompt_lines.append(
-                    f"{display_name}：{image_ref} 是全身/姿态/朝向参考，必须用于锁定服装配色、身形、站姿和{view_label or '当前视角'}。"
+                    f"{display_name}：{image_ref} 是“{display_name}”的全身/姿态/朝向参考，必须用于锁定头部轮廓、发型、胡须、帽子/头盔、服装配色、身形、站姿和{view_label or '当前视角'}。"
                 )
             image_slot += 1
         if character_images:
-            prompt_lines.append(f"{display_name}：生成时必须同时参考该角色的大头身份图和全身姿态图；脸按大头图，身体和朝向按全身图。")
+            if _reference_wants_back(prompt_text, explicit_view):
+                prompt_lines.append(
+                    f"{display_name}：本格是背面/背影/背对镜头视角，只参考该角色的背面或全身姿态图；不要把正脸头像、大头照或参考图里的第二个人拼进最终画面。"
+                )
+            else:
+                if _reference_wants_closeup(prompt_text, explicit_view):
+                    prompt_lines.append(f"{display_name}：生成时必须同时参考该角色的大头身份图和全身姿态图；脸按大头图，身体和朝向按全身图。")
+                else:
+                    prompt_lines.append(
+                        f"{display_name}：本格不是头像/特写，优先用身份参考图锁定人物身份；动作、站姿、远近、左右位置和朝向按本格文字执行，不要生成额外头像或第二个身体。"
+                    )
         if explicit_view and selected_view is not None:
             view_index = _character_view_position(character, selected_view)
             view_label = _view_label(selected_view)
@@ -1876,9 +1956,17 @@ def _character_prompt_and_reference(
         role_names = "、".join(_character_display_name(character, name) for name, character in resolved_characters)
         layout_lines = _character_layout_lines(resolved_characters, _character_position_hints(prompt_text))
         layout_text = f"\n多人默认站位：\n{chr(10).join(layout_lines)}" if layout_lines else ""
+        qwen_binding_text = ""
+        if qwen_reference_binding and qwen_bindings:
+            qwen_binding_text = (
+                "Qwen strict reference binding table:\n"
+                + "\n".join(qwen_bindings)
+                + "\nOnly the listed character identities are allowed as main people in the final image. Never swap identities between images. Never invent an extra man or woman. Keep each named character's gender, age, beard, hair, headwear and face from their own bound reference image.\n\n"
+            )
         prompt_text = (
-            f"{prompt_text}\n\n"
+            f"{qwen_binding_text}{prompt_text}\n\n"
             f"角色库参考要求：本格涉及角色为 {role_names}。生成画面必须严格保持下列人物特色；如果原文写“两人/二人/双方”，默认指这些角色。不要把参考图的构图、背景或裁切直接照搬；忽略参考图里的透明棋盘格、灰白方格、透明背景预览、文字、标签、水印和说明字样，最终画面禁止出现这些内容。\n"
+            f"最终画面只允许本格涉及的这些角色作为主要人物；参考图只用于身份、服装、姿态和朝向，不得把参考图里的头像裁切、第二个身体或多余人物复制进画面。\n"
             f"{detail}{layout_text}"
         )
     return prompt_text, reference_tensor
@@ -2293,9 +2381,10 @@ def _storyboard_cache_signature(
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _lazy_optional_images(scene: Any, reference: Any, width: int, height: int) -> dict[str, torch.Tensor]:
-    scene_images = [_resize_crop_short_edge(image, width, height) for image in _split_media(scene)]
-    reference_images = [_resize_crop_short_edge(image, width, height) for image in _split_media(reference)]
+def _lazy_optional_images(scene: Any, reference: Any, width: int, height: int, fit_reference: bool = False) -> dict[str, torch.Tensor]:
+    resize = _resize_fit_reference if fit_reference else _resize_crop_short_edge
+    scene_images = [resize(image, width, height) for image in _split_media(scene)]
+    reference_images = [resize(image, width, height) for image in _split_media(reference)]
     images = [*scene_images, *reference_images]
     if not images:
         return {}
@@ -2316,6 +2405,14 @@ def _media_count(value: Any) -> int:
     return len(_split_media(value))
 
 
+def _media_slice(value: Any, limit: int) -> list[torch.Tensor] | None:
+    count = max(0, int(limit or 0))
+    if count <= 0:
+        return None
+    items = _split_media(value)[:count]
+    return items or None
+
+
 def _append_scene_reference_prompt(prompt_text: str, scene_count: int) -> str:
     if int(scene_count or 0) <= 0:
         return prompt_text
@@ -2323,7 +2420,40 @@ def _append_scene_reference_prompt(prompt_text: str, scene_count: int) -> str:
     return (
         f"{prompt_text}\n\n"
         f"场景背景参考要求：{scene_ref} 是本格的背景/环境/地貌/光线参考，必须优先作为最终画面的背景使用。"
-        "人物只能放入这个场景背景中；不要丢掉背景，不要改成纯色、空白、室内、雪地、角色图自带背景或无关环境。"
+        "人物和动作只能发生在这个场景背景中；即使原提示是比武、打斗、对峙、奔跑或交谈，也必须保留这个背景。"
+        "不要丢掉背景，不要改成纯色、空白、室内、雪地、庭院、擂台、角色图自带背景或无关环境。"
+    )
+
+
+def _image_ref_range(start_index: int, count: int) -> str:
+    start = max(1, int(start_index or 1))
+    total = max(0, int(count or 0))
+    if total <= 0:
+        return ""
+    if total == 1:
+        return f"image{start}"
+    return f"image{start}-image{start + total - 1}"
+
+
+def _append_plain_reference_prompt(
+    prompt_text: str,
+    reference_start_index: int,
+    reference_count: int,
+    has_scene_background: bool,
+) -> str:
+    ref = _image_ref_range(reference_start_index, reference_count)
+    if not ref:
+        return prompt_text
+    if has_scene_background:
+        return (
+            f"{prompt_text}\n\n"
+            f"补充参考图要求：{ref} 是本格的补充视觉参考，只用于借鉴构图、动作、道具、服饰细节、光影、色调或画面气质；"
+            "不得替代已经指定的场景背景，不得把补充参考图的完整背景、无关人物或多余主体复制进最终画面。"
+        )
+    return (
+        f"{prompt_text}\n\n"
+        f"补充参考图要求：{ref} 是本格的主要视觉参考，可用于确定构图、环境氛围、动作、道具、服饰细节、光影和色调；"
+        "如果提示词另有明确人物或场景要求，以提示词为准，不要复制参考图中的无关人物或多余主体。"
     )
 
 
@@ -2338,18 +2468,54 @@ def _normalize_model_text(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", _safe_text(value).casefold())
 
 
-def _is_qwen_image_edit_unet(unet_name: Any) -> bool:
+def _is_next_scene_image_edit_unet(unet_name: Any) -> bool:
     text = _normalize_model_text(unet_name)
-    return "qwen" in text and "image" in text and "edit" in text
+    return (("qwen" in text or "firered" in text) and "image" in text and "edit" in text)
 
 
-def _prefix_qwen_next_scene_prompt(prompt_text: str, unet_name: Any) -> str:
+def _prefix_next_scene_prompt(prompt_text: str, unet_name: Any) -> str:
     text = _safe_text(prompt_text).strip()
-    if not _is_qwen_image_edit_unet(unet_name):
+    if not _is_next_scene_image_edit_unet(unet_name):
         return text
-    if text.startswith(QWEN_NEXT_SCENE_PROMPT_PREFIX):
+    if text.startswith(NEXT_SCENE_PROMPT_PREFIX):
         return text
-    return f"{QWEN_NEXT_SCENE_PROMPT_PREFIX}\n{text}"
+    return f"{NEXT_SCENE_PROMPT_PREFIX}\n{text}"
+
+
+def _resolve_model_by_keywords(models: list[Any], keywords: tuple[str, ...], fallback: Any) -> Any:
+    choices = [str(item) for item in (models or []) if str(item or "").strip()]
+    if not choices:
+        return fallback
+    fallback_text = _safe_text(fallback).strip()
+    if fallback_text in choices:
+        fallback_value = fallback_text
+    else:
+        fallback_value = choices[0]
+    for keyword in keywords:
+        wanted = _normalize_model_text(keyword)
+        if not wanted:
+            continue
+        for item in choices:
+            if wanted in _normalize_model_text(item):
+                return item
+    return fallback_value
+
+
+def _ensure_next_scene_image_edit_clip_vae(unet_name: Any, clip_name1: Any, vae_name: Any) -> tuple[Any, Any]:
+    text = _normalize_model_text(unet_name)
+    if not ("firered" in text and "image" in text and "edit" in text):
+        return clip_name1, vae_name
+    clip_name1 = _resolve_model_by_keywords(
+        _list_lazy_clip_models(),
+        ("qwen_2.5_vl", "qwen25vl", "qwen"),
+        clip_name1,
+    )
+    vae_name = _resolve_model_by_keywords(
+        list_vae_models(),
+        ("qwen_image_vae", "qwenimagevae", "qwen"),
+        vae_name,
+    )
+    return clip_name1, vae_name
 
 
 def _resolve_storyboard_lora_name(preferred: str) -> str:
@@ -2371,6 +2537,21 @@ def _resolve_storyboard_lora_name(preferred: str) -> str:
         if wanted_base in key:
             return item
     return wanted
+
+
+def _storyboard_lora_choices(default_unet_name: Any = "") -> tuple[list[str], str]:
+    try:
+        loras = [str(item) for item in folder_paths.get_filename_list("loras") if str(item or "").strip()]
+    except Exception:
+        loras = []
+    choices = [STORYBOARD_LORA_NONE]
+    choices.extend(item for item in loras if not re.search(r"(flux|f2k)", item, re.IGNORECASE))
+    default = STORYBOARD_LORA_NONE
+    if _is_next_scene_image_edit_unet(default_unet_name):
+        default = _resolve_storyboard_lora_name("next-scene")
+        if default and default not in choices:
+            choices.insert(1, default)
+    return choices, default if default in choices else STORYBOARD_LORA_NONE
 
 
 def _append_lora_row(rows: list[dict[str, Any]], name: str, strength: float = 1.0) -> None:
@@ -2438,12 +2619,12 @@ def _preset_lora_data(unet_name: Any) -> str:
                     "strength": _normalize_strength(preset.get("lora_2_strength"), 0.7),
                 }
             )
-    if _is_qwen_image_edit_unet(unet_name):
-        _append_lora_row(rows, QWEN_NEXT_SCENE_LORA, 1.0)
+    if _is_next_scene_image_edit_unet(unet_name):
+        _append_lora_row(rows, NEXT_SCENE_LORA, 1.0)
     return json.dumps(rows, ensure_ascii=False) if rows else "[]"
 
 
-def _ensure_qwen_next_scene_lora_data(lora_data: Any, unet_name: Any) -> str:
+def _ensure_next_scene_lora_data(lora_data: Any, unet_name: Any) -> str:
     text = _safe_text(lora_data).strip()
     try:
         rows = json.loads(text) if text else []
@@ -2452,8 +2633,8 @@ def _ensure_qwen_next_scene_lora_data(lora_data: Any, unet_name: Any) -> str:
     if not isinstance(rows, list):
         rows = []
     rows = [row for row in rows if isinstance(row, dict)]
-    if _is_qwen_image_edit_unet(unet_name):
-        _append_lora_row(rows, QWEN_NEXT_SCENE_LORA, 1.0)
+    if _is_next_scene_image_edit_unet(unet_name):
+        _append_lora_row(rows, NEXT_SCENE_LORA, 1.0)
     return json.dumps(rows, ensure_ascii=False) if rows else "[]"
 
 
@@ -2488,8 +2669,10 @@ class GJJ_StoryboardGridGenerator:
         diffusion_keywords = ["flux", "f2k", "zimage", "z_image", "z-image", "zit", "qwen", "firered", "boogu", "gguf"]
         filtered = [m for m in raw_unet_models if any(k in str(m).lower() for k in diffusion_keywords)]
         diffusion_models = filtered if filtered else raw_unet_models
+        default_unet_name = _preferred_default(diffusion_models, DEFAULT_UNET_NAME)
         clip_models = _list_lazy_clip_models() or [DEFAULT_CLIP_NAME]
         vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
+        lora_models, default_storyboard_lora = _storyboard_lora_choices(default_unet_name)
         return {
             "required": {
                 "prompt": (
@@ -2534,7 +2717,12 @@ class GJJ_StoryboardGridGenerator:
                 ),
                 "unet_name": (
                     diffusion_models,
-                    {"default": _preferred_default(diffusion_models, DEFAULT_UNET_NAME), "display_name": "🟣 UNET 主模型"},
+                    {
+                        "default": default_unet_name,
+                        "display_name": "🟣 UNET 主模型",
+                        "hidden": True,
+                        "display": "hidden",
+                    },
                 ),
                 "unet_dtype": (
                     UNET_DTYPE_OPTIONS,
@@ -2608,6 +2796,14 @@ class GJJ_StoryboardGridGenerator:
                     "STRING",
                     {"default": "[]", "multiline": False, "display_name": "分镜预览缓存", "hidden": True, "display": "hidden"},
                 ),
+                "storyboard_lora_name": (
+                    lora_models,
+                    {
+                        "default": default_storyboard_lora,
+                        "display_name": "🟢 LoRA",
+                        "tooltip": "可选单行 LoRA。主模型为 qwen-image-edit / firered-image-edit 时默认选择名称匹配 next-scene 的 LoRA；其它模型默认不选择，列表排除 flux / f2k LoRA。",
+                    },
+                ),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "prompt_graph": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -2665,6 +2861,7 @@ class GJJ_StoryboardGridGenerator:
         storyboard_full_prompt="",
         force_generate_all="false",
         storyboard_preview_images="[]",
+        storyboard_lora_name="",
         unique_id=None,
         prompt_graph=None,
         extra_pnginfo=None,
@@ -2699,11 +2896,23 @@ class GJJ_StoryboardGridGenerator:
         storyboard_full_prompt = _first_scalar(storyboard_full_prompt)
         force_generate_all = _parse_bool(_first_scalar(force_generate_all), False)
         storyboard_preview_images = _first_scalar(storyboard_preview_images)
+        storyboard_lora_name = _first_scalar(storyboard_lora_name)
         unique_id = _first_scalar(unique_id)
+        clip_name1, vae_name = _ensure_next_scene_image_edit_clip_vae(unet_name, clip_name1, vae_name)
         if not _has_configured_lora_data(lora_data):
             lora_data = _preset_lora_data(unet_name)
         else:
-            lora_data = _ensure_qwen_next_scene_lora_data(lora_data, unet_name)
+            lora_data = _ensure_next_scene_lora_data(lora_data, unet_name)
+        if _safe_text(storyboard_lora_name).strip():
+            try:
+                rows = json.loads(_safe_text(lora_data).strip() or "[]")
+            except Exception:
+                rows = []
+            if not isinstance(rows, list):
+                rows = []
+            rows = [row for row in rows if isinstance(row, dict)]
+            _append_lora_row(rows, storyboard_lora_name, 1.0)
+            lora_data = json.dumps(rows, ensure_ascii=False) if rows else "[]"
 
         prompts = _split_prompt_segments(prompt)
         if not prompts:
@@ -2799,7 +3008,7 @@ class GJJ_StoryboardGridGenerator:
                 )
             _send_status(unique_id, "缓存为空，下游首次请求自动生成完整分镜。")
         storyboard_character_refs = _storyboard_character_context(prompts)
-        is_qwen_image_edit = _is_qwen_image_edit_unet(unet_name)
+        is_next_scene_image_edit = _is_next_scene_image_edit_unet(unet_name)
         generated: list[torch.Tensor] = []
         generated_positions: list[int] = []
         if selected_cell_mode:
@@ -2816,43 +3025,89 @@ class GJJ_StoryboardGridGenerator:
                 preview_index = seed_offset + index if single_cell_mode else index
             line, library_scene_reference, scene_consumed_characters = _scene_reference_tensor_for_prompt(line, cell_w, cell_h)
             scene_source = None if library_scene_reference is not None else scene
+            if is_next_scene_image_edit and library_scene_reference is None:
+                scene_source = _media_slice(scene_source, 1)
             library_scene_reference_count = _media_count(library_scene_reference)
-            plain_reference_count = _media_count(reference) + library_scene_reference_count
             scene_reference_count = _media_count(scene_source)
+            character_refs_for_limits = _resolved_character_refs(line, storyboard_character_refs)
+            image_edit_reference_slots = 3 - scene_reference_count - library_scene_reference_count - len(character_refs_for_limits)
+            effective_reference = reference
+            if is_next_scene_image_edit:
+                effective_reference = _media_slice(reference, max(0, image_edit_reference_slots))
+            reference_count = _media_count(effective_reference)
+            plain_reference_count = reference_count + library_scene_reference_count
+            reference_start = scene_reference_count + library_scene_reference_count + 1
             character_reference_start = scene_reference_count + plain_reference_count + 1
+            character_reference_limit = None
+            if is_next_scene_image_edit:
+                character_reference_limit = max(0, 3 - scene_reference_count - library_scene_reference_count - reference_count)
             if library_scene_reference is None:
                 line = _append_scene_reference_prompt(line, scene_reference_count)
+            if reference_count:
+                line = _append_plain_reference_prompt(
+                    line,
+                    reference_start,
+                    reference_count,
+                    scene_reference_count > 0 or library_scene_reference_count > 0,
+                )
             line, character_reference = _character_prompt_and_reference(
                 line,
                 storyboard_character_refs,
-                contain_reference_images=is_qwen_image_edit,
+                contain_reference_images=is_next_scene_image_edit,
                 first_reference_image_index=character_reference_start,
                 include_reference_images=not scene_consumed_characters,
+                qwen_reference_binding=is_next_scene_image_edit,
+                max_reference_images=character_reference_limit,
             )
-            costume_reference_start = character_reference_start + _media_count(character_reference)
-            line, costume_reference = _costume_prompt_and_reference(
-                line,
-                contain_reference_images=is_qwen_image_edit,
-                first_reference_image_index=costume_reference_start,
-            )
-            line = _prefix_qwen_next_scene_prompt(line, unet_name)
+            character_reference_count = _media_count(character_reference)
+            costume_reference_start = character_reference_start + character_reference_count
+            remaining_image_edit_slots = 3 - scene_reference_count - library_scene_reference_count - reference_count - character_reference_count
+            include_costume_reference = not is_next_scene_image_edit or remaining_image_edit_slots > 0
+            if include_costume_reference:
+                line, costume_reference = _costume_prompt_and_reference(
+                    line,
+                    contain_reference_images=is_next_scene_image_edit,
+                    first_reference_image_index=costume_reference_start,
+                )
+                if is_next_scene_image_edit:
+                    costume_reference = _media_slice(costume_reference, remaining_image_edit_slots)
+            else:
+                costume_reference = None
+            line = _prefix_next_scene_prompt(line, unet_name)
             line = f"{line}\n\n{CELL_BLEED_PROMPT}"
             combined_reference_parts = []
             if library_scene_reference is not None:
                 combined_reference_parts.append(library_scene_reference)
-            if reference is not None:
-                combined_reference_parts.append(reference)
+            if effective_reference is not None:
+                combined_reference_parts.append(effective_reference)
             if character_reference is not None:
                 combined_reference_parts.append(character_reference)
             if costume_reference is not None:
                 combined_reference_parts.append(costume_reference)
             combined_reference = combined_reference_parts if combined_reference_parts else None
-            refs = _lazy_optional_images(scene_source, combined_reference, cell_w, cell_h)
+            refs = _lazy_optional_images(scene_source, combined_reference, cell_w, cell_h, fit_reference=is_next_scene_image_edit)
+            storyboard_main_image_index = 1 if refs.get("image_01") is not None else main_image_index
+            if is_next_scene_image_edit:
+                image_edit_total_refs = scene_reference_count + library_scene_reference_count + reference_count + character_reference_count + _media_count(costume_reference)
+                image_edit_parts = []
+                if scene_reference_count:
+                    image_edit_parts.append(f"外部场景×{scene_reference_count}")
+                if library_scene_reference_count:
+                    image_edit_parts.append(f"场景库×{library_scene_reference_count}")
+                if reference_count:
+                    image_edit_parts.append(f"外部参考×{reference_count}")
+                if character_reference_count:
+                    image_edit_parts.append(f"角色库×{character_reference_count}")
+                if costume_reference is not None:
+                    costume_count = _media_count(costume_reference)
+                    if costume_count:
+                        image_edit_parts.append(f"服装道具×{costume_count}")
+                _send_status(unique_id, f"ImageEdit 实际参考图 {image_edit_total_refs}/3：{'，'.join(image_edit_parts) if image_edit_parts else '无'}")
             _send_status(unique_id, f"按懒人一键生图流程生成分镜 {preview_index}/{preview_total}")
             result = self._lazy.create_image(
                 prompt=line,
                 negative_prompt=negative_prompt,
-                main_image_index=main_image_index,
+                main_image_index=storyboard_main_image_index,
                 width=cell_w,
                 height=cell_h,
                 batch_size=1,
@@ -2871,7 +3126,7 @@ class GJJ_StoryboardGridGenerator:
                 lora_data=lora_data,
                 batch_source_images="[]",
                 disable_reference_auto_mask=True,
-                force_empty_latent_reference=is_qwen_image_edit,
+                force_empty_latent_reference=is_next_scene_image_edit,
                 prompt_graph=prompt_graph,
                 unique_id=unique_id,
                 extra_pnginfo=extra_pnginfo,
