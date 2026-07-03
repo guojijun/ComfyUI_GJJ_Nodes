@@ -12,7 +12,12 @@ import { api } from "/scripts/api.js";
 	const LIGHTBOX_ID = "gjj-character-library-lightbox";
 	const STYLE_ID = "gjj-character-library-style";
 	const ENDPOINT = "/gjj/character_library";
-	const VIEW_LABELS = ["大头照", "正面", "左侧", "右侧", "背面", "45度", "半身", "表情", "动作"];
+	const VIEW_LABELS = ["大头照", "正面", "左侧", "右侧", "背面", "45度", "半身", "动作"];
+	const CUSTOM_VIEW_GROUPS = [
+		{ key: "view", title: "视角", required: true, options: ["正面", "左前 45°", "右前 45°", "左侧面", "右侧面", "左后 45°", "右后 45°", "背面", "底部仰视", "顶部俯视"] },
+		{ key: "shot", title: "景别", required: false, options: ["广角", "大全景", "远景", "中远景", "中景", "中近景", "半身", "特写", "大特写", "微距", "全身肖像", "肩部肖像"] },
+		{ key: "angle", title: "角度", required: false, options: ["超低仰拍", "仰拍", "齐眼平视", "微高角度", "高角度", "俯拍", "高空鸟瞰", "极致俯拍", "倾斜镜头"] },
+	];
 	const SHARED_PANEL_LAYOUT_KEY = "gjj.libraryPanel.layout";
 	let state = {
 		characters: [],
@@ -199,7 +204,7 @@ import { api } from "/scripts/api.js";
 .gjj-cl-view{border:1px solid #2e4149;border-radius:8px;background:#131d22;padding:6px;display:flex;flex-direction:column;gap:4px;min-width:0;}
 .gjj-cl-view-img{height:142px;border:0;border-radius:6px;background-image:linear-gradient(45deg,#0a1115 25%,#111c21 25%,#111c21 50%,#0a1115 50%,#0a1115 75%,#111c21 75%);background-size:18px 18px;display:flex;align-items:center;justify-content:center;overflow:hidden;cursor:zoom-in;padding:0;}
 .gjj-cl-view-img img{max-width:100%;max-height:100%;object-fit:contain;}
-.gjj-cl-view-title{font-size:12px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.gjj-cl-view-title{font-size:12px;font-weight:800;line-height:1.25;min-height:30px;white-space:normal;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word;}
 .gjj-cl-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
 .gjj-cl-view-actions{display:grid;grid-template-columns:repeat(4,28px);gap:4px;}
 .gjj-cl-view-actions .gjj-cl-btn{width:28px;height:28px;padding:0;font-size:14px;line-height:24px;}
@@ -609,6 +614,186 @@ import { api } from "/scripts/api.js";
 		}
 	}
 
+	function hasCharacterView(character, label) {
+		const key = String(label || "").trim().toLowerCase();
+		return (character?.views || []).some((view) => String(view?.label || view?.id || "").trim().toLowerCase() === key);
+	}
+
+	function missingDefaultViewLabels(character) {
+		return VIEW_LABELS.filter((label) => label !== "大头照" && !hasCharacterView(character, label));
+	}
+
+	async function generateCharacterViews(character, labels = []) {
+		if (!character?.id) return;
+		const requested = (labels || []).map((label) => String(label || "").trim()).filter(Boolean);
+		if (!requested.length) return;
+		if (!hasCharacterView(character, "大头照")) {
+			setStatus("需要先有大头照，才能用 GJJ_CharacterMultiViewStudio 自动生成其它视图");
+			return;
+		}
+		const form = new FormData();
+		form.append("id", character.id);
+		form.append("name", character.name || character.id);
+		form.append("labels", JSON.stringify(requested));
+		setStatus(`正在用大头照生成：${requested.join("、")}...`);
+		startImportProgress();
+		try {
+			const data = await apiJson(`${ENDPOINT}/generate_multiview`, { method: "POST", body: form });
+			state.selectedId = data.character?.id || character.id;
+			await refreshCharacters(true);
+			finishImportProgress(true);
+			setStatus(`已生成 ${data.count || 0} 个视图：${(data.labels || requested).join("、")}`);
+		} catch (error) {
+			finishImportProgress(false);
+			throw error;
+		}
+	}
+
+	function combineCustomViewLabels(groups) {
+		const values = CUSTOM_VIEW_GROUPS.map((group) => {
+			const selected = groups[group.key]?.selected || [];
+			return selected.length ? selected : [""];
+		});
+		const result = [];
+		for (const view of values[0]) {
+			for (const shot of values[1]) {
+				for (const angle of values[2]) {
+					const label = [view, shot, angle].filter(Boolean).join(" ").trim();
+					if (label && !result.includes(label)) result.push(label);
+				}
+			}
+		}
+		return result;
+	}
+
+	function openCustomViewPicker(character) {
+		return new Promise((resolve) => {
+			const groups = {};
+			for (const group of CUSTOM_VIEW_GROUPS) {
+				groups[group.key] = { selected: group.required ? [group.options[0]] : [], anchor: 0 };
+			}
+			const root = document.createElement("div");
+			root.style.cssText = [
+				"position:fixed",
+				"inset:0",
+				"z-index:100003",
+				"display:flex",
+				"align-items:center",
+				"justify-content:center",
+				"background:rgba(0,0,0,.46)",
+				"padding:18px",
+				"box-sizing:border-box",
+			].join(";");
+			const panel = document.createElement("div");
+			panel.style.cssText = [
+				"width:min(760px,calc(100vw - 28px))",
+				"max-height:min(620px,calc(100vh - 28px))",
+				"display:flex",
+				"flex-direction:column",
+				"gap:10px",
+				"border:1px solid #40535b",
+				"border-radius:8px",
+				"background:#0f171b",
+				"color:#e7f2f4",
+				"box-shadow:0 18px 48px rgba(0,0,0,.56)",
+				"padding:12px",
+				"box-sizing:border-box",
+				"font-family:system-ui,'Microsoft YaHei',sans-serif",
+			].join(";");
+			const head = document.createElement("div");
+			head.style.cssText = "display:flex;align-items:center;gap:8px;";
+			const title = document.createElement("div");
+			title.textContent = "自定义生成视图";
+			title.style.cssText = "font-size:14px;font-weight:900;flex:1 1 auto;";
+			const close = button("×", "关闭", "gjj-cl-btn gjj-cl-icon", () => finish([]));
+			head.append(title, close);
+			const columns = document.createElement("div");
+			columns.style.cssText = "display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;overflow:auto;";
+			const footer = document.createElement("div");
+			footer.style.cssText = "display:flex;align-items:center;gap:8px;justify-content:flex-end;";
+			const summary = document.createElement("div");
+			summary.style.cssText = "flex:1 1 auto;color:#94aeb4;font-size:12px;min-width:0;";
+			const cancel = button("取消", "取消", "gjj-cl-btn", () => finish([]));
+			const apply = button("生成", "生成选中的视图组合", "gjj-cl-btn", () => finish(combineCustomViewLabels(groups)));
+			footer.append(summary, cancel, apply);
+
+			function finish(labels) {
+				root.remove();
+				resolve(labels || []);
+			}
+			function refresh() {
+				for (const item of columns.querySelectorAll("[data-custom-view-option]")) {
+					const key = item.dataset.customViewKey;
+					const value = item.dataset.customViewValue;
+					const active = groups[key]?.selected.includes(value);
+					item.classList.toggle("active", !!active);
+					item.style.background = active ? "#1d5d39" : "#17242a";
+					item.style.borderColor = active ? "#65d189" : "#3f535b";
+					item.style.color = active ? "#fff" : "#dce7e2";
+				}
+				const labels = combineCustomViewLabels(groups);
+				summary.textContent = labels.length ? `将生成 ${labels.length} 个视图：${labels.slice(0, 4).join("、")}${labels.length > 4 ? "..." : ""}` : "请选择至少一个视角";
+			}
+			for (const group of CUSTOM_VIEW_GROUPS) {
+				const box = document.createElement("div");
+				box.style.cssText = "display:flex;flex-direction:column;gap:6px;min-width:0;";
+				const label = document.createElement("div");
+				label.textContent = group.title;
+				label.style.cssText = "font-size:12px;font-weight:900;color:#f0faf4;";
+				const list = document.createElement("div");
+				list.style.cssText = "display:flex;flex-direction:column;gap:5px;min-height:0;";
+				group.options.forEach((option, index) => {
+					const item = document.createElement("button");
+					item.type = "button";
+					item.textContent = option;
+					item.dataset.customViewOption = "1";
+					item.dataset.customViewKey = group.key;
+					item.dataset.customViewValue = option;
+					item.style.cssText = "min-height:28px;border:1px solid #3f535b;border-radius:6px;background:#17242a;color:#dce7e2;font-size:12px;font-weight:800;text-align:left;padding:0 8px;cursor:pointer;";
+					item.addEventListener("click", (event) => {
+						stopBubble(event);
+						const stateForGroup = groups[group.key];
+						if (event.shiftKey) {
+							const start = Math.min(stateForGroup.anchor, index);
+							const end = Math.max(stateForGroup.anchor, index);
+							const picked = group.options.slice(start, end + 1);
+							stateForGroup.selected = [...new Set([...(event.ctrlKey || event.metaKey ? stateForGroup.selected : []), ...picked])];
+						} else if (event.ctrlKey || event.metaKey) {
+							if (stateForGroup.selected.includes(option)) {
+								stateForGroup.selected = stateForGroup.selected.filter((itemValue) => itemValue !== option);
+							} else {
+								stateForGroup.selected = [...stateForGroup.selected, option];
+							}
+							stateForGroup.anchor = index;
+						} else {
+							stateForGroup.selected = [option];
+							stateForGroup.anchor = index;
+						}
+						if (group.required && !stateForGroup.selected.length) stateForGroup.selected = [option];
+						refresh();
+					});
+					list.appendChild(item);
+				});
+				box.append(label, list);
+				columns.appendChild(box);
+			}
+			panel.append(head, columns, footer);
+			root.appendChild(panel);
+			root.addEventListener("click", (event) => {
+				if (event.target === root) finish([]);
+			});
+			panel.addEventListener("click", stopBubble);
+			document.body.appendChild(root);
+			refresh();
+		});
+	}
+
+	async function generateCustomCharacterViews(character) {
+		const labels = await openCustomViewPicker(character);
+		if (!labels.length) return;
+		await generateCharacterViews(character, labels);
+	}
+
 	async function generateMultiviewBatch() {
 		const files = await fileInputs("image/*");
 		if (!files.length) return;
@@ -716,6 +901,23 @@ import { api } from "/scripts/api.js";
 		await apiJson(`${ENDPOINT}/view?id=${encodeURIComponent(character.id)}&view=${encodeURIComponent(view.id)}`, { method: "DELETE" });
 		await refreshCharacters(true);
 		setStatus("视图已删除");
+	}
+
+	async function renameViewLabel(character, view) {
+		if (!character || !view) return;
+		const current = String(view.label || view.id || "").trim();
+		const next = window.prompt("修改视图标签", current);
+		if (next === null) return;
+		const label = String(next || "").trim();
+		if (!label || label === current) return;
+		const data = await apiJson(`${ENDPOINT}/view_label`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ id: character.id, view: view.id, label }),
+		});
+		state.selectedId = data.character?.id || character.id;
+		await refreshCharacters(true);
+		setStatus(`视图标签已改为「${label}」`);
 	}
 
 	function copyText(text) {
@@ -941,8 +1143,20 @@ import { api } from "/scripts/api.js";
 		);
 		const quick = document.createElement("div");
 		quick.className = "gjj-cl-row";
-		for (const label of VIEW_LABELS) {
-			quick.appendChild(button(label, `上传 ${label} 图片并使用 RMBG 抠图`, "gjj-cl-btn", () => uploadView(character, label).catch((error) => setStatus(error.message))));
+		if (hasCharacterView(character, "大头照")) {
+			const missingLabels = missingDefaultViewLabels(character);
+			if (missingLabels.length > 1) {
+				quick.appendChild(button("补全部缺失", `使用大头照生成：${missingLabels.join("、")}`, "gjj-cl-btn", () => generateCharacterViews(character, missingLabels).catch((error) => setStatus(error.message))));
+			}
+			for (const label of missingLabels) {
+				quick.appendChild(button(label, `使用大头照自动生成 ${label} 视图`, "gjj-cl-btn", () => generateCharacterViews(character, [label]).catch((error) => setStatus(error.message))));
+			}
+			quick.appendChild(button("自定义视图", "选择一个或多个视角、景别、角度，用大头照自动生成", "gjj-cl-btn", () => generateCustomCharacterViews(character).catch((error) => setStatus(error.message))));
+		} else {
+			const hint = document.createElement("div");
+			hint.className = "gjj-cl-status";
+			hint.textContent = "添加大头照后，可用 GJJ_CharacterMultiViewStudio 自动生成任意视图";
+			quick.appendChild(hint);
 		}
 		const status = document.createElement("div");
 		status.className = "gjj-cl-status";
@@ -994,6 +1208,11 @@ import { api } from "/scripts/api.js";
 		const title = document.createElement("div");
 		title.className = "gjj-cl-view-title";
 		title.textContent = view.label || view.id;
+		title.title = "双击修改标签";
+		title.addEventListener("dblclick", (event) => {
+			stopBubble(event);
+			renameViewLabel(character, view).catch((error) => setStatus(error.message));
+		});
 		const refText = `${characterReference(character)}/${view.label || view.id}`;
 		const row = document.createElement("div");
 		row.className = "gjj-cl-view-actions";

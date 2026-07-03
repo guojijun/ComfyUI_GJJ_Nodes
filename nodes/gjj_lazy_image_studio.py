@@ -1590,10 +1590,11 @@ def _uses_equal_reference_canvas(preset: dict[str, Any], unet_name: str = "") ->
             ]
         )
     )
+    normalized_unet = _normalize_text(str(unet_name or ""))
     return (
         "qwenimageedit2511" in text
-        or "fireredimageedit11" in text
-        or "fireredimageedit1.1" in _normalize_text(str(unet_name or ""))
+        or ("firered" in text and "image" in text and "edit" in text)
+        or "fireredimageedit" in normalized_unet
     )
 
 

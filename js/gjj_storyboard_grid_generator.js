@@ -20,6 +20,7 @@ const FULL_PROMPT_INPUT = "storyboard_full_prompt";
 const FORCE_GENERATE_INPUT = "force_generate_all";
 const PREVIEW_IMAGES_INPUT = "storyboard_preview_images";
 const STORYBOARD_LORA_NAME = "storyboard_lora_name";
+const RECONNECT_LINKS_PROPERTY = "gjj_storyboard_grid_last_upstream_links";
 const DEFAULT_UNET_FILTER = "flux|f2k|edit";
 const SEED_CONTROL_KEY = "__seed_control_after_generate";
 const SEED_CONTROL_VALUES = new Set(["fixed", "increment", "decrement", "randomize"]);
@@ -63,6 +64,7 @@ const TEMPLATE_SOURCE_FIELDS = [
 ];
 const DEFAULT_LORA_ROW = { enabled: true, name: "", strength: 1.0 };
 const NEXT_SCENE_LORA = "next-scene_lora-v2-3000.safetensors";
+const FLUX_STORYBOARD_LORA = "f2k_9B_lcs_consist";
 
 function isTarget(node) {
 	return TARGET_NODES.has(node?.comfyClass || node?.type);
@@ -74,6 +76,133 @@ function getWidget(node, name) {
 
 function getInput(node, name) {
 	return node?.inputs?.find((input) => String(input?.name || "") === name);
+}
+
+function getGraphLink(linkId, graph = app.graph) {
+	if (linkId == null || !graph) return null;
+	if (typeof graph.getLink === "function") {
+		const link = graph.getLink(linkId);
+		if (link) return link;
+	}
+	const links = graph.links || graph._links;
+	if (!links) return null;
+	if (Array.isArray(links)) {
+		return links.find((link) => String(link?.id ?? link?.[0]) === String(linkId)) || null;
+	}
+	if (links instanceof Map) {
+		return links.get(linkId) || links.get(String(linkId)) || null;
+	}
+	return links[linkId] || links[String(linkId)] || null;
+}
+
+function linkOriginId(link) {
+	return Array.isArray(link) ? link[1] : link?.origin_id;
+}
+
+function linkOriginSlot(link) {
+	return Number(Array.isArray(link) ? link[2] : link?.origin_slot);
+}
+
+function getGraphNodeById(nodeId, graph = app.graph) {
+	if (nodeId == null || !graph) return null;
+	return graph.getNodeById?.(nodeId)
+		|| graph.getNodeById?.(Number(nodeId))
+		|| (graph._nodes || []).find((item) => String(item?.id) === String(nodeId))
+		|| null;
+}
+
+function storyboardLinkMemory(node) {
+	const records = node?.properties?.[RECONNECT_LINKS_PROPERTY];
+	return Array.isArray(records) ? records.filter((item) => item && item.source_id != null && Number.isFinite(Number(item.source_slot))) : [];
+}
+
+function saveStoryboardLinkMemory(node, records) {
+	if (!node) return false;
+	node.properties ||= {};
+	const clean = [];
+	const seen = new Set();
+	for (const record of records || []) {
+		const targetSlot = Number(record?.target_slot);
+		const sourceSlot = Number(record?.source_slot);
+		if (record?.source_id == null || !Number.isFinite(sourceSlot)) continue;
+		const targetInputName = String(record?.target_input_name || "");
+		const key = `${targetInputName || targetSlot}:${record.source_id}:${sourceSlot}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		clean.push({
+			source_id: record.source_id,
+			source_slot: sourceSlot,
+			source_title: String(record.source_title || ""),
+			source_label: String(record.source_label || ""),
+			target_input_name: targetInputName,
+			target_slot: Number.isFinite(targetSlot) ? targetSlot : null,
+		});
+	}
+	node.properties[RECONNECT_LINKS_PROPERTY] = clean;
+	return true;
+}
+
+function sourceNodeTitle(node) {
+	return String(node?.title || node?.type || node?.comfyClass || "");
+}
+
+function sourceOutputLabel(node, slot) {
+	const output = node?.outputs?.[Number(slot)];
+	return String(output?.label || output?.localized_name || output?.name || "");
+}
+
+function storeStoryboardLink(node, input, link, targetSlot = null) {
+	if (!node || !input || !link) return false;
+	const graph = node?.graph || app.graph;
+	const sourceId = linkOriginId(link);
+	const sourceSlot = linkOriginSlot(link);
+	if (sourceId == null || !Number.isFinite(sourceSlot)) return false;
+	const sourceNode = getGraphNodeById(sourceId, graph);
+	const slot = Number.isFinite(Number(targetSlot)) ? Number(targetSlot) : node.inputs?.indexOf(input);
+	const records = storyboardLinkMemory(node).filter((record) => {
+		const sameName = String(record.target_input_name || "") === String(input.name || "");
+		const sameSlot = Number(record.target_slot) === Number(slot);
+		return !(sameName || sameSlot);
+	});
+	records.unshift({
+		source_id: sourceId,
+		source_slot: sourceSlot,
+		source_title: sourceNodeTitle(sourceNode),
+		source_label: sourceOutputLabel(sourceNode, sourceSlot),
+		target_input_name: String(input.name || ""),
+		target_slot: Number.isFinite(slot) ? slot : null,
+	});
+	return saveStoryboardLinkMemory(node, records);
+}
+
+function recordCurrentStoryboardLinks(node) {
+	let changed = false;
+	for (const input of node?.inputs || []) {
+		const link = getGraphLink(input?.link, node?.graph || app.graph);
+		if (link) changed = storeStoryboardLink(node, input, link, node.inputs?.indexOf(input)) || changed;
+	}
+	return changed;
+}
+
+function recordStoryboardLinkFromConnectionEvent(node, args) {
+	const [type, slot, connected, linkInfo] = args || [];
+	const isInputEvent =
+		type === globalThis.LiteGraph?.INPUT ||
+		type === 1 ||
+		String(type).toLowerCase() === "input";
+	if (!isInputEvent) return false;
+	const input = node?.inputs?.[Number(slot)];
+	if (!input) return false;
+	if (connected) return recordCurrentStoryboardLinks(node);
+	return storeStoryboardLink(node, input, linkInfo, slot);
+}
+
+function hasLinkedStoryboardInputs(node) {
+	return Boolean((node?.inputs || []).some((input) => input?.link != null));
+}
+
+function hasStoryboardReconnectTargets(node) {
+	return !hasLinkedStoryboardInputs(node) && storyboardLinkMemory(node).length > 0;
 }
 
 function settingsOpen(node) {
@@ -708,6 +837,11 @@ function isNextSceneImageEdit(unetName, preset) {
 	return (text.includes("qwen") || text.includes("firered")) && text.includes("image") && text.includes("edit");
 }
 
+function isFluxStoryboardModel(unetName, preset) {
+	const text = normalizedModelText(`${unetName || ""} ${preset?.id || ""} ${(preset?.keywords || []).join(" ")}`);
+	return text.includes("flux") || text.includes("f2k") || text.includes("klein");
+}
+
 function fireredImageEditFallbackPreset(node, unetName) {
 	const text = normalizedModelText(unetName);
 	if (!(text.includes("firered") && text.includes("image") && text.includes("edit"))) return null;
@@ -764,6 +898,7 @@ function presetLoraRows(preset, unetName = "") {
 		});
 	}
 	if (isNextSceneImageEdit(unetName, preset)) appendLoraRow(rows, NEXT_SCENE_LORA, 1.0);
+	else if (isFluxStoryboardModel(unetName, preset)) appendLoraRow(rows, FLUX_STORYBOARD_LORA, 1.0);
 	if (rows.length) rows.push({ ...DEFAULT_LORA_ROW });
 	return rows;
 }
@@ -786,7 +921,16 @@ function setStoryboardLoraForModel(node, preset, unetName = "", force = false) {
 		if (nextScene && (force || !current)) setWidgetValue(widget, nextScene);
 		return;
 	}
-	if (force || resolveWidgetOption(widget, current) === resolveWidgetOption(widget, NEXT_SCENE_LORA)) {
+	const usesFluxLora = isFluxStoryboardModel(unetName, preset);
+	if (usesFluxLora) {
+		const fluxLora = resolveWidgetOptionByKeyword(widget, FLUX_STORYBOARD_LORA)
+			|| resolveWidgetOptionByKeyword(widget, "f2k")
+			|| resolveWidgetOption(widget, FLUX_STORYBOARD_LORA);
+		if (fluxLora && (force || !current)) setWidgetValue(widget, fluxLora);
+		return;
+	}
+	const currentResolved = resolveWidgetOption(widget, current);
+	if (force || currentResolved === resolveWidgetOption(widget, NEXT_SCENE_LORA) || currentResolved === resolveWidgetOption(widget, FLUX_STORYBOARD_LORA)) {
 		setWidgetValue(widget, "");
 	}
 }
@@ -911,6 +1055,82 @@ function setSettingsOpen(node, open) {
 	applySettingsVisibility(node);
 }
 
+function updateReconnectButton(node) {
+	const button = node?.__gjjStoryboardReconnectButton;
+	if (!button) return;
+	const records = storyboardLinkMemory(node);
+	const visible = hasStoryboardReconnectTargets(node);
+	button.style.display = visible ? "" : "none";
+	const first = records[0];
+	const label = first ? [first.source_title, first.source_label].filter(Boolean).join(" · ") : "";
+	button.title = records.length > 1
+		? `重新连接 ${records.length} 个上游`
+		: (label ? `重新连接：${label}` : "重新连接上游");
+	button.dataset.originalTitle = button.title;
+}
+
+function flashReconnectButton(node, text, ok = true) {
+	const button = node?.__gjjStoryboardReconnectButton;
+	if (!button) return;
+	clearTimeout(button.__gjjStoryboardReconnectFlashTimer);
+	button.textContent = text;
+	button.style.background = ok ? "linear-gradient(135deg, #064e3b, #059669)" : "linear-gradient(135deg, #7f1d1d, #dc2626)";
+	button.style.borderColor = ok ? "#10b981" : "#ef4444";
+	button.__gjjStoryboardReconnectFlashTimer = setTimeout(() => {
+		button.textContent = "🔗";
+		button.style.background = "linear-gradient(135deg, #26313a, #334155)";
+		button.style.borderColor = "#64748b";
+		button.__gjjStoryboardReconnectFlashTimer = null;
+		updateReconnectButton(node);
+	}, 1200);
+}
+
+function reconnectStoryboardLinks(node) {
+	const graph = node?.graph || app.graph;
+	const records = storyboardLinkMemory(node);
+	if (!records.length) {
+		flashReconnectButton(node, "无", false);
+		return false;
+	}
+	let connected = 0;
+	let missing = 0;
+	for (const record of records) {
+		const sourceNode = getGraphNodeById(record.source_id, graph);
+		const sourceSlot = Number(record.source_slot);
+		if (!sourceNode || !sourceNode.outputs?.[sourceSlot]) {
+			missing += 1;
+			continue;
+		}
+		const byName = (node.inputs || []).find((input) => String(input?.name || "") === String(record.target_input_name || ""));
+		const targetSlot = byName ? node.inputs.indexOf(byName) : Number(record.target_slot);
+		const input = node.inputs?.[targetSlot];
+		if (!input || !Number.isFinite(targetSlot)) {
+			missing += 1;
+			continue;
+		}
+		if (input.link != null) {
+			try { node.disconnectInput?.(targetSlot); } catch (_) {}
+		}
+		try {
+			sourceNode.connect(sourceSlot, node, targetSlot);
+			connected += 1;
+		} catch (error) {
+			console.warn("[GJJ_StoryboardGridGenerator] reconnect upstream failed", error);
+			missing += 1;
+		}
+	}
+	if (connected > 0) {
+		node.setDirtyCanvas?.(true, true);
+		node.graph?.setDirtyCanvas?.(true, true);
+		node.graph?.change?.();
+		updateReconnectButton(node);
+		flashReconnectButton(node, missing ? `${connected}` : "已连");
+		return true;
+	}
+	flashReconnectButton(node, "丢失", false);
+	return false;
+}
+
 function createButtons(node) {
 	const container = document.createElement("div");
 	container.style.cssText = [
@@ -987,6 +1207,35 @@ function createButtons(node) {
 	].join(";");
 	node.__gjjStoryboardDiceButton = diceButton;
 
+	const completeRefButton = document.createElement("button");
+	completeRefButton.type = "button";
+	completeRefButton.textContent = "🔄";
+	completeRefButton.title = "检查所有宫格，把纯人物/场景名字补齐为角色库/场景库引用语法。";
+	completeRefButton.style.cssText = [
+		...sharedButtonStyle,
+		"border:1px solid #64748b",
+		"background:linear-gradient(135deg, #26313a, #334155)",
+		"color:#e5edf2",
+		"flex:0 0 28px",
+		"padding:0",
+	].join(";");
+	node.__gjjStoryboardCompleteRefButton = completeRefButton;
+
+	const reconnectButton = document.createElement("button");
+	reconnectButton.type = "button";
+	reconnectButton.textContent = "🔗";
+	reconnectButton.title = "重新连接上游";
+	reconnectButton.style.cssText = [
+		...sharedButtonStyle,
+		"border:1px solid #64748b",
+		"background:linear-gradient(135deg, #26313a, #334155)",
+		"color:#e5edf2",
+		"flex:0 0 28px",
+		"padding:0",
+		"display:none",
+	].join(";");
+	node.__gjjStoryboardReconnectButton = reconnectButton;
+
 	const templateButton = createTemplateSourceButton(node, TEMPLATE_SOURCE_FIELDS, sharedButtonStyle);
 
 	const settingsButton = document.createElement("button");
@@ -1010,6 +1259,8 @@ function createButtons(node) {
 	function setupButtonHover(button, defaultBg, hoverBg) {
 		button.addEventListener("mouseenter", () => {
 			if (button === diceButton && node.__gjjStoryboardRandomSeedOnce) return;
+			if (button === completeRefButton && button.__gjjStoryboardCompleteRefFlashTimer) return;
+			if (button === reconnectButton && button.__gjjStoryboardReconnectFlashTimer) return;
 			if (button === settingsButton && settingsOpen(node)) return;
 			button.style.background = hoverBg;
 			button.style.transform = "translateY(-1px)";
@@ -1018,6 +1269,14 @@ function createButtons(node) {
 			if (button === diceButton && node.__gjjStoryboardRandomSeedOnce) {
 				button.style.transform = "translateY(0)";
 				updateDiceButtonState();
+				return;
+			}
+			if (button === completeRefButton && button.__gjjStoryboardCompleteRefFlashTimer) {
+				button.style.transform = "translateY(0)";
+				return;
+			}
+			if (button === reconnectButton && button.__gjjStoryboardReconnectFlashTimer) {
+				button.style.transform = "translateY(0)";
 				return;
 			}
 			if (button === settingsButton && settingsOpen(node)) {
@@ -1140,20 +1399,51 @@ function createButtons(node) {
 		updateDiceButtonState();
 	}
 
+	function handleReconnect(event) {
+		protectEvent(event);
+		reconnectStoryboardLinks(node);
+	}
+
+	function flashCompleteRefButton(text, ok = true) {
+		clearTimeout(completeRefButton.__gjjStoryboardCompleteRefFlashTimer);
+		completeRefButton.textContent = text;
+		completeRefButton.style.background = ok ? "linear-gradient(135deg, #064e3b, #059669)" : "linear-gradient(135deg, #7f1d1d, #dc2626)";
+		completeRefButton.style.borderColor = ok ? "#10b981" : "#ef4444";
+		completeRefButton.__gjjStoryboardCompleteRefFlashTimer = setTimeout(() => {
+			completeRefButton.textContent = "🔄";
+			completeRefButton.style.background = "linear-gradient(135deg, #26313a, #334155)";
+			completeRefButton.style.borderColor = "#64748b";
+			completeRefButton.__gjjStoryboardCompleteRefFlashTimer = null;
+		}, 1200);
+	}
+
+	function handleCompleteReferences(event) {
+		protectEvent(event);
+		const count = completeStoryboardReferenceSyntax(node, completeRefButton);
+		flashCompleteRefButton(count > 0 ? `${count}` : "无", count > 0);
+	}
+
 	setupButtonHover(generateButton, "linear-gradient(135deg, #064e3b, #059669)", "linear-gradient(135deg, #059669, #10b981)");
 	setupButtonHover(singleButton, "linear-gradient(135deg, #0c4a6e, #0284c7)", "linear-gradient(135deg, #0284c7, #38bdf8)");
 	setupButtonHover(diceButton, "linear-gradient(135deg, #26313a, #334155)", "linear-gradient(135deg, #475569, #64748b)");
+	setupButtonHover(completeRefButton, "linear-gradient(135deg, #26313a, #334155)", "linear-gradient(135deg, #475569, #64748b)");
+	setupButtonHover(reconnectButton, "linear-gradient(135deg, #26313a, #334155)", "linear-gradient(135deg, #475569, #64748b)");
 	setupButtonHover(settingsButton, "linear-gradient(135deg, #1f2933, #374151)", "linear-gradient(135deg, #374151, #4b5563)");
 	setupButtonEvents(generateButton, handleGenerate);
 	setupButtonEvents(singleButton, handleSingleGenerate);
 	setupButtonEvents(diceButton, handleDice);
+	setupButtonEvents(completeRefButton, handleCompleteReferences);
+	setupButtonEvents(reconnectButton, handleReconnect);
 	setupButtonEvents(settingsButton, handleSettings);
 	updateSettingsButtonState(node);
 	updateDiceButtonState();
+	updateReconnectButton(node);
 
 	container.appendChild(generateButton);
 	container.appendChild(singleButton);
 	container.appendChild(diceButton);
+	container.appendChild(completeRefButton);
+	container.appendChild(reconnectButton);
 	container.appendChild(templateButton);
 	container.appendChild(settingsButton);
 	return container;
@@ -1306,6 +1596,179 @@ function findLibraryItem(items, name) {
 	return (items || []).find((item) => itemAliasKeys(item).includes(key))
 		|| (items || []).find((item) => itemAliasKeys(item).some((alias) => alias.includes(key) || key.includes(alias)))
 		|| null;
+}
+
+function referenceDisplayName(item) {
+	return String(item?.name || item?.id || item?._folder_id || "").trim();
+}
+
+function referenceAliases(item) {
+	const values = [item?.name, item?.id, item?._folder_id, ...(Array.isArray(item?.tags) ? item.tags : [])];
+	const result = [];
+	const seen = new Set();
+	for (const value of values) {
+		const text = String(value || "").trim();
+		const key = refKey(text);
+		if (!text || !key || seen.has(key)) continue;
+		seen.add(key);
+		result.push(text);
+	}
+	return result;
+}
+
+function protectExistingReferences(text) {
+	const source = String(text || "");
+	const ranges = [];
+	for (const pattern of [CHARACTER_REF_PATTERN, SCENE_REF_PATTERN]) {
+		pattern.lastIndex = 0;
+		for (const match of source.matchAll(pattern)) {
+			ranges.push({ start: match.index || 0, end: (match.index || 0) + match[0].length });
+		}
+	}
+	ranges.sort((left, right) => left.start - right.start || right.end - left.end);
+	const merged = [];
+	for (const range of ranges) {
+		const last = merged[merged.length - 1];
+		if (last && range.start <= last.end) {
+			last.end = Math.max(last.end, range.end);
+		} else {
+			merged.push({ ...range });
+		}
+	}
+	const tokens = [];
+	let cursor = 0;
+	let output = "";
+	for (const range of merged) {
+		output += source.slice(cursor, range.start);
+		const token = `__GJJ_REF_${tokens.length}__`;
+		tokens.push(source.slice(range.start, range.end));
+		output += token;
+		cursor = range.end;
+	}
+	output += source.slice(cursor);
+	return { text: output, tokens };
+}
+
+function restoreExistingReferences(text, tokens) {
+	let output = String(text || "");
+	for (const [index, value] of (tokens || []).entries()) {
+		output = output.replaceAll(`__GJJ_REF_${index}__`, value);
+	}
+	return output;
+}
+
+function isAsciiWordChar(char) {
+	return /[0-9A-Za-z_]/.test(char || "");
+}
+
+function isInsideReferenceSyntax(source, index) {
+	const before = String(source || "").slice(0, Math.max(0, index));
+	const lastAt = before.lastIndexOf("@");
+	if (lastAt >= 0 && !/[\s,，;；。.!！?？()[\]{}<>《》"'“”‘’]/.test(before.slice(lastAt + 1))) {
+		return true;
+	}
+	const lastOpen = before.lastIndexOf("[");
+	const lastClose = before.lastIndexOf("]");
+	return lastOpen > lastClose;
+}
+
+function replacePlainAlias(text, alias, referenceText) {
+	const source = String(text || "");
+	const target = String(alias || "").trim();
+	const replacement = String(referenceText || "").trim();
+	if (!target || !replacement) return { text: source, count: 0 };
+	let output = "";
+	let cursor = 0;
+	let count = 0;
+	const asciiEdge = /^[0-9A-Za-z_]+$/.test(target);
+	while (cursor < source.length) {
+		const index = source.indexOf(target, cursor);
+		if (index < 0) {
+			output += source.slice(cursor);
+			break;
+		}
+		const before = source[index - 1] || "";
+		const after = source[index + target.length] || "";
+		const alreadyPrefixed = before === "@" || before === "/" || before === ":" || before === "：";
+		const asciiBlocked = asciiEdge && (isAsciiWordChar(before) || isAsciiWordChar(after));
+		if (alreadyPrefixed || asciiBlocked || isInsideReferenceSyntax(source, index)) {
+			output += source.slice(cursor, index + target.length);
+			cursor = index + target.length;
+			continue;
+		}
+		output += source.slice(cursor, index) + replacement;
+		cursor = index + target.length;
+		count += 1;
+	}
+	return { text: output, count };
+}
+
+function referenceSyntaxCandidates() {
+	const characters = globalThis.GJJ_CharacterLibrary?.characters || [];
+	const scenes = globalThis.GJJ_SceneLibrary?.scenes || [];
+	const aliasKinds = new Map();
+	const raw = [];
+	for (const character of characters) {
+		const ref = globalThis.GJJ_CharacterLibrary?.referenceText?.(character)
+			|| `@${characterReferenceName(character, character?.id)}`;
+		for (const alias of referenceAliases(character)) {
+			raw.push({ alias, ref, kind: "character", label: referenceDisplayName(character) });
+			const key = refKey(alias);
+			aliasKinds.set(key, (aliasKinds.get(key) || new Set()).add("character"));
+		}
+	}
+	for (const scene of scenes) {
+		const ref = globalThis.GJJ_SceneLibrary?.referenceText?.(scene)
+			|| `[场景:${referenceDisplayName(scene)}]`;
+		for (const alias of referenceAliases(scene)) {
+			raw.push({ alias, ref, kind: "scene", label: referenceDisplayName(scene) });
+			const key = refKey(alias);
+			aliasKinds.set(key, (aliasKinds.get(key) || new Set()).add("scene"));
+		}
+	}
+	const seen = new Set();
+	return raw
+		.filter((item) => {
+			const key = refKey(item.alias);
+			if (!key || seen.has(`${item.kind}:${key}`)) return false;
+			seen.add(`${item.kind}:${key}`);
+			const kinds = aliasKinds.get(key);
+			return !kinds || kinds.size === 1;
+		})
+		.sort((left, right) => String(right.alias).length - String(left.alias).length);
+}
+
+function completeReferenceSyntaxInText(text, candidates) {
+	const protectedRefs = protectExistingReferences(text);
+	let working = protectedRefs.text;
+	let count = 0;
+	for (const candidate of candidates) {
+		const result = replacePlainAlias(working, candidate.alias, candidate.ref);
+		working = result.text;
+		count += result.count;
+	}
+	return { text: restoreExistingReferences(working, protectedRefs.tokens), count };
+}
+
+function completeStoryboardReferenceSyntax(node, button = null) {
+	const widget = getWidget(node, "prompt");
+	if (!widget) return 0;
+	const parts = parsePromptParts(widget.value || "");
+	if (!parts.length) return 0;
+	const candidates = referenceSyntaxCandidates();
+	if (!candidates.length) return 0;
+	let changed = 0;
+	const nextParts = parts.map((part) => {
+		const result = completeReferenceSyntaxInText(part, candidates);
+		changed += result.count;
+		return result.text;
+	});
+	if (changed <= 0) return 0;
+	setWidgetValue(widget, serializePromptParts(nextParts));
+	saveParamValues(node);
+	drawPromptGridPreview(node);
+	GJJ_Utils.refreshNode?.(node);
+	return changed;
 }
 
 function splitCharacterViewSuffix(name) {
@@ -1476,7 +1939,21 @@ function replaceCurrentCellReference(node, icon, nextText) {
 	const parts = parsePromptParts(getWidget(node, "prompt")?.value || "");
 	const index = selectedCellIndex(node);
 	if (!parts[index]) return;
-	parts[index] = parts[index].replace(icon.source.pattern, nextText);
+	if (icon.kind === "character" && icon.source?.character) {
+		let replaced = false;
+		const target = icon.source.character;
+		parts[index] = parts[index].replace(CHARACTER_REF_PATTERN, (match, rawName) => {
+			const [name] = splitCharacterViewSuffix(rawName || "");
+			const character = findLibraryItem(globalThis.GJJ_CharacterLibrary?.characters || [], name);
+			if (character !== target) return match;
+			if (replaced) return "";
+			replaced = true;
+			return nextText;
+		}).replace(/[ \t]{2,}/g, " ").replace(/\s+([,，.。;；!！?？])/g, "$1").trim();
+		if (!replaced) parts[index] = parts[index].replace(icon.source.pattern, nextText);
+	} else {
+		parts[index] = parts[index].replace(icon.source.pattern, nextText);
+	}
 	setWidgetValue(getWidget(node, "prompt"), serializePromptParts(parts));
 	saveParamValues(node);
 	drawPromptGridPreview(node);
@@ -1510,11 +1987,20 @@ function referencePickerOptions(icon) {
 	if (icon.kind === "character") {
 		const character = icon.source?.character;
 		const views = Array.isArray(character?.views) ? character.views : [];
-		return views.map((view) => ({
-			label: view.label || view.id || "视图",
-			url: view.url || character.cover || "",
-			value: characterViewReference(character, view),
-		}));
+		const explicitView = refKey(icon.source?.view || "");
+		const options = views.map((view) => {
+			const label = String(view?.label || view?.id || "视图").trim();
+			const value = characterViewReference(character, view);
+			const labelKey = refKey(label);
+			return {
+				label,
+				url: view.url || character.cover || "",
+				value,
+				selected: (explicitView && labelKey === explicitView) || refKey(value) === refKey(icon.source?.pattern || ""),
+			};
+		});
+		if (options.length && !options.some((option) => option.selected)) options[0].selected = true;
+		return options;
 	}
 	if (icon.kind === "scene") {
 		const scene = icon.source?.scene;
@@ -1528,15 +2014,20 @@ function referencePickerOptions(icon) {
 	return [];
 }
 
+function selectedReferenceValues(options) {
+	return (options || []).filter((option) => option?.selected).map((option) => option.value).filter(Boolean);
+}
+
 function openReferencePicker(node, icon, event) {
 	closeReferencePicker(node);
 	const options = referencePickerOptions(icon);
 	if (!options.length) return;
+	const isMulti = icon.kind === "character";
 	const root = document.createElement("div");
 	root.style.cssText = [
 		"position:fixed",
 		"z-index:100000",
-		"width:240px",
+		`width:${isMulti ? 270 : 240}px`,
 		"max-height:360px",
 		"overflow:auto",
 		"box-sizing:border-box",
@@ -1549,16 +2040,103 @@ function openReferencePicker(node, icon, event) {
 		"flex-direction:column",
 		"gap:4px",
 	].join(";");
-	const left = Math.max(8, Math.min(event.clientX + 8, window.innerWidth - 248));
+	const popupWidth = isMulti ? 278 : 248;
+	const left = Math.max(8, Math.min(event.clientX + 8, window.innerWidth - popupWidth));
 	const top = Math.max(8, Math.min(event.clientY + 8, window.innerHeight - 368));
 	root.style.left = `${left}px`;
 	root.style.top = `${top}px`;
+	let hoverPreview = null;
+	const closeHoverPreview = () => {
+		hoverPreview?.remove();
+		hoverPreview = null;
+	};
+	const positionHoverPreview = (pointerEvent) => {
+		if (!hoverPreview) return;
+		const width = Number(hoverPreview.__gjjPreviewWidth || 220);
+		const height = Number(hoverPreview.__gjjPreviewHeight || 300);
+		const x = Math.max(8, Math.min((pointerEvent?.clientX ?? left) + 14, window.innerWidth - width - 8));
+		const y = Math.max(8, Math.min((pointerEvent?.clientY ?? top) + 14, window.innerHeight - height - 8));
+		hoverPreview.style.left = `${x}px`;
+		hoverPreview.style.top = `${y}px`;
+	};
+	const openHoverPreview = (option, pointerEvent) => {
+		const url = referenceOptionPreviewUrl(option);
+		if (!url) return;
+		closeHoverPreview();
+		const wrap = document.createElement("div");
+		wrap.style.cssText = [
+			"position:fixed",
+			"z-index:100001",
+			"width:220px",
+			"max-width:min(260px, 38vw)",
+			"max-height:min(360px, 58vh)",
+			"padding:6px",
+			"border:1px solid #4d6a73",
+			"border-radius:7px",
+			"background:#071014",
+			"box-shadow:0 14px 38px rgba(0,0,0,.5)",
+			"pointer-events:none",
+			"box-sizing:border-box",
+		].join(";");
+		const img = document.createElement("img");
+		img.src = url;
+		img.alt = option.label || "preview";
+		img.style.cssText = "display:block;width:100%;height:auto;max-height:330px;object-fit:contain;border-radius:5px;background:#0b1519;";
+		const caption = document.createElement("div");
+		caption.textContent = option.label || "";
+		caption.style.cssText = "padding-top:5px;color:#dce7e2;font:700 12px/1.3 sans-serif;white-space:normal;word-break:break-word;";
+		wrap.append(img, caption);
+		document.body.append(wrap);
+		hoverPreview = wrap;
+		requestAnimationFrame(() => {
+			const rect = wrap.getBoundingClientRect();
+			wrap.__gjjPreviewWidth = rect.width || 220;
+			wrap.__gjjPreviewHeight = rect.height || 300;
+			positionHoverPreview(pointerEvent);
+		});
+		positionHoverPreview(pointerEvent);
+	};
+	const refreshRows = () => {
+		for (const row of root.querySelectorAll("[data-gjj-ref-option]")) {
+			const index = Number(row.dataset.gjjRefOption || 0);
+			const option = options[index];
+			const active = Boolean(option?.selected);
+			row.style.background = active ? "#1b3a32" : "#142329";
+			row.style.borderColor = active ? "#65d189" : "#253941";
+			const check = row.querySelector("[data-gjj-ref-check]");
+			if (check) check.textContent = active ? "✓" : "";
+		}
+	};
+	if (isMulti) {
+		const head = document.createElement("div");
+		head.style.cssText = "display:flex;align-items:center;gap:6px;color:#b8c7cf;font:700 12px/1.3 sans-serif;padding:1px 2px 4px;";
+		const title = document.createElement("div");
+		title.textContent = "选择角色视图";
+		title.title = "默认单选；按住 Ctrl 或 Alt 点击可多选，再点确定应用。";
+		title.style.cssText = "flex:1 1 auto;";
+		const apply = document.createElement("button");
+		apply.type = "button";
+		apply.textContent = "确定";
+		apply.title = "应用当前勾选的多个视图；普通点击选项会直接单选应用。";
+		apply.style.cssText = "height:24px;border:1px solid #4f8f6f;border-radius:5px;background:#1d5d39;color:#fff;font:700 12px sans-serif;cursor:pointer;padding:0 8px;";
+		apply.addEventListener("click", (clickEvent) => {
+			clickEvent.preventDefault();
+			clickEvent.stopPropagation();
+			const values = selectedReferenceValues(options);
+			if (values.length) replaceCurrentCellReference(node, icon, values.join(" "));
+			closeReferencePicker(node);
+		});
+		head.append(title, apply);
+		root.append(head);
+	}
 	for (const option of options) {
+		const optionIndex = options.indexOf(option);
 		const button = document.createElement("button");
 		button.type = "button";
+		button.dataset.gjjRefOption = String(optionIndex);
 		button.style.cssText = [
 			"display:grid",
-			"grid-template-columns:34px 1fr",
+			`grid-template-columns:34px 1fr${isMulti ? " 20px" : ""}`,
 			"align-items:center",
 			"gap:7px",
 			"width:100%",
@@ -1587,16 +2165,36 @@ function openReferencePicker(node, icon, event) {
 		label.textContent = option.label || option.value;
 		label.style.cssText = "min-width:0;white-space:normal;word-break:break-word;";
 		button.append(preview, label);
-		button.addEventListener("mouseenter", () => button.style.background = "#20333b");
-		button.addEventListener("mouseleave", () => button.style.background = "#142329");
+		if (isMulti) {
+			const check = document.createElement("div");
+			check.dataset.gjjRefCheck = "1";
+			check.style.cssText = "width:18px;height:18px;border:1px solid #54717a;border-radius:4px;display:flex;align-items:center;justify-content:center;color:#d9ffe8;font:900 13px sans-serif;";
+			button.append(check);
+		}
+		button.addEventListener("mouseenter", (hoverEvent) => {
+			if (!isMulti || !option.selected) button.style.background = "#20333b";
+			openHoverPreview(option, hoverEvent);
+		});
+		button.addEventListener("mousemove", positionHoverPreview);
+		button.addEventListener("mouseleave", () => {
+			closeHoverPreview();
+			refreshRows();
+		});
 		button.addEventListener("click", (clickEvent) => {
 			clickEvent.preventDefault();
 			clickEvent.stopPropagation();
-			replaceCurrentCellReference(node, icon, option.value);
-			closeReferencePicker(node);
+			if (isMulti && (clickEvent.ctrlKey || clickEvent.altKey)) {
+				option.selected = !option.selected;
+				if (!selectedReferenceValues(options).length) option.selected = true;
+				refreshRows();
+			} else {
+				replaceCurrentCellReference(node, icon, option.value);
+				closeReferencePicker(node);
+			}
 		});
 		root.append(button);
 	}
+	refreshRows();
 	const stop = (popupEvent) => popupEvent.stopPropagation();
 	for (const name of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "wheel"]) root.addEventListener(name, stop);
 	document.body.append(root);
@@ -1611,6 +2209,7 @@ function openReferencePicker(node, icon, event) {
 	node.__gjjStoryboardReferencePicker = {
 		root,
 		cleanup: () => {
+			closeHoverPreview();
 			clearTimeout(timer);
 			document.removeEventListener("pointerdown", onPointerDown, true);
 			document.removeEventListener("keydown", onKeyDown, true);
@@ -2014,8 +2613,18 @@ function patchNode(node) {
 	refreshUnetPickerControl(node);
 	updateTemplateSourcePanel(node, TEMPLATE_SOURCE_FIELDS);
 	void applyModelFamilyPreset(node, false);
+	recordCurrentStoryboardLinks(node);
+	updateReconnectButton(node);
 	if (node.__gjjStoryboardPatched) return;
 	node.__gjjStoryboardPatched = true;
+
+	const originalOnConnectionsChange = node.onConnectionsChange;
+	node.onConnectionsChange = function (...args) {
+		const result = originalOnConnectionsChange?.apply(this, args);
+		recordStoryboardLinkFromConnectionEvent(this, args);
+		updateReconnectButton(this);
+		return result;
+	};
 
 	const originalOnSerialize = node.onSerialize;
 	node.onSerialize = function (serializedNode, ...args) {

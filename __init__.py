@@ -781,8 +781,12 @@ def _register_gjj_character_library_api():
 			views.append(next_item)
 		data = dict(data)
 		data["views"] = views
-		data["cover"] = views[0]["url"] if views else ""
-		data["cover_view"] = views[0]["id"] if views else ""
+		def is_head_view(item: dict) -> bool:
+			text = f"{item.get('label') or ''} {item.get('id') or ''}".lower()
+			return any(keyword in text for keyword in ("大头照", "大头", "头像", "头部", "脸", "face", "head", "portrait"))
+		cover_view = next((item for item in views if is_head_view(item)), None) or (views[0] if views else None)
+		data["cover"] = cover_view["url"] if cover_view else ""
+		data["cover_view"] = cover_view["id"] if cover_view else ""
 		data["reference_name"] = character_reference_name(data, character_id)
 		data["reference"] = f"@{data['reference_name']}"
 		voice_path = clean_voice_path(data.get("voice_path") or "") or default_voice_path_for_character(data)
@@ -1207,12 +1211,114 @@ def _register_gjj_character_library_api():
 			return ["大头照", "正面", "背面"]
 		if count == 4:
 			return ["大头照", "正面", "45度", "背面"]
-		base = ["大头照", "正面", "左侧", "右侧", "背面", "45度", "半身", "表情", "动作"]
+		base = ["大头照", "正面", "左侧", "右侧", "背面", "45度", "半身", "动作"]
 		return [base[index] if index < len(base) else f"视图{index + 1}" for index in range(count)]
 
 	def labels_for_multiview(count: int) -> list[str]:
 		base = ["大头照", "正面", "45度", "背面"]
 		return [base[index] if index < len(base) else f"视图{index + 1}" for index in range(count)]
+
+	def parse_view_labels(value) -> list[str]:
+		raw = []
+		if isinstance(value, list):
+			raw = value
+		else:
+			text = str(value or "").strip()
+			if text:
+				try:
+					parsed = json.loads(text)
+					raw = parsed if isinstance(parsed, list) else [text]
+				except Exception:
+					raw = re.split(r"[,，、\n;；]+", text)
+		labels = []
+		for item in raw:
+			label = str(item or "").strip()
+			if label and label not in labels:
+				labels.append(label[:80])
+		return labels
+
+	def find_character_head_view(manifest: dict) -> dict | None:
+		views = manifest.get("views") if isinstance(manifest.get("views"), list) else []
+		keywords = ("大头照", "大头", "头像", "头部", "脸", "face", "head", "portrait")
+		for view in views:
+			text = f"{view.get('label') or ''} {view.get('id') or ''}".lower()
+			if any(keyword.lower() in text for keyword in keywords):
+				return view
+		return None
+
+	def open_character_view_image(character_id: str, view: dict) -> Image.Image:
+		file_name = clean_key(view.get("file") or "", "")
+		if not file_name:
+			raise ValueError("角色视图缺少文件。")
+		path = (character_dir(character_id) / file_name).resolve()
+		if character_dir(character_id).resolve() not in path.parents or not path.is_file():
+			raise ValueError("角色视图文件不存在。")
+		return Image.open(path).convert("RGBA")
+
+	def multiview_prompt_for_label(label: str) -> str:
+		text = str(label or "").strip()
+		lowered = text.lower()
+		view_rule = "标准正面视图"
+		if "左前" in text or "front left" in lowered or "left front" in lowered:
+			view_rule = "左前 45° 斜侧视图，身体和脸部朝向左前方"
+		elif "右前" in text or "front right" in lowered or "right front" in lowered:
+			view_rule = "右前 45° 斜侧视图，身体和脸部朝向右前方"
+		elif "左后" in text or "back left" in lowered or "left back" in lowered:
+			view_rule = "左后 45° 斜后视图，展示背部轮廓和左侧轮廓"
+		elif "右后" in text or "back right" in lowered or "right back" in lowered:
+			view_rule = "右后 45° 斜后视图，展示背部轮廓和右侧轮廓"
+		elif "左侧" in text or "left" in lowered:
+			view_rule = "左侧面视图，主体完整侧身"
+		elif "右侧" in text or "right" in lowered:
+			view_rule = "右侧面视图，主体完整侧身"
+		elif "背" in text or "后" in text or "back" in lowered:
+			view_rule = "背面/后视图，主体背对镜头"
+		elif "底部仰视" in text:
+			view_rule = "底部仰视视角，从下往上看主体"
+		elif "顶部俯视" in text:
+			view_rule = "顶部俯视视角，从上往下看主体"
+		elif "正面" in text or "front" in lowered:
+			view_rule = "标准正面视图，主体面向镜头"
+
+		shot_rule = "远景全身照，完整全身构图，从头顶到双脚全部可见，全身无裁剪，双脚完整在画面内"
+		if "微距" in text or "macro" in lowered:
+			shot_rule = "微距细节特写，只拍摄脸部或服装局部细节，画面极近，纹理清晰"
+		elif "大特写" in text or "extreme close" in lowered:
+			shot_rule = "大特写肖像构图，只包含脸部主要区域和少量头部边缘，五官清晰"
+		elif "特写" in text or "close" in lowered:
+			shot_rule = "特写肖像构图，只拍头部和肩颈附近，五官、头饰和表情清晰"
+		elif "肩部肖像" in text or "shoulder" in lowered:
+			shot_rule = "肩部肖像构图，只包含头部、颈部和双肩，上半身不超过胸口，五官清晰"
+		elif "半身" in text or "half" in lowered or "中近景" in text:
+			shot_rule = "半身或中近景构图，显示头部到腰部/胸腹区域，清晰保留服装上半身"
+		elif "中景" in text:
+			shot_rule = "中景构图，显示主体上半身到大腿附近，姿态和服装清晰"
+		elif "中远景" in text:
+			shot_rule = "中远景构图，显示大部分身体，允许轻微留白，主体姿态清晰"
+		elif "全身肖像" in text or "大全景" in text or "远景" in text or "广角" in text:
+			shot_rule = "全身肖像/远景构图，从头到脚完整可见，画面留有适度空间"
+
+		angle_rule = "齐眼平视，镜头高度与人物眼睛接近"
+		if "超低仰拍" in text:
+			angle_rule = "超低机位仰拍，镜头明显低于人物"
+		elif "仰拍" in text:
+			angle_rule = "低机位仰拍，镜头略低于人物"
+		elif "微高角度" in text:
+			angle_rule = "微高角度，镜头略高于人物眼睛"
+		elif "高空鸟瞰" in text:
+			angle_rule = "高空鸟瞰角度，从很高位置向下看"
+		elif "极致俯拍" in text:
+			angle_rule = "极致俯拍，镜头几乎从正上方向下"
+		elif "俯拍" in text or "高角度" in text:
+			angle_rule = "高角度俯拍，镜头高于人物向下看"
+		elif "倾斜镜头" in text:
+			angle_rule = "倾斜镜头构图，画面轻微 Dutch angle"
+
+		if any(token in text for token in ("大头", "头像", "头部", "脸")) or any(token in lowered for token in ("head", "face", "portrait")):
+			return f"白色背景,{view_rule},{shot_rule},{angle_rule},构图紧凑，清晰保留完整面部特征，人物资产。"
+		if "动作" in text or "pose" in lowered or "action" in lowered:
+			return f"白色背景,{text}人物动作视图,{view_rule},{shot_rule},{angle_rule},动作清晰自然，保持身份、服装配色和风格一致。"
+		return f"白色背景,{text or '自定义角度'}人物视图,{view_rule},{shot_rule},{angle_rule},保持身份、五官、服装配色和风格一致。"
 
 	def save_view_bytes(character_id: str, label: str, raw: bytes) -> dict:
 		if not raw.startswith(PNG_SIGNATURE):
@@ -1440,6 +1546,31 @@ def _register_gjj_character_library_api():
 		except Exception as exc:
 			return web.json_response({"ok": False, "error": str(exc)}, status=400)
 
+	@server.routes.post("/gjj/character_library/view_label")
+	async def gjj_character_library_view_label(request):
+		try:
+			data = await request.json()
+			character_id = clean_key(data.get("id") or data.get("character_id") or "", "")
+			view_id = clean_key(data.get("view") or data.get("view_id") or "", "")
+			label = str(data.get("label") or "").strip()[:80]
+			if not character_id or not view_id:
+				raise ValueError("缺少角色或视图 ID。")
+			if not label:
+				raise ValueError("视图标签不能为空。")
+			manifest = read_manifest(character_id)
+			changed = False
+			for item in manifest.get("views") or []:
+				if item.get("id") == view_id:
+					item["label"] = label
+					item["updated_at"] = now_ms()
+					changed = True
+					break
+			if not changed:
+				raise ValueError("没有找到要修改的视图。")
+			return web.json_response({"ok": True, "character": enrich_manifest(write_manifest(manifest))})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
 	@server.routes.post("/gjj/character_library/import_sheet")
 	async def gjj_character_library_import_sheet(request):
 		try:
@@ -1499,19 +1630,27 @@ def _register_gjj_character_library_api():
 						fields[part.name] = await part.text()
 				name = str(fields.get("name") or "").strip()
 				character_id = clean_key(fields.get("id") or name, "character")
-				image = Image.open(io.BytesIO(raw)).convert("RGBA")
+				image = Image.open(io.BytesIO(raw)).convert("RGBA") if raw else None
 				base_prompt = str(fields.get("base_prompt") or "").strip()
+				requested_labels = parse_view_labels(fields.get("labels") or fields.get("views") or "")
 				seed = int(fields.get("seed") or 0)
 			else:
 				data = await request.json()
 				name = str(data.get("name") or "").strip()
 				character_id = clean_key(data.get("id") or name, "character")
-				image = decode_image(data.get("image") or data.get("png") or "")
+				image_value = data.get("image") or data.get("png") or ""
+				image = decode_image(image_value) if image_value else None
 				base_prompt = str(data.get("base_prompt") or "").strip()
+				requested_labels = parse_view_labels(data.get("labels") or data.get("views") or "")
 				seed = int(data.get("seed") or 0)
 			manifest = read_manifest(character_id)
 			manifest["name"] = name or manifest.get("name") or character_id
 			write_manifest(manifest)
+			if image is None:
+				head_view = find_character_head_view(manifest)
+				if head_view is None:
+					raise RuntimeError("缺少大头照：请先添加“大头照”视图，再用它自动生成其它角度。")
+				image = open_character_view_image(character_id, head_view)
 
 			try:
 				from .nodes.gjj_comprehensive_matting import _pil_list_to_tensor, _tensor_to_pil_list
@@ -1537,18 +1676,20 @@ def _register_gjj_character_library_api():
 					pass
 				return fallback
 
-			identity_prompt = (
-				"图一只作为人物身份、五官、发型、服装配色和风格参考；不要继承图一的近景构图、裁切范围、白条、背景边缘或镜头距离。"
-				"除大头照外，其余视图必须重新拉远镜头生成完整人体。"
-			)
+			if requested_labels:
+				identity_prompt = (
+					"图一只作为人物身份、五官、发型、服装配色和风格参考；不要继承图一的裁切范围、白条、背景边缘或镜头距离。"
+					"每个输出视图必须严格服从对应动作文本里的视角、景别和镜头角度；如果写了肩部肖像、半身、特写或俯仰角，不要自动改成全身正面。"
+				)
+			else:
+				identity_prompt = (
+					"图一只作为人物身份、五官、发型、服装配色和风格参考；不要继承图一的近景构图、裁切范围、白条、背景边缘或镜头距离。"
+					"除大头照外，其余视图必须重新拉远镜头生成完整人体。"
+				)
 			if base_prompt:
 				identity_prompt = f"{identity_prompt}\n{base_prompt}"
-			action_prompts = "\n".join([
-				"白色背景,近距离大头特写，只拍头部和肩膀，构图紧凑，清晰保留完整面部特征，人物资产。",
-				"白色背景,标准正面,远景全身照,镜头拉远,完整全身构图,从头顶到双脚全部可见,完整人体,双脚完整在画面内,不要大头照,不要半身照,不要裁脚,画面底部预留足够空间容纳双脚。",
-				"白色背景,主体45°斜侧身,远景全身照,镜头拉远,全身无裁剪,从头到脚全部可见,姿态自然,不要大头照,不要半身照,不要裁脚。顶部、底部各留白5%，居中人物资产。",
-				"白色背景,主体后视图,远景全身照,镜头拉远,全身无裁剪,从头到脚全部可见,轮廓标准,不要大头照,不要半身照,不要裁脚。顶部、底部各留白5%，居中人物资产。",
-			])
+			output_labels = requested_labels or ["大头照", "正面", "45度", "背面"]
+			action_prompts = "\n".join([multiview_prompt_for_label(label) for label in output_labels])
 			lora_models = _safe_filename_list("loras") or []
 			def lora_exists(name: str) -> bool:
 				target = os.path.basename(str(name or "").replace("\\", "/")).lower()
@@ -1602,7 +1743,7 @@ def _register_gjj_character_library_api():
 			if not generated:
 				raise RuntimeError("多视图节点没有返回单图批量图片。")
 			views = comprehensive_matting_cutouts(generated)
-			labels = labels_for_multiview(len(views))
+			labels = output_labels if requested_labels else labels_for_multiview(len(views))
 			for label, view in zip(labels, views):
 				save_view_image(character_id, label, view)
 			return web.json_response({
