@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import re
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,9 @@ from .common_utils.network_media import (
     gjjutils_media_file_starts_like_html,
 )
 from .common_utils.temp_files import (
+    gjjutils_read_temp_pil_image,
     gjjutils_temp_root,
+    gjjutils_write_temp_bytes,
     gjjutils_write_temp_file,
     gjjutils_write_temp_pil_image,
 )
@@ -39,6 +42,7 @@ NODE_NAME = "GJJ_MultiImageLoader"
 IMAGE_API_PATH = "/gjj/input_images"
 THUMB_API_PATH = "/gjj/input_image_thumb"
 DEFAULT_NETWORK_IMAGE_API_PATH = "/gjj/multi_image_loader/default_image"
+TEMP_UPLOAD_API_PATH = "/gjj/multi_image_loader/upload_temp_images"
 MAX_OUTPUT_IMAGES = 20
 NETWORK_IMAGE_DOWNLOAD_TIMEOUT = 8
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".avif"}
@@ -315,6 +319,81 @@ async def post_gjj_default_network_image(request):
     })
 
 
+def _uploaded_image_suffix(filename: str, content_type: str = "") -> str:
+    suffix = Path(str(filename or "")).suffix.lower()
+    if suffix in IMAGE_EXTENSIONS:
+        return suffix
+    content_type = str(content_type or "").lower()
+    if "jpeg" in content_type or "jpg" in content_type:
+        return ".jpg"
+    if "png" in content_type:
+        return ".png"
+    if "webp" in content_type:
+        return ".webp"
+    if "bmp" in content_type:
+        return ".bmp"
+    if "gif" in content_type:
+        return ".gif"
+    if "avif" in content_type:
+        return ".avif"
+    return ".png"
+
+
+def _write_uploaded_image_to_temp(content: bytes, filename: str = "", content_type: str = "") -> dict[str, Any]:
+    if not content:
+        raise ValueError("图片内容为空")
+    suffix = _uploaded_image_suffix(filename, content_type)
+    with Image.open(BytesIO(content)) as image:
+        image.load()
+        format_name = str(image.format or suffix.lstrip(".") or "PNG").lower()
+    info = gjjutils_write_temp_bytes(content, suffix=suffix)
+    saved_image = gjjutils_read_temp_pil_image(info)
+    path = (Path(folder_paths.get_temp_directory()).resolve() / str(info.get("subfolder") or "") / str(info.get("filename") or "")).resolve()
+    stat = path.stat() if path.exists() else None
+    info.update(
+        {
+            "label": str(info.get("filename") or ""),
+            "source": "drag_upload",
+            "media_type": "image",
+            "format": f"image/{format_name}",
+            "width": int(saved_image.width),
+            "height": int(saved_image.height),
+            "mtime_ns": int(stat.st_mtime_ns) if stat else 0,
+            "size_bytes": int(stat.st_size) if stat else 0,
+            "original_name": Path(str(filename or "")).name,
+        }
+    )
+    return info
+
+
+async def post_gjj_multi_image_loader_upload_temp_images(request):
+    try:
+        reader = await request.multipart()
+        uploaded: list[dict[str, Any]] = []
+        errors: list[str] = []
+        async for part in reader:
+            if part.name not in {"image", "images", "file", "files"}:
+                continue
+            filename = str(part.filename or "")
+            try:
+                content = await part.read(decode=False)
+                uploaded.append(
+                    _write_uploaded_image_to_temp(
+                        content,
+                        filename=filename,
+                        content_type=str(part.headers.get("Content-Type", "")),
+                    )
+                )
+            except Exception as error:
+                errors.append(f"{filename or '未命名图片'}: {error}")
+        if not uploaded:
+            message = "；".join(errors[:5]) if errors else "缺少图片"
+            return web.json_response({"ok": False, "error": message, "items": [], "errors": errors[:20]}, status=400)
+        return web.json_response({"ok": True, "items": uploaded, "images": uploaded, "errors": errors[:20]})
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error), "items": []}, status=500)
+
+
 def _safe_int(value: Any, default: int, min_value: int, max_value: int) -> int:
     try:
         number = int(value)
@@ -380,6 +459,7 @@ def _register_multi_image_loader_routes() -> None:
     routes.get(IMAGE_API_PATH)(get_gjj_input_images)
     routes.get(THUMB_API_PATH)(get_gjj_input_image_thumb)
     routes.post(DEFAULT_NETWORK_IMAGE_API_PATH)(post_gjj_default_network_image)
+    routes.post(TEMP_UPLOAD_API_PATH)(post_gjj_multi_image_loader_upload_temp_images)
 
 
 _register_multi_image_loader_routes()
@@ -399,19 +479,22 @@ def parse_selected_images(raw_value: Any) -> list[dict[str, str]]:
         return []
 
     cleaned: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     for item in parsed:
         if not isinstance(item, dict):
             continue
         filename = str(item.get("filename") or "").strip()
         subfolder = str(item.get("subfolder") or "").strip().replace("\\", "/")
+        image_type = str(item.get("type") or "input").strip().lower()
+        if image_type not in {"input", "temp", "output"}:
+            image_type = "input"
         if not filename:
             continue
-        key = (subfolder, filename)
+        key = (image_type, subfolder, filename)
         if key in seen:
             continue
         seen.add(key)
-        cleaned.append({"filename": filename, "subfolder": subfolder})
+        cleaned.append({"filename": filename, "subfolder": subfolder, "type": image_type})
     # 批量队列不限制图片数量；单图输出仍由前端最多展开 20 个。
     return cleaned
 
@@ -520,9 +603,10 @@ def selected_images_signature(selected: list[dict[str, str]]) -> list[dict[str, 
         item: dict[str, Any] = {
             "filename": str(entry.get("filename") or ""),
             "subfolder": str(entry.get("subfolder") or ""),
+            "type": str(entry.get("type") or "input"),
         }
         try:
-            path = resolve_input_image_path(entry)
+            path = resolve_selected_image_path(entry)
             stat = path.stat()
             item["size"] = int(stat.st_size)
             item["mtime_ns"] = int(stat.st_mtime_ns)
@@ -533,16 +617,28 @@ def selected_images_signature(selected: list[dict[str, str]]) -> list[dict[str, 
 
 
 def resolve_input_image_path(entry: dict[str, str]) -> Path:
-    input_dir = Path(folder_paths.get_input_directory()).resolve()
+    return resolve_selected_image_path({**entry, "type": "input"})
+
+
+def resolve_selected_image_path(entry: dict[str, str]) -> Path:
+    image_type = str(entry.get("type") or "input").strip().lower()
+    if image_type == "output":
+        root = Path(folder_paths.get_output_directory()).resolve()
+    elif image_type == "temp":
+        root = Path(folder_paths.get_temp_directory()).resolve()
+    else:
+        image_type = "input"
+        root = Path(folder_paths.get_input_directory()).resolve()
     filename = str(entry.get("filename") or "").strip()
     subfolder = str(entry.get("subfolder") or "").strip().replace("\\", "/")
-    candidate = (input_dir / subfolder / filename).resolve()
+    candidate = (root / subfolder / filename).resolve()
     try:
-        candidate.relative_to(input_dir)
+        candidate.relative_to(root)
     except ValueError as error:
         raise RuntimeError(f"图片路径越界：{subfolder}/{filename}") from error
     if not candidate.exists():
-        raise RuntimeError(f"未找到图片：{subfolder}/{filename}")
+        label = f"{subfolder}/{filename}".strip("/")
+        raise RuntimeError(f"未找到{image_type}图片：{label}")
     return candidate
 
 
@@ -903,7 +999,7 @@ class GJJ_MultiImageLoader:
         skipped_errors: list[str] = []
         for entry in selected:
             try:
-                image_path = resolve_input_image_path(entry)
+                image_path = resolve_selected_image_path(entry)
                 image_tensor = load_image_tensor(image_path)
             except Exception as error:
                 subfolder_label = str(entry.get("subfolder") or "").strip().replace("\\", "/")

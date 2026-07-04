@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import time
+from pathlib import Path
 from typing import Any
 
 import folder_paths
@@ -36,6 +37,17 @@ class AnyMediaType(str):
 
 MIXED_IMAGE_TYPE = AnyMediaType("GJJ_BATCH_IMAGE,IMAGE,VIDEO")
 MAX_REFERENCE_IMAGES = 2
+
+
+def _comfyui_root() -> Path:
+    base_path = getattr(folder_paths, "base_path", None)
+    if base_path:
+        return Path(base_path)
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if parent.name == "custom_nodes":
+            return parent.parent
+    return current.parents[3]
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 
@@ -938,7 +950,7 @@ class GJJ_BerniniStudio:
         notice="Bernini Studio 使用公共模型树声明；模型按树放入对应目录后刷新或重启 ComfyUI。",
         extra={
             "title": "Bernini Studio",
-            "workflow_reference": r"D:\AI\MOD\user\default\workflows\BERNINI.json",
+            "workflow_reference": str(_comfyui_root() / "user" / "default" / "workflows" / "BERNINI.json"),
             "model_tree": MODEL_TREE,
             "models": REQUIRED_MODELS,
             "static_model_tree_only": True,

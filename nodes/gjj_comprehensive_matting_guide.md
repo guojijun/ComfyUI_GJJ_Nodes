@@ -90,7 +90,7 @@ Remover = load_dependency_at_runtime(
 [GJJ] 该节点需要 timm Python 包才能运行 RMBG2/BiRefNet 模型
 
 [GJJ] 快速安装命令:
-& "D:\AI\ComfyUI\python.exe" -m pip install timm -i https://pypi.tuna.tsinghua.edu.cn/simple --ignore-installed --target "D:\AI\ComfyUI\Lib\site-packages"
+& "<当前 ComfyUI 的 Python 解释器>" -m pip install timm -i https://pypi.tuna.tsinghua.edu.cn/simple --ignore-installed --target "<当前 Python 的 site-packages>"
 
 [GJJ] 提示: 安装后请重启 ComfyUI 服务器
 ================================================================================
@@ -110,7 +110,7 @@ def get_pip_install_command_text(pkg: str) -> str
 
 ```python
 install_cmd = get_pip_install_command_text("numpy safetensors torchvision")
-# 输出: '& "D:\AI\ComfyUI\python.exe" -m pip install numpy safetensors torchvision -i https://pypi.tuna.tsinghua.edu.cn/simple --ignore-installed --target "D:\AI\ComfyUI\Lib\site-packages"'
+# 输出示例: '& "<当前 ComfyUI 的 Python 解释器>" -m pip install numpy safetensors torchvision -i https://pypi.tuna.tsinghua.edu.cn/simple --ignore-installed --target "<当前 Python 的 site-packages>"'
 ```
 
 #### 命令特点
@@ -467,7 +467,7 @@ models/
 
 ```powershell
 # 安装所有必需依赖
-& "D:\AI\ComfyUI\python.exe" -m pip install numpy safetensors torchvision timm kornia transparent-background -i https://pypi.tuna.tsinghua.edu.cn/simple --ignore-installed --target "D:\AI\ComfyUI\Lib\site-packages"
+& "<当前 ComfyUI 的 Python 解释器>" -m pip install numpy safetensors torchvision timm kornia transparent-background -i https://pypi.tuna.tsinghua.edu.cn/simple --ignore-installed --target "<当前 Python 的 site-packages>"
 ```
 
 ---

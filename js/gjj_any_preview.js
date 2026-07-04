@@ -1970,6 +1970,110 @@ async function copyImagesToInput(images) {
 	return normalizeMediaPayload(data.images);
 }
 
+function imageFilesFromDropEvent(event) {
+	const files = Array.from(event?.dataTransfer?.files || []);
+	return files.filter((file) => String(file?.type || "").startsWith("image/") || /\.(png|jpe?g|webp|bmp|gif)$/i.test(file?.name || ""));
+}
+
+async function uploadDroppedImagesToTemp(files) {
+	const form = new FormData();
+	for (const file of files) {
+		form.append("images", file, file.name || "image.png");
+	}
+	const response = await api.fetchApi("/gjj/any_preview/upload_temp_image", {
+		method: "POST",
+		body: form,
+	});
+	const data = await response.json().catch(() => ({}));
+	if (!response.ok || !Array.isArray(data?.images) || !data.images.length) {
+		throw new Error(data?.error || "图片上传失败");
+	}
+	return normalizeMediaPayload(data.images);
+}
+
+function setDropTargetActive(node, active, text = "") {
+	const wrap = node?.__gjjAnyPreviewWrap;
+	if (!wrap) {
+		return;
+	}
+	wrap.dataset.gjjAnyPreviewDragActive = active ? "true" : "false";
+	if (node.__gjjAnyPreviewDropHint) {
+		node.__gjjAnyPreviewDropHint.textContent = text || "松开导入图片";
+		node.__gjjAnyPreviewDropHint.style.display = active ? "flex" : "none";
+	}
+}
+
+async function importDroppedImages(node, files) {
+	if (!node || !files.length) {
+		return;
+	}
+	setDropTargetActive(node, true, "上传中...");
+	try {
+		const images = await uploadDroppedImagesToTemp(files);
+		node.properties = node.properties || {};
+		disconnectLinkedInputs(node);
+		node.properties[HELD_IMAGES_PROPERTY] = images.map((item) => ({ ...item }));
+		delete node.properties[HELD_TEXT_PROPERTY];
+		delete node.properties[HELD_MEDIA_PROPERTY];
+		resetLivePreviewState(node);
+		applyHeldImagePreview(node);
+		scheduleStabilize(node, 0);
+		setDirty(node);
+	} catch (error) {
+		console.warn("[GJJ_AnyPreview] drop image upload failed", error);
+		setDropTargetActive(node, true, error?.message || "上传失败");
+		setTimeout(() => setDropTargetActive(node, false), 1200);
+		return;
+	}
+	setDropTargetActive(node, false);
+}
+
+function installAnyPreviewDropTarget(node, elements) {
+	if (!node || node.__gjjAnyPreviewDropInstalled) {
+		return;
+	}
+	node.__gjjAnyPreviewDropInstalled = true;
+	const targets = elements.filter(Boolean);
+	let dragDepth = 0;
+	const stopIfImages = (event) => {
+		const hasImage = imageFilesFromDropEvent(event).length > 0 || Array.from(event?.dataTransfer?.items || []).some((item) => String(item?.type || "").startsWith("image/"));
+		if (!hasImage) {
+			return false;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		event.dataTransfer.dropEffect = "copy";
+		return true;
+	};
+	for (const target of targets) {
+		target.addEventListener("dragenter", (event) => {
+			if (!stopIfImages(event)) return;
+			dragDepth += 1;
+			setDropTargetActive(node, true);
+		});
+		target.addEventListener("dragover", (event) => {
+			stopIfImages(event);
+		});
+		target.addEventListener("dragleave", (event) => {
+			if (!stopIfImages(event)) return;
+			dragDepth = Math.max(0, dragDepth - 1);
+			if (!dragDepth) {
+				setDropTargetActive(node, false);
+			}
+		});
+		target.addEventListener("drop", (event) => {
+			if (!stopIfImages(event)) return;
+			dragDepth = 0;
+			const files = imageFilesFromDropEvent(event);
+			if (!files.length) {
+				setDropTargetActive(node, false);
+				return;
+			}
+			void importDroppedImages(node, files);
+		});
+	}
+}
+
 async function copyPreviewToAnyPreviewNode(node) {
 	const button = node?.__gjjAnyPreviewCopyNodeButton;
 	const images = currentPreviewImages(node);
@@ -4336,6 +4440,25 @@ function ensurePreviewWidget(node) {
 			border-color: #5f8fa0;
 			background: #16242a;
 		}
+		.gjj-any-preview-wrap[data-gjj-any-preview-drag-active="true"] {
+			border-color: #38bdf8 !important;
+			box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.28), inset 0 0 0 1px rgba(56, 189, 248, 0.2);
+		}
+		.gjj-any-preview-drop-hint {
+			position:absolute;
+			inset:8px;
+			z-index:5;
+			display:none;
+			align-items:center;
+			justify-content:center;
+			border:1px dashed #67e8f9;
+			border-radius:8px;
+			background:rgba(8, 20, 24, 0.78);
+			color:#e0faff;
+			font-size:13px;
+			font-weight:700;
+			pointer-events:none;
+		}
 		.gjj-text-input-markdown-body h1,
 		.gjj-text-input-markdown-body h2,
 		.gjj-text-input-markdown-body h3,
@@ -4489,6 +4612,11 @@ function ensurePreviewWidget(node) {
 	empty.appendChild(emptyRunButton);
 	previewWrap.appendChild(empty);
 
+	const dropHint = document.createElement("div");
+	dropHint.className = "gjj-any-preview-drop-hint";
+	dropHint.textContent = "松开导入图片";
+	previewWrap.appendChild(dropHint);
+
 	body.style.order = "2";
 	container.appendChild(previewWrap);
 
@@ -4541,6 +4669,8 @@ function ensurePreviewWidget(node) {
 	node.__gjjAnyPreviewBody = body;
 	node.__gjjAnyPreviewGrid = grid;
 	node.__gjjAnyPreviewEmpty = empty;
+	node.__gjjAnyPreviewDropHint = dropHint;
+	installAnyPreviewDropTarget(node, [container, previewWrap, body, grid, empty]);
 	applyPreviewContent(node);
 	scheduleLayout(node);
 }

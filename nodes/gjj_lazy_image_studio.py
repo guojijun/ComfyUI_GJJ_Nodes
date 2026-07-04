@@ -58,6 +58,7 @@ from .common_utils.prompt_translation import (
     COMMON_PROMPT_TRANSLATE_API_PATH,
     register_prompt_translation_api,
 )
+from .common_utils.lora_triggers import append_lora_triggers_to_positive_prompt
 from .gjj_model_bundle_loader import (
     UNET_DTYPE_OPTIONS,
     _build_unet_model_options,
@@ -82,7 +83,11 @@ from .common_utils.model_family import (
 )
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
-from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data
+from .gjj_multi_lora_chain import (
+    apply_lora_chain_config,
+    build_lora_trigger_text,
+    normalize_lora_chain_data,
+)
 from .gjj_multi_image_loader import (
     load_image_tensor,
     parse_selected_images,
@@ -1912,7 +1917,7 @@ class GJJ_LazyImageStudio:
                         "max": 8192,
                         "step": 8,
                         "display_name": "📐 宽度",
-                        "tooltip": "默认会在接入批量图片时，从所有图片里不分先后取最大图自动同步宽度；如果你手动修改，节点会按目标尺寸自动缩放或外扩填充。",
+                        "tooltip": "默认会在第一个图像输入有连接时同步为输入图宽度；关闭 📐 后按面板宽度生成。",
                     },
                 ),
                 "height": (
@@ -1923,7 +1928,7 @@ class GJJ_LazyImageStudio:
                         "max": 8192,
                         "step": 8,
                         "display_name": "📏 高度",
-                        "tooltip": "默认会在接入批量图片时，从所有图片里不分先后取最大图自动同步高度；如果你手动修改，节点会按目标尺寸自动缩放或外扩填充。",
+                        "tooltip": "默认会在第一个图像输入有连接时同步为输入图高度；关闭 📐 后按面板高度生成。",
                     },
                 ),
                 "batch_size": (
@@ -2108,6 +2113,17 @@ class GJJ_LazyImageStudio:
                             "forceInput": False,
                         },
                     ),
+                    "use_input_image_size": (
+                        "BOOLEAN",
+                        {
+                            "default": True,
+                            "display_name": "📐 使用输入图尺寸",
+                            "tooltip": "第一个图像输入有连接时，开启后生成宽高使用输入图尺寸；关闭后使用面板宽高。",
+                            "hidden": True,
+                            "display": "hidden",
+                            "forceInput": False,
+                        },
+                    ),
                 }
             ),
             "hidden": {
@@ -2174,6 +2190,21 @@ class GJJ_LazyImageStudio:
                 loaded_lora_cache=None,
             )
         return current_model, current_clip
+
+    def _lora_trigger_text(self, lora_data: str = "", lora_chain_config: str = "") -> str:
+        triggers: list[str] = []
+        seen: set[str] = set()
+        for value in (lora_data, lora_chain_config):
+            if not str(value or "").strip():
+                continue
+            trigger_text = build_lora_trigger_text(normalize_lora_chain_data(value))
+            for trigger in str(trigger_text or "").replace("\n", ",").split(","):
+                item = " ".join(str(trigger or "").strip().split())
+                key = item.lower()
+                if item and key not in seen:
+                    seen.add(key)
+                    triggers.append(item)
+        return ", ".join(triggers)
 
     def _encode_text_conditioning(self, clip, text: str):
         tokens = clip.tokenize(str(text or ""))
@@ -2712,6 +2743,7 @@ class GJJ_LazyImageStudio:
         disable_equal_reference_canvas=False,
         keep_model_loaded=False,
         test_config="",
+        use_input_image_size=True,
         prompt_graph=None,
         unique_id=None,
         extra_pnginfo=None,
@@ -2744,11 +2776,13 @@ class GJJ_LazyImageStudio:
         disable_equal_reference_canvas = _unwrap_list_input(disable_equal_reference_canvas)
         keep_model_loaded = _unwrap_list_input(keep_model_loaded)
         test_config = _unwrap_list_input(test_config)
+        use_input_image_size = _unwrap_list_input(use_input_image_size)
         prompt_graph = _unwrap_list_input(prompt_graph)
         unique_id = _unwrap_list_input(unique_id)
         extra_pnginfo = _unwrap_list_input(extra_pnginfo)
         keep_model_loaded = _as_bool(keep_model_loaded)
         disable_equal_reference_canvas = _as_bool(disable_equal_reference_canvas)
+        use_input_image_size = _as_bool(use_input_image_size)
 
         test_config_data: dict[str, Any] = {}
         if str(test_config or "").strip():
@@ -2775,6 +2809,18 @@ class GJJ_LazyImageStudio:
                                     break
             except Exception:
                 lora_data = ""
+
+        lora_trigger_text = self._lora_trigger_text(lora_data, lora_chain_config)
+        if lora_trigger_text:
+            prompt_items = [
+                append_lora_triggers_to_positive_prompt(item, lora_trigger_text)
+                for item in (prompt_items or [""])
+            ]
+            prompt = prompt_items[0] if prompt_items else ""
+            try:
+                print(f"[GJJ] LazyImageStudio 已追加 LoRA 触发词：{lora_trigger_text}")
+            except Exception:
+                pass
 
         # 设置当前节点引用用于状态更新
         _send_status.current_node = self
@@ -2853,8 +2899,10 @@ class GJJ_LazyImageStudio:
                             mask=mask,
                             disable_reference_auto_mask=disable_reference_auto_mask,
                             force_empty_latent_reference=force_empty_latent_reference,
+                            disable_equal_reference_canvas=disable_equal_reference_canvas,
                             keep_model_loaded=keep_model_loaded,
                             test_config="",
+                            use_input_image_size=use_input_image_size,
                             prompt_graph=prompt_graph,
                             unique_id=unique_id,
                             extra_pnginfo=extra_pnginfo,
@@ -2953,6 +3001,7 @@ class GJJ_LazyImageStudio:
                 "denoise": float(denoise),
                 "grow_mask_by": int(grow_mask_by),
                 "keep_model_loaded": bool(keep_model_loaded),
+                "use_input_image_size": bool(use_input_image_size),
             }
             return {
                 "ui": {
@@ -3049,6 +3098,18 @@ class GJJ_LazyImageStudio:
                 f"[GJJ] LazyImageStudio 实际接收图片：{len(pairs)} 张"
                 + (f"，张量尺寸 {', '.join(input_shapes)}" if input_shapes else "")
             )
+            if use_input_image_size and pairs:
+                first_image = pairs[0].get("image")
+                if isinstance(first_image, torch.Tensor) and first_image.ndim >= 3:
+                    input_width = _ceil_to_multiple(int(first_image.shape[2]), 8)
+                    input_height = _ceil_to_multiple(int(first_image.shape[1]), 8)
+                    if input_width != int(width) or input_height != int(height):
+                        print(
+                            "[GJJ] LazyImageStudio 使用第一个图像输入尺寸："
+                            f"{int(width)}x{int(height)} -> {input_width}x{input_height}"
+                        )
+                    width = input_width
+                    height = input_height
             preset = dict(preset)
             preset["resolved_unet_name"] = str(unet_name or "")
             preset["resolved_clip_type"] = str(resolved_clip_type or "")
@@ -3093,6 +3154,7 @@ class GJJ_LazyImageStudio:
                     "grow_mask_by": int(grow_mask_by),
                     "disable_reference_auto_mask": _as_bool(disable_reference_auto_mask),
                     "force_empty_latent_reference": _as_bool(force_empty_latent_reference),
+                    "use_input_image_size": bool(use_input_image_size),
                     "pairs": _pairs_signature(pairs),
                     "mask": _tensor_signature(mask) if mask is not None else "",
                 }
@@ -3430,6 +3492,7 @@ class GJJ_LazyImageStudio:
                 "denoise": float(denoise),
                 "grow_mask_by": int(grow_mask_by),
                 "keep_model_loaded": bool(keep_model_loaded),
+                "use_input_image_size": bool(use_input_image_size),
             }
 
             # 准备返回值（在清理资源之前）

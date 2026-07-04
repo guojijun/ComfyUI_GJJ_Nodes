@@ -923,13 +923,15 @@ class GJJ_TextOverlay:
                 if not isinstance(item, dict):
                     continue
                 try:
-                    if str(item.get("type") or "").lower() == "temp":
-                        upload_pil = gjjutils_read_temp_pil_image(item).convert("RGBA")
-                    else:
-                        upload_path = resolve_input_image_path(item.get("filename") or "")
-                        if not upload_path:
-                            continue
-                        upload_pil = Image.open(upload_path).convert("RGBA")
+                    upload_path = resolve_comfy_image_path(
+                        item.get("filename") or "",
+                        item.get("type") or "input",
+                        item.get("subfolder") or "",
+                    )
+                    if not upload_path:
+                        print(f"[GJJ_TextOverlay] 清理/跳过失效前景资源: {item.get('type') or 'input'}:{item.get('subfolder') or ''}/{item.get('filename') or ''}")
+                        continue
+                    upload_pil = Image.open(upload_path).convert("RGBA")
                     watermark_entries.append({
                         "pil": upload_pil,
                         "x": clamp_ratio(item.get("x", watermark_x)),
@@ -938,6 +940,7 @@ class GJJ_TextOverlay:
                         "stroke_enabled": bool(item.get("stroke_enabled", False)),
                         "stroke_width": int(item.get("stroke_width", logo_stroke_width) or logo_stroke_width),
                         "stroke_color_hex": str(item.get("stroke_color_hex") or logo_stroke_color_hex),
+                        "mirror_x": bool(item.get("mirror_x", False)),
                     })
                 except Exception:
                     pass
@@ -1003,6 +1006,7 @@ class GJJ_TextOverlay:
                 "x": clamp_ratio(entry.get("x", watermark_x)),
                 "y": clamp_ratio(entry.get("y", watermark_y)),
                 "scale": float(entry.get("scale", watermark_width) or watermark_width),
+                "mirror_x": bool(entry.get("mirror_x", False)),
             })
 
         for i, bg_tensor in enumerate(background_images):
@@ -1087,6 +1091,8 @@ class GJJ_TextOverlay:
                     new_width = max(1, int(round(orig_width * effective_watermark_width)))
                     new_height = max(1, int(round(orig_height * effective_watermark_width)))
                     wm_pil = wm_pil.resize((new_width, new_height), Image.LANCZOS)
+                if bool(styled_wm.get("mirror_x", False)):
+                    wm_pil = wm_pil.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
 
                 # 应用前景透明度
                 if watermark_opacity < 1.0:

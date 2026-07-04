@@ -799,9 +799,30 @@ function updateWatermarkObject(node, index, patch, notify = true) {
 	return true;
 }
 
+function removeWatermarkObject(node, index, notify = true) {
+	const objects = watermarkObjects(node);
+	if (!Number.isInteger(index) || index < 0 || index >= objects.length) return false;
+	objects.splice(index, 1);
+	const selected = selectedWatermarkObjectIndex(node);
+	if (selected >= objects.length) node.__gjjTextOverlaySelectedObjectIndex = objects.length - 1;
+	else if (selected > index) node.__gjjTextOverlaySelectedObjectIndex = selected - 1;
+	setWatermarkObjects(node, objects, notify);
+	return true;
+}
+
 function selectedWatermarkObjectIndex(node) {
 	const index = Number(node.__gjjTextOverlaySelectedObjectIndex);
 	return Number.isInteger(index) ? index : -1;
+}
+
+function activeWatermarkObjectIndex(node) {
+	const objects = watermarkObjects(node);
+	let index = selectedWatermarkObjectIndex(node);
+	if (!Number.isInteger(index) || index < 0 || index >= objects.length) {
+		index = objects.length - 1;
+		node.__gjjTextOverlaySelectedObjectIndex = index;
+	}
+	return index;
 }
 
 function fitWatermarkObjectToBackground(node, imageInfo, point = { x: 0.5, y: 0.5 }) {
@@ -824,10 +845,20 @@ function adjustWatermarkObjectScale(node, index, delta, fine = false) {
 	if (!Number.isInteger(index) || index < 0 || index >= objects.length) return false;
 	if (objects[index]?.locked) return false;
 	const current = Math.max(0.01, Math.min(10, Number(objects[index].scale || 1)));
-	const step = fine ? 0.002 : 0.01;
+	const step = fine ? 0.01 : 0.05;
 	const next = Math.max(0.01, Math.min(10, Number((current + Math.sign(delta) * step).toFixed(4))));
 	if (next === current) return false;
 	objects[index] = { ...objects[index], scale: next };
+	setWatermarkObjects(node, objects);
+	return true;
+}
+
+function toggleWatermarkObjectMirror(node, index) {
+	const objects = watermarkObjects(node);
+	if (!Number.isInteger(index) || index < 0 || index >= objects.length) return false;
+	if (objects[index]?.locked) return false;
+	const current = objects[index] || {};
+	objects[index] = { ...current, mirror_x: !current.mirror_x };
 	setWatermarkObjects(node, objects);
 	return true;
 }
@@ -1281,13 +1312,23 @@ function makePanel(node) {
 		}
 	};
 	const scaleSelectedWatermarkObject = (delta) => {
-		const index = selectedWatermarkObjectIndex(node);
-		if (adjustWatermarkObjectScale(node, index, delta, true)) {
+		const index = activeWatermarkObjectIndex(node);
+		if (adjustWatermarkObjectScale(node, index, delta, false)) {
 			showPanelStatus(node, delta > 0 ? "对象已放大" : "对象已缩小", 900);
 			renderPanel(node, { fitText: false });
 		} else {
 			const locked = watermarkObjects(node)[index]?.locked;
 			showPanelStatus(node, locked ? "对象已锁定" : "请先选择可缩放的对象", 1400);
+		}
+	};
+	const mirrorSelectedWatermarkObject = () => {
+		const index = activeWatermarkObjectIndex(node);
+		if (toggleWatermarkObjectMirror(node, index)) {
+			showPanelStatus(node, watermarkObjects(node)[index]?.mirror_x ? "对象已镜像" : "对象已取消镜像", 900);
+			renderPanel(node, { fitText: false });
+		} else {
+			const locked = watermarkObjects(node)[index]?.locked;
+			showPanelStatus(node, locked ? "对象已锁定" : "请先选择可镜像的对象", 1400);
 		}
 	};
 
@@ -1315,6 +1356,7 @@ function makePanel(node) {
 	addIconButton("⬆", "选中对象上移一层", () => moveSelectedWatermarkObject(1));
 	addIconButton(ZOOM_IN_ICON, "放大选中对象", () => scaleSelectedWatermarkObject(1));
 	addIconButton(ZOOM_OUT_ICON, "缩小选中对象", () => scaleSelectedWatermarkObject(-1));
+	addIconButton("↔️", "水平镜像选中对象", mirrorSelectedWatermarkObject);
 	addIconButton("🗑", "删除选中的拖拽对象", deleteSelectedWatermarkObject);
 	const objectPicker = document.createElement("div");
 	objectPicker.className = "gjj-text-overlay-object-picker";
@@ -2213,6 +2255,13 @@ function renderWatermarkObjects(node, displayScale) {
 		img.src = src;
 		img.draggable = false;
 		img.style.filter = foregroundStrokeFilter(item, displayScale);
+		img.style.transform = item.mirror_x ? "scaleX(-1)" : "";
+		img.onerror = () => {
+			if (removeWatermarkObject(node, index)) {
+				showPanelStatus(node, "已清理失效资源", 1200);
+				renderPanel(node, { fitText: false });
+			}
+		};
 		const resizeNw = document.createElement("div");
 		resizeNw.className = "gjj-text-overlay-resize";
 		resizeNw.dataset.corner = "nw";
@@ -2268,6 +2317,19 @@ function renderWatermarkObjects(node, displayScale) {
 				if (nudgeWatermarkObject(node, selectedWatermarkObjectIndex(node), 1, 0, event.shiftKey || event.altKey)) rerender();
 				else showPanelStatus(node, "对象已锁定", 900);
 			});
+			addTool("＋", "放大", () => {
+				if (adjustWatermarkObjectScale(node, selectedWatermarkObjectIndex(node), 1, false)) rerender();
+				else showPanelStatus(node, "对象已锁定", 900);
+			});
+			addTool("－", "缩小", () => {
+				if (adjustWatermarkObjectScale(node, selectedWatermarkObjectIndex(node), -1, false)) rerender();
+				else showPanelStatus(node, "对象已锁定", 900);
+			});
+			const mirrorButton = addTool("↔", "水平镜像", () => {
+				if (toggleWatermarkObjectMirror(node, selectedWatermarkObjectIndex(node))) rerender();
+				else showPanelStatus(node, "对象已锁定", 900);
+			});
+			if (mirrorButton) mirrorButton.dataset.active = item.mirror_x ? "true" : "false";
 			const lockButton = addTool(item.locked ? "🔒" : "🔓", item.locked ? "已锁定，点击解锁" : "未锁定，点击锁定", () => {
 				if (toggleWatermarkObjectLock(node, selectedWatermarkObjectIndex(node))) rerender();
 			});
@@ -2280,7 +2342,7 @@ function renderWatermarkObjects(node, displayScale) {
 			const toolGap = 4;
 			const toolHeight = Math.min(
 				stageHeight - 8,
-				7 * 19,
+				10 * 19,
 			);
 			const rightFits = objectLeft + displayW + toolGap + toolWidth <= stageWidth;
 			const leftFits = objectLeft - toolGap - toolWidth >= 0;

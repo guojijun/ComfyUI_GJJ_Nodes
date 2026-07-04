@@ -31,6 +31,7 @@ const TEST_CONFIG_WIDGET_NAME = "test_config";
 const LORA_METADATA_API_PATH = "/gjj/lora-metadata";
 const LORA_PREVIEW_API_PREFIX = "/gjj/lora-preview/";
 const KEEP_MODEL_WIDGET_NAME = "keep_model_loaded";
+const USE_INPUT_IMAGE_SIZE_WIDGET_NAME = "use_input_image_size";
 const SETTINGS_OPEN_PROPERTY = "gjj_lazy_image_studio_settings_open";
 const TRANSLATE_ENABLED_PROPERTY = "gjj_lazy_image_studio_translate_enabled";
 const PARAM_VALUES_PROPERTY = "gjj_lazy_image_studio_param_values";
@@ -84,7 +85,7 @@ const KEEP_MODEL_BUTTON_STYLES = {
 	},
 };
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
-const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME, KEEP_MODEL_WIDGET_NAME, TEST_CONFIG_WIDGET_NAME]);
+const ALWAYS_HIDDEN_WIDGETS = new Set([BATCH_SOURCE_WIDGET, LORA_DATA_WIDGET_NAME, KEEP_MODEL_WIDGET_NAME, TEST_CONFIG_WIDGET_NAME, USE_INPUT_IMAGE_SIZE_WIDGET_NAME]);
 const PROTECTED_WIDGET_NAMES = new Set([
 	EXECUTE_BUTTON_NAME,
 	IMAGE_PREVIEW_NAME,
@@ -94,6 +95,7 @@ const PROTECTED_WIDGET_NAMES = new Set([
 	LORA_DATA_WIDGET_NAME,
 	KEEP_MODEL_WIDGET_NAME,
 	TEST_CONFIG_WIDGET_NAME,
+	USE_INPUT_IMAGE_SIZE_WIDGET_NAME,
 	"prompt",
 	"negative_prompt",
 	"main_image_index",
@@ -525,6 +527,31 @@ function setBatchLinkButtonState(node) {
 	button.__gjjLazyHoverBg = hoverBackground;
 }
 
+function applyInputSizeButtonState(node) {
+	const button = node?.__gjjInputSizeButton;
+	if (!button) {
+		return;
+	}
+	const linked = inputLinked(node, PRIMARY_IMAGE_INPUT);
+	const enabled = inputSizeSyncEnabled(node);
+	button.style.display = linked ? "flex" : "none";
+	button.textContent = "📐";
+	button.title = enabled
+		? "已开启：第一个图像输入有连接时，生成尺寸使用输入图尺寸。"
+		: "已关闭：第一个图像输入有连接时，仍使用面板宽高。";
+	button.style.borderColor = enabled ? "#22c55e" : "#64748b";
+	button.style.color = enabled ? "#ecfdf5" : "#cbd5e1";
+	const background = enabled
+		? "linear-gradient(135deg, #065f46, #16a34a)"
+		: "linear-gradient(135deg, #1f2933, #374151)";
+	const hoverBackground = enabled
+		? "linear-gradient(135deg, #16a34a, #22c55e)"
+		: "linear-gradient(135deg, #374151, #4b5563)";
+	button.style.background = background;
+	button.__gjjLazyDefaultBg = background;
+	button.__gjjLazyHoverBg = hoverBackground;
+}
+
 function toggleBatchImageExternalLink(node) {
 	const slot = inputSlotIndex(node, PRIMARY_IMAGE_INPUT);
 	if (slot < 0) {
@@ -545,6 +572,7 @@ function toggleBatchImageExternalLink(node) {
 	node.graph?.setDirtyCanvas?.(true, true);
 	app.graph?.change?.();
 	setBatchLinkButtonState(node);
+	applyInputSizeButtonState(node);
 	return true;
 }
 
@@ -816,6 +844,34 @@ function boolValue(value) {
 	if (typeof value === "boolean") return value;
 	const text = String(value ?? "").trim().toLowerCase();
 	return ["true", "1", "yes", "on", "启用", "开启"].includes(text);
+}
+
+function inputSizeSyncEnabled(node) {
+	const widget = getWidget(node, USE_INPUT_IMAGE_SIZE_WIDGET_NAME);
+	if (!widget) {
+		return true;
+	}
+	return boolValue(widget.value);
+}
+
+function setInputSizeSyncEnabled(node, enabled) {
+	if (!node) return;
+	const value = Boolean(enabled);
+	setWidgetValue(getWidget(node, USE_INPUT_IMAGE_SIZE_WIDGET_NAME), value);
+	node.properties = node.properties || {};
+	node.properties[PARAM_VALUES_PROPERTY] = {
+		...(node.properties[PARAM_VALUES_PROPERTY] || {}),
+		[USE_INPUT_IMAGE_SIZE_WIDGET_NAME]: value,
+	};
+	if (!value) {
+		delete node.properties[IMAGE_SIZE_SIGNATURE_PROPERTY];
+	}
+	applyInputSizeButtonState(node);
+	if (value) {
+		void syncSizeFromPrimaryInput(node);
+	}
+	node.graph?.change?.();
+	app.graph?.setDirtyCanvas?.(true, true);
 }
 
 function keepModelEnabled(node) {
@@ -1879,6 +1935,13 @@ async function largestMultiImageLoaderSize(sourceNode) {
 }
 
 async function syncSizeFromPrimaryInput(node) {
+	applyInputSizeButtonState(node);
+	if (!inputSizeSyncEnabled(node)) {
+		if (node?.properties) {
+			delete node.properties[IMAGE_SIZE_SIGNATURE_PROPERTY];
+		}
+		return;
+	}
 	if (getLinkedWidgetInput(node, "width") || getLinkedWidgetInput(node, "height")) {
 		return;
 	}
@@ -2334,6 +2397,22 @@ function createButtons(node) {
 	].join(";");
 	node.__gjjBatchImageLinkButton = batchLinkButton;
 
+	const inputSizeButton = document.createElement("button");
+	inputSizeButton.type = "button";
+	inputSizeButton.textContent = "📐";
+	inputSizeButton.title = "第一个图像输入尺寸同步开关";
+	inputSizeButton.setAttribute("aria-label", "使用第一个输入图尺寸");
+	inputSizeButton.style.cssText = [
+		...sharedButtonStyle,
+		"padding:0",
+		"border:1px solid #22c55e",
+		"background:linear-gradient(135deg, #065f46, #16a34a)",
+		"color:#ecfdf5",
+		"font-size:15px",
+		"display:none",
+	].join(";");
+	node.__gjjInputSizeButton = inputSizeButton;
+
 	const translateButton = document.createElement("button");
 	translateButton.type = "button";
 	translateButton.textContent = "🌏";
@@ -2579,8 +2658,14 @@ function createButtons(node) {
 		stabilizeNode(node, false);
 	}
 
+	function handleInputSize(event) {
+		protectEvent(event);
+		setInputSizeSyncEnabled(node, !inputSizeSyncEnabled(node));
+	}
+
 	setupButtonHover(refreshButton, "linear-gradient(135deg, #1e3a5f, #1e40af)", "linear-gradient(135deg, #1e40af, #3b82f6)");
 	setupButtonHover(batchLinkButton, "linear-gradient(135deg, #075985, #0284c7)", "linear-gradient(135deg, #0284c7, #38bdf8)");
+	setupButtonHover(inputSizeButton, "linear-gradient(135deg, #065f46, #16a34a)", "linear-gradient(135deg, #16a34a, #22c55e)");
 	setupButtonHover(translateButton, TRANSLATE_BUTTON_STYLES.off.bg, TRANSLATE_BUTTON_STYLES.off.hover);
 	setupButtonHover(keepModelButton, KEEP_MODEL_BUTTON_STYLES.off.bg, KEEP_MODEL_BUTTON_STYLES.off.hover);
 	setupButtonHover(testButton, "linear-gradient(135deg, #4a2f08, #b45309)", "linear-gradient(135deg, #b45309, #d97706)");
@@ -2588,6 +2673,7 @@ function createButtons(node) {
 	setupButtonHover(settingsButton, "linear-gradient(135deg, #1f2933, #374151)", "linear-gradient(135deg, #374151, #4b5563)");
 	setupButtonEvents(refreshButton, handleRefresh);
 	setupButtonEvents(batchLinkButton, handleBatchLink);
+	setupButtonEvents(inputSizeButton, handleInputSize);
 	setupButtonEvents(translateButton, handleTranslate);
 	setupButtonEvents(keepModelButton, handleKeepModel);
 	setupButtonEvents(testButton, handleTest);
@@ -2595,11 +2681,13 @@ function createButtons(node) {
 	setupButtonEvents(settingsButton, handleSettings);
 	applyLazyTranslateButtonState(node);
 	applyKeepModelButtonState(node);
+	applyInputSizeButtonState(node);
 	updateSettingsButtonState(node);
 	setBatchLinkButtonState(node);
 
 	container.appendChild(refreshButton);
 	container.appendChild(batchLinkButton);
+	container.appendChild(inputSizeButton);
 	container.appendChild(translateButton);
 	container.appendChild(keepModelButton);
 	container.appendChild(testButton);
@@ -2615,7 +2703,7 @@ function lazyButtonsHeight(width, node = null) {
 		return measured;
 	}
 	const availableWidth = Math.max(120, Number(width || 260));
-	const buttonWidths = [34, 34, 34, 34, 34, 86, 34, 74];
+	const buttonWidths = [34, 34, 34, 34, 34, 34, 86, 34, 74];
 	const gap = 6;
 	let rows = 1;
 	let rowWidth = 0;
@@ -4283,6 +4371,7 @@ app.registerExtension({
 				cleanupRedundantMultiLoaderLinks(this);
 				syncBatchSourceWidget(this);
 				void syncSizeFromPrimaryInput(this);
+				applyInputSizeButtonState(this);
 				stabilizeNode(this, false);
 				syncPanelFromLinkedSources(this);
 				updateTemplateSourcePanel(this, TEMPLATE_SOURCE_FIELDS);

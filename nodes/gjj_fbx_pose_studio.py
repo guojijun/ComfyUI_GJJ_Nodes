@@ -12,9 +12,31 @@ from array import array
 from pathlib import Path
 from typing import Any
 
+import folder_paths
+
 NODE_NAME = "GJJ_FBXPoseStudio"
 ROUTE_BASE = "/gjj/fbx_pose_studio"
-DEFAULT_MODEL_DIR = Path(r"D:\AI\MOD\models\GJJ\3D")
+
+
+def _comfyui_root() -> Path:
+    base_path = getattr(folder_paths, "base_path", None)
+    if base_path:
+        return Path(base_path)
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if parent.name == "custom_nodes":
+            return parent.parent
+    return current.parents[3]
+
+
+def _models_root() -> Path:
+    models_dir = getattr(folder_paths, "models_dir", None)
+    if models_dir:
+        return Path(models_dir)
+    return _comfyui_root() / "models"
+
+
+DEFAULT_MODEL_DIR = _models_root() / "GJJ" / "3D"
 
 _FBX_CACHE: dict[str, tuple[float, int, dict[str, Any]]] = {}
 

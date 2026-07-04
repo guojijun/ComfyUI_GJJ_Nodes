@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import uuid
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,11 @@ import folder_paths
 import torch
 from PIL import Image
 
-from .common_utils.temp_files import gjjutils_write_temp_tensor_images
+from .common_utils.temp_files import (
+    gjjutils_read_temp_pil_image,
+    gjjutils_write_temp_bytes,
+    gjjutils_write_temp_tensor_images,
+)
 
 NODE_NAME = "GJJ_AnyPreview"
 ANY_PREVIEW_INPUT_TYPE = "*"
@@ -1688,6 +1693,44 @@ try:
         copied = {**item, "filename": target_name, "subfolder": target_subfolder, "type": "input"}
         return copied
 
+    def _uploaded_image_suffix(filename: str, content_type: str = "") -> str:
+        suffix = Path(str(filename or "")).suffix.lower()
+        if suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}:
+            return suffix
+        content_type = str(content_type or "").lower()
+        if "jpeg" in content_type or "jpg" in content_type:
+            return ".jpg"
+        if "png" in content_type:
+            return ".png"
+        if "webp" in content_type:
+            return ".webp"
+        if "bmp" in content_type:
+            return ".bmp"
+        if "gif" in content_type:
+            return ".gif"
+        return ".png"
+
+    def _write_uploaded_image_to_temp(content: bytes, filename: str = "", content_type: str = "") -> dict[str, Any]:
+        if not content:
+            raise ValueError("图片内容为空")
+        suffix = _uploaded_image_suffix(filename, content_type)
+        with Image.open(BytesIO(content)) as image:
+            image.load()
+            format_name = str(image.format or suffix.lstrip(".") or "PNG").lower()
+        info = gjjutils_write_temp_bytes(content, suffix=suffix)
+        saved_image = gjjutils_read_temp_pil_image(info)
+        info.update(
+            {
+                "source": "drag_upload",
+                "media_type": "image",
+                "format": f"image/{format_name}",
+                "width": int(saved_image.width),
+                "height": int(saved_image.height),
+                "original_name": Path(str(filename or "")).name,
+            }
+        )
+        return info
+
     @PromptServer.instance.routes.post("/gjj/any_preview/open_media_folder")
     async def gjj_any_preview_open_media_folder(request):
         try:
@@ -1723,6 +1766,29 @@ try:
             else:
                 subprocess.Popen(["xdg-open", str(folder)])
             return web.json_response({"status": "ok", "path": str(folder)})
+        except Exception as error:
+            return web.json_response({"error": str(error)}, status=500)
+
+    @PromptServer.instance.routes.post("/gjj/any_preview/upload_temp_image")
+    async def gjj_any_preview_upload_temp_image(request):
+        try:
+            reader = await request.multipart()
+            uploaded = []
+            async for part in reader:
+                if part.name not in {"image", "images", "file", "files"}:
+                    continue
+                filename = str(part.filename or "")
+                content = await part.read(decode=False)
+                uploaded.append(
+                    _write_uploaded_image_to_temp(
+                        content,
+                        filename=filename,
+                        content_type=str(part.headers.get("Content-Type", "")),
+                    )
+                )
+            if not uploaded:
+                return web.json_response({"error": "缺少图片"}, status=400)
+            return web.json_response({"images": uploaded})
         except Exception as error:
             return web.json_response({"error": str(error)}, status=500)
 

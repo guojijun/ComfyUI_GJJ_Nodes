@@ -12,6 +12,7 @@ const DOM_WIDGET_NAME = "gjj_multi_image_loader_dom";
 const IMAGE_API_PATH = "/gjj/input_images";
 const THUMB_API_PATH = "/gjj/input_image_thumb";
 const DEFAULT_NETWORK_IMAGE_API_PATH = "/gjj/multi_image_loader/default_image";
+const TEMP_UPLOAD_API_PATH = "/gjj/multi_image_loader/upload_temp_images";
 const UPLOAD_SUBFOLDER = "gjj_multi_image_loader";
 const NETWORK_CACHE_SUBFOLDER = "GJJ_TemplateParams";
 const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE";
@@ -444,6 +445,33 @@ function enrichSelectionWithOptions(state) {
 	}
 }
 
+function addSelectionItems(node, items) {
+	const state = ensureState(node);
+	let changed = false;
+	for (const rawItem of items || []) {
+		const item = normalizeInputImageItem(rawItem);
+		if (!item.filename) {
+			continue;
+		}
+		const alreadySelected = state.selection.some((selected) => itemKey(selected) === itemKey(item));
+		if (!alreadySelected) {
+			state.selection.push(item);
+			changed = true;
+		}
+	}
+	if (!changed) {
+		return false;
+	}
+	enrichSelectionWithOptions(state);
+	syncDataWidget(node);
+	ensureOutputs(node, totalImageCount(node));
+	renderBrowser(node);
+	renderPreview(node);
+	updateSummary(node);
+	scheduleLayout(node);
+	return true;
+}
+
 async function uploadFiles(node, files) {
 	const list = Array.from(files || [])
 		.filter((file) => file instanceof File)
@@ -475,20 +503,40 @@ async function uploadFiles(node, files) {
 		});
 	}
 	await refreshOptions(node);
-	for (const item of uploaded) {
-		const alreadySelected = state.selection.some((selected) => selected.filename === item.filename && selected.subfolder === item.subfolder);
-		// 移除20张限制，允许上传并选择任意数量的图片
-		if (!alreadySelected) {
-			state.selection.push(item);
-		}
+	addSelectionItems(node, uploaded.map((item) => ({ ...item, type: "input" })));
+}
+
+function imageFilesFromDropEvent(event) {
+	const files = Array.from(event?.dataTransfer?.files || []);
+	return files
+		.filter((file) => String(file?.type || "").startsWith("image/") || /\.(png|jpe?g|webp|bmp|gif|avif)$/i.test(file?.name || ""))
+		.sort((a, b) => FILE_NAME_COLLATOR.compare(a.name || "", b.name || ""));
+}
+
+async function uploadFilesToTemp(node, files) {
+	const list = Array.from(files || []);
+	if (!list.length) {
+		return [];
 	}
-	enrichSelectionWithOptions(state);
-	syncDataWidget(node);
-	ensureOutputs(node, totalImageCount(node));
-	renderBrowser(node);
-	renderPreview(node);
-	updateSummary(node);
-	scheduleLayout(node);
+	if (node.__gjjMultiImageSummary) {
+		node.__gjjMultiImageSummary.textContent = `正在拖入 ${list.length} 张...`;
+	}
+	const formData = new FormData();
+	for (const file of list) {
+		formData.append("images", file, file.name || "image.png");
+	}
+	const response = api?.fetchApi
+		? await api.fetchApi(TEMP_UPLOAD_API_PATH, { method: "POST", body: formData })
+		: await fetch(uploadUrl(TEMP_UPLOAD_API_PATH), { method: "POST", body: formData });
+	const data = await response.json().catch(() => ({}));
+	if (!response?.ok || data?.ok === false) {
+		throw new Error(data?.error || `拖拽导入失败：HTTP ${response?.status || "?"}`);
+	}
+	const items = Array.isArray(data?.items) && data.items.length ? data.items : (Array.isArray(data?.images) ? data.images : []);
+	if (!items.length) {
+		throw new Error("拖拽导入没有返回图片");
+	}
+	return items.map((item) => normalizeInputImageItem({ ...item, type: item?.type || "temp" }));
 }
 
 function normalizeUploadFilename(data, file, requestedSubfolder = "") {
@@ -615,10 +663,13 @@ function persistNetworkUrls(node, urls, options = {}) {
 function normalizeInputImageItem(item) {
 	const filename = String(item?.filename || "");
 	const subfolder = String(item?.subfolder || "").replace(/\\/g, "/");
+	const type = ["input", "temp", "output"].includes(String(item?.type || "").toLowerCase())
+		? String(item.type).toLowerCase()
+		: "input";
 	return {
 		filename,
 		subfolder,
-		type: "input",
+		type,
 		label: String(item?.label || (subfolder ? `${subfolder}/${filename}` : filename)),
 		width: Number(item?.width || 0),
 		height: Number(item?.height || 0),
@@ -1294,7 +1345,7 @@ function renderBrowser(node) {
 }
 
 function itemKey(item) {
-	return `${String(item?.subfolder || "")}\u0000${String(item?.filename || "")}`;
+	return `${String(item?.type || "input")}\u0000${String(item?.subfolder || "")}\u0000${String(item?.filename || "")}`;
 }
 
 function moveSelectionItem(node, fromIndex, toIndex) {
@@ -1766,6 +1817,95 @@ function makeIconButton(icon, tooltip) {
 	return button;
 }
 
+function setDropTargetActive(node, active, text = "") {
+	const previewWrap = node?.__gjjMultiImagePreviewWrap;
+	if (!previewWrap) {
+		return;
+	}
+	previewWrap.style.borderColor = active ? "#38bdf8" : "#33434a";
+	previewWrap.style.boxShadow = active
+		? "0 0 0 2px rgba(56, 189, 248, 0.28), inset 0 0 0 1px rgba(56, 189, 248, 0.18)"
+		: "";
+	if (node.__gjjMultiImageDropHint) {
+		node.__gjjMultiImageDropHint.textContent = text || "松开导入多张图片";
+		node.__gjjMultiImageDropHint.style.display = active ? "flex" : "none";
+	}
+}
+
+async function importDroppedFiles(node, files) {
+	if (!node || !files.length) {
+		return;
+	}
+	setDropTargetActive(node, true, "上传中...");
+	try {
+		const items = await uploadFilesToTemp(node, files);
+		addSelectionItems(node, items);
+		if (node.__gjjMultiImageSummary) {
+			node.__gjjMultiImageSummary.textContent = `已拖入 ${items.length} 张`;
+		}
+	} catch (error) {
+		console.warn("[GJJ_MultiImageLoader] drop upload failed", error);
+		if (node.__gjjMultiImageSummary) {
+			node.__gjjMultiImageSummary.textContent = error?.message || "拖拽导入失败";
+		}
+		setDropTargetActive(node, true, error?.message || "拖拽导入失败");
+		setTimeout(() => setDropTargetActive(node, false), 1300);
+		requestRedraw(node);
+		return;
+	}
+	setDropTargetActive(node, false);
+	requestRedraw(node);
+}
+
+function installDropTarget(node, elements) {
+	if (!node || node.__gjjMultiImageDropInstalled) {
+		return;
+	}
+	node.__gjjMultiImageDropInstalled = true;
+	const targets = elements.filter(Boolean);
+	let dragDepth = 0;
+	const eventHasImages = (event) => (
+		imageFilesFromDropEvent(event).length > 0
+		|| Array.from(event?.dataTransfer?.items || []).some((item) => String(item?.type || "").startsWith("image/"))
+	);
+	const protect = (event) => {
+		if (!eventHasImages(event)) {
+			return false;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		event.dataTransfer.dropEffect = "copy";
+		return true;
+	};
+	for (const target of targets) {
+		target.addEventListener("dragenter", (event) => {
+			if (!protect(event)) return;
+			dragDepth += 1;
+			setDropTargetActive(node, true);
+		});
+		target.addEventListener("dragover", (event) => {
+			protect(event);
+		});
+		target.addEventListener("dragleave", (event) => {
+			if (!protect(event)) return;
+			dragDepth = Math.max(0, dragDepth - 1);
+			if (!dragDepth) {
+				setDropTargetActive(node, false);
+			}
+		});
+		target.addEventListener("drop", (event) => {
+			if (!protect(event)) return;
+			dragDepth = 0;
+			const files = imageFilesFromDropEvent(event);
+			if (!files.length) {
+				setDropTargetActive(node, false);
+				return;
+			}
+			void importDroppedFiles(node, files);
+		});
+	}
+}
+
 function updateToolbarCompact(node) {
 	const toolbar = node.__gjjMultiImageToolbar;
 	if (!toolbar) {
@@ -2072,7 +2212,7 @@ function buildDom(node) {
 	].join(";");
 
 	const empty = document.createElement("div");
-	empty.textContent = "点击 📁 导入图片，或连接外部 GJJ 批量图片队列";
+	empty.textContent = "点击 📁 导入图片，拖入多张图片，或连接外部 GJJ 批量图片队列";
 	empty.style.cssText = [
 		"position:absolute",
 		"inset:0",
@@ -2096,6 +2236,24 @@ function buildDom(node) {
 
 	previewWrap.appendChild(grid);
 	previewWrap.appendChild(empty);
+	const dropHint = document.createElement("div");
+	dropHint.textContent = "松开导入多张图片";
+	dropHint.style.cssText = [
+		"position:absolute",
+		"inset:8px",
+		"z-index:5",
+		"display:none",
+		"align-items:center",
+		"justify-content:center",
+		"border:1px dashed #67e8f9",
+		"border-radius:8px",
+		"background:rgba(8,20,24,0.78)",
+		"color:#e0faff",
+		"font-size:13px",
+		"font-weight:700",
+		"pointer-events:none",
+	].join(";");
+	previewWrap.appendChild(dropHint);
 	container.appendChild(toolbar);
 	container.appendChild(previewWrap);
 	container.appendChild(fileInput);
@@ -2116,6 +2274,8 @@ function buildDom(node) {
 	node.__gjjMultiImagePreviewWrap = previewWrap;
 	node.__gjjMultiImageGrid = grid;
 	node.__gjjMultiImageEmpty = empty;
+	node.__gjjMultiImageDropHint = dropHint;
+	installDropTarget(node, [container, previewWrap, grid, empty]);
 	applyThumbnailSize(node);
 	updateOutputButtonState(node);
 	updateToolbarCompact(node);
