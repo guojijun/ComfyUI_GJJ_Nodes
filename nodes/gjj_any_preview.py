@@ -823,6 +823,10 @@ def save_image_sequence_webp_preview(
             quality=88,
             method=4,
         )
+        sequence_frames = annotate_preview_image_dimensions(
+            gjjutils_write_temp_tensor_images(frames),
+            frames,
+        )
         return [
             {
                 "filename": filename,
@@ -837,6 +841,7 @@ def save_image_sequence_webp_preview(
                 "frame_count": int(frames.shape[0]),
                 "width": int(frames.shape[2]),
                 "height": int(frames.shape[1]),
+                "sequence_frames": sequence_frames,
             }
         ]
     except Exception as error:

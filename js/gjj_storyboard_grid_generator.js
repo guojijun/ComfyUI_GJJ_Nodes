@@ -1059,13 +1059,20 @@ function updateReconnectButton(node) {
 	const button = node?.__gjjStoryboardReconnectButton;
 	if (!button) return;
 	const records = storyboardLinkMemory(node);
-	const visible = hasStoryboardReconnectTargets(node);
+	const linked = hasLinkedStoryboardInputs(node);
+	const visible = linked || records.length > 0;
 	button.style.display = visible ? "" : "none";
 	const first = records[0];
 	const label = first ? [first.source_title, first.source_label].filter(Boolean).join(" · ") : "";
-	button.title = records.length > 1
-		? `重新连接 ${records.length} 个上游`
-		: (label ? `重新连接：${label}` : "重新连接上游");
+	if (linked) {
+		button.title = records.length > 1
+			? `当前已有上游连接；点击记住并断开 ${records.length} 个连接`
+			: (label ? `当前已连接：${label}；点击记住并断开` : "当前已有上游连接；点击记住并断开");
+	} else {
+		button.title = records.length > 1
+			? `重新连接 ${records.length} 个上游`
+			: (label ? `重新连接：${label}` : "重新连接上游");
+	}
 	button.dataset.originalTitle = button.title;
 }
 
@@ -1129,6 +1136,45 @@ function reconnectStoryboardLinks(node) {
 	}
 	flashReconnectButton(node, "丢失", false);
 	return false;
+}
+
+function disconnectStoryboardLinks(node) {
+	if (!Array.isArray(node?.inputs)) {
+		flashReconnectButton(node, "无", false);
+		return false;
+	}
+	recordCurrentStoryboardLinks(node);
+	let disconnected = 0;
+	for (const [index, input] of node.inputs.entries()) {
+		if (input?.link == null) continue;
+		try {
+			if (typeof node.disconnectInput === "function") {
+				node.disconnectInput(index);
+			} else {
+				(node?.graph || app.graph)?.removeLink?.(input.link);
+			}
+			disconnected += 1;
+		} catch (error) {
+			console.warn("[GJJ_StoryboardGridGenerator] disconnect upstream failed", error);
+		}
+	}
+	if (disconnected > 0) {
+		node.setDirtyCanvas?.(true, true);
+		node.graph?.setDirtyCanvas?.(true, true);
+		node.graph?.change?.();
+		updateReconnectButton(node);
+		flashReconnectButton(node, disconnected > 1 ? `${disconnected}` : "已断");
+		return true;
+	}
+	flashReconnectButton(node, "无", false);
+	return false;
+}
+
+function toggleStoryboardLinks(node) {
+	if (hasLinkedStoryboardInputs(node)) {
+		return disconnectStoryboardLinks(node);
+	}
+	return reconnectStoryboardLinks(node);
 }
 
 function createButtons(node) {
@@ -1401,7 +1447,7 @@ function createButtons(node) {
 
 	function handleReconnect(event) {
 		protectEvent(event);
-		reconnectStoryboardLinks(node);
+		toggleStoryboardLinks(node);
 	}
 
 	function flashCompleteRefButton(text, ok = true) {

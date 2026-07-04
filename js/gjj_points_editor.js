@@ -9,21 +9,31 @@ const SOURCE_PROPERTY = "gjj_points_editor_image_source";
 const IMAGE_STORE_PROPERTY = "gjj_points_editor_image_store";
 const STATE_PROPERTY = "gjj_points_editor_state";
 const MORE_OUTPUTS_PROPERTY = "gjj_points_editor_more_outputs";
+const ENABLED_OUTPUTS_PROPERTY = "enabled_outputs";
+const PARAMETERS_VISIBLE_PROPERTY = "gjj_points_editor_parameters_visible";
+const NODE_CLASS_NAME = "GJJ_PointsEditor";
 const MIN_NODE_WIDTH = 420;
 const DEFAULT_NODE_WIDTH = 520;
 const DEFAULT_NODE_HEIGHT = 360;
 const TOOLBAR_HEIGHT = 34;
 const NODE_FRAME_EXTRA = 10;
-const HIDDEN_WIDGET_SET = new Set(["points_store", "coordinates", "neg_coordinates", "bbox_store", "image_store", "bboxes", "editor_state"]);
+const HIDDEN_WIDGET_SET = new Set(["points_store", "coordinates", "neg_coordinates", "bbox_store", "image_store", "bboxes", "editor_state", "enabled_outputs", "parameters_visible"]);
+const PARAMETER_WIDGET_SET = new Set(["bbox_format", "width", "height", "normalize"]);
 
-const OUTPUT_DEFS = [
-	{ name: "前景点坐标", type: "STRING", tooltip: "前景点位坐标 JSON 文本。"},
-	{ name: "背景点坐标", type: "STRING", tooltip: "背景点位坐标 JSON 文本。"},
-	{ name: "框选范围信息", type: "BBOX", tooltip: "框选结果，按所选格式输出边框数组。"},
-	{ name: "框选遮罩图像", type: "MASK", tooltip: "根据边框填充得到的遮罩。"},
-	{ name: "首个裁切图像", type: "IMAGE", tooltip: "若接了背景图则输出第一组边框裁切图，否则输出当前背景图或空白画布。"},
+const DEFAULT_OUTPUT_KEYS = ["positive", "negative", "bbox"];
+const BASE_OUTPUT_DEFS = [
+	{ key: "positive", name: "前景点坐标", type: "STRING", tooltip: "前景点位坐标 JSON 文本。"},
+	{ key: "negative", name: "背景点坐标", type: "STRING", tooltip: "背景点位坐标 JSON 文本。"},
+	{ key: "bbox", name: "框选范围信息", type: "BBOX", tooltip: "框选结果，按所选格式输出边框数组。"},
 ];
-let queuePatched = false;
+const OPTIONAL_OUTPUT_DEFS = [
+	{ key: "mask", name: "框选遮罩图像", type: "MASK", tooltip: "根据边框填充得到的遮罩。"},
+	{ key: "crop", name: "首个裁切图像", type: "IMAGE", tooltip: "若接了背景图则输出第一组边框裁切图，否则输出当前背景图或空白画布。"},
+	{ key: "bbox_preview", name: "框选预览图像", type: "IMAGE", tooltip: "在原图上绘制框选范围后的预览图像。"},
+];
+const OUTPUT_DEFS = [...BASE_OUTPUT_DEFS, ...OPTIONAL_OUTPUT_DEFS];
+const OUTPUT_DEF_BY_KEY = new Map(OUTPUT_DEFS.map((def) => [def.key, def]));
+let promptPatched = false;
 let queuePatchRetryCount = 0;
 
 function graphDirty() {
@@ -35,6 +45,7 @@ function compactPointsNode(node) {
 		return;
 	}
 	HIDDEN_WIDGET_SET.forEach((name) => hideWidget(node.widgets?.find((widget) => widget?.name === name)));
+	PARAMETER_WIDGET_SET.forEach((name) => hideWidget(node.widgets?.find((widget) => widget?.name === name)));
 	GJJ_Utils.removeHiddenInputSockets?.(node, HIDDEN_WIDGET_SET);
 	GJJ_Utils.reorderWidgets?.(node, HIDDEN_WIDGET_SET);
 }
@@ -46,10 +57,40 @@ function hideWidget(widget) {
 	widget.__gjjPointsHidden ||= {
 		type: widget.type,
 		computeSize: widget.computeSize,
+		getHeight: widget.getHeight,
+		draw: widget.draw,
+		mouse: widget.mouse,
+		hidden: widget.hidden,
+		y: widget.y,
+		last_y: widget.last_y,
+		computedHeight: widget.computedHeight,
+		margin_top: widget.margin_top,
+		size: Array.isArray(widget.size) ? [...widget.size] : widget.size,
+		label: widget.label,
+		localized_name: widget.localized_name,
+		tooltip: widget.tooltip,
+		elementDisplay: widget.element?.style?.display,
+		elementHeight: widget.element?.style?.height,
+		elementMinHeight: widget.element?.style?.minHeight,
+		elementMargin: widget.element?.style?.margin,
+		elementPadding: widget.element?.style?.padding,
+		elementOverflow: widget.element?.style?.overflow,
+		inputDisplay: widget.inputEl?.style?.display,
+		inputHeight: widget.inputEl?.style?.height,
+		inputMinHeight: widget.inputEl?.style?.minHeight,
+		inputMargin: widget.inputEl?.style?.margin,
+		inputPadding: widget.inputEl?.style?.padding,
 	};
 	GJJ_Utils.hideWidget(widget);
-	widget.type = `converted-widget:${widget.name || "hidden"}`;
+	widget.type = "hidden";
 	widget.serialize = true;
+	widget.disabled = true;
+	widget.advanced = true;
+	widget.options ||= {};
+	widget.options.hidden = true;
+	widget.options.display = "hidden";
+	widget.options.widget = "hidden";
+	widget.options.forceInput = false;
 	widget.computeSize = () => [0, 0];
 	widget.getHeight = () => 0;
 	widget.draw = () => {};
@@ -67,16 +108,58 @@ function hideWidget(widget) {
 		widget.element.style.display = "none";
 		widget.element.style.height = "0px";
 		widget.element.style.minHeight = "0px";
+		widget.element.style.maxHeight = "0px";
 		widget.element.style.margin = "0";
 		widget.element.style.padding = "0";
+		widget.element.style.border = "0";
 		widget.element.style.overflow = "hidden";
 	}
 	if (widget.inputEl) {
 		widget.inputEl.style.display = "none";
 		widget.inputEl.style.height = "0px";
 		widget.inputEl.style.minHeight = "0px";
+		widget.inputEl.style.maxHeight = "0px";
 		widget.inputEl.style.margin = "0";
 		widget.inputEl.style.padding = "0";
+		widget.inputEl.style.border = "0";
+	}
+}
+
+function showWidget(widget) {
+	if (!widget) {
+		return;
+	}
+	const stored = widget.__gjjPointsHidden;
+	if (stored) {
+		widget.type = stored.type;
+		widget.computeSize = stored.computeSize;
+		widget.getHeight = stored.getHeight;
+		widget.draw = stored.draw;
+		widget.mouse = stored.mouse;
+		widget.hidden = stored.hidden || false;
+		widget.y = stored.y;
+		widget.last_y = stored.last_y;
+		widget.computedHeight = stored.computedHeight;
+		widget.margin_top = stored.margin_top;
+		widget.size = Array.isArray(stored.size) ? [...stored.size] : stored.size;
+		widget.label = stored.label;
+		widget.localized_name = stored.localized_name;
+		widget.tooltip = stored.tooltip;
+	}
+	if (widget.element) {
+		widget.element.style.display = stored?.elementDisplay || "";
+		widget.element.style.height = stored?.elementHeight || "";
+		widget.element.style.minHeight = stored?.elementMinHeight || "";
+		widget.element.style.margin = stored?.elementMargin || "";
+		widget.element.style.padding = stored?.elementPadding || "";
+		widget.element.style.overflow = stored?.elementOverflow || "";
+	}
+	if (widget.inputEl) {
+		widget.inputEl.style.display = stored?.inputDisplay || "";
+		widget.inputEl.style.height = stored?.inputHeight || "";
+		widget.inputEl.style.minHeight = stored?.inputMinHeight || "";
+		widget.inputEl.style.margin = stored?.inputMargin || "";
+		widget.inputEl.style.padding = stored?.inputPadding || "";
 	}
 }
 
@@ -124,6 +207,42 @@ function coerceBoolean(value) {
 	return Boolean(value);
 }
 
+function readParametersVisible(node) {
+	const widget = getWidget(node, "parameters_visible");
+	const raw = node?.properties?.[PARAMETERS_VISIBLE_PROPERTY] ?? widget?.value ?? false;
+	return coerceBoolean(raw);
+}
+
+function writeParametersVisible(node, visible) {
+	node.properties ||= {};
+	node.properties[PARAMETERS_VISIBLE_PROPERTY] = Boolean(visible);
+	const widget = getWidget(node, "parameters_visible");
+	if (widget) {
+		setWidgetValue(widget, visible ? "true" : "false", false);
+	}
+}
+
+function updateSettingsButton(node) {
+	const button = node.__gjjPointsEditor?.settingsButton;
+	if (!button) {
+		return;
+	}
+	const visible = readParametersVisible(node);
+	button.style.background = visible ? "#24475b" : "#182127";
+	button.style.borderColor = visible ? "#5fa8d3" : "#41535b";
+	button.title = visible ? "隐藏参数" : "显示参数";
+}
+
+function applyParameterVisibility(node, visible = readParametersVisible(node)) {
+	PARAMETER_WIDGET_SET.forEach((name) => hideWidget(getWidget(node, name)));
+	writeParametersVisible(node, visible);
+	if (node.__gjjPointsEditor?.settingsPanel) {
+		node.__gjjPointsEditor.settingsPanel.style.display = visible ? "flex" : "none";
+	}
+	updateSettingsButton(node);
+	graphDirty();
+}
+
 function finitePositiveNumber(value) {
 	const number = Number(value);
 	return Number.isFinite(number) && number > 0 ? number : null;
@@ -134,6 +253,12 @@ function coerceDimension(value, fallback = 512) {
 }
 
 function validBboxFormat(value) {
+	if (value === 0 || value === "0") {
+		return "xyxy";
+	}
+	if (value === 1 || value === "1") {
+		return "xywh";
+	}
 	const text = String(value || "");
 	return ["xyxy", "xywh"].includes(text) ? text : null;
 }
@@ -257,12 +382,234 @@ function persistNodeSize(node) {
 	node.properties[HEIGHT_PROPERTY] = getStoredHeight(node);
 }
 
-function getDynamicOutputs(node) {
-	return Array.isArray(node?.outputs) ? node.outputs : [];
+function parseJsonValue(rawValue, fallback = null) {
+	try {
+		return JSON.parse(String(rawValue || ""));
+	} catch {
+		return fallback;
+	}
 }
 
-function hasLinkedExtraOutputs(node) {
-	return getDynamicOutputs(node).slice(1).some((output) => Array.isArray(output?.links) && output.links.length > 0);
+function normalizeOutputKeys(value) {
+	const source = Array.isArray(value)
+		? value
+		: Array.isArray(value?.outputs)
+			? value.outputs
+			: Array.isArray(value?.enabled_outputs)
+				? value.enabled_outputs
+				: [];
+	const result = [];
+	for (const item of source) {
+		const key = String(typeof item === "object" && item ? item.key : item || "");
+		if (OUTPUT_DEF_BY_KEY.has(key) && !result.includes(key)) {
+			result.push(key);
+		}
+	}
+	return result;
+}
+
+function parseEnabledOutputs(rawValue) {
+	return normalizeOutputKeys(parseJsonValue(rawValue, []));
+}
+
+function serializeEnabledOutputs(keys) {
+	return JSON.stringify({
+		version: 2,
+		outputs: normalizeOutputKeys(keys).map((key) => {
+			const def = OUTPUT_DEF_BY_KEY.get(key);
+			return { key, name: def?.name || key, type: def?.type || "*" };
+		}),
+	});
+}
+
+function outputSlotKey(output, index) {
+	const explicit = String(output?.__gjj_key || output?.gjj_key || output?.key || "");
+	if (OUTPUT_DEF_BY_KEY.has(explicit)) return explicit;
+	const label = String(output?.name || output?.label || output?.localized_name || output?.display_name || "");
+	const matched = OUTPUT_DEFS.find((def) => def.name === label);
+	if (matched) return matched.key;
+	return OUTPUT_DEFS[index]?.key || "";
+}
+
+function outputLinked(output) {
+	return Array.isArray(output?.links) && output.links.length > 0;
+}
+
+function linkedOutputKeys(node) {
+	const result = [];
+	for (let index = 0; index < (node.outputs || []).length; index += 1) {
+		const output = node.outputs[index];
+		const key = outputSlotKey(output, index);
+		if (OUTPUT_DEF_BY_KEY.has(key) && outputLinked(output) && !result.includes(key)) {
+			result.push(key);
+		}
+	}
+	return result;
+}
+
+function enabledOutputKeys(node) {
+	return parseEnabledOutputs(node?.properties?.[ENABLED_OUTPUTS_PROPERTY]);
+}
+
+function currentOutputDefs(node) {
+	const keys = enabledOutputKeys(node);
+	return keys.map((key) => OUTPUT_DEF_BY_KEY.get(key)).filter(Boolean);
+}
+
+function applyOutputSpec(output, def, index) {
+	if (!output || !def) return;
+	output.name = def.name;
+	output.label = def.name;
+	output.localized_name = def.name;
+	output.display_name = def.name;
+	output.type = def.type;
+	output.tooltip = def.tooltip;
+	output.__gjj_key = def.key;
+	output.gjj_key = def.key;
+	output.hidden = false;
+	output.visible = true;
+	output.disabled = false;
+	output.not_show = false;
+	output.__gjj_hidden = false;
+	output.slot_index = index;
+	if (!Array.isArray(output.links)) output.links = [];
+}
+
+function collectOutputLinksByKey(node) {
+	const saved = [];
+	for (let index = 0; index < (node.outputs || []).length; index += 1) {
+		const output = node.outputs[index];
+		const key = outputSlotKey(output, index);
+		if (!key) continue;
+		for (const linkId of (Array.isArray(output?.links) ? output.links.slice() : [])) {
+			const link = app.graph?.links?.[linkId];
+			if (!link) continue;
+			saved.push({
+				id: linkId,
+				key,
+				link,
+				target_id: link.target_id,
+				target_slot: link.target_slot,
+			});
+		}
+		output.links = [];
+	}
+	return saved;
+}
+
+function restoreOutputLinksByKey(node, savedLinks, defs) {
+	const byKey = new Map(defs.map((def, index) => [def.key, { def, index }]));
+	const restored = new Set();
+	for (const item of savedLinks || []) {
+		const target = byKey.get(item.key);
+		if (!target) continue;
+		const output = node.outputs?.[target.index];
+		const link = app.graph?.links?.[item.id] || item.link;
+		if (!output || !link) continue;
+		const graphUsesSerializableLinks = Object.values(app.graph?.links || {}).some((candidate) => candidate && typeof candidate.asSerialisable === "function");
+		if (graphUsesSerializableLinks && typeof link.asSerialisable !== "function") continue;
+		link.id = item.id;
+		link.origin_id = node.id;
+		link.origin_slot = target.index;
+		link.type = target.def.type;
+		app.graph.links ||= {};
+		app.graph.links[item.id] = link;
+		if (!Array.isArray(output.links)) output.links = [];
+		if (!output.links.includes(item.id)) output.links.push(item.id);
+		const targetNode = app.graph?.getNodeById?.(item.target_id) || app.graph?._nodes_by_id?.[item.target_id];
+		const targetInput = targetNode?.inputs?.[item.target_slot];
+		if (targetInput) targetInput.link = item.id;
+		restored.add(item.id);
+	}
+	return restored;
+}
+
+function deleteUnrestoredOutputLinks(savedLinks, restoredIds) {
+	for (const item of savedLinks || []) {
+		if (restoredIds?.has?.(item.id)) continue;
+		const targetNode = app.graph?.getNodeById?.(item.target_id) || app.graph?._nodes_by_id?.[item.target_id];
+		const targetInput = targetNode?.inputs?.[item.target_slot];
+		if (targetInput?.link === item.id) targetInput.link = null;
+		try { app.graph?.removeLink?.(item.id); } catch (_) {}
+		try { if (app.graph?.links?.[item.id]) delete app.graph.links[item.id]; } catch (_) {}
+	}
+}
+
+function rebuildOutputSlots(node, defs) {
+	if (!Array.isArray(node.outputs)) node.outputs = [];
+	const savedLinks = collectOutputLinksByKey(node);
+	while (node.outputs.length > 0) {
+		try { node.removeOutput?.(node.outputs.length - 1); }
+		catch { node.outputs.pop(); }
+	}
+	for (const def of defs) {
+		try { node.addOutput?.(def.name, def.type); }
+		catch { node.outputs.push({ name: def.name, type: def.type, links: [] }); }
+	}
+	defs.forEach((def, index) => applyOutputSpec(node.outputs?.[index], def, index));
+	const restored = restoreOutputLinksByKey(node, savedLinks, defs);
+	deleteUnrestoredOutputLinks(savedLinks, restored);
+}
+
+function serializedOutputObject(existing, def, index) {
+	const links = Array.isArray(existing?.links) ? [...existing.links] : [];
+	return {
+		name: def.name,
+		label: def.name,
+		localized_name: def.name,
+		display_name: def.name,
+		type: def.type,
+		links,
+		slot_index: index,
+		tooltip: def.tooltip,
+		gjj_key: def.key,
+		hidden: false,
+		visible: true,
+		disabled: false,
+		not_show: false,
+		__gjj_hidden: false,
+	};
+}
+
+function writeSerializedOutputSlots(serializedNode, defs) {
+	if (!serializedNode) return;
+	const existing = Array.isArray(serializedNode.outputs) ? serializedNode.outputs : [];
+	const existingByKey = new Map();
+	existing.forEach((output, index) => {
+		const key = outputSlotKey(output, index);
+		if (key && !existingByKey.has(key)) existingByKey.set(key, output);
+	});
+	const liveNode = app.graph?.getNodeById?.(serializedNode.id) || app.graph?._nodes_by_id?.[serializedNode.id];
+	const liveByKey = new Map();
+	(liveNode?.outputs || []).forEach((output, index) => {
+		const key = outputSlotKey(output, index);
+		if (key && !liveByKey.has(key)) liveByKey.set(key, output);
+	});
+	serializedNode.outputs = defs.map((def, index) => {
+		return serializedOutputObject(liveByKey.get(def.key) || existingByKey.get(def.key), def, index);
+	});
+}
+
+function refreshNodeAfterOutputChange(node) {
+	if (!node) return;
+	if (typeof node.computeSize === "function") {
+		try {
+			const size = node.computeSize();
+			if (Array.isArray(size) && size.length >= 2) {
+				node.size = [Math.max(node.size?.[0] || MIN_NODE_WIDTH, size[0]), Math.max(DEFAULT_NODE_HEIGHT, size[1])];
+			}
+		} catch {}
+	}
+	node.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function outputShapeMatches(node, defs) {
+	if (!Array.isArray(node?.outputs) || node.outputs.length !== defs.length) return false;
+	return defs.every((def, index) => {
+		const output = node.outputs[index];
+		return output && outputSlotKey(output, index) === def.key && String(output.type || "") === def.type;
+	});
 }
 
 function stabilizeOutputs(node) {
@@ -271,51 +618,38 @@ function stabilizeOutputs(node) {
 	}
 
 	node.properties ||= {};
-	const expanded = Boolean(node.properties[MORE_OUTPUTS_PROPERTY] || hasLinkedExtraOutputs(node));
-	node.properties[MORE_OUTPUTS_PROPERTY] = expanded;
-	const wanted = expanded ? OUTPUT_DEFS.length : 1;
-	const outputs = getDynamicOutputs(node);
-
-	for (let index = outputs.length - 1; index >= wanted; index -= 1) {
-		const output = outputs[index];
-		if (Array.isArray(output?.links) && output.links.length > 0) {
-			node.properties[MORE_OUTPUTS_PROPERTY] = true;
-			break;
-		}
-		node.removeOutput?.(index);
+	if (!node.properties[ENABLED_OUTPUTS_PROPERTY]) {
+		const recovered = linkedOutputKeys(node);
+		const existing = Array.isArray(node.outputs) && node.outputs.length > 0
+			? node.outputs.map((output, index) => outputSlotKey(output, index)).filter((key) => OUTPUT_DEF_BY_KEY.has(key))
+			: [];
+		node.properties[ENABLED_OUTPUTS_PROPERTY] = serializeEnabledOutputs(recovered.length ? recovered : existing.length ? existing : DEFAULT_OUTPUT_KEYS);
 	}
-
-	while (getDynamicOutputs(node).length < wanted) {
-		const def = OUTPUT_DEFS[getDynamicOutputs(node).length];
-		node.addOutput?.(def.name, def.type);
+	const defs = currentOutputDefs(node);
+	if (!outputShapeMatches(node, defs)) {
+		rebuildOutputSlots(node, defs);
+	} else {
+		defs.forEach((def, index) => applyOutputSpec(node.outputs?.[index], def, index));
 	}
-
-	getDynamicOutputs(node).forEach((output, index) => {
-		const def = OUTPUT_DEFS[index];
-		if (!def) {
-			return;
-		}
-		output.name = def.name;
-		output.label = def.name;
-		output.localized_name = def.name;
-		output.type = def.type;
-		output.tooltip = def.tooltip;
-	});
+	node.properties[MORE_OUTPUTS_PROPERTY] = enabledOutputKeys(node).length === OUTPUT_DEFS.length;
 
 	const moreOutputsButton = node.__gjjPointsEditor?.moreOutputsButton;
 	if (moreOutputsButton) {
-		const expanded = Boolean(node.properties?.[MORE_OUTPUTS_PROPERTY] || hasLinkedExtraOutputs(node));
-		moreOutputsButton.disabled = expanded;
+		const expanded = Boolean(node.properties?.[MORE_OUTPUTS_PROPERTY]);
+		moreOutputsButton.disabled = false;
 		moreOutputsButton.title = buildOutputTitle(expanded);
+		moreOutputsButton.style.background = expanded ? "#24475b" : "#182127";
+		moreOutputsButton.style.borderColor = expanded ? "#5fa8d3" : "#41535b";
 	}
-
+	globalThis.GJJApplyTypeColorsToNode?.(node);
+	refreshNodeAfterOutputChange(node);
 	graphDirty();
 }
 
 function buildOutputTitle(expanded) {
 	return expanded
-		? "已展开更多输出口：当前会显示背景点、框选范围、遮罩和裁切图。"
-		: "默认只显示前景点坐标。点击后展开更多输出口。";
+		? "已展开全部输出口。点击后收起未连接的尾部输出口。"
+		: "默认显示前景点、背景点和框选范围。点击后展开遮罩、裁切图和框选预览图输出口。";
 }
 
 function workflowNodeById(workflow, nodeId) {
@@ -345,17 +679,22 @@ function syncNodeToPrompt(node, output, workflow) {
 	const negative = Array.isArray(state.negative) ? state.negative : [];
 	const boxes = Array.isArray(state.boxes) ? state.boxes : [];
 	const stateText = JSON.stringify(state);
+	const bboxFormatWidget = getWidget(node, "bbox_format");
+	const widthWidget = getWidget(node, "width");
+	const heightWidget = getWidget(node, "height");
 	inputs.points_store = JSON.stringify({ positive, negative }, null, 0);
 	inputs.coordinates = JSON.stringify(positive);
 	inputs.neg_coordinates = JSON.stringify(negative);
 	inputs.bbox_store = JSON.stringify(boxes);
 	inputs.bboxes = JSON.stringify(boxes);
-	inputs.bbox_format = validBboxFormat(state.bbox_format) || "xyxy";
-	inputs.width = coerceDimension(state.width, coerceDimension(node.widgets?.find((w) => w?.name === "width")?.value, 512));
-	inputs.height = coerceDimension(state.height, coerceDimension(node.widgets?.find((w) => w?.name === "height")?.value, 512));
+	inputs.bbox_format = validBboxFormat(bboxFormatWidget?.value) || validBboxFormat(state.bbox_format) || "xywh";
+	inputs.width = coerceDimension(state.width, coerceDimension(widthWidget?.value, 512));
+	inputs.height = coerceDimension(state.height, coerceDimension(heightWidget?.value, 512));
 	inputs.normalize = coerceBoolean(state.normalize);
 	inputs.image_store = String(state.image_store || "");
 	inputs.editor_state = stateText;
+	inputs.enabled_outputs = String(node.properties?.[ENABLED_OUTPUTS_PROPERTY] || serializeEnabledOutputs(enabledOutputKeys(node).length ? enabledOutputKeys(node) : DEFAULT_OUTPUT_KEYS));
+	inputs.parameters_visible = readParametersVisible(node) ? "true" : "false";
 
 	const workflowNode = workflowNodeById(workflow, node.id);
 	if (workflowNode) {
@@ -364,6 +703,9 @@ function syncNodeToPrompt(node, output, workflow) {
 		workflowNode.properties[IMAGE_STORE_PROPERTY] = String(state.image_store || "");
 		workflowNode.properties[WIDTH_PROPERTY] = coerceDimension(state.width, workflowNode.properties[WIDTH_PROPERTY] || 512);
 		workflowNode.properties[HEIGHT_PROPERTY] = coerceDimension(state.height, workflowNode.properties[HEIGHT_PROPERTY] || 512);
+		workflowNode.properties[ENABLED_OUTPUTS_PROPERTY] = inputs.enabled_outputs;
+		workflowNode.properties[PARAMETERS_VISIBLE_PROPERTY] = readParametersVisible(node);
+		writeSerializedOutputSlots(workflowNode, currentOutputDefs(node));
 	}
 }
 
@@ -384,20 +726,38 @@ function syncAllPointsEditorsToWidgets() {
 }
 
 function patchQueuePrompt() {
-	if (!queuePatched && typeof api.queuePrompt === "function") {
-		const original = api.queuePrompt;
+	if (!api.__gjjPointsEditorPromptPatchInstalled && typeof api.queuePrompt === "function") {
+		api.__gjjPointsEditorPromptPatchInstalled = true;
+		const original = api.queuePrompt.bind(api);
 		api.queuePrompt = async function (number, promptData, ...args) {
 			try {
 				syncAllPointsEditorsToPrompt(promptData?.output, promptData?.workflow);
 			} catch (error) {
 				console.warn("[GJJ] 点位编辑器提交前同步失败：", error);
 			}
-			return original.call(this, number, promptData, ...args);
+			return original(number, promptData, ...args);
 		};
-		queuePatched = true;
-		return;
+		promptPatched = true;
 	}
-	if (!queuePatched && queuePatchRetryCount < 30) {
+	if (!app.__gjjPointsEditorPromptPatchInstalled && typeof app.graphToPrompt === "function") {
+		app.__gjjPointsEditorPromptPatchInstalled = true;
+		const originalGraphToPrompt = app.graphToPrompt.bind(app);
+		app.graphToPrompt = async function (...args) {
+			const result = await originalGraphToPrompt(...args);
+			try {
+				const graph = args[0] || this.rootGraph || this.graph || app.rootGraph || app.graph;
+				syncAllPointsEditorsToPrompt(
+					result?.output || result?.prompt?.output,
+					result?.workflow || result?.prompt?.workflow || graph?.serialize?.(),
+				);
+			} catch (error) {
+				console.warn("[GJJ] 点位编辑器 graphToPrompt 同步失败：", error);
+			}
+			return result;
+		};
+		promptPatched = true;
+	}
+	if (!promptPatched && queuePatchRetryCount < 30) {
 		queuePatchRetryCount += 1;
 		window.setTimeout(patchQueuePrompt, 500);
 	}
@@ -506,6 +866,8 @@ function ensureEditor(node) {
 	const bboxStoreWidget = getWidget(node, "bbox_store");
 	const imageStoreWidget = getWidget(node, "image_store");
 	const editorStateWidget = getWidget(node, "editor_state");
+	const enabledOutputsWidget = getWidget(node, "enabled_outputs");
+	const parametersVisibleWidget = getWidget(node, "parameters_visible");
 	const bboxWidget = getWidget(node, "bboxes");
 	const bboxFormatWidget = getWidget(node, "bbox_format");
 	const widthWidget = getWidget(node, "width");
@@ -575,11 +937,23 @@ function ensureEditor(node) {
 	newCanvasButton.style.cssText = buttonStyle;
 	toolbar.appendChild(newCanvasButton);
 
+	const resetDrawingButton = document.createElement("button");
+	resetDrawingButton.textContent = "🔄";
+	resetDrawingButton.title = "初始化绘制内容。重置前景点、背景点和默认框选，保留当前图片。";
+	resetDrawingButton.style.cssText = buttonStyle;
+	toolbar.appendChild(resetDrawingButton);
+
 	const moreOutputsButton = document.createElement("button");
-	moreOutputsButton.textContent = "➕";
+	moreOutputsButton.textContent = "🔌";
 	moreOutputsButton.title = buildOutputTitle(Boolean(node.properties?.[MORE_OUTPUTS_PROPERTY]));
 	moreOutputsButton.style.cssText = buttonStyle;
 	toolbar.appendChild(moreOutputsButton);
+
+	const settingsButton = document.createElement("button");
+	settingsButton.textContent = "⚙️";
+	settingsButton.title = readParametersVisible(node) ? "隐藏参数" : "显示参数";
+	settingsButton.style.cssText = buttonStyle;
+	toolbar.appendChild(settingsButton);
 
 	const wrap = document.createElement("div");
 	wrap.title = "左键添加前景点，右键添加背景点；按住 Ctrl 并拖拽可创建第三输出口的框选范围。";
@@ -607,6 +981,74 @@ function ensureEditor(node) {
 		"user-select:none",
 	].join(";");
 	wrap.appendChild(canvas);
+
+	const settingsPanel = document.createElement("div");
+	settingsPanel.style.cssText = [
+		"display:none",
+		"flex-direction:column",
+		"gap:6px",
+		"border:1px solid #33444b",
+		"border-radius:8px",
+		"background:#111a1f",
+		"padding:8px",
+		"box-sizing:border-box",
+	].join(";");
+	root.appendChild(settingsPanel);
+
+	const controlStyle = [
+		"width:100%",
+		"height:28px",
+		"box-sizing:border-box",
+		"border:1px solid #33444b",
+		"border-radius:6px",
+		"background:#263038",
+		"color:#e5efea",
+		"padding:0 10px",
+		"font-size:13px",
+	].join(";");
+	const labelStyle = "color:#b7c3c8;font-size:12px;line-height:28px;white-space:nowrap;";
+	const rowStyle = "display:grid;grid-template-columns:92px minmax(0,1fr);gap:8px;align-items:center;";
+	function addSettingsRow(label, control) {
+		const row = document.createElement("label");
+		row.style.cssText = rowStyle;
+		const text = document.createElement("span");
+		text.textContent = label;
+		text.style.cssText = labelStyle;
+		row.appendChild(text);
+		row.appendChild(control);
+		settingsPanel.appendChild(row);
+	}
+
+	const bboxFormatControl = document.createElement("select");
+	bboxFormatControl.style.cssText = controlStyle;
+	for (const format of ["xyxy", "xywh"]) {
+		const option = document.createElement("option");
+		option.value = format;
+		option.textContent = format;
+		bboxFormatControl.appendChild(option);
+	}
+	addSettingsRow("边框格式", bboxFormatControl);
+
+	const widthControl = document.createElement("input");
+	widthControl.type = "number";
+	widthControl.min = "8";
+	widthControl.max = "4096";
+	widthControl.step = "8";
+	widthControl.style.cssText = controlStyle;
+	addSettingsRow("宽度", widthControl);
+
+	const heightControl = document.createElement("input");
+	heightControl.type = "number";
+	heightControl.min = "8";
+	heightControl.max = "4096";
+	heightControl.step = "8";
+	heightControl.style.cssText = controlStyle;
+	addSettingsRow("高度", heightControl);
+
+	const normalizeControl = document.createElement("input");
+	normalizeControl.type = "checkbox";
+	normalizeControl.style.cssText = "width:22px;height:22px;margin:0;accent-color:#6ca7d4;";
+	addSettingsRow("归一化坐标", normalizeControl);
 
 	const image = new Image();
 	image.crossOrigin = "anonymous";
@@ -641,6 +1083,9 @@ function ensureEditor(node) {
 		boxes: initialBoxes.map(parseBox).filter(Boolean),
 		currentBox: null,
 		drawingBox: false,
+		boxDragMode: null,
+		boxDragStartPoint: null,
+		boxDragStartBox: null,
 		pendingPoint: null,
 		usingDefaultPoints: false,
 		loadingToken: 0,
@@ -687,11 +1132,79 @@ function ensureEditor(node) {
 		};
 	}
 
+	function makeDefaultBox() {
+		const width = editor.getModelWidth();
+		const height = editor.getModelHeight();
+		const boxWidth = Math.max(1, Math.round(width * 0.35));
+		const boxHeight = Math.max(1, Math.round(height * 0.35));
+		const startX = Math.max(0, Math.round((width - boxWidth) / 2));
+		const startY = Math.max(0, Math.round((height - boxHeight) / 2));
+		return {
+			startX,
+			startY,
+			endX: Math.min(width, startX + boxWidth),
+			endY: Math.min(height, startY + boxHeight),
+		};
+	}
+
 	function setDefaultPoints() {
 		const defaults = makeDefaultPoints();
 		editor.posPoints = defaults.positive;
 		editor.negPoints = defaults.negative;
 		editor.usingDefaultPoints = true;
+	}
+
+	function syncSettingsControlsFromWidgets() {
+		bboxFormatControl.value = validBboxFormat(bboxFormatWidget?.value) || "xywh";
+		widthControl.value = String(Math.max(1, Math.round(coerceDimension(widthWidget?.value, 512))));
+		heightControl.value = String(Math.max(1, Math.round(coerceDimension(heightWidget?.value, 512))));
+		normalizeControl.checked = coerceBoolean(normalizeWidget?.value);
+	}
+
+	function bindSettingsControl(control, applyValue, afterChange = null) {
+		control.addEventListener("change", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			applyValue();
+			afterChange?.();
+			writeBack();
+			syncSettingsControlsFromWidgets();
+			syncLayout(true);
+			scheduleDraw();
+		});
+	}
+
+	bindSettingsControl(bboxFormatControl, () => {
+		setWidgetValue(bboxFormatWidget, validBboxFormat(bboxFormatControl.value) || "xywh", true);
+	});
+	bindSettingsControl(widthControl, () => {
+		setWidgetValue(widthWidget, Math.max(8, Math.round(coerceDimension(widthControl.value, 512))), true);
+	}, () => {
+		if (!editor.imageLoaded && editor.usingDefaultPoints) setDefaultPoints();
+	});
+	bindSettingsControl(heightControl, () => {
+		setWidgetValue(heightWidget, Math.max(8, Math.round(coerceDimension(heightControl.value, 512))), true);
+	}, () => {
+		if (!editor.imageLoaded && editor.usingDefaultPoints) setDefaultPoints();
+	});
+	bindSettingsControl(normalizeControl, () => {
+		setWidgetValue(normalizeWidget, Boolean(normalizeControl.checked), true);
+	});
+
+	function setEnabledOutputKeys(keys) {
+		node.properties ||= {};
+		const next = normalizeOutputKeys(keys);
+		const serialized = serializeEnabledOutputs(next);
+		node.properties[ENABLED_OUTPUTS_PROPERTY] = serialized;
+		node.properties[MORE_OUTPUTS_PROPERTY] = next.length === OUTPUT_DEFS.length;
+		if (enabledOutputsWidget) {
+			enabledOutputsWidget.value = serialized;
+			enabledOutputsWidget.callback?.(serialized);
+		}
+		stabilizeOutputs(node);
+		writeBack();
+		syncLayout(true);
+		scheduleDraw();
 	}
 
 	function sanitizeVisibleWidgets(forceImageSize = false) {
@@ -702,7 +1215,7 @@ function ensureEditor(node) {
 		let changed = false;
 		try {
 			if (bboxFormatWidget && !validBboxFormat(bboxFormatWidget.value)) {
-				setWidgetValue(bboxFormatWidget, "xyxy", false);
+				setWidgetValue(bboxFormatWidget, "xywh", false);
 				changed = true;
 			}
 			const imageWidth = editor.imageLoaded && image.naturalWidth > 0 ? Math.round(image.naturalWidth) : null;
@@ -727,6 +1240,7 @@ function ensureEditor(node) {
 			node.__gjjPointsSanitizing = false;
 		}
 		if (changed) {
+			syncSettingsControlsFromWidgets();
 			graphDirty();
 		}
 		return changed;
@@ -748,6 +1262,7 @@ function ensureEditor(node) {
 		if (repaired) {
 			scheduleDraw();
 		}
+		syncSettingsControlsFromWidgets();
 		return repaired;
 	}
 
@@ -760,7 +1275,7 @@ function ensureEditor(node) {
 			image_store: String(imageStoreWidget?.value || node.properties?.[IMAGE_STORE_PROPERTY] || "").trim(),
 			width: editor.getModelWidth(),
 			height: editor.getModelHeight(),
-			bbox_format: validBboxFormat(bboxFormatWidget?.value) || "xyxy",
+			bbox_format: validBboxFormat(bboxFormatWidget?.value) || "xywh",
 			normalize: coerceBoolean(normalizeWidget?.value),
 		};
 	}
@@ -807,7 +1322,9 @@ function ensureEditor(node) {
 
 	function syncLayout(adjustNode = true) {
 		const metrics = getCanvasMetrics();
-		const widgetHeight = metrics.displayHeight + TOOLBAR_HEIGHT + NODE_FRAME_EXTRA;
+		const panelVisible = settingsPanel.style.display !== "none";
+		const panelHeight = panelVisible ? Math.max(128, Math.ceil(settingsPanel.offsetHeight || 128)) : 0;
+		const widgetHeight = metrics.displayHeight + TOOLBAR_HEIGHT + panelHeight + NODE_FRAME_EXTRA + (panelVisible ? 8 : 0);
 		wrap.style.height = `${metrics.displayHeight}px`;
 		canvas.style.aspectRatio = `${metrics.modelWidth} / ${metrics.modelHeight}`;
 		if (canvas.width !== metrics.modelWidth || canvas.height !== metrics.modelHeight) {
@@ -860,7 +1377,7 @@ function ensureEditor(node) {
 
 	function writeBack() {
 		sanitizeVisibleWidgets(false);
-		editor.boxes = editor.boxes.map(parseBox).filter(Boolean);
+		editor.boxes = editor.boxes.map(parseBox).filter(Boolean).slice(-1);
 		const payload = { positive: editor.posPoints, negative: editor.negPoints };
 		if (coordsWidget) {
 			coordsWidget.value = JSON.stringify(editor.posPoints);
@@ -888,6 +1405,16 @@ function ensureEditor(node) {
 			editorStateWidget.callback?.(stateText);
 			node.properties ||= {};
 			node.properties[STATE_PROPERTY] = stateText;
+		}
+		if (enabledOutputsWidget) {
+			const serialized = String(node.properties?.[ENABLED_OUTPUTS_PROPERTY] || serializeEnabledOutputs(enabledOutputKeys(node)));
+			enabledOutputsWidget.value = serialized;
+			enabledOutputsWidget.callback?.(serialized);
+		}
+		if (parametersVisibleWidget) {
+			const visible = readParametersVisible(node);
+			parametersVisibleWidget.value = visible ? "true" : "false";
+			parametersVisibleWidget.callback?.(parametersVisibleWidget.value);
 		}
 		graphDirty();
 		scheduleDraw();
@@ -923,23 +1450,25 @@ function ensureEditor(node) {
 		return getSourceFrame();
 	}
 
-	function toModelPoint(event) {
+	function toModelPoint(event, allowOutside = false) {
 		const rect = canvas.getBoundingClientRect();
 		const localX = event.clientX - rect.left;
 		const localY = event.clientY - rect.top;
 		if (
-			localX < 0 ||
-			localX > rect.width ||
-			localY < 0 ||
-			localY > rect.height
+			!allowOutside && (
+				localX < 0 ||
+				localX > rect.width ||
+				localY < 0 ||
+				localY > rect.height
+			)
 		) {
 			return null;
 		}
 		const modelWidth = editor.getModelWidth();
 		const modelHeight = editor.getModelHeight();
 		return {
-			x: Math.max(0, Math.min(modelWidth, Math.round(localX * (modelWidth / Math.max(1, rect.width))))),
-			y: Math.max(0, Math.min(modelHeight, Math.round(localY * (modelHeight / Math.max(1, rect.height))))),
+			x: Math.max(0, Math.min(modelWidth, localX * (modelWidth / Math.max(1, rect.width)))),
+			y: Math.max(0, Math.min(modelHeight, localY * (modelHeight / Math.max(1, rect.height)))),
 		};
 	}
 
@@ -986,6 +1515,21 @@ function ensureEditor(node) {
 		ctx.lineWidth = 2;
 		ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
 		ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+		const handleSize = Math.max(10, Math.min(18, Math.min(bounds.modelWidth, bounds.modelHeight) * 0.018));
+		const half = handleSize / 2;
+		const handles = [
+			[x1, y1],
+			[x2, y1],
+			[x1, y2],
+			[x2, y2],
+		];
+		ctx.fillStyle = "rgba(56, 200, 255, 0.95)";
+		ctx.strokeStyle = "rgba(16, 65, 86, 0.95)";
+		ctx.lineWidth = 1.5;
+		for (const [x, y] of handles) {
+			ctx.fillRect(x - half, y - half, handleSize, handleSize);
+			ctx.strokeRect(x - half, y - half, handleSize, handleSize);
+		}
 		ctx.restore();
 	}
 
@@ -1044,18 +1588,14 @@ function ensureEditor(node) {
 				: safeParseArray(bboxWidget?.value, safeParseArray(bboxStoreWidget?.value));
 		editor.posPoints = positiveSource;
 		editor.negPoints = negativeSource;
-		editor.boxes = boxesSource.map(parseBox).filter(Boolean);
+		editor.boxes = boxesSource.map(parseBox).filter(Boolean).slice(-1);
 		if (!hasPoints(editor.posPoints) && !hasPoints(editor.negPoints)) {
 			setDefaultPoints();
 		} else {
 			editor.usingDefaultPoints = false;
 		}
-		if (state.image_store != null) {
+		if (typeof state.image_store === "string" && state.image_store.trim()) {
 			syncStoredImage(String(state.image_store || ""));
-		}
-		const stateBboxFormat = validBboxFormat(state.bbox_format);
-		if (stateBboxFormat) {
-			setWidgetValue(bboxFormatWidget, stateBboxFormat, false);
 		}
 		const stateWidth = finitePositiveNumber(state.width);
 		if (stateWidth != null) {
@@ -1127,28 +1667,165 @@ function ensureEditor(node) {
 		setDefaultPoints();
 		editor.boxes = [];
 		editor.currentBox = null;
+		editor.drawingBox = false;
+		editor.boxDragMode = null;
+		editor.boxDragStartPoint = null;
+		editor.boxDragStartBox = null;
 		writeBack();
 		loadCurrentPreview();
 	}
 
-	function revealMoreOutputs() {
-		node.properties ||= {};
-		node.properties[MORE_OUTPUTS_PROPERTY] = true;
-		stabilizeOutputs(node);
-		moreOutputsButton.disabled = true;
-		moreOutputsButton.title = buildOutputTitle(true);
+	function resetDrawing() {
+		setDefaultPoints();
+		editor.boxes = [makeDefaultBox()];
+		editor.currentBox = null;
+		editor.drawingBox = false;
+		editor.boxDragMode = null;
+		editor.boxDragStartPoint = null;
+		editor.boxDragStartBox = null;
+		editor.pendingPoint = null;
+		writeBack();
+	}
+
+	function toggleMoreOutputs() {
+		const current = enabledOutputKeys(node);
+		const showingAll = current.length === OUTPUT_DEFS.length;
+		const next = showingAll ? linkedOutputKeys(node) : OUTPUT_DEFS.map((def) => def.key);
+		setEnabledOutputKeys(next);
+		moreOutputsButton.title = buildOutputTitle(Boolean(node.properties[MORE_OUTPUTS_PROPERTY]));
+	}
+
+	function toggleParameterVisibility() {
+		applyParameterVisibility(node, !readParametersVisible(node));
+		syncSettingsControlsFromWidgets();
+		writeBack();
+		syncLayout(true);
+		scheduleDraw();
 	}
 
 	loadButton.onclick = loadLocalImageFromButton;
 	clearButton.onclick = clearLocalImage;
 	newCanvasButton.onclick = newCanvas;
-	moreOutputsButton.onclick = revealMoreOutputs;
+	resetDrawingButton.onclick = resetDrawing;
+	moreOutputsButton.onclick = toggleMoreOutputs;
+	settingsButton.onclick = toggleParameterVisibility;
 
 	wrap.addEventListener("contextmenu", stopEvent);
+
+	function getBoxHitTolerance() {
+		const rect = canvas.getBoundingClientRect();
+		const scaleX = editor.getModelWidth() / Math.max(1, rect.width);
+		const scaleY = editor.getModelHeight() / Math.max(1, rect.height);
+		return Math.max(8, 12 * Math.max(scaleX, scaleY));
+	}
+
+	function normalizeBoxForEdit(box) {
+		const normalized = parseBox(box);
+		if (!normalized) {
+			return null;
+		}
+		return {
+			x1: Math.min(normalized.startX, normalized.endX),
+			y1: Math.min(normalized.startY, normalized.endY),
+			x2: Math.max(normalized.startX, normalized.endX),
+			y2: Math.max(normalized.startY, normalized.endY),
+		};
+	}
+
+	function hitTestBox(point) {
+		const box = normalizeBoxForEdit(editor.boxes[0]);
+		if (!box) {
+			return null;
+		}
+		const tolerance = getBoxHitTolerance();
+		const nearLeft = Math.abs(point.x - box.x1) <= tolerance;
+		const nearRight = Math.abs(point.x - box.x2) <= tolerance;
+		const nearTop = Math.abs(point.y - box.y1) <= tolerance;
+		const nearBottom = Math.abs(point.y - box.y2) <= tolerance;
+		if (nearLeft && nearTop) return "resize-tl";
+		if (nearRight && nearTop) return "resize-tr";
+		if (nearLeft && nearBottom) return "resize-bl";
+		if (nearRight && nearBottom) return "resize-br";
+		if (point.x >= box.x1 && point.x <= box.x2 && point.y >= box.y1 && point.y <= box.y2) {
+			return "move";
+		}
+		return null;
+	}
+
+	function cursorForBoxMode(mode) {
+		if (mode === "move") return "move";
+		if (mode === "resize-tl" || mode === "resize-br") return "nwse-resize";
+		if (mode === "resize-tr" || mode === "resize-bl") return "nesw-resize";
+		return "crosshair";
+	}
+
+	function startBoxEdit(mode, point) {
+		const box = normalizeBoxForEdit(editor.boxes[0]);
+		if (!box) {
+			return false;
+		}
+		editor.pendingPoint = null;
+		editor.drawingBox = false;
+		editor.currentBox = null;
+		editor.boxDragMode = mode;
+		editor.boxDragStartPoint = point;
+		editor.boxDragStartBox = box;
+		wrap.style.cursor = cursorForBoxMode(mode);
+		return true;
+	}
+
+	function releasePointer(event) {
+		try {
+			if (event?.pointerId != null) {
+				wrap.releasePointerCapture?.(event.pointerId);
+			}
+		} catch {
+			// Pointer capture may already be released by the browser.
+		}
+	}
+
+	function updateBoxEdit(point) {
+		const mode = editor.boxDragMode;
+		const start = editor.boxDragStartPoint;
+		const box = editor.boxDragStartBox;
+		if (!mode || !start || !box) {
+			return;
+		}
+		const width = editor.getModelWidth();
+		const height = editor.getModelHeight();
+		let x1 = box.x1;
+		let y1 = box.y1;
+		let x2 = box.x2;
+		let y2 = box.y2;
+		if (mode === "move") {
+			const boxWidth = box.x2 - box.x1;
+			const boxHeight = box.y2 - box.y1;
+			const targetX = Math.max(0, Math.min(width - boxWidth, box.x1 + point.x - start.x));
+			const targetY = Math.max(0, Math.min(height - boxHeight, box.y1 + point.y - start.y));
+			editor.boxes = [{ startX: targetX, startY: targetY, endX: targetX + boxWidth, endY: targetY + boxHeight }];
+			return;
+		}
+		if (mode.includes("l")) x1 = point.x;
+		if (mode.includes("r")) x2 = point.x;
+		if (mode.includes("t")) y1 = point.y;
+		if (mode.includes("b")) y2 = point.y;
+		editor.boxes = [{
+			startX: Math.max(0, Math.min(width, x1)),
+			startY: Math.max(0, Math.min(height, y1)),
+			endX: Math.max(0, Math.min(width, x2)),
+			endY: Math.max(0, Math.min(height, y2)),
+		}];
+	}
+
 	function startBox(point) {
 		editor.pendingPoint = null;
 		editor.drawingBox = true;
+		editor.boxDragMode = null;
+		editor.boxDragStartPoint = null;
+		editor.boxDragStartBox = null;
+		editor.boxes = [];
 		editor.currentBox = { startX: point.x, startY: point.y, endX: point.x, endY: point.y };
+		wrap.style.cursor = "crosshair";
 		scheduleDraw();
 	}
 
@@ -1159,14 +1836,19 @@ function ensureEditor(node) {
 		if (!point) {
 			return;
 		}
-		if (event.ctrlKey) {
-			startBox(point);
-			return;
-		}
 		if (event.button === 2) {
 			editor.usingDefaultPoints = false;
 			editor.negPoints.push(point);
+			releasePointer(event);
 			writeBack();
+			return;
+		}
+		const boxMode = hitTestBox(point);
+		if (event.button === 0 && !event.ctrlKey && boxMode && startBoxEdit(boxMode, point)) {
+			return;
+		}
+		if (event.ctrlKey) {
+			startBox(point);
 			return;
 		}
 		editor.pendingPoint = {
@@ -1178,6 +1860,15 @@ function ensureEditor(node) {
 	});
 
 	wrap.addEventListener("pointermove", (event) => {
+		const point = toModelPoint(event, Boolean(editor.boxDragMode || editor.drawingBox));
+		if (editor.boxDragMode) {
+			stopEvent(event);
+			if (point) {
+				updateBoxEdit(point);
+				scheduleDraw();
+			}
+			return;
+		}
 		if (editor.pendingPoint && event.pointerId === editor.pendingPoint.pointerId) {
 			const moved = Math.hypot(event.clientX - editor.pendingPoint.clientX, event.clientY - editor.pendingPoint.clientY);
 			if (moved >= 6) {
@@ -1186,10 +1877,12 @@ function ensureEditor(node) {
 			}
 		}
 		if (!editor.drawingBox || !editor.currentBox) {
+			if (!editor.pendingPoint && point) {
+				wrap.style.cursor = cursorForBoxMode(hitTestBox(point));
+			}
 			return;
 		}
 		stopEvent(event);
-		const point = toModelPoint(event);
 		if (!point) {
 			return;
 		}
@@ -1199,11 +1892,23 @@ function ensureEditor(node) {
 	});
 
 	function finishPointer(event) {
+		if (editor.boxDragMode) {
+			stopEvent(event);
+			editor.boxes = editor.boxes.map(parseBox).filter(Boolean).slice(-1);
+			editor.boxDragMode = null;
+			editor.boxDragStartPoint = null;
+			editor.boxDragStartBox = null;
+			wrap.style.cursor = "crosshair";
+			releasePointer(event);
+			writeBack();
+			return;
+		}
 		if (editor.pendingPoint && event.pointerId === editor.pendingPoint.pointerId) {
 			stopEvent(event);
 			editor.usingDefaultPoints = false;
 			editor.posPoints.push(editor.pendingPoint.point);
 			editor.pendingPoint = null;
+			releasePointer(event);
 			writeBack();
 			return;
 		}
@@ -1211,24 +1916,19 @@ function ensureEditor(node) {
 			return;
 		}
 		stopEvent(event);
-		const point = toModelPoint(event);
+		const point = toModelPoint(event, true);
 		if (point) {
 			editor.currentBox.endX = point.x;
 			editor.currentBox.endY = point.y;
 		}
 		const box = parseBox(editor.currentBox);
 		if (box && Math.abs(box.endX - box.startX) > 0 && Math.abs(box.endY - box.startY) > 0) {
-			editor.boxes.push(box);
+			editor.boxes = [box];
 		}
 		editor.currentBox = null;
 		editor.drawingBox = false;
-		try {
-			if (event?.pointerId != null) {
-				wrap.releasePointerCapture?.(event.pointerId);
-			}
-		} catch {
-			// Pointer capture may already be released by the browser.
-		}
+		wrap.style.cursor = "crosshair";
+		releasePointer(event);
 		writeBack();
 	}
 
@@ -1269,14 +1969,18 @@ function ensureEditor(node) {
 		draw: scheduleDraw,
 		syncFromWidgets,
 		loadCurrentPreview,
-		revealMoreOutputs,
+		toggleMoreOutputs,
 		moreOutputsButton,
+		toggleParameterVisibility,
+		settingsButton,
+		settingsPanel,
 		repairWidgetValues,
 		writeBack,
 		buildEditorState,
 		syncLayout: () => syncLayout(true),
 	};
 
+	applyParameterVisibility(node);
 	syncFromWidgets();
 	repairWidgetValues();
 	writeBack();
@@ -1403,8 +2107,11 @@ app.registerExtension({
 			data.properties[WIDTH_PROPERTY] = this.properties?.[WIDTH_PROPERTY];
 			data.properties[HEIGHT_PROPERTY] = this.properties?.[HEIGHT_PROPERTY];
 			data.properties[MORE_OUTPUTS_PROPERTY] = this.properties?.[MORE_OUTPUTS_PROPERTY] || false;
+			data.properties[ENABLED_OUTPUTS_PROPERTY] = this.properties?.[ENABLED_OUTPUTS_PROPERTY] || serializeEnabledOutputs(enabledOutputKeys(this));
+			data.properties[PARAMETERS_VISIBLE_PROPERTY] = readParametersVisible(this);
 			data.properties[IMAGE_STORE_PROPERTY] = this.properties?.[IMAGE_STORE_PROPERTY] || "";
 			data.properties[STATE_PROPERTY] = this.properties?.[STATE_PROPERTY] || "";
+			writeSerializedOutputSlots(data, currentOutputDefs(this));
 		}
 		return result;
 	};

@@ -16,6 +16,8 @@ const META_API = "/gjj/visual_region_crop/meta";
 const MEDIA_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
 const ALIGN = 64;
 const MIN_CROP_SIZE = 256;
+const NATIVE_CANVAS_PREVIEW_WIDGET = "$$canvas-image-preview";
+const NATIVE_PREVIEW_WIDGET_PATTERN = /(?:preview|image|images|img|预览|图像|图片)/i;
 const OUTPUT_DEFS = [
 	{ name: "裁切帧序列", type: "IMAGE", tooltip: "裁切后的连续视频帧序列。" },
 	{ name: "宽度", type: "INT,FLOAT,STRING", tooltip: "当前裁切区域宽度。点击 🔌 可显示或收起。" },
@@ -49,6 +51,165 @@ function setWidgetValue(node, name, value) {
 	if (!w) return;
 	w.value = value;
 	try { w.callback?.(value); } catch (_) {}
+}
+
+function clearNativePreview(node) {
+	if (!node) return;
+	suppressNativePreviewProperties(node);
+	node.imgs = [];
+	node.images = [];
+	node._imgs = [];
+	node._images = [];
+	node.imageRects = [];
+	node.animatedImages = [];
+	node.imageIndex = 0;
+	node.overIndex = null;
+	node.pointerOverPos = null;
+	node.image = null;
+	node.preview = null;
+	node.previews = null;
+	node.hideOutputImages = true;
+	hideLegacyPreviewWidgets(node);
+	node?.graph?.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function hideNativeWidget(widget) {
+	if (!widget) return widget;
+	widget.type = "hidden";
+	widget.hidden = true;
+	widget.serialize = false;
+	widget.serializeValue = () => undefined;
+	widget.computeLayoutSize = () => ({ minHeight: 0, minWidth: 0 });
+	widget.computeSize = () => [0, 0];
+	widget.drawWidget = () => {};
+	widget.draw = () => {};
+	for (const key of ["element", "inputEl", "container", "dom", "root"]) {
+		const element = widget?.[key];
+		if (element?.style) element.style.display = "none";
+		if (typeof element?.remove === "function") element.remove();
+	}
+	return widget;
+}
+
+function isNativePreviewWidget(node, widget) {
+	if (!widget || widget === node?.__gjjVisualRegionCrop?.widget) return false;
+	const name = String(widget?.name || "");
+	if (name === WIDGET_NAME) return false;
+	if (name === NATIVE_CANVAS_PREVIEW_WIDGET) return true;
+	const label = String(widget?.label || "");
+	const type = String(widget?.type || "");
+	const optionsType = String(widget?.options?.type || "");
+	const optionsName = String(widget?.options?.name || "");
+	const constructorName = String(widget?.constructor?.name || "");
+	const text = `${name} ${label} ${type} ${optionsType} ${optionsName} ${constructorName}`;
+	if (NATIVE_PREVIEW_WIDGET_PATTERN.test(text) && !/^(number|combo|text|string|customtext|toggle|boolean|slider|html)$/i.test(type)) {
+		return true;
+	}
+	for (const key of ["element", "inputEl", "container", "dom", "root"]) {
+		const element = widget?.[key];
+		if (typeof element?.querySelector === "function" && element.querySelector("img, canvas, video")) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function hideLegacyPreviewWidgets(node) {
+	if (!Array.isArray(node?.widgets)) return false;
+	let changed = false;
+	for (let index = node.widgets.length - 1; index >= 0; index--) {
+		const current = node.widgets[index];
+		if (!isNativePreviewWidget(node, current)) continue;
+		hideNativeWidget(current);
+		node.widgets.splice(index, 1);
+		changed = true;
+	}
+	return changed;
+}
+
+function nativePreviewEmptyArray(node, key) {
+	if (!node.__gjjVisualRegionCropNativeEmptyArrays) {
+		Object.defineProperty(node, "__gjjVisualRegionCropNativeEmptyArrays", {
+			configurable: true,
+			enumerable: false,
+			writable: true,
+			value: {},
+		});
+	}
+	if (!Array.isArray(node.__gjjVisualRegionCropNativeEmptyArrays[key])) {
+		node.__gjjVisualRegionCropNativeEmptyArrays[key] = [];
+	}
+	node.__gjjVisualRegionCropNativeEmptyArrays[key].length = 0;
+	return node.__gjjVisualRegionCropNativeEmptyArrays[key];
+}
+
+function defineSuppressedNativePreviewProperty(node, key, emptyValue) {
+	const descriptor = Object.getOwnPropertyDescriptor(node, key);
+	if (descriptor?.get?.__gjjVisualRegionCropSuppressNativePreview) return;
+	const getter = function () {
+		return Array.isArray(emptyValue) ? nativePreviewEmptyArray(this, key) : emptyValue;
+	};
+	getter.__gjjVisualRegionCropSuppressNativePreview = true;
+	try {
+		Object.defineProperty(node, key, {
+			configurable: true,
+			enumerable: false,
+			get: getter,
+			set() {
+				if (Array.isArray(emptyValue)) nativePreviewEmptyArray(this, key);
+			},
+		});
+	} catch (_) {
+		try { node[key] = Array.isArray(emptyValue) ? [] : emptyValue; } catch (_error) {}
+	}
+}
+
+function suppressNativePreviewProperties(node) {
+	if (!node) return;
+	defineSuppressedNativePreviewProperty(node, "imgs", []);
+	defineSuppressedNativePreviewProperty(node, "images", []);
+	defineSuppressedNativePreviewProperty(node, "_imgs", []);
+	defineSuppressedNativePreviewProperty(node, "_images", []);
+	defineSuppressedNativePreviewProperty(node, "imageRects", []);
+	defineSuppressedNativePreviewProperty(node, "animatedImages", []);
+	defineSuppressedNativePreviewProperty(node, "preview", null);
+	defineSuppressedNativePreviewProperty(node, "previews", null);
+	defineSuppressedNativePreviewProperty(node, "image", null);
+	defineSuppressedNativePreviewProperty(node, "imageIndex", null);
+	defineSuppressedNativePreviewProperty(node, "overIndex", null);
+	defineSuppressedNativePreviewProperty(node, "hideOutputImages", true);
+	if (node.constructor?.nodeData) node.constructor.nodeData.output_preview = false;
+}
+
+function scheduleNativePreviewClear(node) {
+	clearNativePreview(node);
+	if (typeof requestAnimationFrame === "function") {
+		requestAnimationFrame(() => clearNativePreview(node));
+	}
+	for (const delay of [80, 180, 360, 720, 1400, 2400]) {
+		setTimeout(() => clearNativePreview(node), delay);
+	}
+}
+
+function clearExecutedPreviewPayload(message) {
+	if (!message || typeof message !== "object") return;
+	for (const key of ["images", "imgs", "preview", "previews", "animatedImages"]) {
+		if (Object.prototype.hasOwnProperty.call(message, key)) {
+			message[key] = Array.isArray(message[key]) ? [] : null;
+		}
+	}
+	for (const parent of [message.ui, message.output, message.results]) {
+		if (!parent || typeof parent !== "object" || Array.isArray(parent)) continue;
+		for (const key of ["images", "imgs", "preview", "previews", "animatedImages"]) {
+			if (Object.prototype.hasOwnProperty.call(parent, key)) {
+				parent[key] = Array.isArray(parent[key]) ? [] : null;
+			}
+		}
+	}
+	if (Array.isArray(message.ui)) {
+		for (const item of message.ui) clearExecutedPreviewPayload(item);
+	}
 }
 
 function syncNodeWidgetValues(node) {
@@ -651,6 +812,7 @@ async function refreshPreview(node) {
 
 async function uploadVideo(node, file) {
 	const state = ensureState(node);
+	clearNativePreview(node);
 	state.uploading = true;
 	state.refreshing = false;
 	state.statusText = "";
@@ -1200,6 +1362,7 @@ function applyDrag(state, dx, dy) {
 }
 
 function applyExecutedMessage(node, message) {
+	clearNativePreview(node);
 	const state = ensureWidget(node);
 	state.refreshing = false;
 	state.uploading = false;
@@ -1230,6 +1393,7 @@ function applyExecutedMessage(node, message) {
 
 function stabilize(node) {
 	if (!node || !TARGET_NODES.has(node.comfyClass)) return;
+	clearNativePreview(node);
 	hideWidget(node, PREVIEW_WIDTH_WIDGET);
 	hideWidget(node, CROP_WIDGET);
 	hideWidget(node, SELECTED_VIDEO_WIDGET);
@@ -1279,9 +1443,26 @@ app.registerExtension({
 	name: "Comfy.GJJ.VisualRegionCrop",
 	beforeRegisterNodeDef(nodeType, nodeData) {
 		if (!TARGET_NODES.has(nodeData?.name)) return;
+		nodeData.output_preview = false;
+		nodeType.prototype.hideOutputImages = true;
+		if (Array.isArray(nodeData.outputs)) {
+			for (const output of nodeData.outputs) {
+				output.preview = false;
+			}
+		}
+		const originalAddCustomWidget = nodeType.prototype.addCustomWidget;
+		nodeType.prototype.addCustomWidget = function (customWidget, ...args) {
+			if (isNativePreviewWidget(this, customWidget)) {
+				return hideNativeWidget(customWidget);
+			}
+			return typeof originalAddCustomWidget === "function"
+				? originalAddCustomWidget.call(this, customWidget, ...args)
+				: customWidget;
+		};
 		const originalCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
 			const result = originalCreated?.apply(this, args);
+			scheduleNativePreviewClear(this);
 			schedule(this, 0);
 			schedule(this, 150);
 			return result;
@@ -1289,6 +1470,7 @@ app.registerExtension({
 		const originalConfigure = nodeType.prototype.onConfigure;
 		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
 			const result = originalConfigure?.apply(this, [serializedNode, ...args]);
+			scheduleNativePreviewClear(this);
 			restoreExtraOutputState(this, serializedNode);
 			schedule(this, 0);
 			schedule(this, 180);
@@ -1302,11 +1484,20 @@ app.registerExtension({
 			serializedNode.properties[SELECTED_VIDEO_PROPERTY] = widgetValue(this, SELECTED_VIDEO_WIDGET, "") || this.properties?.[SELECTED_VIDEO_PROPERTY] || "";
 			return result;
 		};
-		const originalExecuted = nodeType.prototype.onExecuted;
+		nodeType.prototype.onDrawBackground = function (...args) {
+			clearNativePreview(this);
+			return undefined;
+		};
+		nodeType.prototype.onDrawForeground = function (...args) {
+			clearNativePreview(this);
+			return undefined;
+		};
 		nodeType.prototype.onExecuted = function (message, ...args) {
-			const result = originalExecuted?.apply(this, [message, ...args]);
+			clearNativePreview(this);
 			applyExecutedMessage(this, message || {});
-			return result;
+			clearExecutedPreviewPayload(message);
+			scheduleNativePreviewClear(this);
+			return undefined;
 		};
 	},
 	nodeCreated(node) {

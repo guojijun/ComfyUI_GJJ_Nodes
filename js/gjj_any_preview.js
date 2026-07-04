@@ -414,6 +414,38 @@ function firstMediaPayload(...payloads) {
 	return [];
 }
 
+function sequenceFramePayload(item) {
+	return normalizeMediaPayload(item?.sequence_frames || item?.frame_images || item?.frames);
+}
+
+function tileImagePayload(item) {
+	if (isSequenceMediaItem(item)) {
+		return sequenceFramePayload(item);
+	}
+	return item ? [item] : [];
+}
+
+function countTileImages(images) {
+	return normalizeMediaPayload(images).reduce(
+		(total, image) => total + tileImagePayload(image).length,
+		0,
+	);
+}
+
+function tileImageEntriesFromImages(images, baseLabel = "") {
+	const entries = [];
+	for (const image of normalizeMediaPayload(images)) {
+		const tileImages = tileImagePayload(image);
+		for (const [index, tileImage] of tileImages.entries()) {
+			entries.push({
+				item: tileImage,
+				label: baseLabel || (tileImages.length > 1 ? `${index + 1}` : ""),
+			});
+		}
+	}
+	return entries;
+}
+
 function sourceLooksAudio(sourceInfo) {
 	const text = `${sourceInfo?.type || ""} ${sourceInfo?.label || ""}`.toUpperCase();
 	return text.includes("AUDIO");
@@ -1819,9 +1851,9 @@ function hasCurrentPreviewContent(node) {
 function previewTileCandidateCount(node) {
 	const items = Array.isArray(node?.__gjjAnyPreviewItems) ? node.__gjjAnyPreviewItems : [];
 	if (items.length) {
-		return items.reduce((total, item) => total + normalizeMediaPayload(item?.images).length, 0);
+		return items.reduce((total, item) => total + countTileImages(item?.images), 0);
 	}
-	return currentPreviewImages(node).length;
+	return countTileImages(currentPreviewImages(node));
 }
 
 function updatePreviewActionButtons(node) {
@@ -3567,10 +3599,9 @@ function renderPreviewItems(node, items) {
 	if (isTileMode(node)) {
 		const imageEntries = [];
 		for (const [index, item] of items.entries()) {
-			for (const image of normalizeMediaPayload(item.images)) {
+			for (const entry of tileImageEntriesFromImages(item.images)) {
 				imageEntries.push({
-					item: image,
-					label: "",
+					...entry,
 					sourceTitle: previewItemDisplayTitle(item, index),
 				});
 			}
@@ -3725,10 +3756,11 @@ function applyPreviewContent(node) {
 	}
 
 	const sequenceImage = images.find(isSequenceMediaItem);
-	if (showImage && isTileMode(node) && images.length > 1) {
+	const tileImageEntries = showImage && isTileMode(node) ? tileImageEntriesFromImages(images) : [];
+	if (showImage && isTileMode(node) && tileImageEntries.length > 1) {
 		clearImageSequenceTimers(node);
 		body.style.display = "none";
-		renderCompactImageTiles(node, grid, images.map((item) => ({ item })));
+		renderCompactImageTiles(node, grid, tileImageEntries);
 	} else if (showImage && sequenceImage) {
 		clearImageSequenceTimers(node);
 		grid.style.display = "flex";

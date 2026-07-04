@@ -93,6 +93,13 @@ def _build_caption_prompt(prompt: str, filename: str) -> str:
     )
 
 
+def _hidden_options(**options: Any) -> dict[str, Any]:
+    result = dict(options)
+    result["hidden"] = True
+    result["display"] = "hidden"
+    return result
+
+
 def _caption_with_ollama(host: str, model: str, prompt: str, image_base64: str, filename: str = "") -> str:
     request_url = f"{host.rstrip('/')}/api/chat"
     body = {
@@ -182,61 +189,61 @@ class GJJ_OllamaDirectoryCaptioner:
             "required": {
                 "ollama_host": (
                     "STRING",
-                    {
-                        "default": DEFAULT_OLLAMA_HOST,
-                        "display_name": "Ollama 完整地址",
-                        "tooltip": "整体填写完整地址，格式为 http://127.0.0.1:端口 。示例：http://127.0.0.1:11434",
-                    },
+                    _hidden_options(
+                        default=DEFAULT_OLLAMA_HOST,
+                        display_name="Ollama 完整地址",
+                        tooltip="整体填写完整地址，格式为 http://127.0.0.1:端口 。示例：http://127.0.0.1:11434",
+                    ),
                 ),
                 "ollama_model": (
                     model_options_with_fallback(),
-                    {
-                        "default": DEFAULT_OLLAMA_MODEL,
-                        "display_name": "Ollama 模型",
-                        "tooltip": "列出本地 Ollama 已安装模型；如果列表为空，请先启动 Ollama 并安装多模态模型。",
-                    },
+                    _hidden_options(
+                        default=DEFAULT_OLLAMA_MODEL,
+                        display_name="Ollama 模型",
+                        tooltip="列出本地 Ollama 已安装模型；如果列表为空，请先启动 Ollama 并安装多模态模型。",
+                    ),
                 ),
                 "prompt_template": (
                     "STRING",
-                    {
-                        "default": DEFAULT_PROMPT,
-                        "multiline": True,
-                        "display_name": "打标提示词",
-                        "tooltip": "发送给 Ollama 的图片打标提示词。建议输出简洁、稳定、逗号分隔的 LoRA 训练标签。",
-                    },
+                    _hidden_options(
+                        default=DEFAULT_PROMPT,
+                        multiline=True,
+                        display_name="打标提示词",
+                        tooltip="发送给 Ollama 的图片打标提示词。建议输出简洁、稳定、逗号分隔的 LoRA 训练标签。",
+                    ),
                 ),
                 "overwrite_existing": (
                     "BOOLEAN",
-                    {
-                        "default": False,
-                        "display_name": "覆盖已有 txt",
-                        "tooltip": "关闭时遇到同名 txt 会跳过；打开后会覆盖已有 txt。",
-                    },
+                    _hidden_options(
+                        default=False,
+                        display_name="覆盖已有 txt",
+                        tooltip="关闭时遇到同名 txt 会跳过；打开后会覆盖已有 txt。",
+                    ),
                 ),
                 "include_subdirectories": (
                     "BOOLEAN",
-                    {
-                        "default": True,
-                        "display_name": "包含子目录",
-                        "tooltip": "打开后会递归处理所选目录下的所有子目录图片。",
-                    },
+                    _hidden_options(
+                        default=True,
+                        display_name="包含子目录",
+                        tooltip="打开后会递归处理所选目录下的所有子目录图片。",
+                    ),
                 ),
                 "selected_directory": (
                     "STRING",
-                    {
-                        "default": "",
-                        "display_name": "已选目录",
-                        "tooltip": "由前端目录选择器自动维护，一般无需手动填写。",
-                    },
+                    _hidden_options(
+                        default="",
+                        display_name="已选目录",
+                        tooltip="由前端目录选择器自动维护，一般无需手动填写。",
+                    ),
                 ),
                 "last_summary": (
                     "STRING",
-                    {
-                        "default": "等待执行",
-                        "multiline": True,
-                        "display_name": "最近结果",
-                        "tooltip": "由前端自动维护的最近一次批量打标结果摘要。",
-                    },
+                    _hidden_options(
+                        default="等待执行",
+                        multiline=True,
+                        display_name="最近结果",
+                        tooltip="由前端自动维护的最近一次批量打标结果摘要。",
+                    ),
                 ),
             }
         }

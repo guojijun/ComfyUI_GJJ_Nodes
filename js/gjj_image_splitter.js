@@ -161,17 +161,103 @@ function scheduleCompact(node, ms = 32) {
 	node.__gjjSplitCompactTimer = setTimeout(() => compactNode(node), ms);
 }
 
+function eventNodeId(event) {
+	return String(
+		event?.detail?.node_id
+			?? event?.detail?.node
+			?? event?.detail?.display_node
+			?? event?.detail?.nodeId
+			?? "",
+	);
+}
+
+function isInputConnectionEvent(slotType) {
+	return (
+		slotType === globalThis.LiteGraph?.INPUT
+		|| slotType === 1
+		|| String(slotType).toLowerCase() === "input"
+	);
+}
+
+function getImageInput(node) {
+	return node?.inputs?.find?.((input) => input?.name === "image") || null;
+}
+
+function graphLinkById(linkId) {
+	const links = app.graph?.links || app.graph?._links;
+	if (!links || linkId == null) return null;
+	if (links instanceof Map) return links.get(linkId) || links.get(String(linkId)) || null;
+	return links[linkId] || links[String(linkId)] || null;
+}
+
+function hasImageInputLink(node) {
+	return getImageInput(node)?.link != null;
+}
+
+function linkedImageSourceId(node) {
+	const input = getImageInput(node);
+	if (!input || input.link == null) return "";
+	const link = graphLinkById(input.link);
+	if (!link) return "";
+	return String(link.origin_id ?? link.source_id ?? link.from_id ?? "");
+}
+
+function mediaItemUrl(item, fallbackType = "temp") {
+	if (!item || typeof item !== "object") return "";
+	if (item.url) return String(item.url);
+	const filename = String(item.filename || item.name || item.image || "").trim();
+	if (!filename) return "";
+	const type = String(item.type || item.output_type || fallbackType || "temp");
+	const subfolder = String(item.subfolder || "");
+	return api.apiURL(`/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(type)}&subfolder=${encodeURIComponent(subfolder)}&rand=${Date.now()}`);
+}
+
+function firstImageUrlFromPayload(...payloads) {
+	for (const payload of payloads) {
+		const queue = Array.isArray(payload) ? [...payload] : (payload ? [payload] : []);
+		while (queue.length) {
+			const item = queue.shift();
+			if (Array.isArray(item)) {
+				queue.unshift(...item);
+				continue;
+			}
+			const url = mediaItemUrl(item);
+			if (url) return url;
+		}
+	}
+	return "";
+}
+
+function imageUrlFromExecutedEvent(event) {
+	const output = event?.detail?.output || event?.detail || {};
+	return firstImageUrlFromPayload(output.preview_images, output.images, output.__gjj_queue_images);
+}
+
+function imageUrlFromAnyPreviewNode(node) {
+	const direct = firstImageUrlFromPayload(node?.__gjjAnyPreviewImages);
+	if (direct) return direct;
+	const items = Array.isArray(node?.__gjjAnyPreviewItems) ? node.__gjjAnyPreviewItems : [];
+	for (const item of items) {
+		const url = firstImageUrlFromPayload(item?.images);
+		if (url) return url;
+	}
+	return firstImageUrlFromPayload(node?.properties?.gjj_any_preview_held_images);
+}
+
 function getUpstreamImageSrc(node) {
 	const inputNames = ["image"];
 	for (const name of inputNames) {
 		const input = node.inputs?.find?.((i) => i.name === name);
-		if (!input || input.link == null || !app.graph?.links) continue;
-		const link = app.graph.links[input.link];
+		if (!input || input.link == null) continue;
+		const link = graphLinkById(input.link);
 		if (!link) continue;
 		const srcId = link.origin_id ?? link.source_id ?? link.from_id;
 		if (srcId == null) continue;
 		const srcNode = app.graph.getNodeById(srcId);
 		if (!srcNode) continue;
+
+		const anyPreviewSrc = imageUrlFromAnyPreviewNode(srcNode);
+		if (anyPreviewSrc) return anyPreviewSrc;
 
 		if (Array.isArray(srcNode.imgs)) {
 			for (const img of srcNode.imgs) {
@@ -339,14 +425,30 @@ function createSplitterWidget(node) {
 
 	// ── Top Toolbar: all buttons in one row ────────────────────
 	const toolbar = document.createElement("div");
-	toolbar.style.cssText = "display:flex;align-items:center;gap:4px;flex-wrap:nowrap;white-space:nowrap;overflow:hidden;";
+	toolbar.style.cssText = "display:flex;align-items:center;gap:4px;flex-wrap:wrap;white-space:normal;overflow:visible;";
 
 	const openBtn = document.createElement("button");
 	openBtn.type = "button";
 	openBtn.textContent = "📁";
 	openBtn.title = "打开图片：从本地选择图片加载到节点内（无需外部 IMAGE 连接）";
 	openBtn.style.cssText = "width:24px;height:22px;padding:0;border:1px solid rgba(113,137,148,0.45);border-radius:4px;background:#1b2f35;color:#d9e4e8;font-size:13px;cursor:pointer;line-height:20px;";
-	openBtn.onclick = () => fileInput.click();
+	openBtn.onclick = () => {
+		if (openBtn.disabled) return;
+		fileInput.click();
+	};
+
+	function updateOpenButtonState() {
+		const linked = hasImageInputLink(node);
+		openBtn.disabled = linked;
+		openBtn.title = linked
+			? "IMAGE 输入口已有链接，内部打开图片已禁用"
+			: "打开图片：从本地选择图片加载到节点内（无需外部 IMAGE 连接）";
+		openBtn.style.cursor = linked ? "not-allowed" : "pointer";
+		openBtn.style.opacity = linked ? "0.42" : "1";
+		openBtn.style.background = linked ? "#20272b" : "#1b2f35";
+		openBtn.style.color = linked ? "#7d8b91" : "#d9e4e8";
+		openBtn.style.borderColor = linked ? "rgba(113,137,148,0.22)" : "rgba(113,137,148,0.45)";
+	}
 
 	const rowDec = btn("−", "减少一行");
 	const rowVal = document.createElement("span");
@@ -363,11 +465,11 @@ function createSplitterWidget(node) {
 
 	const rowBox = document.createElement("span");
 	rowBox.title = "行数设置";
-	rowBox.style.cssText = "display:inline-flex;align-items:center;gap:2px;";
+	rowBox.style.cssText = "display:inline-flex;align-items:center;gap:2px;white-space:nowrap;flex:0 0 auto;";
 	rowBox.append("↕", rowDec, rowVal, rowInc);
 	const colBox = document.createElement("span");
 	colBox.title = "列数设置";
-	colBox.style.cssText = "display:inline-flex;align-items:center;gap:2px;";
+	colBox.style.cssText = "display:inline-flex;align-items:center;gap:2px;white-space:nowrap;flex:0 0 auto;";
 	colBox.append("↔", colDec, colVal, colInc);
 
 	const evenBtn = document.createElement("button");
@@ -398,7 +500,7 @@ function createSplitterWidget(node) {
 	let currentAlign = ALIGN_PX.includes(Number(state.align_px)) ? Number(state.align_px) : DEFAULT_ALIGN;
 	const alignBox = document.createElement("span");
 	alignBox.title = "拖拽分割线时吸附到指定像素倍数";
-	alignBox.style.cssText = "display:inline-flex;align-items:center;gap:2px;margin-left:2px;color:#9fb3bd;font-size:10px;";
+	alignBox.style.cssText = "display:inline-flex;align-items:center;gap:2px;margin-left:2px;color:#9fb3bd;font-size:10px;white-space:nowrap;flex:0 0 auto;";
 	alignBox.append("🎯");
 	for (const v of ALIGN_PX) {
 		const radio = document.createElement("input");
@@ -750,11 +852,44 @@ function createSplitterWidget(node) {
 
 	function tryLoadImage(src) {
 		if (!src) { loadedImage = null; applyVisibility(); updateBlockPreviews(); return; }
+		if (src === node.__gjjSplitterLastPreviewSrc) return;
+		node.__gjjSplitterLastPreviewSrc = src;
 		const img = new Image();
 		img.crossOrigin = "anonymous";
 		img.onload = () => setImage(img);
-		img.onerror = () => { loadedImage = null; dimEl.textContent = "加载失败"; applyVisibility(); };
+		img.onerror = () => {
+			if (node.__gjjSplitterLastPreviewSrc === src) node.__gjjSplitterLastPreviewSrc = "";
+			loadedImage = null;
+			dimEl.textContent = "加载失败";
+			applyVisibility();
+		};
 		img.src = src;
+	}
+
+	function clearPreview() {
+		node.__gjjSplitterLastPreviewSrc = "";
+		loadedImage = null;
+		imgW = 0;
+		imgH = 0;
+		dimEl.textContent = "等待图片...";
+		applyVisibility();
+		updateBlockPreviews();
+	}
+
+	function refreshFromInput(preferredSrc = "", clearIfMissing = false) {
+		updateOpenButtonState();
+		if (hasImageInputLink(node)) {
+			const src = preferredSrc || getUpstreamImageSrc(node);
+			if (src) tryLoadImage(src);
+			return Boolean(src);
+		}
+		const internalFile = getHiddenValue(node, FILE_WIDGET, "");
+		if (internalFile) {
+			tryLoadImage(api.apiURL(`/view?filename=${encodeURIComponent(internalFile)}&type=input&subfolder=&rand=${Date.now()}`));
+			return true;
+		}
+		if (clearIfMissing) clearPreview();
+		return false;
 	}
 
 	// ── DOM Widget ─────────────────────────────────────────────
@@ -780,6 +915,7 @@ function createSplitterWidget(node) {
 	const origRem = node.onRemoved;
 	node.onRemoved = function () {
 		origRem?.apply(this, arguments);
+		delete node.__gjjImageSplitterRefreshFromUpstream;
 		ro.disconnect();
 		if (fileInput && fileInput.parentNode) fileInput.parentNode.removeChild(fileInput);
 	};
@@ -823,30 +959,31 @@ function createSplitterWidget(node) {
 	node.onConnectionsChange = function (slotType, slotIndex, connected, linkInfo) {
 		origConn?.apply(this, arguments);
 		// 输入口（image）连接变化时重新加载预览
-		if (slotType === 0) {
+		if (isInputConnectionEvent(slotType)) {
 			const input = node.inputs?.[slotIndex];
 			if (input && input.name === "image") {
+				updateOpenButtonState();
 				setTimeout(() => {
-					const src = getUpstreamImageSrc(node);
-					if (src) tryLoadImage(src);
+					refreshFromInput("", true);
 				}, 300);
 			}
 		}
 	};
 
+	node.__gjjImageSplitterRefreshFromUpstream = function (event) {
+		if (!hasImageInputLink(node)) {
+			updateOpenButtonState();
+			return;
+		}
+		if (String(linkedImageSourceId(node)) !== eventNodeId(event)) return;
+		const eventSrc = imageUrlFromExecutedEvent(event);
+		setTimeout(() => refreshFromInput(eventSrc, false), eventSrc ? 30 : 180);
+	};
+
 	// ── Initial load ───────────────────────────────────────────
 	syncOutputs(node, state.rows, state.cols, showBlocks);
 	setTimeout(() => {
-		// Try internal file first
-		const internalFile = getHiddenValue(node, FILE_WIDGET, "");
-		if (internalFile) {
-			const url = api.apiURL(`/view?filename=${encodeURIComponent(internalFile)}&type=input&subfolder=&rand=${Date.now()}`);
-			tryLoadImage(url);
-			return;
-		}
-		// Then upstream
-		const src = getUpstreamImageSrc(node);
-		if (src) { tryLoadImage(src); } else { loadedImage = null; applyVisibility(); updateBlockPreviews(); }
+		refreshFromInput("", true);
 	}, 400);
 	requestAnimationFrame(resizeN);
 }
@@ -896,3 +1033,15 @@ app.registerExtension({
 		setTimeout(() => compactNode(node), 120);
 	},
 });
+
+if (!window.__gjjImageSplitterExecutedListenerInstalled) {
+	window.__gjjImageSplitterExecutedListenerInstalled = true;
+	api.addEventListener("executed", (event) => {
+		const sourceId = eventNodeId(event);
+		if (!sourceId) return;
+		for (const node of app.graph?._nodes || []) {
+			if (node?.comfyClass !== TARGET_CLASS) continue;
+			node.__gjjImageSplitterRefreshFromUpstream?.(event);
+		}
+	});
+}

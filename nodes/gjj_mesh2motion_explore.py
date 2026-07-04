@@ -97,6 +97,45 @@ def _safe_child(base: Path, candidate: Path) -> bool:
         return False
 
 
+def _mesh2motion_capture_patch_script() -> str:
+    return """
+<script>
+(function () {
+  if (window.__gjjMesh2MotionPreserveDrawingBuffer) return;
+  window.__gjjMesh2MotionPreserveDrawingBuffer = true;
+  const originalGetContext = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+    const name = String(type || "").toLowerCase();
+    if (name === "webgl" || name === "webgl2" || name === "experimental-webgl") {
+      attrs = Object.assign({}, attrs || {}, { preserveDrawingBuffer: true });
+    }
+    return originalGetContext.call(this, type, attrs);
+  };
+})();
+</script>
+""".strip()
+
+
+async def _serve_html_with_capture_patch(path: Path, web):
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        text = path.read_text(encoding="utf-8-sig")
+    patch = _mesh2motion_capture_patch_script()
+    if "__gjjMesh2MotionPreserveDrawingBuffer" not in text:
+        lower = text.lower()
+        head_index = lower.find("<head")
+        if head_index >= 0:
+            close_index = text.find(">", head_index)
+            if close_index >= 0:
+                text = f"{text[:close_index + 1]}\n{patch}\n{text[close_index + 1:]}"
+            else:
+                text = f"{patch}\n{text}"
+        else:
+            text = f"{patch}\n{text}"
+    return web.Response(text=text, content_type="text/html")
+
+
 def _register_routes() -> None:
     try:
         from aiohttp import web
@@ -115,7 +154,7 @@ def _register_routes() -> None:
     async def serve_index(_request):
         index_path = UI_DIR / "index-comfyui.html"
         if index_path.exists():
-            return web.FileResponse(index_path)
+            return await _serve_html_with_capture_patch(index_path, web)
         return web.Response(text="GJJ Mesh2Motion UI 文件不存在。", status=404)
 
     # 存储捕获状态的全局缓存
@@ -161,9 +200,11 @@ def _register_routes() -> None:
             for name in ("index-comfyui.html", "index.html", "retarget-comfyui.html", "retarget.html"):
                 index_path = file_path / name
                 if index_path.exists():
-                    return web.FileResponse(index_path)
+                    return await _serve_html_with_capture_patch(index_path, web)
 
         if file_path.exists() and file_path.is_file():
+            if file_path.suffix.lower() == ".html":
+                return await _serve_html_with_capture_patch(file_path, web)
             return web.FileResponse(file_path)
 
         return web.Response(text="文件不存在。", status=404)

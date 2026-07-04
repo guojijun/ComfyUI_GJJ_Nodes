@@ -14,6 +14,25 @@ from PIL import Image, ImageOps
 
 STATE_PROPERTY = "gjj_points_editor_state"
 IMAGE_STORE_PROPERTY = "gjj_points_editor_image_store"
+ENABLED_OUTPUTS_PROPERTY = "enabled_outputs"
+DEFAULT_OUTPUT_KEYS = ("positive", "negative", "bbox")
+OUTPUT_KEYS = ("positive", "negative", "bbox", "mask", "crop", "bbox_preview")
+OUTPUT_DEFS = {
+	"positive": {"name": "前景点坐标", "type": "STRING"},
+	"negative": {"name": "背景点坐标", "type": "STRING"},
+	"bbox": {"name": "框选范围信息", "type": "BBOX"},
+	"mask": {"name": "框选遮罩图像", "type": "MASK"},
+	"crop": {"name": "首个裁切图像", "type": "IMAGE"},
+	"bbox_preview": {"name": "框选预览图像", "type": "IMAGE"},
+}
+
+
+class AnyType(str):
+	def __ne__(self, __value: object) -> bool:
+		return False
+
+
+any_type = AnyType("*")
 
 
 def _image_to_base64(image: torch.Tensor) -> str:
@@ -47,6 +66,40 @@ def _safe_parse_state(raw: Any) -> dict[str, Any]:
 		return {}
 
 
+def _normalize_enabled_outputs(raw: Any) -> list[str]:
+	try:
+		value = json.loads(str(raw or "[]"))
+	except Exception:
+		value = raw if isinstance(raw, list) else []
+	if isinstance(value, dict):
+		source = value.get("outputs") or value.get("enabled_outputs") or []
+	else:
+		source = value if isinstance(value, list) else []
+	result: list[str] = []
+	for item in source:
+		key = item.get("key") if isinstance(item, dict) else item
+		key = str(key or "")
+		if key in OUTPUT_KEYS and key not in result:
+			result.append(key)
+	return result
+
+
+def _has_explicit_enabled_outputs(raw: Any) -> bool:
+	if raw is None:
+		return False
+	if isinstance(raw, dict):
+		return "outputs" in raw or "enabled_outputs" in raw
+	if isinstance(raw, list):
+		return True
+	try:
+		value = json.loads(str(raw or ""))
+	except Exception:
+		return False
+	if isinstance(value, dict):
+		return "outputs" in value or "enabled_outputs" in value
+	return isinstance(value, list)
+
+
 def _state_score(value: Any) -> int:
 	if not isinstance(value, dict):
 		return 0
@@ -73,7 +126,7 @@ def _find_editor_state(*raw_values: Any) -> dict[str, Any]:
 			except Exception:
 				continue
 		score = _state_score(value)
-		if score > 0 and score >= best_score:
+		if score > best_score:
 			best = value
 			best_score = score
 	return best
@@ -85,6 +138,25 @@ def _state_list(state: dict[str, Any], *keys: str) -> list[dict[str, float]] | N
 		if isinstance(value, list):
 			return value
 	return None
+
+
+def _coerce_bbox_format(value: Any, default: str = "xywh") -> str:
+	if value in ("xyxy", "xywh"):
+		return str(value)
+	if isinstance(value, str):
+		text = value.strip().lower()
+		if text in ("xyxy", "xywh"):
+			return text
+		if text == "0":
+			return "xyxy"
+		if text == "1":
+			return "xywh"
+	if not isinstance(value, bool) and isinstance(value, (int, float)):
+		if int(value) == 0:
+			return "xyxy"
+		if int(value) == 1:
+			return "xywh"
+	return default
 
 
 def _safe_parse_workflow(value: Any) -> dict[str, Any]:
@@ -111,12 +183,49 @@ def _workflow_state(extra_pnginfo: Any, unique_id: Any) -> dict[str, Any]:
 		if not isinstance(properties, dict):
 			return {}
 		state = _safe_parse_state(properties.get(STATE_PROPERTY))
-		if _state_score(state) > 0:
-			return state
 		image_store = properties.get(IMAGE_STORE_PROPERTY)
+		if _state_score(state) > 0:
+			if isinstance(image_store, str) and image_store and not state.get("image_store"):
+				state = {**state, "image_store": image_store}
+			return state
 		if isinstance(image_store, str) and image_store:
 			return {"image_store": image_store}
 	return {}
+
+
+def _workflow_enabled_outputs(extra_pnginfo: Any, unique_id: Any) -> list[str]:
+	extra = extra_pnginfo if isinstance(extra_pnginfo, dict) else {}
+	workflow = _safe_parse_workflow(extra.get("workflow"))
+	nodes = workflow.get("nodes")
+	if not isinstance(nodes, list):
+		return []
+	node_id = str(unique_id or "")
+	for node in nodes:
+		if not isinstance(node, dict) or str(node.get("id", "")) != node_id:
+			continue
+		properties = node.get("properties")
+		if isinstance(properties, dict):
+			keys = _normalize_enabled_outputs(properties.get(ENABLED_OUTPUTS_PROPERTY))
+			if keys:
+				return keys
+		outputs = node.get("outputs")
+		if isinstance(outputs, list):
+			result: list[str] = []
+			for index, output in enumerate(outputs):
+				if not isinstance(output, dict):
+					continue
+				key = str(output.get("gjj_key") or output.get("key") or "")
+				if key not in OUTPUT_KEYS:
+					name = str(output.get("name") or output.get("label") or output.get("localized_name") or "")
+					for candidate_key in OUTPUT_KEYS:
+						if OUTPUT_DEFS.get(candidate_key, {}).get("name") == name:
+							key = candidate_key
+							break
+				if key in OUTPUT_KEYS and key not in result:
+					result.append(key)
+			return result
+		return []
+	return []
 
 
 def _blank_image(width: int, height: int) -> torch.Tensor:
@@ -157,14 +266,62 @@ def _default_negative_point(width: int, height: int) -> dict[str, int]:
 	}
 
 
+def _default_bbox(width: int, height: int) -> tuple[int, int, int, int]:
+	box_width = max(1, int(round(width * 0.35)))
+	box_height = max(1, int(round(height * 0.35)))
+	x_min = max(0, int(round((width - box_width) / 2)))
+	y_min = max(0, int(round((height - box_height) / 2)))
+	return (
+		x_min,
+		y_min,
+		min(width, x_min + box_width),
+		min(height, y_min + box_height),
+	)
+
+
+def _draw_bbox_preview(
+	image: torch.Tensor,
+	boxes: list[tuple[int, int, int, int]],
+	source_width: int,
+	source_height: int,
+	line_width: int = 3,
+) -> torch.Tensor:
+	preview = image.clone()
+	if preview.ndim != 4 or not boxes:
+		return preview
+	batch, image_height, image_width, channels = preview.shape
+	if image_height <= 0 or image_width <= 0 or channels <= 0:
+		return preview
+	color = torch.zeros((channels,), dtype=preview.dtype, device=preview.device)
+	color[0] = 1
+	if channels > 3:
+		color[3] = 1
+	scale_x = float(image_width) / float(max(1, source_width))
+	scale_y = float(image_height) / float(max(1, source_height))
+	for x_min, y_min, x_max, y_max in boxes:
+		x_min = max(0, min(int(round(float(x_min) * scale_x)), image_width - 1))
+		y_min = max(0, min(int(round(float(y_min) * scale_y)), image_height - 1))
+		x_max = max(0, min(int(round(float(x_max) * scale_x)), image_width))
+		y_max = max(0, min(int(round(float(y_max) * scale_y)), image_height))
+		if x_max <= x_min or y_max <= y_min:
+			continue
+		for lw in range(max(1, int(line_width))):
+			top = min(image_height - 1, y_min + lw)
+			bottom = max(0, min(image_height - 1, y_max - 1 - lw))
+			left = min(image_width - 1, x_min + lw)
+			right = max(0, min(image_width - 1, x_max - 1 - lw))
+			preview[:, top, x_min:x_max, :] = color
+			preview[:, bottom, x_min:x_max, :] = color
+			preview[:, y_min:y_max, left, :] = color
+			preview[:, y_min:y_max, right, :] = color
+	return preview
+
+
 def _load_image_from_path(file_path: str) -> torch.Tensor:
 	with Image.open(file_path) as img:
 		img.load()
 		img = ImageOps.exif_transpose(img)
-		if img.mode == "RGBA":
-			array = np.asarray(img).astype(np.float32) / 255.0
-		else:
-			array = np.asarray(img.convert("RGB")).astype(np.float32) / 255.0
+		array = np.asarray(img.convert("RGB")).astype(np.float32) / 255.0
 	return torch.from_numpy(array)[None, ...]
 
 
@@ -248,7 +405,7 @@ class GJJ_PointsEditor:
 				"bbox_format": (["xyxy", "xywh"], {
 					"display_name": "边框格式",
 					"tooltip": "xyxy 输出左上和右下角坐标；xywh 输出左上角和宽高。",
-					"default": "xyxy",
+					"default": "xywh",
 				}),
 				"width": ("INT", {
 					"default": 512,
@@ -291,6 +448,26 @@ class GJJ_PointsEditor:
 					"display_name": "编辑器状态",
 					"tooltip": "前端内部使用的隐藏数据，保存当前点位、框选和图片状态。",
 				}),
+				"enabled_outputs": ("STRING", {
+					"default": "[]",
+					"multiline": False,
+					"display": "hidden",
+					"hidden": True,
+					"socketless": True,
+					"advanced": True,
+					"display_name": "启用输出",
+					"tooltip": "前端内部使用的隐藏数据，记录当前显示的动态扩展输出口。",
+				}),
+				"parameters_visible": ("STRING", {
+					"default": "false",
+					"multiline": False,
+					"display": "hidden",
+					"hidden": True,
+					"socketless": True,
+					"advanced": True,
+					"display_name": "参数展开状态",
+					"tooltip": "前端内部使用的隐藏数据，记录参数区是否展开。",
+				}),
 			},
 			"optional": {
 				"bg_image": ("IMAGE", {
@@ -304,14 +481,15 @@ class GJJ_PointsEditor:
 			},
 	}
 
-	RETURN_TYPES = ("STRING", "STRING", "BBOX", "MASK", "IMAGE")
-	RETURN_NAMES = ("前景点坐标", "背景点坐标", "框选范围信息", "框选遮罩图像", "首个裁切图像")
+	RETURN_TYPES = (any_type,) * len(OUTPUT_KEYS)
+	RETURN_NAMES = ("前景点坐标", "背景点坐标", "框选范围信息", "框选遮罩图像", "首个裁切图像", "框选预览图像")
 	OUTPUT_TOOLTIPS = (
 		"前景点位坐标 JSON 文本。",
 		"背景点位坐标 JSON 文本。",
 		"框选结果，按所选格式输出为边框数组。",
 		"根据边框填充得到的遮罩。",
 		"若接了背景图则输出第一组边框裁切图，否则输出当前背景图或空白画布。",
+		"在原图上绘制框选范围后的预览图像。",
 	)
 	FUNCTION = "pointdata"
 	CATEGORY = "GJJ/工具"
@@ -323,40 +501,36 @@ class GJJ_PointsEditor:
 		neg_coordinates="[]",
 		bbox_store="[]",
 		bboxes="[]",
-		bbox_format="xyxy",
+		bbox_format="xywh",
 		width=512,
 		height=512,
 		normalize=False,
 		image_store="",
 		editor_state="{}",
+		enabled_outputs="[]",
+		parameters_visible="false",
 		bg_image=None,
 		unique_id=None,
 		extra_pnginfo=None,
 		**kwargs,
 	):
 		workflow_state = _workflow_state(extra_pnginfo, unique_id)
-		state = _find_editor_state(
+		prompt_state = _find_editor_state(
 			editor_state,
 			points_store,
-			coordinates,
-			neg_coordinates,
-			bbox_store,
-			bboxes,
 			image_store,
-			workflow_state,
 			*kwargs.values(),
 		)
+		state = prompt_state if _state_score(prompt_state) > 0 else workflow_state
+		if isinstance(workflow_state.get("image_store"), str) and workflow_state.get("image_store") and not state.get("image_store"):
+			state = {**state, "image_store": workflow_state.get("image_store")}
 		store_state = _safe_parse_state(points_store)
-		pos_source = _state_list(state, "positive", "coordinates") or _state_list(store_state, "positive")
-		neg_source = _state_list(state, "negative", "neg_coordinates") or _state_list(store_state, "negative")
-		bbox_source = _state_list(state, "boxes", "bboxes")
-
-		if pos_source is not None:
-			coordinates = json.dumps(pos_source, ensure_ascii=False)
-		if neg_source is not None:
-			neg_coordinates = json.dumps(neg_source, ensure_ascii=False)
-		if bbox_source is not None:
-			bboxes = json.dumps(bbox_source, ensure_ascii=False)
+		pos_direct = _safe_parse_points(coordinates)
+		neg_direct = _safe_parse_points(neg_coordinates)
+		bbox_direct = _safe_parse_boxes(bboxes) or _safe_parse_boxes(bbox_store)
+		pos_source = pos_direct or _state_list(state, "positive", "coordinates") or _state_list(store_state, "positive")
+		neg_source = neg_direct or _state_list(state, "negative", "neg_coordinates") or _state_list(store_state, "negative")
+		bbox_source = bbox_direct or _state_list(state, "boxes", "bboxes")
 		if isinstance(state.get("image_store"), str) and (not image_store or _state_score(_safe_parse_state(image_store)) > 0):
 			image_store = state.get("image_store", "")
 
@@ -364,21 +538,17 @@ class GJJ_PointsEditor:
 			width = state.get("width")
 		if state.get("height") is not None:
 			height = state.get("height")
-		if state.get("bbox_format") in ("xyxy", "xywh"):
-			bbox_format = state.get("bbox_format")
-		if state.get("normalize") is not None:
-			normalize = state.get("normalize")
 		width = _coerce_int(width, 512)
 		height = _coerce_int(height, 512)
-		bbox_format = bbox_format if bbox_format in ("xyxy", "xywh") else "xyxy"
-		normalize = _coerce_bool(normalize, _coerce_bool(state.get("normalize"), False))
-		pos_input = _safe_parse_points(coordinates)
-		neg_input = _safe_parse_points(neg_coordinates)
+		bbox_format = _coerce_bbox_format(bbox_format, "xywh")
+		normalize = _coerce_bool(normalize, False)
+		pos_input = pos_source or []
+		neg_input = neg_source or []
 		if not pos_input:
 			pos_input = [_default_positive_point(width, height)]
 		if not neg_input:
 			neg_input = [_default_negative_point(width, height)]
-		bbox_input = _safe_parse_boxes(bboxes) or _safe_parse_boxes(bbox_store)
+		bbox_input = bbox_source or []
 		stored_image = _resolve_annotated_image(image_store)
 
 		pos_output = []
@@ -410,16 +580,24 @@ class GJJ_PointsEditor:
 				continue
 			if any(bbox.get(key) is None for key in ("startX", "startY", "endX", "endY")):
 				continue
-			x_min = min(int(round(float(bbox["startX"]))), int(round(float(bbox["endX"]))))
-			y_min = min(int(round(float(bbox["startY"]))), int(round(float(bbox["endY"]))))
-			x_max = max(int(round(float(bbox["startX"]))), int(round(float(bbox["endX"]))))
-			y_max = max(int(round(float(bbox["startY"]))), int(round(float(bbox["endY"]))))
+			start_x = int(float(bbox["startX"]))
+			start_y = int(float(bbox["startY"]))
+			end_x = int(float(bbox["endX"]))
+			end_y = int(float(bbox["endY"]))
+			x_min = min(start_x, end_x)
+			y_min = min(start_y, end_y)
+			x_max = max(start_x, end_x)
+			y_max = max(start_y, end_y)
 			x_min = max(0, min(x_min, width))
 			y_min = max(0, min(y_min, height))
 			x_max = max(0, min(x_max, width))
 			y_max = max(0, min(y_max, height))
 			if x_max <= x_min or y_max <= y_min:
 				continue
+			valid_boxes.append((x_min, y_min, x_max, y_max))
+			mask[y_min:y_max, x_min:x_max] = 1
+		if not valid_boxes:
+			x_min, y_min, x_max, y_max = _default_bbox(width, height)
 			valid_boxes.append((x_min, y_min, x_max, y_max))
 			mask[y_min:y_max, x_min:x_max] = 1
 
@@ -444,16 +622,24 @@ class GJJ_PointsEditor:
 		if valid_boxes:
 			x_min, y_min, x_max, y_max = valid_boxes[0]
 			cropped_image = base_image[:, y_min:y_max, x_min:x_max, :]
+		bbox_preview_image = _draw_bbox_preview(base_image, valid_boxes, width, height, 3)
+		output_values = {
+			"positive": json.dumps(pos_output, ensure_ascii=False),
+			"negative": json.dumps(neg_output, ensure_ascii=False),
+			"bbox": bbox_output,
+			"mask": mask_tensor,
+			"crop": cropped_image,
+			"bbox_preview": bbox_preview_image,
+		}
+		enabled_output_keys = _normalize_enabled_outputs(enabled_outputs)
+		if not enabled_output_keys and not _has_explicit_enabled_outputs(enabled_outputs):
+			enabled_output_keys = _workflow_enabled_outputs(extra_pnginfo, unique_id)
+		if not enabled_output_keys and not _has_explicit_enabled_outputs(enabled_outputs):
+			enabled_output_keys = list(DEFAULT_OUTPUT_KEYS)
 
 		return {
 			"ui": {"bg_image": [preview_b64]},
-			"result": (
-				json.dumps(pos_output, ensure_ascii=False),
-				json.dumps(neg_output, ensure_ascii=False),
-				bbox_output,
-				mask_tensor,
-				cropped_image,
-			),
+			"result": tuple(output_values[key] for key in enabled_output_keys if key in output_values),
 		}
 
 

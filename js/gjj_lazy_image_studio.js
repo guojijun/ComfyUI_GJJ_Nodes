@@ -37,6 +37,7 @@ const PARAM_VALUES_PROPERTY = "gjj_lazy_image_studio_param_values";
 const IMAGE_SIZE_SIGNATURE_PROPERTY = "gjj_lazy_image_studio_image_size_signature";
 const TEST_FILTER_PROPERTY = "gjj_lazy_image_studio_test_filters";
 const TEST_SORT_PROPERTY = "gjj_lazy_image_studio_test_sorts";
+const BATCH_IMAGE_LINK_MEMORY_PROPERTY = "gjj_lazy_image_studio_batch_image_link_memory";
 const TRANSLATE_BUTTON_STYLES = {
 	off: {
 		bg: "linear-gradient(135deg, #1f2933, #374151)",
@@ -297,6 +298,32 @@ function scheduleNativePreviewClear(node) {
 	}, 120);
 }
 
+function clearExecutedPreviewPayload(message) {
+	if (!message || typeof message !== "object") {
+		return;
+	}
+	for (const key of ["images", "imgs", "preview", "previews", "animatedImages"]) {
+		if (Object.prototype.hasOwnProperty.call(message, key)) {
+			message[key] = Array.isArray(message[key]) ? [] : null;
+		}
+	}
+	for (const parent of [message.ui, message.output, message.results]) {
+		if (!parent || typeof parent !== "object" || Array.isArray(parent)) {
+			continue;
+		}
+		for (const key of ["images", "imgs", "preview", "previews", "animatedImages"]) {
+			if (Object.prototype.hasOwnProperty.call(parent, key)) {
+				parent[key] = Array.isArray(parent[key]) ? [] : null;
+			}
+		}
+	}
+	if (Array.isArray(message.ui)) {
+		for (const item of message.ui) {
+			clearExecutedPreviewPayload(item);
+		}
+	}
+}
+
 const PANEL_SYNC_WIDGETS = [
 	"prompt",
 	"negative_prompt",
@@ -427,6 +454,98 @@ function widgetValue(node, name) {
 
 function inputLinked(node, name) {
 	return Boolean(getInput(node, name)?.link != null);
+}
+
+function inputSlotIndex(node, name) {
+	return Array.isArray(node?.inputs)
+		? node.inputs.findIndex((input) => input?.name === name)
+		: -1;
+}
+
+function graphLinkById(linkId) {
+	if (linkId == null) {
+		return null;
+	}
+	const links = app.graph?.links;
+	if (!links) {
+		return null;
+	}
+	if (links[linkId]) {
+		return links[linkId];
+	}
+	if (Array.isArray(links)) {
+		return links.find((link) => String(link?.id) === String(linkId)) || null;
+	}
+	return null;
+}
+
+function batchImageLinkMemory(node) {
+	const memory = node?.properties?.[BATCH_IMAGE_LINK_MEMORY_PROPERTY];
+	return memory && typeof memory === "object" ? memory : null;
+}
+
+function rememberBatchImageLink(node) {
+	const input = getInput(node, PRIMARY_IMAGE_INPUT);
+	const slot = inputSlotIndex(node, PRIMARY_IMAGE_INPUT);
+	const link = graphLinkById(input?.link);
+	if (!node || slot < 0 || !link) {
+		return null;
+	}
+	const memory = {
+		origin_id: Number(link.origin_id),
+		origin_slot: Number(link.origin_slot),
+		target_slot: slot,
+	};
+	node.properties = node.properties || {};
+	node.properties[BATCH_IMAGE_LINK_MEMORY_PROPERTY] = memory;
+	return memory;
+}
+
+function setBatchLinkButtonState(node) {
+	const button = node?.__gjjBatchImageLinkButton;
+	if (!button) {
+		return;
+	}
+	const linked = inputLinked(node, PRIMARY_IMAGE_INPUT);
+	const memory = batchImageLinkMemory(node);
+	button.style.display = linked || memory ? "flex" : "none";
+	button.textContent = "🔗";
+	button.title = linked
+		? "断开【批量图片】外部链接，并记住来源节点和插槽。"
+		: "恢复上次断开的【批量图片】外部链接。";
+	button.style.borderColor = linked ? "#38bdf8" : "#f59e0b";
+	const background = linked
+		? "linear-gradient(135deg, #075985, #0284c7)"
+		: "linear-gradient(135deg, #4a2f08, #b45309)";
+	const hoverBackground = linked
+		? "linear-gradient(135deg, #0284c7, #38bdf8)"
+		: "linear-gradient(135deg, #b45309, #d97706)";
+	button.style.background = background;
+	button.__gjjLazyDefaultBg = background;
+	button.__gjjLazyHoverBg = hoverBackground;
+}
+
+function toggleBatchImageExternalLink(node) {
+	const slot = inputSlotIndex(node, PRIMARY_IMAGE_INPUT);
+	if (slot < 0) {
+		return false;
+	}
+	if (inputLinked(node, PRIMARY_IMAGE_INPUT)) {
+		rememberBatchImageLink(node);
+		node.disconnectInput?.(slot);
+	} else {
+		const memory = batchImageLinkMemory(node);
+		const origin = memory ? app.graph?.getNodeById?.(Number(memory.origin_id)) : null;
+		if (!origin || !Number.isFinite(Number(memory?.origin_slot))) {
+			return false;
+		}
+		origin.connect?.(Number(memory.origin_slot), node, slot);
+		delete node.properties[BATCH_IMAGE_LINK_MEMORY_PROPERTY];
+	}
+	node.graph?.setDirtyCanvas?.(true, true);
+	app.graph?.change?.();
+	setBatchLinkButtonState(node);
+	return true;
 }
 
 function installModelHelpProvider(node) {
@@ -948,6 +1067,7 @@ function applySettingsVisibility(node) {
 	}
 	setDomWidgetHidden(node.__gjjLoraWidget, node.__gjjLoraContainer, !open);
 	updateSettingsButtonState(node);
+	setBatchLinkButtonState(node);
 	orderLazyWidgets(node);
 	updateTemplateSourcePanel(node, TEMPLATE_SOURCE_FIELDS);
 	GJJ_Utils.refreshNode(node);
@@ -1420,6 +1540,39 @@ function preferredValue(values, desired) {
 		}
 	}
 	return best || list[0] || wanted;
+}
+
+function resolveLoraValue(values, desired) {
+	const list = Array.isArray(values) ? values.map((item) => String(item ?? "")).filter(Boolean) : [];
+	const wanted = String(desired || "").trim();
+	if (!wanted) {
+		return "";
+	}
+	if (list.includes(wanted)) {
+		return wanted;
+	}
+	const wantedBase = wanted.split(/[\\/]/).pop() || wanted;
+	const wantedCanonical = canonicalizeText(wantedBase);
+	let best = "";
+	let bestScore = -1;
+	for (const candidate of list) {
+		const candidateBase = candidate.split(/[\\/]/).pop() || candidate;
+		const candidateCanonical = canonicalizeText(candidateBase);
+		const fullCanonical = canonicalizeText(candidate);
+		let score = -1;
+		if (candidateBase === wantedBase) {
+			score = 1000;
+		} else if (candidateCanonical === wantedCanonical || fullCanonical === wantedCanonical) {
+			score = 900;
+		} else if (wantedCanonical && (candidateCanonical.includes(wantedCanonical) || fullCanonical.includes(wantedCanonical))) {
+			score = 700 - Math.max(0, candidateCanonical.length - wantedCanonical.length);
+		}
+		if (score > bestScore) {
+			bestScore = score;
+			best = candidate;
+		}
+	}
+	return best || wanted;
 }
 
 function getImageInputs(node) {
@@ -2116,6 +2269,7 @@ function openLazyTestDialog(node, testButton, generateButton) {
 
 function createButtons(node) {
 	const container = document.createElement("div");
+	node.__gjjLazyButtonsContainer = container;
 	container.style.cssText = [
 		"display:flex",
 		"flex-direction:row",
@@ -2150,6 +2304,7 @@ function createButtons(node) {
 		"line-height:1.15",
 		"text-align:center",
 		"min-width:0",
+		"flex:0 0 auto",
 	];
 	// 刷新Lora按钮
 	const refreshButton = document.createElement("button");
@@ -2161,8 +2316,23 @@ function createButtons(node) {
 		"border:1px solid #3b82f6",
 		"background:linear-gradient(135deg, #1e3a5f, #1e40af)",
 		"color:#e0e7ff",
-		"flex:1px",
 	].join(";");
+
+	const batchLinkButton = document.createElement("button");
+	batchLinkButton.type = "button";
+	batchLinkButton.textContent = "🔗";
+	batchLinkButton.title = "断开或恢复【批量图片】外部链接";
+	batchLinkButton.setAttribute("aria-label", "批量图片外部链接开关");
+	batchLinkButton.style.cssText = [
+		...sharedButtonStyle,
+		"padding:0 9px",
+		"border:1px solid #38bdf8",
+		"background:linear-gradient(135deg, #075985, #0284c7)",
+		"color:#e0f2fe",
+		"font-size:15px",
+		"display:none",
+	].join(";");
+	node.__gjjBatchImageLinkButton = batchLinkButton;
 
 	const translateButton = document.createElement("button");
 	translateButton.type = "button";
@@ -2175,7 +2345,6 @@ function createButtons(node) {
 		`border:1px solid ${TRANSLATE_BUTTON_STYLES.off.border}`,
 		`background:${TRANSLATE_BUTTON_STYLES.off.bg}`,
 		`color:${TRANSLATE_BUTTON_STYLES.off.color}`,
-		"flex:0 0 34px",
 		"font-size:15px",
 	].join(";");
 	node.__gjjLazyTranslateButton = translateButton;
@@ -2191,7 +2360,6 @@ function createButtons(node) {
 		`border:1px solid ${KEEP_MODEL_BUTTON_STYLES.off.border}`,
 		`background:${KEEP_MODEL_BUTTON_STYLES.off.bg}`,
 		`color:${KEEP_MODEL_BUTTON_STYLES.off.color}`,
-		"flex:0 0 34px",
 		"font-size:15px",
 	].join(";");
 	node.__gjjKeepModelButton = keepModelButton;
@@ -2207,7 +2375,6 @@ function createButtons(node) {
 		"border:1px solid #f59e0b",
 		"background:linear-gradient(135deg, #4a2f08, #b45309)",
 		"color:#fffbeb",
-		"flex:0 0 34px",
 		"font-size:15px",
 	].join(";");
 
@@ -2221,7 +2388,6 @@ function createButtons(node) {
 		"border:1px solid #10b981",
 		"background:linear-gradient(135deg, #064e3b, #059669)",
 		"color:#a7f3d0",
-		"flex:1 1 82px",
 	].join(";");
 
 	const settingsButton = document.createElement("button");
@@ -2233,10 +2399,10 @@ function createButtons(node) {
 		"border:1px solid #55636f",
 		"background:linear-gradient(135deg, #1f2933, #374151)",
 		"color:#e5edf2",
-		"flex:0 0 74px",
 	].join(";");
 	node.__gjjSettingsButton = settingsButton;
 	const templateButton = createTemplateSourceButton(node, TEMPLATE_SOURCE_FIELDS, sharedButtonStyle);
+	templateButton.style.flex = "0 0 auto";
 
 	// 按钮悬停效果函数
 	function setupButtonHover(btn, defaultBg, hoverBg) {
@@ -2304,7 +2470,16 @@ function createButtons(node) {
 		refreshButton.style.opacity = "0.7";
 
 		try {
-			await refreshLoraOptions(node, true);
+			await refreshLoraOptions(node, false);
+			resolveLoraRowsToAvailable(node);
+			node.properties = node.properties || {};
+			node.properties[LAST_PRESET_KEY] = "";
+			applyPreset(node, true);
+			node.properties[SETTINGS_OPEN_PROPERTY] = true;
+			stabilizeNode(node, true);
+			applySettingsVisibility(node);
+			scheduleNativePreviewClear(node);
+			GJJ_Utils.refreshNode(node);
 			refreshButton.innerHTML = "✅ 已刷新";
 			refreshButton.style.background = "linear-gradient(135deg, #064e3b, #059669)";
 			refreshButton.style.borderColor = "#10b981";
@@ -2398,13 +2573,21 @@ function createButtons(node) {
 		openLazyTestDialog(node, testButton, generateButton);
 	}
 
+	function handleBatchLink(event) {
+		protectEvent(event);
+		toggleBatchImageExternalLink(node);
+		stabilizeNode(node, false);
+	}
+
 	setupButtonHover(refreshButton, "linear-gradient(135deg, #1e3a5f, #1e40af)", "linear-gradient(135deg, #1e40af, #3b82f6)");
+	setupButtonHover(batchLinkButton, "linear-gradient(135deg, #075985, #0284c7)", "linear-gradient(135deg, #0284c7, #38bdf8)");
 	setupButtonHover(translateButton, TRANSLATE_BUTTON_STYLES.off.bg, TRANSLATE_BUTTON_STYLES.off.hover);
 	setupButtonHover(keepModelButton, KEEP_MODEL_BUTTON_STYLES.off.bg, KEEP_MODEL_BUTTON_STYLES.off.hover);
 	setupButtonHover(testButton, "linear-gradient(135deg, #4a2f08, #b45309)", "linear-gradient(135deg, #b45309, #d97706)");
 	setupButtonHover(generateButton, "linear-gradient(135deg, #064e3b, #059669)", "linear-gradient(135deg, #059669, #10b981)");
 	setupButtonHover(settingsButton, "linear-gradient(135deg, #1f2933, #374151)", "linear-gradient(135deg, #374151, #4b5563)");
 	setupButtonEvents(refreshButton, handleRefresh);
+	setupButtonEvents(batchLinkButton, handleBatchLink);
 	setupButtonEvents(translateButton, handleTranslate);
 	setupButtonEvents(keepModelButton, handleKeepModel);
 	setupButtonEvents(testButton, handleTest);
@@ -2413,8 +2596,10 @@ function createButtons(node) {
 	applyLazyTranslateButtonState(node);
 	applyKeepModelButtonState(node);
 	updateSettingsButtonState(node);
+	setBatchLinkButtonState(node);
 
 	container.appendChild(refreshButton);
+	container.appendChild(batchLinkButton);
 	container.appendChild(translateButton);
 	container.appendChild(keepModelButton);
 	container.appendChild(testButton);
@@ -2424,9 +2609,13 @@ function createButtons(node) {
 	return container;
 }
 
-function lazyButtonsHeight(width) {
+function lazyButtonsHeight(width, node = null) {
+	const measured = Number(node?.__gjjLazyButtonsContainer?.scrollHeight || 0);
+	if (measured > 0) {
+		return measured;
+	}
 	const availableWidth = Math.max(120, Number(width || 260));
-	const buttonWidths = [82, 34, 34, 34, 82, 34, 74];
+	const buttonWidths = [34, 34, 34, 34, 34, 86, 34, 74];
 	const gap = 6;
 	let rows = 1;
 	let rowWidth = 0;
@@ -2732,6 +2921,36 @@ function replaceLoraRows(node, rows) {
 	renderLoraUi(node);
 }
 
+function availableLoraValues(node) {
+	const state = ensureLoraNodeState(node);
+	return (state.options || []).map((option) => String(option?.value || "")).filter(Boolean);
+}
+
+function resolveLoraRowsToAvailable(node) {
+	const state = ensureLoraNodeState(node);
+	const values = availableLoraValues(node);
+	if (!values.length) {
+		return false;
+	}
+	let changed = false;
+	state.rows = state.rows.map((row) => {
+		const name = String(row?.name || "");
+		const resolved = resolveLoraValue(values, name);
+		if (resolved !== name) {
+			changed = true;
+		}
+		return {
+			enabled: row?.enabled !== false,
+			name: resolved,
+			strength: normalizeStrength(row?.strength, 1.0),
+		};
+	});
+	if (changed) {
+		persistLoraRows(node, state.rows);
+	}
+	return changed;
+}
+
 function clearPresetLoras(node) {
 	replaceLoraRows(node, [{ ...DEFAULT_ROW }]);
 }
@@ -2795,18 +3014,19 @@ function applyPreset(node, force = false) {
 	}
 
 	let newLoraRows = [];
+	const loraValues = availableLoraValues(node);
 	if (hasPresetLora) {
 		if (preset.lora1 && String(preset.lora1).trim()) {
 			newLoraRows.push({
 				enabled: preset.lora1AutoEnabled !== false,
-				name: String(preset.lora1),
+				name: resolveLoraValue(loraValues, preset.lora1),
 				strength: normalizeStrength(preset.lora1Strength, 1.0),
 			});
 		}
 		if (preset.lora2 && String(preset.lora2).trim()) {
 			newLoraRows.push({
 				enabled: true,
-				name: String(preset.lora2),
+				name: resolveLoraValue(loraValues, preset.lora2),
 				strength: normalizeStrength(preset.lora2Strength, 0.7),
 			});
 		}
@@ -3724,6 +3944,7 @@ async function refreshLoraOptions(node, rerender = true) {
 	state.options = options;
 	state.metadata = metadata.metadata;
 	state.previews = metadata.previews;
+	resolveLoraRowsToAvailable(node);
 	if (rerender) {
 		renderLoraUi(node);
 	}
@@ -3913,9 +4134,9 @@ function stabilizeNode(node, forcePreset = false) {
 		node.__gjjExecuteButtonWidget = node.addDOMWidget(EXECUTE_BUTTON_NAME, "HTML", buttonsContainer, { serialize: false });
 		node.__gjjExecuteButtonWidget.computeSize = (width) => [
 			Math.round(Number(width || node.size?.[0] || 260)),
-			lazyButtonsHeight(width || node.size?.[0]),
+			lazyButtonsHeight(width || node.size?.[0], node),
 		];
-		node.__gjjExecuteButtonWidget.getHeight = () => lazyButtonsHeight(node.size?.[0]);
+		node.__gjjExecuteButtonWidget.getHeight = () => lazyButtonsHeight(node.size?.[0], node);
 	}
 
 	setupLoraUi(node);
@@ -4135,6 +4356,7 @@ app.registerExtension({
 			if (images) {
 				updateImagePreview(this, images);
 			}
+			clearExecutedPreviewPayload(message);
 			scheduleNativePreviewClear(this);
 
 			const effectiveParams = Array.isArray(message?.effective_params)

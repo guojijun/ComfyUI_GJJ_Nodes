@@ -139,6 +139,16 @@ def _gjj_default_user_settings() -> dict:
 			"shadowY": 4.0,
 			"align": "居中",
 		},
+		"character_library": {
+			"matting_method": "RMBG1.4",
+			"multiview_unet": "qwen_image_edit_2511_fp8mixed.safetensors",
+			"multiview_lora_1": "QWEN/lighting/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+			"multiview_lora_2": "qwen-image-edit-2511-multiple-angles-lora.safetensors",
+			"annotate_clip": "qwen3.5_4b_fp8_mixed.safetensors",
+		},
+		"scene_library": {
+			"annotate_clip": "qwen3.5_4b_fp8_mixed.safetensors",
+		},
 		"ollama_assistant": ollama_assistant,
 		"nodes": {},
 		"user": {},
@@ -207,6 +217,36 @@ def _gjj_workflow_screenshot_settings() -> dict:
 		"filter_mode": str(section.get("filter_mode") or "openable"),
 		"search_text": str(section.get("search_text") or ""),
 		"page_size": page_size,
+	}
+
+def _gjj_section_settings(section: str) -> dict:
+	settings = _gjj_read_user_settings()
+	value = settings.get(section) if isinstance(settings, dict) else {}
+	return value if isinstance(value, dict) else {}
+
+def _gjj_model_filename_choices(category: str) -> list[str]:
+	try:
+		import folder_paths
+		items = folder_paths.get_filename_list(category) or []
+	except Exception:
+		items = []
+	result = []
+	seen = set()
+	for item in items:
+		text = str(item or "").replace("\\", "/").strip()
+		key = text.lower()
+		if not text or key in seen:
+			continue
+		seen.add(key)
+		result.append(text)
+	return result
+
+def _gjj_library_model_choices() -> dict:
+	return {
+		"text_encoders": _gjj_model_filename_choices("text_encoders"),
+		"diffusion_models": _gjj_model_filename_choices("diffusion_models"),
+		"loras": _gjj_model_filename_choices("loras"),
+		"matting_methods": ["RMBG1.4"],
 	}
 
 def _register_gjj_user_settings_api():
@@ -1157,8 +1197,12 @@ def _register_gjj_character_library_api():
 			)
 		except Exception as exc:
 			raise RuntimeError(f"加载综合抠图运行时失败：{exc}") from exc
+		character_settings = _gjj_section_settings("character_library")
+		matting_method = str(character_settings.get("matting_method") or METHOD_RMBG14)
+		if matting_method not in {METHOD_RMBG14}:
+			matting_method = METHOD_RMBG14
 		try:
-			_resolve_model_path(METHOD_RMBG14, notify_missing=False)
+			_resolve_model_path(matting_method, notify_missing=False)
 		except Exception as exc:
 			raise RuntimeError(
 				f"未找到 RMBG1.4 抠图模型：models/RMBG/rmbg1.4.safetensors。{exc}\n{MODEL_DOWNLOAD_URL}"
@@ -1173,7 +1217,7 @@ def _register_gjj_character_library_api():
 				pass
 		try:
 			output = GJJ_ComprehensiveMatting().remove_background(
-				matting_method=METHOD_RMBG14,
+				matting_method=matting_method,
 				background="透明",
 				device="自动",
 				process_res=1024,
@@ -1371,30 +1415,41 @@ def _register_gjj_character_library_api():
 
 	@server.routes.get("/gjj/character_library/model_tree")
 	async def gjj_character_library_model_tree(_request):
+		settings = _gjj_section_settings("character_library")
+		choices = _gjj_library_model_choices()
 		return web.json_response({
 			"ok": True,
 			"title": "角色库模型树",
+			"settings_section": "character_library",
+			"settings": settings,
+			"controls": [
+				{"key": "matting_method", "label": "抠图模型", "options": choices.get("matting_methods") or ["RMBG1.4"]},
+				{"key": "multiview_unet", "label": "多视图 UNET", "options": choices.get("diffusion_models") or []},
+				{"key": "multiview_lora_1", "label": "Lightning LoRA", "options": choices.get("loras") or []},
+				{"key": "multiview_lora_2", "label": "多角度 LoRA", "options": choices.get("loras") or []},
+				{"key": "annotate_clip", "label": "备注/性别文本编码器", "options": choices.get("text_encoders") or []},
+			],
 			"groups": [
 				{
 					"name": "🪄 抠图",
 					"items": [
-						{"label": "RMBG1.4", "path": "models/RMBG/rmbg1.4.safetensors"},
+						{"label": f"抠图模型：{settings.get('matting_method') or 'RMBG1.4'}", "path": "models/RMBG/rmbg1.4.safetensors"},
 					],
 				},
 				{
 					"name": "🚀 生成多视图",
 					"items": [
-						{"label": "UNET", "path": "models/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors"},
+						{"label": "UNET", "path": f"models/diffusion_models/{settings.get('multiview_unet') or 'qwen_image_edit_2511_fp8mixed.safetensors'}"},
 						{"label": "CLIP / VL", "path": "models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors"},
 						{"label": "VAE", "path": "models/vae/qwen_image_vae.safetensors"},
-						{"label": "Lightning LoRA", "path": "models/loras/QWEN/lighting/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"},
-						{"label": "多角度 LoRA", "path": "models/loras/qwen-image-edit-2511-multiple-angles-lora.safetensors"},
+						{"label": "Lightning LoRA", "path": f"models/loras/{settings.get('multiview_lora_1') or 'QWEN/lighting/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors'}"},
+						{"label": "多角度 LoRA", "path": f"models/loras/{settings.get('multiview_lora_2') or 'qwen-image-edit-2511-multiple-angles-lora.safetensors'}"},
 					],
 				},
 				{
 					"name": "🧠 备注/性别推理",
 					"items": [
-						{"label": "Gemma / Qwen VL 文本编码器", "path": "models/text_encoders/qwen3.5_4b_fp8_mixed.safetensors"},
+						{"label": "Gemma / Qwen VL 文本编码器", "path": f"models/text_encoders/{settings.get('annotate_clip') or 'qwen3.5_4b_fp8_mixed.safetensors'}"},
 					],
 				},
 				{
@@ -1691,17 +1746,18 @@ def _register_gjj_character_library_api():
 			output_labels = requested_labels or ["大头照", "正面", "45度", "背面"]
 			action_prompts = "\n".join([multiview_prompt_for_label(label) for label in output_labels])
 			lora_models = _safe_filename_list("loras") or []
+			character_settings = _gjj_section_settings("character_library")
 			def lora_exists(name: str) -> bool:
 				target = os.path.basename(str(name or "").replace("\\", "/")).lower()
 				return bool(target) and any(os.path.basename(str(item or "").replace("\\", "/")).lower() == target for item in lora_models)
 			lora_1_name = _pick_available_lora_name(
 				lora_models,
-				DEFAULT_QWEN2511_LIGHTNING_LORA,
+				str(character_settings.get("multiview_lora_1") or DEFAULT_QWEN2511_LIGHTNING_LORA),
 				DEFAULT_QWEN2511_LIGHTNING_LORA,
 			)
 			lora_2_name = _pick_available_lora_name(
 				lora_models,
-				DEFAULT_MULTI_ANGLES_LORA,
+				str(character_settings.get("multiview_lora_2") or DEFAULT_MULTI_ANGLES_LORA),
 				DEFAULT_MULTI_ANGLES_LORA,
 			)
 			if not lora_exists(lora_1_name) or not lora_exists(lora_2_name):
@@ -1716,12 +1772,12 @@ def _register_gjj_character_library_api():
 				except Exception:
 					pass
 			try:
-				_collage, batch_images = GJJ_CharacterMultiViewStudio().generate(
+				multiview_result = GJJ_CharacterMultiViewStudio().generate(
 					main_image=main_image,
 					base_prompt=identity_prompt,
 					negative_prompt=DEFAULT_NEGATIVE_PROMPT,
 					action_prompts=action_prompts,
-					unet_name=DEFAULT_QWEN2511_UNET,
+					unet_name=str(character_settings.get("multiview_unet") or DEFAULT_QWEN2511_UNET),
 					lora_1_name=lora_1_name,
 					lora_1_strength=1.0,
 					lora_2_name=lora_2_name,
@@ -1732,6 +1788,10 @@ def _register_gjj_character_library_api():
 					extra_pnginfo={},
 					unique_id=context_unique_id,
 				)
+				if isinstance(multiview_result, dict):
+					_collage, batch_images = multiview_result.get("result", (None, None))
+				else:
+					_collage, batch_images = multiview_result
 			finally:
 				if not had_last_prompt_id and hasattr(server, "last_prompt_id"):
 					try:
@@ -1766,7 +1826,8 @@ def _register_gjj_character_library_api():
 			requested_ids = data.get("ids") if isinstance(data.get("ids"), list) else []
 			requested_ids = [clean_key(item, "") for item in requested_ids]
 			requested_ids = [item for item in requested_ids if item]
-			clip_name = str(data.get("clip_name") or "qwen3.5_4b_fp8_mixed.safetensors")
+			character_settings = _gjj_section_settings("character_library")
+			clip_name = str(data.get("clip_name") or character_settings.get("annotate_clip") or "qwen3.5_4b_fp8_mixed.safetensors")
 			try:
 				from .nodes.gjj_comprehensive_matting import _pil_list_to_tensor
 				from .nodes.gjj_gemma_text_generate import (
@@ -2858,6 +2919,8 @@ def _register_gjj_scene_library_api():
 
 	@server.routes.get("/gjj/scene_library/model_tree")
 	async def gjj_scene_library_model_tree(_request):
+		settings = _gjj_section_settings("scene_library")
+		choices = _gjj_library_model_choices()
 		def model_item_path(item: dict) -> str:
 			base = str(item.get("path") or "").replace("\\", "/").rstrip("/")
 			filename = str(item.get("filename") or "").replace("\\", "/").strip("/")
@@ -2874,6 +2937,11 @@ def _register_gjj_scene_library_api():
 		return web.json_response({
 			"ok": True,
 			"title": "场景库依赖目录树",
+			"settings_section": "scene_library",
+			"settings": settings,
+			"controls": [
+				{"key": "annotate_clip", "label": "自动打标文本编码器", "options": choices.get("text_encoders") or []},
+			],
 			"groups": [
 				{
 					"name": "🌏 360 场景生成",
@@ -2882,7 +2950,7 @@ def _register_gjj_scene_library_api():
 				{
 					"name": "🧠 自动打标",
 					"items": [
-						{"label": "Gemma / Qwen VL 文本编码器", "path": "models/text_encoders/qwen3.5_4b_fp8_mixed.safetensors"},
+						{"label": "Gemma / Qwen VL 文本编码器", "path": f"models/text_encoders/{settings.get('annotate_clip') or 'qwen3.5_4b_fp8_mixed.safetensors'}"},
 					],
 				},
 				{
@@ -3058,7 +3126,8 @@ def _register_gjj_scene_library_api():
 			requested_ids = data.get("ids") if isinstance(data.get("ids"), list) else []
 			requested_ids = [clean_key(item, "") for item in requested_ids]
 			requested_ids = [item for item in requested_ids if item]
-			clip_name = str(data.get("clip_name") or "qwen3.5_4b_fp8_mixed.safetensors")
+			scene_settings = _gjj_section_settings("scene_library")
+			clip_name = str(data.get("clip_name") or scene_settings.get("annotate_clip") or "qwen3.5_4b_fp8_mixed.safetensors")
 			progress_id = clean_key(data.get("unique_id") or "", "")
 			def send_scene_progress(current: int, total: int, text: str) -> None:
 				if not progress_id:

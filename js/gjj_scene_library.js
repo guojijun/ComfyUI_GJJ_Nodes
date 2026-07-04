@@ -678,6 +678,50 @@ import { api } from "/scripts/api.js";
 		head.append(title, spacer, button("❌关闭", "关闭", "gjj-sl-btn", () => backdrop.remove()));
 		const body = document.createElement("div");
 		body.className = "gjj-sl-model-body";
+		if (data.settings_section && Array.isArray(data.controls) && data.controls.length) {
+			const settingsGroup = document.createElement("div");
+			settingsGroup.className = "gjj-sl-model-group";
+			const settingsTitle = document.createElement("div");
+			settingsTitle.className = "gjj-sl-model-group-title";
+			settingsTitle.textContent = "⚙️ 模型设置";
+			settingsGroup.appendChild(settingsTitle);
+			const values = { ...(data.settings || {}) };
+			for (const control of data.controls) {
+				const row = document.createElement("label");
+				row.style.cssText = "display:grid;grid-template-columns:150px minmax(0,1fr);align-items:center;gap:8px;margin:6px 0;color:#dce7e2;font:12px/1.35 sans-serif;";
+				const label = document.createElement("span");
+				label.textContent = control.label || control.key;
+				const select = document.createElement("select");
+				select.className = "gjj-sl-input";
+				select.style.cssText = "min-width:0;";
+				const current = String(values[control.key] || "");
+				const options = Array.isArray(control.options) ? control.options.slice() : [];
+				if (current && !options.includes(current)) options.unshift(current);
+				for (const optionValue of options) {
+					const option = document.createElement("option");
+					option.value = String(optionValue || "");
+					option.textContent = String(optionValue || "");
+					if (option.value === current) option.selected = true;
+					select.appendChild(option);
+				}
+				select.addEventListener("change", () => {
+					values[control.key] = select.value;
+				});
+				row.append(label, select);
+				settingsGroup.appendChild(row);
+			}
+			const save = button("保存设置", "保存场景库模型设置", "gjj-sl-btn", async () => {
+				await apiJson("/gjj/user_settings", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ section: data.settings_section, values }),
+				});
+				setStatus("场景库模型设置已保存");
+				await showModelTree();
+			});
+			settingsGroup.appendChild(save);
+			body.appendChild(settingsGroup);
+		}
 		for (const group of data.groups || []) {
 			const groupEl = document.createElement("div");
 			groupEl.className = "gjj-sl-model-group";
@@ -869,7 +913,6 @@ import { api } from "/scripts/api.js";
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
-					clip_name: "qwen3.5_4b_fp8_mixed.safetensors",
 					ids: Array.from(idSet),
 					unique_id: state.annotateNodeId,
 				}),
@@ -1613,6 +1656,7 @@ import { api } from "/scripts/api.js";
 		head.append(drag, title, spacer, importButton);
 		head.appendChild(button("⬆", "导入场景文件", "gjj-sl-btn gjj-sl-icon", () => uploadAsset(selectedScene()).catch((error) => setStatus(error.message))));
 		head.appendChild(annotateButton([], "全库场景"));
+		head.appendChild(button("⚙️", "查看并设置场景库使用的模型", "gjj-sl-btn gjj-sl-icon", () => showModelTree().catch((error) => setStatus(error.message))));
 		head.appendChild(button("❓", "查看场景库依赖目录树", "gjj-sl-btn gjj-sl-icon", () => showModelTree().catch((error) => setStatus(error.message))));
 		const search = document.createElement("input");
 		search.className = "gjj-sl-search";

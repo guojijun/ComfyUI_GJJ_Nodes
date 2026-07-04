@@ -3,15 +3,33 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
+from PIL import Image, ImageOps
+
+try:
+    import folder_paths
+except Exception:
+    folder_paths = None
+
+try:
+    from aiohttp import web
+    from server import PromptServer
+except Exception:
+    web = None
+    PromptServer = None
 
 
 REGION_TYPE = "GJJ_REGION"
+REGION_CROP_MEDIA_TYPE = "GJJ_BATCH_IMAGE,IMAGE"
+REGION_CROP_SETTINGS_KEY = "region_crop"
+REGION_CROP_SETTINGS_DEFAULTS = {"total_pixels": 10, "align_multiple": 8}
+USER_SETTINGS_PATH = Path(__file__).resolve().parents[1] / "presets" / "gjj_user_settings.json"
 
 
 def _normalize_image(image: torch.Tensor) -> torch.Tensor:
@@ -21,9 +39,80 @@ def _normalize_image(image: torch.Tensor) -> torch.Tensor:
         image = image.unsqueeze(0)
     if image.ndim != 4:
         raise ValueError("图像维度不正确。")
+    if image.shape[-1] not in (1, 2, 3, 4) and image.shape[1] in (1, 2, 3, 4):
+        image = image.permute(0, 2, 3, 1)
     if image.shape[-1] == 1:
         image = image.repeat(1, 1, 1, 3)
     return image[..., :3].float().clamp(0, 1)
+
+
+def _component_value(value: Any, key: str) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def _batch_image_items(value: Any) -> list[torch.Tensor]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        items: list[torch.Tensor] = []
+        for item in value:
+            items.extend(_batch_image_items(item))
+        return items
+    source = value
+    if hasattr(value, "get_components"):
+        try:
+            components = value.get_components()
+            source = _component_value(components, "images") or _component_value(components, "image") or value
+        except Exception:
+            source = value
+    elif not isinstance(value, torch.Tensor):
+        for key in ("images", "image", "frames", "samples", "batch", "items", "value"):
+            candidate = _component_value(value, key)
+            if candidate is not None:
+                source = candidate
+                break
+    if source is not value:
+        return _batch_image_items(source)
+    tensor = _normalize_image(source)
+    return [tensor[index:index + 1].contiguous() for index in range(int(tensor.shape[0]))]
+
+
+def _pad_images_to_common_size(images: list[torch.Tensor]) -> torch.Tensor:
+    if not images:
+        raise RuntimeError("区域裁切失败：没有可输出的图像。")
+    target_h = max(int(item.shape[1]) for item in images)
+    target_w = max(int(item.shape[2]) for item in images)
+    target_device = torch.device("cpu") if any(item.device.type == "cpu" for item in images) else images[0].device
+    padded: list[torch.Tensor] = []
+    for item in images:
+        item = item.to(device=target_device, dtype=torch.float32, non_blocking=True, copy=False).contiguous()
+        pad_h = target_h - int(item.shape[1])
+        pad_w = target_w - int(item.shape[2])
+        if pad_h > 0 or pad_w > 0:
+            item = F.pad(item.permute(0, 3, 1, 2), (0, pad_w, 0, pad_h), value=0.0).permute(0, 2, 3, 1)
+        padded.append(item.contiguous())
+    return torch.cat(padded, dim=0)
+
+
+def _pad_masks_to_common_size(masks: list[torch.Tensor]) -> torch.Tensor:
+    if not masks:
+        raise RuntimeError("区域裁切失败：没有可输出的遮罩。")
+    target_h = max(int(item.shape[1]) for item in masks)
+    target_w = max(int(item.shape[2]) for item in masks)
+    target_device = torch.device("cpu") if any(item.device.type == "cpu" for item in masks) else masks[0].device
+    padded: list[torch.Tensor] = []
+    for item in masks:
+        item = item.to(device=target_device, dtype=torch.float32, non_blocking=True, copy=False).contiguous()
+        pad_h = target_h - int(item.shape[1])
+        pad_w = target_w - int(item.shape[2])
+        if pad_h > 0 or pad_w > 0:
+            item = F.pad(item, (0, pad_w, 0, pad_h), value=0.0)
+        padded.append(item.contiguous())
+    return torch.cat(padded, dim=0)
 
 
 def _normalize_mask(mask: torch.Tensor | None, height: int, width: int) -> torch.Tensor:
@@ -46,6 +135,30 @@ def _tensor_to_pil(image: torch.Tensor) -> Image.Image:
 def _pil_to_tensor(image: Image.Image) -> torch.Tensor:
     array = np.asarray(image.convert("RGB")).astype(np.float32) / 255.0
     return torch.from_numpy(array).unsqueeze(0)
+
+
+def _input_image_files() -> list[str]:
+    if folder_paths is None:
+        return [""]
+    input_dir = folder_paths.get_input_directory()
+    items: list[str] = [""]
+    for root, _, files in os.walk(input_dir):
+        rel_root = os.path.relpath(root, input_dir)
+        for name in files:
+            if name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")):
+                items.append(name if rel_root == "." else f"{rel_root.replace(os.sep, '/')}/{name}")
+    return sorted(set(items), key=lambda item: item.lower())
+
+
+def _load_input_image(image_file: str) -> torch.Tensor:
+    if folder_paths is None:
+        raise RuntimeError("当前环境无法访问 ComfyUI 的 input 目录。")
+    if not str(image_file or "").strip():
+        raise RuntimeError("请连接输入图像，或点击 📁 打开一张图片。")
+    image_path = folder_paths.get_annotated_filepath(image_file)
+    with Image.open(image_path) as img:
+        img = ImageOps.exif_transpose(img)
+        return _pil_to_tensor(img)
 
 
 def _image_preview_data_url(image: torch.Tensor, max_edge: int = 1024) -> str:
@@ -76,6 +189,89 @@ def _resize_image(image: torch.Tensor, width: int, height: int, mode: str) -> to
         fitted = Image.new("RGB", (width, height), (0, 0, 0))
         fitted.paste(resized, ((width - new_w) // 2, (height - new_h) // 2))
     return _pil_to_tensor(fitted)
+
+
+def _resize_tensor_to(image: torch.Tensor, width: int, height: int) -> torch.Tensor:
+    if int(image.shape[1]) == height and int(image.shape[2]) == width:
+        return image.contiguous()
+    tensor = image.permute(0, 3, 1, 2).to(dtype=torch.float32)
+    resized = F.interpolate(tensor, size=(height, width), mode="bicubic", align_corners=False, antialias=True)
+    return resized.permute(0, 2, 3, 1).clamp(0, 1).to(device=image.device, dtype=image.dtype).contiguous()
+
+
+def _align_size(value: int, align_multiple: int) -> int:
+    multiple = _power_of_two_align(align_multiple)
+    if multiple <= 1:
+        return max(1, int(value))
+    return max(multiple, int(round(max(1, value) / multiple)) * multiple)
+
+
+def _power_of_two_align(value: Any) -> int:
+    try:
+        raw = int(round(float(value or 1)))
+    except Exception:
+        raw = 1
+    raw = max(1, min(256, raw))
+    return min((1, 2, 4, 8, 16, 32, 64, 128, 256), key=lambda item: abs(item - raw))
+
+
+def _normalize_total_wan_pixels(value: Any) -> int:
+    try:
+        raw = int(round(float(value or REGION_CROP_SETTINGS_DEFAULTS["total_pixels"])))
+    except Exception:
+        raw = REGION_CROP_SETTINGS_DEFAULTS["total_pixels"]
+    raw = max(10, min(6400, raw))
+    return int(round(raw / 5.0) * 5)
+
+
+def _read_user_settings() -> dict[str, Any]:
+    if not USER_SETTINGS_PATH.exists():
+        return {}
+    try:
+        with USER_SETTINGS_PATH.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_user_settings(data: dict[str, Any]) -> None:
+    USER_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with USER_SETTINGS_PATH.open("w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=2)
+
+
+def _region_crop_user_settings() -> dict[str, int]:
+    data = _read_user_settings()
+    section = data.get(REGION_CROP_SETTINGS_KEY) if isinstance(data.get(REGION_CROP_SETTINGS_KEY), dict) else {}
+    return {
+        "total_pixels": _normalize_total_wan_pixels(section.get("total_pixels", REGION_CROP_SETTINGS_DEFAULTS["total_pixels"])),
+        "align_multiple": _power_of_two_align(section.get("align_multiple", REGION_CROP_SETTINGS_DEFAULTS["align_multiple"])),
+    }
+
+
+def _save_region_crop_user_settings(total_pixels: Any, align_multiple: Any) -> dict[str, int]:
+    data = _read_user_settings()
+    settings = {
+        "total_pixels": _normalize_total_wan_pixels(total_pixels),
+        "align_multiple": _power_of_two_align(align_multiple),
+    }
+    data[REGION_CROP_SETTINGS_KEY] = settings
+    if "version" not in data:
+        data["version"] = 1
+    _write_user_settings(data)
+    return settings
+
+
+def _scaled_crop_size(width: int, height: int, total_wan_pixels: float, scale_ratio: float, align_multiple: int) -> tuple[int, int]:
+    crop_w = max(1, int(width))
+    crop_h = max(1, int(height))
+    value = _normalize_total_wan_pixels(total_wan_pixels)
+    pixels = int(round(value * 10_000))
+    ratio = (float(pixels) / max(1.0, float(crop_w * crop_h))) ** 0.5 if pixels > 0 else 1.0
+    target_w = _align_size(int(round(crop_w * ratio)), align_multiple)
+    target_h = _align_size(int(round(crop_h * ratio)), align_multiple)
+    return target_w, target_h
 
 
 def _region_box(region: Any) -> tuple[int, int, int, int]:
@@ -258,38 +454,45 @@ class GJJ_RegionCrop:
     FUNCTION = "crop"
     DESCRIPTION = "按 GJJ 区域数据从图片中裁切局部图像。"
     SEARCH_ALIASES = ["region crop", "crop by region", "区域裁切", "局部裁切"]
-    RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("裁切图像", "裁切遮罩")
+    RETURN_TYPES = (REGION_CROP_MEDIA_TYPE, "MASK")
+    RETURN_NAMES = ("裁剪图像", "裁剪遮罩")
     OUTPUT_TOOLTIPS = ("区域内裁切出的图像。", "区域内的白色遮罩。")
 
     @classmethod
     def INPUT_TYPES(cls):
+        settings = _region_crop_user_settings()
         return {
             "required": {
-                "image": ("IMAGE", {"display_name": "输入图像", "tooltip": "需要裁切的图片。"}),
                 "crop_config": ("STRING", {"default": "", "multiline": False, "hidden": True, "display": "hidden", "display_name": "面板框选数据", "tooltip": "内部保存面板框选区域，通常无需手动编辑。"}),
+                "image_file": (_input_image_files(), {"image_upload": True, "display_name": "图片文件", "tooltip": "输入图像未连接时使用。点击节点内 📁 可从磁盘/网盘选择并上传到 ComfyUI/input。"}),
+                "total_pixels": ("INT", {"default": settings["total_pixels"], "min": 10, "max": 6400, "step": 5, "display": "slider", "display_name": "总像素(万)", "tooltip": "裁切后严格缩放到接近此总像素，单位为万像素。30 表示约 30 万像素；最低 10 万，步长 5 万。"}),
+                "scale_ratio": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 16.0, "step": 0.01, "display": "slider", "display_name": "缩放比例(兼容保留)", "tooltip": "兼容旧工作流保留；当前节点不再使用此参数。"}),
+                "align_multiple": ("INT", {"default": settings["align_multiple"], "min": 1, "max": 256, "step": 1, "display_name": "对齐倍数", "tooltip": "输出宽高按此倍数对齐，只使用 2 的 n 次方：1/2/4/8/16/32/64/128/256。默认 8。"}),
             },
             "optional": {
                 "region": (REGION_TYPE, {"display_name": "区域数据", "tooltip": "可选。连接后优先使用外部区域；不连接时使用面板内框选区域。"}),
+                "image": (REGION_CROP_MEDIA_TYPE, {"display_name": "输入图像", "tooltip": "可选。连接后优先使用外部图像；不连接时使用节点内 📁 选择的图片。"}),
             }
         }
 
-    def crop(self, image, crop_config="", region=None):
-        image = _normalize_image(image)
+    def _crop_one(self, image: torch.Tensor, crop_config="", total_pixels=0, scale_ratio=1.0, align_multiple=8, region=None):
         height = int(image.shape[1])
         width = int(image.shape[2])
         angle = 0.0
         if region is None:
-            region = _region_from_crop_config(crop_config, width, height)
-            angle = _normalize_angle(region.get("angle", 0.0))
-        x, y, w, h = _region_box(region)
+            active_region = _region_from_crop_config(crop_config, width, height)
+            angle = _normalize_angle(active_region.get("angle", 0.0))
+        else:
+            active_region = region
+            angle = _normalize_angle(active_region.get("angle", 0.0)) if isinstance(active_region, dict) else 0.0
+        x, y, w, h = _region_box(active_region)
         left = max(0, x)
         top = max(0, y)
         right = min(width, x + w)
         bottom = min(height, y + h)
         if right <= left or bottom <= top:
             raise ValueError("区域不在图片范围内。")
-        if abs(angle) > 0.001 and region is not None:
+        if abs(angle) > 0.001:
             crop_width = max(1, int(w))
             crop_height = max(1, int(h))
             cropped = _rotated_crop_tensor(image, int(x), int(y), crop_width, crop_height, angle)
@@ -297,24 +500,66 @@ class GJJ_RegionCrop:
             cropped = image[:, top:bottom, left:right, :].contiguous()
             crop_width = right - left
             crop_height = bottom - top
+        output_width, output_height = _scaled_crop_size(crop_width, crop_height, float(total_pixels), float(scale_ratio), int(align_multiple))
+        if output_width != int(cropped.shape[2]) or output_height != int(cropped.shape[1]):
+            cropped = _resize_tensor_to(cropped, output_width, output_height)
+            crop_width = output_width
+            crop_height = output_height
         mask = torch.ones((int(cropped.shape[0]), int(cropped.shape[1]), int(cropped.shape[2])), dtype=torch.float32, device=cropped.device)
+        return cropped, mask.contiguous(), {
+            "source_width": width,
+            "source_height": height,
+            "region_x": int(x),
+            "region_y": int(y),
+            "region_width": int(w),
+            "region_height": int(h),
+            "crop_angle": float(angle),
+            "crop_x": left,
+            "crop_y": top,
+            "crop_width": crop_width,
+            "crop_height": crop_height,
+            "output_width": int(cropped.shape[2]),
+            "output_height": int(cropped.shape[1]),
+        }
+
+    def crop(self, crop_config="", image_file="", total_pixels=0, scale_ratio=1.0, align_multiple=8, region=None, image=None):
+        images = _batch_image_items(image) if image is not None else [_load_input_image(image_file)]
+        cropped_items: list[torch.Tensor] = []
+        mask_items: list[torch.Tensor] = []
+        ui_items: list[dict[str, Any]] = []
+        for item in images:
+            cropped, mask, ui = self._crop_one(item, crop_config, total_pixels, scale_ratio, align_multiple, region)
+            cropped_items.append(cropped)
+            mask_items.append(mask)
+            ui_items.append(ui)
+        cropped_batch = _pad_images_to_common_size(cropped_items)
+        mask_batch = _pad_masks_to_common_size(mask_items)
+        first = ui_items[0]
         return {
             "ui": {
-                "preview_image": [_image_preview_data_url(image[0:1])],
-                "source_width": [width],
-                "source_height": [height],
-                "region_x": [int(x)],
-                "region_y": [int(y)],
-                "region_width": [int(w)],
-                "region_height": [int(h)],
-                "crop_angle": [float(angle)],
-                "crop_x": [left],
-                "crop_y": [top],
-                "crop_width": [crop_width],
-                "crop_height": [crop_height],
+                "source_width": [first["source_width"]],
+                "source_height": [first["source_height"]],
+                "region_x": [first["region_x"]],
+                "region_y": [first["region_y"]],
+                "region_width": [first["region_width"]],
+                "region_height": [first["region_height"]],
+                "crop_angle": [first["crop_angle"]],
+                "crop_x": [first["crop_x"]],
+                "crop_y": [first["crop_y"]],
+                "crop_width": [first["crop_width"]],
+                "crop_height": [first["crop_height"]],
+                "output_width": [int(cropped_batch.shape[2])],
+                "output_height": [int(cropped_batch.shape[1])],
+                "batch_count": [int(cropped_batch.shape[0])],
             },
-            "result": (cropped, mask.contiguous()),
+            "result": (cropped_batch, mask_batch),
         }
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, image_file="", **kwargs):
+        if image_file and folder_paths is not None and not folder_paths.exists_annotated_filepath(image_file):
+            return f"图片文件无效：{image_file}"
+        return True
 
 
 class GJJ_RegionComposite:
@@ -374,6 +619,24 @@ class GJJ_RegionComposite:
         }
 
 
+if PromptServer is not None and web is not None:
+    @PromptServer.instance.routes.get("/gjj/region_crop/settings")
+    async def gjj_region_crop_settings_get(request):
+        return web.json_response(_region_crop_user_settings())
+
+    @PromptServer.instance.routes.post("/gjj/region_crop/settings")
+    async def gjj_region_crop_settings_post(request):
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        settings = _save_region_crop_user_settings(
+            payload.get("total_pixels", REGION_CROP_SETTINGS_DEFAULTS["total_pixels"]) if isinstance(payload, dict) else REGION_CROP_SETTINGS_DEFAULTS["total_pixels"],
+            payload.get("align_multiple", REGION_CROP_SETTINGS_DEFAULTS["align_multiple"]) if isinstance(payload, dict) else REGION_CROP_SETTINGS_DEFAULTS["align_multiple"],
+        )
+        return web.json_response(settings)
+
+
 NODE_CLASS_MAPPINGS = {
     "GJJ_RegionBox": GJJ_RegionBox,
     "GJJ_GridRegionSelector": GJJ_GridRegionSelector,
@@ -383,6 +646,6 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "GJJ_RegionBox": "GJJ · 📐 区域框",
     "GJJ_GridRegionSelector": "GJJ · 🔲 网格区域选择",
-    "GJJ_RegionCrop": "GJJ · ✂️ 区域裁切",
+    "GJJ_RegionCrop": "GJJ · ✂️ 图片可视化区域裁切",
     "GJJ_RegionComposite": "GJJ · 🧱 区域图层合成",
 }

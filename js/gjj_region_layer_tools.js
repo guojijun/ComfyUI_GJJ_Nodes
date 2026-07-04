@@ -1,4 +1,5 @@
 import { app } from "/scripts/app.js";
+import { api } from "/scripts/api.js";
 
 const TARGET_BOX = "GJJ_RegionBox";
 const TARGET_CROP = "GJJ_RegionCrop";
@@ -7,7 +8,16 @@ const BOX_IMAGE_INPUT = "image";
 const CROP_IMAGE_INPUT = "image";
 const CROP_REGION_INPUT = "region";
 const CROP_CONFIG_WIDGET = "crop_config";
+const CROP_IMAGE_FILE_WIDGET = "image_file";
+const CROP_TOTAL_PIXELS_WIDGET = "total_pixels";
+const CROP_SCALE_RATIO_WIDGET = "scale_ratio";
+const CROP_ALIGN_MULTIPLE_WIDGET = "align_multiple";
 const CROP_PANEL_WIDGET = "gjj_region_crop_panel";
+const CROP_STORED_LINKS_PROPERTY = "__gjjRegionCropStoredLinks";
+const CROP_EXTRA_PORTS_PROPERTY = "__gjjRegionCropExtraPorts";
+const CROP_IMAGE_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
+const CROP_IMAGE_OUTPUT = "裁剪图像";
+const CROP_MASK_OUTPUT = "裁剪遮罩";
 const COMPOSITE_IMAGE_INPUT = "base_image";
 const CANVAS_W_WIDGET = "canvas_width";
 const CANVAS_H_WIDGET = "canvas_height";
@@ -23,6 +33,8 @@ const CROP_MOVE_HIT_RADIUS = 24;
 const CROP_ROTATE_HANDLE_SIZE = 10;
 const CROP_ROTATE_HIT_RADIUS = 18;
 const CROP_ROTATE_HANDLE_OFFSET = 28;
+const CROP_HIDDEN_WIDGETS = [CROP_CONFIG_WIDGET, CROP_IMAGE_FILE_WIDGET, CROP_TOTAL_PIXELS_WIDGET, CROP_SCALE_RATIO_WIDGET, CROP_ALIGN_MULTIPLE_WIDGET];
+const CROP_ALIGN_POWERS = [1, 2, 4, 8, 16, 32, 64, 128, 256];
 
 // ─── Helpers ───────────────────────────────────────────────────────
 
@@ -38,6 +50,15 @@ function getFirstValue(arr) {
 function refreshNode(node) {
 	node?.setDirtyCanvas?.(true, true);
 	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function clearCropNativePreview(node) {
+	if (!node) return;
+	node.imgs = null;
+	node.imageIndex = 0;
+	node.overIndex = null;
+	node.animatedImages = null;
+	node.currentImage = null;
 }
 
 function clamp(value, min, max) {
@@ -61,6 +82,23 @@ function safeJsonParse(value, fallback = {}) {
 function hasInputLink(node, name) {
 	const input = node.inputs?.find?.((i) => i.name === name);
 	return Boolean(input?.link);
+}
+
+function hasOutputLink(node, name) {
+	const output = node.outputs?.find?.((item) => item.name === name);
+	return Array.isArray(output?.links) && output.links.some((link) => link != null);
+}
+
+function removeInputSlot(node, index) {
+	if (!Array.isArray(node?.inputs) || index < 0 || index >= node.inputs.length) return;
+	try { node.disconnectInput?.(index); } catch (_) {}
+	try { node.removeInput?.(index); } catch (_) { node.inputs.splice(index, 1); }
+}
+
+function removeOutputSlot(node, index) {
+	if (!Array.isArray(node?.outputs) || index < 0 || index >= node.outputs.length) return;
+	try { node.disconnectOutput?.(index); } catch (_) {}
+	try { node.removeOutput?.(index); } catch (_) { node.outputs.splice(index, 1); }
 }
 
 function hideWidget(widget) {
@@ -110,6 +148,105 @@ function ensureCropConfigWidget(node) {
 	return widget;
 }
 
+function ensureCropHiddenWidgets(node) {
+	for (const name of CROP_HIDDEN_WIDGETS) {
+		const widget = getWidget(node, name);
+		if (widget) hideWidget(widget);
+		removeConvertedWidgetInput(node, name);
+	}
+	return getWidget(node, CROP_CONFIG_WIDGET);
+}
+
+function showCropExtraPorts(node) {
+	return node?.properties?.[CROP_EXTRA_PORTS_PROPERTY] === true;
+}
+
+function updateCropPortsButton(node) {
+	const button = node.__gjjRegionCropPortsButton;
+	if (!button) return;
+	const active = showCropExtraPorts(node);
+	button.style.opacity = active ? "1" : "0.62";
+	button.style.background = active ? "#1f3b35" : "#172429";
+	button.title = active ? "隐藏区域数据输入和裁剪遮罩输出。" : "显示区域数据输入和裁剪遮罩输出。";
+}
+
+function applyCropPorts(node, fromUser = false) {
+	if (!node) return;
+	node.properties ??= {};
+	if (!Array.isArray(node.inputs)) node.inputs = [];
+	if (!Array.isArray(node.outputs)) node.outputs = [];
+	const hasRegionLink = hasInputLink(node, CROP_REGION_INPUT);
+	const hasMaskLink = hasOutputLink(node, CROP_MASK_OUTPUT);
+	if (!showCropExtraPorts(node) && !fromUser && (hasRegionLink || hasMaskLink)) {
+		node.properties[CROP_EXTRA_PORTS_PROPERTY] = true;
+	}
+	const showExtra = showCropExtraPorts(node);
+
+	let imageInput = node.inputs.find((input) => input.name === CROP_IMAGE_INPUT);
+	if (!imageInput) {
+		node.addInput?.(CROP_IMAGE_INPUT, CROP_IMAGE_TYPE);
+		imageInput = node.inputs[node.inputs.length - 1];
+	}
+	if (imageInput) {
+		imageInput.name = CROP_IMAGE_INPUT;
+		imageInput.label = "输入图像";
+		imageInput.localized_name = "输入图像";
+		imageInput.type = CROP_IMAGE_TYPE;
+	}
+
+	let regionIndex = node.inputs.findIndex((input) => input.name === CROP_REGION_INPUT);
+	if (showExtra) {
+		if (regionIndex < 0) {
+			node.addInput?.(CROP_REGION_INPUT, "GJJ_REGION");
+			regionIndex = node.inputs.length - 1;
+		}
+		const regionInput = node.inputs[regionIndex];
+		if (regionInput) {
+			regionInput.name = CROP_REGION_INPUT;
+			regionInput.label = "区域数据";
+			regionInput.localized_name = "区域数据";
+			regionInput.type = "GJJ_REGION";
+		}
+	} else if (regionIndex >= 0 && (!hasRegionLink || fromUser)) {
+		removeInputSlot(node, regionIndex);
+	}
+
+	while (node.outputs.length < 1) node.addOutput?.(CROP_IMAGE_OUTPUT, CROP_IMAGE_TYPE);
+	const imageOutput = node.outputs[0];
+	if (imageOutput) {
+		imageOutput.name = CROP_IMAGE_OUTPUT;
+		imageOutput.label = CROP_IMAGE_OUTPUT;
+		imageOutput.localized_name = CROP_IMAGE_OUTPUT;
+		imageOutput.type = CROP_IMAGE_TYPE;
+	}
+	let maskIndex = node.outputs.findIndex((output, index) => index > 0 && output.name === CROP_MASK_OUTPUT);
+	if (maskIndex < 0 && node.outputs[1]?.type === "MASK") maskIndex = 1;
+	if (showExtra) {
+		if (maskIndex < 0) {
+			node.addOutput?.(CROP_MASK_OUTPUT, "MASK");
+			maskIndex = node.outputs.length - 1;
+		}
+		const maskOutput = node.outputs[maskIndex];
+		if (maskOutput) {
+			maskOutput.name = CROP_MASK_OUTPUT;
+			maskOutput.label = CROP_MASK_OUTPUT;
+			maskOutput.localized_name = CROP_MASK_OUTPUT;
+			maskOutput.type = "MASK";
+		}
+	} else if (maskIndex >= 0 && (!hasMaskLink || fromUser)) {
+		removeOutputSlot(node, maskIndex);
+	}
+
+	updateCropPortsButton(node);
+	refreshNode(node);
+}
+
+function toggleCropExtraPorts(node) {
+	node.properties ??= {};
+	node.properties[CROP_EXTRA_PORTS_PROPERTY] = !showCropExtraPorts(node);
+	applyCropPorts(node, true);
+}
+
 function readCropConfig(node) {
 	return safeJsonParse(getWidget(node, CROP_CONFIG_WIDGET)?.value, {});
 }
@@ -139,6 +276,105 @@ function writeCropConfig(node, patch) {
 		app.graph?.change?.();
 	} catch (_) {}
 	refreshNode(node);
+}
+
+function uploadUrl(path) {
+	try {
+		if (api?.apiURL) return api.apiURL(path);
+	} catch (_) {}
+	return path;
+}
+
+function uploadedImageWidgetValue(data, fallbackName = "") {
+	const filename = String(data?.name || data?.filename || data?.file || fallbackName || "").replace(/\\/g, "/").trim();
+	const subfolder = String(data?.subfolder || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").trim();
+	return subfolder && !filename.startsWith(`${subfolder}/`) ? `${subfolder}/${filename}` : filename;
+}
+
+async function uploadCropImageFile(file) {
+	const endpoints = ["/upload/image", "/api/upload/image"];
+	let lastError = null;
+	for (const endpoint of endpoints) {
+		const form = new FormData();
+		form.append("image", file, file.name);
+		form.append("type", "input");
+		form.append("overwrite", "true");
+		try {
+			const response = await (api?.fetchApi
+				? api.fetchApi(endpoint, { method: "POST", body: form })
+				: fetch(uploadUrl(endpoint), { method: "POST", body: form }));
+			if (!response.ok) {
+				lastError = new Error(`HTTP ${response.status}`);
+				continue;
+			}
+			const data = await response.json().catch(() => ({}));
+			return uploadedImageWidgetValue(data, file.name);
+		} catch (error) {
+			lastError = error;
+		}
+	}
+	throw lastError || new Error("图片上传失败");
+}
+
+async function loadCropUserSettings() {
+	try {
+		const response = await (api?.fetchApi ? api.fetchApi("/gjj/region_crop/settings") : fetch(uploadUrl("/gjj/region_crop/settings")));
+		if (!response.ok) throw new Error(`HTTP ${response.status}`);
+		const data = await response.json();
+		return {
+			total_pixels: Math.max(10, Math.round(toNumber(data?.total_pixels, 10))),
+			align_multiple: nearestCropAlignPower(data?.align_multiple ?? 8),
+		};
+	} catch (_) {
+		return null;
+	}
+}
+
+async function saveCropUserSettings(totalPixels, alignMultiple) {
+	const payload = {
+		total_pixels: Math.max(10, Math.round(toNumber(totalPixels, 10))),
+		align_multiple: nearestCropAlignPower(alignMultiple),
+	};
+	try {
+		const response = await (api?.fetchApi
+			? api.fetchApi("/gjj/region_crop/settings", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(payload),
+			})
+			: fetch(uploadUrl("/gjj/region_crop/settings"), {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(payload),
+			}));
+		if (!response.ok) throw new Error(`HTTP ${response.status}`);
+		return await response.json();
+	} catch (error) {
+		console.error("[GJJ RegionCrop] 保存参数失败：", error);
+		return payload;
+	}
+}
+
+function setWidgetValue(node, name, value) {
+	const widget = getWidget(node, name);
+	if (!widget) return false;
+	widget.options ??= {};
+	const values = widget.options.values || widget.options.comboValues || widget.values;
+	if (Array.isArray(values) && value && !values.includes(value)) values.push(value);
+	widget.value = value;
+	try { widget.callback?.call(widget, value, app.canvas, node); } catch (_) {}
+	try { node.graph?.change?.(); } catch (_) {}
+	refreshNode(node);
+	return true;
+}
+
+function cropImageFileUrl(value) {
+	const text = String(value || "").replace(/\\/g, "/").trim();
+	if (!text) return "";
+	const parts = text.split("/");
+	const filename = parts.pop() || "";
+	const subfolder = parts.join("/");
+	return `/api/view?filename=${encodeURIComponent(filename)}&type=input&subfolder=${encodeURIComponent(subfolder)}&rand=${Date.now()}`;
 }
 
 function degToRad(value) {
@@ -267,6 +503,14 @@ function getCropSourceDescriptor(node) {
 	return { filename, signature, sourceNode, viewType };
 }
 
+function getCropFileDescriptor(node) {
+	const value = String(getWidget(node, CROP_IMAGE_FILE_WIDGET)?.value || "").trim();
+	if (!value) return null;
+	const src = cropImageFileUrl(value);
+	if (!src) return null;
+	return { src, signature: `file:${value}`, filename: value };
+}
+
 function setCropPanelImage(node, src, width = 0, height = 0, signature = "") {
 	const panel = node.__gjjRegionCropPanel;
 	if (!panel || !src) return;
@@ -371,7 +615,37 @@ function cropPanelHeight(node) {
 	const sourceH = Math.max(1, panel?.sourceHeight || panel?.image?.naturalHeight || 1);
 	const width = Math.max(160, Math.round((node.size?.[0] || 300) - 24));
 	const imageH = panel?.image ? Math.round(width * sourceH / sourceW) : 132;
-	return Math.max(CROP_PANEL_MIN_H, imageH + 54);
+	return Math.max(CROP_PANEL_MIN_H, imageH + 84);
+}
+
+function alignCropSize(value, multiple) {
+	const align = nearestCropAlignPower(multiple);
+	if (align <= 1) return Math.max(1, Math.round(value));
+	return Math.max(align, Math.round(Math.max(1, value) / align) * align);
+}
+
+function nearestCropAlignPower(value) {
+	const raw = clamp(Math.round(toNumber(value, 8)), 1, 256);
+	return CROP_ALIGN_POWERS.reduce((best, item) => Math.abs(item - raw) < Math.abs(best - raw) ? item : best, 8);
+}
+
+function cropAlignPowerIndex(value) {
+	const align = nearestCropAlignPower(value);
+	return Math.max(0, CROP_ALIGN_POWERS.indexOf(align));
+}
+
+function outputCropSize(node, width, height) {
+	const totalWanPixels = Math.max(10, Math.round(toNumber(getWidget(node, CROP_TOTAL_PIXELS_WIDGET)?.value, 10)));
+	const totalPixels = totalWanPixels > 10000 ? Math.round(totalWanPixels) : Math.round(totalWanPixels * 10000);
+	const alignMultiple = nearestCropAlignPower(getWidget(node, CROP_ALIGN_MULTIPLE_WIDGET)?.value);
+	let ratio = 1;
+	if (totalPixels > 0) {
+		ratio *= Math.sqrt(totalPixels / Math.max(1, width * height));
+	}
+	return {
+		width: alignCropSize(width * ratio, alignMultiple),
+		height: alignCropSize(height * ratio, alignMultiple),
+	};
 }
 
 function getCropPanelCanvasRect(node) {
@@ -484,7 +758,11 @@ function renderCropPanel(node) {
 	ctx.arc(rotateHandle.cx, rotateHandle.cy, CROP_ROTATE_HANDLE_SIZE / 2, 0, Math.PI * 2);
 	ctx.fill();
 	ctx.stroke();
-	if (sizeLine) sizeLine.textContent = `裁剪后宽高 ${config.width} x ${config.height}  旋转 ${Math.round(config.angle)}°`;
+	if (sizeLine) {
+		const out = outputCropSize(node, config.width, config.height);
+		const suffix = out.width === config.width && out.height === config.height ? "" : ` -> ${out.width} x ${out.height}`;
+		sizeLine.textContent = `裁剪后宽高 ${config.width} x ${config.height}${suffix}  旋转 ${Math.round(config.angle)}°`;
+	}
 }
 
 function resizeCropPanel(node) {
@@ -695,7 +973,15 @@ async function tryLoadCropSourceFromLink(node, force = false) {
 	const panel = node.__gjjRegionCropPanel;
 	if (!panel) return;
 	if (!descriptor) {
-		if (panel.image || panel.sourceSignature) clearCropPanelImage(node);
+		const fileDescriptor = getCropFileDescriptor(node);
+		if (!fileDescriptor) {
+			if (panel.image || panel.sourceSignature) clearCropPanelImage(node);
+			return;
+		}
+		if (!force && panel.sourceSignature === fileDescriptor.signature && panel.image) return;
+		if (panel.sizeLine) panel.sizeLine.textContent = "正在打开图片文件...";
+		clearCropPreview(node);
+		setCropPanelImage(node, fileDescriptor.src, 0, 0, fileDescriptor.signature);
 		return;
 	}
 	if (!force && panel.sourceSignature === descriptor.signature && panel.image) return;
@@ -703,6 +989,331 @@ async function tryLoadCropSourceFromLink(node, force = false) {
 	clearCropPreview(node);
 	const src = `/api/view?filename=${encodeURIComponent(descriptor.filename)}&type=${encodeURIComponent(descriptor.viewType)}&rand=${Date.now()}`;
 	setCropPanelImage(node, src, 0, 0, descriptor.signature);
+}
+
+function makeCropButton(label, title, onClick) {
+	const button = document.createElement("button");
+	button.type = "button";
+	button.textContent = label;
+	button.title = title;
+	button.style.cssText = [
+		"width:28px",
+		"height:24px",
+		"border:1px solid rgba(255,255,255,0.18)",
+		"border-radius:6px",
+		"background:#172429",
+		"color:#d7eef0",
+		"font:13px Arial, sans-serif",
+		"cursor:pointer",
+		"padding:0",
+	].join(";");
+	button.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		onClick?.(button);
+	});
+	return button;
+}
+
+async function openCropImageFile(node, button) {
+	const input = document.createElement("input");
+	input.type = "file";
+	input.accept = "image/*,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff";
+	input.style.display = "none";
+	document.body.appendChild(input);
+	input.addEventListener("change", async () => {
+		const file = input.files?.[0];
+		input.remove();
+		if (!file) return;
+		const oldText = button?.textContent || "📁";
+		try {
+			if (button) {
+				button.disabled = true;
+				button.textContent = "...";
+			}
+			const uploaded = await uploadCropImageFile(file);
+			setWidgetValue(node, CROP_IMAGE_FILE_WIDGET, uploaded);
+			clearCropNativePreview(node);
+			setTimeout(() => clearCropNativePreview(node), 0);
+			setTimeout(() => tryLoadCropSourceFromLink(node, true), 0);
+		} catch (error) {
+			console.error("[GJJ RegionCrop] 打开图片失败：", error);
+			alert(`打开图片失败：${error?.message || error}`);
+		} finally {
+			if (button) {
+				button.disabled = false;
+				button.textContent = oldText;
+			}
+			updateCropLinkButton(node);
+		}
+	}, { once: true });
+	input.click();
+}
+
+function currentCropExternalLinks(node) {
+	const links = [];
+	for (const name of [CROP_IMAGE_INPUT, CROP_REGION_INPUT]) {
+		const slot = node.inputs?.findIndex?.((input) => input.name === name) ?? -1;
+		const input = slot >= 0 ? node.inputs[slot] : null;
+		const linkId = input?.link;
+		const graphLinks = app.graph?.links || node.graph?.links;
+		let link = linkId != null
+			? (typeof graphLinks?.get === "function" ? graphLinks.get(linkId) : graphLinks?.[linkId])
+			: null;
+		if (!link && linkId != null && graphLinks && typeof graphLinks === "object") {
+			link = Object.values(graphLinks).find((item) => String(item?.id ?? item?.[0] ?? "") === String(linkId));
+		}
+		const originId = link?.origin_id ?? link?.[1];
+		const originSlot = link?.origin_slot ?? link?.[2] ?? 0;
+		if (originId != null) {
+			links.push({
+				inputName: name,
+				target_slot: slot,
+				origin_id: originId,
+				origin_slot: originSlot,
+			});
+		}
+	}
+	return links;
+}
+
+function toggleCropExternalLinks(node) {
+	node.properties ??= {};
+	const active = currentCropExternalLinks(node);
+	if (active.length) {
+		node.properties[CROP_STORED_LINKS_PROPERTY] = active;
+		for (const item of active) {
+			const slot = node.inputs?.findIndex?.((input) => input.name === item.inputName) ?? -1;
+			if (slot >= 0) {
+				try { node.disconnectInput?.(slot); } catch (_) {}
+			}
+		}
+		tryLoadCropSourceFromLink(node, true);
+		updateCropLinkButton(node);
+		refreshNode(node);
+		return;
+	}
+	const stored = Array.isArray(node.properties[CROP_STORED_LINKS_PROPERTY]) ? node.properties[CROP_STORED_LINKS_PROPERTY] : [];
+	let restored = 0;
+	for (const item of stored) {
+		const sourceNode = item?.origin_id != null ? app.graph?.getNodeById?.(item.origin_id) : null;
+		const namedSlot = node.inputs?.findIndex?.((input) => input.name === item.inputName) ?? -1;
+		const slot = Number.isInteger(item?.target_slot) && node.inputs?.[item.target_slot]
+			? item.target_slot
+			: namedSlot;
+		if (sourceNode && slot >= 0) {
+			try {
+				sourceNode.connect?.(Number(item.origin_slot || 0), node, slot);
+				restored++;
+			} catch (_) {}
+		}
+	}
+	if (restored) {
+		node.properties[CROP_STORED_LINKS_PROPERTY] = [];
+		setTimeout(() => tryLoadCropSourceFromLink(node, true), 0);
+	}
+	updateCropLinkButton(node);
+	refreshNode(node);
+}
+
+function updateCropLinkButton(node) {
+	const button = node.__gjjRegionCropLinkButton;
+	if (!button) return;
+	const active = currentCropExternalLinks(node).length;
+	const stored = Array.isArray(node.properties?.[CROP_STORED_LINKS_PROPERTY]) && node.properties[CROP_STORED_LINKS_PROPERTY].length;
+	button.disabled = false;
+	button.style.opacity = !active && !stored ? "0.62" : "1";
+	button.style.background = active ? "#1f3b35" : stored ? "#3b321f" : "#172429";
+	button.title = active ? "断开并记住当前外部链接；再次点击可恢复。" : stored ? "恢复上次记住的外部链接。" : "没有可断开或恢复的外部链接。";
+}
+
+async function openCropSettings(node) {
+	node.__gjjRegionCropSettingsModal?.remove?.();
+	const savedSettings = await loadCropUserSettings();
+	if (savedSettings) {
+		setWidgetValue(node, CROP_TOTAL_PIXELS_WIDGET, savedSettings.total_pixels);
+		setWidgetValue(node, CROP_ALIGN_MULTIPLE_WIDGET, savedSettings.align_multiple);
+	}
+
+	const config = clampCropConfig(node);
+	const overlay = document.createElement("div");
+	overlay.className = "gjj-region-crop-settings-overlay";
+	overlay.style.cssText = [
+		"position:fixed",
+		"inset:0",
+		"z-index:10030",
+		"background:rgba(0,0,0,0.34)",
+		"display:flex",
+		"align-items:center",
+		"justify-content:center",
+		"font:13px Arial, sans-serif",
+		"color:#d7eef0",
+	].join(";");
+
+	const dialog = document.createElement("div");
+	dialog.style.cssText = [
+		"width:min(420px,calc(100vw - 32px))",
+		"box-sizing:border-box",
+		"padding:16px",
+		"border:1px solid rgba(255,255,255,0.16)",
+		"border-radius:10px",
+		"background:#11191d",
+		"box-shadow:0 18px 50px rgba(0,0,0,0.45)",
+	].join(";");
+
+	const title = document.createElement("div");
+	title.textContent = "区域裁切参数";
+	title.style.cssText = "font-size:15px;font-weight:700;margin-bottom:12px;color:#ffffff;";
+
+	const body = document.createElement("div");
+	body.style.cssText = "display:grid;grid-template-columns:96px 1fr;gap:10px 12px;align-items:center;";
+
+	const makeLabel = (text, hint) => {
+		const wrap = document.createElement("label");
+		wrap.style.cssText = "color:#bcd0d5;line-height:1.35;";
+		wrap.textContent = text;
+		if (hint) wrap.title = hint;
+		return wrap;
+	};
+	let updatePreview = () => {};
+	const makeSliderControl = (name, value, attrs = {}, formatter = (v) => String(v)) => {
+		const wrap = document.createElement("div");
+		wrap.style.cssText = "display:grid;grid-template-columns:1fr 74px;gap:8px;align-items:center;";
+		const slider = document.createElement("input");
+		slider.name = name;
+		slider.type = "range";
+		slider.value = String(value);
+		slider.style.cssText = "width:100%;accent-color:#35e2c2;cursor:pointer;";
+		for (const [key, attrValue] of Object.entries(attrs)) slider.setAttribute(key, String(attrValue));
+		const valueButton = document.createElement("button");
+		valueButton.type = "button";
+		valueButton.style.cssText = [
+			"height:28px",
+			"border:1px solid #52626d",
+			"border-radius:7px",
+			"background:#0b1113",
+			"color:#e8f6f8",
+			"cursor:text",
+			"font:12px Arial,sans-serif",
+		].join(";");
+		const min = toNumber(attrs.min, 0);
+		const max = toNumber(attrs.max, 1);
+		const step = toNumber(attrs.step, 1);
+		const decimals = String(attrs.step ?? "").includes(".") ? String(attrs.step).split(".")[1].length : 0;
+		const normalize = (raw) => {
+			let next = clamp(toNumber(raw, value), min, max);
+			if (step > 0) next = Math.round(next / step) * step;
+			return decimals > 0 ? Number(next.toFixed(decimals)) : Math.round(next);
+		};
+		const setValue = (raw) => {
+			const next = normalize(raw);
+			slider.value = String(next);
+			valueButton.textContent = formatter(next);
+			updatePreview();
+			return next;
+		};
+		slider.addEventListener("input", () => setValue(slider.value));
+		valueButton.addEventListener("dblclick", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			const input = document.createElement("input");
+			input.type = "number";
+			input.value = slider.value;
+			input.min = String(min);
+			input.max = String(max);
+			input.step = String(step);
+			input.style.cssText = valueButton.style.cssText + ";width:74px;box-sizing:border-box;padding:0 6px;";
+			valueButton.replaceWith(input);
+			const commit = () => {
+				setValue(input.value);
+				input.replaceWith(valueButton);
+			};
+			input.addEventListener("keydown", (keyEvent) => {
+				if (keyEvent.key === "Enter") commit();
+				if (keyEvent.key === "Escape") input.replaceWith(valueButton);
+			});
+			input.addEventListener("blur", commit, { once: true });
+			input.focus();
+			input.select?.();
+		});
+		wrap.append(slider, valueButton);
+		setValue(value);
+		return { wrap, slider, get value() { return slider.value; } };
+	};
+
+	const pixelsInput = makeSliderControl("total_pixels", Math.round(toNumber(getWidget(node, CROP_TOTAL_PIXELS_WIDGET)?.value, 10)), { min: 10, max: 6400, step: 5 }, (v) => `${v}万`);
+	const alignInput = makeSliderControl("align_multiple", cropAlignPowerIndex(getWidget(node, CROP_ALIGN_MULTIPLE_WIDGET)?.value ?? 8), { min: 0, max: CROP_ALIGN_POWERS.length - 1, step: 1 }, (v) => `${CROP_ALIGN_POWERS[v]}`);
+
+	body.append(
+		makeLabel("总像素(万)", "单位为万像素。30 表示约 30 万像素；最低 10 万，步长 5 万。"),
+		pixelsInput.wrap,
+		makeLabel("对齐倍数", "输出宽高按 2 的 n 次方对齐：1/2/4/8/16/32/64/128/256。"),
+		alignInput.wrap,
+	);
+
+	const preview = document.createElement("div");
+	preview.style.cssText = "margin-top:12px;padding:9px 10px;border-radius:7px;background:#0b1113;color:#35e2c2;font-weight:700;";
+	updatePreview = () => {
+		const previous = {
+			pixels: getWidget(node, CROP_TOTAL_PIXELS_WIDGET)?.value,
+			align: getWidget(node, CROP_ALIGN_MULTIPLE_WIDGET)?.value,
+		};
+		getWidget(node, CROP_TOTAL_PIXELS_WIDGET).value = Math.max(10, Math.round(toNumber(pixelsInput.value, 10)));
+		getWidget(node, CROP_ALIGN_MULTIPLE_WIDGET).value = CROP_ALIGN_POWERS[clamp(Math.round(toNumber(alignInput.value, 3)), 0, CROP_ALIGN_POWERS.length - 1)] || 8;
+		const out = outputCropSize(node, config.width, config.height);
+		getWidget(node, CROP_TOTAL_PIXELS_WIDGET).value = previous.pixels;
+		getWidget(node, CROP_ALIGN_MULTIPLE_WIDGET).value = previous.align;
+		preview.textContent = `输出尺寸预览：${config.width} x ${config.height} -> ${out.width} x ${out.height}`;
+	};
+	const footer = document.createElement("div");
+	footer.style.cssText = "display:flex;justify-content:flex-end;gap:8px;margin-top:14px;";
+	const makeDialogButton = (text, primary = false) => {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.textContent = text;
+		button.style.cssText = [
+			"height:30px",
+			"min-width:68px",
+			"border-radius:7px",
+			`border:1px solid ${primary ? "#35e2c2" : "#52626d"}`,
+			`background:${primary ? "#1f6f62" : "#273036"}`,
+			"color:#fff",
+			"cursor:pointer",
+		].join(";");
+		return button;
+	};
+	const ok = makeDialogButton("确定", true);
+	const cancel = makeDialogButton("取消");
+	footer.append(cancel, ok);
+
+	const close = () => {
+		if (node.__gjjRegionCropSettingsModal === overlay) node.__gjjRegionCropSettingsModal = null;
+		overlay.remove();
+	};
+	cancel.addEventListener("click", close);
+	ok.addEventListener("click", async () => {
+		const totalPixels = Math.max(10, Math.round(toNumber(pixelsInput.value, 10)));
+		const alignMultiple = CROP_ALIGN_POWERS[clamp(Math.round(toNumber(alignInput.value, 3)), 0, CROP_ALIGN_POWERS.length - 1)] || 8;
+		const saved = await saveCropUserSettings(totalPixels, alignMultiple);
+		setWidgetValue(node, CROP_TOTAL_PIXELS_WIDGET, saved?.total_pixels ?? totalPixels);
+		setWidgetValue(node, CROP_ALIGN_MULTIPLE_WIDGET, saved?.align_multiple ?? alignMultiple);
+		renderCropPanel(node);
+		close();
+	});
+	overlay.addEventListener("pointerdown", (event) => {
+		if (event.target === overlay) close();
+	});
+	dialog.addEventListener("pointerdown", (event) => event.stopPropagation());
+	dialog.addEventListener("mousedown", (event) => event.stopPropagation());
+	dialog.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true });
+
+	dialog.append(title, body, preview, footer);
+	overlay.append(dialog);
+	document.body.append(overlay);
+	node.__gjjRegionCropSettingsModal = overlay;
+	updatePreview();
+	pixelsInput.slider.focus();
+	pixelsInput.slider.select?.();
 }
 
 function startCropSourceWatcher(node) {
@@ -721,7 +1332,7 @@ function startCropSourceWatcher(node) {
 
 function mountCropPanel(node) {
 	if (node.__gjjRegionCropPanel || typeof node.addDOMWidget !== "function") return;
-	ensureCropConfigWidget(node);
+	ensureCropHiddenWidgets(node);
 	const root = document.createElement("div");
 	root.className = "gjj-region-crop-panel";
 	root.style.cssText = [
@@ -734,12 +1345,21 @@ function mountCropPanel(node) {
 		"font:12px Arial, sans-serif",
 		"user-select:none",
 	].join(";");
+	const toolbar = document.createElement("div");
+	toolbar.style.cssText = "display:flex;gap:6px;align-items:center;justify-content:flex-end;margin-bottom:6px;";
+	const openButton = makeCropButton("📁", "打开图片文件；会上传到 ComfyUI/input，并在没有外部图像输入时使用。", (button) => openCropImageFile(node, button));
+	const settingsButton = makeCropButton("⚙️", "参数设置：总像素、对齐倍数。", () => openCropSettings(node));
+	const linkButton = makeCropButton("🔗", "断开/恢复外部链接。", () => toggleCropExternalLinks(node));
+	const portsButton = makeCropButton("🔌", "显示/隐藏区域数据输入和裁剪遮罩输出。", () => toggleCropExtraPorts(node));
+	node.__gjjRegionCropLinkButton = linkButton;
+	node.__gjjRegionCropPortsButton = portsButton;
+	toolbar.append(openButton, settingsButton, portsButton, linkButton);
 	const canvas = document.createElement("canvas");
 	canvas.style.cssText = "display:block;width:100%;height:132px;border-radius:6px;background:#0b1113;cursor:crosshair;";
 	const sizeLine = document.createElement("div");
 	sizeLine.style.cssText = "height:18px;line-height:18px;margin-top:6px;text-align:center;color:#35e2c2;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
 	sizeLine.textContent = "裁剪后宽高 -- x --";
-	root.append(canvas, sizeLine);
+	root.append(toolbar, canvas, sizeLine);
 	const widget = node.addDOMWidget(CROP_PANEL_WIDGET, "HTML", root, { serialize: false, hideOnZoom: false });
 	node.__gjjRegionCropPanel = { root, canvas, sizeLine, widget, image: null, src: "", sourceSignature: "", sourceWidth: 0, sourceHeight: 0, dragging: false, dragMode: "new", dragAnchor: null, start: null };
 
@@ -791,6 +1411,9 @@ function mountCropPanel(node) {
 	});
 
 	resizeCropPanel(node);
+	applyCropPorts(node);
+	updateCropLinkButton(node);
+	updateCropPortsButton(node);
 	startCropSourceWatcher(node);
 	setTimeout(() => tryLoadCropSourceFromLink(node), 0);
 }
@@ -925,15 +1548,19 @@ app.registerExtension({
 			const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
 			nodeType.prototype.onNodeCreated = function () {
 				const result = originalOnNodeCreated?.apply(this, arguments);
+				clearCropNativePreview(this);
 				mountCropPanel(this);
+				applyCropPorts(this);
 				return result;
 			};
 
 			const originalOnConfigure = nodeType.prototype.onConfigure;
 			nodeType.prototype.onConfigure = function () {
 				const result = originalOnConfigure?.apply(this, arguments);
+				clearCropNativePreview(this);
 				mountCropPanel(this);
-				ensureCropConfigWidget(this);
+				ensureCropHiddenWidgets(this);
+				applyCropPorts(this);
 				const saved = this.properties?.__gjjRegionCropConfig;
 				if (saved && getWidget(this, CROP_CONFIG_WIDGET) && !getWidget(this, CROP_CONFIG_WIDGET).value) {
 					writeCropConfig(this, saved);
@@ -963,8 +1590,11 @@ app.registerExtension({
 			const originalOnExecuted = nodeType.prototype.onExecuted;
 			nodeType.prototype.onExecuted = function (message) {
 				const result = originalOnExecuted?.apply(this, arguments);
-				ensureCropConfigWidget(this);
+				clearCropNativePreview(this);
+				ensureCropHiddenWidgets(this);
+				applyCropPorts(this);
 				updateCropPreview(this, message);
+				updateCropLinkButton(this);
 				return result;
 			};
 
@@ -978,17 +1608,26 @@ app.registerExtension({
 						if (input?.name === CROP_IMAGE_INPUT && connected) {
 							setTimeout(() => tryLoadCropSourceFromLink(this), 0);
 						}
+						if (input?.name === CROP_IMAGE_INPUT && !connected) {
+							setTimeout(() => tryLoadCropSourceFromLink(this, true), 0);
+						}
 						if (input?.name === CROP_REGION_INPUT) {
 							renderCropPanel(this);
 						}
+						updateCropLinkButton(this);
 					}
+				}
+				if (slotType === 1 || slotType === 0) {
+					applyCropPorts(this);
 				}
 				return result;
 			};
 
 			const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
 			nodeType.prototype.onDrawBackground = function (ctx) {
+				clearCropNativePreview(this);
 				originalOnDrawBackground?.apply(this, arguments);
+				clearCropNativePreview(this);
 				drawCropPreview(this, ctx);
 			};
 		}

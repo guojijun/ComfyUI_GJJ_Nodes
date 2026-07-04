@@ -5,7 +5,7 @@
     "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
-    "search_text": "",
+    "search_text": "boo",
     "page_size": 10,
     "image_format": "png",
     "jpeg_quality": 0.86
@@ -38,6 +38,16 @@
     "shadowY": -142,
     "align": "居中",
     "version": 1
+  },
+  "character_library": {
+    "matting_method": "RMBG1.4",
+    "multiview_unet": "qwen_image_edit_2511_fp8mixed.safetensors",
+    "multiview_lora_1": "QWEN/lighting/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+    "multiview_lora_2": "qwen-image-edit-2511-multiple-angles-lora.safetensors",
+    "annotate_clip": "qwen3.5_4b_fp8_mixed.safetensors"
+  },
+  "scene_library": {
+    "annotate_clip": "qwen3.5_4b_fp8_mixed.safetensors"
   },
   "ollama_assistant": {
     "version": 1,
@@ -76,6 +86,10 @@
   },
   "nodes": {},
   "user": {},
+  "region_crop": {
+    "total_pixels": 20,
+    "align_multiple": 8
+  },
   "text_merge": {
     "template_text": " 根据下面的风格生成新的提示词",
     "selected_template": "美漫",

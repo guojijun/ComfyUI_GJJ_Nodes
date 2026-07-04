@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,7 @@ from .common_utils.dependency_checker import (
 	DEFAULT_MODEL_URL,
 	build_dependency_model_report,
 )
+from .common_utils.temp_files import gjjutils_write_temp_tensor_images
 
 
 
@@ -297,6 +299,50 @@ DEFAULT_PRODUCT_ACTION_LINES = [
 	"白色背景。生成产品后视图。",
 	"白色背景。生成产品右侧视图。",
 ]
+DEFAULT_MULTIVIEW_TEMPLATE_TEXT = """《人物资产》(保持图一主体的类别、轮廓、材质、颜色、结构细节、标识与整体风格一致，单主体，白色背景。)
+白色背景,近距离大头特写，只拍头部和肩膀，构图紧凑，清晰保留完整面部特征。
+白色背景,标准正面，完整全身构图，全身取景，全身照，完整人体，双脚完整在画面内，画面底部预留足够空间容纳双脚
+白色背景,主体45°斜侧身，全身无裁剪，从头到脚，姿态自然。顶部、底部各留白5%，居中。
+白色背景,主体后视图，全身无裁剪，从头到脚，轮廓标准。顶部、底部各留白5%，居中。
+---
+《产品四视图》(保持产品的类别、轮廓、材质、颜色、结构细节、标识与整体风格一致，单主体，白色背景。)
+白色背景。生成产品正视图。
+白色背景。生成产品左侧视图。
+白色背景。生成产品后视图。
+白色背景。生成产品右侧视图。
+---
+《标准五视图》(保持图一主体的类别、轮廓、材质、颜色、结构细节、标识与整体风格一致，单主体，白色背景。)
+白色背景。生成主体全身正视图。
+白色背景。生成主体全身正面右45°视图。
+白色背景。生成主体左侧视图。
+白色背景。生成主体右侧视图。
+白色背景。生成主体后视图。
+---
+《标准六视图》(保持图一主体的类别、轮廓、材质、颜色、结构细节、标识与整体风格一致，单主体，白色背景。)
+白色背景。生成主体全身正视图。
+白色背景。生成主体全身正面右45°视图。
+白色背景。生成主体左侧视图。
+白色背景。生成主体右侧视图。
+白色背景。生成主体后视图。
+白色背景。生成主体半身正视图。
+---
+《标准九视图》(保持图一主体的类别、轮廓、材质、颜色、结构细节、标识与整体风格一致，单主体，白色背景。)
+白色背景。生成主体全身正视图。
+白色背景。生成主体全身正面右45°视图。
+白色背景。生成主体面朝左方的左侧全身视图。
+白色背景。生成主体面朝右方的右侧全身视图。
+白色背景。生成主体全身后视图。
+白色背景。生成主体半身正视图。
+白色背景。生成主体正面右45°半身图。
+白色背景。生成主体正面近景局部特写。
+白色背景。生成主体不同配色或版本的正视图。
+---
+《半身特写》(保持图一主体的类别、轮廓、材质、颜色、结构细节、标识与整体风格一致，单主体，白色背景。)
+白色背景。生成主体半身正视图。
+白色背景。生成主体正面右45°半身图。
+白色背景。生成主体左侧近景特写。
+白色背景。生成主体右侧近景特写。
+"""
 DEFAULT_EXTRA_PROMPT = "保持图一主体的类别、轮廓、材质、颜色、结构细节、标识与整体风格一致，单主体，白色背景。"
 DEFAULT_NEGATIVE_PROMPT = ""
 DEFAULT_SEED = 0
@@ -681,6 +727,80 @@ def _send_status(unique_id: Any, text: str) -> None:
 		pass
 
 
+def _save_multiview_temp_preview(image: torch.Tensor, index: int) -> dict[str, Any] | None:
+	try:
+		if image is None:
+			return None
+		sample = image[0] if image.ndim == 4 else image
+		if sample.ndim != 3:
+			return None
+		target_dir = Path(folder_paths.get_temp_directory()) / "GJJ" / "character_multiview_preview"
+		target_dir.mkdir(parents=True, exist_ok=True)
+		filename = f"GJJ_CharacterMultiView_preview_{uuid.uuid4().hex[:12]}_{int(index):02d}.png"
+		pixels = 255.0 * sample.detach().cpu().clamp(0.0, 1.0).numpy()
+		pil_image = Image.fromarray(np.clip(pixels, 0, 255).astype(np.uint8))
+		pil_image.save(target_dir / filename, compress_level=2)
+		return {
+			"filename": filename,
+			"subfolder": "GJJ/character_multiview_preview",
+			"type": "temp",
+			"width": int(sample.shape[1]),
+			"height": int(sample.shape[0]),
+			"index": int(index),
+		}
+	except Exception as error:
+		print(f"[GJJ] CharacterMultiView 临时预览保存失败: {error}")
+		return None
+
+
+def _send_multiview_preview(unique_id: Any, image: dict[str, Any] | None = None, reset: bool = False) -> None:
+	if not unique_id:
+		return
+	try:
+		from server import PromptServer
+	except Exception:
+		PromptServer = None
+	if PromptServer is None or getattr(PromptServer, "instance", None) is None:
+		return
+	payload: dict[str, Any] = {"node": str(unique_id)}
+	if reset:
+		payload["reset"] = True
+	if image:
+		payload["image"] = image
+	try:
+		PromptServer.instance.send_sync("gjj_character_multiview_preview", payload)
+	except Exception:
+		pass
+
+
+def _multiview_preview_result(collage: torch.Tensor, batch_images: torch.Tensor) -> dict[str, Any]:
+	preview_images: list[dict[str, Any]] = []
+	try:
+		if collage is not None:
+			preview_images.extend(gjjutils_write_temp_tensor_images(collage))
+		if batch_images is not None:
+			preview_images.extend(gjjutils_write_temp_tensor_images(batch_images))
+	except Exception as error:
+		print(f"[GJJ] CharacterMultiView 标准预览保存失败: {error}")
+	return {
+		"ui": {"images": preview_images, "gjj_images": preview_images},
+		"result": (collage, batch_images),
+	}
+
+
+def _release_multiview_models_if_needed(keep_model: Any, unique_id: Any = None) -> None:
+	if bool(keep_model):
+		return
+	try:
+		import comfy.model_management
+
+		comfy.model_management.unload_all_models()
+		comfy.model_management.soft_empty_cache()
+		_send_status(unique_id, "🧠 保持模型已关闭：已释放模型缓存。")
+	except Exception as error:
+		_send_status(unique_id, f"🧠 释放模型缓存失败：{error}")
+
+
 def _conditioning_set_values(conditioning, values: dict[str, Any], append: bool = False):
 	updated = []
 	for item in conditioning:
@@ -717,10 +837,18 @@ def _multiview_allowed_unets() -> list[str]:
 	models = list_unet_models() or [DEFAULT_UNET_NAME]
 	filtered: list[str] = []
 	for model_name in models:
+		if "2511" not in str(model_name or "").lower():
+			continue
 		preset = _match_multiview_family(model_name)
 		if preset.get("id") in ALLOWED_PRESET_IDS or preset.get("supports_multi_image_edit"):
 			filtered.append(model_name)
-	return filtered or models
+	remaining = [model_name for model_name in models if model_name not in filtered]
+	return filtered + remaining or [DEFAULT_QWEN2511_UNET]
+
+
+def _multiview_lora_models() -> list[str]:
+	models = [str(item or "").strip() for item in (_safe_filename_list("loras") or []) if str(item or "").strip()]
+	return ["", *(models or [DEFAULT_QWEN2511_LIGHTNING_LORA, DEFAULT_MULTI_ANGLES_LORA])]
 
 
 def _pick_default_multiview_unet(unet_models: list[str]) -> str:
@@ -768,6 +896,7 @@ def _match_multiview_family(unet_name: str) -> dict[str, Any]:
 
 
 def _pick_available_lora_name(candidates: list[str], preferred_name: str, fallback: str = "") -> str:
+	candidates = [str(candidate or "").strip() for candidate in (candidates or []) if str(candidate or "").strip()]
 	preferred = str(preferred_name or "").strip()
 	fallback = str(fallback or "").strip()
 	if preferred and preferred in candidates:
@@ -787,7 +916,7 @@ def _pick_available_lora_name(candidates: list[str], preferred_name: str, fallba
 			if candidate.replace("\\", "/").split("/")[-1].lower() == fallback_base:
 				return candidate
 
-	return preferred or fallback
+	return ""
 
 
 def _normalized_model_basename(value: str) -> str:
@@ -822,7 +951,7 @@ def _missing_multiview_models() -> list[dict[str, str]]:
 
 
 _MULTIVIEW_DESCRIPTION_READY = (
-	"主体一键多视图：主图必选，动作可用图片参考、文字描述或按钮预设。"
+	"主体一键多视图：主图必选，动作可用图片参考、文字描述或按钮模板。"
 	"节点会自动匹配 Qwen Image Edit 2511 为主线的图生图模型族，并将结果拼接成多视图图板。\n\n"
 	"🌏模型下载：\n"
 	f"{MODEL_DOWNLOAD_URL}\n\n"
@@ -1338,20 +1467,75 @@ def _resolve_job_caption(job: dict[str, Any]) -> str:
 def _best_grid(count: int, cell_width: int, cell_height: int, target_aspect: float = 1.0) -> tuple[int, int]:
 	best_cols = 1
 	best_rows = count
-	best_score: tuple[float, int] | None = None
-	target_ratio = max(0.1, float(target_aspect or 1.0))
+	best_score: tuple[float, int, int, int] | None = None
+	target_ratio = min(2.4, max(0.45, float(target_aspect or 1.0)))
+	cell_ratio = float(max(1, cell_width)) / float(max(1, cell_height + CAPTION_HEIGHT))
+	ideal_cols = math.sqrt(float(count) * target_ratio / max(0.1, cell_ratio))
 	for cols in range(1, count + 1):
 		rows = math.ceil(count / cols)
 		total_width = cols * cell_width
 		total_height = rows * (cell_height + CAPTION_HEIGHT)
 		current_ratio = float(total_width) / float(max(1, total_height))
 		empty_slots = max(0, rows * cols - count)
-		score = (abs(current_ratio - target_ratio) + float(empty_slots) * EMPTY_GRID_SLOT_PENALTY, rows * cols)
+		aspect_score = abs(math.log(max(0.05, current_ratio) / target_ratio))
+		empty_score = float(empty_slots) / float(max(1, count))
+		balance_score = abs(float(cols) - ideal_cols) / max(1.0, ideal_cols)
+		line_score = max(0, cols - rows - 2) * 0.12 + max(0, rows - cols - 2) * 0.12
+		score = (
+			aspect_score * 1.15
+			+ empty_score * EMPTY_GRID_SLOT_PENALTY
+			+ balance_score * 0.45
+			+ line_score,
+			empty_slots,
+			rows * cols,
+			cols,
+		)
 		if best_score is None or score < best_score:
 			best_score = score
 			best_cols = cols
 			best_rows = rows
 	return best_cols, best_rows
+
+
+def _best_smart_grid(count: int, cell_width: int, cell_height: int, target_aspect: float = 1.0) -> tuple[int, int]:
+	if count <= 0:
+		return 1, 1
+	if count == 1:
+		return 1, 1
+	target_ratio = min(2.2, max(0.55, float(target_aspect or 1.0)))
+	candidates: set[tuple[int, int]] = set()
+	for cols in range(1, count + 1):
+		candidates.add((cols, math.ceil(count / cols)))
+	wide = math.ceil(math.sqrt(count))
+	for cols in range(max(1, wide - 2), min(count, wide + 3) + 1):
+		candidates.add((cols, math.ceil(count / cols)))
+	best: tuple[float, int, int, int] | None = None
+	best_grid = (1, count)
+	for cols, rows in candidates:
+		if cols * rows < count:
+			continue
+		total_width = cols * cell_width
+		total_height = rows * (cell_height + CAPTION_HEIGHT)
+		ratio = float(total_width) / float(max(1, total_height))
+		empty_slots = cols * rows - count
+		empty_score = float(empty_slots) / float(max(1, count))
+		shape_score = abs(math.log(max(0.05, ratio) / target_ratio))
+		row_col_score = abs(cols - rows) / max(1, max(cols, rows))
+		last_row_fill = count - (rows - 1) * cols if rows > 1 else count
+		last_row_gap_score = 0.0 if last_row_fill == cols else (cols - last_row_fill) / max(1, cols)
+		score = (
+			shape_score * 1.1
+			+ empty_score * 1.8
+			+ row_col_score * 0.36
+			+ last_row_gap_score * 0.28,
+			empty_slots,
+			rows,
+			cols,
+		)
+		if best is None or score < best:
+			best = score
+			best_grid = (cols, rows)
+	return best_grid
 
 
 def _resize_bchw(samples: torch.Tensor, width: int, height: int) -> torch.Tensor:
@@ -1639,7 +1823,7 @@ def _make_squareish_collage(images: list[torch.Tensor], captions: list[str], tar
 	elif len(bchw_images) == 6:
 		cols, rows = _best_fixed_grid(6, cell_width, cell_height, ((2, 3), (3, 2)), target_aspect=target_aspect)
 	else:
-		cols, rows = _best_grid(len(bchw_images), cell_width, cell_height, target_aspect=target_aspect)
+		cols, rows = _best_smart_grid(len(bchw_images), cell_width, cell_height, target_aspect=target_aspect)
 	total_height = rows * (cell_height + CAPTION_HEIGHT)
 	canvas = np.ones((total_height, cols * cell_width, 3), dtype=np.float32)
 	for index, sample in enumerate(fitted_images):
@@ -1696,6 +1880,7 @@ def _hidden_multiview_param(options: dict[str, Any]) -> dict[str, Any]:
 class GJJ_CharacterMultiViewStudio:
 	CATEGORY = "GJJ"
 	FUNCTION = "generate"
+	OUTPUT_NODE = True
 	DESCRIPTION = (
 		_MULTIVIEW_DESCRIPTION_READY
 		if _MULTIVIEW_MODEL_REPORT.get("available", True)
@@ -1748,7 +1933,7 @@ class GJJ_CharacterMultiViewStudio:
 		unet_models = _multiview_allowed_unets()
 		clip_models = list_clip_models() or [DEFAULT_CLIP_NAME]
 		vae_models = list_vae_models() or [DEFAULT_VAE_NAME]
-		lora_models = [""] + (_safe_filename_list("loras") or [])
+		lora_models = _multiview_lora_models()
 		default_unet_name = _pick_default_multiview_unet(unet_models)
 		default_preset = _match_multiview_family(default_unet_name)
 		return {
@@ -1801,9 +1986,13 @@ class GJJ_CharacterMultiViewStudio:
 					lora_models,
 					_hidden_multiview_param(
 					{
-						"default": _pick_available_name(default_preset.get("lora_1_name", DEFAULT_LIGHTNING_LORA), lora_models, DEFAULT_LIGHTNING_LORA),
+						"default": _pick_available_lora_name(
+							lora_models,
+							default_preset.get("lora_1_name", DEFAULT_LIGHTNING_LORA),
+							DEFAULT_LIGHTNING_LORA,
+						),
 						"display_name": "🟢 第1组 LoRA",
-						"tooltip": "推荐的加速或编辑 LoRA；强度为 0 或未选择时不参与运算。",
+						"tooltip": "必选。推荐使用 Qwen Image Edit 2511 Lightning LoRA。",
 					}
 					),
 				),
@@ -1811,12 +2000,12 @@ class GJJ_CharacterMultiViewStudio:
 					"FLOAT",
 					_hidden_multiview_param(
 					{
-						"default": float(default_preset.get("lora_1_strength", 1.0)),
-						"min": 0.0,
+						"default": max(0.01, float(default_preset.get("lora_1_strength", 1.0))),
+						"min": 0.01,
 						"max": 4.0,
 						"step": 0.01,
 						"display_name": "LoRA 1 强度",
-						"tooltip": "第一组 LoRA 强度。",
+						"tooltip": "第一组 LoRA 强度，必须大于 0。",
 					}
 					),
 				),
@@ -1843,7 +2032,30 @@ class GJJ_CharacterMultiViewStudio:
 						"max": 2.0,
 						"step": 0.01,
 						"display_name": "LoRA 2 强度",
-						"tooltip": "第二组 LoRA 强度。",
+						"tooltip": "第二组 LoRA 强度，必须大于 0。",
+					}
+					),
+				),
+				"lora_3_name": (
+					lora_models,
+					_hidden_multiview_param(
+					{
+						"default": "",
+						"display_name": "🟢 第3组 LoRA",
+						"tooltip": "第三组可选 LoRA；默认强度为 0，不参与加载。",
+					}
+					),
+				),
+				"lora_3_strength": (
+					"FLOAT",
+					_hidden_multiview_param(
+					{
+						"default": 0.0,
+						"min": 0.0,
+						"max": 2.0,
+						"step": 0.01,
+						"display_name": "LoRA 3 强度",
+						"tooltip": "第三组 LoRA 强度；默认 0 表示关闭。",
 					}
 					),
 				),
@@ -1869,6 +2081,18 @@ class GJJ_CharacterMultiViewStudio:
 						"label_on": "保存",
 						"label_off": "不保存",
 						"tooltip": "开启后会把每张单图保存到输出目录，并把当前工作流元数据写进 PNG。",
+					}
+					),
+				),
+				"keep_model": (
+					"BOOLEAN",
+					_hidden_multiview_param(
+					{
+						"default": True,
+						"display_name": "保持模型",
+						"label_on": "保持",
+						"label_off": "释放",
+						"tooltip": "开启时执行后尽量保留当前模型在内存中；关闭时完成后允许释放模型缓存。",
 					}
 					),
 				),
@@ -1924,8 +2148,11 @@ class GJJ_CharacterMultiViewStudio:
 		lora_1_strength=0.0,
 		lora_2_name="",
 		lora_2_strength=0.0,
+		lora_3_name="",
+		lora_3_strength=0.0,
 		seed=0,
 		save_each_image=True,
+		keep_model=True,
 		unique_id=None,
 		**kwargs,
 	):
@@ -1947,9 +2174,12 @@ class GJJ_CharacterMultiViewStudio:
 				str(lora_1_strength),
 				str(lora_2_name),
 				str(lora_2_strength),
+				str(lora_3_name),
+				str(lora_3_strength),
 				str(normalize_lora_chain_data(kwargs.get("lora_chain_config", ""))),
 				str(seed),
 				str(bool(save_each_image)),
+				str(bool(keep_model)),
 			]
 		)
 
@@ -1975,6 +2205,8 @@ class GJJ_CharacterMultiViewStudio:
 		lora_1_strength: float,
 		lora_2_name: str,
 		lora_2_strength: float,
+		lora_3_name: str = "",
+		lora_3_strength: float = 0.0,
 		lora_chain_config: str = "",
 	):
 		"""应用 LoRA 到模型和 CLIP。"""
@@ -1995,6 +2227,8 @@ class GJJ_CharacterMultiViewStudio:
 					current_model = loader.load_lora_model_only(current_model, lora_1_name, float(lora_1_strength))[0]
 				if str(lora_2_name or "").strip() and abs(float(lora_2_strength)) > 1e-6:
 					current_model = loader.load_lora_model_only(current_model, lora_2_name, float(lora_2_strength))[0]
+				if str(lora_3_name or "").strip() and abs(float(lora_3_strength)) > 1e-6:
+					current_model = loader.load_lora_model_only(current_model, lora_3_name, float(lora_3_strength))[0]
 			except ImportError:
 				# 降级方案：使用 apply_standard_lora，但 CLIP 强度设为 0
 				clip_strength = 0.0
@@ -2014,6 +2248,15 @@ class GJJ_CharacterMultiViewStudio:
 						current_clip,
 						lora_state,
 						float(lora_2_strength),
+						float(clip_strength),
+					)
+				if str(lora_3_name or "").strip() and abs(float(lora_3_strength)) > 1e-6:
+					lora_state = self._load_lora_state(lora_3_name)
+					current_model, current_clip, _, _, _ = apply_standard_lora(
+						current_model,
+						current_clip,
+						lora_state,
+						float(lora_3_strength),
 						float(clip_strength),
 					)
 		else:
@@ -2036,6 +2279,15 @@ class GJJ_CharacterMultiViewStudio:
 					lora_state,
 					float(lora_2_strength),
 					float(lora_2_strength) if clip_strength is None else float(clip_strength),
+				)
+			if str(lora_3_name or "").strip() and abs(float(lora_3_strength)) > 1e-6:
+				lora_state = self._load_lora_state(lora_3_name)
+				current_model, current_clip, _, _, _ = apply_standard_lora(
+					current_model,
+					current_clip,
+					lora_state,
+					float(lora_3_strength),
+					float(lora_3_strength) if clip_strength is None else float(clip_strength),
 				)
 
 		# 应用 LoRA 链配置（如果有的话）
@@ -2330,13 +2582,17 @@ class GJJ_CharacterMultiViewStudio:
 		lora_1_strength=0.0,
 		lora_2_name="",
 		lora_2_strength=0.0,
+		lora_3_name="",
+		lora_3_strength=0.0,
 		seed=0,
 		save_each_image=True,
+		keep_model=True,
 		prompt=None,
 		extra_pnginfo=None,
 		unique_id=None,
 		**kwargs,
 	):
+		_send_multiview_preview(unique_id, reset=True)
 		# 检测主图是否为批量输入（多维张量）
 		main_image_batch = _split_image_batch(main_image) if main_image is not None else []
 		is_batch_mode = len(main_image_batch) > 1
@@ -2359,6 +2615,8 @@ class GJJ_CharacterMultiViewStudio:
 					lora_1_strength,
 					lora_2_name,
 					lora_2_strength,
+					lora_3_name,
+					lora_3_strength,
 					seed + batch_index - 1,
 					save_each_image,
 					prompt,
@@ -2372,10 +2630,11 @@ class GJJ_CharacterMultiViewStudio:
 			# 合并所有结果
 			final_collage = torch.cat(all_collages, dim=0) if all_collages else all_collages[0]
 			final_batch = torch.cat(all_batch_images, dim=0) if all_batch_images else all_batch_images[0]
-			return (final_collage, final_batch)
+			_release_multiview_models_if_needed(keep_model, unique_id)
+			return _multiview_preview_result(final_collage, final_batch)
 		else:
 			# 单图模式：原有逻辑
-			return self._process_single_main(
+			result = self._process_single_main(
 				main_image,
 				base_prompt,
 				negative_prompt,
@@ -2385,6 +2644,8 @@ class GJJ_CharacterMultiViewStudio:
 				lora_1_strength,
 				lora_2_name,
 				lora_2_strength,
+				lora_3_name,
+				lora_3_strength,
 				seed,
 				save_each_image,
 				prompt,
@@ -2392,6 +2653,9 @@ class GJJ_CharacterMultiViewStudio:
 				unique_id,
 				**kwargs,
 			)
+			_release_multiview_models_if_needed(keep_model, unique_id)
+			return _multiview_preview_result(result[0], result[1])
+
 	def _process_single_main(
 		self,
 		main_image,
@@ -2403,6 +2667,8 @@ class GJJ_CharacterMultiViewStudio:
 		lora_1_strength,
 		lora_2_name,
 		lora_2_strength,
+		lora_3_name,
+		lora_3_strength,
 		seed,
 		save_each_image,
 		prompt=None,
@@ -2428,6 +2694,7 @@ class GJJ_CharacterMultiViewStudio:
 			lora_1_strength = ACTION_MIGRATION_LORA_1_STRENGTH
 			lora_2_name = _pick_available_lora_name(lora_models, ACTION_MIGRATION_LORA_2, ACTION_MIGRATION_LORA_2)
 			lora_2_strength = ACTION_MIGRATION_LORA_2_STRENGTH
+			lora_3_strength = 0.0
 			_send_status(unique_id, f"🔄 动作迁移模式：已切换 LoRA → {lora_1_name}（强度 {lora_1_strength}）+ {lora_2_name}（强度 {lora_2_strength}）")
 
 		try:
@@ -2445,6 +2712,8 @@ class GJJ_CharacterMultiViewStudio:
 				lora_1_strength,
 				lora_2_name,
 				lora_2_strength,
+				lora_3_name,
+				lora_3_strength,
 				kwargs.get("lora_chain_config", ""),
 			)
 			model = _patch_model_sampling(
@@ -2524,6 +2793,9 @@ class GJJ_CharacterMultiViewStudio:
 					f"详细错误：{exc}"
 				) from exc
 			results.append(result)
+			preview_image = _save_multiview_temp_preview(result, index)
+			if preview_image:
+				_send_multiview_preview(unique_id, preview_image)
 
 		captions = _resolve_job_captions(jobs)
 		_send_status(unique_id, f"3/{total_steps} 计算最优拼图布局...")
@@ -2561,3 +2833,52 @@ class GJJ_CharacterMultiViewStudio:
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_CharacterMultiViewStudio}
 NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 👤 主体一键多视图"}
+
+
+def _multiview_templates_path() -> Path:
+	return Path(__file__).resolve().parents[1] / "presets" / "gjj_character_multiview_templates.txt"
+
+
+def _read_multiview_template_text() -> str:
+	path = _multiview_templates_path()
+	path.parent.mkdir(parents=True, exist_ok=True)
+	if not path.exists():
+		path.write_text(DEFAULT_MULTIVIEW_TEMPLATE_TEXT, encoding="utf-8")
+	text = path.read_text(encoding="utf-8")
+	if not text.strip():
+		text = DEFAULT_MULTIVIEW_TEMPLATE_TEXT
+	return text
+
+
+try:
+	from aiohttp import web
+	from server import PromptServer
+
+	if getattr(PromptServer, "instance", None) is not None:
+		@PromptServer.instance.routes.get("/gjj/character_multiview/templates")
+		async def gjj_character_multiview_get_templates(request):
+			try:
+				path = _multiview_templates_path()
+				return web.json_response({
+					"text": _read_multiview_template_text(),
+					"path": str(path),
+				})
+			except Exception as error:
+				return web.json_response({"error": str(error)}, status=500)
+
+		@PromptServer.instance.routes.post("/gjj/character_multiview/templates")
+		async def gjj_character_multiview_save_templates(request):
+			try:
+				payload = await request.json()
+				text = str(payload.get("text") if isinstance(payload, dict) else "")
+				path = _multiview_templates_path()
+				path.parent.mkdir(parents=True, exist_ok=True)
+				path.write_text(text, encoding="utf-8")
+				return web.json_response({
+					"text": _read_multiview_template_text(),
+					"path": str(path),
+				})
+			except Exception as error:
+				return web.json_response({"error": str(error)}, status=500)
+except Exception:
+	pass

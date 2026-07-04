@@ -1,6 +1,6 @@
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
-import { GJJ_Utils } from "./gjj_utils.js";
+import { GJJ_Utils, queueOnlyCurrentNode } from "./gjj_utils.js";
 
 const TARGET_NODES = new Set(["GJJ_CharacterMultiViewStudio"]);
 const ACTION_PREFIX = "action_image_";
@@ -10,15 +10,29 @@ const MIN_VISIBLE_ACTIONS = 1;
 const MAX_ACTIONS = 9;
 const PRESET_WIDGET_NAME = "gjj_multiview_toolbar";
 const STATUS_WIDGET_NAME = "gjj_multiview_status";
+const PREVIEW_WIDGET_NAME = "gjj_multiview_live_preview";
+const LORA_LIST_WIDGET_NAME = "gjj_multiview_lora_list";
+const NATIVE_CANVAS_PREVIEW_WIDGET = "$$canvas-image-preview";
+const NATIVE_PREVIEW_WIDGET_PATTERN = /(?:preview|image|images|img|预览|图像|图片)/i;
 const ACTION_TEXT_WIDGET = "action_prompts";
 const BASE_PROMPT_WIDGET = "base_prompt";
 const SETTINGS_PROPERTY = "gjj_multiview_show_settings";
 const AUTO_LOAD_IMAGE_PROPERTY = "gjj_multiview_auto_load_image_node_id";
+const KEEP_MODEL_PROPERTY = "gjj_multiview_keep_model";
+const RANDOM_SEED_PROPERTY = "gjj_multiview_random_seed";
+const PREVIEW_DRAG_MIME = "application/x-gjj-character-multiview-preview";
+const ANY_PREVIEW_HELD_IMAGES_PROPERTY = "gjj_any_preview_held_images";
+const TEMPLATE_API_PATH = "/gjj/character_multiview/templates";
 const UNET_WIDGET = "unet_name";
 const LORA1_WIDGET = "lora_1_name";
 const LORA1_STRENGTH_WIDGET = "lora_1_strength";
 const LORA2_WIDGET = "lora_2_name";
 const LORA2_STRENGTH_WIDGET = "lora_2_strength";
+const LORA3_WIDGET = "lora_3_name";
+const LORA3_STRENGTH_WIDGET = "lora_3_strength";
+const LORA_METADATA_API_PATH = "/gjj/lora-metadata";
+const LORA_PREVIEW_API_PREFIX = "/gjj/lora-preview/";
+const TEMP_OUTPUT_NODE_FLAG = "__gjjCharacterMultiViewTempOutputNode";
 const PY_DECLARED_HIDDEN_WIDGETS = new Set([
 	BASE_PROMPT_WIDGET,
 	"negative_prompt",
@@ -27,8 +41,11 @@ const PY_DECLARED_HIDDEN_WIDGETS = new Set([
 	LORA1_STRENGTH_WIDGET,
 	LORA2_WIDGET,
 	LORA2_STRENGTH_WIDGET,
+	LORA3_WIDGET,
+	LORA3_STRENGTH_WIDGET,
 	"seed",
 	"save_each_image",
+	"keep_model",
 ]);
 const PY_DECLARED_HIDDEN_INPUTS = new Set([MAIN_IMAGE_INPUT, LORA_CHAIN_INPUT]);
 const REQUIRED_WIDGET_ORDER = [
@@ -40,8 +57,11 @@ const REQUIRED_WIDGET_ORDER = [
 	LORA1_STRENGTH_WIDGET,
 	LORA2_WIDGET,
 	LORA2_STRENGTH_WIDGET,
+	LORA3_WIDGET,
+	LORA3_STRENGTH_WIDGET,
 	"seed",
 	"save_each_image",
+	"keep_model",
 ];
 const OUTPUT_SPECS = [
 	{
@@ -107,6 +127,23 @@ const PRESET_ACTION_GROUPS = {
 	],
 };
 
+function templateTextFromGroups() {
+	const defaultBase = "保持图一主体的类别、轮廓、材质、颜色、结构细节、标识与整体风格一致，单主体，白色背景。";
+	const blocks = [
+		["人物资产", defaultBase, PRESET_ACTION_GROUPS.characterAsset],
+		["产品四视图", "保持产品的类别、轮廓、材质、颜色、结构细节、标识与整体风格一致，单主体，白色背景。", PRESET_ACTION_GROUPS.productFour],
+		["标准五视图", defaultBase, PRESET_ACTION_GROUPS.five],
+		["标准六视图", defaultBase, PRESET_ACTION_GROUPS.six],
+		["标准九视图", defaultBase, PRESET_ACTION_GROUPS.nine],
+		["半身特写", defaultBase, PRESET_ACTION_GROUPS.closeup],
+	];
+	return blocks
+		.map(([name, basePrompt, lines]) => `《${name}》(${basePrompt})\n${lines.join("\n")}`)
+		.join("\n---\n");
+}
+
+const DEFAULT_TEMPLATE_TEXT = templateTextFromGroups();
+
 const DEFAULT_MULTI_ANGLES_LORA = "qwen-image-edit-2511-multiple-angles-lora.safetensors";
 
 const ACTION_MIGRATION_LORA_1 = "QWEN\\lighting\\FireRed-Image-Edit-1.0-Lightning-8steps-v1.1.safetensors";
@@ -121,6 +158,8 @@ const MODEL_PRESETS = [
 		lora1Strength: 1.0,
 		lora2: DEFAULT_MULTI_ANGLES_LORA,
 		lora2Strength: 1.0,
+		lora3: "",
+		lora3Strength: 0.0,
 	},
 	{
 		keywords: ["qwen_image_edit"],
@@ -128,6 +167,8 @@ const MODEL_PRESETS = [
 		lora1Strength: 1.0,
 		lora2: DEFAULT_MULTI_ANGLES_LORA,
 		lora2Strength: 1.0,
+		lora3: "",
+		lora3Strength: 0.0,
 	},
 	{
 		keywords: ["lotus-depth-"],
@@ -135,6 +176,8 @@ const MODEL_PRESETS = [
 		lora1Strength: 1.0,
 		lora2: "",
 		lora2Strength: 0.0,
+		lora3: "",
+		lora3Strength: 0.0,
 	},
 	{
 		keywords: ["flux1-fill-dev", "flux1-dev-kontext", "flux1-canny-dev"],
@@ -142,11 +185,218 @@ const MODEL_PRESETS = [
 		lora1Strength: 0.0,
 		lora2: "",
 		lora2Strength: 0.0,
+		lora3: "",
+		lora3Strength: 0.0,
 	},
 ];
 
 function getWidget(node, name) {
 	return node.widgets?.find((widget) => widget?.name === name);
+}
+
+function hideNativePreviewWidget(widget) {
+	if (!widget) {
+		return widget;
+	}
+	widget.type = "hidden";
+	widget.hidden = true;
+	widget.serialize = false;
+	widget.serializeValue = () => undefined;
+	widget.computeLayoutSize = () => ({ minHeight: 0, minWidth: 0 });
+	widget.computeSize = () => [0, 0];
+	widget.drawWidget = () => {};
+	widget.draw = () => {};
+	for (const key of ["element", "inputEl", "container", "dom", "root"]) {
+		const element = widget?.[key];
+		if (element?.style) {
+			element.style.display = "none";
+		}
+		if (typeof element?.remove === "function") {
+			element.remove();
+		}
+	}
+	return widget;
+}
+
+function isNativePreviewWidget(node, widget) {
+	if (!widget || widget === node?.__gjjCharacterMultiViewPreview?.widget) {
+		return false;
+	}
+	const name = String(widget?.name || "");
+	if (name === PRESET_WIDGET_NAME || name === STATUS_WIDGET_NAME || name === PREVIEW_WIDGET_NAME || name === LORA_LIST_WIDGET_NAME || name === ACTION_TEXT_WIDGET) {
+		return false;
+	}
+	if (PY_DECLARED_HIDDEN_WIDGETS.has(name) || name.startsWith(ACTION_PREFIX)) {
+		return false;
+	}
+	if (name === NATIVE_CANVAS_PREVIEW_WIDGET) {
+		return true;
+	}
+	const label = String(widget?.label || "");
+	const type = String(widget?.type || "");
+	const optionsType = String(widget?.options?.type || "");
+	const optionsName = String(widget?.options?.name || "");
+	const constructorName = String(widget?.constructor?.name || "");
+	const text = `${name} ${label} ${type} ${optionsType} ${optionsName} ${constructorName}`;
+	if (NATIVE_PREVIEW_WIDGET_PATTERN.test(text) && !/^(number|combo|text|string|customtext|toggle|boolean|slider)$/i.test(type)) {
+		return true;
+	}
+	for (const key of ["element", "inputEl", "container", "dom", "root"]) {
+		const element = widget?.[key];
+		if (typeof element?.querySelector === "function" && element.querySelector("img, canvas, video")) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function hideLegacyNativePreviewWidgets(node) {
+	if (!Array.isArray(node?.widgets)) {
+		return false;
+	}
+	let changed = false;
+	for (let index = node.widgets.length - 1; index >= 0; index -= 1) {
+		const widget = node.widgets[index];
+		if (!isNativePreviewWidget(node, widget)) {
+			continue;
+		}
+		hideNativePreviewWidget(widget);
+		node.widgets.splice(index, 1);
+		changed = true;
+	}
+	return changed;
+}
+
+function nativePreviewEmptyArray(node, key) {
+	if (!node.__gjjCharacterMultiViewNativeEmptyArrays) {
+		Object.defineProperty(node, "__gjjCharacterMultiViewNativeEmptyArrays", {
+			configurable: true,
+			enumerable: false,
+			writable: true,
+			value: {},
+		});
+	}
+	if (!Array.isArray(node.__gjjCharacterMultiViewNativeEmptyArrays[key])) {
+		node.__gjjCharacterMultiViewNativeEmptyArrays[key] = [];
+	}
+	node.__gjjCharacterMultiViewNativeEmptyArrays[key].length = 0;
+	return node.__gjjCharacterMultiViewNativeEmptyArrays[key];
+}
+
+function defineSuppressedNativePreviewProperty(node, key, emptyValue) {
+	const descriptor = Object.getOwnPropertyDescriptor(node, key);
+	if (descriptor?.get?.__gjjCharacterMultiViewSuppressNativePreview) {
+		return;
+	}
+	const getter = function () {
+		return Array.isArray(emptyValue) ? nativePreviewEmptyArray(this, key) : emptyValue;
+	};
+	getter.__gjjCharacterMultiViewSuppressNativePreview = true;
+	try {
+		Object.defineProperty(node, key, {
+			configurable: true,
+			enumerable: false,
+			get: getter,
+			set() {
+				if (Array.isArray(emptyValue)) {
+					nativePreviewEmptyArray(this, key);
+				}
+			},
+		});
+	} catch (_) {
+		try {
+			node[key] = Array.isArray(emptyValue) ? [] : emptyValue;
+		} catch (_) {}
+	}
+}
+
+function suppressNativePreviewProperties(node) {
+	if (!node) {
+		return;
+	}
+	defineSuppressedNativePreviewProperty(node, "imgs", []);
+	defineSuppressedNativePreviewProperty(node, "images", []);
+	defineSuppressedNativePreviewProperty(node, "_imgs", []);
+	defineSuppressedNativePreviewProperty(node, "_images", []);
+	defineSuppressedNativePreviewProperty(node, "imageRects", []);
+	defineSuppressedNativePreviewProperty(node, "animatedImages", []);
+	defineSuppressedNativePreviewProperty(node, "preview", null);
+	defineSuppressedNativePreviewProperty(node, "previews", null);
+	defineSuppressedNativePreviewProperty(node, "image", null);
+	defineSuppressedNativePreviewProperty(node, "imageIndex", null);
+	defineSuppressedNativePreviewProperty(node, "overIndex", null);
+	defineSuppressedNativePreviewProperty(node, "hideOutputImages", true);
+	if (node.constructor?.nodeData) {
+		node.constructor.nodeData.output_preview = false;
+	}
+}
+
+function clearNativePreview(node) {
+	if (!node) {
+		return;
+	}
+	suppressNativePreviewProperties(node);
+	node.imgs = [];
+	node.images = [];
+	node.image = null;
+	node.imageIndex = null;
+	node.overIndex = null;
+	node._imgs = [];
+	node._images = [];
+	node.imageRects = [];
+	node.animatedImages = [];
+	node.preview = null;
+	node.previews = null;
+	node.hideOutputImages = true;
+	hideLegacyNativePreviewWidgets(node);
+	node?.graph?.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function scheduleNativePreviewClear(node) {
+	clearNativePreview(node);
+	if (typeof requestAnimationFrame === "function") {
+		requestAnimationFrame(() => clearNativePreview(node));
+	}
+	for (const delay of [80, 180, 360, 720, 1400, 2400, 4200, 6500]) {
+		setTimeout(() => clearNativePreview(node), delay);
+	}
+	clearInterval(node.__gjjCharacterMultiViewNativePreviewClearInterval);
+	const startedAt = Date.now();
+	node.__gjjCharacterMultiViewNativePreviewClearInterval = setInterval(() => {
+		clearNativePreview(node);
+		node?.graph?.setDirtyCanvas?.(true, true);
+		if (Date.now() - startedAt > 7000) {
+			clearInterval(node.__gjjCharacterMultiViewNativePreviewClearInterval);
+			node.__gjjCharacterMultiViewNativePreviewClearInterval = null;
+		}
+	}, 120);
+}
+
+function clearExecutedPreviewPayload(message) {
+	if (!message || typeof message !== "object") {
+		return;
+	}
+	for (const key of ["images", "imgs", "preview", "previews", "animatedImages"]) {
+		if (Object.prototype.hasOwnProperty.call(message, key)) {
+			message[key] = Array.isArray(message[key]) ? [] : null;
+		}
+	}
+	for (const parent of [message.ui, message.output, message.results]) {
+		if (!parent || typeof parent !== "object" || Array.isArray(parent)) {
+			continue;
+		}
+		for (const key of ["images", "imgs", "preview", "previews", "animatedImages"]) {
+			if (Object.prototype.hasOwnProperty.call(parent, key)) {
+				parent[key] = Array.isArray(parent[key]) ? [] : null;
+			}
+		}
+	}
+	if (Array.isArray(message.ui)) {
+		for (const item of message.ui) {
+			clearExecutedPreviewPayload(item);
+		}
+	}
 }
 
 function setWidgetValue(widget, value) {
@@ -160,6 +410,11 @@ function setWidgetValue(widget, value) {
 function widgetChoices(widget) {
 	const values = widget?.options?.values || widget?.options?.items || widget?.values;
 	return Array.isArray(values) ? values.map((value) => String(value)) : null;
+}
+
+function mutableWidgetChoices(widget) {
+	const values = widget?.options?.values || widget?.options?.items || widget?.values;
+	return Array.isArray(values) ? values : null;
 }
 
 function asBool(value) {
@@ -260,6 +515,16 @@ function restoreSerializedValues(node, serializedNode) {
 	if (!rawValues?.length) {
 		return;
 	}
+	if (rawValues.length === REQUIRED_WIDGET_ORDER.length - 2) {
+		rawValues.splice(8, 0, "", 0);
+	}
+	if (rawValues.length === REQUIRED_WIDGET_ORDER.length - 3) {
+		rawValues.splice(8, 0, "", 0);
+		rawValues.push(true);
+	}
+	if (rawValues.length === REQUIRED_WIDGET_ORDER.length - 1) {
+		rawValues.push(true);
+	}
 	let values = legacyVisualOrderValues(rawValues);
 	let bestScore = -1;
 	if (!values) {
@@ -346,6 +611,21 @@ function normalizeUploadedImage(data, fallbackName) {
 	};
 }
 
+function mediaItemToUrl(item) {
+	if (!item?.filename) {
+		return "";
+	}
+	const previewFormat =
+		typeof app.getPreviewFormatParam === "function"
+			? app.getPreviewFormatParam()
+			: "";
+	const randParam =
+		typeof app.getRandParam === "function" ? app.getRandParam() : "";
+	return api.apiURL(
+		`/view?filename=${encodeURIComponent(item.filename)}&type=${encodeURIComponent(item.type || "temp")}&subfolder=${encodeURIComponent(item.subfolder || "")}${previewFormat}${randParam}`,
+	);
+}
+
 async function uploadMainImageFile(file) {
 	const form = new FormData();
 	form.append("image", file, file.name);
@@ -425,6 +705,159 @@ function addOrUpdateMainLoadImage(node, uploaded) {
 	app.canvas?.setDirty?.(true, true);
 	updateMainImageButtonState(node);
 	refreshNode(node);
+}
+
+function graphDropPosition(event, fallbackNode = null) {
+	if (app.canvas?.convertEventToCanvasOffset) {
+		try {
+			const point = app.canvas.convertEventToCanvasOffset(event);
+			if (Array.isArray(point) && Number.isFinite(point[0]) && Number.isFinite(point[1])) {
+				return [Math.round(point[0]), Math.round(point[1])];
+			}
+		} catch (_) {}
+	}
+	const canvas = app.canvas?.canvas;
+	const rect = canvas?.getBoundingClientRect?.();
+	const ds = app.canvas?.ds;
+	if (rect && ds) {
+		const scale = Number(ds.scale || 1);
+		const offset = Array.isArray(ds.offset) ? ds.offset : [0, 0];
+		return [
+			Math.round((Number(event.clientX) - rect.left) / Math.max(0.01, scale) - Number(offset[0] || 0)),
+			Math.round((Number(event.clientY) - rect.top) / Math.max(0.01, scale) - Number(offset[1] || 0)),
+		];
+	}
+	return [
+		Math.round(Number(fallbackNode?.pos?.[0] || 0) + Number(fallbackNode?.size?.[0] || 320) + 80),
+		Math.round(Number(fallbackNode?.pos?.[1] || 0)),
+	];
+}
+
+async function copyPreviewImageToInput(item) {
+	const response = await api.fetchApi("/gjj/any_preview/copy_media_to_input", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ images: [{ ...item }] }),
+	});
+	const data = await response.json().catch(() => ({}));
+	if (!response.ok || !Array.isArray(data?.images) || !data.images[0]?.filename) {
+		throw new Error(data?.error || "复制图片失败");
+	}
+	return data.images[0];
+}
+
+function addLoadImageNodeAt(item, pos) {
+	const graph = app.canvas?.graph || app.graph;
+	const imageNode = globalThis.LiteGraph?.createNode?.("LoadImage");
+	if (!graph?.add || !imageNode) {
+		throw new Error("无法创建 LoadImage 节点");
+	}
+	graph.add(imageNode);
+	imageNode.title = "多视图预览图";
+	imageNode.pos = [Math.round(pos[0]), Math.round(pos[1])];
+	if (!setNodeWidgetValue(imageNode, "image", uploadedImageWidgetValue(item))) {
+		throw new Error("LoadImage 节点缺少 image 控件");
+	}
+	app.canvas?.selectNode?.(imageNode, false);
+	imageNode.setDirtyCanvas?.(true, true);
+	graph.change?.();
+	graph.setDirtyCanvas?.(true, true);
+	app.canvas?.setDirty?.(true, true);
+	return imageNode;
+}
+
+function addAnyPreviewNodeAt(item, pos) {
+	const graph = app.canvas?.graph || app.graph;
+	const previewNode = globalThis.LiteGraph?.createNode?.("GJJ_AnyPreview");
+	if (!graph?.add || !previewNode) {
+		throw new Error("无法创建预览节点");
+	}
+	graph.add(previewNode);
+	previewNode.title = "多视图预览";
+	previewNode.pos = [Math.round(pos[0]), Math.round(pos[1])];
+	previewNode.properties ||= {};
+	previewNode.properties[ANY_PREVIEW_HELD_IMAGES_PROPERTY] = [{ ...item }];
+	app.canvas?.selectNode?.(previewNode, false);
+	previewNode.setDirtyCanvas?.(true, true);
+	graph.change?.();
+	graph.setDirtyCanvas?.(true, true);
+	app.canvas?.setDirty?.(true, true);
+	return previewNode;
+}
+
+async function createNodeFromDraggedPreview(item, event, sourceNode = null) {
+	const pos = graphDropPosition(event, sourceNode);
+	try {
+		const inputItem = item?.type === "input" ? item : await copyPreviewImageToInput(item);
+		addLoadImageNodeAt(inputItem, pos);
+		setStatus(sourceNode, "已拖拽生成 LoadImage 节点");
+		return;
+	} catch (error) {
+		console.warn("[GJJ CharacterMultiViewStudio] 拖拽创建 LoadImage 失败，降级为预览节点。", error);
+	}
+	try {
+		addAnyPreviewNodeAt(item, pos);
+		setStatus(sourceNode, "已拖拽生成预览节点");
+	} catch (error) {
+		setStatus(sourceNode, `拖拽创建节点失败：${error?.message || error}`);
+	}
+}
+
+function setupPreviewImageDrag(card, image, node, item) {
+	const payload = JSON.stringify({ item, nodeId: node?.id ?? null });
+	card.draggable = true;
+	image.draggable = true;
+	card.title = "点击放大预览；拖到画布可生成图片节点";
+	const onDragStart = (event) => {
+		event.stopPropagation();
+		if (!event.dataTransfer) {
+			return;
+		}
+		event.dataTransfer.effectAllowed = "copy";
+		event.dataTransfer.setData(PREVIEW_DRAG_MIME, payload);
+		event.dataTransfer.setData("text/plain", mediaItemToUrl(item));
+		try {
+			event.dataTransfer.setDragImage(image, Math.min(48, image.width / 2 || 24), Math.min(48, image.height / 2 || 24));
+		} catch (_) {}
+	};
+	card.addEventListener("dragstart", onDragStart);
+	image.addEventListener("dragstart", onDragStart);
+}
+
+function ensurePreviewDropHandler() {
+	if (window.__gjjCharacterMultiViewPreviewDropHandler) {
+		return;
+	}
+	window.__gjjCharacterMultiViewPreviewDropHandler = true;
+	const hasPreviewDragType = (transfer) => Array.from(transfer?.types || []).includes(PREVIEW_DRAG_MIME);
+	document.addEventListener("dragover", (event) => {
+		if (!hasPreviewDragType(event.dataTransfer)) {
+			return;
+		}
+		event.preventDefault();
+		event.dataTransfer.dropEffect = "copy";
+	}, true);
+	document.addEventListener("drop", (event) => {
+		const raw = event.dataTransfer?.getData?.(PREVIEW_DRAG_MIME);
+		if (!raw) {
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		let payload = null;
+		try {
+			payload = JSON.parse(raw);
+		} catch (_) {
+			payload = null;
+		}
+		const item = payload?.item;
+		if (!item?.filename) {
+			return;
+		}
+		const graph = app.canvas?.graph || app.graph;
+		const sourceNode = payload?.nodeId != null ? graph?.getNodeById?.(payload.nodeId) : null;
+		createNodeFromDraggedPreview(item, event, sourceNode);
+	}, true);
 }
 
 function openMainImageFile(node) {
@@ -681,6 +1114,8 @@ function stabilizeActions(node) {
 		setWidgetValue(getWidget(node, LORA1_STRENGTH_WIDGET), ACTION_MIGRATION_LORA_1_STRENGTH);
 		setWidgetValue(getWidget(node, LORA2_WIDGET), resolveWidgetOption(getWidget(node, LORA2_WIDGET), ACTION_MIGRATION_LORA_2));
 		setWidgetValue(getWidget(node, LORA2_STRENGTH_WIDGET), ACTION_MIGRATION_LORA_2_STRENGTH);
+		setWidgetValue(getWidget(node, LORA3_STRENGTH_WIDGET), 0);
+		renderLoraList(node);
 	} else {
 		applyModelPreset(node, true);
 	}
@@ -739,9 +1174,645 @@ function applyModelPreset(node, force = false) {
 	setWidgetValue(getWidget(node, LORA1_STRENGTH_WIDGET), preset.lora1Strength ?? 0);
 	setWidgetValue(getWidget(node, LORA2_WIDGET), resolveWidgetOption(getWidget(node, LORA2_WIDGET), preset.lora2 || ""));
 	setWidgetValue(getWidget(node, LORA2_STRENGTH_WIDGET), preset.lora2Strength ?? 0);
+	setWidgetValue(getWidget(node, LORA3_WIDGET), resolveWidgetOption(getWidget(node, LORA3_WIDGET), preset.lora3 || ""));
+	setWidgetValue(getWidget(node, LORA3_STRENGTH_WIDGET), preset.lora3Strength ?? 0);
 	node.__gjjCharacterMultiViewLastPresetKey = preset.keywords[0];
 	node.__gjjCharacterMultiViewPresetInitialized = true;
 	syncWidgetValuesCache(node);
+	renderLoraList(node);
+}
+
+function normalizeStrength(value, fallback = 1.0) {
+	const parsed = Number.parseFloat(value);
+	return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function isPartialNumericInput(value) {
+	const text = String(value ?? "").trim();
+	return text === "" || text === "-" || text === "+" || text === "." || text === "-." || text === "+.";
+}
+
+function formatStrength(value, fallback = 1.0) {
+	return normalizeStrength(value, fallback).toFixed(2);
+}
+
+function normalizeLoraKeyword(value) {
+	return String(value || "").trim().toLowerCase();
+}
+
+function normalizeLoraToken(value) {
+	return normalizeLoraKeyword(value)
+		.split(/[\\/]/)
+		.pop()
+		.replace(/\.(safetensors|ckpt|pt|bin)$/i, "")
+		.replace(/^krea-2-lora-/i, "")
+		.replace(/^krea2[_-]/i, "")
+		.replace(/[^a-z0-9\u4e00-\u9fff]+/g, "");
+}
+
+function getLoraMetadata(node, loraName) {
+	const selected = normalizeLoraToken(loraName);
+	if (!selected) {
+		return null;
+	}
+	const metadata = Array.isArray(node?.__gjjCharacterMultiViewLoraMetadata)
+		? node.__gjjCharacterMultiViewLoraMetadata
+		: [];
+	return metadata.find((item) => {
+		const matches = Array.isArray(item?.match) ? item.match : [];
+		return matches.some((keyword) => {
+			const token = normalizeLoraToken(keyword);
+			return token && (selected.includes(token) || token.includes(selected));
+		});
+	}) || null;
+}
+
+function loraSearchHaystack(node, value) {
+	const metadata = getLoraMetadata(node, value);
+	return [
+		value,
+		metadata?.title,
+		metadata?.trigger,
+		metadata?.summary,
+		...(Array.isArray(metadata?.match) ? metadata.match : []),
+	].map((item) => normalizeLoraKeyword(item)).filter(Boolean).join(" ");
+}
+
+function loraFilterGroups(query) {
+	return String(query || "")
+		.toLowerCase()
+		.split(/[,\|]+/)
+		.map((group) => group.split(/[\s&]+/).map((term) => term.trim()).filter(Boolean))
+		.filter((group) => group.length);
+}
+
+function loraMatchesFilter(node, value, query) {
+	if (!String(value || "").trim()) {
+		return true;
+	}
+	const groups = loraFilterGroups(query);
+	if (!groups.length) {
+		return true;
+	}
+	const haystack = loraSearchHaystack(node, value);
+	return groups.some((group) => group.every((term) => haystack.includes(term)));
+}
+
+function loraPreviewUrl(node, loraName) {
+	const name = String(loraName || "");
+	if (!name) {
+		return "";
+	}
+	const previews = node?.__gjjCharacterMultiViewLoraPreviews || {};
+	return previews[name] ? String(previews[name]) : `${LORA_PREVIEW_API_PREFIX}${encodeURIComponent(name)}`;
+}
+
+function loraRowDefs() {
+	return [
+		{ index: 1, label: "LoRA 1", name: LORA1_WIDGET, strength: LORA1_STRENGTH_WIDGET, required: true },
+		{ index: 2, label: "LoRA 2", name: LORA2_WIDGET, strength: LORA2_STRENGTH_WIDGET, required: false },
+		{ index: 3, label: "LoRA 3", name: LORA3_WIDGET, strength: LORA3_STRENGTH_WIDGET, required: false },
+	];
+}
+
+function loraChoicesForNode(node, widget, filterText = "") {
+	const values = widgetChoices(widget) || [];
+	const current = String(widget?.value || "");
+	const combined = current && !values.includes(current) ? [current, ...values] : values;
+	const unique = [];
+	for (const value of combined) {
+		const text = String(value || "");
+		if (!unique.includes(text) && (text === current || loraMatchesFilter(node, text, filterText))) {
+			unique.push(text);
+		}
+	}
+	if (!unique.includes("")) {
+		unique.unshift("");
+	}
+	return unique;
+}
+
+function ensureCharacterMultiViewLoraPopup() {
+	if (globalThis.__gjjCharacterMultiViewLoraPopup) {
+		return globalThis.__gjjCharacterMultiViewLoraPopup;
+	}
+	const panel = document.createElement("div");
+	panel.className = "gjj-mv-lora-popup";
+	panel.style.cssText = [
+		"display:none",
+		"flex-direction:column",
+		"gap:6px",
+		"position:fixed",
+		"left:12px",
+		"top:12px",
+		"min-width:360px",
+		"max-width:680px",
+		"width:max-content",
+		"padding:6px",
+		"border:1px solid #41535b",
+		"border-radius:8px",
+		"background:#10171b",
+		"box-sizing:border-box",
+		"z-index:99999",
+		"box-shadow:0 8px 24px rgba(0,0,0,.35)",
+	].join(";");
+
+	const search = document.createElement("input");
+	search.type = "text";
+	search.className = "gjj-mv-lora-popup-search";
+	search.style.cssText = [
+		"width:100%",
+		"min-width:0",
+		"background:#11181c",
+		"color:#dce7e2",
+		"border:1px solid #41535b",
+		"border-radius:6px",
+		"padding:4px 6px",
+		"box-sizing:border-box",
+	].join(";");
+
+	const list = document.createElement("div");
+	list.className = "gjj-mv-lora-popup-list";
+	list.style.cssText = [
+		"display:flex",
+		"flex-direction:column",
+		"gap:4px",
+		"max-height:300px",
+		"overflow:auto",
+	].join(";");
+
+	panel.append(search, list);
+	document.body.appendChild(panel);
+	panel.addEventListener("pointerdown", (event) => event.stopPropagation(), true);
+	panel.addEventListener("mousedown", (event) => event.stopPropagation(), true);
+	panel.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true });
+	list.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true });
+
+	const popup = {
+		panel,
+		search,
+		list,
+		state: null,
+		close() {
+			panel.style.display = "none";
+			search.value = "";
+			list.replaceChildren();
+			this.state = null;
+			document.removeEventListener("pointerdown", outsideHandler, true);
+		},
+		reposition() {
+			const anchor = this.state?.anchorEl;
+			if (!anchor) {
+				return;
+			}
+			const rect = anchor.getBoundingClientRect?.();
+			const viewportWidth = Math.max(320, window.innerWidth || 320);
+			const viewportHeight = Math.max(240, window.innerHeight || 240);
+			const padding = 12;
+			const targetWidth = Math.min(Math.max(Math.ceil(rect?.width || 360), 360), viewportWidth - padding * 2, 680);
+			const below = Math.max(120, viewportHeight - Math.ceil(rect?.bottom || 0) - padding - 6);
+			const above = Math.max(120, Math.floor(rect?.top || 0) - padding - 6);
+			const openAbove = below < 220 && above > below;
+			const maxHeight = Math.max(180, Math.min(420, openAbove ? above : below));
+			const left = Math.max(padding, Math.min(Math.floor(rect?.left || padding), viewportWidth - targetWidth - padding));
+			panel.style.width = `${targetWidth}px`;
+			panel.style.maxHeight = `${maxHeight}px`;
+			list.style.maxHeight = `${Math.max(96, maxHeight - 52)}px`;
+			panel.style.left = `${left}px`;
+			if (openAbove) {
+				panel.style.top = "auto";
+				panel.style.bottom = `${Math.max(padding, viewportHeight - Math.floor(rect?.top || 0) + 6)}px`;
+			} else {
+				panel.style.bottom = "auto";
+				panel.style.top = `${Math.max(padding, Math.ceil(rect?.bottom || padding) + 6)}px`;
+			}
+		},
+		render() {
+			if (!this.state) {
+				return;
+			}
+			const selected = String(this.state.getSelectedValue?.() || "");
+			const options = this.state.getOptions(search.value);
+			list.replaceChildren();
+			if (!options.length) {
+				const empty = document.createElement("div");
+				empty.className = "gjj-mv-lora-popup-empty";
+				empty.textContent = "没有匹配的 LoRA";
+				list.appendChild(empty);
+				this.reposition();
+				return;
+			}
+			for (const option of options) {
+				const value = String(option || "");
+				const item = document.createElement("button");
+				item.type = "button";
+				item.className = "gjj-mv-lora-popup-item";
+				if (value === selected) {
+					item.classList.add("selected");
+				}
+				item.textContent = `${value === selected ? "✓ " : ""}${value || "未选择"}`;
+				item.title = value || "未选择";
+				item.addEventListener("pointerdown", (event) => event.stopPropagation(), true);
+				item.addEventListener("mousedown", (event) => event.stopPropagation(), true);
+				item.addEventListener("click", (event) => {
+					event.preventDefault();
+					event.stopPropagation();
+					this.state?.onSelect?.(value);
+				}, true);
+				list.appendChild(item);
+			}
+			this.reposition();
+		},
+		isOpenFor(anchorEl) {
+			return panel.style.display === "flex" && this.state?.anchorEl === anchorEl;
+		},
+		open(state) {
+			this.state = state;
+			search.value = String(state.searchValue || "");
+			search.placeholder = "搜索 LoRA";
+			search.title = "输入关键词筛选当前这一行可选的 LoRA；支持 & 与，, 或 | 表示或。";
+			panel.style.display = "flex";
+			this.reposition();
+			this.render();
+			document.addEventListener("pointerdown", outsideHandler, true);
+			setTimeout(() => search.focus(), 0);
+		},
+	};
+
+	function outsideHandler(event) {
+		if (!popup.state) {
+			return;
+		}
+		if (panel.contains(event.target) || popup.state.anchorEl?.contains?.(event.target)) {
+			return;
+		}
+		popup.close();
+	}
+
+	search.addEventListener("input", () => popup.render());
+	search.addEventListener("keydown", (event) => {
+		event.stopPropagation();
+		if (event.key === "Escape") {
+			event.preventDefault();
+			popup.close();
+		}
+	});
+	window.addEventListener("resize", () => popup.reposition());
+
+	globalThis.__gjjCharacterMultiViewLoraPopup = popup;
+	return popup;
+}
+
+function syncLoraListValue(node, def, rawName, rawStrength, enabled) {
+	const nameWidget = getWidget(node, def.name);
+	const strengthWidget = getWidget(node, def.strength);
+	const name = enabled ? resolveWidgetOption(nameWidget, rawName) : "";
+	if (nameWidget) {
+		const choices = mutableWidgetChoices(nameWidget);
+		if (choices && name && !choices.includes(name)) {
+			choices.unshift(name);
+		}
+		setWidgetValue(nameWidget, name);
+	}
+	if (strengthWidget) {
+		setWidgetValue(strengthWidget, enabled ? normalizeStrength(rawStrength, 1.0) : 0);
+	}
+	syncWidgetValuesCache(node);
+	node.setDirtyCanvas?.(true, true);
+	node.graph?.setDirtyCanvas?.(true, true);
+	node.graph?.change?.();
+}
+
+async function refreshLoraMetadata(node) {
+	if (!node || node.__gjjCharacterMultiViewLoraMetadataLoading) {
+		return;
+	}
+	node.__gjjCharacterMultiViewLoraMetadataLoading = true;
+	try {
+		const response = await fetch(LORA_METADATA_API_PATH);
+		if (!response.ok) {
+			return;
+		}
+		const data = await response.json().catch(() => ({}));
+		node.__gjjCharacterMultiViewLoraMetadata = Array.isArray(data?.metadata) ? data.metadata : [];
+		node.__gjjCharacterMultiViewLoraPreviews = data?.previews && typeof data.previews === "object" ? data.previews : {};
+		renderLoraList(node);
+	} catch (_) {
+		node.__gjjCharacterMultiViewLoraMetadata = [];
+		node.__gjjCharacterMultiViewLoraPreviews = {};
+	} finally {
+		node.__gjjCharacterMultiViewLoraMetadataLoading = false;
+	}
+}
+
+function renderLoraList(node) {
+	const rowsContainer = node?.__gjjCharacterMultiViewLoraRows;
+	if (!rowsContainer) {
+		return;
+	}
+	rowsContainer.replaceChildren();
+	for (const def of loraRowDefs()) {
+		const nameWidget = getWidget(node, def.name);
+		const strengthWidget = getWidget(node, def.strength);
+		const currentName = String(nameWidget?.value || "");
+		const currentStrength = normalizeStrength(strengthWidget?.value, def.required ? 1.0 : 0.0);
+		const enabled = def.required || (currentName.trim() && Math.abs(currentStrength) > 1e-6);
+		const metadata = getLoraMetadata(node, currentName);
+
+		const row = document.createElement("div");
+		row.className = `gjj-mv-lora-row${enabled ? "" : " off"}`;
+
+		const main = document.createElement("div");
+		main.className = "gjj-mv-lora-main";
+
+		const picker = document.createElement("button");
+		picker.type = "button";
+		picker.className = "gjj-mv-lora-picker";
+		picker.title = `点击展开 ${def.label} 的可搜索 LoRA 列表。`;
+		picker.textContent = currentName || "未选择";
+		picker.dataset.value = currentName;
+
+		const meta = document.createElement("div");
+		meta.className = "gjj-mv-lora-meta";
+
+		if (metadata) {
+			const title = document.createElement("span");
+			title.className = "gjj-mv-lora-meta-title";
+			title.textContent = String(metadata.title || def.label);
+
+			const trigger = document.createElement("span");
+			trigger.className = "gjj-mv-lora-meta-trigger";
+			trigger.textContent = String(metadata.trigger || "");
+			trigger.title = `触发词：${metadata.trigger || ""}`;
+
+			const recommendedStrength = document.createElement("span");
+			recommendedStrength.className = "gjj-mv-lora-meta-strength";
+			recommendedStrength.textContent = formatStrength(metadata.strength, 1.0);
+
+			const previewButton = document.createElement("button");
+			previewButton.type = "button";
+			previewButton.className = "gjj-mv-lora-preview-btn";
+			previewButton.textContent = "▣";
+			previewButton.title = "展开缩略图和简介。";
+
+			const previewCard = document.createElement("div");
+			previewCard.className = "gjj-mv-lora-preview-card";
+
+			const image = document.createElement("img");
+			image.alt = String(metadata.title || currentName || "LoRA preview");
+			image.loading = "lazy";
+			image.decoding = "async";
+			image.dataset.src = loraPreviewUrl(node, currentName);
+			image.addEventListener("error", () => {
+				const fallback = document.createElement("div");
+				fallback.className = "gjj-mv-lora-preview-fallback";
+				fallback.textContent = "可放同名 preview 小图";
+				image.replaceWith(fallback);
+			}, { once: true });
+
+			const copy = document.createElement("div");
+			copy.className = "gjj-mv-lora-preview-copy";
+			copy.innerHTML = "<strong></strong><span></span><code></code><span></span>";
+			copy.children[0].textContent = String(metadata.title || currentName || "");
+			copy.children[1].textContent = String(metadata.summary || "");
+			copy.children[2].textContent = String(metadata.trigger || "");
+			copy.children[3].textContent = `推荐强度 ${formatStrength(metadata.strength, 1.0)}`;
+			previewCard.append(image, copy);
+
+			previewButton.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				const open = !previewCard.classList.contains("open");
+				if (open && image.dataset.src && !image.src) {
+					image.src = image.dataset.src;
+				}
+				previewCard.classList.toggle("open", open);
+				previewButton.classList.toggle("open", open);
+				refreshNode(node);
+			});
+
+			meta.append(title, trigger, recommendedStrength, previewButton);
+			main.append(picker, meta, previewCard);
+		} else {
+			const title = document.createElement("span");
+			title.className = "gjj-mv-lora-meta-title";
+			title.textContent = currentName ? def.label : "未选择";
+			meta.appendChild(title);
+			main.append(picker, meta);
+		}
+
+		const side = document.createElement("div");
+		side.className = "gjj-mv-lora-side";
+
+		const toggleWrap = document.createElement("label");
+		toggleWrap.className = "gjj-mv-lora-toggle";
+		toggleWrap.title = def.required ? "第一组 LoRA 默认启用。" : `控制 ${def.label} 是否参与加载。`;
+
+		const toggle = document.createElement("input");
+		toggle.type = "checkbox";
+		toggle.checked = enabled;
+		toggle.disabled = def.required;
+		toggleWrap.append(toggle, document.createTextNode("启用"));
+
+		const strength = document.createElement("input");
+		strength.type = "number";
+		strength.className = "gjj-mv-lora-strength";
+		strength.step = "0.05";
+		strength.value = formatStrength(currentStrength, def.required ? 1.0 : 0.0);
+		strength.title = `设置 ${def.label} 强度。`;
+
+		const commit = () => {
+			const nextEnabled = def.required || toggle.checked;
+			strength.value = formatStrength(strength.value, nextEnabled ? 1.0 : 0.0);
+			syncLoraListValue(node, def, picker.dataset.value || "", strength.value, nextEnabled);
+			renderLoraList(node);
+		};
+
+		function selectLoraValue(value) {
+			picker.dataset.value = String(value || "");
+			picker.textContent = picker.dataset.value || "未选择";
+			const selectedMetadata = getLoraMetadata(node, picker.dataset.value);
+			if (selectedMetadata && (!String(currentName || "").trim() || Math.abs(currentStrength - 1.0) < 0.0001)) {
+				strength.value = formatStrength(selectedMetadata.strength, 1.0);
+			}
+			if (picker.dataset.value && !toggle.checked) {
+				toggle.checked = true;
+			}
+			commit();
+		}
+
+		function openLoraPicker(event) {
+			event.preventDefault();
+			event.stopPropagation();
+			const now = Date.now();
+			if (event.type === "click" && now - Number(picker.__gjjLastLoraPointerUp || 0) < 250) {
+				return;
+			}
+			if (event.type === "pointerup") {
+				picker.__gjjLastLoraPointerUp = now;
+			}
+			const popup = ensureCharacterMultiViewLoraPopup();
+			if (popup.isOpenFor(picker)) {
+				popup.close();
+				return;
+			}
+			popup.open({
+				node,
+				anchorEl: picker,
+				getSelectedValue() {
+					return String(picker.dataset.value || "");
+				},
+				getOptions(searchText) {
+					return loraChoicesForNode(node, nameWidget, searchText);
+				},
+				onSelect(value) {
+					selectLoraValue(value);
+					popup.close();
+				},
+			});
+		}
+
+		picker.addEventListener("pointerdown", (event) => event.stopPropagation(), true);
+		picker.addEventListener("mousedown", (event) => event.stopPropagation(), true);
+		picker.addEventListener("pointerup", openLoraPicker, true);
+		picker.addEventListener("click", openLoraPicker, true);
+		toggle.addEventListener("change", commit);
+		strength.addEventListener("keydown", (event) => {
+			event.stopPropagation();
+			if (event.key === "Enter") {
+				commit();
+				strength.blur();
+			}
+		});
+		strength.addEventListener("input", () => {
+			if (isPartialNumericInput(strength.value)) {
+				return;
+			}
+			syncLoraListValue(node, def, picker.dataset.value || "", strength.value, def.required || toggle.checked);
+		});
+		strength.addEventListener("change", commit);
+		strength.addEventListener("blur", commit);
+
+		side.append(toggleWrap, strength);
+		row.append(main, side);
+		rowsContainer.appendChild(row);
+	}
+	refreshNode(node);
+}
+
+function ensureLoraListWidget(node) {
+	if (node.__gjjCharacterMultiViewLoraWidget) {
+		renderLoraList(node);
+		return;
+	}
+	const container = document.createElement("div");
+	container.className = "gjj-mv-lora-wrap";
+	container.style.display = showSettings(node) ? "flex" : "none";
+
+	const style = document.createElement("style");
+	style.textContent = `
+		.gjj-mv-lora-wrap { flex-direction:column; gap:6px; width:100%; box-sizing:border-box; margin:4px 0 2px; pointer-events:auto; }
+		.gjj-mv-lora-rows { display:flex; flex-direction:column; gap:6px; }
+		.gjj-mv-lora-row { display:flex; align-items:flex-start; gap:6px; padding:6px; border:1px solid #3c4c54; border-radius:8px; background:#172026; box-sizing:border-box; }
+		.gjj-mv-lora-row.off { opacity:.65; }
+		.gjj-mv-lora-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:6px; position:relative; }
+		.gjj-mv-lora-picker { width:100%; min-width:0; height:26px; background:#11181c; color:#dce7e2; border:1px solid #41535b; border-radius:6px; padding:3px 7px; box-sizing:border-box; font-size:12px; text-align:left; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+		.gjj-mv-lora-picker:hover { border-color:#6aa6b8; background:#172329; }
+		.gjj-mv-lora-meta { display:flex; align-items:center; gap:6px; min-height:18px; color:#b9c9cf; font-size:11px; line-height:1.25; }
+		.gjj-mv-lora-meta-title { color:#eef8f4; font-weight:600; white-space:nowrap; }
+		.gjj-mv-lora-meta-trigger { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#9fd4c3; }
+		.gjj-mv-lora-meta-strength { flex:0 0 auto; color:#d7c587; }
+		.gjj-mv-lora-preview-btn { width:24px; height:20px; flex:0 0 24px; border:1px solid #41535b; border-radius:6px; background:#1a2328; color:#dce7e2; cursor:pointer; font-size:12px; line-height:16px; padding:0; text-align:center; }
+		.gjj-mv-lora-preview-btn:hover, .gjj-mv-lora-preview-btn.open { border-color:#6aa6b8; background:#26363d; }
+		.gjj-mv-lora-preview-card { display:none; position:absolute; left:0; top:calc(100% + 6px); width:min(360px,100%); padding:8px; border:1px solid #41535b; border-radius:8px; background:#10171b; box-shadow:0 8px 24px rgba(0,0,0,.38); z-index:9998; box-sizing:border-box; }
+		.gjj-mv-lora-preview-card.open { display:grid; grid-template-columns:92px minmax(0,1fr); gap:8px; }
+		.gjj-mv-lora-preview-card img, .gjj-mv-lora-preview-fallback { width:92px; height:92px; border-radius:6px; border:1px solid #2e4149; background:#172026; }
+		.gjj-mv-lora-preview-card img { object-fit:cover; }
+		.gjj-mv-lora-preview-fallback { display:flex; align-items:center; justify-content:center; text-align:center; padding:8px; box-sizing:border-box; color:#9fb0b7; font-size:11px; }
+		.gjj-mv-lora-preview-copy { min-width:0; display:flex; flex-direction:column; gap:5px; font-size:11px; color:#c7d5d8; line-height:1.35; }
+		.gjj-mv-lora-preview-copy strong { color:#eef8f4; font-size:12px; }
+		.gjj-mv-lora-preview-copy code { color:#9fd4c3; white-space:normal; word-break:break-word; }
+		.gjj-mv-lora-side { display:flex; align-items:center; gap:6px; padding-top:1px; flex:0 0 auto; white-space:nowrap; }
+		.gjj-mv-lora-toggle { display:flex; align-items:center; gap:4px; color:#dce7e2; font-size:11px; white-space:nowrap; }
+		.gjj-mv-lora-strength { width:64px; height:26px; background:#11181c; color:#dce7e2; border:1px solid #41535b; border-radius:6px; padding:3px 6px; text-align:center; box-sizing:border-box; }
+		.gjj-mv-lora-popup-item { width:100%; display:block; background:#182127; color:#dce7e2; border:1px solid #33454c; border-radius:6px; padding:5px 8px; text-align:left; cursor:pointer; box-sizing:border-box; white-space:normal; overflow-wrap:anywhere; word-break:break-word; line-height:1.3; }
+		.gjj-mv-lora-popup-item:hover { background:#223039; }
+		.gjj-mv-lora-popup-item.selected { background:#18352f; border-color:#2f7d67; color:#e8fff6; }
+		.gjj-mv-lora-popup-empty { color:#8da2ad; font-size:11px; padding:4px 2px; }
+	`;
+
+	const rows = document.createElement("div");
+	rows.className = "gjj-mv-lora-rows";
+	container.append(style, rows);
+
+	for (const eventName of ["pointerdown", "mousedown", "click", "dblclick", "contextmenu", "keydown", "keyup"]) {
+		container.addEventListener(eventName, (event) => {
+			if (event.target?.closest?.("button,input,select,textarea,.gjj-mv-lora-picker")) {
+				return;
+			}
+			event.stopPropagation();
+		}, true);
+	}
+	container.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true });
+
+	node.__gjjCharacterMultiViewLoraContainer = container;
+	node.__gjjCharacterMultiViewLoraRows = rows;
+	const widget = node.addDOMWidget?.(LORA_LIST_WIDGET_NAME, "LoRA 列表", container, {
+		serialize: false,
+		hideOnZoom: false,
+		getHeight: () => showSettings(node) ? Math.max(196, Math.ceil(container.scrollHeight || container.offsetHeight || 196)) : 0,
+	});
+	if (widget) {
+		widget.serialize = false;
+		widget.options ||= {};
+		widget.options.serialize = false;
+		widget.value = undefined;
+		widget.computeSize = (width) => [
+			Math.max(280, width || 280),
+			showSettings(node) ? Math.max(196, Math.ceil(container.scrollHeight || container.offsetHeight || 196)) : 0,
+		];
+	}
+	node.__gjjCharacterMultiViewLoraWidget = widget || { element: container };
+	renderLoraList(node);
+	void refreshLoraMetadata(node);
+}
+
+function enforceRequiredModelChoices(node) {
+	const unetWidget = getWidget(node, UNET_WIDGET);
+	const unetValues = mutableWidgetChoices(unetWidget);
+	if (unetValues?.length) {
+		const filtered = unetValues.filter((value) => String(value || "").toLowerCase().includes("2511"));
+		if (filtered.length) {
+			unetValues.splice(0, unetValues.length, ...filtered);
+			if (!filtered.includes(String(unetWidget.value || ""))) {
+				setWidgetValue(unetWidget, filtered[0]);
+			}
+		}
+	}
+	const loraFilters = new Map([
+		[LORA1_WIDGET, ["2511", "lightning"]],
+		[LORA2_WIDGET, ["2511", "angles"]],
+		[LORA3_WIDGET, ["qwen"]],
+	]);
+	for (const [name, keywords] of loraFilters.entries()) {
+		const widget = getWidget(node, name);
+		const values = mutableWidgetChoices(widget);
+		if (values?.length) {
+			for (let index = values.length - 1; index >= 0; index--) {
+				const text = String(values[index] || "").toLowerCase();
+				if (text.trim() && !keywords.every((keyword) => text.includes(keyword))) values.splice(index, 1);
+			}
+			if (values.length && !String(widget.value || "").trim()) {
+				setWidgetValue(widget, values[0]);
+			}
+			if (values.length && !values.includes(String(widget.value || ""))) {
+				setWidgetValue(widget, values[0]);
+			}
+		}
+	}
+	if (!String(getWidget(node, LORA3_STRENGTH_WIDGET)?.value ?? "").trim()) {
+		setWidgetValue(getWidget(node, LORA3_STRENGTH_WIDGET), 0);
+	}
 }
 
 function ensureOutputs(node) {
@@ -791,11 +1862,17 @@ function createButton(label, title, onClick, container) {
 		button.style.color = "#ffffff";
 	});
 	button.addEventListener("mouseup", (event) => {
+		if (button.__gjjToggleButton) {
+			return;
+		}
 		button.style.background = "#172026";
 		button.style.borderColor = "#41535b";
 		button.style.color = "#dce7e2";
 	});
 	button.addEventListener("mouseleave", (event) => {
+		if (button.__gjjToggleButton) {
+			return;
+		}
 		button.style.background = "#172026";
 		button.style.borderColor = "#41535b";
 		button.style.color = "#dce7e2";
@@ -814,6 +1891,9 @@ function createButton(label, title, onClick, container) {
 
 	// 鼠标悬停效果
 	button.addEventListener("mouseenter", (event) => {
+		if (button.__gjjToggleButton) {
+			return;
+		}
 		if (button.style.transform !== "scale(0.95)") {
 			button.style.background = "#1e2d36";
 			button.style.borderColor = "#4a636f";
@@ -821,6 +1901,191 @@ function createButton(label, title, onClick, container) {
 	});
 
 	return button;
+}
+
+function parseMultiviewTemplates(text) {
+	const blocks = String(text || "")
+		.replace(/\r\n/g, "\n")
+		.replace(/\r/g, "\n")
+		.split(/^\s*---+\s*$/m);
+	const templates = [];
+	for (const block of blocks) {
+		const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
+		if (!lines.length) {
+			continue;
+		}
+		const header = lines[0];
+		const match = header.match(/^《([^》]+)》\s*(?:\((.*)\))?\s*$/);
+		if (!match) {
+			continue;
+		}
+		const name = String(match[1] || "").trim();
+		const basePrompt = String(match[2] || "").trim();
+		const actions = lines.slice(1).filter((line) => line && line !== "---");
+		if (!name || !actions.length) {
+			continue;
+		}
+		templates.push({ name, basePrompt, actions });
+	}
+	return templates;
+}
+
+async function loadMultiviewTemplateText() {
+	try {
+		const response = await api.fetchApi(TEMPLATE_API_PATH);
+		if (!response.ok) {
+			throw new Error(`HTTP ${response.status}`);
+		}
+		const data = await response.json();
+		return String(data?.text || DEFAULT_TEMPLATE_TEXT);
+	} catch (error) {
+		console.warn("[GJJ CharacterMultiViewStudio] 模板读取失败，使用内置模板。", error);
+		return DEFAULT_TEMPLATE_TEXT;
+	}
+}
+
+async function saveMultiviewTemplateText(text) {
+	const response = await api.fetchApi(TEMPLATE_API_PATH, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ text: String(text || "") }),
+	});
+	if (!response.ok) {
+		const message = await response.text().catch(() => "");
+		throw new Error(message || `HTTP ${response.status}`);
+	}
+	return response.json();
+}
+
+function applyMultiviewTemplate(node, template) {
+	const textWidget = getWidget(node, ACTION_TEXT_WIDGET);
+	const basePromptWidget = getWidget(node, BASE_PROMPT_WIDGET);
+	if (basePromptWidget) {
+		setWidgetValue(basePromptWidget, template.basePrompt || "");
+	}
+	if (textWidget) {
+		setWidgetValue(textWidget, (template.actions || []).join("\n"));
+	}
+	syncWidgetValuesCache(node);
+	setStatus(node, `已应用模板：${template.name}`);
+	refreshNode(node);
+}
+
+function renderTemplateButtons(node) {
+	const wrap = node?.__gjjCharacterMultiViewTemplateButtons;
+	if (!wrap) {
+		return;
+	}
+	const templates = parseMultiviewTemplates(node.__gjjCharacterMultiViewTemplateText || DEFAULT_TEMPLATE_TEXT);
+	for (const button of node.__gjjCharacterMultiViewTemplateButtonElements || []) {
+		button.remove();
+	}
+	node.__gjjCharacterMultiViewTemplateButtonElements = [];
+	for (const template of templates) {
+		const button = createButton(
+			template.name,
+			`应用模板：${template.name}`,
+			() => applyMultiviewTemplate(node, template),
+		);
+		wrap.insertBefore(button, node.__gjjCharacterMultiViewTemplateInsertBefore || null);
+		node.__gjjCharacterMultiViewTemplateButtonElements.push(button);
+	}
+	refreshNode(node);
+}
+
+async function refreshTemplateButtons(node) {
+	node.__gjjCharacterMultiViewTemplateText = await loadMultiviewTemplateText();
+	renderTemplateButtons(node);
+}
+
+function openTemplateEditor(node) {
+	const overlay = document.createElement("div");
+	overlay.style.cssText = [
+		"position:fixed",
+		"inset:0",
+		"z-index:100000",
+		"display:flex",
+		"align-items:center",
+		"justify-content:center",
+		"background:rgba(0,0,0,.58)",
+		"font-family:system-ui,\"Microsoft YaHei\",sans-serif",
+	].join(";");
+	const panel = document.createElement("div");
+	panel.style.cssText = [
+		"width:min(760px,calc(100vw - 28px))",
+		"height:min(620px,calc(100vh - 28px))",
+		"display:flex",
+		"flex-direction:column",
+		"gap:8px",
+		"border:1px solid #455a63",
+		"border-radius:8px",
+		"background:#10171b",
+		"color:#e7f2f4",
+		"box-shadow:0 18px 46px rgba(0,0,0,.54)",
+		"padding:10px",
+	].join(";");
+	const header = document.createElement("div");
+	header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;font-weight:800;";
+	const title = document.createElement("div");
+	title.textContent = "多视图模板";
+	const path = document.createElement("div");
+	path.textContent = "保存到 presets/gjj_character_multiview_templates.txt";
+	path.style.cssText = "font-size:11px;font-weight:500;color:#91a8ae;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+	header.append(title, path);
+
+	const textarea = document.createElement("textarea");
+	textarea.value = String(node.__gjjCharacterMultiViewTemplateText || DEFAULT_TEMPLATE_TEXT);
+	textarea.spellcheck = false;
+	textarea.style.cssText = [
+		"flex:1 1 auto",
+		"min-height:0",
+		"width:100%",
+		"box-sizing:border-box",
+		"resize:none",
+		"border:1px solid #34464e",
+		"border-radius:7px",
+		"background:#0b1114",
+		"color:#dce7e2",
+		"padding:9px",
+		"font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,\"Microsoft YaHei\",monospace",
+		"outline:none",
+		"white-space:pre",
+	].join(";");
+	const footer = document.createElement("div");
+	footer.style.cssText = "display:flex;align-items:center;justify-content:flex-end;gap:7px;";
+	const status = document.createElement("span");
+	status.style.cssText = "margin-right:auto;color:#9eb3b7;font-size:12px;";
+	const reset = createButton("恢复内置", "用内置模板覆盖编辑框内容", () => {
+		textarea.value = DEFAULT_TEMPLATE_TEXT;
+		status.textContent = "已恢复到内置模板，保存后生效";
+	});
+	const close = createButton("关闭", "关闭模板编辑器", () => overlay.remove());
+	const save = createButton("保存", "保存模板到 presets 并刷新按钮", async () => {
+		const oldText = save.textContent;
+		try {
+			save.disabled = true;
+			save.textContent = "保存中...";
+			const data = await saveMultiviewTemplateText(textarea.value);
+			node.__gjjCharacterMultiViewTemplateText = String(data?.text || textarea.value);
+			renderTemplateButtons(node);
+			status.textContent = "已保存";
+		} catch (error) {
+			status.textContent = `保存失败：${error?.message || error}`;
+		} finally {
+			save.disabled = false;
+			save.textContent = oldText;
+		}
+	});
+	footer.append(status, reset, close, save);
+	panel.append(header, textarea, footer);
+	overlay.appendChild(panel);
+	const stop = (event) => event.stopPropagation();
+	for (const eventName of ["pointerdown", "mousedown", "click", "dblclick", "wheel", "contextmenu", "keydown"]) {
+		panel.addEventListener(eventName, stop);
+	}
+	overlay.addEventListener("click", () => overlay.remove());
+	document.body.appendChild(overlay);
+	textarea.focus();
 }
 
 function setToolbarButtonDisabled(button, disabled) {
@@ -984,6 +2249,51 @@ function setSettingsVisible(node, visible) {
 	syncWidgetValuesCache(node);
 }
 
+function keepModelEnabled(node) {
+	if (!node) {
+		return true;
+	}
+	node.properties ||= {};
+	if (node.properties[KEEP_MODEL_PROPERTY] == null) {
+		node.properties[KEEP_MODEL_PROPERTY] = true;
+	}
+	return node.properties[KEEP_MODEL_PROPERTY] !== false;
+}
+
+function setKeepModelEnabled(node, enabled) {
+	node.properties ||= {};
+	node.properties[KEEP_MODEL_PROPERTY] = Boolean(enabled);
+	setWidgetValue(getWidget(node, "keep_model"), Boolean(enabled));
+	updateKeepModelButtonState(node);
+	syncWidgetValuesCache(node);
+	refreshNode(node);
+}
+
+function randomSeedEnabled(node) {
+	return Boolean(node?.properties?.[RANDOM_SEED_PROPERTY]);
+}
+
+function randomSeedValue() {
+	return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+}
+
+function setRandomSeedEnabled(node, enabled) {
+	node.properties ||= {};
+	node.properties[RANDOM_SEED_PROPERTY] = Boolean(enabled);
+	updateRandomSeedButtonState(node);
+	refreshNode(node);
+}
+
+function randomizeSeedIfEnabled(node) {
+	if (!randomSeedEnabled(node)) {
+		return null;
+	}
+	const seed = randomSeedValue();
+	setWidgetValue(getWidget(node, "seed"), seed);
+	syncWidgetValuesCache(node);
+	return seed;
+}
+
 function updateSettingsButtonState(node) {
 	const button = node?.__gjjCharacterMultiViewSettingsButton;
 	if (!button) {
@@ -996,10 +2306,100 @@ function updateSettingsButtonState(node) {
 	button.style.borderColor = open ? "#5a7a8a" : "#41535b";
 }
 
+function applyToolbarToggleStyle(button, enabled, colors) {
+	if (!button) {
+		return;
+	}
+	button.__gjjToggleButton = true;
+	button.setAttribute("aria-pressed", enabled ? "true" : "false");
+	button.style.minWidth = "34px";
+	button.style.padding = "3px 9px";
+	button.style.fontWeight = "700";
+	button.style.background = enabled ? colors.onBg : "#11181c";
+	button.style.borderColor = enabled ? colors.onBorder : "#43555f";
+	button.style.color = enabled ? colors.onColor : "#7f9199";
+	button.style.boxShadow = enabled
+		? `inset 0 0 0 1px ${colors.onInset}, 0 0 8px ${colors.onGlow}`
+		: "inset 0 0 0 1px rgba(255,255,255,0.03)";
+	button.style.opacity = enabled ? "1" : "0.72";
+}
+
+function updateKeepModelButtonState(node) {
+	const button = node?.__gjjCharacterMultiViewKeepModelButton;
+	if (!button) {
+		return;
+	}
+	const enabled = keepModelEnabled(node);
+	const widget = getWidget(node, "keep_model");
+	if (widget && widget.value !== enabled) {
+		widget.value = enabled;
+	}
+	button.textContent = "🧠";
+	button.title = enabled ? "保持模型：开启。执行后尽量保留当前模型在内存中。" : "保持模型：关闭。执行后允许释放当前模型。";
+	applyToolbarToggleStyle(button, enabled, {
+		onBg: "#1d3d34",
+		onBorder: "#54c985",
+		onColor: "#eafff2",
+		onInset: "rgba(111,255,174,0.28)",
+		onGlow: "rgba(84,201,133,0.32)",
+	});
+}
+
+function updateRandomSeedButtonState(node) {
+	const button = node?.__gjjCharacterMultiViewRandomSeedButton;
+	if (!button) {
+		return;
+	}
+	const enabled = randomSeedEnabled(node);
+	button.textContent = "🎲";
+	button.title = enabled ? "随机种：开启。每次运行前自动更换 seed。" : "随机种：关闭。点击开启每次运行前自动更换 seed。";
+	applyToolbarToggleStyle(button, enabled, {
+		onBg: "#463413",
+		onBorder: "#f2b84b",
+		onColor: "#fff4d7",
+		onInset: "rgba(255,207,98,0.28)",
+		onGlow: "rgba(242,184,75,0.34)",
+	});
+}
+
+async function runCurrentCharacterMultiViewNode(node) {
+	const button = node?.__gjjCharacterMultiViewRunButton;
+	const previousOutputNode = node?.constructor?.nodeData?.output_node;
+	try {
+		if (button) {
+			button.disabled = true;
+			button.textContent = "…";
+		}
+		enforceRequiredModelChoices(node);
+		const randomizedSeed = randomizeSeedIfEnabled(node);
+		clearLivePreview(node);
+		node.properties ||= {};
+		node.properties[TEMP_OUTPUT_NODE_FLAG] = true;
+		if (node.constructor?.nodeData) node.constructor.nodeData.output_node = true;
+		node.output_node = true;
+		const queued = await queueOnlyCurrentNode(node);
+		setStatus(node, queued
+			? (randomizedSeed == null ? "已加入队列" : `已加入队列，随机 seed：${randomizedSeed}`)
+			: "运行失败");
+	} catch (error) {
+		setStatus(node, `运行失败：${error?.message || error}`);
+	} finally {
+		if (node?.properties) delete node.properties[TEMP_OUTPUT_NODE_FLAG];
+		if (node?.constructor?.nodeData) node.constructor.nodeData.output_node = previousOutputNode;
+		if (node) delete node.output_node;
+		if (button) {
+			button.disabled = false;
+			button.textContent = "▶";
+		}
+	}
+}
+
 function widgetVisibilityRank(widget) {
 	const name = String(widget?.name || "");
 	if (name === PRESET_WIDGET_NAME) return 0;
 	if (name === ACTION_TEXT_WIDGET) return 1;
+	if (name === LORA_LIST_WIDGET_NAME) return 2;
+	if (name === PREVIEW_WIDGET_NAME) return 3;
 	if (name === STATUS_WIDGET_NAME) return 99;
 	return 10;
 }
@@ -1019,11 +2419,27 @@ function applyCompactVisibility(node) {
 		return;
 	}
 	const open = showSettings(node);
+	const hiddenLoraWidgets = new Set([
+		LORA1_WIDGET,
+		LORA1_STRENGTH_WIDGET,
+		LORA2_WIDGET,
+		LORA2_STRENGTH_WIDGET,
+		LORA3_WIDGET,
+		LORA3_STRENGTH_WIDGET,
+	]);
 	for (const widget of node.widgets) {
 		const name = String(widget?.name || "");
-		if (name === PRESET_WIDGET_NAME || name === ACTION_TEXT_WIDGET) {
+		if (name === PRESET_WIDGET_NAME || name === ACTION_TEXT_WIDGET || name === PREVIEW_WIDGET_NAME) {
 			setWidgetHidden(widget, false);
+		} else if (name === LORA_LIST_WIDGET_NAME) {
+			const container = node.__gjjCharacterMultiViewLoraContainer;
+			if (container?.style) {
+				container.style.display = open ? "flex" : "none";
+			}
+			setWidgetHidden(widget, !open);
 		} else if (name === STATUS_WIDGET_NAME) {
+			setWidgetHidden(widget, true);
+		} else if (hiddenLoraWidgets.has(name)) {
 			setWidgetHidden(widget, true);
 		} else if (widgetDeclaresCompactHidden(widget)) {
 			setWidgetHidden(widget, !open);
@@ -1037,6 +2453,9 @@ function applyCompactVisibility(node) {
 	reorderCompactWidgets(node);
 	updateMainImageButtonState(node);
 	updateSettingsButtonState(node);
+	updateKeepModelButtonState(node);
+	updateRandomSeedButtonState(node);
+	renderLoraList(node);
 	syncWidgetValuesCache(node);
 	refreshNode(node);
 }
@@ -1051,7 +2470,7 @@ function ensureToolbar(node) {
 	}
 
 	const container = document.createElement("div");
-	container.style.cssText = "display:flex;flex-wrap:nowrap;gap:6px;padding:4px 0 2px;align-items:center;overflow:hidden;";
+	container.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;padding:4px 0 2px;align-items:center;overflow:hidden;";
 
 	const setActionLines = (lines) => {
 		setWidgetValue(textWidget, lines.join("\n"));
@@ -1062,18 +2481,42 @@ function ensureToolbar(node) {
 	const openImageButton = createButton("📁", "打开本地图片，上传后自动接入主图。", () => openMainImageFile(node));
 	node.__gjjCharacterMultiViewMainImageButton = openImageButton;
 	container.appendChild(openImageButton);
-	container.appendChild(createButton("人物资产", "填入超写实真人角色四连图动作文本（大头特写+正面全身+斜侧全身+正侧全身）", () => setActionLines(PRESET_ACTION_GROUPS.characterAsset)));
-	container.appendChild(createButton("产品四视图", "填入产品正左后右四视图动作文本", () => setActionLines(PRESET_ACTION_GROUPS.productFour)));
-	container.appendChild(createButton("标准五视图", "填入 1 张标准照 + 2x2 拼版的五视图动作文本", () => setActionLines(PRESET_ACTION_GROUPS.five)));
-	container.appendChild(createButton("标准六视图", "填入六视图动作文本，拼版自动使用 2x3 或 3x2", () => setActionLines(PRESET_ACTION_GROUPS.six)));
-	container.appendChild(createButton("标准九视图", "填入九视图常用动作文本，并追加一张主体变体图", () => setActionLines(PRESET_ACTION_GROUPS.nine)));
-	container.appendChild(createButton("半身特写", "填入半身和局部补充视图", () => setActionLines(PRESET_ACTION_GROUPS.closeup)));
-	container.appendChild(createButton("清空动作", "清空动作文本列表", () => setActionLines([])));
+
+	const runButton = createButton("▶", "运行当前 GJJ_CharacterMultiViewStudio 节点，不需要外接输出。", () => runCurrentCharacterMultiViewNode(node));
+	node.__gjjCharacterMultiViewRunButton = runButton;
+	container.appendChild(runButton);
+
+	const keepModelButton = createButton("🧠", "保持模型：开启。执行后尽量保留当前模型在内存中。", () => {
+		setKeepModelEnabled(node, !keepModelEnabled(node));
+	});
+	node.__gjjCharacterMultiViewKeepModelButton = keepModelButton;
+	container.appendChild(keepModelButton);
+
+	const randomSeedButton = createButton("🎲", "随机种：关闭。点击开启每次运行前自动更换 seed。", () => {
+		setRandomSeedEnabled(node, !randomSeedEnabled(node));
+	});
+	node.__gjjCharacterMultiViewRandomSeedButton = randomSeedButton;
+	container.appendChild(randomSeedButton);
+
+	const templateEditorButton = createButton("📚", "编辑多视图模板，保存到 presets/gjj_character_multiview_templates.txt。", () => openTemplateEditor(node));
+	node.__gjjCharacterMultiViewTemplateEditorButton = templateEditorButton;
+	container.appendChild(templateEditorButton);
+
+	const clearButton = createButton("清空动作", "清空动作文本列表", () => setActionLines([]));
+	node.__gjjCharacterMultiViewTemplateButtons = container;
+	node.__gjjCharacterMultiViewTemplateInsertBefore = clearButton;
+	node.__gjjCharacterMultiViewTemplateButtonElements = [];
+	container.appendChild(clearButton);
 	const settingsButton = createButton("⚙️", "显示模型、LoRA、提示词、种子和保存参数。", () => {
 		setSettingsVisible(node, !showSettings(node));
 	});
 	node.__gjjCharacterMultiViewSettingsButton = settingsButton;
 	container.appendChild(settingsButton);
+	refreshTemplateButtons(node).catch((error) => {
+		console.warn("[GJJ CharacterMultiViewStudio] 模板按钮刷新失败。", error);
+		node.__gjjCharacterMultiViewTemplateText = DEFAULT_TEMPLATE_TEXT;
+		renderTemplateButtons(node);
+	});
 
 	const measureToolbarHeight = () => Math.max(34, Math.ceil(container.scrollHeight || container.offsetHeight || 34));
 
@@ -1093,6 +2536,8 @@ function ensureToolbar(node) {
 	node.__gjjCharacterMultiViewToolbar = widget || { element: container };
 	updateMainImageButtonState(node);
 	updateSettingsButtonState(node);
+	updateKeepModelButtonState(node);
+	updateRandomSeedButtonState(node);
 	requestAnimationFrame(() => refreshNode(node));
 }
 
@@ -1128,6 +2573,246 @@ function ensureStatusWidget(node) {
 	node.__gjjCharacterMultiViewStatus = { widget, box };
 }
 
+function ensurePreviewWidget(node) {
+	if (node.__gjjCharacterMultiViewPreview) {
+		return;
+	}
+	const wrap = document.createElement("div");
+	wrap.style.cssText = [
+		"display:none",
+		"grid-template-columns:repeat(auto-fill,minmax(86px,1fr))",
+		"gap:6px",
+		"padding:4px 0 2px",
+		"width:100%",
+		"box-sizing:border-box",
+	].join(";");
+	const widget = node.addDOMWidget?.(PREVIEW_WIDGET_NAME, PREVIEW_WIDGET_NAME, wrap, {
+		serialize: false,
+		hideOnZoom: false,
+		getHeight: () => {
+			if (wrap.style.display === "none") {
+				return 0;
+			}
+			return Math.max(96, Math.ceil(wrap.scrollHeight || wrap.offsetHeight || 96));
+		},
+	});
+	if (widget) {
+		widget.serialize = false;
+		widget.options ||= {};
+		widget.options.serialize = false;
+		widget.value = undefined;
+		widget.computeSize = (width) => [
+			Math.max(280, width || 280),
+			wrap.style.display === "none" ? 0 : Math.max(96, Math.ceil(wrap.scrollHeight || wrap.offsetHeight || 96)),
+		];
+	}
+	node.__gjjCharacterMultiViewPreview = { widget, wrap };
+}
+
+function clearLivePreview(node) {
+	const wrap = node?.__gjjCharacterMultiViewPreview?.wrap;
+	if (!wrap) {
+		return;
+	}
+	wrap.replaceChildren();
+	wrap.style.display = "none";
+	refreshNode(node);
+}
+
+function mediaAspectRatio(item) {
+	const width = Number(item?.width || 0);
+	const height = Number(item?.height || 0);
+	return width > 0 && height > 0 ? `${width} / ${height}` : "1 / 1";
+}
+
+function updateLivePreviewLayout(node) {
+	const wrap = node?.__gjjCharacterMultiViewPreview?.wrap;
+	if (!wrap) {
+		return;
+	}
+	const cards = Array.from(wrap.children || []);
+	if (!cards.length) {
+		wrap.style.display = "none";
+		return;
+	}
+	wrap.style.display = "grid";
+	const single = cards.length === 1;
+	wrap.style.gridTemplateColumns = single ? "minmax(0, 1fr)" : "repeat(auto-fill,minmax(86px,1fr))";
+	for (const card of cards) {
+		const item = card.__gjjCharacterMultiViewPreviewItem || {};
+		card.style.aspectRatio = single ? mediaAspectRatio(item) : "1 / 1";
+		const image = card.querySelector("img");
+		if (image) {
+			image.style.objectFit = single ? "contain" : "cover";
+		}
+	}
+}
+
+function currentLivePreviewItems(node) {
+	const wrap = node?.__gjjCharacterMultiViewPreview?.wrap;
+	return Array.from(wrap?.children || [])
+		.map((card) => card.__gjjCharacterMultiViewPreviewItem)
+		.filter((item) => item?.filename);
+}
+
+function openLivePreviewOverlay(node, startItem) {
+	const items = currentLivePreviewItems(node);
+	if (!items.length) {
+		return;
+	}
+	let index = Math.max(0, items.findIndex((item) => item === startItem));
+	if (index < 0) index = 0;
+	let scale = 1;
+
+	const overlay = document.createElement("div");
+	overlay.style.cssText = [
+		"position:fixed",
+		"inset:0",
+		"z-index:100000",
+		"display:flex",
+		"align-items:center",
+		"justify-content:center",
+		"background:rgba(0,0,0,.9)",
+		"cursor:zoom-out",
+		"overflow:hidden",
+	].join(";");
+	const image = document.createElement("img");
+	image.draggable = false;
+	image.style.cssText = [
+		"max-width:92vw",
+		"max-height:92vh",
+		"object-fit:contain",
+		"border-radius:8px",
+		"box-shadow:0 16px 42px rgba(0,0,0,.5)",
+		"transform-origin:center center",
+		"transition:transform .08s ease",
+		"cursor:zoom-in",
+	].join(";");
+	const badge = document.createElement("div");
+	badge.style.cssText = [
+		"position:absolute",
+		"right:18px",
+		"bottom:16px",
+		"padding:5px 10px",
+		"border-radius:999px",
+		"background:rgba(0,0,0,.55)",
+		"color:#fff",
+		"font:12px/1.2 system-ui,\"Microsoft YaHei\",sans-serif",
+		"pointer-events:none",
+	].join(";");
+	const render = () => {
+		const item = items[index] || items[0];
+		image.src = mediaItemToUrl(item);
+		image.style.transform = `scale(${scale})`;
+		badge.textContent = `${index + 1}/${items.length} · ${Math.round(scale * 100)}%`;
+	};
+	const cycle = (delta = 1) => {
+		index = (index + delta + items.length) % items.length;
+		scale = 1;
+		render();
+	};
+	const close = () => {
+		window.removeEventListener("keydown", onKeyDown, true);
+		overlay.remove();
+	};
+	const onKeyDown = (event) => {
+		if (event.code === "Space") {
+			event.preventDefault();
+			event.stopPropagation();
+			cycle(1);
+		} else if (event.key === "Escape") {
+			event.preventDefault();
+			event.stopPropagation();
+			close();
+		} else if (event.key === "ArrowRight") {
+			event.preventDefault();
+			event.stopPropagation();
+			cycle(1);
+		} else if (event.key === "ArrowLeft") {
+			event.preventDefault();
+			event.stopPropagation();
+			cycle(-1);
+		}
+	};
+	overlay.addEventListener("wheel", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		const factor = event.deltaY < 0 ? 1.12 : 0.89;
+		scale = Math.min(8, Math.max(0.2, scale * factor));
+		render();
+	}, { passive: false });
+	overlay.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		close();
+	});
+	image.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		close();
+	});
+	overlay.append(image, badge);
+	document.body.appendChild(overlay);
+	window.addEventListener("keydown", onKeyDown, true);
+	render();
+}
+
+function appendLivePreviewImage(node, item) {
+	const wrap = node?.__gjjCharacterMultiViewPreview?.wrap;
+	if (!wrap || !item?.filename) {
+		return;
+	}
+	wrap.style.display = "grid";
+	const card = document.createElement("div");
+	card.style.cssText = [
+		"position:relative",
+		"aspect-ratio:1/1",
+		"overflow:hidden",
+		"border:1px solid #33434a",
+		"border-radius:7px",
+		"background:#0c1114",
+		"box-sizing:border-box",
+	].join(";");
+	card.__gjjCharacterMultiViewPreviewItem = item;
+	card.title = "点击放大预览；拖到画布可生成图片节点";
+	card.style.cursor = "zoom-in";
+	card.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		openLivePreviewOverlay(node, item);
+	});
+	const image = document.createElement("img");
+	image.draggable = false;
+	image.src = mediaItemToUrl(item);
+	image.style.cssText = [
+		"width:100%",
+		"height:100%",
+		"object-fit:cover",
+		"display:block",
+	].join(";");
+	image.onload = () => refreshNode(node);
+	setupPreviewImageDrag(card, image, node, item);
+	const badge = document.createElement("div");
+	badge.textContent = String(item.index || wrap.children.length + 1);
+	badge.style.cssText = [
+		"position:absolute",
+		"right:5px",
+		"bottom:5px",
+		"padding:2px 6px",
+		"border-radius:999px",
+		"background:rgba(0,0,0,.58)",
+		"color:#fff",
+		"font-size:10px",
+		"font-weight:700",
+		"line-height:1.2",
+		"pointer-events:none",
+	].join(";");
+	card.append(image, badge);
+	wrap.appendChild(card);
+	updateLivePreviewLayout(node);
+	refreshNode(node);
+}
+
 function setStatus(node, text) {
 	const box = node?.__gjjCharacterMultiViewStatus?.box;
 	if (!box) {
@@ -1142,9 +2827,13 @@ function patchNode(node) {
 		return;
 	}
 
+	clearNativePreview(node);
 	ensureToolbar(node);
+	ensurePreviewWidget(node);
 	ensureStatusWidget(node);
+	ensureLoraListWidget(node);
 	ensureOutputs(node);
+	enforceRequiredModelChoices(node);
 	stabilizeActions(node);
 	applyModelPreset(node, true);
 	applyCompactVisibility(node);
@@ -1175,12 +2864,14 @@ function patchNode(node) {
 
 	const originalExecuted = node.onExecuted;
 	node.onExecuted = function (message) {
+		const width = message?.images?.[0]?.width || message?.preview_images?.[0]?.width;
+		const height = message?.images?.[0]?.height || message?.preview_images?.[0]?.height;
+		clearExecutedPreviewPayload(message);
 		const result = typeof originalExecuted === "function"
 			? originalExecuted.apply(this, arguments)
 			: undefined;
-		const width = message?.images?.[0]?.width || message?.preview_images?.[0]?.width;
-		const height = message?.images?.[0]?.height || message?.preview_images?.[0]?.height;
 		setStatus(this, width && height ? `完成：${width} × ${height}` : "完成");
+		scheduleNativePreviewClear(this);
 		return result;
 	};
 
@@ -1204,6 +2895,26 @@ api.addEventListener("gjj_node_progress", (event) => {
 	}
 });
 
+api.addEventListener("gjj_character_multiview_preview", (event) => {
+	const detail = event?.detail || {};
+	const nodeId = String(detail.node || "");
+	for (const node of app.graph?._nodes || []) {
+		if (!TARGET_NODES.has(node?.comfyClass)) {
+			continue;
+		}
+		if (String(node.id) !== nodeId) {
+			continue;
+		}
+		ensurePreviewWidget(node);
+		if (detail.reset) {
+			clearLivePreview(node);
+		}
+		if (detail.image) {
+			appendLivePreviewImage(node, detail.image);
+		}
+	}
+});
+
 app.registerExtension({
 	name: "GJJ.CharacterMultiViewStudio",
 	async beforeRegisterNodeDef(nodeType, nodeData) {
@@ -1211,11 +2922,28 @@ app.registerExtension({
 			return;
 		}
 		nodeType.prototype.__gjjCharacterMultiViewRegistered = true;
+		nodeData.output_preview = false;
+		nodeType.prototype.hideOutputImages = true;
+		if (Array.isArray(nodeData.outputs)) {
+			for (const output of nodeData.outputs) {
+				output.preview = false;
+			}
+		}
+		const originalAddCustomWidget = nodeType.prototype.addCustomWidget;
+		nodeType.prototype.addCustomWidget = function (widget, ...args) {
+			if (isNativePreviewWidget(this, widget)) {
+				return hideNativePreviewWidget(widget);
+			}
+			return typeof originalAddCustomWidget === "function"
+				? originalAddCustomWidget.call(this, widget, ...args)
+				: widget;
+		};
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
 			const result = typeof originalOnNodeCreated === "function"
 				? originalOnNodeCreated.apply(this, args)
 				: undefined;
+			clearNativePreview(this);
 			setTimeout(() => patchNode(this), 0);
 			return result;
 		};
@@ -1224,8 +2952,10 @@ app.registerExtension({
 			const result = typeof originalOnConfigure === "function"
 				? originalOnConfigure.call(this, serializedNode, ...args)
 				: undefined;
+			clearNativePreview(this);
 			restoreSerializedValues(this, serializedNode);
 			setTimeout(() => {
+				clearNativePreview(this);
 				restoreSerializedValues(this, serializedNode);
 				patchNode(this);
 				syncWidgetValuesCache(this);
@@ -1249,6 +2979,7 @@ app.registerExtension({
 		setTimeout(() => patchNode(node), 0);
 	},
 	setup() {
+		ensurePreviewDropHandler();
 		for (const node of app.graph?._nodes || []) {
 			if (TARGET_NODES.has(node?.comfyClass)) {
 				patchNode(node);
