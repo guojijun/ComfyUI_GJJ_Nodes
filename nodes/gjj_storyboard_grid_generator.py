@@ -780,6 +780,7 @@ def _open_character_view_rgba(character: dict[str, Any], view: dict[str, Any], p
     try:
         image = Image.open(path).convert("RGBA")
         image = _remove_checkerboard_background(image)
+        image = _remove_flat_edge_background(image)
         image = _crop_character_reference_alpha(image, preserve_full_body=preserve_full_body)
         return image
     except Exception:
@@ -844,6 +845,72 @@ def _remove_checkerboard_background(image: Image.Image) -> Image.Image:
         remove[y, x] = True
         stack.extend(((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)))
     if remove.mean() < 0.01:
+        return image
+    array[..., 3] = np.where(remove, 0, alpha).astype(np.uint8)
+    return Image.fromarray(array, "RGBA")
+
+
+def _remove_flat_edge_background(image: Image.Image) -> Image.Image:
+    if image.mode != "RGBA" or image.width < 16 or image.height < 16:
+        return image
+    array = np.asarray(image).copy()
+    alpha = array[..., 3]
+    if int(alpha.min(initial=255)) < 240:
+        return image
+    rgb = array[..., :3].astype(np.int16)
+    height, width = alpha.shape
+    border = np.concatenate(
+        [
+            array[:4, :, :].reshape(-1, 4),
+            array[-4:, :, :].reshape(-1, 4),
+            array[:, :4, :].reshape(-1, 4),
+            array[:, -4:, :].reshape(-1, 4),
+        ],
+        axis=0,
+    )
+    border_rgb = border[:, :3].astype(np.int16)
+    border_alpha = border[:, 3]
+    border_rgb = border_rgb[border_alpha > 240]
+    if border_rgb.shape[0] < max(32, int((width + height) * 0.08)):
+        return image
+    quantized = (border_rgb // 12).astype(np.int16)
+    values, counts = np.unique(quantized, axis=0, return_counts=True)
+    order = np.argsort(counts)[::-1]
+    colors: list[np.ndarray] = []
+    for item_index in order[:6]:
+        if counts[item_index] < max(12, int(border_rgb.shape[0] * 0.04)):
+            continue
+        color = (values[item_index].astype(np.int16) * 12 + 6).clip(0, 255)
+        if all(np.linalg.norm(color - existing) > 22 for existing in colors):
+            colors.append(color)
+        if len(colors) >= 3:
+            break
+    if not colors:
+        return image
+    distances = [np.abs(rgb - color.reshape(1, 1, 3)).max(axis=2) for color in colors]
+    background_candidate = np.minimum.reduce(distances) <= 34
+    visited = np.zeros((height, width), dtype=np.bool_)
+    remove = np.zeros((height, width), dtype=np.bool_)
+    stack: list[tuple[int, int]] = []
+    for x in range(width):
+        if background_candidate[0, x]:
+            stack.append((x, 0))
+        if background_candidate[height - 1, x]:
+            stack.append((x, height - 1))
+    for y in range(height):
+        if background_candidate[y, 0]:
+            stack.append((0, y))
+        if background_candidate[y, width - 1]:
+            stack.append((width - 1, y))
+    while stack:
+        x, y = stack.pop()
+        if x < 0 or y < 0 or x >= width or y >= height or visited[y, x] or not background_candidate[y, x]:
+            continue
+        visited[y, x] = True
+        remove[y, x] = True
+        stack.extend(((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)))
+    ratio = float(remove.mean())
+    if ratio < 0.03 or ratio > 0.92:
         return image
     array[..., 3] = np.where(remove, 0, alpha).astype(np.uint8)
     return Image.fromarray(array, "RGBA")
@@ -1691,6 +1758,11 @@ def _make_scene_character_board(
         char_image = _open_character_view_rgba(character, selected_view, preserve_full_body=True)
         if char_image is None:
             continue
+        try:
+            if int(np.asarray(char_image.getchannel("A")).min(initial=255)) >= 240:
+                continue
+        except Exception:
+            continue
         explicit_view = next((label for label in explicit_views if not _reference_wants_closeup("", label)), explicit_views[0] if explicit_views else "")
         slot = hints.get(char_name.casefold()) or hints.get((char_name + "/" + explicit_view).casefold()) or ""
         if slot not in {"left", "right", "center"} or slot in used_slots:
@@ -1751,6 +1823,106 @@ def _make_scene_character_board(
     return board.convert("RGB"), prompt_parts, binding_lines
 
 
+def _make_scene_identity_reference_board(
+    prompt_text: str,
+    character_refs: list[tuple[str, str]],
+    width: int,
+    height: int,
+) -> tuple[Image.Image | None, list[str]]:
+    grouped_refs = _group_character_refs(character_refs)
+    images: list[tuple[str, dict[str, Any], Image.Image]] = []
+    for name, explicit_labels in grouped_refs[:3]:
+        character = _find_character(name)
+        if not character:
+            continue
+        view = None
+        for label in explicit_labels:
+            if not _reference_wants_closeup("", label):
+                continue
+            view = _find_view(character, (), label)
+            if view is not None:
+                break
+        if view is None:
+            view = _select_character_face_view(character)
+        if view is None:
+            view = _character_full_body_reference_view(character, prompt_text, explicit_labels)
+        if view is None:
+            continue
+        image = _open_character_view(character, view)
+        if image is None:
+            continue
+        images.append((name, character, image))
+    if not images:
+        return None, []
+    count = len(images)
+    board_w = max(512, min(1536, max(int(width or 1024), count * 360)))
+    board_h = max(512, min(1024, int(height or 768)))
+    panel_w = board_w / max(1, count)
+    board = Image.new("RGB", (board_w, board_h), (255, 255, 255))
+    display_names: list[str] = []
+    for index, (name, character, image) in enumerate(images):
+        cell = _pil_fit_cell(
+            image,
+            max(1, int(round(panel_w))),
+            board_h,
+            contain=True,
+            top_bias=True,
+        )
+        x = int(round(index * panel_w))
+        board.paste(cell, (x, 0))
+        display_names.append(_character_display_name(character, name))
+    return board, display_names
+
+
+def _make_qwen_direct_character_reference_boards(
+    prompt_text: str,
+    character_refs: list[tuple[str, str]],
+    width: int,
+    height: int,
+    max_boards: int = 3,
+) -> list[tuple[str, Image.Image]]:
+    grouped_refs = _group_character_refs(character_refs)
+    limit = max(0, int(max_boards or 0))
+    if not grouped_refs or limit <= 0 or len(grouped_refs) > limit:
+        return []
+    boards: list[tuple[str, Image.Image]] = []
+    board_w = max(64, int(width or 1024))
+    board_h = max(64, int(height or 768))
+    half_w = max(1, board_w // 2)
+    for name, explicit_labels in grouped_refs:
+        character = _find_character(name)
+        if not character:
+            return []
+        face_view = None
+        for label in explicit_labels:
+            if not _reference_wants_closeup("", label):
+                continue
+            face_view = _find_view(character, (), label)
+            if face_view is not None:
+                break
+        if face_view is None:
+            face_view = _select_character_face_view(character)
+        body_view = _character_full_body_reference_view(character, prompt_text, explicit_labels)
+        if face_view is None and body_view is None:
+            return []
+        face_image = _open_character_view(character, face_view) if face_view is not None else None
+        body_image = _open_character_view(character, body_view) if body_view is not None else None
+        if face_image is None and body_image is None:
+            return []
+        board = Image.new("RGB", (board_w, board_h), (255, 255, 255))
+        if face_image is not None and body_image is not None and not _same_character_view(face_view, body_view):
+            board.paste(_pil_fit_cell(face_image, half_w, board_h, contain=True, top_bias=True), (0, 0))
+            board.paste(
+                _pil_fit_cell(body_image, board_w - half_w, board_h, contain=True, top_bias=True),
+                (half_w, 0),
+            )
+        else:
+            source = body_image or face_image
+            board = _pil_fit_cell(source, board_w, board_h, contain=True, top_bias=True) if source is not None else board
+        boards.append((_character_display_name(character, name), board))
+    return boards
+
+
 def _pil_list_to_reference_tensor(images: list[Image.Image]) -> torch.Tensor | None:
     tensors: list[torch.Tensor] = []
     for image in images:
@@ -1766,6 +1938,8 @@ def _scene_reference_tensor_for_prompt(
     width: int,
     height: int,
     compose_character_references: bool = False,
+    include_identity_reference_board: bool = False,
+    use_direct_character_references: bool = False,
 ) -> tuple[str, torch.Tensor | None, bool]:
     scene_refs = _extract_scene_refs(prompt_text)
     if not scene_refs:
@@ -1781,7 +1955,36 @@ def _scene_reference_tensor_for_prompt(
         background, label = _scene_background_image(scene, place, width, height)
         if background is None:
             continue
-        use_separate_references = len(character_refs) <= 2 and not compose_character_references
+        grouped_character_refs = _group_character_refs(character_refs)
+        direct_character_boards: list[tuple[str, Image.Image]] = []
+        direct_character_mode = use_direct_character_references and 0 < len(grouped_character_refs) <= 2
+        if direct_character_mode:
+            direct_character_boards = _make_qwen_direct_character_reference_boards(
+                prompt_text,
+                character_refs,
+                width,
+                height,
+                max_boards=2,
+            )
+        if direct_character_boards:
+            reference_images.append(background)
+            for _display_name, board in direct_character_boards[:2]:
+                reference_images.append(board)
+            consumed_characters = True
+            display = _safe_text(scene.get("name") or scene.get("id") or scene_name).strip()
+            anchor_rule = f"本格指定的场景锚点是“{label}”，最终画面的主要空间和人物互动位置必须围绕“{label}”。" if label else ""
+            prompt_lines.append(
+                f"参考图使用规则：image1 是场景库“{display}”{('的“' + label + '”位置') if label else ''}干净背景参考，"
+                f"必须作为最终背景和空间透视来源。{anchor_rule}"
+                "image2 起是逐个角色参考板，每张只对应一个角色；每张角色参考板左侧偏身份/脸部，右侧偏全身/服装/体型。"
+                "角色参考板只用于锁定该角色的脸型、五官、发色、头饰、服装配色、体型和身份；"
+                "不得复制角色参考板的白底、半身裁切、站姿、原背景或板内排版。"
+                "最终动作、坐姿、举杯、背靠、人物左右位置和场景透视必须服从原始文字描述与 image1 背景。"
+            )
+            for offset, (display_name, _board) in enumerate(direct_character_boards[:2], start=2):
+                prompt_lines.append(f"image{offset} 只绑定角色“{display_name}”，不要把 image{offset} 当成另一个场景或构图。")
+            continue
+        use_separate_references = len(character_refs) <= 2 and (direct_character_mode or not compose_character_references)
         character_board, character_parts, character_bindings = (
             (None, [], [])
             if use_separate_references
@@ -1791,6 +1994,11 @@ def _scene_reference_tensor_for_prompt(
             reference_images.append(character_board)
             consumed_characters = True
         reference_images.append(background)
+        identity_names: list[str] = []
+        if include_identity_reference_board and character_board is not None and len(reference_images) < 3:
+            identity_board, identity_names = _make_scene_identity_reference_board(prompt_text, character_refs, width, height)
+            if identity_board is not None:
+                reference_images.append(identity_board)
         display = _safe_text(scene.get("name") or scene.get("id") or scene_name).strip()
         if use_separate_references:
             anchor_rule = f"本格指定的场景锚点是“{label}”，最终画面的主要空间和人物互动位置必须围绕“{label}”，不要漂移到同一场景其它未指定物品旁边。" if label else ""
@@ -1821,6 +2029,12 @@ def _scene_reference_tensor_for_prompt(
                 "人物必须重新绘制成自然完整的人体结构，保持头颈肩、躯干、手臂、手指、腿部比例正常；"
                 "不要把参考板中的人物贴片边缘、透明裁切轮廓、压扁或拉长的身体形状复制到最终画面。"
             )
+            if identity_names:
+                prompt_lines.append(
+                    f"image3 是人物身份参考板，包含 {'、'.join(identity_names)}；"
+                    "只用于校准脸型、五官、发色、头饰、服装配色和身份，不用于决定站姿、半身裁切、背景或动作。"
+                    "最终动作、坐姿、举杯、人物左右位置和场景透视必须服从 image1 与文字描述。"
+                )
         else:
             anchor_rule = f"最终画面的主要空间必须围绕“{label}”这个标注点，不要漂移到同一场景其它未指定物品旁边。" if label else ""
             prompt_lines.append(
@@ -2036,6 +2250,38 @@ def _character_prompt_and_reference(
     grouped_refs = _group_character_refs(refs)
     qwen_multi_character = bool(qwen_reference_binding and len(grouped_refs) > 1)
     reference_tensor_override: torch.Tensor | None = None
+    qwen_direct_limit = 0 if remaining_reference_images is None else remaining_reference_images
+    if (
+        include_reference_images
+        and qwen_reference_binding
+        and 0 < len(grouped_refs) <= max(0, int(qwen_direct_limit or 0))
+    ):
+        direct_boards = _make_qwen_direct_character_reference_boards(
+            prompt_text,
+            refs,
+            reference_width,
+            reference_height,
+            max_boards=int(qwen_direct_limit or 0),
+        )
+        if direct_boards and len(direct_boards) == len(grouped_refs):
+            reference_tensor_override = _pil_list_to_reference_tensor([board for _display_name, board in direct_boards])
+            for name, _explicit_views in grouped_refs:
+                character = _find_character(name)
+                if character:
+                    resolved_characters.append((name, character))
+            for offset, (display_name, _board) in enumerate(direct_boards, start=image_slot):
+                prompt_lines.append(
+                    f"{display_name}：image{offset} 是“{display_name}”的单人身份+全身参考板，只用于锁定脸型、五官、发色、头饰、服装配色、体型和身份；"
+                    "不要复制参考板白底、半身裁切、站姿、原背景或板内左右排版。"
+                )
+                qwen_bindings.append(
+                    f"- image{offset} = character \"{display_name}\" ONLY. Use this single-person identity+body board for identity, face, hair, clothing colors and body shape; do not use its background, crop or pose as final composition."
+                )
+            if remaining_reference_images is not None:
+                remaining_reference_images -= len(direct_boards)
+            image_slot += len(direct_boards)
+            grouped_refs = []
+            qwen_multi_character = False
     if (
         include_reference_images
         and qwen_reference_binding
@@ -3249,6 +3495,8 @@ class GJJ_StoryboardGridGenerator:
                 cell_w,
                 cell_h,
                 compose_character_references=is_next_scene_image_edit or is_flux_storyboard,
+                include_identity_reference_board=is_next_scene_image_edit,
+                use_direct_character_references=is_next_scene_image_edit,
             )
             scene_source = None if library_scene_reference is not None else scene
             if is_next_scene_image_edit and library_scene_reference is None:
