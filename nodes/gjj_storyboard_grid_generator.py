@@ -773,14 +773,14 @@ def _open_character_view(character: dict[str, Any], view: dict[str, Any]) -> Ima
         return None
 
 
-def _open_character_view_rgba(character: dict[str, Any], view: dict[str, Any]) -> Image.Image | None:
+def _open_character_view_rgba(character: dict[str, Any], view: dict[str, Any], preserve_full_body: bool = False) -> Image.Image | None:
     path = _view_file(character, view)
     if path is None:
         return None
     try:
         image = Image.open(path).convert("RGBA")
         image = _remove_checkerboard_background(image)
-        image = _crop_character_reference_alpha(image)
+        image = _crop_character_reference_alpha(image, preserve_full_body=preserve_full_body)
         return image
     except Exception:
         return None
@@ -879,7 +879,7 @@ def _alpha_components(mask: np.ndarray) -> list[tuple[int, int, int, int, int]]:
     return components
 
 
-def _crop_character_reference_alpha(image: Image.Image) -> Image.Image:
+def _crop_character_reference_alpha(image: Image.Image, preserve_full_body: bool = False) -> Image.Image:
     if image.mode != "RGBA" or image.width < 8 or image.height < 8:
         return image
     alpha = np.asarray(image.getchannel("A"))
@@ -900,7 +900,7 @@ def _crop_character_reference_alpha(image: Image.Image) -> Image.Image:
         and ((comp[1] + comp[3]) * 0.5) < image.height * 0.78
         and ((comp[3] - comp[1]) > image.height * 0.08 or comp[4] > image_area * 0.01)
     ]
-    keep = upper or useful
+    keep = useful if preserve_full_body else (upper or useful)
     pad_x = max(12, int(round(image.width * 0.025)))
     pad_top = max(20, int(round(image.height * 0.04)))
     pad_bottom = max(16, int(round(image.height * 0.025)))
@@ -1652,8 +1652,16 @@ def _character_note_for_scene_prompt(character: dict[str, Any], name: str) -> st
     return f"{display}，保持人物五官、发型、服装配色和身份一致"
 
 
-def _select_scene_character_view(character: dict[str, Any], prompt_text: str, explicit_label: str = "") -> dict[str, Any] | None:
-    selected = _select_character_pose_view(character, prompt_text, explicit_label)
+def _select_scene_character_view(
+    character: dict[str, Any],
+    prompt_text: str,
+    explicit_labels: list[str] | str | None = None,
+) -> dict[str, Any] | None:
+    labels = explicit_labels if isinstance(explicit_labels, list) else ([explicit_labels] if explicit_labels else [])
+    selected = _character_full_body_reference_view(character, prompt_text, labels)
+    if selected is None:
+        pose_label = next((label for label in labels if not _reference_wants_closeup("", label)), "")
+        selected = _select_character_pose_view(character, prompt_text, pose_label)
     if selected is None:
         selected = _select_character_face_view(character)
     return selected
@@ -1672,17 +1680,18 @@ def _make_scene_character_board(
     resolved: list[tuple[str, dict[str, Any], Image.Image, str, str]] = []
     used_slots: set[str] = set()
     default_slots = ["left", "right", "center"]
-    scene_refs = [(name, views[0] if views else "") for name, views in _group_character_refs(character_refs)]
-    for index, (char_name, explicit_view) in enumerate(scene_refs[:3]):
+    scene_refs = _group_character_refs(character_refs)
+    for index, (char_name, explicit_views) in enumerate(scene_refs[:3]):
         character = _find_character(char_name)
         if not character:
             continue
-        selected_view = _select_scene_character_view(character, prompt_text, explicit_view)
+        selected_view = _select_scene_character_view(character, prompt_text, explicit_views)
         if selected_view is None:
             continue
-        char_image = _open_character_view_rgba(character, selected_view)
+        char_image = _open_character_view_rgba(character, selected_view, preserve_full_body=True)
         if char_image is None:
             continue
+        explicit_view = next((label for label in explicit_views if not _reference_wants_closeup("", label)), explicit_views[0] if explicit_views else "")
         slot = hints.get(char_name.casefold()) or hints.get((char_name + "/" + explicit_view).casefold()) or ""
         if slot not in {"left", "right", "center"} or slot in used_slots:
             slot = ""
@@ -1701,29 +1710,39 @@ def _make_scene_character_board(
     else:
         board = Image.new("RGBA", (max(64, int(width)), max(64, int(height))), (255, 255, 255, 255))
     resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
-    slot_x = {
-        "left": 0.24,
-        "center": 0.50,
-        "right": 0.76,
-    }
     prompt_parts: list[str] = []
     binding_lines: list[str] = []
-    for index, (char_name, character, char_image, slot, _explicit_view) in enumerate(resolved):
-        char = char_image.convert("RGBA")
+    slot_order = {"left": 0, "center": 1, "right": 2}
+    sorted_resolved = sorted(enumerate(resolved), key=lambda item: (slot_order.get(item[1][3], item[0]), item[0]))
+    character_layers = [(original_index, item, item[2].convert("RGBA")) for original_index, item in sorted_resolved]
+    max_char_h = max((char.height for _original_index, _item, char in character_layers), default=0)
+    character_gap = max(16, int(round(max_char_h * 0.08))) if len(character_layers) > 1 else 0
+    group_w = sum(char.width for _original_index, _item, char in character_layers) + character_gap * max(0, len(character_layers) - 1)
+    group_h = max_char_h
+    if group_w > 0 and group_h > 0:
+        group = Image.new("RGBA", (group_w, group_h), (0, 0, 0, 0))
+        x_cursor = 0
+        for _original_index, _item, char in character_layers:
+            group.alpha_composite(char, (x_cursor, max(0, group_h - char.height)))
+            x_cursor += char.width + character_gap
         closeup = _prompt_wants_closeup(prompt_text)
-        target_h = int(round(board.height * (0.76 if closeup else 0.62)))
-        scale = target_h / max(1, char.height)
-        target_w = int(round(char.width * scale))
-        max_w = int(round(board.width * ((0.40 if len(resolved) <= 2 else 0.30) if closeup else (0.32 if len(resolved) <= 2 else 0.24))))
-        if target_w > max_w:
-            scale = max_w / max(1, char.width)
-            target_w = int(round(char.width * scale))
-            target_h = int(round(char.height * scale))
-        char = char.resize((max(1, target_w), max(1, target_h)), resampling)
-        center_x = int(round(board.width * slot_x.get(slot, 0.5)))
-        x = max(0, min(board.width - char.width, center_x - char.width // 2))
-        y = max(0, min(board.height - char.height, int(round(board.height * 0.96 - char.height))))
-        board.alpha_composite(char, (x, y))
+        max_group_w = int(round(board.width * 0.90))
+        max_group_h = int(round(board.height * (0.78 if closeup else 0.66)))
+        scale = min(max_group_w / max(1, group.width), max_group_h / max(1, group.height))
+        scaled_w = max(1, int(round(group.width * scale)))
+        scaled_h = max(1, int(round(group.height * scale)))
+        group = group.resize((scaled_w, scaled_h), resampling)
+        slots = {item[3] for _original_index, item, _char in character_layers}
+        if len(character_layers) == 1 and "left" in slots:
+            group_x = int(round(board.width * 0.12))
+        elif len(character_layers) == 1 and "right" in slots:
+            group_x = int(round(board.width * 0.88 - group.width))
+        else:
+            group_x = int(round((board.width - group.width) * 0.5))
+        group_x = max(0, min(board.width - group.width, group_x))
+        group_y = max(0, min(board.height - group.height, int(round(board.height * 0.96 - group.height))))
+        board.alpha_composite(group, (group_x, group_y))
+    for index, (char_name, character, _char_image, slot, _explicit_view) in enumerate(resolved):
         label = _character_slot_label(slot, index)
         display_name = _character_display_name(character, char_name)
         note = _character_note_for_scene_prompt(character, char_name)
