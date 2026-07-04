@@ -16,6 +16,7 @@ from PIL import Image
 
 from .gjj_batch_image_type import GJJ_BATCH_IMAGE_TYPE
 from .common_utils.model_family import gjjutils_model_family_match_preset as _match_model_family_preset
+from .common_utils.temp_files import gjjutils_read_temp_pil_image, gjjutils_write_temp_bytes, gjjutils_write_temp_tensor_images
 from .gjj_lazy_image_studio import (
     DEFAULT_CLIP_NAME,
     DEFAULT_UNET_DTYPE,
@@ -163,6 +164,53 @@ def _send_live_preview(unique_id: Any, image: torch.Tensor, index: int, total: i
         )
     except Exception as exc:
         print(f"[GJJ StoryboardGridGenerator] 发送实时预览失败: {exc}")
+
+
+def _write_debug_reference_images(unique_id: Any, preview_index: int, refs: dict[str, torch.Tensor]) -> None:
+    if not refs:
+        return
+    try:
+        lines: list[str] = []
+        for key in sorted(refs):
+            value = refs.get(key)
+            if not isinstance(value, torch.Tensor):
+                continue
+            images = gjjutils_write_temp_tensor_images(value.detach().float().clamp(0.0, 1.0).cpu())
+            for index, info in enumerate(images, start=1):
+                filename = _safe_text(info.get("filename")).strip()
+                if filename:
+                    try:
+                        check = gjjutils_read_temp_pil_image(info)
+                        size_text = f"{int(check.width)}x{int(check.height)}"
+                    except Exception:
+                        size_text = f"{info.get('width', '?')}x{info.get('height', '?')}"
+                    lines.append(f"{key}[{index}]={info.get('subfolder', 'GJJ')}/{filename}({size_text})")
+        if not lines:
+            return
+        message = f"分镜 {int(preview_index)} 实际参考入口 temp：{'；'.join(lines)}"
+        print(f"[GJJ StoryboardGridGenerator] {message}")
+        _send_status(unique_id, message)
+    except Exception as exc:
+        print(f"[GJJ StoryboardGridGenerator] 写入参考入口调试图失败: {exc}")
+
+
+def _write_debug_final_prompt(unique_id: Any, preview_index: int, prompt_text: str, negative_prompt: Any) -> None:
+    try:
+        content = (
+            f"GJJ_StoryboardGridGenerator final prompt debug\n"
+            f"cell: {int(preview_index)}\n\n"
+            f"POSITIVE:\n{_safe_text(prompt_text)}\n\n"
+            f"NEGATIVE:\n{_safe_text(negative_prompt)}\n"
+        )
+        info = gjjutils_write_temp_bytes(content.encode("utf-8"), suffix=".txt")
+        filename = _safe_text(info.get("filename")).strip()
+        if not filename:
+            return
+        message = f"分镜 {int(preview_index)} 最终提示词 temp：{info.get('subfolder', 'GJJ')}/{filename}"
+        print(f"[GJJ StoryboardGridGenerator] {message}")
+        _send_status(unique_id, message)
+    except Exception as exc:
+        print(f"[GJJ StoryboardGridGenerator] 写入最终提示词调试文件失败: {exc}")
 
 
 def _split_prompt_segments(prompt: Any) -> list[str]:
@@ -392,44 +440,56 @@ def _scene_library_root() -> Path:
     return models_dir / "GJJ" / "scene_library"
 
 
+def _scene_library_roots() -> list[Path]:
+    roots = [_scene_library_root(), Path(__file__).resolve().parents[1] / "presets" / "scene_library"]
+    seen: set[str] = set()
+    result: list[Path] = []
+    for root in roots:
+        key = str(root.resolve()) if root else ""
+        if key and key not in seen:
+            seen.add(key)
+            result.append(root)
+    return result
+
+
 def _scene_library_items() -> list[dict[str, Any]]:
-    root = _scene_library_root()
-    if not root.is_dir():
-        return []
     items: list[dict[str, Any]] = []
-    for entry in root.iterdir():
-        if not entry.is_dir():
+    for root in _scene_library_roots():
+        if not root.is_dir():
             continue
-        path = entry / "manifest.json"
-        try:
-            data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-        except Exception:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
-        data["id"] = _safe_text(data.get("id") or entry.name).strip()
-        data["name"] = _safe_text(data.get("name") or data["id"]).strip()
-        data["type"] = _safe_text(data.get("type") or "360").strip().lower() or "360"
-        data["_dir"] = str(entry)
-        data["_folder_id"] = entry.name
-        assets = data.get("assets") if isinstance(data.get("assets"), list) else []
-        annotations = data.get("annotations") if isinstance(data.get("annotations"), list) else []
-        data["assets"] = [asset for asset in assets if isinstance(asset, dict)]
-        data["annotations"] = [mark for mark in annotations if isinstance(mark, dict)]
-        items.append(data)
+        for entry in root.iterdir():
+            if not entry.is_dir():
+                continue
+            path = entry / "manifest.json"
+            try:
+                data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+            except Exception:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            data["id"] = _safe_text(data.get("id") or entry.name).strip()
+            data["name"] = _safe_text(data.get("name") or data["id"]).strip()
+            data["type"] = _safe_text(data.get("type") or "360").strip().lower() or "360"
+            data["_dir"] = str(entry)
+            data["_folder_id"] = entry.name
+            assets = data.get("assets") if isinstance(data.get("assets"), list) else []
+            annotations = data.get("annotations") if isinstance(data.get("annotations"), list) else []
+            data["assets"] = [asset for asset in assets if isinstance(asset, dict)]
+            data["annotations"] = [mark for mark in annotations if isinstance(mark, dict)]
+            items.append(data)
     return items
 
 
 def _scene_library_signature() -> str:
-    root = _scene_library_root()
-    if not root.is_dir():
-        return ""
     parts: list[str] = []
     try:
-        for path in root.glob("*/*"):
-            if path.is_file() and path.suffix.lower() in {".json", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".hdr", ".exr"}:
-                stat = path.stat()
-                parts.append(f"{path.parent.name}/{path.name}:{int(stat.st_mtime_ns)}:{int(stat.st_size)}")
+        for root in _scene_library_roots():
+            if not root.is_dir():
+                continue
+            for path in root.glob("*/*"):
+                if path.is_file() and path.suffix.lower() in {".json", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".hdr", ".exr"}:
+                    stat = path.stat()
+                    parts.append(f"{root.name}/{path.parent.name}/{path.name}:{int(stat.st_mtime_ns)}:{int(stat.st_size)}")
     except Exception:
         return ""
     return "|".join(sorted(parts))
@@ -521,29 +581,62 @@ def _normalize_scene_key(value: Any) -> str:
 
 def _scene_alias_keys(scene: dict[str, Any]) -> list[tuple[str, str]]:
     aliases: list[tuple[str, str]] = []
-    for value in (scene.get("name"), scene.get("id"), scene.get("_folder_id")):
+    values = [scene.get("name"), scene.get("id"), scene.get("_folder_id")]
+    values.extend(scene.get("keywords") if isinstance(scene.get("keywords"), list) else [])
+    values.extend(scene.get("tags") if isinstance(scene.get("tags"), list) else [])
+    for value in values:
         text = _safe_text(value).strip()
         key = _normalize_scene_key(text)
         if text and key:
             aliases.append((text, key))
+    for mark in scene.get("annotations") or []:
+        if not isinstance(mark, dict):
+            continue
+        values = [
+            mark.get("keyword"),
+            mark.get("label"),
+            mark.get("name"),
+            mark.get("id"),
+        ]
+        values.extend(mark.get("tags") if isinstance(mark.get("tags"), list) else [])
+        for value in values:
+            text = _safe_text(value).strip()
+            key = _normalize_scene_key(text)
+            if text and key:
+                aliases.append((text, key))
     return aliases
+
+
+def _scene_semantic_aliases(key: str) -> list[str]:
+    aliases = [key]
+    groups = [
+        ("主卧", "卧室", "卧房", "房间", "bedroom", "masterbedroom"),
+        ("客厅", "大厅", "起居室", "livingroom", "lounge"),
+        ("厨房", "kitchen"),
+        ("餐厅", "饭厅", "diningroom"),
+        ("浴室", "卫生间", "洗手间", "bathroom"),
+        ("阳台", "露台", "balcony", "terrace"),
+    ]
+    for group in groups:
+        normalized = [_normalize_scene_key(item) for item in group]
+        if any(item and (item in key or key in item) for item in normalized):
+            aliases.extend(item for item in normalized if item)
+    seen: set[str] = set()
+    return [item for item in aliases if item and not (item in seen or seen.add(item))]
 
 
 def _find_scene(name: str) -> dict[str, Any] | None:
     key = _normalize_scene_key(name)
     if not key:
         return None
+    keys = _scene_semantic_aliases(key)
     items = _scene_library_items()
     for item in items:
-        if any(alias_key == key for _alias, alias_key in _scene_alias_keys(item)):
+        if any(alias_key in keys for _alias, alias_key in _scene_alias_keys(item)):
             return item
     for item in items:
-        if any(key in alias_key or alias_key in key for _alias, alias_key in _scene_alias_keys(item)):
+        if any(any(item_key in alias_key or alias_key in item_key for item_key in keys) for _alias, alias_key in _scene_alias_keys(item)):
             return item
-    for item in items:
-        for mark in item.get("annotations") or []:
-            if key == _normalize_scene_key(mark.get("keyword")):
-                return item
     return None
 
 
@@ -766,6 +859,19 @@ def _open_character_view(character: dict[str, Any], view: dict[str, Any]) -> Ima
     if image is None:
         return None
     try:
+        background = Image.new("RGBA", image.size, (255, 255, 255, 255))
+        background.alpha_composite(image)
+        return background.convert("RGB")
+    except Exception:
+        return None
+
+
+def _open_character_view_white(character: dict[str, Any], view: dict[str, Any]) -> Image.Image | None:
+    path = _view_file(character, view)
+    if path is None:
+        return None
+    try:
+        image = Image.open(path).convert("RGBA")
         background = Image.new("RGBA", image.size, (255, 255, 255, 255))
         background.alpha_composite(image)
         return background.convert("RGB")
@@ -1011,6 +1117,14 @@ def _same_character_view(left: dict[str, Any] | None, right: dict[str, Any] | No
     return bool(left_label and right_label and left_label == right_label)
 
 
+def _append_unique_character_view(views: list[dict[str, Any]], view: dict[str, Any] | None, limit: int) -> None:
+    if view is None or len(views) >= max(0, int(limit or 0)):
+        return
+    if any(_same_character_view(item, view) for item in views):
+        return
+    views.append(view)
+
+
 def _select_character_face_view(character: dict[str, Any]) -> dict[str, Any] | None:
     selected = _find_view(character, HEAD_LABEL_KEYWORDS)
     if selected is not None:
@@ -1133,6 +1247,118 @@ def _character_full_body_reference_view(
     return _select_character_face_view(character)
 
 
+def _character_full_body_reference_views(
+    character: dict[str, Any],
+    prompt_text: str,
+    explicit_labels: list[str] | None = None,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    labels = explicit_labels or []
+    result: list[dict[str, Any]] = []
+    for label in labels:
+        if _reference_wants_closeup("", label):
+            continue
+        _append_unique_character_view(result, _find_view(character, (), label), limit)
+    for keywords in (
+        FRONT_LABEL_KEYWORDS,
+        LEFT_LABEL_KEYWORDS + ANGLE_LABEL_KEYWORDS,
+        RIGHT_LABEL_KEYWORDS + ANGLE_LABEL_KEYWORDS,
+        BACK_LABEL_KEYWORDS,
+    ):
+        _append_unique_character_view(result, _find_view(character, keywords), limit)
+    prompt_view = _select_character_pose_view(character, prompt_text, "")
+    _append_unique_character_view(result, prompt_view, limit)
+    all_views = character.get("views") if isinstance(character.get("views"), list) else []
+    for view in all_views:
+        label = _view_label(view)
+        if _reference_wants_closeup("", label):
+            continue
+        _append_unique_character_view(result, view, limit)
+    return result
+
+
+def _select_multi_character_full_body_view(
+    character: dict[str, Any],
+    explicit_labels: list[str] | str | None = None,
+) -> dict[str, Any] | None:
+    labels = explicit_labels if isinstance(explicit_labels, list) else ([explicit_labels] if explicit_labels else [])
+    for label in labels:
+        view = _find_view(character, (), label)
+        if view is not None:
+            return view
+    selected = _find_view(character, ("正面全身", "正面全身照", "front full body", "front_full_body"))
+    if selected is not None:
+        return selected
+    selected = _find_view(character, FRONT_LABEL_KEYWORDS)
+    if selected is not None:
+        return selected
+    views = character.get("views") if isinstance(character.get("views"), list) else []
+    for view in views:
+        if not _reference_wants_closeup("", _view_label(view)):
+            return view
+    return _select_character_face_view(character)
+
+
+def _make_equal_height_reference_strip(
+    items: list[tuple[Image.Image, bool]],
+    gap: int | None = None,
+) -> Image.Image | None:
+    if not items:
+        return None
+    resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+    cropped = [
+        _crop_character_reference_alpha(image.convert("RGBA"), preserve_full_body=True) if crop_alpha else image.convert("RGBA")
+        for image, crop_alpha in items
+    ]
+    target_h = max((image.height for image in cropped), default=0)
+    if target_h <= 0:
+        return None
+    spacing = max(12, int(round(target_h * 0.04))) if gap is None else max(0, int(gap))
+    normalized: list[Image.Image] = []
+    for image in cropped:
+        scale = target_h / max(1, image.height)
+        target_w = max(1, int(round(image.width * scale)))
+        normalized.append(image.resize((target_w, target_h), resampling))
+    strip_w = sum(image.width for image in normalized) + spacing * max(0, len(normalized) - 1)
+    strip = Image.new("RGBA", (max(1, strip_w), target_h), (0, 0, 0, 0))
+    x_cursor = 0
+    for image in normalized:
+        strip.alpha_composite(image, (x_cursor, 0))
+        x_cursor += image.width + spacing
+    return strip
+
+
+def _make_equal_height_character_strip(images: list[Image.Image], gap: int | None = None) -> Image.Image | None:
+    return _make_equal_height_reference_strip([(image, True) for image in images], gap=gap)
+
+
+def _make_qwen_single_character_reference_board(
+    face_image: Image.Image | None,
+    body_images: list[Image.Image],
+    width: int,
+    height: int,
+) -> Image.Image | None:
+    board_w = max(64, int(width or 1024))
+    board_h = max(64, int(height or 768))
+    resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+    board = Image.new("RGB", (board_w, board_h), (255, 255, 255))
+    margin = max(10, int(round(min(board_w, board_h) * 0.018)))
+    panel_images = ([face_image] if face_image is not None else []) + body_images[:3]
+    strip = _make_equal_height_reference_strip([(image, False) for image in panel_images], gap=max(10, int(round(board_h * 0.018))))
+    if strip is None:
+        return None
+    safe_w = max(1, board_w - margin * 2)
+    safe_h = max(1, board_h - margin * 2)
+    scale = min(safe_w / max(1, strip.width), safe_h / max(1, strip.height))
+    target_w = max(1, int(round(strip.width * scale)))
+    target_h = max(1, int(round(strip.height * scale)))
+    strip = strip.resize((target_w, target_h), resampling)
+    board_rgba = board.convert("RGBA")
+    board_rgba.alpha_composite(strip, ((board_w - target_w) // 2, max(0, board_h - margin - target_h)))
+    board = board_rgba.convert("RGB")
+    return board
+
+
 def _make_multi_character_full_body_board(
     prompt_text: str,
     grouped_refs: list[tuple[str, list[str]]],
@@ -1144,7 +1370,7 @@ def _make_multi_character_full_body_board(
         character = _find_character(name)
         if not character:
             continue
-        view = _character_full_body_reference_view(character, prompt_text, explicit_labels)
+        view = _select_multi_character_full_body_view(character, explicit_labels)
         if view is None:
             continue
         image = _open_character_view_rgba(character, view)
@@ -1159,21 +1385,17 @@ def _make_multi_character_full_body_board(
     board_w = max(768, min(2400, max(int(width or 1024), count * 300)))
     board = Image.new("RGBA", (board_w, board_h), (255, 255, 255, 255))
     resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
-    panel_w = board_w / max(1, count)
-    for index, (_name, _character, image, _labels) in enumerate(resolved):
-        char = _crop_character_reference_alpha(image.convert("RGBA"))
-        target_h = int(round(board_h * 0.84))
-        max_w = int(round(panel_w * 0.76))
-        scale = target_h / max(1, char.height)
-        if int(round(char.width * scale)) > max_w:
-            scale = max_w / max(1, char.width)
-        target_w = max(1, int(round(char.width * scale)))
-        target_h = max(1, int(round(char.height * scale)))
-        char = char.resize((target_w, target_h), resampling)
-        center_x = int(round((index + 0.5) * panel_w))
-        x = max(0, min(board_w - target_w, center_x - target_w // 2))
+    strip = _make_equal_height_character_strip([image for _name, _character, image, _labels in resolved])
+    if strip is not None:
+        safe_w = int(round(board_w * 0.94))
+        safe_h = int(round(board_h * 0.86))
+        scale = min(safe_w / max(1, strip.width), safe_h / max(1, strip.height))
+        target_w = max(1, int(round(strip.width * scale)))
+        target_h = max(1, int(round(strip.height * scale)))
+        strip = strip.resize((target_w, target_h), resampling)
+        x = max(0, min(board_w - target_w, (board_w - target_w) // 2))
         y = max(0, min(board_h - target_h, int(round(board_h * 0.94 - target_h))))
-        board.alpha_composite(char, (x, y))
+        board.alpha_composite(strip, (x, y))
 
     resolved_characters = [(name, character) for name, character, _image, _labels in resolved]
     position_lines: list[str] = []
@@ -1702,13 +1924,37 @@ def _paste_character_on_background(background: Image.Image, character_image: Ima
 
 
 def _character_slot_label(slot: str, index: int = 0) -> str:
+    if slot == "far_left":
+        return "画面最左侧"
     if slot == "left":
         return "画面左侧"
+    if slot == "left_center":
+        return "画面左中位置"
     if slot == "right":
         return "画面右侧"
+    if slot == "right_center":
+        return "画面右中位置"
+    if slot == "far_right":
+        return "画面最右侧"
     if slot == "center":
         return "画面中间"
     return ["画面左侧", "画面右侧", "画面中间"][min(max(0, index), 2)]
+
+
+def _character_default_slots(count: int) -> list[str]:
+    if count <= 1:
+        return ["center"]
+    if count == 2:
+        return ["left", "right"]
+    if count == 3:
+        return ["left", "center", "right"]
+    if count == 4:
+        return ["far_left", "left_center", "right_center", "far_right"]
+    return ["far_left", "left", "center", "right", "far_right"]
+
+
+def _character_slot_sort_order(slots: list[str]) -> dict[str, int]:
+    return {slot: index for index, slot in enumerate(slots)}
 
 
 def _character_note_for_scene_prompt(character: dict[str, Any], name: str) -> str:
@@ -1723,8 +1969,11 @@ def _select_scene_character_view(
     character: dict[str, Any],
     prompt_text: str,
     explicit_labels: list[str] | str | None = None,
+    prefer_front_full_body: bool = False,
 ) -> dict[str, Any] | None:
     labels = explicit_labels if isinstance(explicit_labels, list) else ([explicit_labels] if explicit_labels else [])
+    if prefer_front_full_body:
+        return _select_multi_character_full_body_view(character, labels)
     selected = _character_full_body_reference_view(character, prompt_text, labels)
     if selected is None:
         pose_label = next((label for label in labels if not _reference_wants_closeup("", label)), "")
@@ -1746,13 +1995,18 @@ def _make_scene_character_board(
     hints = _character_position_hints(prompt_text)
     resolved: list[tuple[str, dict[str, Any], Image.Image, str, str]] = []
     used_slots: set[str] = set()
-    default_slots = ["left", "right", "center"]
     scene_refs = _group_character_refs(character_refs)
-    for index, (char_name, explicit_views) in enumerate(scene_refs[:3]):
+    default_slots = _character_default_slots(len(scene_refs))
+    for index, (char_name, explicit_views) in enumerate(scene_refs):
         character = _find_character(char_name)
         if not character:
             continue
-        selected_view = _select_scene_character_view(character, prompt_text, explicit_views)
+        selected_view = _select_scene_character_view(
+            character,
+            prompt_text,
+            explicit_views,
+            prefer_front_full_body=len(scene_refs) > 1,
+        )
         if selected_view is None:
             continue
         char_image = _open_character_view_rgba(character, selected_view, preserve_full_body=True)
@@ -1765,7 +2019,7 @@ def _make_scene_character_board(
             continue
         explicit_view = next((label for label in explicit_views if not _reference_wants_closeup("", label)), explicit_views[0] if explicit_views else "")
         slot = hints.get(char_name.casefold()) or hints.get((char_name + "/" + explicit_view).casefold()) or ""
-        if slot not in {"left", "right", "center"} or slot in used_slots:
+        if slot not in default_slots or slot in used_slots:
             slot = ""
             for candidate in default_slots:
                 if candidate not in used_slots:
@@ -1777,6 +2031,8 @@ def _make_scene_character_board(
         resolved.append((char_name, character, char_image, slot, explicit_view))
     if not resolved:
         return None, [], []
+    if len(scene_refs) > 3 and len(resolved) < len(scene_refs):
+        return None, [], []
     if background is not None:
         board = background.convert("RGBA").resize((max(64, int(width)), max(64, int(height))))
     else:
@@ -1784,19 +2040,11 @@ def _make_scene_character_board(
     resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
     prompt_parts: list[str] = []
     binding_lines: list[str] = []
-    slot_order = {"left": 0, "center": 1, "right": 2}
+    slot_order = _character_slot_sort_order(default_slots)
     sorted_resolved = sorted(enumerate(resolved), key=lambda item: (slot_order.get(item[1][3], item[0]), item[0]))
     character_layers = [(original_index, item, item[2].convert("RGBA")) for original_index, item in sorted_resolved]
-    max_char_h = max((char.height for _original_index, _item, char in character_layers), default=0)
-    character_gap = max(16, int(round(max_char_h * 0.08))) if len(character_layers) > 1 else 0
-    group_w = sum(char.width for _original_index, _item, char in character_layers) + character_gap * max(0, len(character_layers) - 1)
-    group_h = max_char_h
-    if group_w > 0 and group_h > 0:
-        group = Image.new("RGBA", (group_w, group_h), (0, 0, 0, 0))
-        x_cursor = 0
-        for _original_index, _item, char in character_layers:
-            group.alpha_composite(char, (x_cursor, max(0, group_h - char.height)))
-            x_cursor += char.width + character_gap
+    group = _make_equal_height_character_strip([char for _original_index, _item, char in character_layers])
+    if group is not None and group.width > 0 and group.height > 0:
         closeup = _prompt_wants_closeup(prompt_text)
         max_group_w = int(round(board.width * 0.90))
         max_group_h = int(round(board.height * (0.78 if closeup else 0.66)))
@@ -1831,7 +2079,7 @@ def _make_scene_identity_reference_board(
 ) -> tuple[Image.Image | None, list[str]]:
     grouped_refs = _group_character_refs(character_refs)
     images: list[tuple[str, dict[str, Any], Image.Image]] = []
-    for name, explicit_labels in grouped_refs[:3]:
+    for name, explicit_labels in grouped_refs:
         character = _find_character(name)
         if not character:
             continue
@@ -1880,6 +2128,7 @@ def _make_qwen_direct_character_reference_boards(
     width: int,
     height: int,
     max_boards: int = 3,
+    single_view_only: bool = False,
 ) -> list[tuple[str, Image.Image]]:
     grouped_refs = _group_character_refs(character_refs)
     limit = max(0, int(max_boards or 0))
@@ -1888,11 +2137,22 @@ def _make_qwen_direct_character_reference_boards(
     boards: list[tuple[str, Image.Image]] = []
     board_w = max(64, int(width or 1024))
     board_h = max(64, int(height or 768))
-    half_w = max(1, board_w // 2)
     for name, explicit_labels in grouped_refs:
         character = _find_character(name)
         if not character:
             return []
+        if single_view_only:
+            view = _select_multi_character_full_body_view(character, explicit_labels)
+            if view is None:
+                return []
+            image = _open_character_view_white(character, view)
+            if image is None:
+                return []
+            boards.append((
+                _character_display_name(character, name),
+                _pil_fit_cell(image, board_w, board_h, contain=True, top_bias=True),
+            ))
+            continue
         face_view = None
         for label in explicit_labels:
             if not _reference_wants_closeup("", label):
@@ -1902,34 +2162,32 @@ def _make_qwen_direct_character_reference_boards(
                 break
         if face_view is None:
             face_view = _select_character_face_view(character)
-        body_view = _character_full_body_reference_view(character, prompt_text, explicit_labels)
-        if face_view is None and body_view is None:
+        body_views = _character_full_body_reference_views(character, prompt_text, explicit_labels, limit=3)
+        if face_view is None and not body_views:
             return []
-        face_image = _open_character_view(character, face_view) if face_view is not None else None
-        body_image = _open_character_view(character, body_view) if body_view is not None else None
-        if face_image is None and body_image is None:
+        face_image = _open_character_view_white(character, face_view) if face_view is not None else None
+        body_images = [image for view in body_views if (image := _open_character_view_white(character, view)) is not None]
+        if face_image is None and not body_images:
             return []
-        board = Image.new("RGB", (board_w, board_h), (255, 255, 255))
-        if face_image is not None and body_image is not None and not _same_character_view(face_view, body_view):
-            board.paste(_pil_fit_cell(face_image, half_w, board_h, contain=True, top_bias=True), (0, 0))
-            board.paste(
-                _pil_fit_cell(body_image, board_w - half_w, board_h, contain=True, top_bias=True),
-                (half_w, 0),
-            )
-        else:
-            source = body_image or face_image
-            board = _pil_fit_cell(source, board_w, board_h, contain=True, top_bias=True) if source is not None else board
+        board = _make_qwen_single_character_reference_board(face_image, body_images, board_w, board_h)
+        if board is None:
+            return []
         boards.append((_character_display_name(character, name), board))
     return boards
 
 
 def _pil_list_to_reference_tensor(images: list[Image.Image]) -> torch.Tensor | None:
+    if not images:
+        return None
+    target_w = max(1, int(images[0].width))
+    target_h = max(1, int(images[0].height))
     tensors: list[torch.Tensor] = []
     for image in images:
-        array = np.asarray(image.convert("RGB")).astype(np.float32) / 255.0
+        source = image.convert("RGB")
+        if source.size != (target_w, target_h):
+            source = _pil_fit_cell(source, target_w, target_h, contain=True, top_bias=False)
+        array = np.asarray(source).astype(np.float32) / 255.0
         tensors.append(torch.from_numpy(array).unsqueeze(0))
-    if not tensors:
-        return None
     return torch.cat(tensors, dim=0).contiguous()
 
 
@@ -1976,9 +2234,9 @@ def _scene_reference_tensor_for_prompt(
             prompt_lines.append(
                 f"参考图使用规则：image1 是场景库“{display}”{('的“' + label + '”位置') if label else ''}干净背景参考，"
                 f"必须作为最终背景和空间透视来源。{anchor_rule}"
-                "image2 起是逐个角色参考板，每张只对应一个角色；每张角色参考板左侧偏身份/脸部，右侧偏全身/服装/体型。"
-                "角色参考板只用于锁定该角色的脸型、五官、发色、头饰、服装配色、体型和身份；"
-                "不得复制角色参考板的白底、半身裁切、站姿、原背景或板内排版。"
+                "image2 起是逐个角色参考拼图，每张只对应一个角色；角色拼图可以包含大头照和多张等高全身参考。"
+                "角色拼图只用于锁定该角色的脸型、五官、发色、头饰、服装配色、体型、正反侧面和身份；"
+                "不得复制角色参考拼图的白底、半身裁切、站姿、多视图排版或原背景。"
                 "最终动作、坐姿、举杯、背靠、人物左右位置和场景透视必须服从原始文字描述与 image1 背景。"
             )
             for offset, (display_name, _board) in enumerate(direct_character_boards[:2], start=2):
@@ -1993,9 +2251,11 @@ def _scene_reference_tensor_for_prompt(
         if character_board is not None:
             reference_images.append(character_board)
             consumed_characters = True
-        reference_images.append(background)
+        character_board_is_scene_strip = character_board is not None and len(grouped_character_refs) > 1
+        if not character_board_is_scene_strip:
+            reference_images.append(background)
         identity_names: list[str] = []
-        if include_identity_reference_board and character_board is not None and len(reference_images) < 3:
+        if include_identity_reference_board and character_board is not None and not character_board_is_scene_strip and len(reference_images) < 3:
             identity_board, identity_names = _make_scene_identity_reference_board(prompt_text, character_refs, width, height)
             if identity_board is not None:
                 reference_images.append(identity_board)
@@ -2011,24 +2271,38 @@ def _scene_reference_tensor_for_prompt(
             )
         elif character_parts:
             anchor_rule = f"本格指定的场景锚点是“{label}”，最终画面的主要空间和人物互动位置必须围绕“{label}”，不要漂移到同一场景的床、椅子、窗户或其它未指定物品旁边。" if label else ""
-            prompt_lines.append(
-                f"参考图使用规则：image1 是人物与场景的合成构图参考，"
-                f"必须按 image1 中{' 和 '.join(character_parts)}的身份、左右站位、人物比例和背景空间生成。"
-                f"人物身份位置绑定：{'；'.join(character_bindings)}。"
-                f"{anchor_rule}"
-                "这里的左/右一律以观众看最终画面时的屏幕坐标为准，不是角色自身左右，也不是镜像后的左右；"
-                "严禁左右镜像、严禁交换两个人的位置。"
-                "后续所有表情、视线、手部动作和台词都必须按这个姓名绑定执行；"
-                "如果原文写某个名字在笑、看、拿、说话，只允许该名字对应的位置人物执行，禁止把动作转移给另一侧人物。"
-                "image2 是场景库按标注位置裁切的干净背景参考，必须作为最终画面的真实背景和主要空间来源；"
-                "保留 image2 的空间结构、透视、光线、建筑轮廓、地面和主要物件位置。"
-                "人物只能作为前景角色放入 image2，默认使用正面全身比例；除非原提示明确写大头照、头像、特写、近景，否则不要放大成半身或大头。"
-                "如果后续还有单独人物参考图，必须用它们校准人物脸型、胡须、发型、服饰配色和身份特征。"
-                "不要把透明预览底色、裁切边缘或人物参考图背景当作最终背景。"
-                "最终构图必须给背景留出足够可见空间，人物不要铺满画面、不要遮挡大部分背景，人物总占画面高度不超过约 65%。"
-                "人物必须重新绘制成自然完整的人体结构，保持头颈肩、躯干、手臂、手指、腿部比例正常；"
-                "不要把参考板中的人物贴片边缘、透明裁切轮廓、压扁或拉长的身体形状复制到最终画面。"
-            )
+            if character_board_is_scene_strip:
+                prompt_lines.append(
+                    f"参考图使用规则：image1 是场景库“{display}”{('的“' + label + '”位置') if label else ''}背景上叠放等高人物参考的构图板，"
+                    f"背景保持为一整张图，没有参与横向拼接。必须以 image1 的背景作为最终画面的背景和空间透视来源。{anchor_rule}"
+                    f"人物身份位置绑定：{'；'.join(character_bindings)}。"
+                    "image1 中等高排列的人物只用于锁定对应角色的脸型、五官、发色、头饰、服装配色、体型和身份；"
+                    "不要复制人物透明边缘、裁切框、卡片边界或人物参考排版。"
+                    "image1 是参考资料板，不是最终画面成品；最终画面严禁生成截图式拼贴、多面板、分栏、画中画或人物参考卡。"
+                    "每个名字只允许在最终画面中出现一次，不要把同一角色的大头照、正面、背面、侧面或多张参考姿态同时画出来。"
+                    "最终画面必须把所有引用人物重新画进第一块背景环境里，人物动作、坐姿、举杯、背靠和互动关系服从原始文字描述。"
+                    "这里的左/右一律以观众看最终画面时的屏幕坐标为准，不是角色自身左右，也不是镜像后的左右；严禁左右镜像、严禁交换人物。"
+                    "最终构图必须保留背景空间，人物不要遮挡大部分背景；人物必须是自然完整的人体结构。"
+                )
+            else:
+                prompt_lines.append(
+                    f"参考图使用规则：image1 是人物与场景的合成构图参考，"
+                    f"必须按 image1 中{' 和 '.join(character_parts)}的身份、左右站位、人物比例和背景空间生成。"
+                    f"人物身份位置绑定：{'；'.join(character_bindings)}。"
+                    f"{anchor_rule}"
+                    "这里的左/右一律以观众看最终画面时的屏幕坐标为准，不是角色自身左右，也不是镜像后的左右；"
+                    "严禁左右镜像、严禁交换两个人的位置。"
+                    "后续所有表情、视线、手部动作和台词都必须按这个姓名绑定执行；"
+                    "如果原文写某个名字在笑、看、拿、说话，只允许该名字对应的位置人物执行，禁止把动作转移给另一侧人物。"
+                    "image2 是场景库按标注位置裁切的干净背景参考，必须作为最终画面的真实背景和主要空间来源；"
+                    "保留 image2 的空间结构、透视、光线、建筑轮廓、地面和主要物件位置。"
+                    "人物只能作为前景角色放入 image2，默认使用正面全身比例；除非原提示明确写大头照、头像、特写、近景，否则不要放大成半身或大头。"
+                    "如果后续还有单独人物参考图，必须用它们校准人物脸型、胡须、发型、服饰配色和身份特征。"
+                    "不要把透明预览底色、裁切边缘或人物参考图背景当作最终背景。"
+                    "最终构图必须给背景留出足够可见空间，人物不要铺满画面、不要遮挡大部分背景，人物总占画面高度不超过约 65%。"
+                    "人物必须重新绘制成自然完整的人体结构，保持头颈肩、躯干、手臂、手指、腿部比例正常；"
+                    "不要把参考板中的人物贴片边缘、透明裁切轮廓、压扁或拉长的身体形状复制到最终画面。"
+                )
             if identity_names:
                 prompt_lines.append(
                     f"image3 是人物身份参考板，包含 {'、'.join(identity_names)}；"
@@ -2188,15 +2462,19 @@ def _character_layout_lines(characters: list[tuple[str, dict[str, Any]]], positi
     if len(characters) <= 1:
         return []
     positions = {
+        "far_left": ("画面最左侧区域", "右侧人物不得覆盖该角色"),
         "left": ("画面左侧 1/3 区域", "右侧不要挤占该角色位置"),
+        "left_center": ("画面左中区域", "左右相邻人物不得覆盖该角色"),
         "right": ("画面右侧 1/3 区域", "左侧不要挤占该角色位置"),
+        "right_center": ("画面右中区域", "左右相邻人物不得覆盖该角色"),
+        "far_right": ("画面最右侧区域", "左侧人物不得覆盖该角色"),
         "center": ("画面中间 1/3 区域", "左右两侧用场景、道具、光影或背景空间自然填充"),
     }
-    default_order = ("left", "right", "center")
+    default_order = _character_default_slots(len(characters))
     used: set[str] = set()
     assigned: list[str] = []
     hints = position_hints or {}
-    for name, _character in characters[:3]:
+    for name, _character in characters:
         hint = hints.get(name.casefold())
         if hint in positions and hint not in used:
             assigned.append(hint)
@@ -2215,14 +2493,12 @@ def _character_layout_lines(characters: list[tuple[str, dict[str, Any]]], positi
             assigned[index] = default_order[min(index, len(default_order) - 1)]
     lines: list[str] = []
     lines.append("以下站位是硬约束，以观众看到的最终画面坐标为准，不是人物自身左右；禁止交换左右位置，禁止因为参考图构图改变站位。")
-    for index, (name, character) in enumerate(characters[:3]):
+    for index, (name, character) in enumerate(characters):
         display_name = _character_display_name(character, name)
         position, fill_rule = positions[assigned[index]]
         lines.append(f"{index + 1}. {display_name} 必须固定在{position}；{fill_rule}。")
     if len(characters) > 3:
-        extra_names = "、".join(_character_display_name(character, name) for name, character in characters[3:])
-        if extra_names:
-            lines.append(f"其余角色 {extra_names} 作为背景或次要人物，避免抢占前三个主角色位置。")
+        lines.append("所有上述角色都是本格明确引用人物，最终画面必须全部出现；不要把第 4 个及之后的人物省略成背景路人。")
     return lines
 
 
@@ -2261,7 +2537,7 @@ def _character_prompt_and_reference(
             refs,
             reference_width,
             reference_height,
-            max_boards=int(qwen_direct_limit or 0),
+                max_boards=int(qwen_direct_limit or 0),
         )
         if direct_boards and len(direct_boards) == len(grouped_refs):
             reference_tensor_override = _pil_list_to_reference_tensor([board for _display_name, board in direct_boards])
@@ -2271,11 +2547,11 @@ def _character_prompt_and_reference(
                     resolved_characters.append((name, character))
             for offset, (display_name, _board) in enumerate(direct_boards, start=image_slot):
                 prompt_lines.append(
-                    f"{display_name}：image{offset} 是“{display_name}”的单人身份+全身参考板，只用于锁定脸型、五官、发色、头饰、服装配色、体型和身份；"
-                    "不要复制参考板白底、半身裁切、站姿、原背景或板内左右排版。"
+                    f"{display_name}：image{offset} 是“{display_name}”的角色参考拼图，只用于锁定脸型、五官、发色、头饰、服装配色、体型、正反侧面和身份；"
+                    "可以包含大头照和多张等高全身参考；不要复制参考拼图白底、半身裁切、站姿、多视图排版或原背景。"
                 )
                 qwen_bindings.append(
-                    f"- image{offset} = character \"{display_name}\" ONLY. Use this single-person identity+body board for identity, face, hair, clothing colors and body shape; do not use its background, crop or pose as final composition."
+                    f"- image{offset} = character \"{display_name}\" ONLY. Use this single-character reference collage for identity, face, hair, clothing colors, body shape and side/back details; do not use its background, crop, pose or multi-view layout as final composition."
                 )
             if remaining_reference_images is not None:
                 remaining_reference_images -= len(direct_boards)
@@ -3567,6 +3843,8 @@ class GJJ_StoryboardGridGenerator:
                 combined_reference_parts.append(costume_reference)
             combined_reference = combined_reference_parts if combined_reference_parts else None
             refs = _lazy_optional_images(scene_source, combined_reference, cell_w, cell_h, fit_reference=is_next_scene_image_edit)
+            if is_next_scene_image_edit:
+                _write_debug_reference_images(unique_id, preview_index, refs)
             storyboard_main_image_index = 1 if refs.get("image_01") is not None else main_image_index
             if is_next_scene_image_edit:
                 image_edit_total_refs = scene_reference_count + library_scene_reference_count + reference_count + character_reference_count + _media_count(costume_reference)
@@ -3584,6 +3862,7 @@ class GJJ_StoryboardGridGenerator:
                     if costume_count:
                         image_edit_parts.append(f"服装道具×{costume_count}")
                 _send_status(unique_id, f"ImageEdit 实际参考图 {image_edit_total_refs}/3：{'，'.join(image_edit_parts) if image_edit_parts else '无'}")
+                _write_debug_final_prompt(unique_id, preview_index, line, negative_prompt)
             _send_status(unique_id, f"按懒人一键生图流程生成分镜 {preview_index}/{preview_total}")
             result = self._lazy.create_image(
                 prompt=line,

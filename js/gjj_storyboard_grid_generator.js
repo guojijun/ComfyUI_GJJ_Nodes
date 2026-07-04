@@ -26,6 +26,7 @@ const SEED_CONTROL_KEY = "__seed_control_after_generate";
 const SEED_CONTROL_VALUES = new Set(["fixed", "increment", "decrement", "randomize"]);
 const JS_SAFE_MAX_SEED_VALUE = Number.MAX_SAFE_INTEGER;
 const CHARACTER_REF_PATTERN = /@([0-9A-Za-z\u4e00-\u9fff._-]+)(?:\/([0-9A-Za-z\u4e00-\u9fff._-]+))?/g;
+const SCENE_VIEW_REF_PATTERN = /\[\s*([^\[\]/:：]+?)\s*[:：]\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*\]/g;
 const SCENE_REF_PATTERN = /(?:🌏|🌍|🌎)([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?|\[场景[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?\]|\[([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?\]/g;
 const COSTUME_REF_PATTERN = /(?:💼|👗)([0-9A-Za-z\u4e00-\u9fff._-]+)|\[(?:服装|道具|prop|costume)[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]/gi;
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
@@ -1665,7 +1666,7 @@ function referenceAliases(item) {
 function protectExistingReferences(text) {
 	const source = String(text || "");
 	const ranges = [];
-	for (const pattern of [CHARACTER_REF_PATTERN, SCENE_REF_PATTERN]) {
+	for (const pattern of [CHARACTER_REF_PATTERN, SCENE_VIEW_REF_PATTERN, SCENE_REF_PATTERN]) {
 		pattern.lastIndex = 0;
 		for (const match of source.matchAll(pattern)) {
 			ranges.push({ start: match.index || 0, end: (match.index || 0) + match[0].length });
@@ -1857,6 +1858,14 @@ function promptReferenceIcons(promptText) {
 	const scenes = globalThis.GJJ_SceneLibrary?.scenes || [];
 	const characters = globalThis.GJJ_CharacterLibrary?.characters || [];
 	const costumes = globalThis.GJJ_CostumeLibrary?.items || [];
+	for (const match of text.matchAll(SCENE_VIEW_REF_PATTERN)) {
+		const rawName = String(match[1] || "").trim();
+		const scene = findLibraryItem(scenes, rawName);
+		if (scene) {
+			const icon = addUniqueReferenceIcon(icons, "scene", scene.name || scene.id || rawName, sceneCoverUrl(scene), "🏞");
+			if (icon) icon.source = { pattern: match[0], scene, place: "" };
+		}
+	}
 	for (const match of text.matchAll(SCENE_REF_PATTERN)) {
 		const rawName = match[1] || match[3] || match[5] || "";
 		if (!rawName || rawName === "场景" || /[:：]/.test(rawName)) continue;
