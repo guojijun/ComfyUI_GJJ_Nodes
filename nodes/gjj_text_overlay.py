@@ -1,5 +1,6 @@
 import re
 import os
+import json
 import base64
 import io
 import urllib.parse
@@ -11,11 +12,12 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 import folder_paths
 from .common_utils import DEFAULT_MODEL_URL, build_node_help_payload, make_model_tree_item
 from .common_utils.dependency_checker import make_missing_model_spec, raise_dependency_model_error
+from .common_utils.temp_files import gjjutils_read_temp_pil_image, gjjutils_write_temp_bytes
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
 FONT_EXTENSIONS = {".ttf", ".otf", ".ttc", ".otc"}
 NODE_NAME = "GJJ_TextOverlay"
-NODE_DISPLAY_NAME = "GJJ · 👣 批量文本图片水印叠加"
+NODE_DISPLAY_NAME = "GJJ · 👣 批量文本图片前景叠加"
 MIXED_BATCH_IMAGE_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
 MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 RMBG14_MODEL_TREE = [
@@ -23,7 +25,7 @@ RMBG14_MODEL_TREE = [
         label="RMBG1.4 模型",
         folder="RMBG",
         filename="rmbg1.4.safetensors",
-        description="Logo 自动抠图使用的本地 RMBG1.4 模型；默认读取 models/RMBG/rmbg1.4.safetensors，也会沿用综合抠图节点的模糊搜索。",
+        description="前景自动抠图使用的本地 RMBG1.4 模型；默认读取 models/RMBG/rmbg1.4.safetensors，也会沿用综合抠图节点的模糊搜索。",
         kind="diffusion",
     )
 ]
@@ -31,10 +33,11 @@ RMBG14_MODEL_SPEC = make_missing_model_spec(
     label="RMBG1.4 模型",
     subdir="RMBG",
     filename="rmbg1.4.safetensors",
-    description="Logo 自动抠图使用的本地 RMBG1.4 模型。",
+    description="前景自动抠图使用的本地 RMBG1.4 模型。",
 )
 RMBG14_PREVIEW_API = "/gjj/text_overlay/rmbg14_preview"
 FETCH_LOGO_API = "/gjj/text_overlay/fetch_logo_url"
+WRITE_TEMP_IMAGE_API = "/gjj/text_overlay/write_temp_image"
 
 
 def get_font_choices():
@@ -93,7 +96,7 @@ def apply_opacity(image: Image.Image, opacity: float) -> Image.Image:
 
 
 def auto_remove_watermark_background(image: Image.Image) -> Image.Image:
-    """自动把白底或黑底水印背景转成透明。"""
+    """自动把白底或黑底前景背景转成透明。"""
     background_threshold = 3.0
     rgba = image.convert("RGBA")
     arr = np.array(rgba).astype(np.float32)
@@ -137,6 +140,16 @@ def auto_remove_watermark_background(image: Image.Image) -> Image.Image:
     return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), mode="RGBA")
 
 
+def image_has_transparency(image: Image.Image) -> bool:
+    if "A" not in image.getbands():
+        return False
+    try:
+        alpha_min, alpha_max = image.getchannel("A").getextrema()
+        return alpha_min < 255
+    except Exception:
+        return False
+
+
 def remove_watermark_background_rmbg14(image: Image.Image) -> Image.Image:
     from .gjj_comprehensive_matting import (
         METHOD_RMBG14,
@@ -155,7 +168,7 @@ def remove_watermark_background_rmbg14(image: Image.Image) -> Image.Image:
         raise_dependency_model_error(
             node_name=NODE_DISPLAY_NAME,
             missing_models=[RMBG14_MODEL_SPEC],
-            description="TextOverlay 的 logo 自动抠图需要本地 RMBG1.4 模型。",
+            description="TextOverlay 的前景自动抠图需要本地 RMBG1.4 模型。",
             original_error=str(exc),
             title="GJJ TextOverlay 模型缺失！",
             model_download_url=MODEL_DOWNLOAD_URL,
@@ -291,10 +304,10 @@ def _register_text_overlay_api():
             data = await request.json()
             filename = str(data.get("filename") or "").strip()
             if not filename:
-                return web.json_response({"ok": False, "error": "缺少 logo 文件名"}, status=400)
+                return web.json_response({"ok": False, "error": "缺少前景文件名"}, status=400)
             path = resolve_comfy_image_path(filename, data.get("type") or "input", data.get("subfolder") or "")
             if not path:
-                return web.json_response({"ok": False, "error": "找不到 logo 文件"}, status=404)
+                return web.json_response({"ok": False, "error": "找不到前景文件"}, status=404)
             cutout = remove_watermark_background_rmbg14(Image.open(path).convert("RGBA"))
             buffer = io.BytesIO()
             cutout.save(buffer, format="PNG")
@@ -315,7 +328,7 @@ def _register_text_overlay_api():
             url = str(data.get("url") or "").strip()
             parsed = urllib.parse.urlparse(url)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                return web.json_response({"ok": False, "error": "只支持 http/https logo 地址"}, status=400)
+                return web.json_response({"ok": False, "error": "只支持 http/https 前景地址"}, status=400)
             request_obj = urllib.request.Request(
                 url,
                 headers={
@@ -327,7 +340,7 @@ def _register_text_overlay_api():
                 content_type = str(response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
                 raw = response.read(12 * 1024 * 1024 + 1)
             if len(raw) > 12 * 1024 * 1024:
-                return web.json_response({"ok": False, "error": "logo 文件超过 12MB"}, status=400)
+                return web.json_response({"ok": False, "error": "前景文件超过 12MB"}, status=400)
             path_name = urllib.parse.unquote(os.path.basename(parsed.path or "logo")).strip() or "logo"
             lower_name = path_name.lower()
             if content_type in {"image/svg+xml", "text/xml", "application/xml"} or lower_name.endswith(".svg") or raw.lstrip().startswith(b"<svg"):
@@ -350,6 +363,30 @@ def _register_text_overlay_api():
                 "filename": filename,
                 "url": url,
             })
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    @routes.post(WRITE_TEMP_IMAGE_API)
+    async def write_temp_image(request):
+        try:
+            data = await request.json()
+            src = str(data.get("src") or "")
+            if not src.startswith("data:") or "," not in src:
+                return web.json_response({"ok": False, "error": "缺少 dataURL 图片数据"}, status=400)
+            header, body = src.split(",", 1)
+            raw = base64.b64decode(body) if ";base64" in header else urllib.parse.unquote_to_bytes(body)
+            if len(raw) > 24 * 1024 * 1024:
+                return web.json_response({"ok": False, "error": "图片超过 24MB"}, status=400)
+            suffix = os.path.splitext(str(data.get("name") or ""))[1].lower()
+            if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+                mime = header.split(";", 1)[0].replace("data:", "").lower()
+                suffix = {
+                    "image/jpeg": ".jpg",
+                    "image/webp": ".webp",
+                    "image/bmp": ".bmp",
+                }.get(mime, ".png")
+            info = gjjutils_write_temp_bytes(raw, suffix=suffix)
+            return web.json_response({"ok": True, **info})
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
@@ -423,6 +460,22 @@ def pil_to_tensor(image):
 
     return tensor
 
+def split_image_input(value):
+    if value is None:
+        return []
+    if isinstance(value, torch.Tensor):
+        if value.ndim == 3:
+            return [value]
+        if value.ndim == 4:
+            return [value[i].contiguous() for i in range(int(value.shape[0]))]
+        return [value]
+    if isinstance(value, (list, tuple)):
+        images = []
+        for item in value:
+            images.extend(split_image_input(item))
+        return images
+    return []
+
 # 工具函数
 def hex2rgb(h, default):
     try:
@@ -442,8 +495,8 @@ class GJJ_TextOverlay:
     NAME = "GJJ_TextOverlay"
     DISPLAY_NAME = "GJJ · 📝 文本图片叠加"
     CATEGORY = "GJJ"
-    DESCRIPTION = "将文本或 logo 叠加到背景图上，支持批量处理；logo 可使用本地 RMBG1.4 模型自动抠图，并添加阴影、描边。"
-    SEARCH_ALIASES = ["text overlay", "text image overlay", "水印", "叠加", "图片", "批量", "batch"]
+    DESCRIPTION = "将文本或前景图叠加到背景图上，支持批量处理；前景图可使用本地 RMBG1.4 模型自动抠图，并添加阴影、描边。"
+    SEARCH_ALIASES = ["text overlay", "text image overlay", "前景", "叠加", "图片", "批量", "batch"]
     GJJ_HELP = build_node_help_payload(
         description=DESCRIPTION,
         dependencies=[
@@ -451,7 +504,7 @@ class GJJ_TextOverlay:
                 "name": "RMBG1.4",
                 "type": "本地模型",
                 "required": False,
-                "description": "仅在启用 Logo 自动抠图时需要。",
+                "description": "仅在启用前景自动抠图时需要。",
             },
             {
                 "name": "torchvision",
@@ -464,15 +517,15 @@ class GJJ_TextOverlay:
         models=[RMBG14_MODEL_SPEC],
         usage=[
             "背景图必填；文本为空时不会在画布上显示文字预览。",
-            "Logo 可连接水印图输入，也可通过面板按钮选择本地图片。",
-            "启用 RMBG1.4 抠图后，执行时会用 models/RMBG/rmbg1.4.safetensors 生成 logo 透明通道。",
+            "前景图可连接前景图输入，也可通过面板按钮选择本地图片。",
+            "启用 RMBG1.4 抠图后，执行时会用 models/RMBG/rmbg1.4.safetensors 生成前景透明通道。",
         ],
         runtime=[
-            "Logo 阴影和描边会在 RMBG1.4 抠图之后应用。",
-            "批量背景会保持同一相对文字和 logo 位置。",
+            "前景阴影和描边会在 RMBG1.4 抠图之后应用。",
+            "批量背景会保持同一相对文字和前景位置。",
         ],
         model_download_url=MODEL_DOWNLOAD_URL,
-        notice="RMBG1.4 只在 Logo 自动抠图开启时需要；模型按模型树放入对应目录后刷新或重启 ComfyUI。",
+        notice="RMBG1.4 只在前景自动抠图开启时需要；模型按模型树放入对应目录后刷新或重启 ComfyUI。",
         extra={
             "model_tree": RMBG14_MODEL_TREE,
             "models_tree": RMBG14_MODEL_TREE,
@@ -484,7 +537,7 @@ class GJJ_TextOverlay:
     FUNCTION = "run"
     RETURN_TYPES = (MIXED_BATCH_IMAGE_TYPE,)
     RETURN_NAMES = ("叠加后图像",)
-    OUTPUT_TOOLTIPS = ("文本或水印叠加后的图像队列；不同尺寸图片会保持原尺寸和同一相对位置。",)
+    OUTPUT_TOOLTIPS = ("文本或前景叠加后的图像队列；不同尺寸图片会保持原尺寸和同一相对位置。",)
 
     INPUT_IS_LIST = False
     OUTPUT_IS_LIST = (True,)
@@ -493,12 +546,12 @@ class GJJ_TextOverlay:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "background_image": (MIXED_BATCH_IMAGE_TYPE, {
-                    "display_name": "背景图",
-                    "tooltip": "必选，需要叠加文字或水印的背景图像；支持单图/批量图片输入",
-                }),
             },
             "optional": {
+                "background_image": (MIXED_BATCH_IMAGE_TYPE, {
+                    "display_name": "背景图",
+                    "tooltip": "需要叠加文字或前景的背景图像；支持单图/批量图片输入。也可以用面板 📂 打开本地背景。",
+                }),
                 "texts": ("STRING", {
                     "default": "",
                     "multiline": True,
@@ -506,8 +559,8 @@ class GJJ_TextOverlay:
                     "tooltip": "支持多行文本，每行独立显示。可用分隔符和索引抽取第一行的部分内容。",
                 }),
                 "watermark_image": (MIXED_BATCH_IMAGE_TYPE, {
-                    "display_name": "水印图",
-                    "tooltip": "可选，logo/水印图像；启用 Logo 自动抠图时会使用本地 RMBG1.4 生成透明通道，支持单图/批量输入。",
+                    "display_name": "前景图",
+                    "tooltip": "可选，前景图像；启用前景自动抠图时会使用本地 RMBG1.4 生成透明通道，支持单图/批量输入。",
                 }),
                 "split_char": ("STRING", {
                     "default": "_",
@@ -532,16 +585,16 @@ class GJJ_TextOverlay:
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.01,
-                    "display_name": "水印透明度",
-                    "tooltip": "水印的整体透明度（0.0=完全透明，1.0=完全不透明）",
+                    "display_name": "前景透明度",
+                    "tooltip": "前景的整体透明度（0.0=完全透明，1.0=完全不透明）",
                 }),
                 "watermark_width": ("FLOAT", {
                     "default": 1.0,
                     "min": 0.1,
                     "max": 10.0,
                     "step": 0.1,
-                    "display_name": "水印宽度",
-                    "tooltip": "水印宽度缩放比例（1.0=原始尺寸，0.5=缩小一半，2.0=放大两倍）",
+                    "display_name": "前景宽度",
+                    "tooltip": "前景宽度缩放比例（1.0=原始尺寸，0.5=缩小一半，2.0=放大两倍）",
                 }),
                 "direction": (["横向", "纵向"], {
                     "default": "横向",
@@ -618,8 +671,8 @@ class GJJ_TextOverlay:
                     "step": 0.01,
                     "display": "hidden",
                     "hidden": True,
-                    "display_name": "水印X位置",
-                    "tooltip": "内部使用：水印 X 位置。-1 表示沿用旧版 X位置。",
+                    "display_name": "前景X位置",
+                    "tooltip": "内部使用：前景 X 位置。-1 表示沿用旧版 X位置。",
                 }),
                 "watermark_y": ("FLOAT", {
                     "default": -1.0,
@@ -627,8 +680,8 @@ class GJJ_TextOverlay:
                     "step": 0.01,
                     "display": "hidden",
                     "hidden": True,
-                    "display_name": "水印Y位置",
-                    "tooltip": "内部使用：水印 Y 位置。-1 表示沿用旧版 Y位置。",
+                    "display_name": "前景Y位置",
+                    "tooltip": "内部使用：前景 Y 位置。-1 表示沿用旧版 Y位置。",
                 }),
                 "color_hex": ("STRING", {
                     "default": "#FFD700",
@@ -655,83 +708,97 @@ class GJJ_TextOverlay:
                     "default": "",
                     "display": "hidden",
                     "hidden": True,
-                    "display_name": "面板选择Logo",
-                    "tooltip": "内部使用：面板按钮上传并选择的 logo 图片。",
+                    "display_name": "面板选择前景",
+                    "tooltip": "内部使用：面板按钮上传并选择的前景图片。",
                 }),
                 "logo_remove_bg": ("BOOLEAN", {
                     "default": True,
-                    "display_name": "Logo自动抠图",
-                    "tooltip": "启用后使用本地 RMBG1.4 模型自动去除 logo 背景。",
+                    "display_name": "前景自动抠图",
+                    "tooltip": "启用后使用本地 RMBG1.4 模型自动去除前景背景。",
                 }),
                 "logo_shadow_enabled": ("BOOLEAN", {
                     "default": False,
-                    "display_name": "Logo阴影",
-                    "tooltip": "启用后给 logo 增加阴影。",
+                    "display_name": "前景阴影",
+                    "tooltip": "启用后给前景增加阴影。",
                 }),
                 "logo_shadow_blur": ("FLOAT", {
                     "default": 8.0,
                     "min": 0.0,
                     "max": 64.0,
                     "step": 0.5,
-                    "display_name": "Logo阴影模糊",
-                    "tooltip": "Logo 阴影的柔化半径。",
+                    "display_name": "前景阴影模糊",
+                    "tooltip": "前景阴影的柔化半径。",
                 }),
                 "logo_shadow_x": ("FLOAT", {
                     "default": 4.0,
                     "min": -128.0,
                     "max": 128.0,
                     "step": 1.0,
-                    "display_name": "Logo阴影X",
-                    "tooltip": "Logo 阴影横向偏移。",
+                    "display_name": "前景阴影X",
+                    "tooltip": "前景阴影横向偏移。",
                 }),
                 "logo_shadow_y": ("FLOAT", {
                     "default": 4.0,
                     "min": -128.0,
                     "max": 128.0,
                     "step": 1.0,
-                    "display_name": "Logo阴影Y",
-                    "tooltip": "Logo 阴影纵向偏移。",
+                    "display_name": "前景阴影Y",
+                    "tooltip": "前景阴影纵向偏移。",
                 }),
                 "logo_shadow_color_hex": ("STRING", {
                     "default": "#000000",
-                    "display_name": "Logo阴影颜色",
-                    "tooltip": "Logo 阴影颜色，例如 #000000。",
+                    "display_name": "前景阴影颜色",
+                    "tooltip": "前景阴影颜色，例如 #000000。",
                 }),
                 "logo_stroke_enabled": ("BOOLEAN", {
                     "default": False,
-                    "display_name": "Logo描边",
-                    "tooltip": "启用后给 logo 透明轮廓增加描边。",
+                    "display_name": "前景描边",
+                    "tooltip": "启用后给前景透明轮廓增加描边。",
                 }),
                 "logo_stroke_width": ("INT", {
                     "default": 3,
                     "min": 0,
-                    "display_name": "Logo描边宽度",
-                    "tooltip": "Logo 描边宽度，填 0 表示不绘制。",
+                    "display_name": "前景描边宽度",
+                    "tooltip": "前景描边宽度，填 0 表示不绘制。",
                 }),
                 "logo_stroke_color_hex": ("STRING", {
                     "default": "#FFFFFF",
-                    "display_name": "Logo描边颜色",
-                    "tooltip": "Logo 描边颜色，例如 #FFFFFF。",
+                    "display_name": "前景描边颜色",
+                    "tooltip": "前景描边颜色，例如 #FFFFFF。",
                 }),
                 "logo_default_url": ("STRING", {
                     "default": "",
                     "display": "hidden",
                     "hidden": True,
-                    "display_name": "默认网络Logo",
-                    "tooltip": "内部使用：面板 🌏 按钮设置的网络默认 logo 地址。",
+                    "display_name": "默认网络前景",
+                    "tooltip": "内部使用：面板 🌏 按钮设置的网络默认前景地址。",
+                }),
+                "watermark_objects_json": ("STRING", {
+                    "default": "[]",
+                    "display": "hidden",
+                    "hidden": True,
+                    "display_name": "拖拽前景对象",
+                    "tooltip": "内部使用：拖拽添加的多个前景对象、位置和缩放。",
+                }),
+                "background_image_ref_json": ("STRING", {
+                    "default": "{}",
+                    "display": "hidden",
+                    "hidden": True,
+                    "display_name": "面板背景图",
+                    "tooltip": "内部使用：面板 📂 打开的临时背景图。",
                 }),
             },
             "hidden": {
                 "has_watermark_input": ("BOOLEAN", {
                     "default": False,
-                    "display_name": "是否有水印输入",
+                    "display_name": "是否有前景输入",
                     "tooltip": "内部使用，用于控制参数显示",
                 }),
             },
         }
 
     def run(self,
-            background_image,
+            background_image=None,
             texts="",
             watermark_image=None,
             split_char="_",
@@ -765,7 +832,9 @@ class GJJ_TextOverlay:
             logo_stroke_enabled=False,
             logo_stroke_width=3,
             logo_stroke_color_hex="#FFFFFF",
-            logo_default_url=""):
+            logo_default_url="",
+            watermark_objects_json="[]",
+            background_image_ref_json="{}"):
 
         seed = int(seed)
         font_size = max(1, int(font_size))
@@ -779,13 +848,18 @@ class GJJ_TextOverlay:
         text_opacity = float(text_opacity)
         watermark_opacity = float(watermark_opacity)
 
-        # 处理背景图（支持批量输入）
-        # 确保是4D张量 [B, H, W, C]
-        if background_image.ndim == 3:
-            background_image = background_image.unsqueeze(0)
-
-        batch_size = background_image.shape[0]
-        background_images = [background_image[i] for i in range(batch_size)]
+        # 处理背景图（支持批量输入和 GJJ 图片队列列表）
+        background_images = split_image_input(background_image)
+        if not background_images:
+            try:
+                background_ref = json.loads(str(background_image_ref_json or "{}"))
+                if isinstance(background_ref, dict) and background_ref.get("filename"):
+                    bg_pil = gjjutils_read_temp_pil_image(background_ref).convert("RGB")
+                    background_images = [pil_to_tensor(bg_pil)]
+            except Exception:
+                background_images = []
+        if not background_images:
+            raise RuntimeError("背景图输入为空，请连接背景图，或用面板 📂 打开本地背景图。")
 
         # 自动检测背景图尺寸，用于动态UI
         # 如果是批量，使用最小尺寸以确保安全区域或统一参考
@@ -829,38 +903,53 @@ class GJJ_TextOverlay:
         # 文件名
         filename = re.sub(r'[^a-zA-Z0-9\u4e00-\u9fff]', '_', final_text)[:150] or "text"
 
-        # 处理背景图（支持批量输入）
-        # 确保是4D张量 [B, H, W, C]
-        if background_image.ndim == 3:
-            background_image = background_image.unsqueeze(0)
+        batch_size = len(background_images)
 
-        batch_size = background_image.shape[0]
-        background_images = [background_image[i] for i in range(batch_size)]
-
-        # 处理水印图（支持批量输入）
-        watermark_images = []
+        # 处理前景图（支持批量输入、GJJ 图片队列列表和面板拖拽对象）。多张时全部依次叠加到每张背景图。
+        watermark_entries = []
         if watermark_image is not None:
-            if watermark_image.ndim == 3:
-                watermark_image = watermark_image.unsqueeze(0)
-            if watermark_image.ndim == 4:
-                # 如果水印是批量的，且数量与背景一致，则一一对应；否则只取第一张或循环使用
-                if watermark_image.shape[0] == batch_size:
-                    watermark_images = [watermark_image[i] for i in range(batch_size)]
-                else:
-                    # 简单处理：如果数量不匹配，只取第一张作为全局水印，或者按需扩展
-                    # 这里假设如果数量不一致，就只用第一张重复使用，或者如果只有一张
-                    wm_single = watermark_image[0]
-                    watermark_images = [wm_single] * batch_size
-        elif watermark_upload_name:
+            watermark_entries = [
+                {"tensor": item, "x": watermark_x, "y": watermark_y, "scale": float(watermark_width)}
+                for item in split_image_input(watermark_image)
+            ]
+        else:
+            try:
+                objects = json.loads(str(watermark_objects_json or "[]"))
+                if not isinstance(objects, list):
+                    objects = []
+            except Exception:
+                objects = []
+            for item in objects:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    if str(item.get("type") or "").lower() == "temp":
+                        upload_pil = gjjutils_read_temp_pil_image(item).convert("RGBA")
+                    else:
+                        upload_path = resolve_input_image_path(item.get("filename") or "")
+                        if not upload_path:
+                            continue
+                        upload_pil = Image.open(upload_path).convert("RGBA")
+                    watermark_entries.append({
+                        "pil": upload_pil,
+                        "x": clamp_ratio(item.get("x", watermark_x)),
+                        "y": clamp_ratio(item.get("y", watermark_y)),
+                        "scale": float(item.get("scale", watermark_width) or watermark_width),
+                        "stroke_enabled": bool(item.get("stroke_enabled", False)),
+                        "stroke_width": int(item.get("stroke_width", logo_stroke_width) or logo_stroke_width),
+                        "stroke_color_hex": str(item.get("stroke_color_hex") or logo_stroke_color_hex),
+                    })
+                except Exception:
+                    pass
+
+        if watermark_image is None and watermark_upload_name:
             upload_path = resolve_input_image_path(watermark_upload_name)
             if upload_path:
                 try:
                     upload_pil = Image.open(upload_path).convert("RGBA")
-                    upload_arr = np.array(upload_pil).astype(np.float32) / 255.0
-                    wm_single = torch.from_numpy(upload_arr)
-                    watermark_images = [wm_single] * batch_size
+                    watermark_entries.append({"pil": upload_pil, "x": watermark_x, "y": watermark_y, "scale": float(watermark_width)})
                 except Exception:
-                    watermark_images = []
+                    pass
 
         # 批量处理
         composite_outputs = []
@@ -889,6 +978,32 @@ class GJJ_TextOverlay:
 
         reference_height = max(1, int(background_images[0].shape[0]))
         reference_width = max(1, int(background_images[0].shape[1]))
+        styled_watermarks = []
+        for entry in watermark_entries:
+            wm_pil = entry.get("pil")
+            if wm_pil is None:
+                wm_pil = tensor_to_pil(entry.get("tensor")).convert("RGBA")
+            else:
+                wm_pil = wm_pil.convert("RGBA")
+            if logo_remove_bg and not image_has_transparency(wm_pil):
+                wm_pil = remove_watermark_background_rmbg14(wm_pil)
+            wm_pil = style_watermark_image(
+                wm_pil,
+                bool(logo_shadow_enabled),
+                logo_shadow_blur,
+                logo_shadow_x,
+                logo_shadow_y,
+                logo_shadow_color_hex,
+                bool(entry.get("stroke_enabled", logo_stroke_enabled)),
+                int(entry.get("stroke_width", logo_stroke_width) or logo_stroke_width),
+                str(entry.get("stroke_color_hex") or logo_stroke_color_hex),
+            )
+            styled_watermarks.append({
+                "image": wm_pil,
+                "x": clamp_ratio(entry.get("x", watermark_x)),
+                "y": clamp_ratio(entry.get("y", watermark_y)),
+                "scale": float(entry.get("scale", watermark_width) or watermark_width),
+            })
 
         for i, bg_tensor in enumerate(background_images):
             bg_pil = tensor_to_pil(bg_tensor).convert("RGBA")
@@ -958,43 +1073,29 @@ class GJJ_TextOverlay:
             # 合成文本到背景
             composite = Image.alpha_composite(bg_pil, text_layer)
 
-            # 处理水印叠加
-            if i < len(watermark_images):
-                wm_tensor = watermark_images[i]
-                wm_pil = tensor_to_pil(wm_tensor).convert("RGBA")
-                if logo_remove_bg:
-                    wm_pil = remove_watermark_background_rmbg14(wm_pil)
-                wm_pil = style_watermark_image(
-                    wm_pil,
-                    bool(logo_shadow_enabled),
-                    logo_shadow_blur,
-                    logo_shadow_x,
-                    logo_shadow_y,
-                    logo_shadow_color_hex,
-                    bool(logo_stroke_enabled),
-                    logo_stroke_width,
-                    logo_stroke_color_hex,
-                )
+            # 处理前景叠加
+            for wm_index, styled_wm in enumerate(styled_watermarks):
+                wm_pil = styled_wm["image"].copy()
                 orig_width, orig_height = wm_pil.size
-                if i == 0:
+                if i == 0 and wm_index == 0:
                     preview_meta["watermark_source_width"] = int(orig_width)
                     preview_meta["watermark_source_height"] = int(orig_height)
 
-                # 应用水印宽度缩放；批量不同尺寸背景时，按第一张背景为参考等比协调。
-                effective_watermark_width = float(watermark_width) * style_scale
+                # 应用前景宽度缩放；批量不同尺寸背景时，按第一张背景为参考等比协调。
+                effective_watermark_width = float(styled_wm.get("scale", watermark_width)) * style_scale
                 if effective_watermark_width != 1.0:
                     new_width = max(1, int(round(orig_width * effective_watermark_width)))
                     new_height = max(1, int(round(orig_height * effective_watermark_width)))
                     wm_pil = wm_pil.resize((new_width, new_height), Image.LANCZOS)
 
-                # 应用水印透明度
+                # 应用前景透明度
                 if watermark_opacity < 1.0:
                     wm_pil = apply_opacity(wm_pil, watermark_opacity)
 
-                # 确定水印位置
-                wx = int(round(watermark_x * canvas_width))
-                wy = int(round(watermark_y * canvas_height))
-                if i == 0:
+                # 确定前景位置
+                wx = int(round(float(styled_wm.get("x", watermark_x)) * canvas_width))
+                wy = int(round(float(styled_wm.get("y", watermark_y)) * canvas_height))
+                if i == 0 and wm_index == 0:
                     preview_meta["watermark_width"] = int(wm_pil.size[0])
                     preview_meta["watermark_height"] = int(wm_pil.size[1])
                     preview_meta["watermark_x"] = int(wx)
@@ -1002,7 +1103,7 @@ class GJJ_TextOverlay:
                     preview_meta["text_x"] = int(round(text_x * canvas_width))
                     preview_meta["text_y"] = int(round(text_y * canvas_height))
 
-                # 创建水印图层以支持位置偏移
+                # 创建前景图层以支持位置偏移
                 watermark_layer = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
                 watermark_layer.paste(wm_pil, (wx, wy), mask=wm_pil)
 

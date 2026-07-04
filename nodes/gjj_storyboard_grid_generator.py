@@ -1742,7 +1742,12 @@ def _pil_list_to_reference_tensor(images: list[Image.Image]) -> torch.Tensor | N
     return torch.cat(tensors, dim=0).contiguous()
 
 
-def _scene_reference_tensor_for_prompt(prompt_text: str, width: int, height: int) -> tuple[str, torch.Tensor | None, bool]:
+def _scene_reference_tensor_for_prompt(
+    prompt_text: str,
+    width: int,
+    height: int,
+    compose_character_references: bool = False,
+) -> tuple[str, torch.Tensor | None, bool]:
     scene_refs = _extract_scene_refs(prompt_text)
     if not scene_refs:
         return prompt_text, None, False
@@ -1757,7 +1762,7 @@ def _scene_reference_tensor_for_prompt(prompt_text: str, width: int, height: int
         background, label = _scene_background_image(scene, place, width, height)
         if background is None:
             continue
-        use_separate_references = len(character_refs) <= 2
+        use_separate_references = len(character_refs) <= 2 and not compose_character_references
         character_board, character_parts, character_bindings = (
             (None, [], [])
             if use_separate_references
@@ -1794,6 +1799,8 @@ def _scene_reference_tensor_for_prompt(prompt_text: str, width: int, height: int
                 "如果后续还有单独人物参考图，必须用它们校准人物脸型、胡须、发型、服饰配色和身份特征。"
                 "不要把透明预览底色、裁切边缘或人物参考图背景当作最终背景。"
                 "最终构图必须给背景留出足够可见空间，人物不要铺满画面、不要遮挡大部分背景，人物总占画面高度不超过约 65%。"
+                "人物必须重新绘制成自然完整的人体结构，保持头颈肩、躯干、手臂、手指、腿部比例正常；"
+                "不要把参考板中的人物贴片边缘、透明裁切轮廓、压扁或拉长的身体形状复制到最终画面。"
             )
         else:
             anchor_rule = f"最终画面的主要空间必须围绕“{label}”这个标注点，不要漂移到同一场景其它未指定物品旁边。" if label else ""
@@ -3203,6 +3210,7 @@ class GJJ_StoryboardGridGenerator:
             _send_status(unique_id, "缓存为空，下游首次请求自动生成完整分镜。")
         storyboard_character_refs = _storyboard_character_context(prompts)
         is_next_scene_image_edit = _is_next_scene_image_edit_unet(unet_name)
+        is_flux_storyboard = _is_flux_storyboard_unet(unet_name)
         generated: list[torch.Tensor] = []
         generated_positions: list[int] = []
         if selected_cell_mode:
@@ -3217,7 +3225,12 @@ class GJJ_StoryboardGridGenerator:
                 preview_index = selected_indices[index - 1]
             else:
                 preview_index = seed_offset + index if single_cell_mode else index
-            line, library_scene_reference, scene_consumed_characters = _scene_reference_tensor_for_prompt(line, cell_w, cell_h)
+            line, library_scene_reference, scene_consumed_characters = _scene_reference_tensor_for_prompt(
+                line,
+                cell_w,
+                cell_h,
+                compose_character_references=is_next_scene_image_edit or is_flux_storyboard,
+            )
             scene_source = None if library_scene_reference is not None else scene
             if is_next_scene_image_edit and library_scene_reference is None:
                 scene_source = _media_slice(scene_source, 1)

@@ -4,7 +4,6 @@ import json
 import math
 import os
 import re
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -731,23 +730,12 @@ def _save_multiview_temp_preview(image: torch.Tensor, index: int) -> dict[str, A
 	try:
 		if image is None:
 			return None
-		sample = image[0] if image.ndim == 4 else image
-		if sample.ndim != 3:
+		entries = gjjutils_write_temp_tensor_images(image[:1] if image.ndim == 4 else image)
+		if not entries:
 			return None
-		target_dir = Path(folder_paths.get_temp_directory()) / "GJJ" / "character_multiview_preview"
-		target_dir.mkdir(parents=True, exist_ok=True)
-		filename = f"GJJ_CharacterMultiView_preview_{uuid.uuid4().hex[:12]}_{int(index):02d}.png"
-		pixels = 255.0 * sample.detach().cpu().clamp(0.0, 1.0).numpy()
-		pil_image = Image.fromarray(np.clip(pixels, 0, 255).astype(np.uint8))
-		pil_image.save(target_dir / filename, compress_level=2)
-		return {
-			"filename": filename,
-			"subfolder": "GJJ/character_multiview_preview",
-			"type": "temp",
-			"width": int(sample.shape[1]),
-			"height": int(sample.shape[0]),
-			"index": int(index),
-		}
+		info = dict(entries[0])
+		info["index"] = int(index)
+		return info
 	except Exception as error:
 		print(f"[GJJ] CharacterMultiView 临时预览保存失败: {error}")
 		return None

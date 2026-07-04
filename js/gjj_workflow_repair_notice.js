@@ -809,6 +809,12 @@ import { app } from "/scripts/app.js";
 		if (!api?.nodeHasMissingModelSignal) return [];
 		return graphNodes().filter((node) => {
 			try {
+				if (api.findModelWidgets && api.widgetLooksMissing) {
+					const widgets = safeArray(api.findModelWidgets(node));
+					if (widgets.length) {
+						return widgets.some((widget) => api.widgetLooksMissing(node, widget));
+					}
+				}
 				return api.nodeHasMissingModelSignal(node);
 			} catch (_) {
 				return false;
@@ -828,7 +834,7 @@ import { app } from "/scripts/app.js";
 					return false;
 				}
 			});
-			count += widgets.length || 1;
+			count += widgets.length;
 		}
 		return count;
 	}
@@ -962,6 +968,46 @@ import { app } from "/scripts/app.js";
 		showToast(`已替换：${compactText(match.name)}`, "ok");
 		clearTimeout(rescanTimer);
 		rescanTimer = setTimeout(() => renderNotice(lastPlan), 260);
+	}
+
+	function applyBestModelSuggestions(items) {
+		const api = summonApi();
+		if (!api?.setWidgetValue) return { changed: 0, skipped: 0, missed: 0 };
+		let changed = 0;
+		let skipped = 0;
+		let missed = 0;
+		const changedNodes = new Set();
+		for (const item of safeArray(items)) {
+			const target = findModelSuggestionTarget(item);
+			const match = sortedModelMatches(item?.matches).find((candidate) => candidate?.name);
+			if (!target || !match?.name) {
+				missed += 1;
+				continue;
+			}
+			try {
+				if (api.widgetLooksMissing && !api.widgetLooksMissing(target.node, target.widget)) {
+					skipped += 1;
+					continue;
+				}
+			} catch (_) {}
+			if (!confirmModelReplacement(item, match)) {
+				skipped += 1;
+				continue;
+			}
+			if (!api.setWidgetValue(target.node, target.widget, String(match.name), match)) {
+				missed += 1;
+				continue;
+			}
+			changedNodes.add(target.node);
+			changed += 1;
+		}
+		for (const node of changedNodes) {
+			api.clearSummonedModelWarningIfResolved?.(node);
+		}
+		if (changedNodes.size) {
+			api.scheduleWorkflowRepairRescan?.();
+		}
+		return { changed, skipped, missed };
 	}
 
 	function modelSuggestionRow(item) {
@@ -1122,6 +1168,10 @@ import { app } from "/scripts/app.js";
 			return;
 		}
 		await api.summonModelsForNodes(targets);
+		const applied = applyBestModelSuggestions(lastModelSuggestions);
+		if (applied.changed > 0) {
+			showToast(`已把最佳候选写回 ${applied.changed} 个模型控件。`, "ok");
+		}
 		clearTimeout(rescanTimer);
 		rescanTimer = setTimeout(() => renderNotice(lastPlan), 300);
 	}

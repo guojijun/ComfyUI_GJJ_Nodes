@@ -1185,6 +1185,37 @@ def _register_gjj_character_library_api():
 		canvas.paste(source, (left, top))
 		return canvas
 
+	def make_character_reference_collage(images: list[Image.Image]) -> Image.Image:
+		clean_images = [image.convert("RGBA") for image in images if image is not None]
+		if not clean_images:
+			raise RuntimeError("没有可用于拼图的参考图。")
+		if len(clean_images) == 1:
+			return clean_images[0]
+		count = len(clean_images)
+		cols = max(1, int((count ** 0.5) + 0.999))
+		rows = max(1, (count + cols - 1) // cols)
+		max_w = max(image.width for image in clean_images)
+		max_h = max(image.height for image in clean_images)
+		cell = max(256, min(1024, max(max_w, max_h)))
+		gap = max(12, cell // 32)
+		out_w = cols * cell + (cols + 1) * gap
+		out_h = rows * cell + (rows + 1) * gap
+		canvas = Image.new("RGB", (out_w, out_h), (255, 255, 255))
+		resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+		for index, image in enumerate(clean_images):
+			src = image.copy()
+			src.thumbnail((cell, cell), resample)
+			x = gap + (index % cols) * (cell + gap) + (cell - src.width) // 2
+			y = gap + (index // cols) * (cell + gap) + (cell - src.height) // 2
+			if src.mode == "RGBA":
+				background = Image.new("RGB", src.size, (255, 255, 255))
+				background.paste(src.convert("RGB"), mask=src.getchannel("A"))
+				src = background
+			else:
+				src = src.convert("RGB")
+			canvas.paste(src, (x, y))
+		return canvas
+
 	def comprehensive_matting_cutouts(images: list[Image.Image]) -> list[Image.Image]:
 		try:
 			from .nodes.gjj_comprehensive_matting import (
@@ -1287,6 +1318,21 @@ def _register_gjj_character_library_api():
 		for view in views:
 			text = f"{view.get('label') or ''} {view.get('id') or ''}".lower()
 			if any(keyword.lower() in text for keyword in keywords):
+				return view
+		return None
+
+	def find_character_view_by_label(manifest: dict, label: str) -> dict | None:
+		key = str(label or "").strip().lower()
+		if not key:
+			return None
+		views = manifest.get("views") if isinstance(manifest.get("views"), list) else []
+		for view in views:
+			candidates = (
+				str(view.get("label") or "").strip().lower(),
+				str(view.get("id") or "").strip().lower(),
+				str(view.get("file") or "").strip().lower(),
+			)
+			if key in candidates:
 				return view
 		return None
 
@@ -1687,7 +1733,12 @@ def _register_gjj_character_library_api():
 				character_id = clean_key(fields.get("id") or name, "character")
 				image = Image.open(io.BytesIO(raw)).convert("RGBA") if raw else None
 				base_prompt = str(fields.get("base_prompt") or "").strip()
+				reference_label = str(fields.get("reference_label") or "").strip()
+				reference_labels = parse_view_labels(fields.get("reference_labels") or "")
+				if reference_label and reference_label not in reference_labels:
+					reference_labels.insert(0, reference_label)
 				requested_labels = parse_view_labels(fields.get("labels") or fields.get("views") or "")
+				prompt_labels = parse_view_labels(fields.get("prompt_labels") or "")
 				seed = int(fields.get("seed") or 0)
 			else:
 				data = await request.json()
@@ -1696,16 +1747,36 @@ def _register_gjj_character_library_api():
 				image_value = data.get("image") or data.get("png") or ""
 				image = decode_image(image_value) if image_value else None
 				base_prompt = str(data.get("base_prompt") or "").strip()
+				reference_label = str(data.get("reference_label") or "").strip()
+				reference_labels = parse_view_labels(data.get("reference_labels") or "")
+				if reference_label and reference_label not in reference_labels:
+					reference_labels.insert(0, reference_label)
 				requested_labels = parse_view_labels(data.get("labels") or data.get("views") or "")
+				prompt_labels = parse_view_labels(data.get("prompt_labels") or "")
 				seed = int(data.get("seed") or 0)
 			manifest = read_manifest(character_id)
 			manifest["name"] = name or manifest.get("name") or character_id
 			write_manifest(manifest)
+			reference_count = 1
 			if image is None:
-				head_view = find_character_head_view(manifest)
-				if head_view is None:
+				reference_images = []
+				missing_reference_labels = []
+				for label in reference_labels:
+					reference_view = find_character_view_by_label(manifest, label)
+					if reference_view is None:
+						missing_reference_labels.append(label)
+						continue
+					reference_images.append(open_character_view_image(character_id, reference_view))
+				if missing_reference_labels:
+					raise RuntimeError(f"未找到参考图视图：{'、'.join(missing_reference_labels)}")
+				if not reference_images:
+					reference_view = find_character_head_view(manifest)
+					if reference_view is not None:
+						reference_images.append(open_character_view_image(character_id, reference_view))
+				if not reference_images:
 					raise RuntimeError("缺少大头照：请先添加“大头照”视图，再用它自动生成其它角度。")
-				image = open_character_view_image(character_id, head_view)
+				reference_count = len(reference_images)
+				image = make_character_reference_collage(reference_images)
 
 			try:
 				from .nodes.gjj_comprehensive_matting import _pil_list_to_tensor, _tensor_to_pil_list
@@ -1731,7 +1802,13 @@ def _register_gjj_character_library_api():
 					pass
 				return fallback
 
-			if requested_labels:
+			if reference_count > 1:
+				identity_prompt = (
+					"图一是一张由同一角色多张参考图拼成的参考板，只用于人物身份、五官、发型、服装配色、正反面细节和整体风格参考；"
+					"不要把参考板画成最终画面的拼图、分格、多人物或文字标签，也不要继承参考板的白底、边框、裁切范围和镜头距离。"
+					"每个输出视图必须严格服从对应动作文本里的视角、景别和镜头角度。"
+				)
+			elif requested_labels:
 				identity_prompt = (
 					"图一只作为人物身份、五官、发型、服装配色和风格参考；不要继承图一的裁切范围、白条、背景边缘或镜头距离。"
 					"每个输出视图必须严格服从对应动作文本里的视角、景别和镜头角度；如果写了肩部肖像、半身、特写或俯仰角，不要自动改成全身正面。"
@@ -1744,7 +1821,11 @@ def _register_gjj_character_library_api():
 			if base_prompt:
 				identity_prompt = f"{identity_prompt}\n{base_prompt}"
 			output_labels = requested_labels or ["大头照", "正面", "45度", "背面"]
-			action_prompts = "\n".join([multiview_prompt_for_label(label) for label in output_labels])
+			action_source_labels = prompt_labels if len(prompt_labels) == len(output_labels) else output_labels
+			action_prompts = "\n".join([
+				str(label).strip() if str(label).strip().lower().startswith("<sks>") else multiview_prompt_for_label(label)
+				for label in action_source_labels
+			])
 			lora_models = _safe_filename_list("loras") or []
 			character_settings = _gjj_section_settings("character_library")
 			def lora_exists(name: str) -> bool:

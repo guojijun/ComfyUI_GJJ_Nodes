@@ -39,6 +39,8 @@ const HIDDEN_WIDGETS = new Set([
 	"logo_stroke_width",
 	"logo_stroke_color_hex",
 	"logo_default_url",
+	"watermark_objects_json",
+	"background_image_ref_json",
 	"has_watermark_input",
 ]);
 const TEXT_WIDGETS = [
@@ -67,6 +69,8 @@ const WATERMARK_WIDGETS = [
 	"logo_stroke_width",
 	"logo_stroke_color_hex",
 	"logo_default_url",
+	"watermark_objects_json",
+	"background_image_ref_json",
 ];
 const PERSISTED_WIDGETS = new Set([
 	"font_size",
@@ -86,7 +90,10 @@ const SIZE_PROPERTIES = {
 };
 const RMBG14_PREVIEW_API = "/gjj/text_overlay/rmbg14_preview";
 const FETCH_LOGO_API = "/gjj/text_overlay/fetch_logo_url";
+const WRITE_TEMP_IMAGE_API = "/gjj/text_overlay/write_temp_image";
 const DEFAULT_LOGO_URL = "https://mintcdn.com/dripart/QzWbjSCBG7w61rR3/logo/dark.svg";
+const ZOOM_IN_ICON = `<svg viewBox="0 0 1024 1024" aria-hidden="true"><path d="M815.3 959.1H208.9c-79.7 0-144.4-64.6-144.4-144.4V208.3c0-79.7 64.6-144.4 144.4-144.4h606.5c79.7 0 144.4 64.6 144.4 144.4v606.5c-0.1 79.7-64.7 144.3-144.5 144.3zM266.6 540.4c0-23.9-19.4-43.3-43.3-43.3S180 516.5 180 540.4v259.9c0 23.9 19.4 43.3 43.3 43.3h259.9c23.9 0 43.3-19.4 43.3-43.3S507.1 757 483.2 757H266.6V540.4z m577.6-317.7c0-23.9-19.4-43.3-43.3-43.3H541c-23.9 0-43.3 19.4-43.3 43.3S517.1 266 541 266h216.6v216.6c0 23.9 19.4 43.3 43.3 43.3s43.3-19.4 43.3-43.3V222.7z" fill="#1296db"></path></svg>`;
+const ZOOM_OUT_ICON = `<svg viewBox="0 0 1024 1024" aria-hidden="true"><path d="M815.5 63.9H208.7c-79.8 0-144.5 64.7-144.5 144.5V815c0 79.8 64.7 144.5 144.5 144.5h606.7c79.8 0 144.5-64.7 144.5-144.5V208.3c0-79.8-64.7-144.4-144.4-144.4z m-289 736.7c0 23.9-19.4 43.3-43.3 43.3s-43.3-19.4-43.3-43.3V583.9H223.2c-23.9 0-43.3-19.4-43.3-43.3s19.4-43.3 43.3-43.3h260c23.9 0 43.3 19.4 43.3 43.3v260z m303.4-303.4h-260c-23.9 0-43.3-19.4-43.3-43.3v-260c0-23.9 19.4-43.3 43.3-43.3s43.3 19.4 43.3 43.3v216.7h216.7c23.9 0 43.3 19.4 43.3 43.3s-19.4 43.3-43.3 43.3z" fill="#1296db"></path></svg>`;
 function widget(node, name) {
 	return node?.widgets?.find((item) => item?.name === name) || null;
 }
@@ -252,7 +259,7 @@ function updateLinkToggleButtons(node) {
 	if (!ui) return;
 	const defs = [
 		["background_image", ui.backgroundLinkButton, "背景图"],
-		["watermark_image", ui.watermarkLinkButton, "水印图"],
+		["watermark_image", ui.watermarkLinkButton, "前景图"],
 	];
 	for (const [inputName, button, label] of defs) {
 		if (!button) continue;
@@ -491,7 +498,36 @@ function dataUrlToBlob(dataUrl) {
 	return new Blob([bytes], { type: mime });
 }
 
-function imageDataUrlToPngFile(dataUrl, filename = "logo.png") {
+function imageSourceDetails(src) {
+	return new Promise((resolve) => {
+		const image = new Image();
+		image.onload = () => {
+			const width = Math.max(1, image.naturalWidth || image.width || 1);
+			const height = Math.max(1, image.naturalHeight || image.height || 1);
+			let hasTransparency = false;
+			try {
+				const canvas = document.createElement("canvas");
+				canvas.width = width;
+				canvas.height = height;
+				const ctx = canvas.getContext("2d", { willReadFrequently: true });
+				ctx.clearRect(0, 0, width, height);
+				ctx.drawImage(image, 0, 0, width, height);
+				const data = ctx.getImageData(0, 0, width, height).data;
+				for (let i = 3; i < data.length; i += 4) {
+					if (data[i] < 255) {
+						hasTransparency = true;
+						break;
+					}
+				}
+			} catch (_) {}
+			resolve({ width, height, hasTransparency });
+		};
+		image.onerror = () => resolve({ width: 72, height: 72, hasTransparency: false });
+		image.src = src;
+	});
+}
+
+function imageDataUrlToPngFile(dataUrl, filename = "foreground.png") {
 	return new Promise((resolve, reject) => {
 		const image = new Image();
 		image.onload = () => {
@@ -504,11 +540,11 @@ function imageDataUrlToPngFile(dataUrl, filename = "logo.png") {
 			ctx.clearRect(0, 0, width, height);
 			ctx.drawImage(image, 0, 0, width, height);
 			canvas.toBlob((blob) => {
-				if (!blob) return reject(new Error("Logo 转 PNG 失败"));
+				if (!blob) return reject(new Error("前景图转 PNG 失败"));
 				resolve(new File([blob], filename.replace(/\.[^.]+$/, "") + ".png", { type: "image/png" }));
 			}, "image/png");
 		};
-		image.onerror = () => reject(new Error("Logo 图片解析失败"));
+		image.onerror = () => reject(new Error("前景图解析失败"));
 		image.src = dataUrl;
 	});
 }
@@ -520,7 +556,7 @@ async function fetchNetworkLogo(url) {
 		body: JSON.stringify({ url }),
 	});
 	const data = await response.json().catch(() => ({}));
-	if (!response?.ok || !data?.ok || !data?.src) throw new Error(data?.error || "网络 logo 解析失败");
+	if (!response?.ok || !data?.ok || !data?.src) throw new Error(data?.error || "网络前景图解析失败");
 	return data;
 }
 
@@ -532,7 +568,7 @@ function normalizeUploadFilename(data, file, requestedSubfolder = "") {
 	return subfolder ? `${subfolder}/${filename}` : filename;
 }
 
-async function uploadImageToInput(file, subfolder = "gjj_text_overlay_logo") {
+async function uploadImageToInput(file, subfolder = "gjj_text_overlay_foreground") {
 	const cleanSubfolder = String(subfolder || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
 	const form = new FormData();
 	form.append("image", file, file.name);
@@ -551,6 +587,17 @@ async function uploadImageToInput(file, subfolder = "gjj_text_overlay_logo") {
 	const filename = normalizeUploadFilename(data, file, cleanSubfolder);
 	if (!filename) throw new Error("上传成功但没有返回文件名");
 	return filename;
+}
+
+async function writeTempImageFromDataUrl(src, file = null) {
+	const response = await api.fetchApi(WRITE_TEMP_IMAGE_API, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ src, name: file?.name || "object.png" }),
+	});
+	const data = await response.json().catch(() => ({}));
+	if (!response?.ok || !data?.ok || !data?.filename) throw new Error(data?.error || "临时图片写入失败");
+	return data;
 }
 
 function inputImageViewInfo(filename) {
@@ -723,6 +770,135 @@ function setPosition(node, target, x, y) {
 	renderPanel(node);
 }
 
+function watermarkObjects(node) {
+	try {
+		const parsed = JSON.parse(stringValue(node, "watermark_objects_json", "[]"));
+		return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item === "object") : [];
+	} catch (_) {
+		return [];
+	}
+}
+
+function setWatermarkObjects(node, objects, notify = true) {
+	const value = JSON.stringify(Array.isArray(objects) ? objects : []);
+	if (notify) {
+		setWidgetValue(node, "watermark_objects_json", value);
+		return;
+	}
+	const item = widget(node, "watermark_objects_json");
+	if (item) item.value = value;
+	node.setDirtyCanvas?.(true, true);
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function updateWatermarkObject(node, index, patch, notify = true) {
+	const objects = watermarkObjects(node);
+	if (!Number.isInteger(index) || index < 0 || index >= objects.length) return false;
+	objects[index] = { ...objects[index], ...(patch || {}) };
+	setWatermarkObjects(node, objects, notify);
+	return true;
+}
+
+function selectedWatermarkObjectIndex(node) {
+	const index = Number(node.__gjjTextOverlaySelectedObjectIndex);
+	return Number.isInteger(index) ? index : -1;
+}
+
+function fitWatermarkObjectToBackground(node, imageInfo, point = { x: 0.5, y: 0.5 }) {
+	const bgWidth = Math.max(1, Number(node.__gjjTextOverlayBgSize?.width || node.__gjjTextOverlayUI?.stage?.clientWidth || 1));
+	const bgHeight = Math.max(1, Number(node.__gjjTextOverlayBgSize?.height || node.__gjjTextOverlayUI?.stage?.clientHeight || 1));
+	const imageWidth = Math.max(1, Number(imageInfo?.width || 72));
+	const imageHeight = Math.max(1, Number(imageInfo?.height || 72));
+	const scale = Math.max(0.01, Math.min(10, 1, bgWidth / imageWidth, bgHeight / imageHeight));
+	const widthRatio = Math.min(1, (imageWidth * scale) / bgWidth);
+	const heightRatio = Math.min(1, (imageHeight * scale) / bgHeight);
+	return {
+		scale: Number(scale.toFixed(4)),
+		x: Number(Math.max(0, Math.min(Math.max(0, 1 - widthRatio), Number(point?.x ?? 0.5))).toFixed(4)),
+		y: Number(Math.max(0, Math.min(Math.max(0, 1 - heightRatio), Number(point?.y ?? 0.5))).toFixed(4)),
+	};
+}
+
+function adjustWatermarkObjectScale(node, index, delta, fine = false) {
+	const objects = watermarkObjects(node);
+	if (!Number.isInteger(index) || index < 0 || index >= objects.length) return false;
+	if (objects[index]?.locked) return false;
+	const current = Math.max(0.01, Math.min(10, Number(objects[index].scale || 1)));
+	const step = fine ? 0.002 : 0.01;
+	const next = Math.max(0.01, Math.min(10, Number((current + Math.sign(delta) * step).toFixed(4))));
+	if (next === current) return false;
+	objects[index] = { ...objects[index], scale: next };
+	setWatermarkObjects(node, objects);
+	return true;
+}
+
+function nudgeWatermarkObject(node, index, dx, dy, fine = false) {
+	const objects = watermarkObjects(node);
+	if (!Number.isInteger(index) || index < 0 || index >= objects.length) return false;
+	if (objects[index]?.locked) return false;
+	const step = fine ? 0.001 : 0.005;
+	const current = clampStagePoint(objects[index].x ?? 0.5, objects[index].y ?? 0.5);
+	const pos = clampStagePoint(current.x + dx * step, current.y + dy * step);
+	objects[index] = { ...objects[index], x: Number(pos.x.toFixed(4)), y: Number(pos.y.toFixed(4)) };
+	setWatermarkObjects(node, objects);
+	return true;
+}
+
+function moveWatermarkObjectLayer(node, index, delta) {
+	const objects = watermarkObjects(node);
+	if (!Number.isInteger(index) || index < 0 || index >= objects.length) return false;
+	const nextIndex = Math.max(0, Math.min(objects.length - 1, index + Math.sign(delta)));
+	if (nextIndex === index) return false;
+	const [item] = objects.splice(index, 1);
+	objects.splice(nextIndex, 0, item);
+	node.__gjjTextOverlaySelectedObjectIndex = nextIndex;
+	setWatermarkObjects(node, objects);
+	return true;
+}
+
+function toggleWatermarkObjectLock(node, index) {
+	const objects = watermarkObjects(node);
+	if (!Number.isInteger(index) || index < 0 || index >= objects.length) return false;
+	objects[index] = { ...objects[index], locked: !objects[index].locked };
+	setWatermarkObjects(node, objects);
+	return true;
+}
+
+function toggleWatermarkObjectStroke(node, index) {
+	const objects = watermarkObjects(node);
+	if (!Number.isInteger(index) || index < 0 || index >= objects.length) return false;
+	const current = objects[index] || {};
+	const enabled = !current.stroke_enabled;
+	objects[index] = {
+		...current,
+		stroke_enabled: enabled,
+		stroke_width: Math.max(1, Math.round(numberValue(node, "logo_stroke_width", 3))),
+		stroke_color_hex: stringValue(node, "logo_stroke_color_hex", "#FFFFFF") || "#FFFFFF",
+	};
+	setWatermarkObjects(node, objects);
+	return true;
+}
+
+function foregroundStrokeFilter(item, displayScale = 1) {
+	if (!item?.stroke_enabled) return "";
+	const width = Math.max(0, Number(item.stroke_width || 3) * displayScale);
+	if (width <= 0) return "";
+	const color = String(item.stroke_color_hex || "#FFFFFF");
+	const px = Math.max(1, Math.round(width));
+	return [
+		`drop-shadow(${px}px 0 0 ${color})`,
+		`drop-shadow(${-px}px 0 0 ${color})`,
+		`drop-shadow(0 ${px}px 0 ${color})`,
+		`drop-shadow(0 ${-px}px 0 ${color})`,
+	].join(" ");
+}
+
+function storedImageSrc(item) {
+	if (!item?.filename) return "";
+	if (item.type && item.type !== "input") return imageRefToViewUrl(item);
+	return inputImageViewInfo(item.filename)?.src || "";
+}
+
 function scheduleRenderPanel(node, options = {}) {
 	if (!node) return;
 	if (node.__gjjTextOverlayRenderFrame) cancelAnimationFrame(node.__gjjTextOverlayRenderFrame);
@@ -761,22 +937,41 @@ function installStyles() {
 	style.id = "gjj-text-overlay-live-style";
 	style.textContent = `
 		.gjj-text-overlay-panel{width:100%;display:flex;flex-direction:column;gap:5px;color:#dce7e2;font:12px system-ui,"Microsoft YaHei",sans-serif;box-sizing:border-box;overflow:hidden;padding:0 2px 3px;}
-		.gjj-text-overlay-toolbar{display:flex;align-items:center;gap:4px;min-width:0;overflow:hidden;}
+		.gjj-text-overlay-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:4px;min-width:0;overflow:visible;}
 		.gjj-text-overlay-settings{display:none;flex-wrap:wrap;align-items:flex-start;gap:5px;min-width:0;}
 		.gjj-text-overlay-settings[data-open="true"]{display:flex;}
 		.gjj-text-overlay-icon-button{width:26px;height:24px;min-width:26px;border:1px solid #3c5058;border-radius:6px;background:#17252b;color:#f3fbfb;font-size:14px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;}
+		.gjj-text-overlay-icon-button svg{width:16px;height:16px;display:block;pointer-events:none;}
 		.gjj-text-overlay-icon-button:hover{background:#213942;border-color:#63838d;}
 		.gjj-text-overlay-icon-button[data-active="true"]{background:#244850;border-color:#82b9c5;}
+		.gjj-text-overlay-object-picker{display:flex;align-items:center;flex-wrap:wrap;gap:2px;min-width:0;max-width:100%;overflow:visible;scrollbar-width:none;}
+		.gjj-text-overlay-object-picker::-webkit-scrollbar{display:none;}
+		.gjj-text-overlay-object-picker-button{height:22px;min-width:25px;border:1px solid transparent;border-radius:5px;background:transparent;color:#eaf3f3;font-size:11px;font-weight:800;line-height:1;padding:0 3px;cursor:pointer;white-space:nowrap;text-shadow:0 1px 3px rgba(0,0,0,.8);}
+		.gjj-text-overlay-object-picker-button:hover{background:#213942;border-color:#63838d;}
+		.gjj-text-overlay-object-picker-button[data-active="true"]{background:#39422a;border-color:#ffd84d;color:#fff6bf;}
 		.gjj-text-overlay-preview{position:relative;width:100%;min-width:0;border:1px solid #34484f;border-radius:7px;background:#10181c;overflow:hidden;display:flex;justify-content:center;}
+		.gjj-text-overlay-preview[data-dragging-image="true"]{border-color:#ffd84d;box-shadow:0 0 0 2px rgba(255,216,77,.28) inset;}
 		.gjj-text-overlay-status{position:absolute;left:8px;bottom:8px;max-width:calc(100% - 16px);padding:3px 7px;border-radius:6px;background:rgba(8,14,17,.72);color:#b7cbd0;font-size:11px;line-height:1.3;pointer-events:none;opacity:0;transition:opacity .15s ease;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 		.gjj-text-overlay-status[data-show="true"]{opacity:1;}
 		.gjj-text-overlay-stage{position:relative;width:100%;aspect-ratio:16/9;background:linear-gradient(45deg,#182126 25%,#121a1e 25%,#121a1e 50%,#182126 50%,#182126 75%,#121a1e 75%);background-size:22px 22px;overflow:hidden;margin:0 auto;}
-		.gjj-text-overlay-base{position:absolute;inset:0;background:radial-gradient(circle at 30% 25%,rgba(112,151,163,.35),transparent 35%),linear-gradient(135deg,#202c32,#0d1418);opacity:.9;}
-		.gjj-text-overlay-bg{position:absolute;inset:0;width:100%;height:100%;object-fit:fill;display:none;}
-		.gjj-text-overlay-item{position:absolute;left:50%;top:50%;user-select:none;touch-action:none;cursor:grab;border:1px solid transparent;border-radius:5px;}
+		.gjj-text-overlay-base{position:absolute;inset:0;z-index:0;background:radial-gradient(circle at 30% 25%,rgba(112,151,163,.35),transparent 35%),linear-gradient(135deg,#202c32,#0d1418);opacity:.9;}
+		.gjj-text-overlay-bg{position:absolute;inset:0;z-index:1;width:100%;height:100%;object-fit:fill;display:none;}
+		.gjj-text-overlay-object-layer{position:absolute;inset:0;z-index:4;pointer-events:none;}
+		.gjj-text-overlay-object{position:absolute;user-select:none;touch-action:none;cursor:grab;border:1px solid transparent;border-radius:5px;pointer-events:auto;}
+		.gjj-text-overlay-object:active{cursor:grabbing;}
+		.gjj-text-overlay-object[data-selected="true"]{border-color:#ffd84d;box-shadow:0 0 0 2px rgba(255,216,77,.26);}
+		.gjj-text-overlay-object[data-selected="true"] .gjj-text-overlay-resize{display:block;}
+		.gjj-text-overlay-object[data-locked="true"]{border-style:dashed;}
+		.gjj-text-overlay-object[data-locked="true"] .gjj-text-overlay-resize{display:none;}
+		.gjj-text-overlay-object img{display:block;width:100%;height:100%;object-fit:contain;pointer-events:none;}
+		.gjj-text-overlay-object-tools{position:absolute;left:calc(100% + 4px);top:0;display:flex;flex-direction:column;gap:1px;align-items:center;padding:0;background:transparent;pointer-events:auto;z-index:9;}
+		.gjj-text-overlay-object-tool{width:18px;height:18px;border:1px solid transparent;border-radius:4px;background:transparent;color:#f4fbfb;font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center;padding:0;cursor:pointer;text-shadow:0 1px 3px rgba(0,0,0,.9);}
+		.gjj-text-overlay-object-tool:hover{background:rgba(20,31,36,.68);border-color:rgba(126,162,173,.78);}
+		.gjj-text-overlay-object-tool[data-active="true"]{background:rgba(80,69,18,.72);border-color:#ffd84d;color:#fff6bf;}
+		.gjj-text-overlay-item{position:absolute;left:50%;top:50%;z-index:3;user-select:none;touch-action:none;cursor:grab;border:1px solid transparent;border-radius:5px;}
 		.gjj-text-overlay-item:active{cursor:grabbing;}
 		.gjj-text-overlay-item[data-active="true"]{border-color:#7fa7b3;box-shadow:0 0 0 2px rgba(127,167,179,.22);}
-		.gjj-text-overlay-text{display:block;max-width:none;padding:0;image-rendering:auto;}
+		.gjj-text-overlay-text{z-index:5;display:block;max-width:none;padding:0;image-rendering:auto;}
 		.gjj-text-overlay-text-img{display:block;width:100%;height:100%;pointer-events:none;}
 		.gjj-text-overlay-resize{position:absolute;width:14px;height:14px;border:2px solid #071014;border-radius:50%;background:#ffd84d;box-shadow:0 0 0 1px rgba(255,255,255,.7);display:none;z-index:3;}
 		.gjj-text-overlay-resize[data-corner="nw"]{left:2px;top:2px;cursor:nwse-resize;}
@@ -939,6 +1134,7 @@ function makePanel(node) {
 	toolbar.className = "gjj-text-overlay-toolbar";
 	const preview = document.createElement("div");
 	preview.className = "gjj-text-overlay-preview";
+	preview.tabIndex = 0;
 	const status = document.createElement("div");
 	status.className = "gjj-text-overlay-status";
 	const stage = document.createElement("div");
@@ -948,6 +1144,8 @@ function makePanel(node) {
 	const bg = document.createElement("img");
 	bg.className = "gjj-text-overlay-bg";
 	bg.alt = "";
+	const objectLayer = document.createElement("div");
+	objectLayer.className = "gjj-text-overlay-object-layer";
 	const text = document.createElement("div");
 	text.className = "gjj-text-overlay-item gjj-text-overlay-text";
 	text.dataset.kind = "text";
@@ -976,7 +1174,7 @@ function makePanel(node) {
 	watermarkResizeSe.className = "gjj-text-overlay-resize";
 	watermarkResizeSe.dataset.corner = "se";
 	watermark.append(watermarkImg, watermarkResizeNw, watermarkResizeSe);
-	stage.append(base, bg, watermark, text);
+	stage.append(base, bg, objectLayer, watermark, text);
 	preview.append(stage, status);
 
 	const settings = document.createElement("div");
@@ -1002,11 +1200,103 @@ function makePanel(node) {
 	logoFileInput.style.display = "none";
 	document.body.appendChild(logoFileInput);
 
+	const firstImageFile = (items) => {
+		for (const item of Array.from(items || [])) {
+			const file = item?.kind === "file" ? item.getAsFile?.() : item;
+			if (!file) continue;
+			if (String(file.type || "").startsWith("image/") || /\.(png|jpe?g|webp|bmp)$/i.test(file.name || "")) return file;
+		}
+		return null;
+	};
+
+	const dropPointOnStage = (event) => {
+		const rect = stage.getBoundingClientRect();
+		if (!rect.width || !rect.height) return { x: 0.5, y: 0.5 };
+		return {
+			x: (event.clientX - rect.left) / rect.width,
+			y: (event.clientY - rect.top) / rect.height,
+		};
+	};
+
+	const useFileAsWatermark = async (file, event = null) => {
+		if (!file) return;
+		if (!syncBackgroundSizeFromImage(node)) {
+			showPanelStatus(node, "请先放入背景图，再拖入前景图片", 2200);
+			return;
+		}
+		const point = event ? dropPointOnStage(event) : { x: positionValue(node, "watermark_x", "x"), y: positionValue(node, "watermark_y", "y") };
+		try {
+			preview.dataset.draggingImage = "false";
+			showPanelStatus(node, "正在添加前景图片...", 2200);
+			const src = await readLocalFile(file);
+			const imageInfo = await imageSourceDetails(src);
+			const hasTransparency = imageInfo.hasTransparency;
+			setWidgetValue(node, "logo_default_url", "");
+			setPosition(node, "watermark", point.x, point.y);
+			activate("watermark");
+			const tempInfo = await writeTempImageFromDataUrl(src, file);
+			const objects = watermarkObjects(node);
+			const fit = fitWatermarkObjectToBackground(node, imageInfo, clampStagePoint(point.x, point.y));
+			objects.push({
+				filename: tempInfo.filename,
+				type: tempInfo.type || "temp",
+				subfolder: tempInfo.subfolder || "GJJ",
+				hash: tempInfo.hash || "",
+				x: fit.x,
+				y: fit.y,
+				scale: fit.scale,
+				width: imageInfo.width || 72,
+				height: imageInfo.height || 72,
+			});
+			node.__gjjTextOverlaySelectedObjectIndex = objects.length - 1;
+			setWatermarkObjects(node, objects);
+			showPanelStatus(node, hasTransparency ? "透明前景已直接添加" : (boolValue(node, "logo_remove_bg", true) ? "前景已添加，执行时会自动抠图" : "前景已添加"), 1600);
+			renderPanel(node, { fitText: false });
+		} catch (error) {
+			console.warn("[GJJ_TextOverlay] 拖拽添加前景失败", error);
+			showPanelStatus(node, "前景添加失败", 2200);
+		}
+	};
+
+	const deleteSelectedWatermarkObject = () => {
+		const objects = watermarkObjects(node);
+		const index = Number(node.__gjjTextOverlaySelectedObjectIndex);
+		if (!Number.isInteger(index) || index < 0 || index >= objects.length) {
+			showPanelStatus(node, "请先选择要删除的对象", 1400);
+			return;
+		}
+		objects.splice(index, 1);
+		node.__gjjTextOverlaySelectedObjectIndex = Math.min(index, objects.length - 1);
+		setWatermarkObjects(node, objects);
+		showPanelStatus(node, "对象已删除", 1200);
+		renderPanel(node, { fitText: false });
+	};
+	const moveSelectedWatermarkObject = (delta) => {
+		const index = selectedWatermarkObjectIndex(node);
+		if (moveWatermarkObjectLayer(node, index, delta)) {
+			showPanelStatus(node, delta > 0 ? "对象已上移一层" : "对象已下移一层", 1000);
+			renderPanel(node, { fitText: false });
+		} else {
+			showPanelStatus(node, "请先选择可调整的对象", 1400);
+		}
+	};
+	const scaleSelectedWatermarkObject = (delta) => {
+		const index = selectedWatermarkObjectIndex(node);
+		if (adjustWatermarkObjectScale(node, index, delta, true)) {
+			showPanelStatus(node, delta > 0 ? "对象已放大" : "对象已缩小", 900);
+			renderPanel(node, { fitText: false });
+		} else {
+			const locked = watermarkObjects(node)[index]?.locked;
+			showPanelStatus(node, locked ? "对象已锁定" : "请先选择可缩放的对象", 1400);
+		}
+	};
+
 	const addIconButton = (icon, title, callback) => {
 		const button = document.createElement("button");
 		button.type = "button";
 		button.className = "gjj-text-overlay-icon-button";
-		button.textContent = icon;
+		if (String(icon || "").trim().startsWith("<svg")) button.innerHTML = icon;
+		else button.textContent = icon;
 		button.title = title;
 		button.addEventListener("click", (event) => {
 			event.preventDefault();
@@ -1020,21 +1310,29 @@ function makePanel(node) {
 	addIconButton("📂", "打开本地背景图", () => fileInput.click());
 	const backgroundLinkButton = addIconButton("🔗", "断开背景图上游链接", () => toggleRememberedInputLink(node, "background_image"));
 	backgroundLinkButton.style.display = "none";
-	addIconButton("🧩", "打开本地 logo，并使用 RMBG1.4 抠图预览", () => logoFileInput.click());
-	const watermarkLinkButton = addIconButton("🔗", "断开水印图上游链接", () => toggleRememberedInputLink(node, "watermark_image"));
+	addIconButton("🧩", "打开本地前景图，并使用 RMBG1.4 抠图预览", () => logoFileInput.click());
+	addIconButton("⬇", "选中对象下移一层", () => moveSelectedWatermarkObject(-1));
+	addIconButton("⬆", "选中对象上移一层", () => moveSelectedWatermarkObject(1));
+	addIconButton(ZOOM_IN_ICON, "放大选中对象", () => scaleSelectedWatermarkObject(1));
+	addIconButton(ZOOM_OUT_ICON, "缩小选中对象", () => scaleSelectedWatermarkObject(-1));
+	addIconButton("🗑", "删除选中的拖拽对象", deleteSelectedWatermarkObject);
+	const objectPicker = document.createElement("div");
+	objectPicker.className = "gjj-text-overlay-object-picker";
+	objectPicker.style.display = "none";
+	const watermarkLinkButton = addIconButton("🔗", "断开前景图上游链接", () => toggleRememberedInputLink(node, "watermark_image"));
 	watermarkLinkButton.style.display = "none";
-	addIconButton("🌏", "设置网络默认 logo", async () => {
+	addIconButton("🌏", "设置网络默认前景图", async () => {
 		const current = stringValue(node, "logo_default_url", "") || DEFAULT_LOGO_URL;
-		const url = window.prompt("网络默认 logo URL", current);
+		const url = window.prompt("网络默认前景图 URL", current);
 		if (!url) return;
 		try {
 			if (status) {
-				status.textContent = "正在解析网络 logo...";
+				status.textContent = "正在解析网络前景图...";
 				status.dataset.show = "true";
 			}
 			const data = await fetchNetworkLogo(url.trim());
 			setWatermarkPreviewImage(node, { src: data.src });
-			const file = await imageDataUrlToPngFile(data.src, data.filename || "logo.png");
+			const file = await imageDataUrlToPngFile(data.src, data.filename || "foreground.png");
 			const filename = await uploadImageToInput(file);
 			setWidgetValue(node, "logo_default_url", url.trim());
 			setWidgetValue(node, "watermark_upload_name", filename);
@@ -1048,33 +1346,44 @@ function makePanel(node) {
 						setWatermarkPreviewImage(node, cutout);
 					}
 				} catch (error) {
-					console.warn("[GJJ_TextOverlay] RMBG1.4 网络 logo 预览失败", error);
+					console.warn("[GJJ_TextOverlay] RMBG1.4 网络前景图预览失败", error);
 				}
 			}
 			if (status) {
-				status.textContent = "网络默认 logo 已设置";
+				status.textContent = "网络默认前景图已设置";
 				clearTimeout(node.__gjjTextOverlayStatusTimer);
 				node.__gjjTextOverlayStatusTimer = setTimeout(() => { status.dataset.show = "false"; }, 1400);
 			}
 			renderPanel(node);
 		} catch (error) {
-			console.warn("[GJJ_TextOverlay] 网络 logo 设置失败", error);
+			console.warn("[GJJ_TextOverlay] 网络前景图设置失败", error);
 			if (status) {
-				status.textContent = `网络 logo 设置失败：${error?.message || error}`;
+				status.textContent = `网络前景图设置失败：${error?.message || error}`;
 				status.dataset.show = "true";
 			}
 		}
 	});
-	addIconButton("🌘", "开关 logo 阴影", (button) => {
+	addIconButton("🌘", "开关前景阴影", (button) => {
 		const next = !boolValue(node, "logo_shadow_enabled", false);
 		setWidgetValue(node, "logo_shadow_enabled", next);
 		button.dataset.active = next ? "true" : "false";
 		renderPanel(node);
 	});
-	addIconButton("✒️", "开关 logo 描边", (button) => {
+	const foregroundStrokeButton = addIconButton("✒️", "给选中前景描边；未选中时切换全局前景描边", (button) => {
+		const index = selectedWatermarkObjectIndex(node);
+		const objects = watermarkObjects(node);
+		if (Number.isInteger(index) && index >= 0 && index < objects.length) {
+			toggleWatermarkObjectStroke(node, index);
+			const enabled = watermarkObjects(node)[index]?.stroke_enabled;
+			button.dataset.active = enabled ? "true" : "false";
+			showPanelStatus(node, enabled ? "选中前景描边已开启" : "选中前景描边已关闭", 1200);
+			renderPanel(node, { fitText: false });
+			return;
+		}
 		const next = !boolValue(node, "logo_stroke_enabled", false);
 		setWidgetValue(node, "logo_stroke_enabled", next);
 		button.dataset.active = next ? "true" : "false";
+		showPanelStatus(node, next ? "全局前景描边已开启" : "全局前景描边已关闭", 1200);
 		renderPanel(node);
 	});
 	const settingsButton = addIconButton("⚙️", "其它设置", (button) => {
@@ -1087,6 +1396,7 @@ function makePanel(node) {
 		updatePanelHeight(node);
 	});
 	settingsButton.dataset.active = settings.dataset.open === "true" ? "true" : "false";
+	toolbar.appendChild(objectPicker);
 
 	control(node, settings, "文本", "texts", "text", { wide: true });
 	control(node, settings, "字体", "font_path", "select");
@@ -1097,25 +1407,101 @@ function makePanel(node) {
 	control(node, settings, "描边颜色", "stroke_color_hex", "color");
 	control(node, settings, "启用描边", "use_stroke", "checkbox");
 	control(node, settings, "描边宽度", "stroke_width", "number", { min: 0, step: 1 });
-	control(node, settings, "水印透明度", "watermark_opacity", "range", { min: 0, max: 1, step: 0.01 });
+	control(node, settings, "前景透明度", "watermark_opacity", "range", { min: 0, max: 1, step: 0.01 });
 	control(node, settings, "RMBG1.4抠图", "logo_remove_bg", "checkbox");
-	control(node, settings, "Logo阴影模糊", "logo_shadow_blur", "number", { min: 0, step: 0.5 });
-	control(node, settings, "Logo阴影X", "logo_shadow_x", "number", { step: 1 });
-	control(node, settings, "Logo阴影Y", "logo_shadow_y", "number", { step: 1 });
-	control(node, settings, "Logo阴影颜色", "logo_shadow_color_hex", "color");
-	control(node, settings, "Logo描边宽度", "logo_stroke_width", "number", { min: 0, step: 1 });
-	control(node, settings, "Logo描边颜色", "logo_stroke_color_hex", "color");
+	control(node, settings, "前景阴影模糊", "logo_shadow_blur", "number", { min: 0, step: 0.5 });
+	control(node, settings, "前景阴影X", "logo_shadow_x", "number", { step: 1 });
+	control(node, settings, "前景阴影Y", "logo_shadow_y", "number", { step: 1 });
+	control(node, settings, "前景阴影颜色", "logo_shadow_color_hex", "color");
+	control(node, settings, "前景描边宽度", "logo_stroke_width", "number", { min: 0, step: 1 });
+	control(node, settings, "前景描边颜色", "logo_stroke_color_hex", "color");
 
 	fileInput.addEventListener("change", async () => {
 		const file = fileInput.files?.[0];
 		if (!file) return;
 		try {
-			setBackgroundImage(node, await readLocalFile(file), file.name);
+			const src = await readLocalFile(file);
+			const imageInfo = await imageSourceDetails(src);
+			setBackgroundImage(node, { src, width: imageInfo.width, height: imageInfo.height }, file.name);
+			const tempInfo = await writeTempImageFromDataUrl(src, file);
+			setWidgetValue(node, "background_image_ref_json", JSON.stringify({
+				...tempInfo,
+				original_name: file.name || tempInfo.filename || "",
+				width: imageInfo.width || 0,
+				height: imageInfo.height || 0,
+			}));
+			showPanelStatus(node, "背景图已载入，可直接执行", 1600);
 		} catch (error) {
 			console.warn("[GJJ_TextOverlay] 打开背景预览失败", error);
+			showPanelStatus(node, "背景图打开失败", 2200);
 		} finally {
 			fileInput.value = "";
 		}
+	});
+
+	let dragImageDepth = 0;
+	const showDragImageTarget = (show) => {
+		preview.dataset.draggingImage = show ? "true" : "false";
+	};
+	for (const el of [preview, stage]) {
+		el.addEventListener("dragenter", (event) => {
+			const file = firstImageFile(event.dataTransfer?.items);
+			if (!file) return;
+			event.preventDefault();
+			event.stopPropagation();
+			dragImageDepth += 1;
+			showDragImageTarget(true);
+			if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+			showPanelStatus(node, syncBackgroundSizeFromImage(node) ? "松开后作为前景添加" : "请先放入背景图", 1200);
+		});
+		el.addEventListener("dragover", (event) => {
+			const file = firstImageFile(event.dataTransfer?.items);
+			if (!file) return;
+			event.preventDefault();
+			event.stopPropagation();
+			if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+		});
+		el.addEventListener("dragleave", (event) => {
+			const file = firstImageFile(event.dataTransfer?.items);
+			if (!file) return;
+			event.preventDefault();
+			event.stopPropagation();
+			dragImageDepth = Math.max(0, dragImageDepth - 1);
+			if (dragImageDepth <= 0) showDragImageTarget(false);
+		});
+		el.addEventListener("drop", async (event) => {
+			const file = firstImageFile(event.dataTransfer?.files) || firstImageFile(event.dataTransfer?.items);
+			if (!file) return;
+			event.preventDefault();
+			event.stopPropagation();
+			dragImageDepth = 0;
+			showDragImageTarget(false);
+			await useFileAsWatermark(file, event);
+		});
+	}
+
+	preview.addEventListener("keydown", (event) => {
+		if (event.key === "[" || event.key === "]" || event.key === "PageUp" || event.key === "PageDown") {
+			event.preventDefault();
+			event.stopPropagation();
+			const delta = (event.key === "]" || event.key === "PageUp") ? 1 : -1;
+			moveSelectedWatermarkObject(delta);
+			return;
+		}
+		if (event.key === "+" || event.key === "=" || event.key === "-" || event.key === "_") {
+			event.preventDefault();
+			event.stopPropagation();
+			const index = selectedWatermarkObjectIndex(node);
+			const direction = (event.key === "+" || event.key === "=") ? 1 : -1;
+			if (adjustWatermarkObjectScale(node, index, direction, event.shiftKey || event.altKey)) {
+				renderPanel(node, { fitText: false });
+			}
+			return;
+		}
+		if (event.key !== "Delete" && event.key !== "Backspace") return;
+		event.preventDefault();
+		event.stopPropagation();
+		deleteSelectedWatermarkObject();
 	});
 
 	logoFileInput.addEventListener("change", async () => {
@@ -1136,20 +1522,20 @@ function makePanel(node) {
 						setWatermarkPreviewImage(node, cutout);
 					}
 				} catch (error) {
-					console.warn("[GJJ_TextOverlay] RMBG1.4 logo 预览失败", error);
+					console.warn("[GJJ_TextOverlay] RMBG1.4 前景预览失败", error);
 				}
 			}
 			if (status) {
-				status.textContent = boolValue(node, "logo_remove_bg", true) ? "Logo 已选择，执行时使用 RMBG1.4 抠图" : "Logo 已选择";
+				status.textContent = boolValue(node, "logo_remove_bg", true) ? "前景已选择，执行时使用 RMBG1.4 抠图" : "前景已选择";
 				status.dataset.show = "true";
 				clearTimeout(node.__gjjTextOverlayStatusTimer);
 				node.__gjjTextOverlayStatusTimer = setTimeout(() => { status.dataset.show = "false"; }, 1400);
 			}
 			renderPanel(node);
 		} catch (error) {
-			console.warn("[GJJ_TextOverlay] 打开 logo 失败", error);
+			console.warn("[GJJ_TextOverlay] 打开前景失败", error);
 			if (status) {
-				status.textContent = "Logo 打开失败";
+				status.textContent = "前景打开失败";
 				status.dataset.show = "true";
 			}
 		} finally {
@@ -1167,6 +1553,8 @@ function makePanel(node) {
 
 	let dragging = "";
 	let dragOffset = { x: 0, y: 0 };
+	let draggingObjectIndex = -1;
+	let draggingObjectElement = null;
 	let resizingKind = "";
 	let resizeStart = null;
 	const drag = (event, kind = dragging) => {
@@ -1175,15 +1563,25 @@ function makePanel(node) {
 		if (!rect.width || !rect.height) return;
 		const x = (event.clientX - rect.left - dragOffset.x) / rect.width;
 		const y = (event.clientY - rect.top - dragOffset.y) / rect.height;
+		if (kind === "object") {
+			const pos = clampStagePoint(x, y);
+			updateWatermarkObject(node, draggingObjectIndex, { x: pos.x, y: pos.y }, false);
+			if (draggingObjectElement) {
+				draggingObjectElement.style.left = `${pos.x * 100}%`;
+				draggingObjectElement.style.top = `${pos.y * 100}%`;
+			}
+			return;
+		}
 		setPosition(node, kind, x, y);
 	};
-	const startResize = (event, kind, corner, element) => {
+	const startResize = (event, kind, corner, element, objectIndex = -1, objectElement = null) => {
 		event.preventDefault();
 		event.stopPropagation();
 		resizingKind = kind;
 		dragging = "";
 		activate(kind);
-		const target = kind === "watermark" ? watermark : text;
+		const target = kind === "object" ? objectElement : (kind === "watermark" ? watermark : text);
+		if (!target) return;
 		const rect = target.getBoundingClientRect();
 		const stageRect = stage.getBoundingClientRect();
 		const left = rect.left - stageRect.left;
@@ -1200,10 +1598,21 @@ function makePanel(node) {
 			top,
 			anchorX: corner === "nw" ? left + width : left,
 			anchorY: corner === "nw" ? top + height : top,
+			startPointerX: event.clientX - stageRect.left,
+			startPointerY: event.clientY - stageRect.top,
 			stageWidth: Math.max(1, stageRect.width),
 			stageHeight: Math.max(1, stageRect.height),
 			fontSize: Math.max(1, numberValue(node, "font_size", 48)),
 			watermarkWidth: Math.max(0.1, numberValue(node, "watermark_width", 1)),
+			objectIndex,
+			objectScale: Math.max(0.01, Number(watermarkObjects(node)[objectIndex]?.scale || 1)),
+			objectElement,
+			baseWidth: Math.max(1, Number(watermarkObjects(node)[objectIndex]?.width || width)),
+			baseHeight: Math.max(1, Number(watermarkObjects(node)[objectIndex]?.height || height)),
+			displayScale: (() => {
+				const bgWidth = Math.max(1, node.__gjjTextOverlayBgSize?.width || Math.max(1, stageRect.width));
+				return Math.max(1, stageRect.width) / bgWidth;
+			})(),
 		};
 		element.setPointerCapture?.(event.pointerId);
 	};
@@ -1226,6 +1635,45 @@ function makePanel(node) {
 			drag(event, dragging);
 		});
 	}
+	node.__gjjTextOverlayStartObjectDrag = (event, index, element) => {
+		event.preventDefault();
+		event.stopPropagation();
+		preview?.focus?.();
+		node.__gjjTextOverlaySelectedObjectIndex = index;
+		activate("object");
+		objectLayer.querySelectorAll?.(".gjj-text-overlay-object").forEach((item) => {
+			item.dataset.selected = item === element ? "true" : "false";
+		});
+		if (watermarkObjects(node)[index]?.locked) {
+			renderPanel(node, { fitText: false });
+			return;
+		}
+		dragging = "object";
+		draggingObjectIndex = index;
+		draggingObjectElement = element;
+		resizingKind = "";
+		resizeStart = null;
+		const itemRect = element.getBoundingClientRect();
+		dragOffset = {
+			x: event.clientX - itemRect.left,
+			y: event.clientY - itemRect.top,
+		};
+		element.setPointerCapture?.(event.pointerId);
+		drag(event, "object");
+	};
+	node.__gjjTextOverlayStartObjectResize = (event, index, corner, objectElement, handleElement) => {
+		node.__gjjTextOverlaySelectedObjectIndex = index;
+		objectLayer.querySelectorAll?.(".gjj-text-overlay-object").forEach((item) => {
+			item.dataset.selected = item === objectElement ? "true" : "false";
+		});
+		if (watermarkObjects(node)[index]?.locked) {
+			event.preventDefault();
+			event.stopPropagation();
+			renderPanel(node, { fitText: false });
+			return;
+		}
+		startResize(event, "object", corner, handleElement, index, objectElement);
+	};
 	stage.addEventListener("pointerdown", (event) => {
 		if (event.target !== stage && event.target !== base && event.target !== bg) return;
 		event.preventDefault();
@@ -1237,8 +1685,13 @@ function makePanel(node) {
 		if (resizingKind && resizeStart) {
 			event.preventDefault();
 			const stageRect = stage.getBoundingClientRect();
-			const pointerX = Math.max(0, Math.min(resizeStart.stageWidth, event.clientX - stageRect.left));
-			const pointerY = Math.max(0, Math.min(resizeStart.stageHeight, event.clientY - stageRect.top));
+			let pointerX = Math.max(0, Math.min(resizeStart.stageWidth, event.clientX - stageRect.left));
+			let pointerY = Math.max(0, Math.min(resizeStart.stageHeight, event.clientY - stageRect.top));
+			if (resizingKind === "object" && (event.shiftKey || event.altKey || event.ctrlKey)) {
+				const fineFactor = event.altKey ? 0.05 : (event.ctrlKey ? 0.1 : 0.2);
+				pointerX = resizeStart.startPointerX + (pointerX - resizeStart.startPointerX) * fineFactor;
+				pointerY = resizeStart.startPointerY + (pointerY - resizeStart.startPointerY) * fineFactor;
+			}
 			const widthRatio = Math.abs(pointerX - resizeStart.anchorX) / resizeStart.width;
 			const heightRatio = Math.abs(pointerY - resizeStart.anchorY) / resizeStart.height;
 			const rawRatio = Math.max(widthRatio, heightRatio);
@@ -1256,6 +1709,13 @@ function makePanel(node) {
 			if (resizingKind === "text") {
 				const nextSize = Math.max(1, Math.min(512, Math.round(resizeStart.fontSize * ratio)));
 				setWidgetValue(node, "font_size", nextSize);
+			} else if (resizingKind === "object") {
+				const nextScale = Math.max(0.01, Math.min(10, Number((resizeStart.objectScale * ratio).toFixed(4))));
+				updateWatermarkObject(node, resizeStart.objectIndex, { scale: nextScale }, false);
+				if (resizeStart.objectElement) {
+					resizeStart.objectElement.style.width = `${Math.round(resizeStart.baseWidth * nextScale * resizeStart.displayScale)}px`;
+					resizeStart.objectElement.style.height = `${Math.round(resizeStart.baseHeight * nextScale * resizeStart.displayScale)}px`;
+				}
 			} else {
 				const nextScale = Math.max(0.1, Math.min(10, Number((resizeStart.watermarkWidth * ratio).toFixed(4))));
 				setWidgetValue(node, "watermark_width", nextScale);
@@ -1264,7 +1724,13 @@ function makePanel(node) {
 				const nextLeft = (resizeStart.left + resizeStart.width - nextWidth) / resizeStart.stageWidth;
 				const nextTop = (resizeStart.top + resizeStart.height - nextHeight) / resizeStart.stageHeight;
 				const pos = clampStagePoint(nextLeft, nextTop);
-				if (resizingKind === "watermark") {
+				if (resizingKind === "object") {
+					updateWatermarkObject(node, resizeStart.objectIndex, { x: pos.x, y: pos.y }, false);
+					if (resizeStart.objectElement) {
+						resizeStart.objectElement.style.left = `${pos.x * 100}%`;
+						resizeStart.objectElement.style.top = `${pos.y * 100}%`;
+					}
+				} else if (resizingKind === "watermark") {
 					setWidgetValue(node, "watermark_x", pos.x);
 					setWidgetValue(node, "watermark_y", pos.y);
 				} else {
@@ -1276,7 +1742,13 @@ function makePanel(node) {
 					resizeStart.left / resizeStart.stageWidth,
 					resizeStart.top / resizeStart.stageHeight,
 				);
-				if (resizingKind === "watermark") {
+				if (resizingKind === "object") {
+					updateWatermarkObject(node, resizeStart.objectIndex, { x: pos.x, y: pos.y }, false);
+					if (resizeStart.objectElement) {
+						resizeStart.objectElement.style.left = `${pos.x * 100}%`;
+						resizeStart.objectElement.style.top = `${pos.y * 100}%`;
+					}
+				} else if (resizingKind === "watermark") {
 					setWidgetValue(node, "watermark_x", pos.x);
 					setWidgetValue(node, "watermark_y", pos.y);
 				} else {
@@ -1284,15 +1756,24 @@ function makePanel(node) {
 					setWidgetValue(node, "text_y", pos.y);
 				}
 			}
-			renderPanel(node);
+			if (resizingKind !== "object") renderPanel(node, { fitText: false });
 			return;
 		}
 		if (!dragging) return;
 		event.preventDefault();
 		drag(event, dragging);
 	});
-	stage.addEventListener("pointerup", () => { dragging = ""; resizingKind = ""; resizeStart = null; });
-	stage.addEventListener("pointerleave", () => { dragging = ""; resizingKind = ""; resizeStart = null; });
+	const finishPointerEdit = () => {
+		const wasObjectEdit = dragging === "object" || resizingKind === "object";
+		dragging = "";
+		draggingObjectIndex = -1;
+		draggingObjectElement = null;
+		resizingKind = "";
+		resizeStart = null;
+		if (wasObjectEdit) renderPanel(node, { fitText: false });
+	};
+	stage.addEventListener("pointerup", finishPointerEdit);
+	stage.addEventListener("pointerleave", finishPointerEdit);
 
 	let observedStageWidth = 0;
 	const resizeObserver = new ResizeObserver(() => {
@@ -1316,7 +1797,7 @@ function makePanel(node) {
 		return originalRemoved?.apply(this, args);
 	};
 
-	node.__gjjTextOverlayUI = { root, toolbar, settings, preview, status, stage, base, bg, text, textImg, textResizeNw, textResizeSe, watermark, watermarkImg, watermarkResizeNw, watermarkResizeSe, backgroundLinkButton, watermarkLinkButton, activate };
+	node.__gjjTextOverlayUI = { root, toolbar, settings, preview, status, stage, base, bg, objectLayer, objectPicker, foregroundStrokeButton, text, textImg, textResizeNw, textResizeSe, watermark, watermarkImg, watermarkResizeNw, watermarkResizeSe, backgroundLinkButton, watermarkLinkButton, activate };
 	activate(node.__gjjTextOverlayActive || "text");
 	updateLinkToggleButtons(node);
 	scheduleRenderPanel(node);
@@ -1431,7 +1912,7 @@ function refreshWatermarkPreview(node, force = false) {
 								node.__gjjTextOverlayWatermarkSrc = cutout.src;
 								setWatermarkPreviewImage(node, cutout);
 							})
-							.catch((error) => console.warn("[GJJ_TextOverlay] RMBG1.4 logo 预览失败", error));
+							.catch((error) => console.warn("[GJJ_TextOverlay] RMBG1.4 前景预览失败", error));
 					}
 				}
 			}
@@ -1445,7 +1926,7 @@ function refreshWatermarkPreview(node, force = false) {
 				fetchNetworkLogo(defaultUrl)
 					.then(async (data) => {
 						setWatermarkPreviewImage(node, { src: data.src });
-						const file = await imageDataUrlToPngFile(data.src, data.filename || "logo.png");
+						const file = await imageDataUrlToPngFile(data.src, data.filename || "foreground.png");
 						const filename = await uploadImageToInput(file);
 						setWidgetValue(node, "watermark_upload_name", filename);
 						node.__gjjTextOverlayWatermarkSourceKey = `upload:${filename}`;
@@ -1459,7 +1940,7 @@ function refreshWatermarkPreview(node, force = false) {
 						}
 						renderPanel(node);
 					})
-					.catch((error) => console.warn("[GJJ_TextOverlay] 默认网络 logo 恢复失败", error))
+					.catch((error) => console.warn("[GJJ_TextOverlay] 默认网络前景图恢复失败", error))
 					.finally(() => { node.__gjjTextOverlayDefaultLogoLoading = false; });
 			}
 			return true;
@@ -1469,7 +1950,7 @@ function refreshWatermarkPreview(node, force = false) {
 		if (ui?.watermarkImg) ui.watermarkImg.removeAttribute("src");
 		if (ui?.watermark) ui.watermark.style.display = "none";
 		if (force && ui?.status) {
-			ui.status.textContent = "未找到上游水印图片预览，请先执行上游节点。";
+			ui.status.textContent = "未找到上游前景图片预览，请先执行上游节点。";
 			ui.status.dataset.show = "true";
 			clearTimeout(node.__gjjTextOverlayStatusTimer);
 			node.__gjjTextOverlayStatusTimer = setTimeout(() => { ui.status.dataset.show = "false"; }, 2200);
@@ -1490,7 +1971,7 @@ function refreshWatermarkPreview(node, force = false) {
 					node.__gjjTextOverlayWatermarkSrc = cutout.src;
 					setWatermarkPreviewImage(node, cutout);
 				})
-				.catch((error) => console.warn("[GJJ_TextOverlay] RMBG1.4 logo 预览失败", error));
+				.catch((error) => console.warn("[GJJ_TextOverlay] RMBG1.4 前景预览失败", error));
 		}
 	}
 	return true;
@@ -1582,6 +2063,27 @@ function drawTextPreviewImage(node) {
 	return { src: canvas.toDataURL("image/png"), width: canvas.width, height: canvas.height };
 }
 
+function restorePanelBackground(node) {
+	if (linkPresent(input(node, "background_image"))) return false;
+	let ref = null;
+	try {
+		const parsed = JSON.parse(stringValue(node, "background_image_ref_json", "{}"));
+		if (parsed && typeof parsed === "object" && parsed.filename) ref = parsed;
+	} catch (_) {
+		ref = null;
+	}
+	if (!ref) return false;
+	const src = imageRefToViewUrl(ref);
+	if (!src) return false;
+	if (node.__gjjTextOverlayBgSrc === src && node.__gjjTextOverlayUI?.bg?.src) return true;
+	setBackgroundImage(node, {
+		src,
+		width: Number(ref.width || 0),
+		height: Number(ref.height || 0),
+	}, ref.original_name || ref.filename || "面板背景图");
+	return true;
+}
+
 function refreshBackground(node, force = false) {
 	let info = getUpstreamImageInfo(node);
 	if (info?.src && (!info.width || !info.height)) {
@@ -1591,6 +2093,7 @@ function refreshBackground(node, force = false) {
 	const src = info?.src || "";
 	const ui = node.__gjjTextOverlayUI;
 	if (!src) {
+		if (restorePanelBackground(node)) return true;
 		if (force && ui?.status) {
 			ui.status.textContent = "未找到上游背景预览，请先执行上游节点或使用打开图片。";
 			ui.status.dataset.show = "true";
@@ -1600,6 +2103,7 @@ function refreshBackground(node, force = false) {
 		return false;
 	}
 	if (!force && node.__gjjTextOverlayBgSrc === src) return true;
+	setWidgetValue(node, "background_image_ref_json", "{}");
 	setBackgroundImage(node, info || src, "上游背景图");
 	if (force && ui?.status) {
 		ui.status.textContent = "已加载上游背景图";
@@ -1642,6 +2146,189 @@ function updateWatermarkPreviewStyle(node) {
 	ui.watermarkImg.style.filter = filters.join(" ");
 }
 
+function renderObjectPicker(node) {
+	const ui = node.__gjjTextOverlayUI;
+	const picker = ui?.objectPicker;
+	if (!picker) return;
+	const objects = watermarkObjects(node);
+	picker.replaceChildren();
+	if (!objects.length) {
+		picker.style.display = "none";
+		if (ui.foregroundStrokeButton) ui.foregroundStrokeButton.dataset.active = boolValue(node, "logo_stroke_enabled", false) ? "true" : "false";
+		return;
+	}
+	picker.style.display = "flex";
+	let selected = selectedWatermarkObjectIndex(node);
+	if (selected < 0 || selected >= objects.length) {
+		selected = objects.length - 1;
+		node.__gjjTextOverlaySelectedObjectIndex = selected;
+	}
+	if (ui.foregroundStrokeButton) {
+		ui.foregroundStrokeButton.dataset.active = objects[selected]?.stroke_enabled ? "true" : "false";
+	}
+	objects.forEach((item, index) => {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.className = "gjj-text-overlay-object-picker-button";
+		button.textContent = `👤${index + 1}`;
+		button.title = `选择人物 ${index + 1}${item.locked ? "（已锁定）" : ""}${item.stroke_enabled ? "（已描边）" : ""}`;
+		button.dataset.active = index === selected ? "true" : "false";
+		button.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			node.__gjjTextOverlaySelectedObjectIndex = index;
+			node.__gjjTextOverlayActive = "object";
+			renderPanel(node, { fitText: false });
+		});
+		picker.appendChild(button);
+	});
+}
+
+function renderWatermarkObjects(node, displayScale) {
+	const ui = node.__gjjTextOverlayUI;
+	const layer = ui?.objectLayer;
+	if (!layer) return;
+	layer.replaceChildren();
+	const objects = watermarkObjects(node);
+	const selected = Number(node.__gjjTextOverlaySelectedObjectIndex);
+	for (const [index, item] of objects.entries()) {
+		const src = item.src || storedImageSrc(item);
+		if (!src) continue;
+		const wrap = document.createElement("div");
+		wrap.className = "gjj-text-overlay-object";
+		wrap.dataset.index = String(index);
+		wrap.dataset.selected = index === selected ? "true" : "false";
+		wrap.dataset.locked = item.locked ? "true" : "false";
+		const pos = clampStagePoint(item.x ?? 0.5, item.y ?? 0.5);
+		const scale = Math.max(0.01, Math.min(10, Number(item.scale || 1)));
+		const baseW = Math.max(1, Number(item.width || 72));
+		const baseH = Math.max(1, Number(item.height || 72));
+		const displayW = Math.round(baseW * scale * displayScale);
+		const displayH = Math.round(baseH * scale * displayScale);
+		wrap.style.left = `${pos.x * 100}%`;
+		wrap.style.top = `${pos.y * 100}%`;
+		wrap.style.width = `${displayW}px`;
+		wrap.style.height = `${displayH}px`;
+		const img = document.createElement("img");
+		img.src = src;
+		img.draggable = false;
+		img.style.filter = foregroundStrokeFilter(item, displayScale);
+		const resizeNw = document.createElement("div");
+		resizeNw.className = "gjj-text-overlay-resize";
+		resizeNw.dataset.corner = "nw";
+		const resizeSe = document.createElement("div");
+		resizeSe.className = "gjj-text-overlay-resize";
+		resizeSe.dataset.corner = "se";
+		wrap.append(img, resizeNw, resizeSe);
+		if (index === selected) {
+			const tools = document.createElement("div");
+			tools.className = "gjj-text-overlay-object-tools";
+			const addTool = (icon, title, callback) => {
+				const button = document.createElement("button");
+				button.type = "button";
+				button.className = "gjj-text-overlay-object-tool";
+				button.textContent = icon;
+				button.title = title;
+				button.addEventListener("pointerdown", (event) => {
+					event.preventDefault();
+					event.stopPropagation();
+				});
+				button.addEventListener("click", (event) => {
+					event.preventDefault();
+					event.stopPropagation();
+					callback(event);
+				});
+				button.addEventListener("wheel", (event) => {
+					event.preventDefault();
+					event.stopPropagation();
+				}, { passive: false });
+				tools.appendChild(button);
+				return button;
+			};
+			const rerender = () => renderPanel(node, { fitText: false });
+			addTool("⬇", "下移一层", () => {
+				if (moveWatermarkObjectLayer(node, index, -1)) rerender();
+			});
+			addTool("⬆", "上移一层", () => {
+				if (moveWatermarkObjectLayer(node, index, 1)) rerender();
+			});
+			addTool("←", "向左微调", (event) => {
+				if (nudgeWatermarkObject(node, selectedWatermarkObjectIndex(node), -1, 0, event.shiftKey || event.altKey)) rerender();
+				else showPanelStatus(node, "对象已锁定", 900);
+			});
+			addTool("↑", "向上微调", (event) => {
+				if (nudgeWatermarkObject(node, selectedWatermarkObjectIndex(node), 0, -1, event.shiftKey || event.altKey)) rerender();
+				else showPanelStatus(node, "对象已锁定", 900);
+			});
+			addTool("↓", "向下微调", (event) => {
+				if (nudgeWatermarkObject(node, selectedWatermarkObjectIndex(node), 0, 1, event.shiftKey || event.altKey)) rerender();
+				else showPanelStatus(node, "对象已锁定", 900);
+			});
+			addTool("→", "向右微调", (event) => {
+				if (nudgeWatermarkObject(node, selectedWatermarkObjectIndex(node), 1, 0, event.shiftKey || event.altKey)) rerender();
+				else showPanelStatus(node, "对象已锁定", 900);
+			});
+			const lockButton = addTool(item.locked ? "🔒" : "🔓", item.locked ? "已锁定，点击解锁" : "未锁定，点击锁定", () => {
+				if (toggleWatermarkObjectLock(node, selectedWatermarkObjectIndex(node))) rerender();
+			});
+			if (lockButton) lockButton.dataset.active = item.locked ? "true" : "false";
+			const stageWidth = Math.max(1, ui.stage?.clientWidth || 1);
+			const stageHeight = Math.max(1, ui.stage?.clientHeight || 1);
+			const objectLeft = pos.x * stageWidth;
+			const objectTop = pos.y * stageHeight;
+			const toolWidth = 28;
+			const toolGap = 4;
+			const toolHeight = Math.min(
+				stageHeight - 8,
+				7 * 19,
+			);
+			const rightFits = objectLeft + displayW + toolGap + toolWidth <= stageWidth;
+			const leftFits = objectLeft - toolGap - toolWidth >= 0;
+			if (!rightFits && leftFits) {
+				tools.style.left = "auto";
+				tools.style.right = `calc(100% + ${toolGap}px)`;
+			}
+			if (objectTop + toolHeight > stageHeight) {
+				tools.style.top = `${Math.max(-objectTop, stageHeight - objectTop - toolHeight)}px`;
+			}
+			tools.style.maxHeight = `${Math.max(48, stageHeight - 8)}px`;
+			tools.style.overflowY = "auto";
+			wrap.appendChild(tools);
+		}
+		wrap.addEventListener("pointerdown", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			ui.preview?.focus?.();
+			node.__gjjTextOverlaySelectedObjectIndex = index;
+			if (item.locked) {
+				node.__gjjTextOverlayActive = "object";
+				renderPanel(node, { fitText: false });
+				return;
+			}
+			node.__gjjTextOverlayStartObjectDrag?.(event, index, wrap);
+		});
+		wrap.addEventListener("wheel", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			ui.preview?.focus?.();
+			node.__gjjTextOverlaySelectedObjectIndex = index;
+			const direction = event.deltaY < 0 ? 1 : -1;
+			if (adjustWatermarkObjectScale(node, index, direction, event.shiftKey || event.altKey)) {
+				renderPanel(node, { fitText: false });
+			} else if (item.locked) {
+				showPanelStatus(node, "对象已锁定", 900);
+			}
+		}, { passive: false });
+		resizeNw.addEventListener("pointerdown", (event) => {
+			if (!item.locked) node.__gjjTextOverlayStartObjectResize?.(event, index, "nw", wrap, resizeNw);
+		});
+		resizeSe.addEventListener("pointerdown", (event) => {
+			if (!item.locked) node.__gjjTextOverlayStartObjectResize?.(event, index, "se", wrap, resizeSe);
+		});
+		layer.appendChild(wrap);
+	}
+}
+
 function renderPanel(node, options = {}) {
 	const ui = node.__gjjTextOverlayUI;
 	if (!ui) return;
@@ -1677,6 +2364,8 @@ function renderPanel(node, options = {}) {
 	const stageWidth = Math.max(1, ui.stage.clientWidth || 1);
 	const bgWidth = Math.max(1, node.__gjjTextOverlayBgSize?.width || stageWidth);
 	const displayScale = stageWidth / bgWidth;
+	renderObjectPicker(node);
+	renderWatermarkObjects(node, displayScale);
 	const wmDisplayWidth = Math.round(baseW * scale * displayScale);
 	const wmDisplayHeight = Math.round(baseH * scale * displayScale);
 	const wmPos = clampStagePoint(wmX, wmY);
@@ -1724,6 +2413,7 @@ function patchNode(node) {
 	hideNativeWidgets(node);
 	ensurePanel(node);
 	restorePreviewSizes(node);
+	refreshBackground(node, false);
 	renderPanel(node);
 	for (const name of [...TEXT_WIDGETS, ...WATERMARK_WIDGETS]) {
 		const item = widget(node, name);

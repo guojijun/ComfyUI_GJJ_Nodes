@@ -567,6 +567,34 @@ import { app } from "/scripts/app.js";
 		}
 	}
 
+	function clearNodeErrorClasses(node) {
+		const candidates = [
+			node?.el,
+			node?.element,
+			node?.root,
+			node?.container,
+			node?.domElement,
+			node?.canvas?.canvas,
+		].filter(Boolean);
+		const errorClassRe = /(?:^|[-_\s])(error|invalid|failed|executing-error|validation)(?:$|[-_\s])/i;
+		for (const element of candidates) {
+			try {
+				if (element?.classList) {
+					for (const cls of Array.from(element.classList)) {
+						if (errorClassRe.test(cls)) element.classList.remove(cls);
+					}
+				}
+				if (element?.style) {
+					for (const prop of ["borderColor", "outlineColor", "boxShadow"]) {
+						if (/red|#f|rgb\(\s*255|error/i.test(String(element.style[prop] || ""))) {
+							element.style[prop] = "";
+						}
+					}
+				}
+			} catch (_) {}
+		}
+	}
+
 	function clearCachedNodeErrors(node) {
 		const holders = [
 			app,
@@ -587,8 +615,16 @@ import { app } from "/scripts/app.js";
 			"execution_errors",
 			"executionErrors",
 			"lastExecutionErrors",
+			"lastPromptError",
+			"lastPromptErrors",
+			"prompt_errors",
+			"promptErrors",
+			"promptExecutionErrors",
+			"nodeExecutionErrors",
+			"nodeValidationErrors",
 			"validation_errors",
 			"validationErrors",
+			"lastValidationErrors",
 			"invalid_nodes",
 			"invalidNodes",
 			"error_nodes",
@@ -616,9 +652,22 @@ import { app } from "/scripts/app.js";
 			"has_errors",
 			"hasErrors",
 			"invalid",
+			"_error",
+			"_errors",
+			"_invalid",
+			"graph_error",
+			"graphError",
 		]) {
 			try {
 				if (key in node) node[key] = null;
+			} catch (_) {}
+		}
+		for (const key of ["color", "bgcolor", "boxcolor", "borderColor"]) {
+			try {
+				const value = String(node[key] || "");
+				if (/^#?(?:c00|f00|ff0000|b91c1c|dc2626|ef4444|991b1b)$/i.test(value.replace(/\s+/g, ""))) {
+					node[key] = null;
+				}
 			} catch (_) {}
 		}
 		if (Array.isArray(node.badges)) {
@@ -638,6 +687,7 @@ import { app } from "/scripts/app.js";
 				if (/error|错误|invalid/i.test(String(node[key] || ""))) node[key] = null;
 			} catch (_) {}
 		}
+		clearNodeErrorClasses(node);
 	}
 
 	function clearStandardStatus(node) {

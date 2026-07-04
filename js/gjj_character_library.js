@@ -14,9 +14,46 @@ import { api } from "/scripts/api.js";
 	const ENDPOINT = "/gjj/character_library";
 	const VIEW_LABELS = ["大头照", "正面", "左侧", "右侧", "背面", "45度", "半身", "动作"];
 	const CUSTOM_VIEW_GROUPS = [
-		{ key: "view", title: "视角", required: true, options: ["正面", "左前 45°", "右前 45°", "左侧面", "右侧面", "左后 45°", "右后 45°", "背面", "底部仰视", "顶部俯视"] },
-		{ key: "shot", title: "景别", required: false, options: ["广角", "大全景", "远景", "中远景", "中景", "中近景", "半身", "特写", "大特写", "微距", "全身肖像", "肩部肖像"] },
-		{ key: "angle", title: "角度", required: false, options: ["超低仰拍", "仰拍", "齐眼平视", "微高角度", "高角度", "俯拍", "高空鸟瞰", "极致俯拍", "倾斜镜头"] },
+		{
+			key: "azimuth",
+			title: "方位",
+			required: true,
+			defaultSelected: ["front view"],
+			options: [
+				{ label: "正面", value: "front view" },
+				{ label: "右前45°", value: "front-right quarter view" },
+				{ label: "右侧", value: "right side view" },
+				{ label: "右后45°", value: "back-right quarter view" },
+				{ label: "背面", value: "back view" },
+				{ label: "左后45°", value: "back-left quarter view" },
+				{ label: "左侧", value: "left side view" },
+				{ label: "左前45°", value: "front-left quarter view" },
+			],
+		},
+		{
+			key: "elevation",
+			title: "机位",
+			required: true,
+			defaultSelected: ["eye-level shot"],
+			options: [
+				{ label: "齐眼", value: "eye-level shot" },
+				{ label: "低角度", value: "low-angle shot" },
+				{ label: "抬高", value: "elevated shot" },
+				{ label: "高角度", value: "high-angle shot" },
+			],
+		},
+		{
+			key: "distance",
+			title: "景别",
+			required: true,
+			defaultSelected: ["medium shot"],
+			options: [
+				{ label: "全身", value: "full body shot" },
+				{ label: "中景", value: "medium shot" },
+				{ label: "特写", value: "close-up" },
+				{ label: "远景", value: "wide shot" },
+			],
+		},
 	];
 	const SHARED_PANEL_LAYOUT_KEY = "gjj.libraryPanel.layout";
 	let state = {
@@ -623,11 +660,24 @@ import { api } from "/scripts/api.js";
 		return VIEW_LABELS.filter((label) => label !== "大头照" && !hasCharacterView(character, label));
 	}
 
-	async function generateCharacterViews(character, labels = []) {
+	function characterViewLabel(character, keywords = []) {
+		const tokens = (keywords || []).map((item) => String(item || "").toLowerCase()).filter(Boolean);
+		const views = Array.isArray(character?.views) ? character.views : [];
+		for (const view of views) {
+			const text = `${view?.label || ""} ${view?.id || ""}`.toLowerCase();
+			if (tokens.some((token) => text.includes(token))) return String(view?.label || view?.id || "").trim();
+		}
+		return "";
+	}
+
+	async function generateCharacterViews(character, labels = [], basePrompt = "", referenceLabel = "", promptLabels = [], referenceLabels = null) {
 		if (!character?.id) return;
 		const requested = (labels || []).map((label) => String(label || "").trim()).filter(Boolean);
+		const prompts = (promptLabels || []).map((label) => String(label || "").trim()).filter(Boolean);
+		const references = (Array.isArray(referenceLabels) ? referenceLabels : [referenceLabel]).map((label) => String(label || "").trim()).filter(Boolean);
+		const reference = references[0] || "";
 		if (!requested.length) return;
-		if (!hasCharacterView(character, "大头照")) {
+		if (!references.length && !hasCharacterView(character, "大头照")) {
 			setStatus("需要先有大头照，才能用 GJJ_CharacterMultiViewStudio 自动生成其它视图");
 			return;
 		}
@@ -635,7 +685,13 @@ import { api } from "/scripts/api.js";
 		form.append("id", character.id);
 		form.append("name", character.name || character.id);
 		form.append("labels", JSON.stringify(requested));
-		setStatus(`正在用大头照生成：${requested.join("、")}...`);
+		if (prompts.length) form.append("prompt_labels", JSON.stringify(prompts));
+		const prompt = String(basePrompt || "").trim();
+		if (prompt) form.append("base_prompt", prompt);
+		if (reference) form.append("reference_label", reference);
+		if (references.length > 1) form.append("reference_labels", JSON.stringify(references));
+		const referenceText = references.length > 1 ? `${references.length} 张参考图` : (reference || "大头照");
+		setStatus(`正在用${referenceText}生成：${requested.join("、")}...`);
 		startImportProgress();
 		try {
 			const data = await apiJson(`${ENDPOINT}/generate_multiview`, { method: "POST", body: form });
@@ -649,28 +705,56 @@ import { api } from "/scripts/api.js";
 		}
 	}
 
-	function combineCustomViewLabels(groups) {
+	function customViewOptionValue(option) {
+		return String(typeof option === "object" ? option.value : option || "").trim();
+	}
+
+	function customViewOptionLabel(option) {
+		return String(typeof option === "object" ? option.label : option || "").trim();
+	}
+
+	function customViewOptionByValue(group, value) {
+		const key = String(value || "").trim();
+		return (group.options || []).find((option) => customViewOptionValue(option) === key) || null;
+	}
+
+	function combineCustomViewItems(groups) {
 		const values = CUSTOM_VIEW_GROUPS.map((group) => {
 			const selected = groups[group.key]?.selected || [];
-			return selected.length ? selected : [""];
+			return selected.length ? selected : [customViewOptionValue(group.options?.[0])];
 		});
 		const result = [];
-		for (const view of values[0]) {
-			for (const shot of values[1]) {
-				for (const angle of values[2]) {
-					const label = [view, shot, angle].filter(Boolean).join(" ").trim();
-					if (label && !result.includes(label)) result.push(label);
+		for (const azimuth of values[0]) {
+			for (const elevation of values[1]) {
+				for (const distance of values[2]) {
+					const prompt = `<sks> ${[azimuth, elevation, distance].filter(Boolean).join(" ")}`.trim();
+					const display = [
+						customViewOptionLabel(customViewOptionByValue(CUSTOM_VIEW_GROUPS[0], azimuth)) || azimuth,
+						customViewOptionLabel(customViewOptionByValue(CUSTOM_VIEW_GROUPS[1], elevation)) || elevation,
+						customViewOptionLabel(customViewOptionByValue(CUSTOM_VIEW_GROUPS[2], distance)) || distance,
+					].filter(Boolean).join("");
+					if (prompt && !result.some((item) => item.label === display)) result.push({ label: display, prompt, display });
 				}
 			}
 		}
 		return result;
 	}
 
+	function combineCustomViewLabels(groups) {
+		return combineCustomViewItems(groups).map((item) => item.label);
+	}
+
+	function combineCustomViewPrompts(groups) {
+		return combineCustomViewItems(groups).map((item) => item.prompt);
+	}
+
 	function openCustomViewPicker(character) {
 		return new Promise((resolve) => {
 			const groups = {};
 			for (const group of CUSTOM_VIEW_GROUPS) {
-				groups[group.key] = { selected: group.required ? [group.options[0]] : [], anchor: 0 };
+				const optionValues = (group.options || []).map(customViewOptionValue);
+				const defaults = Array.isArray(group.defaultSelected) ? group.defaultSelected.filter((item) => optionValues.includes(item)) : [];
+				groups[group.key] = { selected: defaults.length ? defaults : (group.required ? [optionValues[0]] : []), anchor: 0 };
 			}
 			const root = document.createElement("div");
 			root.style.cssText = [
@@ -686,11 +770,11 @@ import { api } from "/scripts/api.js";
 			].join(";");
 			const panel = document.createElement("div");
 			panel.style.cssText = [
-				"width:min(760px,calc(100vw - 28px))",
+				"width:min(700px,calc(100vw - 28px))",
 				"max-height:min(620px,calc(100vh - 28px))",
 				"display:flex",
 				"flex-direction:column",
-				"gap:10px",
+				"gap:8px",
 				"border:1px solid #40535b",
 				"border-radius:8px",
 				"background:#0f171b",
@@ -702,24 +786,151 @@ import { api } from "/scripts/api.js";
 			].join(";");
 			const head = document.createElement("div");
 			head.style.cssText = "display:flex;align-items:center;gap:8px;";
+			const titleIcon = document.createElement("div");
+			titleIcon.textContent = "📹";
+			titleIcon.style.cssText = "width:28px;height:28px;border:1px solid #3f535b;border-radius:7px;background:#17242a;display:flex;align-items:center;justify-content:center;font-size:16px;";
 			const title = document.createElement("div");
 			title.textContent = "自定义生成视图";
 			title.style.cssText = "font-size:14px;font-weight:900;flex:1 1 auto;";
 			const close = button("×", "关闭", "gjj-cl-btn gjj-cl-icon", () => finish([]));
-			head.append(title, close);
+			head.append(titleIcon, title, close);
+			const headReferenceLabel = characterViewLabel(character, ["大头照", "大头", "头像", "头部", "脸", "face", "head", "portrait"]);
+			let referenceLabels = headReferenceLabel ? [headReferenceLabel] : [];
+			const referenceBox = document.createElement("div");
+			referenceBox.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:5px 7px;border:1px solid #263842;border-radius:7px;background:#10191e;";
+			const referenceText = document.createElement("div");
+			referenceText.textContent = "参考图";
+			referenceText.style.cssText = "font-size:12px;font-weight:900;color:#f0faf4;";
+			const referenceButtons = document.createElement("div");
+			referenceButtons.style.cssText = "display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0;";
+			const referencePreview = document.createElement("div");
+			referencePreview.style.cssText = [
+				"position:fixed",
+				"z-index:100004",
+				"display:none",
+				"width:128px",
+				"height:128px",
+				"border:1px solid #40535b",
+				"border-radius:7px",
+				"background:#071014",
+				"box-shadow:0 12px 28px rgba(0,0,0,.48)",
+				"padding:4px",
+				"pointer-events:none",
+				"box-sizing:border-box",
+			].join(";");
+			const referencePreviewImg = document.createElement("img");
+			referencePreviewImg.alt = "";
+			referencePreviewImg.style.cssText = "width:100%;height:100%;object-fit:contain;border-radius:5px;background-image:linear-gradient(45deg,#0a1115 25%,#111c21 25%,#111c21 50%,#0a1115 50%,#0a1115 75%,#111c21 75%);background-size:14px 14px;";
+			referencePreview.appendChild(referencePreviewImg);
+			const showReferencePreview = (event, view) => {
+				if (!view?.url) return;
+				referencePreviewImg.src = apiUrl(view.url);
+				referencePreview.style.left = `${Math.min(window.innerWidth - 142, Math.max(8, event.clientX + 12))}px`;
+				referencePreview.style.top = `${Math.min(window.innerHeight - 142, Math.max(8, event.clientY + 12))}px`;
+				referencePreview.style.display = "block";
+			};
+			const hideReferencePreview = () => {
+				referencePreview.style.display = "none";
+			};
+			const referenceButton = (view, index) => {
+				const label = String(view?.label || view?.id || `视图${index + 1}`).trim();
+				const item = button(label, `使用「${label}」作为参考图；按 Ctrl/Shift 可多选`, "gjj-cl-btn", (event) => {
+					stopBubble(event);
+					if (event.shiftKey) {
+						const current = referenceLabels.length ? referenceLabels[referenceLabels.length - 1] : "";
+						const anchorIndex = Math.max(0, referenceViews.findIndex((itemView) => {
+							const itemLabel = String(itemView?.label || itemView?.id || "").trim();
+							return itemLabel === current;
+						}));
+						const start = Math.min(anchorIndex, index);
+						const end = Math.max(anchorIndex, index);
+						const picked = referenceViews.slice(start, end + 1).map((itemView, itemIndex) => String(itemView?.label || itemView?.id || `视图${start + itemIndex + 1}`).trim()).filter(Boolean);
+						referenceLabels = [...new Set([...(event.ctrlKey || event.metaKey ? referenceLabels : []), ...picked])];
+					} else if (event.ctrlKey || event.metaKey) {
+						if (referenceLabels.includes(label)) {
+							referenceLabels = referenceLabels.filter((itemLabel) => itemLabel !== label);
+						} else {
+							referenceLabels = [...referenceLabels, label];
+						}
+					} else {
+						referenceLabels = [label];
+					}
+					if (!referenceLabels.length) referenceLabels = [label];
+					refreshReferenceButtons();
+				});
+				item.dataset.referenceLabel = label;
+				item.style.height = "24px";
+				item.style.padding = "0 7px";
+				item.style.maxWidth = "96px";
+				item.style.overflow = "hidden";
+				item.style.textOverflow = "ellipsis";
+				item.addEventListener("mouseenter", (event) => showReferencePreview(event, view));
+				item.addEventListener("mousemove", (event) => showReferencePreview(event, view));
+				item.addEventListener("mouseleave", hideReferencePreview);
+				referenceButtons.appendChild(item);
+				return item;
+			};
+			const referenceViews = Array.isArray(character?.views) ? character.views : [];
+			if (!referenceLabels.length && referenceViews[0]) referenceLabels = [String(referenceViews[0]?.label || referenceViews[0]?.id || "").trim()].filter(Boolean);
+			referenceViews.forEach((view, index) => referenceButton(view, index));
+			if (!referenceViews.length) {
+				const emptyReference = document.createElement("div");
+				emptyReference.textContent = "暂无视图";
+				emptyReference.style.cssText = "color:#8fa4aa;font-size:12px;";
+				referenceButtons.appendChild(emptyReference);
+			}
+			referenceBox.append(referenceText, referenceButtons);
 			const columns = document.createElement("div");
-			columns.style.cssText = "display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;overflow:auto;";
+			columns.style.cssText = "display:grid;grid-template-columns:1.2fr .9fr .8fr;gap:7px;overflow:auto;";
+			const promptBox = document.createElement("div");
+			promptBox.style.cssText = "display:flex;flex-direction:column;gap:5px;padding:7px;border:1px solid #263842;border-radius:7px;background:#10191e;";
+			const promptLabel = document.createElement("div");
+			promptLabel.textContent = "补充提示词";
+			promptLabel.style.cssText = "font-size:12px;font-weight:900;color:#f0faf4;";
+			const promptInput = document.createElement("textarea");
+			promptInput.placeholder = "可输入服装、材质、风格、画面要求等，会追加到本次生成提示词";
+			promptInput.style.cssText = [
+				"min-height:58px",
+				"resize:vertical",
+				"border:1px solid #3f535b",
+				"border-radius:6px",
+				"background:#071014",
+				"color:#dce7e2",
+				"padding:7px 9px",
+				"font-size:12px",
+				"line-height:1.45",
+				"outline:none",
+				"box-sizing:border-box",
+				"font-family:system-ui,'Microsoft YaHei',sans-serif",
+			].join(";");
+			promptBox.append(promptLabel, promptInput);
 			const footer = document.createElement("div");
 			footer.style.cssText = "display:flex;align-items:center;gap:8px;justify-content:flex-end;";
 			const summary = document.createElement("div");
 			summary.style.cssText = "flex:1 1 auto;color:#94aeb4;font-size:12px;min-width:0;";
 			const cancel = button("取消", "取消", "gjj-cl-btn", () => finish([]));
-			const apply = button("生成", "生成选中的视图组合", "gjj-cl-btn", () => finish(combineCustomViewLabels(groups)));
+			const apply = button("生成", "生成选中的视图组合", "gjj-cl-btn", () => finish(combineCustomViewLabels(groups), combineCustomViewPrompts(groups)));
 			footer.append(summary, cancel, apply);
 
-			function finish(labels) {
+			function finish(labels, promptLabels = []) {
+				hideReferencePreview();
+				referencePreview.remove();
 				root.remove();
-				resolve(labels || []);
+				resolve({
+					labels: labels || [],
+					promptLabels: promptLabels || [],
+					prompt: String(promptInput?.value || "").trim(),
+					referenceLabel: referenceLabels[0] || "",
+					referenceLabels: [...referenceLabels],
+				});
+			}
+			function refreshReferenceButtons() {
+				for (const item of referenceButtons.querySelectorAll("[data-reference-label]")) {
+					const active = referenceLabels.includes(String(item.dataset.referenceLabel || ""));
+					item.classList.toggle("active", active);
+					item.style.background = active ? "#1d5d39" : "";
+					item.style.borderColor = active ? "#65d189" : "";
+				}
 			}
 			function refresh() {
 				for (const item of columns.querySelectorAll("[data-custom-view-option]")) {
@@ -727,49 +938,53 @@ import { api } from "/scripts/api.js";
 					const value = item.dataset.customViewValue;
 					const active = groups[key]?.selected.includes(value);
 					item.classList.toggle("active", !!active);
-					item.style.background = active ? "#1d5d39" : "#17242a";
-					item.style.borderColor = active ? "#65d189" : "#3f535b";
+					item.style.background = active ? "#1f7545" : "#17242a";
+					item.style.borderColor = active ? "#78df99" : "#3f535b";
 					item.style.color = active ? "#fff" : "#dce7e2";
+					item.style.boxShadow = active ? "0 0 0 1px rgba(120,223,153,.22) inset" : "none";
 				}
-				const labels = combineCustomViewLabels(groups);
-				summary.textContent = labels.length ? `将生成 ${labels.length} 个视图：${labels.slice(0, 4).join("、")}${labels.length > 4 ? "..." : ""}` : "请选择至少一个视角";
+				const items = combineCustomViewItems(groups);
+				summary.textContent = items.length ? `将生成 ${items.length} 个视图：${items.slice(0, 4).map((item) => item.display).join("、")}${items.length > 4 ? "..." : ""}` : "请选择至少一个视角";
 			}
-			for (const group of CUSTOM_VIEW_GROUPS) {
+			for (const [groupIndex, group] of CUSTOM_VIEW_GROUPS.entries()) {
 				const box = document.createElement("div");
-				box.style.cssText = "display:flex;flex-direction:column;gap:6px;min-width:0;";
+				box.style.cssText = "display:flex;flex-direction:column;gap:6px;min-width:0;padding:7px;border:1px solid #263842;border-radius:7px;background:#10191e;";
 				const label = document.createElement("div");
-				label.textContent = group.title;
-				label.style.cssText = "font-size:12px;font-weight:900;color:#f0faf4;";
+				label.textContent = `${groupIndex + 1}. ${group.title}`;
+				label.style.cssText = "font-size:12px;font-weight:900;color:#f0faf4;letter-spacing:0;";
 				const list = document.createElement("div");
-				list.style.cssText = "display:flex;flex-direction:column;gap:5px;min-height:0;";
+				list.style.cssText = "display:flex;flex-wrap:wrap;gap:4px;min-height:0;";
 				group.options.forEach((option, index) => {
+					const optionValue = customViewOptionValue(option);
+					const optionLabel = customViewOptionLabel(option);
 					const item = document.createElement("button");
 					item.type = "button";
-					item.textContent = option;
+					item.textContent = optionLabel;
 					item.dataset.customViewOption = "1";
 					item.dataset.customViewKey = group.key;
-					item.dataset.customViewValue = option;
-					item.style.cssText = "min-height:28px;border:1px solid #3f535b;border-radius:6px;background:#17242a;color:#dce7e2;font-size:12px;font-weight:800;text-align:left;padding:0 8px;cursor:pointer;";
+					item.dataset.customViewValue = optionValue;
+					item.title = optionValue;
+					item.style.cssText = "height:24px;border:1px solid #3f535b;border-radius:6px;background:#17242a;color:#dce7e2;font-size:12px;font-weight:800;text-align:center;padding:0 7px;cursor:pointer;white-space:nowrap;";
 					item.addEventListener("click", (event) => {
 						stopBubble(event);
 						const stateForGroup = groups[group.key];
 						if (event.shiftKey) {
 							const start = Math.min(stateForGroup.anchor, index);
 							const end = Math.max(stateForGroup.anchor, index);
-							const picked = group.options.slice(start, end + 1);
+							const picked = group.options.slice(start, end + 1).map(customViewOptionValue);
 							stateForGroup.selected = [...new Set([...(event.ctrlKey || event.metaKey ? stateForGroup.selected : []), ...picked])];
 						} else if (event.ctrlKey || event.metaKey) {
-							if (stateForGroup.selected.includes(option)) {
-								stateForGroup.selected = stateForGroup.selected.filter((itemValue) => itemValue !== option);
+							if (stateForGroup.selected.includes(optionValue)) {
+								stateForGroup.selected = stateForGroup.selected.filter((itemValue) => itemValue !== optionValue);
 							} else {
-								stateForGroup.selected = [...stateForGroup.selected, option];
+								stateForGroup.selected = [...stateForGroup.selected, optionValue];
 							}
 							stateForGroup.anchor = index;
 						} else {
-							stateForGroup.selected = [option];
+							stateForGroup.selected = [optionValue];
 							stateForGroup.anchor = index;
 						}
-						if (group.required && !stateForGroup.selected.length) stateForGroup.selected = [option];
+						if (group.required && !stateForGroup.selected.length) stateForGroup.selected = [optionValue];
 						refresh();
 					});
 					list.appendChild(item);
@@ -777,21 +992,24 @@ import { api } from "/scripts/api.js";
 				box.append(label, list);
 				columns.appendChild(box);
 			}
-			panel.append(head, columns, footer);
+			refreshReferenceButtons();
+			panel.append(head, referenceBox, columns, promptBox, footer);
 			root.appendChild(panel);
 			root.addEventListener("click", (event) => {
 				if (event.target === root) finish([]);
 			});
 			panel.addEventListener("click", stopBubble);
 			document.body.appendChild(root);
+			document.body.appendChild(referencePreview);
 			refresh();
 		});
 	}
 
 	async function generateCustomCharacterViews(character) {
-		const labels = await openCustomViewPicker(character);
+		const result = await openCustomViewPicker(character);
+		const labels = (Array.isArray(result) ? result : result?.labels) || [];
 		if (!labels.length) return;
-		await generateCharacterViews(character, labels);
+		await generateCharacterViews(character, labels, result?.prompt || "", result?.referenceLabel || "", result?.promptLabels || [], result?.referenceLabels || null);
 	}
 
 	async function generateMultiviewBatch() {
