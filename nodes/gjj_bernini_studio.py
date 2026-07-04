@@ -73,8 +73,8 @@ DEFAULT_HIGH_MODEL = "wan2.2_bernini_r_high_noise_fp8_scaled.safetensors"
 DEFAULT_LOW_MODEL = "wan2.2_bernini_r_low_noise_fp8_scaled.safetensors"
 DEFAULT_VAE = "wan_2.1_vae.safetensors"
 DEFAULT_CLIP = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
-DEFAULT_HIGH_LORA = "wan\\wan2.2_t2v_A14b_high_noise_lora_rank64_lightx2v_4step_1217.safetensors"
-DEFAULT_LOW_LORA = "wan\\wan2.2_t2v_A14b_low_noise_lora_rank64_lightx2v_4step_1217.safetensors"
+DEFAULT_HIGH_LORA = "Bernini\Bernini-R_LightX2V_high_noise.safetensors"
+DEFAULT_LOW_LORA = "Bernini\Bernini-R_LightX2V_low_noise.safetensors"
 
 MODEL_TREE = [
     {
@@ -966,8 +966,8 @@ class GJJ_BerniniStudio:
         low_models = _model_choices("diffusion_models", ["bernini", "low"], DEFAULT_LOW_MODEL)
         vae_models = _model_choices("vae", ["wan","2.1", "vae"], DEFAULT_VAE)
         clip_models = _model_choices("text_encoders", ["umt5", "xxl"], DEFAULT_CLIP)
-        high_loras = _model_choices("loras", ["wan", "t2v","a14b","high"], DEFAULT_HIGH_LORA)
-        low_loras = _model_choices("loras", ["wan", "t2v","a14b","low"], DEFAULT_LOW_LORA)
+        high_loras = _model_choices("loras", ["bernini", "lightx2v","high"], DEFAULT_HIGH_LORA)
+        low_loras = _model_choices("loras", ["bernini", "lightx2v","low"], DEFAULT_LOW_LORA)
         return {
             "required": {},
             "optional": {

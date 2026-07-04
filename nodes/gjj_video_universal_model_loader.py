@@ -356,8 +356,8 @@ VIDEO_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             S("low_model", "Low模型", "diffusion_models", "diffusion", ["bernini","low"], preferred_name=WAN22_T2V_LOW_NAMES[0], official_names=WAN22_T2V_LOW_NAMES),
             S("vae", "VAE", "vae", "vae", ["wan_2.1_vae"], preferred_name=WAN21_VAE_NAMES[0], official_names=WAN21_VAE_NAMES),
             S("clip", "CLIP编码器", "text_encoders", "clip", ["umt5", "xxl"], preferred_name=WAN_T5_NAMES[0], official_names=WAN_T5_NAMES),
-            S("high_lora", "High LoRA名称", "loras", "name", ["wan2.2", "t2v","a14b", "lightx2v", "high"], preferred_name=WAN22_T2V_LORA_HIGH_NAMES[0], official_names=WAN22_T2V_LORA_HIGH_NAMES),
-            S("low_lora", "Low LoRA名称", "loras", "name", ["wan2.2", "t2v","a14b", "lightx2v", "low"], preferred_name=WAN22_T2V_LORA_LOW_NAMES[0], official_names=WAN22_T2V_LORA_LOW_NAMES),
+            S("high_lora", "High LoRA名称", "loras", "name", ["Bernini-R","lightx2v", "high"], preferred_name=WAN22_T2V_LORA_HIGH_NAMES[0], official_names=WAN22_T2V_LORA_HIGH_NAMES),
+            S("low_lora", "Low LoRA名称", "loras", "name", ["Bernini-R","lightx2v","low"], preferred_name=WAN22_T2V_LORA_LOW_NAMES[0], official_names=WAN22_T2V_LORA_LOW_NAMES),
         ],
     },
     "wan22_remix": {
