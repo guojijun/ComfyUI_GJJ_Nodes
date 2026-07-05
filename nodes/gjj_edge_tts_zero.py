@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import base64
+import asyncio
+import concurrent.futures
 import html
 import os
 import re
 import socket
 import ssl
 import struct
+import tempfile
 import time
 import uuid
 import wave
@@ -43,18 +46,18 @@ VOICE_IDS = {
     "[中文] zh-HK WanLung 男声": "zh-HK-WanLungNeural",
     "[中文] zh-TW HsiaoChen 女声": "zh-TW-HsiaoChenNeural",
     "[中文] zh-TW YunJhe 男声": "zh-TW-YunJheNeural",
-    "[English] en-US Jenny Female": "en-US-JennyNeural",
-    "[English] en-US Guy Male": "en-US-GuyNeural",
-    "[English] en-US Aria Female": "en-US-AriaNeural",
-    "[English] en-GB Sonia Female": "en-GB-SoniaNeural",
-    "[Japanese] ja-JP Nanami Female": "ja-JP-NanamiNeural",
-    "[Japanese] ja-JP Keita Male": "ja-JP-KeitaNeural",
-    "[Korean] ko-KR SunHi Female": "ko-KR-SunHiNeural",
-    "[Korean] ko-KR InJoon Male": "ko-KR-InJoonNeural",
+    "[英文] en-US Jenny 女声": "en-US-JennyNeural",
+    "[英文] en-US Guy 男声": "en-US-GuyNeural",
+    "[英文] en-US Aria 女声": "en-US-AriaNeural",
+    "[英文] en-GB Sonia 女声": "en-GB-SoniaNeural",
+    "[日文] ja-JP Nanami 女声": "ja-JP-NanamiNeural",
+    "[日文] ja-JP Keita 男声": "ja-JP-KeitaNeural",
+    "[韩文] ko-KR SunHi 女声": "ko-KR-SunHiNeural",
+    "[韩文] ko-KR InJoon 男声": "ko-KR-InJoonNeural",
 }
 
 
-def _empty_audio(sample_rate: int = DEFAULT_SAMPLE_RATE, seconds: float = 0.05) -> dict[str, Any]:
+def _empty_audio(sample_rate: int = 16000, seconds: float = 1.0) -> dict[str, Any]:
     samples = max(1, int(float(sample_rate) * max(0.01, float(seconds))))
     return {"waveform": torch.zeros((1, 1, samples), dtype=torch.float32), "sample_rate": int(sample_rate)}
 
@@ -104,6 +107,74 @@ def _audio_from_raw_pcm(data: bytes, sample_rate: int = DEFAULT_SAMPLE_RATE) -> 
         raise RuntimeError("Edge TTS 没有返回音频。")
     samples = torch.frombuffer(bytearray(data), dtype=torch.int16).float() / 32768.0
     return {"waveform": samples.reshape(1, 1, -1).contiguous(), "sample_rate": int(sample_rate)}
+
+
+def _audio_from_file(path: str) -> dict[str, Any]:
+    try:
+        import torchaudio
+
+        waveform, sample_rate = torchaudio.load(path)
+    except Exception:
+        import soundfile as sf
+
+        audio_np, sample_rate = sf.read(path, always_2d=True, dtype="float32")
+        waveform = torch.from_numpy(audio_np.T).float()
+    if waveform.ndim == 1:
+        waveform = waveform.unsqueeze(0)
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+    peak = float(waveform.abs().max()) if waveform.numel() else 0.0
+    if peak > 1e-6:
+        waveform = (waveform / max(1.0, peak)).clamp(-1.0, 1.0)
+    return {"waveform": waveform.unsqueeze(0).contiguous(), "sample_rate": int(sample_rate)}
+
+
+async def _generate_with_edge_tts_library(text: str, voice: str, speed: float, pitch: int) -> dict[str, Any]:
+    import edge_tts
+
+    temp_path = ""
+    try:
+        fd, temp_path = tempfile.mkstemp(prefix="gjj_edge_tts_", suffix=".mp3")
+        os.close(fd)
+        communicate = edge_tts.Communicate(
+            text=text,
+            voice=voice,
+            rate=_rate_from_speed(speed),
+            pitch=_pitch_value(pitch),
+        )
+        try:
+            await communicate.save(temp_path)
+        except getattr(edge_tts, "exceptions").NoAudioReceived:
+            default_voice = VOICE_IDS[next(iter(VOICE_IDS))]
+            if voice == default_voice:
+                raise
+            communicate = edge_tts.Communicate(
+                text=text,
+                voice=default_voice,
+                rate=_rate_from_speed(speed),
+                pitch=_pitch_value(pitch),
+            )
+            await communicate.save(temp_path)
+        return _audio_from_file(temp_path)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def _synthesize_with_edge_tts_library(text: str, voice: str, speed: float, pitch: int) -> dict[str, Any]:
+    def run_async_in_thread():
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(_generate_with_edge_tts_library(text, voice, speed, pitch))
+        finally:
+            loop.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(run_async_in_thread).result()
 
 
 class _StdlibWebSocket:
@@ -240,6 +311,11 @@ def _ssml(text: str, voice: str, rate: str, pitch: str) -> str:
 
 
 def _synthesize_edge_tts(text: str, voice: str, speed: float, pitch: int, timeout: float) -> dict[str, Any]:
+    try:
+        return _synthesize_with_edge_tts_library(text, voice, speed, pitch)
+    except ModuleNotFoundError:
+        pass
+
     request_id = uuid.uuid4().hex
     connection_id = uuid.uuid4().hex
     timestamp = time.strftime("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)", time.gmtime())
@@ -299,14 +375,14 @@ class GJJ_EdgeTTS_ZeroDependency:
         return {
             "required": {
                 "text": ("STRING", {"multiline": True, "placeholder": "输入要朗读的文本"}),
-                "voice": (voices, {"default": voices[0], "tooltip": "选择 Edge TTS 语音"}),
+                "voice": (voices, {"default": voices[0], "display_name": "音色", "tooltip": "选择 Edge TTS 语音"}),
             },
             "optional": {
-                "custom_voice": ("STRING", {"default": "", "multiline": False, "tooltip": "可选：直接填写 Edge voice id，例如 zh-CN-XiaoxiaoNeural"}),
-                "speed": ("FLOAT", {"default": 1.0, "min": 0.5, "max": 2.0, "step": 0.1, "tooltip": "语速倍率"}),
-                "pitch": ("INT", {"default": 0, "min": -20, "max": 20, "step": 1, "tooltip": "音调，单位 Hz"}),
-                "timeout": ("FLOAT", {"default": 30.0, "min": 5.0, "max": 180.0, "step": 1.0, "tooltip": "网络超时秒数"}),
-                "fail_mode": (["静音占位", "报错"], {"default": "静音占位", "tooltip": "TTS 失败时返回短静音或直接报错"}),
+                "custom_voice": ("STRING", {"default": "", "multiline": False, "display_name": "自定义音色", "tooltip": "可选：直接填写 Edge voice id，例如 zh-CN-XiaoxiaoNeural"}),
+                "speed": ("FLOAT", {"default": 1.0, "min": 0.5, "max": 2.0, "step": 0.1, "display_name": "语速", "tooltip": "语速倍率"}),
+                "pitch": ("INT", {"default": 0, "min": -20, "max": 20, "step": 1, "display_name": "音调", "tooltip": "音调，单位 Hz"}),
+                "timeout": ("FLOAT", {"default": 30.0, "min": 5.0, "max": 180.0, "step": 1.0, "display_name": "超时秒数", "tooltip": "网络超时秒数"}),
+                "fail_mode": (["静音占位", "报错"], {"default": "静音占位", "display_name": "失败处理", "tooltip": "TTS 失败时返回短静音或直接报错"}),
             },
         }
 

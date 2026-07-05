@@ -417,6 +417,10 @@ def _parse_dialogue_lines(text: str) -> list[tuple[int, str]]:
     return [(speaker, line) for speaker, line in turns if line]
 
 
+def _has_speaker_tag(text: str) -> bool:
+    return bool(re.search(r"^\s*\[speaker_\d+\]:", str(text or ""), flags=re.MULTILINE))
+
+
 def _speaker_audio_name(index: int) -> str:
     return f"{AUDIO_PREFIX}{index:02d}_audio"
 
@@ -528,8 +532,8 @@ class GJJ_LongCatAudioDiTTTS:
             },
         ],
         "tips": [
-            "连接多个参考音频时，文本必须使用 [speaker_1]:、[speaker_2]: 这样的行首标签。",
-            "没有连接参考音频时，会优先使用 models/mp3 下最新的本地音频文件。",
+            "连接多个参考音频时，无标签单段文本会自动按 speaker_1 合成；多说话人对话请使用 [speaker_1]:、[speaker_2]: 这样的行首标签。",
+            "没有连接参考音频时，会优先使用下拉框选中的本地参考音频。",
             "LongCat 音质通常不如 FishAudioS2，但多说话人流程更直接。",
         ],
     }
@@ -550,7 +554,7 @@ class GJJ_LongCatAudioDiTTTS:
                     "multiline": True,
                     "default": "[speaker_1]: 最近字母圈怎么样？\n[speaker_2]: 你说的是什么字母？\n[speaker_1]: AI！人工智能！\n[speaker_2]: 哦，我以为你说的是SM？哈哈……",
                     "display_name": "合成文本",
-                    "tooltip": "要合成的文本。多说话人请使用 [speaker_1]:、[speaker_2]: 这样的行首标签。",
+                    "tooltip": "要合成的文本。无标签单段文本默认使用 speaker_1；多说话人请使用 [speaker_1]:、[speaker_2]: 这样的行首标签。",
                 }),
                 "local_audio_name": (audio_choices, {
                     "default": default_audio,
@@ -655,37 +659,14 @@ class GJJ_LongCatAudioDiTTTS:
         sr = int(model.config.sampling_rate)
         refs = connected_refs
 
-        # 如果没有连接任何参考音频，使用本地参考音频列表中的文件
+        # 如果没有连接任何参考音频，优先使用下拉框选择的本地参考音频作为 speaker_1。
         if not refs:
-            audio_choices = _list_models_mp3()
-
-            # 默认使用本地参考音频列表中的 [1] 和 [2]（如果存在）
-            if len(audio_choices) >= 2:
-                # 有两个或更多文件，使用 [0] 和 [1] 作为 speaker_1 和 speaker_2
-                refs = []
-                for idx in range(min(2, len(audio_choices))):
-                    local_path = _models_mp3_root() / audio_choices[idx].replace("/", os.sep).replace("\\", os.sep)
-                    refs.append({
-                        "source": f"models/mp3：{local_path.name}",
-                        "local_path": local_path,
-                        "ref_text": str(kwargs.get(_speaker_ref_text_name(idx + 1)) or DEFAULT_REFERENCE_TEXT).strip(),
-                    })
-            elif len(audio_choices) == 1:
-                # 只有一个文件，使用它作为 speaker_1
-                local_path = _models_mp3_root() / audio_choices[0].replace("/", os.sep).replace("\\", os.sep)
-                refs = [{
-                    "source": f"models/mp3：{local_path.name}",
-                    "local_path": local_path,
-                    "ref_text": str(kwargs.get(_speaker_ref_text_name(1)) or DEFAULT_REFERENCE_TEXT).strip(),
-                }]
-            else:
-                # 没有本地音频文件，回退到 local_audio_name
-                local_path = _resolve_local_audio(local_audio_name)
-                refs = [{
-                    "source": f"models/mp3：{local_path.name}",
-                    "local_path": local_path,
-                    "ref_text": str(kwargs.get(_speaker_ref_text_name(1)) or DEFAULT_REFERENCE_TEXT).strip(),
-                }]
+            local_path = _resolve_local_audio(local_audio_name)
+            refs = [{
+                "source": f"models/mp3：{local_path.name}",
+                "local_path": local_path,
+                "ref_text": str(kwargs.get(_speaker_ref_text_name(1)) or DEFAULT_REFERENCE_TEXT).strip(),
+            }]
 
         prepared: list[dict[str, Any]] = []
         for index, ref in enumerate(refs, start=1):
@@ -713,8 +694,8 @@ class GJJ_LongCatAudioDiTTTS:
             raise RuntimeError("合成文本不能为空。")
         turns = _parse_dialogue_lines(raw_text)
         if not turns:
-            if speaker_count > 1:
-                raise RuntimeError("连接多个参考音频时，合成文本需要使用 [speaker_1]:、[speaker_2]: 这样的说话人标签。")
+            if _has_speaker_tag(raw_text):
+                raise RuntimeError("合成文本包含说话人标签，但没有解析到有效文本。请检查 [speaker_1]: 后是否填写了内容。")
             return [(0, raw_text)]
         max_speaker = max(speaker for speaker, _ in turns)
         if max_speaker >= speaker_count:
