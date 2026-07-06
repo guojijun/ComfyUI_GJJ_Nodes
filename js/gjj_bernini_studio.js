@@ -6,6 +6,8 @@ import { createTemplateSourceButton, updateTemplateSourcePanel, TEMPLATE_SOURCE_
 
 const NODE_TYPE = "GJJ_BerniniStudio";
 const MEDIA_TYPE = "GJJ_BATCH_IMAGE,IMAGE,VIDEO";
+const LORA_CHAIN_CONFIG_INPUT = "lora_chain_config";
+const LORA_CHAIN_CONFIG_TYPE = "LORA_CHAIN_CONFIG";
 const PANEL_WIDGET = "__gjj_bernini_panel";
 const PREVIEW_WIDGET = "__gjj_bernini_preview";
 const SETTINGS_PROPERTY = "gjj_bernini_settings_open";
@@ -673,6 +675,23 @@ function removeUnlinkedHiddenInputSockets(node, hiddenNames) {
 	}
 }
 
+function ensureLoraChainConfigInput(node) {
+	if (!Array.isArray(node?.inputs)) return null;
+	let input = node.inputs.find((item) => String(item?.name || "") === LORA_CHAIN_CONFIG_INPUT || String(item?.type || "") === LORA_CHAIN_CONFIG_TYPE);
+	if (!input) {
+		node.addInput?.(LORA_CHAIN_CONFIG_INPUT, LORA_CHAIN_CONFIG_TYPE);
+		input = node.inputs[node.inputs.length - 1];
+	}
+	if (!input) return null;
+	input.name = LORA_CHAIN_CONFIG_INPUT;
+	input.type = LORA_CHAIN_CONFIG_TYPE;
+	input.label = "🧬 LoRA串联配置";
+	input.localized_name = "🧬 LoRA串联配置";
+	input.display_name = "🧬 LoRA串联配置";
+	input.tooltip = "连接 GJJ_LoraChainConfig 输出，按配置顺序额外叠加 LoRA。";
+	return input;
+}
+
 function normalizeInputs(node) {
 	if (!Array.isArray(node?.inputs)) return;
 	const selected = [];
@@ -713,8 +732,9 @@ function normalizeInputs(node) {
 		input.localized_name = label;
 		input.tooltip = "支持 GJJ_BATCH_IMAGE、IMAGE、VIDEO；节点内部自动解包分析。";
 	});
+	const loraInput = ensureLoraChainConfigInput(node);
 	const others = node.inputs.filter((input) => !selected.includes(input));
-	node.inputs = [...selected, ...others];
+	node.inputs = [...selected, ...others.filter((input) => input !== loraInput), ...(loraInput ? [loraInput] : [])];
 }
 
 function widgetChoices(target) {

@@ -20,6 +20,7 @@ from .gjj_bernini import (
 from .gjj_clip_prompt_encode_panel import GJJ_CLIPPromptEncodePanel
 from .gjj_image_batch_multi import GJJ_ImageBatchMulti
 from .gjj_model_patch_bundle import GJJ_ModelPatchBundle
+from .gjj_multi_lora_chain import apply_lora_chain_config, normalize_lora_chain_data, parse_lora_data
 from .gjj_video_combine import GJJ_VideoCombine
 from .gjj_video_universal_model_loader import GJJ_VideoUniversalModelLoader
 from .gjj_wanvideo_decode import GJJ_WanVideoDecode
@@ -1012,6 +1013,7 @@ class GJJ_BerniniStudio:
                 "randomize_seed": ("BOOLEAN", {"default": False, "display_name": "随机种子", "tooltip": "开启后每次执行自动生成新种子；关闭时保持当前种子，输入不变可复用缓存结果。"}),
                 "resize_to_panel": ("BOOLEAN", {"default": True, "display_name": "按面板尺寸", "tooltip": "开启时按面板宽高缩放裁剪；关闭时优先沿用源媒体尺寸。"}),
                 "use_prev_segment_latent": ("BOOLEAN", {"default": False, "display_name": "上一段Latent", "tooltip": "长视频分段时，把上一段最终 latent 的尾部写入下一段初始 latent 开头，用于增强段落衔接。"}),
+                "lora_chain_config": ("LORA_CHAIN_CONFIG", {"forceInput": True, "display_name": "LoRA串联配置", "tooltip": "对齐 GJJ_LoraChainConfig 输出；额外 LoRA 会按配置顺序叠加到 Bernini High/Low 模型与 CLIP。"}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -1029,7 +1031,7 @@ class GJJ_BerniniStudio:
             "enable_sage_attention", "enable_fp16_accumulation", "frame_rate", "filename_prefix",
             "format_name", "vae_tiling", "high_model", "low_model", "vae_name", "clip_name", "high_lora", "low_lora",
             "segment_frames", "keep_model", "prev_segment_ref_frames", "randomize_seed", "resize_to_panel",
-            "translation_enabled", "batch_size", "use_prev_segment_latent",
+            "translation_enabled", "batch_size", "use_prev_segment_latent", "lora_chain_config",
         ]
         parts = ["bernini_studio_cache_v2"]
         parts.extend(str(_first_value(kwargs.get(key), "")) for key in keys)
@@ -1038,6 +1040,7 @@ class GJJ_BerniniStudio:
         return "|".join(parts)
 
     def _model_cache_key(self, kwargs: dict[str, Any]) -> tuple[Any, ...]:
+        lora_chain_config = normalize_lora_chain_data(_first_value(kwargs.get("lora_chain_config"), ""))
         return (
             _as_text(kwargs.get("high_model"), DEFAULT_HIGH_MODEL),
             _as_text(kwargs.get("low_model"), DEFAULT_LOW_MODEL),
@@ -1048,6 +1051,7 @@ class GJJ_BerniniStudio:
             _as_bool(kwargs.get("use_accel_lora"), True),
             _as_bool(kwargs.get("enable_sage_attention"), True),
             _as_bool(kwargs.get("enable_fp16_accumulation"), False),
+            lora_chain_config,
         )
 
     def _load_models(self, kwargs: dict[str, Any], unique_id=None):
@@ -1090,6 +1094,21 @@ class GJJ_BerniniStudio:
             缺SageAttention处理="自动跳过SageAttention继续运行",
             unique_id=unique_id,
         )
+        normalized_lora_chain_config = normalize_lora_chain_data(_first_value(kwargs.get("lora_chain_config"), ""))
+        if parse_lora_data(normalized_lora_chain_config):
+            _send_status(unique_id, "1/5 应用额外 LoRA 串联配置...", 0.08)
+            patched_high, clip, lora_cache = apply_lora_chain_config(
+                patched_high,
+                clip,
+                lora_data=normalized_lora_chain_config,
+                loaded_lora_cache=None,
+            )
+            patched_low, _, _ = apply_lora_chain_config(
+                patched_low,
+                None,
+                lora_data=normalized_lora_chain_config,
+                loaded_lora_cache=lora_cache,
+            )
         result = (patched_high, patched_low, vae, clip)
         if keep_model:
             self._MODEL_CACHE[cache_key] = result
