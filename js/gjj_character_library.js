@@ -426,11 +426,11 @@ import { api } from "/scripts/api.js";
 
 	async function uploadVoice(character) {
 		if (!character) return;
-		const file = await fileInput("audio/mpeg,.mp3");
+		const file = await fileInput("audio/wav,audio/mpeg,.wav,.mp3");
 		if (!file) return;
 		const form = new FormData();
 		form.append("id", character.id);
-		form.append("voice_path", `${characterReferenceName(character)}.mp3`);
+		form.append("voice_path", `${characterReferenceName(character)}${file.name.toLowerCase().endsWith(".mp3") ? ".mp3" : ".wav"}`);
 		form.append("file", file, file.name);
 		setStatus("正在保存角色音色...");
 		const data = await apiJson(`${ENDPOINT}/voice`, { method: "POST", body: form });
@@ -455,7 +455,7 @@ import { api } from "/scripts/api.js";
 		}
 		const search = document.createElement("input");
 		search.className = "gjj-cl-voice-search";
-		search.placeholder = "搜索 models/mp3 下的音色";
+		search.placeholder = "搜索 models/GJJ/wav 下的音色";
 		const list = document.createElement("div");
 		list.className = "gjj-cl-voice-list";
 		const player = document.createElement("audio");
@@ -518,7 +518,7 @@ import { api } from "/scripts/api.js";
 			clearTimeout(timer);
 			timer = setTimeout(() => renderItems().catch((error) => setStatus(error.message)), 180);
 		});
-		const upload = button("上传 mp3", "上传 mp3 到 models/mp3 并绑定当前角色", "gjj-cl-btn", () => uploadVoice(character).then(closeVoicePicker).catch((error) => setStatus(error.message)));
+		const upload = button("上传音色", "上传 wav / mp3 到 models/GJJ/wav 并绑定当前角色（默认 wav）", "gjj-cl-btn", () => uploadVoice(character).then(closeVoicePicker).catch((error) => setStatus(error.message)));
 		const head = document.createElement("div");
 		head.className = "gjj-cl-row";
 		head.append(search, upload);
@@ -1373,12 +1373,12 @@ import { api } from "/scripts/api.js";
 		voicePath.className = "gjj-cl-voice-path clickable";
 		voicePath.dataset.clVoicePath = "1";
 		voicePath.value = character.voice_path || "";
-		voicePath.placeholder = "models/mp3 下的相对路径，默认同名 .mp3";
+		voicePath.placeholder = "models/GJJ/wav 下的相对路径，默认同名 .wav，兼容 .mp3";
 		voicePath.addEventListener("click", (event) => {
 			stopBubble(event);
 			openVoicePicker(character, voicePath).catch((error) => setStatus(error.message));
 		});
-		const chooseVoice = button("选择", "从 models/mp3 列表中搜索/试听/选择音色", "gjj-cl-btn", () => openVoicePicker(character, chooseVoice).catch((error) => setStatus(error.message)));
+		const chooseVoice = button("选择", "从 models/GJJ/wav 列表中搜索/试听/选择音色", "gjj-cl-btn", () => openVoicePicker(character, chooseVoice).catch((error) => setStatus(error.message)));
 		const clearVoiceButton = button("清除", "清除当前角色音色路径", "gjj-cl-btn", () => clearVoice(character).catch((error) => setStatus(error.message)));
 		const saveVoiceButton = button("保存", "保存音色相对路径", "gjj-cl-btn", () => saveCharacterFromForm().catch((error) => setStatus(error.message)));
 		voiceRow.append(voiceLabel, voicePath, chooseVoice, clearVoiceButton, saveVoiceButton);

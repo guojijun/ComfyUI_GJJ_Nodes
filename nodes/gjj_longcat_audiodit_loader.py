@@ -26,7 +26,7 @@ if str(VENDOR_ROOT) not in sys.path:
 # Suppress verbose transformers warnings about logits processors
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
-MODELS_FOLDER_NAME = "audiodit"
+MODELS_FOLDER_NAME = "TTS"
 HF_MODELS_FOLDER_NAME = MODELS_FOLDER_NAME
 LOCAL_MODEL_PLACEHOLDER = "[未找到本地LongCat AudioDiT模型]"
 RUNTIME_INSTALL_PACKAGES = [
@@ -271,7 +271,7 @@ def resolve_model_path(name: str, unique_id=None) -> Path:
                         label=name,
                         subdir=MODELS_FOLDER_NAME,
                         filename=name,
-                        description="请把模型目录放到 models/audiodit/ 下。",
+                        description="请把模型目录放到 models/TTS/ 下。",
                     )
                 ],
                 description=f"Model folder not found: {path}",
@@ -704,12 +704,22 @@ def _is_fp8_model(model_path: Path) -> bool:
     return (model_path / "fp8_scales.json").is_file()
 
 
-def _has_safetensors_metadata(model_path: Path) -> bool:
-    """Check if safetensors file has proper format metadata.
+def _config_quant_mode(model_path: Path) -> str:
+    config_path = model_path / "config.json"
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    for key in ("quantization_config", "quantization"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            mode = str(value.get("mode") or "").strip().lower()
+            if mode:
+                return mode
+    return ""
 
-    Original meituan-longcat models have safetensors without metadata,
-    which causes transformers.from_pretrained to fail.
-    """
+
+def _safetensors_metadata(model_path: Path) -> dict:
     safetensors_module = load_dependency_at_runtime(
         module_name="safetensors",
         node_name=NODE_DISPLAY_NAME,
@@ -720,16 +730,32 @@ def _has_safetensors_metadata(model_path: Path) -> bool:
 
     safetensors_path = model_path / "model.safetensors"
     if not safetensors_path.exists():
-        return True  # No safetensors, let normal path handle it
-
+        return {}
     try:
         with safe_open(safetensors_path, framework="pt") as f:
-            metadata = f.metadata()
-            if metadata is None or metadata.get("format") is None:
-                return False
-            return True
+            return dict(f.metadata() or {})
     except Exception:
-        return True  # If we can't check, assume it's fine
+        return {}
+
+
+def _is_mxfp8_model(model_path: Path) -> bool:
+    return _config_quant_mode(model_path) == "mxfp8" or _safetensors_metadata(model_path).get("format") == "mlx"
+
+
+def _has_safetensors_metadata(model_path: Path) -> bool:
+    """Check if safetensors file has proper format metadata.
+
+    Original meituan-longcat models have safetensors without metadata,
+    which causes transformers.from_pretrained to fail.
+    """
+    safetensors_path = model_path / "model.safetensors"
+    if not safetensors_path.exists():
+        return True  # No safetensors, let normal path handle it
+
+    metadata = _safetensors_metadata(model_path)
+    if not metadata or metadata.get("format") is None:
+        return False
+    return True
 
 
 def _load_model_direct(model_path: Path, model_class, torch_dtype):
@@ -760,6 +786,96 @@ def _load_model_direct(model_path: Path, model_class, torch_dtype):
     else:
         raise FileNotFoundError(f"No model.safetensors found in {model_path}")
 
+    return model
+
+
+def _decode_e4m3fn(byte_tensor: torch.Tensor) -> torch.Tensor:
+    bits = byte_tensor.to(torch.int16)
+    sign = torch.where((bits & 0x80) != 0, -1.0, 1.0)
+    exponent = (bits >> 3) & 0x0F
+    mantissa = bits & 0x07
+    normal = torch.pow(torch.tensor(2.0, device=bits.device), (exponent.to(torch.float32) - 7.0)) * (1.0 + mantissa.to(torch.float32) / 8.0)
+    subnormal = torch.pow(torch.tensor(2.0, device=bits.device), torch.tensor(-6.0, device=bits.device)) * (mantissa.to(torch.float32) / 8.0)
+    value = torch.where(exponent == 0, subnormal, normal) * sign
+    return torch.where(byte_tensor == 0, torch.zeros_like(value), value)
+
+
+def _decode_e8m0(scale_tensor: torch.Tensor) -> torch.Tensor:
+    exponent = scale_tensor.to(torch.float32) - 127.0
+    return torch.pow(torch.tensor(2.0, device=scale_tensor.device), exponent)
+
+
+def _unpack_mxfp8_weight(weight: torch.Tensor, scales: torch.Tensor, torch_dtype: torch.dtype) -> torch.Tensor:
+    packed = weight.to(torch.int64)
+    bytes_tensor = torch.stack(
+        [
+            (packed & 0xFF),
+            ((packed >> 8) & 0xFF),
+            ((packed >> 16) & 0xFF),
+            ((packed >> 24) & 0xFF),
+        ],
+        dim=-1,
+    ).to(torch.uint8)
+    values = _decode_e4m3fn(bytes_tensor).reshape(*weight.shape[:-1], weight.shape[-1] * 4)
+    scale_values = _decode_e8m0(scales.to(torch.uint8)).repeat_interleave(32, dim=-1)
+    scale_values = scale_values[..., : values.shape[-1]]
+    return (values * scale_values).to(torch_dtype)
+
+
+def _remap_mxfp8_key(key: str) -> str | list[str]:
+    if key == "text_encoder.shared.weight":
+        return ["text_encoder.shared.weight", "text_encoder.encoder.embed_tokens.weight"]
+    match = re.match(r"^text_encoder\.block\.(\d+)\.SelfAttention\.(.+)$", key)
+    if match:
+        return f"text_encoder.encoder.block.{match.group(1)}.layer.0.SelfAttention.{match.group(2)}"
+    match = re.match(r"^text_encoder\.block\.(\d+)\.DenseReluDense\.(.+)$", key)
+    if match:
+        return f"text_encoder.encoder.block.{match.group(1)}.layer.1.DenseReluDense.{match.group(2)}"
+    match = re.match(r"^text_encoder\.block\.(\d+)\.layer_norm_sa\.weight$", key)
+    if match:
+        return f"text_encoder.encoder.block.{match.group(1)}.layer.0.layer_norm.weight"
+    match = re.match(r"^text_encoder\.block\.(\d+)\.layer_norm_ff\.weight$", key)
+    if match:
+        return f"text_encoder.encoder.block.{match.group(1)}.layer.1.layer_norm.weight"
+    if key == "text_encoder.final_layer_norm.weight":
+        return "text_encoder.encoder.final_layer_norm.weight"
+    return key
+
+
+def _load_mxfp8_model_direct(model_path: Path, model_class, torch_dtype):
+    safetensors_torch = load_dependency_at_runtime(
+        module_name="safetensors.torch",
+        node_name=NODE_DISPLAY_NAME,
+        package_name="safetensors",
+        description="LongCat AudioDiT 直接加载 safetensors 模型需要 safetensors。",
+    )
+    load_file = safetensors_torch.load_file
+
+    config = model_class.config_class.from_pretrained(str(model_path))
+    model = model_class(config)
+    raw = load_file(str(model_path / "model.safetensors"), device="cpu")
+    state_dict = {}
+    for key, tensor in raw.items():
+        if key.endswith(".scales"):
+            continue
+        mapped_keys = _remap_mxfp8_key(key)
+        if not isinstance(mapped_keys, list):
+            mapped_keys = [mapped_keys]
+        scale = raw.get(f"{key[:-7]}.scales") if key.endswith(".weight") else None
+        if scale is not None and tensor.dtype == torch.uint32:
+            value = _unpack_mxfp8_weight(tensor, scale, torch_dtype)
+        else:
+            value = tensor.to(torch_dtype) if torch.is_floating_point(tensor) else tensor
+        for mapped_key in mapped_keys:
+            state_dict[mapped_key] = value
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    logger.info(
+        "Loaded MXFP8/MLX model directly from safetensors: %s missing, %s unexpected; missing=%s unexpected=%s",
+        len(missing),
+        len(unexpected),
+        list(missing)[:12],
+        list(unexpected)[:12],
+    )
     return model
 
 
@@ -848,11 +964,15 @@ def load_model(model_name: str, device: str, precision: str, attention: str, uni
 
     # Check if safetensors has proper metadata (original meituan models don't)
     has_metadata = _has_safetensors_metadata(model_path)
+    mxfp8 = _is_mxfp8_model(model_path)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         with _without_incomplete_hf_quant_config(model_path):
-            if has_metadata:
+            if mxfp8:
+                logger.info("MXFP8/MLX model detected — unpacking grouped fp8 weights to BF16")
+                model = _load_mxfp8_model_direct(model_path, AudioDiTModel, torch.bfloat16)
+            elif has_metadata:
                 # Normal loading path - safetensors has proper metadata
                 # torch_dtype=bfloat16 ensures fp8 tensors in safetensors are
                 # properly converted to bf16 during loading by transformers

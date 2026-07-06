@@ -12,6 +12,20 @@ const MODE_AUTO = "自动";
 const NUMBER_SOCKET_TYPE = "INT,FLOAT";
 const AUTO_PROPERTY = "gjj_audio_silence_trim_auto_queue";
 const AUTO_STOP_REASON_PROPERTY = "gjj_audio_silence_trim_auto_stop_reason";
+const INTERFACES_PROPERTY = "gjj_audio_silence_trim_interfaces";
+const OUTPUT_ORDER_PROPERTY = "gjj_audio_silence_trim_output_order";
+const OUTPUT_STORAGE_NAME = "output_order_json";
+const OUTPUT_DEFS = [
+	{ key: "segment_audio", name: "分段音频", type: "AUDIO" },
+	{ key: "segment_count", name: "分段总数", type: "INT" },
+	{ key: "segment_index", name: "当前分段序号", type: "INT" },
+	{ key: "background_audio", name: "分段背景声", type: "AUDIO" },
+];
+const PARAMETER_NAMES = ["threshold_db", "min_silence_duration", "keep_silence", "max_duration", "fade_duration", "current_segment", "fps"];
+const PARAMETER_LABELS = {
+	threshold_db: "静音阈值 dB", min_silence_duration: "最短静音秒", keep_silence: "保留静音秒",
+	max_duration: "最长保留时长", fade_duration: "交叉淡化秒", current_segment: "当前分段", fps: "帧率",
+};
 const QUEUE_DELAY_MS = 800;
 let activeAutoNodeId = null;
 let activeAutoToken = 0;
@@ -88,9 +102,84 @@ function removeInputAt(node, index) {
 	catch (_) { node.inputs.splice(index, 1); }
 }
 
+function readOutputOrder(node, serialized = null) {
+	node.properties ||= {};
+	let order = node.properties[OUTPUT_ORDER_PROPERTY];
+	if (serialized?.outputs?.length) {
+		const byName = {
+			"分段总数": "segment_count", "当前分段音频": "segment_audio", "分段音频": "segment_audio",
+			"当前分段序号": "segment_index", "当前分段背景声": "background_audio", "分段背景声": "background_audio",
+		};
+		const restored = serialized.outputs.map((output) => byName[output?.name]).filter(Boolean);
+		if (restored.length) order = restored;
+	}
+	if (!Array.isArray(order)) {
+		try { order = JSON.parse(String(getWidget(node, OUTPUT_STORAGE_NAME)?.value || "[]")); } catch (_) { order = []; }
+	}
+	order = [...new Set((order || []).filter((key) => OUTPUT_DEFS.some((def) => def.key === key)))];
+	if (!order.length) order = ["segment_audio"];
+	node.properties[OUTPUT_ORDER_PROPERTY] = order;
+	return order;
+}
+
+function applyOutputs(node, serialized = null) {
+	const order = readOutputOrder(node, serialized);
+	const targets = order.map((key) => OUTPUT_DEFS.find((def) => def.key === key)).filter(Boolean);
+	for (let index = (node.outputs || []).length - 1; index >= targets.length; index -= 1) {
+		if (node.outputs[index]?.links?.length) continue;
+		node.removeOutput?.(index);
+	}
+	while ((node.outputs || []).length < targets.length) {
+		const def = targets[node.outputs.length];
+		node.addOutput?.(def.name, def.type);
+	}
+	targets.forEach((def, index) => {
+		const output = node.outputs?.[index];
+		if (!output) return;
+		output.name = output.label = output.localized_name = def.name;
+		output.type = def.type;
+	});
+	setWidgetValue(node, OUTPUT_STORAGE_NAME, JSON.stringify(order));
+}
+
+function enabledInterfaces(node, serialized = null) {
+	node.properties ||= {};
+	let values = node.properties[INTERFACES_PROPERTY];
+	if (!Array.isArray(values)) values = [];
+	if (serialized?.inputs?.length) {
+		for (const input of serialized.inputs) {
+			if (["current_segment", "background_audio"].includes(input?.name) && !values.includes(input.name)) values.push(input.name);
+		}
+	}
+	node.properties[INTERFACES_PROPERTY] = [...new Set(values)];
+	return node.properties[INTERFACES_PROPERTY];
+}
+
+function syncOptionalInputs(node, serialized = null) {
+	const enabled = enabledInterfaces(node, serialized);
+	for (const name of ["current_segment", "background_audio"]) {
+		let input = findInput(node, name);
+		const linked = Boolean(input?.link);
+		if (enabled.includes(name) || linked) {
+			if (!input) node.addInput?.(name, name === "background_audio" ? "AUDIO" : "INT");
+			input = findInput(node, name);
+			if (input && name === "background_audio") {
+				input.label = input.localized_name = "背景声";
+				input.type = "AUDIO";
+			}
+		} else if (input) {
+			removeInputAt(node, node.inputs.indexOf(input));
+		}
+	}
+}
+
 function ensureCurrentSegmentInput(node) {
 	if (!node || !Array.isArray(node.inputs)) return;
 	let current = findInput(node, CURRENT_SEGMENT_NAME);
+	if (!enabledInterfaces(node).includes(CURRENT_SEGMENT_NAME) && !current?.link) {
+		if (current) removeInputAt(node, node.inputs.indexOf(current));
+		return;
+	}
 	if (!current) {
 		node.addInput?.(CURRENT_SEGMENT_NAME, "INT");
 		current = node.inputs?.[node.inputs.length - 1] || null;
@@ -239,7 +328,7 @@ function isAutoRunning(node) {
 function updateToolbar(node) {
 	if (!node) return;
 	hideWidget(getWidget(node, QUEUE_MODE_NAME), true);
-	hideWidget(getWidget(node, CURRENT_SEGMENT_NAME), false);
+	hideWidget(getWidget(node, CURRENT_SEGMENT_NAME), true);
 	ensureCurrentSegmentInput(node);
 	const external = inputLinked(node, CURRENT_SEGMENT_NAME);
 	const mode = getWidget(node, QUEUE_MODE_NAME)?.value || MODE_AUTO;
@@ -365,6 +454,103 @@ function queuePendingAfterWorkflow(reason = "执行完成") {
 	queueNextIfNeeded(data.node, data.count, data.index, data.token);
 }
 
+function closePopup(node, key) {
+	const popup = node?.[key];
+	if (popup) popup.remove();
+	if (node) node[key] = null;
+}
+
+function popupBox(title) {
+	const popup = document.createElement("div");
+	popup.style.cssText = "position:fixed;z-index:100000;width:340px;max-width:calc(100vw - 16px);padding:9px;border:1px solid #526873;border-radius:8px;background:#10171b;box-shadow:0 12px 28px #0008;color:#dce7e2;font:12px/1.35 system-ui,'Microsoft YaHei',sans-serif";
+	const heading = document.createElement("div");
+	heading.textContent = title;
+	heading.style.cssText = "font-weight:700;margin-bottom:7px;color:#edf7fb";
+	popup.append(heading);
+	for (const event of ["mousedown", "pointerdown"]) popup.addEventListener(event, (e) => e.stopPropagation());
+	return popup;
+}
+
+function showPopup(popup, anchor) {
+	document.body.append(popup);
+	const rect = anchor.getBoundingClientRect();
+	popup.style.left = `${Math.min(innerWidth - popup.offsetWidth - 8, Math.max(8, rect.left))}px`;
+	popup.style.top = `${Math.min(innerHeight - popup.offsetHeight - 8, Math.max(8, rect.bottom + 6))}px`;
+}
+
+function toggleSettings(node, anchor) {
+	if (node.__gjjSilenceSettingsPopup) return closePopup(node, "__gjjSilenceSettingsPopup");
+	closePopup(node, "__gjjSilenceInterfacesPopup");
+	const popup = popupBox("音频静音修剪参数");
+	for (const name of PARAMETER_NAMES) {
+		const widget = getWidget(node, name);
+		if (!widget) continue;
+		const row = document.createElement("label");
+		row.style.cssText = "display:flex;align-items:center;gap:8px;margin:6px 0";
+		const label = document.createElement("span");
+		label.textContent = PARAMETER_LABELS[name] || name;
+		label.style.cssText = "width:92px;color:#c9d6dc";
+		const input = document.createElement("input");
+		input.type = "number";
+		input.value = String(widget.value ?? "");
+		if (widget.options?.min != null) input.min = widget.options.min;
+		if (widget.options?.max != null) input.max = widget.options.max;
+		if (widget.options?.step != null) input.step = widget.options.step;
+		input.style.cssText = "flex:1;min-width:0;padding:5px 7px;border:1px solid #41535b;border-radius:5px;background:#202a30;color:#eef7fa";
+		input.onchange = () => setWidgetValue(node, name, Number(input.value));
+		row.append(label, input);
+		popup.append(row);
+	}
+	node.__gjjSilenceSettingsPopup = popup;
+	showPopup(popup, anchor);
+}
+
+function toggleInterfaces(node, anchor) {
+	if (node.__gjjSilenceInterfacesPopup) return closePopup(node, "__gjjSilenceInterfacesPopup");
+	closePopup(node, "__gjjSilenceSettingsPopup");
+	const popup = popupBox("输入 / 输出接口");
+	const addToggle = (labelText, checked, disabled, onChange) => {
+		const row = document.createElement("label");
+		row.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px;cursor:pointer";
+		const check = document.createElement("input");
+		check.type = "checkbox";
+		check.checked = checked;
+		check.disabled = disabled;
+		check.onchange = () => onChange(check);
+		row.append(check, document.createTextNode(labelText));
+		popup.append(row);
+	};
+	const interfaces = enabledInterfaces(node);
+	addToggle("输入：音频（默认）", true, true, () => {});
+	for (const [name, label] of [["current_segment", "输入：当前分段"], ["background_audio", "输入：背景声"]]) {
+		addToggle(label, interfaces.includes(name), false, (check) => {
+			const next = enabledInterfaces(node).filter((item) => item !== name);
+			if (check.checked) next.push(name);
+			node.properties[INTERFACES_PROPERTY] = next;
+			syncOptionalInputs(node);
+			updateToolbar(node);
+		});
+	}
+	const order = readOutputOrder(node);
+	for (const def of OUTPUT_DEFS) {
+		addToggle(`输出：${def.name}`, order.includes(def.key), def.key === "segment_audio", (check) => {
+			const current = readOutputOrder(node);
+			const index = current.indexOf(def.key);
+			if (!check.checked && (node.outputs || []).some((output, slot) => slot >= index && output.links?.length)) {
+				check.checked = true;
+				return;
+			}
+			let next = current.filter((key) => key !== def.key);
+			if (check.checked) next.push(def.key);
+			node.properties[OUTPUT_ORDER_PROPERTY] = OUTPUT_DEFS.map((item) => item.key).filter((key) => next.includes(key));
+			applyOutputs(node);
+			node.graph?.change?.();
+		});
+	}
+	node.__gjjSilenceInterfacesPopup = popup;
+	showPopup(popup, anchor);
+}
+
 function ensureToolbar(node) {
 	if (!node || node.__gjjSilenceTrimToolbar) {
 		updateToolbar(node);
@@ -391,10 +577,14 @@ function ensureToolbar(node) {
 		if (isAutoRunning(node)) stopAuto(node);
 		else startAuto(node);
 	});
+	node.__gjjSilenceTrimInterfacesBtn = makeButton("🔌", "管理输入与输出接口", () => toggleInterfaces(node, node.__gjjSilenceTrimInterfacesBtn));
+	node.__gjjSilenceTrimSettingsBtn = makeButton("⚙️", "显示参数", () => toggleSettings(node, node.__gjjSilenceTrimSettingsBtn));
+	node.__gjjSilenceTrimInterfacesBtn.style.minWidth = "34px";
+	node.__gjjSilenceTrimSettingsBtn.style.minWidth = "34px";
 	const status = document.createElement("span");
 	status.style.cssText = "display:block;font-size:12px;color:#b8cac6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:16px;max-width:100%;";
 	node.__gjjSilenceTrimStatus = status;
-	buttonRow.append(node.__gjjSilenceTrimBlankBtn, node.__gjjSilenceTrimInitialBtn, node.__gjjSilenceTrimAutoBtn);
+	buttonRow.append(node.__gjjSilenceTrimBlankBtn, node.__gjjSilenceTrimInitialBtn, node.__gjjSilenceTrimAutoBtn, node.__gjjSilenceTrimInterfacesBtn, node.__gjjSilenceTrimSettingsBtn);
 	row.append(buttonRow, status);
 
 	const widget = node.addDOMWidget?.("gjj_silence_trim_queue_toolbar", "HTML", row, {
@@ -409,14 +599,18 @@ function ensureToolbar(node) {
 	updateToolbar(node);
 }
 
-function patchNode(node) {
+function patchNode(node, serialized = null) {
 	if (!node || node.__gjjSilenceTrimPatched) {
+		syncOptionalInputs(node, serialized);
+		applyOutputs(node, serialized);
 		updateToolbar(node);
 		return;
 	}
 	node.__gjjSilenceTrimPatched = true;
 	node.properties = node.properties || {};
-	ensureCurrentSegmentInput(node);
+	syncOptionalInputs(node, serialized);
+	applyOutputs(node, serialized);
+	for (const name of [...PARAMETER_NAMES, QUEUE_MODE_NAME, OUTPUT_STORAGE_NAME]) hideWidget(getWidget(node, name), true);
 	ensureToolbar(node);
 	const originalExecuted = node.onExecuted;
 	node.onExecuted = function (message) {
@@ -518,10 +712,10 @@ function armFirstAutoNodeForManualRun() {
 	}
 }
 
-function scheduleNormalize(node, delay = 0) {
+function scheduleNormalize(node, delay = 0, serialized = null) {
 	setTimeout(() => {
 		normalizeMaxDurationInput(node);
-		patchNode(node);
+		patchNode(node, serialized);
 	}, delay);
 }
 
@@ -540,11 +734,11 @@ app.registerExtension({
 		};
 
 		const originalOnConfigure = nodeType.prototype.onConfigure;
-		nodeType.prototype.onConfigure = function (...args) {
-			const result = originalOnConfigure?.apply(this, args);
+		nodeType.prototype.onConfigure = function (data, ...args) {
+			const result = originalOnConfigure?.apply(this, [data, ...args]);
 			clearLoadedAutoState(this);
-			scheduleNormalize(this, 0);
-			scheduleNormalize(this, 80);
+			scheduleNormalize(this, 0, data);
+			scheduleNormalize(this, 80, data);
 			return result;
 		};
 
@@ -557,6 +751,12 @@ app.registerExtension({
 			scheduleNormalize(this, 16);
 			setTimeout(() => updateToolbar(this), 32);
 			return result;
+		};
+
+		const originalOnSerialize = nodeType.prototype.onSerialize;
+		nodeType.prototype.onSerialize = function (...args) {
+			setWidgetValue(this, OUTPUT_STORAGE_NAME, JSON.stringify(readOutputOrder(this)));
+			return originalOnSerialize?.apply(this, args);
 		};
 	},
 

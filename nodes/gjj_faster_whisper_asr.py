@@ -380,13 +380,14 @@ class GJJ_FasterWhisperASR:
 
     @classmethod
     def INPUT_TYPES(cls):
-        # 读取 models/mp3 列表（下拉列表选项）
-        mp3_dir = os.path.join(folder_paths.models_dir, "mp3")
+        # 读取 models/GJJ/wav 列表（默认 .wav，兼容 .mp3）
+        mp3_dir = os.path.join(folder_paths.models_dir, "GJJ", "wav")
         audio_choices = [""]  # 空选项
         if os.path.isdir(mp3_dir):
-            for f in sorted(os.listdir(mp3_dir)):
-                if f.lower().endswith((".mp3", ".wav", ".flac", ".m4a")):
-                    audio_choices.append(f)
+            for current_root, _, files in os.walk(mp3_dir):
+                for f in sorted(files):
+                    if f.lower().endswith((".wav", ".mp3", ".flac", ".m4a")):
+                        audio_choices.append(os.path.relpath(os.path.join(current_root, f), mp3_dir))
 
         # 如果列表为空，添加占位符
         if len(audio_choices) == 1:
@@ -402,7 +403,7 @@ class GJJ_FasterWhisperASR:
                 "example_audio": (audio_choices, {
                     "default": "",
                     "display_name": "示例音频",
-                    "tooltip": "从 models/mp3 目录选择示例音频进行识别。",
+                    "tooltip": "从 models/GJJ/wav 目录选择示例音频；默认 .wav，兼容 .mp3。",
                 }),
                 "model_name": (AVAILABLE_MODELS, {
                     "default": "large-v3",
@@ -475,7 +476,7 @@ class GJJ_FasterWhisperASR:
             # 步骤 1：准备输入音频
             _send_status(unique_id, "正在准备音频...", 0.1)
             if audio is None and example_audio != "[无示例音频]":
-                mp3_dir = os.path.join(folder_paths.models_dir, "mp3")
+                mp3_dir = os.path.join(folder_paths.models_dir, "GJJ", "wav")
                 audio_path = os.path.join(mp3_dir, example_audio)
                 if os.path.exists(audio_path):
                     try:

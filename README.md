@@ -106,7 +106,7 @@ pip install -r requirements-accelerate.txt # 推理加速
 | `models/cosyvoice/` | CosyVoice3 全套模型文件 | CosyVoice3 语音克隆 TTS |
 | `models/fishaudioS2/` | Fish Audio S2 全套模型 | Fish Audio S2 语音克隆 TTS |
 | `models/audiodit/` | LongCat-AudioDiT 模型 | LongCat 语音克隆 TTS |
-| `models/Qwen3-ASR/` | Qwen3-ASR 模型 | Qwen3 语音识别与强制对齐 |
+| `models/ASR/` | Qwen3-ASR 模型 | Qwen3 语音识别与强制对齐 |
 | `models/FlashVSR/` | FlashVSR / Ultra-Fast 模型 | FlashVSR 视频超分放大器 |
 | `models/sam3/` | sam3.safetensors | SAM3 点选/文本/批量分割器 |
 | `models/sam2/` | sam2_hiera_base_plus.safetensors 等 | SEM2 点选分割器 |
@@ -133,7 +133,7 @@ pip install -r requirements-accelerate.txt # 推理加速
 | `models/audio_encoders/` | wav2vec2_large_english_fp16.safetensors | Wan S2V 音频条件编码 |
 | `models/loras/LTX/` | ltx-2.3-22b-distilled-lora-384 + AV-LoRA | LTX2.3 口型同步 |
 | `models/vae/` | LTX23_video_vae_bf16 / LTX23_audio_vae_bf16 | LTX2.3 音视频链路 |
-| `models/mp3/` | 参考音频文件（.mp3 / .wav） | 语音克隆各节点（参考音色） |
+| `models/GJJ/wav/` | 参考音频文件（默认 .wav，兼容 .mp3） | 语音克隆各节点（参考音色） |
 | `models/fonts/` | 字体文件（.ttf / .otf） | Text Overlay 文字叠加 |
 
 > **提示：** 大部分节点在运行时会自动在 `ComfyUI/models/` 下递归搜索模型，面板中也会显示对应的中文 tooltip 提示所需路径。

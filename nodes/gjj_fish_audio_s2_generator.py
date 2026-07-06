@@ -46,7 +46,7 @@ NODE_NAME = "GJJ_FishAudioS2Generator"
 MAX_SPEAKERS = 10
 AUDIO_PREFIX = "speaker_"
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac"}
-MISSING_AUDIO_CHOICE = "[未找到models/mp3音频]"
+MISSING_AUDIO_CHOICE = "[未找到models/GJJ/wav音频]"
 DEFAULT_REFERENCE_TEXT = "人生不如意十有八九。要么看得开，要么就认栽！"
 DEFAULT_MAX_NEW_TOKENS = 1024
 MP3_QUALITY_OPTIONS = ["320k", "128k", "V0"]
@@ -260,7 +260,7 @@ def _check_interrupt() -> None:
 
 
 def _models_mp3_root() -> Path:
-    root = Path(folder_paths.models_dir) / "mp3"
+    root = Path(folder_paths.models_dir) / "GJJ" / "wav"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -549,7 +549,7 @@ class GJJ_FishAudioS2Generator:
                 "local_audio_name": (audio_choices, {
                     "default": default_audio,
                     "display_name": "本地参考音频",
-                    "tooltip": "没有连接第 1 路参考音频时，从 models/mp3 选择一段音频作为单人克隆或 speaker_1 的参考。",
+                    "tooltip": "没有连接第 1 路参考音频时，从 models/GJJ/wav 选择一段音频作为单人克隆或 speaker_1 的参考（兼容 .wav / .mp3）。",
                 }),
                 "default_reference_text": ("STRING", {
                     "multiline": False,
@@ -669,7 +669,7 @@ class GJJ_FishAudioS2Generator:
             _send_status(unique_id, "正在读取本地参考音频", 0.18)
             refs.append({
                 "speaker": 0,
-                "source": "models/mp3",
+                "source": "models/GJJ/wav",
                 "audio": _local_audio_to_comfy_audio(local_audio_name),
                 "ref_text": str(default_reference_text or "").strip(),
             })

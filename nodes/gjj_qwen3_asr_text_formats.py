@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -20,7 +21,7 @@ from .common_utils.dependency_checker import (
 
 
 NODE_NAME = "GJJ_Qwen3ASRTextFormats"
-MODEL_ROOT_NAME = "Qwen3-ASR"
+MODEL_ROOT_NAME = "ASR"
 
 ASR_MODEL_REPOS = {
     "Qwen3-ASR-1.7B": "Qwen/Qwen3-ASR-1.7B",
@@ -83,7 +84,7 @@ PRECISION_OPTIONS = ["自动", "bfloat16", "float16", "float32"]
 _ASR_CACHE: dict[tuple[str, str, str, int, int], Any] = {}
 _ALIGNER_CACHE: dict[tuple[str, str, str], Any] = {}
 NODE_DISPLAY_NAME = "🎤 语音识别四文本TTS(Qwen3)"
-MODEL_DOWNLOAD_BASE_URL = "https://huggingface.co/Qwen"
+MODEL_DOWNLOAD_BASE_URL = "https://pan.quark.cn/s/4b5a36d50e9c"
 DEPENDENCY_SPECS = [
     {
         "module_name": "qwen_asr",
@@ -92,26 +93,20 @@ DEPENDENCY_SPECS = [
         "description": "Qwen3-ASR 主运行库。",
     },
 ]
-REQUIRED_QWEN_MODELS = [
-    make_missing_model_spec(
-        label="Qwen3-ASR-1.7B",
-        subdir=MODEL_ROOT_NAME,
-        filename="Qwen3-ASR-1.7B",
-        description="推荐，高精度 ASR 模型。",
-    ),
-    make_missing_model_spec(
-        label="Qwen3-ASR-0.6B",
-        subdir=MODEL_ROOT_NAME,
-        filename="Qwen3-ASR-0.6B",
-        description="轻量 ASR 模型。",
-    ),
-    make_missing_model_spec(
-        label="Qwen3-ForcedAligner-0.6B",
-        subdir=MODEL_ROOT_NAME,
-        filename="Qwen3-ForcedAligner-0.6B",
-        description="强制对齐模型。",
-    ),
-]
+def _local_model_tree_text() -> str:
+    root = os.path.join(folder_paths.models_dir, MODEL_ROOT_NAME)
+
+    def marker(name: str) -> str:
+        return "✅" if _is_model_dir(os.path.join(root, name)) else "⚪"
+
+    return "\n".join([
+        "ComfyUI/",
+        "└──📁 models/",
+        "   └──📁 ASR/",
+        f"      ├──{marker('Qwen3-ASR-1.7B')} Qwen3-ASR-1.7B/  （推荐，与 0.6B 二选一）",
+        f"      ├──{marker('Qwen3-ASR-0.6B')} Qwen3-ASR-0.6B/  （轻量，与 1.7B 二选一）",
+        f"      └──{marker('Qwen3-ForcedAligner-0.6B')} Qwen3-ForcedAligner-0.6B/  （强制对齐）",
+    ])
 
 
 def _collect_dependency_state() -> tuple[bool, list[dict[str, str]]]:
@@ -142,10 +137,10 @@ _DESCRIPTION_READY = """
 Qwen3-ASR 一体式语音识别与强制对齐节点。
 
 📁 模型目录：
-models/Qwen3-ASR/
+models/ASR/
 
-🌏模型下载：
-https://huggingface.co/Qwen
+🌏模型下载（夸克网盘）：
+https://pan.quark.cn/s/4b5a36d50e9c
 
 💡 使用提示：
 - 支持 28+ 种语言自动识别
@@ -397,52 +392,10 @@ def _find_local_model_dir(model_name: str, kind: str) -> str | None:
     return best_contains
 
 
-def _download_model(model_name: str, repos: dict[str, str], unique_id: Any = None) -> str:
-    huggingface_hub = load_dependency_at_runtime(
-        module_name="huggingface_hub",
-        node_name=NODE_DISPLAY_NAME,
-        package_name="huggingface_hub",
-        description="自动下载 Qwen3-ASR 模型需要 huggingface_hub。",
-        unique_id=unique_id,
-    )
-    snapshot_download = huggingface_hub.snapshot_download
-
-    resolved_name = _resolve_known_model_name(model_name, repos)
-    target_dir = os.path.join(_model_root(), resolved_name)
-    repo_id = repos[resolved_name]
-    _send_status(unique_id, f"未找到本地模型，正在下载：{resolved_name}", 0.08)
-    snapshot_download(
-        repo_id=repo_id,
-        local_dir=target_dir,
-        local_dir_use_symlinks=False,
-    )
-    if not _is_model_dir(target_dir):
-        raise_dependency_model_error(
-            node_name=NODE_DISPLAY_NAME,
-            missing_models=[
-                make_missing_model_spec(
-                    label=resolved_name,
-                    subdir=MODEL_ROOT_NAME,
-                    filename=resolved_name,
-                    description="模型下载后目录仍不完整，请重新下载或手动补齐模型文件。",
-                )
-            ],
-            description=f"模型下载后仍不完整：{target_dir}",
-            unique_id=unique_id,
-            title="GJJ 节点模型缺失！",
-            copy_text=f"https://huggingface.co/{repo_id}",
-            copy_label="🌏 复制下载网址",
-        )
-    return target_dir
-
-
-def _resolve_model_dir(model_name: str, kind: str, auto_download: bool, unique_id: Any = None) -> str:
-    repos = ALIGNER_MODEL_REPOS if kind == "aligner" else ASR_MODEL_REPOS
+def _resolve_model_dir(model_name: str, kind: str, unique_id: Any = None) -> str:
     found = _find_local_model_dir(model_name, kind)
     if found:
         return found
-    if auto_download:
-        return _download_model(model_name, repos, unique_id)
     root = os.path.join(folder_paths.models_dir, MODEL_ROOT_NAME)
     raise_dependency_model_error(
         node_name=NODE_DISPLAY_NAME,
@@ -451,14 +404,14 @@ def _resolve_model_dir(model_name: str, kind: str, auto_download: bool, unique_i
                 label=str(model_name or "Qwen3-ASR 模型"),
                 subdir=MODEL_ROOT_NAME,
                 filename=str(model_name or ""),
-                description=f"请放到 {root}，或开启自动下载模型。",
+                description=f"请从夸克网盘下载后放到 {root}。",
             )
         ],
         description=f"未找到本地模型：{model_name}",
         unique_id=unique_id,
         title="GJJ 节点模型缺失！",
-        copy_text=f"https://huggingface.co/{repos.get(_resolve_known_model_name(model_name, repos), '')}",
-        copy_label="🌏 复制下载网址",
+        copy_text=MODEL_DOWNLOAD_BASE_URL,
+        copy_label="🌏 复制夸克下载网址",
     )
 
 
@@ -570,6 +523,35 @@ def _audio_to_numpy(audio: dict[str, Any]) -> tuple[np.ndarray, int]:
     return waveform, sample_rate
 
 
+def transcribe_reference_audio(audio: dict[str, Any], unique_id: Any = None) -> str:
+    """Transcribe one local reference clip without loading the forced aligner."""
+    waveform, sample_rate = _audio_to_numpy(audio)
+    model_dir = _find_local_model_dir("Qwen3-ASR-1.7B", "asr")
+    if not model_dir:
+        model_dir = _find_local_model_dir("Qwen3-ASR-0.6B", "asr")
+    if not model_dir:
+        model_dir = _resolve_model_dir("Qwen3-ASR-1.7B", "asr", unique_id)
+    dtype_name = _resolve_dtype_name("自动")
+    model = _load_asr_model(
+        model_dir,
+        dtype_name,
+        _resolve_device_map(),
+        8,
+        512,
+        unique_id,
+    )
+    transcriptions = model.transcribe(
+        audio=(waveform, sample_rate),
+        context="",
+        language=None,
+        return_time_stamps=False,
+    )
+    text = str(getattr(transcriptions[0], "text", "") or "").strip() if transcriptions else ""
+    if not text:
+        raise RuntimeError("Qwen3-ASR 未能识别参考音频文本。")
+    return text
+
+
 def _normalize_language_name(value: str) -> str:
     target = str(value or "").strip()
     if not target:
@@ -650,6 +632,14 @@ def _format_time_array(values: list[str]) -> str:
     return "[" + ",".join(str(value).strip() for value in values if str(value).strip()) + ",]"
 
 
+def _hidden_widget(options: dict[str, Any]) -> dict[str, Any]:
+    result = dict(options)
+    result.setdefault("hidden", True)
+    result.setdefault("display", "hidden")
+    result.setdefault("advanced", True)
+    return result
+
+
 class GJJ_Qwen3ASRTextFormats:
     CATEGORY = "GJJ/Audio"
     FUNCTION = "transcribe_and_align"
@@ -664,6 +654,21 @@ class GJJ_Qwen3ASRTextFormats:
         "每个片段的开始时间，输出为 [1,2,] 形式的数组字符串。",
         "每个片段的结束时间，输出为 [1,2,] 形式的数组字符串。",
     )
+    GJJ_UI = {
+        "toolbar": ["📁", "🧠", "📝", "🔌", "⚙️", "📋", "🎤"],
+        "hidden_parameters": [
+            "example_audio",
+            "asr_model_name",
+            "aligner_model_name",
+            "asr_language",
+            "align_language",
+            "context",
+            "precision",
+            "max_inference_batch_size",
+            "max_new_tokens",
+            "output_order_json",
+        ],
+    }
     GJJ_HELP = {
         "title": NODE_DISPLAY_NAME,
         "description": _DESCRIPTION_READY,
@@ -677,10 +682,14 @@ class GJJ_Qwen3ASRTextFormats:
         "missing_models": [],
         "dependencies": [
             "qwen-asr（主识别与强制对齐运行库）",
-            "huggingface_hub（自动下载模型时按需使用）",
+            "huggingface_hub（qwen-asr 运行时依赖）",
             "soundfile / torchaudio / av / librosa（音频解码，至少可用一套）",
         ],
-        "models": REQUIRED_QWEN_MODELS,
+        "model_tree": [],
+        "models": [],
+        "model_tree_text": _local_model_tree_text(),
+        "static_model_tree_only": True,
+        "model_tree_priority": "static",
         "tips": [
             "推荐优先准备 Qwen3-ASR-1.7B 和 Qwen3-ForcedAligner-0.6B。",
             "长音频或显存不足时可降低推理批量，或切回 CPU。",
@@ -688,18 +697,46 @@ class GJJ_Qwen3ASRTextFormats:
         ],
     }
 
+    @staticmethod
+    def _ordered_outputs(
+        timestamps: str,
+        text_list: str,
+        start_times: str,
+        end_times: str,
+        output_order_json: str,
+    ) -> tuple[str, str, str, str]:
+        values = {
+            "text_list": text_list,
+            "timestamps": timestamps,
+            "start_times": start_times,
+            "end_times": end_times,
+        }
+        try:
+            requested = json.loads(str(output_order_json or "[]"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            requested = []
+        order = []
+        if isinstance(requested, list):
+            order = [str(key) for key in requested if str(key) in values]
+        if not order:
+            order = ["text_list"]
+        result = [values[key] for key in dict.fromkeys(order)]
+        result.extend("" for _ in range(4 - len(result)))
+        return tuple(result[:4])
+
     @classmethod
     def INPUT_TYPES(cls):
         asr_models = _list_asr_models()
         aligner_models = _list_aligner_models()
 
-        # 读取 models/mp3 列表（下拉列表选项）
-        mp3_dir = os.path.join(folder_paths.models_dir, "mp3")
+        # 读取 models/GJJ/wav 列表（默认 .wav，兼容 .mp3）
+        mp3_dir = os.path.join(folder_paths.models_dir, "GJJ", "wav")
         audio_choices = [""]  # 空选项
         if os.path.isdir(mp3_dir):
-            for f in sorted(os.listdir(mp3_dir)):
-                if f.lower().endswith((".mp3", ".wav", ".flac", ".m4a")):
-                    audio_choices.append(f)
+            for current_root, _, files in os.walk(mp3_dir):
+                for f in sorted(files):
+                    if f.lower().endswith((".wav", ".mp3", ".flac", ".m4a")):
+                        audio_choices.append(os.path.relpath(os.path.join(current_root, f), mp3_dir))
 
         # 如果列表为空，添加占位符
         if len(audio_choices) == 1:
@@ -712,57 +749,61 @@ class GJJ_Qwen3ASRTextFormats:
                     "display_name": "输入音频",
                     "tooltip": "连接 ComfyUI 的音频对象，例如 Load Audio 节点输出。",
                 }),
-                "example_audio": (audio_choices, {
+                "example_audio": (audio_choices, _hidden_widget({
                     "default": "",
                     "display_name": "示例音频",
-                    "tooltip": "从 models/mp3 目录选择示例音频进行识别。",
-                }),
-                "asr_model_name": (asr_models,
- {
+                    "tooltip": "从 models/GJJ/wav 目录选择示例音频；默认 .wav，兼容 .mp3。",
+                })),
+                "asr_model_name": (asr_models, _hidden_widget({
                     "default": "Qwen3-ASR-1.7B" if "Qwen3-ASR-1.7B" in asr_models else asr_models[0],
                     "display_name": "ASR模型",
-                    "tooltip": "自动搜索 models/Qwen3-ASR 下的本地 Qwen3-ASR 模型；找不到时可按设置自动下载。",
-                }),
-                "aligner_model_name": (aligner_models, {
+                    "tooltip": "搜索 models/ASR 下的本地 Qwen3-ASR 模型；缺少时显示夸克下载提示。",
+                })),
+                "aligner_model_name": (aligner_models, _hidden_widget({
                     "default": "Qwen3-ForcedAligner-0.6B" if "Qwen3-ForcedAligner-0.6B" in aligner_models else aligner_models[0],
                     "display_name": "对齐模型",
                     "tooltip": "用于把识别文本对齐到音频时间轴的 Qwen3-ForcedAligner 模型。",
-                }),
-                "asr_language": (ASR_LANGUAGES, {
+                })),
+                "asr_language": (ASR_LANGUAGES, _hidden_widget({
                     "default": "Auto",
                     "display_name": "识别语言",
                     "tooltip": "Auto 会自动检测语言；选择具体语言时会强制按该语言识别。",
-                }),
-                "align_language": ([ALIGN_AUTO] + ALIGN_LANGUAGES, {
+                })),
+                "align_language": ([ALIGN_AUTO] + ALIGN_LANGUAGES, _hidden_widget({
                     "default": ALIGN_AUTO,
                     "display_name": "对齐语言",
                     "tooltip": "默认使用 ASR 检测到的语言；如果检测语言不稳定，可手动指定强制对齐语言。",
-                }),
-                "context": ("STRING", {
+                })),
+                "context": ("STRING", _hidden_widget({
                     "default": "",
                     "multiline": True,
                     "display_name": "上下文提示",
                     "tooltip": "可填写专有名词、人物名或场景提示，帮助 ASR 识别更准确；不需要时留空。",
-                }),
-                "precision": (PRECISION_OPTIONS, {
+                })),
+                "precision": (PRECISION_OPTIONS, _hidden_widget({
                     "default": "自动",
                     "display_name": "计算精度",
                     "tooltip": "CUDA 环境通常使用 bfloat16；显卡不支持时可改为 float16 或自动。",
-                }),
-                "max_inference_batch_size": ("INT", {
+                })),
+                "max_inference_batch_size": ("INT", _hidden_widget({
                     "default": 32,
                     "min": 1,
                     "max": 128,
                     "display_name": "推理批量",
                     "tooltip": "控制 Qwen3-ASR 内部分批大小。显存不足时调小。",
-                }),
-                "max_new_tokens": ("INT", {
+                })),
+                "max_new_tokens": ("INT", _hidden_widget({
                     "default": 512,
                     "min": 64,
                     "max": 4096,
                     "display_name": "最大输出长度",
                     "tooltip": "限制单段 ASR 生成 token 数。长音频或长句可适当调大。",
-                }),
+                })),
+                "output_order_json": ("STRING", _hidden_widget({
+                    "default": '["text_list"]',
+                    "display_name": "输出接口顺序",
+                    "tooltip": "由顶部 🔌 按钮自动维护。",
+                })),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -780,10 +821,11 @@ class GJJ_Qwen3ASRTextFormats:
         align_language=ALIGN_AUTO,
         context="",
         segment_by_sentence=True,
-        auto_download=True,
+        auto_download=False,
         precision="自动",
         max_inference_batch_size=32,
         max_new_tokens=512,
+        output_order_json='["text_list"]',
         unique_id=None,
         extra_pnginfo=None,
     ):
@@ -804,12 +846,10 @@ class GJJ_Qwen3ASRTextFormats:
             props = {}
 
         segment_by_sentence = bool(props.get("segment_by_sentence", True))
-        auto_download = bool(props.get("auto_download", True))
-
         # 如果提供了 example_audio，加载它作为 audio
         # 支持空字符串、'[无示例音频]' 或实际文件名
         if audio is None and example_audio and example_audio != "[无示例音频]":
-            mp3_dir = os.path.join(folder_paths.models_dir, "mp3")
+            mp3_dir = os.path.join(folder_paths.models_dir, "GJJ", "wav")
             audio_path = os.path.join(mp3_dir, example_audio)
             if os.path.exists(audio_path):
                 try:
@@ -846,7 +886,7 @@ class GJJ_Qwen3ASRTextFormats:
             dtype_name = _resolve_dtype_name(precision)
             device_map = _resolve_device_map()
             _send_status(unique_id, "2/5 正在加载 Qwen3-ASR 模型...", 0.24)
-            asr_dir = _resolve_model_dir(asr_model_name, "asr", bool(auto_download), unique_id)
+            asr_dir = _resolve_model_dir(asr_model_name, "asr", unique_id)
             asr_model = _load_asr_model(
                 asr_dir,
                 dtype_name,
@@ -874,11 +914,11 @@ class GJJ_Qwen3ASRTextFormats:
 
             if not full_text:
                 _send_status(unique_id, f"完成：未识别到有效文本，音频时长 {duration:.2f} 秒。", 1.0)
-                return {"ui": {"text": ("", "", "", "")}, "result": ("", "", "", "")}
+                return {"ui": {"text": ("", "", "", "")}, "result": self._ordered_outputs("", "", "", "", output_order_json)}
 
             resolved_align_language = _resolve_align_language(detected_language, align_language, asr_language)
             _send_status(unique_id, f"4/5 正在执行强制对齐：{resolved_align_language}...", 0.72)
-            aligner_dir = _resolve_model_dir(aligner_model_name, "aligner", bool(auto_download), unique_id)
+            aligner_dir = _resolve_model_dir(aligner_model_name, "aligner", unique_id)
             aligner = _load_aligner_model(aligner_dir, dtype_name, device_map, unique_id)
             align_results = aligner.align(
                 audio=(waveform, sample_rate),
@@ -916,7 +956,7 @@ class GJJ_Qwen3ASRTextFormats:
 
             return {
                 "ui": {"text": (timestamps, text_list, start_times, end_times)},
-                "result": (timestamps, text_list, start_times, end_times),
+                "result": self._ordered_outputs(timestamps, text_list, start_times, end_times, output_order_json),
             }
         except Exception as exc:
             report = get_report_from_exception(exc)

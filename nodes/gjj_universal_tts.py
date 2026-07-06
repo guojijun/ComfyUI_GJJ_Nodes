@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import concurrent.futures
+import hashlib
 import html
 import io
 import importlib.util
@@ -54,17 +55,19 @@ NODE_DISPLAY_NAME = "📢 多功能文字转语音TTS"
 MAX_REFERENCES = 10
 AUDIO_PREFIX = "reference_"
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac", ".webm", ".mp4", ".mov", ".mkv"}
-MISSING_AUDIO_CHOICE = "[未找到 models/mp3 音频]"
+MISSING_AUDIO_CHOICE = "[未找到 models/GJJ/wav 音频]"
 MP3_QUALITY_OPTIONS = ["320k", "128k", "V0"]
+AUDIO_FORMAT_OPTIONS = ["MP3", "WAV"]
 BRANCHES = [
     "EdgeTTS", "FishAudioS2", "LongCat-1B", "LongCat3.5B", "Fun-CosyVoice3-0.5B-2512",
     "Qwen3-CustomVoice", "Qwen3-VoiceDesign", "Qwen3-VoiceClone", "IndexTTS-v1.5", "IndexTTS-v1.0", "IndexTTS-v2",
+    "VoxCPM2",
 ]
 TEXT_FORMATS = ["SRT", "VTT", "LRC", "JSON"]
 AUDIO_OUTPUT_MODES = ["整体合并", "单个队列"]
 DEFAULT_TEXT = "你好，这是一段多功能 TTS 节点生成的语音。"
 LEGACY_DEFAULT_REFERENCE_TEXT = "人生不如意十有八九。要么看得开，要么就认栽！"
-DEFAULT_REFERENCE_TEXT = ""
+DEFAULT_REFERENCE_TEXT = "人生不如意十有八九。要么看得开，要么就认栽!"
 DEFAULT_SAMPLE_RATE = 24000
 EDGE_HOST = "speech.platform.bing.com"
 EDGE_PATH = "/consumer/speech/synthesize/readaloud/edge/v1"
@@ -153,19 +156,29 @@ BRANCH_DEPENDENCIES = {
         {"module_name": "sentencepiece", "package_name": "sentencepiece", "display_name": "sentencepiece", "description": "IndexTTS tokenizer 依赖。"},
         {"module_name": "textstat", "package_name": "textstat", "display_name": "textstat", "description": "文本处理依赖。"},
     ],
+    "VoxCPM2": [
+        {"module_name": "transformers", "package_name": "transformers", "display_name": "transformers", "description": "VoxCPM2 文本与模型运行时。"},
+        {"module_name": "safetensors", "package_name": "safetensors", "display_name": "safetensors", "description": "VoxCPM2 权重读取依赖。"},
+        {"module_name": "einops", "package_name": "einops", "display_name": "einops", "description": "VoxCPM2 张量变换依赖。"},
+        {"module_name": "tqdm", "package_name": "tqdm", "display_name": "tqdm", "description": "VoxCPM2 运行时进度依赖。"},
+        {"module_name": "librosa", "package_name": "librosa", "display_name": "librosa", "description": "VoxCPM2 参考音频读取依赖。"},
+        {"module_name": "soundfile", "package_name": "soundfile", "display_name": "soundfile", "description": "参考音频缓存依赖。"},
+        {"module_name": "pydantic", "package_name": "pydantic", "display_name": "pydantic", "description": "VoxCPM2 配置解析依赖。"},
+    ],
 }
 
 BRANCH_MODEL_HINTS = {
-    "FishAudioS2": ("fishaudioS2", "s2-pro / s2-base / 其它 S2 变体"),
-    "LongCat-1B": ("audiodit", "LongCat-AudioDiT-1B"),
-    "LongCat3.5B": ("audiodit", "LongCat-AudioDiT-3.5B-*"),
-    "Fun-CosyVoice3-0.5B-2512": ("cosyvoice", "Fun-CosyVoice3-0.5B-2512"),
-    "Qwen3-CustomVoice": ("qwen-tts", "Qwen3-TTS-12Hz-0.6B-CustomVoice"),
-    "Qwen3-VoiceDesign": ("qwen-tts", "Qwen3-TTS-12Hz-1.7B-VoiceDesign"),
-    "Qwen3-VoiceClone": ("qwen-tts", "Qwen3-TTS-12Hz-0.6B-Base"),
-    "IndexTTS-v1.5": ("TTS", "Index-TTS"),
-    "IndexTTS-v1.0": ("TTS", "Index-TTS"),
+    "FishAudioS2": ("TTS", "fishaudio-s2-pro-fp8"),
+    "LongCat-1B": ("TTS", "LongCat-AudioDiT-1B-mxfp8"),
+    "LongCat3.5B": ("TTS", "LongCat-AudioDiT-3.5B-fp8"),
+    "Fun-CosyVoice3-0.5B-2512": ("TTS", "Fun-CosyVoice3-0.5B-2512"),
+    "Qwen3-CustomVoice": ("TTS", "Qwen3-TTS-12Hz-1.7B-CustomVoice"),
+    "Qwen3-VoiceDesign": ("TTS", "Qwen3-TTS-12Hz-1.7B-VoiceDesign"),
+    "Qwen3-VoiceClone": ("TTS", "Qwen3-TTS-12Hz-1.7B-base"),
+    "IndexTTS-v1.5": ("TTS", "IndexTTS-1.5"),
+    "IndexTTS-v1.0": ("TTS", "Index-TTS-1.0"),
     "IndexTTS-v2": ("TTS", "IndexTTS-2"),
+    "VoxCPM2": ("TTS", "VoxCPM2"),
 }
 
 QWEN_BRANCH_MODEL_TYPES = {
@@ -174,22 +187,19 @@ QWEN_BRANCH_MODEL_TYPES = {
     "Qwen3-VoiceClone": "base",
 }
 INDEXTTS_SHARED_MODEL_SPECS = [
-    ("IndexTTS 主模型", "TTS", "Index-TTS", "IndexTTS v1.x 主模型目录。"),
-    ("Wav2Vec2-BERT", "TTS", "w2v-bert-2.0", "IndexTTS v1.x/v2 共用语音特征模型目录。"),
-    ("MaskGCT semantic codec", "TTS", "MaskGCT/semantic_codec/model.safetensors", "IndexTTS v1.x/v2 共用语义 codec 权重。"),
-    ("CampPlus", "TTS", "campplus/campplus_cn_common.bin", "IndexTTS v1.x/v2 共用说话人特征模型。"),
-    ("BigVGAN", "TTS", "bigvgan_v2_22khz_80band_256x", "IndexTTS v1.x/v2 共用声码器目录。"),
+    ("Wav2Vec2-BERT 目录", "TTS", "w2v-bert-2.0", "IndexTTS v1.x/v2 共用语音特征模型目录。"),
+    ("MaskGCT 目录", "TTS", "MaskGCT", "IndexTTS v1.x/v2 共用语义 codec 模型目录。"),
+    ("CampPlus 目录", "TTS", "campplus", "IndexTTS v1.x/v2 共用说话人特征模型目录。"),
+    ("BigVGAN 目录", "TTS", "bigvgan_v2_22khz_80band_256x", "IndexTTS v1.x/v2 共用声码器目录。"),
+    ("Speakers 目录", "TTS", "speakers", "IndexTTS v1.x/v2 说话人预设目录。", False),
 ]
 INDEXTTS_V2_MODEL_SPECS = [
-    ("IndexTTS2 主模型", "TTS", "IndexTTS-2/config.yaml", "IndexTTS v2 主配置。"),
-    ("IndexTTS2 GPT", "TTS", "IndexTTS-2/gpt.pth", "IndexTTS v2 GPT 权重。"),
-    ("IndexTTS2 S2Mel", "TTS", "IndexTTS-2/s2mel.pth", "IndexTTS v2 S2Mel 权重。"),
-    ("IndexTTS2 tokenizer", "TTS", "IndexTTS-2/bpe.model", "IndexTTS v2 tokenizer。"),
-    ("IndexTTS2 Qwen emotion", "TTS", "IndexTTS-2/qwen0.6bemo4-merge", "IndexTTS v2 情绪识别 Qwen 模型目录。"),
-    ("Wav2Vec2-BERT", "TTS", "w2v-bert-2.0", "IndexTTS v1.x/v2 共用语音特征模型目录。"),
-    ("MaskGCT semantic codec", "TTS", "MaskGCT/semantic_codec/model.safetensors", "IndexTTS v1.x/v2 共用语义 codec 权重。"),
-    ("CampPlus", "TTS", "campplus/campplus_cn_common.bin", "IndexTTS v1.x/v2 共用说话人特征模型。"),
-    ("BigVGAN", "TTS", "bigvgan_v2_22khz_80band_256x", "IndexTTS v1.x/v2 共用声码器目录。"),
+    ("CampPlus 目录", "TTS", "campplus", "IndexTTS v2 说话人特征模型目录。"),
+    ("IndexTTS2 目录", "TTS", "IndexTTS-2", "IndexTTS v2 主模型目录。"),
+    ("Wav2Vec2-BERT 目录", "TTS", "w2v-bert-2.0", "IndexTTS v2 语音特征模型目录。"),
+    ("MaskGCT 目录", "TTS", "MaskGCT", "IndexTTS v2 语义 codec 模型目录。"),
+    ("BigVGAN 目录", "TTS", "bigvgan_v2_22khz_80band_256x", "IndexTTS v2 声码器目录。"),
+    ("Speakers 目录", "TTS", "speakers", "IndexTTS v2 说话人预设目录。", False),
 ]
 
 
@@ -214,9 +224,14 @@ FISH_RUNTIME_PACKAGES = [
 ]
 LONGCAT_TOKENIZER_ID = "google/umt5-base"
 LONGCAT_KNOWN_MODELS = {
-    "LongCat-1B": "LongCat-AudioDiT-1B",
-    "LongCat3.5B": "LongCat-AudioDiT-3.5B-bf16",
+    "LongCat-1B": "LongCat-AudioDiT-1B-mxfp8",
+    "LongCat3.5B": "LongCat-AudioDiT-3.5B-fp8",
 }
+LONGCAT_BRANCH_PREFIXES = {
+    "LongCat-1B": "LongCat-AudioDiT-1B",
+    "LongCat3.5B": "LongCat-AudioDiT-3.5B",
+}
+LONGCAT_UNSUPPORTED_MODEL_MARKERS = ("nvfp4",)
 BRANCH_MODEL_DOWNLOAD_URLS = {
     "Qwen3-CustomVoice": "https://huggingface.co/Qwen",
     "Qwen3-VoiceDesign": "https://huggingface.co/Qwen",
@@ -224,10 +239,41 @@ BRANCH_MODEL_DOWNLOAD_URLS = {
     "IndexTTS-v1.5": "https://github.com/index-tts/index-tts",
     "IndexTTS-v1.0": "https://github.com/index-tts/index-tts",
     "IndexTTS-v2": "https://github.com/index-tts/index-tts",
+    "VoxCPM2": "https://github.com/OpenBMB/VoxCPM",
+}
+QWEN_GENERATION_PRESETS = {
+    "Qwen3-CustomVoice": {
+        "max_new_tokens": 8192,
+        "top_p": 1.0,
+        "top_k": 50,
+        "temperature": 0.9,
+        "repetition_penalty": 1.05,
+        "x_vector_only": False,
+    },
+    "Qwen3-VoiceDesign": {
+        "max_new_tokens": 4096,
+        "top_p": 0.9,
+        "top_k": 40,
+        "temperature": 0.8,
+        "repetition_penalty": 1.05,
+        "x_vector_only": False,
+    },
+    "Qwen3-VoiceClone": {
+        "max_new_tokens": 2048,
+        "top_p": 0.8,
+        "top_k": 20,
+        "temperature": 1.0,
+        "repetition_penalty": 1.05,
+        "x_vector_only": False,
+    },
 }
 REFERENCE_REQUIRED_BRANCHES = {
     "FishAudioS2", "LongCat-1B", "LongCat3.5B", "Fun-CosyVoice3-0.5B-2512",
     "Qwen3-VoiceClone", "IndexTTS-v1.5", "IndexTTS-v1.0", "IndexTTS-v2",
+}
+REFERENCE_TEXT_ASR_BRANCHES = {
+    "FishAudioS2", "LongCat-1B", "LongCat3.5B", "Fun-CosyVoice3-0.5B-2512",
+    "Qwen3-VoiceClone",
 }
 
 
@@ -239,10 +285,25 @@ def universal_tts_branch_model_specs(branch: str) -> list[dict[str, str]]:
         expected_type = _qwen_expected_model_type(branch)
         return [{
             "label": f"{branch} 模型",
-            "subdir": "qwen-tts",
+            "subdir": hint[0],
             "filename": hint[1],
-            "description": f"tts_model_type={expected_type}；请预先下载到 models/qwen-tts/，UniversalTTS 不会在运行时临时下载。",
+            "description": f"tts_model_type={expected_type}；请预先下载到 models/{hint[0]}/，UniversalTTS 不会在运行时临时下载。",
         }]
+    if branch.startswith("LongCat"):
+        return [
+            {
+                "label": f"{branch} 模型目录",
+                "subdir": hint[0],
+                "filename": hint[1],
+                "description": "LongCat AudioDiT 模型目录。",
+            },
+            {
+                "label": "UMT5 tokenizer 目录",
+                "subdir": "TTS",
+                "filename": "umt5-base-tokenizer",
+                "description": "LongCat AudioDiT tokenizer 目录。",
+            },
+        ]
     if branch == "IndexTTS-v2":
         return [
             {
@@ -250,24 +311,30 @@ def universal_tts_branch_model_specs(branch: str) -> list[dict[str, str]]:
                 "subdir": subdir,
                 "filename": filename,
                 "description": f"{description} 请预先放到 models/{subdir}/{filename}。",
+                "required": required,
             }
-            for label, subdir, filename, description in INDEXTTS_V2_MODEL_SPECS
+            for label, subdir, filename, description, *optional in INDEXTTS_V2_MODEL_SPECS
+            for required in [optional[0] if optional else True]
         ]
     if branch.startswith("IndexTTS"):
+        specs = [
+            (f"{branch} 目录", hint[0], hint[1], f"{branch} 主模型目录。"),
+            *INDEXTTS_SHARED_MODEL_SPECS,
+        ]
         return [
             {
                 "label": label,
                 "subdir": subdir,
                 "filename": filename,
                 "description": f"{description} 请预先放到 models/{subdir}/{filename}。",
+                "required": required,
             }
-            for label, subdir, filename, description in INDEXTTS_SHARED_MODEL_SPECS
+            for label, subdir, filename, description, *optional in specs
+            for required in [optional[0] if optional else True]
         ]
     description = f"{branch} 默认模型；请放到 models/{hint[0]}/。"
     if branch == "FishAudioS2":
         description = "Fish Audio S2 模型目录需包含 config.json、文本权重和 DAC 解码器。"
-    elif branch.startswith("LongCat"):
-        description = "LongCat AudioDiT 模型目录。"
     elif branch == "Fun-CosyVoice3-0.5B-2512":
         description = "Fun-CosyVoice3 官方模型目录。"
     return [{
@@ -287,23 +354,94 @@ def build_universal_tts_model_tree(branches: list[str] | None = None) -> list[di
             if key in seen:
                 continue
             seen.add(key)
-            tree.append(make_model_tree_item(
+            item = make_model_tree_item(
                 label=spec.get("label", branch),
                 folder=spec.get("subdir", ""),
                 filename=spec.get("filename", ""),
                 kind="tts",
                 icon="🎙️",
                 type=branch,
-                input="model_name",
+                input="",
+                required=bool(spec.get("required", True)),
                 description=spec.get("description", ""),
-            ))
+            )
+            item["directory"] = True
+            tree.append(item)
     return tree
+
+
+def universal_tts_model_tree_text() -> str:
+    entries = [
+        ("Qwen3-TTS-12Hz-1.7B-CustomVoice", "10语种；9种预置音色；含北京/四川口音、英/日/韩音色；支持自然语言情感风格控制"),
+        ("Qwen3-TTS-12Hz-1.7B-VoiceDesign", "10语种；用文字描述设计音色、年龄、语气与情感；无需参考音频"),
+        ("Qwen3-TTS-12Hz-1.7B-base", "10语种；零样本/跨语言音色克隆；中、英、日、韩及德/法/俄/葡/西/意"),
+        ("LongCat-AudioDiT-1B-mxfp8", "中英文零样本音色克隆；轻量省显存；扩散式波形生成"),
+        ("LongCat-AudioDiT-3.5B-fp8", "中英文零样本音色克隆；更高音色相似度与清晰度；显存需求更高"),
+        ("umt5-base-tokenizer", "LongCat 共用多语言文本 tokenizer；辅助组件，不单独生成语音"),
+        ("Index-TTS-1.0", "中英文零样本音色克隆；基础版，偏中文"),
+        ("IndexTTS-1.5", "中英文零样本音色克隆；英文稳定性与自然度增强"),
+        ("IndexTTS-2", "中英文音色克隆；强化情感表现，并支持时长控制能力"),
+        ("w2v-bert-2.0", "IndexTTS 共用语音内容特征编码器；辅助组件"),
+        ("MaskGCT", "IndexTTS 共用语义 codec；辅助组件"),
+        ("bigvgan_v2_22khz_80band_256x", "IndexTTS 共用 BigVGAN 声码器；将声学特征还原为波形"),
+        ("campplus", "IndexTTS 共用说话人特征编码器；用于保持音色相似度"),
+        ("speakers", "IndexTTS 可选预置说话人音色目录"),
+        ("fishaudio-s2-pro-fp8", "约50语种；跨语言音色克隆；情感丰富，支持细粒度行内控制"),
+        ("Fun-CosyVoice3-0.5B-2512", "9语种：中/英/日/韩/德/西/法/意/俄；18+中文方言口音；跨语言克隆与情感/语速控制"),
+        ("VoxCPM2", "30语种；真实感音色克隆、跨语言合成、创意音色设计；控制指令支持中英文"),
+    ]
+    lines = ["ComfyUI/", "└──📁 models/", "    ├──📁 TTS/"]
+    for index, (name, feature) in enumerate(entries):
+        joint = "└" if index == len(entries) - 1 else "├"
+        lines.append(f"    │   {joint}──📁 {name}/  —— {feature}")
+    lines.extend([
+        "    └──📁 ASR/",
+        "        ├──📁 Qwen3-ASR-1.7B/  —— 多语言参考音频识别；精度优先，与 0.6B 二选一",
+        "        ├──📁 Qwen3-ASR-0.6B/  —— 多语言参考音频识别；速度/显存优先，与 1.7B 二选一",
+        "        └──📁 Qwen3-ForcedAligner-0.6B/  —— 字词级强制对齐；供 ASR 节点生成时间戳",
+    ])
+    return "\n".join(lines)
 
 
 def _safe_filename(value: str, fallback: str = "reference") -> str:
     name = os.path.basename(str(value or "").strip()) or fallback
     name = re.sub(r'[<>:"/\\|?*\x00-\x1F]+', "_", name).strip(" .")
     return (name or fallback)[:160]
+
+
+def _safe_path_part(value: Any, fallback: str = "未命名") -> str:
+    text = str(value or "").strip() or fallback
+    text = re.sub(r'[<>:"\\|?*\x00-\x1F]+', "_", text).strip(" .")
+    return text or fallback
+
+
+def _expand_mp3_filename_prefix(template: str, *, branch: str, model_name: str, seed: int) -> str:
+    value = str(template or "audio/GJJ_UniversalTTS").strip() or "audio/GJJ_UniversalTTS"
+    now = time.localtime()
+    variables = {
+        "分支": branch,
+        "branch": branch,
+        "模型": model_name or "自动",
+        "model": model_name or "auto",
+        "种子": seed,
+        "seed": seed,
+        "日期": time.strftime("%Y%m%d", now),
+        "date": time.strftime("%Y%m%d", now),
+        "时间": time.strftime("%H%M%S", now),
+        "time": time.strftime("%H%M%S", now),
+        "年月日": time.strftime("%Y-%m-%d", now),
+        "时分秒": time.strftime("%H-%M-%S", now),
+    }
+
+    def replace_var(match: re.Match[str]) -> str:
+        key = match.group(1).strip()
+        if key not in variables:
+            return match.group(0)
+        return _safe_path_part(variables[key], key)
+
+    expanded = re.sub(r"\{([^{}]+)\}", replace_var, value)
+    parts = [_safe_path_part(part, "GJJ_UniversalTTS") for part in re.split(r"[\\/]+", expanded) if part.strip()]
+    return "/".join(parts) or "audio/GJJ_UniversalTTS"
 
 
 def _has_module(module_name: str) -> bool:
@@ -373,7 +511,7 @@ def _qwen_expected_model_type(branch: str) -> str:
 
 def _qwen_compatible_model_dirs(branch: str) -> list[Path]:
     expected = _qwen_expected_model_type(branch)
-    root = _models_root("qwen-tts")
+    root = _models_root("TTS")
     if not expected or not root.is_dir():
         return []
     matches: list[Path] = []
@@ -381,6 +519,59 @@ def _qwen_compatible_model_dirs(branch: str) -> list[Path]:
         if path.is_dir() and any(path.iterdir()) and _qwen_model_type(path) == expected:
             matches.append(path)
     return matches
+
+
+def _is_longcat_supported_model_name(name: str) -> bool:
+    value = str(name or "").lower()
+    return bool(value) and not any(marker in value for marker in LONGCAT_UNSUPPORTED_MODEL_MARKERS)
+
+
+def _longcat_compatible_model_names(branch: str) -> list[str]:
+    root = _models_root("TTS")
+    prefix = LONGCAT_BRANCH_PREFIXES.get(branch, "")
+    if not prefix or not root.is_dir():
+        return []
+    names: list[str] = []
+    for path in sorted(root.iterdir(), key=lambda item: item.name.lower()):
+        if path.name.startswith(".") or not path.is_dir():
+            continue
+        if not path.name.startswith(prefix):
+            continue
+        if not _is_longcat_supported_model_name(path.name):
+            continue
+        names.append(path.name)
+    return names
+
+
+def _fish_compatible_model_names() -> list[str]:
+    root = _models_root("TTS")
+    if not root.is_dir():
+        return []
+    names: list[str] = []
+    for path in sorted(root.iterdir(), key=lambda item: item.name.lower()):
+        if path.name.startswith(".") or not path.is_dir():
+            continue
+        if _fish_model_complete(path):
+            names.append(path.name)
+    return names
+
+
+def _cosyvoice_compatible_model_names(branch: str) -> list[str]:
+    root = _models_root("TTS")
+    hint = BRANCH_MODEL_HINTS.get(branch)
+    default_name = hint[1] if hint else "Fun-CosyVoice3-0.5B-2512"
+    if not root.is_dir():
+        return []
+    exact = root / default_name
+    if exact.is_dir() and any(exact.iterdir()):
+        return [default_name]
+    names: list[str] = []
+    for path in sorted(root.iterdir(), key=lambda item: item.name.lower()):
+        if path.name.startswith(".") or not path.is_dir():
+            continue
+        if "cosyvoice" in path.name.lower() and any(path.iterdir()):
+            names.append(path.name)
+    return names
 
 
 def _branch_model_choices(branch: str) -> list[str]:
@@ -392,6 +583,17 @@ def _branch_model_choices(branch: str) -> list[str]:
         choices = [path.name for path in _qwen_compatible_model_dirs(branch)]
         return choices or [hint[1]]
     if branch.startswith("IndexTTS"):
+        return [hint[1]]
+    if branch.startswith("LongCat"):
+        choices = _longcat_compatible_model_names(branch)
+        return choices or [LONGCAT_KNOWN_MODELS.get(branch, hint[1])]
+    if branch == "FishAudioS2":
+        choices = _fish_compatible_model_names()
+        return choices or [hint[1]]
+    if branch == "Fun-CosyVoice3-0.5B-2512":
+        choices = _cosyvoice_compatible_model_names(branch)
+        return choices or [hint[1]]
+    if branch == "VoxCPM2":
         return [hint[1]]
     choices: list[str] = []
     for path in sorted(root.iterdir() if root.is_dir() else []):
@@ -417,15 +619,85 @@ def _missing_models(branch: str, model_name: str = "") -> list[dict[str, str]]:
         return specs
     if branch.startswith("IndexTTS"):
         missing: list[dict[str, str]] = []
-        for spec in universal_tts_branch_model_specs(branch):
+        if branch == "IndexTTS-v1.5":
+            specs = [{
+                "label": "IndexTTS-v1.5 目录",
+                "subdir": "TTS",
+                "filename": "IndexTTS-1.5",
+                "description": "IndexTTS-v1.5 主模型目录。请预先放到 models/TTS/IndexTTS-1.5。",
+                "required": True,
+            }]
+        elif branch == "IndexTTS-v1.0":
+            specs = [{
+                "label": "IndexTTS-v1.0 目录",
+                "subdir": "TTS",
+                "filename": "Index-TTS-1.0",
+                "description": "IndexTTS-v1.0 主模型目录。请预先放到 models/TTS/Index-TTS-1.0。",
+                "required": True,
+            }]
+        else:
+            specs = universal_tts_branch_model_specs(branch)
+        for spec in specs:
+            if spec.get("required") is False:
+                continue
             label = spec.get("label", "模型")
             subdir = spec.get("subdir", "")
             filename = spec.get("filename", "")
             path = root / filename
-            ok = (path.is_dir() and any(path.iterdir())) or path.is_file()
+            ok = path.is_dir() or path.is_file()
             if not ok:
                 missing.append(spec)
         return missing
+    if branch.startswith("LongCat"):
+        selected_name = _longcat_model_name(branch, selected)
+        if selected_name and (root / selected_name).exists() and _is_longcat_supported_model_name(selected_name):
+            return []
+        if _longcat_compatible_model_names(branch):
+            return []
+        return [{
+            "label": f"{branch} 模型",
+            "subdir": hint[0],
+            "filename": LONGCAT_KNOWN_MODELS.get(branch, hint[1]),
+            "description": (
+                f"请放到 models/{hint[0]}/。当前加载器不支持 nvfp4 压缩版；"
+                "请使用未压缩或当前加载器支持的 bf16/fp8 目录，或切换到已支持的 LongCat 分支。"
+            ),
+        }]
+    if branch == "FishAudioS2":
+        names = _fish_compatible_model_names()
+        if selected and selected != "自动" and _fish_model_complete(root / Path(selected).name):
+            return []
+        if names:
+            return []
+        return [{
+            "label": f"{branch} 模型",
+            "subdir": hint[0],
+            "filename": hint[1],
+            "description": "请放到 models/TTS/，目录需包含 config.json、文本权重和 DAC 解码器。",
+        }]
+    if branch == "Fun-CosyVoice3-0.5B-2512":
+        names = _cosyvoice_compatible_model_names(branch)
+        if selected and selected != "自动" and (root / Path(selected).name).is_dir():
+            return []
+        if names:
+            return []
+        return [{
+            "label": f"{branch} 模型",
+            "subdir": hint[0],
+            "filename": hint[1],
+            "description": "请放到 models/TTS/。",
+        }]
+    if branch == "VoxCPM2":
+        selected_name = Path(selected).name if selected and selected != "自动" else hint[1]
+        path = root / selected_name
+        if path.is_dir() and (path / "config.json").is_file():
+            return []
+        return [{
+            "label": "VoxCPM2 模型目录",
+            "subdir": hint[0],
+            "filename": selected_name,
+            "description": "请放到 models/TTS/VoxCPM2，目录内需包含 config.json 和权重文件。",
+        }]
     if selected and selected != hint[1] and (root / selected).exists():
         return []
     if any(root.iterdir()):
@@ -482,20 +754,26 @@ def _send_audio_preview(unique_id: Any, audio_ui: dict[str, Any], text: str = ""
         pass
 
 
-def _save_audio_mp3_ui(audio: dict[str, Any], filename_prefix: str, quality: str = "320k") -> dict[str, Any]:
+def _save_audio_ui(
+    audio: dict[str, Any],
+    filename_prefix: str,
+    audio_format: str = "WAV",
+    quality: str = "320k",
+) -> dict[str, Any]:
     try:
         from comfy_api.latest import UI
 
+        selected_format = _coerce_choice(audio_format, AUDIO_FORMAT_OPTIONS, "WAV")
         selected_quality = quality if quality in MP3_QUALITY_OPTIONS else "320k"
         return UI.AudioSaveHelper.get_save_audio_ui(
             audio,
             filename_prefix=str(filename_prefix or "audio/GJJ_UniversalTTS"),
             cls=None,
-            format="mp3",
-            quality=selected_quality,
+            format=selected_format.lower(),
+            quality=selected_quality if selected_format == "MP3" else "pcm16",
         ).as_dict()
     except Exception as exc:
-        raise RuntimeError(f"保存 MP3 失败：{exc}") from exc
+        raise RuntimeError(f"保存 {audio_format} 失败：{exc}") from exc
 
 
 def _audio_to_tensor(audio: dict[str, Any]) -> tuple[torch.Tensor, int]:
@@ -562,8 +840,15 @@ def _resample_waveform(waveform: torch.Tensor, source_sr: int, target_sr: int) -
         return torch.nn.functional.interpolate(waveform, size=new_len, mode="linear", align_corners=False)
 
 
+def _normalize_audio_rms(waveform: torch.Tensor, target_dbfs: float = -23.0) -> torch.Tensor:
+    wav = waveform.float()
+    rms = torch.sqrt(torch.mean(wav.square()).clamp_min(1e-12))
+    target = float(10 ** (float(target_dbfs) / 20.0))
+    return torch.clamp(wav * (target / rms), -1.0, 1.0)
+
+
 def _models_mp3_root() -> Path:
-    root = Path(folder_paths.models_dir) / "mp3"
+    root = Path(folder_paths.models_dir) / "GJJ" / "wav"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -579,6 +864,68 @@ def _unique_models_mp3_path(filename: str) -> Path:
         candidate = root / f"{stem}_{counter:03d}{suffix}"
         counter += 1
     return candidate
+
+
+def _audio_stem(value: str, fallback: str = "reference") -> str:
+    text = re.sub(r"[^\w\u4e00-\u9fff.-]+", "_", str(value or ""), flags=re.UNICODE).strip("._-")
+    return text[:72] or fallback
+
+
+def _save_audio_to_models_mp3(audio: dict[str, Any], filename: str) -> str:
+    wav, sample_rate = _audio_to_tensor(audio)
+    data = wav.squeeze(0).detach().cpu().numpy()
+    if data.ndim == 2:
+        data = data.T
+    data = np.asarray(data, dtype=np.float32)
+    wav_target = _unique_models_mp3_path(f"{Path(filename).stem}.wav")
+
+    def write_wav(path: Path) -> None:
+        try:
+            import soundfile as sf
+
+            sf.write(str(path), data, int(sample_rate), subtype="PCM_16")
+            return
+        except Exception:
+            pass
+        pcm = np.clip(data.reshape(-1), -1.0, 1.0)
+        pcm16 = (pcm * 32767.0).astype(np.int16)
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(1 if data.ndim == 1 else int(data.shape[1]))
+            handle.setsampwidth(2)
+            handle.setframerate(int(sample_rate))
+            handle.writeframes(pcm16.tobytes())
+
+    write_wav(wav_target)
+    return str(wav_target.relative_to(_models_mp3_root())).replace("/", "\\")
+
+
+def _save_indextts_prompt_wav(waveform: torch.Tensor, sample_rate: int) -> str:
+    cache_root = _ROOT / "__pycache__" / "gjj_indextts_audio_cache"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    wav = waveform.detach().cpu().float()
+    if wav.ndim == 3:
+        wav = wav.squeeze(0)
+    if wav.ndim == 1:
+        wav = wav.unsqueeze(0)
+    if wav.shape[0] > 1:
+        wav = wav.mean(dim=0, keepdim=True)
+    data = wav.squeeze(0).numpy().astype(np.float32, copy=False)
+    digest = hashlib.sha256(data[: min(data.shape[0], int(sample_rate) * 30)].tobytes()).hexdigest()[:16]
+    target = cache_root / f"prompt_{digest}_{int(sample_rate)}.wav"
+    if target.exists():
+        return str(target)
+    try:
+        import soundfile as sf
+
+        sf.write(str(target), data, int(sample_rate), subtype="PCM_16")
+    except Exception:
+        pcm16 = (np.clip(data, -1.0, 1.0) * 32767.0).astype(np.int16)
+        with wave.open(str(target), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(int(sample_rate))
+            handle.writeframes(pcm16.tobytes())
+    return str(target)
 
 
 def _find_ffmpeg_executable() -> str:
@@ -763,18 +1110,12 @@ def _speaker_ref_text_name(index: int) -> str:
 
 def _build_reference_inputs() -> dict[str, tuple[str, dict[str, Any]]]:
     optional: dict[str, tuple[str, dict[str, Any]]] = {}
-    # 后端只声明默认一对；后续输入由前端动态追加，执行时通过 **kwargs 接收。
+    # 后端只声明一个参考音频；后续输入由前端动态追加，参考文本由 Qwen3-ASR 自动识别。
     for index in range(1, 2):
         optional[_speaker_audio_name(index)] = ("AUDIO", {
             "forceInput": True,
             "display_name": f"参考音频{index}",
             "tooltip": "连接最后一对输入后会自动扩展下一对；没有链接会自动收缩。",
-        })
-        optional[_speaker_ref_text_name(index)] = ("STRING", {
-            "forceInput": True,
-            "default": "",
-            "display_name": f"参考文本{index}",
-            "tooltip": "对应参考音频的原文。可连接文本节点，也可留空使用默认参考文本。",
         })
     return optional
 
@@ -783,7 +1124,7 @@ def _valid_audio(value: Any) -> bool:
     return isinstance(value, dict) and value.get("waveform") is not None and value.get("sample_rate") is not None
 
 
-def _collect_references(kwargs: dict[str, Any], local_audio_name: str, default_reference_text: str, local_audio_order: Any = None) -> list[dict[str, Any]]:
+def _collect_references(kwargs: dict[str, Any], local_audio_name: str, local_audio_order: Any = None) -> list[dict[str, Any]]:
     refs: list[dict[str, Any]] = []
     for index in range(1, MAX_REFERENCES + 1):
         audio = kwargs.get(_speaker_audio_name(index))
@@ -793,7 +1134,8 @@ def _collect_references(kwargs: dict[str, Any], local_audio_name: str, default_r
             "speaker": index - 1,
             "source": "input",
             "audio": audio,
-            "text": str(kwargs.get(_speaker_ref_text_name(index)) or default_reference_text or "").strip(),
+            "text": "",
+            "text_is_explicit": False,
         })
     if not refs:
         ordered_names: list[str] = []
@@ -809,9 +1151,21 @@ def _collect_references(kwargs: dict[str, Any], local_audio_name: str, default_r
                 "speaker": index,
                 "source": "local",
                 "audio": _audio_from_file(_resolve_local_audio(name)),
-                "text": str(default_reference_text or "").strip(),
+                "text": "",
+                "text_is_explicit": False,
             })
     return refs
+
+
+def _recognize_reference_texts(references: list[dict[str, Any]], unique_id: Any = None) -> None:
+    if not references:
+        return
+    from .gjj_qwen3_asr_text_formats import transcribe_reference_audio
+
+    for index, reference in enumerate(references):
+        _send_status(unique_id, f"正在识别参考音频文本 {index + 1}/{len(references)}", 0.07)
+        reference["text"] = transcribe_reference_audio(reference["audio"], unique_id)
+        reference["text_is_explicit"] = True
 
 
 def _reference_for_speaker(references: list[dict[str, Any]], speaker: int) -> dict[str, Any] | None:
@@ -1270,25 +1624,25 @@ def _qwen_dtype_name(precision: str) -> str:
 def _qwen_model_name(branch: str, model_name: str) -> str:
     raw = str(model_name or "").strip()
     requested = Path(raw).name if raw and raw != "自动" else ""
-    if requested and _qwen_expected_model_type(branch) == _qwen_model_type(_models_root("qwen-tts") / requested):
+    if requested and _qwen_expected_model_type(branch) == _qwen_model_type(_models_root("TTS") / requested):
         return requested
     matches = _qwen_compatible_model_dirs(branch)
     if matches:
         return matches[0].name
     hint = BRANCH_MODEL_HINTS.get(branch)
-    return hint[1] if hint else "Qwen3-TTS-12Hz-0.6B-Base"
+    return hint[1] if hint else "Qwen3-TTS-12Hz-1.7B-base"
 
 
 def _qwen_model_dir(branch: str, model_name: str, unique_id: Any = None) -> Path:
     name = _qwen_model_name(branch, model_name)
-    path = _models_root("qwen-tts") / name
+    path = _models_root("TTS") / name
     expected_type = _qwen_expected_model_type(branch)
     actual_type = _qwen_model_type(path)
     if not (path.is_dir() and any(path.iterdir())) or (expected_type and actual_type != expected_type):
         selected = str(model_name or "").strip()
         reason = ""
         if selected and selected != "自动":
-            selected_path = _models_root("qwen-tts") / Path(selected).name
+            selected_path = _models_root("TTS") / Path(selected).name
             selected_type = _qwen_model_type(selected_path)
             if selected_path.is_dir() and selected_type and selected_type != expected_type:
                 reason = f"当前选择的模型类型是 {selected_type}，但 {branch} 需要 {expected_type}。"
@@ -1296,9 +1650,9 @@ def _qwen_model_dir(branch: str, model_name: str, unique_id: Any = None) -> Path
             node_name=NODE_DISPLAY_NAME,
             missing_models=[{
                 "label": f"{branch} 模型",
-                "subdir": "qwen-tts",
+                "subdir": "TTS",
                 "filename": name,
-                "description": f"请预先下载 tts_model_type={expected_type} 的模型到 models/qwen-tts/；UniversalTTS 不会在运行时临时下载。{reason}",
+                "description": f"请预先下载 tts_model_type={expected_type} 的模型到 models/TTS/；UniversalTTS 不会在运行时临时下载。{reason}",
             }],
             description="Qwen3-TTS 模型目录缺失或模型能力与当前分支不匹配。",
             unique_id=unique_id,
@@ -1321,7 +1675,7 @@ def _load_qwen3(branch: str, model_name: str, device: str, precision: str, uniqu
             node_name=NODE_DISPLAY_NAME,
             missing_dependencies=BRANCH_DEPENDENCIES.get(branch, []),
             install_packages=["qwen-tts", "soundfile"],
-            description="Qwen3-TTS 运行时导入失败；请安装 qwen-tts。模型仍需手动放在 models/qwen-tts/ 下。",
+            description="Qwen3-TTS 运行时导入失败；请安装 qwen-tts。模型仍需手动放在 models/TTS/ 下。",
             original_error=str(exc),
             unique_id=unique_id,
         )
@@ -1375,10 +1729,7 @@ def _qwen_language(language: str) -> str:
 def _qwen_reference_text(reference_text: str) -> str:
     text = str(reference_text or "").strip()
     if not text or text == LEGACY_DEFAULT_REFERENCE_TEXT:
-        raise RuntimeError(
-            "Qwen3-VoiceClone 需要参考音频对应的真实原文。请连接“参考文本1”，"
-            "或在“默认参考文本”里填写参考音频逐字内容；不要留空，也不要保留旧默认占位句。"
-        )
+        raise RuntimeError("Qwen3-ASR 未能提供参考音频的有效识别文本。")
     return text
 
 
@@ -1446,11 +1797,26 @@ def _qwen3_tts(
     device: str,
     precision: str,
     seed: int,
+    qwen_max_new_tokens: int,
+    qwen_top_p: float,
+    qwen_top_k: int,
+    qwen_temperature: float,
+    qwen_repetition_penalty: float,
+    qwen_x_vector_only: bool,
+    emotion_prompt: str,
+    qwen_instruct: str,
     unique_id: Any,
 ) -> dict[str, Any]:
     _seed_all(seed)
     model = _load_qwen3(branch, model_name, device, precision, unique_id)
     lang = _qwen_language(language)
+    gen_kwargs = {
+        "max_new_tokens": int(qwen_max_new_tokens),
+        "temperature": float(qwen_temperature),
+        "top_p": float(qwen_top_p),
+        "top_k": int(qwen_top_k),
+        "repetition_penalty": float(qwen_repetition_penalty),
+    }
     if branch == "Qwen3-CustomVoice":
         speaker = str(custom_voice or "").strip() or "Vivian"
         wavs, sr = model.generate_custom_voice(
@@ -1458,38 +1824,34 @@ def _qwen3_tts(
             language=lang,
             speaker=speaker,
             instruct=None,
-            max_new_tokens=2048,
-            temperature=1.0,
-            top_p=0.8,
-            repetition_penalty=1.1,
+            **gen_kwargs,
         )
         return _qwen_audio_from_wavs(wavs, sr)
     if branch == "Qwen3-VoiceDesign":
-        description = str(custom_voice or "").strip() or str(reference_text or "").strip() or "A warm, clear natural voice."
+        description = (
+            str(qwen_instruct or "").strip()
+            or str(emotion_prompt or "").strip()
+            or str(custom_voice or "").strip()
+            or "A warm, clear natural voice."
+        )
         wavs, sr = model.generate_voice_design(
             text=text,
             language=lang,
             instruct=description,
-            max_new_tokens=2048,
-            temperature=1.0,
-            top_p=0.8,
-            repetition_penalty=1.1,
+            **gen_kwargs,
         )
         return _qwen_audio_from_wavs(wavs, sr)
     if reference is None or not _valid_audio(reference.get("audio")):
         raise RuntimeError("Qwen3-VoiceClone 分支需要参考音频。")
-    ref_text = _qwen_reference_text(reference_text)
+    ref_text = "" if qwen_x_vector_only else _qwen_reference_text(reference_text)
     ref_np, sr0 = _qwen_clone_reference_audio(reference)
     wavs, sr = model.generate_voice_clone(
         text=text,
         language=lang,
         ref_audio=(ref_np, int(sr0)),
         ref_text=ref_text,
-        x_vector_only_mode=False,
-        max_new_tokens=2048,
-        temperature=1.0,
-        top_p=0.8,
-        repetition_penalty=1.1,
+        x_vector_only_mode=bool(qwen_x_vector_only),
+        **gen_kwargs,
     )
     return _qwen_audio_from_wavs(wavs, sr)
 
@@ -1623,6 +1985,97 @@ def _patch_indextts_text_normalizer():
     TextNormalizer.load = load
 
 
+def _patch_indextts_torchaudio_load():
+    try:
+        import indexttsnode
+    except Exception:
+        return
+    ta = getattr(indexttsnode, "torchaudio", None)
+    if ta is None:
+        return
+    original = getattr(ta, "load", None)
+    if original is not None and not getattr(original, "_gjj_soundfile_fallback", False):
+        def load(path, *args, _original=original, **kwargs):
+            try:
+                return _original(path, *args, **kwargs)
+            except Exception as exc:
+                message = str(exc)
+                if "TorchCodec is required" not in message and "load_with_torchcodec" not in message:
+                    raise
+                import soundfile as sf
+
+                data, sample_rate = sf.read(str(path), dtype="float32", always_2d=True)
+                tensor = torch.from_numpy(data.T.copy())
+                return tensor, int(sample_rate)
+
+        load._gjj_soundfile_fallback = True
+        ta.load = load
+
+    original_save = getattr(ta, "save", None)
+    if original_save is None or getattr(original_save, "_gjj_soundfile_fallback", False):
+        return
+
+    def save(path, src, sample_rate, *args, _original=original_save, **kwargs):
+        try:
+            return _original(path, src, sample_rate, *args, **kwargs)
+        except Exception as exc:
+            message = str(exc)
+            if "TorchCodec is required" not in message and "save_with_torchcodec" not in message:
+                raise
+            import soundfile as sf
+
+            tensor = src.detach().cpu().float()
+            if tensor.ndim == 3:
+                tensor = tensor.squeeze(0)
+            if tensor.ndim == 1:
+                data = tensor.numpy()
+            else:
+                data = tensor.numpy().T
+            sf.write(str(path), data, int(sample_rate), subtype="PCM_16")
+
+    save._gjj_soundfile_fallback = True
+    ta.save = save
+
+
+def _patch_indextts_audio_cache_manager():
+    try:
+        import indexttsnode
+    except Exception:
+        return
+    manager_cls = getattr(indexttsnode, "AudioCacheManager", None)
+    if manager_cls is None:
+        return
+    original = getattr(manager_cls, "_cache_audio_tensor", None)
+    if original is None or getattr(original, "_gjj_soundfile_cache", False):
+        return
+
+    def _cache_audio_tensor(self, audio_tensor, sample_rate, filename_prefix="cached_audio_", audio_format=".wav"):
+        try:
+            import soundfile as sf
+
+            with tempfile.NamedTemporaryFile(
+                prefix=filename_prefix,
+                suffix=audio_format or ".wav",
+                dir=self.cache_dir,
+                delete=False,
+            ) as tmp_file:
+                temp_filepath = tmp_file.name
+            tensor = audio_tensor.detach().cpu().float()
+            if tensor.ndim == 3:
+                tensor = tensor.squeeze(0)
+            if tensor.ndim == 1:
+                data = tensor.numpy()
+            else:
+                data = tensor.numpy().T
+            sf.write(str(temp_filepath), data, int(sample_rate), subtype="PCM_16")
+            return temp_filepath
+        except Exception as exc:
+            raise Exception(f"Error caching audio tensor: {exc}")
+
+    _cache_audio_tensor._gjj_soundfile_cache = True
+    manager_cls._cache_audio_tensor = _cache_audio_tensor
+
+
 def _ensure_indextts_runtime(branch: str = "IndexTTS-v2", unique_id: Any = None):
     root = _indextts_root()
     if not root.is_dir():
@@ -1652,6 +2105,8 @@ def _ensure_indextts_runtime(branch: str = "IndexTTS-v2", unique_id: Any = None)
         from indexttsnode import AudioCacheManager, IndexTTS, IndexTTS2, cache_dir, current_dir
         _patch_indextts_deepspeed_fallback()
         _patch_indextts_text_normalizer()
+        _patch_indextts_torchaudio_load()
+        _patch_indextts_audio_cache_manager()
     except Exception as exc:
         deps = BRANCH_DEPENDENCIES.get(branch, BRANCH_DEPENDENCIES.get("IndexTTS-v2", []))
         raise_dependency_model_error(
@@ -1665,16 +2120,35 @@ def _ensure_indextts_runtime(branch: str = "IndexTTS-v2", unique_id: Any = None)
     return AudioCacheManager, IndexTTS, IndexTTS2, cache_dir, current_dir
 
 
-def _index_cfg_path(branch: str, current_dir: str) -> str:
-    name = "config_v1_5.yaml" if branch == "IndexTTS-v1.5" else "config.yaml"
-    return str(Path(current_dir) / "checkpoints" / name)
+def _indextts_v1_model_dir(branch: str) -> Path:
+    hint = BRANCH_MODEL_HINTS.get(branch, ("TTS", "Index-TTS"))
+    return _models_root(hint[0]) / hint[1]
+
+
+def _index_cfg_path(branch: str, model_dir: Path) -> str:
+    candidates = ["config_v1_5.yaml", "config.yaml"] if branch == "IndexTTS-v1.5" else ["config.yaml"]
+    for name in candidates:
+        cfg_path = model_dir / name
+        if cfg_path.is_file():
+            if branch == "IndexTTS-v1.0":
+                text = cfg_path.read_text(encoding="utf-8")
+                if "checkpoints/" in text:
+                    cache_root = _ROOT / "__pycache__" / "gjj_indextts_configs"
+                    cache_root.mkdir(parents=True, exist_ok=True)
+                    patched_path = cache_root / f"{branch}_config.yaml"
+                    patched_path.write_text(text.replace("checkpoints/", ""), encoding="utf-8")
+                    return str(patched_path)
+            return str(cfg_path)
+    return str(model_dir / candidates[-1])
 
 
 def _load_indextts(branch: str, device: str, precision: str, unique_id: Any = None):
     AudioCacheManager, IndexTTS, IndexTTS2, cache_dir, current_dir = _ensure_indextts_runtime(branch, unique_id)
     precision_value = str(precision or "auto").strip().lower()
     is_auto_cuda = precision_value == "auto" and torch.cuda.is_available() and str(device or "auto") in {"auto", "cuda", "cuda:0"}
-    is_fp16 = precision_value in {"fp16", "float16"} or (branch == "IndexTTS-v2" and is_auto_cuda)
+    is_fp16 = precision_value in {"fp16", "float16"}
+    if branch != "IndexTTS-v2" and is_auto_cuda:
+        is_fp16 = True
     if branch == "IndexTTS-v2":
         cache_key = f"indextts:{branch}:{is_fp16}:{device}"
         if cache_key in _MODEL_CACHE:
@@ -1683,12 +2157,18 @@ def _load_indextts(branch: str, device: str, precision: str, unique_id: Any = No
         model = IndexTTS2(is_fp16=is_fp16, device=None if str(device or "auto") == "auto" else str(device), use_cuda_kernel=False)
         _MODEL_CACHE[cache_key] = (model, AudioCacheManager(cache_dir))
         return _MODEL_CACHE[cache_key]
-    cfg_path = _index_cfg_path(branch, current_dir)
-    cache_key = f"indextts:{branch}:{cfg_path}:{is_fp16}:{device}"
+    model_dir = _indextts_v1_model_dir(branch)
+    cfg_path = _index_cfg_path(branch, model_dir)
+    cache_key = f"indextts:{branch}:{model_dir}:{cfg_path}:{is_fp16}:{device}"
     if cache_key in _MODEL_CACHE:
         return _MODEL_CACHE[cache_key]
     _send_status(unique_id, f"正在加载 {branch}", 0.12)
-    model = IndexTTS(cfg_path=cfg_path, is_fp16=is_fp16, device=None if str(device or "auto") == "auto" else str(device))
+    model = IndexTTS(
+        cfg_path=cfg_path,
+        model_dir=str(model_dir),
+        is_fp16=is_fp16,
+        device=None if str(device or "auto") == "auto" else str(device),
+    )
     _MODEL_CACHE[cache_key] = (model, AudioCacheManager(cache_dir))
     return _MODEL_CACHE[cache_key]
 
@@ -1699,6 +2179,7 @@ def _indextts_audio(
     reference: dict[str, Any] | None,
     device: str,
     precision: str,
+    emotion_prompt: str,
     unique_id: Any,
 ) -> dict[str, Any]:
     if reference is None or not _valid_audio(reference.get("audio")):
@@ -1707,17 +2188,30 @@ def _indextts_audio(
     waveform = reference["audio"]["waveform"].squeeze(0)
     sr = int(reference["audio"]["sample_rate"])
     prompt_path = audio_cache.process_audio(waveform, sr)
-    res = model.infer_fast(
-        prompt_path,
-        str(text or ""),
-        top_p=0.8,
-        top_k=30,
-        temperature=1.0,
-        max_mel_tokens=1000,
-        max_text_tokens_per_sentence=120,
-        sentences_bucket_max_size=4,
-        num_beams=3,
-    )
+    infer_kwargs = {
+        "top_p": 0.8,
+        "top_k": 30,
+        "temperature": 0.8 if branch == "IndexTTS-v2" else 1.0,
+        "max_mel_tokens": 1500 if branch == "IndexTTS-v2" else 1000,
+        "max_text_tokens_per_sentence": 120,
+        "num_beams": 3,
+    }
+    if hasattr(model, "infer_fast"):
+        res = model.infer_fast(
+            prompt_path,
+            str(text or ""),
+            sentences_bucket_max_size=4,
+            **infer_kwargs,
+        )
+    else:
+        emotion_text = str(emotion_prompt or "").strip()
+        res = model.infer(
+            prompt_path,
+            str(text or ""),
+            use_emo_text=bool(emotion_text),
+            emo_text=emotion_text or None,
+            **infer_kwargs,
+        )
     wav = res[0]
     out_sr = int(res[1])
     if isinstance(wav, torch.Tensor):
@@ -1779,7 +2273,7 @@ def _find_fish_decoder(path: Path, unique_id: Any = None) -> Path:
                 return candidate
     raise_dependency_model_error(
         node_name=NODE_DISPLAY_NAME,
-        missing_models=[{"label": "Fish S2 DAC 解码器", "subdir": "fishaudioS2", "filename": "codec.pth / firefly-gan-vq-fsq-8x1024-21hz-generator.pth", "description": "请放在 Fish 模型目录或 models/fishaudioS2/ 下。"}],
+        missing_models=[{"label": "Fish S2 DAC 解码器", "subdir": "TTS", "filename": "codec.pth / firefly-gan-vq-fsq-8x1024-21hz-generator.pth", "description": "请放在 Fish 模型目录或 models/TTS/ 下。"}],
         install_packages=[],
         description=f"未找到 Fish S2 解码器：{path}",
         unique_id=unique_id,
@@ -1794,11 +2288,15 @@ def _load_fish_engine(model_name: str, device_choice: str, precision: str, uniqu
         marker.write_text("GJJ vendored Fish Speech project root marker.\n", encoding="utf-8")
     except OSError:
         pass
-    model_path = _model_dir("fishaudioS2", model_name, "s2-pro-fp8", unique_id)
+    selected_name = str(model_name or "").strip()
+    if not selected_name or selected_name == "自动":
+        choices = _fish_compatible_model_names()
+        selected_name = choices[0] if choices else "fishaudio-s2-pro-fp8"
+    model_path = _model_dir("TTS", selected_name, "fishaudio-s2-pro-fp8", unique_id)
     if not _fish_model_complete(model_path):
         raise_dependency_model_error(
             node_name=NODE_DISPLAY_NAME,
-            missing_models=[{"label": model_path.name, "subdir": "fishaudioS2", "filename": model_path.name, "description": "目录需包含 config.json、文本权重和 DAC 解码器。"}],
+            missing_models=[{"label": model_path.name, "subdir": "TTS", "filename": model_path.name, "description": "目录需包含 config.json、文本权重和 DAC 解码器。"}],
             install_packages=[],
             description=f"Fish S2 模型不完整：{model_path}",
             unique_id=unique_id,
@@ -1886,8 +2384,39 @@ def _fish_tts(
 def _longcat_model_name(branch: str, model_name: str) -> str:
     raw = str(model_name or "").strip()
     if raw and raw != "自动":
-        return raw.replace(" (auto download)", "")
-    return LONGCAT_KNOWN_MODELS.get(branch, "LongCat-AudioDiT-3.5B-bf16")
+        selected = raw.replace(" (auto download)", "")
+        prefix = LONGCAT_BRANCH_PREFIXES.get(branch, "")
+        if prefix and selected.startswith(prefix) and _is_longcat_supported_model_name(selected):
+            return selected
+    choices = _longcat_compatible_model_names(branch)
+    if choices:
+        return choices[0]
+    return LONGCAT_KNOWN_MODELS.get(branch, "LongCat-AudioDiT-3.5B-fp8")
+
+
+def _is_longcat_quantization_mismatch_error(error: Any) -> bool:
+    text = str(error or "").lower()
+    return "size mismatch" in text and "embedding" in text and "256384" in text and ("96" in text or "nvfp4" in text)
+
+
+def _raise_longcat_quantization_error(model_name: str, unique_id: Any = None) -> None:
+    branch_hint = "LongCat3.5B" if "3.5b" in str(model_name).lower() else "LongCat-1B"
+    raise_dependency_model_error(
+        node_name=NODE_DISPLAY_NAME,
+        missing_models=[{
+            "label": f"{branch_hint} 支持模型",
+            "subdir": "TTS",
+            "filename": LONGCAT_KNOWN_MODELS.get(branch_hint, "LongCat-AudioDiT-3.5B-fp8"),
+            "description": (
+                "当前本地 LongCat 权重是 nvfp4 压缩形态，text encoder 权重维度与当前加载器不匹配。"
+                "请使用未压缩或当前加载器支持的 bf16/fp8/mxfp8 版本；UniversalTTS 会自动忽略 nvfp4 目录。"
+            ),
+        }],
+        description="LongCat 模型权重格式暂不兼容。",
+        original_error=str(model_name or ""),
+        unique_id=unique_id,
+        model_download_url="https://huggingface.co/meituan-longcat",
+    )
 
 
 def _is_longcat_architecture_error(error: Any) -> bool:
@@ -1922,7 +2451,9 @@ def _raise_longcat_architecture_error(unique_id: Any = None) -> None:
 
 def _load_longcat(model_name: str, device_choice: str, precision: str, unique_id: Any = None):
     _ensure_vendor_package("audiodit", _VENDOR_ROOT, unique_id)
-    selected_name = str(model_name or "").strip() or LONGCAT_KNOWN_MODELS.get("LongCat3.5B", "LongCat-AudioDiT-3.5B-bf16")
+    selected_name = str(model_name or "").strip() or LONGCAT_KNOWN_MODELS.get("LongCat3.5B", "LongCat-AudioDiT-3.5B-fp8")
+    if not _is_longcat_supported_model_name(selected_name):
+        _raise_longcat_quantization_error(selected_name, unique_id)
     device, dtype = _resolve_device_dtype(device_choice, precision)
     loader_precision = "bf16" if str(precision or "auto") == "fp16" else str(precision or "auto")
     cache_key = f"longcat:{selected_name}:{device}:{loader_precision}"
@@ -1940,7 +2471,7 @@ def _reference_to_tensor(reference: dict[str, Any], target_sr: int) -> torch.Ten
         wav = _resample_waveform(wav, sr, target_sr)
     if wav.ndim == 3:
         wav = wav[:, 0, :]
-    return wav.to(torch.float32)
+    return _normalize_audio_rms(wav.to(torch.float32))
 
 
 def _longcat_tts(
@@ -1965,7 +2496,8 @@ def _longcat_tts(
     max_duration = float(model.config.max_wav_duration)
     ref_audio = _reference_to_tensor(reference, sr).to(model.device)
     line_text = _longcat_normalize_text(text)
-    ref_norm = _longcat_normalize_text(reference_text) if str(reference_text or "").strip() else ""
+    ref_text_matches_audio = bool(reference.get("text_is_explicit", True))
+    ref_norm = _longcat_normalize_text(reference_text) if ref_text_matches_audio and str(reference_text or "").strip() else ""
     full_text = f"{ref_norm} {line_text}" if ref_norm else line_text
     inputs = tokenizer([full_text], padding="longest", return_tensors="pt")
     input_ids = inputs.input_ids.to(model.device)
@@ -2029,11 +2561,11 @@ def _cosyvoice_tts(branch: str, model_name: str, text: str, reference: dict[str,
         )
     import soundfile as sf
 
-    model_root = _models_root("cosyvoice")
+    model_root = _models_root("TTS")
     selected_name = str(model_name or "").strip()
     if not selected_name or selected_name == "自动":
-        local_dirs = [item.name for item in sorted(model_root.iterdir()) if item.is_dir()]
-        selected_name = local_dirs[0] if local_dirs else "Fun-CosyVoice3-0.5B-2512"
+        choices = _cosyvoice_compatible_model_names(branch)
+        selected_name = choices[0] if choices else "Fun-CosyVoice3-0.5B-2512"
     selected_path = str((model_root / selected_name).resolve())
     key = f"cosyvoice:{selected_path}"
     if key not in _MODEL_CACHE:
@@ -2078,6 +2610,123 @@ def _cosyvoice_tts(branch: str, model_name: str, text: str, reference: dict[str,
                 pass
 
 
+def _voxcpm_root() -> Path:
+    return _VENDOR_ROOT / "voxcpm"
+
+
+def _ensure_voxcpm_runtime(unique_id: Any = None):
+    root = _voxcpm_root()
+    if not (root / "__init__.py").is_file():
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_dependencies=[{
+                "module_name": "voxcpm",
+                "package_name": "",
+                "display_name": "GJJ 内置 VoxCPM 运行时",
+                "description": f"未找到 GJJ vendor 运行时：{root}",
+            }],
+            install_packages=[],
+            description="VoxCPM vendor 运行时代码缺失。",
+            unique_id=unique_id,
+            copy_text="",
+            copy_label="",
+        )
+    _ensure_sys_path(_VENDOR_ROOT)
+    try:
+        from voxcpm import VoxCPM
+    except Exception as exc:
+        deps = BRANCH_DEPENDENCIES.get("VoxCPM2", [])
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_dependencies=deps,
+            install_packages=[spec.get("package_name", "") for spec in deps if spec.get("package_name")],
+            description="VoxCPM 运行时导入失败；请补齐 Python 依赖。",
+            original_error=str(exc),
+            unique_id=unique_id,
+        )
+    return VoxCPM
+
+
+def _load_voxcpm2(model_name: str, device: str, unique_id: Any = None):
+    VoxCPM = _ensure_voxcpm_runtime(unique_id)
+    selected_name = str(model_name or "").strip()
+    if not selected_name or selected_name == "自动":
+        selected_name = "VoxCPM2"
+    model_path = _models_root("TTS") / Path(selected_name).name
+    if not model_path.is_dir():
+        raise_dependency_model_error(
+            node_name=NODE_DISPLAY_NAME,
+            missing_models=[{
+                "label": "VoxCPM2 模型目录",
+                "subdir": "TTS",
+                "filename": selected_name,
+                "description": "请放到 models/TTS/VoxCPM2。",
+            }],
+            install_packages=[],
+            description=f"未找到 VoxCPM2 模型目录：{model_path}",
+            unique_id=unique_id,
+            title="GJJ TTS 模型缺失",
+        )
+    device_arg = None if str(device or "auto") == "auto" else str(device)
+    cache_key = f"voxcpm2:{model_path}:{device_arg or 'auto'}"
+    if cache_key not in _MODEL_CACHE:
+        _send_status(unique_id, "正在加载 VoxCPM2", 0.12)
+        _MODEL_CACHE[cache_key] = VoxCPM.from_pretrained(
+            str(model_path),
+            load_denoiser=False,
+            local_files_only=True,
+            optimize=False,
+            device=device_arg,
+        )
+    return _MODEL_CACHE[cache_key]
+
+
+def _voxcpm2_control_text(custom_voice: str, emotion_prompt: str) -> str:
+    parts = [str(custom_voice or "").strip(), str(emotion_prompt or "").strip()]
+    return "，".join(part for part in parts if part)
+
+
+def _voxcpm2_tts(
+    model_name: str,
+    text: str,
+    reference: dict[str, Any] | None,
+    reference_text: str,
+    custom_voice: str,
+    emotion_prompt: str,
+    device: str,
+    steps: int,
+    guidance_strength: float,
+    seed: int,
+    unique_id: Any,
+) -> dict[str, Any]:
+    if not str(text or "").strip():
+        raise RuntimeError("VoxCPM2 需要输入文本。")
+    model = _load_voxcpm2(model_name, device, unique_id)
+    prompt_path = ""
+    if reference is not None and _valid_audio(reference.get("audio")):
+        wav, sr = _audio_to_tensor(reference["audio"])
+        prompt_path = _save_indextts_prompt_wav(wav, sr)
+    control = _voxcpm2_control_text(custom_voice, emotion_prompt)
+    control = re.sub(r"[()（）]", "", control).strip()
+    final_text = f"({control}){str(text or '').strip()}" if control else str(text or "").strip()
+    kwargs: dict[str, Any] = {
+        "text": final_text,
+        "reference_wav_path": prompt_path or None,
+        "cfg_value": float(guidance_strength),
+        "inference_timesteps": int(max(1, steps)),
+        "normalize": False,
+        "denoise": False,
+        "seed": int(seed),
+    }
+    wav = model.generate(**kwargs)
+    if isinstance(wav, torch.Tensor):
+        tensor = wav.detach().cpu().float()
+    else:
+        tensor = torch.as_tensor(np.asarray(wav, dtype=np.float32), dtype=torch.float32)
+    sample_rate = int(getattr(getattr(model, "tts_model", None), "sample_rate", DEFAULT_SAMPLE_RATE) or DEFAULT_SAMPLE_RATE)
+    return _comfy_audio(tensor.reshape(1, 1, -1), sample_rate)
+
+
 def _unsupported_public_adapter(branch: str, model_name: str, unique_id: Any) -> None:
     report = _build_branch_report(branch, model_name)
     if report.get("notice_level") == "ok":
@@ -2116,6 +2765,48 @@ def _read_bool_props(extra_pnginfo: Any, unique_id: Any) -> dict[str, Any]:
 
 def _settings_path() -> Path:
     return Path(__file__).resolve().parents[1] / "presets" / "gjj_user_settings.json"
+
+
+def _terms_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "presets" / "gjj_universal_tts_terms.tsv"
+
+
+def _read_terms_text() -> str:
+    path = _terms_path()
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# 原术语\t替换读法\n", encoding="utf-8")
+    return path.read_text(encoding="utf-8")
+
+
+def _write_terms_text(text: str) -> None:
+    path = _terms_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(text or ""), encoding="utf-8", newline="")
+
+
+def _read_terms() -> list[tuple[str, str]]:
+    terms: list[tuple[str, str]] = []
+    for raw_line in _read_terms_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = raw_line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        source = parts[0].strip()
+        target = parts[1].strip()
+        if source and target:
+            terms.append((source, target))
+    terms.sort(key=lambda item: len(item[0]), reverse=True)
+    return terms
+
+
+def _apply_terms(text: str) -> str:
+    result = str(text or "")
+    for source, target in _read_terms():
+        result = result.replace(source, target)
+    return result
 
 
 def _read_saved_branch() -> str:
@@ -2194,6 +2885,19 @@ def _register_universal_tts_api() -> None:
     async def audio_library(request):
         return web.json_response({"ok": True, "root": str(_models_mp3_root()), "items": _models_mp3_items()})
 
+    @server.routes.get("/gjj/universal_tts/terms")
+    async def terms_get(request):
+        return web.json_response({"ok": True, "path": str(_terms_path()), "text": _read_terms_text()})
+
+    @server.routes.post("/gjj/universal_tts/terms")
+    async def terms_post(request):
+        try:
+            data = await request.json()
+            _write_terms_text(str(data.get("text") or ""))
+            return web.json_response({"ok": True, "path": str(_terms_path())})
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
     server._gjj_universal_tts_api_registered = True
 
 
@@ -2237,6 +2941,24 @@ def _coerce_int(value: Any, default: int, minimum: int | None = None, maximum: i
     return int(number)
 
 
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "开", "是"}:
+        return True
+    if text in {"0", "false", "no", "off", "关", "否"}:
+        return False
+    return bool(default)
+
+
+def _coerce_optional_prompt(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.lower() in {"0", "false", "no", "none", "null", "off", "关", "否", "无", "空"}:
+        return ""
+    return text
+
+
 class GJJ_UniversalTTS:
     CATEGORY = "GJJ/Audio"
     FUNCTION = "generate"
@@ -2252,14 +2974,15 @@ class GJJ_UniversalTTS:
             "EdgeTTS 分支零 pip 依赖，使用 Python 标准库访问在线 Edge TTS 服务。",
             "其它分支只允许使用公开 pip 包和模型文件；禁止导入本包旧 TTS 节点、loader 或 cache。",
         ],
-        model_tree=build_universal_tts_model_tree(),
+        model_tree=[],
         usage=[
             "文本支持 [speaker_1]: 这样的说话人标签；未标记文本会按句自动分队列。",
-            "参考音频输入口由前端自动扩展/收缩，后端最多接收 10 对。",
+            "参考音频输入口由前端自动扩展/收缩，后端最多接收 10 路；参考文本由本地 Qwen3-ASR 自动识别。",
         ],
         notice="模型树展示所有 UniversalTTS 分支用到的本地模型；EdgeTTS 分支不需要本地模型。",
         extra={
             "title": NODE_DISPLAY_NAME,
+            "model_tree_text": universal_tts_model_tree_text(),
             "static_model_tree_only": True,
             "model_tree_priority": "static",
         },
@@ -2267,8 +2990,8 @@ class GJJ_UniversalTTS:
     GJJ_UI = {
         "dynamic_reference_pairs": True,
         "branch_presets_path": "presets/gjj_user_settings.json",
-        "toolbar": ["📂", "🧠", "💱", "🔗", "🎲", "📢", "🔌", "⚙️", "🎤"],
-        "hidden_parameters": ["model_name", "local_audio_name", "default_reference_text", "language", "device", "precision", "steps", "guidance_strength"],
+        "toolbar": ["📂", "🧠", "💱", "🔗", "🎲", "📢", "👨‍🎨", "🔌", "⚙️", "🎤", "🔄"],
+        "hidden_parameters": ["model_name", "local_audio_name", "custom_voice", "language", "device", "precision", "steps", "guidance_strength", "qwen_max_new_tokens", "qwen_top_p", "qwen_top_k", "qwen_temperature", "qwen_repetition_penalty", "qwen_x_vector_only", "emotion_prompt", "audio_format", "qwen_instruct"],
     }
 
     @classmethod
@@ -2282,8 +3005,7 @@ class GJJ_UniversalTTS:
                 "text": ("STRING", {"multiline": False, "default": DEFAULT_TEXT, "display_name": "合成文本"}),
                 "branch": (BRANCHES, _hidden_widget({"default": saved_branch, "display_name": "生成分支", "tooltip": "由顶部 💱 按钮切换。"})),
                 "model_name": (model_choices, _hidden_widget({"default": "自动", "display_name": "模型", "tooltip": "当前生成分支的模型；留自动会选择对应模型目录中的第一个可用项。"})),
-                "local_audio_name": (audio_choices, _hidden_widget({"default": default_audio, "display_name": "本地参考音频", "tooltip": "由顶部 📢 按钮选择 models/mp3 音频。"})),
-                "default_reference_text": ("STRING", _hidden_widget({"multiline": False, "default": DEFAULT_REFERENCE_TEXT, "display_name": "默认参考文本", "tooltip": "参考文本输入未连接时使用；语音克隆请填写参考音频对应的真实逐字内容。"})),
+                "local_audio_name": (audio_choices, _hidden_widget({"default": default_audio, "display_name": "本地参考音频", "tooltip": "由顶部 📢 按钮选择 models/GJJ/wav 及其子目录中的 .wav / .mp3 音频。"})),
                 "edge_voice": (list(VOICE_IDS.keys()), _hidden_widget({"default": "[中文] zh-CN Xiaoxiao 女声", "display_name": "Edge音色"})),
                 "custom_voice": ("STRING", _hidden_widget({"multiline": False, "default": "", "display_name": "自定义音色", "tooltip": "EdgeTTS 可直接填 voice id，优先于 Edge 音色下拉。"})),
                 "speed": ("STRING", _hidden_widget({"multiline": False, "default": "1.0", "display_name": "语速"})),
@@ -2297,7 +3019,7 @@ class GJJ_UniversalTTS:
                 "seed": ("STRING", _hidden_widget({"multiline": False, "default": "42", "display_name": "随机种子"})),
                 "audio_output_mode": (AUDIO_OUTPUT_MODES, _hidden_widget({"default": "整体合并", "display_name": "音频输出"})),
                 "timeline_format": (TEXT_FORMATS, _hidden_widget({"default": "SRT", "display_name": "文本输出"})),
-                "mp3_filename_prefix": ("STRING", _hidden_widget({"multiline": False, "default": "audio/GJJ_UniversalTTS", "display_name": "MP3文件名前缀"})),
+                "mp3_filename_prefix": ("STRING", _hidden_widget({"multiline": False, "default": "audio/GJJ_UniversalTTS", "display_name": "音频文件名前缀", "tooltip": "支持变量：{分支}、{模型}、{种子}、{日期}、{时间}，例如 GJJ/{分支}。"})),
                 "mp3_quality": (MP3_QUALITY_OPTIONS, _hidden_widget({"default": "320k", "display_name": "MP3质量"})),
                 "fail_mode": (["报错", "静音占位"], _hidden_widget({"default": "报错", "display_name": "失败处理"})),
                 "segment_min_chars": ("STRING", _hidden_widget({"multiline": False, "default": "12", "display_name": "最短分段字数"})),
@@ -2305,6 +3027,15 @@ class GJJ_UniversalTTS:
                 "local_audio_order_json": ("STRING", _hidden_widget({"multiline": False, "default": "[]", "display_name": "本地参考语音表"})),
                 "edge_speaker_voices_json": ("STRING", _hidden_widget({"multiline": False, "default": "{}", "display_name": "Edge说话人音色表", "tooltip": "EdgeTTS 多说话人音色映射；由前端面板自动维护。"})),
                 "tts_voice_orders_json": ("STRING", _hidden_widget({"multiline": False, "default": "{}", "display_name": "TTS分支音色表", "tooltip": "按生成分支保存排序后的 TTS 音色队列；由前端面板自动维护。"})),
+                "qwen_max_new_tokens": ("STRING", _hidden_widget({"multiline": False, "default": "2048", "display_name": "Qwen最大Token"})),
+                "qwen_top_p": ("STRING", _hidden_widget({"multiline": False, "default": "0.8", "display_name": "Qwen Top-P"})),
+                "qwen_top_k": ("STRING", _hidden_widget({"multiline": False, "default": "20", "display_name": "Qwen Top-K"})),
+                "qwen_temperature": ("STRING", _hidden_widget({"multiline": False, "default": "1.0", "display_name": "Qwen温度"})),
+                "qwen_repetition_penalty": ("STRING", _hidden_widget({"multiline": False, "default": "1.05", "display_name": "Qwen重复惩罚"})),
+                "qwen_x_vector_only": ("BOOLEAN", _hidden_widget({"default": False, "display_name": "Qwen仅音色向量"})),
+                "emotion_prompt": ("STRING", _hidden_widget({"multiline": True, "default": "", "display_name": "情感描述", "tooltip": "IndexTTS2 / VoxCPM2 的情感或风格描述；留空表示不额外控制。"})),
+                "audio_format": (AUDIO_FORMAT_OPTIONS, _hidden_widget({"default": "WAV", "display_name": "音频格式", "tooltip": "选择生成音频和分段预览的保存格式；默认 WAV。"})),
+                "qwen_instruct": ("STRING", _hidden_widget({"multiline": True, "default": "", "display_name": "Instruct", "tooltip": "Qwen3-VoiceDesign 的自然语言音色设计指令，例如：年轻温柔的女声，语速稍慢，带开心情绪。"})),
             },
             "optional": _build_reference_inputs(),
             "hidden": {
@@ -2332,6 +3063,14 @@ class GJJ_UniversalTTS:
         precision: str,
         steps: int,
         guidance_strength: float,
+        qwen_max_new_tokens: int,
+        qwen_top_p: float,
+        qwen_top_k: int,
+        qwen_temperature: float,
+        qwen_repetition_penalty: float,
+        qwen_x_vector_only: bool,
+        emotion_prompt: str,
+        qwen_instruct: str,
         seed: int,
         unique_id: Any,
     ) -> dict[str, Any]:
@@ -2348,15 +3087,123 @@ class GJJ_UniversalTTS:
                     raise
                 if _is_longcat_architecture_error(exc):
                     _raise_longcat_architecture_error(unique_id)
+                if _is_longcat_quantization_mismatch_error(exc):
+                    _raise_longcat_quantization_error(model_name, unique_id)
                 raise
         if branch in {"Qwen3-CustomVoice", "Qwen3-VoiceDesign", "Qwen3-VoiceClone"}:
-            return _qwen3_tts(branch, model_name, text, reference, str((reference or {}).get("text") or DEFAULT_REFERENCE_TEXT), custom_voice, language, device, precision, seed, unique_id)
+            return _qwen3_tts(
+                branch,
+                model_name,
+                text,
+                reference,
+                str((reference or {}).get("text") or DEFAULT_REFERENCE_TEXT),
+                custom_voice,
+                language,
+                device,
+                precision,
+                seed,
+                qwen_max_new_tokens,
+                qwen_top_p,
+                qwen_top_k,
+                qwen_temperature,
+                qwen_repetition_penalty,
+                qwen_x_vector_only,
+                emotion_prompt,
+                qwen_instruct,
+                unique_id,
+            )
         if branch in {"IndexTTS-v1.5", "IndexTTS-v1.0", "IndexTTS-v2"}:
-            return _indextts_audio(branch, text, reference, device, precision, unique_id)
+            return _indextts_audio(branch, text, reference, device, precision, emotion_prompt if branch == "IndexTTS-v2" else "", unique_id)
         if branch == "Fun-CosyVoice3-0.5B-2512":
             return _cosyvoice_tts(branch, model_name, text, reference, str((reference or {}).get("text") or DEFAULT_REFERENCE_TEXT), speed, seed, unique_id)
+        if branch == "VoxCPM2":
+            return _voxcpm2_tts(
+                model_name,
+                text,
+                reference,
+                str((reference or {}).get("text") or DEFAULT_REFERENCE_TEXT),
+                custom_voice,
+                emotion_prompt,
+                device,
+                steps,
+                guidance_strength,
+                seed,
+                unique_id,
+            )
         _unsupported_public_adapter(branch, model_name, unique_id)
         raise RuntimeError(f"{branch} 分支未生成音频。")
+
+    def _cache_external_reference_voice(
+        self,
+        branch: str,
+        model_name: str,
+        references: list[dict[str, Any]],
+        default_reference_text: str,
+        edge_voice: str,
+        custom_voice: str,
+        speed: float,
+        pitch: int,
+        language: str,
+        device: str,
+        precision: str,
+        steps: int,
+        guidance_strength: float,
+        qwen_max_new_tokens: int,
+        qwen_top_p: float,
+        qwen_top_k: int,
+        qwen_temperature: float,
+        qwen_repetition_penalty: float,
+        qwen_x_vector_only: bool,
+        emotion_prompt: str,
+        qwen_instruct: str,
+        seed: int,
+        unique_id: Any,
+    ) -> list[str]:
+        if branch.startswith("IndexTTS") or branch in {"Fun-CosyVoice3-0.5B-2512", "VoxCPM2"}:
+            return []
+        text = str(default_reference_text or DEFAULT_REFERENCE_TEXT).strip()
+        external_refs = [ref for ref in references if str(ref.get("source") or "") == "input" and _valid_audio(ref.get("audio"))]
+        if not text or not external_refs:
+            return []
+        saved: list[str] = []
+        for index, ref in enumerate(external_refs[:MAX_REFERENCES]):
+            try:
+                speaker = int(ref.get("speaker") or index)
+                turn_edge_voice = _edge_voice_for_speaker(speaker, edge_voice, {}) if branch == "EdgeTTS" else edge_voice
+                _send_status(unique_id, f"正在缓存外部参考音频 {index + 1}/{len(external_refs)}", 0.05)
+                audio = self._synthesize_one(
+                    branch,
+                    model_name,
+                    text,
+                    ref,
+                    turn_edge_voice,
+                    custom_voice,
+                    speed,
+                    pitch,
+                    language,
+                    device,
+                    precision,
+                    steps,
+                    guidance_strength,
+                    qwen_max_new_tokens,
+                    qwen_top_p,
+                    qwen_top_k,
+                    qwen_temperature,
+                    qwen_repetition_penalty,
+                    qwen_x_vector_only,
+                    emotion_prompt,
+                    qwen_instruct,
+                    int(seed) + 10000 + index,
+                    unique_id,
+                )
+                stem = _audio_stem(f"{branch}_参考音频{index + 1}")
+                rel = _save_audio_to_models_mp3(audio, f"GJJ_UniversalTTS_{stem}.wav")
+                saved.append(rel)
+            except Exception as exc:
+                _send_status(unique_id, f"外部参考音频缓存失败：{exc}", 0.05)
+        if saved:
+            _send_status(unique_id, f"已缓存外部参考语音到 models\\GJJ\\wav：{saved[0]}", 0.06)
+        return saved
 
     def generate(
         self,
@@ -2386,6 +3233,15 @@ class GJJ_UniversalTTS:
         local_audio_order_json: str = "[]",
         edge_speaker_voices_json: str = "{}",
         tts_voice_orders_json: str = "{}",
+        qwen_max_new_tokens: int = 2048,
+        qwen_top_p: float = 0.8,
+        qwen_top_k: int = 20,
+        qwen_temperature: float = 1.0,
+        qwen_repetition_penalty: float = 1.05,
+        qwen_x_vector_only: bool = False,
+        emotion_prompt: str = "",
+        audio_format: str = "WAV",
+        qwen_instruct: str = "",
         unique_id: Any = None,
         extra_pnginfo: dict[str, Any] | None = None,
         **kwargs,
@@ -2404,8 +3260,11 @@ class GJJ_UniversalTTS:
         selected_branch = str(branch or _read_saved_branch() or BRANCHES[0])
         if selected_branch not in BRANCHES:
             selected_branch = BRANCHES[0]
-        default_reference_text = str(default_reference_text or "").strip()
+        default_reference_text = str(default_reference_text or DEFAULT_REFERENCE_TEXT).strip()
+        if default_reference_text == LEGACY_DEFAULT_REFERENCE_TEXT:
+            default_reference_text = DEFAULT_REFERENCE_TEXT
         text = str(text if text is not None else "").strip()
+        text = _apply_terms(text)
         edge_voice = _coerce_choice(edge_voice, list(VOICE_IDS.keys()), "[中文] zh-CN Xiaoxiao 女声")
         edge_speaker_voices = _parse_tts_speaker_voices(tts_voice_orders_json, selected_branch, edge_speaker_voices_json)
         language = _coerce_choice(language, ["auto", "zh", "en", "ja", "ko"], "auto")
@@ -2421,9 +3280,41 @@ class GJJ_UniversalTTS:
         audio_output_mode = _coerce_choice(audio_output_mode, AUDIO_OUTPUT_MODES, "整体合并")
         timeline_format = _coerce_choice(timeline_format, TEXT_FORMATS, "SRT")
         mp3_quality = _coerce_choice(mp3_quality, MP3_QUALITY_OPTIONS, "320k")
+        audio_format = _coerce_choice(audio_format, AUDIO_FORMAT_OPTIONS, "WAV")
+        mp3_filename_prefix = _expand_mp3_filename_prefix(
+            mp3_filename_prefix,
+            branch=selected_branch,
+            model_name=model_name,
+            seed=seed,
+        )
         fail_mode = _coerce_choice(fail_mode, ["报错", "静音占位"], "报错")
         segment_min_chars = _coerce_int(segment_min_chars, 12, 0, 200)
         segment_max_chars = _coerce_int(segment_max_chars, 80, 8, 500)
+        qwen_max_new_tokens = _coerce_int(qwen_max_new_tokens, 2048, 512, 8192)
+        qwen_top_p = _coerce_float(qwen_top_p, 0.8, 0.0, 1.0)
+        qwen_top_k = _coerce_int(qwen_top_k, 20, 0, 100)
+        qwen_temperature = _coerce_float(qwen_temperature, 1.0, 0.1, 2.0)
+        qwen_repetition_penalty = _coerce_float(qwen_repetition_penalty, 1.05, 1.0, 2.0)
+        qwen_x_vector_only = _coerce_bool(qwen_x_vector_only, False)
+        emotion_prompt = _coerce_optional_prompt(emotion_prompt)
+        qwen_instruct = str(qwen_instruct or "").strip()
+        qwen_old_default = (2048, 0.8, 20, 1.0, 1.05, False)
+        qwen_current = (
+            qwen_max_new_tokens,
+            qwen_top_p,
+            qwen_top_k,
+            qwen_temperature,
+            qwen_repetition_penalty,
+            qwen_x_vector_only,
+        )
+        qwen_preset = QWEN_GENERATION_PRESETS.get(selected_branch)
+        if qwen_preset and selected_branch != "Qwen3-VoiceClone" and qwen_current == qwen_old_default:
+            qwen_max_new_tokens = int(qwen_preset["max_new_tokens"])
+            qwen_top_p = float(qwen_preset["top_p"])
+            qwen_top_k = int(qwen_preset["top_k"])
+            qwen_temperature = float(qwen_preset["temperature"])
+            qwen_repetition_penalty = float(qwen_preset["repetition_penalty"])
+            qwen_x_vector_only = bool(qwen_preset["x_vector_only"])
         if segment_min_chars > segment_max_chars:
             segment_min_chars = segment_max_chars
         if str(model_name or "") == "自动":
@@ -2436,9 +3327,11 @@ class GJJ_UniversalTTS:
             turns = _parse_turns(text, segment_min_chars, segment_max_chars)
             if not turns:
                 raise RuntimeError("合成文本不能为空。")
-            references = _collect_references(kwargs, local_audio_name, default_reference_text, local_audio_order) if selected_branch in REFERENCE_REQUIRED_BRANCHES else []
+            references = _collect_references(kwargs, local_audio_name, local_audio_order) if selected_branch in REFERENCE_REQUIRED_BRANCHES or selected_branch == "VoxCPM2" else []
             if selected_branch in REFERENCE_REQUIRED_BRANCHES and not references:
                 raise RuntimeError(f"当前分支需要参考音频，但没有找到可用音频。请连接参考音频，或把音频放到：{_models_mp3_root()}")
+            if selected_branch in REFERENCE_TEXT_ASR_BRANCHES:
+                _recognize_reference_texts(references, unique_id)
 
             report = _build_branch_report(selected_branch, model_name)
             if report.get("notice_level") == "error":
@@ -2453,6 +3346,32 @@ class GJJ_UniversalTTS:
                     copy_label=report.get("copy_label", ""),
                     model_download_url=report.get("model_download_url", ""),
                 )
+
+            self._cache_external_reference_voice(
+                selected_branch,
+                model_name,
+                references,
+                default_reference_text,
+                edge_voice,
+                custom_voice,
+                speed,
+                pitch,
+                language,
+                device,
+                precision,
+                steps,
+                guidance_strength,
+                qwen_max_new_tokens,
+                qwen_top_p,
+                qwen_top_k,
+                qwen_temperature,
+                qwen_repetition_penalty,
+                qwen_x_vector_only,
+                emotion_prompt,
+                qwen_instruct,
+                seed,
+                unique_id,
+            )
 
             pbar = None
             try:
@@ -2490,24 +3409,34 @@ class GJJ_UniversalTTS:
                     precision,
                     steps,
                     guidance_strength,
+                    qwen_max_new_tokens,
+                    qwen_top_p,
+                    qwen_top_k,
+                    qwen_temperature,
+                    qwen_repetition_penalty,
+                    qwen_x_vector_only,
+                    emotion_prompt,
+                    qwen_instruct,
                     actual_seed,
                     unique_id,
                 )
                 audio_items.append(audio)
-                try:
-                    preview_ui = _save_audio_mp3_ui(
-                        audio,
-                        f"{mp3_filename_prefix}_segment_{index + 1:03d}",
-                        mp3_quality,
-                    )
-                    _send_audio_preview(
-                        unique_id,
-                        preview_ui,
-                        f"已生成片段 {index + 1}/{len(turns)}：speaker_{speaker + 1}",
-                        True,
-                    )
-                except Exception as preview_exc:
-                    _send_status(unique_id, f"片段 {index + 1} 预览保存失败：{preview_exc}", 0.08 + 0.82 * ((index + 1) / len(turns)))
+                if len(turns) > 1:
+                    try:
+                        preview_ui = _save_audio_ui(
+                            audio,
+                            f"{mp3_filename_prefix}_segment_{index + 1:03d}",
+                            audio_format,
+                            mp3_quality,
+                        )
+                        _send_audio_preview(
+                            unique_id,
+                            preview_ui,
+                            f"已生成片段 {index + 1}/{len(turns)}：speaker_{speaker + 1}",
+                            True,
+                        )
+                    except Exception as preview_exc:
+                        _send_status(unique_id, f"片段 {index + 1} 预览保存失败：{preview_exc}", 0.08 + 0.82 * ((index + 1) / len(turns)))
                 wav, sr = _audio_to_tensor(audio)
                 duration = float(wav.shape[-1]) / float(sr)
                 start = cursor
@@ -2524,11 +3453,15 @@ class GJJ_UniversalTTS:
                 if pbar:
                     pbar.update_absolute(index + 1, len(turns))
 
-            _send_status(unique_id, "正在拼接输出", 0.94)
-            merged = _concat_audio(audio_items, float(pause_after_speaker))
+            if len(audio_items) == 1:
+                _send_status(unique_id, "单段语音直接输出", 0.94)
+                merged = audio_items[0]
+            else:
+                _send_status(unique_id, f"正在拼接 {len(audio_items)} 段语音", 0.94)
+                merged = _concat_audio(audio_items, float(pause_after_speaker))
             timeline_text = _format_timeline(timeline, timeline_format)
-            _send_status(unique_id, "正在保存 MP3 预览", 0.97)
-            audio_ui = _save_audio_mp3_ui(merged, mp3_filename_prefix, mp3_quality)
+            _send_status(unique_id, f"正在保存 {audio_format} 预览", 0.97)
+            audio_ui = _save_audio_ui(merged, mp3_filename_prefix, audio_format, mp3_quality)
             _send_audio_preview(unique_id, audio_ui, "完成，音频已保存", False)
             elapsed = time.perf_counter() - started
             _send_status(unique_id, f"完成：{len(turns)} 段，耗时 {elapsed:.2f} 秒", 1.0)

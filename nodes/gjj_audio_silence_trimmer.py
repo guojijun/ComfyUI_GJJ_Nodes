@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import torch
@@ -459,11 +460,29 @@ def _return_payload(
     current_index: int,
     queue_mode: str,
     current_background_audio: dict[str, Any] | None = None,
+    output_order_json: str = '["segment_audio"]',
     unique_id=None,
 ):
+    values = {
+        "segment_audio": current_audio,
+        "segment_count": int(segment_count),
+        "segment_index": int(current_index),
+        "background_audio": current_background_audio if current_background_audio is not None else current_audio,
+    }
+    try:
+        requested = json.loads(str(output_order_json or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        requested = []
+    order = [str(key) for key in requested if str(key) in values] if isinstance(requested, list) else []
+    if not order:
+        order = ["segment_audio"]
     if register_runtime_variable_source is not None:
-        register_runtime_variable_source(unique_id, 0, int(segment_count))
-        register_runtime_variable_source(unique_id, 2, int(current_index))
+        if "segment_count" in order:
+            register_runtime_variable_source(unique_id, order.index("segment_count"), int(segment_count))
+        if "segment_index" in order:
+            register_runtime_variable_source(unique_id, order.index("segment_index"), int(current_index))
+    result = [values[key] for key in dict.fromkeys(order)]
+    result.extend(0 for _ in range(4 - len(result)))
     return {
         "ui": {
             "gjj_audio_silence_trimmer": [
@@ -477,13 +496,16 @@ def _return_payload(
             "segment_index": (int(current_index),),
             "queue_mode": (str(queue_mode or QUEUE_MODE_AUTO),),
         },
-        "result": (
-            int(segment_count),
-            current_audio,
-            int(current_index),
-            current_background_audio if current_background_audio is not None else current_audio,
-        ),
+        "result": tuple(result[:4]),
     }
+
+
+def _hidden_widget(options: dict[str, Any]) -> dict[str, Any]:
+    result = dict(options)
+    result.setdefault("hidden", True)
+    result.setdefault("display", "hidden")
+    result.setdefault("advanced", True)
+    return result
 
 
 class GJJ_AudioSilenceTrimmer:
@@ -497,7 +519,8 @@ class GJJ_AudioSilenceTrimmer:
         "静音修剪",
         "音频去静音",
     ]
-    RETURN_TYPES = ("INT", "AUDIO", "INT", "AUDIO")
+    # 输出槽由前端 🔌 动态排序；后端使用通配类型，具体槽类型由前端 OUTPUT_DEFS 约束。
+    RETURN_TYPES = ("*", "*", "*", "*")
     RETURN_NAMES = ("分段总数", "当前分段音频", "当前分段序号", "当前分段背景声")
     OUTPUT_TOOLTIPS = (
         "分段队列中的音频片段总数。",
@@ -507,6 +530,13 @@ class GJJ_AudioSilenceTrimmer:
     )
     OUTPUT_IS_LIST = (False, False, False, False)
     GJJ_HELP = {"title": NODE_DISPLAY_NAME, **_GJJ_HELP}
+    GJJ_UI = {
+        "toolbar": ["🧹", "░", "▶", "🔌", "⚙️"],
+        "hidden_parameters": [
+            "threshold_db", "min_silence_duration", "keep_silence", "max_duration",
+            "fade_duration", "queue_mode", "current_segment", "fps", "output_order_json",
+        ],
+    }
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -517,6 +547,8 @@ class GJJ_AudioSilenceTrimmer:
                     "FLOAT",
                     {
                         "default": -40.0,
+                        "hidden": True,
+                        "display": "hidden",
                         "min": -120.0,
                         "max": 0.0,
                         "step": 1.0,
@@ -528,6 +560,8 @@ class GJJ_AudioSilenceTrimmer:
                     "FLOAT",
                     {
                         "default": 0.1,
+                        "hidden": True,
+                        "display": "hidden",
                         "min": 0.01,
                         "max": 30.0,
                         "step": 0.01,
@@ -539,6 +573,8 @@ class GJJ_AudioSilenceTrimmer:
                     "FLOAT",
                     {
                         "default": 0.4,
+                        "hidden": True,
+                        "display": "hidden",
                         "min": 0.0,
                         "max": 60.0,
                         "step": 0.01,
@@ -550,6 +586,8 @@ class GJJ_AudioSilenceTrimmer:
                     "FLOAT",
                     {
                         "default": 7.0,
+                        "hidden": True,
+                        "display": "hidden",
                         "min": 0.0,
                         "max": 36000.0,
                         "step": 0.1,
@@ -561,6 +599,8 @@ class GJJ_AudioSilenceTrimmer:
                     "FLOAT",
                     {
                         "default": 0.001,
+                        "hidden": True,
+                        "display": "hidden",
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.001,
@@ -572,6 +612,8 @@ class GJJ_AudioSilenceTrimmer:
                     QUEUE_MODES,
                     {
                         "default": QUEUE_MODE_AUTO,
+                        "hidden": True,
+                        "display": "hidden",
                         "display_name": "队列模式",
                         "tooltip": "自动：未外接滑动序号时输出完整分段队列；初始：只输出第一段；空行：输出一个静音占位段。外接滑动起始序号时由外部接管。",
                     },
@@ -580,6 +622,8 @@ class GJJ_AudioSilenceTrimmer:
                     "INT",
                     {
                         "default": 1,
+                        "hidden": True,
+                        "display": "hidden",
                         "min": 1,
                         "max": 100000,
                         "step": 1,
@@ -592,12 +636,22 @@ class GJJ_AudioSilenceTrimmer:
                     "FLOAT",
                     {
                         "default": 24.0,
+                        "hidden": True,
+                        "display": "hidden",
                         "min": 0.01,
                         "max": 240.0,
                         "step": 0.01,
                         "display_name": "帧率",
                         "tooltip": "每段音频只在末尾补静音到 8n+1，不拉伸人声主体，避免改变音色。",
                     },
+                ),
+                "output_order_json": (
+                    "STRING",
+                    _hidden_widget({
+                        "default": '["segment_audio"]',
+                        "display_name": "输出接口顺序",
+                        "tooltip": "由顶部 🔌 按钮自动维护。",
+                    }),
                 ),
             },
             "optional": {
@@ -626,6 +680,7 @@ class GJJ_AudioSilenceTrimmer:
         queue_mode: str = QUEUE_MODE_AUTO,
         current_segment: int = 1,
         fps: float = 24.0,
+        output_order_json: str = '["segment_audio"]',
         background_audio: dict[str, Any] | None = None,
         prompt=None,
         unique_id=None,
@@ -687,6 +742,7 @@ class GJJ_AudioSilenceTrimmer:
                 current_index,
                 queue_mode,
                 current_background,
+                output_order_json,
                 unique_id,
             )
 
@@ -742,6 +798,7 @@ class GJJ_AudioSilenceTrimmer:
             int(current_index),
             queue_mode,
             current_background,
+            output_order_json,
             unique_id,
         )
 

@@ -120,7 +120,7 @@ https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512
 
 💡 使用提示：
 - 默认模型为 Fun-CosyVoice3-0.5B-2512，约 1GB
-- 本地示例音频放到 models/mp3/，官方示例会自动缓存到 models/cosyvoice/demo/
+- 本地示例音频放到 models/GJJ/wav/；默认 .wav，兼容 .mp3。官方示例会自动缓存到 models/cosyvoice/demo/
 - 生成后会自动保存 MP3，并在节点中间显示播放器
 """.strip()
 DESCRIPTION = (
@@ -184,7 +184,7 @@ class GJJ_CosyVoice3Generator:
 				"example_audio_name": (example_audios or [MISSING_EXAMPLE_AUDIO], {
 					"default": example_audios[0] if example_audios else MISSING_EXAMPLE_AUDIO,
 					"display_name": "示例音频",
-					"tooltip": "不连接参考音频时，会直接使用这里选择的示例音频。本地音频读取共享目录 models/mp3；旧 models/cosyvoice/mp3 会自动迁移兼容。官方示例会在执行时自动下载到 models/cosyvoice/demo。",
+					"tooltip": "不连接参考音频时，会直接使用这里选择的示例音频。本地音频读取 models/GJJ/wav；默认 .wav，兼容 .mp3。旧 models/cosyvoice/mp3 会自动迁移兼容。",
 				}),
 				"model_name": (available or [DEFAULT_MODEL_NAME], {
 					"default": default_model,

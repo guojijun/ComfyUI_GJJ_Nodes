@@ -393,12 +393,13 @@ def _send_result_to_frontend(unique_id: Any, text_list: str) -> None:
 
 def _get_example_audio_files() -> list[str]:
     """获取示例音频文件列表"""
-    mp3_dir = os.path.join(folder_paths.models_dir, "mp3")
+    mp3_dir = os.path.join(folder_paths.models_dir, "GJJ", "wav")
     audio_choices = [""]  # 空选项
     if os.path.isdir(mp3_dir):
-        for f in sorted(os.listdir(mp3_dir)):
-            if f.lower().endswith((".mp3", ".wav", ".flac", ".m4a", ".ogg")):
-                audio_choices.append(f)
+        for current_root, _, files in os.walk(mp3_dir):
+            for f in sorted(files):
+                if f.lower().endswith((".wav", ".mp3", ".flac", ".m4a", ".ogg")):
+                    audio_choices.append(os.path.relpath(os.path.join(current_root, f), mp3_dir))
 
     # 如果列表为空，添加占位符
     if len(audio_choices) == 1:
@@ -558,7 +559,7 @@ class GJJ_SenseVoiceASR:
         "tips": [
             "推荐优先把模型放到 models/ASR/SenseVoice-small-nonx/，避免首次执行时在线下载失败。",
             "CPU + int8 兼容性最好；CUDA 环境不完整时请先切回 CPU。",
-            "若只是测试流程，可先在 models/mp3/ 放一个示例音频供下拉框选择。",
+            "若只是测试流程，可先在 models/GJJ/wav/ 放一个 .wav 示例音频供下拉框选择（兼容 .mp3）。",
         ],
     }
 
@@ -580,7 +581,7 @@ class GJJ_SenseVoiceASR:
                     {
                         "default": example_audio_files[0],
                         "display_name": "示例音频",
-                        "tooltip": "从 models/mp3 目录选择示例音频进行识别。",
+                        "tooltip": "从 models/GJJ/wav 目录选择示例音频；默认 .wav，兼容 .mp3。",
                     },
                 ),
                 "language": (
@@ -637,7 +638,7 @@ class GJJ_SenseVoiceASR:
             # 如果提供了 example_audio，加载它作为 audio
             # 支持空字符串、'[无示例音频]' 或实际文件名
             if audio is None and example_audio and example_audio != "[无示例音频]":
-                mp3_dir = os.path.join(folder_paths.models_dir, "mp3")
+                mp3_dir = os.path.join(folder_paths.models_dir, "GJJ", "wav")
                 audio_path = os.path.join(mp3_dir, example_audio)
                 if os.path.exists(audio_path):
                     try:

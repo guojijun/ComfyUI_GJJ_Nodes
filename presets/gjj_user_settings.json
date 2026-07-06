@@ -5,7 +5,7 @@
     "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
-    "search_text": "long",
+    "search_text": "语音",
     "page_size": 10,
     "image_format": "png",
     "jpeg_quality": 0.86
@@ -86,7 +86,7 @@
   },
   "nodes": {
     "GJJ_UniversalTTS": {
-      "branch": "IndexTTS-v2",
+      "branch": "VoxCPM2",
       "local_audio_sort_mode": "name_asc"
     }
   },
@@ -205,5 +205,36 @@
   },
   "workflow_screenshot_toolbar": {
     "position": null
+  },
+  "zero_dependency_file_browser": {
+    "auto_execute": false,
+    "recursive_depth": 3,
+    "show_hidden": false,
+    "settings_open": false,
+    "directory": "D:\\wav",
+    "filter_text": "",
+    "filter_mode": "包含",
+    "extensions": "wav,mp3,flac,ogg,m4a,aac,wma,aiff,aif",
+    "sort_mode": "修改时间 旧-新",
+    "output_mode": "绝对路径",
+    "file_output_mode": "按文件类型",
+    "favorites": [
+      {
+        "path": "D:\\AI\\MOD\\temp",
+        "label": "temp"
+      },
+      {
+        "path": "D:\\AI\\MOD\\input",
+        "label": "input"
+      },
+      {
+        "path": "D:\\AI\\MOD\\output",
+        "label": "output"
+      },
+      {
+        "path": "D:\\Download",
+        "label": "Download"
+      }
+    ]
   }
 }

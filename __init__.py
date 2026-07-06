@@ -655,7 +655,7 @@ def _register_gjj_character_library_api():
 			models_dir = Path()
 		if not str(models_dir):
 			models_dir = _gjj_package_root().parent.parent / "models"
-		path = (models_dir / "mp3").resolve()
+		path = (models_dir / "GJJ" / "wav").resolve()
 		path.mkdir(parents=True, exist_ok=True)
 		return path
 
@@ -674,14 +674,14 @@ def _register_gjj_character_library_api():
 		if not raw:
 			return ""
 		parts = [clean_key(part, "") for part in raw.split("/") if clean_key(part, "")]
-		if not parts or not parts[-1].lower().endswith(".mp3"):
+		if not parts or Path(parts[-1]).suffix.lower() not in {".wav", ".mp3"}:
 			return ""
 		return "/".join(parts)[:220]
 
 	def voice_path_from_relative(relative_path: str) -> Path:
 		clean = clean_voice_path(relative_path)
 		if not clean:
-			raise ValueError("音色路径无效，只支持 models/mp3 下的 mp3 文件。")
+			raise ValueError("音色路径无效，只支持 models/GJJ/wav 下的 wav / mp3 文件。")
 		base = voice_root_dir()
 		path = (base / clean).resolve()
 		if base not in path.parents and path != base:
@@ -695,12 +695,13 @@ def _register_gjj_character_library_api():
 			if clean and clean not in candidates:
 				candidates.append(clean)
 		for name in candidates:
-			relative = f"{name}.mp3"
-			try:
-				if voice_path_from_relative(relative).is_file():
-					return relative
-			except Exception:
-				continue
+			for suffix in (".wav", ".mp3"):
+				relative = f"{name}{suffix}"
+				try:
+					if voice_path_from_relative(relative).is_file():
+						return relative
+				except Exception:
+					continue
 		return ""
 
 	def voice_url(relative_path: str, mtime: float = 0) -> str:
@@ -1560,12 +1561,13 @@ def _register_gjj_character_library_api():
 			character_id = clean_key(fields.get("id") or "", "")
 			manifest = read_manifest(character_id)
 			if not raw:
-				raise ValueError("缺少音色 mp3 文件。")
-			if not file_name.lower().endswith(".mp3"):
-				raise ValueError("音色只支持 mp3 文件。")
-			target_name = clean_key(fields.get("voice_path") or file_name or f"{character_reference_name(manifest, character_id)}.mp3", "voice.mp3")
-			if not target_name.lower().endswith(".mp3"):
-				target_name += ".mp3"
+				raise ValueError("缺少音色文件。")
+			suffix = Path(file_name).suffix.lower()
+			if suffix not in {".wav", ".mp3"}:
+				raise ValueError("音色默认使用 wav，同时兼容 mp3 文件。")
+			target_name = clean_key(fields.get("voice_path") or file_name or f"{character_reference_name(manifest, character_id)}.wav", "voice.wav")
+			if Path(target_name).suffix.lower() not in {".wav", ".mp3"}:
+				target_name += suffix or ".wav"
 			target_path = voice_path_from_relative(target_name)
 			target_path.parent.mkdir(parents=True, exist_ok=True)
 			target_path.write_bytes(raw)
@@ -1580,7 +1582,7 @@ def _register_gjj_character_library_api():
 			search = str(request.query.get("search") or "").strip().lower()
 			items = []
 			base = voice_root_dir()
-			for path in sorted(base.rglob("*.mp3"), key=lambda item: str(item.relative_to(base)).lower()):
+			for path in sorted((item for item in base.rglob("*") if item.is_file() and item.suffix.lower() in {".wav", ".mp3"}), key=lambda item: str(item.relative_to(base)).lower()):
 				try:
 					relative = str(path.relative_to(base)).replace("\\", "/")
 				except Exception:

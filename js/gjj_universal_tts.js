@@ -11,11 +11,24 @@ const SETTINGS_ENDPOINT = "/gjj/user_settings";
 const IMPORT_MEDIA_ENDPOINT = "/gjj/universal_tts/import_media";
 const CHECK_ENDPOINT = "/gjj/universal_tts/check";
 const AUDIO_LIBRARY_ENDPOINT = "/gjj/universal_tts/audio_library";
+const TERMS_ENDPOINT = "/gjj/universal_tts/terms";
 const CHARACTER_LIBRARY_ENDPOINT = "/gjj/character_library/list";
 const STATUS_WIDGET = "gjj_universal_tts_panel";
 const TOOLBAR_WIDGET = "gjj_universal_tts_toolbar";
 const AUDIO_WIDGET = "gjj_universal_tts_audio";
 const LOCAL_AUDIO_SORT_MODES = new Set(["name_asc", "name_desc", "date_desc", "date_asc", "size_desc", "size_asc"]);
+const QWEN_CUSTOM_VOICES = ["Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric", "Ryan", "Aiden", "Ono_Anna", "Sohee"];
+const QWEN_CUSTOM_VOICE_LABELS = {
+	Vivian: "中文·普通话｜明亮年轻女声",
+	Serena: "中文·普通话｜温暖温柔女声",
+	Uncle_Fu: "中文·普通话｜成熟醇厚男声",
+	Dylan: "中文·北京口音｜年轻男声",
+	Eric: "中文·四川口音｜活力男声",
+	Ryan: "英文｜节奏感男声",
+	Aiden: "英文·美式｜阳光男声",
+	Ono_Anna: "日文｜俏皮女声",
+	Sohee: "韩文｜温暖女声",
+};
 let universalTTSPresetCache = null;
 let universalTTSPresetPromise = null;
 const MANAGED_PROPS = {
@@ -33,32 +46,35 @@ const cloneValue = (value) => value === undefined ? undefined : JSON.parse(JSON.
 const COMMON_WIDGETS = new Set([
 	"text", "open_file_button", "keep_model_loaded", "branch", "link_button", "random_seed",
 	"local_audio_name", "audio_output_mode", "timeline_format", "settings_button", "generate_button",
-	"model_name", "default_reference_text",
+	"model_name",
 	"edge_voice", "custom_voice", "speed", "pitch", "language", "device",
 	"precision", "steps", "guidance_strength", "pause_after_speaker", "seed",
 	"audio_output_mode", "timeline_format", "mp3_filename_prefix", "mp3_quality", "fail_mode",
 	"segment_min_chars", "segment_max_chars",
 	"local_audio_order_json", "edge_speaker_voices_json", "tts_voice_orders_json",
+	"qwen_max_new_tokens", "qwen_top_p", "qwen_top_k", "qwen_temperature", "qwen_repetition_penalty", "qwen_x_vector_only",
+	"emotion_prompt", "audio_format", "qwen_instruct",
 ]);
 
 const CORE_WIDGETS = new Set(["text"]);
 const SETTINGS_COMMON_WIDGETS = new Set([
-	"mp3_filename_prefix", "mp3_quality", "fail_mode", "segment_min_chars", "segment_max_chars",
+	"mp3_filename_prefix", "mp3_quality", "fail_mode", "segment_min_chars", "segment_max_chars", "audio_format",
 ]);
 const PANEL_MANAGED_WIDGETS = new Set(["edge_speaker_voices_json", "tts_voice_orders_json"]);
 
 const BRANCH_PRIVATE = {
 	EdgeTTS: new Set(["speed", "pitch", "edge_speaker_voices_json"]),
-	FishAudioS2: new Set(["model_name", "default_reference_text", "language", "device", "precision", "seed", "pause_after_speaker"]),
-	"LongCat-1B": new Set(["model_name", "default_reference_text", "device", "precision", "steps", "guidance_strength", "seed", "pause_after_speaker"]),
-	"LongCat3.5B": new Set(["model_name", "default_reference_text", "device", "precision", "steps", "guidance_strength", "seed", "pause_after_speaker"]),
-	"Fun-CosyVoice3-0.5B-2512": new Set(["model_name", "default_reference_text", "speed", "seed"]),
-	"Qwen3-CustomVoice": new Set(["model_name", "language", "device", "precision", "seed"]),
-	"Qwen3-VoiceDesign": new Set(["model_name", "default_reference_text", "language", "device", "precision", "seed"]),
-	"Qwen3-VoiceClone": new Set(["model_name", "default_reference_text", "language", "device", "precision", "seed"]),
-	"IndexTTS-v1.5": new Set(["default_reference_text", "device", "precision", "seed"]),
-	"IndexTTS-v1.0": new Set(["default_reference_text", "device", "precision", "seed"]),
-	"IndexTTS-v2": new Set(["default_reference_text", "device", "precision", "seed"]),
+	FishAudioS2: new Set(["model_name", "language", "device", "precision", "seed", "pause_after_speaker"]),
+	"LongCat-1B": new Set(["model_name", "device", "precision", "steps", "guidance_strength", "seed", "pause_after_speaker"]),
+	"LongCat3.5B": new Set(["model_name", "device", "precision", "steps", "guidance_strength", "seed", "pause_after_speaker"]),
+	"Fun-CosyVoice3-0.5B-2512": new Set(["model_name", "speed", "seed"]),
+	"Qwen3-CustomVoice": new Set(["model_name", "language", "device", "precision", "seed", "qwen_max_new_tokens", "qwen_top_p", "qwen_top_k", "qwen_temperature", "qwen_repetition_penalty"]),
+	"Qwen3-VoiceDesign": new Set(["model_name", "qwen_instruct", "language", "device", "precision", "seed", "qwen_max_new_tokens", "qwen_top_p", "qwen_top_k", "qwen_temperature", "qwen_repetition_penalty"]),
+	"Qwen3-VoiceClone": new Set(["model_name", "language", "device", "precision", "seed", "qwen_max_new_tokens", "qwen_top_p", "qwen_top_k", "qwen_temperature", "qwen_repetition_penalty", "qwen_x_vector_only"]),
+	"IndexTTS-v1.5": new Set(["device", "precision", "seed"]),
+	"IndexTTS-v1.0": new Set(["device", "precision", "seed"]),
+	"IndexTTS-v2": new Set(["emotion_prompt", "device", "precision", "seed"]),
+	VoxCPM2: new Set(["model_name", "emotion_prompt", "device", "steps", "guidance_strength", "seed", "pause_after_speaker"]),
 };
 
 const BRANCH_VALUES = Object.keys(BRANCH_PRIVATE);
@@ -74,6 +90,7 @@ const BRANCH_DISPLAY = {
 	"IndexTTS-v1.5": "🎙️ 克隆 · IndexTTS-v1.5",
 	"IndexTTS-v1.0": "🎙️ 克隆 · IndexTTS-v1.0",
 	"IndexTTS-v2": "🎙️ 克隆 · IndexTTS-v2",
+	VoxCPM2: "🎙️ 克隆/设计 · VoxCPM2",
 };
 const CHOICE_DEFAULTS = {
 	branch: "EdgeTTS",
@@ -86,6 +103,7 @@ const CHOICE_DEFAULTS = {
 	timeline_format: "SRT",
 	mp3_quality: "320k",
 	fail_mode: "报错",
+	audio_format: "WAV",
 };
 
 const NUMBER_DEFAULTS = {
@@ -97,14 +115,32 @@ const NUMBER_DEFAULTS = {
 	seed: { value: 42, min: 0, max: 0x7fffffff, int: true },
 	segment_min_chars: { value: 12, min: 0, max: 200, int: true },
 	segment_max_chars: { value: 80, min: 8, max: 500, int: true },
+	qwen_max_new_tokens: { value: 2048, min: 512, max: 8192, int: true },
+	qwen_top_p: { value: 0.8, min: 0, max: 1, decimals: 2 },
+	qwen_top_k: { value: 20, min: 0, max: 100, int: true },
+	qwen_temperature: { value: 1.0, min: 0.1, max: 2.0, decimals: 2 },
+	qwen_repetition_penalty: { value: 1.05, min: 1.0, max: 2.0, decimals: 2 },
+};
+
+const BOOLEAN_DEFAULTS = {
+	qwen_x_vector_only: false,
+};
+
+const QWEN_PARAM_NAMES = ["qwen_max_new_tokens", "qwen_top_p", "qwen_top_k", "qwen_temperature", "qwen_repetition_penalty", "qwen_x_vector_only"];
+const QWEN_PARAM_PRESETS = {
+	"Qwen3-CustomVoice": { qwen_max_new_tokens: 8192, qwen_top_p: 1.0, qwen_top_k: 50, qwen_temperature: 0.9, qwen_repetition_penalty: 1.05, qwen_x_vector_only: false },
+	"Qwen3-VoiceDesign": { qwen_max_new_tokens: 4096, qwen_top_p: 0.9, qwen_top_k: 40, qwen_temperature: 0.8, qwen_repetition_penalty: 1.05, qwen_x_vector_only: false },
+	"Qwen3-VoiceClone": { qwen_max_new_tokens: 2048, qwen_top_p: 0.8, qwen_top_k: 20, qwen_temperature: 1.0, qwen_repetition_penalty: 1.05, qwen_x_vector_only: false },
 };
 
 const SERIALIZED_WIDGET_ORDER = [
-	"text", "branch", "model_name", "local_audio_name", "default_reference_text",
+	"text", "branch", "model_name", "local_audio_name",
 	"edge_voice", "custom_voice", "speed", "pitch", "language", "device", "precision",
 	"steps", "guidance_strength", "pause_after_speaker", "seed",
 	"audio_output_mode", "timeline_format", "mp3_filename_prefix", "mp3_quality", "fail_mode",
 	"segment_min_chars", "segment_max_chars", "local_audio_order_json", "edge_speaker_voices_json", "tts_voice_orders_json",
+	"qwen_max_new_tokens", "qwen_top_p", "qwen_top_k", "qwen_temperature", "qwen_repetition_penalty", "qwen_x_vector_only",
+	"emotion_prompt", "audio_format", "qwen_instruct",
 ];
 const SERIALIZED_WIDGET_RANK = new Map(SERIALIZED_WIDGET_ORDER.map((name, index) => [name, index]));
 
@@ -149,6 +185,12 @@ function normalizeCharacterKey(value) {
 
 function branchDisplayName(value) {
 	return BRANCH_DISPLAY[String(value || "")] || String(value || "");
+}
+
+function voiceDisplayLabel(branch, value) {
+	const name = String(value || "");
+	const detail = branch === "Qwen3-CustomVoice" ? QWEN_CUSTOM_VOICE_LABELS[name] : "";
+	return detail ? `${name} — ${detail}` : name;
 }
 
 function isTtsVoiceLibraryBranch(branch) {
@@ -411,29 +453,20 @@ function formatAudioName(index) {
 	return `${AUDIO_PREFIX}${String(index).padStart(2, "0")}_audio`;
 }
 
-function formatTextName(index) {
-	return `${AUDIO_PREFIX}${String(index).padStart(2, "0")}_text`;
-}
-
 function inputIndex(name) {
 	const match = String(name || "").match(/^reference_(\d+)_(audio|text)$/);
 	return match ? Number.parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER;
 }
 
 function isManagedInput(input) {
-	return /^reference_\d+_(audio|text)$/.test(String(input?.name || ""));
+	return /^reference_\d+_audio$/.test(String(input?.name || ""));
 }
 
 function pairs(node) {
-	const map = new Map();
-	for (const input of node?.inputs || []) {
-		if (!isManagedInput(input)) continue;
-		const index = inputIndex(input.name);
-		if (!map.has(index)) map.set(index, { index, audio: null, text: null });
-		if (String(input.name).endsWith("_audio")) map.get(index).audio = input;
-		else map.get(index).text = input;
-	}
-	return [...map.values()].sort((a, b) => a.index - b.index);
+	return (node?.inputs || [])
+		.filter(isManagedInput)
+		.map((audio) => ({ index: inputIndex(audio.name), audio }))
+		.sort((a, b) => a.index - b.index);
 }
 
 function hasLink(input) {
@@ -445,12 +478,12 @@ function linkedInputs(node) {
 }
 
 function pairLinked(pair) {
-	return hasLink(pair?.audio) || hasLink(pair?.text);
+	return hasLink(pair?.audio);
 }
 
 function pairDetached(node, pair) {
 	const stored = node?.properties?.detached_links || {};
-	return Boolean(stored[pair?.audio?.name] || stored[pair?.text?.name]);
+	return Boolean(stored[pair?.audio?.name]);
 }
 
 function removeInput(node, input) {
@@ -463,10 +496,15 @@ function addPair(node) {
 	if (count >= MAX_REFERENCES) return;
 	const index = count + 1;
 	node.addInput(formatAudioName(index), "AUDIO");
-	node.addInput(formatTextName(index), "STRING");
 }
 
 function normalizePairs(node) {
+	for (let index = (node?.inputs || []).length - 1; index >= 0; index -= 1) {
+		if (/^reference_\d+_text$/.test(String(node.inputs[index]?.name || ""))) node.removeInput(index);
+	}
+	for (const name of Object.keys(node?.properties?.detached_links || {})) {
+		if (/^reference_\d+_text$/.test(name)) delete node.properties.detached_links[name];
+	}
 	let list = pairs(node);
 	while (list.length < 1) {
 		addPair(node);
@@ -480,7 +518,6 @@ function normalizePairs(node) {
 	}
 	for (let i = list.length - 1; i >= 1; i -= 1) {
 		if (pairLinked(list[i]) || pairDetached(node, list[i])) break;
-		removeInput(node, list[i].text);
 		removeInput(node, list[i].audio);
 	}
 	list = pairs(node);
@@ -493,12 +530,6 @@ function normalizePairs(node) {
 			pair.audio.label = `参考音频${index}`;
 			pair.audio.localized_name = pair.audio.label;
 			pair.audio.type = "AUDIO";
-		}
-		if (pair.text) {
-			pair.text.name = formatTextName(index);
-			pair.text.label = `参考文本${index}`;
-			pair.text.localized_name = pair.text.label;
-			pair.text.type = "STRING";
 		}
 	}
 	updateLinkButton(node);
@@ -565,12 +596,7 @@ function textValueFromNode(node) {
 function widgetNameForInput(input) {
 	const name = String(input?.name || "");
 	if (name === "text" || name === "合成文本") return "text";
-	if (name === _speakerRefTextName(1) || name === "参考文本1") return "default_reference_text";
 	return COMMON_WIDGETS.has(name) ? name : "";
-}
-
-function _speakerRefTextName(index) {
-	return `${AUDIO_PREFIX}${String(index).padStart(2, "0")}_text`;
 }
 
 function linkedSynthesisText(node) {
@@ -718,7 +744,7 @@ function normalizeVoicePath(value) {
 
 function voiceStem(value) {
 	const name = normalizeVoicePath(value).split("\\").pop() || "";
-	return normalizeCharacterKey(name.replace(/\.mp3$/i, ""));
+	return normalizeCharacterKey(name.replace(/\.(?:wav|mp3)$/i, ""));
 }
 
 function voiceMatchesAnyAlias(value, aliases) {
@@ -875,11 +901,13 @@ function ensurePanel(node) {
 	const branch = button("💱", "选择生成分支");
 	const link = button("🔗", "记住外部链接并断开/恢复");
 	const seed = button("🎲", "切换固定/随机种子");
-	const mp3 = button("📢", "显示 models/mp3 音频列表");
+	const mp3 = button("📢", "显示 models/GJJ/wav 及其子目录中的 .wav / .mp3 音频");
+	const terms = button("👨‍🎨", "编辑术语库");
 	const output = button("🔌", "选择输出口内容");
 	const settings = button("⚙️", "显示/隐藏其它参数");
 	const generate = button("🎤", "生成语音");
-	toolbar.append(open, keep, branch, link, seed, mp3, output, settings, generate);
+	const reset = button("🔄", "清空预览音频并初始化节点");
+	toolbar.append(open, keep, branch, link, seed, mp3, terms, output, settings, generate, reset);
 
 	const progress = document.createElement("div");
 	progress.style.cssText = "display:none;padding:6px 8px;border:1px solid #41535b;border-radius:7px;background:#121a1f";
@@ -907,7 +935,7 @@ function ensurePanel(node) {
 	root.style.cssText = "display:flex;flex-direction:column;gap:7px;width:100%;box-sizing:border-box;color:#dce7e2;font:12px/1.35 ui-sans-serif,system-ui,'Microsoft YaHei',sans-serif";
 	root.append(fileInput, progress, outputPanel, speakerPanel);
 
-	const state = { root, toolbar, open, keep, branch, link, seed, mp3, output, settings, generate, progress, label, bar, outputPanel, speakerPanel, fileInput, branchPopup: null, mp3Popup: null, mp3SortMode: "name_asc", mp3SortAsc: true };
+	const state = { root, toolbar, open, keep, branch, link, seed, mp3, terms, output, settings, generate, reset, progress, label, bar, outputPanel, speakerPanel, fileInput, branchPopup: null, mp3Popup: null, termsPopup: null, outputPopup: null, settingsPopup: null, mp3SortMode: "name_asc", mp3SortAsc: true };
 	ensureToolbarWidget(node, state);
 	const panelHeight = () => {
 		let h = 0;
@@ -955,16 +983,16 @@ function syncButtons(node) {
 	s.seed.style.background = node.properties.random_seed ? "#7a5c18" : "#2a3034";
 	s.seed.style.borderColor = node.properties.random_seed ? "#ffc766" : "#46606a";
 	s.seed.title = node.properties.random_seed ? "随机种子：每次变化" : `随机种子：固定 ${widget(node, "seed")?.value ?? 42}`;
-	s.settings.style.background = node.properties.settings_open ? "#4d5860" : "#1f3037";
-	s.settings.style.borderColor = node.properties.settings_open ? "#9fb0bd" : "#46606a";
-	s.settings.title = node.properties.settings_open ? "隐藏其它参数" : "显示其它参数";
+	s.settings.style.background = s.settingsPopup ? "#4d5860" : "#1f3037";
+	s.settings.style.borderColor = s.settingsPopup ? "#9fb0bd" : "#46606a";
+	s.settings.title = s.settingsPopup ? "关闭参数弹窗" : "显示参数弹窗";
 	const branchColors = ["#1f3037", "#273d62", "#3f3a1e", "#43304f", "#244437"];
 	s.branch.style.background = branchColors[Math.max(0, BRANCH_VALUES.indexOf(branchValue)) % branchColors.length] || "#1f3037";
 	s.branch.style.borderColor = branchValue === "EdgeTTS" ? "#46606a" : "#79a7d8";
 	s.branch.title = `生成分支：${branchDisplayName(branchValue)}。点击选择`;
 	s.branch.style.boxShadow = s.branchPopup ? "0 0 0 1px #9fb0bd inset" : "";
-	s.output.style.background = s.outputPanel?.style.display !== "none" ? "#33414a" : "#1f3037";
-	s.output.style.borderColor = s.outputPanel?.style.display !== "none" ? "#9fb0bd" : "#46606a";
+	s.output.style.background = s.outputPopup ? "#33414a" : "#1f3037";
+	s.output.style.borderColor = s.outputPopup ? "#9fb0bd" : "#46606a";
 	s.output.title = `输出：${audioMode} / ${textMode}`;
 	const audioOrder = Array.isArray(node.properties.local_audio_order) ? node.properties.local_audio_order.filter(Boolean) : [];
 	const audioName = audioOrder.length ? `已选 ${audioOrder.length} 个：${audioOrder.map((item, index) => `${index + 1}.${item}`).join(" / ")}` : String(widget(node, "local_audio_name")?.value || "").trim();
@@ -978,7 +1006,10 @@ function syncButtons(node) {
 	s.mp3.style.borderColor = s.mp3Popup ? "#9fb0bd" : "#46606a";
 	s.mp3.title = isTtsLibrary
 		? (libraryName ? `TTS 音色库：${libraryName}` : "选择当前 TTS 分支音色库")
-		: (libraryName ? `本地参考音频：${libraryName}` : "选择 models/mp3 本地参考音频");
+		: (libraryName ? `本地参考音频：${libraryName}` : "选择 models/GJJ/wav 及其子目录中的 .wav / .mp3 音频");
+	s.terms.style.background = s.termsPopup ? "#33414a" : "#1f3037";
+	s.terms.style.borderColor = s.termsPopup ? "#9fb0bd" : "#46606a";
+	s.terms.title = "编辑术语库";
 	const detachedCount = Object.keys(node.properties.detached_links || {}).length;
 	const linkedCount = linkedInputs(node).length;
 	s.link.style.display = linkedCount || detachedCount ? "" : "none";
@@ -1056,9 +1087,41 @@ function coerceNumberWidget(node, name, config) {
 	setWidgetValue(node, name, String(value));
 }
 
+function boolValue(value, fallback = false) {
+	if (typeof value === "boolean") return value;
+	const text = String(value ?? "").trim().toLowerCase();
+	if (["1", "true", "yes", "on", "开", "是"].includes(text)) return true;
+	if (["0", "false", "no", "off", "关", "否"].includes(text)) return false;
+	return Boolean(fallback);
+}
+
+function coerceBooleanWidget(node, name, fallback) {
+	const w = widget(node, name);
+	if (!w) return;
+	const value = boolValue(w.value, fallback);
+	if (w.value !== value) setWidgetValue(node, name, value);
+}
+
+function applyQwenParamPreset(node, force = false) {
+	ensureProperties(node);
+	const branch = String(widget(node, "branch")?.value || "");
+	const preset = QWEN_PARAM_PRESETS[branch];
+	if (!preset) return;
+	const previous = String(node.properties.qwen_param_preset_branch || "");
+	if (!force && previous === branch) return;
+	for (const name of QWEN_PARAM_NAMES) {
+		if (widget(node, name)) setWidgetValue(node, name, preset[name]);
+	}
+	node.properties.qwen_param_preset_branch = branch;
+}
+
 function normalizeRuntimeWidgetValues(node) {
 	ensureProperties(node);
 	syncLocalAudioOrderStorage(node);
+	const emotionWidget = widget(node, "emotion_prompt");
+	if (emotionWidget && ["0", "false", "no", "none", "null", "off", "关", "否", "无", "空"].includes(String(emotionWidget.value ?? "").trim().toLowerCase())) {
+		setWidgetValue(node, "emotion_prompt", "");
+	}
 	for (const [name, fallback] of Object.entries(CHOICE_DEFAULTS)) {
 		coerceChoiceWidget(node, name, fallback);
 	}
@@ -1072,6 +1135,10 @@ function normalizeRuntimeWidgetValues(node) {
 	for (const [name, config] of Object.entries(NUMBER_DEFAULTS)) {
 		coerceNumberWidget(node, name, config);
 	}
+	for (const [name, fallback] of Object.entries(BOOLEAN_DEFAULTS)) {
+		coerceBooleanWidget(node, name, fallback);
+	}
+	applyQwenParamPreset(node);
 	const minSegment = widget(node, "segment_min_chars");
 	const maxSegment = widget(node, "segment_max_chars");
 	if (minSegment && maxSegment && Number(minSegment.value) > Number(maxSegment.value)) {
@@ -1133,11 +1200,11 @@ function wirePanel(node, state) {
 		toggleOutputPanel(node);
 	});
 	state.settings.addEventListener("click", () => {
-		node.properties.settings_open = !node.properties.settings_open;
-		applyWidgetVisibility(node);
-		syncButtons(node);
+		toggleSettingsPanel(node);
 	});
 	state.mp3.addEventListener("click", () => toggleMp3List(node));
+	state.terms.addEventListener("click", () => toggleTermsLibrary(node));
+	state.reset.addEventListener("click", () => resetUniversalTTSNode(node));
 	state.generate.addEventListener("click", async () => {
 		const original = state.generate.textContent;
 		const originalWidth = state.generate.style.width;
@@ -1210,12 +1277,9 @@ function toggleDetachLinks(node) {
 
 function applyWidgetVisibility(node) {
 	ensureProperties(node);
-	const branch = String(widget(node, "branch")?.value || "EdgeTTS");
-	const open = Boolean(node.properties.settings_open);
-	const visiblePrivate = BRANCH_PRIVATE[branch] || new Set();
 	for (const w of node.widgets || []) {
 		if (!COMMON_WIDGETS.has(w.name)) continue;
-		const visible = !PANEL_MANAGED_WIDGETS.has(w.name) && (CORE_WIDGETS.has(w.name) || (open && (SETTINGS_COMMON_WIDGETS.has(w.name) || visiblePrivate.has(w.name))));
+		const visible = !PANEL_MANAGED_WIDGETS.has(w.name) && CORE_WIDGETS.has(w.name);
 		if (visible) showWidget(w);
 		else hideWidget(w);
 	}
@@ -1325,6 +1389,43 @@ function playNextQueuedAudio(node) {
 	state.playingQueued = false;
 }
 
+function clearAudioPreview(node) {
+	const state = node?.__gjjUniversalTTSAudio;
+	if (!state) return;
+	state.queue = [];
+	state.playingQueued = false;
+	try { state.audio.pause?.(); } catch (_) {}
+	try {
+		state.audio.removeAttribute("src");
+		state.audio.load?.();
+	} catch (_) {
+		state.audio.src = "";
+	}
+	state.box.style.display = "none";
+}
+
+function resetUniversalTTSNode(node) {
+	const s = ensurePanel(node);
+	closeUniversalPopups(node);
+	clearAudioPreview(node);
+	s.progress.style.display = "none";
+	s.label.textContent = "";
+	s.bar.style.width = "0%";
+	s.outputPanel.style.display = "none";
+	s.outputPanel.replaceChildren();
+	s.speakerPanel.style.display = "none";
+	s.speakerPanel.replaceChildren();
+	s.fileInput.value = "";
+	node.properties.settings_open = false;
+	normalizePairs(node);
+	normalizeRuntimeWidgetValues(node);
+	applyWidgetVisibility(node);
+	compactTextWidget(node);
+	syncButtons(node);
+	refresh(node);
+	node.graph?.change?.();
+}
+
 function makeSelectRow(node, labelText, widgetName) {
 	const row = document.createElement("label");
 	row.style.cssText = "display:flex;align-items:center;gap:8px;margin:4px 0";
@@ -1353,15 +1454,164 @@ function makeSelectRow(node, labelText, widgetName) {
 	return row;
 }
 
+const SETTING_LABELS = {
+	model_name: "模型",
+	edge_voice: "Edge音色",
+	custom_voice: "自定义音色",
+	speed: "语速",
+	pitch: "音调",
+	language: "语言",
+	device: "设备",
+	precision: "精度",
+	steps: "步数",
+	guidance_strength: "引导强度",
+	pause_after_speaker: "停顿",
+	seed: "种子",
+	mp3_filename_prefix: "音频前缀",
+	mp3_quality: "MP3质量",
+	audio_format: "音频格式",
+	qwen_instruct: "Instruct",
+	fail_mode: "失败处理",
+	segment_min_chars: "最短分段",
+	segment_max_chars: "最长分段",
+	qwen_max_new_tokens: "最大Token",
+	qwen_top_p: "Top-P",
+	qwen_top_k: "Top-K",
+	qwen_temperature: "温度",
+	qwen_repetition_penalty: "重复惩罚",
+	qwen_x_vector_only: "仅音色向量",
+	emotion_prompt: "情感描述",
+};
+
+function closeUniversalPopup(node, key) {
+	const s = node?.__gjjUniversalTTS;
+	const popup = s?.[key];
+	if (!popup) return;
+	popup.remove?.();
+	s[key] = null;
+	if (key === "settingsPopup") node.properties.settings_open = false;
+}
+
+function closeUniversalPopups(node, except = "") {
+	const s = node?.__gjjUniversalTTS;
+	if (!s) return;
+	for (const key of ["branchPopup", "mp3Popup", "termsPopup", "outputPopup", "settingsPopup"]) {
+		if (key !== except) closeUniversalPopup(node, key);
+	}
+	syncButtons(node);
+}
+
+function createToolbarPopup(titleText, width = 300) {
+	const popup = document.createElement("div");
+	popup.style.cssText = [
+		"position:fixed", "z-index:100000", `width:${width}px`, "max-width:calc(100vw - 16px)",
+		"padding:8px", "border:1px solid #526873", "border-radius:8px",
+		"background:#10171b", "box-shadow:0 12px 28px rgba(0,0,0,.42)",
+		"color:#dce7e2", "font:12px/1.35 ui-sans-serif,system-ui,'Microsoft YaHei',sans-serif",
+	].join(";");
+	const head = document.createElement("div");
+	head.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px";
+	const title = document.createElement("div");
+	title.textContent = titleText;
+	title.style.cssText = "font-weight:700;color:#edf7fb";
+	const close = document.createElement("button");
+	close.type = "button";
+	close.textContent = "确定";
+	close.style.cssText = "padding:4px 8px;border:1px solid #6ea6cf;border-radius:6px;background:#245477;color:#f4fbff;cursor:pointer;font-weight:700";
+	head.append(title, close);
+	popup.append(head);
+	popup.addEventListener("pointerdown", (event) => event.stopPropagation());
+	popup.addEventListener("mousedown", (event) => event.stopPropagation());
+	return { popup, close };
+}
+
+function positionToolbarPopup(popup, anchor, fallbackWidth = 300) {
+	document.body.append(popup);
+	const rect = anchor.getBoundingClientRect();
+	const width = popup.offsetWidth || fallbackWidth;
+	const left = Math.min(window.innerWidth - width - 8, Math.max(8, rect.left));
+	const top = Math.min(window.innerHeight - popup.offsetHeight - 8, Math.max(8, rect.bottom + 6));
+	popup.style.left = `${left}px`;
+	popup.style.top = `${top}px`;
+}
+
+function settingWidgetNames(node) {
+	const branch = String(widget(node, "branch")?.value || "EdgeTTS");
+	const visiblePrivate = BRANCH_PRIVATE[branch] || new Set();
+	const names = new Set([...visiblePrivate, ...SETTINGS_COMMON_WIDGETS]);
+	const audioFormat = String(widget(node, "audio_format")?.value || "WAV");
+	return SERIALIZED_WIDGET_ORDER.filter((name) => names.has(name) && widget(node, name) && !(name === "mp3_quality" && audioFormat === "WAV"));
+}
+
+function makeSettingsRow(node, name) {
+	const w = widget(node, name);
+	const row = document.createElement("label");
+	row.style.cssText = "display:flex;align-items:flex-start;gap:8px;margin:5px 0";
+	const label = document.createElement("span");
+	label.textContent = SETTING_LABELS[name] || name;
+	label.style.cssText = "width:72px;color:#c9d6dc;white-space:nowrap;padding-top:5px";
+	const values = optionValues(w);
+	let control;
+	const commit = (value) => {
+		setWidgetValue(node, name, value);
+		normalizeRuntimeWidgetValues(node);
+		syncButtons(node);
+		refreshDependencyNotice(node);
+	};
+	if (Object.prototype.hasOwnProperty.call(BOOLEAN_DEFAULTS, name)) {
+		control = document.createElement("input");
+		control.type = "checkbox";
+		control.checked = boolValue(w?.value, BOOLEAN_DEFAULTS[name]);
+		control.style.cssText = "margin-top:7px;width:16px;height:16px;accent-color:#58a6d6";
+		control.addEventListener("change", () => commit(control.checked));
+	} else if (values.length) {
+		control = document.createElement("select");
+		control.style.cssText = "flex:1;min-width:0;background:#2b3035;color:#f4fbff;border:1px solid #465862;border-radius:5px;padding:4px 6px";
+		for (const value of values) {
+			const option = document.createElement("option");
+			option.value = String(value);
+			option.textContent = String(value);
+			control.append(option);
+		}
+		control.value = String(w?.value ?? "");
+		control.addEventListener("change", () => commit(control.value));
+	} else if (NUMBER_DEFAULTS[name]) {
+		const config = NUMBER_DEFAULTS[name];
+		control = document.createElement("input");
+		control.type = "number";
+		control.value = String(w?.value ?? config.value ?? "");
+		if (Number.isFinite(config.min)) control.min = String(config.min);
+		if (Number.isFinite(config.max)) control.max = String(config.max);
+		control.step = config.int ? "1" : String(10 ** -(config.decimals || 2));
+		control.style.cssText = "flex:1;min-width:0;background:#2b3035;color:#f4fbff;border:1px solid #465862;border-radius:5px;padding:5px 6px";
+		control.addEventListener("change", () => commit(control.value));
+	} else {
+		const multiline = Boolean(w?.options?.multiline);
+		control = multiline ? document.createElement("textarea") : document.createElement("input");
+		if (!multiline) control.type = "text";
+		control.value = String(w?.value ?? "");
+		control.style.cssText = "flex:1;min-width:0;background:#2b3035;color:#f4fbff;border:1px solid #465862;border-radius:5px;padding:5px 6px;box-sizing:border-box";
+		if (multiline) {
+			control.rows = 3;
+			control.style.resize = "vertical";
+		}
+		control.addEventListener("input", () => {
+			setWidgetValue(node, name, control.value);
+			syncButtons(node);
+		});
+		control.addEventListener("change", () => refreshDependencyNotice(node));
+	}
+	control.addEventListener("pointerdown", (event) => event.stopPropagation());
+	control.addEventListener("mousedown", (event) => event.stopPropagation());
+	row.append(label, control);
+	return row;
+}
+
 function toggleBranchMenu(node) {
 	const s = ensurePanel(node);
-	if (s.mp3Popup) {
-		s.mp3Popup.remove();
-		s.mp3Popup = null;
-	}
+	closeUniversalPopups(node, "branchPopup");
 	if (s.branchPopup) {
-		s.branchPopup.remove();
-		s.branchPopup = null;
+		closeUniversalPopup(node, "branchPopup");
 		syncButtons(node);
 		return;
 	}
@@ -1433,38 +1683,215 @@ function toggleBranchMenu(node) {
 
 function toggleOutputPanel(node) {
 	const s = ensurePanel(node);
-	if (s.branchPopup) {
-		s.branchPopup.remove();
-		s.branchPopup = null;
-	}
-	if (s.mp3Popup) {
-		s.mp3Popup.remove();
-		s.mp3Popup = null;
-	}
-	if (s.outputPanel.style.display !== "none") {
-		s.outputPanel.style.display = "none";
+	closeUniversalPopups(node, "outputPopup");
+	s.outputPanel.style.display = "none";
+	if (s.outputPopup) {
+		closeUniversalPopup(node, "outputPopup");
 		syncButtons(node);
 		refresh(node);
 		return;
 	}
-	s.outputPanel.replaceChildren(
+	const { popup, close } = createToolbarPopup("输出口内容", 300);
+	const body = document.createElement("div");
+	body.style.cssText = "display:flex;flex-direction:column;gap:4px";
+	body.append(
 		makeSelectRow(node, "音频输出", "audio_output_mode"),
 		makeSelectRow(node, "文本输出", "timeline_format"),
 	);
-	s.outputPanel.style.display = "";
+	popup.append(body);
+	close.addEventListener("click", () => {
+		closeUniversalPopup(node, "outputPopup");
+		syncButtons(node);
+	});
+	positionToolbarPopup(popup, s.output, 300);
+	s.outputPopup = popup;
 	syncButtons(node);
 	refresh(node);
 }
 
+function toggleSettingsPanel(node) {
+	const s = ensurePanel(node);
+	closeUniversalPopups(node, "settingsPopup");
+	if (s.settingsPopup) {
+		closeUniversalPopup(node, "settingsPopup");
+		applyWidgetVisibility(node);
+		syncButtons(node);
+		return;
+	}
+	node.properties.settings_open = true;
+	const branch = String(widget(node, "branch")?.value || "EdgeTTS");
+	const { popup, close } = createToolbarPopup(`${branchDisplayName(branch)} 参数`, 340);
+	const body = document.createElement("div");
+	body.style.cssText = "max-height:420px;overflow:auto;display:flex;flex-direction:column;gap:2px";
+	const names = settingWidgetNames(node);
+	if (names.length) {
+		for (const name of names) body.append(makeSettingsRow(node, name));
+	} else {
+		const empty = document.createElement("div");
+		empty.textContent = "当前分支没有可调参数";
+		empty.style.cssText = "padding:8px;color:#91a3ad";
+		body.append(empty);
+	}
+	popup.append(body);
+	close.addEventListener("click", () => {
+		closeUniversalPopup(node, "settingsPopup");
+		applyWidgetVisibility(node);
+		syncButtons(node);
+	});
+	positionToolbarPopup(popup, s.settings, 340);
+	s.settingsPopup = popup;
+	applyWidgetVisibility(node);
+	syncButtons(node);
+}
+
+async function toggleTermsLibrary(node) {
+	const s = ensurePanel(node);
+	closeUniversalPopups(node, "termsPopup");
+	if (s.termsPopup) {
+		closeUniversalPopup(node, "termsPopup");
+		syncButtons(node);
+		return;
+	}
+	const { popup, close } = createToolbarPopup("术语库", 520);
+	const body = document.createElement("div");
+	body.style.cssText = "display:flex;flex-direction:column;gap:6px";
+	const hint = document.createElement("div");
+	hint.textContent = "保存为 TSV：原术语<TAB>替换读法";
+	hint.style.cssText = "color:#9fb0bd";
+	const tableWrap = document.createElement("div");
+	tableWrap.style.cssText = "height:280px;overflow:auto;border:1px solid #526873;border-radius:6px;background:#172126";
+	const table = document.createElement("table");
+	table.style.cssText = "width:100%;border-collapse:collapse;table-layout:fixed";
+	const thead = document.createElement("thead");
+	thead.style.cssText = "position:sticky;top:0;background:#203039;z-index:1";
+	const headRow = document.createElement("tr");
+	const rowsBody = document.createElement("tbody");
+	const sortState = { key: "source", asc: true };
+	let termRows = [];
+	const parseTerms = (text) => String(text || "")
+		.split(/\r?\n/)
+		.map((line) => line.trim() ? line.split("\t", 2) : null)
+		.filter((parts) => parts && parts.length === 2 && !String(parts[0] || "").trim().startsWith("#"))
+		.map(([source, target]) => ({ source: String(source || "").trim(), target: String(target || "").trim() }));
+	const serializeTerms = () => {
+		const lines = ["# 原术语\t替换读法"];
+		for (const row of termRows) {
+			const source = String(row.source || "").trim();
+			const target = String(row.target || "").trim();
+			if (source || target) lines.push(`${source}\t${target}`);
+		}
+		return `${lines.join("\n")}\n`;
+	};
+	const addHeader = (label, key) => {
+		const th = document.createElement("th");
+		th.style.cssText = "padding:6px;text-align:left;border-bottom:1px solid #526873;color:#d9edf6;font-weight:700";
+		const btn = document.createElement("button");
+		btn.type = "button";
+		btn.textContent = label;
+		btn.style.cssText = "width:100%;text-align:left;border:0;background:transparent;color:inherit;cursor:pointer;font-weight:700";
+		btn.addEventListener("click", () => {
+			sortState.asc = sortState.key === key ? !sortState.asc : true;
+			sortState.key = key;
+			termRows.sort((a, b) => String(a[key] || "").localeCompare(String(b[key] || ""), "zh-Hans-CN") * (sortState.asc ? 1 : -1));
+			renderRows();
+		});
+		th.append(btn);
+		headRow.append(th);
+	};
+	addHeader("原术语", "source");
+	addHeader("替换读法", "target");
+	const actionHead = document.createElement("th");
+	actionHead.style.cssText = "width:44px;padding:6px;border-bottom:1px solid #526873";
+	headRow.append(actionHead);
+	thead.append(headRow);
+	table.append(thead, rowsBody);
+	tableWrap.append(table);
+	const makeCellInput = (row, key) => {
+		const input = document.createElement("input");
+		input.type = "text";
+		input.value = row[key] || "";
+		input.style.cssText = "width:100%;box-sizing:border-box;border:1px solid #3d4e57;border-radius:4px;background:#10191e;color:#f0f7f8;padding:5px 6px;font:12px/1.35 ui-monospace,Consolas,monospace";
+		input.addEventListener("input", () => { row[key] = input.value; });
+		return input;
+	};
+	function renderRows() {
+		rowsBody.replaceChildren();
+		termRows.forEach((row, index) => {
+			const tr = document.createElement("tr");
+			for (const key of ["source", "target"]) {
+				const td = document.createElement("td");
+				td.style.cssText = "padding:4px 6px;border-bottom:1px solid rgba(82,104,115,.35)";
+				td.append(makeCellInput(row, key));
+				tr.append(td);
+			}
+			const action = document.createElement("td");
+			action.style.cssText = "padding:4px 6px;border-bottom:1px solid rgba(82,104,115,.35);text-align:center";
+			const remove = document.createElement("button");
+			remove.type = "button";
+			remove.textContent = "×";
+			remove.title = "删除";
+			remove.style.cssText = "width:24px;height:24px;border:1px solid #526873;border-radius:5px;background:#2b3035;color:#f4fbff;cursor:pointer";
+			remove.addEventListener("click", () => {
+				termRows.splice(index, 1);
+				renderRows();
+			});
+			action.append(remove);
+			tr.append(action);
+			rowsBody.append(tr);
+		});
+	}
+	const addRow = document.createElement("button");
+	addRow.type = "button";
+	addRow.textContent = "添加术语";
+	addRow.style.cssText = "align-self:flex-start;padding:5px 9px;border:1px solid #526873;border-radius:6px;background:#203039;color:#f4fbff;cursor:pointer";
+	addRow.addEventListener("click", () => {
+		termRows.push({ source: "", target: "" });
+		renderRows();
+	});
+	const status = document.createElement("div");
+	status.style.cssText = "min-height:16px;color:#91c7e8";
+	body.append(hint, tableWrap, addRow, status);
+	popup.append(body);
+	status.textContent = "加载中…";
+	try {
+		const response = await fetch(TERMS_ENDPOINT);
+		const data = await response.json();
+		termRows = parseTerms(data?.text || "");
+		if (!termRows.length) termRows.push({ source: "", target: "" });
+		renderRows();
+		status.textContent = data?.path ? `文件：${data.path}` : "";
+	} catch (error) {
+		termRows = [{ source: "", target: "" }];
+		renderRows();
+		status.textContent = `读取失败：${error?.message || error}`;
+	}
+	close.textContent = "保存";
+	close.addEventListener("click", async () => {
+		try {
+			const response = await fetch(TERMS_ENDPOINT, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ text: serializeTerms() }),
+			});
+			const data = await response.json();
+			if (!response.ok || data?.ok === false) throw new Error(data?.error || "保存失败");
+			status.textContent = "已保存";
+			closeUniversalPopup(node, "termsPopup");
+			syncButtons(node);
+		} catch (error) {
+			status.textContent = `保存失败：${error?.message || error}`;
+		}
+	});
+	positionToolbarPopup(popup, s.terms, 520);
+	s.termsPopup = popup;
+	syncButtons(node);
+}
+
 function toggleMp3List(node) {
 	const s = ensurePanel(node);
-	if (s.branchPopup) {
-		s.branchPopup.remove();
-		s.branchPopup = null;
-	}
+	closeUniversalPopups(node, "mp3Popup");
 	if (s.mp3Popup) {
-		s.mp3Popup.remove();
-		s.mp3Popup = null;
+		closeUniversalPopup(node, "mp3Popup");
 		syncButtons(node);
 		return;
 	}
@@ -1473,7 +1900,8 @@ function toggleMp3List(node) {
 	const isEdge = branch === "EdgeTTS";
 	const primaryWidgetName = isEdge ? "edge_voice" : (isTtsLibrary ? "custom_voice" : "local_audio_name");
 	const w = widget(node, primaryWidgetName);
-	const baseValues = (isEdge || !isTtsLibrary) ? optionValues(w) : [];
+	const baseValues = branch === "Qwen3-CustomVoice" ? QWEN_CUSTOM_VOICES : ((isEdge || !isTtsLibrary) ? optionValues(w) : []);
+	const audioLibraryValues = new Set();
 	const audioMeta = new Map();
 	const characterMatches = new Map();
 	let characterVoiceDefaults = [];
@@ -1495,7 +1923,11 @@ function toggleMp3List(node) {
 			.then((response) => response.json())
 			.then((data) => {
 				for (const item of data?.items || []) {
-					if (item?.name) audioMeta.set(String(item.name), item);
+					if (item?.name) {
+						const name = String(item.name);
+						audioLibraryValues.add(name);
+						audioMeta.set(name, item);
+					}
 				}
 				render();
 			})
@@ -1527,7 +1959,8 @@ function toggleMp3List(node) {
 	const allValues = () => {
 		const manualValues = readEdgeVoiceOrder(node, branch);
 		const primaryValue = String(widget(node, primaryWidgetName)?.value || "").trim();
-		return [...new Set([...(baseValues || []), ...manualValues, primaryValue, branch === "Qwen3-CustomVoice" ? "Vivian" : ""].map((item) => String(item || "").trim()).filter(Boolean))];
+		const values = [...new Set([...(baseValues || []), ...audioLibraryValues, ...manualValues, primaryValue].map((item) => String(item || "").trim()).filter(Boolean))];
+		return audioLibraryValues.size ? values.filter((item) => !item.startsWith("[未找到 models/GJJ/wav")) : values;
 	};
 	const selectedOrder = () => {
 		ensureProperties(node);
@@ -1559,7 +1992,7 @@ function toggleMp3List(node) {
 	};
 	const popup = document.createElement("div");
 	popup.style.cssText = [
-		"position:fixed", "z-index:100000", "width:300px", "max-width:calc(100vw - 16px)",
+		"position:fixed", "z-index:100000", `width:${branch === "Qwen3-CustomVoice" ? 430 : 300}px`, "max-width:calc(100vw - 16px)",
 		"padding:8px", "border:1px solid #526873", "border-radius:8px",
 		"background:#10171b", "box-shadow:0 12px 28px rgba(0,0,0,.42)",
 		"color:#dce7e2", "font:12px/1.35 ui-sans-serif,system-ui,'Microsoft YaHei',sans-serif",
@@ -1603,7 +2036,7 @@ function toggleMp3List(node) {
 			const voice = selected.length ? selected[index % selected.length] : "";
 			const character = characterMatches.get(index);
 			const row = document.createElement("div");
-			const text = `${entry.label || `说话人${index + 1}`}  →  ${voice || "未选择"}`;
+			const text = `${entry.label || `说话人${index + 1}`}  →  ${voice ? voiceDisplayLabel(branch, voice) : "未选择"}`;
 			row.title = character ? `${character.name || character.id || entry.label}\n${text}` : text;
 			row.style.cssText = "display:flex;align-items:center;gap:5px;min-width:0;color:#c9d6dc;font-size:11px;line-height:1.25";
 			if (character?.cover) {
@@ -1679,7 +2112,9 @@ function toggleMp3List(node) {
 			main.type = "button";
 			const meta = audioMeta.get(item) || {};
 			const suffix = !isTtsLibrary && (meta.size || meta.mtime) ? `  ${formatBytes(meta.size)}` : "";
-			main.textContent = active ? `${selectedIndex + 1}. ${item}${suffix}` : `${item}${suffix}`;
+			const displayItem = voiceDisplayLabel(branch, item);
+			main.textContent = active ? `${selectedIndex + 1}. ${displayItem}${suffix}` : `${displayItem}${suffix}`;
+			main.title = displayItem;
 			main.style.cssText = "flex:1;min-width:0;text-align:left;padding:6px 8px;border:0;background:transparent;color:inherit;cursor:pointer;font:inherit;overflow:hidden;text-overflow:ellipsis";
 			main.addEventListener("click", () => {
 				const next = selectedOrder();

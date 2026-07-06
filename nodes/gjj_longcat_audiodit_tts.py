@@ -50,7 +50,7 @@ NODE_NAME = "GJJ_LongCatAudioDiTTTS"
 MAX_SPEAKERS = 10
 AUDIO_PREFIX = "speaker_"
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac"}
-MISSING_AUDIO_CHOICE = "[未找到models/mp3音频]"
+MISSING_AUDIO_CHOICE = "[未找到models/GJJ/wav音频]"
 MP3_QUALITY_OPTIONS = ["320k", "128k", "V0"]
 DEFAULT_REFERENCE_TEXT = "人生不如意十有八九。要么看得开，要么就认栽!"
 MIN_VISIBLE_PAIRS = 1  # 默认只显示 1 对输入口
@@ -129,7 +129,7 @@ https://huggingface.co/meituan-longcat
 
 💡 使用提示：
 - 支持多说话人输入，按 [speaker_1]:、[speaker_2]: 这样的行首标签逐句合成
-- 默认从 models/mp3 选择参考音频；连接输入音频后自动按实际输入数量匹配说话人
+- 默认从 models/GJJ/wav 选择参考音频（兼容 .wav / .mp3）；连接输入音频后自动按实际输入数量匹配说话人
 - 节点会自动保存 MP3 预览，便于快速试听
 """.strip()
 DESCRIPTION = (
@@ -229,7 +229,7 @@ def _check_interrupt() -> None:
 
 
 def _models_mp3_root() -> Path:
-    root = Path(folder_paths.models_dir) / "mp3"
+    root = Path(folder_paths.models_dir) / "GJJ" / "wav"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -440,7 +440,7 @@ def _build_optional_inputs() -> dict[str, tuple[str, dict[str, Any]]]:
         })
         optional[_speaker_ref_text_name(index)] = ("STRING", {
             "forceInput": True,
-            "default": DEFAULT_REFERENCE_TEXT,
+            "default": "",
             "display_name": f"参考文本{index}",
             "tooltip": f"第 {index} 个说话人参考音频对应的文字，可留空；连接文本后会随同音频作为克隆提示。",
         })
@@ -457,10 +457,12 @@ def _collect_connected_references(kwargs: dict[str, Any]) -> list[dict[str, Any]
         audio = kwargs.get(_speaker_audio_name(index))
         if not _valid_audio(audio):
             continue
+        explicit_text = str(kwargs.get(_speaker_ref_text_name(index)) or "").strip()
         refs.append({
             "source": f"输入音频 {len(refs) + 1}",
             "audio": audio,
-            "ref_text": str(kwargs.get(_speaker_ref_text_name(index)) or DEFAULT_REFERENCE_TEXT).strip(),
+            "ref_text": explicit_text,
+            "text_is_explicit": bool(explicit_text),
         })
     return refs
 
@@ -559,7 +561,7 @@ class GJJ_LongCatAudioDiTTTS:
                 "local_audio_name": (audio_choices, {
                     "default": default_audio,
                     "display_name": "本地参考音频",
-                    "tooltip": "没有连接参考音频时，从 models/mp3 选择一段音频作为 speaker_1；连接任意参考音频后此项会自动置空并被忽略。",
+                    "tooltip": "没有连接参考音频时，从 models/GJJ/wav 选择一段音频作为 speaker_1（兼容 .wav / .mp3）；连接任意参考音频后此项会自动置空并被忽略。",
                 }),
                 "steps": ("INT", {
                     "default": 16,
@@ -663,9 +665,10 @@ class GJJ_LongCatAudioDiTTTS:
         if not refs:
             local_path = _resolve_local_audio(local_audio_name)
             refs = [{
-                "source": f"models/mp3：{local_path.name}",
+                "source": f"models/GJJ/wav：{local_path.name}",
                 "local_path": local_path,
                 "ref_text": str(kwargs.get(_speaker_ref_text_name(1)) or DEFAULT_REFERENCE_TEXT).strip(),
+                "text_is_explicit": True,
             }]
 
         prepared: list[dict[str, Any]] = []
@@ -683,6 +686,7 @@ class GJJ_LongCatAudioDiTTTS:
             prepared.append({
                 "audio": tensor,
                 "ref_text": str(ref.get("ref_text") or "").strip(),
+                "text_is_explicit": bool(ref.get("text_is_explicit", True)),
                 "source": ref.get("source") or f"参考音频 {index}",
                 "duration": duration,
             })
@@ -744,7 +748,7 @@ class GJJ_LongCatAudioDiTTTS:
         cancel_event.clear()
         pbar = None
         connected_refs = _collect_connected_references(kwargs)
-        reference_mode = "输入音频" if connected_refs else "models/mp3"
+        reference_mode = "输入音频" if connected_refs else "models/GJJ/wav"
         try:
             _check_interrupt()
             _send_status(unique_id, "1/5 正在加载 LongCat AudioDiT 模型...", 0.06)
@@ -782,7 +786,7 @@ class GJJ_LongCatAudioDiTTTS:
                 ref_audio = ref["audio"]
                 ref_text = ref["ref_text"]
                 line_norm = normalize_text(line_text)
-                ref_norm = normalize_text(ref_text) if ref_text else ""
+                ref_norm = normalize_text(ref_text) if ref.get("text_is_explicit", True) and ref_text else ""
                 full_text = f"{ref_norm} {line_norm}" if ref_norm else line_norm
 
                 _send_status(

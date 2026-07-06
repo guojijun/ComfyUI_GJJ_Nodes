@@ -41,6 +41,7 @@ const WIDTH_PROPERTY = "gjj_any_preview_width";
 const HELD_TEXT_PROPERTY = "gjj_any_preview_held_text";
 const HELD_IMAGES_PROPERTY = "gjj_any_preview_held_images";
 const HELD_MEDIA_PROPERTY = "gjj_any_preview_held_media";
+const GJJ_FILE_DRAG_MIME = "application/x-gjj-file-browser-item";
 const LAST_LINKS_PROPERTY = "gjj_any_preview_last_upstream_links";
 const TEXT_INPUT_SAVED_TEXT_PROPERTY = "gjj_text_input_saved_text";
 const MOTION_GUARD_STYLE_ID = "gjj-any-preview-motion-guard-style";
@@ -1975,6 +1976,25 @@ function imageFilesFromDropEvent(event) {
 	return files.filter((file) => String(file?.type || "").startsWith("image/") || /\.(png|jpe?g|webp|bmp|gif)$/i.test(file?.name || ""));
 }
 
+function fileBrowserDropPayload(event) {
+	const transfer = event?.dataTransfer;
+	if (!transfer) return null;
+	const raw = transfer.getData?.(GJJ_FILE_DRAG_MIME) || "";
+	if (!raw) return null;
+	try {
+		const payload = JSON.parse(raw);
+		const path = String(payload?.path || "").trim();
+		if (!path) return null;
+		return { path, name: String(payload?.name || "") };
+	} catch (_) {
+		return null;
+	}
+}
+
+function hasFileBrowserDrop(event) {
+	return Array.from(event?.dataTransfer?.types || []).includes(GJJ_FILE_DRAG_MIME) || Boolean(fileBrowserDropPayload(event));
+}
+
 async function uploadDroppedImagesToTemp(files) {
 	const form = new FormData();
 	for (const file of files) {
@@ -1990,6 +2010,141 @@ async function uploadDroppedImagesToTemp(files) {
 	}
 	return normalizeMediaPayload(data.images);
 }
+
+async function importLocalFileFromBrowserNode(node, payload) {
+	if (!node || !payload?.path) return;
+	setDropTargetActive(node, true, "导入文件中...");
+	try {
+		const response = await api.fetchApi("/gjj/any_preview/import_local_file", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ path: payload.path }),
+		});
+		const data = await response.json().catch(() => ({}));
+		if (!response.ok || !data?.kind) throw new Error(data?.error || "导入文件失败");
+		node.properties = node.properties || {};
+		disconnectLinkedInputs(node);
+		delete node.properties[HELD_TEXT_PROPERTY];
+		delete node.properties[HELD_IMAGES_PROPERTY];
+		delete node.properties[HELD_MEDIA_PROPERTY];
+		resetLivePreviewState(node);
+		const items = normalizeMediaPayload(data.items);
+		if (data.kind === "text") {
+			node.properties[HELD_TEXT_PROPERTY] = String(data.text || payload.path);
+		} else if (data.kind === "image") {
+			node.properties[HELD_IMAGES_PROPERTY] = items.map((item) => ({ ...item }));
+		} else if (["audio", "video", "3d"].includes(String(data.kind))) {
+			node.properties[HELD_MEDIA_PROPERTY] = {
+				kind: String(data.kind),
+				items: items.map((item) => ({ ...item })),
+				text: String(data.text || payload.path),
+			};
+		} else {
+			node.properties[HELD_TEXT_PROPERTY] = String(data.text || payload.path);
+		}
+		applyHeldPreview(node);
+		scheduleStabilize(node, 0);
+		setDirty(node);
+	} catch (error) {
+		console.warn("[GJJ_AnyPreview] import local file failed", error);
+		setDropTargetActive(node, true, error?.message || "导入失败");
+		setTimeout(() => setDropTargetActive(node, false), 1400);
+		return;
+	}
+	setDropTargetActive(node, false);
+}
+
+function anyPreviewNodeAtClientPoint(clientX, clientY) {
+	const nodes = Array.isArray(app.graph?._nodes) ? app.graph._nodes : [];
+	for (let index = nodes.length - 1; index >= 0; index -= 1) {
+		const node = nodes[index];
+		if (node?.comfyClass !== "GJJ_AnyPreview") continue;
+		const elements = [
+			node.__gjjAnyPreviewWrap,
+			node.__gjjAnyPreviewContainer,
+			node.__gjjAnyPreviewBody,
+			node.__gjjAnyPreviewGrid,
+			node.__gjjAnyPreviewEmpty,
+		].filter(Boolean);
+		for (const element of elements) {
+			const rect = element.getBoundingClientRect?.();
+			if (!rect) continue;
+			if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
+				return node;
+			}
+		}
+	}
+	return null;
+}
+
+function canvasPointFromClient(clientX, clientY) {
+	const event = { clientX: Number(clientX), clientY: Number(clientY) };
+	if (app.canvas?.convertEventToCanvasOffset) {
+		try {
+			const point = app.canvas.convertEventToCanvasOffset(event);
+			if (Array.isArray(point) && Number.isFinite(point[0]) && Number.isFinite(point[1])) {
+				return [Math.round(point[0]), Math.round(point[1])];
+			}
+		} catch (_) {}
+	}
+	const canvas = app.canvas?.canvas;
+	const rect = canvas?.getBoundingClientRect?.();
+	const ds = app.canvas?.ds;
+	if (rect && ds) {
+		const scale = Number(ds.scale || 1);
+		const offset = Array.isArray(ds.offset) ? ds.offset : [0, 0];
+		return [
+			Math.round((Number(clientX) - rect.left) / Math.max(0.01, scale) - Number(offset[0] || 0)),
+			Math.round((Number(clientY) - rect.top) / Math.max(0.01, scale) - Number(offset[1] || 0)),
+		];
+	}
+	return [Number(app.canvas?.graph_mouse?.[0] || 0), Number(app.canvas?.graph_mouse?.[1] || 0)];
+}
+
+function createAnyPreviewAtClientPoint(clientX, clientY) {
+	const graph = app.canvas?.graph || app.graph;
+	const node = globalThis.LiteGraph?.createNode?.("GJJ_AnyPreview");
+	if (!graph || !node) return null;
+	const [x, y] = canvasPointFromClient(clientX, clientY);
+	const width = Number(node.size?.[0] || MIN_WIDTH);
+	node.pos = [Math.round(x - width / 2), Math.round(y - 40)];
+	graph.add(node);
+	stabilizeNode(node);
+	graph.change?.();
+	graph.setDirtyCanvas?.(true, true);
+	app.canvas?.setDirty?.(true, true);
+	return node;
+}
+
+globalThis.__gjjAnyPreviewImportLocalFileAtPoint = async function (payload, clientX, clientY) {
+	const node = anyPreviewNodeAtClientPoint(Number(clientX), Number(clientY)) || createAnyPreviewAtClientPoint(clientX, clientY);
+	if (!node) return false;
+	await importLocalFileFromBrowserNode(node, payload);
+	return true;
+};
+
+function installAnyPreviewCanvasDropTarget() {
+	if (document.__gjjAnyPreviewCanvasDropTargetInstalled) return;
+	document.__gjjAnyPreviewCanvasDropTargetInstalled = true;
+	document.addEventListener("dragover", (event) => {
+		if (!hasFileBrowserDrop(event)) return;
+		if (event.target?.closest?.(".gjj-file-browser")) return;
+		event.preventDefault();
+		if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+	});
+	document.addEventListener("drop", (event) => {
+		const payload = fileBrowserDropPayload(event);
+		if (!payload) return;
+		if (event.target?.closest?.(".gjj-file-browser")) return;
+		event.preventDefault();
+		if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+		Promise.resolve(globalThis.__gjjAnyPreviewImportLocalFileAtPoint(payload, event.clientX, event.clientY)).catch((error) => {
+			console.warn("[GJJ_AnyPreview] canvas file browser drop failed", error);
+		});
+	});
+}
+
+installAnyPreviewCanvasDropTarget();
 
 function setDropTargetActive(node, active, text = "") {
 	const wrap = node?.__gjjAnyPreviewWrap;
@@ -2035,9 +2190,10 @@ function installAnyPreviewDropTarget(node, elements) {
 	node.__gjjAnyPreviewDropInstalled = true;
 	const targets = elements.filter(Boolean);
 	let dragDepth = 0;
-	const stopIfImages = (event) => {
+	const stopIfSupported = (event) => {
+		const hasBrowserFile = hasFileBrowserDrop(event);
 		const hasImage = imageFilesFromDropEvent(event).length > 0 || Array.from(event?.dataTransfer?.items || []).some((item) => String(item?.type || "").startsWith("image/"));
-		if (!hasImage) {
+		if (!hasBrowserFile && !hasImage) {
 			return false;
 		}
 		event.preventDefault();
@@ -2047,23 +2203,28 @@ function installAnyPreviewDropTarget(node, elements) {
 	};
 	for (const target of targets) {
 		target.addEventListener("dragenter", (event) => {
-			if (!stopIfImages(event)) return;
+			if (!stopIfSupported(event)) return;
 			dragDepth += 1;
-			setDropTargetActive(node, true);
+			setDropTargetActive(node, true, hasFileBrowserDrop(event) ? "松开导入文件" : "松开导入图片");
 		});
 		target.addEventListener("dragover", (event) => {
-			stopIfImages(event);
+			stopIfSupported(event);
 		});
 		target.addEventListener("dragleave", (event) => {
-			if (!stopIfImages(event)) return;
+			if (!stopIfSupported(event)) return;
 			dragDepth = Math.max(0, dragDepth - 1);
 			if (!dragDepth) {
 				setDropTargetActive(node, false);
 			}
 		});
 		target.addEventListener("drop", (event) => {
-			if (!stopIfImages(event)) return;
+			if (!stopIfSupported(event)) return;
 			dragDepth = 0;
+			const browserPayload = fileBrowserDropPayload(event);
+			if (browserPayload) {
+				void importLocalFileFromBrowserNode(node, browserPayload);
+				return;
+			}
 			const files = imageFilesFromDropEvent(event);
 			if (!files.length) {
 				setDropTargetActive(node, false);

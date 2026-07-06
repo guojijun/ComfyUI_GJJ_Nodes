@@ -504,6 +504,65 @@ def normalize_preview_media_items(items: Any) -> list[dict[str, Any]]:
     return result
 
 
+def preview_media_item_path(item: dict[str, Any]) -> Path:
+    media_type = str(item.get("type") or "temp").strip().lower()
+    if media_type == "output":
+        root = Path(folder_paths.get_output_directory()).resolve()
+    elif media_type == "input":
+        root = Path(folder_paths.get_input_directory()).resolve()
+    else:
+        root = Path(folder_paths.get_temp_directory()).resolve()
+    filename = str(item.get("filename") or "").replace("\\", "/").strip("/")
+    subfolder = str(item.get("subfolder") or "").replace("\\", "/").strip("/")
+    if not filename or "/" in filename:
+        raise ValueError("预览图片文件名无效。")
+    path = (root / subfolder / filename).resolve() if subfolder else (root / filename).resolve()
+    path.relative_to(root)
+    return path
+
+
+def preview_media_images_to_tensor(items: list[dict[str, Any]]) -> torch.Tensor | None:
+    """把 AnyPreview 保存的图片预览项还原成 IMAGE 张量，供透传输出继续接下游图片节点。"""
+    if not items:
+        return None
+    try:
+        import numpy as np
+        from PIL import ImageOps, ImageSequence
+    except Exception as exc:
+        print(f"[GJJ] AnyPreview 图片透传需要 Pillow/numpy：{exc}")
+        return None
+
+    frames: list[torch.Tensor] = []
+    target_size: tuple[int, int] | None = None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            path = preview_media_item_path(item)
+            if not path.is_file():
+                continue
+            with Image.open(path) as image:
+                try:
+                    source_frames = list(ImageSequence.Iterator(image))
+                except Exception:
+                    source_frames = [image]
+                for frame in source_frames:
+                    current = ImageOps.exif_transpose(frame).convert("RGB")
+                    if target_size is None:
+                        target_size = current.size
+                    elif current.size != target_size:
+                        resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+                        current = current.resize(target_size, resample)
+                    array = np.asarray(current).astype(np.float32) / 255.0
+                    frames.append(torch.from_numpy(array))
+        except Exception as error:
+            print(f"[GJJ] AnyPreview 图片透传读取失败：{error}")
+            continue
+    if not frames:
+        return None
+    return torch.stack(frames, dim=0).contiguous()
+
+
 def annotate_preview_image_dimensions(
     items: list[dict[str, Any]],
     images: torch.Tensor,
@@ -1440,6 +1499,7 @@ class GJJ_AnyPreview:
         raw_values = []
         using_cached_inputs = False
         held_images: list[dict[str, Any]] = []
+        held_image_tensor: torch.Tensor | None = None
         held_media_kind = ""
         held_media: list[dict[str, Any]] = []
         held_media_text = ""
@@ -1483,7 +1543,8 @@ class GJJ_AnyPreview:
         if held_images and not preview_values:
             preview_kind = "image"
             preview_text = f"保持图片预览：{len(held_images)} 张"
-            merged = held_images[0] if len(held_images) == 1 else held_images
+            held_image_tensor = preview_media_images_to_tensor(held_images)
+            merged = held_image_tensor if held_image_tensor is not None else (held_images[0] if len(held_images) == 1 else held_images)
         if held_media and not preview_values:
             preview_kind = held_media_kind
             label = {"audio": "音频", "video": "视频", "3d": "3D 文件"}.get(
@@ -1565,6 +1626,7 @@ class GJJ_AnyPreview:
 
         elif (
             not has_expanded_items
+            and not held_images
             and preview_kind in {"image", "mask"}
             and isinstance(merged, torch.Tensor)
         ):
@@ -1731,6 +1793,56 @@ try:
         )
         return info
 
+    def _preview_kind_from_suffix(path: Path) -> str:
+        suffix = path.suffix.lower()
+        if suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".exr", ".hdr"}:
+            return "image"
+        if suffix in {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".aiff", ".aif"}:
+            return "audio"
+        if suffix in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".wmv", ".flv"}:
+            return "video"
+        if suffix in {".glb", ".gltf", ".obj", ".fbx", ".stl", ".usdz", ".ply", ".splat", ".spz", ".ksplat"}:
+            return "3d"
+        if suffix in {".txt", ".csv", ".tsv", ".json", ".yaml", ".yml", ".md", ".html", ".htm", ".xml", ".ini", ".log", ".py", ".js", ".css"}:
+            return "text"
+        return "text"
+
+    def _copy_local_file_to_any_preview_temp(path_text: str) -> tuple[str, dict[str, Any] | None, str]:
+        source = Path(str(path_text or "").strip().strip('"')).expanduser().resolve()
+        if not source.exists() or not source.is_file():
+            raise FileNotFoundError(f"文件不存在：{source}")
+        kind = _preview_kind_from_suffix(source)
+        if kind == "text":
+            raw = source.read_bytes()
+            text = ""
+            for encoding in ("utf-8-sig", "utf-8", "gb18030"):
+                try:
+                    text = raw.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if not text:
+                text = raw.decode("utf-8", errors="replace")
+            if len(text) > 20000:
+                text = text[:20000] + "\n\n... 文本过长，已截断 ..."
+            return "text", None, f"文件：{source}\n\n{text}"
+
+        target_dir = Path(folder_paths.get_temp_directory()) / "GJJ" / "any_preview" / "dropped"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        safe_stem = re.sub(r"[^0-9A-Za-z._-]+", "_", source.stem).strip("._-") or "file"
+        target_name = f"{safe_stem}_{uuid.uuid4().hex[:10]}{source.suffix.lower()}"
+        target = target_dir / target_name
+        shutil.copy2(source, target)
+        item = {
+            "filename": target_name,
+            "subfolder": "GJJ/any_preview/dropped",
+            "type": "temp",
+            "original_name": source.name,
+            "source_path": str(source),
+            "format": source.suffix.lower().lstrip("."),
+        }
+        return kind, item, f"本地文件：{source}"
+
     @PromptServer.instance.routes.post("/gjj/any_preview/open_media_folder")
     async def gjj_any_preview_open_media_folder(request):
         try:
@@ -1789,6 +1901,18 @@ try:
             if not uploaded:
                 return web.json_response({"error": "缺少图片"}, status=400)
             return web.json_response({"images": uploaded})
+        except Exception as error:
+            return web.json_response({"error": str(error)}, status=500)
+
+    @PromptServer.instance.routes.post("/gjj/any_preview/import_local_file")
+    async def gjj_any_preview_import_local_file(request):
+        try:
+            payload = await request.json()
+            path_text = payload.get("path") if isinstance(payload, dict) else ""
+            kind, item, text = _copy_local_file_to_any_preview_temp(str(path_text or ""))
+            if kind == "text":
+                return web.json_response({"kind": "text", "text": text})
+            return web.json_response({"kind": kind, "items": [item], "text": text})
         except Exception as error:
             return web.json_response({"error": str(error)}, status=500)
 

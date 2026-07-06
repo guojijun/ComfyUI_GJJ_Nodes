@@ -1,482 +1,427 @@
-/**
- * GJJ_Qwen3ASRTextFormats 节点前端扩展
- * - 将 Boolean 控件改为按钮（按句分段、自动下载模型）
- * - 添加状态栏和生成文本按钮
- * - 显示生成的多行文本，支持一键复制
- */
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 
-(function () {
-    if (typeof window === "undefined" || typeof window.comfyAPI === "undefined") return;
+const TARGET = "GJJ_Qwen3ASRTextFormats";
+const PANEL_WIDGET = "__gjj_qwen3_asr_panel";
+const IMPORT_MEDIA_ENDPOINT = "/gjj/universal_tts/import_media";
+const EMPTY_TEXT = "（暂无生成文本）";
+const OUTPUT_PROPERTY = "gjj_qwen3_output_order";
+const OUTPUT_STORAGE = "output_order_json";
+const OUTPUT_DEFS = [
+	{ key: "text_list", name: "分段文本", type: "STRING", tip: "每个识别片段一行。" },
+	{ key: "timestamps", name: "时间戳表", type: "STRING", tip: "[开始s-结束s] 文本。" },
+	{ key: "start_times", name: "开始时间列表", type: "STRING", tip: "片段开始时间数组。" },
+	{ key: "end_times", name: "结束时间列表", type: "STRING", tip: "片段结束时间数组。" },
+];
+const PARAM_GROUPS = {
+	model: ["asr_model_name", "aligner_model_name"],
+	settings: ["asr_language", "align_language", "context", "precision", "max_inference_batch_size", "max_new_tokens"],
+};
+const LABELS = {
+	example_audio: "示例音频", asr_model_name: "ASR模型", aligner_model_name: "对齐模型",
+	asr_language: "识别语言", align_language: "对齐语言", context: "上下文提示",
+	precision: "计算精度", max_inference_batch_size: "推理批量", max_new_tokens: "最大输出长度",
+};
 
-    const STATUS_WIDGET_NAME = "__gjj_qwen3_asr_status";
-    const BOOL_WIDGETS = ["segment_by_sentence", "auto_download"];
-    const EMPTY_TEXT = "（暂无生成文本）";
+function widget(node, name) {
+	return (node.widgets || []).find((item) => item?.name === name);
+}
 
-    function isExecutionOutputNode(node) {
-        if (!node) return false;
-        if (node === undefined || node === null) return false;
-        if (node.comfyClass === "GJJ_Qwen3ASRTextFormats") return true;
-        if (node.constructor?.nodeData?.output_node === true) return true;
-        if (node.nodeData?.output_node === true) return true;
-        if (node.flags?.output === true) return true;
-        return false;
-    }
+function setWidget(node, name, value) {
+	const item = widget(node, name);
+	if (!item) return;
+	item.value = value;
+	item.callback?.(value);
+}
 
-    async function queueOnlyCurrentNode(node) {
-        if (!node || !node.graph) return false;
+function hideWidget(item) {
+	if (!item || item.__gjjHidden) return;
+	item.__gjjHidden = true;
+	item.__gjjComputeSize = item.computeSize;
+	item.__gjjOriginalType = item.type;
+	item.options ||= {};
+	item.options.hidden = true;
+	item.options.display = "hidden";
+	item.type = "hidden";
+	item.computeSize = () => [0, 0];
+	item.getHeight = () => 0;
+	item.hidden = true;
+	const element = item.element || item.inputEl;
+	if (element?.style) element.style.display = "none";
+}
 
-        const graph = node.graph || app.graph;
-        const allNodes = graph?._nodes || app.graph?._nodes || [];
+function ensureProperties(node) {
+	node.properties ||= {};
+	if (node.properties.segment_by_sentence === undefined) node.properties.segment_by_sentence = true;
+}
 
-        const savedModes = [];
-        const oldSelectedNodes = app.canvas?.selected_nodes;
-        const oldSelectedNode = app.canvas?.selected_node;
+function readOutputOrder(node, serialized = null) {
+	ensureProperties(node);
+	let order = node.properties[OUTPUT_PROPERTY];
+	if (serialized) {
+		const names = (serialized.outputs || []).map((output) => output?.name);
+		const restored = names.map((name) => ({
+			"时间戳表": "timestamps", "分段文本": "text_list",
+			"开始时间列表": "start_times", "结束时间列表": "end_times",
+		}[name])).filter(Boolean);
+		if (restored.length) order = restored;
+	}
+	if (!Array.isArray(order)) {
+		try { order = JSON.parse(String(widget(node, OUTPUT_STORAGE)?.value || "[]")); } catch (_) { order = []; }
+	}
+	order = order.filter((key) => OUTPUT_DEFS.some((def) => def.key === key));
+	if (!order.length) order = ["text_list"];
+	node.properties[OUTPUT_PROPERTY] = [...new Set(order)];
+	return node.properties[OUTPUT_PROPERTY];
+}
 
-        try {
-            for (const n of allNodes) {
-                if (!n || n === node) continue;
-                if (isExecutionOutputNode(n)) {
-                    savedModes.push([n, n.mode]);
-                    n.mode = 2;
-                }
-            }
+function syncOutputStorage(node) {
+	const value = JSON.stringify(readOutputOrder(node));
+	setWidget(node, OUTPUT_STORAGE, value);
+}
 
-            if (app.canvas) {
-                app.canvas.selected_nodes = {};
-                app.canvas.selected_nodes[node.id] = node;
-                app.canvas.selected_node = node;
-            }
+function applyOutputs(node, serialized = null) {
+	const order = readOutputOrder(node, serialized);
+	const targets = order.map((key) => OUTPUT_DEFS.find((def) => def.key === key)).filter(Boolean);
+	for (let index = (node.outputs || []).length - 1; index >= targets.length; index--) {
+		if (node.outputs[index]?.links?.length) continue;
+		node.removeOutput?.(index);
+	}
+	while ((node.outputs || []).length < targets.length) {
+		const def = targets[node.outputs.length];
+		node.addOutput?.(def.name, def.type);
+	}
+	targets.forEach((def, index) => {
+		const output = node.outputs?.[index];
+		if (!output) return;
+		output.name = output.label = output.localized_name = def.name;
+		output.type = def.type;
+		output.tooltip = def.tip;
+	});
+	syncOutputStorage(node);
+	node.setDirtyCanvas?.(true, true);
+}
 
-            node.setDirtyCanvas?.(true, true);
-            node.graph?.setDirtyCanvas?.(true, true);
-            app.graph?.setDirtyCanvas?.(true, true);
+function button(icon, title) {
+	const control = document.createElement("button");
+	control.type = "button";
+	control.textContent = icon;
+	control.title = title;
+	control.style.cssText = "flex:1;min-width:28px;height:28px;padding:2px 5px;border:1px solid #46606a;border-radius:6px;background:#1f3037;color:#edf7fb;cursor:pointer;font-size:15px";
+	return control;
+}
 
-            if (typeof app.queuePrompt === "function") {
-                await app.queuePrompt(0, 1);
-                return true;
-            }
+function closePopups(node, except = "") {
+	const state = node.__gjjQwen3Panel;
+	if (!state) return;
+	for (const key of ["modelPopup", "outputPopup", "settingsPopup"]) {
+		if (key !== except && state[key]) {
+			state[key].remove();
+			state[key] = null;
+		}
+	}
+	syncButtons(node);
+}
 
-            console.warn("[GJJ] app.queuePrompt 不存在，无法只刷新当前节点");
-            return false;
-        } finally {
-            for (const [n, mode] of savedModes) {
-                n.mode = mode;
-            }
+function positionPopup(popup, anchor) {
+	document.body.append(popup);
+	const rect = anchor.getBoundingClientRect();
+	const width = popup.offsetWidth || 330;
+	popup.style.left = `${Math.min(innerWidth - width - 8, Math.max(8, rect.left))}px`;
+	popup.style.top = `${Math.min(innerHeight - popup.offsetHeight - 8, Math.max(8, rect.bottom + 6))}px`;
+}
 
-            if (app.canvas) {
-                app.canvas.selected_nodes = oldSelectedNodes;
-                app.canvas.selected_node = oldSelectedNode;
-            }
+function makePopup(title) {
+	const popup = document.createElement("div");
+	popup.style.cssText = "position:fixed;z-index:100000;width:330px;max-width:calc(100vw - 16px);padding:9px;border:1px solid #526873;border-radius:8px;background:#10171b;box-shadow:0 12px 28px #0008;color:#dce7e2;font:12px/1.35 system-ui,'Microsoft YaHei',sans-serif";
+	const head = document.createElement("div");
+	head.textContent = title;
+	head.style.cssText = "font-weight:700;color:#edf7fb;margin-bottom:7px";
+	popup.append(head);
+	for (const event of ["pointerdown", "mousedown"]) popup.addEventListener(event, (e) => e.stopPropagation());
+	return popup;
+}
 
-            node.setDirtyCanvas?.(true, true);
-            node.graph?.setDirtyCanvas?.(true, true);
-            app.graph?.setDirtyCanvas?.(true, true);
-        }
-    }
+function optionsOf(item) {
+	const values = item?.options?.values;
+	return Array.isArray(values) ? values : [];
+}
 
-    function setStatus(node, text, progress) {
-        const status = node.__gjjQwen3Status;
-        if (!status) return;
-        status.label.textContent = text;
-        if (progress != null) {
-            const pct = Math.max(0, Math.min(100, Math.round(progress * 100)));
-            status.bar.style.width = `${pct}%`;
-        }
-    }
+function addParameterRow(node, popup, name) {
+	const item = widget(node, name);
+	if (!item) return;
+	const row = document.createElement("label");
+	row.style.cssText = "display:flex;align-items:flex-start;gap:8px;margin:6px 0";
+	const label = document.createElement("span");
+	label.textContent = LABELS[name] || name;
+	label.style.cssText = "width:82px;flex:0 0 auto;padding-top:5px;color:#bdcbd1";
+	let control;
+	const values = optionsOf(item);
+	if (values.length) {
+		control = document.createElement("select");
+		for (const value of values) {
+			const option = document.createElement("option");
+			option.value = option.textContent = String(value);
+			control.append(option);
+		}
+		control.value = String(item.value ?? "");
+	} else if (name === "context") {
+		control = document.createElement("textarea");
+		control.rows = 4;
+		control.value = String(item.value ?? "");
+	} else {
+		control = document.createElement("input");
+		control.type = "number";
+		control.value = String(item.value ?? "");
+		if (item.options?.min != null) control.min = item.options.min;
+		if (item.options?.max != null) control.max = item.options.max;
+	}
+	control.style.cssText = "box-sizing:border-box;flex:1;min-width:0;padding:5px 7px;border:1px solid #41535b;border-radius:5px;background:#0b1114;color:#e5f3f7";
+	control.addEventListener("change", () => {
+		const value = control.type === "number" ? Number(control.value) : control.value;
+		setWidget(node, name, value);
+		node.graph?.change?.();
+	});
+	row.append(label, control);
+	popup.append(row);
+}
 
-    function bindGeneratedTextCopyButton(status) {
-        if (!status?.copyBtn) return;
-        const oldCopyBtn = status.copyBtn.cloneNode(true);
-        status.copyBtn.parentNode.replaceChild(oldCopyBtn, status.copyBtn);
-        status.copyBtn = oldCopyBtn;
-        status.copyBtn.textContent = "📋";
-        status.copyBtn.title = "复制生成的文本到剪贴板";
-        status.copyBtn.style.display = "none";
-        status.copyBtn.style.background = "#4a5a6a";
-        status.copyBtn.style.color = "#fff";
-        status.copyBtn.addEventListener("mouseenter", () => status.copyBtn.style.background = "#5a6a7a");
-        status.copyBtn.addEventListener("mouseleave", () => status.copyBtn.style.background = "#4a5a6a");
-        status.copyBtn.addEventListener("click", () => {
-            const text = status.textDisplay?.textContent;
-            if (text && text !== EMPTY_TEXT) {
-                navigator.clipboard.writeText(text).then(() => {
-                    const originalText = status.copyBtn.textContent;
-                    status.copyBtn.textContent = "✅ 已复制";
-                    setTimeout(() => {
-                        status.copyBtn.textContent = originalText;
-                    }, 1500);
-                }).catch(err => {
-                    console.error("[GJJ] 复制失败:", err);
-                    alert("复制失败，请手动选择文本复制");
-                });
-            } else {
-                alert("暂无文本可复制");
-            }
-        });
-    }
+function toggleParameterPopup(node, group, stateKey, anchor, title) {
+	const state = node.__gjjQwen3Panel;
+	if (state[stateKey]) {
+		closePopups(node);
+		return;
+	}
+	closePopups(node, stateKey);
+	const popup = makePopup(title);
+	for (const name of PARAM_GROUPS[group]) addParameterRow(node, popup, name);
+	const done = document.createElement("button");
+	done.textContent = "确定";
+	done.style.cssText = "float:right;margin-top:5px;padding:5px 12px;border:1px solid #6ea6cf;border-radius:6px;background:#245477;color:white;cursor:pointer";
+	done.onclick = () => closePopups(node);
+	popup.append(done);
+	state[stateKey] = popup;
+	positionPopup(popup, anchor);
+	syncButtons(node);
+}
 
-    function ensureStatusWidget(node) {
-        if (node.__gjjQwen3Status) {
-            return node.__gjjQwen3Status;
-        }
-        const box = document.createElement("div");
-        box.style.cssText = [
-            "padding:6px 10px",
-            "border:1px solid #41535b",
-            "border-radius:8px",
-            "background:#121a1f",
-            "color:#dce7e2",
-            "font-size:12px",
-            "line-height:1.35",
-            "white-space:pre-wrap",
-            "word-break:break-word",
-        ].join(";");
+function toggleOutputPopup(node) {
+	const state = node.__gjjQwen3Panel;
+	if (state.outputPopup) return closePopups(node);
+	closePopups(node, "outputPopup");
+	const popup = makePopup("输出接口");
+	const order = readOutputOrder(node);
+	for (const def of OUTPUT_DEFS) {
+		const row = document.createElement("label");
+		row.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px;border-radius:5px;cursor:pointer";
+		const check = document.createElement("input");
+		check.type = "checkbox";
+		check.checked = order.includes(def.key);
+		check.disabled = def.key === "text_list";
+		check.onchange = () => {
+			const current = readOutputOrder(node);
+			let next = current.filter((key) => key !== def.key);
+			if (check.checked) next.push(def.key);
+			const removedIndex = current.indexOf(def.key);
+			const linkedAtOrAfter = (node.outputs || []).some((output, index) => index >= removedIndex && output.links?.length);
+			if (!check.checked && linkedAtOrAfter) {
+				check.checked = true;
+				check.title = "请先断开该接口及其后方接口的连线";
+				return;
+			}
+			node.properties[OUTPUT_PROPERTY] = OUTPUT_DEFS.map((item) => item.key).filter((key) => next.includes(key));
+			applyOutputs(node);
+			node.graph?.change?.();
+		};
+		const text = document.createElement("span");
+		text.textContent = `${def.name}　${def.tip}`;
+		row.append(check, text);
+		popup.append(row);
+	}
+	state.outputPopup = popup;
+	positionPopup(popup, state.output);
+	syncButtons(node);
+}
 
-        // 第一行：Boolean 按钮
-        const boolBtnRow = document.createElement("div");
-        boolBtnRow.style.cssText = "display:flex;gap:6px;margin-bottom:8px";
+function syncButtons(node) {
+	const state = node.__gjjQwen3Panel;
+	if (!state) return;
+	state.segment.style.background = node.properties.segment_by_sentence ? "#245477" : "#1f3037";
+	for (const [buttonName, popupName] of [["model", "modelPopup"], ["output", "outputPopup"], ["settings", "settingsPopup"]]) {
+		state[buttonName].style.borderColor = state[popupName] ? "#9fc8e8" : "#46606a";
+	}
+}
 
-        const boolButtons = {};
-        const boolConfigs = [
-            { name: "segment_by_sentence", label: "📝 按句分段", default: true },
-            { name: "auto_download", label: "⬇️ 自动下载", default: true },
-        ];
+function setStatus(node, text, progress) {
+	const state = node.__gjjQwen3Panel;
+	if (!state) return;
+	state.status.style.display = text ? "flex" : "none";
+	state.label.textContent = text;
+	if (progress != null) state.bar.style.width = `${Math.max(0, Math.min(100, Math.round(progress * 100)))}%`;
+	resizeNode(node);
+}
 
-        boolConfigs.forEach(config => {
-            const btn = document.createElement("button");
-            btn.textContent = config.label;
-            btn.title = config.name;
-            btn.style.cssText = [
-                "flex: 1",
-                "background: #5aa8ff",
-                "color: #fff",
-                "border: none",
-                "border-radius:4px",
-                "padding: 4px 8px",
-                "cursor: pointer",
-                "font-size: 11px",
-                "font-weight: bold",
-                "transition: all 0.2s",
-            ].join(";");
+function resizeNode(node) {
+	requestAnimationFrame(() => {
+		const size = node.computeSize?.();
+		if (Array.isArray(size)) node.setSize?.([Math.max(340, node.size?.[0] || size[0]), size[1]]);
+		node.setDirtyCanvas?.(true, true);
+	});
+}
 
-            btn.__boolValue = config.default;
+function isOutputNode(node) {
+	return node?.comfyClass === TARGET || node?.constructor?.nodeData?.output_node === true || node?.flags?.output === true;
+}
 
-            btn.addEventListener("click", () => {
-                btn.__boolValue = !btn.__boolValue;
-                if (btn.__boolValue) {
-                    btn.style.background = "#5aa8ff";
-                    btn.style.color = "#fff";
-                } else {
-                    btn.style.background = "#3a3a3a";
-                    btn.style.color = "#aaa";
-                }
+async function queueOnlyCurrentNode(node) {
+	const nodes = node.graph?._nodes || app.graph?._nodes || [];
+	const saved = [];
+	try {
+		for (const item of nodes) if (item !== node && isOutputNode(item)) { saved.push([item, item.mode]); item.mode = 2; }
+		await app.queuePrompt?.(0, 1);
+		return true;
+	} finally {
+		for (const [item, mode] of saved) item.mode = mode;
+	}
+}
 
-                if (!node.properties) node.properties = {};
-                node.properties[config.name] = btn.__boolValue;
+function ensurePanel(node) {
+	if (node.__gjjQwen3Panel) return node.__gjjQwen3Panel;
+	const root = document.createElement("div");
+	root.style.cssText = "display:flex;flex-direction:column;gap:7px;padding:6px 8px;border:1px solid #41535b;border-radius:8px;background:#121a1f;color:#dce7e2;font:12px/1.35 system-ui,'Microsoft YaHei',sans-serif";
+	const toolbar = document.createElement("div");
+	toolbar.style.cssText = "display:flex;gap:5px";
+	const file = button("📁", "选择示例音频");
+	const model = button("🧠", "选择识别与对齐模型");
+	const segment = button("📝", "按句分段");
+	const output = button("🔌", "管理输出接口");
+	const settings = button("⚙️", "其它参数");
+	const copy = button("📋", "复制识别文本");
+	const generate = button("🎤", "只执行当前节点");
+	toolbar.append(file, model, segment, output, settings, copy, generate);
+	const fileInput = document.createElement("input");
+	fileInput.type = "file";
+	fileInput.accept = ".wav,.mp3,audio/wav,audio/mpeg";
+	fileInput.style.display = "none";
+	const status = document.createElement("div");
+	status.style.cssText = "display:none;flex-direction:column;gap:4px";
+	const label = document.createElement("div");
+	label.textContent = "等待执行";
+	const track = document.createElement("div");
+	track.style.cssText = "height:5px;overflow:hidden;border-radius:999px;background:#27343b";
+	const bar = document.createElement("div");
+	bar.style.cssText = "width:0%;height:100%;border-radius:999px;background:#5aa8ff;transition:width 160ms ease";
+	track.append(bar);
+	status.append(label, track);
+	const textDisplay = document.createElement("div");
+	textDisplay.textContent = EMPTY_TEXT;
+	textDisplay.style.cssText = "display:none;padding:8px;max-height:180px;overflow:auto;border:1px solid #3a4a52;border-radius:5px;background:#1a2329;color:#c8d6e5;white-space:pre-wrap;word-break:break-word";
+	root.append(fileInput, toolbar, status, textDisplay);
+	const panel = { root, file, model, segment, output, settings, copy, generate, fileInput, status, label, bar, textDisplay, modelPopup: null, outputPopup: null, settingsPopup: null };
+	node.__gjjQwen3Panel = panel;
+	node.addDOMWidget?.(PANEL_WIDGET, PANEL_WIDGET, root, {
+		serialize: false,
+		hideOnZoom: false,
+		getHeight: () => {
+			let height = 44;
+			if (status.style.display !== "none") height += 34;
+			if (textDisplay.style.display !== "none") height += Math.min(196, Math.max(50, textDisplay.scrollHeight + 10));
+			return height;
+		},
+	});
+	file.onclick = () => fileInput.click();
+	fileInput.onchange = async () => {
+		const selected = fileInput.files?.[0];
+		if (!selected) return;
+		file.disabled = true;
+		setStatus(node, `正在导入音频：${selected.name}`, 0.05);
+		try {
+			const body = new FormData();
+			body.append("file", selected, selected.name);
+			const response = await fetch(IMPORT_MEDIA_ENDPOINT, { method: "POST", body });
+			const data = await response.json();
+			if (!response.ok || !data?.ok) throw new Error(data?.error || "导入音频失败");
+			setWidget(node, "example_audio", data.name || "");
+			node.graph?.change?.();
+			setStatus(node, `已载入：${data.name || selected.name}`, 1);
+		} catch (error) {
+			setStatus(node, `导入失败：${error?.message || error}`, 1);
+		} finally {
+			file.disabled = false;
+			fileInput.value = "";
+		}
+	};
+	model.onclick = () => toggleParameterPopup(node, "model", "modelPopup", model, "模型");
+	settings.onclick = () => toggleParameterPopup(node, "settings", "settingsPopup", settings, "其它参数");
+	output.onclick = () => toggleOutputPopup(node);
+	segment.onclick = () => { node.properties.segment_by_sentence = !node.properties.segment_by_sentence; syncButtons(node); node.graph?.change?.(); };
+	copy.onclick = async () => {
+		if (textDisplay.textContent && textDisplay.textContent !== EMPTY_TEXT) await navigator.clipboard.writeText(textDisplay.textContent);
+	};
+	generate.onclick = async () => {
+		generate.disabled = true;
+		setStatus(node, "正在生成文本…", 0);
+		try { await queueOnlyCurrentNode(node); } finally { setTimeout(() => { generate.disabled = false; }, 400); }
+	};
+	return panel;
+}
 
-                node.setDirtyCanvas?.(true, true);
-                node.graph?.setDirtyCanvas?.(true, true);
-                node.graph?.change?.();
-            });
+function patchNode(node, serialized = null) {
+	if (!node) return;
+	ensureProperties(node);
+	for (const name of ["example_audio", ...PARAM_GROUPS.model, ...PARAM_GROUPS.settings, OUTPUT_STORAGE]) hideWidget(widget(node, name));
+	ensurePanel(node);
+	applyOutputs(node, serialized);
+	syncButtons(node);
+	resizeNode(node);
+}
 
-            btn.addEventListener("mouseenter", () => {
-                btn.style.opacity = "0.85";
-            });
-            btn.addEventListener("mouseleave", () => {
-                btn.style.opacity = "1";
-            });
-
-            boolBtnRow.appendChild(btn);
-            boolButtons[config.name] = btn;
-        });
-
-        box.appendChild(boolBtnRow);
-
-        // 第二行：状态栏 + 生成文本按钮
-        const statusRow = document.createElement("div");
-        statusRow.style.cssText = "display:flex;gap:8px;align-items:center";
-
-        const statusContent = document.createElement("div");
-        statusContent.style.cssText = "flex:1;min-width:0";
-
-        const label = document.createElement("div");
-        label.textContent = "等待执行";
-        label.style.cssText = "margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
-
-        const track = document.createElement("div");
-        track.style.cssText = [
-            "height:5px",
-            "overflow:hidden",
-            "border-radius:999px",
-            "background:#27343b",
-        ].join(";");
-        const bar = document.createElement("div");
-        bar.style.cssText = [
-            "width:0%",
-            "height:100%",
-            "border-radius:999px",
-            "background:#5aa8ff",
-            "transition:width 160ms ease",
-        ].join(";");
-        track.appendChild(bar);
-        statusContent.append(label, track);
-
-        const generateBtn = document.createElement("button");
-        generateBtn.textContent = "🎤 生成文本";
-        generateBtn.title = "只执行当前节点，生成识别文本";
-        generateBtn.style.cssText = [
-            "background: #2d5a9e",
-            "color: #fff",
-            "border: none",
-            "border-radius:4px",
-            "padding: 4px 12px",
-            "cursor: pointer",
-            "font-size: 11px",
-            "font-weight: bold",
-            "white-space: nowrap",
-        ].join(";");
-        generateBtn.addEventListener("mouseenter", () => generateBtn.style.background = "#3d6aae");
-        generateBtn.addEventListener("mouseleave", () => generateBtn.style.background = "#2d5a9e");
-
-        statusRow.append(statusContent, generateBtn);
-        box.appendChild(statusRow);
-
-        // 第三行：生成的文本显示区域 + 复制按钮（同一行）
-        const textRow = document.createElement("div");
-        textRow.style.cssText = "margin-top:8px;display:flex;gap:6px;";
-
-        const textDisplay = document.createElement("div");
-        textDisplay.style.cssText = [
-            "flex:1",
-            "padding:8px",
-            "background:#1a2329",
-            "border:1px solid #3a4a52",
-            "border-radius:4px",
-            "font-family:monospace",
-            "font-size:11px",
-            "max-height:200px",
-            "overflow-y:auto",
-            "white-space:pre-wrap",
-            "word-break:break-word",
-            "color:#c8d6e5",
-        ].join(";");
-        textDisplay.textContent = EMPTY_TEXT;
-        textRow.appendChild(textDisplay);
-
-        // 复制按钮（默认隐藏）
-        const copyBtn = document.createElement("button");
-        copyBtn.textContent = "📋";
-        copyBtn.title = "复制生成的文本到剪贴板";
-        copyBtn.style.cssText = [
-            "display:none",
-            "background:#4a5a6a",
-            "color:#fff",
-            "border:none",
-            "border-radius:4px",
-            "padding:4px 8px",
-            "cursor:pointer",
-            "font-size:11px",
-            "font-weight:bold",
-            "white-space:nowrap",
-            "height:fit-content",
-        ].join(";");
-        copyBtn.addEventListener("mouseenter", () => copyBtn.style.background = "#5a6a7a");
-        copyBtn.addEventListener("mouseleave", () => copyBtn.style.background = "#4a5a6a");
-        textRow.appendChild(copyBtn);
-
-        box.appendChild(textRow);
-
-        // 创建状态对象（在 widget 之前）
-        const statusObj = {
-            widget: null,
-            box,
-            label,
-            bar,
-            generateBtn,
-            boolButtons,
-            boolBtnRow,
-            statusRow,
-            textDisplay,
-            copyBtn
-        };
-
-        const widget = node.addDOMWidget?.(STATUS_WIDGET_NAME, STATUS_WIDGET_NAME, box, {
-            serialize: false,
-            hideOnZoom: false,
-            getHeight: () => {
-                // 根据文本内容动态计算高度
-                const textHeight = textDisplay?.scrollHeight || 0;
-                const baseHeight = 240; // 基础高度（按钮、标签等）
-                return Math.max(baseHeight, baseHeight + textHeight - 50);
-            },
-        });
-
-        statusObj.widget = widget;
-        node.__gjjQwen3Status = statusObj;
-        return node.__gjjQwen3Status;
-    }
-
-    function patchNode(node) {
-        if (!node || node.__gjjQwen3Patched) {
-            return;
-        }
-        node.__gjjQwen3Patched = true;
-        ensureStatusWidget(node);
-        setStatus(node, "等待执行");
-
-        // 彻底删除旧的 Boolean widgets
-        BOOL_WIDGETS.forEach(widgetName => {
-            const widgetIndex = (node.widgets || []).findIndex(w => w.name === widgetName);
-            if (widgetIndex !== -1) {
-                node.widgets.splice(widgetIndex, 1);
-            }
-        });
-
-        // 初始化 Boolean 状态
-        BOOL_WIDGETS.forEach(widgetName => {
-            if (!node.properties) node.properties = {};
-            if (node.properties[widgetName] === undefined) {
-                node.properties[widgetName] = true;
-            }
-        });
-
-        // 同步 Boolean 按钮状态
-        const status = node.__gjjQwen3Status;
-        if (status?.boolButtons) {
-            Object.entries(status.boolButtons).forEach(([name, btn]) => {
-                const value = node.properties?.[name] ?? btn.__boolValue;
-                btn.__boolValue = value;
-                if (btn.__boolValue) {
-                    btn.style.background = "#5aa8ff";
-                    btn.style.color = "#fff";
-                } else {
-                    btn.style.background = "#3a3a3a";
-                    btn.style.color = "#aaa";
-                }
-            });
-        }
-
-        // 绑定生成文本按钮事件
-        if (status?.generateBtn) {
-            // 移除旧的事件监听器
-            const oldGenerateBtn = status.generateBtn.cloneNode(true);
-            status.generateBtn.parentNode.replaceChild(oldGenerateBtn, status.generateBtn);
-            status.generateBtn = oldGenerateBtn;
-
-            status.generateBtn.addEventListener("click", async () => {
-                console.log("[GJJ] 生成文本: 只执行当前节点");
-                const btn = status.generateBtn;
-                const originalText = btn.textContent;
-
-                try {
-                    btn.textContent = "⏳ 生成中...";
-                    btn.disabled = true;
-                    btn.style.cursor = "not-allowed";
-                    btn.style.opacity = "0.65";
-
-                    setStatus(node, "正在生成文本...");
-
-                    const ok = await queueOnlyCurrentNode(node);
-
-                    if (!ok) {
-                        console.warn("[GJJ] 生成文本失败：queueOnlyCurrentNode 返回 false");
-                        setStatus(node, "生成失败");
-                    }
-                } catch (err) {
-                    console.error("[GJJ] 生成文本失败:", err);
-                    setStatus(node, "生成失败");
-                } finally {
-                    setTimeout(() => {
-                        btn.textContent = originalText;
-                        btn.disabled = false;
-                        btn.style.cursor = "pointer";
-                        btn.style.opacity = "1";
-                    }, 500);
-                }
-            });
-        }
-
-        // 绑定复制按钮事件
-        if (status?.copyBtn) {
-            bindGeneratedTextCopyButton(status);
-        }
-    }
-
-    app.registerExtension({
-        name: "GJJ.Qwen3ASRTextFormats",
-        async beforeRegisterNodeDef(nodeType, nodeData) {
-            if (nodeData?.name === "GJJ_Qwen3ASRTextFormats") {
-                const origOnNodeCreated = nodeType.prototype.onNodeCreated;
-                nodeType.prototype.onNodeCreated = function () {
-                    const result = origOnNodeCreated?.apply(this, arguments);
-                    patchNode(this);
-                    return result;
-                };
-            }
-        },
-        async setup(app) {
-            // 监听后端发送的文本生成完成事件
-            api.addEventListener("gjj_qwen3_text_generated", (event) => {
-                try {
-                    const data = event.detail || {};
-                    const nodeId = data.node;
-                    const textList = data.text_list || "";
-
-                    if (!nodeId || !textList) return;
-
-                    // 查找对应的节点
-                    const nodes = app.graph?._nodes || [];
-                    for (const node of nodes) {
-                        if (String(node.id) === String(nodeId)) {
-                            const status = node.__gjjQwen3Status;
-                            if (status?.textDisplay) {
-                                status.textDisplay.textContent = textList;
-                                status.textDisplay.style.color = "#c8d6e5";
-                                bindGeneratedTextCopyButton(status);
-                                status.copyBtn.style.display = "block";
-                                setStatus(node, "文本已生成");
-                            }
-                            break;
-                        }
-                    }
-                } catch (err) {
-                    console.error("[GJJ] 处理文本生成事件失败:", err);
-                }
-            });
-
-            // 监听后端发送的普通执行错误事件
-            api.addEventListener("gjj_qwen3_error", (event) => {
-                try {
-                    const data = event.detail || {};
-                    const nodeId = data.node;
-                    const errorMessage = data.error || "";
-
-                    if (!nodeId || !errorMessage) return;
-
-                    // 查找对应的节点
-                    const nodes = app.graph?._nodes || [];
-                    for (const node of nodes) {
-                        if (String(node.id) === String(nodeId)) {
-                            const status = node.__gjjQwen3Status;
-                            if (status?.textDisplay) {
-                                status.textDisplay.textContent = `❌ 执行失败：\n\n${errorMessage}`;
-                                status.textDisplay.style.color = "#ffb86b";
-                                status.copyBtn.style.display = "none";
-                                setStatus(node, "执行失败");
-                            }
-                            break;
-                        }
-                    }
-                } catch (err) {
-                    console.error("[GJJ] 处理错误事件失败:", err);
-                }
-            });
-        },
-    });
-
-    if (typeof window !== "undefined") {
-        window.__gjjQwen3ASRStatusPatch = patchNode;
-    }
-})();
+app.registerExtension({
+	name: "GJJ.Qwen3ASRTextFormats",
+	beforeRegisterNodeDef(nodeType, nodeData) {
+		if (nodeData?.name !== TARGET) return;
+		const created = nodeType.prototype.onNodeCreated;
+		nodeType.prototype.onNodeCreated = function (...args) {
+			const result = created?.apply(this, args);
+			for (const delay of [0, 40, 150]) setTimeout(() => patchNode(this), delay);
+			return result;
+		};
+		const configured = nodeType.prototype.onConfigure;
+		nodeType.prototype.onConfigure = function (data, ...args) {
+			const result = configured?.apply(this, [data, ...args]);
+			for (const delay of [0, 40, 150]) setTimeout(() => patchNode(this, data), delay);
+			return result;
+		};
+		const serialized = nodeType.prototype.onSerialize;
+		nodeType.prototype.onSerialize = function (...args) {
+			syncOutputStorage(this);
+			return serialized?.apply(this, args);
+		};
+	},
+	setup() {
+		for (const node of app.graph?._nodes || []) if (node.comfyClass === TARGET) patchNode(node);
+		api.addEventListener("gjj_node_progress", (event) => {
+			const data = event.detail || {};
+			for (const node of app.graph?._nodes || []) if (String(node.id) === String(data.node)) setStatus(node, data.text || "", data.progress);
+		});
+		api.addEventListener("gjj_qwen3_text_generated", (event) => {
+			const data = event.detail || {};
+			for (const node of app.graph?._nodes || []) if (String(node.id) === String(data.node)) {
+				const state = ensurePanel(node);
+				state.textDisplay.textContent = data.text_list || EMPTY_TEXT;
+				state.textDisplay.style.display = data.text_list ? "block" : "none";
+				setStatus(node, "文本已生成", 1);
+			}
+		});
+		api.addEventListener("gjj_qwen3_error", (event) => {
+			const data = event.detail || {};
+			for (const node of app.graph?._nodes || []) if (String(node.id) === String(data.node)) {
+				const state = ensurePanel(node);
+				state.textDisplay.textContent = `❌ 执行失败：\n\n${data.error || ""}`;
+				state.textDisplay.style.display = "block";
+				state.textDisplay.style.color = "#ffb86b";
+				setStatus(node, "执行失败", 1);
+			}
+		});
+	},
+});

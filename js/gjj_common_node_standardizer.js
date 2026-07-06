@@ -148,6 +148,7 @@ const STATUS_ENABLED_CLASSES = new Set([
 ]);
 const STATUS_DISABLED_CLASSES = new Set([
 	"GJJ_CLIPPromptEncodePanel",
+	"GJJ_Qwen3ASRTextFormats",
 ]);
 const PRESERVE_DETAILED_COMPLETION_CLASSES = new Set([
 	"GJJ_OldPhotoRestorer",
@@ -845,6 +846,7 @@ function declaredModelTreeEntries(meta) {
 			type: escapeText(item.type || ""),
 			kind: escapeText(item.kind || ""),
 			icon: escapeText(item.icon || ""),
+			directory: Boolean(item.directory || item.dir || item.is_directory),
 		} : null;
 	};
 	const normalizeMany = (value) => {
@@ -1281,6 +1283,21 @@ function parseModelTreeItem(entry, part, fallbackFolder = "") {
 	const ext = cleanFilename.includes(".")
 		? `.${cleanFilename.split(".").pop().toLowerCase()}`
 		: "";
+	if (entry?.directory || entry?.dir || entry?.is_directory) {
+		const dirFolder = normalizeModelFolder(
+			folder.endsWith(`/${cleanFilename}`) || folder === cleanFilename
+				? folder
+				: [folder, cleanFilename].filter(Boolean).join("/")
+		) || "其他";
+		return {
+			folder: dirFolder,
+			filename: "",
+			icon: "📁",
+			kind,
+			label: String(entry.label || "模型"),
+			directory: true,
+		};
+	}
 	if (!ext || !MODEL_TREE_FILE_EXTENSIONS.has(ext)) {
 		return null;
 	}
@@ -1391,6 +1408,17 @@ function createModelHelpContent(items, emptyText, downloadUrl = DEFAULT_MODEL_DO
 	const pre = document.createElement("pre");
 	pre.className = "gjj-help-model-tree-pre";
 	pre.textContent = modelTreeText(modelTreeItems(items), emptyText || "未选择模型文件");
+	wrap.appendChild(pre);
+	return wrap;
+}
+
+function createModelHelpTextContent(text, downloadUrl = DEFAULT_MODEL_DOWNLOAD_URL) {
+	const wrap = document.createElement("div");
+	wrap.className = "gjj-help-model-content gjj-help-model-tree";
+	wrap.appendChild(createModelTreeDownloadLink(downloadUrl));
+	const pre = document.createElement("pre");
+	pre.className = "gjj-help-model-tree-pre";
+	pre.textContent = String(text || "").trim();
 	wrap.appendChild(pre);
 	return wrap;
 }
@@ -1656,7 +1684,13 @@ function showHelpDialog(node) {
 		|| ""
 	).trim();
 	const modelDownloadUrl = DEFAULT_MODEL_DOWNLOAD_URL;
-	if (modelEntries.length) {
+	const localModelTreeText = String(meta?.help?.model_tree_text || meta?.help?.modelTreeText || "").trim();
+	if (localModelTreeText) {
+		body.appendChild(createHelpSection(
+			"用到的模型",
+			createModelHelpTextContent(localModelTreeText, modelDownloadUrl)
+		));
+	} else if (modelEntries.length) {
 		body.appendChild(createHelpSection(
 			"用到的模型",
 			createModelHelpContent(modelEntries, "", modelDownloadUrl)

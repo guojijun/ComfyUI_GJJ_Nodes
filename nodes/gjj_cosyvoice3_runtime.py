@@ -30,7 +30,7 @@ if VENDOR_ROOT not in sys.path:
 
 
 COSYVOICE_ROOT = os.path.join(folder_paths.models_dir, "cosyvoice")
-LOCAL_AUDIO_ROOT = os.path.join(folder_paths.models_dir, "mp3")
+LOCAL_AUDIO_ROOT = os.path.join(folder_paths.models_dir, "GJJ", "wav")
 LEGACY_COSYVOICE_AUDIO_ROOT = os.path.join(COSYVOICE_ROOT, "mp3")
 LEGACY_LOCAL_AUDIO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "mp3"))
 DEFAULT_MODEL_NAME = "Fun-CosyVoice3-0.5B-2512"
