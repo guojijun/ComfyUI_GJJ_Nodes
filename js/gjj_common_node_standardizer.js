@@ -1338,28 +1338,49 @@ function createModelTreeDownloadLink(url = DEFAULT_MODEL_DOWNLOAD_URL) {
 }
 
 function modelTreeText(items, emptyText) {
-	const folders = new Map();
-	for (const item of items) {
-		const folder = normalizeModelFolder(item.folder || "其他") || "其他";
-		if (!folders.has(folder)) {
-			folders.set(folder, []);
+	const modelsNode = { name: "models", directory: true, children: new Map() };
+	const addNode = (parent, name, directory, icon = "📁") => {
+		const key = `${directory ? "dir" : "file"}:${name}:${icon}`;
+		if (!parent.children.has(key)) {
+			parent.children.set(key, { name, directory, icon, children: new Map() });
 		}
-		folders.get(folder).push(item);
+		return parent.children.get(key);
+	};
+	for (const item of items) {
+		const rawFolder = normalizeModelFolder(item.folder || "其他") || "其他";
+		const filename = String(item.filename || "").replaceAll("\\", "/").trim();
+		const folder = (() => {
+			if (!filename || !rawFolder.endsWith(`/${filename}`)) return rawFolder;
+			return normalizeModelFolder(rawFolder.slice(0, -filename.length).replace(/\/+$/, "")) || "其他";
+		})();
+		const folderParts = folder.split("/").map((part) => part.trim()).filter(Boolean);
+		let node = modelsNode;
+		for (const part of folderParts) {
+			node = addNode(node, part, true, "📁");
+		}
+		if (filename) {
+			addNode(node, filename, false, item.icon || "⚫");
+		}
 	}
 	const lines = ["ComfyUI/", "├──📁 models/"];
-	if (!folders.size) {
-		lines.push(`│　　 ├──⚫ ${emptyText}`);
+	if (!modelsNode.children.size) {
+		lines.push(`│   └──⚫ ${emptyText}`);
 		return lines.join("\n");
 	}
-	const folderEntries = Array.from(folders.entries());
-	folderEntries.forEach(([folder, files], folderIndex) => {
-		const folderLast = folderIndex === folderEntries.length - 1;
-		lines.push(`│   ${folderLast ? "└" : "├"}──📁 ${folder}/`);
-		files.forEach((file, fileIndex) => {
-			const fileLast = fileIndex === files.length - 1;
-			lines.push(`│   ${folderLast ? "    " : "│   "}${fileLast ? "└" : "├"}──${file.icon || "⚫"} ${file.filename}`);
+	const render = (node, prefix = "│   ") => {
+		const children = Array.from(node.children.values()).sort((a, b) => {
+			if (a.directory !== b.directory) return a.directory ? -1 : 1;
+			return a.name.localeCompare(b.name, "zh-Hans-CN");
 		});
-	});
+		children.forEach((child, index) => {
+			const last = index === children.length - 1;
+			lines.push(`${prefix}${last ? "└" : "├"}──${child.directory ? "📁 " : `${child.icon || "⚫"} `}${child.name}${child.directory ? "/" : ""}`);
+			if (child.directory) {
+				render(child, `${prefix}${last ? "    " : "│   "}`);
+			}
+		});
+	};
+	render(modelsNode);
 	return lines.join("\n");
 }
 

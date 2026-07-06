@@ -44,6 +44,7 @@ const HIDDEN_WIDGETS = new Set([
 	"logo_default_url",
 	"watermark_objects_json",
 	"background_image_ref_json",
+	"fusion_unet_name",
 	"has_watermark_input",
 ]);
 const TEXT_WIDGETS = [
@@ -74,6 +75,7 @@ const WATERMARK_WIDGETS = [
 	"logo_default_url",
 	"watermark_objects_json",
 	"background_image_ref_json",
+	"fusion_unet_name",
 ];
 const PERSISTED_WIDGETS = new Set([
 	"font_size",
@@ -94,8 +96,11 @@ const SIZE_PROPERTIES = {
 const RMBG14_PREVIEW_API = "/gjj/text_overlay/rmbg14_preview";
 const FETCH_LOGO_API = "/gjj/text_overlay/fetch_logo_url";
 const WRITE_TEMP_IMAGE_API = "/gjj/text_overlay/write_temp_image";
+const FUSION_UNET_MODELS_API = "/gjj/text_overlay/fusion_unets";
 const GJJ_MULTI_IMAGE_DRAG_MIME = "application/x-gjj-multi-image-ref";
 const DEFAULT_LOGO_URL = "https://mintcdn.com/dripart/QzWbjSCBG7w61rR3/logo/dark.svg";
+const DEFAULT_FUSION_UNET = "qwen_image_edit_2511_fp8mixed.safetensors";
+const FUSION_UNET_FILTER = "2511";
 const ZOOM_IN_ICON = `<svg viewBox="0 0 1024 1024" aria-hidden="true"><path d="M815.3 959.1H208.9c-79.7 0-144.4-64.6-144.4-144.4V208.3c0-79.7 64.6-144.4 144.4-144.4h606.5c79.7 0 144.4 64.6 144.4 144.4v606.5c-0.1 79.7-64.7 144.3-144.5 144.3zM266.6 540.4c0-23.9-19.4-43.3-43.3-43.3S180 516.5 180 540.4v259.9c0 23.9 19.4 43.3 43.3 43.3h259.9c23.9 0 43.3-19.4 43.3-43.3S507.1 757 483.2 757H266.6V540.4z m577.6-317.7c0-23.9-19.4-43.3-43.3-43.3H541c-23.9 0-43.3 19.4-43.3 43.3S517.1 266 541 266h216.6v216.6c0 23.9 19.4 43.3 43.3 43.3s43.3-19.4 43.3-43.3V222.7z" fill="#1296db"></path></svg>`;
 const ZOOM_OUT_ICON = `<svg viewBox="0 0 1024 1024" aria-hidden="true"><path d="M815.5 63.9H208.7c-79.8 0-144.5 64.7-144.5 144.5V815c0 79.8 64.7 144.5 144.5 144.5h606.7c79.8 0 144.5-64.7 144.5-144.5V208.3c0-79.8-64.7-144.4-144.4-144.4z m-289 736.7c0 23.9-19.4 43.3-43.3 43.3s-43.3-19.4-43.3-43.3V583.9H223.2c-23.9 0-43.3-19.4-43.3-43.3s19.4-43.3 43.3-43.3h260c23.9 0 43.3 19.4 43.3 43.3v260z m303.4-303.4h-260c-23.9 0-43.3-19.4-43.3-43.3v-260c0-23.9 19.4-43.3 43.3-43.3s43.3 19.4 43.3 43.3v216.7h216.7c23.9 0 43.3 19.4 43.3 43.3s-19.4 43.3-43.3 43.3z" fill="#1296db"></path></svg>`;
 function widget(node, name) {
@@ -900,6 +905,52 @@ function boolValue(node, name, fallback = false) {
 	if (typeof value === "boolean") return value;
 	if (value == null) return fallback;
 	return ["true", "1", "yes", "on", "是", "开", "启用"].includes(String(value).trim().toLowerCase());
+}
+
+function dedupe(values) {
+	const seen = new Set();
+	const result = [];
+	for (const value of values || []) {
+		const text = String(value || "").trim();
+		if (!text || seen.has(text)) continue;
+		seen.add(text);
+		result.push(text);
+	}
+	return result;
+}
+
+function fusionUnetInitialOptions(node) {
+	const current = stringValue(node, "fusion_unet_name", DEFAULT_FUSION_UNET);
+	return dedupe([current, DEFAULT_FUSION_UNET].filter(Boolean));
+}
+
+async function loadFusionUnetOptions(node) {
+	try {
+		const response = await api.fetchApi(FUSION_UNET_MODELS_API);
+		const data = await response.json();
+		const current = stringValue(node, "fusion_unet_name", DEFAULT_FUSION_UNET);
+		return dedupe([
+			current,
+			...(Array.isArray(data?.models) ? data.models : []),
+			DEFAULT_FUSION_UNET,
+		].filter((name) => name === current || String(name).toLowerCase().includes(FUSION_UNET_FILTER)));
+	} catch (error) {
+		console.warn("[GJJ_TextOverlay] 融合 UNET 列表加载失败", error);
+		return fusionUnetInitialOptions(node);
+	}
+}
+
+function updateSelectOptions(select, values, current) {
+	if (!select) return;
+	const previous = current || select.value;
+	select.replaceChildren();
+	for (const value of dedupe([previous, ...(values || [])])) {
+		const opt = document.createElement("option");
+		opt.value = value;
+		opt.textContent = value;
+		select.appendChild(opt);
+	}
+	select.value = previous;
 }
 
 function setWidgetValue(node, name, value) {
@@ -1831,6 +1882,10 @@ function makePanel(node) {
 	control(node, settings, "前景阴影颜色", "logo_shadow_color_hex", "color");
 	control(node, settings, "前景描边宽度", "logo_stroke_width", "number", { min: 0, step: 1 });
 	control(node, settings, "前景描边颜色", "logo_stroke_color_hex", "color");
+	const fusionUnetSelect = control(node, settings, "融合UNET", "fusion_unet_name", "select", { values: fusionUnetInitialOptions(node), wide: true });
+	loadFusionUnetOptions(node).then((values) => {
+		updateSelectOptions(fusionUnetSelect, values, stringValue(node, "fusion_unet_name", DEFAULT_FUSION_UNET));
+	});
 
 	fileInput.addEventListener("change", async () => {
 		const file = fileInput.files?.[0];

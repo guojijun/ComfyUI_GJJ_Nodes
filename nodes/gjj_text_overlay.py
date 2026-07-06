@@ -47,8 +47,9 @@ RMBG14_MODEL_SPEC = make_missing_model_spec(
 RMBG14_PREVIEW_API = "/gjj/text_overlay/rmbg14_preview"
 FETCH_LOGO_API = "/gjj/text_overlay/fetch_logo_url"
 WRITE_TEMP_IMAGE_API = "/gjj/text_overlay/write_temp_image"
+FUSION_UNET_MODELS_API = "/gjj/text_overlay/fusion_unets"
 FUSION_OUTPUT_INDEX = 1
-FUSION_PROMPT = "将画面中的人物与背景光线、透视、遮挡和场景质感自然融合，保持人物外观、五官、服饰、姿态与背景构图不变。"
+FUSION_PROMPT = "将画面中的人物与背景光线、透视、遮挡、阴影、前景和场景质感自然融合，保持人物外观、五官、服饰、姿态与背景构图不变。"
 FUSION_UNET_NAME = "qwen_image_edit_2511_fp8mixed.safetensors"
 FUSION_CLIP_NAME = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
 FUSION_VAE_NAME = "qwen_image_vae.safetensors"
@@ -382,6 +383,17 @@ def _register_text_overlay_api():
 
     routes = PromptServer.instance.routes
 
+    @routes.get(FUSION_UNET_MODELS_API)
+    async def fusion_unet_models(_request):
+        try:
+            names = [str(item) for item in (folder_paths.get_filename_list("diffusion_models") or [])]
+            filtered = [name for name in names if "2511" in name.lower()]
+            if FUSION_UNET_NAME not in filtered:
+                filtered.insert(0, FUSION_UNET_NAME)
+            return web.json_response({"ok": True, "models": filtered})
+        except Exception as exc:
+            return web.json_response({"ok": False, "models": [FUSION_UNET_NAME], "error": str(exc)}, status=500)
+
     @routes.post(RMBG14_PREVIEW_API)
     async def rmbg14_preview(request):
         try:
@@ -683,13 +695,13 @@ def build_fusion_lora_data():
     )
 
 
-def generate_qwen2511_scene_fusion(composite_outputs, seed=0, unique_id=None, prompt_graph=None, extra_pnginfo=None):
+def generate_qwen2511_scene_fusion(composite_outputs, seed=0, fusion_unet_name="", unique_id=None, prompt_graph=None, extra_pnginfo=None):
     from .gjj_lazy_image_studio import GJJ_LazyImageStudio
 
     if not composite_outputs:
         return composite_outputs
     studio = GJJ_LazyImageStudio()
-    unet_name = pick_available_model_name("diffusion_models", FUSION_UNET_NAME)
+    unet_name = pick_available_model_name("diffusion_models", str(fusion_unet_name or FUSION_UNET_NAME))
     clip_name = pick_available_model_name("text_encoders", FUSION_CLIP_NAME)
     vae_name = pick_available_model_name("vae", FUSION_VAE_NAME)
     lora_data = build_fusion_lora_data()
@@ -1038,6 +1050,13 @@ class GJJ_TextOverlay:
                     "display_name": "面板背景图",
                     "tooltip": "内部使用：面板 📂 打开的临时背景图。",
                 }),
+                "fusion_unet_name": ("STRING", {
+                    "default": FUSION_UNET_NAME,
+                    "display": "hidden",
+                    "hidden": True,
+                    "display_name": "融合 UNET",
+                    "tooltip": "连接【融合后图像】输出时使用的 Qwen Image Edit 2511 UNET；前端 ⚙️ 面板只显示包含 2511 的 diffusion_models。",
+                }),
             }
         return {
             "required": {
@@ -1093,6 +1112,7 @@ class GJJ_TextOverlay:
             logo_default_url="",
             watermark_objects_json="[]",
             background_image_ref_json="{}",
+            fusion_unet_name=FUSION_UNET_NAME,
             unique_id=None,
             prompt_graph=None,
             extra_pnginfo=None,
@@ -1423,6 +1443,7 @@ class GJJ_TextOverlay:
             fusion_outputs = generate_qwen2511_scene_fusion(
                 composite_outputs,
                 seed=seed,
+                fusion_unet_name=fusion_unet_name,
                 unique_id=unique_id,
                 prompt_graph=prompt_graph,
                 extra_pnginfo=extra_pnginfo,
