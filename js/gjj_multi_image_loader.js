@@ -13,6 +13,7 @@ const IMAGE_API_PATH = "/gjj/input_images";
 const THUMB_API_PATH = "/gjj/input_image_thumb";
 const DEFAULT_NETWORK_IMAGE_API_PATH = "/gjj/multi_image_loader/default_image";
 const TEMP_UPLOAD_API_PATH = "/gjj/multi_image_loader/upload_temp_images";
+const GJJ_MULTI_IMAGE_DRAG_MIME = "application/x-gjj-multi-image-ref";
 const UPLOAD_SUBFOLDER = "gjj_multi_image_loader";
 const NETWORK_CACHE_SUBFOLDER = "GJJ_TemplateParams";
 const BATCH_IMAGE_TYPE = "GJJ_BATCH_IMAGE";
@@ -1424,8 +1425,15 @@ function renderPreview(node) {
 			}
 			state.dragIndex = index;
 			card.style.opacity = "0.45";
-			event.dataTransfer.effectAllowed = "move";
+			event.dataTransfer.effectAllowed = "copyMove";
 			event.dataTransfer.setData("text/plain", String(index));
+			event.dataTransfer.setData(GJJ_MULTI_IMAGE_DRAG_MIME, JSON.stringify({
+				filename: String(item?.filename || ""),
+				subfolder: String(item?.subfolder || ""),
+				type: String(item?.type || "input"),
+				width: Number(item?.width || item?.preview_width || item?.w || 0),
+				height: Number(item?.height || item?.preview_height || item?.h || 0),
+			}));
 		});
 		card.addEventListener("dragend", () => {
 			state.dragIndex = null;

@@ -5,6 +5,9 @@ const TARGET = "GJJ_TextOverlay";
 const PANEL = "gjj_text_overlay_live_panel";
 const PANEL_MIN_HEIGHT = 220;
 const PANEL_MAX_HEIGHT = 620;
+const FOREGROUND_INPUT_PREFIX = "watermark_image_";
+const FOREGROUND_INPUT_TYPE = "GJJ_BATCH_IMAGE,IMAGE";
+const MAX_FOREGROUND_INPUTS = 64;
 const HIDDEN_WIDGETS = new Set([
 	"texts",
 	"split_char",
@@ -91,6 +94,7 @@ const SIZE_PROPERTIES = {
 const RMBG14_PREVIEW_API = "/gjj/text_overlay/rmbg14_preview";
 const FETCH_LOGO_API = "/gjj/text_overlay/fetch_logo_url";
 const WRITE_TEMP_IMAGE_API = "/gjj/text_overlay/write_temp_image";
+const GJJ_MULTI_IMAGE_DRAG_MIME = "application/x-gjj-multi-image-ref";
 const DEFAULT_LOGO_URL = "https://mintcdn.com/dripart/QzWbjSCBG7w61rR3/logo/dark.svg";
 const ZOOM_IN_ICON = `<svg viewBox="0 0 1024 1024" aria-hidden="true"><path d="M815.3 959.1H208.9c-79.7 0-144.4-64.6-144.4-144.4V208.3c0-79.7 64.6-144.4 144.4-144.4h606.5c79.7 0 144.4 64.6 144.4 144.4v606.5c-0.1 79.7-64.7 144.3-144.5 144.3zM266.6 540.4c0-23.9-19.4-43.3-43.3-43.3S180 516.5 180 540.4v259.9c0 23.9 19.4 43.3 43.3 43.3h259.9c23.9 0 43.3-19.4 43.3-43.3S507.1 757 483.2 757H266.6V540.4z m577.6-317.7c0-23.9-19.4-43.3-43.3-43.3H541c-23.9 0-43.3 19.4-43.3 43.3S517.1 266 541 266h216.6v216.6c0 23.9 19.4 43.3 43.3 43.3s43.3-19.4 43.3-43.3V222.7z" fill="#1296db"></path></svg>`;
 const ZOOM_OUT_ICON = `<svg viewBox="0 0 1024 1024" aria-hidden="true"><path d="M815.5 63.9H208.7c-79.8 0-144.5 64.7-144.5 144.5V815c0 79.8 64.7 144.5 144.5 144.5h606.7c79.8 0 144.5-64.7 144.5-144.5V208.3c0-79.8-64.7-144.4-144.4-144.4z m-289 736.7c0 23.9-19.4 43.3-43.3 43.3s-43.3-19.4-43.3-43.3V583.9H223.2c-23.9 0-43.3-19.4-43.3-43.3s19.4-43.3 43.3-43.3h260c23.9 0 43.3 19.4 43.3 43.3v260z m303.4-303.4h-260c-23.9 0-43.3-19.4-43.3-43.3v-260c0-23.9 19.4-43.3 43.3-43.3s43.3 19.4 43.3 43.3v216.7h216.7c23.9 0 43.3 19.4 43.3 43.3s-19.4 43.3-43.3 43.3z" fill="#1296db"></path></svg>`;
@@ -100,6 +104,59 @@ function widget(node, name) {
 
 function input(node, name) {
 	return node?.inputs?.find((item) => item?.name === name) || null;
+}
+
+function foregroundInputIndex(name) {
+	const match = String(name || "").match(/^watermark_image_(\d+)$/);
+	return match ? Number.parseInt(match[1], 10) : null;
+}
+
+function foregroundInputs(node) {
+	return Array.isArray(node?.inputs)
+		? node.inputs
+			.filter((item) => foregroundInputIndex(item?.name) != null)
+			.sort((a, b) => foregroundInputIndex(a.name) - foregroundInputIndex(b.name))
+		: [];
+}
+
+function setForegroundInputMeta(slot, index) {
+	if (!slot) return;
+	slot.name = `${FOREGROUND_INPUT_PREFIX}${index}`;
+	slot.type = FOREGROUND_INPUT_TYPE;
+	slot.label = `前景图 ${index}`;
+	slot.localized_name = slot.label;
+	slot.tooltip = "额外前景图。支持 IMAGE / GJJ_BATCH_IMAGE；连上最后一路后会自动展开下一路。";
+}
+
+function hasInputLink(slot) {
+	return slot?.link != null || (Array.isArray(slot?.links) && slot.links.length > 0);
+}
+
+function ensureForegroundInputs(node) {
+	if (!node) return;
+	let slots = foregroundInputs(node);
+	const primaryLinked = hasInputLink(input(node, "watermark_image"));
+	for (let index = slots.length - 1; index >= 0; index -= 1) {
+		const previousLinked = index === 0 ? primaryLinked : hasInputLink(slots[index - 1]);
+		if (hasInputLink(slots[index]) || previousLinked) break;
+		const slotIndex = node.inputs?.indexOf(slots[index]) ?? -1;
+		if (slotIndex >= 0) node.removeInput?.(slotIndex);
+	}
+
+	slots = foregroundInputs(node);
+	const lastLinked = slots.length ? hasInputLink(slots[slots.length - 1]) : false;
+	if ((primaryLinked || lastLinked) && slots.length < MAX_FOREGROUND_INPUTS) {
+		node.addInput?.(`${FOREGROUND_INPUT_PREFIX}${slots.length + 1}`, FOREGROUND_INPUT_TYPE);
+	}
+
+	foregroundInputs(node).forEach((slot, index) => setForegroundInputMeta(slot, index + 1));
+	markGraphChanged(node);
+}
+
+function firstConnectedForegroundInputName(node) {
+	if (hasInputLink(input(node, "watermark_image"))) return "watermark_image";
+	const slot = foregroundInputs(node).find((item) => hasInputLink(item));
+	return slot?.name || "watermark_image";
 }
 
 function linkPresent(slot) {
@@ -131,6 +188,17 @@ function sourceNodeFromInput(node, name) {
 	const link = graphLink(slot.link);
 	const sourceId = linkField(link, "origin_id") ?? linkField(link, "source_id") ?? linkField(link, "from_id");
 	return sourceId == null ? null : findNodeById(sourceId);
+}
+
+function sourceInfoFromInput(node, name) {
+	const slot = input(node, name);
+	if (!slot || slot.link == null || !app.graph?.links) return null;
+	const link = graphLink(slot.link);
+	if (!link) return null;
+	const sourceId = linkField(link, "origin_id") ?? linkField(link, "source_id") ?? linkField(link, "from_id");
+	const sourceSlot = linkField(link, "origin_slot") ?? linkField(link, "source_slot") ?? linkField(link, "from_slot");
+	const source = sourceId == null ? null : findNodeById(sourceId);
+	return source ? { source, sourceId, sourceSlot: Number(sourceSlot || 0), link } : null;
 }
 
 function linkMemory(node, create = false) {
@@ -292,6 +360,9 @@ function imageRefToViewInfo(item) {
 		src,
 		width: Number.isFinite(width) && width > 0 ? width : 0,
 		height: Number.isFinite(height) && height > 0 ? height : 0,
+		filename: String(item?.filename || ""),
+		type: String(item?.type || "input"),
+		subfolder: String(item?.subfolder || ""),
 	};
 }
 
@@ -320,6 +391,159 @@ function parseSelection(rawValue) {
 	} catch (_) {
 		return [];
 	}
+}
+
+function multiImageLoaderItems(sourceNode) {
+	const state = sourceNode?.__gjjMultiImageState;
+	const executed = Array.isArray(state?.executedImages) ? state.executedImages.filter((item) => item?.filename) : [];
+	if (executed.length) return executed;
+	const selected = Array.isArray(state?.selection) ? state.selection.filter((item) => item?.filename) : [];
+	if (selected.length) return selected;
+	const propertyItems = parseSelection(sourceNode?.properties?.selected_images).filter((item) => item?.filename);
+	if (propertyItems.length) return propertyItems;
+	const selectedWidget = widget(sourceNode, "selected_images") || sourceNode?.__gjjSelectedImagesWidget;
+	return parseSelection(selectedWidget?.value).filter((item) => item?.filename);
+}
+
+function connectedForegroundInputNames(node) {
+	const names = ["watermark_image"];
+	for (const slot of foregroundInputs(node)) names.push(slot.name);
+	return names.filter((name) => hasInputLink(input(node, name)));
+}
+
+function imageInfosForForegroundInput(node, inputName) {
+	const info = sourceInfoFromInput(node, inputName);
+	if (!info?.source) return [];
+	const sourceNode = info.source;
+	if (sourceNode?.comfyClass === "GJJ_MultiImageLoader" || sourceNode?.type === "GJJ_MultiImageLoader") {
+		const items = multiImageLoaderItems(sourceNode);
+		if (info.sourceSlot > 0) {
+			const one = imageRefToViewInfo(items[info.sourceSlot - 1]);
+			return one?.src ? [{ ...one, source_batch_index: 0, source_item: items[info.sourceSlot - 1] }] : [];
+		}
+		return items
+			.map((item, index) => ({ ...imageRefToViewInfo(item), source_batch_index: index, source_item: item }))
+			.filter((item) => item?.src);
+	}
+	const one = getUpstreamImageInfo(node, inputName);
+	if (!one?.src) return [];
+	const parsed = viewUrlToImageInfo(one.src);
+	return [{
+		...one,
+		...(parsed || {}),
+		source_batch_index: 0,
+	}];
+}
+
+function linkedForegroundStablePart(info, index) {
+	if (info?.filename) {
+		return [
+			info.type || "input",
+			info.subfolder || "",
+			info.filename || "",
+			info.source_batch_index ?? index,
+		].join("/");
+	}
+	return `slot:${info?.source_batch_index ?? index}:${info?.src || ""}`;
+}
+
+function linkedCutoutCache(node) {
+	if (!node.__gjjTextOverlayLinkedCutoutCache) node.__gjjTextOverlayLinkedCutoutCache = new Map();
+	return node.__gjjTextOverlayLinkedCutoutCache;
+}
+
+function linkedDisplayInfo(node, info, key) {
+	if (!boolValue(node, "logo_remove_bg", true) || !info?.filename) return info || {};
+	const cache = linkedCutoutCache(node);
+	const cached = cache.get(key);
+	if (cached === "loading") return info || {};
+	if (cached) return { ...info, ...cached };
+	cache.set(key, "loading");
+	requestRmbg14Preview({
+		filename: info.filename,
+		type: info.type || "input",
+		subfolder: info.subfolder || "",
+	})
+		.then((cutout) => {
+			if (cutout?.src) cache.set(key, cutout);
+			else cache.delete(key);
+			scheduleRenderPanel(node, { fitText: false });
+		})
+		.catch((error) => {
+			cache.delete(key);
+			console.warn("[GJJ_TextOverlay] 连线前景抠图预览失败", error);
+		});
+	return info || {};
+}
+
+function linkedForegroundInfos(node) {
+	const result = [];
+	for (const inputName of connectedForegroundInputNames(node)) {
+		const source = sourceInfoFromInput(node, inputName);
+		const infos = imageInfosForForegroundInput(node, inputName);
+		infos.forEach((info, index) => {
+			const stable = linkedForegroundStablePart(info, index);
+			const key = [
+				inputName,
+				source?.sourceId ?? "",
+				source?.sourceSlot ?? "",
+				stable,
+			].join("|");
+			const display = linkedDisplayInfo(node, info, key);
+			result.push({
+				...info,
+				src: display.src || info.src,
+				width: Number(display.width || info.width || 72),
+				height: Number(display.height || info.height || 72),
+				input_name: inputName,
+				linked_key: key,
+			});
+		});
+	}
+	return result;
+}
+
+function syncLinkedWatermarkObjects(node) {
+	const linkedInfos = linkedForegroundInfos(node);
+	const objects = watermarkObjects(node);
+	const oldLinked = new Map(objects.filter((item) => item?.source === "linked").map((item) => [item.linked_key, item]));
+	const localObjects = objects.filter((item) => item?.source !== "linked");
+	const linkedObjects = linkedInfos.map((info, index) => {
+		const old = oldLinked.get(info.linked_key);
+		if (old) {
+			return {
+				...old,
+				src: info.src,
+				width: Number(info.width || old.width || 72),
+				height: Number(info.height || old.height || 72),
+				input_name: info.input_name,
+			};
+		}
+		const point = {
+			x: Math.min(0.82, 0.18 + index * 0.08),
+			y: Math.min(0.72, 0.22 + index * 0.05),
+		};
+		const fit = fitWatermarkObjectToBackground(node, info, point);
+		return {
+			source: "linked",
+			linked_key: info.linked_key,
+			input_name: info.input_name,
+			src: info.src,
+			width: Number(info.width || 72),
+			height: Number(info.height || 72),
+			x: fit.x,
+			y: fit.y,
+			scale: fit.scale,
+			stroke_enabled: boolValue(node, "logo_stroke_enabled", false),
+			stroke_width: Math.max(1, Math.round(numberValue(node, "logo_stroke_width", 3))),
+			stroke_color_hex: stringValue(node, "logo_stroke_color_hex", "#FFFFFF") || "#FFFFFF",
+		};
+	});
+	const next = [...localObjects, ...linkedObjects];
+	if (JSON.stringify(next) !== JSON.stringify(objects)) {
+		setWatermarkObjects(node, next, false);
+	}
+	return linkedObjects.length;
 }
 
 function firstMultiImageLoaderSrc(sourceNode) {
@@ -610,6 +834,9 @@ function inputImageViewInfo(filename) {
 		src: api.apiURL(`/view?filename=${encodeURIComponent(name)}&type=input&subfolder=${encodeURIComponent(subfolder)}&rand=${Date.now()}`),
 		width: 0,
 		height: 0,
+		filename: name,
+		type: "input",
+		subfolder,
 	};
 }
 
@@ -1240,6 +1467,22 @@ function makePanel(node) {
 		return null;
 	};
 
+	const draggedImageRef = (dataTransfer) => {
+		if (!dataTransfer) return null;
+		try {
+			const raw = dataTransfer.getData(GJJ_MULTI_IMAGE_DRAG_MIME);
+			if (!raw) return null;
+			const item = JSON.parse(raw);
+			return item?.filename ? item : null;
+		} catch (_) {
+			return null;
+		}
+	};
+	const hasDraggedImageRef = (dataTransfer) => {
+		const types = Array.from(dataTransfer?.types || []);
+		return types.includes(GJJ_MULTI_IMAGE_DRAG_MIME);
+	};
+
 	const dropPointOnStage = (event) => {
 		const rect = stage.getBoundingClientRect();
 		if (!rect.width || !rect.height) return { x: 0.5, y: 0.5 };
@@ -1282,6 +1525,57 @@ function makePanel(node) {
 			node.__gjjTextOverlaySelectedObjectIndex = objects.length - 1;
 			setWatermarkObjects(node, objects);
 			showPanelStatus(node, hasTransparency ? "透明前景已直接添加" : (boolValue(node, "logo_remove_bg", true) ? "前景已添加，执行时会自动抠图" : "前景已添加"), 1600);
+			renderPanel(node, { fitText: false });
+		} catch (error) {
+			console.warn("[GJJ_TextOverlay] 拖拽添加前景失败", error);
+			showPanelStatus(node, "前景添加失败", 2200);
+		}
+	};
+
+	const useImageRefAsWatermark = async (item, event = null) => {
+		if (!item?.filename) return;
+		if (!syncBackgroundSizeFromImage(node)) {
+			showPanelStatus(node, "请先放入背景图，再拖入前景图片", 2200);
+			return;
+		}
+		const point = event ? dropPointOnStage(event) : { x: positionValue(node, "watermark_x", "x"), y: positionValue(node, "watermark_y", "y") };
+		const info = imageRefToViewInfo(item);
+		if (!info?.src) return;
+		try {
+			preview.dataset.draggingImage = "false";
+			showPanelStatus(node, "正在添加前景图片...", 2200);
+			setWidgetValue(node, "logo_default_url", "");
+			setPosition(node, "watermark", point.x, point.y);
+			activate("watermark");
+			let displayInfo = info;
+			if (boolValue(node, "logo_remove_bg", true)) {
+				try {
+					const cutout = await requestRmbg14Preview({
+						filename: info.filename,
+						type: info.type || "input",
+						subfolder: info.subfolder || "",
+					});
+					if (cutout?.src) displayInfo = { ...info, ...cutout };
+				} catch (error) {
+					console.warn("[GJJ_TextOverlay] 拖拽前景抠图预览失败", error);
+				}
+			}
+			const objects = watermarkObjects(node);
+			const fit = fitWatermarkObjectToBackground(node, displayInfo, clampStagePoint(point.x, point.y));
+			objects.push({
+				filename: info.filename,
+				type: info.type || "input",
+				subfolder: info.subfolder || "",
+				src: displayInfo.src,
+				x: fit.x,
+				y: fit.y,
+				scale: fit.scale,
+				width: Number(displayInfo.width || info.width || 72),
+				height: Number(displayInfo.height || info.height || 72),
+			});
+			node.__gjjTextOverlaySelectedObjectIndex = objects.length - 1;
+			setWatermarkObjects(node, objects);
+			showPanelStatus(node, boolValue(node, "logo_remove_bg", true) ? "前景已抠图添加" : "前景已添加", 1600);
 			renderPanel(node, { fitText: false });
 		} catch (error) {
 			console.warn("[GJJ_TextOverlay] 拖拽添加前景失败", error);
@@ -1488,7 +1782,7 @@ function makePanel(node) {
 	for (const el of [preview, stage]) {
 		el.addEventListener("dragenter", (event) => {
 			const file = firstImageFile(event.dataTransfer?.items);
-			if (!file) return;
+			if (!file && !hasDraggedImageRef(event.dataTransfer)) return;
 			event.preventDefault();
 			event.stopPropagation();
 			dragImageDepth += 1;
@@ -1498,27 +1792,29 @@ function makePanel(node) {
 		});
 		el.addEventListener("dragover", (event) => {
 			const file = firstImageFile(event.dataTransfer?.items);
-			if (!file) return;
+			if (!file && !hasDraggedImageRef(event.dataTransfer)) return;
 			event.preventDefault();
 			event.stopPropagation();
 			if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
 		});
 		el.addEventListener("dragleave", (event) => {
 			const file = firstImageFile(event.dataTransfer?.items);
-			if (!file) return;
+			if (!file && !hasDraggedImageRef(event.dataTransfer)) return;
 			event.preventDefault();
 			event.stopPropagation();
 			dragImageDepth = Math.max(0, dragImageDepth - 1);
 			if (dragImageDepth <= 0) showDragImageTarget(false);
 		});
 		el.addEventListener("drop", async (event) => {
+			const ref = draggedImageRef(event.dataTransfer);
 			const file = firstImageFile(event.dataTransfer?.files) || firstImageFile(event.dataTransfer?.items);
-			if (!file) return;
+			if (!file && !ref) return;
 			event.preventDefault();
 			event.stopPropagation();
 			dragImageDepth = 0;
 			showDragImageTarget(false);
-			await useFileAsWatermark(file, event);
+			if (ref) await useImageRefAsWatermark(ref, event);
+			else await useFileAsWatermark(file, event);
 		});
 	}
 
@@ -1933,7 +2229,7 @@ function setWatermarkPreviewImage(node, info) {
 }
 
 function refreshWatermarkPreview(node, force = false) {
-	const info = getUpstreamImageInfo(node, "watermark_image");
+	const info = getUpstreamImageInfo(node, firstConnectedForegroundInputName(node));
 	const src = info?.src || "";
 	const ui = node.__gjjTextOverlayUI;
 	if (!src) {
@@ -2395,6 +2691,7 @@ function renderPanel(node, options = {}) {
 	const ui = node.__gjjTextOverlayUI;
 	if (!ui) return;
 	const hasBgSize = syncBackgroundSizeFromImage(node);
+	const linkedObjectCount = syncLinkedWatermarkObjects(node);
 	const textX = positionValue(node, "text_x", "x");
 	const textY = positionValue(node, "text_y", "y");
 	const wmX = positionValue(node, "watermark_x", "x");
@@ -2436,8 +2733,8 @@ function renderPanel(node, options = {}) {
 	ui.watermark.style.width = `${wmDisplayWidth}px`;
 	ui.watermark.style.height = `${wmDisplayHeight}px`;
 	updateWatermarkPreviewStyle(node);
-	ui.watermark.style.display = (linkPresent(input(node, "watermark_image")) || stringValue(node, "watermark_upload_name", "")) && ui.watermarkImg.src ? "flex" : "none";
-	if (linkPresent(input(node, "watermark_image"))) refreshWatermarkPreview(node, false);
+	ui.watermark.style.display = linkedObjectCount <= 0 && (connectedForegroundInputNames(node).length > 0 || stringValue(node, "watermark_upload_name", "")) && ui.watermarkImg.src ? "flex" : "none";
+	if (connectedForegroundInputNames(node).length > 0) refreshWatermarkPreview(node, false);
 	updateLinkToggleButtons(node);
 	updatePanelHeight(node);
 }
@@ -2473,6 +2770,7 @@ function patchNode(node) {
 	}
 	restorePreviewSizes(node);
 	hideNativeWidgets(node);
+	ensureForegroundInputs(node);
 	ensurePanel(node);
 	restorePreviewSizes(node);
 	refreshBackground(node, false);
@@ -2545,6 +2843,7 @@ app.registerExtension({
 		nodeType.prototype.onConnectionsChange = function (...args) {
 			const result = originalOnConnectionsChange?.apply(this, args);
 			setTimeout(() => {
+				ensureForegroundInputs(this);
 				refreshBackground(this, false);
 				refreshWatermarkPreview(this, true);
 				renderPanel(this, { fitText: false });

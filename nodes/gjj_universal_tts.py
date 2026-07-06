@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import uuid
 import wave
 from io import BytesIO
@@ -128,6 +129,7 @@ BRANCH_DEPENDENCIES = {
         {"module_name": "soundfile", "package_name": "soundfile", "display_name": "soundfile", "description": "参考音频缓存依赖。"},
         {"module_name": "json5", "package_name": "json5", "display_name": "json5", "description": "MaskGCT/语义配置解析依赖。"},
         {"module_name": "cn2an", "package_name": "cn2an", "display_name": "cn2an", "description": "中文文本数字规范化依赖。"},
+        {"module_name": "wetext", "package_name": "wetext", "display_name": "wetext", "description": "IndexTTS 文本规范化依赖。"},
         {"module_name": "sentencepiece", "package_name": "sentencepiece", "display_name": "sentencepiece", "description": "IndexTTS tokenizer 依赖。"},
         {"module_name": "textstat", "package_name": "textstat", "display_name": "textstat", "description": "文本处理依赖。"},
     ],
@@ -137,6 +139,7 @@ BRANCH_DEPENDENCIES = {
         {"module_name": "soundfile", "package_name": "soundfile", "description": "参考音频缓存依赖。"},
         {"module_name": "json5", "package_name": "json5", "display_name": "json5", "description": "MaskGCT/语义配置解析依赖。"},
         {"module_name": "cn2an", "package_name": "cn2an", "display_name": "cn2an", "description": "中文文本数字规范化依赖。"},
+        {"module_name": "wetext", "package_name": "wetext", "display_name": "wetext", "description": "IndexTTS 文本规范化依赖。"},
         {"module_name": "sentencepiece", "package_name": "sentencepiece", "display_name": "sentencepiece", "description": "IndexTTS tokenizer 依赖。"},
         {"module_name": "textstat", "package_name": "textstat", "display_name": "textstat", "description": "文本处理依赖。"},
     ],
@@ -144,9 +147,9 @@ BRANCH_DEPENDENCIES = {
         {"module_name": "modelscope", "package_name": "modelscope", "display_name": "modelscope", "description": "IndexTTS2 Qwen emotion 模型依赖。"},
         {"module_name": "yaml", "package_name": "pyyaml", "display_name": "pyyaml", "description": "IndexTTS2 配置解析依赖。"},
         {"module_name": "soundfile", "package_name": "soundfile", "description": "参考音频缓存依赖。"},
-        {"module_name": "deepspeed", "package_name": "deepspeed", "display_name": "deepspeed", "description": "IndexTTS-v2 运行时依赖。"},
         {"module_name": "json5", "package_name": "json5", "display_name": "json5", "description": "MaskGCT/语义配置解析依赖。"},
         {"module_name": "cn2an", "package_name": "cn2an", "display_name": "cn2an", "description": "中文文本数字规范化依赖。"},
+        {"module_name": "wetext", "package_name": "wetext", "display_name": "wetext", "description": "IndexTTS2 文本规范化依赖。"},
         {"module_name": "sentencepiece", "package_name": "sentencepiece", "display_name": "sentencepiece", "description": "IndexTTS tokenizer 依赖。"},
         {"module_name": "textstat", "package_name": "textstat", "display_name": "textstat", "description": "文本处理依赖。"},
     ],
@@ -1495,6 +1498,131 @@ def _indextts_root() -> Path:
     return _ROOT.parent / "ComfyUI_IndexTTS"
 
 
+def _install_indextts_audio_compat():
+    module_name = "indextts.s2mel.modules.audio"
+    if module_name in sys.modules:
+        return
+    try:
+        import torchaudio.functional as ta_functional
+    except Exception:
+        return
+
+    audio_module = types.ModuleType(module_name)
+    audio_module.MAX_WAV_VALUE = 32768.0
+    audio_module.mel_basis = {}
+    audio_module.hann_window = {}
+
+    def load_wav(full_path):
+        import soundfile as sf
+
+        data, sampling_rate = sf.read(full_path, dtype="int16")
+        return data, sampling_rate
+
+    def dynamic_range_compression(x, C=1, clip_val=1e-5):
+        return np.log(np.clip(x, a_min=clip_val, a_max=None) * C)
+
+    def dynamic_range_decompression(x, C=1):
+        return np.exp(x) / C
+
+    def dynamic_range_compression_torch(x, C=1, clip_val=1e-5):
+        return torch.log(torch.clamp(x, min=clip_val) * C)
+
+    def dynamic_range_decompression_torch(x, C=1):
+        return torch.exp(x) / C
+
+    def spectral_normalize_torch(magnitudes):
+        return dynamic_range_compression_torch(magnitudes)
+
+    def spectral_de_normalize_torch(magnitudes):
+        return dynamic_range_decompression_torch(magnitudes)
+
+    def mel_spectrogram(y, n_fft, num_mels, sampling_rate, hop_size, win_size, fmin, fmax, center=False):
+        key = f"{sampling_rate}_{fmax}_{y.device}"
+        win_key = f"{sampling_rate}_{y.device}"
+        if key not in audio_module.mel_basis:
+            mel = ta_functional.melscale_fbanks(
+                n_freqs=n_fft // 2 + 1,
+                f_min=float(fmin),
+                f_max=float(fmax) if fmax is not None else float(sampling_rate) / 2,
+                n_mels=int(num_mels),
+                sample_rate=int(sampling_rate),
+                norm="slaney",
+                mel_scale="slaney",
+            ).transpose(0, 1)
+            audio_module.mel_basis[key] = mel.float().to(y.device)
+            audio_module.hann_window[win_key] = torch.hann_window(win_size).to(y.device)
+        y = torch.nn.functional.pad(
+            y.unsqueeze(1), (int((n_fft - hop_size) / 2), int((n_fft - hop_size) / 2)), mode="reflect"
+        ).squeeze(1)
+        spec = torch.view_as_real(
+            torch.stft(
+                y,
+                n_fft,
+                hop_length=hop_size,
+                win_length=win_size,
+                window=audio_module.hann_window[win_key],
+                center=center,
+                pad_mode="reflect",
+                normalized=False,
+                onesided=True,
+                return_complex=True,
+            )
+        )
+        spec = torch.sqrt(spec.pow(2).sum(-1) + 1e-9)
+        spec = torch.matmul(audio_module.mel_basis[key], spec)
+        return spectral_normalize_torch(spec)
+
+    audio_module.load_wav = load_wav
+    audio_module.dynamic_range_compression = dynamic_range_compression
+    audio_module.dynamic_range_decompression = dynamic_range_decompression
+    audio_module.dynamic_range_compression_torch = dynamic_range_compression_torch
+    audio_module.dynamic_range_decompression_torch = dynamic_range_decompression_torch
+    audio_module.spectral_normalize_torch = spectral_normalize_torch
+    audio_module.spectral_de_normalize_torch = spectral_de_normalize_torch
+    audio_module.mel_spectrogram = mel_spectrogram
+    sys.modules[module_name] = audio_module
+
+
+def _patch_indextts_deepspeed_fallback():
+    if importlib.util.find_spec("deepspeed") is not None:
+        return
+    for module_name in ("indextts.gpt.model", "indextts.gpt.model_v2"):
+        try:
+            module = __import__(module_name, fromlist=["UnifiedVoice"])
+            cls = getattr(module, "UnifiedVoice", None)
+            original = getattr(cls, "post_init_gpt2_config", None)
+        except Exception:
+            continue
+        if cls is None or original is None or getattr(original, "_gjj_no_deepspeed", False):
+            continue
+
+        def patched(self, use_deepspeed=False, kv_cache=False, half=False, _original=original):
+            return _original(self, use_deepspeed=False, kv_cache=kv_cache, half=half)
+
+        patched._gjj_no_deepspeed = True
+        cls.post_init_gpt2_config = patched
+
+
+def _patch_indextts_text_normalizer():
+    try:
+        from indextts.utils.front import TextNormalizer
+        from wetext import Normalizer
+    except Exception:
+        return
+    original = getattr(TextNormalizer, "load", None)
+    if original is None or getattr(original, "_gjj_wetext", False):
+        return
+
+    def load(self):
+        if self.zh_normalizer is not None and self.en_normalizer is not None:
+            return
+        self.zh_normalizer = Normalizer(remove_erhua=False, lang="zh", operator="tn")
+        self.en_normalizer = Normalizer(lang="en", operator="tn")
+
+    load._gjj_wetext = True
+    TextNormalizer.load = load
+
+
 def _ensure_indextts_runtime(branch: str = "IndexTTS-v2", unique_id: Any = None):
     root = _indextts_root()
     if not root.is_dir():
@@ -1513,8 +1641,17 @@ def _ensure_indextts_runtime(branch: str = "IndexTTS-v2", unique_id: Any = None)
             copy_label="",
         )
     _ensure_sys_path(root)
+    numba_cache_dir = _ROOT / "__pycache__" / "gjj_numba_cache"
+    try:
+        numba_cache_dir.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("NUMBA_CACHE_DIR", str(numba_cache_dir))
+    except Exception:
+        pass
+    _install_indextts_audio_compat()
     try:
         from indexttsnode import AudioCacheManager, IndexTTS, IndexTTS2, cache_dir, current_dir
+        _patch_indextts_deepspeed_fallback()
+        _patch_indextts_text_normalizer()
     except Exception as exc:
         deps = BRANCH_DEPENDENCIES.get(branch, BRANCH_DEPENDENCIES.get("IndexTTS-v2", []))
         raise_dependency_model_error(
@@ -1535,7 +1672,9 @@ def _index_cfg_path(branch: str, current_dir: str) -> str:
 
 def _load_indextts(branch: str, device: str, precision: str, unique_id: Any = None):
     AudioCacheManager, IndexTTS, IndexTTS2, cache_dir, current_dir = _ensure_indextts_runtime(branch, unique_id)
-    is_fp16 = str(precision or "").lower() in {"fp16", "float16"}
+    precision_value = str(precision or "auto").strip().lower()
+    is_auto_cuda = precision_value == "auto" and torch.cuda.is_available() and str(device or "auto") in {"auto", "cuda", "cuda:0"}
+    is_fp16 = precision_value in {"fp16", "float16"} or (branch == "IndexTTS-v2" and is_auto_cuda)
     if branch == "IndexTTS-v2":
         cache_key = f"indextts:{branch}:{is_fp16}:{device}"
         if cache_key in _MODEL_CACHE:

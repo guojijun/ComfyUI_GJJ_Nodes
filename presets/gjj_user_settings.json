@@ -86,7 +86,7 @@
   },
   "nodes": {
     "GJJ_UniversalTTS": {
-      "branch": "EdgeTTS",
+      "branch": "IndexTTS-v2",
       "local_audio_sort_mode": "name_asc"
     }
   },

@@ -150,6 +150,35 @@ def image_has_transparency(image: Image.Image) -> bool:
         return False
 
 
+def crop_alpha_bbox(image: Image.Image, padding: int = 2) -> Image.Image:
+    rgba = image.convert("RGBA")
+    alpha = rgba.getchannel("A")
+    bbox = alpha.point(lambda value: 255 if value > 2 else 0).getbbox()
+    if not bbox:
+        return rgba
+    left, top, right, bottom = bbox
+    pad = max(0, int(padding))
+    left = max(0, left - pad)
+    top = max(0, top - pad)
+    right = min(rgba.width, right + pad)
+    bottom = min(rgba.height, bottom + pad)
+    if left <= 0 and top <= 0 and right >= rgba.width and bottom >= rgba.height:
+        return rgba
+    return rgba.crop((left, top, right, bottom))
+
+
+def prepare_watermark_rgba(image: Image.Image, remove_bg: bool) -> Image.Image:
+    rgba = image.convert("RGBA")
+    if not remove_bg:
+        return rgba
+    if image_has_transparency(rgba):
+        return crop_alpha_bbox(rgba)
+    fast_rgba = auto_remove_watermark_background(rgba)
+    if image_has_transparency(fast_rgba):
+        return crop_alpha_bbox(fast_rgba)
+    return crop_alpha_bbox(remove_watermark_background_rmbg14(rgba))
+
+
 def remove_watermark_background_rmbg14(image: Image.Image) -> Image.Image:
     from .gjj_comprehensive_matting import (
         METHOD_RMBG14,
@@ -308,7 +337,7 @@ def _register_text_overlay_api():
             path = resolve_comfy_image_path(filename, data.get("type") or "input", data.get("subfolder") or "")
             if not path:
                 return web.json_response({"ok": False, "error": "找不到前景文件"}, status=404)
-            cutout = remove_watermark_background_rmbg14(Image.open(path).convert("RGBA"))
+            cutout = crop_alpha_bbox(remove_watermark_background_rmbg14(Image.open(path).convert("RGBA")))
             buffer = io.BytesIO()
             cutout.save(buffer, format="PNG")
             encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
@@ -476,6 +505,46 @@ def split_image_input(value):
         return images
     return []
 
+
+def watermark_input_index(name):
+    match = re.match(r"^watermark_image_(\d+)$", str(name or ""))
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except Exception:
+        return None
+
+
+class TextOverlayOptionalInputs(dict):
+    """允许前端动态添加 watermark_image_1、watermark_image_2 ... 前景输入。"""
+
+    def __init__(self, data=None):
+        super().__init__()
+        self.data = data or {}
+        for key, value in self.data.items():
+            self[key] = value
+
+    def __getitem__(self, key):
+        if key in self.data:
+            return self.data[key]
+        index = watermark_input_index(key)
+        if index is not None:
+            return (MIXED_BATCH_IMAGE_TYPE, {
+                "display_name": f"前景图 {index}",
+                "tooltip": "可选，额外前景图像；支持单图/批量输入，会按编号依次叠加。",
+            })
+        raise KeyError(key)
+
+    def __contains__(self, key):
+        return key in self.data or watermark_input_index(key) is not None
+
+    def get(self, key, default=None):
+        if key in self:
+            return self[key]
+        return default
+
+
 # 工具函数
 def hex2rgb(h, default):
     try:
@@ -544,10 +613,7 @@ class GJJ_TextOverlay:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {
-            "required": {
-            },
-            "optional": {
+        optional_inputs = {
                 "background_image": (MIXED_BATCH_IMAGE_TYPE, {
                     "display_name": "背景图",
                     "tooltip": "需要叠加文字或前景的背景图像；支持单图/批量图片输入。也可以用面板 📂 打开本地背景。",
@@ -787,7 +853,11 @@ class GJJ_TextOverlay:
                     "display_name": "面板背景图",
                     "tooltip": "内部使用：面板 📂 打开的临时背景图。",
                 }),
+            }
+        return {
+            "required": {
             },
+            "optional": TextOverlayOptionalInputs(optional_inputs),
             "hidden": {
                 "has_watermark_input": ("BOOLEAN", {
                     "default": False,
@@ -834,7 +904,8 @@ class GJJ_TextOverlay:
             logo_stroke_color_hex="#FFFFFF",
             logo_default_url="",
             watermark_objects_json="[]",
-            background_image_ref_json="{}"):
+            background_image_ref_json="{}",
+            **kwargs):
 
         seed = int(seed)
         font_size = max(1, int(font_size))
@@ -905,47 +976,71 @@ class GJJ_TextOverlay:
 
         batch_size = len(background_images)
 
-        # 处理前景图（支持批量输入、GJJ 图片队列列表和面板拖拽对象）。多张时全部依次叠加到每张背景图。
-        watermark_entries = []
-        if watermark_image is not None:
-            watermark_entries = [
-                {"tensor": item, "x": watermark_x, "y": watermark_y, "scale": float(watermark_width)}
-                for item in split_image_input(watermark_image)
-            ]
-        else:
-            try:
-                objects = json.loads(str(watermark_objects_json or "[]"))
-                if not isinstance(objects, list):
-                    objects = []
-            except Exception:
+        try:
+            objects = json.loads(str(watermark_objects_json or "[]"))
+            if not isinstance(objects, list):
                 objects = []
-            for item in objects:
-                if not isinstance(item, dict):
-                    continue
-                try:
-                    upload_path = resolve_comfy_image_path(
-                        item.get("filename") or "",
-                        item.get("type") or "input",
-                        item.get("subfolder") or "",
-                    )
-                    if not upload_path:
-                        print(f"[GJJ_TextOverlay] 清理/跳过失效前景资源: {item.get('type') or 'input'}:{item.get('subfolder') or ''}/{item.get('filename') or ''}")
-                        continue
-                    upload_pil = Image.open(upload_path).convert("RGBA")
-                    watermark_entries.append({
-                        "pil": upload_pil,
-                        "x": clamp_ratio(item.get("x", watermark_x)),
-                        "y": clamp_ratio(item.get("y", watermark_y)),
-                        "scale": float(item.get("scale", watermark_width) or watermark_width),
-                        "stroke_enabled": bool(item.get("stroke_enabled", False)),
-                        "stroke_width": int(item.get("stroke_width", logo_stroke_width) or logo_stroke_width),
-                        "stroke_color_hex": str(item.get("stroke_color_hex") or logo_stroke_color_hex),
-                        "mirror_x": bool(item.get("mirror_x", False)),
-                    })
-                except Exception:
-                    pass
+        except Exception:
+            objects = []
+        linked_objects = [item for item in objects if isinstance(item, dict) and item.get("source") == "linked"]
+        local_objects = [item for item in objects if isinstance(item, dict) and item.get("source") != "linked"]
 
-        if watermark_image is None and watermark_upload_name:
+        def apply_linked_object(entry, index):
+            if index < 0 or index >= len(linked_objects):
+                return entry
+            item = linked_objects[index]
+            entry.update({
+                "x": clamp_ratio(item.get("x", entry.get("x", watermark_x))),
+                "y": clamp_ratio(item.get("y", entry.get("y", watermark_y))),
+                "scale": float(item.get("scale", entry.get("scale", watermark_width)) or watermark_width),
+                "stroke_enabled": bool(item.get("stroke_enabled", logo_stroke_enabled)),
+                "stroke_width": int(item.get("stroke_width", logo_stroke_width) or logo_stroke_width),
+                "stroke_color_hex": str(item.get("stroke_color_hex") or logo_stroke_color_hex),
+                "mirror_x": bool(item.get("mirror_x", False)),
+            })
+            return entry
+
+        # 处理前景图（支持批量输入、GJJ 图片队列列表、动态多输入和面板拖拽对象）。多张时全部依次叠加到每张背景图。
+        watermark_entries = []
+        linked_entry_index = 0
+        if watermark_image is not None:
+            for item in split_image_input(watermark_image):
+                entry = {"tensor": item, "x": watermark_x, "y": watermark_y, "scale": float(watermark_width)}
+                watermark_entries.append(apply_linked_object(entry, linked_entry_index))
+                linked_entry_index += 1
+        for name, value in sorted(kwargs.items(), key=lambda item: watermark_input_index(item[0]) or 999999):
+            if watermark_input_index(name) is None or value is None:
+                continue
+            for item in split_image_input(value):
+                entry = {"tensor": item, "x": watermark_x, "y": watermark_y, "scale": float(watermark_width)}
+                watermark_entries.append(apply_linked_object(entry, linked_entry_index))
+                linked_entry_index += 1
+
+        for item in local_objects:
+            try:
+                upload_path = resolve_comfy_image_path(
+                    item.get("filename") or "",
+                    item.get("type") or "input",
+                    item.get("subfolder") or "",
+                )
+                if not upload_path:
+                    print(f"[GJJ_TextOverlay] 清理/跳过失效前景资源: {item.get('type') or 'input'}:{item.get('subfolder') or ''}/{item.get('filename') or ''}")
+                    continue
+                upload_pil = Image.open(upload_path).convert("RGBA")
+                watermark_entries.append({
+                    "pil": upload_pil,
+                    "x": clamp_ratio(item.get("x", watermark_x)),
+                    "y": clamp_ratio(item.get("y", watermark_y)),
+                    "scale": float(item.get("scale", watermark_width) or watermark_width),
+                    "stroke_enabled": bool(item.get("stroke_enabled", False)),
+                    "stroke_width": int(item.get("stroke_width", logo_stroke_width) or logo_stroke_width),
+                    "stroke_color_hex": str(item.get("stroke_color_hex") or logo_stroke_color_hex),
+                    "mirror_x": bool(item.get("mirror_x", False)),
+                })
+            except Exception:
+                pass
+
+        if not watermark_entries and watermark_upload_name:
             upload_path = resolve_input_image_path(watermark_upload_name)
             if upload_path:
                 try:
@@ -988,8 +1083,7 @@ class GJJ_TextOverlay:
                 wm_pil = tensor_to_pil(entry.get("tensor")).convert("RGBA")
             else:
                 wm_pil = wm_pil.convert("RGBA")
-            if logo_remove_bg and not image_has_transparency(wm_pil):
-                wm_pil = remove_watermark_background_rmbg14(wm_pil)
+            wm_pil = prepare_watermark_rgba(wm_pil, bool(logo_remove_bg))
             wm_pil = style_watermark_image(
                 wm_pil,
                 bool(logo_shadow_enabled),
