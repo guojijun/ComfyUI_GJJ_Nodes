@@ -10,9 +10,18 @@ import torch
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 import folder_paths
+from .common_utils.model_family import (
+    gjjutils_model_family_pick_lora_name,
+    gjjutils_model_family_pick_model_name,
+)
 from .common_utils import DEFAULT_MODEL_URL, build_node_help_payload, make_model_tree_item
 from .common_utils.dependency_checker import make_missing_model_spec, raise_dependency_model_error
-from .common_utils.temp_files import gjjutils_read_temp_pil_image, gjjutils_write_temp_bytes
+from .common_utils.temp_files import (
+    gjjutils_read_temp_pil_image,
+    gjjutils_temp_path,
+    gjjutils_write_temp_bytes,
+    gjjutils_write_temp_pil_image,
+)
 from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
 FONT_EXTENSIONS = {".ttf", ".otf", ".ttc", ".otc"}
@@ -38,6 +47,45 @@ RMBG14_MODEL_SPEC = make_missing_model_spec(
 RMBG14_PREVIEW_API = "/gjj/text_overlay/rmbg14_preview"
 FETCH_LOGO_API = "/gjj/text_overlay/fetch_logo_url"
 WRITE_TEMP_IMAGE_API = "/gjj/text_overlay/write_temp_image"
+FUSION_OUTPUT_INDEX = 1
+FUSION_PROMPT = "将画面中的人物与背景光线、透视、遮挡和场景质感自然融合，保持人物外观、五官、服饰、姿态与背景构图不变。"
+FUSION_UNET_NAME = "qwen_image_edit_2511_fp8mixed.safetensors"
+FUSION_CLIP_NAME = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
+FUSION_VAE_NAME = "qwen_image_vae.safetensors"
+FUSION_LIGHTNING_LORA = "QWEN\\Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+FUSION_SCENE_LORA = "QWEN\\edit_2511人景融合20.safetensors"
+FUSION_MODEL_TREE = [
+    make_model_tree_item(
+        label="Qwen Image Edit 2511 主模型",
+        folder="diffusion_models",
+        filename=FUSION_UNET_NAME,
+        description="仅连接【融合后图像】输出时加载，用于把叠加后的所见画面做人物与背景融合。",
+    ),
+    make_model_tree_item(
+        label="Qwen Image CLIP",
+        folder="text_encoders",
+        filename=FUSION_CLIP_NAME,
+        description="Qwen Image Edit 2511 的文本/视觉编码器。",
+    ),
+    make_model_tree_item(
+        label="Qwen Image VAE",
+        folder="vae",
+        filename=FUSION_VAE_NAME,
+        description="Qwen Image Edit 2511 融合输出解码使用。",
+    ),
+    make_model_tree_item(
+        label="Qwen 2511 Lightning LoRA",
+        folder="loras",
+        filename=FUSION_LIGHTNING_LORA,
+        description="融合输出默认 4 步加速 LoRA。",
+    ),
+    make_model_tree_item(
+        label="人景融合 LoRA",
+        folder="loras",
+        filename=FUSION_SCENE_LORA,
+        description="融合输出默认使用的人景融合 LoRA。",
+    ),
+]
 
 
 def get_font_choices():
@@ -248,11 +296,18 @@ def resolve_comfy_image_path(filename, image_type="input", subfolder=""):
         name = parts[-1]
         sub = "/".join(parts[:-1])
     if kind == "temp":
-        root = folder_paths.get_temp_directory()
+        try:
+            path = gjjutils_temp_path(name)
+            if os.path.isfile(path):
+                return str(path)
+        except Exception:
+            return None
     elif kind == "output":
         root = folder_paths.get_output_directory()
     else:
         return resolve_input_image_path("/".join(part for part in (sub, name) if part))
+    if kind == "temp":
+        return None
     candidate = os.path.abspath(os.path.join(root, sub, name))
     root_abs = os.path.abspath(root)
     if os.path.isfile(candidate) and os.path.commonpath([root_abs, candidate]) == root_abs:
@@ -338,12 +393,10 @@ def _register_text_overlay_api():
             if not path:
                 return web.json_response({"ok": False, "error": "找不到前景文件"}, status=404)
             cutout = crop_alpha_bbox(remove_watermark_background_rmbg14(Image.open(path).convert("RGBA")))
-            buffer = io.BytesIO()
-            cutout.save(buffer, format="PNG")
-            encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+            info = gjjutils_write_temp_pil_image(cutout, format="PNG", suffix=".png", media_type="image")
             return web.json_response({
                 "ok": True,
-                "src": f"data:image/png;base64,{encoded}",
+                **info,
                 "width": cutout.width,
                 "height": cutout.height,
             })
@@ -559,6 +612,127 @@ def parse_text_blob(texts, strip_empty=True):
         lines = [l for l in lines if l]
     return lines
 
+
+def output_is_connected(extra_pnginfo, unique_id, output_index, prompt_graph=None):
+    uid = str(unique_id)
+    try:
+        if isinstance(prompt_graph, dict):
+            for node in prompt_graph.values():
+                if not isinstance(node, dict):
+                    continue
+                inputs = node.get("inputs")
+                if not isinstance(inputs, dict):
+                    continue
+                for value in inputs.values():
+                    if (
+                        isinstance(value, (list, tuple))
+                        and len(value) >= 2
+                        and str(value[0]) == uid
+                        and int(value[1]) == int(output_index)
+                    ):
+                        return True
+    except Exception:
+        pass
+    try:
+        workflow = extra_pnginfo.get("workflow") if isinstance(extra_pnginfo, dict) else None
+        nodes = workflow.get("nodes") if isinstance(workflow, dict) else None
+        if not isinstance(nodes, list):
+            return False
+        for node in nodes:
+            if not isinstance(node, dict) or str(node.get("id")) != uid:
+                continue
+            outputs = node.get("outputs")
+            if not isinstance(outputs, list) or output_index >= len(outputs):
+                return False
+            output = outputs[output_index]
+            if not isinstance(output, dict):
+                return False
+            return bool(output.get("links"))
+    except Exception:
+        return False
+    return False
+
+
+def pick_available_model_name(folder_name, preferred_name):
+    try:
+        available = folder_paths.get_filename_list(folder_name)
+    except Exception:
+        available = []
+    if not available:
+        return preferred_name
+    return gjjutils_model_family_pick_model_name(preferred_name, available, preferred_name)
+
+
+def pick_available_lora_name(preferred_name):
+    try:
+        available = folder_paths.get_filename_list("loras")
+    except Exception:
+        available = []
+    if not available:
+        return preferred_name
+    return gjjutils_model_family_pick_lora_name(preferred_name, available, preferred_name) or preferred_name
+
+
+def build_fusion_lora_data():
+    return json.dumps(
+        [
+            {"enabled": True, "name": pick_available_lora_name(FUSION_LIGHTNING_LORA), "strength": 1.0},
+            {"enabled": True, "name": pick_available_lora_name(FUSION_SCENE_LORA), "strength": 1.0},
+        ],
+        ensure_ascii=False,
+    )
+
+
+def generate_qwen2511_scene_fusion(composite_outputs, seed=0, unique_id=None, prompt_graph=None, extra_pnginfo=None):
+    from .gjj_lazy_image_studio import GJJ_LazyImageStudio
+
+    if not composite_outputs:
+        return composite_outputs
+    studio = GJJ_LazyImageStudio()
+    unet_name = pick_available_model_name("diffusion_models", FUSION_UNET_NAME)
+    clip_name = pick_available_model_name("text_encoders", FUSION_CLIP_NAME)
+    vae_name = pick_available_model_name("vae", FUSION_VAE_NAME)
+    lora_data = build_fusion_lora_data()
+    fused_outputs = []
+    for index, item in enumerate(composite_outputs):
+        if not isinstance(item, torch.Tensor):
+            continue
+        reference_image = item if item.ndim == 4 else item.unsqueeze(0)
+        height = int(reference_image.shape[1])
+        width = int(reference_image.shape[2])
+        result = studio.create_image(
+            FUSION_PROMPT,
+            "",
+            1,
+            width,
+            height,
+            1,
+            unet_name,
+            "default",
+            clip_name,
+            vae_name,
+            int(seed) + index,
+            4,
+            1.0,
+            "euler",
+            "simple",
+            1.0,
+            6,
+            lora_data=lora_data,
+            disable_reference_auto_mask=True,
+            force_empty_latent_reference=True,
+            keep_model_loaded=True,
+            use_input_image_size=True,
+            prompt_graph=prompt_graph,
+            unique_id=unique_id,
+            extra_pnginfo=extra_pnginfo,
+            image_01=reference_image,
+        )
+        image = result.get("result", (None,))[0] if isinstance(result, dict) else None
+        if isinstance(image, torch.Tensor):
+            fused_outputs.extend(image[i:i + 1] for i in range(int(image.shape[0])))
+    return fused_outputs or composite_outputs
+
 # 节点主体
 class GJJ_TextOverlay:
     NAME = "GJJ_TextOverlay"
@@ -581,35 +755,46 @@ class GJJ_TextOverlay:
                 "required": False,
                 "description": "RMBG1.4 推理链路依赖；通常随 ComfyUI/PyTorch 环境提供。",
             },
+            {
+                "name": "Qwen Image Edit 2511 人景融合链",
+                "type": "本地模型",
+                "required": False,
+                "description": "仅连接【融合后图像】输出时需要，用于把叠加结果进一步做人物与背景融合。",
+            },
         ],
-        model_tree=RMBG14_MODEL_TREE,
-        models=[RMBG14_MODEL_SPEC],
+        model_tree=[*RMBG14_MODEL_TREE, *FUSION_MODEL_TREE],
+        models=[RMBG14_MODEL_SPEC, *FUSION_MODEL_TREE],
         usage=[
             "背景图必填；文本为空时不会在画布上显示文字预览。",
             "前景图可连接前景图输入，也可通过面板按钮选择本地图片。",
             "启用 RMBG1.4 抠图后，执行时会用 models/RMBG/rmbg1.4.safetensors 生成前景透明通道。",
+            "连接【融合后图像】输出时，会把当前所见叠加图送入 Qwen Image Edit 2511 人景融合流程。",
         ],
         runtime=[
             "前景阴影和描边会在 RMBG1.4 抠图之后应用。",
             "批量背景会保持同一相对文字和前景位置。",
+            "未连接【融合后图像】输出时不会加载 Qwen 2511 模型链。",
         ],
         model_download_url=MODEL_DOWNLOAD_URL,
         notice="RMBG1.4 只在前景自动抠图开启时需要；模型按模型树放入对应目录后刷新或重启 ComfyUI。",
         extra={
-            "model_tree": RMBG14_MODEL_TREE,
-            "models_tree": RMBG14_MODEL_TREE,
+            "model_tree": [*RMBG14_MODEL_TREE, *FUSION_MODEL_TREE],
+            "models_tree": [*RMBG14_MODEL_TREE, *FUSION_MODEL_TREE],
             "static_model_tree_only": True,
             "model_tree_priority": "static",
         },
     )
 
     FUNCTION = "run"
-    RETURN_TYPES = (MIXED_BATCH_IMAGE_TYPE,)
-    RETURN_NAMES = ("叠加后图像",)
-    OUTPUT_TOOLTIPS = ("文本或前景叠加后的图像队列；不同尺寸图片会保持原尺寸和同一相对位置。",)
+    RETURN_TYPES = (MIXED_BATCH_IMAGE_TYPE, MIXED_BATCH_IMAGE_TYPE)
+    RETURN_NAMES = ("叠加后图像", "融合后图像")
+    OUTPUT_TOOLTIPS = (
+        "文本或前景叠加后的图像队列；不同尺寸图片会保持原尺寸和同一相对位置。",
+        "连接此输出时，会把所见即所得的叠加图送入 Qwen Image Edit 2511 人景融合流程。",
+    )
 
     INPUT_IS_LIST = False
-    OUTPUT_IS_LIST = (True,)
+    OUTPUT_IS_LIST = (True, True)
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -864,6 +1049,9 @@ class GJJ_TextOverlay:
                     "display_name": "是否有前景输入",
                     "tooltip": "内部使用，用于控制参数显示",
                 }),
+                "unique_id": "UNIQUE_ID",
+                "prompt_graph": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
             },
         }
 
@@ -905,6 +1093,9 @@ class GJJ_TextOverlay:
             logo_default_url="",
             watermark_objects_json="[]",
             background_image_ref_json="{}",
+            unique_id=None,
+            prompt_graph=None,
+            extra_pnginfo=None,
             **kwargs):
 
         seed = int(seed)
@@ -982,13 +1173,10 @@ class GJJ_TextOverlay:
                 objects = []
         except Exception:
             objects = []
-        linked_objects = [item for item in objects if isinstance(item, dict) and item.get("source") == "linked"]
-        local_objects = [item for item in objects if isinstance(item, dict) and item.get("source") != "linked"]
 
-        def apply_linked_object(entry, index):
-            if index < 0 or index >= len(linked_objects):
+        def apply_object_transform(entry, item):
+            if not isinstance(item, dict):
                 return entry
-            item = linked_objects[index]
             entry.update({
                 "x": clamp_ratio(item.get("x", entry.get("x", watermark_x))),
                 "y": clamp_ratio(item.get("y", entry.get("y", watermark_y))),
@@ -1000,45 +1188,62 @@ class GJJ_TextOverlay:
             })
             return entry
 
+        def entry_from_local_object(item):
+            if not isinstance(item, dict):
+                return None
+            try:
+                source_item = item.get("cutout_ref") if isinstance(item.get("cutout_ref"), dict) else item
+                upload_path = resolve_comfy_image_path(
+                    source_item.get("filename") or "",
+                    source_item.get("type") or "input",
+                    source_item.get("subfolder") or "",
+                )
+                if not upload_path:
+                    print(f"[GJJ_TextOverlay] 清理/跳过失效前景资源: {source_item.get('type') or 'input'}:{source_item.get('subfolder') or ''}/{source_item.get('filename') or ''}")
+                    return None
+                upload_pil = Image.open(upload_path).convert("RGBA")
+                return apply_object_transform({
+                    "pil": upload_pil,
+                    "x": watermark_x,
+                    "y": watermark_y,
+                    "scale": float(watermark_width),
+                }, item)
+            except Exception:
+                return None
+
         # 处理前景图（支持批量输入、GJJ 图片队列列表、动态多输入和面板拖拽对象）。多张时全部依次叠加到每张背景图。
-        watermark_entries = []
-        linked_entry_index = 0
+        linked_entries = []
         if watermark_image is not None:
             for item in split_image_input(watermark_image):
-                entry = {"tensor": item, "x": watermark_x, "y": watermark_y, "scale": float(watermark_width)}
-                watermark_entries.append(apply_linked_object(entry, linked_entry_index))
-                linked_entry_index += 1
+                linked_entries.append({"tensor": item, "x": watermark_x, "y": watermark_y, "scale": float(watermark_width)})
         for name, value in sorted(kwargs.items(), key=lambda item: watermark_input_index(item[0]) or 999999):
             if watermark_input_index(name) is None or value is None:
                 continue
             for item in split_image_input(value):
-                entry = {"tensor": item, "x": watermark_x, "y": watermark_y, "scale": float(watermark_width)}
-                watermark_entries.append(apply_linked_object(entry, linked_entry_index))
-                linked_entry_index += 1
+                linked_entries.append({"tensor": item, "x": watermark_x, "y": watermark_y, "scale": float(watermark_width)})
 
-        for item in local_objects:
-            try:
-                upload_path = resolve_comfy_image_path(
-                    item.get("filename") or "",
-                    item.get("type") or "input",
-                    item.get("subfolder") or "",
-                )
-                if not upload_path:
-                    print(f"[GJJ_TextOverlay] 清理/跳过失效前景资源: {item.get('type') or 'input'}:{item.get('subfolder') or ''}/{item.get('filename') or ''}")
+        watermark_entries = []
+        if objects:
+            linked_index = 0
+            for item in objects:
+                if not isinstance(item, dict):
                     continue
-                upload_pil = Image.open(upload_path).convert("RGBA")
-                watermark_entries.append({
-                    "pil": upload_pil,
-                    "x": clamp_ratio(item.get("x", watermark_x)),
-                    "y": clamp_ratio(item.get("y", watermark_y)),
-                    "scale": float(item.get("scale", watermark_width) or watermark_width),
-                    "stroke_enabled": bool(item.get("stroke_enabled", False)),
-                    "stroke_width": int(item.get("stroke_width", logo_stroke_width) or logo_stroke_width),
-                    "stroke_color_hex": str(item.get("stroke_color_hex") or logo_stroke_color_hex),
-                    "mirror_x": bool(item.get("mirror_x", False)),
-                })
-            except Exception:
-                pass
+                if item.get("source") == "linked":
+                    local_linked_entry = entry_from_local_object(item) if item.get("filename") else None
+                    if local_linked_entry is not None:
+                        watermark_entries.append(local_linked_entry)
+                    elif linked_index < len(linked_entries):
+                        watermark_entries.append(apply_object_transform(dict(linked_entries[linked_index]), item))
+                    linked_index += 1
+                else:
+                    local_entry = entry_from_local_object(item)
+                    if local_entry is not None:
+                        watermark_entries.append(local_entry)
+            while linked_index < len(linked_entries):
+                watermark_entries.append(linked_entries[linked_index])
+                linked_index += 1
+        else:
+            watermark_entries = linked_entries
 
         if not watermark_entries and watermark_upload_name:
             upload_path = resolve_input_image_path(watermark_upload_name)
@@ -1212,11 +1417,22 @@ class GJJ_TextOverlay:
             comp_out = pil_to_tensor(composite.convert("RGB")).unsqueeze(0)
             composite_outputs.append(comp_out)
 
+        fusion_outputs = composite_outputs
+        fusion_enabled = output_is_connected(extra_pnginfo, unique_id, FUSION_OUTPUT_INDEX, prompt_graph)
+        if fusion_enabled:
+            fusion_outputs = generate_qwen2511_scene_fusion(
+                composite_outputs,
+                seed=seed,
+                unique_id=unique_id,
+                prompt_graph=prompt_graph,
+                extra_pnginfo=extra_pnginfo,
+            )
+
         return {
             "ui": {
                 "gjj_text_overlay": [preview_meta],
             },
-            "result": (composite_outputs,),
+            "result": (composite_outputs, fusion_outputs),
         }
 
 # 注册

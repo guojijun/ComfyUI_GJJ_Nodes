@@ -490,6 +490,7 @@ function linkedForegroundInfos(node) {
 				stable,
 			].join("|");
 			const display = linkedDisplayInfo(node, info, key);
+			if (display.src) setObjectPreviewInfo(node, `linked:${key}`, display);
 			result.push({
 				...info,
 				src: display.src || info.src,
@@ -510,12 +511,14 @@ function syncLinkedWatermarkObjects(node) {
 	const localObjects = objects.filter((item) => item?.source !== "linked");
 	const linkedObjects = linkedInfos.map((info, index) => {
 		const old = oldLinked.get(info.linked_key);
+		const cutoutRef = info.type === "temp" && info.filename ? compactImageRef(info) : null;
 		if (old) {
+			const keepStoredCutout = !cutoutRef && old.filename && (old.type || "input") !== "input";
 			return {
 				...old,
-				src: info.src,
-				width: Number(info.width || old.width || 72),
-				height: Number(info.height || old.height || 72),
+				...(cutoutRef || {}),
+				width: Number((keepStoredCutout ? old.width : info.width) || old.width || 72),
+				height: Number((keepStoredCutout ? old.height : info.height) || old.height || 72),
 				input_name: info.input_name,
 			};
 		}
@@ -528,7 +531,7 @@ function syncLinkedWatermarkObjects(node) {
 			source: "linked",
 			linked_key: info.linked_key,
 			input_name: info.input_name,
-			src: info.src,
+			...(cutoutRef || {}),
 			width: Number(info.width || 72),
 			height: Number(info.height || 72),
 			x: fit.x,
@@ -540,7 +543,8 @@ function syncLinkedWatermarkObjects(node) {
 		};
 	});
 	const next = [...localObjects, ...linkedObjects];
-	if (JSON.stringify(next) !== JSON.stringify(objects)) {
+	const hasSerializedPreview = objects.some((item) => item?.src || item?.preview_src);
+	if (hasSerializedPreview || JSON.stringify(next.map(serializeWatermarkObject)) !== JSON.stringify(objects.map(serializeWatermarkObject))) {
 		setWatermarkObjects(node, next, false);
 	}
 	return linkedObjects.length;
@@ -869,8 +873,17 @@ async function requestRmbg14Preview(info) {
 		body: JSON.stringify(parsed),
 	});
 	const data = await response.json().catch(() => ({}));
-	if (!response?.ok || !data?.ok || !data?.src) throw new Error(data?.error || "RMBG1.4 预览失败");
-	return { src: data.src, width: Number(data.width || 0), height: Number(data.height || 0) };
+	if (!response?.ok || !data?.ok) throw new Error(data?.error || "RMBG1.4 预览失败");
+	const src = data.src || imageRefToViewUrl(data);
+	if (!src) throw new Error(data?.error || "RMBG1.4 预览失败");
+	return {
+		src,
+		filename: String(data.filename || ""),
+		type: String(data.type || "temp"),
+		subfolder: String(data.subfolder || "GJJ"),
+		width: Number(data.width || 0),
+		height: Number(data.height || 0),
+	};
 }
 
 function numberValue(node, name, fallback = 0) {
@@ -1006,8 +1019,50 @@ function watermarkObjects(node) {
 	}
 }
 
+function objectPreviewKey(item) {
+	if (!item) return "";
+	if (item.linked_key) return `linked:${item.linked_key}`;
+	if (item.hash) return `hash:${item.hash}`;
+	if (item.filename) return `file:${item.type || "input"}:${item.subfolder || ""}:${item.filename}`;
+	return "";
+}
+
+function compactImageRef(info) {
+	if (!info?.filename) return null;
+	return {
+		filename: info.filename,
+		type: info.type || "temp",
+		subfolder: info.subfolder || "",
+		hash: info.hash || "",
+		width: Number(info.width || 0),
+		height: Number(info.height || 0),
+	};
+}
+
+function objectPreviewCache(node) {
+	if (!node.__gjjTextOverlayObjectPreviewCache) node.__gjjTextOverlayObjectPreviewCache = new Map();
+	return node.__gjjTextOverlayObjectPreviewCache;
+}
+
+function setObjectPreviewInfo(node, key, info) {
+	if (!key || !info?.src) return;
+	objectPreviewCache(node).set(key, info);
+}
+
+function objectPreviewInfo(node, item) {
+	const key = objectPreviewKey(item);
+	return key ? objectPreviewCache(node).get(key) : null;
+}
+
+function serializeWatermarkObject(item) {
+	const copy = { ...(item || {}) };
+	delete copy.src;
+	delete copy.preview_src;
+	return copy;
+}
+
 function setWatermarkObjects(node, objects, notify = true) {
-	const value = JSON.stringify(Array.isArray(objects) ? objects : []);
+	const value = JSON.stringify(Array.isArray(objects) ? objects.map(serializeWatermarkObject) : []);
 	if (notify) {
 		setWidgetValue(node, "watermark_objects_json", value);
 		return;
@@ -1152,6 +1207,8 @@ function foregroundStrokeFilter(item, displayScale = 1) {
 }
 
 function storedImageSrc(item) {
+	const cutout = item?.cutout_ref;
+	if (cutout?.filename) return imageRefToViewUrl(cutout);
 	if (!item?.filename) return "";
 	if (item.type && item.type !== "input") return imageRefToViewUrl(item);
 	return inputImageViewInfo(item.filename)?.src || "";
@@ -1509,19 +1566,35 @@ function makePanel(node) {
 			setPosition(node, "watermark", point.x, point.y);
 			activate("watermark");
 			const tempInfo = await writeTempImageFromDataUrl(src, file);
+			let displayInfo = { ...tempInfo, src, width: imageInfo.width || 72, height: imageInfo.height || 72 };
+			let cutoutRef = null;
+			if (boolValue(node, "logo_remove_bg", true)) {
+				try {
+					const cutout = await requestRmbg14Preview(tempInfo);
+					if (cutout?.src) {
+						displayInfo = { ...displayInfo, ...cutout };
+						cutoutRef = compactImageRef(cutout);
+					}
+				} catch (error) {
+					console.warn("[GJJ_TextOverlay] 拖拽前景抠图预览失败", error);
+				}
+			}
 			const objects = watermarkObjects(node);
-			const fit = fitWatermarkObjectToBackground(node, imageInfo, clampStagePoint(point.x, point.y));
-			objects.push({
-				filename: tempInfo.filename,
-				type: tempInfo.type || "temp",
-				subfolder: tempInfo.subfolder || "GJJ",
-				hash: tempInfo.hash || "",
+			const fit = fitWatermarkObjectToBackground(node, displayInfo, clampStagePoint(point.x, point.y));
+			const storedRef = cutoutRef || compactImageRef(tempInfo) || tempInfo;
+			const nextObject = {
+				filename: storedRef.filename,
+				type: storedRef.type || "temp",
+				subfolder: storedRef.subfolder || "GJJ",
+				hash: storedRef.hash || "",
 				x: fit.x,
 				y: fit.y,
 				scale: fit.scale,
-				width: imageInfo.width || 72,
-				height: imageInfo.height || 72,
-			});
+				width: Number(displayInfo.width || imageInfo.width || 72),
+				height: Number(displayInfo.height || imageInfo.height || 72),
+			};
+			setObjectPreviewInfo(node, objectPreviewKey(nextObject), displayInfo);
+			objects.push(nextObject);
 			node.__gjjTextOverlaySelectedObjectIndex = objects.length - 1;
 			setWatermarkObjects(node, objects);
 			showPanelStatus(node, hasTransparency ? "透明前景已直接添加" : (boolValue(node, "logo_remove_bg", true) ? "前景已添加，执行时会自动抠图" : "前景已添加"), 1600);
@@ -1548,6 +1621,7 @@ function makePanel(node) {
 			setPosition(node, "watermark", point.x, point.y);
 			activate("watermark");
 			let displayInfo = info;
+			let cutoutRef = null;
 			if (boolValue(node, "logo_remove_bg", true)) {
 				try {
 					const cutout = await requestRmbg14Preview({
@@ -1555,24 +1629,30 @@ function makePanel(node) {
 						type: info.type || "input",
 						subfolder: info.subfolder || "",
 					});
-					if (cutout?.src) displayInfo = { ...info, ...cutout };
+					if (cutout?.src) {
+						displayInfo = { ...info, ...cutout };
+						cutoutRef = compactImageRef(cutout);
+					}
 				} catch (error) {
 					console.warn("[GJJ_TextOverlay] 拖拽前景抠图预览失败", error);
 				}
 			}
 			const objects = watermarkObjects(node);
 			const fit = fitWatermarkObjectToBackground(node, displayInfo, clampStagePoint(point.x, point.y));
-			objects.push({
-				filename: info.filename,
-				type: info.type || "input",
-				subfolder: info.subfolder || "",
-				src: displayInfo.src,
+			const storedRef = cutoutRef || compactImageRef(info) || info;
+			const nextObject = {
+				filename: storedRef.filename,
+				type: storedRef.type || "input",
+				subfolder: storedRef.subfolder || "",
+				hash: storedRef.hash || "",
 				x: fit.x,
 				y: fit.y,
 				scale: fit.scale,
 				width: Number(displayInfo.width || info.width || 72),
 				height: Number(displayInfo.height || info.height || 72),
-			});
+			};
+			setObjectPreviewInfo(node, objectPreviewKey(nextObject), displayInfo);
+			objects.push(nextObject);
 			node.__gjjTextOverlaySelectedObjectIndex = objects.length - 1;
 			setWatermarkObjects(node, objects);
 			showPanelStatus(node, boolValue(node, "logo_remove_bg", true) ? "前景已抠图添加" : "前景已添加", 1600);
@@ -2530,7 +2610,8 @@ function renderWatermarkObjects(node, displayScale) {
 	const objects = watermarkObjects(node);
 	const selected = Number(node.__gjjTextOverlaySelectedObjectIndex);
 	for (const [index, item] of objects.entries()) {
-		const src = item.src || storedImageSrc(item);
+		const preview = objectPreviewInfo(node, item);
+		const src = preview?.src || storedImageSrc(item) || item.src;
 		if (!src) continue;
 		const wrap = document.createElement("div");
 		wrap.className = "gjj-text-overlay-object";
