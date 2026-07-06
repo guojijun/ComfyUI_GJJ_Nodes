@@ -121,6 +121,15 @@ def translation_safetensors_bundle_path(path: Path | str | None = None) -> Path 
 def _read_safetensors_bundle_header(path: Path) -> tuple[dict[str, str], list[str]]:
     from safetensors import safe_open
 
+    try:
+        framework = "numpy"
+        with safe_open(str(path), framework=framework, device="cpu") as handle:
+            metadata = dict(handle.metadata() or {})
+            tensor_names = list(handle.keys())
+        return metadata, tensor_names
+    except Exception:
+        pass
+
     with safe_open(str(path), framework="pt", device="cpu") as handle:
         metadata = dict(handle.metadata() or {})
         tensor_names = list(handle.keys())
@@ -242,10 +251,45 @@ def _decode_bundle_metadata_file(metadata: dict[str, str], relpath: str) -> byte
     return content
 
 
-def _link_or_copy_bundle_weight(bundle_path: Path, target_path: Path) -> None:
-    if target_path.exists():
+def _hf_safetensors_weight_ready(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        from safetensors import safe_open
+
+        with safe_open(str(path), framework="numpy", device="cpu") as handle:
+            metadata = dict(handle.metadata() or {})
+            tensor_names = list(handle.keys())
+        return bool(tensor_names) and metadata.get("format") == "pt"
+    except Exception:
+        return False
+
+
+def _write_hf_safetensors_weight(bundle_path: Path, target_path: Path) -> None:
+    if _hf_safetensors_weight_ready(target_path):
         return
+    if target_path.exists():
+        try:
+            target_path.unlink()
+        except Exception:
+            pass
     target_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        from safetensors import safe_open
+        from safetensors.torch import save_file
+
+        tensors = {}
+        with safe_open(str(bundle_path), framework="pt", device="cpu") as handle:
+            for key in handle.keys():
+                tensors[key] = handle.get_tensor(key)
+        save_file(tensors, str(target_path), metadata={"format": "pt"})
+        return
+    except Exception:
+        pass
+
+    # Last-resort fallback for environments where torch/safetensors.torch is not
+    # importable during startup. The later model load will still surface the real
+    # dependency error if Transformers cannot read this file.
     try:
         os.link(str(bundle_path), str(target_path))
         return
@@ -291,7 +335,7 @@ def prepare_translation_safetensors_model(path: Path | str | None = None) -> Pat
         "files": files,
     }
     manifest_path = cache_path / "manifest.json"
-    if manifest_path.is_file() and weight_path.exists():
+    if manifest_path.is_file() and _hf_safetensors_weight_ready(weight_path):
         try:
             old_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             if old_manifest == manifest and all((cache_path / relpath).is_file() for relpath in files):
@@ -313,7 +357,7 @@ def prepare_translation_safetensors_model(path: Path | str | None = None) -> Pat
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(_decode_bundle_metadata_file(metadata, normalized))
 
-    _link_or_copy_bundle_weight(bundle_path, weight_path)
+    _write_hf_safetensors_weight(bundle_path, weight_path)
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return cache_path
 
