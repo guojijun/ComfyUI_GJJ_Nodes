@@ -406,10 +406,68 @@ def raise_dependency_model_error(
 	send_dependency_model_notice(report, unique_id=unique_id)
 	err = RuntimeError(report.get("warning_message") or "运行环境缺失")
 	setattr(err, "gjj_report", report)
-	raise err
+	raise err from None
 
 def get_report_from_exception(exc):
 	return getattr(exc, "gjj_report", None)
+
+_MODULE_PACKAGE_ALIASES = {
+	"PIL": "pillow",
+	"cv2": "opencv-python",
+	"skimage": "scikit-image",
+	"sklearn": "scikit-learn",
+	"yaml": "pyyaml",
+}
+
+def build_report_from_exception(
+	exc,
+	node_name="",
+	*,
+	dependency_specs=None,
+	install_packages=None,
+	description="",
+	model_download_url=None,
+):
+	report = get_report_from_exception(exc)
+	if report:
+		return report
+	error_text = str(exc or "")
+	match = re.search(r"No module named ['\"]([^'\"]+)['\"]", error_text)
+	if not match and isinstance(exc, ModuleNotFoundError):
+		name = getattr(exc, "name", "") or ""
+		if name:
+			match = re.match(r"(.+)", name)
+	if not match:
+		return None
+	module_name = str(match.group(1) or "").split(".")[0].strip()
+	if not module_name:
+		return None
+	specs = [x if isinstance(x,dict) else {"module_name":x,"package_name":x,"display_name":x,"description":""} for x in (dependency_specs or [])]
+	selected = None
+	for spec in specs:
+		if str(spec.get("module_name") or "").split(".")[0] == module_name:
+			selected = spec
+			break
+		if str(spec.get("package_name") or "").replace("-", "_") == module_name.replace("-", "_"):
+			selected = spec
+			break
+	if selected is None:
+		package_name = _MODULE_PACKAGE_ALIASES.get(module_name, module_name)
+		selected = {
+			"module_name": module_name,
+			"package_name": package_name,
+			"display_name": package_name,
+			"description": "运行时导入时发现缺少这个 Python 依赖。",
+		}
+	packages = install_packages or [selected.get("package_name") or selected.get("module_name")]
+	return build_dependency_model_report(
+		node_name=node_name,
+		missing_dependencies=[selected],
+		install_packages=packages,
+		description=description or "执行过程中发现缺少 Python 运行依赖，请安装后重启 ComfyUI。",
+		original_error=error_text,
+		model_download_url=model_download_url,
+	)
 
 def is_comfyui_model_compatibility_error(error, model_name="", clip_type=""):
 	text = " ".join(str(item or "") for item in (error, model_name, clip_type)).lower()
@@ -509,8 +567,8 @@ def raise_comfyui_model_compatibility_error(
 	err = RuntimeError(report.get("panel_message") or report.get("warning_message") or "模型与当前 ComfyUI 版本不兼容")
 	setattr(err, "gjj_report", report)
 	if isinstance(original_error, BaseException):
-		raise err from original_error
-	raise err
+		raise err from None
+	raise err from None
 # ========= 外部API =========
 def check_dependencies(required_packages,node_name,optional_packages=None):
 	req=_norm(required_packages)
@@ -564,7 +622,7 @@ def load_dependency_at_runtime(module_name,node_name="",package_name="",descript
 		send_dependency_model_notice(report, unique_id=unique_id)
 		err = RuntimeError(report.get("warning_message") or f"{package_name or module_name} 导入失败")
 		setattr(err, "gjj_report", report)
-		raise err from e
+		raise err from None
 
 def print_runtime_dependency_error(node_name="",dependency_name="",install_command="",description="",extra_info="",unique_id=None):
 	# 智能分析错误类型

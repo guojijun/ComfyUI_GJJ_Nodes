@@ -5,7 +5,7 @@
     "filename_template": "{title}_{yyyy}{MM}{dd}_{HH}{mm}{ss}.png",
     "sort_mode": "mtime_desc",
     "filter_mode": "openable",
-    "search_text": "bernin",
+    "search_text": "",
     "page_size": 10,
     "image_format": "png",
     "jpeg_quality": 0.86
@@ -86,7 +86,8 @@
   },
   "nodes": {
     "GJJ_UniversalTTS": {
-      "branch": "Fun-CosyVoice3-0.5B-2512"
+      "branch": "EdgeTTS",
+      "local_audio_sort_mode": "name_asc"
     }
   },
   "user": {},

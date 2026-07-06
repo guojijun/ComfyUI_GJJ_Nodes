@@ -10,9 +10,14 @@ const AUDIO_PREFIX = "reference_";
 const SETTINGS_ENDPOINT = "/gjj/user_settings";
 const IMPORT_MEDIA_ENDPOINT = "/gjj/universal_tts/import_media";
 const CHECK_ENDPOINT = "/gjj/universal_tts/check";
+const AUDIO_LIBRARY_ENDPOINT = "/gjj/universal_tts/audio_library";
+const CHARACTER_LIBRARY_ENDPOINT = "/gjj/character_library/list";
 const STATUS_WIDGET = "gjj_universal_tts_panel";
 const TOOLBAR_WIDGET = "gjj_universal_tts_toolbar";
 const AUDIO_WIDGET = "gjj_universal_tts_audio";
+const LOCAL_AUDIO_SORT_MODES = new Set(["name_asc", "name_desc", "date_desc", "date_asc", "size_desc", "size_asc"]);
+let universalTTSPresetCache = null;
+let universalTTSPresetPromise = null;
 const MANAGED_PROPS = {
 	keep_model_loaded: true,
 	random_seed: false,
@@ -20,9 +25,10 @@ const MANAGED_PROPS = {
 	output_audio_mode: "整体合并",
 	output_text_format: "SRT",
 	detached_links: {},
+	local_audio_order: [],
 };
 
-const cloneValue = (value) => JSON.parse(JSON.stringify(value));
+const cloneValue = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 
 const COMMON_WIDGETS = new Set([
 	"text", "open_file_button", "keep_model_loaded", "branch", "link_button", "random_seed",
@@ -31,22 +37,44 @@ const COMMON_WIDGETS = new Set([
 	"edge_voice", "custom_voice", "speed", "pitch", "language", "device",
 	"precision", "steps", "guidance_strength", "pause_after_speaker", "seed",
 	"audio_output_mode", "timeline_format", "mp3_filename_prefix", "mp3_quality", "fail_mode",
+	"segment_min_chars", "segment_max_chars",
+	"local_audio_order_json", "edge_speaker_voices_json", "tts_voice_orders_json",
 ]);
 
 const CORE_WIDGETS = new Set(["text"]);
 const SETTINGS_COMMON_WIDGETS = new Set([
-	"branch", "audio_output_mode", "timeline_format", "mp3_filename_prefix", "mp3_quality", "fail_mode",
+	"mp3_filename_prefix", "mp3_quality", "fail_mode", "segment_min_chars", "segment_max_chars",
 ]);
+const PANEL_MANAGED_WIDGETS = new Set(["edge_speaker_voices_json", "tts_voice_orders_json"]);
 
 const BRANCH_PRIVATE = {
-	EdgeTTS: new Set(["edge_voice", "custom_voice", "speed", "pitch"]),
-	FishAudioS2: new Set(["model_name", "local_audio_name", "default_reference_text", "language", "device", "precision", "seed", "pause_after_speaker"]),
-	"LongCat-1B": new Set(["model_name", "local_audio_name", "default_reference_text", "device", "precision", "steps", "guidance_strength", "seed", "pause_after_speaker"]),
-	"LongCat3.5B": new Set(["model_name", "local_audio_name", "default_reference_text", "device", "precision", "steps", "guidance_strength", "seed", "pause_after_speaker"]),
-	"Fun-CosyVoice3-0.5B-2512": new Set(["model_name", "local_audio_name", "default_reference_text", "speed", "seed"]),
+	EdgeTTS: new Set(["speed", "pitch", "edge_speaker_voices_json"]),
+	FishAudioS2: new Set(["model_name", "default_reference_text", "language", "device", "precision", "seed", "pause_after_speaker"]),
+	"LongCat-1B": new Set(["model_name", "default_reference_text", "device", "precision", "steps", "guidance_strength", "seed", "pause_after_speaker"]),
+	"LongCat3.5B": new Set(["model_name", "default_reference_text", "device", "precision", "steps", "guidance_strength", "seed", "pause_after_speaker"]),
+	"Fun-CosyVoice3-0.5B-2512": new Set(["model_name", "default_reference_text", "speed", "seed"]),
+	"Qwen3-CustomVoice": new Set(["model_name", "language", "device", "precision", "seed"]),
+	"Qwen3-VoiceDesign": new Set(["model_name", "default_reference_text", "language", "device", "precision", "seed"]),
+	"Qwen3-VoiceClone": new Set(["model_name", "default_reference_text", "language", "device", "precision", "seed"]),
+	"IndexTTS-v1.5": new Set(["default_reference_text", "device", "precision", "seed"]),
+	"IndexTTS-v1.0": new Set(["default_reference_text", "device", "precision", "seed"]),
+	"IndexTTS-v2": new Set(["default_reference_text", "device", "precision", "seed"]),
 };
 
 const BRANCH_VALUES = Object.keys(BRANCH_PRIVATE);
+const BRANCH_DISPLAY = {
+	EdgeTTS: "🗣️ TTS · EdgeTTS",
+	FishAudioS2: "🎙️ 克隆 · FishAudioS2",
+	"LongCat-1B": "🎙️ 克隆 · LongCat-1B",
+	"LongCat3.5B": "🎙️ 克隆 · LongCat3.5B",
+	"Fun-CosyVoice3-0.5B-2512": "🎙️ 克隆 · Fun-CosyVoice3-0.5B-2512",
+	"Qwen3-CustomVoice": "🗣️ TTS · Qwen3-CustomVoice",
+	"Qwen3-VoiceDesign": "🗣️ TTS · Qwen3-VoiceDesign",
+	"Qwen3-VoiceClone": "🎙️ 克隆 · Qwen3-VoiceClone",
+	"IndexTTS-v1.5": "🎙️ 克隆 · IndexTTS-v1.5",
+	"IndexTTS-v1.0": "🎙️ 克隆 · IndexTTS-v1.0",
+	"IndexTTS-v2": "🎙️ 克隆 · IndexTTS-v2",
+};
 const CHOICE_DEFAULTS = {
 	branch: "EdgeTTS",
 	model_name: "自动",
@@ -65,9 +93,124 @@ const NUMBER_DEFAULTS = {
 	pitch: { value: 0, min: -20, max: 20, int: true },
 	steps: { value: 16, min: 1, max: 128, int: true },
 	guidance_strength: { value: 4.0, min: 0, max: 20, decimals: 2 },
-	pause_after_speaker: { value: 0.35, min: 0, max: 10, decimals: 2 },
+	pause_after_speaker: { value: 0.4, min: 0, max: 0.8, decimals: 2 },
 	seed: { value: 42, min: 0, max: 0x7fffffff, int: true },
+	segment_min_chars: { value: 12, min: 0, max: 200, int: true },
+	segment_max_chars: { value: 80, min: 8, max: 500, int: true },
 };
+
+const SERIALIZED_WIDGET_ORDER = [
+	"text", "branch", "model_name", "local_audio_name", "default_reference_text",
+	"edge_voice", "custom_voice", "speed", "pitch", "language", "device", "precision",
+	"steps", "guidance_strength", "pause_after_speaker", "seed",
+	"audio_output_mode", "timeline_format", "mp3_filename_prefix", "mp3_quality", "fail_mode",
+	"segment_min_chars", "segment_max_chars", "local_audio_order_json", "edge_speaker_voices_json", "tts_voice_orders_json",
+];
+const SERIALIZED_WIDGET_RANK = new Map(SERIALIZED_WIDGET_ORDER.map((name, index) => [name, index]));
+
+function normalizeLocalAudioSortMode(value) {
+	return LOCAL_AUDIO_SORT_MODES.has(String(value || "")) ? String(value) : "name_asc";
+}
+
+function nextLibrarySortMode(mode, includeFileStats = false) {
+	const modes = includeFileStats ? ["name_asc", "name_desc", "date_desc", "date_asc", "size_desc", "size_asc"] : ["name_asc", "name_desc"];
+	const current = normalizeLocalAudioSortMode(mode);
+	return modes[(Math.max(0, modes.indexOf(current)) + 1) % modes.length] || modes[0];
+}
+
+function librarySortLabel(mode) {
+	return ({
+		name_asc: "A-Z",
+		name_desc: "Z-A",
+		date_desc: "⏰新",
+		date_asc: "⏰旧",
+		size_desc: "💾大",
+		size_asc: "💾小",
+	})[normalizeLocalAudioSortMode(mode)] || "A-Z";
+}
+
+function formatBytes(bytes) {
+	const value = Number(bytes || 0);
+	if (!Number.isFinite(value) || value <= 0) return "";
+	if (value >= 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(1)}GB`;
+	if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)}MB`;
+	if (value >= 1024) return `${(value / 1024).toFixed(1)}KB`;
+	return `${Math.round(value)}B`;
+}
+
+function normalizeCharacterKey(value) {
+	return String(value || "")
+		.trim()
+		.replace(/^@+/, "")
+		.replace(/[♀♂]/g, "")
+		.replace(/\s+/g, "")
+		.toLowerCase();
+}
+
+function branchDisplayName(value) {
+	return BRANCH_DISPLAY[String(value || "")] || String(value || "");
+}
+
+function isTtsVoiceLibraryBranch(branch) {
+	return new Set(["EdgeTTS", "Qwen3-CustomVoice", "Qwen3-VoiceDesign"]).has(String(branch || ""));
+}
+
+function isCloneVoiceLibraryBranch(branch) {
+	return !isTtsVoiceLibraryBranch(branch);
+}
+
+function nodePresetFromSettings(settings) {
+	const nodes = settings?.nodes;
+	const preset = nodes && typeof nodes === "object" ? nodes[TARGET] : null;
+	if (!preset || typeof preset !== "object") return {};
+	return {
+		branch: String(preset.branch || ""),
+		local_audio_sort_mode: normalizeLocalAudioSortMode(preset.local_audio_sort_mode),
+	};
+}
+
+async function loadUniversalTTSPreset() {
+	if (universalTTSPresetCache) return universalTTSPresetCache;
+	if (!universalTTSPresetPromise) {
+		universalTTSPresetPromise = fetch(SETTINGS_ENDPOINT)
+			.then((response) => response.json())
+			.then((data) => {
+				universalTTSPresetCache = nodePresetFromSettings(data?.settings);
+				return universalTTSPresetCache;
+			})
+			.catch(() => {
+				universalTTSPresetCache = {};
+				return universalTTSPresetCache;
+			});
+	}
+	return universalTTSPresetPromise;
+}
+
+function applyUniversalTTSPreset(node, preset) {
+	if (!node || !preset || typeof preset !== "object") return;
+	const s = node.__gjjUniversalTTS;
+	if (s) {
+		s.mp3SortMode = normalizeLocalAudioSortMode(preset.local_audio_sort_mode);
+		s.mp3SortAsc = s.mp3SortMode !== "name_desc";
+	}
+}
+
+function syncLocalAudioOrderStorage(node) {
+	ensureProperties(node);
+	let order = Array.isArray(node.properties.local_audio_order) ? node.properties.local_audio_order.map((item) => String(item || "").trim()).filter(Boolean) : [];
+	const storage = widget(node, "local_audio_order_json");
+	if (!order.length && storage) {
+		try {
+			const parsed = JSON.parse(String(storage.value || "[]"));
+			if (Array.isArray(parsed)) order = parsed.map((item) => String(item || "").trim()).filter(Boolean);
+		} catch (_) {}
+	}
+	node.properties.local_audio_order = [...new Set(order)];
+	if (storage) {
+		const value = JSON.stringify(node.properties.local_audio_order);
+		if (String(storage.value || "") !== value) storage.value = value;
+	}
+}
 
 function isTarget(node) {
 	const values = [
@@ -204,6 +347,40 @@ function moveWidgetsToTop(node, widgetRefs) {
 	}
 }
 
+function canonicalWidgetRank(widgetRef, fallbackIndex) {
+	if (!widgetRef || widgetRef.serialize === false || widgetRef.options?.serialize === false) {
+		return 10000 + fallbackIndex;
+	}
+	return SERIALIZED_WIDGET_RANK.has(widgetRef.name) ? SERIALIZED_WIDGET_RANK.get(widgetRef.name) : 5000 + fallbackIndex;
+}
+
+function normalizeSerializedWidgetOrder(node) {
+	if (!Array.isArray(node?.widgets)) return;
+	const indexed = node.widgets.map((item, index) => ({ item, index }));
+	indexed.sort((a, b) => canonicalWidgetRank(a.item, a.index) - canonicalWidgetRank(b.item, b.index));
+	node.widgets.splice(0, node.widgets.length, ...indexed.map((entry) => entry.item));
+}
+
+function captureWidgetValuesByName(node) {
+	ensureProperties(node);
+	const values = {};
+	for (const w of node.widgets || []) {
+		if (!SERIALIZED_WIDGET_RANK.has(w?.name)) continue;
+		values[w.name] = cloneValue(w.value);
+	}
+	node.properties.gjj_widget_values_by_name = values;
+}
+
+function restoreWidgetValuesByName(node) {
+	const values = node?.properties?.gjj_widget_values_by_name;
+	if (!values || typeof values !== "object") return;
+	for (const [name, value] of Object.entries(values)) {
+		if (!SERIALIZED_WIDGET_RANK.has(name)) continue;
+		const w = widget(node, name);
+		if (w) setWidgetValue(node, name, cloneValue(value));
+	}
+}
+
 function removeToolbarWidgets(node) {
 	if (!Array.isArray(node?.widgets)) return;
 	for (let i = node.widgets.length - 1; i >= 0; i -= 1) {
@@ -263,8 +440,17 @@ function hasLink(input) {
 	return Boolean(input?.link);
 }
 
+function linkedInputs(node) {
+	return (node?.inputs || []).filter((input) => hasLink(input));
+}
+
 function pairLinked(pair) {
 	return hasLink(pair?.audio) || hasLink(pair?.text);
+}
+
+function pairDetached(node, pair) {
+	const stored = node?.properties?.detached_links || {};
+	return Boolean(stored[pair?.audio?.name] || stored[pair?.text?.name]);
 }
 
 function removeInput(node, input) {
@@ -286,8 +472,14 @@ function normalizePairs(node) {
 		addPair(node);
 		list = pairs(node);
 	}
+	const stored = node?.properties?.detached_links || {};
+	const maxStoredIndex = Math.max(0, ...Object.keys(stored).map(inputIndex).filter((index) => Number.isFinite(index) && index !== Number.MAX_SAFE_INTEGER));
+	while (list.length < Math.min(MAX_REFERENCES, maxStoredIndex)) {
+		addPair(node);
+		list = pairs(node);
+	}
 	for (let i = list.length - 1; i >= 1; i -= 1) {
-		if (pairLinked(list[i])) break;
+		if (pairLinked(list[i]) || pairDetached(node, list[i])) break;
 		removeInput(node, list[i].text);
 		removeInput(node, list[i].audio);
 	}
@@ -356,6 +548,284 @@ function compactTextWidget(node) {
 	}
 }
 
+function textValueFromNode(node) {
+	const candidates = [];
+	for (const w of node?.widgets || []) {
+		if (typeof w?.value !== "string") continue;
+		const value = w.value.trim();
+		if (!value) continue;
+		const name = String(w.name || "").toLowerCase();
+		const score = (["text", "prompt", "markdown", "content"].includes(name) ? 100000 : 0) + value.length;
+		candidates.push({ value, score });
+	}
+	candidates.sort((a, b) => b.score - a.score);
+	return candidates[0]?.value || "";
+}
+
+function widgetNameForInput(input) {
+	const name = String(input?.name || "");
+	if (name === "text" || name === "合成文本") return "text";
+	if (name === _speakerRefTextName(1) || name === "参考文本1") return "default_reference_text";
+	return COMMON_WIDGETS.has(name) ? name : "";
+}
+
+function _speakerRefTextName(index) {
+	return `${AUDIO_PREFIX}${String(index).padStart(2, "0")}_text`;
+}
+
+function linkedSynthesisText(node) {
+	const result = linkedSynthesisTextValue(node);
+	return result.linked ? result.text : "";
+}
+
+function linkedSynthesisTextValue(node) {
+	const input = (node?.inputs || []).find((item) => ["text", "合成文本"].includes(String(item?.name || "")));
+	if (!input?.link) return { linked: false, text: "" };
+	const link = app.graph?.links?.[input.link];
+	const origin = link ? app.graph?.getNodeById?.(link.origin_id) : null;
+	return { linked: true, text: textValueFromNode(origin) };
+}
+
+function syncLinkedSynthesisText(node) {
+	const linked = linkedSynthesisTextValue(node);
+	if (!linked.linked) return false;
+	const text = linked.text;
+	const textWidget = widget(node, "text");
+	if (!textWidget || String(textWidget.value || "") === text) return true;
+	setWidgetValue(node, "text", text);
+	return true;
+}
+
+function synthesisTextForSpeakerParsing(node) {
+	const linked = linkedSynthesisTextValue(node);
+	return linked.linked ? linked.text : String(widget(node, "text")?.value || "");
+}
+
+function parseSpeakerEntriesFromText(text) {
+	const entries = new Map();
+	const named = new Map();
+	const tagRe = /^\s*((?:\[?speaker[_\s-]*(\d+)\]?|spk[_\s-]*(\d+)|角色\s*(\d+)|说话人\s*(\d+)))\s*[:：]/i;
+	const namedTagRe = /^\s*([A-Za-z]|[甲乙丙丁戊己庚辛壬癸]|[\u4e00-\u9fffA-Za-z0-9_·]{1,12}(?:\s*[、,，/|&和与]\s*[\u4e00-\u9fffA-Za-z0-9_·]{1,12}){0,8})\s*[:：]/;
+	const cleanLabel = (label) => String(label || "").trim().replace(/^[\[\]【】（）()\s]+|[\[\]【】（）()\s]+$/g, "");
+	const addEntry = (index, label) => {
+		const clean = cleanLabel(label);
+		if (!clean) return;
+		if (!entries.has(index)) entries.set(index, clean);
+	};
+	const speakerIndexFromLabel = (label) => {
+		const raw = cleanLabel(label);
+		const numeric = raw.match(/(?:speaker|spk|角色|说话人)?[_\s-]*(\d+)$/i);
+		if (numeric) return Math.max(0, Number.parseInt(numeric[1], 10) - 1);
+		const key = raw.toLowerCase();
+		if (!named.has(key)) named.set(key, named.size);
+		return named.get(key);
+	};
+	for (const line of String(text || "").split(/\r?\n/)) {
+		const match = tagRe.exec(line);
+		if (match) {
+			const number = match.slice(2, 6).find(Boolean) || "1";
+			const index = Math.max(0, Number.parseInt(number, 10) - 1);
+			addEntry(index, match[1] || `说话人${index + 1}`);
+			continue;
+		}
+		const namedMatch = namedTagRe.exec(line);
+		if (!namedMatch) continue;
+		const labels = String(namedMatch[1] || "").split(/\s*(?:[、,，/|&]|和|与)\s*/).map(cleanLabel).filter(Boolean);
+		for (const label of labels) addEntry(speakerIndexFromLabel(label), label);
+	}
+	return [...entries.entries()]
+		.sort((a, b) => a[0] - b[0])
+		.slice(0, MAX_REFERENCES)
+		.map(([index, label]) => ({ index, label }));
+}
+
+function readEdgeSpeakerVoiceMap(node) {
+	const w = widget(node, "edge_speaker_voices_json");
+	try {
+		const parsed = JSON.parse(String(w?.value || "{}"));
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+	} catch (_) {
+		return {};
+	}
+}
+
+function readTTSVoiceOrders(node) {
+	const w = widget(node, "tts_voice_orders_json");
+	try {
+		const parsed = JSON.parse(String(w?.value || "{}"));
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+	} catch (_) {}
+	return {};
+}
+
+function readEdgeVoiceOrder(node, branch = "EdgeTTS") {
+	const orders = readTTSVoiceOrders(node);
+	const current = orders[String(branch || "")];
+	if (Array.isArray(current)) return current.map((item) => String(item || "").trim()).filter(Boolean);
+	if (branch === "EdgeTTS") {
+		const legacy = widget(node, "edge_speaker_voices_json");
+		try {
+			const parsed = JSON.parse(String(legacy?.value || "[]"));
+			if (Array.isArray(parsed)) return parsed.map((item) => String(item || "").trim()).filter(Boolean);
+			if (parsed && typeof parsed === "object") {
+				return Object.entries(parsed).sort((a, b) => Number(a[0]) - Number(b[0])).map(([, value]) => String(value || "").trim()).filter(Boolean);
+			}
+		} catch (_) {}
+	}
+	return [];
+}
+
+function writeEdgeVoiceOrder(node, branch, order) {
+	const cleaned = [...new Set((order || []).map((item) => String(item || "").trim()).filter(Boolean))];
+	const orders = readTTSVoiceOrders(node);
+	orders[String(branch || "EdgeTTS")] = cleaned;
+	setWidgetValue(node, "tts_voice_orders_json", JSON.stringify(orders));
+	if (String(branch || "") === "EdgeTTS") setWidgetValue(node, "edge_speaker_voices_json", JSON.stringify(cleaned));
+}
+
+function writeEdgeSpeakerVoiceMap(node, value) {
+	const cleaned = {};
+	for (const [key, voice] of Object.entries(value || {})) {
+		const text = String(voice || "").trim();
+		if (text) cleaned[String(key)] = text;
+	}
+	setWidgetValue(node, "edge_speaker_voices_json", JSON.stringify(cleaned));
+}
+
+function speakerEntriesForLibrary(node) {
+	const entries = parseSpeakerEntriesFromText(synthesisTextForSpeakerParsing(node));
+	return entries.length ? entries : [{ index: 0, label: "说话人1" }];
+}
+
+async function loadCharacterLibraryForTTS() {
+	try {
+		const response = await fetch(CHARACTER_LIBRARY_ENDPOINT);
+		const data = await response.json();
+		return Array.isArray(data?.characters) ? data.characters : [];
+	} catch (_) {
+		return [];
+	}
+}
+
+function characterVoiceForSpeaker(entry, characters) {
+	const character = characterForSpeaker(entry, characters);
+	return character ? String(character.voice_path || "").trim().replace(/\//g, "\\") : "";
+}
+
+function normalizeVoicePath(value) {
+	return String(value || "").trim().replace(/\//g, "\\");
+}
+
+function voiceStem(value) {
+	const name = normalizeVoicePath(value).split("\\").pop() || "";
+	return normalizeCharacterKey(name.replace(/\.mp3$/i, ""));
+}
+
+function voiceMatchesAnyAlias(value, aliases) {
+	const stem = voiceStem(value);
+	return Boolean(stem && aliases.some((alias) => {
+		const key = normalizeCharacterKey(alias);
+		return key && (stem === key || stem.startsWith(key) || (key.length >= 2 && stem.includes(key)));
+	}));
+}
+
+function aliasesForSpeaker(entry, character) {
+	return [
+		entry?.label,
+		character?.reference_name,
+		character?.name,
+		character?.id,
+		String(character?.reference || "").replace(/^@+/, ""),
+	].filter(Boolean);
+}
+
+function findNamedVoiceForSpeaker(entry, character, values) {
+	const aliases = aliasesForSpeaker(entry, character);
+	return (values || []).find((value) => voiceMatchesAnyAlias(value, aliases)) || "";
+}
+
+function characterVoiceForSpeakerFromValues(entry, characters, values, duplicateVoicePaths = new Set()) {
+	const character = characterForSpeaker(entry, characters);
+	const namedVoice = findNamedVoiceForSpeaker(entry, character, values);
+	const voicePath = normalizeVoicePath(character?.voice_path);
+	const known = new Set((values || []).map(normalizeVoicePath));
+	if (voicePath && known.has(voicePath) && !duplicateVoicePaths.has(voicePath)) return voicePath;
+	return namedVoice || (voicePath && known.has(voicePath) ? voicePath : "");
+}
+
+function characterForSpeaker(entry, characters) {
+	const key = normalizeCharacterKey(entry?.label);
+	if (!key) return null;
+	for (const character of characters || []) {
+		const aliases = [
+			character?.reference_name,
+			character?.name,
+			character?.id,
+			String(character?.reference || "").replace(/^@+/, ""),
+		].map(normalizeCharacterKey).filter(Boolean);
+		if (aliases.includes(key)) return character;
+	}
+	return null;
+}
+
+function renderEdgeSpeakerVoicePanel(node) {
+	const s = node.__gjjUniversalTTS;
+	if (!s?.speakerPanel) return;
+	s.speakerPanel.style.display = "none";
+	s.speakerPanel.replaceChildren();
+	return;
+	const branch = String(widget(node, "branch")?.value || "EdgeTTS");
+	const open = Boolean(node.properties?.settings_open);
+	if (branch !== "EdgeTTS" || !open) {
+		s.speakerPanel.style.display = "none";
+		s.speakerPanel.replaceChildren();
+		return;
+	}
+	const voiceWidget = widget(node, "edge_voice");
+	const voices = optionValues(voiceWidget);
+	const fallback = String(voiceWidget?.value || voices[0] || "");
+	const map = readEdgeSpeakerVoiceMap(node);
+	const entries = parseSpeakerEntriesFromText(synthesisTextForSpeakerParsing(node));
+	while (entries.length < 2) entries.push({ index: entries.length, label: `说话人${entries.length + 1}` });
+	s.speakerPanel.replaceChildren();
+	const title = document.createElement("div");
+	title.textContent = "说话人音色";
+	title.style.cssText = "font-weight:700;color:#edf7fb;margin-bottom:6px";
+	s.speakerPanel.append(title);
+	const seenIndexes = new Set();
+	for (const entry of entries.slice(0, MAX_REFERENCES)) {
+		const index = Math.max(0, Number(entry.index) || 0);
+		if (seenIndexes.has(index)) continue;
+		seenIndexes.add(index);
+		const row = document.createElement("label");
+		row.style.cssText = "display:flex;align-items:center;gap:8px;margin:4px 0";
+		const label = document.createElement("span");
+		label.textContent = String(entry.label || `说话人${index + 1}`);
+		label.style.cssText = "width:70px;color:#c9d6dc;white-space:nowrap";
+		const select = document.createElement("select");
+		select.style.cssText = "flex:1;min-width:0;background:#2b3035;color:#f4fbff;border:1px solid #465862;border-radius:5px;padding:4px 6px";
+		for (const value of voices.length ? voices : [fallback]) {
+			const option = document.createElement("option");
+			option.value = String(value);
+			option.textContent = String(value);
+			select.append(option);
+		}
+		select.value = String(map[String(index + 1)] || fallback);
+		select.addEventListener("pointerdown", (event) => event.stopPropagation());
+		select.addEventListener("mousedown", (event) => event.stopPropagation());
+		select.addEventListener("change", () => {
+			const next = readEdgeSpeakerVoiceMap(node);
+			if (String(select.value) === fallback) delete next[String(index + 1)];
+			else next[String(index + 1)] = select.value;
+			writeEdgeSpeakerVoiceMap(node, next);
+			refresh(node);
+		});
+		row.append(label, select);
+		s.speakerPanel.append(row);
+	}
+	s.speakerPanel.style.display = "";
+}
+
 function toolbarHeight(state, width) {
 	const measured = Number(state?.toolbar?.scrollHeight || 0);
 	if (measured > 0) return Math.max(34, measured);
@@ -402,7 +872,7 @@ function ensurePanel(node) {
 	toolbar.style.cssText = "display:flex;gap:4px;align-items:center;flex-wrap:nowrap;width:100%;box-sizing:border-box;overflow:visible";
 	const open = button("📂", "打开文本、音频或视频文件");
 	const keep = button("🧠", "切换是否保留模型");
-	const branch = button("💱", "切换生成分支并保存预设");
+	const branch = button("💱", "选择生成分支");
 	const link = button("🔗", "记住外部链接并断开/恢复");
 	const seed = button("🎲", "切换固定/随机种子");
 	const mp3 = button("📢", "显示 models/mp3 音频列表");
@@ -425,9 +895,9 @@ function ensurePanel(node) {
 
 	const outputPanel = document.createElement("div");
 	outputPanel.style.cssText = "display:none;padding:7px;border:1px solid #41535b;border-radius:7px;background:#10171b";
+	const speakerPanel = document.createElement("div");
+	speakerPanel.style.cssText = "display:none;padding:7px;border:1px solid #41535b;border-radius:7px;background:#10171b";
 
-	const mp3List = document.createElement("div");
-	mp3List.style.cssText = "display:none;max-height:160px;overflow:auto;padding:7px;border:1px solid #41535b;border-radius:7px;background:#10171b";
 	const fileInput = document.createElement("input");
 	fileInput.type = "file";
 	fileInput.accept = ".txt,.srt,.vtt,.lrc,.json,.wav,.mp3,.flac,.m4a,.ogg,.aac,.mp4,.mov,.mkv,.webm,text/*,audio/*,video/*";
@@ -435,15 +905,15 @@ function ensurePanel(node) {
 
 	const root = document.createElement("div");
 	root.style.cssText = "display:flex;flex-direction:column;gap:7px;width:100%;box-sizing:border-box;color:#dce7e2;font:12px/1.35 ui-sans-serif,system-ui,'Microsoft YaHei',sans-serif";
-	root.append(fileInput, progress, outputPanel, mp3List);
+	root.append(fileInput, progress, outputPanel, speakerPanel);
 
-	const state = { root, toolbar, open, keep, branch, link, seed, mp3, output, settings, generate, progress, label, bar, outputPanel, mp3List, fileInput };
+	const state = { root, toolbar, open, keep, branch, link, seed, mp3, output, settings, generate, progress, label, bar, outputPanel, speakerPanel, fileInput, branchPopup: null, mp3Popup: null, mp3SortMode: "name_asc", mp3SortAsc: true };
 	ensureToolbarWidget(node, state);
 	const panelHeight = () => {
 		let h = 0;
 		if (progress.style.display !== "none") h += 52;
 		if (outputPanel.style.display !== "none") h += Math.min(96, outputPanel.scrollHeight || 74);
-		if (mp3List.style.display !== "none") h += Math.min(170, mp3List.scrollHeight || 120);
+		if (speakerPanel.style.display !== "none") h += Math.min(260, speakerPanel.scrollHeight || 116);
 		return h;
 	};
 	const panel = node.addDOMWidget?.(STATUS_WIDGET, "HTML", root, {
@@ -491,24 +961,51 @@ function syncButtons(node) {
 	const branchColors = ["#1f3037", "#273d62", "#3f3a1e", "#43304f", "#244437"];
 	s.branch.style.background = branchColors[Math.max(0, BRANCH_VALUES.indexOf(branchValue)) % branchColors.length] || "#1f3037";
 	s.branch.style.borderColor = branchValue === "EdgeTTS" ? "#46606a" : "#79a7d8";
-	s.branch.title = `生成分支：${branchValue}`;
+	s.branch.title = `生成分支：${branchDisplayName(branchValue)}。点击选择`;
+	s.branch.style.boxShadow = s.branchPopup ? "0 0 0 1px #9fb0bd inset" : "";
 	s.output.style.background = s.outputPanel?.style.display !== "none" ? "#33414a" : "#1f3037";
 	s.output.style.borderColor = s.outputPanel?.style.display !== "none" ? "#9fb0bd" : "#46606a";
 	s.output.title = `输出：${audioMode} / ${textMode}`;
-	s.link.style.display = pairs(node).some((pair) => pairLinked(pair)) || Object.keys(node.properties.detached_links || {}).length ? "" : "none";
-	s.link.title = Object.keys(node.properties.detached_links || {}).length ? "恢复已记住的外部链接" : "记住外部链接并断开";
+	const audioOrder = Array.isArray(node.properties.local_audio_order) ? node.properties.local_audio_order.filter(Boolean) : [];
+	const audioName = audioOrder.length ? `已选 ${audioOrder.length} 个：${audioOrder.map((item, index) => `${index + 1}.${item}`).join(" / ")}` : String(widget(node, "local_audio_name")?.value || "").trim();
+	const isTtsLibrary = isTtsVoiceLibraryBranch(branchValue);
+	const edgeVoiceOrder = readEdgeVoiceOrder(node, branchValue);
+	const ttsPrimaryVoice = branchValue === "EdgeTTS" ? String(widget(node, "edge_voice")?.value || "").trim() : String(widget(node, "custom_voice")?.value || "").trim();
+	const libraryName = isTtsLibrary
+		? (edgeVoiceOrder.length ? `已选 ${edgeVoiceOrder.length} 个：${edgeVoiceOrder.map((item, index) => `${index + 1}.${item}`).join(" / ")}` : ttsPrimaryVoice)
+		: audioName;
+	s.mp3.style.background = s.mp3Popup ? "#33414a" : "#1f3037";
+	s.mp3.style.borderColor = s.mp3Popup ? "#9fb0bd" : "#46606a";
+	s.mp3.title = isTtsLibrary
+		? (libraryName ? `TTS 音色库：${libraryName}` : "选择当前 TTS 分支音色库")
+		: (libraryName ? `本地参考音频：${libraryName}` : "选择 models/mp3 本地参考音频");
+	const detachedCount = Object.keys(node.properties.detached_links || {}).length;
+	const linkedCount = linkedInputs(node).length;
+	s.link.style.display = linkedCount || detachedCount ? "" : "none";
+	s.link.style.background = detachedCount ? "#31475d" : "#1f3037";
+	s.link.style.borderColor = detachedCount ? "#7eb2e0" : "#46606a";
+	s.link.title = detachedCount ? `恢复已记住的 ${detachedCount} 条外部连接` : `复刻并断开 ${linkedCount} 条外部连接`;
 }
 
-async function saveBranchPreset(node) {
+async function saveUniversalTTSPreset(node, values = {}) {
 	try {
 		const branchWidget = widget(node, "branch");
+		const s = node?.__gjjUniversalTTS;
+		const preset = {
+			branch: String(branchWidget?.value || "EdgeTTS"),
+			local_audio_sort_mode: normalizeLocalAudioSortMode(s?.mp3SortMode),
+			...values,
+		};
+		universalTTSPresetCache = { ...(universalTTSPresetCache || {}), ...preset };
 		await fetch(SETTINGS_ENDPOINT, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ section: "nodes", values: { [TARGET]: { branch: String(branchWidget?.value || "EdgeTTS") } } }),
+			body: JSON.stringify({ section: "nodes", values: { [TARGET]: preset } }),
 		});
 	} catch (_) {}
 }
+
+const saveBranchPreset = (node) => saveUniversalTTSPreset(node);
 
 async function refreshDependencyNotice(node) {
 	try {
@@ -536,12 +1033,6 @@ function optionValues(w) {
 	return Array.isArray(values) ? values : [];
 }
 
-function nextOption(w) {
-	const values = optionValues(w);
-	const index = values.indexOf(w?.value);
-	return values.length ? values[(index + 1 + values.length) % values.length] : w?.value;
-}
-
 function coerceChoiceWidget(node, name, fallback) {
 	const w = widget(node, name);
 	if (!w) return;
@@ -567,14 +1058,24 @@ function coerceNumberWidget(node, name, config) {
 
 function normalizeRuntimeWidgetValues(node) {
 	ensureProperties(node);
+	syncLocalAudioOrderStorage(node);
 	for (const [name, fallback] of Object.entries(CHOICE_DEFAULTS)) {
 		coerceChoiceWidget(node, name, fallback);
 	}
 	if (!BRANCH_VALUES.includes(String(widget(node, "branch")?.value || ""))) {
 		setWidgetValue(node, "branch", "EdgeTTS");
 	}
+	const pauseWidget = widget(node, "pause_after_speaker");
+	if (pauseWidget && Number(pauseWidget.value) > 0.8) {
+		setWidgetValue(node, "pause_after_speaker", "0.4");
+	}
 	for (const [name, config] of Object.entries(NUMBER_DEFAULTS)) {
 		coerceNumberWidget(node, name, config);
+	}
+	const minSegment = widget(node, "segment_min_chars");
+	const maxSegment = widget(node, "segment_max_chars");
+	if (minSegment && maxSegment && Number(minSegment.value) > Number(maxSegment.value)) {
+		setWidgetValue(node, "segment_min_chars", String(maxSegment.value));
 	}
 	const text = widget(node, "text");
 	if (text && typeof text.value !== "string") setWidgetValue(node, "text", String(text.value ?? ""));
@@ -602,6 +1103,12 @@ function wirePanel(node, state) {
 					throw new Error(data?.error || "导入失败");
 				}
 				setWidgetValue(node, "local_audio_name", data.name || "");
+				if (data.name) {
+					ensureProperties(node);
+					const currentOrder = Array.isArray(node.properties.local_audio_order) ? node.properties.local_audio_order : [];
+					node.properties.local_audio_order = [data.name, ...currentOrder.filter((item) => item !== data.name)];
+					syncLocalAudioOrderStorage(node);
+				}
 				setStatus(node, data.is_video ? "已提取视频音频作为参考音频" : "已导入参考音频", 100);
 			} catch (error) {
 				setStatus(node, `导入失败：${error?.message || error}`, 100);
@@ -620,13 +1127,7 @@ function wirePanel(node, state) {
 		node.graph?.change?.();
 	});
 	state.branch.addEventListener("click", () => {
-		const w = widget(node, "branch");
-		setWidgetValue(node, "branch", nextOption(w));
-		normalizeRuntimeWidgetValues(node);
-		saveBranchPreset(node);
-		applyWidgetVisibility(node);
-		refreshDependencyNotice(node);
-		syncButtons(node);
+		toggleBranchMenu(node);
 	});
 	state.output.addEventListener("click", () => {
 		toggleOutputPanel(node);
@@ -647,6 +1148,7 @@ function wirePanel(node, state) {
 		state.generate.disabled = true;
 		setStatus(node, "正在生成语音…", 5);
 		try {
+			syncLinkedSynthesisText(node);
 			normalizeRuntimeWidgetValues(node);
 			applyWidgetVisibility(node);
 			await queueOnlyCurrentNode(node);
@@ -666,10 +1168,21 @@ function updateLinkButton(node) {
 	syncButtons(node);
 }
 
+function copyLinkedInputValue(node, input, link) {
+	const targetName = widgetNameForInput(input);
+	if (!targetName) return "";
+	const origin = link ? app.graph?.getNodeById?.(link.origin_id) : null;
+	const value = textValueFromNode(origin);
+	if (!value) return "";
+	setWidgetValue(node, targetName, value);
+	return targetName;
+}
+
 function toggleDetachLinks(node) {
 	ensureProperties(node);
 	const stored = node.properties.detached_links || {};
 	if (Object.keys(stored).length) {
+		normalizePairs(node);
 		for (const item of Object.values(stored)) {
 			const input = node.inputs?.find((slot) => slot.name === item.inputName);
 			if (!input || input.link) continue;
@@ -680,15 +1193,19 @@ function toggleDetachLinks(node) {
 	} else {
 		const next = {};
 		for (const input of node.inputs || []) {
-			if (!isManagedInput(input) || !input.link) continue;
+			if (!input.link) continue;
 			const link = app.graph?.links?.[input.link];
 			if (!link) continue;
-			next[input.name] = { inputName: input.name, originId: link.origin_id, originSlot: link.origin_slot };
+			const copiedTo = copyLinkedInputValue(node, input, link);
+			next[input.name] = { inputName: input.name, originId: link.origin_id, originSlot: link.origin_slot, copiedTo };
 			node.disconnectInput(node.inputs.indexOf(input));
 		}
 		node.properties.detached_links = next;
 	}
 	normalizePairs(node);
+	applyWidgetVisibility(node);
+	syncButtons(node);
+	node.graph?.change?.();
 }
 
 function applyWidgetVisibility(node) {
@@ -698,12 +1215,11 @@ function applyWidgetVisibility(node) {
 	const visiblePrivate = BRANCH_PRIVATE[branch] || new Set();
 	for (const w of node.widgets || []) {
 		if (!COMMON_WIDGETS.has(w.name)) continue;
-		const visible = CORE_WIDGETS.has(w.name) || (open && (SETTINGS_COMMON_WIDGETS.has(w.name) || visiblePrivate.has(w.name)));
+		const visible = !PANEL_MANAGED_WIDGETS.has(w.name) && (CORE_WIDGETS.has(w.name) || (open && (SETTINGS_COMMON_WIDGETS.has(w.name) || visiblePrivate.has(w.name))));
 		if (visible) showWidget(w);
 		else hideWidget(w);
 	}
-	moveWidgetToTop(node, node.__gjjUniversalTTS?.widget);
-	moveWidgetToTop(node, node.__gjjUniversalTTSToolbarWidget);
+	renderEdgeSpeakerVoicePanel(node);
 	compactTextWidget(node);
 	refresh(node);
 }
@@ -750,7 +1266,8 @@ function ensureAudio(node) {
 	box.style.cssText = "display:none;padding:8px;border:1px solid #41535b;border-radius:7px;background:#22282d";
 	const audio = document.createElement("audio");
 	audio.controls = true;
-	audio.preload = "metadata";
+	audio.autoplay = true;
+	audio.preload = "auto";
 	audio.style.cssText = "display:block;width:100%;height:34px";
 	box.append(audio);
 	const widgetRef = node.addDOMWidget?.(AUDIO_WIDGET, AUDIO_WIDGET, box, {
@@ -758,7 +1275,9 @@ function ensureAudio(node) {
 		hideOnZoom: false,
 		getHeight: () => (box.style.display === "none" ? 0 : 54),
 	});
-	node.__gjjUniversalTTSAudio = { box, audio, widget: widgetRef };
+	node.__gjjUniversalTTSAudio = { box, audio, widget: widgetRef, queue: [], playingQueued: false };
+	audio.addEventListener("ended", () => playNextQueuedAudio(node));
+	audio.addEventListener("error", () => playNextQueuedAudio(node));
 	return node.__gjjUniversalTTSAudio;
 }
 
@@ -774,9 +1293,36 @@ function setAudioPreview(node, message) {
 	const item = extractAudioItem(message);
 	if (!item) return;
 	const state = ensureAudio(node);
+	const entry = { item };
+	if (state.playingQueued && !state.audio.ended) {
+		state.queue.push(entry);
+		return;
+	}
+	playQueuedAudioEntry(node, entry);
+}
+
+function playQueuedAudioEntry(node, entry) {
+	const state = ensureAudio(node);
+	const item = entry?.item;
+	if (!item) return;
+	state.playingQueued = true;
 	state.audio.src = buildViewUrl(item);
 	state.box.style.display = "";
+	state.audio.currentTime = 0;
+	state.audio.play?.().catch?.(() => {
+		state.playingQueued = false;
+	});
 	refresh(node);
+}
+
+function playNextQueuedAudio(node) {
+	const state = ensureAudio(node);
+	const next = state.queue.shift();
+	if (next) {
+		playQueuedAudioEntry(node, next);
+		return;
+	}
+	state.playingQueued = false;
 }
 
 function makeSelectRow(node, labelText, widgetName) {
@@ -807,8 +1353,94 @@ function makeSelectRow(node, labelText, widgetName) {
 	return row;
 }
 
+function toggleBranchMenu(node) {
+	const s = ensurePanel(node);
+	if (s.mp3Popup) {
+		s.mp3Popup.remove();
+		s.mp3Popup = null;
+	}
+	if (s.branchPopup) {
+		s.branchPopup.remove();
+		s.branchPopup = null;
+		syncButtons(node);
+		return;
+	}
+	const branchWidget = widget(node, "branch");
+	const current = String(branchWidget?.value || "EdgeTTS");
+	const values = optionValues(branchWidget).length ? optionValues(branchWidget) : BRANCH_VALUES;
+	const popup = document.createElement("div");
+	popup.style.cssText = [
+		"position:fixed", "z-index:100000", "min-width:220px", "max-width:300px",
+		"padding:8px", "border:1px solid #526873", "border-radius:8px",
+		"background:#10171b", "box-shadow:0 12px 28px rgba(0,0,0,.42)",
+		"color:#dce7e2", "font:12px/1.35 ui-sans-serif,system-ui,'Microsoft YaHei',sans-serif",
+	].join(";");
+	const title = document.createElement("div");
+	title.textContent = "生成分支";
+	title.style.cssText = "font-weight:700;color:#edf7fb;margin-bottom:6px";
+	const list = document.createElement("div");
+	list.style.cssText = "display:flex;flex-direction:column;gap:5px";
+	for (const value of values) {
+		const item = document.createElement("button");
+		item.type = "button";
+		item.textContent = branchDisplayName(value);
+		item.title = String(value);
+		const active = String(value) === current;
+		item.style.cssText = [
+			"width:100%", "box-sizing:border-box", "text-align:left", "padding:6px 8px",
+			"border-radius:6px", "cursor:pointer", "font:600 12px/1.3 ui-sans-serif,system-ui,'Microsoft YaHei',sans-serif",
+			`border:1px solid ${active ? "#78b8e8" : "#40515a"}`,
+			`background:${active ? "#254761" : "#1b252a"}`,
+			`color:${active ? "#ffffff" : "#d9e7ec"}`,
+		].join(";");
+		item.addEventListener("pointerdown", (event) => event.stopPropagation());
+		item.addEventListener("mousedown", (event) => event.stopPropagation());
+		item.addEventListener("click", () => {
+			setWidgetValue(node, "branch", String(value));
+			normalizeRuntimeWidgetValues(node);
+			saveBranchPreset(node);
+			if (s.branchPopup) {
+				s.branchPopup.remove();
+				s.branchPopup = null;
+			}
+			applyWidgetVisibility(node);
+			refreshDependencyNotice(node);
+			syncButtons(node);
+		});
+		list.append(item);
+	}
+	popup.append(title, list);
+	popup.addEventListener("pointerdown", (event) => event.stopPropagation());
+	popup.addEventListener("mousedown", (event) => event.stopPropagation());
+	document.body.append(popup);
+	const rect = s.branch.getBoundingClientRect();
+	const width = popup.offsetWidth || 240;
+	const left = Math.min(window.innerWidth - width - 8, Math.max(8, rect.left));
+	const top = Math.min(window.innerHeight - popup.offsetHeight - 8, Math.max(8, rect.bottom + 6));
+	popup.style.left = `${left}px`;
+	popup.style.top = `${top}px`;
+	const close = (event) => {
+		if (popup.contains(event.target) || s.branch.contains(event.target)) return;
+		popup.remove();
+		s.branchPopup = null;
+		document.removeEventListener("pointerdown", close, true);
+		syncButtons(node);
+	};
+	setTimeout(() => document.addEventListener("pointerdown", close, true), 0);
+	s.branchPopup = popup;
+	syncButtons(node);
+}
+
 function toggleOutputPanel(node) {
 	const s = ensurePanel(node);
+	if (s.branchPopup) {
+		s.branchPopup.remove();
+		s.branchPopup = null;
+	}
+	if (s.mp3Popup) {
+		s.mp3Popup.remove();
+		s.mp3Popup = null;
+	}
 	if (s.outputPanel.style.display !== "none") {
 		s.outputPanel.style.display = "none";
 		syncButtons(node);
@@ -826,35 +1458,310 @@ function toggleOutputPanel(node) {
 
 function toggleMp3List(node) {
 	const s = ensurePanel(node);
-	if (s.mp3List.style.display !== "none") {
-		s.mp3List.style.display = "none";
-		refresh(node);
+	if (s.branchPopup) {
+		s.branchPopup.remove();
+		s.branchPopup = null;
+	}
+	if (s.mp3Popup) {
+		s.mp3Popup.remove();
+		s.mp3Popup = null;
+		syncButtons(node);
 		return;
 	}
-	const w = widget(node, "local_audio_name");
-	const values = optionValues(w).filter((item) => String(item || "").trim());
+	const branch = String(widget(node, "branch")?.value || "EdgeTTS");
+	const isTtsLibrary = isTtsVoiceLibraryBranch(branch);
+	const isEdge = branch === "EdgeTTS";
+	const primaryWidgetName = isEdge ? "edge_voice" : (isTtsLibrary ? "custom_voice" : "local_audio_name");
+	const w = widget(node, primaryWidgetName);
+	const baseValues = (isEdge || !isTtsLibrary) ? optionValues(w) : [];
+	const audioMeta = new Map();
+	const characterMatches = new Map();
+	let characterVoiceDefaults = [];
+	let characterDefaultsApplied = false;
+	const applyCharacterDefaults = () => {
+		if (characterDefaultsApplied || !characterVoiceDefaults.length) return;
+		const current = selectedOrder();
+		if (!isTtsLibrary && current.length >= characterVoiceDefaults.length) {
+			characterDefaultsApplied = true;
+			return;
+		}
+		const next = [...new Set([...characterVoiceDefaults, ...current])];
+		if (next.join("\n") !== current.join("\n")) saveOrder(next);
+		characterDefaultsApplied = true;
+		render();
+	};
+	if (!isTtsLibrary) {
+		fetch(AUDIO_LIBRARY_ENDPOINT)
+			.then((response) => response.json())
+			.then((data) => {
+				for (const item of data?.items || []) {
+					if (item?.name) audioMeta.set(String(item.name), item);
+				}
+				render();
+			})
+			.catch(() => {});
+		loadCharacterLibraryForTTS().then((characters) => {
+			const valueList = allValues();
+			const values = new Set(valueList);
+			const normalizedValueMap = new Map(valueList.map((value) => [normalizeVoicePath(value), value]));
+			const entries = speakerEntriesForLibrary(node);
+			const voiceCounts = new Map();
+			for (const entry of entries) {
+				const voice = normalizeVoicePath(characterForSpeaker(entry, characters)?.voice_path);
+				if (voice) voiceCounts.set(voice, (voiceCounts.get(voice) || 0) + 1);
+			}
+			const duplicateVoicePaths = new Set([...voiceCounts.entries()].filter(([, count]) => count > 1).map(([voice]) => voice));
+			characterMatches.clear();
+			for (const entry of entries) {
+				const character = characterForSpeaker(entry, characters);
+				if (character) characterMatches.set(Math.max(0, Number(entry.index) || 0), character);
+			}
+			characterVoiceDefaults = entries
+				.map((entry) => characterVoiceForSpeakerFromValues(entry, characters, valueList, duplicateVoicePaths))
+				.map((voice) => normalizedValueMap.get(normalizeVoicePath(voice)) || "")
+				.filter((voice) => voice && values.has(voice));
+			applyCharacterDefaults();
+			render();
+		});
+	}
+	const allValues = () => {
+		const manualValues = readEdgeVoiceOrder(node, branch);
+		const primaryValue = String(widget(node, primaryWidgetName)?.value || "").trim();
+		return [...new Set([...(baseValues || []), ...manualValues, primaryValue, branch === "Qwen3-CustomVoice" ? "Vivian" : ""].map((item) => String(item || "").trim()).filter(Boolean))];
+	};
+	const selectedOrder = () => {
+		ensureProperties(node);
+		const values = allValues();
+		const known = new Set(values);
+		if (isTtsLibrary) {
+			let order = readEdgeVoiceOrder(node, branch).filter((item) => known.has(item));
+			const legacy = String(widget(node, primaryWidgetName)?.value || "").trim();
+			if (legacy && known.has(legacy) && !order.includes(legacy)) order = [legacy, ...order];
+			return [...new Set(order)];
+		}
+		let order = Array.isArray(node.properties.local_audio_order) ? node.properties.local_audio_order.map((item) => String(item || "").trim()).filter((item) => item && known.has(item)) : [];
+		const legacy = String(widget(node, "local_audio_name")?.value || "").trim();
+		if (legacy && known.has(legacy) && !order.includes(legacy)) order = [legacy, ...order];
+		node.properties.local_audio_order = [...new Set(order)];
+		return node.properties.local_audio_order;
+	};
+	const saveOrder = (order) => {
+		const cleaned = [...new Set(order.filter(Boolean))];
+		if (isTtsLibrary) {
+			writeEdgeVoiceOrder(node, branch, cleaned);
+			if (cleaned[0]) setWidgetValue(node, primaryWidgetName, cleaned[0]);
+		} else {
+			node.properties.local_audio_order = cleaned;
+			syncLocalAudioOrderStorage(node);
+			setWidgetValue(node, "local_audio_name", node.properties.local_audio_order[0] || "");
+		}
+		node.graph?.change?.();
+	};
+	const popup = document.createElement("div");
+	popup.style.cssText = [
+		"position:fixed", "z-index:100000", "width:300px", "max-width:calc(100vw - 16px)",
+		"padding:8px", "border:1px solid #526873", "border-radius:8px",
+		"background:#10171b", "box-shadow:0 12px 28px rgba(0,0,0,.42)",
+		"color:#dce7e2", "font:12px/1.35 ui-sans-serif,system-ui,'Microsoft YaHei',sans-serif",
+	].join(";");
+	const head = document.createElement("div");
+	head.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px";
+	const title = document.createElement("div");
+	title.textContent = isTtsLibrary ? `${branchDisplayName(branch)} 音色库` : "本地参考语音表";
+	title.style.cssText = "font-weight:700;color:#edf7fb";
+	const clearBtn = document.createElement("button");
+	clearBtn.type = "button";
+	clearBtn.textContent = "清空";
+	clearBtn.style.cssText = "padding:4px 7px;border:1px solid #40515a;border-radius:6px;background:#1b252a;color:#d9e7ec;cursor:pointer";
+	const sortBtn = document.createElement("button");
+	sortBtn.type = "button";
+	sortBtn.style.cssText = "padding:4px 7px;border:1px solid #40515a;border-radius:6px;background:#1b252a;color:#d9e7ec;cursor:pointer";
+	const confirmBtn = document.createElement("button");
+	confirmBtn.type = "button";
+	confirmBtn.textContent = "确定";
+	confirmBtn.style.cssText = "padding:4px 8px;border:1px solid #6ea6cf;border-radius:6px;background:#245477;color:#f4fbff;cursor:pointer;font-weight:700";
+	const actions = document.createElement("div");
+	actions.style.cssText = "display:flex;gap:5px;align-items:center";
+	actions.append(clearBtn, sortBtn, confirmBtn);
+	head.append(title, actions);
+	const speakerBox = document.createElement("div");
+	speakerBox.style.cssText = "margin:0 0 5px 0;padding:5px 6px;border:1px solid #33444d;border-radius:6px;background:#0b1114;display:flex;flex-direction:column;gap:2px;max-height:92px;overflow:auto";
 	const input = document.createElement("input");
-	input.placeholder = "过滤关键词";
-	input.style.cssText = "box-sizing:border-box;width:100%;margin-bottom:6px;background:#0b1114;color:#e5f3f7;border:1px solid #41535b;border-radius:5px;padding:5px";
+	input.placeholder = isTtsLibrary && !isEdge ? "输入音色名后回车添加" : "过滤关键词";
+	input.style.cssText = "box-sizing:border-box;width:100%;margin-bottom:6px;background:#0b1114;color:#e5f3f7;border:1px solid #41535b;border-radius:5px;padding:6px";
 	const list = document.createElement("div");
+	list.style.cssText = "max-height:260px;overflow:auto;display:flex;flex-direction:column;gap:4px";
+	const renderSpeakers = (selected) => {
+		speakerBox.replaceChildren();
+		const entries = speakerEntriesForLibrary(node);
+		const titleLine = document.createElement("div");
+		titleLine.textContent = "说话人 → 音色";
+		titleLine.style.cssText = "font-weight:700;color:#edf7fb;margin-bottom:1px;font-size:11px";
+		speakerBox.append(titleLine);
+		for (const entry of entries) {
+			const index = Math.max(0, Number(entry.index) || 0);
+			const voice = selected.length ? selected[index % selected.length] : "";
+			const character = characterMatches.get(index);
+			const row = document.createElement("div");
+			const text = `${entry.label || `说话人${index + 1}`}  →  ${voice || "未选择"}`;
+			row.title = character ? `${character.name || character.id || entry.label}\n${text}` : text;
+			row.style.cssText = "display:flex;align-items:center;gap:5px;min-width:0;color:#c9d6dc;font-size:11px;line-height:1.25";
+			if (character?.cover) {
+				const img = document.createElement("img");
+				img.src = character.cover;
+				img.alt = String(character.name || entry.label || "角色");
+				img.style.cssText = "width:22px;height:22px;border-radius:4px;object-fit:cover;flex:0 0 auto;border:1px solid #3b515a;background:#172228";
+				row.append(img);
+			}
+			const label = document.createElement("div");
+			label.textContent = text;
+			label.style.cssText = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0";
+			row.append(label);
+			speakerBox.append(row);
+		}
+	};
 	const render = () => {
 		const key = input.value.trim().toLowerCase();
+		const values = allValues();
+		s.mp3SortMode = normalizeLocalAudioSortMode(s.mp3SortMode || (s.mp3SortAsc ? "name_asc" : "name_desc"));
+		s.mp3SortAsc = s.mp3SortMode !== "name_desc";
+		sortBtn.textContent = librarySortLabel(s.mp3SortMode);
+		sortBtn.title = "排序：A-Z / Z-A / ⏰日期 / 💾磁盘空间";
 		list.replaceChildren();
-		for (const item of values.filter((value) => value.toLowerCase().includes(key)).sort((a, b) => a.localeCompare(b))) {
-			const row = document.createElement("label");
-			row.style.cssText = "display:flex;gap:6px;padding:3px 0;cursor:pointer";
-			const cb = document.createElement("input");
-			cb.type = "checkbox";
-			cb.addEventListener("change", () => setWidgetValue(node, "local_audio_name", item));
-			row.append(cb, document.createTextNode(item));
+		const selected = selectedOrder();
+		renderSpeakers(selected);
+		const selectedSet = new Set(selected);
+		const compare = (a, b) => {
+			const mode = normalizeLocalAudioSortMode(s.mp3SortMode);
+			const ma = audioMeta.get(a) || {};
+			const mb = audioMeta.get(b) || {};
+			if (mode === "date_desc" || mode === "date_asc") {
+				const diff = Number(mb.mtime || 0) - Number(ma.mtime || 0);
+				return mode === "date_desc" ? diff : -diff;
+			}
+			if (mode === "size_desc" || mode === "size_asc") {
+				const diff = Number(mb.size || 0) - Number(ma.size || 0);
+				return mode === "size_desc" ? diff : -diff;
+			}
+			return mode === "name_desc" ? b.localeCompare(a) : a.localeCompare(b);
+		};
+		const remaining = values.filter((value) => !selectedSet.has(value));
+		const matched = remaining
+			.filter((value) => !key || value.toLowerCase().includes(key))
+			.sort(compare);
+		const others = key
+			? remaining.filter((value) => !value.toLowerCase().includes(key)).sort(compare)
+			: [];
+		const ordered = [...selected, ...matched, ...others];
+		clearBtn.disabled = !selected.length;
+		clearBtn.style.opacity = selected.length ? "1" : ".55";
+		if (!ordered.length) {
+			const empty = document.createElement("div");
+			empty.textContent = "没有可用音色";
+			empty.style.cssText = "padding:8px;color:#91a3ad";
+			list.append(empty);
+			return;
+		}
+		for (const item of ordered) {
+			const selectedIndex = selected.indexOf(item);
+			const active = selectedIndex >= 0;
+			const matchedKeyword = !key || item.toLowerCase().includes(key);
+			const row = document.createElement("div");
+			row.style.cssText = [
+				"width:100%", "box-sizing:border-box", "display:flex", "align-items:center", "gap:4px",
+				"border-radius:6px", "font:600 12px/1.3 ui-sans-serif,system-ui,'Microsoft YaHei',sans-serif",
+				`border:1px solid ${active ? "#78b8e8" : "#40515a"}`,
+				`background:${active ? "#254761" : "#1b252a"}`,
+				`color:${active ? "#ffffff" : "#d9e7ec"}`,
+				`opacity:${matchedKeyword || active ? "1" : ".68"}`,
+			].join(";");
+			const main = document.createElement("button");
+			main.type = "button";
+			const meta = audioMeta.get(item) || {};
+			const suffix = !isTtsLibrary && (meta.size || meta.mtime) ? `  ${formatBytes(meta.size)}` : "";
+			main.textContent = active ? `${selectedIndex + 1}. ${item}${suffix}` : `${item}${suffix}`;
+			main.style.cssText = "flex:1;min-width:0;text-align:left;padding:6px 8px;border:0;background:transparent;color:inherit;cursor:pointer;font:inherit;overflow:hidden;text-overflow:ellipsis";
+			main.addEventListener("click", () => {
+				const next = selectedOrder();
+				if (next.includes(item)) {
+					saveOrder(next.filter((value) => value !== item));
+				} else {
+					saveOrder([...next, item]);
+				}
+				render();
+				syncButtons(node);
+			});
+			row.append(main);
+			if (active) {
+				const move = (delta) => {
+					const next = selectedOrder();
+					const from = next.indexOf(item);
+					const to = from + delta;
+					if (from < 0 || to < 0 || to >= next.length) return;
+					const [picked] = next.splice(from, 1);
+					next.splice(to, 0, picked);
+					saveOrder(next);
+					render();
+					syncButtons(node);
+				};
+				for (const [label, delta, disabled] of [["↑", -1, selectedIndex <= 0], ["↓", 1, selectedIndex >= selected.length - 1]]) {
+					const btn = document.createElement("button");
+					btn.type = "button";
+					btn.textContent = label;
+					btn.disabled = disabled;
+					btn.style.cssText = "width:24px;height:24px;border:0;border-left:1px solid rgba(255,255,255,.16);background:transparent;color:inherit;cursor:pointer;opacity:" + (disabled ? ".35" : "1");
+					btn.addEventListener("click", (event) => {
+						event.stopPropagation();
+						move(delta);
+					});
+					row.append(btn);
+				}
+			}
 			list.append(row);
 		}
 	};
+	sortBtn.addEventListener("click", () => {
+		s.mp3SortMode = nextLibrarySortMode(s.mp3SortMode, !isTtsLibrary);
+		s.mp3SortAsc = s.mp3SortMode !== "name_desc";
+		saveUniversalTTSPreset(node, { local_audio_sort_mode: s.mp3SortMode });
+		render();
+	});
+	clearBtn.addEventListener("click", () => {
+		saveOrder([]);
+		render();
+		syncButtons(node);
+	});
+	confirmBtn.addEventListener("click", () => {
+		popup.remove();
+		s.mp3Popup = null;
+		syncButtons(node);
+	});
 	input.addEventListener("input", render);
-	s.mp3List.replaceChildren(input, list);
+	input.addEventListener("keydown", (event) => {
+		if (!(isTtsLibrary && !isEdge) || event.key !== "Enter") return;
+		const value = input.value.trim();
+		if (!value) return;
+		event.preventDefault();
+		const next = selectedOrder();
+		if (!next.includes(value)) saveOrder([...next, value]);
+		input.value = "";
+		render();
+		syncButtons(node);
+	});
+	popup.append(head, speakerBox, input, list);
+	popup.addEventListener("pointerdown", (event) => event.stopPropagation());
+	popup.addEventListener("mousedown", (event) => event.stopPropagation());
+	document.body.append(popup);
 	render();
-	s.mp3List.style.display = "";
-	refresh(node);
+	const rect = s.mp3.getBoundingClientRect();
+	const width = popup.offsetWidth || 300;
+	const left = Math.min(window.innerWidth - width - 8, Math.max(8, rect.left));
+	const top = Math.min(window.innerHeight - popup.offsetHeight - 8, Math.max(8, rect.bottom + 6));
+	popup.style.left = `${left}px`;
+	popup.style.top = `${top}px`;
+	s.mp3Popup = popup;
+	syncButtons(node);
+	setTimeout(() => input.focus(), 0);
 }
 
 function isExecutionOutputNode(node) {
@@ -891,6 +1798,18 @@ async function queueOnlyCurrentNode(node) {
 function patchNode(node) {
 	if (!node) return;
 	ensurePanel(node);
+	if (universalTTSPresetCache) {
+		applyUniversalTTSPreset(node, universalTTSPresetCache);
+	} else if (!node.__gjjUniversalTTSPresetRequested) {
+		node.__gjjUniversalTTSPresetRequested = true;
+		loadUniversalTTSPreset().then((preset) => {
+			applyUniversalTTSPreset(node, preset);
+			normalizeRuntimeWidgetValues(node);
+			applyWidgetVisibility(node);
+			refreshDependencyNotice(node);
+			syncButtons(node);
+		});
+	}
 	ensureAudio(node);
 	normalizePairs(node);
 	normalizeRuntimeWidgetValues(node);
@@ -905,6 +1824,22 @@ function patchNode(node) {
 			saveBranchPreset(node);
 			applyWidgetVisibility(node);
 			refreshDependencyNotice(node);
+			return result;
+		};
+	}
+	for (const name of ["text", "edge_voice"]) {
+		const w = widget(node, name);
+		if (!w || w.__gjjUniversalSpeakerVoicePatched) continue;
+		w.__gjjUniversalSpeakerVoicePatched = true;
+		const original = w.callback;
+		w.callback = function (...args) {
+			const result = original?.apply(this, args);
+			renderEdgeSpeakerVoicePanel(node);
+			if (node.__gjjUniversalTTS?.mp3Popup) {
+				node.__gjjUniversalTTS.mp3Popup.remove();
+				node.__gjjUniversalTTS.mp3Popup = null;
+				syncButtons(node);
+			}
 			return result;
 		};
 	}
@@ -954,7 +1889,11 @@ api?.addEventListener?.("gjj_node_audio", (event) => {
 	const node = app.graph?._nodes?.find((item) => String(item?.id) === String(detail.node));
 	if (!isTarget(node)) return;
 	setAudioPreview(node, { audio: detail.audio || [] });
-	setStatus(node, "完成，音频已保存", 100);
+	if (detail.preview) {
+		setStatus(node, detail.text || "片段预览已更新", null);
+	} else {
+		setStatus(node, detail.text || "完成，音频已保存", 100);
+	}
 });
 
 if (app?.registerExtension) {
@@ -974,10 +1913,19 @@ if (app?.registerExtension) {
 			const configured = nodeType.prototype.onConfigure;
 			nodeType.prototype.onConfigure = function (...args) {
 				const result = configured?.apply(this, args);
+				try { restoreWidgetValuesByName(this); } catch (_) {}
+				try { syncLocalAudioOrderStorage(this); } catch (_) {}
 				for (const delay of [0, 30, 120, 300]) {
 					setTimeout(() => safePatchNode(this), delay);
 				}
 				return result;
+			};
+			const serialized = nodeType.prototype.onSerialize;
+			nodeType.prototype.onSerialize = function (...args) {
+				try { syncLocalAudioOrderStorage(this); } catch (_) {}
+				try { syncLinkedSynthesisText(this); } catch (_) {}
+				try { captureWidgetValuesByName(this); } catch (_) {}
+				return serialized?.apply(this, args);
 			};
 			const connections = nodeType.prototype.onConnectionsChange;
 			nodeType.prototype.onConnectionsChange = function (...args) {

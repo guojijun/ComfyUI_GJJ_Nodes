@@ -1,7 +1,9 @@
 import io
+import json
 import logging
 import re
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -761,6 +763,39 @@ def _load_model_direct(model_path: Path, model_class, torch_dtype):
     return model
 
 
+def _has_incomplete_hf_quant_config(config_data: dict) -> bool:
+    quant_config = config_data.get("quantization_config")
+    return isinstance(quant_config, dict) and bool(quant_config) and not quant_config.get("quant_method")
+
+
+@contextmanager
+def _without_incomplete_hf_quant_config(model_path: Path):
+    config_path = model_path / "config.json"
+    if not config_path.is_file():
+        yield
+        return
+    try:
+        original = config_path.read_text(encoding="utf-8")
+        data = json.loads(original)
+    except Exception:
+        yield
+        return
+    if not _has_incomplete_hf_quant_config(data):
+        yield
+        return
+    sanitized = dict(data)
+    sanitized.pop("quantization_config", None)
+    logger.info("Temporarily ignoring incomplete HuggingFace quantization_config while loading LongCat AudioDiT")
+    try:
+        config_path.write_text(json.dumps(sanitized, ensure_ascii=False, indent=2), encoding="utf-8")
+        yield
+    finally:
+        try:
+            config_path.write_text(original, encoding="utf-8")
+        except Exception as exc:
+            logger.warning("Failed to restore LongCat config.json after load: %s", exc)
+
+
 def load_model(model_name: str, device: str, precision: str, attention: str, unique_id=None):
     model_name = _strip_auto_download_suffix(model_name)
     model_path = resolve_model_path(model_name, unique_id=unique_id)
@@ -816,17 +851,18 @@ def load_model(model_name: str, device: str, precision: str, attention: str, uni
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        if has_metadata:
-            # Normal loading path - safetensors has proper metadata
-            # torch_dtype=bfloat16 ensures fp8 tensors in safetensors are
-            # properly converted to bf16 during loading by transformers
-            model = AudioDiTModel.from_pretrained(
-                str(model_path), torch_dtype=torch.bfloat16,
-            )
-        else:
-            # Fallback for safetensors without metadata (original meituan models)
-            logger.info("Safetensors has no format metadata — using direct loading")
-            model = _load_model_direct(model_path, AudioDiTModel, torch.bfloat16)
+        with _without_incomplete_hf_quant_config(model_path):
+            if has_metadata:
+                # Normal loading path - safetensors has proper metadata
+                # torch_dtype=bfloat16 ensures fp8 tensors in safetensors are
+                # properly converted to bf16 during loading by transformers
+                model = AudioDiTModel.from_pretrained(
+                    str(model_path), torch_dtype=torch.bfloat16,
+                )
+            else:
+                # Fallback for safetensors without metadata (original meituan models)
+                logger.info("Safetensors has no format metadata — using direct loading")
+                model = _load_model_direct(model_path, AudioDiTModel, torch.bfloat16)
     transformers.logging.set_verbosity(prev_verbosity)
 
     # Fix weight_norm params (weight_g/weight_v) that from_pretrained fails to load
