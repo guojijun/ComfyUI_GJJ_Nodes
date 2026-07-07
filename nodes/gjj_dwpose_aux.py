@@ -378,7 +378,7 @@ def _draw_poses(poses, height, width, draw_body=True, draw_hand=True, draw_face=
 
 class GJJ_PixelPerfectResolution:
     DESCRIPTION = "按 ControlNet Pixel Perfect 规则，根据原图和生成尺寸计算预处理分辨率。"
-    CATEGORY = "GJJ/ControlNet"
+    CATEGORY = "GJJ/视频/控制网/像素完美分辨率"
     RETURN_TYPES = ("INT",)
     RETURN_NAMES = ("分辨率",)
     OUTPUT_TOOLTIPS = ("建议填入预处理器 resolution 的整数分辨率。",)
@@ -409,7 +409,7 @@ class GJJ_PixelPerfectResolution:
 
 class GJJ_DWPoseEstimator:
     DESCRIPTION = _DWPOSE_DESCRIPTION
-    CATEGORY = "GJJ/ControlNet"
+    CATEGORY = "GJJ/视频/控制网/姿态检测器"
     RETURN_TYPES = ("IMAGE", "POSE_KEYPOINT")
     RETURN_NAMES = ("姿态图", "姿态关键点")
     OUTPUT_TOOLTIPS = ("绘制好的 OpenPose 风格姿态图，可接 ControlNet。", "OpenPose JSON 兼容结构，可被支持 POSE_KEYPOINT 的节点使用。")

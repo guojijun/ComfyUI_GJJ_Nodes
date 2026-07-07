@@ -186,7 +186,7 @@ class GJJBoolSwitch:
     RETURN_TYPES = (any_output_type,)
     RETURN_NAMES = ("输出",)
     FUNCTION = "execute"
-    CATEGORY = "GJJ/逻辑控制"
+    CATEGORY = "GJJ/逻辑"
 
     def execute(self, boolean: bool, on_true: Any = "", on_false: Any = ""):
         selected = on_true if boolean else on_false

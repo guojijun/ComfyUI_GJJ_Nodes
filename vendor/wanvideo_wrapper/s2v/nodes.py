@@ -68,7 +68,7 @@ class WanVideoAddS2VEmbeds:
     RETURN_TYPES = ("WANVIDIMAGE_EMBEDS", "INT",)
     RETURN_NAMES = ("image_embeds", "audio_frame_count")
     FUNCTION = "add"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加"
 
     def add(self, embeds, frame_window_size, audio_encoder_output=None, audio_scale=1.0, ref_latent=None, pose_latent=None, vae=None, pose_start_percent=0.0, pose_end_percent=1.0, enable_framepack=False):
         audio_frame_count=0

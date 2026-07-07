@@ -215,6 +215,9 @@ function serializeSelection(selection) {
 			height: Number(item?.height || 0),
 			mtime_ns: Number(item?.mtime_ns || 0),
 			size_bytes: Number(item?.size_bytes || 0),
+			hash: String(item?.hash || ""),
+			format: String(item?.format || ""),
+			media_type: String(item?.media_type || ""),
 		})),
 	);
 }
@@ -514,6 +517,38 @@ function imageFilesFromDropEvent(event) {
 		.sort((a, b) => FILE_NAME_COLLATOR.compare(a.name || "", b.name || ""));
 }
 
+function draggedImageRefsFromDropEvent(event) {
+	const transfer = event?.dataTransfer;
+	if (!hasDraggedImageRefs(event)) {
+		return [];
+	}
+	try {
+		const raw = transfer.getData(GJJ_MULTI_IMAGE_DRAG_MIME);
+		const parsed = JSON.parse(String(raw || "null"));
+		const list = Array.isArray(parsed) ? parsed : [parsed];
+		return list
+			.filter((item) => item?.filename)
+			.map((item) => normalizeInputImageItem({
+				filename: String(item.filename || ""),
+				subfolder: String(item.subfolder || ""),
+				type: String(item.type || "temp"),
+				width: Number(item.width || item.preview_width || item.w || 0),
+				height: Number(item.height || item.preview_height || item.h || 0),
+				mtime_ns: Number(item.mtime_ns || 0),
+				size_bytes: Number(item.size_bytes || 0),
+				hash: String(item.hash || ""),
+				format: String(item.format || ""),
+				media_type: String(item.media_type || "image"),
+			}));
+	} catch (_) {
+		return [];
+	}
+}
+
+function hasDraggedImageRefs(event) {
+	return Array.from(event?.dataTransfer?.types || []).includes(GJJ_MULTI_IMAGE_DRAG_MIME);
+}
+
 async function uploadFilesToTemp(node, files) {
 	const list = Array.from(files || []);
 	if (!list.length) {
@@ -676,6 +711,9 @@ function normalizeInputImageItem(item) {
 		height: Number(item?.height || 0),
 		mtime_ns: Number(item?.mtime_ns || 0),
 		size_bytes: Number(item?.size_bytes || 0),
+		hash: String(item?.hash || ""),
+		format: String(item?.format || ""),
+		media_type: String(item?.media_type || ""),
 		source_url: String(item?.source_url || ""),
 	};
 }
@@ -1865,6 +1903,20 @@ async function importDroppedFiles(node, files) {
 	requestRedraw(node);
 }
 
+function importDraggedImageRefs(node, refs) {
+	if (!node || !refs.length) {
+		return;
+	}
+	const changed = addSelectionItems(node, refs);
+	if (node.__gjjMultiImageSummary) {
+		node.__gjjMultiImageSummary.textContent = changed
+			? `已加入 ${refs.length} 张`
+			: "图片已在列表中";
+	}
+	setDropTargetActive(node, false);
+	requestRedraw(node);
+}
+
 function installDropTarget(node, elements) {
 	if (!node || node.__gjjMultiImageDropInstalled) {
 		return;
@@ -1875,8 +1927,12 @@ function installDropTarget(node, elements) {
 	const eventHasImages = (event) => (
 		imageFilesFromDropEvent(event).length > 0
 		|| Array.from(event?.dataTransfer?.items || []).some((item) => String(item?.type || "").startsWith("image/"))
+		|| hasDraggedImageRefs(event)
 	);
 	const protect = (event) => {
+		if (ensureState(node).dragIndex != null) {
+			return false;
+		}
 		if (!eventHasImages(event)) {
 			return false;
 		}
@@ -1904,6 +1960,11 @@ function installDropTarget(node, elements) {
 		target.addEventListener("drop", (event) => {
 			if (!protect(event)) return;
 			dragDepth = 0;
+			const refs = draggedImageRefsFromDropEvent(event);
+			if (refs.length) {
+				importDraggedImageRefs(node, refs);
+				return;
+			}
 			const files = imageFilesFromDropEvent(event);
 			if (!files.length) {
 				setDropTargetActive(node, false);

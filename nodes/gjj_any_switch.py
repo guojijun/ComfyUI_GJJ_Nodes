@@ -57,7 +57,7 @@ def extract_input_index(name: str) -> int:
 
 
 class GJJ_AnySwitch:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/切换器"
     FUNCTION = "switch"
     DESCRIPTION = "按输入顺序返回第一个非空值的动态切换器，支持任意类型并会自动增减输入插槽。"
     SEARCH_ALIASES = ["any switch", "switch", "first valid", "动态切换", "任意切换", "选择器"]

@@ -7,6 +7,7 @@ import shutil
 import uuid
 from io import BytesIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import comfy.utils
@@ -17,6 +18,7 @@ from PIL import Image
 from .common_utils.temp_files import (
     gjjutils_read_temp_pil_image,
     gjjutils_write_temp_bytes,
+    gjjutils_write_temp_file,
     gjjutils_write_temp_tensor_images,
 )
 
@@ -408,19 +410,21 @@ def is_3d_file_object(value: Any) -> bool:
 
 def save_3d_file_preview(value: Any) -> list[dict[str, Any]]:
     fmt = str(getattr(value, "format", "") or "glb").lstrip(".").lower() or "glb"
-    filename = f"GJJ_AnyPreview_3d_{uuid.uuid4().hex[:12]}.{fmt}"
-    path = Path(folder_paths.get_temp_directory()) / "GJJ" / "any_preview" / filename
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if hasattr(value, "save_to"):
-        value.save_to(str(path))
-    elif hasattr(value, "get_bytes"):
-        path.write_bytes(value.get_bytes())
+    suffix = f".{fmt}"
+    if hasattr(value, "get_bytes"):
+        info = gjjutils_write_temp_bytes(value.get_bytes(), suffix=suffix)
     elif hasattr(value, "get_data"):
         data = value.get_data()
-        path.write_bytes(data.getvalue() if hasattr(data, "getvalue") else data.read())
+        info = gjjutils_write_temp_bytes(data.getvalue() if hasattr(data, "getvalue") else data.read(), suffix=suffix)
+    elif hasattr(value, "save_to"):
+        with TemporaryDirectory(prefix="gjj_any_preview_3d_") as tmp_dir:
+            path = Path(tmp_dir) / f"preview{suffix}"
+            value.save_to(str(path))
+            info = gjjutils_write_temp_file(path, suffix=suffix)
     else:
         return []
-    return [{"filename": filename, "subfolder": "GJJ/any_preview", "type": "temp", "format": fmt}]
+    info.update({"format": fmt, "media_type": "3d"})
+    return [info]
 
 
 def serialize_audio_preview(value: dict[str, Any]) -> str:
@@ -676,12 +680,11 @@ def save_audio_with_wav_fallback(audio: dict[str, Any]) -> list[dict[str, Any]]:
 
         waveform = audio["waveform"][0].movedim(0, 1).numpy()
         sample_rate = int(audio["sample_rate"])
-        output_dir = folder_paths.get_temp_directory()
-        os.makedirs(output_dir, exist_ok=True)
-        filename = f"GJJ_AnyPreview_audio_{uuid.uuid4().hex[:12]}.wav"
-        filepath = os.path.join(output_dir, filename)
-        sf.write(filepath, waveform, sample_rate, subtype="PCM_16")
-        return [{"filename": filename, "subfolder": "", "type": "temp"}]
+        buffer = BytesIO()
+        sf.write(buffer, waveform, sample_rate, subtype="PCM_16", format="WAV")
+        info = gjjutils_write_temp_bytes(buffer.getvalue(), suffix=".wav")
+        info.update({"format": "audio/wav", "media_type": "audio"})
+        return [info]
     except Exception as error:
         print(f"[GJJ] WAV 音频预览保存失败: {error}")
         return []
@@ -856,11 +859,6 @@ def save_image_sequence_webp_preview(
         if int(frames.shape[0]) <= 0:
             return []
 
-        target_dir = Path(folder_paths.get_temp_directory()) / "GJJ" / "any_preview"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"GJJ_AnyPreview_sequence_{uuid.uuid4().hex[:12]}.webp"
-        filepath = target_dir / filename
-
         pil_frames: list[Image.Image] = []
         arrays = torch.round(frames * 255.0).to(torch.uint8).numpy()
         for array in arrays:
@@ -876,8 +874,9 @@ def save_image_sequence_webp_preview(
                 pil_frames.append(Image.fromarray(array[..., :3], mode="RGB"))
 
         duration_ms = max(1, round(1000.0 / max(0.01, float(VIDEO_SEQUENCE_PREVIEW_FPS))))
+        buffer = BytesIO()
         pil_frames[0].save(
-            filepath,
+            buffer,
             format="WEBP",
             save_all=True,
             append_images=pil_frames[1:],
@@ -887,15 +886,13 @@ def save_image_sequence_webp_preview(
             quality=88,
             method=4,
         )
+        info = gjjutils_write_temp_bytes(buffer.getvalue(), suffix=".webp")
         sequence_frames = annotate_preview_image_dimensions(
             gjjutils_write_temp_tensor_images(frames),
             frames,
         )
-        return [
+        info.update(
             {
-                "filename": filename,
-                "subfolder": "GJJ/any_preview",
-                "type": "temp",
                 "format": "image/webp",
                 "media_type": "image",
                 "is_sequence": True,
@@ -907,7 +904,8 @@ def save_image_sequence_webp_preview(
                 "height": int(frames.shape[1]),
                 "sequence_frames": sequence_frames,
             }
-        ]
+        )
+        return [info]
     except Exception as error:
         print(f"[GJJ] WebP 序列预览失败: {error}")
         import traceback
@@ -1117,7 +1115,7 @@ def _held_preview_media(extra_pnginfo: Any, unique_id: Any) -> tuple[str, list[d
 
 
 class GJJ_AnyPreview:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/预览"
     FUNCTION = "preview"
     OUTPUT_NODE = True
     DESCRIPTION = """动态接收任意类型输入的统一预览节点。
@@ -1827,20 +1825,16 @@ try:
                 text = text[:20000] + "\n\n... 文本过长，已截断 ..."
             return "text", None, f"文件：{source}\n\n{text}"
 
-        target_dir = Path(folder_paths.get_temp_directory()) / "GJJ" / "any_preview" / "dropped"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        safe_stem = re.sub(r"[^0-9A-Za-z._-]+", "_", source.stem).strip("._-") or "file"
-        target_name = f"{safe_stem}_{uuid.uuid4().hex[:10]}{source.suffix.lower()}"
-        target = target_dir / target_name
-        shutil.copy2(source, target)
-        item = {
-            "filename": target_name,
-            "subfolder": "GJJ/any_preview/dropped",
-            "type": "temp",
-            "original_name": source.name,
-            "source_path": str(source),
-            "format": source.suffix.lower().lstrip("."),
-        }
+        item = gjjutils_write_temp_file(source, suffix=source.suffix or ".bin")
+        item.update(
+            {
+                "original_name": source.name,
+                "source_path": str(source),
+                "format": source.suffix.lower().lstrip("."),
+                "media_type": kind,
+                "source": "local_file",
+            }
+        )
         return kind, item, f"本地文件：{source}"
 
     @PromptServer.instance.routes.post("/gjj/any_preview/open_media_folder")

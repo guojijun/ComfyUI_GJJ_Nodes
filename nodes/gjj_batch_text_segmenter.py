@@ -444,7 +444,7 @@ def _build_rgba_batch(images: list[torch.Tensor], canvas_mode: str = "紧凑裁�
 
 
 class GJJ_BatchTextSegmenter:
-	CATEGORY = "GJJ"
+	CATEGORY = "GJJ/图像"
 	FUNCTION = "segment"
 	DESCRIPTION = _DESCRIPTION_READY if _ENV_READY else f"{_ENV_REPORT['warning_message']}\n\n{_DESCRIPTION_READY}"
 	SEARCH_ALIASES = ["批量文本分割", "SAM3批量文本分割", "文本分割器", "零依赖分割", "RGBA裁剪", "semantic crop", "text segmenter"]

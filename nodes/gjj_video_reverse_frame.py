@@ -28,7 +28,7 @@ def _normalize_image_batch(video_frames: Any) -> torch.Tensor:
 
 
 class GJJ_VideoReverseFrame:
-    CATEGORY = "GJJ/Video"
+    CATEGORY = "GJJ/视频"
     FUNCTION = "extract"
     DESCRIPTION = "从输入视频帧序列中提取倒数第 N 帧，输出同尺寸的单张静态图片。"
     SEARCH_ALIASES = ["视频帧提取", "最后一帧", "倒数帧", "last frame", "video frame"]

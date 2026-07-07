@@ -27,7 +27,7 @@ import folder_paths
 from comfy import model_management as mm
 from comfy.utils import load_torch_file, ProgressBar
 
-CATEGORY = "GJJ/音频处理"
+CATEGORY = "GJJ/音频"
 _scanned_models = None
 _cached_models = {}
 
@@ -2213,7 +2213,7 @@ class GJJ_AudioSeparator:
         "音频标签字符串，可用于后续节点识别当前音频来源。",
     )
     FUNCTION = "execute"
-    CATEGORY = CATEGORY
+    CATEGORY = "GJJ/音频"
     OUTPUT_NODE = True
     SEARCH_ALIASES = [
         "MelBandRoFormerSampler",
@@ -2612,7 +2612,7 @@ class GJJ_MelBandRoFormerSampler:
     RETURN_NAMES = ("音频",)
     OUTPUT_TOOLTIPS = ("按目标 LUFS 归一化后的完整输入音频。",)
     FUNCTION = "normalize"
-    CATEGORY = CATEGORY
+    CATEGORY = "GJJ/音频"
     SEARCH_ALIASES = [
         "MelBandRoFormerSampler",
         "Normalize Audio Loudness",

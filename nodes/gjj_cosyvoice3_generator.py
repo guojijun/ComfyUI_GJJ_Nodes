@@ -131,7 +131,7 @@ DESCRIPTION = (
 
 
 class GJJ_CosyVoice3Generator:
-	CATEGORY = "GJJ/Audio"
+	CATEGORY = "GJJ/音频"
 	FUNCTION = "generate"
 	OUTPUT_NODE = True
 	DESCRIPTION = DESCRIPTION

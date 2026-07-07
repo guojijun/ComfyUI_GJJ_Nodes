@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import fnmatch
-import hashlib
 import json
 import os
 import re
-import shutil
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
+
+from .common_utils.temp_files import (
+    gjjutils_read_temp_bytes,
+    gjjutils_temp_path,
+    gjjutils_write_temp_file,
+    gjjutils_write_temp_pil_image,
+)
 
 
 NODE_NAME = "GJJ_ZeroDependencyFileBrowser"
@@ -62,7 +66,7 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".aiff", ".aif", ".opus"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".wmv", ".flv", ".mpeg", ".mpg"}
 TEXT_EXTENSIONS = {".txt", ".csv", ".tsv", ".json", ".yaml", ".yml", ".md", ".html", ".htm", ".xml", ".ini", ".log", ".py", ".js", ".css"}
-THUMBNAIL_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+THUMBNAIL_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 
 
 class AnyType(str):
@@ -378,20 +382,13 @@ def _audio_decode_path(path: str) -> str:
     except UnicodeEncodeError:
         pass
     suffix = os.path.splitext(raw)[1] or ".audio"
-    digest = hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:12]
-    target = os.path.join(tempfile.gettempdir(), f"gjj_audio_{digest}{suffix}")
-    if not os.path.exists(target) or os.path.getmtime(target) < os.path.getmtime(raw) or os.path.getsize(target) != os.path.getsize(raw):
-        shutil.copyfile(raw, target)
-    return target
+    info = gjjutils_write_temp_file(raw, suffix=suffix)
+    return str(gjjutils_temp_path(str(info.get("filename") or "")))
 
 
 def _cleanup_audio_decode_path(decode_path: str, original_path: str) -> None:
-    if os.path.abspath(str(decode_path or "")) == os.path.abspath(str(original_path or "")):
-        return
-    try:
-        os.remove(decode_path)
-    except OSError:
-        pass
+    # temp_files.py keeps content-addressed cache files for reuse.
+    return
 
 
 def _load_audio_file_av(path: str) -> dict[str, Any]:
@@ -442,15 +439,60 @@ def _read_text_file(path: str) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def _thumbnail_canvas(image) -> Any:
+    from PIL import Image
+
+    thumb = image.convert("RGB")
+    resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+    thumb.thumbnail((THUMBNAIL_SIZE, THUMBNAIL_SIZE), resample)
+    canvas = Image.new("RGB", (THUMBNAIL_SIZE, THUMBNAIL_SIZE), (19, 33, 38))
+    x = (THUMBNAIL_SIZE - thumb.width) // 2
+    y = (THUMBNAIL_SIZE - thumb.height) // 2
+    canvas.paste(thumb, (x, y))
+    return canvas
+
+
+def _thumbnail_bytes_from_image(image) -> tuple[bytes, str]:
+    info = gjjutils_write_temp_pil_image(
+        _thumbnail_canvas(image),
+        format="PNG",
+        suffix=".png",
+        media_type="thumbnail",
+    )
+    return gjjutils_read_temp_bytes(info), "image/png"
+
+
+def _video_first_frame(path: str):
+    try:
+        import av
+        with av.open(path) as container:
+            stream = next((item for item in container.streams if item.type == "video"), None)
+            if stream is None:
+                raise RuntimeError("没有找到视频流。")
+            for frame in container.decode(stream):
+                return frame.to_image()
+    except Exception as av_exc:
+        try:
+            import imageio.v3 as iio
+            from PIL import Image
+
+            frame = iio.imread(path, index=0)
+            return Image.fromarray(frame)
+        except Exception as imageio_exc:
+            raise RuntimeError(f"生成视频缩略图失败：av={av_exc}；imageio={imageio_exc}") from imageio_exc
+    raise RuntimeError("视频没有可读取的画面帧。")
+
+
 def _thumbnail_response(path: str) -> tuple[bytes, str]:
     suffix = os.path.splitext(str(path or ""))[1].lower()
     if suffix not in THUMBNAIL_EXTENSIONS:
         raise ValueError("当前文件类型不支持缩略图。")
     normalized = os.path.abspath(os.path.normpath(str(path or "")))
     if not os.path.isfile(normalized):
-        raise FileNotFoundError("图片文件不存在。")
+        raise FileNotFoundError("文件不存在。")
+    if suffix in VIDEO_EXTENSIONS:
+        return _thumbnail_bytes_from_image(_video_first_frame(normalized))
     try:
-        from io import BytesIO
         from PIL import Image, ImageOps, ImageSequence
     except Exception as exc:
         raise RuntimeError(f"生成缩略图需要 Pillow：{exc}") from exc
@@ -461,15 +503,7 @@ def _thumbnail_response(path: str) -> tuple[bytes, str]:
         except Exception:
             frame = image
         thumb = ImageOps.exif_transpose(frame).convert("RGB")
-        resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
-        thumb.thumbnail((THUMBNAIL_SIZE, THUMBNAIL_SIZE), resample)
-        canvas = Image.new("RGB", (THUMBNAIL_SIZE, THUMBNAIL_SIZE), (19, 33, 38))
-        x = (THUMBNAIL_SIZE - thumb.width) // 2
-        y = (THUMBNAIL_SIZE - thumb.height) // 2
-        canvas.paste(thumb, (x, y))
-        buffer = BytesIO()
-        canvas.save(buffer, format="JPEG", quality=82, optimize=True)
-        return buffer.getvalue(), "image/jpeg"
+        return _thumbnail_bytes_from_image(thumb)
 
 
 def _load_file_output(item: dict[str, Any], output_mode: str, file_output_mode: str) -> tuple[Any, str]:
@@ -712,4 +746,4 @@ class GJJ_ZeroDependencyFileBrowser:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_ZeroDependencyFileBrowser}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 📁 零依赖目录浏览器"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 📁 内置目录浏览器"}

@@ -275,7 +275,7 @@ def _coerce_media_to_image_frames(value: Any) -> torch.Tensor:
 
 
 class GJJ_GIMMVFIInterpolate:
-    CATEGORY = "GJJ/视频工具"
+    CATEGORY = "GJJ/视频/插帧"
     FUNCTION = "interpolate"
     RETURN_TYPES = ("IMAGE", "IMAGE")
     RETURN_NAMES = ("插帧图片", "光流预览")

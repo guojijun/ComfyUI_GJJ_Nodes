@@ -477,7 +477,7 @@ def _get_engine(model_path, device, precision, attention, compile_model, keep_lo
 
 
 class GJJ_FishAudioS2Generator:
-    CATEGORY = "GJJ/Audio"
+    CATEGORY = "GJJ/语音"
     FUNCTION = "generate"
     OUTPUT_NODE = True
     DESCRIPTION = DESCRIPTION

@@ -603,7 +603,7 @@ def _coerce_media_for_textgen(media: Any | None):
 
 
 class GJJ_GemmaTextGenerate:
-    CATEGORY = "GJJ/LLM"
+    CATEGORY = "GJJ/视频/文本生成"
     FUNCTION = "generate"
     DESCRIPTION = (
         NODE_DESCRIPTION

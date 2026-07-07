@@ -15,7 +15,7 @@ any_type = AnyType("*")
 
 
 class GJJ_ConditionPassthrough:
-    CATEGORY = "GJJ/逻辑控制"
+    CATEGORY = "GJJ/逻辑"
     FUNCTION = "passthrough"
     DESCRIPTION = "条件透传任意对象。前端可用 ⚡ 选择 GJJ_TemplateParams 或 GJJ_SETNODE 的布尔变量；变量为真时透传，为假时提交前临时旁路下游链路。"
     SEARCH_ALIASES = ["condition passthrough", "条件透传", "条件旁路", "任意透传", "bypass downstream", "template params boolean"]

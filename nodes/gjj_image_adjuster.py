@@ -61,7 +61,7 @@ def _ensure_rgb(image: torch.Tensor) -> torch.Tensor:
 
 
 class GJJ_ImageAdjuster:
-    CATEGORY = "GJJ/Image"
+    CATEGORY = "GJJ/视频/图片调色"
     FUNCTION = "adjust"
     DESCRIPTION = "对图片批次执行本地调色：曝光、对比、饱和、鲜艳度、色温、色调、色相、伽马和颗粒。"
     SEARCH_ALIASES = ["adjust", "color", "tone", "调色", "白平衡", "颗粒", "色相", "饱和度"]

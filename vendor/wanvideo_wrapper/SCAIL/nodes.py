@@ -24,7 +24,7 @@ class WanVideoAddSCAILReferenceEmbeds:
     RETURN_TYPES = ("WANVIDIMAGE_EMBEDS",)
     RETURN_NAMES = ("image_embeds",)
     FUNCTION = "add"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加"
 
     def add(self, embeds, vae, ref_image, strength, start_percent, end_percent, clip_embeds=None):
         updated = dict(embeds)
@@ -63,7 +63,7 @@ class WanVideoAddSCAILPoseEmbeds:
     RETURN_TYPES = ("WANVIDIMAGE_EMBEDS",)
     RETURN_NAMES = ("image_embeds",)
     FUNCTION = "add"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加"
 
     def add(self, embeds, vae, pose_images, strength, start_percent=0.0, end_percent=1.0):
         updated = dict(embeds)

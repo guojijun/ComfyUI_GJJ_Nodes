@@ -86,7 +86,7 @@ class QwenLoader:
     }
     RETURN_TYPES = ("QWENMODEL",)
     FUNCTION = "load"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加"
 
     def load(self, model, load_device, precision):
         transformer_load_device = device if load_device == "main_device" else offload_device
@@ -158,7 +158,7 @@ class WanVideoPromptExtender:
         }
     RETURN_TYPES = ("STRING",)
     FUNCTION = "generate"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def generate(self, qwen, prompt, device, force_offload, max_new_tokens, system_prompt=None, custom_system_prompt=None, seed=0):
         if device == "gpu":
@@ -218,7 +218,7 @@ class WanVideoPromptExtenderSelect:
     RETURN_TYPES = ("WANVIDEOPROMPTEXTENDER_ARGS",)
     RETURN_NAMES = ("extender_args",)
     FUNCTION = "set"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def set(self, model, system_prompt, max_new_tokens, custom_system_prompt=None, seed=0):
 

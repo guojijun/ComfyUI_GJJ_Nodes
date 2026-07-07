@@ -479,7 +479,7 @@ class GJJ_BatchWatermarkRemover:
     )
     FUNCTION = "remove"
     OUTPUT_NODE = True
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/图像"
     GJJ_HELP = {
         "title": "GJJ · 🧼 批量去水印",
         "description": DESCRIPTION,

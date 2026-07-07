@@ -133,7 +133,7 @@ def _tensor2pil(image: torch.Tensor) -> list[Image.Image]:
 
 
 class GJJ_GrowMaskWithBlur:
-    CATEGORY = "GJJ/遮罩"
+    CATEGORY = "GJJ/视频/遮罩"
     FUNCTION = "expand_mask"
     DESCRIPTION = (
         "KJNodes GrowMaskWithBlur 的 GJJ 零依赖复刻版。"

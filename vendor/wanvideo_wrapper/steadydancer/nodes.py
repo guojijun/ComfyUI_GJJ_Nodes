@@ -36,7 +36,7 @@ class WanVideoAddSteadyDancerEmbeds:
     RETURN_TYPES = ("WANVIDIMAGE_EMBEDS",)
     RETURN_NAMES = ("image_embeds",)
     FUNCTION = "add"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加"
 
     def add(self, embeds, pose_latents_positive, pose_strength_spatial, pose_strength_temporal, start_percent=0.0, end_percent=1.0, pose_latents_negative=None, clip_vision_embeds=None):
         sdancer_embeds = {

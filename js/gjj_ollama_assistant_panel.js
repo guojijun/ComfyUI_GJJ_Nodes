@@ -86,6 +86,10 @@ const DEFAULT_SAMPLING = {
 	frequency_penalty: 0.2,
 	repeat_penalty: 1.15,
 };
+const OLLAMA_FALLBACK_HOSTS = [
+	"http://127.0.0.1:11434",
+	"http://localhost:11434",
+];
 const FLOAT_WIDGET_DEFAULTS = new Map([
 	["temperature", { fallback: DEFAULT_SAMPLING.temperature, min: 0, max: 2 }],
 	["top_p", { fallback: DEFAULT_SAMPLING.top_p, min: 0, max: 1 }],
@@ -152,6 +156,26 @@ function setWidgetValue(node, name, value) {
 	target.callback?.(value, app.canvas, node, undefined, target);
 	rememberWorkflowValues(node);
 	markChanged(node);
+}
+
+function normalizeOllamaHost(value) {
+	const text = String(value || "").trim();
+	if (!text) {
+		return "";
+	}
+	let host = text.replace(/\/+$/, "").replace(/\/api$/i, "");
+	if (!/^https?:\/\//i.test(host)) {
+		host = `http://${host}`;
+	}
+	try {
+		const parsed = new URL(host);
+		if (!parsed.port) {
+			parsed.port = "11434";
+		}
+		return parsed.toString().replace(/\/+$/, "");
+	} catch (_) {
+		return "";
+	}
 }
 
 function splitTemplateBlocks(rawText) {
@@ -881,7 +905,7 @@ function button(label, title, handler) {
 	element.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
-		handler();
+		handler(event);
 	});
 	return element;
 }
@@ -963,6 +987,49 @@ function sortModelNames(values) {
 	});
 }
 
+function setModelWidgetOptions(node, values) {
+	const target = widget(node, "model");
+	const choices = sortModelNames(values);
+	if (!target || !choices.length) {
+		return choices;
+	}
+	target.options ||= {};
+	target.options.values = choices;
+	if (!choices.includes(String(target.value || ""))) {
+		target.value = choices[0];
+		target.callback?.(target.value, app.canvas, node, undefined, target);
+		rememberWorkflowValues(node);
+		markChanged(node);
+	}
+	return choices;
+}
+
+function ollamaHostsForNode(node) {
+	const current = normalizeOllamaHost(widgetValue(node, "ollama_host", ""));
+	return current ? [current, ...OLLAMA_FALLBACK_HOSTS.filter((host) => host !== current)] : OLLAMA_FALLBACK_HOSTS.slice();
+}
+
+async function fetchOllamaModelsForPanel(node) {
+	for (const host of ollamaHostsForNode(node)) {
+		try {
+			const response = await fetch(`${host}/api/tags`);
+			if (!response.ok) {
+				continue;
+			}
+			const data = await response.json();
+			const names = (Array.isArray(data?.models) ? data.models : [])
+				.map((item) => String(item?.name || item?.model || "").trim())
+				.filter(Boolean);
+			if (names.length) {
+				return setModelWidgetOptions(node, names);
+			}
+		} catch (_) {
+			// try next host
+		}
+	}
+	return [];
+}
+
 function modelChoices(node) {
 	const modelWidget = widget(node, "model");
 	let values = modelWidget?.options?.values;
@@ -979,6 +1046,133 @@ function modelChoices(node) {
 		values.unshift(selected);
 	}
 	return sortModelNames(values);
+}
+
+function closeModelPopup(node) {
+	const state = node?.__gjjOllamaAssistantPanel;
+	if (!state?.modelPopup) {
+		return;
+	}
+	if (state.modelPopupOutsideHandler) {
+		document.removeEventListener("pointerdown", state.modelPopupOutsideHandler, true);
+		state.modelPopupOutsideHandler = null;
+	}
+	state.modelPopup.remove();
+	state.modelPopup = null;
+}
+
+function positionModelPopup(state, anchor) {
+	if (!state?.modelPopup || !anchor?.getBoundingClientRect) {
+		return;
+	}
+	const rect = anchor.getBoundingClientRect();
+	const popup = state.modelPopup;
+	const margin = 8;
+	const maxWidth = Math.min(560, Math.max(320, window.innerWidth - margin * 2));
+	popup.style.maxWidth = `${maxWidth}px`;
+	const width = Math.min(maxWidth, Math.max(320, popup.offsetWidth || 320));
+	const left = Math.max(margin, Math.min(window.innerWidth - width - margin, rect.left));
+	const height = Math.min(popup.offsetHeight || 120, window.innerHeight - margin * 2);
+	const below = rect.bottom + 6;
+	const above = rect.top - height - 6;
+	const top = below + height <= window.innerHeight - margin
+		? below
+		: Math.max(margin, above);
+	popup.style.left = `${Math.round(left)}px`;
+	popup.style.top = `${Math.round(top)}px`;
+}
+
+function renderModelPopupItems(node, message = "") {
+	const state = node.__gjjOllamaAssistantPanel;
+	const body = state?.modelPopupBody;
+	if (!body) {
+		return;
+	}
+	body.replaceChildren();
+	if (message) {
+		const empty = document.createElement("div");
+		empty.className = "gjj-ia-model-popup-empty";
+		empty.textContent = message;
+		body.appendChild(empty);
+		return;
+	}
+	const selected = String(widgetValue(node, "model", "") || "").trim();
+	const choices = modelChoices(node);
+	if (!choices.length) {
+		renderModelPopupItems(node, "未发现 Ollama 模型，请检查地址后刷新");
+		return;
+	}
+	for (const name of choices) {
+		const item = document.createElement("button");
+		item.type = "button";
+		item.className = "gjj-ia-model-popup-item";
+		item.textContent = name;
+		item.title = name;
+		item.classList.toggle("active", name === selected);
+		item.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			setWidgetValue(node, "model", name);
+			renderModelButtons(node);
+			syncPanel(node);
+			closeModelPopup(node);
+		});
+		body.appendChild(item);
+	}
+}
+
+async function openModelPopup(node, anchor) {
+	const state = node.__gjjOllamaAssistantPanel;
+	if (!state) {
+		return;
+	}
+	if (state.modelPopup) {
+		closeModelPopup(node);
+		return;
+	}
+	const popup = document.createElement("div");
+	popup.className = "gjj-ia-model-popup";
+	const head = document.createElement("div");
+	head.className = "gjj-ia-model-popup-head";
+	const title = document.createElement("span");
+	title.textContent = "切换 Ollama 模型";
+	const refresh = document.createElement("button");
+	refresh.type = "button";
+	refresh.textContent = "🔄";
+	refresh.title = "刷新模型列表";
+	refresh.addEventListener("click", async (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		refresh.disabled = true;
+		renderModelPopupItems(node, "正在刷新模型列表...");
+		const names = await fetchOllamaModelsForPanel(node);
+		refresh.disabled = false;
+		renderModelButtons(node);
+		renderModelPopupItems(node, names.length ? "" : "未发现 Ollama 模型，请检查地址后刷新");
+		positionModelPopup(state, anchor);
+	});
+	const body = document.createElement("div");
+	body.className = "gjj-ia-model-popup-body";
+	head.append(title, refresh);
+	popup.append(head, body);
+	document.body.appendChild(popup);
+	state.modelPopup = popup;
+	state.modelPopupBody = body;
+	state.modelPopupOutsideHandler = (event) => {
+		if (!popup.contains(event.target) && event.target !== anchor) {
+			closeModelPopup(node);
+		}
+	};
+	document.addEventListener("pointerdown", state.modelPopupOutsideHandler, true);
+	renderModelPopupItems(node);
+	positionModelPopup(state, anchor);
+	if (!modelChoices(node).length) {
+		renderModelPopupItems(node, "正在刷新模型列表...");
+		const names = await fetchOllamaModelsForPanel(node);
+		renderModelButtons(node);
+		renderModelPopupItems(node, names.length ? "" : "未发现 Ollama 模型，请检查地址后刷新");
+		positionModelPopup(state, anchor);
+	}
 }
 
 function renderModelButtons(node) {
@@ -1060,8 +1254,8 @@ function syncPanel(node) {
 		const selectedModel = String(widgetValue(node, "model", "") || "").trim();
 		state.modelButton.textContent = "🤖";
 		state.modelButton.title = selectedModel
-			? `当前模型：${selectedModel}。点击展开模型设置。`
-			: "当前模型：未选择。点击展开模型设置。";
+			? `当前模型：${selectedModel}。点击切换模型。`
+			: "当前模型：未选择。点击切换模型。";
 	}
 	state.settingsButton.textContent = "⚙️";
 	state.settingsButton.title = state.expanded
@@ -1101,6 +1295,10 @@ function syncPanel(node) {
 		entry.button.classList.toggle("active", currentPrompt === templatePrompt(state.templateConfig, entry.item));
 	}
 	renderModelButtons(node);
+	if (state.modelPopup) {
+		renderModelPopupItems(node);
+		positionModelPopup(state, state.modelButton);
+	}
 	resizeNode(node);
 }
 
@@ -1346,14 +1544,23 @@ function createPanel(node) {
 		.gjj-ia-textarea.small { min-height:60px; }
 		.gjj-ia-textarea.rule { min-height:48px; }
 		.gjj-ia-textarea.templates { min-height:118px; }
+		.gjj-ia-model-popup { position:fixed; z-index:10050; min-width:320px; width:min(560px, calc(100vw - 16px)); max-height:min(440px, calc(100vh - 24px)); display:flex; flex-direction:column; gap:6px; padding:8px; border:1px solid rgba(91,119,130,.9); border-radius:8px; background:rgba(13,20,24,.98); box-shadow:0 14px 34px rgba(0,0,0,.42); color:#dce6e8; font:12px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; }
+		.gjj-ia-model-popup-head { display:flex; align-items:center; justify-content:space-between; gap:8px; color:#aebfc4; font-weight:800; padding:0 1px 4px; border-bottom:1px solid rgba(64,82,90,.75); }
+		.gjj-ia-model-popup-head button { flex:0 0 auto; height:24px; min-width:28px; padding:0 7px; border:1px solid #3d5159; border-radius:6px; background:#172127; color:#dbe6e9; cursor:pointer; font:700 12px/22px system-ui, sans-serif; }
+		.gjj-ia-model-popup-head button:hover { background:#24333b; border-color:#5f8590; }
+		.gjj-ia-model-popup-head button:disabled { opacity:.65; cursor:wait; }
+		.gjj-ia-model-popup-body { display:flex; flex-direction:column; gap:4px; overflow:auto; padding-right:2px; scrollbar-width:thin; }
+		.gjj-ia-model-popup-item { width:100%; min-height:28px; padding:5px 8px; border:1px solid transparent; border-radius:6px; background:transparent; color:#dbe6e9; cursor:pointer; text-align:left; font:600 12px/1.35 system-ui, sans-serif; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+		.gjj-ia-model-popup-item:hover { background:#1f3037; border-color:#4c6975; }
+		.gjj-ia-model-popup-item.active { background:#24452d; border-color:#65a271; color:#ebffee; }
+		.gjj-ia-model-popup-empty { color:#8b9ba1; padding:8px 4px; white-space:normal; }
 	`;
 	const toolbar = document.createElement("div");
 	toolbar.className = "gjj-ia-toolbar";
 	const templates = document.createElement("div");
 	templates.className = "gjj-ia-templates";
-	const modelButton = button("🤖", "当前模型。点击展开模型设置。", () => {
-		node.__gjjOllamaAssistantPanel.expanded = true;
-		syncPanel(node);
+	const modelButton = button("🤖", "当前模型。点击切换模型。", (event) => {
+		openModelPopup(node, event.currentTarget);
 	});
 	const thinking = button("💭", "思考模式：关。点击开启模型思考。", () => {
 		const value = String(widgetValue(node, "thinking_mode", "关闭思考")) === "开启思考" ? "关闭思考" : "开启思考";

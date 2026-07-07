@@ -7,7 +7,7 @@ RANGE_FORMATS = ["切片 [起始:结束]", "数组 [起始,起始+1]"]
 
 
 class GJJ_IncrementingInteger:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/视频/递增整数"
     FUNCTION = "output"
     DESCRIPTION = "输出一个可链接到多个随机种子或序列切片插槽的数值，并默认在每次生成后按“数量”推进到下一段。"
     SEARCH_ALIASES = ["incrementing integer", "increment value", "increment seed", "seed", "递增", "数值", "整数", "种子", "随机", "切片"]

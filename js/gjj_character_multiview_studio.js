@@ -20,7 +20,10 @@ const SETTINGS_PROPERTY = "gjj_multiview_show_settings";
 const AUTO_LOAD_IMAGE_PROPERTY = "gjj_multiview_auto_load_image_node_id";
 const KEEP_MODEL_PROPERTY = "gjj_multiview_keep_model";
 const RANDOM_SEED_PROPERTY = "gjj_multiview_random_seed";
+const PREVIEW_LAYOUT_PROPERTY = "gjj_multiview_preview_layout";
+const PREVIEW_PAGE_PROPERTY = "gjj_multiview_preview_page";
 const PREVIEW_DRAG_MIME = "application/x-gjj-character-multiview-preview";
+const GJJ_MULTI_IMAGE_DRAG_MIME = "application/x-gjj-multi-image-ref";
 const ANY_PREVIEW_HELD_IMAGES_PROPERTY = "gjj_any_preview_held_images";
 const TEMPLATE_API_PATH = "/gjj/character_multiview/templates";
 const UNET_WIDGET = "unet_name";
@@ -63,6 +66,60 @@ const REQUIRED_WIDGET_ORDER = [
 	"save_each_image",
 	"keep_model",
 ];
+const WIDGET_CHINESE_META = {
+	base_prompt: {
+		label: "主体补充提示词",
+		tooltip: "补充主体的材质、结构、颜色、风格或背景氛围；会和每行动作文本组合后生成对应视图。",
+	},
+	negative_prompt: {
+		label: "反向提示词",
+		tooltip: "用于排除不想出现的内容；留空时节点会自动使用零反向条件。",
+	},
+	action_prompts: {
+		label: "动作文本列表",
+		tooltip: "每行一个动作或视角描述；如果接入了对应动作图，会自动和同一行文本配对。",
+	},
+	unet_name: {
+		label: "主模型",
+		tooltip: "选择图生图或编辑型主模型；这里会过滤掉纯文生图底模。",
+	},
+	lora_1_name: {
+		label: "第1组微调模型",
+		tooltip: "主要加速或风格微调模型，默认推荐适配当前主模型的加速微调模型。",
+	},
+	lora_1_strength: {
+		label: "第1组微调强度",
+		tooltip: "控制第1组微调模型的影响强度；必须大于 0。",
+	},
+	lora_2_name: {
+		label: "第2组微调模型",
+		tooltip: "第二组可选微调模型；多视图默认推荐多角度微调模型。",
+	},
+	lora_2_strength: {
+		label: "第2组微调强度",
+		tooltip: "控制第2组微调模型的影响强度；0 表示不参与。",
+	},
+	lora_3_name: {
+		label: "第3组微调模型",
+		tooltip: "第三组可选微调模型；默认不启用。",
+	},
+	lora_3_strength: {
+		label: "第3组微调强度",
+		tooltip: "控制第3组微调模型的影响强度；0 表示关闭。",
+	},
+	seed: {
+		label: "随机种子",
+		tooltip: "基础随机种子；每个视图会在这个数值上依次加 1。",
+	},
+	save_each_image: {
+		label: "保存单张图片",
+		tooltip: "开启后会把每张单图保存到输出目录，并写入当前工作流元数据。",
+	},
+	keep_model: {
+		label: "保持模型",
+		tooltip: "开启后执行完成会尽量保留当前模型在内存中；关闭后允许释放模型缓存。",
+	},
+};
 const OUTPUT_SPECS = [
 	{
 		index: 0,
@@ -626,6 +683,24 @@ function mediaItemToUrl(item) {
 	);
 }
 
+function compactPreviewImageRef(item) {
+	if (!item?.filename) {
+		return null;
+	}
+	return {
+		filename: String(item.filename || ""),
+		subfolder: String(item.subfolder || ""),
+		type: String(item.type || "temp"),
+		hash: String(item.hash || ""),
+		format: String(item.format || ""),
+		media_type: String(item.media_type || "image"),
+		width: Number(item.width || item.preview_width || item.w || 0),
+		height: Number(item.height || item.preview_height || item.h || 0),
+		mtime_ns: Number(item.mtime_ns || 0),
+		size_bytes: Number(item.size_bytes || 0),
+	};
+}
+
 async function uploadMainImageFile(file) {
 	const form = new FormData();
 	form.append("image", file, file.name);
@@ -805,17 +880,25 @@ async function createNodeFromDraggedPreview(item, event, sourceNode = null) {
 
 function setupPreviewImageDrag(card, image, node, item) {
 	const payload = JSON.stringify({ item, nodeId: node?.id ?? null });
+	const imageRef = compactPreviewImageRef(item);
+	const imageRefPayload = imageRef ? JSON.stringify(imageRef) : "";
 	card.draggable = true;
 	image.draggable = true;
-	card.title = "点击放大预览；拖到画布可生成图片节点";
+	card.title = "点击放大预览；拖到其它节点或画布可使用这张图";
 	const onDragStart = (event) => {
 		event.stopPropagation();
 		if (!event.dataTransfer) {
 			return;
 		}
+		const url = mediaItemToUrl(item);
 		event.dataTransfer.effectAllowed = "copy";
 		event.dataTransfer.setData(PREVIEW_DRAG_MIME, payload);
-		event.dataTransfer.setData("text/plain", mediaItemToUrl(item));
+		if (imageRefPayload) {
+			event.dataTransfer.setData(GJJ_MULTI_IMAGE_DRAG_MIME, imageRefPayload);
+			event.dataTransfer.setData("application/json", imageRefPayload);
+		}
+		event.dataTransfer.setData("text/plain", url);
+		event.dataTransfer.setData("text/uri-list", url);
 		try {
 			event.dataTransfer.setDragImage(image, Math.min(48, image.width / 2 || 24), Math.min(48, image.height / 2 || 24));
 		} catch (_) {}
@@ -830,8 +913,22 @@ function ensurePreviewDropHandler() {
 	}
 	window.__gjjCharacterMultiViewPreviewDropHandler = true;
 	const hasPreviewDragType = (transfer) => Array.from(transfer?.types || []).includes(PREVIEW_DRAG_MIME);
+	const isCanvasDropTarget = (event) => {
+		const target = event?.target;
+		const canvas = app.canvas?.canvas;
+		if (!target || target === document || target === document.body || target === canvas) {
+			return true;
+		}
+		if (target instanceof HTMLCanvasElement) {
+			return true;
+		}
+		return false;
+	};
 	document.addEventListener("dragover", (event) => {
 		if (!hasPreviewDragType(event.dataTransfer)) {
+			return;
+		}
+		if (!isCanvasDropTarget(event)) {
 			return;
 		}
 		event.preventDefault();
@@ -840,6 +937,9 @@ function ensurePreviewDropHandler() {
 	document.addEventListener("drop", (event) => {
 		const raw = event.dataTransfer?.getData?.(PREVIEW_DRAG_MIME);
 		if (!raw) {
+			return;
+		}
+		if (!isCanvasDropTarget(event)) {
 			return;
 		}
 		event.preventDefault();
@@ -970,6 +1070,38 @@ function widgetDeclaresCompactHidden(widget) {
 	return Boolean(widget.__gjjCharacterMultiViewDeclaredHidden);
 }
 
+function chineseWidgetMeta(widgetOrName) {
+	const name = typeof widgetOrName === "string"
+		? widgetOrName
+		: String(widgetOrName?.name || "");
+	return WIDGET_CHINESE_META[name] || null;
+}
+
+function applyChineseWidgetMeta(widget) {
+	const meta = chineseWidgetMeta(widget);
+	if (!widget || !meta) {
+		return;
+	}
+	widget.label = meta.label;
+	widget.localized_name = meta.label;
+	widget.display_name = meta.label;
+	widget.tooltip = meta.tooltip;
+	if (widget.options && typeof widget.options === "object") {
+		widget.options.display_name = meta.label;
+		widget.options.tooltip = meta.tooltip;
+	}
+	const element = widget.element || widget.inputEl;
+	if (element?.setAttribute) {
+		element.setAttribute("title", meta.tooltip);
+	}
+}
+
+function applyChineseLabelsAndTooltips(node) {
+	for (const widget of node?.widgets || []) {
+		applyChineseWidgetMeta(widget);
+	}
+}
+
 function inputDeclaresCompactHidden(input) {
 	if (!input) {
 		return false;
@@ -1016,7 +1148,7 @@ function reorderInputs(node) {
 	};
 
 	push(findInput(node, MAIN_IMAGE_INPUT));
-	// LoRA 接口放在动态接口前面，避免被挡住
+	// 微调模型接口放在动态接口前面，避免被挡住
 	push(findInput(node, LORA_CHAIN_INPUT));
 	for (const input of getActionInputs(node)) {
 		push(input);
@@ -1093,9 +1225,9 @@ function stabilizeActions(node) {
 	setInputMeta(
 		findInput(node, LORA_CHAIN_INPUT),
 		LORA_CHAIN_INPUT,
-		"LoRA串联配置",
+		"微调模型串联配置",
 		"LORA_CHAIN_CONFIG",
-		"可选接入 GJJ · LoRA串联配置 的输出；会在面板 LoRA 1 / LoRA 2 之后继续按顺序串联应用多组 LoRA。",
+		"可选接入 GJJ · 微调模型串联配置 的输出；会在面板微调模型之后继续按顺序串联应用多组微调模型。",
 	);
 
 	// 当有动作图输入时，自动清空动作文本列表，并填充主体补充提示词
@@ -1269,9 +1401,9 @@ function loraPreviewUrl(node, loraName) {
 
 function loraRowDefs() {
 	return [
-		{ index: 1, label: "LoRA 1", name: LORA1_WIDGET, strength: LORA1_STRENGTH_WIDGET, required: true },
-		{ index: 2, label: "LoRA 2", name: LORA2_WIDGET, strength: LORA2_STRENGTH_WIDGET, required: false },
-		{ index: 3, label: "LoRA 3", name: LORA3_WIDGET, strength: LORA3_STRENGTH_WIDGET, required: false },
+		{ index: 1, label: "第1组微调", name: LORA1_WIDGET, strength: LORA1_STRENGTH_WIDGET, required: true },
+		{ index: 2, label: "第2组微调", name: LORA2_WIDGET, strength: LORA2_STRENGTH_WIDGET, required: false },
+		{ index: 3, label: "第3组微调", name: LORA3_WIDGET, strength: LORA3_STRENGTH_WIDGET, required: false },
 	];
 }
 
@@ -1397,7 +1529,7 @@ function ensureCharacterMultiViewLoraPopup() {
 			if (!options.length) {
 				const empty = document.createElement("div");
 				empty.className = "gjj-mv-lora-popup-empty";
-				empty.textContent = "没有匹配的 LoRA";
+				empty.textContent = "没有匹配的微调模型";
 				list.appendChild(empty);
 				this.reposition();
 				return;
@@ -1429,8 +1561,8 @@ function ensureCharacterMultiViewLoraPopup() {
 		open(state) {
 			this.state = state;
 			search.value = String(state.searchValue || "");
-			search.placeholder = "搜索 LoRA";
-			search.title = "输入关键词筛选当前这一行可选的 LoRA；支持 & 与，, 或 | 表示或。";
+			search.placeholder = "搜索微调模型";
+			search.title = "输入关键词筛选当前这一行可选的微调模型；支持 & 与，, 或 | 表示或。";
 			panel.style.display = "flex";
 			this.reposition();
 			this.render();
@@ -1528,7 +1660,7 @@ function renderLoraList(node) {
 		const picker = document.createElement("button");
 		picker.type = "button";
 		picker.className = "gjj-mv-lora-picker";
-		picker.title = `点击展开 ${def.label} 的可搜索 LoRA 列表。`;
+		picker.title = `点击展开 ${def.label} 的可搜索微调模型列表。`;
 		picker.textContent = currentName || "未选择";
 		picker.dataset.value = currentName;
 
@@ -1559,7 +1691,7 @@ function renderLoraList(node) {
 			previewCard.className = "gjj-mv-lora-preview-card";
 
 			const image = document.createElement("img");
-			image.alt = String(metadata.title || currentName || "LoRA preview");
+			image.alt = String(metadata.title || currentName || "微调模型预览图");
 			image.loading = "lazy";
 			image.decoding = "async";
 			image.dataset.src = loraPreviewUrl(node, currentName);
@@ -1606,7 +1738,7 @@ function renderLoraList(node) {
 
 		const toggleWrap = document.createElement("label");
 		toggleWrap.className = "gjj-mv-lora-toggle";
-		toggleWrap.title = def.required ? "第一组 LoRA 默认启用。" : `控制 ${def.label} 是否参与加载。`;
+		toggleWrap.title = def.required ? "第一组微调模型默认启用。" : `控制 ${def.label} 是否参与加载。`;
 
 		const toggle = document.createElement("input");
 		toggle.type = "checkbox";
@@ -1757,7 +1889,7 @@ function ensureLoraListWidget(node) {
 
 	node.__gjjCharacterMultiViewLoraContainer = container;
 	node.__gjjCharacterMultiViewLoraRows = rows;
-	const widget = node.addDOMWidget?.(LORA_LIST_WIDGET_NAME, "LoRA 列表", container, {
+	const widget = node.addDOMWidget?.(LORA_LIST_WIDGET_NAME, "微调模型列表", container, {
 		serialize: false,
 		hideOnZoom: false,
 		getHeight: () => showSettings(node) ? Math.max(196, Math.ceil(container.scrollHeight || container.offsetHeight || 196)) : 0,
@@ -2200,7 +2332,8 @@ function setWidgetHidden(widget, hidden) {
 	} else {
 		delete widget.draw;
 	}
-	widget.label = originals.label ?? widget.name ?? "";
+	widget.label = chineseWidgetMeta(widget)?.label || originals.label || widget.name || "";
+	applyChineseWidgetMeta(widget);
 	if (originals.size) {
 		widget.size = Array.isArray(originals.size) ? [...originals.size] : originals.size;
 	} else {
@@ -2301,7 +2434,7 @@ function updateSettingsButtonState(node) {
 	}
 	const open = showSettings(node);
 	button.textContent = open ? "⚙️收起" : "⚙️";
-	button.title = open ? "收起其它参数，只保留顶部按钮和动作文本列表。" : "显示模型、LoRA、提示词、种子和保存参数。";
+	button.title = open ? "收起其它参数，只保留顶部按钮和动作文本列表。" : "显示模型、微调模型、提示词、种子和保存参数。";
 	button.style.background = open ? "#2a3f4a" : "#172026";
 	button.style.borderColor = open ? "#5a7a8a" : "#41535b";
 }
@@ -2352,7 +2485,7 @@ function updateRandomSeedButtonState(node) {
 	}
 	const enabled = randomSeedEnabled(node);
 	button.textContent = "🎲";
-	button.title = enabled ? "随机种：开启。每次运行前自动更换 seed。" : "随机种：关闭。点击开启每次运行前自动更换 seed。";
+	button.title = enabled ? "随机种：开启。每次运行前自动更换随机种子。" : "随机种：关闭。点击开启每次运行前自动更换随机种子。";
 	applyToolbarToggleStyle(button, enabled, {
 		onBg: "#463413",
 		onBorder: "#f2b84b",
@@ -2379,7 +2512,7 @@ async function runCurrentCharacterMultiViewNode(node) {
 		node.output_node = true;
 		const queued = await queueOnlyCurrentNode(node);
 		setStatus(node, queued
-			? (randomizedSeed == null ? "已加入队列" : `已加入队列，随机 seed：${randomizedSeed}`)
+			? (randomizedSeed == null ? "已加入队列" : `已加入队列，随机种子：${randomizedSeed}`)
 			: "运行失败");
 	} catch (error) {
 		setStatus(node, `运行失败：${error?.message || error}`);
@@ -2482,7 +2615,7 @@ function ensureToolbar(node) {
 	node.__gjjCharacterMultiViewMainImageButton = openImageButton;
 	container.appendChild(openImageButton);
 
-	const runButton = createButton("▶", "运行当前 GJJ_CharacterMultiViewStudio 节点，不需要外接输出。", () => runCurrentCharacterMultiViewNode(node));
+	const runButton = createButton("▶", "运行当前主体一键多视图节点，不需要外接输出。", () => runCurrentCharacterMultiViewNode(node));
 	node.__gjjCharacterMultiViewRunButton = runButton;
 	container.appendChild(runButton);
 
@@ -2492,7 +2625,7 @@ function ensureToolbar(node) {
 	node.__gjjCharacterMultiViewKeepModelButton = keepModelButton;
 	container.appendChild(keepModelButton);
 
-	const randomSeedButton = createButton("🎲", "随机种：关闭。点击开启每次运行前自动更换 seed。", () => {
+	const randomSeedButton = createButton("🎲", "随机种：关闭。点击开启每次运行前自动更换随机种子。", () => {
 		setRandomSeedEnabled(node, !randomSeedEnabled(node));
 	});
 	node.__gjjCharacterMultiViewRandomSeedButton = randomSeedButton;
@@ -2507,7 +2640,7 @@ function ensureToolbar(node) {
 	node.__gjjCharacterMultiViewTemplateInsertBefore = clearButton;
 	node.__gjjCharacterMultiViewTemplateButtonElements = [];
 	container.appendChild(clearButton);
-	const settingsButton = createButton("⚙️", "显示模型、LoRA、提示词、种子和保存参数。", () => {
+	const settingsButton = createButton("⚙️", "显示模型、微调模型、提示词、种子和保存参数。", () => {
 		setSettingsVisible(node, !showSettings(node));
 	});
 	node.__gjjCharacterMultiViewSettingsButton = settingsButton;
@@ -2573,27 +2706,93 @@ function ensureStatusWidget(node) {
 	node.__gjjCharacterMultiViewStatus = { widget, box };
 }
 
+function previewLayoutMode(node) {
+	const mode = String(node?.properties?.[PREVIEW_LAYOUT_PROPERTY] || "tile");
+	return mode === "page" ? "page" : "tile";
+}
+
+function setPreviewLayoutMode(node, mode) {
+	node.properties ||= {};
+	node.properties[PREVIEW_LAYOUT_PROPERTY] = mode === "page" ? "page" : "tile";
+	updateLivePreviewLayout(node);
+	refreshNode(node);
+}
+
+function previewPageIndex(node, total = 0) {
+	node.properties ||= {};
+	const max = Math.max(0, Number(total || 0) - 1);
+	const value = Math.max(0, Math.floor(Number(node.properties[PREVIEW_PAGE_PROPERTY] || 0) || 0));
+	const next = Math.min(value, max);
+	node.properties[PREVIEW_PAGE_PROPERTY] = next;
+	return next;
+}
+
+function setPreviewPageIndex(node, index) {
+	node.properties ||= {};
+	const wrap = node?.__gjjCharacterMultiViewPreview?.wrap;
+	const total = Number(wrap?.children?.length || 0);
+	const max = Math.max(0, total - 1);
+	node.properties[PREVIEW_PAGE_PROPERTY] = Math.max(0, Math.min(max, Math.floor(Number(index || 0) || 0)));
+	updateLivePreviewLayout(node);
+	refreshNode(node);
+}
+
 function ensurePreviewWidget(node) {
 	if (node.__gjjCharacterMultiViewPreview) {
 		return;
 	}
+	const root = document.createElement("div");
+	root.style.cssText = [
+		"display:none",
+		"width:100%",
+		"box-sizing:border-box",
+		"padding:4px 0 2px",
+	].join(";");
+	const controls = document.createElement("div");
+	controls.style.cssText = [
+		"display:none",
+		"align-items:center",
+		"gap:5px",
+		"margin:0 0 5px",
+		"min-height:24px",
+	].join(";");
+	const modeButton = createButton("平铺", "切换多图浏览方式：平铺 / 分页。", () => {
+		setPreviewLayoutMode(node, previewLayoutMode(node) === "page" ? "tile" : "page");
+	});
+	modeButton.style.height = "22px";
+	modeButton.style.fontSize = "11px";
+	const prevButton = createButton("◀", "上一张预览。", () => {
+		const total = Number(node.__gjjCharacterMultiViewPreview?.wrap?.children?.length || 0);
+		setPreviewPageIndex(node, previewPageIndex(node, total) - 1);
+	});
+	prevButton.style.height = "22px";
+	prevButton.style.width = "24px";
+	const pageLabel = document.createElement("span");
+	pageLabel.style.cssText = "color:#9eb3b7;font:11px/1.2 system-ui,\"Microsoft YaHei\",sans-serif;min-width:48px;text-align:center;";
+	const nextButton = createButton("▶", "下一张预览。", () => {
+		const total = Number(node.__gjjCharacterMultiViewPreview?.wrap?.children?.length || 0);
+		setPreviewPageIndex(node, previewPageIndex(node, total) + 1);
+	});
+	nextButton.style.height = "22px";
+	nextButton.style.width = "24px";
+	controls.append(modeButton, prevButton, pageLabel, nextButton);
 	const wrap = document.createElement("div");
 	wrap.style.cssText = [
-		"display:none",
+		"display:grid",
 		"grid-template-columns:repeat(auto-fill,minmax(86px,1fr))",
 		"gap:6px",
-		"padding:4px 0 2px",
 		"width:100%",
 		"box-sizing:border-box",
 	].join(";");
-	const widget = node.addDOMWidget?.(PREVIEW_WIDGET_NAME, PREVIEW_WIDGET_NAME, wrap, {
+	root.append(controls, wrap);
+	const widget = node.addDOMWidget?.(PREVIEW_WIDGET_NAME, PREVIEW_WIDGET_NAME, root, {
 		serialize: false,
 		hideOnZoom: false,
 		getHeight: () => {
-			if (wrap.style.display === "none") {
+			if (root.style.display === "none") {
 				return 0;
 			}
-			return Math.max(96, Math.ceil(wrap.scrollHeight || wrap.offsetHeight || 96));
+			return Math.max(96, Math.ceil(root.scrollHeight || root.offsetHeight || 96));
 		},
 	});
 	if (widget) {
@@ -2603,19 +2802,20 @@ function ensurePreviewWidget(node) {
 		widget.value = undefined;
 		widget.computeSize = (width) => [
 			Math.max(280, width || 280),
-			wrap.style.display === "none" ? 0 : Math.max(96, Math.ceil(wrap.scrollHeight || wrap.offsetHeight || 96)),
+			root.style.display === "none" ? 0 : Math.max(96, Math.ceil(root.scrollHeight || root.offsetHeight || 96)),
 		];
 	}
-	node.__gjjCharacterMultiViewPreview = { widget, wrap };
+	node.__gjjCharacterMultiViewPreview = { widget, root, wrap, controls, modeButton, prevButton, nextButton, pageLabel };
 }
 
 function clearLivePreview(node) {
-	const wrap = node?.__gjjCharacterMultiViewPreview?.wrap;
-	if (!wrap) {
+	const preview = node?.__gjjCharacterMultiViewPreview;
+	const wrap = preview?.wrap;
+	if (!wrap || !preview?.root) {
 		return;
 	}
 	wrap.replaceChildren();
-	wrap.style.display = "none";
+	preview.root.style.display = "none";
 	refreshNode(node);
 }
 
@@ -2626,19 +2826,37 @@ function mediaAspectRatio(item) {
 }
 
 function updateLivePreviewLayout(node) {
-	const wrap = node?.__gjjCharacterMultiViewPreview?.wrap;
-	if (!wrap) {
+	const preview = node?.__gjjCharacterMultiViewPreview;
+	const wrap = preview?.wrap;
+	if (!wrap || !preview?.root) {
 		return;
 	}
 	const cards = Array.from(wrap.children || []);
 	if (!cards.length) {
-		wrap.style.display = "none";
+		preview.root.style.display = "none";
 		return;
 	}
+	preview.root.style.display = "block";
 	wrap.style.display = "grid";
-	const single = cards.length === 1;
+	const mode = previewLayoutMode(node);
+	const paged = mode === "page" && cards.length > 1;
+	const page = previewPageIndex(node, cards.length);
+	if (preview.controls) preview.controls.style.display = cards.length > 1 ? "flex" : "none";
+	if (preview.modeButton) {
+		preview.modeButton.textContent = paged ? "分页" : "平铺";
+		preview.modeButton.title = paged ? "当前为分页浏览，点击切换为平铺。" : "当前为平铺浏览，点击切换为分页。";
+		preview.modeButton.__gjjToggleButton = paged;
+		preview.modeButton.style.background = paged ? "#245c42" : "#172026";
+		preview.modeButton.style.borderColor = paged ? "#5fc585" : "#41535b";
+		preview.modeButton.style.color = paged ? "#ffffff" : "#dce7e2";
+	}
+	if (preview.pageLabel) preview.pageLabel.textContent = `${page + 1}/${cards.length}`;
+	if (preview.prevButton) preview.prevButton.disabled = !paged || page <= 0;
+	if (preview.nextButton) preview.nextButton.disabled = !paged || page >= cards.length - 1;
+	const single = cards.length === 1 || paged;
 	wrap.style.gridTemplateColumns = single ? "minmax(0, 1fr)" : "repeat(auto-fill,minmax(86px,1fr))";
-	for (const card of cards) {
+	for (const [index, card] of cards.entries()) {
+		card.style.display = !paged || index === page ? "block" : "none";
 		const item = card.__gjjCharacterMultiViewPreviewItem || {};
 		card.style.aspectRatio = single ? mediaAspectRatio(item) : "1 / 1";
 		const image = card.querySelector("img");
@@ -2774,8 +2992,8 @@ function appendLivePreviewImage(node, item) {
 		"box-sizing:border-box",
 	].join(";");
 	card.__gjjCharacterMultiViewPreviewItem = item;
-	card.title = "点击放大预览；拖到画布可生成图片节点";
-	card.style.cursor = "zoom-in";
+	card.title = "点击放大预览；拖到其它节点或画布可使用这张图";
+	card.style.cursor = "grab";
 	card.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
@@ -2833,10 +3051,12 @@ function patchNode(node) {
 	ensureStatusWidget(node);
 	ensureLoraListWidget(node);
 	ensureOutputs(node);
+	applyChineseLabelsAndTooltips(node);
 	enforceRequiredModelChoices(node);
 	stabilizeActions(node);
 	applyModelPreset(node, true);
 	applyCompactVisibility(node);
+	applyChineseLabelsAndTooltips(node);
 
 	const unetWidget = getWidget(node, UNET_WIDGET);
 	if (unetWidget && !unetWidget.__gjjCharacterMultiViewPatched) {
@@ -2877,6 +3097,7 @@ function patchNode(node) {
 
 	setStatus(node, "等待执行");
 	applyCompactVisibility(node);
+	applyChineseLabelsAndTooltips(node);
 	syncWidgetValuesCache(node);
 	node.__gjjCharacterMultiViewPatched = true;
 	refreshNode(node);

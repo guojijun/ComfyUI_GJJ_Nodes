@@ -5,10 +5,11 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
+import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -35,6 +36,21 @@ try:
 except Exception:
     ProgressBar = None
 
+try:
+    from .common_utils.temp_files import (
+        gjjutils_read_temp_pil_image,
+        gjjutils_unique_temp_path,
+        gjjutils_write_temp_file,
+        gjjutils_write_temp_tensor_images,
+    )
+except Exception:
+    from common_utils.temp_files import (
+        gjjutils_read_temp_pil_image,
+        gjjutils_unique_temp_path,
+        gjjutils_write_temp_file,
+        gjjutils_write_temp_tensor_images,
+    )
+
 
 NODE_NAME = "GJJ_ImageConcanate"
 MEDIA_TYPE = "GJJ_BATCH_IMAGE,IMAGE,MASK,VIDEO"
@@ -51,6 +67,8 @@ BLACK_PLACEHOLDER_EPSILON = 1e-6
 CUDA_HEADROOM = 0.82
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".wmv", ".mpeg", ".mpg"}
 MEDIA_KEYS = ("images", "frames", "image", "samples", "items", "queue", "batch")
+HELD_MEDIA_WIDGET = "held_media_json"
+HELD_ACTIVE_WIDGET = "held_active"
 
 
 class FlexibleMediaInputs(dict):
@@ -283,15 +301,7 @@ def _safe_name(text: str) -> str:
 
 
 def _video_output_path() -> Path:
-    root = _temp_root() / "GJJ" / "video_concat"
-    root.mkdir(parents=True, exist_ok=True)
-    handle, raw_path = tempfile.mkstemp(prefix=f"{_safe_name(NODE_NAME)}_", suffix=".mp4", dir=root)
-    os.close(handle)
-    try:
-        os.remove(raw_path)
-    except OSError:
-        pass
-    return Path(raw_path)
+    return gjjutils_unique_temp_path(prefix=f"video_concat_{_safe_name(NODE_NAME)}_", suffix=".mp4")
 
 
 def _ordered_video_paths(items: list[Any], direction: str) -> list[Path] | None:
@@ -434,6 +444,117 @@ def _media_frames(value: Any) -> list[torch.Tensor]:
         else:
             frames.append(tensor)
     return [frame for frame in frames if not _is_black_placeholder(frame)]
+
+
+def _tensor_for_temp_images(tensor: torch.Tensor) -> tuple[torch.Tensor, str]:
+    tensor = tensor.detach().cpu().float().clamp(0.0, 1.0)
+    media_type = "mask" if tensor.dim() == 3 else "image"
+    if tensor.dim() == 3:
+        tensor = tensor.unsqueeze(-1)
+    if tensor.dim() == 4 and int(tensor.shape[-1]) == 1:
+        media_type = "mask"
+    if tensor.dim() != 4:
+        raise ValueError("缓存图片 Tensor 必须是 BHWC 或 BHW 格式。")
+    return tensor, media_type
+
+
+def _pil_to_tensor(image) -> torch.Tensor:
+    array = np.asarray(image.convert("RGBA"), dtype=np.float32) / 255.0
+    return torch.from_numpy(array).unsqueeze(0)
+
+
+def _read_cached_image_items(items: list[dict[str, Any]], media_type: str = "image") -> torch.Tensor | None:
+    frames: list[torch.Tensor] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            image = gjjutils_read_temp_pil_image(item)
+        except Exception:
+            continue
+        tensor = _pil_to_tensor(image)
+        if str(media_type or "").lower() == "mask":
+            tensor = tensor[..., :3].mean(dim=-1)
+        else:
+            tensor = tensor[..., :3]
+        frames.append(tensor)
+    if not frames:
+        return None
+    return torch.cat(frames, dim=0)
+
+
+def _cache_record_for_value(input_name: str, value: Any) -> dict[str, Any] | None:
+    video_path = _video_path(value)
+    if video_path is not None:
+        try:
+            info = gjjutils_write_temp_file(video_path, suffix=video_path.suffix or ".mp4")
+        except Exception:
+            info = None
+        if info:
+            return {
+                "input_name": str(input_name or ""),
+                "kind": "video",
+                "items": [info],
+            }
+
+    tensors = _media_tensors_recursive(value)
+    items: list[dict[str, Any]] = []
+    media_type = "image"
+    for tensor in tensors:
+        if tensor is None or _is_black_placeholder(tensor):
+            continue
+        try:
+            normalized, current_type = _tensor_for_temp_images(tensor)
+            media_type = current_type if media_type == "image" else media_type
+            items.extend(gjjutils_write_temp_tensor_images(normalized, media_type=current_type))
+        except Exception:
+            continue
+    if not items:
+        return None
+    return {
+        "input_name": str(input_name or ""),
+        "kind": "images",
+        "media_type": media_type,
+        "items": items,
+    }
+
+
+def _cache_records_to_json(records: list[dict[str, Any]]) -> str:
+    if not records:
+        return ""
+    return json.dumps(records, ensure_ascii=False, separators=(",", ":"))
+
+
+def _parse_cache_records(value: Any) -> list[dict[str, Any]]:
+    text = str(_single_value(value, "") or "").strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]
+
+
+def _raw_items_from_cache_records(records: list[dict[str, Any]]) -> list[Any]:
+    raw_items: list[Any] = []
+    for record in records:
+        kind = str(record.get("kind") or "")
+        items = record.get("items")
+        if not isinstance(items, list) or not items:
+            continue
+        if kind == "video":
+            raw_items.append(items[0])
+            continue
+        tensor = _read_cached_image_items(
+            [item for item in items if isinstance(item, dict)],
+            str(record.get("media_type") or "image"),
+        )
+        if tensor is not None:
+            raw_items.append(tensor)
+    return raw_items
 
 
 def _is_black_placeholder(tensor: torch.Tensor) -> bool:
@@ -726,15 +847,34 @@ class GJJ_ImageConcanate:
                         "tooltip": "开启后后续媒体会按首个输入的共享边缩放并保持比例；关闭时尺寸不一致会居中补黑。",
                     },
                 ),
+                HELD_MEDIA_WIDGET: (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": True,
+                        "display_name": "缓存媒体",
+                        "tooltip": "内部字段：保存断开上游前的媒体缓存。",
+                    },
+                ),
+                HELD_ACTIVE_WIDGET: (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "display_name": "使用缓存媒体",
+                        "tooltip": "内部字段：断开上游链接后使用缓存媒体继续输出。",
+                    },
+                ),
             },
             "optional": FlexibleMediaInputs(),
         }
 
-    def concatenate(self, direction="right", match_image_size=True, **kwargs):
+    def concatenate(self, direction="right", match_image_size=True, held_media_json="", held_active=False, **kwargs):
         direction = str(_single_value(direction, "right"))
         match_image_size = bool(_single_value(match_image_size, True))
+        held_active = bool(_single_value(held_active, False))
         raw_items: list[Any] = []
         media_items: list[torch.Tensor] = []
+        cache_records: list[dict[str, Any]] = []
         with torch.inference_mode():
             for key in sorted(kwargs.keys(), key=_input_index):
                 if not str(key).startswith(IMAGE_PREFIX):
@@ -743,25 +883,39 @@ class GJJ_ImageConcanate:
                 if raw_value is None:
                     continue
                 raw_items.append(raw_value)
+                cache_record = _cache_record_for_value(str(key), raw_value)
+                if cache_record is not None:
+                    cache_records.append(cache_record)
                 media_items.extend(_media_frames(raw_value))
+            if not raw_items and held_active:
+                cache_records = _parse_cache_records(held_media_json)
+                raw_items = _raw_items_from_cache_records(cache_records)
+                for raw_value in raw_items:
+                    media_items.extend(_media_frames(raw_value))
             _release_cuda_cache()
+
+            ui = {
+                "gjj_image_concat_cached_media": (cache_records,),
+                "gjj_image_concat_cached_media_json": (_cache_records_to_json(cache_records),),
+                "gjj_image_concat_cache_active": ("true" if held_active and raw_items else "false",),
+            }
 
             if direction != "square":
                 video_result = _concat_video_files(raw_items, str(direction), bool(match_image_size))
                 if video_result is not None:
-                    return (video_result,)
+                    return {"ui": ui, "result": (video_result,)}
 
             if not media_items:
                 raise RuntimeError("GJJ 图片/视频拼接失败：未解析到可用媒体。若输入是 VIDEO，请确认它来自 Load Video 或包含可访问的视频文件路径。")
 
             if direction == "square":
-                return (_concat_square(media_items, bool(match_image_size)),)
+                return {"ui": ui, "result": (_concat_square(media_items, bool(match_image_size)),)}
 
             result = media_items[0]
             first_shape = result.shape
             for tensor in media_items[1:]:
                 result = _concat_pair(result, tensor, str(direction), bool(match_image_size), first_shape=first_shape)
-            return (result,)
+            return {"ui": ui, "result": (result,)}
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_ImageConcanate}

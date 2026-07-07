@@ -13,7 +13,7 @@ const LEGACY_DEFAULT_PREFIX = "GJJ/任意对象";
 const PREVIEW_WIDGET_NAME = "gjj_save_any_object_preview";
 const EMPTY_PREVIEW = "执行后在这里显示保存结果";
 const MIN_PREVIEW_HEIGHT = 96;
-const MIN_WIDTH = 320;
+const MIN_WIDTH = 200;
 const MULTI_IMAGE_MIN_WIDTH = 104;
 const BUTTON_WIDGET_NAME = "gjj_save_any_object_output_button";
 const FOLDER_WIDGET_NAME = "gjj_save_any_object_folder_button";
@@ -977,10 +977,10 @@ function updateButtonState(node) {
 		return;
 	}
 	if (node.__gjjSaveAnyObjectHasOutput) {
-		button.textContent = "隐藏输出";
+		button.textContent = "🔌";
 		button.style.background = "#3a4a52";
 	} else {
-		button.textContent = "输出";
+		button.textContent = "🔌";
 		button.style.background = "#2a3a42";
 	}
 	const variableButton = node.__gjjSaveAnyObjectVariableButton;
@@ -1033,13 +1033,12 @@ function ensurePreviewWidget(node) {
 	container.style.cssText = [
 		"display:flex",
 		"flex-direction:column",
-		"gap:4px",
 		"width:100%",
 		"box-sizing:border-box",
 		"margin-top:2px",
 		"padding:0",
 		"color:#d9e4df",
-		"font-size:12px",
+		"font-size:16px",
 		"line-height:1.45",
 		"user-select:text",
 		"pointer-events:auto",
@@ -1058,7 +1057,6 @@ function ensurePreviewWidget(node) {
 	mediaGrid.style.cssText = [
 		"display:none",
 		"grid-template-columns:minmax(0, 1fr)",
-		"gap:4px",
 		"width:100%",
 		"align-items:start",
 	].join(";");
@@ -1067,7 +1065,6 @@ function ensurePreviewWidget(node) {
 	textBlock.style.cssText = [
 		"display:none",
 		"margin:0",
-		"padding:6px",
 		"border:1px solid #2b3940",
 		"border-radius:6px",
 		"background:#0f1418",

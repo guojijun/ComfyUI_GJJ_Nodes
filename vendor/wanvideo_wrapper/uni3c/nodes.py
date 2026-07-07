@@ -35,7 +35,7 @@ class WanVideoUni3C_ControlnetLoader:
     RETURN_TYPES = ("WANVIDEOCONTROLNET",)
     RETURN_NAMES = ("controlnet", )
     FUNCTION = "loadmodel"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画输入"
 
     def loadmodel(self, model, base_precision, load_device, quantization, attention_mode, compile_args=None):
 
@@ -151,7 +151,7 @@ class WanVideoUni3C_embeds:
     RETURN_TYPES = ("UNI3C_EMBEDS", )
     RETURN_NAMES = ("uni3c_embeds",)
     FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画输入"
 
     def process(self, controlnet, strength, start_percent, end_percent, render_latent=None, render_mask=None, offload=True):
 

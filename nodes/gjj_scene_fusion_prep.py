@@ -1582,4 +1582,4 @@ class GJJ_SceneFusionPrep:
 
 
 NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_SceneFusionPrep}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🧍 人景融合准备"}
+NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🧍 人景融合动作版"}

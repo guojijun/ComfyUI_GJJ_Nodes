@@ -1249,7 +1249,7 @@ def _pil_to_bgr(image: Image.Image) -> np.ndarray:
 
 
 class GJJ_FaceAnalysis:
-    CATEGORY = CATEGORY
+    CATEGORY = "GJJ/视频/人脸分析"
     FUNCTION = "swap_faces"
     INPUT_IS_LIST = True
     OUTPUT_NODE = False

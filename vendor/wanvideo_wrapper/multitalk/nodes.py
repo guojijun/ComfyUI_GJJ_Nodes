@@ -29,7 +29,7 @@ class Wav2VecModelLoader:
     RETURN_TYPES = ("WAV2VECMODEL",)
     RETURN_NAMES = ("wav2vec_model", )
     FUNCTION = "loadmodel"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def loadmodel(self, model, base_precision, load_device):
         from transformers import Wav2Vec2Config, Wav2Vec2FeatureExtractor
@@ -93,7 +93,7 @@ class MultiTalkModelLoader:
     RETURN_TYPES = ("MULTITALKMODEL",)
     RETURN_NAMES = ("model", )
     FUNCTION = "loadmodel"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def loadmodel(self, model, base_precision=None):
         from .multitalk import AudioProjModel
@@ -172,7 +172,7 @@ class MultiTalkWav2VecEmbeds:
     RETURN_TYPES = ("MULTITALK_EMBEDS", "AUDIO", "INT", )
     RETURN_NAMES = ("multitalk_embeds", "audio", "num_frames", )
     FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def process(self, wav2vec_model, normalize_loudness, fps, num_frames, audio_1, audio_scale, audio_cfg_scale, multi_audio_type, audio_2=None, audio_3=None, audio_4=None,
                 ref_target_masks=None, add_noise_floor=False, smooth_transients=False):
@@ -358,7 +358,7 @@ class MultiTalkSilentEmbeds:
     RETURN_TYPES = ("MULTITALK_EMBEDS", )
     RETURN_NAMES = ("multitalk_embeds", )
     FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def process(self, num_frames):
         silence_path = os.path.join(script_directory, "encoded_silence.safetensors")
@@ -417,7 +417,7 @@ class WanVideoImageToVideoMultiTalk:
     RETURN_TYPES = ("WANVIDIMAGE_EMBEDS", "STRING",)
     RETURN_NAMES = ("image_embeds", "output_path")
     FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
     DESCRIPTION = "Enables Multi/InfiniteTalk long video generation sampling method, the video is created in windows with overlapping frames. Not compatible or necessary to be used with context windows and many other features besides Multi/InfiniteTalk."
 
     def process(self, vae, width, height, frame_window_size, motion_frame, force_offload, colormatch, start_image=None, tiled_vae=False, clip_embeds=None, mode="multitalk", output_path=""):
@@ -499,7 +499,7 @@ class WanVideoImageToVideoSkyreelsv3_audio:
     RETURN_TYPES = ("WANVIDIMAGE_EMBEDS", "STRING",)
     RETURN_NAMES = ("image_embeds", "output_path")
     FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
     DESCRIPTION = "Enables Multi/InfiniteTalk long video generation sampling method, the video is created in windows with overlapping frames. Not compatible or necessary to be used with context windows and many other features besides Multi/InfiniteTalk."
 
     def process(self, vae, width, height, frame_window_size, motion_frame, drop_frames, force_offload, colormatch, start_image=None,

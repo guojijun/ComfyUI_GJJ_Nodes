@@ -203,7 +203,7 @@ def _stage_error(stage: str, exc: Exception) -> RuntimeError:
 
 
 class GJJ_Ideogram4DirectGenerator:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/视频/文本生成"
     FUNCTION = "generate"
     OUTPUT_NODE = True
     DESCRIPTION = "Ideogram 4 文生图零依赖单节点：内部完成模型加载、提示词编码、Ideogram 调度、双模型 CFG 采样和 VAE 解码。"

@@ -109,7 +109,7 @@ class LoadNLFModel:
     RETURN_TYPES = ("NLFMODEL",)
     RETURN_NAMES = ("nlf_model", )
     FUNCTION = "loadmodel"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def loadmodel(self, nlf_model, warmup=True):
         check_jit_script_function()
@@ -142,7 +142,7 @@ class LoadVQVAE:
     RETURN_TYPES = ("VQVAE",)
     RETURN_NAMES = ("vqvae", )
     FUNCTION = "loadmodel"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def loadmodel(self, model_name):
         model_path = folder_paths.get_full_path("vae", model_name)
@@ -184,7 +184,7 @@ class MTVCrafterEncodePoses:
     RETURN_TYPES = ("MTVCRAFTERMOTION", "NLFPRED")
     RETURN_NAMES = ("mtvcrafter_motion", "pose_results")
     FUNCTION = "encode"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def encode(self, vqvae, poses):
 
@@ -229,7 +229,7 @@ class NLFPredict:
     RETURN_TYPES = ("NLFPRED", "BBOX",)
     RETURN_NAMES = ("pose_results", "bboxes")
     FUNCTION = "predict"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def predict(self, model, images, per_batch=-1):
 
@@ -308,7 +308,7 @@ class DrawNLFPoses:
     RETURN_TYPES = ("IMAGE", )
     RETURN_NAMES = ("image",)
     FUNCTION = "predict"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def predict(self, poses, width, height, stick_width=1.0, point_radius=2, style="original"):
         from .draw_pose import get_control_conditions

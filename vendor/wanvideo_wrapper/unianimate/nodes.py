@@ -713,7 +713,7 @@ class WanVideoUniAnimateDWPoseDetector:
     RETURN_TYPES = ("IMAGE", "IMAGE", )
     RETURN_NAMES = ("poses", "reference_pose",)
     FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画检测"
 
     def process(self, pose_images, score_threshold, stick_width, reference_pose_image=None, draw_body=True, body_keypoint_size=4,
                 draw_feet=True, draw_hands=True, hand_keypoint_size=4, colorspace="RGB", handle_not_detected="empty", draw_head=True):
@@ -795,7 +795,7 @@ class WanVideoUniAnimatePoseInput:
     RETURN_TYPES = ("UNIANIMATE_POSE", )
     RETURN_NAMES = ("unianimate_poses",)
     FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画输入"
 
     def process(self, pose_images, strength, start_percent, end_percent, reference_pose_image=None):
 

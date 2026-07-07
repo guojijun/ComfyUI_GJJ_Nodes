@@ -20,7 +20,7 @@ from .common_utils.dependency_checker import (
 
 NODE_NAME = "GJJ_FasterWhisperASR"
 MODEL_ROOT_NAME = "faster-whisper"
-CATEGORY = "GJJ/Audio"
+CATEGORY = "GJJ/语音"
 NODE_DISPLAY_NAME = "🎤 语音识别 (Faster Whisper)"
 MODEL_DOWNLOAD_BASE_URL = "https://huggingface.co/Systran"
 
@@ -343,7 +343,7 @@ class GJJ_FasterWhisperASR:
     """GJJ · 🎤 语音识别 (Faster Whisper)"""
 
     DESCRIPTION = DESCRIPTION
-    CATEGORY = CATEGORY
+    CATEGORY = "GJJ/语音"
     FUNCTION = "transcribe"
     OUTPUT_NODE = True
     RETURN_TYPES = ("WHISPER_OUTPUT", "STRING", "STRING", "STRING", "STRING")

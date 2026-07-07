@@ -42,7 +42,7 @@ class WanVideoReCamMasterDefaultCamera:
     RETURN_TYPES = ("CAMERAPOSES",)
     RETURN_NAMES = ("camera_poses",)
     FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加"
     DESCRIPTION = "https://github.com/KwaiVGI/ReCamMaster"
 
     def process(self, camera_type, latents):
@@ -87,7 +87,7 @@ class WanVideoReCamMasterGenerateOrbitCamera:
     RETURN_TYPES = ("CAMERAPOSES",)
     RETURN_NAMES = ("camera_poses",)
     FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加"
     DESCRIPTION = "https://github.com/KwaiVGI/ReCamMaster"
 
     def process(self, degrees, num_frames):
@@ -148,7 +148,7 @@ class WanVideoReCamMasterCameraEmbed:
     RETURN_TYPES = ("WANVIDIMAGE_EMBEDS", "CAMERAPOSES",)
     RETURN_NAMES = ("camera_embeds", "camera_poses",)
     FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加"
     DESCRIPTION = "https://github.com/KwaiVGI/ReCamMaster"
 
     def process(self, camera_poses, latents):
@@ -232,7 +232,7 @@ class ReCamMasterPoseVisualizer:
     
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "plot"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画可视化"
     DESCRIPTION = """
 Visualizes the camera poses, from Animatediff-Evolved CameraCtrl Pose  
 or a .txt file with RealEstate camera intrinsics and coordinates, in a 3D plot. 

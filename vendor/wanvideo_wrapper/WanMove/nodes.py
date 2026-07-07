@@ -28,7 +28,7 @@ class WanVideoWanDrawWanMoveTracks:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "execute"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片裁切绘制"
 
     def execute(self, images, tracks, line_resolution=24, circle_size=10, opacity=0.5, line_width=14):
         if tracks is None or "track_path" not in tracks:
@@ -63,7 +63,7 @@ class WanVideoAddWanMoveTracks:
     RETURN_TYPES = ("WANVIDIMAGE_EMBEDS", "TRACKS")
     RETURN_NAMES = ("image_embeds", "tracks")
     FUNCTION = "add"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片裁切添加"
 
     def add(self, image_embeds, track_coords=None, tracks=None, strength=1.0, track_mask=None):
         updated = dict(image_embeds)
@@ -159,7 +159,7 @@ class WanMove_native:
     RETURN_TYPES = ("CONDITIONING", "TRACKS")
     RETURN_NAMES = ("positive", "tracks")
     FUNCTION = "patchcond"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片裁切"
     DEPRECATED = True
 
     def patchcond(self, positive, track_coords, track_mask=None):

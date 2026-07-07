@@ -74,8 +74,8 @@ DEFAULT_HIGH_MODEL = "wan2.2_bernini_r_high_noise_fp8_scaled.safetensors"
 DEFAULT_LOW_MODEL = "wan2.2_bernini_r_low_noise_fp8_scaled.safetensors"
 DEFAULT_VAE = "wan_2.1_vae.safetensors"
 DEFAULT_CLIP = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
-DEFAULT_HIGH_LORA = "Bernini\Bernini-R_LightX2V_high_noise.safetensors"
-DEFAULT_LOW_LORA = "Bernini\Bernini-R_LightX2V_low_noise.safetensors"
+DEFAULT_HIGH_LORA = "Bernini\\Bernini-R_LightX2V_high_noise.safetensors"
+DEFAULT_LOW_LORA = "Bernini\\Bernini-R_LightX2V_low_noise.safetensors"
 
 MODEL_TREE = [
     {
@@ -489,6 +489,48 @@ def _media_components(value: Any) -> tuple[torch.Tensor | None, Any, float | Non
     except Exception:
         fps = None
     return _tensor_to_bhwc(source), audio, fps
+
+
+def _audio_waveform_and_rate(audio: Any) -> tuple[torch.Tensor | None, int]:
+    waveform = audio.get("waveform") if isinstance(audio, dict) else _component_value(audio, "waveform")
+    try:
+        sample_rate = int((audio.get("sample_rate") if isinstance(audio, dict) else _component_value(audio, "sample_rate")) or 0)
+    except Exception:
+        sample_rate = 0
+    if not isinstance(waveform, torch.Tensor) or sample_rate <= 0 or int(waveform.numel()) <= 0:
+        return None, 0
+    value = waveform.detach().float().cpu()
+    if value.ndim == 1:
+        value = value.reshape(1, 1, -1)
+    elif value.ndim == 2:
+        value = value.unsqueeze(0)
+    elif value.ndim > 3:
+        value = value.reshape(-1, value.shape[-2], value.shape[-1])
+    if value.ndim != 3 or int(value.shape[-1]) <= 0:
+        return None, 0
+    return value.contiguous(), sample_rate
+
+
+def _coerce_audio_input(value: Any) -> dict[str, Any] | None:
+    waveform, sample_rate = _audio_waveform_and_rate(value)
+    if waveform is not None:
+        return {"waveform": waveform, "sample_rate": sample_rate}
+    if isinstance(value, dict):
+        nested = value.get("audio")
+        waveform, sample_rate = _audio_waveform_and_rate(nested)
+        if waveform is not None:
+            return {"waveform": waveform, "sample_rate": sample_rate}
+    getter = getattr(value, "get_components", None)
+    if callable(getter):
+        try:
+            components = getter()
+        except Exception as exc:
+            raise RuntimeError(f"读取 VIDEO 音频失败：{exc}") from exc
+        nested = _component_value(components, "audio")
+        waveform, sample_rate = _audio_waveform_and_rate(nested)
+        if waveform is not None:
+            return {"waveform": waveform, "sample_rate": sample_rate}
+    return None
 
 
 def _first_media_size(*values: Any) -> tuple[int, int] | None:
@@ -927,7 +969,7 @@ def _send_seed_update(unique_id: Any, seed: int) -> None:
 
 
 class GJJ_BerniniStudio:
-    CATEGORY = "GJJ/Bernini"
+    CATEGORY = "GJJ/视频"
     FUNCTION = "generate"
     INPUT_IS_LIST = True
     OUTPUT_NODE = True
@@ -1385,7 +1427,7 @@ class GJJ_BerniniStudio:
         if mode_output_kind == "image":
             all_frames = all_frames[:1].contiguous()
         effective_fps = source_media if callable(getattr(source_media, "get_components", None)) else (source_fps or _as_float(kwargs.get("frame_rate"), 8.0, 1.0, 240.0))
-        audio_input = source_media if callable(getattr(source_media, "get_components", None)) else source_audio
+        audio_input = _coerce_audio_input(source_audio) or _coerce_audio_input(source_media)
         if mode_output_kind == "image":
             result_value = all_frames
             output_path = ""

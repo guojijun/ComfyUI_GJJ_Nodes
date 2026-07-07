@@ -1866,7 +1866,7 @@ def _hidden_multiview_param(options: dict[str, Any]) -> dict[str, Any]:
 
 
 class GJJ_CharacterMultiViewStudio:
-	CATEGORY = "GJJ"
+	CATEGORY = "GJJ/视频"
 	FUNCTION = "generate"
 	OUTPUT_NODE = True
 	DESCRIPTION = (
@@ -1965,7 +1965,7 @@ class GJJ_CharacterMultiViewStudio:
 					_hidden_multiview_param(
 					{
 						"default": default_unet_name,
-						"display_name": "🟣 UNET 主模型",
+						"display_name": "主模型",
 						"tooltip": "只显示图生图 / 编辑型主模型，不显示纯文生图底模。",
 					}
 					),
@@ -1979,8 +1979,8 @@ class GJJ_CharacterMultiViewStudio:
 							default_preset.get("lora_1_name", DEFAULT_LIGHTNING_LORA),
 							DEFAULT_LIGHTNING_LORA,
 						),
-						"display_name": "🟢 第1组 LoRA",
-						"tooltip": "必选。推荐使用 Qwen Image Edit 2511 Lightning LoRA。",
+						"display_name": "第1组微调模型",
+						"tooltip": "必选。推荐使用适配当前主模型的加速微调模型。",
 					}
 					),
 				),
@@ -1992,8 +1992,8 @@ class GJJ_CharacterMultiViewStudio:
 						"min": 0.01,
 						"max": 4.0,
 						"step": 0.01,
-						"display_name": "LoRA 1 强度",
-						"tooltip": "第一组 LoRA 强度，必须大于 0。",
+						"display_name": "第1组微调强度",
+						"tooltip": "第一组微调模型强度，必须大于 0。",
 					}
 					),
 				),
@@ -2006,8 +2006,8 @@ class GJJ_CharacterMultiViewStudio:
 							default_preset.get("lora_2_name", DEFAULT_MULTI_ANGLES_LORA),
 							DEFAULT_MULTI_ANGLES_LORA,
 						),
-						"display_name": "🟢 第2组 LoRA",
-						"tooltip": "第二组 LoRA；多视图节点默认推荐多角度 LoRA，支持从 loras 子目录自动匹配。",
+						"display_name": "第2组微调模型",
+						"tooltip": "第二组微调模型；多视图节点默认推荐多角度微调模型，支持从模型目录自动匹配。",
 					}
 					),
 				),
@@ -2019,8 +2019,8 @@ class GJJ_CharacterMultiViewStudio:
 						"min": 0.0,
 						"max": 2.0,
 						"step": 0.01,
-						"display_name": "LoRA 2 强度",
-						"tooltip": "第二组 LoRA 强度，必须大于 0。",
+						"display_name": "第2组微调强度",
+						"tooltip": "第二组微调模型强度；0 表示不参与。",
 					}
 					),
 				),
@@ -2029,8 +2029,8 @@ class GJJ_CharacterMultiViewStudio:
 					_hidden_multiview_param(
 					{
 						"default": "",
-						"display_name": "🟢 第3组 LoRA",
-						"tooltip": "第三组可选 LoRA；默认强度为 0，不参与加载。",
+						"display_name": "第3组微调模型",
+						"tooltip": "第三组可选微调模型；默认强度为 0，不参与加载。",
 					}
 					),
 				),
@@ -2042,8 +2042,8 @@ class GJJ_CharacterMultiViewStudio:
 						"min": 0.0,
 						"max": 2.0,
 						"step": 0.01,
-						"display_name": "LoRA 3 强度",
-						"tooltip": "第三组 LoRA 强度；默认 0 表示关闭。",
+						"display_name": "第3组微调强度",
+						"tooltip": "第三组微调模型强度；默认 0 表示关闭。",
 					}
 					),
 				),
@@ -2100,8 +2100,8 @@ class GJJ_CharacterMultiViewStudio:
 						"LORA_CHAIN_CONFIG",
 						_hidden_multiview_param(
 						{
-							"display_name": "LoRA串联配置",
-							"tooltip": "可选接入 GJJ · LoRA串联配置 的输出；会在面板 LoRA 1 / LoRA 2 之后继续按顺序串联应用多组 LoRA。",
+							"display_name": "微调模型串联配置",
+							"tooltip": "可选接入 GJJ · 微调模型串联配置 的输出；会在面板微调模型之后继续按顺序串联应用多组微调模型。",
 						}
 						),
 					),
@@ -2683,7 +2683,7 @@ class GJJ_CharacterMultiViewStudio:
 			lora_2_name = _pick_available_lora_name(lora_models, ACTION_MIGRATION_LORA_2, ACTION_MIGRATION_LORA_2)
 			lora_2_strength = ACTION_MIGRATION_LORA_2_STRENGTH
 			lora_3_strength = 0.0
-			_send_status(unique_id, f"🔄 动作迁移模式：已切换 LoRA → {lora_1_name}（强度 {lora_1_strength}）+ {lora_2_name}（强度 {lora_2_strength}）")
+			_send_status(unique_id, f"🔄 动作迁移模式：已切换微调模型 → {lora_1_name}（强度 {lora_1_strength}）+ {lora_2_name}（强度 {lora_2_strength}）")
 
 		try:
 			model, clip, vae = self._load_runtime_pipeline(
@@ -2713,7 +2713,7 @@ class GJJ_CharacterMultiViewStudio:
 		except Exception as exc:
 			raise RuntimeError(
 				"主体一键多视图节点加载模型失败。\n"
-				f"UNET: {unet_name}\n"
+				f"主模型: {unet_name}\n"
 				f"CLIP: {', '.join(resolved_clip_names)}\n"
 				f"VAE: {resolved_vae_name}\n"
 				f"详细错误：{exc}"
@@ -2737,7 +2737,7 @@ class GJJ_CharacterMultiViewStudio:
 		if action_pairs and not bool(preset.get("supports_multi_image_edit")):
 			_send_status(unique_id, "提示：当前底模不支持多图视觉参考，动作图将仅作为动作文本的辅助说明。")
 		elif use_action_reference_mode:
-			_send_status(unique_id, "提示：已切换到动作图驱动模式；动作文本不再参与姿态控制，已自动加载 FireRed 动作迁移 LoRA。")
+			_send_status(unique_id, "提示：已切换到动作图驱动模式；动作文本不再参与姿态控制，已自动加载动作迁移微调模型。")
 		if len(jobs) < raw_job_count:
 			_send_status(unique_id, f"提示：已自动去除 {raw_job_count - len(jobs)} 个重复视角。")
 

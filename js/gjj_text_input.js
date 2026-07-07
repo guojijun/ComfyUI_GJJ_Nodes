@@ -568,6 +568,10 @@ function getDomWidget(node) {
 	return node.widgets?.find((widget) => widget?.name === DOM_WIDGET_NAME);
 }
 
+function isTransientPreviewText(value) {
+	return String(value ?? "") === WAITING_UPSTREAM_TEXT;
+}
+
 function setTextValue(node, value) {
 	const widget = getTextWidget(node);
 	if (!widget) {
@@ -586,6 +590,25 @@ function setTextValue(node, value) {
 
 function syncSavedValue(node) {
 	const value = getTextValue(node);
+	if (isTransientPreviewText(value)) {
+		return preserveSavedTextValue(node);
+	}
+	const domWidget = getDomWidget(node);
+	if (domWidget) {
+		domWidget.value = value;
+	}
+	node.properties = node.properties || {};
+	node.properties[SAVED_TEXT_PROPERTY] = value;
+	return value;
+}
+
+function preserveSavedTextValue(node) {
+	const propertyValue = node?.properties?.[SAVED_TEXT_PROPERTY];
+	const currentValue = getTextValue(node);
+	const hasPropertyValue = propertyValue !== undefined && propertyValue !== null;
+	const value = hasPropertyValue && !isTransientPreviewText(propertyValue)
+		? String(propertyValue)
+		: (!isTransientPreviewText(currentValue) ? String(currentValue ?? "") : "");
 	const domWidget = getDomWidget(node);
 	if (domWidget) {
 		domWidget.value = value;
@@ -778,8 +801,11 @@ function reconnectTextInput(node) {
 	if (input.link != null) {
 		disconnectTextInput(node);
 	}
+	const savedText = preserveSavedTextValue(node);
 	try {
 		sourceNode.connect(sourceSlot, node, targetSlot);
+		node.properties = node.properties || {};
+		node.properties[SAVED_TEXT_PROPERTY] = savedText;
 		node.__gjjTextInputLiveText = null;
 		enterPreviewMode(node);
 		scheduleStabilize(node, 0);
@@ -810,7 +836,8 @@ function holdCurrentPreviewText(node) {
 
 function restoreSavedValue(node, serializedNode = null) {
 	const textWidget = getTextWidget(node);
-	if (!textWidget || String(textWidget.value ?? "") !== "") {
+	const widgetValue = String(textWidget?.value ?? "");
+	if (!textWidget || (widgetValue !== "" && !isTransientPreviewText(widgetValue))) {
 		syncSavedValue(node);
 		return;
 	}
@@ -823,8 +850,12 @@ function restoreSavedValue(node, serializedNode = null) {
 			return index >= 0 ? values[index] : undefined;
 		})()
 		: undefined;
-	const savedFromValues = values.find((item) => typeof item === "string" && item !== "");
-	const savedValue = node.properties?.[SAVED_TEXT_PROPERTY] ?? savedFromTextWidget ?? savedFromValues;
+	const savedFromValues = values.find((item) => typeof item === "string" && item !== "" && !isTransientPreviewText(item));
+	const savedValue = [
+		node.properties?.[SAVED_TEXT_PROPERTY],
+		savedFromTextWidget,
+		savedFromValues,
+	].find((item) => item !== undefined && item !== null && !isTransientPreviewText(item));
 	if (savedValue !== undefined && savedValue !== null) {
 		setTextValue(node, savedValue);
 	}
@@ -1580,7 +1611,9 @@ app.registerExtension({
 
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (serializedNode) {
-			const value = syncSavedValue(this);
+			const value = hasLinkedTextInput(this)
+				? preserveSavedTextValue(this)
+				: syncSavedValue(this);
 			const width = rememberWidth(this);
 			refreshNode(this);
 			const result = originalOnSerialize?.apply(this, [serializedNode]);

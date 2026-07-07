@@ -340,7 +340,7 @@ def _apply_fade_out(audio: dict[str, Any], fade_seconds: float) -> dict[str, Any
 
 
 class GJJ_AudioAceMusicGenerator:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/音频"
     FUNCTION = "generate"
     OUTPUT_NODE = True
     DESCRIPTION = "将 Audio ACE 1.5 两套工作流合并成单节点：优先使用整包 checkpoint，缺失时自动回退到 split 模型组，直接生成音乐音频。"

@@ -7,7 +7,7 @@ const TARGETS = new Set([TARGET]);
 const SIMPLE_SAMPLER_TARGET = "GJJ_MelBandRoFormerSampler";
 const PROP_MORE_OUTPUTS = "gjj_audio_separator_more_outputs";
 const PROP_TOOLBAR_READY = "gjj_audio_separator_toolbar_ready";
-const MIN_NODE_WIDTH_FOR_NATIVE_LABELS = 460;
+const MIN_NODE_WIDTH_FOR_NATIVE_LABELS = 200;
 const MEDIA_SENTINEL = "🔌 外接音频优先";
 const OLD_MEDIA_SENTINELS = ["🔌 使用连接输入", "[不加载]", ""];
 

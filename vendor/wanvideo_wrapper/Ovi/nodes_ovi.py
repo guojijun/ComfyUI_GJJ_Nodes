@@ -91,7 +91,7 @@ class OviMMAudioVAELoader:
     RETURN_TYPES = ("MMAUDIOVAE",)
     RETURN_NAMES = ("mmaudio_vae",)
     FUNCTION = "loadmodel"
-    CATEGORY = "WanVideoWrapper/Ovi"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
     DESCRIPTION = "Loads MMAudio VAE for Ovi audio generation"
 
     def loadmodel(self, vae, vocoder, precision):
@@ -124,7 +124,7 @@ class WanVideoDecodeOviAudio:
     RETURN_TYPES = ("AUDIO",)
     RETURN_NAMES = ("audio",)
     FUNCTION = "decode"
-    CATEGORY = "WanVideoWrapper/Ovi"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def decode(self, mmaudio_vae, samples):
         mm.soft_empty_cache()
@@ -154,7 +154,7 @@ class WanVideoEncodeOviAudio:
     RETURN_TYPES = ("LATENT",)
     RETURN_NAMES = ("samples",)
     FUNCTION = "decode"
-    CATEGORY = "WanVideoWrapper/Ovi"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def decode(self, mmaudio_vae, audio):
 
@@ -186,7 +186,7 @@ class WanVideoAddOviAudioToLatents:
     RETURN_TYPES = ("LATENT",)
     RETURN_NAMES = ("samples",)
     FUNCTION = "decode"
-    CATEGORY = "WanVideoWrapper/Ovi"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def decode(self, original_samples, audio_samples):
         samples = original_samples.copy()
@@ -205,7 +205,7 @@ class WanVideoEmptyMMAudioLatents:
     RETURN_TYPES = ("LATENT",)
     RETURN_NAMES = ("samples",)
     FUNCTION = "decode"
-    CATEGORY = "WanVideoWrapper/Ovi"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def decode(self, length):
         audio_latents = torch.zeros((length, 20), device=torch.device("cpu"), dtype=torch.float32)  # 1, l c -> l, c
@@ -228,7 +228,7 @@ class WanVideoOviCFG:
     RETURN_TYPES = ("WANVIDEOTEXTEMBEDS", )
     RETURN_NAMES = ("text_embeds",)
     FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper/Ovi"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
     DESCRIPTION = "Adds Ovi negative text embeddings and audio CFG scale to the text embeddings dictionary"
 
     def process(self, original_text_embeds, ovi_audio_cfg, ovi_negative_text_embeds=None):

@@ -138,7 +138,7 @@ class WanVideoDiffusionForcingSampler:
     RETURN_TYPES = ("LATENT", )
     RETURN_NAMES = ("samples",)
     FUNCTION = "process"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画采样"
 
     def process(self, model, text_embeds, image_embeds, shift, fps, steps, addnoise_condition, cfg, seed, scheduler, 
         force_offload=True, samples=None, prefix_samples=None, denoise_strength=1.0, slg_args=None, rope_function="default", cache_args=None, teacache_args=None, 

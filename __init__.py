@@ -3464,7 +3464,8 @@ def _register_gjj_costume_library_api():
 
 	SAFE_TEXT_RE = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff._-]+")
 	ASSET_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
-	CATEGORIES = {"all", "clothing", "prop"}
+	CATEGORIES = {"all", "clothing", "prop", "product"}
+	CATEGORY_LABELS = {"all": "服化道", "clothing": "服装", "prop": "道具", "product": "产品"}
 	CLOTHING_SAM3_PROMPT = (
 		"armor, cuirass, pauldron, vambrace, gauntlet, greave, helmet, robe, gown, tunic, "
 		"mantle, cloak, sash, collar, sleeve, hem, lining, uniform, outfit, attire, garment, "
@@ -3472,6 +3473,7 @@ def _register_gjj_costume_library_api():
 		"pants, skirt, dress, hoodie"
 	)
 	CLOTHING_SAM3_CONFIDENCE = 0.5
+	PRODUCT_MULTI_VIEW_LABELS = ["正面", "左侧", "背面", "右侧"]
 
 	def now_ms() -> int:
 		return int(time.time() * 1000)
@@ -3516,7 +3518,18 @@ def _register_gjj_costume_library_api():
 		text = str(value or "").strip().lower()
 		if text in {"prop", "道具", "props"}:
 			return "prop"
+		if text in {"product", "products", "产品", "商品"}:
+			return "product"
 		return "clothing"
+
+	def clean_category_filter(value: str) -> str:
+		text = str(value or "").strip().lower()
+		if text in {"", "all", "全部"}:
+			return "all"
+		return clean_category(text)
+
+	def category_label(value: str) -> str:
+		return CATEGORY_LABELS.get(value, "服装")
 
 	def unique_item_id(preferred: str, current_id: str = "") -> str:
 		base_id = clean_key(preferred or current_id, "costume")
@@ -3654,6 +3667,95 @@ def _register_gjj_costume_library_api():
 		image.convert("RGBA").save(buffer, format="PNG")
 		return buffer.getvalue()
 
+	def costume_foreground_bbox(image: Image.Image, padding: int = 8) -> tuple[int, int, int, int] | None:
+		alpha = image.convert("RGBA").getchannel("A")
+		bbox = alpha.point(lambda value: 255 if value > 10 else 0).getbbox()
+		if not bbox:
+			return None
+		left, top, right, bottom = bbox
+		return (
+			max(0, left - padding),
+			max(0, top - padding),
+			min(image.width, right + padding),
+			min(image.height, bottom + padding),
+		)
+
+	def prepare_costume_matting_rgb_batch(images: list[Image.Image]) -> list[Image.Image]:
+		if not images:
+			return []
+		sizes = [(image.width, image.height) for image in images]
+		if len(set(sizes)) == 1:
+			return [image.convert("RGB") for image in images]
+		width = max(8, max(item[0] for item in sizes))
+		height = max(8, max(item[1] for item in sizes))
+		result = []
+		resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+		for image in images:
+			src = image.convert("RGB")
+			src.thumbnail((width, height), resample)
+			canvas = Image.new("RGB", (width, height), (245, 245, 245))
+			canvas.paste(src, ((width - src.width) // 2, (height - src.height) // 2))
+			result.append(canvas)
+		return result
+
+	def costume_comprehensive_matting_cutouts(images: list[Image.Image]) -> list[Image.Image]:
+		try:
+			from .nodes.gjj_comprehensive_matting import (
+				GJJ_ComprehensiveMatting,
+				METHOD_RMBG14,
+				_pil_list_to_tensor,
+				_resolve_model_path,
+				_tensor_to_pil_list,
+			)
+		except Exception as exc:
+			raise RuntimeError(f"加载综合抠图运行时失败：{exc}") from exc
+		settings = _gjj_section_settings("character_library")
+		matting_method = str(settings.get("matting_method") or METHOD_RMBG14)
+		if matting_method not in {METHOD_RMBG14}:
+			matting_method = METHOD_RMBG14
+		try:
+			_resolve_model_path(matting_method, notify_missing=False)
+		except Exception as exc:
+			raise RuntimeError("未找到 RMBG1.4 抠图模型：models/RMBG/rmbg1.4.safetensors") from exc
+		rgb_images = prepare_costume_matting_rgb_batch(images)
+		context_unique_id = "gjj_costume_library_matting"
+		had_last_prompt_id = hasattr(server, "last_prompt_id")
+		if not had_last_prompt_id:
+			try:
+				setattr(server, "last_prompt_id", context_unique_id)
+			except Exception:
+				pass
+		try:
+			output = GJJ_ComprehensiveMatting().remove_background(
+				matting_method=matting_method,
+				background="透明",
+				device="自动",
+				process_res=1024,
+				threshold=0.0,
+				mask_blur=0.0,
+				invert_output=False,
+				inspyrenet_jit=False,
+				media=_pil_list_to_tensor(rgb_images),
+				prompt={},
+				extra_pnginfo={},
+				unique_id=context_unique_id,
+			)
+		finally:
+			if not had_last_prompt_id and hasattr(server, "last_prompt_id"):
+				try:
+					delattr(server, "last_prompt_id")
+				except Exception:
+					pass
+		result = output.get("result") if isinstance(output, dict) else None
+		if not result or len(result) < 1:
+			raise RuntimeError("综合抠图没有返回图像结果。")
+		rgba_images = [image.convert("RGBA") for image in _tensor_to_pil_list(result[0])]
+		cutouts = []
+		for rgba in rgba_images:
+			box = costume_foreground_bbox(rgba, padding=8)
+			cutouts.append(rgba.crop(box) if box else rgba)
+		return cutouts
+
 	def fit_costume_inference_canvas(image: Image.Image, max_side: int = 768) -> Image.Image:
 		canvas = image.convert("RGB")
 		canvas.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
@@ -3680,19 +3782,6 @@ def _register_gjj_costume_library_api():
 		tags = split_tags(data.get("tags") or data.get("标签") or data.get("keywords") or data.get("关键词") or "")
 		notes = str(data.get("notes") or data.get("备注") or data.get("description") or data.get("描述") or "").strip()[:300]
 		return name, tags, notes
-
-	def costume_foreground_bbox(image: Image.Image, padding: int = 8) -> tuple[int, int, int, int] | None:
-		alpha = image.convert("RGBA").getchannel("A")
-		bbox = alpha.point(lambda value: 255 if value > 10 else 0).getbbox()
-		if not bbox:
-			return None
-		left, top, right, bottom = bbox
-		return (
-			max(0, left - padding),
-			max(0, top - padding),
-			min(image.width, right + padding),
-			min(image.height, bottom + padding),
-		)
 
 	def sam3_clothing_cutout(image: Image.Image) -> tuple[Image.Image, dict]:
 		try:
@@ -3770,6 +3859,70 @@ def _register_gjj_costume_library_api():
 		except Exception:
 			pass
 		return "models/sam3/sam3.safetensors"
+
+	def fit_costume_reference_canvas(image: Image.Image, width: int = 1024, height: int = 1024) -> Image.Image:
+		rgba = image.convert("RGBA")
+		source = Image.new("RGB", rgba.size, (255, 255, 255))
+		source.paste(rgba.convert("RGB"), mask=rgba.getchannel("A"))
+		resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+		source.thumbnail((int(width), int(height)), resample)
+		canvas = Image.new("RGB", (int(width), int(height)), (255, 255, 255))
+		canvas.paste(source, ((canvas.width - source.width) // 2, (canvas.height - source.height) // 2))
+		return canvas
+
+	def open_costume_asset_image(item_id: str, asset: dict) -> Image.Image:
+		file_name = clean_key(asset.get("file") or "", "")
+		if not file_name:
+			raise ValueError("素材缺少文件。")
+		path = (item_dir(item_id) / file_name).resolve()
+		if item_dir(item_id).resolve() not in path.parents or not path.is_file():
+			raise ValueError("素材文件不存在。")
+		return Image.open(path).convert("RGBA")
+
+	def product_multiview_prompt_for_label(label: str) -> str:
+		text = str(label or "").strip()
+		lowered = text.lower()
+		view_rule = "标准正面视图，产品正对镜头"
+		if "左侧" in text or "left" in lowered:
+			view_rule = "左侧面视图，展示产品左侧轮廓和厚度"
+		elif "右侧" in text or "right" in lowered:
+			view_rule = "右侧面视图，展示产品右侧轮廓和厚度"
+		elif "背" in text or "后" in text or "back" in lowered:
+			view_rule = "背面/后视图，展示产品背部结构和背面标识"
+		elif "45" in text or "斜" in text or "quarter" in lowered:
+			view_rule = "45° 斜侧视图，展示产品正面和侧面结构"
+		elif "顶部" in text or "俯" in text or "top" in lowered:
+			view_rule = "顶部俯视视图，展示产品顶部结构"
+		elif "底部" in text or "仰" in text or "bottom" in lowered:
+			view_rule = "底部视图，展示产品底面结构"
+		return f"白色背景，单个产品资产，{view_rule}，完整产品构图，居中摆放，保留原产品类别、轮廓、材质、颜色、品牌标识和关键结构，不添加人物、文字标签或装饰。"
+
+	def save_costume_asset_image(item_id: str, label: str, image: Image.Image, source_file: str = "", extra: dict | None = None) -> dict:
+		manifest = read_manifest(item_id)
+		base = item_dir(item_id)
+		base.mkdir(parents=True, exist_ok=True)
+		asset_id = clean_key(label, "asset")
+		file_name = f"{asset_id}.png"
+		index = 2
+		while (base / file_name).exists():
+			file_name = f"{asset_id}_{index}.png"
+			index += 1
+		with (base / file_name).open("wb") as handle:
+			handle.write(costume_png_bytes(image))
+		t = now_ms()
+		asset_info = {
+			"id": clean_key(Path(file_name).stem, "asset"),
+			"label": str(label or asset_id).strip()[:96] or asset_id,
+			"file": file_name,
+			"created_at": t,
+			"updated_at": t,
+		}
+		if source_file:
+			asset_info["source_file"] = clean_key(source_file, "")
+		if extra:
+			asset_info.update(extra)
+		manifest.setdefault("assets", []).append(asset_info)
+		return write_manifest(manifest)
 
 	def enrich_manifest(data: dict) -> dict:
 		item_id = data.get("id") or ""
@@ -3915,7 +4068,7 @@ def _register_gjj_costume_library_api():
 				page=int(request.query.get("page") or 1),
 				page_size=int(request.query.get("page_size") or 15),
 				search=request.query.get("search") or "",
-				category=request.query.get("category") or "all",
+				category=clean_category_filter(request.query.get("category") or "all"),
 				tag=request.query.get("tag") or "",
 				sort_mode=request.query.get("sort") or "updated_desc",
 			))
@@ -3924,6 +4077,7 @@ def _register_gjj_costume_library_api():
 
 	@server.routes.get("/gjj/costume_library/model_tree")
 	async def gjj_costume_library_model_tree(_request):
+		settings = _gjj_section_settings("character_library")
 		return web.json_response({
 			"ok": True,
 			"title": "服化道存储目录树",
@@ -3935,9 +4089,20 @@ def _register_gjj_costume_library_api():
 					],
 				},
 				{
-					"name": "✂️ 服装 SAM3 抠取",
+					"name": "✂️ 抠背景",
 					"items": [
+						{"label": "产品抠图", "path": "models/RMBG/rmbg1.4.safetensors"},
 						{"label": "SAM3", "path": sam3_model_hint_path()},
+					],
+				},
+				{
+					"name": "🚀 产品多视图",
+					"items": [
+						{"label": "UNET", "path": f"models/diffusion_models/{settings.get('multiview_unet') or 'qwen_image_edit_2511_fp8mixed.safetensors'}"},
+						{"label": "CLIP / VL", "path": "models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors"},
+						{"label": "VAE", "path": "models/vae/qwen_image_vae.safetensors"},
+						{"label": "Lightning LoRA", "path": f"models/loras/{settings.get('multiview_lora_1') or 'QWEN/lighting/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors'}"},
+						{"label": "多角度 LoRA", "path": f"models/loras/{settings.get('multiview_lora_2') or 'qwen-image-edit-2511-multiple-angles-lora.safetensors'}"},
 					],
 				},
 			],
@@ -4015,8 +4180,10 @@ def _register_gjj_costume_library_api():
 			if ext not in ASSET_EXTS:
 				raise ValueError("仅支持 PNG/JPG/WEBP/GIF/BMP 素材。")
 			stem = clean_key(Path(original).stem, "asset")
-			is_clothing = clean_category(manifest.get("category")) == "clothing"
-			file_ext = ".png" if is_clothing else ext
+			item_category = clean_category(manifest.get("category"))
+			is_clothing = item_category == "clothing"
+			is_product = item_category == "product"
+			file_ext = ".png" if is_clothing or is_product else ext
 			file_name = f"{stem}{file_ext}"
 			index = 2
 			while (base / file_name).exists():
@@ -4032,6 +4199,15 @@ def _register_gjj_costume_library_api():
 				import io
 				source_image = Image.open(io.BytesIO(bytes(raw))).convert("RGBA")
 				output_image, sam3_meta = sam3_clothing_cutout(source_image)
+				output_bytes = costume_png_bytes(output_image)
+			elif is_product:
+				import io
+				source_image = Image.open(io.BytesIO(bytes(raw))).convert("RGBA")
+				matted = costume_comprehensive_matting_cutouts([source_image])
+				output_image = matted[0] if matted else source_image
+				sam3_meta = {
+					"sam3_status": "rmbg_cutout",
+				}
 				output_bytes = costume_png_bytes(output_image)
 			else:
 				sam3_meta = {}
@@ -4054,8 +4230,131 @@ def _register_gjj_costume_library_api():
 					"sam3_status": sam3_meta.get("sam3_status", "cutout"),
 					"sam3_scores": sam3_meta.get("sam3_scores", []),
 				})
+			elif is_product:
+				asset_info.update({
+					"source_file": original,
+					"sam3_status": sam3_meta.get("sam3_status", "rmbg_cutout"),
+				})
 			manifest.setdefault("assets", []).append(asset_info)
 			return web.json_response({"ok": True, "item": enrich_manifest(write_manifest(manifest))})
+		except Exception as exc:
+			return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+	@server.routes.post("/gjj/costume_library/generate_multiview")
+	async def gjj_costume_library_generate_multiview(request):
+		try:
+			data = await request.json()
+			item_id = clean_key(data.get("id") or data.get("item_id") or "", "")
+			asset_id = clean_key(data.get("asset") or data.get("asset_id") or "", "")
+			requested_labels = [str(item or "").strip()[:80] for item in (data.get("labels") if isinstance(data.get("labels"), list) else PRODUCT_MULTI_VIEW_LABELS)]
+			requested_labels = [item for item in requested_labels if item] or PRODUCT_MULTI_VIEW_LABELS
+			base_prompt = str(data.get("base_prompt") or "").strip()
+			seed = int(data.get("seed") or 0)
+			manifest = read_manifest(item_id)
+			if clean_category(manifest.get("category")) != "product":
+				raise ValueError("只有产品条目可以生成产品多视图。")
+			assets = manifest.get("assets") or []
+			reference_asset = None
+			for asset in assets:
+				if asset_id and asset.get("id") == asset_id:
+					reference_asset = asset
+					break
+			if reference_asset is None:
+				reference_asset = next((asset for asset in assets if Path(str(asset.get("file") or "")).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}), None)
+			if reference_asset is None:
+				raise RuntimeError("缺少产品参考图：请先导入一张产品图片。")
+			image = open_costume_asset_image(item_id, reference_asset)
+
+			try:
+				from .nodes.gjj_comprehensive_matting import _pil_list_to_tensor, _tensor_to_pil_list
+				from .nodes.gjj_character_multiview_studio import (
+					DEFAULT_MULTI_ANGLES_LORA,
+					DEFAULT_NEGATIVE_PROMPT,
+					DEFAULT_QWEN2511_LIGHTNING_LORA,
+					DEFAULT_QWEN2511_UNET,
+					GJJ_CharacterMultiViewStudio,
+					_pick_available_lora_name,
+					_safe_filename_list,
+				)
+			except Exception as exc:
+				raise RuntimeError(f"加载 GJJ_CharacterMultiViewStudio 运行时失败：{exc}") from exc
+
+			lora_models = _safe_filename_list("loras") or []
+			settings = _gjj_section_settings("character_library")
+			def lora_exists(name: str) -> bool:
+				target = os.path.basename(str(name or "").replace("\\", "/")).lower()
+				return bool(target) and any(os.path.basename(str(item or "").replace("\\", "/")).lower() == target for item in lora_models)
+			lora_1_name = _pick_available_lora_name(
+				lora_models,
+				str(settings.get("multiview_lora_1") or DEFAULT_QWEN2511_LIGHTNING_LORA),
+				DEFAULT_QWEN2511_LIGHTNING_LORA,
+			)
+			lora_2_name = _pick_available_lora_name(
+				lora_models,
+				str(settings.get("multiview_lora_2") or DEFAULT_MULTI_ANGLES_LORA),
+				DEFAULT_MULTI_ANGLES_LORA,
+			)
+			if not lora_exists(lora_1_name) or not lora_exists(lora_2_name):
+				raise RuntimeError("生成多视图必须使用 Qwen Lightning LoRA 和 multiple-angles LoRA，但未在 models/loras 中找到。")
+
+			identity_prompt = (
+				"图一只作为产品类别、轮廓、材质、颜色、品牌标识、结构细节和比例参考；"
+				"不要继承图一的裁切范围、白条、阴影、背景边缘或镜头距离。"
+				"每个输出视图必须严格服从对应视角文本，生成单个完整产品资产，白色背景。"
+			)
+			if base_prompt:
+				identity_prompt = f"{identity_prompt}\n{base_prompt}"
+			action_prompts = "\n".join([product_multiview_prompt_for_label(label) for label in requested_labels])
+			main_image = _pil_list_to_tensor([fit_costume_reference_canvas(image, 1024, 1024)])
+			context_unique_id = "gjj_costume_library_product_multiview"
+			had_last_prompt_id = hasattr(server, "last_prompt_id")
+			if not had_last_prompt_id:
+				try:
+					setattr(server, "last_prompt_id", context_unique_id)
+				except Exception:
+					pass
+			try:
+				multiview_result = GJJ_CharacterMultiViewStudio().generate(
+					main_image=main_image,
+					base_prompt=identity_prompt,
+					negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+					action_prompts=action_prompts,
+					unet_name=str(settings.get("multiview_unet") or DEFAULT_QWEN2511_UNET),
+					lora_1_name=lora_1_name,
+					lora_1_strength=1.0,
+					lora_2_name=lora_2_name,
+					lora_2_strength=1.0,
+					seed=seed,
+					save_each_image=False,
+					prompt={},
+					extra_pnginfo={},
+					unique_id=context_unique_id,
+				)
+				if isinstance(multiview_result, dict):
+					_collage, batch_images = multiview_result.get("result", (None, None))
+				else:
+					_collage, batch_images = multiview_result
+			finally:
+				if not had_last_prompt_id and hasattr(server, "last_prompt_id"):
+					try:
+						delattr(server, "last_prompt_id")
+					except Exception:
+						pass
+
+			generated = _tensor_to_pil_list(batch_images)
+			if not generated:
+				raise RuntimeError("多视图节点没有返回单图批量图片。")
+			views = costume_comprehensive_matting_cutouts(generated)
+			for label, view in zip(requested_labels, views):
+				save_costume_asset_image(item_id, label, view, str(reference_asset.get("file") or ""), {
+					"sam3_status": "product_multiview_rmbg",
+				})
+			return web.json_response({
+				"ok": True,
+				"count": len(views),
+				"labels": requested_labels[:len(views)],
+				"item": enrich_manifest(read_manifest(item_id)),
+			})
 		except Exception as exc:
 			return web.json_response({"ok": False, "error": str(exc)}, status=400)
 
@@ -4070,7 +4369,7 @@ def _register_gjj_costume_library_api():
 			requested_ids = data.get("ids") if isinstance(data.get("ids"), list) else []
 			requested_ids = [clean_key(item, "") for item in requested_ids]
 			requested_ids = [item for item in requested_ids if item]
-			requested_category = clean_category(data.get("category") or "all")
+			requested_category = clean_category_filter(data.get("category") or "all")
 			clip_name = str(data.get("clip_name") or "qwen3.5_4b_fp8_mixed.safetensors")
 			progress_id = clean_key(data.get("unique_id") or "", "")
 
@@ -4113,7 +4412,7 @@ def _register_gjj_costume_library_api():
 				item_categories = {clean_category(read_manifest(item_id).get("category")) for item_id in item_ids if item_id}
 				if len(item_categories) == 1:
 					scope_category = next(iter(item_categories))
-			scope_label = "道具" if scope_category == "prop" else ("服装" if scope_category == "clothing" else "服化道")
+			scope_label = category_label(scope_category)
 			send_costume_progress(0, total_count, f"正在准备{scope_label}自动打标...")
 			for item_index, item_id in enumerate(item_ids, start=1):
 				if len(processed) >= limit:
@@ -4162,6 +4461,19 @@ def _register_gjj_costume_library_api():
 						"标签 4 到 10 个，优先包含：道具类型、主色、材质、用途、风格、关键部件。"
 					)
 					generic_names = {"道具", "物品", "新道具", "素材", "器物"}
+				elif item_category == "product":
+					system_prompt = (
+						"你是产品资产库的中文自动打标助手。"
+						"根据输入的产品图片，识别产品类型、外观造型、主色、材质、功能、使用场景、品牌感和显著部件。"
+						"不要把产品图识别成服装或人物道具；不要翻译成英文，不要输出解释。"
+						"必须只输出 JSON 对象，格式为 {\"name\":\"唯一、简短、可检索的中文产品名\",\"tags\":[\"清洁电器\",\"银白色\",\"塑料\"],\"notes\":\"一句中文备注\"}。"
+					)
+					user_prompt = (
+						f"当前文件名/名称：{manifest.get('name') or item_id}\n"
+						"请给出一个不笼统的产品名，避免只写“产品”“商品”“新产品”。"
+						"标签 4 到 10 个，优先包含：产品类型、主色、材质、功能、风格、关键部件、使用场景。"
+					)
+					generic_names = {"产品", "商品", "新产品", "素材", "物品"}
 				else:
 					system_prompt = (
 						"你是服装资产库的中文自动打标助手。"

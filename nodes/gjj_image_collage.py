@@ -161,7 +161,7 @@ def _draw_label(canvas: Image.Image, box: tuple[int, int, int, int], text: str, 
 
 
 class GJJ_ImageCollage:
-    CATEGORY = "GJJ/Image"
+    CATEGORY = "GJJ/视频/图片拼版"
     FUNCTION = "collage"
     DESCRIPTION = "把多路图片或图片批次拼成横排、竖排或自动网格，适合对比图、参考图和结果展示。"
     SEARCH_ALIASES = ["collage", "layout", "grid", "拼版", "拼图", "对比图", "图片布局"]

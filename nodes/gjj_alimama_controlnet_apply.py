@@ -133,7 +133,7 @@ def _apply_optional_alimama_mask(control_net: Any, image: torch.Tensor, mask: An
 
 
 class GJJ_AliMamaControlNetApply:
-    CATEGORY = "GJJ/ControlNet"
+    CATEGORY = "GJJ/控制网"
     FUNCTION = "apply"
     DESCRIPTION = DESCRIPTION
     SEARCH_ALIASES = [

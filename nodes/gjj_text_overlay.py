@@ -26,7 +26,7 @@ from .common_utils.types import GJJ_BATCH_IMAGE_TYPE
 
 FONT_EXTENSIONS = {".ttf", ".otf", ".ttc", ".otc"}
 NODE_NAME = "GJJ_TextOverlay"
-NODE_DISPLAY_NAME = "GJJ · 👣 批量文本图片前景叠加"
+NODE_DISPLAY_NAME = "GJJ · 👣 批量文本图片前景背景叠加融合"
 MIXED_BATCH_IMAGE_TYPE = f"{GJJ_BATCH_IMAGE_TYPE},IMAGE"
 MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 RMBG14_MODEL_TREE = [

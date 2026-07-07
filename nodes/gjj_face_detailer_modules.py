@@ -44,7 +44,7 @@ def _default_value(values: list[str], fallback: str = "") -> str:
 
 
 class GJJ_BBoxDetectorLoader:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/视频/人脸检测"
     FUNCTION = "load"
     DESCRIPTION = "从 models/ultralytics/bbox 目录加载人脸或目标检测模型，供 SEGS 检测流程复用。"
     RETURN_TYPES = ("BBOX_DETECTOR",)
@@ -74,7 +74,7 @@ class GJJ_BBoxDetectorLoader:
 
 
 class GJJ_SAMModelLoader:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/视频/人脸细化"
     FUNCTION = "load"
     DESCRIPTION = "从 models/sams 目录加载 SAM 模型，供遮罩细分和人脸细化流程复用。"
     RETURN_TYPES = ("SAM_MODEL",)
@@ -112,7 +112,7 @@ class GJJ_SAMModelLoader:
 
 
 class GJJ_DetectSEGS:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/视频/人脸细化"
     FUNCTION = "detect"
     DESCRIPTION = "使用 BBox 检测器从输入图像中识别目标区域，并转换成后续细化节点可用的 SEGS。"
     RETURN_TYPES = ("SEGS",)
@@ -141,7 +141,7 @@ class GJJ_DetectSEGS:
 
 
 class GJJ_MakeSAMMask:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/视频/人脸细化"
     FUNCTION = "generate"
     DESCRIPTION = "基于 SAM 模型和已有 SEGS 生成更精细的局部遮罩，并输出与遮罩相交后的 SEGS。"
     RETURN_TYPES = ("MASK", "SEGS")
@@ -184,7 +184,7 @@ class GJJ_MakeSAMMask:
 
 
 class GJJ_SEGSBitwiseAndMask:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/视频/人脸细化"
     FUNCTION = "apply"
     DESCRIPTION = "将 SEGS 与遮罩做按位相交，只保留被遮罩覆盖的检测区域。"
     RETURN_TYPES = ("SEGS",)
@@ -206,7 +206,7 @@ class GJJ_SEGSBitwiseAndMask:
 
 
 class GJJ_SEGSToMask:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/视频/人脸细化"
     FUNCTION = "combine"
     DESCRIPTION = "把多个 SEGS 区域合并成一张统一遮罩，方便调试或继续送入其它局部处理节点。"
     RETURN_TYPES = ("MASK",)
@@ -223,7 +223,7 @@ class GJJ_SEGSToMask:
 
 
 class GJJ_DetailerForEach:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/视频/人脸细化"
     FUNCTION = "detail"
     DESCRIPTION = "对输入的每个 SEGS 区域逐项进行局部重绘和细化，并返回整图、裁切图和新的 SEGS。"
     RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "SEGS", "IMAGE")

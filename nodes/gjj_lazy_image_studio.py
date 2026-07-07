@@ -780,7 +780,17 @@ def _prompt_batch_items(value: Any) -> list[str]:
             else:
                 items.append(str(item or ""))
         return items or [""]
-    return [str(value or "")]
+    text = str(value or "")
+    if "---" not in text:
+        return [text]
+    parts = [
+        part.strip()
+        for part in re.split(r"(?:^|\n)\s*---+\s*(?:\n|$)", text)
+        if part.strip()
+    ]
+    if len(parts) <= 1:
+        parts = [part.strip() for part in text.split("---") if part.strip()]
+    return parts or [text]
 
 
 def _as_bool(value: Any) -> bool:

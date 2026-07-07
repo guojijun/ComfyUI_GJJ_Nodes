@@ -24,7 +24,7 @@ class WanVideoAddOneToAllReferenceEmbeds:
     RETURN_TYPES = ("WANVIDIMAGE_EMBEDS",)
     RETURN_NAMES = ("image_embeds",)
     FUNCTION = "add"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def add(self, embeds, vae, ref_image, strength, start_percent, end_percent, ref_mask=None):
         updated = dict(embeds)
@@ -75,7 +75,7 @@ class WanVideoAddOneToAllPoseEmbeds:
     RETURN_TYPES = ("WANVIDIMAGE_EMBEDS",)
     RETURN_NAMES = ("image_embeds",)
     FUNCTION = "add"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def add(self, embeds, pose_images, strength, pose_prefix_image=None, start_percent=0.0, end_percent=1.0, pose_cfg_scale=1.5):
         updated = dict(embeds)
@@ -113,7 +113,7 @@ class WanVideoAddOneToAllExtendEmbeds:
     RETURN_TYPES = ("WANVIDIMAGE_EMBEDS", "IMAGE",)
     RETURN_NAMES = ("image_embeds", "pose_slice",)
     FUNCTION = "add"
-    CATEGORY = "WanVideoWrapper"
+    CATEGORY = "GJJ/视频/图片动画添加提示词"
 
     def add(self, embeds, prev_latents, if_not_enough_frames, window_size=81, overlap=5, frames_processed=0, pose_images=None):
         updated = dict(embeds)

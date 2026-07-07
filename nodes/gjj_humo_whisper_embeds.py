@@ -38,7 +38,7 @@ except ImportError:
 
 NODE_NAME = "GJJ_HuMoWhisperEmbeds"
 NODE_DISPLAY_NAME = "🎭 HuMo音频条件"
-CATEGORY = "GJJ/视频生成"
+CATEGORY = "GJJ/视频/文本生成"
 MODEL_DOWNLOAD_URL = DEFAULT_MODEL_URL
 DEFAULT_WHISPER_MODEL = "whisper_large_v3_encoder_fp16.safetensors"
 NO_WHISPER_MODEL = "[未找到 Whisper Encoder 模型]"
@@ -442,7 +442,7 @@ def _encode_reference_images(vae, reference_images, width, height, tiled_vae):
 
 
 class GJJ_HuMoWhisperEmbeds:
-    CATEGORY = CATEGORY
+    CATEGORY = "GJJ/视频/文本生成"
     FUNCTION = "process"
     RETURN_TYPES = ("WANVIDIMAGE_EMBEDS", "INT", "STRING")
     RETURN_NAMES = ("HuMo条件", "实际帧数", "状态")

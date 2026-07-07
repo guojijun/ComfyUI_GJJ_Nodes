@@ -275,7 +275,7 @@ def _calculate_condition(formula: Any, values: dict[str, Any]) -> bool:
 
 
 class GJJ_ConditionalBypass:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/视频/逻辑"
     FUNCTION = "check"
     DESCRIPTION = "用可输入公式判断是否放行下游；条件为假时输出 False，供下游条件口跳过执行。"
     SEARCH_ALIASES = ["conditional bypass", "condition bypass", "条件旁路", "条件放行", "旁路", "公式条件"]

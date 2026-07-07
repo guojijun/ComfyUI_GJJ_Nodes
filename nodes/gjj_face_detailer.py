@@ -60,7 +60,7 @@ def _default_value(values: list[str], fallback: str = "") -> str:
 
 
 class GJJ_FaceDetailer:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/视频/人脸细化"
     FUNCTION = "detail_faces"
     SEARCH_ALIASES = [
         "face detailer",

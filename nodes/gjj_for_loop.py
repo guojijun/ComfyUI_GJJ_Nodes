@@ -109,7 +109,7 @@ def _total_status_text(total: Any, fallback: int = 1) -> str:
 
 
 class GJJ_ForLoopWhileStart:
-    CATEGORY = "guojijun/内部引用/循环"
+    CATEGORY = "GJJ/视频/循环"
     DEPRECATED = True
     SEARCH_ALIASES = []
 
@@ -142,7 +142,7 @@ class GJJ_ForLoopWhileStart:
 
 
 class GJJ_ForLoopWhileEnd:
-    CATEGORY = "guojijun/内部引用/循环"
+    CATEGORY = "GJJ/视频/循环"
     DEPRECATED = True
     SEARCH_ALIASES = []
 
@@ -265,7 +265,7 @@ class GJJ_ForLoopWhileEnd:
 
 
 class GJJ_ForLoopIntAdd:
-    CATEGORY = "guojijun/内部引用/循环"
+    CATEGORY = "GJJ/视频/循环"
     DEPRECATED = True
     SEARCH_ALIASES = []
 
@@ -309,7 +309,7 @@ class GJJ_ForLoopIntAdd:
 
 
 class GJJ_ForLoopIntLess:
-    CATEGORY = "guojijun/内部引用/循环"
+    CATEGORY = "GJJ/视频/循环"
     DEPRECATED = True
     SEARCH_ALIASES = []
 

@@ -15,7 +15,8 @@ import { api } from "/scripts/api.js";
 	const ENDPOINT = "/gjj/costume_library";
 	const SHARED_PANEL_LAYOUT_KEY = "gjj.libraryPanel.layout";
 	const AUTO_ANNOTATE_STORAGE_KEY = "gjj.costumeLibrary.autoAnnotate";
-	const CATEGORY_LABELS = { clothing: "服装", prop: "道具" };
+	const CATEGORY_LABELS = { clothing: "服装", prop: "道具", product: "产品" };
+	const CATEGORY_OPTIONS = [["clothing", "服装"], ["prop", "道具"], ["product", "产品"]];
 
 	let state = {
 		items: [],
@@ -30,6 +31,7 @@ import { api } from "/scripts/api.js";
 		pageCount: 1,
 		status: "",
 		annotating: false,
+		generatingMultiview: false,
 		annotateNodeId: "",
 		annotateButtons: new Set(),
 		autoAnnotate: localStorage.getItem(AUTO_ANNOTATE_STORAGE_KEY) !== "false",
@@ -217,6 +219,16 @@ import { api } from "/scripts/api.js";
 		return String(file?.name || fallback).replace(/\.[^.]+$/, "").trim() || fallback;
 	}
 
+	function categoryLabel(category) {
+		return CATEGORY_LABELS[category] || "服装";
+	}
+
+	function categoryIcon(category) {
+		if (category === "prop") return "🎒";
+		if (category === "product") return "📦";
+		return "👗";
+	}
+
 	function formatBytes(value) {
 		const size = Number(value || 0);
 		if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
@@ -348,8 +360,10 @@ import { api } from "/scripts/api.js";
 
 	async function uploadFilesAsAssets(files, item = undefined, forcedCategory = "") {
 		let target = item === undefined ? selectedItem() : item;
-		const category = forcedCategory || target?.category || (state.category === "prop" ? "prop" : "clothing");
-		setStatus(category === "clothing" ? "正在导入并抠取服装..." : "正在导入素材...");
+		const activeCategory = ["prop", "product"].includes(state.category) ? state.category : "clothing";
+		const category = forcedCategory || target?.category || activeCategory;
+		const label = categoryLabel(category);
+		setStatus(category === "clothing" ? "正在导入并抠取服装..." : (category === "product" ? "正在导入并抠取产品背景..." : `正在导入${label}素材...`));
 		const importedIds = [];
 		for (const file of files) {
 			const form = new FormData();
@@ -371,7 +385,7 @@ import { api } from "/scripts/api.js";
 			return;
 		}
 		await refreshItems(true);
-		setStatus(category === "clothing" && !state.autoAnnotate ? `已导入 ${files.length} 个服装；自动打标已关闭` : `已导入 ${files.length} 个素材`);
+		setStatus(category === "clothing" && !state.autoAnnotate ? `已导入 ${files.length} 个服装；自动打标已关闭` : `已导入 ${files.length} 个${label}素材`);
 	}
 
 	async function uploadAssets(item = null) {
@@ -404,8 +418,28 @@ import { api } from "/scripts/api.js";
 		}
 	}
 
+	async function generateProductMultiview(item) {
+		if (!item || item.category !== "product" || state.generatingMultiview) return;
+		state.generatingMultiview = true;
+		setStatus("正在生成产品多视图...");
+		renderPanel();
+		try {
+			const data = await apiJson(`${ENDPOINT}/generate_multiview`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ id: item.id, labels: ["正面", "左侧", "背面", "右侧"] }),
+			});
+			state.selectedId = data.item?.id || item.id;
+			await refreshItems(true);
+			setStatus(`已添加 ${Number(data.count || 0)} 张产品多视图`);
+		} finally {
+			state.generatingMultiview = false;
+			renderPanel();
+		}
+	}
+
 	function itemReferenceText(item) {
-		const prefix = item?.category === "prop" ? "道具" : "服装";
+		const prefix = categoryLabel(item?.category);
 		const name = String(item?.name || item?.id || "").trim();
 		return name ? `[${prefix}:${name}]` : "";
 	}
@@ -492,7 +526,7 @@ import { api } from "/scripts/api.js";
 			} else {
 				const empty = document.createElement("div");
 				empty.className = "gjj-ct-empty-cover";
-				empty.textContent = item.category === "prop" ? "🎒" : "👗";
+				empty.textContent = categoryIcon(item.category);
 				cover.appendChild(empty);
 			}
 			const name = document.createElement("div");
@@ -500,7 +534,7 @@ import { api } from "/scripts/api.js";
 			name.textContent = item.name || item.id;
 			const meta = document.createElement("div");
 			meta.className = "gjj-ct-meta";
-			meta.textContent = `${CATEGORY_LABELS[item.category] || "服装"} · ${(item.assets || []).length} 图`;
+			meta.textContent = `${categoryLabel(item.category)} · ${(item.assets || []).length} 图`;
 			card.append(cover, name, meta);
 			card.addEventListener("click", () => {
 				state.selectedId = item.id;
@@ -511,7 +545,7 @@ import { api } from "/scripts/api.js";
 		if (!state.items.length) {
 			const empty = document.createElement("div");
 			empty.className = "gjj-ct-empty";
-			empty.textContent = "还没有服装或道具";
+			empty.textContent = "还没有服装、道具或产品";
 			list.appendChild(empty);
 		}
 		for (const item of panel.querySelectorAll("[data-ct-category-filter]")) item.classList.toggle("active", item.dataset.ctCategoryFilter === state.category);
@@ -570,7 +604,7 @@ import { api } from "/scripts/api.js";
 		if (!item) {
 			const empty = document.createElement("div");
 			empty.className = "gjj-ct-empty";
-			empty.textContent = "点击添加或导入素材开始管理服装、道具";
+			empty.textContent = "点击添加或导入素材开始管理服装、道具、产品";
 			body.appendChild(empty);
 			return;
 		}
@@ -583,7 +617,7 @@ import { api } from "/scripts/api.js";
 		const category = document.createElement("select");
 		category.className = "gjj-ct-select";
 		category.dataset.ctCategory = "1";
-		for (const [value, label] of [["clothing", "服装"], ["prop", "道具"]]) {
+		for (const [value, label] of CATEGORY_OPTIONS) {
 			const option = document.createElement("option");
 			option.value = value;
 			option.textContent = label;
@@ -604,17 +638,25 @@ import { api } from "/scripts/api.js";
 		const notes = document.createElement("textarea");
 		notes.className = "gjj-ct-textarea";
 		notes.dataset.ctNotes = "1";
-		notes.placeholder = "服装/道具备注";
+		notes.placeholder = "服装/道具/产品备注";
 		notes.value = item.notes || "";
 		form.append(name, category, save, open, tags, notes);
 		body.appendChild(form);
 		const actions = document.createElement("div");
 		actions.className = "gjj-ct-row";
-		actions.append(
+		const actionButtons = [
 			button("导入素材", "给当前条目导入图片素材", "gjj-ct-btn", () => uploadAssets(item).catch((error) => setStatus(error.message))),
-			button("引用", "插入或复制当前服装/道具引用", "gjj-ct-btn", (event) => copyOrInsertItemReference(item, event?.currentTarget).catch((error) => setStatus(error.message))),
-			annotateButton([item.id], item.category === "prop" ? "当前道具" : "当前服装"),
-			button("删除", "删除当前服化道条目", "gjj-ct-btn danger", () => deleteItem(item).catch((error) => setStatus(error.message)))
+			button("引用", "插入或复制当前服装/道具/产品引用", "gjj-ct-btn", (event) => copyOrInsertItemReference(item, event?.currentTarget).catch((error) => setStatus(error.message))),
+			annotateButton([item.id], `当前${categoryLabel(item.category)}`),
+		];
+		if (item.category === "product") {
+			const multiview = button(state.generatingMultiview ? "生成中..." : "多视图", "按当前产品参考图生成正面、左侧、背面、右侧", "gjj-ct-btn", () => generateProductMultiview(item).catch((error) => setStatus(error.message)));
+			multiview.disabled = !!state.generatingMultiview;
+			actionButtons.push(multiview);
+		}
+		actionButtons.push(button("删除", "删除当前服化道条目", "gjj-ct-btn danger", () => deleteItem(item).catch((error) => setStatus(error.message))));
+		actions.append(
+			...actionButtons
 		);
 		body.appendChild(actions);
 		const tagRow = document.createElement("div");
@@ -770,13 +812,14 @@ import { api } from "/scripts/api.js";
 			spacer,
 			button("👗", "新增服装", "gjj-ct-btn gjj-ct-icon", () => createItem("clothing").catch((error) => setStatus(error.message))),
 			button("🎒", "新增道具", "gjj-ct-btn gjj-ct-icon", () => createItem("prop").catch((error) => setStatus(error.message))),
+			button("📦", "新增产品", "gjj-ct-btn gjj-ct-icon", () => createItem("product").catch((error) => setStatus(error.message))),
 			button("⬆", "导入素材", "gjj-ct-btn gjj-ct-icon", () => uploadAssets(selectedItem()).catch((error) => setStatus(error.message))),
 			annotateButton([], "全库服化道"),
 			button("?", "查看服化道存储目录", "gjj-ct-btn gjj-ct-icon", () => showModelTree().catch((error) => setStatus(error.message)))
 		);
 		const search = document.createElement("input");
 		search.className = "gjj-ct-search";
-		search.placeholder = "搜索服装、道具、标签";
+		search.placeholder = "搜索服装、道具、产品、标签";
 		search.value = state.search;
 		search.addEventListener("input", () => {
 			state.search = search.value || "";
@@ -785,7 +828,7 @@ import { api } from "/scripts/api.js";
 		});
 		const tools = document.createElement("div");
 		tools.className = "gjj-ct-tools";
-		for (const [value, label] of [["all", "全部"], ["clothing", "服装"], ["prop", "道具"]]) {
+		for (const [value, label] of [["all", "全部"], ...CATEGORY_OPTIONS]) {
 			const item = button(label, `筛选${label}`, "gjj-ct-filter", () => {
 				state.category = value;
 				state.page = 1;
@@ -883,7 +926,7 @@ import { api } from "/scripts/api.js";
 		btn.id = BUTTON_ID;
 		btn.type = "button";
 		btn.textContent = "💼";
-		btn.title = "服化道：管理服装、道具并按标签筛选";
+		btn.title = "服化道：管理服装、道具、产品并按标签筛选";
 		btn.setAttribute("aria-label", btn.title);
 		btn.addEventListener("pointerdown", stop, true);
 		btn.addEventListener("mousedown", stop, true);

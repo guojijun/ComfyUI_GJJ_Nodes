@@ -375,8 +375,8 @@ function hideNativeWidgets(node) {
 	for (const name of PARAM_WIDGETS) hideWidget(findWidget(node, name));
 }
 
-function ensureOutputSocket(node) {
-	if (!node) return;
+function ensureOutputSocket(node, options = {}) {
+	if (!node) return false;
 	if (!Array.isArray(node.outputs) || !node.outputs.length) {
 		node.addOutput?.("文件", "*");
 	}
@@ -395,18 +395,24 @@ function ensureOutputSocket(node) {
 			fullPathOutput.label = "文件完整路径";
 			fullPathOutput.type = "STRING";
 		}
-		return;
+		return true;
 	}
 	const fullPathOutput = node.outputs[1];
 	const hasLinks = Array.isArray(fullPathOutput?.links) && fullPathOutput.links.length > 0;
 	if (fullPathOutput && hasLinks) {
 		node.properties.gjj_file_browser_output_full_path = true;
+		if (options.notify) {
+			node.properties.gjj_file_browser_status = "文件完整路径输出口已有连接；请先断开连接后再隐藏。";
+		}
 		fullPathOutput.name = "文件完整路径";
 		fullPathOutput.label = "文件完整路径";
 		fullPathOutput.type = "STRING";
-		return;
+		syncStateWidget(node);
+		renderPanel(node);
+		return false;
 	}
 	if (fullPathOutput && !hasLinks) node.removeOutput?.(1);
+	return true;
 }
 
 function updateCurrentBounds(node, total) {
@@ -564,9 +570,10 @@ function setupPanel(node) {
 		</div>
 	`;
 	ensureStyles(wrap);
-	for (const eventName of ["mousedown", "pointerdown", "click", "dblclick", "wheel"]) {
+	for (const eventName of ["mousedown", "pointerdown", "click", "dblclick"]) {
 		wrap.addEventListener(eventName, (event) => event.stopPropagation());
 	}
+	wrap.addEventListener("wheel", (event) => handlePanelWheel(node, event), { passive: false });
 	node.__gjjFileBrowserPanel = wrap;
 	node.__gjjFileBrowserPanelWidget = node.addDOMWidget(PANEL_WIDGET, "HTML", wrap, { serialize: false, hideOnZoom: false });
 	node.__gjjFileBrowserPanelWidget.computeSize = (width) => [Math.max(MIN_NODE_WIDTH, Number(width || node.size?.[0] || MIN_NODE_WIDTH)), panelHeight(node)];
@@ -579,6 +586,43 @@ function setupPanel(node) {
 	renderPanel(node);
 	scheduleNodeSize(node);
 	scheduleAutoRefresh(node, true);
+}
+
+function wheelDeltaPixels(event) {
+	const unit = event.deltaMode === 1 ? 32 : event.deltaMode === 2 ? 240 : 1;
+	return {
+		x: Number(event.deltaX || 0) * unit,
+		y: Number(event.deltaY || 0) * unit,
+	};
+}
+
+function findScrollableElement(start, fallback) {
+	let element = start?.nodeType === 1 ? start : start?.parentElement;
+	while (element && element !== fallback?.parentElement) {
+		if (element === fallback || element.closest?.(".gjj-file-browser")) {
+			const canY = element.scrollHeight > element.clientHeight + 1;
+			const canX = element.scrollWidth > element.clientWidth + 1;
+			if (canY || canX) return element;
+		}
+		element = element.parentElement;
+	}
+	return fallback?.querySelector?.(".gjj-file-grid") || fallback;
+}
+
+function handlePanelWheel(node, event) {
+	const wrap = node?.__gjjFileBrowserPanel;
+	if (!wrap) return;
+	const target = findScrollableElement(event.target, wrap);
+	if (!target) return;
+	const delta = wheelDeltaPixels(event);
+	const beforeTop = Number(target.scrollTop || 0);
+	const beforeLeft = Number(target.scrollLeft || 0);
+	const canY = target.scrollHeight > target.clientHeight + 1;
+	const canX = target.scrollWidth > target.clientWidth + 1;
+	if (canY) target.scrollTop = beforeTop + delta.y;
+	else if (canX) target.scrollLeft = beforeLeft + (delta.x || delta.y);
+	event.preventDefault();
+	event.stopPropagation();
 }
 
 function installPanelHandlers(node) {
@@ -610,7 +654,7 @@ function installPanelHandlers(node) {
 			const data = state(node);
 			updateState(node, { [key]: !data[key] });
 			if (key === "output_full_path") {
-				ensureOutputSocket(node);
+				ensureOutputSocket(node, { notify: true });
 				scheduleNodeSize(node);
 				dirty(node);
 			}
@@ -933,8 +977,16 @@ function renderPanel(node) {
 			}
 			selectFileIndex(node, Number(tile.dataset.index || 1));
 		});
-		tile.addEventListener("dblclick", () => {
-			if (tile.dataset.kind === "file") app.queuePrompt?.(0);
+		tile.addEventListener("dblclick", (event) => {
+			if (tile.dataset.kind !== "file") return;
+			event.preventDefault();
+			event.stopPropagation();
+			const payload = fileTilePayload(node, tile);
+			if (!payload.path) return;
+			const rect = tile.getBoundingClientRect?.();
+			const clientX = rect ? Math.round(rect.left + rect.width / 2) : Number(app.canvas?.canvas?.getBoundingClientRect?.().left || 0) + 80;
+			const clientY = rect ? Math.round(rect.top + rect.height / 2) : Number(app.canvas?.canvas?.getBoundingClientRect?.().top || 0) + 80;
+			importFileAtCanvasPoint(payload, clientX, clientY);
 		});
 		tile.addEventListener("dragstart", (event) => {
 			if (tile.dataset.kind !== "file") return;
@@ -949,13 +1001,9 @@ function renderPanel(node) {
 			tile.classList.remove("dragging");
 			if (event.dataTransfer?.dropEffect && event.dataTransfer.dropEffect !== "none") return;
 			if (isPointInBrowserPanel(node, event.clientX, event.clientY)) return;
-			const importer = globalThis.__gjjAnyPreviewImportLocalFileAtPoint;
-			if (typeof importer !== "function") return;
 			const payload = fileTilePayload(node, tile);
 			if (!payload.path) return;
-			Promise.resolve(importer(payload, event.clientX, event.clientY)).catch((error) => {
-				console.warn("[GJJ File Browser] 拖拽创建 AnyPreview 失败:", error);
-			});
+			importFileAtCanvasPoint(payload, event.clientX, event.clientY);
 		});
 		tile.addEventListener("pointerdown", (event) => {
 			if (tile.dataset.kind !== "file" || event.button !== 0) return;
@@ -1018,17 +1066,24 @@ function installPointerDragFallback(node, tile, startEvent) {
 		cleanup();
 		if (!wasMoved) return;
 		if (isPointInBrowserPanel(node, event.clientX, event.clientY)) return;
-		const importer = globalThis.__gjjAnyPreviewImportLocalFileAtPoint;
-		if (typeof importer !== "function") return;
 		event.preventDefault();
 		event.stopPropagation();
-		Promise.resolve(importer(payload, event.clientX, event.clientY)).catch((error) => {
-			console.warn("[GJJ File Browser] 拖拽到 AnyPreview 失败:", error);
-		});
+		importFileAtCanvasPoint(payload, event.clientX, event.clientY);
 	};
 	document.addEventListener("pointermove", onMove, true);
 	document.addEventListener("pointerup", onUp, true);
 	document.addEventListener("pointercancel", onCancel, true);
+}
+
+function importFileAtCanvasPoint(payload, clientX, clientY) {
+	const importer = globalThis.__gjjAnyPreviewImportLocalFileAtPoint;
+	if (typeof importer !== "function") {
+		console.warn("[GJJ File Browser] AnyPreview 导入入口不可用");
+		return;
+	}
+	Promise.resolve(importer(payload, clientX, clientY)).catch((error) => {
+		console.warn("[GJJ File Browser] 创建 AnyPreview 失败:", error);
+	});
 }
 
 function renderBreadcrumbs(node) {
@@ -1111,6 +1166,10 @@ function isImageFile(name) {
 	return /\.(png|jpe?g|webp|bmp|gif|tiff?|exr|hdr)$/i.test(String(name || ""));
 }
 
+function isVideoFile(name) {
+	return /\.(mp4|mov|mkv|webm|avi|m4v|wmv|flv|mpe?g)$/i.test(String(name || ""));
+}
+
 function thumbnailUrl(item) {
 	const params = new URLSearchParams();
 	params.set("path", String(item?.path || ""));
@@ -1119,8 +1178,9 @@ function thumbnailUrl(item) {
 }
 
 function fileIconHtml(item) {
-	if (isImageFile(item?.name)) {
-		return `<img class="gjj-file-thumb" src="${escapeHtml(thumbnailUrl(item))}" loading="lazy"><span class="gjj-file-thumb-fallback">🖼️</span>`;
+	if (isImageFile(item?.name) || isVideoFile(item?.name)) {
+		const fallback = isVideoFile(item?.name) ? "🎬" : "🖼️";
+		return `<img class="gjj-file-thumb" src="${escapeHtml(thumbnailUrl(item))}" loading="lazy"><span class="gjj-file-thumb-fallback">${fallback}</span>`;
 	}
 	return fileIcon(item?.name);
 }

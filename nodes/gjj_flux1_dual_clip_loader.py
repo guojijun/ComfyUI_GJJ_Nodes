@@ -75,7 +75,7 @@ def _default_flux_bundle(unet_name: str) -> tuple[str, str, str]:
 
 
 class GJJ_Flux1DualCLIPLoader:
-    CATEGORY = "GJJ"
+    CATEGORY = "GJJ/视频/模型加载"
     FUNCTION = "load_models"
     DESCRIPTION = "为 Flux 1 系列模型一次性加载 UNET、双 CLIP 和 VAE，适合作为 Flux 1 工作流的基础模型入口。"
     SEARCH_ALIASES = [

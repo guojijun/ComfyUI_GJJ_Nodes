@@ -39,6 +39,8 @@ const IMAGE_SIZE_SIGNATURE_PROPERTY = "gjj_lazy_image_studio_image_size_signatur
 const TEST_FILTER_PROPERTY = "gjj_lazy_image_studio_test_filters";
 const TEST_SORT_PROPERTY = "gjj_lazy_image_studio_test_sorts";
 const BATCH_IMAGE_LINK_MEMORY_PROPERTY = "gjj_lazy_image_studio_batch_image_link_memory";
+const PREVIEW_LAYOUT_PROPERTY = "gjj_lazy_image_studio_preview_layout";
+const PREVIEW_PAGE_PROPERTY = "gjj_lazy_image_studio_preview_page";
 const TRANSLATE_BUTTON_STYLES = {
 	off: {
 		bg: "linear-gradient(135deg, #1f2933, #374151)",
@@ -345,6 +347,7 @@ const PANEL_SYNC_WIDGETS = [
 	"denoise",
 	"grow_mask_by",
 	KEEP_MODEL_WIDGET_NAME,
+	USE_INPUT_IMAGE_SIZE_WIDGET_NAME,
 ];
 
 const RESTORE_WIDGET_TYPES = {
@@ -366,11 +369,28 @@ const RESTORE_WIDGET_TYPES = {
 	denoise: "number",
 	grow_mask_by: "number",
 	[KEEP_MODEL_WIDGET_NAME]: "toggle",
+	[USE_INPUT_IMAGE_SIZE_WIDGET_NAME]: "toggle",
 };
 const SEED_CONTROL_KEY = "__seed_control_after_generate";
 const SEED_CONTROL_VALUES = new Set(["fixed", "increment", "decrement", "randomize"]);
 const MAX_SEED_VALUE = 0xFFFFFFFFFFFFFFFF;
 const JS_SAFE_MAX_SEED_VALUE = Number.MAX_SAFE_INTEGER;
+const SEED_RANDOM_BUTTON_STYLES = {
+	off: {
+		bg: "linear-gradient(135deg, #1f2933, #374151)",
+		hover: "linear-gradient(135deg, #374151, #4b5563)",
+		border: "#55636f",
+		color: "#cbd5e1",
+		title: "随机种子已关闭：生成时固定当前 seed。",
+	},
+	on: {
+		bg: "linear-gradient(135deg, #854d0e, #ca8a04)",
+		hover: "linear-gradient(135deg, #ca8a04, #facc15)",
+		border: "#facc15",
+		color: "#fffbeb",
+		title: "随机种子已开启：每次生成前自动刷新 seed。",
+	},
+};
 const SERIALIZED_PARAM_WIDGETS = [
 	"prompt",
 	"negative_prompt",
@@ -393,6 +413,7 @@ const SERIALIZED_PARAM_WIDGETS = [
 	BATCH_SOURCE_WIDGET,
 	KEEP_MODEL_WIDGET_NAME,
 	TEST_CONFIG_WIDGET_NAME,
+	USE_INPUT_IMAGE_SIZE_WIDGET_NAME,
 ];
 const DEFAULT_PARAM_VALUES = {
 	prompt: "",
@@ -406,7 +427,7 @@ const DEFAULT_PARAM_VALUES = {
 	clip_name1: "",
 	vae_name: "default",
 	seed: 0,
-	[SEED_CONTROL_KEY]: "randomize",
+	[SEED_CONTROL_KEY]: "fixed",
 	steps: 4,
 	cfg: 1.0,
 	sampler_name: "euler",
@@ -416,6 +437,7 @@ const DEFAULT_PARAM_VALUES = {
 	[BATCH_SOURCE_WIDGET]: "[]",
 	[KEEP_MODEL_WIDGET_NAME]: false,
 	[TEST_CONFIG_WIDGET_NAME]: "",
+	[USE_INPUT_IMAGE_SIZE_WIDGET_NAME]: true,
 };
 
 let MODEL_PRESETS = getCachedModelFamilyPresets();
@@ -486,21 +508,80 @@ function batchImageLinkMemory(node) {
 	return memory && typeof memory === "object" ? memory : null;
 }
 
+function linkedInputMemories(node) {
+	const memories = [];
+	const inputs = Array.isArray(node?.inputs) ? node.inputs : [];
+	for (let slot = 0; slot < inputs.length; slot += 1) {
+		const input = inputs[slot];
+		const link = graphLinkById(input?.link);
+		if (!link) {
+			continue;
+		}
+		memories.push({
+			target_name: String(input?.name || ""),
+			target_type: String(input?.type || ""),
+			target_slot: slot,
+			origin_id: Number(link.origin_id),
+			origin_slot: Number(link.origin_slot),
+		});
+	}
+	return memories;
+}
+
+function normalizedInputLinkMemory(node) {
+	const memory = batchImageLinkMemory(node);
+	if (!memory) {
+		return [];
+	}
+	if (Array.isArray(memory.links)) {
+		return memory.links.filter((item) => item && typeof item === "object");
+	}
+	if (Number.isFinite(Number(memory.origin_id)) && Number.isFinite(Number(memory.origin_slot))) {
+		return [{
+			target_name: PRIMARY_IMAGE_INPUT,
+			target_type: BATCH_IMAGE_TYPE,
+			target_slot: Number(memory.target_slot || inputSlotIndex(node, PRIMARY_IMAGE_INPUT) || 0),
+			origin_id: Number(memory.origin_id),
+			origin_slot: Number(memory.origin_slot),
+		}];
+	}
+	return [];
+}
+
 function rememberBatchImageLink(node) {
-	const input = getInput(node, PRIMARY_IMAGE_INPUT);
-	const slot = inputSlotIndex(node, PRIMARY_IMAGE_INPUT);
-	const link = graphLinkById(input?.link);
-	if (!node || slot < 0 || !link) {
+	const links = linkedInputMemories(node);
+	if (!node || !links.length) {
 		return null;
 	}
 	const memory = {
-		origin_id: Number(link.origin_id),
-		origin_slot: Number(link.origin_slot),
-		target_slot: slot,
+		version: 2,
+		links,
 	};
 	node.properties = node.properties || {};
 	node.properties[BATCH_IMAGE_LINK_MEMORY_PROPERTY] = memory;
 	return memory;
+}
+
+function hasAnyExternalInputLink(node) {
+	return linkedInputMemories(node).length > 0;
+}
+
+function inputSlotForMemory(node, item) {
+	const wantedName = String(item?.target_name || "");
+	if (wantedName === PRIMARY_IMAGE_INPUT && !getInput(node, PRIMARY_IMAGE_INPUT)) {
+		addImageInput(node);
+	} else if (wantedName.startsWith(IMAGE_PREFIX) && !getInput(node, wantedName)) {
+		node.addInput?.(wantedName, String(item?.target_type || BATCH_IMAGE_TYPE));
+	}
+	let slot = wantedName ? inputSlotIndex(node, wantedName) : -1;
+	if (slot >= 0) {
+		return slot;
+	}
+	const fallbackSlot = Number(item?.target_slot);
+	if (Number.isFinite(fallbackSlot) && node?.inputs?.[fallbackSlot]) {
+		return fallbackSlot;
+	}
+	return -1;
 }
 
 function setBatchLinkButtonState(node) {
@@ -508,13 +589,13 @@ function setBatchLinkButtonState(node) {
 	if (!button) {
 		return;
 	}
-	const linked = inputLinked(node, PRIMARY_IMAGE_INPUT);
-	const memory = batchImageLinkMemory(node);
-	button.style.display = linked || memory ? "flex" : "none";
+	const linked = hasAnyExternalInputLink(node);
+	const memory = normalizedInputLinkMemory(node);
+	button.style.display = linked || memory.length ? "flex" : "none";
 	button.textContent = "🔗";
 	button.title = linked
-		? "断开【批量图片】外部链接，并记住来源节点和插槽。"
-		: "恢复上次断开的【批量图片】外部链接。";
+		? "断开所有外部输入链接，并把来源接口记录到本节点。"
+		: "恢复上次断开的所有外部输入链接。";
 	button.style.borderColor = linked ? "#38bdf8" : "#f59e0b";
 	const background = linked
 		? "linear-gradient(135deg, #075985, #0284c7)"
@@ -553,21 +634,40 @@ function applyInputSizeButtonState(node) {
 }
 
 function toggleBatchImageExternalLink(node) {
-	const slot = inputSlotIndex(node, PRIMARY_IMAGE_INPUT);
-	if (slot < 0) {
-		return false;
-	}
-	if (inputLinked(node, PRIMARY_IMAGE_INPUT)) {
-		rememberBatchImageLink(node);
-		node.disconnectInput?.(slot);
-	} else {
-		const memory = batchImageLinkMemory(node);
-		const origin = memory ? app.graph?.getNodeById?.(Number(memory.origin_id)) : null;
-		if (!origin || !Number.isFinite(Number(memory?.origin_slot))) {
+	if (hasAnyExternalInputLink(node)) {
+		syncBatchSourceWidget(node);
+		const memory = rememberBatchImageLink(node);
+		if (!memory) {
 			return false;
 		}
-		origin.connect?.(Number(memory.origin_slot), node, slot);
-		delete node.properties[BATCH_IMAGE_LINK_MEMORY_PROPERTY];
+		const slots = linkedInputMemories(node)
+			.map((item) => Number(item.target_slot))
+			.filter((slot) => Number.isFinite(slot))
+			.sort((a, b) => b - a);
+		for (const slot of slots) {
+			node.disconnectInput?.(slot);
+		}
+	} else {
+		const memory = normalizedInputLinkMemory(node);
+		if (!memory.length) {
+			return false;
+		}
+		const remaining = [];
+		for (const item of memory) {
+			const origin = app.graph?.getNodeById?.(Number(item.origin_id));
+			const slot = inputSlotForMemory(node, item);
+			if (!origin || !Number.isFinite(Number(item.origin_slot)) || slot < 0) {
+				remaining.push(item);
+				continue;
+			}
+			origin.connect?.(Number(item.origin_slot), node, slot);
+		}
+		if (remaining.length) {
+			node.properties[BATCH_IMAGE_LINK_MEMORY_PROPERTY] = { version: 2, links: remaining };
+		} else {
+			delete node.properties[BATCH_IMAGE_LINK_MEMORY_PROPERTY];
+		}
+		syncBatchSourceWidget(node);
 	}
 	node.graph?.setDirtyCanvas?.(true, true);
 	app.graph?.change?.();
@@ -652,6 +752,21 @@ function setWidgetValue(widget, value) {
 		widget.element.value = value;
 	}
 	widget.callback?.(value);
+}
+
+function splitLazyPromptQueueSegments(value) {
+	const text = String(value ?? "");
+	if (!text.includes("---")) {
+		return [text];
+	}
+	let segments = text
+		.split(/(?:^|\n)\s*---+\s*(?:\n|$)/g)
+		.map((item) => item.trim())
+		.filter(Boolean);
+	if (segments.length <= 1) {
+		segments = text.split("---").map((item) => item.trim()).filter(Boolean);
+	}
+	return segments.length > 1 ? segments : [text];
 }
 
 function commitPromptTranslation(node, values) {
@@ -863,6 +978,15 @@ function setInputSizeSyncEnabled(node, enabled) {
 		...(node.properties[PARAM_VALUES_PROPERTY] || {}),
 		[USE_INPUT_IMAGE_SIZE_WIDGET_NAME]: value,
 	};
+	const widget = getWidget(node, USE_INPUT_IMAGE_SIZE_WIDGET_NAME);
+	if (widget) {
+		widget.value = value;
+		const index = getWidgetIndex(node, USE_INPUT_IMAGE_SIZE_WIDGET_NAME);
+		if (Array.isArray(node.widgets_values) && index >= 0) {
+			node.widgets_values[index] = value;
+		}
+		try { widget.callback?.(value); } catch (_) {}
+	}
 	if (!value) {
 		delete node.properties[IMAGE_SIZE_SIGNATURE_PROPERTY];
 	}
@@ -870,6 +994,49 @@ function setInputSizeSyncEnabled(node, enabled) {
 	if (value) {
 		void syncSizeFromPrimaryInput(node);
 	}
+	node.graph?.change?.();
+	app.graph?.setDirtyCanvas?.(true, true);
+}
+
+function seedRandomEnabled(node) {
+	return fallbackParamValue(node, SEED_CONTROL_KEY) === "randomize";
+}
+
+function applySeedRandomButtonState(node) {
+	const button = node?.__gjjSeedRandomButton;
+	if (!button) return;
+	const enabled = seedRandomEnabled(node);
+	const style = enabled ? SEED_RANDOM_BUTTON_STYLES.on : SEED_RANDOM_BUTTON_STYLES.off;
+	button.textContent = "🎲";
+	button.dataset.value = enabled ? "true" : "false";
+	button.setAttribute("aria-pressed", enabled ? "true" : "false");
+	button.title = style.title;
+	button.style.background = style.bg;
+	button.style.borderColor = style.border;
+	button.style.color = style.color;
+	button.__gjjLazyDefaultBg = style.bg;
+	button.__gjjLazyHoverBg = style.hover;
+}
+
+function setSeedRandomEnabled(node, enabled) {
+	if (!node) return;
+	const mode = enabled ? "randomize" : "fixed";
+	const seedWidget = getWidget(node, "seed");
+	const nextSeed = randomSeedValue();
+	if (seedWidget) {
+		setWidgetValue(seedWidget, nextSeed);
+	}
+	const seedControlWidget = findSeedControlWidget(node);
+	if (seedControlWidget) {
+		setWidgetValue(seedControlWidget, mode);
+	}
+	const params = currentParamValues(node);
+	params.seed = nextSeed;
+	params[SEED_CONTROL_KEY] = mode;
+	saveParamSnapshot(node, params);
+	node.widgets_values = serializedParamValues(params, node).slice();
+	delete node.__gjjLazySeedPreparedAt;
+	applySeedRandomButtonState(node);
 	node.graph?.change?.();
 	app.graph?.setDirtyCanvas?.(true, true);
 }
@@ -1081,7 +1248,7 @@ function updateSettingsButtonState(node) {
 		return;
 	}
 	const open = settingsOpen(node);
-	button.textContent = open ? "⚙️" : "⚙️设置";
+	button.textContent = open ? "⚙️" : "⚙️";
 	button.title = open ? "收起更多设置，只保留正向提示词。" : "展开更多设置，显示反向提示词、模型、尺寸、采样和 LoRA。";
 	button.classList.toggle("on", open);
 	button.style.background = open ? "linear-gradient(135deg, #4b5563, #64748b)" : "linear-gradient(135deg, #1f2933, #374151)";
@@ -1265,6 +1432,7 @@ function coerceParamValue(name, value, node) {
 	if (name === BATCH_SOURCE_WIDGET) return String(value ?? "[]");
 	if (name === KEEP_MODEL_WIDGET_NAME) return boolValue(value);
 	if (name === TEST_CONFIG_WIDGET_NAME) return String(value ?? "");
+	if (name === USE_INPUT_IMAGE_SIZE_WIDGET_NAME) return boolValue(value);
 	return String(value ?? fallbackParamValue(node, name) ?? "");
 }
 
@@ -1407,6 +1575,10 @@ function applyParamValues(node, params) {
 	if (Object.prototype.hasOwnProperty.call(params, KEEP_MODEL_WIDGET_NAME)) {
 		applyKeepModelButtonState(node);
 	}
+	if (Object.prototype.hasOwnProperty.call(params, USE_INPUT_IMAGE_SIZE_WIDGET_NAME)) {
+		applyInputSizeButtonState(node);
+	}
+	applySeedRandomButtonState(node);
 	return changed;
 }
 
@@ -1454,12 +1626,19 @@ function applySeedControlBeforeQueue(node) {
 function syncSeedControlWidget(node) {
 	const widget = findSeedControlWidget(node);
 	if (!widget || widget.__gjjLazySeedControlHooked) {
+		applySeedRandomButtonState(node);
 		return;
 	}
 	widget.__gjjLazySeedControlHooked = true;
-	const storedValue = textValue(node?.properties?.[PARAM_VALUES_PROPERTY]?.[SEED_CONTROL_KEY]);
-	if (isSeedControlValue(storedValue) && widget.value !== storedValue) {
-		setWidgetValue(widget, storedValue);
+	const storedParams = node?.properties?.[PARAM_VALUES_PROPERTY] || {};
+	const storedValue = textValue(storedParams[SEED_CONTROL_KEY]);
+	const nextValue = isSeedControlValue(storedValue) ? storedValue : DEFAULT_PARAM_VALUES[SEED_CONTROL_KEY];
+	if (widget.value !== nextValue) {
+		setWidgetValue(widget, nextValue);
+		const params = currentParamValues(node);
+		params[SEED_CONTROL_KEY] = nextValue;
+		saveParamSnapshot(node, params);
+		node.widgets_values = serializedParamValues(params, node).slice();
 	}
 	const originalCallback = widget.callback;
 	widget.callback = function (value, ...args) {
@@ -1470,9 +1649,11 @@ function syncSeedControlWidget(node) {
 			params[SEED_CONTROL_KEY] = mode;
 			saveParamSnapshot(node, params);
 			node.widgets_values = serializedParamValues(params, node).slice();
+			applySeedRandomButtonState(node);
 		}
 		return result;
 	};
+	applySeedRandomButtonState(node);
 }
 
 function patchLazySeedIntoPromptData(promptData) {
@@ -1495,9 +1676,11 @@ function patchLazySeedIntoPromptData(promptData) {
 		}
 		entry.inputs = entry.inputs || {};
 		entry.inputs.seed = seed;
+		entry.inputs[USE_INPUT_IMAGE_SIZE_WIDGET_NAME] = inputSizeSyncEnabled(node);
 		if (promptData?.prompt && promptData.prompt !== promptData.output && promptData.prompt[key]) {
 			promptData.prompt[key].inputs = promptData.prompt[key].inputs || {};
 			promptData.prompt[key].inputs.seed = seed;
+			promptData.prompt[key].inputs[USE_INPUT_IMAGE_SIZE_WIDGET_NAME] = inputSizeSyncEnabled(node);
 		}
 	}
 	return promptData;
@@ -2337,7 +2520,9 @@ function createButtons(node) {
 		"display:flex",
 		"flex-direction:row",
 		"flex-wrap:wrap",
-		"gap:6px",
+		"align-items:center",
+		"align-content:flex-start",
+		"gap:0",
 		"width:100%",
 		"box-sizing:border-box",
 		"position:relative",
@@ -2369,13 +2554,19 @@ function createButtons(node) {
 		"min-width:0",
 		"flex:0 0 auto",
 	];
+	const emojiButtonStyle = [
+		...sharedButtonStyle,
+		"padding:0 7px",
+		"gap:0",
+		"font-size:15px",
+	];
 	// 刷新Lora按钮
 	const refreshButton = document.createElement("button");
 	refreshButton.type = "button";
 	refreshButton.innerHTML = "🔄";
 	refreshButton.title = "刷新LoRA选项列表";
 	refreshButton.style.cssText = [
-		...sharedButtonStyle,
+		...emojiButtonStyle,
 		"border:1px solid #3b82f6",
 		"background:linear-gradient(135deg, #1e3a5f, #1e40af)",
 		"color:#e0e7ff",
@@ -2387,12 +2578,10 @@ function createButtons(node) {
 	batchLinkButton.title = "断开或恢复【批量图片】外部链接";
 	batchLinkButton.setAttribute("aria-label", "批量图片外部链接开关");
 	batchLinkButton.style.cssText = [
-		...sharedButtonStyle,
-		"padding:0 9px",
+		...emojiButtonStyle,
 		"border:1px solid #38bdf8",
 		"background:linear-gradient(135deg, #075985, #0284c7)",
 		"color:#e0f2fe",
-		"font-size:15px",
 		"display:none",
 	].join(";");
 	node.__gjjBatchImageLinkButton = batchLinkButton;
@@ -2403,15 +2592,26 @@ function createButtons(node) {
 	inputSizeButton.title = "第一个图像输入尺寸同步开关";
 	inputSizeButton.setAttribute("aria-label", "使用第一个输入图尺寸");
 	inputSizeButton.style.cssText = [
-		...sharedButtonStyle,
-		"padding:0",
+		...emojiButtonStyle,
 		"border:1px solid #22c55e",
 		"background:linear-gradient(135deg, #065f46, #16a34a)",
 		"color:#ecfdf5",
-		"font-size:15px",
 		"display:none",
 	].join(";");
 	node.__gjjInputSizeButton = inputSizeButton;
+
+	const seedRandomButton = document.createElement("button");
+	seedRandomButton.type = "button";
+	seedRandomButton.textContent = "🎲";
+	seedRandomButton.title = SEED_RANDOM_BUTTON_STYLES.off.title;
+	seedRandomButton.setAttribute("aria-label", "随机种子开关");
+	seedRandomButton.style.cssText = [
+		...emojiButtonStyle,
+		`border:1px solid ${SEED_RANDOM_BUTTON_STYLES.off.border}`,
+		`background:${SEED_RANDOM_BUTTON_STYLES.off.bg}`,
+		`color:${SEED_RANDOM_BUTTON_STYLES.off.color}`,
+	].join(";");
+	node.__gjjSeedRandomButton = seedRandomButton;
 
 	const translateButton = document.createElement("button");
 	translateButton.type = "button";
@@ -2419,12 +2619,10 @@ function createButtons(node) {
 	translateButton.title = TRANSLATE_BUTTON_STYLES.off.title;
 	translateButton.setAttribute("aria-label", "提示词翻译开关");
 	translateButton.style.cssText = [
-		...sharedButtonStyle,
-		"padding:0",
+		...emojiButtonStyle,
 		`border:1px solid ${TRANSLATE_BUTTON_STYLES.off.border}`,
 		`background:${TRANSLATE_BUTTON_STYLES.off.bg}`,
 		`color:${TRANSLATE_BUTTON_STYLES.off.color}`,
-		"font-size:15px",
 	].join(";");
 	node.__gjjLazyTranslateButton = translateButton;
 
@@ -2434,12 +2632,10 @@ function createButtons(node) {
 	keepModelButton.title = KEEP_MODEL_BUTTON_STYLES.off.title;
 	keepModelButton.setAttribute("aria-label", "保持模型开关");
 	keepModelButton.style.cssText = [
-		...sharedButtonStyle,
-		"padding:0",
+		...emojiButtonStyle,
 		`border:1px solid ${KEEP_MODEL_BUTTON_STYLES.off.border}`,
 		`background:${KEEP_MODEL_BUTTON_STYLES.off.bg}`,
 		`color:${KEEP_MODEL_BUTTON_STYLES.off.color}`,
-		"font-size:15px",
 	].join(";");
 	node.__gjjKeepModelButton = keepModelButton;
 
@@ -2449,18 +2645,16 @@ function createButtons(node) {
 	testButton.title = "打开 UNET / LoRA 批量测试窗口";
 	testButton.setAttribute("aria-label", "模型测试");
 	testButton.style.cssText = [
-		...sharedButtonStyle,
-		"padding:0",
+		...emojiButtonStyle,
 		"border:1px solid #f59e0b",
 		"background:linear-gradient(135deg, #4a2f08, #b45309)",
 		"color:#fffbeb",
-		"font-size:15px",
 	].join(";");
 
 	// 生成图片按钮
 	const generateButton = document.createElement("button");
 	generateButton.type = "button";
-	generateButton.innerHTML = "✨ 生成图片";
+	generateButton.innerHTML = "✨ 生成";
 	generateButton.title = "只执行当前节点，无需连接其他节点";
 	generateButton.style.cssText = [
 		...sharedButtonStyle,
@@ -2480,8 +2674,11 @@ function createButtons(node) {
 		"color:#e5edf2",
 	].join(";");
 	node.__gjjSettingsButton = settingsButton;
-	const templateButton = createTemplateSourceButton(node, TEMPLATE_SOURCE_FIELDS, sharedButtonStyle);
+	const templateButton = createTemplateSourceButton(node, TEMPLATE_SOURCE_FIELDS, emojiButtonStyle);
+	templateButton.style.width = "";
 	templateButton.style.flex = "0 0 auto";
+	templateButton.style.padding = "0 7px";
+	templateButton.style.gap = "0";
 
 	// 按钮悬停效果函数
 	function setupButtonHover(btn, defaultBg, hoverBg) {
@@ -2589,15 +2786,39 @@ function createButtons(node) {
 		generateButton.style.opacity = "0.7";
 
 		try {
-			applySeedControlBeforeQueue(node);
-			const ok = await queueOnlyCurrentNode(node);
-			if (!ok) {
+			const promptWidget = getWidget(node, "prompt");
+			const originalPrompt = String(promptWidget?.value ?? "");
+			const promptSegments = splitLazyPromptQueueSegments(originalPrompt);
+			let allQueued = true;
+			if (promptSegments.length > 1) {
+				try {
+					for (let index = 0; index < promptSegments.length; index += 1) {
+						generateButton.innerHTML = `⏳ 提交 ${index + 1}/${promptSegments.length}`;
+						setWidgetValue(promptWidget, promptSegments[index]);
+						writeLiveParamSnapshot(node);
+						delete node.__gjjLazySeedPreparedAt;
+						applySeedControlBeforeQueue(node);
+						const ok = await queueOnlyCurrentNode(node);
+						if (!ok) {
+							allQueued = false;
+							break;
+						}
+					}
+				} finally {
+					setWidgetValue(promptWidget, originalPrompt);
+					writeLiveParamSnapshot(node);
+				}
+			} else {
+				applySeedControlBeforeQueue(node);
+				allQueued = await queueOnlyCurrentNode(node);
+			}
+			if (!allQueued) {
 				console.warn("[GJJ] 当前节点执行失败：queueOnlyCurrentNode 返回 false");
 				generateButton.innerHTML = "❌ 执行失败";
 				generateButton.style.background = "linear-gradient(135deg, #7f1d1d, #dc2626)";
 				generateButton.style.borderColor = "#ef4444";
 			} else {
-				generateButton.innerHTML = "✅ 执行中";
+				generateButton.innerHTML = promptSegments.length > 1 ? `✅ 已提交 ${promptSegments.length} 队列` : "✅ 执行中";
 				generateButton.style.background = "linear-gradient(135deg, #064e3b, #059669)";
 				generateButton.style.borderColor = "#10b981";
 			}
@@ -2663,9 +2884,15 @@ function createButtons(node) {
 		setInputSizeSyncEnabled(node, !inputSizeSyncEnabled(node));
 	}
 
+	function handleSeedRandom(event) {
+		protectEvent(event);
+		setSeedRandomEnabled(node, !seedRandomEnabled(node));
+	}
+
 	setupButtonHover(refreshButton, "linear-gradient(135deg, #1e3a5f, #1e40af)", "linear-gradient(135deg, #1e40af, #3b82f6)");
 	setupButtonHover(batchLinkButton, "linear-gradient(135deg, #075985, #0284c7)", "linear-gradient(135deg, #0284c7, #38bdf8)");
 	setupButtonHover(inputSizeButton, "linear-gradient(135deg, #065f46, #16a34a)", "linear-gradient(135deg, #16a34a, #22c55e)");
+	setupButtonHover(seedRandomButton, SEED_RANDOM_BUTTON_STYLES.off.bg, SEED_RANDOM_BUTTON_STYLES.off.hover);
 	setupButtonHover(translateButton, TRANSLATE_BUTTON_STYLES.off.bg, TRANSLATE_BUTTON_STYLES.off.hover);
 	setupButtonHover(keepModelButton, KEEP_MODEL_BUTTON_STYLES.off.bg, KEEP_MODEL_BUTTON_STYLES.off.hover);
 	setupButtonHover(testButton, "linear-gradient(135deg, #4a2f08, #b45309)", "linear-gradient(135deg, #b45309, #d97706)");
@@ -2674,12 +2901,14 @@ function createButtons(node) {
 	setupButtonEvents(refreshButton, handleRefresh);
 	setupButtonEvents(batchLinkButton, handleBatchLink);
 	setupButtonEvents(inputSizeButton, handleInputSize);
+	setupButtonEvents(seedRandomButton, handleSeedRandom);
 	setupButtonEvents(translateButton, handleTranslate);
 	setupButtonEvents(keepModelButton, handleKeepModel);
 	setupButtonEvents(testButton, handleTest);
 	setupButtonEvents(generateButton, handleGenerate);
 	setupButtonEvents(settingsButton, handleSettings);
 	applyLazyTranslateButtonState(node);
+	applySeedRandomButtonState(node);
 	applyKeepModelButtonState(node);
 	applyInputSizeButtonState(node);
 	updateSettingsButtonState(node);
@@ -2688,6 +2917,7 @@ function createButtons(node) {
 	container.appendChild(refreshButton);
 	container.appendChild(batchLinkButton);
 	container.appendChild(inputSizeButton);
+	container.appendChild(seedRandomButton);
 	container.appendChild(translateButton);
 	container.appendChild(keepModelButton);
 	container.appendChild(testButton);
@@ -2703,8 +2933,8 @@ function lazyButtonsHeight(width, node = null) {
 		return measured;
 	}
 	const availableWidth = Math.max(120, Number(width || 260));
-	const buttonWidths = [34, 34, 34, 34, 34, 34, 86, 34, 74];
-	const gap = 6;
+	const buttonWidths = [32, 32, 32, 32, 32, 32, 32, 68, 32, 58];
+	const gap = 0;
 	let rows = 1;
 	let rowWidth = 0;
 	for (const buttonWidth of buttonWidths) {
@@ -2729,26 +2959,196 @@ function createImagePreview(node) {
 		"box-sizing:border-box",
 	].join(";");
 
-	const image = document.createElement("img");
-	// 给自定义预览添加标记，避免被隐藏
-	image.dataset.gjjCustomPreview = "true";
-	image.style.cssText = [
-		"width:100%",
-		"max-width:100%",
-		"height:auto",
-		"object-fit:contain",
+	const controls = document.createElement("div");
+	controls.style.cssText = [
 		"display:none",
-		"cursor:pointer",
-		"border-radius:8px",
-		"border:1px solid #33434a",
-		"background:#0f1418",
-		"pointer-events:auto",
-		"position:relative",
-		"z-index:100",
-		"transition:transform 0.2s ease",
+		"align-items:center",
+		"gap:5px",
+		"min-height:24px",
 	].join(";");
 
-	// 鼠标悬停效果
+	function smallButton(text, title, onClick) {
+		const button = document.createElement("button");
+		button.type = "button";
+		button.textContent = text;
+		button.title = title;
+		button.style.cssText = [
+			"height:22px",
+			"min-width:24px",
+			"padding:0 7px",
+			"border:1px solid #41535b",
+			"border-radius:6px",
+			"background:#172026",
+			"color:#dce7e2",
+			"font:11px/20px system-ui,\"Microsoft YaHei\",sans-serif",
+			"cursor:pointer",
+			"pointer-events:auto",
+		].join(";");
+		button.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			onClick?.();
+		});
+		return button;
+	}
+
+	const modeButton = smallButton("平铺", "切换多图浏览方式：平铺 / 分页。", () => {
+		setLazyPreviewLayoutMode(node, lazyPreviewLayoutMode(node) === "page" ? "tile" : "page");
+	});
+	const prevButton = smallButton("◀", "上一张预览。", () => {
+		setLazyPreviewPageIndex(node, lazyPreviewPageIndex(node) - 1);
+	});
+	const pageLabel = document.createElement("span");
+	pageLabel.style.cssText = "color:#9eb3b7;font:11px/1.2 system-ui,\"Microsoft YaHei\",sans-serif;min-width:48px;text-align:center;";
+	const nextButton = smallButton("▶", "下一张预览。", () => {
+		setLazyPreviewPageIndex(node, lazyPreviewPageIndex(node) + 1);
+	});
+	controls.append(modeButton, prevButton, pageLabel, nextButton);
+
+	const wrap = document.createElement("div");
+	wrap.style.cssText = [
+		"display:none",
+		"grid-template-columns:repeat(auto-fill,minmax(86px,1fr))",
+		"gap:6px",
+		"width:100%",
+		"box-sizing:border-box",
+	].join(";");
+
+	container.append(controls, wrap);
+	node.__gjjLazyPreview = { container, controls, wrap, modeButton, prevButton, nextButton, pageLabel, items: [] };
+	node.__gjjPreviewImage = wrap;
+	return container;
+}
+
+function lazyPreviewLayoutMode(node) {
+	const mode = String(node?.properties?.[PREVIEW_LAYOUT_PROPERTY] || "tile");
+	return mode === "page" ? "page" : "tile";
+}
+
+function setLazyPreviewLayoutMode(node, mode) {
+	node.properties ||= {};
+	node.properties[PREVIEW_LAYOUT_PROPERTY] = mode === "page" ? "page" : "tile";
+	updateLazyPreviewLayout(node);
+	GJJ_Utils.refreshNode(node);
+}
+
+function lazyPreviewPageIndex(node) {
+	node.properties ||= {};
+	const total = Number(node.__gjjLazyPreview?.wrap?.children?.length || 0);
+	const max = Math.max(0, total - 1);
+	const value = Math.max(0, Math.floor(Number(node.properties[PREVIEW_PAGE_PROPERTY] || 0) || 0));
+	const next = Math.min(value, max);
+	node.properties[PREVIEW_PAGE_PROPERTY] = next;
+	return next;
+}
+
+function setLazyPreviewPageIndex(node, index) {
+	node.properties ||= {};
+	const total = Number(node.__gjjLazyPreview?.wrap?.children?.length || 0);
+	const max = Math.max(0, total - 1);
+	node.properties[PREVIEW_PAGE_PROPERTY] = Math.max(0, Math.min(max, Math.floor(Number(index || 0) || 0)));
+	updateLazyPreviewLayout(node);
+	GJJ_Utils.refreshNode(node);
+}
+
+function lazyPreviewAspectRatio(item) {
+	const width = Number(item?.width || 0);
+	const height = Number(item?.height || 0);
+	return width > 0 && height > 0 ? `${width} / ${height}` : "1 / 1";
+}
+
+function openLazyPreviewOverlay(src) {
+	if (!src) return;
+	const overlay = document.createElement("div");
+	overlay.style.cssText = [
+		"position:fixed",
+		"inset:0",
+		"background:rgba(0, 0, 0, 0.9)",
+		"backdrop-filter:blur(10px)",
+		"z-index:10000",
+		"display:flex",
+		"align-items:center",
+		"justify-content:center",
+		"cursor:zoom-out",
+	].join(";");
+
+	const previewImg = document.createElement("img");
+	previewImg.src = src;
+	previewImg.style.cssText = [
+		"max-width:90%",
+		"max-height:90%",
+		"object-fit:contain",
+		"border-radius:8px",
+		"box-shadow:0 0 40px rgba(0, 0, 0, 0.5)",
+		"transition:transform 0.1s ease",
+		"cursor:grab",
+	].join(";");
+
+	let currentScale = 1;
+	const minScale = 0.1;
+	const maxScale = 10;
+
+	overlay.addEventListener("wheel", (e) => {
+		e.preventDefault();
+		e.stopPropagation();
+		const delta = e.deltaY > 0 ? -0.1 : 0.1;
+		currentScale = Math.max(minScale, Math.min(maxScale, currentScale + delta));
+		previewImg.style.transform = `scale(${currentScale})`;
+	});
+
+	previewImg.addEventListener("dblclick", (e) => {
+		e.stopPropagation();
+		currentScale = 1;
+		previewImg.style.transform = `scale(${currentScale})`;
+	});
+
+	const closeHint = document.createElement("div");
+	closeHint.textContent = "滚轮缩放 · 双击重置 · 点击关闭";
+	closeHint.style.cssText = [
+		"position:absolute",
+		"bottom:20px",
+		"left:50%",
+		"transform:translateX(-50%)",
+		"color:#fff",
+		"font-size:13px",
+		"opacity:0.6",
+		"pointer-events:none",
+		"white-space:nowrap",
+	].join(";");
+
+	overlay.appendChild(previewImg);
+	overlay.appendChild(closeHint);
+	document.body.appendChild(overlay);
+	overlay.addEventListener("click", () => {
+		overlay.remove();
+	});
+}
+
+function createLazyPreviewCard(node, item) {
+	const card = document.createElement("button");
+	card.type = "button";
+	card.__gjjLazyPreviewItem = item;
+	card.style.cssText = [
+		"display:block",
+		"min-width:0",
+		"padding:0",
+		"border:1px solid #33434a",
+		"border-radius:8px",
+		"background:#0f1418",
+		"overflow:hidden",
+		"cursor:pointer",
+		"pointer-events:auto",
+	].join(";");
+	const image = document.createElement("img");
+	image.dataset.gjjCustomPreview = "true";
+	image.src = imageDataToUrl(item);
+	image.style.cssText = [
+		"width:100%",
+		"height:100%",
+		"display:block",
+		"object-fit:cover",
+		"transition:transform 0.2s ease",
+	].join(";");
 	image.addEventListener("mouseenter", () => {
 		image.style.transform = "scale(1.02)";
 	});
@@ -2756,91 +3156,18 @@ function createImagePreview(node) {
 		image.style.transform = "scale(1)";
 	});
 	image.addEventListener("load", () => {
-		node.__gjjLazyPreviewNaturalWidth = Number(image.naturalWidth || 0);
-		node.__gjjLazyPreviewNaturalHeight = Number(image.naturalHeight || 0);
-		node.__gjjLazyPreviewHeight = lazyPreviewHeightForNode(node);
+		if (!item.width) item.width = Number(image.naturalWidth || 0);
+		if (!item.height) item.height = Number(image.naturalHeight || 0);
+		updateLazyPreviewLayout(node);
 		GJJ_Utils.refreshNode(node);
 	});
-
-	// 图片点击放大功能 - 完全参考批量多图片加载器
-	image.addEventListener("click", (event) => {
+	card.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
-
-		const overlay = document.createElement("div");
-		overlay.style.cssText = [
-			"position:fixed",
-			"inset:0",
-			"background:rgba(0, 0, 0, 0.9)",
-			"backdrop-filter:blur(10px)",
-			"z-index:10000",
-			"display:flex",
-			"align-items:center",
-			"justify-content:center",
-			"cursor:zoom-out",
-		].join(";");
-
-		const previewImg = document.createElement("img");
-		previewImg.src = image.src;
-		previewImg.style.cssText = [
-			"max-width:90%",
-			"max-height:90%",
-			"object-fit:contain",
-			"border-radius:8px",
-			"box-shadow:0 0 40px rgba(0, 0, 0, 0.5)",
-			"transition:transform 0.1s ease",
-			"cursor:grab",
-		].join(";");
-
-		// 滚轮缩放功能
-		let currentScale = 1;
-		const minScale = 0.1;
-		const maxScale = 10;
-
-		overlay.addEventListener("wheel", (e) => {
-			e.preventDefault();
-			e.stopPropagation();
-
-			const delta = e.deltaY > 0 ? -0.1 : 0.1;
-			currentScale = Math.max(minScale, Math.min(maxScale, currentScale + delta));
-			previewImg.style.transform = `scale(${currentScale})`;
-		});
-
-		// 双击重置缩放
-		previewImg.addEventListener("dblclick", (e) => {
-			e.stopPropagation();
-			currentScale = 1;
-			previewImg.style.transform = `scale(${currentScale})`;
-		});
-
-		const closeHint = document.createElement("div");
-		closeHint.textContent = "滚轮缩放 · 双击重置 · 点击关闭";
-		closeHint.style.cssText = [
-			"position:absolute",
-			"bottom:20px",
-			"left:50%",
-			"transform:translateX(-50%)",
-			"color:#fff",
-			"font-size:13px",
-			"opacity:0.6",
-			"pointer-events:none",
-			"white-space:nowrap",
-		].join(";");
-
-		overlay.appendChild(previewImg);
-		overlay.appendChild(closeHint);
-		document.body.appendChild(overlay);
-
-		// 点击关闭
-		overlay.addEventListener("click", () => {
-			overlay.remove();
-		});
+		openLazyPreviewOverlay(image.src);
 	});
-
-	container.appendChild(image);
-
-	node.__gjjPreviewImage = image;
-	return container;
+	card.appendChild(image);
+	return card;
 }
 
 function imageDataToUrl(item) {
@@ -2855,43 +3182,86 @@ function imageDataToUrl(item) {
 }
 
 function updateImagePreview(node, images) {
-	if (!node.__gjjPreviewImage) return;
+	const preview = node.__gjjLazyPreview;
+	if (!preview?.wrap) return;
 
 	if (!images || !images.length) {
-		node.__gjjPreviewImage.style.display = "none";
+		preview.wrap.replaceChildren();
+		preview.wrap.style.display = "none";
+		if (preview.controls) preview.controls.style.display = "none";
 		node.__gjjLazyPreviewHeight = 0;
+		GJJ_Utils.refreshNode(node);
 		return;
 	}
 
-	const imageUrl = imageDataToUrl(images[0]);
-	node.__gjjPreviewImage.src = imageUrl;
-	// 确保自定义预览图的样式完全正常！
-	node.__gjjPreviewImage.style.display = "block";
-	node.__gjjPreviewImage.style.visibility = "visible";
-	node.__gjjPreviewImage.style.height = "auto";
-	node.__gjjPreviewImage.style.width = "100%";
-	node.__gjjPreviewImage.style.margin = "";
-	node.__gjjPreviewImage.style.padding = "";
-	node.__gjjPreviewImage.style.opacity = "";
-	node.__gjjPreviewImage.style.position = "";
-	node.__gjjPreviewImage.style.left = "";
-
-	// 刷新节点尺寸
+	preview.items = Array.isArray(images) ? images.slice() : [];
+	preview.wrap.replaceChildren();
+	for (const item of preview.items) {
+		const card = createLazyPreviewCard(node, item);
+		preview.wrap.appendChild(card);
+	}
+	updateLazyPreviewLayout(node);
 	GJJ_Utils.refreshNode(node);
 }
 
 function lazyPreviewHeightForNode(node, width = null) {
-	const image = node?.__gjjPreviewImage;
-	if (!image || image.style.display === "none") {
+	const preview = node?.__gjjLazyPreview;
+	if (!preview?.wrap || preview.wrap.style.display === "none") {
 		return 0;
 	}
-	const naturalWidth = Number(image.naturalWidth || node.__gjjLazyPreviewNaturalWidth || 0);
-	const naturalHeight = Number(image.naturalHeight || node.__gjjLazyPreviewNaturalHeight || 0);
-	if (naturalWidth <= 0 || naturalHeight <= 0) {
-		return Number(node.__gjjLazyPreviewHeight || 0);
+	updateLazyPreviewLayout(node, width);
+	return Number(node.__gjjLazyPreviewHeight || 0);
+}
+
+function updateLazyPreviewLayout(node, width = null) {
+	const preview = node?.__gjjLazyPreview;
+	const wrap = preview?.wrap;
+	if (!wrap) return;
+	const cards = Array.from(wrap.children || []);
+	if (!cards.length) {
+		wrap.style.display = "none";
+		if (preview.controls) preview.controls.style.display = "none";
+		node.__gjjLazyPreviewHeight = 0;
+		return;
+	}
+	wrap.style.display = "grid";
+	const mode = lazyPreviewLayoutMode(node);
+	const paged = mode === "page" && cards.length > 1;
+	const page = lazyPreviewPageIndex(node);
+	if (preview.controls) preview.controls.style.display = cards.length > 1 ? "flex" : "none";
+	if (preview.modeButton) {
+		preview.modeButton.textContent = paged ? "分页" : "平铺";
+		preview.modeButton.title = paged ? "当前为分页浏览，点击切换为平铺。" : "当前为平铺浏览，点击切换为分页。";
+		preview.modeButton.style.background = paged ? "#245c42" : "#172026";
+		preview.modeButton.style.borderColor = paged ? "#5fc585" : "#41535b";
+		preview.modeButton.style.color = paged ? "#ffffff" : "#dce7e2";
+	}
+	if (preview.pageLabel) preview.pageLabel.textContent = `${page + 1}/${cards.length}`;
+	if (preview.prevButton) preview.prevButton.disabled = !paged || page <= 0;
+	if (preview.nextButton) preview.nextButton.disabled = !paged || page >= cards.length - 1;
+	const single = cards.length === 1 || paged;
+	wrap.style.gridTemplateColumns = single ? "minmax(0, 1fr)" : "repeat(auto-fill,minmax(86px,1fr))";
+	for (const [index, card] of cards.entries()) {
+		card.style.display = !paged || index === page ? "block" : "none";
+		const item = card.__gjjLazyPreviewItem || {};
+		card.style.aspectRatio = single ? lazyPreviewAspectRatio(item) : "1 / 1";
+		const image = card.querySelector("img");
+		if (image) image.style.objectFit = single ? "contain" : "cover";
 	}
 	const contentWidth = Math.max(0, Math.round(Number(width || node?.size?.[0] || 320) - 20));
-	return Math.max(0, Math.ceil(contentWidth * naturalHeight / naturalWidth) + 8);
+	const controlHeight = cards.length > 1 ? 24 + 6 : 0;
+	if (single) {
+		const item = cards[page]?.__gjjLazyPreviewItem || cards[0]?.__gjjLazyPreviewItem || {};
+		const itemWidth = Number(item.width || 1);
+		const itemHeight = Number(item.height || 1);
+		node.__gjjLazyPreviewHeight = Math.max(96, Math.ceil(contentWidth * itemHeight / itemWidth) + controlHeight + 10);
+		return;
+	}
+	const columns = Math.max(1, Math.floor((contentWidth + 6) / (86 + 6)));
+	const rows = Math.max(1, Math.ceil(cards.length / columns));
+	const cellWidth = Math.max(1, Math.floor((contentWidth - (columns - 1) * 6) / columns));
+	const gap = Math.max(0, rows - 1) * 6;
+	node.__gjjLazyPreviewHeight = Math.max(96, rows * cellWidth + gap + controlHeight + 10);
 }
 
 function configureImagePreviewWidget(node, widget, container) {

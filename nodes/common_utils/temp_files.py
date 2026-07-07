@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import uuid
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,15 @@ def gjjutils_temp_path(filename: str) -> Path:
     if path.parent != root:
         raise ValueError("临时文件路径必须位于 temp/GJJ。")
     return path
+
+
+def gjjutils_unique_temp_path(prefix: str = "gjj_", suffix: str = ".bin") -> Path:
+    clean_prefix = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(prefix or "gjj_"))
+    clean_suffix = str(suffix or ".bin").strip()
+    if not clean_suffix.startswith("."):
+        clean_suffix = f".{clean_suffix}"
+    filename = f"{clean_prefix}{uuid.uuid4().hex}{clean_suffix.lower()}"
+    return gjjutils_temp_path(filename)
 
 
 def gjjutils_write_temp_bytes(content: bytes, suffix: str = ".bin") -> dict[str, Any]:

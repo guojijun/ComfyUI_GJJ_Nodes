@@ -350,7 +350,7 @@ class GJJ_InpaintCrop:
     RETURN_NAMES = ("拼回信息", "裁切图片", "裁切遮罩")
     OUTPUT_TOOLTIPS = ("传给 GJJ 局部重绘拼回节点的内部信息。", "送入重绘流程的局部图片。", "送入重绘流程的局部遮罩。")
     FUNCTION = "inpaint_crop"
-    CATEGORY = "GJJ/Image"
+    CATEGORY = "GJJ/视频/图片裁切"
     SEARCH_ALIASES = ["Inpaint Crop", "inpaint crop", "局部重绘裁切", "重绘裁切", "裁切拼回"]
 
     @classmethod

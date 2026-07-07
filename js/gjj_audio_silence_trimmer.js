@@ -15,11 +15,18 @@ const AUTO_STOP_REASON_PROPERTY = "gjj_audio_silence_trim_auto_stop_reason";
 const INTERFACES_PROPERTY = "gjj_audio_silence_trim_interfaces";
 const OUTPUT_ORDER_PROPERTY = "gjj_audio_silence_trim_output_order";
 const OUTPUT_STORAGE_NAME = "output_order_json";
+const COMPACT_MIN_WIDTH = 360;
+const COMPACT_MIN_HEIGHT = 120;
+const COMPACT_BOTTOM_PADDING = 18;
 const OUTPUT_DEFS = [
 	{ key: "segment_audio", name: "分段音频", type: "AUDIO" },
 	{ key: "segment_count", name: "分段总数", type: "INT" },
 	{ key: "segment_index", name: "当前分段序号", type: "INT" },
 	{ key: "background_audio", name: "分段背景声", type: "AUDIO" },
+];
+const INPUT_DEFS = [
+	{ key: "current_segment", name: "当前分段", type: "INT", tooltip: "可外接滑动序号；未外接时由面板数字框或自动队列控制。" },
+	{ key: "background_audio", name: "背景声", type: "AUDIO", tooltip: "可选背景声。会跟随人声使用相同切点，并同样对齐到 8n+1。" },
 ];
 const PARAMETER_NAMES = ["threshold_db", "min_silence_duration", "keep_silence", "max_duration", "fade_duration", "current_segment", "fps"];
 const PARAMETER_LABELS = {
@@ -93,6 +100,17 @@ function findInput(node, name) {
 	return node?.inputs?.find((input) => inputMatchesName(input, name));
 }
 
+function inputIsConcrete(input, name) {
+	if (!inputMatchesName(input, name)) return false;
+	const rawName = String(input?.name || "");
+	const rawType = String(input?.type || "");
+	return rawName === name && !rawType.startsWith("converted-widget:") && !input?.hidden;
+}
+
+function findConcreteInput(node, name) {
+	return node?.inputs?.find((input) => inputIsConcrete(input, name));
+}
+
 function removeInputAt(node, index) {
 	if (!Array.isArray(node?.inputs) || index < 0 || index >= node.inputs.length) return;
 	if (node.inputs[index]?.link != null) {
@@ -102,10 +120,146 @@ function removeInputAt(node, index) {
 	catch (_) { node.inputs.splice(index, 1); }
 }
 
+function repairInputLinkSlots(node) {
+	const links = node?.graph?.links || app.graph?.links;
+	if (!links || !Array.isArray(node?.inputs)) return;
+	node.inputs.forEach((input, index) => {
+		if (input?.link == null) return;
+		const link = links[input.link];
+		if (!link) return;
+		if (Array.isArray(link)) {
+			link[3] = node.id;
+			link[4] = index;
+		} else {
+			link.target_id = node.id;
+			link.target_slot = index;
+		}
+	});
+}
+
+function reorderOptionalInputs(node) {
+	if (!Array.isArray(node?.inputs)) return;
+	const managed = new Map();
+	const fixed = [];
+	for (const input of node.inputs) {
+		const def = INPUT_DEFS.find((item) => inputMatchesName(input, item.key));
+		if (def) {
+			if (!managed.has(def.key)) managed.set(def.key, input);
+			continue;
+		}
+		fixed.push(input);
+	}
+	const first = fixed.slice(0, 1);
+	const rest = fixed.slice(1);
+	const ordered = INPUT_DEFS.map((def) => managed.get(def.key)).filter(Boolean);
+	const next = [...first, ...ordered, ...rest];
+	if (next.length !== node.inputs.length) return;
+	if (!next.some((input, index) => input !== node.inputs[index])) return;
+	node.inputs = next;
+	repairInputLinkSlots(node);
+}
+
+function toolbarWidgetTop(node) {
+	const widget = node?.__gjjSilenceTrimToolbar;
+	const candidates = [
+		Number(widget?.last_y),
+		Number(widget?.y),
+		Number(node?.__gjjSilenceTrimToolbarTop),
+	];
+	for (const value of candidates) {
+		if (Number.isFinite(value) && value > 0) {
+			node.__gjjSilenceTrimToolbarTop = value;
+			return value;
+		}
+	}
+	const visibleRows = Math.max(
+		1,
+		(node?.inputs || []).filter((input) => input && !input.hidden && !String(input.type || "").startsWith("converted-widget:")).length,
+		(node?.outputs || []).filter((output) => output && !output.hidden).length,
+	);
+	const fallback = 32 + visibleRows * 20 + 10;
+	if (node) node.__gjjSilenceTrimToolbarTop = fallback;
+	return fallback;
+}
+
+function toolbarWidgetHeight(node) {
+	const widget = node?.__gjjSilenceTrimToolbar;
+	const height = Number(widget?.getHeight?.() || widget?.computeSize?.(node?.size?.[0])?.[1] || 50);
+	return Number.isFinite(height) && height > 0 ? height : 50;
+}
+
+function desiredCompactHeight(node) {
+	return Math.max(
+		COMPACT_MIN_HEIGHT,
+		Math.ceil(toolbarWidgetTop(node) + toolbarWidgetHeight(node) + COMPACT_BOTTOM_PADDING),
+	);
+}
+
+function refreshNodeSize(node) {
+	if (!node || !Array.isArray(node.size)) return;
+	setTimeout(() => {
+		const desired = desiredCompactHeight(node);
+		const currentHeight = Number(node.size?.[1] || 0);
+		const currentWidth = Number(node.size?.[0] || 0);
+		if (!Number.isFinite(desired) || desired <= 0 || !Number.isFinite(currentHeight) || !Number.isFinite(currentWidth)) return;
+		if (!node.__gjjSilenceTrimSizing && Math.abs(currentHeight - desired) > 2) {
+			const nextSize = [Math.max(currentWidth, COMPACT_MIN_WIDTH), desired];
+			node.__gjjSilenceTrimSizing = true;
+			try { node.setSize?.(nextSize); }
+			finally { requestAnimationFrame(() => { node.__gjjSilenceTrimSizing = false; }); }
+			node?.setDirtyCanvas?.(true, true);
+			app.graph?.setDirtyCanvas?.(true, true);
+		}
+	}, 0);
+}
+
+function scheduleRefreshNodeSize(node) {
+	refreshNodeSize(node);
+	setTimeout(() => refreshNodeSize(node), 80);
+	setTimeout(() => refreshNodeSize(node), 240);
+	setTimeout(() => refreshNodeSize(node), 600);
+}
+
+function hasSerializedProperty(node, serialized, key) {
+	return Object.prototype.hasOwnProperty.call(node?.properties || {}, key)
+		|| Object.prototype.hasOwnProperty.call(serialized?.properties || {}, key);
+}
+
+function suppressNativeAdvancedFooter(node) {
+	if (!node) return;
+	node.showAdvanced = false;
+	node.showAdvancedInputs = false;
+	node.__showAdvanced = false;
+	node.__showAdvancedInputs = false;
+	for (const widget of node.widgets || []) {
+		if (!widget?.hidden && !widget?.options?.hidden) continue;
+		widget.advanced = false;
+		widget.options ||= {};
+		widget.options.advanced = false;
+	}
+}
+
+function suppressAdvancedMetadata(nodeData) {
+	const inputGroups = nodeData?.input;
+	if (!inputGroups || typeof inputGroups !== "object") return;
+	for (const group of Object.values(inputGroups)) {
+		if (!group || typeof group !== "object") continue;
+		for (const name of [...PARAMETER_NAMES, QUEUE_MODE_NAME, OUTPUT_STORAGE_NAME]) {
+			const def = group[name];
+			const options = Array.isArray(def) ? def[1] : null;
+			if (!options || typeof options !== "object") continue;
+			options.advanced = false;
+		}
+	}
+}
+
 function readOutputOrder(node, serialized = null) {
 	node.properties ||= {};
 	let order = node.properties[OUTPUT_ORDER_PROPERTY];
-	if (serialized?.outputs?.length) {
+	if (serialized?.properties && Object.prototype.hasOwnProperty.call(serialized.properties, OUTPUT_ORDER_PROPERTY)) {
+		order = serialized.properties[OUTPUT_ORDER_PROPERTY];
+	}
+	if (!hasSerializedProperty(node, serialized, OUTPUT_ORDER_PROPERTY) && serialized?.outputs?.length) {
 		const byName = {
 			"分段总数": "segment_count", "当前分段音频": "segment_audio", "分段音频": "segment_audio",
 			"当前分段序号": "segment_index", "当前分段背景声": "background_audio", "分段背景声": "background_audio",
@@ -140,13 +294,17 @@ function applyOutputs(node, serialized = null) {
 		output.type = def.type;
 	});
 	setWidgetValue(node, OUTPUT_STORAGE_NAME, JSON.stringify(order));
+	scheduleRefreshNodeSize(node);
 }
 
 function enabledInterfaces(node, serialized = null) {
 	node.properties ||= {};
 	let values = node.properties[INTERFACES_PROPERTY];
+	if (serialized?.properties && Object.prototype.hasOwnProperty.call(serialized.properties, INTERFACES_PROPERTY)) {
+		values = serialized.properties[INTERFACES_PROPERTY];
+	}
 	if (!Array.isArray(values)) values = [];
-	if (serialized?.inputs?.length) {
+	if (!hasSerializedProperty(node, serialized, INTERFACES_PROPERTY) && serialized?.inputs?.length) {
 		for (const input of serialized.inputs) {
 			if (["current_segment", "background_audio"].includes(input?.name) && !values.includes(input.name)) values.push(input.name);
 		}
@@ -156,33 +314,60 @@ function enabledInterfaces(node, serialized = null) {
 }
 
 function syncOptionalInputs(node, serialized = null) {
+	if (!node || !Array.isArray(node.inputs)) return;
 	const enabled = enabledInterfaces(node, serialized);
-	for (const name of ["current_segment", "background_audio"]) {
-		let input = findInput(node, name);
-		const linked = Boolean(input?.link);
+	for (const def of INPUT_DEFS) {
+		const name = def.key;
+		let input = findConcreteInput(node, name);
+		const matched = (node.inputs || []).filter((item) => inputMatchesName(item, name));
+		const linked = matched.some((item) => item?.link != null);
 		if (enabled.includes(name) || linked) {
-			if (!input) node.addInput?.(name, name === "background_audio" ? "AUDIO" : "INT");
-			input = findInput(node, name);
-			if (input && name === "background_audio") {
-				input.label = input.localized_name = "背景声";
-				input.type = "AUDIO";
+			for (let index = node.inputs.length - 1; index >= 0; index -= 1) {
+				const item = node.inputs[index];
+				if (item === input || !inputMatchesName(item, name)) continue;
+				if (item?.link != null && !input) {
+					input = item;
+					continue;
+				}
+				removeInputAt(node, index);
 			}
-		} else if (input) {
-			removeInputAt(node, node.inputs.indexOf(input));
+			if (!input) {
+				node.addInput?.(name, def.type);
+				input = findConcreteInput(node, name) || node.inputs?.[node.inputs.length - 1] || null;
+			}
+			if (input) {
+				input.name = name;
+				input.type = def.type;
+				input.label = input.localized_name = input.display_name = def.name;
+				input.tooltip = def.tooltip;
+				input.forceInput = false;
+				input.hidden = false;
+				input.visible = true;
+				delete input.widget;
+			}
+		} else {
+			for (let index = node.inputs.length - 1; index >= 0; index -= 1) {
+				if (inputMatchesName(node.inputs[index], name)) removeInputAt(node, index);
+			}
 		}
 	}
+	reorderOptionalInputs(node);
+	scheduleRefreshNodeSize(node);
 }
 
 function ensureCurrentSegmentInput(node) {
 	if (!node || !Array.isArray(node.inputs)) return;
-	let current = findInput(node, CURRENT_SEGMENT_NAME);
-	if (!enabledInterfaces(node).includes(CURRENT_SEGMENT_NAME) && !current?.link) {
-		if (current) removeInputAt(node, node.inputs.indexOf(current));
+	let current = findConcreteInput(node, CURRENT_SEGMENT_NAME);
+	const matched = node.inputs.filter((input) => inputMatchesName(input, CURRENT_SEGMENT_NAME));
+	if (!enabledInterfaces(node).includes(CURRENT_SEGMENT_NAME) && !matched.some((input) => input?.link != null)) {
+		for (let index = node.inputs.length - 1; index >= 0; index -= 1) {
+			if (inputMatchesName(node.inputs[index], CURRENT_SEGMENT_NAME)) removeInputAt(node, index);
+		}
 		return;
 	}
 	if (!current) {
 		node.addInput?.(CURRENT_SEGMENT_NAME, "INT");
-		current = node.inputs?.[node.inputs.length - 1] || null;
+		current = findConcreteInput(node, CURRENT_SEGMENT_NAME) || node.inputs?.[node.inputs.length - 1] || null;
 	}
 	if (current) {
 		current.name = CURRENT_SEGMENT_NAME;
@@ -191,7 +376,7 @@ function ensureCurrentSegmentInput(node) {
 		current.localized_name = "当前分段";
 		current.display_name = "当前分段";
 		current.tooltip = "可外接滑动序号；未外接时由面板数字框或自动队列控制。";
-		current.widget = { name: CURRENT_SEGMENT_NAME };
+		delete current.widget;
 		current.forceInput = false;
 		current.hidden = false;
 		current.visible = true;
@@ -203,6 +388,8 @@ function ensureCurrentSegmentInput(node) {
 			removeInputAt(node, index);
 		}
 	}
+	reorderOptionalInputs(node);
+	scheduleRefreshNodeSize(node);
 }
 
 async function queueRun(node) {
@@ -228,31 +415,72 @@ function hideWidget(widget, hidden) {
 			draw: widget.draw,
 			mouse: widget.mouse,
 			type: widget.type,
+			label: widget.label,
+			advanced: widget.advanced,
+			y: widget.y,
+			last_y: widget.last_y,
+			elementStyle: widget.element?.getAttribute?.("style"),
+			inputStyle: widget.inputEl?.getAttribute?.("style"),
+			widgetStyle: widget.widget?.getAttribute?.("style"),
 		};
 	}
 	if (hidden) {
 		widget.hidden = true;
+		widget.advanced = false;
 		widget.disabled = true;
-		widget.type = "hidden";
+		widget.type = `converted-widget:${widget.name || "hidden"}`;
+		widget.label = "";
 		widget.options.hidden = true;
 		widget.options.display = "hidden";
-		widget.computeSize = () => [0, -4];
+		widget.options.advanced = false;
+		widget.computeSize = () => [0, 0];
 		widget.getHeight = () => 0;
 		widget.draw = () => {};
 		widget.mouse = () => false;
+		widget.y = 0;
+		widget.last_y = 0;
+		widget.computedHeight = 0;
+		widget.size = [0, 0];
+		for (const el of [widget.element, widget.inputEl, widget.widget]) {
+			if (!el?.style) continue;
+			el.style.display = "none";
+			el.style.height = "0";
+			el.style.minHeight = "0";
+			el.style.margin = "0";
+			el.style.padding = "0";
+			el.style.overflow = "hidden";
+		}
 	} else {
 		const state = widget.__gjjOriginalState;
 		widget.hidden = false;
+		widget.advanced = state.advanced;
 		widget.disabled = false;
 		widget.type = state.type || widget.type || "combo";
+		widget.label = state.label;
 		widget.computeSize = state.computeSize;
 		widget.getHeight = state.getHeight;
+		widget.y = state.y;
+		widget.last_y = state.last_y;
 		if (state.draw) widget.draw = state.draw;
 		else delete widget.draw;
 		if (state.mouse) widget.mouse = state.mouse;
 		else delete widget.mouse;
+		for (const [el, style] of [[widget.element, state.elementStyle], [widget.inputEl, state.inputStyle], [widget.widget, state.widgetStyle]]) {
+			if (!el?.style) continue;
+			if (style != null) el.setAttribute("style", style);
+			else {
+				el.style.display = "";
+				el.style.height = "";
+				el.style.minHeight = "";
+				el.style.margin = "";
+				el.style.padding = "";
+				el.style.overflow = "";
+			}
+		}
 		delete widget.options.hidden;
 		delete widget.options.display;
+		if (state.advanced == null) delete widget.options.advanced;
+		else widget.options.advanced = state.advanced;
 	}
 }
 
@@ -261,18 +489,19 @@ function makeButton(label, title, onClick) {
 	button.type = "button";
 	button.textContent = label;
 	button.title = title;
+	button.setAttribute("aria-label", title);
 	button.style.cssText = [
 		"border:1px solid #345b60",
 		"background:#17363a",
 		"color:#f0fbf5",
 		"border-radius:6px",
-		"padding:5px 10px",
+		"padding:5px 8px",
 		"font-size:13px",
 		"font-weight:800",
 		"line-height:1.15",
 		"cursor:pointer",
 		"white-space:nowrap",
-		"min-width:72px",
+		"min-width:34px",
 	].join(";");
 	button.addEventListener("mousedown", (event) => {
 		event.preventDefault();
@@ -339,10 +568,11 @@ function updateToolbar(node) {
 	setActive(node.__gjjSilenceTrimInitialBtn, mode === MODE_INITIAL && !external);
 	setAutoButtonState(node, autoRunning ? "running" : (autoStopped ? "stopped" : "idle"));
 	if (node.__gjjSilenceTrimAutoBtn) {
-		node.__gjjSilenceTrimAutoBtn.textContent = autoRunning ? "■ 自动" : "▶ 自动";
+		node.__gjjSilenceTrimAutoBtn.textContent = autoRunning ? "■" : "▶";
 		node.__gjjSilenceTrimAutoBtn.title = autoRunning
 			? "停止自动队列"
 			: (autoStopped ? `自动已关闭：${node.properties?.[AUTO_STOP_REASON_PROPERTY] || ""}` : "从当前分段开始自动排队执行");
+		node.__gjjSilenceTrimAutoBtn.setAttribute("aria-label", node.__gjjSilenceTrimAutoBtn.title);
 	}
 	for (const button of [node.__gjjSilenceTrimBlankBtn, node.__gjjSilenceTrimInitialBtn, node.__gjjSilenceTrimAutoBtn]) {
 		if (!button) continue;
@@ -458,11 +688,12 @@ function closePopup(node, key) {
 	const popup = node?.[key];
 	if (popup) popup.remove();
 	if (node) node[key] = null;
+	scheduleRefreshNodeSize(node);
 }
 
 function popupBox(title) {
 	const popup = document.createElement("div");
-	popup.style.cssText = "position:fixed;z-index:100000;width:340px;max-width:calc(100vw - 16px);padding:9px;border:1px solid #526873;border-radius:8px;background:#10171b;box-shadow:0 12px 28px #0008;color:#dce7e2;font:12px/1.35 system-ui,'Microsoft YaHei',sans-serif";
+	popup.style.cssText = "position:fixed;z-index:100000;width:340px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);overflow:auto;padding:8px;border:1px solid #526873;border-radius:8px;background:#10171b;box-shadow:0 12px 28px #0008;color:#dce7e2;font:12px/1.35 system-ui,'Microsoft YaHei',sans-serif";
 	const heading = document.createElement("div");
 	heading.textContent = title;
 	heading.style.cssText = "font-weight:700;margin-bottom:7px;color:#edf7fb";
@@ -476,6 +707,34 @@ function showPopup(popup, anchor) {
 	const rect = anchor.getBoundingClientRect();
 	popup.style.left = `${Math.min(innerWidth - popup.offsetWidth - 8, Math.max(8, rect.left))}px`;
 	popup.style.top = `${Math.min(innerHeight - popup.offsetHeight - 8, Math.max(8, rect.bottom + 6))}px`;
+}
+
+function appendConfirmButton(popup, onConfirm) {
+	const row = document.createElement("div");
+	row.style.cssText = "display:flex;justify-content:flex-end;margin-top:6px;padding-top:6px;border-top:1px solid #2c3a40";
+	const button = document.createElement("button");
+	button.type = "button";
+	button.textContent = "✓";
+	button.title = "确定";
+	button.setAttribute("aria-label", "确定");
+	button.style.cssText = [
+		"border:1px solid #58c27c",
+		"background:#1c8f56",
+		"color:#fff",
+		"border-radius:6px",
+		"padding:5px 14px",
+		"font-size:12px",
+		"font-weight:800",
+		"cursor:pointer",
+	].join(";");
+	for (const event of ["mousedown", "pointerdown"]) button.addEventListener(event, (e) => e.stopPropagation());
+	button.addEventListener("click", (event) => {
+		event.preventDefault();
+		event.stopPropagation();
+		onConfirm?.();
+	});
+	row.append(button);
+	popup.append(row);
 }
 
 function toggleSettings(node, anchor) {
@@ -501,6 +760,7 @@ function toggleSettings(node, anchor) {
 		row.append(label, input);
 		popup.append(row);
 	}
+	appendConfirmButton(popup, () => closePopup(node, "__gjjSilenceSettingsPopup"));
 	node.__gjjSilenceSettingsPopup = popup;
 	showPopup(popup, anchor);
 }
@@ -511,7 +771,7 @@ function toggleInterfaces(node, anchor) {
 	const popup = popupBox("输入 / 输出接口");
 	const addToggle = (labelText, checked, disabled, onChange) => {
 		const row = document.createElement("label");
-		row.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px;cursor:pointer";
+		row.style.cssText = "display:flex;align-items:center;gap:8px;padding:4px 6px;cursor:pointer";
 		const check = document.createElement("input");
 		check.type = "checkbox";
 		check.checked = checked;
@@ -547,6 +807,7 @@ function toggleInterfaces(node, anchor) {
 			node.graph?.change?.();
 		});
 	}
+	appendConfirmButton(popup, () => closePopup(node, "__gjjSilenceInterfacesPopup"));
 	node.__gjjSilenceInterfacesPopup = popup;
 	showPopup(popup, anchor);
 }
@@ -561,19 +822,19 @@ function ensureToolbar(node) {
 	const buttonRow = document.createElement("div");
 	buttonRow.style.cssText = "display:flex;gap:6px;align-items:center;flex-wrap:nowrap;overflow:hidden;";
 
-	node.__gjjSilenceTrimBlankBtn = makeButton("🧹 空行", "输出一个静音占位段", () => {
+	node.__gjjSilenceTrimBlankBtn = makeButton("🧹", "空行：输出一个静音占位段", () => {
 		if (isAutoRunning(node) || node.properties?.[AUTO_PROPERTY]) stopAuto(node, "自动队列已停止");
 		delete node.properties?.[AUTO_STOP_REASON_PROPERTY];
 		setWidgetValue(node, QUEUE_MODE_NAME, MODE_BLANK);
 		updateToolbar(node);
 	});
-	node.__gjjSilenceTrimInitialBtn = makeButton("░ 初始", "只输出第一段，方便先预览", () => {
+	node.__gjjSilenceTrimInitialBtn = makeButton("░", "初始：只输出第一段，方便先预览", () => {
 		if (isAutoRunning(node) || node.properties?.[AUTO_PROPERTY]) stopAuto(node, "自动队列已停止");
 		delete node.properties?.[AUTO_STOP_REASON_PROPERTY];
 		setWidgetValue(node, QUEUE_MODE_NAME, MODE_INITIAL);
 		updateToolbar(node);
 	});
-	node.__gjjSilenceTrimAutoBtn = makeButton("▶ 自动", "输出完整分段队列，让后续节点自动逐段执行", () => {
+	node.__gjjSilenceTrimAutoBtn = makeButton("▶", "自动：输出完整分段队列，让后续节点自动逐段执行", () => {
 		if (isAutoRunning(node)) stopAuto(node);
 		else startAuto(node);
 	});
@@ -600,10 +861,13 @@ function ensureToolbar(node) {
 }
 
 function patchNode(node, serialized = null) {
+	suppressNativeAdvancedFooter(node);
 	if (!node || node.__gjjSilenceTrimPatched) {
 		syncOptionalInputs(node, serialized);
 		applyOutputs(node, serialized);
 		updateToolbar(node);
+		suppressNativeAdvancedFooter(node);
+		scheduleRefreshNodeSize(node);
 		return;
 	}
 	node.__gjjSilenceTrimPatched = true;
@@ -611,7 +875,9 @@ function patchNode(node, serialized = null) {
 	syncOptionalInputs(node, serialized);
 	applyOutputs(node, serialized);
 	for (const name of [...PARAMETER_NAMES, QUEUE_MODE_NAME, OUTPUT_STORAGE_NAME]) hideWidget(getWidget(node, name), true);
+	suppressNativeAdvancedFooter(node);
 	ensureToolbar(node);
+	scheduleRefreshNodeSize(node);
 	const originalExecuted = node.onExecuted;
 	node.onExecuted = function (message) {
 		const result = originalExecuted?.apply(this, arguments);
@@ -724,6 +990,7 @@ app.registerExtension({
 
 	beforeRegisterNodeDef(nodeType, nodeData) {
 		if (!TARGET_NODES.has(String(nodeData?.name || ""))) return;
+		suppressAdvancedMetadata(nodeData);
 
 		const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
 		nodeType.prototype.onNodeCreated = function (...args) {
@@ -755,6 +1022,9 @@ app.registerExtension({
 
 		const originalOnSerialize = nodeType.prototype.onSerialize;
 		nodeType.prototype.onSerialize = function (...args) {
+			this.properties ||= {};
+			this.properties[INTERFACES_PROPERTY] = enabledInterfaces(this);
+			this.properties[OUTPUT_ORDER_PROPERTY] = readOutputOrder(this);
 			setWidgetValue(this, OUTPUT_STORAGE_NAME, JSON.stringify(readOutputOrder(this)));
 			return originalOnSerialize?.apply(this, args);
 		};

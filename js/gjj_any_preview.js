@@ -205,9 +205,29 @@ function isTileMode(node) {
 	return Boolean(node?.properties?.[TILE_PROPERTY]);
 }
 
+function resetPreviewAutoHeight(node) {
+	node.__gjjAnyPreviewHeight = MIN_PREVIEW_HEIGHT;
+	node.__gjjAnyPreviewCompactTileEntries = 0;
+	for (const element of [
+		node?.__gjjAnyPreviewContainer,
+		node?.__gjjAnyPreviewWrap,
+		node?.__gjjAnyPreviewGrid,
+	]) {
+		if (element) {
+			element.style.height = "auto";
+		}
+	}
+	if (node?.__gjjAnyPreviewWrap) {
+		node.__gjjAnyPreviewWrap.style.minHeight = "96px";
+		node.__gjjAnyPreviewWrap.style.maxHeight = "";
+		node.__gjjAnyPreviewWrap.style.overflow = "visible";
+	}
+}
+
 function setTileMode(node, enabled) {
 	node.properties = node.properties || {};
 	node.properties[TILE_PROPERTY] = Boolean(enabled);
+	resetPreviewAutoHeight(node);
 	applyPreviewContent(node);
 	updatePreviewActionButtons(node);
 	scheduleLayout(node);
@@ -1205,6 +1225,14 @@ function setNodeSizeInternal(node, width, height) {
 	});
 }
 
+function snapNodeHeight(height) {
+	const numericHeight = Number(height);
+	if (!Number.isFinite(numericHeight)) {
+		return MIN_NODE_HEIGHT;
+	}
+	return Math.max(MIN_NODE_HEIGHT, Math.ceil(numericHeight / 2) * 2);
+}
+
 function restoreConfiguredWidth(node) {
 	const width = Number(node?.__gjjAnyPreviewConfiguredWidth || node?.properties?.[WIDTH_PROPERTY] || 0);
 	const currentWidth = currentNodeWidth(node);
@@ -1220,7 +1248,7 @@ function setNodeHeightFromContent(node, height) {
 	if (!node || !width || !Number.isFinite(Number(height))) {
 		return false;
 	}
-	const nextHeight = Math.max(MIN_NODE_HEIGHT, Number(height));
+	const nextHeight = snapNodeHeight(height);
 	const currentWidth = currentNodeWidth(node);
 	const currentHeight = Number(node.size?.[1] || MIN_NODE_HEIGHT);
 	if (
@@ -1340,10 +1368,108 @@ function hasPreviewItems(node) {
 	return Array.isArray(node?.__gjjAnyPreviewItems) && node.__gjjAnyPreviewItems.length > 0;
 }
 
+function hasCompactTilePreview(node) {
+	const images = Array.isArray(node?.__gjjAnyPreviewImages)
+		? node.__gjjAnyPreviewImages
+		: [];
+	return (
+		String(node?.__gjjAnyPreviewKind || "") === "image" &&
+		isTileMode(node) &&
+		tileImageEntriesFromImages(images).length > 1
+	);
+}
+
 function previewContentWidth(node) {
 	const container = node?.__gjjAnyPreviewContainer;
 	const rawWidth = Number(container?.clientWidth || container?.offsetWidth || currentNodeWidth(node) || preferredNodeWidth(node));
 	return Math.max(1, Math.round(rawWidth - 20));
+}
+
+function compactTileEntryCount(node) {
+	const explicit = Number(node?.__gjjAnyPreviewCompactTileEntries || 0);
+	if (Number.isFinite(explicit) && explicit > 1) {
+		return Math.floor(explicit);
+	}
+	if (hasCompactTilePreview(node)) {
+		const images = Array.isArray(node?.__gjjAnyPreviewImages)
+			? node.__gjjAnyPreviewImages
+			: [];
+		return tileImageEntriesFromImages(images).length;
+	}
+	return 0;
+}
+
+function isCompactTileGrid(node) {
+	return compactTileEntryCount(node) > 1;
+}
+
+function compactTileChildHeight(node) {
+	const grid = node?.__gjjAnyPreviewGrid;
+	const children = Array.from(grid?.children || []).filter((child) => child?.style?.display !== "none");
+	if (!children.length) {
+		return 0;
+	}
+	let top = Infinity;
+	let bottom = 0;
+	for (const child of children) {
+		const childTop = Number(child.offsetTop || 0);
+		const childHeight = Number(child.offsetHeight || 0);
+		if (!Number.isFinite(childHeight) || childHeight <= 0) {
+			continue;
+		}
+		top = Math.min(top, childTop);
+		bottom = Math.max(bottom, childTop + childHeight);
+	}
+	return Number.isFinite(top) && bottom > top ? Math.ceil(bottom - top) : 0;
+}
+
+function compactTileChromeHeight(node) {
+	const copyBar = node?.__gjjAnyPreviewCopyBar;
+	const copyBarHeight =
+		copyBar && copyBar.style.display !== "none"
+			? Number(copyBar.offsetHeight || 0) + 6
+			: 0;
+	return copyBarHeight + 16;
+}
+
+function estimateCompactTileHeight(node) {
+	const count = compactTileEntryCount(node);
+	if (count <= 1) {
+		return MIN_PREVIEW_HEIGHT;
+	}
+	const childHeight = compactTileChildHeight(node);
+	if (childHeight > 0) {
+		return Math.max(MIN_PREVIEW_HEIGHT, childHeight + compactTileChromeHeight(node));
+	}
+	const contentWidth = previewContentWidth(node);
+	const tileWidth = 96;
+	const gap = 2;
+	const columns = Math.max(1, Math.min(count, Math.floor((contentWidth + gap) / (tileWidth + gap))));
+	const rows = Math.max(1, Math.ceil(count / columns));
+	return Math.max(
+		MIN_PREVIEW_HEIGHT,
+		rows * tileWidth + (rows - 1) * gap + compactTileChromeHeight(node),
+	);
+}
+
+function clampCompactTileDomHeight(node, height = null) {
+	if (!isCompactTileGrid(node) && !hasCompactTilePreview(node)) {
+		return;
+	}
+	const nextHeight = Math.max(MIN_PREVIEW_HEIGHT, Math.ceil(Number(height || estimateCompactTileHeight(node)) || MIN_PREVIEW_HEIGHT));
+	const container = node?.__gjjAnyPreviewContainer;
+	const previewWrap = node?.__gjjAnyPreviewWrap;
+	if (container) {
+		container.style.height = `${nextHeight}px`;
+		container.style.minHeight = "0";
+		container.style.overflow = "visible";
+	}
+	if (previewWrap) {
+		previewWrap.style.height = `${nextHeight}px`;
+		previewWrap.style.minHeight = "0";
+		previewWrap.style.maxHeight = `${nextHeight}px`;
+		previewWrap.style.overflow = "visible";
+	}
 }
 
 function estimatePreviewItemsHeight(node) {
@@ -1382,12 +1508,21 @@ function measurePreviewItemsHeight(node) {
 	container.style.height = "auto";
 	container.style.minHeight = `${MIN_PREVIEW_HEIGHT}px`;
 	grid.style.height = "auto";
-	const measured = Math.max(
-		Number(grid.scrollHeight || 0),
-		Number(previewWrap?.scrollHeight || 0),
-		Number(container.scrollHeight || 0),
-	);
-	return Math.max(MIN_PREVIEW_HEIGHT, Math.ceil(measured || estimatePreviewItemsHeight(node)));
+	grid.style.minHeight = "0";
+	if (isCompactTileGrid(node)) {
+		const compactHeight = estimateCompactTileHeight(node);
+		clampCompactTileDomHeight(node, compactHeight);
+		return compactHeight;
+	}
+	const copyBar = node?.__gjjAnyPreviewCopyBar;
+	const copyBarHeight =
+		copyBar && copyBar.style.display !== "none"
+			? Number(copyBar.offsetHeight || 0) + 6
+			: 0;
+	const measured = Number(grid.scrollHeight || 0) + copyBarHeight + 16;
+	const estimated = estimatePreviewItemsHeight(node);
+	const safeMeasured = measured > estimated * 1.35 + 80 ? estimated : measured;
+	return Math.max(MIN_PREVIEW_HEIGHT, Math.ceil(safeMeasured || estimated));
 }
 
 function getWidgetHeight(node, widget) {
@@ -1395,6 +1530,9 @@ function getWidgetHeight(node, widget) {
 		return estimateImagePreviewHeight(node);
 	}
 	if (hasPreviewItems(node)) {
+		return measurePreviewItemsHeight(node);
+	}
+	if (hasCompactTilePreview(node) || isCompactTileGrid(node)) {
 		return measurePreviewItemsHeight(node);
 	}
 	const nodeHeight = Math.max(
@@ -1416,22 +1554,42 @@ function updateLayout(node) {
 
 	const topOffset = getWidgetTopOffset(node);
 	const useEstimatedImageLayout = shouldUseEstimatedImageLayout(node);
+	const useCompactTileLayout = hasCompactTilePreview(node) || isCompactTileGrid(node);
 	const container = node.__gjjAnyPreviewContainer;
 	const previewWrap = node.__gjjAnyPreviewWrap;
-	if (!useEstimatedImageLayout && container && previewWrap) {
+	if (!useEstimatedImageLayout && !useCompactTileLayout && container && previewWrap) {
 		container.style.height = "auto";
 		previewWrap.style.height = "auto";
+		previewWrap.style.maxHeight = "";
 		previewWrap.style.overflow = "visible";
 	}
 	const previewHeight = useEstimatedImageLayout
 		? estimateImagePreviewHeight(node)
-		: hasPreviewItems(node)
+		: hasPreviewItems(node) || useCompactTileLayout
 			? measurePreviewItemsHeight(node)
 		: measureHeight(node);
 	const height = Math.max(
 		MIN_NODE_HEIGHT,
 		topOffset + previewHeight + NODE_BOTTOM_PADDING,
 	);
+	if (container && previewWrap) {
+		const availableHeight = height - topOffset - NODE_BOTTOM_PADDING;
+		if (useEstimatedImageLayout) {
+			container.style.height = `${Math.max(MIN_PREVIEW_HEIGHT, availableHeight)}px`;
+			previewWrap.style.height = `${Math.max(MIN_PREVIEW_HEIGHT, availableHeight)}px`;
+			previewWrap.style.maxHeight = "";
+			previewWrap.style.overflow = "visible";
+		} else if (useCompactTileLayout) {
+			clampCompactTileDomHeight(node, availableHeight);
+		} else {
+			container.style.height = "auto";
+			container.style.minHeight = `${MIN_PREVIEW_HEIGHT}px`;
+			previewWrap.style.height = "auto";
+			previewWrap.style.minHeight = "96px";
+			previewWrap.style.maxHeight = "";
+			previewWrap.style.overflow = "visible";
+		}
+	}
 
 	// 只同步内部计算出的高度；如果宽度发生布局漂移，则恢复到已保存的节点宽度。
 	const currentWidth = currentNodeWidth(node);
@@ -1442,22 +1600,6 @@ function updateLayout(node) {
 		(currentWidth && Math.abs(nextWidth - currentWidth) >= 0.5)
 	) {
 		setNodeHeightFromContent(node, height);
-
-		// 同步更新 DOM 容器高度
-		if (container && previewWrap) {
-			const availableHeight = height - topOffset - NODE_BOTTOM_PADDING;
-			if (useEstimatedImageLayout) {
-				container.style.height = `${Math.max(MIN_PREVIEW_HEIGHT, availableHeight)}px`;
-				previewWrap.style.height = `${Math.max(MIN_PREVIEW_HEIGHT, availableHeight)}px`;
-				previewWrap.style.overflow = "visible";
-			} else {
-				container.style.height = "auto";
-				previewWrap.style.height = "auto";
-				previewWrap.style.minHeight = "96px";
-				previewWrap.style.overflow = "visible";
-			}
-		}
-
 		setDirty(node);
 	}
 }
@@ -3353,6 +3495,18 @@ function appendPreviewTileImage(node, parent, item, badgeText = "", imageItems =
 }
 
 function renderCompactImageTiles(node, grid, entries) {
+	const container = node?.__gjjAnyPreviewContainer;
+	const previewWrap = node?.__gjjAnyPreviewWrap;
+	node.__gjjAnyPreviewCompactTileEntries = Array.isArray(entries) ? entries.length : 0;
+	if (container) {
+		container.style.height = "auto";
+		container.style.minHeight = `${MIN_PREVIEW_HEIGHT}px`;
+	}
+	if (previewWrap) {
+		previewWrap.style.height = "auto";
+		previewWrap.style.minHeight = "96px";
+		previewWrap.style.overflow = "visible";
+	}
 	const images = entries
 		.map((entry) => ({
 			item: entry?.item || entry,
@@ -3365,6 +3519,7 @@ function renderCompactImageTiles(node, grid, entries) {
 	grid.style.gridTemplateColumns = "";
 	grid.style.gap = "2px";
 	grid.style.height = "auto";
+	grid.style.minHeight = "0";
 	grid.style.alignItems = "flex-start";
 	grid.replaceChildren();
 	for (const [index, entry] of images.entries()) {
@@ -3386,9 +3541,11 @@ function renderCompactImageTiles(node, grid, entries) {
 		appendPreviewTileImage(node, card, entry.item, entry.label || `${index + 1}`);
 		grid.appendChild(card);
 	}
-	node.__gjjAnyPreviewHeight = Math.max(MIN_PREVIEW_HEIGHT, Number(grid.scrollHeight || 0) + 16);
+	node.__gjjAnyPreviewHeight = estimateCompactTileHeight(node);
+	clampCompactTileDomHeight(node, node.__gjjAnyPreviewHeight);
 	requestAnimationFrame(() => {
-		node.__gjjAnyPreviewHeight = Math.max(MIN_PREVIEW_HEIGHT, Number(grid.scrollHeight || 0) + 16);
+		node.__gjjAnyPreviewHeight = estimateCompactTileHeight(node);
+		clampCompactTileDomHeight(node, node.__gjjAnyPreviewHeight);
 		scheduleLayout(node);
 	});
 }
@@ -3841,12 +3998,14 @@ function renderPreviewItems(node, items) {
 	if (copyBar) copyBar.style.display = "none";
 	if (editor) editor.style.display = "none";
 	empty.style.display = "none";
+	node.__gjjAnyPreviewCompactTileEntries = 0;
 	container.style.height = "auto";
 	container.style.minHeight = `${MIN_PREVIEW_HEIGHT}px`;
 	if (previewWrap) {
 		previewWrap.style.overflow = "visible";
 		previewWrap.style.height = "auto";
 		previewWrap.style.minHeight = "96px";
+		previewWrap.style.maxHeight = "";
 		previewWrap.style.border = "1px solid #33434a";
 		previewWrap.style.background = "#0f1418";
 		previewWrap.style.padding = "8px";
@@ -4015,6 +4174,7 @@ function applyPreviewContent(node) {
 		previewWrap.style.overflow = "visible";
 		previewWrap.style.height = useEstimatedImageLayout ? `${availableHeight}px` : "auto";
 		previewWrap.style.minHeight = isEmptyPreview ? "24px" : (useEstimatedImageLayout ? `${availableHeight}px` : "96px");
+		previewWrap.style.maxHeight = "";
 		previewWrap.style.border = isEmptyPreview ? "none" : "1px solid #33434a";
 		previewWrap.style.background = isEmptyPreview ? "transparent" : "#0f1418";
 		previewWrap.style.padding = isEmptyPreview ? "0" : "8px";
@@ -4027,6 +4187,7 @@ function applyPreviewContent(node) {
 		body.style.display = "none";
 		renderCompactImageTiles(node, grid, tileImageEntries);
 	} else if (showImage && sequenceImage) {
+		node.__gjjAnyPreviewCompactTileEntries = 0;
 		clearImageSequenceTimers(node);
 		grid.style.display = "flex";
 		grid.style.flexDirection = "column";
@@ -4038,6 +4199,7 @@ function applyPreviewContent(node) {
 		appendAnimatedSequenceImage(node, grid, sequenceImage, hasText ? text : "");
 		body.style.display = "none";
 	} else if (showImage && images.length >= IMAGE_SEQUENCE_MIN_FRAMES) {
+		node.__gjjAnyPreviewCompactTileEntries = 0;
 		clearImageSequenceTimers(node);
 		grid.style.display = "flex";
 		grid.style.flexDirection = "column";
@@ -4049,6 +4211,7 @@ function applyPreviewContent(node) {
 		appendImageSequencePlayer(node, grid, images, hasText ? text : "");
 		body.style.display = "none";
 	} else if (showImage) {
+		node.__gjjAnyPreviewCompactTileEntries = 0;
 		const isSingleImage = images.length === 1;
 
 		// 单图和多图使用不同的样式
@@ -4219,6 +4382,7 @@ function applyPreviewContent(node) {
 		}
 		// 图片预览分支结束，body 已在前置逻辑中隐藏
 	} else if (showAudio) {
+		node.__gjjAnyPreviewCompactTileEntries = 0;
 		// 音频预览：播放器下方用一行紧凑信息展示文件和元数据。
 		grid.style.gridTemplateColumns = "1fr";
 		grid.style.height = "auto";
@@ -4253,6 +4417,7 @@ function applyPreviewContent(node) {
 		grid.appendChild(audioCard);
 		body.style.display = "none";
 	} else if (showVideo) {
+		node.__gjjAnyPreviewCompactTileEntries = 0;
 		// 视频预览：播放器下方用一行紧凑信息展示文件和元数据。
 		grid.style.gridTemplateColumns = "1fr";
 		grid.style.height = "auto";
@@ -4292,6 +4457,7 @@ function applyPreviewContent(node) {
 		grid.appendChild(videoCard);
 		body.style.display = "none";
 	} else if (showFiles) {
+		node.__gjjAnyPreviewCompactTileEntries = 0;
 		grid.style.gridTemplateColumns = "1fr";
 		grid.style.height = "auto";
 		grid.style.alignItems = "center";
@@ -4317,6 +4483,7 @@ function applyPreviewContent(node) {
 		grid.appendChild(fileCard);
 		body.style.display = "none";
 	} else {
+		node.__gjjAnyPreviewCompactTileEntries = 0;
 		grid.style.gridTemplateColumns = "repeat(auto-fit, minmax(140px, 1fr))";
 		grid.style.height = "";
 		grid.style.alignItems = "";
@@ -4332,14 +4499,17 @@ function applyPreviewContent(node) {
 	requestAnimationFrame(() => {
 		const height = useEstimatedImageLayout
 			? availableHeight
-			: Math.max(
-					MIN_PREVIEW_HEIGHT,
-					Math.ceil(
-						container.scrollHeight ||
-							container.offsetHeight ||
-							MIN_PREVIEW_HEIGHT,
-					),
-			  );
+			: showImage && isTileMode(node) && tileImageEntries.length > 1
+				? measurePreviewItemsHeight(node)
+				: Math.max(
+						MIN_PREVIEW_HEIGHT,
+						Math.ceil(
+							grid.scrollHeight ||
+								container.scrollHeight ||
+								container.offsetHeight ||
+								MIN_PREVIEW_HEIGHT,
+						),
+				  );
 		if (node.__gjjAnyPreviewHeight !== height) {
 			node.__gjjAnyPreviewHeight = height;
 		}
@@ -4791,6 +4961,8 @@ function ensurePreviewWidget(node) {
 			getHeight: () =>
 				shouldUseEstimatedImageLayout(node)
 					? getWidgetHeight(node, node.__gjjAnyPreviewWidget || widget)
+					: hasPreviewItems(node) || hasCompactTilePreview(node) || isCompactTileGrid(node)
+						? measurePreviewItemsHeight(node)
 					: Math.max(
 							MIN_PREVIEW_HEIGHT,
 							node.__gjjAnyPreviewHeight || MIN_PREVIEW_HEIGHT,
@@ -4802,7 +4974,7 @@ function ensurePreviewWidget(node) {
 			Math.max(MIN_WIDTH, Number(width) || preferredNodeWidth(node)),
 			shouldUseEstimatedImageLayout(node)
 				? estimateImagePreviewHeight(node)
-				: hasPreviewItems(node)
+				: hasPreviewItems(node) || hasCompactTilePreview(node) || isCompactTileGrid(node)
 					? measurePreviewItemsHeight(node)
 				: Math.max(MIN_NODE_HEIGHT, measureHeight(node)),
 		];
@@ -5197,7 +5369,7 @@ app.registerExtension({
 				rememberNodeWidth(this);
 			}
 			// 用户手动调整宽度后，只按当前宽度重新计算高度，不反向改宽度。
-			if (hasPreviewItems(this)) {
+			if (hasPreviewItems(this) || hasCompactTilePreview(this)) {
 				requestAnimationFrame(() => {
 					applyPreviewContent(this);
 					updateLayout(this);

@@ -28,7 +28,7 @@ const JS_SAFE_MAX_SEED_VALUE = Number.MAX_SAFE_INTEGER;
 const CHARACTER_REF_PATTERN = /@([0-9A-Za-z\u4e00-\u9fff._-]+)(?:\/([0-9A-Za-z\u4e00-\u9fff._-]+))?/g;
 const SCENE_VIEW_REF_PATTERN = /\[\s*([^\[\]/:：]+?)\s*[:：]\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*\]/g;
 const SCENE_REF_PATTERN = /(?:🌏|🌍|🌎)([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?|\[场景[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?\]|\[([0-9A-Za-z\u4e00-\u9fff._-]+)(?:[/\\]([0-9A-Za-z\u4e00-\u9fff._-]+))?\]/g;
-const COSTUME_REF_PATTERN = /(?:💼|👗)([0-9A-Za-z\u4e00-\u9fff._-]+)|\[(?:服装|道具|prop|costume)[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]/gi;
+const COSTUME_REF_PATTERN = /(?:💼|👗|📦)([0-9A-Za-z\u4e00-\u9fff._-]+)|\[(?:服装|道具|产品|prop|product|costume)[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]/gi;
 const ALWAYS_VISIBLE_WIDGETS = new Set(["prompt"]);
 const ALWAYS_HIDDEN_WIDGETS = new Set(["unet_name", "lora_data", SINGLE_CELL_INDEX_INPUT, SINGLE_CELL_TOTAL_INPUT, SELECTED_CELL_INDICES_INPUT, FULL_PROMPT_INPUT, FORCE_GENERATE_INPUT, PREVIEW_IMAGES_INPUT]);
 const PANEL_SYNC_WIDGETS = [
@@ -1885,12 +1885,12 @@ function promptReferenceIcons(promptText) {
 			continue;
 		}
 		const costume = findLibraryItem(costumes, match[1] || "");
-		if (costume) addUniqueReferenceIcon(icons, "costume", costume.name || costume.id || match[1], itemCoverUrl(costume), costume.category === "prop" ? "🎒" : "👗");
+		if (costume) addUniqueReferenceIcon(icons, "costume", costume.name || costume.id || match[1], itemCoverUrl(costume), costume.category === "product" ? "📦" : (costume.category === "prop" ? "🎒" : "👗"));
 	}
 	for (const match of text.matchAll(COSTUME_REF_PATTERN)) {
 		const rawName = match[1] || match[2] || "";
 		const costume = findLibraryItem(costumes, rawName);
-		if (costume) addUniqueReferenceIcon(icons, "costume", costume.name || costume.id || rawName, itemCoverUrl(costume), costume.category === "prop" ? "🎒" : "👗");
+		if (costume) addUniqueReferenceIcon(icons, "costume", costume.name || costume.id || rawName, itemCoverUrl(costume), costume.category === "product" ? "📦" : (costume.category === "prop" ? "🎒" : "👗"));
 	}
 	return icons.slice(0, 5);
 }

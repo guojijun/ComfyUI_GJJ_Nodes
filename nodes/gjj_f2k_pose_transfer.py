@@ -626,7 +626,7 @@ def _merge_results(images: list[torch.Tensor]) -> torch.Tensor:
 class GJJ_F2KMultiImagePoseTransfer:
     NAME = NODE_NAME
     DISPLAY_NAME = NODE_DISPLAY_NAME
-    CATEGORY = "GJJ/Flux2"
+    CATEGORY = "GJJ/视频/姿势迁移"
     DESCRIPTION = (
         "把 F2K 图片动作姿势迁移工作流封装为 GJJ 零依赖单节点。"
         "1口必填，2口选填；模型、提示词与采样参数按工作流固定并自动查找。"

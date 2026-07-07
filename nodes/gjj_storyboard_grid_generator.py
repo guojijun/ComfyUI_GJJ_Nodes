@@ -69,6 +69,8 @@ COSTUME_REF_RE = re.compile(
     r"|\[服装[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]"
     r"|\[道具[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]"
     r"|\[prop[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]"
+    r"|\[产品[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]"
+    r"|\[product[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]"
     r"|\[costume[:：]([0-9A-Za-z\u4e00-\u9fff._-]+)\]",
     re.IGNORECASE,
 )
@@ -519,7 +521,8 @@ def _costume_library_items() -> list[dict[str, Any]]:
             data = {}
         data["id"] = _safe_text(data.get("id") or entry.name).strip()
         data["name"] = _safe_text(data.get("name") or data["id"]).strip()
-        data["category"] = _safe_text(data.get("category") or "clothing").strip().lower() or "clothing"
+        category = _safe_text(data.get("category") or "clothing").strip().lower() or "clothing"
+        data["category"] = category if category in {"clothing", "prop", "product"} else "clothing"
         data["notes"] = _safe_text(data.get("notes") or "").strip()
         tags = data.get("tags") if isinstance(data.get("tags"), list) else []
         assets = data.get("assets") if isinstance(data.get("assets"), list) else []
@@ -2712,7 +2715,7 @@ def _extract_costume_refs(text: str) -> list[tuple[str, str]]:
         name = next((_safe_text(group).strip(" 　.,，;；。!！?？") for group in groups if group), "")
         if not name:
             continue
-        category = "prop" if (groups[2] or groups[3]) else "clothing"
+        category = "product" if (groups[4] or groups[5]) else ("prop" if (groups[2] or groups[3]) else "clothing")
         key = (category, name.casefold())
         if key in seen:
             continue
@@ -2722,7 +2725,7 @@ def _extract_costume_refs(text: str) -> list[tuple[str, str]]:
         name = _safe_text(match.group(1)).strip(" 　.,，;；。!！?？")
         if not name or _find_character(name):
             continue
-        costume = _find_costume(name, "clothing") or _find_costume(name, "prop")
+        costume = _find_costume(name, "clothing") or _find_costume(name, "prop") or _find_costume(name, "product")
         if not costume:
             continue
         category = _safe_text(costume.get("category") or "clothing").strip().lower() or "clothing"
@@ -2735,8 +2738,14 @@ def _extract_costume_refs(text: str) -> list[tuple[str, str]]:
 
 
 def _costume_asset_path(costume: dict[str, Any]) -> Path | None:
+    paths = _costume_asset_paths(costume, 1)
+    return paths[0] if paths else None
+
+
+def _costume_asset_paths(costume: dict[str, Any], limit: int = 6) -> list[Path]:
     base = Path(_safe_text(costume.get("_dir"))).resolve()
     assets = costume.get("assets") if isinstance(costume.get("assets"), list) else []
+    paths: list[Path] = []
     for asset in assets:
         file_name = _safe_text(asset.get("file") if isinstance(asset, dict) else "").strip()
         if not file_name:
@@ -2748,8 +2757,10 @@ def _costume_asset_path(costume: dict[str, Any]) -> Path | None:
         except Exception:
             continue
         if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
-            return path
-    return None
+            paths.append(path)
+            if len(paths) >= max(1, int(limit or 1)):
+                break
+    return paths
 
 
 def _open_costume_image(costume: dict[str, Any]) -> Image.Image | None:
@@ -2763,6 +2774,19 @@ def _open_costume_image(costume: dict[str, Any]) -> Image.Image | None:
     background = Image.new("RGBA", image.size, (255, 255, 255, 255))
     background.alpha_composite(image)
     return background.convert("RGB")
+
+
+def _open_costume_images(costume: dict[str, Any], limit: int = 6) -> list[Image.Image]:
+    images: list[Image.Image] = []
+    for path in _costume_asset_paths(costume, limit):
+        try:
+            image = Image.open(path).convert("RGBA")
+        except Exception:
+            continue
+        background = Image.new("RGBA", image.size, (255, 255, 255, 255))
+        background.alpha_composite(image)
+        images.append(background.convert("RGB"))
+    return images
 
 
 def _costume_prompt_and_reference(
@@ -2781,10 +2805,12 @@ def _costume_prompt_and_reference(
         costume = _find_costume(name, category)
         if not costume:
             continue
-        image = _open_costume_image(costume)
         display = _safe_text(costume.get("name") or costume.get("id") or name).strip()
         item_category = _safe_text(costume.get("category") or category or "clothing").strip().lower() or "clothing"
+        if item_category not in {"clothing", "prop", "product"}:
+            item_category = "clothing"
         is_prop = item_category == "prop"
+        is_product = item_category == "product"
         tags = "、".join(_safe_text(tag).strip() for tag in costume.get("tags") or [] if _safe_text(tag).strip())
         notes = _safe_text(costume.get("notes") or "").strip()
         resolved_names.append(display)
@@ -2793,15 +2819,22 @@ def _costume_prompt_and_reference(
             detail.append(f"标签：{tags}")
         if notes:
             detail.append(f"备注：{notes}")
-        if image is not None:
-            images.append(image)
-            if is_prop:
+        item_images = _open_costume_images(costume, 6 if is_product else 1)
+        if item_images:
+            start_slot = image_slot
+            images.extend(item_images)
+            if is_product:
+                end_slot = image_slot + len(item_images) - 1
+                image_ref = f"image{start_slot}" if end_slot == start_slot else f"image{start_slot}-image{end_slot}"
+                prompt_lines.append(f"{display}：对应产品多视图参考图为 {image_ref}，生成时必须采用这个产品的外观比例、主色、材质、结构、接口、按钮、包装/品牌感和关键部件；不同视图属于同一个产品，不要生成多个不同产品。")
+            elif is_prop:
                 prompt_lines.append(f"{display}：对应道具参考图为 image{image_slot}，生成时必须采用这个道具的形状、主色、材质、尺寸感和关键部件；按原文语义作为手持物、摆件或场景物品出现。")
             else:
                 prompt_lines.append(f"{display}：对应服装参考图为 image{image_slot}，生成时必须采用这套服装的轮廓、主色、材质和关键部件。")
-            image_slot += 1
+            image_slot += len(item_images)
         else:
-            prompt_lines.append(f"{display}：按{'道具' if is_prop else '服装'}库文字信息使用这个{'道具' if is_prop else '服装'}。")
+            category_label = "产品" if is_product else ("道具" if is_prop else "服装")
+            prompt_lines.append(f"{display}：按{category_label}库文字信息使用这个{category_label}。")
         if detail:
             prompt_lines.append(f"{display}：" + "；".join(detail))
     if not prompt_lines:
@@ -2810,7 +2843,7 @@ def _costume_prompt_and_reference(
     role_text = "、".join(resolved_names)
     prompt_text = (
         f"{prompt_text}\n\n"
-        f"服化道参考要求：本格调用服装/道具为 {role_text}。服装参考只约束衣物/盔甲/配饰，不改变角色身份、五官和场景；道具参考只约束物品本身，不替换人物或背景；"
+        f"服化道参考要求：本格调用服装/道具/产品为 {role_text}。服装参考只约束衣物/盔甲/配饰，不改变角色身份、五官和场景；道具参考只约束物品本身，不替换人物或背景；产品参考只约束产品本身的外观、比例、材质、功能部件和品牌感，不替换人物或背景；"
         "不要把参考图里的透明底、白底、裁切边缘、文字或水印画进最终画面。\n"
         + "\n".join(prompt_lines)
     )

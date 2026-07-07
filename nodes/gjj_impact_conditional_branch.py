@@ -17,7 +17,7 @@ any_type = AnyType("*")
 
 
 class GJJImpactConditionalBranch:
-    CATEGORY = "GJJ/逻辑控制"
+    CATEGORY = "GJJ/逻辑"
     FUNCTION = "doit"
     DESCRIPTION = "零依赖复刻 ImpactConditionalBranch：按布尔条件只执行并输出被选中的任意输入。"
     SEARCH_ALIASES = ["ImpactConditionalBranch", "conditional branch", "impact branch", "条件分支", "惰性分支"]
