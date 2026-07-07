@@ -3,7 +3,7 @@ import { GJJ_Utils } from "./gjj_utils.js";
 
 const TARGET_NODE = "GJJ_LotusDepthMap";
 const PANEL_WIDGET = "gjj_lotus_depth_controls_panel";
-const MIN_WIDTH = 260;
+const MIN_WIDTH = 200;
 const SETTINGS_PROP = "gjj_lotus_depth_settings_open";
 const HIDDEN_WIDGETS = [
 	"unet_name",
@@ -136,6 +136,7 @@ function messageWithoutNativePreview(message = {}) {
 	const clean = { ...(message || {}) };
 	delete clean.images;
 	delete clean.preview_images;
+	delete clean.preview_items;
 	delete clean.gifs;
 	delete clean.animated;
 
@@ -143,16 +144,19 @@ function messageWithoutNativePreview(message = {}) {
 		clean.ui = { ...clean.ui };
 		delete clean.ui.images;
 		delete clean.ui.preview_images;
+		delete clean.ui.preview_items;
 	}
 	if (clean.output && typeof clean.output === "object") {
 		clean.output = { ...clean.output };
 		delete clean.output.images;
 		delete clean.output.preview_images;
+		delete clean.output.preview_items;
 	}
 	if (clean.results && typeof clean.results === "object") {
 		clean.results = { ...clean.results };
 		delete clean.results.images;
 		delete clean.results.preview_images;
+		delete clean.results.preview_items;
 	}
 	return clean;
 }
@@ -208,7 +212,7 @@ function ensureStyles() {
 		.gjj-lotus-depth-summary{color:#9fb1b5;white-space:pre-wrap;overflow-wrap:anywhere;}
 		.gjj-lotus-depth-stage{display:block;}
 		.gjj-lotus-depth-card{position:relative;min-height:120px;border:1px solid #2e424a;border-radius:7px;overflow:hidden;background:#071014;}
-		.gjj-lotus-depth-card img{display:block;width:100%;max-height:310px;object-fit:contain;background:#05090c;cursor:zoom-in;}
+		.gjj-lotus-depth-card img{display:block;width:100%;max-height:180px;object-fit:contain;background:#05090c;cursor:zoom-in;}
 		.gjj-lotus-depth-badge{position:absolute;left:6px;top:6px;padding:2px 6px;border-radius:999px;background:rgba(4,8,10,.62);color:#eef7f2;font-size:11px;text-shadow:0 1px 2px rgba(0,0,0,.4);}
 		.gjj-lotus-depth-counter{position:absolute;right:7px;bottom:7px;padding:2px 6px;border-radius:999px;background:rgba(4,8,10,.66);color:#f0faf6;font-size:11px;font-weight:800;text-shadow:0 1px 2px rgba(0,0,0,.42);}
 		.gjj-lotus-depth-nav{position:absolute;top:50%;transform:translateY(-50%);width:26px;height:38px;border:1px solid rgba(180,210,218,.34);border-radius:7px;background:rgba(5,10,13,.58);color:#f4fbf8;font-size:20px;line-height:1;cursor:pointer;}

@@ -38,6 +38,34 @@ function setDirty(node) {
 	app.graph?.setDirtyCanvas?.(true, true);
 }
 
+function serializedSize(serializedNode) {
+	const size = serializedNode?.size;
+	if (!Array.isArray(size)) return null;
+	const width = Number(size[0]);
+	const height = Number(size[1]);
+	return Number.isFinite(width) && Number.isFinite(height) && height > 0 ? [width, height] : null;
+}
+
+function rememberConfiguredSize(node, serializedNode) {
+	const size = serializedSize(serializedNode);
+	if (!size) return;
+	node.__gjjImageConcatConfiguredSize = size;
+}
+
+function restoreConfiguredSize(node) {
+	const size = node?.__gjjImageConcatConfiguredSize;
+	if (!Array.isArray(size)) return;
+	const width = Number(size[0]);
+	const height = Number(size[1]);
+	if (!Number.isFinite(height) || height <= 0) return;
+	if (Array.isArray(node.size)) {
+		node.size[0] = Number.isFinite(width) && width > 0 ? width : Number(node.size[0] || 180);
+		node.size[1] = height;
+	} else {
+		node.size = [Number.isFinite(width) && width > 0 ? width : 180, height];
+	}
+}
+
 function widgetByName(node, name) {
 	return node?.widgets?.find?.((widget) => widget?.name === name);
 }
@@ -287,7 +315,7 @@ function toggleLinkHold(node) {
 }
 
 function buttonStyle(button) {
-	button.style.border = "1px solid #3E4D54";
+	button.style.border = "0";
 	button.style.borderRadius = "6px";
 	button.style.background = "#172229";
 	button.style.color = "#EAF7EE";
@@ -296,15 +324,14 @@ function buttonStyle(button) {
 	button.style.lineHeight = "1";
 	button.style.minWidth = "28px";
 	button.style.height = "30px";
-	button.style.padding = "0 4px";
+	button.style.padding = "0";
 	button.style.cursor = "pointer";
 	button.style.boxSizing = "border-box";
 }
 
 function activeButton(button, active) {
 	button.style.background = active ? "#245B44" : "#172229";
-	button.style.borderColor = active ? "#5BD18C" : "#3E4D54";
-	button.style.boxShadow = active ? "0 0 0 1px rgba(91,209,140,.28) inset" : "none";
+	button.style.boxShadow = "none";
 }
 
 function refreshButtons(node) {
@@ -344,14 +371,14 @@ function createPanel(node) {
 	const root = document.createElement("div");
 	root.style.display = "flex";
 	root.style.alignItems = "center";
-	root.style.gap = "4px";
-	root.style.padding = "4px 0 2px";
+	root.style.gap = "0";
+	root.style.padding = "0";
 	root.style.width = "100%";
 	root.style.boxSizing = "border-box";
 
 	const directionRow = document.createElement("div");
 	directionRow.style.display = "flex";
-	directionRow.style.gap = "3px";
+	directionRow.style.gap = "0";
 	directionRow.style.flexWrap = "nowrap";
 
 	for (const item of DIRECTIONS) {
@@ -377,7 +404,7 @@ function createPanel(node) {
 	matchButton.textContent = "✳️";
 	matchButton.dataset.match = "1";
 	buttonStyle(matchButton);
-	matchButton.style.marginLeft = "4px";
+	matchButton.style.marginLeft = "0";
 	matchButton.addEventListener("pointerdown", (event) => event.stopPropagation());
 	matchButton.addEventListener("click", (event) => {
 		event.preventDefault();
@@ -392,7 +419,7 @@ function createPanel(node) {
 	linkButton.textContent = "🔗";
 	linkButton.dataset.linkHold = "1";
 	buttonStyle(linkButton);
-	linkButton.style.marginLeft = "4px";
+	linkButton.style.marginLeft = "0";
 	linkButton.addEventListener("pointerdown", (event) => event.stopPropagation());
 	linkButton.addEventListener("click", (event) => {
 		event.preventDefault();
@@ -416,6 +443,7 @@ function createPanel(node) {
 
 function trimUnusedTail(node) {
 	const inputs = mediaInputs(node);
+	let changed = false;
 	for (let index = inputs.length - 1; index >= 1; index -= 1) {
 		const input = inputs[index];
 		if (input?.link) break;
@@ -423,26 +451,50 @@ function trimUnusedTail(node) {
 		if (slot >= 0) {
 			try { node.disconnectInput?.(slot); } catch (_) {}
 			node.removeInput?.(slot);
+			changed = true;
 		}
 	}
+	return changed;
 }
 
 function ensureTrailingInput(node) {
 	const inputs = mediaInputs(node);
 	if (!inputs.length || inputs[inputs.length - 1]?.link) {
 		node.addInput?.(inputName(inputs.length + 1), MEDIA_TYPE);
+		return true;
 	}
+	return false;
 }
 
 function labelInputs(node) {
+	let changed = false;
 	mediaInputs(node).forEach((input, zeroIndex) => {
 		const index = zeroIndex + 1;
-		input.name = inputName(index);
-		input.type = MEDIA_TYPE;
-		input.label = `媒体 ${index}`;
-		input.localized_name = input.label;
-		input.tooltip = `第 ${index} 个拼接媒体，支持 GJJ_BATCH_IMAGE、IMAGE、MASK、VIDEO；连接最后一个口后会自动扩展。`;
+		const name = inputName(index);
+		const label = `媒体 ${index}`;
+		const tooltip = `第 ${index} 个拼接媒体，支持 GJJ_BATCH_IMAGE、IMAGE、MASK、VIDEO；连接最后一个口后会自动扩展。`;
+		if (input.name !== name) {
+			input.name = name;
+			changed = true;
+		}
+		if (input.type !== MEDIA_TYPE) {
+			input.type = MEDIA_TYPE;
+			changed = true;
+		}
+		if (input.label !== label) {
+			input.label = label;
+			changed = true;
+		}
+		if (input.localized_name !== label) {
+			input.localized_name = label;
+			changed = true;
+		}
+		if (input.tooltip !== tooltip) {
+			input.tooltip = tooltip;
+			changed = true;
+		}
 	});
+	return changed;
 }
 
 function stabilize(node) {
@@ -452,11 +504,11 @@ function stabilize(node) {
 	hideNativeWidget(widgetByName(node, "match_image_size"));
 	hideNativeWidget(widgetByName(node, HELD_MEDIA_WIDGET));
 	hideNativeWidget(widgetByName(node, HELD_ACTIVE_WIDGET));
-	trimUnusedTail(node);
-	ensureTrailingInput(node);
-	labelInputs(node);
+	const trimmed = trimUnusedTail(node);
+	const trailing = ensureTrailingInput(node);
+	const labeled = labelInputs(node);
 	refreshButtons(node);
-	setDirty(node);
+	if (trimmed || trailing || labeled) setDirty(node);
 }
 
 function firstMessageValue(value) {
@@ -496,10 +548,18 @@ app.registerExtension({
 		};
 
 		const originalConfigure = nodeType.prototype.onConfigure;
-		nodeType.prototype.onConfigure = function (...args) {
-			const result = originalConfigure?.apply(this, args);
-			setTimeout(() => stabilize(this), 0);
-			setTimeout(() => stabilize(this), 80);
+		nodeType.prototype.onConfigure = function (serializedNode, ...args) {
+			rememberConfiguredSize(this, serializedNode);
+			const result = originalConfigure?.apply(this, [serializedNode, ...args]);
+			restoreConfiguredSize(this);
+			setTimeout(() => {
+				stabilize(this);
+				restoreConfiguredSize(this);
+			}, 0);
+			setTimeout(() => {
+				stabilize(this);
+				restoreConfiguredSize(this);
+			}, 80);
 			return result;
 		};
 

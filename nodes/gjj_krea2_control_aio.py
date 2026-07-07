@@ -15,22 +15,71 @@ from .common_utils import build_node_help_payload, make_model_tree_item
 
 
 NODE_NAME = "GJJ_Krea2ControlAIO"
-NODE_DISPLAY_NAME = "GJJ · Krea2 Control 单节点"
+NODE_DISPLAY_NAME = "GJJ · Krea2 控制单节点"
 CONTROL_LATENT_KEY = "gjj_krea2_control_latent"
 WRAPPER_KEY = "gjj_krea2_control"
 EPS = 1e-6
 DEFAULT_LORA_NAME = "Krea-2/depth-control-lora.safetensors"
 DEFAULT_LORA_KEYWORDS = ("krea", "control")
+RESIZE_CHOICES = ["匹配潜空间尺寸", "保持控制图尺寸"]
+UPSCALE_CHOICES = ["兰索斯", "双三次", "双线性", "区域", "最近邻精确"]
+CROP_CHOICES = ["居中裁剪", "不裁剪"]
+CHANNEL_CHOICES = ["RGB 彩色", "灰度"]
+NORMALIZE_CHOICES = ["不归一化", "单图最小最大"]
+BATCH_MODE_CHOICES = ["独立图片", "视频帧"]
+RESIZE_VALUE_MAP = {
+    "匹配潜空间尺寸": "match_latent_size",
+    "匹配 latent 尺寸": "match_latent_size",
+    "保持控制图尺寸": "keep_control_image_size",
+    "match_latent_size": "match_latent_size",
+    "keep_control_image_size": "keep_control_image_size",
+}
+UPSCALE_VALUE_MAP = {
+    "兰索斯": "lanczos",
+    "双三次": "bicubic",
+    "双线性": "bilinear",
+    "区域": "area",
+    "最近邻精确": "nearest-exact",
+    "lanczos": "lanczos",
+    "bicubic": "bicubic",
+    "bilinear": "bilinear",
+    "area": "area",
+    "nearest-exact": "nearest-exact",
+}
+CROP_VALUE_MAP = {
+    "居中裁剪": "center",
+    "不裁剪": "disabled",
+    "center": "center",
+    "disabled": "disabled",
+}
+CHANNEL_VALUE_MAP = {
+    "RGB 彩色": "rgb",
+    "灰度": "grayscale",
+    "rgb": "rgb",
+    "grayscale": "grayscale",
+}
+NORMALIZE_VALUE_MAP = {
+    "不归一化": "none",
+    "单图最小最大": "per_image_minmax",
+    "none": "none",
+    "per_image_minmax": "per_image_minmax",
+}
+BATCH_MODE_VALUE_MAP = {
+    "独立图片": "independent_images",
+    "视频帧": "video_frames",
+    "independent_images": "independent_images",
+    "video_frames": "video_frames",
+}
 KREA2_CONTROL_MODEL_TREE = [
     make_model_tree_item(
-        label="Krea2 Depth Control LoRA",
+        label="Krea2 深度控制 LoRA",
         folder="loras/Krea-2",
         filename="depth-control-lora.safetensors",
         kind="lora",
         icon="🟣",
         type="LORA",
         input="lora_name",
-        description="Krea2 Control 默认 LoRA；放在 ComfyUI/models/loras/Krea-2/depth-control-lora.safetensors。",
+        description="Krea2 控制默认 LoRA；放在 ComfyUI/models/loras/Krea-2/depth-control-lora.safetensors。",
     )
 ]
 
@@ -315,7 +364,7 @@ def _get_first_module(model_patcher):
     try:
         return model_patcher.get_model_object("diffusion_model.first")
     except Exception as exc:
-        raise RuntimeError("当前 MODEL 不是原生 ComfyUI Krea2 模型，无法应用 Krea2 Control LoRA。") from exc
+        raise RuntimeError("当前模型不是原生 ComfyUI Krea2 模型，无法应用 Krea2 控制 LoRA。") from exc
 
 
 def _first_shape(first):
@@ -333,7 +382,7 @@ def _make_control_projection(model_patcher, state_dict):
     expected_in = image_features + control_features
     weight_key = _find_first_weight_key(state_dict, out_features, expected_in)
     if weight_key is None:
-        raise RuntimeError(f"选中的 LoRA 中找不到 Krea2 Control 扩展 first projection 权重：({out_features}, {expected_in})。")
+        raise RuntimeError(f"选中的 LoRA 中找不到 Krea2 控制扩展首层投影权重：({out_features}, {expected_in})。")
 
     bias = _find_matching_bias(state_dict, weight_key, out_features)
     if bias is None and hasattr(first, "bias") and torch.is_tensor(first.bias):
@@ -360,7 +409,7 @@ def _flatten_temporal_if_needed(control_latent):
     if control_latent.ndim == 5:
         b, c, t, h, w = control_latent.shape
         return control_latent.reshape(b * t, c, h, w)
-    raise RuntimeError(f"Krea2 control latent must be 4D or 5D, got shape {tuple(control_latent.shape)}.")
+    raise RuntimeError(f"Krea2 控制潜空间必须是 4D 或 5D，当前形状为 {tuple(control_latent.shape)}。")
 
 
 def _expected_latent_channels(model_patcher):
@@ -373,12 +422,12 @@ def _expected_latent_channels(model_patcher):
 
 def _process_control_latent_for_model(model_patcher, control_latent):
     if control_latent.ndim not in (4, 5):
-        raise RuntimeError(f"Krea2 control latent must be 4D or 5D, got shape {tuple(control_latent.shape)}.")
+        raise RuntimeError(f"Krea2 控制潜空间必须是 4D 或 5D，当前形状为 {tuple(control_latent.shape)}。")
 
     expected_channels = _expected_latent_channels(model_patcher)
     if expected_channels is not None and control_latent.shape[1] != expected_channels:
         raise RuntimeError(
-            f"Krea2 control latent 有 {control_latent.shape[1]} 个通道，但当前模型需要 {expected_channels} 个通道。请使用 Krea2/Qwen 图像 VAE。"
+            f"Krea2 控制潜空间有 {control_latent.shape[1]} 个通道，但当前模型需要 {expected_channels} 个通道。请使用 Krea2/Qwen 图像 VAE。"
         )
 
     processed = control_latent
@@ -419,12 +468,12 @@ def _control_tokens_from_latent(control_latent, x, patch, expected_features):
     control = comfy.ldm.common_dit.pad_to_patch_size(control, (patch, patch))
     b, c, h, w = control.shape
     if h % patch != 0 or w % patch != 0:
-        raise RuntimeError("Krea2 control latent padding failed to align to patch size.")
+        raise RuntimeError("Krea2 控制潜空间补边后仍无法对齐模型块尺寸。")
 
     features = c * patch * patch
     if features != expected_features:
         raise RuntimeError(
-            f"Krea2 control latent produces {features} token features, but the projection expects {expected_features}. 请确认使用 Krea2/Qwen 图像 VAE 编码。"
+            f"Krea2 控制潜空间产生了 {features} 个 token 特征，但投影层需要 {expected_features} 个。请确认使用 Krea2/Qwen 图像 VAE 编码。"
         )
 
     control = control.reshape(b, c, h // patch, patch, w // patch, patch)
@@ -488,16 +537,16 @@ def _krea2_control_wrapper(control_projection):
 def _krea2_control_wrapper_call(executor, control_projection, *args, **kwargs):
     transformer_options = _get_transformer_options_from_forward(args, kwargs)
     if not isinstance(transformer_options, dict):
-        raise RuntimeError("Krea2 Control LoRA could not find transformer_options during sampling.")
+        raise RuntimeError("Krea2 控制 LoRA 在采样时没有找到 transformer_options。")
 
     diffusion_model = executor.class_obj
     control_latent = transformer_options.get(CONTROL_LATENT_KEY)
     if control_latent is None:
         _restore_control_projection(diffusion_model, control_projection)
-        raise RuntimeError("GJJ Krea2 Control 单节点已加载 LoRA，但采样时没有找到 control latent。")
+        raise RuntimeError("GJJ Krea2 控制单节点已加载 LoRA，但采样时没有找到控制潜空间。")
 
     if not isinstance(control_projection, GJJKrea2ControlInputProjection):
-        raise RuntimeError("Krea2 Control LoRA input projection is not installed. Reload the base model and node.")
+        raise RuntimeError("Krea2 控制 LoRA 输入投影没有安装成功。请重新加载基础模型和节点。")
 
     x = args[0]
     previous_first = getattr(diffusion_model, "first", None)
@@ -516,14 +565,14 @@ def _krea2_control_wrapper_call(executor, control_projection, *args, **kwargs):
 
 
 class GJJ_Krea2ControlAIO:
-    CATEGORY = "GJJ/ControlNet"
+    CATEGORY = "GJJ/控制网"
     FUNCTION = "apply"
-    DESCRIPTION = "把 Krea2ControlLoRALoader、Krea2ControlImageEncode、Krea2ControlApply 合并为一个零第三方依赖 GJJ 单节点。"
+    DESCRIPTION = "把 Krea2 控制 LoRA 加载、控制图编码和模型应用合并为一个零第三方依赖 GJJ 单节点。"
     RETURN_TYPES = ("MODEL", "LATENT", "IMAGE")
-    RETURN_NAMES = ("model", "control_latent", "encoded_control_image")
+    RETURN_NAMES = ("模型", "控制潜空间", "编码控制图")
     OUTPUT_TOOLTIPS = (
-        "已加载 Krea2 Control LoRA 并附加 control latent 的 MODEL，直接连接采样器。",
-        "由控制图编码得到的 control latent，方便复用或检查。",
+        "已加载 Krea2 控制 LoRA 并附加控制潜空间的模型，直接连接采样器。",
+        "由控制图编码得到的控制潜空间，方便复用或检查。",
         "实际送入 VAE 编码的控制图预览。",
     )
     SEARCH_ALIASES = ["Krea2 Control", "Krea2 Control LoRA", "Krea2 ControlNet", "Krea2控制", "Krea2单节点"]
@@ -539,13 +588,13 @@ class GJJ_Krea2ControlAIO:
         ],
         model_tree=KREA2_CONTROL_MODEL_TREE,
         usage=[
-            "默认模型关键词：krea, control；下拉会优先选择匹配这些关键词的 LoRA。",
+            "默认模型关键词：krea、control；下拉会优先选择匹配这些关键词的 LoRA。",
             "推荐路径：ComfyUI/models/loras/Krea-2/depth-control-lora.safetensors。",
-            "选择 Krea2 Control LoRA，接入 Krea2 MODEL、控制图和 Krea2/Qwen 图像 VAE。",
-            "resize 为 match_latent_size 时必须连接 latent，用于把控制图缩放到采样 latent 对应尺寸。",
-            "输出 MODEL 直接接采样器；输出图像可接预览节点查看实际控制图。",
+            "选择 Krea2 控制 LoRA，接入 Krea2 模型、控制图和 Krea2/Qwen 图像 VAE。",
+            "尺寸为匹配潜空间时必须连接潜空间，用于把控制图缩放到采样潜空间对应尺寸。",
+            "输出模型直接接采样器；输出图像可接预览节点查看实际控制图。",
         ],
-        notice="Krea2 Control 单节点使用公共模型树声明；模型按树放入对应目录后刷新或重启 ComfyUI。",
+        notice="Krea2 控制单节点使用公共模型树声明；模型按树放入对应目录后刷新或重启 ComfyUI。",
         extra={
             "title": NODE_DISPLAY_NAME,
             "model_keywords": list(DEFAULT_LORA_KEYWORDS),
@@ -565,15 +614,15 @@ class GJJ_Krea2ControlAIO:
         default_lora = _pick_default_lora(loras)
         return {
             "required": {
-                "model": ("MODEL", {"tooltip": "Krea2 基础模型。"}),
-                "control_image": ("IMAGE", {"tooltip": "控制图。"}),
-                "vae": ("VAE", {"tooltip": "Krea2/Qwen 图像 VAE，用于把控制图编码成 latent。"}),
+                "model": ("MODEL", {"display_name": "模型", "tooltip": "Krea2 基础模型。"}),
+                "control_image": ("IMAGE", {"display_name": "控制图", "tooltip": "控制图。"}),
+                "vae": ("VAE", {"display_name": "图像 VAE", "tooltip": "Krea2/Qwen 图像 VAE，用于把控制图编码成潜空间。"}),
                 "lora_name": (
                     choices,
                     {
                         "default": default_lora,
-                        "display_name": "LoRA",
-                        "tooltip": "models/loras 下的 Krea2 Control LoRA。",
+                        "display_name": "控制 LoRA",
+                        "tooltip": "models/loras 下的 Krea2 控制 LoRA。",
                     },
                 ),
                 "strength": (
@@ -584,34 +633,34 @@ class GJJ_Krea2ControlAIO:
                         "max": 100.0,
                         "step": 0.01,
                         "display_name": "强度",
-                        "tooltip": "Krea2 Control LoRA 强度。0 时只编码控制图并透传 MODEL。",
+                        "tooltip": "Krea2 控制 LoRA 强度。0 时只编码控制图并透传模型。",
                     },
                 ),
                 "resize": (
-                    ["keep_control_image_size", "match_latent_size"],
-                    {"default": "match_latent_size", "display_name": "尺寸", "tooltip": "是否匹配采样 latent 的像素尺寸。"},
+                    RESIZE_CHOICES,
+                    {"default": "匹配潜空间尺寸", "display_name": "尺寸", "tooltip": "是否匹配采样潜空间的像素尺寸。"},
                 ),
                 "upscale_method": (
-                    ["lanczos", "bicubic", "bilinear", "area", "nearest-exact"],
-                    {"default": "lanczos", "display_name": "缩放算法"},
+                    UPSCALE_CHOICES,
+                    {"default": "兰索斯", "display_name": "缩放算法"},
                 ),
-                "crop": (["center", "disabled"], {"default": "center", "display_name": "裁剪"}),
-                "channel_mode": (["rgb", "grayscale"], {"default": "rgb", "display_name": "通道"}),
-                "normalize": (["none", "per_image_minmax"], {"default": "none", "display_name": "归一化"}),
+                "crop": (CROP_CHOICES, {"default": "居中裁剪", "display_name": "裁剪"}),
+                "channel_mode": (CHANNEL_CHOICES, {"default": "RGB 彩色", "display_name": "通道"}),
+                "normalize": (NORMALIZE_CHOICES, {"default": "不归一化", "display_name": "归一化"}),
                 "invert": ("BOOLEAN", {"default": False, "display_name": "反相"}),
                 "batch_mode": (
-                    ["independent_images", "video_frames"],
-                    {"default": "independent_images", "display_name": "批次模式"},
+                    BATCH_MODE_CHOICES,
+                    {"default": "独立图片", "display_name": "批次模式"},
                 ),
             },
             "optional": {
-                "latent": ("LATENT", {"tooltip": "resize 为 match_latent_size 时用于匹配尺寸。"}),
+                "latent": ("LATENT", {"display_name": "潜空间", "tooltip": "尺寸为匹配潜空间时用于匹配尺寸。"}),
             },
         }
 
     def _load_state_dict(self, lora_name):
         if not str(lora_name or "").strip():
-            raise RuntimeError("没有可用的 LoRA。请把 Krea2 Control LoRA 放入 models/loras 后刷新或重启 ComfyUI。")
+            raise RuntimeError("没有可用的 LoRA。请把 Krea2 控制 LoRA 放入 models/loras 后刷新或重启 ComfyUI。")
         lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
         if self.loaded_lora is not None:
             if self.loaded_lora[0] == lora_path:
@@ -622,10 +671,16 @@ class GJJ_Krea2ControlAIO:
         return state_dict
 
     def _encode(self, control_image, vae, resize, upscale_method, crop, channel_mode, normalize, invert, batch_mode, latent=None):
+        resize = RESIZE_VALUE_MAP.get(str(resize), str(resize))
+        upscale_method = UPSCALE_VALUE_MAP.get(str(upscale_method), str(upscale_method))
+        crop = CROP_VALUE_MAP.get(str(crop), str(crop))
+        channel_mode = CHANNEL_VALUE_MAP.get(str(channel_mode), str(channel_mode))
+        normalize = NORMALIZE_VALUE_MAP.get(str(normalize), str(normalize))
+        batch_mode = BATCH_MODE_VALUE_MAP.get(str(batch_mode), str(batch_mode))
         image = _prepare_control_image(control_image, "rgb", "none", False)
         if resize == "match_latent_size":
             if latent is None or "samples" not in latent:
-                raise RuntimeError("尺寸选择 match_latent_size 时，需要连接 LATENT 输入。")
+                raise RuntimeError("尺寸选择匹配潜空间时，需要连接潜空间输入。")
             compression = vae.spacial_compression_encode() if hasattr(vae, "spacial_compression_encode") else 8
             target_height = int(latent["samples"].shape[-2] * compression)
             target_width = int(latent["samples"].shape[-1] * compression)
@@ -639,18 +694,18 @@ class GJJ_Krea2ControlAIO:
         if strength == 0:
             return model
         if model.get_attachment(WRAPPER_KEY) is not None:
-            raise RuntimeError("这个 MODEL 已经加载过 GJJ Krea2 Control。请确保同一路径只使用一个 Krea2 Control 单节点。")
+            raise RuntimeError("这个模型已经加载过 GJJ Krea2 控制。请确保同一路径只使用一个 Krea2 控制单节点。")
 
         state_dict = self._load_state_dict(lora_name)
         new_model = model.clone()
         control_projection = _make_control_projection(new_model, state_dict)
         lora_patches, loaded_keys = _build_lora_patches(state_dict, new_model.model.state_dict())
         if not lora_patches:
-            raise RuntimeError("选中的 LoRA 中没有找到兼容当前 Krea2 MODEL 的 Control LoRA 权重。")
+            raise RuntimeError("选中的 LoRA 中没有找到兼容当前 Krea2 模型的控制 LoRA 权重。")
 
         patched_keys = new_model.add_patches(lora_patches, strength_patch=strength, strength_model=1.0)
         if not patched_keys:
-            raise RuntimeError("当前 MODEL 没有接受任何 Krea2 Control LoRA patch。")
+            raise RuntimeError("当前模型没有接受任何 Krea2 控制 LoRA 补丁。")
 
         new_model.add_wrapper_with_key(
             comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL,

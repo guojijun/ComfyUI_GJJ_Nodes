@@ -299,5 +299,5 @@ class GJJ_ScribbleControlNetGenerator:
         return (result,)
 
 
-NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_ScribbleControlNetGenerator}
-NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🖌️ 涂鸦ControlNet生图器"}
+#NODE_CLASS_MAPPINGS = {NODE_NAME: GJJ_ScribbleControlNetGenerator}
+#NODE_DISPLAY_NAME_MAPPINGS = {NODE_NAME: "GJJ · 🖌️ 涂鸦ControlNet生图器"}

@@ -446,6 +446,18 @@ def _media_frames(value: Any) -> list[torch.Tensor]:
     return [frame for frame in frames if not _is_black_placeholder(frame)]
 
 
+def _interleave_media_frame_groups(frame_groups: list[list[torch.Tensor]]) -> list[torch.Tensor]:
+    if not frame_groups:
+        return []
+    max_frames = max((len(group) for group in frame_groups), default=0)
+    frames: list[torch.Tensor] = []
+    for frame_index in range(max_frames):
+        for group in frame_groups:
+            if frame_index < len(group):
+                frames.append(group[frame_index])
+    return frames
+
+
 def _tensor_for_temp_images(tensor: torch.Tensor) -> tuple[torch.Tensor, str]:
     tensor = tensor.detach().cpu().float().clamp(0.0, 1.0)
     media_type = "mask" if tensor.dim() == 3 else "image"
@@ -463,7 +475,7 @@ def _pil_to_tensor(image) -> torch.Tensor:
     return torch.from_numpy(array).unsqueeze(0)
 
 
-def _read_cached_image_items(items: list[dict[str, Any]], media_type: str = "image") -> torch.Tensor | None:
+def _read_cached_image_items(items: list[dict[str, Any]], media_type: str = "image") -> Any:
     frames: list[torch.Tensor] = []
     for item in items:
         if not isinstance(item, dict):
@@ -480,6 +492,9 @@ def _read_cached_image_items(items: list[dict[str, Any]], media_type: str = "ima
         frames.append(tensor)
     if not frames:
         return None
+    first_shape = tuple(frames[0].shape[1:])
+    if any(tuple(frame.shape[1:]) != first_shape for frame in frames[1:]):
+        return frames
     return torch.cat(frames, dim=0)
 
 
@@ -873,7 +888,7 @@ class GJJ_ImageConcanate:
         match_image_size = bool(_single_value(match_image_size, True))
         held_active = bool(_single_value(held_active, False))
         raw_items: list[Any] = []
-        media_items: list[torch.Tensor] = []
+        media_frame_groups: list[list[torch.Tensor]] = []
         cache_records: list[dict[str, Any]] = []
         with torch.inference_mode():
             for key in sorted(kwargs.keys(), key=_input_index):
@@ -886,13 +901,18 @@ class GJJ_ImageConcanate:
                 cache_record = _cache_record_for_value(str(key), raw_value)
                 if cache_record is not None:
                     cache_records.append(cache_record)
-                media_items.extend(_media_frames(raw_value))
+                frames = _media_frames(raw_value)
+                if frames:
+                    media_frame_groups.append(frames)
             if not raw_items and held_active:
                 cache_records = _parse_cache_records(held_media_json)
                 raw_items = _raw_items_from_cache_records(cache_records)
                 for raw_value in raw_items:
-                    media_items.extend(_media_frames(raw_value))
+                    frames = _media_frames(raw_value)
+                    if frames:
+                        media_frame_groups.append(frames)
             _release_cuda_cache()
+            media_items = _interleave_media_frame_groups(media_frame_groups)
 
             ui = {
                 "gjj_image_concat_cached_media": (cache_records,),

@@ -3057,8 +3057,19 @@ function lazyPreviewAspectRatio(item) {
 	return width > 0 && height > 0 ? `${width} / ${height}` : "1 / 1";
 }
 
-function openLazyPreviewOverlay(src) {
+function openLazyPreviewOverlay(src, items = [], startIndex = 0) {
 	if (!src) return;
+	const sources = (Array.isArray(items) ? items : [])
+		.map((item) => imageDataToUrl(item))
+		.filter(Boolean);
+	if (!sources.length) sources.push(src);
+	let currentIndex = Math.max(0, Math.min(sources.length - 1, Math.floor(Number(startIndex || 0) || 0)));
+	if (sources[currentIndex] !== src) {
+		const foundIndex = sources.indexOf(src);
+		if (foundIndex >= 0) currentIndex = foundIndex;
+	}
+	let playTimer = null;
+
 	const overlay = document.createElement("div");
 	overlay.style.cssText = [
 		"position:fixed",
@@ -3073,7 +3084,6 @@ function openLazyPreviewOverlay(src) {
 	].join(";");
 
 	const previewImg = document.createElement("img");
-	previewImg.src = src;
 	previewImg.style.cssText = [
 		"max-width:90%",
 		"max-height:90%",
@@ -3088,6 +3098,53 @@ function openLazyPreviewOverlay(src) {
 	const minScale = 0.1;
 	const maxScale = 10;
 
+	const closeHint = document.createElement("div");
+	closeHint.style.cssText = [
+		"position:absolute",
+		"bottom:20px",
+		"left:50%",
+		"transform:translateX(-50%)",
+		"color:#fff",
+		"font-size:13px",
+		"opacity:0.68",
+		"pointer-events:none",
+		"white-space:nowrap",
+	].join(";");
+
+	const setOverlayImage = (index) => {
+		currentIndex = Math.max(0, Math.min(sources.length - 1, Math.floor(Number(index || 0) || 0)));
+		previewImg.src = sources[currentIndex] || src;
+		currentScale = 1;
+		previewImg.style.transform = `scale(${currentScale})`;
+		const counter = sources.length > 1 ? ` · ${currentIndex + 1}/${sources.length}` : "";
+		const playText = sources.length > 1 ? (playTimer ? " · 空格暂停" : " · 空格播放") : "";
+		closeHint.textContent = `滚轮缩放 · 双击重置 · 点击背景关闭${counter}${playText}`;
+	};
+
+	const stepOverlayImage = (delta = 1) => {
+		if (sources.length <= 1) return;
+		setOverlayImage((currentIndex + delta + sources.length) % sources.length);
+	};
+
+	const stopPlayback = () => {
+		if (playTimer) {
+			clearInterval(playTimer);
+			playTimer = null;
+			setOverlayImage(currentIndex);
+		}
+	};
+
+	const togglePlayback = () => {
+		if (sources.length <= 1) return;
+		if (playTimer) {
+			stopPlayback();
+			return;
+		}
+		stepOverlayImage(1);
+		playTimer = setInterval(() => stepOverlayImage(1), 900);
+		setOverlayImage(currentIndex);
+	};
+
 	overlay.addEventListener("wheel", (e) => {
 		e.preventDefault();
 		e.stopPropagation();
@@ -3096,35 +3153,53 @@ function openLazyPreviewOverlay(src) {
 		previewImg.style.transform = `scale(${currentScale})`;
 	});
 
+	previewImg.addEventListener("click", (e) => {
+		e.stopPropagation();
+	});
+
 	previewImg.addEventListener("dblclick", (e) => {
 		e.stopPropagation();
 		currentScale = 1;
 		previewImg.style.transform = `scale(${currentScale})`;
 	});
 
-	const closeHint = document.createElement("div");
-	closeHint.textContent = "滚轮缩放 · 双击重置 · 点击关闭";
-	closeHint.style.cssText = [
-		"position:absolute",
-		"bottom:20px",
-		"left:50%",
-		"transform:translateX(-50%)",
-		"color:#fff",
-		"font-size:13px",
-		"opacity:0.6",
-		"pointer-events:none",
-		"white-space:nowrap",
-	].join(";");
+	const handleKeydown = (event) => {
+		if (event.code === "Space" || event.key === " ") {
+			event.preventDefault();
+			event.stopPropagation();
+			togglePlayback();
+		} else if (event.key === "ArrowRight") {
+			event.preventDefault();
+			event.stopPropagation();
+			stopPlayback();
+			stepOverlayImage(1);
+		} else if (event.key === "ArrowLeft") {
+			event.preventDefault();
+			event.stopPropagation();
+			stopPlayback();
+			stepOverlayImage(-1);
+		} else if (event.key === "Escape") {
+			event.preventDefault();
+			event.stopPropagation();
+			closeOverlay();
+		}
+	};
+
+	function closeOverlay() {
+		stopPlayback();
+		document.removeEventListener("keydown", handleKeydown, true);
+		overlay.remove();
+	}
 
 	overlay.appendChild(previewImg);
 	overlay.appendChild(closeHint);
 	document.body.appendChild(overlay);
-	overlay.addEventListener("click", () => {
-		overlay.remove();
-	});
+	setOverlayImage(currentIndex);
+	document.addEventListener("keydown", handleKeydown, true);
+	overlay.addEventListener("click", closeOverlay);
 }
 
-function createLazyPreviewCard(node, item) {
+function createLazyPreviewCard(node, item, index = 0) {
 	const card = document.createElement("button");
 	card.type = "button";
 	card.__gjjLazyPreviewItem = item;
@@ -3164,7 +3239,7 @@ function createLazyPreviewCard(node, item) {
 	card.addEventListener("click", (event) => {
 		event.preventDefault();
 		event.stopPropagation();
-		openLazyPreviewOverlay(image.src);
+		openLazyPreviewOverlay(image.src, node.__gjjLazyPreview?.items || [item], index);
 	});
 	card.appendChild(image);
 	return card;
@@ -3196,8 +3271,8 @@ function updateImagePreview(node, images) {
 
 	preview.items = Array.isArray(images) ? images.slice() : [];
 	preview.wrap.replaceChildren();
-	for (const item of preview.items) {
-		const card = createLazyPreviewCard(node, item);
+	for (const [index, item] of preview.items.entries()) {
+		const card = createLazyPreviewCard(node, item, index);
 		preview.wrap.appendChild(card);
 	}
 	updateLazyPreviewLayout(node);

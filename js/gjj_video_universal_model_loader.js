@@ -907,13 +907,7 @@ function addVideoHelpModelEntry(entries, slot, index, filename, labelOverride = 
 }
 
 function currentHelpConfigKey(node, state) {
-	const configKeys = Object.keys(state.configs || {});
-	let key = currentConfigKey(node).trim();
-	const appliedKey = String(node?.__gjjVUAppliedConfigKey || node?.properties?.gjj_vu_applied_config_key || "").trim();
-	if (!state.configs?.[key]) key = helpValueOf(node, "config", appliedKey || configKeys[0] || "").trim();
-	if (!state.configs?.[key] && appliedKey && state.configs?.[appliedKey]) key = appliedKey;
-	if (!state.configs?.[key]) key = configKeys[0] || "";
-	return key;
+	return activeConfigKey(node, state);
 }
 
 function helpModelFileForSlot(node, state, slot, index, secondary = false) {
@@ -1063,6 +1057,7 @@ function createSearchableSelect(node, name, values, onChange, labels = null, opt
 
 	const setValue = (value, trigger = true) => {
 		const next = String(value ?? "");
+		box.__gjjVUValue = next;
 		if (w) {
 			w.value = next;
 			w.callback?.(next);
@@ -1077,7 +1072,9 @@ function createSearchableSelect(node, name, values, onChange, labels = null, opt
 	const setOptions = (nextValues, nextLabels = null) => {
 		optionValues = Array.isArray(nextValues) ? nextValues.map(String) : [];
 		if (nextLabels) optionLabels = nextLabels;
-		setVisualValue(w?.value ?? optionValues[0] ?? "");
+		const next = String(w?.value ?? box.__gjjVUValue ?? optionValues[0] ?? "");
+		box.__gjjVUValue = next;
+		setVisualValue(next);
 	};
 
 	function openPopup() {
@@ -1153,7 +1150,8 @@ function createSearchableSelect(node, name, values, onChange, labels = null, opt
 		w.__gjjVUSetOptions = setOptions;
 		w.__gjjVUSetValue = setValue;
 	}
-	setVisualValue(w?.value ?? list[0] ?? "");
+	box.__gjjVUValue = String(w?.value ?? list[0] ?? "");
+	setVisualValue(box.__gjjVUValue);
 	return box;
 }
 
@@ -2067,6 +2065,25 @@ function currentConfigKey(node) {
 	return String(getWidget(node, "config")?.value || "");
 }
 
+function activeConfigKey(node, state = null) {
+	const configs = state?.configs || ensureState(node).configs || {};
+	const hasConfig = (key) => !configs || !Object.keys(configs).length || Object.prototype.hasOwnProperty.call(configs, key);
+	const candidates = [
+		node?.__gjjVUConfigSelect?.__gjjVUValue,
+		currentConfigKey(node),
+		helpValueOf(node, "config", ""),
+		node?.properties?.[SAVED_VALUES_PROPERTY]?.config,
+		node?.properties?.gjj_vu_value_config,
+		node?.__gjjVUAppliedConfigKey,
+		node?.properties?.gjj_vu_applied_config_key,
+	];
+	for (const candidate of candidates) {
+		const key = String(candidate ?? "").trim();
+		if (key && hasConfig(key)) return key;
+	}
+	return Object.keys(configs)[0] || "";
+}
+
 function isMainModelSlot(slot) {
 	if (isLoraSlot(slot)) return false;
 	const kind = String(slot?.kind || "");
@@ -2075,7 +2092,7 @@ function isMainModelSlot(slot) {
 
 function updateLoaderMetadata(node, cfg = null) {
 	if (!node) return {};
-	const configKey = currentConfigKey(node);
+	const configKey = activeConfigKey(node);
 	const slots = Array.isArray(cfg?.slots) ? cfg.slots : [];
 	const mainIndex = slots.findIndex(isMainModelSlot);
 	const mainModel = mainIndex >= 0 ? valueOf(node, `file_${mainIndex + 1}`) : "";
@@ -2270,7 +2287,7 @@ function repairFixedOutput(node, out, slot, index) {
 
 function updateOutputs(node, cfg, opts = {}) {
 	const slots = visibleOutputSlots(node, cfg);
-	const nextConfigKey = currentConfigKey(node);
+	const nextConfigKey = activeConfigKey(node);
 	const previousConfigKey = String(node.__gjjVUAppliedConfigKey || node.properties?.gjj_vu_applied_config_key || "");
 	const layoutChanged = !sameOutputShape(node, slots);
 	const configChanged = Boolean(opts?.userConfigChanged || (previousConfigKey && nextConfigKey && previousConfigKey !== nextConfigKey) || layoutChanged);
@@ -2388,10 +2405,11 @@ function currentConfig(node, state) {
 		for (const key of configKeys) labels[key] = state.configs[key]?.label ? `${state.configs[key].label}` : key;
 		setComboOptions(cw, configKeys);
 		if (cw?.__gjjVUSetOptions) cw.__gjjVUSetOptions(configKeys, labels);
-		if (!configKeys.includes(String(cw?.value ?? ""))) { if (cw) cw.value = configKeys[0]; }
-		if (cw?.__gjjVUSetValue) cw.__gjjVUSetValue(String(cw?.value ?? configKeys[0] ?? ""), false);
+		const key = activeConfigKey(node, state) || configKeys[0];
+		if (cw && String(cw.value ?? "") !== key) cw.value = key;
+		if (cw?.__gjjVUSetValue) cw.__gjjVUSetValue(key, false);
 	}
-	const key = valueOf(node, "config", configKeys[0] || "");
+	const key = activeConfigKey(node, state) || configKeys[0] || "";
 	return state.configs[key] || state.configs[configKeys[0]] || null;
 }
 
@@ -2411,7 +2429,7 @@ function applyConfig(node, opts = {}) {
 		const empty = document.createElement("div"); empty.className = "gjj-vu-empty"; empty.textContent = "未读取到模型配置。"; rows.appendChild(empty); node.__gjjVUVisibleRowCount = 1; scheduleLayoutRefresh(node, [0, 48, 160]); return;
 	}
 	const loraEnabled = effectiveUseLora(node);
-	const configKey = currentConfigKey(node);
+	const configKey = activeConfigKey(node, state);
 	node.properties = node.properties || {};
 	const previousSettingsConfig = String(node.properties[SETTINGS_CONFIG_PROPERTY] || "");
 	const previousAppliedConfig = String(node.__gjjVUAppliedConfigKey || node.properties?.gjj_vu_applied_config_key || "");

@@ -427,7 +427,7 @@ class GJJ_LotusDepthMap:
     def _save_previews(self, images: list[torch.Tensor], prompt=None, extra_pnginfo=None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         preview_entries: list[dict[str, Any]] = []
         preview_items: list[dict[str, Any]] = []
-        for index, image in enumerate(images, start=1):
+        for index, image in enumerate(images[:1], start=1):
             entries = gjjutils_write_temp_tensor_images(image)
             preview_entries.extend(entries)
             if entries:
@@ -493,11 +493,7 @@ class GJJ_LotusDepthMap:
 
         _preview_entries, preview_items = self._save_previews(output_images, prompt=prompt, extra_pnginfo=extra_pnginfo)
         count = len(output_images)
-        summary = (
-            f"Lotus 深度图完成：{count} 张；"
-            f"模型 {resolved_unet}；VAE {resolved_vae}；"
-            f"{steps_value} 步 / {scheduler} / {sampler_name} / sigma {first_sigma_value:g}"
-        )
+        summary = ( f"Lotus 深度图完成：{count} 张；")
         return {
             "ui": {
                 "preview_items": preview_items,

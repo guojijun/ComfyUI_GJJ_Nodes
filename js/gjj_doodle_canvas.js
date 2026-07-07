@@ -1984,10 +1984,14 @@ app.registerExtension({
 
 		const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
 		nodeType.prototype.onDrawBackground = function (...args) {
-			const signature = imageLinkSignature(this);
-			if (signature !== this.__gjjDoodleImageLinkSignature) {
-				this.__gjjDoodleImageLinkSignature = signature;
-				setTimeout(() => this.__gjjDoodleEditor?.syncUpstreamImageFromConnection(), 0);
+			const now = Date.now();
+			if (!this.__gjjDoodleLastLinkCheckAt || now - this.__gjjDoodleLastLinkCheckAt > 300) {
+				this.__gjjDoodleLastLinkCheckAt = now;
+				const signature = imageLinkSignature(this);
+				if (signature !== this.__gjjDoodleImageLinkSignature) {
+					this.__gjjDoodleImageLinkSignature = signature;
+					setTimeout(() => this.__gjjDoodleEditor?.syncUpstreamImageFromConnection(), 0);
+				}
 			}
 			return originalOnDrawBackground?.apply(this, args);
 		};
