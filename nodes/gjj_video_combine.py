@@ -88,6 +88,10 @@ def _frame_rate_from_input(value: Any) -> Any:
     components = _video_components(value)
     if components is not None:
         frame_rate = _component_value(components, "frame_rate")
+        if frame_rate is None:
+            frame_rate = _component_value(components, "fps")
+        if frame_rate is None:
+            frame_rate = _component_value(components, "frameRate")
         if frame_rate is not None:
             return frame_rate
     if callable(getattr(value, "get_frame_rate", None)):

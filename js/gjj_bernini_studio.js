@@ -339,9 +339,15 @@ function writeSerializedValues(node, serializedNode = null) {
 	const values = collectValues(node);
 	node.properties ||= {};
 	node.properties[VALUES_PROPERTY] = { ...values };
+	if (Array.isArray(node.widgets)) {
+		node.widgets_values = node.widgets
+			.filter((target) => target?.serialize !== false && target?.options?.serialize !== false)
+			.map((target) => typeof target.serializeValue === "function" ? target.serializeValue(node, target) : target.value);
+	}
 	if (serializedNode) {
 		serializedNode.properties ||= {};
 		serializedNode.properties[VALUES_PROPERTY] = { ...values };
+		if (Array.isArray(node.widgets_values)) serializedNode.widgets_values = [...node.widgets_values];
 	}
 }
 
@@ -848,6 +854,7 @@ function createPanel(node) {
 		generate.innerHTML = "⏳ 执行中";
 		generate.disabled = true;
 		try {
+			writeSerializedValues(node);
 			await queueOnlyCurrentNode(node);
 		} finally {
 			setTimeout(() => {

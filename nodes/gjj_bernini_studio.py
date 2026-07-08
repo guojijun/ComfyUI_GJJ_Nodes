@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import random
+import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,12 @@ from .gjj_wanvideo_decode import GJJ_WanVideoDecode
 from .common_utils.dependency_checker import build_node_help_payload, make_missing_model_spec
 from .common_utils.model_manager import gjjutils_find_model_list
 
+try:
+    from .gjj_bernini_runtime_patch import apply_gjj_bernini_patches
+
+    apply_gjj_bernini_patches()
+except Exception as exc:
+    print(f"[GJJ BerniniStudio] Bernini 运行时补丁加载失败，V2V/VI2V 源视频条件可能失效：{exc}")
 
 NODE_NAME = "GJJ_BerniniStudio"
 
@@ -38,6 +46,7 @@ class AnyMediaType(str):
 
 MIXED_IMAGE_TYPE = AnyMediaType("GJJ_BATCH_IMAGE,IMAGE,VIDEO")
 MAX_REFERENCE_IMAGES = 2
+_VIDEO_DECODE_CACHE: dict[tuple[str, float, int], tuple[torch.Tensor, float | None]] = {}
 
 
 def _comfyui_root() -> Path:
@@ -277,7 +286,11 @@ def _components_indicate_video(value: Any) -> bool:
     fps = _component_value(value, "frame_rate")
     if fps is None:
         fps = _component_value(value, "fps")
-    return audio is not None or fps is not None
+    if fps is None:
+        fps = _component_value(value, "frameRate")
+    width = _positive_int(_component_value(value, "width") or _component_value(value, "w"))
+    height = _positive_int(_component_value(value, "height") or _component_value(value, "h"))
+    return audio is not None or fps is not None or (width > 0 and height > 0)
 
 
 def _is_video_media(value: Any) -> bool:
@@ -285,6 +298,17 @@ def _is_video_media(value: Any) -> bool:
         return False
     if isinstance(value, (list, tuple)):
         return _is_video_media(value[0]) if len(value) == 1 else False
+    if callable(getattr(value, "get_stream_source", None)):
+        return True
+    for name in ("path", "filepath", "file_path", "filename", "video_path", "source", "src", "loaded_file", "full_path", "abs_path"):
+        try:
+            candidate = getattr(value, name, None)
+            if callable(candidate):
+                candidate = candidate()
+            if candidate:
+                return True
+        except Exception:
+            pass
     getter = getattr(value, "get_components", None)
     if callable(getter):
         try:
@@ -292,6 +316,8 @@ def _is_video_media(value: Any) -> bool:
         except Exception:
             return False
     if isinstance(value, dict):
+        if any(value.get(key) for key in ("path", "filepath", "file_path", "filename", "video_path", "source", "src")):
+            return True
         return _components_indicate_video(value)
     return False
 
@@ -328,6 +354,14 @@ def _tensor_frame_sizes(value: Any) -> list[tuple[int, int]]:
     return []
 
 
+def _positive_int(value: Any) -> int:
+    try:
+        number = int(round(float(str(value).strip())))
+    except Exception:
+        return 0
+    return number if number > 0 else 0
+
+
 def _media_original_frame_sizes(value: Any) -> list[tuple[int, int]]:
     getter = getattr(value, "get_components", None)
     if callable(getter):
@@ -335,11 +369,19 @@ def _media_original_frame_sizes(value: Any) -> list[tuple[int, int]]:
             components = getter()
         except Exception:
             return []
+        width = _positive_int(_component_value(components, "width") or _component_value(components, "w"))
+        height = _positive_int(_component_value(components, "height") or _component_value(components, "h"))
+        if width > 0 and height > 0:
+            return [(height, width)]
         source = _component_value(components, "images")
         if source is None:
             source = _component_value(components, "frames")
         return _tensor_frame_sizes(source)
     if isinstance(value, dict):
+        width = _positive_int(value.get("width") or value.get("w"))
+        height = _positive_int(value.get("height") or value.get("h"))
+        if width > 0 and height > 0:
+            return [(height, width)]
         for key in ("images", "frames", "image", "samples"):
             sizes = _tensor_frame_sizes(value.get(key))
             if sizes:
@@ -466,7 +508,241 @@ def _tensor_to_bhwc(value: Any) -> torch.Tensor | None:
     return tensor.clamp(0.0, 1.0).contiguous()
 
 
+def _tensor_cache_signature(tensor: torch.Tensor | None) -> str:
+    if not isinstance(tensor, torch.Tensor):
+        return "none"
+    try:
+        value = tensor.detach()
+        shape = tuple(int(item) for item in value.shape)
+        if int(value.numel()) <= 0:
+            return f"{shape}|empty"
+        flat = value.float().reshape(-1).cpu()
+        count = int(flat.numel())
+        sample_count = min(4096, count)
+        if sample_count < count:
+            indices = torch.linspace(0, count - 1, sample_count, dtype=torch.long)
+            sample = flat.index_select(0, indices)
+        else:
+            sample = flat
+        total = float(sample.sum().item())
+        mean = float(sample.mean().item())
+        std = float(sample.std(unbiased=False).item()) if int(sample.numel()) > 1 else 0.0
+        return f"{shape}|{str(value.dtype)}|{total:.6f}|{mean:.6f}|{std:.6f}"
+    except Exception as exc:
+        return f"unreadable:{type(exc).__name__}:{id(tensor)}"
+
+
+def _resolve_annotated_path(raw_path: str) -> str:
+    path = os.fspath(raw_path)
+    try:
+        if folder_paths.exists_annotated_filepath(path):
+            return folder_paths.get_annotated_filepath(path)
+        if not os.path.exists(path):
+            candidate = folder_paths.get_annotated_filepath(path)
+            if candidate and os.path.exists(candidate):
+                return candidate
+    except Exception:
+        pass
+    return path
+
+
+def _video_stream_source(value: Any, seen: set[int] | None = None) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        if len(value) == 1:
+            return _video_stream_source(value[0], seen)
+        for item in value:
+            candidate = _video_stream_source(item, seen)
+            if candidate is not None:
+                return candidate
+        return None
+    seen = seen or set()
+    marker = id(value)
+    if marker in seen:
+        return None
+    seen.add(marker)
+
+    if isinstance(value, (str, os.PathLike)):
+        return _resolve_annotated_path(os.fspath(value))
+    getter = getattr(value, "get_stream_source", None)
+    if callable(getter):
+        try:
+            source = getter()
+            if source is not None:
+                return source
+        except Exception:
+            pass
+    for name in ("path", "filepath", "file_path", "filename", "video_path", "source", "src", "loaded_file", "full_path", "abs_path", "stream_source"):
+        try:
+            candidate = getattr(value, name, None)
+            if callable(candidate):
+                candidate = candidate()
+            if candidate:
+                return _resolve_annotated_path(os.fspath(candidate)) if isinstance(candidate, (str, os.PathLike)) else candidate
+        except Exception:
+            pass
+    if isinstance(value, dict):
+        for key in ("path", "filepath", "file_path", "filename", "video_path", "source", "src", "loaded_file", "full_path", "abs_path", "stream_source"):
+            candidate = value.get(key)
+            if candidate:
+                return _resolve_annotated_path(os.fspath(candidate)) if isinstance(candidate, (str, os.PathLike)) else candidate
+        for key in ("video", "media", "file", "stream", "components", "value"):
+            candidate = _video_stream_source(value.get(key), seen)
+            if candidate is not None:
+                return candidate
+    getter = getattr(value, "get_components", None)
+    if callable(getter):
+        try:
+            components = getter()
+        except Exception:
+            components = None
+        candidate = _video_stream_source(components, seen)
+        if candidate is not None:
+            return candidate
+    return None
+
+
+def _materialize_video_stream(source: Any) -> str | None:
+    if source is None:
+        return None
+    if isinstance(source, (str, os.PathLike)):
+        path = _resolve_annotated_path(os.fspath(source))
+        return path if os.path.isfile(path) else None
+    name = getattr(source, "name", None)
+    if isinstance(name, (str, os.PathLike)):
+        path = _resolve_annotated_path(os.fspath(name))
+        if os.path.isfile(path):
+            return path
+    read = getattr(source, "read", None)
+    if not callable(read):
+        return None
+    try:
+        if hasattr(source, "seek"):
+            source.seek(0)
+        data = source.read()
+        if hasattr(source, "seek"):
+            source.seek(0)
+    except Exception:
+        return None
+    if isinstance(data, str):
+        data = data.encode("utf-8", errors="ignore")
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        return None
+    suffix = Path(str(name or "")).suffix or ".mp4"
+    try:
+        temp_dir = Path(folder_paths.get_temp_directory())
+        temp_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        temp_dir = Path(tempfile.gettempdir())
+    temp_path = temp_dir / f"GJJ_BerniniStudio_source_{abs(hash((len(data), bytes(data[:64]))))}_{time.time_ns()}{suffix}"
+    temp_path.write_bytes(bytes(data))
+    return str(temp_path)
+
+
+def _video_stream_cache_key(value: Any) -> tuple[str, float, int] | None:
+    path = _materialize_video_stream(_video_stream_source(value))
+    if not path:
+        return None
+    try:
+        stat = Path(path).stat()
+        return (str(Path(path).resolve()), float(stat.st_mtime), int(stat.st_size))
+    except Exception:
+        return (str(path), 0.0, 0)
+
+
+def _decode_video_media_frames(value: Any) -> tuple[torch.Tensor | None, float | None]:
+    cache_key = _video_stream_cache_key(value)
+    if cache_key is not None and cache_key in _VIDEO_DECODE_CACHE:
+        frames, fps = _VIDEO_DECODE_CACHE[cache_key]
+        return frames, fps
+    try:
+        from .gjj_video_segment_editor import _decode_video_with_ffmpeg, video_to_frames_data
+
+        path = cache_key[0] if cache_key is not None else _materialize_video_stream(_video_stream_source(value))
+        if path:
+            video_data = _decode_video_with_ffmpeg(path)
+            frames = _tensor_to_bhwc(video_data.get("images"))
+            fps = float(video_data.get("frame_rate")) if video_data.get("frame_rate") is not None else None
+        else:
+            frames_data, decoded_fps, _width, _height = video_to_frames_data(value)
+            frames = _tensor_to_bhwc(torch.as_tensor(frames_data))
+            fps = float(decoded_fps) if decoded_fps is not None else None
+    except Exception as exc:
+        print(f"[GJJ BerniniStudio] VIDEO 自动抽帧失败：{exc}；输入类型={type(value).__name__}")
+        return None, None
+    if frames is not None and cache_key is not None:
+        _VIDEO_DECODE_CACHE[cache_key] = (frames, fps)
+        while len(_VIDEO_DECODE_CACHE) > 3:
+            try:
+                _VIDEO_DECODE_CACHE.pop(next(iter(_VIDEO_DECODE_CACHE)))
+            except Exception:
+                break
+    return frames, fps
+
+
+def _prompt_node(prompt: Any, node_id: Any) -> dict[str, Any] | None:
+    if not isinstance(prompt, dict) or node_id is None:
+        return None
+    node = prompt.get(str(node_id))
+    return node if isinstance(node, dict) else None
+
+
+def _prompt_link(prompt: Any, node_id: Any, input_name: str) -> tuple[str, int] | None:
+    node = _prompt_node(prompt, node_id)
+    inputs = node.get("inputs") if isinstance(node, dict) else None
+    if not isinstance(inputs, dict):
+        return None
+    value = inputs.get(input_name)
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    try:
+        return str(value[0]), int(value[1] if len(value) > 1 else 0)
+    except Exception:
+        return None
+
+
+def _decode_prompt_linked_video(prompt: Any, node_id: Any, input_name: str) -> tuple[torch.Tensor | None, Any, float | None]:
+    link = _prompt_link(prompt, node_id, input_name)
+    if link is None:
+        return None, None, None
+    source_id, _slot = link
+    source_node = _prompt_node(prompt, source_id)
+    if not isinstance(source_node, dict):
+        return None, None, None
+    class_type = str(source_node.get("class_type") or source_node.get("type") or "")
+    inputs = source_node.get("inputs") if isinstance(source_node.get("inputs"), dict) else {}
+    file_value = inputs.get("file") or inputs.get("video") or inputs.get("video_file") or inputs.get("filename")
+    if not file_value:
+        return None, None, None
+    try:
+        path = folder_paths.get_annotated_filepath(str(file_value))
+    except Exception:
+        path = _resolve_annotated_path(str(file_value))
+    if not path or not os.path.isfile(path):
+        return None, None, None
+    frames, fps = _decode_video_media_frames(path)
+    if frames is not None:
+        print(f"[GJJ BerniniStudio] 已从工作流上游 {class_type or source_id} 的文件参数自动抽帧：{path}，帧数={int(frames.shape[0])}")
+    return frames, None, fps
+
+
 def _media_components(value: Any) -> tuple[torch.Tensor | None, Any, float | None]:
+    if isinstance(value, (list, tuple)):
+        if len(value) == 1:
+            return _media_components(value[0])
+        tensors: list[torch.Tensor] = []
+        audio = None
+        fps = None
+        for item in value:
+            frames, item_audio, item_fps = _media_components(item)
+            if frames is not None:
+                tensors.append(frames)
+            if audio is None and item_audio is not None:
+                audio = item_audio
+            if fps is None and item_fps is not None:
+                fps = item_fps
+        return _cat_bhwc_tensors(tensors), audio, fps
     source = value
     audio = None
     fps = None
@@ -481,14 +757,46 @@ def _media_components(value: Any) -> tuple[torch.Tensor | None, Any, float | Non
             source = _component_value(components, "frames")
         audio = _component_value(components, "audio")
         fps = _component_value(components, "frame_rate")
+        if fps is None:
+            fps = _component_value(components, "fps")
+        if fps is None:
+            fps = _component_value(components, "frameRate")
     elif isinstance(value, dict):
         audio = value.get("audio")
-        fps = value.get("frame_rate") or value.get("fps")
+        fps = value.get("frame_rate") or value.get("fps") or value.get("frameRate")
     try:
         fps = float(fps) if fps is not None else None
     except Exception:
         fps = None
-    return _tensor_to_bhwc(source), audio, fps
+    frames = _tensor_to_bhwc(source)
+    if frames is None and (callable(getter) or isinstance(value, dict)):
+        decoded_frames, decoded_fps = _decode_video_media_frames(value)
+        if decoded_frames is not None:
+            frames = decoded_frames
+            if fps is None:
+                fps = decoded_fps
+    return frames, audio, fps
+
+
+def _media_cache_signature(value: Any) -> str:
+    if value is None:
+        return "none"
+    try:
+        frames, audio, fps = _media_components(value)
+        sizes = _media_original_frame_sizes(value)
+        kind = "video" if _is_video_media(value) else "image"
+        audio_sig = "audio" if _coerce_audio_input(audio) is not None else "noaudio"
+        return "|".join(
+            [
+                kind,
+                _tensor_cache_signature(frames),
+                f"fps={fps if fps is not None else ''}",
+                f"sizes={sizes[:3]}",
+                audio_sig,
+            ]
+        )
+    except Exception as exc:
+        return f"unreadable:{type(exc).__name__}:{str(value)}"
 
 
 def _audio_waveform_and_rate(audio: Any) -> tuple[torch.Tensor | None, int]:
@@ -535,6 +843,10 @@ def _coerce_audio_input(value: Any) -> dict[str, Any] | None:
 
 def _first_media_size(*values: Any) -> tuple[int, int] | None:
     for value in values:
+        sizes = _media_original_frame_sizes(value)
+        if sizes:
+            height, width = sizes[0]
+            return int(width), int(height)
         try:
             tensor = _media_components(value)[0]
         except Exception:
@@ -588,6 +900,10 @@ def _mode_pads_source_context(mode: str) -> bool:
 
 def _mode_treats_multiframe_source_as_video(mode: str) -> bool:
     return str(mode or "").upper() in {"V2V", "VI2V", "RV2V", "ADS2V", "VRC2V", "MV2V"}
+
+
+def _mode_orders_refs_before_source(mode: str) -> bool:
+    return str(mode or "").upper() in {"RV2V", "ADS2V", "VRC2V", "MV2V"}
 
 
 def _resolve_mode(mode: str, output_kind: str, source_media: Any, reference_video: Any, kwargs: dict[str, Any]) -> str:
@@ -1076,7 +1392,11 @@ class GJJ_BerniniStudio:
             "translation_enabled", "batch_size", "use_prev_segment_latent", "lora_chain_config",
         ]
         parts = ["bernini_studio_cache_v2"]
-        parts.extend(str(_first_value(kwargs.get(key), "")) for key in keys)
+        for key in keys:
+            if key in {"source_media", "reference_media_1", "reference_media_2"}:
+                parts.append(_media_cache_signature(kwargs.get(key)))
+            else:
+                parts.append(str(_first_value(kwargs.get(key), "")))
         if _as_bool(kwargs.get("randomize_seed"), False):
             parts.append(str(time.time_ns()))
         return "|".join(parts)
@@ -1170,6 +1490,13 @@ class GJJ_BerniniStudio:
         source_media = kwargs.get("source_media")
         source_is_video = _is_video_media(source_media)
         source_frames, source_audio, source_fps = _media_components(source_media)
+        if source_frames is None:
+            prompt_frames, prompt_audio, prompt_fps = _decode_prompt_linked_video(prompt_info, unique_id, "source_media")
+            if prompt_frames is not None:
+                source_frames = prompt_frames
+                source_audio = source_audio or prompt_audio
+                source_fps = source_fps or prompt_fps
+                source_is_video = True
         reference_values = [kwargs.get("reference_media_1"), kwargs.get("reference_media_2")]
         ref_max_size_value = _as_int(kwargs.get("ref_max_size"), 848, 16, 8192)
         reference_entries = []
@@ -1221,6 +1548,11 @@ class GJJ_BerniniStudio:
         initial_total_frames = source_count if source_looks_like_video and source_count > 1 else requested_length
         initial_output_kind = _resolve_output_kind("auto", initial_total_frames, source_media, reference_video)
         mode = _resolve_mode(_as_text(kwargs.get("mode"), "auto"), initial_output_kind, source_media, reference_video, mode_kwargs)
+        if mode in {"V2V", "VI2V"} and (source_frames is None or source_count <= 0):
+            raise RuntimeError(
+                f"Bernini Studio 当前为 {mode}，但源媒体没有解析出有效视频帧。"
+                "请确认源媒体输入连接的是已解码帧的 VIDEO / IMAGE / GJJ_BATCH_IMAGE。"
+            )
         source_sequence_is_video = source_is_video or (source_count > 1 and _mode_treats_multiframe_source_as_video(mode))
         if source_sequence_is_video:
             source_image_batch_count = 0
@@ -1385,9 +1717,14 @@ class GJJ_BerniniStudio:
                     reference_images=segment_reference_images,
                     ref_max_size=ref_max_size_value,
                 )
-                if "video" in context_parts:
-                    context.append(context_parts["video"])
-                context.extend(context_parts.get("refs") or [])
+                refs = context_parts.get("refs") or []
+                source_context = [context_parts["video"]] if "video" in context_parts else []
+                if _mode_orders_refs_before_source(mode):
+                    context.extend(refs)
+                    context.extend(source_context)
+                else:
+                    context.extend(source_context)
+                    context.extend(refs)
             positive, negative = base_positive, base_negative
             if context:
                 positive = _conditioning_set_values(base_positive, {"context_latents": context})
@@ -1426,8 +1763,9 @@ class GJJ_BerniniStudio:
         all_frames = torch.cat(generated_segments, dim=0)
         if mode_output_kind == "image":
             all_frames = all_frames[:1].contiguous()
-        effective_fps = source_media if callable(getattr(source_media, "get_components", None)) else (source_fps or _as_float(kwargs.get("frame_rate"), 8.0, 1.0, 240.0))
-        audio_input = _coerce_audio_input(source_audio) or _coerce_audio_input(source_media)
+        source_is_video_object = callable(getattr(source_media, "get_components", None))
+        effective_fps = source_fps or (source_media if source_is_video_object else _as_float(kwargs.get("frame_rate"), 8.0, 1.0, 240.0))
+        audio_input = source_media if source_is_video_object else (_coerce_audio_input(source_audio) or _coerce_audio_input(source_media))
         if mode_output_kind == "image":
             result_value = all_frames
             output_path = ""

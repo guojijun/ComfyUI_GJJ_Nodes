@@ -287,9 +287,9 @@ class GJJBerniniConditioning:
             ref_max_size=int(ref_max_size),
         )
         context = []
+        context.extend(context_parts.get("refs") or [])
         if "video" in context_parts:
             context.append(context_parts["video"])
-        context.extend(context_parts.get("refs") or [])
 
         if context:
             positive = _conditioning_set_values(positive, {"context_latents": context})
